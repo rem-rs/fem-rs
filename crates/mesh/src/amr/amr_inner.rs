@@ -473,6 +473,19 @@ pub trait NcState2D {
 
     /// Current hanging-node constraints.
     fn constraints(&self) -> &[HangingNodeConstraint];
+
+    /// Tree-node indices of derefinable groups (children all leaves).
+    fn deref_groups(&self) -> Vec<usize> { Vec::new() }
+
+    /// Children (current-mesh element indices) of the given tree node.
+    fn deref_group_children(&self, _node: usize) -> [ElemId; 4] {
+        [ElemId::MAX; 4]
+    }
+
+    /// Coarsen the given tree-node groups; returns the new mesh or `None`.
+    fn derefine_groups(&mut self, _mesh: &Mesh<2>, _groups: &[usize]) -> Option<Mesh<2>> {
+        None
+    }
 }
 
 impl NcState2D for NCState {
@@ -499,6 +512,13 @@ impl NcState2D for NCStateQuad {
     }
     fn can_derefine(&self) -> bool { self.can_derefine() }
     fn constraints(&self) -> &[HangingNodeConstraint] { self.constraints() }
+    fn deref_groups(&self) -> Vec<usize> { self.deref_groups() }
+    fn deref_group_children(&self, node: usize) -> [ElemId; 4] {
+        self.deref_group_children(node)
+    }
+    fn derefine_groups(&mut self, mesh: &Mesh<2>, groups: &[usize]) -> Option<Mesh<2>> {
+        self.derefine_groups(mesh, groups)
+    }
 }
 
 /// Propagate refinement to neighbors when nc_limit would be violated (Tri3).
@@ -2468,6 +2488,35 @@ struct NCStateQuadSnapshot {
     edge_level: HashMap<(NodeId, NodeId), u32>,
 }
 
+/// One 4-split of a Quad4 parent element in the NC refinement tree.
+///
+/// Mirrors MFEM's `NCMesh::Element` refinement tree used by
+/// `GetDerefinementTable`: a node is *derefinable* when all its children are
+/// still leaves of the current mesh (`child_leaf[k] == true`).
+#[derive(Debug, Clone)]
+struct QuadRefineNode {
+    /// Parent corner nodes (current-mesh node ids).
+    parent_nodes: [NodeId; 4],
+    parent_tag: i32,
+    /// Current-mesh element indices of the 4 children.  Only meaningful while
+    /// the matching `child_leaf[k]` is true (element numbering shifts on
+    /// every subsequent refinement pass).
+    children: [ElemId; 4],
+    /// Whether each child is still a leaf element of the current mesh.
+    child_leaf: [bool; 4],
+    /// False once this node's group has been derefined (coarsened) away.
+    alive: bool,
+    /// Position of this node's parent element within an ancestor tree node
+    /// (parent node index, child slot).  When this group is derefined the
+    /// parent element becomes a leaf again, so the ancestor's `child_leaf`
+    /// slot must be restored to `true` (MFEM `DerefineElement` semantics).
+    parent: Option<(usize, usize)>,
+}
+
+impl QuadRefineNode {
+    fn derefinable(&self) -> bool { self.alive && self.child_leaf.iter().all(|&l| l) }
+}
+
 /// Accumulated state for multi-level non-conforming refinement of **Quad4** meshes.
 ///
 /// Mirrors [`NCState`] for triangular meshes.  Tracks active edge midpoints
@@ -2480,6 +2529,11 @@ pub struct NCStateQuad {
     /// Edge refinement level: number of times each edge has been split.
     edge_level: HashMap<(NodeId, NodeId), u32>,
     history: Vec<NCStateQuadSnapshot>,
+    /// Refinement tree (see `QuadRefineNode`) for MFEM-style derefinement.
+    refine_tree: Vec<QuadRefineNode>,
+    /// Current-mesh element → (tree node index, child slot) for leaf children
+    /// that participate in the refinement tree.
+    elem_to_node: HashMap<ElemId, (usize, usize)>,
 }
 
 impl Default for NCStateQuad {
@@ -2493,6 +2547,8 @@ impl NCStateQuad {
             active_midpoints: HashMap::new(),
             edge_level: HashMap::new(),
             history: Vec::new(),
+            refine_tree: Vec::new(),
+            elem_to_node: HashMap::new(),
         }
     }
 
@@ -2545,6 +2601,65 @@ impl NCStateQuad {
 
         let marked_set: std::collections::HashSet<ElemId> = prop_marked.iter().copied().collect();
         let n_elems = mesh.n_elems();
+
+        // ── Update the refinement tree (MFEM GetDerefinementTable support) ──
+        // New element numbering: unrefined e keeps `e + 3·before(e)`; refined
+        // e expands to 4 children at `e + 3·before(e) .. +4`.
+        let before: Vec<usize> = (0..n_elems as usize)
+            .map(|e| prop_marked.iter().filter(|&&m| (m as usize) < e).count())
+            .collect();
+        // 1) children of the current tree that get refined this pass cease to
+        //    be leaves (their numbering is no longer tracked in the tree).
+        let old_elem_to_node = std::mem::take(&mut self.elem_to_node);
+        for &e in &prop_marked {
+            if let Some(&(ni, k)) = old_elem_to_node.get(&e) {
+                if self.refine_tree[ni].child_leaf[k] {
+                    self.refine_tree[ni].child_leaf[k] = false;
+                }
+            }
+        }
+        // 2) create a fresh tree node for every refined element.
+        let old_tree_len = self.refine_tree.len();
+        for &e in &prop_marked {
+            let ns = mesh.elem_nodes(e);
+            let base = e as usize + 3 * before[e as usize];
+            let node = QuadRefineNode {
+                parent_nodes: [ns[0], ns[1], ns[2], ns[3]],
+                parent_tag: mesh.elem_tags[e as usize],
+                children: [
+                    base as ElemId, (base + 1) as ElemId,
+                    (base + 2) as ElemId, (base + 3) as ElemId,
+                ],
+                child_leaf: [true; 4],
+                alive: true,
+                // if the refined element was itself a leaf child of an
+                // ancestor tree node, remember where it sits
+                parent: old_elem_to_node.get(&e).copied(),
+            };
+            let ni = self.refine_tree.len();
+            self.refine_tree.push(node);
+            for k in 0..4 {
+                self.elem_to_node.insert((base + k) as ElemId, (ni, k));
+            }
+        }
+        // 3) renumber surviving leaf children of pre-existing tree nodes.
+        for node in &mut self.refine_tree[..old_tree_len] {
+            if !node.alive { continue; }
+            for k in 0..4 {
+                if node.child_leaf[k] {
+                    let c = node.children[k] as usize;
+                    node.children[k] = (c + 3 * before[c]) as ElemId;
+                }
+            }
+        }
+        // 4) rebuild elem_to_node with the new numbering (old entries only).
+        for (e, &(ni, k)) in &old_elem_to_node {
+            let node = &self.refine_tree[ni];
+            if !node.alive || !node.child_leaf[k] { continue; }
+            let e = *e as usize;
+            if marked_set.contains(&(e as ElemId)) { continue; }
+            self.elem_to_node.insert((e + 3 * before[e]) as ElemId, (ni, k));
+        }
 
         // ── nc_limit: rebuild edge_elems AFTER propagation ──────────────
         let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
@@ -2678,6 +2793,224 @@ impl NCStateQuad {
         self.active_midpoints = snap.active_midpoints;
         self.edge_level = snap.edge_level;
         Some((snap.mesh, self.constraints.clone()))
+    }
+
+    /// Indices of tree nodes whose 4 children are all still leaves of the
+    /// current mesh — the MFEM `GetDerefinementTable` groups.  A group may be
+    /// coarsened (derefined) if its aggregated error is below the threshold.
+    pub fn deref_groups(&self) -> Vec<usize> {
+        self.refine_tree
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.derefinable())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Children (current-mesh element indices) of the given tree nodes.
+    pub fn deref_group_children(&self, node: usize) -> [ElemId; 4] {
+        self.refine_tree[node].children
+    }
+
+    /// Coarsen (derefine) the given tree-node groups: remove their leaf
+    /// children from `mesh` and restore each parent element at the position
+    /// of its first child.  Returns the new mesh.  Hanging-node state
+    /// (midpoints, edge levels, constraints) is updated accordingly.
+    pub fn derefine_groups(&mut self, mesh: &Mesh<2>, groups: &[usize]) -> Option<Mesh<2>> {
+        if groups.is_empty() { return None; }
+
+        let n_elems = mesh.n_elems() as usize;
+        let mut removed: std::collections::HashSet<ElemId> = Default::default();
+        let mut parents: Vec<(ElemId, [NodeId; 4], i32)> = Vec::new(); // (slot, nodes, tag)
+        for &ni in groups {
+            let node = &self.refine_tree[ni];
+            if !node.derefinable() { continue; }
+            for k in 0..4 { removed.insert(node.children[k]); }
+            parents.push((node.children[0], node.parent_nodes, node.parent_tag));
+        }
+        if parents.is_empty() { return None; }
+        parents.sort_by_key(|&(slot, _, _)| slot);
+
+        // New element numbering after coarsening: `new_id(e) = e - shift[e]`
+        // where shift[e] counts removed children before e.  Surviving tree
+        // children and elem_to_node keys must be renumbered accordingly.
+        let mut shift: Vec<usize> = vec![0; n_elems];
+        {
+            let mut cnt = 0usize;
+            for e in 0..n_elems {
+                shift[e] = cnt;
+                if removed.contains(&(e as ElemId)) { cnt += 1; }
+            }
+        }
+        for node in &mut self.refine_tree {
+            if !node.alive { continue; }
+            for k in 0..4 {
+                if node.child_leaf[k] {
+                    let c = node.children[k] as usize;
+                    node.children[k] = (c - shift[c]) as ElemId;
+                }
+            }
+        }
+        // When a group is derefined its parent element becomes a leaf again;
+        // restore the ancestor slot (MFEM DerefineElement) and register the
+        // recovered parent in elem_to_node so later refinements track it.
+        let mut restored: Vec<(ElemId, usize, usize)> = Vec::new(); // (parent_elem_id, anc_node, anc_slot)
+        for &ni in groups {
+            let node = &self.refine_tree[ni];
+            if let Some((pi, pk)) = node.parent {
+                // parent element occupies its first child's (removed) slot
+                let slot = node.children[0] as usize;
+                restored.push(((slot - shift[slot]) as ElemId, pi, pk));
+            }
+        }
+        let old_etn = std::mem::take(&mut self.elem_to_node);
+        for (e, v) in old_etn {
+            let e = e as usize;
+            if removed.contains(&(e as ElemId)) { continue; }
+            self.elem_to_node.insert((e - shift[e]) as ElemId, v);
+        }
+        for (pe, pi, pk) in restored {
+            self.refine_tree[pi].child_leaf[pk] = true;
+            self.elem_to_node.insert(pe, (pi, pk));
+        }
+
+        // Rebuild element connectivity: skip removed children, insert each
+        // parent element at its first child's position.
+        let mut new_conn: Vec<NodeId> = Vec::new();
+        let mut new_tags: Vec<i32> = Vec::new();
+        let mut parent_iter = parents.iter().peekable();
+        for e in 0..n_elems as ElemId {
+            // Insert the parent element at its first child's position before
+            // processing element e (the slot is a removed child itself).
+            while let Some((slot, nodes, tag)) = parent_iter.peek() {
+                if *slot > e { break; }
+                new_conn.extend_from_slice(&nodes[..]);
+                new_tags.push(*tag);
+                parent_iter.next();
+            }
+            if removed.contains(&e) { continue; }
+            let ns = mesh.elem_nodes(e);
+            new_conn.extend_from_slice(ns);
+            new_tags.push(mesh.elem_tags[e as usize]);
+        }
+        for (_, nodes, tag) in parent_iter {
+            new_conn.extend_from_slice(&nodes[..]);
+            new_tags.push(*tag);
+        }
+
+        // Faces: rebuild boundary faces from the old face table (a coarsened
+        // child edge disappears, so the parent edge may become boundary).
+        let old_face_tag: std::collections::HashMap<(NodeId, NodeId), i32> = mesh
+            .face_conn
+            .chunks_exact(2)
+            .zip(mesh.face_tags.iter())
+            .map(|(p, &t)| (quad_edge_key(p[0], p[1]), t))
+            .collect();
+        let used: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+        let mut new_face_conn: Vec<NodeId> = Vec::new();
+        let mut new_face_tags: Vec<i32> = Vec::new();
+        for e in 0..new_tags.len() as ElemId {
+            let ns = &new_conn[e as usize * 4..e as usize * 4 + 4];
+            for &(a, b) in &local_edges_quad() {
+                let key = quad_edge_key(ns[a], ns[b]);
+                if !used.contains(&ns[a]) || !used.contains(&ns[b]) { continue; }
+                if let Some(&t) = old_face_tag.get(&key) {
+                    new_face_conn.extend_from_slice(&[ns[a], ns[b]]);
+                    new_face_tags.push(t);
+                }
+            }
+        }
+
+        // ── Compact node numbering (drop orphan nodes of removed children) ──
+        // MFEM's NCMesh::Update() deletes unused nodes after Derefine; keep
+        // only nodes referenced by the new connectivity and remap everything.
+        let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut new_coords: Vec<f64> = Vec::new();
+        for &n in &new_conn {
+            if !node_map.contains_key(&n) {
+                node_map.insert(n, node_map.len() as NodeId);
+                new_coords.extend_from_slice(&mesh.coords_of(n));
+            }
+        }
+        let new_conn: Vec<NodeId> = new_conn.iter().map(|&n| node_map[&n]).collect();
+        let new_face_conn: Vec<NodeId> =
+            new_face_conn.iter().map(|&n| node_map[&n]).collect();
+        // remap tree parent geometries (parents are elements of the new mesh).
+        // Only derefinable nodes have a parent element in the mesh; nodes with
+        // no remaining leaf children can never be derefined again, so their
+        // historical geometry is not remapped (their old ids are stale after
+        // the node compaction but are never used again).
+        for (ni, node) in self.refine_tree.iter_mut().enumerate() {
+            if !node.derefinable() { continue; }
+            for k in 0..4 {
+                node.parent_nodes[k] = node_map[&node.parent_nodes[k]];
+            }
+        }
+        // remap active midpoints, dropping orphans (nodes no longer in use)
+        let old_midpoints = std::mem::take(&mut self.active_midpoints);
+        for ((a, b), mid) in old_midpoints {
+            if let (Some(&ra), Some(&rb), Some(&rm)) =
+                (node_map.get(&a), node_map.get(&b), node_map.get(&mid))
+            {
+                self.active_midpoints.insert((ra, rb), rm);
+            }
+        }
+        // remap edge levels, dropping orphan edges
+        let old_edge_level = std::mem::take(&mut self.edge_level);
+        for ((a, b), lvl) in old_edge_level {
+            if let (Some(&ra), Some(&rb)) = (node_map.get(&a), node_map.get(&b)) {
+                self.edge_level.insert((ra, rb), lvl);
+            }
+        }
+
+        let new_mesh = Mesh::uniform(
+            new_coords, new_conn.clone(), new_tags, ElementType::Quad4,
+            new_face_conn, new_face_tags, ElementType::Line2,
+        );
+
+        // Mark nodes as coarsened (dead) in the tree.
+        for &ni in groups {
+            if let Some(node) = self.refine_tree.get_mut(ni) {
+                node.alive = false;
+            }
+        }
+        self.elem_to_node.retain(|_, &mut (ni, _)| self.refine_tree[ni].alive);
+
+        // Drop midpoints whose parent edge no longer exists after coarsening.
+        let new_edge_elems: std::collections::HashMap<(NodeId, NodeId), Vec<u32>> = {
+            let mut m: std::collections::HashMap<(NodeId, NodeId), Vec<u32>> = Default::default();
+            for e in 0..new_mesh.n_elems() as u32 {
+                let ns = new_mesh.elem_nodes(e);
+                for &(a, b) in &local_edges_quad() {
+                    m.entry(quad_edge_key(ns[a], ns[b])).or_default().push(e);
+                }
+            }
+            m
+        };
+        let new_node_set: std::collections::HashSet<NodeId> = new_conn.iter().copied().collect();
+        self.active_midpoints.retain(|&(a, b), &mut mid| {
+            new_node_set.contains(&mid) && new_edge_elems.contains_key(&quad_edge_key(a, b))
+        });
+
+        // Rebuild hanging-node constraints for the coarsened mesh.
+        let mut new_constraints: Vec<HangingNodeConstraint> = Vec::new();
+        for (&(a, b), &mid) in &self.active_midpoints {
+            if !new_node_set.contains(&mid) { continue; }
+            if new_edge_elems.contains_key(&quad_edge_key(a, b)) {
+                new_constraints.push(HangingNodeConstraint {
+                    constrained: mid as usize,
+                    parent_a: a as usize,
+                    parent_b: b as usize,
+                    coeff_a: 0.5,
+                    coeff_b: 0.5,
+                    extra: Vec::new(),
+                });
+            }
+        }
+        new_constraints.sort_by_key(|c| c.constrained);
+        self.constraints = new_constraints;
+
+        Some(new_mesh)
     }
 }
 

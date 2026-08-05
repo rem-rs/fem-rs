@@ -139,6 +139,24 @@ impl NcState2D for NcState2 {
             NcState2::Quad4(s) => s.constraints(),
         }
     }
+    fn deref_groups(&self) -> Vec<usize> {
+        match self {
+            NcState2::Tri3(s) => s.deref_groups(),
+            NcState2::Quad4(s) => s.deref_groups(),
+        }
+    }
+    fn deref_group_children(&self, node: usize) -> [ElemId; 4] {
+        match self {
+            NcState2::Tri3(s) => s.deref_group_children(node),
+            NcState2::Quad4(s) => s.deref_group_children(node),
+        }
+    }
+    fn derefine_groups(&mut self, mesh: &Mesh<2>, groups: &[usize]) -> Option<Mesh<2>> {
+        match self {
+            NcState2::Tri3(s) => s.derefine_groups(mesh, groups),
+            NcState2::Quad4(s) => s.derefine_groups(mesh, groups),
+        }
+    }
 }
 
 // ─── P2 hanging-node constraint upgrade ───────────────────────────────────────
@@ -158,7 +176,9 @@ fn p2_constraints(
     let mut out: Vec<HangingNodeConstraint> = Vec::new();
     for c in p1 {
         let (mid, a, b) = (c.constrained, c.parent_a, c.parent_b);
-        let e = dm.edge_dof_map.get(&EdgeKey(a as u32, b as u32)).copied();
+        // NOTE: edge_dof_map keys are canonicalized via EdgeKey::new (min,max);
+        // constructing EdgeKey(a, b) directly would miss reversed edges.
+        let e = dm.edge_dof_map.get(&EdgeKey::new(a as u32, b as u32)).copied();
         let Some(e) = e else { continue };
         let e = e as usize;
         // mid vertex DOF == coarse-edge midpoint DOF (same point).
@@ -166,7 +186,7 @@ fn p2_constraints(
             out.push(HangingNodeConstraint::new_weighted(mid, e, e, 0.5, 0.5, vec![]));
         }
         // fine edge (a, mid): midpoint at the 1/4 point of the coarse edge.
-        if let Some(&s1) = dm.edge_dof_map.get(&EdgeKey(a as u32, mid as u32)) {
+        if let Some(&s1) = dm.edge_dof_map.get(&EdgeKey::new(a as u32, mid as u32)) {
             let s1 = s1 as usize;
             if s1 != mid && s1 != e {
                 out.push(HangingNodeConstraint::new_weighted(
@@ -175,7 +195,7 @@ fn p2_constraints(
             }
         }
         // fine edge (mid, b): midpoint at the 3/4 point of the coarse edge.
-        if let Some(&s2) = dm.edge_dof_map.get(&EdgeKey(mid as u32, b as u32)) {
+        if let Some(&s2) = dm.edge_dof_map.get(&EdgeKey::new(mid as u32, b as u32)) {
             let s2 = s2 as usize;
             if s2 != mid && s2 != e {
                 out.push(HangingNodeConstraint::new_weighted(
@@ -281,29 +301,63 @@ fn main() {
                 apply_hanging_constraints(&mut mat, &mut rhs_vec, &hc);
             }
 
-            // Dirichlet BC on all boundaries (time-dependent).
+            // ── Reduce to the true-DOF system (MFEM FormLinearSystem with the
+            //    conforming prolongation cP: PᵀAP and Pᵀb on unconstrained DOFs).
+            //    This makes the GSSmoother sweep order and PCG history match
+            //    MFEM bit-for-bit (full-N + identity rows would give a
+            //    different GS order and ~1e-7 solution drift).
+            let (mat_true, rhs_true, true_dofs) = if hc.is_empty() {
+                (mat.clone(), rhs_vec.clone(), (0..cdofs).collect())
+            } else {
+                fem_space::constraints::reduce_hanging_system(&mat, &rhs_vec, &hc)
+            };
+
+            // Dirichlet BC on all boundaries (time-dependent), restricted to
+            // true DOFs (C++: ess_tdof_list = GetEssentialTrueDofs).
             // C++ ex15.cpp:275 — `x.ProjectBdrCoefficient(bdr, ess_bdr)`
-            // C++ ex15.cpp:281-283 — `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)`
             // (DIAG_KEEP: diagonal kept, rhs_i = A_ii · bdr_val)
             let dm = space.dof_manager();
             let bnd_tags = space.mesh().unique_boundary_tags();
-            let bnd = boundary_dofs(space.mesh(), dm, &bnd_tags);
-            let bnd_vals: Vec<f64> = bnd.iter().map(|&dof| {
-                let coord = dm.dof_coord(dof);
-                bdr_func(&coord, time)
-            }).collect();
-            fem_space::constraints::apply_dirichlet(&mut mat, &mut rhs_vec, &bnd, &bnd_vals);
+            let bnd_all = boundary_dofs(space.mesh(), dm, &bnd_tags);
+            let true_set: std::collections::HashSet<usize> = true_dofs.iter().copied().collect();
+            let true_idx: std::collections::HashMap<usize, usize> = true_dofs
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| (d, i))
+                .collect();
+            let mut mat_true = mat_true;
+            let mut rhs_true = rhs_true;
+            // boundary DOFs, mapped to true-DOF (compressed) indices
+            let bnd_vals: Vec<f64> = bnd_all
+                .iter()
+                .filter(|d| true_set.contains(&(**d as usize)))
+                .map(|&dof| {
+                    let coord = dm.dof_coord(dof);
+                    bdr_func(&coord, time)
+                })
+                .collect();
+            let bnd: Vec<u32> = bnd_all
+                .iter()
+                .filter(|d| true_set.contains(&(**d as usize)))
+                .map(|&d| true_idx[&(d as usize)] as u32)
+                .collect();
+            fem_space::constraints::apply_dirichlet(&mut mat_true, &mut rhs_true, &bnd, &bnd_vals);
 
             // Solve (C++ ex15.cpp:286-287 — `GSSmoother M(A); PCG(A, M, B, X, 0, 500, 1e-12, 0.0)`)
             let mut u = vec![0.0_f64; cdofs];
+            let mut x_true = vec![0.0_f64; true_dofs.len()];
             let res = fem_solver::solve_pcg_gssmoother(
-                &mat, &rhs_vec, &mut u,
+                &mat_true, &rhs_true, &mut x_true,
                 &fem_solver::SolverConfig {
                     rtol: 1e-12, max_iter: 500, verbose: false, ..Default::default()
                 },
             );
             if res.is_err() { break; }
             if res.as_ref().is_ok_and(|r| !r.converged) { break; }
+            // Expand true-DOF solution back to the full vector (RecoverFEMSolution).
+            for (&td, &v) in true_dofs.iter().zip(x_true.iter()) {
+                u[td] = v;
+            }
 
             // Recover hanging-node values
             if !hc.is_empty() { recover_hanging_values(&mut u, &hc); }
@@ -324,9 +378,12 @@ fn main() {
 
         // ── 4b. Derefinement (C++ ex15.cpp:330-336: `if (derefiner.Apply(mesh))`
         //          → `cout << "\nDerefined elements." << endl;`)
-        // TODO(ex15): derefiner child-index assumption broken on NC meshes — disabled while aligning the refine path.
-        let _ = (&mut derefiner, &mut nc_state, &mut refiner);
-        let _ne_before = mesh.n_elems();
+        // MFEM ThresholdDerefiner::ApplyImpl → Mesh::DerefineByError: coarsen
+        // every derefinement-table group whose children's summed error is
+        // below the threshold (uses the eta of the last inner iteration).
+        if derefiner.apply(&mut mesh, &mut nc_state, &mut refiner) {
+            println!("\nDerefined elements.");
+        }
 
         time += dt;
     }

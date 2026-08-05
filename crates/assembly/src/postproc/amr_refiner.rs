@@ -23,7 +23,7 @@ use fem_space::fe_space::FESpace;
 
 use crate::postproc::grid_function::GridFunction;
 use crate::postproc::error_estimate::{threshold_mark, kelly_estimator};
-use crate::postproc::flux_recovery::{zz_estimator_mfem, FluxRecovery};
+use crate::postproc::flux_recovery::{zz_estimator_mfem, zz_estimator_mfem_nc, FluxRecovery};
 
 /// Threshold-based AMR refiner — MFEM `ThresholdRefiner` equivalent.
 ///
@@ -86,10 +86,13 @@ impl ThresholdRefiner {
         integrator: &F,
     ) {
         // ── 1. Error estimation ────────────────────────────────────────────
+        // On NC (non-conforming) meshes the flux space carries hanging-node
+        // constraints; MFEM's SumFluxAndCount propagates them, so use the NC
+        // variant (matches ex15: EnsureNCMesh → GeneralRefinement → NC path).
         let indicators = if self.use_kelly {
             kelly_estimator(gf)
         } else {
-            zz_estimator_mfem(gf, integrator)
+            zz_estimator_mfem_nc(gf, integrator, nc_state.constraints())
         };
         self.eta = indicators.eta;
 
@@ -114,8 +117,10 @@ impl ThresholdRefiner {
 
 /// Threshold-based derefiner — MFEM `ThresholdDerefiner` equivalent.
 ///
-/// Coarsens element groups whose children's aggregated error (sum, matching
-/// C++ default `op=1`) is below the threshold.
+/// Coarsens element groups (parents whose 4 children are all leaves) whose
+/// children's aggregated error (sum, matching C++ default `op=1`) is below
+/// the threshold.  Mirrors MFEM `Mesh::DerefineByError` +
+/// `NCMesh::GetDerefinementTable` + `Derefine`.
 pub struct ThresholdDerefiner {
     threshold: f64,
 }
@@ -126,48 +131,42 @@ impl ThresholdDerefiner {
     /// Elements whose children's aggregate error falls below `thresh` are coarsened.
     pub fn set_threshold(&mut self, thresh: f64) { self.threshold = thresh; }
 
-    /// Apply selective derefinement using `refiner.eta` and `refiner.last_marked`.
+    /// Apply selective derefinement using `refiner.eta` (errors on the current
+    /// mesh).  On return, `*mesh` and `refiner.constraints` are updated.
     ///
-    /// The refined mesh has `old_n_elems + 3 × last_marked.len()` elements.
-    /// For each marked old index `e`, the 4 children start at
-    /// `e + 3 × marked_before(e)` in the eta array.
-    ///
-    /// On return, `*mesh` and `refiner.constraints` are updated.
+    /// Returns `true` if at least one group was coarsened (MFEM
+    /// `ThresholdDerefiner::ApplyImpl` returns `CONTINUE + DEREFINED`).
     pub fn apply(
         &mut self,
         mesh: &mut Mesh<2>,
         nc_state: &mut dyn NcState2D,
         refiner: &mut ThresholdRefiner,
-    ) {
-        if !nc_state.can_derefine() || refiner.eta.is_empty() || self.threshold <= 0.0 {
-            return;
-        }
-        // Restore the pre-refinement mesh.
-        let Some((old_mesh, _old_constraints)) = nc_state.derefine_last() else { return };
-        // Compute refined_before for each marked old element.
-        let mut keep_refined: Vec<ElemId> = Vec::new();
-        let mut refined_before: usize = 0;
-        for &old_e in &refiner.last_marked {
-            let child_start = old_e as usize + 3 * refined_before;
-            refined_before += 1;
-            // Aggregate child errors (sum, matching C++ default op=1).
-            let child_sum: f64 = refiner.eta[child_start..child_start + 4].iter().sum();
-            if child_sum >= self.threshold {
-                keep_refined.push(old_e);
+    ) -> bool {
+        if self.threshold <= 0.0 || refiner.eta.is_empty() { return false; }
+
+        // MFEM Mesh::NonconformingDerefinement: for each derefinement-table
+        // group, aggregate the child errors (op=1: sum) and coarsen the group
+        // when the aggregate is below the threshold.  A group is only
+        // coarsened when ALL its children are leaves of the current mesh.
+        let groups = nc_state.deref_groups();
+        if groups.is_empty() { return false; }
+
+        let mut to_derefine: Vec<usize> = Vec::new();
+        for &g in &groups {
+            let children = nc_state.deref_group_children(g);
+            if children.iter().any(|&c| c as usize >= refiner.eta.len()) { continue; }
+            let agg: f64 = children.iter().map(|&c| refiner.eta[c as usize]).sum();
+            if agg < self.threshold {
+                to_derefine.push(g);
             }
         }
-        let n_coarsened = refiner.last_marked.len() - keep_refined.len();
-        if n_coarsened > 0 {
-            // Re-refine with the keep set (partial coarsening).
-            let (new_mesh, constraints, _) = nc_state.refine(&old_mesh, &keep_refined, 0);
-            *mesh = new_mesh;
-            refiner.constraints = constraints;
-        } else {
-            // No elements to coarsen: restore the full refinement.
-            let (restored_mesh, constraints, _) =
-                nc_state.refine(&old_mesh, &refiner.last_marked, 0);
-            *mesh = restored_mesh;
-            refiner.constraints = constraints;
-        }
+        if to_derefine.is_empty() { return false; }
+
+        let Some(new_mesh) = nc_state.derefine_groups(mesh, &to_derefine) else {
+            return false;
+        };
+        *mesh = new_mesh;
+        refiner.constraints = nc_state.constraints().to_vec();
+        true
     }
 }
