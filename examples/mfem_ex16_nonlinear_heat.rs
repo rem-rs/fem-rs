@@ -35,11 +35,11 @@
 //! | `-a`  | `--alpha`     | `0.01`                | Alpha coefficient               |
 //! | `-k`  | `--kappa`     | `0.5`                 | Kappa coefficient offset        |
 
-use fem_assembly::coefficient::{GridFunctionCoeff, TransformedCoeff};
+use fem_assembly::coefficient::GridFunctionCoeff;
 use fem_assembly::{Assembler, standard::{DiffusionIntegrator, MassIntegrator}};
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::CsrMatrix;
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_pcg_dsmoother, SolverConfig};
 use fem_mesh::Mesh;
 use fem_space::{fe_space::FESpace, H1Space};
 
@@ -63,8 +63,8 @@ struct ConductionOperator {
     t_mat: Option<CsrMatrix<f64>>,
     current_dt: f64,
 
-    // M_solver: CG + Jacobi preconditioner (matching MFEM CGSolver+DSmoother)
-    // T_solver: CG + Jacobi preconditioner (same, but with max_iter=100)
+    // M_solver: CG + DSmoother (matching MFEM CGSolver+DSmoother)
+    // T_solver: CG + DSmoother (same, but with max_iter=100)
     solve_cfg_m: SolverConfig,
     solve_cfg_t: SolverConfig,
 
@@ -142,7 +142,7 @@ impl ConductionOperator {
             *v = -*v;
         }
         // M_solver.Mult(z, du_dt)
-        solve_pcg_jacobi(&self.m_mat, &self.z, du_dt, &self.solve_cfg_m)
+        solve_pcg_dsmoother(&self.m_mat, &self.z, du_dt, &self.solve_cfg_m)
             .expect("ConductionOperator::Mult: PCG solve failed");
     }
 
@@ -175,7 +175,7 @@ impl ConductionOperator {
 
         // Solve T·k = RHS
         let sys = self.t_mat.as_ref().unwrap();
-        solve_pcg_jacobi(sys, &self.z, k, &self.solve_cfg_t)
+        solve_pcg_dsmoother(sys, &self.z, k, &self.solve_cfg_t)
             .expect("ConductionOperator::ImplicitSolve: PCG solve failed");
     }
 
@@ -185,18 +185,17 @@ impl ConductionOperator {
     /// then invalidates T so it is rebuilt on the next ImplicitSolve.
     /// (C++ ex16.cpp:336-355 — ConductionOperator::SetParameters)
     fn set_parameters(&mut self, u: &[f64]) {
-        // Build κ = kappa + alpha·u as a GridFunctionCoefficient
+        // C++ ex16.cpp:338-343 — build u_alpha_gf(i) = kappa + alpha*u(i) as a
+        // *nodal* GridFunction (linear transform applied node-wise), then use it
+        // as a GridFunctionCoefficient for the DiffusionIntegrator.
         let alpha = self.alpha;
         let kappa = self.kappa;
-        let u_coeff = GridFunctionCoeff::new(u.to_vec());
-        let kappa_coeff = TransformedCoeff {
-            inner: u_coeff,
-            transform: move |u_val| kappa + alpha * u_val,
-        };
+        let u_alpha: Vec<f64> = u.iter().map(|&v| kappa + alpha * v).collect();
+        let u_coeff = GridFunctionCoeff::new(u_alpha);
 
-        // Assemble K with transformed coefficient
+        // Assemble K with the transformed GridFunctionCoefficient
         let k_integ = DiffusionIntegrator {
-            kappa: kappa_coeff,
+            kappa: u_coeff,
         };
         self.k_mat = Assembler::assemble_bilinear(&self.fespace, &[&k_integ], self.quad_order);
 
@@ -212,12 +211,80 @@ fn initial_temperature(x: &[f64]) -> f64 {
 }
 
 // ─── SDIRK33 coefficients ───────────────────────────────────────────────────
-// MFEM sdirk33_gamma, sdirk33_a21, sdirk33_a32, sdirk33_b from ode.cpp.
-// Values match MFEM's SDIRK33Solver to within machine epsilon (~1e-16).
-const SDIRK3_GAMMA: f64 = 0.435_866_521_508_459;
-const SDIRK3_A21: f64 = 0.564_133_478_491_541; // 1 − γ
-const SDIRK3_A32: f64 = 0.717_933_260_754_229_5;
-const SDIRK3_B: [f64; 3] = [0.225_557_007_738_747, 0.286_419_283_997_043, 0.488_023_708_264_210];
+// MFEM ode.cpp SDIRK33Solver::Step (linalg/ode.cpp:775-799): the method is
+// defined by three constants a/b/c and accumulates x in-place:
+//
+//   //   a  |   a
+//   //   c  |  c-a    a
+//   //   1  |   b   1-a-b  a
+//   // -----+----------------
+//   //      |   b   1-a-b  a
+//
+//   k = ImplicitSolve(a*dt, x)
+//   y = x + (c-a)*dt*k;  x += b*dt*k
+//   k = ImplicitSolve(a*dt, y);  x += (1-a-b)*dt*k
+//   k = ImplicitSolve(a*dt, x);  x += a*dt*k
+const SDIRK33_A: f64 = 0.435866521508458999416019;
+const SDIRK33_B: f64 = 1.20849664917601007033648;
+const SDIRK33_C: f64 = 0.717933260754229499708010;
+
+/// Mimic C++ `std::cout << v` under `cout.precision(8)` (defaultfloat, i.e.
+/// printf-style `%g` with 8 significant digits, trailing zeros stripped).
+/// C++ ex16.cpp:110 sets `cout.precision(8)` for the `step ti, t = ...` line.
+fn cpp_fmt(v: f64) -> String {
+    let p = 8usize; // significant digits
+    let sci = format!("{:.7e}", v); // 7 decimals = 8 significant digits
+    let (mant, exp) = sci.split_once('e').expect("sci format");
+    let exp: i32 = exp.parse().expect("exp");
+    let neg = mant.starts_with('-');
+    let mant = mant.trim_start_matches('-');
+    let mut digits: Vec<char> = mant.chars().filter(|c| c.is_ascii_digit()).collect();
+    while digits.len() > 1 && digits[digits.len() - 1] == '0' {
+        digits.pop();
+    }
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if exp >= -4 && exp < p as i32 {
+        // fixed-point: value = digits × 10^(exp-(len-1))
+        if exp >= 0 {
+            let int_len = (exp + 1) as usize;
+            if int_len >= digits.len() {
+                out.push_str(&digits.iter().collect::<String>());
+                out.push_str(&"0".repeat(int_len - digits.len()));
+            } else {
+                out.push_str(&digits[..int_len].iter().collect::<String>());
+                out.push('.');
+                out.push_str(&digits[int_len..].iter().collect::<String>());
+            }
+        } else {
+            // 0.0…ddd
+            out.push('0');
+            out.push('.');
+            out.push_str(&"0".repeat((-exp - 1) as usize));
+            out.push_str(&digits.iter().collect::<String>());
+        }
+    } else {
+        out.push(digits[0]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..].iter().collect::<String>());
+        }
+        out.push('e');
+        if exp < 0 {
+            out.push('-');
+        } else {
+            out.push('+');
+        }
+        let e = exp.abs();
+        if e < 10 {
+            out.push('0');
+        }
+        out.push_str(&e.to_string());
+    }
+    out
+}
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
@@ -334,62 +401,61 @@ fn main() {
     let t_final = args.t_final;
     let dt = args.dt;
 
-    // Time stepping
+    // Time stepping (C++ ex16.cpp:229-259: `for (int ti = 1; !last_step; ti++)`)
     let mut t = 0.0;
     let vis_steps = 5;
-    let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
 
     // SDIRK33 needs a mutable operator (ImplicitSolve invalidates/rebuilds T)
     let mut oper = oper;
 
-    let mut last_step;
-    for ti in 1..=n_steps.max(1) {
-        let dt_actual = if t + dt >= t_final - dt / 2.0 {
+    let mut last_step = false;
+    let mut ti = 1usize;
+    while !last_step {
+        // C++ ex16.cpp:234-237 — decide `last_step` BEFORE stepping (dt is NOT
+        // clipped: SDIRK33Solver::Step always advances t by the full dt).
+        if t + dt >= t_final - dt / 2.0 {
             last_step = true;
-            t_final - t
-        } else {
-            last_step = false;
-            dt
-        };
-
-        // SDIRK33 step
-        let n = fe_size;
-        let g = SDIRK3_GAMMA;
-
-        // Stage 1: k₁ = ImplicitSolve(γ·dt, u)
-        let mut k1 = vec![0.0; n];
-        oper.implicit_solve(g * dt_actual, &u, &mut k1);
-
-        // Stage 2: u_stage = u + a₂₁·dt·k₁
-        //          k₂ = ImplicitSolve(γ·dt, u_stage)
-        let u2: Vec<f64> = (0..n).map(|i| u[i] + SDIRK3_A21 * dt_actual * k1[i]).collect();
-        let mut k2 = vec![0.0; n];
-        oper.implicit_solve(g * dt_actual, &u2, &mut k2);
-
-        // Stage 3: u_stage = u + a₃₂·dt·k₂
-        //          k₃ = ImplicitSolve(γ·dt, u_stage)
-        let u3: Vec<f64> = (0..n).map(|i| u[i] + SDIRK3_A32 * dt_actual * k2[i]).collect();
-        let mut k3 = vec![0.0; n];
-        oper.implicit_solve(g * dt_actual, &u3, &mut k3);
-
-        // Update: u = u + dt·(b₁·k₁ + b₂·k₂ + b₃·k₃)
-        for i in 0..n {
-            u[i] += dt_actual
-                * (SDIRK3_B[0] * k1[i] + SDIRK3_B[1] * k2[i] + SDIRK3_B[2] * k3[i]);
         }
 
-        t += dt_actual;
+        // SDIRK33 step (MFEM linalg/ode.cpp:775-799, x accumulated in place)
+        let n = fe_size;
+        let a = SDIRK33_A;
+        let b = SDIRK33_B;
+        let c = SDIRK33_C;
 
-        if ti % vis_steps == 0 || last_step || ti == n_steps {
-            println!("step {}, t = {:.6e}", ti, t);
+        // k = ImplicitSolve(a*dt, x)
+        let mut k = vec![0.0; n];
+        oper.implicit_solve(a * dt, &u, &mut k);
+
+        // y = x + (c-a)*dt*k ; x += b*dt*k
+        let y: Vec<f64> = (0..n).map(|i| u[i] + (c - a) * dt * k[i]).collect();
+        for i in 0..n {
+            u[i] += b * dt * k[i];
+        }
+
+        // k = ImplicitSolve(a*dt, y) ; x += (1-a-b)*dt*k
+        oper.implicit_solve(a * dt, &y, &mut k);
+        for i in 0..n {
+            u[i] += (1.0 - a - b) * dt * k[i];
+        }
+
+        // k = ImplicitSolve(a*dt, x) ; x += a*dt*k
+        oper.implicit_solve(a * dt, &u, &mut k);
+        for i in 0..n {
+            u[i] += a * dt * k[i];
+        }
+
+        t += dt;
+
+        // C++ ex16.cpp:241-243 — `if (last_step || (ti % vis_steps) == 0)`
+        if last_step || ti % vis_steps == 0 {
+            println!("step {}, t = {}", ti, cpp_fmt(t));
         }
 
         // Update K with the new solution (lagged linearization for next step)
         oper.set_parameters(&u);
 
-        if last_step {
-            break;
-        }
+        ti += 1;
     }
 
     // 9. Save the final solution (C++ ex16.cpp:263-267: ex16-final.gf).
@@ -463,42 +529,40 @@ mod tests {
         let quad_order = 2 * order;
         let mut oper = ConductionOperator::new(space, alpha, kappa, &u, quad_order);
 
-        let n_steps = if dt > 0.0 {
-            (t_final / dt).ceil() as usize
-        } else {
-            0
-        };
         let mut t = 0.0;
-        let g = SDIRK3_GAMMA;
+        let a = SDIRK33_A;
+        let b = SDIRK33_B;
+        let c = SDIRK33_C;
+        let mut steps = 0usize;
 
-        for _ in 0..n_steps {
-            let dt_actual = if t + dt >= t_final - dt / 2.0 {
-                t_final - t
-            } else {
-                dt
-            };
-
-            let mut k1 = vec![0.0; fe_size];
-            oper.implicit_solve(g * dt_actual, &u, &mut k1);
-
-            let u2: Vec<f64> = (0..fe_size)
-                .map(|i| u[i] + SDIRK3_A21 * dt_actual * k1[i])
-                .collect();
-            let mut k2 = vec![0.0; fe_size];
-            oper.implicit_solve(g * dt_actual, &u2, &mut k2);
-
-            let u3: Vec<f64> = (0..fe_size)
-                .map(|i| u[i] + SDIRK3_A32 * dt_actual * k2[i])
-                .collect();
-            let mut k3 = vec![0.0; fe_size];
-            oper.implicit_solve(g * dt_actual, &u3, &mut k3);
-
-            for i in 0..fe_size {
-                u[i] += dt_actual
-                    * (SDIRK3_B[0] * k1[i] + SDIRK3_B[1] * k2[i] + SDIRK3_B[2] * k3[i]);
+        let mut last_step = false;
+        while !last_step {
+            if t + dt >= t_final - dt / 2.0 {
+                last_step = true;
             }
 
-            t += dt_actual;
+            let mut k = vec![0.0; fe_size];
+            oper.implicit_solve(a * dt, &u, &mut k);
+
+            let y: Vec<f64> = (0..fe_size)
+                .map(|i| u[i] + (c - a) * dt * k[i])
+                .collect();
+            for i in 0..fe_size {
+                u[i] += b * dt * k[i];
+            }
+
+            oper.implicit_solve(a * dt, &y, &mut k);
+            for i in 0..fe_size {
+                u[i] += (1.0 - a - b) * dt * k[i];
+            }
+
+            oper.implicit_solve(a * dt, &u, &mut k);
+            for i in 0..fe_size {
+                u[i] += a * dt * k[i];
+            }
+
+            t += dt;
+            steps += 1;
             oper.set_parameters(&u);
         }
 
@@ -508,7 +572,7 @@ mod tests {
             .enumerate()
             .map(|(i, &v)| (i as f64 + 1.0) * v)
             .sum();
-        (fe_size, n_steps, t, sol_norm, checksum)
+        (fe_size, steps, t, sol_norm, checksum)
     }
 
     #[test]
