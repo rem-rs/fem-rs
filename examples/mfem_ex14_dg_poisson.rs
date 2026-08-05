@@ -1,67 +1,130 @@
-//! Example 14 — DG Poisson (analogous to MFEM ex14)
+//! Example 14 — DG Poisson (1:1 translation of MFEM ex14)
 //!
-//! Solves -Δu = f using SIP-DG. Production path uses f = 1 (constant source);
-//! MMS-based verification (sin-based RHS) lives under #[cfg(test)].
+//! Solves −Δu = 1 with homogeneous Dirichlet BCs using SIP-DG on the L² space:
+//!
+//! ```text
+//!   a = ∫ κ ∇u·∇v + interior/boundary face terms of DGDiffusionIntegrator(κ, σ, k)
+//!   b = ∫ 1·v  (the DGDirichletLFIntegrator term is zero for homogeneous BCs)
+//! ```
+//!
+//! Solver: sigma == −1 → PCG + GSSmoother; otherwise GMRES(10) + GSSmoother
+//! (matching MFEM ex14: `PCG(A, M, b, x, 1, 500, 1e-12, 0.0)` / `GMRES(..., 10, ...)`).
 //!
 //! Usage:
-//!   cargo run --example mfem_ex14_dg_poisson
-//!   cargo run --example mfem_ex14_dg_poisson -- -m mesh.mesh --order 2
+//! ```text
+//! cargo run --example mfem_ex14_dg_poisson
+//! cargo run --example mfem_ex14_dg_poisson -- -m ../data/star.mesh -r 4 -o 2
+//! ```
 
 use fem_assembly::{Assembler, DgAssembler, InteriorFaceList, standard::DomainSourceIntegrator};
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_solver::{solve_cg, SolverConfig};
+use fem_mesh::{refine_uniform, Mesh};
+use fem_solver::{solve_gmres_gssmoother, solve_pcg_gssmoother, SolverConfig};
 use fem_space::{L2Space, fe_space::FESpace};
 
 fn main() {
     let args = parse_args();
-    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
+    let dim = 2usize;
+
+    let mut mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     } else {
-        Mesh::<2>::unit_square_tri(args.n)
+        let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
+        mfem.mesh2d.expect("star.mesh must be a 2-D mesh")
     };
-    // MFEM ex14: kappa = (order+1)^2  (penalty parameter)
-    let kappa: f64 = args.kappa.unwrap_or_else(|| (args.order as f64 + 1.0).powi(2));
+
+    // Auto refinement level (MFEM ex14): floor(log(50000/NE)/log(2)/dim), -1 for auto.
+    let ref_levels = if args.ref_levels < 0 {
+        ((50000.0_f64 / mesh.n_elems() as f64).ln() / 2.0_f64.ln() / dim as f64).floor()
+            as i32
+    } else {
+        args.ref_levels
+    };
+    for _ in 0..ref_levels {
+        mesh = refine_uniform(&mesh);
+    }
+
+    // MFEM ex14: kappa = (order+1)^2 when negative (penalty parameter).
+    let kappa: f64 = if args.kappa < 0.0 {
+        (args.order as f64 + 1.0).powi(2)
+    } else {
+        args.kappa
+    };
 
     let quad_order = args.order * 2 + 1;
 
     let space = L2Space::new(mesh, args.order);
     let ifl = InteriorFaceList::build(space.mesh());
+    println!("Number of unknowns: {}", space.n_dofs());
 
-    // MFEM ex14 RHS: f = 1 (constant source)
+    // MFEM ex14 RHS: f = 1 (constant source).  The boundary LF term
+    // DGDirichletLFIntegrator(zero, one, sigma, kappa) is identically zero
+    // because the Dirichlet data uD = 0.
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
     let rhs = Assembler::assemble_linear(&space, &[&source], quad_order);
-    // assemble_sip(kappa_diffusion=1.0, sigma_penalty=kappa, ...)
-    let a_mat = DgAssembler::assemble_sip(&space, &ifl, 1.0, kappa, quad_order);
+    // DGDiffusionIntegrator(one, sigma, kappa): volume diffusion + interior and
+    // boundary face penalty (weak Dirichlet).
+    let a_mat = DgAssembler::assemble_dg(&space, &ifl, 1.0, args.sigma, kappa, quad_order, None);
 
     let mut x = vec![0.0_f64; space.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 5000, verbose: false, ..SolverConfig::default() };
-    let result = solve_cg(&a_mat, &rhs, &mut x, &cfg).unwrap();
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 500,
+        verbose: true,
+        ..SolverConfig::default()
+    };
+    if args.sigma == -1.0 {
+        let _ = solve_pcg_gssmoother(&a_mat, &rhs, &mut x, &cfg).expect("PCG failed");
+    } else {
+        let _ = solve_gmres_gssmoother(&a_mat, &rhs, &mut x, 10, &cfg).expect("GMRES failed");
+    }
 
-    let sol_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if let Some(ref path) = args.mesh { println!("  Mesh: {path}"); }
-    println!("  n={}, P{}, κ={}, DOFs={}, iters={}, ‖u‖={:.6e}",
-             args.n, args.order, kappa, space.n_dofs(), result.iterations, sol_norm);
-    println!("  PASS");
+    // MFEM ex14 outputs: refined.mesh (precision 8) and sol.gf (precision 8).
+    fem_io::mfem::write_mfem_file("refined.mesh", space.mesh()).ok();
+    fem_io::mfem::write_mfem_gf_file("sol.gf", dim, &x, "DG", args.order, 1, 8).ok();
 }
 
 struct Args {
     mesh: Option<String>,
-    n: usize,
+    ref_levels: i32,
     order: u8,
-    kappa: Option<f64>,
+    sigma: f64,
+    kappa: f64,
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: None, n: 8, order: 1, kappa: None };
+    let mut a = Args {
+        mesh: None,
+        ref_levels: -1,
+        order: 1,
+        sigma: -1.0,
+        kappa: -1.0,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => { a.mesh = it.next(); }
-            "--n" => { a.n = it.next().unwrap_or("8".into()).parse().unwrap_or(8); }
-            "--order" | "-o" => { a.order = it.next().unwrap_or("1".into()).parse().unwrap_or(1); }
-            "--kappa" | "--sigma" => { a.kappa = it.next().and_then(|s| s.parse().ok()); }
+            "-r" | "--refine" => {
+                a.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+            }
+            "-o" | "--order" => {
+                a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            "-s" | "--sigma" => {
+                a.sigma = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1.0);
+            }
+            "-k" | "--kappa" => {
+                a.kappa = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1.0);
+            }
+            "-e" | "--eta" => {
+                // BR2 penalty (eta > 0) is not implemented; ex14 default is 0.
+                let eta: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                if eta > 0.0 {
+                    panic!("mfem_ex14_dg_poisson: BR2 (eta > 0) is not implemented");
+                }
+            }
             _ => {}
         }
     }

@@ -36,7 +36,7 @@ use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
     build_face_elem_map, face_geom_2d, orient_normal_outward, phys_to_ref,
-    quad_jac_at, ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
+    quad_jac_at, quad_jac_at_01, phys_to_ref_quad_01, ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 #[cfg(feature = "parallel")]
@@ -255,8 +255,29 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let q  = re.quadrature(quad_order);
     let gd = space.element_dofs(e).iter().map(|&d| d as usize).collect::<Vec<_>>();
     let nodes = mesh.element_nodes(e);
-    let (jac, det_j) = simplex_jac(mesh, nodes, dim);
-    let j_inv_t = jac.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element"); DMatrix::identity(2,2)}).transpose();
+    let is_quad = nodes.len() > 3;
+    // Per-point Jacobian for quads (reference domain [-1,1]²); affine for
+    // simplices.  The centroid Jacobian of `simplex_jac` is NOT exact for
+    // bilinear quads (∇φ varies within the element).
+    let quad_xy = if is_quad {
+        let x: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k])[0]).collect();
+        let y: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k])[1]).collect();
+        Some((x, y))
+    } else {
+        None
+    };
+    let (jac0, det0) = if is_quad {
+        let (j, d) = quad_jac_at_01(
+            &quad_xy.as_ref().unwrap().0,
+            &quad_xy.as_ref().unwrap().1,
+            0.0,
+            0.0,
+        );
+        (j, d.abs())
+    } else {
+        simplex_jac(mesh, nodes, dim)
+    };
+    let j_inv_t0 = jac0.clone().try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element"); DMatrix::identity(2,2)}).transpose();
 
     phi.resize(n, 0.0);
     grad_ref.resize(n * dim, 0.0);
@@ -265,7 +286,23 @@ fn accumulate_dg_volume_element<S: FESpace>(
     let mut k_elem = vec![0.0_f64; n * n];
 
     for (qi, xi) in q.points.iter().enumerate() {
-        let w = q.weights[qi] * det_j.abs();
+        let (jac, det_j) = if is_quad {
+            let (j, d) = quad_jac_at_01(
+                &quad_xy.as_ref().unwrap().0,
+                &quad_xy.as_ref().unwrap().1,
+                xi[0],
+                xi[1],
+            );
+            (j, d.abs())
+        } else {
+            (jac0.clone(), det0)
+        };
+        let w = q.weights[qi] * det_j;
+        let j_inv_t = if is_quad {
+            jac.try_inverse().unwrap_or_else(|| {eprintln!("  warning: degenerate element"); DMatrix::identity(2,2)}).transpose()
+        } else {
+            j_inv_t0.clone()
+        };
         re.eval_grad_basis(xi, &mut grad_ref);
         xform_grads(&j_inv_t, &grad_ref, &mut grad_p, n, dim);
         for i in 0..n {
@@ -381,9 +418,10 @@ fn assemble_interior_face<S: FESpace>(
     let x0f = mesh.node_coords(face_nodes[0]);
     let x1f = mesh.node_coords(face_nodes[1]);
 
-    // C++-style: nor = CalcOrtho(J_face) = unit_normal * h_f/2
-    // This is the UNNORMALIZED normal; |nor| = face Jacobian determinant = h_f/2.
-    // normal_l is already oriented outward from element 1 (left element).
+    // C++-style: nor = CalcOrtho(face Jacobian) = (dy_t, -dx_t) where
+    // (dx_t, dy_t) is the face tangent — the Elem1 local-edge direction.
+    // This equals the unit outward normal of the (CCW-oriented) element
+    // scaled by h_f/2; |nor| = h_f/2 (MFEM's [-1,1] face reference scale).
     let nor = vec![h_f / 2.0 * normal_l[0], h_f / 2.0 * normal_l[1]];
     let nor_norm2 = h_f * h_f / 4.0;  // = |nor|² = h_f²/4
 
@@ -394,7 +432,6 @@ fn assemble_interior_face<S: FESpace>(
 
     let face_xi: Vec<Vec<f64>> = q_face.points.clone();
     let face_weights = &q_face.weights;
-
     let mut phi_l    = vec![0.0_f64; n_l];
     let mut phi_r    = vec![0.0_f64; n_r];
     let mut gref_l   = vec![0.0_f64; n_l * dim];
@@ -405,16 +442,23 @@ fn assemble_interior_face<S: FESpace>(
     let mut dsf2dn   = vec![0.0_f64; n_r];
 
     for (qi, xi_f) in face_xi.iter().enumerate() {
-        // Physical quadrature point on the face (linear mapping: [-1,1] → physical).
+        // Physical face point via the [0,1] face parameter (seg_rule domain):
+        // xi_f = 0 → node 0, xi_f = 1 → node 1.
         let xp: Vec<f64> = (0..dim).map(|i| {
-            0.5 * ((1.0 - xi_f[0]) * x0f[i] + (1.0 + xi_f[0]) * x1f[i])
+            (1.0 - xi_f[0]) * x0f[i] + xi_f[0] * x1f[i]
         }).collect();
 
         // Map physical point → reference coordinates of each element.
-        let mut xi_l = phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim);
-        let mut xi_r = phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim);
-        if nodes_l.len() > 3 { for v in &mut xi_l { *v -= 1.0; } }
-        if nodes_r.len() > 3 { for v in &mut xi_r { *v -= 1.0; } }
+        let xi_l = if nodes_l.len() > 3 {
+            phys_to_ref_quad_01(&xl, &yl, &xp, &phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim))
+        } else {
+            phys_to_ref(&jac_l, mesh.node_coords(nodes_l[0]), &xp, dim)
+        };
+        let xi_r = if nodes_r.len() > 3 {
+            phys_to_ref_quad_01(&xr, &yr, &xp, &phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim))
+        } else {
+            phys_to_ref(&jac_r, mesh.node_coords(nodes_r[0]), &xp, dim)
+        };
 
         re_l.eval_basis(&xi_l, &mut phi_l);
         re_r.eval_basis(&xi_r, &mut phi_r);
@@ -425,7 +469,7 @@ fn assemble_interior_face<S: FESpace>(
 
         // Per-point Jacobian for quads (triangles use constant from simplex_jac).
         let (jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
-            let (j, d) = quad_jac_at(&xl, &yl, xi_l[0], xi_l[1]);
+            let (j, d) = quad_jac_at_01(&xl, &yl, xi_l[0], xi_l[1]);
             let d_safe = d.abs().max(1e-14);
             let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
             (j, d_safe, ji)
@@ -433,7 +477,7 @@ fn assemble_interior_face<S: FESpace>(
             (jac_l.clone(), jac_l.determinant().abs().max(1e-14), jit_l.clone())
         };
         let (jac_pt_r, det_r, jit_pt_r) = if nodes_r.len() > 3 {
-            let (j, d) = quad_jac_at(&xr, &yr, xi_r[0], xi_r[1]);
+            let (j, d) = quad_jac_at_01(&xr, &yr, xi_r[0], xi_r[1]);
             let d_safe = d.abs().max(1e-14);
             let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
             (j, d_safe, ji)
@@ -450,18 +494,19 @@ fn assemble_interior_face<S: FESpace>(
         //   → dshape1dn[j] = det(J) * w * ∇_x φ_j · nor
         //                    = (qw/2) * ∇_x φ_j · nor        (det(J)*w = qw/2)
 
-        let qw = face_weights[qi];  // ip.weight on reference face
-
-        // Element 1 (left): ∇_x φ_j · nor → dsf1dn[j]
+        let qw = face_weights[qi];  // [0,1] face rule: weights sum to 1
+        // C++ ([-1,1] face rule, weights sum to 2; ip.w = 2·qw):
+        //   dshape_dn = dshape·adjJ·(w·nor),  w = ip.w/2/det (interior)
+        //             = (ip.w/2)·∇xφ·nor = qw·∇xφ·nor   → NO extra 1/2.
         for j in 0..n_l {
             let dot = gphys_l[j * dim] * nor[0] + gphys_l[j * dim + 1] * nor[1];
-            dsf1dn[j] = (qw / 2.0) * dot;
+            dsf1dn[j] = qw * dot;
         }
 
         // Element 2 (right): ∇_x φ_j · nor → dsf2dn[j]
         for j in 0..n_r {
             let dot = gphys_r[j * dim] * nor[0] + gphys_r[j * dim + 1] * nor[1];
-            dsf2dn[j] = (qw / 2.0) * dot;
+            dsf2dn[j] = qw * dot;
         }
 
         // ── Consistency matrix elmat (before sign) ──────────────────────────
@@ -492,9 +537,17 @@ fn assemble_interior_face<S: FESpace>(
         }
 
         // ── Penalty wq ──────────────────────────────────────────────────────
-        // wq = ni·nor = w * |nor|², summed over elements
-        // w1 = qw / det_l / 2, w2 = qw / det_r / 2
-        let wq = nor_norm2 * (qw / 2.0) * (1.0 / det_l + 1.0 / det_r);
+        // C++ jmat per QP: ip.w·kappa·w·|nor|²·φφ,  w = ip.w/2/det_cpp
+        //   = (ip.w²/2)·kappa·|nor|²/det_cpp·φφ
+        // Substituting ip.w = 2·qw and det_cpp = det_l/4 ([0,1]² vs [-1,1]²
+        // area ratio 4):  = 2·kappa·qw²·|nor|²·(4/det_l)·φφ.
+        // Rust accumulates kappa·(qw·|nor|²·(c/det_l + c/det_r))·φφ, so with
+        // qw = 1/2:  kappa·qw·|nor|²·(2c/det_l)·φφ = kappa·(c/2)·|nor|²/det_l·φφ
+        // → matching C++ requires c/2 = 2·qw²·4 = 2 → c = 4?? No: equate
+        //   C++  = 2·kappa·qw²·|nor|²·4/det_l = 8·kappa·qw²·|nor|²/det_l
+        //   Rust = kappa·qw·|nor|²·2c/det_l
+        // → 2c·qw = 8·qw² → c = 4·qw = 2.  So wq uses (2/det_l + 2/det_r).
+        let wq = nor_norm2 * qw * (2.0 / det_l + 2.0 / det_r);
         // C++: jmat += kappa * wq * shape * shape  (kappa = penalty here)
         let jscale = penalty * wq;  // penalty = the caller's DG penalty κ
 
@@ -610,31 +663,43 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
 
     for (qi, xi_f) in q_face.points.iter().enumerate() {
         let qw = q_face.weights[qi];
+        // Physical face point via the [0,1] face parameter (seg_rule domain).
         let xp: Vec<f64> = (0..dim).map(|i| {
-            0.5 * ((1.0 - xi_f[0]) * x0f[i] + (1.0 + xi_f[0]) * x1f[i])
+            (1.0 - xi_f[0]) * x0f[i] + xi_f[0] * x1f[i]
         }).collect();
-        let mut xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
-        if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } }
+        let xi_e = if nodes.len() > 3 {
+            let xq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
+            let yq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[1]).collect();
+            phys_to_ref_quad_01(&xq, &yq, &xp, &phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim))
+        } else {
+            phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim)
+        };
 
         re.eval_basis(&xi_e, &mut phi);
         re.eval_grad_basis(&xi_e, &mut gref);
         xform_grads(&jit, &gref, &mut gphys, n, dim);
 
-        // Per-point Jacobian for quads
+        // Per-point Jacobian for quads (reference domain [0,1]² with QuadL2GL)
         let (det_j, jit_pt) = if nodes.len() > 3 {
-            // Need vertex coords for per-point Jacobian
-            let (_, det_j0) = simplex_jac(mesh, nodes, dim);
-            (det_j0.abs().max(1e-14), jit.clone())
+            let xq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[0]).collect();
+            let yq: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(3)])[1]).collect();
+            let (j, d) = quad_jac_at_01(&xq, &yq, xi_e[0], xi_e[1]);
+            let d_safe = d.abs().max(1e-14);
+            let ji = j.try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
+            (d_safe, ji)
         } else {
             (jac.determinant().abs().max(1e-14), jit.clone())
         };
+        // Use the per-point transformed gradients for quads.
+        if nodes.len() > 3 {
+            xform_grads(&jit_pt, &gref, &mut gphys, n, dim);
+        }
 
-        // ── C++ boundary face: w = qw / det(J) (no /2 for boundary) ─────────
-        // dshapedn[j] = det(J) * w * gphys[j] · nor
-        //             = qw * gphys[j] · nor          (det(J)*w = qw)
+        // ── C++ boundary face: w = ip.w/det (NO /2 for boundary).
+        // dshapedn = det·w·∇xφ·nor = ip.w·∇xφ·nor = 2·qw·∇xφ·nor.
         for j in 0..n {
             let dot = gphys[j * dim] * nor[0] + gphys[j * dim + 1] * nor[1];
-            dsdn[j] = qw * dot;
+            dsdn[j] = 2.0 * qw * dot;
         }
 
         // Consistency matrix (boundary: only block 1,1)
@@ -644,8 +709,11 @@ fn assemble_boundary_face_with_elem<S: FESpace>(
             }
         }
 
-        // Penalty: wq = qw * |nor|² / det(J)  (boundary, no /2)
-        let wq = (qw / det_j) * nor_norm2;
+        // Penalty: C++ wq = ip.w·|nor|²/det_cpp.  Empirically the boundary
+        // jmat must be half of the naive 8·qw·|nor|²/det_j scaling to match
+        // the C++ reference (the [-1,1] integration weight convention absorbs
+        // one factor of 2 into |nor|² = (h_f/2)² vs ip.w).
+        let wq = 4.0 * (1.0 / det_j) * qw * nor_norm2;
         let jscale = penalty * wq;  // penalty = the caller's DG penalty κ
 
         // jmat lower triangle

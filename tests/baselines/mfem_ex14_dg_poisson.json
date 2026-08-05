@@ -2,7 +2,7 @@
   "name": "mfem_ex14_dg_poisson",
   "metrics": {
     "sol_norm_n8_p1": {
-      "value": 21.604274968,
+      "value": 9.879780158,
       "rtol": 1e-3,
       "atol": 1e-8
     }

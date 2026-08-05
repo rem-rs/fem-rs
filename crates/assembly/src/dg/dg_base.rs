@@ -16,6 +16,7 @@ use fem_element::{
         TriP1, TriP2, TriP3,
         TetP1, TetP2, TetP3,
         QuadQ1, QuadQ2, QuadQk,
+        factory::QuadL2GL,
     },
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -33,11 +34,11 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
         (ElementType::Tri3, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        // order >= 3 uses GLL nodes on [0,1]^2 (MFEM H1 default); QuadQ3 is
-        // equidistant [-1,1]^2 and NOT MFEM-compatible at p=3.
-        (ElementType::Quad4, 3) => Box::new(QuadQk::new_lex(3)),
+        // Quad4 in the DG/L2 path uses the Gauss-Legendre tensor basis
+        // (MFEM L2_FECollection / DG_FECollection default), on [0,1]².
+        (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
+        (ElementType::Quad4, 2) => Box::new(QuadL2GL::new(2)),
+        (ElementType::Quad4, 3) => Box::new(QuadL2GL::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
@@ -148,6 +149,61 @@ pub fn quad_jac_at(x: &[f64], y: &[f64], xi: f64, eta: f64) -> (DMatrix<f64>, f6
     }
     j *= 0.25;
     (j.clone(), j.determinant())
+}
+
+/// Per-point Jacobian of the bilinear quad map on the reference square `[0,1]²`
+/// with the **topological** (CCW) node order `(0,0),(1,0),(1,1),(0,1)` —
+/// the order MFEM's `ElementTransformation` uses for element nodes.  (The L2
+/// solution basis is lexicographic; geometry is always topological.)
+pub fn quad_jac_at_01(x: &[f64], y: &[f64], xi: f64, eta: f64) -> (DMatrix<f64>, f64) {
+    // N1=(1-x)(1-y)@(0,0), N2=x(1-y)@(1,0), N3=xy@(1,1), N4=(1-x)y@(0,1)
+    let dxi  = [-(1.0 - eta),  (1.0 - eta),  eta, -eta];
+    let deta = [-(1.0 - xi),  -xi,   xi,  (1.0 - xi)];
+    let mut j = DMatrix::<f64>::zeros(2, 2);
+    for k in 0..4 {
+        j[(0, 0)] += dxi[k]  * x[k];
+        j[(0, 1)] += deta[k] * x[k];
+        j[(1, 0)] += dxi[k]  * y[k];
+        j[(1, 1)] += deta[k] * y[k];
+    }
+    (j.clone(), j.determinant())
+}
+
+/// Exact inverse of the bilinear quad map on `[0,1]²` via Newton iteration
+/// (the affine `phys_to_ref` is only an approximation for bilinear maps; MFEM
+/// uses `ElementTransformation::TransformBack` which converges to machine
+/// precision).  Node order matches [`quad_jac_at_01`].
+pub fn phys_to_ref_quad_01(
+    x: &[f64],
+    y: &[f64],
+    xp: &[f64],
+    xi0: &[f64],
+) -> Vec<f64> {
+    let mut xi = vec![xi0[0], xi0[1]];
+    for _ in 0..12 {
+        // Bilinear map value at (xi, eta): X = Σ N_k(ξ,η) x_k, topological
+        // node order N1=(1-x)(1-y)@0, N2=x(1-y)@1, N3=xy@2, N4=(1-x)y@3
+        // (matching quad_jac_at_01).
+        let (nx0, nx1) = (1.0 - xi[0], xi[0]);
+        let (ny0, ny1) = (1.0 - xi[1], xi[1]);
+        let xv = nx0 * ny0 * x[0] + nx1 * ny0 * x[1] + nx1 * ny1 * x[2] + nx0 * ny1 * x[3];
+        let yv = nx0 * ny0 * y[0] + nx1 * ny0 * y[1] + nx1 * ny1 * y[2] + nx0 * ny1 * y[3];
+        let (j, _d) = quad_jac_at_01(x, y, xi[0], xi[1]);
+        let det = j[(0, 0)] * j[(1, 1)] - j[(0, 1)] * j[(1, 0)];
+        if det.abs() < 1e-16 {
+            break;
+        }
+        let fx = xp[0] - xv;
+        let fy = xp[1] - yv;
+        if fx * fx + fy * fy < 1e-26 {
+            break;
+        }
+        let dxi = (j[(1, 1)] * fx - j[(0, 1)] * fy) / det;
+        let deta = (-j[(1, 0)] * fx + j[(0, 0)] * fy) / det;
+        xi[0] += dxi;
+        xi[1] += deta;
+    }
+    xi
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

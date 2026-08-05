@@ -130,33 +130,6 @@ path = "mfem_ex33_fractional_laplacian.rs"
 name = "mfem_ex33_fractional_diffusion"
 path = "mfem_ex33_fractional_diffusion.rs"
 [[example]]
-name = "dbg_e2v"
-path = "dbg_e2v.rs"
-[[example]]
-name = "dbg_j2"
-path = "dbg_j2.rs"
-[[example]]
-name = "dbg_rt0"
-path = "dbg_rt0.rs"
-[[example]]
-name = "dbg_phi2"
-path = "dbg_phi2.rs"
-[[example]]
-name = "dbg_elmat2"
-path = "dbg_elmat2.rs"
-[[example]]
-name = "dbg_prism"
-path = "dbg_prism.rs"
-[[example]]
-name = "dbg_prism2"
-path = "dbg_prism2.rs"
-[[example]]
-name = "dbg_prismrt0"
-path = "dbg_prismrt0.rs"
-[[example]]
-name = "dbg_signs"
-path = "dbg_signs.rs"
-[[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
 [[example]]
@@ -187,9 +160,6 @@ path = "mfem_ex40_eikonal.rs"
 name = "mfem_ex41_imex"
 path = "mfem_ex41_imex.rs"
 [[example]]
-name = "dbg_ex41_dump"
-path = "dbg_ex41_dump.rs"
-[[example]]
 name = "mfem_ex5_mixed_darcy"
 path = "mfem_ex5_mixed_darcy.rs"
 [[example]]
@@ -201,9 +171,6 @@ path = "mfem_ex7_surface_poisson.rs"
 [[example]]
 name = "mfem_ex8_dpg_2x2"
 path = "mfem_ex8_dpg_2x2.rs"
-[[example]]
-name = "mfem_ex8_hybridization"
-path = "mfem_ex8_hybridization.rs"
 [[example]]
 name = "mfem_ex9_dg_advection"
 path = "mfem_ex9_dg_advection.rs"

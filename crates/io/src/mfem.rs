@@ -397,8 +397,13 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
              &mesh_d.face_conn, &mesh_d.face_tags, &mesh_d.elem_types)
         };
     let n_nodes = coords.len() / dim;
-    let n_elems = if dim == 3 { mesh_3d.map_or(conn.len() / elem_type.nodes_per_element(), |m| m.n_elems()) }
-        else { conn.len() / elem_type.nodes_per_element() };
+    let n_elems = if dim == 3 {
+        mesh_3d.map_or(conn.len() / elem_type.nodes_per_element(), |m| m.n_elems())
+    } else if let Some(ref offsets) = mesh_d.elem_offsets {
+        offsets.len() - 1
+    } else {
+        conn.len() / elem_type.nodes_per_element()
+    };
     let n_face_elem = if dim == 3 { mesh_3d.map_or(0, |m| m.n_faces()) }
         else { face_conn.len() / 2 };
 
@@ -410,16 +415,18 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
     let npe = elem_type.nodes_per_element();
     if let Some(ref etypes) = elem_types_opt {
         // Mixed element types - use elem_offsets if available, else uniform stride
-        let m3 = mesh_3d.unwrap();
+        let offsets = if dim == 3 {
+            mesh_3d.and_then(|m| m.elem_offsets.as_ref())
+        } else {
+            mesh_d.elem_offsets.as_ref()
+        };
         for ei in 0..n_elems {
             let et = &etypes[ei];
             let code = elem_type_to_mfem_code(*et).ok_or_else(|| {
                 FemError::Mesh(format!("write_mfem: unsupported mixed type {et:?}"))
             })?;
             let npe_local = et.nodes_per_element();
-            let offset = m3.elem_offsets.as_ref()
-                .map(|offs| offs[ei])
-                .unwrap_or(ei * npe);
+            let offset = offsets.map(|offs| offs[ei]).unwrap_or(ei * npe);
             write!(writer, "{} {code}", elem_tags[ei])?;
             for j in 0..npe_local {
                 write!(writer, " {}", conn[offset + j] + 1)?;
@@ -862,6 +869,89 @@ pub fn write_gf_file(
 /// `Ordering::byNODES`, block layout: all component-0 DOFs, then component-1,
 /// …; `vdof = dof + ndofs*vd`), so the ordering line is always `0` —
 /// matching MFEM `GridFunction::Save`.
+/// Format a `f64` exactly like C's `printf("%.16g", x)` — which is what
+/// MFEM `Vector::Print` (via the default `std::ostream` `floatfield` with
+/// precision 16) produces for `GridFunction::Save`.  Used to make `.gf`
+/// output text-identical to the C++ reference.
+///
+/// Rules (matching `%.16g`): at most 16 significant digits; trailing zeros
+/// stripped; fixed notation for decimal exponent in `[-4, 16)`, scientific
+/// notation otherwise (exponent sign always present, at least two digits).
+fn c_printf_g16(x: f64) -> String {
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    if !x.is_finite() {
+        return x.to_string();
+    }
+    // 16 significant digits via scientific notation with 15 decimals.
+    let s = format!("{:.15e}", x);
+    let (mant, exp_str) = s.split_once('e').expect("scientific format");
+    let exp: i32 = exp_str.parse().expect("exponent");
+    let neg = mant.starts_with('-');
+    let digits: String = mant
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    // Strip trailing zeros like %g.
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    if (-4..16).contains(&exp) {
+        // Fixed notation: decimal point sits after digit index `exp`.
+        let mut out = String::new();
+        if neg && digits != "0" {
+            out.push('-');
+        }
+        let dot = 1 + exp; // 0-based position of the decimal point
+        if dot <= 0 {
+            out.push_str("0.");
+            for _ in 0..-dot {
+                out.push('0');
+            }
+            out.push_str(digits);
+        } else if dot as usize >= digits.len() {
+            out.push_str(digits);
+            for _ in 0..(dot as usize - digits.len()) {
+                out.push('0');
+            }
+        } else {
+            out.push_str(&digits[..dot as usize]);
+            out.push('.');
+            out.push_str(&digits[dot as usize..]);
+        }
+        out
+    } else {
+        // Scientific notation, exponent with sign and ≥ 2 digits.
+        let mut m = digits.to_string();
+        if m.len() > 1 {
+            m.insert(1, '.');
+        }
+        let sign = if exp >= 0 { "+" } else { "-" };
+        let e = format!("{}{:02}", sign, exp.abs());
+        format!("{}{}e{}", if neg { "-" } else { "" }, m, e)
+    }
+}
+
+/// Write a `.gf` file in MFEM's native FiniteElementSpace format.
+///
+/// Produces files compatible with GLVis (`glvis -m mesh.mesh -g sol.gf`).
+/// The format matches MFEM's `GridFunction::Save(std::ostream &)` output:
+///
+/// ```text
+/// FiniteElementSpace
+/// FiniteElementCollection: H1_<dim>D_P<order>
+/// VDim: <vdim>
+/// Ordering: <ordering>
+/// <value 1>
+/// <value 2>
+/// ...
+/// ```
+///
+/// `precision` controls the value formatting:
+/// - `precision >= 16`: `printf("%.16g")` style (16 significant digits,
+///   defaultfloat) — text-identical to MFEM `Vector::Print` at precision 16.
+/// - `precision < 16`: `{:.prec$e}` scientific notation with `precision`
+///   significant digits.
 pub fn write_mfem_gf_file(
     path: impl AsRef<std::path::Path>,
     dim: usize, dofs: &[f64],
@@ -880,7 +970,11 @@ pub fn write_mfem_gf_file(
     // (e.g. prec=7 gives 8 sf: "4.2830810e+01" for value 42.83081)
     let sig_digits = precision.saturating_sub(1).max(0);
     for v in dofs {
-        writeln!(file, "{:.prec$e}", v, prec = sig_digits)?;
+        if precision >= 16 {
+            writeln!(file, "{}", c_printf_g16(*v))?;
+        } else {
+            writeln!(file, "{:.prec$e}", v, prec = sig_digits)?;
+        }
     }
     Ok(())
 }

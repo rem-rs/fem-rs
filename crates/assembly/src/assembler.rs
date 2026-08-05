@@ -121,9 +121,10 @@ pub(crate) fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn Refe
     if elem_type == ElementType::Quad4 {
         match order {
             0 => Box::new(P0),
-            1 => Box::new(fem_element::lagrange::QuadQk::new_lex(1)),
-            2 => Box::new(fem_element::lagrange::QuadQk::new_lex(2)),
-            o => Box::new(fem_element::lagrange::QuadQk::new_lex(o as usize)),
+            // MFEM L2_FECollection uses Gauss-Legendre tensor-product basis
+            // (BasisType::GaussLegendre), NOT the GLL basis of H1.  QuadL2GL
+            // reproduces it bit-identically on [0,1]² with lexicographic DOFs.
+            o => Box::new(fem_element::lagrange::QuadL2GL::new(o as usize)),
         }
     } else {
         ref_elem_vol(elem_type, order)

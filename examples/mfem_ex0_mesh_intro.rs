@@ -1,27 +1,24 @@
-//! # Example 0 — Mesh introduction + Poisson (analogous to MFEM ex0)
+//! # Example 0 — Mesh introduction + Poisson (1:1 with MFEM ex0)
 //!
-//! Demonstrates the most basic usage of fem-rs: load an MFEM-format mesh, apply
-//! one uniform refinement, define an H¹ finite element space, assemble and solve
-//! −Δu = 1 with zero Dirichlet BCs, then write output for visualization (VTK + MFEM).
+//! Loads an MFEM-format mesh, applies one uniform refinement, defines an H¹
+//! finite element space, assembles and solves −Δu = 1 with zero Dirichlet BCs,
+//! then saves the solution (`sol.gf`) and mesh (`mesh.mesh`) like MFEM ex0.
 //!
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_ex0_mesh_intro
 //! cargo run --example mfem_ex0_mesh_intro -- -m ../data/star.mesh
 //! cargo run --example mfem_ex0_mesh_intro -- -m ../data/star.mesh -o 2
-//! cargo run --example mfem_ex0_mesh_intro -- -m ../data/square-disc.mesh --glvis
 //! ```
 //!
-//! When no `-m` is given, a default unit-square triangulation is used.
-//! With `--glvis`, a running GLVis server (default `localhost:19916`) will
-//! display the result in real-time.
+//! Default mesh is `data/star.mesh` (same as MFEM's `../data/star.mesh`).
 
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
 use fem_mesh::{refine_uniform, Mesh};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{solve_pcg_gssmoother, SolverConfig};
 use fem_space::{
     H1Space,
     fe_space::FESpace,
@@ -30,35 +27,26 @@ use fem_space::{
 
 fn main() {
     let args = parse_args();
-    println!("=== fem-rs Example 0: Mesh intro + Poisson (MFEM ex0) ===");
 
-    // 1. Load mesh from an MFEM .mesh file, or generate a default unit square.
+    // 1. Load the mesh (MFEM ex0 default: ../data/star.mesh).
     let mesh = if let Some(ref path) = args.mesh_file {
         let mfem = fem_io::mfem::read_mfem_file(path).unwrap_or_else(|e| {
             panic!("Failed to read MFEM mesh '{}': {}", path, e)
         });
         mfem.mesh2d.expect("only 2-D meshes are supported in this example")
     } else {
-        Mesh::<2>::unit_square_tri(16)
+        let mfem = fem_io::mfem::read_mfem_file("data/star.mesh")
+            .expect("failed to read default mesh data/star.mesh");
+        mfem.mesh2d.expect("star.mesh must be a 2-D mesh")
     };
-    println!(
-        "  Mesh: {} nodes, {} elements",
-        mesh.n_nodes(),
-        mesh.n_elems(),
-    );
 
     // 2. Uniform refinement (matches MFEM ex0's `mesh.UniformRefinement()`).
     let mesh = refine_uniform(&mesh);
-    println!(
-        "  After refinement: {} nodes, {} elements",
-        mesh.n_nodes(),
-        mesh.n_elems(),
-    );
 
     // 3. H¹ finite element space.
     let space = H1Space::new(mesh, args.order);
     let n_dofs = space.n_dofs();
-    println!("  Number of unknowns: {}", n_dofs);
+    println!("Number of unknowns: {}", n_dofs);
 
     // 4. Assemble stiffness matrix: ∫∇u·∇v
     let mat = Assembler::assemble_bilinear(
@@ -79,58 +67,34 @@ fn main() {
     let mut mat = mat;
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
-    // 7. Solve with PCG + Jacobi preconditioner.
+    // 7. Solve with PCG + GSSmoother (MFEM ex0: GSSmoother M(A); PCG(A, M, B, X,
+    //    1, 200, 1e-12, 0.0) — print_level=1, max_iter=200, rtol=1e-12, atol=0).
     let mut u = vec![0.0_f64; n_dofs];
     let cfg = SolverConfig {
         rtol: 1e-12,
         atol: 0.0,
-        max_iter: 5_000,
-        verbose: false,
+        max_iter: 200,
+        verbose: true,
         ..SolverConfig::default()
     };
-    let res = solve_pcg_jacobi(&mat, &rhs, &mut u, &cfg).expect("solver failed");
-    println!(
-        "  Solve: {} iters, residual = {:.3e}, converged = {}",
-        res.iterations, res.final_residual, res.converged,
-    );
+    let res = solve_pcg_gssmoother(&mat, &rhs, &mut u, &cfg).expect("solver failed");
+    let _ = res;
 
-    // 8. Write VTK output for external visualization (e.g. ParaView).
-    let fname = "ex0_solution.vtu";
-    let mut w = fem_io::VtkWriter::new(space.mesh());
-    w.add_point_data(fem_io::DataArray::scalars("u", u.clone()));
-    w.write_file(fname).expect("write VTK");
-    println!("  Wrote: {}", fname);
-
-    // Also write MFEM-format output (mesh + grid function), matching ex0.
-    fem_io::mfem::write_mfem_file("ex0_mesh.mesh", space.mesh()).ok();
-    fem_io::mfem::write_gf_file("ex0_solution.gf", 2, &u, "H1", args.order, 1).ok();
-    println!("  Wrote: ex0_mesh.mesh, ex0_solution.gf");
-
-    // 9. Optional GLVis visualization.
-    if args.glvis {
-        match fem_io::glvis::GlVisSocket::connect("localhost", 19916) {
-            Ok(mut vis) => {
-                vis.send_solution_2d(space.mesh(), &u, "u").ok();
-                println!("  Sent to GLVis (localhost:19916)");
-            }
-            Err(e) => println!("  GLVis not available: {}", e),
-        }
-    }
-
-    println!("Done.");
+    // 8. Save MFEM-format output, matching MFEM ex0: sol.gf and mesh.mesh.
+    fem_io::mfem::write_mfem_file("mesh.mesh", space.mesh()).ok();
+    // precision 16 → printf("%.16g") style, text-identical to MFEM Vector::Print
+    fem_io::mfem::write_mfem_gf_file("sol.gf", 2, &u, "H1", args.order, 1, 16).ok();
 }
 
 struct Args {
     mesh_file: Option<String>,
     order: u8,
-    glvis: bool,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
         mesh_file: None,
         order: 1,
-        glvis: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -142,7 +106,6 @@ fn parse_args() -> Args {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1)
             }
-            "--glvis" | "-g" => a.glvis = true,
             _ => {}
         }
     }
@@ -162,7 +125,7 @@ mod tests {
     use fem_element::ReferenceElement;
     use fem_mesh::topology::MeshTopology;
     use fem_mesh::Mesh;
-    use fem_solver::{solve_pcg_jacobi, SolverConfig};
+    use fem_solver::{solve_cg, SolverConfig};
     use fem_space::constraints::{apply_dirichlet, boundary_dofs};
     use fem_space::fe_space::FESpace;
     use fem_space::H1Space;

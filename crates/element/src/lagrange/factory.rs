@@ -1251,10 +1251,11 @@ impl QuadL2GL {
             .collect()
     }
 
-    /// Tensor-product DOF ordering: dof = ix*(p+1) + iy (x varies slowest,
-    /// matching MFEM's L2 tensor order and bit-identical summation).
+    /// Tensor-product DOF ordering: dof = iy*(p+1) + ix (x varies fastest,
+    /// matching MFEM's L2 tensor order `for (j) for (i) shape(o++) = sx(i)*sy(j)`
+    /// and bit-identical summation).
     fn node_to_dof(&self, ix: usize, iy: usize) -> usize {
-        ix * (self.order + 1) + iy
+        iy * (self.order + 1) + ix
     }
 
     fn all_dof_coords(&self) -> Vec<[f64; 2]> {
