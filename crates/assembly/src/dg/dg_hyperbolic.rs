@@ -183,7 +183,9 @@ pub struct DgHyperbolicConservationLaws {
     dim: usize,
     total_dofs: usize,
     invmass: Vec<na::DMatrix<f64>>,
-    #[allow(dead_code)]
+    /// Preassembled weak divergence ∫φ_i·∇φ_j (trial space ByDim layout:
+    /// column j*dim+d). Used by `mult` when `preassemble_weakdiv` is set
+    /// (MFEM ex18.hpp ComputeWeakDivergence / AddMult_a_ABt path).
     weakdiv: Vec<na::DMatrix<f64>>,
     ref_elem: Box<dyn ReferenceElement>,
     elem_shape: ElemShape,
@@ -834,76 +836,110 @@ impl DgHyperbolicConservationLaws {
             }
         }
 
-        // 4. Volume term: direct quadrature (Form 2: +∫ F·∇v)
+        // 4. Volume term (Form 2: +∫ F·∇v).
         if self.preassemble_weakdiv {
-        //    Interpolate u to QP, compute flux F(u_qp), dot with∇φ_i.
-        let q_order = 2 * self.ref_elem.order();
-        let qr = self.ref_elem.quadrature(q_order);
-        let n_vol_qp = qr.n_points();
-        let mut phi = vec![0.0; dp];
-        let mut gphi = vec![0.0; dp * dim];
-        let mut state_qp = vec![0.0; nq];
-        let mut flux_qp = vec![0.0; nq * dim];
-        for e in 0..self.n_elems {
-            let base = e * dp * nq;
-            let det_j = self.elem_det_j[e];
-            // Precompute physical gradients of all test functions at each QP
-            // ∇x_φ_i(q) = J_e^{-T} · ∇ξ_φ_i(q)
-            let (_, jit) = match self.elem_shape {
-                ElemShape::Tri => {
-                    let en = &self.mesh_elem_nodes[e];
-                    let p0 = &self.mesh_node_coords[en[0] as usize];
-                    let p1 = &self.mesh_node_coords[en[1] as usize];
-                    let p2 = &self.mesh_node_coords[en[2] as usize];
-                    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
-                    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
-                    let det = j11 * j22 - j12 * j21;
-                    let inv_det = 1.0 / det;
-                    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
-                }
-                // Quad: use the full 4-node isoparametric Jacobian.  The old
-                // code built J from only (p0,p1,p2) — for a quad the η
-                // direction is p3−p0, NOT p2−p0 (p2 is the opposite corner),
-                // which corrupted det(J) and produced NaN in ex18's volume
-                // term on quad meshes.
-                ElemShape::Quad => {
-                    let en = &self.mesh_elem_nodes[e];
-                    let p: [[f64; 2]; 4] = [
-                        self.mesh_node_coords[en[0] as usize],
-                        self.mesh_node_coords[en[1] as usize],
-                        self.mesh_node_coords[en[2] as usize],
-                        self.mesh_node_coords[en[3] as usize],
-                    ];
-                    quad4_jac_at_qp(&p, 0.0, 0.0)
-                }
-            };
-            for q in 0..n_vol_qp {
-                let xi = &qr.points[q];
-                let w = qr.weights[q] * det_j;
-                self.ref_elem.eval_basis(xi, &mut phi);
-                // Interpolate u to QP
-                state_qp.fill(0.0);
-                for eq in 0..nq {
-                    for i in 0..dp {
-                        state_qp[eq] += phi[i] * u[base + i * nq + eq];
-                    }
-                }
-                // Compute physical flux at QP
-                self.flux.compute_flux(&state_qp, &[0.0, 0.0], &mut flux_qp);
-                // Evaluate physical gradient of test functions at this QP
-                self.ref_elem.eval_grad_basis(xi, &mut gphi);
-                for i in 0..dp {
-                    // ∇x_φ_i = J^{-T} · ∇ξ_φ_i
-                    let gx = jit[0] * gphi[i * dim] + jit[1] * gphi[i * dim + 1];
-                    let gy = jit[2] * gphi[i * dim] + jit[3] * gphi[i * dim + 1];
-                    // z[e,i,eq] += w * |detJ| * (F_x * gx + F_y * gy)
+            // Preassembled weak divergence × node flux — MFEM
+            // DGHyperbolicConservationLaws::Mult weakdiv path
+            // (ex18.hpp ComputeWeakDivergence): F(u) is evaluated at each
+            // DOF *node* j, then contracted with the preassembled
+            // ∫φ_i·∇φ_j matrix (trial space ByDim):
+            //   z(r, eq) += Σ_j Σ_d weakdiv[r, j*dim+d] · F(u_j)[eq, d]
+            // (cf. mfem::AddMult_a_ABt(1.0, weakdiv[i], flux, current_zmat)).
+            // For nonlinear fluxes this is NOT equivalent to quadrature of
+            // F(u(x_q)) — on periodic meshes the per-QP form fails to cancel
+            // against the face fluxes and goes NaN.
+            let mut flux_node = vec![0.0; nq * dim];
+            for e in 0..self.n_elems {
+                let base = e * dp * nq;
+                let wd = &self.weakdiv[e];
+                let mut state = vec![0.0; nq];
+                for j in 0..dp {
                     for eq in 0..nq {
-                        z[base + i * nq + eq] += w * (flux_qp[eq*dim] * gx + flux_qp[eq*dim+1] * gy);
+                        state[eq] = u[base + j * nq + eq];
+                    }
+                    self.flux.compute_flux(&state, &[0.0, 0.0], &mut flux_node);
+                    for eq in 0..nq {
+                        for d in 0..dim {
+                            let f = flux_node[eq * dim + d];
+                            if f != 0.0 {
+                                let col = j * dim + d;
+                                for r in 0..dp {
+                                    z[base + r * nq + eq] += f * wd[(r, col)];
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-
+        } else {
+            // Matrix-free fallback (MFEM non-preassembled path): direct
+            // quadrature of F(u(x_q))·∇φ_i.
+            let q_order = 2 * self.ref_elem.order();
+            let qr = self.ref_elem.quadrature(q_order);
+            let n_vol_qp = qr.n_points();
+            let mut phi = vec![0.0; dp];
+            let mut gphi = vec![0.0; dp * dim];
+            let mut state_qp = vec![0.0; nq];
+            let mut flux_qp = vec![0.0; nq * dim];
+            for e in 0..self.n_elems {
+                let base = e * dp * nq;
+                let det_j = self.elem_det_j[e];
+                // Precompute physical gradients of all test functions at each QP
+                // ∇x_φ_i(q) = J_e^{-T} · ∇ξ_φ_i(q)
+                let (_, jit) = match self.elem_shape {
+                    ElemShape::Tri => {
+                        let en = &self.mesh_elem_nodes[e];
+                        let p0 = &self.mesh_node_coords[en[0] as usize];
+                        let p1 = &self.mesh_node_coords[en[1] as usize];
+                        let p2 = &self.mesh_node_coords[en[2] as usize];
+                        let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+                        let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+                        let det = j11 * j22 - j12 * j21;
+                        let inv_det = 1.0 / det;
+                        (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+                    }
+                    // Quad: use the full 4-node isoparametric Jacobian.  The old
+                    // code built J from only (p0,p1,p2) — for a quad the η
+                    // direction is p3−p0, NOT p2−p0 (p2 is the opposite corner),
+                    // which corrupted det(J) and produced NaN in ex18's volume
+                    // term on quad meshes.
+                    ElemShape::Quad => {
+                        let en = &self.mesh_elem_nodes[e];
+                        let p: [[f64; 2]; 4] = [
+                            self.mesh_node_coords[en[0] as usize],
+                            self.mesh_node_coords[en[1] as usize],
+                            self.mesh_node_coords[en[2] as usize],
+                            self.mesh_node_coords[en[3] as usize],
+                        ];
+                        quad4_jac_at_qp(&p, 0.0, 0.0)
+                    }
+                };
+                for q in 0..n_vol_qp {
+                    let xi = &qr.points[q];
+                    let w = qr.weights[q] * det_j;
+                    self.ref_elem.eval_basis(xi, &mut phi);
+                    // Interpolate u to QP
+                    state_qp.fill(0.0);
+                    for eq in 0..nq {
+                        for i in 0..dp {
+                            state_qp[eq] += phi[i] * u[base + i * nq + eq];
+                        }
+                    }
+                    // Compute physical flux at QP
+                    self.flux.compute_flux(&state_qp, &[0.0, 0.0], &mut flux_qp);
+                    // Evaluate physical gradient of test functions at this QP
+                    self.ref_elem.eval_grad_basis(xi, &mut gphi);
+                    for i in 0..dp {
+                        // ∇x_φ_i = J^{-T} · ∇ξ_φ_i
+                        let gx = jit[0] * gphi[i * dim] + jit[1] * gphi[i * dim + 1];
+                        let gy = jit[2] * gphi[i * dim] + jit[3] * gphi[i * dim + 1];
+                        // z[e,i,eq] += w * |detJ| * (F_x * gx + F_y * gy)
+                        for eq in 0..nq {
+                            z[base + i * nq + eq] += w * (flux_qp[eq*dim] * gx + flux_qp[eq*dim+1] * gy);
+                        }
+                    }
+                }
+            }
         }
 
         // 5. Apply inverse mass matrix

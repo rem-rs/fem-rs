@@ -19,19 +19,33 @@
 //! ## Reference
 //! MFEM ex18.cpp + ex18.hpp — DG hyperbolic conservation laws.
 
-use fem_assembly::dg::{DgHyperbolicConservationLaws, EulerFlux, RusanovFlux, FluxFunction};
+use fem_assembly::dg::{DgHyperbolicConservationLaws, EulerFlux, RusanovFlux};
+use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
+use fem_element::lagrange::QuadL2GL;
 use fem_element::reference::ReferenceElement;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
+use fem_mesh::element_type::ElementType;
 use fem_mesh::refine_uniform;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::ode::explicit::{ForwardEuler, Rk4};
 use fem_solver::ode::traits::TimeStepper;
-use nalgebra as na;
 
 // ─── make_ref_elem (redefined locally since the one in dg_hyperbolic is private) ─
-
+// Must mirror dg_hyperbolic.rs::make_ref_elem: MFEM DG_FECollection(order,
+// dim, BasisType::GaussLegendre) uses the Gauss-Legendre nodal basis on
+// [0,1]² — NOT the equally spaced QuadQk.  Mismatched DOF nodes make the
+// initial projection and error evaluation land on the wrong physical points.
 fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> Box<dyn ReferenceElement> {
-    mesh.element_type(0).ref_elem(order)
+    if mesh.element_type(0) == ElementType::Quad4 {
+        Box::new(QuadL2GL::new(order as usize))
+    } else {
+        match order {
+            1 => Box::new(TriP1),
+            2 => Box::new(TriP2),
+            3 => Box::new(TriP3),
+            _ => Box::new(TriP1),
+        }
+    }
 }
 
 // ─── CLI Args (C++ ex18.cpp:65-83 — matching MFEM ex18 options) ──────────────
@@ -184,10 +198,16 @@ fn euler_initial_condition(problem: i32, x: &[f64], gamma: f64) -> Vec<f64> {
 fn compute_h_min(mesh: &dyn MeshTopology) -> f64 {
     let mut h = f64::MAX;
     for e in 0..mesh.n_elements() as u32 {
-        let nodes = mesh.element_nodes(e);
-        let p0 = mesh.node_coords(nodes[0]);
-        let p1 = mesh.node_coords(nodes[1]);
-        let p2 = mesh.node_coords(nodes[2]);
+        // Per-element geometry (MFEM GetElementSize uses the element
+        // transformation; for periodic meshes the folded vertices are wrong).
+        let g: Vec<[f64; 2]> = mesh.geometry_nodes(e)
+            .iter()
+            .map(|n| {
+                let c = mesh.geom_coords_of(*n);
+                [c[0], c[1]]
+            })
+            .collect();
+        let (p0, p1, p2) = (g[0], g[1], g[2]);
         let d01 = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
         let d12 = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
         let d20 = ((p0[0] - p2[0]).powi(2) + (p0[1] - p2[1]).powi(2)).sqrt();
@@ -204,100 +224,42 @@ fn project_initial<F: Fn(&[f64]) -> Vec<f64>>(
     order: u8,
     n_eq: usize,
 ) -> Vec<f64> {
+    // MFEM GridFunction::ProjectCoefficient → FiniteElement::Project:
+    // evaluate u0 at each DOF node (Gauss-Legendre nodes for L2 spaces) —
+    // NOT an L² projection.
     let ref_elem = make_ref_elem(mesh, order);
     let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
     let n_elems = mesh.n_elements();
-    let total = n_elems * dp * n_eq;
-    let mut u = vec![0.0; total];
-
-    let q_order = 2 * order;
-    let qr = ref_elem.quadrature(q_order);
-    let n_qp = qr.n_points();
-    let mut phi = vec![0.0; dp];
+    let mut u = vec![0.0; n_elems * dp * n_eq];
+    let dof_ref = ref_elem.dof_coords(); // [dof][dim], [0,1]² domain
 
     for e in 0..n_elems {
-        let enodes = mesh.element_nodes(e as u32);
-        // Jacobian at QP (Tri3: constant; Quad4: varies per QP)
+        let pg: Vec<[f64; 2]> = mesh.geometry_nodes(e as u32)
+            .iter()
+            .map(|n| {
+                let c = mesh.geom_coords_of(*n);
+                [c[0], c[1]]
+            })
+            .collect();
         let base = e * dp * n_eq;
-
-        // Assemble mass matrix
-        let mut m = na::DMatrix::<f64>::zeros(dp, dp);
-        for q in 0..n_qp {
-            let xi = &qr.points[q];
-            let det_j = if is_quad {
-                // Quad4: bilinear mapping Jacobian at (ξ, η)
-                let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
-                let p = [cn(0), cn(1), cn(2), cn(3)];
-                let (xi_q, eta_q) = (xi[0], xi[1]);
-                let dxi = [-(1.0-eta_q), (1.0-eta_q), (1.0+eta_q), -(1.0+eta_q)];
-                let deta = [-(1.0-xi_q), -(1.0+xi_q), (1.0+xi_q), (1.0-xi_q)];
-                let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
-                let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
-                let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
-                let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
-                (j11*j22 - j12*j21).abs()
+        for i in 0..dp {
+            let (xi, eta) = (dof_ref[i][0], dof_ref[i][1]);
+            let (px, py) = if is_quad {
+                // [0,1]² Q1 mapping (QuadL2GL reference domain), matching the
+                // operator's geometry — NOT the [-1,1]² bilinear form.
+                let p = [pg[0], pg[1], pg[2], pg[3]];
+                let n = [(1.0-xi)*(1.0-eta), xi*(1.0-eta), xi*eta, (1.0-xi)*eta];
+                (n[0]*p[0][0]+n[1]*p[1][0]+n[2]*p[2][0]+n[3]*p[3][0],
+                 n[0]*p[0][1]+n[1]*p[1][1]+n[2]*p[2][1]+n[3]*p[3][1])
             } else {
-                let p0 = mesh.node_coords(enodes[0]);
-                let p1 = mesh.node_coords(enodes[1]);
-                let p2 = mesh.node_coords(enodes[2]);
-                ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])).abs()
+                let p0 = pg[0]; let p1 = pg[1]; let p2 = pg[2];
+                (p0[0] + xi*(p1[0]-p0[0]) + eta*(p2[0]-p0[0]),
+                 p0[1] + xi*(p1[1]-p0[1]) + eta*(p2[1]-p0[1]))
             };
-            let w = qr.weights[q] * det_j;
-            ref_elem.eval_basis(xi, &mut phi);
-            for i in 0..dp {
-                for j in 0..dp {
-                    m[(i, j)] += w * phi[i] * phi[j];
-                }
-            }
-        }
-        let inv_m = m.cholesky().expect("Mass matrix must be SPD").inverse();
-
-        // For each equation, project
-        for eq in 0..n_eq {
-            let mut rhs = na::DVector::<f64>::zeros(dp);
-            for q in 0..n_qp {
-                let xi = &qr.points[q];
-                let det_j_q = if is_quad {
-                    let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
-                    let p = [cn(0), cn(1), cn(2), cn(3)];
-                    let (xi_q, eta_q) = (xi[0], xi[1]);
-                    let dxi = [-(1.0-eta_q), (1.0-eta_q), (1.0+eta_q), -(1.0+eta_q)];
-                    let deta = [-(1.0-xi_q), -(1.0+xi_q), (1.0+xi_q), (1.0-xi_q)];
-                    let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
-                    let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
-                    let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
-                    let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
-                    (j11*j22 - j12*j21).abs()
-                } else {
-                    let p0 = mesh.node_coords(enodes[0]);
-                    let p1 = mesh.node_coords(enodes[1]);
-                    let p2 = mesh.node_coords(enodes[2]);
-                    ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs()
-                };
-                let w = qr.weights[q] * det_j_q;
-                let (px, py) = if is_quad {
-                    let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
-                    let p = [cn(0), cn(1), cn(2), cn(3)];
-                    let (xi_q, eta_q) = (xi[0], xi[1]);
-                    let n = [(1.0-xi_q)*(1.0-eta_q)/4.0, (1.0+xi_q)*(1.0-eta_q)/4.0,
-                             (1.0+xi_q)*(1.0+eta_q)/4.0, (1.0-xi_q)*(1.0+eta_q)/4.0];
-                    (n[0]*p[0][0]+n[1]*p[1][0]+n[2]*p[2][0]+n[3]*p[3][0],
-                     n[0]*p[0][1]+n[1]*p[1][1]+n[2]*p[2][1]+n[3]*p[3][1])
-                } else {
-                    (mesh.node_coords(enodes[0])[0] + xi[0]*(mesh.node_coords(enodes[1])[0]-mesh.node_coords(enodes[0])[0]) + xi[1]*(mesh.node_coords(enodes[2])[0]-mesh.node_coords(enodes[0])[0]),
-                     mesh.node_coords(enodes[0])[1] + xi[0]*(mesh.node_coords(enodes[1])[1]-mesh.node_coords(enodes[0])[1]) + xi[1]*(mesh.node_coords(enodes[2])[1]-mesh.node_coords(enodes[0])[1]))
-                };
-                let u0_vals = u0(&[px, py]);
-                ref_elem.eval_basis(xi, &mut phi);
-                for i in 0..dp {
-                    rhs[i] += w * phi[i] * u0_vals[eq];
-                }
-            }
-            let sol = &inv_m * rhs;
-            // Store in DOF-major layout: base + i*n_eq + eq
-            for i in 0..dp {
-                u[base + i * n_eq + eq] = sol[i];
+            let uv = u0(&[px, py]);
+            for eq in 0..n_eq {
+                u[base + i * n_eq + eq] = uv[eq];
             }
         }
     }
@@ -322,30 +284,34 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     let mut err_sq = 0.0;
 
     for e in 0..mesh.n_elements() {
-        let enodes = mesh.element_nodes(e as u32);
         let base = e * dp * n_eq;
+        let pg: Vec<[f64; 2]> = mesh.geometry_nodes(e as u32)
+            .iter()
+            .map(|n| {
+                let c = mesh.geom_coords_of(*n);
+                [c[0], c[1]]
+            })
+            .collect();
 
         for q in 0..qr.n_points() {
             let xi = &qr.points[q];
             let (det_j, px, py) = if is_quad {
-                let cn = |i: u32| { let c = mesh.node_coords(enodes[i as usize]); [c[0], c[1]] };
-                let p = [cn(0), cn(1), cn(2), cn(3)];
-                let (xq, yq) = (xi[0], xi[1]);
-                let dxi = [-(1.0-yq), (1.0-yq), (1.0+yq), -(1.0+yq)];
-                let deta = [-(1.0-xq), -(1.0+xq), (1.0+xq), (1.0-xq)];
-                let j11 = (dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0])/4.0;
-                let j12 = (deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0])/4.0;
-                let j21 = (dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1])/4.0;
-                let j22 = (deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1])/4.0;
+                let p = [pg[0], pg[1], pg[2], pg[3]];
+                let (xs, ys) = (xi[0], xi[1]);
+                // [0,1]² Q1 mapping (QuadL2GL reference domain), matching
+                // the operator's geometry — NOT the [-1,1]² bilinear form.
+                let dxi = [-(1.0-ys), (1.0-ys), ys, -ys];
+                let deta = [-(1.0-xs), -xs, xs, (1.0-xs)];
+                let j11 = dxi[0]*p[0][0]+dxi[1]*p[1][0]+dxi[2]*p[2][0]+dxi[3]*p[3][0];
+                let j12 = deta[0]*p[0][0]+deta[1]*p[1][0]+deta[2]*p[2][0]+deta[3]*p[3][0];
+                let j21 = dxi[0]*p[0][1]+dxi[1]*p[1][1]+dxi[2]*p[2][1]+dxi[3]*p[3][1];
+                let j22 = deta[0]*p[0][1]+deta[1]*p[1][1]+deta[2]*p[2][1]+deta[3]*p[3][1];
                 let det = (j11*j22 - j12*j21).abs();
-                let n = [(1.0-xq)*(1.0-yq)/4.0, (1.0+xq)*(1.0-yq)/4.0,
-                         (1.0+xq)*(1.0+yq)/4.0, (1.0-xq)*(1.0+yq)/4.0];
+                let n = [(1.0-xs)*(1.0-ys), xs*(1.0-ys), xs*ys, (1.0-xs)*ys];
                 (det, n[0]*p[0][0]+n[1]*p[1][0]+n[2]*p[2][0]+n[3]*p[3][0],
                       n[0]*p[0][1]+n[1]*p[1][1]+n[2]*p[2][1]+n[3]*p[3][1])
             } else {
-                let p0 = mesh.node_coords(enodes[0]);
-                let p1 = mesh.node_coords(enodes[1]);
-                let p2 = mesh.node_coords(enodes[2]);
+                let p0 = pg[0]; let p1 = pg[1]; let p2 = pg[2];
                 let det = ((p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])).abs();
                 (det, p0[0] + xi[0]*(p1[0]-p0[0]) + xi[1]*(p2[0]-p0[0]),
                       p0[1] + xi[0]*(p1[1]-p0[1]) + xi[1]*(p2[1]-p0[1]))
@@ -484,10 +450,10 @@ fn main() {
     println!("  --> saved initial mesh + solution files");
 
     // CFL or fixed dt
-    let dt = if args.dt > 0.0 {
+    let h_min = compute_h_min(&mesh);
+    let mut dt = if args.dt > 0.0 {
         args.dt
     } else {
-        let h_min = compute_h_min(&mesh);
         let mut tmp = vec![0.0; n_dofs];
         euler_op.mult(&sol, &mut tmp);
         let max_cs = euler_op.max_char_speed();
@@ -498,12 +464,14 @@ fn main() {
         );
         cfl_dt
     };
-    let n_steps = (args.t_final / dt).ceil() as usize;
-    println!("  steps: {}, dt: {:.6e}", n_steps, dt);
+    println!("  initial dt: {:.6e}", dt);
 
-    // C++ ex18.cpp:175-182 — 4. Time integration (SSP-RK3, FE, SSP-RK2, RK4)
+    // C++ ex18.cpp:238-256 — 4. Time integration.  With CFL the time step is
+    // re-computed after every step from the maximum characteristic speed
+    // (ex18.cpp:249-252) — a fixed dt can de-stabilise RK4 on periodic meshes.
     let mut t = 0.0;
-    for ti in 1..=n_steps {
+    let mut ti = 0usize;
+    loop {
         let dta = dt.min(args.t_final - t);
         let rhs = |_: f64, u: &[f64], dudt: &mut [f64]| euler_op.mult(u, dudt);
         match args.ode_solver {
@@ -513,10 +481,20 @@ fn main() {
             _ => Rk4.step(t, dta, &mut sol, &rhs),
         }
         t += dta;
-        if ti % args.vis_steps == 0 || ti == n_steps {
+        ti += 1;
+        if args.dt <= 0.0 {
+            // CFL: update dt from the latest max characteristic speed
+            let max_cs = euler_op.max_char_speed();
+            dt = args.cfl * h_min / max_cs / (2.0 * order as f64 + 1.0);
+        }
+        if t >= args.t_final - 1e-8 * dt {
+            break;
+        }
+        if ti % args.vis_steps == 0 {
             println!("time step: {:6}, time: {:.6e}", ti, t);
         }
     }
+    println!("time step: {:6}, time: {:.6e}", ti, t);
 
     // MFEM: mesh->Print(ofs)
     write_mfem_file("euler-mesh-final.mesh", &mesh)
