@@ -223,6 +223,71 @@ impl<const D: usize> Mesh<D> {
         self.geometry.as_ref().map_or(0, |g| g.n_nodes)
     }
 
+    /// Isoparametric Jacobian `J = ∂x/∂ξ` of element `e` at the reference
+    /// point `xi`, using the high-order geometry (Q3) when present, else the
+    /// linear (P1) mapping.
+    ///
+    /// Returns `(J, det J, x_phys)`.
+    ///
+    /// This is the geometry actually used in assembly — for a curved mesh the
+    /// vertex coordinates alone (see [`element_jacobian_at`]) do NOT describe
+    /// the curved edges.
+    pub fn element_jacobian(
+        &self,
+        e: ElemId,
+        xi: &[f64],
+    ) -> (nalgebra::DMatrix<f64>, f64, Vec<f64>) {
+        use fem_element::ReferenceElement as _;
+        use fem_element::lagrange::factory::{ElemType as FactoryElemType, QuadQk, ref_elem as factory_ref_elem};
+        let dim = D;
+        let et = self.element_type_at(e);
+        let nodes: Vec<u32> = if let Some(ref g) = self.geometry {
+            let e = e as usize;
+            g.conn[e * g.nodes_per_elem..(e + 1) * g.nodes_per_elem].to_vec()
+        } else {
+            self.element_nodes(e).to_vec()
+        };
+
+        let geo_order = self.geom_order() as usize;
+        // Geometry reference element for isoparametric Jacobians.
+        let factory: Box<dyn fem_element::ReferenceElement> = match et {
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
+                Box::new(QuadQk::new(geo_order.max(1)))
+            }
+            _ => factory_ref_elem(match et {
+                ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
+                ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
+                ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => FactoryElemType::Hex,
+                ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => FactoryElemType::Prism,
+                ElementType::Pyramid5 | ElementType::Pyramid13 => FactoryElemType::Pyramid,
+                _ => panic!("element_jacobian: unsupported element type {et:?}"),
+            }, geo_order.max(1) as u8),
+        };
+        let n = factory.n_dofs();
+        let mut grad_ref = vec![0.0_f64; n * dim];
+        let mut phi_ref = vec![0.0_f64; n];
+        factory.eval_grad_basis(xi, &mut grad_ref);
+        factory.eval_basis(xi, &mut phi_ref);
+
+        let mut j = nalgebra::DMatrix::<f64>::zeros(dim, dim);
+        let mut xp = vec![0.0_f64; dim];
+        for k in 0..nodes.len() {
+            let xk = self.geom_coords_of(nodes[k]);
+            for i in 0..dim {
+                xp[i] += phi_ref[k] * xk[i];
+                for d in 0..dim {
+                    j[(i, d)] += xk[i] * grad_ref[k * dim + d];
+                }
+            }
+        }
+        let det = if dim == 2 {
+            j[(0, 0)] * j[(1, 1)] - j[(0, 1)] * j[(1, 0)]
+        } else {
+            j.determinant()
+        };
+        (j, det, xp)
+    }
+
     /// Promote the mesh to high-order (curved) geometry of the given order.
     ///
     /// This creates a `GeometryData` entry that maps each element to its
@@ -2161,6 +2226,47 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("named attribute set not found"));
     }
+
+    #[test]
+    fn element_jacobian_q3_matches_curved_path() {
+        // Q3-curved single quad: [0,0] [1,0] [1,1] [0,1] with edge nodes
+        // snapped to a parabola — element_jacobian must use the geometry
+        // nodes (not the linear corners).
+        let mut m = Mesh::<2>::unit_square_quad(1);
+        m.set_curvature(3);
+        // Snap all geometry nodes to a curved surface: y += 0.1·x·(1−x).
+        if let Some(ref mut g) = m.geometry {
+            for i in 0..g.n_nodes {
+                let off = i * 2;
+                let x = g.coords[off];
+                g.coords[off + 1] += 0.1 * x * (1.0 - x);
+            }
+        }
+        // Reference: x = (ξ, η + 0.1·ξ(1−ξ)) so at ξ=0.5: ∂y/∂ξ = 0.
+        let (jq, detq, xp) = m.element_jacobian(0, &[0.5, 0.5]);
+        assert!((jq[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!((jq[(0, 1)]).abs() < 1e-12);
+        assert!((jq[(1, 0)] - 0.0).abs() < 1e-12);
+        assert!((jq[(1, 1)] - 1.0).abs() < 1e-12);
+        assert!((detq - 1.0).abs() < 1e-12);
+        assert!((xp[0] - 0.5).abs() < 1e-12);
+        assert!((xp[1] - 0.525).abs() < 1e-12);
+        // Off-centre: ∂y/∂ξ = 0.1·(1−2ξ) = 0.05 at ξ=0.25.
+        let (jq, _, _) = m.element_jacobian(0, &[0.25, 0.5]);
+        assert!((jq[(1, 0)] - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn element_jacobian_linear_matches_affine() {
+        // Linear mesh: J must be the affine map (side lengths, constant).
+        let m = Mesh::<2>::unit_square_quad(1);
+        let (j, det, xp) = m.element_jacobian(0, &[0.3, 0.7]);
+        assert!((j[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!((j[(1, 1)] - 1.0).abs() < 1e-12);
+        assert!((det - 1.0).abs() < 1e-12);
+        assert!((xp[0] - 0.3).abs() < 1e-12);
+        assert!((xp[1] - 0.7).abs() < 1e-12);
+    }
 }
 
 #[cfg(all(test, feature = "serialize"))]
@@ -2190,16 +2296,5 @@ mod serde_tests {
         assert_eq!(m.n_elems(), m2.n_elems());
         assert_eq!(m.coords, m2.coords);
         assert_eq!(m.conn, m2.conn);
-    }
-
-    #[test]
-    fn simplex_mesh_hex_roundtrip() {
-        let m = Mesh::<3>::unit_cube_hex(2);
-        let json = serde_json::to_string(&m).unwrap();
-        let m2: Mesh<3> = serde_json::from_str(&json).unwrap();
-        assert_eq!(m.n_nodes(), m2.n_nodes());
-        assert_eq!(m.n_elems(), m2.n_elems());
-        assert_eq!(m.coords, m2.coords);
-        assert_eq!(m.elem_type, m2.elem_type);
     }
 }

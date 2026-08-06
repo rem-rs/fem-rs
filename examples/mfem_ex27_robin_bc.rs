@@ -78,9 +78,10 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     for &d in &ess {
         let du = d as usize;
         let mut dummy = vec![0.0; n];
-        stiff.apply_dirichlet_symmetric(du, a.dbc_val, &mut dummy);
-        if let Some(k) = stiff.find_entry(du, du) { stiff.values[k] = 1.0; }
-        rhs[du] = a.dbc_val;
+        // C++ BilinearForm::FormLinearSystem defaults to diag_policy=DIAG_KEEP
+        // (preserves the original diagonal, zeroes the row/col off-diagonals).
+        stiff.apply_dirichlet_keep_diag(du, a.dbc_val, &mut dummy);
+        for j in 0..n { rhs[j] += dummy[j]; }
     }
 
     let mut x = vec![0.0; n];
@@ -406,8 +407,14 @@ fn l2_face_dofs<S: FESpace>(space: &S, elem: u32, face: u32) -> [usize; 2] {
 /// average of `α·n·Grad(u) + β·u` and the L² (root-mean-square) error of
 /// `α·n·Grad(u) + β·u − γ`, normalized by the boundary measure.
 ///
-/// The physical gradients use the bilinear (corner) element geometry, the same
-/// convention as the DG face assembly. `n` is the outward unit normal.
+/// Geometry follows MFEM `IntegrateBC` exactly:
+/// - the boundary face is one edge of its owner element; the face reference
+///   point `t ∈ [-1,1]` maps to the element reference point `eip` affinely
+///   (`FTr->Loc1.Transform(ip, eip)`),
+/// - physical gradients use the **Q3** isoparametric element geometry
+///   (`fe.CalcPhysDShape(*FTr->Elem1, dshape)` = J⁻ᵀ·∇ref),
+/// - the face Jacobian / normal come from the face tangent
+///   `J·d(eip)/dt` (`FTr->Face->Jacobian()` + `CalcOrtho`).
 fn integrate_bc<S: FESpace>(
     space: &S,
     mesh: &Mesh<2>,
@@ -427,8 +434,12 @@ fn integrate_bc<S: FESpace>(
     let mut err2 = 0.0;
 
     let face_to_elem = build_face_elem_map(mesh, dim);
-    let (xi_q, w_q) = seg_quad(qo);
-    let re = ref_elem_vol(ElementType::Quad4, order);
+    // MFEM: int_order = 2*fe.GetOrder() + 3
+    let (xi_q, w_q) = seg_quad(2 * order + 3);
+    // H1 space basis: QuadQk on [0,1]² with H1 topological node order
+    // (matches H1Space's element_dofs).  NOT dg_base::ref_elem_vol (QuadL2GL
+    // lex order) — using that misaligns dof i ↔ basis i and corrupts u/∇u.
+    let re = fem_element::lagrange::QuadQk::new(order as usize);
     let n_dofs = re.n_dofs();
 
     let mut phi = vec![0.0; n_dofs];
@@ -442,40 +453,52 @@ fn integrate_bc<S: FESpace>(
         let mut ud = vec![0.0; n_dofs];
         for (k, &g) in gd.iter().enumerate() { ud[k] = sol[g]; }
 
-        let nodes = mesh.element_nodes(elem);
-        let (jac, _) = simplex_jac(mesh, nodes, dim);
-        let jit = jac.clone().try_inverse()
-            .unwrap_or_else(|| { eprintln!("  warning: degenerate element"); nalgebra::DMatrix::identity(2, 2) })
-            .transpose();
-        let (xl, yl): (Vec<f64>, Vec<f64>) = if nodes.len() > 3 {
-            let xl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[0]).collect();
-            let yl: Vec<f64> = (0..4).map(|k| mesh.node_coords(nodes[k.min(nodes.len()-1)])[1]).collect();
-            (xl, yl)
-        } else {
-            (vec![], vec![])
+        // Local edge of `face` inside the owner element (quad [0,1]²:
+        // edge 0 = η=0, edge 1 = ξ=1, edge 2 = η=1, edge 3 = ξ=0).
+        // The face's own node order (matching MFEM AddBdrSegment) decides the
+        // reference-direction: face ref t=-1 maps to the FIRST face node.
+        let en = mesh.element_nodes(elem);
+        let fn_ = mesh.face_nodes(f);
+        let (pa, pb) = (
+            en.iter().position(|&n| n == fn_[0]).unwrap(),
+            en.iter().position(|&n| n == fn_[1]).unwrap(),
+        );
+        let (eip_at, deip): (Box<dyn Fn(f64) -> [f64; 2]>, [f64; 2]) = match (pa, pb) {
+            (0, 1) => (Box::new(|t| [0.5 * (1.0 + t), 0.0]), [0.5, 0.0]),
+            (1, 0) => (Box::new(|t| [0.5 * (1.0 - t), 0.0]), [-0.5, 0.0]),
+            (1, 2) => (Box::new(|t| [1.0, 0.5 * (1.0 + t)]), [0.0, 0.5]),
+            (2, 1) => (Box::new(|t| [1.0, 0.5 * (1.0 - t)]), [0.0, -0.5]),
+            (2, 3) => (Box::new(|t| [0.5 * (1.0 - t), 1.0]), [-0.5, 0.0]),
+            (3, 2) => (Box::new(|t| [0.5 * (1.0 + t), 1.0]), [0.5, 0.0]),
+            (3, 0) => (Box::new(|t| [0.0, 0.5 * (1.0 - t)]), [0.0, -0.5]),
+            (0, 3) => (Box::new(|t| [0.0, 0.5 * (1.0 + t)]), [0.0, 0.5]),
+            _ => panic!("integrate_bc: face not on element edge"),
         };
 
         for (qi, xi) in xi_q.iter().enumerate() {
-            let (xp, nor) = face_point_and_normal(mesh, elem, f, *xi);
-            let face_weight = (nor[0] * nor[0] + nor[1] * nor[1]).sqrt(); // |nor| = face Jacobian
-            let mut xi_e = phys_to_ref(&jac, mesh.node_coords(nodes[0]), &xp, dim);
-            if nodes.len() > 3 { for v in &mut xi_e { *v -= 1.0; } }
-            re.eval_basis(&xi_e, &mut phi);
-            re.eval_grad_basis(&xi_e, &mut gref);
-            // Per-point Jacobian for quads (bilinear corner geometry).
-            let (jit_pt, det_pt) = if nodes.len() > 3 {
-                let (j, d) = quad_jac_at(&xl, &yl, xi_e[0], xi_e[1]);
-                (j.clone().try_inverse().unwrap_or_else(|| nalgebra::DMatrix::identity(2, 2)).transpose(), d.abs().max(1e-14))
-            } else {
-                (jit.clone(), jac.determinant().abs().max(1e-14))
-            };
-            xform_grads(&jit_pt, &gref, &mut gphys, n_dofs, dim);
+            // Face ref point t ∈ [-1,1] → element ref point eip ∈ [0,1]².
+            let eip = eip_at(*xi);
+            // Q3 isoparametric element geometry: J, det, physical face point.
+            let (jq, detq, _xp) = mesh.element_jacobian(elem, &eip);
+            // Face tangent dF/dt = J·d(eip)/dt; face_weight = |tangent|.
+            let tx = jq[(0, 0)] * deip[0] + jq[(0, 1)] * deip[1];
+            let ty = jq[(1, 0)] * deip[0] + jq[(1, 1)] * deip[1];
+            let face_weight = (tx * tx + ty * ty).sqrt();
+            // CalcOrtho(J_face, w_nor): w_nor = (dy, -dx), |w_nor| = face_weight.
+            let nor = [ty, -tx];
+
+            re.eval_basis(&eip, &mut phi);
+            re.eval_grad_basis(&eip, &mut gref);
+            let jit = jq.clone().try_inverse()
+                .unwrap_or_else(|| { eprintln!("  warning: degenerate element"); nalgebra::DMatrix::identity(2, 2) })
+                .transpose();
+            xform_grads(&jit, &gref, &mut gphys, n_dofs, dim);
 
             let w = w_q[qi] * face_weight;
             nrm += w;
             let mut val = 0.0;
             if !a_is_zero {
-                // α · (∇u · nor) / face_weight  →  α · ∇u · n̂
+                // α · (∇u · w_nor) / face_weight  →  α · ∇u · n̂
                 let mut du_dn = 0.0;
                 for k in 0..n_dofs {
                     du_dn += ud[k] * (gphys[k * dim] * nor[0] + gphys[k * dim + 1] * nor[1]);
@@ -490,7 +513,7 @@ fn integrate_bc<S: FESpace>(
             avg += val * w;
             let d = val - gamma;
             err2 += d * d * w;
-            let _ = det_pt;
+            let _ = detq;
         }
     }
     if nrm.abs() > 0.0 { avg /= nrm; err2 /= nrm; }
