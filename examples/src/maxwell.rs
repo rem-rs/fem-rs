@@ -1606,30 +1606,30 @@ where
                 #[allow(non_snake_case)]
                 fn N(k: usize, xi: f64, eta: f64) -> f64 {
                     match k {
-                        0 => 0.25 * (1.0 - xi) * (1.0 - eta),
-                        1 => 0.25 * (1.0 + xi) * (1.0 - eta),
-                        2 => 0.25 * (1.0 + xi) * (1.0 + eta),
-                        3 => 0.25 * (1.0 - xi) * (1.0 + eta),
+                        0 => (1.0 - xi) * (1.0 - eta),
+                        1 => xi * (1.0 - eta),
+                        2 => xi * eta,
+                        3 => (1.0 - xi) * eta,
                         _ => 0.0,
                     }
                 }
                 #[allow(non_snake_case)]
                 fn dN_dxi(k: usize, eta: f64) -> f64 {
                     match k {
-                        0 => -0.25 * (1.0 - eta),
-                        1 =>  0.25 * (1.0 - eta),
-                        2 =>  0.25 * (1.0 + eta),
-                        3 => -0.25 * (1.0 + eta),
+                        0 => -(1.0 - eta),
+                        1 =>  (1.0 - eta),
+                        2 =>  eta,
+                        3 => -eta,
                         _ => 0.0,
                     }
                 }
                 #[allow(non_snake_case)]
                 fn dN_deta(k: usize, xi: f64) -> f64 {
                     match k {
-                        0 => -0.25 * (1.0 - xi),
-                        1 => -0.25 * (1.0 + xi),
-                        2 =>  0.25 * (1.0 + xi),
-                        3 =>  0.25 * (1.0 - xi),
+                        0 => -(1.0 - xi),
+                        1 => -xi,
+                        2 =>  xi,
+                        3 =>  (1.0 - xi),
                         _ => 0.0,
                     }
                 }
@@ -1748,38 +1748,43 @@ where
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
 
-                // Quad4 bilinear mapping: x(ξ,η) = Σ N_i(ξ,η) * x_i
+                // Quad4 bilinear mapping on the [0,1]^2 reference domain
+                // (matches QuadND1::quadrature = quad_rule_01 and MFEM's
+                // SQUARE reference domain).  The previous [-1,1]^2 formula
+                // was inconsistent with the [0,1]^2 quadrature points and
+                // produced wrong physical coords -> wrong exact eval -> 80x
+                // larger L2 error (ex3).
                 let xc: Vec<Vec<f64>> = (0..4)
                     .map(|k| mesh.node_coords(nodes[k]).to_vec())
                     .collect();
-                // Quad4 scalar shape functions for the mapping
+                // Quad4 scalar shape functions for the mapping ([0,1]^2)
                 #[allow(non_snake_case)]
                 fn N(k: usize, xi: f64, eta: f64) -> f64 {
                     match k {
-                        0 => 0.25 * (1.0 - xi) * (1.0 - eta),
-                        1 => 0.25 * (1.0 + xi) * (1.0 - eta),
-                        2 => 0.25 * (1.0 + xi) * (1.0 + eta),
-                        3 => 0.25 * (1.0 - xi) * (1.0 + eta),
+                        0 => (1.0 - xi) * (1.0 - eta),
+                        1 => xi * (1.0 - eta),
+                        2 => xi * eta,
+                        3 => (1.0 - xi) * eta,
                         _ => 0.0,
                     }
                 }
                 #[allow(non_snake_case)]
                 fn dN_dxi(k: usize, eta: f64) -> f64 {
                     match k {
-                        0 => -0.25 * (1.0 - eta),
-                        1 =>  0.25 * (1.0 - eta),
-                        2 =>  0.25 * (1.0 + eta),
-                        3 => -0.25 * (1.0 + eta),
+                        0 => -(1.0 - eta),
+                        1 =>  (1.0 - eta),
+                        2 =>  eta,
+                        3 => -eta,
                         _ => 0.0,
                     }
                 }
                 #[allow(non_snake_case)]
                 fn dN_deta(k: usize, xi: f64) -> f64 {
                     match k {
-                        0 => -0.25 * (1.0 - xi),
-                        1 => -0.25 * (1.0 + xi),
-                        2 =>  0.25 * (1.0 + xi),
-                        3 =>  0.25 * (1.0 - xi),
+                        0 => -(1.0 - xi),
+                        1 => -xi,
+                        2 =>  xi,
+                        3 =>  (1.0 - xi),
                         _ => 0.0,
                     }
                 }
