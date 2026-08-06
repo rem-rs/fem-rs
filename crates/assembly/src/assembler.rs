@@ -497,6 +497,27 @@ fn adjugate_2d(j: &DMatrix<f64>) -> DMatrix<f64> {
     a
 }
 
+/// 3-D adjugate (cofactor) matrix of J — MFEM `AdjugateJacobian` for
+/// hexahedra/tetrahedra.  Missing before, so any non-affine 3-D assembly
+/// (e.g. ex34's SubMesh with curved/Hex geometry) hit an out-of-bounds
+/// `adj[(k,j)]` in [`transform_grads_adj`].
+fn adjugate_3d(j: &DMatrix<f64>) -> DMatrix<f64> {
+    let j00 = j[(0, 0)]; let j01 = j[(0, 1)]; let j02 = j[(0, 2)];
+    let j10 = j[(1, 0)]; let j11 = j[(1, 1)]; let j12 = j[(1, 2)];
+    let j20 = j[(2, 0)]; let j21 = j[(2, 1)]; let j22 = j[(2, 2)];
+    let mut a = DMatrix::<f64>::zeros(3, 3);
+    a[(0, 0)] = j11 * j22 - j12 * j21;
+    a[(0, 1)] = j02 * j21 - j01 * j22;
+    a[(0, 2)] = j01 * j12 - j02 * j11;
+    a[(1, 0)] = j12 * j20 - j10 * j22;
+    a[(1, 1)] = j00 * j22 - j02 * j20;
+    a[(1, 2)] = j02 * j10 - j00 * j12;
+    a[(2, 0)] = j10 * j21 - j11 * j20;
+    a[(2, 1)] = j01 * j20 - j00 * j21;
+    a[(2, 2)] = j00 * j11 - j01 * j10;
+    a
+}
+
 /// Transform reference gradients by the adjugate Jacobian (MFEM
 /// `Mult(dshape, AdjugateJacobian, dshapedxt)`): grad_phys(i,j) =
 /// Σ_k adj(J)(k,j)·grad_ref(i,k).  No det division — the diffusion weight
@@ -722,7 +743,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 continue;
             }
             // MFEM: dshapedxt = Mult(dshape, AdjugateJacobian, dshapedxt).
-            let adj = adjugate_2d(&jac_qp);
+            let adj = if dim == 3 { adjugate_3d(&jac_qp) } else { adjugate_2d(&jac_qp) };
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
             transform_grads_adj(&adj, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);

@@ -1673,7 +1673,14 @@ impl DiscreteLinearOperator {
                         if !visited.insert(face_dof) {
                             continue;
                         }
-                        let nv = if face_verts[2] == face_verts[3] { 3 } else { 4 };
+                        // MFEM Wedge::GetNFaceVertices: faces 0,1 are
+                        // triangles (padded with a dummy 4th slot in
+                        // PRISM_FACES_CANON — NOT a closure), 2..4 quads.
+                        // The old `face_verts[2]==face_verts[3]` test misread
+                        // the top tri [3,4,5,0] as a quad and looked for the
+                        // non-existent edge (5,0) → "prism face boundary edge
+                        // not found" (ex34 SubMesh on fichera-mixed.mesh).
+                        let nv = if face_local < 2 { 3 } else { 4 };
                         let gv: Vec<u32> = face_verts[..nv].iter().map(|&li| verts[li]).collect();
                         for k in 0..nv {
                             let (a, b) = (gv[k], gv[(k + 1) % nv]);
