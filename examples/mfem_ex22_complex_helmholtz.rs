@@ -638,6 +638,7 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
         let et = mesh.element_type(e);
         let nodes = mesh.element_nodes(e);
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
         match et {
             ElementType::Tri3 => {
                 let re = TriRT0;
@@ -658,12 +659,13 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                     let mut uh_re = [0.0; 2];
                     let mut uh_im = [0.0; 2];
                     for a in 0..nld {
+                        let s = signs[a];
                         let px = (j00 * phi[a * 2] + j01 * phi[a * 2 + 1]) / det;
                         let py = (j10 * phi[a * 2] + j11 * phi[a * 2 + 1]) / det;
-                        uh_re[0] += u_re[ed[a]] * px;
-                        uh_re[1] += u_re[ed[a]] * py;
-                        uh_im[0] += u_im[ed[a]] * px;
-                        uh_im[1] += u_im[ed[a]] * py;
+                        uh_re[0] += s * u_re[ed[a]] * px;
+                        uh_re[1] += s * u_re[ed[a]] * py;
+                        uh_im[0] += s * u_im[ed[a]] * px;
+                        uh_im[1] += s * u_im[ed[a]] * py;
                     }
                     let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
                     er2 += w * ((uh_re[0] - 0.0).powi(2) + (uh_re[1] - er).powi(2));
@@ -712,12 +714,13 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                     let mut uh_re = [0.0; 2];
                     let mut uh_im = [0.0; 2];
                     for a in 0..nld {
+                        let s = signs[a];
                         let px = (j00 * phi[a * 2] + j01 * phi[a * 2 + 1]) / det;
                         let py = (j10 * phi[a * 2] + j11 * phi[a * 2 + 1]) / det;
-                        uh_re[0] += u_re[ed[a]] * px;
-                        uh_re[1] += u_re[ed[a]] * py;
-                        uh_im[0] += u_im[ed[a]] * px;
-                        uh_im[1] += u_im[ed[a]] * py;
+                        uh_re[0] += s * u_re[ed[a]] * px;
+                        uh_re[1] += s * u_re[ed[a]] * py;
+                        uh_im[0] += s * u_im[ed[a]] * px;
+                        uh_im[1] += s * u_im[ed[a]] * py;
                     }
                     let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
                     er2 += w * ((uh_re[0] - 0.0).powi(2) + (uh_re[1] - er).powi(2));

@@ -1020,7 +1020,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let mid = [0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])];
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let normal = [-ty, tx]; // CCW of sorted a→b direction
+                        let normal = [ty, -tx]; // CW of sorted a→b (MFEM RT0 edge normal convention)
                         let fval = f(&mid);
                         let flux = fval[0] * normal[0] + fval[1] * normal[1];
                         result.as_slice_mut()[dof as usize] = flux;
@@ -1036,7 +1036,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let pb = self.mesh.node_coords(b);
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let normal = [-ty, tx];
+                        let normal = [ty, -tx]; // CW (MFEM RT0 edge normal)
 
                         let mut mom0 = 0.0_f64;
                         let mut mom1 = 0.0_f64;
@@ -1159,7 +1159,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let pb = self.mesh.node_coords(b);
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let normal = [-ty, tx];
+                        let normal = [ty, -tx]; // CW (MFEM RT0 edge normal)
                         let r = result.as_slice_mut();
                         for k in 0..3 {
                             let t = bop[k];
