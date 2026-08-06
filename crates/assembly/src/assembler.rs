@@ -1286,7 +1286,7 @@ impl Assembler {
         let ref_elem: &dyn ReferenceElement = match ref_elem_override {
             Some(r) => r,
             None => {
-                owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1));
+                owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0));
                 &*owned_default
             }
         };
@@ -1340,7 +1340,7 @@ impl Assembler {
 
         // Quadrature from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1));
+        let owned_default = ref_elem_vol_for_space(space, elem_type, space.element_order(0));
         let quad = owned_default.quadrature(quad_order);
 
         let dofs_per_elem = owned_default.n_dofs();
@@ -1421,7 +1421,7 @@ impl Assembler {
 
         // Precompute quadrature rule from the ACTUAL solution order (see assemble_bilinear).
         let elem_type = mesh.element_type(0);
-        let quad = ref_elem_vol_for_space(space, elem_type, space.element_order(0).max(1)).quadrature(quad_order);
+        let quad = ref_elem_vol_for_space(space, elem_type, space.element_order(0)).quadrature(quad_order);
 
         #[cfg(feature = "parallel")]
         {

@@ -275,12 +275,15 @@ fn gs_forward(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
 }
 
 /// MFEM `SparseMatrix::Gauss_Seidel_back`: same as forward but i descending.
+/// The Finalized path scans columns in **descending** index order
+/// (`for (j = Ip[i+1]-1; j >= Ip[i]; j--)`), matching MFEM's CSR back-sweep.
 fn gs_backward(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     let n = a.nrows;
     for i in (0..n).rev() {
         let mut sum = 0.0;
         let mut diag = 0.0;
-        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+        let end = a.row_ptr[i + 1];
+        for p in (a.row_ptr[i]..end).rev() {
             let c = a.col_idx[p] as usize;
             if c == i {
                 diag = a.values[p];

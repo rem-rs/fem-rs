@@ -411,8 +411,10 @@ fn main() {
     // 5. Initial guess: u₀ = 1 − |x|² (nodal interpolation on the P2 geometry).
     let geom = mesh.geometry.as_ref().unwrap();
     let u0 = interpolate_h1_geom(&h1, &mesh, &ic_func);
-    let mut u_old = u0;
+    let mut u_old = u0.clone();
     let mut u_new = vec![0.0; n_h1];
+    // C++ u_tmp starts as u_old_gf; each round u_tmp -= u_gf then u_tmp = u_gf.
+    let mut prev_x0 = u0;
 
     // 6. Slack variable ψ₀ = clamp(ln(u₀ − ϕ), −36), element-wise (L² P0).
     let mut psi = vec![0.0; n_l2];
@@ -484,28 +486,23 @@ fn main() {
             // C++ MixedScalarMassIntegrator uses the mixed GetRule
             // (order_trial + order_test = 0 + 1 = 1 for P0×P1); a 5th-order
             // rule is exact on affine elements but differs on this curved mesh.
-            let mut a10 = MixedAssembler::assemble_bilinear(&l2, &h1, &[&ScalarMassIntegrator], 1);
+            let mut a10 = MixedAssembler::assemble_bilinear(&l2, &h1, &[&ScalarMassIntegrator], 5);
             eliminate_cols(&mut a10, &ess_dofs, &x0, &mut rhs1);
             let a01 = a10.transpose();
 
-            // A11 = Mass(−clamp(exp(ψ)+ϕ, 0, 1e6)) − 1e-6·Mass  on L².
+            // A11 = Mass(−clamp(exp(ψ)+0, 0, 1e6)) − 1e-6·Mass  on L².
             // C++ neg_exp_psi = ProductCoefficient(-1, exp_psi) where exp_psi
-            // = ExponentialGridFunctionCoefficient(psi, obstacle) evaluates
-            // clamp(exp(ψ)+ϕ, 0, 1e6) — the clamp is applied to the SUM, and
-            // on elements where exp(ψ)+ϕ ≤ 0 the Hessian term vanishes.
+            // = ExponentialGridFunctionCoefficient(psi_gf, **zero**) evaluates
+            // clamp(exp(ψ)+0, 0, 1e6) — the obstacle is NOT part of A11
+            // (it only enters the RHS b1).  Verified against dump_ablocks.cpp.
             let exp_psi_t = TransformedCoeff {
                 inner: L2P0Coeff {
                     values: psi.clone(),
                 },
                 transform: |t| t.exp(),
             };
-            let obstacle_cf2 = FnCoeff(|x: &[f64]| spherical_obstacle(x));
-            let sum_exp_phi = SumCoeff {
-                a: exp_psi_t,
-                b: obstacle_cf2,
-            };
             let neg_clamped = TransformedCoeff {
-                inner: sum_exp_phi,
+                inner: exp_psi_t,
                 transform: |v| -(v.min(1e6).max(0.0)),
             };
             let a11 = Assembler::assemble_bilinear(
@@ -514,10 +511,9 @@ fn main() {
                     &MassIntegrator { rho: neg_clamped },
                     &MassIntegrator { rho: -1e-6 },
                 ],
-                // C++ MassIntegrator uses GetRule(2·order) = 0 for P0 (1-point
-                // centroid); on this curved mesh higher-order quadrature gives
-                // a different element area and breaks the Newton system match.
-                0,
+                // C++ MassIntegrator GetRule = trial.GetOrder()+test.GetOrder()
+                // +Trans.OrderW() = 0+0+3 (P2 geometry Qk dim-1 rule) = 3 → 2×2 GL.
+                3,
             );
 
             // GMRES(A, prec, rhs, x, 0, 10000, 500, 1e-12, 0.0) with
@@ -532,13 +528,16 @@ fn main() {
             let (_ok, _iters, _resid) = solve_gmres_block_diag_gs(
                 &a00, &a01, &a10, &a11, &rhs0, &rhs1, &mut x0, &mut x1, 500, &cfg,
             );
-            // Newton update size: ‖u_old − u_new‖_{L²}.
-            u_new.copy_from_slice(&x0);
+            // Newton update size: C++ u_tmp = u_old; each round u_tmp -= u_gf;
+            // then u_tmp = u_gf — so Newton_update_size measures the DIFFERENCE
+            // between successive increments ‖δu_j − δu_{j−1}‖, not u_old − δu.
             let mut tmp = vec![0.0; n_h1];
             for i in 0..n_h1 {
-                tmp[i] = u_old[i] - u_new[i];
+                tmp[i] = prev_x0[i] - x0[i];
             }
-            let newton_size = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 4);
+            let newton_size = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 7);
+            prev_x0.copy_from_slice(&x0);
+            u_new.copy_from_slice(&x0);
 
             // ψ += γ·δψ  (γ = 1).
             for (p, d) in psi.iter_mut().zip(x1.iter()) {
@@ -558,7 +557,7 @@ fn main() {
         for i in 0..n_h1 {
             tmp[i] = u_new[i] - u_old[i];
         }
-        increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 4);
+        increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 7);
 
         println!("Number of Newton iterations = {}", last_j + 1);
         println!("Increment (|| uₕ - uₕ_prvs||) = {}", cpp_6(increment_u));
@@ -573,7 +572,7 @@ fn main() {
         let h1_err = GridFunction::new(&h1, u_old.clone()).compute_h1_full_error(
             &|x: &[f64]| exact_solution_obstacle(x),
             &|x: &[f64]| exact_solution_gradient_obstacle(x),
-            4,
+            7,
         );
         println!("H1-error  (|| u - uₕᵏ||)       = {}", cpp_6(h1_err));
     }
@@ -584,24 +583,25 @@ fn main() {
 
     // 8. Final errors.
     let gf = GridFunction::new(&h1, u_old.clone());
-    let l2_err = gf.compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 4);
+    let l2_err = gf.compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 7);
     let h1_err = gf.compute_h1_full_error(
         &|x: &[f64]| exact_solution_obstacle(x),
         &|x: &[f64]| exact_solution_gradient_obstacle(x),
-        4,
+        7,
     );
 
-    // u_alt = exp(ψₕ) + ϕ, element-wise (L² P0 projection at element
-    // centers), then L² error vs exact — MFEM's
-    // `ExponentialGridFunctionCoefficient(psi_gf, obstacle)`.
+    // u_alt = clamp(exp(ψₕ)+ϕ, 0, 1e6), element-wise — MFEM's
+    // `ExponentialGridFunctionCoefficient(psi_gf, obstacle)` clamps the SUM
+    // (ex36.cpp step 13: u_alt_cf = ExponentialGridFunctionCoefficient(psi_gf,
+    // obstacle) → u_alt_gf.ProjectCoefficient(u_alt_cf)).
     let mut u_alt = vec![0.0; n_l2];
     for e in 0..n_l2 {
         let center_node = geom.conn[e * 9 + 8];
         let c = mesh.geom_coords_of(center_node);
-        u_alt[e] = psi[e].exp().min(1e6) + spherical_obstacle(c);
+        u_alt[e] = (psi[e].exp() + spherical_obstacle(c)).min(1e6).max(0.0);
     }
     let l2_alt =
-        GridFunction::new(&l2, u_alt).compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 0);
+        GridFunction::new(&l2, u_alt).compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 3);
 
     println!(
         "\n Final L2-error (|| u - uₕ||)          = {}",
