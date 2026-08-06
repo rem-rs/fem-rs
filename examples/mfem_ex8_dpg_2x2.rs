@@ -33,7 +33,7 @@ use fem_linalg::PrintLevel;
 use fem_space::{
     H1Space, L2Space, DpgTraceSpace,
     fe_space::FESpace,
-    constraints::{boundary_dofs, apply_dirichlet},
+    constraints::{boundary_dofs, apply_dirichlet_diag_one},
 };
 
 // ─── Mixed Diffusion Integrator (B0) ─────────────────────────────────────────
@@ -156,7 +156,7 @@ fn main() {
     // ── 8. S0 (trial stiffness with BC) ───────────────────────────────────────
     let mut s0_mat = Assembler::assemble_bilinear(&x0, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
     let mut zr = vec![0.0; s0];
-    apply_dirichlet(&mut s0_mat, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
+    apply_dirichlet_diag_one(&mut s0_mat, &mut zr, &ess_dofs, &vec![0.0; ess_dofs.len()]);
 
     // ── 9. RHS: b = B^T * S^{-1} * F ──────────────────────────────────────────
     let mut sf = vec![0.0; st];
@@ -222,9 +222,14 @@ fn main() {
     let n_tot = op.n_total();
 
     // ── 13. PCG solve ─────────────────────────────────────────────────────────
+    // MFEM ex8 calls `PCG(A, P, b, x, 1, 200, 1e-12, 0.0)`; the PCG()
+    // helper (solvers.cpp) does SetRelTol(sqrt(RTOLERANCE)) — the 1e-12
+    // argument is a SQUARED tolerance, i.e. rel_tol = 1e-6.  Our
+    // solve_pcg_operator_precond takes rel_tol directly ((B r, r) <=
+    // rtol²·nom0, matching CGSolver), so pass 1e-6.
     let mut x = vec![0.0; n_tot];
     let cfg = SolverConfig {
-        rtol: 1e-12,
+        rtol: 1e-6,
         atol: 0.0,
         max_iter: 200,
         verbose: false,

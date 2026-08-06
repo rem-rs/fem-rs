@@ -1,13 +1,15 @@
 use fem_linalg::CsrMatrix as FemCsr;
+use fem_linalg::{
+    fem_to_linlvo_csr, into_result, PrintLevel, SolveResult, SolverConfig, SolverError,
+};
+use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
-    DenseVec, GaussSeidelSmoother, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver,
+    DenseVec, GaussSeidelSmoother, IldltPrecond, Ilu0Precond, JacobiPrecond, KrylovSolver,
     Preconditioner, SsorPrecond,
 };
-use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{LinearOperator, Vector};
-use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult, PrintLevel};
 
 use crate::macros::check_dims;
 
@@ -30,7 +32,12 @@ pub fn fmt_g(x: f64) -> String {
         // Scientific notation: strip trailing zeros in the mantissa,
         // exponent with sign and at least two digits.
         let mant = s[..epos].trim_end_matches('0').trim_end_matches('.');
-        format!("{}e{}{:02}", mant, if exp < 0 { "-" } else { "+" }, exp.abs())
+        format!(
+            "{}e{}{:02}",
+            mant,
+            if exp < 0 { "-" } else { "+" },
+            exp.abs()
+        )
     } else {
         // Fixed notation with P−1−exp fractional digits, trailing zeros stripped.
         let digits = (P - 1 - exp).max(0) as usize;
@@ -41,9 +48,18 @@ pub fn fmt_g(x: f64) -> String {
 
 // ─── Macro-generated iterative solvers ──────────────────────────────────────
 
-solve_iterative_simple!(solve_cg, ConjugateGradient<T>, "Conjugate Gradient - for symmetric positive definite systems.");
+solve_iterative_simple!(
+    solve_cg,
+    ConjugateGradient<T>,
+    "Conjugate Gradient - for symmetric positive definite systems."
+);
 
-solve_precond_simple!(solve_pcg_jacobi, ConjugateGradient<T>, JacobiPrecond<T>, "Preconditioned CG with Jacobi preconditioner.");
+solve_precond_simple!(
+    solve_pcg_jacobi,
+    ConjugateGradient<T>,
+    JacobiPrecond<T>,
+    "Preconditioned CG with Jacobi preconditioner."
+);
 
 /// PCG with symmetric Gauss-Seidel (MFEM GSSmoother) preconditioner.
 ///
@@ -56,7 +72,10 @@ solve_precond_simple!(solve_pcg_jacobi, ConjugateGradient<T>, JacobiPrecond<T>, 
 ///   warm-start sweep is reproduced.
 /// - Convergence test: `nom = (z, r) <= max(rtol²·nom0, atol²)`.
 pub fn solve_pcg_gssmoother(
-    a: &FemCsr<f64>, b: &[f64], x: &mut [f64], cfg: &SolverConfig,
+    a: &FemCsr<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let n = a.nrows;
@@ -89,7 +108,7 @@ pub fn solve_pcg_gssmoother(
 
     let mut iter = 0usize;
     if cfg.verbose {
-        eprintln!("    CG iter {:>3}  (B r, r) = {:.9e}", 0, nom);
+        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
     }
     if nom <= r0 {
         return Ok(into_result_from_cg(n, iter, nom0, nom, true));
@@ -118,10 +137,98 @@ pub fn solve_pcg_gssmoother(
         let betanom = dot(&z, &r);
         iter += 1;
         if cfg.verbose {
-            eprintln!("    CG iter {:>3}  (B r, r) = {:.9e}", iter, betanom);
+            println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
         }
         if betanom <= r0 || iter >= cfg.max_iter {
-            return Ok(into_result_from_cg(n, iter, nom0, betanom, betanom <= r0));
+            let res = into_result_from_cg(n, iter, nom0, betanom, betanom <= r0);
+            if cfg.verbose {
+                // MFEM: average reduction factor = (betanom/nom0)^(0.5/final_iter)
+                let avg = (betanom / nom0).powf(0.5 / iter as f64);
+                println!("Average reduction factor = {}", fmt_g(avg));
+            }
+            return Ok(res);
+        }
+        let beta = betanom / nom;
+        for i in 0..n {
+            d[i] = z[i] + beta * d[i];
+        }
+        nom = betanom;
+    }
+}
+
+/// PCG with diagonal (Jacobi) preconditioner — MFEM `DSmoother` in its
+/// `DiagScale` mode (`type == 0, iterations == 1, iterative_mode == false`).
+///
+/// Bit-for-bit port of MFEM's `CGSolver::Mult` with the `DSmoother`
+/// preconditioner (`z = D⁻¹ r`, `D = diag(A)`): iterative_mode = false
+/// (start from zero), convergence test `nom = (z, r) <= max(rtol²·nom0, atol²)`.
+pub fn solve_pcg_dsmoother(
+    a: &FemCsr<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    check_dims(a, b, x)?;
+    let n = a.nrows;
+    let row_ptr = &a.row_ptr;
+    let col = &a.col_idx;
+    let val = &a.values;
+
+    // r = b (iterative_mode = false => x starts from zero).
+    let mut r = b.to_vec();
+    for i in 0..n {
+        x[i] = 0.0;
+    }
+
+    // z = D^{-1} r ; d = z
+    let mut z = vec![0.0_f64; n];
+    for i in 0..n {
+        z[i] = r[i] / diag(row_ptr, col, val, i);
+    }
+    let mut d = z.clone();
+    let mut nom = dot(&d, &r);
+    let nom0 = nom;
+    let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
+
+    let mut iter = 0usize;
+    if cfg.verbose {
+        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
+    }
+    if nom <= r0 {
+        return Ok(into_result_from_cg(n, iter, nom0, nom, true));
+    }
+
+    loop {
+        // z = A·d
+        for i in 0..n {
+            let mut s = 0.0;
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                s += val[k] * d[col[k] as usize];
+            }
+            z[i] = s;
+        }
+        let den = dot(&z, &d);
+        let alpha = nom / den;
+        for i in 0..n {
+            x[i] += alpha * d[i];
+            r[i] -= alpha * z[i];
+        }
+        // z = D^{-1} r
+        for i in 0..n {
+            z[i] = r[i] / diag(row_ptr, col, val, i);
+        }
+        let betanom = dot(&z, &r);
+        iter += 1;
+        if cfg.verbose {
+            println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
+        }
+        if betanom <= r0 || iter >= cfg.max_iter {
+            let res = into_result_from_cg(n, iter, nom0, betanom, betanom <= r0);
+            if cfg.verbose {
+                let avg = (betanom / nom0).powf(0.5 / iter as f64);
+                println!("Average reduction factor = {}", fmt_g(avg));
+            }
+            return Ok(res);
         }
         let beta = betanom / nom;
         for i in 0..n {
@@ -133,13 +240,7 @@ pub fn solve_pcg_gssmoother(
 
 /// One full symmetric Gauss-Seidel sweep `z <- GS(r)` with the incoming `z`
 /// used as the initial guess (MFEM `Gauss_Seidel_forw`/`Gauss_Seidel_back`).
-fn gs_sweep(
-    row_ptr: &[usize],
-    col: &[u32],
-    val: &[f64],
-    r: &[f64],
-    z: &mut [f64],
-) {
+fn gs_sweep(row_ptr: &[usize], col: &[u32], val: &[f64], r: &[f64], z: &mut [f64]) {
     let n = z.len();
     // forward
     for i in 0..n {
@@ -167,7 +268,7 @@ fn gs_sweep(
 }
 
 #[inline]
-fn diag(row_ptr: &[usize], col: &[u32], val: &[f64], i: usize) -> f64 {
+pub(crate) fn diag(row_ptr: &[usize], col: &[u32], val: &[f64], i: usize) -> f64 {
     for k in row_ptr[i]..row_ptr[i + 1] {
         if col[k] as usize == i {
             return val[k];
@@ -177,13 +278,17 @@ fn diag(row_ptr: &[usize], col: &[u32], val: &[f64], i: usize) -> f64 {
 }
 
 #[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Build a [`SolveResult`] from a hand-rolled CG run.
-fn into_result_from_cg(
-    _n: usize, iter: usize, _nom0: f64, nom: f64, converged: bool,
+pub(crate) fn into_result_from_cg(
+    _n: usize,
+    iter: usize,
+    _nom0: f64,
+    nom: f64,
+    converged: bool,
 ) -> SolveResult {
     SolveResult {
         converged,
@@ -192,23 +297,43 @@ fn into_result_from_cg(
     }
 }
 
-solve_precond_simple!(solve_pcg_ilu0, ConjugateGradient<T>, Ilu0Precond<T>, "Preconditioned CG with ILU(0) preconditioner.");
+solve_precond_simple!(
+    solve_pcg_ilu0,
+    ConjugateGradient<T>,
+    Ilu0Precond<T>,
+    "Preconditioned CG with ILU(0) preconditioner."
+);
 
 solve_iterative_restart!(solve_gmres, Gmres<T>, "GMRES for general (possibly non-symmetric) systems.", restart: usize);
 
-solve_precond_restart!(solve_gmres_jacobi, Gmres<T>, JacobiPrecond<T>, "GMRES with Jacobi preconditioner.");
+solve_precond_restart!(
+    solve_gmres_jacobi,
+    Gmres<T>,
+    JacobiPrecond<T>,
+    "GMRES with Jacobi preconditioner."
+);
 
-solve_precond_restart!(solve_gmres_ilu0, Gmres<T>, Ilu0Precond<T>, "GMRES with ILU(0) preconditioner.");
+solve_precond_restart!(
+    solve_gmres_ilu0,
+    Gmres<T>,
+    Ilu0Precond<T>,
+    "GMRES with ILU(0) preconditioner."
+);
 
 /// GMRES with symmetric Gauss-Seidel (SSOR(ω=1)) preconditioner — MFEM GSSmoother.
 pub fn solve_gmres_gssmoother<T: linlvoScalar>(
-    a: &FemCsr<T>, b: &[T], x: &mut [T], restart: usize, cfg: &SolverConfig,
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = SsorPrecond::from_csr(&la, T::one()).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec =
+        SsorPrecond::from_csr(&la, T::one()).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -217,21 +342,49 @@ pub fn solve_gmres_gssmoother<T: linlvoScalar>(
     Ok(into_result(res))
 }
 
-solve_iterative_simple!(solve_bicgstab, BiCgStab<T>, "BiCGSTAB for non-symmetric systems; often faster than GMRES per iteration.");
+solve_iterative_simple!(
+    solve_bicgstab,
+    BiCgStab<T>,
+    "BiCGSTAB for non-symmetric systems; often faster than GMRES per iteration."
+);
 
 solve_iterative_restart!(solve_fgmres, Fgmres<T>, "Flexible GMRES - allows a variable preconditioner per iteration.", restart: usize);
 
-solve_precond_restart!(solve_fgmres_jacobi, Fgmres<T>, JacobiPrecond<T>, "Flexible GMRES with Jacobi preconditioner.");
+solve_precond_restart!(
+    solve_fgmres_jacobi,
+    Fgmres<T>,
+    JacobiPrecond<T>,
+    "Flexible GMRES with Jacobi preconditioner."
+);
 
-solve_precond_restart!(solve_fgmres_ilu0, Fgmres<T>, Ilu0Precond<T>, "Flexible GMRES with ILU(0) preconditioner.");
+solve_precond_restart!(
+    solve_fgmres_ilu0,
+    Fgmres<T>,
+    Ilu0Precond<T>,
+    "Flexible GMRES with ILU(0) preconditioner."
+);
 
-solve_precond_simple!(solve_pcg_ildlt, ConjugateGradient<T>, IldltPrecond<T>, "Preconditioned CG with incomplete LDL^T preconditioner.");
+solve_precond_simple!(
+    solve_pcg_ildlt,
+    ConjugateGradient<T>,
+    IldltPrecond<T>,
+    "Preconditioned CG with incomplete LDL^T preconditioner."
+);
 
-solve_precond_restart!(solve_gmres_ildlt, Gmres<T>, IldltPrecond<T>, "GMRES with incomplete LDL^T preconditioner.");
+solve_precond_restart!(
+    solve_gmres_ildlt,
+    Gmres<T>,
+    IldltPrecond<T>,
+    "GMRES with incomplete LDL^T preconditioner."
+);
 
 solve_iterative_restart!(solve_idrs, Idrs<T>, "IDR(s) - Induced Dimension Reduction for non-symmetric systems.", s: usize);
 
-solve_iterative_simple!(solve_tfqmr, Tfqmr<T>, "TFQMR - Transpose-Free Quasi-Minimal Residual for non-symmetric systems.");
+solve_iterative_simple!(
+    solve_tfqmr,
+    Tfqmr<T>,
+    "TFQMR - Transpose-Free Quasi-Minimal Residual for non-symmetric systems."
+);
 
 // ─── CG operator ───────────────────────────────────────────────────────────
 
@@ -354,7 +507,11 @@ where
     F: Fn(&[f64], &mut [f64]),
 {
     if nrows != ncols || b.len() != nrows || x.len() != ncols {
-        return Err(SolverError::DimensionMismatch { rows: nrows, cols: ncols, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: nrows,
+            cols: ncols,
+            rhs: b.len(),
+        });
     }
     let n = nrows;
     let mut r = vec![0.0; n];
@@ -365,11 +522,15 @@ where
 
     // r0 = b - A*x0
     apply(x, &mut ap);
-    for i in 0..n { r[i] = b[i] - ap[i]; }
+    for i in 0..n {
+        r[i] = b[i] - ap[i];
+    }
 
     // Jacobi preconditioner: z = D^{-1} * r
     if let Some(d) = diag {
-        for i in 0..n { z[i] = r[i] / d[i].max(1e-32); }
+        for i in 0..n {
+            z[i] = r[i] / d[i].max(1e-32);
+        }
     } else {
         z.copy_from_slice(&r);
     }
@@ -381,7 +542,11 @@ where
     let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
     let mut res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
     if res_norm <= tol {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: res_norm });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
     }
 
     let check_interval = cfg.to_linlvo().check_interval.max(1);
@@ -389,11 +554,16 @@ where
         apply(&p, &mut ap);
         let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
         if p_ap.abs() < 1e-32 {
-            return Err(SolverError::Linlvo("CG breakdown: p^T A p near zero".into()));
+            return Err(SolverError::Linlvo(
+                "CG breakdown: p^T A p near zero".into(),
+            ));
         }
 
         let alpha = rz / p_ap;
-        for i in 0..n { x[i] += alpha * p[i]; r[i] -= alpha * ap[i]; }
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
 
         res_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
 
@@ -401,28 +571,42 @@ where
         if res_norm > tol && (iter + 1) % check_interval == 0 {
             apply(x, &mut ap_check);
             let mut rs_true = 0.0;
-            for i in 0..n { let d = b[i] - ap_check[i]; rs_true += d * d; }
+            for i in 0..n {
+                let d = b[i] - ap_check[i];
+                rs_true += d * d;
+            }
             res_norm = rs_true.sqrt();
         }
 
         if res_norm <= tol {
-            return Ok(SolveResult { converged: true, iterations: iter + 1, final_residual: res_norm });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: res_norm,
+            });
         }
 
         // Jacobi preconditioner
         if let Some(d) = diag {
-            for i in 0..n { z[i] = r[i] / d[i].max(1e-32); }
+            for i in 0..n {
+                z[i] = r[i] / d[i].max(1e-32);
+            }
         } else {
             z.copy_from_slice(&r);
         }
 
         let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
         let beta = rz_new / rz;
-        for i in 0..n { p[i] = z[i] + beta * p[i]; }
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
         rz = rz_new;
     }
 
-    Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: res_norm })
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
 }
 
 /// PCG with both operator and preconditioner as closures.
@@ -481,20 +665,25 @@ where
 
     let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
     let print_iter = cfg.effective_print_level() >= PrintLevel::Iterations;
-    let norm0 = z.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-32);
-    let mut z_norm = norm0;
-    let tol = cfg.atol.max(cfg.rtol * norm0);
+    // MFEM CGSolver convergence test: nom = (B r, r) = (z, r); converged when
+    // nom <= max(rtol^2 * nom0, atol^2)  (cg.cpp).  Using |z| (as before)
+    // mis-stops the iteration whenever |P r| and (P r, r) differ, which broke
+    // the block-diagonal DPG preconditioner in ex8 (200 iterations, no
+    // convergence, vs MFEM 28).
+    let nom0 = rz.max(1e-32);
+    let mut nom = rz;
+    let tol_sq = (cfg.atol * cfg.atol).max(cfg.rtol * cfg.rtol * nom0);
     if print_iter {
         println!("   Iteration : {:>3}  (B r, r) = {}", 0, fmt_g(rz));
     }
-    if z_norm <= tol {
+    if nom <= tol_sq {
         if print_iter {
             println!("Average reduction factor = {:.6}", 1.0);
         }
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
-            final_residual: z_norm,
+            final_residual: nom.sqrt(),
         });
     }
 
@@ -517,21 +706,25 @@ where
         // Compute updated preconditioned residual for convergence and log
         precond(&r, &mut z);
         let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
-        z_norm = z.iter().map(|v| v * v).sum::<f64>().sqrt();
+        nom = rz_new;
 
         if print_iter {
-            println!("   Iteration : {:>3}  (B r, r) = {}", iter + 1, fmt_g(rz_new));
+            println!(
+                "   Iteration : {:>3}  (B r, r) = {}",
+                iter + 1,
+                fmt_g(rz_new)
+            );
         }
 
-        if z_norm <= tol {
+        if nom <= tol_sq {
             if print_iter {
-                let avg = (z_norm / norm0).powf(1.0 / (iter + 1) as f64);
+                let avg = (nom / nom0).powf(0.5 / (iter + 1) as f64);
                 println!("Average reduction factor = {:.6}", avg);
             }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter + 1,
-                final_residual: z_norm,
+                final_residual: nom.sqrt(),
             });
         }
 
@@ -544,7 +737,7 @@ where
 
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
-        residual: z_norm,
+        residual: nom,
     })
 }
 
@@ -655,12 +848,15 @@ where
             // Apply existing Givens rotations.
             for i in 0..j {
                 let tmp = cs[i] * h[i * restart + j] + sn[i] * h[(i + 1) * restart + j];
-                h[(i + 1) * restart + j] = -sn[i] * h[i * restart + j] + cs[i] * h[(i + 1) * restart + j];
+                h[(i + 1) * restart + j] =
+                    -sn[i] * h[i * restart + j] + cs[i] * h[(i + 1) * restart + j];
                 h[i * restart + j] = tmp;
             }
 
             // Build and apply new Givens rotation.
-            let denom = (h[j * restart + j] * h[j * restart + j] + h[(j + 1) * restart + j] * h[(j + 1) * restart + j]).sqrt();
+            let denom = (h[j * restart + j] * h[j * restart + j]
+                + h[(j + 1) * restart + j] * h[(j + 1) * restart + j])
+                .sqrt();
             if denom > 1e-32 {
                 cs[j] = h[j * restart + j] / denom;
                 sn[j] = h[(j + 1) * restart + j] / denom;
@@ -922,13 +1118,17 @@ where
     let mut z = DenseVec::zeros(n);
     precond.apply_precond(&r, &mut z);
 
-    let gamma0 = r.dot(&z);            // (B r₀, r₀)
+    let gamma0 = r.dot(&z); // (B r₀, r₀)
     if gamma0 == 0.0 {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: 0.0,
+        });
     }
 
     let tol = rtol * gamma0;
-    let mut p = z.clone();            // p₀ = z₀
+    let mut p = z.clone(); // p₀ = z₀
     let mut gamma = gamma0;
     let mut w = DenseVec::zeros(n);
 
@@ -941,12 +1141,12 @@ where
         la.apply(&p, &mut w);
 
         let alpha = gamma / p.dot(&w);
-        lx.axpy(alpha, &p);            // x ← x + α·p
-        r.axpy(-alpha, &w);            // r ← r − α·w
+        lx.axpy(alpha, &p); // x ← x + α·p
+        r.axpy(-alpha, &w); // r ← r − α·w
 
-        precond.apply_precond(&r, &mut z);  // z = M⁻¹·r
+        precond.apply_precond(&r, &mut z); // z = M⁻¹·r
 
-        let gamma_new = r.dot(&z);      // (B r_{k+1}, r_{k+1})
+        let gamma_new = r.dot(&z); // (B r_{k+1}, r_{k+1})
 
         if verbose {
             eprintln!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(gamma_new));
@@ -960,7 +1160,11 @@ where
                 let avg = (gamma_new / gamma0).powf(0.5 / iter as f64);
                 eprintln!("Average reduction factor = {}", fmt_g(avg));
             }
-            return Ok(SolveResult { converged: true, iterations: iter, final_residual });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter,
+                final_residual,
+            });
         }
 
         let beta = gamma_new / gamma;
@@ -972,7 +1176,10 @@ where
     }
 
     x.copy_from_slice(lx.as_slice());
-    Err(SolverError::ConvergenceFailed { max_iter, residual: gamma.sqrt() })
+    Err(SolverError::ConvergenceFailed {
+        max_iter,
+        residual: gamma.sqrt(),
+    })
 }
 
 /// Preconditioned CG with a user-supplied preconditioner.
@@ -1007,7 +1214,13 @@ where
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
+        .solve(
+            &la,
+            Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>),
+            &lb,
+            &mut lx,
+            &cfg.to_linlvo(),
+        )
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1034,7 +1247,13 @@ where
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = Gmres::<T>::new(restart)
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
+        .solve(
+            &la,
+            Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>),
+            &lb,
+            &mut lx,
+            &cfg.to_linlvo(),
+        )
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1063,7 +1282,13 @@ where
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
     let res = Fgmres::<T>::new(restart)
-        .solve(&la, Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>), &lb, &mut lx, &cfg.to_linlvo())
+        .solve(
+            &la,
+            Some(precond as &dyn Preconditioner<Vector = DenseVec<T>>),
+            &lb,
+            &mut lx,
+            &cfg.to_linlvo(),
+        )
         .map_err(SolverError::from)?;
     x.copy_from_slice(lx.as_slice());
     Ok(into_result(res))
@@ -1075,19 +1300,19 @@ where
 ///
 /// `fill_level = 0` reproduces ILU(0); increase for harder problems.
 pub fn solve_gmres_iluk<T: linlvoScalar>(
-    a:          &FemCsr<T>,
-    b:          &[T],
-    x:          &mut [T],
-    restart:    usize,
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
     fill_level: usize,
-    cfg:        &SolverConfig,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IlukPrecond::from_csr(&la, fill_level)
-        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec =
+        IlukPrecond::from_csr(&la, fill_level).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1101,20 +1326,20 @@ pub fn solve_gmres_iluk<T: linlvoScalar>(
 /// * `tau`    — relative drop tolerance (0.0 = keep all, 0.01 = aggressive)
 /// * `p_fill` — max off-diagonal fill per row in L and U
 pub fn solve_gmres_ilut<T: linlvoScalar>(
-    a:      &FemCsr<T>,
-    b:      &[T],
-    x:      &mut [T],
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
     restart: usize,
-    tau:    f64,
+    tau: f64,
     p_fill: usize,
-    cfg:    &SolverConfig,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IlutPrecond::from_csr(&la, tau, p_fill)
-        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec =
+        IlutPrecond::from_csr(&la, tau, p_fill).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Gmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1127,18 +1352,18 @@ pub fn solve_gmres_ilut<T: linlvoScalar>(
 ///
 /// `fill_level = 0` reproduces `solve_pcg_ilu0`.
 pub fn solve_pcg_iluk<T: linlvoScalar>(
-    a:          &FemCsr<T>,
-    b:          &[T],
-    x:          &mut [T],
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
     fill_level: usize,
-    cfg:        &SolverConfig,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IlukPrecond::from_csr(&la, fill_level)
-        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec =
+        IlukPrecond::from_csr(&la, fill_level).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let res = ConjugateGradient::<T>::default()
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
         .map_err(SolverError::from)?;
@@ -1151,20 +1376,20 @@ pub fn solve_pcg_iluk<T: linlvoScalar>(
 /// FGMRES tolerates a variable preconditioner; useful when the inner ILUT
 /// solve is itself iterative or when the preconditioner changes between steps.
 pub fn solve_fgmres_ilut<T: linlvoScalar>(
-    a:      &FemCsr<T>,
-    b:      &[T],
-    x:      &mut [T],
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
     restart: usize,
-    tau:    f64,
+    tau: f64,
     p_fill: usize,
-    cfg:    &SolverConfig,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
     let lb = DenseVec::from_vec(b.to_vec());
     let mut lx = DenseVec::from_vec(x.to_vec());
-    let prec = IlutPrecond::from_csr(&la, tau, p_fill)
-        .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+    let prec =
+        IlutPrecond::from_csr(&la, tau, p_fill).map_err(|e| SolverError::Linlvo(e.to_string()))?;
     let solver = Fgmres::<T>::new(restart);
     let res = solver
         .solve(&la, Some(&prec), &lb, &mut lx, &cfg.to_linlvo())
@@ -1191,7 +1416,11 @@ pub fn solve_minres(
 ) -> Result<SolveResult, SolverError> {
     let n = a.nrows;
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
     }
     solve_minres_impl(n, |z, w| a.spmv(z, w), b, x, cfg)
 }
@@ -1213,7 +1442,11 @@ where
     F: Fn(&[f64], &mut [f64]),
 {
     if nrows != ncols || b.len() != nrows || x.len() != ncols {
-        return Err(SolverError::DimensionMismatch { rows: nrows, cols: ncols, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: nrows,
+            cols: ncols,
+            rhs: b.len(),
+        });
     }
     solve_minres_impl(nrows, apply, b, x, cfg)
 }
@@ -1236,37 +1469,45 @@ where
     let mut ax = vec![0.0; n];
     apply(x, &mut ax);
     let mut r = vec![0.0; n];
-    for i in 0..n { r[i] = b[i] - ax[i]; }
+    for i in 0..n {
+        r[i] = b[i] - ax[i];
+    }
 
     let norm_b = norm(b);
     let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
     let mut res_norm = norm(&r);
     if res_norm <= tol {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: res_norm });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
     }
 
     // ── Lanczos vectors (contiguous: v[iter * n + i]) ──────────────────
     // V[0] = v_0 = 0 (placeholder), V[1] = v_1 = r₀ / ‖r₀‖
     let max_vecs = cfg.max_iter + 2;
-    let mut v = vec![0.0_f64; max_vecs * n];  // single allocation
-    // v₀ = 0 already (zero-initialised)
+    let mut v = vec![0.0_f64; max_vecs * n]; // single allocation
+                                             // v₀ = 0 already (zero-initialised)
     {
         let inv = 1.0 / res_norm;
-        for i in 0..n { v[1 * n + i] = r[i] * inv; }
+        for i in 0..n {
+            v[1 * n + i] = r[i] * inv;
+        }
     }
 
     // Tricliagonal coefficients: α[1..k], β[0..k]  (β[0] = 0)
     let mut alpha: Vec<f64> = Vec::new();
-    let mut beta:  Vec<f64> = vec![0.0];          // β₀
+    let mut beta: Vec<f64> = vec![0.0]; // β₀
 
     // QR factorisation of T̃_k:
-    let mut r_sup2: Vec<f64> = Vec::new();   // R_{k-2,k}
-    let mut r_sup1: Vec<f64> = Vec::new();   // R_{k-1,k}
-    let mut r_diag: Vec<f64> = Vec::new();   // R_{k,k} = ρ_k
+    let mut r_sup2: Vec<f64> = Vec::new(); // R_{k-2,k}
+    let mut r_sup1: Vec<f64> = Vec::new(); // R_{k-1,k}
+    let mut r_diag: Vec<f64> = Vec::new(); // R_{k,k} = ρ_k
 
     // Givens rotation history
-    let mut cs_old   = 1.0_f64;
-    let mut sn_old   = 0.0_f64;
+    let mut cs_old = 1.0_f64;
+    let mut sn_old = 0.0_f64;
     let mut cs_older = 1.0_f64;
     let mut sn_older = 0.0_f64;
 
@@ -1289,18 +1530,20 @@ where
 
         if bk > 1e-32 {
             let inv = 1.0 / bk;
-            for i in 0..n { v[(iter + 1) * n + i] = r[i] * inv; }
+            for i in 0..n {
+                v[(iter + 1) * n + i] = r[i] * inv;
+            }
         } else {
             // v_{k+1} = 0 (already zero-initialised)
         }
 
         // ── Apply Givens QR to column k of T̃_k ────────────────────────
         let zeta_sup2 = sn_older * beta[iter - 1];
-        let zeta_sub  = cs_older * beta[iter - 1];
+        let zeta_sub = cs_older * beta[iter - 1];
         r_sup2.push(zeta_sup2);
 
         let zeta_sup1 = cs_old * zeta_sub + sn_old * ak;
-        let diag_in   = -sn_old * zeta_sub + cs_old * ak;
+        let diag_in = -sn_old * zeta_sub + cs_old * ak;
         r_sup1.push(zeta_sup1);
 
         let rk = (diag_in * diag_in + bk * bk).sqrt();
@@ -1324,17 +1567,29 @@ where
             let mut y = vec![0.0; k];
             for i in (0..k).rev() {
                 let mut s = g[i];
-                if i + 1 < k { s -= r_sup1[i + 1] * y[i + 1]; }
-                if i + 2 < k { s -= r_sup2[i + 2] * y[i + 2]; }
+                if i + 1 < k {
+                    s -= r_sup1[i + 1] * y[i + 1];
+                }
+                if i + 2 < k {
+                    s -= r_sup2[i + 2] * y[i + 2];
+                }
                 y[i] = s / r_diag[i];
             }
             // x = V_k y = Σ y_j * v_j  (contiguous access)
-            for i in 0..n { x[i] = 0.0; }
+            for i in 0..n {
+                x[i] = 0.0;
+            }
             for j in 0..k {
                 let vj = &v[(j + 1) * n..(j + 2) * n];
-                for i in 0..n { x[i] += y[j] * vj[i]; }
+                for i in 0..n {
+                    x[i] += y[j] * vj[i];
+                }
             }
-            return Ok(SolveResult { converged: true, iterations: iter, final_residual: res_norm });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter,
+                final_residual: res_norm,
+            });
         }
 
         // ── Shift Givens history ─────────────────────────────────────────
@@ -1344,7 +1599,10 @@ where
         sn_old = snk;
     }
 
-    Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: res_norm })
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
 }
 
 /// MINRES with Jacobi (diagonal) preconditioning.
@@ -1363,7 +1621,11 @@ pub fn solve_minres_jacobi(
 ) -> Result<SolveResult, SolverError> {
     let n = a.nrows;
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
     }
 
     // 1. Extract Jacobi scaling: s[i] = 1 / sqrt(|A[i,i]|)
@@ -1378,22 +1640,30 @@ pub fn solve_minres_jacobi(
         // tmp = A * (s ⊙ y)
         let mut tmp = vec![0.0; n];
         let mut sy = vec![0.0; n];
-        for i in 0..n { sy[i] = y[i] * s[i]; }
+        for i in 0..n {
+            sy[i] = y[i] * s[i];
+        }
         a.spmv(&sy, &mut tmp);
         // z = s ⊙ tmp  (i.e., z = s ⊙ (A * (s ⊙ y)))
-        for i in 0..n { z[i] = s[i] * tmp[i]; }
+        for i in 0..n {
+            z[i] = s[i] * tmp[i];
+        }
     };
 
     // 3. Scale RHS: b'[i] = s[i] * b[i]
     let mut bs = vec![0.0; n];
-    for i in 0..n { bs[i] = s[i] * b[i]; }
+    for i in 0..n {
+        bs[i] = s[i] * b[i];
+    }
 
     // 4. Solve A' * y = b' using the existing MINRES implementation
     let mut y = x.to_vec();
     match solve_minres_impl(n, apply_scaled, &bs, &mut y, cfg) {
         Ok(res) => {
             // 5. Unscale: x[i] = s[i] * y[i]
-            for i in 0..n { x[i] = s[i] * y[i]; }
+            for i in 0..n {
+                x[i] = s[i] * y[i];
+            }
             Ok(res)
         }
         Err(e) => Err(e),
@@ -1423,7 +1693,11 @@ pub fn solve_gcr(
 ) -> Result<SolveResult, SolverError> {
     let n = a.nrows;
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
     }
     if restart == 0 {
         return Err(SolverError::Linlvo("GCR restart must be > 0".into()));
@@ -1445,7 +1719,11 @@ where
     F: Fn(&[f64], &mut [f64]),
 {
     if nrows != ncols || b.len() != nrows || x.len() != ncols {
-        return Err(SolverError::DimensionMismatch { rows: nrows, cols: ncols, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: nrows,
+            cols: ncols,
+            rhs: b.len(),
+        });
     }
     if restart == 0 {
         return Err(SolverError::Linlvo("GCR restart must be > 0".into()));
@@ -1481,13 +1759,19 @@ where
     let mut r = vec![0.0; n];
     let mut ax = vec![0.0; n];
     apply(x, &mut ax);
-    for i in 0..n { r[i] = b[i] - ax[i]; }
+    for i in 0..n {
+        r[i] = b[i] - ax[i];
+    }
 
     let norm_b = norm(b);
     let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
     let mut res_norm = norm(&r);
     if res_norm <= tol {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: res_norm });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: res_norm,
+        });
     }
 
     let mut total_iters = 0usize;
@@ -1496,19 +1780,23 @@ where
     loop {
         // Storage for one cycle
         let m = restart;
-        let mut pp: Vec<Vec<f64>> = Vec::with_capacity(m);   // search directions
-        let mut ap: Vec<Vec<f64>> = Vec::with_capacity(m);   // A·p
+        let mut pp: Vec<Vec<f64>> = Vec::with_capacity(m); // search directions
+        let mut ap: Vec<Vec<f64>> = Vec::with_capacity(m); // A·p
 
         // ── Inner Krylov construction ────────────────────────────────────
         for _inner in 0..m {
-            if total_iters >= cfg.max_iter { break; }
+            if total_iters >= cfg.max_iter {
+                break;
+            }
 
             // p = r — full orthogonalisation against previous p's
             let mut p = r_work.clone();
             for j in 0..pp.len() {
                 let beta = -dot(&p, &ap[j]) / dot(&ap[j], &ap[j]);
                 if beta.is_finite() {
-                    for i in 0..n { p[i] += beta * pp[j][i]; }
+                    for i in 0..n {
+                        p[i] += beta * pp[j][i];
+                    }
                 }
             }
 
@@ -1525,9 +1813,13 @@ where
             let alpha = dot(r_work, &apj) / ap_sq;
 
             // x += α·p
-            for i in 0..n { x[i] += alpha * p[i]; }
+            for i in 0..n {
+                x[i] += alpha * p[i];
+            }
             // r = r − α·Ap
-            for i in 0..n { r_work[i] -= alpha * apj[i]; }
+            for i in 0..n {
+                r_work[i] -= alpha * apj[i];
+            }
 
             pp.push(p);
             ap.push(apj);
@@ -1535,20 +1827,184 @@ where
             total_iters += 1;
             res_norm = norm(r_work);
             if res_norm <= tol {
-                return Ok(SolveResult { converged: true, iterations: total_iters, final_residual: res_norm });
+                return Ok(SolveResult {
+                    converged: true,
+                    iterations: total_iters,
+                    final_residual: res_norm,
+                });
             }
         }
 
-        if total_iters >= cfg.max_iter { break; }
+        if total_iters >= cfg.max_iter {
+            break;
+        }
 
         // ── Restart: r = b − A·x (to avoid drift from rounding) ──────────
         apply(x, &mut ax);
-        for i in 0..n { r_work[i] = b[i] - ax[i]; }
+        for i in 0..n {
+            r_work[i] = b[i] - ax[i];
+        }
         res_norm = norm(r_work);
         if res_norm <= tol {
-            return Ok(SolveResult { converged: true, iterations: total_iters, final_residual: res_norm });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: total_iters,
+                final_residual: res_norm,
+            });
         }
     }
 
-    Err(SolverError::ConvergenceFailed { max_iter: cfg.max_iter, residual: res_norm })
+    Err(SolverError::ConvergenceFailed {
+        max_iter: cfg.max_iter,
+        residual: res_norm,
+    })
+}
+
+/// MINRES with an SPD preconditioner — bit-for-bit port of MFEM's
+/// `MINRESSolver::Mult` (van der Vorst, "Iterative Krylov Methods", Fig. 6.9,
+/// extended to support an SPD preconditioner via split preconditioning).
+///
+/// Preconditioning: `z = M⁻¹ v`; the energy inner product is `(z, v)` and the
+/// residual norm is `||r||_B = sqrt((M⁻¹ r, r))`.  Convergence test:
+/// `|eta| <= max(rel_tol·eta0, abs_tol)` where `eta0 = ||b||_B`.
+///
+/// # Arguments
+/// * `a`     — the operator (symmetric, possibly indefinite).
+/// * `prec`  — SPD preconditioner: `prec(z, r)` sets `z = M⁻¹ r`.
+/// * `b`     — right-hand side.
+/// * `x`     — on entry: initial guess (MFEM `iterative_mode=false` in the
+///   global `MINRES()` helper, so ex40 starts from x = 0); on exit: solution.
+/// * `cfg`   — convergence config.  Note the global MFEM `MINRES(...)` helper
+///   passes `rtol = sqrt(user_rtol)` to `MINRESSolver`, so to match
+///   `MINRES(A, M, b, x, 0, 2000, 1e-12)` pass `cfg.rtol = 1e-6`, `atol = 0`.
+pub fn solve_minres_precond(
+    a: &FemCsr<f64>,
+    prec: &dyn Fn(&[f64], &mut [f64]),
+    b: &[f64],
+    x: &mut [f64],
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError> {
+    let n = a.nrows;
+    if b.len() != n || x.len() != n {
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
+    }
+    // MFEM MINRESSolver::Mult with iterative_mode = true (the default for
+    // IterativeSolver): r = b − A·x with the incoming x as initial guess.
+    let mut v1 = vec![0.0_f64; n];
+    {
+        let mut ax = vec![0.0_f64; n];
+        a.spmv(x, &mut ax);
+        for i in 0..n {
+            v1[i] = b[i] - ax[i];
+        }
+    }
+    let mut u1 = vec![0.0_f64; n]; // z = M⁻¹ v1 (only used when prec != None)
+    let mut q = vec![0.0_f64; n];
+    let mut v0 = vec![0.0_f64; n];
+    let mut w0 = vec![0.0_f64; n];
+    let mut w1 = vec![0.0_f64; n];
+
+    prec(&v1, &mut u1); // u1 = M⁻¹ v1 (MFEM: prec->Mult(v1, u1))
+    let mut eta = (dot(&u1, &v1)).sqrt();
+    let norm_goal = cfg.atol.max(cfg.rtol * eta);
+
+    let mut gamma0 = 1.0_f64;
+    let mut gamma1 = 1.0_f64;
+    let mut sigma0 = 0.0_f64;
+    let mut sigma1 = 0.0_f64;
+    let mut beta = eta;
+
+    let mut it = 0usize;
+    let mut converged = eta <= norm_goal;
+
+    if !converged {
+        for it_ in 1..=cfg.max_iter {
+            it = it_;
+            // v1 /= beta; u1 /= beta
+            let inv_beta = 1.0 / beta;
+            for i in 0..n {
+                v1[i] *= inv_beta;
+                u1[i] *= inv_beta;
+            }
+            // q = A z, z = u1
+            a.spmv(&u1, &mut q);
+            let alpha = dot(&u1, &q);
+            if it > 1 {
+                // q -= beta v0
+                for i in 0..n {
+                    q[i] -= beta * v0[i];
+                }
+            }
+            // q = q - alpha v1  (store result in v0)
+            for i in 0..n {
+                v0[i] = q[i] - alpha * v1[i];
+            }
+
+            let delta = gamma1 * alpha - gamma0 * sigma1 * beta;
+            let rho3 = sigma0 * beta;
+            let rho2 = sigma1 * alpha + gamma0 * gamma1 * beta;
+            // beta = sqrt((M⁻¹ v0, v0))
+            prec(&v0, &mut q);
+            beta = (dot(&v0, &q)).sqrt();
+            let rho1 = (delta * delta + beta * beta).sqrt();
+
+            if it == 1 {
+                // w0 = z / rho1
+                for i in 0..n {
+                    w0[i] = u1[i] / rho1;
+                }
+            } else if it == 2 {
+                // w0 = z/rho1 - rho2/rho1 w1
+                for i in 0..n {
+                    w0[i] = u1[i] / rho1 - (rho2 / rho1) * w1[i];
+                }
+            } else {
+                // w0 = -rho3/rho1 w0 - rho2/rho1 w1 + z/rho1
+                for i in 0..n {
+                    w0[i] = -(rho3 / rho1) * w0[i] - (rho2 / rho1) * w1[i] + u1[i] / rho1;
+                }
+            }
+
+            gamma0 = gamma1;
+            gamma1 = delta / rho1;
+
+            // x += gamma1 * eta * w0
+            let coeff = gamma1 * eta;
+            for i in 0..n {
+                x[i] += coeff * w0[i];
+            }
+
+            sigma0 = sigma1;
+            sigma1 = beta / rho1;
+            eta = -sigma1 * eta;
+
+            if eta.abs() <= norm_goal {
+                converged = true;
+                break;
+            }
+
+            // Swap(u1, q)  → u1 now holds the latest M⁻¹v0 (= q)
+            std::mem::swap(&mut u1, &mut q);
+            // Swap(v0, v1); Swap(w0, w1)
+            std::mem::swap(&mut v0, &mut v1);
+            std::mem::swap(&mut w0, &mut w1);
+        }
+    }
+
+    if converged {
+        Ok(SolveResult {
+            converged: true,
+            iterations: it,
+            final_residual: eta.abs(),
+        })
+    } else {
+        Err(SolverError::ConvergenceFailed {
+            max_iter: cfg.max_iter,
+            residual: eta.abs(),
+        })
+    }
 }

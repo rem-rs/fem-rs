@@ -87,62 +87,17 @@ impl<M: MeshTopology> DpgTraceSpace<M> {
         let dpf = (order as usize + 1).max(1);
         let dim = mesh.dim() as usize;
 
-        // ── Step 1: enumerate boundary faces ────────────────────────────────
-        let n_bfaces = mesh.n_boundary_faces() as usize;
-        let mut bdr_face_key_to_idx: HashMap<Vec<u32>, (usize, Vec<u32>)> = HashMap::new();
-        let mut bdr_face_info: Vec<FaceInfo> = Vec::with_capacity(n_bfaces);
-
-        {
-            // Build a face-key → boundary-face-index map for boundary detection.
-            // Also store boundary face element-adjacency in face_info.
-            let mut sorted_to_idx: HashMap<Vec<u32>, usize> = HashMap::new();
-
-            // First pass: collect boundary face node sets sorted.
-            for bf in 0..n_bfaces as u32 {
-                let nodes = mesh.face_nodes(bf).to_vec();
-                let mut key: Vec<u32> = nodes.clone();
-                key.sort_unstable();
-                sorted_to_idx.insert(key, bf as usize);
-            }
-
-            // Second pass: match element faces to boundary faces.
-            // This gives us the element and local-face-index for each boundary face.
-            // We use sentinel to track which boundary faces we have matched.
-            let mut matched = vec![false; n_bfaces];
-
-            for e in mesh.elem_iter() {
-                let en = mesh.element_nodes(e);
-                let local_faces = local_faces_of_element(en, dim);
-                for (li, lf_nodes) in local_faces.iter().enumerate() {
-                    let mut key: Vec<u32> = lf_nodes.iter().map(|&k| en[k]).collect();
-                    key.sort_unstable();
-                    if let Some(&bf_idx) = sorted_to_idx.get(&key) {
-                        if !matched[bf_idx] {
-                            matched[bf_idx] = true;
-                            let face_nodes: Vec<u32> = lf_nodes.iter().map(|&k| en[k]).collect();
-                            let fn_copy = face_nodes.clone();
-                            bdr_face_info.push(FaceInfo::Boundary {
-                                elem: e,
-                                local_face: li,
-                                nodes: fn_copy,
-                            });
-                            bdr_face_key_to_idx.insert(key.clone(), (bf_idx, face_nodes));
-                        }
-                    }
-                }
-            }
-
-            // Any unmatched boundary faces? (should not happen in a valid mesh)
-            debug_assert!(
-                matched.iter().all(|&m| m),
-                "DpgTraceSpace: {} unmatched boundary faces",
-                matched.iter().filter(|&&m| !m).count()
-            );
-        }
-
-        // ── Step 2: enumerate interior faces via edge-key hash map ───────────
-        let mut edge_map: HashMap<Vec<u32>, (u32, usize, Vec<u32>)> = HashMap::new();
-        let mut interior_faces: Vec<FaceInfo> = Vec::new();
+        // ── Step 1: enumerate ALL faces in element-traversal order ─────────
+        // MFEM's RT_Trace_FECollection trace DOFs follow the mesh *edge*
+        // table numbering (GetVertexToVertexTable: first-encounter order
+        // while walking elements 0..NE), NOT "boundary faces first".
+        // The old boundary-first ordering misnumbered the trace DOFs — the
+        // 20 boundary edges took DOFs 0..19 so every interior edge shifted,
+        // scrambling Bhat columns versus MFEM (ex8 comparison).
+        let mut face_map: HashMap<Vec<u32>, usize> = HashMap::new(); // sorted key → face id
+        let mut face_info: Vec<FaceInfo> = Vec::new();
+        let mut first_seen: Vec<(u32, usize, Vec<u32>)> = Vec::new(); // (elem, local_face, nodes)
+        let mut n_boundary = 0usize;
 
         for e in mesh.elem_iter() {
             let en = mesh.element_nodes(e);
@@ -151,37 +106,44 @@ impl<M: MeshTopology> DpgTraceSpace<M> {
                 let unsorted: Vec<u32> = lf_nodes.iter().map(|&k| en[k]).collect();
                 let mut key: Vec<u32> = unsorted.clone();
                 key.sort_unstable();
-
-                // Skip faces that are boundary faces.
-                if bdr_face_key_to_idx.contains_key(&key) {
-                    continue;
-                }
-
-                match edge_map.remove(&key) {
-                    None => {
-                        edge_map.insert(key, (e, li, unsorted));
+                match face_map.get(&key) {
+                    Some(&fid) => {
+                        // Second encounter → this is an interior face.  It was
+                        // tentatively recorded as boundary on first sight.
+                        if let FaceInfo::Boundary { .. } = face_info[fid] {
+                            let (e1, l1, ref n1) = first_seen[fid];
+                            // Keep the FIRST-seen node order: MFEM's face
+                            // direction is the first-encounter edge direction
+                            // (GetVertexToVertexTable walk), and the RT0
+                            // trace DOF sign is derived from that direction.
+                            face_info[fid] = FaceInfo::Interior {
+                                elem_l: e1, elem_r: e,
+                                local_l: l1, local_r: li,
+                                nodes: n1.clone(),
+                            };
+                            n_boundary -= 1;
+                        }
+                        // Third+ encounter (non-manifold): keep first Interior.
                     }
-                    Some((other_e, other_li, _other_unsorted)) => {
-                        interior_faces.push(FaceInfo::Interior {
-                            elem_l: other_e,
-                            elem_r: e,
-                            local_l: other_li,
-                            local_r: li,
-                            nodes: unsorted,
+                    None => {
+                        let fid = face_info.len();
+                        face_map.insert(key, fid);
+                        first_seen.push((e, li, unsorted.clone()));
+                        face_info.push(FaceInfo::Boundary {
+                            elem: e, local_face: li, nodes: unsorted,
                         });
+                        n_boundary += 1;
                     }
                 }
             }
         }
 
-        let n_ifaces = interior_faces.len();
-        let total_faces = n_bfaces + n_ifaces;
+        let n_faces = face_info.len();
 
-        // ── Step 3: assign DOFs ─────────────────────────────────────────────
-        let mut face_dofs = vec![u32::MAX; total_faces * dpf];
+        // ── Step 2: assign DOFs (consecutive per face, traversal order) ────
+        let mut face_dofs = vec![u32::MAX; n_faces * dpf];
         let mut next_dof = 0u32;
-
-        for f in 0..total_faces {
+        for f in 0..n_faces {
             let base = f * dpf;
             for k in 0..dpf {
                 face_dofs[base + k] = next_dof;
@@ -189,33 +151,22 @@ impl<M: MeshTopology> DpgTraceSpace<M> {
             }
         }
 
-        // ── Step 4: build per-element face-DOF concatenation ─────────────────
+        // ── Step 3: build per-element face-DOF concatenation ─────────────────
         let n_elems = mesh.n_elements() as usize;
         let mut elem_face_dofs = vec![Vec::new(); n_elems];
-
-        // Boundary faces
-        for (fi, info) in bdr_face_info.iter().enumerate() {
-            if let FaceInfo::Boundary { elem, .. } = info {
-                let base = fi * dpf;
-                let dofs = &face_dofs[base..base + dpf];
-                elem_face_dofs[*elem as usize].extend_from_slice(dofs);
-            }
-        }
-
-        // Interior faces
-        for (local_i, info) in interior_faces.iter().enumerate() {
-            let fi = n_bfaces + local_i;
+        for (fi, info) in face_info.iter().enumerate() {
             let base = fi * dpf;
             let dofs = &face_dofs[base..base + dpf];
-            if let FaceInfo::Interior { elem_l, elem_r, .. } = info {
-                elem_face_dofs[*elem_l as usize].extend_from_slice(dofs);
-                elem_face_dofs[*elem_r as usize].extend_from_slice(dofs);
+            match info {
+                FaceInfo::Boundary { elem, .. } => {
+                    elem_face_dofs[*elem as usize].extend_from_slice(dofs);
+                }
+                FaceInfo::Interior { elem_l, elem_r, .. } => {
+                    elem_face_dofs[*elem_l as usize].extend_from_slice(dofs);
+                    elem_face_dofs[*elem_r as usize].extend_from_slice(dofs);
+                }
             }
         }
-
-        // Combine face_info: boundary first, then interior.
-        let mut all_face_info = bdr_face_info;
-        all_face_info.extend(interior_faces);
 
         DpgTraceSpace {
             mesh,
@@ -223,9 +174,9 @@ impl<M: MeshTopology> DpgTraceSpace<M> {
             dofs_per_face: dpf,
             n_dofs: next_dof as usize,
             face_dofs,
-            n_boundary_faces: n_bfaces,
-            n_faces: total_faces,
-            face_info: all_face_info,
+            n_boundary_faces: n_boundary,
+            n_faces,
+            face_info,
             elem_face_dofs,
         }
     }

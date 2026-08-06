@@ -12,8 +12,8 @@ use std::marker::PhantomData;
 
 use fem_element::{
     ReferenceElement,
-    lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2},
-    quadrature::{tri_rule, quad_rule_arbitrary},
+    lagrange::{QuadL2GL, TriP1, TriP2, TriP3, QuadQ2},
+    quadrature::{tri_rule, quad_rule_01},
 };
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
@@ -45,7 +45,7 @@ fn ref_elem(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
+        (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         _ => panic!("SinvBuilder ref_elem: unsupported ({elem_type:?}, order={order})"),
     }
@@ -115,22 +115,19 @@ fn transform_grads(jit: &nalgebra::DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: 
 /// bilinear shape functions (1±ξ)(1±η)/4.
 /// Returns (J, det_J, J^{-T}).
 fn quad_jacobian(x: &[f64; 4], y: &[f64; 4], xi: f64, eta: f64) -> ([[f64; 2]; 2], f64, [[f64; 2]; 2]) {
-    // QuadQ1 shape function derivatives on [-1,1]²:
-    // N0=(1-ξ)(1-η)/4: ∂N0/∂ξ=-(1-η)/4, ∂N0/∂η=-(1-ξ)/4
-    // N1=(1+ξ)(1-η)/4: ∂N1/∂ξ= (1-η)/4, ∂N1/∂η=-(1+ξ)/4
-    // N2=(1+ξ)(1+η)/4: ∂N2/∂ξ= (1+η)/4, ∂N2/∂η= (1+ξ)/4
-    // N3=(1-ξ)(1+η)/4: ∂N3/∂ξ=-(1+η)/4, ∂N3/∂η= (1-ξ)/4
+    // QuadL2GL (Gauss-Legendre nodal) shape derivatives on [0,1]²:
+    // N0=(1-ξ)(1-η), N1=ξ(1-η), N2=ξη, N3=(1-ξ)η
     let dN_dxi = [
-        -(1.0 - eta) / 4.0,
-         (1.0 - eta) / 4.0,
-         (1.0 + eta) / 4.0,
-        -(1.0 + eta) / 4.0,
+        -(1.0 - eta),
+         (1.0 - eta),
+         eta,
+        -eta,
     ];
     let dN_deta = [
-        -(1.0 - xi) / 4.0,
-        -(1.0 + xi) / 4.0,
-         (1.0 + xi) / 4.0,
-         (1.0 - xi) / 4.0,
+        -(1.0 - xi),
+        -xi,
+         xi,
+         (1.0 - xi),
     ];
     let mut j = [[0.0; 2]; 2];
     for i in 0..4 {
@@ -164,13 +161,13 @@ impl<M: MeshTopology> SinvBuilder<M> {
             (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3usize),
             (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriP2) as Box<dyn ReferenceElement>, 6),
             (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriP3) as Box<dyn ReferenceElement>, 10),
-            (ElementType::Quad4, 1) => (Box::new(QuadQ1) as Box<dyn ReferenceElement>, 4),
+            (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4),
             (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9),
             _ => panic!("SinvBuilder: unsupported ({et:?}, order={order})"),
         };
         let qr = match et {
             ElementType::Tri3 | ElementType::Tri6 => tri_rule(qo),
-            ElementType::Quad4 => quad_rule_arbitrary(qo),
+            ElementType::Quad4 => quad_rule_01(qo),
             _ => panic!("SinvBuilder: unsupported {et:?}"),
         };
 

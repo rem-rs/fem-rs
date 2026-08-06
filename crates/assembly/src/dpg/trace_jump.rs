@@ -12,7 +12,7 @@
 use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement,
-    lagrange::{TriP1, TriP2, TriP3, QuadQ1, QuadQ2},
+    lagrange::{QuadL2GL, TriP1, TriP2, TriP3, QuadQ1, QuadQ2},
     quadrature::seg_rule_arbitrary,
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -49,13 +49,24 @@ fn eval_lagrange_1d(p: usize, xi: f64, phi: &mut [f64]) {
 
 // ─── Reference element helpers ───────────────────────────────────────────────
 
-fn ref_elem_for_space(elem_type: ElementType, order: u8) -> (Box<dyn ReferenceElement>, usize) {
+fn ref_elem_for_space(
+    elem_type: ElementType,
+    order: u8,
+) -> (Box<dyn ReferenceElement>, usize, bool) {
+    // `ref01` = whether the reference element lives on the [0,1]ⁿ domain
+    // (MFEM L2/Gauss-Legendre elements) vs the [-1,1]ⁿ domain (legacy
+    // QuadQk).  The face parameterisation must match.
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriP2) as Box<dyn ReferenceElement>, 6),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriP3) as Box<dyn ReferenceElement>, 10),
-        (ElementType::Quad4, 1) => (Box::new(QuadQ1) as Box<dyn ReferenceElement>, 4),
-        (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9),
+        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3, true),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriP2) as Box<dyn ReferenceElement>, 6, true),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriP3) as Box<dyn ReferenceElement>, 10, true),
+        // L2 P1 on quads uses Gauss-Legendre nodal basis (MFEM
+        // L2_FECollection default BasisType::GaussLegendre) on [0,1]² — NOT
+        // the equally-spaced QuadQ1.  Using QuadQ1 here made Bhat
+        // inconsistent with the test space used by B0 (0.0156 vs MFEM 0.683
+        // on ex8).
+        (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4, true),
+        (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9, false),
         _ => panic!("assemble_bhat ref_elem: unsupported ({elem_type:?}, order={order})"),
     }
 }
@@ -79,6 +90,18 @@ fn edge_xi_quad(lf: usize, xi: f64) -> (f64, f64) {
         1 => (1.0, 2.0 * xi - 1.0),
         2 => (1.0 - 2.0 * xi, 1.0),
         3 => (-1.0, 1.0 - 2.0 * xi),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Face parameterisation for reference elements on the [0,1]² domain
+/// (e.g. L2 Gauss-Legendre elements, matching MFEM's reference domain).
+fn edge_xi_quad_01(lf: usize, xi: f64) -> (f64, f64) {
+    match lf {
+        0 => (xi, 0.0),
+        1 => (1.0, xi),
+        2 => (1.0 - xi, 1.0),
+        3 => (0.0, 1.0 - xi),
         _ => (0.0, 0.0),
     }
 }
@@ -107,7 +130,7 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
     let dim = 2; // 2D only for now
     let elem_type = test_space.mesh().element_type(0);
     let test_order = test_space.order();
-    let (ref_elem, nt) = ref_elem_for_space(elem_type, test_order);
+    let (ref_elem, nt, ref01) = ref_elem_for_space(elem_type, test_order);
     let dpf = trace_space.dofs_per_face();
     let is_tri = matches!(elem_type, ElementType::Tri3 | ElementType::Tri6);
 
@@ -119,74 +142,69 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
     let mut phi = vec![0.0; nt];
     let mut trace_phi = vec![0.0; dpf];
 
-    //── Boundary faces ──────────────────────────────────────────────────────
-    for bf in 0..trace_space.n_boundary_faces() {
-        let info = trace_space.face_info(bf);
-        let (elem, local_face, face_len) = match info {
-            FaceInfo::Boundary { elem, local_face, .. } => (*elem, *local_face, {
-                let (_, len) = trace_space.face_normal(bf);
-                len
-            }),
-            _ => unreachable!(),
-        };
-        let test_dofs: Vec<usize> = test_space.element_dofs(elem).iter().map(|&d| d as usize).collect();
-        let trace_dofs: Vec<usize> = trace_space.face_dofs(bf).iter().map(|&d| d as usize).collect();
-        let npe = test_space.mesh().element_nodes(elem).len();
-
-        for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
-            let xi = xr[0];
-            let w = wr * face_len;
-            let (rx, ry) = if is_tri { edge_xi_tri(local_face, xi) } else { edge_xi_quad(local_face, xi) };
-            ref_elem.eval_basis(&[rx, ry], &mut phi);
-            eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
-
-            for i in 0..nt {
-                let gi = test_dofs[i];
-                for j in 0..dpf {
-                    coo.add(gi, trace_dofs[j], w * phi[i] * trace_phi[j]);
-                }
-            }
-        }
-    }
-
-    //── Interior faces ──────────────────────────────────────────────────────
-    for fi in trace_space.n_boundary_faces()..trace_space.n_faces() {
+    //── All faces (boundary + interior) in face-table order ─────────────────
+    for fi in 0..trace_space.n_faces() {
         let info = trace_space.face_info(fi);
-        let (elem_l, elem_r, local_l, local_r, face_len) = match info {
-            FaceInfo::Interior { elem_l, elem_r, local_l, local_r, .. } => {
-                let (_, len) = trace_space.face_normal(fi);
-                (*elem_l, *elem_r, *local_l, *local_r, len)
+        // RT0 trace DOF sign: MFEM encodes the face orientation in the
+        // GetFaceDofs sign (vdof < 0 → AddSubMatrix flips the column):
+        // sign = +1 when the face's node order matches the canonical
+        // (min→max) vertex order, -1 otherwise.
+        let face_sign = match info {
+            FaceInfo::Boundary { nodes, .. } | FaceInfo::Interior { nodes, .. } => {
+                if nodes[0] < nodes[1] { 1.0 } else { -1.0 }
             }
-            _ => unreachable!(),
         };
-        let dl: Vec<usize> = test_space.element_dofs(elem_l).iter().map(|&d| d as usize).collect();
-        let dr: Vec<usize> = test_space.element_dofs(elem_r).iter().map(|&d| d as usize).collect();
-        let trace_dofs: Vec<usize> = trace_space.face_dofs(fi).iter().map(|&d| d as usize).collect();
-        let npe_l = test_space.mesh().element_nodes(elem_l).len();
-        let npe_r = test_space.mesh().element_nodes(elem_r).len();
+        match info {
+            FaceInfo::Boundary { elem, local_face, .. } => {
+                let test_dofs: Vec<usize> = test_space.element_dofs(*elem).iter().map(|&d| d as usize).collect();
+                let trace_dofs: Vec<usize> = trace_space.face_dofs(fi).iter().map(|&d| d as usize).collect();
 
-        for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
-            let xi = xr[0];
-            let w = wr * face_len;
-            eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
+                for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
+                    let xi = xr[0];
+                    let w = wr * face_sign; // RT_Trace map_type=INTEGRAL: no physical Weight (MFEM TraceJumpIntegrator only multiplies for VALUE map types)
+                    let (rx, ry) = if is_tri { edge_xi_tri(*local_face, xi) } else if ref01 { edge_xi_quad_01(*local_face, xi) } else { edge_xi_quad(*local_face, xi) };
+                    ref_elem.eval_basis(&[rx, ry], &mut phi);
+                    eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
 
-            // Left element (+ sign, outward normal)
-            let (rxl, ryl) = if npe_l == 3 { edge_xi_tri(local_l, xi) } else { edge_xi_quad(local_l, xi) };
-            ref_elem.eval_basis(&[rxl, ryl], &mut phi);
-            for i in 0..nt {
-                let gi = dl[i];
-                for j in 0..dpf {
-                    coo.add(gi, trace_dofs[j], w * phi[i] * trace_phi[j]);
+                    for i in 0..nt {
+                        let gi = test_dofs[i];
+                        for j in 0..dpf {
+                            coo.add(gi, trace_dofs[j], w * phi[i] * trace_phi[j]);
+                        }
+                    }
                 }
             }
+            FaceInfo::Interior { elem_l, elem_r, local_l, local_r, .. } => {
+                let dl: Vec<usize> = test_space.element_dofs(*elem_l).iter().map(|&d| d as usize).collect();
+                let dr: Vec<usize> = test_space.element_dofs(*elem_r).iter().map(|&d| d as usize).collect();
+                let trace_dofs: Vec<usize> = trace_space.face_dofs(fi).iter().map(|&d| d as usize).collect();
+                let npe_l = test_space.mesh().element_nodes(*elem_l).len();
+                let npe_r = test_space.mesh().element_nodes(*elem_r).len();
 
-            // Right element (- sign, inward normal → trace jump convention)
-            let (rxr, ryr) = if npe_r == 3 { edge_xi_tri(local_r, 1.0 - xi) } else { edge_xi_quad(local_r, 1.0 - xi) };
-            ref_elem.eval_basis(&[rxr, ryr], &mut phi);
-            for i in 0..nt {
-                let gi = dr[i];
-                for j in 0..dpf {
-                    coo.add(gi, trace_dofs[j], -w * phi[i] * trace_phi[j]);
+                for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
+                    let xi = xr[0];
+                    let w = wr * face_sign; // RT_Trace map_type=INTEGRAL: no physical Weight (MFEM TraceJumpIntegrator only multiplies for VALUE map types)
+                    eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
+
+                    // Left element (+ sign, outward normal)
+                    let (rxl, ryl) = if npe_l == 3 { edge_xi_tri(*local_l, xi) } else if ref01 { edge_xi_quad_01(*local_l, xi) } else { edge_xi_quad(*local_l, xi) };
+                    ref_elem.eval_basis(&[rxl, ryl], &mut phi);
+                    for i in 0..nt {
+                        let gi = dl[i];
+                        for j in 0..dpf {
+                            coo.add(gi, trace_dofs[j], w * phi[i] * trace_phi[j]);
+                        }
+                    }
+
+                    // Right element (- sign, inward normal → trace jump convention)
+                    let (rxr, ryr) = if npe_r == 3 { edge_xi_tri(*local_r, 1.0 - xi) } else if ref01 { edge_xi_quad_01(*local_r, 1.0 - xi) } else { edge_xi_quad(*local_r, 1.0 - xi) };
+                    ref_elem.eval_basis(&[rxr, ryr], &mut phi);
+                    for i in 0..nt {
+                        let gi = dr[i];
+                        for j in 0..dpf {
+                            coo.add(gi, trace_dofs[j], -w * phi[i] * trace_phi[j]);
+                        }
+                    }
                 }
             }
         }

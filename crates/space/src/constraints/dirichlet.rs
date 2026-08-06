@@ -37,6 +37,52 @@ pub fn apply_dirichlet(
     }
 }
 
+/// Apply Dirichlet BCs with MFEM's `DIAG_ONE` policy: row/column elimination
+/// with the diagonal set to 1 and `rhs[i] = val[i]` (instead of keeping the
+/// diagonal like [`apply_dirichlet`]).
+///
+/// MFEM's plain `BilinearForm::EliminateEssentialBC(bdr)` (without a
+/// `diag_policy` argument) uses the form's `diag_policy` member, which for
+/// `BilinearForm` defaults to `DIAG_ONE` (ex8's S0 — ex8.cpp calls
+/// `S0->EliminateEssentialBC(ess_bdr)` and the resulting diagonal entries
+/// are 1).
+pub fn apply_dirichlet_diag_one(
+    mat:              &mut CsrMatrix<f64>,
+    rhs:              &mut [f64],
+    constrained_dofs: &[DofId],
+    values:           &[f64],
+) {
+    assert_eq!(constrained_dofs.len(), values.len(),
+        "constrained_dofs and values must have the same length");
+    for (&dof, &val) in constrained_dofs.iter().zip(values.iter()) {
+        // Row zeroing + column elimination + diagonal = 1 (DIAG_ONE).
+        let row = dof as usize;
+        let start = mat.row_ptr[row];
+        let end = mat.row_ptr[row + 1];
+        for k in start..end {
+            let other = mat.col_idx[k] as usize;
+            if other != row {
+                // rhs[other] -= A[other,row]·val (symmetric: A[row,other]).
+                let a_ij = mat.values[k];
+                if a_ij != 0.0 {
+                    rhs[other] -= a_ij * val;
+                    if let Some(pos) = mat.find_entry(other, row) {
+                        mat.values[pos] = 0.0;
+                    }
+                }
+            }
+        }
+        for k in start..end {
+            if mat.col_idx[k] as usize == row {
+                mat.values[k] = 1.0;
+            } else {
+                mat.values[k] = 0.0;
+            }
+        }
+        rhs[row] = val;
+    }
+}
+
 /// Apply Dirichlet BCs following MFEM's `FormLinearSystem` convention.
 ///
 /// Modifies the matrix and RHS in-place so that constrained DOFs are set

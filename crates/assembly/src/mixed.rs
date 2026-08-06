@@ -28,8 +28,7 @@ use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
 use crate::integrator::QpData;
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 
-#[cfg(feature = "parallel")]
-use crate::assembler::assembly_parallel_min_elems;
+use crate::assembler::{assembly_parallel_min_elems, ref_elem_vol_for_space};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -1113,7 +1112,9 @@ fn accumulate_mixed_volume_element<SR, SC>(
     let mut grad_phys_c = Vec::<f64>::new();
 
     let elem_type = mesh.element_type(e);
-    let ref_r = ref_elem_vol(elem_type, order_r).unwrap();
+    // L2/DG row spaces use the Gauss-Legendre nodal basis on [0,1]²
+    // (ref_elem_vol_l2 → QuadL2GL); H1 keeps the topological QuadQk.
+    let ref_r = ref_elem_vol_for_space(row_space, elem_type, order_r);
     let ref_c = ref_elem_vol(elem_type, order_c).unwrap();
     let n_r = ref_r.n_dofs();
     let n_c = ref_c.n_dofs();
