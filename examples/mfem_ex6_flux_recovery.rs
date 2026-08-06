@@ -141,33 +141,30 @@ fn main() {
 
         // Print ZZ estimator diagnostics.
         let gf = GridFunction::new(&space, u.clone());
-        let indicators = zz_estimator_nodal(&gf);
-
+        let indicators = zz_estimator_nodal(&gf, &hanging_constraints);
         // Check max DOFs.
         if cdofs > max_dofs {
             println!("Reached the maximum number of dofs. Stop.");
             break;
         }
 
-        // MFEM ThresholdRefiner with SetTotalErrorFraction(0.7):
-        // sort elements by error descending, mark the smallest set whose
-        // cumulative error sum reaches ≥ 70 % of total error.
-        let mut eta: Vec<(usize, f64)> = indicators.eta.iter().copied().enumerate().collect();
-        let eta_total: f64 = eta.iter().map(|(_, e)| e).sum();
-        // Sort descending by error.
-        eta.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let mut cum = 0.0_f64;
-        let threshold = 0.7 * eta_total;
-        let marked: Vec<u32> = eta.iter()
-            .take_while(|(_, e)| { cum += e; cum <= threshold })
-            .map(|(i, _)| *i as u32)
+        // MFEM ThresholdRefiner with SetTotalErrorFraction(0.7)
+        // (mesh_operators.cpp MarkWithoutRefining):
+        //   total_norm_p = infinity() (default) → total_err = max(err);
+        //   threshold = max(total_err * 0.7, local_err_goal) = 0.7 * max_err;
+        //   mark elements with local_err(el) > threshold (strict).
+        let max_err = indicators.eta.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let threshold = 0.7 * max_err;
+        let marked: Vec<u32> = indicators.eta.iter()
+            .enumerate()
+            .filter(|(_, e)| **e > threshold)
+            .map(|(i, _)| i as u32)
             .collect();
 
         if marked.is_empty() {
             println!("Stopping criterion satisfied. Stop.");
             break;
         }
-
         // Apply refiner to modify the mesh (MFEM refiner.Apply(mesh)).
         if is_quad {
             let (new_mesh, new_constraints) = refine_nonconforming_quad(&mesh, &marked.iter().map(|&i| i as u32).collect::<Vec<_>>(), None);
@@ -312,8 +309,12 @@ mod tests {
     fn ex6_zz_estimator_symmetry() {
         let (u, space) = solve_mms(16, 2);
         let gf = GridFunction::new(&space, u);
-        let ind = zz_estimator_nodal(&gf);
+        let ind = zz_estimator_nodal(&gf, &[]);
         assert!(ind.eta.iter().all(|&e| e >= 0.0), "ZZ indicators must be non-negative");
         assert!(ind.total_error > 0.0, "total error must be positive");
     }
 }
+
+// 临时调试
+#[allow(dead_code)]
+fn _hang_dbg() {}

@@ -463,7 +463,17 @@ where
 /// ```
 /// where `f = flux_coeff − smoothed_coeff` are the DOF coefficients of the
 /// flux difference and `M_K` is the element mass matrix.
-pub fn zz_estimator_nodal<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+///
+/// `hanging` supplies the non-conforming mesh hanging-node constraints: like
+/// MFEM's `SumFluxAndCount`, hanging DOFs do NOT participate in the DOF
+/// averaging (MFEM's `AddElementVector` skips negative/constrained vdofs);
+/// their smoothed flux is recovered by linear interpolation from the parent
+/// DOFs (`DofTransformation::InvTransformPrimal`), which for Q1 is the same
+/// 0.5/0.5 rule used by the hanging-node constraints.
+pub fn zz_estimator_nodal<M, S>(
+    gf: &GridFunction<'_, S>,
+    hanging: &[HangingNodeConstraint],
+) -> ElementIndicators
 where
     M: MeshTopology,
     S: FESpace<Mesh = M>,
@@ -473,11 +483,15 @@ where
     let nd = gf.space().n_dofs();
     let d = m.dim() as usize;
     let order = gf.space().order();
+    let hang_set: std::collections::HashSet<usize> =
+        hanging.iter().map(|c| c.constrained).collect();
 
     // ── 1. Compute element gradients at ALL DOF locations ───────────────────
     // Like MFEM's SumFluxAndCount: for each element, compute ∇u_h at each
     // DOF of the element (vertex, edge, interior) using the correct geometric
-    // Jacobian.  Accumulate at global DOFs and count.
+    // Jacobian.  Accumulate at global DOFs and count.  Hanging DOFs are
+    // skipped during accumulation (MFEM AddElementVector drops the negative
+    // vdofs) and are filled in by parent interpolation afterwards.
     let mut dof_grad = vec![vec![0.0; d]; nd];
     let mut dof_count = vec![0usize; nd];
 
@@ -492,9 +506,10 @@ where
         let dof_coords = ref_elem.dof_coords();
 
         for (i, &dof) in elem_dofs.iter().enumerate() {
+            let idx = dof as usize;
+            if hang_set.contains(&idx) { continue; }
             let xi = &dof_coords[i];
             let g = eval_grad_at(m, e, gf.space(), gf.dofs(), xi, elem_type);
-            let idx = dof as usize;
             for di in 0..d {
                 dof_grad[idx][di] += g[di];
             }
@@ -509,6 +524,33 @@ where
             for di in 0..d {
                 dof_grad[i][di] /= c;
             }
+        }
+    }
+    // Hanging DOFs: interpolate from parents (chains handled recursively).
+    if !hanging.is_empty() {
+        fn interp_grad<M: MeshTopology>(
+            dof: usize,
+            hanging: &[HangingNodeConstraint],
+            hang_set: &std::collections::HashSet<usize>,
+            dof_grad: &[Vec<f64>],
+            d: usize,
+            memo: &mut std::collections::HashMap<usize, Vec<f64>>,
+        ) -> Vec<f64> {
+            if let Some(v) = memo.get(&dof) { return v.clone(); }
+            if !hang_set.contains(&dof) { return dof_grad[dof].clone(); }
+            let c = hanging.iter().find(|c| c.constrained == dof).expect("hang constraint");
+            let mut out = vec![0.0; d];
+            for (p, w) in c.parents() {
+                let gp = interp_grad::<M>(p, hanging, hang_set, dof_grad, d, memo);
+                for di in 0..d { out[di] += w * gp[di]; }
+            }
+            memo.insert(dof, out.clone());
+            out
+        }
+        let mut memo = std::collections::HashMap::new();
+        for c in hanging {
+            let g = interp_grad::<M>(c.constrained, hanging, &hang_set, &dof_grad, d, &mut memo);
+            dof_grad[c.constrained] = g;
         }
     }
 
@@ -1022,7 +1064,7 @@ mod tests {
         assert!(eta.iter().sum::<f64>() > 0.0, "L² estimator should be > 0 for quadratic");
         // L² projection should give more accurate recovery → smaller total L² error
         // Compare against DOF-level averaging (both using full L² quadrature)
-        let eta_nodal = zz_estimator_nodal(&gf).eta;
+        let eta_nodal = zz_estimator_nodal(&gf, &[]).eta;
         let total_l2: f64 = eta.iter().sum();
         let total_nodal: f64 = eta_nodal.iter().sum();
         assert!(total_l2 < total_nodal,

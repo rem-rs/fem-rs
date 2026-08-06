@@ -2422,16 +2422,6 @@ pub fn refine_nonconforming_quad(
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
     let n_elems = mesh.n_elems();
 
-    // ── 1. Build edge → adjacent element list ────────────────────────────────
-    let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
-    for e in 0..n_elems as ElemId {
-        let ns = mesh.elem_nodes(e);
-        for &(a, b) in &local_edges_quad() {
-            let key = quad_edge_key(ns[a], ns[b]);
-            edge_elems.entry(key).or_default().push(e);
-        }
-    }
-
     // ── 2. Compute midpoints and centers for marked elements ─────────────────
     let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
     let mut center_map:   HashMap<ElemId, NodeId>           = HashMap::new();
@@ -2505,21 +2495,15 @@ pub fn refine_nonconforming_quad(
     }
 
     // ── 4. Detect hanging nodes ──────────────────────────────────────────────
+    // Full-topology scan on the *refined* mesh: any element edge (a,b) whose
+    // geometric midpoint coincides with a mesh vertex m that the element does
+    // NOT contain is a hanging node.  This catches both this round's new
+    // midpoints and hanging nodes carried over from previous refinement
+    // levels — the previous implementation only scanned `midpoint_map`
+    // (this round's fresh midpoints), silently dropping pre-existing
+    // constraints, which broke multi-level AMR (ex6 it2+: 20 constraints vs
+    // MFEM's 30).
     let mut constraints = Vec::new();
-    for (&(a, b), &mid) in &midpoint_map {
-        if let Some(adj) = edge_elems.get(&(a, b)) {
-            let has_unrefined = adj.iter().any(|e| !marked_set.contains(e));
-            if has_unrefined {
-                constraints.push(HangingNodeConstraint {
-                    constrained: mid as usize,
-                    parent_a: a as usize,
-                    parent_b: b as usize,
-                coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
-});
-            }
-        }
-    }
-    constraints.sort_by_key(|c| c.constrained);
 
     // ── 5. Rebuild boundary edges ─────────────────────────────────────────────
     let n_faces = mesh.n_faces();
@@ -2545,6 +2529,59 @@ pub fn refine_nonconforming_quad(
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
+
+    let mut coord_map: HashMap<String, NodeId> = HashMap::new();
+    for n in 0..new_mesh.n_nodes() as NodeId {
+        let c = new_mesh.coords_of(n);
+        coord_map.entry(format!("{:.9},{:.9}", c[0], c[1])).or_insert(n);
+    }
+    let coords_of = |id: NodeId| -> [f64; 2] {
+        let c = new_mesh.coords_of(id);
+        [c[0], c[1]]
+    };
+    // Multi-level detection: starting from every element edge (a,b), walk the
+    // bisection chain (a,b) → (a,m),(m,b) → ... recording every midpoint that
+    // the element does NOT contain as a hanging constraint.  A pure
+    // "midpoint-of-element-edge" scan (as before) misses mid-level hanging
+    // nodes whose parent edge is not an element edge (e.g. m2 = mid(a,m1)
+    // where m1 is itself hanging).
+    for e in 0..new_mesh.n_elems() as ElemId {
+        let ns = new_mesh.elem_nodes(e);
+        let contains = |m: NodeId| ns.contains(&m);
+        fn walk(
+            a: NodeId, b: NodeId,
+            coord_map: &HashMap<String, NodeId>,
+            coords_of: &dyn Fn(NodeId) -> [f64; 2],
+            contains: &dyn Fn(NodeId) -> bool,
+            out: &mut Vec<HangingNodeConstraint>,
+        ) {
+            let ca = coords_of(a);
+            let cb = coords_of(b);
+            let key = format!("{:.9},{:.9}", 0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]));
+            if let Some(&m) = coord_map.get(&key) {
+                if m != a && m != b && !contains(m) {
+                    out.push(HangingNodeConstraint {
+                        constrained: m as usize,
+                        parent_a: a as usize,
+                        parent_b: b as usize,
+                        coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+                    });
+                    // Recurse into the two halves (m may itself be hanging at
+                    // a finer level: its parent edge is (a,m) / (m,b), which
+                    // need not be an element edge).
+                    walk(a, m, coord_map, coords_of, contains, out);
+                    walk(m, b, coord_map, coords_of, contains, out);
+                }
+            }
+        }
+        for &(ea, eb) in &local_edges_quad() {
+            let a = ns[ea];
+            let b = ns[eb];
+            walk(a, b, &coord_map, &coords_of, &contains, &mut constraints);
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+    constraints.dedup_by(|a, b| a.constrained == b.constrained);
     (new_mesh, constraints)
 }
 
