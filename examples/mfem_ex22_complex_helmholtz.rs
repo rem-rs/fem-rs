@@ -199,9 +199,14 @@ fn main() {
     let mu = cfg.mu;
     let epsilon = cfg.epsilon;
     let sigma = cfg.sigma;
+    // Pass the raw physical coefficients (1/μ, ε, σ) — ComplexAssembler
+    // applies the frequency factors itself: k_re = K − ω²·ε·M,
+    // k_im = ω·σ·M (matching C++ ex22's SesquilinearForm with
+    // massCoef(−ω²ε) and lossCoef(ωσ)).  Passing −ω²ε / ωσ here would
+    // double-count the frequency (ω⁴ε, ω²σ) and corrupt the solution.
     let stiffness_coef = 1.0 / mu;
-    let mass_coef = -omega * omega * epsilon;
-    let loss_coef = omega * sigma;
+    let mass_coef = epsilon;
+    let loss_coef = sigma;
     let quad_order = (2 * cfg.order + 1) as u8;
 
     // Read mesh — detect 2D or 3D
@@ -282,13 +287,20 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     let mut rhs = vec![0.0; 2 * n];
 
     if exact_sol_known {
-        let u_proj: Vec<f64> = (0..n).map(|d| {
-            let c = dm.dof_coord(d as u32);
-            let (re, _im) = u0_exact(&c[..dim], mu, epsilon, sigma, omega);
+        // Project BOTH real and imaginary parts of the exact solution onto the
+        // boundary DOFs (C++ ex22: ProjectBdrCoefficient(u0_r, u0_i)).  The
+        // imaginary part was previously zeroed, which badly corrupted the
+        // p=0 (H1) solution since the complex system couples re/im.
+        let u_proj = space.interpolate(&|x| {
+            let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
             re
-        }).collect();
+        }).as_slice().to_vec();
+        let u_proj_im = space.interpolate(&|x| {
+            let (_re, im) = u0_exact(x, mu, epsilon, sigma, omega);
+            im
+        }).as_slice().to_vec();
         let bc_re: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d]).collect();
-        let bc_im: Vec<f64> = ess_bdr.iter().map(|_| 0.0).collect();
+        let bc_im: Vec<f64> = ess_bdr.iter().map(|&d| u_proj_im[d]).collect();
         sys.apply_dirichlet(&ess_bdr, &bc_re, &bc_im, &mut rhs);
     } else {
         let bc_re = vec![0.0; ess_bdr.len()];
@@ -328,7 +340,10 @@ fn solve_2d_p0(mesh: &Mesh<2>, cfg: &Config, omega: f64,
             let et = mesh.element_type(e);
             let re = et.ref_elem(cfg.order as u8);
             let nld = re.n_dofs();
-            let q = re.quadrature(quad_order);
+            // MFEM GridFunction::ComputeL2Error uses 2*order+3 (IntRules.Get);
+            // the assembly quad_order (2*order+1) under-samples the strongly
+            // oscillating exact solution (κ=10) and inflates the error ~8x.
+            let q = re.quadrature(2 * cfg.order as u8 + 3);
             let mut phi = vec![0.0; nld];
             let mut gr = vec![0.0; nld * 2];
             let en = mesh.element_nodes(e);
@@ -453,8 +468,17 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
 
     let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
-        let (er2, ei2) = l2_error_hcurl(mesh, &space, &gf.u_re, &gf.u_im,
-                                         mu, epsilon, sigma, omega, quad_order);
+        // Use the correct H(Curl) L² error (Piola-transformed, Quad4-aware)
+        // from fem_examples::maxwell — the local l2_error_hcurl is hardcoded
+        // to TriND1 without the Piola transform and is wrong on quad meshes.
+        let er2 = fem_examples::maxwell::l2_error_hcurl_exact(&space, &gf.u_re, |x| {
+            let (re, _im) = u0_exact(x, mu, epsilon, sigma, omega);
+            [re, 0.0]
+        });
+        let ei2 = fem_examples::maxwell::l2_error_hcurl_exact(&space, &gf.u_im, |x| {
+            let (_re, im) = u0_exact(x, mu, epsilon, sigma, omega);
+            [im, 0.0]
+        });
         println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2);
         println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2);
     }
@@ -546,7 +570,7 @@ fn solve_2d_p2(mesh: &Mesh<2>, cfg: &Config, omega: f64,
     let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
         let (er2, ei2) = l2_error_hdiv(mesh, &space, &gf.u_re, &gf.u_im,
-                                         mu, epsilon, sigma, omega, quad_order);
+                                         mu, epsilon, sigma, omega, 2 * cfg.order as u8 + 3);
         println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2);
         println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2);
     }
@@ -731,7 +755,10 @@ fn solve_3d_p0(mesh: &Mesh<3>, cfg: &Config, omega: f64,
             let et = mesh.element_type(e);
             let re = et.ref_elem(cfg.order as u8);
             let nld = re.n_dofs();
-            let q = re.quadrature(quad_order);
+            // MFEM GridFunction::ComputeL2Error uses 2*order+3 (IntRules.Get);
+            // the assembly quad_order (2*order+1) under-samples the strongly
+            // oscillating exact solution (κ=10) and inflates the error ~8x.
+            let q = re.quadrature(2 * cfg.order as u8 + 3);
             let mut phi = vec![0.0; nld];
             let mut gr = vec![0.0; nld * 3];
             let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -826,7 +853,7 @@ fn solve_3d_p1(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
         let (er2, ei2) = l2_error_hcurl_3d(mesh, &space, &gf.u_re, &gf.u_im,
-                                            mu, epsilon, sigma, omega, quad_order);
+                                            mu, epsilon, sigma, omega, 2 * cfg.order as u8 + 3);
         println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2);
         println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2);
     }
@@ -895,7 +922,7 @@ fn solve_3d_p2(mesh: &Mesh<3>, cfg: &Config, omega: f64,
     let gf = ComplexGridFunction::from_flat(&X);
     if exact_sol_known {
         let (er2, ei2) = l2_error_hdiv_3d(mesh, &space, &gf.u_re, &gf.u_im,
-                                           mu, epsilon, sigma, omega, quad_order);
+                                           mu, epsilon, sigma, omega, 2 * cfg.order as u8 + 3);
         println!("\n|| Re(u_h-u) ||_{{L^2}} = {:.6e}", er2);
         println!("|| Im(u_h-u) ||_{{L^2}} = {:.6e}\n", ei2);
     }
