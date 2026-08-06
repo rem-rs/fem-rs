@@ -52,3 +52,4 @@ ex9-init.gf
 ex9-final.gf
 *.gf
 *.mesh
+tmp/
