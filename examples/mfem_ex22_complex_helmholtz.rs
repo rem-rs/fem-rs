@@ -1023,16 +1023,28 @@ fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
         let q = re.quadrature(quad_order);
         let mut phi = vec![0.0; nld * 3];
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
         for (qi, xi) in q.points.iter().enumerate() {
             re.eval_basis_vec(xi, &mut phi);
             let (J, xp) = element_jacobian_3d(mesh, e, xi);
-            let w = q.weights[qi] * J.determinant().abs();
+            let det = J.determinant();
+            let w = q.weights[qi] * det.abs();
+            // Covariant Piola: u_h(phys) = J^{-T} · u_ref.  MFEM's
+            // NDInterpolator/nedelec element transforms use this on every
+            // element, not the raw reference basis.
+            let jit = J.try_inverse().unwrap_or_default().transpose();
             let mut uh_re = [0.0; 3]; let mut uh_im = [0.0; 3];
             for a in 0..nld {
-                for c in 0..3 {
-                    uh_re[c] += u_re[ed[a]] * phi[a * 3 + c];
-                    uh_im[c] += u_im[ed[a]] * phi[a * 3 + c];
-                }
+                let s = signs[a];
+                let vx = jit[(0, 0)] * phi[a * 3] + jit[(0, 1)] * phi[a * 3 + 1] + jit[(0, 2)] * phi[a * 3 + 2];
+                let vy = jit[(1, 0)] * phi[a * 3] + jit[(1, 1)] * phi[a * 3 + 1] + jit[(1, 2)] * phi[a * 3 + 2];
+                let vz = jit[(2, 0)] * phi[a * 3] + jit[(2, 1)] * phi[a * 3 + 1] + jit[(2, 2)] * phi[a * 3 + 2];
+                uh_re[0] += s * u_re[ed[a]] * vx;
+                uh_re[1] += s * u_re[ed[a]] * vy;
+                uh_re[2] += s * u_re[ed[a]] * vz;
+                uh_im[0] += s * u_im[ed[a]] * vx;
+                uh_im[1] += s * u_im[ed[a]] * vy;
+                uh_im[2] += s * u_im[ed[a]] * vz;
             }
             let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
             er2 += w * ((uh_re[0] - er).powi(2) + uh_re[1].powi(2) + uh_re[2].powi(2));
@@ -1059,16 +1071,26 @@ fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
         let q = re.quadrature(quad_order);
         let mut phi = vec![0.0; nld * 3];
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
         for (qi, xi) in q.points.iter().enumerate() {
             re.eval_basis_vec(xi, &mut phi);
             let (J, xp) = element_jacobian_3d(mesh, e, xi);
-            let w = q.weights[qi] * J.determinant().abs();
+            let det = J.determinant();
+            let w = q.weights[qi] * det.abs();
+            // Contravariant Piola: u_h(phys) = J·u_ref / det(J).
+            let id = 1.0 / det;
             let mut uh_re = [0.0; 3]; let mut uh_im = [0.0; 3];
             for a in 0..nld {
-                for c in 0..3 {
-                    uh_re[c] += u_re[ed[a]] * phi[a * 3 + c];
-                    uh_im[c] += u_im[ed[a]] * phi[a * 3 + c];
-                }
+                let s = signs[a];
+                let px = id * (J[(0, 0)] * phi[a * 3] + J[(0, 1)] * phi[a * 3 + 1] + J[(0, 2)] * phi[a * 3 + 2]);
+                let py = id * (J[(1, 0)] * phi[a * 3] + J[(1, 1)] * phi[a * 3 + 1] + J[(1, 2)] * phi[a * 3 + 2]);
+                let pz = id * (J[(2, 0)] * phi[a * 3] + J[(2, 1)] * phi[a * 3 + 1] + J[(2, 2)] * phi[a * 3 + 2]);
+                uh_re[0] += s * u_re[ed[a]] * px;
+                uh_re[1] += s * u_re[ed[a]] * py;
+                uh_re[2] += s * u_re[ed[a]] * pz;
+                uh_im[0] += s * u_im[ed[a]] * px;
+                uh_im[1] += s * u_im[ed[a]] * py;
+                uh_im[2] += s * u_im[ed[a]] * pz;
             }
             let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
             // Exact: [0, 0, u0] for HDiv (last component)
