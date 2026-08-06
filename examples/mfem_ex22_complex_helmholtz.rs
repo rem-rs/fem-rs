@@ -625,34 +625,106 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                   mu: f64, epsilon: f64, sigma: f64, omega: f64,
                   quad_order: u8) -> (f64, f64) {
     use fem_element::VectorReferenceElement;
-    use fem_element::raviart_thomas::TriRT0;
+    use fem_element::raviart_thomas::{QuadRT0, TriRT0};
+    use fem_mesh::element_type::ElementType;
 
+    // H(Div) Piola (contravariant, 2-D): φ_phys = J·φ_ref / det J.
+    // Reference domain: TriRT0 on [0,1]² triangle (affine map),
+    // QuadRT0 on [0,1]² quad (bilinear map — NOTE element_jacobian_at uses
+    // the [-1,1]^2 QuadQ1 basis and cannot be paired with these [0,1]
+    // quadrature points; we build the [0,1]^2 map here instead).
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
-        let re = TriRT0;
-        let nld = re.n_dofs();
-        let q = re.quadrature(quad_order);
-        let mut phi = vec![0.0; nld * 2];
-        let _en = mesh.element_nodes(e);
+        let et = mesh.element_type(e);
+        let nodes = mesh.element_nodes(e);
         let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        for (qi, xi) in q.points.iter().enumerate() {
-            re.eval_basis_vec(xi, &mut phi);
-            let (J, xp) = element_jacobian(mesh, e, xi);
-            let det_j = J.determinant();
-            let w = q.weights[qi] * det_j.abs();
-
-            let mut uh_re = [0.0; 2];
-            let mut uh_im = [0.0; 2];
-            for a in 0..nld {
-                uh_re[0] += u_re[ed[a]] * phi[a * 2];
-                uh_re[1] += u_re[ed[a]] * phi[a * 2 + 1];
-                uh_im[0] += u_im[ed[a]] * phi[a * 2];
-                uh_im[1] += u_im[ed[a]] * phi[a * 2 + 1];
+        match et {
+            ElementType::Tri3 => {
+                let re = TriRT0;
+                let nld = re.n_dofs();
+                let q = re.quadrature(quad_order);
+                let mut phi = vec![0.0; nld * 2];
+                let x0 = mesh.node_coords(nodes[0]);
+                let x1 = mesh.node_coords(nodes[1]);
+                let x2 = mesh.node_coords(nodes[2]);
+                let (j00, j01) = (x1[0] - x0[0], x2[0] - x0[0]);
+                let (j10, j11) = (x1[1] - x0[1], x2[1] - x0[1]);
+                let det = j00 * j11 - j01 * j10;
+                for (qi, xi) in q.points.iter().enumerate() {
+                    re.eval_basis_vec(xi, &mut phi);
+                    let w = q.weights[qi] * det.abs();
+                    let xp = [x0[0] + j00 * xi[0] + j01 * xi[1],
+                              x0[1] + j10 * xi[0] + j11 * xi[1]];
+                    let mut uh_re = [0.0; 2];
+                    let mut uh_im = [0.0; 2];
+                    for a in 0..nld {
+                        let px = (j00 * phi[a * 2] + j01 * phi[a * 2 + 1]) / det;
+                        let py = (j10 * phi[a * 2] + j11 * phi[a * 2 + 1]) / det;
+                        uh_re[0] += u_re[ed[a]] * px;
+                        uh_re[1] += u_re[ed[a]] * py;
+                        uh_im[0] += u_im[ed[a]] * px;
+                        uh_im[1] += u_im[ed[a]] * py;
+                    }
+                    let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
+                    er2 += w * ((uh_re[0] - 0.0).powi(2) + (uh_re[1] - er).powi(2));
+                    ei2 += w * ((uh_im[0] - 0.0).powi(2) + (uh_im[1] - ei).powi(2));
+                }
             }
-            // Exact: [0, u0_exact]
-            let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
-            er2 += w * ((uh_re[0] - 0.0).powi(2) + (uh_re[1] - er).powi(2));
-            ei2 += w * ((uh_im[0] - 0.0).powi(2) + (uh_im[1] - ei).powi(2));
+            ElementType::Quad4 => {
+                let re = QuadRT0;
+                let nld = re.n_dofs();
+                let q = re.quadrature(quad_order);
+                let mut phi = vec![0.0; nld * 2];
+                let xc: Vec<Vec<f64>> = (0..4)
+                    .map(|k| mesh.node_coords(nodes[k]).to_vec())
+                    .collect();
+                // [0,1]^2 bilinear map (must match QuadRT0's [0,1] domain)
+                #[allow(non_snake_case)]
+                let n = |k: usize, xi: f64, eta: f64| -> f64 {
+                    match k {
+                        0 => (1.0 - xi) * (1.0 - eta),
+                        1 => xi * (1.0 - eta),
+                        2 => xi * eta,
+                        3 => (1.0 - xi) * eta,
+                        _ => 0.0,
+                    }
+                };
+                for (qi, xi_eta) in q.points.iter().enumerate() {
+                    let (xi, eta) = (xi_eta[0], xi_eta[1]);
+                    re.eval_basis_vec(&[xi, eta], &mut phi);
+                    // dx/dxi, dx/deta
+                    let (j00, j01) = (
+                        -(1.0 - eta) * xc[0][0] + (1.0 - eta) * xc[1][0] + eta * xc[2][0] - eta * xc[3][0],
+                        -(1.0 - xi)  * xc[0][0] - xi * xc[1][0] + xi * xc[2][0] + (1.0 - xi) * xc[3][0],
+                    );
+                    let (j10, j11) = (
+                        -(1.0 - eta) * xc[0][1] + (1.0 - eta) * xc[1][1] + eta * xc[2][1] - eta * xc[3][1],
+                        -(1.0 - xi)  * xc[0][1] - xi * xc[1][1] + xi * xc[2][1] + (1.0 - xi) * xc[3][1],
+                    );
+                    let det = j00 * j11 - j01 * j10;
+                    let w = q.weights[qi] * det.abs();
+                    let xp = [
+                        xc[0][0] * n(0, xi, eta) + xc[1][0] * n(1, xi, eta)
+                            + xc[2][0] * n(2, xi, eta) + xc[3][0] * n(3, xi, eta),
+                        xc[0][1] * n(0, xi, eta) + xc[1][1] * n(1, xi, eta)
+                            + xc[2][1] * n(2, xi, eta) + xc[3][1] * n(3, xi, eta),
+                    ];
+                    let mut uh_re = [0.0; 2];
+                    let mut uh_im = [0.0; 2];
+                    for a in 0..nld {
+                        let px = (j00 * phi[a * 2] + j01 * phi[a * 2 + 1]) / det;
+                        let py = (j10 * phi[a * 2] + j11 * phi[a * 2 + 1]) / det;
+                        uh_re[0] += u_re[ed[a]] * px;
+                        uh_re[1] += u_re[ed[a]] * py;
+                        uh_im[0] += u_im[ed[a]] * px;
+                        uh_im[1] += u_im[ed[a]] * py;
+                    }
+                    let (er, ei) = u0_exact(&xp, mu, epsilon, sigma, omega);
+                    er2 += w * ((uh_re[0] - 0.0).powi(2) + (uh_re[1] - er).powi(2));
+                    ei2 += w * ((uh_im[0] - 0.0).powi(2) + (uh_im[1] - ei).powi(2));
+                }
+            }
+            _ => panic!("l2_error_hdiv: unsupported element type {et:?}"),
         }
     }
     (er2.sqrt(), ei2.sqrt())
