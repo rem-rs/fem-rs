@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use fem_core::{FemError, FemResult};
 use fem_mesh::{
     element_type::ElementType,
-    simplex::Mesh,
+    simplex::{GeometryData, Mesh},
     topology::MeshTopology,
 };
 
@@ -156,6 +156,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     }
     let n_vert = read_uint(&mut r)?;
     let mut coords: Vec<f64> = Vec::new();
+    // Per-element high-order geometry (MFEM `nodes` section).  For L2
+    // (discontinuous) node spaces each element owns `nodes_per_elem`
+    // independent geometry nodes — this is how geometrically periodic meshes
+    // (e.g. `periodic-square.mesh`) encode per-element geometry.
+    let mut geometry: Option<GeometryData> = None;
 
     // Check if next line is "nodes" (MFEM v1.2 curved mesh format),
     // a dimension number (standard format), or a NURBS keyword (skip).
@@ -231,13 +236,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     } else if next == "nodes" {
         // Nodes section: FiniteElementSpace header then DOF coefficient values.
         let _fes = read_line(&mut r)?;         // "FiniteElementSpace"
-        let _fec = read_line(&mut r)?;          // "FiniteElementCollection: ..."
+        let fec_line = read_line(&mut r)?;     // "FiniteElementCollection: ..."
         let vdim_line = read_line(&mut r)?;     // "VDim: N"
         let _nodes_vdim: usize = vdim_line.split_whitespace().last()
             .and_then(|s| s.parse().ok()).unwrap_or(dim);
         let _ordering = read_line(&mut r)?;     // "Ordering: ..."
 
-        // Read remaining values as DOF coefficients.
+        // Read remaining values as DOF coefficient values.
         let mut raw: Vec<f64> = Vec::new();
         loop {
             match read_f64_line(&mut r) {
@@ -245,12 +250,83 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 Err(_) => break,
             }
         }
-        // Try to extract vertex coords from nodes data.
-        // For H1 geometry: first n_vert DOFs are vertex positions.
-        // For L2/discontinuous geometry: DOFs are element-local with duplicates
-        // (shared vertices stored per-element). Deduplicate by coordinate value.
-        if raw.len() >= n_vert * dim {
-            // Build unique coordinate list (dedup by rounded values)
+        let fec_name = fec_line.split(':').nth(1).unwrap_or("").trim().to_string();
+        let is_l2_nodes = fec_name.starts_with("L2_");
+        if is_l2_nodes && n_elem > 0 && raw.len() >= n_elem * dim {
+            // Discontinuous (L2) geometry: every element owns an independent
+            // set of `nodes_per_elem` geometry nodes (MFEM L2_T1_2D_P1 etc.).
+            // This is how geometrically periodic meshes (periodic-square.mesh,
+            // periodic-hexagon.mesh, ...) encode per-element geometry — the
+            // same vertex index can map to different physical positions in
+            // different elements, and the element-to-element face pairing is
+            // done purely by (periodically identified) vertex indices.
+            let npe = raw.len() / (n_elem * dim);
+            if npe >= 2 && raw.len() % (n_elem * dim) == 0 {
+                // 1) Folded vertex coordinates: for each vertex, take the
+                //    position it has in the first element that references it.
+                //    This mirrors MFEM's `Mesh::vertices` array (used only by
+                //    the face transformations; element assembly uses the
+                //    per-element geometry below).
+                coords = vec![0.0_f64; n_vert * dim];
+                for v in 0..n_vert {
+                    'outer: for e in 0..n_elem {
+                        for k in 0..elem_conn[e].len() {
+                            if elem_conn[e][k] as usize == v {
+                                // `k` is the vertex index in the element's
+                                // connectivity (H1 order); the nodes section
+                                // stores them in lexicographic (L2) order, so
+                                // map k -> lex index (P1: swap 2<->3).
+                                let kl = if npe == 4 && dim == 2 {
+                                    match k {
+                                        2 => 3,
+                                        3 => 2,
+                                        _ => k,
+                                    }
+                                } else {
+                                    k
+                                };
+                                for c in 0..dim {
+                                    coords[v * dim + c] = raw[(e * npe + kl) * dim + c];
+                                }
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                // 2) Per-element geometry table (non-shared nodes).  The node
+                //    order matches the element connectivity (H1 vertex order:
+                //    LL, LR, UR, UL), which is what the QuadQk assembly basis
+                //    and the mesh topology expect.  The MFEM `nodes` section
+                //    stores them in lexicographic (L2) order, so for P1 quad
+                //    we swap the last two entries.
+                let mut geo_conn: Vec<u32> = Vec::with_capacity(n_elem * npe);
+                let mut geo_coords: Vec<f64> = Vec::with_capacity(n_elem * npe * dim);
+                let perm: Vec<usize> = if npe == 4 && dim == 2 {
+                    vec![0, 1, 3, 2]
+                } else {
+                    (0..npe).collect()
+                };
+                for e in 0..n_elem {
+                    for i in 0..npe {
+                        geo_conn.push((e * npe + i) as u32);
+                        let k = perm[i];
+                        for c in 0..dim {
+                            geo_coords.push(raw[(e * npe + k) * dim + c]);
+                        }
+                    }
+                }
+                geometry = Some(GeometryData {
+                    order: 1,
+                    conn: geo_conn,
+                    nodes_per_elem: npe,
+                    coords: geo_coords,
+                    n_nodes: n_elem * npe,
+                });
+            }
+        } else if raw.len() >= n_vert * dim {
+            // Continuous (H1) geometry: first n_vert DOFs are the vertex
+            // positions.  Build unique coordinate list (dedup by rounded
+            // values) for the remaining DOFs (edge/face/interior nodes).
             let tol = 1e-10;
             for chunk in raw.chunks(dim) {
                 if chunk.len() < dim { break; }
@@ -273,17 +349,17 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 }
                 if coords.len() >= n_vert * dim { break; }
             }
-        }
-        // Fallback: generate regular grid (common for structured meshes).
-        if coords.len() < n_vert * dim {
-            coords.clear();
-            let side = (n_vert as f64).sqrt().ceil() as usize;
-            for iy in 0..side {
-                for ix in 0..side {
-                    let idx = iy * side + ix;
-                    if idx < n_vert {
-                        coords.push(ix as f64 / (side - 1).max(1) as f64);
-                        coords.push(iy as f64 / (side - 1).max(1) as f64);
+            // Fallback: generate regular grid (common for structured meshes).
+            if coords.len() < n_vert * dim {
+                coords.clear();
+                let side = (n_vert as f64).sqrt().ceil() as usize;
+                for iy in 0..side {
+                    for ix in 0..side {
+                        let idx = iy * side + ix;
+                        if idx < n_vert {
+                            coords.push(ix as f64 / (side - 1).max(1) as f64);
+                            coords.push(iy as f64 / (side - 1).max(1) as f64);
+                        }
                     }
                 }
             }
@@ -348,7 +424,8 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             face_offsets: face_offsets_opt.clone(),
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
-            geometry: None,
+            nc_vertex_view: None,
+            geometry,
         };
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
@@ -366,7 +443,8 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             face_offsets: face_offsets_opt,
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
-            geometry: None,
+            nc_vertex_view: None,
+            geometry,
         };
         // MFEM's Mesh(filename, 1, 1) finalizes tetrahedral meshes with
         // refine=1 → MarkTetMeshForRefinement (vertex rotation so the longest
@@ -669,16 +747,75 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         }
         "hex" => {
-            let n = nx.max(ny).max(_nz.unwrap_or(1));
-            let mut mesh = Mesh::<3>::unit_cube_hex(n);
-            let scale_x = sx / n as f64 * nx as f64;
-            let scale_y = sy / n as f64 * ny as f64;
-            let scale_z = _sz.unwrap_or(1.0) / n as f64 * _nz.unwrap_or(1) as f64;
-            for c in mesh.coords.chunks_mut(3) {
-                c[0] *= scale_x;
-                c[1] *= scale_y;
-                c[2] *= scale_z;
+            // MFEM INLINE hex: Make3D(nx,ny,nz, HEX, sx,sy,sz, sfc_ordering=true)
+            // — elements follow the 3-D Hilbert SFC (NCMesh::GridSfcOrdering3D),
+            // NOT row-major.  The old `unit_cube_hex` row-major order misnumbered
+            // elements (elem1 = x+1 vs MFEM z+1), which scrambled the RT0/ND
+            // face-DOF numbering (ex22 3D p2: Re error 3.3× off).
+            let nz = _nz.unwrap_or(1);
+            let nxv = nx as i32 + 1;
+            let nyv = ny as i32 + 1;
+            let nzv = nz as i32 + 1;
+            let mut coords = Vec::with_capacity((nxv * nyv * nzv) as usize * 3);
+            for k in 0..nzv {
+                for j in 0..nyv {
+                    for i in 0..nxv {
+                        coords.push(i as f64 / nx as f64 * sx);
+                        coords.push(j as f64 / ny as f64 * sy);
+                        coords.push(k as f64 / nz as f64 * _sz.unwrap_or(1.0));
+                    }
+                }
             }
+            let vtx = |x: i32, y: i32, z: i32| (x + (y + z * nyv) * nxv) as u32;
+            let sfc = grid_sfc_ordering_3d(nx, ny, nz);
+            let mut conn = Vec::with_capacity(sfc.len() * 8);
+            let mut elem_tags = Vec::with_capacity(sfc.len());
+            for &(x, y, z) in &sfc {
+                conn.extend([
+                    vtx(x, y, z), vtx(x + 1, y, z), vtx(x + 1, y + 1, z), vtx(x, y + 1, z),
+                    vtx(x, y, z + 1), vtx(x + 1, y, z + 1), vtx(x + 1, y + 1, z + 1), vtx(x, y + 1, z + 1),
+                ]);
+                elem_tags.push(1);
+            }
+            // Boundary faces (MFEM Make3D attr order):
+            // bottom 1, front 2, right 3, back 4, left 5, top 6.
+            let mut face_conn = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz));
+            let mut face_tags = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz));
+            let mut quad = |f: [u32; 4], tag: i32| { face_conn.extend_from_slice(&f); face_tags.push(tag); };
+            for y in 0..ny as i32 {
+                for x in 0..nx as i32 {
+                    quad([vtx(x, y, 0), vtx(x, y + 1, 0), vtx(x + 1, y + 1, 0), vtx(x + 1, y, 0)], 1);
+                }
+            }
+            for y in 0..ny as i32 {
+                for x in 0..nx as i32 {
+                    quad([vtx(x, y, nz as i32), vtx(x + 1, y, nz as i32), vtx(x + 1, y + 1, nz as i32), vtx(x, y + 1, nz as i32)], 6);
+                }
+            }
+            for z in 0..nz as i32 {
+                for y in 0..ny as i32 {
+                    quad([vtx(0, y, z), vtx(0, y, z + 1), vtx(0, y + 1, z + 1), vtx(0, y + 1, z)], 5);
+                }
+            }
+            for z in 0..nz as i32 {
+                for y in 0..ny as i32 {
+                    quad([vtx(nx as i32, y, z), vtx(nx as i32, y + 1, z), vtx(nx as i32, y + 1, z + 1), vtx(nx as i32, y, z + 1)], 3);
+                }
+            }
+            for z in 0..nz as i32 {
+                for x in 0..nx as i32 {
+                    quad([vtx(x, 0, z), vtx(x + 1, 0, z), vtx(x + 1, 0, z + 1), vtx(x, 0, z + 1)], 2);
+                }
+            }
+            for z in 0..nz as i32 {
+                for x in 0..nx as i32 {
+                    quad([vtx(x, ny as i32, z), vtx(x, ny as i32, z + 1), vtx(x + 1, ny as i32, z + 1), vtx(x + 1, ny as i32, z)], 4);
+                }
+            }
+            let mesh = Mesh::<3>::uniform(
+                coords, conn, elem_tags, ElementType::Hex8,
+                face_conn, face_tags, ElementType::Quad4,
+            );
             Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
         }
         "tet" => {
@@ -771,6 +908,143 @@ fn hilbert_sfc_2d(
             coords,
         );
     }
+}
+
+/// Hilbert space-filling curve in 3-D — 1:1 port of MFEM's
+/// `NCMesh::HilbertSfc3D` (ncmesh.cpp).  Appends `(x, y, z)` grid
+/// coordinates in Hilbert-curve order.
+fn hilbert_sfc_3d(
+    x: i32, y: i32, z: i32,
+    ax: i32, ay: i32, az: i32,
+    bx: i32, by: i32, bz: i32,
+    cx: i32, cy: i32, cz: i32,
+    coords: &mut Vec<(i32, i32, i32)>,
+) {
+    let w = (ax + ay + az).abs();
+    let h = (bx + by + bz).abs();
+    let d = (cx + cy + cz).abs();
+    let dax = sfc_sgn(ax); let day = sfc_sgn(ay); let daz = sfc_sgn(az);
+    let dbx = sfc_sgn(bx); let dby = sfc_sgn(by); let dbz = sfc_sgn(bz);
+    let dcx = sfc_sgn(cx); let dcy = sfc_sgn(cy); let dcz = sfc_sgn(cz);
+
+    // trivial row/column fills
+    if h == 1 && d == 1 {
+        let (mut x, mut y, mut z) = (x, y, z);
+        for _ in 0..w {
+            coords.push((x, y, z));
+            x += dax; y += day; z += daz;
+        }
+        return;
+    }
+    if w == 1 && d == 1 {
+        let (mut x, mut y, mut z) = (x, y, z);
+        for _ in 0..h {
+            coords.push((x, y, z));
+            x += dbx; y += dby; z += dbz;
+        }
+        return;
+    }
+    if w == 1 && h == 1 {
+        let (mut x, mut y, mut z) = (x, y, z);
+        for _ in 0..d {
+            coords.push((x, y, z));
+            x += dcx; y += dcy; z += dcz;
+        }
+        return;
+    }
+
+    let mut ax2 = ax / 2; let mut ay2 = ay / 2; let mut az2 = az / 2;
+    let mut bx2 = bx / 2; let mut by2 = by / 2; let mut bz2 = bz / 2;
+    let mut cx2 = cx / 2; let mut cy2 = cy / 2; let mut cz2 = cz / 2;
+    let w2 = (ax2 + ay2 + az2).abs();
+    let h2 = (bx2 + by2 + bz2).abs();
+    let d2 = (cx2 + cy2 + cz2).abs();
+
+    // prefer even steps
+    if (w2 & 0x1) != 0 && w > 2 { ax2 += dax; ay2 += day; az2 += daz; }
+    if (h2 & 0x1) != 0 && h > 2 { bx2 += dbx; by2 += dby; bz2 += dbz; }
+    if (d2 & 0x1) != 0 && d > 2 { cx2 += dcx; cy2 += dcy; cz2 += dcz; }
+
+    // wide case, split in w only
+    if 2 * w > 3 * h && 2 * w > 3 * d {
+        hilbert_sfc_3d(x, y, z, ax2, ay2, az2, bx, by, bz, cx, cy, cz, coords);
+        hilbert_sfc_3d(x + ax2, y + ay2, z + az2, ax - ax2, ay - ay2, az - az2, bx, by, bz, cx, cy, cz, coords);
+    }
+    // do not split in d
+    else if 3 * h > 4 * d {
+        hilbert_sfc_3d(x, y, z, bx2, by2, bz2, cx, cy, cz, ax2, ay2, az2, coords);
+        hilbert_sfc_3d(x + bx2, y + by2, z + bz2, ax, ay, az, bx - bx2, by - by2, bz - bz2, cx, cy, cz, coords);
+        hilbert_sfc_3d(
+            x + (ax - dax) + (bx2 - dbx),
+            y + (ay - day) + (by2 - dby),
+            z + (az - daz) + (bz2 - dbz),
+            -bx2, -by2, -bz2,
+            cx, cy, cz,
+            -(ax - ax2), -(ay - ay2), -(az - az2),
+            coords,
+        );
+    }
+    // do not split in h
+    else if 3 * d > 4 * h {
+        hilbert_sfc_3d(x, y, z, cx2, cy2, cz2, ax2, ay2, az2, bx, by, bz, coords);
+        hilbert_sfc_3d(x + cx2, y + cy2, z + cz2, ax, ay, az, bx, by, bz, cx - cx2, cy - cy2, cz - cz2, coords);
+        hilbert_sfc_3d(
+            x + (ax - dax) + (cx2 - dcx),
+            y + (ay - day) + (cy2 - dcy),
+            z + (az - daz) + (cz2 - dcz),
+            -cx2, -cy2, -cz2,
+            -(ax - ax2), -(ay - ay2), -(az - az2),
+            bx, by, bz,
+            coords,
+        );
+    }
+    // regular case, split in all w/h/d
+    else {
+        hilbert_sfc_3d(x, y, z, bx2, by2, bz2, cx2, cy2, cz2, ax2, ay2, az2, coords);
+        hilbert_sfc_3d(x + bx2, y + by2, z + bz2, cx, cy, cz, ax2, ay2, az2, bx - bx2, by - by2, bz - bz2, coords);
+        hilbert_sfc_3d(
+            x + (bx2 - dbx) + (cx - dcx),
+            y + (by2 - dby) + (cy - dcy),
+            z + (bz2 - dbz) + (cz - dcz),
+            ax, ay, az,
+            -bx2, -by2, -bz2,
+            -(cx - cx2), -(cy - cy2), -(cz - cz2),
+            coords,
+        );
+        hilbert_sfc_3d(
+            x + (ax - dax) + bx2 + (cx - dcx),
+            y + (ay - day) + by2 + (cy - dcy),
+            z + (az - daz) + bz2 + (cz - dcz),
+            -cx, -cy, -cz,
+            -(ax - ax2), -(ay - ay2), -(az - az2),
+            bx - bx2, by - by2, bz - bz2,
+            coords,
+        );
+        hilbert_sfc_3d(
+            x + (ax - dax) + (bx2 - dbx),
+            y + (ay - day) + (by2 - dby),
+            z + (az - daz) + (bz2 - dbz),
+            -bx2, -by2, -bz2,
+            cx2, cy2, cz2,
+            -(ax - ax2), -(ay - ay2), -(az - az2),
+            coords,
+        );
+    }
+}
+
+/// MFEM `NCMesh::GridSfcOrdering3D`: Hilbert-curve element order for INLINE
+/// hex/tet meshes (`Make3D(..., sfc_ordering=true)`).
+fn grid_sfc_ordering_3d(nx: usize, ny: usize, nz: usize) -> Vec<(i32, i32, i32)> {
+    let mut coords = Vec::with_capacity(nx * ny * nz);
+    let (w, h, d) = (nx as i32, ny as i32, nz as i32);
+    if w >= h && w >= d {
+        hilbert_sfc_3d(0, 0, 0, w, 0, 0, 0, h, 0, 0, 0, d, &mut coords);
+    } else if h >= w && h >= d {
+        hilbert_sfc_3d(0, 0, 0, 0, h, 0, w, 0, 0, 0, 0, d, &mut coords);
+    } else {
+        hilbert_sfc_3d(0, 0, 0, 0, 0, d, w, 0, 0, 0, h, 0, &mut coords);
+    }
+    coords
 }
 
 // ─── GridFunction .gf I/O ────────────────────────────────────────────────

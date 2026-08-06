@@ -197,6 +197,10 @@ pub struct HDivSpace<M: MeshTopology> {
     /// Per-element offsets into dofs_flat (non-empty for mixed meshes).
     elem_offsets: Vec<usize>,
     face_map: FaceDofMap,
+    /// Canonical vertex order of each global face (first-seen element's
+    /// MFEM FaceVert ordering).  Used by interpolate_vector to compute the
+    /// RT0 face normal consistent with MFEM DofOrderForOrientation.
+    face_canon_verts: std::collections::HashMap<FaceKey, Vec<u32>>,
     /// Cached element type for dispatch.
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
@@ -298,6 +302,7 @@ impl<M: MeshTopology> HDivSpace<M> {
         // Tracks the MFEM canonical (Elem1) vertex ordering of each face so
         // that element-face RT signs can be computed topologically.
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::new();
         let mut signs_flat = Vec::new();
@@ -320,7 +325,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let key = FaceKey::new(local[0], local[1], local[2]);
                         let sign = match face_canon.get(&key) {
                             Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                            _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                            _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                         };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
@@ -346,7 +351,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
                         let sign = match face_canon.get(&key) {
                             Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                            _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                            _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                         };
                         if nd == 1 {
                             dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
@@ -377,13 +382,13 @@ impl<M: MeshTopology> HDivSpace<M> {
                             let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
                             match face_canon.get(&key) {
                                 Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                                _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                                _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                             }
                         } else {
                             let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
                             match face_canon.get(&key) {
                                 Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                                _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                                _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                             }
                         };
                         if nd == 1 {
@@ -410,6 +415,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem: 0,
             elem_offsets,
             face_map: FaceDofMap::Faces(face_map),
+            face_canon_verts,
             elem_type: ElementType::Tet4,
             is_bdm: false,
         }
@@ -492,6 +498,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             signs_flat,
             dofs_per_elem,
             elem_offsets: vec![],
+            face_canon_verts: HashMap::new(),
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
             is_bdm,
@@ -561,6 +568,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -574,7 +582,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                 let key = FaceKey::new(local[0], local[1], local[2]);
                 let sign = match face_canon.get(&key) {
                     Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                    _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                    _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                 };
 
                 if dofs_per_face == 1 {
@@ -604,6 +612,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_map: FaceDofMap::Faces(face_map),
+            face_canon_verts,
             elem_type: ElementType::Tet4,
             is_bdm,
         }
@@ -693,6 +702,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             signs_flat,
             dofs_per_elem,
             elem_offsets: vec![],
+            face_canon_verts: HashMap::new(),
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
             is_bdm: false,
@@ -723,6 +733,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -751,7 +762,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                 let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
                 let sign = match face_canon.get(&key) {
                     Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                    _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                    _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                 };
 
                 if dofs_per_face == 1 {
@@ -788,6 +799,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
+            face_canon_verts,
             elem_type: ElementType::Hex8,
             is_bdm: false,
         }
@@ -803,6 +815,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -830,13 +843,13 @@ impl<M: MeshTopology> HDivSpace<M> {
                     let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
                     match face_canon.get(&key) {
                         Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                     }
                 } else {
                     let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
                     match face_canon.get(&key) {
                         Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                     }
                 };
                 if dofs_per_face == 1 {
@@ -870,6 +883,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
+            face_canon_verts,
             elem_type: ElementType::Prism6,
             is_bdm: false,
         }
@@ -885,6 +899,7 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -904,13 +919,13 @@ impl<M: MeshTopology> HDivSpace<M> {
                     let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
                     match face_canon.get(&key) {
                         Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); 1.0 }
+                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                     }
                 } else {
                     let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
                     match face_canon.get(&key) {
                         Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); 1.0 }
+                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
                     }
                 };
                 if dofs_per_face == 1 {
@@ -944,6 +959,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
+            face_canon_verts,
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
         }
@@ -1207,10 +1223,20 @@ impl<M: MeshTopology> HDivSpace<M> {
             FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => {
                 if self.order == 0 {
                     // 3-D RT0: one flux DOF per face (midpoint rule).
-                    for (&FaceKey(a, b, c), &dof) in map {
-                        let pa = self.mesh.node_coords(a);
-                        let pb = self.mesh.node_coords(b);
-                        let pc = self.mesh.node_coords(c);
+                    for (&key, &dof) in map {
+                        // MFEM's RT0 face DOF direction is the CANONICAL face
+                        // orientation (first-seen element's FaceVert order,
+                        // as used by DofOrderForOrientation), NOT the sorted
+                        // FaceKey order.  The sorted-key cross product gave the
+                        // wrong sign on half the faces (ex22 3D p2: 64 dofs
+                        // flipped).  For a quad face the canonical ordering is
+                        // [c0,c1,c2,c3] with normal = (c1−c0)×(c2−c0).
+                        let canon = self.face_canon_verts.get(&key);
+                        let Some(canon) = canon else { continue };
+                        if canon.len() < 3 { continue; }
+                        let pa = self.mesh.node_coords(canon[0]);
+                        let pb = self.mesh.node_coords(canon[1]);
+                        let pc = self.mesh.node_coords(canon[2]);
                         let centroid = [
                             (pa[0] + pb[0] + pc[0]) / 3.0,
                             (pa[1] + pb[1] + pc[1]) / 3.0,
