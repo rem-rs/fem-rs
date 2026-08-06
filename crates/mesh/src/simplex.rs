@@ -147,6 +147,17 @@ pub struct Mesh<const D: usize> {
     #[cfg_attr(feature = "serialize", serde(default))]
     #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
     pub geometry: Option<GeometryData>,
+
+    // ─── MFEM-compatible vertex view (set by NC refinement) ────────────────
+
+    /// MFEM `UpdateVertices` vertex-view order for NC meshes: `view[d]` is the
+    /// physical node that global vertex DOF `d` refers to.  `None` for plain
+    /// (conforming) meshes where vertex DOF `d` is node `d`.  The NC AMR state
+    /// fills this in after each refinement so the DOF numbering matches MFEM's
+    /// top-level-then-SFC ordering.
+    #[cfg_attr(feature = "serialize", serde(default))]
+    #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
+    pub nc_vertex_view: Option<Vec<NodeId>>,
 }
 
 impl<const D: usize> Mesh<D> {
@@ -233,7 +244,11 @@ impl<const D: usize> Mesh<D> {
         let p = order as usize;
 
         if self.elem_type == ElementType::Tri3 {
-            self.set_curvature_tri3(p);
+            if D == 2 {
+                self.set_curvature_tri3_2d(p);
+            } else {
+                self.set_curvature_tri3(p);
+            }
             return;
         }
         assert!(self.elem_type == ElementType::Quad4,
@@ -378,8 +393,62 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    fn set_curvature_tri3(&mut self, p: usize) {
-        use fem_element::lagrange::TriPk;
+    /// 2-D Tri3 → Tri6 geometry: insert edge midpoints (shared edges deduped,
+    /// direction-aware), matching MFEM `Mesh::SetCurvature(2)` on a straight
+    /// 2-D triangle mesh (H1_FECollection(order=2) nodal interpolation of the
+    /// linear coordinates — midpoints land at edge-midpoint positions).
+    fn set_curvature_tri3_2d(&mut self, p: usize) {
+        debug_assert!(p == 2, "2D Tri3 curvature only supports order 2 (Tri6)");
+        use std::collections::HashMap;
+        let n_elems = self.n_elems();
+        const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+        // Tri6 node order (MFEM H1_FECollection P2 on triangle): v0 v1 v2 e01 e12 e20
+        let npe_new = 6usize;
+
+        let mut geo_conn = vec![0u32; n_elems * npe_new];
+        let mut geo_coords = self.coords.clone();
+        let mut next_id = self.n_nodes() as NodeId;
+
+        // Edge map: sorted vertex pair → (creator's first vertex, shared node id).
+        let mut edge_map: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+
+        for e in 0..n_elems as ElemId {
+            let v = self.elem_nodes(e);
+            let base = e as usize * npe_new;
+            // Vertex nodes
+            geo_conn[base] = v[0];
+            geo_conn[base + 1] = v[1];
+            geo_conn[base + 2] = v[2];
+            // Edge midpoints: local edge i → global node at base+3+i
+            for (li, &(a, b)) in TRI_EDGES.iter().enumerate() {
+                let key = (v[a].min(v[b]), v[a].max(v[b]));
+                let entry = edge_map.entry(key).or_insert_with(|| {
+                    let ca = self.coords_of(v[a]);
+                    let cb = self.coords_of(v[b]);
+                    let mut x = [0.0; D];
+                    for d in 0..D { x[d] = 0.5 * (ca[d] + cb[d]); }
+                    geo_coords.extend_from_slice(&x);
+                    let id = next_id;
+                    next_id += 1;
+                    (v[a], id)
+                });
+                let (creator_first, mid) = *entry;
+                let same_dir = creator_first == v[a];
+                geo_conn[base + 3 + li] = mid;
+                let _ = same_dir; // Tri6 midpoints are direction-agnostic
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geo_conn,
+            nodes_per_elem: npe_new,
+            coords: geo_coords,
+            n_nodes: next_id as usize,
+        });
+    }
+
+    fn set_curvature_tri3(&mut self, p: usize) {        use fem_element::lagrange::TriPk;
         use fem_element::ReferenceElement;
         let n_elems = self.n_elems();
         let npe_new = (p + 1) * (p + 2) / 2;
@@ -1105,6 +1174,7 @@ impl<const D: usize> Mesh<D> {
             face_to_elem: None,
             edge_conn: vec![], edge_to_elem: vec![],
             geometry: None,
+            nc_vertex_view: None,
         }
     }
 
@@ -1834,14 +1904,21 @@ impl<const D: usize> MeshTopology for Mesh<D> {
             if n < geo.n_nodes {
                 let off = n * D;
                 if off + D <= geo.coords.len() {
-                    return &geo.coords[off..off + D];
-                }
+                    return &geo.coords[off..off + D];                }
             }
         }
         self.node_coords(node)
     }
 
+    fn geom_n_nodes(&self) -> usize {
+        self.geometry.as_ref().map_or(self.n_nodes(), |g| g.n_nodes)
+    }
+
     fn face_nodes(&self, face: FaceId) -> &[NodeId] { self.bface_nodes(face) }
+
+    fn nc_vertex_view(&self) -> Option<&[NodeId]> {
+        self.nc_vertex_view.as_deref()
+    }
 
     fn face_tag(&self, face: FaceId) -> i32 { self.face_tags[face as usize] }
 

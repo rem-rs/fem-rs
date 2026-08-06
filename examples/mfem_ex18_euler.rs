@@ -442,7 +442,7 @@ fn main() {
         &mesh,
         order,
         Box::new(flux),
-        false, // volume off — known bug: NaN with volume term
+        true, // volume term on: MFEM HyperbolicFormIntegrator (∫F·∇v)
     );
     let n_dofs = euler_op.n_dofs();
     println!("Number of unknowns: {}", n_dofs);

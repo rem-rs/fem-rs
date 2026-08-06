@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 use fem_element::reference::ReferenceElement;
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
-use fem_element::lagrange::QuadQ1;
+use fem_element::lagrange::QuadL2GL;
+use fem_core::types::NodeId;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 
@@ -81,12 +82,13 @@ impl FluxFunction for EulerFlux {
         flux_out[7] = v * (E + p);                      // F_y[E]:  v(E + p)
     }
 
-    fn max_speed(&self, state: &[f64], normal: &[f64]) -> f64 {
+    fn max_speed(&self, state: &[f64], _normal: &[f64]) -> f64 {
         let (rho, u, v, p) = cons_to_prim(state, self.gamma);
         let a = (self.gamma * p / rho).sqrt();
-        let vn = u * normal[0] + v * normal[1];
-        let nlen = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
-        (if nlen > 0.0 { (vn / nlen).abs() } else { 0.0 }) + a
+        // MFEM EulerFlux::ComputeFlux returns the FULL fluid speed |u| plus
+        // sound speed (hyperbolic.cpp), not the normal component.
+        let speed = (u * u + v * v).sqrt();
+        speed + a
     }
 
     fn numerical_flux(&self, ql: &[f64], qr: &[f64], normal: &[f64]) -> Vec<f64> {
@@ -207,8 +209,13 @@ fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElemen
     };
     match shape {
         ElemShape::Quad => {
-            assert_eq!(order, 1, "Quad4 only supports order=1 (QuadQ1) currently");
-            (Box::new(QuadQ1), shape)
+            assert_eq!(order, 1, "Quad4 only supports order=1 currently");
+            // MFEM DG_FECollection(order, dim, BasisType::GaussLegendre) uses
+            // the Gauss-Legendre nodal basis on [0,1]² — NOT the equally
+            // spaced QuadQ1.  With GL nodes the mass matrix is diagonal
+            // (C++ invmass = 36·I on this mesh; QuadQ1 gave a full 144/-72
+            // matrix → 10× larger dudt → NaN).
+            (Box::new(QuadL2GL::new(1)), shape)
         }
         ElemShape::Tri => {
             match order {
@@ -224,34 +231,39 @@ fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElemen
 /// Bilinear (Q1) Jacobian and J^{-T} at quadrature point (ξ, η) ∈ [-1,1]².
 /// Returns (detJ, [Jit00, Jit01, Jit10, Jit11]).
 fn quad4_jac_at_qp(p: &[[f64; 2]; 4], xi: f64, eta: f64) -> (f64, [f64; 4]) {
-    // dN/dξ:  [-(1-η), (1-η), (1+η), -(1+η)] / 4
-    // dN/dη:  [-(1-ξ), -(1+ξ), (1+ξ), (1-ξ)] / 4
-    let dxi = [-(1.0 - eta), (1.0 - eta), (1.0 + eta), -(1.0 + eta)];
-    let deta = [-(1.0 - xi), -(1.0 + xi), (1.0 + xi), (1.0 - xi)];
-    let j11 = (dxi[0]*p[0][0] + dxi[1]*p[1][0] + dxi[2]*p[2][0] + dxi[3]*p[3][0]) / 4.0;
-    let j12 = (deta[0]*p[0][0] + deta[1]*p[1][0] + deta[2]*p[2][0] + deta[3]*p[3][0]) / 4.0;
-    let j21 = (dxi[0]*p[0][1] + dxi[1]*p[1][1] + dxi[2]*p[2][1] + dxi[3]*p[3][1]) / 4.0;
-    let j22 = (deta[0]*p[0][1] + deta[1]*p[1][1] + deta[2]*p[2][1] + deta[3]*p[3][1]) / 4.0;
+    // Q1 shape derivatives on [0,1]² (GL nodal basis):
+    // N0=(1-ξ)(1-η), N1=ξ(1-η), N2=ξη, N3=(1-ξ)η
+    let dxi = [-(1.0 - eta), (1.0 - eta), eta, -eta];
+    let deta = [-(1.0 - xi), -xi, xi, (1.0 - xi)];
+    let j11 = dxi[0]*p[0][0] + dxi[1]*p[1][0] + dxi[2]*p[2][0] + dxi[3]*p[3][0];
+    let j12 = deta[0]*p[0][0] + deta[1]*p[1][0] + deta[2]*p[2][0] + deta[3]*p[3][0];
+    let j21 = dxi[0]*p[0][1] + dxi[1]*p[1][1] + dxi[2]*p[2][1] + dxi[3]*p[3][1];
+    let j22 = deta[0]*p[0][1] + deta[1]*p[1][1] + deta[2]*p[2][1] + deta[3]*p[3][1];
     let det = j11 * j22 - j12 * j21;
     let inv_det = 1.0 / det;
     (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
 }
 
-/// Helper: convert mesh.node_coords(&[f64]) to [f64; 2] for quad4_jac_at_qp.
+/// Helper: per-element geometry coordinates (uses the mesh "nodes" section,
+/// i.e. `geometry_nodes`/`geom_coords_of` — for geometrically periodic meshes
+/// like periodic-square.mesh the same vertex index maps to different physical
+/// positions in different elements, and only the per-element geometry is
+/// meaningful; MFEM's element transforms use the nodes field too).
 fn get_quad_nodes(mesh: &dyn MeshTopology, elem: u32) -> [[f64; 2]; 4] {
-    let nodes = mesh.element_nodes(elem);
-    [[mesh.node_coords(nodes[0])[0], mesh.node_coords(nodes[0])[1]],
-     [mesh.node_coords(nodes[1])[0], mesh.node_coords(nodes[1])[1]],
-     [mesh.node_coords(nodes[2])[0], mesh.node_coords(nodes[2])[1]],
-     [mesh.node_coords(nodes[3])[0], mesh.node_coords(nodes[3])[1]]]
+    let nodes = mesh.geometry_nodes(elem);
+    let c = |n: &NodeId| {
+        let p = mesh.geom_coords_of(*n);
+        [p[0], p[1]]
+    };
+    [c(&nodes[0]), c(&nodes[1]), c(&nodes[2]), c(&nodes[3])]
 }
 
-/// Tri3 constant Jacobian.
+/// Tri3 constant Jacobian (per-element geometry coordinates).
 fn tri3_jac_at_qp(mesh: &dyn MeshTopology, elem: u32) -> (f64, [f64; 4]) {
-    let nodes = mesh.element_nodes(elem);
-    let p0 = mesh.node_coords(nodes[0]);
-    let p1 = mesh.node_coords(nodes[1]);
-    let p2 = mesh.node_coords(nodes[2]);
+    let nodes = mesh.geometry_nodes(elem);
+    let p0 = mesh.geom_coords_of(nodes[0]);
+    let p1 = mesh.geom_coords_of(nodes[1]);
+    let p2 = mesh.geom_coords_of(nodes[2]);
     let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
     let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
     let det = j11 * j22 - j12 * j21;
@@ -391,12 +403,12 @@ fn tri_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
 /// Map a face-local coordinate `t ∈ [0,1]` to reference-quadrilateral `[-1,1]²` coordinates.
 fn quad_face_ref(face: u8, t: f64, reverse: bool) -> [f64; 2] {
     let t1 = if reverse { 1.0 - t } else { t };
-    let xi = 2.0 * t1 - 1.0; // map [0,1] → [-1,1]
+    // QuadL2GL reference domain is [0,1]².
     match face {
-        0 => [ xi, -1.0], // bottom: η = -1
-        1 => [ 1.0,  xi], // right:  ξ = +1
-        2 => [ xi,  1.0], // top:    η = +1
-        3 => [-1.0,  xi], // left:   ξ = -1
+        0 => [t1, 0.0],        // bottom: η = 0
+        1 => [1.0, t1],        // right:  ξ = 1
+        2 => [1.0 - t1, 1.0],  // top:    η = 1
+        3 => [0.0, 1.0 - t1],  // left:   ξ = 0
         _ => panic!("Quad4 faces 0-3"),
     }
 }
@@ -498,17 +510,28 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
                 (e1 as usize, f1, e0 as usize, f0)
             };
 
-            // Normal outward from L
-            let l_nodes = mesh.element_nodes(elem_l as u32);
+            // Normal outward from L (per-element geometry coordinates —
+            // periodic meshes: the same vertex index can map to different
+            // physical positions in different elements).
+            let l_nodes = mesh.geometry_nodes(elem_l as u32);
             let (na, nb) = face_nodes(shape, &l_nodes, face_l as u8);
-            let pa = mesh.node_coords(na);
-            let pb = mesh.node_coords(nb);
+            let pa = mesh.geom_coords_of(na);
+            let pb = mesh.geom_coords_of(nb);
             let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
-            let normal = [-dy, dx];
             let length = (dx * dx + dy * dy).sqrt();
+            // Unit outward normal.  MFEM CalcOrtho returns the outward
+            // normal scaled by h/2 and the [-1,1] face quadrature weights
+            // sum to 2, so the net face contribution is h·F̂(unit normal);
+            // here qp_weights already carry the length, so normal is unit.
+            // MFEM CalcOrtho (2D): n = (dy, -dx) — the CW rotation
+            // of the face tangent, i.e. the OUTWARD normal.  The old
+            // [-dy, dx] was the CCW/inward rotation: every face flux got the
+            // wrong sign, so the face and volume terms ADDED instead of
+            // cancelling (ex18: z L1 1321 vs C++ 63).
+            let normal = [dy / length, -dx / length];
 
             // Check orientation for R element
-            let r_nodes = mesh.element_nodes(elem_r as u32);
+            let r_nodes = mesh.geometry_nodes(elem_r as u32);
             let (r_na, _) = face_nodes(shape, &r_nodes, face_r as u8);
             let reverse_r = na != r_na;
 
@@ -568,8 +591,8 @@ fn build_faces(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement) -> (Vec
         let pa = mesh.node_coords(na);
         let pb = mesh.node_coords(nb);
         let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
-        let normal = [-dy, dx];
         let length = (dx * dx + dy * dy).sqrt();
+        let normal = [dy / length, -dx / length];
         bound_info.push(BoundInfo { elem, lf, normal, length });
     }
 
@@ -789,8 +812,8 @@ impl DgHyperbolicConservationLaws {
                         uL[eq] += face.basis[q][i] * u[base + i * nq + eq];
                     }
                 }
-                let nx = face.normal[0] / face.length;
-                let ny = face.normal[1] / face.length;
+                let nx = face.normal[0];
+                let ny = face.normal[1];
                 let vn = uL[1] * nx + uL[2] * ny;
                 u_mirror[0] = uL[0];
                 u_mirror[1] = uL[1] - 2.0 * vn * nx;
@@ -826,16 +849,33 @@ impl DgHyperbolicConservationLaws {
             let det_j = self.elem_det_j[e];
             // Precompute physical gradients of all test functions at each QP
             // ∇x_φ_i(q) = J_e^{-T} · ∇ξ_φ_i(q)
-            let (_, jit) = {
-                let en = &self.mesh_elem_nodes[e];
-                let p0 = &self.mesh_node_coords[en[0] as usize];
-                let p1 = &self.mesh_node_coords[en[1] as usize];
-                let p2 = &self.mesh_node_coords[en[2] as usize];
-                let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
-                let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
-                let det = j11 * j22 - j12 * j21;
-                let inv_det = 1.0 / det;
-                (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+            let (_, jit) = match self.elem_shape {
+                ElemShape::Tri => {
+                    let en = &self.mesh_elem_nodes[e];
+                    let p0 = &self.mesh_node_coords[en[0] as usize];
+                    let p1 = &self.mesh_node_coords[en[1] as usize];
+                    let p2 = &self.mesh_node_coords[en[2] as usize];
+                    let j11 = p1[0] - p0[0]; let j12 = p2[0] - p0[0];
+                    let j21 = p1[1] - p0[1]; let j22 = p2[1] - p0[1];
+                    let det = j11 * j22 - j12 * j21;
+                    let inv_det = 1.0 / det;
+                    (det.abs(), [j22*inv_det, -j21*inv_det, -j12*inv_det, j11*inv_det])
+                }
+                // Quad: use the full 4-node isoparametric Jacobian.  The old
+                // code built J from only (p0,p1,p2) — for a quad the η
+                // direction is p3−p0, NOT p2−p0 (p2 is the opposite corner),
+                // which corrupted det(J) and produced NaN in ex18's volume
+                // term on quad meshes.
+                ElemShape::Quad => {
+                    let en = &self.mesh_elem_nodes[e];
+                    let p: [[f64; 2]; 4] = [
+                        self.mesh_node_coords[en[0] as usize],
+                        self.mesh_node_coords[en[1] as usize],
+                        self.mesh_node_coords[en[2] as usize],
+                        self.mesh_node_coords[en[3] as usize],
+                    ];
+                    quad4_jac_at_qp(&p, 0.0, 0.0)
+                }
             };
             for q in 0..n_vol_qp {
                 let xi = &qr.points[q];
@@ -865,6 +905,7 @@ impl DgHyperbolicConservationLaws {
         }
 
         }
+
         // 5. Apply inverse mass matrix
         for e in 0..self.n_elems {
             let base = e * dp * nq;

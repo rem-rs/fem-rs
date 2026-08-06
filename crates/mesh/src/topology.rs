@@ -139,6 +139,23 @@ pub trait MeshTopology: Send + Sync {
         self.node_coords(node)
     }
 
+    /// Total number of high-order geometry nodes.
+    ///
+    /// For flat meshes this equals [`n_nodes`](Self::n_nodes).  For meshes
+    /// with per-element geometry (curved / geometrically periodic), it is the
+    /// size of the geometry node table that [`geometry_nodes`](Self::geometry_nodes)
+    /// and [`geom_coords_of`](Self::geom_coords_of) index into.
+    fn geom_n_nodes(&self) -> usize {
+        self.n_nodes()
+    }
+
+    /// MFEM vertex-view order for NC meshes: `Some(view)` means vertex DOF `d`
+    /// refers to physical node `view[d]` (MFEM `UpdateVertices` top-level then
+    /// SFC ordering).  `None` (default) means vertex DOF `d` is node `d`.
+    fn nc_vertex_view(&self) -> Option<&[NodeId]> {
+        None
+    }
+
     /// Clone the mesh into a boxed trait object.
     /// Required for dimension-agnostic code with dynamic dispatch.
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync + 'static> {
