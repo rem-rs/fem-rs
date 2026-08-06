@@ -12,9 +12,15 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct HexND1;
 
 impl VectorReferenceElement for HexND1 {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 1 }
-    fn n_dofs(&self) -> usize { 12 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        12
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let x = xi[0];
@@ -30,7 +36,7 @@ impl VectorReferenceElement for HexND1 {
         values[1] = 0.0;
         values[2] = 0.0;
 
-        values[3] = 0.0;                            // e1 (y, x=+1, z=-1)
+        values[3] = 0.0; // e1 (y, x=+1, z=-1)
         values[4] = 0.125 * (1.0 + x) * (1.0 - z);
         values[5] = 0.0;
 
@@ -38,7 +44,7 @@ impl VectorReferenceElement for HexND1 {
         values[7] = 0.0;
         values[8] = 0.0;
 
-        values[9] = 0.0;                            // e3 (y, x=-1, z=-1)
+        values[9] = 0.0; // e3 (y, x=-1, z=-1)
         values[10] = 0.125 * (1.0 - x) * (1.0 - z);
         values[11] = 0.0;
 
@@ -46,7 +52,7 @@ impl VectorReferenceElement for HexND1 {
         values[13] = 0.0;
         values[14] = 0.0;
 
-        values[15] = 0.0;                            // e5 (y, x=+1, z=+1)
+        values[15] = 0.0; // e5 (y, x=+1, z=+1)
         values[16] = 0.125 * (1.0 + x) * (1.0 + z);
         values[17] = 0.0;
 
@@ -54,7 +60,7 @@ impl VectorReferenceElement for HexND1 {
         values[19] = 0.0;
         values[20] = 0.0;
 
-        values[21] = 0.0;                            // e7 (y, x=-1, z=+1)
+        values[21] = 0.0; // e7 (y, x=-1, z=+1)
         values[22] = 0.125 * (1.0 - x) * (1.0 + z);
         values[23] = 0.0;
 
@@ -201,8 +207,8 @@ mod tests {
         {
             elem.eval_basis_vec(mid, &mut vals);
             for i in 0..elem.n_dofs() {
-                let dof = (vals[i * 3] * t[0] + vals[i * 3 + 1] * t[1] + vals[i * 3 + 2] * t[2])
-                    * l;
+                let dof =
+                    (vals[i * 3] * t[0] + vals[i * 3 + 1] * t[1] + vals[i * 3 + 2] * t[2]) * l;
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!(
                     (dof - expected).abs() < 1e-12,

@@ -40,19 +40,37 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct HexRT0;
 
 impl VectorReferenceElement for HexRT0 {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 6 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        0
+    }
+    fn n_dofs(&self) -> usize {
+        6
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
         // MFEM CUBE FaceVert ordering: bottom, front, right, back, left, top.
-        values[0] = 0.0; values[1] = 0.0; values[2] = (z - 1.0) / 8.0;   // z=−1
-        values[3] = 0.0; values[4] = (y - 1.0) / 8.0; values[5] = 0.0;   // y=−1
-        values[6] = (1.0 + x) / 8.0; values[7] = 0.0; values[8] = 0.0;   // x=+1
-        values[9] = 0.0; values[10] = (1.0 + y) / 8.0; values[11] = 0.0; // y=+1
-        values[12] = (x - 1.0) / 8.0; values[13] = 0.0; values[14] = 0.0; // x=−1
-        values[15] = 0.0; values[16] = 0.0; values[17] = (1.0 + z) / 8.0; // z=+1
+        values[0] = 0.0;
+        values[1] = 0.0;
+        values[2] = (z - 1.0) / 8.0; // z=−1
+        values[3] = 0.0;
+        values[4] = (y - 1.0) / 8.0;
+        values[5] = 0.0; // y=−1
+        values[6] = (1.0 + x) / 8.0;
+        values[7] = 0.0;
+        values[8] = 0.0; // x=+1
+        values[9] = 0.0;
+        values[10] = (1.0 + y) / 8.0;
+        values[11] = 0.0; // y=+1
+        values[12] = (x - 1.0) / 8.0;
+        values[13] = 0.0;
+        values[14] = 0.0; // x=−1
+        values[15] = 0.0;
+        values[16] = 0.0;
+        values[17] = (1.0 + z) / 8.0; // z=+1
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {

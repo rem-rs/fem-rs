@@ -85,7 +85,9 @@ pub struct MultiRateStats {
 pub enum MultiRateError {
     #[error("invalid multi-rate config: {0}")]
     InvalidConfig(String),
-    #[error("sync step at t={time:.6e} did not converge after {retries} retries (error={error:.3e})")]
+    #[error(
+        "sync step at t={time:.6e} did not converge after {retries} retries (error={error:.3e})"
+    )]
     SyncDidNotConverge {
         time: f64,
         retries: usize,
@@ -192,7 +194,8 @@ where
                 break;
             }
 
-            if attempt >= cfg.max_sync_retries || current_fast_dt <= cfg.min_fast_dt * (1.0 + 1.0e-12)
+            if attempt >= cfg.max_sync_retries
+                || current_fast_dt <= cfg.min_fast_dt * (1.0 + 1.0e-12)
             {
                 return Err(MultiRateError::SyncDidNotConverge {
                     time: t_window_end,
@@ -258,7 +261,14 @@ mod tests {
             slow_dt: 0.1,
         };
         let mut ctx = ();
-        assert!(run_multirate(bad, &mut ctx, |_ctx, _t, _dt| {}, |_ctx, _t, _dt| {}, |_ctx, _t| {}).is_err());
+        assert!(run_multirate(
+            bad,
+            &mut ctx,
+            |_ctx, _t, _dt| {},
+            |_ctx, _t, _dt| {},
+            |_ctx, _t| {}
+        )
+        .is_err());
     }
 
     #[test]

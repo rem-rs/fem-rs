@@ -512,7 +512,7 @@ mod tests {
         let mut rhs = vec![1.0; n];
 
         let standard = vec![HangingNodeConstraint {
-            constrained: 1, parent_a: 0, parent_b: 2,
+            constrained: 1, parent_a: 0, parent_b: 2, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         let hp = vec![LinearConstraint {
             constrained: 3,
@@ -532,7 +532,7 @@ mod tests {
     fn recover_hp_values_check() {
         let mut x = vec![3.0, 0.0, 9.0, 0.0];
         let standard = vec![HangingNodeConstraint {
-            constrained: 1, parent_a: 0, parent_b: 2,
+            constrained: 1, parent_a: 0, parent_b: 2, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         let hp = vec![LinearConstraint {
             constrained: 3,
@@ -565,7 +565,7 @@ mod tests {
         let mut rhs = vec![1.0; n];
 
         let standard = vec![HangingNodeConstraint {
-            constrained: 4, parent_a: 1, parent_b: 3,
+            constrained: 4, parent_a: 1, parent_b: 3, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         let hp = vec![LinearConstraint {
             constrained: 5,

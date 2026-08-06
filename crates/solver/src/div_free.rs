@@ -38,7 +38,9 @@ pub fn project_divergence_free(
     for nd in 0..n_nd {
         // M[nd, nd] via find_entry
         let md = m.find_entry(nd, nd).map(|p| m.values[p]).unwrap_or(1.0);
-        if md.abs() < 1e-30 { continue; }
+        if md.abs() < 1e-30 {
+            continue;
+        }
         for ri in g.row_ptr[nd]..g.row_ptr[nd + 1] {
             let i = g.col_idx[ri] as usize;
             let gi = g.values[ri];
@@ -46,7 +48,9 @@ pub fn project_divergence_free(
                 let j = g.col_idx[rj] as usize;
                 let gj = g.values[rj];
                 let val = gi * md * gj;
-                if val.abs() > 1e-30 { coo.add(i, j, val); }
+                if val.abs() > 1e-30 {
+                    coo.add(i, j, val);
+                }
             }
         }
     }
@@ -59,5 +63,7 @@ pub fn project_divergence_free(
     // rhs −= G · x_h1
     let mut gx = vec![0.0; n_nd];
     g.spmv(&x_h1, &mut gx);
-    for i in 0..n_nd { rhs[i] -= gx[i]; }
+    for i in 0..n_nd {
+        rhs[i] -= gx[i];
+    }
 }

@@ -14,12 +14,12 @@
 
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
 use fem_linalg::{csr_spmm, fem_to_linlvo_csr, CsrMatrix};
+pub use linlvo::amg::AmgConfig;
 use linlvo::{
     amg::{AmgHierarchy, AmgPrecond},
     core::preconditioner::Preconditioner,
     DenseVec, Scalar as linlvoScalar,
 };
-pub use linlvo::amg::AmgConfig;
 
 /// LOR preconditioner configuration.
 #[derive(Debug, Clone)]
@@ -28,24 +28,35 @@ pub struct LorPrecond {
 }
 
 impl Default for LorPrecond {
-    fn default() -> Self { LorPrecond { smoother_sweeps: 2 } }
+    fn default() -> Self {
+        LorPrecond { smoother_sweeps: 2 }
+    }
 }
 
 impl LorPrecond {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Solve SPD system with LOR-Jacobi preconditioned CG (legacy API stub).
 pub fn solve_pcg_lor<T: linlvoScalar>(
-    a: &CsrMatrix<T>, b: &[T], x: &mut [T],
-    _lor: &LorPrecond, cfg: &SolverConfig,
+    a: &CsrMatrix<T>,
+    b: &[T],
+    x: &mut [T],
+    _lor: &LorPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     solve_pcg_jacobi(a, b, x, cfg)
 }
 
 pub fn solve_gmres_lor<T: linlvoScalar>(
-    a: &CsrMatrix<T>, b: &[T], x: &mut [T],
-    restart: usize, _lor: &LorPrecond, cfg: &SolverConfig,
+    a: &CsrMatrix<T>,
+    b: &[T],
+    x: &mut [T],
+    restart: usize,
+    _lor: &LorPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     solve_gmres(a, b, x, restart, cfg)
 }
@@ -57,8 +68,8 @@ pub fn solve_gmres_lor<T: linlvoScalar>(
 /// `M⁻¹ = P · A_LO⁻¹ · Pᵀ` where `A_LO = Pᵀ · A_HO · P` and AMG is
 /// applied to `A_LO`.  `P` is the prolongation from P1 → high-order.
 pub struct LorAmgPrecond {
-    prolong: CsrMatrix<f64>,       // P:  n_lo → n_hi  (n_hi × n_lo)
-    amg: AmgPrecond<f64>,          // AMG on A_LO
+    prolong: CsrMatrix<f64>, // P:  n_lo → n_hi  (n_hi × n_lo)
+    amg: AmgPrecond<f64>,    // AMG on A_LO
     n_lo: usize,
 }
 
@@ -85,7 +96,11 @@ impl LorAmgPrecond {
         let la_lo = fem_to_linlvo_csr(&a_lo);
         let hier = AmgHierarchy::build(la_lo, amg_cfg.clone());
         let amg = AmgPrecond::new(hier);
-        LorAmgPrecond { prolong: p.clone(), amg, n_lo }
+        LorAmgPrecond {
+            prolong: p.clone(),
+            amg,
+            n_lo,
+        }
     }
 }
 
@@ -129,12 +144,19 @@ impl Preconditioner for LorAmgPrecond {
 /// * `lor`  – the LOR-AMG preconditioner (built once)
 /// * `cfg`  – convergence parameters
 pub fn solve_pcg_lor_amg(
-    a_ho: &CsrMatrix<f64>, b: &[f64], x: &mut [f64],
-    lor: &LorAmgPrecond, cfg: &SolverConfig,
+    a_ho: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    lor: &LorAmgPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     let n = a_ho.nrows;
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
     }
     // Delegate to `solve_pcg_precond` which takes any Preconditioner.
     crate::solve_pcg_precond(a_ho, b, x, lor, cfg)
@@ -145,12 +167,20 @@ pub fn solve_pcg_lor_amg(
 /// Suitable for non‑symmetric high‑order systems when the low‑order
 /// operator is a reasonable preconditioner.
 pub fn solve_gmres_lor_amg(
-    a_ho: &CsrMatrix<f64>, b: &[f64], x: &mut [f64],
-    restart: usize, lor: &LorAmgPrecond, cfg: &SolverConfig,
+    a_ho: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    restart: usize,
+    lor: &LorAmgPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     let n = a_ho.nrows;
     if b.len() != n || x.len() != n {
-        return Err(SolverError::DimensionMismatch { rows: n, cols: n, rhs: b.len() });
+        return Err(SolverError::DimensionMismatch {
+            rows: n,
+            cols: n,
+            rhs: b.len(),
+        });
     }
     crate::solve_gmres_precond(a_ho, b, x, restart, lor, cfg)
 }
@@ -167,11 +197,25 @@ pub struct GeomMGHierarchy {
 
 impl GeomMGHierarchy {
     pub fn new(levels: Vec<CsrMatrix<f64>>, prolong: Vec<CsrMatrix<f64>>) -> Self {
-        assert!(levels.len() >= 2, "GeomMGHierarchy: need at least two levels");
-        assert_eq!(prolong.len(), levels.len() - 1, "GeomMGHierarchy: prolong length mismatch");
+        assert!(
+            levels.len() >= 2,
+            "GeomMGHierarchy: need at least two levels"
+        );
+        assert_eq!(
+            prolong.len(),
+            levels.len() - 1,
+            "GeomMGHierarchy: prolong length mismatch"
+        );
         for l in 0..prolong.len() {
-            assert_eq!(prolong[l].nrows, levels[l].nrows, "GeomMGHierarchy: P rows != fine size at level {l}");
-            assert_eq!(prolong[l].ncols, levels[l + 1].nrows, "GeomMGHierarchy: P cols != coarse size at level {l}");
+            assert_eq!(
+                prolong[l].nrows, levels[l].nrows,
+                "GeomMGHierarchy: P rows != fine size at level {l}"
+            );
+            assert_eq!(
+                prolong[l].ncols,
+                levels[l + 1].nrows,
+                "GeomMGHierarchy: P cols != coarse size at level {l}"
+            );
         }
         GeomMGHierarchy { levels, prolong }
     }
@@ -363,7 +407,13 @@ mod tests {
 
         let b = vec![2.0, 3.0];
         let mut x = vec![0.0; 2];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: false, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            atol: 0.0,
+            max_iter: 200,
+            verbose: false,
+            ..Default::default()
+        };
         let lor = LorPrecond::new();
         let res = solve_pcg_lor(&a, &b, &mut x, &lor, &cfg).expect("solve_pcg_lor failed");
 
@@ -383,7 +433,13 @@ mod tests {
 
         let b = vec![4.0, 2.0];
         let mut x = vec![0.0; 2];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: false, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            atol: 0.0,
+            max_iter: 200,
+            verbose: false,
+            ..Default::default()
+        };
         let lor = LorPrecond::new();
         let res = solve_gmres_lor(&a, &b, &mut x, 10, &lor, &cfg).expect("solve_gmres_lor failed");
 
@@ -453,7 +509,11 @@ mod tests {
 
         let res = solve_vcycle_geom_mg(&a0, &b, &mut x, &h, &mg, &cfg)
             .expect("solve_vcycle_geom_mg failed");
-        assert!(res.converged, "geom mg did not converge: {:.3e}", res.final_residual);
+        assert!(
+            res.converged,
+            "geom mg did not converge: {:.3e}",
+            res.final_residual
+        );
     }
 
     // ── LOR-AMG tests ─────────────────────────────────────────────────────
@@ -462,7 +522,9 @@ mod tests {
     /// so LOR-AMG reduces to plain AMG — a good baseline check.
     fn identity_prolong(n: usize) -> CsrMatrix<f64> {
         let mut coo = CooMatrix::<f64>::new(n, n);
-        for i in 0..n { coo.add(i, i, 1.0); }
+        for i in 0..n {
+            coo.add(i, i, 1.0);
+        }
         coo.into_csr()
     }
 
@@ -487,8 +549,12 @@ mod tests {
         for i in 0..n {
             for r in a_lo.row_ptr[i]..a_lo.row_ptr[i + 1] {
                 let j = a_lo.col_idx[r] as usize;
-                assert!((a_lo.values[r] - a_ho.get(i, j)).abs() < 1e-15,
-                    "A_LO differs at ({},{})", i, j);
+                assert!(
+                    (a_lo.values[r] - a_ho.get(i, j)).abs() < 1e-15,
+                    "A_LO differs at ({},{})",
+                    i,
+                    j
+                );
             }
         }
     }
@@ -497,8 +563,10 @@ mod tests {
     fn build_lor_operator_2x1_verify_manually() {
         // A_HO = [[2,-1],[-1,2]], P = [[1],[1]]
         let mut coo = CooMatrix::<f64>::new(2, 2);
-        coo.add(0, 0, 2.0); coo.add(0, 1, -1.0);
-        coo.add(1, 0, -1.0); coo.add(1, 1, 2.0);
+        coo.add(0, 0, 2.0);
+        coo.add(0, 1, -1.0);
+        coo.add(1, 0, -1.0);
+        coo.add(1, 1, 2.0);
         let a_ho = coo.into_csr();
         let p = simple_prolong();
         let a_lo = build_lor_operator(&a_ho, &p);
@@ -507,7 +575,11 @@ mod tests {
         // = [1,1]·[1;1] = 2
         assert_eq!(a_lo.nrows, 1);
         assert_eq!(a_lo.ncols, 1);
-        assert!((a_lo.get(0, 0) - 2.0).abs() < 1e-15, "A_LO[0,0] = {} (expected 2)", a_lo.get(0, 0));
+        assert!(
+            (a_lo.get(0, 0) - 2.0).abs() < 1e-15,
+            "A_LO[0,0] = {} (expected 2)",
+            a_lo.get(0, 0)
+        );
     }
 
     #[test]
@@ -533,13 +605,25 @@ mod tests {
         let lor = LorAmgPrecond::build(&a_ho, &p, &amg_cfg);
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 50, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            max_iter: 50,
+            ..Default::default()
+        };
         let res = solve_pcg_lor_amg(&a_ho, &b, &mut x, &lor, &cfg).unwrap();
-        assert!(res.converged,
-            "LOR‑AMG (P=I) did not converge in {} iters (res={:.3e})", res.iterations, res.final_residual);
+        assert!(
+            res.converged,
+            "LOR‑AMG (P=I) did not converge in {} iters (res={:.3e})",
+            res.iterations, res.final_residual
+        );
         let mut ax = vec![0.0_f64; n];
         a_ho.spmv(&x, &mut ax);
-        let err: f64 = ax.iter().zip(b.iter()).map(|(ai, bi)| (ai - bi).powi(2)).sum::<f64>().sqrt();
+        let err: f64 = ax
+            .iter()
+            .zip(b.iter())
+            .map(|(ai, bi)| (ai - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
         assert!(err < 1e-6, "solution error {:.3e}", err);
     }
 
@@ -552,9 +636,16 @@ mod tests {
         let lor = LorAmgPrecond::build(&a_ho, &p, &amg_cfg);
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 50, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            max_iter: 50,
+            ..Default::default()
+        };
         let res = solve_gmres_lor_amg(&a_ho, &b, &mut x, 30, &lor, &cfg).unwrap();
-        assert!(res.converged,
-            "GMRES+LOR‑AMG (P=I) failed: {} iters res={:.3e}", res.iterations, res.final_residual);
+        assert!(
+            res.converged,
+            "GMRES+LOR‑AMG (P=I) failed: {} iters res={:.3e}",
+            res.iterations, res.final_residual
+        );
     }
 }

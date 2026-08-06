@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case)]
 
-use crate::butcher::wrms_error;
 use crate::bdf::BdfStats;
-use crate::bdf::{BDF_ALPHA, L_COEFFS, ERROR_WEIGHTS, pascal_coeff};
+use crate::bdf::{pascal_coeff, BDF_ALPHA, ERROR_WEIGHTS, L_COEFFS};
+use crate::butcher::wrms_error;
 use crate::{solve_gmres, SolverConfig};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
@@ -31,19 +31,24 @@ impl DaeState {
     /// Create a new DAE state from consistent initial conditions `(y0, yp0)`.
     pub fn new(_t0: f64, y0: &[f64], yp0: &[f64], dt: f64) -> Self {
         let _n = y0.len();
-        let z = vec![
-            y0.to_vec(),
-            yp0.iter().map(|&v| dt * v).collect(),
-        ];
+        let z = vec![y0.to_vec(), yp0.iter().map(|&v| dt * v).collect()];
         // Verify consistency: currently trusts the caller.
         // A proper implementation would check F(t0, y0, yp0) ≈ 0.
         DaeState { z, order: 1, dt }
     }
 
-    pub fn n_vars(&self) -> usize { self.z[0].len() }
-    pub fn y(&self) -> &[f64] { &self.z[0] }
-    pub fn order(&self) -> usize { self.order }
-    pub fn dt(&self) -> f64 { self.dt }
+    pub fn n_vars(&self) -> usize {
+        self.z[0].len()
+    }
+    pub fn y(&self) -> &[f64] {
+        &self.z[0]
+    }
+    pub fn order(&self) -> usize {
+        self.order
+    }
+    pub fn dt(&self) -> f64 {
+        self.dt
+    }
 }
 
 // ─── DaeIntegrator ───────────────────────────────────────────────────────────
@@ -75,16 +80,20 @@ impl DaeIntegrator {
         let tnp1 = t + dt;
 
         // ── 1. Predict ────────────────────────────────────────────────────
-        let zp_pred: Vec<Vec<f64>> = (0..=k).map(|i| {
-            let mut val = vec![0.0; n];
-            for j in i..=k {
-                let c = pascal_coeff(k, i, j);
-                if c.abs() > 0.0 {
-                    for d in 0..n { val[d] += c * state.z[j][d]; }
+        let zp_pred: Vec<Vec<f64>> = (0..=k)
+            .map(|i| {
+                let mut val = vec![0.0; n];
+                for j in i..=k {
+                    let c = pascal_coeff(k, i, j);
+                    if c.abs() > 0.0 {
+                        for d in 0..n {
+                            val[d] += c * state.z[j][d];
+                        }
+                    }
                 }
-            }
-            val
-        }).collect();
+                val
+            })
+            .collect();
 
         let y_pred = &zp_pred[0];
         let _yp_recon: Vec<f64> = vec![0.0; n];
@@ -150,29 +159,46 @@ impl DaeIntegrator {
 
             // Solve J_total * Δy = -G
             let mut rhs_lin = vec![0.0; n];
-            for i in 0..n { rhs_lin[i] = -G[i]; }
+            for i in 0..n {
+                rhs_lin[i] = -G[i];
+            }
 
             let mut dy = vec![0.0; n];
-            let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+            let cfg = SolverConfig {
+                rtol: 1e-10,
+                atol: 0.0,
+                max_iter: 500,
+                verbose: false,
+                ..SolverConfig::default()
+            };
             solve_gmres(&jac_total, &rhs_lin, &mut dy, 30, &cfg)
                 .map_err(|e| format!("DAE-BDF{k} Newton-GMRES failed: {e}"))?;
 
-            for i in 0..n { y[i] += dy[i]; }
+            for i in 0..n {
+                y[i] += dy[i];
+            }
         }
 
         if !converged {
-            return Err(format!("DAE-BDF{k} Newton did not converge in {} iterations", newton.max_iter));
+            return Err(format!(
+                "DAE-BDF{k} Newton did not converge in {} iterations",
+                newton.max_iter
+            ));
         }
 
         // ── 3. Compute δ = y - y_pred and update Nordsieck ──────────────
         let mut delta = vec![0.0; n];
-        for i in 0..n { delta[i] = y[i] - y_pred[i]; }
+        for i in 0..n {
+            delta[i] = y[i] - y_pred[i];
+        }
 
         let mut zp_new = zp_pred;
         for i in 0..=k {
             let li = L_COEFFS[k][i];
             if li.abs() > 0.0 {
-                for d in 0..n { zp_new[i][d] += li * delta[d]; }
+                for d in 0..n {
+                    zp_new[i][d] += li * delta[d];
+                }
             }
         }
         // The Nordsieck update above correctly propagates the correction
@@ -216,7 +242,9 @@ impl DaeIntegrator {
         let mut consecutive_rejections = 0u32;
 
         while t < t_end {
-            if stats.n_steps >= config.max_steps { break; }
+            if stats.n_steps >= config.max_steps {
+                break;
+            }
             stats.n_steps += 1;
 
             state.dt = state.dt.min(t_end - t);
@@ -234,8 +262,10 @@ impl DaeIntegrator {
                         if want_order != state.order {
                             Self::dae_change_order(state, want_order);
                         }
-                        state.dt = (state.dt * (0.9 / err.max(1e-15)).powf(1.0 / state.order as f64))
-                            .max(config.dt_min).min(config.dt_max);
+                        state.dt = (state.dt
+                            * (0.9 / err.max(1e-15)).powf(1.0 / state.order as f64))
+                        .max(config.dt_min)
+                        .min(config.dt_max);
                         prev_err = err;
                     } else {
                         stats.n_rejected += 1;
@@ -262,14 +292,20 @@ impl DaeIntegrator {
     }
 
     fn dae_select_order(current: usize, err: f64, prev_err: f64) -> usize {
-        if current < 5 && err < 0.1 * prev_err.max(1e-15) { current + 1 }
-        else if current > 1 && err > 3.0 { current - 1 }
-        else { current }
+        if current < 5 && err < 0.1 * prev_err.max(1e-15) {
+            current + 1
+        } else if current > 1 && err > 3.0 {
+            current - 1
+        } else {
+            current
+        }
     }
 
     fn dae_change_order(state: &mut DaeState, new_order: usize) {
         let n = state.n_vars();
-        while state.z.len() <= new_order { state.z.push(vec![0.0; n]); }
+        while state.z.len() <= new_order {
+            state.z.push(vec![0.0; n]);
+        }
         state.z.truncate(new_order + 1);
         state.order = new_order;
     }
@@ -284,7 +320,13 @@ pub struct DaeNewtonConfig {
 }
 
 impl Default for DaeNewtonConfig {
-    fn default() -> Self { DaeNewtonConfig { atol: 1e-10, rtol: 1e-8, max_iter: 10 } }
+    fn default() -> Self {
+        DaeNewtonConfig {
+            atol: 1e-10,
+            rtol: 1e-8,
+            max_iter: 10,
+        }
+    }
 }
 
 // ─── DaeConfig ───────────────────────────────────────────────────────────────
@@ -301,8 +343,10 @@ pub struct DaeConfig {
 impl Default for DaeConfig {
     fn default() -> Self {
         DaeConfig {
-            atol: 1e-6, rtol: 1e-3,
-            dt_min: 1e-12, dt_max: 1.0,
+            atol: 1e-6,
+            rtol: 1e-3,
+            dt_min: 1e-12,
+            dt_max: 1.0,
             max_steps: 1_000_000,
             newton: DaeNewtonConfig::default(),
         }
@@ -334,13 +378,17 @@ where
     let mut yp = yp_guess.to_vec();
     // Count unknowns
     let n_unknown = dof_y.iter().filter(|&&b| b).count() + dof_yp.iter().filter(|&&b| b).count();
-    if n_unknown == 0 { return Ok((y, yp)); }
+    if n_unknown == 0 {
+        return Ok((y, yp));
+    }
 
     for _iter in 0..config.max_iter {
         let mut res = vec![0.0; n];
         res_fn(t0, &y, &yp, &mut res);
         let norm = res.iter().map(|v| v.powi(2)).sum::<f64>().sqrt();
-        if norm < config.atol { return Ok((y, yp)); }
+        if norm < config.atol {
+            return Ok((y, yp));
+        }
 
         let (df_dy, df_dyp) = jac_fn(t0, &y, &yp);
         // Build system for unknowns: J_total * [Δy; Δyp] = -res
@@ -350,27 +398,51 @@ where
             // dF/dy * Δy
             for ptr in df_dy.row_ptr[i]..df_dy.row_ptr[i + 1] {
                 let j = df_dy.col_idx[ptr] as usize;
-                if dof_y[j] { coo.add(i, j, df_dy.values[ptr]); }
+                if dof_y[j] {
+                    coo.add(i, j, df_dy.values[ptr]);
+                }
             }
             // dF/dyp * Δyp
             for ptr in df_dyp.row_ptr[i]..df_dyp.row_ptr[i + 1] {
                 let j = df_dyp.col_idx[ptr] as usize;
-                if dof_yp[j] { coo.add(i, n + j, df_dyp.values[ptr]); }
+                if dof_yp[j] {
+                    coo.add(i, n + j, df_dyp.values[ptr]);
+                }
             }
         }
         let jac_total = coo.into_csr();
 
         let mut du = vec![0.0; 2 * n];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
-        solve_gmres(&jac_total, &res.iter().map(|v| -v).collect::<Vec<_>>(), &mut du, 30, &cfg)
-            .map_err(|e| format!("DAE init solve failed: {e}"))?;
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_gmres(
+            &jac_total,
+            &res.iter().map(|v| -v).collect::<Vec<_>>(),
+            &mut du,
+            30,
+            &cfg,
+        )
+        .map_err(|e| format!("DAE init solve failed: {e}"))?;
 
         let mut du_norm = 0.0;
         for i in 0..n {
-            if dof_y[i] { y[i] += du[i]; du_norm += du[i].powi(2); }
-            if dof_yp[i] { yp[i] += du[n + i]; du_norm += du[n + i].powi(2); }
+            if dof_y[i] {
+                y[i] += du[i];
+                du_norm += du[i].powi(2);
+            }
+            if dof_yp[i] {
+                yp[i] += du[n + i];
+                du_norm += du[n + i].powi(2);
+            }
         }
-        if du_norm.sqrt() < config.atol { return Ok((y, yp)); }
+        if du_norm.sqrt() < config.atol {
+            return Ok((y, yp));
+        }
     }
     Err("DAE consistent initialization did not converge".to_string())
 }
@@ -419,13 +491,19 @@ mod tests {
     fn dae_pendulum_index1_consistent_initialization() {
         let y0 = vec![1.0, 0.0]; // y1 = 1, y2 = 0 → constraint satisfied
         let yp0 = vec![0.0, 0.0];
-        let dof_y = [true, true];  // Both y unknowns
+        let dof_y = [true, true]; // Both y unknowns
         let dof_yp = [true, false]; // Only y1' computed from equation
         let config = DaeNewtonConfig::default();
 
         let result = dae_consistent_initialization(
-            0.0, &y0, &yp0, &dof_y, &dof_yp,
-            &pendulum_dae_res, &pendulum_dae_jac, &config,
+            0.0,
+            &y0,
+            &yp0,
+            &dof_y,
+            &dof_yp,
+            &pendulum_dae_res,
+            &pendulum_dae_jac,
+            &config,
         );
         assert!(result.is_ok(), "DAE init should converge");
         let (y_init, yp_init) = result.unwrap();
@@ -440,28 +518,41 @@ mod tests {
         let y0 = vec![1.0, 0.0];
         let yp0 = vec![0.0, 0.0]; // y2' = 0 (algebraic)
         let mut state = DaeState::new(0.0, &y0, &yp0, 0.01);
-        let newton = DaeNewtonConfig { atol: 1e-6, rtol: 1e-4, max_iter: 15 };
-        let result = DaeIntegrator::step(&mut state, 0.0, &pendulum_dae_res, &pendulum_dae_jac, &newton);
+        let newton = DaeNewtonConfig {
+            atol: 1e-6,
+            rtol: 1e-4,
+            max_iter: 15,
+        };
+        let result = DaeIntegrator::step(
+            &mut state,
+            0.0,
+            &pendulum_dae_res,
+            &pendulum_dae_jac,
+            &newton,
+        );
         assert!(result.is_ok(), "DAE step failed: {:?}", result.err());
         let y = state.y();
         let constraint = y[0] * y[0] + y[1] * y[1];
-        assert!((constraint - 1.0).abs() < 0.01,
-            "Constraint violation: y1²+y2²={}", constraint);
+        assert!(
+            (constraint - 1.0).abs() < 0.01,
+            "Constraint violation: y1²+y2²={}",
+            constraint
+        );
     }
 
     // ─── Simple DAE test: y' = 2y, 0 = y + 1 - z (constraint) ───────────
     // Exact: y(t) = exp(2t), z(t) = y(t) + 1
 
     fn simple_dae_res(t: f64, y: &[f64], yp: &[f64], res: &mut [f64]) {
-        res[0] = yp[0] - 2.0 * y[0];  // y' = 2y
-        res[1] = y[0] + 1.0 - y[1];    // z = y + 1
+        res[0] = yp[0] - 2.0 * y[0]; // y' = 2y
+        res[1] = y[0] + 1.0 - y[1]; // z = y + 1
         let _ = (t, yp);
     }
 
     fn simple_dae_jac(_t: f64, _y: &[f64], _yp: &[f64]) -> (CsrMatrix<f64>, CsrMatrix<f64>) {
         let mut df_dy = CooMatrix::<f64>::new(2, 2);
         df_dy.add(0, 0, -2.0); // d/dy (yp - 2y) = -2
-        df_dy.add(1, 0, 1.0);  // d/dy (y + 1 - z) = 1
+        df_dy.add(1, 0, 1.0); // d/dy (y + 1 - z) = 1
         df_dy.add(1, 1, -1.0); // d/dz (y + 1 - z) = -1
 
         let mut df_dyp = CooMatrix::<f64>::new(2, 2);
@@ -478,8 +569,14 @@ mod tests {
         let dof_yp = [true, false]; // yp[0] is determined by eqn, yp[1] free
         let config = DaeNewtonConfig::default();
         let result = dae_consistent_initialization(
-            0.0, &y0, &yp0, &dof_y, &dof_yp,
-            &simple_dae_res, &simple_dae_jac, &config,
+            0.0,
+            &y0,
+            &yp0,
+            &dof_y,
+            &dof_yp,
+            &simple_dae_res,
+            &simple_dae_jac,
+            &config,
         );
         assert!(result.is_ok());
     }
@@ -490,12 +587,23 @@ mod tests {
         let yp0 = vec![2.0, 0.0];
         let mut state = DaeState::new(0.0, &y0, &yp0, 0.05);
         let newton = DaeNewtonConfig::default();
-        let result = DaeIntegrator::step(&mut state, 0.0, &simple_dae_res, &simple_dae_jac, &newton);
+        let result =
+            DaeIntegrator::step(&mut state, 0.0, &simple_dae_res, &simple_dae_jac, &newton);
         assert!(result.is_ok(), "Simple DAE step failed: {:?}", result.err());
         let y = state.y();
         let expected_y = (2.0 * 0.05_f64).exp();
-        assert!((y[0] - expected_y).abs() < 0.01, "y={}, expected={}", y[0], expected_y);
-        assert!((y[1] - (y[0] + 1.0)).abs() < 1e-12, "constraint violated: z={}, y+1={}", y[1], y[0] + 1.0);
+        assert!(
+            (y[0] - expected_y).abs() < 0.01,
+            "y={}, expected={}",
+            y[0],
+            expected_y
+        );
+        assert!(
+            (y[1] - (y[0] + 1.0)).abs() < 1e-12,
+            "constraint violated: z={}, y+1={}",
+            y[1],
+            y[0] + 1.0
+        );
     }
 
     #[test]
@@ -513,19 +621,28 @@ mod tests {
         // Take 3 steps manually, re-initializing the Nordsieck state each time
         for step in 0..3 {
             let t = step as f64 * 0.01;
-            let result = DaeIntegrator::step(&mut state, t, &simple_dae_res, &simple_dae_jac, &newton);
+            let result =
+                DaeIntegrator::step(&mut state, t, &simple_dae_res, &simple_dae_jac, &newton);
             assert!(result.is_ok(), "Step {step} failed: {:?}", result.err());
             let y = state.y();
             // Constraint must be satisfied at every step
-            assert!((y[1] - (y[0] + 1.0)).abs() < 1e-10,
-                "step {step}: constraint: z={}, y+1={}", y[1], y[0] + 1.0);
+            assert!(
+                (y[1] - (y[0] + 1.0)).abs() < 1e-10,
+                "step {step}: constraint: z={}, y+1={}",
+                y[1],
+                y[0] + 1.0
+            );
             // Re-initialize Nordsieck state from current solution
             let yp = vec![2.0 * y[0], 0.0];
             state = DaeState::new(t + 0.01, &y.to_vec(), &yp, 0.01);
         }
         let final_y = state.y()[0];
         let exact_y = (2.0 * 0.03_f64).exp();
-        assert!((final_y - exact_y).abs() < 0.005,
-            "after 3 steps: y={}, expected≈{}", final_y, exact_y);
+        assert!(
+            (final_y - exact_y).abs() < 0.005,
+            "after 3 steps: y={}, expected≈{}",
+            final_y,
+            exact_y
+        );
     }
 }

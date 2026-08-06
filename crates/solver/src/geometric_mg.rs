@@ -10,11 +10,11 @@
 //! mg.v_cycle(&hierarchy, &b, &mut x);
 //! ```
 
-use fem_linalg::CsrMatrix;
-use crate::SolverConfig;
 use crate::constrained_operator::RectangularConstrainedOperator;
+use crate::SolverConfig;
+use fem_element::lagrange::factory::{QuadQk, TriPk};
 use fem_element::ReferenceElement;
-use fem_element::lagrange::factory::{TriPk, QuadQk};
+use fem_linalg::CsrMatrix;
 use fem_mesh::{topology::MeshTopology, ElementType};
 use nalgebra::DMatrix;
 
@@ -77,8 +77,11 @@ impl SumFactDiffusionOp {
         kappa: f64,
         mut elem_dofs_fn: impl FnMut(u32) -> Vec<u32>,
     ) -> Self {
-        assert_eq!(mesh.element_type(0), ElementType::Quad4,
-            "SumFactDiffusionOp requires Quad4 elements");
+        assert_eq!(
+            mesh.element_type(0),
+            ElementType::Quad4,
+            "SumFactDiffusionOp requires Quad4 elements"
+        );
 
         let n_elems = mesh.n_elements();
         let dim = mesh.dim() as usize;
@@ -172,10 +175,10 @@ impl SumFactDiffusionOp {
 
                     // J⁻¹ = 1/detJ * [j11, -j01; -j10, j00]
                     let inv_det = 1.0 / (det_j + 1e-300);
-                    let a00 =  jac[1][1] * inv_det;
+                    let a00 = jac[1][1] * inv_det;
                     let a01 = -jac[0][1] * inv_det;
                     let a10 = -jac[1][0] * inv_det;
-                    let a11 =  jac[0][0] * inv_det;
+                    let a11 = jac[0][0] * inv_det;
 
                     // D = J⁻¹ · J⁻ᵀ (symmetric 2×2)
                     let d00 = a00 * a00 + a01 * a01;
@@ -185,7 +188,7 @@ impl SumFactDiffusionOp {
                     // Scale by w[q]·w[r]·|detJ|·κ
                     let scale = w_1d[q] * w_1d[r] * det_j * kappa;
                     let base = (e as usize * q1d * q1d + q * q1d + r) * 3;
-                    pa_data[base]     = d00 * scale;
+                    pa_data[base] = d00 * scale;
                     pa_data[base + 1] = d01 * scale;
                     pa_data[base + 2] = d11 * scale;
                 }
@@ -194,9 +197,17 @@ impl SumFactDiffusionOp {
 
         SumFactDiffusionOp {
             elem_dofs: all_dofs,
-            n_elems, n_dofs, ldofs, p, q1d,
-            B: b_1d, G: g_1d, W: w_1d,
-            pa_data, tp_to_dof, dof_to_tp,
+            n_elems,
+            n_dofs,
+            ldofs,
+            p,
+            q1d,
+            B: b_1d,
+            G: g_1d,
+            W: w_1d,
+            pa_data,
+            tp_to_dof,
+            dof_to_tp,
         }
     }
 
@@ -225,13 +236,15 @@ impl SumFactDiffusionOp {
 
     /// Raw mat-vec with sum-factorization: `y = A x`. **No BC enforcement.**
     pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
-        for v in y.iter_mut() { *v = 0.0; }
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
 
         let p1 = self.p + 1;
         let q1d = self.q1d;
         // Scratch arrays sized for max p=4 → p1=5, q1d=5 (P4 diffusion needs
         // 5-point Gauss, exact to degree 9).
-        let mut tp_x = [0.0f64; 25];  // max (p+1)² = 25
+        let mut tp_x = [0.0f64; 25]; // max (p+1)² = 25
         let mut tp_y = [0.0f64; 25];
         let mut s_b = [[0.0f64; 8]; 8]; // s_b[q][j], max q1d=5, p1=5
         let mut s_g = [[0.0f64; 8]; 8];
@@ -249,7 +262,9 @@ impl SumFactDiffusionOp {
                 }
             }
             // Zero tp_y
-            for v in tp_y.iter_mut() { *v = 0.0; }
+            for v in tp_y.iter_mut() {
+                *v = 0.0;
+            }
 
             // ─────────────────────────────────────────────────────────────
             // Phase 1: Forward sum-factorization (over ξ quadrature points)
@@ -291,7 +306,7 @@ impl SumFactDiffusionOp {
                     let mut u_xi = 0.0;
                     let mut u_eta = 0.0;
                     for j in 0..p1 {
-                        u_xi  += sg[j] * br[j];
+                        u_xi += sg[j] * br[j];
                         u_eta += sb[j] * gr[j];
                     }
 
@@ -300,7 +315,7 @@ impl SumFactDiffusionOp {
                     let d01 = self.pa_data[pa_off + 1];
                     let d11 = self.pa_data[pa_off + 2];
 
-                    let f_xi  = d00 * u_xi + d01 * u_eta;
+                    let f_xi = d00 * u_xi + d01 * u_eta;
                     let f_eta = d01 * u_xi + d11 * u_eta;
 
                     // ─────────────────────────────────────────────────────
@@ -337,11 +352,15 @@ impl SumFactDiffusionOp {
         let mut xc = vec![0.0; self.n_dofs];
         xc.copy_from_slice(x);
         for &d in bc_dofs {
-            if (d as usize) < xc.len() { xc[d as usize] = 0.0; }
+            if (d as usize) < xc.len() {
+                xc[d as usize] = 0.0;
+            }
         }
         self.mult_raw(&xc, y);
         for &d in bc_dofs {
-            if (d as usize) < y.len() { y[d as usize] = 0.0; }
+            if (d as usize) < y.len() {
+                y[d as usize] = 0.0;
+            }
         }
     }
 }
@@ -419,23 +438,39 @@ fn quadqk_node_to_dof(ix: usize, iy: usize, p: usize) -> usize {
     let on_ymax = (y - 1.0).abs() < tol;
 
     // Corners
-    if on_xmin && on_ymin { return 0; }
-    if on_xmax && on_ymin { return 1; }
-    if on_xmax && on_ymax { return 2; }
-    if on_xmin && on_ymax { return 3; }
+    if on_xmin && on_ymin {
+        return 0;
+    }
+    if on_xmax && on_ymin {
+        return 1;
+    }
+    if on_xmax && on_ymax {
+        return 2;
+    }
+    if on_xmin && on_ymax {
+        return 3;
+    }
 
     let mut idx = 4usize;
     // Bottom edge (η=-1), iy=0, corners already handled
-    if on_ymin { return idx + (ix - 1); }
+    if on_ymin {
+        return idx + (ix - 1);
+    }
     idx += p - 1;
     // Right edge (ξ=+1), ix=p
-    if on_xmax { return idx + (iy - 1); }
+    if on_xmax {
+        return idx + (iy - 1);
+    }
     idx += p - 1;
     // Top edge (η=+1), iy=p, reversed order
-    if on_ymax { return idx + (p - 1 - ix); }
+    if on_ymax {
+        return idx + (p - 1 - ix);
+    }
     idx += p - 1;
     // Left edge (ξ=-1), ix=0, reversed order
-    if on_xmin { return idx + (p - 1 - iy); }
+    if on_xmin {
+        return idx + (p - 1 - iy);
+    }
 
     // Interior: none of the boundary checks matched
     let base = 4 + 4 * (p - 1);
@@ -536,11 +571,15 @@ impl PADiffusionOp {
                     let mut j = DMatrix::<f64>::zeros(dim, dim);
                     for col in 0..dim {
                         let xc = mesh.node_coords(nodes[col + 1]);
-                        for row in 0..dim { j[(row, col)] = xc[row] - x0[row]; }
+                        for row in 0..dim {
+                            j[(row, col)] = xc[row] - x0[row];
+                        }
                     }
                     (j.clone(), j.determinant())
                 };
-                let jit = jac.clone().try_inverse()
+                let jit = jac
+                    .clone()
+                    .try_inverse()
                     .expect("degenerate element in PADiffusionOp")
                     .transpose();
                 let w = quad.weights[qi] * det_j.abs();
@@ -549,7 +588,9 @@ impl PADiffusionOp {
                 for i in 0..ldofs {
                     for d in 0..dim {
                         let mut s = 0.0;
-                        for k in 0..dim { s += jit[(d, k)] * grad_ref[i * dim + k]; }
+                        for k in 0..dim {
+                            s += jit[(d, k)] * grad_ref[i * dim + k];
+                        }
                         grad_phys[i * dim + d] = s;
                     }
                 }
@@ -562,13 +603,19 @@ impl PADiffusionOp {
             elem_dofs: all_dofs,
             grad_phys: all_grad,
             weight_det: all_wdet,
-            ldofs, n_elems, n_qp, dim, n_dofs,
+            ldofs,
+            n_elems,
+            n_qp,
+            dim,
+            n_dofs,
         }
     }
 
     /// On-the-fly mat-vec: `y = A x`.  **No BC enforcement.**
     pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
-        for v in y.iter_mut() { *v = 0.0; }
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
         let stride = self.ldofs * self.dim;
         for e in 0..self.n_elems {
             let dof_base = e * self.ldofs;
@@ -612,9 +659,17 @@ impl PADiffusionOp {
     pub fn mult_constrained(&self, x: &[f64], y: &mut [f64], bc_dofs: &[u32]) {
         let mut xc = vec![0.0; self.n_dofs];
         xc.copy_from_slice(x);
-        for &d in bc_dofs { if (d as usize) < xc.len() { xc[d as usize] = 0.0; } }
+        for &d in bc_dofs {
+            if (d as usize) < xc.len() {
+                xc[d as usize] = 0.0;
+            }
+        }
         self.mult_raw(&xc, y);
-        for &d in bc_dofs { if (d as usize) < y.len() { y[d as usize] = 0.0; } }
+        for &d in bc_dofs {
+            if (d as usize) < y.len() {
+                y[d as usize] = 0.0;
+            }
+        }
     }
 }
 
@@ -642,7 +697,9 @@ pub struct StoredElementOperator {
 impl StoredElementOperator {
     /// Raw element-by-element mat-vec: `y = A x`.  **No BC enforcement.**
     pub fn mult_raw(&self, x: &[f64], y: &mut [f64]) {
-        for v in y.iter_mut() { *v = 0.0; }
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
         let ld = self.ldofs;
         // Dynamic buffer: supports high-order 3-D elements (e.g. Hex8 P4 has
         // (p+1)^3 = 125 local DOFs).
@@ -668,9 +725,17 @@ impl StoredElementOperator {
     pub fn mult_constrained(&self, x: &[f64], y: &mut [f64], bc_dofs: &[u32]) {
         let mut xc = vec![0.0; self.n_dofs];
         xc.copy_from_slice(x);
-        for &d in bc_dofs { if (d as usize) < xc.len() { xc[d as usize] = 0.0; } }
+        for &d in bc_dofs {
+            if (d as usize) < xc.len() {
+                xc[d as usize] = 0.0;
+            }
+        }
         self.mult_raw(&xc, y);
-        for &d in bc_dofs { if (d as usize) < y.len() { y[d as usize] = 0.0; } }
+        for &d in bc_dofs {
+            if (d as usize) < y.len() {
+                y[d as usize] = 0.0;
+            }
+        }
     }
 }
 
@@ -726,12 +791,12 @@ impl GeometricMgLevel {
 }
 
 impl GeometricMgHierarchy {
-    pub fn new(
-        levels: Vec<GeometricMgLevel>,
-        prolong_mat: Vec<CsrMatrix<f64>>,
-    ) -> Self {
-        assert_eq!(prolong_mat.len(), levels.len() - 1,
-            "GeometricMgHierarchy: need len(prolong) == len(levels) - 1");
+    pub fn new(levels: Vec<GeometricMgLevel>, prolong_mat: Vec<CsrMatrix<f64>>) -> Self {
+        assert_eq!(
+            prolong_mat.len(),
+            levels.len() - 1,
+            "GeometricMgHierarchy: need len(prolong) == len(levels) - 1"
+        );
         let mut prolong = Vec::with_capacity(prolong_mat.len());
         for l in 0..prolong_mat.len() {
             prolong.push(RectangularConstrainedOperator {
@@ -742,8 +807,12 @@ impl GeometricMgHierarchy {
         }
         GeometricMgHierarchy { levels, prolong }
     }
-    pub fn n_levels(&self) -> usize { self.levels.len() }
-    pub fn finest_matrix(&self) -> &CsrMatrix<f64> { &self.levels[0].mat }
+    pub fn n_levels(&self) -> usize {
+        self.levels.len()
+    }
+    pub fn finest_matrix(&self) -> &CsrMatrix<f64> {
+        &self.levels[0].mat
+    }
 }
 
 /// Multigrid cycle type.
@@ -786,10 +855,12 @@ pub struct GeometricMgConfig {
 impl Default for GeometricMgConfig {
     fn default() -> Self {
         GeometricMgConfig {
-            pre_sweeps: 2, post_sweeps: 2,
+            pre_sweeps: 2,
+            post_sweeps: 2,
             smoother: MgSmootherType::Chebyshev(2),
             jacobi_omega: 0.8,
-            coarse_max_iter: 200, coarse_rtol: 1e-12,
+            coarse_max_iter: 200,
+            coarse_rtol: 1e-12,
             max_eig_override: None,
             max_eig_overrides: Vec::new(),
             cycle_type: MgCycleType::V,
@@ -815,17 +886,26 @@ impl MgChebyshevSmoother {
         let n = a.nrows;
         let diag = a.diagonal();
         let mut dinv = vec![0.0; n];
-        for i in 0..n { dinv[i] = if diag[i].abs() > 1e-30 { 1.0 / diag[i] } else { 1.0 }; }
-        for &d in bc { if (d as usize) < n { dinv[d as usize] = 1.0; } }
+        for i in 0..n {
+            dinv[i] = if diag[i].abs() > 1e-30 {
+                1.0 / diag[i]
+            } else {
+                1.0
+            };
+        }
+        for &d in bc {
+            if (d as usize) < n {
+                dinv[d as usize] = 1.0;
+            }
+        }
 
         // Estimate λ_max(D⁻¹A) via power iteration using the ACTUAL mat-vec
         // (which goes through sf_op / pa_op when available), matching the
         // operator used during Chebyshev smoothing.  Using the CSR-only
         // spmv can give a different eigenvalue than the SF/PA operator,
         // causing the Chebyshev polynomial to become unstable.
-        let max_eig = max_eig_override.unwrap_or_else(|| {
-            estimate_max_eigenvalue_with_op(mat_vec, &dinv, bc)
-        });
+        let max_eig =
+            max_eig_override.unwrap_or_else(|| estimate_max_eigenvalue_with_op(mat_vec, &dinv, bc));
         if std::env::var("FEM_MG_DEBUG").is_ok() {
             eprintln!("  [mg] Chebyshev smoother: n={n}, λmax(D⁻¹A)≈{max_eig:.6}");
         }
@@ -861,7 +941,9 @@ impl MgChebyshevSmoother {
         // Residual: r = b - A*x (uses ConstrainedOperator mat-vec when elem_op present)
         let mut r = vec![0.0; n];
         level.mat_vec(x, &mut r);
-        for i in 0..n { r[i] = b[i] - r[i]; }
+        for i in 0..n {
+            r[i] = b[i] - r[i];
+        }
 
         // Correction: Δ = p(D⁻¹A) D⁻¹ r, matching MFEM OperatorChebyshevSmoother::Mult
         //
@@ -870,21 +952,33 @@ impl MgChebyshevSmoother {
         let mut correction = vec![0.0; n];
         // residual = D⁻¹ · r
         let mut residual = vec![0.0; n];
-        for i in 0..n { residual[i] = r[i] * self.dinv[i]; }
+        for i in 0..n {
+            residual[i] = r[i] * self.dinv[i];
+        }
 
         for k in 0..m {
             let c = self.coeffs[k];
-            for i in 0..n { correction[i] += c * residual[i]; }
+            for i in 0..n {
+                correction[i] += c * residual[i];
+            }
             if k + 1 < m {
                 // residual = D⁻¹ · A · residual
                 let mut tmp = vec![0.0; n];
                 level.mat_vec(&residual, &mut tmp);
-                for i in 0..n { residual[i] = tmp[i] * self.dinv[i]; }
+                for i in 0..n {
+                    residual[i] = tmp[i] * self.dinv[i];
+                }
             }
         }
 
-        for i in 0..n { x[i] += correction[i]; }
-        for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
+        for i in 0..n {
+            x[i] += correction[i];
+        }
+        for &d in &level.bc_dofs {
+            if (d as usize) < n {
+                x[d as usize] = 0.0;
+            }
+        }
     }
 }
 
@@ -901,11 +995,19 @@ fn estimate_max_eigenvalue_with_op(
     let n = dinv.len();
     // MFEM: PowerMethod on ProductOperator(D⁻¹, A) with 30 iterations, rtol=1e-8, seed=42
     let mut v = vec![1.0; n];
-    for i in 0..n { v[i] = 1.0 + (i as f64 % 7.0) * 0.1; }
-    for &d in bc { if (d as usize) < n { v[d as usize] = 0.0; } }
+    for i in 0..n {
+        v[i] = 1.0 + (i as f64 % 7.0) * 0.1;
+    }
+    for &d in bc {
+        if (d as usize) < n {
+            v[d as usize] = 0.0;
+        }
+    }
     let normalize = |w: &mut [f64]| {
-        let nrm: f64 = w.iter().map(|x| x*x).sum::<f64>().sqrt().max(1e-30);
-        for x in w.iter_mut() { *x /= nrm; }
+        let nrm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
+        for x in w.iter_mut() {
+            *x /= nrm;
+        }
     };
     normalize(&mut v);
     let mut lambda = 0.0;
@@ -913,10 +1015,19 @@ fn estimate_max_eigenvalue_with_op(
     let mut tmp = vec![0.0; n];
     for _iter in 0..30 {
         mat_vec(&v, &mut tmp);
-        for i in 0..n { w[i] = tmp[i] * dinv[i]; }
-        for &d in bc { if (d as usize) < n { w[d as usize] = 0.0; } }
-        let rq: f64 = (0..n).map(|i| v[i]*w[i]).sum();
-        if (rq - lambda).abs() < 1e-8 * rq.abs().max(1e-30) && _iter > 2 { lambda = rq; break; }
+        for i in 0..n {
+            w[i] = tmp[i] * dinv[i];
+        }
+        for &d in bc {
+            if (d as usize) < n {
+                w[d as usize] = 0.0;
+            }
+        }
+        let rq: f64 = (0..n).map(|i| v[i] * w[i]).sum();
+        if (rq - lambda).abs() < 1e-8 * rq.abs().max(1e-30) && _iter > 2 {
+            lambda = rq;
+            break;
+        }
         lambda = rq;
         normalize(&mut w);
         v.copy_from_slice(&w);
@@ -991,7 +1102,8 @@ impl linlvo::Preconditioner for GeometricMgAsPrecond<'_> {
     type Vector = linlvo::DenseVec<f64>;
 
     fn apply_precond(&self, x: &linlvo::DenseVec<f64>, y: &mut linlvo::DenseVec<f64>) {
-        self.mg.v_cycle(self.hierarchy, x.as_slice(), y.as_mut_slice());
+        self.mg
+            .v_cycle(self.hierarchy, x.as_slice(), y.as_mut_slice());
     }
 }
 
@@ -1001,12 +1113,18 @@ impl GeometricMgPrecond {
             MgSmootherType::Chebyshev(order) => {
                 let mut s = Vec::new();
                 for (li, level) in h.levels.iter().enumerate() {
-                    let override_eig = config.max_eig_overrides.get(li)
+                    let override_eig = config
+                        .max_eig_overrides
+                        .get(li)
                         .and_then(|o| *o)
                         .or(config.max_eig_override);
                     s.push(MgChebyshevSmoother::new(
-                        &level.mat, &level.bc_dofs, order, override_eig,
-                        &|x, y| level.mat_vec(x, y)));
+                        &level.mat,
+                        &level.bc_dofs,
+                        order,
+                        override_eig,
+                        &|x, y| level.mat_vec(x, y),
+                    ));
                 }
                 s
             }
@@ -1018,14 +1136,22 @@ impl GeometricMgPrecond {
     /// Apply one V/W-cycle: `x ← cycle(levels, prolong, b)` starting from zero.
     pub fn v_cycle(&self, h: &GeometricMgHierarchy, b: &[f64], x: &mut [f64]) {
         // Start from zero (matching MFEM MultigridBase::ArrayMult: *Y(M-1,j) = 0.0)
-        for v in x.iter_mut() { *v = 0.0; }
+        for v in x.iter_mut() {
+            *v = 0.0;
+        }
         let w_cycle = self.config.cycle_type == MgCycleType::W;
         self.v_cycle_level_inner(h, 0, b, x, w_cycle);
     }
 
     /// Core recursive cycle: handles both V-cycle and W-cycle.
-    fn v_cycle_level_inner(&self, h: &GeometricMgHierarchy, lvl: usize,
-                           b: &[f64], x: &mut [f64], w_cycle: bool) {
+    fn v_cycle_level_inner(
+        &self,
+        h: &GeometricMgHierarchy,
+        lvl: usize,
+        b: &[f64],
+        x: &mut [f64],
+        w_cycle: bool,
+    ) {
         let level = &h.levels[lvl];
         let a = &level.mat;
         let n = a.nrows;
@@ -1033,18 +1159,27 @@ impl GeometricMgPrecond {
         if lvl + 1 == h.levels.len() {
             // Coarsest level: CG solve
             let cfg = SolverConfig {
-                rtol: self.config.coarse_rtol, atol: 0.0,
+                rtol: self.config.coarse_rtol,
+                atol: 0.0,
                 max_iter: self.config.coarse_max_iter,
-                verbose: false, ..Default::default()
+                verbose: false,
+                ..Default::default()
             };
             let res = crate::solve_cg(a, b, x, &cfg);
             if std::env::var("FEM_MG_DEBUG").is_ok() {
                 match &res {
-                    Ok(r) => eprintln!("[mg] coarse CG: {} iters, residual {:.3e}", r.iterations, r.final_residual),
+                    Ok(r) => eprintln!(
+                        "[mg] coarse CG: {} iters, residual {:.3e}",
+                        r.iterations, r.final_residual
+                    ),
                     Err(e) => eprintln!("[mg] coarse CG FAILED: {e:?}"),
                 }
             }
-            for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
+            for &d in &level.bc_dofs {
+                if (d as usize) < n {
+                    x[d as usize] = 0.0;
+                }
+            }
             return;
         }
 
@@ -1071,7 +1206,9 @@ impl GeometricMgPrecond {
             // Prolongate correction
             let mut corr = vec![0.0; n];
             h.prolong[lvl].prolong(&e_c, &mut corr);
-            for i in 0..n { x[i] += corr[i]; }
+            for i in 0..n {
+                x[i] += corr[i];
+            }
         } else {
             let mut e_c = vec![0.0; n_c];
             self.v_cycle_level_inner(h, lvl + 1, &r_c, &mut e_c, false);
@@ -1079,7 +1216,9 @@ impl GeometricMgPrecond {
             // Prolongate correction
             let mut corr = vec![0.0; n];
             h.prolong[lvl].prolong(&e_c, &mut corr);
-            for i in 0..n { x[i] += corr[i]; }
+            for i in 0..n {
+                x[i] += corr[i];
+            }
         }
 
         // Post-smooth
@@ -1087,11 +1226,14 @@ impl GeometricMgPrecond {
         for _ in 1..self.config.post_sweeps {
             self.smooth_level(lvl, level, b, x);
         }
-        for &d in &level.bc_dofs { if (d as usize) < n { x[d as usize] = 0.0; } }
+        for &d in &level.bc_dofs {
+            if (d as usize) < n {
+                x[d as usize] = 0.0;
+            }
+        }
     }
 
-    fn smooth_level(&self, lvl: usize, level: &GeometricMgLevel, b: &[f64],
-                    x: &mut [f64]) {
+    fn smooth_level(&self, lvl: usize, level: &GeometricMgLevel, b: &[f64], x: &mut [f64]) {
         let a = &level.mat;
         let bc = &level.bc_dofs;
         match self.config.smoother {
@@ -1113,18 +1255,25 @@ impl GeometricMgPrecond {
     }
 
     /// Plain Jacobi smoothing (omega from config).
-    fn jacobi_smooth_level(&self, level: &GeometricMgLevel, b: &[f64],
-                           x: &mut [f64]) {
+    fn jacobi_smooth_level(&self, level: &GeometricMgLevel, b: &[f64], x: &mut [f64]) {
         let a = &level.mat;
         let diag = a.diagonal();
         let mut r = vec![0.0; a.nrows];
         level.mat_vec(x, &mut r);
-        for i in 0..r.len() { r[i] = b[i] - r[i]; }
+        for i in 0..r.len() {
+            r[i] = b[i] - r[i];
+        }
         let omega = self.config.jacobi_omega;
         for i in 0..r.len() {
-            if diag[i].abs() > 1e-30 { x[i] += omega * r[i] / diag[i]; }
+            if diag[i].abs() > 1e-30 {
+                x[i] += omega * r[i] / diag[i];
+            }
         }
-        for &d in &level.bc_dofs { if (d as usize) < x.len() { x[d as usize] = 0.0; } }
+        for &d in &level.bc_dofs {
+            if (d as usize) < x.len() {
+                x[d as usize] = 0.0;
+            }
+        }
     }
 }
 
@@ -1276,4 +1425,3 @@ mod tests {
         );
     }
 }
-

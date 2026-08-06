@@ -18,8 +18,12 @@ use crate::reference::ReferenceElement;
 
 /// Evaluate Legendre polynomial P_n(x) on [-1, 1].
 fn legendre_p(n: usize, x: f64) -> f64 {
-    if n == 0 { return 1.0; }
-    if n == 1 { return x; }
+    if n == 0 {
+        return 1.0;
+    }
+    if n == 1 {
+        return x;
+    }
     let mut p0 = 1.0;
     let mut p1 = x;
     for k in 1..n {
@@ -32,8 +36,12 @@ fn legendre_p(n: usize, x: f64) -> f64 {
 
 /// Evaluate derivative of Legendre polynomial P'_n(x) on [-1, 1].
 fn legendre_dp(n: usize, x: f64) -> f64 {
-    if n == 0 { return 0.0; }
-    if n == 1 { return 1.0; }
+    if n == 0 {
+        return 0.0;
+    }
+    if n == 1 {
+        return 1.0;
+    }
     // L'_n(x) = n·(x·L_n(x) - L_{n-1}(x)) / (x²-1) for |x| < 1
     // At x = ±1, limit is n(n+1)/2 * (±1)^{n+1}
     let eps = 1e-14;
@@ -83,16 +91,26 @@ pub struct HierarchicalSegPk {
 }
 
 impl HierarchicalSegPk {
-    pub fn new(p: usize) -> Self { Self { p } }
+    pub fn new(p: usize) -> Self {
+        Self { p }
+    }
 
     /// Return the order of the k-th internal (bubble) mode.
-    pub fn mode_order(k: usize) -> usize { k } // mode k ≥ 2 has polynomial order k
+    pub fn mode_order(k: usize) -> usize {
+        k
+    } // mode k ≥ 2 has polynomial order k
 }
 
 impl ReferenceElement for HierarchicalSegPk {
-    fn dim(&self) -> u8 { 1 }
-    fn order(&self) -> u8 { self.p as u8 }
-    fn n_dofs(&self) -> usize { self.p + 1 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        self.p as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.p + 1
+    }
 
     fn quadrature(&self, order: u8) -> crate::reference::QuadratureRule {
         crate::quadrature::seg_rule(order)
@@ -116,10 +134,12 @@ impl ReferenceElement for HierarchicalSegPk {
         let mut coords = Vec::with_capacity(self.p + 1);
         coords.push(vec![0.0]); // vertex 0
         coords.push(vec![1.0]); // vertex 1
-        // Bubble modes have no nodal coordinates (they vanish at vertices).
-        // We place them at Chebyshev nodes for visualization purposes.
+                                // Bubble modes have no nodal coordinates (they vanish at vertices).
+                                // We place them at Chebyshev nodes for visualization purposes.
         for k in 2..=self.p {
-            coords.push(vec![0.5 * (1.0 - (std::f64::consts::PI * (k as f64 - 1.0) / self.p as f64).cos())]);
+            coords.push(vec![
+                0.5 * (1.0 - (std::f64::consts::PI * (k as f64 - 1.0) / self.p as f64).cos()),
+            ]);
         }
         coords
     }
@@ -193,9 +213,15 @@ impl HierarchicalTriPk {
 }
 
 impl ReferenceElement for HierarchicalTriPk {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.p as u8 }
-    fn n_dofs(&self) -> usize { self.n_dofs }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.p as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
 
     fn quadrature(&self, order: u8) -> crate::reference::QuadratureRule {
         crate::quadrature::tri_rule(order)
@@ -223,9 +249,9 @@ impl ReferenceElement for HierarchicalTriPk {
             for k in 2..=self.p {
                 for edge in 0..3 {
                     let te = match edge {
-                        0 => ξ,              // edge v0→v1
-                        1 => η,              // edge v1→v2
-                        2 => 1.0 - ξ - η,    // edge v2→v0
+                        0 => ξ,           // edge v0→v1
+                        1 => η,           // edge v1→v2
+                        2 => 1.0 - ξ - η, // edge v2→v0
                         _ => 0.0,
                     };
                     values[idx] = lobatto_fn(k, te);
@@ -238,7 +264,7 @@ impl ReferenceElement for HierarchicalTriPk {
         // Number of interior modes = (p-2)(p-1)/2
         if self.p >= 3 {
             let np = self.p - 3; // max degree of multiplier polynomial
-            // Generate monomials x^a·y^b with a+b ≤ np
+                                 // Generate monomials x^a·y^b with a+b ≤ np
             for total in 0..=np {
                 for a in 0..=total {
                     let b = total - a;
@@ -331,9 +357,15 @@ impl HierarchicalTetPk {
 }
 
 impl ReferenceElement for HierarchicalTetPk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.p as u8 }
-    fn n_dofs(&self) -> usize { self.n_dofs }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.p as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
 
     fn quadrature(&self, order: u8) -> crate::reference::QuadratureRule {
         crate::quadrature::tet_rule(order)
@@ -341,10 +373,20 @@ impl ReferenceElement for HierarchicalTetPk {
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         // Collapsed coordinates: (a,b,c) ∈ [-1,1]³ mapped from (ξ,η,ζ) ∈ tet
-        let ξ = xi[0]; let η = xi[1]; let ζ = xi[2];
+        let ξ = xi[0];
+        let η = xi[1];
+        let ζ = xi[2];
         let _c = 2.0 * ζ - 1.0;
-        let _b = if (1.0 - ζ).abs() < 1e-15 { 0.0 } else { 2.0 * η / (1.0 - ζ) - 1.0 };
-        let _a = if (1.0 - η - ζ).abs() < 1e-15 { 0.0 } else { 2.0 * ξ / (1.0 - η - ζ) - 1.0 };
+        let _b = if (1.0 - ζ).abs() < 1e-15 {
+            0.0
+        } else {
+            2.0 * η / (1.0 - ζ) - 1.0
+        };
+        let _a = if (1.0 - η - ζ).abs() < 1e-15 {
+            0.0
+        } else {
+            2.0 * ξ / (1.0 - η - ζ) - 1.0
+        };
 
         // Vertex modes
         values[0] = 1.0 - ξ - η - ζ;
@@ -352,7 +394,9 @@ impl ReferenceElement for HierarchicalTetPk {
         values[2] = η;
         values[3] = ζ;
 
-        if self.p <= 1 { return; }
+        if self.p <= 1 {
+            return;
+        }
         let mut idx = 4;
 
         // Edge modes (6 edges, each with (p-1) modes)
@@ -368,9 +412,9 @@ impl ReferenceElement for HierarchicalTetPk {
                     0 => ξ,
                     1 => η,
                     2 => ζ,
-                    3 => η,    // v1-v2
-                    4 => ζ,    // v1-v3
-                    5 => ζ,    // v2-v3
+                    3 => η, // v1-v2
+                    4 => ζ, // v1-v3
+                    5 => ζ, // v2-v3
                     _ => 0.0,
                 };
                 values[idx] = lobatto_fn(k, te);
@@ -411,14 +455,16 @@ impl ReferenceElement for HierarchicalTetPk {
         coords.push(vec![1.0, 0.0, 0.0]);
         coords.push(vec![0.0, 1.0, 0.0]);
         coords.push(vec![0.0, 0.0, 1.0]);
-        if self.p <= 1 { return coords; }
+        if self.p <= 1 {
+            return coords;
+        }
         for edge in 0..6 {
             for k in 2..=self.p {
                 let t = (k as f64 - 1.0) / (self.p as f64);
                 let (x, y, z) = match edge {
-                    0 => (t, 0.0, 0.0),   // v0-v1
-                    1 => (0.0, t, 0.0),   // v0-v2
-                    2 => (0.0, 0.0, t),   // v0-v3
+                    0 => (t, 0.0, 0.0),     // v0-v1
+                    1 => (0.0, t, 0.0),     // v0-v2
+                    2 => (0.0, 0.0, t),     // v0-v3
                     3 => (1.0 - t, t, 0.0), // v1-v2
                     4 => (1.0 - t, 0.0, t), // v1-v3
                     5 => (0.0, 1.0 - t, t), // v2-v3
@@ -467,8 +513,11 @@ mod tests {
         el2.eval_basis(&[xi], &mut v2);
         el3.eval_basis(&[xi], &mut v3);
         for i in 0..3 {
-            assert!((v2[i] - v3[i]).abs() < 1e-14,
-                "P2/P3 mismatch at DOF {i}: {:.2e}", (v2[i] - v3[i]).abs());
+            assert!(
+                (v2[i] - v3[i]).abs() < 1e-14,
+                "P2/P3 mismatch at DOF {i}: {:.2e}",
+                (v2[i] - v3[i]).abs()
+            );
         }
     }
 
@@ -499,8 +548,12 @@ mod tests {
         el.eval_basis(&[xi - h], &mut vm);
         for i in 0..4 {
             let fd = (vp[i] - vm[i]) / (2.0 * h);
-            assert!((g[i] - fd).abs() < 1e-8,
-                "P3 grad mismatch DOF {i}: analytic={:.6e} fd={:.6e}", g[i], fd);
+            assert!(
+                (g[i] - fd).abs() < 1e-8,
+                "P3 grad mismatch DOF {i}: analytic={:.6e} fd={:.6e}",
+                g[i],
+                fd
+            );
         }
     }
 
@@ -527,7 +580,9 @@ mod tests {
             for j in 0..5 {
                 let ξ = i as f64 / 4.0;
                 let η = j as f64 / 4.0;
-                if ξ + η > 1.0 { continue; }
+                if ξ + η > 1.0 {
+                    continue;
+                }
                 let mut v = vec![0.0; 3];
                 el.eval_basis(&[ξ, η], &mut v);
                 let sum: f64 = v.iter().sum();

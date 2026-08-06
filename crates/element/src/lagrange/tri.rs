@@ -16,9 +16,15 @@ use crate::reference::{QuadratureRule, ReferenceElement};
 pub struct TriP1;
 
 impl ReferenceElement for TriP1 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 1 }
-    fn n_dofs(&self) -> usize  { 3 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        3
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
@@ -29,12 +35,17 @@ impl ReferenceElement for TriP1 {
 
     fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) {
         // row-major [3×2]: grads[i*2 + j]
-        grads[0] = -1.0;  grads[1] = -1.0;  // ∇φ₀
-        grads[2] =  1.0;  grads[3] =  0.0;  // ∇φ₁
-        grads[4] =  0.0;  grads[5] =  1.0;  // ∇φ₂
+        grads[0] = -1.0;
+        grads[1] = -1.0; // ∇φ₀
+        grads[2] = 1.0;
+        grads[3] = 0.0; // ∇φ₁
+        grads[4] = 0.0;
+        grads[5] = 1.0; // ∇φ₂
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0]]
@@ -55,9 +66,15 @@ impl ReferenceElement for TriP1 {
 pub struct TriP2;
 
 impl ReferenceElement for TriP2 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 2 }
-    fn n_dofs(&self) -> usize  { 6 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        2
+    }
+    fn n_dofs(&self) -> usize {
+        6
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
@@ -75,31 +92,37 @@ impl ReferenceElement for TriP2 {
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
         // ∂φ₀/∂ξ = (4ξ+4η−3),  ∂φ₀/∂η = same
-        grads[0]  = 4.0 * x + 4.0 * y - 3.0;
-        grads[1]  = 4.0 * x + 4.0 * y - 3.0;
+        grads[0] = 4.0 * x + 4.0 * y - 3.0;
+        grads[1] = 4.0 * x + 4.0 * y - 3.0;
         // ∂φ₁/∂ξ = 4ξ−1,  ∂φ₁/∂η = 0
-        grads[2]  = 4.0 * x - 1.0;
-        grads[3]  = 0.0;
+        grads[2] = 4.0 * x - 1.0;
+        grads[3] = 0.0;
         // ∂φ₂/∂ξ = 0,  ∂φ₂/∂η = 4η−1
-        grads[4]  = 0.0;
-        grads[5]  = 4.0 * y - 1.0;
+        grads[4] = 0.0;
+        grads[5] = 4.0 * y - 1.0;
         // ∂φ₃/∂ξ = 4(1−2ξ−η),  ∂φ₃/∂η = −4ξ
-        grads[6]  = 4.0 * (1.0 - 2.0 * x - y);
-        grads[7]  = -4.0 * x;
+        grads[6] = 4.0 * (1.0 - 2.0 * x - y);
+        grads[7] = -4.0 * x;
         // ∂φ₄/∂ξ = 4η,  ∂φ₄/∂η = 4ξ
-        grads[8]  = 4.0 * y;
-        grads[9]  = 4.0 * x;
+        grads[8] = 4.0 * y;
+        grads[9] = 4.0 * x;
         // ∂φ₅/∂ξ = −4η,  ∂φ₅/∂η = 4(1−ξ−2η)
         grads[10] = -4.0 * y;
         grads[11] = 4.0 * (1.0 - x - 2.0 * y);
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0],
-            vec![0.5, 0.0], vec![0.5, 0.5], vec![0.0, 0.5],
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![0.5, 0.0],
+            vec![0.5, 0.5],
+            vec![0.0, 0.5],
         ]
     }
 }
@@ -122,15 +145,21 @@ impl ReferenceElement for TriP2 {
 pub struct TriP3;
 
 impl ReferenceElement for TriP3 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 3 }
-    fn n_dofs(&self) -> usize  { 10 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        3
+    }
+    fn n_dofs(&self) -> usize {
+        10
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
-        let l1 = 1.0 - x - y;  // λ₁
-        let l2 = x;              // λ₂
-        let l3 = y;              // λ₃
+        let l1 = 1.0 - x - y; // λ₁
+        let l2 = x; // λ₂
+        let l3 = y; // λ₃
 
         // Vertex DOFs
         values[0] = 0.5 * l1 * (3.0 * l1 - 1.0) * (3.0 * l1 - 2.0);
@@ -190,8 +219,8 @@ impl ReferenceElement for TriP3 {
         // d/dη = 4.5 * [(-1)*l2*(3l1-1) + l1*0*(3l1-1) + l1*l2*(-3)]
         //      = 4.5 * [-l2*(3l1-1) - 3l1l2]
         //      = 4.5 * [-l2*(3l1-1+3l1)] = 4.5 * [-l2*(6l1-1)]
-        grads[6] = 4.5 * ((3.0*l1 - 1.0)*(l1 - l2) - 3.0*l1*l2);
-        grads[7] = 4.5 * (-l2*(6.0*l1 - 1.0));
+        grads[6] = 4.5 * ((3.0 * l1 - 1.0) * (l1 - l2) - 3.0 * l1 * l2);
+        grads[7] = 4.5 * (-l2 * (6.0 * l1 - 1.0));
 
         // φ₄ = 4.5*l1*l2*(3l2-1)
         // d/dξ = 4.5 * [(-1)*l2*(3l2-1) + l1*(3l2-1) + l1*l2*3]
@@ -202,20 +231,20 @@ impl ReferenceElement for TriP3 {
         //   = (3l2-1)*(l1-l2) + 3l1l2
         // ∂/∂η [l1*l2*(3l2-1)] = (-1)*l2*(3l2-1) + l1*0*(3l2-1) + l1*l2*3*0
         //   = -l2*(3l2-1)
-        grads[8]  = 4.5 * ((3.0*l2 - 1.0)*(l1 - l2) + 3.0*l1*l2);
-        grads[9]  = 4.5 * (-l2*(3.0*l2 - 1.0));
+        grads[8] = 4.5 * ((3.0 * l2 - 1.0) * (l1 - l2) + 3.0 * l1 * l2);
+        grads[9] = 4.5 * (-l2 * (3.0 * l2 - 1.0));
 
         // φ₅ = 4.5*l2*l3*(3l2-1)
         // ∂/∂ξ = 4.5 * [l3*(3l2-1) + l2*0 + l2*l3*3] = 4.5*l3*(3l2-1+3l2) = 4.5*l3*(6l2-1)
         // ∂/∂η = 4.5 * [0*l3*(3l2-1) + l2*1*(3l2-1) + l2*l3*0] = 4.5*l2*(3l2-1)
-        grads[10] = 4.5 * l3 * (6.0*l2 - 1.0);
-        grads[11] = 4.5 * l2 * (3.0*l2 - 1.0);
+        grads[10] = 4.5 * l3 * (6.0 * l2 - 1.0);
+        grads[11] = 4.5 * l2 * (3.0 * l2 - 1.0);
 
         // φ₆ = 4.5*l2*l3*(3l3-1)
         // ∂/∂ξ = 4.5 * [1*l3*(3l3-1) + l2*0*(3l3-1) + l2*l3*0] = 4.5*l3*(3l3-1)
         // ∂/∂η = 4.5 * [0*l3*(3l3-1) + l2*1*(3l3-1) + l2*l3*3] = 4.5*l2*(3l3-1+3l3) = 4.5*l2*(6l3-1)
-        grads[12] = 4.5 * l3 * (3.0*l3 - 1.0);
-        grads[13] = 4.5 * l2 * (6.0*l3 - 1.0);
+        grads[12] = 4.5 * l3 * (3.0 * l3 - 1.0);
+        grads[13] = 4.5 * l2 * (6.0 * l3 - 1.0);
 
         // φ₇ = 4.5*l1*l3*(3l1-1)
         // ∂/∂ξ = 4.5 * [(-1)*l3*(3l1-1) + l1*0*(3l1-1) + l1*l3*(-3)]
@@ -224,8 +253,8 @@ impl ReferenceElement for TriP3 {
         //       = 4.5 * [(3l1-1)*(l1-l3) - 3l1l3]  ... wait, ∂l3/∂η=1, ∂l1/∂η=-1
         // ∂/∂η [l1*l3*(3l1-1)] = (-1)*l3*(3l1-1) + l1*1*(3l1-1) + l1*l3*3*(-1)
         //   = (3l1-1)*(l1-l3) - 3l1*l3
-        grads[14] = 4.5 * (-l3*(6.0*l1 - 1.0));
-        grads[15] = 4.5 * ((3.0*l1 - 1.0)*(l1 - l3) - 3.0*l1*l3);
+        grads[14] = 4.5 * (-l3 * (6.0 * l1 - 1.0));
+        grads[15] = 4.5 * ((3.0 * l1 - 1.0) * (l1 - l3) - 3.0 * l1 * l3);
 
         // φ₈ = 4.5*l1*l3*(3l3-1)
         // ∂/∂ξ [l1*l3*(3l3-1)] = (-1)*l3*(3l3-1) + l1*0*(3l3-1) + l1*l3*0
@@ -233,8 +262,8 @@ impl ReferenceElement for TriP3 {
         // ∂/∂η [l1*l3*(3l3-1)] = (-1)*l3*(3l3-1) + l1*1*(3l3-1) + l1*l3*3
         //   = (3l3-1)*(l1-l3) + 3l1l3  ... ∂l3/∂η=1, ∂l1/∂η=-1, ∂(3l3-1)/∂η=3
         // = (3l3-1)*(-l3 + l1) + 3l1l3
-        grads[16] = 4.5 * (-l3*(3.0*l3 - 1.0));
-        grads[17] = 4.5 * ((3.0*l3 - 1.0)*(l1 - l3) + 3.0*l1*l3);
+        grads[16] = 4.5 * (-l3 * (3.0 * l3 - 1.0));
+        grads[17] = 4.5 * ((3.0 * l3 - 1.0) * (l1 - l3) + 3.0 * l1 * l3);
 
         // φ₉ = 27*l1*l2*l3
         // ∂/∂ξ = 27*[(-1)*l2*l3 + l1*1*l3 + l1*l2*0] = 27*l3*(l1-l2)  ...
@@ -246,22 +275,24 @@ impl ReferenceElement for TriP3 {
         grads[19] = 27.0 * l2 * (l1 - l3);
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let t = 1.0 / 3.0;
         let t2 = 2.0 / 3.0;
         vec![
-            vec![0.0, 0.0],  // v0
-            vec![1.0, 0.0],  // v1
-            vec![0.0, 1.0],  // v2
-            vec![t,   0.0],  // edge v0→v1 @ 1/3
-            vec![t2,  0.0],  // edge v0→v1 @ 2/3
-            vec![t2,  t  ],  // edge v1→v2 @ 1/3 from v1
-            vec![t,   t2 ],  // edge v1→v2 @ 2/3 from v1
-            vec![0.0, t  ],  // edge v0→v2 @ 1/3
-            vec![0.0, t2 ],  // edge v0→v2 @ 2/3
-            vec![t,   t  ],  // bubble
+            vec![0.0, 0.0], // v0
+            vec![1.0, 0.0], // v1
+            vec![0.0, 1.0], // v2
+            vec![t, 0.0],   // edge v0→v1 @ 1/3
+            vec![t2, 0.0],  // edge v0→v1 @ 2/3
+            vec![t2, t],    // edge v1→v2 @ 1/3 from v1
+            vec![t, t2],    // edge v1→v2 @ 2/3 from v1
+            vec![0.0, t],   // edge v0→v2 @ 1/3
+            vec![0.0, t2],  // edge v0→v2 @ 2/3
+            vec![t, t],     // bubble
         ]
     }
 }
@@ -275,25 +306,51 @@ impl ReferenceElement for TriP3 {
 pub struct TriP4;
 
 const TRIP4_IJK: [(usize, usize, usize); 15] = [
-    (0,0,4), (4,0,0), (0,4,0),                         // vertices
-    (1,0,3), (2,0,2), (3,0,1),                         // edge 0→1
-    (3,1,0), (2,2,0), (1,3,0),                         // edge 1→2
-    (0,1,3), (0,2,2), (0,3,1),                         // edge 2→0
-    (2,1,1), (1,2,1), (1,1,2),                         // face interior
+    (0, 0, 4),
+    (4, 0, 0),
+    (0, 4, 0), // vertices
+    (1, 0, 3),
+    (2, 0, 2),
+    (3, 0, 1), // edge 0→1
+    (3, 1, 0),
+    (2, 2, 0),
+    (1, 3, 0), // edge 1→2
+    (0, 1, 3),
+    (0, 2, 2),
+    (0, 3, 1), // edge 2→0
+    (2, 1, 1),
+    (1, 2, 1),
+    (1, 1, 2), // face interior
 ];
 
 const TRIP4_COORDS: [[f64; 2]; 15] = [
-    [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-    [0.25, 0.0], [0.5, 0.0],  [0.75, 0.0],
-    [0.75, 0.25], [0.5, 0.5], [0.25, 0.75],
-    [0.0, 0.25], [0.0, 0.5],  [0.0, 0.75],
-    [0.5, 0.25], [0.25, 0.5], [0.25, 0.25],
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [0.25, 0.0],
+    [0.5, 0.0],
+    [0.75, 0.0],
+    [0.75, 0.25],
+    [0.5, 0.5],
+    [0.25, 0.75],
+    [0.0, 0.25],
+    [0.0, 0.5],
+    [0.0, 0.75],
+    [0.5, 0.25],
+    [0.25, 0.5],
+    [0.25, 0.25],
 ];
 
 impl ReferenceElement for TriP4 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 4 }
-    fn n_dofs(&self) -> usize { 15 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        4
+    }
+    fn n_dofs(&self) -> usize {
+        15
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let pf = 4.0_f64;
@@ -317,12 +374,14 @@ impl ReferenceElement for TriP4 {
             let di = rising_deriv(i, t0);
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         TRIP4_COORDS.iter().map(|c| vec![c[0], c[1]]).collect()
@@ -335,29 +394,63 @@ impl ReferenceElement for TriP4 {
 pub struct TriP5;
 
 const TRIP5_IJK: [(usize, usize, usize); 21] = [
-    (0,0,5), (5,0,0), (0,5,0),                         // vertices
-    (1,0,4), (2,0,3), (3,0,2), (4,0,1),               // edge 0→1
-    (4,1,0), (3,2,0), (2,3,0), (1,4,0),               // edge 1→2
-    (0,1,4), (0,2,3), (0,3,2), (0,4,1),               // edge 2→0
-    (1,1,3), (2,1,2), (3,1,1),                         // face interior j=1
-    (1,2,2), (2,2,1),                                   // face interior j=2
-    (1,3,1),                                             // face interior j=3
+    (0, 0, 5),
+    (5, 0, 0),
+    (0, 5, 0), // vertices
+    (1, 0, 4),
+    (2, 0, 3),
+    (3, 0, 2),
+    (4, 0, 1), // edge 0→1
+    (4, 1, 0),
+    (3, 2, 0),
+    (2, 3, 0),
+    (1, 4, 0), // edge 1→2
+    (0, 1, 4),
+    (0, 2, 3),
+    (0, 3, 2),
+    (0, 4, 1), // edge 2→0
+    (1, 1, 3),
+    (2, 1, 2),
+    (3, 1, 1), // face interior j=1
+    (1, 2, 2),
+    (2, 2, 1), // face interior j=2
+    (1, 3, 1), // face interior j=3
 ];
 
 const TRIP5_COORDS: [[f64; 2]; 21] = [
-    [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-    [0.2, 0.0], [0.4, 0.0], [0.6, 0.0], [0.8, 0.0],
-    [0.8, 0.2], [0.6, 0.4], [0.4, 0.6], [0.2, 0.8],
-    [0.0, 0.2], [0.0, 0.4], [0.0, 0.6], [0.0, 0.8],
-    [0.2, 0.2], [0.4, 0.2], [0.6, 0.2],
-    [0.2, 0.4], [0.4, 0.4],
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [0.2, 0.0],
+    [0.4, 0.0],
+    [0.6, 0.0],
+    [0.8, 0.0],
+    [0.8, 0.2],
+    [0.6, 0.4],
+    [0.4, 0.6],
+    [0.2, 0.8],
+    [0.0, 0.2],
+    [0.0, 0.4],
+    [0.0, 0.6],
+    [0.0, 0.8],
+    [0.2, 0.2],
+    [0.4, 0.2],
+    [0.6, 0.2],
+    [0.2, 0.4],
+    [0.4, 0.4],
     [0.2, 0.6],
 ];
 
 impl ReferenceElement for TriP5 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 5 }
-    fn n_dofs(&self) -> usize { 21 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        5
+    }
+    fn n_dofs(&self) -> usize {
+        21
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let pf = 5.0_f64;
@@ -381,12 +474,14 @@ impl ReferenceElement for TriP5 {
             let di = rising_deriv(i, t0);
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         TRIP5_COORDS.iter().map(|c| vec![c[0], c[1]]).collect()
@@ -399,31 +494,77 @@ impl ReferenceElement for TriP5 {
 pub struct TriP6;
 
 const TRIP6_IJK: [(usize, usize, usize); 28] = [
-    (0,0,6), (6,0,0), (0,6,0),                         // vertices
-    (1,0,5), (2,0,4), (3,0,3), (4,0,2), (5,0,1),       // edge 0→1
-    (5,1,0), (4,2,0), (3,3,0), (2,4,0), (1,5,0),       // edge 1→2
-    (0,1,5), (0,2,4), (0,3,3), (0,4,2), (0,5,1),       // edge 2→0
-    (1,1,4), (2,1,3), (3,1,2), (4,1,1),                 // face j=1
-    (1,2,3), (2,2,2), (3,2,1),                           // face j=2
-    (1,3,2), (2,3,1),                                     // face j=3
-    (1,4,1),                                               // face j=4
+    (0, 0, 6),
+    (6, 0, 0),
+    (0, 6, 0), // vertices
+    (1, 0, 5),
+    (2, 0, 4),
+    (3, 0, 3),
+    (4, 0, 2),
+    (5, 0, 1), // edge 0→1
+    (5, 1, 0),
+    (4, 2, 0),
+    (3, 3, 0),
+    (2, 4, 0),
+    (1, 5, 0), // edge 1→2
+    (0, 1, 5),
+    (0, 2, 4),
+    (0, 3, 3),
+    (0, 4, 2),
+    (0, 5, 1), // edge 2→0
+    (1, 1, 4),
+    (2, 1, 3),
+    (3, 1, 2),
+    (4, 1, 1), // face j=1
+    (1, 2, 3),
+    (2, 2, 2),
+    (3, 2, 1), // face j=2
+    (1, 3, 2),
+    (2, 3, 1), // face j=3
+    (1, 4, 1), // face j=4
 ];
 
 const TRIP6_COORDS: [[f64; 2]; 28] = [
-    [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-    [1.0/6.0, 0.0], [2.0/6.0, 0.0], [3.0/6.0, 0.0], [4.0/6.0, 0.0], [5.0/6.0, 0.0],
-    [5.0/6.0, 1.0/6.0], [4.0/6.0, 2.0/6.0], [3.0/6.0, 3.0/6.0], [2.0/6.0, 4.0/6.0], [1.0/6.0, 5.0/6.0],
-    [0.0, 1.0/6.0], [0.0, 2.0/6.0], [0.0, 3.0/6.0], [0.0, 4.0/6.0], [0.0, 5.0/6.0],
-    [1.0/6.0, 1.0/6.0], [2.0/6.0, 1.0/6.0], [3.0/6.0, 1.0/6.0], [4.0/6.0, 1.0/6.0],
-    [1.0/6.0, 2.0/6.0], [2.0/6.0, 2.0/6.0], [3.0/6.0, 2.0/6.0],
-    [1.0/6.0, 3.0/6.0], [2.0/6.0, 3.0/6.0],
-    [1.0/6.0, 4.0/6.0],
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [1.0 / 6.0, 0.0],
+    [2.0 / 6.0, 0.0],
+    [3.0 / 6.0, 0.0],
+    [4.0 / 6.0, 0.0],
+    [5.0 / 6.0, 0.0],
+    [5.0 / 6.0, 1.0 / 6.0],
+    [4.0 / 6.0, 2.0 / 6.0],
+    [3.0 / 6.0, 3.0 / 6.0],
+    [2.0 / 6.0, 4.0 / 6.0],
+    [1.0 / 6.0, 5.0 / 6.0],
+    [0.0, 1.0 / 6.0],
+    [0.0, 2.0 / 6.0],
+    [0.0, 3.0 / 6.0],
+    [0.0, 4.0 / 6.0],
+    [0.0, 5.0 / 6.0],
+    [1.0 / 6.0, 1.0 / 6.0],
+    [2.0 / 6.0, 1.0 / 6.0],
+    [3.0 / 6.0, 1.0 / 6.0],
+    [4.0 / 6.0, 1.0 / 6.0],
+    [1.0 / 6.0, 2.0 / 6.0],
+    [2.0 / 6.0, 2.0 / 6.0],
+    [3.0 / 6.0, 2.0 / 6.0],
+    [1.0 / 6.0, 3.0 / 6.0],
+    [2.0 / 6.0, 3.0 / 6.0],
+    [1.0 / 6.0, 4.0 / 6.0],
 ];
 
 impl ReferenceElement for TriP6 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 6 }
-    fn n_dofs(&self) -> usize { 28 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        6
+    }
+    fn n_dofs(&self) -> usize {
+        28
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let pf = 6.0_f64;
@@ -447,12 +588,14 @@ impl ReferenceElement for TriP6 {
             let di = rising_deriv(i, t0);
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         TRIP6_COORDS.iter().map(|c| vec![c[0], c[1]]).collect()
@@ -465,33 +608,93 @@ impl ReferenceElement for TriP6 {
 pub struct TriP7;
 
 const TRIP7_IJK: [(usize, usize, usize); 36] = [
-    (0,0,7), (7,0,0), (0,7,0),                         // vertices
-    (1,0,6), (2,0,5), (3,0,4), (4,0,3), (5,0,2), (6,0,1), // edge 0→1
-    (6,1,0), (5,2,0), (4,3,0), (3,4,0), (2,5,0), (1,6,0), // edge 1→2
-    (0,1,6), (0,2,5), (0,3,4), (0,4,3), (0,5,2), (0,6,1), // edge 2→0
-    (1,1,5), (2,1,4), (3,1,3), (4,1,2), (5,1,1),           // face j=1
-    (1,2,4), (2,2,3), (3,2,2), (4,2,1),                     // face j=2
-    (1,3,3), (2,3,2), (3,3,1),                               // face j=3
-    (1,4,2), (2,4,1),                                         // face j=4
-    (1,5,1),                                                   // face j=5
+    (0, 0, 7),
+    (7, 0, 0),
+    (0, 7, 0), // vertices
+    (1, 0, 6),
+    (2, 0, 5),
+    (3, 0, 4),
+    (4, 0, 3),
+    (5, 0, 2),
+    (6, 0, 1), // edge 0→1
+    (6, 1, 0),
+    (5, 2, 0),
+    (4, 3, 0),
+    (3, 4, 0),
+    (2, 5, 0),
+    (1, 6, 0), // edge 1→2
+    (0, 1, 6),
+    (0, 2, 5),
+    (0, 3, 4),
+    (0, 4, 3),
+    (0, 5, 2),
+    (0, 6, 1), // edge 2→0
+    (1, 1, 5),
+    (2, 1, 4),
+    (3, 1, 3),
+    (4, 1, 2),
+    (5, 1, 1), // face j=1
+    (1, 2, 4),
+    (2, 2, 3),
+    (3, 2, 2),
+    (4, 2, 1), // face j=2
+    (1, 3, 3),
+    (2, 3, 2),
+    (3, 3, 1), // face j=3
+    (1, 4, 2),
+    (2, 4, 1), // face j=4
+    (1, 5, 1), // face j=5
 ];
 
 const TRIP7_COORDS: [[f64; 2]; 36] = [
-    [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-    [1.0/7.0, 0.0], [2.0/7.0, 0.0], [3.0/7.0, 0.0], [4.0/7.0, 0.0], [5.0/7.0, 0.0], [6.0/7.0, 0.0],
-    [6.0/7.0, 1.0/7.0], [5.0/7.0, 2.0/7.0], [4.0/7.0, 3.0/7.0], [3.0/7.0, 4.0/7.0], [2.0/7.0, 5.0/7.0], [1.0/7.0, 6.0/7.0],
-    [0.0, 1.0/7.0], [0.0, 2.0/7.0], [0.0, 3.0/7.0], [0.0, 4.0/7.0], [0.0, 5.0/7.0], [0.0, 6.0/7.0],
-    [1.0/7.0, 1.0/7.0], [2.0/7.0, 1.0/7.0], [3.0/7.0, 1.0/7.0], [4.0/7.0, 1.0/7.0], [5.0/7.0, 1.0/7.0],
-    [1.0/7.0, 2.0/7.0], [2.0/7.0, 2.0/7.0], [3.0/7.0, 2.0/7.0], [4.0/7.0, 2.0/7.0],
-    [1.0/7.0, 3.0/7.0], [2.0/7.0, 3.0/7.0], [3.0/7.0, 3.0/7.0],
-    [1.0/7.0, 4.0/7.0], [2.0/7.0, 4.0/7.0],
-    [1.0/7.0, 5.0/7.0],
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [1.0 / 7.0, 0.0],
+    [2.0 / 7.0, 0.0],
+    [3.0 / 7.0, 0.0],
+    [4.0 / 7.0, 0.0],
+    [5.0 / 7.0, 0.0],
+    [6.0 / 7.0, 0.0],
+    [6.0 / 7.0, 1.0 / 7.0],
+    [5.0 / 7.0, 2.0 / 7.0],
+    [4.0 / 7.0, 3.0 / 7.0],
+    [3.0 / 7.0, 4.0 / 7.0],
+    [2.0 / 7.0, 5.0 / 7.0],
+    [1.0 / 7.0, 6.0 / 7.0],
+    [0.0, 1.0 / 7.0],
+    [0.0, 2.0 / 7.0],
+    [0.0, 3.0 / 7.0],
+    [0.0, 4.0 / 7.0],
+    [0.0, 5.0 / 7.0],
+    [0.0, 6.0 / 7.0],
+    [1.0 / 7.0, 1.0 / 7.0],
+    [2.0 / 7.0, 1.0 / 7.0],
+    [3.0 / 7.0, 1.0 / 7.0],
+    [4.0 / 7.0, 1.0 / 7.0],
+    [5.0 / 7.0, 1.0 / 7.0],
+    [1.0 / 7.0, 2.0 / 7.0],
+    [2.0 / 7.0, 2.0 / 7.0],
+    [3.0 / 7.0, 2.0 / 7.0],
+    [4.0 / 7.0, 2.0 / 7.0],
+    [1.0 / 7.0, 3.0 / 7.0],
+    [2.0 / 7.0, 3.0 / 7.0],
+    [3.0 / 7.0, 3.0 / 7.0],
+    [1.0 / 7.0, 4.0 / 7.0],
+    [2.0 / 7.0, 4.0 / 7.0],
+    [1.0 / 7.0, 5.0 / 7.0],
 ];
 
 impl ReferenceElement for TriP7 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 7 }
-    fn n_dofs(&self) -> usize { 36 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        7
+    }
+    fn n_dofs(&self) -> usize {
+        36
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let pf = 7.0_f64;
@@ -515,12 +718,14 @@ impl ReferenceElement for TriP7 {
             let di = rising_deriv(i, t0);
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         TRIP7_COORDS.iter().map(|c| vec![c[0], c[1]]).collect()
@@ -533,35 +738,111 @@ impl ReferenceElement for TriP7 {
 pub struct TriP8;
 
 const TRIP8_IJK: [(usize, usize, usize); 45] = [
-    (0,0,8), (8,0,0), (0,8,0),
-    (1,0,7),(2,0,6),(3,0,5),(4,0,4),(5,0,3),(6,0,2),(7,0,1),
-    (7,1,0),(6,2,0),(5,3,0),(4,4,0),(3,5,0),(2,6,0),(1,7,0),
-    (0,1,7),(0,2,6),(0,3,5),(0,4,4),(0,5,3),(0,6,2),(0,7,1),
-    (1,1,6),(2,1,5),(3,1,4),(4,1,3),(5,1,2),(6,1,1),
-    (1,2,5),(2,2,4),(3,2,3),(4,2,2),(5,2,1),
-    (1,3,4),(2,3,3),(3,3,2),(4,3,1),
-    (1,4,3),(2,4,2),(3,4,1),
-    (1,5,2),(2,5,1),
-    (1,6,1),
+    (0, 0, 8),
+    (8, 0, 0),
+    (0, 8, 0),
+    (1, 0, 7),
+    (2, 0, 6),
+    (3, 0, 5),
+    (4, 0, 4),
+    (5, 0, 3),
+    (6, 0, 2),
+    (7, 0, 1),
+    (7, 1, 0),
+    (6, 2, 0),
+    (5, 3, 0),
+    (4, 4, 0),
+    (3, 5, 0),
+    (2, 6, 0),
+    (1, 7, 0),
+    (0, 1, 7),
+    (0, 2, 6),
+    (0, 3, 5),
+    (0, 4, 4),
+    (0, 5, 3),
+    (0, 6, 2),
+    (0, 7, 1),
+    (1, 1, 6),
+    (2, 1, 5),
+    (3, 1, 4),
+    (4, 1, 3),
+    (5, 1, 2),
+    (6, 1, 1),
+    (1, 2, 5),
+    (2, 2, 4),
+    (3, 2, 3),
+    (4, 2, 2),
+    (5, 2, 1),
+    (1, 3, 4),
+    (2, 3, 3),
+    (3, 3, 2),
+    (4, 3, 1),
+    (1, 4, 3),
+    (2, 4, 2),
+    (3, 4, 1),
+    (1, 5, 2),
+    (2, 5, 1),
+    (1, 6, 1),
 ];
 
 const TRIP8_COORDS: [[f64; 2]; 45] = [
-    [0.0, 0.0], [1.0, 0.0], [0.0, 1.0],
-    [1./8., 0.], [2./8., 0.], [3./8., 0.], [4./8., 0.], [5./8., 0.], [6./8., 0.], [7./8., 0.],
-    [7./8., 1./8.], [6./8., 2./8.], [5./8., 3./8.], [4./8., 4./8.], [3./8., 5./8.], [2./8., 6./8.], [1./8., 7./8.],
-    [0., 1./8.], [0., 2./8.], [0., 3./8.], [0., 4./8.], [0., 5./8.], [0., 6./8.], [0., 7./8.],
-    [1./8., 1./8.], [2./8., 1./8.], [3./8., 1./8.], [4./8., 1./8.], [5./8., 1./8.], [6./8., 1./8.],
-    [1./8., 2./8.], [2./8., 2./8.], [3./8., 2./8.], [4./8., 2./8.], [5./8., 2./8.],
-    [1./8., 3./8.], [2./8., 3./8.], [3./8., 3./8.], [4./8., 3./8.],
-    [1./8., 4./8.], [2./8., 4./8.], [3./8., 4./8.],
-    [1./8., 5./8.], [2./8., 5./8.],
-    [1./8., 6./8.],
+    [0.0, 0.0],
+    [1.0, 0.0],
+    [0.0, 1.0],
+    [1. / 8., 0.],
+    [2. / 8., 0.],
+    [3. / 8., 0.],
+    [4. / 8., 0.],
+    [5. / 8., 0.],
+    [6. / 8., 0.],
+    [7. / 8., 0.],
+    [7. / 8., 1. / 8.],
+    [6. / 8., 2. / 8.],
+    [5. / 8., 3. / 8.],
+    [4. / 8., 4. / 8.],
+    [3. / 8., 5. / 8.],
+    [2. / 8., 6. / 8.],
+    [1. / 8., 7. / 8.],
+    [0., 1. / 8.],
+    [0., 2. / 8.],
+    [0., 3. / 8.],
+    [0., 4. / 8.],
+    [0., 5. / 8.],
+    [0., 6. / 8.],
+    [0., 7. / 8.],
+    [1. / 8., 1. / 8.],
+    [2. / 8., 1. / 8.],
+    [3. / 8., 1. / 8.],
+    [4. / 8., 1. / 8.],
+    [5. / 8., 1. / 8.],
+    [6. / 8., 1. / 8.],
+    [1. / 8., 2. / 8.],
+    [2. / 8., 2. / 8.],
+    [3. / 8., 2. / 8.],
+    [4. / 8., 2. / 8.],
+    [5. / 8., 2. / 8.],
+    [1. / 8., 3. / 8.],
+    [2. / 8., 3. / 8.],
+    [3. / 8., 3. / 8.],
+    [4. / 8., 3. / 8.],
+    [1. / 8., 4. / 8.],
+    [2. / 8., 4. / 8.],
+    [3. / 8., 4. / 8.],
+    [1. / 8., 5. / 8.],
+    [2. / 8., 5. / 8.],
+    [1. / 8., 6. / 8.],
 ];
 
 impl ReferenceElement for TriP8 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 8 }
-    fn n_dofs(&self) -> usize { 45 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        8
+    }
+    fn n_dofs(&self) -> usize {
+        45
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let pf = 8.0_f64;
@@ -585,12 +866,14 @@ impl ReferenceElement for TriP8 {
             let di = rising_deriv(i, t0);
             let dj = rising_deriv(j, t1);
             let dk = rising_deriv(k, t2);
-            grads[dof_idx * 2]     = pf * (di * vj * vk - vi * vj * dk);
+            grads[dof_idx * 2] = pf * (di * vj * vk - vi * vj * dk);
             grads[dof_idx * 2 + 1] = pf * (vi * dj * vk - vi * vj * dk);
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         TRIP8_COORDS.iter().map(|c| vec![c[0], c[1]]).collect()
@@ -603,38 +886,104 @@ impl ReferenceElement for TriP8 {
 pub struct TriP9;
 
 const TRIP9_IJK: [(usize, usize, usize); 55] = [
-    (0,0,9), (9,0,0), (0,9,0),
-    (1,0,8),(2,0,7),(3,0,6),(4,0,5),(5,0,4),(6,0,3),(7,0,2),(8,0,1),
-    (8,1,0),(7,2,0),(6,3,0),(5,4,0),(4,5,0),(3,6,0),(2,7,0),(1,8,0),
-    (0,1,8),(0,2,7),(0,3,6),(0,4,5),(0,5,4),(0,6,3),(0,7,2),(0,8,1),
-    (1,1,7),(2,1,6),(3,1,5),(4,1,4),(5,1,3),(6,1,2),(7,1,1),
-    (1,2,6),(2,2,5),(3,2,4),(4,2,3),(5,2,2),(6,2,1),
-    (1,3,5),(2,3,4),(3,3,3),(4,3,2),(5,3,1),
-    (1,4,4),(2,4,3),(3,4,2),(4,4,1),
-    (1,5,3),(2,5,2),(3,5,1),
-    (1,6,2),(2,6,1),
-    (1,7,1),
+    (0, 0, 9),
+    (9, 0, 0),
+    (0, 9, 0),
+    (1, 0, 8),
+    (2, 0, 7),
+    (3, 0, 6),
+    (4, 0, 5),
+    (5, 0, 4),
+    (6, 0, 3),
+    (7, 0, 2),
+    (8, 0, 1),
+    (8, 1, 0),
+    (7, 2, 0),
+    (6, 3, 0),
+    (5, 4, 0),
+    (4, 5, 0),
+    (3, 6, 0),
+    (2, 7, 0),
+    (1, 8, 0),
+    (0, 1, 8),
+    (0, 2, 7),
+    (0, 3, 6),
+    (0, 4, 5),
+    (0, 5, 4),
+    (0, 6, 3),
+    (0, 7, 2),
+    (0, 8, 1),
+    (1, 1, 7),
+    (2, 1, 6),
+    (3, 1, 5),
+    (4, 1, 4),
+    (5, 1, 3),
+    (6, 1, 2),
+    (7, 1, 1),
+    (1, 2, 6),
+    (2, 2, 5),
+    (3, 2, 4),
+    (4, 2, 3),
+    (5, 2, 2),
+    (6, 2, 1),
+    (1, 3, 5),
+    (2, 3, 4),
+    (3, 3, 3),
+    (4, 3, 2),
+    (5, 3, 1),
+    (1, 4, 4),
+    (2, 4, 3),
+    (3, 4, 2),
+    (4, 4, 1),
+    (1, 5, 3),
+    (2, 5, 2),
+    (3, 5, 1),
+    (1, 6, 2),
+    (2, 6, 1),
+    (1, 7, 1),
 ];
 
 impl ReferenceElement for TriP9 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 9 }
-    fn n_dofs(&self) -> usize { 55 }
-    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let p = 9.0; let t0=p*xi[0]; let t1=p*xi[1]; let t2=p*(1.0-xi[0]-xi[1]);
-        for (i, &(a,b,c)) in TRIP9_IJK.iter().enumerate() { values[i]=rising_val(a,t0)*rising_val(b,t1)*rising_val(c,t2); }
+    fn dim(&self) -> u8 {
+        2
     }
-    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let p=9.0; let t0=p*xi[0]; let t1=p*xi[1]; let t2=p*(1.0-xi[0]-xi[1]);
-        for (i, &(a,b,c)) in TRIP9_IJK.iter().enumerate() {
-            let (va,vb,vc)=(rising_val(a,t0),rising_val(b,t1),rising_val(c,t2));
-            grads[i*2]=p*(rising_deriv(a,t0)*vb*vc - va*vb*rising_deriv(c,t2));
-            grads[i*2+1]=p*(va*rising_deriv(b,t1)*vc - va*vb*rising_deriv(c,t2));
+    fn order(&self) -> u8 {
+        9
+    }
+    fn n_dofs(&self) -> usize {
+        55
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let p = 9.0;
+        let t0 = p * xi[0];
+        let t1 = p * xi[1];
+        let t2 = p * (1.0 - xi[0] - xi[1]);
+        for (i, &(a, b, c)) in TRIP9_IJK.iter().enumerate() {
+            values[i] = rising_val(a, t0) * rising_val(b, t1) * rising_val(c, t2);
         }
     }
-    fn quadrature(&self, o: u8) -> QuadratureRule { tri_rule(o) }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let p = 9.0;
+        let t0 = p * xi[0];
+        let t1 = p * xi[1];
+        let t2 = p * (1.0 - xi[0] - xi[1]);
+        for (i, &(a, b, c)) in TRIP9_IJK.iter().enumerate() {
+            let (va, vb, vc) = (rising_val(a, t0), rising_val(b, t1), rising_val(c, t2));
+            grads[i * 2] = p * (rising_deriv(a, t0) * vb * vc - va * vb * rising_deriv(c, t2));
+            grads[i * 2 + 1] = p * (va * rising_deriv(b, t1) * vc - va * vb * rising_deriv(c, t2));
+        }
+    }
+    fn quadrature(&self, o: u8) -> QuadratureRule {
+        tri_rule(o)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let p=9.0; (0..55).map(|i| { let (a,b,_)=TRIP9_IJK[i]; vec![a as f64/p, b as f64/p] }).collect()
+        let p = 9.0;
+        (0..55)
+            .map(|i| {
+                let (a, b, _) = TRIP9_IJK[i];
+                vec![a as f64 / p, b as f64 / p]
+            })
+            .collect()
     }
 }
 
@@ -644,43 +993,119 @@ impl ReferenceElement for TriP9 {
 pub struct TriP10;
 
 const TRIP10_IJK: [(usize, usize, usize); 66] = [
-    (0,0,10),(10,0,0),(0,10,0),
-    (1,0,9),(2,0,8),(3,0,7),(4,0,6),(5,0,5),(6,0,4),(7,0,3),(8,0,2),(9,0,1),
-    (9,1,0),(8,2,0),(7,3,0),(6,4,0),(5,5,0),(4,6,0),(3,7,0),(2,8,0),(1,9,0),
-    (0,1,9),(0,2,8),(0,3,7),(0,4,6),(0,5,5),(0,6,4),(0,7,3),(0,8,2),(0,9,1),
-    (1,1,8),(2,1,7),(3,1,6),(4,1,5),(5,1,4),(6,1,3),(7,1,2),(8,1,1),
-    (1,2,7),(2,2,6),(3,2,5),(4,2,4),(5,2,3),(6,2,2),(7,2,1),
-    (1,3,6),(2,3,5),(3,3,4),(4,3,3),(5,3,2),(6,3,1),
-    (1,4,5),(2,4,4),(3,4,3),(4,4,2),(5,4,1),
-    (1,5,4),(2,5,3),(3,5,2),(4,5,1),
-    (1,6,3),(2,6,2),(3,6,1),
-    (1,7,2),(2,7,1),
-    (1,8,1),
+    (0, 0, 10),
+    (10, 0, 0),
+    (0, 10, 0),
+    (1, 0, 9),
+    (2, 0, 8),
+    (3, 0, 7),
+    (4, 0, 6),
+    (5, 0, 5),
+    (6, 0, 4),
+    (7, 0, 3),
+    (8, 0, 2),
+    (9, 0, 1),
+    (9, 1, 0),
+    (8, 2, 0),
+    (7, 3, 0),
+    (6, 4, 0),
+    (5, 5, 0),
+    (4, 6, 0),
+    (3, 7, 0),
+    (2, 8, 0),
+    (1, 9, 0),
+    (0, 1, 9),
+    (0, 2, 8),
+    (0, 3, 7),
+    (0, 4, 6),
+    (0, 5, 5),
+    (0, 6, 4),
+    (0, 7, 3),
+    (0, 8, 2),
+    (0, 9, 1),
+    (1, 1, 8),
+    (2, 1, 7),
+    (3, 1, 6),
+    (4, 1, 5),
+    (5, 1, 4),
+    (6, 1, 3),
+    (7, 1, 2),
+    (8, 1, 1),
+    (1, 2, 7),
+    (2, 2, 6),
+    (3, 2, 5),
+    (4, 2, 4),
+    (5, 2, 3),
+    (6, 2, 2),
+    (7, 2, 1),
+    (1, 3, 6),
+    (2, 3, 5),
+    (3, 3, 4),
+    (4, 3, 3),
+    (5, 3, 2),
+    (6, 3, 1),
+    (1, 4, 5),
+    (2, 4, 4),
+    (3, 4, 3),
+    (4, 4, 2),
+    (5, 4, 1),
+    (1, 5, 4),
+    (2, 5, 3),
+    (3, 5, 2),
+    (4, 5, 1),
+    (1, 6, 3),
+    (2, 6, 2),
+    (3, 6, 1),
+    (1, 7, 2),
+    (2, 7, 1),
+    (1, 8, 1),
 ];
 
 impl ReferenceElement for TriP10 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 10 }
-    fn n_dofs(&self) -> usize { 66 }
-    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let p=10.0; let t0=p*xi[0]; let t1=p*xi[1]; let t2=p*(1.0-xi[0]-xi[1]);
-        for (i, &(a,b,c)) in TRIP10_IJK.iter().enumerate() { values[i]=rising_val(a,t0)*rising_val(b,t1)*rising_val(c,t2); }
+    fn dim(&self) -> u8 {
+        2
     }
-    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let p=10.0; let t0=p*xi[0]; let t1=p*xi[1]; let t2=p*(1.0-xi[0]-xi[1]);
-        for (i, &(a,b,c)) in TRIP10_IJK.iter().enumerate() {
-            let (va,vb,vc)=(rising_val(a,t0),rising_val(b,t1),rising_val(c,t2));
-            grads[i*2]=p*(rising_deriv(a,t0)*vb*vc - va*vb*rising_deriv(c,t2));
-            grads[i*2+1]=p*(va*rising_deriv(b,t1)*vc - va*vb*rising_deriv(c,t2));
+    fn order(&self) -> u8 {
+        10
+    }
+    fn n_dofs(&self) -> usize {
+        66
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let p = 10.0;
+        let t0 = p * xi[0];
+        let t1 = p * xi[1];
+        let t2 = p * (1.0 - xi[0] - xi[1]);
+        for (i, &(a, b, c)) in TRIP10_IJK.iter().enumerate() {
+            values[i] = rising_val(a, t0) * rising_val(b, t1) * rising_val(c, t2);
         }
     }
-    fn quadrature(&self, o: u8) -> QuadratureRule { tri_rule(o) }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let p = 10.0;
+        let t0 = p * xi[0];
+        let t1 = p * xi[1];
+        let t2 = p * (1.0 - xi[0] - xi[1]);
+        for (i, &(a, b, c)) in TRIP10_IJK.iter().enumerate() {
+            let (va, vb, vc) = (rising_val(a, t0), rising_val(b, t1), rising_val(c, t2));
+            grads[i * 2] = p * (rising_deriv(a, t0) * vb * vc - va * vb * rising_deriv(c, t2));
+            grads[i * 2 + 1] = p * (va * rising_deriv(b, t1) * vc - va * vb * rising_deriv(c, t2));
+        }
+    }
+    fn quadrature(&self, o: u8) -> QuadratureRule {
+        tri_rule(o)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        let p=10.0; (0..66).map(|i| { let (a,b,_)=TRIP10_IJK[i]; vec![a as f64/p, b as f64/p] }).collect()
+        let p = 10.0;
+        (0..66)
+            .map(|i| {
+                let (a, b, _) = TRIP10_IJK[i];
+                vec![a as f64 / p, b as f64 / p]
+            })
+            .collect()
     }
 }
 
-use super::factory::{rising_val, rising_deriv};
+use super::factory::{rising_deriv, rising_val};
 
 #[cfg(test)]
 mod tests {
@@ -709,12 +1134,30 @@ mod tests {
         }
     }
 
-    #[test] fn tri_p1_pou()       { check_pou(&TriP1); }
-    #[test] fn tri_p1_grad_zero() { check_grad_zero(&TriP1); }
-    #[test] fn tri_p2_pou()       { check_pou(&TriP2); }
-    #[test] fn tri_p2_grad_zero() { check_grad_zero(&TriP2); }
-    #[test] fn tri_p3_pou()       { check_pou(&TriP3); }
-    #[test] fn tri_p3_grad_zero() { check_grad_zero(&TriP3); }
+    #[test]
+    fn tri_p1_pou() {
+        check_pou(&TriP1);
+    }
+    #[test]
+    fn tri_p1_grad_zero() {
+        check_grad_zero(&TriP1);
+    }
+    #[test]
+    fn tri_p2_pou() {
+        check_pou(&TriP2);
+    }
+    #[test]
+    fn tri_p2_grad_zero() {
+        check_grad_zero(&TriP2);
+    }
+    #[test]
+    fn tri_p3_pou() {
+        check_pou(&TriP3);
+    }
+    #[test]
+    fn tri_p3_grad_zero() {
+        check_grad_zero(&TriP3);
+    }
 
     #[test]
     fn tri_p3_vertex_dofs() {
@@ -722,7 +1165,9 @@ mod tests {
         // φ₀ = 1 at vertex 0 (0,0)
         TriP3.eval_basis(&[0.0, 0.0], &mut phi);
         assert!((phi[0] - 1.0).abs() < 1e-14, "phi0 at v0 = {}", phi[0]);
-        for i in 1..10 { assert!(phi[i].abs() < 1e-14, "phi[{i}] at v0 = {}", phi[i]); }
+        for i in 1..10 {
+            assert!(phi[i].abs() < 1e-14, "phi[{i}] at v0 = {}", phi[i]);
+        }
 
         // φ₁ = 1 at vertex 1 (1,0)
         TriP3.eval_basis(&[1.0, 0.0], &mut phi);
@@ -761,14 +1206,22 @@ mod tests {
 
         // φ₅ = 1 at (2/3, 1/3) — edge v1→v2 near v1
         TriP3.eval_basis(&[t2, t], &mut phi);
-        assert!((phi[5] - 1.0).abs() < 1e-14, "phi5 at (2/3,1/3) = {}", phi[5]);
+        assert!(
+            (phi[5] - 1.0).abs() < 1e-14,
+            "phi5 at (2/3,1/3) = {}",
+            phi[5]
+        );
         for i in (0..10).filter(|&j| j != 5) {
             assert!(phi[i].abs() < 1e-14, "phi[{i}] at (2/3,1/3) = {}", phi[i]);
         }
 
         // φ₉ = 1 at (1/3, 1/3) — bubble
         TriP3.eval_basis(&[t, t], &mut phi);
-        assert!((phi[9] - 1.0).abs() < 1e-14, "phi9 (bubble) at centroid = {}", phi[9]);
+        assert!(
+            (phi[9] - 1.0).abs() < 1e-14,
+            "phi9 (bubble) at centroid = {}",
+            phi[9]
+        );
         for i in (0..10).filter(|&j| j != 9) {
             assert!(phi[i].abs() < 1e-14, "phi[{i}] at centroid = {}", phi[i]);
         }
@@ -794,18 +1247,31 @@ mod tests {
         // At vertex 0: φ₀=1, rest=0
         TriP2.eval_basis(&[0.0, 0.0], &mut phi);
         assert!((phi[0] - 1.0).abs() < 1e-14);
-        for i in 1..6 { assert!(phi[i].abs() < 1e-14, "phi[{i}]={}", phi[i]); }
+        for i in 1..6 {
+            assert!(phi[i].abs() < 1e-14, "phi[{i}]={}", phi[i]);
+        }
         // At edge midpoint (0.5, 0): φ₃=1, rest=0
         TriP2.eval_basis(&[0.5, 0.0], &mut phi);
-        for i in [0, 1, 2, 4, 5] { assert!(phi[i].abs() < 1e-14, "phi[{i}]={}", phi[i]); }
+        for i in [0, 1, 2, 4, 5] {
+            assert!(phi[i].abs() < 1e-14, "phi[{i}]={}", phi[i]);
+        }
         assert!((phi[3] - 1.0).abs() < 1e-14);
     }
 
     // ── TriP4 ─────────────────────────────────────────────────────────────
 
-    #[test] fn tri_p4_pou()       { check_pou(&TriP4); }
-    #[test] fn tri_p4_grad_zero() { check_grad_zero(&TriP4); }
-    #[test] fn tri_p4_n_dofs()    { assert_eq!(TriP4.n_dofs(), 15); }
+    #[test]
+    fn tri_p4_pou() {
+        check_pou(&TriP4);
+    }
+    #[test]
+    fn tri_p4_grad_zero() {
+        check_grad_zero(&TriP4);
+    }
+    #[test]
+    fn tri_p4_n_dofs() {
+        assert_eq!(TriP4.n_dofs(), 15);
+    }
 
     #[test]
     fn tri_p4_nodal_interp() {
@@ -815,8 +1281,11 @@ mod tests {
             TriP4.eval_basis(&[coord[0], coord[1]], &mut phi);
             for j in 0..15 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-12,
-                    "TriP4 node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-12,
+                    "TriP4 node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
@@ -831,27 +1300,39 @@ mod tests {
     fn tri_p4_gradient_fd() {
         let h = 1e-7;
         let n = 15;
-        let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
+        let (mut vc, mut vx, mut vy, mut grads) =
+            (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
         for &(x, y) in &[(0.15, 0.2), (0.3, 0.3), (0.1, 0.6)] {
-            if x + y > 0.9 { continue; }
+            if x + y > 0.9 {
+                continue;
+            }
             TriP4.eval_basis(&[x, y], &mut vc);
-            TriP4.eval_basis(&[x+h, y], &mut vx);
-            TriP4.eval_basis(&[x, y+h], &mut vy);
+            TriP4.eval_basis(&[x + h, y], &mut vx);
+            TriP4.eval_basis(&[x, y + h], &mut vy);
             TriP4.eval_grad_basis(&[x, y], &mut grads);
             for i in 0..n {
                 let fd_x = (vx[i] - vc[i]) / h;
                 let fd_y = (vy[i] - vc[i]) / h;
-                assert!((grads[i*2] - fd_x).abs() < 1e-5, "({x},{y}) i={i} gx");
-                assert!((grads[i*2+1] - fd_y).abs() < 1e-5, "({x},{y}) i={i} gy");
+                assert!((grads[i * 2] - fd_x).abs() < 1e-5, "({x},{y}) i={i} gx");
+                assert!((grads[i * 2 + 1] - fd_y).abs() < 1e-5, "({x},{y}) i={i} gy");
             }
         }
     }
 
     // ── TriP5 ─────────────────────────────────────────────────────────────
 
-    #[test] fn tri_p5_pou()       { check_pou(&TriP5); }
-    #[test] fn tri_p5_grad_zero() { check_grad_zero(&TriP5); }
-    #[test] fn tri_p5_n_dofs()    { assert_eq!(TriP5.n_dofs(), 21); }
+    #[test]
+    fn tri_p5_pou() {
+        check_pou(&TriP5);
+    }
+    #[test]
+    fn tri_p5_grad_zero() {
+        check_grad_zero(&TriP5);
+    }
+    #[test]
+    fn tri_p5_n_dofs() {
+        assert_eq!(TriP5.n_dofs(), 21);
+    }
 
     #[test]
     fn tri_p5_nodal_interp() {
@@ -861,8 +1342,11 @@ mod tests {
             TriP5.eval_basis(&[coord[0], coord[1]], &mut phi);
             for j in 0..21 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-12,
-                    "TriP5 node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-12,
+                    "TriP5 node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
@@ -877,27 +1361,39 @@ mod tests {
     fn tri_p5_gradient_fd() {
         let h = 1e-7;
         let n = 21;
-        let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
+        let (mut vc, mut vx, mut vy, mut grads) =
+            (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
         for &(x, y) in &[(0.12, 0.15), (0.25, 0.25), (0.08, 0.5)] {
-            if x + y > 0.85 { continue; }
+            if x + y > 0.85 {
+                continue;
+            }
             TriP5.eval_basis(&[x, y], &mut vc);
-            TriP5.eval_basis(&[x+h, y], &mut vx);
-            TriP5.eval_basis(&[x, y+h], &mut vy);
+            TriP5.eval_basis(&[x + h, y], &mut vx);
+            TriP5.eval_basis(&[x, y + h], &mut vy);
             TriP5.eval_grad_basis(&[x, y], &mut grads);
             for i in 0..n {
                 let fd_x = (vx[i] - vc[i]) / h;
                 let fd_y = (vy[i] - vc[i]) / h;
-                assert!((grads[i*2] - fd_x).abs() < 1e-5, "({x},{y}) i={i} gx");
-                assert!((grads[i*2+1] - fd_y).abs() < 1e-5, "({x},{y}) i={i} gy");
+                assert!((grads[i * 2] - fd_x).abs() < 1e-5, "({x},{y}) i={i} gx");
+                assert!((grads[i * 2 + 1] - fd_y).abs() < 1e-5, "({x},{y}) i={i} gy");
             }
         }
     }
 
     // ── TriP6 ─────────────────────────────────────────────────────────────
 
-    #[test] fn tri_p6_pou()       { check_pou(&TriP6); }
-    #[test] fn tri_p6_grad_zero() { check_grad_zero(&TriP6); }
-    #[test] fn tri_p6_n_dofs()    { assert_eq!(TriP6.n_dofs(), 28); }
+    #[test]
+    fn tri_p6_pou() {
+        check_pou(&TriP6);
+    }
+    #[test]
+    fn tri_p6_grad_zero() {
+        check_grad_zero(&TriP6);
+    }
+    #[test]
+    fn tri_p6_n_dofs() {
+        assert_eq!(TriP6.n_dofs(), 28);
+    }
 
     #[test]
     fn tri_p6_nodal_interp() {
@@ -907,8 +1403,11 @@ mod tests {
             TriP6.eval_basis(&[coord[0], coord[1]], &mut phi);
             for j in 0..28 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-12,
-                    "TriP6 node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-12,
+                    "TriP6 node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
@@ -923,27 +1422,39 @@ mod tests {
     fn tri_p6_gradient_fd() {
         let h = 1e-7;
         let n = 28;
-        let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
+        let (mut vc, mut vx, mut vy, mut grads) =
+            (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
         for &(x, y) in &[(0.1, 0.12), (0.2, 0.2), (0.07, 0.4)] {
-            if x + y > 0.8 { continue; }
+            if x + y > 0.8 {
+                continue;
+            }
             TriP6.eval_basis(&[x, y], &mut vc);
-            TriP6.eval_basis(&[x+h, y], &mut vx);
-            TriP6.eval_basis(&[x, y+h], &mut vy);
+            TriP6.eval_basis(&[x + h, y], &mut vx);
+            TriP6.eval_basis(&[x, y + h], &mut vy);
             TriP6.eval_grad_basis(&[x, y], &mut grads);
             for i in 0..n {
                 let fd_x = (vx[i] - vc[i]) / h;
                 let fd_y = (vy[i] - vc[i]) / h;
-                assert!((grads[i*2] - fd_x).abs() < 5e-5, "({x},{y}) i={i} gx");
-                assert!((grads[i*2+1] - fd_y).abs() < 5e-5, "({x},{y}) i={i} gy");
+                assert!((grads[i * 2] - fd_x).abs() < 5e-5, "({x},{y}) i={i} gx");
+                assert!((grads[i * 2 + 1] - fd_y).abs() < 5e-5, "({x},{y}) i={i} gy");
             }
         }
     }
 
     // ── TriP7 ─────────────────────────────────────────────────────────────
 
-    #[test] fn tri_p7_pou()       { check_pou(&TriP7); }
-    #[test] fn tri_p7_grad_zero() { check_grad_zero(&TriP7); }
-    #[test] fn tri_p7_n_dofs()    { assert_eq!(TriP7.n_dofs(), 36); }
+    #[test]
+    fn tri_p7_pou() {
+        check_pou(&TriP7);
+    }
+    #[test]
+    fn tri_p7_grad_zero() {
+        check_grad_zero(&TriP7);
+    }
+    #[test]
+    fn tri_p7_n_dofs() {
+        assert_eq!(TriP7.n_dofs(), 36);
+    }
 
     #[test]
     fn tri_p7_nodal_interp() {
@@ -953,8 +1464,11 @@ mod tests {
             TriP7.eval_basis(&[coord[0], coord[1]], &mut phi);
             for j in 0..36 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-12,
-                    "TriP7 node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-12,
+                    "TriP7 node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
@@ -969,27 +1483,39 @@ mod tests {
     fn tri_p7_gradient_fd() {
         let h = 1e-7;
         let n = 36;
-        let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
+        let (mut vc, mut vx, mut vy, mut grads) =
+            (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
         for &(x, y) in &[(0.08, 0.1), (0.15, 0.15), (0.05, 0.3)] {
-            if x + y > 0.75 { continue; }
+            if x + y > 0.75 {
+                continue;
+            }
             TriP7.eval_basis(&[x, y], &mut vc);
-            TriP7.eval_basis(&[x+h, y], &mut vx);
-            TriP7.eval_basis(&[x, y+h], &mut vy);
+            TriP7.eval_basis(&[x + h, y], &mut vx);
+            TriP7.eval_basis(&[x, y + h], &mut vy);
             TriP7.eval_grad_basis(&[x, y], &mut grads);
             for i in 0..n {
                 let fd_x = (vx[i] - vc[i]) / h;
                 let fd_y = (vy[i] - vc[i]) / h;
-                assert!((grads[i*2] - fd_x).abs() < 5e-5, "({x},{y}) i={i} gx");
-                assert!((grads[i*2+1] - fd_y).abs() < 5e-5, "({x},{y}) i={i} gy");
+                assert!((grads[i * 2] - fd_x).abs() < 5e-5, "({x},{y}) i={i} gx");
+                assert!((grads[i * 2 + 1] - fd_y).abs() < 5e-5, "({x},{y}) i={i} gy");
             }
         }
     }
 
     // ── TriP8 ─────────────────────────────────────────────────────────────
 
-    #[test] fn tri_p8_pou()       { check_pou(&TriP8); }
-    #[test] fn tri_p8_grad_zero() { check_grad_zero(&TriP8); }
-    #[test] fn tri_p8_n_dofs()    { assert_eq!(TriP8.n_dofs(), 45); }
+    #[test]
+    fn tri_p8_pou() {
+        check_pou(&TriP8);
+    }
+    #[test]
+    fn tri_p8_grad_zero() {
+        check_grad_zero(&TriP8);
+    }
+    #[test]
+    fn tri_p8_n_dofs() {
+        assert_eq!(TriP8.n_dofs(), 45);
+    }
 
     #[test]
     fn tri_p8_nodal_interp() {
@@ -999,8 +1525,11 @@ mod tests {
             TriP8.eval_basis(&[coord[0], coord[1]], &mut phi);
             for j in 0..45 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-12,
-                    "TriP8 node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-12,
+                    "TriP8 node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
@@ -1015,30 +1544,51 @@ mod tests {
     fn tri_p8_gradient_fd() {
         let h = 1e-7;
         let n = 45;
-        let (mut vc, mut vx, mut vy, mut grads) = (vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*2]);
+        let (mut vc, mut vx, mut vy, mut grads) =
+            (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 2]);
         for &(x, y) in &[(0.06, 0.08), (0.12, 0.12), (0.04, 0.25)] {
-            if x + y > 0.7 { continue; }
+            if x + y > 0.7 {
+                continue;
+            }
             TriP8.eval_basis(&[x, y], &mut vc);
-            TriP8.eval_basis(&[x+h, y], &mut vx);
-            TriP8.eval_basis(&[x, y+h], &mut vy);
+            TriP8.eval_basis(&[x + h, y], &mut vx);
+            TriP8.eval_basis(&[x, y + h], &mut vy);
             TriP8.eval_grad_basis(&[x, y], &mut grads);
             for i in 0..n {
                 let fd_x = (vx[i] - vc[i]) / h;
                 let fd_y = (vy[i] - vc[i]) / h;
-                assert!((grads[i*2] - fd_x).abs() < 1e-4, "({x},{y}) i={i} gx");
-                assert!((grads[i*2+1] - fd_y).abs() < 1e-4, "({x},{y}) i={i} gy");
+                assert!((grads[i * 2] - fd_x).abs() < 1e-4, "({x},{y}) i={i} gx");
+                assert!((grads[i * 2 + 1] - fd_y).abs() < 1e-4, "({x},{y}) i={i} gy");
             }
         }
     }
 
     // ── TriP9 / TriP10 ────────────────────────────────────────────────────
 
-    #[test] fn tri_p9_n_dofs() { assert_eq!(TriP9.n_dofs(), 55); }
-    #[test] fn tri_p10_n_dofs() { assert_eq!(TriP10.n_dofs(), 66); }
-    #[test] fn tri_p9_pou() { check_pou(&TriP9); }
-    #[test] fn tri_p10_pou() { check_pou(&TriP10); }
-    #[test] fn tri_p9_grad_zero() { check_grad_zero(&TriP9); }
-    #[test] fn tri_p10_grad_zero() { check_grad_zero(&TriP10); }
+    #[test]
+    fn tri_p9_n_dofs() {
+        assert_eq!(TriP9.n_dofs(), 55);
+    }
+    #[test]
+    fn tri_p10_n_dofs() {
+        assert_eq!(TriP10.n_dofs(), 66);
+    }
+    #[test]
+    fn tri_p9_pou() {
+        check_pou(&TriP9);
+    }
+    #[test]
+    fn tri_p10_pou() {
+        check_pou(&TriP10);
+    }
+    #[test]
+    fn tri_p9_grad_zero() {
+        check_grad_zero(&TriP9);
+    }
+    #[test]
+    fn tri_p10_grad_zero() {
+        check_grad_zero(&TriP10);
+    }
 
     #[test]
     fn tri_p9_nodal_interp() {
@@ -1046,7 +1596,9 @@ mod tests {
         let mut phi = vec![0.0; 55];
         for (i, c) in coords.iter().enumerate() {
             TriP9.eval_basis(&[c[0], c[1]], &mut phi);
-            for j in 0..55 { assert!((phi[j] - if i==j {1.0} else {0.0}).abs() < 1e-12); }
+            for j in 0..55 {
+                assert!((phi[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12);
+            }
         }
     }
 
@@ -1056,7 +1608,9 @@ mod tests {
         let mut phi = vec![0.0; 66];
         for (i, c) in coords.iter().enumerate() {
             TriP10.eval_basis(&[c[0], c[1]], &mut phi);
-            for j in 0..66 { assert!((phi[j] - if i==j {1.0} else {0.0}).abs() < 1e-12); }
+            for j in 0..66 {
+                assert!((phi[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12);
+            }
         }
     }
 }

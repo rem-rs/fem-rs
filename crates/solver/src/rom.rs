@@ -31,8 +31,8 @@
 //! let x_r = a_r.solve(&b_r);
 //! ```
 
-use nalgebra::{DMatrix, DVector, SVD};
 use fem_linalg::CsrMatrix;
+use nalgebra::{DMatrix, DVector, SVD};
 
 /// Snapshot matrix: columns are solution vectors at different parameters / times.
 ///
@@ -46,23 +46,38 @@ pub struct Snapshots {
 impl Snapshots {
     /// Create an empty snapshot collector for an `n`-DOF system.
     pub fn new(n_dofs: usize) -> Self {
-        Snapshots { n_dofs, snapshots: Vec::new() }
+        Snapshots {
+            n_dofs,
+            snapshots: Vec::new(),
+        }
     }
 
     /// Add a solution vector as a new snapshot column.
     pub fn add_snapshot(&mut self, u: &[f64]) {
-        assert_eq!(u.len(), self.n_dofs, "snapshot length {} != n_dofs {}", u.len(), self.n_dofs);
+        assert_eq!(
+            u.len(),
+            self.n_dofs,
+            "snapshot length {} != n_dofs {}",
+            u.len(),
+            self.n_dofs
+        );
         self.snapshots.push(u.to_vec());
     }
 
     /// Number of DOFs.
-    pub fn n_dofs(&self) -> usize { self.n_dofs }
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
 
     /// Number of snapshots collected.
-    pub fn n_snapshots(&self) -> usize { self.snapshots.len() }
+    pub fn n_snapshots(&self) -> usize {
+        self.snapshots.len()
+    }
 
     /// Access the i-th snapshot.
-    pub fn snapshot(&self, i: usize) -> &[f64] { &self.snapshots[i] }
+    pub fn snapshot(&self, i: usize) -> &[f64] {
+        &self.snapshots[i]
+    }
 
     /// Convert to a dense matrix (n_dofs × n_snapshots).
     pub fn to_matrix(&self) -> DMatrix<f64> {
@@ -118,21 +133,31 @@ impl PodBasis {
         let n_sv = n_modes.min(sv_total);
         let singular_values: Vec<f64> = sv.iter().take(n_sv).copied().collect();
 
-        Ok(PodBasis { modes, singular_values, r: n_modes })
+        Ok(PodBasis {
+            modes,
+            singular_values,
+            r: n_modes,
+        })
     }
 
     /// Number of basis vectors (reduced dimension).
-    pub fn n_modes(&self) -> usize { self.r }
+    pub fn n_modes(&self) -> usize {
+        self.r
+    }
 
     /// The i-th POD mode (column vector, length n_dofs).
     pub fn mode(&self, i: usize) -> Vec<f64> {
-        (0..self.modes.nrows()).map(|row| self.modes[(row, i)]).collect()
+        (0..self.modes.nrows())
+            .map(|row| self.modes[(row, i)])
+            .collect()
     }
 
     /// Energy fraction captured by the first `k` modes: sum(σᵢ²) / sum(all σᵢ²).
     pub fn energy_fraction(&self, k: usize) -> f64 {
         let total: f64 = self.singular_values.iter().map(|s| s * s).sum();
-        if total == 0.0 { return 1.0; }
+        if total == 0.0 {
+            return 1.0;
+        }
         let partial: f64 = self.singular_values.iter().take(k).map(|s| s * s).sum();
         partial / total
     }
@@ -140,7 +165,9 @@ impl PodBasis {
     /// Cumulative energy fraction across all computed modes.
     pub fn cumulative_energy(&self) -> Vec<f64> {
         let total: f64 = self.singular_values.iter().map(|s| s * s).sum();
-        if total == 0.0 { return vec![1.0; self.singular_values.len()]; }
+        if total == 0.0 {
+            return vec![1.0; self.singular_values.len()];
+        }
         let mut cum = Vec::with_capacity(self.singular_values.len());
         let mut running = 0.0;
         for s in &self.singular_values {
@@ -197,8 +224,11 @@ pub fn reconstruct(pod: &PodBasis, u_r: &[f64]) -> Vec<f64> {
 
 /// Compute the relative L² error between reduced and full-order solutions.
 pub fn relative_error(u_full: &[f64], u_reduced: &[f64]) -> f64 {
-    let diff: f64 = u_full.iter().zip(u_reduced.iter())
-        .map(|(a, b)| (a - b).powi(2)).sum();
+    let diff: f64 = u_full
+        .iter()
+        .zip(u_reduced.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum();
     let norm: f64 = u_full.iter().map(|a| a.powi(2)).sum();
     (diff / norm.max(1e-30)).sqrt()
 }
@@ -228,15 +258,21 @@ pub fn online_solve(
     let mut b_r = DVector::zeros(r);
     for i in 0..affine_op_proj.n_terms() {
         let theta = affine_op_proj.coeffs[i](mu);
-        if theta.abs() < 1e-300 { continue; }
+        if theta.abs() < 1e-300 {
+            continue;
+        }
         a_r += theta * &affine_op_proj.components[i];
     }
     for i in 0..affine_rhs_proj.n_terms() {
         let theta = affine_rhs_proj.coeffs[i](mu);
-        if theta.abs() < 1e-300 { continue; }
+        if theta.abs() < 1e-300 {
+            continue;
+        }
         b_r += theta * &affine_rhs_proj.components[i];
     }
-    let u_r = a_r.lu().solve(&b_r)
+    let u_r = a_r
+        .lu()
+        .solve(&b_r)
         .ok_or_else(|| "reduced system solve failed".to_string())?;
     let u_full = reconstruct(pod, u_r.as_slice());
     Ok((u_r, u_full))
@@ -292,7 +328,9 @@ impl EimBasis {
         let mut points: Vec<usize> = Vec::with_capacity(m_eff);
 
         // Step 1: first basis = snapshot with largest norm; first point = argmax |b₁|
-        let (idx_first, _) = snapshots.iter().enumerate()
+        let (idx_first, _) = snapshots
+            .iter()
+            .enumerate()
             .map(|(i, s)| (i, s.iter().map(|v| v * v).sum::<f64>()))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .ok_or("EIM: empty snapshots")?;
@@ -303,7 +341,9 @@ impl EimBasis {
             return Err("EIM: zero snapshot".into());
         }
         let b1: Vec<f64> = first_vec.iter().map(|v| v / inf_norm).collect();
-        let p0 = b1.iter().enumerate()
+        let p0 = b1
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
             .map(|(i, _)| i)
             .unwrap();
@@ -325,7 +365,7 @@ impl EimBasis {
                 // Solve B_sub · c = snapshot[points] for coefficients
                 let c = match b_sub.lu().solve(&b_rhs) {
                     Some(c) => c,
-                    None => continue,  // singular; skip this snapshot
+                    None => continue, // singular; skip this snapshot
                 };
 
                 // Residual r = snap - basis · c
@@ -346,7 +386,9 @@ impl EimBasis {
                     } else {
                         residual.iter().map(|_| 0.0).collect()
                     };
-                    let pk = residual.iter().enumerate()
+                    let pk = residual
+                        .iter()
+                        .enumerate()
                         .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
                         .map(|(i, _)| i)
                         .unwrap_or(0);
@@ -358,7 +400,7 @@ impl EimBasis {
             match best_basis {
                 Some(b) => {
                     if best_res_norm < 1e-14 {
-                        break;  // converged — remaining snapshots are in the span
+                        break; // converged — remaining snapshots are in the span
                     }
                     basis.push(b);
                     points.push(best_point);
@@ -375,7 +417,11 @@ impl EimBasis {
             }
         }
 
-        Ok(EimBasis { basis: basis_mat, points, m: m_final })
+        Ok(EimBasis {
+            basis: basis_mat,
+            points,
+            m: m_final,
+        })
     }
 
     /// Interpolate an arbitrary vector `f` using the EIM basis and magic points.
@@ -387,7 +433,9 @@ impl EimBasis {
         let m = self.m;
         let b_sub = DMatrix::from_fn(m, m, |i, j| self.basis[(self.points[i], j)]);
         let b_rhs = DVector::from_fn(m, |i, _| f[self.points[i]]);
-        let c = b_sub.lu().solve(&b_rhs)
+        let c = b_sub
+            .lu()
+            .solve(&b_rhs)
             .expect("EIM interpolation matrix should be invertible");
 
         let mut result = vec![0.0; n];
@@ -403,7 +451,11 @@ impl EimBasis {
     /// Evaluate the interpolation residual ‖f - I[f]‖ / ‖f‖.
     pub fn relative_interp_error(&self, f: &[f64]) -> f64 {
         let f_eim = self.interpolate(f);
-        let diff: f64 = f.iter().zip(f_eim.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+        let diff: f64 = f
+            .iter()
+            .zip(f_eim.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
         let norm: f64 = f.iter().map(|a| a.powi(2)).sum();
         (diff / norm.max(1e-30)).sqrt()
     }
@@ -428,23 +480,35 @@ pub struct AffineDecomposition<T> {
 impl<T> AffineDecomposition<T> {
     /// Create a new affine decomposition.
     pub fn new(components: Vec<T>, coeffs: Vec<fn(&[f64]) -> f64>) -> Self {
-        assert_eq!(components.len(), coeffs.len(),
-            "number of components must match number of coefficient functions");
+        assert_eq!(
+            components.len(),
+            coeffs.len(),
+            "number of components must match number of coefficient functions"
+        );
         AffineDecomposition { components, coeffs }
     }
 
     /// Number of terms in the affine decomposition.
-    pub fn n_terms(&self) -> usize { self.components.len() }
+    pub fn n_terms(&self) -> usize {
+        self.components.len()
+    }
 }
 
 impl AffineDecomposition<Vec<f64>> {
     /// Project the RHS affine components onto a POD basis: `b_q_r = Vᵀ · b_q`.
     pub fn project_rhs(&self, pod: &PodBasis) -> AffineDecomposition<DVector<f64>> {
-        let projected: Vec<DVector<f64>> = self.components.iter().map(|b| {
-            let b_vec = DVector::from_vec(b.clone());
-            pod.modes.transpose() * b_vec
-        }).collect();
-        AffineDecomposition { components: projected, coeffs: self.coeffs.clone() }
+        let projected: Vec<DVector<f64>> = self
+            .components
+            .iter()
+            .map(|b| {
+                let b_vec = DVector::from_vec(b.clone());
+                pod.modes.transpose() * b_vec
+            })
+            .collect();
+        AffineDecomposition {
+            components: projected,
+            coeffs: self.coeffs.clone(),
+        }
     }
 }
 
@@ -455,7 +519,9 @@ impl AffineDecomposition<CsrMatrix<f64>> {
         let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
         for (comp, &coeff_fn) in self.components.iter().zip(self.coeffs.iter()) {
             let theta = coeff_fn(mu);
-            if theta.abs() < 1e-300 { continue; }
+            if theta.abs() < 1e-300 {
+                continue;
+            }
             for row in 0..comp.nrows {
                 for ptr in comp.row_ptr[row]..comp.row_ptr[row + 1] {
                     let col = comp.col_idx[ptr] as usize;
@@ -469,18 +535,24 @@ impl AffineDecomposition<CsrMatrix<f64>> {
     /// Project each component matrix onto a POD basis: `A_q_r = Vᵀ A_q V`.
     /// Returns the reduced affine decomposition ready for online evaluation.
     pub fn project(&self, pod: &PodBasis) -> AffineDecomposition<DMatrix<f64>> {
-        let projected: Vec<DMatrix<f64>> = self.components.iter().map(|a| {
-            let n = a.nrows;
-            let r = pod.r;
-            let mut av = DMatrix::zeros(n, r);
-            for j in 0..r {
-                let mode_j = pod.mode(j);
-                let mut col = vec![0.0; n];
-                a.spmv(&mode_j, &mut col);
-                for i in 0..n { av[(i, j)] = col[i]; }
-            }
-            pod.modes.transpose() * av
-        }).collect();
+        let projected: Vec<DMatrix<f64>> = self
+            .components
+            .iter()
+            .map(|a| {
+                let n = a.nrows;
+                let r = pod.r;
+                let mut av = DMatrix::zeros(n, r);
+                for j in 0..r {
+                    let mode_j = pod.mode(j);
+                    let mut col = vec![0.0; n];
+                    a.spmv(&mode_j, &mut col);
+                    for i in 0..n {
+                        av[(i, j)] = col[i];
+                    }
+                }
+                pod.modes.transpose() * av
+            })
+            .collect();
         AffineDecomposition {
             components: projected,
             coeffs: self.coeffs.clone(),
@@ -523,7 +595,9 @@ impl ErrorEstimator {
         let n = b.len();
         let mut r = vec![0.0; n];
         a.spmv(&u_full, &mut r);
-        for i in 0..n { r[i] = b[i] - r[i]; }
+        for i in 0..n {
+            r[i] = b[i] - r[i];
+        }
         let r_norm: f64 = r.iter().map(|v| v * v).sum::<f64>().sqrt();
         let b_norm: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
         r_norm / b_norm.max(1e-300)
@@ -548,17 +622,21 @@ impl ErrorEstimator {
         let r = pod.r;
         let u = DVector::from_vec(reduced_solution.to_vec());
         let q = affine_op.n_terms().min(affine_rhs.n_terms());
-        if q == 0 { return 0.0; }
+        if q == 0 {
+            return 0.0;
+        }
 
         // Accumulate residual in reduced space: r_red = Σ_q θ_q · (b_q_proj - A_q_proj · u_r)
         let mut r_red = DVector::zeros(r);
         for i in 0..q {
             let theta = affine_rhs.coeffs[i](mu);
-            if theta.abs() < 1e-300 { continue; }
+            if theta.abs() < 1e-300 {
+                continue;
+            }
             let b_q = &affine_rhs.components[i];
             let a_q = &affine_op.components[i];
             let mut r_q = b_q.clone();
-            r_q -= a_q * &u;  // r_q = b_q_proj - A_q_proj · u_r
+            r_q -= a_q * &u; // r_q = b_q_proj - A_q_proj · u_r
             r_red += theta * r_q;
         }
         r_red.norm_squared()
@@ -619,7 +697,7 @@ pub fn deim_greedy(modes: &DMatrix<f64>, r: usize) -> Vec<usize> {
 /// `u_deim = U (P^T U)^{-1} P^T u`, where `P` selects `indices` rows.
 pub fn deim_interpolate(
     u: &DVector<f64>,
-    modes: &DMatrix<f64>,  // POD modes (n × m)
+    modes: &DMatrix<f64>, // POD modes (n × m)
     indices: &[usize],
 ) -> Vec<f64> {
     let m = indices.len();
@@ -634,7 +712,9 @@ pub fn deim_interpolate(
     let pt_u_vec = DVector::from_fn(m, |i, _| u[indices[i]]);
 
     // Solve (P^T U) c = P^T u for c
-    let c = pt_u.lu().solve(&pt_u_vec)
+    let c = pt_u
+        .lu()
+        .solve(&pt_u_vec)
         .expect("DEIM interpolation matrix should be invertible");
 
     // u_deim = U · c
@@ -644,15 +724,19 @@ pub fn deim_interpolate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SolverConfig, solve_cg};
+    use crate::{solve_cg, SolverConfig};
     use fem_linalg::CsrMatrix;
 
     fn laplacian_1d(n: usize) -> CsrMatrix<f64> {
         let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
         for i in 0..n {
             coo.add(i, i, 2.0);
-            if i > 0 { coo.add(i, i - 1, -1.0); }
-            if i < n - 1 { coo.add(i, i + 1, -1.0); }
+            if i > 0 {
+                coo.add(i, i - 1, -1.0);
+            }
+            if i < n - 1 {
+                coo.add(i, i + 1, -1.0);
+            }
         }
         coo.into_csr()
     }
@@ -665,7 +749,10 @@ mod tests {
         b[mid - 1] = rhs_scale;
         b[mid] = 2.0 * rhs_scale;
         b[mid + 1] = rhs_scale;
-        let cfg = SolverConfig { rtol: 1e-10, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            ..Default::default()
+        };
         solve_cg(&a, &b, &mut x, &cfg).expect("CG");
         x
     }
@@ -703,7 +790,10 @@ mod tests {
         }
         let pod = PodBasis::compute(&snaps, 5).expect("POD basis");
         let e = pod.energy_fraction(5);
-        assert!((e - 1.0).abs() < 1e-10, "all modes should capture all energy: {e:.10}");
+        assert!(
+            (e - 1.0).abs() < 1e-10,
+            "all modes should capture all energy: {e:.10}"
+        );
     }
 
     #[test]
@@ -738,7 +828,10 @@ mod tests {
             b[k * 4] = 1.0;
             let a = laplacian_1d(n);
             let mut x = vec![0.0; n];
-            let cfg = SolverConfig { rtol: 1e-10, ..Default::default() };
+            let cfg = SolverConfig {
+                rtol: 1e-10,
+                ..Default::default()
+            };
             solve_cg(&a, &b, &mut x, &cfg).expect("CG");
             snaps.add_snapshot(&x);
         }
@@ -760,11 +853,17 @@ mod tests {
 
         // Compare with full solve
         let mut x_full = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-10, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            ..Default::default()
+        };
         solve_cg(&a, &b, &mut x_full, &cfg).expect("CG");
 
         let err = relative_error(&x_full, &u_full);
-        assert!(err < 0.1, "ROM reconstruction error should be reasonable, got {err:.3e}");
+        assert!(
+            err < 0.1,
+            "ROM reconstruction error should be reasonable, got {err:.3e}"
+        );
     }
 
     #[test]
@@ -808,8 +907,12 @@ mod tests {
             let err = (&s - s_proj).norm();
             // Bound: error ≤ sqrt(σ_5² + σ_6²) (tail energy)
             let tail_sq: f64 = sv.iter().skip(r).map(|&s| s * s).sum();
-            assert!(err * err <= tail_sq + 1e-10,
-                "snap {snap_idx}: proj err² {:.3e} > tail {:.3e}", err * err, tail_sq);
+            assert!(
+                err * err <= tail_sq + 1e-10,
+                "snap {snap_idx}: proj err² {:.3e} > tail {:.3e}",
+                err * err,
+                tail_sq
+            );
         }
     }
 
@@ -836,8 +939,10 @@ mod tests {
             let u_deim = deim_interpolate(&snap, &v_m, &indices);
             let err = (&snap - DVector::from_vec(u_deim)).norm() / snap.norm();
             // Error should decrease with more modes
-            assert!(err < prev_err + 1e-6,
-                "DEIM error at m={m}: {err:.3e} >= prev {prev_err:.3e}");
+            assert!(
+                err < prev_err + 1e-6,
+                "DEIM error at m={m}: {err:.3e} >= prev {prev_err:.3e}"
+            );
             prev_err = err;
         }
     }
@@ -881,8 +986,12 @@ mod tests {
         let test_vec = solve_laplacian_1d(n, 3.0);
         let interp = eim.interpolate(&test_vec);
         for &pt in &eim.points {
-            assert!((interp[pt] - test_vec[pt]).abs() < 1e-10,
-                "mismatch at magic point {pt}: interp={:.6}, actual={:.6}", interp[pt], test_vec[pt]);
+            assert!(
+                (interp[pt] - test_vec[pt]).abs() < 1e-10,
+                "mismatch at magic point {pt}: interp={:.6}, actual={:.6}",
+                interp[pt],
+                test_vec[pt]
+            );
         }
     }
 
@@ -894,18 +1003,27 @@ mod tests {
         let mut coo2 = fem_linalg::CooMatrix::<f64>::new(n, n);
         for i in 0..n {
             coo1.add(i, i, 2.0);
-            if i > 0 { coo1.add(i, i - 1, -1.0); }
-            if i < n - 1 { coo1.add(i, i + 1, -1.0); }
+            if i > 0 {
+                coo1.add(i, i - 1, -1.0);
+            }
+            if i < n - 1 {
+                coo1.add(i, i + 1, -1.0);
+            }
             // Second component: mass-like (identity)
             coo2.add(i, i, 1.0);
         }
         let a1 = coo1.into_csr();
         let a2 = coo2.into_csr();
 
-        fn theta1(_mu: &[f64]) -> f64 { 1.0 }
-        fn theta2(mu: &[f64]) -> f64 { mu[0] }
+        fn theta1(_mu: &[f64]) -> f64 {
+            1.0
+        }
+        fn theta2(mu: &[f64]) -> f64 {
+            mu[0]
+        }
 
-        let affine = AffineDecomposition::new(vec![a1, a2], vec![theta1 as fn(&[f64]) -> f64, theta2]);
+        let affine =
+            AffineDecomposition::new(vec![a1, a2], vec![theta1 as fn(&[f64]) -> f64, theta2]);
         assert_eq!(affine.n_terms(), 2);
 
         // Build snapshots for POD
@@ -950,30 +1068,41 @@ mod tests {
 
     #[test]
     fn rom_parametric_diffusion_end_to_end() {
-        use fem_assembly::standard::DiffusionIntegrator;
-        use fem_assembly::postproc::coefficient::FnCoeff;
-        use fem_mesh::Mesh;
-        use fem_space::H1Space;
-        use fem_space::fe_space::FESpace;
-        use fem_space::constraints::boundary_dofs;
-        use fem_assembly::Assembler;
         use crate::solve_cg;
+        use fem_assembly::postproc::coefficient::FnCoeff;
+        use fem_assembly::standard::DiffusionIntegrator;
+        use fem_assembly::Assembler;
+        use fem_mesh::Mesh;
+        use fem_space::constraints::boundary_dofs;
+        use fem_space::fe_space::FESpace;
+        use fem_space::H1Space;
 
         let mesh = Mesh::<2>::unit_square_tri(6);
         let space = H1Space::new(mesh.clone(), 1);
         let dm = fem_space::DofManager::new(&mesh, 1);
 
         // Dirichlet BC: u=0 on all boundaries
-        let bdofs: Vec<usize> = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4]).iter()
-            .map(|&d| d as usize).collect();
+        let bdofs: Vec<usize> = boundary_dofs(&mesh, &dm, &[1, 2, 3, 4])
+            .iter()
+            .map(|&d| d as usize)
+            .collect();
 
-        let a1_raw = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
-        let a2_raw = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator {
-            kappa: FnCoeff(Box::new(|x: &[f64]| x[0])),
-        }], 3);
-        let b_raw = Assembler::assemble_linear(&space, &[
-            &fem_assembly::standard::DomainSourceIntegrator::new(|_| 1.0)
-        ], 3);
+        let a1_raw =
+            Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
+        let a2_raw = Assembler::assemble_bilinear(
+            &space,
+            &[&DiffusionIntegrator {
+                kappa: FnCoeff(Box::new(|x: &[f64]| x[0])),
+            }],
+            3,
+        );
+        let b_raw = Assembler::assemble_linear(
+            &space,
+            &[&fem_assembly::standard::DomainSourceIntegrator::new(|_| {
+                1.0
+            })],
+            3,
+        );
 
         let n = space.n_dofs();
         // Save copies for later use before any moves
@@ -985,25 +1114,48 @@ mod tests {
         let assemble_am = |m1: f64, m2: f64| -> (fem_linalg::CsrMatrix<f64>, Vec<f64>) {
             let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
             for row in 0..n {
-                for k in a1_copy.row_ptr[row]..a1_copy.row_ptr[row+1] {
-                    coo.add(row, a1_copy.col_idx[k] as usize,
-                        m1 * a1_copy.values[k] + m2 * a2_copy.values[k]);
+                for k in a1_copy.row_ptr[row]..a1_copy.row_ptr[row + 1] {
+                    coo.add(
+                        row,
+                        a1_copy.col_idx[k] as usize,
+                        m1 * a1_copy.values[k] + m2 * a2_copy.values[k],
+                    );
                 }
             }
             let mut m: fem_linalg::CsrMatrix<f64> = coo.into_csr();
             let mut r = b_copy.clone();
-            for &d in &bdofs { if d < m.nrows { m.apply_dirichlet_row_zeroing(d, 0.0, &mut r); } }
+            for &d in &bdofs {
+                if d < m.nrows {
+                    m.apply_dirichlet_row_zeroing(d, 0.0, &mut r);
+                }
+            }
             (m, r)
         };
 
         let mut snaps = Snapshots::new(n);
-        let params = [(1.0, 0.0), (0.0, 1.0), (2.0, 1.0), (1.0, 2.0),
-                      (3.0, 1.0), (1.0, 3.0), (0.5, 0.5), (2.0, 2.0)];
+        let params = [
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (2.0, 1.0),
+            (1.0, 2.0),
+            (3.0, 1.0),
+            (1.0, 3.0),
+            (0.5, 0.5),
+            (2.0, 2.0),
+        ];
         for &(m1, m2) in &params {
             let (am, r_mu) = assemble_am(m1, m2);
             let mut u = vec![0.0; n];
-            solve_cg(&am, &r_mu, &mut u, &SolverConfig { rtol: 1e-10, ..Default::default() })
-                .expect("CG solve during snapshot");
+            solve_cg(
+                &am,
+                &r_mu,
+                &mut u,
+                &SolverConfig {
+                    rtol: 1e-10,
+                    ..Default::default()
+                },
+            )
+            .expect("CG solve during snapshot");
             snaps.add_snapshot(&u);
         }
 
@@ -1016,33 +1168,45 @@ mod tests {
             vec![a1_raw, a2_raw],
             vec![|mu: &[f64]| mu[0], |mu: &[f64]| mu[1]],
         );
-        let aff_rhs = AffineDecomposition::new(
-            vec![b_raw],
-            vec![|_: &[f64]| 1.0],
-        );
+        let aff_rhs = AffineDecomposition::new(vec![b_raw], vec![|_: &[f64]| 1.0]);
 
         let op_proj = aff_op.project(&pod);
         let rhs_proj = aff_rhs.project_rhs(&pod);
 
         let mu_new = [1.5, 1.5];
-        let (u_r, u_full) = online_solve(&pod, &op_proj, &rhs_proj, &mu_new)
-            .expect("online solve");
+        let (u_r, u_full) = online_solve(&pod, &op_proj, &rhs_proj, &mu_new).expect("online solve");
         assert_eq!(u_r.len(), r);
         assert_eq!(u_full.len(), n);
 
         // Full solve at same parameter for error comparison
         let (a_full, r_full) = assemble_am(mu_new[0], mu_new[1]);
         let mut x_full = vec![0.0; n];
-        solve_cg(&a_full, &r_full, &mut x_full, &SolverConfig { rtol: 1e-10, ..Default::default() })
-            .expect("CG solve for reference");
+        solve_cg(
+            &a_full,
+            &r_full,
+            &mut x_full,
+            &SolverConfig {
+                rtol: 1e-10,
+                ..Default::default()
+            },
+        )
+        .expect("CG solve for reference");
 
         let err = relative_error(&x_full, &u_full);
         eprintln!("ROM end-to-end: n={n}, r={r}, rel_error={err:.3e}");
         assert!(err < 0.5, "ROM error should be reasonable, got {err:.3e}");
 
         let res_sq = ErrorEstimator::efficient_residual_sq(
-            u_r.as_slice(), &pod, &rhs_proj, &op_proj, &mu_new);
-        assert!(res_sq.is_finite(), "efficient residual_sq should be finite, got {res_sq}");
+            u_r.as_slice(),
+            &pod,
+            &rhs_proj,
+            &op_proj,
+            &mu_new,
+        );
+        assert!(
+            res_sq.is_finite(),
+            "efficient residual_sq should be finite, got {res_sq}"
+        );
         assert!(res_sq >= 0.0);
     }
 }

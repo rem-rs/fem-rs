@@ -135,7 +135,7 @@ mod tests {
     fn recover_hanging_values_simple() {
         let mut x = vec![2.0, 6.0, 0.0]; // DOF 2 is hanging between 0 and 1
         let constraints = vec![HangingNodeConstraint {
-            constrained: 2, parent_a: 0, parent_b: 1,
+            constrained: 2, parent_a: 0, parent_b: 1, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         recover_hanging_values(&mut x, &constraints);
         assert!((x[2] - 4.0).abs() < 1e-14, "expected 0.5*(2+6)=4, got {}", x[2]);
@@ -148,8 +148,8 @@ mod tests {
         // then DOF 3 uses the recovered DOF 2.
         let mut x = vec![0.0, 4.0, 0.0, 0.0];
         let constraints = vec![
-            HangingNodeConstraint { constrained: 2, parent_a: 0, parent_b: 1 },
-            HangingNodeConstraint { constrained: 3, parent_a: 1, parent_b: 2 },
+            HangingNodeConstraint { constrained: 2, parent_a: 0, parent_b: 1, coeff_a: 0.5, coeff_b: 0.5, extra: vec![] },
+            HangingNodeConstraint { constrained: 3, parent_a: 1, parent_b: 2, coeff_a: 0.5, coeff_b: 0.5, extra: vec![] },
         ];
         recover_hanging_values(&mut x, &constraints);
         // DOF 2 = 0.5*(0 + 4) = 2
@@ -174,8 +174,8 @@ mod tests {
         let mut rhs = vec![1.0; n];
 
         let constraints = vec![
-            HangingNodeConstraint { constrained: 3, parent_a: 1, parent_b: 2 },
-            HangingNodeConstraint { constrained: 4, parent_a: 2, parent_b: 3 },
+            HangingNodeConstraint { constrained: 3, parent_a: 1, parent_b: 2, coeff_a: 0.5, coeff_b: 0.5, extra: vec![] },
+            HangingNodeConstraint { constrained: 4, parent_a: 2, parent_b: 3, coeff_a: 0.5, coeff_b: 0.5, extra: vec![] },
         ];
 
         apply_hanging_constraints(&mut mat, &mut rhs, &constraints);
@@ -200,7 +200,7 @@ mod tests {
         let mut mat = coo.into_csr();
         let mut rhs = vec![1.0; 4];
         let constraints = vec![HangingNodeConstraint {
-            constrained: 2, parent_a: 0, parent_b: 1,
+            constrained: 2, parent_a: 0, parent_b: 1, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
 
         apply_hanging_constraints(&mut mat, &mut rhs, &constraints);
@@ -237,7 +237,7 @@ mod tests {
 
         // Hanging constraint: DOF 2 = 0.5*(DOF 1 + DOF 3).
         let constraints = vec![HangingNodeConstraint {
-            constrained: 2, parent_a: 1, parent_b: 3,
+            constrained: 2, parent_a: 1, parent_b: 3, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         apply_hanging_constraints(&mut mat, &mut rhs, &constraints);
 

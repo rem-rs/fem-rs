@@ -968,14 +968,20 @@ impl QuadQk {
         let p = self.order;
         let n = p + 1;
         let x = &self.gll01;
-        // Barycentric weights w_i = 1/∏_{j≠i}(x_i − x_j)
+        // Barycentric weights — MFEM Poly_1D::Basis::Basis(Barycentric)
+        // accumulates with the j<i double loop (`w(i) *= xij; w(j) *= -xij`)
+        // then takes one reciprocal; matching the exact multiply order keeps
+        // the weights bit-identical (a `j != i` full loop permutes the
+        // accumulation order and differs by ~1 ulp).
         let mut w = vec![1.0; n];
         for i in 0..n {
-            for j in 0..n {
-                if j != i {
-                    w[i] *= x[i] - x[j];
-                }
+            for j in 0..i {
+                let xij = x[i] - x[j];
+                w[i] *= xij;
+                w[j] *= -xij;
             }
+        }
+        for i in 0..n {
             w[i] = 1.0 / w[i];
         }
         // Stable centre k: lk = ∏ over the nodes on one side of y.
@@ -996,6 +1002,10 @@ impl QuadQk {
         let mut sk = 0.0;
         let mut u = vec![0.0; n];
         for i in 0..k {
+            // MFEM Poly_1D::Basis::Eval(y, u, d) (value+derivative overload)
+            // uses the reciprocal-multiplication form `u(i) = l·si·w(i)` with
+            // `si = 1/(y−x(i))` (fe_base.cpp:1905) — NOT the division form
+            // used by the value-only overload (which `mfem_bary_val` mirrors).
             let si = 1.0 / (y - x[i]);
             sk += si;
             u[i] = l * si * w[i];
@@ -1026,14 +1036,19 @@ impl QuadQk {
         let p = self.order;
         let n = p + 1;
         let x = &self.gll01;
-        // Barycentric weights w_i = 1/∏_{j≠i}(x_i − x_j)
+        // Barycentric weights — MFEM Poly_1D::Basis::Basis(Barycentric)
+        // accumulates with the j<i double loop (`w(i) *= xij; w(j) *= -xij`)
+        // then takes one reciprocal; matching the exact multiply order keeps
+        // the weights bit-identical.
         let mut w = vec![1.0; n];
         for i in 0..n {
-            for j in 0..n {
-                if j != i {
-                    w[i] *= x[i] - x[j];
-                }
+            for j in 0..i {
+                let xij = x[i] - x[j];
+                w[i] *= xij;
+                w[j] *= -xij;
             }
+        }
+        for i in 0..n {
             w[i] = 1.0 / w[i];
         }
         // Stable centre k (identical to mfem_bary_1d).

@@ -22,12 +22,12 @@
 //! println!("λ�?= {:.6}", eigenvalues[0]);
 //! ```
 
-use fem_linalg::CsrMatrix;
 use crate::solve_sparse_lu;
+use fem_linalg::CsrMatrix;
 use linlvo::{
-    KrylovSchur as linlvoKrylovSchur,
     eigen::{EigenParams, EigenSolver, EigenWhich},
     sparse::CsrMatrix as linlvoCsr,
+    KrylovSchur as linlvoKrylovSchur,
 };
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
@@ -53,7 +53,12 @@ pub struct LobpcgConfig {
 
 impl Default for LobpcgConfig {
     fn default() -> Self {
-        LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: false, nullspace_skip: 0.0 }
+        LobpcgConfig {
+            max_iter: 300,
+            tol: 1e-8,
+            verbose: false,
+            nullspace_skip: 0.0,
+        }
     }
 }
 
@@ -110,9 +115,9 @@ pub fn make_constraint_matrix(n_dofs: usize, ess_dofs: &[usize]) -> DMatrix<f64>
 /// # Returns
 /// `EigenResult` with eigenvalues sorted ascending and corresponding eigenvectors.
 pub fn lobpcg(
-    a:   &CsrMatrix<f64>,
-    b:   Option<&CsrMatrix<f64>>,
-    k:   usize,
+    a: &CsrMatrix<f64>,
+    b: Option<&CsrMatrix<f64>>,
+    k: usize,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
     lobpcg_projected(a, b, k, None, None, None, cfg)
@@ -195,7 +200,15 @@ pub fn lobpcg_essential_bc<F>(
 where
     F: Fn(&DMatrix<f64>) -> DMatrix<f64>,
 {
-    lobpcg_projected(a, b, k, Some(constraints), Some(&preconditioner), Some(zero_dofs), cfg)
+    lobpcg_projected(
+        a,
+        b,
+        k,
+        Some(constraints),
+        Some(&preconditioner),
+        Some(zero_dofs),
+        cfg,
+    )
 }
 
 /// Zero out specified DOFs in every column of a dense matrix.
@@ -250,7 +263,9 @@ fn lobpcg_projected(
 
     // ── 1. Initialise X with random B-orthonormal (or Euclidean) columns ─────
     let mut x = random_feasible_orthonormal(n, k, &constraint_basis, b)?;
-    if let Some(bc) = zero_dofs { zero_rows(&mut x, bc); }
+    if let Some(bc) = zero_dofs {
+        zero_rows(&mut x, bc);
+    }
 
     let mut p = DMatrix::<f64>::zeros(n, k); // previous search direction (0 on first iter)
     let mut use_p = false;
@@ -260,7 +275,11 @@ fn lobpcg_projected(
     for iter in 0..cfg.max_iter {
         // ── 2. Compute AX and BX (or X) ──────────────────────────────────────
         let ax = spmm(a, &x);
-        let bx = if let Some(bm) = b { spmm(bm, &x) } else { x.clone() };
+        let bx = if let Some(bm) = b {
+            spmm(bm, &x)
+        } else {
+            x.clone()
+        };
 
         // ── 3. Rayleigh quotients ─────────────────────────────────────────────
         // Solve small dense problem in span(X, AX-λBX, P):
@@ -284,7 +303,13 @@ fn lobpcg_projected(
 
         // ── 5. Convergence check (zero BC DOFs excluded from residual) ───────
         if let Some(bc) = zero_dofs {
-            for j in 0..k { for &d in bc { if d < n { r[(d, j)] = 0.0; } } }
+            for j in 0..k {
+                for &d in bc {
+                    if d < n {
+                        r[(d, j)] = 0.0;
+                    }
+                }
+            }
         }
         let res_norms: Vec<f64> = (0..k)
             .map(|j| r.column(j).norm() / lambdas[j].abs().max(1e-14))
@@ -327,7 +352,9 @@ fn lobpcg_projected(
             r.clone()
         };
         // Zero BC DOFs in Z (preconditioner may introduce components there).
-        if let Some(bc) = zero_dofs { zero_rows(&mut z, bc); }
+        if let Some(bc) = zero_dofs {
+            zero_rows(&mut z, bc);
+        }
         project_out(&mut z, &constraint_basis, b);
 
         // ── 7. Update X using local Rayleigh–Ritz in span(X, Z, P) ───────────
@@ -354,7 +381,11 @@ fn lobpcg_projected(
 
         // Small dense Rayleigh–Ritz in W.
         let aw = spmm(a, &w);
-        let bw = if let Some(bm) = b { spmm(bm, &w) } else { w.clone() };
+        let bw = if let Some(bm) = b {
+            spmm(bm, &w)
+        } else {
+            w.clone()
+        };
         let wtaw = w.transpose() * &aw;
         let wtbw = w.transpose() * &bw;
 
@@ -363,7 +394,11 @@ fn lobpcg_projected(
         // Skip nullspace modes: eigenvalues below nullspace_skip are treated as
         // zero (gradient nullspace) and excluded from the Ritz selection.
         let skip = if cfg.nullspace_skip > 0.0 {
-            ritz_vals.iter().take_while(|&&v| v.abs() < cfg.nullspace_skip).count().min(w.ncols().saturating_sub(k))
+            ritz_vals
+                .iter()
+                .take_while(|&&v| v.abs() < cfg.nullspace_skip)
+                .count()
+                .min(w.ncols().saturating_sub(k))
         } else {
             0
         };
@@ -380,9 +415,13 @@ fn lobpcg_projected(
         }
 
         x = x_new;
-        if let Some(bc) = zero_dofs { zero_rows(&mut x, bc); }
+        if let Some(bc) = zero_dofs {
+            zero_rows(&mut x, bc);
+        }
         project_out(&mut x, &constraint_basis, b);
-        if let Some(bc) = zero_dofs { zero_rows(&mut p, bc); }
+        if let Some(bc) = zero_dofs {
+            zero_rows(&mut p, bc);
+        }
         project_out(&mut p, &constraint_basis, b);
         use_p = true;
 
@@ -420,7 +459,6 @@ pub struct LobpcgSolver {
     pub cfg: LobpcgConfig,
 }
 
-
 impl GeneralizedEigenSolver for LobpcgSolver {
     fn solve_smallest(
         a: &CsrMatrix<f64>,
@@ -455,7 +493,9 @@ fn random_orthonormal(n: usize, k: usize) -> DMatrix<f64> {
     // Deterministic seed using simple LCG for reproducibility.
     let mut state = 12345u64;
     let mut lcg = move || -> f64 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state >> 33) as f64) / (u32::MAX as f64)
     };
 
@@ -495,8 +535,8 @@ fn random_feasible_orthonormal(
     let oversample = (k + 5).min(n);
     for _ in 0..6 {
         let mut x = random_orthonormal(n, oversample);
-        project_out(&mut x, constraints, b);  // B-projection against constraints
-        let basis = orthonormal_basis(x, b);      // B-orthonormalise the search space
+        project_out(&mut x, constraints, b); // B-projection against constraints
+        let basis = orthonormal_basis(x, b); // B-orthonormalise the search space
         if basis.ncols() >= k {
             return Ok(basis.columns(0, k).into_owned());
         }
@@ -574,7 +614,9 @@ fn qr_orthonormalise(x: &mut DMatrix<f64>) {
         }
         // Normalise.
         let norm = x.column(j).norm();
-        if norm > 1e-14 { x.column_mut(j).scale_mut(1.0 / norm); }
+        if norm > 1e-14 {
+            x.column_mut(j).scale_mut(1.0 / norm);
+        }
     }
 }
 
@@ -626,7 +668,10 @@ pub fn solve_dense_generalized_eig(a: &DMatrix<f64>, b: &DMatrix<f64>) -> (Vec<f
     let eig = SymmetricEigen::new(c);
 
     // Sort by ascending eigenvalue.
-    let mut pairs: Vec<(f64, usize)> = eig.eigenvalues.iter().enumerate()
+    let mut pairs: Vec<(f64, usize)> = eig
+        .eigenvalues
+        .iter()
+        .enumerate()
         .map(|(i, &v)| (v, i))
         .collect();
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -662,16 +707,23 @@ pub fn krylov_schur(
     let la = _fem_to_linlvo_csr(a);
     let solver = match ncv {
         Some(m) => linlvoKrylovSchur::new(m),
-        None    => linlvoKrylovSchur::default(),
+        None => linlvoKrylovSchur::default(),
     };
     let params = EigenParams::<f64>::new(k, EigenWhich::LargestAlgebraic);
     let res = solver.solve(&la, &params).map_err(|e| e.to_string())?;
     let neig = res.eigenvalues.len();
     let mut evecs = DMatrix::<f64>::zeros(n, neig);
     for (j, ev) in res.eigenvectors.iter().enumerate() {
-        for i in 0..n { evecs[(i, j)] = ev.as_slice()[i]; }
+        for i in 0..n {
+            evecs[(i, j)] = ev.as_slice()[i];
+        }
     }
-    Ok(EigenResult { eigenvalues: res.eigenvalues, eigenvectors: evecs, converged: res.converged > 0, iterations: res.iterations })
+    Ok(EigenResult {
+        eigenvalues: res.eigenvalues,
+        eigenvectors: evecs,
+        converged: res.converged > 0,
+        iterations: res.iterations,
+    })
 }
 
 fn _fem_to_linlvo_csr(a: &CsrMatrix<f64>) -> linlvoCsr<f64> {
@@ -701,7 +753,7 @@ pub enum WhichEigenvalue {
 
 fn which_to_linlvo(w: WhichEigenvalue) -> EigenWhich {
     match w {
-        WhichEigenvalue::LargestMagnitude  => EigenWhich::LargestMagnitude,
+        WhichEigenvalue::LargestMagnitude => EigenWhich::LargestMagnitude,
         WhichEigenvalue::SmallestMagnitude => EigenWhich::SmallestMagnitude,
         _ => EigenWhich::LargestMagnitude,
     }
@@ -749,7 +801,9 @@ pub fn arpack(
             let la_shift = _fem_to_linlvo_csr(&a_shift);
             let solver = linlvoKrylovSchur::new(krylov_dim);
             let params = EigenParams::<f64>::new(k, EigenWhich::LargestMagnitude);
-            let res = solver.solve(&la_shift, &params).map_err(|e| e.to_string())?;
+            let res = solver
+                .solve(&la_shift, &params)
+                .map_err(|e| e.to_string())?;
             let neig = res.eigenvalues.len();
             let mut eigenvalues = res.eigenvalues.clone();
             // Recover original eigenvalues: λ = σ + 1/θ
@@ -758,9 +812,16 @@ pub fn arpack(
             }
             let mut evecs = DMatrix::<f64>::zeros(n, neig);
             for (j, ev) in res.eigenvectors.iter().enumerate() {
-                for i in 0..n { evecs[(i, j)] = ev.as_slice()[i]; }
+                for i in 0..n {
+                    evecs[(i, j)] = ev.as_slice()[i];
+                }
             }
-            Ok(EigenResult { eigenvalues, eigenvectors: evecs, converged: true, iterations: res.iterations })
+            Ok(EigenResult {
+                eigenvalues,
+                eigenvectors: evecs,
+                converged: true,
+                iterations: res.iterations,
+            })
         }
         _ => {
             let ew = which_to_linlvo(which);
@@ -770,9 +831,16 @@ pub fn arpack(
             let neig = res.eigenvalues.len();
             let mut evecs = DMatrix::<f64>::zeros(n, neig);
             for (j, ev) in res.eigenvectors.iter().enumerate() {
-                for i in 0..n { evecs[(i, j)] = ev.as_slice()[i]; }
+                for i in 0..n {
+                    evecs[(i, j)] = ev.as_slice()[i];
+                }
             }
-            Ok(EigenResult { eigenvalues: res.eigenvalues, eigenvectors: evecs, converged: res.converged > 0, iterations: res.iterations })
+            Ok(EigenResult {
+                eigenvalues: res.eigenvalues,
+                eigenvectors: evecs,
+                converged: res.converged > 0,
+                iterations: res.iterations,
+            })
         }
     }
 }
@@ -793,7 +861,12 @@ pub struct IntervalEigenConfig {
 
 impl Default for IntervalEigenConfig {
     fn default() -> Self {
-        IntervalEigenConfig { subspace: 0, max_iter: 10, tol: 1e-8, verbose: false }
+        IntervalEigenConfig {
+            subspace: 0,
+            max_iter: 10,
+            tol: 1e-8,
+            verbose: false,
+        }
     }
 }
 
@@ -812,11 +885,17 @@ pub fn feast_interval(
     cfg: &IntervalEigenConfig,
 ) -> Result<EigenResult, String> {
     let n = a.nrows;
-    if k > n { return Err("k > n".into()); }
+    if k > n {
+        return Err("k > n".into());
+    }
     if lambda_max <= lambda_min {
         return Err("lambda_max must be > lambda_min".into());
     }
-    let subspace = if cfg.subspace > 0 { cfg.subspace } else { (k + 5).max(2 * k).min(n) };
+    let subspace = if cfg.subspace > 0 {
+        cfg.subspace
+    } else {
+        (k + 5).max(2 * k).min(n)
+    };
     let n_shifts = 4usize.min(subspace);
     let mut q = DMatrix::<f64>::zeros(n, subspace);
 
@@ -836,7 +915,11 @@ pub fn feast_interval(
         // Solve for random RHS
         let cols_per_shift = subspace / n_shifts;
         let start_col = s_idx * cols_per_shift;
-        let end_col = if s_idx == n_shifts - 1 { subspace } else { start_col + cols_per_shift };
+        let end_col = if s_idx == n_shifts - 1 {
+            subspace
+        } else {
+            start_col + cols_per_shift
+        };
         for c in start_col..end_col {
             let mut rhs = vec![0.0; n];
             for i in 0..n {
@@ -844,17 +927,23 @@ pub fn feast_interval(
             }
             match solve_sparse_lu(&a_shift, &rhs) {
                 Ok(y) => {
-                    for i in 0..n { q[(i, c)] = y[i]; }
+                    for i in 0..n {
+                        q[(i, c)] = y[i];
+                    }
                 }
                 Err(_) => {
-                    for i in 0..n { q[(i, c)] = rhs[i]; }
+                    for i in 0..n {
+                        q[(i, c)] = rhs[i];
+                    }
                 }
             }
         }
     }
 
     // Orthonormalise Q
-    if let Ok(q_ortho) = qr_orthonormalize(&q) { q = q_ortho; }
+    if let Ok(q_ortho) = qr_orthonormalize(&q) {
+        q = q_ortho;
+    }
 
     // Rayleigh-Ritz: A_q = Q^T A Q, solve dense EVP
     let aq = q.transpose() * (&q_mat_mul(a, &q));
@@ -872,11 +961,17 @@ pub fn feast_interval(
             let mut ev = DMatrix::<f64>::zeros(n, 1);
             for j in 0..subspace {
                 let c = eig.eigenvectors[(j, i)];
-                for r in 0..n { ev[(r, 0)] += c * q[(r, j)]; }
+                for r in 0..n {
+                    ev[(r, 0)] += c * q[(r, j)];
+                }
             }
             // Normalise
             let norm = (0..n).map(|r| ev[(r, 0)].powi(2)).sum::<f64>().sqrt();
-            if norm > 1e-14 { for r in 0..n { ev[(r, 0)] /= norm; } }
+            if norm > 1e-14 {
+                for r in 0..n {
+                    ev[(r, 0)] /= norm;
+                }
+            }
             evecs.push(ev);
         }
     }
@@ -884,7 +979,9 @@ pub fn feast_interval(
     let n_found = evals.len();
     let mut eigenvectors = DMatrix::<f64>::zeros(n, n_found);
     for (j, ev) in evecs.iter().enumerate() {
-        for i in 0..n { eigenvectors[(i, j)] = ev[(i, 0)]; }
+        for i in 0..n {
+            eigenvectors[(i, j)] = ev[(i, 0)];
+        }
     }
 
     Ok(EigenResult {
@@ -902,7 +999,9 @@ fn q_mat_mul(a: &CsrMatrix<f64>, q: &DMatrix<f64>) -> DMatrix<f64> {
     for j in 0..m {
         let mut tmp = vec![0.0; n];
         a.spmv(q.column(j).as_slice(), &mut tmp);
-        for i in 0..n { aq[(i, j)] = tmp[i]; }
+        for i in 0..n {
+            aq[(i, j)] = tmp[i];
+        }
     }
     aq
 }
@@ -913,10 +1012,16 @@ fn qr_orthonormalize(m: &DMatrix<f64>) -> Result<DMatrix<f64>, String> {
     for j in 0..ncols {
         for i in 0..j {
             let dot: f64 = (0..nrows).map(|r| q[(r, j)] * q[(r, i)]).sum();
-            for r in 0..nrows { q[(r, j)] -= dot * q[(r, i)]; }
+            for r in 0..nrows {
+                q[(r, j)] -= dot * q[(r, i)];
+            }
         }
         let norm: f64 = (0..nrows).map(|r| q[(r, j)].powi(2)).sum::<f64>().sqrt();
-        if norm > 1e-14 { for r in 0..nrows { q[(r, j)] /= norm; } }
+        if norm > 1e-14 {
+            for r in 0..nrows {
+                q[(r, j)] /= norm;
+            }
+        }
     }
     Ok(q)
 }
@@ -943,7 +1048,14 @@ pub struct AmeConfig {
 
 impl Default for AmeConfig {
     fn default() -> Self {
-        AmeConfig { nev: 5, max_iter: 100, tol: 1e-8, verbose: false, singularity_regularization: 1e-6, extra: 20 }
+        AmeConfig {
+            nev: 5,
+            max_iter: 100,
+            tol: 1e-8,
+            verbose: false,
+            singularity_regularization: 1e-6,
+            extra: 20,
+        }
     }
 }
 
@@ -963,13 +1075,13 @@ impl Default for AmeConfig {
 /// # Returns
 /// `EigenResult` with eigenvalues sorted ascending.
 pub fn ame_solve(
-    a:   &CsrMatrix<f64>,
-    m:   &CsrMatrix<f64>,
-    g:   &CsrMatrix<f64>,
+    a: &CsrMatrix<f64>,
+    m: &CsrMatrix<f64>,
+    g: &CsrMatrix<f64>,
     cfg: &AmeConfig,
 ) -> Result<EigenResult, String> {
-    use linlvo::eigen::AmeSolver as LinlvoAmeSolver;
     use linlvo::eigen::AmeResult as LinlvoAmeResult;
+    use linlvo::eigen::AmeSolver as LinlvoAmeSolver;
 
     let n = a.nrows;
     let la = _fem_to_linlvo_csr(a);
@@ -983,13 +1095,16 @@ pub fn ame_solve(
         .singularity_regularization(cfg.singularity_regularization)
         .extra(cfg.extra);
 
-    let result: LinlvoAmeResult<f64> = solver.solve(&la, &lm, &lg)
+    let result: LinlvoAmeResult<f64> = solver
+        .solve(&la, &lm, &lg)
         .map_err(|e| format!("AME solve failed: {e}"))?;
 
     let n_found = result.eigenvalues.len().min(cfg.nev);
     let mut eigenvectors = DMatrix::<f64>::zeros(n, n_found);
     for (j, ev) in result.eigenvectors.iter().enumerate().take(n_found) {
-        for i in 0..n { eigenvectors[(i, j)] = ev.as_slice()[i]; }
+        for i in 0..n {
+            eigenvectors[(i, j)] = ev.as_slice()[i];
+        }
     }
 
     Ok(EigenResult {
@@ -1012,8 +1127,12 @@ mod tests {
         let mut coo = CooMatrix::<f64>::new(n, n);
         for i in 0..n {
             coo.add(i, i, 2.0);
-            if i > 0     { coo.add(i, i-1, -1.0); }
-            if i < n-1   { coo.add(i, i+1, -1.0); }
+            if i > 0 {
+                coo.add(i, i - 1, -1.0);
+            }
+            if i < n - 1 {
+                coo.add(i, i + 1, -1.0);
+            }
         }
         coo.into_csr()
     }
@@ -1021,7 +1140,9 @@ mod tests {
     /// Identity matrix of size n.
     fn identity(n: usize) -> CsrMatrix<f64> {
         let mut coo = CooMatrix::<f64>::new(n, n);
-        for i in 0..n { coo.add(i, i, 1.0); }
+        for i in 0..n {
+            coo.add(i, i, 1.0);
+        }
         coo.into_csr()
     }
 
@@ -1031,11 +1152,20 @@ mod tests {
         // λ_1 = 2 - 2cos(π/(n+1)) �?(π/(n+1))² for large n.
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 300,
+            tol: 1e-6,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
         let res = lobpcg(&a, None, 1, &cfg).unwrap();
         let exact = 2.0 - 2.0 * (std::f64::consts::PI / (n as f64 + 1.0)).cos();
         let err = (res.eigenvalues[0] - exact).abs();
-        assert!(err < 1e-4, "λ�?{:.6}, exact={exact:.6}, err={err:.2e}", res.eigenvalues[0]);
+        assert!(
+            err < 1e-4,
+            "λ�?{:.6}, exact={exact:.6}, err={err:.2e}",
+            res.eigenvalues[0]
+        );
     }
 
     #[test]
@@ -1043,12 +1173,20 @@ mod tests {
         // Find 3 smallest eigenvalues of tridiagonal laplacian.
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 500,
+            tol: 1e-6,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
         let res = lobpcg(&a, None, 3, &cfg).unwrap();
         assert_eq!(res.eigenvalues.len(), 3);
         // Eigenvalues should be sorted ascending.
-        assert!(res.eigenvalues[0] <= res.eigenvalues[1],
-            "λ should be sorted: {:?}", res.eigenvalues);
+        assert!(
+            res.eigenvalues[0] <= res.eigenvalues[1],
+            "λ should be sorted: {:?}",
+            res.eigenvalues
+        );
         assert!(res.eigenvalues[1] <= res.eigenvalues[2]);
         // All should be positive.
         for &lam in &res.eigenvalues {
@@ -1062,22 +1200,42 @@ mod tests {
         // Eigenvalues are 1, 2, 3, ...
         let n = 10;
         let mut coo_a = CooMatrix::<f64>::new(n, n);
-        for i in 0..n { coo_a.add(i, i, (i + 1) as f64); }
+        for i in 0..n {
+            coo_a.add(i, i, (i + 1) as f64);
+        }
         let a = coo_a.into_csr();
         let b = identity(n);
-        let cfg = LobpcgConfig { max_iter: 300, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 300,
+            tol: 1e-6,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
         let res = lobpcg(&a, Some(&b), 2, &cfg).unwrap();
         let err0 = (res.eigenvalues[0] - 1.0).abs();
         let err1 = (res.eigenvalues[1] - 2.0).abs();
-        assert!(err0 < 1e-4, "λ₀={:.6e}, expected 1.0, err={err0:.2e}", res.eigenvalues[0]);
-        assert!(err1 < 1e-4, "λ�?{:.6e}, expected 2.0, err={err1:.2e}", res.eigenvalues[1]);
+        assert!(
+            err0 < 1e-4,
+            "λ₀={:.6e}, expected 1.0, err={err0:.2e}",
+            res.eigenvalues[0]
+        );
+        assert!(
+            err1 < 1e-4,
+            "λ�?{:.6e}, expected 2.0, err={err1:.2e}",
+            res.eigenvalues[1]
+        );
     }
 
     #[test]
     fn lobpcg_eigenvectors_orthonormal() {
         let n = 20;
         let a = laplacian_1d(n);
-        let cfg = LobpcgConfig { max_iter: 500, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 500,
+            tol: 1e-6,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
         let res = lobpcg(&a, None, 3, &cfg).unwrap();
         // X^T X should be �?I_k.
         let xtx = res.eigenvectors.transpose() * &res.eigenvectors;
@@ -1085,7 +1243,11 @@ mod tests {
             for j in 0..3 {
                 let expected = if i == j { 1.0 } else { 0.0 };
                 let err = (xtx[(i, j)] - expected).abs();
-                assert!(err < 1e-6, "X^TX[{i},{j}] = {:.6e}, expected {expected}", xtx[(i,j)]);
+                assert!(
+                    err < 1e-6,
+                    "X^TX[{i},{j}] = {:.6e}, expected {expected}",
+                    xtx[(i, j)]
+                );
             }
         }
     }
@@ -1109,12 +1271,25 @@ mod tests {
         let a = coo.into_csr();
         let b = identity(4);
         let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 200,
+            tol: 1e-8,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
 
         let res = lobpcg_constrained(&a, Some(&b), 2, &constraints, &cfg).unwrap();
 
-        assert!((res.eigenvalues[0] - 1.0).abs() < 1e-6, "first constrained eigenvalue = {}", res.eigenvalues[0]);
-        assert!((res.eigenvalues[1] - 4.0).abs() < 1e-5, "second constrained eigenvalue = {}", res.eigenvalues[1]);
+        assert!(
+            (res.eigenvalues[0] - 1.0).abs() < 1e-6,
+            "first constrained eigenvalue = {}",
+            res.eigenvalues[0]
+        );
+        assert!(
+            (res.eigenvalues[1] - 4.0).abs() < 1e-5,
+            "second constrained eigenvalue = {}",
+            res.eigenvalues[1]
+        );
         assert!(res.eigenvectors[(0, 0)].abs() < 1e-8);
         assert!(res.eigenvectors[(0, 1)].abs() < 1e-8);
     }
@@ -1129,7 +1304,12 @@ mod tests {
         let a = coo.into_csr();
         let b = identity(4);
         let constraints = DMatrix::<f64>::from_vec(4, 1, vec![1.0, 0.0, 0.0, 0.0]);
-        let cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 200,
+            tol: 1e-8,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
 
         // Exact diagonal inverse on unconstrained dofs acts as an ideal block preconditioner.
         let precond = |r: &DMatrix<f64>| {
@@ -1146,8 +1326,16 @@ mod tests {
         let res = lobpcg_constrained_preconditioned(&a, Some(&b), 2, &constraints, precond, &cfg)
             .unwrap();
 
-        assert!((res.eigenvalues[0] - 1.0).abs() < 1e-6, "first constrained eigenvalue = {}", res.eigenvalues[0]);
-        assert!((res.eigenvalues[1] - 4.0).abs() < 1e-5, "second constrained eigenvalue = {}", res.eigenvalues[1]);
+        assert!(
+            (res.eigenvalues[0] - 1.0).abs() < 1e-6,
+            "first constrained eigenvalue = {}",
+            res.eigenvalues[0]
+        );
+        assert!(
+            (res.eigenvalues[1] - 4.0).abs() < 1e-5,
+            "second constrained eigenvalue = {}",
+            res.eigenvalues[1]
+        );
         assert!(res.eigenvectors[(0, 0)].abs() < 1e-8);
         assert!(res.eigenvectors[(0, 1)].abs() < 1e-8);
     }
@@ -1155,7 +1343,12 @@ mod tests {
     #[test]
     fn lobpcg_preconditioner_shape_mismatch_errors() {
         let a = laplacian_1d(8);
-        let cfg = LobpcgConfig { max_iter: 50, tol: 1e-6, verbose: false, nullspace_skip: 0.0 };
+        let cfg = LobpcgConfig {
+            max_iter: 50,
+            tol: 1e-6,
+            verbose: false,
+            nullspace_skip: 0.0,
+        };
         let constraints = DMatrix::<f64>::zeros(8, 0);
 
         let err = lobpcg_constrained_preconditioned(
@@ -1165,7 +1358,8 @@ mod tests {
             &constraints,
             |_r| DMatrix::<f64>::zeros(7, 2),
             &cfg,
-        ).unwrap_err();
+        )
+        .unwrap_err();
 
         assert!(err.contains("wrong shape"), "unexpected error: {err}");
     }
@@ -1178,7 +1372,11 @@ mod tests {
         assert_eq!(res.eigenvalues.len(), 3);
         // Largest magnitude of Laplacian is the LAST eigenvalue
         // For tridiagonal [-1,2,-1], λ_max ≈ 4 - 2cos(πn/(n+1)) ≈ 4
-        assert!(res.eigenvalues[0] > 3.0, "largest eigenvalue should be near 4, got {}", res.eigenvalues[0]);
+        assert!(
+            res.eigenvalues[0] > 3.0,
+            "largest eigenvalue should be near 4, got {}",
+            res.eigenvalues[0]
+        );
     }
 
     #[test]
@@ -1189,6 +1387,10 @@ mod tests {
         let res = arpack(&a, 1, WhichEigenvalue::Target(3.0), Some(15)).unwrap();
         assert_eq!(res.eigenvalues.len(), 1);
         // Expected eigenvalue closest to 3 is λ ≈ 3.18 (for n=20)
-        assert!((res.eigenvalues[0] - 3.0).abs() < 0.5, "shift-invert eigenvalue = {}", res.eigenvalues[0]);
+        assert!(
+            (res.eigenvalues[0] - 3.0).abs() < 0.5,
+            "shift-invert eigenvalue = {}",
+            res.eigenvalues[0]
+        );
     }
 }

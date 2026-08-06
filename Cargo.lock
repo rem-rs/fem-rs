@@ -762,6 +762,7 @@ dependencies = [
  "fem-regression",
  "fem-solver",
  "fem-space",
+ "libm",
  "linlvo",
  "log",
  "nalgebra 0.33.3",

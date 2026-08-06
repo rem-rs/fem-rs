@@ -507,8 +507,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None,
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
-            geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         let pumi = PumiMesh::new(mesh);
         assert_eq!(pumi.n_regions(), 1);
@@ -564,8 +563,7 @@ mod tests {
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None,
             face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![],
-            geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         let pumi = PumiMesh::new(hex);
         assert_eq!(pumi.n_faces(), 6);

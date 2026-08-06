@@ -28,7 +28,9 @@ use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
 use crate::integrator::QpData;
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 
-use crate::assembler::{assembly_parallel_min_elems, ref_elem_vol_for_space};
+use crate::assembler::ref_elem_vol_for_space;
+#[cfg(feature = "parallel")]
+use crate::assembler::assembly_parallel_min_elems;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

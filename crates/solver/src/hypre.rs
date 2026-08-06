@@ -55,7 +55,9 @@ impl HyprePrecond {
     /// Build the AMG hierarchy from matrix `a` using BoomerAMG-style settings.
     pub fn new(a: &CsrMatrix<f64>, cfg: &HypreBoomerAMG) -> Self {
         let smoother = match cfg.smoother_type {
-            0 => SmootherType::WeightedJacobi { omega: cfg.relax_weight },
+            0 => SmootherType::WeightedJacobi {
+                omega: cfg.relax_weight,
+            },
             _ => SmootherType::GaussSeidel,
         };
         let amg_cfg = AmgConfig {
@@ -69,7 +71,9 @@ impl HyprePrecond {
 
         let la = fem_to_linlvo(a);
         let hier = AmgHierarchy::build(la, amg_cfg);
-        HyprePrecond { amg: AmgPrecond::new(hier) }
+        HyprePrecond {
+            amg: AmgPrecond::new(hier),
+        }
     }
 }
 
@@ -82,7 +86,10 @@ impl HyprePrecond {
 /// or `fem_linalg::CsrMatrix` for serial storage.  This type is kept for
 /// backward compatibility with MFEM-style code.
 #[derive(Debug, Clone)]
-#[deprecated(since = "0.2.0", note = "use fem_parallel::ParCsrMatrix or fem_linalg::CsrMatrix directly")]
+#[deprecated(
+    since = "0.2.0",
+    note = "use fem_parallel::ParCsrMatrix or fem_linalg::CsrMatrix directly"
+)]
 pub struct HypreParMatrix {
     /// Local CSR matrix.
     pub diag: CsrMatrix<f64>,
@@ -114,7 +121,10 @@ impl HypreParMatrix {
 ///
 /// **Deprecated**: use `fem_parallel::par_solve_pcg_amg` for distributed systems,
 /// or `fem_solver::solve_pcg_precond` with a custom preconditioner for serial systems.
-#[deprecated(since = "0.2.0", note = "use fem_solver::solve_pcg_precond with AmgPrecond, or fem_parallel::par_solve_pcg_amg for distributed")]
+#[deprecated(
+    since = "0.2.0",
+    note = "use fem_solver::solve_pcg_precond with AmgPrecond, or fem_parallel::par_solve_pcg_amg for distributed"
+)]
 pub fn hypre_solve_pcg(
     a: &CsrMatrix<f64>,
     b: &[f64],
@@ -126,18 +136,27 @@ pub fn hypre_solve_pcg(
     let precond = HyprePrecond::new(a, amg_cfg);
 
     // Use the generic preconditioned CG path
-    super::solve_pcg_precond(a, b, x, &precond, &super::SolverConfig {
-        rtol,
-        max_iter,
-        ..Default::default()
-    })
+    super::solve_pcg_precond(
+        a,
+        b,
+        x,
+        &precond,
+        &super::SolverConfig {
+            rtol,
+            max_iter,
+            ..Default::default()
+        },
+    )
 }
 
 /// Solve `A x = b` with GMRES + BoomerAMG preconditioner (HYPRE-style).
 ///
 /// **Deprecated**: use `fem_solver::solve_gmres_precond` with `AmgPrecond`,
 /// or `fem_parallel::par_solve_gmres_amg` for distributed systems.
-#[deprecated(since = "0.2.0", note = "use fem_solver::solve_gmres_precond with AmgPrecond")]
+#[deprecated(
+    since = "0.2.0",
+    note = "use fem_solver::solve_gmres_precond with AmgPrecond"
+)]
 pub fn hypre_solve_gmres(
     a: &CsrMatrix<f64>,
     b: &[f64],
@@ -149,11 +168,18 @@ pub fn hypre_solve_gmres(
 ) -> Result<super::SolveResult, super::SolverError> {
     let precond = HyprePrecond::new(a, amg_cfg);
 
-    super::solve_gmres_precond(a, b, x, restart, &precond, &super::SolverConfig {
-        rtol,
-        max_iter,
-        ..Default::default()
-    })
+    super::solve_gmres_precond(
+        a,
+        b,
+        x,
+        restart,
+        &precond,
+        &super::SolverConfig {
+            rtol,
+            max_iter,
+            ..Default::default()
+        },
+    )
 }
 
 /// Convert fem-linalg CSR to linlvo CSR.
@@ -185,8 +211,12 @@ mod tests {
         let mut coo = CooMatrix::<f64>::new(n, n);
         for i in 0..n {
             coo.add(i, i, 2.0);
-            if i > 0 { coo.add(i, i - 1, -1.0); }
-            if i < n - 1 { coo.add(i, i + 1, -1.0); }
+            if i > 0 {
+                coo.add(i, i - 1, -1.0);
+            }
+            if i < n - 1 {
+                coo.add(i, i + 1, -1.0);
+            }
         }
         coo.into_csr()
     }
@@ -227,13 +257,14 @@ mod tests {
     #[test]
     fn hypre_poisson_2d_matches_native_cg() {
         use fem_assembly::{
-            Assembler,
             standard::{DiffusionIntegrator, DomainSourceIntegrator},
+            Assembler,
         };
         use fem_mesh::Mesh;
         use fem_space::{
-            H1Space, fe_space::FESpace,
             constraints::{apply_dirichlet, boundary_dofs},
+            fe_space::FESpace,
+            H1Space,
         };
 
         let n = 16;
@@ -243,9 +274,11 @@ mod tests {
         let quad = 3;
 
         // Assemble
-        let mat_orig = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], quad);
+        let mat_orig =
+            Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], quad);
         let source = DomainSourceIntegrator::new(|x: &[f64]| {
-            2.0 * std::f64::consts::PI * std::f64::consts::PI
+            2.0 * std::f64::consts::PI
+                * std::f64::consts::PI
                 * (std::f64::consts::PI * x[0]).sin()
                 * (std::f64::consts::PI * x[1]).sin()
         });
@@ -263,24 +296,37 @@ mod tests {
         // Hypre solve: BoomerAMG + PCG
         let mut x_hypre = vec![0.0; dofs];
         let amg_cfg = HypreBoomerAMG::default();
-        let res_h = hypre_solve_pcg(&mat_hypre, &rhs_hypre, &mut x_hypre, &amg_cfg, 1e-8, 2000).unwrap();
+        let res_h =
+            hypre_solve_pcg(&mat_hypre, &rhs_hypre, &mut x_hypre, &amg_cfg, 1e-8, 2000).unwrap();
         assert!(res_h.converged, "Hypre PCG not converged");
 
         // Native CG
         let mut x_native = vec![0.0; dofs];
-        let cfg = crate::SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 10_000, verbose: false, ..crate::SolverConfig::default() };
+        let cfg = crate::SolverConfig {
+            rtol: 1e-8,
+            atol: 0.0,
+            max_iter: 10_000,
+            verbose: false,
+            ..crate::SolverConfig::default()
+        };
         let res_c = crate::solve_cg(&mat_native, &rhs_native, &mut x_native, &cfg).unwrap();
         assert!(res_c.converged, "Native CG not converged");
 
         // Solutions should match to solver tolerance
-        let max_diff = x_hypre.iter().zip(x_native.iter())
+        let max_diff = x_hypre
+            .iter()
+            .zip(x_native.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f64, f64::max);
-        assert!(max_diff < 1e-6,
-            "hypre PCG vs native CG: max|diff| = {max_diff:.3e}");
+        assert!(
+            max_diff < 1e-6,
+            "hypre PCG vs native CG: max|diff| = {max_diff:.3e}"
+        );
 
         // Both solvers should have converged
-        assert!(res_h.converged && res_c.converged, "both solvers must converge");
+        assert!(
+            res_h.converged && res_c.converged,
+            "both solvers must converge"
+        );
     }
-
 }

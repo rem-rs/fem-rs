@@ -5,10 +5,10 @@
 //! are loaded the registries return `None` and built-in solvers are used —
 //! zero overhead, no pro code in the OSS binary.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use fem_core::FemResult;
 use fem_linalg::{CsrMatrix, Vector};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Trait for externally-registered solvers (pro edition).
 ///
@@ -21,8 +21,7 @@ pub trait ProSolver: Send + Sync {
 
     /// Solve the linear system `matrix · x = rhs` and return the solution
     /// vector.
-    fn solve(&self, matrix: &CsrMatrix<f64>, rhs: &Vector<f64>)
-        -> FemResult<Vector<f64>>;
+    fn solve(&self, matrix: &CsrMatrix<f64>, rhs: &Vector<f64>) -> FemResult<Vector<f64>>;
 }
 
 /// Global registry for pro solvers.

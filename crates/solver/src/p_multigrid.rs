@@ -17,8 +17,8 @@
 //! Build a [`PmgHierarchy`] from an assembled operator at the fine level,
 //! then wrap it with [`PmgPrecond`] for use as a preconditioner.
 
-use fem_linalg::{CooMatrix, CsrMatrix};
 use crate::{SolveResult, SolverConfig};
+use fem_linalg::{CooMatrix, CsrMatrix};
 
 /// p-multigrid hierarchy: matrices and prolongation operators.
 ///
@@ -33,10 +33,18 @@ impl PmgHierarchy {
         assert!(levels.len() >= 2, "PmgHierarchy: need at least 2 levels");
         assert_eq!(prolong.len(), levels.len() - 1);
         for l in 0..prolong.len() {
-            assert_eq!(prolong[l].nrows, levels[l].nrows,
-                "P{{long}} rows={} != fine DOFs={}", prolong[l].nrows, levels[l].nrows);
-            assert_eq!(prolong[l].ncols, levels[l + 1].nrows,
-                "P{{long}} cols={} != coarse DOFs={}", prolong[l].ncols, levels[l + 1].nrows);
+            assert_eq!(
+                prolong[l].nrows, levels[l].nrows,
+                "P{{long}} rows={} != fine DOFs={}",
+                prolong[l].nrows, levels[l].nrows
+            );
+            assert_eq!(
+                prolong[l].ncols,
+                levels[l + 1].nrows,
+                "P{{long}} cols={} != coarse DOFs={}",
+                prolong[l].ncols,
+                levels[l + 1].nrows
+            );
         }
         PmgHierarchy { levels, prolong }
     }
@@ -80,12 +88,19 @@ pub struct PmgPrecond {
 
 impl Default for PmgPrecond {
     fn default() -> Self {
-        PmgPrecond { pre_sweeps: 2, post_sweeps: 2, jacobi_omega: 0.8, coarse_max_iter: 200 }
+        PmgPrecond {
+            pre_sweeps: 2,
+            post_sweeps: 2,
+            jacobi_omega: 0.8,
+            coarse_max_iter: 200,
+        }
     }
 }
 
 impl PmgPrecond {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Apply one V-cycle of p-multigrid: `x ← V-cycle(A, b, x)`.
     /// After the V-cycle, Dirichlet DOFs (first and last) are zeroed.
@@ -94,7 +109,9 @@ impl PmgPrecond {
         let n = h.levels[0].nrows;
         // Ensure Dirichlet BCs at x=0 and x=1
         for &d in &[0, n - 1] {
-            if d < x.len() { x[d] = 0.0; }
+            if d < x.len() {
+                x[d] = 0.0;
+            }
         }
     }
 
@@ -103,8 +120,11 @@ impl PmgPrecond {
         if lvl + 1 == h.levels.len() {
             // Coarsest level: direct CG solve
             let cfg = SolverConfig {
-                rtol: 1e-12, atol: 0.0, max_iter: self.coarse_max_iter,
-                verbose: false, ..Default::default()
+                rtol: 1e-12,
+                atol: 0.0,
+                max_iter: self.coarse_max_iter,
+                verbose: false,
+                ..Default::default()
             };
             let _ = crate::solve_cg(a, b, x, &cfg);
             return;
@@ -117,7 +137,9 @@ impl PmgPrecond {
         let mut ax = vec![0.0; b.len()];
         a.spmv(x, &mut ax);
         let mut r = vec![0.0; b.len()];
-        for i in 0..b.len() { r[i] = b[i] - ax[i]; }
+        for i in 0..b.len() {
+            r[i] = b[i] - ax[i];
+        }
 
         let p = &h.prolong[lvl]; // P: coarse → fine
         let r_c = spmv_transpose(p, &r); // R = P^T
@@ -127,7 +149,9 @@ impl PmgPrecond {
         // Prolongate correction
         let mut pe = vec![0.0; x.len()];
         p.spmv(&e_c, &mut pe);
-        for i in 0..x.len() { x[i] += pe[i]; }
+        for i in 0..x.len() {
+            x[i] += pe[i];
+        }
 
         // Post-smooth
         jacobi_smooth(a, b, x, self.jacobi_omega, self.post_sweeps);
@@ -136,45 +160,75 @@ impl PmgPrecond {
 
 /// Solve using p-multigrid V-cycles as a preconditioner.
 pub fn solve_vcycle_pmg(
-    a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64],
-    hierarchy: &PmgHierarchy, mg: &PmgPrecond, cfg: &SolverConfig,
+    a: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    hierarchy: &PmgHierarchy,
+    mg: &PmgPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, crate::SolverError> {
     if a.nrows != a.ncols || b.len() != a.nrows || x.len() != a.nrows {
-        return Err(crate::SolverError::DimensionMismatch { rows: a.nrows, cols: a.ncols, rhs: b.len() });
+        return Err(crate::SolverError::DimensionMismatch {
+            rows: a.nrows,
+            cols: a.ncols,
+            rhs: b.len(),
+        });
     }
     if hierarchy.levels[0].nrows != a.nrows {
         return Err(crate::SolverError::DimensionMismatch {
-            rows: hierarchy.levels[0].nrows, cols: hierarchy.levels[0].ncols, rhs: a.nrows,
+            rows: hierarchy.levels[0].nrows,
+            cols: hierarchy.levels[0].ncols,
+            rhs: a.nrows,
         });
     }
 
     let mut ax = vec![0.0; b.len()];
     a.spmv(x, &mut ax);
     let mut r = vec![0.0; b.len()];
-    for i in 0..b.len() { r[i] = b[i] - ax[i]; }
+    for i in 0..b.len() {
+        r[i] = b[i] - ax[i];
+    }
     let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-32);
     let tol = cfg.atol.max(cfg.rtol * b_norm);
     let mut r_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
     if r_norm <= tol {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: r_norm });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: r_norm,
+        });
     }
 
     let dirichlet = [0usize, x.len() - 1];
     for k in 0..cfg.max_iter {
         let mut corr = vec![0.0; x.len()];
         mg.v_cycle(hierarchy, &r, &mut corr);
-        for i in 0..x.len() { x[i] += corr[i]; }
-        for &d in &dirichlet { x[d] = 0.0; }
+        for i in 0..x.len() {
+            x[i] += corr[i];
+        }
+        for &d in &dirichlet {
+            x[d] = 0.0;
+        }
 
         a.spmv(x, &mut ax);
-        for i in 0..b.len() { r[i] = b[i] - ax[i]; }
+        for i in 0..b.len() {
+            r[i] = b[i] - ax[i];
+        }
         r_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
 
         if r_norm <= tol {
-            return Ok(SolveResult { converged: true, iterations: k + 1, final_residual: r_norm });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: k + 1,
+                final_residual: r_norm,
+            });
         }
     }
-    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: r_norm })
+    Ok(SolveResult {
+        converged: false,
+        iterations: cfg.max_iter,
+        final_residual: r_norm,
+    })
 }
 
 /// Build a p-multigrid hierarchy for a 1-D Laplacian (for testing).
@@ -194,9 +248,11 @@ pub fn build_pmg_hierarchy_1d_laplacian(n_elem: usize, p_fine: u8) -> PmgHierarc
         for e in 0..n_elem {
             let dofs: Vec<usize> = (0..=p).map(|k| e * p + k).collect();
             // 3-point Gauss quadrature on [0,1]
-            let gl = [(0.112701665379258, 0.277777777777778),
-                      (0.5, 0.444444444444444),
-                      (0.887298334620742, 0.277777777777778)];
+            let gl = [
+                (0.112701665379258, 0.277777777777778),
+                (0.5, 0.444444444444444),
+                (0.887298334620742, 0.277777777777778),
+            ];
             for &(xi, w) in &gl {
                 let dphi = lagrange_1d_deriv(p, xi);
                 let w_phys = w * h;
@@ -246,7 +302,9 @@ fn lagrange_1d_eval(p: usize, xi: f64) -> Vec<f64> {
         let xi_i = i as f64 / p as f64;
         phi[i] = 1.0;
         for j in 0..=p {
-            if j == i { continue; }
+            if j == i {
+                continue;
+            }
             let xi_j = j as f64 / p as f64;
             phi[i] *= (xi - xi_j) / (xi_i - xi_j);
         }
@@ -263,11 +321,15 @@ fn lagrange_1d_deriv(p: usize, xi: f64) -> Vec<f64> {
         // dphi[i] = Σ_{k≠i} Π_{j≠i,j≠k} (xi - xi_j) / (xi_i - xi_j) / (xi_i - xi_k)
         let mut sum = 0.0;
         for k in 0..=p {
-            if k == i { continue; }
+            if k == i {
+                continue;
+            }
             let xi_k = k as f64 * h;
             let mut prod = 1.0;
             for j in 0..=p {
-                if j == i || j == k { continue; }
+                if j == i || j == k {
+                    continue;
+                }
                 let xi_j = j as f64 * h;
                 prod *= (xi - xi_j) / (xi_i - xi_j);
             }
@@ -285,8 +347,11 @@ fn lagrange_1d_deriv(p: usize, xi: f64) -> Vec<f64> {
 /// 3. Apply V-cycles on that level
 /// 4. Repeat until the finest level
 pub fn fmg_solve(
-    a_fine: &CsrMatrix<f64>, b: &[f64],
-    hierarchy: &PmgHierarchy, mg: &PmgPrecond, cfg: &SolverConfig,
+    a_fine: &CsrMatrix<f64>,
+    b: &[f64],
+    hierarchy: &PmgHierarchy,
+    mg: &PmgPrecond,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, crate::SolverError> {
     // Solve on coarsest level
     let n_coarse = hierarchy.levels.last().unwrap().nrows;
@@ -300,9 +365,18 @@ pub fn fmg_solve(
             rhs_c = spmv_transpose(&hierarchy.prolong[l], &prev);
         }
 
-        let _ = crate::solve_cg(a_c, &rhs_c, &mut x_c, &SolverConfig {
-            rtol: 1e-14, atol: 0.0, max_iter: 500, verbose: false, ..Default::default()
-        });
+        let _ = crate::solve_cg(
+            a_c,
+            &rhs_c,
+            &mut x_c,
+            &SolverConfig {
+                rtol: 1e-14,
+                atol: 0.0,
+                max_iter: 500,
+                verbose: false,
+                ..Default::default()
+            },
+        );
     }
 
     // Nested iteration: coarse → fine
@@ -323,19 +397,27 @@ pub fn fmg_solve(
         // V-cycles at this level
         let mut r = vec![0.0; n_fine];
         hierarchy.levels[level].spmv(&x_f, &mut r);
-        for i in 0..n_fine { r[i] = b_lvl[i] - r[i]; }
+        for i in 0..n_fine {
+            r[i] = b_lvl[i] - r[i];
+        }
         let b_norm = b_lvl.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-32);
         let tol = cfg.rtol * b_norm;
 
         for _ in 0..mg.coarse_max_iter.min(10) {
             hierarchy.levels[level].spmv(&x_f, &mut r);
-            for i in 0..n_fine { r[i] = b_lvl[i] - r[i]; }
+            for i in 0..n_fine {
+                r[i] = b_lvl[i] - r[i];
+            }
             let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if rn <= tol.max(1e-14) { break; }
+            if rn <= tol.max(1e-14) {
+                break;
+            }
 
             let mut corr = vec![0.0; n_fine];
             mg.v_cycle_level(hierarchy, level, &r, &mut corr);
-            for i in 0..n_fine { x_f[i] += corr[i]; }
+            for i in 0..n_fine {
+                x_f[i] += corr[i];
+            }
         }
         x = x_f;
     }
@@ -344,9 +426,15 @@ pub fn fmg_solve(
     let mut ax = vec![0.0; a_fine.nrows];
     a_fine.spmv(&x, &mut ax);
     let mut r = vec![0.0; a_fine.nrows];
-    for i in 0..a_fine.nrows { r[i] = b[i] - ax[i]; }
+    for i in 0..a_fine.nrows {
+        r[i] = b[i] - ax[i];
+    }
     let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
-    Ok(SolveResult { converged: true, iterations: 0, final_residual: rn })
+    Ok(SolveResult {
+        converged: true,
+        iterations: 0,
+        final_residual: rn,
+    })
 }
 
 #[cfg(test)]
@@ -380,7 +468,9 @@ mod tests {
         let mut x = vec![0.0; n];
         let mg = PmgPrecond::default();
         mg.v_cycle(&h, &b_vec, &mut x);
-        for &v in &x { assert!(v.is_finite()); }
+        for &v in &x {
+            assert!(v.is_finite());
+        }
     }
 
     #[test]
@@ -388,11 +478,16 @@ mod tests {
         let h = build_pmg_hierarchy_1d_laplacian(8, 2);
         let a = &h.levels[0];
         let n = a.nrows;
-        let b_vec: Vec<f64> = (0..n).map(|i| {
-            let x = i as f64 / (n - 1) as f64;
-            (std::f64::consts::PI * x).sin()
-        }).collect();
-        let cfg = SolverConfig { rtol: 1e-6, ..Default::default() };
+        let b_vec: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = i as f64 / (n - 1) as f64;
+                (std::f64::consts::PI * x).sin()
+            })
+            .collect();
+        let cfg = SolverConfig {
+            rtol: 1e-6,
+            ..Default::default()
+        };
         let mg = PmgPrecond::new();
         let res = fmg_solve(a, &b_vec, &h, &mg, &cfg).unwrap();
         assert!(res.final_residual.is_finite());
@@ -403,19 +498,31 @@ mod tests {
         let h = build_pmg_hierarchy_1d_laplacian(8, 2);
         let a = &h.levels[0];
         let n = a.nrows;
-        let b_vec: Vec<f64> = (0..n).map(|i| {
-            let x = i as f64 / (n - 1) as f64;
-            x * (1.0 - x)
-        }).collect();
+        let b_vec: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = i as f64 / (n - 1) as f64;
+                x * (1.0 - x)
+            })
+            .collect();
 
         let mut x_cg = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 2000, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            max_iter: 2000,
+            ..Default::default()
+        };
         let res_cg = crate::solve_cg(a, &b_vec, &mut x_cg, &cfg).unwrap();
         assert!(res_cg.converged, "CG should converge");
 
         let mut x_pmg = vec![0.0; n];
-        let mg = PmgPrecond { coarse_max_iter: 200, ..Default::default() };
+        let mg = PmgPrecond {
+            coarse_max_iter: 200,
+            ..Default::default()
+        };
         let res_pmg = solve_vcycle_pmg(a, &b_vec, &mut x_pmg, &h, &mg, &cfg).unwrap();
-        assert!(res_pmg.final_residual.is_finite(), "PMG should produce finite residual");
+        assert!(
+            res_pmg.final_residual.is_finite(),
+            "PMG should produce finite residual"
+        );
     }
 }

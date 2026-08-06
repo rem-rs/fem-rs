@@ -177,7 +177,7 @@ pub fn read_pmesh<const D: usize>(path: &str) -> FemResult<Mesh<D>> {
         face_conn: vec![], face_tags: vec![], face_type,
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
         face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
-        geometry: None,
+        geometry: None, nc_vertex_view: None,
     })
 }
 

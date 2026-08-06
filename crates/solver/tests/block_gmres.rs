@@ -1,13 +1,16 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{
-    Assembler,
     coefficient::ConstantVectorCoeff,
     standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
+    Assembler,
 };
 use fem_mesh::Mesh;
 use fem_solver::{solve_block_gmres, solve_gmres, BlockGmresConfig, SolverConfig};
-use fem_space::{H1Space, constraints::{apply_dirichlet, boundary_dofs}};
+use fem_space::{
+    constraints::{apply_dirichlet, boundary_dofs},
+    H1Space,
+};
 
 fn forcing_sin(x: &[f64]) -> f64 {
     2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
@@ -66,14 +69,23 @@ fn block_gmres_matches_individual_gmres_on_convection_diffusion_rhs_pair() {
 
     let mut x_block = vec![0.0_f64; 2 * n];
     let res_block = solve_block_gmres(&mat, &rhs_block, &mut x_block, &block_cfg()).unwrap();
-    assert!(res_block.converged, "Block-GMRES did not converge on convection-diffusion RHS pair");
+    assert!(
+        res_block.converged,
+        "Block-GMRES did not converge on convection-diffusion RHS pair"
+    );
 
     let mut x_ref_1 = vec![0.0_f64; n];
     let mut x_ref_2 = vec![0.0_f64; n];
     let res_ref_1 = solve_gmres(&mat, &rhs_1, &mut x_ref_1, 30, &gmres_cfg()).unwrap();
     let res_ref_2 = solve_gmres(&mat, &rhs_2, &mut x_ref_2, 30, &gmres_cfg()).unwrap();
-    assert!(res_ref_1.converged, "reference GMRES did not converge for RHS 1");
-    assert!(res_ref_2.converged, "reference GMRES did not converge for RHS 2");
+    assert!(
+        res_ref_1.converged,
+        "reference GMRES did not converge for RHS 1"
+    );
+    assert!(
+        res_ref_2.converged,
+        "reference GMRES did not converge for RHS 2"
+    );
 
     let block_1 = &x_block[..n];
     let block_2 = &x_block[n..];
@@ -89,6 +101,12 @@ fn block_gmres_matches_individual_gmres_on_convection_diffusion_rhs_pair() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
 
-    assert!(max_diff_1 < 1e-7, "Block-GMRES RHS 1 mismatch vs GMRES reference: {max_diff_1}");
-    assert!(max_diff_2 < 1e-7, "Block-GMRES RHS 2 mismatch vs GMRES reference: {max_diff_2}");
+    assert!(
+        max_diff_1 < 1e-7,
+        "Block-GMRES RHS 1 mismatch vs GMRES reference: {max_diff_1}"
+    );
+    assert!(
+        max_diff_2 < 1e-7,
+        "Block-GMRES RHS 2 mismatch vs GMRES reference: {max_diff_2}"
+    );
 }

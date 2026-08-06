@@ -11,9 +11,15 @@ use crate::reference::{QuadratureRule, ReferenceElement};
 pub struct SegP1;
 
 impl ReferenceElement for SegP1 {
-    fn dim(&self)   -> u8    { 1 }
-    fn order(&self) -> u8    { 1 }
-    fn n_dofs(&self) -> usize { 2 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        2
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let x = xi[0];
@@ -24,10 +30,12 @@ impl ReferenceElement for SegP1 {
     fn eval_grad_basis(&self, _xi: &[f64], grads: &mut [f64]) {
         // grads[i*1 + 0] = ∂φᵢ/∂ξ
         grads[0] = -1.0;
-        grads[1] =  1.0;
+        grads[1] = 1.0;
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        seg_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![vec![0.0], vec![1.0]]
@@ -47,9 +55,15 @@ impl ReferenceElement for SegP1 {
 pub struct SegP2;
 
 impl ReferenceElement for SegP2 {
-    fn dim(&self)   -> u8    { 1 }
-    fn order(&self) -> u8    { 2 }
-    fn n_dofs(&self) -> usize { 3 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        2
+    }
+    fn n_dofs(&self) -> usize {
+        3
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let x = xi[0];
@@ -61,11 +75,13 @@ impl ReferenceElement for SegP2 {
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
         let x = xi[0];
         grads[0] = -3.0 + 4.0 * x;
-        grads[1] =  4.0 * x - 1.0;
-        grads[2] =  4.0 - 8.0 * x;
+        grads[1] = 4.0 * x - 1.0;
+        grads[2] = 4.0 - 8.0 * x;
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        seg_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![vec![0.0], vec![1.0], vec![0.5]]
@@ -90,31 +106,39 @@ impl ReferenceElement for SegP2 {
 pub struct SegP3;
 
 impl ReferenceElement for SegP3 {
-    fn dim(&self)    -> u8     { 1 }
-    fn order(&self)  -> u8     { 3 }
-    fn n_dofs(&self) -> usize  { 4 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        3
+    }
+    fn n_dofs(&self) -> usize {
+        4
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let x  = xi[0];
+        let x = xi[0];
         let x2 = x * x;
         let x3 = x2 * x;
         values[0] = -4.5 * x3 + 9.0 * x2 - 5.5 * x + 1.0;
-        values[1] =  4.5 * x3 - 4.5 * x2 + x;
+        values[1] = 4.5 * x3 - 4.5 * x2 + x;
         values[2] = 13.5 * x3 - 22.5 * x2 + 9.0 * x;
         values[3] = -13.5 * x3 + 18.0 * x2 - 4.5 * x;
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let x  = xi[0];
+        let x = xi[0];
         let x2 = x * x;
         // grads[i] = ∂φᵢ/∂ξ  (dim=1, so grads[i*1+0] = grads[i])
         grads[0] = -13.5 * x2 + 18.0 * x - 5.5;
-        grads[1] =  13.5 * x2 -  9.0 * x + 1.0;
-        grads[2] =  40.5 * x2 - 45.0 * x + 9.0;
+        grads[1] = 13.5 * x2 - 9.0 * x + 1.0;
+        grads[2] = 40.5 * x2 - 45.0 * x + 9.0;
         grads[3] = -40.5 * x2 + 36.0 * x - 4.5;
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        seg_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![vec![0.0], vec![1.0], vec![1.0 / 3.0], vec![2.0 / 3.0]]
@@ -149,13 +173,21 @@ mod tests {
     }
 
     #[test]
-    fn seg_p1_partition_of_unity() { check_partition_of_unity(&SegP1); }
+    fn seg_p1_partition_of_unity() {
+        check_partition_of_unity(&SegP1);
+    }
     #[test]
-    fn seg_p1_grad_sum_zero()      { check_grad_sum_zero(&SegP1); }
+    fn seg_p1_grad_sum_zero() {
+        check_grad_sum_zero(&SegP1);
+    }
     #[test]
-    fn seg_p2_partition_of_unity() { check_partition_of_unity(&SegP2); }
+    fn seg_p2_partition_of_unity() {
+        check_partition_of_unity(&SegP2);
+    }
     #[test]
-    fn seg_p2_grad_sum_zero()      { check_grad_sum_zero(&SegP2); }
+    fn seg_p2_grad_sum_zero() {
+        check_grad_sum_zero(&SegP2);
+    }
 
     #[test]
     fn seg_p2_recovers_linear() {
@@ -168,9 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn seg_p3_partition_of_unity() { check_partition_of_unity(&SegP3); }
+    fn seg_p3_partition_of_unity() {
+        check_partition_of_unity(&SegP3);
+    }
     #[test]
-    fn seg_p3_grad_sum_zero()      { check_grad_sum_zero(&SegP3); }
+    fn seg_p3_grad_sum_zero() {
+        check_grad_sum_zero(&SegP3);
+    }
 
     #[test]
     fn seg_p3_vertex_dofs() {
@@ -212,21 +248,37 @@ mod tests {
 macro_rules! seg_fixed {
     ($name:ident, $p:literal) => {
         impl ReferenceElement for $name {
-            fn dim(&self) -> u8 { 1 }
-            fn order(&self) -> u8 { $p }
-            fn n_dofs(&self) -> usize { $p as usize + 1 }
-            fn eval_basis(&self, xi:&[f64], v:&mut[f64]) {
+            fn dim(&self) -> u8 {
+                1
+            }
+            fn order(&self) -> u8 {
+                $p
+            }
+            fn n_dofs(&self) -> usize {
+                $p as usize + 1
+            }
+            fn eval_basis(&self, xi: &[f64], v: &mut [f64]) {
                 use crate::lagrange::factory::lagrange_val as lv;
-                let t=$p as f64*xi[0]; for i in 0..=$p as usize { v[i]=lv(i,$p as usize,t); }
+                let t = $p as f64 * xi[0];
+                for i in 0..=$p as usize {
+                    v[i] = lv(i, $p as usize, t);
+                }
             }
-            fn eval_grad_basis(&self, xi:&[f64], g:&mut[f64]) {
+            fn eval_grad_basis(&self, xi: &[f64], g: &mut [f64]) {
                 use crate::lagrange::factory::lagrange_deriv as ld;
-                let t=$p as f64*xi[0]; let p=$p as f64;
-                for i in 0..=$p as usize { g[i]=p*ld(i,$p as usize,t); }
+                let t = $p as f64 * xi[0];
+                let p = $p as f64;
+                for i in 0..=$p as usize {
+                    g[i] = p * ld(i, $p as usize, t);
+                }
             }
-            fn quadrature(&self, o: u8) -> QuadratureRule { seg_rule(o) }
+            fn quadrature(&self, o: u8) -> QuadratureRule {
+                seg_rule(o)
+            }
             fn dof_coords(&self) -> Vec<Vec<f64>> {
-                (0..=$p as usize).map(|i| vec![i as f64/$p as f64]).collect()
+                (0..=$p as usize)
+                    .map(|i| vec![i as f64 / $p as f64])
+                    .collect()
             }
         }
     };
@@ -247,24 +299,78 @@ seg_fixed!(SegP6, 6);
 #[cfg(test)]
 mod tests_p4 {
     use super::*;
-    fn check_pou(e: &dyn ReferenceElement) { let r=e.quadrature(4); let mut p=vec![0.0;e.n_dofs()];
-        for pt in &r.points { e.eval_basis(pt,&mut p); assert!((p.iter().sum::<f64>()-1.0).abs()<1e-13); } }
-    fn check_grad(e: &dyn ReferenceElement) { let r=e.quadrature(4); let n=e.n_dofs(); let mut g=vec![0.0;n];
-        for pt in &r.points { e.eval_grad_basis(pt,&mut g);
-            assert!(g.iter().sum::<f64>().abs()<1e-13); }}
-    #[test] fn seg_p4_pou() { check_pou(&SegP4); }
-    #[test] fn seg_p5_pou() { check_pou(&SegP5); }
-    #[test] fn seg_p6_pou() { check_pou(&SegP6); }
-    #[test] fn seg_p4_grad() { check_grad(&SegP4); }
-    #[test] fn seg_p5_grad() { check_grad(&SegP5); }
-    #[test] fn seg_p6_grad() { check_grad(&SegP6); }
-    #[test] fn seg_p4_nodal() { let c=SegP4.dof_coords(); let mut p=vec![0.0;5];
-        for (i,coord) in c.iter().enumerate() { SegP4.eval_basis(&[coord[0]],&mut p);
-            for j in 0..5 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
-    #[test] fn seg_p5_nodal() { let c=SegP5.dof_coords(); let mut p=vec![0.0;6];
-        for (i,coord) in c.iter().enumerate() { SegP5.eval_basis(&[coord[0]],&mut p);
-            for j in 0..6 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
-    #[test] fn seg_p6_nodal() { let c=SegP6.dof_coords(); let mut p=vec![0.0;7];
-        for (i,coord) in c.iter().enumerate() { SegP6.eval_basis(&[coord[0]],&mut p);
-            for j in 0..7 { assert!((p[j]-if i==j{1.0}else{0.0}).abs()<1e-13); }}}
+    fn check_pou(e: &dyn ReferenceElement) {
+        let r = e.quadrature(4);
+        let mut p = vec![0.0; e.n_dofs()];
+        for pt in &r.points {
+            e.eval_basis(pt, &mut p);
+            assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-13);
+        }
+    }
+    fn check_grad(e: &dyn ReferenceElement) {
+        let r = e.quadrature(4);
+        let n = e.n_dofs();
+        let mut g = vec![0.0; n];
+        for pt in &r.points {
+            e.eval_grad_basis(pt, &mut g);
+            assert!(g.iter().sum::<f64>().abs() < 1e-13);
+        }
+    }
+    #[test]
+    fn seg_p4_pou() {
+        check_pou(&SegP4);
+    }
+    #[test]
+    fn seg_p5_pou() {
+        check_pou(&SegP5);
+    }
+    #[test]
+    fn seg_p6_pou() {
+        check_pou(&SegP6);
+    }
+    #[test]
+    fn seg_p4_grad() {
+        check_grad(&SegP4);
+    }
+    #[test]
+    fn seg_p5_grad() {
+        check_grad(&SegP5);
+    }
+    #[test]
+    fn seg_p6_grad() {
+        check_grad(&SegP6);
+    }
+    #[test]
+    fn seg_p4_nodal() {
+        let c = SegP4.dof_coords();
+        let mut p = vec![0.0; 5];
+        for (i, coord) in c.iter().enumerate() {
+            SegP4.eval_basis(&[coord[0]], &mut p);
+            for j in 0..5 {
+                assert!((p[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-13);
+            }
+        }
+    }
+    #[test]
+    fn seg_p5_nodal() {
+        let c = SegP5.dof_coords();
+        let mut p = vec![0.0; 6];
+        for (i, coord) in c.iter().enumerate() {
+            SegP5.eval_basis(&[coord[0]], &mut p);
+            for j in 0..6 {
+                assert!((p[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-13);
+            }
+        }
+    }
+    #[test]
+    fn seg_p6_nodal() {
+        let c = SegP6.dof_coords();
+        let mut p = vec![0.0; 7];
+        for (i, coord) in c.iter().enumerate() {
+            SegP6.eval_basis(&[coord[0]], &mut p);
+            for j in 0..7 {
+                assert!((p[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-13);
+            }
+        }
+    }
 }

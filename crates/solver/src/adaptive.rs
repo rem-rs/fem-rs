@@ -4,7 +4,7 @@
 //! (explicit or implicit) with step size control, WRMS error norms,
 //! and diagnostics.
 
-use crate::butcher::{wrms_error, i_step_controller, ButcherTableau};
+use crate::butcher::{i_step_controller, wrms_error, ButcherTableau};
 
 /// Diagnostics collected during an adaptive time integration.
 #[derive(Debug, Clone, Default)]
@@ -21,7 +21,9 @@ pub struct IntegratorStats {
 }
 
 impl IntegratorStats {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Configuration for adaptive time stepping.
@@ -68,7 +70,12 @@ pub struct StepperState {
 
 impl StepperState {
     pub fn new(t: f64, u: Vec<f64>, dt: f64) -> Self {
-        StepperState { t, u, dt, prev_err: 0.0 }
+        StepperState {
+            t,
+            u,
+            dt,
+            prev_err: 0.0,
+        }
     }
 }
 
@@ -177,7 +184,7 @@ where
         stats.n_rhs_eval += tableau.s() as u64;
 
         let err = if u_err.iter().any(|&e| e.is_nan()) {
-            1e20  // Force rejection
+            1e20 // Force rejection
         } else {
             wrms_error(&u_new, &u_err, config.atol, config.rtol)
         };
@@ -211,7 +218,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::butcher::{rk4_tableau, dopri5_tableau, forward_euler_tableau};
+    use crate::butcher::{dopri5_tableau, forward_euler_tableau, rk4_tableau};
 
     /// ODE: du/dt = -λu, exact solution u(t) = exp(-λ t)
     fn decay_rhs(_t: f64, u: &[f64], dudt: &mut [f64]) {
@@ -223,15 +230,21 @@ mod tests {
     fn dope_adaptive_integrates_decay() {
         let u0 = vec![1.0];
         let config = AdaptiveConfig {
-            atol: 1e-6, rtol: 1e-4, dt_min: 1e-10, dt_max: 1.0, max_steps: 10000,
+            atol: 1e-6,
+            rtol: 1e-4,
+            dt_min: 1e-10,
+            dt_max: 1.0,
+            max_steps: 10000,
         };
-        let (u_final, stats) = integrate_adaptive(
-            decay_rhs, &dopri5_tableau(),
-            0.0, 5.0, &u0, 0.1, &config,
-        );
+        let (u_final, stats) =
+            integrate_adaptive(decay_rhs, &dopri5_tableau(), 0.0, 5.0, &u0, 0.1, &config);
         let exact = (-5.0_f64).exp();
-        assert!((u_final[0] - exact).abs() < 1e-4,
-            "DOPRI5 decay: u={}, exact={}", u_final[0], exact);
+        assert!(
+            (u_final[0] - exact).abs() < 1e-4,
+            "DOPRI5 decay: u={}, exact={}",
+            u_final[0],
+            exact
+        );
         assert!(stats.n_accepted > 0);
         assert!(stats.n_rhs_eval > 0);
     }
@@ -240,14 +253,16 @@ mod tests {
     fn adaptive_integrates_with_large_dt() {
         let u0 = vec![1.0];
         let config = AdaptiveConfig::default();
-        let (u_final, stats) = integrate_adaptive(
-            decay_rhs, &rk4_tableau(),
-            0.0, 1.0, &u0, 0.5, &config,
-        );
+        let (u_final, stats) =
+            integrate_adaptive(decay_rhs, &rk4_tableau(), 0.0, 1.0, &u0, 0.5, &config);
         let exact = (-1.0_f64).exp();
         // Rk4 has no embedded error estimation, so it can't adapt
-        assert!((u_final[0] - exact).abs() < 0.05,
-            "RK4 decay: u={}, exact={}", u_final[0], exact);
+        assert!(
+            (u_final[0] - exact).abs() < 0.05,
+            "RK4 decay: u={}, exact={}",
+            u_final[0],
+            exact
+        );
         let _ = stats;
     }
 
@@ -256,11 +271,20 @@ mod tests {
         // Use forward Euler with a stiff problem (dt too large → rejection)
         let u0 = vec![1.0];
         let config = AdaptiveConfig {
-            atol: 1e-6, rtol: 1e-6, dt_min: 1e-10, dt_max: 10.0, max_steps: 10000,
+            atol: 1e-6,
+            rtol: 1e-6,
+            dt_min: 1e-10,
+            dt_max: 10.0,
+            max_steps: 10000,
         };
         let (_u_final, stats) = integrate_adaptive(
-            decay_rhs, &forward_euler_tableau(),
-            0.0, 1.0, &u0, 0.5, &config,
+            decay_rhs,
+            &forward_euler_tableau(),
+            0.0,
+            1.0,
+            &u0,
+            0.5,
+            &config,
         );
         // Forward Euler has no embedded, so all steps are "accepted"
         // The error estimator is degenerate; this just checks no panic

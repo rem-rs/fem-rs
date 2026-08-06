@@ -4,7 +4,7 @@
 //! Schur complement approximation using the pressure mass matrix.
 
 use crate::block::BlockSystem;
-use crate::{solve_cg, solve_gmres, SolverConfig, SolveResult, SolverError};
+use crate::{solve_cg, solve_gmres, SolveResult, SolverConfig, SolverError};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 /// Build the pressure mass matrix from the divergence operator B.
@@ -30,10 +30,16 @@ pub fn build_pressure_mass(b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
 /// Build `S = B * diag(A)^{-1} * B^T` (BFBt Schur complement approximation) as CSR.
 pub fn build_bfbt_schur(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
     let n_p = b.nrows;
-    let inv_diag_a: Vec<f64> = (0..a.nrows).map(|i| {
-        let d = a.get(i, i);
-        if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
-    }).collect();
+    let inv_diag_a: Vec<f64> = (0..a.nrows)
+        .map(|i| {
+            let d = a.get(i, i);
+            if d.abs() > 1e-14 {
+                1.0 / d
+            } else {
+                1.0
+            }
+        })
+        .collect();
 
     let mut coo = CooMatrix::<f64>::new(n_p, n_p);
     for i in 0..n_p {
@@ -76,11 +82,23 @@ pub struct StokesPrecond {
 impl StokesPrecond {
     /// Create from the block system and pressure mass matrix.
     pub fn new(sys: &BlockSystem, mp: CsrMatrix<f64>) -> Self {
-        let inv_diag_a = (0..sys.a.nrows).map(|i| {
-            let d = sys.a.get(i, i);
-            if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
-        }).collect();
-        StokesPrecond { a: sys.a.clone(), bt: sys.bt.clone(), b: sys.b.clone(), mp, inv_diag_a }
+        let inv_diag_a = (0..sys.a.nrows)
+            .map(|i| {
+                let d = sys.a.get(i, i);
+                if d.abs() > 1e-14 {
+                    1.0 / d
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        StokesPrecond {
+            a: sys.a.clone(),
+            bt: sys.bt.clone(),
+            b: sys.b.clone(),
+            mp,
+            inv_diag_a,
+        }
     }
 
     /// Create with an externally assembled Schur complement approximation.
@@ -91,25 +109,62 @@ impl StokesPrecond {
     /// Apply the preconditioner:
     ///   zp = M_p^{-1} * rp   (Schur complement solve via CG)
     ///   zu = diag(A)^{-1} * (ru - B^T * zp)
-    pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) -> Result<(), SolverError> {
-        solve_cg(&self.mp, rp, zp, &SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() })?;
+    pub fn apply(
+        &self,
+        ru: &[f64],
+        rp: &[f64],
+        zu: &mut [f64],
+        zp: &mut [f64],
+    ) -> Result<(), SolverError> {
+        solve_cg(
+            &self.mp,
+            rp,
+            zp,
+            &SolverConfig {
+                rtol: 1e-6,
+                atol: 0.0,
+                max_iter: 100,
+                verbose: false,
+                ..SolverConfig::default()
+            },
+        )?;
         let n_u = self.a.nrows;
         let mut bt_zp = vec![0.0; n_u];
         self.bt.spmv(zp, &mut bt_zp);
-        for i in 0..ru.len() { zu[i] = self.inv_diag_a[i] * (ru[i] - bt_zp[i]); }
+        for i in 0..ru.len() {
+            zu[i] = self.inv_diag_a[i] * (ru[i] - bt_zp[i]);
+        }
         Ok(())
     }
 
     /// Solve the Stokes system with GMRES (no preconditioner, flat system).
-    pub fn solve_gmres(&self, sys: &BlockSystem, f: &[f64], g: &[f64],
-        u: &mut [f64], p: &mut [f64]) -> Result<SolveResult, SolverError> {
+    pub fn solve_gmres(
+        &self,
+        sys: &BlockSystem,
+        f: &[f64],
+        g: &[f64],
+        u: &mut [f64],
+        p: &mut [f64],
+    ) -> Result<SolveResult, SolverError> {
         let n = sys.n_u() + sys.n_p();
         let flat = sys.to_flat_csr();
         let mut rhs = vec![0.0; n];
         rhs[..sys.n_u()].copy_from_slice(f);
         rhs[sys.n_u()..].copy_from_slice(g);
         let mut x = vec![0.0; n];
-        let res = solve_gmres(&flat, &rhs, &mut x, 50, &SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() })?;
+        let res = solve_gmres(
+            &flat,
+            &rhs,
+            &mut x,
+            50,
+            &SolverConfig {
+                rtol: 1e-8,
+                atol: 0.0,
+                max_iter: 500,
+                verbose: false,
+                ..SolverConfig::default()
+            },
+        )?;
         u.copy_from_slice(&x[..sys.n_u()]);
         p.copy_from_slice(&x[sys.n_u()..]);
         Ok(res)
@@ -124,20 +179,25 @@ mod tests {
 
     fn make_test_stokes() -> (BlockSystem, CsrMatrix<f64>) {
         let mut a_coo = CooMatrix::<f64>::new(2, 2);
-        a_coo.add(0, 0, 2.0); a_coo.add(0, 1, -1.0);
-        a_coo.add(1, 0, -1.0); a_coo.add(1, 1, 2.0);
+        a_coo.add(0, 0, 2.0);
+        a_coo.add(0, 1, -1.0);
+        a_coo.add(1, 0, -1.0);
+        a_coo.add(1, 1, 2.0);
         let a = a_coo.into_csr();
 
         let mut b_coo = CooMatrix::<f64>::new(2, 2);
-        b_coo.add(0, 0, 1.0); b_coo.add(1, 1, 1.0);
+        b_coo.add(0, 0, 1.0);
+        b_coo.add(1, 1, 1.0);
         let b = b_coo.into_csr();
 
         let mut bt_coo = CooMatrix::<f64>::new(2, 2);
-        bt_coo.add(0, 0, 1.0); bt_coo.add(1, 1, 1.0);
+        bt_coo.add(0, 0, 1.0);
+        bt_coo.add(1, 1, 1.0);
         let bt = bt_coo.into_csr();
 
         let mut mp_coo = CooMatrix::<f64>::new(2, 2);
-        mp_coo.add(0, 0, 1.0); mp_coo.add(1, 1, 1.0);
+        mp_coo.add(0, 0, 1.0);
+        mp_coo.add(1, 1, 1.0);
         let mp = mp_coo.into_csr();
 
         (BlockSystem { a, bt, b, c: None }, mp)

@@ -446,7 +446,7 @@ mod tests {
     fn constraint_single_parent_gathers_correctly() {
         // Node 2 constrained to node 0 (single parent)
         let constraints = vec![HangingNodeConstraint {
-            constrained: 2, parent_a: 0, parent_b: 0,
+            constrained: 2, parent_a: 0, parent_b: 0, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         let n = 3;
         let c = build_constraint_matrix_2d(&constraints, n);
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn constraint_two_parents() {
         let constraints = vec![HangingNodeConstraint {
-            constrained: 2, parent_a: 0, parent_b: 1,
+            constrained: 2, parent_a: 0, parent_b: 1, coeff_a: 0.5, coeff_b: 0.5, extra: vec![],
         }];
         let c = build_constraint_matrix_2d(&constraints, 3);
         assert_eq!(c.nrows(), 2);

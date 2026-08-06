@@ -4,34 +4,50 @@
 //! h-independent iteration counts when applied to actual FEM systems.
 
 use fem_assembly::{
-    VectorAssembler,
     coefficient::FnVectorCoeff,
     discrete_op::DiscreteLinearOperator,
-    standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator},
+    standard::{CurlCurlIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator},
+    VectorAssembler,
 };
 use fem_linalg::fem_to_linlvo_csr;
 use fem_mesh::Mesh;
-use fem_solver::{solve_gmres_ams, solve_pcg_ads, SolverConfig, AmsSolverConfig, AdsSolverConfig};
-use fem_space::{H1Space, HCurlSpace, HDivSpace,
-                fe_space::FESpace, constraints::boundary_dofs_hcurl};
+use fem_solver::{solve_gmres_ams, solve_pcg_ads, AdsSolverConfig, AmsSolverConfig, SolverConfig};
+use fem_space::{
+    constraints::boundary_dofs_hcurl, fe_space::FESpace, H1Space, HCurlSpace, HDivSpace,
+};
 
 fn ams_solver_cfg() -> AmsSolverConfig {
     AmsSolverConfig {
-        inner_cfg: SolverConfig { rtol: 1e-6, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+        inner_cfg: SolverConfig {
+            rtol: 1e-6,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        },
         ams_cfg: linlvo::precond::AmsConfig::hpc_default(),
     }
 }
 
 fn ams_solver_cfg_default() -> AmsSolverConfig {
     AmsSolverConfig {
-        inner_cfg: SolverConfig { rtol: 1e-6, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+        inner_cfg: SolverConfig {
+            rtol: 1e-6,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        },
         ..AmsSolverConfig::default()
     }
 }
 
 fn ads_solver_cfg() -> AdsSolverConfig {
     AdsSolverConfig {
-        inner_cfg: SolverConfig { rtol: 1e-5, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+        inner_cfg: SolverConfig {
+            rtol: 1e-5,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        },
         ..AdsSolverConfig::default()
     }
 }
@@ -43,15 +59,22 @@ fn solve_maxwell_2d(n: usize) -> (bool, usize) {
 
     // Assemble curl-curl + mass matrix
     let a = VectorAssembler::assemble_bilinear(
-        &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 4);
+        &hcurl,
+        &[
+            &CurlCurlIntegrator { mu: 1.0 },
+            &VectorMassIntegrator { alpha: 1.0 },
+        ],
+        4,
+    );
 
     // Assemble RHS: curl-curl(E) + E = f
     use std::f64::consts::PI;
     let src = VectorDomainLFIntegrator {
         f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-            let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin();
-            out[0] = (1.0 + PI*PI)*sy;
-            out[1] = (1.0 + PI*PI)*sx;
+            let sx = (PI * x[0]).sin();
+            let sy = (PI * x[1]).sin();
+            out[0] = (1.0 + PI * PI) * sy;
+            out[1] = (1.0 + PI * PI) * sx;
         })),
     };
     let mut rhs = VectorAssembler::assemble_linear(&hcurl, &[&src], 4);
@@ -78,16 +101,25 @@ fn ams_2d_converges() {
     let (conv, iters) = solve_maxwell_2d(8);
     eprintln!("AMS 2D (16×16): converged={conv}, iters={iters}");
     assert!(conv, "AMS GMRES must converge");
-    assert!(iters < 200, "AMS should converge in < 200 iters, got {iters}");
+    assert!(
+        iters < 200,
+        "AMS should converge in < 200 iters, got {iters}"
+    );
 }
 
 #[test]
 fn ams_2d_h_independent_iterations() {
-    let (conv1, it1) = solve_maxwell_2d(6);   // 12×12 mesh
-    let (conv2, it2) = solve_maxwell_2d(10);  // 20×20 mesh
-    eprintln!("AMS (default) iters: 12x12={it1}, 20x20={it2}, ratio={:.2}x", it2 as f64 / it1 as f64);
+    let (conv1, it1) = solve_maxwell_2d(6); // 12×12 mesh
+    let (conv2, it2) = solve_maxwell_2d(10); // 20×20 mesh
+    eprintln!(
+        "AMS (default) iters: 12x12={it1}, 20x20={it2}, ratio={:.2}x",
+        it2 as f64 / it1 as f64
+    );
     assert!(conv1 && conv2, "All cases must converge");
-    assert!(it2 <= it1 + 280, "AMS iters should grow sub-linearly: {it1}->{it2}");
+    assert!(
+        it2 <= it1 + 280,
+        "AMS iters should grow sub-linearly: {it1}->{it2}"
+    );
     eprintln!("AMS ratio: {:.2}x", it2 as f64 / it1 as f64);
 }
 
@@ -100,15 +132,25 @@ fn ams_2d_hpc_improvement() {
         let mesh = Mesh::<2>::unit_square_tri(n);
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
-        use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator};
         use fem_assembly::postproc::coefficient::FnVectorCoeff;
+        use fem_assembly::standard::{
+            CurlCurlIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator,
+        };
         let a = fem_assembly::VectorAssembler::assemble_bilinear(
-            &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], 4);
+            &hcurl,
+            &[
+                &CurlCurlIntegrator { mu: 1.0 },
+                &VectorMassIntegrator { alpha: 1.0 },
+            ],
+            4,
+        );
         use std::f64::consts::PI;
         let src = VectorDomainLFIntegrator {
             f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin();
-                out[0] = (1.0 + PI*PI)*sy; out[1] = (1.0 + PI*PI)*sx;
+                let sx = (PI * x[0]).sin();
+                let sy = (PI * x[1]).sin();
+                out[0] = (1.0 + PI * PI) * sy;
+                out[1] = (1.0 + PI * PI) * sx;
             })),
         };
         let mut rhs = fem_assembly::VectorAssembler::assemble_linear(&hcurl, &[&src], 4);
@@ -129,10 +171,22 @@ fn ams_2d_hpc_improvement() {
     let (c2_def, i2_def) = run(10, &cfg_def);
     let (c1_hpc, i1_hpc) = run(6, &cfg_hpc);
     let (c2_hpc, i2_hpc) = run(10, &cfg_hpc);
-    eprintln!("AMS default:  12x12={i1_def}, 20x20={i2_def}, ratio={:.2}x", i2_def as f64 / i1_def as f64);
-    eprintln!("AMS HPC:      12x12={i1_hpc}, 20x20={i2_hpc}, ratio={:.2}x", i2_hpc as f64 / i1_hpc as f64);
-    assert!(c1_def && c2_def && c1_hpc && c2_hpc, "All cases must converge");
-    assert!(i2_hpc <= i2_def, "HPC config should be no worse than default: {i2_hpc} vs {i2_def}");
+    eprintln!(
+        "AMS default:  12x12={i1_def}, 20x20={i2_def}, ratio={:.2}x",
+        i2_def as f64 / i1_def as f64
+    );
+    eprintln!(
+        "AMS HPC:      12x12={i1_hpc}, 20x20={i2_hpc}, ratio={:.2}x",
+        i2_hpc as f64 / i1_hpc as f64
+    );
+    assert!(
+        c1_def && c2_def && c1_hpc && c2_hpc,
+        "All cases must converge"
+    );
+    assert!(
+        i2_hpc <= i2_def,
+        "HPC config should be no worse than default: {i2_hpc} vs {i2_def}"
+    );
 }
 
 // ─── ADS: H(div) Darcy 3D ───────────────────────────────────────────────────
@@ -150,7 +204,9 @@ fn solve_darcy_3d(n: usize) -> (bool, usize) {
     // RHS
     let src = VectorDomainLFIntegrator {
         f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-            out[0] = (PI*x[0]).sin(); out[1] = (PI*x[1]).sin(); out[2] = (PI*x[2]).sin();
+            out[0] = (PI * x[0]).sin();
+            out[1] = (PI * x[1]).sin();
+            out[2] = (PI * x[2]).sin();
         })),
     };
     let mut rhs = VectorAssembler::assemble_linear(&hdiv, &[&src], 3);
@@ -172,7 +228,15 @@ fn solve_darcy_3d(n: usize) -> (bool, usize) {
     let g_linlvo = fem_to_linlvo_csr(&g_fem);
 
     let mut x = vec![0.0; hdiv.n_dofs()];
-    let res = solve_pcg_ads(&a_mut, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_solver_cfg()).unwrap();
+    let res = solve_pcg_ads(
+        &a_mut,
+        &c_linlvo,
+        &g_linlvo,
+        &rhs,
+        &mut x,
+        &ads_solver_cfg(),
+    )
+    .unwrap();
     (res.converged, res.iterations)
 }
 
@@ -186,12 +250,17 @@ fn ads_darcy_3d_converges() {
 
 #[test]
 fn ads_darcy_3d_h_independent() {
-    let (conv1, it1) = solve_darcy_3d(2);  // 2×2×2 = 6 tets
+    let (conv1, it1) = solve_darcy_3d(2); // 2×2×2 = 6 tets
     eprintln!("ADS 3D 2³: converged={conv1}, iters={it1}");
     assert!(conv1, "Coarse ADS must converge");
     // For larger 3×3×3, increase tolerance
     let cfg_coarse = AdsSolverConfig {
-        inner_cfg: SolverConfig { rtol: 1e-4, max_iter: 1000, verbose: false, ..SolverConfig::default() },
+        inner_cfg: SolverConfig {
+            rtol: 1e-4,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        },
         ..AdsSolverConfig::default()
     };
     let (conv2, it2) = {
@@ -200,10 +269,13 @@ fn ads_darcy_3d_h_independent() {
         let hdiv = HDivSpace::new(mesh.clone(), 0);
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
-        let a = VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+        let a =
+            VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
         let src = VectorDomainLFIntegrator {
             f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-                out[0] = (PI*x[0]).sin(); out[1] = (PI*x[1]).sin(); out[2] = (PI*x[2]).sin();
+                out[0] = (PI * x[0]).sin();
+                out[1] = (PI * x[1]).sin();
+                out[2] = (PI * x[2]).sin();
             })),
         };
         let mut rhs = VectorAssembler::assemble_linear(&hdiv, &[&src], 3);
@@ -229,8 +301,8 @@ fn ads_darcy_3d_h_independent() {
 
 use fem_linalg::complex_csr::ComplexCsr;
 use fem_solver::complex_ams::{
-    solve_gmres_ams_complex, solve_bicgstab_ams_complex,
-    solve_gmres_ads_complex, solve_bicgstab_ads_complex,
+    solve_bicgstab_ads_complex, solve_bicgstab_ams_complex, solve_gmres_ads_complex,
+    solve_gmres_ams_complex,
 };
 
 /// Build a complex H(curl) system `(K + M) + i·(ω·M)` on a 2D mesh,
@@ -239,8 +311,14 @@ use fem_solver::complex_ams::{
 /// The real part `K + M` is symmetric positive-definite, so the AMS
 /// preconditioner (built from the real part) performs robustly.
 fn build_complex_maxwell_2d(
-    n: usize, omega: f64,
-) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
+    n: usize,
+    omega: f64,
+) -> (
+    ComplexCsr,
+    linlvo::sparse::CsrMatrix<f64>,
+    Vec<f64>,
+    Vec<f64>,
+) {
     use std::f64::consts::PI;
     let mesh = Mesh::<2>::unit_square_tri(n);
     let h1 = H1Space::new(mesh.clone(), 1);
@@ -248,21 +326,20 @@ fn build_complex_maxwell_2d(
     let n_dofs = hcurl.n_dofs();
 
     // Assemble curl-curl (K) and mass (M) separately.
-    let k = VectorAssembler::assemble_bilinear(
-        &hcurl, &[&CurlCurlIntegrator { mu: 1.0 }], 4);
-    let m_csr = VectorAssembler::assemble_bilinear(
-        &hcurl, &[&VectorMassIntegrator { alpha: 1.0 }], 4);
+    let k = VectorAssembler::assemble_bilinear(&hcurl, &[&CurlCurlIntegrator { mu: 1.0 }], 4);
+    let m_csr =
+        VectorAssembler::assemble_bilinear(&hcurl, &[&VectorMassIntegrator { alpha: 1.0 }], 4);
 
     // Build A_re = K + M (SPD) and A_im = ω·M via COO.
     let mut coo_re = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
     let mut coo_im = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
     for i in 0..n_dofs {
-        for ptr in k.row_ptr[i]..k.row_ptr[i+1] {
+        for ptr in k.row_ptr[i]..k.row_ptr[i + 1] {
             coo_re.add(i, k.col_idx[ptr] as usize, k.values[ptr]);
         }
     }
     for i in 0..n_dofs {
-        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i+1] {
+        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i + 1] {
             let j = m_csr.col_idx[ptr] as usize;
             let m_val = m_csr.values[ptr];
             // A_re += M
@@ -280,15 +357,18 @@ fn build_complex_maxwell_2d(
     let g_linlvo = fem_to_linlvo_csr(&g_fem);
 
     // RHS from sinusoidal source (same as real AMS test)
-    let mut rhs_re = VectorAssembler::assemble_linear(&hcurl, &[
-        &VectorDomainLFIntegrator {
+    let mut rhs_re = VectorAssembler::assemble_linear(
+        &hcurl,
+        &[&VectorDomainLFIntegrator {
             f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin();
-                out[0] = (1.0 + PI*PI)*sy;
-                out[1] = (1.0 + PI*PI)*sx;
+                let sx = (PI * x[0]).sin();
+                let sy = (PI * x[1]).sin();
+                out[0] = (1.0 + PI * PI) * sy;
+                out[1] = (1.0 + PI * PI) * sx;
             })),
-        },
-    ], 4);
+        }],
+        4,
+    );
     let mut rhs_im = vec![0.0; n_dofs]; // purely real RHS
 
     // Dirichlet: tangential E = 0 on all boundaries
@@ -310,9 +390,9 @@ fn complex_ams_2d_converges() {
 
     let cfg = linlvo::precond::AmsConfig::hpc_default();
     let (iters, res) = solve_gmres_ams_complex(
-        &a, &g, &b_re, &b_im, &mut x_re, &mut x_im,
-        1e-6, 500, 50, cfg,
-    ).expect("Complex AMS GMRES should converge");
+        &a, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, 50, cfg,
+    )
+    .expect("Complex AMS GMRES should converge");
 
     eprintln!("Complex AMS 2D (12×12 mesh): converged in {iters} iters, rel_prec_res={res:.2e}");
     assert!(iters < 300, "too many iterations: {iters}");
@@ -328,7 +408,18 @@ fn complex_ams_2d_h_independent() {
         let (a, g, b_re, b_im) = build_complex_maxwell_2d(n, omega);
         let mut x_re = vec![0.0; a.nrows];
         let mut x_im = vec![0.0; a.nrows];
-        match solve_gmres_ams_complex(&a, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, 50, cfg.clone()) {
+        match solve_gmres_ams_complex(
+            &a,
+            &g,
+            &b_re,
+            &b_im,
+            &mut x_re,
+            &mut x_im,
+            1e-6,
+            500,
+            50,
+            cfg.clone(),
+        ) {
             Ok((iters, _res)) => (iters < 500, iters),
             Err(_) => (false, 999),
         }
@@ -353,10 +444,9 @@ fn complex_ams_2d_bicgstab() {
     let mut x_im = vec![0.0; n];
 
     let cfg = linlvo::precond::AmsConfig::hpc_default();
-    let (iters, res) = solve_bicgstab_ams_complex(
-        &a, &g, &b_re, &b_im, &mut x_re, &mut x_im,
-        1e-6, 500, cfg,
-    ).expect("Complex AMS BiCGSTAB should converge");
+    let (iters, res) =
+        solve_bicgstab_ams_complex(&a, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, cfg)
+            .expect("Complex AMS BiCGSTAB should converge");
 
     eprintln!("Complex AMS BiCGSTAB 2D: {iters} iters, res={res:.2e}");
     assert!(iters < 400, "BiCGSTAB too many iterations: {iters}");
@@ -368,9 +458,15 @@ fn complex_ams_2d_bicgstab() {
 /// apply normal-component Dirichlet BCs, and return
 /// `(A_complex, C_linlvo, G_linlvo, rhs_re, rhs_im)`.
 fn build_complex_darcy_3d(
-    n: usize, omega: f64,
-) -> (ComplexCsr, linlvo::sparse::CsrMatrix<f64>, linlvo::sparse::CsrMatrix<f64>,
-      Vec<f64>, Vec<f64>) {
+    n: usize,
+    omega: f64,
+) -> (
+    ComplexCsr,
+    linlvo::sparse::CsrMatrix<f64>,
+    linlvo::sparse::CsrMatrix<f64>,
+    Vec<f64>,
+    Vec<f64>,
+) {
     use std::f64::consts::PI;
     let mesh = Mesh::<3>::unit_cube_tet(n);
     let hdiv = HDivSpace::new(mesh.clone(), 0); // RT0
@@ -379,13 +475,14 @@ fn build_complex_darcy_3d(
     let n_dofs = hdiv.n_dofs();
 
     // Assemble H(div) mass matrix (real part)
-    let m_csr = VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
+    let m_csr =
+        VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
 
     // Build A_re = M (SPD) and A_im = ω·M via COO.
     let mut coo_re = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
     let mut coo_im = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
     for i in 0..n_dofs {
-        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i+1] {
+        for ptr in m_csr.row_ptr[i]..m_csr.row_ptr[i + 1] {
             let j = m_csr.col_idx[ptr] as usize;
             let m_val = m_csr.values[ptr];
             coo_re.add(i, j, m_val);
@@ -405,14 +502,20 @@ fn build_complex_darcy_3d(
     let g_linlvo = fem_to_linlvo_csr(&g_fem);
 
     // RHS from sinusoidal source
-    let mut rhs_re = VectorAssembler::assemble_linear(&hdiv, &[
-        &VectorDomainLFIntegrator {
+    let mut rhs_re = VectorAssembler::assemble_linear(
+        &hdiv,
+        &[&VectorDomainLFIntegrator {
             f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
-                let sx = (PI*x[0]).sin(); let sy = (PI*x[1]).sin(); let sz = (PI*x[2]).sin();
-                out[0] = sx; out[1] = sy; out[2] = sz;
+                let sx = (PI * x[0]).sin();
+                let sy = (PI * x[1]).sin();
+                let sz = (PI * x[2]).sin();
+                out[0] = sx;
+                out[1] = sy;
+                out[2] = sz;
             })),
-        },
-    ], 3);
+        }],
+        3,
+    );
     let mut rhs_im = vec![0.0; n_dofs];
 
     // Dirichlet: normal component = 0 on all 6 faces
@@ -435,9 +538,9 @@ fn complex_ads_3d_converges() {
 
     let cfg = linlvo::precond::AdsConfig::hpc_default();
     let (iters, res) = solve_gmres_ads_complex(
-        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im,
-        1e-6, 500, 50, cfg,
-    ).expect("Complex ADS GMRES should converge");
+        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, 50, cfg,
+    )
+    .expect("Complex ADS GMRES should converge");
 
     eprintln!("Complex ADS 3D (2×2×2): converged in {iters} iters, res={res:.2e}");
     assert!(iters < 300, "too many iterations: {iters}");
@@ -454,9 +557,9 @@ fn complex_ads_3d_bicgstab() {
 
     let cfg = linlvo::precond::AdsConfig::hpc_default();
     let (iters, res) = solve_bicgstab_ads_complex(
-        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im,
-        1e-6, 500, cfg,
-    ).expect("Complex ADS BiCGSTAB should converge");
+        &a, &c, &g, &b_re, &b_im, &mut x_re, &mut x_im, 1e-6, 500, cfg,
+    )
+    .expect("Complex ADS BiCGSTAB should converge");
 
     eprintln!("Complex ADS BiCGSTAB 3D: {iters} iters, res={res:.2e}");
     assert!(iters < 400, "BiCGSTAB too many iterations: {iters}");

@@ -333,7 +333,7 @@ pub fn extract_boundary_submesh(mesh: &Mesh<3>, bdr_tags: &[i32]) -> BoundarySub
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
-        geometry: None,
+        geometry: None, nc_vertex_view: None,
     };
 
     BoundarySubMesh {
@@ -602,7 +602,7 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
-        geometry: None,
+        geometry: None, nc_vertex_view: None,
     };
 
     SubMesh3D {
@@ -664,7 +664,7 @@ mod tests {
             face_to_elem: None,
             edge_conn: vec![],
             edge_to_elem: vec![],
-            geometry: None,
+            geometry: None, nc_vertex_view: None,
         }
     }
 

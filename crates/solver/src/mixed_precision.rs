@@ -9,8 +9,8 @@
 //! - [`convert_csr_f32_to_f64`] — conversion back to f64
 //! - [`MixedPrecisionPrecond`] — wraps an f32 preconditioner for f64 systems
 
-use fem_linalg::CsrMatrix;
 use crate::SolveResult;
+use fem_linalg::CsrMatrix;
 
 /// Lossy-convert an `f64` CSR matrix to `f32`.
 pub fn convert_csr_f64_to_f32(a: &CsrMatrix<f64>) -> CsrMatrix<f32> {
@@ -67,7 +67,11 @@ impl MixedPrecisionPrecond {
             let mut ax = vec![0.0f32; n];
             self.a_f32.spmv(&x_f32, &mut ax);
             for i in 0..n {
-                let d = if self.diag_f32[i].abs() > 1e-30f32 { self.diag_f32[i] } else { 1.0f32 };
+                let d = if self.diag_f32[i].abs() > 1e-30f32 {
+                    self.diag_f32[i]
+                } else {
+                    1.0f32
+                };
                 x_f32[i] += omega_f32 * (b_f32[i] - ax[i]) / d;
             }
         }
@@ -95,13 +99,19 @@ pub fn solve_pcg_mixed(
     let mut z = vec![0.0; n];
 
     a.spmv(x, &mut ax);
-    for i in 0..n { r[i] = b[i] - ax[i]; }
+    for i in 0..n {
+        r[i] = b[i] - ax[i];
+    }
 
     let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-32);
     let tol = cfg.atol.max(cfg.rtol * b_norm);
     let mut r_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
     if r_norm <= tol {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: r_norm });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: r_norm,
+        });
     }
 
     let mut rz_prev = 0.0;
@@ -116,27 +126,43 @@ pub fn solve_pcg_mixed(
             p.copy_from_slice(&z);
         } else {
             let beta = rz / rz_prev;
-            for i in 0..n { p[i] = z[i] + beta * p[i]; }
+            for i in 0..n {
+                p[i] = z[i] + beta * p[i];
+            }
         }
 
         a.spmv(&p, &mut ap);
 
         let pap = p.iter().zip(ap.iter()).map(|(p, ap)| p * ap).sum::<f64>();
-        if pap.abs() < 1e-30 { break; }
+        if pap.abs() < 1e-30 {
+            break;
+        }
         let alpha = rz / pap;
 
-        for i in 0..n { x[i] += alpha * p[i]; }
-        for i in 0..n { r[i] -= alpha * ap[i]; }
+        for i in 0..n {
+            x[i] += alpha * p[i];
+        }
+        for i in 0..n {
+            r[i] -= alpha * ap[i];
+        }
 
         r_norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
         if r_norm <= tol {
-            return Ok(SolveResult { converged: true, iterations: k + 1, final_residual: r_norm });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: k + 1,
+                final_residual: r_norm,
+            });
         }
 
         rz_prev = rz;
     }
 
-    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: r_norm })
+    Ok(SolveResult {
+        converged: false,
+        iterations: cfg.max_iter,
+        final_residual: r_norm,
+    })
 }
 
 /// Solve an f64 SPD system using f32 Jacobi-preconditioned CG (pure f32 solve).
@@ -182,15 +208,19 @@ pub fn solve_gmres_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_linalg::CooMatrix;
     use crate::SolverConfig;
+    use fem_linalg::CooMatrix;
 
     fn laplacian_1d(n: usize) -> CsrMatrix<f64> {
         let mut coo = CooMatrix::<f64>::new(n, n);
         for i in 0..n {
             coo.add(i, i, 2.0);
-            if i > 0 { coo.add(i, i - 1, -1.0); }
-            if i < n - 1 { coo.add(i, i + 1, -1.0); }
+            if i > 0 {
+                coo.add(i, i - 1, -1.0);
+            }
+            if i < n - 1 {
+                coo.add(i, i + 1, -1.0);
+            }
         }
         coo.into_csr()
     }
@@ -206,7 +236,10 @@ mod tests {
             for j in 0..a64.ncols {
                 let orig = a64.get(i, j);
                 let back = a64_back.get(i, j);
-                assert!((orig - back).abs() < 1e-12, "mismatch at ({i},{j}): {orig} vs {back}");
+                assert!(
+                    (orig - back).abs() < 1e-12,
+                    "mismatch at ({i},{j}): {orig} vs {back}"
+                );
             }
         }
     }
@@ -218,7 +251,10 @@ mod tests {
         let mut b = vec![0.0; n];
         b[n / 2] = 1.0;
         let mut x = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-4, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-4,
+            ..Default::default()
+        };
         let res = solve_cg_f32(&a, &b, &mut x, &cfg).unwrap();
         assert!(res.converged, "f32 CG should converge: {res:?}");
     }
@@ -230,7 +266,10 @@ mod tests {
         let mut b = vec![0.0; n];
         b[n / 2] = 1.0;
         let mut x = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-4, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-4,
+            ..Default::default()
+        };
         let res = solve_gmres_f32(&a, &b, &mut x, 8, &cfg).unwrap();
         assert!(res.converged, "f32 GMRES should converge: {res:?}");
     }
@@ -242,23 +281,34 @@ mod tests {
         let mut b = vec![0.0; n];
         b[n / 2] = 1.0;
         let mut x = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-6, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-6,
+            ..Default::default()
+        };
         let res = solve_pcg_mixed(&a, &b, &mut x, &cfg).unwrap();
-        assert!(res.converged, "mixed-precision PCG should converge: {res:?}");
+        assert!(
+            res.converged,
+            "mixed-precision PCG should converge: {res:?}"
+        );
     }
 
     #[test]
     fn f32_vs_f64_accuracy_comparison() {
         let a = laplacian_1d(32);
         let n = a.nrows;
-        let b: Vec<f64> = (0..n).map(|i| {
-            let x = i as f64 / (n - 1) as f64;
-            (std::f64::consts::PI * x).sin()
-        }).collect();
+        let b: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = i as f64 / (n - 1) as f64;
+                (std::f64::consts::PI * x).sin()
+            })
+            .collect();
 
         // f64 CG
         let mut x64 = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-8, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            ..Default::default()
+        };
         let _ = crate::solve_cg(&a, &b, &mut x64, &cfg).unwrap();
 
         // f32 CG
@@ -267,22 +317,36 @@ mod tests {
         assert!(res32.converged, "f32 CG should converge");
 
         // Difference should be bounded by f32 precision
-        let diff: f64 = x64.iter().zip(x32.iter()).map(|(a, b)| (a - b).abs()).sum::<f64>() / n as f64;
-        assert!(diff < 1e-4, "f32 vs f64 avg diff should be < 1e-4, got {diff:.3e}");
+        let diff: f64 = x64
+            .iter()
+            .zip(x32.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / n as f64;
+        assert!(
+            diff < 1e-4,
+            "f32 vs f64 avg diff should be < 1e-4, got {diff:.3e}"
+        );
     }
 
     #[test]
     fn mixed_precision_precond_improves_cg() {
         let a = laplacian_1d(16);
         let n = a.nrows;
-        let b: Vec<f64> = (0..n).map(|i| {
-            let x = i as f64 / (n - 1) as f64;
-            x * (1.0 - x)
-        }).collect();
+        let b: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = i as f64 / (n - 1) as f64;
+                x * (1.0 - x)
+            })
+            .collect();
 
         // Plain CG
         let mut x_cg = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-6, max_iter: 500, ..Default::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-6,
+            max_iter: 500,
+            ..Default::default()
+        };
         let res_cg = crate::solve_cg(&a, &b, &mut x_cg, &cfg).unwrap();
 
         // Mixed-precision PCG
@@ -290,7 +354,11 @@ mod tests {
         let res_mp = solve_pcg_mixed(&a, &b, &mut x_mp, &cfg).unwrap();
 
         // Both should converge
-        assert!(res_cg.converged && res_mp.converged,
-            "CG converged={}, mixed PCG converged={}", res_cg.converged, res_mp.converged);
+        assert!(
+            res_cg.converged && res_mp.converged,
+            "CG converged={}, mixed PCG converged={}",
+            res_cg.converged,
+            res_mp.converged
+        );
     }
 }

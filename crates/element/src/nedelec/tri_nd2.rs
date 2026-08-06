@@ -46,21 +46,48 @@ fn build_vandermonde() -> [[f64; 8]; 8] {
     //   ∫_T ξη   = 1/24
     //
     // Row 0: DOF_0 = ∫₀¹ (m_j)_x(ξ,0) dξ
-    let r0 = [1.0, 0.5, 0.0,  0.0, 0.0, 0.0,  0.0,       0.0];
+    let r0 = [1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     // Row 1: DOF_1 = ∫₀¹ (m_j)_x(ξ,0) · ξ dξ
-    let r1 = [0.5, 1.0/3.0, 0.0,  0.0, 0.0, 0.0,  0.0,  0.0];
+    let r1 = [0.5, 1.0 / 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     // Row 2: DOF_2 = ∫₀¹ [−(m_j)_x + (m_j)_y](1−t, t) dt
-    let r2 = [-1.0, -0.5, -0.5,  1.0, 0.5, 0.5,  0.5,  0.5];
+    let r2 = [-1.0, -0.5, -0.5, 1.0, 0.5, 0.5, 0.5, 0.5];
     // Row 3: DOF_3 = ∫₀¹ [−(m_j)_x + (m_j)_y](1−t, t) · t dt
-    let r3 = [-0.5, -1.0/6.0, -1.0/3.0,  0.5, 1.0/6.0, 1.0/3.0,  1.0/6.0, 1.0/3.0];
+    let r3 = [
+        -0.5,
+        -1.0 / 6.0,
+        -1.0 / 3.0,
+        0.5,
+        1.0 / 6.0,
+        1.0 / 3.0,
+        1.0 / 6.0,
+        1.0 / 3.0,
+    ];
     // Row 4: DOF_4 = ∫₀¹ (m_j)_y(0, η) dη
-    let r4 = [0.0, 0.0, 0.0,  1.0, 0.0, 0.5,  0.0,  0.0];
+    let r4 = [0.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0];
     // Row 5: DOF_5 = ∫₀¹ (m_j)_y(0, η) · η dη
-    let r5 = [0.0, 0.0, 0.0,  0.5, 0.0, 1.0/3.0,  0.0,  0.0];
+    let r5 = [0.0, 0.0, 0.0, 0.5, 0.0, 1.0 / 3.0, 0.0, 0.0];
     // Row 6: DOF_6 = ∫_T (m_j)_x dA
-    let r6 = [0.5, 1.0/6.0, 1.0/6.0,  0.0, 0.0, 0.0,  -1.0/24.0, -1.0/12.0];
+    let r6 = [
+        0.5,
+        1.0 / 6.0,
+        1.0 / 6.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.0 / 24.0,
+        -1.0 / 12.0,
+    ];
     // Row 7: DOF_7 = ∫_T (m_j)_y dA
-    let r7 = [0.0, 0.0, 0.0,  0.5, 1.0/6.0, 1.0/6.0,  1.0/12.0, 1.0/24.0];
+    let r7 = [
+        0.0,
+        0.0,
+        0.0,
+        0.5,
+        1.0 / 6.0,
+        1.0 / 6.0,
+        1.0 / 12.0,
+        1.0 / 24.0,
+    ];
 
     [r0, r1, r2, r3, r4, r5, r6, r7]
 }
@@ -94,7 +121,9 @@ fn invert_8x8(a: [[f64; 8]; 8]) -> [[f64; 8]; 8] {
             m[col][j] *= inv_pivot;
         }
         for row in 0..8 {
-            if row == col { continue; }
+            if row == col {
+                continue;
+            }
             let factor = m[row][col];
             for j in 0..16 {
                 let delta = factor * m[col][j];
@@ -134,21 +163,29 @@ fn coeff() -> &'static [[f64; 8]; 8] {
 #[inline]
 fn eval_monomials(x: f64, y: f64, vals: &mut [f64; 16]) {
     // m₀ = (1, 0)
-    vals[0] = 1.0;  vals[1] = 0.0;
+    vals[0] = 1.0;
+    vals[1] = 0.0;
     // m₁ = (ξ, 0)
-    vals[2] = x;    vals[3] = 0.0;
+    vals[2] = x;
+    vals[3] = 0.0;
     // m₂ = (η, 0)
-    vals[4] = y;    vals[5] = 0.0;
+    vals[4] = y;
+    vals[5] = 0.0;
     // m₃ = (0, 1)
-    vals[6] = 0.0;  vals[7] = 1.0;
+    vals[6] = 0.0;
+    vals[7] = 1.0;
     // m₄ = (0, ξ)
-    vals[8] = 0.0;  vals[9] = x;
+    vals[8] = 0.0;
+    vals[9] = x;
     // m₅ = (0, η)
-    vals[10] = 0.0; vals[11] = y;
+    vals[10] = 0.0;
+    vals[11] = y;
     // m₆ = (−ξη, ξ²)
-    vals[12] = -x * y; vals[13] = x * x;
+    vals[12] = -x * y;
+    vals[13] = x * x;
     // m₇ = (−η², ξη)
-    vals[14] = -y * y; vals[15] = x * y;
+    vals[14] = -y * y;
+    vals[15] = x * y;
 }
 
 /// Scalar curl of each monomial at (x,y): curl(m_j) = ∂(m_j)_y/∂ξ − ∂(m_j)_x/∂η.
@@ -159,7 +196,7 @@ fn eval_monomial_curls(x: f64, y: f64, curls: &mut [f64; 8]) {
     curls[1] = 0.0;
     curls[2] = -1.0; // ∂(0)/∂ξ − ∂(η)/∂η = 0 − 1
     curls[3] = 0.0;
-    curls[4] = 1.0;  // ∂(ξ)/∂ξ − ∂(0)/∂η = 1 − 0
+    curls[4] = 1.0; // ∂(ξ)/∂ξ − ∂(0)/∂η = 1 − 0
     curls[5] = 0.0;
     curls[6] = 3.0 * x; // ∂(ξ²)/∂ξ − ∂(−ξη)/∂η = 2ξ − (−ξ) = 3ξ
     curls[7] = 3.0 * y; // ∂(ξη)/∂ξ − ∂(−η²)/∂η = η − (−2η) = 3η
@@ -188,9 +225,15 @@ impl TriND2 {
 }
 
 impl VectorReferenceElement for TriND2 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 2 }
-    fn n_dofs(&self) -> usize { 8 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        2
+    }
+    fn n_dofs(&self) -> usize {
+        8
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
@@ -207,7 +250,7 @@ impl VectorReferenceElement for TriND2 {
                 vx += c[i][j] * mono[j * 2];
                 vy += c[i][j] * mono[j * 2 + 1];
             }
-            values[i * 2]     = vx;
+            values[i * 2] = vx;
             values[i * 2 + 1] = vy;
         }
     }
@@ -231,10 +274,14 @@ impl VectorReferenceElement for TriND2 {
 
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
         // H(curl) elements have zero divergence in the natural sense.
-        for v in div_vals.iter_mut() { *v = 0.0; }
+        for v in div_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     /// DOF sites:
     /// - 2 Gauss points per edge (at 1/3 and 2/3 along each edge)
@@ -242,17 +289,17 @@ impl VectorReferenceElement for TriND2 {
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
             // Edge e₀ (η=0): ξ = 1/3 and 2/3
-            vec![1.0/3.0, 0.0],
-            vec![2.0/3.0, 0.0],
+            vec![1.0 / 3.0, 0.0],
+            vec![2.0 / 3.0, 0.0],
             // Edge e₁ (v₁→v₂): param t=1/3 → (2/3, 1/3), t=2/3 → (1/3, 2/3)
-            vec![2.0/3.0, 1.0/3.0],
-            vec![1.0/3.0, 2.0/3.0],
+            vec![2.0 / 3.0, 1.0 / 3.0],
+            vec![1.0 / 3.0, 2.0 / 3.0],
             // Edge e₂ (ξ=0): η = 1/3 and 2/3
-            vec![0.0, 1.0/3.0],
-            vec![0.0, 2.0/3.0],
+            vec![0.0, 1.0 / 3.0],
+            vec![0.0, 2.0 / 3.0],
             // Interior
-            vec![1.0/3.0, 1.0/3.0],
-            vec![1.0/4.0, 1.0/4.0],
+            vec![1.0 / 3.0, 1.0 / 3.0],
+            vec![1.0 / 4.0, 1.0 / 4.0],
         ]
     }
 }
@@ -269,7 +316,10 @@ mod tests {
         let c = coeff();
         // Diagonal should not all be zero
         let diag_sum: f64 = (0..8).map(|i| c[i][i].abs()).sum();
-        assert!(diag_sum > 0.1, "coefficient matrix diagonal is unexpectedly small");
+        assert!(
+            diag_sum > 0.1,
+            "coefficient matrix diagonal is unexpectedly small"
+        );
     }
 
     /// Nodal basis property: DOF_j(Φᵢ) ≈ δᵢⱼ.
@@ -285,8 +335,13 @@ mod tests {
         let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
         let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
         let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
-        let gl_pts = [0.5*(1.0-tb), 0.5*(1.0-ta), 0.5*(1.0+ta), 0.5*(1.0+tb)];
-        let gl_wts = [0.5*wb, 0.5*wa, 0.5*wa, 0.5*wb];
+        let gl_pts = [
+            0.5 * (1.0 - tb),
+            0.5 * (1.0 - ta),
+            0.5 * (1.0 + ta),
+            0.5 * (1.0 + tb),
+        ];
+        let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
 
         // DOF matrix (DOF_j applies to basis function i): should be identity
         let mut dof_mat = [[0.0f64; 8]; 8];
@@ -296,8 +351,8 @@ mod tests {
             elem.eval_basis_vec(&[t, 0.0], &mut vals);
             for i in 0..8 {
                 let tang = vals[i * 2]; // Φ_x
-                dof_mat[0][i] += w * tang;         // ∫ Φ_x dξ
-                dof_mat[1][i] += w * tang * t;     // ∫ Φ_x · ξ dξ
+                dof_mat[0][i] += w * tang; // ∫ Φ_x dξ
+                dof_mat[1][i] += w * tang * t; // ∫ Φ_x · ξ dξ
             }
         }
 
@@ -338,7 +393,8 @@ mod tests {
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!(
                     (dof_mat[j][i] - expected).abs() < 1e-10,
-                    "DOF_{j}(Phi_{i}) = {}, expected {expected}", dof_mat[j][i]
+                    "DOF_{j}(Phi_{i}) = {}, expected {expected}",
+                    dof_mat[j][i]
                 );
             }
         }
@@ -351,19 +407,14 @@ mod tests {
         let curl = vec![0.0; 8];
         let curl2 = vec![0.0; 8];
 
-        let pts = [
-            [0.1, 0.1],
-            [0.5, 0.2],
-            [0.2, 0.5],
-            [1.0/3.0, 1.0/3.0],
-        ];
+        let pts = [[0.1, 0.1], [0.5, 0.2], [0.2, 0.5], [1.0 / 3.0, 1.0 / 3.0]];
         // Evaluate curl at p and at 2*p; for linear functions curl(2p)=2*curl(p) only at origin...
         // Better test: verify curl changes linearly between two points.
         // curl(t*p1 + (1-t)*p2) = t*curl(p1) + (1-t)*curl(p2)
         let p1 = [0.1, 0.2_f64];
         let p2 = [0.3, 0.1_f64];
         let t = 0.4f64;
-        let pm = [t * p1[0] + (1.0-t)*p2[0], t * p1[1] + (1.0-t)*p2[1]];
+        let pm = [t * p1[0] + (1.0 - t) * p2[0], t * p1[1] + (1.0 - t) * p2[1]];
         let mut c1 = vec![0.0; 8];
         let mut c2 = vec![0.0; 8];
         let mut cm = vec![0.0; 8];
@@ -371,21 +422,29 @@ mod tests {
         elem.eval_curl(&p2, &mut c2);
         elem.eval_curl(&pm, &mut cm);
         for i in 0..8 {
-            let interp = t * c1[i] + (1.0-t) * c2[i];
+            let interp = t * c1[i] + (1.0 - t) * c2[i];
             assert!(
                 (cm[i] - interp).abs() < 1e-12,
-                "curl is not linear for basis {i}: {}, expected {interp}", cm[i]
+                "curl is not linear for basis {i}: {}, expected {interp}",
+                cm[i]
             );
         }
         let _ = pts; // suppress warning
-        let _ = curl; let _ = curl2;
+        let _ = curl;
+        let _ = curl2;
     }
 
     #[test]
     fn nd2_basis_values_finite() {
         let elem = TriND2;
         let mut vals = vec![0.0; 16];
-        for xi in &[[0.0,0.0],[1.0,0.0],[0.0,1.0],[0.25,0.25],[1.0/3.0,1.0/3.0]] {
+        for xi in &[
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.25, 0.25],
+            [1.0 / 3.0, 1.0 / 3.0],
+        ] {
             elem.eval_basis_vec(xi, &mut vals);
             for v in &vals {
                 assert!(v.is_finite(), "non-finite value at {xi:?}: {v}");

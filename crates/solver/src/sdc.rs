@@ -153,7 +153,10 @@ mod tests {
         }
         let expected = exp_decay_exact(t);
         let err = (u[0] - expected).abs();
-        assert!(err < 0.05, "SDC error at t={t}: {err:.3e}, expected {expected:.6}");
+        assert!(
+            err < 0.05,
+            "SDC error at t={t}: {err:.3e}, expected {expected:.6}"
+        );
     }
 
     #[test]
@@ -162,7 +165,7 @@ mod tests {
         let t_final = 1.0;
         let n_steps = (t_final / dt) as usize;
 
-        // M=3, K=1 (one sweep)  
+        // M=3, K=1 (one sweep)
         let sdc1 = SdcIntegrator::new(SdcConfig { m: 3, k: 1 });
         let mut u1 = vec![1.0];
         let mut t = 0.0;
@@ -182,7 +185,9 @@ mod tests {
         }
         let err10 = (u10[0] - exp_decay_exact(t)).abs();
 
-        assert!(err10 <= err1 * 1.01 || err1 > 1e-10,
-            "more SDC sweeps should not increase error: K1={err1:.3e} K10={err10:.3e}");
+        assert!(
+            err10 <= err1 * 1.01 || err1 > 1e-10,
+            "more SDC sweeps should not increase error: K1={err1:.3e} K10={err10:.3e}"
+        );
     }
 }

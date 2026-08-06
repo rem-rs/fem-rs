@@ -7,8 +7,7 @@
 use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::{
-    DeviceBuffer, GpuContext, GpuCsrMatrix, GpuVector,
-    SpmvPipeline, VectorOpsPipeline,
+    DeviceBuffer, GpuContext, GpuCsrMatrix, GpuVector, SpmvPipeline, VectorOpsPipeline,
 };
 use wgpu;
 
@@ -66,15 +65,28 @@ impl<T: Scalar> GpuSolverBase<T> {
         );
         let b_norm = vops.compute_norm2(ctx, &gpu_b);
 
-        Self { n, spmv, vops, gpu_a, gpu_b, gpu_x, gpu_r, dot_buf, b_norm }
+        Self {
+            n,
+            spmv,
+            vops,
+            gpu_a,
+            gpu_b,
+            gpu_x,
+            gpu_r,
+            dot_buf,
+            b_norm,
+        }
     }
 
     /// Compute the initial residual `r = b − A·x` in a single encoder.
     /// Coefficients 1.0 and -1.0 are always f64; the pipeline casts internally.
     pub fn compute_residual(&self, ctx: &GpuContext, enc: &mut wgpu::CommandEncoder) {
-        self.spmv.encode_spmv(ctx, enc, 1.0, &self.gpu_a, &self.gpu_x, 0.0, &self.gpu_r);
-        self.vops.encode_axpy(ctx, enc, 1.0, &self.gpu_b, 0.0, &self.gpu_r);
-        self.vops.encode_axpy(ctx, enc, -1.0, &self.gpu_r, 1.0, &self.gpu_r);
+        self.spmv
+            .encode_spmv(ctx, enc, 1.0, &self.gpu_a, &self.gpu_x, 0.0, &self.gpu_r);
+        self.vops
+            .encode_axpy(ctx, enc, 1.0, &self.gpu_b, 0.0, &self.gpu_r);
+        self.vops
+            .encode_axpy(ctx, enc, -1.0, &self.gpu_r, 1.0, &self.gpu_r);
     }
 
     /// Submit a simple encoder and wait for completion.

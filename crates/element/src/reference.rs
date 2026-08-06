@@ -10,14 +10,16 @@
 #[derive(Debug, Clone)]
 pub struct QuadratureRule {
     /// Reference-coordinate quadrature points.  `points[q].len() == dim`.
-    pub points:  Vec<Vec<f64>>,
+    pub points: Vec<Vec<f64>>,
     /// Quadrature weights.
     pub weights: Vec<f64>,
 }
 
 impl QuadratureRule {
     /// Number of quadrature points.
-    pub fn n_points(&self) -> usize { self.weights.len() }
+    pub fn n_points(&self) -> usize {
+        self.weights.len()
+    }
 }
 
 /// A reference finite element: basis functions defined on a fixed reference domain.
@@ -60,7 +62,7 @@ pub trait ReferenceElement: Send + Sync {
         let n = self.n_dofs();
         let d = self.dim() as usize;
         let h = 1e-6_f64;
-        let mut g_plus  = vec![0.0_f64; n * d];
+        let mut g_plus = vec![0.0_f64; n * d];
         let mut g_minus = vec![0.0_f64; n * d];
         for di in 0..d {
             let mut xi_p = xi.to_vec();
@@ -143,7 +145,10 @@ mod tests {
         let mut hess = vec![0.0_f64; n * d * d];
         elem.eval_hessian(&[0.3, 0.2], &mut hess);
         let max_h: f64 = hess.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        assert!(max_h < 5e-6, "TriP1 Hessian should be ~zero, got |max|={max_h:.3e}");
+        assert!(
+            max_h < 5e-6,
+            "TriP1 Hessian should be ~zero, got |max|={max_h:.3e}"
+        );
     }
 
     #[test]
@@ -158,10 +163,14 @@ mod tests {
         // d^2 phi_3 / dx dy = -4.
         let dxy = hess[3 * 4 + 0 * 2 + 1];
         let dyx = hess[3 * 4 + 1 * 2 + 0];
-        assert!((dxy - (-4.0)).abs() < 5e-6,
-            "d^2phi_3/dxdy should be -4, got {dxy:.6e}");
-        assert!((dyx - (-4.0)).abs() < 5e-6,
-            "d^2phi_3/dydx should be -4, got {dyx:.6e}");
+        assert!(
+            (dxy - (-4.0)).abs() < 5e-6,
+            "d^2phi_3/dxdy should be -4, got {dxy:.6e}"
+        );
+        assert!(
+            (dyx - (-4.0)).abs() < 5e-6,
+            "d^2phi_3/dydx should be -4, got {dyx:.6e}"
+        );
         assert!((dxy - dyx).abs() < 1e-12, "Hessian symmetry violated");
     }
 
@@ -181,8 +190,10 @@ mod tests {
             let mut hess = vec![0.0_f64; n * d * d];
             let xi: Vec<f64> = (0..d).map(|_| 0.3).collect();
             elem.eval_hessian(&xi, &mut hess);
-            assert!(hess.iter().all(|v| v.is_finite()),
-                "eval_hessian produced non-finite for dim={d} n={n}");
+            assert!(
+                hess.iter().all(|v| v.is_finite()),
+                "eval_hessian produced non-finite for dim={d} n={n}"
+            );
         }
     }
 }

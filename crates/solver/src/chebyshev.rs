@@ -46,17 +46,26 @@ impl ChebyshevSmoother {
 
         // Inverse diagonal (1 for BC DOFs, matching C++ OperatorChebyshevSmoother)
         let mut dinv = vec![0.0; n];
-        for i in 0..n { dinv[i] = if diag[i].abs() > 1e-30 { 1.0 / diag[i] } else { 1.0 }; }
-        for &d in bc_dofs { if (d as usize) < n { dinv[d as usize] = 1.0; } }
+        for i in 0..n {
+            dinv[i] = if diag[i].abs() > 1e-30 {
+                1.0 / diag[i]
+            } else {
+                1.0
+            };
+        }
+        for &d in bc_dofs {
+            if (d as usize) < n {
+                dinv[d as usize] = 1.0;
+            }
+        }
 
         // Estimate λ_max via power iteration on D⁻¹A
-        let max_eig = max_eig_estimate.unwrap_or_else(|| {
-            estimate_max_eigenvalue(a, &dinv, bc_dofs)
-        });
+        let max_eig =
+            max_eig_estimate.unwrap_or_else(|| estimate_max_eigenvalue(a, &dinv, bc_dofs));
 
         // Chebyshev parameters (matching MFEM OperatorChebyshevSmoother::Setup)
-        let upper = 1.2 * max_eig;  // over-estimate upper bound
-        let lower = 0.3 * max_eig;  // under-estimate lower bound
+        let upper = 1.2 * max_eig; // over-estimate upper bound
+        let lower = 0.3 * max_eig; // under-estimate lower bound
         let theta = 0.5 * (upper + lower);
         let delta = 0.5 * (upper - lower);
         let th2 = theta * theta;
@@ -73,7 +82,11 @@ impl ChebyshevSmoother {
                 let tmp0 = 3.0 * d2;
                 let tmp1 = th2;
                 let tmp2 = 1.0 / (-4.0 * theta * th2 + theta * tmp0);
-                vec![tmp2 * (tmp0 - 12.0 * tmp1), 12.0 / (tmp0 - 4.0 * tmp1), -4.0 * tmp2]
+                vec![
+                    tmp2 * (tmp0 - 12.0 * tmp1),
+                    12.0 / (tmp0 - 4.0 * tmp1),
+                    -4.0 * tmp2,
+                ]
             }
             3 => {
                 let tmp0 = 8.0 * d2;
@@ -103,7 +116,9 @@ impl ChebyshevSmoother {
     pub fn mult(&mut self, a: &CsrMatrix<f64>, rhs: &[f64], sol: &mut [f64]) {
         let n = self.n;
         // y = 0
-        for i in 0..n { sol[i] = 0.0; }
+        for i in 0..n {
+            sol[i] = 0.0;
+        }
 
         // residual starts as a copy of rhs
         let mut r = rhs.to_vec();
@@ -115,11 +130,15 @@ impl ChebyshevSmoother {
             }
 
             // r = D⁻¹ * r
-            for i in 0..n { r[i] *= self.dinv[i]; }
+            for i in 0..n {
+                r[i] *= self.dinv[i];
+            }
 
             // sol += coeffs[k] * r
             let c = self.coeffs[k];
-            for i in 0..n { sol[i] += c * r[i]; }
+            for i in 0..n {
+                sol[i] += c * r[i];
+            }
 
             // Save r as tmp for next iteration (need to multiply by A)
             // Actually we need A * r for the next iteration
@@ -128,7 +147,11 @@ impl ChebyshevSmoother {
         }
 
         // Zero BC DOFs
-        for &d in &self.bc_dofs { if (d as usize) < n { sol[d as usize] = 0.0; } }
+        for &d in &self.bc_dofs {
+            if (d as usize) < n {
+                sol[d as usize] = 0.0;
+            }
+        }
     }
 }
 
@@ -139,29 +162,52 @@ fn estimate_max_eigenvalue(a: &CsrMatrix<f64>, dinv: &[f64], bc_dofs: &[u32]) ->
     let mut w = vec![0.0; n];
 
     // Seed with non-uniform values
-    for i in 0..n { v[i] = 1.0 + (i as f64) / (n as f64); }
-    for &d in bc_dofs { if (d as usize) < n { v[d as usize] = 0.0; } }
+    for i in 0..n {
+        v[i] = 1.0 + (i as f64) / (n as f64);
+    }
+    for &d in bc_dofs {
+        if (d as usize) < n {
+            v[d as usize] = 0.0;
+        }
+    }
 
     let mut lambda = 0.0;
     for _iter in 0..50 {
         // w = D⁻¹ * A * v
         a.spmv(&v, &mut w);
-        for i in 0..n { w[i] *= dinv[i]; }
-        for &d in bc_dofs { if (d as usize) < n { w[d as usize] = 0.0; } }
+        for i in 0..n {
+            w[i] *= dinv[i];
+        }
+        for &d in bc_dofs {
+            if (d as usize) < n {
+                w[d as usize] = 0.0;
+            }
+        }
 
         // Rayleigh quotient
         let vw: f64 = (0..n).map(|i| v[i] * w[i]).sum();
         let vv: f64 = (0..n).map(|i| v[i] * v[i]).sum();
-        if vv < 1e-30 { break; }
+        if vv < 1e-30 {
+            break;
+        }
         let new_lambda = vw / vv;
 
-        if (new_lambda - lambda).abs() < 1e-6 * new_lambda.abs() { lambda = new_lambda; break; }
+        if (new_lambda - lambda).abs() < 1e-6 * new_lambda.abs() {
+            lambda = new_lambda;
+            break;
+        }
         lambda = new_lambda;
 
         // Normalize
         let nrm = w.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
-        for i in 0..n { v[i] = w[i] / nrm; }
-        for &d in bc_dofs { if (d as usize) < n { v[d as usize] = 0.0; } }
+        for i in 0..n {
+            v[i] = w[i] / nrm;
+        }
+        for &d in bc_dofs {
+            if (d as usize) < n {
+                v[d as usize] = 0.0;
+            }
+        }
     }
     lambda.abs().max(0.1) // ensure minimum estimate
 }

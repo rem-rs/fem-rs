@@ -663,7 +663,7 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         dim,
         n_vertex_dofs: n_nodes,
         edge_dof_map: HashMap::new(),
-        edge_dof2_map: HashMap::new(),
+        edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), 
         edge_pk_map,
         face_pk_map,
         quad_face_pk_map: HashMap::new(),

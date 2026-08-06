@@ -17,9 +17,15 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct HexRT1;
 
 impl VectorReferenceElement for HexRT1 {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 1 }
-    fn n_dofs(&self) -> usize { 36 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        36
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         HexRTk::new(1).eval_basis_vec(xi, values);
@@ -30,10 +36,14 @@ impl VectorReferenceElement for HexRT1 {
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
-        for v in curl_vals.iter_mut() { *v = 0.0; }
+        for v in curl_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { hex_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        hex_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         (0..36).map(|_| vec![0.0, 0.0, 0.0]).collect()
@@ -53,11 +63,11 @@ mod tests {
     fn hex_rt1_basis_finite() {
         let elem = HexRT1;
         let mut v = vec![0.0; 36 * 3];
-        for xi in &[
-            vec![0., 0., 0.], vec![1., -1., 0.5], vec![-0.5, 0.5, 1.],
-        ] {
+        for xi in &[vec![0., 0., 0.], vec![1., -1., 0.5], vec![-0.5, 0.5, 1.]] {
             elem.eval_basis_vec(xi, &mut v);
-            for &val in &v { assert!(val.is_finite(), "non-finite at {xi:?}: {val}"); }
+            for &val in &v {
+                assert!(val.is_finite(), "non-finite at {xi:?}: {val}");
+            }
         }
     }
 
@@ -68,7 +78,9 @@ mod tests {
         let qr = elem.quadrature(3);
         for xi in &qr.points {
             elem.eval_div(xi, &mut div);
-            for &d in &div { assert!(d.is_finite()); }
+            for &d in &div {
+                assert!(d.is_finite());
+            }
         }
     }
 }

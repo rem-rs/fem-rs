@@ -43,41 +43,56 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct TriRT0;
 
 impl VectorReferenceElement for TriRT0 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 0 }
-    fn n_dofs(&self) -> usize  { 3 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        0
+    }
+    fn n_dofs(&self) -> usize {
+        3
+    }
 
     /// `values[i*2 + c]` = component c of RT0 basis function i.
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
         // Φ₀ = (ξ, η)
-        values[0] = x;      values[1] = y;
+        values[0] = x;
+        values[1] = y;
         // Φ₁ = (ξ−1, η)
-        values[2] = x - 1.0; values[3] = y;
+        values[2] = x - 1.0;
+        values[3] = y;
         // Φ₂ = (ξ, η−1)
-        values[4] = x;      values[5] = y - 1.0;
+        values[4] = x;
+        values[5] = y - 1.0;
     }
 
     /// Curl of RT0 functions: `curl(Φ_x, Φ_y) = ∂Φ_y/∂ξ − ∂Φ_x/∂η`.
     /// For RT0: all curls are 0 (div-conforming, not curl-conforming).
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
-        for v in curl_vals.iter_mut() { *v = 0.0; }
+        for v in curl_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
     /// Divergence: constant 2 for all RT0 basis functions.
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
         // div Φᵢ = ∂Φᵢ_x/∂ξ + ∂Φᵢ_y/∂η = 1 + 1 = 2
-        for v in div_vals.iter_mut() { *v = 2.0; }
+        for v in div_vals.iter_mut() {
+            *v = 2.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     /// DOF sites: midpoints of the three faces (edges).
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.5, 0.5],  // midpoint of f₀: v₁→v₂
-            vec![0.0, 0.5],  // midpoint of f₁: v₀→v₂
-            vec![0.5, 0.0],  // midpoint of f₂: v₀→v₁
+            vec![0.5, 0.5], // midpoint of f₀: v₁→v₂
+            vec![0.0, 0.5], // midpoint of f₁: v₀→v₂
+            vec![0.5, 0.0], // midpoint of f₂: v₀→v₁
         ]
     }
 }
@@ -120,7 +135,7 @@ mod tests {
         for (j, (normal, len)) in faces.iter().enumerate() {
             elem.eval_basis_vec(&mids[j], &mut vals);
             for i in 0..3 {
-                let dof = (vals[i*2]*normal[0] + vals[i*2+1]*normal[1]) * len;
+                let dof = (vals[i * 2] * normal[0] + vals[i * 2 + 1] * normal[1]) * len;
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!(
                     (dof - expected).abs() < 1e-12,

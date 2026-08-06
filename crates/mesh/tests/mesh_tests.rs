@@ -198,6 +198,7 @@ fn mixed_mesh_elem_type_accessor() {
         face_to_elem: None,
         edge_conn: vec![],
         edge_to_elem: vec![],
+        nc_vertex_view: None,
         geometry: None,
     };
 

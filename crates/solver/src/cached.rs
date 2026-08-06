@@ -1,9 +1,11 @@
-use linlvo::{
-    iterative::{ConjugateGradient, Gmres},
-    DenseVec, Ilu0Precond, IldltPrecond, JacobiPrecond, KrylovSolver, Preconditioner,
+use fem_linalg::{
+    fem_to_linlvo_csr, into_result, CsrMatrix, SolveResult, SolverConfig, SolverError,
 };
 use linlvo::sparse::CsrMatrix as LinlvoCsr;
-use fem_linalg::{CsrMatrix, SolverConfig, SolverError, SolveResult, fem_to_linlvo_csr, into_result};
+use linlvo::{
+    iterative::{ConjugateGradient, Gmres},
+    DenseVec, IldltPrecond, Ilu0Precond, JacobiPrecond, KrylovSolver, Preconditioner,
+};
 
 /// Available preconditioner types for [`CachedSolver`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +65,11 @@ impl CachedSolver {
     pub fn new(a: &CsrMatrix<f64>, kind: CachedPrecond) -> Result<Self, SolverError> {
         let la = fem_to_linlvo_csr(a);
         let precond = build_precond(&la, kind)?;
-        Ok(Self { la, precond_kind: kind, precond })
+        Ok(Self {
+            la,
+            precond_kind: kind,
+            precond,
+        })
     }
 
     /// Solve `Ax = b` with Conjugate Gradient.
@@ -132,25 +138,19 @@ impl CachedSolver {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-fn build_precond(
-    la: &LinlvoCsr<f64>,
-    kind: CachedPrecond,
-) -> Result<PrecondInstance, SolverError> {
+fn build_precond(la: &LinlvoCsr<f64>, kind: CachedPrecond) -> Result<PrecondInstance, SolverError> {
     match kind {
         CachedPrecond::None => Ok(PrecondInstance::None),
         CachedPrecond::Jacobi => {
-            let p = JacobiPrecond::from_csr(la)
-                .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+            let p = JacobiPrecond::from_csr(la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
             Ok(PrecondInstance::Jacobi(p))
         }
         CachedPrecond::Ilu0 => {
-            let p = Ilu0Precond::from_csr(la)
-                .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+            let p = Ilu0Precond::from_csr(la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
             Ok(PrecondInstance::Ilu0(p))
         }
         CachedPrecond::Ildlt => {
-            let p = IldltPrecond::from_csr(la)
-                .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+            let p = IldltPrecond::from_csr(la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
             Ok(PrecondInstance::Ildlt(p))
         }
     }

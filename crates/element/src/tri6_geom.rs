@@ -55,20 +55,20 @@ pub fn eval_basis(xi: &[f64], phi: &mut [f64]) {
 pub fn eval_grad_basis(xi: &[f64], grads: &mut [f64]) {
     let (x, y) = (xi[0], xi[1]);
     // node 0: φ = λ₁(2λ₁−1)
-    grads[0]  = 4.0 * x + 4.0 * y - 3.0;   // ∂/∂ξ
-    grads[1]  = 4.0 * x + 4.0 * y - 3.0;   // ∂/∂η
-    // node 1: φ = λ₂(2λ₂−1)
-    grads[2]  = 4.0 * x - 1.0;
-    grads[3]  = 0.0;
+    grads[0] = 4.0 * x + 4.0 * y - 3.0; // ∂/∂ξ
+    grads[1] = 4.0 * x + 4.0 * y - 3.0; // ∂/∂η
+                                        // node 1: φ = λ₂(2λ₂−1)
+    grads[2] = 4.0 * x - 1.0;
+    grads[3] = 0.0;
     // node 2: φ = λ₃(2λ₃−1)
-    grads[4]  = 0.0;
-    grads[5]  = 4.0 * y - 1.0;
+    grads[4] = 0.0;
+    grads[5] = 4.0 * y - 1.0;
     // node 3: φ = 4λ₁λ₂
-    grads[6]  = 4.0 * (1.0 - 2.0 * x - y);
-    grads[7]  = -4.0 * x;
+    grads[6] = 4.0 * (1.0 - 2.0 * x - y);
+    grads[7] = -4.0 * x;
     // node 4: φ = 4λ₂λ₃
-    grads[8]  = 4.0 * y;
-    grads[9]  = 4.0 * x;
+    grads[8] = 4.0 * y;
+    grads[9] = 4.0 * x;
     // node 5: φ = 4λ₁λ₃
     grads[10] = -4.0 * y;
     grads[11] = 4.0 * (1.0 - x - 2.0 * y);
@@ -91,14 +91,14 @@ pub fn jacobian(nodes_flat: &[f64], xi: &[f64]) -> ([f64; 4], f64) {
 
     let mut j = [0.0f64; 4]; // [J00, J01, J10, J11]
     for k in 0..6 {
-        let xk = nodes_flat[2 * k    ];
+        let xk = nodes_flat[2 * k];
         let yk = nodes_flat[2 * k + 1];
-        let dphi_dxi = grads[2 * k    ];
+        let dphi_dxi = grads[2 * k];
         let dphi_det = grads[2 * k + 1];
-        j[0] += xk * dphi_dxi;  // J[0,0]
-        j[1] += xk * dphi_det;  // J[0,1]
-        j[2] += yk * dphi_dxi;  // J[1,0]
-        j[3] += yk * dphi_det;  // J[1,1]
+        j[0] += xk * dphi_dxi; // J[0,0]
+        j[1] += xk * dphi_det; // J[0,1]
+        j[2] += yk * dphi_dxi; // J[1,0]
+        j[3] += yk * dphi_det; // J[1,1]
     }
     let det = j[0] * j[3] - j[1] * j[2];
     (j, det)
@@ -114,10 +114,10 @@ pub fn jacobian(nodes_flat: &[f64], xi: &[f64]) -> ([f64; 4], f64) {
 pub fn inv_jacobian(j_flat: &[f64; 4], det: f64) -> [f64; 4] {
     let inv_det = 1.0 / det;
     [
-         j_flat[3] * inv_det,   // J⁻¹₀₀ =  J₁₁ / det
-        -j_flat[1] * inv_det,   // J⁻¹₀₁ = −J₀₁ / det
-        -j_flat[2] * inv_det,   // J⁻¹₁₀ = −J₁₀ / det
-         j_flat[0] * inv_det,   // J⁻¹₁₁ =  J₀₀ / det
+        j_flat[3] * inv_det,  // J⁻¹₀₀ =  J₁₁ / det
+        -j_flat[1] * inv_det, // J⁻¹₀₁ = −J₀₁ / det
+        -j_flat[2] * inv_det, // J⁻¹₁₀ = −J₁₀ / det
+        j_flat[0] * inv_det,  // J⁻¹₁₁ =  J₀₀ / det
     ]
 }
 
@@ -130,7 +130,7 @@ pub fn ref_to_phys(nodes_flat: &[f64], xi: &[f64]) -> [f64; 2] {
     eval_basis(xi, &mut phi);
     let mut xp = [0.0f64; 2];
     for k in 0..6 {
-        xp[0] += nodes_flat[2 * k    ] * phi[k];
+        xp[0] += nodes_flat[2 * k] * phi[k];
         xp[1] += nodes_flat[2 * k + 1] * phi[k];
     }
     xp
@@ -144,20 +144,13 @@ mod tests {
 
     fn unit_tri6_nodes() -> [f64; 12] {
         // Vertices: (0,0), (1,0), (0,1); mid-edges: (0.5,0), (0.5,0.5), (0,0.5)
-        [
-            0.0, 0.0,
-            1.0, 0.0,
-            0.0, 1.0,
-            0.5, 0.0,
-            0.5, 0.5,
-            0.0, 0.5,
-        ]
+        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.5, 0.5, 0.0, 0.5]
     }
 
     #[test]
     fn partition_of_unity() {
         let pts: &[&[f64]] = &[
-            &[1.0/3.0, 1.0/3.0],
+            &[1.0 / 3.0, 1.0 / 3.0],
             &[0.1, 0.2],
             &[0.5, 0.5],
             &[0.0, 0.0],
@@ -168,8 +161,10 @@ mod tests {
             let mut phi = [0.0f64; 6];
             eval_basis(xi, &mut phi);
             let sum: f64 = phi.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-14,
-                "POU failed at xi={xi:?}: sum={sum:.15e}");
+            assert!(
+                (sum - 1.0).abs() < 1e-14,
+                "POU failed at xi={xi:?}: sum={sum:.15e}"
+            );
         }
     }
 
@@ -180,12 +175,18 @@ mod tests {
         for (v, xi) in pts.iter().enumerate() {
             let mut phi = [0.0f64; 6];
             eval_basis(xi, &mut phi);
-            assert!((phi[v] - 1.0).abs() < 1e-14,
-                "phi[{v}] at vertex {v} = {} (expected 1)", phi[v]);
+            assert!(
+                (phi[v] - 1.0).abs() < 1e-14,
+                "phi[{v}] at vertex {v} = {} (expected 1)",
+                phi[v]
+            );
             for j in 0..3 {
                 if j != v {
-                    assert!(phi[j].abs() < 1e-14,
-                        "phi[{j}] at vertex {v} = {} (expected 0)", phi[j]);
+                    assert!(
+                        phi[j].abs() < 1e-14,
+                        "phi[{j}] at vertex {v} = {} (expected 0)",
+                        phi[j]
+                    );
                 }
             }
         }
@@ -194,16 +195,15 @@ mod tests {
     #[test]
     fn basis_at_midpoints() {
         // Mid-edge node 3 = (0.5, 0): φ₃ = 1, all others = 0.
-        let mid_pts: &[(&[f64], usize)] = &[
-            (&[0.5, 0.0], 3),
-            (&[0.5, 0.5], 4),
-            (&[0.0, 0.5], 5),
-        ];
+        let mid_pts: &[(&[f64], usize)] = &[(&[0.5, 0.0], 3), (&[0.5, 0.5], 4), (&[0.0, 0.5], 5)];
         for &(xi, idx) in mid_pts {
             let mut phi = [0.0f64; 6];
             eval_basis(xi, &mut phi);
-            assert!((phi[idx] - 1.0).abs() < 1e-14,
-                "phi[{idx}] at mid-node {idx} = {} (expected 1)", phi[idx]);
+            assert!(
+                (phi[idx] - 1.0).abs() < 1e-14,
+                "phi[{idx}] at mid-node {idx} = {} (expected 1)",
+                phi[idx]
+            );
         }
     }
 
@@ -211,19 +211,19 @@ mod tests {
     fn jacobian_unit_triangle_is_identity() {
         // For the unit reference triangle, J should be the 2×2 identity.
         let nodes = unit_tri6_nodes();
-        let (j, det) = jacobian(&nodes, &[1.0/3.0, 1.0/3.0]);
+        let (j, det) = jacobian(&nodes, &[1.0 / 3.0, 1.0 / 3.0]);
         assert!((j[0] - 1.0).abs() < 1e-13, "J00 = {}", j[0]);
-        assert!((j[1]).abs()       < 1e-13, "J01 = {}", j[1]);
-        assert!((j[2]).abs()       < 1e-13, "J10 = {}", j[2]);
+        assert!((j[1]).abs() < 1e-13, "J01 = {}", j[1]);
+        assert!((j[2]).abs() < 1e-13, "J10 = {}", j[2]);
         assert!((j[3] - 1.0).abs() < 1e-13, "J11 = {}", j[3]);
-        assert!((det - 1.0).abs()  < 1e-13, "det = {}", det);
+        assert!((det - 1.0).abs() < 1e-13, "det = {}", det);
     }
 
     #[test]
     fn jacobian_positive_in_reference_triangle() {
         let nodes = unit_tri6_nodes();
         let pts: &[&[f64]] = &[
-            &[1.0/3.0, 1.0/3.0],
+            &[1.0 / 3.0, 1.0 / 3.0],
             &[0.1, 0.1],
             &[0.7, 0.2],
             &[0.1, 0.7],
@@ -245,8 +245,8 @@ mod tests {
         let a10 = j[2] * jinv[0] + j[3] * jinv[2];
         let a11 = j[2] * jinv[1] + j[3] * jinv[3];
         assert!((a00 - 1.0).abs() < 1e-13, "J·J⁻¹ [0,0] = {a00}");
-        assert!(a01.abs()          < 1e-13, "J·J⁻¹ [0,1] = {a01}");
-        assert!(a10.abs()          < 1e-13, "J·J⁻¹ [1,0] = {a10}");
+        assert!(a01.abs() < 1e-13, "J·J⁻¹ [0,1] = {a01}");
+        assert!(a10.abs() < 1e-13, "J·J⁻¹ [1,0] = {a10}");
         assert!((a11 - 1.0).abs() < 1e-13, "J·J⁻¹ [1,1] = {a11}");
     }
 
@@ -260,10 +260,18 @@ mod tests {
         ];
         for &(xi, expected) in pts {
             let xp = ref_to_phys(&nodes, xi);
-            assert!((xp[0] - expected[0]).abs() < 1e-13,
-                "x mismatch at {xi:?}: got {}, expected {}", xp[0], expected[0]);
-            assert!((xp[1] - expected[1]).abs() < 1e-13,
-                "y mismatch at {xi:?}: got {}, expected {}", xp[1], expected[1]);
+            assert!(
+                (xp[0] - expected[0]).abs() < 1e-13,
+                "x mismatch at {xi:?}: got {}, expected {}",
+                xp[0],
+                expected[0]
+            );
+            assert!(
+                (xp[1] - expected[1]).abs() < 1e-13,
+                "y mismatch at {xi:?}: got {}, expected {}",
+                xp[1],
+                expected[1]
+            );
         }
     }
 
@@ -286,17 +294,12 @@ mod tests {
     fn scaled_triangle_jacobian() {
         // Nodes for triangle [0,0], [2,0], [0,2]: J = [[2,0],[0,2]], det = 4.
         let nodes = [
-            0.0f64, 0.0,
-            2.0,    0.0,
-            0.0,    2.0,
-            1.0,    0.0,
-            1.0,    1.0,
-            0.0,    1.0,
+            0.0f64, 0.0, 2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
         ];
-        let (j, det) = jacobian(&nodes, &[1.0/3.0, 1.0/3.0]);
+        let (j, det) = jacobian(&nodes, &[1.0 / 3.0, 1.0 / 3.0]);
         assert!((j[0] - 2.0).abs() < 1e-13);
         assert!((j[3] - 2.0).abs() < 1e-13);
-        assert!((det - 4.0).abs()  < 1e-13);
+        assert!((det - 4.0).abs() < 1e-13);
     }
 
     #[test]
@@ -314,10 +317,18 @@ mod tests {
         for i in 0..6 {
             let fd_dx = (phi_dx[i] - phi[i]) / h;
             let fd_dy = (phi_dy[i] - phi[i]) / h;
-            assert!((grads[2*i]   - fd_dx).abs() < 1e-6,
-                "∂φ{i}/∂ξ: analytic={:.8}, FD={:.8}", grads[2*i], fd_dx);
-            assert!((grads[2*i+1] - fd_dy).abs() < 1e-6,
-                "∂φ{i}/∂η: analytic={:.8}, FD={:.8}", grads[2*i+1], fd_dy);
+            assert!(
+                (grads[2 * i] - fd_dx).abs() < 1e-6,
+                "∂φ{i}/∂ξ: analytic={:.8}, FD={:.8}",
+                grads[2 * i],
+                fd_dx
+            );
+            assert!(
+                (grads[2 * i + 1] - fd_dy).abs() < 1e-6,
+                "∂φ{i}/∂η: analytic={:.8}, FD={:.8}",
+                grads[2 * i + 1],
+                fd_dy
+            );
         }
     }
 }

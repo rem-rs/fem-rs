@@ -38,7 +38,7 @@ use crate::reference::ReferenceElement;
 struct CacheKey {
     dim: u8,
     order: u8,
-    n_dofs: u16,   // supports up to 65535 DOFs
+    n_dofs: u16, // supports up to 65535 DOFs
     quad_order: u8,
 }
 
@@ -55,26 +55,38 @@ pub struct CachedBasis {
 
 impl CachedBasis {
     /// Number of basis functions (DOFs) for this element.
-    pub fn n_dofs(&self) -> usize { self.n_dofs }
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
 
     /// Spatial dimension (1, 2, or 3).
-    pub fn dim(&self) -> usize { self.dim }
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
 
     /// Number of quadrature points.
-    pub fn n_qp(&self) -> usize { self.n_qp }
+    pub fn n_qp(&self) -> usize {
+        self.n_qp
+    }
 
     /// Basis function values, flat array of length `n_qp * n_dofs`.
     ///
     /// Index: `phi[q * n_dofs + i]` = φᵢ(xi_q).
-    pub fn phi(&self) -> &[f64] { &self.phi }
+    pub fn phi(&self) -> &[f64] {
+        &self.phi
+    }
 
     /// Reference-element gradient values, flat array of length `n_qp * n_dofs * dim`.
     ///
     /// Index: `grad_ref[(q * n_dofs + i) * dim + d]` = ∂φᵢ(xi_q)/∂ξ_d.
-    pub fn grad_ref(&self) -> &[f64] { &self.grad_ref }
+    pub fn grad_ref(&self) -> &[f64] {
+        &self.grad_ref
+    }
 
     /// Shape of the data (n_qp, n_dofs, dim).
-    pub fn shape(&self) -> (usize, usize, usize) { (self.n_qp, self.n_dofs, self.dim) }
+    pub fn shape(&self) -> (usize, usize, usize) {
+        (self.n_qp, self.n_dofs, self.dim)
+    }
 }
 
 // ─── BasisCache ──────────────────────────────────────────────────────────────
@@ -90,7 +102,9 @@ pub struct BasisCache {
 impl BasisCache {
     /// Create an empty cache.
     pub fn new() -> Self {
-        BasisCache { cache: Mutex::new(HashMap::new()) }
+        BasisCache {
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Retrieve (or compute and cache) basis values and gradients for `elem`
@@ -138,12 +152,17 @@ impl BasisCache {
 
     /// Clear the cache.
     pub fn clear(&self) {
-        self.cache.lock().expect("BasisCache mutex poisoned").clear();
+        self.cache
+            .lock()
+            .expect("BasisCache mutex poisoned")
+            .clear();
     }
 }
 
 impl Default for BasisCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ─── Computation helper ──────────────────────────────────────────────────────
@@ -165,7 +184,13 @@ fn compute_cached_basis(elem: &dyn ReferenceElement, quad_order: u8) -> CachedBa
         elem.eval_grad_basis(xi, grad_slice);
     }
 
-    CachedBasis { phi, grad_ref, n_dofs, dim, n_qp }
+    CachedBasis {
+        phi,
+        grad_ref,
+        n_dofs,
+        dim,
+        n_qp,
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -189,8 +214,7 @@ mod tests {
         for q in 0..basis.n_qp() {
             let start = q * basis.n_dofs();
             let sum: f64 = basis.phi()[start..start + basis.n_dofs()].iter().sum();
-            assert!((sum - 1.0).abs() < 1e-14,
-                "P1 phi sum at qp {q} = {sum}");
+            assert!((sum - 1.0).abs() < 1e-14, "P1 phi sum at qp {q} = {sum}");
         }
     }
 
@@ -208,8 +232,7 @@ mod tests {
                 let s: f64 = (0..n_dofs)
                     .map(|i| basis.grad_ref()[base + i * dim + d])
                     .sum();
-                assert!(s.abs() < 1e-12,
-                    "P2 grad sum d={d} at qp {q} = {s}");
+                assert!(s.abs() < 1e-12, "P2 grad sum d={d} at qp {q} = {s}");
             }
         }
     }
@@ -225,7 +248,10 @@ mod tests {
 
         let basis_b = cache.get(&*elem, 4);
         assert_eq!(cache.len(), 1, "second get should not add new entry");
-        assert!(Arc::ptr_eq(&basis_a, &basis_b), "same key should return same Arc");
+        assert!(
+            Arc::ptr_eq(&basis_a, &basis_b),
+            "same key should return same Arc"
+        );
     }
 
     #[test]
@@ -265,8 +291,7 @@ mod tests {
         for q in 0..basis.n_qp() {
             let start = q * basis.n_dofs();
             let sum: f64 = basis.phi()[start..start + basis.n_dofs()].iter().sum();
-            assert!((sum - 1.0).abs() < 1e-12,
-                "SegP3 phi sum at qp {q} = {sum}");
+            assert!((sum - 1.0).abs() < 1e-12, "SegP3 phi sum at qp {q} = {sum}");
         }
     }
 
@@ -278,8 +303,10 @@ mod tests {
         for q in 0..basis.n_qp() {
             let start = q * basis.n_dofs();
             let sum: f64 = basis.phi()[start..start + basis.n_dofs()].iter().sum();
-            assert!((sum - 1.0).abs() < 1e-12,
-                "QuadQ2 phi sum at qp {q} = {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "QuadQ2 phi sum at qp {q} = {sum}"
+            );
         }
     }
 }

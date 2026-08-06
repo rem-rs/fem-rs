@@ -3,7 +3,10 @@
 //! Checks partition-of-unity, gradient consistency, and quadrature weight sums
 //! for each reference element type.
 
-use fem_element::{lagrange::{TetP1, TriP1, TriP2, QuadQ1}, ReferenceElement};
+use fem_element::{
+    lagrange::{QuadQ1, TetP1, TriP1, TriP2},
+    ReferenceElement,
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,8 +118,14 @@ fn tri_p1_grad_linear_function() {
             du_dxi += u_vals[i] * grad_ref[i * 2];
             du_deta += u_vals[i] * grad_ref[i * 2 + 1];
         }
-        assert!((du_dxi - 2.0).abs() < 1e-12, "∂u/∂ξ = {du_dxi:.6}, expected 2.0");
-        assert!((du_deta - 3.0).abs() < 1e-12, "∂u/∂η = {du_deta:.6}, expected 3.0");
+        assert!(
+            (du_dxi - 2.0).abs() < 1e-12,
+            "∂u/∂ξ = {du_dxi:.6}, expected 2.0"
+        );
+        assert!(
+            (du_deta - 3.0).abs() < 1e-12,
+            "∂u/∂η = {du_deta:.6}, expected 3.0"
+        );
     }
 }
 
@@ -140,8 +149,14 @@ fn quad_q1_grad_bilinear_function() {
             du_dxi += u_vals[i] * grad_ref[i * 2];
             du_deta += u_vals[i] * grad_ref[i * 2 + 1];
         }
-        assert!((du_dxi - 1.0).abs() < 1e-12, "Q1 ∂u/∂ξ = {du_dxi:.6}, expected 1.0 at xi={xi:?}");
-        assert!(du_deta.abs() < 1e-12, "Q1 ∂u/∂η = {du_deta:.6}, expected 0.0 at xi={xi:?}");
+        assert!(
+            (du_dxi - 1.0).abs() < 1e-12,
+            "Q1 ∂u/∂ξ = {du_dxi:.6}, expected 1.0 at xi={xi:?}"
+        );
+        assert!(
+            du_deta.abs() < 1e-12,
+            "Q1 ∂u/∂η = {du_deta:.6}, expected 0.0 at xi={xi:?}"
+        );
     }
 }
 
@@ -155,11 +170,19 @@ fn tri_p1_integrates_constant_exactly() {
     let mut phi = vec![0.0_f64; re.n_dofs()];
 
     // ∫ 1 dΩ over reference triangle = 0.5
-    let area: f64 = quad.points.iter().zip(quad.weights.iter()).map(|(xi, &w)| {
-        re.eval_basis(xi, &mut phi);
-        w * phi.iter().sum::<f64>()
-    }).sum();
-    assert!((area - 0.5).abs() < 1e-13, "∫1 dΩ = {area:.6e}, expected 0.5");
+    let area: f64 = quad
+        .points
+        .iter()
+        .zip(quad.weights.iter())
+        .map(|(xi, &w)| {
+            re.eval_basis(xi, &mut phi);
+            w * phi.iter().sum::<f64>()
+        })
+        .sum();
+    assert!(
+        (area - 0.5).abs() < 1e-13,
+        "∫1 dΩ = {area:.6e}, expected 0.5"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -183,9 +206,7 @@ fn ref_quad_coord() -> impl Strategy<Value = [f64; 2]> {
 /// Random point within the reference tetrahedron: ξ,η,ζ ≥ 0, ξ+η+ζ ≤ 1.
 fn ref_tet_coord() -> impl Strategy<Value = [f64; 3]> {
     (0.0f64..=1.0, 0.0f64..=1.0, 0.0f64..=1.0)
-        .prop_filter("outside tet", |&(xi, eta, zeta)| {
-            xi + eta + zeta <= 1.0
-        })
+        .prop_filter("outside tet", |&(xi, eta, zeta)| xi + eta + zeta <= 1.0)
         .prop_map(|(xi, eta, zeta)| [xi, eta, zeta])
 }
 

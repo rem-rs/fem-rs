@@ -2,7 +2,7 @@
 //!
 //! Methods: [`Newmark`] (Newmark-β), [`GeneralizedAlpha`] (first-order).
 
-use crate::{SolverConfig, solve_cg, solve_gmres};
+use crate::{solve_cg, solve_gmres, SolverConfig};
 
 /// Build `M + α K` as a CsrMatrix.
 pub(super) fn build_effective_stiffness(
@@ -15,13 +15,13 @@ pub(super) fn build_effective_stiffness(
     let mut coo = CooMatrix::<f64>::new(n, n);
     // Add M
     for i in 0..n {
-        for ptr in mass.row_ptr[i]..mass.row_ptr[i+1] {
+        for ptr in mass.row_ptr[i]..mass.row_ptr[i + 1] {
             coo.add(i, mass.col_idx[ptr] as usize, mass.values[ptr]);
         }
     }
     // Add alpha*K
     for i in 0..n {
-        for ptr in stiff.row_ptr[i]..stiff.row_ptr[i+1] {
+        for ptr in stiff.row_ptr[i]..stiff.row_ptr[i + 1] {
             coo.add(i, stiff.col_idx[ptr] as usize, alpha * stiff.values[ptr]);
         }
     }
@@ -50,30 +50,48 @@ pub struct Newmark {
 impl Default for Newmark {
     fn default() -> Self {
         // Average acceleration (trapezoidal rule) — unconditionally stable
-        Newmark { beta: 0.25, gamma: 0.5 }
+        Newmark {
+            beta: 0.25,
+            gamma: 0.5,
+        }
     }
 }
 
 /// State for the Newmark method: stores velocity and acceleration.
 pub struct NewmarkState {
-    pub vel: Vec<f64>,   // velocity v = du/dt
-    pub acc: Vec<f64>,   // acceleration a = d²u/dt²
+    pub vel: Vec<f64>, // velocity v = du/dt
+    pub acc: Vec<f64>, // acceleration a = d²u/dt²
 }
 
 impl NewmarkState {
     pub fn new(n: usize) -> Self {
-        NewmarkState { vel: vec![0.0; n], acc: vec![0.0; n] }
+        NewmarkState {
+            vel: vec![0.0; n],
+            acc: vec![0.0; n],
+        }
     }
 
     /// Initialize with given velocity and compute initial acceleration from M a₀ = f₀ - K u₀.
-    pub fn init_from(vel: Vec<f64>, mass: &fem_linalg::CsrMatrix<f64>, stiff: &fem_linalg::CsrMatrix<f64>, u: &[f64], force: &[f64]) -> Self {
+    pub fn init_from(
+        vel: Vec<f64>,
+        mass: &fem_linalg::CsrMatrix<f64>,
+        stiff: &fem_linalg::CsrMatrix<f64>,
+        u: &[f64],
+        force: &[f64],
+    ) -> Self {
         let n = u.len();
         // a₀ = M⁻¹(f₀ - K u₀)
         let mut ku = vec![0.0; n];
         stiff.spmv(u, &mut ku);
         let rhs: Vec<f64> = (0..n).map(|i| force[i] - ku[i]).collect();
         let mut acc = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         solve_cg(mass, &rhs, &mut acc, &cfg).expect("Newmark init: mass solve failed");
         NewmarkState { vel, acc }
     }
@@ -120,7 +138,13 @@ impl Newmark {
 
         // Solve for a_{n+1}
         let mut a_new = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         solve_cg(&eff, &rhs, &mut a_new, &cfg).expect("Newmark: effective system solve failed");
 
         // Correct: u_{n+1} = u_pred + β dt² a_{n+1}
@@ -190,7 +214,10 @@ impl SecondOrderSolver {
             10 => SecondOrderSolver::BackwardEuler,
             11 => SecondOrderSolver::Trapezoidal,
             12 => SecondOrderSolver::Sdirk2,
-            _ => { eprintln!("SecondOrderSolver: unknown type {code}, using BackwardEuler"); SecondOrderSolver::BackwardEuler }
+            _ => {
+                eprintln!("SecondOrderSolver: unknown type {code}, using BackwardEuler");
+                SecondOrderSolver::BackwardEuler
+            }
         }
     }
 
@@ -212,17 +239,31 @@ pub struct GeneralizedAlpha2State {
 
 impl GeneralizedAlpha2State {
     pub fn new(n: usize) -> Self {
-        GeneralizedAlpha2State { vel: vec![0.0; n], acc: vec![0.0; n] }
+        GeneralizedAlpha2State {
+            vel: vec![0.0; n],
+            acc: vec![0.0; n],
+        }
     }
 
-    pub fn init_from(vel: Vec<f64>, mass: &fem_linalg::CsrMatrix<f64>,
-                      stiff: &fem_linalg::CsrMatrix<f64>, u: &[f64], force: &[f64]) -> Self {
+    pub fn init_from(
+        vel: Vec<f64>,
+        mass: &fem_linalg::CsrMatrix<f64>,
+        stiff: &fem_linalg::CsrMatrix<f64>,
+        u: &[f64],
+        force: &[f64],
+    ) -> Self {
         let n = u.len();
         let mut ku = vec![0.0; n];
         stiff.spmv(u, &mut ku);
         let rhs: Vec<f64> = (0..n).map(|i| force[i] - ku[i]).collect();
         let mut acc = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         solve_cg(mass, &rhs, &mut acc, &cfg).expect("GeneralizedAlpha2 init: mass solve failed");
         GeneralizedAlpha2State { vel, acc }
     }
@@ -234,12 +275,18 @@ impl GeneralizedAlpha2 {
         GeneralizedAlpha2 { rho_inf }
     }
 
-    fn alpha_m(&self) -> f64 { (2.0 - self.rho_inf) / (1.0 + self.rho_inf) }
-    fn alpha_f(&self) -> f64 { 1.0 / (1.0 + self.rho_inf) }
-    fn gamma(&self) -> f64 { 0.5 + self.alpha_m() - self.alpha_f() }
+    fn alpha_m(&self) -> f64 {
+        (2.0 - self.rho_inf) / (1.0 + self.rho_inf)
+    }
+    fn alpha_f(&self) -> f64 {
+        1.0 / (1.0 + self.rho_inf)
+    }
+    fn gamma(&self) -> f64 {
+        0.5 + self.alpha_m() - self.alpha_f()
+    }
     fn beta(&self) -> f64 {
         let g = 0.5 + self.alpha_m() - self.alpha_f();
-        0.25 * (g + 0.5) * (g + 0.5)  // MFEM: β = (γ+½)²/4
+        0.25 * (g + 0.5) * (g + 0.5) // MFEM: β = (γ+½)²/4
     }
 
     /// Advance one time step for M·ü + K·u = f(t).
@@ -280,13 +327,19 @@ impl GeneralizedAlpha2 {
         }
 
         let mut a_new = vec![0.0; n];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 1000, verbose: false, ..SolverConfig::default() };
-        solve_cg(&eff, &rhs, &mut a_new, &cfg).expect("GeneralizedAlpha2: effective system solve failed");
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 1000,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_cg(&eff, &rhs, &mut a_new, &cfg)
+            .expect("GeneralizedAlpha2: effective system solve failed");
 
         // Correct: u_{n+1} = u + dt·v + dt²·[(0.5-β)·a_n + β·a_{n+1}]
         for i in 0..n {
-            u[i] += dt * state.vel[i]
-                  + dt * dt * ((0.5 - b) * state.acc[i] + b * a_new[i]);
+            u[i] += dt * state.vel[i] + dt * dt * ((0.5 - b) * state.acc[i] + b * a_new[i]);
         }
 
         // Update velocity: v_{n+1} = v_n + dt·[(1-γ)·a_n + γ·a_{n+1}]
@@ -352,7 +405,7 @@ impl GeneralizedAlpha {
         let r = self.rho_inf;
         let alpha_f = 1.0 / (1.0 + r);
         let alpha_m = (3.0 - r) / (2.0 * (1.0 + r));
-        let gamma   = 0.5 + alpha_m - alpha_f;
+        let gamma = 0.5 + alpha_m - alpha_f;
         (alpha_f, alpha_m, gamma)
     }
 
@@ -360,14 +413,14 @@ impl GeneralizedAlpha {
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &self,
-        mass:     &fem_linalg::CsrMatrix<f64>,
-        stiff:    &fem_linalg::CsrMatrix<f64>,
+        mass: &fem_linalg::CsrMatrix<f64>,
+        stiff: &fem_linalg::CsrMatrix<f64>,
         force_fn: &dyn Fn(f64) -> Vec<f64>,
-        dt:       f64,
-        t:        f64,
-        v:        &mut [f64],
-        state:    &mut GeneralizedAlphaState,
-        bc_dofs:  &[u32],
+        dt: f64,
+        t: f64,
+        v: &mut [f64],
+        state: &mut GeneralizedAlphaState,
+        bc_dofs: &[u32],
     ) {
         let n = v.len();
         let (alpha_f, alpha_m, gamma) = self.params();
@@ -413,13 +466,17 @@ impl GeneralizedAlpha {
             use fem_linalg::CooMatrix;
             let mut coo = CooMatrix::<f64>::new(n, n);
             for i in 0..mass.nrows {
-                for ptr in mass.row_ptr[i]..mass.row_ptr[i+1] {
+                for ptr in mass.row_ptr[i]..mass.row_ptr[i + 1] {
                     coo.add(i, mass.col_idx[ptr] as usize, alpha_m * mass.values[ptr]);
                 }
             }
             for i in 0..stiff.nrows {
-                for ptr in stiff.row_ptr[i]..stiff.row_ptr[i+1] {
-                    coo.add(i, stiff.col_idx[ptr] as usize, alpha_f * gamma * dt * stiff.values[ptr]);
+                for ptr in stiff.row_ptr[i]..stiff.row_ptr[i + 1] {
+                    coo.add(
+                        i,
+                        stiff.col_idx[ptr] as usize,
+                        alpha_f * gamma * dt * stiff.values[ptr],
+                    );
                 }
             }
             coo.into_csr()
@@ -433,7 +490,13 @@ impl GeneralizedAlpha {
         }
 
         // Solve for dvdt_{n+1}
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let mut dvdt_new = vec![0.0f64; n];
         solve_gmres(&lhs_scaled, &rhs, &mut dvdt_new, 30, &cfg)
             .expect("GeneralizedAlpha: linear solve failed");
@@ -518,16 +581,15 @@ pub struct ExplicitState {
 
 impl ExplicitState {
     pub fn new(n: usize) -> Self {
-        ExplicitState { vel: vec![0.0; n], acc: vec![0.0; n] }
+        ExplicitState {
+            vel: vec![0.0; n],
+            acc: vec![0.0; n],
+        }
     }
 
     /// Initialize acceleration from `M·a₀ = f_total₀`.
     /// `mass_lumped` is the diagonal of the lumped mass matrix.
-    pub fn init_from(
-        vel: Vec<f64>,
-        mass_lumped: &[f64],
-        force_total: &[f64],
-    ) -> Self {
+    pub fn init_from(vel: Vec<f64>, mass_lumped: &[f64], force_total: &[f64]) -> Self {
         let n = vel.len();
         let mut acc = vec![0.0; n];
         for i in 0..n {
@@ -650,7 +712,10 @@ mod tests {
         }
         let exact = (omega * t_end).cos();
         let err = (u[0] - exact).abs();
-        assert!(err < 0.01, "Newmark free vibration error={err:.4e} (exact={exact:.4})");
+        assert!(
+            err < 0.01,
+            "Newmark free vibration error={err:.4e} (exact={exact:.4})"
+        );
     }
 
     #[test]
@@ -678,7 +743,10 @@ mod tests {
         }
         let exact = (-lambda * t_end).exp();
         let err = (v[0] - exact).abs();
-        assert!(err < 0.01, "GeneralizedAlpha exp decay error={err:.3e} (exact={exact:.6})");
+        assert!(
+            err < 0.01,
+            "GeneralizedAlpha exp decay error={err:.3e} (exact={exact:.6})"
+        );
     }
 
     #[test]
@@ -704,7 +772,11 @@ mod tests {
             solver.step(&mass, &stiff, &force_fn, h, t, &mut v, &mut state, &[]);
             t += h;
         }
-        assert!(v[0].abs() < 0.01, "GeneralizedAlpha stiff: did not decay; u={:.3e}", v[0]);
+        assert!(
+            v[0].abs() < 0.01,
+            "GeneralizedAlpha stiff: did not decay; u={:.3e}",
+            v[0]
+        );
     }
 
     // ─── Central Difference Explicit tests ────────────────────────────────
@@ -740,7 +812,10 @@ mod tests {
         let exact = (omega * t_end).cos();
         let err = (u[0] - exact).abs();
         // Central difference is 2nd-order accurate → small error
-        assert!(err < 0.001, "Central diff free vibration error={err:.4e} (exact={exact:.4})");
+        assert!(
+            err < 0.001,
+            "Central diff free vibration error={err:.4e} (exact={exact:.4})"
+        );
     }
 
     #[test]
@@ -759,7 +834,10 @@ mod tests {
         let stiff = stiff_coo.into_csr();
 
         let cd = CentralDifferenceExplicit::default();
-        let newmark = Newmark { beta: 0.0, gamma: 0.5 };
+        let newmark = Newmark {
+            beta: 0.0,
+            gamma: 0.5,
+        };
 
         let dt = 0.001;
         let t_end = 0.5_f64;
@@ -817,7 +895,11 @@ mod tests {
                 vec![-ku[0], -ku[1]]
             });
         }
-        assert!((u[0]).abs() < 1e-14, "BC DOF 0 should be zero, got {:.4e}", u[0]);
+        assert!(
+            (u[0]).abs() < 1e-14,
+            "BC DOF 0 should be zero, got {:.4e}",
+            u[0]
+        );
         assert!((state.vel[0]).abs() < 1e-14, "BC vel[0] should be zero");
         assert!((state.acc[0]).abs() < 1e-14, "BC acc[0] should be zero");
     }

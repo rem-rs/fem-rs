@@ -2,24 +2,33 @@
 //!
 //! Methods: [`ImplicitEuler`] (BDF-1), [`Sdirk2`], [`Bdf2`], [`CrankNicolson`].
 
-use crate::{SolverConfig, solve_gmres};
 use super::traits::ImplicitTimeStepper;
+use crate::{solve_gmres, SolverConfig};
 
 // ─── Helper: build (sI - αJ) ─────────────────────────────────────────────────
 
 /// Build `I − α J` as a CsrMatrix (convenience wrapper).
-pub(super) fn identity_minus_dt_jac(jac: &fem_linalg::CsrMatrix<f64>, alpha: f64) -> fem_linalg::CsrMatrix<f64> {
+pub(super) fn identity_minus_dt_jac(
+    jac: &fem_linalg::CsrMatrix<f64>,
+    alpha: f64,
+) -> fem_linalg::CsrMatrix<f64> {
     scaled_identity_minus_dt_jac(jac, 1.0, alpha)
 }
 
 /// Build `s I − α J` as a CsrMatrix.
-pub(super) fn scaled_identity_minus_dt_jac(jac: &fem_linalg::CsrMatrix<f64>, s: f64, alpha: f64) -> fem_linalg::CsrMatrix<f64> {
+pub(super) fn scaled_identity_minus_dt_jac(
+    jac: &fem_linalg::CsrMatrix<f64>,
+    s: f64,
+    alpha: f64,
+) -> fem_linalg::CsrMatrix<f64> {
     use fem_linalg::CooMatrix;
     let n = jac.nrows;
     let mut coo = CooMatrix::<f64>::new(n, n);
 
     // Add diagonal s I
-    for i in 0..n { coo.add(i, i, s); }
+    for i in 0..n {
+        coo.add(i, i, s);
+    }
 
     // Subtract α J
     for i in 0..n {
@@ -54,11 +63,19 @@ impl ImplicitTimeStepper for ImplicitEuler {
         let sys = identity_minus_dt_jac(&jac, dt);
         let b: Vec<f64> = dudt.iter().map(|&v| dt * v).collect();
 
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let mut du = vec![0.0_f64; n];
         solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("ImplicitEuler: linear solve failed");
 
-        for i in 0..n { u[i] += du[i]; }
+        for i in 0..n {
+            u[i] += du[i];
+        }
     }
 }
 
@@ -92,13 +109,21 @@ impl ImplicitTimeStepper for Sdirk2 {
         let sys1 = identity_minus_dt_jac(&jac1, dt * g);
         let mut f1 = vec![0.0_f64; n];
         rhs(t + g * dt, u, &mut f1);
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let mut k1 = vec![0.0_f64; n];
         solve_gmres(&sys1, &f1, &mut k1, 30, &cfg).expect("SDIRK2 stage 1 solve failed");
 
         // Stage 2: U₂ = u + dt[(1-γ) k₁ + γ k₂]
         let mut u2 = u.to_vec();
-        for i in 0..n { u2[i] += dt * (1.0 - g) * k1[i]; }
+        for i in 0..n {
+            u2[i] += dt * (1.0 - g) * k1[i];
+        }
         let jac2 = jac_fn(t + dt, &u2);
         let sys2 = identity_minus_dt_jac(&jac2, dt * g);
         let mut f2 = vec![0.0_f64; n];
@@ -129,30 +154,39 @@ pub struct Bdf2State {
 }
 
 impl Bdf2State {
-    pub fn new() -> Self { Bdf2State { u_prev: None } }
+    pub fn new() -> Self {
+        Bdf2State { u_prev: None }
+    }
 }
 
 impl Default for Bdf2State {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Bdf2 {
     /// Advance `u` using BDF-2, updating `state` for the next call.
     pub fn step_implicit<F, J>(
         &self,
-        t:       f64,
-        dt:      f64,
-        u:       &mut [f64],
-        state:   &mut Bdf2State,
-        rhs:     F,
-        jac_fn:  J,
-    )
-    where
+        t: f64,
+        dt: f64,
+        u: &mut [f64],
+        state: &mut Bdf2State,
+        rhs: F,
+        jac_fn: J,
+    ) where
         F: Fn(f64, &[f64], &mut [f64]),
         J: Fn(f64, &[f64]) -> fem_linalg::CsrMatrix<f64>,
     {
         let n = u.len();
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
 
         match &state.u_prev {
             None => {
@@ -165,7 +199,9 @@ impl Bdf2 {
                 let mut du = vec![0.0_f64; n];
                 solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("BDF2 startup solve failed");
                 let u_old = u.to_vec();
-                for i in 0..n { u[i] += du[i]; }
+                for i in 0..n {
+                    u[i] += du[i];
+                }
                 state.u_prev = Some(u_old);
             }
             Some(u_prev) => {
@@ -176,9 +212,7 @@ impl Bdf2 {
                 // Build (3/2 I − dt J)
                 let sys = scaled_identity_minus_dt_jac(&jac, 1.5, dt);
                 // RHS: 2 uₙ − ½ u_{n-1}
-                let b: Vec<f64> = (0..n)
-                    .map(|i| 2.0 * u[i] - 0.5 * u_prev[i])
-                    .collect();
+                let b: Vec<f64> = (0..n).map(|i| 2.0 * u[i] - 0.5 * u_prev[i]).collect();
 
                 let u_old = u.to_vec();
                 let mut u_new = vec![0.0_f64; n];
@@ -207,7 +241,13 @@ impl ImplicitTimeStepper for CrankNicolson {
         J: Fn(f64, &[f64]) -> fem_linalg::CsrMatrix<f64>,
     {
         let n = u.len();
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
 
         // f(t_n, u_n)
         let mut fn0 = vec![0.0_f64; n];
@@ -220,7 +260,9 @@ impl ImplicitTimeStepper for CrankNicolson {
         let b: Vec<f64> = fn0.iter().map(|&v| dt * v).collect();
         let mut du = vec![0.0_f64; n];
         solve_gmres(&sys, &b, &mut du, 30, &cfg).expect("CrankNicolson: linear solve failed");
-        for i in 0..n { u[i] += du[i]; }
+        for i in 0..n {
+            u[i] += du[i];
+        }
     }
 }
 
@@ -230,7 +272,9 @@ mod tests {
     use fem_linalg::CooMatrix;
 
     fn exp_decay(lambda: f64) -> impl Fn(f64, &[f64], &mut [f64]) {
-        move |_t, u, dudt| { dudt[0] = -lambda * u[0]; }
+        move |_t, u, dudt| {
+            dudt[0] = -lambda * u[0];
+        }
     }
 
     fn exp_decay_jac(n: usize, lambda: f64) -> impl Fn(f64, &[f64]) -> fem_linalg::CsrMatrix<f64> {
@@ -244,64 +288,81 @@ mod tests {
     #[test]
     fn implicit_euler_stiff_stable() {
         let lambda = 1000.0_f64;
-        let rhs    = exp_decay(lambda);
-        let jac    = exp_decay_jac(1, lambda);
-        let ie     = ImplicitEuler;
-        let t_end  = 1.0_f64;
-        let dt     = 0.1_f64;
-        let mut u  = vec![1.0_f64];
-        let mut t  = 0.0_f64;
+        let rhs = exp_decay(lambda);
+        let jac = exp_decay_jac(1, lambda);
+        let ie = ImplicitEuler;
+        let t_end = 1.0_f64;
+        let dt = 0.1_f64;
+        let mut u = vec![1.0_f64];
+        let mut t = 0.0_f64;
         while t < t_end - 1e-14 {
             let dt_act = dt.min(t_end - t);
             ie.step_implicit(t, dt_act, &mut u, &rhs, &jac);
             t += dt_act;
         }
-        assert!(u[0] < 0.01, "ImplicitEuler: solution did not decay; u={:.3e}", u[0]);
-        assert!(u[0] >= 0.0, "ImplicitEuler: negative solution (instability)");
+        assert!(
+            u[0] < 0.01,
+            "ImplicitEuler: solution did not decay; u={:.3e}",
+            u[0]
+        );
+        assert!(
+            u[0] >= 0.0,
+            "ImplicitEuler: negative solution (instability)"
+        );
     }
 
     #[test]
     fn sdirk2_stiff_stable() {
         let lambda = 1000.0_f64;
-        let rhs    = exp_decay(lambda);
-        let jac    = exp_decay_jac(1, lambda);
+        let rhs = exp_decay(lambda);
+        let jac = exp_decay_jac(1, lambda);
         let solver = Sdirk2;
-        let t_end  = 1.0_f64;
-        let dt     = 0.1_f64;
-        let mut u  = vec![1.0_f64];
-        let mut t  = 0.0_f64;
+        let t_end = 1.0_f64;
+        let dt = 0.1_f64;
+        let mut u = vec![1.0_f64];
+        let mut t = 0.0_f64;
         while t < t_end - 1e-14 {
             let dt_act = dt.min(t_end - t);
             solver.step_implicit(t, dt_act, &mut u, &rhs, &jac);
             t += dt_act;
         }
-        assert!(u[0] < 0.01, "SDIRK2: solution did not decay; u={:.3e}", u[0]);
+        assert!(
+            u[0] < 0.01,
+            "SDIRK2: solution did not decay; u={:.3e}",
+            u[0]
+        );
         assert!(u[0] >= 0.0, "SDIRK2: negative solution (instability)");
     }
 
     #[test]
     fn bdf2_stiff_stable() {
         let lambda = 1000.0_f64;
-        let rhs    = exp_decay(lambda);
-        let jac    = exp_decay_jac(1, lambda);
+        let rhs = exp_decay(lambda);
+        let jac = exp_decay_jac(1, lambda);
         let solver = Bdf2;
         let mut state = Bdf2State::new();
-        let t_end  = 1.0_f64;
-        let dt     = 0.1_f64;
-        let mut u  = vec![1.0_f64];
-        let mut t  = 0.0_f64;
+        let t_end = 1.0_f64;
+        let dt = 0.1_f64;
+        let mut u = vec![1.0_f64];
+        let mut t = 0.0_f64;
         while t < t_end - 1e-14 {
             let dt_act = dt.min(t_end - t);
             solver.step_implicit(t, dt_act, &mut u, &mut state, &rhs, &jac);
             t += dt_act;
         }
-        assert!(u[0].abs() < 0.01, "BDF2: solution did not decay; u={:.3e}", u[0]);
+        assert!(
+            u[0].abs() < 0.01,
+            "BDF2: solution did not decay; u={:.3e}",
+            u[0]
+        );
     }
 
     #[test]
     fn crank_nicolson_heat_order2() {
         let lambda = std::f64::consts::PI * std::f64::consts::PI;
-        let rhs = |_t: f64, u: &[f64], dudt: &mut [f64]| { dudt[0] = -lambda * u[0]; };
+        let rhs = |_t: f64, u: &[f64], dudt: &mut [f64]| {
+            dudt[0] = -lambda * u[0];
+        };
         let jac = |_t: f64, _u: &[f64]| {
             let mut coo = CooMatrix::<f64>::new(1, 1);
             coo.add(0, 0, -lambda);
@@ -322,7 +383,14 @@ mod tests {
             errors.push((u[0] - exact).abs());
         }
         let order = (errors[0] / errors[1]).log2();
-        assert!(order > 1.8, "CrankNicolson heat convergence order={order:.2} (expected ~2)");
-        assert!(errors[2] < 5e-4, "CrankNicolson error at finest dt={e:.2e}", e=errors[2]);
+        assert!(
+            order > 1.8,
+            "CrankNicolson heat convergence order={order:.2} (expected ~2)"
+        );
+        assert!(
+            errors[2] < 5e-4,
+            "CrankNicolson error at finest dt={e:.2e}",
+            e = errors[2]
+        );
     }
 }

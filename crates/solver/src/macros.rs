@@ -7,7 +7,10 @@ macro_rules! solve_iterative_simple {
     ($name:ident, $solver:ty, $doc:literal) => {
         #[doc = $doc]
         pub fn $name<T: linlvoScalar>(
-            a: &FemCsr<T>, b: &[T], x: &mut [T], cfg: &SolverConfig,
+            a: &FemCsr<T>,
+            b: &[T],
+            x: &mut [T],
+            cfg: &SolverConfig,
         ) -> Result<SolveResult, SolverError> {
             check_dims(a, b, x)?;
             let la = fem_to_linlvo_csr(a);
@@ -48,7 +51,10 @@ macro_rules! solve_precond_simple {
     ($name:ident, $solver:ty, $precond:ty, $doc:literal) => {
         #[doc = $doc]
         pub fn $name<T: linlvoScalar>(
-            a: &FemCsr<T>, b: &[T], x: &mut [T], cfg: &SolverConfig,
+            a: &FemCsr<T>,
+            b: &[T],
+            x: &mut [T],
+            cfg: &SolverConfig,
         ) -> Result<SolveResult, SolverError> {
             check_dims(a, b, x)?;
             let la = fem_to_linlvo_csr(a);
@@ -68,7 +74,9 @@ macro_rules! solve_precond_restart {
     ($name:ident, $solver:ty, $precond:ty, $doc:literal) => {
         #[doc = $doc]
         pub fn $name<T: linlvoScalar>(
-            a: &FemCsr<T>, b: &[T], x: &mut [T],
+            a: &FemCsr<T>,
+            b: &[T],
+            x: &mut [T],
             restart: usize,
             cfg: &SolverConfig,
         ) -> Result<SolveResult, SolverError> {
@@ -90,15 +98,17 @@ macro_rules! solve_precond_restart {
 macro_rules! solve_direct {
     ($name:ident, $solver:ty, $doc:literal) => {
         #[doc = $doc]
-        pub fn $name<T: linlvoScalar>(
-            a: &FemCsr<T>, b: &[T],
-        ) -> Result<Vec<T>, SolverError> {
+        pub fn $name<T: linlvoScalar>(a: &FemCsr<T>, b: &[T]) -> Result<Vec<T>, SolverError> {
             let la = fem_to_linlvo_csr(a);
             let lb = DenseVec::from_vec(b.to_vec());
             let mut lx = DenseVec::zeros(b.len());
             let mut solver = <$solver>::default();
-            solver.factor(&la).map_err(|e| SolverError::Linlvo(e.to_string()))?;
-            solver.solve(&lb, &mut lx).map_err(|e| SolverError::Linlvo(e.to_string()))?;
+            solver
+                .factor(&la)
+                .map_err(|e| SolverError::Linlvo(e.to_string()))?;
+            solver
+                .solve(&lb, &mut lx)
+                .map_err(|e| SolverError::Linlvo(e.to_string()))?;
             Ok(lx.into_vec())
         }
     };
@@ -109,7 +119,7 @@ pub(crate) fn check_dims<T>(a: &FemCsr<T>, b: &[T], x: &[T]) -> Result<(), Solve
         return Err(SolverError::DimensionMismatch {
             rows: a.nrows,
             cols: a.ncols,
-            rhs:  b.len(),
+            rhs: b.len(),
         });
     }
     Ok(())

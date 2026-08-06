@@ -2,17 +2,23 @@
 //!
 //! This implementation provides 2 edge moments per edge (24 DOFs total).
 
+use crate::nedelec::hex::HexND1;
 use crate::quadrature::hex_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
-use crate::nedelec::hex::HexND1;
 
 /// Second-order H(curl) element on reference hex, 24 edge-based DOFs.
 pub struct HexND2;
 
 impl VectorReferenceElement for HexND2 {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 2 }
-    fn n_dofs(&self) -> usize { 24 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        2
+    }
+    fn n_dofs(&self) -> usize {
+        24
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let mut low = vec![0.0_f64; 12 * 3];
@@ -83,9 +89,18 @@ impl VectorReferenceElement for HexND2 {
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let mut out = Vec::with_capacity(24);
         let edge_mids = vec![
-            vec![0.0, -1.0, -1.0], vec![0.0, 1.0, -1.0], vec![0.0, -1.0, 1.0], vec![0.0, 1.0, 1.0],
-            vec![1.0, 0.0, -1.0], vec![-1.0, 0.0, -1.0], vec![1.0, 0.0, 1.0], vec![-1.0, 0.0, 1.0],
-            vec![-1.0, -1.0, 0.0], vec![1.0, -1.0, 0.0], vec![1.0, 1.0, 0.0], vec![-1.0, 1.0, 0.0],
+            vec![0.0, -1.0, -1.0],
+            vec![0.0, 1.0, -1.0],
+            vec![0.0, -1.0, 1.0],
+            vec![0.0, 1.0, 1.0],
+            vec![1.0, 0.0, -1.0],
+            vec![-1.0, 0.0, -1.0],
+            vec![1.0, 0.0, 1.0],
+            vec![-1.0, 0.0, 1.0],
+            vec![-1.0, -1.0, 0.0],
+            vec![1.0, -1.0, 0.0],
+            vec![1.0, 1.0, 0.0],
+            vec![-1.0, 1.0, 0.0],
         ];
         for p in edge_mids {
             out.push(p.clone());

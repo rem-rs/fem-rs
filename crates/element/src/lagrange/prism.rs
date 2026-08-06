@@ -8,12 +8,14 @@
 //!
 //! DOF count: `(p+1) × (p+1)(p+2)/2`.
 
-use crate::lagrange::factory::{rising_val, rising_deriv};
+use crate::lagrange::factory::{rising_deriv, rising_val};
 use crate::quadrature::prism_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
 fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
-    if p == 0 { return 1.0; }
+    if p == 0 {
+        return 1.0;
+    }
     let mut val = 1.0;
     let tn = n as f64;
     for m in 0..=p {
@@ -25,7 +27,9 @@ fn lagrange_val(n: usize, p: usize, t: f64) -> f64 {
 }
 
 fn lagrange_deriv(n: usize, p: usize, t: f64) -> f64 {
-    if p == 0 { return 0.0; }
+    if p == 0 {
+        return 0.0;
+    }
     let mut sum = 0.0;
     let tn = n as f64;
     for k in 0..=p {
@@ -58,14 +62,20 @@ impl PrismPk {
         assert!(p >= 1, "order must be ≥ 1");
         let tri_nodes = equispaced_nodes_tri(p);
         let n_tri = tri_nodes.len();
-        let tri_ijk: Vec<(usize, usize, usize)> = tri_nodes.iter()
+        let tri_ijk: Vec<(usize, usize, usize)> = tri_nodes
+            .iter()
             .map(|n| {
                 let i = (n[0] * p as f64).round() as usize;
                 let j = (n[1] * p as f64).round() as usize;
                 (i, j, p - i - j)
             })
             .collect();
-        Self { order: p, tri_nodes, tri_ijk, n_tri }
+        Self {
+            order: p,
+            tri_nodes,
+            tri_ijk,
+            n_tri,
+        }
     }
 
     fn dof_index(&self, k: usize, tri_dof: usize) -> usize {
@@ -82,10 +92,19 @@ fn equispaced_nodes_tri(p: usize) -> Vec<[f64; 2]> {
     nodes.push([0.0, 0.0]);
     nodes.push([1.0, 0.0]);
     nodes.push([0.0, 1.0]);
-    if p == 1 { return nodes; }
-    for k in 1..p { nodes.push([k as f64 / p as f64, 0.0]); }
-    for k in 1..p { let t = k as f64 / p as f64; nodes.push([1.0 - t, t]); }
-    for k in 1..p { nodes.push([0.0, k as f64 / p as f64]); }
+    if p == 1 {
+        return nodes;
+    }
+    for k in 1..p {
+        nodes.push([k as f64 / p as f64, 0.0]);
+    }
+    for k in 1..p {
+        let t = k as f64 / p as f64;
+        nodes.push([1.0 - t, t]);
+    }
+    for k in 1..p {
+        nodes.push([0.0, k as f64 / p as f64]);
+    }
     for j in 1..=(p - 2) {
         for i in 1..=(p - 1 - j) {
             nodes.push([i as f64 / p as f64, j as f64 / p as f64]);
@@ -95,9 +114,15 @@ fn equispaced_nodes_tri(p: usize) -> Vec<[f64; 2]> {
 }
 
 impl ReferenceElement for PrismPk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { (self.order + 1) * self.n_tri }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * self.n_tri
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
@@ -111,9 +136,7 @@ impl ReferenceElement for PrismPk {
         for k in 0..=p {
             let lx = lagrange_val(k, p, t_xi);
             for (tri_dof, &(i, j, r)) in self.tri_ijk.iter().enumerate() {
-                let phi_tri = rising_val(i, t_eta)
-                            * rising_val(j, t_zeta)
-                            * rising_val(r, t_rest);
+                let phi_tri = rising_val(i, t_eta) * rising_val(j, t_zeta) * rising_val(r, t_rest);
                 values[self.dof_index(k, tri_dof)] = lx * phi_tri;
             }
         }
@@ -141,14 +164,16 @@ impl ReferenceElement for PrismPk {
                 let phi_tri = vi * vj * vr;
 
                 let dof = self.dof_index(k, tri_dof);
-                grads[dof * 3]     = dlx * phi_tri;
+                grads[dof * 3] = dlx * phi_tri;
                 grads[dof * 3 + 1] = lx * pf * (di * vj * vr - vi * vj * dr);
                 grads[dof * 3 + 2] = lx * pf * (vi * dj * vr - vi * vj * dr);
             }
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { prism_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        prism_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let p = self.order;

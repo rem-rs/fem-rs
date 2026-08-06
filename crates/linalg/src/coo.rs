@@ -158,8 +158,17 @@ impl<T: Scalar> CooMatrix<T> {
         self.rows = Vec::new();
         self.cols = Vec::new();
 
-        // Phase A: sort by (row, col) to merge duplicates.
-        entries.sort_unstable_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
+        // Phase A: sort by (row, col, insertion idx) so that duplicate
+        // (row, col) entries are summed in insertion order.  MFEM's open
+        // SparseMatrix::AddSubMatrix accumulates element contributions
+        // element-by-element in traversal order; `sort_unstable_by(row,col)`
+        // would permute equal keys and change the summation order (hence the
+        // last-ulp differences seen on multi-element diagonals).
+        entries.sort_by(|a, b| {
+            a.row.cmp(&b.row)
+                .then(a.col.cmp(&b.col))
+                .then(a.idx.cmp(&b.idx))
+        });
 
         // Merge adjacent duplicates, keeping earliest insertion index.
         let mut merged: Vec<Entry<T>> = Vec::with_capacity(entries.len());

@@ -12,6 +12,7 @@ pub mod dg_euler_3d;
 pub mod dg_framework;
 pub mod dg_ldg;
 pub mod dg_limiters;
+pub mod dg_imex;
 
 pub use dg::*;
 pub use dg_advection::*;
@@ -27,3 +28,4 @@ pub use dg_euler_3d::*;
 pub use dg_framework::*;
 pub use dg_ldg::*;
 pub use dg_limiters::*;
+pub use dg_imex::*;

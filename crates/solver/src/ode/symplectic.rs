@@ -36,13 +36,7 @@ impl SIAVSolver {
         }
     }
 
-    fn step_order1<S: HamiltonianSystem>(
-        &self,
-        sys: &S,
-        q: &mut [f64],
-        p: &mut [f64],
-        dt: f64,
-    ) {
+    fn step_order1<S: HamiltonianSystem>(&self, sys: &S, q: &mut [f64], p: &mut [f64], dt: f64) {
         // Symplectic Euler A: kick p, then drift q.
         let n = q.len();
         let mut gq = vec![0.0_f64; n];
@@ -57,13 +51,7 @@ impl SIAVSolver {
         }
     }
 
-    fn step_order3<S: HamiltonianSystem>(
-        &self,
-        sys: &S,
-        q: &mut [f64],
-        p: &mut [f64],
-        dt: f64,
-    ) {
+    fn step_order3<S: HamiltonianSystem>(&self, sys: &S, q: &mut [f64], p: &mut [f64], dt: f64) {
         // Ruth's 3rd-order 3-stage symplectic integrator (Ruth 1983).
         let n = q.len();
         let a: [f64; 3] = [2.0 / 3.0, -2.0 / 3.0, 1.0]; // drift coefficients
@@ -175,7 +163,10 @@ mod tests {
             stepper.step(&sys, &mut q, &mut p, dt);
         }
         let e1 = ho_energy(sys.omega, q[0], p[0]);
-        assert!((e1 - e0).abs() < 5e-3, "Verlet energy drift too large: e0={e0:.6}, e1={e1:.6}");
+        assert!(
+            (e1 - e0).abs() < 5e-3,
+            "Verlet energy drift too large: e0={e0:.6}, e1={e1:.6}"
+        );
     }
 
     #[test]
@@ -217,7 +208,11 @@ mod tests {
         }
         let e1 = ho_energy(sys.omega, q[0], p[0]);
         // Symplectic Euler has O(dt) energy error; should stay bounded.
-        assert!((e1 - e0).abs() < 1.0, "order 1 drift too large: {}", (e1 - e0).abs());
+        assert!(
+            (e1 - e0).abs() < 1.0,
+            "order 1 drift too large: {}",
+            (e1 - e0).abs()
+        );
     }
 
     #[test]
@@ -271,6 +266,10 @@ mod tests {
             s.step(&sys, &mut q, &mut p, dt);
         }
         let e1 = ho_energy(sys.omega, q[0], p[0]);
-        assert!((e1 - e0).abs() < 0.5, "order 3 drift too large: {}", (e1 - e0).abs());
+        assert!(
+            (e1 - e0).abs() < 0.5,
+            "order 3 drift too large: {}",
+            (e1 - e0).abs()
+        );
     }
 }

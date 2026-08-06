@@ -8,12 +8,7 @@ use fem_linalg::{BlockMatrix, BlockVector, CooMatrix, CsrMatrix};
 use thiserror::Error;
 
 use crate::{
-    solve_gmres,
-    BlockSystem,
-    SchurComplementSolver,
-    SolveResult,
-    SolverConfig,
-    SolverError,
+    solve_gmres, BlockSystem, SchurComplementSolver, SolveResult, SolverConfig, SolverError,
 };
 
 /// A generic coupled multiphysics problem in block form.
@@ -114,7 +109,9 @@ pub enum CoupledSolveError {
     InvalidLayout(String),
     #[error("linear solve failed: {0}")]
     Linear(#[from] SolverError),
-    #[error("coupled Newton did not converge in {max_iter} iterations (residual = {residual:.3e})")]
+    #[error(
+        "coupled Newton did not converge in {max_iter} iterations (residual = {residual:.3e})"
+    )]
     NonConverged { max_iter: usize, residual: f64 },
 }
 
@@ -124,7 +121,9 @@ pub struct CoupledNewtonSolver {
 }
 
 impl CoupledNewtonSolver {
-    pub fn new(cfg: CoupledNewtonConfig) -> Self { Self { cfg } }
+    pub fn new(cfg: CoupledNewtonConfig) -> Self {
+        Self { cfg }
+    }
 
     /// Solve `F(x,t) = rhs` using monolithic Newton iterations.
     ///
@@ -185,7 +184,8 @@ impl CoupledNewtonSolver {
                         best_alpha = alpha;
                     }
 
-                    let target = ((1.0 - self.cfg.line_search_sufficient_decrease * alpha).max(0.0)) * rnorm;
+                    let target =
+                        ((1.0 - self.cfg.line_search_sufficient_decrease * alpha).max(0.0)) * rnorm;
                     if trial_norm <= target || trial_norm < rnorm {
                         accepted = true;
                         break;
@@ -237,13 +237,8 @@ impl CoupledNewtonSolver {
             CoupledLinearStrategy::Gmres => {
                 let jac = block_matrix_to_csr(jac_block);
                 let mut dx = vec![0.0_f64; rhs.len()];
-                let lin = solve_gmres(
-                    &jac,
-                    rhs,
-                    &mut dx,
-                    self.cfg.gmres_restart,
-                    &self.cfg.linear,
-                )?;
+                let lin =
+                    solve_gmres(&jac, rhs, &mut dx, self.cfg.gmres_restart, &self.cfg.linear)?;
                 Ok((dx, lin))
             }
             CoupledLinearStrategy::BlockSchur2x2 => {
@@ -271,28 +266,24 @@ impl CoupledNewtonSolver {
                 let g = &rhs[n0..n0 + n1];
                 let mut u = vec![0.0_f64; n0];
                 let mut p = vec![0.0_f64; n1];
-                let lin = SchurComplementSolver::solve(&sys, f, g, &mut u, &mut p, &self.cfg.linear)?;
+                let lin =
+                    SchurComplementSolver::solve(&sys, f, g, &mut u, &mut p, &self.cfg.linear)?;
 
                 let mut dx = vec![0.0_f64; rhs.len()];
                 dx[..n0].copy_from_slice(&u);
                 dx[n0..n0 + n1].copy_from_slice(&p);
                 Ok((dx, lin))
             }
-            CoupledLinearStrategy::BlockDiagonalGmres => {
-                Err(CoupledSolveError::InvalidLayout(
-                    "BlockDiagonalGmres: use solve_block_precond_gmres directly; \
-                     see fem_solver::block_operator::solve_block_precond_gmres".to_string(),
-                ))
-            }
+            CoupledLinearStrategy::BlockDiagonalGmres => Err(CoupledSolveError::InvalidLayout(
+                "BlockDiagonalGmres: use solve_block_precond_gmres directly; \
+                     see fem_solver::block_operator::solve_block_precond_gmres"
+                    .to_string(),
+            )),
         }
     }
 }
 
-fn validate_layout(
-    sizes: &[usize],
-    v: &BlockVector,
-    name: &str,
-) -> Result<(), CoupledSolveError> {
+fn validate_layout(sizes: &[usize], v: &BlockVector, name: &str) -> Result<(), CoupledSolveError> {
     if sizes.len() != v.n_blocks() {
         return Err(CoupledSolveError::InvalidLayout(format!(
             "{name} has {} blocks, but problem declares {}",
@@ -311,10 +302,7 @@ fn validate_layout(
     Ok(())
 }
 
-fn validate_jacobian_layout(
-    sizes: &[usize],
-    j: &BlockMatrix,
-) -> Result<(), CoupledSolveError> {
+fn validate_jacobian_layout(sizes: &[usize], j: &BlockMatrix) -> Result<(), CoupledSolveError> {
     if j.n_row_blocks() != sizes.len() || j.n_col_blocks() != sizes.len() {
         return Err(CoupledSolveError::InvalidLayout(format!(
             "jacobian block grid mismatch: expected {}x{}, got {}x{}",
@@ -386,11 +374,15 @@ mod tests {
     }
 
     impl Linear2x2Problem {
-        fn new() -> Self { Self { sizes: vec![1, 1] } }
+        fn new() -> Self {
+            Self { sizes: vec![1, 1] }
+        }
     }
 
     impl CoupledProblem for Linear2x2Problem {
-        fn block_sizes(&self) -> &[usize] { &self.sizes }
+        fn block_sizes(&self) -> &[usize] {
+            &self.sizes
+        }
 
         fn residual(&self, _t: f64, state: &BlockVector, rhs: &BlockVector, out: &mut BlockVector) {
             let x0 = state.block(0)[0];
@@ -424,7 +416,13 @@ mod tests {
             line_search_shrink: 0.5,
             line_search_max_backtracks: 20,
             line_search_sufficient_decrease: 1e-4,
-            linear: SolverConfig { rtol: 1e-14, atol: 0.0, max_iter: 50, verbose: false, print_level: crate::PrintLevel::Silent },
+            linear: SolverConfig {
+                rtol: 1e-14,
+                atol: 0.0,
+                max_iter: 50,
+                verbose: false,
+                print_level: crate::PrintLevel::Silent,
+            },
             linear_strategy: CoupledLinearStrategy::Gmres,
         });
 
@@ -454,7 +452,13 @@ mod tests {
             line_search_shrink: 0.5,
             line_search_max_backtracks: 20,
             line_search_sufficient_decrease: 1e-4,
-            linear: SolverConfig { rtol: 1e-14, atol: 0.0, max_iter: 50, verbose: false, print_level: crate::PrintLevel::Silent },
+            linear: SolverConfig {
+                rtol: 1e-14,
+                atol: 0.0,
+                max_iter: 50,
+                verbose: false,
+                print_level: crate::PrintLevel::Silent,
+            },
             linear_strategy: CoupledLinearStrategy::BlockSchur2x2,
         });
 
@@ -478,11 +482,15 @@ mod tests {
     }
     impl Linear3x3Problem {
         fn new() -> Self {
-            Self { sizes: vec![2, 2, 1] }
+            Self {
+                sizes: vec![2, 2, 1],
+            }
         }
     }
     impl CoupledProblem for Linear3x3Problem {
-        fn block_sizes(&self) -> &[usize] { &self.sizes }
+        fn block_sizes(&self) -> &[usize] {
+            &self.sizes
+        }
         fn residual(&self, _t: f64, state: &BlockVector, rhs: &BlockVector, out: &mut BlockVector) {
             // Three-field linear system:
             // F₀ = 2u₀ + u₁ + v₀     - rhs₀  (u-v coupling)
@@ -503,27 +511,33 @@ mod tests {
             // Helper: build a CSR block from a dense slice
             let csr = |rows: usize, cols: usize, data: &[(usize, usize, f64)]| -> CsrMatrix<f64> {
                 let mut coo = CooMatrix::new(rows, cols);
-                for &(r, c, v) in data { coo.add(r, c, v); }
+                for &(r, c, v) in data {
+                    coo.add(r, c, v);
+                }
                 coo.into_csr()
             };
             // J₀₀ = [[2,1],[1,3]]
-            bm.set(0, 0, csr(2, 2, &[(0,0,2.0),(0,1,1.0),(1,0,1.0),(1,1,3.0)]));
+            bm.set(
+                0,
+                0,
+                csr(2, 2, &[(0, 0, 2.0), (0, 1, 1.0), (1, 0, 1.0), (1, 1, 3.0)]),
+            );
             // J₀₁ = [[1,0],[0,0]]
-            bm.set(0, 1, csr(2, 2, &[(0,0,1.0)]));
+            bm.set(0, 1, csr(2, 2, &[(0, 0, 1.0)]));
             // J₀₂ = [[0],[1]]
-            bm.set(0, 2, csr(2, 1, &[(1,0,1.0)]));
+            bm.set(0, 2, csr(2, 1, &[(1, 0, 1.0)]));
             // J₁₀ = [[1,0],[0,0]]
-            bm.set(1, 0, csr(2, 2, &[(0,0,1.0)]));
+            bm.set(1, 0, csr(2, 2, &[(0, 0, 1.0)]));
             // J₁₁ = [[1,2],[0,1]]
-            bm.set(1, 1, csr(2, 2, &[(0,0,1.0),(0,1,2.0),(1,1,1.0)]));
+            bm.set(1, 1, csr(2, 2, &[(0, 0, 1.0), (0, 1, 2.0), (1, 1, 1.0)]));
             // J₁₂ = [[1],[3]]
-            bm.set(1, 2, csr(2, 1, &[(0,0,1.0),(1,0,3.0)]));
+            bm.set(1, 2, csr(2, 1, &[(0, 0, 1.0), (1, 0, 3.0)]));
             // J₂₀ = [[1,0]]
-            bm.set(2, 0, csr(1, 2, &[(0,0,1.0)]));
+            bm.set(2, 0, csr(1, 2, &[(0, 0, 1.0)]));
             // J₂₁ = [[-1,0]]
-            bm.set(2, 1, csr(1, 2, &[(0,0,-1.0)]));
+            bm.set(2, 1, csr(1, 2, &[(0, 0, -1.0)]));
             // J₂₂ = [[1]]
-            bm.set(2, 2, csr(1, 1, &[(0,0,1.0)]));
+            bm.set(2, 2, csr(1, 1, &[(0, 0, 1.0)]));
             bm
         }
     }
@@ -532,15 +546,25 @@ mod tests {
     fn monolithic_newton_solves_three_field_problem() {
         let problem = Linear3x3Problem::new();
         let solver = CoupledNewtonSolver::new(CoupledNewtonConfig {
-            atol: 1e-10, rtol: 1e-10, max_iter: 20,
-            gmres_restart: 16, line_search: true,
-            linear: SolverConfig { rtol: 1e-14, atol: 0.0, max_iter: 50,
-                verbose: false, print_level: crate::PrintLevel::Silent },
+            atol: 1e-10,
+            rtol: 1e-10,
+            max_iter: 20,
+            gmres_restart: 16,
+            line_search: true,
+            linear: SolverConfig {
+                rtol: 1e-14,
+                atol: 0.0,
+                max_iter: 50,
+                verbose: false,
+                print_level: crate::PrintLevel::Silent,
+            },
             ..Default::default()
         });
         let mut rhs = BlockVector::new(vec![2, 2, 1]);
-        rhs.block_mut(0)[0] = 1.0; rhs.block_mut(0)[1] = 2.0;
-        rhs.block_mut(1)[0] = 3.0; rhs.block_mut(1)[1] = 4.0;
+        rhs.block_mut(0)[0] = 1.0;
+        rhs.block_mut(0)[1] = 2.0;
+        rhs.block_mut(1)[0] = 3.0;
+        rhs.block_mut(1)[1] = 4.0;
         rhs.block_mut(2)[0] = 5.0;
 
         let mut state = BlockVector::new(vec![2, 2, 1]);

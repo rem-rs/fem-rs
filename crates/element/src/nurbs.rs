@@ -60,13 +60,22 @@ impl KnotVector {
     /// Panics if `knots.len() < degree + 2` (need at least `p+2` knots to have
     /// one non-empty span) or if `knots` is not non-decreasing.
     pub fn new(knots: Vec<f64>, degree: usize) -> Self {
-        assert!(knots.len() >= degree + 2,
+        assert!(
+            knots.len() >= degree + 2,
             "KnotVector: need at least {} knots for degree {}, got {}",
-            degree + 2, degree, knots.len());
+            degree + 2,
+            degree,
+            knots.len()
+        );
         for i in 1..knots.len() {
-            assert!(knots[i] >= knots[i - 1],
+            assert!(
+                knots[i] >= knots[i - 1],
                 "KnotVector: knots must be non-decreasing; knots[{}]={} < knots[{}]={}",
-                i, knots[i], i-1, knots[i-1]);
+                i,
+                knots[i],
+                i - 1,
+                knots[i - 1]
+            );
         }
         KnotVector { knots, degree }
     }
@@ -110,8 +119,12 @@ impl KnotVector {
         let knots = &self.knots;
 
         // Clamp to domain.
-        if xi >= knots[n + 1] { return n; }
-        if xi <= knots[p] { return p; }
+        if xi >= knots[n + 1] {
+            return n;
+        }
+        if xi <= knots[p] {
+            return p;
+        }
 
         let mut lo = p;
         let mut hi = n + 1;
@@ -136,17 +149,21 @@ impl KnotVector {
         let p = self.degree;
         let knots = &self.knots;
         let mut n = vec![0.0_f64; p + 1];
-        let mut left  = vec![0.0_f64; p + 1];
+        let mut left = vec![0.0_f64; p + 1];
         let mut right = vec![0.0_f64; p + 1];
 
         n[0] = 1.0;
         for j in 1..=p {
-            left[j]  = xi - knots[span + 1 - j];
+            left[j] = xi - knots[span + 1 - j];
             right[j] = knots[span + j] - xi;
             let mut saved = 0.0_f64;
             for r in 0..j {
                 let denom = right[r + 1] + left[j - r];
-                let temp = if denom.abs() < 1e-300 { 0.0 } else { n[r] / denom };
+                let temp = if denom.abs() < 1e-300 {
+                    0.0
+                } else {
+                    n[r] / denom
+                };
                 n[r] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
@@ -173,19 +190,23 @@ impl KnotVector {
         // We use the standard layout from the NURBS Book:
         //   ndu[j][r] = N_{span-j+r, j}  (the r-th basis of degree j)
         // and ndu is sized (p+1) x (p+1).
-        let mut ndu    = vec![vec![0.0_f64; p + 1]; p + 1];
-        let mut left   = vec![0.0_f64; p + 1];
-        let mut right  = vec![0.0_f64; p + 1];
+        let mut ndu = vec![vec![0.0_f64; p + 1]; p + 1];
+        let mut left = vec![0.0_f64; p + 1];
+        let mut right = vec![0.0_f64; p + 1];
 
         ndu[0][0] = 1.0;
         for j in 1..=p {
-            left[j]  = xi - knots[span + 1 - j];
+            left[j] = xi - knots[span + 1 - j];
             right[j] = knots[span + j] - xi;
             let mut saved = 0.0_f64;
             for r in 0..j {
                 // Store the denominator in the lower triangular part.
                 ndu[j][r] = right[r + 1] + left[j - r];
-                let temp = if ndu[j][r].abs() < 1e-300 { 0.0 } else { ndu[r][j - 1] / ndu[j][r] };
+                let temp = if ndu[j][r].abs() < 1e-300 {
+                    0.0
+                } else {
+                    ndu[r][j - 1] / ndu[j][r]
+                };
                 ndu[r][j] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
@@ -218,7 +239,7 @@ impl KnotVector {
             let j2: usize = if (r as i64 - 1) <= pk {
                 0
             } else {
-                (r - 1) - p  // this is the "p - r" range lower bound
+                (r - 1) - p // this is the "p - r" range lower bound
             };
             // Simpler: direct formula using ndu.
             // dN_{span-p+r,p}/dxi = p * (N_{span-p+r,p-1}/(Xi_{span+r}-Xi_{span-p+r})
@@ -228,22 +249,35 @@ impl KnotVector {
             let _ = (j1, j2, s2, rk, pk, &mut a); // suppress unused warnings
 
             let i = span as i64 - p as i64 + r as i64;
-            let n_ip_m1  = if r > 0 { ndu[r - 1][p - 1] } else { 0.0 };
+            let n_ip_m1 = if r > 0 { ndu[r - 1][p - 1] } else { 0.0 };
             let n_ip1_m1 = if r < p { ndu[r][p - 1] } else { 0.0 };
             let d1 = if r > 0 {
                 let denom = ndu[p][r - 1]; // stored denominator = Xi_{span+r} - Xi_{span-p+r}
-                if denom.abs() > 1e-300 { n_ip_m1 / denom } else { 0.0 }
-            } else { 0.0 };
+                if denom.abs() > 1e-300 {
+                    n_ip_m1 / denom
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             let d2 = if r < p {
                 let denom = ndu[p][r]; // stored denominator = Xi_{span+r+1} - Xi_{span-p+r+1}
-                if denom.abs() > 1e-300 { n_ip1_m1 / denom } else { 0.0 }
-            } else { 0.0 };
+                if denom.abs() > 1e-300 {
+                    n_ip1_m1 / denom
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             let _ = i;
             dn[r] = p as f64 * (d1 - d2);
 
             // Reset a for next r iteration.
             a[s1][0] = 0.0;
-            s1 = 1 - s1; s2 = 1 - s2;
+            s1 = 1 - s1;
+            s2 = 1 - s2;
             let _ = (s1, s2);
         }
 
@@ -282,7 +316,9 @@ impl KnotVector {
         let (nm, _) = self.basis_funs_and_ders(span, xi_m);
 
         let inv_eps2 = 1.0 / (eps * eps);
-        let ddn: Vec<f64> = (0..=p).map(|j| (np[j] - 2.0 * n[j] + nm[j]) * inv_eps2).collect();
+        let ddn: Vec<f64> = (0..=p)
+            .map(|j| (np[j] - 2.0 * n[j] + nm[j]) * inv_eps2)
+            .collect();
         (n, dn, ddn)
     }
 }
@@ -300,10 +336,14 @@ pub struct BSplineBasis1D {
 }
 
 impl BSplineBasis1D {
-    pub fn new(kv: KnotVector) -> Self { BSplineBasis1D { kv } }
+    pub fn new(kv: KnotVector) -> Self {
+        BSplineBasis1D { kv }
+    }
 
     /// Number of basis functions.
-    pub fn n_basis(&self) -> usize { self.kv.n_basis() }
+    pub fn n_basis(&self) -> usize {
+        self.kv.n_basis()
+    }
 
     /// Evaluate all basis functions at `xi`.
     ///
@@ -390,9 +430,13 @@ impl NurbsPatch2D {
     pub fn new(kv_u: KnotVector, kv_v: KnotVector, weights: Vec<f64>) -> Self {
         let n_u = kv_u.n_basis();
         let n_v = kv_v.n_basis();
-        assert_eq!(weights.len(), n_u * n_v,
+        assert_eq!(
+            weights.len(),
+            n_u * n_v,
             "NurbsPatch2D: weights.len()={} != n_u*n_v={}",
-            weights.len(), n_u * n_v);
+            weights.len(),
+            n_u * n_v
+        );
         for &w in &weights {
             assert!(w > 0.0, "NURBS weights must be positive");
         }
@@ -410,9 +454,13 @@ impl NurbsPatch2D {
     }
 
     /// Number of DOFs in $u$.
-    pub fn n_u(&self) -> usize { self.basis_u.n_basis() }
+    pub fn n_u(&self) -> usize {
+        self.basis_u.n_basis()
+    }
     /// Number of DOFs in $v$.
-    pub fn n_v(&self) -> usize { self.basis_v.n_basis() }
+    pub fn n_v(&self) -> usize {
+        self.basis_v.n_basis()
+    }
 
     /// Evaluate NURBS Hessians (second derivatives) at `xi = [u, v]` in
     /// **parametric** coordinates.
@@ -510,13 +558,17 @@ impl NurbsPatch2D {
 }
 
 impl ReferenceElement for NurbsPatch2D {
-    fn dim(&self) -> u8 { 2 }
+    fn dim(&self) -> u8 {
+        2
+    }
 
     fn order(&self) -> u8 {
         self.basis_u.kv.degree.max(self.basis_v.kv.degree) as u8
     }
 
-    fn n_dofs(&self) -> usize { self.n_u() * self.n_v() }
+    fn n_dofs(&self) -> usize {
+        self.n_u() * self.n_v()
+    }
 
     /// Evaluate all NURBS basis functions $R_{ij}(u,v)$ at reference point `xi = [u, v]`.
     ///
@@ -544,7 +596,9 @@ impl ReferenceElement for NurbsPatch2D {
         // Normalise by the denominator.
         if w_sum.abs() > 1e-300 {
             let inv_w = 1.0 / w_sum;
-            for v in values[..n].iter_mut() { *v *= inv_w; }
+            for v in values[..n].iter_mut() {
+                *v *= inv_w;
+            }
         }
     }
 
@@ -561,16 +615,16 @@ impl ReferenceElement for NurbsPatch2D {
         let n_u = self.n_u();
         let n_v = self.n_v();
 
-        let (nu,  dnu)  = self.basis_u.eval_with_ders(u);
-        let (nv,  dnv)  = self.basis_v.eval_with_ders(v);
+        let (nu, dnu) = self.basis_u.eval_with_ders(u);
+        let (nv, dnv) = self.basis_v.eval_with_ders(v);
 
         // Compute tensor-product B-splines, their weighted values, and the
         // denominator W and its gradient ∇W.
-        let mut b   = vec![0.0_f64; n_u * n_v]; // B_ij = N_i * M_j
+        let mut b = vec![0.0_f64; n_u * n_v]; // B_ij = N_i * M_j
         let mut db_du = vec![0.0_f64; n_u * n_v]; // dB/du = dN_i/du * M_j
         let mut db_dv = vec![0.0_f64; n_u * n_v]; // dB/dv = N_i * dM_j/dv
 
-        let mut w_sum    = 0.0_f64;
+        let mut w_sum = 0.0_f64;
         let mut dw_du = 0.0_f64;
         let mut dw_dv = 0.0_f64;
 
@@ -578,10 +632,10 @@ impl ReferenceElement for NurbsPatch2D {
             for i in 0..n_u {
                 let dof = j * n_u + i;
                 let w = self.weights[dof];
-                b[dof]    = nu[i] * nv[j];
+                b[dof] = nu[i] * nv[j];
                 db_du[dof] = dnu[i] * nv[j];
-                db_dv[dof] = nu[i]  * dnv[j];
-                w_sum    += w * b[dof];
+                db_dv[dof] = nu[i] * dnv[j];
+                w_sum += w * b[dof];
                 dw_du += w * db_du[dof];
                 dw_dv += w * db_dv[dof];
             }
@@ -596,7 +650,7 @@ impl ReferenceElement for NurbsPatch2D {
                 let w = self.weights[dof];
                 let w_b = w * b[dof];
                 // dR/du = (w * dB/du * W - w*B * dW/du) / W²
-                grads[dof * 2]     = (w * db_du[dof] * w_sum - w_b * dw_du) * inv_w2;
+                grads[dof * 2] = (w * db_du[dof] * w_sum - w_b * dw_du) * inv_w2;
                 // dR/dv = (w * dB/dv * W - w*B * dW/dv) / W²
                 grads[dof * 2 + 1] = (w * db_dv[dof] * w_sum - w_b * dw_dv) * inv_w2;
             }
@@ -604,7 +658,9 @@ impl ReferenceElement for NurbsPatch2D {
     }
 
     /// Gauss-Legendre tensor-product quadrature rule on $[0,1]^2$.
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        quad_rule(order)
+    }
 
     /// Reference-domain DOF coordinates.
     ///
@@ -640,15 +696,15 @@ pub struct NurbsPatch3D {
 }
 
 impl NurbsPatch3D {
-    pub fn new(
-        kv_u: KnotVector,
-        kv_v: KnotVector,
-        kv_w: KnotVector,
-        weights: Vec<f64>,
-    ) -> Self {
+    pub fn new(kv_u: KnotVector, kv_v: KnotVector, kv_w: KnotVector, weights: Vec<f64>) -> Self {
         let n = kv_u.n_basis() * kv_v.n_basis() * kv_w.n_basis();
-        assert_eq!(weights.len(), n,
-            "NurbsPatch3D: weights.len()={} != n_u*n_v*n_w={}", weights.len(), n);
+        assert_eq!(
+            weights.len(),
+            n,
+            "NurbsPatch3D: weights.len()={} != n_u*n_v*n_w={}",
+            weights.len(),
+            n
+        );
         for &w in &weights {
             assert!(w > 0.0, "NURBS weights must be positive");
         }
@@ -665,20 +721,36 @@ impl NurbsPatch3D {
         Self::new(kv_u, kv_v, kv_w, vec![1.0; n])
     }
 
-    pub fn n_u(&self) -> usize { self.basis_u.n_basis() }
-    pub fn n_v(&self) -> usize { self.basis_v.n_basis() }
-    pub fn n_w(&self) -> usize { self.basis_w.n_basis() }
+    pub fn n_u(&self) -> usize {
+        self.basis_u.n_basis()
+    }
+    pub fn n_v(&self) -> usize {
+        self.basis_v.n_basis()
+    }
+    pub fn n_w(&self) -> usize {
+        self.basis_w.n_basis()
+    }
 }
 
 impl ReferenceElement for NurbsPatch3D {
-    fn dim(&self) -> u8 { 3 }
-
-    fn order(&self) -> u8 {
-        [self.basis_u.kv.degree, self.basis_v.kv.degree, self.basis_w.kv.degree]
-            .into_iter().max().unwrap() as u8
+    fn dim(&self) -> u8 {
+        3
     }
 
-    fn n_dofs(&self) -> usize { self.n_u() * self.n_v() * self.n_w() }
+    fn order(&self) -> u8 {
+        [
+            self.basis_u.kv.degree,
+            self.basis_v.kv.degree,
+            self.basis_w.kv.degree,
+        ]
+        .into_iter()
+        .max()
+        .unwrap() as u8
+    }
+
+    fn n_dofs(&self) -> usize {
+        self.n_u() * self.n_v() * self.n_w()
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let (u, v, w) = (xi[0], xi[1], xi[2]);
@@ -704,7 +776,9 @@ impl ReferenceElement for NurbsPatch3D {
         }
         if w_sum.abs() > 1e-300 {
             let inv_w = 1.0 / w_sum;
-            for v in values[..n].iter_mut() { *v *= inv_w; }
+            for v in values[..n].iter_mut() {
+                *v *= inv_w;
+            }
         }
     }
 
@@ -714,27 +788,30 @@ impl ReferenceElement for NurbsPatch3D {
         let n_v = self.n_v();
         let n_w = self.n_w();
 
-        let (nu,  dnu)  = self.basis_u.eval_with_ders(u);
-        let (nv,  dnv)  = self.basis_v.eval_with_ders(v);
-        let (nw,  dnw)  = self.basis_w.eval_with_ders(w);
+        let (nu, dnu) = self.basis_u.eval_with_ders(u);
+        let (nv, dnv) = self.basis_v.eval_with_ders(v);
+        let (nw, dnw) = self.basis_w.eval_with_ders(w);
 
         let n_dofs = n_u * n_v * n_w;
-        let mut b     = vec![0.0_f64; n_dofs];
+        let mut b = vec![0.0_f64; n_dofs];
         let mut db_du = vec![0.0_f64; n_dofs];
         let mut db_dv = vec![0.0_f64; n_dofs];
         let mut db_dw = vec![0.0_f64; n_dofs];
 
-        let mut w_sum = 0.0; let mut dw_du = 0.0; let mut dw_dv = 0.0; let mut dw_dw = 0.0;
+        let mut w_sum = 0.0;
+        let mut dw_du = 0.0;
+        let mut dw_dv = 0.0;
+        let mut dw_dw = 0.0;
 
         for k in 0..n_w {
             for j in 0..n_v {
                 for i in 0..n_u {
                     let dof = k * n_u * n_v + j * n_u + i;
-                    let wt  = self.weights[dof];
-                    b[dof]    = nu[i] * nv[j] * nw[k];
+                    let wt = self.weights[dof];
+                    b[dof] = nu[i] * nv[j] * nw[k];
                     db_du[dof] = dnu[i] * nv[j] * nw[k];
-                    db_dv[dof] = nu[i]  * dnv[j] * nw[k];
-                    db_dw[dof] = nu[i]  * nv[j]  * dnw[k];
+                    db_dv[dof] = nu[i] * dnv[j] * nw[k];
+                    db_dw[dof] = nu[i] * nv[j] * dnw[k];
                     w_sum += wt * b[dof];
                     dw_du += wt * db_du[dof];
                     dw_dv += wt * db_dv[dof];
@@ -750,9 +827,9 @@ impl ReferenceElement for NurbsPatch3D {
             for j in 0..n_v {
                 for i in 0..n_u {
                     let dof = k * n_u * n_v + j * n_u + i;
-                    let wt  = self.weights[dof];
+                    let wt = self.weights[dof];
                     let w_b = wt * b[dof];
-                    grads[dof * 3]     = (wt * db_du[dof] * w_sum - w_b * dw_du) * inv_w2;
+                    grads[dof * 3] = (wt * db_du[dof] * w_sum - w_b * dw_du) * inv_w2;
                     grads[dof * 3 + 1] = (wt * db_dv[dof] * w_sum - w_b * dw_dv) * inv_w2;
                     grads[dof * 3 + 2] = (wt * db_dw[dof] * w_sum - w_b * dw_dw) * inv_w2;
                 }
@@ -760,7 +837,9 @@ impl ReferenceElement for NurbsPatch3D {
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { hex_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        hex_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let n_u = self.n_u();
@@ -832,13 +911,21 @@ impl NurbsMesh2D {
         weights: Vec<f64>,
     ) -> Self {
         NurbsMesh2D {
-            patches: vec![NurbsPatch2DData { kv_u, kv_v, control_pts, weights, tag: 1 }],
+            patches: vec![NurbsPatch2DData {
+                kv_u,
+                kv_v,
+                control_pts,
+                weights,
+                tag: 1,
+            }],
             edge_connectivity: Vec::new(),
         }
     }
 
     /// Number of patches.
-    pub fn n_patches(&self) -> usize { self.patches.len() }
+    pub fn n_patches(&self) -> usize {
+        self.patches.len()
+    }
 
     /// Total number of control points (DOFs) across all patches.
     /// Note: shared boundary DOFs are counted once per patch (no deduplication).
@@ -880,17 +967,28 @@ impl NurbsMesh3D {
         weights: Vec<f64>,
     ) -> Self {
         NurbsMesh3D {
-            patches: vec![NurbsPatch3DData { kv_u, kv_v, kv_w, control_pts, weights, tag: 1 }],
+            patches: vec![NurbsPatch3DData {
+                kv_u,
+                kv_v,
+                kv_w,
+                control_pts,
+                weights,
+                tag: 1,
+            }],
             face_connectivity: Vec::new(),
         }
     }
 
-    pub fn n_patches(&self) -> usize { self.patches.len() }
+    pub fn n_patches(&self) -> usize {
+        self.patches.len()
+    }
 
     pub fn patch_element(&self, patch_idx: usize) -> NurbsPatch3D {
         let pd = &self.patches[patch_idx];
         NurbsPatch3D::new(
-            pd.kv_u.clone(), pd.kv_v.clone(), pd.kv_w.clone(),
+            pd.kv_u.clone(),
+            pd.kv_v.clone(),
+            pd.kv_w.clone(),
             pd.weights.clone(),
         )
     }
@@ -900,7 +998,9 @@ impl NurbsPatch3DData {
     /// Get the `NurbsPatch3D` reference element for this patch data.
     pub fn patch_element_ref(&self) -> NurbsPatch3D {
         NurbsPatch3D::new(
-            self.kv_u.clone(), self.kv_v.clone(), self.kv_w.clone(),
+            self.kv_u.clone(),
+            self.kv_v.clone(),
+            self.kv_w.clone(),
             self.weights.clone(),
         )
     }
@@ -915,25 +1015,33 @@ pub fn greville_abscissae(kv: &KnotVector) -> Vec<f64> {
     let n = kv.n_basis();
     let p = kv.degree;
     let knots = &kv.knots;
-    (0..n).map(|i| {
-        if p == 0 {
-            // Midpoint of the span.
-            0.5 * (knots[i] + knots[i + 1])
-        } else {
-            let sum: f64 = (1..=p).map(|k| knots[i + k]).sum();
-            sum / p as f64
-        }
-    }).collect()
+    (0..n)
+        .map(|i| {
+            if p == 0 {
+                // Midpoint of the span.
+                0.5 * (knots[i] + knots[i + 1])
+            } else {
+                let sum: f64 = (1..=p).map(|k| knots[i + k]).sum();
+                sum / p as f64
+            }
+        })
+        .collect()
 }
 
 // ─── Degree elevation ────────────────────────────────────────────────────────
 
 fn binom(n: usize, k: usize) -> f64 {
-    if k > n { return 0.0; }
+    if k > n {
+        return 0.0;
+    }
     let k = k.min(n - k);
-    if k == 0 { return 1.0; }
+    if k == 0 {
+        return 1.0;
+    }
     let mut r = 1.0;
-    for i in 1..=k { r = r * (n - k + i) as f64 / i as f64; }
+    for i in 1..=k {
+        r = r * (n - k + i) as f64 / i as f64;
+    }
     r
 }
 
@@ -944,7 +1052,9 @@ fn bezalfs(p: usize, t: usize) -> Vec<Vec<f64>> {
     a[ph][p] = 1.0;
     for i in 1..ph {
         let d = binom(ph, i);
-        if d.abs() <= 1e-300 { continue; }
+        if d.abs() <= 1e-300 {
+            continue;
+        }
         for j in (if i >= t { i - t } else { 0 })..=p.min(i) {
             a[i][j] = binom(p, j) * binom(t, i - j) / d;
         }
@@ -958,7 +1068,12 @@ fn bezalfs(p: usize, t: usize) -> Vec<Vec<f64>> {
 }
 
 #[allow(unused_assignments, non_snake_case, dead_code)]
-pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn elevate_curve_1d(
+    knots: &[f64],
+    ctrl: &[f64],
+    p: usize,
+    t: usize,
+) -> (Vec<f64>, Vec<f64>) {
     assert!(t > 0);
     let n = ctrl.len() - 1;
     let m = knots.len() - 1;
@@ -970,13 +1085,17 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
     let mb = nb + ph + 1;
     let mut U = vec![0.0; mb + 1];
     let mut Q = vec![0.0; nb + 1];
-    for j in 0..=ph { U[j] = knots[0]; }
+    for j in 0..=ph {
+        U[j] = knots[0];
+    }
     Q[0] = ctrl[0];
     let mut bp = vec![0.0; p + 1];
     let mut eb = vec![0.0; ph + 1];
     let mut nx = vec![0.0; p.saturating_sub(1).max(1)];
     let mut al = vec![0.0; p.saturating_sub(1).max(1)];
-    for j in 0..=p { bp[j] = ctrl[j]; }
+    for j in 0..=p {
+        bp[j] = ctrl[j];
+    }
     let mut a = p as isize;
     let mut b = (p + 1) as isize;
     let mut kd = (ph + 1) as isize;
@@ -986,7 +1105,9 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
     let mut ua = knots[0];
     while b < m as isize {
         let i0 = b;
-        while b < m as isize && (knots[b as usize] - knots[(b + 1) as usize]).abs() < 1e-14 { b += 1; }
+        while b < m as isize && (knots[b as usize] - knots[(b + 1) as usize]).abs() < 1e-14 {
+            b += 1;
+        }
         let mul = (b - i0 + 1) as usize;
         let ub = knots[b as usize];
         or = r;
@@ -1027,7 +1148,8 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
                     if ib < ci {
                         let af = (ub - U[ib as usize]) / (ua - U[ib as usize]);
                         let iu = ib as usize;
-                        Q[iu] = af * Q[iu] - (1.0 - af) * Q[if ib > 0 { (ib - 1) as usize } else { 0 }];
+                        Q[iu] =
+                            af * Q[iu] - (1.0 - af) * Q[if ib > 0 { (ib - 1) as usize } else { 0 }];
                     }
                     if jb >= lbz as isize {
                         let jtr = jb - tr as isize;
@@ -1044,7 +1166,11 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
             }
         }
         if a != p as isize {
-            for _ in 0..if or > 0 { ph.saturating_sub(or as usize) } else { ph } {
+            for _ in 0..if or > 0 {
+                ph.saturating_sub(or as usize)
+            } else {
+                ph
+            } {
                 U[kd as usize] = ua;
                 kd += 1;
             }
@@ -1056,7 +1182,9 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
             }
         }
         if b < m as isize {
-            for j in 0..ru { bp[j] = nx[j]; }
+            for j in 0..ru {
+                bp[j] = nx[j];
+            }
             for j in ru..=p {
                 bp[j] = ctrl[(b - p as isize + j as isize) as usize];
             }
@@ -1073,60 +1201,233 @@ pub(crate) fn elevate_curve_1d(knots: &[f64], ctrl: &[f64], p: usize, t: usize) 
 }
 
 #[allow(non_snake_case)]
-pub fn elevate_degree_curve_2d(kv: &KnotVector, ctrl: &[[f64; 2]], w: &[f64], t: usize) -> (KnotVector, Vec<[f64; 2]>, Vec<f64>) {
-    let p = kv.degree; let n = ctrl.len();
-    let (U, x) = elevate_curve_1d(&kv.knots, &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(), p, t);
-    let (_, y) = elevate_curve_1d(&kv.knots, &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(), p, t);
+pub fn elevate_degree_curve_2d(
+    kv: &KnotVector,
+    ctrl: &[[f64; 2]],
+    w: &[f64],
+    t: usize,
+) -> (KnotVector, Vec<[f64; 2]>, Vec<f64>) {
+    let p = kv.degree;
+    let n = ctrl.len();
+    let (U, x) = elevate_curve_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(),
+        p,
+        t,
+    );
+    let (_, y) = elevate_curve_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(),
+        p,
+        t,
+    );
     let (_, ww) = elevate_curve_1d(&kv.knots, &w.to_vec(), p, t);
     let nn = x.len();
-    (KnotVector::new(U, p + t), (0..nn).map(|i| { let w = ww[i]; if w.abs() > 1e-300 { [x[i] / w, y[i] / w] } else { [0.0, 0.0] } }).collect(), ww)
+    (
+        KnotVector::new(U, p + t),
+        (0..nn)
+            .map(|i| {
+                let w = ww[i];
+                if w.abs() > 1e-300 {
+                    [x[i] / w, y[i] / w]
+                } else {
+                    [0.0, 0.0]
+                }
+            })
+            .collect(),
+        ww,
+    )
 }
 
 #[allow(non_snake_case)]
-pub fn elevate_curve_3d(kv: &KnotVector, ctrl: &[[f64; 3]], w: &[f64], t: usize) -> (KnotVector, Vec<[f64; 3]>, Vec<f64>) {
-    let p = kv.degree; let n = ctrl.len();
-    let (U, x) = elevate_curve_1d(&kv.knots, &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(), p, t);
-    let (_, y) = elevate_curve_1d(&kv.knots, &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(), p, t);
-    let (_, z) = elevate_curve_1d(&kv.knots, &(0..n).map(|i| ctrl[i][2] * w[i]).collect::<Vec<_>>(), p, t);
+pub fn elevate_curve_3d(
+    kv: &KnotVector,
+    ctrl: &[[f64; 3]],
+    w: &[f64],
+    t: usize,
+) -> (KnotVector, Vec<[f64; 3]>, Vec<f64>) {
+    let p = kv.degree;
+    let n = ctrl.len();
+    let (U, x) = elevate_curve_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(),
+        p,
+        t,
+    );
+    let (_, y) = elevate_curve_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(),
+        p,
+        t,
+    );
+    let (_, z) = elevate_curve_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][2] * w[i]).collect::<Vec<_>>(),
+        p,
+        t,
+    );
     let (_, ww) = elevate_curve_1d(&kv.knots, &w.to_vec(), p, t);
     let nn = x.len();
-    (KnotVector::new(U, p + t), (0..nn).map(|i| { let w = ww[i]; if w.abs() > 1e-300 { [x[i] / w, y[i] / w, z[i] / w] } else { [0.0, 0.0, 0.0] } }).collect(), ww)
+    (
+        KnotVector::new(U, p + t),
+        (0..nn)
+            .map(|i| {
+                let w = ww[i];
+                if w.abs() > 1e-300 {
+                    [x[i] / w, y[i] / w, z[i] / w]
+                } else {
+                    [0.0, 0.0, 0.0]
+                }
+            })
+            .collect(),
+        ww,
+    )
 }
 
 pub fn elevate_u_2d(pd: &NurbsPatch2DData, t: usize) -> NurbsPatch2DData {
-    if t == 0 { return pd.clone(); }
-    let nu = pd.kv_u.n_basis(); let nv = pd.kv_v.n_basis(); let p = pd.kv_u.degree;
-    let n = nu * nv; let mut xw = vec![0.0; n]; let mut yw = vec![0.0; n]; let mut ww = vec![0.0; n];
-    for j in 0..nv { for i in 0..nu { let idx = j * nu + i; xw[idx] = pd.control_pts[idx][0] * pd.weights[idx]; yw[idx] = pd.control_pts[idx][1] * pd.weights[idx]; ww[idx] = pd.weights[idx]; } }
-    let mut nx = Vec::new(); let mut ny = Vec::new(); let mut nw = Vec::new(); let mut nkv = None;
-    for j in 0..nv {
-        let (U, rx) = elevate_curve_1d(&pd.kv_u.knots, &(0..nu).map(|i| xw[j * nu + i]).collect::<Vec<_>>(), p, t);
-        let (_, ry) = elevate_curve_1d(&pd.kv_u.knots, &(0..nu).map(|i| yw[j * nu + i]).collect::<Vec<_>>(), p, t);
-        let (_, rw) = elevate_curve_1d(&pd.kv_u.knots, &(0..nu).map(|i| ww[j * nu + i]).collect::<Vec<_>>(), p, t);
-        if nkv.is_none() { nkv = Some(KnotVector::new(U, p + t)); }
-        nx.extend(rx); ny.extend(ry); nw.extend(rw);
+    if t == 0 {
+        return pd.clone();
     }
-    let nkv = nkv.unwrap(); let nnu = nkv.n_basis();
-    NurbsPatch2DData { kv_u: nkv, kv_v: pd.kv_v.clone(), control_pts: (0..nnu * nv).map(|i| { let w = nw[i]; if w.abs() > 1e-300 { [nx[i] / w, ny[i] / w] } else { [0.0, 0.0] } }).collect(), weights: nw, tag: pd.tag }
+    let nu = pd.kv_u.n_basis();
+    let nv = pd.kv_v.n_basis();
+    let p = pd.kv_u.degree;
+    let n = nu * nv;
+    let mut xw = vec![0.0; n];
+    let mut yw = vec![0.0; n];
+    let mut ww = vec![0.0; n];
+    for j in 0..nv {
+        for i in 0..nu {
+            let idx = j * nu + i;
+            xw[idx] = pd.control_pts[idx][0] * pd.weights[idx];
+            yw[idx] = pd.control_pts[idx][1] * pd.weights[idx];
+            ww[idx] = pd.weights[idx];
+        }
+    }
+    let mut nx = Vec::new();
+    let mut ny = Vec::new();
+    let mut nw = Vec::new();
+    let mut nkv = None;
+    for j in 0..nv {
+        let (U, rx) = elevate_curve_1d(
+            &pd.kv_u.knots,
+            &(0..nu).map(|i| xw[j * nu + i]).collect::<Vec<_>>(),
+            p,
+            t,
+        );
+        let (_, ry) = elevate_curve_1d(
+            &pd.kv_u.knots,
+            &(0..nu).map(|i| yw[j * nu + i]).collect::<Vec<_>>(),
+            p,
+            t,
+        );
+        let (_, rw) = elevate_curve_1d(
+            &pd.kv_u.knots,
+            &(0..nu).map(|i| ww[j * nu + i]).collect::<Vec<_>>(),
+            p,
+            t,
+        );
+        if nkv.is_none() {
+            nkv = Some(KnotVector::new(U, p + t));
+        }
+        nx.extend(rx);
+        ny.extend(ry);
+        nw.extend(rw);
+    }
+    let nkv = nkv.unwrap();
+    let nnu = nkv.n_basis();
+    NurbsPatch2DData {
+        kv_u: nkv,
+        kv_v: pd.kv_v.clone(),
+        control_pts: (0..nnu * nv)
+            .map(|i| {
+                let w = nw[i];
+                if w.abs() > 1e-300 {
+                    [nx[i] / w, ny[i] / w]
+                } else {
+                    [0.0, 0.0]
+                }
+            })
+            .collect(),
+        weights: nw,
+        tag: pd.tag,
+    }
 }
 
-pub fn elevate_v_2d(pd: &NurbsPatch2DData, t: usize) -> NurbsPatch2DData { /* same pattern for v-direction */
-    if t == 0 { return pd.clone(); }
-    let nu = pd.kv_u.n_basis(); let nv = pd.kv_v.n_basis(); let q = pd.kv_v.degree;
-    let n = nu * nv; let mut xw = vec![0.0; n]; let mut yw = vec![0.0; n]; let mut ww = vec![0.0; n];
-    for idx in 0..n { xw[idx] = pd.control_pts[idx][0] * pd.weights[idx]; yw[idx] = pd.control_pts[idx][1] * pd.weights[idx]; ww[idx] = pd.weights[idx]; }
-    let mut nx = Vec::new(); let mut ny = Vec::new(); let mut nw = Vec::new(); let mut nkv = None;
-    for i in 0..nu {
-        let (V, rx) = elevate_curve_1d(&pd.kv_v.knots, &(0..nv).map(|j| xw[j * nu + i]).collect::<Vec<_>>(), q, t);
-        let (_, ry) = elevate_curve_1d(&pd.kv_v.knots, &(0..nv).map(|j| yw[j * nu + i]).collect::<Vec<_>>(), q, t);
-        let (_, rw) = elevate_curve_1d(&pd.kv_v.knots, &(0..nv).map(|j| ww[j * nu + i]).collect::<Vec<_>>(), q, t);
-        if nkv.is_none() { nkv = Some(KnotVector::new(V, q + t)); }
-        nx.extend(rx); ny.extend(ry); nw.extend(rw);
+pub fn elevate_v_2d(pd: &NurbsPatch2DData, t: usize) -> NurbsPatch2DData {
+    /* same pattern for v-direction */
+    if t == 0 {
+        return pd.clone();
     }
-    let nkv = nkv.unwrap(); let nnv = nkv.n_basis();
-    let ctrl: Vec<[f64; 2]> = (0..nu * nnv).map(|idx| { let j = idx / nu; let i = idx % nu; let w = nw[i * nnv + j]; if w.abs() > 1e-300 { [nx[i * nnv + j] / w, ny[i * nnv + j] / w] } else { [0.0, 0.0] } }).collect();
-    let wgt: Vec<f64> = (0..nu * nnv).map(|idx| { let j = idx / nu; let i = idx % nu; nw[i * nnv + j] }).collect();
-    NurbsPatch2DData { kv_u: pd.kv_u.clone(), kv_v: nkv, control_pts: ctrl, weights: wgt, tag: pd.tag }
+    let nu = pd.kv_u.n_basis();
+    let nv = pd.kv_v.n_basis();
+    let q = pd.kv_v.degree;
+    let n = nu * nv;
+    let mut xw = vec![0.0; n];
+    let mut yw = vec![0.0; n];
+    let mut ww = vec![0.0; n];
+    for idx in 0..n {
+        xw[idx] = pd.control_pts[idx][0] * pd.weights[idx];
+        yw[idx] = pd.control_pts[idx][1] * pd.weights[idx];
+        ww[idx] = pd.weights[idx];
+    }
+    let mut nx = Vec::new();
+    let mut ny = Vec::new();
+    let mut nw = Vec::new();
+    let mut nkv = None;
+    for i in 0..nu {
+        let (V, rx) = elevate_curve_1d(
+            &pd.kv_v.knots,
+            &(0..nv).map(|j| xw[j * nu + i]).collect::<Vec<_>>(),
+            q,
+            t,
+        );
+        let (_, ry) = elevate_curve_1d(
+            &pd.kv_v.knots,
+            &(0..nv).map(|j| yw[j * nu + i]).collect::<Vec<_>>(),
+            q,
+            t,
+        );
+        let (_, rw) = elevate_curve_1d(
+            &pd.kv_v.knots,
+            &(0..nv).map(|j| ww[j * nu + i]).collect::<Vec<_>>(),
+            q,
+            t,
+        );
+        if nkv.is_none() {
+            nkv = Some(KnotVector::new(V, q + t));
+        }
+        nx.extend(rx);
+        ny.extend(ry);
+        nw.extend(rw);
+    }
+    let nkv = nkv.unwrap();
+    let nnv = nkv.n_basis();
+    let ctrl: Vec<[f64; 2]> = (0..nu * nnv)
+        .map(|idx| {
+            let j = idx / nu;
+            let i = idx % nu;
+            let w = nw[i * nnv + j];
+            if w.abs() > 1e-300 {
+                [nx[i * nnv + j] / w, ny[i * nnv + j] / w]
+            } else {
+                [0.0, 0.0]
+            }
+        })
+        .collect();
+    let wgt: Vec<f64> = (0..nu * nnv)
+        .map(|idx| {
+            let j = idx / nu;
+            let i = idx % nu;
+            nw[i * nnv + j]
+        })
+        .collect();
+    NurbsPatch2DData {
+        kv_u: pd.kv_u.clone(),
+        kv_v: nkv,
+        control_pts: ctrl,
+        weights: wgt,
+        tag: pd.tag,
+    }
 }
 
 pub fn elevate_deg_2d(pd: &NurbsPatch2DData, tu: usize, tv: usize) -> NurbsPatch2DData {
@@ -1135,13 +1436,24 @@ pub fn elevate_deg_2d(pd: &NurbsPatch2DData, tu: usize, tv: usize) -> NurbsPatch
 
 impl NurbsMesh2D {
     pub fn elevate_degree(&self, tu: usize, tv: usize) -> Self {
-        NurbsMesh2D { patches: self.patches.iter().map(|p| elevate_deg_2d(p, tu, tv)).collect(), edge_connectivity: self.edge_connectivity.clone() }
+        NurbsMesh2D {
+            patches: self
+                .patches
+                .iter()
+                .map(|p| elevate_deg_2d(p, tu, tv))
+                .collect(),
+            edge_connectivity: self.edge_connectivity.clone(),
+        }
     }
 
     /// Refine each patch by inserting knots in u and v.
     pub fn h_refine(&self, uvals: &[f64], vvals: &[f64]) -> Self {
         NurbsMesh2D {
-            patches: self.patches.iter().map(|p| h_refine2d(p, uvals, vvals)).collect(),
+            patches: self
+                .patches
+                .iter()
+                .map(|p| h_refine2d(p, uvals, vvals))
+                .collect(),
             edge_connectivity: self.edge_connectivity.clone(),
         }
     }
@@ -1154,49 +1466,106 @@ impl NurbsMesh2D {
         for _ in 0..times {
             let mut new_patches = Vec::new();
             for p in &mesh.patches {
-                let u_mid: Vec<f64> = p.kv_u.knots.windows(2)
-                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
-                let v_mid: Vec<f64> = p.kv_v.knots.windows(2)
-                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                let u_mid: Vec<f64> = p
+                    .kv_u
+                    .knots
+                    .windows(2)
+                    .filter(|w| w[1] > w[0])
+                    .map(|w| 0.5 * (w[0] + w[1]))
+                    .collect();
+                let v_mid: Vec<f64> = p
+                    .kv_v
+                    .knots
+                    .windows(2)
+                    .filter(|w| w[1] > w[0])
+                    .map(|w| 0.5 * (w[0] + w[1]))
+                    .collect();
                 new_patches.push(h_refine2d(p, &u_mid, &v_mid));
             }
             mesh.patches = new_patches;
         }
-        NurbsMesh2D { patches: mesh.patches, edge_connectivity: self.edge_connectivity.clone() }
+        NurbsMesh2D {
+            patches: mesh.patches,
+            edge_connectivity: self.edge_connectivity.clone(),
+        }
     }
 }
 
 // ─── Knot insertion ──────────────────────────────────────────────────────────
 
-pub(crate) fn insert_knot_1d(knots: &[f64], ctrl: &[f64], p: usize, u: f64) -> (Vec<f64>, Vec<f64>) {
-    let n = ctrl.len() - 1; assert_eq!(knots.len() - 1, n + p + 1);
+pub(crate) fn insert_knot_1d(
+    knots: &[f64],
+    ctrl: &[f64],
+    p: usize,
+    u: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let n = ctrl.len() - 1;
+    assert_eq!(knots.len() - 1, n + p + 1);
     let k = {
         let (mut lo, mut hi, mut mid) = (p, n + 1, (p + n + 1) / 2);
         while u < knots[mid] || u >= knots[mid + 1] {
-            if u < knots[mid] { hi = mid; } else { lo = mid; }
+            if u < knots[mid] {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
             mid = (lo + hi) / 2;
         }
         mid
     };
     assert!(knots.iter().filter(|&&x| (x - u).abs() < 1e-12).count() <= p);
-    let mut nk = knots.to_vec(); nk.insert(k + 1, u);
+    let mut nk = knots.to_vec();
+    nk.insert(k + 1, u);
     let mut nc = Vec::with_capacity(n + 2);
-    for i in 0..=k - p { nc.push(ctrl[i]); }
+    for i in 0..=k - p {
+        nc.push(ctrl[i]);
+    }
     for i in (k - p + 1)..=k {
-        let a = if (knots[i + p] - knots[i]).abs() > 1e-300 { (u - knots[i]) / (knots[i + p] - knots[i]) } else { 0.0 };
+        let a = if (knots[i + p] - knots[i]).abs() > 1e-300 {
+            (u - knots[i]) / (knots[i + p] - knots[i])
+        } else {
+            0.0
+        };
         nc.push(a * ctrl[i] + (1.0 - a) * ctrl[i - 1]);
     }
-    for i in (k + 1)..=n + 1 { nc.push(ctrl[i - 1]); }
+    for i in (k + 1)..=n + 1 {
+        nc.push(ctrl[i - 1]);
+    }
     (nk, nc)
 }
 
-pub fn insert_knot_curve_2d(kv: &KnotVector, ctrl: &[[f64; 2]], w: &[f64], u: f64) -> (KnotVector, Vec<[f64; 2]>, Vec<f64>) {
-    let p = kv.degree; let n = ctrl.len();
-    let (nk, x) = insert_knot_1d(&kv.knots, &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(), p, u);
-    let (_, y) = insert_knot_1d(&kv.knots, &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(), p, u);
+pub fn insert_knot_curve_2d(
+    kv: &KnotVector,
+    ctrl: &[[f64; 2]],
+    w: &[f64],
+    u: f64,
+) -> (KnotVector, Vec<[f64; 2]>, Vec<f64>) {
+    let p = kv.degree;
+    let n = ctrl.len();
+    let (nk, x) = insert_knot_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][0] * w[i]).collect::<Vec<_>>(),
+        p,
+        u,
+    );
+    let (_, y) = insert_knot_1d(
+        &kv.knots,
+        &(0..n).map(|i| ctrl[i][1] * w[i]).collect::<Vec<_>>(),
+        p,
+        u,
+    );
     let (_, ww) = insert_knot_1d(&kv.knots, &w.to_vec(), p, u);
     let nn = x.len();
-    let nc: Vec<[f64; 2]> = (0..nn).map(|i| { let w = ww[i]; if w.abs() > 1e-300 { [x[i] / w, y[i] / w] } else { [0.0, 0.0] } }).collect();
+    let nc: Vec<[f64; 2]> = (0..nn)
+        .map(|i| {
+            let w = ww[i];
+            if w.abs() > 1e-300 {
+                [x[i] / w, y[i] / w]
+            } else {
+                [0.0, 0.0]
+            }
+        })
+        .collect();
     (KnotVector::new(nk, p), nc, ww)
 }
 
@@ -1207,20 +1576,28 @@ pub fn h_refine_uk(pd: &NurbsPatch2DData, u: &[f64]) -> NurbsPatch2DData {
         let nu = r.kv_u.n_basis();
         let p = r.kv_u.degree;
         let kv = r.kv_u.knots.clone(); // save original knot vector
-        // Insert knot into each v-row using the SAME original knot vector
+                                       // Insert knot into each v-row using the SAME original knot vector
         let mut new_ctrl = Vec::new();
         let mut new_wgt = Vec::new();
         for j in 0..nv {
-            let row_x: Vec<f64> = (0..nu).map(|i| r.control_pts[j*nu+i][0] * r.weights[j*nu+i]).collect();
-            let row_y: Vec<f64> = (0..nu).map(|i| r.control_pts[j*nu+i][1] * r.weights[j*nu+i]).collect();
-            let row_w: Vec<f64> = (0..nu).map(|i| r.weights[j*nu+i]).collect();
+            let row_x: Vec<f64> = (0..nu)
+                .map(|i| r.control_pts[j * nu + i][0] * r.weights[j * nu + i])
+                .collect();
+            let row_y: Vec<f64> = (0..nu)
+                .map(|i| r.control_pts[j * nu + i][1] * r.weights[j * nu + i])
+                .collect();
+            let row_w: Vec<f64> = (0..nu).map(|i| r.weights[j * nu + i]).collect();
             let (nk, rx) = insert_knot_1d(&kv, &row_x, p, v);
             let (_, ry) = insert_knot_1d(&kv, &row_y, p, v);
             let (_, rw) = insert_knot_1d(&kv, &row_w, p, v);
             r.kv_u = KnotVector::new(nk, p); // update kv (same for all rows)
             for i in 0..r.kv_u.n_basis() {
                 let w = rw[i];
-                new_ctrl.push(if w.abs() > 1e-300 { [rx[i]/w, ry[i]/w] } else { [0.0,0.0] });
+                new_ctrl.push(if w.abs() > 1e-300 {
+                    [rx[i] / w, ry[i] / w]
+                } else {
+                    [0.0, 0.0]
+                });
                 new_wgt.push(w);
             }
         }
@@ -1231,8 +1608,11 @@ pub fn h_refine_uk(pd: &NurbsPatch2DData, u: &[f64]) -> NurbsPatch2DData {
 }
 
 pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
-    let nu = pd.kv_u.n_basis(); let pv = pd.kv_v.degree;
-    let mut kk = pd.kv_v.clone(); let mut cc = pd.control_pts.to_vec(); let mut ww = pd.weights.to_vec();
+    let nu = pd.kv_u.n_basis();
+    let pv = pd.kv_v.degree;
+    let mut kk = pd.kv_v.clone();
+    let mut cc = pd.control_pts.to_vec();
+    let mut ww = pd.weights.to_vec();
     for &u in v {
         let cv = kk.n_basis();
         let nn = cv + 1; // each insertion adds one basis function
@@ -1241,13 +1621,19 @@ pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
         let mut new_cc = Vec::with_capacity(nu * nn);
         let mut new_ww = Vec::with_capacity(nu * nn);
         for i in 0..nu {
-            let cx: Vec<f64> = (0..cv).map(|j| cc[j*nu+i][0]*ww[j*nu+i]).collect();
-            let cy: Vec<f64> = (0..cv).map(|j| cc[j*nu+i][1]*ww[j*nu+i]).collect();
-            let cw: Vec<f64> = (0..cv).map(|j| ww[j*nu+i]).collect();
+            let cx: Vec<f64> = (0..cv)
+                .map(|j| cc[j * nu + i][0] * ww[j * nu + i])
+                .collect();
+            let cy: Vec<f64> = (0..cv)
+                .map(|j| cc[j * nu + i][1] * ww[j * nu + i])
+                .collect();
+            let cw: Vec<f64> = (0..cv).map(|j| ww[j * nu + i]).collect();
             let (nk, rx) = insert_knot_1d(&orig_knots, &cx, pv, u);
             let (_, ry) = insert_knot_1d(&orig_knots, &cy, pv, u);
             let (_, rw) = insert_knot_1d(&orig_knots, &cw, pv, u);
-            if i == 0 { kk = KnotVector::new(nk, pv); }
+            if i == 0 {
+                kk = KnotVector::new(nk, pv);
+            }
             for j in 0..nn {
                 let w = rw[j];
                 if w.abs() > 1e-300 {
@@ -1261,10 +1647,18 @@ pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
         cc = new_cc;
         ww = new_ww;
     }
-    NurbsPatch2DData { kv_u: pd.kv_u.clone(), kv_v: kk, control_pts: cc, weights: ww, tag: pd.tag }
+    NurbsPatch2DData {
+        kv_u: pd.kv_u.clone(),
+        kv_v: kk,
+        control_pts: cc,
+        weights: ww,
+        tag: pd.tag,
+    }
 }
 
-pub fn h_refine2d(pd: &NurbsPatch2DData, uk: &[f64], vk: &[f64]) -> NurbsPatch2DData { h_refine_vk(&h_refine_uk(pd, uk), vk) }
+pub fn h_refine2d(pd: &NurbsPatch2DData, uk: &[f64], vk: &[f64]) -> NurbsPatch2DData {
+    h_refine_vk(&h_refine_uk(pd, uk), vk)
+}
 
 // ─── Spacing function ─────────────────────────────────────────────────────────
 
@@ -1284,8 +1678,10 @@ pub fn nurbs_spacing_2d(pd: &NurbsPatch2DData, u: f64, v: f64) -> f64 {
         let py = pd.control_pts[dof][1];
         let dud = grads[dof * 2];
         let dvd = grads[dof * 2 + 1];
-        j00 += px * dud; j01 += px * dvd;
-        j10 += py * dud; j11 += py * dvd;
+        j00 += px * dud;
+        j01 += px * dvd;
+        j10 += py * dud;
+        j11 += py * dvd;
     }
     let det = (j00 * j11 - j01 * j10).abs();
     det.sqrt()
@@ -1295,7 +1691,12 @@ pub fn nurbs_spacing_2d(pd: &NurbsPatch2DData, u: f64, v: f64) -> f64 {
 ///
 /// Returns `cbrt(|det J|)` where `J` is the 3×3 Jacobian.
 pub fn nurbs_spacing_3d(pd: &NurbsPatch3DData, u: f64, v: f64, w: f64) -> f64 {
-    let patch = NurbsPatch3D::new(pd.kv_u.clone(), pd.kv_v.clone(), pd.kv_w.clone(), pd.weights.clone());
+    let patch = NurbsPatch3D::new(
+        pd.kv_u.clone(),
+        pd.kv_v.clone(),
+        pd.kv_w.clone(),
+        pd.weights.clone(),
+    );
     let n_dofs = patch.n_dofs();
     let mut grads = vec![0.0; n_dofs * 3];
     patch.eval_grad_basis(&[u, v, w], &mut grads);
@@ -1308,9 +1709,10 @@ pub fn nurbs_spacing_3d(pd: &NurbsPatch3DData, u: f64, v: f64, w: f64) -> f64 {
             }
         }
     }
-    let det = (J[0][0]*(J[1][1]*J[2][2] - J[1][2]*J[2][1])
-             - J[0][1]*(J[1][0]*J[2][2] - J[1][2]*J[2][0])
-             + J[0][2]*(J[1][0]*J[2][1] - J[1][1]*J[2][0])).abs();
+    let det = (J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
+        - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
+        + J[0][2] * (J[1][0] * J[2][1] - J[1][1] * J[2][0]))
+        .abs();
     det.cbrt()
 }
 
@@ -1319,11 +1721,17 @@ pub fn nurbs_spacing_3d(pd: &NurbsPatch3DData, u: f64, v: f64, w: f64) -> f64 {
 /// Returns `Vec` of `((span_u, span_v), h)` where each span is identified by its
 /// knot-span index in the u and v directions.
 pub fn nurbs_span_sizes_2d(pd: &NurbsPatch2DData) -> Vec<((usize, usize), f64)> {
-    let span_centers_u: Vec<f64> = pd.kv_u.knots.windows(2)
+    let span_centers_u: Vec<f64> = pd
+        .kv_u
+        .knots
+        .windows(2)
         .filter(|w| w[1] > w[0])
         .map(|w| 0.5 * (w[0] + w[1]))
         .collect();
-    let span_centers_v: Vec<f64> = pd.kv_v.knots.windows(2)
+    let span_centers_v: Vec<f64> = pd
+        .kv_v
+        .knots
+        .windows(2)
         .filter(|w| w[1] > w[0])
         .map(|w| 0.5 * (w[0] + w[1]))
         .collect();
@@ -1357,13 +1765,22 @@ pub fn h_refine_uk_3d(pd: &NurbsPatch3DData, uvals: &[f64]) -> NurbsPatch3DData 
         for k in 0..nw {
             for j in 0..nv {
                 let row_x: Vec<f64> = (0..nu)
-                    .map(|i| r.control_pts[k * nu * nv + j * nu + i][0] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|i| {
+                        r.control_pts[k * nu * nv + j * nu + i][0]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let row_y: Vec<f64> = (0..nu)
-                    .map(|i| r.control_pts[k * nu * nv + j * nu + i][1] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|i| {
+                        r.control_pts[k * nu * nv + j * nu + i][1]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let row_z: Vec<f64> = (0..nu)
-                    .map(|i| r.control_pts[k * nu * nv + j * nu + i][2] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|i| {
+                        r.control_pts[k * nu * nv + j * nu + i][2]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let row_w: Vec<f64> = (0..nu)
                     .map(|i| r.weights[k * nu * nv + j * nu + i])
@@ -1375,13 +1792,11 @@ pub fn h_refine_uk_3d(pd: &NurbsPatch3DData, uvals: &[f64]) -> NurbsPatch3DData 
                 r.kv_u = KnotVector::new(nk, p);
                 for i in 0..r.kv_u.n_basis() {
                     let w = rw[i];
-                    new_ctrl.push(
-                        if w.abs() > 1e-300 {
-                            [rx[i] / w, ry[i] / w, rz[i] / w]
-                        } else {
-                            [0.0, 0.0, 0.0]
-                        },
-                    );
+                    new_ctrl.push(if w.abs() > 1e-300 {
+                        [rx[i] / w, ry[i] / w, rz[i] / w]
+                    } else {
+                        [0.0, 0.0, 0.0]
+                    });
                     new_wgt.push(w);
                 }
             }
@@ -1413,13 +1828,22 @@ pub fn h_refine_vk_3d(pd: &NurbsPatch3DData, vvals: &[f64]) -> NurbsPatch3DData 
         for k in 0..nw {
             for i in 0..nu {
                 let col_x: Vec<f64> = (0..nv)
-                    .map(|j| r.control_pts[k * nu * nv + j * nu + i][0] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|j| {
+                        r.control_pts[k * nu * nv + j * nu + i][0]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_y: Vec<f64> = (0..nv)
-                    .map(|j| r.control_pts[k * nu * nv + j * nu + i][1] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|j| {
+                        r.control_pts[k * nu * nv + j * nu + i][1]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_z: Vec<f64> = (0..nv)
-                    .map(|j| r.control_pts[k * nu * nv + j * nu + i][2] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|j| {
+                        r.control_pts[k * nu * nv + j * nu + i][2]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_w: Vec<f64> = (0..nv)
                     .map(|j| r.weights[k * nu * nv + j * nu + i])
@@ -1467,13 +1891,22 @@ pub fn h_refine_wk_3d(pd: &NurbsPatch3DData, wvals: &[f64]) -> NurbsPatch3DData 
         for j in 0..nv {
             for i in 0..nu {
                 let col_x: Vec<f64> = (0..nw)
-                    .map(|k| r.control_pts[k * nu * nv + j * nu + i][0] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|k| {
+                        r.control_pts[k * nu * nv + j * nu + i][0]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_y: Vec<f64> = (0..nw)
-                    .map(|k| r.control_pts[k * nu * nv + j * nu + i][1] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|k| {
+                        r.control_pts[k * nu * nv + j * nu + i][1]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_z: Vec<f64> = (0..nw)
-                    .map(|k| r.control_pts[k * nu * nv + j * nu + i][2] * r.weights[k * nu * nv + j * nu + i])
+                    .map(|k| {
+                        r.control_pts[k * nu * nv + j * nu + i][2]
+                            * r.weights[k * nu * nv + j * nu + i]
+                    })
                     .collect();
                 let col_w: Vec<f64> = (0..nw)
                     .map(|k| r.weights[k * nu * nv + j * nu + i])
@@ -1535,17 +1968,35 @@ impl NurbsMesh3D {
         for _ in 0..times {
             let mut new_patches = Vec::new();
             for p in &mesh.patches {
-                let u_mid: Vec<f64> = p.kv_u.knots.windows(2)
-                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
-                let v_mid: Vec<f64> = p.kv_v.knots.windows(2)
-                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
-                let w_mid: Vec<f64> = p.kv_w.knots.windows(2)
-                    .filter(|w| w[1] > w[0]).map(|w| 0.5 * (w[0] + w[1])).collect();
+                let u_mid: Vec<f64> = p
+                    .kv_u
+                    .knots
+                    .windows(2)
+                    .filter(|w| w[1] > w[0])
+                    .map(|w| 0.5 * (w[0] + w[1]))
+                    .collect();
+                let v_mid: Vec<f64> = p
+                    .kv_v
+                    .knots
+                    .windows(2)
+                    .filter(|w| w[1] > w[0])
+                    .map(|w| 0.5 * (w[0] + w[1]))
+                    .collect();
+                let w_mid: Vec<f64> = p
+                    .kv_w
+                    .knots
+                    .windows(2)
+                    .filter(|w| w[1] > w[0])
+                    .map(|w| 0.5 * (w[0] + w[1]))
+                    .collect();
                 new_patches.push(h_refine_3d(p, &u_mid, &v_mid, &w_mid));
             }
             mesh.patches = new_patches;
         }
-        NurbsMesh3D { patches: mesh.patches, face_connectivity: self.face_connectivity.clone() }
+        NurbsMesh3D {
+            patches: mesh.patches,
+            face_connectivity: self.face_connectivity.clone(),
+        }
     }
 }
 
@@ -1562,9 +2013,9 @@ mod tests {
         let kv = KnotVector::uniform(1, 3);
         // p=1, n_elems=3 → [0,0, 1/3, 2/3, 1,1]
         assert_eq!(kv.knots.len(), 6);
-        assert_eq!(kv.n_basis(), 4);   // 6 - 1 - 1 = 4
+        assert_eq!(kv.n_basis(), 4); // 6 - 1 - 1 = 4
         assert_eq!(kv.n_spans(), 3);
-        assert!((kv.knots[2] - 1.0/3.0).abs() < 1e-15);
+        assert!((kv.knots[2] - 1.0 / 3.0).abs() < 1e-15);
     }
 
     #[test]
@@ -1580,12 +2031,12 @@ mod tests {
     fn find_span_is_correct() {
         let kv = KnotVector::uniform(2, 4);
         // interior spans: [0,0.25), [0.25,0.5), [0.5,0.75), [0.75,1]
-        assert_eq!(kv.find_span(0.0),   2);
+        assert_eq!(kv.find_span(0.0), 2);
         assert_eq!(kv.find_span(0.125), 2);
-        assert_eq!(kv.find_span(0.25),  3);
-        assert_eq!(kv.find_span(0.5),   4);
-        assert_eq!(kv.find_span(0.75),  5);
-        assert_eq!(kv.find_span(1.0),   5); // clamped to last non-empty span
+        assert_eq!(kv.find_span(0.25), 3);
+        assert_eq!(kv.find_span(0.5), 4);
+        assert_eq!(kv.find_span(0.75), 5);
+        assert_eq!(kv.find_span(1.0), 5); // clamped to last non-empty span
     }
 
     #[test]
@@ -1621,8 +2072,12 @@ mod tests {
             let n_m = basis.eval(xi - h);
             for i in 0..basis.n_basis() {
                 let fd = (n_p[i] - n_m[i]) / (2.0 * h);
-                assert!((dn[i] - fd).abs() < 1e-5,
-                    "xi={xi}, dof={i}: analytic={:.6} fd={:.6}", dn[i], fd);
+                assert!(
+                    (dn[i] - fd).abs() < 1e-5,
+                    "xi={xi}, dof={i}: analytic={:.6} fd={:.6}",
+                    dn[i],
+                    fd
+                );
             }
         }
     }
@@ -1639,8 +2094,7 @@ mod tests {
             for &v in &[0.05, 0.25, 0.5, 0.75, 0.95] {
                 patch.eval_basis(&[u, v], &mut vals);
                 let sum: f64 = vals.iter().sum();
-                assert!((sum - 1.0).abs() < 1e-12,
-                    "u={u}, v={v}: sum = {sum}");
+                assert!((sum - 1.0).abs() < 1e-12, "u={u}, v={v}: sum = {sum}");
             }
         }
     }
@@ -1665,8 +2119,12 @@ mod tests {
         patch.eval_basis(&[u0 - h, v0], &mut vm);
         for i in 0..n {
             let fd = (vp[i] - vm[i]) / (2.0 * h);
-            assert!((grads[i * 2] - fd).abs() < 1e-5,
-                "dof={i}: dR/du analytic={:.6} fd={:.6}", grads[i * 2], fd);
+            assert!(
+                (grads[i * 2] - fd).abs() < 1e-5,
+                "dof={i}: dR/du analytic={:.6} fd={:.6}",
+                grads[i * 2],
+                fd
+            );
         }
 
         // dR/dv: finite diff
@@ -1674,8 +2132,12 @@ mod tests {
         patch.eval_basis(&[u0, v0 - h], &mut vm);
         for i in 0..n {
             let fd = (vp[i] - vm[i]) / (2.0 * h);
-            assert!((grads[i * 2 + 1] - fd).abs() < 1e-5,
-                "dof={i}: dR/dv analytic={:.6} fd={:.6}", grads[i * 2 + 1], fd);
+            assert!(
+                (grads[i * 2 + 1] - fd).abs() < 1e-5,
+                "dof={i}: dR/dv analytic={:.6} fd={:.6}",
+                grads[i * 2 + 1],
+                fd
+            );
         }
     }
 
@@ -1706,8 +2168,7 @@ mod tests {
                 for &w in &[0.1, 0.5, 0.9] {
                     patch.eval_basis(&[u, v, w], &mut vals);
                     let sum: f64 = vals.iter().sum();
-                    assert!((sum - 1.0).abs() < 1e-12,
-                        "u={u},v={v},w={w}: sum={sum}");
+                    assert!((sum - 1.0).abs() < 1e-12, "u={u},v={v},w={w}: sum={sum}");
                 }
             }
         }
@@ -1738,8 +2199,12 @@ mod tests {
             for i in 0..n {
                 let fd = (vp[i] - vm[i]) / (2.0 * h);
                 let an = grads[i * 3 + dir];
-                assert!((an - fd).abs() < 1e-5,
-                    "dir={dir}, dof={i}: analytic={:.6} fd={:.6}", an, fd);
+                assert!(
+                    (an - fd).abs() < 1e-5,
+                    "dir={dir}, dof={i}: analytic={:.6} fd={:.6}",
+                    an,
+                    fd
+                );
             }
         }
     }
@@ -1773,35 +2238,47 @@ mod tests {
     }
 
     fn eval_1d(kv: &KnotVector, ctrl: &[f64], xi: f64) -> f64 {
-        let s = kv.find_span(xi); let b = kv.basis_funs(s, xi); let p = kv.degree;
-        (0..=p).map(|j| b[j] * ctrl[s-p+j]).sum()
+        let s = kv.find_span(xi);
+        let b = kv.basis_funs(s, xi);
+        let p = kv.degree;
+        (0..=p).map(|j| b[j] * ctrl[s - p + j]).sum()
     }
 
     #[test]
     fn elevate_degree_curve_preserves_shape() {
         let kv = KnotVector::uniform(1, 4);
-        let c: Vec<f64> = (0..5).map(|i| i as f64/4.0).collect();
+        let c: Vec<f64> = (0..5).map(|i| i as f64 / 4.0).collect();
         let (nk, nc) = elevate_curve_1d(&kv.knots, &c, 1, 1);
         let nkv = KnotVector::new(nk, 2);
         assert_eq!(nc.len(), 9);
-        for i in 0..=20 { let x = i as f64/20.0; assert!((eval_1d(&kv,&c,x)-eval_1d(&nkv,&nc,x)).abs()<1e-12); }
+        for i in 0..=20 {
+            let x = i as f64 / 20.0;
+            assert!((eval_1d(&kv, &c, x) - eval_1d(&nkv, &nc, x)).abs() < 1e-12);
+        }
     }
 
     #[test]
     fn elevate_degree_curve_multi_step() {
         let kv = KnotVector::uniform(1, 3);
-        let c: Vec<f64> = (0..4).map(|i| i as f64/3.0).collect();
+        let c: Vec<f64> = (0..4).map(|i| i as f64 / 3.0).collect();
         let (nk, nc) = elevate_curve_1d(&kv.knots, &c, 1, 2);
         let nkv = KnotVector::new(nk, 3);
-        for i in 0..=20 { let x = i as f64/20.0; assert!((eval_1d(&kv,&c,x)-eval_1d(&nkv,&nc,x)).abs()<1e-12); }
+        for i in 0..=20 {
+            let x = i as f64 / 20.0;
+            assert!((eval_1d(&kv, &c, x) - eval_1d(&nkv, &nc, x)).abs() < 1e-12);
+        }
     }
 
     #[test]
     fn elevate_surface_2d_increases_degree() {
         let pd = NurbsPatch2DData {
-            kv_u: KnotVector::uniform(1, 3), kv_v: KnotVector::uniform(1, 2),
-            control_pts: (0..12).map(|i|[i as f64/12.0,(i%4)as f64/3.0]).collect(),
-            weights: vec![1.0; 12], tag: 1,
+            kv_u: KnotVector::uniform(1, 3),
+            kv_v: KnotVector::uniform(1, 2),
+            control_pts: (0..12)
+                .map(|i| [i as f64 / 12.0, (i % 4) as f64 / 3.0])
+                .collect(),
+            weights: vec![1.0; 12],
+            tag: 1,
         };
         assert_eq!(elevate_u_2d(&pd, 1).kv_u.degree, 2);
         assert_eq!(elevate_v_2d(&pd, 1).kv_v.degree, 2);
@@ -1812,19 +2289,26 @@ mod tests {
     #[test]
     fn h_refine_knot_increases_cp() {
         let kv = KnotVector::uniform(1, 4);
-        let c: Vec<f64> = (0..5).map(|i| i as f64/4.0).collect();
+        let c: Vec<f64> = (0..5).map(|i| i as f64 / 4.0).collect();
         let (nk, nc) = insert_knot_1d(&kv.knots, &c, 1, 0.5);
         let nkv = KnotVector::new(nk, 1);
         assert_eq!(nc.len(), 6);
-        for i in 0..=20 { let x = i as f64/20.0; assert!((eval_1d(&kv,&c,x)-eval_1d(&nkv,&nc,x)).abs()<1e-14); }
+        for i in 0..=20 {
+            let x = i as f64 / 20.0;
+            assert!((eval_1d(&kv, &c, x) - eval_1d(&nkv, &nc, x)).abs() < 1e-14);
+        }
     }
 
     #[test]
     fn h_refine_2d_u_increases_cp() {
         let pd = NurbsPatch2DData {
-            kv_u: KnotVector::uniform(1, 3), kv_v: KnotVector::uniform(1, 2),
-            control_pts: (0..12).map(|i|[i as f64/12.0,(i%4)as f64/3.0]).collect(),
-            weights: vec![1.0; 12], tag: 1,
+            kv_u: KnotVector::uniform(1, 3),
+            kv_v: KnotVector::uniform(1, 2),
+            control_pts: (0..12)
+                .map(|i| [i as f64 / 12.0, (i % 4) as f64 / 3.0])
+                .collect(),
+            weights: vec![1.0; 12],
+            tag: 1,
         };
         let cp_old = pd.control_pts.len();
         let r = h_refine_uk(&pd, &[0.5]);
@@ -1834,9 +2318,11 @@ mod tests {
     #[test]
     fn spacing_2d_unit_square() {
         let pd = NurbsPatch2DData {
-            kv_u: KnotVector::uniform(1, 1), kv_v: KnotVector::uniform(1, 1),
-            control_pts: vec![[0.0,0.0],[1.0,0.0],[0.0,1.0],[1.0,1.0]],
-            weights: vec![1.0; 4], tag: 1,
+            kv_u: KnotVector::uniform(1, 1),
+            kv_v: KnotVector::uniform(1, 1),
+            control_pts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
         };
         let h = nurbs_spacing_2d(&pd, 0.5, 0.5);
         assert!((h - 1.0).abs() < 1e-12, "unit square spacing={h}");
@@ -1845,22 +2331,31 @@ mod tests {
     #[test]
     fn spacing_2d_stretched() {
         let pd = NurbsPatch2DData {
-            kv_u: KnotVector::uniform(1, 1), kv_v: KnotVector::uniform(1, 1),
-            control_pts: vec![[0.0,0.0],[2.0,0.0],[0.0,3.0],[2.0,3.0]],
-            weights: vec![1.0; 4], tag: 1,
+            kv_u: KnotVector::uniform(1, 1),
+            kv_v: KnotVector::uniform(1, 1),
+            control_pts: vec![[0.0, 0.0], [2.0, 0.0], [0.0, 3.0], [2.0, 3.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
         };
         // det J = 2*3 = 6 for a uniform 2×3 rectangle
         let h = nurbs_spacing_2d(&pd, 0.5, 0.5);
-        assert!((h - (6.0_f64).sqrt()).abs() < 1e-12, "stretched spacing={h}");
+        assert!(
+            (h - (6.0_f64).sqrt()).abs() < 1e-12,
+            "stretched spacing={h}"
+        );
     }
 
     #[test]
     fn spacing_span_sizes_match_patch_count() {
         // deg 2 with 3 spans → n_basis = 5, deg 1 with 2 spans → n_basis = 3
         let pd = NurbsPatch2DData {
-            kv_u: KnotVector::uniform(2, 3), kv_v: KnotVector::uniform(1, 2),
-            control_pts: (0..15).map(|i|[i as f64/5.0,(i%5)as f64/3.0]).collect(),
-            weights: vec![1.0; 15], tag: 1,
+            kv_u: KnotVector::uniform(2, 3),
+            kv_v: KnotVector::uniform(1, 2),
+            control_pts: (0..15)
+                .map(|i| [i as f64 / 5.0, (i % 5) as f64 / 3.0])
+                .collect(),
+            weights: vec![1.0; 15],
+            tag: 1,
         };
         let sizes = nurbs_span_sizes_2d(&pd);
         assert_eq!(sizes.len(), 3 * 2); // 3 u-spans × 2 v-spans
@@ -1875,14 +2370,19 @@ mod tests {
             kv_u: KnotVector::uniform(1, 1),
             kv_v: KnotVector::uniform(1, 1),
             kv_w: KnotVector::uniform(1, 1),
-            control_pts: (0..8).map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64]).collect(),
+            control_pts: (0..8)
+                .map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64])
+                .collect(),
             weights: vec![1.0; 8],
             tag: 1,
         };
         let cp_old = pd.control_pts.len(); // 8
         let r = h_refine_uk_3d(&pd, &[0.5]);
         // nw*nv = 2*2 = 4 new control points added (one per (w,v) row)
-        assert_eq!(r.control_pts.len(), cp_old + pd.kv_v.n_basis() * pd.kv_w.n_basis());
+        assert_eq!(
+            r.control_pts.len(),
+            cp_old + pd.kv_v.n_basis() * pd.kv_w.n_basis()
+        );
     }
 
     #[test]
@@ -1892,14 +2392,19 @@ mod tests {
             kv_u: KnotVector::uniform(1, 1),
             kv_v: KnotVector::uniform(1, 1),
             kv_w: KnotVector::uniform(1, 1),
-            control_pts: (0..8).map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64]).collect(),
+            control_pts: (0..8)
+                .map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64])
+                .collect(),
             weights: vec![1.0; 8],
             tag: 1,
         };
         let cp_old = pd.control_pts.len(); // 8
         let r = h_refine_vk_3d(&pd, &[0.5]);
         // nw*nu = 2*2 = 4 new control points added
-        assert_eq!(r.control_pts.len(), cp_old + pd.kv_u.n_basis() * pd.kv_w.n_basis());
+        assert_eq!(
+            r.control_pts.len(),
+            cp_old + pd.kv_u.n_basis() * pd.kv_w.n_basis()
+        );
     }
 
     #[test]
@@ -1909,14 +2414,19 @@ mod tests {
             kv_u: KnotVector::uniform(1, 1),
             kv_v: KnotVector::uniform(1, 1),
             kv_w: KnotVector::uniform(1, 1),
-            control_pts: (0..8).map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64]).collect(),
+            control_pts: (0..8)
+                .map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64])
+                .collect(),
             weights: vec![1.0; 8],
             tag: 1,
         };
         let cp_old = pd.control_pts.len(); // 8
         let r = h_refine_wk_3d(&pd, &[0.5]);
         // nv*nu = 2*2 = 4 new control points added
-        assert_eq!(r.control_pts.len(), cp_old + pd.kv_u.n_basis() * pd.kv_v.n_basis());
+        assert_eq!(
+            r.control_pts.len(),
+            cp_old + pd.kv_u.n_basis() * pd.kv_v.n_basis()
+        );
     }
 
     #[test]
@@ -1926,7 +2436,9 @@ mod tests {
             kv_u: KnotVector::uniform(1, 1),
             kv_v: KnotVector::uniform(1, 1),
             kv_w: KnotVector::uniform(1, 1),
-            control_pts: (0..8).map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64]).collect(),
+            control_pts: (0..8)
+                .map(|i| [i as f64, (i % 2) as f64, (i / 4) as f64])
+                .collect(),
             weights: vec![1.0; 8],
             tag: 1,
         };
@@ -2059,8 +2571,7 @@ mod tests {
 
     #[test]
     fn bspline_second_derivatives_nonuniform() {
-        let kv =
-            KnotVector::new(vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0], 2);
+        let kv = KnotVector::new(vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0], 2);
         let basis = BSplineBasis1D::new(kv);
         let eps = 1e-6;
         for xi in [0.05, 0.15, 0.35, 0.65, 0.85, 0.95] {

@@ -45,9 +45,15 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct TetRT0;
 
 impl VectorReferenceElement for TetRT0 {
-    fn dim(&self)    -> u8    { 3 }
-    fn order(&self)  -> u8    { 0 }
-    fn n_dofs(&self) -> usize  { 4 }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        0
+    }
+    fn n_dofs(&self) -> usize {
+        4
+    }
 
     /// `values[i*3 + c]` = component c of RT0 basis function i.
     ///
@@ -59,34 +65,48 @@ impl VectorReferenceElement for TetRT0 {
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y, z) = (xi[0], xi[1], xi[2]);
         // Φ₀ = (x, y, z)
-        values[0] = x;           values[1]  = y;           values[2]  = z;
+        values[0] = x;
+        values[1] = y;
+        values[2] = z;
         // Φ₁ = (x−1, y, z)
-        values[3] = x-1.0;       values[4]  = y;           values[5]  = z;
+        values[3] = x - 1.0;
+        values[4] = y;
+        values[5] = z;
         // Φ₂ = (x, y−1, z)
-        values[6] = x;           values[7]  = y-1.0;       values[8]  = z;
+        values[6] = x;
+        values[7] = y - 1.0;
+        values[8] = z;
         // Φ₃ = (x, y, z−1)
-        values[9] = x;           values[10] = y;           values[11] = z-1.0;
+        values[9] = x;
+        values[10] = y;
+        values[11] = z - 1.0;
     }
 
     /// Curl is not the natural operator for H(div) — returns zeros.
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
-        for v in curl_vals.iter_mut() { *v = 0.0; }
+        for v in curl_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
     /// Divergence: 3 for all RT0 basis functions (MFEM: div of (x,y,z) etc.).
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
-        for v in div_vals.iter_mut() { *v = 3.0; }
+        for v in div_vals.iter_mut() {
+            *v = 3.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tet_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tet_rule(order)
+    }
 
     /// DOF sites: centroids of the four faces.
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![1.0/3.0, 1.0/3.0, 1.0/3.0], // centroid of f₀: v₁v₂v₃
-            vec![0.0,     1.0/3.0, 1.0/3.0], // centroid of f₁: v₀v₂v₃
-            vec![1.0/3.0, 0.0,     1.0/3.0], // centroid of f₂: v₀v₁v₃
-            vec![1.0/3.0, 1.0/3.0, 0.0    ], // centroid of f₃: v₀v₁v₂
+            vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], // centroid of f₀: v₁v₂v₃
+            vec![0.0, 1.0 / 3.0, 1.0 / 3.0],       // centroid of f₁: v₀v₂v₃
+            vec![1.0 / 3.0, 0.0, 1.0 / 3.0],       // centroid of f₂: v₀v₁v₃
+            vec![1.0 / 3.0, 1.0 / 3.0, 0.0],       // centroid of f₃: v₀v₁v₂
         ]
     }
 }
@@ -116,19 +136,24 @@ mod tests {
     fn tet_rt0_nodal_basis() {
         let elem = TetRT0;
         let ips: [[f64; 3]; 4] = [
-            [1.0/3.0, 1.0/3.0, 1.0/3.0],
-            [0.0,     1.0/3.0, 1.0/3.0],
-            [1.0/3.0, 0.0,     1.0/3.0],
-            [1.0/3.0, 1.0/3.0, 0.0],
+            [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+            [0.0, 1.0 / 3.0, 1.0 / 3.0],
+            [1.0 / 3.0, 0.0, 1.0 / 3.0],
+            [1.0 / 3.0, 1.0 / 3.0, 0.0],
         ];
         let nk: [[f64; 3]; 4] = [
-            [1.0, 1.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
         ];
         let mut vals = vec![0.0; 12];
         for (j, ip) in ips.iter().enumerate() {
             elem.eval_basis_vec(ip, &mut vals);
             for i in 0..4 {
-                let dof = vals[i*3]*nk[j][0] + vals[i*3+1]*nk[j][1] + vals[i*3+2]*nk[j][2];
+                let dof = vals[i * 3] * nk[j][0]
+                    + vals[i * 3 + 1] * nk[j][1]
+                    + vals[i * 3 + 2] * nk[j][2];
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!(
                     (dof - expected).abs() < 1e-12,

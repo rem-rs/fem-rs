@@ -13,24 +13,56 @@
 //!
 //! Coefficients `αₖ` and correction vector `l` depend on the current order `k`.
 
-use crate::butcher::{wrms_error, i_step_controller};
+use crate::butcher::{i_step_controller, wrms_error};
 use crate::{solve_gmres, SolverConfig};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 // ─── BDF coefficients ────────────────────────────────────────────────────────
 
 /// αₖ = sum_{j=1}^{k} 1/j — the BDF coefficient for order k.
-pub(crate) const BDF_ALPHA: [f64; 7] = [0.0, 1.0, 3.0/2.0, 11.0/6.0, 25.0/12.0, 137.0/60.0, 49.0/20.0];
+pub(crate) const BDF_ALPHA: [f64; 7] = [
+    0.0,
+    1.0,
+    3.0 / 2.0,
+    11.0 / 6.0,
+    25.0 / 12.0,
+    137.0 / 60.0,
+    49.0 / 20.0,
+];
 
 /// `l[i]` = Nordsieck correction coefficients for order k.
 pub(crate) const L_COEFFS: [[f64; 7]; 7] = [
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  // k=0 (unused)
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], // k=0 (unused)
     [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [1.0, 2.0/3.0, 1.0/3.0, 0.0, 0.0, 0.0, 0.0],
-    [1.0, 6.0/11.0, 3.0/11.0, 1.0/11.0, 0.0, 0.0, 0.0],
-    [1.0, 12.0/25.0, 6.0/25.0, 4.0/25.0, 1.0/25.0, 0.0, 0.0],
-    [1.0, 120.0/274.0, 60.0/274.0, 40.0/274.0, 15.0/274.0, 6.0/274.0, 0.0],
-    [1.0, 60.0/147.0, 30.0/147.0, 20.0/147.0, 10.0/147.0, 6.0/147.0, 2.0/147.0],
+    [1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0, 0.0, 0.0, 0.0],
+    [1.0, 6.0 / 11.0, 3.0 / 11.0, 1.0 / 11.0, 0.0, 0.0, 0.0],
+    [
+        1.0,
+        12.0 / 25.0,
+        6.0 / 25.0,
+        4.0 / 25.0,
+        1.0 / 25.0,
+        0.0,
+        0.0,
+    ],
+    [
+        1.0,
+        120.0 / 274.0,
+        60.0 / 274.0,
+        40.0 / 274.0,
+        15.0 / 274.0,
+        6.0 / 274.0,
+        0.0,
+    ],
+    [
+        1.0,
+        60.0 / 147.0,
+        30.0 / 147.0,
+        20.0 / 147.0,
+        10.0 / 147.0,
+        6.0 / 147.0,
+        2.0 / 147.0,
+    ],
 ];
 
 /// Error weighting coefficients for order selection.
@@ -38,17 +70,19 @@ pub(crate) const L_COEFFS: [[f64; 7]; 7] = [
 pub(crate) const ERROR_WEIGHTS: [[f64; 7]; 7] = [
     [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0/3.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0/11.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 1.0/25.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 6.0/274.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0/147.0],
+    [0.0, 0.0, 1.0 / 3.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0 / 11.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 1.0 / 25.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 6.0 / 274.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0 / 147.0],
 ];
 
 /// Pascal triangle matrix coefficients for Nordsieck prediction.
 /// `P[k][i][j]` for i,j = 0..=k: ẑ[i] = Σⱼ C(j,i) · z[j] where C is the Pascal matrix.
 pub(crate) fn pascal_coeff(_k: usize, i: usize, j: usize) -> f64 {
-    if j < i { return 0.0; }
+    if j < i {
+        return 0.0;
+    }
     // binomial(j, i)
     let mut c = 1.0;
     let mut num = j;
@@ -101,20 +135,33 @@ impl NordsieckState {
     pub fn from_z(z: Vec<Vec<f64>>, dt: f64) -> Self {
         let order = z.len() - 1;
         assert!((1..=6).contains(&order), "BDF order {order} not supported");
-        NordsieckState { z, order, dt, nordsieck_history: None }
+        NordsieckState {
+            z,
+            order,
+            dt,
+            nordsieck_history: None,
+        }
     }
 
     /// Number of variables in the ODE system.
-    pub fn n_vars(&self) -> usize { self.z[0].len() }
+    pub fn n_vars(&self) -> usize {
+        self.z[0].len()
+    }
 
     /// Current solution `y_n`.
-    pub fn y(&self) -> &[f64] { &self.z[0] }
+    pub fn y(&self) -> &[f64] {
+        &self.z[0]
+    }
 
     /// Current order.
-    pub fn order(&self) -> usize { self.order }
+    pub fn order(&self) -> usize {
+        self.order
+    }
 
     /// Current step size.
-    pub fn dt(&self) -> f64 { self.dt }
+    pub fn dt(&self) -> f64 {
+        self.dt
+    }
 }
 
 // ─── BdfIntegrator ───────────────────────────────────────────────────────────
@@ -157,16 +204,20 @@ impl BdfIntegrator {
         let tnp1 = t + dt;
 
         // ── 1. Predict: ẑ[i] = Σⱼ P[i][j] · z[j] ──────────────────────────
-        let zp_pred: Vec<Vec<f64>> = (0..=k).map(|i| {
-            let mut val = vec![0.0; n];
-            for j in i..=k {
-                let c = pascal_coeff(k, i, j);
-                if c.abs() > 0.0 {
-                    for d in 0..n { val[d] += c * state.z[j][d]; }
+        let zp_pred: Vec<Vec<f64>> = (0..=k)
+            .map(|i| {
+                let mut val = vec![0.0; n];
+                for j in i..=k {
+                    let c = pascal_coeff(k, i, j);
+                    if c.abs() > 0.0 {
+                        for d in 0..n {
+                            val[d] += c * state.z[j][d];
+                        }
+                    }
                 }
-            }
-            val
-        }).collect();
+                val
+            })
+            .collect();
 
         // ── 2. Newton correction on δ ──────────────────────────────────────
         // Solve G(δ) = δ - h·α·f(t+h, ẑ₀ + δ) + ẑ₁ = 0
@@ -175,7 +226,7 @@ impl BdfIntegrator {
         let z1_curr = &zp_pred[1];
 
         let mut delta = vec![0.0; n];
-        let mut y = z0_pred.to_vec();          // y = ẑ₀ + δ
+        let mut y = z0_pred.to_vec(); // y = ẑ₀ + δ
         let mut jac = None;
         let mut converged = false;
 
@@ -210,7 +261,13 @@ impl BdfIntegrator {
             let jac = jac.as_ref().unwrap();
             let sys = build_identity_minus_dt_jac_scaled(jac, 1.0, dt * alpha_k);
             let mut ddelta = vec![0.0; n];
-            let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 500, verbose: false, ..SolverConfig::default() };
+            let cfg = SolverConfig {
+                rtol: 1e-10,
+                atol: 0.0,
+                max_iter: 500,
+                verbose: false,
+                ..SolverConfig::default()
+            };
             solve_gmres(&sys, &rhs_lin, &mut ddelta, 30, &cfg)
                 .map_err(|e| format!("Newton-GMRES BDF{k} failed: {e}"))?;
 
@@ -221,7 +278,10 @@ impl BdfIntegrator {
         }
 
         if !converged {
-            return Err(format!("BDF{k} Newton did not converge in {} iterations", newton.max_iter));
+            return Err(format!(
+                "BDF{k} Newton did not converge in {} iterations",
+                newton.max_iter
+            ));
         }
 
         // ── 3. Update Nordsieck: z⁺ = ẑ + l·δ ────────────────────────────
@@ -229,7 +289,9 @@ impl BdfIntegrator {
         for i in 0..=k {
             let li = L_COEFFS[k][i];
             if li.abs() > 0.0 {
-                for d in 0..n { zp_new[i][d] += li * delta[d]; }
+                for d in 0..n {
+                    zp_new[i][d] += li * delta[d];
+                }
             }
         }
         state.z = zp_new;
@@ -265,7 +327,9 @@ impl BdfIntegrator {
         let mut consecutive_rejections = 0u32;
 
         while t < t_end {
-            if stats.n_steps >= config.max_steps { break; }
+            if stats.n_steps >= config.max_steps {
+                break;
+            }
             stats.n_steps += 1;
 
             let dt_step = state.dt.min(t_end - t);
@@ -274,7 +338,15 @@ impl BdfIntegrator {
             // Save Nordsieck state before attempting step (for rollback)
             let saved_z = state.z.clone();
 
-            let result = Self::step(state, t, rhs, jac_fn, &config.newton, config.atol, config.rtol);
+            let result = Self::step(
+                state,
+                t,
+                rhs,
+                jac_fn,
+                &config.newton,
+                config.atol,
+                config.rtol,
+            );
             match result {
                 Ok(err) => {
                     if err <= 1.0 {
@@ -286,8 +358,11 @@ impl BdfIntegrator {
 
                         // Order selection
                         let want_order = Self::select_order(
-                            state.order, err, prev_err,
-                            config.atol, config.rtol,
+                            state.order,
+                            err,
+                            prev_err,
+                            config.atol,
+                            config.rtol,
                         );
                         if want_order != state.order {
                             Self::change_order(state, want_order);
@@ -326,7 +401,13 @@ impl BdfIntegrator {
     }
 
     /// Decide whether to increase, decrease, or keep the current order.
-    fn select_order(current_order: usize, err: f64, prev_err: f64, _atol: f64, _rtol: f64) -> usize {
+    fn select_order(
+        current_order: usize,
+        err: f64,
+        prev_err: f64,
+        _atol: f64,
+        _rtol: f64,
+    ) -> usize {
         // Simple heuristic: if error is very small, try higher order;
         // if error is large, lower order.
         if current_order < 6 && err < 0.1 * prev_err.max(1e-15) {
@@ -423,25 +504,38 @@ pub struct BdfStats {
 }
 
 impl Default for BdfStats {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BdfStats {
     pub fn new() -> Self {
         BdfStats {
-            n_steps: 0, n_accepted: 0, n_rejected: 0,
-            n_rhs_eval: 0, n_jac_eval: 0,
-            n_newton_iter: 0, n_linear_solves: 0,
-            final_dt: 0.0, last_error: None,
+            n_steps: 0,
+            n_accepted: 0,
+            n_rejected: 0,
+            n_rhs_eval: 0,
+            n_jac_eval: 0,
+            n_newton_iter: 0,
+            n_linear_solves: 0,
+            final_dt: 0.0,
+            last_error: None,
         }
     }
 }
 
 /// Build the matrix `s·I − α·J` where J is a CSR matrix and I is the identity.
-pub(crate) fn build_identity_minus_dt_jac_scaled(jac: &CsrMatrix<f64>, s: f64, alpha: f64) -> CsrMatrix<f64> {
+pub(crate) fn build_identity_minus_dt_jac_scaled(
+    jac: &CsrMatrix<f64>,
+    s: f64,
+    alpha: f64,
+) -> CsrMatrix<f64> {
     let n = jac.nrows;
     let mut coo = CooMatrix::<f64>::new(n, n);
-    for i in 0..n { coo.add(i, i, s); }
+    for i in 0..n {
+        coo.add(i, i, s);
+    }
     for i in 0..n {
         let start = jac.row_ptr[i];
         let end = jac.row_ptr[i + 1];
@@ -478,8 +572,12 @@ mod tests {
         let newton = NewtonConfig::default();
         let _ = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, &newton, 1e-6, 1e-3);
         let exact = (-0.1_f64).exp();
-        assert!((state.y()[0] - exact).abs() < 0.01,
-            "BDF1 decay: u={}, exact={}", state.y()[0], exact);
+        assert!(
+            (state.y()[0] - exact).abs() < 0.01,
+            "BDF1 decay: u={}, exact={}",
+            state.y()[0],
+            exact
+        );
     }
 
     #[test]
@@ -487,17 +585,21 @@ mod tests {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 0.05, &decay_rhs);
         let config = BdfConfig {
-            atol: 1e-3, rtol: 1e-2,
-            dt_min: 1e-10, dt_max: 0.1,
+            atol: 1e-3,
+            rtol: 1e-2,
+            dt_min: 1e-10,
+            dt_max: 0.1,
             ..BdfConfig::default()
         };
-        let (y_final, stats) = BdfIntegrator::integrate(
-            &mut state, &decay_rhs, &decay_jac,
-            0.0, 1.0, &config,
-        );
+        let (y_final, stats) =
+            BdfIntegrator::integrate(&mut state, &decay_rhs, &decay_jac, 0.0, 1.0, &config);
         let exact = (-1.0_f64).exp();
-        assert!((y_final[0] - exact).abs() < 0.05,
-            "BDF final: u={}, exact={}", y_final[0], exact);
+        assert!(
+            (y_final[0] - exact).abs() < 0.05,
+            "BDF final: u={}, exact={}",
+            y_final[0],
+            exact
+        );
         assert!(stats.n_accepted > 0);
     }
 
@@ -506,14 +608,16 @@ mod tests {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 0.01, &decay_rhs);
         let config = BdfConfig {
-            atol: 1e-3, rtol: 1e-2,
-            dt_min: 1e-10, dt_max: 0.5, max_order: 6, max_steps: 100000,
+            atol: 1e-3,
+            rtol: 1e-2,
+            dt_min: 1e-10,
+            dt_max: 0.5,
+            max_order: 6,
+            max_steps: 100000,
             newton: NewtonConfig::default(),
         };
-        let (_y_final, stats) = BdfIntegrator::integrate(
-            &mut state, &decay_rhs, &decay_jac,
-            0.0, 0.5, &config,
-        );
+        let (_y_final, stats) =
+            BdfIntegrator::integrate(&mut state, &decay_rhs, &decay_jac, 0.0, 0.5, &config);
         assert!(stats.n_accepted > 0, "no accepted steps");
     }
 
@@ -531,8 +635,15 @@ mod tests {
     fn bdf_rejects_when_dt_too_large() {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 1.0, &decay_rhs);
-        let newton = NewtonConfig { atol: 1e-12, rtol: 1e-12, max_iter: 2, reassemble_jac: true };
-        let result = BdfIntegrator::step(&mut state, 0.0, &decay_rhs, &decay_jac, &newton, 1e-12, 1e-12);
+        let newton = NewtonConfig {
+            atol: 1e-12,
+            rtol: 1e-12,
+            max_iter: 2,
+            reassemble_jac: true,
+        };
+        let result = BdfIntegrator::step(
+            &mut state, 0.0, &decay_rhs, &decay_jac, &newton, 1e-12, 1e-12,
+        );
         // With a really tight tolerance and large dt, it should reject
         // (or at least not panic)
         let _ = result;
@@ -566,7 +677,11 @@ mod tests {
         for k in 1..=6 {
             assert!(BDF_ALPHA[k] > 0.0, "alpha_{k} should be positive");
             for i in 0..=k {
-                assert!(L_COEFFS[k][i].abs() < 10.0, "L[{k}][{i}] too large: {}", L_COEFFS[k][i]);
+                assert!(
+                    L_COEFFS[k][i].abs() < 10.0,
+                    "L[{k}][{i}] too large: {}",
+                    L_COEFFS[k][i]
+                );
             }
         }
     }
@@ -621,18 +736,27 @@ mod tests {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 1e-7, &stiff_rhs); // tiny initial dt
         let config = BdfConfig {
-            atol: 1e-4, rtol: 1e-3,
-            dt_min: 1e-15, dt_max: 1e-5, max_steps: 1000000, max_order: 2,
-            newton: NewtonConfig { atol: 1e-4, rtol: 1e-3, ..NewtonConfig::default() },
+            atol: 1e-4,
+            rtol: 1e-3,
+            dt_min: 1e-15,
+            dt_max: 1e-5,
+            max_steps: 1000000,
+            max_order: 2,
+            newton: NewtonConfig {
+                atol: 1e-4,
+                rtol: 1e-3,
+                ..NewtonConfig::default()
+            },
         };
-        let (y_final, stats) = BdfIntegrator::integrate(
-            &mut state, &stiff_rhs, &stiff_jac,
-            0.0, 0.001, &config,
-        );
+        let (y_final, stats) =
+            BdfIntegrator::integrate(&mut state, &stiff_rhs, &stiff_jac, 0.0, 0.001, &config);
         let exact = (-1000.0 * 0.001_f64).exp();
-        assert!((y_final[0] - exact).abs() < 0.1 ||
-            y_final[0] < exact * 10.0,
-            "BDF stiff: u={}, exact={}", y_final[0], exact);
+        assert!(
+            (y_final[0] - exact).abs() < 0.1 || y_final[0] < exact * 10.0,
+            "BDF stiff: u={}, exact={}",
+            y_final[0],
+            exact
+        );
         let _ = stats;
     }
 
@@ -651,23 +775,57 @@ mod tests {
     fn bdf_newton_converges() {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 0.2, &nonlinear_rhs);
-        let newton = NewtonConfig { atol: 1e-14, rtol: 1e-12, max_iter: 5, reassemble_jac: true };
-        let result = BdfIntegrator::step(&mut state, 0.0, &nonlinear_rhs, &nonlinear_jac, &newton, 1e-6, 1e-3);
+        let newton = NewtonConfig {
+            atol: 1e-14,
+            rtol: 1e-12,
+            max_iter: 5,
+            reassemble_jac: true,
+        };
+        let result = BdfIntegrator::step(
+            &mut state,
+            0.0,
+            &nonlinear_rhs,
+            &nonlinear_jac,
+            &newton,
+            1e-6,
+            1e-3,
+        );
         assert!(result.is_ok(), "Newton should converge for du/dt = -u²");
         let exact = 1.0 / (1.0 + 0.2);
-        assert!((state.y()[0] - exact).abs() < 0.05,
-            "BDF1 nonlinear: u={}, exact={}", state.y()[0], exact);
+        assert!(
+            (state.y()[0] - exact).abs() < 0.05,
+            "BDF1 nonlinear: u={}, exact={}",
+            state.y()[0],
+            exact
+        );
     }
 
     #[test]
     fn bdf_modified_newton_converges() {
         let y0 = vec![1.0];
         let mut state = NordsieckState::new(0.0, &y0, 0.1, &nonlinear_rhs);
-        let newton = NewtonConfig { atol: 1e-10, rtol: 1e-8, max_iter: 10, reassemble_jac: false };
-        let result = BdfIntegrator::step(&mut state, 0.0, &nonlinear_rhs, &nonlinear_jac, &newton, 1e-6, 1e-3);
+        let newton = NewtonConfig {
+            atol: 1e-10,
+            rtol: 1e-8,
+            max_iter: 10,
+            reassemble_jac: false,
+        };
+        let result = BdfIntegrator::step(
+            &mut state,
+            0.0,
+            &nonlinear_rhs,
+            &nonlinear_jac,
+            &newton,
+            1e-6,
+            1e-3,
+        );
         assert!(result.is_ok(), "Modified Newton should also converge");
         let exact = 1.0 / (1.0 + 0.1);
-        assert!((state.y()[0] - exact).abs() < 0.02,
-            "Modified Newton: u={}, exact={}", state.y()[0], exact);
+        assert!(
+            (state.y()[0] - exact).abs() < 0.02,
+            "Modified Newton: u={}, exact={}",
+            state.y()[0],
+            exact
+        );
     }
 }

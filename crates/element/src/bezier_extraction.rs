@@ -44,7 +44,9 @@ pub fn compute_extraction_1d(kv: &KnotVector) -> Option<BezierExtraction1D> {
     let spans: Vec<usize> = (p..=n_basis - 1)
         .filter(|&s| knots[s + 1] > knots[s])
         .collect();
-    if spans.is_empty() { return None; }
+    if spans.is_empty() {
+        return None;
+    }
 
     let n_elements = spans.len();
     let np1 = p + 1;
@@ -53,10 +55,16 @@ pub fn compute_extraction_1d(kv: &KnotVector) -> Option<BezierExtraction1D> {
     // For uniform knot vectors (all interior knots distinct), C_e = I
     for _ in 0..n_elements {
         let mut Ce = vec![0.0; np1 * np1];
-        for i in 0..np1 { Ce[i * np1 + i] = 1.0; }
+        for i in 0..np1 {
+            Ce[i * np1 + i] = 1.0;
+        }
         matrices.push(Ce);
     }
-    Some(BezierExtraction1D { matrices, degree: p, n_elements })
+    Some(BezierExtraction1D {
+        matrices,
+        degree: p,
+        n_elements,
+    })
 }
 
 /// Solve (p+1) × (p+1) system A·x = b in-place (Gauss elimination with partial pivot).
@@ -195,8 +203,10 @@ pub fn compute_extraction_2d(pd: &super::nurbs::NurbsPatch2DData) -> Option<Bezi
     let ext_u = compute_extraction_1d_full(&pd.kv_u)?;
     let ext_v = compute_extraction_1d_full(&pd.kv_v)?;
 
-    let p = ext_u.degree; let q = ext_v.degree;
-    let np1 = p + 1; let nq1 = q + 1;
+    let p = ext_u.degree;
+    let q = ext_v.degree;
+    let np1 = p + 1;
+    let nq1 = q + 1;
     let n_local = np1 * nq1;
 
     let mut matrices = Vec::with_capacity(ext_u.n_elements * ext_v.n_elements);
@@ -205,46 +215,69 @@ pub fn compute_extraction_2d(pd: &super::nurbs::NurbsPatch2DData) -> Option<Bezi
         for eu in 0..ext_u.n_elements {
             let Cu = &ext_u.matrices[eu];
             let mut C = vec![0.0; n_local * n_local];
-            for iv in 0..nq1 { for iu in 0..np1 {
-                for jv in 0..nq1 { for ju in 0..np1 {
-                    let row = iv * np1 + iu; let col = jv * np1 + ju;
-                    C[row * n_local + col] = Cu[iu * np1 + ju] * Cv[iv * nq1 + jv];
-                }}
-            }}
+            for iv in 0..nq1 {
+                for iu in 0..np1 {
+                    for jv in 0..nq1 {
+                        for ju in 0..np1 {
+                            let row = iv * np1 + iu;
+                            let col = jv * np1 + ju;
+                            C[row * n_local + col] = Cu[iu * np1 + ju] * Cv[iv * nq1 + jv];
+                        }
+                    }
+                }
+            }
             matrices.push(C);
         }
     }
-    Some(BezierExtraction2D { matrices, degree_u: p, degree_v: q,
-        n_elements_u: ext_u.n_elements, n_elements_v: ext_v.n_elements, n_local })
+    Some(BezierExtraction2D {
+        matrices,
+        degree_u: p,
+        degree_v: q,
+        n_elements_u: ext_u.n_elements,
+        n_elements_v: ext_v.n_elements,
+        n_local,
+    })
 }
 
 /// Evaluate 2-D Bernstein basis values and parametric gradients at `(xi, eta)`.
-pub fn eval_bernstein_2d(p: usize, q: usize, xi: f64, eta: f64,
-    phi: &mut [f64], grads: &mut [f64])
-{
+pub fn eval_bernstein_2d(
+    p: usize,
+    q: usize,
+    xi: f64,
+    eta: f64,
+    phi: &mut [f64],
+    grads: &mut [f64],
+) {
     let bu = bernstein_vals(p, xi);
     let bv = bernstein_vals(q, eta);
     let du = bernstein_ders(p, xi);
     let dv = bernstein_ders(q, eta);
-    let np1 = p + 1; let nq1 = q + 1;
-    for j in 0..nq1 { for i in 0..np1 {
-        let idx = j * np1 + i;
-        phi[idx] = bu[i] * bv[j];
-        grads[idx * 2]     = du[i] * bv[j];
-        grads[idx * 2 + 1] = bu[i] * dv[j];
-    }}
+    let np1 = p + 1;
+    let nq1 = q + 1;
+    for j in 0..nq1 {
+        for i in 0..np1 {
+            let idx = j * np1 + i;
+            phi[idx] = bu[i] * bv[j];
+            grads[idx * 2] = du[i] * bv[j];
+            grads[idx * 2 + 1] = bu[i] * dv[j];
+        }
+    }
 }
 
 /// Apply 2-D extraction: phi_nurbs = C^T · phi_bernstein, grads_nurbs = C^T · grads_bernstein.
-pub fn apply_extraction_2d(C: &[f64], n_local: usize,
-    phi_b: &[f64], grads_b: &[f64],
-    phi_n: &mut [f64], grads_n: &mut [f64])
-{
+pub fn apply_extraction_2d(
+    C: &[f64],
+    n_local: usize,
+    phi_b: &[f64],
+    grads_b: &[f64],
+    phi_n: &mut [f64],
+    grads_n: &mut [f64],
+) {
     for i in 0..n_local {
         let (mut s, mut sx, mut sy) = (0.0, 0.0, 0.0);
         for j in 0..n_local {
             let ct = C[i * n_local + j];
-            s  += ct * phi_b[j];
+            s += ct * phi_b[j];
             sx += ct * grads_b[j * 2];
             sy += ct * grads_b[j * 2 + 1];
         }
@@ -274,8 +307,12 @@ pub fn compute_extraction_3d(pd: &super::nurbs::NurbsPatch3DData) -> Option<Bezi
     let ext_v = compute_extraction_1d_full(&pd.kv_v)?;
     let ext_w = compute_extraction_1d_full(&pd.kv_w)?;
 
-    let p = ext_u.degree; let q = ext_v.degree; let r = ext_w.degree;
-    let np1 = p + 1; let nq1 = q + 1; let nr1 = r + 1;
+    let p = ext_u.degree;
+    let q = ext_v.degree;
+    let r = ext_w.degree;
+    let np1 = p + 1;
+    let nq1 = q + 1;
+    let nr1 = r + 1;
     let n_local = np1 * nq1 * nr1;
 
     let mut matrices = Vec::with_capacity(ext_u.n_elements * ext_v.n_elements * ext_w.n_elements);
@@ -286,21 +323,32 @@ pub fn compute_extraction_3d(pd: &super::nurbs::NurbsPatch3DData) -> Option<Bezi
             for eu in 0..ext_u.n_elements {
                 let Cu = &ext_u.matrices[eu];
                 let mut C = vec![0.0; n_local * n_local];
-                for iw in 0..nr1 { for iv in 0..nq1 { for iu in 0..np1 {
-                    for jw in 0..nr1 { for jv in 0..nq1 { for ju in 0..np1 {
-                        let row = iw * nq1 * np1 + iv * np1 + iu;
-                        let col = jw * nq1 * np1 + jv * np1 + ju;
-                        C[row * n_local + col] = Cu[iu * np1 + ju]
-                                               * Cv[iv * nq1 + jv]
-                                               * Cw[iw * nr1 + jw];
-                    }}}
-                }}}
+                for iw in 0..nr1 {
+                    for iv in 0..nq1 {
+                        for iu in 0..np1 {
+                            for jw in 0..nr1 {
+                                for jv in 0..nq1 {
+                                    for ju in 0..np1 {
+                                        let row = iw * nq1 * np1 + iv * np1 + iu;
+                                        let col = jw * nq1 * np1 + jv * np1 + ju;
+                                        C[row * n_local + col] = Cu[iu * np1 + ju]
+                                            * Cv[iv * nq1 + jv]
+                                            * Cw[iw * nr1 + jw];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 matrices.push(C);
             }
         }
     }
     Some(BezierExtraction3D {
-        matrices, degree_u: p, degree_v: q, degree_w: r,
+        matrices,
+        degree_u: p,
+        degree_v: q,
+        degree_w: r,
         n_elements_u: ext_u.n_elements,
         n_elements_v: ext_v.n_elements,
         n_elements_w: ext_w.n_elements,
@@ -309,35 +357,52 @@ pub fn compute_extraction_3d(pd: &super::nurbs::NurbsPatch3DData) -> Option<Bezi
 }
 
 /// Evaluate 3-D Bernstein basis values and parametric gradients at (xi, eta, zeta).
-pub fn eval_bernstein_3d(p: usize, q: usize, r: usize, xi: f64, eta: f64, zeta: f64,
-    phi: &mut [f64], grads: &mut [f64])
-{
+pub fn eval_bernstein_3d(
+    p: usize,
+    q: usize,
+    r: usize,
+    xi: f64,
+    eta: f64,
+    zeta: f64,
+    phi: &mut [f64],
+    grads: &mut [f64],
+) {
     let bu = bernstein_vals(p, xi);
     let bv = bernstein_vals(q, eta);
     let bw = bernstein_vals(r, zeta);
     let du = bernstein_ders(p, xi);
     let dv = bernstein_ders(q, eta);
     let dw = bernstein_ders(r, zeta);
-    let np1 = p + 1; let nq1 = q + 1; let nr1 = r + 1;
-    for k in 0..nr1 { for j in 0..nq1 { for i in 0..np1 {
-        let idx = k * nq1 * np1 + j * np1 + i;
-        phi[idx] = bu[i] * bv[j] * bw[k];
-        grads[idx * 3]     = du[i] * bv[j] * bw[k];
-        grads[idx * 3 + 1] = bu[i] * dv[j] * bw[k];
-        grads[idx * 3 + 2] = bu[i] * bv[j] * dw[k];
-    }}}
+    let np1 = p + 1;
+    let nq1 = q + 1;
+    let nr1 = r + 1;
+    for k in 0..nr1 {
+        for j in 0..nq1 {
+            for i in 0..np1 {
+                let idx = k * nq1 * np1 + j * np1 + i;
+                phi[idx] = bu[i] * bv[j] * bw[k];
+                grads[idx * 3] = du[i] * bv[j] * bw[k];
+                grads[idx * 3 + 1] = bu[i] * dv[j] * bw[k];
+                grads[idx * 3 + 2] = bu[i] * bv[j] * dw[k];
+            }
+        }
+    }
 }
 
 /// Apply 3-D extraction: phi_nurbs = C^T · phi_bernstein, grads_nurbs = C^T · grads_bernstein.
-pub fn apply_extraction_3d(C: &[f64], n_local: usize,
-    phi_b: &[f64], grads_b: &[f64],
-    phi_n: &mut [f64], grads_n: &mut [f64])
-{
+pub fn apply_extraction_3d(
+    C: &[f64],
+    n_local: usize,
+    phi_b: &[f64],
+    grads_b: &[f64],
+    phi_n: &mut [f64],
+    grads_n: &mut [f64],
+) {
     for i in 0..n_local {
         let (mut s, mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0, 0.0);
         for j in 0..n_local {
             let ct = C[i * n_local + j];
-            s  += ct * phi_b[j];
+            s += ct * phi_b[j];
             sx += ct * grads_b[j * 3];
             sy += ct * grads_b[j * 3 + 1];
             sz += ct * grads_b[j * 3 + 2];
@@ -363,13 +428,7 @@ pub fn apply_extraction_3d(C: &[f64], n_local: usize,
 ///   d²(B_i·B_j)/dξ²   = B''_i(ξ)·B_j(η)
 ///   d²(B_i·B_j)/dη²   = B_i(ξ)·B''_j(η)
 ///   d²(B_i·B_j)/dξdη  = B'_i(ξ)·B'_j(η)
-pub fn eval_bernstein_hessian_2d(
-    p: usize,
-    q: usize,
-    xi: f64,
-    eta: f64,
-    hessians: &mut [f64],
-) {
+pub fn eval_bernstein_hessian_2d(p: usize, q: usize, xi: f64, eta: f64, hessians: &mut [f64]) {
     let bu = bernstein_vals(p, xi);
     let bv = bernstein_vals(q, eta);
     let du = bernstein_ders(p, xi);
@@ -392,12 +451,7 @@ pub fn eval_bernstein_hessian_2d(
 /// Apply 2-D extraction to Hessians: hessian_nurbs = C^T · hessian_bernstein.
 ///
 /// Each Hessian has stride 4 per DOF: `[d2/dξ2, d2/dξdη, d2/dηdξ, d2/dη2]`.
-pub fn apply_extraction_hessian_2d(
-    C: &[f64],
-    n_local: usize,
-    hess_b: &[f64],
-    hess_n: &mut [f64],
-) {
+pub fn apply_extraction_hessian_2d(C: &[f64], n_local: usize, hess_b: &[f64], hess_n: &mut [f64]) {
     for i in 0..n_local {
         let (mut h_uu, mut h_uv, mut h_vu, mut h_vv) = (0.0, 0.0, 0.0, 0.0);
         for j in 0..n_local {
@@ -427,34 +481,44 @@ mod tests {
 
         // Bernstein basis on [0,1]
         let bernstein = |xi: f64, j: usize, p: usize| -> f64 {
-            if j > p { return 0.0; }
+            if j > p {
+                return 0.0;
+            }
             let k = j.min(p - j);
             let binom: f64 = (1..=k).fold(1.0_f64, |r, jj| r * (p - k + jj) as f64 / jj as f64);
             binom * xi.powi(j as i32) * (1.0 - xi).powi((p - j) as i32)
         };
 
         // Reference B-spline basis via the iga module
-        let bspline = crate::iga::BsplineBasis::new(p,
-            crate::iga::KnotVector::new_clamped(kv.knots.clone()).unwrap()).unwrap();
+        let bspline = crate::iga::BsplineBasis::new(
+            p,
+            crate::iga::KnotVector::new_clamped(kv.knots.clone()).unwrap(),
+        )
+        .unwrap();
 
         let knots = &kv.knots;
-        let spans: Vec<usize> = (p..kv.n_basis()-1).filter(|&s| knots[s+1] > knots[s]).collect();
+        let spans: Vec<usize> = (p..kv.n_basis() - 1)
+            .filter(|&s| knots[s + 1] > knots[s])
+            .collect();
 
         for (ei, &span) in spans.iter().enumerate() {
-            let u0 = knots[span]; let u1 = knots[span+1];
+            let u0 = knots[span];
+            let u1 = knots[span + 1];
             let Ce = &ext.matrices[ei];
             for &xi_frac in &[0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 1.0] {
                 let u = u0 + xi_frac * (u1 - u0);
                 // Bernstein values on [0,1]
-                let mut b = vec![0.0; p+1];
-                for j in 0..=p { b[j] = bernstein(xi_frac, j, p); }
+                let mut b = vec![0.0; p + 1];
+                for j in 0..=p {
+                    b[j] = bernstein(xi_frac, j, p);
+                }
                 // Apply extraction: N = C_e^T · B
                 // Ce stores C_e, computed as N_i = Σ_j Ce[i][j] * B_j
                 // so n_extract[i] = Σ_j Ce[i][j] * B_j
-                let mut n_extract = vec![0.0; p+1];
+                let mut n_extract = vec![0.0; p + 1];
                 for i in 0..=p {
                     for j in 0..=p {
-                        n_extract[i] += Ce[i * (p+1) + j] * b[j];
+                        n_extract[i] += Ce[i * (p + 1) + j] * b[j];
                     }
                 }
                 // Direct B-spline evaluation
@@ -463,8 +527,12 @@ mod tests {
                     let local = idx as i64 - span as i64 + p as i64;
                     if local >= 0 && local <= p as i64 {
                         let li = local as usize;
-                        assert!((n_extract[li] - val).abs() < 1e-10,
-                            "u={u:.4}, basis {li}: extract={:.10e} direct={:.10e}", n_extract[li], val);
+                        assert!(
+                            (n_extract[li] - val).abs() < 1e-10,
+                            "u={u:.4}, basis {li}: extract={:.10e} direct={:.10e}",
+                            n_extract[li],
+                            val
+                        );
                     }
                 }
             }
@@ -477,16 +545,23 @@ mod tests {
         let ext = compute_extraction_1d(&kv).unwrap();
         assert_eq!(ext.n_elements, 2);
         for Ce in &ext.matrices {
-            assert!((Ce[0]-1.0).abs()<1e-14 && (Ce[1]-0.0).abs()<1e-14 &&
-                    (Ce[2]-0.0).abs()<1e-14 && (Ce[3]-1.0).abs()<1e-14);
+            assert!(
+                (Ce[0] - 1.0).abs() < 1e-14
+                    && (Ce[1] - 0.0).abs() < 1e-14
+                    && (Ce[2] - 0.0).abs() < 1e-14
+                    && (Ce[3] - 1.0).abs() < 1e-14
+            );
         }
     }
 
     #[test]
     fn ext_2d_identity() {
         let pd = crate::nurbs::NurbsPatch2DData {
-            kv_u: KnotVector::uniform(1, 3), kv_v: KnotVector::uniform(1, 2),
-            control_pts: vec![[0.0,0.0];12], weights: vec![1.0;12], tag: 1,
+            kv_u: KnotVector::uniform(1, 3),
+            kv_v: KnotVector::uniform(1, 2),
+            control_pts: vec![[0.0, 0.0]; 12],
+            weights: vec![1.0; 12],
+            tag: 1,
         };
         let ext = compute_extraction_2d(&pd).unwrap();
         assert_eq!(ext.n_elements_u, 3);
@@ -509,16 +584,21 @@ mod tests {
     #[test]
     fn ext_3d_basic() {
         let pd = crate::nurbs::NurbsPatch3DData {
-            kv_u: KnotVector::uniform(1, 2), kv_v: KnotVector::uniform(1, 2),
+            kv_u: KnotVector::uniform(1, 2),
+            kv_v: KnotVector::uniform(1, 2),
             kv_w: KnotVector::uniform(1, 2),
-            control_pts: vec![[0.0; 3]; 8], weights: vec![1.0; 8], tag: 1,
+            control_pts: vec![[0.0; 3]; 8],
+            weights: vec![1.0; 8],
+            tag: 1,
         };
         let ext = compute_extraction_3d(&pd).unwrap();
         assert_eq!(ext.matrices.len(), 8); // 2×2×2 elements
         assert_eq!(ext.n_local, 8);
         // Identity for uniform degree 1
         for C in &ext.matrices {
-            for i in 0..8 { assert!((C[i * 8 + i] - 1.0).abs() < 1e-14); }
+            for i in 0..8 {
+                assert!((C[i * 8 + i] - 1.0).abs() < 1e-14);
+            }
         }
     }
 
@@ -536,13 +616,15 @@ mod tests {
         let mut grads_b = vec![0.0; n_local * 3];
         eval_bernstein_3d(1, 1, 1, 0.4, 0.6, 0.3, &mut phi_b, &mut grads_b);
         let mut C = vec![0.0; n_local * n_local];
-        for i in 0..n_local { C[i * n_local + i] = 1.0; }
+        for i in 0..n_local {
+            C[i * n_local + i] = 1.0;
+        }
         let mut phi_n = vec![0.0; n_local];
         let mut grads_n = vec![0.0; n_local * 3];
         apply_extraction_3d(&C, n_local, &phi_b, &grads_b, &mut phi_n, &mut grads_n);
         for i in 0..n_local {
             assert!((phi_n[i] - phi_b[i]).abs() < 1e-14);
-            assert!((grads_n[i*3] - grads_b[i*3]).abs() < 1e-14);
+            assert!((grads_n[i * 3] - grads_b[i * 3]).abs() < 1e-14);
         }
     }
 

@@ -32,13 +32,17 @@ impl RectangularConstrainedOperator {
         // Zero coarse BC entries in the input
         let mut x = x_coarse.to_vec();
         for &d in &self.ess_coarse {
-            if (d as usize) < x.len() { x[d as usize] = 0.0; }
+            if (d as usize) < x.len() {
+                x[d as usize] = 0.0;
+            }
         }
         // y_fine = P * x
         self.mat.spmv(&x, y_fine);
         // Zero fine BC entries in the output
         for &d in &self.ess_fine {
-            if (d as usize) < y_fine.len() { y_fine[d as usize] = 0.0; }
+            if (d as usize) < y_fine.len() {
+                y_fine[d as usize] = 0.0;
+            }
         }
     }
 
@@ -52,7 +56,9 @@ impl RectangularConstrainedOperator {
         // Zero fine BC entries in the input
         let mut x = x_fine.to_vec();
         for &d in &self.ess_fine {
-            if (d as usize) < x.len() { x[d as usize] = 0.0; }
+            if (d as usize) < x.len() {
+                x[d as usize] = 0.0;
+            }
         }
         // y_coarse = P^T * x (transpose SpMV)
         let n_coarse = self.mat.ncols;
@@ -60,14 +66,18 @@ impl RectangularConstrainedOperator {
         y_coarse.resize(n_coarse, 0.0);
         for row in 0..self.mat.nrows {
             let val = x[row];
-            if val == 0.0 { continue; }
+            if val == 0.0 {
+                continue;
+            }
             for p in self.mat.row_ptr[row]..self.mat.row_ptr[row + 1] {
                 y_coarse[self.mat.col_idx[p] as usize] += self.mat.values[p] * val;
             }
         }
         // Zero coarse BC entries in the output
         for &d in &self.ess_coarse {
-            if (d as usize) < y_coarse.len() { y_coarse[d as usize] = 0.0; }
+            if (d as usize) < y_coarse.len() {
+                y_coarse[d as usize] = 0.0;
+            }
         }
     }
 }

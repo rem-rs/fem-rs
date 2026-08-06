@@ -25,8 +25,14 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 #[allow(dead_code)]
 const EDGES: [(usize, usize); 8] = [
-    (0, 1), (1, 2), (2, 3), (3, 0), // base quad
-    (0, 4), (1, 4), (2, 4), (3, 4), // apex edges
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0), // base quad
+    (0, 4),
+    (1, 4),
+    (2, 4),
+    (3, 4), // apex edges
 ];
 
 const EDGE_GEOM: [([f64; 3], [f64; 3]); 8] = [
@@ -42,16 +48,19 @@ const EDGE_GEOM: [([f64; 3], [f64; 3]); 8] = [
 
 // Triangular faces (4): each connects a base edge to the apex.
 // Quad face (1): the base at z=0.
-const TRI_FACES: [[usize; 3]; 4] = [
-    [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4],
-];
+const TRI_FACES: [[usize; 3]; 4] = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
 #[allow(dead_code)]
 const QUAD_FACE: [usize; 4] = [0, 1, 2, 3];
 
 // ─── Monomial construction ──────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct Mono { comp: u8, a: usize, b: usize, c: usize }
+struct Mono {
+    comp: u8,
+    a: usize,
+    b: usize,
+    c: usize,
+}
 
 fn pyramid_monomials(max_deg: usize) -> Vec<Mono> {
     let mut m = Vec::new();
@@ -59,7 +68,9 @@ fn pyramid_monomials(max_deg: usize) -> Vec<Mono> {
         for a in 0..=deg {
             for b in 0..=(deg - a) {
                 let c = deg - a - b;
-                for comp in 0..3u8 { m.push(Mono { comp, a, b, c }); }
+                for comp in 0..3u8 {
+                    m.push(Mono { comp, a, b, c });
+                }
             }
         }
     }
@@ -81,15 +92,30 @@ fn pyramid_ndk_dim(k: usize) -> usize {
 /// Compute DOF_k(monomial) for edge k with moment p.
 fn edge_dof(m: &Mono, edge: usize, p: usize) -> f64 {
     let (s, e) = EDGE_GEOM[edge];
-    let tgt = [e[0]-s[0], e[1]-s[1], e[2]-s[2]];
+    let tgt = [e[0] - s[0], e[1] - s[1], e[2] - s[2]];
     // 4-point Gauss-Legendre on [0,1]
-    let gp = [0.0694318442029737, 0.3300094782075719, 0.6699905217924281, 0.9305681557970263];
-    let gw = [0.1739274225687269, 0.3260725774312731, 0.3260725774312731, 0.1739274225687269];
+    let gp = [
+        0.0694318442029737,
+        0.3300094782075719,
+        0.6699905217924281,
+        0.9305681557970263,
+    ];
+    let gw = [
+        0.1739274225687269,
+        0.3260725774312731,
+        0.3260725774312731,
+        0.1739274225687269,
+    ];
     let mut sum = 0.0;
     for (&t, &w) in gp.iter().zip(gw.iter()) {
-        let pt = [s[0]+t*tgt[0], s[1]+t*tgt[1], s[2]+t*tgt[2]];
+        let pt = [s[0] + t * tgt[0], s[1] + t * tgt[1], s[2] + t * tgt[2]];
         let mv = eval_mono(m, pt[0], pt[1], pt[2]);
-        let comp_val = match m.comp { 0 => tgt[0], 1 => tgt[1], 2 => tgt[2], _ => 0.0 };
+        let comp_val = match m.comp {
+            0 => tgt[0],
+            1 => tgt[1],
+            2 => tgt[2],
+            _ => 0.0,
+        };
         sum += w * comp_val * mv * t.powi(p as i32);
     }
     sum
@@ -103,44 +129,71 @@ fn tri_face_dof(m: &Mono, face: usize, i: usize, j: usize, tangent: usize) -> f6
     let face_verts = TRI_FACES[face];
     // Map reference triangle (u,v) to face vertices:
     // P(u,v) = v0 + u*(v1-v0) + v*(v2-v0), where (u,v) in [0,1]², u+v ≤ 1
-    let v0 = face_verts[0]; let v1 = face_verts[1]; let v2 = face_verts[2];
+    let v0 = face_verts[0];
+    let v1 = face_verts[1];
+    let v2 = face_verts[2];
     let _p0 = EDGE_GEOM[0].0; // legacy placeholder — kept for backward compat
-    // Use vertex coords from pyramid definition
+                              // Use vertex coords from pyramid definition
     let verts: [[f64; 3]; 5] = [
-        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0],
-        [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
     ];
     let (pa, pb, pc) = (verts[v0], verts[v1], verts[v2]);
     // Two tangents on the face: t1 = pb-pa, t2 = pc-pa
-    let t1 = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
-    let t2 = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
+    let t1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+    let t2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
     // Normal (for orientation): n = t1 × t2
     // The tangent used in the DOF is either t1/|t1| or t2/|t2| depending on `tangent`.
-    let tc = if tangent == 0 { [t1[0], t1[1], t1[2]] } else { [t2[0], t2[1], t2[2]] };
+    let tc = if tangent == 0 {
+        [t1[0], t1[1], t1[2]]
+    } else {
+        [t2[0], t2[1], t2[2]]
+    };
     // Area element: dA = |t1 × t2| du dv
-    let nx = t1[1]*t2[2] - t1[2]*t2[1];
-    let ny = t1[2]*t2[0] - t1[0]*t2[2];
-    let nz = t1[0]*t2[1] - t1[1]*t2[0];
-    let area_elem = (nx*nx + ny*ny + nz*nz).sqrt();
-    if area_elem < 1e-30 { return 0.0; }
+    let nx = t1[1] * t2[2] - t1[2] * t2[1];
+    let ny = t1[2] * t2[0] - t1[0] * t2[2];
+    let nz = t1[0] * t2[1] - t1[1] * t2[0];
+    let area_elem = (nx * nx + ny * ny + nz * nz).sqrt();
+    if area_elem < 1e-30 {
+        return 0.0;
+    }
 
     // Integrate over the reference triangle with 6-point Gauss rule
     let tri_pts = [
-        [1.0/6.0, 1.0/6.0], [2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0],
-        [0.2, 0.2], [0.6, 0.2], [0.2, 0.6],
+        [1.0 / 6.0, 1.0 / 6.0],
+        [2.0 / 3.0, 1.0 / 6.0],
+        [1.0 / 6.0, 2.0 / 3.0],
+        [0.2, 0.2],
+        [0.6, 0.2],
+        [0.2, 0.6],
     ];
-    let tri_wts = [1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0];
+    let tri_wts = [
+        1.0 / 6.0,
+        1.0 / 6.0,
+        1.0 / 6.0,
+        1.0 / 6.0,
+        1.0 / 6.0,
+        1.0 / 6.0,
+    ];
 
     let mut sum = 0.0;
     for (p_uv, &w) in tri_pts.iter().zip(tri_wts.iter()) {
         let (u, v) = (p_uv[0], p_uv[1]);
         let pt = [
-            pa[0] + u*t1[0] + v*t2[0],
-            pa[1] + u*t1[1] + v*t2[1],
-            pa[2] + u*t1[2] + v*t2[2],
+            pa[0] + u * t1[0] + v * t2[0],
+            pa[1] + u * t1[1] + v * t2[1],
+            pa[2] + u * t1[2] + v * t2[2],
         ];
         let mv = eval_mono(m, pt[0], pt[1], pt[2]);
-        let dot = match m.comp { 0 => tc[0], 1 => tc[1], 2 => tc[2], _ => 0.0 };
+        let dot = match m.comp {
+            0 => tc[0],
+            1 => tc[1],
+            2 => tc[2],
+            _ => 0.0,
+        };
         let poly = u.powi(i as i32) * v.powi(j as i32);
         sum += w * dot * mv * poly * area_elem;
     }
@@ -182,23 +235,46 @@ fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     for i in 0..n {
         for j in 0..n {
             let mut s = 0.0;
-            for col in 0..m { s += v[i][col] * v[j][col]; }
+            for col in 0..m {
+                s += v[i][col] * v[j][col];
+            }
             vvt[i][j] = s;
         }
     }
     // Invert VVT
     let mut a = vvt.clone();
     let mut inv = vec![vec![0.0_f64; n]; n];
-    for i in 0..n { inv[i][i] = 1.0; }
+    for i in 0..n {
+        inv[i][i] = 1.0;
+    }
     for c in 0..n {
-        let mut best = c; let mut bv = a[c][c].abs();
-        for r in (c+1)..n { if a[r][c].abs() > bv { bv = a[r][c].abs(); best = r; } }
-        if bv < 1e-30 { continue; }
-        a.swap(c, best); inv.swap(c, best);
+        let mut best = c;
+        let mut bv = a[c][c].abs();
+        for r in (c + 1)..n {
+            if a[r][c].abs() > bv {
+                bv = a[r][c].abs();
+                best = r;
+            }
+        }
+        if bv < 1e-30 {
+            continue;
+        }
+        a.swap(c, best);
+        inv.swap(c, best);
         let ip = 1.0 / a[c][c];
-        for j in 0..n { a[c][j] *= ip; inv[c][j] *= ip; }
-        for r in 0..n { if r == c { continue; } let f = a[r][c];
-            for j in 0..n { a[r][j] -= f * a[c][j]; inv[r][j] -= f * inv[c][j]; }
+        for j in 0..n {
+            a[c][j] *= ip;
+            inv[c][j] *= ip;
+        }
+        for r in 0..n {
+            if r == c {
+                continue;
+            }
+            let f = a[r][c];
+            for j in 0..n {
+                a[r][j] -= f * a[c][j];
+                inv[r][j] -= f * inv[c][j];
+            }
         }
     }
     // coeff[i][j] = sum_k inv_vvt[k][i] * V[k][j]  (for basis i, monomial j)
@@ -206,7 +282,9 @@ fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     for i in 0..n {
         for j in 0..m {
             let mut s = 0.0;
-            for k in 0..n { s += v[k][j] * inv[k][i]; }
+            for k in 0..n {
+                s += v[k][j] * inv[k][i];
+            }
             coeff[i * m + j] = s;
         }
     }
@@ -224,7 +302,9 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
     // For all k ≥ 1, edge DOFs are evaluated via `edge_dof`.
     for edge in 0..8 {
         for p in 0..k {
-            for j in 0..m { v[row][j] = edge_dof(&monos[j], edge, p); }
+            for j in 0..m {
+                v[row][j] = edge_dof(&monos[j], edge, p);
+            }
             row += 1;
         }
     }
@@ -263,14 +343,18 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
         for deg in 0..=2 * k {
             for i in 0..=deg.min(k - 1).max(0) {
                 let j = deg - i;
-                if j < k { qpairs.push((i, j)); }
+                if j < k {
+                    qpairs.push((i, j));
+                }
             }
         }
         // Use x-component rows, then y-component rows, cycling through qpairs as needed
         for qi in 0..quad_total {
             let comp = qi % 2;
             let (p, q) = qpairs[(qi / 2) % qpairs.len()];
-            for j in 0..m { v[row][j] = quad_face_dof(&monos[j], comp, p, q); }
+            for j in 0..m {
+                v[row][j] = quad_face_dof(&monos[j], comp, p, q);
+            }
             row += 1;
         }
 
@@ -297,7 +381,13 @@ fn build_pyramid_ndk(k: usize) -> (Vec<f64>, usize) {
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Nedelec-I H(curl) element on the reference pyramid �?arbitrary order k.
-pub struct PyraNDk { k: usize, coeff: Vec<f64>, n: usize, m: usize, monos: Vec<Mono> }
+pub struct PyraNDk {
+    k: usize,
+    coeff: Vec<f64>,
+    n: usize,
+    m: usize,
+    monos: Vec<Mono>,
+}
 
 /// Order-1 element (alias for PyraNDk::new(1), kept for backward compat).
 pub type PyraND1 = PyraNDk;
@@ -308,14 +398,26 @@ impl PyraNDk {
         let (coeff, m) = build_pyramid_ndk(order);
         let n = pyramid_ndk_dim(order);
         let monos = pyramid_monomials(order + 2);
-        PyraNDk { k: order, coeff, n, m, monos }
+        PyraNDk {
+            k: order,
+            coeff,
+            n,
+            m,
+            monos,
+        }
     }
 }
 
 impl VectorReferenceElement for PyraNDk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.k as u8 }
-    fn n_dofs(&self) -> usize { self.n }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.k as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.n
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let mut mv = vec![0.0_f64; self.monos.len()];
@@ -336,55 +438,68 @@ impl VectorReferenceElement for PyraNDk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        let h = 1e-6; let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3]; let mut vm = vec![0.0; n3];
+        let h = 1e-6;
+        let n3 = self.n * 3;
+        let mut vp = vec![0.0; n3];
+        let mut vm = vec![0.0; n3];
         for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0]+h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0]-h, xi[1], xi[2]], &mut vm);
-            let dfy_dx = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            let dfz_dx = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1]+h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1]-h, xi[2]], &mut vm);
-            let dfx_dy = (vp[i*3]-vm[i*3])/(2.0*h);
-            let dfz_dy = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]+h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]-h], &mut vm);
-            let dfx_dz = (vp[i*3]-vm[i*3])/(2.0*h);
-            let dfy_dz = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            curl_vals[i*3]   = dfz_dy - dfy_dz;
-            curl_vals[i*3+1] = dfx_dz - dfz_dx;
-            curl_vals[i*3+2] = dfy_dx - dfx_dy;
+            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
+            let dfy_dx = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            let dfz_dx = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
+            let dfx_dy = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            let dfz_dy = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
+            let dfx_dz = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            let dfy_dz = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            curl_vals[i * 3] = dfz_dy - dfy_dz;
+            curl_vals[i * 3 + 1] = dfx_dz - dfz_dx;
+            curl_vals[i * 3 + 2] = dfy_dx - dfx_dy;
         }
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        let h = 1e-6; let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3]; let mut vm = vec![0.0; n3];
+        let h = 1e-6;
+        let n3 = self.n * 3;
+        let mut vp = vec![0.0; n3];
+        let mut vm = vec![0.0; n3];
         for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0]+h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0]-h, xi[1], xi[2]], &mut vm);
-            let dfx = (vp[i*3]-vm[i*3])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1]+h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1]-h, xi[2]], &mut vm);
-            let dfy = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]+h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]-h], &mut vm);
-            let dfz = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
+            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
+            let dfx = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
+            let dfy = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
+            let dfz = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
             div_vals[i] = dfx + dfy + dfz;
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { pyramid_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        pyramid_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let k = self.k;
         let mut coords = Vec::new();
-        let pts: Vec<f64> = if k == 1 { vec![0.5] }
-            else { (0..k).map(|i| (i as f64 + 0.5) / k as f64).collect() };
+        let pts: Vec<f64> = if k == 1 {
+            vec![0.5]
+        } else {
+            (0..k).map(|i| (i as f64 + 0.5) / k as f64).collect()
+        };
         for ei in 0..8 {
             let (s, e) = EDGE_GEOM[ei];
             for &t in &pts {
-                coords.push(vec![s[0]+t*(e[0]-s[0]), s[1]+t*(e[1]-s[1]), s[2]+t*(e[2]-s[2])]);
+                coords.push(vec![
+                    s[0] + t * (e[0] - s[0]),
+                    s[1] + t * (e[1] - s[1]),
+                    s[2] + t * (e[2] - s[2]),
+                ]);
             }
         }
         coords
@@ -397,51 +512,73 @@ impl VectorReferenceElement for PyraNDk {
 mod tests {
     use super::*;
 
-    #[test] fn pyra_ndk_k1_n_dofs() { assert_eq!(PyraNDk::new(1).n_dofs(), 8); }
-    #[test] fn pyra_ndk_k2_dim_formula() { assert_eq!(pyramid_ndk_dim(2), 30); }
-    #[test] fn pyra_ndk_k3_dim_formula() { assert_eq!(pyramid_ndk_dim(3), 72); }
+    #[test]
+    fn pyra_ndk_k1_n_dofs() {
+        assert_eq!(PyraNDk::new(1).n_dofs(), 8);
+    }
+    #[test]
+    fn pyra_ndk_k2_dim_formula() {
+        assert_eq!(pyramid_ndk_dim(2), 30);
+    }
+    #[test]
+    fn pyra_ndk_k3_dim_formula() {
+        assert_eq!(pyramid_ndk_dim(3), 72);
+    }
 
-    #[test] fn pyra_ndk_basis_finite() {
+    #[test]
+    fn pyra_ndk_basis_finite() {
         let ndk = PyraNDk::new(1);
         let mut v = vec![0.0; ndk.n_dofs() * 3];
         let qr = ndk.quadrature(3);
         for p in &qr.points {
             ndk.eval_basis_vec(p, &mut v);
-            for x in &v { assert!(x.is_finite(), "non-finite at {p:?}"); }
+            for x in &v {
+                assert!(x.is_finite(), "non-finite at {p:?}");
+            }
         }
     }
 
-    #[test] fn pyra_ndk_basis_finite_k2() {
+    #[test]
+    fn pyra_ndk_basis_finite_k2() {
         let ndk = PyraNDk::new(2);
         let mut v = vec![0.0; ndk.n_dofs() * 3];
         let qr = ndk.quadrature(3);
         for p in &qr.points {
             ndk.eval_basis_vec(p, &mut v);
-            for x in &v { assert!(x.is_finite(), "non-finite at {p:?}"); }
+            for x in &v {
+                assert!(x.is_finite(), "non-finite at {p:?}");
+            }
         }
     }
 
-    #[test] fn pyra_ndk_curl_finite() {
+    #[test]
+    fn pyra_ndk_curl_finite() {
         let ndk = PyraNDk::new(1);
         let mut c = vec![0.0; 24];
         let qr = ndk.quadrature(3);
         for p in &qr.points {
             ndk.eval_curl(p, &mut c);
-            for x in &c { assert!(x.is_finite(), "non-finite curl at {p:?}"); }
+            for x in &c {
+                assert!(x.is_finite(), "non-finite curl at {p:?}");
+            }
         }
     }
 
-    #[test] fn pyra_ndk_curl_finite_k2() {
+    #[test]
+    fn pyra_ndk_curl_finite_k2() {
         let ndk = PyraNDk::new(2);
         let mut c = vec![0.0; 90];
         let qr = ndk.quadrature(3);
         for p in &qr.points {
             ndk.eval_curl(p, &mut c);
-            for x in &c { assert!(x.is_finite(), "non-finite curl at {p:?}"); }
+            for x in &c {
+                assert!(x.is_finite(), "non-finite curl at {p:?}");
+            }
         }
     }
 
-    #[test] fn pyra_ndk_basis_has_no_zero_dof() {
+    #[test]
+    fn pyra_ndk_basis_has_no_zero_dof() {
         for k in 1..=3 {
             let ndk = PyraNDk::new(k);
             let qr = ndk.quadrature(3);
@@ -450,7 +587,11 @@ mod tests {
             let mut has_nonzero = false;
             for p in &qr.points {
                 ndk.eval_basis_vec(p, &mut v);
-                for x in &v { if x.abs() > 1e-12 { has_nonzero = true; } }
+                for x in &v {
+                    if x.abs() > 1e-12 {
+                        has_nonzero = true;
+                    }
+                }
             }
             assert!(has_nonzero, "PyraNDk(k={k}) all basis values zero");
         }

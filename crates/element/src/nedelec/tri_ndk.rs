@@ -10,16 +10,16 @@
 //! # Approach
 //! Vandermonde construction: build monomial→DOF matrix, invert with column pivoting.
 
-use std::sync::OnceLock;
 use crate::quadrature::tri_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
+use std::sync::OnceLock;
 
 struct TriNDkData {
-    coeff: Vec<f64>,       // [n×n] row-major, C[i][j] for Φ_i = Σ_j C[i][j]·m_j
-    n: usize,              // dimension = k(k+2)
+    coeff: Vec<f64>, // [n×n] row-major, C[i][j] for Φ_i = Σ_j C[i][j]·m_j
+    n: usize,        // dimension = k(k+2)
     #[allow(dead_code)]
     order: usize,
-    monomap: Vec<usize>,   // selected monomial indices (length n)
+    monomap: Vec<usize>, // selected monomial indices (length n)
 }
 
 fn edge_integral_x(p: usize, xi: f64, eta: f64) -> f64 {
@@ -29,38 +29,62 @@ fn edge_integral_x(p: usize, xi: f64, eta: f64) -> f64 {
     // Integral = ∫₀¹ t^a · t^p dt = 1/(a+p+1)
     // But for the mixed monomials (like (-ξη, ξ²)), we need to handle each component:
     // For (ξ^a η^b, 0): edge integral = δ_{b0} / (a+p+1)
-    if eta == 0.0 { 1.0 / (xi + p as f64 + 1.0) } else { 0.0 }
+    if eta == 0.0 {
+        1.0 / (xi + p as f64 + 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn edge_integral_y(p: usize, xi: f64, eta: f64) -> f64 {
     // ∫₀¹ (component_y(t,0))·t^p dt for edge e0
-    if eta == 0.0 { 1.0 / (xi + p as f64 + 1.0) } else { 0.0 }
+    if eta == 0.0 {
+        1.0 / (xi + p as f64 + 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn area_integral(ix: usize, iy: usize) -> f64 {
     // ∫_T x^ix y^iy dA = ix! iy! / (ix+iy+2)!
     let mut num = 1.0_f64;
-    for i in 1..=ix { num *= i as f64; }
-    for i in 1..=iy { num *= i as f64; }
+    for i in 1..=ix {
+        num *= i as f64;
+    }
+    for i in 1..=iy {
+        num *= i as f64;
+    }
     let mut den = 1.0_f64;
-    for i in 1..=(ix + iy + 2) { den *= i as f64; }
+    for i in 1..=(ix + iy + 2) {
+        den *= i as f64;
+    }
     num / den
 }
 
 fn tri_data(k: usize) -> &'static TriNDkData {
     static CACHE: [OnceLock<TriNDkData>; 9] = [
-        OnceLock::new(), OnceLock::new(), OnceLock::new(),
-        OnceLock::new(), OnceLock::new(), OnceLock::new(),
-        OnceLock::new(), OnceLock::new(), OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
     ];
-    CACHE[k-1].get_or_init(|| build_tri_data(k))
+    CACHE[k - 1].get_or_init(|| build_tri_data(k))
 }
 
 fn build_tri_data(k: usize) -> TriNDkData {
     let n = k * (k + 2); // dimension
 
     // Generate ALL monomials (comp, a, b) with degree a+b ≤ k
-    struct Mono { comp: u8, a: usize, b: usize } // comp 0=x, 1=y
+    struct Mono {
+        comp: u8,
+        a: usize,
+        b: usize,
+    } // comp 0=x, 1=y
     let mut monos: Vec<Mono> = Vec::new();
     for deg in 0..=k {
         for a in 0..=deg {
@@ -121,7 +145,11 @@ fn build_tri_data(k: usize) -> TriNDkData {
             } else {
                 // Φ_y(0, η): x=0, y=η → component_y = 0^a·η^b = δ_{a0}·η^b
                 // ∫₀¹ Φ_y(0,η)·η^p dη = ∫₀¹ δ_{a0}·η^b·η^p dη = δ_{a0}·1/(b+p+1)
-                if m.a == 0 { 1.0 / (m.b as f64 + p as f64 + 1.0) } else { 0.0 }
+                if m.a == 0 {
+                    1.0 / (m.b as f64 + p as f64 + 1.0)
+                } else {
+                    0.0
+                }
             };
             v[2 * k + p][j] = val;
         }
@@ -131,25 +159,25 @@ fn build_tri_data(k: usize) -> TriNDkData {
     let mut dof_idx = 3 * k;
     if k >= 2 {
         for deg in 0..=(k - 2) {
-        for ix in 0..=deg {
-            let iy = deg - ix;
-            // ∫ (Φ_x · x^ix y^iy) dA
-            for (j, m) in monos.iter().enumerate() {
-                if m.comp == 0 {
-                    // ∫ x^(a+ix) y^(b+iy) dA where the monomial is (x^a y^b, 0)
-                    v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
+            for ix in 0..=deg {
+                let iy = deg - ix;
+                // ∫ (Φ_x · x^ix y^iy) dA
+                for (j, m) in monos.iter().enumerate() {
+                    if m.comp == 0 {
+                        // ∫ x^(a+ix) y^(b+iy) dA where the monomial is (x^a y^b, 0)
+                        v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
+                    }
                 }
-            }
-            dof_idx += 1;
-            // ∫ (Φ_y · x^ix y^iy) dA
-            for (j, m) in monos.iter().enumerate() {
-                if m.comp == 1 {
-                    v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
+                dof_idx += 1;
+                // ∫ (Φ_y · x^ix y^iy) dA
+                for (j, m) in monos.iter().enumerate() {
+                    if m.comp == 1 {
+                        v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
+                    }
                 }
+                dof_idx += 1;
             }
-            dof_idx += 1;
         }
-    }
     }
     assert_eq!(dof_idx, n);
 
@@ -157,7 +185,9 @@ fn build_tri_data(k: usize) -> TriNDkData {
     let mut col_perm: Vec<usize> = (0..m_total).collect();
     let mut row = vec![vec![0.0_f64; n + m_total]; n];
     for i in 0..n {
-        for j in 0..m_total { row[i][j] = v[i][j]; }
+        for j in 0..m_total {
+            row[i][j] = v[i][j];
+        }
         row[i][m_total + i] = 1.0;
     }
 
@@ -169,7 +199,9 @@ fn build_tri_data(k: usize) -> TriNDkData {
         for c in col..m_total {
             // Check if this column is usable
             let mut max_row = 0.0_f64;
-            for r in col..n { max_row = max_row.max(row[r][c].abs()); }
+            for r in col..n {
+                max_row = max_row.max(row[r][c].abs());
+            }
             if max_row > best_val {
                 best_val = max_row;
                 best_col = c;
@@ -177,7 +209,9 @@ fn build_tri_data(k: usize) -> TriNDkData {
         }
         // Column pivot
         col_perm.swap(col, best_col);
-        for r in 0..n { row[r].swap(col, best_col); }
+        for r in 0..n {
+            row[r].swap(col, best_col);
+        }
 
         // Find row pivot
         let mut piv_row = col;
@@ -191,14 +225,21 @@ fn build_tri_data(k: usize) -> TriNDkData {
         row.swap(col, piv_row);
 
         let pivot = row[col][col];
-        assert!(pivot.abs() > 1e-14, "TriNDk({k}): singular Vandermonde at col {col}");
+        assert!(
+            pivot.abs() > 1e-14,
+            "TriNDk({k}): singular Vandermonde at col {col}"
+        );
         let inv = 1.0 / pivot;
-        for j in col..n + m_total { row[col][j] *= inv; }
+        for j in col..n + m_total {
+            row[col][j] *= inv;
+        }
 
         for r in 0..n {
             if r != col {
                 let f = row[r][col];
-                for j in col..n + m_total { row[r][j] -= f * row[col][j]; }
+                for j in col..n + m_total {
+                    row[r][j] -= f * row[col][j];
+                }
             }
         }
         selected.push(col);
@@ -212,21 +253,34 @@ fn build_tri_data(k: usize) -> TriNDkData {
         }
     }
 
-    TriNDkData { coeff, n, order: k, monomap: selected }
+    TriNDkData {
+        coeff,
+        n,
+        order: k,
+        monomap: selected,
+    }
 }
 
 /// Beta integral ∫₀¹ (1-t)^a t^(b+p) dt = a! (b+p)! / (a+b+p+1)!
 fn beta_int(a: usize, bp: usize) -> f64 {
     let mut num = 1.0_f64;
-    for i in 1..=a { num *= i as f64; }
-    for i in 1..=bp { num *= i as f64; }
+    for i in 1..=a {
+        num *= i as f64;
+    }
+    for i in 1..=bp {
+        num *= i as f64;
+    }
     let mut den = 1.0_f64;
-    for i in 1..=(a + bp + 1) { den *= i as f64; }
+    for i in 1..=(a + bp + 1) {
+        den *= i as f64;
+    }
     num / den
 }
 
 /// Arbitrary-order Nedelec-I element on the reference triangle.
-pub struct TriNDk { order: usize }
+pub struct TriNDk {
+    order: usize,
+}
 
 impl TriNDk {
     pub fn new(p: usize) -> Self {
@@ -236,14 +290,21 @@ impl TriNDk {
 }
 
 impl VectorReferenceElement for TriNDk {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { self.order * (self.order + 2) }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.order * (self.order + 2)
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let k = self.order;
         let d = tri_data(k);
-        let x = xi[0]; let y = xi[1];
+        let x = xi[0];
+        let y = xi[1];
         let n = d.n;
         let m_total = (k + 1) * (k + 2); // total number of monomial entries (comp×a×b)
 
@@ -266,7 +327,8 @@ impl VectorReferenceElement for TriNDk {
         }
 
         for i in 0..n {
-            let mut vx = 0.0; let mut vy = 0.0;
+            let mut vx = 0.0;
+            let mut vy = 0.0;
             for (ji, &sel) in d.monomap.iter().enumerate() {
                 let c = d.coeff[i * n + ji];
                 vx += c * mono_vals[sel * 2];
@@ -280,7 +342,8 @@ impl VectorReferenceElement for TriNDk {
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
         let k = self.order;
         let d = tri_data(k);
-        let x = xi[0]; let y = xi[1];
+        let x = xi[0];
+        let y = xi[1];
         let n = d.n;
 
         // Compute curl of each selected monomial entry
@@ -292,7 +355,9 @@ impl VectorReferenceElement for TriNDk {
             let mut deg = 0usize;
             loop {
                 let n_at_deg = 2 * (deg + 1);
-                if rem < n_at_deg { break; }
+                if rem < n_at_deg {
+                    break;
+                }
                 rem -= n_at_deg;
                 deg += 1;
             }
@@ -320,10 +385,14 @@ impl VectorReferenceElement for TriNDk {
     }
 
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
-        for v in div_vals.iter_mut() { *v = 0.0; }
+        for v in div_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let k = self.order;
@@ -348,7 +417,8 @@ impl VectorReferenceElement for TriNDk {
         if k >= 2 {
             for j in 1..k {
                 for i in 1..=(k - j) {
-                    if i + j < k { // strictly interior
+                    if i + j < k {
+                        // strictly interior
                         coords.push(vec![i as f64 / k as f64, j as f64 / k as f64]);
                     }
                 }
@@ -372,7 +442,9 @@ mod tests {
             let n = d.n;
             // Check diagonal of coefficient matrix
             let mut diag_sum = 0.0_f64;
-            for i in 0..n { diag_sum += d.coeff[i * n + i].abs(); }
+            for i in 0..n {
+                diag_sum += d.coeff[i * n + i].abs();
+            }
             assert!(diag_sum > 0.1, "TriNDk({k}) coefficient diagonal too small");
         }
     }
@@ -390,7 +462,9 @@ mod tests {
             let mut vals = vec![0.0; n * 2];
             for c in &coords {
                 elem.eval_basis_vec(&[c[0], c[1]], &mut vals);
-                for v in &vals { assert!(v.is_finite(), "non-finite value at {c:?}"); }
+                for v in &vals {
+                    assert!(v.is_finite(), "non-finite value at {c:?}");
+                }
             }
         }
     }
@@ -403,7 +477,12 @@ mod tests {
         let mut c2 = vec![0.0; 3];
         elem.eval_curl(&[0.2, 0.3], &mut c1);
         elem.eval_curl(&[0.5, 0.1], &mut c2);
-        for i in 0..3 { assert!((c1[i] - c2[i]).abs() < 1e-13, "k=1 curl not constant at {i}"); }
+        for i in 0..3 {
+            assert!(
+                (c1[i] - c2[i]).abs() < 1e-13,
+                "k=1 curl not constant at {i}"
+            );
+        }
     }
 
     #[test]
@@ -412,9 +491,17 @@ mod tests {
             let elem = TriNDk::new(k);
             let n = elem.n_dofs();
             let mut vals = vec![0.0; n * 2];
-            for &(x, y) in &[(0.0,0.0),(1.0,0.0),(0.0,1.0),(0.25,0.25),(1.0/3.0,1.0/3.0)] {
+            for &(x, y) in &[
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (0.25, 0.25),
+                (1.0 / 3.0, 1.0 / 3.0),
+            ] {
                 elem.eval_basis_vec(&[x, y], &mut vals);
-                for v in &vals { assert!(v.is_finite(), "k={k} non-finite at ({x},{y})"); }
+                for v in &vals {
+                    assert!(v.is_finite(), "k={k} non-finite at ({x},{y})");
+                }
             }
         }
     }
@@ -425,9 +512,11 @@ mod tests {
             let elem = TriNDk::new(k);
             let n = elem.n_dofs();
             let mut curl = vec![0.0; n];
-            for &(x, y) in &[(0.1,0.2),(0.3,0.3),(0.4,0.1)] {
+            for &(x, y) in &[(0.1, 0.2), (0.3, 0.3), (0.4, 0.1)] {
                 elem.eval_curl(&[x, y], &mut curl);
-                for v in &curl { assert!(v.is_finite(), "k={k} non-finite curl at ({x},{y})"); }
+                for v in &curl {
+                    assert!(v.is_finite(), "k={k} non-finite curl at ({x},{y})");
+                }
             }
         }
     }

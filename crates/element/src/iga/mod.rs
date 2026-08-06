@@ -62,7 +62,10 @@ impl BsplineBasis {
             .count();
 
         if left_mult < degree + 1 || right_mult < degree + 1 {
-            return Err("clamped knot vector must repeat first/last knot at least degree+1 times".to_string());
+            return Err(
+                "clamped knot vector must repeat first/last knot at least degree+1 times"
+                    .to_string(),
+            );
         }
 
         Ok(Self { degree, knots })
@@ -272,7 +275,6 @@ impl BsplineBasis {
         }
         Ok(basis)
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -353,7 +355,12 @@ mod tests {
         let points = [0.0, 0.1, 0.25, 0.5, 0.8, 1.0];
 
         for &u in &points {
-            let sum: f64 = basis.nonzero_values(u).unwrap().iter().map(|(_, v)| *v).sum();
+            let sum: f64 = basis
+                .nonzero_values(u)
+                .unwrap()
+                .iter()
+                .map(|(_, v)| *v)
+                .sum();
             assert!((sum - 1.0).abs() < 1e-12, "u={u}, sum={sum}");
         }
     }
@@ -407,16 +414,9 @@ mod tests {
 
     #[test]
     fn clamped_multiplicity_is_epsilon_tolerant() {
-        let kv = KnotVector::new_clamped(vec![
-            0.0,
-            5e-13,
-            9e-13,
-            0.5,
-            1.0 - 9e-13,
-            1.0 - 5e-13,
-            1.0,
-        ])
-        .unwrap();
+        let kv =
+            KnotVector::new_clamped(vec![0.0, 5e-13, 9e-13, 0.5, 1.0 - 9e-13, 1.0 - 5e-13, 1.0])
+                .unwrap();
         assert!(BsplineBasis::new(2, kv).is_ok());
     }
 
@@ -450,11 +450,23 @@ mod tests {
         let n0 = basis.n_basis();
         let refined = basis.insert_knot(0.5).unwrap();
         let n1 = refined.n_basis();
-        assert_eq!(n1, n0 + 1, "inserting one knot should add one basis function");
+        assert_eq!(
+            n1,
+            n0 + 1,
+            "inserting one knot should add one basis function"
+        );
         // Partition of unity must still hold
         for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let sum: f64 = refined.nonzero_values(u).unwrap().iter().map(|(_, v)| *v).sum();
-            assert!((sum - 1.0).abs() < 1e-12, "partition of unity fails at u={u}: sum={sum}");
+            let sum: f64 = refined
+                .nonzero_values(u)
+                .unwrap()
+                .iter()
+                .map(|(_, v)| *v)
+                .sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "partition of unity fails at u={u}: sum={sum}"
+            );
         }
     }
 
@@ -467,7 +479,12 @@ mod tests {
         assert_eq!(refined.n_basis(), basis.n_basis() + 4);
         // Check partition of unity
         for u in [0.0, 0.1, 0.5, 0.9, 1.0] {
-            let sum: f64 = refined.nonzero_values(u).unwrap().iter().map(|(_, v)| *v).sum();
+            let sum: f64 = refined
+                .nonzero_values(u)
+                .unwrap()
+                .iter()
+                .map(|(_, v)| *v)
+                .sum();
             assert!((sum - 1.0).abs() < 1e-12);
         }
     }
@@ -487,13 +504,6 @@ mod tests {
 // `BsplineBasis::new(deg, kv)` from the new `KnotVector`.
 
 pub use crate::nurbs::{
-    BSplineBasis1D as NurbsBSplineBasis1D,
-    KnotVector as NurbsKnotVector,
-    greville_abscissae,
-    NurbsMesh2D,
-    NurbsMesh3D,
-    NurbsPatch2D,
-    NurbsPatch2DData,
-    NurbsPatch3D,
-    NurbsPatch3DData,
+    greville_abscissae, BSplineBasis1D as NurbsBSplineBasis1D, KnotVector as NurbsKnotVector,
+    NurbsMesh2D, NurbsMesh3D, NurbsPatch2D, NurbsPatch2DData, NurbsPatch3D, NurbsPatch3DData,
 };

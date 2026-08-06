@@ -35,16 +35,16 @@
 //! | [`TriRT0`]  | unit triangle   | 3    |
 //! | [`TetRT0`]  | unit tet        | 4    |
 
-pub mod reference;
-pub mod quadrature;
+pub mod basis_cache;
 pub mod bernstein;
 pub mod bernstein_simplex;
-pub mod serendipity;
-pub mod lagrange;
-pub mod nedelec;
-pub mod raviart_thomas;
+pub mod bezier_extraction;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
+pub mod hierarchical;
+pub mod iga;
+pub mod lagrange;
+pub mod nedelec;
 pub mod nonconforming;
 /// Legacy NURBS module — prefer `fem_element::iga` for new code.
 /// The new `iga::KnotVector` (pure knot sequence) + `iga::BsplineBasis` supersede
@@ -52,27 +52,40 @@ pub mod nonconforming;
 /// `NurbsMesh2D`, etc. remain in `nurbs` but are re-exported from `iga` for
 /// migration convenience.
 pub mod nurbs;
+pub mod quadrature;
+pub mod raviart_thomas;
+pub mod reference;
+pub mod serendipity;
 pub mod tri6_geom;
-pub mod iga;
-pub mod hierarchical;
-pub mod basis_cache;
-pub mod bezier_extraction;
 
+pub use bernstein::{
+    bernstein_dders, bernstein_ders, bernstein_ders_2d, bernstein_vals, bernstein_vals_2d,
+    bernstein_vals_3d, BernsteinHexPk, BernsteinQuadPk, BernsteinSegPk,
+};
+pub use bernstein_simplex::{BernsteinTetPk, BernsteinTriPk};
+pub use brezzi_douglas_marini::{HexBDMk, QuadBDMk, TetBDMk, TriBDMk};
+pub use crouzeix_raviart::{
+    cr1_basis, cr1_grad, cr1_tet_basis, cr1_tet_grad, cr2_tet_basis, cr2_tet_grad, cr2_tri_basis,
+    cr2_tri_grad, CrTet1, CrTet2, CrTri1, CrTri2, CrouzeixRaviart1, CrouzeixRaviartVec1,
+};
+pub use hierarchical::{HierarchicalSegPk, HierarchicalTetPk, HierarchicalTriPk};
+pub use lagrange::{
+    ref_elem, vec_ref_elem, ElemType, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex, LagrangePrism,
+    LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle, PrismPk,
+    PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadQk,
+    SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6,
+    TetPk, TriP1, TriP10, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriPk, VecFamily,
+};
+pub use nedelec::{
+    HexND1, HexND2, HexNDk, PrismND1, PrismNDk, PyraND1, PyraNDk, QuadND1, QuadND2, QuadNDk,
+    TetND1, TetND2, TetNDk, TriND1, TriND2, TriNDk,
+};
+pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec};
+pub use quadrature::{tri_rule_named, TriQuadRule};
+pub use raviart_thomas::{
+    HexRT0, HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT0, QuadRT1, QuadRTk,
+    TetRT0, TetRT1, TetRT2, TetRTk, TriRT0, TriRT1, TriRT2, TriRTk,
+};
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
-pub use quadrature::{TriQuadRule, tri_rule_named};
-pub use bernstein::{BernsteinSegPk, BernsteinQuadPk, BernsteinHexPk, bernstein_vals, bernstein_ders, bernstein_dders, bernstein_vals_2d, bernstein_vals_3d, bernstein_ders_2d};
-pub use bernstein_simplex::{BernsteinTriPk, BernsteinTetPk};
-pub use serendipity::{QuadSerendipityPk, HexSerendipityPk};
-pub use lagrange::{HexQ1, HexQ2, HexQ3, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadP1, QuadP2, QuadP3, QuadP4, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6, TriP1, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriP10,
-                   LagrangeSegment, LagrangeTriangle, LagrangeTetrahedron, LagrangeQuad, LagrangeHex,
-                   LagrangePrism, LagrangePyramid,
-                   SegPk, TriPk, TetPk, QuadQk, QuadL2GL, HexQk, PrismPk, PyramidPk, ref_elem, ElemType,
-                   VecFamily, vec_ref_elem};
-pub use nedelec::{TriND1, TriND2, TriNDk, QuadND1, QuadND2, QuadNDk, HexND1, HexND2, HexNDk, TetND1, TetND2, TetNDk, PrismND1, PrismNDk, PyraND1, PyraNDk};
-pub use raviart_thomas::{TriRT0, TriRTk, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, TetRTk, QuadRT0, QuadRTk, HexRT0, HexRTk, QuadRT1, HexRT1, PrismRT0, PrismRTk, PyraRT0, PyraRTk};
-pub use brezzi_douglas_marini::{QuadBDMk, TriBDMk, TetBDMk, HexBDMk};
-pub use nonconforming::{QuadQ1Rot, QuadQ1RotVec, Q1RotRef};
-pub use crouzeix_raviart::{CrouzeixRaviart1, CrouzeixRaviartVec1, CrTri1, CrTri2, CrTet1, CrTet2, cr1_basis, cr1_grad, cr1_tet_basis, cr1_tet_grad, cr2_tri_basis, cr2_tri_grad, cr2_tet_basis, cr2_tet_grad};
-pub use hierarchical::{HierarchicalSegPk, HierarchicalTriPk, HierarchicalTetPk};
+pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};
 // Use fem_element::iga::* instead (migration target)
-

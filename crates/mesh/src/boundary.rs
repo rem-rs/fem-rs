@@ -83,6 +83,87 @@ impl NamedAttributeRegistry {
         out.sort_unstable();
         out
     }
+
+    /// True if a named set exists (regardless of which tag kind it holds).
+    pub fn attribute_set_exists(&self, name: &str) -> bool {
+        self.sets.contains_key(name)
+    }
+
+    /// MFEM `AttributeSets::SetAttributeSet` for the element side: create the
+    /// named set from `tags` (replacing any existing set with that name).
+    ///
+    /// The element tags are deduplicated and sorted (MFEM `ArraysByName` keeps
+    /// its arrays sorted with duplicates removed).
+    pub fn set_attribute_set(&mut self, name: &str, tags: &[i32]) {
+        let entry = self.sets.entry(name.to_string()).or_default();
+        entry.name = name.to_string();
+        entry.element_tags = tags.to_vec();
+        entry.element_tags.sort_unstable();
+        entry.element_tags.dedup();
+    }
+
+    /// MFEM `AttributeSets::SetAttributeSet` for the boundary side.
+    pub fn set_boundary_attribute_set(&mut self, name: &str, tags: &[BoundaryTag]) {
+        let entry = self.sets.entry(name.to_string()).or_default();
+        entry.name = name.to_string();
+        entry.boundary_tags = tags.to_vec();
+        entry.boundary_tags.sort_unstable();
+        entry.boundary_tags.dedup();
+    }
+
+    /// MFEM `AttributeSets::AddToAttributeSet` for the element side: merge
+    /// `tags` into the named set (ignored if the set does not exist).
+    pub fn add_to_attribute_set(&mut self, name: &str, tags: &[i32]) {
+        if let Some(set) = self.sets.get_mut(name) {
+            set.element_tags.extend_from_slice(tags);
+            set.element_tags.sort_unstable();
+            set.element_tags.dedup();
+        }
+    }
+
+    /// MFEM `AttributeSets::AddToAttributeSet` for the boundary side.
+    pub fn add_to_boundary_attribute_set(&mut self, name: &str, tags: &[BoundaryTag]) {
+        if let Some(set) = self.sets.get_mut(name) {
+            set.boundary_tags.extend_from_slice(tags);
+            set.boundary_tags.sort_unstable();
+            set.boundary_tags.dedup();
+        }
+    }
+
+    /// Element-side attribute numbers of the named set (empty if missing).
+    pub fn element_set(&self, name: &str) -> &[i32] {
+        self.sets.get(name).map(|s| s.element_tags.as_slice()).unwrap_or(&[])
+    }
+
+    /// Boundary-side attribute numbers of the named set (empty if missing).
+    pub fn boundary_set(&self, name: &str) -> &[BoundaryTag] {
+        self.sets.get(name).map(|s| s.boundary_tags.as_slice()).unwrap_or(&[])
+    }
+
+    /// MFEM `AttributeSets::GetAttributeSetMarker` for the element side:
+    /// marker array of length `max_attr` with `marker[attr-1] = 1` for every
+    /// attribute number in the set, else 0. `max_attr` is the largest
+    /// attribute number in the mesh (`mesh.attributes.Max()`).
+    pub fn element_set_marker(&self, name: &str, max_attr: i32) -> Vec<i32> {
+        attr_to_marker(max_attr, self.element_set(name))
+    }
+
+    /// MFEM `AttributeSets::GetAttributeSetMarker` for the boundary side.
+    pub fn boundary_set_marker(&self, name: &str, max_attr: i32) -> Vec<i32> {
+        attr_to_marker(max_attr, self.boundary_set(name))
+    }
+}
+
+/// MFEM `AttributeSets::AttrToMarker`: `marker[attr-1] = 1` for `attr` in
+/// `attrs`; length = `max_attr` (the largest attribute number in the mesh).
+fn attr_to_marker(max_attr: i32, attrs: &[i32]) -> Vec<i32> {
+    let mut marker = vec![0i32; max_attr.max(0) as usize];
+    for &attr in attrs {
+        if attr > 0 && (attr as usize) <= marker.len() {
+            marker[(attr - 1) as usize] = 1;
+        }
+    }
+    marker
 }
 
 #[cfg(test)]

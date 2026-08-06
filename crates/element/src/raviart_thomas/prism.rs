@@ -13,7 +13,12 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 // ─── Monomial helpers (shared with NDk) ─────────────────────────────────────
 
 #[derive(Clone)]
-struct Mono { comp: u8, a: usize, b: usize, c: usize }
+struct Mono {
+    comp: u8,
+    a: usize,
+    b: usize,
+    c: usize,
+}
 
 fn prism_monos(max_deg: usize) -> Vec<Mono> {
     let mut m = Vec::new();
@@ -21,7 +26,9 @@ fn prism_monos(max_deg: usize) -> Vec<Mono> {
         for a in 0..=deg {
             for b in 0..=(deg - a) {
                 let c = deg - a - b;
-                for comp in 0..3u8 { m.push(Mono { comp, a, b, c }); }
+                for comp in 0..3u8 {
+                    m.push(Mono { comp, a, b, c });
+                }
             }
         }
     }
@@ -41,10 +48,10 @@ fn eval_mono(m: &Mono, xi: f64, eta: f64, zeta: f64) -> f64 {
 /// face 3: quad (ζ=0, n̂=(0,0,-1)), area dξ·dη
 /// face 4: quad diagonal (η+ζ=1, n̂=(0,1,1)/√2), area √2 dξ·dη
 const FACE_DEFS: [(u8, [f64; 3]); 5] = [
-    (0, [-1.0, 0.0, 0.0]),  // tri, xi=0
-    (0, [ 1.0, 0.0, 0.0]),  // tri, xi=1
-    (1, [ 0.0,-1.0, 0.0]),  // quad, η=0
-    (1, [ 0.0, 0.0,-1.0]),  // quad, ζ=0
+    (0, [-1.0, 0.0, 0.0]),                              // tri, xi=0
+    (0, [1.0, 0.0, 0.0]),                               // tri, xi=1
+    (1, [0.0, -1.0, 0.0]),                              // quad, η=0
+    (1, [0.0, 0.0, -1.0]),                              // quad, ζ=0
     (1, [0.0, 0.7071067811865475, 0.7071067811865475]), // quad diagonal (η+ζ=1)
 ];
 
@@ -66,16 +73,30 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
             let xi_val = if face == 0 { 0.0 } else { 1.0 };
             // Integrate over the triangle (η, ζ)
             let tri_pts = [
-                [1.0/6.0, 1.0/6.0], [2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0],
-                [0.2, 0.2], [0.6, 0.2], [0.2, 0.6],
+                [1.0 / 6.0, 1.0 / 6.0],
+                [2.0 / 3.0, 1.0 / 6.0],
+                [1.0 / 6.0, 2.0 / 3.0],
+                [0.2, 0.2],
+                [0.6, 0.2],
+                [0.2, 0.6],
             ];
-            let tri_wts = [1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0, 1.0/6.0];
+            let tri_wts = [
+                1.0 / 6.0,
+                1.0 / 6.0,
+                1.0 / 6.0,
+                1.0 / 6.0,
+                1.0 / 6.0,
+                1.0 / 6.0,
+            ];
             let mut sum = 0.0;
             for (p_uv, &w) in tri_pts.iter().zip(tri_wts.iter()) {
                 let (eta, zeta) = (p_uv[0], p_uv[1]);
                 let mv = eval_mono(m, xi_val, eta, zeta);
                 let dot = match m.comp {
-                    0 => norm[0], 1 => norm[1], 2 => norm[2], _ => 0.0,
+                    0 => norm[0],
+                    1 => norm[1],
+                    2 => norm[2],
+                    _ => 0.0,
                 };
                 // Face polynomial weight: monomial in (η, ζ) of degree p+q
                 let poly = eta.powi(p as i32) * zeta.powi(q as i32);
@@ -102,7 +123,10 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
                             let zeta = 1.0 - eta;
                             let mv = eval_mono(m, u, eta, zeta);
                             let dot = match m.comp {
-                                0 => norm[0], 1 => norm[1], 2 => norm[2], _ => 0.0,
+                                0 => norm[0],
+                                1 => norm[1],
+                                2 => norm[2],
+                                _ => 0.0,
                             };
                             let poly = u.powi(p as i32) * v.powi(q as i32);
                             // ds = √2 dξ·dη
@@ -124,7 +148,10 @@ fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
                     pt[free_dirs.1] = v;
                     let mv = eval_mono(m, pt[0], pt[1], pt[2]);
                     let dot = match m.comp {
-                        0 => norm[0], 1 => norm[1], 2 => norm[2], _ => 0.0,
+                        0 => norm[0],
+                        1 => norm[1],
+                        2 => norm[2],
+                        _ => 0.0,
                     };
                     let poly = u.powi(p as i32) * v.powi(q as i32);
                     sum += wu * wv * dot * mv * poly;
@@ -150,29 +177,54 @@ fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     for i in 0..n {
         for j in 0..n {
             let mut s = 0.0;
-            for col in 0..m { s += v[i][col] * v[j][col]; }
+            for col in 0..m {
+                s += v[i][col] * v[j][col];
+            }
             vvt[i][j] = s;
         }
     }
     let mut a = vvt.clone();
     let mut inv = vec![vec![0.0_f64; n]; n];
-    for i in 0..n { inv[i][i] = 1.0; }
+    for i in 0..n {
+        inv[i][i] = 1.0;
+    }
     for c in 0..n {
-        let mut best = c; let mut bv = a[c][c].abs();
-        for r in (c+1)..n { if a[r][c].abs() > bv { bv = a[r][c].abs(); best = r; } }
-        if bv < 1e-30 { continue; }
-        a.swap(c, best); inv.swap(c, best);
+        let mut best = c;
+        let mut bv = a[c][c].abs();
+        for r in (c + 1)..n {
+            if a[r][c].abs() > bv {
+                bv = a[r][c].abs();
+                best = r;
+            }
+        }
+        if bv < 1e-30 {
+            continue;
+        }
+        a.swap(c, best);
+        inv.swap(c, best);
         let ip = 1.0 / a[c][c];
-        for j in 0..n { a[c][j] *= ip; inv[c][j] *= ip; }
-        for r in 0..n { if r == c { continue; } let f = a[r][c];
-            for j in 0..n { a[r][j] -= f * a[c][j]; inv[r][j] -= f * inv[c][j]; }
+        for j in 0..n {
+            a[c][j] *= ip;
+            inv[c][j] *= ip;
+        }
+        for r in 0..n {
+            if r == c {
+                continue;
+            }
+            let f = a[r][c];
+            for j in 0..n {
+                a[r][j] -= f * a[c][j];
+                inv[r][j] -= f * inv[c][j];
+            }
         }
     }
     let mut coeff = vec![0.0_f64; n * m];
     for i in 0..n {
         for j in 0..m {
             let mut s = 0.0;
-            for k in 0..n { s += v[k][j] * inv[k][i]; }
+            for k in 0..n {
+                s += v[k][j] * inv[k][i];
+            }
             coeff[i * m + j] = s;
         }
     }
@@ -199,13 +251,22 @@ fn build_prism_rtk(k: usize) -> (Vec<f64>, usize) {
 
     // Generate (p,q) pairs for quad faces: 0 ≤ p,q ≤ k
     let mut quad_moments = Vec::new();
-    for p in 0..=k { for q in 0..=k { quad_moments.push((p, q)); } }
+    for p in 0..=k {
+        for q in 0..=k {
+            quad_moments.push((p, q));
+        }
+    }
 
     for face in 0..5 {
         let (ftype, _) = FACE_DEFS[face];
-        let moments = match ftype { 0 => &tri_moments, _ => &quad_moments };
+        let moments = match ftype {
+            0 => &tri_moments,
+            _ => &quad_moments,
+        };
         for &(p, q) in moments {
-            for j in 0..m { vand[row][j] = face_dof_value(&monos[j], face, p, q); }
+            for j in 0..m {
+                vand[row][j] = face_dof_value(&monos[j], face, p, q);
+            }
             row += 1;
         }
     }
@@ -226,7 +287,13 @@ fn build_prism_rtk(k: usize) -> (Vec<f64>, usize) {
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Raviart-Thomas H(div) element on the reference prism — arbitrary order k.
-pub struct PrismRTk { k: usize, coeff: Vec<f64>, n: usize, m: usize, monos: Vec<Mono> }
+pub struct PrismRTk {
+    k: usize,
+    coeff: Vec<f64>,
+    n: usize,
+    m: usize,
+    monos: Vec<Mono>,
+}
 
 /// Order-0 element (alias for `PrismRTk::new(0)`, kept for backward compat).
 pub type PrismRT0 = PrismRTk;
@@ -236,14 +303,26 @@ impl PrismRTk {
         let (coeff, m) = build_prism_rtk(order);
         let n = prism_rtk_dim(order);
         let monos = prism_monos(order + 2);
-        PrismRTk { k: order, coeff, n, m, monos }
+        PrismRTk {
+            k: order,
+            coeff,
+            n,
+            m,
+            monos,
+        }
     }
 }
 
 impl VectorReferenceElement for PrismRTk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.k as u8 }
-    fn n_dofs(&self) -> usize { self.n }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.k as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.n
+    }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         if self.k == 0 {
@@ -257,9 +336,12 @@ impl VectorReferenceElement for PrismRTk {
             values.fill(0.0);
             values[0] = a - 1.0;
             values[3] = a;
-            values[7] = b;          values[8]  = c - 1.0;
-            values[10] = b;         values[11] = c;
-            values[13] = b - 1.0;   values[14] = c;
+            values[7] = b;
+            values[8] = c - 1.0;
+            values[10] = b;
+            values[11] = c;
+            values[13] = b - 1.0;
+            values[14] = c;
             return;
         }
         let mut mv = vec![0.0_f64; self.monos.len()];
@@ -281,24 +363,26 @@ impl VectorReferenceElement for PrismRTk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        let h = 1e-6; let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3]; let mut vm = vec![0.0; n3];
+        let h = 1e-6;
+        let n3 = self.n * 3;
+        let mut vp = vec![0.0; n3];
+        let mut vm = vec![0.0; n3];
         for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0]+h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0]-h, xi[1], xi[2]], &mut vm);
-            let dfy_dx = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            let dfz_dx = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1]+h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1]-h, xi[2]], &mut vm);
-            let dfx_dy = (vp[i*3]-vm[i*3])/(2.0*h);
-            let dfz_dy = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]+h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]-h], &mut vm);
-            let dfx_dz = (vp[i*3]-vm[i*3])/(2.0*h);
-            let dfy_dz = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            curl_vals[i*3]   = dfz_dy - dfy_dz;
-            curl_vals[i*3+1] = dfx_dz - dfz_dx;
-            curl_vals[i*3+2] = dfy_dx - dfx_dy;
+            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
+            let dfy_dx = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            let dfz_dx = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
+            let dfx_dy = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            let dfz_dy = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
+            let dfx_dz = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            let dfy_dz = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            curl_vals[i * 3] = dfz_dy - dfy_dz;
+            curl_vals[i * 3 + 1] = dfx_dz - dfz_dx;
+            curl_vals[i * 3 + 2] = dfy_dx - dfx_dy;
         }
     }
 
@@ -313,42 +397,62 @@ impl VectorReferenceElement for PrismRTk {
             div_vals[4] = 2.0;
             return;
         }
-        let h = 1e-6; let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3]; let mut vm = vec![0.0; n3];
+        let h = 1e-6;
+        let n3 = self.n * 3;
+        let mut vp = vec![0.0; n3];
+        let mut vm = vec![0.0; n3];
         for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0]+h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0]-h, xi[1], xi[2]], &mut vm);
-            let dfx = (vp[i*3]-vm[i*3])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1]+h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1]-h, xi[2]], &mut vm);
-            let dfy = (vp[i*3+1]-vm[i*3+1])/(2.0*h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]+h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2]-h], &mut vm);
-            let dfz = (vp[i*3+2]-vm[i*3+2])/(2.0*h);
+            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
+            let dfx = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
+            let dfy = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
+            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
+            let dfz = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
             div_vals[i] = dfx + dfy + dfz;
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { prism_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        prism_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         // Face-based DOF locations (Gauss-like on each face)
         let k = self.k;
         let mut coords = Vec::new();
-        let tri_q_pts: Vec<f64> = if k == 0 { vec![1.0/3.0] }
-            else { (0..(k+1)*(k+2)/2).map(|_| 0.3).collect() };
-        let quad_q_pts: Vec<f64> = if k == 0 { vec![0.5] }
-            else { (0..(k+1)*(k+1)).map(|_| 0.3).collect() };
+        let tri_q_pts: Vec<f64> = if k == 0 {
+            vec![1.0 / 3.0]
+        } else {
+            (0..(k + 1) * (k + 2) / 2).map(|_| 0.3).collect()
+        };
+        let quad_q_pts: Vec<f64> = if k == 0 {
+            vec![0.5]
+        } else {
+            (0..(k + 1) * (k + 1)).map(|_| 0.3).collect()
+        };
         // Face 0 (xi=0, tri)
-        for _ in 0..tri_q_pts.len() { coords.push(vec![0.0, 0.3, 0.3]); }
+        for _ in 0..tri_q_pts.len() {
+            coords.push(vec![0.0, 0.3, 0.3]);
+        }
         // Face 1 (xi=1, tri)
-        for _ in 0..tri_q_pts.len() { coords.push(vec![1.0, 0.3, 0.3]); }
+        for _ in 0..tri_q_pts.len() {
+            coords.push(vec![1.0, 0.3, 0.3]);
+        }
         // Face 2 (eta=0, quad)
-        for _ in 0..quad_q_pts.len() { coords.push(vec![0.3, 0.0, 0.3]); }
+        for _ in 0..quad_q_pts.len() {
+            coords.push(vec![0.3, 0.0, 0.3]);
+        }
         // Face 3 (zeta=0, quad)
-        for _ in 0..quad_q_pts.len() { coords.push(vec![0.3, 0.3, 0.0]); }
+        for _ in 0..quad_q_pts.len() {
+            coords.push(vec![0.3, 0.3, 0.0]);
+        }
         // Face 4 (diagonal, quad)
-        for _ in 0..quad_q_pts.len() { coords.push(vec![0.3, 0.3, 0.4]); }
+        for _ in 0..quad_q_pts.len() {
+            coords.push(vec![0.3, 0.3, 0.4]);
+        }
         coords
     }
 }
@@ -359,21 +463,38 @@ impl VectorReferenceElement for PrismRTk {
 mod tests {
     use super::*;
 
-    #[test] fn prism_rtk_k0_dim() { assert_eq!(prism_rtk_dim(0), 5); }
-    #[test] fn prism_rtk_k1_dim() { assert_eq!(prism_rtk_dim(1), 18); }
-    #[test] fn prism_rtk_k2_dim() { assert_eq!(prism_rtk_dim(2), 42); }
-    #[test] fn prism_rtk_k0_finite() {
-        let e = PrismRTk::new(0); let mut v = vec![0.0; 15];
+    #[test]
+    fn prism_rtk_k0_dim() {
+        assert_eq!(prism_rtk_dim(0), 5);
+    }
+    #[test]
+    fn prism_rtk_k1_dim() {
+        assert_eq!(prism_rtk_dim(1), 18);
+    }
+    #[test]
+    fn prism_rtk_k2_dim() {
+        assert_eq!(prism_rtk_dim(2), 42);
+    }
+    #[test]
+    fn prism_rtk_k0_finite() {
+        let e = PrismRTk::new(0);
+        let mut v = vec![0.0; 15];
         for p in &e.quadrature(3).points {
             e.eval_basis_vec(p, &mut v);
-            for x in &v { assert!(x.is_finite()); }
+            for x in &v {
+                assert!(x.is_finite());
+            }
         }
     }
-    #[test] fn prism_rtk_k1_finite() {
-        let e = PrismRTk::new(1); let mut v = vec![0.0; 54];
+    #[test]
+    fn prism_rtk_k1_finite() {
+        let e = PrismRTk::new(1);
+        let mut v = vec![0.0; 54];
         for p in &e.quadrature(3).points {
             e.eval_basis_vec(p, &mut v);
-            for x in &v { assert!(x.is_finite()); }
+            for x in &v {
+                assert!(x.is_finite());
+            }
         }
     }
 }

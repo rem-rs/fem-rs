@@ -322,6 +322,13 @@ fn main() {
                 u[td] = v;
             }
 
+            // DEBUG (ex15 1:1): dump the true-DOF solution at Time 0.93 it1 for
+            // result comparison against the C++ solve (X).
+            if (time - 0.93).abs() < 1e-9 && ref_it == 1 {
+                println!("SOLU93 {}", x_true.len());
+                for (i, &v) in x_true.iter().enumerate() { println!("{i} {v:.17e}"); }
+            }
+
             // Recover hanging-node values
             if !hc.is_empty() { recover_hanging_values(&mut u, &hc); }
 

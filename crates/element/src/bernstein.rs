@@ -34,7 +34,10 @@ pub fn bernstein_vals(p: usize, t: f64) -> Vec<f64> {
     let mut v = vec![0.0; p + 1];
     match p {
         0 => v[0] = 1.0,
-        1 => { v[0] = 1.0 - t; v[1] = t; }
+        1 => {
+            v[0] = 1.0 - t;
+            v[1] = t;
+        }
         _ => {
             // de Casteljau / recurrence: B_{i,p} = (1-t)·B_{i,p-1} + t·B_{i-1,p-1}
             let mut prev = vec![1.0]; // p=0
@@ -56,7 +59,9 @@ pub fn bernstein_vals(p: usize, t: f64) -> Vec<f64> {
 /// Evaluate all degree-p Bernstein basis derivatives at t ∈ [0,1].
 /// ders[i] = d/dt B_{i,p}(t)
 pub fn bernstein_ders(p: usize, t: f64) -> Vec<f64> {
-    if p == 0 { return vec![0.0]; }
+    if p == 0 {
+        return vec![0.0];
+    }
     let v_low = bernstein_vals(p - 1, t);
     let mut d = Vec::with_capacity(p + 1);
     let pf = p as f64;
@@ -83,7 +88,11 @@ pub fn bernstein_dders(p: usize, t: f64) -> Vec<f64> {
     let mut d = Vec::with_capacity(p + 1);
     for i in 0..=p {
         let b1 = if i >= 2 { v_low[i - 2] } else { 0.0 };
-        let b2 = if i >= 1 && i <= p - 1 { v_low[i - 1] } else { 0.0 };
+        let b2 = if i >= 1 && i <= p - 1 {
+            v_low[i - 1]
+        } else {
+            0.0
+        };
         let b3 = if i <= p - 2 { v_low[i] } else { 0.0 };
         d.push(pf * (b1 - 2.0 * b2 + b3));
     }
@@ -143,8 +152,8 @@ pub fn bernstein_ders_2d(p: usize, xi: f64, eta: f64) -> (Vec<f64>, Vec<f64>) {
         for i in 0..np1 {
             let idx = j * np1 + i;
             vals.push(vx[i] * vy[j]);
-            grads[idx * 2]     = dx[i] * vy[j];     // d/dξ
-            grads[idx * 2 + 1] = vx[i] * dy[j];     // d/dη
+            grads[idx * 2] = dx[i] * vy[j]; // d/dξ
+            grads[idx * 2 + 1] = vx[i] * dy[j]; // d/dη
         }
     }
     (vals, grads)
@@ -153,7 +162,9 @@ pub fn bernstein_ders_2d(p: usize, xi: f64, eta: f64) -> (Vec<f64>, Vec<f64>) {
 /// Compute the binomial coefficient C(n,k) as f64.
 #[allow(dead_code)]
 fn binom(n: usize, k: usize) -> f64 {
-    if k > n || k > MAX_DEG || n > MAX_DEG { return 0.0; }
+    if k > n || k > MAX_DEG || n > MAX_DEG {
+        return 0.0;
+    }
     BINOM[n][k]
 }
 
@@ -170,9 +181,15 @@ impl BernsteinSegPk {
 }
 
 impl ReferenceElement for BernsteinSegPk {
-    fn dim(&self) -> u8 { 1 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { self.order + 1 }
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.order + 1
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let v = bernstein_vals(self.order, xi[0]);
         values.copy_from_slice(&v);
@@ -181,9 +198,13 @@ impl ReferenceElement for BernsteinSegPk {
         let d = bernstein_ders(self.order, xi[0]);
         grads.copy_from_slice(&d);
     }
-    fn quadrature(&self, order: u8) -> QuadratureRule { seg_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        seg_rule(order)
+    }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        (0..=self.order).map(|i| vec![i as f64 / self.order as f64]).collect()
+        (0..=self.order)
+            .map(|i| vec![i as f64 / self.order as f64])
+            .collect()
     }
 }
 
@@ -200,9 +221,15 @@ impl BernsteinQuadPk {
 }
 
 impl ReferenceElement for BernsteinQuadPk {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.p as u8 }
-    fn n_dofs(&self) -> usize { (self.p + 1) * (self.p + 1) }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.p as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.p + 1) * (self.p + 1)
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let t = (xi[0] + 1.0) * 0.5;
         let u = (xi[1] + 1.0) * 0.5;
@@ -217,7 +244,7 @@ impl ReferenceElement for BernsteinQuadPk {
         let np1 = self.p + 1;
         let n = np1 * np1;
         for idx in 0..n {
-            grads[idx * 2]     = g[idx * 2]     * 0.5;
+            grads[idx * 2] = g[idx * 2] * 0.5;
             grads[idx * 2 + 1] = g[idx * 2 + 1] * 0.5;
         }
     }
@@ -251,9 +278,15 @@ impl BernsteinHexPk {
 }
 
 impl ReferenceElement for BernsteinHexPk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.p as u8 }
-    fn n_dofs(&self) -> usize { (self.p + 1) * (self.p + 1) * (self.p + 1) }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.p as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.p + 1) * (self.p + 1) * (self.p + 1)
+    }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let t = (xi[0] + 1.0) * 0.5;
         let u = (xi[1] + 1.0) * 0.5;
@@ -277,7 +310,7 @@ impl ReferenceElement for BernsteinHexPk {
             for j in 0..np1 {
                 for i in 0..np1 {
                     let idx = k * np12 + j * np1 + i;
-                    grads[idx * 3]     = dx[i] * vy[j] * vz[k] * 0.5;
+                    grads[idx * 3] = dx[i] * vy[j] * vz[k] * 0.5;
                     grads[idx * 3 + 1] = vx[i] * dy[j] * vz[k] * 0.5;
                     grads[idx * 3 + 2] = vx[i] * vy[j] * dz[k] * 0.5;
                 }
@@ -353,8 +386,12 @@ mod tests {
                 let vm = bernstein_vals(p, t - h);
                 for i in 0..=p {
                     let fd = (vp[i] - vm[i]) / (2.0 * h);
-                    assert!((d_analytic[i] - fd).abs() < 1e-7,
-                        "p={p} t={t} i={i}: analytic={} fd={}", d_analytic[i], fd);
+                    assert!(
+                        (d_analytic[i] - fd).abs() < 1e-7,
+                        "p={p} t={t} i={i}: analytic={} fd={}",
+                        d_analytic[i],
+                        fd
+                    );
                 }
             }
         }
@@ -371,8 +408,12 @@ mod tests {
                 let dm = bernstein_ders(p, t - h);
                 for i in 0..=p {
                     let fd = (dp[i] - dm[i]) / (2.0 * h);
-                    assert!((dd_analytic[i] - fd).abs() < 1e-6,
-                        "p={p} t={t} i={i}: analytic={} fd={}", dd_analytic[i], fd);
+                    assert!(
+                        (dd_analytic[i] - fd).abs() < 1e-6,
+                        "p={p} t={t} i={i}: analytic={} fd={}",
+                        dd_analytic[i],
+                        fd
+                    );
                 }
             }
         }
@@ -412,7 +453,10 @@ mod tests {
                 for &eta in &[-0.6, 0.0, 0.7] {
                     elem.eval_basis(&[xi, eta], &mut v);
                     let s: f64 = v.iter().sum();
-                    assert!((s - 1.0).abs() < 1e-13, "Quad P{p} at ({xi},{eta}): sum={s}");
+                    assert!(
+                        (s - 1.0).abs() < 1e-13,
+                        "Quad P{p} at ({xi},{eta}): sum={s}"
+                    );
                 }
             }
         }
@@ -444,16 +488,24 @@ mod tests {
                 elem.eval_basis(&[xi - h, eta], &mut vm);
                 for i in 0..n {
                     let fd = (vp[i] - vm[i]) / (2.0 * h);
-                    assert!((g[i * 2] - fd).abs() < 1e-6,
-                        "Quad P2 d/dξ at ({xi},{eta}) i={i}: analytic={} fd={}", g[i*2], fd);
+                    assert!(
+                        (g[i * 2] - fd).abs() < 1e-6,
+                        "Quad P2 d/dξ at ({xi},{eta}) i={i}: analytic={} fd={}",
+                        g[i * 2],
+                        fd
+                    );
                 }
                 // FD in η
                 elem.eval_basis(&[xi, eta + h], &mut vp);
                 elem.eval_basis(&[xi, eta - h], &mut vm);
                 for i in 0..n {
                     let fd = (vp[i] - vm[i]) / (2.0 * h);
-                    assert!((g[i * 2 + 1] - fd).abs() < 1e-6,
-                        "Quad P2 d/dη at ({xi},{eta}) i={i}: analytic={} fd={}", g[i*2+1], fd);
+                    assert!(
+                        (g[i * 2 + 1] - fd).abs() < 1e-6,
+                        "Quad P2 d/dη at ({xi},{eta}) i={i}: analytic={} fd={}",
+                        g[i * 2 + 1],
+                        fd
+                    );
                 }
             }
         }
@@ -470,8 +522,10 @@ mod tests {
                     for &zeta in &[-0.6, 0.4] {
                         elem.eval_basis(&[xi, eta, zeta], &mut v);
                         let s: f64 = v.iter().sum();
-                        assert!((s - 1.0).abs() < 1e-13,
-                            "Hex P{p} at ({xi},{eta},{zeta}): sum={s}");
+                        assert!(
+                            (s - 1.0).abs() < 1e-13,
+                            "Hex P{p} at ({xi},{eta},{zeta}): sum={s}"
+                        );
                     }
                 }
             }
@@ -504,24 +558,36 @@ mod tests {
                     elem.eval_basis(&[xi - h, eta, zeta], &mut vm);
                     for i in 0..n {
                         let fd = (vp[i] - vm[i]) / (2.0 * h);
-                        assert!((g[i * 3] - fd).abs() < 1e-6,
-                            "Hex P2 d/dξ at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}", g[i*3], fd);
+                        assert!(
+                            (g[i * 3] - fd).abs() < 1e-6,
+                            "Hex P2 d/dξ at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}",
+                            g[i * 3],
+                            fd
+                        );
                     }
                     // FD in η
                     elem.eval_basis(&[xi, eta + h, zeta], &mut vp);
                     elem.eval_basis(&[xi, eta - h, zeta], &mut vm);
                     for i in 0..n {
                         let fd = (vp[i] - vm[i]) / (2.0 * h);
-                        assert!((g[i * 3 + 1] - fd).abs() < 1e-6,
-                            "Hex P2 d/dη at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}", g[i*3+1], fd);
+                        assert!(
+                            (g[i * 3 + 1] - fd).abs() < 1e-6,
+                            "Hex P2 d/dη at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}",
+                            g[i * 3 + 1],
+                            fd
+                        );
                     }
                     // FD in ζ
                     elem.eval_basis(&[xi, eta, zeta + h], &mut vp);
                     elem.eval_basis(&[xi, eta, zeta - h], &mut vm);
                     for i in 0..n {
                         let fd = (vp[i] - vm[i]) / (2.0 * h);
-                        assert!((g[i * 3 + 2] - fd).abs() < 1e-6,
-                            "Hex P2 d/dζ at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}", g[i*3+2], fd);
+                        assert!(
+                            (g[i * 3 + 2] - fd).abs() < 1e-6,
+                            "Hex P2 d/dζ at ({xi},{eta},{zeta}) i={i}: analytic={} fd={}",
+                            g[i * 3 + 2],
+                            fd
+                        );
                     }
                 }
             }

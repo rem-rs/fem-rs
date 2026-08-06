@@ -27,8 +27,8 @@
 //! SchurComplementSolver::solve(&sys, &f, &g, &mut u, &mut p, &cfg).unwrap();
 //! ```
 
+use crate::{SolveResult, SolverConfig, SolverError};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use crate::{SolverConfig, SolverError, SolveResult};
 
 // ─── Block system ─────────────────────────────────────────────────────────────
 
@@ -40,19 +40,25 @@ use crate::{SolverConfig, SolverError, SolveResult};
 /// where `C` is typically zero or a small stabilization matrix.
 pub struct BlockSystem {
     /// (1,1) block: n_u × n_u, typically symmetric positive definite.
-    pub a:  CsrMatrix<f64>,
+    pub a: CsrMatrix<f64>,
     /// (1,2) block: n_u × n_p  (B transposed).
     pub bt: CsrMatrix<f64>,
     /// (2,1) block: n_p × n_u.
-    pub b:  CsrMatrix<f64>,
+    pub b: CsrMatrix<f64>,
     /// (2,2) block: n_p × n_p (may be None → treated as zero).
-    pub c:  Option<CsrMatrix<f64>>,
+    pub c: Option<CsrMatrix<f64>>,
 }
 
 impl BlockSystem {
-    pub fn n_u(&self) -> usize { self.a.nrows }
-    pub fn n_p(&self) -> usize { self.b.nrows }
-    pub fn n_total(&self) -> usize { self.n_u() + self.n_p() }
+    pub fn n_u(&self) -> usize {
+        self.a.nrows
+    }
+    pub fn n_p(&self) -> usize {
+        self.b.nrows
+    }
+    pub fn n_total(&self) -> usize {
+        self.n_u() + self.n_p()
+    }
 
     /// Apply the full block matrix to `[u; p]` → `[Au + Bᵀp; Bu + Cp]`.
     pub fn apply(&self, u: &[f64], p: &[f64], ru: &mut [f64], rp: &mut [f64]) {
@@ -70,26 +76,26 @@ impl BlockSystem {
     pub fn to_flat_csr(&self) -> CsrMatrix<f64> {
         let n_u = self.n_u();
         let n_p = self.n_p();
-        let n   = n_u + n_p;
+        let n = n_u + n_p;
         let mut coo = CooMatrix::<f64>::new(n, n);
 
         // A block
         for i in 0..n_u {
-            for ptr in self.a.row_ptr[i]..self.a.row_ptr[i+1] {
+            for ptr in self.a.row_ptr[i]..self.a.row_ptr[i + 1] {
                 let j = self.a.col_idx[ptr] as usize;
                 coo.add(i, j, self.a.values[ptr]);
             }
         }
         // B^T block (upper right)
         for i in 0..n_u {
-            for ptr in self.bt.row_ptr[i]..self.bt.row_ptr[i+1] {
+            for ptr in self.bt.row_ptr[i]..self.bt.row_ptr[i + 1] {
                 let j = self.bt.col_idx[ptr] as usize;
                 coo.add(i, n_u + j, self.bt.values[ptr]);
             }
         }
         // B block (lower left)
         for i in 0..n_p {
-            for ptr in self.b.row_ptr[i]..self.b.row_ptr[i+1] {
+            for ptr in self.b.row_ptr[i]..self.b.row_ptr[i + 1] {
                 let j = self.b.col_idx[ptr] as usize;
                 coo.add(n_u + i, j, self.b.values[ptr]);
             }
@@ -97,7 +103,7 @@ impl BlockSystem {
         // C block (lower right)
         if let Some(c) = &self.c {
             for i in 0..n_p {
-                for ptr in c.row_ptr[i]..c.row_ptr[i+1] {
+                for ptr in c.row_ptr[i]..c.row_ptr[i + 1] {
                     let j = c.col_idx[ptr] as usize;
                     coo.add(n_u + i, n_u + j, c.values[ptr]);
                 }
@@ -130,26 +136,43 @@ impl BlockDiagonalPrecond {
         let inv_diag_a: Vec<f64> = (0..n_u)
             .map(|i| {
                 let d = sys.a.get(i, i);
-                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+                if d.abs() > 1e-14 {
+                    1.0 / d
+                } else {
+                    1.0
+                }
             })
             .collect();
 
         let inv_diag_s: Vec<f64> = if let Some(c) = &sys.c {
-            (0..n_p).map(|i| {
-                let d = c.get(i, i);
-                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
-            }).collect()
+            (0..n_p)
+                .map(|i| {
+                    let d = c.get(i, i);
+                    if d.abs() > 1e-14 {
+                        1.0 / d
+                    } else {
+                        1.0
+                    }
+                })
+                .collect()
         } else {
             vec![1.0; n_p]
         };
 
-        BlockDiagonalPrecond { inv_diag_a, inv_diag_s }
+        BlockDiagonalPrecond {
+            inv_diag_a,
+            inv_diag_s,
+        }
     }
 
     /// Apply preconditioner: `z = P^{-1} r`.
     pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) {
-        for i in 0..zu.len() { zu[i] = self.inv_diag_a[i] * ru[i]; }
-        for i in 0..zp.len() { zp[i] = self.inv_diag_s[i] * rp[i]; }
+        for i in 0..zu.len() {
+            zu[i] = self.inv_diag_a[i] * ru[i];
+        }
+        for i in 0..zp.len() {
+            zp[i] = self.inv_diag_s[i] * rp[i];
+        }
     }
 }
 
@@ -184,15 +207,25 @@ impl BlockTriangularPrecond {
         let inv_diag_a: Vec<f64> = (0..n_u)
             .map(|i| {
                 let d = sys.a.get(i, i);
-                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
+                if d.abs() > 1e-14 {
+                    1.0 / d
+                } else {
+                    1.0
+                }
             })
             .collect();
 
         let inv_diag_s: Vec<f64> = if let Some(c) = &sys.c {
-            (0..n_p).map(|i| {
-                let d = c.get(i, i);
-                if d.abs() > 1e-14 { 1.0 / d } else { 1.0 }
-            }).collect()
+            (0..n_p)
+                .map(|i| {
+                    let d = c.get(i, i);
+                    if d.abs() > 1e-14 {
+                        1.0 / d
+                    } else {
+                        1.0
+                    }
+                })
+                .collect()
         } else {
             // No C block: use identity scaling for the pressure.
             vec![1.0; n_p]
@@ -211,7 +244,9 @@ impl BlockTriangularPrecond {
     /// 2. `z_u = diag(A)⁻¹ (r_u - B^T z_p)`
     pub fn apply(&self, ru: &[f64], rp: &[f64], zu: &mut [f64], zp: &mut [f64]) {
         // Step 1: Schur block
-        for i in 0..zp.len() { zp[i] = self.inv_diag_s[i] * rp[i]; }
+        for i in 0..zp.len() {
+            zp[i] = self.inv_diag_s[i] * rp[i];
+        }
 
         // Step 2: coupling + velocity block
         // tmp = B^T z_p
@@ -238,17 +273,19 @@ pub struct SchurComplementSolver;
 impl SchurComplementSolver {
     /// Solve the saddle-point system.
     pub fn solve(
-        sys:  &BlockSystem,
-        f:    &[f64],
-        g:    &[f64],
-        u:    &mut [f64],
-        p:    &mut [f64],
-        cfg:  &SolverConfig,
+        sys: &BlockSystem,
+        f: &[f64],
+        g: &[f64],
+        u: &mut [f64],
+        p: &mut [f64],
+        cfg: &SolverConfig,
     ) -> Result<SolveResult, SolverError> {
         let n_u = sys.n_u();
         let n_p = sys.n_p();
-        assert_eq!(u.len(), n_u); assert_eq!(p.len(), n_p);
-        assert_eq!(f.len(), n_u); assert_eq!(g.len(), n_p);
+        assert_eq!(u.len(), n_u);
+        assert_eq!(p.len(), n_p);
+        assert_eq!(f.len(), n_u);
+        assert_eq!(g.len(), n_p);
 
         // Flatten the block system
         let flat = sys.to_flat_csr();
@@ -265,18 +302,15 @@ impl SchurComplementSolver {
         let restart = n.min(1000); // Full GMRES up to moderate size
         let mut x = vec![0.0_f64; n];
 
-        let res = preconditioned_gmres(
-            &flat, &rhs, &mut x, restart, cfg,
-            |r, z| {
-                // Apply block-diagonal preconditioner
-                for i in 0..n_u {
-                    z[i] = prec.inv_diag_a[i] * r[i];
-                }
-                for i in 0..n_p {
-                    z[n_u + i] = prec.inv_diag_s[i] * r[n_u + i];
-                }
-            },
-        )?;
+        let res = preconditioned_gmres(&flat, &rhs, &mut x, restart, cfg, |r, z| {
+            // Apply block-diagonal preconditioner
+            for i in 0..n_u {
+                z[i] = prec.inv_diag_a[i] * r[i];
+            }
+            for i in 0..n_p {
+                z[n_u + i] = prec.inv_diag_s[i] * r[n_u + i];
+            }
+        })?;
 
         u.copy_from_slice(&x[..n_u]);
         p.copy_from_slice(&x[n_u..]);
@@ -297,7 +331,11 @@ fn preconditioned_gmres(
     let n = a.nrows;
     let b_norm = norm2(b);
     if b_norm < 1e-30 {
-        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: 0.0,
+        });
     }
     let tol = (cfg.rtol * b_norm).max(cfg.atol);
 
@@ -307,26 +345,32 @@ fn preconditioned_gmres(
         // r = b - A x
         let mut r = b.to_vec();
         for i in 0..n {
-            for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+            for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
                 let j = a.col_idx[ptr] as usize;
                 r[i] -= a.values[ptr] * x[j];
             }
         }
         let beta = norm2(&r);
         if beta < tol {
-            return Ok(SolveResult { converged: true, iterations: total_iters, final_residual: beta });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: total_iters,
+                final_residual: beta,
+            });
         }
 
         let m = restart;
         let mut v: Vec<Vec<f64>> = vec![vec![0.0; n]; m + 1]; // Krylov basis
-        let mut z: Vec<Vec<f64>> = vec![vec![0.0; n]; m];     // Preconditioned vectors
-        let mut h = vec![vec![0.0_f64; m]; m + 1];            // Hessenberg
+        let mut z: Vec<Vec<f64>> = vec![vec![0.0; n]; m]; // Preconditioned vectors
+        let mut h = vec![vec![0.0_f64; m]; m + 1]; // Hessenberg
         let mut cs = vec![0.0_f64; m]; // Givens cosines
         let mut sn = vec![0.0_f64; m]; // Givens sines
         let mut e1 = vec![0.0_f64; m + 1];
         e1[0] = beta;
 
-        for i in 0..n { v[0][i] = r[i] / beta; }
+        for i in 0..n {
+            v[0][i] = r[i] / beta;
+        }
 
         let mut j = 0;
         while j < m && total_iters < cfg.max_iter {
@@ -342,32 +386,34 @@ fn preconditioned_gmres(
                 h[i][j] = dot(&w, &v[i]);
                 axpy_inplace(-h[i][j], &v[i], &mut w);
             }
-            h[j+1][j] = norm2(&w);
-            if h[j+1][j] > 1e-16 {
-                for i in 0..n { v[j+1][i] = w[i] / h[j+1][j]; }
+            h[j + 1][j] = norm2(&w);
+            if h[j + 1][j] > 1e-16 {
+                for i in 0..n {
+                    v[j + 1][i] = w[i] / h[j + 1][j];
+                }
             }
 
             // Apply previous Givens rotations to column j of H
             for i in 0..j {
-                let tmp = cs[i] * h[i][j] + sn[i] * h[i+1][j];
-                h[i+1][j] = -sn[i] * h[i][j] + cs[i] * h[i+1][j];
+                let tmp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
                 h[i][j] = tmp;
             }
 
             // Compute new Givens rotation
-            let r_val = (h[j][j] * h[j][j] + h[j+1][j] * h[j+1][j]).sqrt();
+            let r_val = (h[j][j] * h[j][j] + h[j + 1][j] * h[j + 1][j]).sqrt();
             cs[j] = h[j][j] / r_val;
-            sn[j] = h[j+1][j] / r_val;
+            sn[j] = h[j + 1][j] / r_val;
             h[j][j] = r_val;
-            h[j+1][j] = 0.0;
+            h[j + 1][j] = 0.0;
 
             // Apply to e1
-            let tmp = cs[j] * e1[j] + sn[j] * e1[j+1];
-            e1[j+1] = -sn[j] * e1[j] + cs[j] * e1[j+1];
+            let tmp = cs[j] * e1[j] + sn[j] * e1[j + 1];
+            e1[j + 1] = -sn[j] * e1[j] + cs[j] * e1[j + 1];
             e1[j] = tmp;
 
             total_iters += 1;
-            let res_norm = e1[j+1].abs();
+            let res_norm = e1[j + 1].abs();
             if cfg.verbose {
                 println!("[PGMRES] iter={total_iters}: ‖r‖={res_norm:.3e}");
             }
@@ -383,7 +429,7 @@ fn preconditioned_gmres(
         let mut y = vec![0.0_f64; k];
         for i in (0..k).rev() {
             y[i] = e1[i];
-            for jj in (i+1)..k {
+            for jj in (i + 1)..k {
                 y[i] -= h[i][jj] * y[jj];
             }
             y[i] /= h[i][i];
@@ -397,7 +443,7 @@ fn preconditioned_gmres(
         // Check residual
         let mut r_check = b.to_vec();
         for i in 0..n {
-            for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+            for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
                 let jj = a.col_idx[ptr] as usize;
                 r_check[i] -= a.values[ptr] * x[jj];
             }
@@ -412,7 +458,11 @@ fn preconditioned_gmres(
         }
     }
 
-    Ok(SolveResult { converged: false, iterations: total_iters, final_residual: f64::NAN })
+    Ok(SolveResult {
+        converged: false,
+        iterations: total_iters,
+        final_residual: f64::NAN,
+    })
 }
 
 // ─── MINRES for symmetric indefinite systems ──────────────────────────────────
@@ -425,20 +475,25 @@ pub struct MinresSolver;
 
 impl MinresSolver {
     pub fn solve(
-        a:   &CsrMatrix<f64>,
-        b:   &[f64],
-        x:   &mut [f64],
+        a: &CsrMatrix<f64>,
+        b: &[f64],
+        x: &mut [f64],
         cfg: &SolverConfig,
     ) -> Result<SolveResult, SolverError> {
         let n = a.nrows;
-        assert_eq!(b.len(), n); assert_eq!(x.len(), n);
+        assert_eq!(b.len(), n);
+        assert_eq!(x.len(), n);
 
         // r = b - A x
         let mut r = b.to_vec();
         spmv_sub_inplace(a, x, &mut r);
         let beta1 = norm2(&r);
         if beta1 < cfg.atol {
-            return Ok(SolveResult { converged: true, iterations: 0, final_residual: beta1 });
+            return Ok(SolveResult {
+                converged: true,
+                iterations: 0,
+                final_residual: beta1,
+            });
         }
 
         // Lanczos vectors
@@ -448,8 +503,8 @@ impl MinresSolver {
         let mut beta = beta1;
 
         // Solution update vectors
-        let mut w      = vec![0.0_f64; n];
-        let mut w_bar  = vec![0.0_f64; n];
+        let mut w = vec![0.0_f64; n];
+        let mut w_bar = vec![0.0_f64; n];
 
         // QR factorization scalars
         let mut delta_bar: f64;
@@ -467,7 +522,9 @@ impl MinresSolver {
             axpy_inplace(-beta, &v_old, &mut v_new);
             let beta_new = norm2(&v_new);
             if beta_new > 1e-16 {
-                for vi in v_new.iter_mut() { *vi /= beta_new; }
+                for vi in v_new.iter_mut() {
+                    *vi /= beta_new;
+                }
             }
 
             // QR factorization: apply old Givens to get delta_bar
@@ -481,7 +538,8 @@ impl MinresSolver {
             let cs_new;
             let sn_new;
             if gamma.abs() < 1e-30 {
-                cs_new = 0.0; sn_new = 0.0;
+                cs_new = 0.0;
+                sn_new = 0.0;
             } else {
                 cs_new = gamma_bar / gamma;
                 sn_new = beta_new / gamma;
@@ -490,7 +548,11 @@ impl MinresSolver {
             // Update solution vectors
             // w_new = (v - delta_bar * w_bar - epsilon * w) / gamma
             // Reuse: w becomes w_old, w_bar becomes w, new w_bar
-            let inv_gamma = if gamma.abs() > 1e-30 { 1.0 / gamma } else { 0.0 };
+            let inv_gamma = if gamma.abs() > 1e-30 {
+                1.0 / gamma
+            } else {
+                0.0
+            };
             let mut w_new = vec![0.0_f64; n];
             for i in 0..n {
                 w_new[i] = (v[i] - delta_bar * w_bar[i] - epsilon * w[i]) * inv_gamma;
@@ -506,7 +568,8 @@ impl MinresSolver {
             std::mem::swap(&mut v_old, &mut v);
             v.clone_from(&v_new);
             beta = beta_new;
-            cs = cs_new; sn = sn_new;
+            cs = cs_new;
+            sn = sn_new;
 
             let r_norm = phi_bar.abs();
             if cfg.verbose {
@@ -533,7 +596,7 @@ impl MinresSolver {
 
 fn spmv_add(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     for i in 0..a.nrows {
-        for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+        for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
             let j = a.col_idx[ptr] as usize;
             y[i] += a.values[ptr] * x[j];
         }
@@ -549,7 +612,7 @@ fn spmv_sub_inplace(a: &CsrMatrix<f64>, x: &[f64], b: &mut [f64]) {
     // b = b - A x
     for i in 0..a.nrows {
         let mut s = 0.0;
-        for ptr in a.row_ptr[i]..a.row_ptr[i+1] {
+        for ptr in a.row_ptr[i]..a.row_ptr[i + 1] {
             let j = a.col_idx[ptr] as usize;
             s += a.values[ptr] * x[j];
         }
@@ -566,7 +629,9 @@ fn norm2(v: &[f64]) -> f64 {
 }
 
 fn axpy_inplace(alpha: f64, x: &[f64], y: &mut [f64]) {
-    for (yi, &xi) in y.iter_mut().zip(x.iter()) { *yi += alpha * xi; }
+    for (yi, &xi) in y.iter_mut().zip(x.iter()) {
+        *yi += alpha * xi;
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -581,15 +646,18 @@ mod tests {
     /// f = [2,2], g = [2]  →  (B^T p = 0) → u = [1,1], B u = 2 = g.
     fn small_saddle_point() -> (BlockSystem, Vec<f64>, Vec<f64>) {
         let mut coo_a = CooMatrix::<f64>::new(2, 2);
-        coo_a.add(0, 0, 2.0); coo_a.add(1, 1, 2.0);
+        coo_a.add(0, 0, 2.0);
+        coo_a.add(1, 1, 2.0);
         let a = coo_a.into_csr();
 
         let mut coo_bt = CooMatrix::<f64>::new(2, 1);
-        coo_bt.add(0, 0, 1.0); coo_bt.add(1, 0, 1.0);
+        coo_bt.add(0, 0, 1.0);
+        coo_bt.add(1, 0, 1.0);
         let bt = coo_bt.into_csr();
 
         let mut coo_b = CooMatrix::<f64>::new(1, 2);
-        coo_b.add(0, 0, 1.0); coo_b.add(0, 1, 1.0);
+        coo_b.add(0, 0, 1.0);
+        coo_b.add(0, 1, 1.0);
         let b = coo_b.into_csr();
 
         let sys = BlockSystem { a, bt, b, c: None };
@@ -605,14 +673,14 @@ mod tests {
         assert_eq!(flat.nrows, 3);
         assert_eq!(flat.ncols, 3);
         // A block: flat[0,0]=2, flat[1,1]=2
-        assert!((flat.get(0,0) - 2.0).abs() < 1e-12);
-        assert!((flat.get(1,1) - 2.0).abs() < 1e-12);
+        assert!((flat.get(0, 0) - 2.0).abs() < 1e-12);
+        assert!((flat.get(1, 1) - 2.0).abs() < 1e-12);
         // B block: flat[2,0]=1, flat[2,1]=1
-        assert!((flat.get(2,0) - 1.0).abs() < 1e-12);
-        assert!((flat.get(2,1) - 1.0).abs() < 1e-12);
+        assert!((flat.get(2, 0) - 1.0).abs() < 1e-12);
+        assert!((flat.get(2, 1) - 1.0).abs() < 1e-12);
         // B^T block: flat[0,2]=1, flat[1,2]=1
-        assert!((flat.get(0,2) - 1.0).abs() < 1e-12);
-        assert!((flat.get(1,2) - 1.0).abs() < 1e-12);
+        assert!((flat.get(0, 2) - 1.0).abs() < 1e-12);
+        assert!((flat.get(1, 2) - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -620,14 +688,30 @@ mod tests {
         let (sys, f, g) = small_saddle_point();
         let mut u = vec![0.0_f64; 2];
         let mut p = vec![0.0_f64; 1];
-        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         SchurComplementSolver::solve(&sys, &f, &g, &mut u, &mut p, &cfg).unwrap();
         // Check residuals: A u + B^T p ≈ f, B u ≈ g
         let mut ru = vec![0.0_f64; 2];
         let mut rp = vec![0.0_f64; 1];
         sys.apply(&u, &p, &mut ru, &mut rp);
-        let err_u = ru.iter().zip(f.iter()).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
-        let err_p = rp.iter().zip(g.iter()).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
+        let err_u = ru
+            .iter()
+            .zip(f.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let err_p = rp
+            .iter()
+            .zip(g.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
         assert!(err_u < 1e-6, "residual u: {err_u:.2e}");
         assert!(err_p < 1e-6, "residual p: {err_p:.2e}");
     }
@@ -662,11 +746,19 @@ mod tests {
     fn minres_spd_identity() {
         // I * x = [1, 2, 3] → x = [1, 2, 3]
         let mut coo = CooMatrix::<f64>::new(3, 3);
-        coo.add(0, 0, 1.0); coo.add(1, 1, 1.0); coo.add(2, 2, 1.0);
+        coo.add(0, 0, 1.0);
+        coo.add(1, 1, 1.0);
+        coo.add(2, 2, 1.0);
         let k = coo.into_csr();
         let b = vec![1.0, 2.0, 3.0];
         let mut x = vec![0.0_f64; 3];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 10,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         assert!(res.converged);
         assert!((x[0] - 1.0).abs() < 1e-8);
@@ -678,11 +770,18 @@ mod tests {
     fn minres_spd_diagonal() {
         // diag(2, 3) x = [4, 9] → x = [2, 3]
         let mut coo = CooMatrix::<f64>::new(2, 2);
-        coo.add(0, 0, 2.0); coo.add(1, 1, 3.0);
+        coo.add(0, 0, 2.0);
+        coo.add(1, 1, 3.0);
         let k = coo.into_csr();
         let b = vec![4.0, 9.0];
         let mut x = vec![0.0_f64; 2];
-        let cfg = SolverConfig { rtol: 1e-10, atol: 0.0, max_iter: 10, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 10,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         assert!(res.converged);
         assert!((x[0] - 2.0).abs() < 1e-8, "x[0]={}", x[0]);
@@ -693,20 +792,40 @@ mod tests {
     fn minres_symmetric_indefinite() {
         // [[2, 0, 1], [0, 2, 1], [1, 1, 0]] x = [2, 2, 2] → x = [1, 1, 0]
         let mut coo = CooMatrix::<f64>::new(3, 3);
-        coo.add(0, 0, 2.0); coo.add(1, 1, 2.0);
-        coo.add(0, 2, 1.0); coo.add(2, 0, 1.0);
-        coo.add(1, 2, 1.0); coo.add(2, 1, 1.0);
+        coo.add(0, 0, 2.0);
+        coo.add(1, 1, 2.0);
+        coo.add(0, 2, 1.0);
+        coo.add(2, 0, 1.0);
+        coo.add(1, 2, 1.0);
+        coo.add(2, 1, 1.0);
         let k = coo.into_csr();
         let b = vec![2.0, 2.0, 2.0];
         let mut x = vec![0.0_f64; 3];
-        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 100, verbose: false, ..SolverConfig::default() };
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..SolverConfig::default()
+        };
         let res = MinresSolver::solve(&k, &b, &mut x, &cfg).unwrap();
         // Verify actual residual
         let mut kx = vec![0.0_f64; 3];
         spmv_add(&k, &x, &mut kx);
-        let res_actual = kx.iter().zip(b.iter()).map(|(a,b)| (a-b).powi(2)).sum::<f64>().sqrt();
-        assert!(res.converged, "MINRES didn't converge: iters={}, est_res={:.2e}",
-                res.iterations, res.final_residual);
-        assert!(res_actual < 1e-6, "MINRES actual residual = {res_actual:.2e}, x={x:?}");
+        let res_actual = kx
+            .iter()
+            .zip(b.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            res.converged,
+            "MINRES didn't converge: iters={}, est_res={:.2e}",
+            res.iterations, res.final_residual
+        );
+        assert!(
+            res_actual < 1e-6,
+            "MINRES actual residual = {res_actual:.2e}, x={x:?}"
+        );
     }
 }

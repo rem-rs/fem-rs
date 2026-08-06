@@ -120,6 +120,11 @@ pub struct DofManager {
     /// Edge-to-2-DOF mapping (P3 only). Empty for other orders.
     /// Ordered [near_first_vertex, near_second_vertex].
     pub edge_dof2_map: HashMap<EdgeKey, [DofId; 2]>,
+    /// Physical mesh node → global vertex DOF id, for NC meshes whose vertex
+    /// DOFs follow the MFEM vertex-view order (identity for conforming
+    /// meshes).  Constraints (hanging nodes) reference physical node ids;
+    /// they must be translated through this map to the global DOF ids.
+    pub phys_to_vertex_dof: HashMap<NodeId, DofId>,
     /// Edge-to-N-DOFs mapping for general order p.
     /// Each canonical edge key maps to (p-1) DOFs, ordered from near-first-vertex
     /// to near-second-vertex.
@@ -275,8 +280,7 @@ impl DofManager {
             order: 1, n_dofs: n_nodes, dofs_flat, dofs_per_elem,
             elem_dof_offsets, dof_coords, dim, n_vertex_dofs: n_nodes,
             edge_dof_map: HashMap::new(),
-            edge_dof2_map: HashMap::new(),
-            edge_pk_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_nodes,
@@ -351,8 +355,7 @@ impl DofManager {
             order: 2, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes, edge_dof_map: edge_map,
-            edge_dof2_map: HashMap::new(),
-            edge_pk_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
@@ -376,8 +379,35 @@ impl DofManager {
         let dim     = mesh.dim() as usize;
         assert_eq!(mesh.topological_dim() as usize, 2, "build_q2_quad requires 2-D elements");
 
+        // MFEM vertex-view ordering: if the mesh carries an NC vertex view
+        // (top-level nodes first, then non-top-level nodes in SFC/leaf order —
+        // MFEM UpdateVertices), vertex DOF `d` refers to physical node
+        // `view[d]`.  This is how the global DOF ids line up with MFEM on
+        // non-conforming meshes.
+        let vertex_view: Option<&[NodeId]> = mesh.nc_vertex_view();
+        // Number of vertex DOFs = vertex-view length when present.  The mesh
+        // node table may contain extra (preserved) nodes that are not part of
+        // any element — e.g. edge-midpoint history kept for the NC constraint
+        // walk — and those must NOT become DOFs (MFEM: vertex table only
+        // covers nodes used by elements).
+        let n_vertex = vertex_view.map_or(n_nodes, |v| v.len());
+        let node_to_dof: std::collections::HashMap<NodeId, DofId> = match vertex_view {
+            Some(view) => view
+                .iter()
+                .enumerate()
+                .map(|(d, &n)| (n, d as DofId))
+                .collect(),
+            None => (0..n_nodes as NodeId).map(|n| (n, n as DofId)).collect(),
+        };
+        let vertex_phys = |dof: DofId| -> NodeId {
+            match vertex_view {
+                Some(view) => view[dof as usize],
+                None => dof,
+            }
+        };
+
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
-        let mut next_dof = n_nodes as DofId;
+        let mut next_dof = n_vertex as DofId;
 
         // dofs_per_elem = 9: 4 corners + 4 edges + 1 interior.
         let dofs_per_elem = 9;
@@ -393,11 +423,12 @@ impl DofManager {
             let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
             let base = e as usize * dofs_per_elem;
 
-            // Vertex DOFs (positions 0–3)
-            dofs_flat[base]     = n0;
-            dofs_flat[base + 1] = n1;
-            dofs_flat[base + 2] = n2;
-            dofs_flat[base + 3] = n3;
+            // Vertex DOFs (positions 0–3) — via the vertex view so the ids
+            // match MFEM's ordering on NC meshes.
+            dofs_flat[base]     = node_to_dof[&n0];
+            dofs_flat[base + 1] = node_to_dof[&n1];
+            dofs_flat[base + 2] = node_to_dof[&n2];
+            dofs_flat[base + 3] = node_to_dof[&n3];
 
             // Edge midpoint DOFs (positions 4–7)
             // Ordering: bottom (n0,n1), right (n1,n2), top (n2,n3), left (n3,n0)
@@ -415,7 +446,7 @@ impl DofManager {
         // numbered after every edge DOF, matching MFEM's vertex→edge→face
         // ordering.
         let n_edge_dofs = edge_map.len();
-        let mut interior_dof = (n_nodes + n_edge_dofs) as DofId;
+        let mut interior_dof = (n_vertex + n_edge_dofs) as DofId;
         for e in 0..n_elems as u32 {
             let base = e as usize * dofs_per_elem;
             dofs_flat[base + 8] = interior_dof;
@@ -427,10 +458,11 @@ impl DofManager {
         // Build DOF coordinates.
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];
 
-        // Vertex coords.
-        for n in 0..n_nodes as u32 {
-            let c = mesh.node_coords(n);
-            dof_coords[n as usize * dim .. n as usize * dim + dim].copy_from_slice(c);
+        // Vertex coords (via vertex view: DOF d lives at physical node view[d]).
+        for d in 0..n_vertex as u32 {
+            let phys = vertex_phys(d);
+            let c = mesh.node_coords(phys);
+            dof_coords[d as usize * dim .. d as usize * dim + dim].copy_from_slice(c);
         }
 
         // Edge midpoints.
@@ -458,8 +490,18 @@ impl DofManager {
         DofManager {
             order: 2, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
-            n_vertex_dofs: n_nodes, edge_dof_map: edge_map,
+            n_vertex_dofs: n_vertex, edge_dof_map: edge_map,
             edge_dof2_map: HashMap::new(),
+            phys_to_vertex_dof: match vertex_view {
+                Some(view) => view
+                    .iter()
+                    .enumerate()
+                    .map(|(d, &n)| (n, d as DofId))
+                    .collect(),
+                None => (0..n_nodes as NodeId)
+                    .map(|n| (n, n as DofId))
+                    .collect(),
+            },
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
@@ -596,7 +638,7 @@ impl DofManager {
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
             edge_dof_map: HashMap::new(),
-            edge_dof2_map: edge2_map,
+            edge_dof2_map: edge2_map, phys_to_vertex_dof: HashMap::new(), 
             edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
@@ -759,7 +801,7 @@ impl DofManager {
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
             edge_dof_map: HashMap::new(),
-            edge_dof2_map: edge2_map,
+            edge_dof2_map: edge2_map, phys_to_vertex_dof: HashMap::new(), 
             edge_pk_map: HashMap::new(),
             face_pk_map,
             quad_face_pk_map: HashMap::new(),
@@ -843,8 +885,7 @@ impl DofManager {
             order: 2, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes, edge_dof_map: edge_map,
-            edge_dof2_map: HashMap::new(),
-            edge_pk_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
@@ -971,8 +1012,7 @@ impl DofManager {
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
             edge_dof_map: edge_map,
-            edge_dof2_map: HashMap::new(),
-            edge_pk_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
             quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs,
@@ -1031,7 +1071,7 @@ impl DofManager {
             order:2, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets:None, dof_coords, dim,
             n_vertex_dofs:n_nodes,
-            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(),
+            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(), phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
             quad_face_pk_map:HashMap::new(),
             bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
@@ -1089,7 +1129,7 @@ impl DofManager {
             order:2, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets:None, dof_coords, dim,
             n_vertex_dofs:n_nodes,
-            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(),
+            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(), phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
             quad_face_pk_map:HashMap::new(),
             bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
@@ -1183,7 +1223,7 @@ impl DofManager {
         DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
             elem_dof_offsets:None,dof_coords,dim,
             n_vertex_dofs:n_nodes,
-            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map,
+            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
             quad_face_pk_map:qface_map,
             bubble_dof_start:n_dofs,n_volume_dofs:2,elem_orders:None,}
@@ -1255,7 +1295,7 @@ impl DofManager {
         DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
             elem_dof_offsets:None,dof_coords,dim,
             n_vertex_dofs:n_nodes,
-            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map,
+            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
             quad_face_pk_map:qface_map,
             bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,}
@@ -1351,7 +1391,7 @@ impl DofManager {
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem, elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map: HashMap::new(), quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
         }
@@ -1460,7 +1500,7 @@ impl DofManager {
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem, elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map: HashMap::new(), quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
         }
@@ -1651,7 +1691,7 @@ impl DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map, quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
         }
@@ -1829,7 +1869,7 @@ impl DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), edge_pk_map,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map, quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
         }
@@ -2071,7 +2111,7 @@ impl DofManager {
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
             edge_dof_map: HashMap::new(),
-            edge_dof2_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), 
             edge_pk_map,
             face_pk_map,
             quad_face_pk_map,

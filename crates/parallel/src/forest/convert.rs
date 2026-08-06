@@ -261,7 +261,7 @@ where
         face_to_elem: None,
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
-        geometry: None,
+        geometry: None, nc_vertex_view: None,
     }
 }
 

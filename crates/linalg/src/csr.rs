@@ -828,9 +828,10 @@ pub fn csr_spmm(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f64> {
             }
         }
 
-        // Sort dirty columns so the output row is stored in ascending column order.
-        dirty.sort_unstable();
-
+        // MFEM SparseMatrix::Mult (sparsemat.cpp:3819) appends columns in
+        // first-appearance order (A row order × B row order) — NOT sorted.
+        // Sorting would change the GS-smoother accumulation order and break
+        // bit-identical PCG histories.
         for &j in &dirty {
             let v = acc[j as usize];
             col_idx.push(j);

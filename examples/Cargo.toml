@@ -61,6 +61,45 @@ path = "mfem_ex14_dg_poisson.rs"
 name = "mfem_ex15_dynamic_amr"
 path = "mfem_ex15_dynamic_amr.rs"
 [[example]]
+name = "geo_dump"
+path = "geo_dump.rs"
+[[example]]
+name = "check137"
+path = "check137.rs"
+[[example]]
+name = "check_mid"
+path = "check_mid.rs"
+[[example]]
+name = "check_p1"
+path = "check_p1.rs"
+[[example]]
+name = "check_view"
+path = "check_view.rs"
+[[example]]
+name = "dump_hc"
+path = "dump_hc.rs"
+[[example]]
+name = "mfem_ex15_dump_dsxt2"
+path = "mfem_ex15_dump_dsxt2.rs"
+[[example]]
+name = "mfem_ex15_dump_dshape3"
+path = "mfem_ex15_dump_dshape3.rs"
+[[example]]
+name = "mfem_ex15_dump_jac4"
+path = "mfem_ex15_dump_jac4.rs"
+[[example]]
+name = "mfem_ex15_dump_A_raw_it1"
+path = "mfem_ex15_dump_A_raw_it1.rs"
+[[example]]
+name = "mfem_ex15_dump_A_true"
+path = "mfem_ex15_dump_A_true.rs"
+[[example]]
+name = "mfem_ex15_dump_p1"
+path = "mfem_ex15_dump_p1.rs"
+[[example]]
+name = "mfem_ex15_dump_it2_coords"
+path = "mfem_ex15_dump_it2_coords.rs"
+[[example]]
 name = "mfem_ex16_nonlinear_heat"
 path = "mfem_ex16_nonlinear_heat.rs"
 [[example]]
@@ -165,6 +204,7 @@ path = "mfem_ex5_mixed_darcy.rs"
 [[example]]
 name = "mfem_ex6_flux_recovery"
 path = "mfem_ex6_flux_recovery.rs"
+
 [[example]]
 name = "mfem_ex7_surface_poisson"
 path = "mfem_ex7_surface_poisson.rs"
@@ -312,3 +352,12 @@ path = "mfem_miniapp_tesla.rs"
 [[example]]
 name = "mfem_miniapp_volta"
 path = "mfem_miniapp_volta.rs"
+[[example]]
+name = "mfem_ex15_dump_p1_it3"
+path = "mfem_ex15_dump_p1_it3.rs"
+[[example]]
+name = "mfem_ex15_dump_flow"
+path = "mfem_ex15_dump_flow.rs"
+[[example]]
+name = "mfem_ex15_dump_T002"
+path = "mfem_ex15_dump_T002.rs"

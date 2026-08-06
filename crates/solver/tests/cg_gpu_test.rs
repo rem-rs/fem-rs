@@ -3,7 +3,10 @@
 use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::GpuContext;
-use fem_solver::{SolverConfig, cg_gpu::{solve_cg_gpu, solve_cg_gpu_f32}};
+use fem_solver::{
+    cg_gpu::{solve_cg_gpu, solve_cg_gpu_f32},
+    SolverConfig,
+};
 
 /// Build a 1D Poisson matrix (tridiagonal [2, -1, 0, ...; -1, 2, -1, ...]).
 fn poisson_1d<T: Scalar>(n: usize) -> (CsrMatrix<T>, Vec<T>, Vec<T>) {
@@ -29,7 +32,13 @@ fn poisson_1d<T: Scalar>(n: usize) -> (CsrMatrix<T>, Vec<T>, Vec<T>) {
         }
     }
 
-    let a = CsrMatrix { nrows: n, ncols: n, row_ptr, col_idx, values };
+    let a = CsrMatrix {
+        nrows: n,
+        ncols: n,
+        row_ptr,
+        col_idx,
+        values,
+    };
 
     // Exact solution: x_i = sin(pi * i / (n-1))
     let pi = std::f64::consts::PI;
@@ -75,8 +84,16 @@ fn cg_gpu_solves_poisson_1d() {
 
         let mut x = vec![0.0f64; n];
         let result = solve_cg_gpu(&gpu, &a, &b, &mut x, &cfg).expect("CG should converge");
-        assert!(result.converged, "CG did not converge in {} iters", result.iterations);
-        assert!(result.iterations <= n, "CG took {} iterations (expected <= {n})", result.iterations);
+        assert!(
+            result.converged,
+            "CG did not converge in {} iters",
+            result.iterations
+        );
+        assert!(
+            result.iterations <= n,
+            "CG took {} iterations (expected <= {n})",
+            result.iterations
+        );
         assert!(max_error(&x, &x_exact) < 1e-8, "max error too large");
     } else {
         let (a, b, x_exact) = poisson_1d::<f32>(n);
@@ -90,8 +107,16 @@ fn cg_gpu_solves_poisson_1d() {
 
         let mut x = vec![0.0f32; n];
         let result = solve_cg_gpu_f32(&gpu, &a, &b, &mut x, &cfg).expect("CG f32 should converge");
-        assert!(result.converged, "CG did not converge in {} iters", result.iterations);
-        assert!(result.iterations <= n, "CG took {} iterations (expected <= {n})", result.iterations);
+        assert!(
+            result.converged,
+            "CG did not converge in {} iters",
+            result.iterations
+        );
+        assert!(
+            result.iterations <= n,
+            "CG took {} iterations (expected <= {n})",
+            result.iterations
+        );
         assert!(max_error(&x, &x_exact) < 5e-4, "max error too large");
     }
 }

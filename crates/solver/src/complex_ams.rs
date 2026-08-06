@@ -17,7 +17,7 @@
 
 use fem_linalg::complex_csr::ComplexCsr;
 use linlvo::{
-    precond::{AmsConfig, AmsPrecond, AdsConfig, AdsPrecond},
+    precond::{AdsConfig, AdsPrecond, AmsConfig, AmsPrecond},
     sparse::CsrMatrix as linlvoCsr,
     DenseVec, Preconditioner,
 };
@@ -34,8 +34,7 @@ pub fn build_ams_precond(
     config: AmsConfig,
 ) -> Result<AmsPrecond<f64>, String> {
     let a_re = real_part_csr(a_complex);
-    AmsPrecond::<f64>::new(&a_re, g, config)
-        .map_err(|e| format!("AMS setup: {e}"))
+    AmsPrecond::<f64>::new(&a_re, g, config).map_err(|e| format!("AMS setup: {e}"))
 }
 
 /// Create a preconditioner closure for use with
@@ -79,8 +78,7 @@ pub fn build_ads_precond(
     config: AdsConfig,
 ) -> Result<AdsPrecond<f64>, String> {
     let a_re = real_part_csr(a_complex);
-    AdsPrecond::<f64>::new(&a_re, c, g, config)
-        .map_err(|e| format!("ADS setup: {e}"))
+    AdsPrecond::<f64>::new(&a_re, c, g, config).map_err(|e| format!("ADS setup: {e}"))
 }
 
 /// Solve `(A_re + i·A_im) x = b` using GMRES with AMS preconditioner.
@@ -103,8 +101,7 @@ pub fn solve_gmres_ams_complex(
     let ams = build_ams_precond(a_complex, g, ams_config)?;
     let prec = make_ams_closure(&ams);
     fem_linalg::complex_csr::solve_gmres_complex_with(
-        a_complex, b_re, b_im, x_re, x_im,
-        tol, max_iter, restart, &prec,
+        a_complex, b_re, b_im, x_re, x_im, tol, max_iter, restart, &prec,
     )
 }
 
@@ -124,8 +121,7 @@ pub fn solve_bicgstab_ams_complex(
     let ams = build_ams_precond(a_complex, g, ams_config)?;
     let prec = make_ams_closure(&ams);
     fem_linalg::complex_csr::solve_bicgstab_complex_with(
-        a_complex, b_re, b_im, x_re, x_im,
-        tol, max_iter, &prec,
+        a_complex, b_re, b_im, x_re, x_im, tol, max_iter, &prec,
     )
 }
 
@@ -147,8 +143,7 @@ pub fn solve_gmres_ads_complex(
     let ads = build_ads_precond(a_complex, c, g, ads_config)?;
     let prec = make_ads_closure(&ads);
     fem_linalg::complex_csr::solve_gmres_complex_with(
-        a_complex, b_re, b_im, x_re, x_im,
-        tol, max_iter, restart, &prec,
+        a_complex, b_re, b_im, x_re, x_im, tol, max_iter, restart, &prec,
     )
 }
 
@@ -169,8 +164,7 @@ pub fn solve_bicgstab_ads_complex(
     let ads = build_ads_precond(a_complex, c, g, ads_config)?;
     let prec = make_ads_closure(&ads);
     fem_linalg::complex_csr::solve_bicgstab_complex_with(
-        a_complex, b_re, b_im, x_re, x_im,
-        tol, max_iter, &prec,
+        a_complex, b_re, b_im, x_re, x_im, tol, max_iter, &prec,
     )
 }
 
@@ -179,7 +173,8 @@ pub fn solve_bicgstab_ads_complex(
 /// Extract the real part of a `ComplexCsr` as a linlvo CSR matrix.
 fn real_part_csr(c: &ComplexCsr) -> linlvoCsr<f64> {
     linlvoCsr::from_raw(
-        c.nrows, c.ncols,
+        c.nrows,
+        c.ncols,
         c.row_ptr.clone(),
         c.col_idx.iter().map(|&x| x as usize).collect(),
         c.re_vals.clone(),
@@ -204,8 +199,7 @@ mod tests {
         let g_val = vec![1.0, 1.0, 1.0];
         let g = linlvoCsr::from_raw(n, n, g_row, g_col, g_val);
 
-        let ams = AmsPrecond::<f64>::new(&a, &g, AmsConfig::default())
-            .expect("AMS setup");
+        let ams = AmsPrecond::<f64>::new(&a, &g, AmsConfig::default()).expect("AMS setup");
         let prec = make_ams_closure(&ams);
 
         let r_re = vec![1.0, 2.0, 3.0];
@@ -223,7 +217,14 @@ mod tests {
         let col_idx = vec![0u32, 1, 2];
         let re_vals = vec![2.0, 3.0, 1.0];
         let im_vals = vec![1.0, -1.0, 2.0];
-        let a = ComplexCsr { nrows: 3, ncols: 3, row_ptr, col_idx, re_vals, im_vals };
+        let a = ComplexCsr {
+            nrows: 3,
+            ncols: 3,
+            row_ptr,
+            col_idx,
+            re_vals,
+            im_vals,
+        };
         let real = real_part_csr(&a);
         assert_eq!(real.nrows(), 3);
         assert_eq!(real.nnz(), 3);

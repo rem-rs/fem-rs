@@ -102,7 +102,11 @@ where
 {
     let mut alpha = 1.0;
     for _ in 0..max_iter {
-        let u_trial: Vec<f64> = u.iter().zip(du.iter()).map(|(ui, dui)| ui + alpha * dui).collect();
+        let u_trial: Vec<f64> = u
+            .iter()
+            .zip(du.iter())
+            .map(|(ui, dui)| ui + alpha * dui)
+            .collect();
         let (r_trial, _) = residual_fn(&u_trial);
         let r_norm = norm2(&r_trial);
 
@@ -140,16 +144,22 @@ where
 
     if !r_norm.is_finite() {
         return Ok(NewtonResult {
-            iterations: 0, final_residual: r_norm, initial_residual,
-            converged: false, reason: NewtonStopReason::NanDetected,
+            iterations: 0,
+            final_residual: r_norm,
+            initial_residual,
+            converged: false,
+            reason: NewtonStopReason::NanDetected,
         });
     }
 
     let abs_tol = (cfg.rtol * initial_residual).max(cfg.atol);
     if r_norm < abs_tol {
         return Ok(NewtonResult {
-            iterations: 0, final_residual: r_norm, initial_residual,
-            converged: true, reason: NewtonStopReason::ResidualConverged,
+            iterations: 0,
+            final_residual: r_norm,
+            initial_residual,
+            converged: true,
+            reason: NewtonStopReason::ResidualConverged,
         });
     }
 
@@ -166,30 +176,43 @@ where
 
         if !lin_ok {
             return Ok(NewtonResult {
-                iterations: iter - 1, final_residual: r_norm, initial_residual,
-                converged: false, reason: NewtonStopReason::LinearSolveFailed(
-                    "PCG and GMRES both failed".into()),
+                iterations: iter - 1,
+                final_residual: r_norm,
+                initial_residual,
+                converged: false,
+                reason: NewtonStopReason::LinearSolveFailed("PCG and GMRES both failed".into()),
             });
         }
 
-        match line_search_armijo(u, &du, r_norm, cfg.armijo_c,
-                                 cfg.line_search_factor, cfg.max_line_search_iter,
-                                 &residual_and_jacobian)
-        {
+        match line_search_armijo(
+            u,
+            &du,
+            r_norm,
+            cfg.armijo_c,
+            cfg.line_search_factor,
+            cfg.max_line_search_iter,
+            &residual_and_jacobian,
+        ) {
             Some((alpha, r_new, u_new, r_new_norm)) => {
                 u.copy_from_slice(&u_new);
                 r = r_new;
                 r_norm = r_new_norm;
 
                 if cfg.verbose {
-                    println!("  Newton: iter={}, α={:.4e}, ‖R‖={:.6e}", iter, alpha, r_norm);
+                    println!(
+                        "  Newton: iter={}, α={:.4e}, ‖R‖={:.6e}",
+                        iter, alpha, r_norm
+                    );
                 }
 
                 let abs_tol = (cfg.rtol * initial_residual).max(cfg.atol);
                 if r_norm < abs_tol {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: true, reason: NewtonStopReason::ResidualConverged,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: true,
+                        reason: NewtonStopReason::ResidualConverged,
                     });
                 }
 
@@ -197,30 +220,42 @@ where
                 let u_norm = norm2(u).max(1.0);
                 if du_norm < cfg.dtol * u_norm {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: true, reason: NewtonStopReason::UpdateConverged,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: true,
+                        reason: NewtonStopReason::UpdateConverged,
                     });
                 }
 
                 if !r_norm.is_finite() {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: false, reason: NewtonStopReason::NanDetected,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: false,
+                        reason: NewtonStopReason::NanDetected,
                     });
                 }
             }
             None => {
                 return Ok(NewtonResult {
-                    iterations: iter - 1, final_residual: r_norm, initial_residual,
-                    converged: false, reason: NewtonStopReason::LineSearchFailed,
+                    iterations: iter - 1,
+                    final_residual: r_norm,
+                    initial_residual,
+                    converged: false,
+                    reason: NewtonStopReason::LineSearchFailed,
                 });
             }
         }
     }
 
     Ok(NewtonResult {
-        iterations: cfg.max_iter, final_residual: r_norm, initial_residual,
-        converged: false, reason: NewtonStopReason::MaxIterations,
+        iterations: cfg.max_iter,
+        final_residual: r_norm,
+        initial_residual,
+        converged: false,
+        reason: NewtonStopReason::MaxIterations,
     })
 }
 
@@ -246,16 +281,22 @@ where
 
     if !r_norm.is_finite() {
         return Ok(NewtonResult {
-            iterations: 0, final_residual: r_norm, initial_residual,
-            converged: false, reason: NewtonStopReason::NanDetected,
+            iterations: 0,
+            final_residual: r_norm,
+            initial_residual,
+            converged: false,
+            reason: NewtonStopReason::NanDetected,
         });
     }
 
     let abs_tol = (cfg.rtol * initial_residual).max(cfg.atol);
     if r_norm < abs_tol {
         return Ok(NewtonResult {
-            iterations: 0, final_residual: r_norm, initial_residual,
-            converged: true, reason: NewtonStopReason::ResidualConverged,
+            iterations: 0,
+            final_residual: r_norm,
+            initial_residual,
+            converged: true,
+            reason: NewtonStopReason::ResidualConverged,
         });
     }
 
@@ -271,31 +312,44 @@ where
             }
             Err(e) => {
                 return Ok(NewtonResult {
-                    iterations: iter - 1, final_residual: r_norm, initial_residual,
+                    iterations: iter - 1,
+                    final_residual: r_norm,
+                    initial_residual,
                     converged: false,
                     reason: NewtonStopReason::LinearSolveFailed(e.to_string()),
                 });
             }
         }
 
-        match line_search_armijo(u, &du, r_norm, cfg.armijo_c,
-                                 cfg.line_search_factor, cfg.max_line_search_iter,
-                                 &residual_and_jacobian)
-        {
+        match line_search_armijo(
+            u,
+            &du,
+            r_norm,
+            cfg.armijo_c,
+            cfg.line_search_factor,
+            cfg.max_line_search_iter,
+            &residual_and_jacobian,
+        ) {
             Some((alpha, r_new, u_new, r_new_norm)) => {
                 u.copy_from_slice(&u_new);
                 r = r_new;
                 r_norm = r_new_norm;
 
                 if cfg.verbose {
-                    println!("  Newton(LU): iter={}, α={:.4e}, ‖R‖={:.6e}", iter, alpha, r_norm);
+                    println!(
+                        "  Newton(LU): iter={}, α={:.4e}, ‖R‖={:.6e}",
+                        iter, alpha, r_norm
+                    );
                 }
 
                 let abs_tol = (cfg.rtol * initial_residual).max(cfg.atol);
                 if r_norm < abs_tol {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: true, reason: NewtonStopReason::ResidualConverged,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: true,
+                        reason: NewtonStopReason::ResidualConverged,
                     });
                 }
 
@@ -303,30 +357,42 @@ where
                 let u_norm = norm2(u).max(1.0);
                 if du_norm < cfg.dtol * u_norm {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: true, reason: NewtonStopReason::UpdateConverged,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: true,
+                        reason: NewtonStopReason::UpdateConverged,
                     });
                 }
 
                 if !r_norm.is_finite() {
                     return Ok(NewtonResult {
-                        iterations: iter, final_residual: r_norm, initial_residual,
-                        converged: false, reason: NewtonStopReason::NanDetected,
+                        iterations: iter,
+                        final_residual: r_norm,
+                        initial_residual,
+                        converged: false,
+                        reason: NewtonStopReason::NanDetected,
                     });
                 }
             }
             None => {
                 return Ok(NewtonResult {
-                    iterations: iter - 1, final_residual: r_norm, initial_residual,
-                    converged: false, reason: NewtonStopReason::LineSearchFailed,
+                    iterations: iter - 1,
+                    final_residual: r_norm,
+                    initial_residual,
+                    converged: false,
+                    reason: NewtonStopReason::LineSearchFailed,
                 });
             }
         }
     }
 
     Ok(NewtonResult {
-        iterations: cfg.max_iter, final_residual: r_norm, initial_residual,
-        converged: false, reason: NewtonStopReason::MaxIterations,
+        iterations: cfg.max_iter,
+        final_residual: r_norm,
+        initial_residual,
+        converged: false,
+        reason: NewtonStopReason::MaxIterations,
     })
 }
 
@@ -354,21 +420,33 @@ mod tests {
     fn newton_1d_scalar() {
         let mut u = vec![2.0_f64];
         let cfg = NewtonRaphsonConfig {
-            rtol: 1e-12, atol: 1e-14,
+            rtol: 1e-12,
+            atol: 1e-14,
             ..NewtonRaphsonConfig::default()
         };
         let lin_cfg = SolverConfig {
-            rtol: 1e-14, max_iter: 100,
+            rtol: 1e-14,
+            max_iter: 100,
             ..SolverConfig::default()
         };
 
-        let result = solve_newton(&mut u, |x| {
-            let r = vec![x[0] * x[0] - 2.0];
-            let j = build_1x1_csr(2.0 * x[0]);
-            (r, j)
-        }, &cfg, &lin_cfg).unwrap();
+        let result = solve_newton(
+            &mut u,
+            |x| {
+                let r = vec![x[0] * x[0] - 2.0];
+                let j = build_1x1_csr(2.0 * x[0]);
+                (r, j)
+            },
+            &cfg,
+            &lin_cfg,
+        )
+        .unwrap();
 
-        assert!(result.converged, "Newton should converge: {:?}", result.reason);
+        assert!(
+            result.converged,
+            "Newton should converge: {:?}",
+            result.reason
+        );
         assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-10);
     }
 
@@ -377,15 +455,22 @@ mod tests {
         let mut u = vec![1.0, 0.5];
         let cfg = NewtonRaphsonConfig::default();
         let lin_cfg = SolverConfig {
-            rtol: 1e-12, max_iter: 200,
+            rtol: 1e-12,
+            max_iter: 200,
             ..SolverConfig::default()
         };
 
-        let result = solve_newton(&mut u, |x| {
-            let r = vec![x[0] * x[0] + x[1] * x[1] - 1.0, x[0] - x[1]];
-            let j = build_2x2_csr(&[2.0 * x[0], 2.0 * x[1], 1.0, -1.0]);
-            (r, j)
-        }, &cfg, &lin_cfg).unwrap();
+        let result = solve_newton(
+            &mut u,
+            |x| {
+                let r = vec![x[0] * x[0] + x[1] * x[1] - 1.0, x[0] - x[1]];
+                let j = build_2x2_csr(&[2.0 * x[0], 2.0 * x[1], 1.0, -1.0]);
+                (r, j)
+            },
+            &cfg,
+            &lin_cfg,
+        )
+        .unwrap();
 
         assert!(result.converged);
         let expected = 1.0 / 2.0_f64.sqrt();
@@ -397,19 +482,27 @@ mod tests {
     fn newton_poor_initial_guess() {
         let mut u = vec![100.0_f64];
         let cfg = NewtonRaphsonConfig {
-            max_iter: 100, rtol: 1e-10,
+            max_iter: 100,
+            rtol: 1e-10,
             ..NewtonRaphsonConfig::default()
         };
         let lin_cfg = SolverConfig {
-            rtol: 1e-12, max_iter: 100,
+            rtol: 1e-12,
+            max_iter: 100,
             ..SolverConfig::default()
         };
 
-        let result = solve_newton(&mut u, |x| {
-            let r = vec![x[0] * x[0] - 2.0];
-            let j = build_1x1_csr(2.0 * x[0]);
-            (r, j)
-        }, &cfg, &lin_cfg).unwrap();
+        let result = solve_newton(
+            &mut u,
+            |x| {
+                let r = vec![x[0] * x[0] - 2.0];
+                let j = build_1x1_csr(2.0 * x[0]);
+                (r, j)
+            },
+            &cfg,
+            &lin_cfg,
+        )
+        .unwrap();
 
         assert!(result.converged);
         assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-8);
@@ -423,11 +516,16 @@ mod tests {
             ..NewtonRaphsonConfig::default()
         };
 
-        let result = solve_newton_lu(&mut u, |x| {
-            let r = vec![x[0] * x[0] - 2.0];
-            let j = build_1x1_csr(2.0 * x[0]);
-            (r, j)
-        }, &cfg).unwrap();
+        let result = solve_newton_lu(
+            &mut u,
+            |x| {
+                let r = vec![x[0] * x[0] - 2.0];
+                let j = build_1x1_csr(2.0 * x[0]);
+                (r, j)
+            },
+            &cfg,
+        )
+        .unwrap();
 
         assert!(result.converged);
         assert!((u[0] - 2.0_f64.sqrt()).abs() < 1e-10);
@@ -437,21 +535,34 @@ mod tests {
     fn newton_quadratic_convergence() {
         let mut u = vec![1.5_f64];
         let cfg = NewtonRaphsonConfig {
-            rtol: 1e-14, atol: 1e-16, max_iter: 20,
+            rtol: 1e-14,
+            atol: 1e-16,
+            max_iter: 20,
             ..NewtonRaphsonConfig::default()
         };
         let lin_cfg = SolverConfig {
-            rtol: 1e-14, max_iter: 100,
+            rtol: 1e-14,
+            max_iter: 100,
             ..SolverConfig::default()
         };
 
-        let result = solve_newton(&mut u, |x| {
-            let r = vec![x[0] * x[0] - 2.0];
-            let j = build_1x1_csr(2.0 * x[0]);
-            (r, j)
-        }, &cfg, &lin_cfg).unwrap();
+        let result = solve_newton(
+            &mut u,
+            |x| {
+                let r = vec![x[0] * x[0] - 2.0];
+                let j = build_1x1_csr(2.0 * x[0]);
+                (r, j)
+            },
+            &cfg,
+            &lin_cfg,
+        )
+        .unwrap();
 
         assert!(result.converged);
-        assert!(result.iterations <= 6, "Newton took {} iters", result.iterations);
+        assert!(
+            result.iterations <= 6,
+            "Newton took {} iters",
+            result.iterations
+        );
     }
 }

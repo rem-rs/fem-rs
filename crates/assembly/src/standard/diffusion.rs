@@ -24,16 +24,29 @@ let integ = DiffusionIntegrator { kappa: FnCoeff(|x: &[f64]| 1.0 + x[0]) };
 // Piecewise constant per material:
 let integ = DiffusionIntegrator { kappa: PWConstCoeff::new([(1, 1.0), (2, 100.0)]) };
 ```", |qp, k_elem, n, w| {
-    // Outer-product form: K += w · (g₀·g₀ᵀ + g₁·g₁ᵀ + …)
-    // (gₖ = k-th column of the n×d physical gradient matrix).
+    // MFEM `AddMult_a_AAt` (densemat.cpp): for each pair (i,j) first
+    // accumulate d = Σ_k A(i,k)·A(j,k) with plain multiply-then-add (NOT FMA;
+    // serial g++ builds do not fuse), then scale by a once:
+    //   AAt(i,j) += (d *= a);  AAt(j,i) += d;   (i > j)
+    //   AAt(i,i) += a * d;
+    // This bit-matches the reference integration (a per-point FMA loop with
+    // `a` folded into each term differs by ~1 ulp on shared entries).
     let dim = qp.dim;
-    for k in 0..dim {
-        for i in 0..n {
-            let g_ik = qp.grad_phys[i * dim + k];
-            for j in 0..n {
-                k_elem[i * n + j] = (w * g_ik).mul_add(qp.grad_phys[j * dim + k], k_elem[i * n + j]);
+    for i in 0..n {
+        for j in 0..i {
+            let mut d = 0.0_f64;
+            for k in 0..dim {
+                d += qp.grad_phys[i * dim + k] * qp.grad_phys[j * dim + k];
             }
+            let ad = w * d;
+            k_elem[i * n + j] += ad;
+            k_elem[j * n + i] += ad;
         }
+        let mut d = 0.0_f64;
+        for k in 0..dim {
+            d += qp.grad_phys[i * dim + k] * qp.grad_phys[i * dim + k];
+        }
+        k_elem[i * n + i] += w * d;
     }
 });
 

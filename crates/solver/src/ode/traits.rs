@@ -54,4 +54,24 @@ pub trait ImexOperator: Send + Sync {
 
     /// Jacobian of implicit part: `J_I = ∂f_I/∂u`.
     fn jac_implicit(&self, t: f64, u: &[f64]) -> CsrMatrix<f64>;
+
+    /// Solve the implicit-stage system `k = g(u, dt)` in MFEM's
+    /// `ImplicitSolve(dt, x, k)` semantics: for `f_I(u) = -M⁻¹ S u` this is
+    /// `(M + dt·S) k = -S·x`.  The default implementation uses the Jacobian:
+    /// `(I − dt·J_I(u)) k = f_I(u)` solved with GMRES.
+    fn implicit_solve(&self, dt: f64, x: &[f64], k: &mut [f64]) {
+        let n = x.len();
+        let jac = self.jac_implicit(0.0, x);
+        let lhs = crate::ode::implicit::identity_minus_dt_jac(&jac, dt);
+        let mut b = vec![0.0f64; n];
+        self.implicit(0.0, x, &mut b);
+        let cfg = crate::SolverConfig {
+            rtol: 1e-9,
+            atol: 0.0,
+            max_iter: 100,
+            verbose: false,
+            ..crate::SolverConfig::default()
+        };
+        crate::solve_gmres(&lhs, &b, k, 30, &cfg).expect("ImexOperator::implicit_solve failed");
+    }
 }

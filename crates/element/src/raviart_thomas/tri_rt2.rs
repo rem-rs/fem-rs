@@ -394,7 +394,13 @@ mod tests {
     fn rt2_basis_finite() {
         let elem = TriRT2;
         let mut buf = vec![0.0f64; 2 * N];
-        for xi in &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.2, 0.3], [1.0 / 3.0, 1.0 / 3.0]] {
+        for xi in &[
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.2, 0.3],
+            [1.0 / 3.0, 1.0 / 3.0],
+        ] {
             elem.eval_basis_vec(xi, &mut buf);
             for &z in &buf {
                 assert!(z.is_finite());

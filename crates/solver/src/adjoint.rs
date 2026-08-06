@@ -16,9 +16,9 @@
 //! `dJ/du₀ = λ(0)`
 #![allow(non_snake_case)]
 
-use fem_linalg::CsrMatrix;
 #[cfg(test)]
 use fem_linalg::CooMatrix;
+use fem_linalg::CsrMatrix;
 
 /// An ODE problem with cost functional for adjoint sensitivity analysis.
 pub trait AdjointProblem {
@@ -32,7 +32,9 @@ pub trait AdjointProblem {
     fn jacobian(&self, t: f64, u: &[f64]) -> CsrMatrix<f64>;
 
     /// Running cost integrand `g(t, u)`.
-    fn cost_integrand(&self, _t: f64, _u: &[f64]) -> f64 { 0.0 }
+    fn cost_integrand(&self, _t: f64, _u: &[f64]) -> f64 {
+        0.0
+    }
 
     /// Gradient of running cost: `∂g/∂u`.
     fn cost_gradient(&self, _t: f64, _u: &[f64], dgdu: &mut [f64]) {
@@ -40,7 +42,9 @@ pub trait AdjointProblem {
     }
 
     /// Terminal cost `h(u(T))`.
-    fn terminal_cost(&self, _u: &[f64]) -> f64 { 0.0 }
+    fn terminal_cost(&self, _u: &[f64]) -> f64 {
+        0.0
+    }
 
     /// Gradient of terminal cost: `∂h/∂u`.
     fn terminal_gradient(&self, _u: &[f64]) -> Vec<f64> {
@@ -74,13 +78,32 @@ pub fn adjoint_sensitivity(
     // ── Forward pass: integrate with RK4 and store checkpoints ──────────
     // Use fixed-step RK4 (simple, reversible)
     fn rk4_step<F>(f: &F, t: f64, dt: f64, u: &mut [f64])
-    where F: Fn(f64, &[f64], &mut [f64]) {
+    where
+        F: Fn(f64, &[f64], &mut [f64]),
+    {
         let n = u.len();
-        let mut k1 = vec![0.0; n]; f(t, u, &mut k1);
-        let mut k2 = vec![0.0; n]; let mut ut = u.iter().zip(k1.iter()).map(|(&u, &k)| u + 0.5*dt*k).collect::<Vec<_>>(); f(t + 0.5*dt, &ut, &mut k2);
-        let mut k3 = vec![0.0; n]; ut = u.iter().zip(k2.iter()).map(|(&u, &k)| u + 0.5*dt*k).collect(); f(t + 0.5*dt, &ut, &mut k3);
-        let mut k4 = vec![0.0; n]; ut = u.iter().zip(k3.iter()).map(|(&u, &k)| u + dt*k).collect(); f(t + dt, &ut, &mut k4);
-        for i in 0..n { u[i] += dt / 6.0 * (k1[i] + 2.0*k2[i] + 2.0*k3[i] + k4[i]); }
+        let mut k1 = vec![0.0; n];
+        f(t, u, &mut k1);
+        let mut k2 = vec![0.0; n];
+        let mut ut = u
+            .iter()
+            .zip(k1.iter())
+            .map(|(&u, &k)| u + 0.5 * dt * k)
+            .collect::<Vec<_>>();
+        f(t + 0.5 * dt, &ut, &mut k2);
+        let mut k3 = vec![0.0; n];
+        ut = u
+            .iter()
+            .zip(k2.iter())
+            .map(|(&u, &k)| u + 0.5 * dt * k)
+            .collect();
+        f(t + 0.5 * dt, &ut, &mut k3);
+        let mut k4 = vec![0.0; n];
+        ut = u.iter().zip(k3.iter()).map(|(&u, &k)| u + dt * k).collect();
+        f(t + dt, &ut, &mut k4);
+        for i in 0..n {
+            u[i] += dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
+        }
     }
 
     // Forward integration
@@ -117,7 +140,9 @@ pub fn adjoint_sensitivity(
         let cp_prev = &checkpoints[i - 1];
         let cp_curr = &checkpoints[i];
         let h = cp_curr.t - cp_prev.t;
-        if h < 1e-15 { continue; }
+        if h < 1e-15 {
+            continue;
+        }
 
         // Adjoint RHS at a given (t, u, lambda):  dλ/dt = -Aᵀ·λ - ∂g/∂u
         let adjoint_rhs = |t: f64, u: &[f64], lam: &[f64], out: &mut [f64]| {
@@ -139,7 +164,10 @@ pub fn adjoint_sensitivity(
         // Helper: interpolate forward state between checkpoints (linear).
         let interp_u = |t_mid: f64| -> Vec<f64> {
             let alpha = (t_mid - cp_prev.t) / h;
-            cp_prev.u.iter().zip(cp_curr.u.iter())
+            cp_prev
+                .u
+                .iter()
+                .zip(cp_curr.u.iter())
                 .map(|(&up, &uc)| up + alpha * (uc - up))
                 .collect()
         };
@@ -160,7 +188,9 @@ pub fn adjoint_sensitivity(
         let mut k2 = vec![0.0; n];
         {
             let mut lam2 = vec![0.0; n];
-            for i2 in 0..n { lam2[i2] = lam[i2] - 0.5 * h * k1[i2]; }
+            for i2 in 0..n {
+                lam2[i2] = lam[i2] - 0.5 * h * k1[i2];
+            }
             adjoint_rhs(t2, &u2, &lam2, &mut k2);
         }
 
@@ -168,7 +198,9 @@ pub fn adjoint_sensitivity(
         let mut k3 = vec![0.0; n];
         {
             let mut lam3 = vec![0.0; n];
-            for i2 in 0..n { lam3[i2] = lam[i2] - 0.5 * h * k2[i2]; }
+            for i2 in 0..n {
+                lam3[i2] = lam[i2] - 0.5 * h * k2[i2];
+            }
             adjoint_rhs(t2, &u2, &lam3, &mut k3);
         }
 
@@ -176,7 +208,9 @@ pub fn adjoint_sensitivity(
         let mut k4 = vec![0.0; n];
         {
             let mut lam4 = vec![0.0; n];
-            for i2 in 0..n { lam4[i2] = lam[i2] - h * k3[i2]; }
+            for i2 in 0..n {
+                lam4[i2] = lam[i2] - h * k3[i2];
+            }
             adjoint_rhs(tmm, u_mm, &lam4, &mut k4);
         }
 
@@ -201,17 +235,27 @@ mod tests {
     // Simple problem: du/dt = -λu, u(0) = u₀
     // Cost: J = ∫₀ᵀ u(t) dt (running cost only)
     // Exact sensitivity: dJ/du₀ = ∫₀ᵀ exp(-λt) dt = (1 - exp(-λT))/λ
-    struct DecayProblem { lambda: f64 }
+    struct DecayProblem {
+        lambda: f64,
+    }
     impl AdjointProblem for DecayProblem {
-        fn n_states(&self) -> usize { 1 }
-        fn rhs(&self, _t: f64, u: &[f64], dudt: &mut [f64]) { dudt[0] = -self.lambda * u[0]; }
+        fn n_states(&self) -> usize {
+            1
+        }
+        fn rhs(&self, _t: f64, u: &[f64], dudt: &mut [f64]) {
+            dudt[0] = -self.lambda * u[0];
+        }
         fn jacobian(&self, _t: f64, _u: &[f64]) -> CsrMatrix<f64> {
             let mut coo = CooMatrix::<f64>::new(1, 1);
             coo.add(0, 0, -self.lambda);
             coo.into_csr()
         }
-        fn cost_integrand(&self, _t: f64, u: &[f64]) -> f64 { u[0] }
-        fn cost_gradient(&self, _t: f64, _u: &[f64], dgdu: &mut [f64]) { dgdu[0] = 1.0; }
+        fn cost_integrand(&self, _t: f64, u: &[f64]) -> f64 {
+            u[0]
+        }
+        fn cost_gradient(&self, _t: f64, _u: &[f64], dgdu: &mut [f64]) {
+            dgdu[0] = 1.0;
+        }
     }
 
     #[test]
@@ -219,31 +263,46 @@ mod tests {
         let problem = DecayProblem { lambda: 1.0 };
         let u0 = vec![2.0];
         let T = 1.0;
-        let (_u_final, sensitivity, cost) = adjoint_sensitivity(
-            &problem, 0.0, T, &u0, 0.01, 1e-6, 1e-6,
-        );
+        let (_u_final, sensitivity, cost) =
+            adjoint_sensitivity(&problem, 0.0, T, &u0, 0.01, 1e-6, 1e-6);
         // Total cost J = ∫₀¹ 2·exp(-t) dt = 2·(1 - exp(-1)) ≈ 1.264
         // dJ/du₀ = ∫₀¹ exp(-t) dt = 1 - exp(-1) ≈ 0.632
         let expected_cost = 2.0 * (1.0 - (-1.0_f64).exp());
         let expected_sens = 1.0 - (-1.0_f64).exp();
-        assert!((cost - expected_cost).abs() < 0.02,
-            "cost={}, expected={}", cost, expected_cost);
-        assert!((sensitivity[0] - expected_sens).abs() < 0.02,
-            "sensitivity={}, expected={}", sensitivity[0], expected_sens);
+        assert!(
+            (cost - expected_cost).abs() < 0.02,
+            "cost={}, expected={}",
+            cost,
+            expected_cost
+        );
+        assert!(
+            (sensitivity[0] - expected_sens).abs() < 0.02,
+            "sensitivity={}, expected={}",
+            sensitivity[0],
+            expected_sens
+        );
     }
 
     // Problem with terminal cost only: J = h(u(T)) = u(T)
     // dJ/du₀ = exp(-λT)
-    struct TerminalCostProblem { lambda: f64 }
+    struct TerminalCostProblem {
+        lambda: f64,
+    }
     impl AdjointProblem for TerminalCostProblem {
-        fn n_states(&self) -> usize { 1 }
-        fn rhs(&self, _t: f64, u: &[f64], dudt: &mut [f64]) { dudt[0] = -self.lambda * u[0]; }
+        fn n_states(&self) -> usize {
+            1
+        }
+        fn rhs(&self, _t: f64, u: &[f64], dudt: &mut [f64]) {
+            dudt[0] = -self.lambda * u[0];
+        }
         fn jacobian(&self, _t: f64, _u: &[f64]) -> CsrMatrix<f64> {
             let mut coo = CooMatrix::<f64>::new(1, 1);
             coo.add(0, 0, -self.lambda);
             coo.into_csr()
         }
-        fn terminal_gradient(&self, _u: &[f64]) -> Vec<f64> { vec![1.0] }
+        fn terminal_gradient(&self, _u: &[f64]) -> Vec<f64> {
+            vec![1.0]
+        }
     }
 
     #[test]
@@ -251,20 +310,25 @@ mod tests {
         let problem = TerminalCostProblem { lambda: 2.0 };
         let u0 = vec![1.0];
         let T = 0.5;
-        let (_u_final, sensitivity, _cost) = adjoint_sensitivity(
-            &problem, 0.0, T, &u0, 0.005, 1e-6, 1e-6,
-        );
+        let (_u_final, sensitivity, _cost) =
+            adjoint_sensitivity(&problem, 0.0, T, &u0, 0.005, 1e-6, 1e-6);
         // dJ/du₀ = exp(-2*0.5) = exp(-1) ≈ 0.3679
         let expected = (-1.0_f64).exp();
-        assert!((sensitivity[0] - expected).abs() < 0.01,
-            "sensitivity={}, expected={}", sensitivity[0], expected);
+        assert!(
+            (sensitivity[0] - expected).abs() < 0.01,
+            "sensitivity={}, expected={}",
+            sensitivity[0],
+            expected
+        );
     }
 
     // 2D linear ODE: u' = Au, A = [[-1, 0], [0, -2]]
     // J = ∫ u₁ dt, dJ/du₀ = [1-exp(-T), 0] (only u₁ component matters)
     struct Linear2dProblem;
     impl AdjointProblem for Linear2dProblem {
-        fn n_states(&self) -> usize { 2 }
+        fn n_states(&self) -> usize {
+            2
+        }
         fn rhs(&self, _t: f64, u: &[f64], dudt: &mut [f64]) {
             dudt[0] = -1.0 * u[0];
             dudt[1] = -2.0 * u[1];
@@ -275,7 +339,9 @@ mod tests {
             coo.add(1, 1, -2.0);
             coo.into_csr()
         }
-        fn cost_integrand(&self, _t: f64, u: &[f64]) -> f64 { u[1] }
+        fn cost_integrand(&self, _t: f64, u: &[f64]) -> f64 {
+            u[1]
+        }
         fn cost_gradient(&self, _t: f64, _u: &[f64], dgdu: &mut [f64]) {
             dgdu[0] = 0.0;
             dgdu[1] = 1.0;
@@ -287,15 +353,21 @@ mod tests {
         let problem = Linear2dProblem;
         let u0 = vec![1.0, 1.0];
         let T = 0.5;
-        let (_u_final, sensitivity, _cost) = adjoint_sensitivity(
-            &problem, 0.0, T, &u0, 0.01, 1e-6, 1e-6,
-        );
+        let (_u_final, sensitivity, _cost) =
+            adjoint_sensitivity(&problem, 0.0, T, &u0, 0.01, 1e-6, 1e-6);
         // dJ/du₀₁ = ∫₀⁰·⁵ exp(-2t) dt = (1-exp(-1))/2 ≈ 0.316
         // dJ/du₀₀ = 0 (cost only depends on u₁)
         let expected_1 = (1.0 - (-1.0_f64).exp()) / 2.0;
-        assert!((sensitivity[0]).abs() < 0.01,
-            "∂J/∂u₀₀ should be near 0, got {}", sensitivity[0]);
-        assert!((sensitivity[1] - expected_1).abs() < 0.01,
-            "∂J/∂u₀₁={}, expected={}", sensitivity[1], expected_1);
+        assert!(
+            (sensitivity[0]).abs() < 0.01,
+            "∂J/∂u₀₀ should be near 0, got {}",
+            sensitivity[0]
+        );
+        assert!(
+            (sensitivity[1] - expected_1).abs() < 0.01,
+            "∂J/∂u₀₁={}, expected={}",
+            sensitivity[1],
+            expected_1
+        );
     }
 }

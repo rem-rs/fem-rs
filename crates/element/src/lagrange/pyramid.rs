@@ -16,7 +16,9 @@ use crate::quadrature::pyramid_rule;
 use crate::reference::{QuadratureRule, ReferenceElement};
 
 fn lagrange_1d_val(i: usize, degree: usize, xi: f64) -> f64 {
-    if degree == 0 { return 1.0; }
+    if degree == 0 {
+        return 1.0;
+    }
     let d = degree as f64;
     let t = d * xi;
     let mut val = 1.0;
@@ -30,7 +32,9 @@ fn lagrange_1d_val(i: usize, degree: usize, xi: f64) -> f64 {
 }
 
 fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
-    if degree == 0 { return 0.0; }
+    if degree == 0 {
+        return 0.0;
+    }
     let d = degree as f64;
     let t = d * xi;
     let mut sum = 0.0;
@@ -69,7 +73,10 @@ impl PyramidPk {
             off += n * n;
         }
         layer_offset.push(off);
-        Self { order: p, layer_offset }
+        Self {
+            order: p,
+            layer_offset,
+        }
     }
 
     fn layer_n(&self, k: usize) -> usize {
@@ -100,9 +107,15 @@ impl PyramidPk {
 }
 
 impl ReferenceElement for PyramidPk {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order as u8 }
-    fn n_dofs(&self) -> usize { self.n_dofs_total() }
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.n_dofs_total()
+    }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let x = xi[0];
@@ -111,7 +124,9 @@ impl ReferenceElement for PyramidPk {
         let p = self.order;
 
         if (z - 1.0).abs() < 1e-14 {
-            for v in values.iter_mut() { *v = 0.0; }
+            for v in values.iter_mut() {
+                *v = 0.0;
+            }
             let apex = self.dof_index(p, 0, 0);
             values[apex] = 1.0;
             return;
@@ -142,7 +157,9 @@ impl ReferenceElement for PyramidPk {
         let p = self.order;
 
         if (z - 1.0).abs() < 1e-14 {
-            for g in grads.iter_mut() { *g = 0.0; }
+            for g in grads.iter_mut() {
+                *g = 0.0;
+            }
             return;
         }
 
@@ -169,8 +186,12 @@ impl ReferenceElement for PyramidPk {
             let r = x * inv_one_minus_z;
             let s_val = y * inv_one_minus_z;
 
-            for i in 0..n { lr[i] = lagrange_1d_val(i, layer_deg, r); }
-            for j in 0..n { ls[j] = lagrange_1d_val(j, layer_deg, s_val); }
+            for i in 0..n {
+                lr[i] = lagrange_1d_val(i, layer_deg, r);
+            }
+            for j in 0..n {
+                ls[j] = lagrange_1d_val(j, layer_deg, s_val);
+            }
 
             let (mut dlr, mut dls) = if n > 1 {
                 (vec![0.0; n], vec![0.0; n])
@@ -178,8 +199,12 @@ impl ReferenceElement for PyramidPk {
                 (vec![0.0; 1], vec![0.0; 1])
             };
 
-            for i in 0..n { dlr[i] = lagrange_1d_deriv(i, layer_deg, r); }
-            for j in 0..n { dls[j] = lagrange_1d_deriv(j, layer_deg, s_val); }
+            for i in 0..n {
+                dlr[i] = lagrange_1d_deriv(i, layer_deg, r);
+            }
+            for j in 0..n {
+                dls[j] = lagrange_1d_deriv(j, layer_deg, s_val);
+            }
 
             for j in 0..n {
                 for i in 0..n {
@@ -189,7 +214,7 @@ impl ReferenceElement for PyramidPk {
                     let dlr_i = dlr[i];
                     let dls_j = dls[j];
 
-                    grads[dof * 3]     = lz * dlr_i * ls_j * inv_one_minus_z;
+                    grads[dof * 3] = lz * dlr_i * ls_j * inv_one_minus_z;
                     grads[dof * 3 + 1] = lz * lr_i * dls_j * inv_one_minus_z;
                     grads[dof * 3 + 2] = dlz * lr_i * ls_j
                         + lz * dlr_i * ls_j * x * inv_one_minus_z * inv_one_minus_z
@@ -199,7 +224,9 @@ impl ReferenceElement for PyramidPk {
         }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { pyramid_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        pyramid_rule(order)
+    }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let p = self.order;
@@ -230,8 +257,7 @@ mod tests {
         for pt in &rule.points {
             elem.eval_basis(pt, &mut phi);
             let s: f64 = phi.iter().sum();
-            assert!((s - 1.0).abs() < 1e-10,
-                "POU failed at {:?}: sum={s}", pt);
+            assert!((s - 1.0).abs() < 1e-10, "POU failed at {:?}: sum={s}", pt);
         }
     }
 
@@ -244,8 +270,7 @@ mod tests {
             elem.eval_grad_basis(pt, &mut g);
             for d in 0..dim {
                 let s: f64 = (0..elem.n_dofs()).map(|i| g[i * dim + d]).sum();
-                assert!(s.abs() < 1e-10,
-                    "grad sum d={d} = {s} at {:?}", pt);
+                assert!(s.abs() < 1e-10, "grad sum d={d} = {s} at {:?}", pt);
             }
         }
     }
@@ -258,18 +283,33 @@ mod tests {
             elem.eval_basis(coord, &mut phi);
             for j in 0..n {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((phi[j] - expected).abs() < 1e-10,
-                    "nodal interp: node {i}, basis {j}: expected {expected}, got {}", phi[j]);
+                assert!(
+                    (phi[j] - expected).abs() < 1e-10,
+                    "nodal interp: node {i}, basis {j}: expected {expected}, got {}",
+                    phi[j]
+                );
             }
         }
     }
 
     #[test]
-    fn pyramid_pou() { for p in 1..=4 { check_pou(&PyramidPk::new(p)); } }
+    fn pyramid_pou() {
+        for p in 1..=4 {
+            check_pou(&PyramidPk::new(p));
+        }
+    }
     #[test]
-    fn pyramid_grad_zero() { for p in 1..=4 { check_grad_zero(&PyramidPk::new(p)); } }
+    fn pyramid_grad_zero() {
+        for p in 1..=4 {
+            check_grad_zero(&PyramidPk::new(p));
+        }
+    }
     #[test]
-    fn pyramid_nodal_interp() { for p in 1..=4 { check_nodal_interp(&PyramidPk::new(p)); } }
+    fn pyramid_nodal_interp() {
+        for p in 1..=4 {
+            check_nodal_interp(&PyramidPk::new(p));
+        }
+    }
     #[test]
     fn pyramid_n_dofs() {
         assert_eq!(PyramidPk::new(1).n_dofs(), 5);
@@ -286,7 +326,11 @@ mod tests {
             let elem = PyramidPk::new(p);
             let n = elem.n_dofs();
             let (mut vc, mut vx, mut vy, mut vz, mut grads) = (
-                vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n], vec![0.0;n*3]
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n],
+                vec![0.0; n * 3],
             );
             let test_pts: &[[f64; 3]] = if p == 1 {
                 &[[0.3, 0.2, 0.1]]
@@ -295,20 +339,33 @@ mod tests {
             };
             for pt in test_pts {
                 let (x, y, z) = (pt[0], pt[1], pt[2]);
-                if x + z > 0.95 || y + z > 0.95 { continue; }
-                if z > 0.8 { continue; }
+                if x + z > 0.95 || y + z > 0.95 {
+                    continue;
+                }
+                if z > 0.8 {
+                    continue;
+                }
                 elem.eval_basis(&[x, y, z], &mut vc);
-                elem.eval_basis(&[x+h, y, z], &mut vx);
-                elem.eval_basis(&[x, y+h, z], &mut vy);
-                elem.eval_basis(&[x, y, z+h], &mut vz);
+                elem.eval_basis(&[x + h, y, z], &mut vx);
+                elem.eval_basis(&[x, y + h, z], &mut vy);
+                elem.eval_basis(&[x, y, z + h], &mut vz);
                 elem.eval_grad_basis(&[x, y, z], &mut grads);
                 for i in 0..n {
                     let fd_x = (vx[i] - vc[i]) / h;
                     let fd_y = (vy[i] - vc[i]) / h;
                     let fd_z = (vz[i] - vc[i]) / h;
-                    assert!((grads[i*3] - fd_x).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gx");
-                    assert!((grads[i*3+1] - fd_y).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gy");
-                    assert!((grads[i*3+2] - fd_z).abs() < 1e-4, "p={p} ({x},{y},{z}) i={i} gz");
+                    assert!(
+                        (grads[i * 3] - fd_x).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i} gx"
+                    );
+                    assert!(
+                        (grads[i * 3 + 1] - fd_y).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i} gy"
+                    );
+                    assert!(
+                        (grads[i * 3 + 2] - fd_z).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i} gz"
+                    );
                 }
             }
         }

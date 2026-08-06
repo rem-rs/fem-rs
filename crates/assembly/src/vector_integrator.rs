@@ -48,6 +48,9 @@ pub struct VectorQpData<'a> {
     pub elem_id: ElemId,
     /// Element material / region tag.
     pub elem_tag: i32,
+    /// Global DOF indices of this element (for grid-function coefficients).
+    /// `None` when the assembler does not provide them.
+    pub elem_dofs: Option<&'a [u32]>,
 }
 
 // ─── Integrator traits ──────────────────────────────────────────────────────

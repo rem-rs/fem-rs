@@ -69,19 +69,28 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 pub struct TriND1;
 
 impl VectorReferenceElement for TriND1 {
-    fn dim(&self)    -> u8    { 2 }
-    fn order(&self)  -> u8    { 1 }
-    fn n_dofs(&self) -> usize  { 3 }
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn n_dofs(&self) -> usize {
+        3
+    }
 
     /// `values[i*2 + c]` = component c of basis function i.
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let (x, y) = (xi[0], xi[1]);
         // Φ₀ = w_{01} = (1−η, ξ)
-        values[0] = 1.0 - y;  values[1] = x;
+        values[0] = 1.0 - y;
+        values[1] = x;
         // Φ₁ = w_{12} = (−η, ξ)
-        values[2] = -y;        values[3] = x;
+        values[2] = -y;
+        values[3] = x;
         // Φ₂ = w_{02} = (η, 1−ξ)
-        values[4] = y;         values[5] = 1.0 - x;
+        values[4] = y;
+        values[5] = 1.0 - x;
     }
 
     /// 2-D scalar curl: `curl_vals[i] = ∂Φᵢ_y/∂ξ − ∂Φᵢ_x/∂η`
@@ -96,17 +105,21 @@ impl VectorReferenceElement for TriND1 {
 
     /// Divergence — not the natural operator for H(curl); returns zeros.
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
-        for v in div_vals.iter_mut() { *v = 0.0; }
+        for v in div_vals.iter_mut() {
+            *v = 0.0;
+        }
     }
 
-    fn quadrature(&self, order: u8) -> QuadratureRule { tri_rule(order) }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
 
     /// DOF sites: midpoints of the three edges.
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![
-            vec![0.5, 0.0],  // midpoint of e₀: v₀→v₁
-            vec![0.5, 0.5],  // midpoint of e₁: v₁→v₂
-            vec![0.0, 0.5],  // midpoint of e₂: v₀→v₂
+            vec![0.5, 0.0], // midpoint of e₀: v₀→v₁
+            vec![0.5, 0.5], // midpoint of e₁: v₁→v₂
+            vec![0.0, 0.5], // midpoint of e₂: v₀→v₂
         ]
     }
 }
@@ -125,7 +138,11 @@ mod tests {
         for pt in &qr.points {
             elem.eval_curl(pt, &mut curl);
             for (i, &c) in curl.iter().enumerate() {
-                assert!((c - expected[i]).abs() < 1e-13, "curl[{i}] = {c}, expected {}", expected[i]);
+                assert!(
+                    (c - expected[i]).abs() < 1e-13,
+                    "curl[{i}] = {c}, expected {}",
+                    expected[i]
+                );
             }
         }
     }

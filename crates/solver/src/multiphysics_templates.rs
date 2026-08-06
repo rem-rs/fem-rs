@@ -192,7 +192,11 @@ const JOULE_HEATING_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
 
 const FSI_SPEC: MultiphysicsTemplateSpec = MultiphysicsTemplateSpec {
     template: BuiltinMultiphysicsTemplate::FluidStructureInteraction,
-    field_nodes: &["fluid_velocity_pressure", "solid_displacement", "mesh_motion"],
+    field_nodes: &[
+        "fluid_velocity_pressure",
+        "solid_displacement",
+        "mesh_motion",
+    ],
     coupling_edges: &[
         "fluid_traction -> solid_boundary_load",
         "solid_displacement -> fluid_moving_boundary",

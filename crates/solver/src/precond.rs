@@ -1,12 +1,12 @@
 use fem_linalg::CsrMatrix as FemCsr;
+use fem_linalg::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
     iterative::{ConjugateGradient, Gmres},
-    precond::{AmsPrecond, AmsConfig, AdsPrecond, AdsConfig},
+    precond::{AdsConfig, AdsPrecond, AmsConfig, AmsPrecond},
     sparse::CsrMatrix as linlvoCsr,
     DenseVec, KrylovSolver, Preconditioner,
 };
-use fem_linalg::{fem_to_linlvo_csr, into_result, SolverConfig, SolverError, SolveResult};
 
 use crate::macros::check_dims;
 
@@ -34,7 +34,7 @@ pub enum PrecondKind {
     /// keep at most `fill` off-diagonal entries per row in L and U.
     Ilut {
         /// Relative drop tolerance (e.g. `0.01`).
-        tau:  f64,
+        tau: f64,
         /// Max off-diagonal fill per row in each factor.
         fill: usize,
     },
@@ -55,17 +55,19 @@ pub enum PrecondKind {
 ///     &SolverConfig::default())?;
 /// ```
 pub fn solve_precond_kind<T: linlvoScalar>(
-    a:       &FemCsr<T>,
-    b:       &[T],
-    x:       &mut [T],
+    a: &FemCsr<T>,
+    b: &[T],
+    x: &mut [T],
     restart: usize,
-    kind:    PrecondKind,
-    cfg:     &SolverConfig,
+    kind: PrecondKind,
+    cfg: &SolverConfig,
 ) -> Result<SolveResult, SolverError> {
     match kind {
-        PrecondKind::Ilu0             => crate::solve_gmres_ilu0(a, b, x, restart, cfg),
-        PrecondKind::Iluk(k)          => crate::solve_gmres_iluk(a, b, x, restart, k, cfg),
-        PrecondKind::Ilut { tau, fill } => crate::solve_gmres_ilut(a, b, x, restart, tau, fill, cfg),
+        PrecondKind::Ilu0 => crate::solve_gmres_ilu0(a, b, x, restart, cfg),
+        PrecondKind::Iluk(k) => crate::solve_gmres_iluk(a, b, x, restart, k, cfg),
+        PrecondKind::Ilut { tau, fill } => {
+            crate::solve_gmres_ilut(a, b, x, restart, tau, fill, cfg)
+        }
     }
 }
 
@@ -76,8 +78,7 @@ pub fn solve_precond_kind<T: linlvoScalar>(
 /// AMS is the Hiptmair-Xu preconditioner for H(curl) problems (Maxwell).
 /// It uses a multigrid V-cycle on the auxiliary nodal space plus
 /// a stationary correction on the edge space.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AmsSolverConfig {
     pub inner_cfg: SolverConfig,
     pub ams_cfg: AmsConfig,
@@ -153,8 +154,7 @@ pub fn solve_gmres_ams<T: linlvoScalar>(
 /// ADS is the Hiptmair-Xu preconditioner for H(div) problems (Darcy flow).
 /// It combines auxiliary-space cycles on the edge space (via curl) and
 /// nodal space (via gradient) for robust H(div) preconditioning.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AdsSolverConfig {
     pub inner_cfg: SolverConfig,
     pub ads_cfg: AdsConfig,
@@ -259,7 +259,9 @@ impl<P: Preconditioner<Vector = DenseVec<f64>>> Preconditioner for ScaledPrecond
     type Vector = DenseVec<f64>;
     fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
         self.inner.apply_precond(x, z);
-        for v in z.as_mut_slice().iter_mut() { *v *= self.scale; }
+        for v in z.as_mut_slice().iter_mut() {
+            *v *= self.scale;
+        }
     }
 }
 
@@ -274,10 +276,9 @@ pub struct BlockDiagPrecondPair<
     pub n: usize,
 }
 
-impl<
-    P1: Preconditioner<Vector = DenseVec<f64>>,
-    P2: Preconditioner<Vector = DenseVec<f64>>,
-> Preconditioner for BlockDiagPrecondPair<P1, P2> {
+impl<P1: Preconditioner<Vector = DenseVec<f64>>, P2: Preconditioner<Vector = DenseVec<f64>>>
+    Preconditioner for BlockDiagPrecondPair<P1, P2>
+{
     type Vector = DenseVec<f64>;
     fn apply_precond(&self, x: &DenseVec<f64>, z: &mut DenseVec<f64>) {
         let n = self.n;

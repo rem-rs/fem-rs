@@ -945,7 +945,7 @@ mod tests {
             face_conn: vec![], face_tags: vec![], face_type: ElementType::Line2,
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         mesh.build_edge_connectivity();
         assert!(mesh.edge_to_elem.len() >= 2);
@@ -971,7 +971,7 @@ mod tests {
             face_conn: vec![], face_tags: vec![], face_type: ElementType::Line2,
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         mesh.build_edge_connectivity();
 
@@ -994,7 +994,7 @@ mod tests {
             face_conn: vec![], face_tags: vec![], face_type: ElementType::Line2,
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         mesh.build_edge_connectivity();
 
@@ -1020,7 +1020,7 @@ mod tests {
             face_conn: vec![], face_tags: vec![], face_type: ElementType::Line2,
             elem_types: None, elem_offsets: None,
             face_types: None, face_offsets: None, face_to_elem: None,
-            edge_conn: vec![], edge_to_elem: vec![], geometry: None,
+            edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None,
         };
         mesh.build_edge_connectivity();
 
