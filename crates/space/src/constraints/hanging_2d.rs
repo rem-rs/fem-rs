@@ -110,7 +110,9 @@ pub fn apply_hanging_constraints(
     }
     rhs.copy_from_slice(&new_rhs);
 
-    *mat = coo.into_csr();
+    // Sorted columns: callers use binary-search find_entry (e.g. ex27's
+    // Dirichlet elimination) which requires ascending CSR columns.
+    *mat = coo.into_csr_sorted();
 }
 
 /// Reduce the constrained (full-N) system to the true-DOF system, mirroring
@@ -501,7 +503,9 @@ pub fn apply_hanging_face_constraints(
     }
     rhs.copy_from_slice(&new_rhs);
 
-    *mat = coo.into_csr();
+    // Sorted columns: callers use binary-search find_entry (e.g. ex27's
+    // Dirichlet elimination) which requires ascending CSR columns.
+    *mat = coo.into_csr_sorted();
 }
 
 /// Recover hanging face DOF values after solving.
