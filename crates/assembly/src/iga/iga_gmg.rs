@@ -1005,7 +1005,10 @@ mod tests {
         let h = GeometricMgHierarchy::new(levels, vec![p_mid_to_fine, p_coarse_to_mid]);
 
         let cfg = SolverConfig {
-            rtol: 1e-10,
+            // Preconditioned PCG uses the energy-ratio criterion
+            // (Br,r)/(Br0,r0) < rtol (MFEM PCG semantics), which does NOT bound
+            // the Euclidean residual; 1e-12 brings ‖Ax−b‖/‖b‖ below 1e-6.
+            rtol: 1e-12,
             max_iter: 2000,
             verbose: false,
             ..Default::default()
@@ -1123,8 +1126,10 @@ mod tests {
 
         let cfg = SolverConfig {
             max_iter: 2000,
-            rtol: 1e-8,
-            atol: 1e-12,
+            // Energy-ratio criterion for preconditioned PCG (see 1-D test);
+            // 1e-13 brings ‖Ax−b‖/‖b‖ below 1e-6.
+            rtol: 1e-13,
+            atol: 1e-13,
             verbose: false,
             ..Default::default()
         };

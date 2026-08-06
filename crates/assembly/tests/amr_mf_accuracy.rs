@@ -193,17 +193,19 @@ fn test_mf_vs_matrix_amr_q1() {
     // ── MF path: apply_amr with constraint + Dirichlet projection ──
     let op = SimpleDiffusionOp::new(H1Space::new(mesh, order), 1.0, quad_order);
 
-    // RHS for MF: apply C^T (scatter of constrained entries to parents),
-    // matching what apply_hanging_constraints does via expand_dof.
-    // Then zero boundary DOFs for Dirichlet BC.
+    // RHS for MF: apply C^T (chained scatter of constrained entries to
+    // parents), matching apply_hanging_constraints' P^T f via expand_dof.
+    // Must use accumulated values in reverse order (same chaining rule as
+    // apply_amr's scatter) so a constrained DOF that is itself a parent
+    // carries its children's RHS contributions.
     let mut f_mf = f_full.clone();
-    let f_orig = f_mf.clone();  // snapshot before modification
-    for c in &constraints {
+    for c in constraints.iter().rev() {
+        let val = f_mf[c.constrained];
         if c.parent_a == c.parent_b {
-            f_mf[c.parent_a] += f_orig[c.constrained];
+            f_mf[c.parent_a] += val;
         } else {
-            f_mf[c.parent_a] += 0.5 * f_orig[c.constrained];
-            f_mf[c.parent_b] += 0.5 * f_orig[c.constrained];
+            f_mf[c.parent_a] += 0.5 * val;
+            f_mf[c.parent_b] += 0.5 * val;
         }
         f_mf[c.constrained] = 0.0;
     }
@@ -214,11 +216,12 @@ fn test_mf_vs_matrix_amr_q1() {
         n_dofs, n_dofs,
         |x, y| {
             y.fill(0.0);
-            // First apply Dirichlet projection on x (zero boundary)
-            let mut xp = x.to_vec();
-            for &d in &bnd { xp[d as usize] = 0.0; }
-            // Apply constrained operator: y += C^T K C xp
-            op.apply_amr(&xp, y, &constraints);
+            // Apply constrained operator: y += C^T K C x.  Dirichlet is applied
+            // AFTER the constraint expansion (projecting y), matching the
+            // matrix path (apply_hanging_constraints THEN apply_dirichlet) —
+            // projecting x first would zero boundary parents before the
+            // hanging-node gather and disagree with the matrix operator.
+            op.apply_amr(x, y, &constraints);
             // Project y: zero boundary DOFs
             for &d in &bnd { y[d as usize] = 0.0; }
         },

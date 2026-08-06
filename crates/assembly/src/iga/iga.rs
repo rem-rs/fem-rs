@@ -1146,11 +1146,6 @@ impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity2D {
         let n_vec = dim * n_total;
         let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
 
-        let (lam, mu) = match &self.model {
-            crate::physics::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
-            _ => (0.0, 1.0),
-        };
-
         let mut offset = 0usize;
         for pd in &self.mesh.patches {
             let elem = pd_to_patch2d(pd);
@@ -1172,35 +1167,37 @@ impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity2D {
                 }
                 let mut f_mat = nalgebra::DMatrix::identity(dim, dim);
                 f_mat += &du;
-                let jac: f64 = f_mat.determinant();
-                let ln_j = jac.ln();
-                let c2 = mu - lam * ln_j / jac;
-
+                // Tangent from the same model used by `residual`
+                // (pk1_and_tangent) so the Newton update direction is
+                // consistent — the previous hand-written formula did not
+                // match the PK1 stress and stalled the iteration.
+                let (_, ct) = self.model.pk1_and_tangent(&f_mat);
+                // ct[(i*dim+I, j*dim+J)] = ∂P_{iI}/∂F_{jJ}
+                // K[2a+i, 2b+j] += w · Σ_{I,J} ct[(i,I),(j,J)]·∂N_a/∂x_I·∂N_b/∂x_J
                 for a in 0..n_dof {
-                    let gax = grads[a * 2];
-                    let gay = grads[a * 2 + 1];
                     let ba = 2 * (offset + a);
                     for b in 0..n_dof {
-                        let gbx = grads[b * 2];
-                        let gby = grads[b * 2 + 1];
                         let bb = 2 * (offset + b);
-
-                        let k00 = w * (lam / jac * gax * gbx + c2 * (gax * gbx + gay * gby));
-                        let k01 = w * (lam / jac * gax * gby + mu * gay * gbx);
-                        let k10 = w * (lam / jac * gay * gbx + mu * gax * gby);
-                        let k11 = w * (lam / jac * gay * gby + c2 * (gax * gbx + gay * gby));
-
-                        coo.add(ba, bb, k00);
-                        coo.add(ba, bb + 1, k01);
-                        coo.add(ba + 1, bb, k10);
-                        coo.add(ba + 1, bb + 1, k11);
+                        for i in 0..dim {
+                            for I in 0..dim {
+                                for j in 0..dim {
+                                    for J in 0..dim {
+                                        let val = w * ct[(i * dim + I, j * dim + J)]
+                                            * grads[a * 2 + I] * grads[b * 2 + J];
+                                        if val.abs() > 1e-300 {
+                                            coo.add(ba + i, bb + j, val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
             offset += n_dof;
         }
 
-        let mut mat = coo.into_csr();
+        let mut mat = coo.into_csr_sorted();
         let mut dummy = vec![0.0; n_vec];
         for &(dof, _) in &self.dirichlet {
             mat.apply_dirichlet_row_zeroing(dof, 0.0, &mut dummy);
@@ -1296,11 +1293,6 @@ impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity3D {
         let n_vec = dim * n_total;
         let mut coo = CooMatrix::<f64>::new(n_vec, n_vec);
 
-        let (lam, mu) = match &self.model {
-            crate::physics::nonlinear_hyperelasticity::HyperelasticModel::NeoHookean { lambda, mu } => (*lambda, *mu),
-            _ => (0.0, 1.0),
-        };
-
         let mut offset = 0usize;
         for pd in &self.mesh.patches {
             let elem = pd.patch_element_ref();
@@ -1328,46 +1320,28 @@ impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity3D {
                 }
                 let mut f_mat = nalgebra::DMatrix::identity(dim, dim);
                 f_mat += &du;
-                let jac: f64 = f_mat.determinant();
-                let ln_j = jac.ln();
-                let c2 = mu - lam * ln_j / jac;
-
+                // Tangent from the same model used by `residual`
+                // (pk1_and_tangent) so the Newton update direction is
+                // consistent — the previous hand-written spatial-tangent
+                // formula did not match the PK1 stress and stalled/NaN'd.
+                let (_, ct) = self.model.pk1_and_tangent(&f_mat);
+                // ct[(i*dim+I, j*dim+J)] = ∂P_{iI}/∂F_{jJ}
+                // K[3a+i, 3b+j] += w · Σ_{I,J} ct[(i,I),(j,J)]·∂R_a/∂x_I·∂R_b/∂x_J
                 for a in 0..n_dof {
                     let ba = 3 * (offset + a);
-                    let gax = grads[a * 3];
-                    let gay = grads[a * 3 + 1];
-                    let gaz = grads[a * 3 + 2];
                     for b in 0..n_dof {
                         let bb = 3 * (offset + b);
-                        let gbx = grads[b * 3];
-                        let gby = grads[b * 3 + 1];
-                        let gbz = grads[b * 3 + 2];
-
-                        // Spatial tangent for neo-Hookean in 3D:
-                        // C_ijkl = (λ/J) δ_ij δ_kl + (μ - λ·lnJ/J) (δ_ik δ_jl + δ_il δ_jk)
-                        // K[3a+i, 3b+k] += ∫ C_ijkl · ∂R_a/∂x_j · ∂R_b/∂x_l
-                        let c0 = lam / jac;
-                        let c1 = c2;
-
-                        for i in 0..3 {
-                            for k in 0..3 {
-                                let mut val = 0.0;
-                                for j in 0..3 {
-                                    for l in 0..3 {
-                                        let mut ct = 0.0;
-                                        // (λ/J) * δ_ij * δ_kl
-                                        ct += c0 * (if i == j { 1.0 } else { 0.0 })
-                                                  * (if k == l { 1.0 } else { 0.0 });
-                                        // c2 * (δ_ik * δ_jl + δ_il * δ_jk)
-                                        let d_ik = if i == k { 1.0 } else { 0.0 };
-                                        let d_jl = if j == l { 1.0 } else { 0.0 };
-                                        let d_il = if i == l { 1.0 } else { 0.0 };
-                                        let d_jk = if j == k { 1.0 } else { 0.0 };
-                                        ct += c1 * (d_ik * d_jl + d_il * d_jk);
-                                        val += ct * grads[a * 3 + j] * grads[b * 3 + l];
+                        for i in 0..dim {
+                            for I in 0..dim {
+                                for j in 0..dim {
+                                    for J in 0..dim {
+                                        let val = w * ct[(i * dim + I, j * dim + J)]
+                                            * grads[a * 3 + I] * grads[b * 3 + J];
+                                        if val.abs() > 1e-300 {
+                                            coo.add(ba + i, bb + j, val);
+                                        }
                                     }
                                 }
-                                coo.add(ba + i, bb + k, w * val);
                             }
                         }
                     }
@@ -1376,7 +1350,7 @@ impl crate::physics::nonlinear::NonlinearForm for IgaHyperelasticity3D {
             offset += n_dof;
         }
 
-        let mut mat = coo.into_csr();
+        let mut mat = coo.into_csr_sorted();
         let mut dummy = vec![0.0; n_vec];
         for &(dof, _) in &self.dirichlet {
             mat.apply_dirichlet_row_zeroing(dof, 0.0, &mut dummy);
@@ -2063,7 +2037,7 @@ mod tests {
             rtol: 1e-6,
             max_iter: 50,
             linear_tol: 1e-8,
-            line_search: false,
+            line_search: true,
             ..NewtonConfig::default()
         };
         let result = crate::physics::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);
@@ -2122,7 +2096,7 @@ mod tests {
 
         let cfg = NewtonConfig {
             atol: 1e-6, rtol: 1e-6, max_iter: 50, linear_tol: 1e-8,
-            line_search: false,
+            line_search: true,
             ..NewtonConfig::default()
         };
         let result = crate::physics::nonlinear::NewtonSolver::new(cfg).solve(&form, &rhs, &mut u);

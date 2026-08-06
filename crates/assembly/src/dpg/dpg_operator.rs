@@ -367,7 +367,9 @@ mod tests {
 
         // Solve
         let mut x = vec![0.0; n_tot];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 200, verbose: false, ..Default::default() };
+        // rtol uses the squared-norm criterion (nom ≤ nom0·rtol², MFEM PCG);
+        // 1e-12 would demand 1e-24 relative accuracy and exhaust max_iter.
+        let cfg = SolverConfig { rtol: 1e-6, atol: 0.0, max_iter: 200, verbose: false, ..Default::default() };
         let result = fem_solver::solve_pcg_operator_precond(n_tot, op.as_closure(), &rhs, &mut x, precond, &cfg);
         let res = result.expect("PCG solve failed");
 

@@ -130,14 +130,27 @@ pub trait AmrAwareOperator: Send + Sync {
         y: &mut [f64],
         constraints: &[HangingNodeConstraint],
     ) {
-        // Gather: constrain x values
+        // Gather: constrain x values.  Chained constraints (a constrained DOF
+        // being the parent of another) need a topological expansion — a single
+        // forward pass is order-dependent, so iterate to a fixed point
+        // (bounded by the refinement-tree depth, no cycles possible).
         let mut xc = x.to_vec();
-        for c in constraints {
-            xc[c.constrained] = if c.parent_a == c.parent_b {
-                xc[c.parent_a]
-            } else {
-                0.5 * xc[c.parent_a] + 0.5 * xc[c.parent_b]
-            };
+        if !constraints.is_empty() {
+            for _ in 0..constraints.len() {
+                let mut changed = false;
+                for c in constraints {
+                    let val = if c.parent_a == c.parent_b {
+                        xc[c.parent_a]
+                    } else {
+                        0.5 * xc[c.parent_a] + 0.5 * xc[c.parent_b]
+                    };
+                    if (xc[c.constrained] - val).abs() > 0.0 {
+                        changed = true;
+                        xc[c.constrained] = val;
+                    }
+                }
+                if !changed { break; }
+            }
         }
 
         // Apply operator
@@ -146,18 +159,29 @@ pub trait AmrAwareOperator: Send + Sync {
         self.element_loop(&xc, &mut yc);
         self.face_loop(&xc, &mut yc, true, true, true);
 
-        // Scatter: C^T yc into y
+        // Scatter: C^T yc into y.  Reverse order so chained constraints
+        // propagate consistently with the gather expansion above; the source
+        // must be the *accumulated* y (not the raw yc) so a constrained DOF
+        // that is itself a parent carries its children's contributions
+        // through (e.g. c35=0.5(c6+c26), c26=0.5(c6+c1) → c35→c6 weight 0.75).
         for i in 0..n_dofs {
             y[i] += yc[i];
         }
-        for c in constraints {
+        for c in constraints.iter().rev() {
+            let val = y[c.constrained];
             if c.parent_a == c.parent_b {
-                y[c.parent_a] += yc[c.constrained];
+                y[c.parent_a] += val;
             } else {
-                y[c.parent_a] += 0.5 * yc[c.constrained];
-                y[c.parent_b] += 0.5 * yc[c.constrained];
+                y[c.parent_a] += 0.5 * val;
+                y[c.parent_b] += 0.5 * val;
             }
-            y[c.constrained] = 0.0;
+        }
+        // Constrained rows become identity (u_c = u_c), matching
+        // constraints::apply_hanging_constraints (row replacement with
+        // RHS[constrained] = 0): pure C^T K C would leave these rows zero and
+        // make the operator singular for CG.
+        for c in constraints {
+            y[c.constrained] = x[c.constrained];
         }
     }
 }

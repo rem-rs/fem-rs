@@ -120,8 +120,8 @@ fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
             let pb = mesh.node_coords(b);
             let tx = pb[0] - pa[0];
             let ty = pb[1] - pa[1];
-            let nx = -ty;
-            let ny = tx;
+            let nx = ty;
+            let ny = -tx;
             for q in 0..3 {
                 let t = bop[q];
                 let xp = pa[0] + t * tx;
@@ -1124,8 +1124,8 @@ impl DiscreteLinearOperator {
                         let pb = mesh.node_coords(b);
                         let tx = pb[0] - pa[0];
                         let ty = pb[1] - pa[1];
-                        let nx = -ty;
-                        let ny = tx;
+                        let nx = ty;
+                        let ny = -tx;
 
                         let mut mom0 = 0.0_f64;
                         let mut mom1 = 0.0_f64;
