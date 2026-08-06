@@ -6,7 +6,7 @@
 //! m(u, v) = ∫_Ω ρ u v dx
 //! ```
 
-scalar_bilinear_integrator!(MassIntegrator, rho,
+scalar_bilinear_integrator_phys!(MassIntegrator, rho,
     "Bilinear integrator for the scalar mass operator `ρ u v`.
 
 For `ρ = 1` this is the standard L² mass matrix.

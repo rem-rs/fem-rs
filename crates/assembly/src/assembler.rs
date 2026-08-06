@@ -111,6 +111,44 @@ impl ReferenceElement for P0 {
     fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0, 0.0]] }
 }
 
+/// Bilinear (Q1) geometry element on `[0,1]²` with MFEM's `BiLinear2DFiniteElement`
+/// direct formulas (H1 topological DOF order: v0=(0,0), v1=(1,0), v2=(1,1),
+/// v3=(0,1)).  Used as the *geometry* element for non-curved Quad4 meshes —
+/// MFEM's mesh without `Nodes` uses a `LinearFECollection` for the element
+/// transformation, whose `CalcDShape` is the direct bilinear formula (NOT the
+/// barycentric path used by `QuadQk`), and whose node order is the H1 order
+/// (NOT the lexicographic `L2_T1` order of curved `Nodes` fields).  Using the
+/// wrong path introduces last-ulp differences in the Jacobian and hence in
+/// every element matrix of non-axis-aligned quads.
+struct BiLinearGeo2D;
+
+impl ReferenceElement for BiLinearGeo2D {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 1 }
+    fn n_dofs(&self) -> usize { 4 }
+    fn eval_basis(&self, xi: &[f64], v: &mut [f64]) {
+        let (x, y) = (xi[0], xi[1]);
+        v[0] = (1.0 - x) * (1.0 - y);
+        v[1] = x * (1.0 - y);
+        v[2] = x * y;
+        v[3] = (1.0 - x) * y;
+    }
+    fn eval_grad_basis(&self, xi: &[f64], g: &mut [f64]) {
+        // MFEM BiLinear2DFiniteElement::CalcDShape:
+        //   dshape(0) = (-(1-y), -(1-x))   dshape(1) = ((1-y), -x)
+        //   dshape(2) = (y, x)             dshape(3) = (-y, (1-x))
+        let (x, y) = (xi[0], xi[1]);
+        g[0] = -(1.0 - y); g[1] = -(1.0 - x);
+        g[2] = 1.0 - y;    g[3] = -x;
+        g[4] = y;          g[5] = x;
+        g[6] = -y;         g[7] = 1.0 - x;
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![1.0, 1.0], vec![0.0, 1.0]]
+    }
+}
+
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial
@@ -266,7 +304,11 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     match et {
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
             return if g <= 1 {
-                Some(Box::new(QuadQk::new(1)) as Box<dyn ReferenceElement>)
+                // Non-curved quad geometry: MFEM's mesh without `Nodes`
+                // transforms with a LinearFECollection (BiLinear2DFiniteElement
+                // direct formulas, H1 topological node order) — NOT the
+                // barycentric QuadQk path nor the lexicographic L2_T1 order.
+                Some(Box::new(BiLinearGeo2D) as Box<dyn ReferenceElement>)
             } else {
                 Some(factory_ref_elem(FactoryElemType::Quad, g))
             };
@@ -308,6 +350,7 @@ fn isoparametric_jacobian<M: MeshTopology>(
     geo_elem: &dyn ReferenceElement,
     xi: &[f64],
     dim: usize,
+    use_lex: bool,
 ) -> (DMatrix<f64>, f64, Vec<f64>) {
     let n_geo = geo_elem.n_dofs();
     let mut grad_geo = vec![0.0_f64; n_geo * dim];
@@ -315,13 +358,14 @@ fn isoparametric_jacobian<M: MeshTopology>(
     geo_elem.eval_grad_basis(xi, &mut grad_geo);
     geo_elem.eval_basis(xi, &mut phi_geo);
 
-    // MFEM's mesh-nodes field (L2_T1_2D_P1) uses the LEX tensor order
-    // (dof2=(0,1), dof3=(1,1)); Rust's geo_elem for quads is QuadQk (H1
-    // topological order: v2=(1,1), v3=(0,1)).  Reorder both the geometry
-    // nodes and the basis rows to lex so the Jacobian accumulation order is
+    // Curved quad geometry uses MFEM's L2_T1 mesh-nodes field (LEX tensor
+    // order: v2=(0,1), v3=(1,1)); the solution/geometry element for
+    // non-curved quads is the H1 topological order (BiLinearGeo2D), in which
+    // case no reordering is applied.  Reorder both the geometry nodes and
+    // the basis rows to lex so the Jacobian accumulation order is
     // bit-identical to MFEM's EvalJacobian.
     let (nodes_r, grad_r, phi_r): (Vec<u32>, Vec<f64>, Vec<f64>) =
-        if dim == 2 && nodes.len() == 4 {
+        if use_lex && dim == 2 && nodes.len() == 4 {
             let mut grad_lex = vec![0.0; n_geo * dim];
             let mut phi_lex = vec![0.0; n_geo];
             for (li, &hi) in [0usize, 1, 3, 2].iter().enumerate() {
@@ -344,10 +388,12 @@ fn isoparametric_jacobian<M: MeshTopology>(
     for k in 0..n_geo {
         let xk = mesh.geom_coords_of(nodes_r[k]);
         for i in 0..dim {
-            // MFEM kernels::Mult/AddMult fuse the accumulation (FMA).
-            xp[i] = phi_r[k].mul_add(xk[i], xp[i]);
+            // MFEM kernels::AddMult: `Adata[i+j*Aheight] += val * Bdata[...]`
+            // with plain multiply-then-add — NOT FMA (serial g++ builds do not
+            // fuse; rustc's mul_add would introduce last-ulp differences).
+            xp[i] += phi_r[k] * xk[i];
             for d in 0..dim {
-                j[(i, d)] = xk[i].mul_add(grad_r[k * dim + d], j[(i, d)]);
+                j[(i, d)] += xk[i] * grad_r[k * dim + d];
             }
         }
     }
@@ -434,6 +480,41 @@ fn transform_grads(
             let mut s = 0.0;
             for k in 0..dim {
                 s += j_inv_t[(j, k)] * grad_ref[i * dim + k];
+            }
+            grad_phys[i * dim + j] = s;
+        }
+    }
+}
+
+/// MFEM `ElementTransformation::AdjugateJacobian()`: the classical adjugate
+/// (cofactor matrix) of J.  2-D: adj(J) = [[J11, -J01], [-J10, J00]].
+fn adjugate_2d(j: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut a = DMatrix::<f64>::zeros(2, 2);
+    a[(0, 0)] = j[(1, 1)];
+    a[(0, 1)] = -j[(0, 1)];
+    a[(1, 0)] = -j[(1, 0)];
+    a[(1, 1)] = j[(0, 0)];
+    a
+}
+
+/// Transform reference gradients by the adjugate Jacobian (MFEM
+/// `Mult(dshape, AdjugateJacobian, dshapedxt)`): grad_phys(i,j) =
+/// Σ_k adj(J)(k,j)·grad_ref(i,k).  No det division — the diffusion weight
+/// carries `1/det` instead (MFEM `w = ip.weight / Trans.Weight()`), which
+/// keeps the floating-point path bit-identical (using J⁻¹ = adj/det and a
+/// `×det` weight differs by ~1 ulp).
+fn transform_grads_adj(
+    adj: &DMatrix<f64>,
+    grad_ref: &[f64],
+    grad_phys: &mut [f64],
+    n_ldofs: usize,
+    dim: usize,
+) {
+    for i in 0..n_ldofs {
+        for j in 0..dim {
+            let mut s = 0.0;
+            for k in 0..dim {
+                s += adj[(k, j)] * grad_ref[i * dim + k];
             }
             grad_phys[i * dim + j] = s;
         }
@@ -584,6 +665,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
+                phys_weight: w,
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp,
@@ -609,6 +691,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
+                phys_weight: w,
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp,
@@ -625,24 +708,31 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
             let geo = geo_elem.as_ref().unwrap();
             let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
             let xi_g = geom_quad_point(elem_type, order, xi);
-            let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
-            let w = quad.weights[q] * det_qp.abs();
+            let (jac_qp, det_qp, xp_qp) = isoparametric_jacobian(
+                mesh, geo_nds, geo.as_ref(), &xi_g, dim,
+                mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
+            );
+            // MFEM DiffusionIntegrator: w = ip.weight / Trans.Weight() where
+            // Trans.Weight() = |det J| for square elements (not ×|det|).
+            let w = quad.weights[q] / det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
                     eprintln!("warning: degenerate element {} at quad point {}, det={:.3e}", e, q, det_qp);
                 }
                 continue;
             }
-            let jit = jac_qp.try_inverse().expect("invertible").transpose();
+            // MFEM: dshapedxt = Mult(dshape, AdjugateJacobian, dshapedxt).
+            let adj = adjugate_2d(&jac_qp);
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
-            transform_grads(&jit, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
+            transform_grads_adj(&adj, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
+            let w_phys = quad.weights[q] * det_qp.abs();
 
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
+                phys_weight: w_phys,
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp_qp,
@@ -742,8 +832,10 @@ fn accumulate_volume_linear_element<S: FESpace>(
             let geo = geo_elem.as_ref().unwrap();
             let geo_nds = if is_surface { nodes } else { mesh.geometry_nodes(e) };
             let xi_g = geom_quad_point(elem_type, order, xi);
-            let (jac_qp, det_qp, xp_qp) =
-                isoparametric_jacobian(mesh, geo_nds, geo.as_ref(), &xi_g, dim);
+            let (jac_qp, det_qp, xp_qp) = isoparametric_jacobian(
+                mesh, geo_nds, geo.as_ref(), &xi_g, dim,
+                mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
+            );
             w = quad.weights[q] * det_qp.abs();
             if det_qp.abs() < 1e-12 {
                 if cfg!(debug_assertions) {
@@ -762,6 +854,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
             n_dofs:    n_elem_dofs,
             dim,
             weight:    w,
+            phys_weight: w,
             phi:       &scratch.phi,
             grad_phys: &scratch.grad_phys,
             x_phys:    &xp,

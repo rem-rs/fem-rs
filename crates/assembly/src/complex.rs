@@ -788,6 +788,7 @@ impl NativeComplexAssembler {
                     n_dofs: n,
                     dim,
                     weight: w_phys,
+                    phys_weight: w_phys,
                     phi: &phi,
                     grad_phys: &grad_phys,
                     x_phys: &x_phys,

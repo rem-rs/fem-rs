@@ -395,13 +395,41 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
     let t_final = args.t_final;
     let vis_steps = args.vis_steps;
 
-    // 8. Time integration matching C++ BackwardEulerSolver exactly.
-    //    Step: ImplicitSolve(dt², dt, u, dudt) → a
-    //    T=M+dt²·K, z=-K·u, solve T·a=z, v+=dt·a, u+=dt·v, zero BC.
+    // 8. Time integration matching C++ ex23 ode_solver_type=10 exactly:
+    //    SecondOrderODESolver::Select(10) → GeneralizedAlpha2Solver(1.0)
+    //    (NOT BackwardEulerSolver!).  With rho_inf=1:
+    //      alpha_m = alpha_f = 0.5, beta = 0.25, gamma = 0.5
+    //      fac0 = 0.5 - beta/alpha_m   = 0.0
+    //      fac1 = alpha_f              = 0.5
+    //      fac2 = alpha_f*(1-gamma/alpha_m) = 0.0
+    //      fac3 = beta*alpha_f/alpha_m = 0.25
+    //      fac4 = gamma*alpha_f/alpha_m= 0.5
+    //      fac5 = alpha_m              = 0.5
+    //    Step(u, dudt, t, dt):
+    //      1st pass: a0 = f->Mult(u, dudt) = M⁻¹(-K·u); state = a0
+    //      Predict: va = dudt + fac0·dt·state;  xa = u + fac1·dt·va;
+    //               va = dudt + fac2·dt·state
+    //      Solve:   aa = ImplicitSolve(fac3·dt², fac4·dt, xa, va)
+    //               → T = M + fac3·dt²·K;  T·aa = -K·xa
+    //      Correct: xa += fac3·dt²·aa;  va += fac4·dt·aa
+    //      Extrap:  u = (1-1/fac1)·u + (1/fac1)·xa
+    //               dudt = (1-1/fac1)·dudt + (1/fac1)·va
+    //               state = (1-1/fac5)·state + (1/fac5)·aa
     let mut t = 0.0;
     let n_steps = if dt > 0.0 { (t_final / dt).ceil() as usize } else { 0 };
-    let mut a = vec![0.0; fe_size];
+    let fac1 = 0.5_f64;
+    let fac3 = 0.25_f64;
+    let fac4 = 0.5_f64;
+    let fac5 = 0.5_f64;
+    let inv_f1 = 1.0 / fac1;
+    let inv_f5 = 1.0 / fac5;
     let mut v = du_dt.clone();
+    let mut state = vec![0.0; fe_size];
+    // 1st pass: initial acceleration a0 = M⁻¹(-K·u) (C++ f->Mult(u, dxdt, state[0]))
+    oper.mult(&u, &mut state);
+    let mut va = vec![0.0; fe_size];
+    let mut xa = vec![0.0; fe_size];
+    let mut aa = vec![0.0; fe_size];
 
     if let Some(ref mut vis) = glvis {
         let _ = vis.send_solution_2d(&mesh, &u, "u");
@@ -413,13 +441,28 @@ fn run_wave_2d(mut mesh: Mesh<2>, args: &Args) {
         let dt_actual = if t + dt >= t_final - dt / 2.0 {
             last_step = true; t_final - t
         } else { dt };
+        let dt2 = dt_actual * dt_actual;
 
-        // C++: ImplicitSolve(dt², dt, u, dudt, a)
-        oper.implicit_solve(dt_actual * dt_actual, &u, &mut a);
+        // Predict (fac0=fac2=0 → va stays = v at both steps)
+        for i in 0..fe_size { xa[i] = u[i] + fac1 * dt_actual * v[i]; }
+        // Solve alpha levels: aa = ImplicitSolve(fac3·dt², fac4·dt, xa, va)
+        //   T = M + fac3·dt²·K,  T·aa = -K·xa  (dudt term unused by ex23's
+        //   WaveOperator::ImplicitSolve — matches C++ z = -K*u only)
+        oper.implicit_solve(fac3 * dt2, &xa, &mut aa);
 
-        // C++: dudt += dt*a, u += dt*dudt, SetSubVector(ess, 0)
-        for i in 0..fe_size { v[i] += dt_actual * a[i]; u[i] += dt_actual * v[i]; }
-        for &d in &ess_tdof_list { u[d as usize] = 0.0; v[d as usize] = 0.0; }
+        // Correct alpha levels
+        for i in 0..fe_size {
+            xa[i] += fac3 * dt2 * aa[i];
+            va[i] = v[i] + fac4 * dt_actual * aa[i];
+        }
+
+        // Extrapolate
+        for i in 0..fe_size {
+            u[i] = (1.0 - inv_f1) * u[i] + inv_f1 * xa[i];
+            v[i] = (1.0 - inv_f1) * v[i] + inv_f1 * va[i];
+            state[i] = (1.0 - inv_f5) * state[i] + inv_f5 * aa[i];
+        }
+        for &d in &ess_tdof_list { u[d as usize] = 0.0; v[d as usize] = 0.0; state[d as usize] = 0.0; }
 
         t += dt_actual;
         if last_step || (ti % vis_steps == 0) {

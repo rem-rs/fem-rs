@@ -8,7 +8,7 @@
 //!
 //! Acts on `VectorH1Space` with interleaved DOFs `[u_x(0), u_y(0), …]`.
 
-scalar_bilinear_integrator!(VectorH1MassIntegrator, kappa,
+scalar_bilinear_integrator_phys!(VectorH1MassIntegrator, kappa,
     "Bilinear integrator for the vector mass operator `κ u · v`.
 
 Each component is treated independently (no cross-coupling between

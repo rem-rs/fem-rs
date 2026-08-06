@@ -39,6 +39,36 @@ macro_rules! scalar_bilinear_integrator {
     };
 }
 
+/// Like [`scalar_bilinear_integrator!`] but uses `qp.phys_weight` (the true
+/// physical measure `quadrature weight × |det J|`) instead of `qp.weight`.
+///
+/// `qp.weight` follows the DiffusionIntegrator MFEM convention
+/// (`ip.weight / |det J|`) on the non-affine assembler path, which is wrong
+/// for mass-type integrands; `phys_weight` is always the physical measure.
+macro_rules! scalar_bilinear_integrator_phys {
+    ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kelem:ident, $n:ident, $w:ident| $body:block) => {
+        use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
+        use crate::integrator::{BilinearIntegrator, QpData};
+
+        #[doc = $doc]
+        pub struct $name<C: ScalarCoeff = f64> {
+            pub $field: C,
+        }
+
+        impl<C: ScalarCoeff> BilinearIntegrator for $name<C> {
+            fn add_to_element_matrix(&self, $qp: &QpData<'_>, $kelem: &mut [f64]) {
+                let $n = $qp.n_dofs;
+                let ctx = CoeffCtx::from_qp(
+                    $qp.x_phys, $qp.dim, $qp.elem_id, $qp.elem_tag,
+                    Some($qp.phi), $qp.elem_dofs,
+                );
+                let $w = $qp.phys_weight * self.$field.eval(&ctx);
+                $body
+            }
+        }
+    };
+}
+
 /// Helper macro for boundary scalar bilinear integrators with a [`ScalarCoeff`] field.
 ///
 /// Like [`scalar_bilinear_integrator!`] but for [`BoundaryBilinearIntegrator`] on

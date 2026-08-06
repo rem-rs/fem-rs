@@ -370,7 +370,9 @@ where
             let qp_r = QpData {
                 n_dofs: n_elem_r,
                 dim,
+
                 weight: w,
+                phys_weight: w,
                 phi: &phi_r,
                 grad_phys: &[], // not needed
                 x_phys: &xp,
@@ -475,7 +477,7 @@ where
             ref_c.eval_curl(xi, &mut curl_c_vec);
             let xp = tr.map_to_physical(xi);
             let qp_r = QpData {
-                n_dofs: n_elem_r, dim, weight: w, phi: &phi_r, grad_phys: &[],
+                n_dofs: n_elem_r, dim, weight: w, phys_weight: w, phi: &phi_r, grad_phys: &[],
                 x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
             };
             for integ in integrators {
@@ -745,7 +747,7 @@ where
                 }
             }
             let qp_r = QpData {
-                n_dofs: n_elem_r, dim, weight: w, phi: &phi_r,
+                n_dofs: n_elem_r, dim, weight: w, phys_weight: w, phi: &phi_r,
                 grad_phys: &grad_phys,
                 x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
             };
@@ -1165,7 +1167,9 @@ fn accumulate_mixed_volume_element<SR, SC>(
         let qp_r = QpData {
             n_dofs: n_elem_r,
             dim,
+
             weight: w,
+                phys_weight: w,
             phi: &phi_r,
             grad_phys: &grad_phys_r,
             x_phys: &xp,
@@ -1176,7 +1180,9 @@ fn accumulate_mixed_volume_element<SR, SC>(
         let qp_c = QpData {
             n_dofs: n_elem_c,
             dim,
+
             weight: w,
+                phys_weight: w,
             phi: &phi_c,
             grad_phys: &grad_phys_c,
             x_phys: &xp,

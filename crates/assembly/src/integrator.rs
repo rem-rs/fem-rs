@@ -16,6 +16,14 @@ pub struct QpData<'a> {
     pub dim:       usize,
     /// Effective integration weight: quadrature weight × |det J|.
     pub weight:    f64,
+    /// Physical integration weight: quadrature weight × |det J|.
+    ///
+    /// Unlike [`weight`](Self::weight) (which follows the DiffusionIntegrator
+    /// MFEM convention `ip.weight / |det J|` on the non-affine path), this is
+    /// always the physical measure: `quadrature weight × |det J|`.  Use this
+    /// for integrators whose integrand is a physical volume form (e.g.
+    /// [`MassIntegrator`](crate::standard::MassIntegrator), `∫ ρ u v dΩ`).
+    pub phys_weight: f64,
     /// Basis function values at this quadrature point; length `n_dofs`.
     pub phi:       &'a [f64],
     /// Physical-space gradients, row-major `[n_dofs × dim]`:
