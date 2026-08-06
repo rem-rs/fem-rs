@@ -147,6 +147,14 @@ fn gmres_core(
                 axpy_inplace(-h[k][i], &v[k], &mut w);
             }
             h[i + 1][i] = norm2(&w);
+            if h[i + 1][i].abs() < 1e-300 {
+                // Arnoldi breakdown: the Krylov subspace has closed, so the
+                // residual-minimising solution is exact — MFEM's GMRES does
+                // the same (happy break).  Dividing by ~0 would NaN the
+                // basis and return a wrong solution.
+                update_x(x, i, &h, &s, &v);
+                return (true, j, s[i].abs());
+            }
             v[i + 1].copy_from_slice(&w);
             scale_inplace(1.0 / h[i + 1][i], &mut v[i + 1]);
 

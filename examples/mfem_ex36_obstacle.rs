@@ -224,6 +224,8 @@ fn load_nurbs_disc() -> Mesh<2> {
     );
 
     // Global geometry-node dedup with tolerance (seam points coincide).
+    // (The dump is already in the H1 topological order used by QuadQ2 —
+    // LL, LR, UR, UL, bottom/right/top/left mids, center — no reorder.)
     let tol = 1e-12;
     let mut node_coords: Vec<f64> = Vec::new();
     let mut elem_geom_conn: Vec<u32> = Vec::with_capacity(n_elem * 9);
@@ -418,6 +420,8 @@ fn main() {
         let center_node = geom.conn[e * 9 + 8]; // QuadQ2 center node
         let c = mesh.geom_coords_of(center_node);
         let u0c = ic_func(c);
+        // C++ LogarithmGridFunctionCoefficient::Eval: psi = max(−36, ln(u−ϕ))
+        // (default min_val_ = −36, verified against the C++ reference dump).
         let val = (u0c - spherical_obstacle(c)).ln();
         psi[e] = val.max(-36.0);
     }
@@ -459,7 +463,9 @@ fn main() {
                 inner: L2P0Coeff {
                     values: psi.clone(),
                 },
-                transform: |t| t.exp(),
+                // C++ ExponentialGridFunctionCoefficient clamps to [0, 1e6]
+                // (max_val) to keep the exponential finite.
+                transform: |t| t.exp().min(1e6),
             };
             let obstacle_cf = FnCoeff(|x: &[f64]| spherical_obstacle(x));
             let rhs1_cf = SumCoeff {
@@ -475,24 +481,43 @@ fn main() {
             eliminate_rowcol_diag_one(&mut a00, &ess_dofs, &x0, &mut rhs0);
 
             // A10 = ∫ v·u  (L² rows × H¹ cols), then EliminateTrialEssentialBC.
-            let mut a10 = MixedAssembler::assemble_bilinear(&l2, &h1, &[&ScalarMassIntegrator], 5);
+            // C++ MixedScalarMassIntegrator uses the mixed GetRule
+            // (order_trial + order_test = 0 + 1 = 1 for P0×P1); a 5th-order
+            // rule is exact on affine elements but differs on this curved mesh.
+            let mut a10 = MixedAssembler::assemble_bilinear(&l2, &h1, &[&ScalarMassIntegrator], 1);
             eliminate_cols(&mut a10, &ess_dofs, &x0, &mut rhs1);
             let a01 = a10.transpose();
 
-            // A11 = Mass(−exp(ψ)) − 1e-6·Mass  on L² (spectrum shift).
-            let neg_exp_psi = TransformedCoeff {
+            // A11 = Mass(−clamp(exp(ψ)+ϕ, 0, 1e6)) − 1e-6·Mass  on L².
+            // C++ neg_exp_psi = ProductCoefficient(-1, exp_psi) where exp_psi
+            // = ExponentialGridFunctionCoefficient(psi, obstacle) evaluates
+            // clamp(exp(ψ)+ϕ, 0, 1e6) — the clamp is applied to the SUM, and
+            // on elements where exp(ψ)+ϕ ≤ 0 the Hessian term vanishes.
+            let exp_psi_t = TransformedCoeff {
                 inner: L2P0Coeff {
                     values: psi.clone(),
                 },
-                transform: |t| -t.exp(),
+                transform: |t| t.exp(),
+            };
+            let obstacle_cf2 = FnCoeff(|x: &[f64]| spherical_obstacle(x));
+            let sum_exp_phi = SumCoeff {
+                a: exp_psi_t,
+                b: obstacle_cf2,
+            };
+            let neg_clamped = TransformedCoeff {
+                inner: sum_exp_phi,
+                transform: |v| -(v.min(1e6).max(0.0)),
             };
             let a11 = Assembler::assemble_bilinear(
                 &l2,
                 &[
-                    &MassIntegrator { rho: neg_exp_psi },
+                    &MassIntegrator { rho: neg_clamped },
                     &MassIntegrator { rho: -1e-6 },
                 ],
-                3,
+                // C++ MassIntegrator uses GetRule(2·order) = 0 for P0 (1-point
+                // centroid); on this curved mesh higher-order quadrature gives
+                // a different element area and breaks the Newton system match.
+                0,
             );
 
             // GMRES(A, prec, rhs, x, 0, 10000, 500, 1e-12, 0.0) with
@@ -504,7 +529,7 @@ fn main() {
                 verbose: std::env::var("FEM_EX36_GMRES_DEBUG").is_ok(),
                 ..Default::default()
             };
-            solve_gmres_block_diag_gs(
+            let (_ok, _iters, _resid) = solve_gmres_block_diag_gs(
                 &a00, &a01, &a10, &a11, &rhs0, &rhs1, &mut x0, &mut x1, 500, &cfg,
             );
             // Newton update size: ‖u_old − u_new‖_{L²}.
@@ -573,7 +598,7 @@ fn main() {
     for e in 0..n_l2 {
         let center_node = geom.conn[e * 9 + 8];
         let c = mesh.geom_coords_of(center_node);
-        u_alt[e] = psi[e].exp() + spherical_obstacle(c);
+        u_alt[e] = psi[e].exp().min(1e6) + spherical_obstacle(c);
     }
     let l2_alt =
         GridFunction::new(&l2, u_alt).compute_l2_error(&|x: &[f64]| exact_solution_obstacle(x), 0);

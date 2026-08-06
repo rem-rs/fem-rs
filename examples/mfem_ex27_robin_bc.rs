@@ -67,6 +67,9 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
             constrained: slave as usize,
             parent_a:    master as usize,
             parent_b:    master as usize,
+            coeff_a:     1.0,
+            coeff_b:     0.0,
+            extra:       vec![],
         })
         .collect();
     apply_hanging_constraints(&mut stiff, &mut rhs, &periodic_constraints);

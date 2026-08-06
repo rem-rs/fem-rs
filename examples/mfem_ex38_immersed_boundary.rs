@@ -53,7 +53,10 @@ use fem_io::read_msh_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_solver::{BuiltinMultiphysicsTemplate, builtin_template_spec, solve_sparse_cholesky};
-use fem_space::{constraints::apply_dirichlet, fe_space::FESpace, H1Space};
+use fem_space::{
+    constraints::{apply_dirichlet_diag_one},
+    fe_space::FESpace, H1Space,
+};
 
 fn main() {
     let cli = parse_args();
@@ -433,7 +436,9 @@ fn solve_embedded_problem(args: &Args) -> EmbeddedResult {
         .filter_map(|(i, active)| if *active { None } else { Some(i as u32) })
         .collect();
     if !inactive_dofs.is_empty() {
-        apply_dirichlet(
+        // DIAG_ONE: the placeholder rows have diagonal 0, so DIAG_KEEP would
+        // leave them singular; set the diagonal to 1 instead.
+        apply_dirichlet_diag_one(
             &mut mat,
             &mut rhs,
             &inactive_dofs,

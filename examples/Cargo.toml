@@ -61,36 +61,6 @@ path = "mfem_ex14_dg_poisson.rs"
 name = "mfem_ex15_dynamic_amr"
 path = "mfem_ex15_dynamic_amr.rs"
 [[example]]
-name = "geo_dump"
-path = "geo_dump.rs"
-[[example]]
-name = "check137"
-path = "check137.rs"
-[[example]]
-name = "check_mid"
-path = "check_mid.rs"
-[[example]]
-name = "check_p1"
-path = "check_p1.rs"
-[[example]]
-name = "check_view"
-path = "check_view.rs"
-[[example]]
-name = "dump_hc"
-path = "dump_hc.rs"
-[[example]]
-name = "mfem_ex15_dump_dsxt2"
-path = "mfem_ex15_dump_dsxt2.rs"
-[[example]]
-name = "mfem_ex15_dump_dshape3"
-path = "mfem_ex15_dump_dshape3.rs"
-[[example]]
-name = "mfem_ex15_dump_jac4"
-path = "mfem_ex15_dump_jac4.rs"
-[[example]]
-name = "mfem_ex15_dump_A_raw_it1"
-path = "mfem_ex15_dump_A_raw_it1.rs"
-[[example]]
 name = "mfem_ex15_dump_A_true"
 path = "mfem_ex15_dump_A_true.rs"
 [[example]]
