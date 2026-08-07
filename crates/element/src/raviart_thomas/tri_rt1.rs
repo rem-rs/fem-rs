@@ -63,69 +63,50 @@ fn eval_monomial_divs(x: f64, y: f64, divs: &mut [f64; 8]) {
 }
 
 /// Build 8×8 Vandermonde matrix V[k][j] = DOF_k(m_j).
+///
+/// Matches MFEM `RT_TriangleElement` (fem/fe/fe_rt.cpp): **nodal** DOFs.
+/// Edge DOF nodes are the Gauss-Legendre open points on each edge
+/// (`poly1d.OpenPoints(1)` → (1∓1/√3)/2 = 0.2113248654, 0.7886751346);
+/// interior DOFs are both at (1/3, 1/3).  The functional is the point
+/// evaluation of the normal component φ·nk with the *unnormalised* edge
+/// normals `nk = {0,-1, 1,1, -1,0}` (hypotenuse normal has length √2 —
+/// MFEM keeps it unnormalised, which affects the basis scaling).
 fn build_vandermonde() -> [[f64; 8]; 8] {
     let mut v = [[0.0f64; 8]; 8];
 
-    // 4-point Gauss-Legendre on [0,1]
-    let sq6_5 = (6.0f64 / 5.0).sqrt();
-    let ta = ((3.0 - 2.0 * sq6_5) / 7.0).sqrt();
-    let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
-    let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
-    let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
-    let gl_pts = [
-        0.5 * (1.0 - tb),
-        0.5 * (1.0 - ta),
-        0.5 * (1.0 + ta),
-        0.5 * (1.0 + tb),
-    ];
-    let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
+    // Gauss-Legendre 2-point nodes on [0,1] (poly1d.OpenPoints(1))
+    let gl = [0.5 * (1.0 - 1.0 / 3.0f64.sqrt()), 0.5 * (1.0 + 1.0 / 3.0f64.sqrt())];
 
     let mut mono = [0.0f64; 16];
 
-    // --- Edge 0 (TRI_FACES[0]): bottom edge v₀→v₁, param t: (t,0), n̂=(0,-1), length=1 ---
-    // DOF_0 = ∫₀¹ (m_j · n̂) dt  (moment 0)
-    // DOF_1 = ∫₀¹ (m_j · n̂) · (2t-1) dt  (moment 1, aligned with MFEM)
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
+    // Edge 0: bottom, nodes (t, 0), nk = (0,-1)
+    for (k, &t) in gl.iter().enumerate() {
         eval_monomials(t, 0.0, &mut mono);
         for j in 0..8 {
-            let nflux = -mono[j * 2 + 1]; // n=(0,−1)
-            v[0][j] += w * nflux; // moment 0
-            v[1][j] += w * nflux * (2.0 * t - 1.0); // moment 1 with (2t-1)
+            v[k][j] = -mono[j * 2 + 1]; // m_j · (0,-1)
         }
     }
-    // --- Edge 1 (TRI_FACES[1]): hypotenuse v₁→v₂, param t: (1-t, t), n̂=(1,1) ---
-    // DOF_2 = ∫₀¹ (m_j · n̂) dt
-    // DOF_3 = ∫₀¹ (m_j · n̂) · (2t-1) dt
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
-        eval_monomials(1.0 - t, t, &mut mono);
+    // Edge 1: hypotenuse, nodes (t2, t1) with (t_hi, t_lo) pairs, nk = (1,1)
+    for k in 0..2 {
+        let (x, y) = (gl[1 - k], gl[k]); // MFEM: Set2(bop[p-i], bop[i]) for i=0..p
+        eval_monomials(x, y, &mut mono);
         for j in 0..8 {
-            let nflux = mono[j * 2] + mono[j * 2 + 1]; // n=(1,1)
-            v[2][j] += w * nflux; // moment 0
-            v[3][j] += w * nflux * (2.0 * t - 1.0); // moment 1 with (2t-1)
+            v[2 + k][j] = mono[j * 2] + mono[j * 2 + 1]; // m_j · (1,1)
         }
     }
-    // --- Edge 2 (TRI_FACES[2]): left edge v₀→v₂, param t: (0,t), n̂=(-1,0), length=1 ---
-    // DOF_4 = ∫₀¹ (m_j · n̂) dt
-    // DOF_5 = ∫₀¹ (m_j · n̂) · (2t-1) dt
-    for k in 0..4 {
-        let (t, w) = (gl_pts[k], gl_wts[k]);
+    // Edge 2: left, nodes (0, t), nk = (-1,0)
+    for k in 0..2 {
+        let t = gl[1 - k]; // MFEM: Set2(0., bop[p-i])
         eval_monomials(0.0, t, &mut mono);
         for j in 0..8 {
-            let nflux = -mono[j * 2]; // n=(−1,0)
-            v[4][j] += w * nflux; // moment 0
-            v[5][j] += w * nflux * (2.0 * t - 1.0); // moment 1 with (2t-1)
+            v[4 + k][j] = -mono[j * 2]; // m_j · (-1,0)
         }
     }
-    // --- Interior DOFs: ∫_T (m_j)_x dA and ∫_T (m_j)_y dA ---
-    let qr = tri_rule(5);
-    for (xi, w) in qr.points.iter().zip(qr.weights.iter()) {
-        eval_monomials(xi[0], xi[1], &mut mono);
-        for j in 0..8 {
-            v[6][j] += w * mono[j * 2];
-            v[7][j] += w * mono[j * 2 + 1];
-        }
+    // Interior DOFs: both at (1/3, 1/3); dof2nk = 0 → nk=(0,-1), dof2nk = 2 → nk=(-1,0)
+    eval_monomials(1.0 / 3.0, 1.0 / 3.0, &mut mono);
+    for j in 0..8 {
+        v[6][j] = -mono[j * 2 + 1]; // nk[0]=(0,-1)
+        v[7][j] = -mono[j * 2];     // nk[2]=(-1,0)
     }
 
     v
@@ -246,19 +227,21 @@ impl VectorReferenceElement for TriRT1 {
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let gl_lo = 0.5 * (1.0 - 1.0 / 3.0f64.sqrt());
+        let gl_hi = 0.5 * (1.0 + 1.0 / 3.0f64.sqrt());
         vec![
-            // TRI_FACES[0]=(0,1): bottom edge, (1/3,0) and (2/3,0)
-            vec![1.0 / 3.0, 0.0],
-            vec![2.0 / 3.0, 0.0],
-            // TRI_FACES[1]=(1,2): hypotenuse, (2/3,1/3) and (1/3,2/3)
-            vec![2.0 / 3.0, 1.0 / 3.0],
-            vec![1.0 / 3.0, 2.0 / 3.0],
-            // TRI_FACES[2]=(0,2): left edge, (0,1/3) and (0,2/3)
-            vec![0.0, 1.0 / 3.0],
-            vec![0.0, 2.0 / 3.0],
-            // interior
+            // Edge 0 (bottom, (0,0)→(1,0)): GL nodes
+            vec![gl_lo, 0.0],
+            vec![gl_hi, 0.0],
+            // Edge 1 (hypotenuse, (1,0)→(0,1)): MFEM Set2(bop[p-i], bop[i])
+            vec![gl_hi, gl_lo],
+            vec![gl_lo, gl_hi],
+            // Edge 2 (left, (0,1)→(0,0)): MFEM Set2(0., bop[p-i])
+            vec![0.0, gl_hi],
+            vec![0.0, gl_lo],
+            // Interior: both at (1/3, 1/3)
             vec![1.0 / 3.0, 1.0 / 3.0],
-            vec![0.25, 0.25],
+            vec![1.0 / 3.0, 1.0 / 3.0],
         ]
     }
 }
@@ -294,72 +277,35 @@ mod tests {
         }
     }
 
-    /// Nodal basis: DOF_k(Φ_i) = δ_{ki} via numerical integration.
+    /// Nodal basis (MFEM RT_TriangleElement semantics): the DOF functional
+    /// is the *point evaluation* of the normal component at the node, i.e.
+    /// DOF_k(Φ_i) = Φ_i(node_k)·nk_k = δ_{ki}.  Nodes are the Gauss-Legendre
+    /// open points on each edge; interior DOFs both at (1/3,1/3).
     #[test]
     fn rt1_nodal_basis() {
         let elem = TriRT1;
-        let sq6_5 = (6.0f64 / 5.0).sqrt();
-        let ta = ((3.0 - 2.0 * sq6_5) / 7.0).sqrt();
-        let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
-        let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
-        let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
-        let gl_pts = [
-            0.5 * (1.0 - tb),
-            0.5 * (1.0 - ta),
-            0.5 * (1.0 + ta),
-            0.5 * (1.0 + tb),
+        let gl_lo = 0.5 * (1.0 - 1.0 / 3.0f64.sqrt());
+        let gl_hi = 0.5 * (1.0 + 1.0 / 3.0f64.sqrt());
+        // node_k + normal (unnormalised nk, as MFEM fe_rt.cpp)
+        let nodes: [(f64, f64, f64, f64); 8] = [
+            (gl_lo, 0.0, 0.0, -1.0),  // edge0 (0,1)
+            (gl_hi, 0.0, 0.0, -1.0),
+            (gl_hi, gl_lo, 1.0, 1.0), // edge1 (1,2)
+            (gl_lo, gl_hi, 1.0, 1.0),
+            (0.0, gl_hi, -1.0, 0.0),  // edge2 (2,0)
+            (0.0, gl_lo, -1.0, 0.0),
+            (1.0 / 3.0, 1.0 / 3.0, 0.0, -1.0), // interior, dof2nk=0 → nk[0]
+            (1.0 / 3.0, 1.0 / 3.0, -1.0, 0.0), // interior, dof2nk=2 → nk[2]
         ];
-        let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
-
         let mut vals = vec![0.0; 16];
-        let mut dof_mat = [[0.0f64; 8]; 8];
-
-        // Edge 0: bottom v0→v1 (t,0), normal (0,-1)  — TRI_FACES[0]
-        for k in 0..4 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            elem.eval_basis_vec(&[t, 0.0], &mut vals);
+        for (k, &(x, y, nx, ny)) in nodes.iter().enumerate() {
+            elem.eval_basis_vec(&[x, y], &mut vals);
             for i in 0..8 {
-                let nf = -vals[i * 2 + 1];
-                dof_mat[0][i] += w * nf; // moment 0
-                dof_mat[1][i] += w * nf * (2.0 * t - 1.0); // moment 1 (2t-1)
-            }
-        }
-        // Edge 1: hypotenuse v1→v2 (1-t,t), normal (1,1)  — TRI_FACES[1]
-        for k in 0..4 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            elem.eval_basis_vec(&[1.0 - t, t], &mut vals);
-            for i in 0..8 {
-                let nf = vals[i * 2] + vals[i * 2 + 1];
-                dof_mat[2][i] += w * nf; // moment 0
-                dof_mat[3][i] += w * nf * (2.0 * t - 1.0); // moment 1 (2t-1)
-            }
-        }
-        // Edge 2: left v0→v2 (0,t), normal (-1,0)  — TRI_FACES[2]
-        for k in 0..4 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            elem.eval_basis_vec(&[0.0, t], &mut vals);
-            for i in 0..8 {
-                let nf = -vals[i * 2];
-                dof_mat[4][i] += w * nf; // moment 0
-                dof_mat[5][i] += w * nf * (2.0 * t - 1.0); // moment 1 (2t-1)
-            }
-        }
-        // Interior
-        let qr = elem.quadrature(6);
-        for (xi, w) in qr.points.iter().zip(qr.weights.iter()) {
-            elem.eval_basis_vec(xi, &mut vals);
-            for i in 0..8 {
-                dof_mat[6][i] += w * vals[i * 2];
-                dof_mat[7][i] += w * vals[i * 2 + 1];
-            }
-        }
-        for k in 0..8 {
-            for i in 0..8 {
+                let nf = vals[i * 2] * nx + vals[i * 2 + 1] * ny;
                 let exp = if i == k { 1.0 } else { 0.0 };
                 assert!(
-                    (dof_mat[k][i] - exp).abs() < 1e-9,
-                    "DOF_{k}(Phi_{i}) = {}, expected {exp}",
-                    dof_mat[k][i]
+                    (nf - exp).abs() < 1e-9,
+                    "DOF_{k}(Phi_{i}) = {nf}, expected {exp}",
                 );
             }
         }

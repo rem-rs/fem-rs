@@ -126,7 +126,9 @@ where
     let elem_type = mesh.element_type(0);
     let ref_elem: &dyn ReferenceElement = match elem_type {
         ElementType::Tri3 | ElementType::Tri6 => &TriP1,
-        ElementType::Quad4 => &QuadQ1,
+        // L2Space uses the Gauss-Legendre tensor-product basis
+        // (QuadL2GL, matching MFEM L2_FECollection), not QuadQ1 (GLL).
+        ElementType::Quad4 => &fem_element::lagrange::QuadL2GL::new(1),
         _ => panic!("compute_l2_error_scalar: unsupported element type {elem_type:?}"),
     };
     let quad = ref_elem.quadrature(6);
@@ -134,15 +136,27 @@ where
     let mut ref_phi = vec![0.0; n_ldofs];
     let mut err2 = 0.0_f64;
 
+    let is_quad = elem_type == ElementType::Quad4;
+    let affine_tr = (!is_quad).then(|| ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(0)));
+
     for e in mesh.elem_iter() {
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
-        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
-        let det_j = tr.det_j();
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * det_j.abs();
-            let xp = tr.map_to_physical(xi);
+            // Quad4 needs the isoparametric (bilinear) map, exactly like the
+            // H(div) error routine — the affine simplex transform gives wrong
+            // det(J) and wrong physical points on quads (p-L² error was
+            // 2.4e-2 vs C++ 3.5e-5).
+            let (xp, w) = if is_quad {
+                let ge = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+                    .expect("geometry element for quad");
+                let (jac, det_j, xp) = crate::vector_assembler::isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, 2);
+                (xp, quad.weights[qi] * det_j.abs())
+            } else {
+                let tr = affine_tr.as_ref().expect("affine transform");
+                (tr.map_to_physical(xi), quad.weights[qi] * tr.det_j().abs())
+            };
             ref_elem.eval_basis(xi, &mut ref_phi);
 
             let mut vh = 0.0;

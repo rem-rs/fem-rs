@@ -304,7 +304,7 @@ where
         let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HDiv).unwrap();
         let n_c = ref_c.n_dofs();
 
-        let ref_r = ref_elem_vol(elem_type, row_space.order()).unwrap();
+        let ref_r = ref_elem_vol_for_space(row_space, elem_type, row_space.order());
         let n_r = ref_r.n_dofs();
 
         // Use the vector element's quadrature (P0 has no quadrature).

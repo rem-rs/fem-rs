@@ -23,6 +23,7 @@ use fem_assembly::{
 };
 use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh};
+use fem_space::dof_manager::EdgeKey;
 use fem_linalg::{CooMatrix, fem_to_linlvo_csr};
 use fem_solver::block::BlockSystem;
 #[cfg(test)] use fem_solver::{solve_gmres, SolverConfig};
@@ -53,8 +54,10 @@ fn main() {
     println!("***********************************************************");
 
     // ── Assemble ─────────────────────────────────────────────────────────
-    // Quadrature order matching C++ max(2, 2*order+1)
-    let qo = (2 * args.order as usize + 1).max(2) as u8;
+    // Quadrature order matching C++ (VectorFEMassIntegrator default
+    // `Trans.OrderW() + 2*GetOrder()`; RT1 → 4; qo=3 under-integrates the
+    // mass matrix → wrong diag(M) → broken DSmoother/S preconditioner).
+    let qo = (2 * args.order as usize + 2).max(2) as u8;
 
     // M = ∫ (u·v) dx   (mass matrix)
     let mm = VectorAssembler::assemble_bilinear(&u_sp, &[&VectorMassIntegrator{alpha:1.0}], qo);
@@ -65,10 +68,13 @@ fn main() {
     // ── RHS: natural BC −p = p_exact → ∫ (−p_exact)·(v·n) ds ──────────
     let tags: Vec<i32> = u_sp.mesh().unique_boundary_tags();
     let fu = if !tags.is_empty() {
-        // C++: fnatcoeff = -p_exact
+        // MFEM `VectorFEBoundaryFluxLFIntegrator` semantics: the RT boundary
+        // DOFs are GL-nodal edge traces, so the RHS is the *reference* L²
+        // projection ∫₀¹ g·φ_k dξ = w_k·g(ξ_k) (GL weights on [0,1], no |J|,
+        // no normal).  The physical-flux integrator used previously
+        // (HdivNormalFluxIntegrator) is NOT what ex5.cpp assembles.
         fn neg_p_exact(x: &[f64]) -> f64 { -p_exact(x) }
-        let nf_int = HdivNormalFluxIntegrator { g: neg_p_exact };
-        VectorBoundaryAssembler::assemble_boundary_linear(&u_sp, &[&nf_int], &tags, qo)
+        assemble_ex5_bdr_rhs(&u_sp, &tags, &neg_p_exact)
     } else {
         vec![0.0; n_u]
     };
@@ -190,6 +196,65 @@ fn main() {
 }
 
 fn p_exact(x: &[f64]) -> f64 { x[0].exp() * x[1].sin() }
+
+/// MFEM `VectorFEBoundaryFluxLFIntegrator` for RT1 boundary RHS.
+///
+/// MFEM assembles the boundary RHS on the *segment* element (L2 GL-nodal):
+/// `elvect[k] = ∫₀¹ g(x(ξ))·φ_k(ξ) dξ`, with the GL rule on [0,1] giving
+/// `= w_k·g(ξ_k)` exactly (φ_k nodal).  It then maps the 2 segment DOFs to
+/// the RT edge DOFs through `DofTransformation` (edge direction sign).
+///
+/// RT1: each edge has 2 DOFs (MFEM `edge_id*2 + {0,1}`, GL nodes).  The
+/// segment node order follows the mesh boundary-edge direction: face_nodes
+/// are stored in the boundary orientation (C++ `GetBdrElementVertices`), so
+/// we evaluate g at ξ along that direction.  A reversed global edge
+/// (`a > b`) flips the node order (same as MFEM `DofOrderForOrientation`).
+fn assemble_ex5_bdr_rhs(
+    space: &HDivSpace<Mesh<2>>,
+    tags: &[i32],
+    g: &dyn Fn(&[f64]) -> f64,
+) -> Vec<f64> {
+    use fem_mesh::MeshTopology;
+    let mesh = space.mesh();
+    let n_dofs = space.n_dofs();
+    let mut rhs = vec![0.0; n_dofs];
+
+    // GL 2-point rule on [0,1] (MFEM `IntRules.Get(SEGMENT, 2)` for RT1:
+    // order = 2*GetOrder()+0 with Segment GetOrder = 1 → 2 points).
+    let xi = [0.5 * (1.0 - 1.0 / 3.0f64.sqrt()), 0.5 * (1.0 + 1.0 / 3.0f64.sqrt())];
+    let wts = [0.5, 0.5];
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if !tags.contains(&mesh.face_tag(f)) { continue; }
+        let nodes = mesh.face_nodes(f);
+        if nodes.len() < 2 { continue; }
+        let pa = mesh.node_coords(nodes[0]);
+        let pb = mesh.node_coords(nodes[1]);
+        let (a, b) = (nodes[0], nodes[1]);
+        let key = if a < b { (a, b) } else { (b, a) };
+        let Some(first) = space.edge_face_dof(EdgeKey::new(key.0, key.1)) else { continue };
+        let first = first as usize;
+
+        // MFEM `GetBdrElementVDofs` semantics (verified 1:1 against
+        // `VectorFEBoundaryFluxLFIntegrator`): the 2 segment GL-nodal DOFs
+        // of edge E are `[2E, 2E+1]` when the boundary-face direction agrees
+        // with the global canonical (min→max) edge direction (cor > 0), and
+        // reversed **and sign-flipped** when it opposes it (cor < 0).
+        // face_nodes order is the boundary-face direction; the global edge
+        // canonical direction is the vertex-id order (EdgeKey min,max).
+        let face_forward = a < b;
+        let cor = if face_forward { 1 } else { -1 };
+        for k in 0..2 {
+            let t = xi[k];
+            let xp = [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])];
+            let global = if cor > 0 { first + k } else { first + (1 - k) };
+            let sgn = if cor > 0 { 1.0 } else { -1.0 };
+            rhs[global] += sgn * wts[k] * (g)(&xp);
+        }
+    }
+    rhs
+}
+
 
 struct Args { mesh: Option<String>, order: u8, visualization: bool }
 fn parse_args() -> Args {
