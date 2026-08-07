@@ -32,6 +32,7 @@ use fem_assembly::standard::{
     VectorMassIntegrator,
 };
 use fem_assembly::Assembler;
+use fem_assembly::GridFunction;
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{
@@ -322,34 +323,29 @@ fn fes_l2_size(port: &Mesh<3>, order_l2: u8) -> usize {
     fes_l2.n_dofs()
 }
 
-/// L² projection of an H¹ port field onto the L² port space
-/// (MFEM `GridFunction::ProjectCoefficient` path: mass solve).
+/// L² projection of an H¹ port field onto the L² port space, matching MFEM
+/// `GridFunction::ProjectCoefficient` semantics (non-NURBS path): the H¹ grid
+/// function is **evaluated at each L² DOF reference node** (`FE::Project`),
+/// NOT solved via the mass matrix.  Quad L² DOFs are the Gauss-Legendre nodes
+/// on [0,1]² (`QuadL2GL`), so `ref_elem_vol_l2` supplies the node points.
 fn project_h1_to_l2(port: &Mesh<3>, order_l2: u8, x_h1: &[f64]) -> Vec<f64> {
     let fes_l2 = L2Space::new(port.clone(), order_l2);
     let n_l2 = fes_l2.n_dofs();
-    let qo = 2 * order_l2 + 3;
-    let mass = Assembler::assemble_bilinear(&fes_l2, &[&MassIntegrator { rho: 1.0 }], qo);
-    // rhs_i = ∫ φ_i · x_h1 over each element: use quadrature point values.
-    // (P0 case: element average; general order handled via element loop.)
-    let mut rhs = vec![0.0; n_l2];
-    let fes_h1 = H1Space::new(port.clone(), order_l2 + 1);
-    let _ = fes_h1;
-    let _ = x_h1;
-    // TODO(mode>0): full L2 projection via quadrature; P0 uses centroid value.
-    if order_l2 == 0 {
-        // P0: dof = element, value = x_h1 at element centroid (H1 P1 average of vertices).
-        for e in 0..port.n_elems() as u32 {
-            let nodes = port.elem_nodes(e);
-            let mut acc = 0.0;
-            for &n in nodes {
-                acc += x_h1[n as usize];
-            }
-            rhs[e as usize] = acc / nodes.len() as f64;
+    let h1_order = order_l2 + 1;
+    let fes_h1 = H1Space::new(port.clone(), h1_order);
+    let gf_h1 = GridFunction::new(&fes_h1, x_h1.to_vec());
+
+    let mut x = vec![0.0; n_l2];
+    // MFEM: fes->GetFE(i)->Project(coeff, Trans, vals) — for each L2 element,
+    // evaluate the H1 field at the L2 DOF reference points.
+    for e in 0..port.n_elems() as u32 {
+        let ref_l2 = fem_assembly::assembler::ref_elem_vol_l2(port.element_type(e), order_l2);
+        let ip = ref_l2.dof_coords();
+        let dofs = fes_l2.element_dofs(e);
+        for (k, &d) in dofs.iter().enumerate() {
+            x[d as usize] = gf_h1.evaluate_at_element(e, &ip[k]);
         }
     }
-    let mut x = rhs.clone();
-    let cfg = fem_solver::SolverConfig { rtol: 1e-12, ..Default::default() };
-    fem_solver::solve_pcg_gssmoother(&mass, &rhs, &mut x, &cfg).expect("L2 projection solve failed");
     x
 }
 

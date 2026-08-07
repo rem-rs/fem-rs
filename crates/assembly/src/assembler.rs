@@ -155,7 +155,7 @@ impl ReferenceElement for BiLinearGeo2D {
 /// `order` for an **L2/DG** space: quad DOFs use MFEM's lexicographic tensor
 /// order (`DG_FECollection`), all other element types keep the H1 topological
 /// ordering (which MFEM's L2 spaces on simplices also use).
-pub(crate) fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     if elem_type == ElementType::Quad4 {
         match order {
             0 => Box::new(P0),
