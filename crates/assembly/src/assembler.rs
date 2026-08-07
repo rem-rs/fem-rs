@@ -17,7 +17,7 @@ use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as F
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
-use fem_space::SpaceType;
+use fem_space::{L2Basis, SpaceType};
 
 use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
 
@@ -177,7 +177,17 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     order: u8,
 ) -> Box<dyn ReferenceElement> {
     if space.space_type() == SpaceType::L2 {
-        ref_elem_vol_l2(elem_type, order)
+        if space.l2_basis() == Some(L2Basis::GaussLobatto) && elem_type == ElementType::Quad4 {
+            // MFEM `DG_FECollection(..., BasisType::GaussLobatto)` uses GLL
+            // nodes with lexicographic DOFs — `QuadQk::new_lex`, NOT the
+            // GL-noded `QuadL2GL` (which matches only `L2_FECollection`'s
+            // default `GaussLegendre`).  Using the wrong basis silently
+            // changes every element matrix (ex41 regression: M/S/K off by
+            // ~6×, IMEX diverged).
+            Box::new(fem_element::lagrange::factory::QuadQk::new_lex(order as usize))
+        } else {
+            ref_elem_vol_l2(elem_type, order)
+        }
     } else {
         ref_elem_vol(elem_type, order)
     }
@@ -687,6 +697,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 dim,
                 weight:    w,
                 phys_weight: w,
+                ref_weight: quad.weights[q],
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp,
@@ -713,6 +724,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 dim,
                 weight:    w,
                 phys_weight: w,
+                ref_weight: quad.weights[q],
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp,
@@ -754,6 +766,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
                 dim,
                 weight:    w,
                 phys_weight: w_phys,
+                ref_weight: quad.weights[q],
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
                 x_phys:    &xp_qp,
@@ -876,6 +889,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
             dim,
             weight:    w,
             phys_weight: w,
+            ref_weight: quad.weights[q],
             phi:       &scratch.phi,
             grad_phys: &scratch.grad_phys,
             x_phys:    &xp,

@@ -789,6 +789,7 @@ impl NativeComplexAssembler {
                     dim,
                     weight: w_phys,
                     phys_weight: w_phys,
+                    ref_weight: quad.weights[q_idx],
                     phi: &phi,
                     grad_phys: &grad_phys,
                     x_phys: &x_phys,

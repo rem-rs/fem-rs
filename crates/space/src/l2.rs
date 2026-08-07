@@ -388,6 +388,8 @@ impl<M: MeshTopology> FESpace for L2Space<M> {
     fn space_type(&self) -> SpaceType { SpaceType::L2 }
 
     fn order(&self) -> u8 { self.order }
+
+    fn l2_basis(&self) -> Option<L2Basis> { Some(self.basis) }
 }
 
 #[cfg(test)]

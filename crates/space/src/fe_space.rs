@@ -88,4 +88,17 @@ pub trait FESpace: Send + Sync {
     fn element_signs(&self, _elem: u32) -> Option<&[f64]> {
         None // default: no sign correction needed
     }
+
+    /// If this is an L² (DG) space, the node placement of its discontinuous
+    /// Lagrange basis ([`crate::L2Basis::GaussLegendre`] or
+    /// [`crate::L2Basis::GaussLobatto`]).  Returns `None` for all other
+    /// spaces.  The assembler uses this to pick the matching reference
+    /// element: MFEM's `L2_FECollection` default (`GaussLegendre`) maps to
+    /// the GL-noded [`fem_element::lagrange::QuadL2GL`], while
+    /// `DG_FECollection(..., BasisType::GaussLobatto)` maps to the GLL-noded
+    /// lexicographic `QuadQk::new_lex` — the two bases are NOT interchangeable
+    /// (they produce different element matrices).
+    fn l2_basis(&self) -> Option<crate::L2Basis> {
+        None
+    }
 }

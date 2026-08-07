@@ -50,7 +50,12 @@ impl<V: VectorCoeff> BilinearIntegrator for ConvectionIntegrator<V> {
                 for k in 0..d {
                     b_dot_grad_j += b[k] * qp.grad_phys[j * d + k];
                 }
-                k_elem[i * n + j] += qp.weight * phi_i * b_dot_grad_j;
+                // MFEM ConvectionIntegrator weights with the bare `ip.weight`
+                // (the |det J| is implicit in the adjugate-Jacobian gradient:
+                // adjJᵀ = det·J⁻ᵀ, so ipw·φᵢ·b·adjJᵀ∇φⱼ = ipw·φᵢ·b·∇φⱼ·dV).
+                // Using qp.weight (which carries an extra 1/det on the
+                // non-affine path) would scale every entry by 1/det.
+                k_elem[i * n + j] += qp.ref_weight * phi_i * b_dot_grad_j;
             }
         }
     }

@@ -351,12 +351,15 @@ impl<V: VectorCoeff> BilinearIntegrator for DGAdvectionIntegrator<V> {
         let mut b = [0.0_f64; 3];
         self.velocity.eval(&ctx, &mut b[..d]);
 
-        // -∫ φ_i · (b·∇u_h) — MFEM ConvectionIntegrator sign
+        // -∫ φ_i · (b·∇u_h) — MFEM ConvectionIntegrator sign.  Weighted with
+        // the bare reference weight (MFEM ConvectionIntegrator convention:
+        // ip.weight; the |det J| is implicit in the adjugate gradient), so this
+        // stays the transpose of ConvectionIntegrator.
         for j in 0..n {
             let mut b_dot_grad_j = 0.0;
             for k in 0..d { b_dot_grad_j += b[k] * qp.grad_phys[j * d + k]; }
             for i in 0..n {
-                k_elem[i * n + j] += -qp.weight * qp.phi[i] * b_dot_grad_j;
+                k_elem[i * n + j] += -qp.ref_weight * qp.phi[i] * b_dot_grad_j;
             }
         }
     }

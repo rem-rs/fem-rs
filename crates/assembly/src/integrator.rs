@@ -24,6 +24,14 @@ pub struct QpData<'a> {
     /// for integrators whose integrand is a physical volume form (e.g.
     /// [`MassIntegrator`](crate::standard::MassIntegrator), `∫ ρ u v dΩ`).
     pub phys_weight: f64,
+    /// Reference-domain quadrature weight `ip.weight` (MFEM convention).
+    ///
+    /// MFEM integrators disagree on how `ip.weight` combines with the
+    /// Jacobian: `DiffusionIntegrator` uses `ip.weight / |det J|` together
+    /// with the adjugate Jacobian, while `ConvectionIntegrator` uses plain
+    /// `ip.weight` (the `det J` is implicit in the adjugate).  This field is
+    /// always the bare quadrature weight, for integrators that need it.
+    pub ref_weight: f64,
     /// Basis function values at this quadrature point; length `n_dofs`.
     pub phi:       &'a [f64],
     /// Physical-space gradients, row-major `[n_dofs × dim]`:
