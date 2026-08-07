@@ -12,13 +12,14 @@
 #![allow(unused_variables, unused_mut)]
 use std::f64::consts::{PI, SQRT_2};
 
+use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
 use fem_assembly::standard::{CurlCurlIntegrator, DiffusionIntegrator, MassIntegrator,
     VectorMassTensorIntegrator};
 use fem_assembly::coefficient::ConstantMatrixCoeff;
 use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
-use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
+use fem_core::types::DofId;
 use fem_element::{VectorReferenceElement, ReferenceElement,
-    nedelec::{TriND1, QuadND1}, lagrange::{TriP1, QuadQ1}};
+    nedelec::{TriND1, QuadND1}, lagrange::{TriP1, QuadQk}};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
@@ -97,7 +98,10 @@ fn affine_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], _xi: &[f64]) -> (f64, f64,
 }
 
 fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
-    let geo = QuadQ1;
+    // Geometry element on [0,1]^2 (MFEM BiLinear2DFiniteElement), matching
+    // QuadQk used by the assembler for the H1 z-space (QuadQ1 is [-1,1]^2 and
+    // would mix reference domains with QuadND1's [0,1]^2 quadrature).
+    let geo = QuadQk::new(1);
     let n_geo = geo.n_dofs();
     let mut grad = vec![0.0_f64; n_geo * 2];
     geo.eval_grad_basis(xi, &mut grad);
@@ -113,10 +117,10 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
     (inv, j[(1,1)] * inv, -j[(1,0)] * inv, -j[(0,1)] * inv, j[(0,0)] * inv, det.abs())
 }
 
-fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, &'static dyn ReferenceElement, usize, JacobianFn) {
+fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
     match et {
-        ElementType::Tri3 => (3, &TriND1 as &dyn VectorReferenceElement, &TriP1 as &dyn ReferenceElement, 3, affine_jac as JacobianFn),
-        ElementType::Quad4 => (4, &QuadND1 as &dyn VectorReferenceElement, &QuadQ1 as &dyn ReferenceElement, 4, isoparametric_jac as JacobianFn),
+        ElementType::Tri3 => (3, &TriND1 as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn),
+        ElementType::Quad4 => (4, &QuadND1 as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn),
         _ => panic!("unsupported element type {et:?}"),
     }
 }
@@ -156,6 +160,11 @@ fn main() {
     let z_space = H1Space::new(mesh.clone(), args.order);
     let n_nd = nd_space.n_dofs();
     let n_h1 = z_space.n_dofs();
+    // Global DOF layout matches MFEM's single ND_R2D_FECollection
+    // FiniteElementSpace::GetElementVDofs: vertex (z) DOFs first
+    // (dof = vertex id, 0..n_h1), then edge (in-plane) DOFs
+    // (dof = n_h1 + edge id, n_h1..n_h1+n_nd).  GS sweep order must
+    // match C++ ex31 (ex31_nd_dump.cpp verified: z DOFs 0..288, in-plane 289..832).
     let n_total = n_nd + n_h1;
     println!("DOFs: H(Curl)={n_nd}  H¹(z)={n_h1}  total={n_total}");
 
@@ -208,14 +217,14 @@ fn main() {
     }
     let coupling = coupling_coo.into_csr();
 
-    // 6. Combine blocks.
+    // 6. Combine blocks.  Layout: z (vertex) DOFs first, then in-plane ND DOFs.
     let mut sys_coo = CooMatrix::<f64>::new(n_total, n_total);
-    for r in 0..n_nd { for k in a_nd.row_ptr[r]..a_nd.row_ptr[r+1] { sys_coo.add(r, a_nd.col_idx[k] as usize, a_nd.values[k]); } }
-    for r in 0..n_h1 { let rr = n_nd + r; for k in a_z.row_ptr[r]..a_z.row_ptr[r+1] { sys_coo.add(rr, n_nd + a_z.col_idx[k] as usize, a_z.values[k]); } }
+    for r in 0..n_nd { let rr = n_h1 + r; for k in a_nd.row_ptr[r]..a_nd.row_ptr[r+1] { sys_coo.add(rr, n_h1 + a_nd.col_idx[k] as usize, a_nd.values[k]); } }
+    for r in 0..n_h1 { for k in a_z.row_ptr[r]..a_z.row_ptr[r+1] { sys_coo.add(r, a_z.col_idx[k] as usize, a_z.values[k]); } }
     for r in 0..coupling.nrows {
         for k in coupling.row_ptr[r]..coupling.row_ptr[r+1] {
             let c = coupling.col_idx[k] as usize; let v = coupling.values[k];
-            if v != 0.0 { sys_coo.add(r, n_nd + c, v); sys_coo.add(n_nd + c, r, v); }
+            if v != 0.0 { sys_coo.add(n_h1 + r, c, v); sys_coo.add(c, n_h1 + r, v); }
         }
     }
     let sys_mat = sys_coo.into_csr();
@@ -227,21 +236,32 @@ fn main() {
     let src_z = FixedOrder::new(FnScalarSource(Box::new(move |x| source_3d(x, kappa)[2])), 2);
     let rhs_z = Assembler::assemble_linear(&z_space, &[&src_z], quad_order);
     let mut rhs = vec![0.0_f64; n_total];
-    for i in 0..n_nd { rhs[i] = rhs_nd[i]; }
-    for i in 0..n_h1 { rhs[n_nd + i] = rhs_z[i]; }
+    for i in 0..n_h1 { rhs[i] = rhs_z[i]; }
+    for i in 0..n_nd { rhs[n_h1 + i] = rhs_nd[i]; }
 
-    // 8. BC (non-homogeneous Dirichlet with exact solution).
+    // 8. BC + initial guess.  MFEM ex31: sol.ProjectCoefficient(E) projects the
+    //    exact solution on ALL DOFs, then FormLinearSystem (default
+    //    copy_interior = 0) does X.SetSubVectorComplement(ess, 0.0): the PCG
+    //    initial guess is the BC values with all interior DOFs set to zero.
+    //    BC elimination uses MFEM 4.9's default diag_policy = DIAG_KEEP.
     let nd_bdr = boundary_dofs_hcurl(&mesh, &nd_space, &mesh.unique_boundary_tags());
     let h1_bdr = boundary_dofs(&mesh, z_space.dof_manager(), &mesh.unique_boundary_tags());
     eprintln!("  BC DOFs: H(Curl)={}  H¹(z)={}", nd_bdr.len(), h1_bdr.len());
     let mut x = vec![0.0_f64; n_total];
-    project_bdr_coefficient_tangent_2d(&mut x[..n_nd], &nd_space,
+    project_bdr_coefficient_tangent_2d(&mut x[n_h1..], &nd_space,
         &|x: &[f64], out: &mut [f64]| { let e = exact_e(x, kappa); out[0] = e[0]; out[1] = e[1]; },
         &mesh.unique_boundary_tags());
-    for &d in &h1_bdr { let c = z_space.dof_manager().dof_coord(d); x[n_nd + d as usize] = exact_e(c, kappa)[2]; }
+    for &d in &h1_bdr { let c = z_space.dof_manager().dof_coord(d); x[d as usize] = exact_e(c, kappa)[2]; }
+    let mut bdr_dofs: Vec<DofId> = nd_bdr.iter().map(|&d| (n_h1 + d as usize) as DofId).collect();
+    let mut bdr_vals: Vec<f64> = nd_bdr.iter().map(|&d| x[n_h1 + d as usize]).collect();
+    for &d in &h1_bdr { bdr_dofs.push(d); bdr_vals.push(x[d as usize]); }
     let mut mat = sys_mat;
-    for &d in &nd_bdr { mat.apply_dirichlet_keep_diag(d as usize, x[d as usize], &mut rhs); }
-    for &d in &h1_bdr { mat.apply_dirichlet_keep_diag(n_nd + d as usize, x[n_nd + d as usize], &mut rhs); }
+    // MFEM 4.9 BilinearForm default diag_policy = DIAG_KEEP (bilinearform.hpp:153):
+    // EliminateVDofs keeps the diagonal and zeroes the rest of the BC rows/cols,
+    // then EliminateVDofsInRHS adjusts the RHS.  Apply per-DOF in the same order.
+    for (&dof, &val) in bdr_dofs.iter().zip(bdr_vals.iter()) {
+        mat.apply_dirichlet_keep_diag(dof as usize, val, &mut rhs);
+    }
 
     // 9. Solve.  MFEM: PCG(*A, M, B, X, 1, 500, 1e-12, 0.0) with GSSmoother —
     // the free-function wrapper calls CGSolver::SetRelTol(sqrt(1e-12)) = 1e-6.
@@ -272,8 +292,8 @@ fn main() {
             let (inv_det, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
             let w = q.weights[qi] * det;
             let xp = if mesh.element_type(e) == ElementType::Quad4 {
-                // Isoparametric: compute through QuadQ1 geometry
-                let geo = QuadQ1; let ng = geo.n_dofs(); let mut phi = vec![0.0; ng];
+                // Isoparametric: compute through QuadQk (Q1) geometry on [0,1]^2
+                let geo = QuadQk::new(1); let ng = geo.n_dofs(); let mut phi = vec![0.0; ng];
                 geo.eval_basis(xi, &mut phi);
                 let mut p = [0.0_f64; 2];
                 for k in 0..ng { let c = mesh.node_coords(nodes[k]); p[0] += phi[k] * c[0]; p[1] += phi[k] * c[1]; }
@@ -297,12 +317,12 @@ fn main() {
                 //   φy = J⁻¹₀₁·φx + J⁻¹₁₁·φy = jit10·φx + jit11·φy
                 // (jit00=j11/det, jit01=−j10/det=J⁻¹₁₀, jit10=−j01/det=J⁻¹₀₁,
                 //  jit11=j00/det).
-                eh[0] += s * x[nd_dofs[i]] * (jit00 * pn[i * 2] + jit01 * pn[i * 2 + 1]);
-                eh[1] += s * x[nd_dofs[i]] * (jit10 * pn[i * 2] + jit11 * pn[i * 2 + 1]);
+                eh[0] += s * x[n_h1 + nd_dofs[i]] * (jit00 * pn[i * 2] + jit01 * pn[i * 2 + 1]);
+                eh[1] += s * x[n_h1 + nd_dofs[i]] * (jit10 * pn[i * 2] + jit11 * pn[i * 2 + 1]);
             }
-            for j in 0..n_lh1 { eh[2] += x[n_nd + h1_dofs[j]] * ph[j]; }
+            for j in 0..n_lh1 { eh[2] += x[h1_dofs[j]] * ph[j]; }
             let mut ce = [0.0_f64; 3];
-            for i in 0..n_ld { ce[2] += signs[i] * x[nd_dofs[i]] * cn[i]; }
+            for i in 0..n_ld { ce[2] += signs[i] * x[n_h1 + nd_dofs[i]] * cn[i]; }
             ce[2] *= inv_det;
             let mut gr = vec![0.0_f64; n_lh1 * 2];
             rh1.eval_grad_basis(xi, &mut gr);
@@ -311,8 +331,8 @@ fn main() {
                 // ∂z/∂y = jit01·gx + jit11·gy;  curl_x = ∂Ez/∂y, curl_y = −∂Ez/∂x.
                 let dx = jit00 * gr[j * 2] + jit10 * gr[j * 2 + 1];
                 let dy = jit01 * gr[j * 2] + jit11 * gr[j * 2 + 1];
-                ce[0] += x[n_nd + h1_dofs[j]] * dy;
-                ce[1] -= x[n_nd + h1_dofs[j]] * dx;
+                ce[0] += x[h1_dofs[j]] * dy;
+                ce[1] -= x[h1_dofs[j]] * dx;
             }
             let (ee, ec) = (exact_e(&xp, kappa), exact_curl(&xp, kappa));
             for c in 0..3 { let d = eh[c] - ee[c]; err2 += w * d * d; let dc = ce[c] - ec[c]; err2 += w * dc * dc; }
