@@ -592,34 +592,48 @@ fn lagrange_q1d_deriv(x: f64) -> [f64; 3] {
 pub fn q2_basis(xi: f64, eta: f64) -> [f64; 9] {
     let lx = lagrange_q1d(xi);
     let ly = lagrange_q1d(eta);
-    let mut phi = [0.0; 9];
-    let mut k = 0;
-    for j in 0..3 {
-        for i in 0..3 {
-            phi[k] = lx[i] * ly[j];
-            k += 1;
-        }
-    }
-    phi
+    // MFEM H1_FECollection order-2 (Q2) DOF order — vertex-edge-face:
+    //   corners (ξ,η): (-1,-1), (1,-1), (1,1), (-1,1)
+    //   edge mids:     (0,-1), (1,0), (0,1), (-1,0)   [bottom,right,top,left]
+    //   center:        (0,0)
+    // (NOT the lexicographic tensor order — that misaligns the element
+    //  matrix with the vertex-first global DOF numbering and breaks A/B.)
+    [
+        lx[0] * ly[0], // 0: (-1,-1)
+        lx[2] * ly[0], // 1: ( 1,-1)
+        lx[2] * ly[2], // 2: ( 1, 1)
+        lx[0] * ly[2], // 3: (-1, 1)
+        lx[1] * ly[0], // 4: ( 0,-1)
+        lx[2] * ly[1], // 5: ( 1, 0)
+        lx[1] * ly[2], // 6: ( 0, 1)
+        lx[0] * ly[1], // 7: (-1, 0)
+        lx[1] * ly[1], // 8: ( 0, 0)
+    ]
 }
 
-/// Derivatives ∂φ/∂ξ and ∂φ/∂η for the 9-node Lagrangian Q2 basis.
+/// Derivatives ∂φ/∂ξ and ∂φ/∂η for the 9-node Lagrangian Q2 basis
+/// (MFEM vertex-edge-face DOF order, see [`q2_basis`]).
 fn q2_basis_derivs(xi: f64, eta: f64) -> ([f64; 9], [f64; 9]) {
     let lx  = lagrange_q1d(xi);
     let ly  = lagrange_q1d(eta);
     let dlx = lagrange_q1d_deriv(xi);
     let dly = lagrange_q1d_deriv(eta);
-    let mut dxi = [0.0; 9];
-    let mut det = [0.0; 9];
-    let mut k = 0;
-    for j in 0..3 {
-        for i in 0..3 {
-            dxi[k] = dlx[i] * ly[j];
-            det[k] = lx[i] * dly[j];
-            k += 1;
-        }
-    }
-    (dxi, det)
+    // corner (-1,-1): dlx0*ly0, lx0*dly0
+    let c00 = (dlx[0] * ly[0], lx[0] * dly[0]);
+    let c10 = (dlx[2] * ly[0], lx[2] * dly[0]);
+    let c11 = (dlx[2] * ly[2], lx[2] * dly[2]);
+    let c01 = (dlx[0] * ly[2], lx[0] * dly[2]);
+    // edge mids (0,-1),(1,0),(0,1),(-1,0)
+    let e_b = (dlx[1] * ly[0], lx[1] * dly[0]);
+    let e_r = (dlx[2] * ly[1], lx[2] * dly[1]);
+    let e_t = (dlx[1] * ly[2], lx[1] * dly[2]);
+    let e_l = (dlx[0] * ly[1], lx[0] * dly[1]);
+    // center (0,0)
+    let ce = (dlx[1] * ly[1], lx[1] * dly[1]);
+    (
+        [c00.0, c10.0, c11.0, c01.0, e_b.0, e_r.0, e_t.0, e_l.0, ce.0],
+        [c00.1, c10.1, c11.1, c01.1, e_b.1, e_r.1, e_t.1, e_l.1, ce.1],
+    )
 }
 
 /// Surface Jacobian for Q2 element at (ξ, η).
@@ -708,6 +722,22 @@ pub fn q2_quad_weight(qi: usize) -> f64 {
 }
 pub fn q2_quad_point(qi: usize) -> (f64, f64) { (GL3[qi][0], GL3[qi][1]) }
 
+// ─── 4×4 Gauss-Legendre on [-1,1]² (degree-7 accurate) ────────────────────
+
+const GL4_X: [f64; 4] = [
+    -0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526,
+];
+const GL4_W: [f64; 4] = [
+    0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538,
+];
+
+pub fn q4_quad_point(qi: usize) -> (f64, f64) {
+    (GL4_X[qi % 4], GL4_X[qi / 4])
+}
+pub fn q4_quad_weight(qi: usize) -> f64 {
+    GL4_W[qi % 4] * GL4_W[qi / 4]
+}
+
 // ─── Diffusion (Laplace-Beltrami) ─────────────────────────────────────────
 
 /// Surface diffusion for Q2 (Quad9): `∫_Γ ∇_Γ u · ∇_Γ v dS`
@@ -746,9 +776,13 @@ pub struct SurfaceQuad9MassIntegrator;
 
 impl SurfaceQuad9MassIntegrator {
     pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 9], k_elem: &mut [f64; 81]) {
-        for q in 0..9 {
-            let (xi, eta) = q2_quad_point(q);
-            let w = q2_quad_weight(q);
+        // MFEM MassIntegrator uses order = 2·GetOrder() + OrderW() = 7 on this
+        // Q2 surface mesh → 4×4 Gauss-Legendre (16 pts), NOT the 3×3 rule used
+        // by DiffusionIntegrator (order 5).  Using 3×3 here under-integrates
+        // the mass block (0.4% error on ex7).
+        for q in 0..16 {
+            let (xi, eta) = q4_quad_point(q);
+            let w = q4_quad_weight(q);
             let j = q2_jacobian_at(elem_nodes, xi, eta);
             let (_det_g, sqrt_det_g) = q2_metric_at(&j);
             let area = w * sqrt_det_g;

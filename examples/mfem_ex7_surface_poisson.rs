@@ -504,9 +504,11 @@ fn quad9_l2_error(mesh: &Mesh<3>, space: &H1Space<Mesh<3>>, u: &[f64],
         if dofs.len() < 9 { continue; }
         let ns = mesh.element_nodes(e);
         let x = q2_coords_from_quad4(mesh, ns);
-        for q in 0..9 {
-            let (xi, eta) = fem_assembly::boundary::surface::q2_quad_point(q);
-            let w   = fem_assembly::boundary::surface::q2_quad_weight(q);
+        // MFEM ComputeL2Error uses 2·GetOrder()+3 = 7th-order quadrature →
+        // 4×4 Gauss-Legendre.  The 3×3 rule under-integrates (u_h − u)².
+        for q in 0..16 {
+            let (xi, eta) = fem_assembly::boundary::surface::q4_quad_point(q);
+            let w   = fem_assembly::boundary::surface::q4_quad_weight(q);
             let jac = fem_assembly::boundary::surface::q2_jacobian_at(&x, xi, eta);
             let g00 = jac[0][0]*jac[0][0] + jac[0][1]*jac[0][1] + jac[0][2]*jac[0][2];
             let g01 = jac[0][0]*jac[1][0] + jac[0][1]*jac[1][1] + jac[0][2]*jac[1][2];
