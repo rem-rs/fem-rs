@@ -118,7 +118,8 @@ pub fn solve_hcurl_eigen(
     stiffness_free: &CsrMatrix<f64>,
     mass_free: &CsrMatrix<f64>,
     gradient_constraints: &DMatrix<f64>,
-    _gradient_full_for_ams: &CsrMatrix<f64>,
+    gradient_full_for_ams: &CsrMatrix<f64>,
+    dim: usize,
     k: usize,
     cfg: &LobpcgConfig,
 ) -> Result<EigenResult, String> {
@@ -129,21 +130,45 @@ pub fn solve_hcurl_eigen(
     let n_constraints = gradient_constraints.ncols();
     let k_work = (k + 20).min(stiffness_free.nrows.saturating_sub(n_constraints));
 
-    // AMG preconditioner (stable on the reduced curl-curl system)
-    let amg = AmgSolver::setup(stiffness_free, AmgConfig::default());
     let a_clone = stiffness_free.clone();
-    let inner_cfg = SolverConfig { max_iter: 20, rtol: 1e-2, atol: 1e-12, verbose: false, ..SolverConfig::default() };
-    let precond = move |r: &DMatrix<f64>| -> DMatrix<f64> {
-        let nk = r.ncols(); let mut z = DMatrix::<f64>::zeros(r.nrows(), nk);
-        for j in 0..nk {
-            let rhs: Vec<f64> = r.column(j).iter().copied().collect();
-            let mut x = vec![0.0; a_clone.nrows];
-            if amg.solve(&a_clone, &rhs, &mut x, &inner_cfg).is_err() {
-                x.copy_from_slice(&rhs);
+    let precond: Box<dyn Fn(&DMatrix<f64>) -> DMatrix<f64> + Send + Sync> = if dim == 3 {
+        // AMS preconditioner (auxiliary-space Maxwell): the right tool for the
+        // 3-D ND1 curl-curl operator (Hiptmair-Xu with edge smoother + nodal
+        // coarse space).  Plain algebraic multigrid converges very slowly on
+        // the (non-elliptic) 3-D curl-curl system.
+        let a_linlvo = fem_to_linlvo_csr(stiffness_free);
+        let g_linlvo = fem_to_linlvo_csr(gradient_full_for_ams);
+        let ams = AmsPrecond::new(&a_linlvo, &g_linlvo, Default::default())
+            .map_err(|e| format!("AMS setup failed: {e}"))?;
+        Box::new(move |r: &DMatrix<f64>| -> DMatrix<f64> {
+            let nk = r.ncols(); let mut z = DMatrix::<f64>::zeros(r.nrows(), nk);
+            for j in 0..nk {
+                let rhs: Vec<f64> = r.column(j).iter().copied().collect();
+                let mut x = vec![0.0; a_clone.nrows];
+                let lr = DenseVec::from_vec(rhs);
+                let mut lx = DenseVec::from_vec(x.clone());
+                ams.apply_precond(&lr, &mut lx);
+                x.copy_from_slice(lx.as_slice());
+                for i in 0..z.nrows() { z[(i, j)] = x[i]; }
             }
-            for i in 0..z.nrows() { z[(i, j)] = x[i]; }
-        }
-        z
+            z
+        })
+    } else {
+        // 2-D: AMG on the reduced curl-curl system (validated on the ex13 2-D
+        // alignment, 12-14 significant digits).
+        let amg = AmgSolver::setup(stiffness_free, AmgConfig::default());
+        Box::new(move |r: &DMatrix<f64>| -> DMatrix<f64> {
+            let nk = r.ncols(); let mut z = DMatrix::<f64>::zeros(r.nrows(), nk);
+            for j in 0..nk {
+                let rhs: Vec<f64> = r.column(j).iter().copied().collect();
+                let mut x = vec![0.0; a_clone.nrows];
+                if amg.solve(&a_clone, &rhs, &mut x, &SolverConfig { max_iter: 20, rtol: 1e-2, atol: 1e-12, verbose: false, ..SolverConfig::default() }).is_err() {
+                    x.copy_from_slice(&rhs);
+                }
+                for i in 0..z.nrows() { z[(i, j)] = x[i]; }
+            }
+            z
+        })
     };
 
     let result = lobpcg_constrained_preconditioned(

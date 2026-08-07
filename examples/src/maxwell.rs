@@ -123,6 +123,9 @@ pub struct HcurlEigenSystem {
     /// Gradient matrix restricted to free H(curl) rows × ALL H¹ columns.
     /// Needed by the AMS preconditioner (which requires the full H¹ space).
     pub gradient_ams: Option<CsrMatrix<f64>>,
+    /// Space dimension (2 or 3): selects the AMS (3-D) vs AMG (2-D)
+    /// preconditioner in the LOBPCG solver.
+    pub dim: usize,
 }
 
 impl HcurlEigenSystem {
@@ -275,6 +278,7 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
         &eig_system.mass_free,
         &eig_system.constraints,
         g_ams,
+        eig_system.dim,
         k,
         eig_cfg,
     )
@@ -708,8 +712,8 @@ pub fn marker_to_tags(boundary_attributes: &[i32], marker: &[i32]) -> Vec<i32> {
 }
 
 /// Return free HCurl DOFs by excluding boundary DOFs selected by marker.
-pub fn free_hcurl_dofs_from_marker(
-    space: &HCurlSpace<Mesh<2>>,
+pub fn free_hcurl_dofs_from_marker<M: MeshTopology>(
+    space: &HCurlSpace<M>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> Vec<usize> {
@@ -725,8 +729,8 @@ pub fn free_hcurl_dofs_from_marker(
 }
 
 /// Return free H1 DOFs by excluding boundary DOFs selected by marker.
-pub fn free_h1_dofs_from_marker(
-    space: &H1Space<Mesh<2>>,
+pub fn free_h1_dofs_from_marker<M: MeshTopology>(
+    space: &H1Space<M>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> Vec<usize> {
@@ -825,9 +829,9 @@ pub fn csr_to_dense_matrix(mat: &CsrMatrix<f64>) -> DMatrix<f64> {
 ///
 /// Returns free DOF lists and the dense constraint matrix obtained from the
 /// discrete gradient restricted to free HCurl/H1 DOFs.
-pub fn build_hcurl_constraint_subspace_from_marker(
-    h1: &H1Space<Mesh<2>>,
-    hcurl: &HCurlSpace<Mesh<2>>,
+pub fn build_hcurl_constraint_subspace_from_marker<M: MeshTopology>(
+    h1: &H1Space<M>,
+    hcurl: &HCurlSpace<M>,
     boundary_attributes: &[i32],
     marker: &[i32],
 ) -> HcurlConstraintSubspace {
@@ -850,9 +854,9 @@ pub fn build_hcurl_constraint_subspace_from_marker(
 ///
 /// Builds full curl-curl and mass matrices, applies MFEM-style marker semantics
 /// for essential boundaries, and returns reduced matrices plus gradient constraints.
-pub fn assemble_hcurl_eigen_system_from_marker(
-    h1: &H1Space<Mesh<2>>,
-    hcurl: &HCurlSpace<Mesh<2>>,
+pub fn assemble_hcurl_eigen_system_from_marker<M: MeshTopology>(
+    h1: &H1Space<M>,
+    hcurl: &HCurlSpace<M>,
     boundary_attributes: &[i32],
     marker: &[i32],
     mu: f64,
@@ -893,6 +897,7 @@ pub fn assemble_hcurl_eigen_system_from_marker(
         hcurl_free_dofs: subspace.hcurl_free_dofs,
         h1_free_dofs: subspace.h1_free_dofs,
         gradient_ams: grad_ams,
+        dim: hcurl.mesh().dim() as usize,
     }
 }
 
