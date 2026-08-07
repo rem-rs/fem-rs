@@ -767,14 +767,30 @@ impl ImexDirkRk3 {
             y[i] = u[i] + dt * a41 * k1_exp[i] + dt * a42 * k2_exp[i] + dt * a43 * k3_exp[i];
         }
         op.explicit(*t + dt, &y, &mut k4_exp);
+        // MFEM: x.Add(dt*b1, k2_imp); x.Add(dt*b2, k3_imp) — two separate
+        // in-place updates (NOT a single expression: the FP accumulation
+        // order differs by 1 ulp, which 10 IMEX steps amplify to 3e-6).
         for i in 0..n {
-            u[i] += dt * b1 * k2_imp[i] + dt * b2 * k3_imp[i];
+            u[i] += dt * b1 * k2_imp[i];
+        }
+        for i in 0..n {
+            u[i] += dt * b2 * k3_imp[i];
         }
         op.implicit_solve(dt * gamma, u, &mut k3_imp); // reuses k3_imp as k4_imp
 
+        // MFEM: x.Add(dt*b1, k2_exp); x.Add(dt*b2, k3_exp);
+        //       x.Add(dt*gamma, k4_exp); x.Add(dt*gamma, k3_imp);
         for i in 0..n {
-            u[i] += dt * b1 * k2_exp[i] + dt * b2 * k3_exp[i] + dt * gamma * k4_exp[i]
-                + dt * gamma * k3_imp[i];
+            u[i] += dt * b1 * k2_exp[i];
+        }
+        for i in 0..n {
+            u[i] += dt * b2 * k3_exp[i];
+        }
+        for i in 0..n {
+            u[i] += dt * gamma * k4_exp[i];
+        }
+        for i in 0..n {
+            u[i] += dt * gamma * k3_imp[i];
         }
         *t += dt;
     }

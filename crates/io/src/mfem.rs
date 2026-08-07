@@ -720,17 +720,18 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                 conn.extend([id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)]);
                 elem_tags.push(1);
             }
-            // Boundary segments (MFEM Make2D): bottom attr 1, right attr 2,
-            // top attr 3, left attr 4 — directions follow MFEM.
+            // Boundary segments — MFEM Make2D order (mesh/mesh.cpp):
+            //   boundary[i]            = (i, i+1)          bottom, attr 1
+            //   boundary[nx+i]         = (m+i+1, m+i)      top,    attr 3
+            //   boundary[2*nx+j]       = ((j+1)*m, j*m)    left,   attr 4
+            //   boundary[2*nx+ny+j]    = (j*m+nx, (j+1)*m+nx) right, attr 2
+            // (m = nxv).  The boundary-face order matters for the assembly
+            // column order (e.g. ex41 BlockILU MDF reordering).
             let mut face_conn = Vec::with_capacity(2 * (nx + ny) * 2);
             let mut face_tags = Vec::with_capacity(2 * (nx + ny));
             for i in 0..nx {
                 face_conn.extend([id(i as i32, 0), id(i as i32 + 1, 0)]);
                 face_tags.push(1);
-            }
-            for j in 0..ny {
-                face_conn.extend([id(nx as i32, j as i32), id(nx as i32, j as i32 + 1)]);
-                face_tags.push(2);
             }
             for i in 0..nx {
                 face_conn.extend([id(i as i32 + 1, ny as i32), id(i as i32, ny as i32)]);
@@ -739,6 +740,10 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             for j in 0..ny {
                 face_conn.extend([id(0, j as i32 + 1), id(0, j as i32)]);
                 face_tags.push(4);
+            }
+            for j in 0..ny {
+                face_conn.extend([id(nx as i32, j as i32), id(nx as i32, j as i32 + 1)]);
+                face_tags.push(2);
             }
             let mesh = Mesh::uniform(
                 coords, conn, elem_tags, ElementType::Quad4,

@@ -67,6 +67,26 @@ pub fn gauss_legendre_01(n: usize) -> (Vec<f64>, Vec<f64>) {
                 0.1739274225687268971,
             ],
         ),
+        // 5-point Gauss-Legendre on [0,1] — bit-identical to MFEM's
+        // IntRules.Get(SEGMENT, 8) (Poly_1D::GaussLegendre).  The generic
+        // Newton solver (gauss_legendre_01_arbitrary) differs by 1 ulp on
+        // the outer nodes, which flips BlockILU's MDF tie-breaks (ex41).
+        5 => (
+            vec![
+                0.0469100770306680043,
+                0.230765344947158446,
+                0.5,
+                0.769234655052841498,
+                0.953089922969332037,
+            ],
+            vec![
+                0.118463442528094556,
+                0.239314335249683235,
+                0.284444444444444444,
+                0.239314335249683235,
+                0.118463442528094556,
+            ],
+        ),
         _ => {
             let (xs, ws) = gauss_legendre_01_arbitrary(n);
             (xs, ws)

@@ -171,19 +171,30 @@ fn bilinear_map(g: &[[f64; 2]; 4], xi: f64, eta: f64) -> [f64; 2] {
 /// bilinear derivative `omy*(g1-g0) + eta*(g2-g3)` is mathematically equal but
 /// floats to a different last ulp, which flips BlockILU's MDF tie-breaks.
 pub fn jacobian(g: &[[f64; 2]; 4], xi: f64, eta: f64) -> [[f64; 2]; 2] {
-    // L2-lex geometry-node order: dof2=(0,1) ↔ local node 3, dof3=(1,1) ↔ local node 2.
-    let pm = [g[0], g[1], g[3], g[2]];
-    let mut dphi = [0.0f64; 8];
-    P1_GEOM.eval_grad_basis(&[xi, eta], &mut dphi);
+    // MFEM `IsoparametricTransformation::EvalJacobian` = PointMat · dshape
+    // with `BiLinear2DFiniteElement::CalcDShape` (fem/fe/fe_fixed_order.cpp),
+    // L2-lex dof order:
+    //   dshape(0) = (-1+eta, -1+xi)  dshape(1) = (1-eta, -xi)
+    //   dshape(2) = (eta, xi)        dshape(3) = (-eta, 1-xi)
+    // Note `-1.+eta` is NOT `-(1.-eta)` — they differ by 1 ulp, which flips
+    // BlockILU's MDF tie-breaks.  Pair with PointMat in H1 topological order
+    // (the mesh has no Nodes field, so PointMat = the element's vertices in
+    // H1 order, matching BiLinear2D's dof order v0=(0,0) v1=(1,0) v2=(1,1)
+    // v3=(0,1)); accumulate with plain multiply-then-add (kernels::Mult is
+    // two statements, g++ -O2 does NOT fuse into FMA).
+    let pm = g;
+    let dsh = [
+        [-1.0 + eta, -1.0 + xi],
+        [1.0 - eta, -xi],
+        [eta, xi],
+        [-eta, 1.0 - xi],
+    ];
     let mut j = [[0.0f64; 2]; 2];
     for k in 0..4 {
-        // MFEM's kernels::AddMult is compiled with FMA: dFdx += dshape*PointMat
-        // fuses the multiply into the accumulation (1-ulp difference from the
-        // unfused form).  Use mul_add to match bit-for-bit.
-        j[0][0] = dphi[k * 2].mul_add(pm[k][0], j[0][0]);
-        j[1][0] = dphi[k * 2].mul_add(pm[k][1], j[1][0]);
-        j[0][1] = dphi[k * 2 + 1].mul_add(pm[k][0], j[0][1]);
-        j[1][1] = dphi[k * 2 + 1].mul_add(pm[k][1], j[1][1]);
+        j[0][0] = dsh[k][0] * pm[k][0] + j[0][0];
+        j[1][0] = dsh[k][0] * pm[k][1] + j[1][0];
+        j[0][1] = dsh[k][1] * pm[k][0] + j[0][1];
+        j[1][1] = dsh[k][1] * pm[k][1] + j[1][1];
     }
     j
 }
@@ -245,7 +256,7 @@ fn face_normal(p0: &[f64; 2], p1: &[f64; 2]) -> [f64; 2] {
 /// `dofs_per_elem` DOFs.  `vel` is evaluated at the *Elem1* physical point of
 /// each face quadrature point, exactly like MFEM's `DGTraceIntegrator`.
 pub fn assemble_ex41_bdr_faces<F>(
-    coo: &mut CooMatrix<f64>,
+    hi: &mut MfemHeadInsert,
     mesh: &Mesh<2>,
     space: &L2Space<Mesh<2>>,
     bdr_faces: &[BdrFaceLoc],
@@ -316,7 +327,7 @@ pub fn assemble_ex41_bdr_faces<F>(
             if w != 0.0 {
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        k_ll[i * nd1 + j] = (w * phi1[i]).mul_add(phi1[j], k_ll[i * nd1 + j]);
+                        k_ll[i * nd1 + j] =((w * phi1[i])) * (phi1[j]) + (k_ll[i * nd1 + j]);
                     }
                 }
             }
@@ -346,19 +357,19 @@ pub fn assemble_ex41_bdr_faces<F>(
             // adjJ.Mult(ni, nh) — MFEM kernels::Mult fuses the 2nd column
             // into the accumulator (FMA), so use mul_add.
             let nh = [
-                adj1[0][0].mul_add(ni[0], adj1[0][1] * ni[1]),
-                adj1[1][0].mul_add(ni[0], adj1[1][1] * ni[1]),
+(adj1[0][0]) * (ni[0]) + (adj1[0][1] * ni[1]),
+(adj1[1][0]) * (ni[0]) + (adj1[1][1] * ni[1]),
             ];
             // dshape1dn[j] = dshape1(j,:) . nh
             let mut dshape1dn = vec![0.0f64; nd1];
             for j in 0..nd1 {
-                dshape1dn[j] = dphi1[j * 2].mul_add(nh[0], dphi1[j * 2 + 1] * nh[1]);
+                dshape1dn[j] =(dphi1[j * 2]) * (nh[0]) + (dphi1[j * 2 + 1] * nh[1]);
             }
             let wq = ni[0] * nor[0] + ni[1] * nor[1];
             // elmat (1,1): s1 * dshape1dn^T
             for i in 0..nd1 {
                 for j in 0..nd1 {
-                    el[i * nd1 + j] = phi1[i].mul_add(dshape1dn[j], el[i * nd1 + j]);
+                    el[i * nd1 + j] =(phi1[i]) * (dshape1dn[j]) + (el[i * nd1 + j]);
                 }
             }
             if kappa != 0.0 {
@@ -367,7 +378,7 @@ pub fn assemble_ex41_bdr_faces<F>(
                 for i in 0..nd1 {
                     let wsi = wqk * phi1[i];
                     for j in 0..=i {
-                        jm[i * nd1 + j] = wsi.mul_add(phi1[j], jm[i * nd1 + j]);
+                        jm[i * nd1 + j] =(wsi) * (phi1[j]) + (jm[i * nd1 + j]);
                     }
                 }
             }
@@ -384,19 +395,67 @@ pub fn assemble_ex41_bdr_faces<F>(
             el[i * nd1 + i] = (sigma - 1.0) * el[i * nd1 + i] + jm[i * nd1 + i];
         }
 
-        // Scatter the diffusion block.
+        // Scatter the diffusion block (MFEM AddSubMatrix: for i, for j,
+        // head-insert keeps structural zeros at MFEM-identical positions).
         for i in 0..nd1 {
             for j in 0..nd1 {
-                // MFEM AddSubMatrix(skip_zeros=0): keep structural zeros.
-                coo.add(dofs1[i] as usize, dofs1[j] as usize, el[i * nd1 + j]);
+                hi.add(dofs1[i] as usize, dofs1[j] as usize, el[i * nd1 + j]);
             }
         }
         // Scatter the advection trace (1,1) block.
         for i in 0..nd1 {
             for j in 0..nd1 {
-                coo.add(dofs1[i] as usize, dofs1[j] as usize, k_ll[i * nd1 + j]);
+                hi.add(dofs1[i] as usize, dofs1[j] as usize, k_ll[i * nd1 + j]);
             }
         }
+    }
+}
+
+// ─── MFEM head-insert assembly ─────────────────────────────────────────────
+
+/// Simulate MFEM's `SparseMatrix` open (pre-Finalize) assembly semantics:
+/// `AddSubMatrix` → `SearchRow` inserts a NEW column at the FRONT of the
+/// row's linked list (`node->Prev = Rows[row]`), while an EXISTING column
+/// accumulates in place.  `into_csr` emits the rows in this head-insert
+/// order — the bit-identical column ordering of MFEM's assembled matrices.
+///
+/// This matters for ex41: BlockILU's MDF block reordering sums A² over the
+/// CSR column order of each block row (`MinimumDiscardedFillOrdering`), and
+/// a 1-ulp difference in those sums flips the `WeightMinHeap` tie-breaks,
+/// changing the whole block permutation and hence the preconditioner.
+pub struct MfemHeadInsert {
+    nrows: usize,
+    rows: Vec<Vec<(usize, f64)>>,
+}
+
+impl MfemHeadInsert {
+    pub fn new(nrows: usize) -> Self {
+        Self { nrows, rows: vec![Vec::new(); nrows] }
+    }
+
+    /// MFEM `_Add_(col, a)`: accumulate into an existing column in place, or
+    /// head-insert a new one.
+    pub fn add(&mut self, r: usize, c: usize, v: f64) {
+        let row = &mut self.rows[r];
+        if let Some(p) = row.iter().position(|(cc, _)| *cc == c) {
+            row[p].1 += v;
+        } else {
+            row.insert(0, (c, v));
+        }
+    }
+
+    pub fn into_csr(self) -> fem_linalg::CsrMatrix<f64> {
+        let mut row_ptr = vec![0usize; self.nrows + 1];
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            for &(c, v) in row {
+                col_idx.push(c as u32);
+                values.push(v);
+            }
+            row_ptr[i + 1] = col_idx.len();
+        }
+        fem_linalg::CsrMatrix { nrows: self.nrows, ncols: self.nrows, row_ptr, col_idx, values }
     }
 }
 
@@ -409,7 +468,7 @@ pub fn assemble_ex41_bdr_faces<F>(
 /// `dofs_per_elem` DOFs.  `vel` is evaluated at the *Elem1* physical point of
 /// each face quadrature point, exactly like MFEM's `DGTraceIntegrator`.
 pub fn assemble_ex41_interior_faces<F>(
-    coo: &mut CooMatrix<f64>,
+    hi: &mut MfemHeadInsert,
     mesh: &Mesh<2>,
     space: &L2Space<Mesh<2>>,
     faces: &[FaceLoc],
@@ -501,26 +560,26 @@ pub fn assemble_ex41_interior_faces<F>(
             if w1 != 0.0 {
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        k_ll[i * nd1 + j] = (w1 * phi1[i]).mul_add(phi1[j], k_ll[i * nd1 + j]);
+                        k_ll[i * nd1 + j] =((w1 * phi1[i])) * (phi1[j]) + (k_ll[i * nd1 + j]);
                     }
                 }
                 // K12(r,c) = -w1 * s2[c] * s1[r]  (r = Elem1 dof row, c = Elem2 dof col)
                 for r in 0..nd1 {
                     for c in 0..nd2 {
-                        k_lr[r * nd2 + c] = (-(w1 * phi2[c])).mul_add(phi1[r], k_lr[r * nd2 + c]);
+                        k_lr[r * nd2 + c] =((-(w1 * phi2[c]))) * (phi1[r]) + (k_lr[r * nd2 + c]);
                     }
                 }
             }
             if w2 != 0.0 {
                 for i in 0..nd2 {
                     for j in 0..nd2 {
-                        k_rr[i * nd2 + j] = (w2 * phi2[i]).mul_add(phi2[j], k_rr[i * nd2 + j]);
+                        k_rr[i * nd2 + j] =((w2 * phi2[i])) * (phi2[j]) + (k_rr[i * nd2 + j]);
                     }
                 }
                 // K21(r,c) = -w2 * s1[c] * s2[r]  (r = Elem2 dof row, c = Elem1 dof col)
                 for r in 0..nd2 {
                     for c in 0..nd1 {
-                        k_rl[r * nd1 + c] = (-(w2 * phi1[c])).mul_add(phi2[r], k_rl[r * nd1 + c]);
+                        k_rl[r * nd1 + c] =((-(w2 * phi1[c]))) * (phi2[r]) + (k_rl[r * nd1 + c]);
                     }
                 }
             }
@@ -545,9 +604,12 @@ pub fn assemble_ex41_interior_faces<F>(
             let adj1 = [[j1[1][1], -j1[0][1]], [-j1[1][0], j1[0][0]]];
             let mut w = ipw / det1;
             if nd2 > 0 {
-                // MFEM: w = ip.weight/2/Weight() — divide by 2 FIRST, then by
-                // the determinant (bit-different from (ipw/det)/2).
-                w = ipw / 2.0 / det1;
+                // MFEM DGDiffusionIntegrator (bilininteg.cpp): for Elem1,
+                //   w = ip.weight/Trans.Elem1->Weight(); w /= 2;
+                // i.e. divide by the determinant FIRST, then halve (NOT
+                // ipw/2/det — that differs by 1 ulp and flips BlockILU's
+                // MDF tie-breaks).
+                w /= 2.0;
             }
             // Q == diffusion coefficient (MFEM ConstantCoefficient diff).
             w *= diff;
@@ -557,13 +619,13 @@ pub fn assemble_ex41_interior_faces<F>(
             // adjJ.Mult(ni, nh) — MFEM kernels::Mult fuses the 2nd column
             // into the accumulator (FMA), so use mul_add.
             let nh = [
-                adj1[0][0].mul_add(ni[0], adj1[0][1] * ni[1]),
-                adj1[1][0].mul_add(ni[0], adj1[1][1] * ni[1]),
+(adj1[0][0]) * (ni[0]) + (adj1[0][1] * ni[1]),
+(adj1[1][0]) * (ni[0]) + (adj1[1][1] * ni[1]),
             ];
             // dshape1dn[j] = dshape1(j,:) . nh
             let mut dshape1dn = vec![0.0f64; nd1];
             for j in 0..nd1 {
-                dshape1dn[j] = dphi1[j * 2].mul_add(nh[0], dphi1[j * 2 + 1] * nh[1]);
+                dshape1dn[j] =(dphi1[j * 2]) * (nh[0]) + (dphi1[j * 2 + 1] * nh[1]);
             }
             let mut wq = ni[0] * nor[0] + ni[1] * nor[1];
             // elmat block (1,1): s1 * dshape1dn^T
@@ -584,13 +646,13 @@ pub fn assemble_ex41_interior_faces<F>(
                 ];
                 let mut dshape2dn = vec![0.0f64; nd2];
                 for j in 0..nd2 {
-                    dshape2dn[j] = dphi2[j * 2].mul_add(nh2[0], dphi2[j * 2 + 1] * nh2[1]);
+                    dshape2dn[j] =(dphi2[j * 2]) * (nh2[0]) + (dphi2[j * 2 + 1] * nh2[1]);
                 }
                 wq += ni2[0] * nor[0] + ni2[1] * nor[1];
                 // elmat (1,2): s1 * dshape2dn^T
                 for i in 0..nd1 {
                     for j in 0..nd2 {
-                        el[i * (nd1 + nd2) + (nd1 + j)] = phi1[i].mul_add(dshape2dn[j], el[i * (nd1 + nd2) + (nd1 + j)]);
+                        el[i * (nd1 + nd2) + (nd1 + j)] =(phi1[i]) * (dshape2dn[j]) + (el[i * (nd1 + nd2) + (nd1 + j)]);
                     }
                 }
                 // elmat (2,1): - s2 * dshape1dn^T
@@ -610,16 +672,16 @@ pub fn assemble_ex41_interior_faces<F>(
                 wq *= kappa;
                 for i in 0..nd1 {
                     for j in 0..nd1 {
-                        jm[i * (nd1 + nd2) + j] = (wq * phi1[i]).mul_add(phi1[j], jm[i * (nd1 + nd2) + j]);
+                        jm[i * (nd1 + nd2) + j] =((wq * phi1[i])) * (phi1[j]) + (jm[i * (nd1 + nd2) + j]);
                     }
                 }
                 if nd2 > 0 {
                     for i in 0..nd2 {
                         for j in 0..nd1 {
-                            jm[(nd1 + i) * (nd1 + nd2) + j] = (-(wq * phi2[i])).mul_add(phi1[j], jm[(nd1 + i) * (nd1 + nd2) + j]);
+                            jm[(nd1 + i) * (nd1 + nd2) + j] =((-(wq * phi2[i]))) * (phi1[j]) + (jm[(nd1 + i) * (nd1 + nd2) + j]);
                         }
                         for j in 0..nd2 {
-                            jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)] = (wq * phi2[i]).mul_add(phi2[j], jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)]);
+                            jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)] =((wq * phi2[i])) * (phi2[j]) + (jm[(nd1 + i) * (nd1 + nd2) + (nd1 + j)]);
                         }
                     }
                 }
@@ -645,25 +707,22 @@ pub fn assemble_ex41_interior_faces<F>(
                 };
                 // MFEM AddSubMatrix(skip_zeros=0): structural zeros are kept
                 // (they matter for the block pattern of BlockILU).
-                coo.add(gi as usize, gj as usize, v);
+                hi.add(gi as usize, gj as usize, v);
             }
         }
 
-        // Scatter the advection trace blocks.
-        for i in 0..nd1 {
-            for j in 0..nd1 {
-                coo.add(dofs1[i] as usize, dofs1[j] as usize, k_ll[i * nd1 + j]);
-            }
-            for j in 0..nd2 {
-                coo.add(dofs1[i] as usize, dofs2[j] as usize, k_lr[i * nd2 + j]);
-            }
-        }
-        for i in 0..nd2 {
-            for j in 0..nd1 {
-                coo.add(dofs2[i] as usize, dofs1[j] as usize, k_rl[i * nd1 + j]);
-            }
-            for j in 0..nd2 {
-                coo.add(dofs2[i] as usize, dofs2[j] as usize, k_rr[i * nd2 + j]);
+        // Scatter the advection trace blocks in MFEM's single 32x32 elmat
+        // layout (row vdofs[i], col vdofs[j], i then j ascending — the
+        // head-insert turns this into MFEM's column order).
+        let vdofs: Vec<usize> = dofs1.iter().chain(dofs2.iter()).map(|&d| d as usize).collect();
+        for i in 0..n {
+            for j in 0..n {
+                let v = if i < nd1 {
+                    if j < nd1 { k_ll[i * nd1 + j] } else { k_lr[i * nd2 + (j - nd1)] }
+                } else {
+                    if j < nd1 { k_rl[(i - nd1) * nd1 + j] } else { k_rr[(i - nd1) * nd2 + (j - nd1)] }
+                };
+                hi.add(vdofs[i], vdofs[j], v);
             }
         }
     }

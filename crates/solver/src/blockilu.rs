@@ -36,8 +36,7 @@ pub struct BlockIlu {
 impl BlockIlu {
     /// Construct the block ILU(0) factorization of the sparse matrix `a` with
     /// the given block size (must divide `a.nrows`).
-    pub fn new(a: &fem_linalg::CsrMatrix<f64>, block_size: usize) -> Self {
-        let mut ilu = BlockIlu {
+    pub fn new(a: &fem_linalg::CsrMatrix<f64>, block_size: usize) -> Self {        let mut ilu = BlockIlu {
             block_size,
             n_blockrows: a.nrows / block_size,
             p: Vec::new(),
@@ -536,25 +535,30 @@ fn right_solve(rows: usize, cols: usize, x: &mut [f64], d: &[f64], ipiv: &[usize
 
 /// `c = c + alpha * a * b` where `a` is `n×n`, `b` is a vector or matrix.
 /// MFEM `DenseMatrix::AddMult_a` (column-major, k summed in order).
+/// `c = c + alpha * a * b` where `a` is `n×n`, `b` is a vector or matrix.
+/// MFEM `DenseMatrix::AddMult_a` (column-major, immediate per-term
+/// accumulation — NOT a dot-product-then-scale, which differs by ~1 ulp):
+/// - vector:   `x_col = alpha*b[col]`, `c[row] += x_col*a[row,col]`
+/// - matrix:   `c[i,j] += alpha*a[i,k]*b[k,j]`  (j→k→i loops)
 fn add_mult_a(alpha: f64, a: &[f64], b: &[f64], c: &mut [f64], n: usize) {
     if b.len() == n {
-        // b is a vector
-        for i in 0..n {
-            let mut s = 0.0;
-            for k in 0..n {
-                s += a[i + k * n] * b[k];
+        // b is a vector — MFEM DenseMatrix::AddMult_a(real_t, Vector, Vector):
+        // for (col) { x_col = alpha*x[col]; for (row) y[row] += x_col*d[row,col]; }
+        for k in 0..n {
+            let xk = alpha * b[k];
+            for i in 0..n {
+                c[i] += xk * a[i + k * n];
             }
-            c[i] += alpha * s;
         }
     } else {
+        // b is a matrix — MFEM AddMult_a(alpha, DenseMatrix, DenseMatrix, ...):
+        // for (j) for (k) for (i) a[i,j] += alpha*b[i,k]*c[k,j]
         let m = b.len() / n;
         for j in 0..m {
-            for i in 0..n {
-                let mut s = 0.0;
-                for k in 0..n {
-                    s += a[i + k * n] * b[k + j * n];
+            for k in 0..n {
+                for i in 0..n {
+                    c[i + j * n] += alpha * a[i + k * n] * b[k + j * n];
                 }
-                c[i + j * n] += alpha * s;
             }
         }
     }

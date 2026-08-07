@@ -17,7 +17,7 @@ use std::f64::consts::PI;
 use fem_assembly::{
     Assembler,
     coefficient::ConstantVectorCoeff,
-    dg::dg_imex::{assemble_ex41_bdr_faces, assemble_ex41_interior_faces, build_bdr_face_locs, build_face_locs},
+    dg::dg_imex::{assemble_ex41_bdr_faces, assemble_ex41_interior_faces, build_bdr_face_locs, build_face_locs, MfemHeadInsert},
     standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator},
 };
 use fem_core::types::DofId;
@@ -199,6 +199,30 @@ fn u0_function(problem: usize, bb_min: &[f64], bb_max: &[f64], x: &[f64]) -> f64
 /// The Rust `CooMatrix::into_csr()` merge (sort by (row,col) then reverse by
 /// insertion index) would re-order columns, so ex41 must build M/S/K/A with
 /// this function instead of `coo.into_csr()` to be bit-identical to MFEM.
+/// Insert a domain (element) matrix in MFEM's `AddSubMatrix(vdofs, vdofs)`
+/// order: for each element `e`, rows `dofs[i]` then columns `dofs[j]` (i and
+/// j ascending) — the head-insert turns this into MFEM's column order.
+fn domain_insert(
+    hi: &mut MfemHeadInsert,
+    space: &fem_space::L2Space<fem_mesh::Mesh<2>>,
+    mat: &CsrMatrix<f64>,
+    scale: f64,
+) {
+    let n_elem = space.mesh().n_elements();
+    for e in 0..n_elem as u32 {
+        let dofs = space.element_dofs(e);
+        let nd = dofs.len();
+        for i in 0..nd {
+            let r = dofs[i] as usize;
+            for j in 0..nd {
+                let c = dofs[j] as usize;
+                let v = mat.find_entry(r, c).map(|p| mat.values[p]).unwrap_or(0.0);
+                hi.add(r, c, scale * v);
+            }
+        }
+    }
+}
+
 fn merge_csr_mfem_plus_eq(
     primary: &CsrMatrix<f64>,
     secondary: &CsrMatrix<f64>,
@@ -446,9 +470,18 @@ fn main() {
         };
         let alpha = -1.0;
         let sigma = -1.0;
-        let mut k_face_coo = CooMatrix::new(n_dofs, n_dofs);
+        // MFEM assembles K/S into ONE open SparseMatrix in this order:
+        // domain integrators (Convection/Diffusion, all elements) first, then
+        // interior faces, then boundary faces.  `MfemHeadInsert` reproduces
+        // the resulting head-insert column ordering bit-for-bit — BlockILU's
+        // MDF block reordering sums A² over the CSR column order, so a
+        // different column order changes the whole preconditioner.
+        let mut hi_k = MfemHeadInsert::new(n_dofs);
+        let mut hi_s = MfemHeadInsert::new(n_dofs);
+        domain_insert(&mut hi_k, &space, &k_vol, -1.0); // K = -Convection
+        domain_insert(&mut hi_s, &space, &s_vol, 1.0);
         assemble_ex41_interior_faces(
-            &mut k_face_coo,
+            &mut hi_k,
             &mesh,
             &space,
             &faces,
@@ -458,10 +491,9 @@ fn main() {
             sigma,
             0.0,
         );
-        let mut s_face_coo = CooMatrix::new(n_dofs, n_dofs);
         let zero_vel = |_: f64, _: f64| -> [f64; 2] { [0.0, 0.0] };
         assemble_ex41_interior_faces(
-            &mut s_face_coo,
+            &mut hi_s,
             &mesh,
             &space,
             &faces,
@@ -475,7 +507,7 @@ fn main() {
         let bdr_faces = build_bdr_face_locs(&mesh);
         if !bdr_faces.is_empty() {
             assemble_ex41_bdr_faces(
-                &mut k_face_coo,
+                &mut hi_k,
                 &mesh,
                 &space,
                 &bdr_faces,
@@ -486,7 +518,7 @@ fn main() {
                 0.0,
             );
             assemble_ex41_bdr_faces(
-                &mut s_face_coo,
+                &mut hi_s,
                 &mesh,
                 &space,
                 &bdr_faces,
@@ -497,15 +529,8 @@ fn main() {
                 kappa as f64,
             );
         }
-        // K = -ConvectionIntegrator + trace ; S = Diffusion + diffusion-face.
-        // MFEM: K = alpha*Convection (alpha=-1) + NonconservativeDGTrace,
-        // S = Diffusion + DGDiffusion — assembled into ONE open SparseMatrix
-        // (domain integrators first, then face integrators), so the column
-        // order is preserved by merge_csr_mfem_plus_eq instead of coo merge.
-        let k_face = k_face_coo.into_csr();
-        let s_face = s_face_coo.into_csr();
-        k = merge_csr_mfem_plus_eq(&k_face, &k_vol, -1.0);
-        s = merge_csr_mfem_plus_eq(&s_face, &s_vol, 1.0);
+        k = hi_k.into_csr();
+        s = hi_s.into_csr();
 
         // 7. Initial conditions.
         u = vec![0.0f64; n_dofs];
