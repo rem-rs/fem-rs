@@ -1,0 +1,15 @@
+{
+  "name": "mfem_ex4_darcy",
+  "metrics": {
+    "l2_error": {
+      "value": 0.01614432549528158,
+      "rtol": 1e-6,
+      "atol": 1e-10
+    },
+    "n_dofs": {
+      "value": 41280.0,
+      "rtol": 0.0,
+      "atol": 0.5
+    }
+  }
+}

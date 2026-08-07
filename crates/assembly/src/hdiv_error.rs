@@ -45,7 +45,13 @@ where
         (ElementType::Quad4, 1) => &QuadRT1,
         _ => panic!("compute_hdiv_l2_error: unsupported (type={elem_type:?}, order={order})"),
     };
-    let quad = ref_elem.quadrature(6);
+    // MFEM GridFunction::ComputeL2Error uses intorder = 2*fe->GetOrder() + 3
+    // (gridfunc.cpp).  For RT elements GetOrder() = p + 1 where p is the RT
+    // order (RT_QuadrilateralElement(p) → VectorTensorFiniteElement(..., p+1,
+    // ...) in fe_rt.cpp), so intorder = 2*(order+1) + 3 = 5 for RT0.  On
+    // non-affine (bilinear) quads the integrand is not a polynomial, so the
+    // quadrature order changes the value — match MFEM exactly.
+    let quad = ref_elem.quadrature(2 * (order + 1) + 3);
     let n_ldofs = ref_elem.n_dofs() as usize;
     let mut ref_phi = vec![0.0; n_ldofs * 2];
     let mut phys_phi = vec![0.0; n_ldofs * 2];

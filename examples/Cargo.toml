@@ -169,6 +169,9 @@ path = "mfem_ex40_eikonal.rs"
 name = "mfem_ex41_imex"
 path = "mfem_ex41_imex.rs"
 [[example]]
+name = "mfem_ex4_darcy"
+path = "mfem_ex4_darcy.rs"
+[[example]]
 name = "mfem_ex5_mixed_darcy"
 path = "mfem_ex5_mixed_darcy.rs"
 [[example]]

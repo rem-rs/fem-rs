@@ -8,7 +8,7 @@
 //! ```
 //!
 //! with a manufactured source derived from the exact solution
-//! `F = (cos(κy)sin(κx), cos(κx)sin(κy))` where `κ = π·freq`.
+//! `F = (cos(κx)sin(κy), cos(κy)sin(κx))` where `κ = π·freq`.
 //! Discretisation uses Raviart-Thomas H(div) elements.
 //!
 //! ## Usage
@@ -20,39 +20,25 @@
 //! cargo run --example mfem_ex4_darcy -- -no-bc -no-vis
 //! ```
 //!
-//! ## ADS (Auxiliary-space Divergence Solver)
-//!
-//! An experimental ADS path using `solve_pcg_ads` with discrete curl
-//! (`DiscreteLinearOperator::curl_2d_hdiv`) and gradient operators is
-//! preserved in the source for reference.  Enable it by changing the
-//! `#[cfg(feature = "ads")]` gate below — it uses `apply_dirichlet_symmetric`
-//! for BCs and falls back to GSSmoother for unsupported element orders.
-//!
 //! ## Output
 //! Prints DOF count, linear system size, solver statistics, and L² error.
 //! Writes `refined.mesh` and `sol.gf` (matching MFEM ex4 output files).
 
 use std::f64::consts::PI;
-use std::fs::File;
-use std::io::Write;
 
 use fem_assembly::{
     VectorAssembler,
-    discrete_op::DiscreteLinearOperator,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{GradDivIntegrator, VectorMassIntegrator},
 };
-use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
-use fem_linalg::fem_to_linlvo_csr;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::{solve_pcg_ads, AdsSolverConfig, SolverConfig};
+use fem_solver::SolverConfig;
 use fem_space::{
-    H1Space, HCurlSpace,
     HDivSpace,
     fe_space::FESpace,
     constraints::{boundary_dofs_hdiv, form_linear_system},
 };
-use fem_solver::PrintLevel;
 
 fn main() {
     // 1. Parse command-line options.
@@ -77,13 +63,30 @@ fn main() {
     } else {
         println!("   --no-hybridization");
     }
+    if args.pa {
+        println!("   --partial-assembly");
+    } else {
+        println!("   --no-partial-assembly");
+    }
+    if args.ea {
+        println!("   --element-assembly");
+    } else {
+        println!("   --no-element-assembly");
+    }
+    println!("   --device {}", args.device.as_deref().unwrap_or("cpu"));
     if args.visualization {
         println!("   --visualization");
     } else {
         println!("   --no-visualization");
     }
 
-    // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class yet).
+    // 2. Device setup — mirror MFEM Device::Print (no GPU backend in fem-rs).
+    println!("Device configuration: {}", args.device.as_deref().unwrap_or("cpu"));
+    println!("Memory configuration: host-std");
+
+    if args.pa || args.ea {
+        eprintln!("  Warning: partial/element assembly not implemented in fem-rs — using the default (full assembly) path.");
+    }
 
     // 3. Read the mesh from the given mesh file.
     let mesh_path = args.mesh.as_deref().unwrap_or("../data/star.mesh");
@@ -109,10 +112,6 @@ fn main() {
     //    MFEM's RT_FECollection(order-1, dim) → RT0 for order=1, RT1 for order=2.
     let rt_order = if args.order >= 1 { args.order - 1 } else { 0 };
 
-    // Clone mesh for auxiliary spaces (ADS uses the de Rham complex).
-    let aux_mesh = mesh.clone();
-    let aux_h1 = H1Space::new(aux_mesh.clone(), 1);       // P1 — topological gradient
-    let aux_hcurl = HCurlSpace::new(aux_mesh, 1);          // ND1 — topological curl
     let space = HDivSpace::new(mesh, rt_order);
     let n_dofs = space.n_dofs();
     println!("\nNumber of finite element unknowns: {n_dofs}");
@@ -128,7 +127,7 @@ fn main() {
     let kappa = args.freq * PI;
 
     // 7. Right-hand side: b(v) = ∫ f·v dx  where
-    //    f = (1+2κ²)(cos(κy)sin(κx), cos(κx)sin(κy)).
+    //    f = (1+2κ²)(cos(κx)sin(κy), cos(κy)sin(κx)).
     let source = MaxwellHSource { kappa };
     let quad_order = args.order * 2 + 2;
     let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
@@ -141,15 +140,13 @@ fn main() {
     let mut mat = VectorAssembler::assemble_bilinear(
         &space, &[&grad_div, &vec_mass], quad_order,
     );
-    print!("Assembling: matrix ... ");
-
     // 10. Form the linear system.
     if args.static_cond {
         eprintln!("  Warning: static condensation not yet implemented — skipping.");
     }
-    println!("done.");
 
-    let (u, solver_label) = if args.hybridization {
+
+    let u = if args.hybridization {
         // ── Hybridization path ─────────────────────────────────────────────
         use fem_assembly::hybridization::Hybridization;
         use fem_assembly::vector_assembler::accumulate_vector_bilinear_element;
@@ -161,8 +158,8 @@ fn main() {
         let x_bc_proj = if !ess_bdr.is_empty() {
             let mut xp = space.interpolate_vector(&|p| {
                 let k = kappa;
-                vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                     (k * p[0]).cos() * (k * p[1]).sin()]
+                vec![(k * p[0]).cos() * (k * p[1]).sin(),
+                     (k * p[1]).cos() * (k * p[0]).sin()]
             });
             // Zero out interior DOFs; keep only essential (boundary) DOF values.
             let ess_set: std::collections::HashSet<u32> = ess_bdr.iter().copied().collect();
@@ -270,96 +267,56 @@ fn main() {
             u_hyb[i] += x_bc_proj[i];
         }
 
-        (u_hyb, "Hybridization".to_string())
-
-    } else if false {
-        // ── ADS path (experimental, see module docs) ─────────────────────────
-        // Row-zeroing (symmetric) preserves matrix structure for ADS.
-        if !ess_bdr.is_empty() {
-            let x_exact = space.interpolate_vector(&|p| {
-                let k = kappa;
-                vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                     (k * p[0]).cos() * (k * p[1]).sin()]
-            });
-            for &dof in &ess_bdr {
-                mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
-            }
-        }
-        let n_sys = n_dofs;
-        println!("Size of linear system: {n_sys}");
-
-        let mut x = vec![0.0_f64; n_dofs];
-        let _cfg = SolverConfig { rtol: 1e-20, max_iter: 10000, verbose: false, print_level: PrintLevel::Iterations, ..SolverConfig::default() };
-        let ads_cfg = AdsSolverConfig {
-            inner_cfg: SolverConfig { rtol: 1e-10, max_iter: 2000, verbose: false, ..SolverConfig::default() },
-            ..AdsSolverConfig::default()
-        };
-        let (result, solver_label) = match (
-            DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space),
-            DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl),
-        ) {
-            (Ok(c_fem), Ok(g_fem)) => {
-                let c_linlvo = fem_to_linlvo_csr(&c_fem);
-                let g_linlvo = fem_to_linlvo_csr(&g_fem);
-                let res = solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
-                    .expect("PCG+ADS solve failed");
-                (res, "PCG+ADS".to_string())
-            }
-            _ => {
-                eprintln!("ADS not supported at this order — falling back to GSSmoother");
-                let res = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &_cfg)
-                    .expect("PCG+GSSmoother solve failed");
-                (res, "PCG+GSSmoother (fallback)".to_string())
-            }
-        };
-        println!(
-            "{}: {} iterations, ||r||/||b|| = {:.3e}",
-            solver_label, result.iterations, result.final_residual,
-        );
-        (x, solver_label)
-
+        u_hyb
     } else {
         // ── Standard path: 1:1 with MFEM ex4 (form_linear_system + GSSmoother) ─
+        // MFEM: x.ProjectCoefficient(F); a.FormLinearSystem(ess_tdof_list, x, *b,
+        // A, X, B) — X starts from the essential (BC) values of x, all other
+        // DOFs zero; B = b − A·X (non-essential part).  The PCG below then
+        // iterates from that X.
+        let mut x = vec![0.0_f64; n_dofs];
         if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
-                vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                     (k * p[0]).cos() * (k * p[1]).sin()]
+                vec![(k * p[0]).cos() * (k * p[1]).sin(),
+                     (k * p[1]).cos() * (k * p[0]).sin()]
             });
+            for &d in &ess_bdr {
+                x[d as usize] = x_exact[d as usize];
+            }
             let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
-            let mut x = vec![0.0_f64; n_dofs];
             form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bv);
         }
         let n_sys = n_dofs;
         println!("Size of linear system: {n_sys}");
-
-        let mut x = vec![0.0_f64; n_dofs];
+        // MFEM ex4: PCG(*A, M, B, X, 1, 10000, 1e-20, 0.0) — the free-function
+        // wrapper calls CGSolver::SetRelTol(sqrt(RTOLERANCE)) = 1e-10 and
+        // SetAbsTol(sqrt(ATOLERANCE)) = 0, with convergence test
+        // (B r, r) <= rel_tol^2 * (B r0, r0).
         let cfg = SolverConfig {
-            rtol: 1e-20,
+            rtol: 1e-10,
             max_iter: 10000,
-            verbose: false,
+            verbose: true,
             ..SolverConfig::default()
         };
-        let result = fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
+        fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg)
             .expect("PCG+GSSmoother solve failed");
-        println!("PCG+GS: {} iterations, ||r||/||b|| = {:.3e}",
-            result.iterations, result.final_residual);
-        (x, "PCG+GSSmoother".to_string())
+        x
     };
-
-    println!("Solver: {solver_label}");
 
     // 13. Compute and print the L² norm of the error against the exact solution.
     let l2_err = fem_assembly::hdiv_error::compute_hdiv_l2_error(
         &space, &u, |x| exact_f(x, kappa),
     );
-    println!("\n|| F_h - F ||_{{L^2}} = {l2_err:.14e}");
+    println!("\n|| F_h - F ||_{{L^2}} = {}", fem_solver::fmt_g(l2_err));
 
     // 14. Save the refined mesh and the solution (matches MFEM ex4 output files).
+    //     MFEM: ofstream precision(8); fespace->GetGridFunction(x).Save(sol_ofs)
+    //     → FiniteElementCollection: RT_2D_P0 (RT_FECollection(order-1)).
     {
         write_mfem_file("refined.mesh", space.mesh()).expect("mesh write failed");
-        write_mfem_gf_file("sol.gf", dim, &u, "H1", args.order, 1, 14).expect("sol write failed");
-        eprintln!("  Wrote refined.mesh and sol.gf");
+        write_mfem_gf_file("sol.gf", dim, &u, "RT", args.order.saturating_sub(1), 1, 8)
+            .expect("sol write failed");
     }
 
     // 15. Send a nodal-projected view of the solution to GLVis.
@@ -373,7 +330,7 @@ fn main() {
 
 // ─── Source term (VectorLinearIntegrator) ────────────────────────────────────
 //
-//   f = (1 + 2κ²) · (cos(κy)sin(κx), cos(κx)sin(κy))
+//   f = (1 + 2κ²) · (cos(κx)sin(κy), cos(κy)sin(κx))
 
 struct MaxwellHSource {
     kappa: f64,
@@ -384,8 +341,8 @@ impl VectorLinearIntegrator for MaxwellHSource {
         let x = qp.x_phys;
         let k = self.kappa;
         let temp = 1.0 + 2.0 * k * k;
-        let fx = temp * (k * x[1]).cos() * (k * x[0]).sin();
-        let fy = temp * (k * x[0]).cos() * (k * x[1]).sin();
+        let fx = temp * (k * x[0]).cos() * (k * x[1]).sin();
+        let fy = temp * (k * x[1]).cos() * (k * x[0]).sin();
         for i in 0..qp.n_dofs {
             let dot = qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy;
             f_elem[i] += qp.weight * dot;
@@ -395,12 +352,12 @@ impl VectorLinearIntegrator for MaxwellHSource {
 
 // ─── Exact solution ──────────────────────────────────────────────────────────
 //
-//   F = (cos(κy)sin(κx), cos(κx)sin(κy))
+//   F = (cos(κx)sin(κy), cos(κy)sin(κx))
 
 fn exact_f(x: &[f64], kappa: f64) -> [f64; 2] {
     let k = kappa;
-    [(k * x[1]).cos() * (k * x[0]).sin(),
-     (k * x[0]).cos() * (k * x[1]).sin()]
+    [(k * x[0]).cos() * (k * x[1]).sin(),
+     (k * x[1]).cos() * (k * x[0]).sin()]
 }
 
 
@@ -486,6 +443,9 @@ struct Args {
     freq:           f64,
     static_cond:    bool,
     hybridization:  bool,
+    pa:             bool,
+    ea:             bool,
+    device:         Option<String>,
     visualization:  bool,
 }
 
@@ -497,6 +457,9 @@ fn parse_args() -> Args {
         freq:           1.0,
         static_cond:    false,
         hybridization:  false,
+        pa:             false,
+        ea:             false,
+        device:         None,
         visualization:  true,
     };
     let mut it = std::env::args().skip(1);
@@ -534,6 +497,21 @@ fn parse_args() -> Args {
             }
             "-no-hb" | "--no-hybridization" => {
                 a.hybridization = false;
+            }
+            "-pa" | "--partial-assembly" => {
+                a.pa = true;
+            }
+            "-no-pa" | "--no-partial-assembly" => {
+                a.pa = false;
+            }
+            "-ea" | "--element-assembly" => {
+                a.ea = true;
+            }
+            "-no-ea" | "--no-element-assembly" => {
+                a.ea = false;
+            }
+            "-d" | "--device" => {
+                a.device = it.next();
             }
             "-vis" | "--visualization" => {
                 a.visualization = true;
@@ -602,8 +580,8 @@ mod tests {
         if !ess_bdr.is_empty() {
             let x_exact = space.interpolate_vector(&|p| {
                 let k = kappa;
-                vec![(k * p[1]).cos() * (k * p[0]).sin(),
-                     (k * p[0]).cos() * (k * p[1]).sin()]
+                vec![(k * p[0]).cos() * (k * p[1]).sin(),
+                     (k * p[1]).cos() * (k * p[0]).sin()]
             });
             let bv: Vec<f64> = ess_bdr.iter().map(|&d| x_exact[d as usize]).collect();
             let mut x = vec![0.0_f64; n_dofs];
@@ -635,6 +613,9 @@ mod tests {
             freq:           1.0,
             static_cond:    false,
             hybridization:  false,
+            pa:             false,
+            ea:             false,
+            device:         None,
             visualization:  false,
         }
     }
@@ -662,57 +643,4 @@ mod tests {
             .finalize();
     }
 
-    #[test]
-    fn ex4_ads_tiny_converges() {
-        // Use a tiny 2×2 triangle mesh so ADS setup is instant even in debug mode.
-        let mesh = Mesh::<2>::unit_square_tri(2);
-        let aux_mesh = mesh.clone();
-        let aux_h1 = H1Space::new(aux_mesh.clone(), 1);
-        let aux_hcurl = HCurlSpace::new(aux_mesh, 1);
-        let space = HDivSpace::new(mesh, 0); // RT0
-        let n_dofs = space.n_dofs();
-        let kappa = std::f64::consts::PI;
-
-        let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
-        let ess_bdr = boundary_dofs_hdiv(space.mesh(), &space, &all_tags);
-
-        let source = MaxwellHSource { kappa };
-        let quad_order = 3;
-        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
-
-        let grad_div = GradDivIntegrator { kappa: 1.0 };
-        let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mut mat = VectorAssembler::assemble_bilinear(
-            &space, &[&grad_div, &vec_mass], quad_order,
-        );
-
-        // Row-zeroing BCs (symmetric — required for PCG/ADS).
-        let x_exact = space.interpolate_vector(&|p| {
-            vec![(kappa * p[1]).cos() * (kappa * p[0]).sin(),
-                 (kappa * p[0]).cos() * (kappa * p[1]).sin()]
-        });
-        for &dof in &ess_bdr {
-            mat.apply_dirichlet_symmetric(dof as usize, x_exact[dof as usize], &mut rhs);
-        }
-
-        // Build C and G, solve with ADS.
-        let c_fem = DiscreteLinearOperator::curl_2d_hdiv(&aux_hcurl, &space).unwrap();
-        let g_fem = DiscreteLinearOperator::gradient(&aux_h1, &aux_hcurl).unwrap();
-        eprintln!("C: {}×{}, G: {}×{}", c_fem.nrows, c_fem.ncols, g_fem.nrows, g_fem.ncols);
-
-        let c_linlvo = fem_to_linlvo_csr(&c_fem);
-        let g_linlvo = fem_to_linlvo_csr(&g_fem);
-
-        let mut x = vec![0.0_f64; n_dofs];
-        let ads_cfg = AdsSolverConfig {
-            inner_cfg: SolverConfig { rtol: 1e-8, max_iter: 1000, verbose: false, ..SolverConfig::default() },
-            ..AdsSolverConfig::default()
-        };
-        let res = solve_pcg_ads(&mat, &c_linlvo, &g_linlvo, &rhs, &mut x, &ads_cfg)
-            .expect("PCG+ADS solve failed");
-
-        assert!(res.converged, "ADS must converge on tiny mesh");
-        eprintln!("ADS tiny {} DOFs: {} iters, ||r||/||b|| = {:.3e}",
-            n_dofs, res.iterations, res.final_residual);
-    }
 }
