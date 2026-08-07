@@ -62,13 +62,21 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     }
 
     // ── 2. Collect new midpoint nodes ─────────────────────────────────────────
+    // MFEM UniformRefinement2D_base creates edge midpoints in element ×
+    // local-edge traversal order (deterministic).  Iterating a HashSet here
+    // made the new-node numbering non-deterministic (different vertex order
+    // every process run), which broke 1:1 output (sol.gf, A/b column
+    // indexing) — see ex2.
     let mut midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
     let mut new_coords: Vec<f64> = mesh.coords.clone();
 
     let n_nodes_orig = mesh.n_nodes() as NodeId;
     let mut next_node = n_nodes_orig;
 
-    for &e in &elems_to_refine {
+    for e in 0..n_elems as ElemId {
+        if !elems_to_refine.contains(&e) {
+            continue;
+        }
         let ns = mesh.elem_nodes(e);
         // For Tri3 bisection: bisect longest edge only (newest-vertex bisection).
         // For simplicity here, bisect all 3 edges (red refinement).
