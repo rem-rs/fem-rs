@@ -29,13 +29,13 @@ fn nr(v: &[f64]) -> f64 {
 
 // ─── Pressure mass matrix (MFEM: BilinearForm(MassIntegrator) on pressure space)
 fn build_pressure_mass(
-    mesh: impl MeshTopology + Clone,
+    mesh: impl fem_mesh::MeshTopology + 'static,
     p_order: u8,
     quad_order: u8,
     np: usize,
 ) -> CsrMatrix<f64> {
     use fem_space::fe_space::FESpace;
-    let space = H1Space::new(mesh.clone(), p_order);
+    let space = H1Space::new(mesh.clone_mesh(), p_order);
     let mut coo = CooMatrix::<f64>::new(np, np);
     let ne = mesh.n_elements() as usize;
     for e in 0..ne {
@@ -70,20 +70,36 @@ fn main() {
     let args = Args::parse();
     println!("=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===");
 
-    // 1. Read mesh
+    // 1. Read mesh (2D or 3D)
     let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
-    let mesh2d = mfem.mesh2d.expect("expected 2D mesh");
-    let mut mesh = mesh2d;
-    for _ in 0..args.refine {
-        mesh = refine_uniform(&mesh);
-    }
-    let dim = mesh.dim() as u8;
+    let dim: usize;
+    let mesh3d: bool;
+    let mut mesh: Box<dyn fem_mesh::MeshTopology + Send + Sync> = if let Some(m2) = mfem.mesh2d {
+        mesh3d = false;
+        dim = 2;
+        let mut m = m2;
+        for _ in 0..args.refine {
+            m = refine_uniform(&m);
+        }
+        Box::new(m)
+    } else if let Some(m3) = mfem.mesh3d {
+        mesh3d = true;
+        dim = 3;
+        let mut m = m3;
+        for _ in 0..args.refine {
+            m = fem_mesh::amr::refine_uniform_3d(&m);
+        }
+        Box::new(m)
+    } else {
+        panic!("ex19: mesh must be 2D or 3D (got {})", args.mesh);
+    };
+    let dim_u8 = dim as u8;
     let order = args.order;
     let p_order = if order > 1 { order - 1 } else { 1 };
 
     // 2. FE spaces (Taylor-Hood: VectorH1^dim for u, H1 for p)
-    let u_space = VectorH1Space::new(mesh.clone(), order, dim);
-    let p_space = H1Space::new(mesh.clone(), p_order);
+    let u_space = VectorH1Space::new(mesh.clone_mesh(), order, dim_u8);
+    let p_space = H1Space::new(mesh.clone_mesh(), p_order);
     let nu = u_space.n_dofs();
     let np = p_space.n_dofs();
     let ns = u_space.n_scalar_dofs(); // scalar DOFs per component
@@ -98,14 +114,18 @@ fn main() {
     let attr2 = boundary_dofs(u_space.mesh(), dm, &[2]);
     let mut du: Vec<(usize, f64)> = Vec::new();
     for &d in &attr1 {
-        // Both components zero
-        du.push((d as usize, 0.0));
-        du.push((d as usize + ns, 0.0));
+        // All components zero
+        for c in 0..dim {
+            du.push((d as usize + c * ns, 0.0));
+        }
     }
     for &d in &attr2 {
         let x = dm.dof_coord(d as u32)[0]; // x-coordinate
         du.push((d as usize, 0.0));         // u_x = 0
         du.push((d as usize + ns, 0.25 * x)); // u_y = 0.25*x
+        if mesh3d {
+            du.push((d as usize + 2 * ns, 0.0)); // u_z = 0
+        }
     }
 
     // 4. Initial guess: InitialDeformation = ReferenceConfiguration + shear
@@ -137,15 +157,15 @@ fn main() {
 
     // 6. Build MixedHyperelasticityForm (moves residual/jacobian to library)
     let quad_order = 2 * order + 3;
-    let dim_u = dim as usize;
+    let dim_u = dim;
     let form = MixedHyperelasticityForm::new(
-        Box::new(mesh.clone()),
+        Box::new(mesh.clone_mesh()),
         dim_u, order, p_order, args.mu, nu, np, ns,
         elem_dofs_u.clone(), elem_dofs_p.clone(), du.clone(),
     );
 
     // 7. Pressure mass matrix (built once, used in preconditioner)
-    let p_mass = build_pressure_mass(mesh.clone(), p_order, quad_order, np);
+    let p_mass = build_pressure_mass(mesh.clone_mesh(), p_order, quad_order, np);
 
     // 8. Initial residual
     let mut ru = vec![0.0_f64; nu];
@@ -316,16 +336,32 @@ fn main() {
     // 10. Save output using fem-io library (matching MFEM SwapNodes+Print + GridFunction::Save)
     // Deformed mesh: displace nodes then write via write_mfem_file
     {
-        let dim_u = dim as usize;
-        let mut deformed_mesh = mesh.clone();
-        let nn = deformed_mesh.n_nodes() as usize;
-        for n in 0..nn.min(ns) {
+        let dim_u = dim;
+        // Rebuild a displaced node list through the trait interface, then
+        // downcast to the concrete Mesh<D> for serialisation.
+        let nn = mesh.n_nodes() as usize;
+        let mut coords_disp: Vec<f64> = Vec::with_capacity(nn * dim_u);
+        for n in 0..nn {
+            let c = mesh.node_coords(n as u32);
             for d in 0..dim_u {
-                deformed_mesh.coords[n * dim_u + d] += u[d * ns + n];
+                let mut v = if d < c.len() { c[d] } else { 0.0 };
+                if n < ns {
+                    v += u[d * ns + n];
+                }
+                coords_disp.push(v);
             }
         }
-        write_mfem_file("deformed.mesh", &deformed_mesh)
-            .expect("cannot write deformed.mesh");
+        if mesh3d {
+            let mut m = mesh.as_any().downcast_ref::<fem_mesh::Mesh<3>>().expect("3D").clone();
+            m.coords = coords_disp;
+            fem_io::mfem::write_mfem_file_3d("deformed.mesh", &m)
+                .expect("cannot write deformed.mesh");
+        } else {
+            let mut m = mesh.as_any().downcast_ref::<fem_mesh::Mesh<2>>().expect("2D").clone();
+            m.coords = coords_disp;
+            write_mfem_file("deformed.mesh", &m)
+                .expect("cannot write deformed.mesh");
+        }
         println!("  Wrote deformed.mesh");
     }
 

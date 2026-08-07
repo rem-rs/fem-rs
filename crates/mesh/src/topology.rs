@@ -189,4 +189,5 @@ impl MeshTopology for Box<dyn MeshTopology + Send + Sync + 'static> {
     fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] { (**self).geometry_nodes(elem) }
     fn geom_coords_of(&self, node: NodeId) -> &[f64] { (**self).geom_coords_of(node) }
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync + 'static> { (**self).clone_mesh() }
+    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }
 }
