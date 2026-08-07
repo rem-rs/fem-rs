@@ -2161,11 +2161,24 @@ fn refine_nonconforming_3d_internal(
             new_conn.extend_from_slice(&[n2, m02, m12, m23]); new_tags.push(tag);
             new_conn.extend_from_slice(&[n3, m03, m13, m23]); new_tags.push(tag);
 
-            // 4 tets splitting the central octahedron.
-            new_conn.extend_from_slice(&[m01, m02, m03, m23]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[m01, m02, m12, m23]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[m01, m12, m13, m23]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[m01, m03, m13, m23]); new_tags.push(tag);
+            // 4 tets splitting the central octahedron.  MFEM
+            // UniformRefinement3D_base (mesh.cpp) chooses the octahedron
+            // diagonal by the best-aspect-ratio refinement type `rt`
+            // (rt_algo = 1); the fixed split used here previously produced a
+            // different refinement pattern than MFEM for tets whose longest
+            // edge is not (v0,v1) on the octahedron.
+            let rt = tet_select_rt_debug(mesh, &[n0, n1, n2, n3]);
+            let e = [m01, m02, m03, m12, m13, m23];
+            let mv: [[usize; 4]; 4] = match rt {
+                0 => [[0, 5, 1, 2], [0, 5, 2, 4], [0, 5, 4, 3], [0, 5, 3, 1]],
+                1 => [[1, 0, 4, 2], [1, 2, 4, 5], [1, 5, 4, 3], [1, 3, 4, 0]],
+                _ => [[2, 0, 1, 3], [2, 1, 5, 3], [2, 5, 4, 3], [2, 4, 0, 3]],
+            };
+            for k in 0..4 {
+                let ch = [e[mv[k][0]], e[mv[k][1]], e[mv[k][2]], e[mv[k][3]]];
+                new_conn.extend_from_slice(&ch);
+                new_tags.push(tag);
+            }
         } else {
             // Unrefined element: keep as is
             for k in 0..4 {
