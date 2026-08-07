@@ -71,46 +71,21 @@ impl Args {
 
 // ─── BC + solver (shared with ex11 pattern) ────────────────────────────────
 
-/// MFEM-style EliminateRowColDiag: zero off-diagonals in row AND column of
-/// each essential DOF, set diagonal to `diag_val`.
-fn eliminate_row_col_diag(mat: &mut CsrMatrix<f64>, ess: &[usize], diag_val: f64) {
-    let row_ptr = &mat.row_ptr;
-    let col_idx = &mat.col_idx;
-    let values  = &mut mat.values;
+fn eliminate_bc(a: &mut CsrMatrix<f64>, m: &mut CsrMatrix<f64>, ess: &[usize]) {
+    // MFEM EliminateEssentialBCDiag: symmetric row/col zeroing with the
+    // diagonal set to diag_val (1.0 for A, min() for M).  Use the core-lib
+    // implementation — a hand-rolled binary-search version was asymmetric
+    // because fem CSR columns are in insertion order, NOT sorted.
     for &d in ess {
-        let start = row_ptr[d];
-        let end   = row_ptr[d + 1];
-        // Collect column indices in this row (excluding diagonal) for column zeroing.
-        let mut cols_to_zero: Vec<u32> = Vec::new();
-        for k in start..end {
-            let c = col_idx[k] as usize;
-            if c == d {
-                values[k] = diag_val;      // set diagonal
-            } else {
-                values[k] = 0.0;            // zero row off-diagonal
-                cols_to_zero.push(c as u32);
-            }
-        }
-        // Zero corresponding entries in other rows' columns
-        for &c in &cols_to_zero {
-            let c_start = row_ptr[c as usize];
-            let c_end   = row_ptr[c as usize + 1];
-            // Binary search for column d in row c (CSR columns are sorted per row)
-            let slice = &col_idx[c_start..c_end];
-            if let Ok(off) = slice.binary_search(&(d as u32)) {
-                values[c_start + off] = 0.0;
-            }
-        }
+        a.eliminate_essential_bc_diag_symmetric(d, 1.0);
+    }
+    for &d in ess {
+        m.eliminate_essential_bc_diag_symmetric(d, f64::MIN_POSITIVE);
     }
 }
 
-fn eliminate_bc(a: &mut CsrMatrix<f64>, m: &mut CsrMatrix<f64>, ess: &[usize]) {
-    eliminate_row_col_diag(a, ess, 1.0);
-    eliminate_row_col_diag(m, ess, f64::MIN_POSITIVE);
-}
-
 fn solve_eig(a: &CsrMatrix<f64>, m: &CsrMatrix<f64>, ess: &[usize],
-             nev: usize, bc: &str, label: &str) -> EigenResult {
+             nev: usize, bc: &str, label: &str, dim: usize) -> EigenResult {
     let cfg = LobpcgConfig { max_iter:400, tol:1e-8, verbose:true, nullspace_skip:0.0 };
     let t = std::time::Instant::now();
     let r = match bc {
@@ -120,15 +95,16 @@ fn solve_eig(a: &CsrMatrix<f64>, m: &CsrMatrix<f64>, ess: &[usize],
             // then use AMG as the preconditioner for LOBPCG.
             let (mut ab, mut mb) = (a.clone(), m.clone());
             eliminate_bc(&mut ab, &mut mb, ess);
-            // AMG preconditioner built from BC-eliminated A.
-            // RS-AMG coarsening (better for elliptic problems with high material
-            // contrast) + W-cycle for improved coarse-grid correction.
+            // Nodal (system) AMG on the BC-eliminated A: the byNODES vector
+            // layout needs hypre-SetNodal-style block-diagonal interpolation —
+            // plain scalar RS-AMG is non-SPD on the 2×2 block matrix.
             use fem_amg::CoarsenStrategy;
             let la = fem_to_linlvo_csr(&ab);
             let mut amg_cfg = AmgConfig::default();
             amg_cfg.strategy = CoarsenStrategy::RugeStüben;
             amg_cfg.pre_sweeps = 2;
             amg_cfg.post_sweeps = 2;
+            amg_cfg.nodal_dofs = Some(dim);
             let hier = AmgHierarchy::build(la, amg_cfg);
             let precond = move |r: &nalgebra::DMatrix<f64>| {
                 let n = r.nrows();
@@ -197,6 +173,9 @@ fn run_2d(mut mesh: Mesh<2>, args: &Args) {
     let ref_lvls = auto_ref_levels(mesh.n_elems(), dim);
     // Still do the auto refinement like MFEM
     for _ in 0..ref_lvls { mesh = refine_uniform(&mesh); }
+    // MFEM ex12p hard-codes par_ref_levels = 1 (one extra parallel refinement
+    // after the serial auto-refinement), so mirror it here in the serial port.
+    mesh = refine_uniform(&mesh);
     println!("  After ref: {} elems", mesh.n_elems());
 
     let fe = if args.order > 0 { args.order as u8 } else { 1 };
@@ -227,7 +206,7 @@ fn run_2d(mut mesh: Mesh<2>, args: &Args) {
     let ess = build_ess_dofs(&mesh, &space);
     println!("  Ess BC: {}/{}", ess.len(), n);
 
-    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM2D");
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM2D", 2);
     let _ = write_mfem_file("refined.mesh", &mesh);
     println!("  Saved refined mesh -> 'refined.mesh'");
     save_modes(&res);
@@ -240,6 +219,9 @@ fn run_3d(mut mesh: Mesh<3>, args: &Args) {
     println!("  Mesh: 3D, {} elems", mesh.n_elems());
     let ref_lvls = auto_ref_levels(mesh.n_elems(), dim);
     for _ in 0..ref_lvls { mesh = refine_uniform_3d(&mesh); }
+    // MFEM ex12p hard-codes par_ref_levels = 1 (one extra parallel refinement
+    // after the serial auto-refinement), so mirror it here in the serial port.
+    mesh = refine_uniform_3d(&mesh);
     println!("  After ref: {} elems", mesh.n_elems());
 
     let fe = if args.order > 0 { args.order as u8 } else { 1 };
@@ -257,7 +239,7 @@ fn run_3d(mut mesh: Mesh<3>, args: &Args) {
     let ess = build_ess_dofs(&mesh, &space);
     println!("  Ess BC: {}/{}", ess.len(), n);
 
-    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM3D");
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "FEM3D", 3);
     let _ = write_mfem_file_3d("refined.mesh", &mesh);
     println!("  Saved refined mesh -> 'refined.mesh'");
     save_modes(&res);
@@ -279,7 +261,7 @@ fn run_iga_2d(m: fem_element::nurbs::NurbsMesh2D, args: &Args) {
     for j in 0..nv { ess.push(2*(j*nu)); ess.push(2*(j*nu)+1); }
     ess.sort_unstable(); ess.dedup();
     println!("  IGA2D: p={p} grid={nu}×{nv} NDoFs={n} Ess BC: {}", ess.len());
-    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA2D");
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA2D", 2);
     save_modes(&res);
 }
 
@@ -297,7 +279,7 @@ fn run_iga_3d(m: fem_element::nurbs::NurbsMesh3D, args: &Args) {
     for k in 0..nw { for j in 0..nv { let b = (k*nv+j)*nu; ess.push(3*b); ess.push(3*b+1); ess.push(3*b+2); }}
     ess.sort_unstable(); ess.dedup();
     println!("  IGA3D: p={p} grid={nu}×{nv}×{nw} NDoFs={n} Ess BC: {}", ess.len());
-    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA3D");
+    let res = solve_eig(&a, &m, &ess, args.nev, &args.bc_mode, "IGA3D", 3);
     save_modes(&res);
 }
 
