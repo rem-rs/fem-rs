@@ -17,10 +17,10 @@ use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
 use fem_assembly::{
     Assembler,
     dg::dg_advection::{
-        DGAdvectionIntegrator, assemble_dg_interior_faces, assemble_advection_boundary_full,
+        DGAdvectionIntegrator, assemble_advection_boundary_full,
         DgAdvectionProblem, dg_velocity, dg_initial_condition, dg_inflow_bc,
     },
-    interior_faces::InteriorFaceList,
+    dg::dg_imex::{MfemHeadInsert, assemble_ex41_interior_faces, build_face_locs},
     postproc::coefficient::{FnVectorCoeff, VectorCoeff},
     standard::MassIntegrator,
 };
@@ -30,7 +30,7 @@ use fem_solver::{
     SolverConfig, solve_cg,
     ode::{Rk4, TimeStepper},
 };
-use fem_space::{L2Space, fe_space::FESpace};
+use fem_space::{L2Basis, L2Space, fe_space::FESpace};
 
 fn main() {
     let args = Args::parse();
@@ -92,7 +92,9 @@ fn main() {
     let vel_coeff = FnVectorCoeff(vel_fn);
 
     // DG space and mass matrix
-    let space = L2Space::new(mesh.clone(), args.order);
+    // DG space: MFEM ex9 uses DG_FECollection(order, dim, BasisType::GaussLobatto)
+    // — GLL nodes, NOT the default GaussLegendre that L2Space::new uses.
+    let space = L2Space::new_with_basis(mesh.clone(), args.order, L2Basis::GaussLobatto);
     let n = space.n_dofs();
     println!("Number of unknowns: {n}");
 
@@ -103,24 +105,35 @@ fn main() {
     let qo_adv = (args.order as u8 * 2).max(2);
     let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], qo_mass);
 
-    // Advection operator: volume + interior faces
+    // Advection operator: volume + interior faces.
+    // Face assembly reuses the ex41 machinery (verified 1:1 with MFEM):
+    // `build_face_locs` computes MFEM-style Loc1/Loc2 per-element geometry,
+    // `assemble_ex41_interior_faces` implements the exact
+    // NonconservativeDGTraceIntegrator(u, -1) (pure advection: diff=sigma=
+    // kappa=0).  ex9's C++ uses DG_FECollection(..., BasisType::GaussLobatto)
+    // so the space must be GLL too.
     let dg_adv = DGAdvectionIntegrator { velocity: vel_coeff };
     let k_vol = Assembler::assemble_bilinear(&space, &[&dg_adv], qo_adv);
-    let ifl = InteriorFaceList::build(space.mesh());
-    let qface = (args.order as u8 * 2).max(2);
+
+    let faces = build_face_locs(space.mesh());
+    let mut hi_k = MfemHeadInsert::new(n);
+    assemble_ex41_interior_faces(
+        &mut hi_k, space.mesh(), &space, &faces,
+        &|x, y| -> [f64; 2] { let v = dg_velocity(problem, &[x, y], &bb_min, &bb_max); [v[0], v[1]] },
+        -1.0, 0.0, 0.0, 0.0,
+    );
 
     let mut coo = CooMatrix::new(n, n);
     for i in 0..n { for p in k_vol.row_ptr[i]..k_vol.row_ptr[i+1] {
         coo.add(i, k_vol.col_idx[p] as usize, k_vol.values[p]);
     }}
-    assemble_dg_interior_faces(&mut coo, space.mesh(), &space, &ifl, args.order, qface, &dg_adv);
-
-    // Periodic face pairs (for 'boundary 0' meshes)
-    if mesh.n_boundary_faces() == 0 && mesh.dim() == 2 {
-        detect_periodic_pairs(space.mesh(), &mut coo, &space, args.order, qface, &dg_adv.velocity);
-    }
+    let k_face = hi_k.into_csr();
+    for i in 0..n { for p in k_face.row_ptr[i]..k_face.row_ptr[i+1] {
+        coo.add(i, k_face.col_idx[p] as usize, k_face.values[p]);
+    }}
 
     // Boundary contribution
+    let qface = (args.order as u8 * 2).max(2);
     let bc_tags: Vec<i32> = mesh.unique_boundary_tags();
     let inflow_g = |x: &[f64]| dg_inflow_bc(problem, x);
     let vel_bdr = {
@@ -178,74 +191,6 @@ fn main() {
 
 /// Detect periodic face pairs for 'boundary 0' meshes and assemble their
 /// flux contributions using each element's OWN face nodes.
-fn detect_periodic_pairs<M: MeshTopology, V: VectorCoeff>(
-    mesh: &M, coo: &mut CooMatrix<f64>, space: &impl FESpace<Mesh=M>,
-    order: u8, qface: u8, velocity: &V,
-) {
-    use std::collections::HashMap;
-    // Map: sorted face key → (elem, local_face_idx, unsorted_nodes)
-    let mut edge_map: HashMap<Vec<u32>, (u32, Vec<u32>)> = HashMap::new();
-    for e in mesh.elem_iter() {
-        let en = mesh.element_nodes(e);
-        let faces: Vec<Vec<usize>> = match en.len() {
-            3 => vec![vec![0,1],vec![1,2],vec![2,0]],
-            4 => vec![vec![0,1],vec![1,2],vec![2,3],vec![3,0]],
-            _ => vec![],
-        };
-        for lf in &faces {
-            let mut key: Vec<u32> = lf.iter().map(|&k| en[k]).collect();
-            key.sort_unstable();
-            edge_map.entry(key).or_insert((e, lf.iter().map(|&k| en[k]).collect()));
-        }
-    }
-    // Edges appearing once are "virtual boundary edges"
-    let boundary: Vec<(u32, Vec<u32>)> = edge_map.into_values().collect();
-    struct BEdge { elem: u32, nodes: Vec<u32>, mid: [f64;2], normal: [f64;2] }
-    let mut edges: Vec<BEdge> = boundary.iter().map(|&(e, ref n)| {
-        let p0 = mesh.node_coords(n[0]); let p1 = mesh.node_coords(n[1]);
-        let dx = p1[0]-p0[0]; let dy = p1[1]-p0[1];
-        let len = (dx*dx+dy*dy).sqrt();
-        let nx = -dy/len; let ny = dx/len;
-        let en = mesh.element_nodes(e);
-        let cx = en.iter().map(|&n|mesh.node_coords(n)[0]).sum::<f64>()/en.len() as f64;
-        let cy = en.iter().map(|&n|mesh.node_coords(n)[1]).sum::<f64>()/en.len() as f64;
-        let mx = (p0[0]+p1[0])/2.0; let my = (p0[1]+p1[1])/2.0;
-        let (nx,ny) = if nx*(mx-cx)+ny*(my-cy) >= 0.0 {(nx,ny)} else {(-nx,-ny)};
-        BEdge{elem:e, nodes:n.clone(), mid:[mx,my], normal:[nx,ny]}
-    }).collect();
-
-    // Group by normal direction and pair opposites
-    let mut groups: Vec<(Vec<usize>, Vec<usize>, usize)> = Vec::new();
-    // x-direction: left vs right
-    let left: Vec<usize> = (0..edges.len()).filter(|&i|edges[i].normal[0] < -0.5).collect();
-    let right: Vec<usize> = (0..edges.len()).filter(|&i|edges[i].normal[0] > 0.5).collect();
-    if !left.is_empty() && left.len() == right.len() { groups.push((left, right, 1)); } // dir=1 for y-sorting
-    // y-direction: bottom vs top
-    let bottom: Vec<usize> = (0..edges.len()).filter(|&i|edges[i].normal[1] < -0.5).collect();
-    let top: Vec<usize> = (0..edges.len()).filter(|&i|edges[i].normal[1] > 0.5).collect();
-    if !bottom.is_empty() && bottom.len() == top.len() { groups.push((bottom, top, 0)); } // dir=0 for x-sorting
-
-    for (neg, pos, sort_dir) in &groups {
-        let mut neg_sorted: Vec<usize> = neg.clone();
-        let mut pos_sorted: Vec<usize> = pos.clone();
-        neg_sorted.sort_by_key(|&i| (edges[i].mid[1-sort_dir] * 1e6) as i64);
-        pos_sorted.sort_by_key(|&i| (edges[i].mid[1-sort_dir] * 1e6) as i64);
-        let mut pairs: Vec<(u32, u32, Vec<u32>, Vec<u32>)> = Vec::new();
-        for i in 0..neg_sorted.len() {
-            // left/bottom element = neg, right/top element = pos
-            // Use neg element's face nodes as left_face (for normal + left basis eval)
-            // Use pos element's face nodes as right_face (for right basis eval)
-            pairs.push((
-                edges[neg_sorted[i]].elem,
-                edges[pos_sorted[i]].elem,
-                edges[neg_sorted[i]].nodes.clone(),
-                edges[pos_sorted[i]].nodes.clone(),
-            ));
-        }
-        fem_assembly::dg::dg_advection::assemble_periodic_flux(coo, mesh, space, &pairs, order, qface, velocity);
-    }
-}
-
 struct Args { mesh: String, problem: usize, refine: usize, order: u8, dt: f64, t_final: f64, ode_solver: usize }
 impl Args {
     fn parse() -> Self {
