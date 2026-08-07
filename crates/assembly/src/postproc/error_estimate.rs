@@ -259,6 +259,311 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
     ElementIndicators::new(eta, "ZZ")
 }
 
+/// Zienkiewicz-Zhu stress-recovery estimator for linear elasticity
+/// (1:1 with MFEM ex21's `ZienkiewiczZhuEstimator` + `ElasticityIntegrator`).
+///
+/// Per element the **stress** `σ(u) = λ tr(ε)I + 2μ ε` (symmetric tensor,
+/// `dim(dim+1)/2` components) is evaluated at the centroid; a nodal average
+/// gives the recovered `σ*`; then `η_K = ‖σ_h|_K − σ*|_K‖_{L²(K)}`.
+///
+/// `lam`/`mu` map an element attribute to the Lamé constants (the C++ side
+/// evaluates `PWConstCoefficient` per element).
+pub fn zz_estimator_stress<M, S>(gf: &GridFunction<'_, S>, lam: &dyn Fn(i32) -> f64, mu: &dyn Fn(i32) -> f64) -> ElementIndicators
+where M: MeshTopology, S: FESpace<Mesh = M> {
+    use fem_element::ReferenceElement;
+    let m: &M = gf.space().mesh();
+    let ne = m.n_elements(); let d = m.dim() as usize;
+    let tdim = d * (d + 1) / 2; // symmetric tensor components
+    let order = gf.space().order();
+    let dofs = gf.dofs();
+
+    // σ_h per element per flux-node (P1 flux element → mesh vertices).
+    let mut eg: Vec<Vec<Vec<f64>>> = vec![Vec::new(); ne];
+    for e in 0..ne as u32 {
+        let elem_type = m.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let elem_dofs = gf.space().element_dofs(e);
+        let nodes = m.element_nodes(e);
+        let npe = nodes.len();
+        let (l, mu_c) = (lam(m.element_tag(e)), mu(m.element_tag(e)));
+
+        let mut sigmas = Vec::with_capacity(npe);
+        for k in 0..npe {
+            // Reference coordinates of flux node k (a vertex).
+            let xi = ref_vertex_coords(d, npe, k);
+            let (jac, _det_j) = geom_jacobian(m, nodes, &xi, d, elem_type);
+            let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+            let mut grad_ref = vec![0.0; n_ldofs * d];
+            ref_elem.eval_grad_basis(&xi, &mut grad_ref);
+            let mut grad_phys = vec![0.0; n_ldofs * d];
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
+
+            let mut grad_u = vec![vec![0.0; d]; d];
+            for c in 0..d {
+                for l in 0..n_ldofs {
+                    let val = dofs[elem_dofs[l * d + c] as usize]; // node-major vector dof table
+                    for dir in 0..d {
+                        grad_u[c][dir] += val * grad_phys[l * d + dir];
+                    }
+                }
+            }
+
+            if d == 2 {
+                let exx = grad_u[0][0];
+                let eyy = grad_u[1][1];
+                let exy = 0.5 * (grad_u[0][1] + grad_u[1][0]);
+                let tr = exx + eyy;
+                sigmas.push(vec![l * tr + 2.0 * mu_c * exx,
+                                 l * tr + 2.0 * mu_c * eyy,
+                                 2.0 * mu_c * exy]);
+            } else {
+                let exx = grad_u[0][0]; let eyy = grad_u[1][1]; let ezz = grad_u[2][2];
+                let exy = 0.5 * (grad_u[0][1] + grad_u[1][0]);
+                let exz = 0.5 * (grad_u[0][2] + grad_u[2][0]);
+                let eyz = 0.5 * (grad_u[1][2] + grad_u[2][1]);
+                let tr = exx + eyy + ezz;
+                sigmas.push(vec![l * tr + 2.0 * mu_c * exx,
+                                 l * tr + 2.0 * mu_c * eyy,
+                                 l * tr + 2.0 * mu_c * ezz,
+                                 2.0 * mu_c * exy,
+                                 2.0 * mu_c * exz,
+                                 2.0 * mu_c * eyz]);
+            }
+        }
+        eg[e as usize] = sigmas;
+    }
+
+    // Nodal average of the stress (recovered σ*).
+    let nn = m.n_nodes();
+    let mut ns: Vec<Vec<f64>> = (0..nn).map(|_| vec![0.0; tdim]).collect();
+    let mut nc = vec![0u32; nn];
+    for e in 0..ne as u32 {
+        let nodes = m.element_nodes(e);
+        for (k, &n) in nodes.iter().enumerate() {
+            for di in 0..tdim { ns[n as usize][di] += eg[e as usize][k][di]; }
+            nc[n as usize] += 1;
+        }
+    }
+    for n in 0..nn { if nc[n] > 0 { for di in 0..tdim { ns[n][di] /= nc[n] as f64; } } }
+
+    // Element error: strain energy of s = σ_h − σ* at the centroid (the flux
+    // difference is linear on P1; a 1-point rule matches MFEM's integration
+    // order for P1 flux elements).
+    let mut eta = vec![0.0; ne];
+    for e in 0..ne as u32 {
+        let nodes = m.element_nodes(e);
+        let npe = nodes.len();
+        let (l, mu_c) = (lam(m.element_tag(e)), mu(m.element_tag(e)));
+        let mut s = vec![0.0; tdim];
+        for k in 0..npe {
+            for di in 0..tdim {
+                s[di] += (eg[e as usize][k][di] - ns[nodes[k] as usize][di]) / npe as f64;
+            }
+        }
+        let pt_e = if d == 2 {
+            let tr_e = (s[0] + s[1]) / (2.0 * (mu_c + l));
+            let l_tr = l * tr_e;
+            0.25 / mu_c * (s[0] * (s[0] - l_tr) + s[1] * (s[1] - l_tr) + 2.0 * s[2] * s[2])
+        } else {
+            let tr_e = (s[0] + s[1] + s[2]) / (2.0 * (3.0 * l + 2.0 * mu_c));
+            let l_tr = l * tr_e;
+            0.25 / mu_c * (s[0] * (s[0] - l_tr) + s[1] * (s[1] - l_tr) + s[2] * (s[2] - l_tr)
+                           + 2.0 * (s[3] * s[3] + s[4] * s[4] + s[5] * s[5]))
+        };
+        eta[e as usize] = (pt_e * elem_vol(m, e)).max(0.0).sqrt();
+    }
+    ElementIndicators::new(eta, "ZZ-stress")
+}
+
+/// Reference (natural) coordinates of the k-th vertex of a simplex of
+/// dimension `d` with `npe` vertices (used to evaluate the flux at the
+/// P1 flux element's nodes).
+fn ref_vertex_coords(d: usize, npe: usize, k: usize) -> Vec<f64> {
+    let mut xi = vec![0.0; d];
+    match (d, npe, k) {
+        (2, 3, 0) => {}
+        (2, 3, 1) => { xi[0] = 1.0; }
+        (2, 3, 2) => { xi[1] = 1.0; }
+        (2, 4, 0) => { xi[0] = -1.0; xi[1] = -1.0; }
+        (2, 4, 1) => { xi[0] = 1.0; xi[1] = -1.0; }
+        (2, 4, 2) => { xi[0] = 1.0; xi[1] = 1.0; }
+        (2, 4, 3) => { xi[0] = -1.0; xi[1] = 1.0; }
+        (3, 4, 0) => {}
+        (3, 4, 1) => { xi[0] = 1.0; }
+        (3, 4, 2) => { xi[1] = 1.0; }
+        (3, 4, 3) => { xi[2] = 1.0; }
+        (3, 8, kk) => {
+            xi[0] = if kk & 1 != 0 { 1.0 } else { -1.0 };
+            xi[1] = if kk & 2 != 0 { 1.0 } else { -1.0 };
+            xi[2] = if kk & 4 != 0 { 1.0 } else { -1.0 };
+        }
+        _ => {}
+    }
+    xi
+}
+///
+/// Recovers a smoothed gradient per component by solving the global L²
+/// projection on the **scalar** solution space:
+/// `(G_c, v) = (∂u_c/∂x_d, v)`  for each component `c` and direction `d`,
+/// then `η_K = ‖∇u_h|_K − G|_K‖_{L²(K)}` summed over components.
+///
+/// This is the vector analogue of [`zz_estimator_l2`]; MFEM ex21 uses
+/// `L2ZienkiewiczZhuEstimator` with `H1FluxReproducer`, whose recovery space
+/// is the same-order H¹ space (flux = stress here is approximated by the
+/// per-component gradient recovery).
+pub fn zz_estimator_l2_vector<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+where
+    M: MeshTopology + Clone,
+    S: FESpace<Mesh = M>,
+{
+    use fem_space::constraints::form_linear_system;
+    let mref: &M = gf.space().mesh();
+    let ne = mref.n_elements();
+    let d = mref.dim() as usize;
+    let order = gf.space().order();
+
+    let space_ref: &S = gf.space();
+    let nd = space_ref.n_dofs();
+    // Vector space: component-major layout, n_scalar scalar DOFs per component.
+    let n_scalar = nd / d;
+    if n_scalar * d != nd {
+        return ElementIndicators::new(vec![0.0; ne], "ZZ-vec");
+    }
+
+    // Recovery space = scalar H¹ of the same order (mass matrix and RHS live
+    // on the scalar space; the vector solution indexes dof c·n_scalar + s).
+    let scalar_space = fem_space::H1Space::new(mref.clone(), order);
+    let quad_order = (order as u8) * 2 + 2;
+    let mass = MassIntegrator { rho: 1.0 };
+    let mut m_mat = Assembler::assemble_bilinear(&scalar_space, &[&mass], quad_order);
+
+    // RHS per component: rhs[c][s] = ∫_Ω ∂u_c/∂x_d · φ_s (vector of length d per scalar dof).
+    let dofs = gf.dofs();
+    let mut rhs = vec![vec![vec![0.0; n_scalar]; d]; d];
+
+    for e in 0..ne as u32 {
+        let elem_type = mref.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = mref.element_nodes(e);
+        let elem_dofs = scalar_space.element_dofs(e);
+        let quad = ref_elem.quadrature(quad_order);
+
+        let mut phi = vec![0.0; n_ldofs];
+        let mut grad_ref = vec![0.0; n_ldofs * d];
+        let mut grad_phys = vec![0.0; n_ldofs * d];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let w_abs_det = quad.weights[q] * det_j.abs();
+            let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
+
+            // grad_u[c][dir] = Σ_i u[c*n_scalar + dof_i] · ∂φ_i/∂x_dir
+            let mut grad_u = vec![vec![0.0; d]; d];
+            for i in 0..n_ldofs {
+                let s = elem_dofs[i] as usize;
+                for c in 0..d {
+                    let val = dofs[c * n_scalar + s];
+                    for di in 0..d {
+                        grad_u[c][di] += val * grad_phys[i * d + di];
+                    }
+                }
+            }
+
+            ref_elem.eval_basis(xi, &mut phi);
+
+            for (i, &s) in elem_dofs.iter().enumerate() {
+                let s = s as usize;
+                for c in 0..d {
+                    for di in 0..d {
+                        rhs[c][di][s] += w_abs_det * grad_u[c][di] * phi[i];
+                    }
+                }
+            }
+        }
+    }
+
+    // Solve M g_{c,dir} = rhs[c][dir] for the recovered gradient.
+    let mut recovered: Vec<Vec<Vec<f64>>> = vec![vec![vec![0.0; n_scalar]; d]; d];
+    for c in 0..d {
+        for di in 0..d {
+            let mut b = rhs[c][di].clone();
+            let mut g = vec![0.0; n_scalar];
+            let empty: Vec<u32> = Vec::new();
+            let empty_vals: Vec<f64> = Vec::new();
+            let mut m_clone = m_mat.clone();
+            form_linear_system(&mut m_clone, &mut b, &mut g, &empty, &empty_vals);
+            if let Ok(res) = fem_solver::solve_pcg_gssmoother(
+                &m_clone,
+                &b,
+                &mut g,
+                &fem_solver::SolverConfig {
+                    rtol: 1e-10,
+                    atol: 0.0,
+                    max_iter: 2000,
+                    verbose: false,
+                    ..fem_solver::SolverConfig::default()
+                },
+            ) {
+                let _ = res;
+            }
+            recovered[c][di] = g;
+        }
+    }
+
+    // Element error: η_K = sqrt( Σ_c Σ_di ∫_K (∂u_c/∂x_d − G_{c,di})² )
+    let mut eta = vec![0.0; ne];
+    for e in 0..ne as u32 {
+        let elem_type = mref.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let nodes = mref.element_nodes(e);
+        let elem_dofs = scalar_space.element_dofs(e);
+        let quad = ref_elem.quadrature(quad_order);
+
+        let mut phi = vec![0.0; n_ldofs];
+        let mut grad_ref = vec![0.0; n_ldofs * d];
+        let mut grad_phys = vec![0.0; n_ldofs * d];
+        let mut e2 = 0.0;
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let w_abs_det = quad.weights[q] * det_j.abs();
+            let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
+
+            ref_elem.eval_grad_basis(xi, &mut grad_ref);
+            transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
+
+            let mut grad_u = vec![vec![0.0; d]; d];
+            let mut rec = vec![vec![0.0; d]; d];
+            for i in 0..n_ldofs {
+                let s = elem_dofs[i] as usize;
+                ref_elem.eval_basis(xi, &mut phi);
+                for c in 0..d {
+                    let val = dofs[c * n_scalar + s];
+                    for di in 0..d {
+                        grad_u[c][di] += val * grad_phys[i * d + di];
+                        rec[c][di] += recovered[c][di][s] * phi[i];
+                    }
+                }
+            }
+            for c in 0..d {
+                for di in 0..d {
+                    let diff = grad_u[c][di] - rec[c][di];
+                    e2 += diff * diff * w_abs_det;
+                }
+            }
+        }
+        eta[e as usize] = e2.sqrt();
+    }
+    ElementIndicators::new(eta, "ZZ-vec")
+}
+
 /// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible).
 ///
 /// This is a convenience wrapper for conforming (non-NC) meshes.

@@ -16,7 +16,7 @@
 use fem_assembly::assembler::face_dofs_p1;
 use fem_assembly::static_cond::condense_global;
 use fem_assembly::postproc::coefficient::PWConstCoeff;
-use fem_assembly::postproc::error_estimate::zz_estimator;
+use fem_assembly::postproc::error_estimate::zz_estimator_stress;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::{ElasticityIntegrator, NeumannIntegrator};
 use fem_assembly::Assembler;
@@ -32,15 +32,16 @@ use fem_space::dof_manager::DofManager;
 use fem_space::{FESpace, VectorH1Space};
 
 fn mark_elements(eta: &[f64], fraction: f64) -> Vec<u32> {
-    let total: f64 = eta.iter().sum();
-    if total <= 0.0 { return Vec::new(); }
-    let target = fraction * total;
-    let mut idx: Vec<usize> = (0..eta.len()).collect();
-    idx.sort_by(|&a, &b| eta[b].partial_cmp(&eta[a]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut cum = 0.0_f64;
-    let mut marked = Vec::new();
-    for &i in &idx { marked.push(i as u32); cum += eta[i]; if cum >= target { break; } }
-    marked
+    // MFEM ThresholdRefiner (ex21): threshold = total_fraction · ‖η‖_∞
+    // (total_norm_p = ∞), mark every element with ηᵉ ≥ threshold.
+    // A cumulative/Dörfler marking changes the AMR trajectory.
+    let max_err = eta.iter().cloned().fold(0.0_f64, f64::max);
+    if max_err <= 0.0 { return Vec::new(); }
+    let threshold = fraction * max_err;
+    (0..eta.len())
+        .filter(|&i| eta[i] >= threshold)
+        .map(|i| i as u32)
+        .collect()
 }
 
 // ─── Macro: single AMR loop body for Mesh<2> or Mesh<3> ────────────────────
@@ -134,7 +135,7 @@ macro_rules! amr_loop {
 
             // ZZ estimator
             let gf = GridFunction::new(&space, x.clone());
-            let est = zz_estimator(&gf);
+            let est = zz_estimator_stress(&gf, &|t: i32| if t == 1 { 50.0 } else { 1.0 }, &|t: i32| if t == 1 { 50.0 } else { 1.0 });
             let max_err = est.eta.iter().cloned().fold(0.0_f64, f64::max);
             println!("  Max err: {max_err:.6e}");
 

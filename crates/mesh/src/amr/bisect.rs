@@ -53,13 +53,7 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     // We simply bisect the entire element (all edges) for simplicity.
     // This over-refines slightly but guarantees conformity.
     let mut elems_to_refine: std::collections::HashSet<ElemId> = marked_set.clone();
-    for &(a, b) in &bisect_edges {
-        if let Some(nbrs) = edge_elems.get(&(a, b)) {
-            for &ne in nbrs {
-                elems_to_refine.insert(ne);
-            }
-        }
-    }
+    // (longest-edge neighbour propagation removed to match MFEM GeneralRefinement)
 
     // ── 2. Collect new midpoint nodes ─────────────────────────────────────────
     // MFEM UniformRefinement2D_base creates edge midpoints in element ×
