@@ -22,7 +22,7 @@ use fem_element::{VectorReferenceElement, ReferenceElement,
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
-use fem_solver::{solve_pcg, GSSmoother, SolverConfig};
+use fem_solver::SolverConfig;
 use fem_space::{HCurlSpace, H1Space,
     fe_space::FESpace, constraints::{boundary_dofs_hcurl, boundary_dofs}};
 
@@ -243,11 +243,17 @@ fn main() {
     for &d in &nd_bdr { mat.apply_dirichlet_keep_diag(d as usize, x[d as usize], &mut rhs); }
     for &d in &h1_bdr { mat.apply_dirichlet_keep_diag(n_nd + d as usize, x[n_nd + d as usize], &mut rhs); }
 
-    // 9. Solve.  MFEM: PCG(*A, M, B, X, 1, 500, 1e-12, 0.0) with GSSmoother.
-    let cfg = SolverConfig { rtol: 1e-12, max_iter: 500, verbose: true, ..Default::default() };
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat).expect("GSSmoother");
-    solve_pcg(&mat, &rhs, &mut x, &precond, cfg.rtol, cfg.max_iter, true).expect("PCG");
+    // 9. Solve.  MFEM: PCG(*A, M, B, X, 1, 500, 1e-12, 0.0) with GSSmoother —
+    // the free-function wrapper calls CGSolver::SetRelTol(sqrt(1e-12)) = 1e-6.
+    // solve_pcg_gssmoother is the bit-for-bit MFEM CGSolver+GSSmoother port
+    // (fwd+back GS sweeps); linlvo's GSSmoother is not bit-identical.
+    let cfg = SolverConfig {
+        rtol: 1e-6,
+        max_iter: 500,
+        verbose: true,
+        ..Default::default()
+    };
+    fem_solver::solve_pcg_gssmoother(&mat, &rhs, &mut x, &cfg).expect("PCG");
 
     // 10. H(Curl) error.
     let mut err2 = 0.0_f64;
@@ -257,7 +263,7 @@ fn main() {
         let nodes = mesh.element_nodes(e);
         let signs = nd_space.element_signs(e);
         let (n_ld, rnd, rh1, n_lh1, jac_fn) = setup_element_ref(mesh.element_type(e), args.order);
-        let qord = (args.order as u8 * 6).max(3);
+        let qord = 2 * args.order as u8 + 3;
         let q = rnd.quadrature(qord);
         let mut pn = vec![0.0; n_ld * 2];
         let mut ph = vec![0.0; n_lh1];
@@ -285,8 +291,14 @@ fn main() {
             let mut eh = [0.0_f64; 3];
             for i in 0..n_ld {
                 let s = signs[i];
-                eh[0] += s * x[nd_dofs[i]] * (jit00 * pn[i*2] + jit01 * pn[i*2+1]);
-                eh[1] += s * x[nd_dofs[i]] * (jit10 * pn[i*2] + jit11 * pn[i*2+1]);
+                // MFEM CalcVShape_ND (fe_base.cpp): shape = vshape_ref · J⁻¹
+                // (row vector right-multiplied), so
+                //   φx = J⁻¹₀₀·φx + J⁻¹₁₀·φy = jit00·φx + jit01·φy
+                //   φy = J⁻¹₀₁·φx + J⁻¹₁₁·φy = jit10·φx + jit11·φy
+                // (jit00=j11/det, jit01=−j10/det=J⁻¹₁₀, jit10=−j01/det=J⁻¹₀₁,
+                //  jit11=j00/det).
+                eh[0] += s * x[nd_dofs[i]] * (jit00 * pn[i * 2] + jit01 * pn[i * 2 + 1]);
+                eh[1] += s * x[nd_dofs[i]] * (jit10 * pn[i * 2] + jit11 * pn[i * 2 + 1]);
             }
             for j in 0..n_lh1 { eh[2] += x[n_nd + h1_dofs[j]] * ph[j]; }
             let mut ce = [0.0_f64; 3];
@@ -295,7 +307,10 @@ fn main() {
             let mut gr = vec![0.0_f64; n_lh1 * 2];
             rh1.eval_grad_basis(xi, &mut gr);
             for j in 0..n_lh1 {
-                let (dx, dy) = (jit00*gr[j*2]+jit01*gr[j*2+1], jit10*gr[j*2]+jit11*gr[j*2+1]);
+                // ∇z_phys = J⁻ᵀ·∇z_ref:  ∂z/∂x = jit00·gx + jit10·gy,
+                // ∂z/∂y = jit01·gx + jit11·gy;  curl_x = ∂Ez/∂y, curl_y = −∂Ez/∂x.
+                let dx = jit00 * gr[j * 2] + jit10 * gr[j * 2 + 1];
+                let dy = jit01 * gr[j * 2] + jit11 * gr[j * 2 + 1];
                 ce[0] += x[n_nd + h1_dofs[j]] * dy;
                 ce[1] -= x[n_nd + h1_dofs[j]] * dx;
             }
