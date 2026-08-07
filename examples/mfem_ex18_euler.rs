@@ -278,7 +278,9 @@ fn compute_l2_error<F: Fn(&[f64]) -> Vec<f64>>(
     let ref_elem = make_ref_elem(mesh, order);
     let is_quad = mesh.element_nodes(0).len() == 4;
     let dp = ref_elem.n_dofs();
-    let q_order = 2 * order + 1;
+    // MFEM GridFunction::ComputeLpError uses intorder = 2*fe->GetOrder() + 3
+    // (gridfunc.cpp); for the DG L2 space GetOrder() = order.
+    let q_order = 2 * order + 3;
     let qr = ref_elem.quadrature(q_order);
     let mut phi = vec![0.0; dp];
     let mut err_sq = 0.0;

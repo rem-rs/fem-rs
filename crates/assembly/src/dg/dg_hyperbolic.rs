@@ -82,12 +82,15 @@ impl FluxFunction for EulerFlux {
         flux_out[7] = v * (E + p);                      // F_y[E]:  v(E + p)
     }
 
-    fn max_speed(&self, state: &[f64], _normal: &[f64]) -> f64 {
+    fn max_speed(&self, state: &[f64], normal: &[f64]) -> f64 {
         let (rho, u, v, p) = cons_to_prim(state, self.gamma);
         let a = (self.gamma * p / rho).sqrt();
-        // MFEM EulerFlux::ComputeFlux returns the FULL fluid speed |u| plus
-        // sound speed (hyperbolic.cpp), not the normal component.
-        let speed = (u * u + v * v).sqrt();
+        // MFEM EulerFlux::ComputeFluxDotN (fem/hyperbolic.cpp): the maximum
+        // characteristic speed is the NORMAL fluid speed |u·n|/|n| plus the
+        // sound speed — NOT the full speed |u| + a.
+        let un = u * normal[0] + v * normal[1];
+        let nnorm = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
+        let speed = un.abs() / nnorm;
         speed + a
     }
 
