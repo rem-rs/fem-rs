@@ -90,16 +90,20 @@ fn gmres_core(
     b: &[f64],
     x: &mut [f64],
     m: usize, // restart dimension (MFEM default 50)
+    iterative_mode: bool,
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
     let mut r = vec![0.0_f64; n];
     let mut w = vec![0.0_f64; n];
 
-    // MFEM iterative_mode = false: x starts at 0.
-    x.fill(0.0);
+    // MFEM GMRESSolver default iterative_mode = true (Solver(0, true) in
+    // IterativeSolver()); when false, x starts at 0.
+    if !iterative_mode {
+        x.fill(0.0);
+    }
 
-    // r = A x (= 0);  w = b − A x = b;  r = M w  (r is zero here, so the GS
-    // initial guess is 0 — same as MFEM).
+    // r = A x;  w = b − A x;  r = M w  (for iterative_mode=false, x = 0 so
+    // r = M·b and the GS initial guess is 0 — same as MFEM).
     apply(x, &mut r);
     for i in 0..n {
         w[i] = b[i] - r[i];
@@ -228,6 +232,7 @@ fn gmres_schur(
         b,
         x,
         m,
+        false,
         cfg,
     )
 }
@@ -419,6 +424,7 @@ pub fn solve_gmres_block_diag_gs(
     x0: &mut [f64],
     x1: &mut [f64],
     restart: usize, // MFEM GMRES restart / MR dimension (ex36: 500)
+    iterative_mode: bool, // MFEM GMRESSolver default true
     cfg: &SolverConfig,
 ) -> (bool, usize, f64) {
     let n0 = x0.len();
@@ -435,6 +441,10 @@ pub fn solve_gmres_block_diag_gs(
     b[n0..].copy_from_slice(b1);
 
     let mut x = vec![0.0_f64; n];
+    // With iterative_mode (MFEM default true) GMRES iterates from the current
+    // x0/x1 (previous Newton solution); gmres_core zeroes it when false.
+    x[..n0].copy_from_slice(x0);
+    x[n0..].copy_from_slice(x1);
 
     let res = gmres_core(
         n,
@@ -458,6 +468,7 @@ pub fn solve_gmres_block_diag_gs(
         &b,
         &mut x,
         restart,
+        iterative_mode,
         cfg,
     );
 

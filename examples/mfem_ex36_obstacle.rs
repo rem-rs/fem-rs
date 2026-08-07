@@ -414,7 +414,7 @@ fn main() {
     let mut u_old = u0.clone();
     let mut u_new = vec![0.0; n_h1];
     // C++ u_tmp starts as u_old_gf; each round u_tmp -= u_gf then u_tmp = u_gf.
-    let mut prev_x0 = u0;
+    let mut prev_x0 = u0.clone();
 
     // 6. Slack variable ψ₀ = clamp(ln(u₀ − ϕ), −36), element-wise (L² P0).
     let mut psi = vec![0.0; n_l2];
@@ -430,7 +430,10 @@ fn main() {
     let mut psi_old = psi.clone();
 
     // 7. Newton iteration (outer loop).
-    let mut x0 = vec![0.0; n_h1]; // u block — persists across inner iterations
+    // C++: u_gf.MakeRef(&H1fes, x, 0); u_gf.ProjectCoefficient(IC_coef) —
+    // the GMRES solution vector's block 0 starts from the IC projection, and
+    // GMRESSolver default iterative_mode = true iterates from it.
+    let mut x0 = u0.clone(); // u block — persists across inner iterations
     let mut x1 = vec![0.0; n_l2]; // δψ block
     let mut total_iterations = 0usize;
     let mut increment_u = 0.1f64;
@@ -518,15 +521,18 @@ fn main() {
 
             // GMRES(A, prec, rhs, x, 0, 10000, 500, 1e-12, 0.0) with
             // BlockDiagonalPreconditioner(GSSmoother(A00), GSSmoother(A11)).
+            // MFEM's free-function wrapper (solvers.cpp) calls
+            // SetRelTol(sqrt(RTOLERANCE)) = sqrt(1e-12) = 1e-6, so the
+            // GMRESSolver convergence test is ||B r|| <= 1e-6·||B r0||.
             let cfg = SolverConfig {
-                rtol: 1e-12,
+                rtol: 1e-6,
                 atol: 0.0,
                 max_iter: 10000,
                 verbose: std::env::var("FEM_EX36_GMRES_DEBUG").is_ok(),
                 ..Default::default()
             };
             let (_ok, _iters, _resid) = solve_gmres_block_diag_gs(
-                &a00, &a01, &a10, &a11, &rhs0, &rhs1, &mut x0, &mut x1, 500, &cfg,
+                &a00, &a01, &a10, &a11, &rhs0, &rhs1, &mut x0, &mut x1, 500, true, &cfg,
             );
             // Newton update size: C++ u_tmp = u_old; each round u_tmp -= u_gf;
             // then u_tmp = u_gf — so Newton_update_size measures the DIFFERENCE
@@ -535,7 +541,7 @@ fn main() {
             for i in 0..n_h1 {
                 tmp[i] = prev_x0[i] - x0[i];
             }
-            let newton_size = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 7);
+            let newton_size = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 2 * args.order + 3);
             prev_x0.copy_from_slice(&x0);
             u_new.copy_from_slice(&x0);
 
@@ -557,7 +563,7 @@ fn main() {
         for i in 0..n_h1 {
             tmp[i] = u_new[i] - u_old[i];
         }
-        increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 7);
+        increment_u = GridFunction::new(&h1, tmp).compute_l2_error(&|_| 0.0, 2 * args.order + 3);
 
         println!("Number of Newton iterations = {}", last_j + 1);
         println!("Increment (|| uₕ - uₕ_prvs||) = {}", cpp_6(increment_u));
