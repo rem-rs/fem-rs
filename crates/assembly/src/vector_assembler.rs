@@ -59,7 +59,11 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => Box::new(TetNDk::new(o as usize)),
         (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexND1),
-        (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexND2),
+        // HCurlSpace builds HexND2 with 54 DOFs (24 edge + 24 face + 6
+        // interior), matching HexNDk::new(2) — NOT the legacy HexND2 (24
+        // edge-only) element.  Using HexND2 left rows 24..53 of every element
+        // unassembled (zero rows) → singular system.
+        (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex8, 3, o) if o >= 3 => Box::new(HexNDk::new(o as usize)),
         (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRT0),
         (SpaceType::HDiv, ElementType::Quad4, 2, 1) => Box::new(QuadRT1),

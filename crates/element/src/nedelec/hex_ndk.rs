@@ -72,28 +72,39 @@ impl VectorReferenceElement for HexNDk {
         let y = xi[1];
         let z = xi[2];
         values.fill(0.0);
-        let yz = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
-        for (ei, &(y0, z0)) in yz.iter().enumerate() {
+        // Edge basis in MFEM `Geometry::Constants<Geometry::CUBE>::Edges`
+        // order (matches HCurlSpace::HEX_EDGES):
+        //   e0 (0,1) x y=-1 z=-1; e1 (1,2) y x=+1 z=-1; e2 (3,2) x y=+1 z=-1;
+        //   e3 (0,3) y x=-1 z=-1; e4 (4,5) x y=-1 z=+1; e5 (5,6) y x=+1 z=+1;
+        //   e6 (7,6) x y=+1 z=+1; e7 (4,7) y x=-1 z=+1;
+        //   e8..e11 z-edges (0,4),(1,5),(2,6),(3,7) = (x,y) (-1,-1),(1,-1),(1,1),(-1,1).
+        // For each edge the `j` index (0..p) runs the 1-D Lagrange modes.
+        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
+        for (ei, &(y0, z0)) in x_edges.iter().enumerate() {
             let hy = hat(y, y0);
             let hz = hat(z, z0);
+            // MFEM edge numbers 0,2,4,6 → output positions 0,2,4,6.
+            let e = [0usize, 2, 4, 6][ei];
             for j in 0..p {
-                values[(ei * p + j) * 3] = lag(&nd, j, x) * hy * hz;
+                values[(e * p + j) * 3] = lag(&nd, j, x) * hy * hz;
             }
         }
-        for (ei, &(x0, z0)) in yz.iter().enumerate() {
+        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
+        for (ei, &(x0, z0)) in y_edges.iter().enumerate() {
             let hx = hat(x, x0);
             let hz = hat(z, z0);
-            let b = 4 * p;
+            let e = [1usize, 3, 5, 7][ei];
             for j in 0..p {
-                values[(b + ei * p + j) * 3 + 1] = lag(&nd, j, y) * hx * hz;
+                values[(e * p + j) * 3 + 1] = lag(&nd, j, y) * hx * hz;
             }
         }
-        for (ei, &(x0, y0)) in yz.iter().enumerate() {
+        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
+        for (ei, &(x0, y0)) in z_edges.iter().enumerate() {
             let hx = hat(x, x0);
             let hy = hat(y, y0);
-            let b = 8 * p;
+            let e = 8 + ei;
             for j in 0..p {
-                values[(b + ei * p + j) * 3 + 2] = lag(&nd, j, z) * hx * hy;
+                values[(e * p + j) * 3 + 2] = lag(&nd, j, z) * hx * hy;
             }
         }
 
@@ -196,7 +207,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hx = hat(x, -1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, z) * zm * zi * hx;
+                    values[off * 3 + 2] = lag(&nd, j, y) * zm * zi * hx;
                     off += 1;
                 }
             }
@@ -216,7 +227,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hx = hat(x, 1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, z) * zm * zi * hx;
+                    values[off * 3 + 2] = lag(&nd, j, y) * zm * zi * hx;
                     off += 1;
                 }
             }
@@ -271,45 +282,53 @@ impl VectorReferenceElement for HexNDk {
         let y = xi[1];
         let z = xi[2];
         curl_vals.fill(0.0);
-        let yz = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
-        for (ei, &(y0, z0)) in yz.iter().enumerate() {
+        // Edge curls in MFEM CUBE edge order (matches eval_basis_vec).
+        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
+        for (ei, &(y0, z0)) in x_edges.iter().enumerate() {
             let hy = hat(y, y0);
             let hz = hat(z, z0);
             let dhy = hat_d(y, y0);
             let dhz = hat_d(z, z0);
+            let e = [0usize, 2, 4, 6][ei];
             for j in 0..p {
-                let d = ei * p + j;
+                let d = e * p + j;
                 let lx = lag(&nd, j, x);
+                // x-edge Φ=(φ,0,0): curl = (0, ∂φ/∂z, −∂φ/∂y)
                 curl_vals[d * 3 + 1] = lx * hy * dhz;
                 curl_vals[d * 3 + 2] = -lx * dhy * hz;
             }
         }
-        for (ei, &(x0, z0)) in yz.iter().enumerate() {
+        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
+        for (ei, &(x0, z0)) in y_edges.iter().enumerate() {
             let hx = hat(x, x0);
             let hz = hat(z, z0);
             let dhx = hat_d(x, x0);
             let dhz = hat_d(z, z0);
-            let b = 4 * p;
+            let e = [1usize, 3, 5, 7][ei];
             for j in 0..p {
-                let d = b + ei * p + j;
+                let d = e * p + j;
                 let ly = lag(&nd, j, y);
+                // y-edge Φ=(0,φ,0): curl = (−∂φ/∂z, 0, ∂φ/∂x)
                 curl_vals[d * 3] = -ly * hx * dhz;
                 curl_vals[d * 3 + 2] = ly * dhx * hz;
             }
         }
-        for (ei, &(x0, y0)) in yz.iter().enumerate() {
+        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
+        for (ei, &(x0, y0)) in z_edges.iter().enumerate() {
             let hx = hat(x, x0);
             let hy = hat(y, y0);
             let dhx = hat_d(x, x0);
             let dhy = hat_d(y, y0);
-            let b = 8 * p;
+            let e = 8 + ei;
             for j in 0..p {
-                let d = b + ei * p + j;
+                let d = e * p + j;
                 let lz = lag(&nd, j, z);
-                curl_vals[d * 3] = lz * dhx * hy;
-                curl_vals[d * 3 + 1] = -lz * hx * dhy;
+                // z-edge Φ=(0,0,φ): curl = (∂φ/∂y, −∂φ/∂x, 0)
+                curl_vals[d * 3] = lz * hx * dhy;
+                curl_vals[d * 3 + 1] = -lz * dhx * hy;
             }
         }
+
         // Face curls (k≥2)
         if p >= 2 {
             let mut off = 12 * p;
