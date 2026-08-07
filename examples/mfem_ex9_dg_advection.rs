@@ -20,7 +20,10 @@ use fem_assembly::{
         DGAdvectionIntegrator, assemble_advection_boundary_full,
         DgAdvectionProblem, dg_velocity, dg_initial_condition, dg_inflow_bc,
     },
-    dg::dg_imex::{MfemHeadInsert, assemble_ex41_interior_faces, build_face_locs},
+    dg::dg_imex::{
+        MfemHeadInsert, assemble_ex41_bdr_faces, assemble_ex41_interior_faces,
+        build_bdr_face_locs, build_face_locs,
+    },
     postproc::coefficient::{FnVectorCoeff, VectorCoeff},
     standard::MassIntegrator,
 };
@@ -132,10 +135,24 @@ fn main() {
         coo.add(i, k_face.col_idx[p] as usize, k_face.values[p]);
     }}
 
-    // Boundary contribution
+    // Boundary contribution: K from ex41's NonconservativeDGTrace boundary
+    // (same Loc1/unnormalised-normal machinery, verified 1:1 with MFEM),
+    // plus the inflow RHS (BoundaryFlowIntegrator) kept from the previous
+    // assembly.
     let qface = (args.order as u8 * 2).max(2);
-    let bc_tags: Vec<i32> = mesh.unique_boundary_tags();
     let inflow_g = |x: &[f64]| dg_inflow_bc(problem, x);
+    let bdr_faces = build_bdr_face_locs(space.mesh());
+    let mut hi_bdr = MfemHeadInsert::new(n);
+    assemble_ex41_bdr_faces(
+        &mut hi_bdr, space.mesh(), &space, &bdr_faces,
+        &|x, y| -> [f64; 2] { let v = dg_velocity(problem, &[x, y], &bb_min, &bb_max); [v[0], v[1]] },
+        -1.0, 0.0, 0.0, 0.0,
+    );
+    let k_bdr = hi_bdr.into_csr();
+    for i in 0..n { for p in k_bdr.row_ptr[i]..k_bdr.row_ptr[i+1] {
+        coo.add(i, k_bdr.col_idx[p] as usize, k_bdr.values[p]);
+    }}
+    let bc_tags: Vec<i32> = mesh.unique_boundary_tags();
     let vel_bdr = {
         let bb_min_c = bb_min.clone(); let bb_max_c = bb_max.clone();
         FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
@@ -143,11 +160,8 @@ fn main() {
             for (i, &vi) in v.iter().enumerate() { out[i] = vi; }
         })
     };
-    let (k_bdr, rhs_bc) = assemble_advection_boundary_full(
+    let (_k_bdr_old, rhs_bc) = assemble_advection_boundary_full(
         &space, &vel_bdr, &bc_tags, &inflow_g, args.order, qface);
-    for i in 0..n { for p in k_bdr.row_ptr[i]..k_bdr.row_ptr[i+1] {
-        coo.add(i, k_bdr.col_idx[p] as usize, k_bdr.values[p]);
-    }}
 
     let k_adv = coo.into_csr();
 
