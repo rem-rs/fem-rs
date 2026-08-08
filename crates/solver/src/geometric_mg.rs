@@ -359,7 +359,10 @@ impl SumFactDiffusionOp {
         self.mult_raw(&xc, y);
         for &d in bc_dofs {
             if (d as usize) < y.len() {
-                y[d as usize] = 0.0;
+                // MFEM ConstrainedOperator diag_policy = DIAG_ONE (BilinearForm
+                // FormSystemMatrix): y[id] = x[id] on constrained DOFs (NOT 0 —
+                // DIAG_ZERO shifts every Chebyshev sweep / power iteration).
+                y[d as usize] = x[d as usize];
             }
         }
     }
@@ -667,7 +670,10 @@ impl PADiffusionOp {
         self.mult_raw(&xc, y);
         for &d in bc_dofs {
             if (d as usize) < y.len() {
-                y[d as usize] = 0.0;
+                // MFEM ConstrainedOperator diag_policy = DIAG_ONE (BilinearForm
+                // FormSystemMatrix): y[id] = x[id] on constrained DOFs (NOT 0 —
+                // DIAG_ZERO shifts every Chebyshev sweep / power iteration).
+                y[d as usize] = x[d as usize];
             }
         }
     }
@@ -733,7 +739,10 @@ impl StoredElementOperator {
         self.mult_raw(&xc, y);
         for &d in bc_dofs {
             if (d as usize) < y.len() {
-                y[d as usize] = 0.0;
+                // MFEM ConstrainedOperator diag_policy = DIAG_ONE (BilinearForm
+                // FormSystemMatrix): y[id] = x[id] on constrained DOFs (NOT 0 —
+                // DIAG_ZERO shifts every Chebyshev sweep / power iteration).
+                y[d as usize] = x[d as usize];
             }
         }
     }
@@ -778,10 +787,15 @@ impl GeometricMgLevel {
     /// Priority: `sf_op` (sum-factorization PA) > `pa_op` (on-the-fly PA) >
     /// `elem_op` (stored elem mats) > CSR spmv.
     pub fn mat_vec(&self, x: &[f64], y: &mut [f64]) {
-        if let Some(ref sf) = self.sf_op {
-            sf.mult_constrained(x, y, &self.bc_dofs);
-        } else if let Some(ref pa) = self.pa_op {
+        // MFEM's DiffusionIntegrator PA (PADiffusionApply2D) is exact to
+        // ~1e-14 vs its CSR; SumFactDiffusionOp currently deviates ~8.6e-6
+        // from the CSR (a precision bug under investigation), which shifts
+        // every Chebyshev sweep and the whole PCG trace.  Prefer the exact
+        // element-by-element pa_op over the approximate sf_op.
+        if let Some(ref pa) = self.pa_op {
             pa.mult_constrained(x, y, &self.bc_dofs);
+        } else if let Some(ref sf) = self.sf_op {
+            sf.mult_constrained(x, y, &self.bc_dofs);
         } else if let Some(ref op) = self.elem_op {
             op.mult_constrained(x, y, &self.bc_dofs);
         } else {
@@ -984,55 +998,114 @@ impl MgChebyshevSmoother {
 
 /// Power iteration on D⁻¹A using a generic mat-vec operator.
 ///
-/// Uses the actual operator (which may go through sf_op / pa_op) to estimate
-/// λ_max, producing a Chebyshev polynomial that matches the mat-vec used
-/// during smoothing.
+/// Bit-for-bit port of MFEM `PowerMethod::EstimateLargestEigenvalue` as used
+/// by `OperatorChebyshevSmoother`'s 6-argument constructor (ex26 uses
+/// `OperatorChebyshevSmoother(*opr, diag, ess_tdofs, 2)` → defaults
+/// `numSteps=10, tolerance=1e-8, seed=12345`):
+/// `v0.Randomize(seed)` (= `srand(seed)` + `rand()/(RAND_MAX+1)`, glibc
+/// `rand()` TYPE_3), then for each of 10 steps: normalize v0, `v1 =
+/// invDiag(oper(v0))` (ProductOperator(invDiag, oper) = invDiag first? no —
+/// `ProductOperator(A=invDiag, B=oper).Mult = A(B(x))` = invDiag(oper(x))),
+/// Rayleigh quotient `eig = <v0, v1>`, break when `|Δeig/eig| < 1e-8`.
 fn estimate_max_eigenvalue_with_op(
     mat_vec: &dyn Fn(&[f64], &mut [f64]),
     dinv: &[f64],
-    bc: &[u32],
+    _bc: &[u32],
 ) -> f64 {
     let n = dinv.len();
-    // MFEM: PowerMethod on ProductOperator(D⁻¹, A) with 30 iterations, rtol=1e-8, seed=42
-    let mut v = vec![1.0; n];
-    for i in 0..n {
-        v[i] = 1.0 + (i as f64 % 7.0) * 0.1;
-    }
-    for &d in bc {
-        if (d as usize) < n {
-            v[d as usize] = 0.0;
-        }
-    }
-    let normalize = |w: &mut [f64]| {
-        let nrm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-30);
-        for x in w.iter_mut() {
+    let mut rng = GlibcRand::new(12345);
+    let mut v0: Vec<f64> = (0..n).map(|_| rng.rand_real()).collect();
+    let mut v1 = vec![0.0; n];
+    let mut eigenvalue = 1.0;
+    for _ in 0..10 {
+        let norm0: f64 = v0.iter().map(|x| x * x).sum();
+        // MFEM: v0 /= sqrt(normV0) — element-wise DIVISION (a `*= inv`
+        // multiply differs by ~1 ulp per step, which 10 power iterations
+        // amplify into a ~4e-6 λmax shift → Chebyshev trace divergence).
+        let nrm = norm0.sqrt();
+        for x in v0.iter_mut() {
             *x /= nrm;
         }
-    };
-    normalize(&mut v);
-    let mut lambda = 0.0;
-    let mut w = vec![0.0; n];
-    let mut tmp = vec![0.0; n];
-    for _iter in 0..30 {
-        mat_vec(&v, &mut tmp);
-        for i in 0..n {
-            w[i] = tmp[i] * dinv[i];
-        }
-        for &d in bc {
-            if (d as usize) < n {
-                w[d as usize] = 0.0;
-            }
-        }
-        let rq: f64 = (0..n).map(|i| v[i] * w[i]).sum();
-        if (rq - lambda).abs() < 1e-8 * rq.abs().max(1e-30) && _iter > 2 {
-            lambda = rq;
+        // v1 = D⁻¹·(A·v0): mat_vec applies the essential-BC constraint with
+        // DIAG_ONE semantics (ConstrainedOperator: y[id] = x[id] on bc DOFs,
+        // NOT 0), and dinv carries the raw diagonal inverse (bc set to 1).
+        mat_vec(&v0, &mut v1);
+        for i in 0..n { v1[i] *= dinv[i]; }
+        let eig_new: f64 = v0.iter().zip(v1.iter()).map(|(a, b)| a * b).sum();
+        let diff = ((eig_new - eigenvalue) / eigenvalue).abs();
+        eigenvalue = eig_new;
+        std::mem::swap(&mut v0, &mut v1);
+        if diff < 1e-8 {
             break;
         }
-        lambda = rq;
-        normalize(&mut w);
-        v.copy_from_slice(&w);
     }
-    lambda.abs().max(0.1)
+    eigenvalue
+}
+
+/// glibc `rand()` TYPE_3 (`x^31 + x^3 + 1`, 31-bit additive feedback),
+/// bit-exact port of `stdlib/random_r.c` (`__srandom_r` + `__random_r`) as
+/// used by MFEM's `Vector::Randomize(seed)` → `srand(seed)` + `rand()`.
+/// `next()` returns the 31-bit `rand()` value; `rand_real()` =
+/// `rand()/(RAND_MAX+1)` (MFEM `rand_real` in linalg/vector.hpp).
+struct GlibcRand {
+    state: Vec<u32>,
+    fptr: usize,
+    rptr: usize,
+}
+
+impl GlibcRand {
+    fn new(seed: u32) -> Self {
+        const DEG: usize = 31;
+        const SEP: usize = 3;
+        let mut state = vec![0u32; DEG];
+        let seed = if seed == 0 { 1 } else { seed };
+        state[0] = seed;
+        // state[i] = (16807 * state[i-1]) % 2147483647, Schrage to avoid overflow.
+        let mut word: i64 = seed as i64;
+        for i in 1..DEG {
+            let hi = word / 127773;
+            let lo = word % 127773;
+            word = 16807 * lo - 2836 * hi;
+            if word < 0 {
+                word += 2147483647;
+            }
+            state[i] = word as u32;
+        }
+        let mut r = GlibcRand {
+            state,
+            fptr: SEP,
+            rptr: 0,
+        };
+        // __srandom_r: kc = deg*10 = 310 discard draws before the first result.
+        for _ in 0..(DEG * 10) {
+            let _ = r.next();
+        }
+        r
+    }
+
+    /// One `rand()` draw (31-bit), pointer advance exactly as `__random_r`.
+    fn next(&mut self) -> u32 {
+        let n = self.state.len();
+        let val = self.state[self.fptr].wrapping_add(self.state[self.rptr]);
+        self.state[self.fptr] = val;
+        let result = val >> 1;
+        self.fptr += 1;
+        if self.fptr >= n {
+            self.fptr = 0;
+            self.rptr += 1;
+        } else {
+            self.rptr += 1;
+            if self.rptr >= n {
+                self.rptr = 0;
+            }
+        }
+        result
+    }
+
+    /// `rand() / (RAND_MAX + 1)` with `RAND_MAX = 2^31 - 1` (MFEM `rand_real`).
+    fn rand_real(&mut self) -> f64 {
+        self.next() as f64 / 2147483648.0
+    }
 }
 
 /// SSOR smoother: forward sweep then backward sweep with relaxation factor omega.
