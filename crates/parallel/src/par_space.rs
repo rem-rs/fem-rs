@@ -62,6 +62,18 @@ where
         Self::finish(local_space, dof_partition, &comm)
     }
 
+    /// Build a parallel FE space for a vector-valued space (vdim components)
+    /// with byNODES block DOF layout (matches `VectorH1Space`).
+    pub fn new_vector<M: MeshTopology>(
+        local_space: S,
+        par_mesh: &ParallelMesh<M>,
+        vdim: usize,
+        comm: Comm,
+    ) -> Self {
+        let dof_partition = DofPartition::from_vector_space(par_mesh.partition(), &comm, vdim);
+        Self::finish(local_space, dof_partition, &comm)
+    }
+
     /// Build a parallel FE space for edge-DOF-only spaces (H(curl), H(div) 2D).
     ///
     /// Uses edge-based DOF partitioning where `owner(edge) = min(owner(endpoints))`.
@@ -149,10 +161,50 @@ mod tests {
     use super::*;
     use crate::launcher::native::ThreadLauncher;
     use crate::launcher::WorkerConfig;
+    use crate::par_assembler::ParAssembler;
     use crate::par_partition::partition_mesh;
+    use crate::par_vector::ParVector;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::dof_manager::DofManager;
+    use fem_space::VectorH1Space;
+
+    #[test]
+    fn par_space_vector_h1_global_dofs_and_ghost_exchange() {
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let serial_n_dofs = 2 * mesh.n_nodes(); // vdim=2 × P1 nodes
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let local_space =
+                VectorH1Space::new(pmesh.local_mesh().clone(), 1, 2);
+            let par_space =
+                ParallelFESpace::new_vector(local_space, &pmesh, 2, comm.clone());
+
+            assert_eq!(par_space.n_global_dofs(), serial_n_dofs);
+
+            // Ghost exchange: fill owned with global ids, check ghosts receive
+            // the matching global id from the owner rank.
+            let n_local = par_space.n_local_dofs();
+            let n_owned = par_space.dof_partition().n_owned_dofs;
+            let mut data = vec![-1.0_f64; n_local];
+            for lid in 0..n_owned {
+                let gid = par_space.dof_partition().global_dof(lid as u32);
+                data[lid] = gid as f64;
+            }
+            par_space.forward_dof_exchange(&mut data);
+            for lid in n_owned..n_local {
+                let expected = par_space.dof_partition().global_dof(lid as u32) as f64;
+                assert!(
+                    (data[lid] - expected).abs() < 1e-14,
+                    "rank {}: ghost DOF local={lid} expected {expected}, got {}",
+                    comm.rank(),
+                    data[lid]
+                );
+            }
+        });
+    }
 
     #[test]
     fn par_space_global_dofs_match_serial_p1() {
@@ -187,6 +239,79 @@ mod tests {
 
             assert_eq!(par_space.n_global_dofs(), serial_n_dofs);
         });
+    }
+
+    #[test]
+    fn par_vector_h1_elasticity_matrix_consistent_across_partitions() {
+        use fem_assembly::assembler::Assembler;
+        use fem_assembly::postproc::coefficient::PWConstCoeff;
+        use fem_assembly::standard::ElasticityIntegrator;
+        use std::sync::{Arc, Mutex};
+
+        let mesh = Mesh::<2>::unit_square_tri(4);
+
+        // Collect global (gid, y) after spmv with x = gid, from rank 0.
+        fn run_partition<const N: usize>(
+            mesh: Mesh<2>,
+        ) -> Vec<(u32, f64)> {
+            let out: Arc<Mutex<Option<Vec<(u32, f64)>>>> = Arc::new(Mutex::new(None));
+            let out2 = Arc::clone(&out);
+            let launcher = ThreadLauncher::new(WorkerConfig::new(N));
+            launcher.launch(move |comm| {
+                let pmesh = partition_mesh(&mesh, &comm);
+                let local = VectorH1Space::new(pmesh.local_mesh().clone(), 1, 2);
+                let ps = ParallelFESpace::new_vector(local, &pmesh, 2, comm.clone());
+                let lam = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+                let mu = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+                let el = ElasticityIntegrator::new(lam, mu);
+                let a = ParAssembler::assemble_bilinear(&ps, &[&el], 3);
+                let dp = ps.dof_partition();
+                let mut x = ParVector::zeros(&ps);
+                for pid in 0..dp.n_owned_dofs {
+                    x.as_slice_mut()[pid] = dp.global_dof(pid as u32) as f64;
+                }
+                let mut y = ParVector::zeros(&ps);
+                a.spmv(&mut x, &mut y);
+                let owned: Vec<(u32, f64)> = (0..dp.n_owned_dofs)
+                    .map(|pid| (dp.global_dof(pid as u32), y.as_slice()[pid]))
+                    .collect();
+                if comm.rank() == 0 {
+                    let mut all = owned.clone();
+                    for src in 1..comm.size() as i32 {
+                        let gids: Vec<u32> = comm.recv(src, 101);
+                        let vals: Vec<f64> = comm.recv(src, 102);
+                        all.extend(gids.into_iter().zip(vals));
+                    }
+                    all.sort_unstable_by_key(|&(g, _)| g);
+                    *out2.lock().unwrap() = Some(all);
+                } else {
+                    let gids: Vec<u32> = owned.iter().map(|&(g, _)| g).collect();
+                    let vals: Vec<f64> = owned.iter().map(|&(_, v)| v).collect();
+                    comm.send(0, 101, &gids);
+                    comm.send(0, 102, &vals);
+                }
+            });
+            let mut guard = out.lock().unwrap();
+            guard.take().unwrap()
+        }
+
+        let np1 = run_partition::<1>(mesh.clone());
+        let np2 = run_partition::<2>(mesh.clone());
+        assert_eq!(np1.len(), np2.len(), "global dof count mismatch");
+        let mut max_diff = 0.0_f64;
+        let mut n_bad = 0;
+        for ((g1, y1), (g2, y2)) in np1.iter().zip(np2.iter()) {
+            assert_eq!(g1, g2, "gid order mismatch");
+            let d = (y1 - y2).abs();
+            if d > 1e-12 {
+                n_bad += 1;
+            }
+            max_diff = max_diff.max(d);
+        }
+        assert!(
+            max_diff < 1e-10,
+            "matrix differs across partitions: max_diff={max_diff:e}, n_bad={n_bad}"
+        );
     }
 
     #[test]

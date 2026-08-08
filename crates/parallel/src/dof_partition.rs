@@ -94,6 +94,86 @@ impl DofPartition {
         }
     }
 
+    /// Build a DOF partition for a vector FE space (vdim components) using the
+    /// byNODES block layout: `dof(vd, node) = node + vd * n_global_nodes`,
+    /// which matches `VectorH1Space` (see crates/space/src/vector_h1.rs).
+    ///
+    /// Local partition layout follows the `[owned | ghost]` convention used by
+    /// `ParVector` / `ParCsrMatrix`:
+    /// - owned segment:  `vd * n_owned_nodes + node` (node in owned range)
+    /// - ghost segment:  `n_owned + vd * n_ghost_nodes + i` (ghost index i)
+    ///
+    /// The `DofManager` (space) ordering is `vd * n_local_nodes + node`
+    /// (component blocks of all local nodes), so a permutation
+    /// `dm_to_partition` / `partition_to_dm` is installed.
+    pub fn from_vector_space(partition: &MeshPartition, comm: &Comm, vdim: usize) -> Self {
+        let n_global_nodes = comm.allreduce_sum_i64(partition.n_owned_nodes as i64) as usize;
+        let n_owned_nodes = partition.n_owned_nodes;
+        let n_ghost_nodes = partition.n_ghost_nodes;
+        let n_local_nodes = partition.global_node_ids.len();
+        let n_owned = n_owned_nodes * vdim;
+        let n_ghost = n_ghost_nodes * vdim;
+
+        let mut global_dof_ids = Vec::with_capacity(n_owned + n_ghost);
+        let mut dof_owner = Vec::with_capacity(n_owned + n_ghost);
+        for vd in 0..vdim {
+            let block_base = (vd * n_global_nodes) as u32;
+            for lid in 0..n_owned_nodes as u32 {
+                global_dof_ids.push(partition.global_node(lid) + block_base);
+                dof_owner.push(comm.rank());
+            }
+        }
+        for vd in 0..vdim {
+            let block_base = (vd * n_global_nodes) as u32;
+            for (i, (lid, owner)) in partition.ghost_nodes().enumerate() {
+                let _ = i;
+                let gid = partition.global_node(lid);
+                global_dof_ids.push(gid + block_base);
+                dof_owner.push(owner);
+            }
+        }
+        // NOTE: ghost segment layout above MUST match the permutation in
+        // dm_to_partition below: both are vd-outer, ghost-node-inner
+        // (gid = n_owned + vd * n_ghost_nodes + i).
+
+        // Permutation: DofManager (space) ordering → partition [owned|ghost] ordering.
+        let mut dm_to_partition = vec![0u32; n_local_nodes * vdim];
+        for vd in 0..vdim {
+            for node in 0..n_local_nodes {
+                let dm_id = vd * n_local_nodes + node;
+                let p_id = if node < n_owned_nodes {
+                    vd * n_owned_nodes + node
+                } else {
+                    n_owned + vd * n_ghost_nodes + (node - n_owned_nodes)
+                };
+                dm_to_partition[dm_id] = p_id as u32;
+            }
+        }
+        let mut partition_to_dm = vec![0u32; n_owned + n_ghost];
+        for (dm_id, &p_id) in dm_to_partition.iter().enumerate() {
+            partition_to_dm[p_id as usize] = dm_id as u32;
+        }
+
+        let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
+        let dof_global_to_local: HashMap<u32, u32> = global_dof_ids
+            .iter()
+            .enumerate()
+            .map(|(lid, &gid)| (gid, lid as u32))
+            .collect();
+
+        DofPartition {
+            n_owned_dofs: n_owned,
+            n_ghost_dofs: n_ghost,
+            global_dof_ids,
+            dof_owner,
+            global_dof_offset,
+            dof_global_to_local,
+            dm_to_partition,
+            partition_to_dm,
+            sign_corrections: Vec::new(),
+        }
+    }
+
     /// Build a DOF partition from a `DofManager` and `MeshPartition`.
     ///
     /// For P1, delegates to `from_mesh_partition`.  For P2, adds edge DOFs

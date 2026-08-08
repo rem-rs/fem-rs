@@ -7,7 +7,8 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::fe_space::FESpace;
 use fem_assembly::assembler::Assembler;
-use fem_assembly::integrator::{BilinearIntegrator, LinearIntegrator};
+use fem_assembly::integrator::{BilinearIntegrator, BoundaryLinearIntegrator, LinearIntegrator};
+use fem_core::types::DofId;
 
 use crate::par_csr::ParCsrMatrix;
 use crate::par_space::ParallelFESpace;
@@ -63,6 +64,42 @@ impl ParAssembler {
     ) -> ParVector {
         let local_rhs = Assembler::assemble_linear(
             par_space.local_space(), integrators, quad_order,
+        );
+
+        let dof_part = par_space.dof_partition();
+        let permuted_rhs = if dof_part.needs_permutation() {
+            permute_vec(&local_rhs, dof_part)
+        } else {
+            local_rhs
+        };
+
+        ParVector::from_local_raw(
+            permuted_rhs,
+            dof_part.n_owned_dofs,
+            par_space.dof_ghost_exchange_arc(),
+            par_space.comm().clone(),
+        )
+    }
+    /// Parallel boundary linear form assembly (e.g. Neumann traction on a
+    /// boundary attribute).  Serial boundary assembly on the local mesh
+    /// (owned + ghost faces), then permute and wrap in a `ParVector`.
+    pub fn assemble_boundary_linear<S: FESpace>(
+        par_space: &ParallelFESpace<S>,
+        n_dofs: usize,
+        face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+        order: u8,
+        integrators: &[&dyn BoundaryLinearIntegrator],
+        tags: &[i32],
+        quad_order: u8,
+    ) -> ParVector {
+        let local_rhs = Assembler::assemble_boundary_linear(
+            n_dofs,
+            par_space.local_space().mesh(),
+            face_dofs,
+            order,
+            integrators,
+            tags,
+            quad_order,
         );
 
         let dof_part = par_space.dof_partition();
