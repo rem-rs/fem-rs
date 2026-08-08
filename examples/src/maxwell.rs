@@ -1697,6 +1697,21 @@ pub fn l2_error_hcurl_exact<F>(
 where
     F: Fn(&[f64]) -> [f64; 2],
 {
+    l2_error_hcurl_exact_owned(space, uh, exact, &|_| true)
+}
+
+/// L² norm of the error restricted to elements for which `owned_pred` is true
+/// (parallel path: each rank integrates only its owned elements).
+pub fn l2_error_hcurl_exact_owned<F, P>(
+    space: &HCurlSpace<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    owned_pred: &P,
+) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 2],
+    P: Fn(u32) -> bool,
+{
     use fem_element::nedelec::QuadND1;
     use fem_element::VectorReferenceElement;
 
@@ -1704,6 +1719,9 @@ where
     let mut err2 = 0.0_f64;
 
     for e in mesh.elem_iter() {
+        if !owned_pred(e) {
+            continue;
+        }
         let elem_type = mesh.element_type(e);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);

@@ -1,12 +1,20 @@
-//! # Parallel Example 3 — Maxwell cavity  (1:1 with MFEM pex3)
+//! # Parallel Example 3 — Maxwell cavity  (1:1 with MFEM pex3 / ex3p.cpp)
 //!
-//! Solves `∇×(∇×E) + E = f` with PEC BC, in parallel.
+//! Solves `curl curl E + E = f` (electromagnetic diffusion) with PEC BC
+//! (`E × n = 0`, non-homogeneous: projected exact tangential values), in
+//! parallel.  Matches MFEM examples/ex3p.cpp defaults: star.mesh, serial
+//! ref_levels (≤1000 elems → 2) then 2 parallel uniform refinements
+//! (4 total, done serially before partitioning), ND1 (ND_FECollection(1,2))
+//! H(curl) space, muinv = sigma = 1, exact solution
+//! `E = (sin(κy), sin(κx))`, `f = (1+κ²)·E`, κ = π.  CG + AMS in C++;
+//! Rust uses GMRES + Jacobi (row-only Dirichlet elimination leaves a
+//! nonsymmetric system, see pex4 notes).
 //!
 //! ## Usage
 //! ```bash
-//! cargo run --example mfem_pex3_maxwell_cavity -- -m data/star.mesh --ranks 4
-//! cargo run --example mfem_pex3_maxwell_cavity -- --n 16 --ranks 4
-//! cargo run --example mfem_pex3_maxwell_cavity -- -m data/star.mesh --ranks 2 -r 2
+//! cargo run --release --example mfem_pex3_maxwell_cavity
+//! cargo run --release --example mfem_pex3_maxwell_cavity -- --ranks 4
+//! cargo run --release --example mfem_pex3_maxwell_cavity -- --n 16 --ranks 4
 //! ```
 
 use std::f64::consts::PI;
@@ -23,7 +31,7 @@ use fem_io::glvis::GlVisSocket;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
-    par_partition::partition_mesh, par_solve_pcg_jacobi,
+    par_partition::partition_mesh, par_solve_gmres_jacobi,
     WorkerConfig,
 };
 use fem_parallel::launcher::native::ThreadLauncher;
@@ -47,75 +55,6 @@ impl VectorLinearIntegrator for Src {
 #[allow(dead_code)]
 fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
     [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
-}
-
-/// Compute the squared L² error on the first `n_elems` owned elements.
-///
-/// `uh` is in the DofPartition ordering; `element_dofs()` returns DOFs in
-/// DOF-Manager (space) ordering.  We permute via `dof_part.permute_dof()`
-/// and apply sign corrections for H(Curl) edge orientation consistency.
-///
-/// The result must be allreduced across ranks to obtain the global L² error.
-fn compute_hcurl_l2_error_sq<R: VectorReferenceElement>(
-    mesh: &Mesh<2>,
-    space: &HCurlSpace<Mesh<2>>,
-    uh: &[f64],
-    dof_part: &DofPartition,
-    ref_elem: R,
-    exact: impl Fn(&[f64]) -> [f64; 2],
-    n_elems: usize,
-) -> f64 {
-    let quad = ref_elem.quadrature(6);
-    let n_ldofs = ref_elem.n_dofs();
-    let mut ref_phi = vec![0.0; n_ldofs * 2];
-    let mut err2 = 0.0_f64;
-
-    for e in 0..n_elems as u32 {
-        let nodes = mesh.element_nodes(e);
-        let dofs: Vec<usize> = space.element_dofs(e)
-            .iter().map(|&d| d as usize).collect();
-        let signs = space.element_signs(e);
-
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        let x2 = mesh.node_coords(nodes[2]);
-        let j00 = x1[0] - x0[0]; let j01 = x2[0] - x0[0];
-        let j10 = x1[1] - x0[1]; let j11 = x2[1] - x0[1];
-        let det_j = (j00 * j11 - j01 * j10).abs();
-        let inv_det = 1.0 / (j00 * j11 - j01 * j10);
-        let (jit00, jit01) = ( j11 * inv_det, -j10 * inv_det);
-        let (jit10, jit11) = (-j01 * inv_det,  j00 * inv_det);
-
-        for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * det_j;
-            let xp = [
-                x0[0] + j00 * xi[0] + j01 * xi[1],
-                x0[1] + j10 * xi[0] + j11 * xi[1],
-            ];
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-
-            let mut eh = [0.0_f64; 2];
-            for i in 0..n_ldofs {
-                // Permute from space (DM) ordering to partition ordering.
-                let dm_dof = dofs[i] as u32;
-                let part_dof = dof_part.permute_dof(dm_dof) as usize;
-                let s = signs[i]; // local element sign
-                let corr = dof_part.sign_correction(dm_dof);
-                // Reconstruct the DM value: uh_partition = uh_dm * corr
-                // So uh_dm = uh[part_dof] * corr (since corr = ±1)
-                let val = s * uh[part_dof] * corr;
-                let phi_x = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
-                let phi_y = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
-                eh[0] += val * phi_x;
-                eh[1] += val * phi_y;
-            }
-            let e_exact = exact(&xp);
-            let dx = eh[0] - e_exact[0];
-            let dy = eh[1] - e_exact[1];
-            err2 += w * (dx * dx + dy * dy);
-        }
-    }
-    err2
 }
 
 #[allow(unused_variables, unused_assignments)]
@@ -145,13 +84,25 @@ fn main() {
         i += 1;
     }
 
+    // 1:1 default: star.mesh + 4 uniform refinements (2 serial ref_levels +
+    // 2 parallel refinements equivalent; done serially before partitioning).
+    // `--n N` keeps the unit-square triangle self-test path.
     let base_mesh: Mesh<2> = if let Some(ref path) = mesh_file {
         read_mfem_file(path).expect("failed to read MFEM mesh")
             .mesh2d.expect("MFEM mesh must be 2D")
-    } else {
+    } else if n != 16 {
         Mesh::<2>::unit_square_tri(n)
+    } else {
+        let mfem = read_mfem_file("data/star.mesh")
+            .expect("failed to read data/star.mesh");
+        let m = mfem.mesh2d.expect("star.mesh must be 2-D");
+        let mut m = m;
+        for _ in 0..4 {
+            m = refine_uniform(&m);
+        }
+        m
     };
-    let mesh = Arc::new(if ref_levels > 0 {
+    let mesh = Arc::new(if ref_levels > 0 && n != 16 {
         let mut m = base_mesh;
         for _ in 0..ref_levels { m = refine_uniform(&m); }
         m
@@ -176,18 +127,36 @@ fn main() {
         let mut stiff = ParVectorAssembler::assemble_bilinear(&ps, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], quad_order);
         let mut rhs = ParVectorAssembler::assemble_linear(&ps, &[&Src { kappa }], quad_order);
 
-        // PEC BC — zero tangential field on all boundaries
+        // PEC BC — zero tangential field on all boundaries.  Non-homogeneous
+        // (MFEM ex3p: x.ProjectCoefficient(E)): row-only elimination with
+        // columns retained carries the A·x_bc contribution on the LHS, so B
+        // must NOT be pre-subtracted; the resulting system is nonsymmetric →
+        // solve with GMRES (see pex4 notes).
         let bdr = boundary_dofs_hcurl(ps.local_space().mesh(), ps.local_space(), &[1]);
         let dp = ps.dof_partition();
+        let n_owned = dp.n_owned_dofs;
+
+        // Initial guess x = projection of E_exact (dm order → partition order).
+        let x0 = ps.local_space().interpolate_vector(&|p| exact_e(p, kappa).to_vec());
+        let x0_perm = fem_parallel::par_assembler::permute_vec(x0.as_slice(), dp);
+        let mut u = ParVector::from_local_raw(
+            x0_perm,
+            n_owned,
+            ps.dof_ghost_exchange_arc(),
+            comm.clone(),
+        );
+
         for &d in &bdr {
             let p = dp.permute_dof(d) as usize;
-            if p < dp.n_owned_dofs { stiff.apply_dirichlet_par(p, 0.0, &mut rhs); }
+            if p < n_owned {
+                let bc_val = u.owned_slice()[p];
+                stiff.apply_dirichlet_par(p, bc_val, &mut rhs);
+            }
         }
 
-        let mut u = ParVector::zeros(&ps);
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..Default::default() };
-        let res = par_solve_pcg_jacobi(&stiff, &rhs, &mut u, &cfg)
-            .expect("PCG solve failed");
+        let res = par_solve_gmres_jacobi(&stiff, &rhs, &mut u, 50, &cfg)
+            .expect("GMRES solve failed");
 
         if comm.rank() == 0 {
             println!("PCG Iterations = {}", res.iterations);
@@ -295,30 +264,38 @@ fn main() {
         let lm = ps.local_space().mesh();
         let dp = ps.dof_partition();
         let n_owned_elems = pm.partition().n_owned_elems;
-        let local_err2 = if n_owned_elems > 0 {
-            let elem_type = lm.element_type(0);
-            match elem_type {
-                ElementType::Tri3 => {
-                    compute_hcurl_l2_error_sq(lm, ps.local_space(), u.as_slice(), dp,
-                        TriND1, |x| exact_e(x, kappa), n_owned_elems)
-                }
-                ElementType::Quad4 => {
-                    compute_hcurl_l2_error_sq(lm, ps.local_space(), u.as_slice(), dp,
-                        QuadND1, |x| exact_e(x, kappa), n_owned_elems)
-                }
-                _ => {
-                    if comm.rank() == 0 {
-                        eprintln!("  L² error not implemented for {:?}", elem_type);
-                    }
-                    0.0
-                }
+        // Refresh ghost DOFs and convert partition order → dm order (with
+        // sign correction back, see pex4 notes), then use the library L2
+        // error function (dm order, verified against serial ex3).
+        let mut u_full = u.clone_vec();
+        u_full.update_ghosts();
+        let n_dm = ps.local_space().n_dofs();
+        let mut u_dm = vec![0.0_f64; n_dm];
+        {
+            let needs_sign = dp.needs_sign_correction();
+            for pid in 0..dp.n_total_dofs() {
+                let dm = dp.unpermute_dof(pid as u32) as usize;
+                let s = if needs_sign {
+                    dp.sign_correction(dm as u32)
+                } else {
+                    1.0
+                };
+                u_dm[dm] = u_full.as_slice()[pid] * s;
             }
+        }
+        let local_err = if n_owned_elems > 0 {
+            fem_examples::maxwell::l2_error_hcurl_exact_owned(
+                ps.local_space(),
+                &u_dm,
+                |x| exact_e(x, kappa),
+                &|e: u32| pm.partition().elem_owner[e as usize] == comm.rank(),
+            )
         } else {
             0.0
         };
-        let global_err2 = comm.allreduce_sum_f64(local_err2);
+        let global_err = comm.allreduce_sum_f64(local_err * local_err).sqrt();
         if comm.rank() == 0 {
-            println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", global_err2.sqrt());
+            println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", global_err);
         }
 
         *r2.lock().unwrap() = Some((n_global, res.iterations, res.final_residual));
