@@ -5131,6 +5131,18 @@ pub fn refine_nonconforming_quad_aniso(
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
 
+    // Coordinate → existing node lookup (reuse hanging nodes of refined
+    // neighbours at edge midpoints, MFEM NC semantics — see
+    // refine_nonconforming_quad).
+    let coord_map: HashMap<String, NodeId> = {
+        let mut m = HashMap::new();
+        for n in 0..mesh.n_nodes() as NodeId {
+            let c = mesh.coords_of(n);
+            m.entry(format!("{:.12},{:.12}", c[0], c[1])).or_insert(n);
+        }
+        m
+    };
+
     // Inline helper macro to insert midpoint if not already present.
     macro_rules! ensure_midpoint {
         ($key:expr) => {{
@@ -5138,10 +5150,16 @@ pub fn refine_nonconforming_quad_aniso(
             if !midpoint_map.contains_key(&k) {
                 let xa = mesh.coords_of(k.0);
                 let xb = mesh.coords_of(k.1);
-                new_coords.push(0.5 * (xa[0] + xb[0]));
-                new_coords.push(0.5 * (xa[1] + xb[1]));
-                midpoint_map.insert(k, next_node);
-                next_node += 1;
+                let mx = 0.5 * (xa[0] + xb[0]);
+                let my = 0.5 * (xa[1] + xb[1]);
+                if let Some(&existing) = coord_map.get(&format!("{mx:.12},{my:.12}")) {
+                    midpoint_map.insert(k, existing);
+                } else {
+                    new_coords.push(mx);
+                    new_coords.push(my);
+                    midpoint_map.insert(k, next_node);
+                    next_node += 1;
+                }
             }
         }};
     }

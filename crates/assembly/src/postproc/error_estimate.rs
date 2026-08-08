@@ -136,12 +136,17 @@ pub struct ElementIndicators {
     pub eta: Vec<f64>,
     pub total_error: f64,
     pub estimator_name: &'static str,
+    /// Per-element anisotropic refinement flags (bit k set ⇒ direction k is
+    /// dominant in the flux error, MFEM `ZZErrorEstimator` aniso_flags:
+    /// threshold 0.15·3/dim on d_xyz[k]/Σd_xyz).  `None` when the estimator
+    /// did not compute directional energies (isotropic path).
+    pub aniso_flags: Option<Vec<u8>>,
 }
 
 impl ElementIndicators {
     pub fn new(eta: Vec<f64>, name: &'static str) -> Self {
         let total_error = eta.iter().map(|v| v * v).sum::<f64>().sqrt();
-        ElementIndicators { eta, total_error, estimator_name: name }
+        ElementIndicators { eta, total_error, estimator_name: name, aniso_flags: None }
     }
 
     pub fn dorfler_mark(&self, theta: f64) -> Vec<u32> {
@@ -867,6 +872,7 @@ where
     // M_elem is the element mass matrix with integration rule 2×order.
     let quad_order = (order as u8) * 2;
     let mut eta = vec![0.0; ne];
+    let mut aniso = vec![0u8; ne];
 
     for e in 0..ne as u32 {
         let elem_type = m.element_type(e);
@@ -904,21 +910,37 @@ where
         }
 
         // Energy: ∫ ‖f‖² = Σ_di Σ_i Σ_j f[i,di] · M_elem[i,j] · f[j,di]
-        let mut eng = 0.0;
+        // (per-direction d_xyz[di] mirrors MFEM ComputeFluxEnergy's d_energy).
+        let mut d_xyz = vec![0.0; d];
         for di in 0..d {
             for i in 0..n_ldofs {
                 let mut row_sum = 0.0;
                 for j in 0..n_ldofs {
                     row_sum += m_elem[i * n_ldofs + j] * f[j * d + di];
                 }
-                eng += f[i * d + di] * row_sum;
+                d_xyz[di] += f[i * d + di] * row_sum;
             }
         }
+        let eng: f64 = d_xyz.iter().sum();
 
         eta[e as usize] = eng.sqrt();
+        // MFEM aniso_flags: flag = bit k if d_xyz[k]/sum > 0.15·3/dim.
+        let sum_e = eng;
+        if sum_e > 0.0 {
+            let thresh = 0.15 * 3.0 / d as f64;
+            let mut flag: u8 = 0;
+            for k in 0..d {
+                if d_xyz[k] / sum_e > thresh {
+                    flag |= 1 << k;
+                }
+            }
+            aniso[e as usize] = flag;
+        }
     }
 
-    ElementIndicators::new(eta, "ZZ(nodal)")
+    let mut indicators = ElementIndicators::new(eta, "ZZ(nodal)");
+    indicators.aniso_flags = Some(aniso);
+    indicators
 }
 
 /// Kelly face-jump error estimator using GridFunction.
