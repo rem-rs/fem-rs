@@ -21,6 +21,12 @@ struct EdgeDofInfo {
     global_node_a: u32,   // min of global endpoints
     global_node_b: u32,   // max of global endpoints
     owner: Rank,
+    /// Cross-rank-consistent DOF identifier used as part of the ghost
+    /// exchange key.  For FE spaces whose edge DOFs carry global numbering
+    /// (RTk/NDk: `local_dof_id` is a global DOF id) this is `local_dof_id`;
+    /// for DofManager P2 (1 DOF per edge, local numbering differs per rank)
+    /// this is `0` (the node pair alone identifies the edge uniquely).
+    dof_key: u32,
 }
 
 // ── DofPartition ────────────────────────────────────────────────────────────
@@ -253,13 +259,18 @@ impl DofPartition {
         for (&EdgeKey(local_a, local_b), &local_dof_id) in &dof_manager.edge_dof_map {
             let ga = partition.global_node(local_a);
             let gb = partition.global_node(local_b);
-            let edge_owner = partition.node_owner(local_a).min(partition.node_owner(local_b));
+            let owner_a = partition.node_owner(local_a);
+            let owner_b = partition.node_owner(local_b);
+            let edge_owner = owner_a.min(owner_b);
 
             let info = EdgeDofInfo {
                 local_dof_id,
                 global_node_a: ga.min(gb),
                 global_node_b: ga.max(gb),
                 owner: edge_owner,
+                // DofManager P2: 1 DOF per edge; the node pair alone
+                // identifies the edge, local DOF numbering is rank-local.
+                dof_key: 0,
             };
 
             if edge_owner == local_rank {
@@ -289,29 +300,42 @@ impl DofPartition {
 
         // Owned vertices: global ID = global node ID.
         for lid in 0..n_owned_vertices as u32 {
-            global_dof_ids.push(partition.global_node(lid));
+            // Read the stored global id directly (global_node() is identity
+            // in identity mode and would return the compact slot itself).
+            global_dof_ids.push(partition.global_node_ids[lid as usize]);
             dof_owner_vec.push(local_rank);
         }
 
         // Owned edges: global ID = total_global_vertices + edge_offset + i.
-        let mut owned_edge_global_map: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut owned_edge_global_map: HashMap<(u32, u32, u32), u32> = HashMap::new();
         for (i, edge) in owned_edges.iter().enumerate() {
             let gid = total_global_vertices + edge_offset + i as u32;
             global_dof_ids.push(gid);
             dof_owner_vec.push(local_rank);
-            owned_edge_global_map.insert((edge.global_node_a, edge.global_node_b), gid);
+            owned_edge_global_map.insert(
+                (edge.global_node_a, edge.global_node_b, edge.dof_key),
+                gid,
+            );
         }
-        debug_assert_eq!(global_dof_ids.len(), n_owned);
 
         // ── Build ghost DOF arrays ──────────────────────────────────────────
 
         // Ghost vertices.
         for lid in n_owned_vertices..(n_owned_vertices + n_ghost_vertices) {
-            global_dof_ids.push(partition.global_node(lid as u32));
-            dof_owner_vec.push(partition.node_owner(lid as u32));
+            // `lid` is a compact slot: read the stored global id directly
+            // (global_node() is identity in identity mode and would return
+            // the compact slot itself).  node_owner() needs the compact slot
+            // in compact mode and the global id in identity mode.
+            let gid = partition.global_node_ids[lid as usize];
+            global_dof_ids.push(gid);
+            let owner = if partition.node_id_identity {
+                partition.node_owner(gid)
+            } else {
+                partition.node_owner(lid as u32)
+            };
+            dof_owner_vec.push(owner);
         }
 
-        // Ghost edges: exchange global IDs with their owners.
         let ghost_edge_gids = exchange_ghost_edge_ids(
             &ghost_edges, &owned_edge_global_map, comm,
         );
@@ -452,6 +476,7 @@ impl DofPartition {
         // For higher-order spaces, DOFs are grouped:
         //   [edge0 × dofs_per_edge, edge1 × dofs_per_edge, ..., interior...]
         let mut dof_to_edge: HashMap<u32, (u32, u32)> = HashMap::new();
+        let mut dof_to_edge_pos: HashMap<u32, u32> = HashMap::new(); // dof_id -> position within its edge
         let mut interior_dofs: Vec<(u32, u32, u32)> = Vec::new(); // (dof_id, local_elem_id, dof_idx_in_elem)
         let mut sign_corr: Vec<f64> = vec![1.0; n_space_dofs];
 
@@ -474,6 +499,20 @@ impl DofPartition {
                     let gb = partition.global_node(local_b);
 
                     dof_to_edge.insert(dof_id, (ga.min(gb), ga.max(gb)));
+                    // Physical per-edge position (mom0/mom1): the edge's DOFs
+                    // are [first, first+dofs_per_edge) in the space's global
+                    // numbering, so `dof_id - first` identifies the moment
+                    // regardless of the element's edge orientation (rev).
+                    // Using `i % dofs_per_edge` instead is WRONG: it depends
+                    // on which element first "sees" the edge, and that
+                    // traversal order differs between ranks.
+                    let edge_start = edge_idx * dofs_per_edge;
+                    let edge_first = dofs[edge_start..edge_start + dofs_per_edge]
+                        .iter()
+                        .min()
+                        .copied()
+                        .unwrap_or(dof_id);
+                    dof_to_edge_pos.insert(dof_id, dof_id - edge_first);
 
                     // Sign correction: local_sign * d = global_sign, so d = global_sign / local_sign.
                     let local_sign: f64 = if local_a < local_b { 1.0 } else { -1.0 };
@@ -491,19 +530,31 @@ impl DofPartition {
         let mut ghost_edges: Vec<EdgeDofInfo> = Vec::new();
 
         // Build global-to-local node map for ownership lookup.
-        let n_total_nodes = (partition.n_owned_nodes + partition.n_ghost_nodes) as u32;
+        // In identity mode local node ids ARE global ids, so iterate the
+        // local mesh's full node range (owned + ghost + unused holes);
+        // in compact mode the range equals owned+ghost count.
+        let n_total_nodes = mesh.n_nodes() as u32;
         let mut global_to_local_node: HashMap<u32, u32> = HashMap::new();
         for lid in 0..n_total_nodes {
             global_to_local_node.insert(partition.global_node(lid), lid);
         }
 
         for (&dof_id, &(ga, gb)) in &dof_to_edge {
-            let owner_a = global_to_local_node.get(&ga)
-                .map(|&lid| partition.node_owner(lid))
-                .unwrap_or(Rank::MAX);
-            let owner_b = global_to_local_node.get(&gb)
-                .map(|&lid| partition.node_owner(lid))
-                .unwrap_or(Rank::MAX);
+            let owner_a = if partition.node_id_identity {
+                // Identity mode: ga is already a local-mesh node id.
+                partition.node_owner(ga)
+            } else {
+                global_to_local_node.get(&ga)
+                    .map(|&lid| partition.node_owner(lid))
+                    .unwrap_or(Rank::MAX)
+            };
+            let owner_b = if partition.node_id_identity {
+                partition.node_owner(gb)
+            } else {
+                global_to_local_node.get(&gb)
+                    .map(|&lid| partition.node_owner(lid))
+                    .unwrap_or(Rank::MAX)
+            };
             let edge_owner = owner_a.min(owner_b);
 
             let info = EdgeDofInfo {
@@ -511,6 +562,13 @@ impl DofPartition {
                 global_node_a: ga,
                 global_node_b: gb,
                 owner: edge_owner,
+                // In-edge position (0..dofs_per_edge): cross-rank consistent
+                // (each edge's DOFs appear in global DOF order inside the
+                // element DOF list; i%2 == dof_id - first regardless of the
+                // local edge enumeration).  The raw DOF id is NOT usable:
+                // HDiv/HCurl spaces number DOFs by local element traversal,
+                // which differs between ranks.
+                dof_key: *dof_to_edge_pos.get(&dof_id).unwrap_or(&0),
             };
 
             if edge_owner == local_rank {
@@ -574,24 +632,30 @@ impl DofPartition {
         let mut global_dof_ids = Vec::with_capacity(total);
         let mut dof_owner_vec = Vec::with_capacity(total);
 
-        // 4a. Edge DOFs (owned first, then ghost).
-        let mut owned_edge_global_map: HashMap<(u32, u32), u32> = HashMap::new();
+        // 4a. Owned DOFs: edges first, then interior DOFs.
+        //
+        // Partition layout is [owned | ghost]; n_owned_dofs = n_owned_edge +
+        // n_owned_interior, so ALL owned DOFs must precede the ghost segment.
+        // (Previously ghost edges were pushed right after owned edges, which
+        // mixed ghost DOFs into the owned segment once interior DOFs exist —
+        // RT0 escaped because it has no interior DOFs; RT1/RT2 break.)
+        //
+        // NOTE: RTk spaces have `dofs_per_edge` DOFs per edge (e.g. RT1: 2).
+        // The map key must include the DOF id — using only the node pair
+        // collapses the edge's DOFs to a single gid and the ghost exchange
+        // returns the same gid for all of them (duplicate global DOFs).
+        let mut owned_edge_global_map: HashMap<(u32, u32, u32), u32> = HashMap::new();
         for (i, edge) in owned_edges.iter().enumerate() {
             let gid = edge_offset + i as u32;
             global_dof_ids.push(gid);
             dof_owner_vec.push(local_rank);
-            owned_edge_global_map.insert((edge.global_node_a, edge.global_node_b), gid);
+            owned_edge_global_map.insert(
+                (edge.global_node_a, edge.global_node_b, edge.dof_key),
+                gid,
+            );
         }
 
-        let ghost_edge_gids = exchange_ghost_edge_ids(
-            &ghost_edges, &owned_edge_global_map, comm,
-        );
-        for (i, edge) in ghost_edges.iter().enumerate() {
-            global_dof_ids.push(ghost_edge_gids[i]);
-            dof_owner_vec.push(edge.owner);
-        }
-
-        // 4b. Interior DOFs (owned then ghost).
+        // Owned interior DOFs.
         let owned_interior_offset = edge_offset + owned_edges.len() as u32;
         let mut owned_interior_map: HashMap<(u32, u32), u32> = HashMap::new();
         for (j, &(_dof_id, elem_gid, dof_idx)) in owned_interior.iter().enumerate() {
@@ -599,6 +663,15 @@ impl DofPartition {
             global_dof_ids.push(gid);
             dof_owner_vec.push(local_rank);
             owned_interior_map.insert((elem_gid, dof_idx), gid);
+        }
+
+        // 4b. Ghost DOFs: edges then interior.
+        let ghost_edge_gids = exchange_ghost_edge_ids(
+            &ghost_edges, &owned_edge_global_map, comm,
+        );
+        for (i, edge) in ghost_edges.iter().enumerate() {
+            global_dof_ids.push(ghost_edge_gids[i]);
+            dof_owner_vec.push(edge.owner);
         }
 
         let ghost_interior_gids = exchange_ghost_interior_ids(
@@ -620,16 +693,16 @@ impl DofPartition {
         for (i, edge) in owned_edges.iter().enumerate() {
             dm_to_partition[edge.local_dof_id as usize] = i as u32;
         }
-        for (i, edge) in ghost_edges.iter().enumerate() {
-            dm_to_partition[edge.local_dof_id as usize] = (n_owned_edge + i) as u32;
-        }
-        // Interior DOFs
-        let interior_owned_start = n_owned_edge + n_ghost_edge;
+        // Owned interior DOFs follow owned edges.
         for (j, &(dof_id, _, _)) in owned_interior.iter().enumerate() {
-            dm_to_partition[dof_id as usize] = (interior_owned_start + j) as u32;
+            dm_to_partition[dof_id as usize] = (n_owned_edge + j) as u32;
+        }
+        // Ghost edges/interior start after the whole owned segment.
+        for (i, edge) in ghost_edges.iter().enumerate() {
+            dm_to_partition[edge.local_dof_id as usize] = (n_owned + i) as u32;
         }
         for (j, &(dof_id, _, _, _)) in ghost_interior.iter().enumerate() {
-            dm_to_partition[dof_id as usize] = (n_owned + j) as u32;
+            dm_to_partition[dof_id as usize] = (n_owned + n_ghost_edge + j) as u32;
         }
         // Build reverse permutation
         for (dm_id, &part_id) in dm_to_partition.iter().enumerate() {
@@ -750,29 +823,32 @@ impl DofPartition {
 /// the owner rank.  The owner looks up the global DOF ID and sends it back.
 fn exchange_ghost_edge_ids(
     ghost_edges: &[EdgeDofInfo],
-    owned_edge_global_map: &HashMap<(u32, u32), u32>,
+    owned_edge_global_map: &HashMap<(u32, u32, u32), u32>,
     comm: &Comm,
 ) -> Vec<u32> {
     if comm.size() <= 1 || ghost_edges.is_empty() {
         return Vec::new();
     }
 
-    // Group ghost edges by owner rank.
-    let mut requests_by_owner: HashMap<Rank, Vec<(usize, u32, u32)>> = HashMap::new();
+    // Group ghost edges by owner rank. Each request carries the local DOF id
+    // so edges with multiple DOFs (RTk: dofs_per_edge > 1) resolve to
+    // distinct global DOF ids on the owner.
+    let mut requests_by_owner: HashMap<Rank, Vec<(usize, u32, u32, u32)>> = HashMap::new();
     for (i, edge) in ghost_edges.iter().enumerate() {
         requests_by_owner.entry(edge.owner).or_default()
-            .push((i, edge.global_node_a, edge.global_node_b));
+            .push((i, edge.global_node_a, edge.global_node_b, edge.dof_key));
     }
 
-    // Phase 1: send edge requests (pairs of global node IDs) to owners.
+    // Phase 1: send edge requests (node pair + dof id) to owners.
     let sends: Vec<(Rank, Vec<u8>)> = requests_by_owner
         .iter()
         .map(|(&owner, edges)| {
             let bytes: Vec<u8> = edges.iter()
-                .flat_map(|&(_, a, b)| {
-                    let mut buf = [0u8; 8];
+                .flat_map(|&(_, a, b, d)| {
+                    let mut buf = [0u8; 12];
                     buf[..4].copy_from_slice(&a.to_le_bytes());
-                    buf[4..].copy_from_slice(&b.to_le_bytes());
+                    buf[4..8].copy_from_slice(&b.to_le_bytes());
+                    buf[8..].copy_from_slice(&d.to_le_bytes());
                     buf
                 })
                 .collect();
@@ -785,14 +861,15 @@ fn exchange_ghost_edge_ids(
     // Phase 2: owners look up global DOF IDs and reply.
     let replies: Vec<(Rank, Vec<u8>)> = received.iter()
         .map(|(requester, bytes)| {
-            debug_assert_eq!(bytes.len() % 8, 0);
-            let reply_bytes: Vec<u8> = bytes.chunks_exact(8)
+            debug_assert_eq!(bytes.len() % 12, 0);
+            let reply_bytes: Vec<u8> = bytes.chunks_exact(12)
                 .flat_map(|chunk| {
                     let a = u32::from_le_bytes(chunk[..4].try_into().unwrap());
-                    let b = u32::from_le_bytes(chunk[4..].try_into().unwrap());
-                    let gid = owned_edge_global_map.get(&(a, b))
+                    let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                    let d = u32::from_le_bytes(chunk[8..].try_into().unwrap());
+                    let gid = owned_edge_global_map.get(&(a, b, d))
                         .unwrap_or_else(|| panic!(
-                            "exchange_ghost_edge_ids: rank {} requested edge ({a},{b}) \
+                            "exchange_ghost_edge_ids: rank {} requested edge ({a},{b}) dof {d} \
                              but this rank does not own it", requester
                         ));
                     gid.to_le_bytes()
@@ -812,7 +889,7 @@ fn exchange_ghost_edge_ids(
             .collect();
         let request_indices = &requests_by_owner[responder];
         assert_eq!(gids.len(), request_indices.len());
-        for (j, &(orig_idx, _, _)) in request_indices.iter().enumerate() {
+        for (j, &(orig_idx, _, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
         }
     }

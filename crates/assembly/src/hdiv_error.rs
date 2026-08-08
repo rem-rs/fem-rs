@@ -168,6 +168,22 @@ where
     F: Fn(&[f64]) -> f64,
     P: Fn(u32) -> bool,
 {
+    compute_l2_error_scalar_owned_q(space, uh, exact, owned_pred, 6)
+}
+
+/// Variant of [`compute_l2_error_scalar_owned`] with an explicit quadrature
+/// order (MFEM ex5p uses `max(2, 2*order+1)` = 3 for the error integral).
+pub fn compute_l2_error_scalar_owned_q<F, P>(
+    space: &fem_space::L2Space<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    owned_pred: &P,
+    quad_order: usize,
+) -> f64
+where
+    F: Fn(&[f64]) -> f64,
+    P: Fn(u32) -> bool,
+{
     use fem_element::{
         lagrange::{QuadQ1, TriP1},
         ReferenceElement,
@@ -183,7 +199,7 @@ where
         ElementType::Quad4 => &fem_element::lagrange::QuadL2GL::new(1),
         _ => panic!("compute_l2_error_scalar: unsupported element type {elem_type:?}"),
     };
-    let quad = ref_elem.quadrature(6);
+    let quad = ref_elem.quadrature(quad_order as u8);
     let n_ldofs = ref_elem.n_dofs();
     let mut ref_phi = vec![0.0; n_ldofs];
     let mut err2 = 0.0_f64;

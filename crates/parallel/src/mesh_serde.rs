@@ -105,11 +105,13 @@ struct SubMeshHeader {
     n_owned_elems:  u32,
     /// `0` = legacy payload only; `2` = mixed-topology extension follows (see module doc).
     wire_format:    u32,
+    /// `1` = local node ids are the global ids (identity partition mode).
+    node_id_identity: u32,
     _pad:           u32,
 }
 
 const HEADER_SIZE: usize = std::mem::size_of::<SubMeshHeader>();
-const _: () = assert!(HEADER_SIZE == 56);
+const _: () = assert!(HEADER_SIZE == 60);
 
 // ── Encode ───────────────────────────────────────────────────────────────────
 
@@ -155,6 +157,7 @@ pub fn encode_submesh<const D: usize>(
         n_local_elems: (partition.n_owned_elems + partition.n_ghost_elems) as u32,
         n_owned_elems: partition.n_owned_elems as u32,
         wire_format,
+        node_id_identity: partition.node_id_identity as u32,
         _pad: 0,
     };
 
@@ -334,12 +337,13 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         ));
     }
 
-    let partition = MeshPartition::from_raw(
+    let mut partition = MeshPartition::from_raw(
         n_owned, n_ghost,
         n_owned_elems, n_ghost_elems,
         global_node_ids, node_owner,
         global_elem_ids, elem_owner,
     );
+    partition.node_id_identity = header.node_id_identity != 0;
 
     Ok((mesh, partition))
 }
@@ -363,8 +367,14 @@ fn read_f64_vec(buf: &[u8], offset: &mut usize, count: usize) -> Result<Vec<f64>
     if end > buf.len() {
         return Err(format!("buffer underflow at f64 read: need {end}, have {}", buf.len()));
     }
-    let slice: &[f64] = bytemuck::cast_slice(&buf[*offset..end]);
-    let v = slice.to_vec();
+    // Manual parse — `bytemuck::cast_slice` requires 8-byte alignment of the
+    // slice start, which is not guaranteed when the header size isn't a
+    // multiple of 8.
+    let mut v = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = *offset + i * 8;
+        v.push(f64::from_le_bytes(buf[start..start + 8].try_into().unwrap()));
+    }
     *offset = end;
     Ok(v)
 }

@@ -55,6 +55,14 @@ pub struct MeshPartition {
     /// remote rank that holds the authoritative copy.
     pub node_owner: Vec<Rank>,
 
+    /// `true` when local node ids ARE the global ids (MFEM ParMesh
+    /// semantics, opt-in via [`crate::par_partition::partition_mesh_identity`]).
+    /// In this mode `global_node(local_id)` returns `local_id` itself and
+    /// `node_owner`/`is_owned_node` resolve through the global→compact map.
+    /// Needed so FE-space construction (HDiv/HCurl edge orientation, DOF
+    /// order) is identical across ranks for RTk/NDk spaces.
+    pub node_id_identity: bool,
+
     // ── element ownership ───────────────────────────────────────────────────
 
     /// Number of locally owned elements.
@@ -114,6 +122,7 @@ impl MeshPartition {
             elem_owner: vec![0; n_elems],
             node_global_to_local,
             elem_global_to_local,
+            node_id_identity: false,
         }
     }
 
@@ -185,10 +194,9 @@ impl MeshPartition {
             elem_owner,
             node_global_to_local,
             elem_global_to_local,
+            node_id_identity: false,
         }
     }
-
-    // ── queries ──────────────────────────────────────────────────────────────
 
     /// Total local node count (owned + ghost).
     #[inline]
@@ -199,16 +207,29 @@ impl MeshPartition {
     /// `true` if `local_id` refers to an owned (non-ghost) node.
     #[inline]
     pub fn is_owned_node(&self, local_id: u32) -> bool {
-        (local_id as usize) < self.n_owned_nodes
+        if self.node_id_identity {
+            self.node_global_to_local
+                .get(&local_id)
+                .map(|&c| (c as usize) < self.n_owned_nodes)
+                .unwrap_or(false)
+        } else {
+            (local_id as usize) < self.n_owned_nodes
+        }
     }
 
     /// Global ID of a local node.
     ///
+    /// In identity mode (`node_id_identity`) the local id IS the global id.
+    ///
     /// # Panics
-    /// Panics if `local_id >= n_total_nodes()`.
+    /// Panics if `local_id >= n_total_nodes()` (non-identity mode).
     #[inline]
     pub fn global_node(&self, local_id: u32) -> NodeId {
-        self.global_node_ids[local_id as usize]
+        if self.node_id_identity {
+            local_id
+        } else {
+            self.global_node_ids[local_id as usize]
+        }
     }
 
     /// Local ID of a global node, or `None` if not present on this rank.
@@ -232,7 +253,14 @@ impl MeshPartition {
     /// Owner rank of local node `local_id`.
     #[inline]
     pub fn node_owner(&self, local_id: u32) -> Rank {
-        self.node_owner[local_id as usize]
+        if self.node_id_identity {
+            self.node_global_to_local
+                .get(&local_id)
+                .map(|&c| self.node_owner[c as usize])
+                .unwrap_or(0)
+        } else {
+            self.node_owner[local_id as usize]
+        }
     }
 
     /// Construct from raw flat arrays (used by streaming mesh deserialisation).
@@ -288,6 +316,7 @@ impl MeshPartition {
             elem_owner,
             node_global_to_local,
             elem_global_to_local,
+            node_id_identity: false,
         }
     }
 

@@ -15,31 +15,32 @@
 //!
 //! Matches MFEM ex5p.cpp defaults: star.mesh, RT_FECollection(1,2) + L2(1,2),
 //! k = 1, MINRES + block-diagonal preconditioner.  Rust uses a block MINRES
-//! with a block-diagonal Jacobi preconditioner (diag(M)⁻¹, diag(S)⁻¹).
+//! with diag(M)⁻¹ for the velocity block and a Gauss-Seidel smoother on the
+//! (locally assembled) Schur complement B diag(M)⁻¹ Bᵀ for the pressure block.
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex5_hdiv_darcy
 //!   cargo run --release --example mfem_pex5_hdiv_darcy -- --ranks 4 -r 1
 
-use std::f64::consts::PI;
 use std::sync::Arc;
 
 use fem_assembly::mixed::{HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
-use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CooMatrix, CsrMatrix, fem_to_linlvo_csr};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_block_csr::{ParBlockCsrMatrix2, ParBlockVector2};
 use fem_parallel::par_mixed_assembler::ParMixedAssembler;
 use fem_parallel::{
     DofPartition, ParVectorAssembler, ParVector, ParallelFESpace, WorkerConfig,
-    par_partition::partition_mesh,
+    par_partition::partition_mesh_identity,
 };
 use fem_solver::SolverConfig;
 use fem_space::dof_manager::EdgeKey;
 use fem_space::fe_space::FESpace;
 use fem_space::{HDivSpace, L2Space};
+use linlvo::core::preconditioner::Preconditioner;
+use linlvo::precond::GaussSeidelSmoother;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -94,8 +95,9 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
     launcher.launch(move |comm| {
         let rank = comm.rank();
 
-        // 1. Partition.
-        let par_mesh = partition_mesh(&mesh_arc, &comm);
+        // 1. Partition.  Identity node ids: RT1's per-edge DOF ordering and
+        // orientation must agree across ranks (see partition_mesh_identity).
+        let par_mesh = partition_mesh_identity(&mesh_arc, &comm);
         let lm = par_mesh.local_mesh().clone();
 
         // 2. RT1 velocity space (edge + interior DOFs) and L2 P1 pressure.
@@ -120,16 +122,15 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
             &p_par, &u_par, &[&HDivL2DivIntegrator], quad_order,
         );
         scale_csr(&mut b, -1.0);
+        // B now has L2 owned+ghost rows × RT1 n_total cols.  A10 (y1 = B·x0)
+        // uses only the L2-owned rows; A01 = Bᵀ keeps the RT1-owned rows with
+        // ALL L2 columns (owned + ghost) so cross-rank symmetry holds.
+        let b_owned = extract_owned_rows(&b, n_p, b.ncols);
         let mut bt = b.transpose();
-        // B columns span RT1 owned + ghost; Bᵀ rows likewise.  The block
-        // system only needs the RT1-owned rows of Bᵀ (ghost rows are the
-        // other rank's owned rows).
         {
-            let n_u_total = u_par.dof_partition().n_total_dofs();
             if bt.nrows > n_u {
                 bt = extract_owned_rows(&bt, n_u, bt.ncols);
             }
-            let _ = n_u_total;
         }
         let zero_11 = fem_parallel::ParCsrMatrix::from_local_matrix(
             &CsrMatrix::new_empty(n_p, n_p),
@@ -154,7 +155,7 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         let gp = ParVector::zeros(&p_par);
 
         let block = ParBlockCsrMatrix2::new(
-            m, bt, b, zero_11,
+            m, bt, b_owned, zero_11,
             u_par.dof_ghost_exchange_arc(),
             p_par.dof_ghost_exchange_arc(),
             n_u, n_p,
@@ -185,13 +186,42 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
             }
             s_diag[j] = 1.0 / acc.max(1e-30);
         }
+
+        // S_approx = B_owned · diag(M)⁻¹ · B_ownedᵀ (L2 owned × L2 owned), GS 平滑
+        let b = &block.a10;
+        let mut b_o_coo = CooMatrix::<f64>::new(n_p, n_u);
+        for j in 0..n_p {
+            for k in b.row_ptr[j]..b.row_ptr[j + 1] {
+                let col = b.col_idx[k] as usize;
+                if col < n_u {
+                    b_o_coo.add(j, col, b.values[k]);
+                }
+            }
+        }
+        let b_o = b_o_coo.into_csr();
+        let b_ot = b_o.transpose();
+        let mut minvbt_coo = CooMatrix::<f64>::new(n_u, n_p);
+        for i in 0..n_u {
+            for k in b_ot.row_ptr[i]..b_ot.row_ptr[i + 1] {
+                let j = b_ot.col_idx[k] as usize;
+                minvbt_coo.add(i, j, b_ot.values[k] * inv_m_diag[i]);
+            }
+        }
+        let minvbt = minvbt_coo.into_csr();
+        let s_approx = b_o.multiply(&minvbt);
+        let s_linlvo = fem_to_linlvo_csr(&s_approx);
+        let gs = GaussSeidelSmoother::from_csr(&s_linlvo)
+            .expect("GaussSeidelSmoother on S_approx failed");
+
         let cfg = SolverConfig {
             rtol: 1e-6,
-            max_iter: 500,
+            max_iter: 3000,
             verbose: false,
             ..SolverConfig::default()
         };
-        let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &s_diag);
+        let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &s_diag, &gs);
+
+        // TEMP (pex5 排查): dump a00 offd（gid 序）验证跨 rank 对称
         // 7. Errors (relative to exact-solution norms).
         let dp_u = u_par.dof_partition();
         let n_dm_u = u_par.local_space().n_dofs();
@@ -224,11 +254,11 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         for pid in 0..dp_p.n_total_dofs() {
             p_dm[dp_p.unpermute_dof(pid as u32) as usize] = x.v1.as_slice()[pid];
         }
-        let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_owned(
-            p_par.local_space(), &p_dm, p_exact, &owned_e,
+        let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
+            p_par.local_space(), &p_dm, p_exact, &owned_e, 3,
         );
-        let np = fem_assembly::hdiv_error::compute_l2_error_scalar_owned(
-            p_par.local_space(), &vec![0.0; n_dm_p], p_exact, &owned_e,
+        let np = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
+            p_par.local_space(), &vec![0.0; n_dm_p], p_exact, &owned_e, 3,
         );
         let gsum = |v: f64| comm.allreduce_sum_f64(v);
         let err_u = gsum(eu * eu).sqrt();
@@ -255,60 +285,6 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         .take()
         .expect("rank 0 did not publish pex5 result");
     final_result
-}
-
-// ─── Serial boundary flux RHS (dm order), 1:1 with serial ex5 ───────────────
-
-fn assemble_ex5_bdr_rhs_serial(
-    space: &HDivSpace<Mesh<2>>,
-    tags: &[i32],
-    g: &dyn Fn(&[f64]) -> f64,
-) -> Vec<f64> {
-    use fem_mesh::MeshTopology;
-    let mesh = space.mesh();
-    let n_dofs = space.n_dofs();
-    let mut rhs = vec![0.0; n_dofs];
-
-    let xi = [
-        0.5 * (1.0 - 1.0 / 3.0f64.sqrt()),
-        0.5 * (1.0 + 1.0 / 3.0f64.sqrt()),
-    ];
-    let wts = [0.5, 0.5];
-
-    for f in 0..mesh.n_boundary_faces() as u32 {
-        if !tags.contains(&mesh.face_tag(f)) {
-            continue;
-        }
-        let nodes = mesh.face_nodes(f);
-        if nodes.len() < 2 {
-            continue;
-        }
-        let pa = mesh.node_coords(nodes[0]);
-        let pb = mesh.node_coords(nodes[1]);
-        let (a, b) = (nodes[0], nodes[1]);
-        let key = if a < b { (a, b) } else { (b, a) };
-        let Some(first) = space.edge_face_dof(EdgeKey::new(key.0, key.1)) else {
-            continue;
-        };
-        let first = first as usize;
-        let reversed = a > b;
-        for (k, (&xk, &wk)) in xi.iter().zip(wts.iter()).enumerate() {
-            let t = xk;
-            let x_phys = [
-                pa[0] + t * (pb[0] - pa[0]),
-                pa[1] + t * (pb[1] - pa[1]),
-            ];
-            let val = wk * g(&x_phys);
-            let dof = if !reversed {
-                first + k
-            } else {
-                first + 1 - k
-            };
-            let sgn = if !reversed { 1.0 } else { -1.0 };
-            rhs[dof] += sgn * val;
-        }
-    }
-    rhs
 }
 
 // ─── Boundary flux RHS (RT1), 1:1 with MFEM VectorFEBoundaryFluxLFIntegrator ─
@@ -376,7 +352,7 @@ fn assemble_bdr_rhs_par(
     rhs
 }
 
-// ─── Block MINRES (no preconditioner yet) ────────────────────────────────────
+// ─── Block MINRES (MFEM MINRESSolver port) ──────────────────────────────────
 
 fn block_minres(
     a: &ParBlockCsrMatrix2,
@@ -385,6 +361,7 @@ fn block_minres(
     cfg: &SolverConfig,
     inv_m_diag: &[f64],
     inv_s_diag: &[f64],
+    gs: &GaussSeidelSmoother<f64>,
 ) -> fem_solver::SolveResult {
     // Port of MFEM MINRESSolver::Mult (linalg/solvers.cpp), van der Vorst
     // three-recurrence form, with a block-diagonal SPD preconditioner
@@ -411,7 +388,7 @@ fn block_minres(
         ParVector::zeros_like(&b.v0),
         ParVector::zeros_like(&b.v1),
     );
-    prec_apply(&v1, &mut z, inv_m_diag, inv_s_diag);
+    prec_apply(&v1, &mut z, inv_m_diag, inv_s_diag, gs);
 
     let mut eta = a.global_dot(&z, &v1).max(0.0).sqrt();
     let beta0 = eta;
@@ -481,7 +458,7 @@ fn block_minres(
             ParVector::zeros_like(&b.v0),
             ParVector::zeros_like(&b.v1),
         );
-        prec_apply(&v0, &mut pv0, inv_m_diag, inv_s_diag);
+        prec_apply(&v0, &mut pv0, inv_m_diag, inv_s_diag, gs);
         beta = a.global_dot(&v0, &pv0).max(0.0).sqrt();
         let rho1 = (delta * delta + beta * beta).sqrt();
 
@@ -568,13 +545,17 @@ fn prec_apply(
     z: &mut ParBlockVector2,
     inv_m_diag: &[f64],
     inv_s_diag: &[f64],
+    gs: &GaussSeidelSmoother<f64>,
 ) {
     for i in 0..r.v0.n_owned() {
         z.v0.as_slice_mut()[i] = inv_m_diag[i] * r.v0.as_slice()[i];
     }
-    for i in 0..r.v1.n_owned() {
-        z.v1.as_slice_mut()[i] = inv_s_diag[i] * r.v1.as_slice()[i];
-    }
+    // Schur 块: 一次 GS 平滑（比 diag(S)⁻¹ 强得多）
+    let n1 = r.v1.n_owned();
+    let rd = linlvo::DenseVec::from_vec(r.v1.as_slice()[..n1].to_vec());
+    let mut zd = linlvo::DenseVec::zeros(n1);
+    gs.apply_precond(&rd, &mut zd);
+    z.v1.as_slice_mut()[..n1].copy_from_slice(zd.as_slice());
 }
 
 fn block_scale(v: &mut ParBlockVector2, s: f64) {

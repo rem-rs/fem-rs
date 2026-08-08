@@ -126,8 +126,15 @@ impl GhostExchange {
         let mut recv_slots: HashMap<Rank, Vec<u32>> = HashMap::new();
         let mut requests:   HashMap<Rank, Vec<u32>> = HashMap::new();
 
-        for (local_id, owner) in partition.ghost_nodes() {
-            let gid = partition.global_node(local_id);
+        for (compact_lid, owner) in partition.ghost_nodes() {
+            // In identity mode the local mesh node ids ARE the global ids;
+            // `ghost_nodes()` yields compact (0-based) slots, so translate.
+            let local_id = if partition.node_id_identity {
+                partition.global_node_ids[compact_lid as usize]
+            } else {
+                compact_lid
+            };
+            let gid = partition.global_node_ids[compact_lid as usize];
             recv_slots.entry(owner).or_default().push(local_id);
             requests.entry(owner).or_default().push(gid);
         }
@@ -162,13 +169,18 @@ impl GhostExchange {
             let local_ids: Vec<u32> = requested_gids
                 .iter()
                 .map(|&gid| {
-                    partition
-                        .local_node(gid)
-                        .unwrap_or_else(|| panic!(
-                            "GhostExchange: rank {} requested global node {} \
-                             but this rank does not own it",
-                            requester, gid
-                        ))
+                    if partition.node_id_identity {
+                        // Local mesh node ids are the global ids themselves.
+                        gid
+                    } else {
+                        partition
+                            .local_node(gid)
+                            .unwrap_or_else(|| panic!(
+                                "GhostExchange: rank {} requested global node {} \
+                                 but this rank does not own it",
+                                requester, gid
+                            ))
+                    }
                 })
                 .collect();
             send_map.insert(requester, local_ids);

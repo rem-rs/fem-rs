@@ -87,11 +87,11 @@ impl ParMixedAssembler {
             local_mat
         };
 
-        extract_owned_rows(
-            &permuted_mat,
-            row_part.n_owned_dofs,
-            col_part.n_total_dofs(),
-        )
+        // Keep ALL local rows (owned + ghost L2 rows): the transpose Bᵀ needs
+        // the ghost-L2 columns to pair with cross-rank B entries (B[j][c] with
+        // j on this rank and c owned elsewhere).  Dropping ghost rows made A01
+        // miss those columns → (Au)·v ≠ u·(Av) for the saddle-point operator.
+        permuted_mat
     }
 }
 

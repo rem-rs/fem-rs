@@ -65,10 +65,13 @@ impl ParBlockCsrMatrix2 {
         // ── y0 = A00·x0 + A01·x1 ──
         let mut a01_x1 = vec![0.0_f64; n0];
         if self.a01.nrows > 0 {
-            // A01 = Bᵀ: ncols = L2 owned (B keeps only owned rows), so only
-            // the owned portion of x1 is needed.
+            // A01 = Bᵀ: rows are the RT1-owned rows; columns span ALL L2
+            // dofs (owned + ghost) so the cross-rank B entries pair up.
+            // The L2 ghost values are filled by the halo exchange below.
+            let mut x1_full = x.v1.clone_vec();
+            x1_full.update_ghosts();
             self.a01
-                .spmv(&x.v1.as_slice()[..x.v1.n_owned()], &mut a01_x1);
+                .spmv(x1_full.as_slice(), &mut a01_x1);
         }
         // A00: overlap ghost exchange with diag multiply
         x.v0.update_ghosts_overlapping(|data| {

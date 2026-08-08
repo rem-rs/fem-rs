@@ -58,6 +58,32 @@ pub fn partition_mesh<const D: usize>(
     mesh: &Mesh<D>,
     comm: &Comm,
 ) -> ParallelMesh<Mesh<D>> {
+    partition_mesh_impl(mesh, comm, false)
+}
+
+/// Partition like [`partition_mesh`], but keep local node ids equal to the
+/// global ids (MFEM ParMesh semantics) instead of renumbering to a compact
+/// local range.
+///
+/// This is required for H(div)/H(curl) spaces with more than one DOF per edge
+/// (RTk/NDk, k ≥ 1): the edge DOF ordering and orientation signs of the local
+/// FE space must agree across ranks, which only holds when every rank numbers
+/// its nodes by the global id.
+///
+/// Note: with identity node ids, node-based spaces (H1) see the full global
+/// node range (including unused holes) as their local DOF count.
+pub fn partition_mesh_identity<const D: usize>(
+    mesh: &Mesh<D>,
+    comm: &Comm,
+) -> ParallelMesh<Mesh<D>> {
+    partition_mesh_impl(mesh, comm, true)
+}
+
+fn partition_mesh_impl<const D: usize>(
+    mesh: &Mesh<D>,
+    comm: &Comm,
+    identity_nodes: bool,
+) -> ParallelMesh<Mesh<D>> {
     if comm.size() == 1 {
         let n = mesh.n_elems();
         assert!(n > 0, "partition_mesh: mesh has no elements");
@@ -66,7 +92,7 @@ pub fn partition_mesh<const D: usize>(
     }
     // Multi-rank: use streaming path (rank 0 partitions, sends sub-meshes).
     // Non-root ranks receive their portion without loading the full mesh.
-    partition_mesh_streaming(Some(mesh), comm)
+    partition_mesh_streaming_impl(Some(mesh), comm, identity_nodes)
         .expect("partition_mesh streaming failed")
 }
 
@@ -91,7 +117,7 @@ pub fn partition_mesh_replicated<const D: usize>(
 
     // ── multi-rank partitioning ──────────────────────────────────────────────
     let (local_mesh, partition) = extract_submesh_for_rank(
-        mesh, comm.rank(), comm.size(),
+        mesh, comm.rank(), comm.size(), false,
     );
     ParallelMesh::new(local_mesh, comm.clone(), partition)
 }
@@ -118,6 +144,14 @@ pub fn partition_mesh_streaming<const D: usize>(
     mesh: Option<&Mesh<D>>,
     comm: &Comm,
 ) -> Result<ParallelMesh<Mesh<D>>, String> {
+    partition_mesh_streaming_impl(mesh, comm, false)
+}
+
+fn partition_mesh_streaming_impl<const D: usize>(
+    mesh: Option<&Mesh<D>>,
+    comm: &Comm,
+    identity_nodes: bool,
+) -> Result<ParallelMesh<Mesh<D>>, String> {
     let size = comm.size();
 
     // ── single-rank fast path ────────────────────────────────────────────────
@@ -133,13 +167,15 @@ pub fn partition_mesh_streaming<const D: usize>(
 
         // Send sub-meshes to ranks 1..N-1.
         for target in 1..size as Rank {
-            let (sub_mesh, sub_part) = extract_submesh_for_rank(m, target, size);
+            let (sub_mesh, sub_part) =
+                extract_submesh_for_rank(m, target, size, identity_nodes);
             let encoded = mesh_serde::encode_submesh(&sub_mesh, &sub_part);
             comm.send_bytes(target, STREAM_TAG_BASE + target, &encoded);
         }
 
         // Extract rank 0's own sub-mesh.
-        let (local_mesh, partition) = extract_submesh_for_rank(m, 0, size);
+        let (local_mesh, partition) =
+            extract_submesh_for_rank(m, 0, size, identity_nodes);
         Ok(ParallelMesh::new(local_mesh, comm.clone(), partition))
     } else {
         // ── non-root: receive sub-mesh ───────────────────────────────────────
@@ -160,13 +196,14 @@ fn extract_submesh_for_rank<const D: usize>(
     mesh: &Mesh<D>,
     target_rank: Rank,
     n_ranks: usize,
+    identity_nodes: bool,
 ) -> (Mesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
     let chunk = n_elems.div_ceil(n_ranks);
     let elem_part: Vec<Rank> = (0..n_elems)
         .map(|e| (e / chunk) as Rank)
         .collect();
-    extract_submesh_from_partition(mesh, target_rank, &elem_part)
+    extract_submesh_from_partition_impl(mesh, target_rank, &elem_part, identity_nodes)
 }
 
 /// Extract the sub-mesh and partition descriptor for a given rank from an
@@ -184,6 +221,25 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
     mesh: &Mesh<D>,
     target_rank: Rank,
     elem_part: &[Rank],
+) -> (Mesh<D>, MeshPartition) {
+    extract_submesh_from_partition_impl(mesh, target_rank, elem_part, false)
+}
+
+/// Identity-node variant of [`extract_submesh_from_partition`]: local node ids
+/// stay equal to global ids (see [`partition_mesh_identity`]).
+pub(crate) fn extract_submesh_from_partition_identity<const D: usize>(
+    mesh: &Mesh<D>,
+    target_rank: Rank,
+    elem_part: &[Rank],
+) -> (Mesh<D>, MeshPartition) {
+    extract_submesh_from_partition_impl(mesh, target_rank, elem_part, true)
+}
+
+fn extract_submesh_from_partition_impl<const D: usize>(
+    mesh: &Mesh<D>,
+    target_rank: Rank,
+    elem_part: &[Rank],
+    identity_nodes: bool,
 ) -> (Mesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
 
@@ -233,24 +289,46 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
         }
     }
 
-    // 4b. Build global → local node mapping (owned first, then ghost).
+    // 4b. Build global → local node mapping.
+    //
+    // Compact mode (default): local ids are 0-based positions (owned first,
+    // then ghost).  Identity mode: local node ids ARE the global ids (MFEM
+    // ParMesh semantics) — required so RTk/NDk edge DOF ordering and
+    // orientation agree across ranks; the coordinate array is padded to the
+    // global id range so node id == array index.
     let ghost_base = owned_global.len();
     let mut g2l: HashMap<NodeId, u32> =
         HashMap::with_capacity(owned_global.len() + ghost_global.len());
-    for (lid, &gn) in owned_global.iter().enumerate() {
-        g2l.insert(gn, lid as u32);
-    }
-    for (idx, &(gn, _)) in ghost_global.iter().enumerate() {
-        g2l.insert(gn, (ghost_base + idx) as u32);
+    if identity_nodes {
+        for &gn in owned_global.iter().chain(ghost_global.iter().map(|(gn, _)| gn)) {
+            g2l.insert(gn, gn);
+        }
+    } else {
+        for (lid, &gn) in owned_global.iter().enumerate() {
+            g2l.insert(gn, lid as u32);
+        }
+        for (idx, &(gn, _)) in ghost_global.iter().enumerate() {
+            g2l.insert(gn, (ghost_base + idx) as u32);
+        }
     }
 
     // 5. Build local coordinate array (owned first, then ghost).
     let total_local_nodes = g2l.len();
-    let mut local_coords = Vec::with_capacity(total_local_nodes * D);
+    let mut local_coords = if identity_nodes {
+        let max_gn = g2l.keys().max().copied().unwrap_or(0) as usize;
+        vec![0.0_f64; (max_gn + 1) * D]
+    } else {
+        Vec::with_capacity(total_local_nodes * D)
+    };
     for &gn in owned_global.iter()
         .chain(ghost_global.iter().map(|(gn, _)| gn))
     {
-        local_coords.extend_from_slice(&mesh.coords_of(gn));
+        if identity_nodes {
+            local_coords[gn as usize * D..(gn as usize + 1) * D]
+                .copy_from_slice(&mesh.coords_of(gn));
+        } else {
+            local_coords.extend_from_slice(&mesh.coords_of(gn));
+        }
     }
 
     // 6. Build local connectivity with remapped node IDs (owned + ghost elements).
@@ -289,13 +367,14 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
     let ghost_elem_pairs: Vec<(ElemId, Rank)> = ghost_elem_gids.iter()
         .map(|&gid| (gid, elem_part[gid as usize]))
         .collect();
-    let partition = MeshPartition::from_partitioner(
+    let mut partition = MeshPartition::from_partitioner(
         &owned_global,
         &ghost_global,
         &local_elem_gids,
         &ghost_elem_pairs,
         target_rank,
     );
+    partition.node_id_identity = identity_nodes;
 
     (local_mesh, partition)
 }
