@@ -2441,6 +2441,21 @@ pub fn refine_nonconforming_quad(
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
 
+    // Coordinate → existing node lookup: a marked element may sit next to an
+    // already-refined neighbour whose hanging node lies at the midpoint of one
+    // of this element's edges.  Refining that edge must REUSE the existing
+    // hanging node (MFEM NC semantics) instead of creating a duplicate node at
+    // the same coordinate — duplicates silently inflate n_dofs and desync the
+    // AMR trajectory (ex6: 311 vs 301 nodes at it3).
+    let coord_map: HashMap<String, NodeId> = {
+        let mut m = HashMap::new();
+        for n in 0..mesh.n_nodes() as NodeId {
+            let c = mesh.coords_of(n);
+            m.entry(format!("{:.12},{:.12}", c[0], c[1])).or_insert(n);
+        }
+        m
+    };
+
     for &e in marked {
         let ns = mesh.elem_nodes(e);
         // Edge midpoints
@@ -2449,8 +2464,15 @@ pub fn refine_nonconforming_quad(
             midpoint_map.entry(key).or_insert_with(|| {
                 let xa = mesh.coords_of(ns[a]);
                 let xb = mesh.coords_of(ns[b]);
-                new_coords.push(0.5 * (xa[0] + xb[0]));
-                new_coords.push(0.5 * (xa[1] + xb[1]));
+                let mx = 0.5 * (xa[0] + xb[0]);
+                let my = 0.5 * (xa[1] + xb[1]);
+                // Reuse an existing node already at this midpoint (hanging
+                // node of a refined neighbour / previously split edge).
+                if let Some(&existing) = coord_map.get(&format!("{mx:.12},{my:.12}")) {
+                    return existing;
+                }
+                new_coords.push(mx);
+                new_coords.push(my);
                 let id = next_node;
                 next_node += 1;
                 id
