@@ -24,7 +24,8 @@ use fem_assembly::postproc::error_estimate::zz_estimator_nodal;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology, element_type::ElementType};
-use fem_mesh::amr::{closure_refine_default, refine_nonconforming_quad, HangingNodeConstraint};
+use fem_mesh::amr::{QuadRefineDir, refine_nonconforming_quad_aniso, HangingNodeConstraint};
+use fem_mesh::amr::closure_refine_default;
 use fem_linalg::PrintLevel;
 use fem_solver::{SolverConfig, solve_pcg_gssmoother};
 use fem_space::{
@@ -166,8 +167,20 @@ fn main() {
             break;
         }
         // Apply refiner to modify the mesh (MFEM refiner.Apply(mesh)).
+        // Quad4: anisotropic NC refinement driven by the ZZ aniso_flags
+        // (MFEM ThresholdRefiner sets each Refinement's type from
+        // GetAnisotropicFlags: 1=X split, 2=Y split, 3=XY 4-way).
         if is_quad {
-            let (new_mesh, new_constraints) = refine_nonconforming_quad(&mesh, &marked.iter().map(|&i| i as u32).collect::<Vec<_>>(), None);
+            let marked_aniso: Vec<(u32, QuadRefineDir)> = marked.iter().map(|&i| {
+                let dir = match indicators.aniso_flags.as_ref().map(|a| a[i as usize]).unwrap_or(3) {
+                    1 => QuadRefineDir::X,
+                    2 => QuadRefineDir::Y,
+                    _ => QuadRefineDir::Both,
+                };
+                (i, dir)
+            }).collect();
+            let (new_mesh, new_constraints) =
+                refine_nonconforming_quad_aniso(&mesh, &marked_aniso, None);
             mesh = new_mesh;
             hanging_constraints = new_constraints;
         } else {
