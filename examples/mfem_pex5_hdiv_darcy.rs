@@ -1,284 +1,632 @@
-//! # Parallel Example 5 — H(div) Darcy flow  (analogous to MFEM pex5)
+//! # Parallel Example 5 — Mixed Darcy (1:1 port of MFEM pex5 / ex5p.cpp)
 //!
-//! Solves the H(div) grad-div problem in parallel:
+//! Saddle-point system from the mixed (dual) formulation of the Darcy
+//! problem on data/star.mesh:
 //!
 //! ```text
-//!   −∇(α ∇·F) + β F = f    in Ω = [0,1]²
-//!                F·n = 0    on ∂Ω
+//!   [ M  Bᵀ ] [u]   [f]
+//!   [ B   0 ] [p] = [g]
 //! ```
 //!
-//! Uses lowest-order Raviart-Thomas (RT0) elements.
+//! with `M = ∫ k u·v` (RT1 velocity space), `B = -∫ div(u)·q`
+//! (L2 P1 pressure space), `f` = boundary flux `f_natural = -p_exact`
+//! (volume force is 0), `g = 0`.  Exact solution (2D):
+//! `u = (-eˣ sin y, -eˣ cos y)`, `p = eˣ sin y`.
 //!
-//! ## Usage
-//! ```
-//! cargo run --example mfem_pex5_darcy
-//! cargo run --example mfem_pex5_darcy -- --n 16 --ranks 4
-//! ```
+//! Matches MFEM ex5p.cpp defaults: star.mesh, RT_FECollection(1,2) + L2(1,2),
+//! k = 1, MINRES + block-diagonal preconditioner.  Rust uses a block MINRES
+//! with a block-diagonal Jacobi preconditioner (diag(M)⁻¹, diag(S)⁻¹).
+//!
+//! Usage:
+//!   cargo run --release --example mfem_pex5_hdiv_darcy
+//!   cargo run --release --example mfem_pex5_hdiv_darcy -- --ranks 4 -r 1
 
 use std::f64::consts::PI;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use fem_assembly::{
-    standard::{GradDivIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator},
-    coefficient::FnVectorCoeff,
-};
-use fem_mesh::Mesh;
-use fem_parallel::{
-    ParVectorAssembler, ParVector, ParallelFESpace,
-    par_partition::partition_mesh,
-    par_solve_pcg_jacobi,
-    WorkerConfig,
-};
+use fem_assembly::mixed::{HDivL2DivIntegrator};
+use fem_assembly::standard::VectorMassIntegrator;
+use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
+use fem_linalg::CsrMatrix;
+use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
+use fem_parallel::par_block_csr::{ParBlockCsrMatrix2, ParBlockVector2};
+use fem_parallel::par_mixed_assembler::ParMixedAssembler;
+use fem_parallel::{
+    DofPartition, ParVectorAssembler, ParVector, ParallelFESpace, WorkerConfig,
+    par_partition::partition_mesh,
+};
 use fem_solver::SolverConfig;
-use fem_space::HDivSpace;
+use fem_space::dof_manager::EdgeKey;
+use fem_space::fe_space::FESpace;
+use fem_space::{HDivSpace, L2Space};
 
 fn main() {
-    env_logger::init();
+    let args: Vec<String> = std::env::args().collect();
+    let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
+    let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(1);
 
-    let args = parse_args();
-
-    println!("=== fem-rs mfem_pex5: Parallel H(div) Darcy (RT0) ===");
-    println!("  Workers: {}, Mesh: {}x{}", args.n_workers, args.mesh_n, args.mesh_n);
-
-    let result = run_case(args.mesh_n, args.n_workers, 1.0, 1.0, 1.0);
-
-    println!("  Global DOFs: {}", result.global_dofs);
+    println!("=== fem-rs mfem_pex5: Parallel Mixed Darcy (RT1 + L2P1) ===");
     println!(
-        "  PCG: {} iters, residual = {:.3e}, converged = {}",
+        "  Workers: {}, Mesh: star.mesh x{} (1:1 MFEM ex5p, -r {})",
+        n_workers, ref_levels + 2, ref_levels
+    );
+
+    let result = run_case(n_workers, ref_levels);
+    println!("dim(R) = {}", result.dim_r);
+    println!("dim(W) = {}", result.dim_w);
+    println!("dim(R+W) = {}", result.dim_r + result.dim_w);
+    println!(
+        "  MINRES: {} iters, residual = {:.3e}, converged = {}",
         result.iterations, result.final_residual, result.converged
     );
-    println!("  h = {:.4e}", result.h);
-    println!("  ||rhs||_L2 = {:.4e}", result.rhs_norm);
-    println!("  ||u||_L2 = {:.4e}", result.solution_norm);
-    println!("  checksum = {:.8e}", result.solution_checksum);
+    println!("|| u_h - u_ex || / || u_ex || = {:.5e}", result.err_u_rel);
+    println!("|| p_h - p_ex || / || p_ex || = {:.5e}", result.err_p_rel);
     println!("=== Done ===");
 }
 
 struct RunResult {
-    global_dofs: usize,
+    dim_r: usize,
+    dim_w: usize,
     iterations: usize,
     final_residual: f64,
     converged: bool,
-    h: f64,
-    rhs_norm: f64,
-    solution_norm: f64,
-    solution_checksum: f64,
+    err_u_rel: f64,
+    err_p_rel: f64,
 }
 
-fn run_case(mesh_n: usize, n_workers: usize, alpha: f64, beta: f64, source_scale: f64) -> RunResult {
-    let result = Arc::new(Mutex::new(None::<RunResult>));
-    let result_slot = Arc::clone(&result);
+fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
+    // star.mesh + serial ref_levels (user -r) + 2 parallel refinements
+    // (equivalent; done serially before partitioning).
+    let mfem = fem_io::mfem::read_mfem_file("data/star.mesh")
+        .expect("failed to read data/star.mesh");
+    let mut mesh: Mesh<2> = mfem.mesh2d.expect("star.mesh must be 2-D");
+    for _ in 0..(ref_levels + 2) {
+        mesh = refine_uniform(&mesh);
+    }
+    let mesh = Arc::new(mesh);
 
-    let mesh = Arc::new(Mesh::<2>::unit_square_tri(mesh_n));
+    let result = Arc::new(std::sync::Mutex::new(None::<RunResult>));
+    let result_slot = Arc::clone(&result);
+    let mesh_arc = Arc::clone(&mesh);
 
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {
         let rank = comm.rank();
 
-        // 1. Partition mesh.
-        let par_mesh = partition_mesh(&mesh, &comm);
+        // 1. Partition.
+        let par_mesh = partition_mesh(&mesh_arc, &comm);
+        let lm = par_mesh.local_mesh().clone();
 
-        // 2. Build parallel H(div) space.
-        let local_space = HDivSpace::new(par_mesh.local_mesh().clone(), 0);
-        let par_space = ParallelFESpace::new_for_edge_space(
-            local_space, &par_mesh, comm.clone(),
+        // 2. RT1 velocity space (edge + interior DOFs) and L2 P1 pressure.
+        let u_space = HDivSpace::new(lm.clone(), 1);
+        let u_par = ParallelFESpace::new_for_edge_space(u_space, &par_mesh, comm.clone());
+        let p_space = L2Space::new(lm, 1);
+        let p_part = DofPartition::from_l2_space(&p_space, par_mesh.partition(), &comm);
+        let p_par = ParallelFESpace::new_with_dof_partition(p_space, p_part, comm.clone());
+
+        let n_u = u_par.dof_partition().n_owned_dofs;
+        let n_p = p_par.dof_partition().n_owned_dofs;
+        let quad_order = 4u8; // RT1: MFEM ex5 uses max(2, 2*order+1)... RT order+1
+
+        // 3. M = ∫ k u·v (RT1 mass).
+        let m = ParVectorAssembler::assemble_bilinear(
+            &u_par, &[&VectorMassIntegrator { alpha: 1.0 }], quad_order,
         );
 
-        // 3. Assemble α(∇·F,∇·G) + β(F,G).
-        let grad_div = GradDivIntegrator { kappa: alpha };
-        let mass = VectorMassIntegrator { alpha: beta };
-        let a_mat = ParVectorAssembler::assemble_bilinear(
-            &par_space, &[&grad_div, &mass], 3,
+        // 4. B = -∫ div(u)·q (L2 rows × RT1 cols), then Bᵀ.
+        //    HDivL2DivIntegrator gives +∫div(u)q; C++ applies (*B) *= -1.
+        let mut b = ParMixedAssembler::assemble_hdiv_l2(
+            &p_par, &u_par, &[&HDivL2DivIntegrator], quad_order,
+        );
+        scale_csr(&mut b, -1.0);
+        let mut bt = b.transpose();
+        // B columns span RT1 owned + ghost; Bᵀ rows likewise.  The block
+        // system only needs the RT1-owned rows of Bᵀ (ghost rows are the
+        // other rank's owned rows).
+        {
+            let n_u_total = u_par.dof_partition().n_total_dofs();
+            if bt.nrows > n_u {
+                bt = extract_owned_rows(&bt, n_u, bt.ncols);
+            }
+            let _ = n_u_total;
+        }
+        let zero_11 = fem_parallel::ParCsrMatrix::from_local_matrix(
+            &CsrMatrix::new_empty(n_p, n_p),
+            n_p,
+            p_par.dof_ghost_exchange_arc(),
+            comm.clone(),
         );
 
-        // 4. Assemble RHS.
-        // Manufactured: F = (sin(πx)cos(πy), −cos(πx)sin(πy)), ∇·F = 0
-        // f = βF
-        let source = VectorDomainLFIntegrator {
-            f: FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
-                out[0] =  source_scale * beta * (PI * x[0]).sin() * (PI * x[1]).cos();
-                out[1] = -source_scale * beta * (PI * x[0]).cos() * (PI * x[1]).sin();
-            }),
-        };
-        let rhs = ParVectorAssembler::assemble_linear(&par_space, &[&source], 3);
+        // 5. RHS: f = boundary flux f_natural = -p_exact on u-block; g = 0.
+        let bdr_rhs_dm = assemble_bdr_rhs_par(
+            u_par.local_space(), &par_mesh, &[1], &|x| -p_exact(x),
+        );
+        let bdr_rhs_perm = fem_parallel::par_assembler::permute_vec(
+            &bdr_rhs_dm, u_par.dof_partition(),
+        );
+        let fu = ParVector::from_local_raw(
+            bdr_rhs_perm,
+            n_u,
+            u_par.dof_ghost_exchange_arc(),
+            comm.clone(),
+        );
+        let gp = ParVector::zeros(&p_par);
 
-        // 5. No essential BCs needed (natural F·n = 0 for this manufactured solution).
-        // But we need to ensure the system is well-posed. For RT0 with grad-div + mass,
-        // the system is SPD so PCG works directly.
+        let block = ParBlockCsrMatrix2::new(
+            m, bt, b, zero_11,
+            u_par.dof_ghost_exchange_arc(),
+            p_par.dof_ghost_exchange_arc(),
+            n_u, n_p,
+        );
+        let rhs = ParBlockVector2::new(fu, gp);
+        let mut x = ParBlockVector2::new(
+            ParVector::zeros(&u_par),
+            ParVector::zeros(&p_par),
+        );
 
-        // 6. Solve with parallel PCG + Jacobi.
-        let mut u = ParVector::zeros(&par_space);
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 10_000, verbose: false, ..SolverConfig::default() };
-        let res = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap();
-
-        let dof_part = par_space.dof_partition();
-        let local_checksum: f64 = u.owned_slice()
-            .iter()
-            .enumerate()
-            .map(|(lid, value)| {
-                let gid = dof_part.global_dof(lid as u32) as f64 + 1.0;
-                gid * value
+        // 6. Solve with preconditioned block MINRES.
+        //    Block-diagonal preconditioner: diag(M)⁻¹ for the velocity block,
+        //    diag(B diag(M)⁻¹ Bᵀ)⁻¹ for the pressure (Schur diagonal approx).
+        let inv_m_diag: Vec<f64> = (0..n_u)
+            .map(|i| {
+                let d = block.a00.diag_block().get(i, i).max(1e-30);
+                1.0 / d
             })
-            .sum();
-        let solution_checksum = comm.allreduce_sum_f64(local_checksum);
-        let rhs_norm = rhs.global_norm();
-        let solution_norm = u.global_norm();
+            .collect();
+        let mut s_diag = vec![0.0_f64; n_p];
+        for j in 0..block.a10.nrows {
+            let mut acc = 0.0_f64;
+            for k in block.a10.row_ptr[j]..block.a10.row_ptr[j + 1] {
+                let col = block.a10.col_idx[k] as usize;
+                if col < n_u {
+                    acc += block.a10.values[k] * block.a10.values[k] * inv_m_diag[col];
+                }
+            }
+            s_diag[j] = 1.0 / acc.max(1e-30);
+        }
+        let cfg = SolverConfig {
+            rtol: 1e-6,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &s_diag);
+        // 7. Errors (relative to exact-solution norms).
+        let dp_u = u_par.dof_partition();
+        let n_dm_u = u_par.local_space().n_dofs();
+        let mut u_dm = vec![0.0_f64; n_dm_u];
+        {
+            let mut u_full = x.v0.clone_vec();
+            u_full.update_ghosts();
+            let needs_sign = dp_u.needs_sign_correction();
+            for pid in 0..dp_u.n_total_dofs() {
+                let dm = dp_u.unpermute_dof(pid as u32) as usize;
+                let s = if needs_sign {
+                    dp_u.sign_correction(dm as u32)
+                } else {
+                    1.0
+                };
+                u_dm[dm] = u_full.as_slice()[pid] * s;
+            }
+        }
+        let owned_e = |e: u32| par_mesh.partition().elem_owner[e as usize] == rank;
+        let eu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
+            u_par.local_space(), &u_dm, |x| u_exact(x), &owned_e, 3,
+        );
+        let nu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
+            u_par.local_space(), &vec![0.0; n_dm_u], |x| u_exact(x), &owned_e, 3,
+        );
+        // pressure: dm order is element order == partition order (identity).
+        let dp_p = p_par.dof_partition();
+        let n_dm_p = p_par.local_space().n_dofs();
+        let mut p_dm = vec![0.0_f64; n_dm_p];
+        for pid in 0..dp_p.n_total_dofs() {
+            p_dm[dp_p.unpermute_dof(pid as u32) as usize] = x.v1.as_slice()[pid];
+        }
+        let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_owned(
+            p_par.local_space(), &p_dm, p_exact, &owned_e,
+        );
+        let np = fem_assembly::hdiv_error::compute_l2_error_scalar_owned(
+            p_par.local_space(), &vec![0.0; n_dm_p], p_exact, &owned_e,
+        );
+        let gsum = |v: f64| comm.allreduce_sum_f64(v);
+        let err_u = gsum(eu * eu).sqrt();
+        let norm_u = gsum(nu * nu).sqrt();
+        let err_p = gsum(ep * ep).sqrt();
+        let norm_p = gsum(np * np).sqrt();
 
         if rank == 0 {
-            *result_slot.lock().expect("mfem_pex5 result mutex poisoned") = Some(RunResult {
-                global_dofs: par_space.n_global_dofs(),
+            *result_slot.lock().expect("pex5 mutex") = Some(RunResult {
+                dim_r: u_par.n_global_dofs(),
+                dim_w: p_par.n_global_dofs(),
                 iterations: res.iterations,
                 final_residual: res.final_residual,
                 converged: res.converged,
-                h: 1.0 / mesh_n as f64,
-                rhs_norm,
-                solution_norm,
-                solution_checksum,
+                err_u_rel: err_u / norm_u,
+                err_p_rel: err_p / norm_p,
             });
         }
     });
 
     let final_result = result
         .lock()
-        .expect("mfem_pex5 result mutex poisoned after launch")
+        .expect("pex5 mutex after launch")
         .take()
-        .expect("rank 0 did not publish mfem_pex5 result");
+        .expect("rank 0 did not publish pex5 result");
     final_result
 }
 
-struct Args {
-    mesh_n: usize,
-    n_workers: usize,
+// ─── Serial boundary flux RHS (dm order), 1:1 with serial ex5 ───────────────
+
+fn assemble_ex5_bdr_rhs_serial(
+    space: &HDivSpace<Mesh<2>>,
+    tags: &[i32],
+    g: &dyn Fn(&[f64]) -> f64,
+) -> Vec<f64> {
+    use fem_mesh::MeshTopology;
+    let mesh = space.mesh();
+    let n_dofs = space.n_dofs();
+    let mut rhs = vec![0.0; n_dofs];
+
+    let xi = [
+        0.5 * (1.0 - 1.0 / 3.0f64.sqrt()),
+        0.5 * (1.0 + 1.0 / 3.0f64.sqrt()),
+    ];
+    let wts = [0.5, 0.5];
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if !tags.contains(&mesh.face_tag(f)) {
+            continue;
+        }
+        let nodes = mesh.face_nodes(f);
+        if nodes.len() < 2 {
+            continue;
+        }
+        let pa = mesh.node_coords(nodes[0]);
+        let pb = mesh.node_coords(nodes[1]);
+        let (a, b) = (nodes[0], nodes[1]);
+        let key = if a < b { (a, b) } else { (b, a) };
+        let Some(first) = space.edge_face_dof(EdgeKey::new(key.0, key.1)) else {
+            continue;
+        };
+        let first = first as usize;
+        let reversed = a > b;
+        for (k, (&xk, &wk)) in xi.iter().zip(wts.iter()).enumerate() {
+            let t = xk;
+            let x_phys = [
+                pa[0] + t * (pb[0] - pa[0]),
+                pa[1] + t * (pb[1] - pa[1]),
+            ];
+            let val = wk * g(&x_phys);
+            let dof = if !reversed {
+                first + k
+            } else {
+                first + 1 - k
+            };
+            let sgn = if !reversed { 1.0 } else { -1.0 };
+            rhs[dof] += sgn * val;
+        }
+    }
+    rhs
 }
 
-fn parse_args() -> Args {
-    let args: Vec<String> = std::env::args().collect();
-    Args {
-        mesh_n: parse_arg(&args, "--n").unwrap_or(16),
-        n_workers: parse_arg(&args, "--ranks").unwrap_or(2),
+// ─── Boundary flux RHS (RT1), 1:1 with MFEM VectorFEBoundaryFluxLFIntegrator ─
+
+fn assemble_bdr_rhs_par(
+    space: &HDivSpace<Mesh<2>>,
+    par_mesh: &fem_parallel::par_mesh::ParallelMesh<Mesh<2>>,
+    tags: &[i32],
+    g: &dyn Fn(&[f64]) -> f64,
+) -> Vec<f64> {
+    use fem_mesh::MeshTopology;
+    let mesh = space.mesh();
+    let rank = par_mesh.comm().rank();
+    let n_dofs = space.n_dofs();
+    let mut rhs = vec![0.0; n_dofs];
+
+    // GL 2-point rule on [0,1] (MFEM IntRules.Get(SEGMENT, 2) for RT1).
+    let xi = [
+        0.5 * (1.0 - 1.0 / 3.0f64.sqrt()),
+        0.5 * (1.0 + 1.0 / 3.0f64.sqrt()),
+    ];
+    let wts = [0.5, 0.5];
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if !tags.contains(&mesh.face_tag(f)) {
+            continue;
+        }
+        // Only assemble faces owned by this rank (no double counting).
+        let (e, _) = mesh.face_elements(f);
+        if par_mesh.partition().elem_owner[e as usize] != rank {
+            continue;
+        }
+        let nodes = mesh.face_nodes(f);
+        if nodes.len() < 2 {
+            continue;
+        }
+        let pa = mesh.node_coords(nodes[0]);
+        let pb = mesh.node_coords(nodes[1]);
+        let (a, b) = (nodes[0], nodes[1]);
+        let key = if a < b { (a, b) } else { (b, a) };
+        let Some(first) = space.edge_face_dof(EdgeKey::new(key.0, key.1)) else {
+            continue;
+        };
+        let first = first as usize;
+
+        // Boundary-face direction vs global edge (a < b) direction:
+        // face nodes are stored in the boundary orientation.
+        let reversed = a > b;
+        for (k, (&xk, &wk)) in xi.iter().zip(wts.iter()).enumerate() {
+            let t = xk;
+            let x_phys = [
+                pa[0] + t * (pb[0] - pa[0]),
+                pa[1] + t * (pb[1] - pa[1]),
+            ];
+            let val = wk * g(&x_phys);
+            let dof = if !reversed {
+                first + k
+            } else {
+                first + 1 - k
+            };
+            let sgn = if !reversed { 1.0 } else { -1.0 };
+            rhs[dof] += sgn * val;
+        }
+    }
+    rhs
+}
+
+// ─── Block MINRES (no preconditioner yet) ────────────────────────────────────
+
+fn block_minres(
+    a: &ParBlockCsrMatrix2,
+    b: &ParBlockVector2,
+    x: &mut ParBlockVector2,
+    cfg: &SolverConfig,
+    inv_m_diag: &[f64],
+    inv_s_diag: &[f64],
+) -> fem_solver::SolveResult {
+    // Port of MFEM MINRESSolver::Mult (linalg/solvers.cpp), van der Vorst
+    // three-recurrence form, with a block-diagonal SPD preconditioner
+    // P = diag(diag(M)⁻¹, diag(S)⁻¹).  Block operators.
+    let n0 = x.v0.n_owned();
+    let n1 = x.v1.n_owned();
+
+    // r = b - A*x
+    let mut v1 = ParBlockVector2::new(b.v0.clone_vec(), b.v1.clone_vec());
+    let mut tmp = ParBlockVector2::new(
+        ParVector::zeros_like(&b.v0),
+        ParVector::zeros_like(&b.v1),
+    );
+    a.spmv(x, &mut tmp);
+    for i in 0..n0 {
+        v1.v0.as_slice_mut()[i] -= tmp.v0.as_slice()[i];
+    }
+    for i in 0..n1 {
+        v1.v1.as_slice_mut()[i] -= tmp.v1.as_slice()[i];
+    }
+
+    // z = P⁻¹ v1
+    let mut z = ParBlockVector2::new(
+        ParVector::zeros_like(&b.v0),
+        ParVector::zeros_like(&b.v1),
+    );
+    prec_apply(&v1, &mut z, inv_m_diag, inv_s_diag);
+
+    let mut eta = a.global_dot(&z, &v1).max(0.0).sqrt();
+    let beta0 = eta;
+    let norm_goal = (cfg.rtol * eta).max(cfg.atol);
+    if eta <= norm_goal {
+        return fem_solver::SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: eta / beta0,
+        };
+    }
+
+    let mut beta = beta0;
+    let mut gamma0 = 1.0_f64;
+    let mut gamma1 = 1.0_f64;
+    let mut sigma0 = 0.0_f64;
+    let mut sigma1 = 0.0_f64;
+
+    let mut v0 = ParBlockVector2::new(
+        ParVector::zeros_like(&b.v0),
+        ParVector::zeros_like(&b.v1),
+    );
+    let mut w0 = ParBlockVector2::new(
+        ParVector::zeros_like(&b.v0),
+        ParVector::zeros_like(&b.v1),
+    );
+    let mut w1 = ParBlockVector2::new(
+        ParVector::zeros_like(&b.v0),
+        ParVector::zeros_like(&b.v1),
+    );
+
+    let mut it = 0usize;
+    for it_i in 1..=cfg.max_iter {
+        it = it_i;
+        // v1 /= beta; z /= beta
+        block_scale(&mut v1, 1.0 / beta);
+        block_scale(&mut z, 1.0 / beta);
+
+        // q = A*z
+        let mut q = ParBlockVector2::new(
+            ParVector::zeros_like(&b.v0),
+            ParVector::zeros_like(&b.v1),
+        );
+        a.spmv(&mut z, &mut q);
+        let alpha = a.global_dot(&z, &q);
+        if it > 1 {
+            for i in 0..n0 {
+                q.v0.as_slice_mut()[i] -= beta * v0.v0.as_slice()[i];
+            }
+            for i in 0..n1 {
+                q.v1.as_slice_mut()[i] -= beta * v0.v1.as_slice()[i];
+            }
+        }
+        // v0_new = q - alpha*v1
+        for i in 0..n0 {
+            v0.v0.as_slice_mut()[i] = q.v0.as_slice()[i] - alpha * v1.v0.as_slice()[i];
+        }
+        for i in 0..n1 {
+            v0.v1.as_slice_mut()[i] = q.v1.as_slice()[i] - alpha * v1.v1.as_slice()[i];
+        }
+
+        let delta = gamma1 * alpha - gamma0 * sigma1 * beta;
+        let rho3 = sigma0 * beta;
+        let rho2 = sigma1 * alpha + gamma0 * gamma1 * beta;
+        // beta = sqrt(v0 · P⁻¹ v0)
+        let mut pv0 = ParBlockVector2::new(
+            ParVector::zeros_like(&b.v0),
+            ParVector::zeros_like(&b.v1),
+        );
+        prec_apply(&v0, &mut pv0, inv_m_diag, inv_s_diag);
+        beta = a.global_dot(&v0, &pv0).max(0.0).sqrt();
+        let rho1 = (delta * delta + beta * beta).sqrt();
+
+        // w0_new = (-rho3*w0 - rho2*w1 + z) / rho1 (three-recurrence)
+        let mut w0_new = ParBlockVector2::new(
+            ParVector::zeros_like(&b.v0),
+            ParVector::zeros_like(&b.v1),
+        );
+        if it == 1 {
+            for i in 0..n0 {
+                w0_new.v0.as_slice_mut()[i] = z.v0.as_slice()[i] / rho1;
+            }
+            for i in 0..n1 {
+                w0_new.v1.as_slice_mut()[i] = z.v1.as_slice()[i] / rho1;
+            }
+        } else if it == 2 {
+            for i in 0..n0 {
+                w0_new.v0.as_slice_mut()[i] =
+                    (z.v0.as_slice()[i] - rho2 * w1.v0.as_slice()[i]) / rho1;
+            }
+            for i in 0..n1 {
+                w0_new.v1.as_slice_mut()[i] =
+                    (z.v1.as_slice()[i] - rho2 * w1.v1.as_slice()[i]) / rho1;
+            }
+        } else {
+            for i in 0..n0 {
+                w0_new.v0.as_slice_mut()[i] =
+                    (-rho3 * w0.v0.as_slice()[i] - rho2 * w1.v0.as_slice()[i]
+                        + z.v0.as_slice()[i])
+                        / rho1;
+            }
+            for i in 0..n1 {
+                w0_new.v1.as_slice_mut()[i] =
+                    (-rho3 * w0.v1.as_slice()[i] - rho2 * w1.v1.as_slice()[i]
+                        + z.v1.as_slice()[i])
+                        / rho1;
+            }
+        }
+
+        gamma0 = gamma1;
+        gamma1 = delta / rho1;
+
+        // x += gamma1 * eta * w0_new
+        for i in 0..n0 {
+            x.v0.as_slice_mut()[i] += gamma1 * eta * w0_new.v0.as_slice()[i];
+        }
+        for i in 0..n1 {
+            x.v1.as_slice_mut()[i] += gamma1 * eta * w0_new.v1.as_slice()[i];
+        }
+
+        sigma0 = sigma1;
+        sigma1 = beta / rho1;
+        eta = -sigma1 * eta;
+
+        if eta.abs() <= norm_goal {
+            return fem_solver::SolveResult {
+                converged: true,
+                iterations: it,
+                final_residual: eta.abs() / beta0,
+            };
+        }
+
+        // MFEM Swap(v0, v1); Swap(w0, w1); Swap(u1, q) — z (u1) becomes
+        // P⁻¹v0_new so that after the next v1/=beta normalization z stays
+        // equal to P⁻¹·v_cur.
+        let v1_old = ParBlockVector2::new(v1.v0.clone_vec(), v1.v1.clone_vec());
+        v1 = ParBlockVector2::new(v0.v0.clone_vec(), v0.v1.clone_vec());
+        v0 = v1_old;
+        let w1_old = ParBlockVector2::new(w1.v0.clone_vec(), w1.v1.clone_vec());
+        w1 = ParBlockVector2::new(w0_new.v0.clone_vec(), w0_new.v1.clone_vec());
+        w0 = w1_old;
+        z = ParBlockVector2::new(pv0.v0.clone_vec(), pv0.v1.clone_vec());
+    }
+
+    fem_solver::SolveResult {
+        converged: false,
+        iterations: it,
+        final_residual: eta.abs() / beta0,
     }
 }
 
+fn prec_apply(
+    r: &ParBlockVector2,
+    z: &mut ParBlockVector2,
+    inv_m_diag: &[f64],
+    inv_s_diag: &[f64],
+) {
+    for i in 0..r.v0.n_owned() {
+        z.v0.as_slice_mut()[i] = inv_m_diag[i] * r.v0.as_slice()[i];
+    }
+    for i in 0..r.v1.n_owned() {
+        z.v1.as_slice_mut()[i] = inv_s_diag[i] * r.v1.as_slice()[i];
+    }
+}
+
+fn block_scale(v: &mut ParBlockVector2, s: f64) {
+    for i in 0..v.v0.n_owned() {
+        v.v0.as_slice_mut()[i] *= s;
+    }
+    for i in 0..v.v1.n_owned() {
+        v.v1.as_slice_mut()[i] *= s;
+    }
+}
+
+// ─── Exact solution (2D) ─────────────────────────────────────────────────────
+
+fn u_exact(x: &[f64]) -> [f64; 2] {
+    let xi = x[0];
+    let yi = x[1];
+    [-xi.exp() * yi.sin(), -xi.exp() * yi.cos()]
+}
+
+fn p_exact(x: &[f64]) -> f64 {
+    x[0].exp() * x[1].sin()
+}
+
 fn parse_arg(args: &[String], flag: &str) -> Option<usize> {
-    args.iter().position(|a| a == flag)
+    args.iter()
+        .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse().ok())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pex5_darcy_coarse_parallel_case_converges() {
-        let result = run_case(8, 2, 1.0, 1.0, 1.0);
-        assert!(result.converged);
-        assert!(result.global_dofs == 208, "unexpected global dof count: {}", result.global_dofs);
-        assert!(result.final_residual < 1.0e-7, "residual too large: {}", result.final_residual);
-        assert!(result.rhs_norm > 1.0e-2, "rhs norm too small: {}", result.rhs_norm);
-        assert!(result.solution_norm > 1.0e-4, "solution norm too small: {}", result.solution_norm);
+fn scale_csr(m: &mut CsrMatrix<f64>, s: f64) {
+    for v in m.values.iter_mut() {
+        *v *= s;
     }
+}
 
-    #[test]
-    fn pex5_darcy_partition_is_invariant_between_one_two_and_four_ranks() {
-        let serial = run_case(8, 1, 1.0, 1.0, 1.0);
-        let parallel2 = run_case(8, 2, 1.0, 1.0, 1.0);
-        let parallel4 = run_case(8, 4, 1.0, 1.0, 1.0);
-
-        assert!(serial.converged && parallel2.converged && parallel4.converged);
-        assert_eq!(serial.global_dofs, parallel2.global_dofs);
-        assert_eq!(serial.global_dofs, parallel4.global_dofs);
-        assert!((serial.rhs_norm - parallel2.rhs_norm).abs() < 1.0e-10);
-        assert!((serial.rhs_norm - parallel4.rhs_norm).abs() < 1.0e-10);
-        assert!((serial.solution_norm - parallel2.solution_norm).abs() < 1.0e-8,
-            "solution norm mismatch: serial={} parallel2={}",
-            serial.solution_norm, parallel2.solution_norm);
-        assert!((serial.solution_norm - parallel4.solution_norm).abs() < 1.0e-8,
-            "solution norm mismatch: serial={} parallel4={}",
-            serial.solution_norm, parallel4.solution_norm);
-        assert!((serial.solution_checksum - parallel2.solution_checksum).abs() < 1.0e-8,
-            "solution checksum mismatch: serial={} parallel2={}",
-            serial.solution_checksum, parallel2.solution_checksum);
-        assert!((serial.solution_checksum - parallel4.solution_checksum).abs() < 1.0e-8,
-            "solution checksum mismatch: serial={} parallel4={}",
-            serial.solution_checksum, parallel4.solution_checksum);
+/// Extract the first `n_owned_rows` rows of a CSR matrix (partition layout
+/// keeps owned rows first).
+fn extract_owned_rows(
+    mat: &CsrMatrix<f64>,
+    n_owned_rows: usize,
+    n_cols: usize,
+) -> CsrMatrix<f64> {
+    let mut coo = fem_linalg::CooMatrix::<f64>::new(n_owned_rows, n_cols);
+    for row in 0..n_owned_rows.min(mat.nrows) {
+        for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
+            let col = mat.col_idx[k] as usize;
+            let val = mat.values[k];
+            if val != 0.0 && col < n_cols {
+                coo.add(row, col, val);
+            }
+        }
     }
-
-    #[test]
-    fn pex5_darcy_solution_scales_linearly_with_source() {
-        let unit = run_case(8, 2, 1.0, 1.0, 1.0);
-        let doubled = run_case(8, 2, 1.0, 1.0, 2.0);
-
-        assert!(unit.converged && doubled.converged);
-        assert!((doubled.rhs_norm / unit.rhs_norm - 2.0).abs() < 1.0e-10);
-        assert!((doubled.solution_norm / unit.solution_norm - 2.0).abs() < 5.0e-6,
-            "solution norm ratio mismatch: unit={} doubled={}",
-            unit.solution_norm, doubled.solution_norm);
-        assert!((doubled.solution_checksum / unit.solution_checksum - 2.0).abs() < 5.0e-6,
-            "solution checksum ratio mismatch: unit={} doubled={}",
-            unit.solution_checksum, doubled.solution_checksum);
-    }
-
-    #[test]
-    fn pex5_darcy_sign_reversed_source_flips_solution() {
-        let positive = run_case(8, 2, 1.0, 1.0, 1.0);
-        let negative = run_case(8, 2, 1.0, 1.0, -1.0);
-
-        assert!(positive.converged && negative.converged);
-        assert!((positive.rhs_norm - negative.rhs_norm).abs() < 1.0e-10);
-        assert!((positive.solution_norm - negative.solution_norm).abs() < 1.0e-10);
-        assert!((positive.solution_checksum + negative.solution_checksum).abs() < 1.0e-8,
-            "expected odd checksum symmetry: positive={} negative={}",
-            positive.solution_checksum, negative.solution_checksum);
-    }
-
-    #[test]
-    fn pex5_darcy_divergence_free_manufactured_solution_is_alpha_invariant() {
-        let alpha1 = run_case(8, 2, 1.0, 1.0, 1.0);
-        let alpha10 = run_case(8, 2, 10.0, 1.0, 1.0);
-
-        assert!(alpha1.converged && alpha10.converged);
-        assert!((alpha1.rhs_norm - alpha10.rhs_norm).abs() < 1.0e-12);
-        assert!((alpha1.solution_norm - alpha10.solution_norm).abs() < 1.0e-5,
-            "solution norm should be alpha-invariant for the divergence-free manufactured field: alpha1={} alpha10={}",
-            alpha1.solution_norm,
-            alpha10.solution_norm);
-        assert!((alpha1.solution_checksum - alpha10.solution_checksum).abs() < 1.0e-2,
-            "solution checksum should be alpha-invariant: alpha1={} alpha10={}",
-            alpha1.solution_checksum,
-            alpha10.solution_checksum);
-    }
-
-    #[test]
-    fn pex5_darcy_coarser_mesh_has_larger_h_and_fewer_dofs() {
-        let coarse = run_case(4, 2, 1.0, 1.0, 1.0);
-        let fine = run_case(8, 2, 1.0, 1.0, 1.0);
-        assert!(coarse.converged && fine.converged);
-        assert!(coarse.h > fine.h,
-            "expected coarser mesh to have larger h: coarse={} fine={}", coarse.h, fine.h);
-        assert!(coarse.global_dofs < fine.global_dofs,
-            "expected coarser mesh to have fewer DOFs: coarse={} fine={}", coarse.global_dofs, fine.global_dofs);
-    }
-
-    #[test]
-    fn pex5_darcy_finer_mesh_has_smaller_h_and_more_dofs() {
-        let standard = run_case(8, 2, 1.0, 1.0, 1.0);
-        let fine = run_case(16, 2, 1.0, 1.0, 1.0);
-        assert!(standard.converged && fine.converged);
-        assert!(fine.h < standard.h,
-            "expected finer mesh to have smaller h: standard={} fine={}", standard.h, fine.h);
-        assert!(fine.global_dofs > standard.global_dofs,
-            "expected finer mesh to have more DOFs: standard={} fine={}", standard.global_dofs, fine.global_dofs);
-    }
-
-    #[test]
-    fn pex5_darcy_zero_source_gives_trivial_solution() {
-        let result = run_case(8, 2, 1.0, 1.0, 0.0);
-        assert!(result.converged);
-        assert!(result.rhs_norm < 1.0e-12, "rhs norm should vanish: {}", result.rhs_norm);
-        assert!(result.solution_norm < 1.0e-12, "solution norm should vanish: {}", result.solution_norm);
-        assert!(result.solution_checksum.abs() < 1.0e-12,
-            "solution checksum should vanish: {}", result.solution_checksum);
-    }
+    coo.into_csr()
 }

@@ -74,6 +74,16 @@ where
         Self::finish(local_space, dof_partition, &comm)
     }
 
+    /// Build a parallel FE space from an already-constructed `DofPartition`
+    /// (e.g. [`DofPartition::from_l2_space`](crate::dof_partition::DofPartition::from_l2_space)).
+    pub fn new_with_dof_partition(
+        local_space: S,
+        dof_partition: DofPartition,
+        comm: Comm,
+    ) -> Self {
+        Self::finish(local_space, dof_partition, &comm)
+    }
+
     /// Build a parallel FE space for edge-DOF-only spaces (H(curl), H(div) 2D).
     ///
     /// Uses edge-based DOF partitioning where `owner(edge) = min(owner(endpoints))`.

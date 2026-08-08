@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use fem_core::Rank;
 use fem_mesh::topology::MeshTopology;
+use fem_mesh::Mesh;
 use fem_space::dof_manager::{DofManager, EdgeKey};
 use fem_space::fe_space::FESpace;
 use crate::comm::Comm;
@@ -89,6 +90,54 @@ impl DofPartition {
             global_dof_offset,
             dof_global_to_local,
             dm_to_partition: Vec::new(), // identity for P1
+            partition_to_dm: Vec::new(),
+            sign_corrections: Vec::new(),
+        }
+    }
+
+    /// Build a DOF partition for a discontinuous L2 space: every element owns
+    /// its `dofs_per_elem` DOFs.  Global DOF IDs are
+    /// `global_elem_id * dofs_per_elem + j`, which is identical on every rank
+    /// holding that element (no exchange needed).  The local DOF layout
+    /// (element-traversal order) already matches the [owned | ghost] element
+    /// ordering, so the permutation is the identity.
+    pub fn from_l2_space(
+        space: &fem_space::L2Space<Mesh<2>>,
+        partition: &MeshPartition,
+        comm: &Comm,
+    ) -> Self {
+        let local_rank = comm.rank();
+        let dofs_per_elem = space.element_dofs(0).len();
+        let n_local_elems = partition.n_owned_elems + partition.n_ghost_elems;
+        let n_owned = partition.n_owned_elems * dofs_per_elem;
+        let n_ghost = partition.n_ghost_elems * dofs_per_elem;
+
+        let mut global_dof_ids = Vec::with_capacity(n_owned + n_ghost);
+        let mut dof_owner = Vec::with_capacity(n_owned + n_ghost);
+        for e in 0..n_local_elems {
+            let ge = partition.global_elem(e as u32);
+            let owner = partition.elem_owner[e];
+            for j in 0..dofs_per_elem {
+                global_dof_ids.push(ge * dofs_per_elem as u32 + j as u32);
+                dof_owner.push(owner);
+            }
+        }
+
+        let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
+        let dof_global_to_local: HashMap<u32, u32> = global_dof_ids
+            .iter()
+            .enumerate()
+            .map(|(lid, &gid)| (gid, lid as u32))
+            .collect();
+
+        DofPartition {
+            n_owned_dofs: n_owned,
+            n_ghost_dofs: n_ghost,
+            global_dof_ids,
+            dof_owner,
+            global_dof_offset,
+            dof_global_to_local,
+            dm_to_partition: Vec::new(), // identity: element order == partition order
             partition_to_dm: Vec::new(),
             sign_corrections: Vec::new(),
         }
@@ -377,15 +426,19 @@ impl DofPartition {
         };
 
         // Determine DOF layout per edge from the element type.
-        // For order-1 spaces each edge holds 1 DOF and there are no interior DOFs.
-        // Higher-order Nédélec elements have multiple DOFs per edge plus interior bubbles.
+        // RTk (HDiv): (k+1) DOFs per edge + interior DOFs
+        //   (k(k+1)/2 per tri, 2k(k+1) per quad); ND1 (HCurl): 1/edge.
+        let order = space.order() as usize;
         let (dofs_per_edge, _n_interior_per_elem) = if mesh.n_elements() > 0 {
             let t = mesh.element_type(0);
             match (space_type, t) {
-                (_, fem_mesh::ElementType::Tri6) => (2, 2),  // TriND2: 2/edge, 2 interior
-                (_, fem_mesh::ElementType::Tri3) => (1, 0),
-                (_, fem_mesh::ElementType::Quad4) => (1, 0),
-                (_, fem_mesh::ElementType::Tet4) => (1, 0),
+                (fem_space::fe_space::SpaceType::HDiv, fem_mesh::ElementType::Quad4) => {
+                    (order + 1, 2 * order * (order + 1))
+                }
+                (fem_space::fe_space::SpaceType::HDiv, fem_mesh::ElementType::Tri3) => {
+                    (order + 1, order * (order + 1) / 2)
+                }
+                (_, fem_mesh::ElementType::Tri6) => (2, 2), // TriND2: 2/edge, 2 interior
                 _ => (1, 0),
             }
         } else {

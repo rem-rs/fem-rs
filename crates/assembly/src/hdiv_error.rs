@@ -51,6 +51,22 @@ where
     F: Fn(&[f64]) -> [f64; 2],
     P: Fn(u32) -> bool,
 {
+    compute_hdiv_l2_error_owned_q(space, uh, exact, owned_pred, 2 * (space.order() as usize + 1) + 3)
+}
+
+/// Variant with an explicit quadrature order (MFEM ex5p uses
+/// `max(2, 2*order+1)` for the error integral).
+pub fn compute_hdiv_l2_error_owned_q<F, P>(
+    space: &HDivSpace<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    owned_pred: &P,
+    quad_order: usize,
+) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 2],
+    P: Fn(u32) -> bool,
+{
     let mesh = space.mesh();
     let elem_type = mesh.element_type(0);
     let order = space.order();
@@ -69,7 +85,7 @@ where
     // ...) in fe_rt.cpp), so intorder = 2*(order+1) + 3 = 5 for RT0.  On
     // non-affine (bilinear) quads the integrand is not a polynomial, so the
     // quadrature order changes the value — match MFEM exactly.
-    let quad = ref_elem.quadrature(2 * (order + 1) + 3);
+    let quad = ref_elem.quadrature(quad_order as u8);
     let n_ldofs = ref_elem.n_dofs() as usize;
     let mut ref_phi = vec![0.0; n_ldofs * 2];
     let mut phys_phi = vec![0.0; n_ldofs * 2];
@@ -137,6 +153,21 @@ pub fn compute_l2_error_scalar<F>(
 where
     F: Fn(&[f64]) -> f64,
 {
+    compute_l2_error_scalar_owned(space, uh, exact, &|_| true)
+}
+
+/// Element-filtered variant of [`compute_l2_error_scalar`] (parallel path:
+/// each rank integrates only its owned elements).
+pub fn compute_l2_error_scalar_owned<F, P>(
+    space: &fem_space::L2Space<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    owned_pred: &P,
+) -> f64
+where
+    F: Fn(&[f64]) -> f64,
+    P: Fn(u32) -> bool,
+{
     use fem_element::{
         lagrange::{QuadQ1, TriP1},
         ReferenceElement,
@@ -161,6 +192,9 @@ where
     let affine_tr = (!is_quad).then(|| ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(0)));
 
     for e in mesh.elem_iter() {
+        if !owned_pred(e) {
+            continue;
+        }
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let nodes = mesh.element_nodes(e);
 

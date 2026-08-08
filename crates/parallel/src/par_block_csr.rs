@@ -65,8 +65,10 @@ impl ParBlockCsrMatrix2 {
         // ── y0 = A00·x0 + A01·x1 ──
         let mut a01_x1 = vec![0.0_f64; n0];
         if self.a01.nrows > 0 {
-            let x1_owned = &x.v1.as_slice()[..x.v1.n_owned()];
-            self.a01.spmv(x1_owned, &mut a01_x1);
+            // A01 = Bᵀ: ncols = L2 owned (B keeps only owned rows), so only
+            // the owned portion of x1 is needed.
+            self.a01
+                .spmv(&x.v1.as_slice()[..x.v1.n_owned()], &mut a01_x1);
         }
         // A00: overlap ghost exchange with diag multiply
         x.v0.update_ghosts_overlapping(|data| {
@@ -81,8 +83,9 @@ impl ParBlockCsrMatrix2 {
         // ── y1 = A10·x0 + A11·x1 ──
         let mut a10_x0 = vec![0.0_f64; n1];
         if self.a10.nrows > 0 {
-            let x0_owned = &x.v0.as_slice()[..x.v0.n_owned()];
-            self.a10.spmv(x0_owned, &mut a10_x0);
+            let mut x0_full = x.v0.clone_vec();
+            x0_full.update_ghosts();
+            self.a10.spmv(x0_full.as_slice(), &mut a10_x0);
         }
         x.v1.update_ghosts_overlapping(|data| {
             self.a11.diag_block().spmv(&data[..n1], &mut y.v1.as_slice_mut()[..n1]);

@@ -6,7 +6,7 @@
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::fe_space::FESpace;
-use fem_assembly::mixed::{MixedAssembler, MixedBilinearIntegrator};
+use fem_assembly::mixed::{MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed};
 
 use crate::dof_partition::DofPartition;
 use crate::par_space::ParallelFESpace;
@@ -58,6 +58,41 @@ impl ParMixedAssembler {
         let n_total_cols = col_part.n_total_dofs();
         extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
     }
+
+    /// Parallel mixed assembly for HDiv × L2 (Darcy divergence coupling),
+    /// via the dedicated [`assemble_hdiv_l2_mixed`] path (the generic
+    /// [`MixedAssembler`] skips vector-valued spaces).
+    ///
+    /// `row_par_space` is the L2 (pressure) space, `col_par_space` the HDiv
+    /// (velocity) space.  Returns `n_owned_row × n_total_col` CSR.
+    pub fn assemble_hdiv_l2<SR: FESpace, SC: FESpace>(
+        row_par_space: &ParallelFESpace<SR>,
+        col_par_space: &ParallelFESpace<SC>,
+        integrators: &[&dyn HDivL2Integrator],
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        let local_mat = assemble_hdiv_l2_mixed(
+            row_par_space.local_space(),
+            col_par_space.local_space(),
+            integrators,
+            quad_order,
+        );
+
+        let row_part = row_par_space.dof_partition();
+        let col_part = col_par_space.dof_partition();
+        let needs_perm = row_part.needs_permutation() || col_part.needs_permutation();
+        let permuted_mat = if needs_perm {
+            permute_rect_csr(&local_mat, row_part, col_part)
+        } else {
+            local_mat
+        };
+
+        extract_owned_rows(
+            &permuted_mat,
+            row_part.n_owned_dofs,
+            col_part.n_total_dofs(),
+        )
+    }
 }
 
 /// Permute a rectangular CSR matrix using row and column DOF partitions.
@@ -69,13 +104,25 @@ fn permute_rect_csr(
     let nr = row_part.n_total_dofs();
     let nc = col_part.n_total_dofs();
     let mut coo = CooMatrix::<f64>::new(nr, nc);
+    let row_sign = row_part.needs_sign_correction();
+    let col_sign = col_part.needs_sign_correction();
 
     for row in 0..mat.nrows {
         let new_row = row_part.permute_dof(row as u32) as usize;
+        let sr = if row_sign {
+            row_part.sign_correction(row as u32)
+        } else {
+            1.0
+        };
         for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
             let col = mat.col_idx[k] as usize;
             let new_col = col_part.permute_dof(col as u32) as usize;
-            let val = mat.values[k];
+            let sc = if col_sign {
+                col_part.sign_correction(col as u32)
+            } else {
+                1.0
+            };
+            let val = mat.values[k] * sr * sc;
             if val != 0.0 {
                 coo.add(new_row, new_col, val);
             }
