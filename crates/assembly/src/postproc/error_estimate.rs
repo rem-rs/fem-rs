@@ -774,15 +774,15 @@ where
 /// where `f = flux_coeff − smoothed_coeff` are the DOF coefficients of the
 /// flux difference and `M_K` is the element mass matrix.
 ///
-/// `hanging` supplies the non-conforming mesh hanging-node constraints: like
-/// MFEM's `SumFluxAndCount`, hanging DOFs do NOT participate in the DOF
-/// averaging (MFEM's `AddElementVector` skips negative/constrained vdofs);
-/// their smoothed flux is recovered by linear interpolation from the parent
-/// DOFs (`DofTransformation::InvTransformPrimal`), which for Q1 is the same
-/// 0.5/0.5 rule used by the hanging-node constraints.
+/// `hanging` is accepted for API compatibility but is NOT used by the
+/// recovery: matching MFEM's `SumFluxAndCount` (gridfunc.cpp), hanging DOFs
+/// participate in the plain DOF average through the fine neighbor elements
+/// that use them as (positive) corner DOFs — there is no parent
+/// interpolation and no skipping.  (The 0.5/0.5 parent interpolation is only
+/// applied to the solution GridFunction via `recover_hanging_values`.)
 pub fn zz_estimator_nodal<M, S>(
     gf: &GridFunction<'_, S>,
-    hanging: &[HangingNodeConstraint],
+    _hanging: &[HangingNodeConstraint],
 ) -> ElementIndicators
 where
     M: MeshTopology,
@@ -793,15 +793,19 @@ where
     let nd = gf.space().n_dofs();
     let d = m.dim() as usize;
     let order = gf.space().order();
-    let hang_set: std::collections::HashSet<usize> =
-        hanging.iter().map(|c| c.constrained).collect();
 
     // ── 1. Compute element gradients at ALL DOF locations ───────────────────
-    // Like MFEM's SumFluxAndCount: for each element, compute ∇u_h at each
-    // DOF of the element (vertex, edge, interior) using the correct geometric
-    // Jacobian.  Accumulate at global DOFs and count.  Hanging DOFs are
-    // skipped during accumulation (MFEM AddElementVector drops the negative
-    // vdofs) and are filled in by parent interpolation afterwards.
+    // Like MFEM's SumFluxAndCount (gridfunc.cpp): for each element, compute
+    // ∇u_h at each DOF of the element (vertex, edge, interior) using the
+    // correct geometric Jacobian.  Accumulate at global DOFs and count.
+    //
+    // Hanging DOFs are NOT skipped: they appear as (positive) corner DOFs of
+    // the fine neighbor elements, which contribute to the average — the same
+    // set of elements that defines their constrained value.  MFEM's H1
+    // Q1 element dofs are just its 4 corner nodes (Mesh::GetElementVertices),
+    // so a hanging node is never a dof of the large parent element; it is
+    // recovered purely by averaging the fine-element fluxes (no parent
+    // interpolation, unlike the solution GridFunction).
     let mut dof_grad = vec![vec![0.0; d]; nd];
     let mut dof_count = vec![0usize; nd];
 
@@ -817,7 +821,6 @@ where
 
         for (i, &dof) in elem_dofs.iter().enumerate() {
             let idx = dof as usize;
-            if hang_set.contains(&idx) { continue; }
             let xi = &dof_coords[i];
             let g = eval_grad_at(m, e, gf.space(), gf.dofs(), xi, elem_type);
             for di in 0..d {
@@ -834,33 +837,6 @@ where
             for di in 0..d {
                 dof_grad[i][di] /= c;
             }
-        }
-    }
-    // Hanging DOFs: interpolate from parents (chains handled recursively).
-    if !hanging.is_empty() {
-        fn interp_grad<M: MeshTopology>(
-            dof: usize,
-            hanging: &[HangingNodeConstraint],
-            hang_set: &std::collections::HashSet<usize>,
-            dof_grad: &[Vec<f64>],
-            d: usize,
-            memo: &mut std::collections::HashMap<usize, Vec<f64>>,
-        ) -> Vec<f64> {
-            if let Some(v) = memo.get(&dof) { return v.clone(); }
-            if !hang_set.contains(&dof) { return dof_grad[dof].clone(); }
-            let c = hanging.iter().find(|c| c.constrained == dof).expect("hang constraint");
-            let mut out = vec![0.0; d];
-            for (p, w) in c.parents() {
-                let gp = interp_grad::<M>(p, hanging, hang_set, dof_grad, d, memo);
-                for di in 0..d { out[di] += w * gp[di]; }
-            }
-            memo.insert(dof, out.clone());
-            out
-        }
-        let mut memo = std::collections::HashMap::new();
-        for c in hanging {
-            let g = interp_grad::<M>(c.constrained, hanging, &hang_set, &dof_grad, d, &mut memo);
-            dof_grad[c.constrained] = g;
         }
     }
 
@@ -882,21 +858,9 @@ where
         let nodes = m.element_nodes(e);
         let quad = ref_elem.quadrature(quad_order);
 
-        // Build element mass matrix M_elem (size: n_ldofs × n_ldofs)
-        let mut m_elem = vec![0.0; n_ldofs * n_ldofs];
-        let mut phi = vec![0.0; n_ldofs];
-        for (q, xi) in quad.points.iter().enumerate() {
-            let (_, det_j) = geom_jacobian(m, nodes, xi, d, elem_type);
-            let w_det = quad.weights[q] * det_j.abs();
-            ref_elem.eval_basis(xi, &mut phi);
-            for i in 0..n_ldofs {
-                for j in 0..n_ldofs {
-                    m_elem[i * n_ldofs + j] += w_det * phi[i] * phi[j];
-                }
-            }
-        }
-
-        // Compute flux difference DOF vector f
+        // Compute flux difference DOF vector f = (element flux − smoothed flux)
+        // at the flux-space DOF coordinates (MFEM ComputeElementFlux evaluates
+        // the gradient at fluxelem.GetNodes()).
         let dof_coords = ref_elem.dof_coords();
         let mut f = vec![0.0; n_ldofs * d];
         for (i, &dof) in elem_dofs.iter().enumerate() {
@@ -909,23 +873,48 @@ where
             }
         }
 
-        // Energy: ∫ ‖f‖² = Σ_di Σ_i Σ_j f[i,di] · M_elem[i,j] · f[j,di]
-        // (per-direction d_xyz[di] mirrors MFEM ComputeFluxEnergy's d_energy).
+        // Energy: ∫‖f‖² (physical components) with per-direction d_xyz
+        // mirroring MFEM `DiffusionIntegrator::ComputeFluxEnergy`'s d_energy
+        // (fem/bilininteg.cpp): at each quadrature point expand f via the
+        // (physical) shape functions, then decompose the energy into
+        // REFERENCE-domain components through vec = Jᵀ·pointflux:
+        //     eng    += w·|detJ|·(pointflux·pointflux)
+        //     d_xyz[k] += w·|detJ|·(Jᵀ·pointflux)ₖ²
+        // (total energy is the physical L2 norm; the directional split is
+        //  done in the reference frame — this is what MFEM's aniso_flags
+        //  threshold 0.15·3/dim is applied to).
         let mut d_xyz = vec![0.0; d];
-        for di in 0..d {
-            for i in 0..n_ldofs {
-                let mut row_sum = 0.0;
+        let mut eng: f64 = 0.0;
+        let mut phi = vec![0.0; n_ldofs];
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (jac, det_j) = geom_jacobian(m, nodes, xi, d, elem_type);
+            let w_det = quad.weights[q] * det_j.abs();
+            ref_elem.eval_basis(xi, &mut phi);
+            // pointflux(k) = Σ_j f[j,k]·φ_j(xi)
+            let mut pointflux = vec![0.0; d];
+            for k in 0..d {
                 for j in 0..n_ldofs {
-                    row_sum += m_elem[i * n_ldofs + j] * f[j * d + di];
+                    pointflux[k] += f[j * d + k] * phi[j];
                 }
-                d_xyz[di] += f[i * d + di] * row_sum;
+            }
+            eng += w_det * (pointflux.iter().map(|v| v * v).sum::<f64>());
+            // ref-domain components: vec = Jᵀ·pointflux
+            let mut vec = vec![0.0; d];
+            for r in 0..d {
+                for c in 0..d {
+                    vec[r] += jac[(c, r)] * pointflux[c];
+                }
+            }
+            for k in 0..d {
+                d_xyz[k] += w_det * vec[k] * vec[k];
             }
         }
-        let eng: f64 = d_xyz.iter().sum();
 
         eta[e as usize] = eng.sqrt();
-        // MFEM aniso_flags: flag = bit k if d_xyz[k]/sum > 0.15·3/dim.
-        let sum_e = eng;
+        // MFEM aniso_flags (gridfunc.cpp ZZErrorEstimator): the directional
+        // split uses the REFERENCE-domain energy d_xyz, so the ratio is
+        // d_xyz[k] / Σ_k d_xyz[k] — NOT eng (physical norm).
+        let sum_e: f64 = d_xyz.iter().sum();
         if sum_e > 0.0 {
             let thresh = 0.15 * 3.0 / d as f64;
             let mut flag: u8 = 0;
