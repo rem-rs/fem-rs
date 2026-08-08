@@ -5111,7 +5111,6 @@ pub fn refine_nonconforming_quad_aniso(
 
     let n_elems = mesh.n_elems();
     let marked_map: HashMap<ElemId, QuadRefineDir> = marked.iter().copied().collect();
-    let marked_set: std::collections::HashSet<ElemId> = marked_map.keys().copied().collect();
 
     // ── Build edge adjacency ─────────────────────────────────────────────────
     let mut edge_elems: HashMap<(NodeId, NodeId), Vec<ElemId>> = HashMap::new();
@@ -5256,60 +5255,92 @@ pub fn refine_nonconforming_quad_aniso(
         }
     }
 
-    // ── Build hanging-node constraints ───────────────────────────────────────
-    // For each split edge whose neighbour is unrefined, record the midpoint as constrained.
-    let mut constraints: Vec<HangingNodeConstraint> = Vec::new();
-
-    for (&e, &dir) in &marked_map {
-        let ns = mesh.elem_nodes(e);
-        let split_edges: Vec<(NodeId, NodeId)> = match dir {
-            QuadRefineDir::X => vec![
-                quad_edge_key(ns[0], ns[1]),
-                quad_edge_key(ns[3], ns[2]),
-            ],
-            QuadRefineDir::Y => vec![
-                quad_edge_key(ns[0], ns[3]),
-                quad_edge_key(ns[1], ns[2]),
-            ],
-            QuadRefineDir::Both => local_edges_quad()
-                .iter()
-                .map(|&(a, b)| quad_edge_key(ns[a], ns[b]))
-                .collect(),
-        };
-        for edge in split_edges {
-            if let Some(&mid) = midpoint_map.get(&edge) {
-                if let Some(neighbors) = edge_elems.get(&edge) {
-                    for &nb in neighbors {
-                        if nb != e && !marked_set.contains(&nb) {
-                            constraints.push(HangingNodeConstraint {
-                                constrained: mid as usize,
-                                parent_a:    edge.0 as usize,
-                                parent_b:    edge.1 as usize,
-                            coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
-});
-                            break;
-                        }
-                    }
-                }
-            }
+    // ── Rebuild boundary edges ───────────────────────────────────────────────
+    // A refined boundary edge is split at its midpoint: the new node becomes
+    // a boundary node (Dirichlet), matching MFEM's NCMesh boundary splitting.
+    let n_faces = mesh.n_faces();
+    let mut new_face_conn: Vec<NodeId> = Vec::new();
+    let mut new_face_tags: Vec<i32>    = Vec::new();
+    for f in 0..n_faces {
+        let a = mesh.face_conn[2 * f];
+        let b = mesh.face_conn[2 * f + 1];
+        let tag = mesh.face_tags[f];
+        if let Some(&mid) = midpoint_map.get(&quad_edge_key(a, b)) {
+            new_face_conn.extend_from_slice(&[a, mid]);
+            new_face_tags.push(tag);
+            new_face_conn.extend_from_slice(&[mid, b]);
+            new_face_tags.push(tag);
+        } else {
+            new_face_conn.extend_from_slice(&[a, b]);
+            new_face_tags.push(tag);
         }
     }
-    // Deduplicate by constrained node
-    constraints.sort_by_key(|c| c.constrained);
-    constraints.dedup_by_key(|c| c.constrained);
 
     let mut new_mesh = Mesh::<2>::uniform(
         new_coords,
         new_conn,
         new_elem_tags,
         ElementType::Quad4,
-        mesh.face_conn.clone(),
-        mesh.face_tags.clone(),
-        mesh.face_type,
+        new_face_conn,
+        new_face_tags,
+        ElementType::Line2,
     );
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 2);
     }
+
+    // ── Detect hanging nodes (multi-level, full-topology walk) ───────────────
+    // Same as refine_nonconforming_quad: starting from every element edge
+    // (a,b) of the *refined* mesh, walk the bisection chain (a,b) → (a,m),
+    // (m,b) → … recording every midpoint m the element does NOT contain.
+    // This catches this round's fresh midpoints AND hanging nodes carried
+    // over from previous refinement levels (a pure midpoint_map scan over the
+    // marked elements misses pre-existing constraints, which broke ex6 it2+
+    // where old hanging nodes must persist into the next solve).
+    let mut constraints: Vec<HangingNodeConstraint> = Vec::new();
+    let mut coord_map: HashMap<String, NodeId> = HashMap::new();
+    for n in 0..new_mesh.n_nodes() as NodeId {
+        let c = new_mesh.coords_of(n);
+        coord_map.entry(format!("{:.9},{:.9}", c[0], c[1])).or_insert(n);
+    }
+    let coords_of = |id: NodeId| -> [f64; 2] {
+        let c = new_mesh.coords_of(id);
+        [c[0], c[1]]
+    };
+    for e in 0..new_mesh.n_elems() as ElemId {
+        let ns = new_mesh.elem_nodes(e);
+        let contains = |m: NodeId| ns.contains(&m);
+        fn walk(
+            a: NodeId, b: NodeId,
+            coord_map: &HashMap<String, NodeId>,
+            coords_of: &dyn Fn(NodeId) -> [f64; 2],
+            contains: &dyn Fn(NodeId) -> bool,
+            out: &mut Vec<HangingNodeConstraint>,
+        ) {
+            let ca = coords_of(a);
+            let cb = coords_of(b);
+            let key = format!("{:.9},{:.9}", 0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]));
+            if let Some(&m) = coord_map.get(&key) {
+                if m != a && m != b && !contains(m) {
+                    out.push(HangingNodeConstraint {
+                        constrained: m as usize,
+                        parent_a: a as usize,
+                        parent_b: b as usize,
+                        coeff_a: 0.5, coeff_b: 0.5, extra: Vec::new(),
+                    });
+                    walk(a, m, coord_map, coords_of, contains, out);
+                    walk(m, b, coord_map, coords_of, contains, out);
+                }
+            }
+        }
+        for &(ea, eb) in &local_edges_quad() {
+            let a = ns[ea];
+            let b = ns[eb];
+            walk(a, b, &coord_map, &coords_of, &contains, &mut constraints);
+        }
+    }
+    constraints.sort_by_key(|c| c.constrained);
+    constraints.dedup_by(|a, b| a.constrained == b.constrained);
     (new_mesh, constraints)
 }
 
