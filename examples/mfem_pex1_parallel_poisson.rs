@@ -1,22 +1,25 @@
-//! # Parallel Example 1 -- Parallel Poisson (analogous to MFEM pex1)
+//! # Parallel Example 1 -- Parallel Poisson (1:1 port of MFEM pex1 / ex1p.cpp)
 //!
-//! Solves -Laplacian(u) = f on [0,1]^2 in parallel using ThreadLauncher,
-//! where f = 2pi^2 sin(pi*x) sin(pi*y) so that the exact solution is
-//! u(x,y) = sin(pi*x) sin(pi*y).
+//! Solves -Laplacian(u) = 1 on data/star.mesh with homogeneous Dirichlet BCs
+//! on all external boundaries, matching MFEM examples/ex1p.cpp defaults:
+//! serial `ref_levels` then 2 parallel uniform refinements (6 total for the
+//! 20-element star.mesh: 81920 quads / 82561 nodes), H1 order 1, f = 1.
+//!
+//! Rust runs the partition with ThreadLauncher (multi-rank threads in one
+//! process); the refinement is done serially before partitioning because
+//! fem-parallel has no parallel *uniform* refinement (C++ refines inside
+//! ParMesh, which yields the same global mesh).
 //!
 //! Usage:
-//!   cargo run --example mfem_pex1_poisson                             # P1, 2 ranks, 16×16
-//!   cargo run --example mfem_pex1_poisson -- --p2                     # P2 elements
-//!   cargo run --example mfem_pex1_poisson -- --n 32 --ranks 4         # 32×32 mesh, 4 ranks
-//!   cargo run --example mfem_pex1_poisson -- --metis                  # METIS graph partitioner
-//!   cargo run --example mfem_pex1_poisson -- --streaming              # streaming partition
-//!   cargo run --example mfem_pex1_poisson -- --metis --streaming      # METIS + streaming
+//!   cargo run --release --example mfem_pex1_parallel_poisson              # 1:1 star.mesh, 2 ranks
+//!   cargo run --release --example mfem_pex1_parallel_poisson -- --ranks 4
+//!   cargo run --release --example mfem_pex1_parallel_poisson -- --n 16    # framework self-test (unit square)
 
 use std::f64::consts::PI;
 use std::sync::Arc;
 
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
-use fem_mesh::Mesh;
+use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::{
     MetisOptions, ParAssembler, ParVector, ParallelFESpace,
     par_partition::{partition_mesh, partition_mesh_streaming},
@@ -30,13 +33,18 @@ use fem_space::{H1Space, fe_space::FESpace};
 use fem_space::constraints::boundary_dofs;
 use fem_space::dof_manager::DofManager;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct RunArgs {
     order: u8,
     n_workers: usize,
-    mesh_n: usize,
+    /// `None` → 1:1 MFEM path (star.mesh, 6 uniform refinements, f = 1);
+    /// `Some(n)` → framework self-test on an n×n unit-square triangle mesh.
+    mesh_n: Option<usize>,
     use_metis: bool,
     use_streaming: bool,
+    /// When set, rank 0 writes the global solution (one value per dof, in
+    /// dof order) to this path — like MFEM ex1p's `sol.XXXXXX` output.
+    dump_sol: Option<String>,
 }
 
 struct RunResult {
@@ -60,10 +68,12 @@ fn main() {
     let run = RunArgs {
         order: if use_p2 { 2 } else { 1 },
         n_workers: parse_arg(&args, "--ranks").unwrap_or(2),
-        mesh_n: parse_arg(&args, "--n").unwrap_or(16),
+        mesh_n: parse_arg(&args, "--n"),
         use_metis,
         use_streaming,
+        dump_sol: parse_arg_str(&args, "--dump-sol"),
     };
+    let is_1to1 = run.mesh_n.is_none();
 
     let partitioner_name = match (use_metis, use_streaming) {
         (false, false) => "contiguous",
@@ -73,18 +83,49 @@ fn main() {
     };
 
     println!("=== fem-rs mfem_pex1: Parallel Poisson (P{}) ===", run.order);
-    println!("  Workers: {}, Mesh: {}x{}, Partitioner: {}", run.n_workers, run.mesh_n, run.mesh_n, partitioner_name);
+    if is_1to1 {
+        println!("  Workers: {}, Mesh: star.mesh x6 (1:1 MFEM ex1p), Partitioner: {}", run.n_workers, partitioner_name);
+    } else {
+        let n = run.mesh_n.unwrap();
+        println!("  Workers: {}, Mesh: {}x{}, Partitioner: {}", run.n_workers, n, n, partitioner_name);
+    }
 
     let result = run_case(run);
-    println!("  Global DOFs: {}", result.global_dofs);
+    // 1:1 output line: MFEM ex1p prints "Number of finite element unknowns: N".
+    println!("Number of finite element unknowns: {}", result.global_dofs);
     println!("  PCG: {} iters, residual = {:.3e}, converged = {}", result.iterations, result.final_residual, result.converged);
+    if is_1to1 {
+        let avg = result
+            .final_residual
+            .powf(1.0 / (result.iterations.max(1) as f64));
+        println!("  Average reduction factor = {:.6}", avg);
+    }
     println!("  L2 error (pointwise): {:.6e}", result.l2_err);
     println!("  ||u||_2 = {:.6e}, sum = {:.8e}, checksum = {:.8e}", result.solution_norm, result.solution_sum, result.solution_checksum);
     println!("=== Done ===");
 }
 
 fn run_case(run: RunArgs) -> RunResult {
-    let mesh = Arc::new(Mesh::<2>::unit_square_tri(run.mesh_n));
+    let mesh = match run.mesh_n {
+        Some(n) => Arc::new(Mesh::<2>::unit_square_tri(n)),
+        None => {
+            // 1:1 with MFEM ex1p.cpp: star.mesh + serial ref_levels + 2
+            // parallel refinements. For the 20-element star.mesh,
+            // ref_levels = floor(log(10000/20)/log(2)/2) = 4, so 6 total
+            // uniform refinements → 81920 quads / 82561 nodes (same global
+            // mesh as C++). Refine serially up front: fem-parallel has no
+            // parallel uniform refinement, but the global mesh is identical.
+            let mfem = fem_io::mfem::read_mfem_file("data/star.mesh")
+                .expect("failed to read data/star.mesh");
+            let mut m = mfem
+                .mesh2d
+                .expect("star.mesh must be a 2-D mesh");
+            for _ in 0..6 {
+                m = refine_uniform(&m);
+            }
+            Arc::new(m)
+        }
+    };
     let result = Arc::new(std::sync::Mutex::new(None::<RunResult>));
     let result_slot = Arc::clone(&result);
 
@@ -123,9 +164,14 @@ fn run_case(run: RunArgs) -> RunResult {
         let diff = DiffusionIntegrator { kappa: 1.0 };
         let mut a_mat = ParAssembler::assemble_bilinear(&par_space, &[&diff], quad_order);
 
-        let source = DomainSourceIntegrator::new(|x: &[f64]| {
-            2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
-        });
+        let source: fn(&[f64]) -> f64 = if run.mesh_n.is_some() {
+            // Framework self-test: exact-solution source term.
+            |x: &[f64]| 2.0 * PI * PI * (PI * x[0]).sin() * (PI * x[1]).sin()
+        } else {
+            // 1:1 with MFEM ex1p.cpp: f = 1 (DomainLFIntegrator + ConstantCoefficient).
+            |_x: &[f64]| 1.0
+        };
+        let source = DomainSourceIntegrator::new(source);
         let rhs_quad = if run.order >= 2 { 5 } else { 3 };
         let mut rhs = ParAssembler::assemble_linear(&par_space, &[&source], rhs_quad);
 
@@ -143,7 +189,7 @@ fn run_case(run: RunArgs) -> RunResult {
         // 5. Solve with parallel PCG (Jacobi preconditioner).
         let mut u = ParVector::zeros(&par_space);
         let cfg = SolverConfig {
-            rtol: 1e-8,
+            rtol: 1e-12,
             max_iter: 5000,
             verbose: false,
             ..SolverConfig::default()
@@ -166,6 +212,34 @@ fn run_case(run: RunArgs) -> RunResult {
         let l2_err = (global_err_sq / n_global).sqrt();
         let solution_norm = u.global_norm();
         let solution_sum = comm.allreduce_sum_f64(u.as_slice()[..n_owned].iter().sum::<f64>());
+
+        // Optional: dump the global solution like MFEM ex1p's sol.XXXXXX.
+        if let Some(ref path) = run.dump_sol {
+            // Gather (global_dof, value) of owned dofs to rank 0, sort by gid,
+            // write the global solution in dof order.
+            let owned: Vec<(u32, f64)> = (0..n_owned)
+                .map(|pid| (dof_part.global_dof(pid as u32), u.as_slice()[pid]))
+                .collect();
+            if rank == 0 {
+                let mut all: Vec<(u32, f64)> = owned.clone();
+                for src in 1..comm.size() as i32 {
+                    let gids: Vec<u32> = comm.recv(src, 81i32);
+                    let vals: Vec<f64> = comm.recv(src, 82i32);
+                    all.extend(gids.into_iter().zip(vals));
+                }
+                all.sort_unstable_by_key(|&(g, _)| g);
+                let mut s = String::new();
+                for (_, v) in all {
+                    s.push_str(&format!("{:.10e}\n", v));
+                }
+                std::fs::write(path, s).expect("failed to write solution dump");
+            } else {
+                let gids: Vec<u32> = owned.iter().map(|&(g, _)| g).collect();
+                let vals: Vec<f64> = owned.iter().map(|&(_, v)| v).collect();
+                comm.send(0, 81, &gids);
+                comm.send(0, 82, &vals);
+            }
+        }
         let local_checksum: f64 = (0..n_owned)
             .map(|pid| {
                 let gid = dof_part.global_dof(pid as u32) as f64 + 1.0;
@@ -202,6 +276,12 @@ fn parse_arg(args: &[String], flag: &str) -> Option<usize> {
         .and_then(|v| v.parse().ok())
 }
 
+fn parse_arg_str<'a>(args: &'a [String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,9 +290,10 @@ mod tests {
         RunArgs {
             order,
             n_workers,
-            mesh_n: 8,
+            mesh_n: Some(8),
             use_metis,
             use_streaming,
+            dump_sol: None,
         }
     }
 
@@ -316,7 +397,7 @@ mod tests {
 
     #[test]
     fn pex1_poisson_coarser_mesh_gives_larger_l2_error() {
-        let coarse = run_case(RunArgs { order: 1, n_workers: 2, mesh_n: 4, use_metis: false, use_streaming: false });
+        let coarse = run_case(RunArgs { order: 1, n_workers: 2, mesh_n: Some(4), use_metis: false, use_streaming: false, dump_sol: None });
         let fine = run_case(run_args(1, 2, false, false)); // mesh_n=8
         assert!(coarse.converged && fine.converged);
         assert!(coarse.l2_err > fine.l2_err,
@@ -327,7 +408,7 @@ mod tests {
 
     #[test]
     fn pex1_poisson_p1_single_worker_matches_two_workers() {
-        let one = run_case(RunArgs { order: 1, n_workers: 1, mesh_n: 8, use_metis: false, use_streaming: false });
+        let one = run_case(RunArgs { order: 1, n_workers: 1, mesh_n: Some(8), use_metis: false, use_streaming: false, dump_sol: None });
         let two = run_case(run_args(1, 2, false, false));
         assert!(one.converged && two.converged);
         assert_eq!(one.global_dofs, two.global_dofs);
@@ -340,7 +421,7 @@ mod tests {
     #[test]
     fn pex1_poisson_p2_finer_mesh_reduces_l2_error() {
         let coarse = run_case(run_args(2, 2, false, false)); // mesh_n=8
-        let fine = run_case(RunArgs { order: 2, n_workers: 2, mesh_n: 16, use_metis: false, use_streaming: false });
+        let fine = run_case(RunArgs { order: 2, n_workers: 2, mesh_n: Some(16), use_metis: false, use_streaming: false, dump_sol: None });
         assert!(coarse.converged && fine.converged);
         assert!(fine.l2_err < coarse.l2_err,
             "expected finer mesh to reduce L2 error: coarse={} fine={}", coarse.l2_err, fine.l2_err);
