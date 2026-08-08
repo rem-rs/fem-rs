@@ -1,6 +1,10 @@
-//! # Parallel Example 4 — Parallel implicit heat equation time-stepping
+//! # Parallel implicit heat equation — framework self-test
 //!
-//! Extends `mfem_ex10_heat_equation` to run in parallel using `ThreadLauncher`.
+//! NOTE: this is NOT a 1:1 port of any MFEM example.  MFEM ex4/ex4p is an
+//! H(div) diffusion problem (`mfem_pex4_parallel_hdiv_diffusion.rs`); this
+//! file is a standalone parallel framework self-test for implicit time
+//! stepping (M + dt·K) with ThreadLauncher.  It is kept for its unit tests
+//! (partition invariance, dt accuracy, sign flip, P2, kappa scan).
 //!
 //! Solves the time-dependent heat equation on a distributed mesh:
 //!
@@ -23,9 +27,9 @@
 //!
 //! ## Usage
 //! ```
-//! cargo run --example mfem_pex4_parallel_heat
-//! cargo run --example mfem_pex4_parallel_heat -- --ranks 4 --n 32 --dt 0.005 --T 0.2
-//! cargo run --example mfem_pex4_parallel_heat -- --p2 --n 16 --T 0.1
+//! cargo run --example par_heat_equation_self_test
+//! cargo run --example par_heat_equation_self_test -- --ranks 4 --n 32 --dt 0.005 --T 0.2
+//! cargo run --example par_heat_equation_self_test -- --p2 --n 16 --T 0.1
 //! ```
 
 use std::f64::consts::PI;

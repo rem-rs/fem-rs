@@ -356,16 +356,22 @@ impl DofPartition {
 
         // Edge tables matching HCurlSpace / HDivSpace element ordering.
         let hcurl_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (0, 2)];
+        let hcurl_quad_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
         let hdiv_2d: Vec<(usize, usize)> = vec![(1, 2), (0, 2), (0, 1)];
+        let hdiv_quad_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
         let hcurl_3d: Vec<(usize, usize)> = vec![
             (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
         ];
 
         let space_type = space.space_type();
+        let is_quad = mesh.n_elements() > 0
+            && matches!(mesh.element_type(0), fem_mesh::ElementType::Quad4);
 
         let edges_for_space: &[(usize, usize)] = match (space_type, dim) {
+            (fem_space::fe_space::SpaceType::HCurl, 2) if is_quad => &hcurl_quad_2d,
             (fem_space::fe_space::SpaceType::HCurl, 2) => &hcurl_2d,
-            (fem_space::fe_space::SpaceType::HDiv, 2)  => &hdiv_2d,
+            (fem_space::fe_space::SpaceType::HDiv, 2) if is_quad => &hdiv_quad_2d,
+            (fem_space::fe_space::SpaceType::HDiv, 2) => &hdiv_2d,
             (fem_space::fe_space::SpaceType::HCurl, 3) => &hcurl_3d,
             _ => &hcurl_2d,
         };

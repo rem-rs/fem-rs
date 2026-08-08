@@ -119,16 +119,27 @@ impl ParAssembler {
 }
 
 /// Permute a CSR matrix from DofManager ordering to partition [owned|ghost] ordering.
-fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> {
+pub fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> {
     let n = dof_part.n_total_dofs();
     let mut coo = CooMatrix::<f64>::new(n, n);
+    let needs_sign = dof_part.needs_sign_correction();
 
     for row in 0..mat.nrows {
         let new_row = dof_part.permute_dof(row as u32) as usize;
+        let sr = if needs_sign {
+            dof_part.sign_correction(row as u32)
+        } else {
+            1.0
+        };
         for k in mat.row_ptr[row]..mat.row_ptr[row + 1] {
             let col = mat.col_idx[k] as usize;
             let new_col = dof_part.permute_dof(col as u32) as usize;
-            let val = mat.values[k];
+            let sc = if needs_sign {
+                dof_part.sign_correction(col as u32)
+            } else {
+                1.0
+            };
+            let val = mat.values[k] * sr * sc;
             if val != 0.0 {
                 coo.add(new_row, new_col, val);
             }
@@ -139,12 +150,18 @@ fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> 
 }
 
 /// Permute a vector from DofManager ordering to partition [owned|ghost] ordering.
-fn permute_vec(vec: &[f64], dof_part: &DofPartition) -> Vec<f64> {
+pub fn permute_vec(vec: &[f64], dof_part: &DofPartition) -> Vec<f64> {
     let n = dof_part.n_total_dofs();
     let mut out = vec![0.0; n];
+    let needs_sign = dof_part.needs_sign_correction();
     for (i, &v) in vec.iter().enumerate() {
         let new_i = dof_part.permute_dof(i as u32) as usize;
-        out[new_i] = v;
+        let si = if needs_sign {
+            dof_part.sign_correction(i as u32)
+        } else {
+            1.0
+        };
+        out[new_i] = v * si;
     }
     out
 }

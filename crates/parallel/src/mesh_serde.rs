@@ -168,6 +168,7 @@ pub fn encode_submesh<const D: usize>(
         + partition.global_node_ids.len() * 4
         + partition.node_owner.len() * 4
         + partition.global_elem_ids.len() * 4
+        + partition.elem_owner.len() * 4
         + ext_tail;
 
     let mut buf = Vec::with_capacity(total);
@@ -203,6 +204,11 @@ pub fn encode_submesh<const D: usize>(
 
     // partition: global_elem_ids
     buf.extend_from_slice(bytemuck::cast_slice::<ElemId, u8>(&partition.global_elem_ids));
+
+    // partition: elem_owner (i32) — must be transmitted so that non-root
+    // ranks can tell owned elements from ghosts (decode used to default
+    // ghosts to rank 1, breaking rank>0 owned-element queries).
+    buf.extend_from_slice(bytemuck::cast_slice::<Rank, u8>(&partition.elem_owner));
 
     if wire_format == 2 {
         buf.extend_from_slice(&mix_flags.to_le_bytes());
@@ -280,6 +286,7 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
     let global_node_ids = read_u32_vec(buf, &mut offset, total_part_nodes)?;
     let node_owner = read_i32_vec(buf, &mut offset, total_part_nodes)?;
     let global_elem_ids = read_u32_vec(buf, &mut offset, n_local_elems)?;
+    let elem_owner = read_i32_vec(buf, &mut offset, n_local_elems)?;
 
     let mut mesh = Mesh::uniform(
         coords, conn, elem_tags, elem_type,
@@ -327,16 +334,6 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
         ));
     }
 
-    let mut elem_owner = vec![0i32; n_local_elems];
-    if n_ghost_elems > 0 {
-        // First n_owned_elems are owned, the rest are ghosts.
-        // elem_owner is already zero-initialized (rank 0).
-        for le in n_owned_elems..n_local_elems {
-            // Ghost element owners should be known; default to rank 1 for now.
-            // This is a best-effort — the caller should fix up elem_owner.
-            elem_owner[le] = 1;
-        }
-    }
     let partition = MeshPartition::from_raw(
         n_owned, n_ghost,
         n_owned_elems, n_ghost_elems,

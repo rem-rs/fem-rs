@@ -293,8 +293,11 @@ path = "mfem_pex40_eikonal.rs"
 name = "mfem_pex41_imex"
 path = "mfem_pex41_imex.rs"
 [[example]]
-name = "mfem_pex4_parallel_heat"
-path = "mfem_pex4_parallel_heat.rs"
+name = "par_heat_equation_self_test"
+path = "par_heat_equation_self_test.rs"
+[[example]]
+name = "mfem_pex4_parallel_hdiv_diffusion"
+path = "mfem_pex4_parallel_hdiv_diffusion.rs"
 [[example]]
 name = "mfem_pex5_hdiv_darcy"
 path = "mfem_pex5_hdiv_darcy.rs"

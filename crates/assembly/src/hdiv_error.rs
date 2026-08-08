@@ -33,6 +33,24 @@ pub fn compute_hdiv_l2_error<F>(
 where
     F: Fn(&[f64]) -> [f64; 2],
 {
+    compute_hdiv_l2_error_owned(space, uh, exact, &|_| true)
+}
+
+/// Compute ‖F_h − F_exact‖_{L²(Ω_owned)} for an H(div) solution, restricting
+/// the element sum to elements for which `owned_pred(elem) == true`.
+///
+/// Used by the parallel path: each rank integrates only its owned elements
+/// and the caller reduces the sum (after `.sqrt()` on the total).
+pub fn compute_hdiv_l2_error_owned<F, P>(
+    space: &HDivSpace<Mesh<2>>,
+    uh: &[f64],
+    exact: F,
+    owned_pred: &P,
+) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 2],
+    P: Fn(u32) -> bool,
+{
     let mesh = space.mesh();
     let elem_type = mesh.element_type(0);
     let order = space.order();
@@ -58,6 +76,9 @@ where
     let mut err2 = 0.0_f64;
 
     for e in mesh.elem_iter() {
+        if !owned_pred(e) {
+            continue;
+        }
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
