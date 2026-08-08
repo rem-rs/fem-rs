@@ -70,7 +70,7 @@ pub use crouzeix_raviart::{
 };
 pub use hierarchical::{HierarchicalSegPk, HierarchicalTetPk, HierarchicalTriPk};
 pub use lagrange::{
-    ref_elem, vec_ref_elem, ElemType, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex, LagrangePrism,
+    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex, LagrangePrism,
     LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle, PrismPk,
     PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadQk,
     SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6,

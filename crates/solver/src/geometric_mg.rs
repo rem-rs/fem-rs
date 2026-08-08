@@ -12,7 +12,7 @@
 
 use crate::constrained_operator::RectangularConstrainedOperator;
 use crate::SolverConfig;
-use fem_element::lagrange::factory::{QuadQk, TriPk};
+use fem_element::lagrange::factory::{H1TriPk, QuadQk, TriPk};
 use fem_element::ReferenceElement;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{topology::MeshTopology, ElementType};
@@ -525,7 +525,7 @@ impl PADiffusionOp {
         let et0 = mesh.element_type(0);
 
         let ref_elem: Box<dyn ReferenceElement> = match et0 {
-            ElementType::Tri3 => Box::new(TriPk::new(order as usize)),
+            ElementType::Tri3 => Box::new(H1TriPk::new(order as usize)),
             ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
             _ => panic!("PADiffusionOp: unsupported {et0:?}"),
         };

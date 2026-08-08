@@ -170,7 +170,8 @@ pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceEl
 }
 
 /// Reference element for `space`: L2/DG spaces get the lexicographic quad
-/// DOF ordering ([`ref_elem_vol_l2`]), H1 spaces the topological one.
+/// DOF ordering ([`ref_elem_vol_l2`]), H1 spaces the topological one
+/// ([`ref_elem_vol_h1`]).
 pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     space: &S,
     elem_type: ElementType,
@@ -189,7 +190,61 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
             ref_elem_vol_l2(elem_type, order)
         }
     } else {
-        ref_elem_vol(elem_type, order)
+        ref_elem_vol_h1(elem_type, order)
+    }
+}
+
+/// H1 solution reference element: MFEM `H1_FECollection` semantics
+/// (`BasisType::GaussLobatto`).
+///
+/// Simplex elements of order ≥ 3 use [`H1TriPk`] (Gauss-Lobatto nodes) —
+/// the fixed-order `TriPk`/`TriP3`/`TriP4` are *equispaced*, which matches
+/// MFEM only at p ≤ 2 (the p=2 edge midpoints coincide with the GLL points).
+/// Note this differs from the DG/L2 paths, which keep the equispaced
+/// [`TriPk`] (see [`ref_elem_vol_l2`]).
+pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    match (elem_type, order) {
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0),
+        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => {
+            Box::new(fem_element::lagrange::H1TriPk::new(3))
+        }
+        (ElementType::Tri3 | ElementType::Tri6, 4) => {
+            Box::new(fem_element::lagrange::H1TriPk::new(4))
+        }
+        (ElementType::Tri3 | ElementType::Tri6, o) => {
+            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
+        }
+        (ElementType::Tet4, 1) => Box::new(TetP1),
+        (ElementType::Tet4, 2) => Box::new(TetP2),
+        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
+        (ElementType::Quad4, 0) => Box::new(P0),
+        // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
+        // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
+        // historically on [-1,1]^2; affine-embedding equivalent for the
+        // gradient (Diffusion) but NOT for the mass ∫φ² (4× off on [0,1]²),
+        // so the reference domain must be [0,1]^2 for all orders.
+        (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQk::new(1)),
+        (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQk::new(2)),
+        // order >= 3: Gauss-Lobatto-Legendre nodes on [0,1]^2 (matches MFEM
+        // H1_FECollection's default BasisType::GaussLobatto); QuadQ3 is
+        // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
+        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
+        (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
+        (ElementType::Hex8, 1) => Box::new(HexQ1),
+        (ElementType::Hex8, o) => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
+            Box::new(PrismPk::new(order as usize))
+        }
+        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
+            Box::new(PyramidPk::new(order as usize))
+        }
+        _ => panic!(
+            "ref_elem_vol_h1: unsupported combination (element_type={elem_type:?}, order={order}). \
+             Try using a different polynomial order or a simplex mesh."
+        ),
     }
 }
 

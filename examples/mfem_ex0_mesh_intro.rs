@@ -68,10 +68,13 @@ fn main() {
     apply_dirichlet(&mut mat, &mut rhs, &bnd, &bnd_vals);
 
     // 7. Solve with PCG + GSSmoother (MFEM ex0: GSSmoother M(A); PCG(A, M, B, X,
-    //    1, 200, 1e-12, 0.0) — print_level=1, max_iter=200, rtol=1e-12, atol=0).
+    //    1, 200, 1e-12, 0.0) — print_level=1, max_iter=200, RTOLERANCE=1e-12,
+    //    atol=0).  MFEM's PCG() helper calls SetRelTol(sqrt(RTOLERANCE)), so the
+    //    CGSolver rel_tol is sqrt(1e-12) = 1e-6 — our SolverConfig::rtol carries
+    //    the rel_tol semantics (see commit 0912343), hence 1e-6 here.
     let mut u = vec![0.0_f64; n_dofs];
     let cfg = SolverConfig {
-        rtol: 1e-12,
+        rtol: 1e-6,
         atol: 0.0,
         max_iter: 200,
         verbose: true,

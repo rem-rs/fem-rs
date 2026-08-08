@@ -1324,6 +1324,13 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
+        // Two-phase DOF assignment, matching MFEM FiniteElementSpace::Construct:
+        // first ALL vertex + edge DOFs (in element-traversal order), then ALL
+        // interior ("bubble") DOFs — the interior DOF block starts after every
+        // edge DOF (ndofs = nvdofs + nedofs + nfdofs + nbdofs).  Assigning the
+        // interior DOFs inside the element loop (interleaved with later edge
+        // DOFs) misnumbers them vs MFEM at p >= 3 (ex26 P4 regression: interior
+        // DOFs at 1373.. instead of 9281..).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 4);
@@ -1337,6 +1344,11 @@ impl DofManager {
                 for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
                 off += edge_dofs_per;
             }
+        }
+        // Phase 2: interior (bubble) DOFs, element order, after all edge DOFs.
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
+            let mut off = n_verts + n_edges * edge_dofs_per;
             for _ in 0..interior_dofs_per {
                 dofs_flat[base + off] = next_dof; next_dof += 1; off += 1;
             }
@@ -1922,6 +1934,8 @@ impl DofManager {
             // ── 2-D triangles ────────────────────────────────────────────────
             // Local edge definitions matching TriPk:
             //   edge(0→1), edge(1→2), edge(0→2)
+            // Two-phase assignment (MFEM FiniteElementSpace::Construct): all
+            // vertex+edge DOFs first, then all interior DOFs in element order.
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
                 assert!(ns.len() >= 3, "build_pk 2D requires >= 3-noded elements");
@@ -1945,9 +1959,11 @@ impl DofManager {
                         off += edge_dofs_per;
                     }
                 }
-
-                // Face interior (bubble) DOFs for p >= 3
-                if volume_dofs_per > 0 {
+            }
+            // Phase 2: face interior (bubble) DOFs for p >= 3, after ALL edge DOFs.
+            if volume_dofs_per > 0 {
+                for e in 0..n_elems as u32 {
+                    let base = e as usize * dofs_per_elem;
                     let mut off = 3 + 3 * edge_dofs_per;
                     for _ in 0..volume_dofs_per {
                         dofs_flat[base + off] = next_dof;
@@ -1961,6 +1977,8 @@ impl DofManager {
             // Local edge definitions matching TetPk:
             //   edge(0→1), edge(0→2), edge(0→3), edge(1→2), edge(1→3), edge(2→3)
             // Local face definitions: (0,1,2), (0,1,3), (0,2,3), (1,2,3)
+            // Two-phase assignment (MFEM FiniteElementSpace::Construct): all
+            // vertex+edge DOFs, then all face DOFs, then all volume DOFs.
             for e in 0..n_elems as u32 {
                 let ns = mesh.element_nodes(e);
                 assert!(ns.len() >= 4, "build_pk 3D requires >= 4-noded elements");
@@ -1985,9 +2003,13 @@ impl DofManager {
                         off += edge_dofs_per;
                     }
                 }
-
-                // 4 faces
-                if p >= 3 {
+            }
+            // Phase 2: 4 face DOF groups (p >= 3), after ALL edge DOFs.
+            if p >= 3 {
+                for e in 0..n_elems as u32 {
+                    let ns = mesh.element_nodes(e);
+                    let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
+                    let base = e as usize * dofs_per_elem;
                     let faces = [(n0, n1, n2), (n0, n1, n3), (n0, n2, n3), (n1, n2, n3)];
                     let mut off = 4 + 6 * edge_dofs_per;
                     for &(a, b, c) in &faces {
@@ -1998,9 +2020,11 @@ impl DofManager {
                         off += face_dofs_per;
                     }
                 }
-
-                // Volume interior DOFs for p >= 4
-                if volume_dofs_per > 0 {
+            }
+            // Phase 3: volume interior DOFs (p >= 4), after ALL face DOFs.
+            if volume_dofs_per > 0 {
+                for e in 0..n_elems as u32 {
+                    let base = e as usize * dofs_per_elem;
                     let mut off = 4 + 6 * edge_dofs_per + 4 * face_dofs_per;
                     for _ in 0..volume_dofs_per {
                         dofs_flat[base + off] = next_dof;

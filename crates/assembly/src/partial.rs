@@ -35,7 +35,7 @@
 
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 use fem_mesh::ElementTransformation;
@@ -309,7 +309,9 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriP2),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
+        // order >= 3: MFEM H1_FECollection uses Gauss-Lobatto nodes
+        // (H1_TriangleElement); the equispaced TriP3/TriPk do NOT match.
+        (ElementType::Tri3, o) => Box::new(fem_element::lagrange::H1TriPk::new(o as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),

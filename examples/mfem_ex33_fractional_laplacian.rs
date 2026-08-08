@@ -1,19 +1,25 @@
-//! # Example 33 �?Fractional Laplacian baseline (toward MFEM ex33)
+//! # Example 33 — Fractional Laplacian spectral baseline (independent reference)
 //!
 //! Solves the spectral fractional Dirichlet problem on the unit square:
 //!
 //! ```text
 //!   (-Δ)^s u = f  in Ω = [0,1]²,
-//!            u = 0  on ∂�?
+//!            u = 0  on ∂Ω
 //! ```
 //!
-//! using a dense generalized-eigen decomposition of the reduced FE pair
-//! `(K, M)`. This is a small-scale baseline that reuses existing H¹ assembly
-//! and eigen infrastructure without adding a large matrix-function backend.
+//! This example is an **independent spectral-method reference**, NOT a
+//! line-by-line translation of MFEM ex33 (which approximates z^{-α} with the
+//! AAA rational algorithm + shifted sparse systems — see
+//! `mfem_ex33_fractional_diffusion.rs`, the 1:1 port).  The spectral baseline
+//! computes (-Δ)^s exactly via the generalized eigen-decomposition
+//! `Kφ = λMφ` and `u = Σ (φᵢᵀf)/λᵢˢ · φᵢ`, so it cross-validates the AAA
+//! path: on `data/inline-quad.mesh -r 2 -o 1 -ver, s = α = 0.5`, both give
+//! `L2 error ≈ 0.001298` (C++ ex33 0.0012976, 1:1 port 0.00129762467).
 //!
-//! Supports two dense backends:
+//! Supports three backends:
 //! - `spectral`: generalized eigendecomposition (reference baseline)
-//! - `rational`: multi-shift rational quadrature
+//! - `rational`: dense multi-shift sinc quadrature
+//! - `sparse-rational`: sparse Jacobi-PCG sinc quadrature (scales to large DOFs)
 //!
 //! By default (--rhs-constant), the right-hand side is f = 1, matching MFEM ex33.
 //! With --verification, the manufactured solution is the first Dirichlet eigenmode
@@ -25,6 +31,7 @@
 //! cargo run --example mfem_ex33_fractional_laplacian
 //! cargo run --example mfem_ex33_fractional_laplacian -- --n 10 --s 0.35
 //! cargo run --example mfem_ex33_fractional_laplacian -- -m mesh.msh --verification
+//! cargo run --example mfem_ex33_fractional_laplacian -- -m data/inline-quad.mesh -r 2 -o 1 --s 0.5 --ver
 //! ```
 
 use std::collections::HashSet;
@@ -56,7 +63,7 @@ fn main() {
         }
     };
 
-    let result = solve_fractional_problem_with_method(mesh, args.s, args.method, args.n_quad, args.verification);
+    let result = solve_fractional_problem_with_method(mesh, args.s, args.method, args.n_quad, args.verification, args.order);
 
     let mesh_label = match args.mesh_file { Some(ref p) => p.clone(), None => format!("{}x{} unit square", args.n, args.n) };
     println!("=== fem-rs Example 33: fractional Laplacian baseline ===");
@@ -87,6 +94,7 @@ fn main() {
 struct Args {
     n: usize,
     s: f64,
+    order: u8,
     method: FractionalMethod,
     n_quad: usize,
     refs: usize,
@@ -120,6 +128,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         n: 8,
         s: 0.5,
+        order: 1,
         method: FractionalMethod::Rational,
         n_quad: 64,
         refs: 3,
@@ -140,6 +149,9 @@ fn parse_args() -> Args {
             }
             "-r" | "--refs" => {
                 args.refs = it.next().and_then(|v| v.parse().ok()).unwrap_or(3);
+            }
+            "-o" | "--order" => {
+                args.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
             }
             "--method" => {
                 let value = it.next().unwrap_or("rational".into()).to_ascii_lowercase();
@@ -170,7 +182,7 @@ mod tests {
 
     fn solve_fractional_problem(n: usize, s: f64) -> FractionalResult {
         solve_fractional_problem_with_method(
-            Mesh::<2>::unit_square_tri(n), s, FractionalMethod::Spectral, 64, true,
+            Mesh::<2>::unit_square_tri(n), s, FractionalMethod::Spectral, 64, true, 1,
         )
     }
 
@@ -240,8 +252,8 @@ mod tests {
 
     #[test]
     fn ex33_rational_matches_spectral_baseline() {
-        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
-        let rational = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Rational, 96, true);
+        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true, 1);
+        let rational = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Rational, 96, true, 1);
 
         assert!(rel_diff(spectral.solution_l2, rational.solution_l2) < 2.0e-2,
             "L2 norm mismatch: spectral={} rational={}",
@@ -259,8 +271,8 @@ mod tests {
     /// Sparse Jacobi-PCG rational quadrature must match the dense spectral baseline.
     #[test]
     fn ex33_sparse_rational_matches_spectral_baseline() {
-        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true);
-        let sparse   = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::SparseRational, 96, true);
+        let spectral = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::Spectral, 64, true, 1);
+        let sparse   = solve_fractional_problem_with_method(mk_mesh(), 0.5, FractionalMethod::SparseRational, 96, true, 1);
 
         assert!(rel_diff(spectral.solution_l2, sparse.solution_l2) < 3.0e-2,
             "L2 norm mismatch: spectral={} sparse={}",
@@ -277,7 +289,7 @@ mod tests {
     #[test]
     fn ex33_sparse_rational_s_scan_converges_accurately() {
         for &s in &[0.25_f64, 0.5, 0.75] {
-            let r = solve_fractional_problem_with_method(mk_mesh(), s, FractionalMethod::SparseRational, 64, true);
+            let r = solve_fractional_problem_with_method(mk_mesh(), s, FractionalMethod::SparseRational, 64, true, 1);
             assert!(r.l2_error < 1.0e-1,
                 "sparse rational L2 error too large at s={}: {:.3e}", s, r.l2_error);
             assert!((r.center_value - 1.0).abs() < 1.5e-1,
@@ -304,8 +316,9 @@ fn solve_fractional_problem_with_method(
     method: FractionalMethod,
     n_quad: usize,
     verification: bool,
+    order: u8,
 ) -> FractionalResult {
-    let space = H1Space::new(mesh, 1);
+    let space = H1Space::new(mesh, order);
 
     let stiffness = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
     let mass = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 3);

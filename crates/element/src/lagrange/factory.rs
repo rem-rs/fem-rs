@@ -24,6 +24,7 @@ use super::pyramid::PyramidPk;
 use crate::quadrature::{hex_rule, quad_rule_01, seg_rule, tet_rule, tri_rule};
 use crate::reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 use crate::serendipity::{HexSerendipityPk, QuadSerendipityPk};
+use nalgebra::DMatrix;
 
 // ─── Helpers: equispaced nodes ────────────────────────────────────────────────
 
@@ -396,6 +397,215 @@ impl ReferenceElement for TriPk {
     fn quadrature(&self, order: u8) -> QuadratureRule {
         tri_rule(order)
     }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.nodes.iter().map(|c| vec![c[0], c[1]]).collect()
+    }
+}
+
+// ─── H1TriPk: MFEM H1_TriangleElement (Gauss-Lobatto nodes) ────────────────
+
+/// MFEM `H1_TriangleElement(p)` clone on the reference triangle
+/// `(0,0),(1,0),(0,1)` — `(p+1)(p+2)/2` DOFs ordered vertices → edges →
+/// interior, with the edge/interior DOFs at **Gauss-Lobatto closed points**
+/// (MFEM `H1_FECollection` default `BasisType::GaussLobatto`), NOT the
+/// equispaced points used by [`TriPk`] (which serves the DG/L2 paths).
+///
+/// Node layout mirrors `H1_TriangleElement::H1_TriangleElement` (fe_h1.cpp):
+/// - vertices: `(0,0)`, `(1,0)`, `(0,1)`
+/// - edge 0 (v0→v1): `(cp[i], 0)` for i = 1..p-1
+/// - edge 1 (v1→v2): `(cp[p-i], cp[i])` for i = 1..p-1
+/// - edge 2 (v2→v0): `(0, cp[p-i])` for i = 1..p-1  (from the **v2** end!)
+/// - interior: `(cp[i]/w, cp[j]/w)`, w = cp[i]+cp[j]+cp[p-i-j],
+///   j = 1..p-1, i = 1..p-1-j
+///
+/// where `cp` are the `p+1` GLL closed points on `[0,1]`.  The basis is the
+/// Vandermonde inverse of the lexicographic product basis
+/// `s_o(ξ) = L_i(ξ0)·L_j(ξ1)·L_k(1−ξ0−ξ1)` (o = `idx(i,j)`, k = p−i−j, `L` =
+/// 1-D GLL Lagrange polynomials), exactly as MFEM computes it, so the DOFs
+/// are nodal values at `nodes`.
+pub struct H1TriPk {
+    order: usize,
+    nodes: Vec<[f64; 2]>,
+    gll: Vec<f64>, // GLL closed points on [0,1], size p+1
+    lex: Vec<(usize, usize)>, // lex (i,j) with i+j <= p (MFEM idx order)
+    ti: Vec<f64>, // dof×dof row-major: φ_k = Σ_o ti[k·dof+o]·s_o
+}
+
+/// Evaluate the 1-D Lagrange basis on `nodes` at `x`.
+fn lag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
+    let n = nodes.len();
+    for i in 0..n {
+        let mut v = 1.0;
+        for m in 0..n {
+            if m != i {
+                v *= (x - nodes[m]) / (nodes[i] - nodes[m]);
+            }
+        }
+        out[i] = v;
+    }
+}
+
+/// Evaluate the 1-D Lagrange basis derivatives on `nodes` at `x`.
+fn dlag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
+    let n = nodes.len();
+    for i in 0..n {
+        let mut s = 0.0;
+        for j in 0..n {
+            if j == i {
+                continue;
+            }
+            let mut v = 1.0 / (nodes[i] - nodes[j]);
+            for m in 0..n {
+                if m != i && m != j {
+                    v *= (x - nodes[m]) / (nodes[i] - nodes[m]);
+                }
+            }
+            s += v;
+        }
+        out[i] = s;
+    }
+}
+
+impl H1TriPk {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "H1TriPk: order must be >= 1");
+        // GLL closed points on [-1,1], mapped to [0,1] (MFEM poly1d::ClosedPoints).
+        let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+        let gll: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+
+        let mut nodes: Vec<[f64; 2]> = Vec::with_capacity((p + 1) * (p + 2) / 2);
+        nodes.push([gll[0], gll[0]]);
+        nodes.push([gll[p], gll[0]]);
+        nodes.push([gll[0], gll[p]]);
+        for i in 1..p {
+            nodes.push([gll[i], gll[0]]);
+        }
+        for i in 1..p {
+            nodes.push([gll[p - i], gll[i]]);
+        }
+        for i in 1..p {
+            nodes.push([gll[0], gll[p - i]]);
+        }
+        for j in 1..p {
+            for i in 1..(p - j) {
+                let w = gll[i] + gll[j] + gll[p - i - j];
+                nodes.push([gll[i] / w, gll[j] / w]);
+            }
+        }
+
+        // Lex order with MFEM's idx(i,j) = ((2p+3-j)·j)/2 + i.
+        let p2p3 = 2 * p + 3;
+        let mut lex = Vec::with_capacity(nodes.len());
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                let o = (p2p3 - j) * j / 2 + i;
+                lex.push((i, j));
+                debug_assert_eq!(lex.len() - 1, o, "H1TriPk lex idx mismatch");
+            }
+        }
+        debug_assert_eq!(lex.len(), nodes.len());
+
+        // Vandermonde T[o][k] = s_o(node_k); ti = T⁻¹ row-major [k][o].
+        let n = nodes.len();
+        let mut t = DMatrix::<f64>::zeros(n, n);
+        let mut lx = vec![0.0; p + 1];
+        let mut ly = vec![0.0; p + 1];
+        let mut ll = vec![0.0; p + 1];
+        for (k, node) in nodes.iter().enumerate() {
+            lag1d_on(&gll, node[0], &mut lx);
+            lag1d_on(&gll, node[1], &mut ly);
+            lag1d_on(&gll, 1.0 - node[0] - node[1], &mut ll);
+            for (o, &(i, j)) in lex.iter().enumerate() {
+                t[(o, k)] = lx[i] * ly[j] * ll[p - i - j];
+            }
+        }
+        let ti_m = t
+            .try_inverse()
+            .expect("H1TriPk: singular Vandermonde matrix");
+        let mut ti = vec![0.0; n * n];
+        for k in 0..n {
+            for o in 0..n {
+                ti[k * n + o] = ti_m[(k, o)];
+            }
+        }
+        Self { order: p, nodes, gll, lex, ti }
+    }
+}
+
+impl ReferenceElement for H1TriPk {
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let p = self.order;
+        let n = self.nodes.len();
+        let mut lx = vec![0.0; p + 1];
+        let mut ly = vec![0.0; p + 1];
+        let mut ll = vec![0.0; p + 1];
+        lag1d_on(&self.gll, xi[0], &mut lx);
+        lag1d_on(&self.gll, xi[1], &mut ly);
+        lag1d_on(&self.gll, 1.0 - xi[0] - xi[1], &mut ll);
+        let mut s = vec![0.0; n];
+        for (o, &(i, j)) in self.lex.iter().enumerate() {
+            s[o] = lx[i] * ly[j] * ll[p - i - j];
+        }
+        for k in 0..n {
+            let mut acc = 0.0;
+            for o in 0..n {
+                acc += self.ti[k * n + o] * s[o];
+            }
+            values[k] = acc;
+        }
+    }
+
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let p = self.order;
+        let n = self.nodes.len();
+        let (x, y) = (xi[0], xi[1]);
+        let sl = 1.0 - x - y;
+        let mut lx = vec![0.0; p + 1];
+        let mut ly = vec![0.0; p + 1];
+        let mut ll = vec![0.0; p + 1];
+        let mut dx = vec![0.0; p + 1];
+        let mut dy = vec![0.0; p + 1];
+        let mut dl = vec![0.0; p + 1];
+        lag1d_on(&self.gll, x, &mut lx);
+        lag1d_on(&self.gll, y, &mut ly);
+        lag1d_on(&self.gll, sl, &mut ll);
+        dlag1d_on(&self.gll, x, &mut dx);
+        dlag1d_on(&self.gll, y, &mut dy);
+        dlag1d_on(&self.gll, sl, &mut dl);
+        let mut ds = vec![0.0; n * 2];
+        for (o, &(i, j)) in self.lex.iter().enumerate() {
+            let k = p - i - j;
+            // ∂s/∂ξ0 = dx_i·ly_j·ll_k − lx_i·ly_j·dl_k   (∂sl/∂ξ0 = −1)
+            // ∂s/∂ξ1 = lx_i·dy_j·ll_k − lx_i·ly_j·dl_k   (∂sl/∂ξ1 = −1)
+            ds[o * 2] = dx[i] * ly[j] * ll[k] - lx[i] * ly[j] * dl[k];
+            ds[o * 2 + 1] = lx[i] * dy[j] * ll[k] - lx[i] * ly[j] * dl[k];
+        }
+        for k in 0..n {
+            let mut gx = 0.0;
+            let mut gy = 0.0;
+            for o in 0..n {
+                gx += self.ti[k * n + o] * ds[o * 2];
+                gy += self.ti[k * n + o] * ds[o * 2 + 1];
+            }
+            grads[k * 2] = gx;
+            grads[k * 2 + 1] = gy;
+        }
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
+
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         self.nodes.iter().map(|c| vec![c[0], c[1]]).collect()
     }
