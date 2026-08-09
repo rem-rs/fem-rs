@@ -8,11 +8,12 @@
 //! on boundary attribute 2 (downward pull), zero elsewhere.
 //!
 //! Matches MFEM `examples/ex2p.cpp` defaults: `beam-tri.mesh` (16 triangles),
-//! serial `ref_levels` (≤1000 elems → 3) then 1 parallel refinement (4 total
-//! uniform refinements, done serially before partitioning — fem-parallel has
-//! no parallel *uniform* refinement, same global mesh), H1 order 1, byNODES
+//! serial `ref_levels` (≤1000 elems → 2) then 1 parallel uniform refinement
+//! (4 total children per element, the last refinement done on the partitioned
+//! mesh via [`fem_parallel::par_refine::par_uniform_refine`] — the distributed
+//! counterpart of C++ `ParMesh::UniformRefinement`), H1 order 1, byNODES
 //! vector ordering (C++ `-nodes` variant; Rust `VectorH1Space` is the byNODES
-//! block layout), PCG + Jacobi (C++ uses HyprePCG + BoomerAMG systems).
+//! block layout), PCG + AMG V-cycle (C++ uses HyprePCG + BoomerAMG systems).
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex2_parallel_elasticity
@@ -28,8 +29,8 @@ use fem_assembly::standard::{ElasticityIntegrator, NeumannIntegrator};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace, WorkerConfig,
-    par_partition::partition_mesh, par_solve_pcg_jacobi,
+    ParAmgConfig, ParAssembler, ParVector, ParallelFESpace, SmootherType, WorkerConfig,
+    par_partition::partition_mesh, par_refine::par_uniform_refine, par_solve_pcg_amg,
 };
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
@@ -73,12 +74,13 @@ struct RunResult {
 
 fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
     // 1:1 with MFEM ex2p.cpp: beam-tri.mesh + serial ref_levels (≤1000 elems:
-    // floor(log(1000/16)/log(2)/2) = 2) + 1 parallel refinement = 3 total
-    // uniform refinements.  Refine serially up front (same global mesh).
+    // floor(log(1000/16)/log(2)/2) = 2) + 1 *parallel* uniform refinement
+    // (ParMesh::UniformRefinement) = 3 total refinements, the last one done
+    // after partitioning exactly like C++.
     let mfem = fem_io::mfem::read_mfem_file("data/beam-tri.mesh")
         .expect("failed to read data/beam-tri.mesh");
     let mut mesh: Mesh<2> = mfem.mesh2d.expect("beam-tri.mesh must be 2-D");
-    for _ in 0..3 {
+    for _ in 0..2 {
         mesh = refine_uniform(&mesh);
     }
     let mesh = Arc::new(mesh);
@@ -90,8 +92,11 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
     let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
     launcher.launch(move |comm| {
         // 1. Partition the refined mesh.
-        let par_mesh = partition_mesh(&mesh_arc, &comm);
+        let mut par_mesh = partition_mesh(&mesh_arc, &comm);
         let rank = comm.rank();
+
+        // 2. Parallel uniform refinement (C++ ParMesh::UniformRefinement).
+        par_mesh = par_uniform_refine(&par_mesh);
 
         // 2. Vector H1 FE space (dim=2), byNODES block layout.
         let order: u8 = 1;
@@ -156,7 +161,8 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
             }
         }
 
-        // 7. Solve: PCG + Jacobi (C++: HyprePCG + BoomerAMG systems, tol 1e-8).
+        // 7. Solve: PCG + AMG V-cycle (C++: HyprePCG + BoomerAMG systems,
+        //    tol 1e-8, max_iter 500).
         let mut u = ParVector::zeros(&par_space);
         let cfg = SolverConfig {
             rtol: 1e-8,
@@ -164,7 +170,14 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
             verbose: false,
             ..SolverConfig::default()
         };
-        let res = par_solve_pcg_jacobi(&a_mat, &rhs, &mut u, &cfg).unwrap();
+        let amg_cfg = ParAmgConfig {
+            smoother: SmootherType::SymmetricGaussSeidel,
+            n_pre_smooth: 2,
+            n_post_smooth: 2,
+            smoothed_prolongation: true,
+            ..Default::default()
+        };
+        let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).unwrap();
 
         // 8. Global norms + optional solution dump (like MFEM sol.XXXXXX).
         let n_owned = dof_part.n_owned_dofs;
