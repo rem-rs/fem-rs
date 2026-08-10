@@ -196,7 +196,16 @@ impl ParAmgHierarchy {
             let inv_diag = compute_inv_diag(&ca);
             let n_global = comm.allreduce_sum_i64(ca.n_owned as i64) as usize;
 
-            if n_global <= config.coarse_size || ca.n_owned <= 1 {
+            // Stop decision must be GLOBALLY consistent: the per-rank
+            // `ca.n_owned <= 1` test alone would let one rank break (its
+            // local coarse part shrank to ≤1 DOF) while another keeps
+            // building levels — the following collective communication then
+            // mismatches across ranks and deadlocks (pex6 AMR hit this at
+            // ~2k DOFs).  Reduce "any rank is tiny" so every rank stops
+            // together.
+            let local_tiny = if ca.n_owned <= 1 { 1i64 } else { 0 };
+            let any_tiny = comm.allreduce_sum_i64(local_tiny) > 0;
+            if n_global <= config.coarse_size || any_tiny {
                 let lambda_max = gershgorin_lambda_max(&ca, &inv_diag);
             levels.push(AmgLevel { a: ca, p: None, r: None, inv_diag, lambda_max });
                 break;
