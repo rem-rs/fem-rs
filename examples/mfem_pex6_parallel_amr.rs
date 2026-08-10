@@ -34,7 +34,7 @@ use std::sync::Arc;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_core::{ElemId, Rank};
 use fem_mesh::amr::{NCState, dorfler_mark, zz_estimator};
-use fem_mesh::{ElementType, Mesh, refine_uniform};
+use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
 use fem_parallel::par_amr::{par_refine_marked, par_repartition};
@@ -60,11 +60,9 @@ fn main() {
     let mfem = fem_io::mfem::read_mfem_file("data/star.mesh")
         .expect("failed to read data/star.mesh");
     let mut mesh0: Mesh<2> = mfem.mesh2d.expect("star.mesh must be 2-D");
-    // star.mesh is a quad mesh; the framework's non-conforming NC refine is
-    // Tri3-only, so triangulate it (split each quad along its diagonal; the
-    // domain geometry is unchanged).  ex6p uses the quad mesh directly with
-    // MFEM's nonconforming Quad4 refinement.
-    mesh0 = quad_mesh_to_tri(&mesh0);
+    // star.mesh is a quad mesh; the framework's NC refine supports both
+    // Tri3 (NCState) and Quad4 (NCStateQuad) natively, so use it directly
+    // (ex6p uses MFEM's nonconforming Quad4 refinement).
     for _ in 0..ref_levels {
         mesh0 = refine_uniform(&mesh0);
     }
@@ -245,36 +243,6 @@ fn gather_global_eta(
         }
     }
     global
-}
-
-/// Split every Quad4 element of a pure-quad mesh into two Tri3 elements
-/// along the (0,1,2)-(0,2,3) diagonal.  Nodes and boundary faces are kept
-/// unchanged, so the domain geometry is identical.
-fn quad_mesh_to_tri(mesh: &Mesh<2>) -> Mesh<2> {
-    assert!(
-        mesh.elem_type == ElementType::Quad4,
-        "quad_mesh_to_tri: expected Quad4 mesh"
-    );
-    let n = mesh.n_elems();
-    let mut conn = Vec::with_capacity(n * 6);
-    let mut tags = Vec::with_capacity(n * 2);
-    for e in 0..n as u32 {
-        let ns = mesh.elem_nodes(e);
-        let (a, b, c, d) = (ns[0], ns[1], ns[2], ns[3]);
-        conn.extend_from_slice(&[a, b, c]);
-        conn.extend_from_slice(&[a, c, d]);
-        tags.push(mesh.elem_tags[e as usize]);
-        tags.push(mesh.elem_tags[e as usize]);
-    }
-    Mesh::uniform(
-        mesh.coords.clone(),
-        conn,
-        tags,
-        ElementType::Tri3,
-        mesh.face_conn.clone(),
-        mesh.face_tags.clone(),
-        ElementType::Line2,
-    )
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<usize> {

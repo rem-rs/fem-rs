@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 
-use fem_mesh::{Mesh, ElementType, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology};
+use fem_mesh::{Mesh, ElementType, amr::NCState, amr::NCStateQuad, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology};
 use fem_core::types::{ElemId, NodeId, Rank};
 
 use crate::{par_mesh::ParallelMesh, partition::MeshPartition, Comm};
@@ -74,9 +74,15 @@ pub fn par_refine_marked(
     // otherwise wait on a different collective than the one being called).
     comm.barrier();
 
-    // Fresh state per round: see the note above.
+    // Fresh state per round: see the note above.  Quad4 meshes use
+    // NCStateQuad (the Tri3-only NCState asserts on Quad4 input).
     let mut nc_state = NCState::new();
-    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
+    let (refined_mesh, _constraints, midpoint_map) =
+        if coarse_mesh.elem_type == ElementType::Quad4 {
+            NCStateQuad::new().refine(&coarse_mesh, marked, 0)
+        } else {
+            nc_state.refine(&coarse_mesh, marked, 0)
+        };
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
@@ -245,21 +251,117 @@ fn rebuild_partition_nc(
             prefix[g] + if global_marked.contains(&(g as u32)) { 4 } else { 1 };
     }
 
-    // 3. New element gids (local refined order = coarse order expanded).
+    // 3. New element gids.  Tri3 NCState::refine outputs children in coarse
+    //    element order (coarse order expanded 1 → 4); NCStateQuad::refine
+    //    outputs them in Hilbert SFC order, so the parent coarse element of
+    //    every refined element is recovered via its centre node (a refined
+    //    quad's centre sits exactly at its parent's centroid).  In both
+    //    cases a refined element's gid is `prefix[parent_gid] + k` with `k`
+    //    the child position within the refined output order (children of one
+    //    parent are always consecutive).
     let n_refined = refined.n_elems();
     let mut new_elem_gid = vec![0u32; n_refined];
     let mut new_elem_owner = vec![0i32; n_refined];
-    let mut expand = 0usize;
-    for e in 0..n_local_elems {
-        let g = partition.global_elem(e as u32) as usize;
-        let cnt = if global_marked.contains(&(g as u32)) { 4 } else { 1 };
-        for k in 0..cnt {
-            new_elem_gid[expand + k] = (prefix[g] + k) as u32;
-            new_elem_owner[expand + k] = partition.elem_owner[e];
+    // Quad4 centre nodes: parent element gid → (refined centre id, owner).
+    let mut local_centers: BTreeMap<u32, (NodeId, Rank)> = BTreeMap::new();
+    if refined.elem_type == ElementType::Quad4 {
+        let mid_values: HashSet<NodeId> = midpoint_map.values().copied().collect();
+        // Parent centroid → local coarse element id (+ its gid).
+        let mut centroid_to_elem: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut gid_to_coarse: HashMap<u32, usize> = HashMap::new();
+        // Unrefined element (all old nodes) → coarse element by node-gid set.
+        let mut coarse_by_nodes: HashMap<Vec<u32>, usize> = HashMap::new();
+        for e in 0..n_local_elems {
+            let ns = local_mesh.elem_nodes(e as u32);
+            let mut gids: Vec<u32> = ns.iter().map(|&n| partition.global_node(n)).collect();
+            // Centre coordinate must use the exact MFEM XY-split formula used
+            // by NCStateQuad::refine (0.5·mid01 + 0.5·mid23, each midpoint
+            // itself 0.5·pa + 0.5·pb) — a 4-corner average differs by 1 ulp
+            // and would fail the bit-exact centroid match below.
+            let c0 = local_mesh.node_coords(ns[0]);
+            let c1 = local_mesh.node_coords(ns[1]);
+            let c2 = local_mesh.node_coords(ns[2]);
+            let c3 = local_mesh.node_coords(ns[3]);
+            let (m01x, m01y) = (0.5 * c0[0] + 0.5 * c1[0], 0.5 * c0[1] + 0.5 * c1[1]);
+            let (m23x, m23y) = (0.5 * c2[0] + 0.5 * c3[0], 0.5 * c2[1] + 0.5 * c3[1]);
+            let cx = 0.5 * m01x + 0.5 * m23x;
+            let cy = 0.5 * m01y + 0.5 * m23y;
+            let key = (cx.to_bits(), cy.to_bits());
+            centroid_to_elem.insert(key, e);
+            gid_to_coarse.insert(partition.global_elem(e as u32), e);
+            gids.sort_unstable();
+            coarse_by_nodes.insert(gids, e);
         }
-        expand += cnt;
+        let mut child_k: HashMap<u32, u32> = HashMap::new();
+        for e in 0..n_refined as ElemId {
+            let ns = refined.elem_nodes(e);
+            // A refined (child) element has a centre node: a new node that is
+            // not an edge midpoint, sitting exactly at its parent's centroid.
+            let centre = ns
+                .iter()
+                .find(|&&n| (n as usize) >= n_orig && !mid_values.contains(&n))
+                .copied();
+            let parent = if let Some(c) = centre {
+                let cxy = refined.node_coords(c);
+                let key = (cxy[0].to_bits(), cxy[1].to_bits());
+                centroid_to_elem
+                    .get(&key)
+                    .map(|&coarse_e| partition.global_elem(coarse_e as u32))
+            } else {
+                // Unrefined element: all old nodes, match the coarse element
+                // by its (sorted) node-gid set.
+                let mut gids: Vec<u32> =
+                    ns.iter().map(|&n| partition.global_node(n)).collect();
+                gids.sort_unstable();
+                coarse_by_nodes
+                    .get(&gids)
+                    .map(|&coarse_e| partition.global_elem(coarse_e as u32))
+            };
+            let pg = parent.unwrap_or_else(|| {
+                let ns = refined.elem_nodes(e);
+                let new_nodes: Vec<NodeId> = ns
+                    .iter()
+                    .copied()
+                    .filter(|&n| (n as usize) >= n_orig)
+                    .collect();
+                panic!(
+                    "rebuild_partition_nc: refined Quad4 element {e} (nodes {ns:?}, \
+                     new {new_nodes:?}, mid_values_len={}, n_orig={}) has no parent",
+                    mid_values.len(),
+                    n_orig
+                )
+            });
+            let k = child_k.entry(pg).or_insert(0);
+            new_elem_gid[e as usize] = (prefix[pg as usize] + *k as usize) as u32;
+            *k += 1;
+            let coarse_e = gid_to_coarse[&pg];
+            new_elem_owner[e as usize] = partition.elem_owner[coarse_e];
+            if let Some(c) = centre {
+                local_centers
+                    .entry(pg)
+                    .or_insert((c, partition.elem_owner[coarse_e]));
+            }
+        }
+    } else {
+        let mut expand = 0usize;
+        for e in 0..n_local_elems {
+            let g = partition.global_elem(e as u32) as usize;
+            let cnt = if global_marked.contains(&(g as u32)) { 4 } else { 1 };
+            for k in 0..cnt {
+                new_elem_gid[expand + k] = (prefix[g] + k) as u32;
+                new_elem_owner[expand + k] = partition.elem_owner[e];
+            }
+            expand += cnt;
+        }
+        debug_assert_eq!(expand, n_refined, "element count drift in NC refine");
     }
-    debug_assert_eq!(expand, n_refined, "element count drift in NC refine");
+
+    // Local edge index table per element type (Tri3: 3 edges, Quad4: 4 edges).
+    let local_edges: &[(usize, usize)] = if refined.elem_type == ElementType::Quad4 {
+        &[(0usize, 1usize), (1usize, 2usize), (2usize, 3usize), (3usize, 0usize)]
+    } else {
+        &[(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)]
+    };
 
     // 4. Edge midpoint gids.  Only *new* midpoints (mid >= n_orig) get fresh
     //    global ids; edges whose midpoint already exists from a previous
@@ -287,7 +389,7 @@ fn rebuild_partition_nc(
         let ns = local_mesh.elem_nodes(e);
         let ge = partition.global_elem(e);
         let owner = partition.elem_owner[e as usize];
-        for &(a, b) in &[(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)] {
+        for &(a, b) in local_edges {
             if !new_mid_edges.contains(&edge_key(ns[a], ns[b])) {
                 continue; // old midpoint (created in a previous round)
             }
@@ -352,10 +454,14 @@ fn rebuild_partition_nc(
     // Send requests to assigners (including ourselves).  The single-rank
     // backend's alltoallv returns nothing, so bypass it there.
     let mut edge_gid: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    // Global new-edge-midpoint counts per rank (used below for the Quad4
+    // centre-node id range; also the edge-midpoint prefix sums).
+    let all_counts: Vec<i64>;
     if comm.size() == 1 {
         for (idx, &ek) in local_new_edges.iter().enumerate() {
             edge_gid.insert(ek, (n_global_old_nodes + idx) as u32);
         }
+        all_counts = vec![local_new_edges.len() as i64];
     } else {
     let sends: Vec<(Rank, Vec<u8>)> = req_map
         .iter()
@@ -385,7 +491,7 @@ fn rebuild_partition_nc(
     }
 
     // Prefix-summed id range for our edges.
-    let all_counts = gather_counts(comm, my_edges.len() as i64);
+    all_counts = gather_counts(comm, my_edges.len() as i64);
     let base: usize = all_counts
         .iter()
         .take(rank as usize)
@@ -425,6 +531,89 @@ fn rebuild_partition_nc(
         "missing midpoint ids in NC refine"
     );
 
+    // 4b. Quad4 centre nodes: each marked element gets one centre node.
+    //     Global ids are assigned by the element's owner in
+    //     marked-element-gid order, in the range right after all new edge
+    //     midpoints.  Tri3 has no centre nodes.  (`local_centers` was built
+    //     in step 3 while mapping refined elements back to their parents.)
+    let mut center_gid: HashMap<u32, u32> = HashMap::new(); // elem gid → centre gid
+    if refined.elem_type == ElementType::Quad4 {
+        let n_edge_new: usize = all_counts.iter().map(|&c| c as usize).sum();
+        if comm.size() == 1 {
+            for (idx, &ge) in local_centers.keys().enumerate() {
+                center_gid.insert(ge, (n_global_old_nodes + n_edge_new + idx) as u32);
+            }
+        } else {
+            let mut center_req: HashMap<Rank, Vec<u32>> = HashMap::new();
+            for (&ge, &(_, o)) in &local_centers {
+                center_req.entry(o).or_default().push(ge);
+            }
+            for v in center_req.values_mut() {
+                v.sort_unstable();
+            }
+            let sends: Vec<(Rank, Vec<u8>)> = center_req
+                .iter()
+                .map(|(&dest, keys)| {
+                    let mut b = Vec::with_capacity(keys.len() * 4);
+                    for &g in keys {
+                        b.extend_from_slice(&g.to_le_bytes());
+                    }
+                    (dest, b)
+                })
+                .collect();
+            let incoming = comm.alltoallv_bytes(&sends);
+            let mut my_center_elems: BTreeSet<u32> = BTreeSet::new();
+            let mut center_req_by_requester: BTreeMap<Rank, Vec<u32>> = BTreeMap::new();
+            for (requester, bytes) in &incoming {
+                let keys = bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                center_req_by_requester.insert(*requester, keys.clone());
+                my_center_elems.extend(keys);
+            }
+            // Prefix-summed id range for the centres we assign (one per
+            // owned marked element, in element-gid order).
+            let center_counts = gather_counts(comm, owned_marked.len() as i64);
+            let center_base: usize = center_counts
+                .iter()
+                .take(rank as usize)
+                .map(|&c| c as usize)
+                .sum();
+            for (idx, &ge) in my_center_elems.iter().enumerate() {
+                center_gid.insert(
+                    ge,
+                    (n_global_old_nodes + n_edge_new + center_base + idx) as u32,
+                );
+            }
+            let reply_payloads: Vec<(Rank, Vec<u8>)> = center_req_by_requester
+                .iter()
+                .map(|(requester, keys)| {
+                    let mut b = Vec::with_capacity(keys.len() * 4);
+                    for &k in keys {
+                        b.extend_from_slice(&center_gid[&k].to_le_bytes());
+                    }
+                    (*requester, b)
+                })
+                .collect();
+            let responses = comm.alltoallv_bytes(&reply_payloads);
+            for (coord, bytes) in responses {
+                let gids = bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                for (&k, g) in center_req[&coord].iter().zip(gids) {
+                    center_gid.insert(k, g);
+                }
+            }
+        }
+        debug_assert_eq!(
+            center_gid.len(),
+            local_centers.len(),
+            "missing centre ids in Quad4 NC refine"
+        );
+    }
+
     // 5. Cross-rank midpoints the local mesh references but did not create.
     //    A coarse edge (u,v) whose midpoint was created on another rank in an
     //    earlier round is invisible to us unless the partition rebuild adds
@@ -463,7 +652,7 @@ fn rebuild_partition_nc(
         let mut seen: BTreeSet<(u32, u32)> = BTreeSet::new();
         for e in 0..refined.n_elems() as ElemId {
             let ns = refined.elem_nodes(e);
-            for &(a, b) in &[(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)] {
+            for &(a, b) in local_edges {
                 let lk = edge_key(ns[a], ns[b]);
                 if !seen.insert(lk) {
                     continue;
@@ -561,6 +750,20 @@ fn rebuild_partition_nc(
         let (_mr, owner) = edge_ref_global[&gkey];
         new_gid[mid as usize] = g;
         new_owner[mid as usize] = owner;
+    }
+    // Quad4 centre nodes: newly created (>= n_orig), not edge midpoints.
+    if refined.elem_type == ElementType::Quad4 {
+        let mid_values: HashSet<NodeId> = midpoint_map.values().copied().collect();
+        for (&ge, &(c, owner)) in &local_centers {
+            if (c as usize) >= n_orig {
+                debug_assert!(
+                    !mid_values.contains(&c),
+                    "Quad4 centre node {c} collides with an edge midpoint"
+                );
+                new_gid[c as usize] = center_gid[&ge];
+                new_owner[c as usize] = owner;
+            }
+        }
     }
     for (i, &(g, owner, _mx, _my)) in extra_ghost.iter().enumerate() {
         let id = refined.n_nodes() + i;
@@ -2024,6 +2227,65 @@ mod tests {
                 assert_eq!(all_n, (0..9).collect::<Vec<_>>(),
                     "quad owned node gids must partition the serial range");
             }
+        });
+    }
+
+    /// Two-rank Quad4 NC refine must produce the same global mesh as serial
+    /// NCStateQuad refine (element/node counts + owned-gid coverage), and
+    /// the refined mesh must be rebalanceable.
+    #[test]
+    fn par_refine_marked_quad4_two_ranks_matches_serial() {
+        let mesh = Mesh::<2>::unit_square_quad(2); // 4 quads, 9 nodes
+        let marked_global: Vec<ElemId> = vec![0, 2];
+
+        // Serial reference.
+        let mut ser_nc = NCStateQuad::new();
+        let (ser_refined, _, _) = ser_nc.refine(&mesh, &marked_global, 0);
+        let n_ser_elems = ser_refined.n_elems();
+        let n_ser_nodes = ser_refined.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let part = pmesh.partition();
+            let n_local = part.n_owned_elems + part.n_ghost_elems;
+            let marked_local: Vec<ElemId> = (0..n_local)
+                .filter(|&e| marked_global.contains(&part.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let res = par_refine_marked(&pmesh, NCState::new(), &marked_local, None).unwrap();
+            let np = res.par_mesh.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, n_ser_elems, "quad4 refined global elem count");
+            assert_eq!(n_nodes_g, n_ser_nodes, "quad4 refined global node count");
+
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all.len(), n_ser_elems, "quad4 owned gid count");
+                assert_eq!(all, (0..n_ser_elems as u32).collect::<Vec<_>>(),
+                    "quad4 owned element gids must partition the serial sequence");
+            }
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_ser_nodes, "quad4 owned node gid count");
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "quad4 owned node gids must partition the serial sequence");
+            }
+
+            // The refined mesh must rebalance cleanly (Quad4 par_repartition).
+            let rb = par_repartition(res.par_mesh).unwrap();
+            let n_elems_g2: usize =
+                comm.allreduce_sum_i64(rb.partition().n_owned_elems as i64) as usize;
+            let n_nodes_g2: usize =
+                comm.allreduce_sum_i64(rb.partition().n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g2, n_ser_elems, "quad4 rebalanced elem count");
+            assert_eq!(n_nodes_g2, n_ser_nodes, "quad4 rebalanced node count");
         });
     }
 
