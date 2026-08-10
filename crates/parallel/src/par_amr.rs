@@ -1025,6 +1025,30 @@ pub fn par_derefine_marked(
 /// 2-D `Tri3` / `Quad4` (the element types produced by pex6's NC refine);
 /// mixed-type and 3-D meshes are rejected with
 /// [`ParAmrError::RepartitionError`].
+///
+/// # Communication pattern (targeted, unlike the old full broadcast)
+///
+/// Only the small SFC keys (12 B/element) are exchanged full-broadcast; all
+/// element/face/node payloads travel **targeted** to their new owner:
+/// 1. **keys** — full alltoallv, every rank computes the global SFC order and
+///    the new owner per element (identical on every rank);
+/// 2. **elements** — sent only to their new owner (`gid | tag | conn`);
+/// 3. **node refs** — each rank announces the nodes its owned elements
+///    reference (with the referencing element) plus the local node coords to
+///    the per-node *coordinator* `gid % size`;
+/// 4. **reply** — coordinators send the full referencing set `E(n)`, the node
+///    coords and the node owner (owner of the smallest-gid referencing
+///    element) back to every referencing rank → node-neighbour ghosts;
+/// 5. **requests** (nodes of ghost elements not yet covered) + boundary
+///    **faces** (sent to the new owner of their adjacent element);
+/// 6. **reply 2** → face-closure ghosts (elements sharing an edge with a
+///    node-neighbour ghost);
+/// 7./8. **request/reply 3** for nodes referenced only by face-closure ghosts.
+///
+/// Every step is a collective `alltoallv` (all ranks call it), so there is no
+/// point-to-point root collection and no deadlock.  Element gids, the node
+/// ownership rule (owner of the smallest-gid referencing element) and the
+/// ghost layer are identical to the previous implementation.
 pub fn par_repartition(
     par_mesh: ParallelMesh<Mesh<2>>,
 ) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
@@ -1044,9 +1068,7 @@ pub fn par_repartition(
             "par_repartition: unsupported element type {elem_type:?} (Tri3/Quad4 only)"
         )));
     }
-    let face_dim = 2usize; // 2-D faces are edges (2 shared nodes)
-
-    // Local element → its edges (by local node ids).
+    // Local element → its edges (canonical endpoint pairs, global ids).
     let edges_of = |conn: &[u32]| -> Vec<(u32, u32)> {
         match npe {
             3 => vec![
@@ -1062,18 +1084,110 @@ pub fn par_repartition(
             ],
         }
     };
+    let trace = std::env::var("PEX6_TRACE").is_ok();
+    // Coordinator of a global node: every rank maps the same gid to the same
+    // rank, so node-reference reductions are globally consistent.
+    let coord_of = |node_gid: u32| -> Rank { (node_gid as usize % size) as Rank };
 
-    // ── 1. Pack the local payload and alltoallv-broadcast it ──
-    // payload layout:
-    //   [n_elems u32]
-    //   elem chunks × n_elems:  gid u32 | key u64 | tag u32 | conn[npe] u32
-    //   [n_faces u32]
-    //   face chunks × n_faces:  a u32 | b u32 | tag u32
-    //   [n_nodes u32]
-    //   node chunks × n_nodes:  gid u32 | x f64 | y f64
+    // Small byte readers for the phase payloads (no captures).
+    fn rd_u32(off: &mut usize, b: &[u8]) -> u32 {
+        let s = &b[*off..*off + 4];
+        *off += 4;
+        u32::from_le_bytes(s.try_into().unwrap())
+    }
+    fn rd_u64(off: &mut usize, b: &[u8]) -> u64 {
+        let s = &b[*off..*off + 8];
+        *off += 8;
+        u64::from_le_bytes(s.try_into().unwrap())
+    }
+    fn rd_f64(off: &mut usize, b: &[u8]) -> f64 {
+        let s = &b[*off..*off + 8];
+        *off += 8;
+        f64::from_le_bytes(s.try_into().unwrap())
+    }
+    fn rd_vec(off: &mut usize, b: &[u8]) -> Vec<u32> {
+        let n = rd_u32(off, b) as usize;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(rd_u32(off, b));
+        }
+        v
+    }
+
+    // Node info a rank needs about a node it references: coordinates, the
+    // global owner (owner of the smallest-gid referencing element) and the
+    // full referencing-element set E(n) with owner/tag/connectivity.
+    struct NodeInfo {
+        coords: [f64; 2],
+        owner: i32,
+        refs: Vec<(u32, i32, i32, Vec<u32>)>, // (elem gid, owner, tag, conn)
+    }
+    // Reply record sent by a coordinator for one node.
+    struct NodeRec {
+        node: u32,
+        coords: [f64; 2],
+        node_owner: i32,
+        refs: Vec<(u32, i32, i32, Vec<u32>)>,
+    }
+    fn encode_node_records(reply_map: &HashMap<Rank, Vec<NodeRec>>) -> Vec<(Rank, Vec<u8>)> {
+        reply_map
+            .iter()
+            .map(|(&d, list)| {
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&(list.len() as u32).to_le_bytes());
+                for rec in list {
+                    buf.extend_from_slice(&rec.node.to_le_bytes());
+                    buf.extend_from_slice(&rec.coords[0].to_le_bytes());
+                    buf.extend_from_slice(&rec.coords[1].to_le_bytes());
+                    buf.extend_from_slice(&(rec.node_owner as u32).to_le_bytes());
+                    buf.extend_from_slice(&(rec.refs.len() as u32).to_le_bytes());
+                    for (eg, o, t, conn) in &rec.refs {
+                        buf.extend_from_slice(&eg.to_le_bytes());
+                        buf.extend_from_slice(&(*o as u32).to_le_bytes());
+                        buf.extend_from_slice(&(*t as u32).to_le_bytes());
+                        buf.extend_from_slice(&(conn.len() as u32).to_le_bytes());
+                        for &gn in conn {
+                            buf.extend_from_slice(&gn.to_le_bytes());
+                        }
+                    }
+                }
+                (d, buf)
+            })
+            .collect()
+    }
+    fn decode_node_replies(incoming: &[(Rank, Vec<u8>)], node_info: &mut HashMap<u32, NodeInfo>) {
+        for (_src, bytes) in incoming {
+            let mut off = 0usize;
+            let n_records = rd_u32(&mut off, bytes) as usize;
+            for _ in 0..n_records {
+                let node = rd_u32(&mut off, bytes);
+                let x = rd_f64(&mut off, bytes);
+                let y = rd_f64(&mut off, bytes);
+                let node_owner = rd_u32(&mut off, bytes) as i32;
+                let n_refs = rd_u32(&mut off, bytes) as usize;
+                let mut refs = Vec::with_capacity(n_refs);
+                for _ in 0..n_refs {
+                    let eg = rd_u32(&mut off, bytes);
+                    let o = rd_u32(&mut off, bytes) as i32;
+                    let t = rd_u32(&mut off, bytes) as i32;
+                    let conn = rd_vec(&mut off, bytes);
+                    refs.push((eg, o, t, conn));
+                }
+                node_info
+                    .entry(node)
+                    .or_insert(NodeInfo { coords: [x, y], owner: node_owner, refs });
+            }
+            debug_assert_eq!(off, bytes.len(), "par_repartition node reply overrun");
+        }
+    }
+
+    // ── Phase 1: SFC keys (alltoallv, full broadcast — 12 B/elem) ──
+    //  Each rank broadcasts its owned elements' (gid, key); every rank sorts
+    //  the full set and computes the new owner per element (the same even
+    //  split ±1 per rank as the previous implementation).  Only the small
+    //  keys are exchanged — element connectivity/tags travel targeted below.
     let sfc_opts = crate::sfc::SfcOptions::default();
-    let mut elem_chunks: Vec<(u32, u64, i32, Vec<u32>)> =
-        Vec::with_capacity(partition.n_owned_elems);
+    let mut key_chunks: Vec<(u32, u64)> = Vec::with_capacity(partition.n_owned_elems);
     for e in 0..partition.n_owned_elems as ElemId {
         let gid = partition.global_elem(e);
         let ns = local_mesh.element_nodes(e);
@@ -1086,8 +1200,274 @@ pub fn par_repartition(
         c[0] /= npe as f64;
         c[1] /= npe as f64;
         let key = crate::sfc::morton_code::<2>(&c, sfc_opts.bits_per_coord);
+        key_chunks.push((gid, key));
+    }
+    let mut key_payload = Vec::with_capacity(key_chunks.len() * 12 + 4);
+    key_payload.extend_from_slice(&(key_chunks.len() as u32).to_le_bytes());
+    for (gid, key) in &key_chunks {
+        key_payload.extend_from_slice(&gid.to_le_bytes());
+        key_payload.extend_from_slice(&key.to_le_bytes());
+    }
+    let key_sends: Vec<(Rank, Vec<u8>)> =
+        (0..size as i32).map(|r| (r, key_payload.clone())).collect();
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase1 keys ({} owned)", key_chunks.len());
+    }
+    let incoming = comm.alltoallv_bytes(&key_sends);
+    let mut keys: Vec<(u32, u64)> = Vec::with_capacity(key_chunks.len() * size);
+    for (_src, bytes) in &incoming {
+        let mut off = 0usize;
+        let n_elems = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_elems {
+            let gid = rd_u32(&mut off, bytes);
+            let key = rd_u64(&mut off, bytes);
+            keys.push((gid, key));
+        }
+        debug_assert_eq!(off, bytes.len(), "par_repartition phase1 key overrun");
+    }
+    if keys.is_empty() {
+        return Err(ParAmrError::RepartitionError(
+            "par_repartition: empty global element set".into(),
+        ));
+    }
+    let n_global = keys.len();
+    let chunk = n_global.div_ceil(size);
+    let n_first = n_global % size;
+    let mut order: Vec<usize> = (0..n_global).collect();
+    order.sort_by(|&i, &j| keys[i].1.cmp(&keys[j].1).then(keys[i].0.cmp(&keys[j].0)));
+    let mut owner_of: HashMap<u32, i32> = HashMap::with_capacity(n_global);
+    for (pos, &i) in order.iter().enumerate() {
+        let o = if chunk == 1 {
+            pos as i32
+        } else if n_first == 0 || pos < n_first * chunk {
+            (pos / chunk) as i32
+        } else {
+            (n_first + (pos - n_first * chunk) / (chunk - 1)) as i32
+        };
+        owner_of.insert(keys[i].0, o);
+    }
+    if trace {
+        let mine = owner_of.values().filter(|&&o| o == rank).count();
+        eprintln!("[r{rank}] par_repartition: phase1 done ({n_global} global, {mine} mine)");
+    }
+
+    // ── Phase 2: element migration (alltoallv, targeted to new owners) ──
+    //  Local old owned elements are sent only to their new owner:
+    //  `gid u32 | tag u32 | conn u32×npe`.  Each rank receives exactly the
+    //  elements it will own.
+    let mut elem_sends: HashMap<Rank, Vec<(u32, i32, Vec<u32>)>> = HashMap::new();
+    for e in 0..partition.n_owned_elems as ElemId {
+        let gid = partition.global_elem(e);
+        let dest = owner_of[&gid];
+        let ns = local_mesh.element_nodes(e);
         let gconn: Vec<u32> = ns.iter().map(|&n| partition.global_node(n)).collect();
-        elem_chunks.push((gid, key, local_mesh.elem_tags[e as usize], gconn));
+        elem_sends
+            .entry(dest)
+            .or_default()
+            .push((gid, local_mesh.elem_tags[e as usize], gconn));
+    }
+    let sends: Vec<(Rank, Vec<u8>)> = elem_sends
+        .iter()
+        .map(|(&d, list)| {
+            let mut buf = Vec::with_capacity(list.len() * (8 + 4 * npe) + 4);
+            buf.extend_from_slice(&(list.len() as u32).to_le_bytes());
+            for (gid, tag, conn) in list {
+                buf.extend_from_slice(&gid.to_le_bytes());
+                buf.extend_from_slice(&(*tag as u32).to_le_bytes());
+                for &gn in conn {
+                    buf.extend_from_slice(&gn.to_le_bytes());
+                }
+            }
+            (d, buf)
+        })
+        .collect();
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase2 elems ({} owned → {} dests)",
+            partition.n_owned_elems, elem_sends.len());
+    }
+    let incoming = comm.alltoallv_bytes(&sends);
+    let mut owned_elems: Vec<(u32, i32, Vec<u32>)> = Vec::new();
+    for (_src, bytes) in &incoming {
+        let mut off = 0usize;
+        let n_elems = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_elems {
+            let gid = rd_u32(&mut off, bytes);
+            let tag = rd_u32(&mut off, bytes) as i32;
+            let mut conn = Vec::with_capacity(npe);
+            for _ in 0..npe {
+                conn.push(rd_u32(&mut off, bytes));
+            }
+            owned_elems.push((gid, tag, conn));
+        }
+        debug_assert_eq!(off, bytes.len(), "par_repartition phase2 element overrun");
+    }
+    owned_elems.sort_by_key(|e| e.0);
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase2 done ({} owned elems)", owned_elems.len());
+    }
+
+    // ── Phase 3: node-reference announcement + local node coords ──
+    //  (alltoallv, targeted to the per-node coordinator `coord_of(gid)`).
+    //  Announcement payload per destination:
+    //    n_coords u32 | (gid u32 | x f64 | y f64)×n_coords
+    //    n_refs   u32 | (node u32 | elem u32 | owner i32 | tag i32 |
+    //                    nconn u32 | conn u32×nconn)×n_refs
+    let mut ann: HashMap<Rank, (Vec<(u32, [f64; 2])>, Vec<(u32, u32, i32, i32, Vec<u32>)>)> =
+        HashMap::new();
+    for lid in 0..partition.n_total_nodes() as u32 {
+        let gid = partition.global_node(lid);
+        let c = local_mesh.node_coords(lid);
+        ann.entry(coord_of(gid)).or_default().0.push((gid, [c[0], c[1]]));
+    }
+    for (gid, tag, conn) in &owned_elems {
+        for &n in conn {
+            ann.entry(coord_of(n))
+                .or_default()
+                .1
+                .push((n, *gid, rank, *tag, conn.clone()));
+        }
+    }
+    let sends: Vec<(Rank, Vec<u8>)> = ann
+        .iter()
+        .map(|(&d, (coords, refs))| {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&(coords.len() as u32).to_le_bytes());
+            for (g, xy) in coords {
+                buf.extend_from_slice(&g.to_le_bytes());
+                buf.extend_from_slice(&xy[0].to_le_bytes());
+                buf.extend_from_slice(&xy[1].to_le_bytes());
+            }
+            buf.extend_from_slice(&(refs.len() as u32).to_le_bytes());
+            for (n, eg, o, t, conn) in refs {
+                buf.extend_from_slice(&n.to_le_bytes());
+                buf.extend_from_slice(&eg.to_le_bytes());
+                buf.extend_from_slice(&(*o as u32).to_le_bytes());
+                buf.extend_from_slice(&(*t as u32).to_le_bytes());
+                buf.extend_from_slice(&(conn.len() as u32).to_le_bytes());
+                for &gn in conn {
+                    buf.extend_from_slice(&gn.to_le_bytes());
+                }
+            }
+            (d, buf)
+        })
+        .collect();
+    if trace {
+        let n_refs: usize = ann.values().map(|(_, r)| r.len()).sum();
+        eprintln!("[r{rank}] par_repartition: phase3 announce ({} coords, {n_refs} node-refs)",
+            partition.n_total_nodes());
+    }
+    let incoming = comm.alltoallv_bytes(&sends);
+
+    // Coordinator side: reduce the announcements into per-node tables.
+    let mut coord_refs: HashMap<u32, Vec<(u32, i32, i32, Vec<u32>)>> = HashMap::new();
+    let mut coord_coords: HashMap<u32, [f64; 2]> = HashMap::new();
+    for (_src, bytes) in &incoming {
+        let mut off = 0usize;
+        let n_coords = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_coords {
+            let gid = rd_u32(&mut off, bytes);
+            let x = rd_f64(&mut off, bytes);
+            let y = rd_f64(&mut off, bytes);
+            coord_coords.entry(gid).or_insert([x, y]);
+        }
+        let n_refs = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_refs {
+            let n = rd_u32(&mut off, bytes);
+            let eg = rd_u32(&mut off, bytes);
+            let o = rd_u32(&mut off, bytes) as i32;
+            let t = rd_u32(&mut off, bytes) as i32;
+            let conn = rd_vec(&mut off, bytes);
+            coord_refs.entry(n).or_default().push((eg, o, t, conn));
+        }
+        debug_assert_eq!(off, bytes.len(), "par_repartition phase3 announce overrun");
+    }
+
+    // ── Phase 4: reply — coordinators send E(n) + coords + owner back to
+    //  every referencing rank (alltoallv, targeted). ──
+    let mut reply_map: HashMap<Rank, Vec<NodeRec>> = HashMap::new();
+    for (n, refs) in &coord_refs {
+        let coords = coord_coords.get(n).copied().unwrap_or([f64::NAN; 2]);
+        let node_owner = refs
+            .iter()
+            .min_by_key(|(eg, _, _, _)| *eg)
+            .map(|(_, o, _, _)| *o)
+            .unwrap_or(rank);
+        // Every referencing rank receives the *complete* referencing set
+        // E(n) (not only its own entries) — receivers need the full set to
+        // detect cross-rank neighbours.
+        let mut by_owner: HashMap<i32, usize> = HashMap::new();
+        for r in refs {
+            *by_owner.entry(r.1).or_insert(0) += 1;
+        }
+        for o in by_owner.keys() {
+            reply_map
+                .entry(*o)
+                .or_default()
+                .push(NodeRec {
+                    node: *n,
+                    coords,
+                    node_owner,
+                    refs: refs.clone(),
+                });
+        }
+    }
+    let sends = encode_node_records(&reply_map);
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase4 reply ({} node records → {} dests)",
+            reply_map.values().map(|l| l.len()).sum::<usize>(), reply_map.len());
+    }
+    let incoming = comm.alltoallv_bytes(&sends);
+    let mut node_info: HashMap<u32, NodeInfo> = HashMap::new();
+    decode_node_replies(&incoming, &mut node_info);
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase4 done ({} node infos)", node_info.len());
+    }
+
+    // ── Local ghost detection, pass 1: node-neighbours ──
+    //  Every element in E(n) of a node referenced by our owned elements is a
+    //  ghost (owner != rank).  Also build `elem_data` (gid → (tag, conn)) and
+    //  `elem_owner_map` from the reference sets for later assembly.
+    let mut elem_data: HashMap<u32, (i32, Vec<u32>)> = HashMap::new();
+    let mut elem_owner_map: HashMap<u32, i32> = HashMap::new();
+    for (gid, tag, conn) in &owned_elems {
+        elem_data.insert(*gid, (*tag, conn.clone()));
+        elem_owner_map.insert(*gid, rank);
+    }
+    for info in node_info.values() {
+        for (eg, o, t, conn) in &info.refs {
+            elem_data.entry(*eg).or_insert_with(|| (*t, conn.clone()));
+            elem_owner_map.entry(*eg).or_insert(*o);
+        }
+    }
+    let owned_set: HashSet<u32> = owned_elems.iter().map(|e| e.0).collect();
+    let mut ghost_nn: HashSet<u32> = HashSet::new();
+    for (gid, _tag, conn) in &owned_elems {
+        for &n in conn {
+            let info = node_info.get(&n).unwrap_or_else(|| {
+                panic!("par_repartition: missing node info for owned-elem node {n} (elem {gid})")
+            });
+            for (eg, o, _t, _c) in &info.refs {
+                if *o != rank {
+                    ghost_nn.insert(*eg);
+                }
+            }
+        }
+    }
+
+    // ── Phase 5: request node info for ghost-element nodes not yet covered,
+    //  plus migrate boundary faces to the new owner of their adjacent
+    //  element (alltoallv, targeted; one message per destination).
+    //  Payload per destination:
+    //    n_req u32 | (node u32)×n_req | n_faces u32 | (a u32 | b u32 | tag i32)×n_faces
+    let mut req2: BTreeSet<u32> = BTreeSet::new();
+    for &g in &ghost_nn {
+        if let Some((_t, conn)) = elem_data.get(&g) {
+            for &n in conn {
+                if !node_info.contains_key(&n) {
+                    req2.insert(n);
+                }
+            }
+        }
     }
     let f_npe = local_mesh.face_type.nodes_per_element();
     let n_faces = if f_npe > 0 {
@@ -1095,212 +1475,253 @@ pub fn par_repartition(
     } else {
         0
     };
-    let mut face_chunks: Vec<(u32, u32, i32)> = Vec::with_capacity(n_faces);
+    // Local old owned elements indexed by their edges (global gids); every
+    // local boundary face is adjacent to exactly one of them.
+    let mut old_edge_elem: HashMap<(u32, u32), u32> = HashMap::new();
+    for e in 0..partition.n_owned_elems as ElemId {
+        let gid = partition.global_elem(e);
+        let ns = local_mesh.element_nodes(e);
+        let gconn: Vec<u32> = ns.iter().map(|&n| partition.global_node(n)).collect();
+        for ek in edges_of(&gconn) {
+            old_edge_elem.entry(ek).or_insert(gid);
+        }
+    }
+    let mut face_sends: HashMap<Rank, Vec<(u32, u32, i32)>> = HashMap::new();
     for fi in 0..n_faces {
         let a = partition.global_node(local_mesh.face_conn[fi * f_npe]);
         let b = partition.global_node(local_mesh.face_conn[fi * f_npe + 1]);
         let tag = local_mesh.face_tags.get(fi).copied().unwrap_or(0);
-        face_chunks.push((a.min(b), a.max(b), tag));
-    }
-    let mut node_chunks: Vec<(u32, [f64; 2])> = Vec::with_capacity(partition.n_total_nodes());
-    for lid in 0..partition.n_total_nodes() as u32 {
-        let c = local_mesh.node_coords(lid);
-        node_chunks.push((partition.global_node(lid), [c[0], c[1]]));
-    }
-
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&(elem_chunks.len() as u32).to_le_bytes());
-    for (gid, key, tag, conn) in &elem_chunks {
-        payload.extend_from_slice(&gid.to_le_bytes());
-        payload.extend_from_slice(&key.to_le_bytes());
-        payload.extend_from_slice(&(*tag as u32).to_le_bytes());
-        for &gn in conn {
-            payload.extend_from_slice(&gn.to_le_bytes());
+        let ek = (a.min(b), a.max(b));
+        if let Some(&old_elem) = old_edge_elem.get(&ek) {
+            let dest = owner_of[&old_elem];
+            face_sends.entry(dest).or_default().push((a, b, tag));
         }
+        // A boundary face without a local adjacent element cannot happen
+        // (faces follow their adjacent element's owner); skip defensively.
     }
-    payload.extend_from_slice(&(face_chunks.len() as u32).to_le_bytes());
-    for (a, b, tag) in &face_chunks {
-        payload.extend_from_slice(&a.to_le_bytes());
-        payload.extend_from_slice(&b.to_le_bytes());
-        payload.extend_from_slice(&(*tag as u32).to_le_bytes());
+    let mut merged: HashMap<Rank, (Vec<u32>, Vec<(u32, u32, i32)>)> = HashMap::new();
+    for &n in &req2 {
+        merged.entry(coord_of(n)).or_default().0.push(n);
     }
-    payload.extend_from_slice(&(node_chunks.len() as u32).to_le_bytes());
-    for (gid, xy) in &node_chunks {
-        payload.extend_from_slice(&gid.to_le_bytes());
-        payload.extend_from_slice(&xy[0].to_le_bytes());
-        payload.extend_from_slice(&xy[1].to_le_bytes());
+    for (d, faces) in face_sends {
+        merged.entry(d).or_default().1.extend(faces);
     }
-    let sends: Vec<(Rank, Vec<u8>)> = (0..size as i32)
-        .map(|r| (r, payload.clone()))
+    let sends: Vec<(Rank, Vec<u8>)> = merged
+        .iter()
+        .map(|(&d, (reqs, faces))| {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&(reqs.len() as u32).to_le_bytes());
+            for &n in reqs {
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            buf.extend_from_slice(&(faces.len() as u32).to_le_bytes());
+            for &(a, b, t) in faces {
+                buf.extend_from_slice(&a.to_le_bytes());
+                buf.extend_from_slice(&b.to_le_bytes());
+                buf.extend_from_slice(&(t as u32).to_le_bytes());
+            }
+            (d, buf)
+        })
         .collect();
-    let trace = std::env::var("PEX6_TRACE").is_ok();
     if trace {
-        eprintln!("[r{rank}] par_repartition: packed {} elems, {} faces, {} nodes → alltoallv",
-            elem_chunks.len(), face_chunks.len(), node_chunks.len());
+        eprintln!("[r{rank}] par_repartition: phase5 requests ({}) + faces ({n_faces})",
+            req2.len());
     }
     let incoming = comm.alltoallv_bytes(&sends);
-    if trace {
-        eprintln!("[r{rank}] par_repartition: alltoallv done ({})", incoming.len());
-    }
 
-    // ── 2. Decode the global tables ──
-    #[derive(Debug, Clone)]
-    struct GlobalElem {
-        gid: u32,
-        key: u64,
-        tag: i32,
-        conn: Vec<u32>,
-    }
-    let mut elems: Vec<GlobalElem> = Vec::new();
-    // Sorted endpoint pair → tag.  Each boundary face is held by exactly one
-    // rank (the owner of its adjacent element), so conflicting entries carry
-    // the same tag; keep the first.
-    let mut faces: BTreeMap<(u32, u32), i32> = BTreeMap::new();
-    // Node gid → coords.
-    let mut nodes: BTreeMap<u32, [f64; 2]> = BTreeMap::new();
-    for (_src, bytes) in &incoming {
+    // ── Phase 6: reply to the phase-5 requests (alltoallv, targeted). ──
+    let mut recv_faces: Vec<(u32, u32, i32)> = Vec::new();
+    let mut req_replies: HashMap<Rank, Vec<NodeRec>> = HashMap::new();
+    for (src, bytes) in &incoming {
         let mut off = 0usize;
-        let take = |off: &mut usize, n: usize| -> &[u8] {
-            let s = &bytes[*off..*off + n];
-            *off += n;
-            s
-        };
-        let n_elems = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
-        for _ in 0..n_elems {
-            let gid = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
-            let key = u64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
-            let tag = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as i32;
-            let mut conn = Vec::with_capacity(npe);
-            for _ in 0..npe {
-                conn.push(u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()));
+        let n_req = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_req {
+            let n = rd_u32(&mut off, bytes);
+            if let Some(refs) = coord_refs.get(&n) {
+                let coords = coord_coords.get(&n).copied().unwrap_or([f64::NAN; 2]);
+                let node_owner = refs
+                    .iter()
+                    .min_by_key(|(eg, _, _, _)| *eg)
+                    .map(|(_, o, _, _)| *o)
+                    .unwrap_or(rank);
+                req_replies
+                    .entry(*src)
+                    .or_default()
+                    .push(NodeRec { node: n, coords, node_owner, refs: refs.clone() });
             }
-            elems.push(GlobalElem { gid, key, tag, conn });
+            // Unknown requested node (no rank announced it) cannot happen for
+            // nodes referenced by real elements; skip defensively.
         }
-        let n_faces = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
+        let n_faces = rd_u32(&mut off, bytes) as usize;
         for _ in 0..n_faces {
-            let a = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
-            let b = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
-            let tag = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as i32;
-            faces.entry((a.min(b), a.max(b))).or_insert(tag);
+            let a = rd_u32(&mut off, bytes);
+            let b = rd_u32(&mut off, bytes);
+            let t = rd_u32(&mut off, bytes) as i32;
+            recv_faces.push((a, b, t));
         }
-        let n_nodes = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
-        for _ in 0..n_nodes {
-            let gid = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
-            let x = f64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
-            let y = f64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
-            nodes.entry(gid).or_insert([x, y]);
-        }
-        debug_assert_eq!(off, bytes.len(), "par_repartition payload overrun");
+        debug_assert_eq!(off, bytes.len(), "par_repartition phase5/6 overrun");
     }
-    if elems.is_empty() {
-        return Err(ParAmrError::RepartitionError(
-            "par_repartition: empty global element table".into(),
-        ));
-    }
-    let n_global = elems.len();
-
-    // ── 3. Global SFC order → new owner (evenly split, ±1 per rank) ──
-    let chunk = n_global.div_ceil(size);
-    let n_first = n_global % size;
-    let mut order: Vec<usize> = (0..n_global).collect();
-    order.sort_by(|&i, &j| {
-        elems[i].key.cmp(&elems[j].key).then(elems[i].gid.cmp(&elems[j].gid))
-    });
-    let mut new_owner = vec![0i32; n_global];
-    for (pos, &i) in order.iter().enumerate() {
-        new_owner[i] = if chunk == 1 {
-            pos as i32
-        } else if n_first == 0 || pos < n_first * chunk {
-            (pos / chunk) as i32
-        } else {
-            (n_first + (pos - n_first * chunk) / (chunk - 1)) as i32
-        };
-    }
-
-    // ── 4. Owned elements (sorted by gid) ──
-    let mut owned_idx: Vec<usize> = (0..n_global)
-        .filter(|&i| new_owner[i] == rank)
-        .collect();
-    owned_idx.sort_by_key(|&i| elems[i].gid);
-    let owned_gids: Vec<u32> = owned_idx.iter().map(|&i| elems[i].gid).collect();
-
-    // ── 5. Ghost layer: node-neighbours + face closure (like partition_mesh) ──
-    let mut node_to_elems: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (i, e) in elems.iter().enumerate() {
-        for &n in &e.conn {
-            node_to_elems.entry(n).or_default().push(i);
+    let sends = encode_node_records(&req_replies);
+    let incoming = comm.alltoallv_bytes(&sends);
+    decode_node_replies(&incoming, &mut node_info);
+    // Refresh elem_data with the newly arrived reference sets.
+    for info in node_info.values() {
+        for (eg, o, t, conn) in &info.refs {
+            elem_data.entry(*eg).or_insert_with(|| (*t, conn.clone()));
+            elem_owner_map.entry(*eg).or_insert(*o);
         }
     }
-    let mut ghost: HashSet<usize> = HashSet::new();
-    for &i in &owned_idx {
-        for &n in &elems[i].conn {
-            for &j in &node_to_elems[&n] {
-                if new_owner[j] != rank {
-                    ghost.insert(j);
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phase6 done ({} node infos, {} faces recv)",
+            node_info.len(), recv_faces.len());
+    }
+
+    // ── Local ghost detection, pass 2: face closure ──
+    //  Elements sharing an edge (≥ face_dim common nodes) with a
+    //  node-neighbour ghost are ghosts too — the same single extra layer as
+    //  the previous implementation (no recursion).  Elements sharing an edge
+    //  with an *owned* element are already node-neighbours, so only the
+    //  ghost elements' edges need checking.
+    let mut ghost_fc: HashSet<u32> = HashSet::new();
+    for &g in &ghost_nn {
+        if let Some((_t, conn)) = elem_data.get(&g) {
+            for (a, b) in edges_of(conn) {
+                let (Some(ia), Some(ib)) = (node_info.get(&a), node_info.get(&b)) else {
+                    continue; // both edges are covered by req2/reply above
+                };
+                let ea: HashSet<u32> = ia.refs.iter().map(|r| r.0).collect();
+                for (eg, o, _t, _c) in &ib.refs {
+                    if *o != rank
+                        && ea.contains(eg)
+                        && !owned_set.contains(eg)
+                        && !ghost_nn.contains(eg)
+                    {
+                        ghost_fc.insert(*eg);
+                    }
                 }
             }
         }
     }
-    let mut local_set: HashSet<usize> = owned_idx.iter().copied().collect();
-    local_set.extend(ghost.iter().copied());
-    for (i, e) in elems.iter().enumerate() {
-        if local_set.contains(&i) || new_owner[i] == rank {
-            continue;
+
+    // ── Phases 7/8: request + reply for nodes referenced only by
+    //  face-closure ghosts (alltoallv, targeted). ──
+    let mut req3: BTreeSet<u32> = BTreeSet::new();
+    for &g in &ghost_fc {
+        if let Some((_t, conn)) = elem_data.get(&g) {
+            for &n in conn {
+                if !node_info.contains_key(&n) {
+                    req3.insert(n);
+                }
+            }
         }
-        // Share a face (≥ face_dim common nodes) with any local element.
-        let shares_face = e.conn.iter().any(|&n| {
-            node_to_elems[&n].iter().any(|&j| {
-                local_set.contains(&j)
-                    && elems[j].conn.iter().filter(|&&m| e.conn.contains(&m)).count() >= face_dim
+    }
+    let sends: Vec<(Rank, Vec<u8>)> = {
+        let mut m: HashMap<Rank, Vec<u32>> = HashMap::new();
+        for &n in &req3 {
+            m.entry(coord_of(n)).or_default().push(n);
+        }
+        m.into_iter()
+            .map(|(d, reqs)| {
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&(reqs.len() as u32).to_le_bytes());
+                for &n in &reqs {
+                    buf.extend_from_slice(&n.to_le_bytes());
+                }
+                buf.extend_from_slice(&0u32.to_le_bytes()); // no faces
+                (d, buf)
             })
-        });
-        if shares_face {
-            ghost.insert(i);
+            .collect()
+    };
+    let incoming = comm.alltoallv_bytes(&sends);
+    let mut req_replies: HashMap<Rank, Vec<NodeRec>> = HashMap::new();
+    for (src, bytes) in &incoming {
+        let mut off = 0usize;
+        let n_req = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_req {
+            let n = rd_u32(&mut off, bytes);
+            if let Some(refs) = coord_refs.get(&n) {
+                let coords = coord_coords.get(&n).copied().unwrap_or([f64::NAN; 2]);
+                let node_owner = refs
+                    .iter()
+                    .min_by_key(|(eg, _, _, _)| *eg)
+                    .map(|(_, o, _, _)| *o)
+                    .unwrap_or(rank);
+                req_replies
+                    .entry(*src)
+                    .or_default()
+                    .push(NodeRec { node: n, coords, node_owner, refs: refs.clone() });
+            }
+        }
+        // No faces travel in the phase-7 request round; consume the (empty)
+        // trailing face segment to keep the payload format uniform.
+        let n_faces = rd_u32(&mut off, bytes) as usize;
+        for _ in 0..n_faces {
+            let _a = rd_u32(&mut off, bytes);
+            let _b = rd_u32(&mut off, bytes);
+            let _t = rd_u32(&mut off, bytes);
+        }
+        debug_assert_eq!(off, bytes.len(), "par_repartition phase7 overrun");
+    }
+    let sends = encode_node_records(&req_replies);
+    let incoming = comm.alltoallv_bytes(&sends);
+    decode_node_replies(&incoming, &mut node_info);
+    for info in node_info.values() {
+        for (eg, o, t, conn) in &info.refs {
+            elem_data.entry(*eg).or_insert_with(|| (*t, conn.clone()));
+            elem_owner_map.entry(*eg).or_insert(*o);
         }
     }
-    let mut ghost_idx: Vec<usize> = ghost.into_iter().collect();
-    ghost_idx.sort_by_key(|&i| elems[i].gid);
-    let ghost_owners: Vec<(u32, i32)> =
-        ghost_idx.iter().map(|&i| (elems[i].gid, new_owner[i])).collect();
-
-    // ── 6. Node ownership: owner of the smallest-gid element referencing it.
-    //        Rebalancing changes element owners, so the old partition's node
-    //        ownership is no longer authoritative; recompute identically on
-    //        every rank from the shared element table. ──
-    let mut node_min_ref: HashMap<u32, (u32, i32)> = HashMap::new();
-    for (i, e) in elems.iter().enumerate() {
-        for &n in &e.conn {
-            node_min_ref
-                .entry(n)
-                .and_modify(|(m, o)| {
-                    if e.gid < *m {
-                        *m = e.gid;
-                        *o = new_owner[i];
-                    }
-                })
-                .or_insert((e.gid, new_owner[i]));
-        }
+    if trace {
+        eprintln!("[r{rank}] par_repartition: phases 7/8 done ({} node infos total)",
+            node_info.len());
     }
 
-    // ── 7. Local node set, ordering and remap ──
-    //    A node is *owned* by the rank that owns the smallest-gid element
-    //    referencing it (computed above); every node referenced by a local
-    //    element (owned or ghost) is local, as owned or ghost.
+    // ── Final assembly: local mesh + partition (ids unchanged) ──
+    //  All local elements: owned + node-neighbour ghosts + face-closure
+    //  ghosts, ordered by gid (owned first, matching the old layout).
+    let mut all_elems: BTreeMap<u32, (i32, Vec<u32>)> = BTreeMap::new();
+    for (gid, tag, conn) in &owned_elems {
+        all_elems.insert(*gid, (*tag, conn.clone()));
+    }
+    for &g in ghost_nn.iter().chain(ghost_fc.iter()) {
+        if let Some((t, conn)) = elem_data.get(&g) {
+            all_elems.entry(g).or_insert_with(|| (*t, conn.clone()));
+        } else {
+            panic!("par_repartition: ghost elem {g} has no connectivity");
+        }
+    }
+    let owned_gids: Vec<u32> = owned_elems.iter().map(|e| e.0).collect();
+    let ghost_gids: Vec<u32> = {
+        let mut v: Vec<u32> = all_elems
+            .keys()
+            .filter(|g| !owned_set.contains(g))
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let ghost_owners: Vec<(u32, i32)> = ghost_gids
+        .iter()
+        .map(|&g| (g, elem_owner_map[&g]))
+        .collect();
+
+    // Node set of all local elements; every referenced node must have been
+    // covered by the replies above.
     let mut all_node_set: BTreeSet<u32> = BTreeSet::new();
-    for &i in owned_idx.iter().chain(ghost_idx.iter()) {
-        for &n in &elems[i].conn {
+    for (_gid, (_t, conn)) in &all_elems {
+        for &n in conn {
             all_node_set.insert(n);
         }
     }
     let owned_nodes: Vec<u32> = all_node_set
         .iter()
-        .filter(|&g| node_min_ref[g].1 == rank)
+        .filter(|&&g| node_info[&g].owner == rank)
         .copied()
         .collect();
     let ghost_nodes: Vec<(u32, i32)> = all_node_set
         .iter()
-        .filter(|&g| node_min_ref[g].1 != rank)
-        .map(|&g| (g, node_min_ref[&g].1))
+        .filter(|&&g| node_info[&g].owner != rank)
+        .map(|&g| (g, node_info[&g].owner))
         .collect();
     let mut g2l: HashMap<u32, u32> =
         HashMap::with_capacity(owned_nodes.len() + ghost_nodes.len());
@@ -1311,42 +1732,34 @@ pub fn par_repartition(
     for (idx, &(g, _)) in ghost_nodes.iter().enumerate() {
         g2l.insert(g, (ghost_base + idx) as u32);
     }
-
-    // ── 8. Local mesh ──
     let mut coords = Vec::with_capacity((owned_nodes.len() + ghost_nodes.len()) * 2);
     for &g in owned_nodes.iter().chain(ghost_nodes.iter().map(|(g, _)| g)) {
-        let xy = nodes[&g];
+        let xy = node_info[&g].coords;
         coords.push(xy[0]);
         coords.push(xy[1]);
     }
-    let n_local_elems = owned_idx.len() + ghost_idx.len();
+    let n_local_elems = all_elems.len();
     let mut conn = Vec::with_capacity(n_local_elems * npe);
     let mut elem_tags = Vec::with_capacity(n_local_elems);
-    for &i in owned_idx.iter().chain(ghost_idx.iter()) {
-        for &n in &elems[i].conn {
+    // Element order must match the partition's `[owned | ghost]` segments
+    // (each gid-ascending) — not the gid-interleaved BTreeMap iteration.
+    for gid in owned_gids.iter().chain(ghost_gids.iter()) {
+        let (tag, econn) = &all_elems[gid];
+        for &n in econn {
             conn.push(g2l[&n]);
         }
-        elem_tags.push(elems[i].tag);
+        elem_tags.push(*tag);
     }
-
-    // ── 9. Boundary faces: assigned to the owner of their adjacent element ──
-    let mut edge_elem: BTreeMap<(u32, u32), i32> = BTreeMap::new(); // edge → owner
-    for (i, e) in elems.iter().enumerate() {
-        for ek in edges_of(&e.conn) {
-            edge_elem.entry(ek).or_insert(new_owner[i]);
-        }
-    }
+    // Boundary faces received in phase 5 (global gids → local ids).
     let mut face_conn = Vec::new();
     let mut face_tags: Vec<i32> = Vec::new();
-    for (&(a, b), &tag) in &faces {
-        if edge_elem.get(&(a.min(b), a.max(b))) == Some(&rank) {
-            face_conn.push(g2l[&a]);
-            face_conn.push(g2l[&b]);
-            face_tags.push(tag);
-        }
+    for (a, b, tag) in &recv_faces {
+        face_conn.push(g2l[a]);
+        face_conn.push(g2l[b]);
+        face_tags.push(*tag);
     }
 
-    // ── 10. Partition rebuild (global ids unchanged) ──
+    // ── Partition rebuild (global ids unchanged) ──
     let mesh = Mesh::uniform(
         coords, conn, elem_tags, elem_type,
         face_conn, face_tags, local_mesh.face_type,
@@ -1360,7 +1773,7 @@ pub fn par_repartition(
     );
     if trace {
         eprintln!("[r{rank}] par_repartition: owned_nodes={} ghost_nodes={} owned_elems={} ghost_elems={}",
-            owned_nodes.len(), ghost_nodes.len(), owned_idx.len(), ghost_idx.len());
+            owned_nodes.len(), ghost_nodes.len(), owned_gids.len(), ghost_gids.len());
     }
     Ok(ParallelMesh::new(mesh, comm, new_partition))
 }
