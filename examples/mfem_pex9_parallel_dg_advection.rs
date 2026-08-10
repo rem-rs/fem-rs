@@ -17,16 +17,17 @@
 //! (Dirichlet) and natural outflow — the advection physics and RK4 scheme
 //! are unchanged.
 //!
-//! # Known limitation (multi-rank)
-//! Multi-rank runs currently diverge: the local assembly of the DG operators
-//! (volume + face + boundary) and the mass solves are not yet consistent
-//! across ranks (same root cause class as pex8's off-diagonal blocks).
-//! Single-rank runs are stable and conserve mass (Σu ≈ const for a wave that
-//! has not reached the outflow).
+//! # Multi-rank support
+//! Multi-rank runs are consistent: interior DG faces are normalized by
+//! global element ids (e1 = smaller gid, so both ranks assemble identical
+//! face fluxes and normals) and boundary faces are assigned to the rank that
+//! owns the adjacent element (MFEM `GetBdrElementAdjacentElement`), so each
+//! owned row receives its boundary flux.  np2 mass evolution matches np1
+//! (24 → outflow loss ≈ 0 for a wave leaving the domain).
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex9_parallel_dg_advection -- --ranks 1
-//!   cargo run --release --example mfem_pex9_parallel_dg_advection -- --ranks 1 -o 2 -n 8
+//!   cargo run --release --example mfem_pex9_parallel_dg_advection -- --ranks 2 -o 2 -n 8
 
 use std::sync::Arc;
 
@@ -120,7 +121,21 @@ fn main() {
         );
 
         // Interior DG faces (NonconservativeDG, α = -1) + boundary faces.
-        let faces = build_face_locs(ps.local_space().mesh());
+        // Cross-rank consistency: `build_face_locs` registers the first-seen
+        // element as e1 and orients the face by its edge — the first-seen
+        // element differs between ranks for a cross-rank face, flipping the
+        // face normal and the trace-flux sign.  Normalize e1/e2 by global
+        // element id (rank-independent); e2_flip is invariant under the swap
+        // (both elements orient the shared edge oppositely in a consistent
+        // mesh, and flip only records "e2's edge direction vs face
+        // direction", which the swap preserves).
+        let mut faces = build_face_locs(ps.local_space().mesh());
+        for f in &mut faces {
+            if partition.global_elem(f.e1) > partition.global_elem(f.e2) {
+                std::mem::swap(&mut f.e1, &mut f.e2);
+                std::mem::swap(&mut f.e1_inf, &mut f.e2_inf);
+            }
+        }
         let mut hi = MfemHeadInsert::new(n_local);
         assemble_ex41_interior_faces(
             &mut hi,

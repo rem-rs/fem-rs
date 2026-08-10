@@ -30,7 +30,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use fem_core::{ElemId, FaceId, NodeId, Rank};
-use fem_mesh::{ElementType, Mesh};
+use fem_mesh::{ElementType, Mesh, topology::MeshTopology};
 
 use crate::{Comm, MeshPartition, par_mesh::ParallelMesh};
 use crate::mesh_serde;
@@ -381,7 +381,7 @@ fn extract_submesh_from_partition_impl<const D: usize>(
 
     // 7. Assign boundary faces to this rank.
     let (local_face_conn, local_face_tags, local_face_types, local_face_offsets) =
-        extract_local_faces(mesh, &g2l, &node_owners, target_rank);
+        extract_local_faces(mesh, &g2l, &node_owners, elem_part, target_rank);
 
     // 8. Assemble the local sub-mesh.
     let mut local_mesh = Mesh::uniform(
@@ -445,6 +445,7 @@ fn extract_local_faces<const D: usize>(
     mesh: &Mesh<D>,
     g2l: &HashMap<NodeId, u32>,
     node_owners: &[Rank],
+    elem_part: &[i32],
     local_rank: Rank,
 ) -> (
     Vec<NodeId>,
@@ -467,11 +468,38 @@ fn extract_local_faces<const D: usize>(
             continue;
         }
 
-        // Assign to the rank owning the minimum-index face node.
-        let min_gn = *bnodes.iter().min().expect("face has no nodes");
-        if node_owners[min_gn as usize] != local_rank {
+        // Boundary face -> adjacent element (MFEM GetBdrElementAdjacentElement
+        // semantics): the element whose node cycle contains the face's edge
+        // (2-D) or that contains all face nodes (3-D).  `face_to_elem` may be
+        // unbuilt and its index space differs from the boundary-face list, so
+        // search locally.  The face is assigned to the rank that owns this
+        // element — the OLD rule (owner of the minimum-index face node)
+        // detached the face from the rank that assembles the owned row (e.g.
+        // a boundary edge of an owned element whose nodes belong to the
+        // neighbour rank), so the owned element's boundary flux never reached
+        // K.
+        let n_elems = mesh.n_elements() as u32;
+        let (a, b) = (bnodes[0], bnodes[1]);
+        let adj_elem = (0..n_elems)
+            .find(|&e| {
+                let en = mesh.element_nodes(e);
+                let n = en.len();
+                (0..n).any(|i| {
+                    (en[i] == a && en[(i + 1) % n] == b)
+                        || (en[i] == b && en[(i + 1) % n] == a)
+                })
+            })
+            .or_else(|| {
+                let bset: Vec<u32> = bnodes.iter().copied().collect();
+                (0..n_elems).find(|&e| {
+                    bset.iter().all(|&n| mesh.element_nodes(e).contains(&n))
+                })
+            })
+            .unwrap_or(0);
+        if elem_part[adj_elem as usize] != local_rank {
             continue;
         }
+        let _ = node_owners;
 
         if mixed_bnd {
             face_types_loc
