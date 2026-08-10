@@ -5,19 +5,10 @@
 
 use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 
-use fem_mesh::{Mesh, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology, boundary::BoundaryTag};
+use fem_mesh::{Mesh, ElementType, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology};
 use fem_core::types::{ElemId, NodeId, Rank};
 
-use crate::{
-    par_mesh::ParallelMesh,
-    partition::MeshPartition,
-    ghost::GhostExchange,
-    mesh_serde::{encode_submesh, decode_submesh},
-    par_partition::{partition_mesh_streaming, STREAM_TAG_BASE},
-    Comm,
-};
-
-const REPART_TAG_BASE: i32 = 0x3800;
+use crate::{par_mesh::ParallelMesh, partition::MeshPartition, Comm};
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -77,7 +68,6 @@ pub fn par_refine_marked(
 ) -> Result<ParRefinedMesh, ParAmrError> {
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
-    let rank = comm.rank();
     // Round-boundary synchronization: keeps every rank in the same collective
     // phase across AMR rounds (the channel backend's alltoallv/allreduce are
     // separate rendezvous sets, so a rank that runs ahead of the others could
@@ -231,7 +221,6 @@ fn rebuild_partition_nc(
     let rank = comm.rank();
     let partition = par_mesh.partition();
     let local_mesh = par_mesh.local_mesh();
-    let rank = comm.rank();
     let n_owned_elems = partition.n_owned_elems;
     let n_ghost_elems = partition.n_ghost_elems;
     let n_local_elems = n_owned_elems + n_ghost_elems;
@@ -501,8 +490,56 @@ fn rebuild_partition_nc(
             }
         }
     }
+    // 5b. Cross-rank coarse-edge midpoints that this rank *reused* (rather
+    // than created) must be reconciled with the global midpoint table.
+    //
+    // After a rebalance the partition changes: `NCState::refine`'s
+    // `find_midpoint_node` coordinate fallback may match an *old* node M on
+    // one rank (same midpoint coordinates, different gid — e.g. M is the
+    // midpoint of another coarse edge) while the other rank creates a fresh
+    // midpoint node.  `global_mid` (gathered from every rank) is
+    // authoritative: every coarse edge's midpoint must be `global_mid[gk].0`
+    // everywhere.  Remap the connectivity from the reused node to the
+    // authoritative gid (appending it as an extra ghost when not present).
+    let mut mid_remap: HashMap<u32, u32> = HashMap::new(); // local mid id → authoritative gid
+    {
+        let created_edges: HashSet<(u32, u32)> = midpoint_map
+            .iter()
+            .filter(|(_, &mid)| (mid as usize) >= n_orig)
+            .map(|(&(a, b), _)| edge_key(gid_of(a), gid_of(b)))
+            .collect();
+        for (&(a, b), &mid) in midpoint_map {
+            if (mid as usize) >= n_orig {
+                continue; // we created it; its gid already agrees with global_mid
+            }
+            let gk = edge_key(gid_of(a), gid_of(b));
+            if created_edges.contains(&gk) {
+                continue;
+            }
+            let Some(&(target_gid, target_owner)) = global_mid.get(&gk) else {
+                continue;
+            };
+            if gid_of(mid) == target_gid {
+                continue; // already the authoritative midpoint
+            }
+            // The refined connectivity uses `mid`, but the global mesh uses
+            // `target_gid`.  Make sure the target node is local (append as an
+            // extra ghost if not) and remap the connectivity below.
+            if partition.local_node(target_gid).is_none()
+                && !extra_ghost.iter().any(|&(g, _, _, _)| g == target_gid)
+            {
+                let c = refined.coords_of(mid);
+                extra_ghost.push((target_gid, target_owner, c[0], c[1]));
+            }
+            mid_remap.insert(mid, target_gid);
+        }
+    }
     extra_ghost.sort_unstable_by_key(|&(g, o, mx, my)| (g, o, mx.to_bits(), my.to_bits()));
     extra_ghost.dedup();
+    if std::env::var("PEX6_TRACE").is_ok() && !mid_remap.is_empty() {
+        eprintln!("[r{rank}] rebuild: mid_remap={mid_remap:?} extra_ghost_len={}",
+            extra_ghost.len());
+    }
 
     // 6. Global ids + owners of every new local node (plus extra ghosts).
     let n_total_new = refined.n_nodes() + extra_ghost.len();
@@ -548,9 +585,21 @@ fn rebuild_partition_nc(
         new_coords.push(c[0]);
         new_coords.push(c[1]);
     }
-    let new_conn: Vec<u32> = refined.conn.iter().map(|&n| remap[n as usize]).collect();
-    let new_face_conn: Vec<u32> =
-        refined.face_conn.iter().map(|&n| remap[n as usize]).collect();
+    // Reordered-node lookup by global id (for mid_remap targets: a remapped
+    // midpoint may live in the owned, ghost or extra-ghost segment).
+    let mut gid_to_new: HashMap<u32, u32> = HashMap::with_capacity(n_total_new);
+    for (new_id, &old_id) in order.iter().enumerate() {
+        gid_to_new.insert(new_gid[old_id], new_id as u32);
+    }
+    let map_node = |n: u32| -> u32 {
+        if let Some(&target_gid) = mid_remap.get(&n) {
+            gid_to_new[&target_gid]
+        } else {
+            remap[n as usize]
+        }
+    };
+    let new_conn: Vec<u32> = refined.conn.iter().map(|&n| map_node(n)).collect();
+    let new_face_conn: Vec<u32> = refined.face_conn.iter().map(|&n| map_node(n)).collect();
 
     let refined_mesh = Mesh::uniform(
         new_coords,
@@ -937,421 +986,383 @@ pub fn par_derefine_marked(
 
 // ─── par_repartition ──────────────────────────────────────────────────────────
 
-fn merge_submeshes(
-    meshes: &[Mesh<2>],
-    partitions: &[MeshPartition],
-) -> Result<Mesh<2>, ParAmrError> {
-    // Collect unique global nodes: global_id → coords
-    let mut global_nodes: BTreeMap<NodeId, [f64; 2]> = BTreeMap::new();
-    // Collect all elements keyed by global element ID
-    let mut global_elems: BTreeMap<ElemId, (Vec<NodeId>, i32)> = BTreeMap::new();
-    // Collect all boundary faces (deduplicated by node set)
-    let mut global_faces: Vec<(Vec<NodeId>, BoundaryTag)> = Vec::new();
-
-    for (mesh, part) in meshes.iter().zip(partitions.iter()) {
-        let gn = &part.global_node_ids;
-        // Nodes
-        for local_id in 0..mesh.n_nodes() {
-            let gid = gn[local_id];
-            let cx = mesh.node_coords(local_id as u32);
-            global_nodes.entry(gid).or_insert_with(|| [cx[0], cx[1]]);
-        }
-        // Elements
-        for le in 0..mesh.n_elems() {
-            let ge = part.global_elem_ids[le];
-            let local_conn = mesh.element_nodes(le as u32);
-            let global_conn: Vec<NodeId> = local_conn.iter().map(|&n| gn[n as usize]).collect();
-            global_elems.entry(ge).or_insert((global_conn, mesh.elem_tags[le]));
-        }
-        // Boundary faces
-        let n_faces = mesh.face_conn.len() / 3; // Tri face = 2 nodes, but in 2D boundary faces are edges
-        // Actually for Mesh<2>, face_conn stores edge vertex pairs
-        // face_conn is flat: each face has face_type.nodes_per_element() entries
-        let f_npe = mesh.face_type.nodes_per_element();
-        if f_npe > 0 && n_faces > 0 {
-            let nf = mesh.face_conn.len() / f_npe;
-            for fi in 0..nf {
-                let global_fv: Vec<NodeId> = (0..f_npe)
-                    .map(|k| gn[mesh.face_conn[fi * f_npe + k] as usize])
-                    .collect();
-                let tag = mesh.face_tags.get(fi).copied().unwrap_or(0);
-                global_faces.push((global_fv, tag));
-            }
-        }
-    }
-
-    if global_nodes.is_empty() || global_elems.is_empty() {
-        return Err(ParAmrError::RepartitionError(
-            "merge_submeshes: no nodes or elements".into(),
-        ));
-    }
-
-    // Build new local index mapping: sorted global ID → 0..n_global_nodes
-    let new_id: HashMap<NodeId, NodeId> = global_nodes
-        .keys()
-        .enumerate()
-        .map(|(i, &gid)| (gid, i as NodeId))
-        .collect();
-
-    let n_glob_nodes = global_nodes.len();
-    let mut coords = Vec::with_capacity(n_glob_nodes * 2);
-    for xy in global_nodes.values() {
-        coords.push(xy[0]);
-        coords.push(xy[1]);
-    }
-
-    let n_glob_elems = global_elems.len();
-    let (elem_type, npe) = if n_glob_elems > 0 {
-        let first_conn = &global_elems.values().next().unwrap().0;
-        let npe = first_conn.len();
-        (if npe == 3 { fem_mesh::ElementType::Tri3 } else { fem_mesh::ElementType::Tri6 }, npe)
-    } else {
-        return Err(ParAmrError::RepartitionError("no elements to merge".into()));
-    };
-
-    let mut conn = Vec::with_capacity(n_glob_elems * npe);
-    let mut elem_tags = Vec::with_capacity(n_glob_elems);
-    for (global_conn, tag) in global_elems.values() {
-        for &gn_id in global_conn {
-            conn.push(new_id[&gn_id]);
-        }
-        elem_tags.push(*tag);
-    }
-
-    // Boundary faces
-    let face_type = fem_mesh::ElementType::Line2;
-    let f_npe = 2usize;
-    let mut face_conn = Vec::with_capacity(global_faces.len() * f_npe);
-    let mut face_tags = Vec::with_capacity(global_faces.len());
-    for (fv, tag) in &global_faces {
-        for &gn_id in fv {
-            face_conn.push(new_id[&gn_id]);
-        }
-        face_tags.push(*tag);
-    }
-
-    Ok(Mesh {
-        coords,
-        conn,
-        elem_tags,
-        elem_type,
-        face_conn,
-        face_tags,
-        face_type,
-        elem_types: None,
-        elem_offsets: None,
-        face_types: None,
-        face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![], edge_to_elem: vec![],
-        geometry: None, nc_vertex_view: None,
-    })
-}
-
-/// Re-distribute elements across MPI ranks after refinement.
+/// Re-distribute elements across ranks for load rebalancing after AMR.
 ///
-/// Gathers all sub-meshes to rank 0, merges them into a single global mesh,
-/// and redistributes via [`partition_mesh_streaming`].
+/// # Communication discipline
+///
+/// Every cross-rank exchange is a single collective `alltoallv` — each rank
+/// broadcasts its local payload and all ranks call the same collective, so
+/// there are **no** point-to-point root-gather/broadcast steps and ranks
+/// cannot deadlock when they run at different speeds (the historical
+/// root-collect version of this function was a pex6 deadlock source).
+///
+/// # Algorithm
+///
+/// 1. Each rank packs its *owned* elements `(gid, SFC key, tag, global conn)`,
+///    its locally held boundary faces `(endpoint gids, tag)` and its local
+///    node coordinates, and `alltoallv`-broadcasts them → every rank holds
+///    the full element / face / node tables.
+/// 2. The global element table is sorted by `(SFC key, gid)` — identical
+///    input on every rank, so the order (and each element's global position)
+///    is identical; the new owner is the evenly-divided interval of that
+///    order (`±1` element per rank).
+/// 3. Each rank keeps the elements whose new owner is itself as *owned* and
+///    selects the *ghost* layer from the global table with the same rule as
+///    [`crate::par_partition::partition_mesh`]: node-neighbours (share ≥ 1
+///    node) plus one face-closure round (share ≥ 2 nodes), so every local
+///    face sees both of its adjacent elements.
+/// 4. Node ownership is recomputed as the owner of the smallest-gid element
+///    referencing the node (a global invariant, identical on every rank from
+///    the shared element table); boundary faces are assigned to the owner of
+///    their adjacent element (pex9 semantics).
+/// 5. The local mesh and [`MeshPartition`] are rebuilt with global element /
+///    node ids **unchanged** (they match the serial mesh numbering), so a
+///    subsequent [`par_refine_marked`] keeps working — rebalancing only moves
+///    elements between ranks, it never renumbers the mesh.
+///
+/// # Supported meshes
+///
+/// 2-D `Tri3` / `Quad4` (the element types produced by pex6's NC refine);
+/// mixed-type and 3-D meshes are rejected with
+/// [`ParAmrError::RepartitionError`].
 pub fn par_repartition(
     par_mesh: ParallelMesh<Mesh<2>>,
 ) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
     let rank = comm.rank();
-
-    if size == 1 {
-        return Ok(par_mesh);
-    }
-
-    let local_mesh = par_mesh.local_mesh().clone();
-    let partition = par_mesh.partition().clone();
-
-    if rank == 0 {
-        // Collect all sub-meshes
-        let mut meshes = vec![local_mesh];
-        let mut parts = vec![partition];
-
-        for src in 1..size as i32 {
-            let buf = comm.recv_bytes(src, REPART_TAG_BASE + src);
-            let (sub_mesh, sub_part) = decode_submesh::<2>(&buf)
-                .map_err(ParAmrError::SerializationError)?;
-            meshes.push(sub_mesh);
-            parts.push(sub_part);
-        }
-
-        let global_mesh = merge_submeshes(&meshes, &parts)?;
-
-        // Redistribute using the streaming partitioner
-        partition_mesh_streaming(Some(&global_mesh), &comm)
-            .map_err(ParAmrError::RepartitionError)
-    } else {
-        // Send our mesh to rank 0
-        let encoded = encode_submesh(&local_mesh, &partition);
-        comm.send_bytes(0, REPART_TAG_BASE + rank, &encoded);
-
-        // Receive new partition from rank 0
-        let buf = comm.recv_bytes(0, STREAM_TAG_BASE + rank);
-        let (new_mesh, new_part) = decode_submesh::<2>(&buf)
-            .map_err(ParAmrError::SerializationError)?;
-        Ok(ParallelMesh::new(new_mesh, comm.clone(), new_part))
-    }
-}
-
-/// Rebalance elements via SFC ordering + MPI ring exchange.
-///
-/// Unlike [`par_repartition`] (gather to rank 0), this does a **neighbour
-/// exchange** on a ring topology: each rank keeps its SFC-lowest elements
-/// up to the target count and sends the excess to the next rank.
-///
-/// Target per rank is `n_global / size`.  When a rank's local count exceeds
-/// the target, the excess is sent clockwise.  When it is below target, it
-/// receives from the anti-clockwise neighbour.
-///
-/// This is a **single-pass diffusive** scheme.  Full balance may require
-/// multiple passes (call in a loop until imbalance < threshold).
-pub fn sfc_rebalance_ring<const D: usize>(
-    par_mesh: ParallelMesh<Mesh<D>>,
-) -> Result<ParallelMesh<Mesh<D>>, ParAmrError> {
-    let comm = par_mesh.comm().clone();
-    let size = comm.size();
-    let rank = comm.rank();
-
     if size <= 1 {
         return Ok(par_mesh);
     }
 
     let local_mesh = par_mesh.local_mesh().clone();
-    let n_local = local_mesh.n_elems();
-    let _partition = par_mesh.partition().clone();
-
-    // 1. Compute global element count via broadcast from rank 0
-    let mut n_global = n_local;
-    if rank == 0 {
-        for src in 1..size as i32 {
-            let buf = comm.recv_bytes(src, REPART_TAG_BASE + 1000 + src);
-            let count_bytes: [u8; 8] = buf[..8].try_into().unwrap();
-            n_global += usize::from_le_bytes(count_bytes);
-        }
-        for dst in 1..size as i32 {
-            comm.send_bytes(dst, REPART_TAG_BASE + 2000 + dst, &n_global.to_le_bytes());
-        }
-    } else {
-        comm.send_bytes(0, REPART_TAG_BASE + 1000 + rank, &n_local.to_le_bytes());
-        let buf = comm.recv_bytes(0, REPART_TAG_BASE + 2000 + rank);
-        let count_bytes: [u8; 8] = buf[..8].try_into().unwrap();
-        n_global = usize::from_le_bytes(count_bytes);
+    let partition = par_mesh.partition().clone();
+    let elem_type = local_mesh.elem_type;
+    let npe = elem_type.nodes_per_element();
+    if !matches!(elem_type, ElementType::Tri3 | ElementType::Quad4) {
+        return Err(ParAmrError::RepartitionError(format!(
+            "par_repartition: unsupported element type {elem_type:?} (Tri3/Quad4 only)"
+        )));
     }
+    let face_dim = 2usize; // 2-D faces are edges (2 shared nodes)
 
-    let target = n_global / size;
-    let _excess = n_global % size;
-    let size_i32 = size as i32;
-
-    if n_global == 0 {
-        return Ok(par_mesh);
-    }
-
-    // 2. SFC plan: keep target elements with lowest Morton keys
-    let (keep_idx, send_idx) = sfc_rebalance_plan(&local_mesh, target.min(n_local));
-
-    // 3. Build send submesh from excess elements
-    let n_send = send_idx.len();
-    let n_keep = keep_idx.len();
-
-    if n_send == 0 && n_keep == n_local {
-        return Ok(par_mesh);
-    }
-
-    let keep_mesh = extract_submesh_elements(&local_mesh, &keep_idx);
-    let send_mesh = extract_submesh_elements(&local_mesh, &send_idx);
-
-    // 4. Ring exchange: send to next rank, receive from previous
-    let next_rank = (rank + 1) % size_i32;
-    let prev_rank = if rank == 0 { size_i32 - 1 } else { rank - 1 };
-
-    // Encode send submesh (with minimal partition info)
-    let send_part = crate::partition::MeshPartition::new_serial(
-        send_mesh.n_nodes(), send_mesh.n_elems());
-    let encoded_send = crate::mesh_serde::encode_submesh::<D>(&send_mesh, &send_part);
-
-    // Buffered send/recv to avoid deadlock on ring
-    // Even ranks send first, odd ranks recv first (standard MPI pattern)
-    let recv_buf = if (rank % 2) == 0 {
-        comm.send_bytes(next_rank, REPART_TAG_BASE + 3000 + rank, &encoded_send);
-        if n_send < n_local || size > 2 {
-            // Expect data from prev rank if we're not the only sender
-            Some(comm.recv_bytes(prev_rank, REPART_TAG_BASE + 3000 + prev_rank))
-        } else {
-            None
+    // Local element → its edges (by local node ids).
+    let edges_of = |conn: &[u32]| -> Vec<(u32, u32)> {
+        match npe {
+            3 => vec![
+                edge_key(conn[0], conn[1]),
+                edge_key(conn[1], conn[2]),
+                edge_key(conn[2], conn[0]),
+            ],
+            _ => vec![
+                edge_key(conn[0], conn[1]),
+                edge_key(conn[1], conn[2]),
+                edge_key(conn[2], conn[3]),
+                edge_key(conn[3], conn[0]),
+            ],
         }
-    } else {
-        let buf = if n_send < n_local || size > 2 {
-            Some(comm.recv_bytes(prev_rank, REPART_TAG_BASE + 3000 + prev_rank))
-        } else {
-            None
-        };
-        comm.send_bytes(next_rank, REPART_TAG_BASE + 3000 + rank, &encoded_send);
-        buf
     };
 
-    // 5. Merge received elements into local mesh
-    let final_mesh = if let Some(buf) = recv_buf {
-        let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<D>(&buf)
-            .map_err(ParAmrError::SerializationError)?;
-        merge_two_meshes(&keep_mesh, &recv_mesh)
+    // ── 1. Pack the local payload and alltoallv-broadcast it ──
+    // payload layout:
+    //   [n_elems u32]
+    //   elem chunks × n_elems:  gid u32 | key u64 | tag u32 | conn[npe] u32
+    //   [n_faces u32]
+    //   face chunks × n_faces:  a u32 | b u32 | tag u32
+    //   [n_nodes u32]
+    //   node chunks × n_nodes:  gid u32 | x f64 | y f64
+    let sfc_opts = crate::sfc::SfcOptions::default();
+    let mut elem_chunks: Vec<(u32, u64, i32, Vec<u32>)> =
+        Vec::with_capacity(partition.n_owned_elems);
+    for e in 0..partition.n_owned_elems as ElemId {
+        let gid = partition.global_elem(e);
+        let ns = local_mesh.element_nodes(e);
+        let mut c = [0.0f64; 2];
+        for &n in ns {
+            let nc = local_mesh.node_coords(n);
+            c[0] += nc[0];
+            c[1] += nc[1];
+        }
+        c[0] /= npe as f64;
+        c[1] /= npe as f64;
+        let key = crate::sfc::morton_code::<2>(&c, sfc_opts.bits_per_coord);
+        let gconn: Vec<u32> = ns.iter().map(|&n| partition.global_node(n)).collect();
+        elem_chunks.push((gid, key, local_mesh.elem_tags[e as usize], gconn));
+    }
+    let f_npe = local_mesh.face_type.nodes_per_element();
+    let n_faces = if f_npe > 0 {
+        local_mesh.face_conn.len() / f_npe
     } else {
-        keep_mesh
+        0
     };
-
-    let new_part = crate::partition::MeshPartition::new_serial(
-        final_mesh.n_nodes(), final_mesh.n_elems());
-    Ok(ParallelMesh::new(final_mesh, comm, new_part))
-}
-
-// ─── SFC rebalancing ──────────────────────────────────────────────────────────
-
-/// Compute a diffusive load-balancing plan based on SFC ordering.
-///
-/// Returns a list of elements to send to each neighbour rank.  The caller
-/// should then use the existing [`par_repartition`] machinery to perform
-/// the actual element exchange.
-///
-/// Step 1: sort local elements by Morton (Z-order) curve key of their centroid.
-/// Step 2: keep the first `target` elements and mark the rest as send candidates.
-/// Step 3: send candidates go to the next rank in the ring.
-///
-/// This is a **one-step diffusive** scheme: each rank talks only to its
-/// clockwise neighbour.  Full balance is reached after O(P) ring passes.
-pub fn sfc_rebalance_plan<const D: usize>(
-    mesh: &Mesh<D>,
-    target: usize,
-) -> (Vec<usize>, Vec<usize>) {
-    let n_local = mesh.n_elems();
-    if n_local <= target {
-        return ((0..n_local).collect(), Vec::new());
+    let mut face_chunks: Vec<(u32, u32, i32)> = Vec::with_capacity(n_faces);
+    for fi in 0..n_faces {
+        let a = partition.global_node(local_mesh.face_conn[fi * f_npe]);
+        let b = partition.global_node(local_mesh.face_conn[fi * f_npe + 1]);
+        let tag = local_mesh.face_tags.get(fi).copied().unwrap_or(0);
+        face_chunks.push((a.min(b), a.max(b), tag));
+    }
+    let mut node_chunks: Vec<(u32, [f64; 2])> = Vec::with_capacity(partition.n_total_nodes());
+    for lid in 0..partition.n_total_nodes() as u32 {
+        let c = local_mesh.node_coords(lid);
+        node_chunks.push((partition.global_node(lid), [c[0], c[1]]));
     }
 
-    // Compute SFC keys
-    let centroids = compute_centroids_simple(mesh);
-    let opts = crate::sfc::SfcOptions::default();
-    let keys: Vec<u64> = centroids.iter()
-        .map(|c| crate::sfc::morton_code::<D>(c, opts.bits_per_coord))
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(elem_chunks.len() as u32).to_le_bytes());
+    for (gid, key, tag, conn) in &elem_chunks {
+        payload.extend_from_slice(&gid.to_le_bytes());
+        payload.extend_from_slice(&key.to_le_bytes());
+        payload.extend_from_slice(&(*tag as u32).to_le_bytes());
+        for &gn in conn {
+            payload.extend_from_slice(&gn.to_le_bytes());
+        }
+    }
+    payload.extend_from_slice(&(face_chunks.len() as u32).to_le_bytes());
+    for (a, b, tag) in &face_chunks {
+        payload.extend_from_slice(&a.to_le_bytes());
+        payload.extend_from_slice(&b.to_le_bytes());
+        payload.extend_from_slice(&(*tag as u32).to_le_bytes());
+    }
+    payload.extend_from_slice(&(node_chunks.len() as u32).to_le_bytes());
+    for (gid, xy) in &node_chunks {
+        payload.extend_from_slice(&gid.to_le_bytes());
+        payload.extend_from_slice(&xy[0].to_le_bytes());
+        payload.extend_from_slice(&xy[1].to_le_bytes());
+    }
+    let sends: Vec<(Rank, Vec<u8>)> = (0..size as i32)
+        .map(|r| (r, payload.clone()))
         .collect();
+    let trace = std::env::var("PEX6_TRACE").is_ok();
+    if trace {
+        eprintln!("[r{rank}] par_repartition: packed {} elems, {} faces, {} nodes → alltoallv",
+            elem_chunks.len(), face_chunks.len(), node_chunks.len());
+    }
+    let incoming = comm.alltoallv_bytes(&sends);
+    if trace {
+        eprintln!("[r{rank}] par_repartition: alltoallv done ({})", incoming.len());
+    }
 
-    // Sort by SFC key
-    let mut indices: Vec<usize> = (0..n_local).collect();
-    indices.sort_by_key(|&i| keys[i]);
-
-    let keep: Vec<usize> = indices.iter().take(target).copied().collect();
-    let send: Vec<usize> = indices.iter().skip(target).copied().collect();
-    (keep, send)
-}
-
-/// Extract a subset of elements from a mesh into a new mesh.
-fn extract_submesh_elements<const D: usize>(
-    mesh: &Mesh<D>,
-    elem_indices: &[usize],
-) -> Mesh<D> {
-    use std::collections::HashMap;
-    let n = elem_indices.len();
-    let mut new_conn = Vec::new();
-    let mut new_tags = Vec::with_capacity(n);
-    let mut node_map: HashMap<u32, u32> = HashMap::new();
-    let mut new_coords = Vec::new();
-
-    let mut next_node = 0u32;
-    for &ei in elem_indices {
-        let e = ei as u32;
-        let nodes = mesh.element_nodes(e);
-        let mut local_nodes = Vec::with_capacity(nodes.len());
-        for &n in nodes {
-            let new_n = *node_map.entry(n).or_insert_with(|| {
-                let idx = next_node;
-                next_node += 1;
-                let c = mesh.node_coords(n);
-                new_coords.extend_from_slice(&c[..D]);
-                idx
-            });
-            local_nodes.push(new_n);
+    // ── 2. Decode the global tables ──
+    #[derive(Debug, Clone)]
+    struct GlobalElem {
+        gid: u32,
+        key: u64,
+        tag: i32,
+        conn: Vec<u32>,
+    }
+    let mut elems: Vec<GlobalElem> = Vec::new();
+    // Sorted endpoint pair → tag.  Each boundary face is held by exactly one
+    // rank (the owner of its adjacent element), so conflicting entries carry
+    // the same tag; keep the first.
+    let mut faces: BTreeMap<(u32, u32), i32> = BTreeMap::new();
+    // Node gid → coords.
+    let mut nodes: BTreeMap<u32, [f64; 2]> = BTreeMap::new();
+    for (_src, bytes) in &incoming {
+        let mut off = 0usize;
+        let take = |off: &mut usize, n: usize| -> &[u8] {
+            let s = &bytes[*off..*off + n];
+            *off += n;
+            s
+        };
+        let n_elems = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
+        for _ in 0..n_elems {
+            let gid = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
+            let key = u64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
+            let tag = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as i32;
+            let mut conn = Vec::with_capacity(npe);
+            for _ in 0..npe {
+                conn.push(u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()));
+            }
+            elems.push(GlobalElem { gid, key, tag, conn });
         }
-        new_conn.extend_from_slice(&local_nodes);
-        new_tags.push(mesh.elem_tags[e as usize]);
-    }
-
-    // Create a minimal mesh with the subset
-    // (face data is not transferred; caller regenerates if needed)
-    Mesh {
-        coords: new_coords,
-        conn: new_conn,
-        elem_tags: new_tags,
-        elem_type: mesh.elem_type,
-        face_conn: Vec::new(),
-        face_tags: Vec::new(),
-        face_type: mesh.face_type,
-        elem_types: mesh.elem_types.clone(),
-        elem_offsets: mesh.elem_offsets.clone(),
-        face_types: None,
-        face_offsets: None,
-        face_to_elem: None,
-        edge_conn: Vec::new(),
-        edge_to_elem: Vec::new(),
-        geometry: None, nc_vertex_view: None,
-    }
-}
-
-/// Merge two meshes (concatenate nodes and elements).
-fn merge_two_meshes<const D: usize>(
-    mesh_a: &Mesh<D>,
-    mesh_b: &Mesh<D>,
-) -> Mesh<D> {
-    let n_a_nodes = mesh_a.n_nodes();
-    let mut coords = mesh_a.coords.clone();
-    coords.extend_from_slice(&mesh_b.coords);
-
-    let mut conn = mesh_a.conn.clone();
-    let offset = n_a_nodes as u32;
-    for &n in &mesh_b.conn {
-        conn.push(n + offset);
-    }
-
-    let mut elem_tags = mesh_a.elem_tags.clone();
-    elem_tags.extend_from_slice(&mesh_b.elem_tags);
-
-    Mesh {
-        coords,
-        conn,
-        elem_tags,
-        elem_type: mesh_a.elem_type,
-        face_conn: mesh_a.face_conn.clone(),
-        face_tags: mesh_a.face_tags.clone(),
-        face_type: mesh_a.face_type,
-        elem_types: None,
-        elem_offsets: None,
-        face_types: None,
-        face_offsets: None,
-        face_to_elem: None,
-        edge_conn: Vec::new(),
-        edge_to_elem: Vec::new(),
-        geometry: None, nc_vertex_view: None,
-    }
-}
-
-/// Compute element centroids (simplified, for D=2 and D=3).
-fn compute_centroids_simple<const D: usize>(mesh: &Mesh<D>) -> Vec<[f64; D]> {
-    let n_elems = mesh.n_elems();
-    let mut centroids = Vec::with_capacity(n_elems);
-    for e in 0..n_elems as u32 {
-        let nodes = mesh.element_nodes(e);
-        let npe = nodes.len();
-        let mut c = [0.0_f64; D];
-        for &n in nodes {
-            let nc = mesh.node_coords(n);
-            for d in 0..D { c[d] += nc[d]; }
+        let n_faces = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
+        for _ in 0..n_faces {
+            let a = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
+            let b = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
+            let tag = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as i32;
+            faces.entry((a.min(b), a.max(b))).or_insert(tag);
         }
-        let inv = 1.0 / npe as f64;
-        for d in 0..D { c[d] *= inv; }
-        centroids.push(c);
+        let n_nodes = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap()) as usize;
+        for _ in 0..n_nodes {
+            let gid = u32::from_le_bytes(take(&mut off, 4).try_into().unwrap());
+            let x = f64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
+            let y = f64::from_le_bytes(take(&mut off, 8).try_into().unwrap());
+            nodes.entry(gid).or_insert([x, y]);
+        }
+        debug_assert_eq!(off, bytes.len(), "par_repartition payload overrun");
     }
-    centroids
+    if elems.is_empty() {
+        return Err(ParAmrError::RepartitionError(
+            "par_repartition: empty global element table".into(),
+        ));
+    }
+    let n_global = elems.len();
+
+    // ── 3. Global SFC order → new owner (evenly split, ±1 per rank) ──
+    let chunk = n_global.div_ceil(size);
+    let n_first = n_global % size;
+    let mut order: Vec<usize> = (0..n_global).collect();
+    order.sort_by(|&i, &j| {
+        elems[i].key.cmp(&elems[j].key).then(elems[i].gid.cmp(&elems[j].gid))
+    });
+    let mut new_owner = vec![0i32; n_global];
+    for (pos, &i) in order.iter().enumerate() {
+        new_owner[i] = if chunk == 1 {
+            pos as i32
+        } else if n_first == 0 || pos < n_first * chunk {
+            (pos / chunk) as i32
+        } else {
+            (n_first + (pos - n_first * chunk) / (chunk - 1)) as i32
+        };
+    }
+
+    // ── 4. Owned elements (sorted by gid) ──
+    let mut owned_idx: Vec<usize> = (0..n_global)
+        .filter(|&i| new_owner[i] == rank)
+        .collect();
+    owned_idx.sort_by_key(|&i| elems[i].gid);
+    let owned_gids: Vec<u32> = owned_idx.iter().map(|&i| elems[i].gid).collect();
+
+    // ── 5. Ghost layer: node-neighbours + face closure (like partition_mesh) ──
+    let mut node_to_elems: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        for &n in &e.conn {
+            node_to_elems.entry(n).or_default().push(i);
+        }
+    }
+    let mut ghost: HashSet<usize> = HashSet::new();
+    for &i in &owned_idx {
+        for &n in &elems[i].conn {
+            for &j in &node_to_elems[&n] {
+                if new_owner[j] != rank {
+                    ghost.insert(j);
+                }
+            }
+        }
+    }
+    let mut local_set: HashSet<usize> = owned_idx.iter().copied().collect();
+    local_set.extend(ghost.iter().copied());
+    for (i, e) in elems.iter().enumerate() {
+        if local_set.contains(&i) || new_owner[i] == rank {
+            continue;
+        }
+        // Share a face (≥ face_dim common nodes) with any local element.
+        let shares_face = e.conn.iter().any(|&n| {
+            node_to_elems[&n].iter().any(|&j| {
+                local_set.contains(&j)
+                    && elems[j].conn.iter().filter(|&&m| e.conn.contains(&m)).count() >= face_dim
+            })
+        });
+        if shares_face {
+            ghost.insert(i);
+        }
+    }
+    let mut ghost_idx: Vec<usize> = ghost.into_iter().collect();
+    ghost_idx.sort_by_key(|&i| elems[i].gid);
+    let ghost_owners: Vec<(u32, i32)> =
+        ghost_idx.iter().map(|&i| (elems[i].gid, new_owner[i])).collect();
+
+    // ── 6. Node ownership: owner of the smallest-gid element referencing it.
+    //        Rebalancing changes element owners, so the old partition's node
+    //        ownership is no longer authoritative; recompute identically on
+    //        every rank from the shared element table. ──
+    let mut node_min_ref: HashMap<u32, (u32, i32)> = HashMap::new();
+    for (i, e) in elems.iter().enumerate() {
+        for &n in &e.conn {
+            node_min_ref
+                .entry(n)
+                .and_modify(|(m, o)| {
+                    if e.gid < *m {
+                        *m = e.gid;
+                        *o = new_owner[i];
+                    }
+                })
+                .or_insert((e.gid, new_owner[i]));
+        }
+    }
+
+    // ── 7. Local node set, ordering and remap ──
+    //    A node is *owned* by the rank that owns the smallest-gid element
+    //    referencing it (computed above); every node referenced by a local
+    //    element (owned or ghost) is local, as owned or ghost.
+    let mut all_node_set: BTreeSet<u32> = BTreeSet::new();
+    for &i in owned_idx.iter().chain(ghost_idx.iter()) {
+        for &n in &elems[i].conn {
+            all_node_set.insert(n);
+        }
+    }
+    let owned_nodes: Vec<u32> = all_node_set
+        .iter()
+        .filter(|&g| node_min_ref[g].1 == rank)
+        .copied()
+        .collect();
+    let ghost_nodes: Vec<(u32, i32)> = all_node_set
+        .iter()
+        .filter(|&g| node_min_ref[g].1 != rank)
+        .map(|&g| (g, node_min_ref[&g].1))
+        .collect();
+    let mut g2l: HashMap<u32, u32> =
+        HashMap::with_capacity(owned_nodes.len() + ghost_nodes.len());
+    for (lid, &g) in owned_nodes.iter().enumerate() {
+        g2l.insert(g, lid as u32);
+    }
+    let ghost_base = owned_nodes.len();
+    for (idx, &(g, _)) in ghost_nodes.iter().enumerate() {
+        g2l.insert(g, (ghost_base + idx) as u32);
+    }
+
+    // ── 8. Local mesh ──
+    let mut coords = Vec::with_capacity((owned_nodes.len() + ghost_nodes.len()) * 2);
+    for &g in owned_nodes.iter().chain(ghost_nodes.iter().map(|(g, _)| g)) {
+        let xy = nodes[&g];
+        coords.push(xy[0]);
+        coords.push(xy[1]);
+    }
+    let n_local_elems = owned_idx.len() + ghost_idx.len();
+    let mut conn = Vec::with_capacity(n_local_elems * npe);
+    let mut elem_tags = Vec::with_capacity(n_local_elems);
+    for &i in owned_idx.iter().chain(ghost_idx.iter()) {
+        for &n in &elems[i].conn {
+            conn.push(g2l[&n]);
+        }
+        elem_tags.push(elems[i].tag);
+    }
+
+    // ── 9. Boundary faces: assigned to the owner of their adjacent element ──
+    let mut edge_elem: BTreeMap<(u32, u32), i32> = BTreeMap::new(); // edge → owner
+    for (i, e) in elems.iter().enumerate() {
+        for ek in edges_of(&e.conn) {
+            edge_elem.entry(ek).or_insert(new_owner[i]);
+        }
+    }
+    let mut face_conn = Vec::new();
+    let mut face_tags: Vec<i32> = Vec::new();
+    for (&(a, b), &tag) in &faces {
+        if edge_elem.get(&(a.min(b), a.max(b))) == Some(&rank) {
+            face_conn.push(g2l[&a]);
+            face_conn.push(g2l[&b]);
+            face_tags.push(tag);
+        }
+    }
+
+    // ── 10. Partition rebuild (global ids unchanged) ──
+    let mesh = Mesh::uniform(
+        coords, conn, elem_tags, elem_type,
+        face_conn, face_tags, local_mesh.face_type,
+    );
+    let new_partition = MeshPartition::from_partitioner(
+        &owned_nodes,
+        &ghost_nodes,
+        &owned_gids,
+        &ghost_owners,
+        rank,
+    );
+    if trace {
+        eprintln!("[r{rank}] par_repartition: owned_nodes={} ghost_nodes={} owned_elems={} ghost_elems={}",
+            owned_nodes.len(), ghost_nodes.len(), owned_idx.len(), ghost_idx.len());
+    }
+    Ok(ParallelMesh::new(mesh, comm, new_partition))
 }
 
 // ─── Solution prolongation ────────────────────────────────────────────────────
@@ -1413,127 +1424,6 @@ fn reorder_solution(sol: &[f64], remap: &[u32]) -> Vec<f64> {
         }
     }
     out
-}
-
-/// Compute the global element count via allreduce.
-///
-/// Returns `(n_global, max_local)`.
-fn compute_global_stats(n_local: usize, comm: &crate::Comm) -> (usize, usize) {
-    let n_global = comm.allreduce_sum_i64(n_local as i64) as usize;
-    // Approximate max with a simple ring to avoid needing allreduce_max.
-    // Each rank sends local count to next rank; after size steps each has seen all.
-    let size = comm.size();
-    let rank = comm.rank();
-    let mut max_seen = n_local;
-    if size > 1 {
-        let next = (rank + 1) % size as i32;
-        let prev = if rank == 0 { size as i32 - 1 } else { rank - 1 };
-        let mut buf = n_local.to_le_bytes().to_vec();
-        for _step in 0..size - 1 {
-            comm.send_bytes(next, REPART_TAG_BASE + 5000 + rank, &buf);
-            let recv = comm.recv_bytes(prev, REPART_TAG_BASE + 5000 + prev);
-            let incoming = usize::from_le_bytes(recv[..8].try_into().unwrap());
-            max_seen = max_seen.max(incoming);
-            buf = recv;
-        }
-    }
-    (n_global, max_seen)
-}
-
-/// Compute the global load imbalance factor across all ranks.
-///
-/// Returns `max_local / ideal`.  Value > 1.0 means overloaded ranks exist.
-pub fn compute_global_imbalance(n_local: usize, comm: &crate::Comm) -> f64 {
-    let size = comm.size() as f64;
-    if size <= 0.0 { return 0.0; }
-    let n_global: usize = comm.allreduce_sum_i64(n_local as i64) as usize;
-    if n_global == 0 { return 0.0; }
-    let ideal = n_global as f64 / size;
-    if ideal <= 0.0 { return 0.0; }
-    let (_total, max_local) = compute_global_stats(n_local, comm);
-    max_local as f64 / ideal
-}
-
-/// Multi-iteration diffusive load-balancing.
-///
-/// Unlike [`sfc_rebalance_ring`] (single-pass ring exchange), this function
-/// performs **iterative nearest-neighbour diffusion**: each step exchanges
-/// excess elements with the neighbour that has the most complementary load.
-///
-/// After each iteration the global imbalance is recomputed.  The process
-/// stops when `imbalance < 1.0 + threshold` or `max_iters` is reached.
-pub fn par_diffusive_rebalance<const D: usize>(
-    par_mesh: ParallelMesh<Mesh<D>>,
-    threshold: f64,
-    max_iters: usize,
-    n_diffuse: usize,
-) -> Result<ParallelMesh<Mesh<D>>, ParAmrError> {
-    let comm = par_mesh.comm().clone();
-    let size = comm.size();
-    if size <= 1 { return Ok(par_mesh); }
-
-    let mut mesh = par_mesh;
-    let rank = comm.rank();
-    let size_i32 = size as i32;
-
-    for _iter in 0..max_iters {
-        let n_local = mesh.local_mesh().n_elems();
-        let imb = compute_global_imbalance(n_local, &comm);
-        if imb < 1.0 + threshold { break; }
-
-        let n_global: usize = comm.allreduce_sum_i64(n_local as i64) as usize;
-        let target = n_global / size;
-        let n_excess = n_local.saturating_sub(target);
-        let n_to_send = n_excess.min(n_diffuse);
-
-        if n_to_send == 0 { continue; }
-
-        // SFC plan: keep lowest keys, send highest keys
-        let n_keep = n_local.saturating_sub(n_to_send);
-        let (keep_idx, send_idx) = sfc_rebalance_plan(mesh.local_mesh(), n_keep);
-        if send_idx.is_empty() { continue; }
-
-        let keep_mesh = extract_submesh_elements(mesh.local_mesh(), &keep_idx);
-        let send_mesh = extract_submesh_elements(mesh.local_mesh(), &send_idx);
-
-        // Send to neighbour one step clockwise (ring diffusion)
-        let next_rank = (rank + 1) % size_i32;
-        let prev_rank = if rank == 0 { size_i32 - 1 } else { rank - 1 };
-
-        let send_part = MeshPartition::new_serial(send_mesh.n_nodes(), send_mesh.n_elems());
-        let encoded_send = crate::mesh_serde::encode_submesh::<D>(&send_mesh, &send_part);
-        let tag = REPART_TAG_BASE + 4000 + (_iter as i32) * 100;
-
-        let recv_buf = if (rank % 2) == 0 {
-            comm.send_bytes(next_rank, tag + rank, &encoded_send);
-            if n_to_send > 0 {
-                Some(comm.recv_bytes(prev_rank, tag + prev_rank))
-            } else {
-                None
-            }
-        } else {
-            let buf = if n_to_send > 0 {
-                Some(comm.recv_bytes(prev_rank, tag + prev_rank))
-            } else {
-                None
-            };
-            comm.send_bytes(next_rank, tag + rank, &encoded_send);
-            buf
-        };
-
-        let final_mesh = if let Some(buf) = recv_buf {
-            let (recv_mesh, _recv_part) = crate::mesh_serde::decode_submesh::<D>(&buf)
-                .map_err(ParAmrError::SerializationError)?;
-            merge_two_meshes(&keep_mesh, &recv_mesh)
-        } else {
-            keep_mesh
-        };
-
-        let new_part = MeshPartition::new_serial(final_mesh.n_nodes(), final_mesh.n_elems());
-        mesh = ParallelMesh::new(final_mesh, comm.clone(), new_part);
-    }
-
-    Ok(mesh)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1615,104 +1505,236 @@ mod tests {
         assert_eq!(result.local_mesh().n_elements(), n);
     }
 
+    // ─── par_repartition (SFC alltoallv rebalancing) ──────────────────────────
+
+    /// Two-rank rebalancing keeps the global mesh (element/node ids +
+    /// element connectivity) identical to the serial input mesh, and balances
+    /// the owned-element counts.
     #[test]
-    fn merge_submeshes_round_trip() {
-        let mesh = Mesh::<2>::unit_square_tri(4);
-        let part = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
-        let merged = merge_submeshes(&[mesh.clone()], &[part]).unwrap();
-        assert_eq!(merged.n_elems(), mesh.n_elems());
-        assert_eq!(merged.n_nodes(), mesh.n_nodes());
-        for le in 0..mesh.n_elems() as u32 {
-            let orig: Vec<_> = mesh.element_nodes(le).iter().copied().collect();
-            let merged_conn: Vec<_> = merged.element_nodes(le).iter().copied().collect();
-            assert_eq!(orig, merged_conn, "elem {le} connectivity mismatch");
-        }
+    fn par_repartition_two_ranks_preserves_global_ids() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements, 25 nodes
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let rb = par_repartition(pmesh).unwrap();
+            let np = rb.partition();
+            let lm = rb.local_mesh();
+
+            // Global counts unchanged.
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, 32, "global elem count: got {n_elems_g}");
+            assert_eq!(n_nodes_g, 25, "global node count: got {n_nodes_g}");
+
+            // Owned element gids partition [0, 32).
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all, (0..32).collect::<Vec<_>>(),
+                    "owned element gids must be a partition of the serial sequence");
+            }
+            // Owned node gids partition [0, 25).
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n, (0..25).collect::<Vec<_>>(),
+                    "owned node gids must be a partition of the serial sequence");
+            }
+
+            // Balance: with 32 elements and 2 ranks the SFC split is exactly
+            // 16/16, so every rank must hold at least 16.
+            let both_full = comm.allreduce_sum_i64((np.n_owned_elems >= 16) as i64);
+            assert_eq!(both_full, 2, "both ranks should hold >= 16 elements");
+
+            // Element connectivity (in global ids) must equal the serial mesh.
+            let mut payload: Vec<u32> = Vec::new();
+            for e in 0..np.n_owned_elems as ElemId {
+                let g = np.global_elem(e);
+                let ns = lm.element_nodes(e);
+                let mut gc: Vec<u32> = ns.iter().map(|&n| np.global_node(n)).collect();
+                gc.sort_unstable();
+                payload.push(g);
+                payload.extend_from_slice(&gc);
+            }
+            let mut flat: Vec<u32> = Vec::new();
+            if comm.is_root() {
+                flat = payload.clone();
+                for r in 1..comm.size() as i32 {
+                    flat.extend(comm.recv::<u32>(r, NC_AMR_MARK_TAG + 200));
+                }
+            } else {
+                comm.send(0, NC_AMR_MARK_TAG + 200, &payload);
+            }
+            if comm.is_root() {
+                assert_eq!(flat.len(), 32 * 4, "payload length");
+                let mut serial: Vec<u32> = Vec::new();
+                for g in 0..32u32 {
+                    let mut gc: Vec<u32> = mesh.element_nodes(g).iter().copied().collect();
+                    gc.sort_unstable();
+                    serial.push(g);
+                    serial.extend_from_slice(&gc);
+                }
+                assert_eq!(flat, serial, "element connectivity must match the serial mesh");
+            }
+        });
     }
 
-    // ─── SFC rebalancing tests ───────────────────────────────────────────────
-
+    /// Two-rank rebalancing of a Quad4 mesh keeps the global element/node ids
+    /// a partition of the serial range.
     #[test]
-    fn sfc_rebalance_plan_under_target_keeps_all() {
+    fn par_repartition_two_ranks_quad4() {
+        let mesh = Mesh::<2>::unit_square_quad(2); // 4 quads, 9 nodes
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let rb = par_repartition(pmesh).unwrap();
+            let np = rb.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, 4, "quad global elem count");
+            assert_eq!(n_nodes_g, 9, "quad global node count");
+
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all, (0..4).collect::<Vec<_>>(),
+                    "quad owned element gids must partition the serial range");
+            }
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n, (0..9).collect::<Vec<_>>(),
+                    "quad owned node gids must partition the serial range");
+            }
+        });
+    }
+
+    /// Rebalancing after NC refinement must preserve the refined global mesh
+    /// (element/node gid coverage matches the serial NC-refine sequence).
+    #[test]
+    fn par_repartition_after_refine_two_ranks() {
         let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
-        let n = mesh.n_elems();
-        let (keep, send) = sfc_rebalance_plan(&mesh, n + 10);
-        assert_eq!(keep.len(), n, "should keep all when target exceeds local count");
-        assert!(send.is_empty(), "should send nothing when under target");
+        // Serial reference: refine the first 75% (elements 0..24).
+        let mut ser_nc = NCState::new();
+        let marked_g: Vec<ElemId> = (0..24).collect();
+        let (ser_refined, _, _) = ser_nc.refine(&mesh, &marked_g, 0);
+        let n_ser = ser_refined.n_elems();
+        let n_ser_nodes = ser_refined.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh0 = partition_mesh(&mesh, &comm);
+            let part0 = pmesh0.partition();
+            let n0 = part0.n_owned_elems + part0.n_ghost_elems;
+            let m1: Vec<ElemId> = (0..n0)
+                .filter(|&e| marked_g.contains(&part0.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let r1 = par_refine_marked(&pmesh0, NCState::new(), &m1, None).unwrap();
+
+            // Rebalance the refined mesh and re-check the global invariants.
+            let rb = par_repartition(r1.par_mesh).unwrap();
+            let np = rb.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, n_ser, "rebalanced global elem count");
+            assert_eq!(n_nodes_g, n_ser_nodes, "rebalanced global node count");
+
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all, (0..n_ser as u32).collect::<Vec<_>>(),
+                    "rebalanced owned element gids must partition the serial sequence");
+            }
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "rebalanced owned node gids must partition the serial sequence");
+            }
+        });
     }
 
+    /// A rebalanced mesh must remain usable by `par_refine_marked` — refine
+    /// a rebalanced partition and verify global gid coverage still holds.
     #[test]
-    fn sfc_rebalance_plan_over_target_sends_excess() {
+    fn par_refine_after_rebalance_two_ranks() {
         let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
-        let n = mesh.n_elems();
-        let target = n / 2;
-        let (keep, send) = sfc_rebalance_plan(&mesh, target);
-        assert_eq!(keep.len(), target, "should keep exactly target elements");
-        assert_eq!(send.len(), n - target, "should send remaining elements");
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh0 = partition_mesh(&mesh, &comm);
+            // Rebalance once (elements move between ranks).
+            let rb = par_repartition(pmesh0).unwrap();
+
+            // Refine the first 75% of the global range on the rebalanced mesh.
+            let part = rb.partition();
+            let n_local = part.n_owned_elems + part.n_ghost_elems;
+            let n_global = rb.global_n_elems();
+            let mark_upto = n_global * 3 / 4;
+            let m: Vec<ElemId> = (0..n_local)
+                .filter(|&e| (part.global_elem(e as u32) as usize) < mark_upto)
+                .map(|e| e as ElemId)
+                .collect();
+            let r = par_refine_marked(&rb, NCState::new(), &m, None).unwrap();
+            let np = r.par_mesh.partition();
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            // 24 refined (×4) + 8 unrefined = 104.
+            assert_eq!(n_elems_g, 24 * 4 + 8, "refine after rebalance count");
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all, (0..(24 * 4 + 8) as u32).collect::<Vec<_>>(),
+                    "refine-after-rebalance gid coverage");
+            }
+        });
     }
 
+    /// pex6-style workload: two rounds of refine(75%) + rebalance must keep
+    /// node-owner consistency (every rank's ghost requests are satisfiable by
+    /// the owning rank) — regression for the GhostExchange panic seen when
+    /// rebalancing a mesh with cross-rank NC midpoints.
     #[test]
-    fn sfc_rebalance_plan_elements_are_disjoint() {
-        let mesh = Mesh::<2>::unit_square_tri(4);
-        let n = mesh.n_elems();
-        let target = n / 2;
-        let (keep, send) = sfc_rebalance_plan(&mesh, target);
-        let mut all: Vec<usize> = keep.iter().chain(send.iter()).copied().collect();
-        all.sort();
-        all.dedup();
-        assert_eq!(all.len(), n, "keep + send should cover all elements without overlap");
-        assert!(all.iter().all(|&i| i < n), "all indices should be in range");
-    }
-
-    #[test]
-    fn extract_submesh_elements_preserves_connectivity() {
-        let mesh = Mesh::<2>::unit_square_tri(3); // 18 elements
-        let indices: Vec<usize> = (0..3).collect(); // first 3 elements
-        let sub = extract_submesh_elements(&mesh, &indices);
-        assert_eq!(sub.n_elems(), 3, "should have 3 elements");
-        for (si, &mi) in indices.iter().enumerate() {
-            let orig_nodes: Vec<u32> = mesh.element_nodes(mi as u32).iter().copied().collect();
-            let sub_nodes: Vec<u32> = sub.element_nodes(si as u32).iter().copied().collect();
-            assert_eq!(sub_nodes.len(), orig_nodes.len(), "elem {si} should have same npe");
-        }
-    }
-
-    #[test]
-    fn merge_two_meshes_concatenates() {
-        let mesh = Mesh::<2>::unit_square_tri(3);
-        let n = mesh.n_elems();
-        let mid = n / 2;
-        let left: Vec<usize> = (0..mid).collect();
-        let right: Vec<usize> = (mid..n).collect();
-        let mesh_a = extract_submesh_elements(&mesh, &left);
-        let mesh_b = extract_submesh_elements(&mesh, &right);
-        let merged = merge_two_meshes(&mesh_a, &mesh_b);
-        assert_eq!(merged.n_elems(), n, "merged should have same total elements");
-    }
-
-    #[test]
-    fn compute_centroids_simple_2d_triangle() {
-        // A known triangle: (0,0), (1,0), (0,1) → centroid at (1/3, 1/3)
-        let mesh = Mesh::<2> {
-            coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-            conn: vec![0, 1, 2],
-            elem_tags: vec![0],
-            elem_type: fem_mesh::ElementType::Tri3,
-            face_conn: Vec::new(),
-            face_tags: Vec::new(),
-            face_type: fem_mesh::ElementType::Line2,
-            elem_types: None,
-            elem_offsets: None,
-            face_types: None,
-            face_offsets: None,
-            face_to_elem: None,
-            edge_conn: Vec::new(),
-            edge_to_elem: Vec::new(),
-            geometry: None, nc_vertex_view: None,
-        };
-        let centroids = compute_centroids_simple(&mesh);
-        assert_eq!(centroids.len(), 1);
-        assert!((centroids[0][0] - 1.0 / 3.0).abs() < 1e-14, "centroid x={}", centroids[0][0]);
-        assert!((centroids[0][1] - 1.0 / 3.0).abs() < 1e-14, "centroid y={}", centroids[0][1]);
+    fn pex6_style_refine_rebalance_refine_rebalance_two_ranks() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let mut pmesh = partition_mesh(&mesh, &comm);
+            let mut nc = NCState::new();
+            for _round in 0..2 {
+                let part = pmesh.partition();
+                let n_local = part.n_owned_elems + part.n_ghost_elems;
+                let n_global = pmesh.global_n_elems();
+                let mark_upto = n_global * 3 / 4;
+                let m: Vec<ElemId> = (0..n_local)
+                    .filter(|&e| (part.global_elem(e as u32) as usize) < mark_upto)
+                    .map(|e| e as ElemId)
+                    .collect();
+                let r = par_refine_marked(&pmesh, nc, &m, None).unwrap();
+                nc = r.nc_state;
+                let rb = par_repartition(r.par_mesh).unwrap();
+                pmesh = rb;
+            }
+            // Final consistency: owned node gids partition the global range.
+            let np = pmesh.partition();
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_nodes_g, "owned node gid count");
+                assert_eq!(all_n, (0..n_nodes_g as u32).collect::<Vec<_>>(),
+                    "owned node gids must partition the serial sequence");
+            }
+        });
     }
 
     // ─── DerefineTree building tests ──────────────────────────────────────────

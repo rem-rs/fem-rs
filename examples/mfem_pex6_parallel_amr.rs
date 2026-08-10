@@ -18,19 +18,15 @@
 //! ([`par_refine_marked`]): marks are gathered globally, every rank refines
 //! its locally visible marked elements, and the partition (global ids,
 //! owners, ghost layer — including cross-rank midpoints of coarse edges) is
-//! rebuilt to match the serial NC-refinement sequence.
-//!
-//! # Known limitation (multi-rank)
-//! The thread-channel MPI backend's `alltoallv` can deadlock under sustained
-//! mixed collective traffic once the mesh grows past ~2000 elements/rank with
-//! partially-marked (non-conforming) refinement; the fully-marked mode and
-//! single-rank runs are not affected.  This is a backend issue, not a
-//! pex6-logic one — the same refinement loop runs 10+ rounds on a single
-//! rank and with full marking on multiple ranks.
+//! rebuilt to match the serial NC-refinement sequence.  After each refine
+//! round the mesh is load-rebalanced ([`par_repartition`], SFC + alltoallv)
+//! like C++ `ex6p`'s `pmesh->Rebalance()` — element gids are preserved, so
+//! the next round's refine continues with the same global numbering.
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex6_parallel_amr
 //!   cargo run --release --example mfem_pex6_parallel_amr -- --ranks 4 -md 50000
+//!   cargo run --release --example mfem_pex6_parallel_amr -- --ranks 4 --no-rebalance
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -41,7 +37,7 @@ use fem_mesh::amr::{NCState, dorfler_mark, zz_estimator};
 use fem_mesh::{ElementType, Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
-use fem_parallel::par_amr::par_refine_marked;
+use fem_parallel::par_amr::{par_refine_marked, par_repartition};
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{Comm, ParAssembler, ParVector, ParallelFESpace, WorkerConfig};
 use fem_solver::SolverConfig;
@@ -53,6 +49,8 @@ fn main() {
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let max_dofs: usize = parse_arg(&args, "-md").unwrap_or(100_000);
     let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(1);
+    // C++ ex6p: `if (do_rebalance) pmesh->Rebalance();` after each refine.
+    let do_rebalance = !args.iter().any(|a| a == "--no-rebalance");
 
     println!("=== fem-rs mfem_pex6: Parallel AMR Poisson (H1 P1, ZZ + Dörfler 0.7) ===");
 
@@ -181,6 +179,21 @@ fn main() {
                 .expect("par_refine_marked failed");
             par_mesh = r.par_mesh;
             nc = r.nc_state;
+
+            // 5b. Load rebalancing after refinement (C++: pmesh->Rebalance()).
+            //     Element gids are preserved, so the next round's marks and
+            //     the NC-refinement sequence stay globally consistent.
+            if do_rebalance {
+                par_mesh = par_repartition(par_mesh)
+                    .expect("par_repartition failed");
+                if rank == 0 {
+                    println!(
+                        "  rebalanced: {} elements across {} ranks",
+                        par_mesh.global_n_elems(),
+                        comm.size()
+                    );
+                }
+            }
             it += 1;
         }
 
