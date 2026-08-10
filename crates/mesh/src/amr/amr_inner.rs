@@ -212,6 +212,27 @@ impl Default for NCState {
     fn default() -> Self { Self::new() }
 }
 
+/// Search the mesh for an existing node exactly at the midpoint of edge
+/// `(a, b)`.  Used as a fallback when `active_midpoints` does not know the
+/// edge (e.g. the mesh was rebuilt and renumbered between NC-refinement
+/// rounds, as happens in the parallel partition rebuild).
+fn find_midpoint_node(mesh: &Mesh<2>, key: &(NodeId, NodeId)) -> Option<NodeId> {
+    let (a, b) = *key;
+    let xa = mesh.coords_of(a);
+    let xb = mesh.coords_of(b);
+    let mx = 0.5 * (xa[0] + xb[0]);
+    let my = 0.5 * (xa[1] + xb[1]);
+    // A midpoint node must be referenced by at least one element (it cannot
+    // be an isolated node).  Scan all nodes referenced by elements.
+    for n in 0..mesh.n_nodes() as NodeId {
+        let c = mesh.coords_of(n);
+        if (c[0] - mx).abs() < 1e-12 && (c[1] - my).abs() < 1e-12 {
+            return Some(n);
+        }
+    }
+    None
+}
+
 impl NCState {
     /// Create an empty NC state for a conforming initial mesh.
     pub fn new() -> Self {
@@ -307,6 +328,14 @@ impl NCState {
                 // Check if a midpoint already exists from a previous level.
                 if let Some(&mid) = self.active_midpoints.get(&key) {
                     midpoint_map.insert(key, mid);
+                } else if let Some(mid) = find_midpoint_node(mesh, &key) {
+                    // Fallback: a midpoint node for this edge may already
+                    // exist in the mesh even though `active_midpoints` does
+                    // not know it (e.g. the mesh was rebuilt/renumbered by a
+                    // parallel partition rebuild between rounds).  Reuse it
+                    // instead of creating a duplicate midpoint.
+                    midpoint_map.insert(key, mid);
+                    self.active_midpoints.insert(key, mid);
                 } else {
                     let xa = mesh.coords_of(ns[a]);
                     let xb = mesh.coords_of(ns[b]);

@@ -30,8 +30,10 @@
 //! * 2-D meshes with a **single** element type: `Tri3` (red refinement,
 //!   1 → 4) or `Quad4` (conforming split).  Mixed-type meshes are not yet
 //!   supported.
-//! * **Compact** node partitions ([`partition_mesh`]); identity-node
-//!   partitions ([`partition_mesh_identity`]) are not yet supported here.
+//! * Compact node partitions ([`partition_mesh`]) **and** identity-node
+//!   partitions ([`partition_mesh_identity`]).  Identity inputs refine to a
+//!   compact partition (holes are dropped; the refined global mesh matches
+//!   the serial refinement).
 //!
 //! [`partition_mesh`]: crate::par_partition::partition_mesh
 //! [`partition_mesh_identity`]: crate::par_partition::partition_mesh_identity
@@ -262,12 +264,6 @@ pub fn par_uniform_refine(par_mesh: &ParallelMesh<Mesh<2>>) -> ParallelMesh<Mesh
     let local_mesh = par_mesh.local_mesh();
     let comm = par_mesh.comm().clone();
 
-    assert!(
-        !partition.node_id_identity,
-        "par_uniform_refine: identity-node partitions are not supported yet \
-         (use the default compact partition_mesh)"
-    );
-
     // 1. Refine the local mesh (owned + ghost elements).
     let lr = refine_local(local_mesh);
     let refined = lr.mesh;
@@ -399,12 +395,15 @@ pub fn par_uniform_refine(par_mesh: &ParallelMesh<Mesh<2>>) -> ParallelMesh<Mesh
     );
 
     // 6. Global ids + owners of every new local node.
+    //    `global_node`/`node_owner` are identity-aware (in identity mode the
+    //    local id IS the global id, so the compact `global_node_ids` array
+    //    cannot be indexed directly).
     let n_total_new = refined.n_nodes();
     let mut new_gid = vec![0u32; n_total_new];
     let mut new_owner = vec![0i32; n_total_new];
     for i in 0..n_orig {
-        new_gid[i] = partition.global_node_ids[i];
-        new_owner[i] = partition.node_owner[i];
+        new_gid[i] = partition.global_node(i as u32);
+        new_owner[i] = partition.node_owner(i as u32);
     }
     for (&(a, b), &mid) in &lr.edge_mid {
         let (ga, gb) = (gid_of(a), gid_of(b));
@@ -427,8 +426,14 @@ pub fn par_uniform_refine(par_mesh: &ParallelMesh<Mesh<2>>) -> ParallelMesh<Mesh
         }
     }
 
-    // 7. Reorder local nodes into [owned | ghost] segments.
-    let mut order: Vec<usize> = (0..n_total_new).collect();
+    // 7. Reorder local nodes into [owned | ghost] segments.  In identity mode
+    //    the local node id space has holes (ids ARE global ids); only nodes
+    //    referenced by the refined mesh participate.
+    let mut referenced = vec![false; n_total_new];
+    for &n in &refined.conn {
+        referenced[n as usize] = true;
+    }
+    let mut order: Vec<usize> = (0..n_total_new).filter(|&i| referenced[i]).collect();
     order.sort_by_key(|&i| (new_owner[i] != my_rank, i));
     let n_owned_new = order.iter().filter(|&&i| new_owner[i] == my_rank).count();
     let mut remap = vec![0u32; n_total_new];
@@ -722,6 +727,46 @@ mod tests {
                 assert_eq!(seen.len(), n_nodes, "node count mismatch");
             } else {
                 comm.send(0, 0x3A21, &flat);
+            }
+        });
+    }
+
+    /// Identity-node partitions must also refine: the local node ids ARE the
+    /// global ids (with holes), and the refined partition must be rebuilt
+    /// correctly (nodes referenced by the refined mesh only, holes dropped).
+    #[test]
+    fn identity_partition_refines_consistently() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements, 25 nodes
+        let serial = refine_uniform(&mesh);
+        let n_elems = serial.n_elems();
+        let n_nodes = serial.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = crate::par_partition::partition_mesh_identity(&mesh, &comm);
+            let refined = par_uniform_refine(&pmesh);
+            let part = refined.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(part.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(part.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, n_elems, "identity refine elem count");
+            assert_eq!(n_nodes_g, n_nodes, "identity refine node count");
+
+            // Owned node gids partition [0, n_nodes) exactly once.
+            let owned: Vec<u32> = part.global_node_ids[..part.n_owned_nodes].to_vec();
+            let mut flat = owned.clone();
+            if comm.rank() == 0 {
+                for r in 1..comm.size() as i32 {
+                    let recv = comm.recv::<u32>(r, 0x3A22);
+                    flat.extend_from_slice(&recv);
+                }
+                flat.sort_unstable();
+                assert_eq!(flat, (0..n_nodes as u32).collect::<Vec<_>>(),
+                    "identity refine owned gids must cover the serial range");
+            } else {
+                comm.send(0, 0x3A22, &flat);
             }
         });
     }

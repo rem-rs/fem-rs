@@ -308,8 +308,8 @@ path = "mfem_pex6_parallel_amr.rs"
 name = "mfem_pex7_parallel_surface"
 path = "mfem_pex7_parallel_surface.rs"
 [[example]]
-name = "mfem_pex8_parallel_p_multigrid"
-path = "mfem_pex8_parallel_p_multigrid.rs"
+name = "mfem_pex8_parallel_dpg"
+path = "mfem_pex8_parallel_dpg.rs"
 [[example]]
 name = "mfem_pex9_parallel_dg_advection"
 path = "mfem_pex9_parallel_dg_advection.rs"

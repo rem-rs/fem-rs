@@ -130,6 +130,7 @@ pub mod par_ras;
 pub mod par_partition;
 pub mod par_solver;
 pub mod par_direct;
+pub mod par_dpg_trace;
 pub mod par_ams;
 pub mod par_discrete_operator;
 pub mod par_lobpcg;

@@ -3,7 +3,7 @@
 //! Provides [`par_refine_marked`] for distributed non-conforming refinement and
 //! [`par_repartition`] for load-rebalancing after refinement.
 
-use std::collections::{HashMap, BTreeMap, HashSet};
+use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 
 use fem_mesh::{Mesh, amr::NCState, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology, boundary::BoundaryTag};
 use fem_core::types::{ElemId, NodeId, Rank};
@@ -14,6 +14,7 @@ use crate::{
     ghost::GhostExchange,
     mesh_serde::{encode_submesh, decode_submesh},
     par_partition::{partition_mesh_streaming, STREAM_TAG_BASE},
+    Comm,
 };
 
 const REPART_TAG_BASE: i32 = 0x3800;
@@ -50,18 +51,42 @@ pub struct ParRefinedMesh {
 
 /// Perform one cycle of parallel non-conforming AMR.
 ///
+/// `marked` are **local** element ids (owned + ghost) to refine; callers must
+/// ensure the marks are globally consistent (every rank marks the same set of
+/// global elements — see [`gather_marked_set`]).  The refined mesh's parallel
+/// partition is rebuilt so that global element/node ids match the *serial*
+/// NC-refinement sequence of the full mesh, children inherit the parent's
+/// owner, and the ghost layer covers all cross-rank neighbours.
+///
+/// # Note on `nc_state`
+/// The argument is accepted for signature compatibility but **ignored**: the
+/// partition rebuild renumbers local node ids, which invalidates any
+/// carried-over `NCState` (`active_midpoints`/`edge_level` keyed by local
+/// ids).  Each call starts from a fresh state; midpoint reuse across rounds
+/// is handled by the coordinate-midpoint fallback in
+/// [`NCState::refine`](fem_mesh::amr::NCState::refine).  For round-trip
+/// derefinement use [`par_refine_marked_with_tree`].
+///
 /// To later derefine, use [`par_refine_marked_with_tree`] which returns a
 /// [`DerefineTree`] suitable for [`par_derefine_marked`].
 pub fn par_refine_marked(
     par_mesh: &ParallelMesh<Mesh<2>>,
-    mut nc_state: NCState,
+    _nc_state: NCState,
     marked:    &[ElemId],
     solution:  Option<&[f64]>,
 ) -> Result<ParRefinedMesh, ParAmrError> {
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
+    let rank = comm.rank();
+    // Round-boundary synchronization: keeps every rank in the same collective
+    // phase across AMR rounds (the channel backend's alltoallv/allreduce are
+    // separate rendezvous sets, so a rank that runs ahead of the others could
+    // otherwise wait on a different collective than the one being called).
+    comm.barrier();
 
-    let (refined_mesh, _constraints, _midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
+    // Fresh state per round: see the note above.
+    let mut nc_state = NCState::new();
+    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
@@ -70,11 +95,11 @@ pub fn par_refine_marked(
         vec![]
     };
 
-    let new_partition = MeshPartition::new_serial(
-        refined_mesh.n_nodes(),
-        refined_mesh.n_elements(),
+    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
     );
-    let _ghost = GhostExchange::from_trivial();
+    // Reorder the prolongated solution to match the reordered node ids.
+    let prolongated = reorder_solution(&prolongated, &remap);
     let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
 
     Ok(ParRefinedMesh {
@@ -108,10 +133,11 @@ pub fn par_refine_marked_with_tree(
         vec![]
     };
 
-    let new_partition = MeshPartition::new_serial(
-        refined_mesh.n_nodes(),
-        refined_mesh.n_elements(),
+    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
     );
+    // Reorder the prolongated solution to match the reordered node ids.
+    let prolongated = reorder_solution(&prolongated, &remap);
     let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
 
     let tree = build_derefine_tree_from_refine(&coarse_mesh, marked, &midpoint_map);
@@ -122,6 +148,456 @@ pub fn par_refine_marked_with_tree(
         solution: prolongated,
         n_new_elems,
     }, tree))
+}
+
+// ─── cross-rank partition rebuild after NC refinement ───────────────────────
+
+/// Tag base for the marked-set broadcast (0x39xx range is free).
+const NC_AMR_MARK_TAG: i32 = 0x3910;
+
+/// Allgather the globally-marked element set: each rank contributes the
+/// global ids of the owned elements it marks; the merged set is replicated.
+///
+/// Uses `alltoallv` (a collective with a global rendezvous) so that every
+/// rank crosses this communication point together — point-to-point root
+/// collection would race across AMG-refinement rounds when thread scheduling
+/// lets one rank run ahead of another.
+fn gather_marked_set(comm: &Comm, owned_marked: &[u32]) -> BTreeSet<u32> {
+    let mut set: BTreeSet<u32> = owned_marked.iter().copied().collect();
+    if comm.size() > 1 {
+        let mut payload = Vec::with_capacity(owned_marked.len() * 4);
+        for g in owned_marked {
+            payload.extend_from_slice(&g.to_le_bytes());
+        }
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, payload.clone()))
+            .collect();
+        for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+            for chunk in bytes.chunks_exact(4) {
+                set.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+        }
+    }
+    set
+}
+
+/// Gather one `i64` per rank into a vector replicated on every rank.
+/// Collective (alltoallv) — see [`gather_marked_set`] for why.
+fn gather_counts(comm: &Comm, my_count: i64) -> Vec<i64> {
+    let n = comm.size() as i32;
+    if n <= 1 {
+        return vec![my_count];
+    }
+    let payload = my_count.to_le_bytes().to_vec();
+    let sends: Vec<(Rank, Vec<u8>)> = (0..n).map(|r| (r, payload.clone())).collect();
+    let recv = comm.alltoallv_bytes(&sends);
+    let mut all = vec![0i64; n as usize];
+    for (src, bytes) in recv {
+        all[src as usize] = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+    }
+    all
+}
+
+
+/// Rebuild the cross-rank [`MeshPartition`] after a local NC refinement.
+///
+/// Returns `(reordered_mesh, new_partition, remap)`: the reordered mesh keeps
+/// local node ids in the `[owned | ghost]` segment order the partition
+/// expects; `remap[new_id] = old_id` maps reordered ids back to the input
+/// (NCState output) node numbering.
+///
+/// `refined` is the locally refined mesh produced by `NCState::refine`
+/// (element order = coarse element order expanded 1 → 4 for marked elements,
+/// owned-first).  `marked_local` are the local element ids that were refined
+/// (owned + ghost; globally consistent).  `midpoint_map` maps local parent
+/// edge `(a, b)` → local midpoint id.
+///
+/// Global ids match the *serial* NC refinement of the full mesh:
+/// * element `g` (global) → `prefix[g] + k` (`k` in 0..4 if refined);
+/// * edge midpoints are assigned in global-marked-element order with edge
+///   order `(0,1), (1,2), (2,0)` and first-touch wins — identical on every
+///   rank; the coordinator (owner of the smallest marked element referencing
+///   the edge) answers cross-rank requests.
+///
+/// Children inherit the parent's owner; a midpoint is owned by the owner of
+/// its smallest referencing marked element.
+fn rebuild_partition_nc(
+    refined: &Mesh<2>,
+    par_mesh: &ParallelMesh<Mesh<2>>,
+    marked_local: &[ElemId],
+    midpoint_map: &HashMap<(NodeId, NodeId), NodeId>,
+    comm: &Comm,
+) -> (Mesh<2>, MeshPartition, Vec<u32>) {
+    let rank = comm.rank();
+    let partition = par_mesh.partition();
+    let local_mesh = par_mesh.local_mesh();
+    let rank = comm.rank();
+    let n_owned_elems = partition.n_owned_elems;
+    let n_ghost_elems = partition.n_ghost_elems;
+    let n_local_elems = n_owned_elems + n_ghost_elems;
+    let n_orig = local_mesh.n_nodes();
+    let n_global_elems = par_mesh.global_n_elems();
+    let n_global_old_nodes = par_mesh.global_n_nodes();
+    let gid_of = |local: u32| partition.global_node(local);
+
+    // 1. Global marked set (every rank contributes its owned marks).
+    let mut owned_marked: Vec<u32> = marked_local
+        .iter()
+        .filter(|&&e| partition.elem_owner[e as usize] == rank)
+        .map(|&e| partition.global_elem(e))
+        .collect();
+    owned_marked.sort_unstable();
+    let global_marked = gather_marked_set(comm, &owned_marked);
+
+    // 2. Serial NC-refinement sequence positions.
+    let mut prefix = vec![0usize; n_global_elems + 1];
+    for g in 0..n_global_elems {
+        prefix[g + 1] =
+            prefix[g] + if global_marked.contains(&(g as u32)) { 4 } else { 1 };
+    }
+
+    // 3. New element gids (local refined order = coarse order expanded).
+    let n_refined = refined.n_elems();
+    let mut new_elem_gid = vec![0u32; n_refined];
+    let mut new_elem_owner = vec![0i32; n_refined];
+    let mut expand = 0usize;
+    for e in 0..n_local_elems {
+        let g = partition.global_elem(e as u32) as usize;
+        let cnt = if global_marked.contains(&(g as u32)) { 4 } else { 1 };
+        for k in 0..cnt {
+            new_elem_gid[expand + k] = (prefix[g] + k) as u32;
+            new_elem_owner[expand + k] = partition.elem_owner[e];
+        }
+        expand += cnt;
+    }
+    debug_assert_eq!(expand, n_refined, "element count drift in NC refine");
+
+    // 4. Edge midpoint gids.  Only *new* midpoints (mid >= n_orig) get fresh
+    //    global ids; edges whose midpoint already exists from a previous
+    //    round keep the id the old-node segment inherited from `partition`.
+    //
+    //    Each edge's global id is assigned by the owner of its smaller
+    //    endpoint node — a globally unique, locally computable rank (every
+    //    rank touching the edge sees both endpoints locally).  Ranks that
+    //    see an edge request its id from the assigner; the assigner dedups,
+    //    numbers its edges in sorted order within a prefix-summed range, and
+    //    replies.  (A min-marked-element-based assigner would be unusable:
+    //    the owner of the smallest marked element referencing an edge may
+    //    not see the edge locally at all.)
+    let new_mid_edges: HashSet<(NodeId, NodeId)> = midpoint_map
+        .iter()
+        .filter(|(_, &mid)| (mid as usize) >= n_orig)
+        .map(|(&(a, b), _)| edge_key(a, b))
+        .collect();
+    let mut local_new_edges: BTreeSet<(u32, u32)> = BTreeSet::new();
+    // Local (edge → smallest marked element referencing it + its owner).
+    // The owner is used for the midpoint *ownership* below; the assigner of
+    // the edge id is the owner of the smaller endpoint (computed separately).
+    let mut local_edge_ref: BTreeMap<(u32, u32), (ElemId, Rank)> = BTreeMap::new();
+    for &e in marked_local {
+        let ns = local_mesh.elem_nodes(e);
+        let ge = partition.global_elem(e);
+        let owner = partition.elem_owner[e as usize];
+        for &(a, b) in &[(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)] {
+            if !new_mid_edges.contains(&edge_key(ns[a], ns[b])) {
+                continue; // old midpoint (created in a previous round)
+            }
+            let ek = edge_key(gid_of(ns[a]), gid_of(ns[b]));
+            local_new_edges.insert(ek);
+            local_edge_ref
+                .entry(ek)
+                .and_modify(|(m, o)| {
+                    if ge < *m {
+                        *m = ge;
+                        *o = owner;
+                    }
+                })
+                .or_insert((ge, owner));
+        }
+    }
+
+    // Global min-ref per edge (with owner), reduced via alltoallv.  A rank
+    // may not see every element referencing an edge it touches (the ghost
+    // layer only covers cross-rank *owned* neighbours), so the minimum must
+    // be reduced across ranks.
+    let mut payload = Vec::with_capacity(local_edge_ref.len() * 16);
+    for (&(a, b), &(m, o)) in &local_edge_ref {
+        payload.extend_from_slice(&a.to_le_bytes());
+        payload.extend_from_slice(&b.to_le_bytes());
+        payload.extend_from_slice(&m.to_le_bytes());
+        payload.extend_from_slice(&(o as u32).to_le_bytes());
+    }
+    let sends_all: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+        .map(|r| (r, payload.clone()))
+        .collect();
+    let mut edge_ref_global: BTreeMap<(u32, u32), (ElemId, Rank)> = local_edge_ref.clone();
+    if comm.size() > 1 {
+        for (_src, bytes) in comm.alltoallv_bytes(&sends_all) {
+            for chunk in bytes.chunks_exact(16) {
+                let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                let m = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                let o = i32::from_le_bytes(chunk[12..16].try_into().unwrap());
+                let entry = edge_ref_global.entry((a, b)).or_insert((m, o));
+                if m < entry.0 {
+                    *entry = (m, o);
+                }
+            }
+        }
+    }
+
+    // Group local edges by assigner rank (owner of the smaller endpoint).
+    let mut req_map: BTreeMap<Rank, Vec<(u32, u32)>> = BTreeMap::new();
+    for &ek in &local_new_edges {
+        let min_n = ek.0.min(ek.1);
+        let min_local = partition
+            .local_node(min_n)
+            .expect("rebuild_partition_nc: edge endpoint not present locally");
+        let owner = partition.node_owner[min_local as usize];
+        req_map.entry(owner).or_default().push(ek);
+    }
+    for v in req_map.values_mut() {
+        v.sort_unstable();
+    }
+
+    // Send requests to assigners (including ourselves).  The single-rank
+    // backend's alltoallv returns nothing, so bypass it there.
+    let mut edge_gid: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    if comm.size() == 1 {
+        for (idx, &ek) in local_new_edges.iter().enumerate() {
+            edge_gid.insert(ek, (n_global_old_nodes + idx) as u32);
+        }
+    } else {
+    let sends: Vec<(Rank, Vec<u8>)> = req_map
+        .iter()
+        .map(|(&dest, keys)| {
+            let mut b = Vec::with_capacity(keys.len() * 8);
+            for &(a, bb) in keys {
+                b.extend_from_slice(&a.to_le_bytes());
+                b.extend_from_slice(&bb.to_le_bytes());
+            }
+            (dest, b)
+        })
+        .collect();
+    let incoming = comm.alltoallv_bytes(&sends);
+
+    // Edges we assign (dedup, sorted) + per-requester edge order for replies.
+    let mut my_edges: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut req_by_requester: BTreeMap<Rank, Vec<(u32, u32)>> = BTreeMap::new();
+    for (requester, bytes) in &incoming {
+        let mut keys = Vec::with_capacity(bytes.len() / 8);
+        for chunk in bytes.chunks_exact(8) {
+            let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+            let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+            keys.push((a, b));
+        }
+        req_by_requester.insert(*requester, keys.clone());
+        my_edges.extend(keys);
+    }
+
+    // Prefix-summed id range for our edges.
+    let all_counts = gather_counts(comm, my_edges.len() as i64);
+    let base: usize = all_counts
+        .iter()
+        .take(rank as usize)
+        .map(|&c| c as usize)
+        .sum();
+
+    // Assign ids in sorted edge order.
+    for (idx, &ek) in my_edges.iter().enumerate() {
+        edge_gid.insert(ek, (n_global_old_nodes + base + idx) as u32);
+    }
+
+    // Reply to every requester (same order as the request).
+    let reply_payloads: Vec<(Rank, Vec<u8>)> = req_by_requester
+        .iter()
+        .map(|(requester, keys)| {
+            let mut b = Vec::with_capacity(keys.len() * 4);
+            for &ek in keys {
+                b.extend_from_slice(&edge_gid[&ek].to_le_bytes());
+            }
+            (*requester, b)
+        })
+        .collect();
+    let responses = comm.alltoallv_bytes(&reply_payloads);
+    for (coord, bytes) in responses {
+        let gids = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        for (&k, g) in req_map[&coord].iter().zip(gids) {
+            edge_gid.insert(k, g);
+        }
+    }
+    }
+    debug_assert_eq!(
+        edge_gid.len(),
+        local_new_edges.len(),
+        "missing midpoint ids in NC refine"
+    );
+
+    // 5. Cross-rank midpoints the local mesh references but did not create.
+    //    A coarse edge (u,v) whose midpoint was created on another rank in an
+    //    earlier round is invisible to us unless the partition rebuild adds
+    //    it as a ghost node; without it a later round would create a
+    //    duplicate midpoint with a different global id.  Exchange the global
+    //    (edge → (gid, owner)) table and append such midpoints as ghost nodes.
+    let mut global_mid: BTreeMap<(u32, u32), (u32, i32)> = BTreeMap::new();
+    for (&ek, &g) in &edge_gid {
+        let owner = edge_ref_global.get(&ek).map(|&(_, o)| o).unwrap_or(rank);
+        global_mid.insert(ek, (g, owner));
+    }
+    if comm.size() > 1 {
+        let mut mid_payload = Vec::with_capacity(edge_gid.len() * 16);
+        for (&(a, b), &(g, o)) in &global_mid {
+            mid_payload.extend_from_slice(&a.to_le_bytes());
+            mid_payload.extend_from_slice(&b.to_le_bytes());
+            mid_payload.extend_from_slice(&g.to_le_bytes());
+            mid_payload.extend_from_slice(&(o as u32).to_le_bytes());
+        }
+        let mid_sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, mid_payload.clone()))
+            .collect();
+        for (_src, bytes) in comm.alltoallv_bytes(&mid_sends) {
+            for chunk in bytes.chunks_exact(16) {
+                let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                let g = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                let o = i32::from_le_bytes(chunk[12..16].try_into().unwrap());
+                global_mid.entry((a, b)).or_insert((g, o));
+            }
+        }
+    }
+    // Edges of the refined local mesh whose midpoint lives elsewhere.
+    let mut extra_ghost: Vec<(u32, i32, f64, f64)> = Vec::new(); // (gid, owner, mx, my)
+    {
+        let mut seen: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for e in 0..refined.n_elems() as ElemId {
+            let ns = refined.elem_nodes(e);
+            for &(a, b) in &[(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)] {
+                let lk = edge_key(ns[a], ns[b]);
+                if !seen.insert(lk) {
+                    continue;
+                }
+                // Edges touching a midpoint created this round are not coarse
+                // edges; their midpoints are already handled locally.
+                if lk.0 >= n_orig as u32 || lk.1 >= n_orig as u32 {
+                    continue;
+                }
+                let gk = edge_key(gid_of(lk.0), gid_of(lk.1));
+                if !global_mid.contains_key(&gk) {
+                    continue;
+                }
+                if edge_gid.contains_key(&gk) {
+                    continue; // we created this midpoint
+                }
+                let (g, owner) = global_mid[&gk];
+                if owner == rank {
+                    continue;
+                }
+                let xa = refined.coords_of(ns[a]);
+                let xb = refined.coords_of(ns[b]);
+                extra_ghost.push((g, owner, 0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1])));
+            }
+        }
+    }
+    extra_ghost.sort_unstable_by_key(|&(g, o, mx, my)| (g, o, mx.to_bits(), my.to_bits()));
+    extra_ghost.dedup();
+
+    // 6. Global ids + owners of every new local node (plus extra ghosts).
+    let n_total_new = refined.n_nodes() + extra_ghost.len();
+    let mut new_gid = vec![0u32; n_total_new];
+    let mut new_owner = vec![0i32; n_total_new];
+    for i in 0..n_orig {
+        new_gid[i] = partition.global_node_ids[i];
+        new_owner[i] = partition.node_owner[i];
+    }
+    for (&(a, b), &mid) in midpoint_map {
+        if (mid as usize) < n_orig {
+            continue; // old midpoint from a previous round (already in old segment)
+        }
+        let gkey = edge_key(gid_of(a), gid_of(b));
+        let g = edge_gid[&gkey];
+        // Midpoint ownership: the owner of the smallest marked element
+        // referencing the edge — that rank refines the edge and creates the
+        // midpoint, so it holds the authoritative copy.
+        let (_mr, owner) = edge_ref_global[&gkey];
+        new_gid[mid as usize] = g;
+        new_owner[mid as usize] = owner;
+    }
+    for (i, &(g, owner, _mx, _my)) in extra_ghost.iter().enumerate() {
+        let id = refined.n_nodes() + i;
+        new_gid[id] = g;
+        new_owner[id] = owner;
+    }
+
+    // 7. Reorder local nodes into [owned | ghost] segments.
+    let mut order: Vec<usize> = (0..n_total_new).collect();
+    order.sort_by_key(|&i| (new_owner[i] != rank, i));
+    let n_owned_new = order.iter().filter(|&&i| new_owner[i] == rank).count();
+    let mut remap = vec![0u32; n_total_new];
+    let mut new_coords = Vec::with_capacity(n_total_new * 2);
+    for (new_id, &old_id) in order.iter().enumerate() {
+        remap[old_id] = new_id as u32;
+        let c = if old_id < refined.n_nodes() {
+            refined.coords_of(old_id as u32)
+        } else {
+            let (_, _, mx, my) = extra_ghost[old_id - refined.n_nodes()];
+            [mx, my]
+        };
+        new_coords.push(c[0]);
+        new_coords.push(c[1]);
+    }
+    let new_conn: Vec<u32> = refined.conn.iter().map(|&n| remap[n as usize]).collect();
+    let new_face_conn: Vec<u32> =
+        refined.face_conn.iter().map(|&n| remap[n as usize]).collect();
+
+    let refined_mesh = Mesh::uniform(
+        new_coords,
+        new_conn,
+        refined.elem_tags.clone(),
+        refined.elem_type,
+        new_face_conn,
+        refined.face_tags.clone(),
+        refined.face_type,
+    );
+
+    // 7. New partition: owned elements first (their children), then ghosts.
+    let mut owned_global_nodes: Vec<u32> = Vec::with_capacity(n_owned_new);
+    let mut ghost_global_nodes: Vec<(u32, i32)> = Vec::with_capacity(n_total_new - n_owned_new);
+    for &old_id in order.iter() {
+        if new_owner[old_id] == rank {
+            owned_global_nodes.push(new_gid[old_id]);
+        } else {
+            ghost_global_nodes.push((new_gid[old_id], new_owner[old_id]));
+        }
+    }
+    let n_owned_refined = (0..n_owned_elems)
+        .map(|e| {
+            let g = partition.global_elem(e as u32) as usize;
+            if global_marked.contains(&(g as u32)) { 4 } else { 1 }
+        })
+        .sum::<usize>();
+    let mut owned_global_elems: Vec<u32> = Vec::with_capacity(n_owned_refined);
+    let mut ghost_global_elems: Vec<(u32, i32)> = Vec::with_capacity(n_refined - n_owned_refined);
+    for e in 0..n_refined {
+        if e < n_owned_refined {
+            owned_global_elems.push(new_elem_gid[e]);
+        } else {
+            ghost_global_elems.push((new_elem_gid[e], new_elem_owner[e]));
+        }
+    }
+
+    let new_partition = MeshPartition::from_partitioner(
+        &owned_global_nodes,
+        &ghost_global_nodes,
+        &owned_global_elems,
+        &ghost_global_elems,
+        rank,
+    );
+    // The reordered `refined_mesh` keeps local node ids = partition segment
+    // order (owned first, then ghost), matching from_partitioner.
+    (refined_mesh, new_partition, remap)
 }
 
 // ─── DerefineTree building ──────────────────────────────────────────────────
@@ -921,6 +1397,24 @@ pub fn prolongate_p1(
     sol_fine
 }
 
+/// Reorder a per-node vector from the NCState output numbering to the
+/// reordered (`[owned | ghost]` segment) numbering produced by
+/// [`rebuild_partition_nc`].  No-op for empty vectors.
+fn reorder_solution(sol: &[f64], remap: &[u32]) -> Vec<f64> {
+    if sol.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![0.0_f64; remap.len()];
+    for (new_id, &old_id) in remap.iter().enumerate() {
+        // Extra ghost midpoints appended by the partition rebuild have no
+        // solution value (they are not referenced by any local element).
+        if (old_id as usize) < sol.len() {
+            out[new_id] = sol[old_id as usize];
+        }
+    }
+    out
+}
+
 /// Compute the global element count via allreduce.
 ///
 /// Returns `(n_global, max_local)`.
@@ -1048,7 +1542,12 @@ pub fn par_diffusive_rebalance<const D: usize>(
 mod tests {
     use super::*;
     use fem_mesh::{Mesh, amr::NCState};
-    use crate::{par_mesh::ParallelMesh, partition::MeshPartition, backend::native::SerialBackend, comm::Comm};
+    use crate::{
+        par_mesh::ParallelMesh, partition::MeshPartition,
+        backend::native::SerialBackend, comm::Comm,
+        launcher::native::ThreadLauncher, par_partition::partition_mesh,
+        WorkerConfig,
+    };
 
     fn make_serial_par_mesh(n: usize) -> (ParallelMesh<Mesh<2>>, NCState) {
         let mesh = Mesh::<2>::unit_square_tri(n);
@@ -1373,5 +1872,257 @@ mod tests {
             let rec = tree.records.get(&p).unwrap();
             assert_eq!(rec.children.len(), 4, "each parent should have 4 children");
         }
+    }
+
+    // ─── cross-rank NC refine (rebuild_partition_nc) ────────────────────────
+
+    /// Collect every rank's owned global elem ids on rank 0, sorted.
+    fn gather_owned_elems(comm: &Comm, owned: &[u32]) -> Vec<u32> {
+        if comm.is_root() {
+            let mut all: Vec<u32> = owned.to_vec();
+            for r in 1..comm.size() as i32 {
+                all.extend(comm.recv::<u32>(r, NC_AMR_MARK_TAG + 100));
+            }
+            all.sort_unstable();
+            all
+        } else {
+            comm.send(0, NC_AMR_MARK_TAG + 100, owned);
+            Vec::new()
+        }
+    }
+
+    /// Two-rank NC refine must produce the same global mesh as serial NC refine.
+    #[test]
+    fn par_refine_marked_two_ranks_matches_serial() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements, 25 nodes
+        let marked_global: Vec<ElemId> = vec![0, 1, 2, 3, 16, 17, 18, 19];
+
+        // Serial reference.
+        let mut ser_nc = NCState::new();
+        let (ser_refined, _, _) = ser_nc.refine(&mesh, &marked_global, 0);
+        let n_ser_elems = ser_refined.n_elems();
+        let n_ser_nodes = ser_refined.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let part = pmesh.partition();
+            let n_local = part.n_owned_elems + part.n_ghost_elems;
+            // Locally visible marked elements (owned + ghost, global consistency).
+            let marked_local: Vec<ElemId> = (0..n_local)
+                .filter(|&e| marked_global.contains(&part.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let nc = NCState::new();
+            let res = par_refine_marked(&pmesh, nc, &marked_local, None).unwrap();
+            let np = res.par_mesh.partition();
+
+            // Global element/node counts match serial.
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_elems as i64) as usize;
+            let n_nodes_g: usize =
+                comm.allreduce_sum_i64(np.n_owned_nodes as i64) as usize;
+            assert_eq!(n_elems_g, n_ser_elems, "global elem count mismatch");
+            assert_eq!(n_nodes_g, n_ser_nodes, "global node count mismatch");
+
+            // Owned global elem ids partition [0, n_ser_elems) exactly once.
+            let owned_gids: Vec<u32> = np.global_elem_ids[..np.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all.len(), n_ser_elems, "owned gid count");
+                assert_eq!(all, (0..n_ser_elems as u32).collect::<Vec<_>>(),
+                    "owned element gids must be a partition of the serial sequence");
+            }
+
+            // Same for nodes.
+            let owned_nodes: Vec<u32> = np.global_node_ids[..np.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_ser_nodes, "owned node gid count");
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "owned node gids must be a partition of the serial sequence");
+            }
+        });
+    }
+
+    /// Two-rank refine followed by a second refine (marked children) keeps the
+    /// same global mesh as two serial NC refine passes.
+    #[test]
+    fn par_refine_marked_two_rounds_matches_serial() {
+        let mesh = Mesh::<2>::unit_square_tri(3); // 18 elements
+        let marked_round1: Vec<ElemId> = vec![0, 1, 8, 9];
+
+        // Serial reference: two consecutive NC refinements.
+        let mut ser_nc = NCState::new();
+        let (ser1, _, _) = ser_nc.refine(&mesh, &marked_round1, 0);
+        // Mark a subset of round-1 children: the first child (id 0 → 0..4)
+        // plus children of element 1 (ids 4..8).
+        let marked_round2: Vec<ElemId> = vec![0, 1, 4, 5];
+        let (ser2, _, _) = ser_nc.refine(&ser1, &marked_round2, 0);
+        let n_ser = ser2.n_elems();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            // Round 1.
+            let pmesh0 = partition_mesh(&mesh, &comm);
+            let part0 = pmesh0.partition();
+            let n0 = part0.n_owned_elems + part0.n_ghost_elems;
+            let marked1: Vec<ElemId> = (0..n0)
+                .filter(|&e| marked_round1.contains(&part0.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let nc1 = NCState::new();
+            let r1 = par_refine_marked(&pmesh0, nc1, &marked1, None).unwrap();
+
+            // Round 2 on the refined mesh.
+            let part1 = r1.par_mesh.partition();
+            let n1 = part1.n_owned_elems + part1.n_ghost_elems;
+            let marked2: Vec<ElemId> = (0..n1)
+                .filter(|&e| marked_round2.contains(&part1.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let r2 = par_refine_marked(&r1.par_mesh, r1.nc_state, &marked2, None).unwrap();
+            let np2 = r2.par_mesh.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np2.n_owned_elems as i64) as usize;
+            assert_eq!(n_elems_g, n_ser, "two-round global elem count mismatch");
+            let owned_gids: Vec<u32> = np2.global_elem_ids[..np2.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all.len(), n_ser);
+                assert_eq!(all, (0..n_ser as u32).collect::<Vec<_>>());
+            }
+            // Nodes must also partition the serial node-id range.
+            let n_ser_nodes = ser2.n_nodes();
+            let owned_nodes: Vec<u32> = np2.global_node_ids[..np2.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_ser_nodes, "two-round owned node gid count");
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "two-round owned node gids must partition the serial sequence");
+            }
+        });
+    }
+
+    /// Regression: single round with a large mark set (pex6-like, 75% marked)
+    /// must rebuild a consistent ghost layer.
+    #[test]
+    fn par_refine_marked_single_round_large_marks() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
+
+        let mut ser_nc = NCState::new();
+        let round1_g: Vec<ElemId> = (0..24).collect(); // 75%
+        let (ser1, _, _) = ser_nc.refine(&mesh, &round1_g, 0);
+        let n_ser = ser1.n_elems();
+        let n_ser_nodes = ser1.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh0 = partition_mesh(&mesh, &comm);
+            let part0 = pmesh0.partition();
+            let n0 = part0.n_owned_elems + part0.n_ghost_elems;
+            let m1: Vec<ElemId> = (0..n0)
+                .filter(|&e| round1_g.contains(&part0.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let r1 = par_refine_marked(&pmesh0, NCState::new(), &m1, None).unwrap();
+            let np1 = r1.par_mesh.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np1.n_owned_elems as i64) as usize;
+            assert_eq!(n_elems_g, n_ser, "large-mark elem count mismatch");
+            let owned_nodes: Vec<u32> = np1.global_node_ids[..np1.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_ser_nodes, "large-mark owned node gid count");
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "large-mark owned node gids must partition the serial sequence");
+            }
+        });
+    }
+
+    /// Regression: two rounds with large mark sets (pex6-like) must also
+    /// rebuild a consistent ghost layer on the second round.
+    #[test]
+    fn par_refine_marked_two_rounds_large_marks() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
+
+        // Serial reference with the same mark fractions.
+        let mut ser_nc = NCState::new();
+        let round1_g: Vec<ElemId> = (0..24).collect(); // 75%
+        let (ser1, _, _) = ser_nc.refine(&mesh, &round1_g, 0);
+        let round2_g: Vec<ElemId> = (0..(ser1.n_elems() * 75 / 100) as ElemId).collect();
+        let (ser2, _, _) = ser_nc.refine(&ser1, &round2_g, 0);
+        let n_ser = ser2.n_elems();
+        let n_ser_nodes = ser2.n_nodes();
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh0 = partition_mesh(&mesh, &comm);
+            let part0 = pmesh0.partition();
+            let n0 = part0.n_owned_elems + part0.n_ghost_elems;
+            let m1: Vec<ElemId> = (0..n0)
+                .filter(|&e| round1_g.contains(&part0.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let r1 = par_refine_marked(&pmesh0, NCState::new(), &m1, None).unwrap();
+
+            let part1 = r1.par_mesh.partition();
+            let n1 = part1.n_owned_elems + part1.n_ghost_elems;
+            let m2: Vec<ElemId> = (0..n1)
+                .filter(|&e| round2_g.contains(&part1.global_elem(e as u32)))
+                .map(|e| e as ElemId)
+                .collect();
+            let r2 = par_refine_marked(&r1.par_mesh, r1.nc_state, &m2, None).unwrap();
+            let np2 = r2.par_mesh.partition();
+
+            let n_elems_g: usize =
+                comm.allreduce_sum_i64(np2.n_owned_elems as i64) as usize;
+            assert_eq!(n_elems_g, n_ser, "large-mark global elem count mismatch");
+            let owned_gids: Vec<u32> = np2.global_elem_ids[..np2.n_owned_elems].to_vec();
+            let all = gather_owned_elems(&comm, &owned_gids);
+            if comm.is_root() {
+                assert_eq!(all, (0..n_ser as u32).collect::<Vec<_>>());
+            }
+            let owned_nodes: Vec<u32> = np2.global_node_ids[..np2.n_owned_nodes].to_vec();
+            let all_n = gather_owned_elems(&comm, &owned_nodes);
+            if comm.is_root() {
+                assert_eq!(all_n.len(), n_ser_nodes, "large-mark owned node gid count");
+                assert_eq!(all_n, (0..n_ser_nodes as u32).collect::<Vec<_>>(),
+                    "large-mark owned node gids must partition the serial sequence");
+            }
+        });
+    }
+
+    /// Regression: four rounds of large marks must keep running (pex6-like
+    /// workload with cross-rank coarse-edge midpoints).
+    #[test]
+    fn par_refine_marked_four_rounds_large_marks() {
+        let mesh = Mesh::<2>::unit_square_tri(4); // 32 elements
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let mut pmesh = partition_mesh(&mesh, &comm);
+            let mut nc = NCState::new();
+            let mut n_elems_g: usize = 0;
+            for _round in 0..4 {
+                let part = pmesh.partition();
+                let n_local = part.n_owned_elems + part.n_ghost_elems;
+                let n_global = pmesh.global_n_elems();
+                // Mark 75% of the global element range (locally visible).
+                let mark_upto = n_global * 3 / 4;
+                let m: Vec<ElemId> = (0..n_local)
+                    .filter(|&e| (part.global_elem(e as u32) as usize) < mark_upto)
+                    .map(|e| e as ElemId)
+                    .collect();
+                let r = par_refine_marked(&pmesh, nc, &m, None).unwrap();
+                n_elems_g = comm.allreduce_sum_i64(r.par_mesh.partition().n_owned_elems as i64) as usize;
+                pmesh = r.par_mesh;
+                nc = r.nc_state;
+            }
+            // Four rounds must complete and produce a strictly growing mesh.
+            assert!(n_elems_g > 32 * 4, "expected strong growth, got {n_elems_g}");
+        });
     }
 }

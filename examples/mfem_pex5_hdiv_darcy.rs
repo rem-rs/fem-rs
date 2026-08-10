@@ -15,8 +15,9 @@
 //!
 //! Matches MFEM ex5p.cpp defaults: star.mesh, RT_FECollection(1,2) + L2(1,2),
 //! k = 1, MINRES + block-diagonal preconditioner.  Rust uses a block MINRES
-//! with diag(M)⁻¹ for the velocity block and a Gauss-Seidel smoother on the
-//! (locally assembled) Schur complement B diag(M)⁻¹ Bᵀ for the pressure block.
+//! with diag(M)⁻¹ for the velocity block and **parallel AMG** on the global
+//! Schur complement S = B·diag(M)⁻¹·Bᵀ for the pressure block — a 1:1 match
+//! of the C++ `S = ParMult(B, MinvBt)` / `HypreBoomerAMG(*S)` setup.
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex5_hdiv_darcy
@@ -26,21 +27,20 @@ use std::sync::Arc;
 
 use fem_assembly::mixed::{HDivL2DivIntegrator};
 use fem_assembly::standard::VectorMassIntegrator;
-use fem_linalg::{CooMatrix, CsrMatrix, fem_to_linlvo_csr};
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
+use fem_parallel::par_amg::{ParAmgConfig, ParAmgHierarchy, SmootherType};
 use fem_parallel::par_block_csr::{ParBlockCsrMatrix2, ParBlockVector2};
 use fem_parallel::par_mixed_assembler::ParMixedAssembler;
 use fem_parallel::{
-    DofPartition, ParVectorAssembler, ParVector, ParallelFESpace, WorkerConfig,
-    par_partition::partition_mesh_identity,
+    DofPartition, ParCsrMatrix, ParVectorAssembler, ParVector, ParallelFESpace,
+    WorkerConfig, par_partition::partition_mesh_identity,
 };
 use fem_solver::SolverConfig;
 use fem_space::dof_manager::EdgeKey;
 use fem_space::fe_space::FESpace;
 use fem_space::{HDivSpace, L2Space};
-use linlvo::core::preconditioner::Preconditioner;
-use linlvo::precond::GaussSeidelSmoother;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -167,51 +167,63 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         );
 
         // 6. Solve with preconditioned block MINRES.
-        //    Block-diagonal preconditioner: diag(M)⁻¹ for the velocity block,
-        //    diag(B diag(M)⁻¹ Bᵀ)⁻¹ for the pressure (Schur diagonal approx).
+        //    Block-diagonal preconditioner (1:1 with MFEM ex5p): diag(M)⁻¹
+        //    for the velocity block, parallel AMG on the global Schur
+        //    complement S = B·diag(M)⁻¹·Bᵀ for the pressure block
+        //    (C++: HypreBoomerAMG(*S)).
         let inv_m_diag: Vec<f64> = (0..n_u)
             .map(|i| {
                 let d = block.a00.diag_block().get(i, i).max(1e-30);
                 1.0 / d
             })
             .collect();
-        let mut s_diag = vec![0.0_f64; n_p];
-        for j in 0..block.a10.nrows {
-            let mut acc = 0.0_f64;
-            for k in block.a10.row_ptr[j]..block.a10.row_ptr[j + 1] {
-                let col = block.a10.col_idx[k] as usize;
-                if col < n_u {
-                    acc += block.a10.values[k] * block.a10.values[k] * inv_m_diag[col];
-                }
-            }
-            s_diag[j] = 1.0 / acc.max(1e-30);
-        }
 
-        // S_approx = B_owned · diag(M)⁻¹ · B_ownedᵀ (L2 owned × L2 owned), GS 平滑
-        let b = &block.a10;
-        let mut b_o_coo = CooMatrix::<f64>::new(n_p, n_u);
-        for j in 0..n_p {
-            for k in b.row_ptr[j]..b.row_ptr[j + 1] {
-                let col = b.col_idx[k] as usize;
-                if col < n_u {
-                    b_o_coo.add(j, col, b.values[k]);
+        // inv(M) over ALL RT1 dofs (owned + ghost, ghost values via exchange).
+        let n_total_rt = b.ncols; // RT1 owned + ghost
+        let mut inv_m_local = vec![0.0_f64; n_total_rt];
+        inv_m_local[..n_u].copy_from_slice(&inv_m_diag);
+        let mut inv_m_par = ParVector::from_local_raw(
+            inv_m_local,
+            n_u,
+            u_par.dof_ghost_exchange_arc(),
+            comm.clone(),
+        );
+        inv_m_par.update_ghosts();
+        let inv_m_full = inv_m_par.as_slice().to_vec();
+
+        // Global Schur complement S = B · diag(M⁻¹) · Bᵀ as a parallel
+        // matrix (L2 owned rows × L2 owned+ghost columns).  `b` holds the
+        // full B (L2 owned+ghost rows × RT1 owned+ghost cols); its first
+        // n_p rows are the owned L2 rows, exactly the from_local_matrix
+        // diag/offd split convention.
+        let n_total_l2 = b.nrows;
+        let bt = b.transpose(); // RT1 cols × L2 rows (CSC-like access to b[j, k])
+        let mut s_coo = CooMatrix::<f64>::new(n_total_l2, n_total_l2);
+        for i in 0..n_p {
+            for k in b.row_ptr[i]..b.row_ptr[i + 1] {
+                let kc = b.col_idx[k] as usize;
+                let wik = b.values[k] * inv_m_full[kc];
+                for j in bt.row_ptr[kc]..bt.row_ptr[kc + 1] {
+                    s_coo.add(i, bt.col_idx[j] as usize, wik * bt.values[j]);
                 }
             }
         }
-        let b_o = b_o_coo.into_csr();
-        let b_ot = b_o.transpose();
-        let mut minvbt_coo = CooMatrix::<f64>::new(n_u, n_p);
-        for i in 0..n_u {
-            for k in b_ot.row_ptr[i]..b_ot.row_ptr[i + 1] {
-                let j = b_ot.col_idx[k] as usize;
-                minvbt_coo.add(i, j, b_ot.values[k] * inv_m_diag[i]);
-            }
+        let s_local = s_coo.into_csr();
+        let s_par = ParCsrMatrix::from_local_matrix(
+            &s_local,
+            n_p,
+            p_par.dof_ghost_exchange_arc(),
+            comm.clone(),
+        );
+        // SGS smoother (pex2 经验: SGS 比 Jacobi 稳健); strength 0.25 default.
+        let amg_cfg = ParAmgConfig {
+            smoother: SmootherType::SymmetricGaussSeidel,
+            ..Default::default()
+        };
+        let schur_amg = ParAmgHierarchy::build(&s_par, &comm, amg_cfg);
+        if rank == 0 {
+            println!("  Schur AMG levels: {}", schur_amg.n_levels());
         }
-        let minvbt = minvbt_coo.into_csr();
-        let s_approx = b_o.multiply(&minvbt);
-        let s_linlvo = fem_to_linlvo_csr(&s_approx);
-        let gs = GaussSeidelSmoother::from_csr(&s_linlvo)
-            .expect("GaussSeidelSmoother on S_approx failed");
 
         let cfg = SolverConfig {
             rtol: 1e-6,
@@ -219,7 +231,7 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
             verbose: false,
             ..SolverConfig::default()
         };
-        let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &s_diag, &gs);
+        let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &schur_amg);
 
         // TEMP (pex5 排查): dump a00 offd（gid 序）验证跨 rank 对称
         // 7. Errors (relative to exact-solution norms).
@@ -360,12 +372,11 @@ fn block_minres(
     x: &mut ParBlockVector2,
     cfg: &SolverConfig,
     inv_m_diag: &[f64],
-    inv_s_diag: &[f64],
-    gs: &GaussSeidelSmoother<f64>,
+    schur_amg: &ParAmgHierarchy,
 ) -> fem_solver::SolveResult {
     // Port of MFEM MINRESSolver::Mult (linalg/solvers.cpp), van der Vorst
     // three-recurrence form, with a block-diagonal SPD preconditioner
-    // P = diag(diag(M)⁻¹, diag(S)⁻¹).  Block operators.
+    // P = diag(diag(M)⁻¹, AMG(S)).  Block operators.
     let n0 = x.v0.n_owned();
     let n1 = x.v1.n_owned();
 
@@ -388,7 +399,7 @@ fn block_minres(
         ParVector::zeros_like(&b.v0),
         ParVector::zeros_like(&b.v1),
     );
-    prec_apply(&v1, &mut z, inv_m_diag, inv_s_diag, gs);
+    prec_apply(&v1, &mut z, inv_m_diag, schur_amg);
 
     let mut eta = a.global_dot(&z, &v1).max(0.0).sqrt();
     let beta0 = eta;
@@ -458,7 +469,7 @@ fn block_minres(
             ParVector::zeros_like(&b.v0),
             ParVector::zeros_like(&b.v1),
         );
-        prec_apply(&v0, &mut pv0, inv_m_diag, inv_s_diag, gs);
+        prec_apply(&v0, &mut pv0, inv_m_diag, schur_amg);
         beta = a.global_dot(&v0, &pv0).max(0.0).sqrt();
         let rho1 = (delta * delta + beta * beta).sqrt();
 
@@ -544,18 +555,16 @@ fn prec_apply(
     r: &ParBlockVector2,
     z: &mut ParBlockVector2,
     inv_m_diag: &[f64],
-    inv_s_diag: &[f64],
-    gs: &GaussSeidelSmoother<f64>,
+    schur_amg: &ParAmgHierarchy,
 ) {
     for i in 0..r.v0.n_owned() {
         z.v0.as_slice_mut()[i] = inv_m_diag[i] * r.v0.as_slice()[i];
     }
-    // Schur 块: 一次 GS 平滑（比 diag(S)⁻¹ 强得多）
+    // Schur 块: 并行 AMG V-cycle on 全局 S（C++ HypreBoomerAMG 1:1 对齐）。
+    // vcycle 从零初值开始，输出 M⁻¹·r。
     let n1 = r.v1.n_owned();
-    let rd = linlvo::DenseVec::from_vec(r.v1.as_slice()[..n1].to_vec());
-    let mut zd = linlvo::DenseVec::zeros(n1);
-    gs.apply_precond(&rd, &mut zd);
-    z.v1.as_slice_mut()[..n1].copy_from_slice(zd.as_slice());
+    z.v1.as_slice_mut()[..n1].fill(0.0);
+    schur_amg.vcycle(&r.v1, &mut z.v1);
 }
 
 fn block_scale(v: &mut ParBlockVector2, s: f64) {
