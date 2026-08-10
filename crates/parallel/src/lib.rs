@@ -179,7 +179,7 @@ pub use par_ras::{
 	par_solve_pcg_ras, summarize_ras_hpc,
 };
 pub use par_partition::{partition_mesh, partition_mesh_replicated, partition_mesh_streaming};
-pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_minres};
+pub use par_solver::{par_solve_cg, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_pcg_precond, par_solve_minres};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector::ParComplexVector;

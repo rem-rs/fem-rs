@@ -14,9 +14,12 @@
 //! elements — the standard overlap that makes owned rows complete), maps the
 //! trace DOFs through a globally consistent face numbering
 //! ([`ParDpgTraceSpace`]), forms `A = Bᵀ S⁻¹ B` locally, packs it into a
-//! [`ParCsrMatrix`] and solves with Jacobi-PCG.  The framework's parallel AMG
-//! does not coarsen this operator well, and the C++ ADS/AMS preconditioners
-//! are not ported, so a plain Jacobi-PCG is used (the system is small).
+//! [`ParCsrMatrix`] and solves with PCG preconditioned by the MFEM ex8p
+//! block-diagonal operator `P = BlockDiagonal(S0⁻¹, Shat⁻¹)`: the trial
+//! (x0) block uses the parallel AMG V-cycle on the Dirichlet-eliminated
+//! x0-space diffusion `S0`, and the trace block uses an AMS
+//! (auxiliary-space, edge→vertex gradient) approximation of `Shat =
+//! Bhatᵀ S⁻¹ Bhat` (2-D rotated H(curl) — [`ParAmsPrecond`]).
 //!
 //! # Multi-rank support
 //! The cross-rank off-diagonal blocks of `A` are consistent: the trace-space
@@ -47,15 +50,18 @@ use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_dpg_trace::ParDpgTraceSpace;
 use fem_parallel::par_mixed_assembler::ParMixedAssembler;
 use fem_parallel::par_partition::partition_mesh;
-use fem_parallel::par_solve_pcg_jacobi;
+use fem_parallel::par_solve_pcg_precond;
 use fem_parallel::{
-    DofPartition, GhostExchange, ParCsrMatrix, ParVector, ParallelFESpace,
+    DofPartition, GhostExchange, ParAssembler, ParCsrMatrix, ParVector, ParallelFESpace,
     WorkerConfig, ghost::GhostChannelDef,
+    par_amg::{ParAmgConfig, ParAmgHierarchy},
+    par_ams::ParAmsPrecond,
 };
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 use fem_space::fe_space::FESpace;
 use fem_space::{DpgTraceSpace, H1Space, L2Space, FaceInfo};
+use linlvo::precond::AmsConfig;
 
 // ─── Mixed Diffusion Integrator (B0: trial × test) ───────────────────────────
 
@@ -294,16 +300,88 @@ fn main() {
         let bnorm: f64 = rhs[..n_owned].iter().map(|v| v * v).sum::<f64>().sqrt();
         let _bnorm_global = comm.allreduce_sum_f64(bnorm * bnorm).sqrt();
 
-        // ── 9. Solve ─────────────────────────────────────────────────────────
+        // ── 9. Solve with a block-diagonal preconditioner ────────────────────
+        //    MFEM ex8p: P = BlockDiagonal(S0⁻¹, Shat⁻¹) with
+        //      S0    = x0-space diffusion (Dirichlet eliminated) → BoomerAMG;
+        //      Shat  = Bhatᵀ S⁻¹ Bhat (H(div) trace skeleton) → AMS (2-D:
+        //              the rotated H(curl) problem, edge→vertex gradient G).
+        //    We port this with the parallel AMG hierarchy (V-cycle) for S0 and
+        //    a block-Jacobi AMS (ParAmsPrecond) for Shat.
         let b = ParVector::from_local_raw(rhs, n_owned, Arc::clone(&ghost), comm.clone());
         let mut u = ParVector::zeros_like(&b);
+
+        // S0 block: x0-space diffusion with symmetric Dirichlet elimination
+        // (row AND column, diagonal 1) so the block stays SPD — the
+        // one-sided row elimination would make the AMG V-cycle nonsymmetric
+        // and PCG would not converge.
+        let mut s0_mat = ParAssembler::assemble_bilinear(
+            &x0_par,
+            &[&DiffusionIntegrator { kappa: 1.0 }],
+            3,
+        );
+        {
+            let s0_owned_dofs: Vec<usize> = ess_dofs
+                .iter()
+                .map(|&d| x0_par.dof_partition().permute_dof(d as u32) as usize)
+                .filter(|&p| p < n_trial_owned)
+                .collect();
+            s0_mat.eliminate_diag_symmetric(&s0_owned_dofs, 1.0);
+        }
+        let s0_hierarchy = ParAmgHierarchy::build(
+            &s0_mat,
+            &comm,
+            ParAmgConfig { ..Default::default() },
+        );
+
+        // Shat block: trace (edge) matrix with the edge→vertex gradient.
+        let a11_par = ParCsrMatrix::from_local_matrix(
+            &a11,
+            n_trace_owned,
+            trace.ghost_exchange_arc(),
+            comm.clone(),
+        );
+        let g_local = build_trace_gradient(&trace, n_trace_owned, local_mesh.n_nodes());
+        // HYPRE AMS defaults: symmetric GS edge smoother + multiplicative
+        // V(1,1) cycle (both symmetric → valid PCG preconditioner).
+        let shat_ams = ParAmsPrecond::new(
+            &a11_par,
+            &g_local,
+            AmsConfig {
+                edge_smoother: linlvo::precond::AmsEdgeSmoother::SymmetricGaussSeidel,
+                cycle: linlvo::precond::AmsCycle::MultiplicativeV11,
+                singularity_regularization: 1e-6,
+                ..Default::default()
+            },
+        );
+
+        // Block-diagonal apply on the owned segment [trial | trace].  The
+        // trial block needs a full x0 vector; its ghost segment is filled
+        // with zeros — the AMG V-cycle's SpMV refreshes ghosts via
+        // update_ghosts_overlapping, so the initial ghost values do not
+        // matter.
+        let x0_ghost_arc = x0_par.dof_ghost_exchange_arc();
+        let comm2 = comm.clone();
+        let precond = |r: &[f64], z: &mut [f64]| {
+            let mut rx0 = vec![0.0_f64; n_trial_owned + n_trial_ghost];
+            rx0[..n_trial_owned].copy_from_slice(&r[..n_trial_owned]);
+            let rxv = ParVector::from_local_raw(
+                rx0,
+                n_trial_owned,
+                Arc::clone(&x0_ghost_arc),
+                comm2.clone(),
+            );
+            let mut zx0 = ParVector::zeros_like(&rxv);
+            s0_hierarchy.vcycle(&rxv, &mut zx0);
+            z[..n_trial_owned].copy_from_slice(&zx0.as_slice()[..n_trial_owned]);
+            shat_ams.apply(&r[n_trial_owned..n_owned], &mut z[n_trial_owned..n_owned]);
+        };
         let cfg = SolverConfig {
             rtol: 1e-8,
             max_iter: 3000,
             verbose: false,
             ..SolverConfig::default()
         };
-        let res = par_solve_pcg_jacobi(&a, &b, &mut u, &cfg).expect("PCG failed");
+        let res = par_solve_pcg_precond(&a, &b, &mut u, &precond, &cfg).expect("PCG failed");
         let iters = res.iterations;
 
         // ── 10. DPG residual ||B x - F||_{S⁻¹} ────────────────────────────────
@@ -658,6 +736,31 @@ fn quad_mesh_to_tri(mesh: &Mesh<2>) -> Mesh<2> {    let n = mesh.n_elems();
         mesh.face_tags.clone(),
         ElementType::Line2,
     )
+}
+
+/// Build the edge → vertex gradient incidence `G` (n_owned_edges × n_nodes):
+/// each trace DOF (an interface edge) gets −1 at its tail node and +1 at its
+/// head node.  This is the discrete gradient of the rotated H(curl) problem
+/// that the AMS auxiliary space needs (MFEM ex8p feeds it to HypreAMS).
+fn build_trace_gradient(
+    trace: &ParDpgTraceSpace<Mesh<2>>,
+    n_trace_owned: usize,
+    n_nodes_local: usize,
+) -> CsrMatrix<f64> {
+    let n_faces = trace.local().n_faces();
+    let mut g = CooMatrix::<f64>::new(n_trace_owned, n_nodes_local);
+    for f in 0..n_faces {
+        let nodes = match trace.local().face_info(f) {
+            FaceInfo::Boundary { nodes, .. } | FaceInfo::Interior { nodes, .. } => nodes,
+        };
+        for &dof in trace.face_dofs_local(f) {
+            if (dof as usize) < n_trace_owned {
+                g.add(dof as usize, nodes[0] as usize, -1.0);
+                g.add(dof as usize, nodes[1] as usize, 1.0);
+            }
+        }
+    }
+    g.into_csr()
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<usize> {

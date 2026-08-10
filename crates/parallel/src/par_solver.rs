@@ -343,6 +343,94 @@ pub fn par_solve_pcg_jacobi(
     })
 }
 
+/// Parallel preconditioned Conjugate Gradient with a custom preconditioner.
+///
+/// `precond` maps the *owned* portion of the residual to the owned portion
+/// of `z` (`z[..n] = M⁻¹ r[..n]`); ghost values are left untouched.  This
+/// is the building block for block-diagonal preconditioners (per-block
+/// AMG / AMS etc.).
+pub fn par_solve_pcg_precond<F>(
+    a: &ParCsrMatrix,
+    b: &ParVector,
+    x: &mut ParVector,
+    precond: &F,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &mut [f64]),
+{
+    let n = a.n_owned;
+
+    // r = b - A*x
+    let mut r = b.clone_vec();
+    let mut ax = ParVector::zeros_like(b);
+    a.spmv(x, &mut ax);
+    sub_assign_owned(&mut r.data, &b.data, &ax.data, n);
+
+    // z = M^{-1} r
+    let mut z = ParVector::zeros_like(b);
+    precond(&r.data[..n], &mut z.data[..n]);
+
+    let mut p = z.clone_vec();
+    let mut rz = r.global_dot(&z);
+    let b_norm = b.global_norm();
+
+    if b_norm < 1e-30 {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+    }
+
+    let mut ap = ParVector::zeros_like(b);
+
+    for iter in 0..cfg.max_iter {
+        // ap = A * p
+        a.spmv(&mut p, &mut ap);
+
+        let pap = p.global_dot(&ap);
+        if pap.abs() < 1e-30 {
+            break;
+        }
+        let alpha = rz / pap;
+
+        // x += alpha * p
+        x.axpy(alpha, &p);
+        // r -= alpha * ap
+        r.axpy(-alpha, &ap);
+
+        let rr = r.global_dot(&r);
+        let res_norm = rr.sqrt() / b_norm;
+
+        if cfg.verbose && x.comm().is_root() {
+            log::info!("par_pcg_precond iter {}: residual = {:.3e}", iter + 1, res_norm);
+        }
+
+        if res_norm < cfg.rtol || rr.sqrt() < cfg.atol {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter + 1,
+                final_residual: res_norm,
+            });
+        }
+
+        // z = M^{-1} r
+        precond(&r.data[..n], &mut z.data[..n]);
+
+        let rz_new = r.global_dot(&z);
+        let beta = rz_new / rz;
+
+        // p = z + beta * p
+        let plen = p.data.len();
+        add_scaled_inplace(&mut p.data, &z.data, beta, plen);
+        rz = rz_new;
+    }
+
+    let final_res = r.global_dot(&r).sqrt() / b_norm;
+    Ok(SolveResult {
+        converged: false,
+        iterations: cfg.max_iter,
+        final_residual: final_res,
+    })
+}
+
 /// Parallel restarted GMRES with Jacobi (`M = diag(A)`) right preconditioning.
 ///
 /// Targets general (possibly nonsymmetric) distributed systems. For SPD
