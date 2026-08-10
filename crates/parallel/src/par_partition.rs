@@ -393,6 +393,55 @@ fn extract_submesh_from_partition_impl<const D: usize>(
     local_mesh.face_types = local_face_types;
     local_mesh.face_offsets = local_face_offsets;
 
+    // 8b. Migrate the per-element geometry table (curved meshes and
+    // geometrically periodic meshes — `periodic-square/hexagon.mesh` store
+    // each element's own geometry nodes, so the same vertex index maps to
+    // different physical positions in different elements).  `Mesh::uniform`
+    // above left `geometry` unset; without a migrated table the local mesh
+    // falls back to the folded vertex coordinates and the element geometry is
+    // silently corrupted (wrong face normals / Jacobians → wrong DG flux).
+    if let Some(ref geo) = mesh.geometry {
+        let n_local_geom = all_local_elems * geo.nodes_per_elem;
+        let mut geo_conn = Vec::with_capacity(n_local_geom);
+        if identity_nodes {
+            // Keep global geometry-node ids (coords stay at global indices).
+            for &ge in local_elem_gids.iter().chain(ghost_elem_gids.iter()) {
+                geo_conn.extend_from_slice(mesh.geometry_nodes(ge));
+            }
+            local_mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+                order: geo.order,
+                conn: geo_conn,
+                nodes_per_elem: geo.nodes_per_elem,
+                coords: geo.coords.clone(),
+                n_nodes: geo.n_nodes,
+            });
+        } else {
+            // Compact local ids: remap the referenced geometry nodes.
+            let mut geom_map = vec![u32::MAX; geo.n_nodes];
+            let mut geo_coords: Vec<f64> = Vec::new();
+            for &ge in local_elem_gids.iter().chain(ghost_elem_gids.iter()) {
+                for &g in mesh.geometry_nodes(ge) {
+                    let gi = g as usize;
+                    if geom_map[gi] == u32::MAX {
+                        let new_id = (geo_coords.len() / D) as u32;
+                        let off = gi * D;
+                        geo_coords.extend_from_slice(&geo.coords[off..off + D]);
+                        geom_map[gi] = new_id;
+                    }
+                    geo_conn.push(geom_map[gi]);
+                }
+            }
+            let n_geo = geo_coords.len() / D;
+            local_mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+                order: geo.order,
+                conn: geo_conn,
+                nodes_per_elem: geo.nodes_per_elem,
+                coords: geo_coords,
+                n_nodes: n_geo,
+            });
+        }
+    }
+
     let ghost_elem_pairs: Vec<(ElemId, Rank)> = ghost_elem_gids.iter()
         .map(|&gid| (gid, elem_part[gid as usize]))
         .collect();

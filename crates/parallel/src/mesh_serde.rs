@@ -138,6 +138,12 @@ pub fn encode_submesh<const D: usize>(
         mix_flags |= 2;
         ext_tail += (n_faces + 1) * 4 + n_faces * 4;
     }
+    if let Some(g) = &mesh.geometry {
+        // Per-element (possibly geometrically periodic) geometry table:
+        // order + nodes_per_elem + n_nodes + conn (u32[]) + coords (f64[]).
+        mix_flags |= 4;
+        ext_tail += 4 + 4 + 4 + g.conn.len() * 4 + g.coords.len() * 8;
+    }
     let wire_format: u32 = if mix_flags != 0 { 2 } else { 0 };
     if mix_flags != 0 {
         ext_tail += 4; // mix_flags word
@@ -235,6 +241,18 @@ pub fn encode_submesh<const D: usize>(
                 buf.extend_from_slice(&element_type_to_u32(*t).to_le_bytes());
             }
         }
+        if mix_flags & 4 != 0 {
+            let g = mesh.geometry.as_ref().unwrap();
+            buf.extend_from_slice(&(g.order as u32).to_le_bytes());
+            buf.extend_from_slice(&(g.nodes_per_elem as u32).to_le_bytes());
+            buf.extend_from_slice(&(g.n_nodes as u32).to_le_bytes());
+            for &x in &g.conn {
+                buf.extend_from_slice(&x.to_le_bytes());
+            }
+            for &x in &g.coords {
+                buf.extend_from_slice(&x.to_le_bytes());
+            }
+        }
     }
 
     debug_assert_eq!(buf.len(), total);
@@ -323,6 +341,23 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
                 }
                 mesh.face_offsets = Some(fo);
                 mesh.face_types = Some(ft);
+            }
+            if mix_flags & 4 != 0 {
+                let order = read_u32_at(buf, &mut offset)? as u8;
+                let nodes_per_elem = read_u32_at(buf, &mut offset)? as usize;
+                let n_nodes = read_u32_at(buf, &mut offset)? as usize;
+                // `conn` holds one `nodes_per_elem`-row per LOCAL element
+                // (n_local_elems × npe), NOT n_nodes × npe — n_nodes is the
+                // deduplicated geometry-node count (coords.len() / D).
+                let conn = read_u32_vec(buf, &mut offset, n_local_elems * nodes_per_elem)?;
+                let coords = read_f64_vec(buf, &mut offset, n_nodes * D)?;
+                mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+                    order,
+                    conn,
+                    nodes_per_elem,
+                    coords,
+                    n_nodes,
+                });
             }
         }
         other => {
@@ -485,6 +520,47 @@ mod tests {
         let result = decode_submesh::<3>(&buf);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("dimension mismatch"));
+    }
+
+    #[test]
+    fn round_trip_per_element_geometry() {
+        // Geometrically periodic mesh (periodic-hexagon-style): each Quad4
+        // element owns an independent 4-node geometry table whose coords are
+        // NOT the folded vertex coords.  Encode/decode must preserve it.
+        let coords = vec![
+            -0.5, -0.866, 0.0, -0.866, 0.25, -0.433, -0.25, -0.433, // elem 0
+            0.25, -0.433, 0.75, -0.433, 1.0, 0.0, 0.5, 0.0, // elem 1
+        ];
+        let conn = vec![0u32, 1, 2, 3, 1, 4, 5, 2];
+        let elem_tags = vec![1i32, 1];
+        let mut mesh = Mesh::<2>::uniform(
+            vec![0.0; 5 * 2], // folded vertex coords (unused by geometry path)
+            conn,
+            elem_tags,
+            ElementType::Quad4,
+            Vec::new(),
+            Vec::new(),
+            ElementType::Line2,
+        );
+        mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+            order: 1,
+            conn: vec![0u32, 1, 2, 3, 4, 5, 6, 7],
+            nodes_per_elem: 4,
+            coords,
+            n_nodes: 8,
+        });
+
+        let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
+        let buf = encode_submesh(&mesh, &partition);
+        let (mesh2, _) = decode_submesh::<2>(&buf).expect("decode failed");
+
+        let g = mesh.geometry.as_ref().expect("source geometry");
+        let g2 = mesh2.geometry.as_ref().expect("decoded geometry");
+        assert_eq!(g.order, g2.order);
+        assert_eq!(g.nodes_per_elem, g2.nodes_per_elem);
+        assert_eq!(g.n_nodes, g2.n_nodes);
+        assert_eq!(g.conn, g2.conn);
+        assert_eq!(g.coords, g2.coords);
     }
 
     #[test]

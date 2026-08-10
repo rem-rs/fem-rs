@@ -106,8 +106,10 @@
 //!
 //! Streaming partition ([`partition_mesh_streaming`]) serialises sub-meshes with
 //! [`mesh_serde::encode_submesh`](mesh_serde::encode_submesh); **wire format v2** carries
-//! mixed volume elements and mixed boundary faces (e.g. `Prism6` / `Pyramid5` with Tri3+Quad4
-//! boundaries) so cylinder- or cone-like GMSH meshes round-trip correctly across ranks.
+//! mixed volume elements, mixed boundary faces (e.g. `Prism6` / `Pyramid5` with Tri3+Quad4
+//! boundaries) so cylinder- or cone-like GMSH meshes round-trip correctly across ranks,
+//! and the per-element (possibly geometrically periodic) geometry table so curved /
+//! periodic meshes keep their element-local geometry on every rank.
 
 pub mod backend;
 pub mod comm;

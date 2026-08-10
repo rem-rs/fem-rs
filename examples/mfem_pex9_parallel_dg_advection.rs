@@ -27,15 +27,17 @@
 //! face fluxes and normals) and boundary faces are assigned to the rank that
 //! owns the adjacent element (MFEM `GetBdrElementAdjacentElement`), so each
 //! owned row receives its boundary flux.  On a periodic mesh mass is
-//! conserved (nothing leaves the domain).
+//! conserved (nothing leaves the domain): np2 mass evolution matches np1
+//! exactly (bit-identical K, 3.865836 → 3.865836 at tf=2.0).
 //!
-//! # Known limitation
-//! On a *periodic* mesh the multi-rank (`--ranks 2`) mass evolution shows a
-//! small drift (≈ ±0.3%/step at order 1 on periodic-hexagon) while np1 is
-//! exactly conservative — the periodic face-flux scatter in the local
-//! (owned+ghost) assembly is not yet bit-consistent across ranks.  The
-//! non-periodic path (unit-square with inflow) has no such drift (np2 mass
-//! matches np1).
+//! Note (per-element geometry): geometrically periodic meshes
+//! (periodic-hexagon/periodic-square) store each element's *own* geometry
+//! nodes — the same vertex index maps to different physical positions in
+//! different elements.  `partition_mesh` migrates the per-element geometry
+//! table into the local sub-mesh, so face normals / Jacobians are identical
+//! on every rank holding a face.  (This was the np2 periodic mass-drift root
+//! cause: without the migration the local mesh fell back to folded vertex
+//! coordinates and cross-rank faces saw inconsistent geometry.)
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex9_parallel_dg_advection -- --ranks 1
