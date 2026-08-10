@@ -869,6 +869,12 @@ pub fn csr_spmm_parallel(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f6
         .into_par_iter()
         .map(|i| {
             let mut acc: Vec<f64> = vec![0.0_f64; n];
+            // `seen` (not `acc[j] == 0.0`) marks dirty columns: for matrices
+            // with sign cancellations (elasticity, DG), acc[j] can return to
+            // exactly 0.0 mid-accumulation and then get a new contribution,
+            // which the old test turned into a DUPLICATE column in the CSR
+            // output (breaking A_c = PᵀAP symmetry / correctness).
+            let mut seen: Vec<bool> = vec![false; n];
             let mut dirty: Vec<u32> = Vec::new();
 
             for ka in a.row_ptr[i]..a.row_ptr[i + 1] {
@@ -880,7 +886,7 @@ pub fn csr_spmm_parallel(a: &CsrMatrix<f64>, b: &CsrMatrix<f64>) -> CsrMatrix<f6
                     let j    = b.col_idx[kb] as usize;
                     let b_kj = b.values[kb];
                     if b_kj == 0.0 { continue; }
-                    if acc[j] == 0.0 { dirty.push(j as u32); }
+                    if !seen[j] { seen[j] = true; dirty.push(j as u32); }
                     acc[j] += a_ik * b_kj;
                 }
             }
@@ -1315,5 +1321,36 @@ mod tests {
         for (s, p) in ds.iter().zip(dp.iter()) {
             assert!((s - p).abs() < 1e-14, "serial vs parallel: {s} vs {p}");
         }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn spmm_parallel_no_duplicate_columns_on_cancellation() {
+        // Row with sign cancellations: acc[j] returns to exactly 0.0
+        // mid-accumulation and then receives a new contribution.  Regression:
+        // the old dirty-marker test `acc[j] == 0.0` pushed the same column
+        // twice, so the CSR output carried 2× values (breaking A_c = PᵀAP
+        // symmetry in the nodal AMG Galerkin product).
+        let mut ca = CooMatrix::<f64>::new(1, 3);
+        ca.add(0, 0, 1.0);
+        ca.add(0, 1, -1.0); // cancels acc[0] back to 0.0
+        ca.add(0, 2, 2.0);
+        let a = ca.into_csr();
+        let mut cb = CooMatrix::<f64>::new(3, 1);
+        cb.add(0, 0, 1.0);
+        cb.add(1, 0, 1.0);
+        cb.add(2, 0, 1.0);
+        let b = cb.into_csr();
+        let c = super::csr_spmm_parallel(&a, &b);
+        // expected: 1*1 + (-1)*1 + 2*1 = 2
+        assert_eq!(c.nrows, 1);
+        assert_eq!(c.ncols, 1);
+        assert!(
+            (c.get(0, 0) - 2.0).abs() < 1e-14,
+            "cancellation spmm: got {} expected 2",
+            c.get(0, 0)
+        );
+        let row = &c.col_idx[0..c.row_ptr[1]];
+        assert_eq!(row.len(), 1, "duplicate columns: {:?}", row);
     }
 }

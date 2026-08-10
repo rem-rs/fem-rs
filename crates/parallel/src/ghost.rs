@@ -387,6 +387,91 @@ impl GhostExchange {
     pub fn is_trivial(&self) -> bool {
         self.channels.is_empty()
     }
+
+    /// Exchange *sparse per-row* data along the same halo pattern as
+    /// [`forward`](GhostExchange::forward): for each owned position `r`,
+    /// `pack(r)` returns that row's non-zeros as `(column, value)` pairs; the
+    /// row is delivered to every ghost slot that references `r`.  Returns the
+    /// ghost rows indexed by ghost slot (`out[g]` = non-zeros of ghost slot
+    /// `g`), with slots that were never filled left empty.
+    ///
+    /// Used by the nodal (systems) AMG to move the prolongation operator's
+    /// ghost rows to the ranks that need them for the Galerkin product.
+    /// The payload layout mirrors [`forward_blocking`] (same send/recv slot
+    /// correspondence), but each slot carries a variable-length row:
+    /// `nz u32 | (col u32, val f64) * nz`.
+    pub fn forward_sparse_rows(
+        &self,
+        comm: &Comm,
+        pack: impl Fn(usize) -> Vec<(u32, f64)>,
+    ) -> Vec<Vec<(u32, f64)>> {
+        if self.channels.is_empty() {
+            return Vec::new();
+        }
+
+        // Determine the ghost-slot range (max recv id + 1) so callers can
+        // index the returned rows by slot.
+        let max_recv = self
+            .channels
+            .iter()
+            .flat_map(|c| c.recv_local_ids.iter())
+            .max()
+            .copied()
+            .unwrap_or(0);
+        let mut out: Vec<Vec<(u32, f64)>> = vec![Vec::new(); (max_recv as usize + 1)];
+
+        // Pack each channel's send rows and exchange via alltoallv (collective
+        // rendezvous — the per-row payload can be large, so point-to-point
+        // send_bytes would deadlock when both sides block on full buffers).
+        let mut send_data: std::collections::HashMap<fem_core::Rank, Vec<u8>> =
+            std::collections::HashMap::new();
+        for ch in &self.channels {
+            let mut buf: Vec<u8> = Vec::new();
+            for &lid in &ch.send_local_ids {
+                let row = pack(lid as usize);
+                buf.extend_from_slice(&(row.len() as u32).to_le_bytes());
+                for (c, v) in row {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            send_data.entry(ch.rank).or_default().extend(buf);
+        }
+        let sends: Vec<(fem_core::Rank, Vec<u8>)> = send_data.into_iter().collect();
+        let received = comm.alltoallv_bytes(&sends);
+
+        // Receive: the k-th packed row from a sender lands in that channel's
+        // recv_local_ids[k] (the two ends of a channel are symmetric).
+        for (sender_rank, bytes) in &received {
+            let ch = self
+                .channels
+                .iter()
+                .find(|c| c.rank == *sender_rank)
+                .expect("received sparse rows from unknown channel");
+            let mut off = 0usize;
+            for &lid in &ch.recv_local_ids {
+                let nz = u32::from_le_bytes(
+                    bytes[off..off + 4].try_into().unwrap(),
+                ) as usize;
+                off += 4;
+                let mut row = Vec::with_capacity(nz);
+                for _ in 0..nz {
+                    let c = u32::from_le_bytes(
+                        bytes[off..off + 4].try_into().unwrap(),
+                    );
+                    off += 4;
+                    let v = f64::from_le_bytes(
+                        bytes[off..off + 8].try_into().unwrap(),
+                    );
+                    off += 8;
+                    row.push((c, v));
+                }
+                out[lid as usize] = row;
+            }
+        }
+
+        out
+    }
 }
 
 // ── native MPI non-blocking (rsmpi) ───────────────────────────────────────────

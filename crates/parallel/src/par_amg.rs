@@ -89,6 +89,17 @@ pub struct ParAmgConfig {
     /// CG terminates adaptively to a tight tolerance, giving a more accurate
     /// coarse correction in (often) fewer floating-point operations.
     pub coarse_cg: bool,
+    /// Systems-AMG block size (number of DOFs per node / per physical point).
+    ///
+    /// `1` (default) = scalar AMG.  For vector PDEs (2-D elasticity: 2,
+    /// 3-D elasticity / Maxwell-ish systems: 3) set this to the DOFs per
+    /// node: coarsening, interpolation and the Galerkin product then operate
+    /// on `block_size × block_size` node blocks (hypre BoomerAMG "nodal"
+    /// approach), which represents the coupled rigid-body / block modes that
+    /// scalar AMG cannot.  Requires the matrix DOF layout to be the
+    /// byNODES block layout (`vd * n_nodes + node`), which is what
+    /// `DofPartition::from_vector_space` produces.
+    pub block_size: usize,
 }
 
 impl Default for ParAmgConfig {
@@ -102,6 +113,7 @@ impl Default for ParAmgConfig {
             smoother: SmootherType::Jacobi,
             smoothed_prolongation: false,
             coarse_cg: true,
+            block_size: 1,
         }
     }
 }
@@ -213,7 +225,11 @@ impl ParAmgHierarchy {
                 break;
             }
 
-            let (p, r, coarse_a) = if global_agg {
+            let (p, r, coarse_a) = if config.block_size > 1 {
+                build_nodal_coarse_level_global(
+                    &ca, comm, config.strength_threshold, config.block_size,
+                )
+            } else if global_agg {
                 build_coarse_level_global(&ca, comm, config.strength_threshold)
             } else {
                 build_coarse_level(&ca, comm, config.strength_threshold)
@@ -221,7 +237,10 @@ impl ParAmgHierarchy {
 
             // Optionally smooth the prolongation: P_smooth = (I - ω D⁻¹ A) P_tent.
             // This is the key step of Smoothed Aggregation (SA-AMG).
-            let p = if config.smoothed_prolongation {
+            // Nodal (block) interpolation is already an energy-minimising
+            // per-block operator, and smoothing would destroy its block
+            // structure — skip it for systems AMG.
+            let p = if config.smoothed_prolongation && config.block_size <= 1 {
                 smooth_prolongation(&ca, p, &inv_diag)
             } else {
                 p
@@ -986,6 +1005,592 @@ fn build_coarse_level_global(
         ac_offd,
         n_coarse,
         _n_coarse_ghost,
+        coarse_ghost_exchange,
+        comm.clone(),
+    );
+
+    (p_par, r_par, ac_par)
+}
+
+// ── Nodal (systems) AMG ───────────────────────────────────────────────────────
+
+/// Frobenius norm of a `bs × bs` block stored row-major.
+fn frob_norm(blk: &[f64]) -> f64 {
+    let mut s = 0.0f64;
+    for &v in blk {
+        s += v * v;
+    }
+    s.sqrt()
+}
+
+/// Build the coarse level for **systems AMG** (hypre BoomerAMG "nodal"
+/// approach): coarsening, interpolation and the Galerkin product all operate
+/// on `bs × bs` node blocks (DOFs per node), so strongly coupled vector PDEs
+/// (elasticity etc.) keep their block structure instead of being split into
+/// independent scalar unknowns.
+///
+/// The DOF layout must be the byNODES block layout produced by
+/// `DofPartition::from_vector_space`: owned DOF `r` belongs to node
+/// `r % n_owned_nodes` and component `r / n_owned_nodes`; ghost DOF slot `g`
+/// to ghost node `g % n_ghost_nodes` and component `g / n_ghost_nodes`.
+///
+/// Algorithm (one coarse level):
+/// 1. Extract the node-block matrix: block `B_ij` (bs×bs) for every pair of
+///    adjacent nodes, from the dof-level `diag`/`offd` blocks.
+/// 2. Node-level aggregation driven by the **block strength**
+///    `s_ij = ‖B_ij‖_F` (aggregation phase 1 seeds, phase 2 assigns leftovers).
+/// 3. Global aggregate ids via alltoallv prefix sum + ghost propagation
+///    (`agg_buf` forward) — every rank agrees on the coarse-dof numbering
+///    `global_agg_id * bs + e`.
+/// 4. **Block interpolation**: `P` block `(i, agg(i)) = I` (identity for every
+///    node) plus `-D_i⁻¹ B_{i,a}` for every strongly-connected *other*
+///    aggregate `a`, with `D_i = B_ii` (block diagonal, exact per-node solve).
+///    This is the key difference from the scalar SA path: each block is a
+///    full `bs×bs` matrix, so the coarse space carries the coupled rigid-body
+///    / block modes that scalar (or block-constant) interpolation cannot.
+/// 5. P's ghost rows are exchanged (`GhostExchange::forward_sparse_rows`) so
+///    the Galerkin product sees identical P values on every rank holding a
+///    node.
+/// 6. `A_c = Pᵀ A P`: `AP = A·P` locally (diag + ghost P rows), then
+///    `A_c = R·AP`; columns are re-split into the local coarse dof range and
+///    the coarse ghost range (other ranks' aggregates), with a dof-level
+///    coarse `GhostExchange` for the next level's halo.
+fn build_nodal_coarse_level_global(
+    a: &ParCsrMatrix,
+    comm: &Comm,
+    strength_threshold: f64,
+    bs: usize,
+) -> (ParCsrMatrix, ParCsrMatrix, ParCsrMatrix) {
+    let n_owned = a.n_owned;
+    let n_ghost = a.n_ghost;
+    let n_on = n_owned / bs; // owned nodes
+    let n_gn = n_ghost / bs; // ghost nodes
+    let diag = &a.diag;
+    let offd = &a.offd;
+    let ghost_ex = a.ghost_exchange_arc();
+
+    // ── 1. node-block matrix: nbr[i] = (key, block), key = j (owned) or n_on+g ──
+    let mut nbr: Vec<Vec<(usize, Vec<f64>)>> = vec![Vec::new(); n_on];
+    let mut blk_of: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    for r in 0..n_owned {
+        let node = r % n_on;
+        let vd = r / n_on;
+        for k in diag.row_ptr[r]..diag.row_ptr[r + 1] {
+            let c = diag.col_idx[k] as usize;
+            let j = c % n_on;
+            let vdj = c / n_on;
+            let idx = *blk_of.entry((node, j)).or_insert_with(|| {
+                nbr[node].push((j, vec![0.0; bs * bs]));
+                nbr[node].len() - 1
+            });
+            nbr[node][idx].1[vd * bs + vdj] = diag.values[k];
+        }
+        for k in offd.row_ptr[r]..offd.row_ptr[r + 1] {
+            let c = offd.col_idx[k] as usize;
+            let g = c % n_gn;
+            let vdj = c / n_gn;
+            let key = n_on + g;
+            let idx = *blk_of.entry((node, key)).or_insert_with(|| {
+                nbr[node].push((key, vec![0.0; bs * bs]));
+                nbr[node].len() - 1
+            });
+            nbr[node][idx].1[vd * bs + vdj] = offd.values[k];
+        }
+    }
+
+    // ── 2. per-node block strength + local aggregation ──────────────────────
+    // Strength excludes the diagonal block (like scalar RS: max over j ≠ i);
+    // including B_ii would push the threshold above every off-diagonal block
+    // for elasticity (‖B_ij‖_F ≈ 1-2 vs ‖B_ii‖_F ≈ 6) and prevent aggregation.
+    let mut max_row = vec![0.0f64; n_on];
+    for i in 0..n_on {
+        for (key, blk) in &nbr[i] {
+            if *key == i {
+                continue;
+            }
+            let s = frob_norm(blk);
+            if s > max_row[i] {
+                max_row[i] = s;
+            }
+        }
+    }
+    let mut aggregate = vec![-1i32; n_on];
+    let mut n_agg = 0i32;
+    // Phase 1: seed aggregates (node + its strong unassigned owned neighbours).
+    for i in 0..n_on {
+        if aggregate[i] >= 0 {
+            continue;
+        }
+        let th = strength_threshold * max_row[i];
+        aggregate[i] = n_agg;
+        for (key, blk) in &nbr[i] {
+            if *key < n_on {
+                let j = *key;
+                if j != i && aggregate[j] < 0 && frob_norm(blk) >= th {
+                    aggregate[j] = n_agg;
+                }
+            }
+        }
+        n_agg += 1;
+    }
+    // Phase 2: assign leftover nodes to the strongest-connected aggregate.
+    for i in 0..n_on {
+        if aggregate[i] >= 0 {
+            continue;
+        }
+        let mut best = -1i32;
+        let mut best_v = 0.0f64;
+        for (key, blk) in &nbr[i] {
+            if *key < n_on {
+                let j = *key;
+                if j != i && aggregate[j] >= 0 && frob_norm(blk) > best_v {
+                    best_v = frob_norm(blk);
+                    best = aggregate[j];
+                }
+            }
+        }
+        if best >= 0 {
+            aggregate[i] = best;
+        } else {
+            aggregate[i] = n_agg;
+            n_agg += 1;
+        }
+    }
+    let mut n_agg = n_agg as usize;
+
+    // ── 3. global aggregate ids: alltoallv prefix sum + ghost propagation ───
+    let my_rank = comm.rank() as usize;
+    let n_ranks = comm.size();
+    let mut all_n_agg = vec![0usize; n_ranks];
+    all_n_agg[my_rank] = n_agg;
+    let payload = (n_agg as u64).to_le_bytes().to_vec();
+    let send_to_root: Vec<(fem_core::Rank, Vec<u8>)> = if my_rank != 0 {
+        vec![(0, payload)]
+    } else {
+        Vec::new()
+    };
+    let received = comm.alltoallv_bytes(&send_to_root);
+    if my_rank == 0 {
+        all_n_agg[0] = n_agg;
+        for (fr, bytes) in &received {
+            all_n_agg[*fr as usize] =
+                u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        }
+    }
+    let mut agg_bytes: Vec<u8> = all_n_agg
+        .iter()
+        .flat_map(|&v| (v as u64).to_le_bytes())
+        .collect();
+    comm.broadcast_bytes(0, &mut agg_bytes);
+    for (i, ch) in agg_bytes.chunks_exact(8).enumerate() {
+        all_n_agg[i] = u64::from_le_bytes(ch.try_into().unwrap()) as usize;
+    }
+    let mut rank_offsets: Vec<usize> = {
+        let mut off = vec![0usize; n_ranks];
+        for r in 1..n_ranks {
+            off[r] = off[r - 1] + all_n_agg[r - 1];
+        }
+        off
+    };
+    let mut rank_offset = rank_offsets[my_rank];
+    let mut n_coarse_global = all_n_agg.iter().sum::<usize>() * bs;
+
+    // Owned global aggregate ids.
+    let mut global_agg: Vec<i64> = aggregate
+        .iter()
+        .map(|&ag| (rank_offset as i64) + ag as i64)
+        .collect();
+    // Propagate to ghost slots (dof-level buffer; node id = vd*n_on + i).
+    let mut agg_buf = vec![0.0f64; n_owned + n_ghost];
+    for i in 0..n_on {
+        for vd in 0..bs {
+            agg_buf[vd * n_on + i] = global_agg[i] as f64;
+        }
+    }
+    ghost_ex.forward(comm, &mut agg_buf);
+    let mut ghost_agg: Vec<i64> =
+        (0..n_gn).map(|g| agg_buf[n_owned + g] as i64).collect();
+
+    // ── 3b. cross-rank aggregate merging (union-find) ─────────────────────────
+    // Local aggregates that share a strongly-connected *ghost* aggregate are
+    // merged into one local aggregate, so interface nodes do not end up in
+    // singleton aggregates (which would stall coarsening on multi-rank runs).
+    // The ghost aggregate itself stays a remote coarse dof (handled by the
+    // coarse offd block / coarse ghost exchange below).
+    {
+        let mut parent: Vec<usize> = (0..n_agg).collect();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                x = parent[x];
+            }
+            x
+        }
+        let mut ghost_connections: std::collections::HashMap<i64, Vec<usize>> =
+            std::collections::HashMap::new();
+        for i in 0..n_on {
+            let th = strength_threshold * max_row[i];
+            for (key, blk) in &nbr[i] {
+                if *key < n_on {
+                    continue; // owned neighbour: local aggregation already covers it
+                }
+                if frob_norm(blk) < th {
+                    continue;
+                }
+                let g = *key - n_on;
+                ghost_connections
+                    .entry(ghost_agg[g])
+                    .or_default()
+                    .push(aggregate[i] as usize);
+            }
+        }
+        for aggs in ghost_connections.values() {
+            if aggs.len() > 1 {
+                for w in aggs.windows(2) {
+                    let ra = find(&mut parent, w[0]);
+                    let rb = find(&mut parent, w[1]);
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
+            }
+        }
+        // Renumber merged aggregates and re-derive global ids + ghost ids.
+        let mut root_to_new = vec![-1i32; n_agg];
+        let mut n_merged = 0i32;
+        let mut merged_agg = vec![0usize; n_on];
+        for i in 0..n_on {
+            let root = find(&mut parent, aggregate[i] as usize);
+            if root_to_new[root] < 0 {
+                root_to_new[root] = n_merged;
+                n_merged += 1;
+            }
+            merged_agg[i] = root_to_new[root] as usize;
+        }
+        // Write merged ids back and refresh all global numbering.
+        n_agg = n_merged as usize;
+        for i in 0..n_on {
+            aggregate[i] = merged_agg[i] as i32;
+        }
+        // NOTE: update the OUTER `all_n_agg` (declared in step 3), not a local
+        // shadow — the coarse-ghost owner lookup below uses it to map a global
+        // aggregate id back to its owning rank.
+        all_n_agg[my_rank] = n_agg;
+        let payload = (n_agg as u64).to_le_bytes().to_vec();
+        let send_to_root: Vec<(fem_core::Rank, Vec<u8>)> = if my_rank != 0 {
+            vec![(0, payload)]
+        } else {
+            Vec::new()
+        };
+        let received = comm.alltoallv_bytes(&send_to_root);
+        if my_rank == 0 {
+            all_n_agg[0] = n_agg;
+            for (fr, bytes) in &received {
+                all_n_agg[*fr as usize] =
+                    u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+            }
+        }
+        let mut agg_bytes: Vec<u8> = all_n_agg
+            .iter()
+            .flat_map(|&v| (v as u64).to_le_bytes())
+            .collect();
+        comm.broadcast_bytes(0, &mut agg_bytes);
+        for (i, ch) in agg_bytes.chunks_exact(8).enumerate() {
+            all_n_agg[i] = u64::from_le_bytes(ch.try_into().unwrap()) as usize;
+        }
+        for r in 1..n_ranks {
+            rank_offsets[r] = rank_offsets[r - 1] + all_n_agg[r - 1];
+        }
+        rank_offset = rank_offsets[my_rank];
+        n_coarse_global = all_n_agg.iter().sum::<usize>() * bs;
+        global_agg = aggregate
+            .iter()
+            .map(|&ag| (rank_offset as i64) + ag as i64)
+            .collect();
+        let mut agg_buf = vec![0.0f64; n_owned + n_ghost];
+        for i in 0..n_on {
+            for vd in 0..bs {
+                agg_buf[vd * n_on + i] = global_agg[i] as f64;
+            }
+        }
+        ghost_ex.forward(comm, &mut agg_buf);
+        ghost_agg = (0..n_gn).map(|g| agg_buf[n_owned + g] as i64).collect();
+    }
+
+    // ── 4. block interpolation P (columns = global coarse dof) ───────────────
+    // Each aggregate contributes bs coarse modes.  The aggregate's *representative*
+    // node (its first member) interpolates with the identity block; every other
+    // node i interpolates with -D_i⁻¹ B_{i,a} to each strongly-connected
+    // aggregate a — **including its own aggregate** (the intra-aggregate
+    // coupling summed into B_{i,agg(i)}).  This is the block-diagonal nodal
+    // interpolation (hypre agg_interp_type=1): unlike a block-constant
+    // prolongation it carries the coupled rigid-body / block modes.
+    let mut rep_of: Vec<usize> = vec![usize::MAX; n_agg];
+    for i in 0..n_on {
+        let a = aggregate[i] as usize;
+        if rep_of[a] == usize::MAX {
+            rep_of[a] = i;
+        }
+    }
+    let mut p_owned_rows: Vec<Vec<(u32, f64)>> = vec![Vec::new(); n_owned];
+    for i in 0..n_on {
+        let ga = global_agg[i] as usize; // own aggregate (global id)
+        if rep_of[aggregate[i] as usize] == i {
+            // Representative: identity block (defines the coarse modes).
+            for e in 0..bs {
+                p_owned_rows[e * n_on + i].push(((ga * bs + e) as u32, 1.0));
+            }
+            continue;
+        }
+        // F node: D_i = B_ii + Σ_weak B_{i,k} (weakly-connected aggregates are
+        // lumped into D).  This makes the interpolation exactly preserve the
+        // near-null-space modes (rigid-body translations for elasticity):
+        //   P·mode = -D⁻¹ Σ_strong B_{i,a}·mode = mode
+        // because Σ_all B_{i,j}·mode + B_ii·mode = 0 for modes in ker(A).
+        let mut bii = vec![0.0f64; bs * bs];
+        if let Some((_, b)) = nbr[i].iter().find(|(k, _)| *k == i) {
+            bii.copy_from_slice(b);
+        }
+        // Sum blocks per neighbouring aggregate (own aggregate included!).
+        let mut agg_blocks: std::collections::HashMap<i64, Vec<f64>> =
+            std::collections::HashMap::new();
+        for (key, blk) in &nbr[i] {
+            if *key == i {
+                continue;
+            }
+            let ga_j = if *key < n_on {
+                global_agg[*key]
+            } else {
+                ghost_agg[*key - n_on]
+            };
+            agg_blocks.entry(ga_j).or_insert_with(|| vec![0.0; bs * bs]);
+            let e = agg_blocks.get_mut(&ga_j).unwrap();
+            for t in 0..bs * bs {
+                e[t] += blk[t];
+            }
+        }
+        let th = strength_threshold * max_row[i];
+        // Own aggregate is always interpolated (keeps every coarse mode
+        // connected); strong aggregates are interpolated too; weak ones are
+        // lumped into D (their B blocks stay in the coarse space via D).
+        let own_block = agg_blocks.remove(&(ga as i64)).unwrap_or_else(|| {
+            // No intra-aggregate coupling recorded: B_ii alone defines D.
+            bii.clone()
+        });
+        let mut d = bii;
+        let mut strong: Vec<(i64, Vec<f64>)> = vec![(ga as i64, own_block)];
+        for (ga_j, b) in agg_blocks {
+            if frob_norm(&b) >= th {
+                strong.push((ga_j, b));
+            } else {
+                for t in 0..bs * bs {
+                    d[t] += b[t];
+                }
+            }
+        }
+        let inv_d = invert_small(&d, bs);
+        for (ga_j, b) in strong {
+            let gj = ga_j as usize;
+            for e1 in 0..bs {
+                for e2 in 0..bs {
+                    let mut acc = 0.0f64;
+                    for t in 0..bs {
+                        acc += inv_d[e1 * bs + t] * b[t * bs + e2];
+                    }
+                    if acc != 0.0 {
+                        p_owned_rows[e1 * n_on + i].push(((gj * bs + e2) as u32, -acc));
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 5. P ghost rows (same halo pattern as A) ────────────────────────────
+    // Note: `forward_sparse_rows` returns rows indexed by the *absolute*
+    // local slot (n_owned + g for ghost slot g), matching GhostExchange's
+    // recv_local_ids semantics.
+    let p_ghost_rows = ghost_ex.forward_sparse_rows(comm, |r| p_owned_rows[r].clone());
+
+    // ── 6. AP = A·P (owned rows, global coarse-dof columns) ──────────────────
+    let mut ap_coo = CooMatrix::new(n_owned, n_coarse_global.max(1));
+    for i in 0..n_owned {
+        for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
+            let j = diag.col_idx[k] as usize;
+            let av = diag.values[k];
+            for (c, v) in &p_owned_rows[j] {
+                ap_coo.add(i, *c as usize, av * *v);
+            }
+        }
+        for k in offd.row_ptr[i]..offd.row_ptr[i + 1] {
+            let g = offd.col_idx[k] as usize;
+            let av = offd.values[k];
+            for (c, v) in &p_ghost_rows[n_owned + g] {
+                ap_coo.add(i, *c as usize, av * *v);
+            }
+        }
+    }
+    let ap = ap_coo.into_csr();
+
+    // ── 7. local P (columns 0..n_coarse) and R = Pᵀ for the V-cycle ──────────
+    let n_coarse = n_agg * bs;
+    let mut p_local_coo = CooMatrix::new(n_owned, n_coarse.max(1));
+    for i in 0..n_owned {
+        for (c, v) in &p_owned_rows[i] {
+            let ga = (*c / bs as u32) as usize;
+            if ga >= rank_offset && ga < rank_offset + n_agg {
+                let ci = (ga - rank_offset) * bs + (*c % bs as u32) as usize;
+                p_local_coo.add(i, ci, *v);
+            }
+        }
+    }
+    let p_local = p_local_coo.into_csr();
+    let r_local = transpose_csr(&p_local);
+
+    // ── 8. A_c = R · AP, split columns into local / coarse-ghost ────────────
+    let mut coarse_ghost_slots: std::collections::HashMap<i64, u32> =
+        std::collections::HashMap::new();
+    let mut coarse_ghost_owners: std::collections::HashMap<u32, fem_core::Rank> =
+        std::collections::HashMap::new();
+    let mut next_ghost = 0u32;
+    for i in 0..n_owned {
+        for k in ap.row_ptr[i]..ap.row_ptr[i + 1] {
+            let c = ap.col_idx[k] as usize;
+            let ga = (c / bs) as i64;
+            if ga >= rank_offset as i64 && ga < (rank_offset + n_agg) as i64 {
+                continue;
+            }
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                coarse_ghost_slots.entry(ga)
+            {
+                let slot = next_ghost;
+                next_ghost += 1;
+                let owner = (0..n_ranks)
+                    .find(|&r| {
+                        let off = rank_offsets[r];
+                        let g = ga as usize;
+                        g >= off && g < off + all_n_agg[r]
+                    })
+                    .unwrap_or(0) as fem_core::Rank;
+                e.insert(slot);
+                coarse_ghost_owners.insert(slot, owner);
+            }
+        }
+    }
+    let n_coarse_ghost = next_ghost as usize;
+
+    let ac_global = csr_multiply(&r_local, &ap);
+    let mut ac_diag_coo = CooMatrix::new(n_coarse.max(1), n_coarse.max(1));
+    let mut ac_offd_coo =
+        CooMatrix::new(n_coarse.max(1), (n_coarse_ghost * bs).max(1));
+    for row in 0..n_coarse {
+        for k in ac_global.row_ptr[row]..ac_global.row_ptr[row + 1] {
+            let c = ac_global.col_idx[k] as usize;
+            let v = ac_global.values[k];
+            if v == 0.0 {
+                continue;
+            }
+            let ga = c / bs;
+            let e = c % bs;
+            if ga >= rank_offset && ga < rank_offset + n_agg {
+                ac_diag_coo.add(row, (ga - rank_offset) * bs + e, v);
+            } else if let Some(&slot) = coarse_ghost_slots.get(&(ga as i64)) {
+                ac_offd_coo.add(row, slot as usize * bs + e, v);
+            }
+        }
+    }
+    let ac_local = ac_diag_coo.into_csr();
+    let ac_offd = if n_coarse_ghost > 0 {
+        ac_offd_coo.into_csr()
+    } else {
+        CsrMatrix::new_empty(n_coarse, 0)
+    };
+
+    // ── 9. coarse ghost exchange (dof level: bs slots per aggregate) ────────
+    let coarse_ghost_exchange = if n_coarse_ghost > 0 {
+        // Tell each owner which of its aggregates we ghost.
+        let mut send_data: std::collections::HashMap<fem_core::Rank, Vec<u8>> =
+            std::collections::HashMap::new();
+        for (&gid, &slot) in &coarse_ghost_slots {
+            let owner = coarse_ghost_owners.get(&slot).copied().unwrap_or(0);
+            let mut buf = Vec::with_capacity(12);
+            buf.extend_from_slice(&(gid as u64).to_le_bytes());
+            buf.extend_from_slice(&slot.to_le_bytes());
+            send_data.entry(owner).or_default().extend(buf);
+        }
+        let sends: Vec<(fem_core::Rank, Vec<u8>)> = send_data.into_iter().collect();
+        let received = comm.alltoallv_bytes(&sends);
+
+        // Owner side: local coarse dof (aggregate a, component e) → (a*bs+e).
+        let mut send_map: std::collections::HashMap<fem_core::Rank, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (sender_rank, bytes) in &received {
+            for chunk in bytes.chunks(12) {
+                if chunk.len() < 12 {
+                    continue;
+                }
+                let gid =
+                    u64::from_le_bytes(chunk[..8].try_into().unwrap()) as i64;
+                let _slot = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                if gid >= rank_offset as i64
+                    && gid < (rank_offset + n_agg) as i64
+                {
+                    let la = (gid - rank_offset as i64) as usize;
+                    for e in 0..bs {
+                        send_map
+                            .entry(*sender_rank)
+                            .or_default()
+                            .push((la * bs + e) as u32);
+                    }
+                }
+            }
+        }
+        let mut recv_slots: std::collections::HashMap<fem_core::Rank, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (&_gid, &slot) in &coarse_ghost_slots {
+            let owner = coarse_ghost_owners.get(&slot).copied().unwrap_or(0);
+            for e in 0..bs {
+                recv_slots
+                    .entry(owner)
+                    .or_default()
+                    .push((n_coarse + slot as usize * bs + e) as u32);
+            }
+        }
+        let all_neighbors: std::collections::HashSet<fem_core::Rank> =
+            send_map.keys().chain(recv_slots.keys()).copied().collect();
+        let channels: Vec<_> = all_neighbors
+            .into_iter()
+            .map(|neighbor| crate::ghost::GhostChannelDef {
+                rank: neighbor,
+                send_local_ids: send_map.remove(&neighbor).unwrap_or_default(),
+                recv_local_ids: recv_slots.remove(&neighbor).unwrap_or_default(),
+            })
+            .collect();
+        Arc::new(GhostExchange::from_channels(channels))
+    } else {
+        Arc::new(GhostExchange::from_trivial())
+    };
+
+    let p_par = ParCsrMatrix::from_blocks(
+        p_local,
+        CsrMatrix::new_empty(n_owned, 0),
+        n_owned,
+        0,
+        Arc::clone(&coarse_ghost_exchange),
+        comm.clone(),
+    );
+    let r_par = ParCsrMatrix::from_blocks(
+        r_local,
+        CsrMatrix::new_empty(n_coarse, 0),
+        n_coarse,
+        0,
+        Arc::clone(&coarse_ghost_exchange),
+        comm.clone(),
+    );
+    let ac_par = ParCsrMatrix::from_blocks(
+        ac_local,
+        ac_offd,
+        n_coarse,
+        n_coarse_ghost * bs,
         coarse_ghost_exchange,
         comm.clone(),
     );

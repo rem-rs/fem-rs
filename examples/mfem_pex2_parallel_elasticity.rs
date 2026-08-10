@@ -153,12 +153,23 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
         let mut a_mat =
             ParAssembler::assemble_bilinear(&par_space, &[&elasticity], quad_order);
 
-        // 6. Eliminate essential BCs.
+        // 6. Eliminate essential BCs (symmetric row+column elimination:
+        //    preserves A's symmetry AND the rigid-body-mode null-space
+        //    property Σ_j A_ij·mode = 0, which the nodal (systems) AMG block
+        //    interpolation relies on.  `apply_dirichlet_par` (row-only) breaks
+        //    the mode property and makes the nodal V-cycle diverge.)
+        let mut clamped_owned: Vec<usize> = Vec::new();
         for &d in &clamped {
             let pid = dof_part.permute_dof(d) as usize;
             if pid < dof_part.n_owned_dofs {
-                a_mat.apply_dirichlet_par(pid, 0.0, &mut rhs);
+                clamped_owned.push(pid);
             }
+        }
+        a_mat.eliminate_diag_symmetric(&clamped_owned, 1.0);
+        // Symmetric elimination leaves the RHS untouched; enforce the
+        // Dirichlet value (0) explicitly (MFEM EliminateEssentialBCDiag).
+        for &pid in &clamped_owned {
+            rhs.as_slice_mut()[pid] = 0.0;
         }
 
         // 7. Solve: PCG + AMG V-cycle (C++: HyprePCG + BoomerAMG systems,
@@ -175,6 +186,9 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
             n_pre_smooth: 2,
             n_post_smooth: 2,
             smoothed_prolongation: true,
+            // Systems AMG: 2 DOFs per node (2-D elasticity) — block coarsening
+            // + block interpolation (hypre BoomerAMG "nodal" approach).
+            block_size: 2,
             ..Default::default()
         };
         let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).unwrap();
