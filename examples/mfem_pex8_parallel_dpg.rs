@@ -18,15 +18,18 @@
 //! does not coarsen this operator well, and the C++ ADS/AMS preconditioners
 //! are not ported, so a plain Jacobi-PCG is used (the system is small).
 //!
-//! # Known limitation (multi-rank)
-//! The cross-rank off-diagonal blocks of `A` (shared trial/trace DOFs)
-//! currently make the multi-rank PCG diverge once the mesh is partitioned;
-//! single-rank runs converge and reproduce the serial DPG solution.  The
-//! trace-space global numbering and the combined ghost exchange are in
-//! place — the remaining defect is in the off-diagonal assembly path.
+//! # Multi-rank support
+//! The cross-rank off-diagonal blocks of `A` are consistent: the trace-space
+//! global numbering, the global-face-normalized Bhat assembly (L/R element
+//! split and orientation decided by *global* ids), the global boundary-DOF
+//! elimination, the face-closure ghost layer (every local face sees all of
+//! its adjacent elements) and the combined trial+trace ghost exchange
+//! (unified owned positions on the answering side) are all in place, so
+//! multi-rank PCG converges (np2: 383 iters at -r 2, residual ≈ np1).
 //!
 //! Usage:
 //!   cargo run --release --example mfem_pex8_parallel_dpg -- --ranks 1
+//!   cargo run --release --example mfem_pex8_parallel_dpg -- --ranks 2 -r 2
 
 use std::sync::Arc;
 
@@ -78,6 +81,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let order: usize = parse_arg(&args, "-o").unwrap_or(1);
+    let diag: bool = args.iter().any(|a| a == "--diag");
 
     println!("=== fem-rs mfem_pex8: Parallel DPG Poisson (H1 + trace + L2) ===");
 
@@ -146,17 +150,41 @@ fn main() {
         );
 
         // Essential trial DOFs (Dirichlet): zero the columns of B0.
+        // Cross-rank consistency: boundary faces of the *global* mesh may be
+        // interior on the ghost side (the neighbour element is present
+        // locally), so the local `boundary_dofs` differs between ranks.
+        // Compute the global boundary-node set (alltoallv merge) and zero the
+        // columns of every local DOF (owned + ghost) whose global node is on
+        // it — both ranks then eliminate the same global DOFs.
         let ess_tags: Vec<i32> = local_mesh.unique_boundary_tags();
-        let dm = x0_par.local_space().dof_manager();
-        let ess_dofs: Vec<usize> = boundary_dofs(
-            &local_mesh as &dyn fem_mesh::topology::MeshTopology,
-            dm,
-            &ess_tags,
-        )
-        .iter()
-        .filter(|&&d| (d as usize) < x0_par.local_space().n_dofs())
-        .map(|&d| d as usize)
-        .collect();
+        let local_bdr_gids: std::collections::BTreeSet<u32> = (0..local_mesh
+            .n_boundary_faces() as u32)
+            .filter(|&f| ess_tags.contains(&local_mesh.face_tag(f)))
+            .flat_map(|f| {
+                local_mesh
+                    .face_nodes(f)
+                    .iter()
+                    .map(|&n| partition.global_node(n))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let mut bdr_payload = Vec::with_capacity(local_bdr_gids.len() * 4);
+        for &g in &local_bdr_gids {
+            bdr_payload.extend_from_slice(&g.to_le_bytes());
+        }
+        let bdr_sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, bdr_payload.clone()))
+            .collect();
+        let mut global_bdr_gids: std::collections::BTreeSet<u32> = local_bdr_gids;
+        for (_src, bytes) in comm.alltoallv_bytes(&bdr_sends) {
+            for chunk in bytes.chunks_exact(4) {
+                global_bdr_gids.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+        }
+        let n_x0_dofs = x0_par.local_space().n_dofs();
+        let ess_dofs: Vec<usize> = (0..n_x0_dofs)
+            .filter(|&d| global_bdr_gids.contains(&partition.global_node(d as u32)))
+            .collect();
         let mut b0 = b0;
         for &c in &ess_dofs {
             for row in 0..b0.nrows {
@@ -169,7 +197,7 @@ fn main() {
         }
 
         // ── 4. Bhat (trace × test face coupling), full local rows ────────────
-        let bhat = assemble_bhat_par(test_par.local_space(), &trace, qo);
+        let bhat = assemble_bhat_par(test_par.local_space(), &trace, partition, qo);
 
         // ── 5. S⁻¹ = (M + K)⁻¹ on the test space (element-wise, local) ──────
         let sinv = SinvBuilder::build(test_par.local_space(), qo);
@@ -280,16 +308,26 @@ fn main() {
 
         // ── 10. DPG residual ||B x - F||_{S⁻¹} ────────────────────────────────
         //     x_test_block = B0·x0 + Bhat·xhat (local); e = S⁻¹ r; sqrt(r·e).
+        //     Fill the ghost DOFs of x0/xhat from the unified solution before
+        //     evaluating the residual (they are needed on every rank).
+        let mut u_full = u.clone_vec();
+        u_full.update_ghosts();
         let mut x0_full = vec![0.0; n_trial_local];
         let mut xhat_full = vec![0.0; n_trace_local];
+        let trial_ghost_start = n_trial_owned + n_trace_owned;
+        let trace_ghost_start = trial_ghost_start + n_trial_ghost;
         for i in 0..n_trial_owned {
-            x0_full[i] = u.as_slice()[i];
+            x0_full[i] = u_full.as_slice()[i];
         }
         for i in 0..n_trace_owned {
-            xhat_full[i] = u.as_slice()[n_trial_owned + i];
+            xhat_full[i] = u_full.as_slice()[n_trial_owned + i];
         }
-        // trial ghost via exchange (u already has them if we copy owned +
-        // ghost segment correctly — u layout is [trial|trace] unified)
+        for i in 0..n_trial_ghost {
+            x0_full[n_trial_owned + i] = u_full.as_slice()[trial_ghost_start + i];
+        }
+        for i in 0..n_trace_ghost {
+            xhat_full[n_trace_owned + i] = u_full.as_slice()[trace_ghost_start + i];
+        }
         let mut r_test = vec![0.0; b0.nrows];
         let mut t0 = vec![0.0; b0.nrows];
         b0.spmv(&x0_full, &mut t0);
@@ -332,9 +370,17 @@ fn main() {
 /// Assemble the trace×test coupling `∫_face v·λ ds` over all local faces.
 /// Test rows cover the full local L2 layout (owned + ghost rows), trace
 /// columns use the `ParDpgTraceSpace` compact segment.
+///
+/// **Cross-rank consistency**: the serial `DpgTraceSpace` builds each face
+/// from the *first-seen* element walk, so the left/right element roles and
+/// the raw node order differ between ranks.  Both the face orientation sign
+/// and the L/R element split are therefore re-normalized with **global**
+/// ids (node gids for the sign, element gids for L/R) so that every rank
+/// assembles identical column values for a shared face.
 fn assemble_bhat_par<M: MeshTopology + Clone>(
     test_space: &impl FESpace<Mesh = M>,
     trace: &ParDpgTraceSpace<M>,
+    partition: &fem_parallel::partition::MeshPartition,
     quad_order: u8,
 ) -> CsrMatrix<f64> {
     use fem_element::lagrange::TriP1;
@@ -366,18 +412,19 @@ fn assemble_bhat_par<M: MeshTopology + Clone>(
         }
     };
 
+    // Global orientation: decided by *global* node ids (rank-independent).
+    let gid_of = |n: u32| partition.global_node(n);
+
     for fi in 0..trace.local().n_faces() {
         let info = trace.local().face_info(fi);
-        let (nodes, sign) = match info {
-            FaceInfo::Boundary { nodes, .. } | FaceInfo::Interior { nodes, .. } => {
-                (nodes, if nodes[0] < nodes[1] { 1.0 } else { -1.0 })
-            }
-        };
         let trace_dofs: Vec<usize> =
             trace.face_dofs_local(fi).iter().map(|&d| d as usize).collect();
 
         match info {
-            FaceInfo::Boundary { elem, local_face, .. } => {
+            FaceInfo::Boundary { elem, local_face, nodes, .. } => {
+                // Boundary face: unique adjacent element, so its local-face
+                // node order is identical on every rank — compare global ids.
+                let sign = if gid_of(nodes[0]) < gid_of(nodes[1]) { 1.0 } else { -1.0 };
                 let test_dofs: Vec<usize> =
                     test_space.element_dofs(*elem).iter().map(|&d| d as usize).collect();
                 for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
@@ -394,16 +441,47 @@ fn assemble_bhat_par<M: MeshTopology + Clone>(
                     }
                 }
             }
-            FaceInfo::Interior { elem_l, elem_r, local_l, local_r, .. } => {
+            FaceInfo::Interior { elem_l, elem_r, nodes, .. } => {
+                // Rank-independent L/R split: the element with the smaller
+                // global id is "left" (+).  The local face numbers recorded
+                // by the serial face walk belong to the *first-seen* element,
+                // which differs between ranks — recompute them from each
+                // element's own node order (identical across ranks for the
+                // same element), so both ranks parameterize identically.
+                let (el, er) =
+                    if partition.global_elem(*elem_l) <= partition.global_elem(*elem_r) {
+                        (*elem_l, *elem_r)
+                    } else {
+                        (*elem_r, *elem_l)
+                    };
+                let enl = test_space.mesh().element_nodes(el);
+                let enr = test_space.mesh().element_nodes(er);
+                // Local face number of edge (u,v) in element node order:
+                // face 0 = (n1,n2), face 1 = (n2,n0), face 2 = (n0,n1).
+                let (u, v) = (nodes[0], nodes[1]);
+                let local_face_no = |en: &[u32]| -> usize {
+                    if (en[1] == u && en[2] == v) || (en[1] == v && en[2] == u) { 0 }
+                    else if (en[2] == u && en[0] == v) || (en[2] == v && en[0] == u) { 1 }
+                    else { 2 }
+                };
+                let ll = local_face_no(enl);
+                let lr = local_face_no(enr);
+                // face sign from the LEFT element's local-face direction.
+                let (fa, fb) = match ll {
+                    0 => (enl[1], enl[2]),
+                    1 => (enl[2], enl[0]),
+                    _ => (enl[0], enl[1]),
+                };
+                let sign = if gid_of(fa) < gid_of(fb) { 1.0 } else { -1.0 };
                 let dl: Vec<usize> =
-                    test_space.element_dofs(*elem_l).iter().map(|&d| d as usize).collect();
+                    test_space.element_dofs(el).iter().map(|&d| d as usize).collect();
                 let dr: Vec<usize> =
-                    test_space.element_dofs(*elem_r).iter().map(|&d| d as usize).collect();
+                    test_space.element_dofs(er).iter().map(|&d| d as usize).collect();
                 for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
                     let xi = xr[0];
                     let w = wr * sign;
                     eval_lag(xi, &mut trace_phi);
-                    let (rxl, ryl) = edge_xi_tri(*local_l, xi);
+                    let (rxl, ryl) = edge_xi_tri(ll, xi);
                     tri.eval_basis(&[rxl, ryl], &mut phi);
                     for i in 0..3 {
                         let gi = dl[i];
@@ -411,7 +489,7 @@ fn assemble_bhat_par<M: MeshTopology + Clone>(
                             coo.add(gi, trace_dofs[j], w * phi[i] * trace_phi[j]);
                         }
                     }
-                    let (rxr, ryr) = edge_xi_tri(*local_r, 1.0 - xi);
+                    let (rxr, ryr) = edge_xi_tri(lr, 1.0 - xi);
                     tri.eval_basis(&[rxr, ryr], &mut phi);
                     for i in 0..3 {
                         let gi = dr[i];
@@ -493,6 +571,10 @@ fn combined_ghost_exchange(
     let incoming = comm.alltoallv_bytes(&sends);
 
     // Answering side: map (tag, global id) to our owned unified local id.
+    // NOTE: `trace.owned_local_dof` returns a COMPACT segment id; the unified
+    // owned position is `n_trial_owned + compact` (trial owned block first).
+    // Using the compact id directly would make `forward` read the wrong
+    // (trial) slot — the cross-rank off-diagonal values of A then mismatch.
     let n_owned = n_trial_owned + n_trace_owned;
     let mut send_local: BTreeMap<Rank, Vec<u32>> = BTreeMap::new();
     for (requester, bytes) in &incoming {
@@ -503,7 +585,7 @@ fn combined_ghost_exchange(
             let lid = if tag == 0 {
                 partition.local_node(g).map(|n| n as usize)
             } else {
-                trace.owned_local_dof(g).map(|i| i as usize)
+                trace.owned_local_dof(g).map(|i| n_trial_owned + i as usize)
             };
             match lid {
                 Some(l) if l < n_owned => idx.push(l as u32),

@@ -27,7 +27,7 @@
 //! A streaming partitioner (where only rank 0 reads the mesh and distributes
 //! via MPI) can replace this later.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use fem_core::{ElemId, FaceId, NodeId, Rank};
 use fem_mesh::{ElementType, Mesh};
@@ -269,6 +269,35 @@ fn extract_submesh_from_partition_impl<const D: usize>(
             ghost_elem_gids.push(e);
         }
     }
+
+    // 3b2. Face-closure: an element that shares a FACE (an edge in 2-D, a
+    // facet in 3-D) with ANY local element (owned or 1-layer ghost) must also
+    // be local, so that every local face has all of its adjacent elements
+    // present.  Interface/trace assembly of a face (Bhat, DG flux, ...) must
+    // see the same adjacent-element set on every rank; with only the 1-layer
+    // node-ghost rule a face can be "half visible" (one neighbour present,
+    // the other absent), making the cross-rank off-diagonal blocks of
+    // A = Bᵀ S⁻¹ B inconsistent.  A single round suffices: the elements
+    // adjacent to a face share that face, so if one is local the other is
+    // picked up here.
+    let mut local_elem_set: HashSet<u32> = HashSet::new();
+    local_elem_set.extend(local_elem_gids.iter().copied());
+    local_elem_set.extend(ghost_elem_gids.iter().copied());
+    let face_dim = D;
+    let mut extra_ghost: Vec<u32> = Vec::new();
+    for e in 0..n_elems as u32 {
+        if local_elem_set.contains(&e) { continue; }
+        let en = mesh.elem_nodes(e);
+        let shares_face = local_elem_set.iter().any(|&l| {
+            let ln = mesh.elem_nodes(l);
+            let common = en.iter().filter(|n| ln.contains(n)).count();
+            common >= face_dim
+        });
+        if shares_face {
+            extra_ghost.push(e);
+        }
+    }
+    ghost_elem_gids.extend(extra_ghost);
 
     // 3c. Add nodes from ghost elements to the node set.
     for &ge in &ghost_elem_gids {
