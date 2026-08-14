@@ -351,10 +351,38 @@ fn main() {
                 ess_dm.insert(d as usize);
             }
         }
-        let ess_part: Vec<usize> = ess_dm
+        // Cross-rank boundary-DOF exchange (pex39 lesson): a boundary face
+        // migrates to the adjacent-element owner, but the boundary VERTEX can
+        // be owned by a different rank — the rank holding the face then sees
+        // the vertex as a GHOST DOF (filtered out by `p < n_owned0`) while
+        // its owner never sees the face, silently dropping essential DOFs
+        // (np2 loses 2, np4 loses 5).  Exchange the global ids of locally
+        // detected boundary DOFs and clamp every owned DOF whose global id
+        // appears in the union.
+        let local_ess_global: Vec<u32> = ess_dm
             .iter()
-            .map(|&d| dp0.permute_dof(d as u32) as usize)
-            .filter(|&p| p < n_owned0)
+            .map(|&d| dp0.global_dof(dp0.permute_dof(d as u32)))
+            .collect();
+        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
+        for r in 0..comm.size() as i32 {
+            if r == rank {
+                continue;
+            }
+            let mut bytes = Vec::with_capacity(local_ess_global.len() * 4);
+            for &g in &local_ess_global {
+                bytes.extend_from_slice(&g.to_le_bytes());
+            }
+            sends.push((r, bytes));
+        }
+        let incoming = comm.alltoallv_bytes(&sends);
+        let mut all_ess: std::collections::HashSet<u32> = local_ess_global.iter().copied().collect();
+        for (_, bytes) in incoming {
+            for chunk in bytes.chunks_exact(4) {
+                all_ess.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+        }
+        let ess_part: Vec<usize> = (0..n_owned0)
+            .filter(|&p| all_ess.contains(&dp0.global_dof(p as u32)))
             .collect();
 
         // ── Initial guess: u₀ = 1 − |x|² (dm order), permuted to partition. ──
@@ -442,7 +470,8 @@ fn main() {
                     },
                 };
                 let integ0 = DomainSourceIntegratorCoeff::new(psi_old_minus_psi);
-                let rhs0_local = Assembler::assemble_linear(ps0.local_space(), &[&integ0], qo_rhs0);
+                let rhs0_dm = Assembler::assemble_linear(ps0.local_space(), &[&integ0], qo_rhs0);
+                let rhs0_local = fem_parallel::par_assembler::permute_vec(&rhs0_dm, dp0);
                 let mut rhs0 = ParVector::from_local_raw(
                     rhs0_local,
                     n_owned0,
@@ -467,11 +496,16 @@ fn main() {
                 );
 
                 // ── A00 = α∇²  on H¹ + DIAG_ONE elimination ─────────────────
-                let a00_local = Assembler::assemble_bilinear(
+                let a00_local_dm = Assembler::assemble_bilinear(
                     ps0.local_space(),
                     &[&DiffusionIntegrator { kappa: alpha }],
                     qo_a00,
                 );
+                // Permute the DofManager-ordered assembly to the partition
+                // [owned|ghost] ordering (from_dof_manager renumbers the P2
+                // H1 edge/center DOFs), matching u0/ess which are already in
+                // partition order.
+                let a00_local = fem_parallel::par_assembler::permute_csr(&a00_local_dm, dp0);
                 let mut a00 = ParCsrMatrix::from_local_matrix(
                     &a00_local,
                     n_owned0,
@@ -611,14 +645,8 @@ fn main() {
                 let mut tmp_part = ParVector::zeros_like(&u_par);
                 tmp_part.copy_from(&prev_x0);
                 tmp_part.axpy(-1.0, &x_block.v0);
-                let tmp_dm = unpermute_owned(
-                    &tmp_part.as_slice()[..n_owned0],
-                    dp0,
-                );
-                let mut tmp_full = vec![0.0; n_total0];
-                for (i, &v) in tmp_dm.iter().enumerate() {
-                    tmp_full[i] = v;
-                }
+                tmp_part.update_ghosts();
+                let tmp_full = to_dm_full(&tmp_part, dp0);
                 let newton_size = GridFunction::new(ps0.local_space(), tmp_full)
                     .compute_l2_error_owned(&|_| 0.0, 2 * order + 3, n_owned_elems);
                 let newton_size = newton_size * newton_size;
@@ -630,7 +658,7 @@ fn main() {
                 u_par.copy_from(&x_block.v0);
                 psi_par.axpy(1.0, &x_block.v1);
 
-                if visualization && is_root {
+                if is_root {
                     println!("Newton_update_size = {}", cpp_6(newton_size));
                 }
                 if newton_size < increment_u {
@@ -643,14 +671,8 @@ fn main() {
             let mut tmp_part = ParVector::zeros_like(&u_par);
             tmp_part.copy_from(&u_par);
             tmp_part.axpy(-1.0, &u_old_par);
-            let tmp_dm = unpermute_owned(
-                &tmp_part.as_slice()[..n_owned0],
-                dp0,
-            );
-            let mut tmp_full = vec![0.0; n_total0];
-            for (i, &v) in tmp_dm.iter().enumerate() {
-                tmp_full[i] = v;
-            }
+            tmp_part.update_ghosts();
+            let tmp_full = to_dm_full(&tmp_part, dp0);
             let inc_local = GridFunction::new(ps0.local_space(), tmp_full)
                 .compute_l2_error_owned(&|_| 0.0, 2 * order + 3, n_owned_elems);
             increment_u = comm.allreduce_sum_f64(inc_local * inc_local).sqrt();
@@ -669,7 +691,7 @@ fn main() {
             }
 
             // H1 error of the current iterate (owned-only + allreduce).
-            let h1_err = h1_full_error_par(
+            let h1_local = h1_full_error_par(
                 ps0.local_space(),
                 dp0,
                 &u_par,
@@ -677,6 +699,7 @@ fn main() {
                 n_total0,
                 n_owned_elems,
             );
+            let h1_err = comm.allreduce_sum_f64(h1_local * h1_local).sqrt();
             if is_root {
                 println!("H1-error  (|| u - uₕᵏ||)       = {}", cpp_6(h1_err));
             }
@@ -689,7 +712,7 @@ fn main() {
         }
 
         // ── Final errors (owned-only integration + allreduce) ───────────────
-        let l2_err = l2_error_par(
+        let l2_local = l2_error_par(
             ps0.local_space(),
             dp0,
             &u_par,
@@ -697,7 +720,8 @@ fn main() {
             n_total0,
             n_owned_elems,
         );
-        let h1_err = h1_full_error_par(
+        let l2_err = comm.allreduce_sum_f64(l2_local * l2_local).sqrt();
+        let h1_local = h1_full_error_par(
             ps0.local_space(),
             dp0,
             &u_par,
@@ -705,6 +729,7 @@ fn main() {
             n_total0,
             n_owned_elems,
         );
+        let h1_err = comm.allreduce_sum_f64(h1_local * h1_local).sqrt();
 
         // u_alt = clamp(exp(ψₕ)+ϕ, 0, 1e6), element-wise on L² P0.
         let mut u_alt = vec![0.0; n_total1];
@@ -735,19 +760,15 @@ fn l2_error_par(
     h1: &H1Space<Mesh<2>>,
     dp: &fem_parallel::DofPartition,
     u_par: &ParVector,
-    n_owned0: usize,
-    n_total0: usize,
+    _n_owned0: usize,
+    _n_total0: usize,
     n_owned_elems: u32,
 ) -> f64 {
-    let dm = unpermute_owned(&u_par.as_slice()[..n_owned0], dp);
-    let mut full = vec![0.0; n_total0];
-    for (i, &v) in dm.iter().enumerate() {
-        full[i] = v;
-    }
-    let local = GridFunction::new(h1, full)
-        .compute_l2_error_owned(&|x: &[f64]| exact_solution_obstacle(x), 7, n_owned_elems);
-    let _ = n_owned_elems;
-    local
+    let mut u_synced = u_par.clone_vec();
+    u_synced.update_ghosts();
+    let full = to_dm_full(&u_synced, dp);
+    GridFunction::new(h1, full)
+        .compute_l2_error_owned(&|x: &[f64]| exact_solution_obstacle(x), 7, n_owned_elems)
 }
 
 /// Owned-only H¹ error of the partition-ordered H¹ solution.
@@ -755,15 +776,13 @@ fn h1_full_error_par(
     h1: &H1Space<Mesh<2>>,
     dp: &fem_parallel::DofPartition,
     u_par: &ParVector,
-    n_owned0: usize,
-    n_total0: usize,
+    _n_owned0: usize,
+    _n_total0: usize,
     n_owned_elems: u32,
 ) -> f64 {
-    let dm = unpermute_owned(&u_par.as_slice()[..n_owned0], dp);
-    let mut full = vec![0.0; n_total0];
-    for (i, &v) in dm.iter().enumerate() {
-        full[i] = v;
-    }
+    let mut u_synced = u_par.clone_vec();
+    u_synced.update_ghosts();
+    let full = to_dm_full(&u_synced, dp);
     let gf = GridFunction::new(h1, full);
     let l2 = gf.compute_l2_error_owned(&|x: &[f64]| exact_solution_obstacle(x), 7, n_owned_elems);
     let h1s = gf.compute_h1_error_owned(
@@ -878,11 +897,14 @@ fn parse_arg_f64(args: &[String], name: &str) -> Option<f64> {
         .and_then(|s| s.parse().ok())
 }
 
-/// Partition order -> DofManager order for the owned segment.
-fn unpermute_owned(owned_part: &[f64], dp: &fem_parallel::DofPartition) -> Vec<f64> {
-    let mut dm = vec![0.0; owned_part.len()];
-    for (pid, &v) in owned_part.iter().enumerate() {
-        dm[dp.unpermute_dof(pid as u32) as usize] = v;
+/// Partition order -> DofManager order for the FULL local vector (owned +
+/// ghost slots).  Callers must have synced ghost values (`update_ghosts`)
+/// beforehand so owned elements referencing ghost DOFs get correct values.
+fn to_dm_full(v_par: &ParVector, dp: &fem_parallel::DofPartition) -> Vec<f64> {
+    let n_total = dp.n_total_dofs();
+    let mut dm = vec![0.0; n_total];
+    for p in 0..n_total {
+        dm[dp.unpermute_dof(p as u32) as usize] = v_par.as_slice()[p];
     }
     dm
 }
