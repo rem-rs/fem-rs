@@ -105,27 +105,30 @@ fn refine_local_tri3(mesh: &Mesh<2>) -> LocalRefine {
     let n_orig = mesh.n_nodes();
     let n_elems = mesh.n_elems();
 
-    // Unique edges of the whole local mesh (owned + ghost elements).
-    let mut edge_set: BTreeSet<(u32, u32)> = BTreeSet::new();
+    // Edge midpoints: new node ids `n_orig + idx` in **element × local-edge
+    // order** (first occurrence), matching the serial `refine_uniform_2d`
+    // edge map (MFEM el_to_edge).  A BTreeSet (sorted-key) enumeration would
+    // renumber the midpoints differently than the serial path, breaking the
+    // P2/P3 DofManager edge numbering on partitioned meshes.
+    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_mid = n_orig as u32;
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
-        edge_set.insert(key(ns[0], ns[1]));
-        edge_set.insert(key(ns[1], ns[2]));
-        edge_set.insert(key(ns[2], ns[0]));
+        for &(li, lj) in &[(0usize, 1usize), (1, 2), (2, 0)] {
+            let k = key(ns[li], ns[lj]);
+            if !edge_mid.contains_key(&k) {
+                let mid = next_mid;
+                next_mid += 1;
+                edge_mid.insert(k, mid);
+                let ca = mesh.coords_of(ns[li]);
+                let cb = mesh.coords_of(ns[lj]);
+                new_coords.push((ca[0] + cb[0]) * 0.5);
+                new_coords.push((ca[1] + cb[1]) * 0.5);
+            }
+        }
     }
-    let n_edges = edge_set.len();
-
-    // Edge midpoints: new node ids `n_orig + idx` in sorted-key order.
-    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_edges);
-    let mut new_coords: Vec<f64> = mesh.coords.clone();
-    for (idx, &(a, b)) in edge_set.iter().enumerate() {
-        let mid = (n_orig + idx) as u32;
-        edge_mid.insert((a, b), mid);
-        let ca = mesh.coords_of(a);
-        let cb = mesh.coords_of(b);
-        new_coords.push((ca[0] + cb[0]) * 0.5);
-        new_coords.push((ca[1] + cb[1]) * 0.5);
-    }
+    let n_edges = edge_mid.len();
 
     // Children (red refinement, MFEM Tri3 pattern).
     let mut new_conn = Vec::with_capacity(n_elems * 4 * 3);
@@ -183,27 +186,28 @@ fn refine_local_quad4(mesh: &Mesh<2>) -> LocalRefine {
     let n_elems = mesh.n_elems();
     const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
 
-    // Unique edges.
-    let mut edge_set: BTreeSet<(u32, u32)> = BTreeSet::new();
+    // New node layout: [old | edge midpoints | element centers].
+    // Edge midpoints in element × local-edge order (serial-matching), not
+    // sorted-key order — see refine_local_tri3.
+    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_mid = n_orig as u32;
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
         for &(li, lj) in &QUAD_EDGES {
-            edge_set.insert(key(ns[li], ns[lj]));
+            let k = key(ns[li], ns[lj]);
+            if !edge_mid.contains_key(&k) {
+                let mid = next_mid;
+                next_mid += 1;
+                edge_mid.insert(k, mid);
+                let ca = mesh.coords_of(ns[li]);
+                let cb = mesh.coords_of(ns[lj]);
+                new_coords.push((ca[0] + cb[0]) * 0.5);
+                new_coords.push((ca[1] + cb[1]) * 0.5);
+            }
         }
     }
-    let n_edges = edge_set.len();
-
-    // New node layout: [old | edge midpoints | element centers].
-    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_edges);
-    let mut new_coords: Vec<f64> = mesh.coords.clone();
-    for (idx, &(a, b)) in edge_set.iter().enumerate() {
-        let mid = (n_orig + idx) as u32;
-        edge_mid.insert((a, b), mid);
-        let ca = mesh.coords_of(a);
-        let cb = mesh.coords_of(b);
-        new_coords.push((ca[0] + cb[0]) * 0.5);
-        new_coords.push((ca[1] + cb[1]) * 0.5);
-    }
+    let n_edges = edge_mid.len();
     let mut center_local: Vec<u32> = Vec::with_capacity(n_elems);
     for e in 0..n_elems {
         let ns = mesh.elem_nodes(e as ElemId);
@@ -292,8 +296,11 @@ fn refine_local_mixed(mesh: &Mesh<2>) -> LocalRefine {
     let n_orig = mesh.n_nodes();
     let n_elems = mesh.n_elems();
 
-    // Unique edges of the whole local mesh (Tri3: 3, Quad4: 4 per element).
-    let mut edge_set: BTreeSet<(u32, u32)> = BTreeSet::new();
+    // Edge midpoints: new node ids `n_orig + idx` in element × local-edge
+    // order (serial-matching; see refine_local_tri3).
+    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    let mut next_mid = n_orig as u32;
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
         let edges = match mesh.element_type_at(e) {
@@ -302,22 +309,19 @@ fn refine_local_mixed(mesh: &Mesh<2>) -> LocalRefine {
             other => panic!("par_uniform_refine: unsupported element type {other:?}"),
         };
         for &(li, lj) in edges {
-            edge_set.insert(key(ns[li], ns[lj]));
+            let k = key(ns[li], ns[lj]);
+            if !edge_mid.contains_key(&k) {
+                let mid = next_mid;
+                next_mid += 1;
+                edge_mid.insert(k, mid);
+                let ca = mesh.coords_of(ns[li]);
+                let cb = mesh.coords_of(ns[lj]);
+                new_coords.push((ca[0] + cb[0]) * 0.5);
+                new_coords.push((ca[1] + cb[1]) * 0.5);
+            }
         }
     }
-    let n_edges = edge_set.len();
-
-    // Edge midpoints: new node ids `n_orig + idx` in sorted-key order.
-    let mut edge_mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(n_edges);
-    let mut new_coords: Vec<f64> = mesh.coords.clone();
-    for (idx, &(a, b)) in edge_set.iter().enumerate() {
-        let mid = (n_orig + idx) as u32;
-        edge_mid.insert((a, b), mid);
-        let ca = mesh.coords_of(a);
-        let cb = mesh.coords_of(b);
-        new_coords.push((ca[0] + cb[0]) * 0.5);
-        new_coords.push((ca[1] + cb[1]) * 0.5);
-    }
+    let n_edges = edge_mid.len();
 
     // Quad centers: one per Quad4 parent, id = n_orig + n_edges + quad_idx.
     let mut center_of: HashMap<u32, u32> = HashMap::new();
