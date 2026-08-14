@@ -100,6 +100,17 @@ pub struct ParAmgConfig {
     /// byNODES block layout (`vd * n_nodes + node`), which is what
     /// `DofPartition::from_vector_space` produces.
     pub block_size: usize,
+    /// Use ghost-aware (cross-rank) aggregation when building the hierarchy.
+    ///
+    /// When `true`, strength-of-connection is computed over the full row
+    /// (owned + ghost columns) and aggregate assignments are exchanged
+    /// across ranks, so aggregates may span partition interfaces.  This
+    /// improves coarsening quality near interfaces and can be the difference
+    /// between convergence and stagnation on problems whose strong coupling
+    /// crosses rank boundaries (e.g. DG penalty faces in pex14: the default
+    /// local aggregation left PCG stuck at ~6e-11 after 500 iterations,
+    /// while the global aggregation converges in ~330).
+    pub use_global_aggregation: bool,
 }
 
 impl Default for ParAmgConfig {
@@ -114,6 +125,7 @@ impl Default for ParAmgConfig {
             smoothed_prolongation: false,
             coarse_cg: true,
             block_size: 1,
+            use_global_aggregation: false,
         }
     }
 }
@@ -2076,7 +2088,11 @@ pub fn par_solve_pcg_amg(
     solver_cfg: &fem_solver::SolverConfig,
 ) -> Result<fem_solver::SolveResult, fem_solver::SolverError> {
     let comm = x.comm().clone();
-    let hierarchy = ParAmgHierarchy::build(a, &comm, amg_cfg.clone());
+    let hierarchy = if amg_cfg.use_global_aggregation {
+        ParAmgHierarchy::build_global(a, &comm, amg_cfg.clone())
+    } else {
+        ParAmgHierarchy::build(a, &comm, amg_cfg.clone())
+    };
 
     if comm.is_root() {
         log::info!("par_amg: {} levels built", hierarchy.n_levels());
