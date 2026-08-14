@@ -80,6 +80,66 @@ impl ParAssembler {
             par_space.comm().clone(),
         )
     }
+    /// Parallel bilinear form assembly with per-integrator element markers
+    /// (named attribute sets).  Same semantics as
+    /// [`Assembler::assemble_bilinear_marked`] on the local mesh (owned +
+    /// ghost elements; the partition migrates `elem_tags`), then permute and
+    /// wrap in a `ParCsrMatrix`.
+    ///
+    /// Used by pex39 (ex39p): κ = 1e-6 everywhere + 1.0 on `Base` + 2.0 on
+    /// `Rose Even`, each piece restricted to a named attribute set marker.
+    pub fn assemble_bilinear_marked<S: FESpace>(
+        par_space: &ParallelFESpace<S>,
+        integrators: &[(&dyn BilinearIntegrator, Option<&[i32]>)],
+        quad_order: u8,
+    ) -> ParCsrMatrix {
+        let local_mat = Assembler::assemble_bilinear_marked(
+            par_space.local_space(), integrators, quad_order,
+        );
+
+        let dof_part = par_space.dof_partition();
+        let permuted_mat = if dof_part.needs_permutation() {
+            permute_csr(&local_mat, dof_part)
+        } else {
+            local_mat
+        };
+
+        ParCsrMatrix::from_local_matrix(
+            &permuted_mat,
+            dof_part.n_owned_dofs,
+            par_space.dof_ghost_exchange_arc(),
+            par_space.comm().clone(),
+        )
+    }
+
+    /// Parallel linear form assembly with a per-integrator element marker
+    /// (named attribute sets).  Same semantics as
+    /// [`Assembler::assemble_linear_marked`] on the local mesh, then permute
+    /// and wrap in a `ParVector`.
+    pub fn assemble_linear_marked<S: FESpace>(
+        par_space: &ParallelFESpace<S>,
+        integrators: &[(&dyn LinearIntegrator, Option<&[i32]>)],
+        quad_order: u8,
+    ) -> ParVector {
+        let local_rhs = Assembler::assemble_linear_marked(
+            par_space.local_space(), integrators, quad_order,
+        );
+
+        let dof_part = par_space.dof_partition();
+        let permuted_rhs = if dof_part.needs_permutation() {
+            permute_vec(&local_rhs, dof_part)
+        } else {
+            local_rhs
+        };
+
+        ParVector::from_local_raw(
+            permuted_rhs,
+            dof_part.n_owned_dofs,
+            par_space.dof_ghost_exchange_arc(),
+            par_space.comm().clone(),
+        )
+    }
+
     /// Parallel boundary linear form assembly (e.g. Neumann traction on a
     /// boundary attribute).  Serial boundary assembly on the local mesh
     /// (owned + ghost faces), then permute and wrap in a `ParVector`.
