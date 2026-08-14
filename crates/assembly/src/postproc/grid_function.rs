@@ -458,12 +458,29 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
+        let n_elems = mesh.n_elements() as u32;
+        self.compute_l2_error_owned(exact, quad_order, n_elems)
+    }
+
+    /// Like [`Self::compute_l2_error`] but restricted to the first
+    /// `n_owned_elems` elements of the (local) mesh.  In a partitioned
+    /// setting the local mesh is `[owned | ghost]`, so passing the rank's
+    /// `n_owned_elems` integrates over owned elements only — ghost elements
+    /// would otherwise be counted once per rank holding them (pex36).
+    pub fn compute_l2_error_owned(
+        &self,
+        exact: &dyn Fn(&[f64]) -> f64,
+        quad_order: u8,
+        n_owned_elems: u32,
+    ) -> f64 {
+        let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err2 = 0.0;
 
-        for e in mesh.elem_iter() {
+        for e in 0..n_owned_elems {
+            let e = e as u32;
             let elem_type = mesh.element_type(e);
             let ref_elem = ref_elem_vol(elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
@@ -585,12 +602,27 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         quad_order: u8,
     ) -> f64 {
         let mesh = self.space.mesh();
+        let n_elems = mesh.n_elements() as u32;
+        self.compute_h1_error_owned(exact_grad, quad_order, n_elems)
+    }
+
+    /// Like [`Self::compute_h1_error`] but restricted to the first
+    /// `n_owned_elems` elements (owned-only in a partitioned setting; see
+    /// [`Self::compute_l2_error_owned`]).
+    pub fn compute_h1_error_owned(
+        &self,
+        exact_grad: &dyn Fn(&[f64]) -> Vec<f64>,
+        quad_order: u8,
+        n_owned_elems: u32,
+    ) -> f64 {
+        let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
 
         let mut err2 = 0.0;
 
-        for e in mesh.elem_iter() {
+        for e in 0..n_owned_elems {
+            let e = e as u32;
             let elem_type = mesh.element_type(e);
             let ref_elem = ref_elem_vol(elem_type, order);
             let n_ldofs = ref_elem.n_dofs();

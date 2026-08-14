@@ -9,6 +9,7 @@ use rayon::prelude::*;
 
 use fem_solver::{SolveResult, SolverConfig, SolverError};
 
+use crate::par_block_csr::{ParBlockCsrMatrix2, ParBlockVector2};
 use crate::par_csr::ParCsrMatrix;
 use crate::par_vector::ParVector;
 
@@ -2301,5 +2302,248 @@ mod tests {
             assert!(res.converged, "PCG+ILU(2) did not converge: {} iters, res={:.3e}",
                 res.iterations, res.final_residual);
         });
+    }
+}
+
+// ─── Parallel block GMRES with a block-diagonal preconditioner ───────────────
+
+/// Parallel GMRES for the 2×2 block system
+/// `[A00 A01; A10 A11] [x0; x1] = [b0; b1]` with a user-supplied
+/// block-diagonal preconditioner `z_i = M_i⁻¹ r_i` (e.g. AMG V-cycle for
+/// `A00`, a smoother/ILU for `A11` — MFEM ex36p uses
+/// `BlockDiagonalPreconditioner(HypreBoomerAMG(A00), HypreSmoother(A11))`).
+///
+/// Mirrors the serial [`fem_solver::solve_gmres_block_diag_gs`] outer loop
+/// and the parallel GMRES in [`par_solve_gmres_jacobi`] (modified
+/// Gram-Schmidt with batched allreduce, Givens rotations,
+/// `restart`-limited inner cycles).
+///
+/// `precond` receives a block vector and must overwrite the solution block
+/// vector with `M⁻¹ r` (zero-init is its responsibility, matching MFEM's
+/// block-diagonal preconditioner which zeroes each block output before
+/// applying the smoother).
+///
+/// **Left preconditioning** (MFEM GMRESSolver semantics): the Arnoldi
+/// vectors live in the preconditioned space `w = M⁻¹ A v`, and convergence
+/// is measured on the preconditioned residual `‖M⁻¹(b − A x)‖` — the
+/// `‖B r‖` criterion of the serial `gmres_core`.  On the nearly-singular
+/// obstacle block system (the L² block is shifted by −1e-6), a plain
+/// `‖r‖` criterion reports convergence while the solution is still far off.
+
+pub fn par_solve_gmres_block_diag<F>(
+    block: &ParBlockCsrMatrix2,
+    precond: &F,
+    b: &ParBlockVector2,
+    x: &mut ParBlockVector2,
+    restart: usize,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&ParBlockVector2, &mut ParBlockVector2),
+{
+    if restart == 0 {
+        return Err(SolverError::Linlvo("GMRES restart must be > 0".to_string()));
+    }
+
+    // r = M⁻¹ (b − A·x);  beta = ‖r‖ (preconditioned residual).
+    let mut ax = zeros_block(b);
+    block.spmv(x, &mut ax);
+    let mut w = clone_block(b);
+    w.v0.axpy(-1.0, &ax.v0);
+    w.v1.axpy(-1.0, &ax.v1);
+    let mut r = zeros_block(b);
+    precond(&w, &mut r);
+
+    let beta0 = block_global_norm(&r);
+    let final_norm = (cfg.rtol * beta0).max(cfg.atol);
+    if beta0 <= final_norm || beta0 < 1e-300 {
+        return Ok(SolveResult {
+            converged: true,
+            iterations: 0,
+            final_residual: beta0,
+        });
+    }
+
+    let mut iter_total = 0usize;
+    let mut beta = beta0;
+    let mut pass = 0usize;
+
+    let mut v: Vec<ParBlockVector2> = (0..=restart).map(|_| zeros_block(b)).collect();
+    let mut h = vec![vec![0.0_f64; restart + 1]; restart + 1];
+    let mut s = vec![0.0_f64; restart + 1];
+    let mut cs = vec![0.0_f64; restart];
+    let mut sn = vec![0.0_f64; restart];
+
+    while iter_total < cfg.max_iter {
+        v[0] = clone_block(&r);
+        scale_block(&mut v[0], 1.0 / beta);
+        s.fill(0.0);
+        s[0] = beta;
+
+        let mut i = 0usize;
+        while i < restart && iter_total < cfg.max_iter {
+            // w = M⁻¹ A v[i]  (left preconditioning).
+            let mut av = zeros_block(b);
+            block.spmv(&mut v[i], &mut av);
+            precond(&av, &mut w);
+
+            // Arnoldi (MGS): h[k][i] = w·v[k],  w −= h[k][i] v[k].
+            for k in 0..=i {
+                h[k][i] = block_global_dot(&w, &v[k]);
+                w.v0.axpy(-h[k][i], &v[k].v0);
+                w.v1.axpy(-h[k][i], &v[k].v1);
+            }
+            h[i + 1][i] = block_global_norm(&w);
+            if h[i + 1][i].abs() < 1e-300 {
+                // Arnoldi breakdown: exact solution in the current subspace.
+                update_x_block(x, i, &h, &s, &v);
+                return Ok(SolveResult {
+                    converged: true,
+                    iterations: iter_total + 1,
+                    final_residual: s[i].abs(),
+                });
+            }
+            v[i + 1] = clone_block(&w);
+            scale_block(&mut v[i + 1], 1.0 / h[i + 1][i]);
+
+            // Apply previous Givens rotations, then generate + apply a new one.
+            for k in 0..i {
+                let (mut a_ki, mut a_k1i) = (h[k][i], h[k + 1][i]);
+                apply_plane_rotation(&mut a_ki, &mut a_k1i, cs[k], sn[k]);
+                h[k][i] = a_ki;
+                h[k + 1][i] = a_k1i;
+            }
+            let (mut hii, mut hii1) = (h[i][i], h[i + 1][i]);
+            generate_plane_rotation(&mut hii, &mut hii1, &mut cs[i], &mut sn[i]);
+            apply_plane_rotation(&mut hii, &mut hii1, cs[i], sn[i]);
+            h[i][i] = hii;
+            h[i + 1][i] = hii1;
+            let (mut si, mut si1) = (s[i], s[i + 1]);
+            apply_plane_rotation(&mut si, &mut si1, cs[i], sn[i]);
+            s[i] = si;
+            s[i + 1] = si1;
+
+            let resid = s[i + 1].abs();
+            iter_total += 1;
+            if cfg.verbose && x.v0.comm().is_root() {
+                log::info!(
+                    "par_gmres_block_diag pass {} iter {}: ||B r|| = {:.3e}",
+                    pass + 1,
+                    iter_total,
+                    resid
+                );
+            }
+            if resid <= final_norm {
+                update_x_block(x, i, &h, &s, &v);
+                return Ok(SolveResult {
+                    converged: true,
+                    iterations: iter_total,
+                    final_residual: resid,
+                });
+            }
+            i += 1;
+        }
+
+        // Restart: x += subspace solution, recompute r = M⁻¹(b − A·x).
+        update_x_block(x, i.saturating_sub(1), &h, &s, &v);
+        block.spmv(x, &mut ax);
+        w.v0.copy_from(&b.v0);
+        w.v1.copy_from(&b.v1);
+        w.v0.axpy(-1.0, &ax.v0);
+        w.v1.axpy(-1.0, &ax.v1);
+        precond(&w, &mut r);
+        beta = block_global_norm(&r);
+        if beta <= final_norm {
+            return Ok(SolveResult {
+                converged: true,
+                iterations: iter_total,
+                final_residual: beta,
+            });
+        }
+        pass += 1;
+    }
+
+    Ok(SolveResult {
+        converged: false,
+        iterations: iter_total,
+        final_residual: beta,
+    })
+}
+
+/// x += Σ_{k=0..i} s[k]·v[k]  with the triangular solve in s (serial
+/// gmres_core's `update_x`).
+fn update_x_block(
+    x: &mut ParBlockVector2,
+    i: usize,
+    h: &[Vec<f64>],
+    s: &[f64],
+    v: &[ParBlockVector2],
+) {
+    let m = i + 1;
+    let mut y = vec![0.0_f64; m];
+    for k in (0..m).rev() {
+        let mut acc = s[k];
+        for j in (k + 1)..m {
+            acc -= h[k][j] * y[j];
+        }
+        y[k] = acc / h[k][k];
+    }
+    for k in 0..m {
+        x.v0.axpy(y[k], &v[k].v0);
+        x.v1.axpy(y[k], &v[k].v1);
+    }
+}
+
+fn clone_block(x: &ParBlockVector2) -> ParBlockVector2 {
+    ParBlockVector2::new(x.v0.clone_vec(), x.v1.clone_vec())
+}
+
+fn zeros_block(x: &ParBlockVector2) -> ParBlockVector2 {
+    ParBlockVector2::new(ParVector::zeros_like(&x.v0), ParVector::zeros_like(&x.v1))
+}
+
+fn scale_block(x: &mut ParBlockVector2, s: f64) {
+    let n0 = x.v0.n_owned();
+    let n1 = x.v1.n_owned();
+    for v in x.v0.as_slice_mut()[..n0].iter_mut() {
+        *v *= s;
+    }
+    for v in x.v1.as_slice_mut()[..n1].iter_mut() {
+        *v *= s;
+    }
+}
+
+/// Global ℓ² norm of a block vector: sqrt(‖v0‖² + ‖v1‖²).
+fn block_global_norm(x: &ParBlockVector2) -> f64 {
+    let n0 = x.v0.global_norm();
+    let n1 = x.v1.global_norm();
+    (n0 * n0 + n1 * n1).sqrt()
+}
+
+/// Global dot product of two block vectors (two allreduces; simple and safe).
+fn block_global_dot(a: &ParBlockVector2, b: &ParBlockVector2) -> f64 {
+    a.v0.global_dot(&b.v0) + a.v1.global_dot(&b.v1)
+}
+
+/// Givens rotation application (same helpers as the serial GMRES core).
+fn apply_plane_rotation(dx: &mut f64, dy: &mut f64, cs: f64, sn: f64) {
+    let x = *dx;
+    let y = *dy;
+    *dx = cs * x + sn * y;
+    *dy = -sn * x + cs * y;
+}
+
+fn generate_plane_rotation(dx: &mut f64, dy: &mut f64, cs: &mut f64, sn: &mut f64) {
+    if *dy == 0.0 {
+        *cs = 1.0;
+        *sn = 0.0;
+    } else if dy.abs() > dx.abs() {
+        let tmp = *dx / *dy;
+        *sn = 1.0 / (1.0 + tmp * tmp).sqrt();
+        *cs = tmp * *sn;
+    } else {
+        let tmp = *dy / *dx;
+        *cs = 1.0 / (1.0 + tmp * tmp).sqrt();
+        *sn = tmp * *cs;
     }
 }

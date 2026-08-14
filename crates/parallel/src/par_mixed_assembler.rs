@@ -96,7 +96,9 @@ impl ParMixedAssembler {
 }
 
 /// Permute a rectangular CSR matrix using row and column DOF partitions.
-fn permute_rect_csr(
+/// Permute a rectangular local CSR matrix from DofManager order to the
+/// partition `[owned | ghost]` order (row and column partitions may differ).
+pub fn permute_rect_csr(
     mat: &CsrMatrix<f64>,
     row_part: &DofPartition,
     col_part: &DofPartition,

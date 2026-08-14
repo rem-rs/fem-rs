@@ -285,13 +285,45 @@ impl DofPartition {
         ghost_edges.sort_by_key(|e| (e.global_node_a, e.global_node_b));
 
         let n_owned_edges = owned_edges.len();
-        let n_owned = n_owned_vertices + n_owned_edges;
-        let n_ghost = n_ghost_vertices + ghost_edges.len();
+        let n_ghost_edges = ghost_edges.len();
+
+        // ── Element-center DOFs (P2 on quads: one center DOF per element) ──
+        // `DofManager` P2 covers vertices + edges only; on quadrilateral
+        // meshes the H¹ P2 space also has one interior (center) DOF per
+        // element, stored in `element_dofs` but absent from `edge_dof_map`
+        // and beyond the vertex range.  Ownership = the element's owner; the
+        // global id = n_global_vertices + n_global_edges + global_elem_id
+        // (unique on every rank holding the element, no exchange needed).
+        let edge_dof_set: std::collections::HashSet<u32> =
+            dof_manager.edge_dof_map.values().copied().collect();
+        let n_total_vertices_loc = dof_manager.n_vertex_dofs as u32;
+        let mut owned_centers: Vec<(u32, u32)> = Vec::new(); // (dm_dof, local elem)
+        let mut ghost_centers: Vec<(u32, u32, Rank)> = Vec::new();
+        let n_local_elems = partition.n_owned_elems + partition.n_ghost_elems;
+        for e in 0..n_local_elems {
+            let owner = partition.elem_owner[e];
+            for &d in dof_manager.element_dofs(e as u32) {
+                if d >= n_total_vertices_loc && !edge_dof_set.contains(&d) {
+                    if owner == local_rank {
+                        owned_centers.push((d, e as u32));
+                    } else {
+                        ghost_centers.push((d, e as u32, owner));
+                    }
+                    break;
+                }
+            }
+        }
+        let n_owned_centers = owned_centers.len();
+        let n_ghost_centers = ghost_centers.len();
+
+        let n_owned = n_owned_vertices + n_owned_edges + n_owned_centers;
+        let n_ghost = n_ghost_vertices + n_ghost_edges + n_ghost_centers;
 
         // ── Compute global offsets ──────────────────────────────────────────
         let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
         let total_global_vertices = comm.allreduce_sum_i64(n_owned_vertices as i64) as u32;
         let edge_offset = exclusive_scan_i64(comm, n_owned_edges as i64) as u32;
+        let n_global_edges = comm.allreduce_sum_i64(n_owned_edges as i64) as u32;
 
         // ── Build owned DOF arrays ──────────────────────────────────────────
         let total = n_owned + n_ghost;
@@ -316,6 +348,15 @@ impl DofPartition {
                 (edge.global_node_a, edge.global_node_b, edge.dof_key),
                 gid,
             );
+        }
+
+        // Owned element centers: global ID = n_global_vertices + n_global_edges
+        // + global_elem_id (element order is the canonical P2 center numbering).
+        for &(_, le) in &owned_centers {
+            let ge = partition.global_elem(le);
+            let gid = total_global_vertices + n_global_edges + ge;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
         }
 
         // ── Build ghost DOF arrays ──────────────────────────────────────────
@@ -343,14 +384,24 @@ impl DofPartition {
             global_dof_ids.push(ghost_edge_gids[i]);
             dof_owner_vec.push(edge.owner);
         }
+
+        // Ghost element centers (same gid formula as owned — element global
+        // ids are shared, so no exchange needed).
+        for &(_, le, owner) in &ghost_centers {
+            let ge = partition.global_elem(le);
+            let gid = total_global_vertices + n_global_edges + ge;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(owner);
+        }
         debug_assert_eq!(global_dof_ids.len(), total);
 
         // ── Build dm_to_partition permutation ───────────────────────────────
         // Maps DofManager's local DOF ID → partition's local DOF ID.
         // Partition layout:
-        //   [owned_vertices | owned_edges | ghost_vertices | ghost_edges]
+        //   [owned_vertices | owned_edges | owned_centers |
+        //    ghost_vertices | ghost_edges | ghost_centers]
         // DofManager layout:
-        //   [all_local_vertices | all_edges_in_enum_order]
+        //   [all_local_vertices | all_edges_in_enum_order | centers_in_elem_order]
         let n_dm_dofs = dof_manager.n_dofs;
         let mut dm_to_partition = vec![0u32; n_dm_dofs];
 
@@ -369,7 +420,17 @@ impl DofPartition {
         }
         // Ghost edges
         for (i, edge) in ghost_edges.iter().enumerate() {
-            dm_to_partition[edge.local_dof_id as usize] = (n_owned + n_ghost_vertices + i) as u32;
+            dm_to_partition[edge.local_dof_id as usize] =
+                (n_owned + n_ghost_vertices + i) as u32;
+        }
+        // Element centers: partition owned segment after edges, ghost segment
+        // after ghost edges.
+        for (i, &(d, _)) in owned_centers.iter().enumerate() {
+            dm_to_partition[d as usize] = (n_owned_vertices + n_owned_edges + i) as u32;
+        }
+        for (i, &(d, _, _)) in ghost_centers.iter().enumerate() {
+            dm_to_partition[d as usize] =
+                (n_owned + n_ghost_vertices + n_ghost_edges + i) as u32;
         }
 
         // Build inverse permutation.

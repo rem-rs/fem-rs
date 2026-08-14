@@ -616,3 +616,4 @@ fn main() {
     println!(" Final H1-error (|| u - uₕ||)          = {}", cpp_6(h1_err));
     println!(" Final L2-error (|| u - ϕ - exp(ψₕ)||) = {}", cpp_6(l2_alt));
 }
+

@@ -140,6 +140,8 @@ impl ParCsrMatrix {
     /// Mutable diagonal block.
     pub fn diag_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.diag }
 
+    pub fn offd_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.offd }
+
     /// Ghost exchange handle.
     pub fn ghost_exchange_handle(&self) -> Arc<GhostExchange> { self.dof_ghost_exchange.clone() }
 
