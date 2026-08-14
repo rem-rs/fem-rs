@@ -1860,10 +1860,23 @@ pub fn refine_uniform_surface_tri3(mesh: &Mesh<3>) -> Mesh<3> {
         nc.extend_from_slice(&[a, ab, ac, b, bc, ab, c, ac, bc, ab, bc, ac]);
         nt.extend_from_slice(&[tag, tag, tag, tag]);
     }
+    let mut fconn = Vec::with_capacity(mesh.face_conn.len());
+    let mut ftags = Vec::with_capacity(mesh.face_tags.len() * 2);
+    for f in 0..mesh.face_conn.len() / 2 {
+        let (a, b) = (mesh.face_conn[f * 2], mesh.face_conn[f * 2 + 1]);
+        let tag = mesh.face_tags[f];
+        let m = midpoint_edge(&mut coords, &mut em, &mut nn, a, b);
+        fconn.push(a);
+        fconn.push(m);
+        fconn.push(m);
+        fconn.push(b);
+        ftags.push(tag);
+        ftags.push(tag);
+    }
     Mesh {
         coords, conn: nc, elem_tags: nt,
         elem_type: ElementType::Tri3,
-        face_conn: vec![], face_tags: vec![],
+        face_conn: fconn, face_tags: ftags,
         face_type: ElementType::Line2,
         elem_types: None, elem_offsets: None,
         face_types: None, face_offsets: None,
@@ -1903,10 +1916,26 @@ pub fn refine_uniform_surface_quad4(mesh: &Mesh<3>) -> Mesh<3> {
         nc.extend_from_slice(&[a, ab, cx, da, ab, b, bc, cx, cx, bc, c, cd, da, cx, cd, d]);
         nt.extend_from_slice(&[tag, tag, tag, tag]);
     }
+    // Rebuild the boundary faces: each parent boundary edge (a,b) splits into
+    // (a,m) and (m,b), inheriting the parent tag.  The edge-midpoint table is
+    // shared with the element refinement so shared nodes stay consistent.
+    let mut fconn = Vec::with_capacity(mesh.face_conn.len());
+    let mut ftags = Vec::with_capacity(mesh.face_tags.len() * 2);
+    for f in 0..mesh.face_conn.len() / 2 {
+        let (a, b) = (mesh.face_conn[f * 2], mesh.face_conn[f * 2 + 1]);
+        let tag = mesh.face_tags[f];
+        let m = midpoint_edge(&mut coords, &mut em, &mut nn, a, b);
+        fconn.push(a);
+        fconn.push(m);
+        fconn.push(m);
+        fconn.push(b);
+        ftags.push(tag);
+        ftags.push(tag);
+    }
     Mesh {
         coords, conn: nc, elem_tags: nt,
         elem_type: ElementType::Quad4,
-        face_conn: vec![], face_tags: vec![],
+        face_conn: fconn, face_tags: ftags,
         face_type: ElementType::Line2,
         elem_types: None, elem_offsets: None,
         face_types: None, face_offsets: None,
