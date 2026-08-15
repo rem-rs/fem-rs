@@ -944,8 +944,12 @@ where
         let ge = if use_iso { geo_ref_elem_from_mesh(mesh, e) } else { None };
         let nodes = mesh.element_nodes(e);
 
-        // HCurl element signs — critical for correct orientation
+        // Orientation signs for BOTH spaces — the H(curl) sign (edge direction
+        // vs global min→max) and the H(div) sign (face orientation vs the
+        // canonical face).  The missing RT sign flipped every odd-orientation
+        // face row (serial ex24 prob-1 weak-curl form error).
         let nd_signs = nd_space.element_signs(e);
+        let rt_signs = rt_space.element_signs(e);
 
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
@@ -995,7 +999,8 @@ where
 
                     let dot = cx*wx + cy*wy + cz*wz;
                     let s_nd = if j < nd_signs.len() { nd_signs[j] } else { 1.0 };
-                    me[i * ng_nd + j] += w * nu * s_nd * dot;
+                    let s_rt = if i < rt_signs.len() { rt_signs[i] } else { 1.0 };
+                    me[i * ng_nd + j] += w * nu * s_nd * s_rt * dot;
                 }
             }
         }
