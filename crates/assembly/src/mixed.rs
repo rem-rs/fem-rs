@@ -318,8 +318,14 @@ where
         // Isoparametric geometry (e.g. Tri6 from SetCurvature(2)): the
         // Jacobian must be built from the mesh's geometry nodes and the
         // matching reference element; otherwise use the affine P1 simplex
-        // transformation.
-        let use_iso = mesh.geom_order() > 1;
+        // transformation.  Non-simplex elements (Quad4, Hex8, ...) always use
+        // the isoparametric/affine-mapped path — `from_simplex_nodes` is only
+        // valid for simplices.
+        let use_iso = mesh.geom_order() > 1
+            || !matches!(
+                elem_type,
+                ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2
+            );
         let geo_elem = geo_ref_elem_from_mesh(mesh, e);
 
         // Apply H(div) orientation signs (contravariant Piola sign) from
@@ -610,13 +616,22 @@ where
             transform_grads(&jit, &gr, &mut gp, n_h1, dim);
             nd_ref.eval_basis_vec(xi, &mut nd_basis);
 
+            // Physical ND basis (covariant Piola): ψ_phys = J^{-T} ψ_ref,
+            // i.e. `psi[c] = Σ_k jit[(c,k)]·nd_basis[i·dim+k]`.  Works for
+            // both 2-D and 3-D (dim components).
             for j in 0..n_g_h1 {
                 let g_j = &gp[j * dim..][..dim];
                 for i in 0..n_g_nd {
                     let s = signs[i];
-                    let psi_x = s * (jit[(0,0)] * nd_basis[i*dim] + jit[(0,1)] * nd_basis[i*dim+1]);
-                    let psi_y = s * (jit[(1,0)] * nd_basis[i*dim] + jit[(1,1)] * nd_basis[i*dim+1]);
-                    me[i * n_g_h1 + j] += w * (g_j[0] * psi_x + g_j[1] * psi_y);
+                    let mut dot = 0.0;
+                    for c in 0..dim {
+                        let mut psi_c = 0.0;
+                        for k in 0..dim {
+                            psi_c += jit[(c, k)] * nd_basis[i * dim + k];
+                        }
+                        dot += g_j[c] * (s * psi_c);
+                    }
+                    me[i * n_g_h1 + j] += w * dot;
                 }
             }
         }
@@ -958,14 +973,17 @@ where
                     (0.0, 0.0, curl_phys)
                 } else {
                     // 3D: curl gives 3-vector
-                    // MFEM VectorFECurlIntegrator: curl_phys = curl_ref · J^T
-                    // (= J · curl_ref, no 1/detJ factor — HDiv Piola absorbs it)
+                    // curl(v_phys) = (1/det_J) · J · curl_ref(v_ref) — the
+                    // H(div) Piola carries its own 1/det_J, so the curl needs
+                    // its own 1/det_J factor for the volume integral to come
+                    // out right (pex24 prob-1 error: RT mass-solve off).
                     let crx = nd_curl[j*dim];
                     let cry = nd_curl[j*dim + 1];
                     let crz = nd_curl[j*dim + 2];
-                    (jac[(0,0)]*crx + jac[(0,1)]*cry + jac[(0,2)]*crz,
-                     jac[(1,0)]*crx + jac[(1,1)]*cry + jac[(1,2)]*crz,
-                     jac[(2,0)]*crx + jac[(2,1)]*cry + jac[(2,2)]*crz)
+                    let id = 1.0 / det_j;
+                    (id * (jac[(0,0)]*crx + jac[(0,1)]*cry + jac[(0,2)]*crz),
+                     id * (jac[(1,0)]*crx + jac[(1,1)]*cry + jac[(1,2)]*crz),
+                     id * (jac[(2,0)]*crx + jac[(2,1)]*cry + jac[(2,2)]*crz))
                 };
 
                 for i in 0..ng_rt {

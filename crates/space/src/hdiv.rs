@@ -138,7 +138,7 @@ enum FaceCanon {
 /// MFEM `Mesh::GetTriOrientation(base, test)`: index of the permutation that
 /// transforms `test` into `base` (`test[tri_orientation[j][i]] == base[i]`).
 /// Orientations 1, 3, 5 are odd permutations (flip).
-fn tri_orientation(base: [u32; 3], test: [u32; 3]) -> usize {
+pub fn tri_orientation(base: [u32; 3], test: [u32; 3]) -> usize {
     if test[0] == base[0] {
         if test[1] == base[1] { 0 } else { 5 }
     } else if test[0] == base[1] {
@@ -151,7 +151,7 @@ fn tri_orientation(base: [u32; 3], test: [u32; 3]) -> usize {
 
 /// MFEM `Mesh::GetQuadOrientation(base, test)` → orientation in 0..=7.
 /// Odd orientations are flips.
-fn quad_orientation(base: [u32; 4], test: [u32; 4]) -> usize {
+pub fn quad_orientation(base: [u32; 4], test: [u32; 4]) -> usize {
     let mut i = 0;
     while test[i] != base[0] {
         i += 1;
@@ -162,7 +162,7 @@ fn quad_orientation(base: [u32; 4], test: [u32; 4]) -> usize {
 /// RT `DofOrderForOrientation`: odd orientation flips the sign of the face DOFs
 /// (for all RT orders — `RT_FECollection::InitFaces` puts a `-1-` prefix on
 /// every odd-orientation row of `TriDofOrd`/`QuadDofOrd`).
-fn rt_face_sign(orientation: usize) -> f64 {
+pub fn rt_face_sign(orientation: usize) -> f64 {
     if orientation % 2 == 1 { -1.0 } else { 1.0 }
 }
 
@@ -1237,12 +1237,29 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let pa = self.mesh.node_coords(canon[0]);
                         let pb = self.mesh.node_coords(canon[1]);
                         let pc = self.mesh.node_coords(canon[2]);
-                        let centroid = [
-                            (pa[0] + pb[0] + pc[0]) / 3.0,
-                            (pa[1] + pb[1] + pc[1]) / 3.0,
-                            (pa[2] + pb[2] + pc[2]) / 3.0,
-                        ];
-                        // Global face normal = (pb−pa) × (pc−pa)  (length = 2 × area)
+                        // Evaluation point: the FACE centroid.  Tri faces use
+                        // the 3-vertex centroid; quad faces MUST use the
+                        // 4-vertex centroid — the triangle (c0,c1,c2) centroid
+                        // lies off the quad centre (pex24 prob-2 error: RT0
+                        // flux interpolant divergence off ~2× per face).
+                        let centroid = if canon.len() == 4 {
+                            let pd = self.mesh.node_coords(canon[3]);
+                            [
+                                (pa[0] + pb[0] + pc[0] + pd[0]) / 4.0,
+                                (pa[1] + pb[1] + pc[1] + pd[1]) / 4.0,
+                                (pa[2] + pb[2] + pc[2] + pd[2]) / 4.0,
+                            ]
+                        } else {
+                            [
+                                (pa[0] + pb[0] + pc[0]) / 3.0,
+                                (pa[1] + pb[1] + pc[1]) / 3.0,
+                                (pa[2] + pb[2] + pc[2]) / 3.0,
+                            ]
+                        };
+                        // Global face normal = (pb−pa) × (pc−pa); for a planar
+                        // quad (c0,c1,c2,c3) the triangle (c0,c1,c2) is half
+                        // the face, so the cross product length equals the
+                        // face area and the dof = ∫_face f·n̂ ds (midpoint rule).
                         let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
                         let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
                         let normal = [

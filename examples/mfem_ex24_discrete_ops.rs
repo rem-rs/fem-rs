@@ -417,9 +417,9 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     // L² errors
     let err_qo = (2 * order + 4).max(5) as u8;
     let curlv_fn = |x: &[f64]| curlv_exact(x);
-    let e1 = compute_l2_error_hdiv(&w_sol, &rt, &curlv_fn, err_qo);
-    let e2 = compute_l2_error_hdiv(&w_interp, &rt, &curlv_fn, err_qo);
-    let e3 = compute_l2_error_hdiv(&w_ex, &rt, &curlv_fn, err_qo);
+    let e1 = compute_l2_error_hdiv(&w_sol, &rt, &curlv_fn, err_qo, None);
+    let e2 = compute_l2_error_hdiv(&w_interp, &rt, &curlv_fn, err_qo, None);
+    let e3 = compute_l2_error_hdiv(&w_ex, &rt, &curlv_fn, err_qo, None);
     println!("\n Solution of (E_h,w) = (curl v_h,w) for E_h and w in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e1);
     println!(" Curl interpolant E_h = curl v_h in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e2);
     println!(" Projection E_h of exact curl v in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e3);
@@ -477,9 +477,9 @@ fn solve_div_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
 
     // L² errors
     let err_qo = (2 * order + 6).max(7) as u8;
-    let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo);
-    let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo);
-    let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo);
+    let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo, None);
+    let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo, None);
+    let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo, None);
     println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e1);
     println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e2);
     println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e3);
@@ -537,9 +537,9 @@ fn solve_div_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
 
     // L² errors
     let err_qo = (2 * order + 6).max(7) as u8;
-    let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo);
-    let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo);
-    let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo);
+    let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo, None);
+    let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo, None);
+    let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo, None);
     println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e1);
     println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e2);
     println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e3);

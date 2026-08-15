@@ -6,7 +6,10 @@
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::fe_space::FESpace;
-use fem_assembly::mixed::{MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed};
+use fem_assembly::mixed::{
+    MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed,
+    assemble_hcurl_h1_gradient, assemble_hcurl_hdiv_weak_curl,
+};
 
 use crate::dof_partition::DofPartition;
 use crate::par_space::ParallelFESpace;
@@ -92,6 +95,66 @@ impl ParMixedAssembler {
         // j on this rank and c owned elsewhere).  Dropping ghost rows made A01
         // miss those columns → (Au)·v ≠ u·(Av) for the saddle-point operator.
         permuted_mat
+    }
+
+    /// Parallel mixed assembly for the H¹ × H(curl) gradient coupling
+    /// `(∇p, v)` (MFEM `MixedVectorGradientIntegrator`), via the serial
+    /// [`assemble_hcurl_h1_gradient`] path.
+    ///
+    /// Returns a CSR with `n_owned_row` (H(curl)) rows and `n_total_col`
+    /// (H¹) columns.
+    pub fn assemble_hcurl_h1_gradient<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+        h1_par: &ParallelFESpace<fem_space::H1Space<M>>,
+        hcurl_par: &ParallelFESpace<fem_space::HCurlSpace<M>>,
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        let local_mat = assemble_hcurl_h1_gradient(
+            hcurl_par.local_space(),
+            h1_par.local_space(),
+            quad_order,
+        );
+        let row_part = hcurl_par.dof_partition();
+        let col_part = h1_par.dof_partition();
+        let needs_perm = row_part.needs_permutation() || col_part.needs_permutation();
+        let permuted_mat = if needs_perm {
+            permute_rect_csr(&local_mat, row_part, col_part)
+        } else {
+            local_mat
+        };
+        // Keep only owned H(curl) rows.
+        let n_owned_rows = row_part.n_owned_dofs;
+        let n_total_cols = col_part.n_total_dofs();
+        extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
+    }
+
+    /// Parallel mixed assembly for the H(curl) × H(div) curl coupling
+    /// `(curl v, w)` (MFEM `MixedVectorCurlIntegrator`), via the serial
+    /// [`assemble_hcurl_hdiv_weak_curl`] path.
+    ///
+    /// Returns a CSR with `n_owned_row` (H(div)) rows and `n_total_col`
+    /// (H(curl)) columns.
+    pub fn assemble_hcurl_hdiv_curl<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+        nd_par: &ParallelFESpace<fem_space::HCurlSpace<M>>,
+        rt_par: &ParallelFESpace<fem_space::HDivSpace<M>>,
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        let local_mat = assemble_hcurl_hdiv_weak_curl(
+            nd_par.local_space(),
+            rt_par.local_space(),
+            quad_order,
+            1.0,
+        );
+        let row_part = rt_par.dof_partition();
+        let col_part = nd_par.dof_partition();
+        let needs_perm = row_part.needs_permutation() || col_part.needs_permutation();
+        let permuted_mat = if needs_perm {
+            permute_rect_csr(&local_mat, row_part, col_part)
+        } else {
+            local_mat
+        };
+        let n_owned_rows = row_part.n_owned_dofs;
+        let n_total_cols = col_part.n_total_dofs();
+        extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
     }
 }
 

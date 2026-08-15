@@ -29,6 +29,19 @@ struct EdgeDofInfo {
     dof_key: u32,
 }
 
+/// Metadata for one face DOF of a 3-D H(div) space (RT0/RT1).
+struct FaceDofInfo {
+    local_dof_id: u32,
+    /// Face key: the 3 smallest global vertex ids of the face.
+    face_key: (u32, u32, u32),
+    /// Position of the DOF within its face (0 for RT0, 0..dofs_per_face for
+    /// RTk): cross-rank consistent because it is derived from the DOF's
+    /// position inside the element's face block, which all ranks compute the
+    /// same way.
+    pos: u32,
+    owner: Rank,
+}
+
 // ── DofPartition ────────────────────────────────────────────────────────────
 
 /// DOF-level partition descriptor for one MPI rank.
@@ -107,8 +120,8 @@ impl DofPartition {
     /// holding that element (no exchange needed).  The local DOF layout
     /// (element-traversal order) already matches the [owned | ghost] element
     /// ordering, so the permutation is the identity.
-    pub fn from_l2_space(
-        space: &fem_space::L2Space<Mesh<2>>,
+    pub fn from_l2_space<M: MeshTopology>(
+        space: &fem_space::L2Space<M>,
         partition: &MeshPartition,
         comm: &Comm,
     ) -> Self {
@@ -580,16 +593,26 @@ impl DofPartition {
         let hcurl_3d: Vec<(usize, usize)> = vec![
             (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
         ];
+        // Hex8 local edges, matching fem_space::hcurl::HEX_EDGES / MFEM
+        // `Geometry::Constants<Geometry::CUBE>::Edges` (used by HCurlSpace for
+        // hex ND1; order-1 hex ND has 12 edge DOFs, one per edge).
+        let hcurl_hex_3d: Vec<(usize, usize)> = vec![
+            (0, 1), (1, 2), (3, 2), (0, 3),
+            (4, 5), (5, 6), (7, 6), (4, 7),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
 
         let space_type = space.space_type();
-        let is_quad = mesh.n_elements() > 0
-            && matches!(mesh.element_type(0), fem_mesh::ElementType::Quad4);
+        let elem0 = if mesh.n_elements() > 0 { Some(mesh.element_type(0)) } else { None };
+        let is_quad = elem0 == Some(fem_mesh::ElementType::Quad4);
+        let is_hex = elem0 == Some(fem_mesh::ElementType::Hex8);
 
         let edges_for_space: &[(usize, usize)] = match (space_type, dim) {
             (fem_space::fe_space::SpaceType::HCurl, 2) if is_quad => &hcurl_quad_2d,
             (fem_space::fe_space::SpaceType::HCurl, 2) => &hcurl_2d,
             (fem_space::fe_space::SpaceType::HDiv, 2) if is_quad => &hdiv_quad_2d,
             (fem_space::fe_space::SpaceType::HDiv, 2) => &hdiv_2d,
+            (fem_space::fe_space::SpaceType::HCurl, 3) if is_hex => &hcurl_hex_3d,
             (fem_space::fe_space::SpaceType::HCurl, 3) => &hcurl_3d,
             _ => &hcurl_2d,
         };
@@ -873,6 +896,315 @@ impl DofPartition {
         }
     }
 
+    /// Build a DOF partition for 3-D H(div) (Raviart-Thomas) face-based spaces.
+    ///
+    /// RT0 (hex: 6 quad-face DOFs, tet: 4 tri-face DOFs; RT1 hex: 4 DOFs per
+    /// quad face + 12 interior DOFs).  Face DOF ownership:
+    /// `owner(face) = min(owner of the face's vertices)`.
+    ///
+    /// The canonical face orientation follows MFEM's Elem1 rule (the element
+    /// with the **minimum global element id** among the elements sharing the
+    /// face), so the partition sign corrections are cross-rank consistent even
+    /// though the space's own first-seen (local traversal) canonical face may
+    /// differ between ranks.
+    pub fn from_face_space<S: FESpace>(
+        space: &S,
+        partition: &MeshPartition,
+        comm: &Comm,
+    ) -> Self
+    where
+        S::Mesh: MeshTopology,
+    {
+        let local_rank = comm.rank();
+        let mesh = space.mesh();
+        let n_space_dofs = space.n_dofs();
+        let dim = mesh.dim() as usize;
+        assert_eq!(dim, 3, "from_face_space: requires a 3-D mesh");
+        assert!(
+            mesh.n_elements() > 0,
+            "from_face_space: empty local mesh"
+        );
+
+        let elem0 = mesh.element_type(0);
+        // Local face vertex tables (matching HDivSpace / MFEM FaceVert order):
+        // hex RT0: 6 quad faces; tet RT0: 4 tri faces.
+        let (faces, dofs_per_face, n_interior_per_elem): (Vec<Vec<usize>>, usize, usize) =
+            match elem0 {
+                fem_mesh::ElementType::Hex8 => (
+                    vec![
+                        vec![3, 2, 1, 0], // z=-1 (bottom)
+                        vec![0, 1, 5, 4], // y=-1 (front)
+                        vec![1, 2, 6, 5], // x=+1 (right)
+                        vec![2, 3, 7, 6], // y=+1 (back)
+                        vec![3, 0, 4, 7], // x=-1 (left)
+                        vec![4, 5, 6, 7], // z=+1 (top)
+                    ],
+                    space.order() as usize + 1,
+                    if space.order() == 0 { 0 } else { 12 },
+                ),
+                fem_mesh::ElementType::Tet4 => (
+                    vec![
+                        vec![1, 2, 3],
+                        vec![0, 2, 3],
+                        vec![0, 1, 3],
+                        vec![0, 1, 2],
+                    ],
+                    space.order() as usize + 1,
+                    0,
+                ),
+                _ => panic!("from_face_space: unsupported element type {elem0:?}"),
+            };
+        let n_face_dofs_total = faces.len() * dofs_per_face;
+
+        // Per-face metadata: the space-canonical (first-seen) vertex order,
+        // the min-global-element-id face order (global canonical), and the
+        // face's owner rank (min over the *elements* sharing the face — the
+        // owner must actually hold the face locally, which the vertex-min
+        // rule does not guarantee).
+        struct FaceInfo {
+            first_order: Vec<u32>,
+            min_gid_elem: u32,
+            min_gid_order: Vec<u32>,
+            min_elem_owner: Rank,
+        }
+
+        let mut face_info: HashMap<(u32, u32, u32), FaceInfo> = HashMap::new();
+        let mut dof_to_face: HashMap<u32, (u32, u32, u32)> = HashMap::new();
+        let mut dof_to_pos: HashMap<u32, u32> = HashMap::new();
+        let mut interior_dofs: Vec<(u32, u32, u32)> = Vec::new(); // (dof_id, local_elem, dof_idx)
+        let mut sign_corr: Vec<f64> = vec![1.0; n_space_dofs];
+
+        for e in mesh.elem_iter() {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let elem_gid = partition.global_elem(e);
+
+            for (i, &dof_id) in dofs.iter().enumerate() {
+                if i >= n_face_dofs_total {
+                    interior_dofs.push((dof_id, e, i as u32));
+                    continue;
+                }
+                let face_idx = i / dofs_per_face;
+                let pos = i % dofs_per_face;
+                let fv = &faces[face_idx];
+                let verts_global: Vec<u32> =
+                    fv.iter().map(|&li| partition.global_node(nodes[li])).collect();
+                // Face key: the 3 smallest global vertex ids of the *whole*
+                // face (HDivSpace FaceKey convention) — the local face vertex
+                // order differs between the two elements sharing a face, so
+                // taking the first 3 of the local ordering would produce
+                // different keys on different ranks.
+                let mut v4 = verts_global.clone();
+                v4.sort_unstable();
+                let key = (v4[0], v4[1], v4[2]);
+
+                let entry = face_info.entry(key).or_insert_with(|| {
+                    let owner = if (e as usize) < partition.n_owned_elems {
+                        local_rank
+                    } else {
+                        partition.elem_owner[e as usize]
+                    };
+                    FaceInfo {
+                        first_order: verts_global.clone(),
+                        min_gid_elem: elem_gid,
+                        min_gid_order: verts_global.clone(),
+                        min_elem_owner: owner,
+                    }
+                });
+                if !dof_to_face.contains_key(&dof_id) {
+                    // First element in traversal maps the DOF: this is the
+                    // space's canonical face orientation (hdiv.rs face_canon
+                    // first-seen rule), in the traversal's vertex order.
+                    entry.first_order = verts_global.clone();
+                    dof_to_face.insert(dof_id, key);
+                    dof_to_pos.insert(dof_id, pos as u32);
+                }
+                if elem_gid < entry.min_gid_elem {
+                    entry.min_gid_elem = elem_gid;
+                    entry.min_gid_order = verts_global.clone();
+                }
+                let owner = if (e as usize) < partition.n_owned_elems {
+                    local_rank
+                } else {
+                    partition.elem_owner[e as usize]
+                };
+                if owner < entry.min_elem_owner {
+                    entry.min_elem_owner = owner;
+                }
+            }
+        }
+
+        // ── Step 2: classify owned / ghost faces and compute sign corrections
+        let mut owned_faces: Vec<FaceDofInfo> = Vec::new();
+        let mut ghost_faces: Vec<FaceDofInfo> = Vec::new();
+
+        for (&dof_id, &key) in &dof_to_face {
+            let info = &face_info[&key];
+            let owner = info.min_elem_owner;
+
+            // Sign correction: parity(space canonical first-seen order, global
+            // canonical min-gid-element order).  Multiplying the space's
+            // element signs by this yields each element's sign relative to the
+            // global canonical face orientation, which is cross-rank
+            // consistent.
+            let sign = if info.first_order.len() == 4 {
+                fem_space::hdiv::rt_face_sign(fem_space::hdiv::quad_orientation(
+                    [
+                        info.first_order[0],
+                        info.first_order[1],
+                        info.first_order[2],
+                        info.first_order[3],
+                    ],
+                    [
+                        info.min_gid_order[0],
+                        info.min_gid_order[1],
+                        info.min_gid_order[2],
+                        info.min_gid_order[3],
+                    ],
+                ))
+            } else {
+                fem_space::hdiv::rt_face_sign(fem_space::hdiv::tri_orientation(
+                    [info.first_order[0], info.first_order[1], info.first_order[2]],
+                    [
+                        info.min_gid_order[0],
+                        info.min_gid_order[1],
+                        info.min_gid_order[2],
+                    ],
+                ))
+            };
+            sign_corr[dof_id as usize] = sign;
+
+            let f = FaceDofInfo {
+                local_dof_id: dof_id,
+                face_key: key,
+                pos: dof_to_pos[&dof_id],
+                owner,
+            };
+            if owner == local_rank {
+                owned_faces.push(f);
+            } else {
+                ghost_faces.push(f);
+            }
+        }
+
+        // Deterministic ordering by (face key, position within face).
+        owned_faces.sort_by_key(|f| (f.face_key.0, f.face_key.1, f.face_key.2, f.pos));
+        ghost_faces.sort_by_key(|f| (f.face_key.0, f.face_key.1, f.face_key.2, f.pos));
+
+        // ── Step 2b: interior DOFs (element-owned) ───────────────────────────
+        let mut owned_interior: Vec<(u32, u32, u32)> = Vec::new();
+        let mut ghost_interior: Vec<(u32, u32, u32, Rank)> = Vec::new();
+        for &(dof_id, le, dof_idx) in &interior_dofs {
+            let elem_gid = partition.global_elem(le);
+            let owner = if (le as usize) < partition.n_owned_elems {
+                local_rank
+            } else {
+                partition.elem_owner[le as usize]
+            };
+            if owner == local_rank {
+                owned_interior.push((dof_id, elem_gid, dof_idx));
+            } else {
+                ghost_interior.push((dof_id, elem_gid, dof_idx, owner));
+            }
+        }
+        owned_interior.sort();
+        ghost_interior.sort_by_key(|&(dof_id, _, _, _)| dof_id);
+
+        let n_owned_face = owned_faces.len();
+        let n_ghost_face = ghost_faces.len();
+        let n_owned_interior = owned_interior.len();
+        let n_ghost_interior = ghost_interior.len();
+        let n_owned = n_owned_face + n_owned_interior;
+        let n_ghost = n_ghost_face + n_ghost_interior;
+        let total = n_owned + n_ghost;
+
+        if total != n_space_dofs {
+            eprintln!(
+                "  Warning: from_face_space classified {total}/{n_space_dofs} DOFs \
+                 (face={}, interior={}). Missing DOFs may cause errors.",
+                n_owned_face + n_ghost_face,
+                n_owned_interior + n_ghost_interior
+            );
+        }
+
+        // ── Step 3: global offsets ─────────────────────────────────────────────
+        let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
+
+        // ── Step 4: build global DOF IDs ───────────────────────────────────────
+        let mut global_dof_ids = Vec::with_capacity(total);
+        let mut dof_owner_vec = Vec::with_capacity(total);
+
+        let mut owned_face_global_map: HashMap<(u32, u32, u32, u32), u32> = HashMap::new();
+        for (i, f) in owned_faces.iter().enumerate() {
+            let gid = global_dof_offset as u32 + i as u32;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
+            owned_face_global_map.insert((f.face_key.0, f.face_key.1, f.face_key.2, f.pos), gid);
+        }
+
+        let owned_interior_offset = global_dof_offset + owned_faces.len();
+        let mut owned_interior_map: HashMap<(u32, u32), u32> = HashMap::new();
+        for (j, &(_dof_id, elem_gid, dof_idx)) in owned_interior.iter().enumerate() {
+            let gid = owned_interior_offset as u32 + j as u32;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
+            owned_interior_map.insert((elem_gid, dof_idx), gid);
+        }
+
+        let ghost_face_gids = exchange_ghost_face_ids(&ghost_faces, &owned_face_global_map, comm);
+        for (i, f) in ghost_faces.iter().enumerate() {
+            global_dof_ids.push(ghost_face_gids[i]);
+            dof_owner_vec.push(f.owner);
+        }
+
+        let ghost_interior_gids =
+            exchange_ghost_interior_ids(&ghost_interior, &owned_interior_map, comm);
+        for &gid in &ghost_interior_gids {
+            global_dof_ids.push(gid);
+        }
+        for &(_, _, _, owner) in &ghost_interior {
+            dof_owner_vec.push(owner);
+        }
+
+        // ── Step 5: permutation ────────────────────────────────────────────────
+        let mut dm_to_partition = vec![0u32; n_space_dofs];
+        let mut partition_to_dm = vec![0u32; n_space_dofs];
+
+        for (i, f) in owned_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] = i as u32;
+        }
+        for (j, &(dof_id, _, _)) in owned_interior.iter().enumerate() {
+            dm_to_partition[dof_id as usize] = (n_owned_face + j) as u32;
+        }
+        for (i, f) in ghost_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] = (n_owned + i) as u32;
+        }
+        for (j, &(dof_id, _, _, _)) in ghost_interior.iter().enumerate() {
+            dm_to_partition[dof_id as usize] = (n_owned + n_ghost_face + j) as u32;
+        }
+        for (dm_id, &part_id) in dm_to_partition.iter().enumerate() {
+            partition_to_dm[part_id as usize] = dm_id as u32;
+        }
+
+        let dof_global_to_local: HashMap<u32, u32> = global_dof_ids
+            .iter()
+            .enumerate()
+            .map(|(lid, &gid)| (gid, lid as u32))
+            .collect();
+
+        DofPartition {
+            n_owned_dofs: n_owned,
+            n_ghost_dofs: n_ghost,
+            global_dof_ids,
+            dof_owner: dof_owner_vec,
+            global_dof_offset,
+            dof_global_to_local,
+            dm_to_partition,
+            partition_to_dm,
+            sign_corrections: sign_corr,
+        }
+    }
+
     /// Total local DOF count (owned + ghost).
     #[inline]
     pub fn n_total_dofs(&self) -> usize { self.n_owned_dofs + self.n_ghost_dofs }
@@ -1035,6 +1367,99 @@ fn exchange_ghost_edge_ids(
         let request_indices = &requests_by_owner[responder];
         assert_eq!(gids.len(), request_indices.len());
         for (j, &(orig_idx, _, _, _)) in request_indices.iter().enumerate() {
+            result[orig_idx] = gids[j];
+        }
+    }
+
+    result
+}
+
+/// Exchange global DOF IDs for ghost face DOFs via alltoallv.
+///
+/// Each rank sends its ghost faces (identified by the 3-vertex face key and
+/// the position within the face) to the owner rank, which looks up the global
+/// DOF ID and replies.
+fn exchange_ghost_face_ids(
+    ghost_faces: &[FaceDofInfo],
+    owned_face_global_map: &HashMap<(u32, u32, u32, u32), u32>,
+    comm: &Comm,
+) -> Vec<u32> {
+    if comm.size() <= 1 || ghost_faces.is_empty() {
+        return Vec::new();
+    }
+
+    let mut requests_by_owner: HashMap<Rank, Vec<(usize, u32, u32, u32, u32)>> = HashMap::new();
+    for (i, f) in ghost_faces.iter().enumerate() {
+        requests_by_owner.entry(f.owner).or_default().push((
+            i,
+            f.face_key.0,
+            f.face_key.1,
+            f.face_key.2,
+            f.pos,
+        ));
+    }
+
+    // Phase 1: send face requests (3-vertex key + pos) to owners.
+    let sends: Vec<(Rank, Vec<u8>)> = requests_by_owner
+        .iter()
+        .map(|(&owner, entries)| {
+            let bytes: Vec<u8> = entries
+                .iter()
+                .flat_map(|&(_, a, b, c, p)| {
+                    let mut buf = [0u8; 16];
+                    buf[..4].copy_from_slice(&a.to_le_bytes());
+                    buf[4..8].copy_from_slice(&b.to_le_bytes());
+                    buf[8..12].copy_from_slice(&c.to_le_bytes());
+                    buf[12..].copy_from_slice(&p.to_le_bytes());
+                    buf
+                })
+                .collect();
+            (owner, bytes)
+        })
+        .collect();
+
+    let received = comm.alltoallv_bytes(&sends);
+
+    // Phase 2: owners look up global DOF IDs and reply.
+    let replies: Vec<(Rank, Vec<u8>)> = received
+        .iter()
+        .map(|(requester, bytes)| {
+            debug_assert_eq!(bytes.len() % 16, 0);
+            let reply_bytes: Vec<u8> = bytes
+                .chunks_exact(16)
+                .flat_map(|chunk| {
+                    let a = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+                    let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                    let c = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                    let p = u32::from_le_bytes(chunk[12..].try_into().unwrap());
+                    let gid = owned_face_global_map
+                        .get(&(a, b, c, p))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "exchange_ghost_face_ids: rank {} requested face ({a},{b},{c}) \
+                                 pos {p} but this rank does not own it",
+                                requester
+                            )
+                        });
+                    gid.to_le_bytes()
+                })
+                .collect();
+            (*requester, reply_bytes)
+        })
+        .collect();
+
+    let reply_received = comm.alltoallv_bytes(&replies);
+
+    // Phase 3: decode replies into the original ghost-face order.
+    let mut result = vec![0u32; ghost_faces.len()];
+    for (responder, bytes) in &reply_received {
+        let gids: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        let request_indices = &requests_by_owner[responder];
+        assert_eq!(gids.len(), request_indices.len());
+        for (j, &(orig_idx, _, _, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
         }
     }
@@ -1296,5 +1721,276 @@ mod tests {
         assert_eq!(res[1].1, 1);
         assert_eq!(res[2].1, 3);
         assert_eq!(res[3].1, 6);
+    }
+
+    /// Assemble the H(div) or H(curl) mass matrix on a partitioned 3-D hex
+    /// mesh, apply `y = M x` with `x = gid` and return `(gid, y)` for all
+    /// owned DOFs.  The returned map must be identical for every partition
+    /// (np1 / np2 / np4) — this validates edge/face DOF ownership, the
+    /// permutation and the sign corrections.
+    #[test]
+    fn hex_nd1_mass_consistent_across_partitions() {
+        let mut mesh = Mesh::<3>::unit_cube_hex(2);
+        for _ in 0..2 {
+            mesh = fem_mesh::refine_uniform_3d(&mesh);
+        }
+        // Hex local edges (matching HCurlSpace HEX_EDGES).
+        const HEX_EDGES: [(usize, usize); 12] = [
+            (0, 1), (1, 2), (3, 2), (0, 3),
+            (4, 5), (5, 6), (7, 6), (4, 7),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+
+        // Returns (edge-node-pair, y) for every owned dof after `y = M x`
+        // with `x = 1` (constant field).  The edge pair uses global node ids,
+        // which are partition-invariant (unlike the edge DOF gids).
+        let run = |np: usize, mesh: Mesh<3>| -> Vec<((u32, u32), f64)> {
+            let out: Arc<Mutex<Option<Vec<((u32, u32), f64)>>>> = Arc::new(Mutex::new(None));
+            let out2 = Arc::clone(&out);
+            let launcher = ThreadLauncher::new(WorkerConfig::new(np));
+            launcher.launch(move |comm| {
+                let pmesh = partition_mesh(&mesh, &comm);
+                let lm = pmesh.local_mesh().clone();
+                let local_space = fem_space::HCurlSpace::new(lm, 1);
+                let dp =
+                    DofPartition::from_edge_space(&local_space, pmesh.partition(), &comm);
+                let ps = crate::par_space::ParallelFESpace::new_with_dof_partition(
+                    local_space,
+                    dp,
+                    comm.clone(),
+                );
+
+                use crate::par_vector::ParVector;
+                use crate::par_vector_assembler::ParVectorAssembler;
+                use fem_assembly::standard::VectorMassIntegrator;
+                let mass = ParVectorAssembler::assemble_bilinear(
+                    &ps,
+                    &[&VectorMassIntegrator { alpha: 1.0 }],
+                    3,
+                );
+                let mut x = ParVector::zeros(&ps);
+                for pid in 0..ps.dof_partition().n_owned_dofs {
+                    x.as_slice_mut()[pid] = 1.0;
+                }
+                x.update_ghosts();
+                let mut y = ParVector::zeros(&ps);
+                mass.spmv(&mut x, &mut y);
+
+                // dof (dm id) -> canonical edge node pair (global ids).
+                let mut dof_edge: std::collections::HashMap<u32, (u32, u32)> =
+                    std::collections::HashMap::new();
+                {
+                    let sp = ps.local_space();
+                    let mesh3 = sp.mesh();
+                    for e in mesh3.elem_iter() {
+                        let dofs = sp.element_dofs(e);
+                        let nodes = mesh3.element_nodes(e);
+                        for (i, &d) in dofs.iter().enumerate() {
+                            let (li, lj) = HEX_EDGES[i];
+                            let (a, b) = (
+                                pmesh.partition().global_node(nodes[li]),
+                                pmesh.partition().global_node(nodes[lj]),
+                            );
+                            dof_edge.entry(d as u32).or_insert((a.min(b), a.max(b)));
+                        }
+                    }
+                }
+                let dp = ps.dof_partition();
+                let owned: Vec<((u32, u32), f64)> = (0..dp.n_owned_dofs)
+                    .map(|pid| {
+                        let dm = dp.unpermute_dof(pid as u32);
+                        let key = *dof_edge
+                            .get(&dm)
+                            .expect("nd1 test: dof not in edge map");
+                        (key, y.as_slice()[pid])
+                    })
+                    .collect();
+                if comm.rank() == 0 {
+                    let mut all = owned.clone();
+                    for src in 1..comm.size() as i32 {
+                        let flat: Vec<u32> = comm.recv(src, 201);
+                        let keys: Vec<(u32, u32)> = flat
+                            .chunks_exact(2)
+                            .map(|c| (c[0], c[1]))
+                            .collect();
+                        let vals: Vec<f64> = comm.recv(src, 202);
+                        all.extend(keys.into_iter().zip(vals));
+                    }
+                    all.sort_unstable_by_key(|&(k, _)| k);
+                    *out2.lock().unwrap() = Some(all);
+                } else {
+                    let keys: Vec<(u32, u32)> = owned.iter().map(|&(k, _)| k).collect();
+                    let vals: Vec<f64> = owned.iter().map(|&(_, v)| v).collect();
+                    // Tuples are not Pod: pack into flat u32 pairs.
+                    let flat: Vec<u32> = keys.iter().flat_map(|&(a, b)| [a, b]).collect();
+                    comm.send(0, 201, &flat);
+                    comm.send(0, 202, &vals);
+                }
+            });
+            let mut guard = out.lock().unwrap();
+            guard.take().unwrap()
+        };
+
+        let np1 = run(1, mesh.clone());
+        let np2 = run(2, mesh.clone());
+        let np4 = run(4, mesh.clone());
+
+        assert_eq!(np1.len(), np2.len(), "nd1: np1/np2 global dof count mismatch");
+        assert_eq!(np1.len(), np4.len(), "nd1: np1/np4 global dof count mismatch");
+        let mut max_diff = 0.0_f64;
+        for ((k1, y1), (k2, y2)) in np1.iter().zip(np2.iter()) {
+            assert_eq!(k1, k2, "nd1: edge-key order mismatch np1 vs np2");
+            max_diff = max_diff.max((y1 - y2).abs());
+        }
+        assert!(
+            max_diff < 1e-10,
+            "hex ND1 mass differs across partitions (np1 vs np2): max_diff={max_diff:e}"
+        );
+        let mut max_diff4 = 0.0_f64;
+        for ((k1, y1), (k4, y4)) in np1.iter().zip(np4.iter()) {
+            assert_eq!(k1, k4, "nd1: edge-key order mismatch np1 vs np4");
+            max_diff4 = max_diff4.max((y1 - y4).abs());
+        }
+        assert!(
+            max_diff4 < 1e-10,
+            "hex ND1 mass differs across partitions (np1 vs np4): max_diff={max_diff4:e}"
+        );
+    }
+
+    #[test]
+    fn hex_rt0_mass_consistent_across_partitions() {
+        let mut mesh = Mesh::<3>::unit_cube_hex(2);
+        for _ in 0..2 {
+            mesh = fem_mesh::refine_uniform_3d(&mesh);
+        }
+
+        // Returns (face-3-vertex-key, y) for every owned dof after `y = M x`
+        // with `x = 1`.  The face key uses global vertex ids (partition
+        // invariant), unlike the face DOF gids.
+        let run = |np: usize, mesh: Mesh<3>| -> Vec<((u32, u32, u32), f64)> {
+            let out: Arc<Mutex<Option<Vec<((u32, u32, u32), f64)>>>> = Arc::new(Mutex::new(None));
+            let out2 = Arc::clone(&out);
+            let launcher = ThreadLauncher::new(WorkerConfig::new(np));
+            launcher.launch(move |comm| {
+                let pmesh = partition_mesh(&mesh, &comm);
+                let lm = pmesh.local_mesh().clone();
+                let local_space = fem_space::HDivSpace::new(lm, 0);
+                let dp =
+                    DofPartition::from_face_space(&local_space, pmesh.partition(), &comm);
+                let ps = crate::par_space::ParallelFESpace::new_with_dof_partition(
+                    local_space,
+                    dp,
+                    comm.clone(),
+                );
+
+                use crate::par_vector::ParVector;
+                use crate::par_vector_assembler::ParVectorAssembler;
+                use fem_assembly::standard::VectorMassIntegrator;
+                let mass = ParVectorAssembler::assemble_bilinear(
+                    &ps,
+                    &[&VectorMassIntegrator { alpha: 1.0 }],
+                    3,
+                );
+                let mut x = ParVector::zeros(&ps);
+                for pid in 0..ps.dof_partition().n_owned_dofs {
+                    x.as_slice_mut()[pid] = 1.0;
+                }
+                x.update_ghosts();
+                let mut y = ParVector::zeros(&ps);
+                mass.spmv(&mut x, &mut y);
+
+                // dof (dm id) -> canonical face key (3 smallest global ids).
+                // Hex local faces (matching HDivSpace HEX_FACES).
+                const HEX_FACES: [[usize; 4]; 6] = [
+                    [3, 2, 1, 0],
+                    [0, 1, 5, 4],
+                    [1, 2, 6, 5],
+                    [2, 3, 7, 6],
+                    [3, 0, 4, 7],
+                    [4, 5, 6, 7],
+                ];
+                let mut dof_face: std::collections::HashMap<u32, (u32, u32, u32)> =
+                    std::collections::HashMap::new();
+                {
+                    let sp = ps.local_space();
+                    let mesh3 = sp.mesh();
+                    for e in mesh3.elem_iter() {
+                        let dofs = sp.element_dofs(e);
+                        let nodes = mesh3.element_nodes(e);
+                        for (i, &d) in dofs.iter().enumerate() {
+                            if i >= HEX_FACES.len() {
+                                break;
+                            }
+                            let fv = HEX_FACES[i];
+                            let mut v4: Vec<u32> = fv
+                                .iter()
+                                .map(|&li| pmesh.partition().global_node(nodes[li]))
+                                .collect();
+                            v4.sort_unstable();
+                            dof_face
+                                .entry(d as u32)
+                                .or_insert((v4[0], v4[1], v4[2]));
+                        }
+                    }
+                }
+                let dp = ps.dof_partition();
+                let owned: Vec<((u32, u32, u32), f64)> = (0..dp.n_owned_dofs)
+                    .map(|pid| {
+                        let dm = dp.unpermute_dof(pid as u32);
+                        let key = *dof_face
+                            .get(&dm)
+                            .expect("rt0 test: dof not in face map");
+                        (key, y.as_slice()[pid])
+                    })
+                    .collect();
+                if comm.rank() == 0 {
+                    let mut all = owned.clone();
+                    for src in 1..comm.size() as i32 {
+                        let flat: Vec<u32> = comm.recv(src, 201);
+                        let keys: Vec<(u32, u32, u32)> = flat
+                            .chunks_exact(3)
+                            .map(|c| (c[0], c[1], c[2]))
+                            .collect();
+                        let vals: Vec<f64> = comm.recv(src, 202);
+                        all.extend(keys.into_iter().zip(vals));
+                    }
+                    all.sort_unstable_by_key(|&(k, _)| k);
+                    *out2.lock().unwrap() = Some(all);
+                } else {
+                    let keys: Vec<(u32, u32, u32)> = owned.iter().map(|&(k, _)| k).collect();
+                    let vals: Vec<f64> = owned.iter().map(|&(_, v)| v).collect();
+                    let flat: Vec<u32> = keys.iter().flat_map(|&(a, b, c)| [a, b, c]).collect();
+                    comm.send(0, 201, &flat);
+                    comm.send(0, 202, &vals);
+                }
+            });
+            let mut guard = out.lock().unwrap();
+            guard.take().unwrap()
+        };
+
+        let np1 = run(1, mesh.clone());
+        let np2 = run(2, mesh.clone());
+        let np4 = run(4, mesh.clone());
+
+        assert_eq!(np1.len(), np2.len(), "rt0: np1/np2 global dof count mismatch");
+        assert_eq!(np1.len(), np4.len(), "rt0: np1/np4 global dof count mismatch");
+        let mut max_diff = 0.0_f64;
+        for ((k1, y1), (k2, y2)) in np1.iter().zip(np2.iter()) {
+            assert_eq!(k1, k2, "rt0: face-key order mismatch np1 vs np2");
+            max_diff = max_diff.max((y1 - y2).abs());
+        }
+        assert!(
+            max_diff < 1e-10,
+            "hex RT0 mass differs across partitions (np1 vs np2): max_diff={max_diff:e}"
+        );
+        let mut max_diff4 = 0.0_f64;
+        for ((k1, y1), (k4, y4)) in np1.iter().zip(np4.iter()) {
+            assert_eq!(k1, k4, "rt0: face-key order mismatch np1 vs np4");
+            max_diff4 = max_diff4.max((y1 - y4).abs());
+        }
+        assert!(
+            max_diff4 < 1e-10,
+            "hex RT0 mass differs across partitions (np1 vs np4): max_diff={max_diff4:e}"
+        );
     }
 }

@@ -97,18 +97,33 @@ pub fn assembly_parallel_min_elems() -> usize {
 
 // ─── P0 (constant) reference element ─────────────────────────────────────────
 
-/// Constant (P0) reference element on the reference `[-1,1]²` domain.
-/// 1 DOF, basis ≡ 1.0, gradient ≡ 0.
-struct P0;
+/// Constant (P0) reference element: 1 DOF, basis ≡ 1.0, gradient ≡ 0.
+///
+/// `dim` selects the reference domain: 2 → `[0,1]²` (tri/quad), 3 → `[-1,1]³`
+/// (hex).  The quadrature must live on the same domain as the geometry element
+/// used by the isoparametric Jacobian.
+struct P0 {
+    dim: u8,
+}
 
 impl ReferenceElement for P0 {
-    fn dim(&self) -> u8 { 2 }
+    fn dim(&self) -> u8 { self.dim }
     fn order(&self) -> u8 { 0 }
     fn n_dofs(&self) -> usize { 1 }
     fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) { g[0] = 0.0; g[1] = 0.0; }
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
-    fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0, 0.0]] }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
+        for x in g.iter_mut() { *x = 0.0; }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        if self.dim == 2 {
+            quad_rule_01(order)
+        } else {
+            fem_element::quadrature::hex_rule(order)
+        }
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0; self.dim as usize]]
+    }
 }
 
 /// Bilinear (Q1) geometry element on `[0,1]²` with MFEM's `BiLinear2DFiniteElement`
@@ -158,7 +173,7 @@ impl ReferenceElement for BiLinearGeo2D {
 pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     if elem_type == ElementType::Quad4 {
         match order {
-            0 => Box::new(P0),
+            0 => Box::new(P0 { dim: 2 }),
             // MFEM L2_FECollection uses Gauss-Legendre tensor-product basis
             // (BasisType::GaussLegendre), NOT the GLL basis of H1.  QuadL2GL
             // reproduces it bit-identically on [0,1]² with lexicographic DOFs.
@@ -204,7 +219,7 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
 /// [`TriPk`] (see [`ref_elem_vol_l2`]).
 pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0),
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3 | ElementType::Tri6, 3) => {
@@ -220,7 +235,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetP3),
         (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
-        (ElementType::Quad4, 0) => Box::new(P0),
+        (ElementType::Quad4, 0) => Box::new(P0 { dim: 2 }),
         // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
         // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
         // historically on [-1,1]^2; affine-embedding equivalent for the
@@ -233,6 +248,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
         (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
         (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
+        (ElementType::Hex8, 0) => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on hexes
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Hex8, o) => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
@@ -251,7 +267,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0),
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
@@ -260,7 +276,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetP3),
         (ElementType::Tet4, o)                           => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
-        (ElementType::Quad4, 0)                          => Box::new(P0),
+        (ElementType::Quad4, 0)                          => Box::new(P0 { dim: 2 }),
         // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
         // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
         // historically on [-1,1]^2; affine-embedding equivalent for the
@@ -273,6 +289,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
         (ElementType::Quad4, 3)                          => Box::new(fem_element::lagrange::QuadQk::new(3)),
         (ElementType::Quad4, o)                          => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
+        (ElementType::Hex8, 0)                           => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on hexes
         (ElementType::Hex8, 1)                           => Box::new(HexQ1),
         (ElementType::Hex8, o)                           => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),

@@ -1170,12 +1170,17 @@ pub fn compute_l2_error_hdiv<M: MeshTopology>(
     rt_space: &HDivSpace<M>,
     exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
     quad_order: u8,
+    exclude_elems: Option<&[bool]>,
 ) -> f64 {
     let mesh = rt_space.mesh();
     let dim = mesh.topological_dim() as usize;
     let mut err2 = 0.0;
 
     for e in mesh.elem_iter() {
+        // Skip excluded elements (e.g. ghost elements in a parallel run).
+        if let Some(mask) = exclude_elems {
+            if e as usize >= mask.len() || mask[e as usize] { continue; }
+        }
         let et = mesh.element_type(e);
         let vre = crate::vector_assembler::vec_ref_elem(
             fem_space::fe_space::SpaceType::HDiv, et, dim, rt_space.order());
@@ -1242,6 +1247,7 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
     l2_space: &L2Space<M>,
     exact: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
     quad_order: u8,
+    exclude_elems: Option<&[bool]>,
 ) -> f64 {
     let mesh = l2_space.mesh();
     let dim = mesh.topological_dim() as usize;
@@ -1249,6 +1255,10 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
     let mut err2 = 0.0;
 
     for e in mesh.elem_iter() {
+        // Skip excluded elements (e.g. ghost elements in a parallel run).
+        if let Some(mask) = exclude_elems {
+            if e as usize >= mask.len() || mask[e as usize] { continue; }
+        }
         let et = mesh.element_type(e);
         let nodes = mesh.element_nodes(e);
         let use_iso = matches!(et,
