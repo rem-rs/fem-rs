@@ -1000,22 +1000,18 @@ fn accumulate_boundary_linear_face(
     let quad = ref_elem.quadrature(quad_order);
 
     let face_nodes = mesh.face_nodes(f);
-    let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
+    let (face_j_mag, normal, p0, p1) = boundary_face_geom(mesh, f, face_nodes, dim);
     let face_tag = mesh.face_tag(f);
 
     let mut phi = vec![0.0_f64; n_fdofs];
     let mut f_face = vec![0.0_f64; n_fdofs];
-    let x0 = mesh.node_coords(face_nodes[0]);
 
     for (q, xi) in quad.points.iter().enumerate() {
         let w = quad.weights[q] * face_j_mag;
         ref_elem.eval_basis(xi, &mut phi);
 
         let xp: Vec<f64> = (0..dim)
-            .map(|i| {
-                let x1 = mesh.node_coords(face_nodes[1]);
-                x0[i] + (x1[i] - x0[i]) * xi[0]
-            })
+            .map(|i| p0[i] + (p1[i] - p0[i]) * xi[0])
             .collect();
 
         let qp = BdQpData {
@@ -1060,22 +1056,18 @@ fn accumulate_boundary_bilinear_face(
     let quad = ref_elem.quadrature(quad_order);
 
     let face_nodes = mesh.face_nodes(f);
-    let (face_j_mag, normal) = face_jacobian_and_normal(mesh, face_nodes, dim);
+    let (face_j_mag, normal, p0, p1) = boundary_face_geom(mesh, f, face_nodes, dim);
     let face_tag = mesh.face_tag(f);
 
     let mut phi = vec![0.0_f64; n_fdofs];
     let mut k_face = vec![0.0_f64; n_fdofs * n_fdofs];
-    let x0 = mesh.node_coords(face_nodes[0]);
 
     for (q, xi) in quad.points.iter().enumerate() {
         let w = quad.weights[q] * face_j_mag;
         ref_elem.eval_basis(xi, &mut phi);
 
         let xp: Vec<f64> = (0..dim)
-            .map(|i| {
-                let x1 = mesh.node_coords(face_nodes[1]);
-                x0[i] + (x1[i] - x0[i]) * xi[0]
-            })
+            .map(|i| p0[i] + (p1[i] - p0[i]) * xi[0])
             .collect();
 
         let qp = BdQpData {
@@ -1746,20 +1738,35 @@ impl Assembler {
 /// Returns `(|J_face|, n)` where `|J_face|` is the edge length and `n` is the
 /// unit outward normal (rotated 90° from the edge tangent, pointing away from
 /// the interior by convention `n = (dy, -dx) / |J_face|`).
-fn face_jacobian_and_normal(
-    mesh:       &dyn MeshTopology,
+/// Boundary-face geometry: physical endpoints, length (`face_j_mag`) and the
+/// outward unit normal, for a 2-D boundary edge.
+///
+/// The endpoints come from the mesh's per-element geometry when present
+/// ([`MeshTopology::boundary_face_endpoints`]) — necessary for
+/// geometrically-periodic meshes where a wrapped boundary face spans the
+/// periodic seam (the folded vertex chord would over-count the face measure) —
+/// and fall back to the folded vertex coordinates otherwise.
+fn boundary_face_geom(
+    mesh: &dyn MeshTopology,
+    f: u32,
     face_nodes: &[u32],
-    dim:        usize,
-) -> (f64, Vec<f64>) {
-    assert_eq!(dim, 2, "face_jacobian_and_normal currently only supports 2-D meshes");
-    let x0 = mesh.node_coords(face_nodes[0]);
-    let x1 = mesh.node_coords(face_nodes[1]);
-    let dx = x1[0] - x0[0];
-    let dy = x1[1] - x0[1];
+    dim: usize,
+) -> (f64, Vec<f64>, [f64; 2], [f64; 2]) {
+    assert_eq!(dim, 2, "boundary_face_geom currently only supports 2-D meshes");
+    let (p0, p1) = match mesh.boundary_face_endpoints(f) {
+        Some(e) => e,
+        None => {
+            let c0 = mesh.node_coords(face_nodes[0]);
+            let c1 = mesh.node_coords(face_nodes[1]);
+            ([c0[0], c0[1]], [c1[0], c1[1]])
+        }
+    };
+    let dx = p1[0] - p0[0];
+    let dy = p1[1] - p0[1];
     let len = (dx * dx + dy * dy).sqrt();
     // Outward normal convention: rotate tangent (dx,dy) by -90° → (dy, -dx)
     let normal = vec![dy / len, -dx / len];
-    (len, normal)
+    (len, normal, p0, p1)
 }
 
 // ─── Scatter helper ───────────────────────────────────────────────────────────

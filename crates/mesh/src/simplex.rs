@@ -2000,6 +2000,38 @@ impl<const D: usize> MeshTopology for Mesh<D> {
         }
     }
 
+    fn boundary_face_endpoints(&self, face: FaceId) -> Option<([f64; 2], [f64; 2])> {
+        // Per-element (possibly geometrically periodic) geometry: a boundary
+        // face of a wrapped element may span the periodic seam — its seam
+        // endpoint sits at the UNFOLDED position in the element's geometry even
+        // though the folded vertex table reports the identified seam.  Map the
+        // face node to the owner element's LOCAL vertex position, then read the
+        // geometry corner at the same local position.
+        let g = self.geometry.as_ref()?;
+        let fn_ = self.face_nodes(face);
+        if fn_.len() < 2 {
+            return None;
+        }
+        let (a, b) = (fn_[0], fn_[1]);
+        let n_elems = self.n_elems() as u32;
+        let owner = (0..n_elems).find(|&e| {
+            let en = self.elem_nodes(e as ElemId);
+            let n = en.len();
+            (0..n).any(|i| {
+                (en[i] == a && en[(i + 1) % n] == b)
+                    || (en[i] == b && en[(i + 1) % n] == a)
+            })
+        })?;
+        let en = self.elem_nodes(owner as ElemId);
+        let off = owner as usize * g.nodes_per_elem;
+        let endpoint = |node: u32| -> Option<[f64; 2]> {
+            let local = en.iter().position(|&n| n == node)?;
+            let gi = g.conn[off + local] as usize;
+            Some([g.coords[gi * 2], g.coords[gi * 2 + 1]])
+        };
+        Some((endpoint(a)?, endpoint(b)?))
+    }
+
     fn n_edges(&self) -> usize { self.edge_conn.len() / 2 }
 
     fn edge_nodes(&self, eid: EdgeId) -> &[NodeId] {

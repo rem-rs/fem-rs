@@ -181,6 +181,31 @@ impl ParCsrMatrix {
         self.apply_dirichlet_row(local_dof, value, rhs.as_slice_mut());
     }
 
+    /// Apply a Dirichlet BC in MFEM's `DIAG_KEEP` style (`EliminateRowCol`,
+    /// the `FormLinearSystem` default used by ex27p) at an owned DOF:
+    /// - zero the off-diagonal entries of row and column `local_dof`
+    ///   (symmetric elimination, keeps the matrix symmetric for CG);
+    /// - **keep** the diagonal entry `A[local_dof, local_dof]` unchanged;
+    /// - `rhs[local_dof] = A[local_dof, local_dof] · value`;
+    /// - for every other owned row `j`: `rhs[j] -= A[j, local_dof] · value`.
+    ///
+    /// The off-diagonal (ghost-column) part of row `local_dof` is zeroed; the
+    /// owned column `local_dof` never appears in the off-diagonal block (its
+    /// columns are ghost DOFs only), so the symmetric elimination is confined
+    /// to the diagonal block.
+    pub fn apply_dirichlet_par_keep_diag(&mut self, local_dof: usize, value: f64, rhs: &mut ParVector) {
+        assert!(local_dof < self.n_owned, "can only apply Dirichlet to owned DOFs");
+        self.diag.apply_dirichlet_keep_diag(local_dof, value, rhs.as_slice_mut());
+        // Zero the ghost-column part of this row.
+        if self.n_ghost > 0 {
+            let start = self.offd.row_ptr[local_dof];
+            let end = self.offd.row_ptr[local_dof + 1];
+            for k in start..end {
+                self.offd.values[k] = 0.0;
+            }
+        }
+    }
+
     /// MFEM‑style symmetric diagonal elimination: zero row AND column for
     /// `owned_dofs`, then set diagonal entry to `val` for each.
     ///

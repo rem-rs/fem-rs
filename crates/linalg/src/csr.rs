@@ -529,6 +529,12 @@ impl<T: Scalar> CsrMatrix<T> {
     ///
     /// Both matrices must have the same dimensions.  The result has the union
     /// of the sparsity patterns.
+    ///
+    /// NOTE: built through COO + [`CooMatrix::into_csr_sorted`] because the
+    /// CSR produced by [`CooMatrix::into_csr`] is in *insertion* order (not
+    /// necessarily sorted by column) — a sorted row-merge would corrupt the
+    /// result whenever the two operands were assembled from different element
+    /// orders (e.g. a volume matrix plus a boundary matrix).
     pub fn axpby(&self, alpha: T, other: &CsrMatrix<T>, beta: T) -> CsrMatrix<T>
     where
         T: std::ops::Mul<Output = T>,
@@ -537,54 +543,16 @@ impl<T: Scalar> CsrMatrix<T> {
         assert_eq!(self.ncols, other.ncols, "axpby: col count mismatch");
 
         let m = self.nrows;
-        let mut row_ptr = Vec::with_capacity(m + 1);
-        let mut col_idx = Vec::new();
-        let mut values  = Vec::new();
-
-        row_ptr.push(0);
-
+        let mut coo = crate::coo::CooMatrix::<T>::new(m, self.ncols);
         for i in 0..m {
-            let a_start = self.row_ptr[i];
-            let a_end   = self.row_ptr[i + 1];
-            let b_start = other.row_ptr[i];
-            let b_end   = other.row_ptr[i + 1];
-
-            let mut ja = a_start;
-            let mut jb = b_start;
-
-            while ja < a_end && jb < b_end {
-                let ca = self.col_idx[ja];
-                let cb = other.col_idx[jb];
-                if ca < cb {
-                    col_idx.push(ca);
-                    values.push(alpha * self.values[ja]);
-                    ja += 1;
-                } else if ca > cb {
-                    col_idx.push(cb);
-                    values.push(beta * other.values[jb]);
-                    jb += 1;
-                } else {
-                    col_idx.push(ca);
-                    values.push(alpha * self.values[ja] + beta * other.values[jb]);
-                    ja += 1;
-                    jb += 1;
-                }
+            for k in self.row_ptr[i]..self.row_ptr[i + 1] {
+                coo.add(i, self.col_idx[k] as usize, alpha * self.values[k]);
             }
-            while ja < a_end {
-                col_idx.push(self.col_idx[ja]);
-                values.push(alpha * self.values[ja]);
-                ja += 1;
+            for k in other.row_ptr[i]..other.row_ptr[i + 1] {
+                coo.add(i, other.col_idx[k] as usize, beta * other.values[k]);
             }
-            while jb < b_end {
-                col_idx.push(other.col_idx[jb]);
-                values.push(beta * other.values[jb]);
-                jb += 1;
-            }
-
-            row_ptr.push(col_idx.len());
         }
-
-        CsrMatrix { nrows: m, ncols: self.ncols, row_ptr, col_idx, values }
+        coo.into_csr_sorted()
     }
 
     // -----------------------------------------------------------------------

@@ -7,7 +7,9 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_space::fe_space::FESpace;
 use fem_assembly::assembler::Assembler;
-use fem_assembly::integrator::{BilinearIntegrator, BoundaryLinearIntegrator, LinearIntegrator};
+use fem_assembly::integrator::{
+    BilinearIntegrator, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, LinearIntegrator,
+};
 use fem_core::types::DofId;
 
 use crate::par_csr::ParCsrMatrix;
@@ -143,6 +145,12 @@ impl ParAssembler {
     /// Parallel boundary linear form assembly (e.g. Neumann traction on a
     /// boundary attribute).  Serial boundary assembly on the local mesh
     /// (owned + ghost faces), then permute and wrap in a `ParVector`.
+    ///
+    /// A boundary face is assembled only by the rank owning its adjacent
+    /// element, but the face's *vertex* DOFs can be owned by other ranks (they
+    /// are ghost slots locally).  The ghost-slot contributions are accumulated
+    /// back into their owners with the reverse ghost exchange before wrapping,
+    /// so every owned DOF receives its full boundary load.
     pub fn assemble_boundary_linear<S: FESpace>(
         par_space: &ParallelFESpace<S>,
         n_dofs: usize,
@@ -163,17 +171,155 @@ impl ParAssembler {
         );
 
         let dof_part = par_space.dof_partition();
-        let permuted_rhs = if dof_part.needs_permutation() {
+        let mut permuted_rhs = if dof_part.needs_permutation() {
             permute_vec(&local_rhs, dof_part)
         } else {
             local_rhs
         };
 
+        let ghost = par_space.dof_ghost_exchange_arc();
+        ghost.reverse(par_space.comm(), &mut permuted_rhs);
+
         ParVector::from_local_raw(
             permuted_rhs,
             dof_part.n_owned_dofs,
-            par_space.dof_ghost_exchange_arc(),
+            ghost,
             par_space.comm().clone(),
+        )
+    }
+
+    /// Parallel boundary bilinear form assembly (e.g. the Robin mass
+    /// `∫_Γ a·u·v ds` on a boundary attribute).  Serial boundary assembly on
+    /// the local mesh (owned + ghost faces), then permute and wrap in a
+    /// `ParCsrMatrix` — only owned rows are retained.
+    ///
+    /// The local mesh keeps every boundary face of the owned elements (the
+    /// face is assigned to the rank owning the adjacent element), so each
+    /// global boundary face contributes to exactly one rank's matrix.
+    ///
+    /// The face's *vertex* DOFs can be owned by other ranks; the rows of the
+    /// local matrix that belong to ghost DOFs are exchanged to their owning
+    /// ranks and added there, so every owned row receives its full boundary
+    /// contribution (the standard `from_local_matrix` drops ghost rows).
+    pub fn assemble_boundary_bilinear<S: FESpace>(
+        par_space: &ParallelFESpace<S>,
+        n_dofs: usize,
+        face_dofs: &(dyn Fn(u32) -> Vec<DofId> + Sync),
+        order: u8,
+        integrators: &[&dyn BoundaryBilinearIntegrator],
+        tags: &[i32],
+        quad_order: u8,
+    ) -> ParCsrMatrix {
+        let local_mat = Assembler::assemble_boundary_bilinear(
+            n_dofs,
+            par_space.local_space().mesh(),
+            face_dofs,
+            order,
+            integrators,
+            tags,
+            quad_order,
+        );
+
+        let dof_part = par_space.dof_partition();
+        let permuted_mat = if dof_part.needs_permutation() {
+            permute_csr(&local_mat, dof_part)
+        } else {
+            local_mat
+        };
+
+        let n_owned = dof_part.n_owned_dofs;
+        let comm = par_space.comm();
+        let rank = comm.rank();
+        let n_ranks = comm.size() as i32;
+        let n_local = dof_part.n_total_dofs();
+
+        // 1. Owned rows → diag/offd; ghost rows → collect for exchange.
+        let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
+        let mut offd_coo = CooMatrix::<f64>::new(n_owned, n_local.saturating_sub(n_owned));
+        // (owner rank, global row id, (global col id, value) entries)
+        let mut ghost_rows: Vec<(i32, u32, Vec<(u32, f64)>)> = Vec::new();
+        for row in 0..n_local {
+            if row < n_owned {
+                for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
+                    let col = permuted_mat.col_idx[k] as usize;
+                    let val = permuted_mat.values[k];
+                    if val == 0.0 { continue; }
+                    if col < n_owned {
+                        diag_coo.add(row, col, val);
+                    } else {
+                        offd_coo.add(row, col - n_owned, val);
+                    }
+                }
+            } else {
+                let owner = dof_part.dof_owner(row as u32);
+                let global_row = dof_part.global_dof(row as u32);
+                let mut entries: Vec<(u32, f64)> = Vec::new();
+                for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
+                    let val = permuted_mat.values[k];
+                    if val != 0.0 {
+                        entries.push((dof_part.global_dof(permuted_mat.col_idx[k]), val));
+                    }
+                }
+                if !entries.is_empty() {
+                    ghost_rows.push((owner, global_row, entries));
+                }
+            }
+        }
+
+        // 2. Alltoall the ghost rows to their owners.
+        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
+        for r in 0..n_ranks {
+            if r == rank { continue; }
+            let mut bytes = Vec::new();
+            for (owner, grow, entries) in &ghost_rows {
+                if *owner != r { continue; }
+                bytes.extend_from_slice(&grow.to_le_bytes());
+                bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+                for (c, v) in entries {
+                    bytes.extend_from_slice(&c.to_le_bytes());
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            sends.push((r, bytes));
+        }
+        let incoming = comm.alltoallv_bytes(&sends);
+        for (_, bytes) in incoming {
+            let mut i = 0usize;
+            while i + 8 <= bytes.len() {
+                let grow = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+                let ne = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+                i += 8;
+                let mut entries = Vec::with_capacity(ne);
+                for _ in 0..ne {
+                    let c = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+                    let v = f64::from_le_bytes(bytes[i + 4..i + 12].try_into().unwrap());
+                    i += 12;
+                    entries.push((c, v));
+                }
+                let Some(local_row) = dof_part.local_dof(grow) else { continue; };
+                let local_row = local_row as usize;
+                debug_assert!(local_row < n_owned, "ghost-row exchange must target an owned row");
+                for (gc, v) in entries {
+                    let Some(local_col) = dof_part.local_dof(gc) else { continue; };
+                    let local_col = local_col as usize;
+                    if local_col < n_owned {
+                        diag_coo.add(local_row, local_col, v);
+                    } else {
+                        offd_coo.add(local_row, local_col - n_owned, v);
+                    }
+                }
+            }
+        }
+
+        let diag = diag_coo.into_csr();
+        let offd = offd_coo.into_csr();
+        ParCsrMatrix::from_blocks(
+            diag,
+            offd,
+            n_owned,
+            n_local.saturating_sub(n_owned),
+            par_space.dof_ghost_exchange_arc(),
+            comm.clone(),
         )
     }
 }

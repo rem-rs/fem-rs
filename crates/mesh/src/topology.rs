@@ -60,6 +60,19 @@ pub trait MeshTopology: Send + Sync {
     /// or `(elem_a, Some(elem_b))` for interior faces (when tracked).
     fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>);
 
+    /// Physical coordinates of the two endpoints of a boundary face, taken
+    /// from the **owning element's per-element geometry** when the mesh carries
+    /// one (curved / geometrically-periodic meshes), else `None` so the caller
+    /// falls back to the folded vertex coordinates.
+    ///
+    /// This matters for periodic meshes whose topology stitches the seam (a
+    /// wrapped boundary face then spans the seam in the vertex table, and the
+    /// vertex-based chord length over-counts the physical face measure).
+    fn boundary_face_endpoints(&self, face: FaceId) -> Option<([f64; 2], [f64; 2])> {
+        let _ = face;
+        None
+    }
+
     // ─── Edge-level queries ──────────────────────────────────────────────────
 
     /// Total number of unique edges in the mesh.
