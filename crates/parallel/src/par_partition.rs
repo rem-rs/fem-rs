@@ -277,24 +277,38 @@ fn extract_submesh_from_partition_impl<const D: usize>(
     // see the same adjacent-element set on every rank; with only the 1-layer
     // node-ghost rule a face can be "half visible" (one neighbour present,
     // the other absent), making the cross-rank off-diagonal blocks of
-    // A = Bᵀ S⁻¹ B inconsistent.  A single round suffices: the elements
-    // adjacent to a face share that face, so if one is local the other is
-    // picked up here.
+    // A = Bᵀ S⁻¹ B inconsistent.
+    //
+    // The closure is iterated to a fixpoint: a face can be shared by a chain
+    // of elements where the intermediate elements are themselves face-closure
+    // additions (not node-ghosts), so a single round misses the far end of
+    // the chain (pex34 np4: the SubMesh RT0 face (71,190,341) was visible on
+    // rank 2 only through a ghost that was itself a closure addition, so the
+    // true owner's element was never made local → the ghost-face id exchange
+    // routed to a rank that did not own it and panicked).
     let mut local_elem_set: HashSet<u32> = HashSet::new();
     local_elem_set.extend(local_elem_gids.iter().copied());
     local_elem_set.extend(ghost_elem_gids.iter().copied());
     let face_dim = D;
     let mut extra_ghost: Vec<u32> = Vec::new();
-    for e in 0..n_elems as u32 {
-        if local_elem_set.contains(&e) { continue; }
-        let en = mesh.elem_nodes(e);
-        let shares_face = local_elem_set.iter().any(|&l| {
-            let ln = mesh.elem_nodes(l);
-            let common = en.iter().filter(|n| ln.contains(n)).count();
-            common >= face_dim
-        });
-        if shares_face {
-            extra_ghost.push(e);
+    loop {
+        let mut added_any = false;
+        for e in 0..n_elems as u32 {
+            if local_elem_set.contains(&e) { continue; }
+            let en = mesh.elem_nodes(e);
+            let shares_face = local_elem_set.iter().any(|&l| {
+                let ln = mesh.elem_nodes(l);
+                let common = en.iter().filter(|n| ln.contains(n)).count();
+                common >= face_dim
+            });
+            if shares_face {
+                local_elem_set.insert(e);
+                extra_ghost.push(e);
+                added_any = true;
+            }
+        }
+        if !added_any {
+            break;
         }
     }
     ghost_elem_gids.extend(extra_ghost);

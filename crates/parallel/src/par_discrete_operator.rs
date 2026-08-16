@@ -1,16 +1,19 @@
 //! Parallel discrete linear operators.
 //!
 //! Provides [`ParDiscreteLinearOperator::gradient`] for building the discrete
-//! gradient `G: H¹ → H(Curl)` in parallel, used by the AMS preconditioner.
+//! gradient `G: H¹ → H(Curl)` in parallel, used by the AMS preconditioner,
+//! and [`ParDiscreteLinearOperator::curl_3d`] for `curl: H(Curl) → H(div)`
+//! (used by pex34 to recover `B = curl A`).
 //!
-//! Each rank assembles the gradient on its local mesh (with ghost overlap),
+//! Each rank assembles the operator on its local mesh (with ghost overlap),
 //! permutes to the parallel DOF ordering, and returns a `CsrMatrix` with
 //! owned-row × full-local-column structure.
 
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_space::{H1Space, HCurlSpace};
+use fem_space::{H1Space, HCurlSpace, HDivSpace};
 use fem_assembly::DiscreteLinearOperator;
 
+use crate::par_mixed_assembler::permute_rect_csr;
 use crate::par_space::ParallelFESpace;
 
 pub struct ParDiscreteLinearOperator;
@@ -61,6 +64,50 @@ impl ParDiscreteLinearOperator {
 
         // Keep only owned rows (discard ghost rows).
         let n_owned_rows = hcurl_part.n_owned_dofs;
+        let mut coo = CooMatrix::<f64>::new(n_owned_rows, n_col_total);
+        for row in 0..n_owned_rows.min(permuted.nrows) {
+            for k in permuted.row_ptr[row]..permuted.row_ptr[row + 1] {
+                let col = permuted.col_idx[k] as usize;
+                let val = permuted.values[k];
+                if val != 0.0 && col < n_col_total {
+                    coo.add(row, col, val);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// Build the discrete curl `curl: H(Curl) → H(div)` in parallel (3-D).
+    ///
+    /// Returns a `CsrMatrix` with:
+    /// - rows = owned H(div) DOFs on this rank
+    /// - columns = total local H(Curl) DOFs (owned + ghost)
+    ///
+    /// The serial `DiscreteLinearOperator::curl_3d` is assembled on the local
+    /// mesh (with ghost overlap) and permuted with the per-DOF sign
+    /// corrections of both spaces (same convention as
+    /// [`crate::ParMixedAssembler::assemble_hcurl_hdiv_curl`]).
+    pub fn curl_3d(
+        nd_par: &ParallelFESpace<HCurlSpace<fem_mesh::Mesh<3>>>,
+        rt_par: &ParallelFESpace<HDivSpace<fem_mesh::Mesh<3>>>,
+    ) -> CsrMatrix<f64> {
+        let local_curl = DiscreteLinearOperator::curl_3d(
+            nd_par.local_space(),
+            rt_par.local_space(),
+        ).expect("ParDiscreteLinearOperator::curl_3d: serial assembly failed");
+
+        let nd_part = nd_par.dof_partition();
+        let rt_part = rt_par.dof_partition();
+        let needs_perm = nd_part.needs_permutation() || rt_part.needs_permutation();
+        let permuted = if needs_perm {
+            permute_rect_csr(&local_curl, rt_part, nd_part)
+        } else {
+            local_curl
+        };
+
+        // Keep only owned H(div) rows.
+        let n_owned_rows = rt_part.n_owned_dofs;
+        let n_col_total = nd_part.n_total_dofs();
         let mut coo = CooMatrix::<f64>::new(n_owned_rows, n_col_total);
         for row in 0..n_owned_rows.min(permuted.nrows) {
             for k in permuted.row_ptr[row]..permuted.row_ptr[row + 1] {

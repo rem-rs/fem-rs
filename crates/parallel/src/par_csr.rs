@@ -206,6 +206,51 @@ impl ParCsrMatrix {
         }
     }
 
+    /// Complete the MFEM `DIAG_KEEP` (FormLinearSystem) elimination for
+    /// **non-homogeneous** essential DOFs whose couplings cross ranks.
+    ///
+    /// [`apply_dirichlet_par_keep_diag`] only eliminates the owned
+    /// (diagonal-block) rows/columns of an essential DOF.  When the essential
+    /// DOF is a **ghost column** here (owned by another rank), this rank's
+    /// rows must still receive the `-A[j, d]·x_bc` contribution on the RHS and
+    /// the column entries must be zeroed to keep the matrix symmetric for PCG.
+    ///
+    /// `ghost_ess` lists the local ghost slots (`0..n_ghost`) that are
+    /// essential together with their Dirichlet values (callers obtain these
+    /// from a global-id exchange of the locally-detected essential DOFs).
+    pub fn apply_ghost_ess_columns(&mut self, ghost_ess: &[(usize, f64)], rhs: &mut ParVector) {
+        if self.n_ghost == 0 || ghost_ess.is_empty() {
+            return;
+        }
+        let offd = &mut self.offd;
+        let rhs_data = rhs.as_slice_mut();
+        for &(g, v) in ghost_ess {
+            if v != 0.0 {
+                for row in 0..self.n_owned {
+                    let s = offd.row_ptr[row];
+                    let e = offd.row_ptr[row + 1];
+                    for k in s..e {
+                        if offd.col_idx[k] as usize == g && offd.values[k] != 0.0 {
+                            rhs_data[row] -= offd.values[k] * v;
+                        }
+                    }
+                }
+            }
+        }
+        // Zero the essential ghost columns (symmetry).
+        for &(g, _) in ghost_ess {
+            for row in 0..self.n_owned {
+                let s = offd.row_ptr[row];
+                let e = offd.row_ptr[row + 1];
+                for k in s..e {
+                    if offd.col_idx[k] as usize == g {
+                        offd.values[k] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
     /// MFEM‑style symmetric diagonal elimination: zero row AND column for
     /// `owned_dofs`, then set diagonal entry to `val` for each.
     ///

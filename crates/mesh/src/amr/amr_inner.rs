@@ -1345,12 +1345,13 @@ pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
         em[t][5] = 0.5 * (j[t][1] + j[t][2]);
     }
     // Inverse of the regular-tet Jacobian (GetPerfPointMat(TETRAHEDRON)).
-    let s3 = 3f64.sqrt();
-    let s6 = 6f64.sqrt();
+    // Values = MFEM's `PerfGeomToGeomJac[TET]` exactly (probe-printed with
+    // %.17g): the last-ulp difference from a closed-form inverse changes the
+    // rt tie-breaking on near-symmetric tets.
     let perf_inv = [
-        [1.0, -1.0 / s3, -1.0 / s6],
-        [0.0, 2.0 / s3, -1.0 / s6],
-        [0.0, 0.0, (1.5f64).sqrt()],
+        [1.0, -0.57735026918962584, -0.40824829046386302],
+        [0.0, 1.1547005383792517, -0.40824829046386302],
+        [0.0, 0.0, 1.2247448713915892],
     ];
     // Aspect ratio of a candidate split: κ = max(σ0/σ2 over the two Jacobians).
     let kappa_of = |js1: &[[f64; 3]; 3], js2: &[[f64; 3]; 3]| -> f64 {
@@ -1364,9 +1365,18 @@ pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
                         + js[t][2] * perf_inv[2][c];
                 }
             }
-            let m = nalgebra::Matrix3::from_fn(|t, s| jp[t][s]);
-            let sv = m.svd(true, false).singular_values;
-            if sv[2].abs() < 1e-300 { f64::INFINITY } else { sv[0] / sv[2] }
+            // MFEM's CalcSingularvalue<3> reads the DenseMatrix data in
+            // column-major order; the bit-exact port needs the transpose in
+            // row-major form (σ(A) = σ(Aᵀ), but the tie-breaking arithmetic
+            // depends on the orientation).
+            let data: [f64; 9] = [
+                jp[0][0], jp[1][0], jp[2][0],
+                jp[0][1], jp[1][1], jp[2][1],
+                jp[0][2], jp[1][2], jp[2][2],
+            ];
+            let s0 = crate::mfem_kernels::calc_singularvalue_3(&data, 0);
+            let s2 = crate::mfem_kernels::calc_singularvalue_3(&data, 2);
+            if s2.abs() < 1e-300 { f64::INFINITY } else { s0 / s2 }
         };
         ar(js1).max(ar(js2))
     };
@@ -1395,11 +1405,10 @@ pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
         [em[2][2] - em[2][1], em[2][4] - em[2][1], em[2][5] - em[2][1]],
     ];
     let kappa = kappa_of(&js, &js2);
-    // MFEM's CalcSingularvalue returns bit-identical values for symmetric
-    // candidates (rt tie), while the SVD here carries ~1e-15 noise; use a
-    // tolerance so ties keep the default rt=0 exactly like MFEM.
-    const KAPPA_TOL: f64 = 1e-12;
-    if kappa < kappa_min - KAPPA_TOL {
+    // MFEM picks rt = 1 / rt = 2 only when the candidate kappa is strictly
+    // smaller (ties keep the earlier rt).  With the bit-exact singular-value
+    // port (mfem_kernels) the comparisons reproduce MFEM's choices exactly.
+    if kappa < kappa_min {
         kappa_min = kappa;
         rt = 1;
     }
@@ -1415,7 +1424,7 @@ pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
         [em[2][1] - em[2][2], em[2][5] - em[2][2], em[2][3] - em[2][2]],
     ];
     let kappa = kappa_of(&js, &js2);
-    if kappa < kappa_min - 1e-12 {
+    if kappa < kappa_min {
         rt = 2;
     }
     rt
@@ -1469,19 +1478,27 @@ pub fn mark_tet_mesh_for_refinement(mesh: &mut Mesh<3>) {
     // ── 2. Edge ordering by geometric length (libstdc++ std::sort, Pair
     //         compares only the length field → unstable for equal lengths). ──
     let n_edges = em.len();
-    // rows[i] = neighbors of vertex i in column order (DSTable RowIterator).
+    // DSTable semantics: each edge (a,b), a<b, is stored in row a; the row
+    // iterator walks the PREV chain → **reverse insertion order** (newest
+    // edge first).  Iterating rows 0..n in that order gives MFEM's
+    // `GetEdgeOrdering` input sequence; equal-length ties therefore break by
+    // reverse-insertion order, which a column-sorted row would not reproduce.
     let mut rows: Vec<Vec<(u32, usize)>> = vec![Vec::new(); mesh.n_nodes()];
     for (&(a, b), &id) in em.iter() {
         rows[a as usize].push((b, id));
     }
+    // Sort by insertion position so the row is in insertion order, then
+    // reverse it (HashMap iteration order is arbitrary).
     for r in rows.iter_mut() {
-        r.sort_by_key(|x| x.0);
+        r.sort_by_key(|x| x.1);
+        r.reverse();
     }
+    // GetEdgeOrdering fills `length_idx[edge_id]` while walking the rows
+    // (DSTable index), so the array handed to std::sort is in **edge-id
+    // order**, not visit order.
     let mut length_idx: Vec<(f64, usize)> = Vec::with_capacity(n_edges);
-    for r in &rows {
-        for &(_, id) in r {
-            length_idx.push((edge_len[id], id));
-        }
+    for id in 0..n_edges {
+        length_idx.push((edge_len[id], id));
     }
     std_sort_by(&mut length_idx, |x, y| x.0 < y.0);
     let mut order = vec![0usize; n_edges];
@@ -7232,6 +7249,32 @@ mod tests {
             "Expected 4×{n_before}={} elements, got {}", 4*n_before, fine.n_elems());
     }
 
+    /// MFEM's `Mesh(fichera-mixed.mesh, 1, 1)` ctor marks the tets (longest
+    /// edge rotated to (v0,v1), canonical second-longest placement).  The
+    /// probe output from the C++ library (see fem-pro HANDOVER pex34) gives
+    /// the exact marked orders below — the marking must match bit-for-bit
+    /// because it feeds the rt (octahedron diagonal) selection.
+    #[test]
+    fn fichera_mixed_marking_matches_mfem() {
+        let mut mesh = fichera_mixed_mesh();
+        crate::mark_tet_mesh_for_refinement(&mut mesh);
+        let marked: Vec<Vec<u32>> = (0..14)
+            .filter(|&e| mesh.element_type_at(e as u32) == ElementType::Tet4)
+            .map(|e| {
+                let off = mesh.elem_offsets.as_ref().unwrap()[e];
+                mesh.conn[off..off + 4].to_vec()
+            })
+            .collect();
+        let expected: Vec<Vec<u32>> = vec![
+            vec![21, 13, 15, 25],
+            vec![13, 21, 15, 12],
+            vec![21, 13, 25, 22],
+            vec![15, 21, 25, 24],
+            vec![25, 13, 15, 16],
+        ];
+        assert_eq!(marked, expected, "tet marking must match MFEM's MarkEdge");
+    }
+
     #[test]
     fn uniform_refinement_node_count() {
         // A 1×1 square → 2 triangles, 4 nodes.
@@ -9067,4 +9110,69 @@ fn std_sort_by<T: Copy>(a: &mut [T], cmp: impl Fn(&T, &T) -> bool) {
     if n <= 1 { return; }
     introsort_loop(a, 0, n, lg(n) * 2, &cmp);
     final_insertion_sort(a, 0, n, &cmp);
+}
+
+/// Build the fichera-mixed mesh (14 elements: 5 tet + 3 hex + 6 prism,
+/// 26 vertices) with the same connectivity as data/fichera-mixed.mesh.
+#[cfg(test)]
+pub(crate) fn fichera_mixed_mesh() -> Mesh<3> {
+    let coords: Vec<f64> = [
+        [0., -1., -1.], [1., -1., -1.], [-1., 0., -1.], [0., 0., -1.], [1., 0., -1.],
+        [-1., 1., -1.], [0., 1., -1.], [1., 1., -1.], [-1., -1., 0.], [0., -1., 0.],
+        [1., -1., 0.], [-1., 0., 0.], [0., 0., 0.], [1., 0., 0.], [-1., 1., 0.],
+        [0., 1., 0.], [1., 1., 0.], [-1., -1., 1.], [0., -1., 1.], [1., -1., 1.],
+        [-1., 0., 1.], [0., 0., 1.], [1., 0., 1.], [-1., 1., 1.], [0., 1., 1.],
+        [1., 1., 1.],
+    ]
+    .iter()
+    .flat_map(|c| c.iter().copied())
+    .collect();
+    // (type, nodes): 4=tet, 5=hex, 6=prism
+    let elems: &[(u8, &[u32])] = &[
+        (4, &[13, 15, 21, 25]),
+        (4, &[12, 13, 15, 21]),
+        (4, &[13, 21, 22, 25]),
+        (4, &[15, 24, 21, 25]),
+        (4, &[13, 15, 25, 16]),
+        (5, &[0, 1, 4, 3, 9, 10, 13, 12]),
+        (5, &[8, 9, 12, 11, 17, 18, 21, 20]),
+        (5, &[2, 3, 6, 5, 11, 12, 15, 14]),
+        (6, &[3, 4, 6, 12, 13, 15]),
+        (6, &[4, 7, 6, 13, 16, 15]),
+        (6, &[12, 13, 21, 9, 10, 18]),
+        (6, &[13, 22, 21, 10, 19, 18]),
+        (6, &[11, 14, 20, 12, 15, 21]),
+        (6, &[15, 21, 24, 14, 20, 23]),
+    ];
+    let mut conn = Vec::new();
+    let mut elem_types = Vec::new();
+    let mut offsets = vec![0usize];
+    for (t, ns) in elems {
+        conn.extend_from_slice(ns);
+        let et = match t {
+            4 => ElementType::Tet4,
+            5 => ElementType::Hex8,
+            _ => ElementType::Prism6,
+        };
+        elem_types.push(et);
+        offsets.push(conn.len());
+    }
+    Mesh {
+        coords,
+        conn,
+        elem_tags: vec![1; 14],
+        elem_type: ElementType::Tet4,
+        face_conn: vec![],
+        face_tags: vec![],
+        face_type: ElementType::Tri3,
+        elem_types: Some(elem_types),
+        elem_offsets: Some(offsets),
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        geometry: None,
+        nc_vertex_view: None,
+    }
 }

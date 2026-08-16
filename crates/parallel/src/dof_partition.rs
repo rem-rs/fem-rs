@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use fem_core::Rank;
 use fem_mesh::topology::MeshTopology;
-use fem_mesh::Mesh;
 use fem_space::dof_manager::{DofManager, EdgeKey};
 use fem_space::fe_space::FESpace;
 use crate::comm::Comm;
@@ -585,59 +584,62 @@ impl DofPartition {
 
         let dim = mesh.dim() as usize;
 
-        // Edge tables matching HCurlSpace / HDivSpace element ordering.
-        let hcurl_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (0, 2)];
-        let hcurl_quad_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
-        let hdiv_2d: Vec<(usize, usize)> = vec![(1, 2), (0, 2), (0, 1)];
-        let hdiv_quad_2d: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (2, 3), (3, 0)];
-        let hcurl_3d: Vec<(usize, usize)> = vec![
-            (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
-        ];
-        // Hex8 local edges, matching fem_space::hcurl::HEX_EDGES / MFEM
-        // `Geometry::Constants<Geometry::CUBE>::Edges` (used by HCurlSpace for
-        // hex ND1; order-1 hex ND has 12 edge DOFs, one per edge).
-        let hcurl_hex_3d: Vec<(usize, usize)> = vec![
-            (0, 1), (1, 2), (3, 2), (0, 3),
-            (4, 5), (5, 6), (7, 6), (4, 7),
-            (0, 4), (1, 5), (2, 6), (3, 7),
-        ];
-
         let space_type = space.space_type();
-        let elem0 = if mesh.n_elements() > 0 { Some(mesh.element_type(0)) } else { None };
-        let is_quad = elem0 == Some(fem_mesh::ElementType::Quad4);
-        let is_hex = elem0 == Some(fem_mesh::ElementType::Hex8);
 
-        let edges_for_space: &[(usize, usize)] = match (space_type, dim) {
-            (fem_space::fe_space::SpaceType::HCurl, 2) if is_quad => &hcurl_quad_2d,
-            (fem_space::fe_space::SpaceType::HCurl, 2) => &hcurl_2d,
-            (fem_space::fe_space::SpaceType::HDiv, 2) if is_quad => &hdiv_quad_2d,
-            (fem_space::fe_space::SpaceType::HDiv, 2) => &hdiv_2d,
-            (fem_space::fe_space::SpaceType::HCurl, 3) if is_hex => &hcurl_hex_3d,
-            (fem_space::fe_space::SpaceType::HCurl, 3) => &hcurl_3d,
-            _ => &hcurl_2d,
-        };
-
-        // Determine DOF layout per edge from the element type.
-        // RTk (HDiv): (k+1) DOFs per edge + interior DOFs
-        //   (k(k+1)/2 per tri, 2k(k+1) per quad); ND1 (HCurl): 1/edge.
-        let order = space.order() as usize;
-        let (dofs_per_edge, _n_interior_per_elem) = if mesh.n_elements() > 0 {
-            let t = mesh.element_type(0);
-            match (space_type, t) {
-                (fem_space::fe_space::SpaceType::HDiv, fem_mesh::ElementType::Quad4) => {
-                    (order + 1, 2 * order * (order + 1))
+        // Per-element-type local edge tables, matching the serial
+        // `HCurlSpace` / `HDivSpace` element ordering (fem_space::hcurl /
+        // fem_space::hdiv).  Mixed 3-D meshes (tet + hex + prism, e.g.
+        // fichera-mixed.mesh used by pex34) require the table of *each*
+        // element, not just element 0's.
+        fn edges_for_elem(space_type: fem_space::fe_space::SpaceType, dim: u8, et: fem_mesh::ElementType) -> &'static [(usize, usize)] {
+            use fem_mesh::ElementType;
+            match (space_type, dim, et) {
+                (fem_space::fe_space::SpaceType::HCurl, 2, ElementType::Quad4 | ElementType::Quad8) => {
+                    &[(0, 1), (1, 2), (2, 3), (3, 0)]
                 }
-                (fem_space::fe_space::SpaceType::HDiv, fem_mesh::ElementType::Tri3) => {
-                    (order + 1, order * (order + 1) / 2)
+                (fem_space::fe_space::SpaceType::HCurl, 2, _) => &[(0, 1), (1, 2), (0, 2)],
+                (fem_space::fe_space::SpaceType::HDiv, 2, ElementType::Quad4 | ElementType::Quad8) => {
+                    &[(0, 1), (1, 2), (2, 3), (3, 0)]
                 }
-                (_, fem_mesh::ElementType::Tri6) => (2, 2), // TriND2: 2/edge, 2 interior
-                _ => (1, 0),
+                (fem_space::fe_space::SpaceType::HDiv, 2, _) => &[(1, 2), (0, 2), (0, 1)],
+                // 3-D HCurl (NDk): tet (6), hex (12, MFEM CUBE Edges), prism
+                // (9) and pyramid (8) edge tables from fem_space::hcurl.
+                (fem_space::fe_space::SpaceType::HCurl, 3, ElementType::Tet4 | ElementType::Tet10) => {
+                    &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+                }
+                (fem_space::fe_space::SpaceType::HCurl, 3, ElementType::Hex8 | ElementType::Hex20) => {
+                    &[
+                        (0, 1), (1, 2), (3, 2), (0, 3),
+                        (4, 5), (5, 6), (7, 6), (4, 7),
+                        (0, 4), (1, 5), (2, 6), (3, 7),
+                    ]
+                }
+                (fem_space::fe_space::SpaceType::HCurl, 3, ElementType::Prism6) => {
+                    &[
+                        (0, 1), (1, 2), (0, 2), // bottom tri
+                        (3, 4), (4, 5), (3, 5), // top tri
+                        (0, 3), (1, 4), (2, 5), // verticals
+                    ]
+                }
+                (fem_space::fe_space::SpaceType::HCurl, 3, ElementType::Pyramid5) => {
+                    &[
+                        (0, 1), (1, 2), (2, 3), (3, 0), // base
+                        (0, 4), (1, 4), (2, 4), (3, 4), // apex
+                    ]
+                }
+                _ => &[(0, 1), (1, 2), (0, 2)],
             }
-        } else {
-            (1, 0)
+        }
+
+        // DOFs per edge for the supported spaces: NDk has k per edge, RTk has
+        // k+1 per edge (RT0/ND1 → 1).  Higher-order 3-D mixed meshes are not
+        // supported by this path.
+        let order = space.order() as usize;
+        let dofs_per_edge = match space_type {
+            fem_space::fe_space::SpaceType::HCurl => order.max(1),
+            fem_space::fe_space::SpaceType::HDiv => order + 1,
+            _ => 1,
         };
-        let n_edges = edges_for_space.len();
-        let edge_dofs_total = n_edges * dofs_per_edge;
 
         // ── Step 1: Map each DOF to its canonical edge (or interior) ──────────
         //
@@ -649,6 +651,9 @@ impl DofPartition {
         let mut sign_corr: Vec<f64> = vec![1.0; n_space_dofs];
 
         for e in mesh.elem_iter() {
+            let et = mesh.element_type(e);
+            let local_edges = edges_for_elem(space_type, dim as u8, et);
+            let edge_dofs_total = local_edges.len() * dofs_per_edge;
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
@@ -658,9 +663,9 @@ impl DofPartition {
                 }
 
                 if i < edge_dofs_total {
-                    // Edge DOF: map to the corresponding edge in edges_for_space.
+                    // Edge DOF: map to the corresponding edge of this element.
                     let edge_idx = i / dofs_per_edge;
-                    let (a, b) = edges_for_space[edge_idx];
+                    let (a, b) = local_edges[edge_idx];
                     let local_a = nodes[a];
                     let local_b = nodes[b];
                     let ga = partition.global_node(local_a);
@@ -926,35 +931,55 @@ impl DofPartition {
         );
 
         let elem0 = mesh.element_type(0);
-        // Local face vertex tables (matching HDivSpace / MFEM FaceVert order):
-        // hex RT0: 6 quad faces; tet RT0: 4 tri faces.
-        let (faces, dofs_per_face, n_interior_per_elem): (Vec<Vec<usize>>, usize, usize) =
-            match elem0 {
-                fem_mesh::ElementType::Hex8 => (
+        let _ = elem0;
+        // Per-element-type local face tables in the **canonical (MFEM
+        // FaceVert) vertex order** — the order the serial `HDivSpace` uses for
+        // its element face signs.  `from_face_space` must record first_seen /
+        // min-gid faces in this same order, otherwise the partition sign
+        // corrections do not line up with the space's element signs on
+        // tet/prism faces (whose plain face lists differ from the canonical
+        // order; hex faces already equal their canonical order).
+        // Each entry: (canonical vertex order, is_tri).
+        fn faces_for_elem(
+            et: fem_mesh::ElementType,
+            order: usize,
+        ) -> (Vec<(Vec<usize>, bool)>, usize) {
+            use fem_mesh::ElementType;
+            match et {
+                ElementType::Tet4 | ElementType::Tet10 => (
                     vec![
-                        vec![3, 2, 1, 0], // z=-1 (bottom)
-                        vec![0, 1, 5, 4], // y=-1 (front)
-                        vec![1, 2, 6, 5], // x=+1 (right)
-                        vec![2, 3, 7, 6], // y=+1 (back)
-                        vec![3, 0, 4, 7], // x=-1 (left)
-                        vec![4, 5, 6, 7], // z=+1 (top)
+                        (vec![1, 2, 3], true),
+                        (vec![0, 3, 2], true),
+                        (vec![0, 1, 3], true),
+                        (vec![0, 2, 1], true),
                     ],
-                    space.order() as usize + 1,
-                    if space.order() == 0 { 0 } else { 12 },
-                ),
-                fem_mesh::ElementType::Tet4 => (
-                    vec![
-                        vec![1, 2, 3],
-                        vec![0, 2, 3],
-                        vec![0, 1, 3],
-                        vec![0, 1, 2],
-                    ],
-                    space.order() as usize + 1,
                     0,
                 ),
-                _ => panic!("from_face_space: unsupported element type {elem0:?}"),
-            };
-        let n_face_dofs_total = faces.len() * dofs_per_face;
+                ElementType::Hex8 => (
+                    vec![
+                        (vec![3, 2, 1, 0], false), // z=-1 (bottom)
+                        (vec![0, 1, 5, 4], false), // y=-1 (front)
+                        (vec![1, 2, 6, 5], false), // x=+1 (right)
+                        (vec![2, 3, 7, 6], false), // y=+1 (back)
+                        (vec![3, 0, 4, 7], false), // x=-1 (left)
+                        (vec![4, 5, 6, 7], false), // z=+1 (top)
+                    ],
+                    if order == 0 { 0 } else { 12 },
+                ),
+                ElementType::Prism6 => (
+                    vec![
+                        (vec![0, 2, 1], true),  // bottom (tri)
+                        (vec![3, 4, 5], true),  // top (tri)
+                        (vec![0, 1, 4, 3], false), // quad (front)
+                        (vec![1, 2, 5, 4], false), // quad (right)
+                        (vec![2, 0, 3, 5], false), // quad (left)
+                    ],
+                    0,
+                ),
+                _ => panic!("from_face_space: unsupported element type {et:?}"),
+            }
+        }
+        let dofs_per_face = space.order() as usize + 1;
 
         // Per-face metadata: the space-canonical (first-seen) vertex order,
         // the min-global-element-id face order (global canonical), and the
@@ -978,6 +1003,8 @@ impl DofPartition {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
             let elem_gid = partition.global_elem(e);
+            let (faces, _n_interior) = faces_for_elem(mesh.element_type(e), space.order() as usize);
+            let n_face_dofs_total = faces.len() * dofs_per_face;
 
             for (i, &dof_id) in dofs.iter().enumerate() {
                 if i >= n_face_dofs_total {
@@ -986,7 +1013,7 @@ impl DofPartition {
                 }
                 let face_idx = i / dofs_per_face;
                 let pos = i % dofs_per_face;
-                let fv = &faces[face_idx];
+                let (fv, _is_tri) = &faces[face_idx];
                 let verts_global: Vec<u32> =
                     fv.iter().map(|&li| partition.global_node(nodes[li])).collect();
                 // Face key: the 3 smallest global vertex ids of the *whole*
