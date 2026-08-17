@@ -2547,3 +2547,281 @@ fn generate_plane_rotation(dx: &mut f64, dy: &mut f64, cs: &mut f64, sn: &mut f6
         *sn = tmp * *cs;
     }
 }
+
+// ─── Parallel complex FGMRES ────────────────────────────────────────────────
+
+/// Complex Givens rotation: zero `b` given `(a, b)`, returning `(c, s)` with
+/// `c` real, `s = s_re + i·s_im` such that
+/// `[c  s̄; −s  c] · [a; b] = [r; 0]` (MATLAB `[c,s] = givens(a,b)`).
+/// Used by the complex FGMRES Arnoldi process (Hessenberg entries complex).
+#[allow(clippy::too_many_arguments)]
+fn complex_givens(
+    a_re: f64, a_im: f64,
+    b_re: f64, b_im: f64,
+) -> (f64, f64, f64, f64) {
+    // c real, s complex: c = |a| / sqrt(|a|² + |b|²), s = conj(a)·b / (|a|·den)
+    let a_norm = (a_re * a_re + a_im * a_im).sqrt();
+    let denom = (a_re * a_re + a_im * a_im + b_re * b_re + b_im * b_im).sqrt();
+    if denom < 1e-300 {
+        return (1.0, 0.0, 0.0, 0.0);
+    }
+    let c = a_norm / denom;
+    if a_norm < 1e-300 {
+        // a == 0: s = 1 (rotation is a pure −b → r swap)
+        return (0.0, 1.0, 0.0, 0.0);
+    }
+    // s = conj(a)·b / (|a|·den) = (a_re·b_re + a_im·b_im)/ (a_norm·den) + i·(a_re·b_im − a_im·b_re)/(a_norm·den)
+    let s_re = (a_re * b_re + a_im * b_im) / (a_norm * denom);
+    let s_im = (a_re * b_im - a_im * b_re) / (a_norm * denom);
+    (c, s_re, s_im, 0.0)
+}
+
+/// Apply a complex Givens rotation to a Hessenberg column entry pair
+/// `(h[i][j], h[i+1][j])` — the corrected rotation application used by the
+/// serial complex GMRES core (see `fem_linalg::solve_gmres_complex_with`).
+#[allow(clippy::too_many_arguments)]
+fn apply_complex_rotation(
+    h_ir: f64, h_ii: f64,
+    h_i1r: f64, h_i1i: f64,
+    c: f64, s_re: f64, s_im: f64,
+) -> (f64, f64, f64, f64) {
+    // [c  s̄] [h_i ]   [ c·h_i  + s_re·h_i1 + i·(...) ]
+    // [−s  c] [h_i1] = [ −s·h_i + c·h_i1 ]
+    let nr = c * h_ir + s_re * h_i1r + s_im * h_i1i;
+    let ni = c * h_ii + s_re * h_i1i - s_im * h_i1r;
+    let mr = -s_re * h_ir + s_im * h_ii + c * h_i1r;
+    let mi = -s_im * h_ir - s_re * h_ii + c * h_i1i;
+    (nr, ni, mr, mi)
+}
+
+/// Parallel FGMRES for a complex system `A·x = b` where `A` is a
+/// [`ParComplexCsrMatrix`] (split re/im CSR) and `b`, `x` are
+/// [`ParComplexVector`]s.
+///
+/// The optional preconditioner `precond` maps the *owned* portion of the
+/// residual to the owned portion of `z` (same convention as
+/// [`par_solve_pcg_precond`]); ghost values are left untouched.  For a
+/// block-diagonal `[P, ±P]` complex preconditioner (MFEM ex35p's
+/// `BlockDiagonalPreconditioner`), callers pass a closure that applies `P` to
+/// the real part and `scale·P` to the imaginary part.
+///
+/// Convergence is measured on the *unpreconditioned* relative residual
+/// `‖b − A·x‖ / ‖b‖` (C++ `FGMRESSolver` convention, rtol 1e-6 for ex35p).
+pub fn par_solve_fgmres_complex<F>(
+    a: &crate::par_complex_csr::ParComplexCsrMatrix,
+    b: &crate::par_vector::ParComplexVector,
+    x: &mut crate::par_vector::ParComplexVector,
+    restart: usize,
+    precond: Option<&F>,
+    cfg: &SolverConfig,
+) -> Result<SolveResult, SolverError>
+where
+    F: Fn(&[f64], &[f64], &mut [f64], &mut [f64]),
+{
+    if restart == 0 {
+        return Err(SolverError::Linlvo("FGMRES restart must be > 0".to_string()));
+    }
+    let n = a.n_owned();
+
+    // r = b − A·x
+    let mut ax = crate::par_vector::ParComplexVector::zeros_like(&b.re);
+    a.spmv(x, &mut ax);
+    let mut r = b.clone_complex();
+    for i in 0..n {
+        r.re.data[i] -= ax.re.data[i];
+        r.im.data[i] -= ax.im.data[i];
+    }
+
+    let b_norm = b.global_norm();
+    if b_norm < 1e-300 {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: 0.0 });
+    }
+    let mut rel_res = r.global_norm() / b_norm;
+    if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+        return Ok(SolveResult { converged: true, iterations: 0, final_residual: rel_res });
+    }
+
+    let mut iter_total = 0usize;
+
+    while iter_total < cfg.max_iter {
+        // v[0] = r / β ;  z[0] = M⁻¹·v[0] (FGMRES stores preconditioned vectors)
+        let beta = r.global_norm();
+        if beta < 1e-300 {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: 0.0 });
+        }
+        let mut v: Vec<crate::par_vector::ParComplexVector> = Vec::with_capacity(restart + 1);
+        let mut z: Vec<crate::par_vector::ParComplexVector> = Vec::with_capacity(restart);
+        {
+            let mut v0 = r.clone_complex();
+            let inv = 1.0 / beta;
+            for i in 0..n {
+                v0.re.data[i] *= inv;
+                v0.im.data[i] *= inv;
+            }
+            v.push(v0);
+        }
+
+        let mut h = vec![vec![(0.0_f64, 0.0_f64); restart]; restart + 1];
+        let mut cs = vec![0.0_f64; restart];
+        let mut sn_re = vec![0.0_f64; restart];
+        let mut sn_im = vec![0.0_f64; restart];
+        let mut g = vec![(0.0_f64, 0.0_f64); restart + 1];
+        g[0] = (beta, 0.0);
+
+        let mut j_end = 0usize;
+        for j in 0..restart {
+            if iter_total >= cfg.max_iter {
+                break;
+            }
+            iter_total += 1;
+            j_end = j;
+
+            // z[j] = M⁻¹·v[j]
+            let mut zj = crate::par_vector::ParComplexVector::zeros_like(&b.re);
+            if let Some(p) = precond {
+                p(
+                    &v[j].re.data[..n], &v[j].im.data[..n],
+                    &mut zj.re.data[..n], &mut zj.im.data[..n],
+                );
+            } else {
+                for i in 0..n {
+                    zj.re.data[i] = v[j].re.data[i];
+                    zj.im.data[i] = v[j].im.data[i];
+                }
+            }
+            zj.update_ghosts();
+            z.push(zj);
+
+            // w = A·z[j]
+            let mut w = crate::par_vector::ParComplexVector::zeros_like(&b.re);
+            a.spmv(&mut z[j], &mut w);
+
+            // Modified Gram-Schmidt: h[i][j] = ⟨v_i, w⟩ = Σ conj(v_i)·w.
+            // `global_dot_complex(a, b)` = Σ a·conj(b), so ⟨v_i, w⟩ =
+            // conj(global_dot_complex(w, v_i)).
+            for i in 0..=j {
+                let dot = w.global_dot_complex(&v[i]);
+                h[i][j] = (dot.0, -dot.1);
+                // w −= h[i][j]·v[i]
+                w.zaxpy(-h[i][j].0, -h[i][j].1, &v[i]);
+            }
+            let w_norm = w.global_norm();
+            h[j + 1][j] = (w_norm, 0.0);
+
+            if w_norm > 1e-300 {
+                let mut vjp1 = w.clone_complex();
+                let inv = 1.0 / w_norm;
+                for i in 0..n {
+                    vjp1.re.data[i] *= inv;
+                    vjp1.im.data[i] *= inv;
+                }
+                v.push(vjp1);
+            } else {
+                v.push(crate::par_vector::ParComplexVector::zeros_like(&b.re));
+            }
+
+            // Apply previous Givens rotations, then generate + apply a new one.
+            for i in 0..j {
+                let (a_ki, a_k1i) = (h[i][j], h[i + 1][j]);
+                let (nr, ni, mr, mi) = apply_complex_rotation(
+                    a_ki.0, a_ki.1, a_k1i.0, a_k1i.1,
+                    cs[i], sn_re[i], sn_im[i],
+                );
+                h[i][j] = (nr, ni);
+                h[i + 1][j] = (mr, mi);
+            }
+            let (a_jj, a_j1) = (h[j][j], h[j + 1][j]);
+            let (c, sr, si, _) = complex_givens(a_jj.0, a_jj.1, a_j1.0, a_j1.1);
+            cs[j] = c;
+            sn_re[j] = sr;
+            sn_im[j] = si;
+            let (nr, ni, mr, mi) = apply_complex_rotation(
+                a_jj.0, a_jj.1, a_j1.0, a_j1.1, c, sr, si,
+            );
+            h[j][j] = (nr, ni);
+            h[j + 1][j] = (mr, mi);
+
+            // Apply rotation to g
+            let (gj, gj1) = (g[j], g[j + 1]);
+            let (nr, ni, mr, mi) = apply_complex_rotation(
+                gj.0, gj.1, gj1.0, gj1.1, c, sr, si,
+            );
+            g[j] = (nr, ni);
+            g[j + 1] = (mr, mi);
+
+            let resid = g[j + 1].0.abs().max(g[j + 1].1.abs());
+            if cfg.verbose && b.re.comm().is_root() {
+                log::info!("par_fgmres_complex iter {}: residual = {:.3e}", iter_total, resid / b_norm);
+            }
+            if resid / b_norm < cfg.rtol || resid < cfg.atol {
+                // Solve H·y = g (upper triangular, complex), x += Z·y
+                let k = j + 1;
+                let mut y = vec![(0.0_f64, 0.0_f64); k];
+                for i in (0..k).rev() {
+                    let mut rr = g[i].0;
+                    let mut ri = g[i].1;
+                    for kk in (i + 1)..k {
+                        rr -= h[i][kk].0 * y[kk].0 - h[i][kk].1 * y[kk].1;
+                        ri -= h[i][kk].0 * y[kk].1 + h[i][kk].1 * y[kk].0;
+                    }
+                    let (hr, hi) = h[i][i];
+                    let mag2 = hr * hr + hi * hi;
+                    if mag2 > 1e-300 {
+                        y[i] = ((rr * hr + ri * hi) / mag2, (ri * hr - rr * hi) / mag2);
+                    }
+                }
+                for kk in 0..k {
+                    if y[kk].0 != 0.0 || y[kk].1 != 0.0 {
+                        for i in 0..n {
+                            x.re.data[i] += y[kk].0 * z[kk].re.data[i] - y[kk].1 * z[kk].im.data[i];
+                            x.im.data[i] += y[kk].0 * z[kk].im.data[i] + y[kk].1 * z[kk].re.data[i];
+                        }
+                    }
+                }
+                return Ok(SolveResult {
+                    converged: true,
+                    iterations: iter_total,
+                    final_residual: resid / b_norm,
+                });
+            }
+        }
+
+        // Restart: solve the reduced system for the current cycle.
+        let k = j_end + 1;
+        let mut y = vec![(0.0_f64, 0.0_f64); k];
+        for i in (0..k).rev() {
+            let mut rr = g[i].0;
+            let mut ri = g[i].1;
+            for kk in (i + 1)..k {
+                rr -= h[i][kk].0 * y[kk].0 - h[i][kk].1 * y[kk].1;
+                ri -= h[i][kk].0 * y[kk].1 + h[i][kk].1 * y[kk].0;
+            }
+            let (hr, hi) = h[i][i];
+            let mag2 = hr * hr + hi * hi;
+            if mag2 > 1e-300 {
+                y[i] = ((rr * hr + ri * hi) / mag2, (ri * hr - rr * hi) / mag2);
+            }
+        }
+        for kk in 0..k {
+            if y[kk].0 != 0.0 || y[kk].1 != 0.0 {
+                for i in 0..n {
+                    x.re.data[i] += y[kk].0 * z[kk].re.data[i] - y[kk].1 * z[kk].im.data[i];
+                    x.im.data[i] += y[kk].0 * z[kk].im.data[i] + y[kk].1 * z[kk].re.data[i];
+                }
+            }
+        }
+
+        // Exact residual after restart.
+        a.spmv(x, &mut ax);
+        for i in 0..n {
+            r.re.data[i] = b.re.data[i] - ax.re.data[i];
+            r.im.data[i] = b.im.data[i] - ax.im.data[i];
+        }
+        rel_res = r.global_norm() / b_norm;
+        if rel_res < cfg.rtol || r.global_norm() < cfg.atol {
+            return Ok(SolveResult { converged: true, iterations: iter_total, final_residual: rel_res });
+        }
+    }
+
+    Ok(SolveResult { converged: false, iterations: cfg.max_iter, final_residual: rel_res })
+}

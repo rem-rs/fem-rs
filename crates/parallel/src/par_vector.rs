@@ -275,6 +275,14 @@ impl ParComplexVector {
     /// Number of owned DOFs (shared by both components).
     pub fn n_owned(&self) -> usize { self.re.n_owned() }
 
+    /// Clone both components.
+    pub fn clone_complex(&self) -> Self {
+        ParComplexVector {
+            re: self.re.clone_vec(),
+            im: self.im.clone_vec(),
+        }
+    }
+
     /// Forward ghost exchange for both components.
     pub fn update_ghosts(&mut self) {
         self.re.update_ghosts();

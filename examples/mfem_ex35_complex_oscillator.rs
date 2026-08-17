@@ -519,6 +519,7 @@ fn solve_h1(
     println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
+    println!("  normRe = {:.8e}, normIm = {:.8e}", x_re.iter().map(|v| v * v).sum::<f64>().sqrt(), x_im.iter().map(|v| v * v).sum::<f64>().sqrt());
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -601,6 +602,7 @@ fn solve_hcurl(
     println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
+    println!("  normRe = {:.8e}, normIm = {:.8e}", x_re.iter().map(|v| v * v).sum::<f64>().sqrt(), x_im.iter().map(|v| v * v).sum::<f64>().sqrt());
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -680,6 +682,7 @@ fn solve_hdiv(
     println!("FGMRES: Final relative residual: {res:.6e}");
     println!("  max|Re(u)| = {:.6e}", x_re.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
     println!("  max|Im(u)| = {:.6e}", x_im.iter().map(|v| v.abs()).fold(0.0_f64, f64::max));
+    println!("  normRe = {:.8e}, normIm = {:.8e}", x_re.iter().map(|v| v * v).sum::<f64>().sqrt(), x_im.iter().map(|v| v * v).sum::<f64>().sqrt());
 }
 
 // ─── Generic port → full transfers (edge/face DOFs) ─────────────────────────
@@ -857,10 +860,11 @@ fn transfer_edge_dofs(
     // Port HCurl space on the boundary submesh (order matches the parent).
     let port_fes = HCurlSpace::new(port.mesh.clone(), parent_fes.order());
 
-    // Each port edge (canonical sub-vertex pair) maps to a parent edge via
-    // parent_node_of_sub; both spaces number their edge DOFs by the same
-    // canonical (min, max) vertex pair, so the values transfer directly
-    // (no sign flip needed — EdgeKey is always (min, max)).
+    // Each port edge maps to a parent edge via parent_node_of_sub.  The ND
+    // basis direction follows the canonical edge orientation (smaller node id
+    // → larger node id) *within each mesh's own node numbering*.  When the
+    // port's local node ordering disagrees with the parent's (partition
+    // renumbers / submesh extraction), the transferred value must flip sign.
     let port_edges: Vec<(u32, u32)> = port_edge_pairs(port);
     for (a, b) in port_edges {
         let key = EdgeKey::new(a, b);
@@ -868,8 +872,13 @@ fn transfer_edge_dofs(
         let pa = port.parent_node_of_sub[a as usize];
         let pb = port.parent_node_of_sub[b as usize];
         let Some(full_dof) = parent_fes.edge_dof(EdgeKey::new(pa, pb)) else { continue };
+        // Sign: +1 when the port edge direction (a→b) agrees with the
+        // parent's canonical direction (pa→pb); flip otherwise.
+        let port_dir_asc = a < b;
+        let parent_dir_asc = pa < pb;
+        let sign = if port_dir_asc == parent_dir_asc { 1.0 } else { -1.0 };
         if (full_dof as usize) < out.len() {
-            out[full_dof as usize] = port_bc[port_dof as usize];
+            out[full_dof as usize] = sign * port_bc[port_dof as usize];
         }
     }
 }
