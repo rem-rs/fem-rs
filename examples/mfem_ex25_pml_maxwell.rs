@@ -631,11 +631,19 @@ struct VectorSrc<'a> {
 }
 impl VectorLinearIntegrator for VectorSrc<'_> {
     fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
+        // f_elem is per-DOF (length n_dofs), the vector-linear-integrator
+        // convention (cf. `VectorDomainLFIntegrator`): each entry is the FULL
+        // component-summed contribution `w · Σ_d f_d · φ_i,d`.  Writing the
+        // components separately (length n_dofs × dim) mismatches the
+        // accumulator (it pairs f_elem[i] with dof i) and shuffles the load
+        // vector — the load_src solution was HALF of C++ ex25p before this fix.
         let f_val = (self.f)(qp.x_phys, qp);
         for i in 0..qp.n_dofs {
+            let mut dot = 0.0;
             for d in 0..qp.dim {
-                f_elem[i * qp.dim + d] += qp.weight * f_val[d] * qp.phi_vec[i * qp.dim + d];
+                dot += f_val[d] * qp.phi_vec[i * qp.dim + d];
             }
+            f_elem[i] += qp.weight * dot;
         }
     }
 }
