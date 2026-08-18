@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fem_space::fe_space::FESpace;
+use fem_space::fe_space::{FESpace, SpaceType};
 use fem_space::dof_manager::DofManager;
 use fem_mesh::topology::MeshTopology;
 
@@ -35,13 +35,29 @@ where
     /// Build a parallel FE space from a local space and parallel mesh.
     ///
     /// The DOF partition is derived from the mesh partition (P1: DOFs = nodes).
-    /// For P2+ spaces, use [`new_with_dof_manager`](Self::new_with_dof_manager).
+    /// H(curl) spaces always use the edge-based partition
+    /// ([`DofPartition::from_edge_space`]); H(div) uses the edge partition in
+    /// 2-D (RT dofs live on edges) and the face partition in 3-D
+    /// ([`DofPartition::from_face_space`]).  For other P2+ spaces, use
+    /// [`new_with_dof_manager`](Self::new_with_dof_manager).
     pub fn new<M: MeshTopology>(
         local_space: S,
         par_mesh: &ParallelMesh<M>,
         comm: Comm,
     ) -> Self {
-        let dof_partition = DofPartition::from_mesh_partition(par_mesh.partition(), &comm);
+        let dof_partition = match local_space.space_type() {
+            SpaceType::HCurl => {
+                DofPartition::from_edge_space(&local_space, par_mesh.partition(), &comm)
+            }
+            SpaceType::HDiv => {
+                if local_space.mesh().topological_dim() == 3 {
+                    DofPartition::from_face_space(&local_space, par_mesh.partition(), &comm)
+                } else {
+                    DofPartition::from_edge_space(&local_space, par_mesh.partition(), &comm)
+                }
+            }
+            _ => DofPartition::from_mesh_partition(par_mesh.partition(), &comm),
+        };
         Self::finish(local_space, dof_partition, &comm)
     }
 

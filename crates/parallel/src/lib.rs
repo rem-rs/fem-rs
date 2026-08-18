@@ -136,6 +136,7 @@ pub mod par_dpg_trace;
 pub mod par_ams;
 pub mod par_discrete_operator;
 pub mod par_lobpcg;
+pub mod par_projection;
 pub mod par_space;
 pub mod par_vector;
 pub mod par_vector_assembler;
@@ -175,6 +176,7 @@ pub use par_csr::ParCsrMatrix;
 pub use par_discrete_operator::ParDiscreteLinearOperator;
 pub use par_lobpcg::{par_lobpcg, ParLobpcgResult};
 pub use par_mesh::ParallelMesh;
+pub use par_projection::ParGradientProjector;
 pub use par_mixed_assembler::ParMixedAssembler;
 pub use par_ras::{
 	RasConfig, RasHpcDiagnostics, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras,

@@ -103,7 +103,7 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
     let ams = ParAmsPrecond::new(&a, &g, AmsConfig::default());
 
     if rank == 0 { eprintln!("\nSolving for eigenvalues using ParLOBPCG + AMS"); }
-    let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), 300, 1e-6);
+    let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), None, 0.0, 300, 1e-6);
 
     if rank == 0 {
         for (i, &l) in res.eigenvalues.iter().enumerate() { eprintln!("  Eigenmode {}: lambda = {:.15e}", i+1, l); }
