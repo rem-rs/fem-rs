@@ -31,9 +31,9 @@ use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{Mesh, MeshTopology, refine_uniform, refine_uniform_3d};
 use fem_parallel::{
-    ParCsrMatrix, ParallelFESpace, ParallelMesh, ParVector, par_lobpcg,
-    par_partition::partition_mesh, par_vector_assembler::ParVectorAssembler,
-    launcher::{native::ThreadLauncher, WorkerConfig},
+    ParAmgConfig, ParAssembler, ParCsrMatrix, ParDiscreteLinearOperator, ParGradientProjector,
+    ParallelFESpace, ParallelMesh, ParVector, SmootherType, par_lobpcg, par_partition::partition_mesh,
+    par_vector_assembler::ParVectorAssembler, launcher::{native::ThreadLauncher, WorkerConfig},
 };
 use fem_space::{H1Space, HCurlSpace, fe_space::FESpace};
 
@@ -338,7 +338,7 @@ fn run_3d(comm: fem_parallel::comm::Comm, args: &Args) {
     let par_mesh: ParallelMesh<Mesh<3>> = partition_mesh(&serial, &comm);
     let local_mesh = par_mesh.local_mesh().clone();
 
-    let _par_h1 = ParallelFESpace::new(H1Space::new(local_mesh.clone(), 1), &par_mesh, comm.clone());
+    let par_h1 = ParallelFESpace::new(H1Space::new(local_mesh.clone(), 1), &par_mesh, comm.clone());
     let par_nd = ParallelFESpace::new(
         HCurlSpace::new(local_mesh.clone(), args.order),
         &par_mesh,
@@ -362,6 +362,14 @@ fn run_3d(comm: fem_parallel::comm::Comm, args: &Args) {
     if rank == 0 {
         eprintln!("  ess dofs (owned): {}", ess.len());
     }
+    // The div-free projector must use the UN-eliminated mass (GᵀMG = Laplacian
+    // holds only with the full mass; eliminated BC rows/cols drop the
+    // boundary-edge couplings).
+    let m_proj = ParVectorAssembler::assemble_bilinear(
+        &par_nd,
+        &[&VectorMassIntegrator { alpha: 1.0 }],
+        quad,
+    );
     a = eliminate_ess_diag(&a, &ess, 1.0);
     m = eliminate_ess_diag(&m, &ess, f64::MIN_POSITIVE);
 
@@ -376,20 +384,56 @@ fn run_3d(comm: fem_parallel::comm::Comm, args: &Args) {
         }
     };
 
+    // Div-free projection P = I − G(GᵀMG)⁻¹GᵀM (HYPRE AME's
+    // hypre_AMEDiscrDivFreeComponent) + essential-dof zeroing: the trial
+    // space stays in the gradient-nullspace-free, BC-free subspace (the
+    // eigenvectors of the eliminated pencil have zero BC components).
+    let g = ParDiscreteLinearOperator::gradient(&par_h1, &par_nd);
+    let nodal = ParAssembler::assemble_bilinear(&par_h1, &[&fem_assembly::standard::DiffusionIntegrator { kappa: 1.0 }], quad);
+    let amg_cfg = ParAmgConfig {
+        smoother: SmootherType::SymmetricGaussSeidel,
+        n_pre_smooth: 2,
+        n_post_smooth: 2,
+        smoothed_prolongation: true,
+        block_size: 1,
+        use_global_aggregation: false,
+        ..ParAmgConfig::default()
+    };
     // Essential-dof zeroing (the eigenvectors of the eliminated pencil have
     // zero BC components; leaving them in the trial space pollutes the
     // Rayleigh quotient: A_dd = 1.0 but B_dd = f64::MIN_POSITIVE).
+    //
+    // Default: BC-zeroing only (small-mesh convergence is exact — 3 iters,
+    // residual 1e-15, eigenvalues = C++ to all printed digits).  The
+    // div-free projection (FEM_USE_PROJ=1) also gives the correct final
+    // eigenvalues but its X-block Rayleigh quotients drift, so the
+    // convergence flag / residual report stays loose; the refined default
+    // mesh (large gradient nullspace) is still not solved by either path.
     let ess_c = ess.clone();
-    let proj = move |block: &mut [ParVector]| {
-        for v in block.iter_mut() {
-            let vs = v.owned_slice_mut();
-            for &p in &ess_c {
-                vs[p] = 0.0;
+    let use_proj = std::env::var("FEM_USE_PROJ").is_ok();
+    if use_proj {
+        let projector = ParGradientProjector::new(&par_h1, &g, &m_proj, &nodal, amg_cfg);
+        let proj = move |block: &mut [ParVector]| {
+            projector.apply(block);
+            for v in block.iter_mut() {
+                let vs = v.owned_slice_mut();
+                for &p in &ess_c {
+                    vs[p] = 0.0;
+                }
             }
-        }
-    };
-
-    run_lobpcg(&par_nd, &a, &m, args, &precond, Some(&proj), rank);
+        };
+        run_lobpcg(&par_nd, &a, &m, args, &precond, Some(&proj), rank);
+    } else {
+        let proj = move |block: &mut [ParVector]| {
+            for v in block.iter_mut() {
+                let vs = v.owned_slice_mut();
+                for &p in &ess_c {
+                    vs[p] = 0.0;
+                }
+            }
+        };
+        run_lobpcg(&par_nd, &a, &m, args, &precond, Some(&proj), rank);
+    }
 }
 
 // ─── 2D path (variant: star.mesh / square-disc.mesh) ─────────────────────────

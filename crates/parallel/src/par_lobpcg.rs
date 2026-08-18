@@ -53,6 +53,7 @@ pub fn par_lobpcg(
     let n_ghost = a.n_ghost();
     let comm = a.comm();
     let bm = b.unwrap_or(a);
+    let eps = f64::EPSILON;
 
     let alloc = || -> Vec<ParVector> {
         (0..k)
@@ -156,11 +157,35 @@ pub fn par_lobpcg(
     let mut lambdas = vec![0.0_f64; k];
     let mut converged = false;
     let mut iterations = 0usize;
+    // Soft-locking mask (BLOPEX `lobpcg_checkResiduals`): modes whose absolute
+    // residual satisfies ||AX − λBX|| ≤ λ·tol + tol + eps are locked and drop
+    // out of the active search — the HYPRE AME mechanism visible in ex13p's
+    // shrinking block size (bsize 5 → 1).
+    let mut active = vec![true; k];
+    let mut res_norms_abs = vec![0.0_f64; k];
 
     for iter in 0..max_iter {
         iterations = iter + 1;
 
-        // ── 2. AX, BX ──────────────────────────────────────────────────────
+        // ── 1. Soft-lock converged modes (skip on the first iteration) ─────
+        if iter > 0 {
+            for j in 0..k {
+                if active[j] {
+                    let lam = lambdas[j].abs();
+                    if res_norms_abs[j] <= lam * tol + tol + eps {
+                        active[j] = false;
+                    }
+                }
+            }
+        }
+        let act: Vec<usize> = (0..k).filter(|&j| active[j]).collect();
+        let na = act.len();
+        if na == 0 {
+            converged = true;
+            break;
+        }
+
+        // ── 2. AX, BX (all columns; locked ones are untouched) ─────────────
         let mut ax = alloc();
         let mut bx = alloc();
         for j in 0..k {
@@ -168,21 +193,58 @@ pub fn par_lobpcg(
             bm.spmv(&mut x[j], &mut bx[j]);
         }
 
-        // ── 3. Rayleigh–Ritz on X ──────────────────────────────────────────
-        let mut xtax = DMatrix::<f64>::zeros(k, k);
-        let mut xtbx = DMatrix::<f64>::zeros(k, k);
-        for i in 0..k {
-            for j in 0..k {
-                xtax[(i, j)] = x[i].global_dot(&ax[j]);
-                xtbx[(i, j)] = x[i].global_dot(&bx[j]);
+        // ── 3. Rayleigh–Ritz on the active X block; rotate the active
+        //        columns to the Ritz basis so x and λ stay aligned ─────────
+        let mut xtax = DMatrix::<f64>::zeros(na, na);
+        let mut xtbx = DMatrix::<f64>::zeros(na, na);
+        for (i, &ri) in act.iter().enumerate() {
+            for (j, &cj) in act.iter().enumerate() {
+                xtax[(i, j)] = x[ri].global_dot(&ax[cj]);
+                xtbx[(i, j)] = x[ri].global_dot(&bx[cj]);
             }
         }
         let ritz = solve_dense_generalized_eig(&xtax, &xtbx);
-        for j in 0..k {
-            lambdas[j] = ritz.0[j];
+        for (t, &j) in act.iter().enumerate() {
+            lambdas[j] = ritz.0[t];
+        }
+        // Rotate x, ax, bx of the active columns by the Ritz coefficients
+        // (keeps the residual / soft-lock / next-W consistent; without it the
+        // sorted λ values no longer correspond to the stored columns once a
+        // mode is soft-locked and `act` is no longer a contiguous prefix).
+        {
+            let mut xr: Vec<ParVector> = Vec::with_capacity(k);
+            let mut ar: Vec<ParVector> = Vec::with_capacity(k);
+            let mut br: Vec<ParVector> = Vec::with_capacity(k);
+            for j in 0..k {
+                xr.push(if active[j] {
+                    ParVector::zeros_like(&x[0])
+                } else {
+                    x[j].clone_vec()
+                });
+                ar.push(if active[j] {
+                    ParVector::zeros_like(&x[0])
+                } else {
+                    ax[j].clone_vec()
+                });
+                br.push(if active[j] {
+                    ParVector::zeros_like(&x[0])
+                } else {
+                    bx[j].clone_vec()
+                });
+            }
+            for (t, &j) in act.iter().enumerate() {
+                for (i, &ri) in act.iter().enumerate() {
+                    xr[j].axpy(ritz.1[(i, t)], &x[ri]);
+                    ar[j].axpy(ritz.1[(i, t)], &ax[ri]);
+                    br[j].axpy(ritz.1[(i, t)], &bx[ri]);
+                }
+            }
+            x = xr;
+            ax = ar;
+            bx = br;
         }
 
-        // ── 4. Residuals R = AX − BX·Λ; project ───────────────────────────
+        // ── 4. Residuals R = AX − BX·Λ (active); project ───────────────────
         let mut r = alloc();
         for j in 0..k {
             for i in 0..n_owned {
@@ -191,17 +253,16 @@ pub fn par_lobpcg(
         }
         apply_projector(&mut r);
 
-        // ── 5. Convergence check (relative residual) ───────────────────────
-        let res_norms: Vec<f64> = (0..k)
-            .map(|j| {
-                r[j].global_norm() / lambdas[j].abs().max(1e-14)
-            })
-            .collect();
-        let max_res = res_norms.iter().cloned().fold(0.0f64, f64::max);
+        // ── 5. Residual norms (absolute for the soft-lock check) ───────────
+        let mut max_res = 0.0f64;
+        for &j in &act {
+            res_norms_abs[j] = r[j].global_norm();
+            max_res = max_res.max(res_norms_abs[j] / lambdas[j].abs().max(1e-14));
+        }
         if comm.rank() == 0 && (iter == 0 || (iter + 1) % 10 == 0 || max_res < tol) {
             let tstr: Vec<String> = lambdas.iter().map(|t| format!("{t:.4e}")).collect();
             eprintln!(
-                "  [ParLOBPCG] iter={}: lambda=[{}] max_res={max_res:.3e}",
+                "  [ParLOBPCG] iter={}: bsize={na} lambda=[{}] max_rel_res={max_res:.3e}",
                 iter + 1,
                 tstr.join(" ")
             );
@@ -211,9 +272,9 @@ pub fn par_lobpcg(
             break;
         }
 
-        // ── 6. Z = T(R) = precond(R), projected ────────────────────────────
+        // ── 6. Z = T(R) = precond(R), projected (active) ───────────────────
         let mut z = alloc();
-        for j in 0..k {
+        for &j in &act {
             let mut zd = vec![0.0; n_owned];
             precond(r[j].owned_slice(), &mut zd);
             for i in 0..n_owned {
@@ -222,35 +283,35 @@ pub fn par_lobpcg(
         }
         apply_projector(&mut z);
 
-        // ── 7. W = [X | Z | P]; project + B-orthonormalise ────────────────
-        let w_ncols = if use_p { 3 * k } else { 2 * k };
+        // ── 7. W = [X_a | Z_a | P_a]; project + B-orthonormalise ───────────
+        let w_ncols = if use_p { 3 * na } else { 2 * na };
         let mut w: Vec<ParVector> = Vec::with_capacity(w_ncols);
-        for j in 0..k {
+        for &j in &act {
             w.push(x[j].clone_vec());
         }
-        for j in 0..k {
+        for &j in &act {
             w.push(z[j].clone_vec());
         }
         if use_p {
-            for j in 0..k {
+            for &j in &act {
                 w.push(p[j].clone_vec());
             }
         }
         apply_projector(&mut w);
         let mut w_ncols = b_orthonormalize(&mut w, w_ncols);
-        if w_ncols < k {
+        if w_ncols < na {
             if use_p {
-                // Rank loss with P — fall back to [X | Z].
-                let mut w2: Vec<ParVector> = Vec::with_capacity(2 * k);
-                for j in 0..k {
+                // Rank loss with P — fall back to [X_a | Z_a].
+                let mut w2: Vec<ParVector> = Vec::with_capacity(2 * na);
+                for &j in &act {
                     w2.push(x[j].clone_vec());
                 }
-                for j in 0..k {
+                for &j in &act {
                     w2.push(z[j].clone_vec());
                 }
                 apply_projector(&mut w2);
-                w_ncols = b_orthonormalize(&mut w2, 2 * k);
-                if w_ncols < k {
+                w_ncols = b_orthonormalize(&mut w2, 2 * na);
+                if w_ncols < na {
                     break;
                 }
                 w = w2;
@@ -280,36 +341,43 @@ pub fn par_lobpcg(
         }
         let (ritz_vals, ritz_vecs) = solve_dense_generalized_eig(&wtaw, &wtbw);
 
-        // ── 9. X = W·C[:, skip..skip+k], P = W·C[:, skip+k..] ─────────────
-        // Skip nullspace modes (|λ| < nullspace_skip) — the serial
-        // `lobpcg_projected` mechanism for singular pencils.
+        // ── 9. X_a = W·C[:, skip..skip+na], P_a = W·C[:, skip+na..] ───────
+        // Skip nullspace modes (|λ| < nullspace_skip).
         let skip = if nullspace_skip > 0.0 {
             ritz_vals
                 .iter()
                 .take_while(|&&v| v.abs() < nullspace_skip)
                 .count()
-                .min(w_ncols.saturating_sub(k))
+                .min(w_ncols.saturating_sub(na))
         } else {
             0
         };
-        let n_avail = w_ncols;
         let mut x_new: Vec<ParVector> = Vec::with_capacity(k);
         for _ in 0..k {
             x_new.push(ParVector::zeros_like(&x[0]));
         }
-        for i in 0..w_ncols {
-            for j in 0..k {
-                x_new[j].axpy(ritz_vecs[(i, skip + j)], &w[i]);
+        // Locked columns are preserved; active columns get the new Ritz vectors.
+        for j in 0..k {
+            if !active[j] {
+                x_new[j] = x[j].clone_vec();
             }
         }
-        let p_cols = (n_avail - skip - k).min(k);
+        for (t, &j) in act.iter().enumerate() {
+            for i in 0..w_ncols {
+                x_new[j].axpy(ritz_vecs[(i, skip + t)], &w[i]);
+            }
+            lambdas[j] = ritz_vals[skip + t];
+        }
+        let p_cols = (w_ncols - skip - na).min(na);
         let mut p_new: Vec<ParVector> = Vec::with_capacity(k);
         for _ in 0..k {
             p_new.push(ParVector::zeros_like(&x[0]));
         }
-        for i in 0..w_ncols {
-            for j in 0..p_cols {
-                p_new[j].axpy(ritz_vecs[(i, skip + k + j)], &w[i]);
+        for (t, &j) in act.iter().enumerate() {
+            if t < p_cols {
+                for i in 0..w_ncols {
+                    p_new[j].axpy(ritz_vecs[(i, skip + na + t)], &w[i]);
+                }
             }
         }
         x = x_new;
