@@ -596,14 +596,22 @@ fn main() {
             done = t >= args.t_final - 1e-8 * args.dt;
             if done || ti % args.vis_steps == 0 {
                 let norm = u_par.global_norm();
+                let sum = comm.allreduce_sum_f64(u_par.as_slice()[..n_owned].iter().sum::<f64>());
                 if rank == 0 {
-                    println!("time step: {ti}, time: {t:.6}, ||u|| = {norm:.6e}");
+                    println!("time step: {ti}, time: {t:.6}, ||u|| = {norm:.6e}, sum = {sum:.6e}");
                 }
             }
         }
 
         if rank == 0 {
             *result_slot.lock().unwrap() = Some((ti, t));
+        }
+        // Dump solution values at final step for comparison
+        if done && rank == 0 {
+            eprintln!("[pex41] FINAL sol (first 10 owned dofs):");
+            for i in 0..10.min(n_owned) {
+                eprintln!("  u[{i}] = {:.10e}", u_par.as_slice()[i]);
+            }
         }
     });
 

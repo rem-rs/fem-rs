@@ -572,5 +572,12 @@ fn main() {
             // significant digits).
             println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
         }
+        // Dump first 10 dofs at final step for cross-checking
+        if done {
+            eprintln!("[ex41] FINAL sol (first 10 dofs):");
+            for i in 0..10.min(n_dofs) {
+                eprintln!("  u[{i}] = {:.10e}", u_vec[i]);
+            }
+        }
     }
 }
