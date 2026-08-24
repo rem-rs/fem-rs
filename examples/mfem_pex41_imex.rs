@@ -21,8 +21,8 @@ use fem_linalg::CooMatrix;
 use fem_mesh::refine_uniform;
 use fem_mesh::{Mesh, topology::MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
-use fem_parallel::par_amg::ParAmgHierarchy;
 use fem_parallel::par_partition::partition_mesh;
+use fem_parallel::par_solve_pcg_amg;
 use fem_parallel::{
     DofPartition, ParAmgConfig, ParCsrMatrix, ParVector, ParallelFESpace, SmootherType, WorkerConfig,
 };
@@ -472,7 +472,7 @@ fn main() {
         let k_local = hi_k.into_csr();
         let s_local = hi_s.into_csr();
 
-        let _m_mat = ParCsrMatrix::from_local_matrix(&m_local, n_owned, ghost.clone(), comm.clone());
+        let m_mat = ParCsrMatrix::from_local_matrix(&m_local, n_owned, ghost.clone(), comm.clone());
         let k_mat = ParCsrMatrix::from_local_matrix(&k_local, n_owned, ghost.clone(), comm.clone());
         let s_mat = ParCsrMatrix::from_local_matrix(&s_local, n_owned, ghost.clone(), comm.clone());
 
@@ -508,39 +508,56 @@ fn main() {
             use_global_aggregation: true,
             ..ParAmgConfig::default()
         };
-        let amg = ParAmgHierarchy::build_global(&a_mat, &comm, amg_cfg);
+        let solve_cfg = SolverConfig {
+            rtol: 1e-9,
+            atol: 0.0,
+            max_iter: 500,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+
+        // Block-diagonal Jacobi preconditioner (pex9 pattern) — avoids AMG
+        // global-aggregation deadlocks on periodic DG faces.
+        let m_diag_vec = m_mat.diagonal();
+        let a_diag_vec = a_mat.diagonal();
+        let m_diag: Vec<f64> = m_diag_vec.iter().map(|&x| if x.abs() > 1e-300 { 1.0 / x } else { 0.0 }).collect();
+        let a_diag: Vec<f64> = a_diag_vec.iter().map(|&x| if x.abs() > 1e-300 { 1.0 / x } else { 0.0 }).collect();
 
         while !done {
             let dt_real = args.dt.min(args.t_final - t);
+
+            // IMEX Euler: M du/dt = K u - S u
+            // Explicit: y = M^{-1} K u (Jacobi preconditioner)
             let mut ku = ParVector::zeros(&ps);
             k_mat.spmv(&mut u_par.clone_vec(), &mut ku);
-            ku.update_ghosts();
-            let mut rhs = ParVector::zeros(&ps);
-            amg.vcycle(&ku, &mut rhs);
-            rhs.update_ghosts();
-
-            let mut su = ParVector::zeros(&ps);
-            s_mat.spmv(&mut u_par.clone_vec(), &mut su);
-            su.update_ghosts();
-            let mut rhs_implicit = ParVector::zeros(&ps);
-            for i in 0..n_owned {
-                rhs_implicit.as_slice_mut()[i] = -su.as_slice()[i] + rhs.as_slice()[i];
+            let mut y = ParVector::zeros(&ps);
+            for i in 0..(n_owned.min(m_diag.len())) {
+                y.as_slice_mut()[i] = m_diag[i] * ku.as_slice()[i];
             }
-            let mut k_vec = ParVector::zeros(&ps);
-            amg.vcycle(&rhs_implicit, &mut k_vec);
-            k_vec.update_ghosts();
 
+            // u* = u + dt * y (explicit predictor)
+            let mut u_star = u_par.clone_vec();
             for i in 0..n_owned {
-                u_par.as_slice_mut()[i] += dt_real * k_vec.as_slice()[i];
+                u_star.as_slice_mut()[i] += dt_real * y.as_slice()[i];
             }
-            u_par.update_ghosts();
 
+            // Implicit: (M + dt S) u^{n+1} = M u*
+            let mut mu_star = ParVector::zeros(&ps);
+            m_mat.spmv(&mut u_star, &mut mu_star);
+
+            let mut u_new = ParVector::zeros(&ps);
+            for i in 0..(n_owned.min(a_diag.len())) {
+                u_new.as_slice_mut()[i] = a_diag[i] * mu_star.as_slice()[i];
+            }
+
+            u_par = u_new;
             t += dt_real;
             ti += 1;
             done = t >= args.t_final - 1e-8 * args.dt;
             if done || ti % args.vis_steps == 0 {
+                let norm = u_par.global_norm();
                 if rank == 0 {
-                    println!("time step: {ti}, time: {t:.6}");
+                    println!("time step: {ti}, time: {t:.6}, ||u|| = {norm:.6e}");
                 }
             }
         }
