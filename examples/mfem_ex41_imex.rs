@@ -570,7 +570,9 @@ fn main() {
         if done || ti % args.vis_steps == 0 {
             // MFEM prints `time: t` with the default ostream precision (6
             // significant digits).
-            println!("time step: {ti}, time: {}", fem_solver::fmt_g(t));
+            let norm = u_vec.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            let sum: f64 = u_vec.iter().sum();
+            println!("time step: {ti}, time: {}, ||u|| = {norm:.6e}, sum = {sum:.6e}", fem_solver::fmt_g(t));
         }
         // Dump first 10 dofs at final step for cross-checking
         if done {

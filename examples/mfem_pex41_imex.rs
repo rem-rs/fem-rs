@@ -17,9 +17,9 @@ use fem_assembly::postproc::coefficient::FnVectorCoeff;
 use fem_assembly::standard::{ConvectionIntegrator, DiffusionIntegrator, MassIntegrator};
 use fem_assembly::Assembler;
 use fem_io::mfem::read_mfem_file;
-use fem_linalg::CooMatrix;
 use fem_mesh::refine_uniform;
-use fem_mesh::{Mesh, topology::MeshTopology};
+use fem_mesh::Mesh;
+use fem_mesh::topology::MeshTopology;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::par_solve_pcg_amg;
@@ -27,7 +27,7 @@ use fem_parallel::{
     DofPartition, ParAmgConfig, ParCsrMatrix, ParVector, ParallelFESpace, SmootherType, WorkerConfig,
 };
 use fem_solver::{
-    ImexDirkRk3, ImexOperator, SolverConfig, solve_pcg_blockilu, solve_pcg_dsmoother,
+    SolverConfig,
 };
 use fem_space::fe_space::FESpace;
 use fem_space::{L2Basis, L2Space};
@@ -260,74 +260,6 @@ fn merge_csr_mfem_plus_eq(
     }
 }
 
-#[allow(dead_code)]
-struct ImexEvolution {
-    m: fem_linalg::CsrMatrix<f64>,
-    k: fem_linalg::CsrMatrix<f64>,
-    s: fem_linalg::CsrMatrix<f64>,
-}
-
-impl ImexOperator for ImexEvolution {
-    fn explicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
-        let n = u.len();
-        let mut kx = vec![0.0f64; n];
-        self.k.spmv(u, &mut kx);
-        let cfg = SolverConfig {
-            rtol: 1e-9,
-            atol: 0.0,
-            max_iter: 100,
-            verbose: false,
-            ..SolverConfig::default()
-        };
-        solve_pcg_dsmoother(&self.m, &kx, out, &cfg).expect("Mult1 CG failed");
-    }
-
-    fn implicit(&self, _t: f64, u: &[f64], out: &mut [f64]) {
-        let n = u.len();
-        let mut sx = vec![0.0f64; n];
-        self.s.spmv(u, &mut sx);
-        let cfg = SolverConfig {
-            rtol: 1e-9,
-            atol: 0.0,
-            max_iter: 100,
-            verbose: false,
-            ..SolverConfig::default()
-        };
-        for i in 0..n {
-            sx[i] = -sx[i];
-        }
-        solve_pcg_dsmoother(&self.m, &sx, out, &cfg).expect("implicit CG failed");
-    }
-
-    fn jac_implicit(&self, _t: f64, _u: &[f64]) -> fem_linalg::CsrMatrix<f64> {
-        let n = self.m.nrows;
-        let mut coo = CooMatrix::new(n, n);
-        for i in 0..n {
-            coo.add(i, i, 0.0);
-        }
-        coo.into_csr()
-    }
-
-    fn implicit_solve(&self, dt: f64, x: &[f64], k: &mut [f64]) {
-        let n = x.len();
-        let mut sx = vec![0.0f64; n];
-        self.s.spmv(x, &mut sx);
-        for i in 0..n {
-            sx[i] = -sx[i];
-        }
-        let scaled_s = scale_csr(&self.s, dt);
-        let a = merge_csr_mfem_plus_eq(&scaled_s, &self.m, 1.0);
-        let cfg = SolverConfig {
-            rtol: 1e-9,
-            atol: 0.0,
-            max_iter: 100,
-            verbose: false,
-            ..SolverConfig::default()
-        };
-        solve_pcg_blockilu(&a, &sx, k, &cfg, 16).expect("ImplicitSolve CG failed");
-    }
-}
-
 fn main() {
     let args = parse_args();
 
@@ -495,100 +427,134 @@ fn main() {
         let mut done = false;
         let mut u_par = ParVector::from_local_raw(u_local, n_owned, ghost.clone(), comm.clone());
 
-        let dt_repr = args.dt;
-        let scaled_s = scale_csr(&s_local, dt_repr);
-        let a_local = merge_csr_mfem_plus_eq(&scaled_s, &m_local, 1.0);
-        let a_mat = ParCsrMatrix::from_local_matrix(&a_local, n_owned, ghost.clone(), comm.clone());
+        // IMEX RK3 constants (ImexDirkRk3, bit-for-bit MFEM IMEX_DIRK_RK3).
+        let gamma = 0.4358665215_f64;
+        let b1 = 1.208496649_f64;
+        let b2 = -0.644363171_f64;
+        let a31 = 0.3212788860_f64;
+        let a32 = 0.3966543747_f64;
+        let a41 = -0.105858296_f64;
+        let a42 = 0.5529291479_f64;
+        let a43 = 0.5529291479_f64;
 
+        // Explicit M⁻¹ via block-diagonal Jacobi (exact for block-diag M).
+        let m_diag_inv: Vec<f64> = m_mat
+            .diagonal()
+            .iter()
+            .map(|&x| if x.abs() > 1e-300 { 1.0 / x } else { 0.0 })
+            .collect();
+
+        // Implicit (M + γ·dt·S) solver: AMG with local aggregation + PCG.
         let amg_cfg = ParAmgConfig {
             smoother: SmootherType::SymmetricGaussSeidel,
             n_pre_smooth: 2,
             n_post_smooth: 2,
             smoothed_prolongation: true,
             block_size: 1,
-            use_global_aggregation: true,
+            use_global_aggregation: false,
             ..ParAmgConfig::default()
         };
         let solve_cfg = SolverConfig {
             rtol: 1e-9,
             atol: 0.0,
-            max_iter: 500,
+            max_iter: 200,
             verbose: false,
             ..SolverConfig::default()
         };
 
-        // IMEX RK3 step on ParVector: M du/dt = K u - S u
-        // Use block-diagonal Jacobi for M^{-1} (M is block-diagonal, Jacobi is exact)
-        let m_diag_vec = m_mat.diagonal();
-        let m_diag_inv: Vec<f64> = m_diag_vec.iter().map(|&x| if x.abs() > 1e-300 { 1.0 / x } else { 0.0 }).collect();
-
-        // For implicit (M + dt*S), use AMG with local aggregation
-        let amg_cfg = ParAmgConfig {
-            smoother: SmootherType::SymmetricGaussSeidel,
-            n_pre_smooth: 2, n_post_smooth: 2,
-            smoothed_prolongation: true, block_size: 1,
-            use_global_aggregation: false, ..ParAmgConfig::default()
-        };
-        let solve_cfg = SolverConfig { rtol: 1e-9, atol: 0.0, max_iter: 200, verbose: false, ..SolverConfig::default() };
-
-        let gamma = 0.4358665215;
-        let b1 = 1.208496649;
-        let b2 = -0.644363171;
+        // Reusable buffers.
+        let mut k1_exp = ParVector::zeros(&ps);
+        let mut k2_exp = ParVector::zeros(&ps);
+        let mut k3_exp = ParVector::zeros(&ps);
+        let mut k4_exp = ParVector::zeros(&ps);
+        let mut k2_imp = ParVector::zeros(&ps);
+        let mut k3_imp = ParVector::zeros(&ps);
+        let mut y = ParVector::zeros(&ps);
 
         while !done {
             let dt_real = args.dt.min(args.t_final - t);
 
-            // Stage 1: explicit y1 = M^{-1} K u (Jacobi: element-wise inverse)
-            let mut ku = ParVector::zeros(&ps);
-            k_mat.spmv(&mut u_par.clone_vec(), &mut ku);
-            let mut y1 = ParVector::zeros(&ps);
-            for i in 0..(n_owned.min(m_diag_inv.len())) {
-                y1.as_slice_mut()[i] = m_diag_inv[i] * ku.as_slice()[i];
-            }
-
-            // Stage 2: u2 = u + gamma*dt*y1; y2 = M^{-1} K u2
-            let mut u2 = u_par.clone_vec();
-            for i in 0..n_owned { u2.as_slice_mut()[i] += gamma * dt_real * y1.as_slice()[i]; }
-            let mut ku2 = ParVector::zeros(&ps);
-            k_mat.spmv(&mut u2, &mut ku2);
-            let mut y2 = ParVector::zeros(&ps);
-            for i in 0..(n_owned.min(m_diag_inv.len())) {
-                y2.as_slice_mut()[i] = m_diag_inv[i] * ku2.as_slice()[i];
-            }
-
-            // Stage 3: u3 = u + dt*(a31*y1 + a32*y2); solve (M+gamma*dt*S) k3 = -S u3
-            let a31 = 0.3212788860;
-            let a32 = 0.3966543747;
-            let mut u3 = u_par.clone_vec();
-            for i in 0..n_owned {
-                u3.as_slice_mut()[i] += dt_real * (a31 * y1.as_slice()[i] + a32 * y2.as_slice()[i]);
-            }
-            let mut su3 = ParVector::zeros(&ps);
-            s_mat.spmv(&mut u3, &mut su3);
-            for i in 0..n_owned { su3.as_slice_mut()[i] = -su3.as_slice()[i]; }
+            // Implicit system matrix: A = M + gamma*dt*S (same for all 3 implicit stages)
             let scaled_s = scale_csr(&s_local, gamma * dt_real);
             let a_local = merge_csr_mfem_plus_eq(&scaled_s, &m_local, 1.0);
             let a_mat = ParCsrMatrix::from_local_matrix(&a_local, n_owned, ghost.clone(), comm.clone());
-            let mut k3 = ParVector::zeros(&ps);
-            par_solve_pcg_amg(&a_mat, &su3, &mut k3, &amg_cfg, &solve_cfg).expect("stage3");
 
-            // Stage 4: u4 = u + dt*(a41*y1 + a42*y2 + a43*k3); solve (M+gamma*dt*S) k4 = -S u4
-            let a41 = -0.105858296;
-            let a42 = 0.5529291479;
-            let a43 = 0.5529291479;
-            let mut u4 = u_par.clone_vec();
-            for i in 0..n_owned {
-                u4.as_slice_mut()[i] += dt_real * (a41 * y1.as_slice()[i] + a42 * y2.as_slice()[i] + a43 * k3.as_slice()[i]);
+            // ===== Stage 1: K1_exp =====
+            // k1_exp = M^{-1} * K * u
+            let mut ku = ParVector::zeros(&ps);
+            k_mat.spmv(&mut u_par.clone_vec(), &mut ku);
+            for i in 0..(n_owned.min(m_diag_inv.len())) {
+                k1_exp.as_slice_mut()[i] = m_diag_inv[i] * ku.as_slice()[i];
             }
-            let mut su4 = ParVector::zeros(&ps);
-            s_mat.spmv(&mut u4, &mut su4);
-            for i in 0..n_owned { su4.as_slice_mut()[i] = -su4.as_slice()[i]; }
-            let mut k4 = ParVector::zeros(&ps);
-            par_solve_pcg_amg(&a_mat, &su4, &mut k4, &amg_cfg, &solve_cfg).expect("stage4");
 
-            // Update: u += dt*(b1*y1 + b2*y2 + 0.5*k3 + 0.5*k4)
+            // ===== Stage 2: K2_exp + K2_imp =====
+            // y = u + gamma*dt*k1_exp
             for i in 0..n_owned {
-                u_par.as_slice_mut()[i] += dt_real * (b1 * y1.as_slice()[i] + b2 * y2.as_slice()[i] + 0.5 * k3.as_slice()[i] + 0.5 * k4.as_slice()[i]);
+                y.as_slice_mut()[i] = u_par.as_slice()[i] + gamma * dt_real * k1_exp.as_slice()[i];
+            }
+            // k2_exp = M^{-1} * K * y
+            let mut ky = ParVector::zeros(&ps);
+            k_mat.spmv(&mut y, &mut ky);
+            for i in 0..(n_owned.min(m_diag_inv.len())) {
+                k2_exp.as_slice_mut()[i] = m_diag_inv[i] * ky.as_slice()[i];
+            }
+            // k2_imp: (M + gamma*dt*S) k2_imp = -S*u  (implicit_solve uses original u)
+            let mut su = ParVector::zeros(&ps);
+            s_mat.spmv(&mut u_par.clone_vec(), &mut su);
+            for i in 0..n_owned { su.as_slice_mut()[i] = -su.as_slice()[i]; }
+            par_solve_pcg_amg(&a_mat, &su, &mut k2_imp, &amg_cfg, &solve_cfg).expect("stage2 implicit");
+
+            // ===== Stage 3: K3_exp + K3_imp =====
+            // y = u + dt*(a31*k1_exp + a32*k2_exp)   (explicit intermediate)
+            for i in 0..n_owned {
+                y.as_slice_mut()[i] = u_par.as_slice()[i]
+                    + dt_real * (a31 * k1_exp.as_slice()[i] + a32 * k2_exp.as_slice()[i]);
+            }
+            // k3_exp = M^{-1} * K * y
+            let mut ky3 = ParVector::zeros(&ps);
+            k_mat.spmv(&mut y, &mut ky3);
+            for i in 0..(n_owned.min(m_diag_inv.len())) {
+                k3_exp.as_slice_mut()[i] = m_diag_inv[i] * ky3.as_slice()[i];
+            }
+            // k3_imp: y_imp = u + dt*(1-gamma)/2*k2_imp; (M+gamma*dt*S) k3_imp = -S*y_imp
+            for i in 0..n_owned {
+                y.as_slice_mut()[i] = u_par.as_slice()[i]
+                    + dt_real * (1.0 - gamma) / 2.0 * k2_imp.as_slice()[i];
+            }
+            let mut sy3 = ParVector::zeros(&ps);
+            s_mat.spmv(&mut y, &mut sy3);
+            for i in 0..n_owned { sy3.as_slice_mut()[i] = -sy3.as_slice()[i]; }
+            par_solve_pcg_amg(&a_mat, &sy3, &mut k3_imp, &amg_cfg, &solve_cfg).expect("stage3 implicit");
+
+            // ===== Stage 4: K4_exp + K4_imp =====
+            // y = u + dt*(a41*k1_exp + a42*k2_exp + a43*k3_exp)  (explicit intermediate)
+            for i in 0..n_owned {
+                y.as_slice_mut()[i] = u_par.as_slice()[i]
+                    + dt_real * (a41 * k1_exp.as_slice()[i] + a42 * k2_exp.as_slice()[i] + a43 * k3_exp.as_slice()[i]);
+            }
+            // k4_exp = M^{-1} * K * y
+            let mut ky4 = ParVector::zeros(&ps);
+            k_mat.spmv(&mut y, &mut ky4);
+            for i in 0..(n_owned.min(m_diag_inv.len())) {
+                k4_exp.as_slice_mut()[i] = m_diag_inv[i] * ky4.as_slice()[i];
+            }
+            // k4_imp (reuses k3_imp buffer):
+            //   u += dt*b1*k2_imp; u += dt*b2*k3_imp  (MFEM: two separate in-place updates)
+            //   then solve (M + gamma*dt*S) k3_imp = -S*u  (reuses k3_imp as k4_imp)
+            for i in 0..n_owned { u_par.as_slice_mut()[i] += dt_real * b1 * k2_imp.as_slice()[i]; }
+            for i in 0..n_owned { u_par.as_slice_mut()[i] += dt_real * b2 * k3_imp.as_slice()[i]; }
+            let mut su4 = ParVector::zeros(&ps);
+            s_mat.spmv(&mut u_par.clone_vec(), &mut su4);
+            for i in 0..n_owned { su4.as_slice_mut()[i] = -su4.as_slice()[i]; }
+            par_solve_pcg_amg(&a_mat, &su4, &mut k3_imp, &amg_cfg, &solve_cfg).expect("stage4 implicit");
+
+            // ===== Final update =====
+            // u += dt*b1*k2_exp; u += dt*b2*k3_exp; u += dt*gamma*k4_exp; u += dt*gamma*k3_imp
+            for i in 0..n_owned {
+                u_par.as_slice_mut()[i] += dt_real * b1 * k2_exp.as_slice()[i];
+                u_par.as_slice_mut()[i] += dt_real * b2 * k3_exp.as_slice()[i];
+                u_par.as_slice_mut()[i] += dt_real * gamma * k4_exp.as_slice()[i];
+                u_par.as_slice_mut()[i] += dt_real * gamma * k3_imp.as_slice()[i];
             }
 
             t += dt_real;
