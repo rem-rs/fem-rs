@@ -400,7 +400,7 @@ fn solve_control_mass(
     let dim = 2usize;
     let n = control_space.n_dofs();
     let mut g = vec![0.0_f64; n];
-    let control_ref = quad_ref(1);
+    let control_ref = quad_ref(1); // L2(1) GLL basis
     let n_c = control_ref.n_dofs();
     let quad = control_ref.quadrature(2);
     let mut cphi = vec![0.0_f64; n_c];
@@ -589,7 +589,7 @@ fn main() {
     let order = args.order as u8;
     let state_space = VectorH1Space::new(mesh.clone(), order, 2);
     let filter_space = H1Space::new(mesh.clone(), order);
-    let control_space = L2Space::new_with_basis(mesh.clone(), (order - 1).max(0), L2Basis::GaussLobatto);
+    let control_space = L2Space::new_with_basis(mesh.clone(), (order - 1).max(1), L2Basis::GaussLobatto);
 
     let n_state = state_space.n_dofs();
     let n_filter = filter_space.n_dofs();
