@@ -505,18 +505,18 @@ impl H1TriPk {
         }
         debug_assert_eq!(lex.len(), nodes.len());
 
-        // Vandermonde T[o][k] = s_o(node_k); ti = T⁻¹ row-major [k][o].
+        // Vandermonde on the *monomial* basis m_o = x^i·y^j (i+j <= p, lex
+        // order).  Using the 1-D GLL tensor product lx·ly·ll here produced
+        // basis functions of degree 3p (not p): interpolation at the nodes
+        // held, but the partition of unity failed away from the nodes
+        // (Σφ ≈ 0.78 at [0.2,0.3] for p=3), corrupting every H1 assembly
+        // of order >= 3 (P3 Poisson L2 error ~0.5).
         let n = nodes.len();
         let mut t = DMatrix::<f64>::zeros(n, n);
-        let mut lx = vec![0.0; p + 1];
-        let mut ly = vec![0.0; p + 1];
-        let mut ll = vec![0.0; p + 1];
         for (k, node) in nodes.iter().enumerate() {
-            lag1d_on(&gll, node[0], &mut lx);
-            lag1d_on(&gll, node[1], &mut ly);
-            lag1d_on(&gll, 1.0 - node[0] - node[1], &mut ll);
             for (o, &(i, j)) in lex.iter().enumerate() {
-                t[(o, k)] = lx[i] * ly[j] * ll[p - i - j];
+                // monomial x^i y^j evaluated at node k
+                t[(o, k)] = node[0].powi(i as i32) * node[1].powi(j as i32);
             }
         }
         let ti_m = t
@@ -546,15 +546,19 @@ impl ReferenceElement for H1TriPk {
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
         let n = self.nodes.len();
-        let mut lx = vec![0.0; p + 1];
-        let mut ly = vec![0.0; p + 1];
-        let mut ll = vec![0.0; p + 1];
-        lag1d_on(&self.gll, xi[0], &mut lx);
-        lag1d_on(&self.gll, xi[1], &mut ly);
-        lag1d_on(&self.gll, 1.0 - xi[0] - xi[1], &mut ll);
+        let (x, y) = (xi[0], xi[1]);
+        // Monomial basis m_o = x^i·y^j (i+j <= p), matching the Vandermonde
+        // used in `new`.  (The old 1-D GLL tensor product produced degree-3p
+        // functions that failed the partition of unity.)
         let mut s = vec![0.0; n];
+        let mut xp = vec![1.0; p + 1];
+        let mut yp = vec![1.0; p + 1];
+        for i in 1..=p {
+            xp[i] = xp[i - 1] * x;
+            yp[i] = yp[i - 1] * y;
+        }
         for (o, &(i, j)) in self.lex.iter().enumerate() {
-            s[o] = lx[i] * ly[j] * ll[p - i - j];
+            s[o] = xp[i] * yp[j];
         }
         for k in 0..n {
             let mut acc = 0.0;
@@ -569,26 +573,20 @@ impl ReferenceElement for H1TriPk {
         let p = self.order;
         let n = self.nodes.len();
         let (x, y) = (xi[0], xi[1]);
-        let sl = 1.0 - x - y;
-        let mut lx = vec![0.0; p + 1];
-        let mut ly = vec![0.0; p + 1];
-        let mut ll = vec![0.0; p + 1];
-        let mut dx = vec![0.0; p + 1];
-        let mut dy = vec![0.0; p + 1];
-        let mut dl = vec![0.0; p + 1];
-        lag1d_on(&self.gll, x, &mut lx);
-        lag1d_on(&self.gll, y, &mut ly);
-        lag1d_on(&self.gll, sl, &mut ll);
-        dlag1d_on(&self.gll, x, &mut dx);
-        dlag1d_on(&self.gll, y, &mut dy);
-        dlag1d_on(&self.gll, sl, &mut dl);
+        // Derivatives of the monomial basis: ∂m/∂x = i·x^{i-1}·y^j,
+        // ∂m/∂y = j·x^i·y^{j-1}.
+        let mut xp = vec![1.0; p + 1];
+        let mut yp = vec![1.0; p + 1];
+        for i in 1..=p {
+            xp[i] = xp[i - 1] * x;
+            yp[i] = yp[i - 1] * y;
+        }
         let mut ds = vec![0.0; n * 2];
         for (o, &(i, j)) in self.lex.iter().enumerate() {
-            let k = p - i - j;
-            // ∂s/∂ξ0 = dx_i·ly_j·ll_k − lx_i·ly_j·dl_k   (∂sl/∂ξ0 = −1)
-            // ∂s/∂ξ1 = lx_i·dy_j·ll_k − lx_i·ly_j·dl_k   (∂sl/∂ξ1 = −1)
-            ds[o * 2] = dx[i] * ly[j] * ll[k] - lx[i] * ly[j] * dl[k];
-            ds[o * 2 + 1] = lx[i] * dy[j] * ll[k] - lx[i] * ly[j] * dl[k];
+            let dx = if i > 0 { (i as f64) * xp[i - 1] * yp[j] } else { 0.0 };
+            let dy = if j > 0 { (j as f64) * xp[i] * yp[j - 1] } else { 0.0 };
+            ds[o * 2] = dx;
+            ds[o * 2 + 1] = dy;
         }
         for k in 0..n {
             let mut gx = 0.0;

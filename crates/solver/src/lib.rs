@@ -1130,7 +1130,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-8,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 300,
                 verbose: false,
@@ -1181,7 +1181,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-8,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 300,
                 verbose: false,
@@ -1232,7 +1232,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-10,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 400,
                 verbose: false,
@@ -1290,7 +1290,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-8,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 200,
                 verbose: false,
@@ -1344,7 +1344,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-8,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 400,
                 verbose: false,
@@ -1394,7 +1394,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-8,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 400,
                 verbose: false,
@@ -1444,7 +1444,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-10,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 500,
                 verbose: false,
@@ -1503,7 +1503,7 @@ mod ams_ads_tests {
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
-                rtol: 1e-6,
+                rtol: 1e-14,
                 atol: 0.0,
                 max_iter: 500,
                 verbose: false,

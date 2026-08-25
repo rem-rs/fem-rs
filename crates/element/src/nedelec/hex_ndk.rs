@@ -644,20 +644,23 @@ impl VectorReferenceElement for HexNDk {
         let nd = self.nodes();
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);
-        // x-edges (4 edges × p): along x at (y0,z0)
-        for &(y0, z0) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        // Edge DOFs in MFEM CUBE edge order e0..e11 (matching `eval_basis_vec`
+        // and `HCurlSpace::HEX_EDGES`): e0,e2,e4,e6 are x-edges, e1,e3,e5,e7
+        // are y-edges, e8..e11 are z-edges.  Each edge carries p modes.
+        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
+        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
+        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
+        for ei in 0..4 {
+            let (y0, z0) = x_edges[ei];
             for j in 0..p {
                 c.push(vec![nd[j], y0, z0]);
             }
-        }
-        // y-edges (4 edges × p): along y at (x0,z0)
-        for &(x0, z0) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let (x0, z0) = y_edges[ei];
             for j in 0..p {
                 c.push(vec![x0, nd[j], z0]);
             }
         }
-        // z-edges (4 edges × p): along z at (x0,y0)
-        for &(x0, y0) in &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        for &(x0, y0) in &z_edges {
             for j in 0..p {
                 c.push(vec![x0, y0, nd[j]]);
             }
@@ -771,17 +774,19 @@ mod tests {
     fn edge_interp() {
         let e = HexNDk::new(2);
         let coords = e.dof_coords();
+        let p = e.order as usize;
         let n = 54;
         let mut v = vec![0.0; n * 3];
         for (i, cd) in coords.iter().enumerate() {
-            if i >= 24 {
+            if i >= 12 * p {
                 break;
-            } // edge DOFs only (12k = 24 for k=2)
+            } // edge DOFs only (12 edges × p)
             e.eval_basis_vec(&[cd[0], cd[1], cd[2]], &mut v);
-            let comp = if i < 8 {
-                0
-            } else if i < 16 {
-                1
+            // MFEM edge order: e0,e2,e4,e6 are x-edges (comp 0),
+            // e1,e3,e5,e7 are y-edges (comp 1), e8..e11 are z-edges (comp 2).
+            let edge = i / p;
+            let comp = if edge < 8 {
+                if edge % 2 == 0 { 0 } else { 1 }
             } else {
                 2
             };

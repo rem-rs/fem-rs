@@ -25,7 +25,7 @@
 //! assert_eq!(parts.len(), mesh.n_elems());
 //! ```
 
-use std::collections::{HashMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
@@ -97,7 +97,7 @@ pub fn build_dual_graph<const D: usize>(mesh: &Mesh<D>) -> (Vec<i32>, Vec<i32>) 
     let n_elems = mesh.n_elems();
     let dim = D;
 
-    let mut face_map: HashMap<Vec<NodeId>, Vec<ElemId>> = HashMap::new();
+    let mut face_map: BTreeMap<Vec<NodeId>, Vec<ElemId>> = BTreeMap::new();
     for e in 0..n_elems as ElemId {
         let nodes = mesh.elem_nodes(e);
         for lf in local_faces(nodes, dim) {

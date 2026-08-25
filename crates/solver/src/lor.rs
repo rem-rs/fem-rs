@@ -606,7 +606,7 @@ mod tests {
         let b = vec![1.0_f64; n];
         let mut x = vec![0.0_f64; n];
         let cfg = SolverConfig {
-            rtol: 1e-8,
+            rtol: 1e-14,
             max_iter: 50,
             ..Default::default()
         };

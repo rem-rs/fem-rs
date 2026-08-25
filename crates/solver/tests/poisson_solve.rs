@@ -165,7 +165,7 @@ fn poisson_nc_amr_convergence() {
         if level < 5 {
             let eta = zz_estimator(&mesh, &u);
             let marked = dorfler_mark(&eta, 0.5);
-            let (new_mesh, new_c, _) = nc_state.refine(&mesh, &marked);
+            let (new_mesh, new_c, _) = nc_state.refine(&mesh, &marked, 0);
             mesh = new_mesh;
             hanging_constraints = new_c;
         }

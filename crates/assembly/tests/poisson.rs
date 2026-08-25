@@ -20,7 +20,7 @@ use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2, TriP3}};
+use fem_element::{ReferenceElement, lagrange::{TriP1, TriP2}};
 use fem_mesh::{topology::MeshTopology, Mesh};
 use fem_space::{
     H1Space,
@@ -126,7 +126,10 @@ fn solve_poisson<M: MeshTopology + Clone>(
     let ref_elem: Box<dyn ReferenceElement> = match order {
         1 => Box::new(TriP1),
         2 => Box::new(TriP2),
-        3 => Box::new(TriP3),
+        // H1 spaces use Gauss-Lobatto nodes for order >= 3 (see
+        // `ref_elem_vol_h1`); the fixed-order TriP3 is equispaced and would
+        // mis-evaluate the discrete solution (P3 L2 error ~0.5).
+        3 => Box::new(fem_element::lagrange::H1TriPk::new(3)),
         _ => panic!("unsupported order"),
     };
     l2_error(&uh, &space, ref_elem.as_ref())

@@ -90,7 +90,7 @@ fn lobpcg_eigenvectors_are_orthonormal() {
 
 #[test]
 fn lobpcg_rayleigh_quotient_matches_eigenvalue() {
-    // For each eigenpair (λ�? v�?, verify (vᵢᵀ A v�? / (vᵢᵀ v�? �?λ�?
+        // For each eigenpair (lambda_i, v_i), verify (v_i^T A v_i) / (v_i^T v_i) ~= lambda_i
     let n = 20;
     let a = laplacian_1d(n);
     let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
@@ -129,9 +129,9 @@ fn lobpcg_generalized_known_spectrum() {
     let cfg = LobpcgConfig { max_iter: 300, tol: 1e-10, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, Some(&b), 3, &cfg).unwrap();
 
-    assert!((res.eigenvalues[0] - 1.0).abs() < 1e-8, "λ₀={:.6e} �?1", res.eigenvalues[0]);
-    assert!((res.eigenvalues[1] - 2.0).abs() < 1e-8, "λ�?{:.6e} �?2", res.eigenvalues[1]);
-    assert!((res.eigenvalues[2] - 3.0).abs() < 1e-8, "λ�?{:.6e} �?3", res.eigenvalues[2]);
+    assert!((res.eigenvalues[0] - 1.0).abs() < 1e-8, "lambda0={:.6e} ~= 1", res.eigenvalues[0]);
+    assert!((res.eigenvalues[1] - 2.0).abs() < 1e-8, "lambda1={:.6e} ~= 2", res.eigenvalues[1]);
+    assert!((res.eigenvalues[2] - 3.0).abs() < 1e-8, "lambda2={:.6e} ~= 3", res.eigenvalues[2]);
 }
 
 // ─── Krylov-Schur ───────────────────────────────────────────────────────
@@ -169,13 +169,13 @@ fn lobpcg_scales_to_100x100() {
 
 #[test]
 fn lobpcg_eigenpair_residual_small() {
-    // For each eigenpair, verify ‖A v - λ v�?/ ‖A�?is small.
+    // For each eigenpair, verify ||A v - lambda v|| / ||A|| is small.
     let n = 30;
     let a = laplacian_1d(n);
     let cfg = LobpcgConfig { max_iter: 500, tol: 1e-8, verbose: false, nullspace_skip: 0.0 };
     let res = lobpcg(&a, None, 3, &cfg).unwrap();
 
-    // Estimate ‖A�?as the largest eigenvalue (Gershgorin bound: 4 for 1D Laplacian)
+    // Estimate ||A|| as the largest eigenvalue (Gershgorin bound: 4 for 1D Laplacian)
     let a_norm = 4.0;
 
     for i in 0..3 {
@@ -186,11 +186,11 @@ fn lobpcg_eigenpair_residual_small() {
             if r > 0   { av[r] -= v_vec[r - 1]; }
             if r < n-1 { av[r] -= v_vec[r + 1]; }
         }
-        // residual = ‖Av - λv‖₂ / ‖A�?
+        // residual = ||Av - lambda v||_2 / ||A||
         let res_norm: f64 = av.iter().zip(v_vec.iter())
             .map(|(a, b)| (a - res.eigenvalues[i] * b).powi(2)).sum::<f64>().sqrt();
         let residual = res_norm / a_norm;
         assert!(residual < 1e-6,
-            "residual for λ[{i}]={:.6e}: ‖Av-λv�?‖A�?{residual:.2e}", res.eigenvalues[i]);
+            "residual for lambda[{i}]={:.6e}: ||Av-lambda v||/||A||={residual:.2e}", res.eigenvalues[i]);
     }
 }

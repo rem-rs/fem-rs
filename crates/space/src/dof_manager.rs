@@ -532,7 +532,8 @@ impl DofManager {
         //   0,1,2   → vertex DOFs (same as node IDs)
         //   3,4     → edge(n0→n1): DOFs at 1/3 (near n0) and 2/3 (near n1)
         //   5,6     → edge(n1→n2): DOFs at 1/3 (near n1) and 2/3 (near n2)
-        //   7,8     → edge(n0→n2): DOFs at 1/3 (near n0) and 2/3 (near n2)
+        //   7,8     → edge(n2→n0): DOFs at 1/3 (near n2) and 2/3 (near n0)
+        //   (counter-clockwise ring, matching MFEM/H1TriPk)
         //   9       → bubble DOF (centroid)
         //
         // DOF numbering: vertex 0..n_nodes, then edge 2-DOFs, then bubble DOFs.
@@ -585,7 +586,7 @@ impl DofManager {
             dofs_flat[base + 5] = d5;
             dofs_flat[base + 6] = d6;
 
-            let [d7, d8] = get_edge_dofs(n0, n2, &mut next_edge_dof, &mut edge2_map);
+            let [d7, d8] = get_edge_dofs(n2, n0, &mut next_edge_dof, &mut edge2_map);
             dofs_flat[base + 7] = d7;
             dofs_flat[base + 8] = d8;
             // Bubble DOF assigned in pass 2.
@@ -1948,8 +1949,12 @@ impl DofManager {
                 dofs_flat[base + 2] = n2;
 
                 if p >= 2 {
-                    // 3 edges, each with (p-1) DOFs, ordered near-first-vertex to near-second
-                    let edges = [(n0, n1), (n1, n2), (n0, n2)];
+                    // 3 edges, each with (p-1) DOFs, ordered near-first-vertex to
+                    // near-second.  Edge 2 follows the MFEM/`H1TriPk` counter-
+                    // clockwise ring (v2→v0), NOT (v0→v2): with (n0,n2) the
+                    // shared edge DOFs came out in opposite order on neighbouring
+                    // elements, corrupting every P3 (and higher) assembly.
+                    let edges = [(n0, n1), (n1, n2), (n2, n0)];
                     let mut off = 3;
                     for &(a, b) in &edges {
                         let edge_dofs = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);

@@ -878,9 +878,8 @@ pub use super::dg_base::ref_elem_vol_dynamic as ref_elem_vol;
 pub use super::dg_base::ref_elem_face;
 pub use super::dg_base::simplex_jac;
 pub use super::dg_base::find_face_elem;
+pub use super::dg_base::{phys_to_ref, xform_grads};
 pub(crate) use super::dg_base::orient_normal_outward;
-use super::dg_base::phys_to_ref;
-use super::dg_base::xform_grads;
 
 /// (Unique to this module) Return a Crouzeix-Raviart reference element.
 pub fn ref_elem_cr(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {

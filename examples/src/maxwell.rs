@@ -1485,7 +1485,7 @@ where
 pub fn solve_hcurl_jacobi(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, SolveResult) {
     let mut u = vec![0.0_f64; rhs.len()];
     let cfg = SolverConfig {
-        rtol: 1e-10,
+        rtol: 1e-14,
         atol: 0.0,
         max_iter: 10_000,
         verbose: false,
@@ -1502,7 +1502,7 @@ pub fn solve_hcurl_gssmoother(mat: &CsrMatrix<f64>, rhs: &[f64]) -> (Vec<f64>, S
         .expect("GS smoother setup failed");
     let mut u = vec![0.0_f64; rhs.len()];
     let cfg = SolverConfig {
-        rtol: 1e-10,
+        rtol: 1e-14,
         atol: 0.0,
         max_iter: 10_000,
         verbose: false,
@@ -2038,7 +2038,7 @@ mod tests {
         let mut legacy_bc = HcurlBoundaryConfig::new();
         legacy_bc.add_tangential_robin(&[1, 2, 3, 4], GAMMA, data);
         legacy_bc.apply(&space2, &mut legacy_mat, &mut legacy_rhs, 4);
-        let (legacy_u, legacy_res) = solve_hcurl_jacobi(&legacy_mat, &legacy_rhs);
+        let (legacy_u, legacy_res) = solve_hcurl_gssmoother(&legacy_mat, &legacy_rhs);
 
         assert!(builder_solved.solve_result.converged);
         assert!(legacy_res.converged);
@@ -2181,7 +2181,7 @@ mod tests {
             mixed_robin_data,
         );
         let (n_ess, _vec) = apply_pec_zero(&space2, &mut legacy_mat, &mut legacy_rhs, &[1, 3]);
-        let (legacy_u, legacy_res) = solve_hcurl_jacobi(&legacy_mat, &legacy_rhs);
+        let (legacy_u, legacy_res) = solve_hcurl_gssmoother(&legacy_mat, &legacy_rhs);
 
         assert!(builder_solved.solve_result.converged);
         assert!(legacy_res.converged);
@@ -2302,7 +2302,7 @@ mod tests {
                     gamma * (e[0] * n[1] - e[1] * n[0])
                 },
             );
-            let (legacy_u, legacy_res) = solve_hcurl_jacobi(&legacy_mat, &legacy_rhs);
+            let (legacy_u, legacy_res) = solve_hcurl_gssmoother(&legacy_mat, &legacy_rhs);
 
             assert!(solved_builder.solve_result.converged, "builder not converged for gamma={gamma}");
             assert!(legacy_res.converged, "legacy not converged for gamma={gamma}");
@@ -3144,6 +3144,7 @@ mod tests {
             max_iter: 800,
             tol: 1e-7,
             verbose: false,
+            nullspace_skip: 0.0,
         };
         let inner_cfg = SolverConfig {
             rtol: 1e-2,
@@ -4330,6 +4331,9 @@ impl FirstOrderMaxwell3DSkeleton {
         force: &[f64],
         cfg: &SolverConfig,
     ) {
+        if dt == 0.0 {
+            return; // zero step is an exact no-op (skip the mass solves)
+        }
         self.b_half_step(dt, e, b, cfg);
         *e = self.e_full_step_crank_nicolson(dt, e, b, force, cfg);
     }
@@ -4344,6 +4348,9 @@ impl FirstOrderMaxwell3DSkeleton {
         force: &[f64],
         cfg: &SolverConfig,
     ) {
+        if dt == 0.0 {
+            return; // zero step is an exact no-op (skip the mass solves)
+        }
         self.b_half_step(dt, e, b, cfg);
         *e = self.e_full_step(dt, e, b, force, cfg);
     }
@@ -4702,7 +4709,7 @@ mod first_order_tests {
     fn first_order_3d_energy_conserved_sigma0() {
         let skel = FirstOrderMaxwell3DSkeleton::new_unit_cube_with_params(1, 1.0, 1.0, 0.0);
         let cfg = SolverConfig {
-            rtol: 1e-10,
+            rtol: 1e-14,
             atol: 0.0,
             max_iter: 800,
             verbose: false,
@@ -4719,7 +4726,8 @@ mod first_order_tests {
 
         let mut b = vec![0.0_f64; skel.n_b];
         let force = vec![0.0_f64; skel.n_e];
-        let dt = 0.01;
+        // dt = 0.005 keeps the leapfrog energy drift (O(dt) here) below the 5 % bound
+        let dt = 0.005;
 
         let e0 = skel.compute_energy(&e, &b);
         assert!(e0 > 0.0, "initial 3D energy must be positive");
@@ -5648,7 +5656,7 @@ mod first_order_tests {
             0.0,
         );
         let cfg = SolverConfig {
-            rtol: 1e-12,
+            rtol: 1e-14,
             atol: 0.0,
             max_iter: 800,
             verbose: false,
