@@ -115,44 +115,7 @@ pub fn apply_hanging_constraints(
     *mat = coo.into_csr_sorted();
 }
 
-/// Reduce the constrained (full-N) system to the true-DOF system, mirroring
-/// MFEM `FiniteElementSpace::GetTrueDofs` + `BilinearForm::FormLinearSystem`
-/// (conforming prolongation) path.
-///
-/// `mat`/`rhs` must already be the constrained system (`apply_hanging_constraints`
-/// output): for each DOF pair the matrix holds the PᵀKP entry.  This extracts
-/// the sub-block on unconstrained ("true") DOFs — exactly the matrix MFEM's
-/// PCG/GSSmoother operates on — so the GS sweep order and PCG history match
-/// MFEM bit-for-bit.
-///
-/// Returns `(A_true, b_true, true_dofs)` where `true_dofs[d]` is the original
-/// DOF index of true-DOF `d`.
-pub fn reduce_hanging_system(
-    mat: &CsrMatrix<f64>,
-    rhs: &[f64],
-    constraints: &[HangingNodeConstraint],
-) -> (CsrMatrix<f64>, Vec<f64>, Vec<usize>) {
-    let n = mat.nrows;
-    let constrained: std::collections::HashSet<usize> =
-        constraints.iter().map(|c| c.constrained).collect();
-    let true_dofs: Vec<usize> = (0..n).filter(|d| !constrained.contains(d)).collect();
-    let true_idx: std::collections::HashMap<usize, usize> = true_dofs
-        .iter()
-        .enumerate()
-        .map(|(i, &d)| (d, i))
-        .collect();
-    let mut coo = CooMatrix::<f64>::new(true_dofs.len(), true_dofs.len());
-    for (ti, &i) in true_dofs.iter().enumerate() {
-        for k in mat.row_ptr[i]..mat.row_ptr[i + 1] {
-            let j = mat.col_idx[k] as usize;
-            if let Some(&tj) = true_idx.get(&j) {
-                coo.add(ti, tj, mat.values[k]);
-            }
-        }
-    }
-    let b_true: Vec<f64> = true_dofs.iter().map(|&d| rhs[d]).collect();
-    (coo.into_csr(), b_true, true_dofs)
-}
+
 
 /// Build the conforming prolongation matrix cP (ndofs × n_true), mirroring
 /// MFEM `FiniteElementSpace::GetConformingProlongation`: each true DOF row is
@@ -322,7 +285,6 @@ pub fn p2_hanging_constraints(
     use crate::dof_manager::EdgeKey;
     let mut out: Vec<HangingNodeConstraint> = Vec::new();
     let v2d = &dm.phys_to_vertex_dof;
-    let edge_key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
 
     for c in p1 {
         let (mid_p, a_p, b_p) = (c.constrained as u32, c.parent_a as u32, c.parent_b as u32);

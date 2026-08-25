@@ -1731,8 +1731,6 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
         let et = mesh.element_type_at(e);
         let ns = mesh.elem_nodes(e);
         let tag = mesh.elem_tags[e as usize];
-        let bc = body_cc.get(&e).copied();
-
         match et {
             ElementType::Tet4 => {
                 let m01=mid!(ns[0],ns[1]);let m02=mid!(ns[0],ns[2]);let m03=mid!(ns[0],ns[3]);
@@ -3002,7 +3000,7 @@ impl NCStateQuad {
             }
         }
         // 3) renumber surviving leaf children of pre-existing tree nodes.
-        for (ni, node) in self.refine_tree.iter_mut().enumerate().take(old_tree_len) {
+        for (_, node) in self.refine_tree.iter_mut().enumerate().take(old_tree_len) {
             if !node.alive { continue; }
             for k in 0..4 {
                 if node.child_leaf[k] {
@@ -3109,7 +3107,7 @@ impl NCStateQuad {
                 m
             };
             // get-or-create centre of element e
-            let mut centre = |e: ElemId,
+            let centre = |e: ElemId,
                               center_map: &mut HashMap<ElemId, NodeId>,
                               new_coords: &mut Vec<f64>,
                               next_node: &mut NodeId| -> NodeId {
@@ -3331,7 +3329,7 @@ impl NCStateQuad {
             if !dups.is_empty() {
                 let mut by_node: std::collections::BTreeMap<usize, Vec<ElemId>> = Default::default();
                 for &(ni, _, _) in &dups { by_node.entry(ni).or_default(); }
-                for &(ni, k, c) in &dups {
+                for &(ni, _, c) in &dups {
                     by_node.entry(ni).or_default().push(c);
                 }
                 for (ni, cs) in by_node {
@@ -3823,7 +3821,7 @@ impl NCStateQuad {
                 groups.len(), old_leaf_order.len(), self.leaf_order.len(), new_mesh.n_elems(),
                 parents.iter().map(|p| p.0).collect::<Vec<_>>()
             );
-            let mut missing: Vec<ElemId> = (0..new_mesh.n_elems() as ElemId)
+            let missing: Vec<ElemId> = (0..new_mesh.n_elems() as ElemId)
                 .filter(|e| !self.leaf_order.contains(e))
                 .collect();
             eprintln!("  missing-from-leaf_order: {missing:?}");

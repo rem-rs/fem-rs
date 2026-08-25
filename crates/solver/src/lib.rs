@@ -95,24 +95,16 @@ mod precond;
 pub use direct::*;
 pub use iterative::*;
 pub use blockilu::{solve_pcg_blockilu, BlockIlu};
-pub use newton::{
-    solve_newton, solve_newton_lu, NewtonRaphsonConfig, NewtonResult, NewtonStopReason,
-};
 pub use precond::*;
-
-pub use cached::{CachedPrecond, CachedSolver};
 
 // ─── Additional sub-modules ──────────────────────────────────────────────────
 
 pub mod adaptive;
-pub mod adjoint;
 pub mod bdf;
 pub mod block;
 pub mod block_gmres;
 pub mod block_operator;
 pub mod butcher;
-pub mod cached;
-pub mod chebyshev;
 pub mod complex_ams;
 pub mod constrained;
 pub mod constrained_operator;
@@ -121,19 +113,16 @@ pub mod div_free;
 pub mod eigen;
 pub mod events;
 pub mod geometric_mg;
-pub mod hypre;
 pub mod lor;
 pub mod multiphysics;
 pub mod multiphysics_sync;
 pub mod multiphysics_templates;
 pub mod multirate;
-pub mod newton;
 pub mod ode;
 pub mod blockilu;
 pub mod p_multigrid;
 /// Plugin API traits for pro-solver extensions.
 pub mod plugin;
-pub mod rom;
 pub mod sdc;
 
 pub use block::{
@@ -196,7 +185,6 @@ mod linlvo_integration_tests {
 pub use adaptive::{
     explicit_adaptive_step, integrate_adaptive, AdaptiveConfig, IntegratorStats, StepperState,
 };
-pub use adjoint::{adjoint_sensitivity, AdjointProblem};
 pub use bdf::{BdfConfig, BdfIntegrator, BdfStats, NewtonConfig, NordsieckState};
 pub use butcher::{
     ark3_tableau, ark5_tableau, backward_euler_tableau, bs32_tableau, ck54_tableau, dopri5_tableau,
@@ -213,9 +201,6 @@ pub use geometric_mg::{
     GeometricMgPrecond, MgCycleType, MgSmootherType, PADiffusionOp, StoredElementOperator,
     SumFactDiffusionOp,
 };
-pub use hypre::HypreBoomerAMG;
-#[allow(deprecated)]
-pub use hypre::{hypre_solve_gmres, hypre_solve_pcg, HypreParMatrix, HyprePrecond};
 pub use lor::{
     build_lor_operator, solve_gmres_lor, solve_gmres_lor_amg, solve_pcg_lor, solve_pcg_lor_amg,
     solve_vcycle_geom_mg, AmgConfig, GeomMGHierarchy, GeomMGPrecond, LorAmgPrecond, LorPrecond,
@@ -231,18 +216,7 @@ pub use ode::{
 pub use p_multigrid::{
     build_pmg_hierarchy_1d_laplacian, fmg_solve, solve_vcycle_pmg, PmgHierarchy, PmgPrecond,
 };
-pub mod active_set;
-pub mod mixed_precision;
-pub mod sli;
-pub mod stokes_precond;
-pub use mixed_precision::{
-    convert_csr_f32_to_f64, convert_csr_f64_to_f32, solve_cg_f32, solve_gmres_f32, solve_pcg_mixed,
-    MixedPrecisionPrecond,
-};
-pub use rom::{project_system, reconstruct, relative_error, PodBasis, Snapshots};
 pub use sdc::{SdcConfig, SdcIntegrator};
-pub use sli::{solve_gs_sli, solve_jacobi_sli};
-pub use stokes_precond::{build_bfbt_schur, build_pressure_mass, StokesPrecond};
 
 #[cfg(test)]
 mod tests {

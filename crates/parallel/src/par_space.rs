@@ -269,7 +269,6 @@ mod tests {
 
     #[test]
     fn par_vector_h1_elasticity_matrix_consistent_across_partitions() {
-        use fem_assembly::assembler::Assembler;
         use fem_assembly::postproc::coefficient::PWConstCoeff;
         use fem_assembly::standard::ElasticityIntegrator;
         use std::sync::{Arc, Mutex};

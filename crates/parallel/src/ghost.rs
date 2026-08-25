@@ -418,7 +418,7 @@ impl GhostExchange {
             .max()
             .copied()
             .unwrap_or(0);
-        let mut out: Vec<Vec<(u32, f64)>> = vec![Vec::new(); (max_recv as usize + 1)];
+        let mut out: Vec<Vec<(u32, f64)>> = vec![Vec::new(); max_recv as usize + 1];
 
         // Pack each channel's send rows and exchange via alltoallv (collective
         // rendezvous — the per-row payload can be large, so point-to-point

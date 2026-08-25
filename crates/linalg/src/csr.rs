@@ -697,7 +697,7 @@ pub fn spadd<T: Scalar>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
     // CooMatrix::into_csr now uses insertion-order CSR.  For spadd (sorted merge),
     // we convert back to COO and re-sort by (row, col) to guarantee sorted rows.
     let mut coo = crate::coo::CooMatrix::from_csr(a);
-    let mut coo_b = crate::coo::CooMatrix::from_csr(b);
+    let coo_b = crate::coo::CooMatrix::from_csr(b);
     coo.append(coo_b);
     coo.into_csr_sorted()
 }

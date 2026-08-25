@@ -1,5 +1,3 @@
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use fem_core::Scalar;
 use crate::csr::CsrMatrix;
 

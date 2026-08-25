@@ -10,7 +10,7 @@
 //! - [`scalar`]  — floating-point scalar abstraction (`f32` / `f64`)
 //! - [`types`]   — index type aliases (`NodeId`, `ElemId`, `DofId`, `FaceId`)
 //! - [`error`]   — `FemError` enum and `FemResult<T>` alias
-//! - [`point`]   — coordinate and matrix type aliases (nalgebra re-exports)
+//! - [`material`] — material response types and constitutive helpers
 //!
 //! # Examples
 //!
@@ -42,16 +42,11 @@
 
 pub mod error;
 pub mod material;
-pub mod hyperelastic;
-pub mod point;
 pub mod scalar;
 pub mod types;
-pub mod units;
-pub mod util;
 
 // Flat re-exports for ergonomic use: `use fem_core::*` in other crates.
 pub use error::{FemError, FemResult};
-pub use material::{MaterialModel, FiniteStrainMaterial, MaterialResponse, n_voigt_components, linear_elastic_stiffness, DeformationGradient};
-pub use point::{Coord2, Coord3, Mat2x2, Mat3x3, Vec2, Vec3};
+pub use material::{MaterialModel, FiniteStrainMaterial, MaterialResponse, linear_elastic_stiffness, DeformationGradient};
 pub use scalar::Scalar;
 pub use types::{DofId, EdgeId, ElemId, FaceId, NodeId, Rank};

@@ -40,8 +40,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use fem_core::{ElemId, NodeId, Rank};
-use fem_mesh::{BoundaryTag, ElementType, Mesh};
+use fem_core::{ElemId, Rank};
+use fem_mesh::{ElementType, Mesh};
 
 use crate::comm::Comm;
 use crate::par_mesh::ParallelMesh;
@@ -860,7 +860,7 @@ mod tests {
     use crate::launcher::native::ThreadLauncher;
     use crate::par_partition::partition_mesh;
     use crate::WorkerConfig;
-    use fem_mesh::refine_uniform;
+    use fem_mesh::{refine_uniform, BoundaryTag};
 
     #[test]
     fn single_rank_tri3_matches_serial() {

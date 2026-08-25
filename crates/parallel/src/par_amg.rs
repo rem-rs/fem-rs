@@ -860,7 +860,7 @@ fn build_coarse_level_global(
 
     // Diagonal contribution: A_diag * P_local
     for i in 0..n_owned {
-        let ci = merged_agg[i];
+        let _ci = merged_agg[i];
         for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
             let j = diag.col_idx[k] as usize;
             let cj = merged_agg.get(j).copied();
@@ -903,7 +903,7 @@ fn build_coarse_level_global(
 
     // Diagonal contribution: A_diag * P_local (A_ij * P_jk = A_ij for k = merged_agg[j]).
     for i in 0..n_owned {
-        let ci = merged_agg[i];
+        let _ci = merged_agg[i];
         for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
             let j = diag.col_idx[k] as usize;
             if let Some(&cj) = merged_agg.get(j) {
@@ -1206,7 +1206,7 @@ fn build_nodal_coarse_level_global(
         off
     };
     let mut rank_offset = rank_offsets[my_rank];
-    let mut n_coarse_global = all_n_agg.iter().sum::<usize>() * bs;
+    let n_coarse_global;
 
     // Owned global aggregate ids.
     let mut global_agg: Vec<i64> = aggregate
@@ -2232,8 +2232,8 @@ fn rs_cf_split(
     // ── Phase 1: count strong connections per DOF ───────────────────────────
     let mut n_strong = vec![0usize; n_owned];
     for i in 0..n_owned {
-        for k in s_diag.row_ptr[i]..s_diag.row_ptr[i + 1] { n_strong[i] += 1; }
-        for k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] { n_strong[i] += 1; }
+        for _k in s_diag.row_ptr[i]..s_diag.row_ptr[i + 1] { n_strong[i] += 1; }
+        for _k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] { n_strong[i] += 1; }
     }
 
     // ── Phase 2: initial C/F assignment ─────────────────────────────────────
@@ -2258,7 +2258,7 @@ fn rs_cf_split(
             }
         }
         for k in s_offd.row_ptr[i]..s_offd.row_ptr[i + 1] {
-            let g = s_offd.col_idx[k] as usize;
+            let _g = s_offd.col_idx[k] as usize;
             // Ghost neighbours: we can't mark them, but we record their influence.
             // Assigned ghost C/F will come from the owning rank.
         }
@@ -2334,7 +2334,6 @@ fn rs_interpolation(
             if diag.col_idx[k] as usize == i { a_ii = diag.values[k]; break; }
         }
         let diag_contrib = a_ii;
-        let mut total_weight = 0.0_f64;
 
         for k in diag.row_ptr[i]..diag.row_ptr[i + 1] {
             let j = diag.col_idx[k] as usize;
@@ -2343,7 +2342,6 @@ fn rs_interpolation(
                 // C-point j: direct interpolation
                 let w = diag.values[k];
                 p_coo.add(i, c_to_coarse[j] as usize, -w);
-                total_weight += w.abs();
             }
         }
         // Normalize so that constant vectors are preserved.
@@ -2351,7 +2349,7 @@ fn rs_interpolation(
         // The denominator already includes the diagonal.
         // We use the sign of a_ii to handle M-matrices properly.
         if diag_contrib.abs() > 1e-30 {
-            let scale = 1.0 / diag_contrib;
+            let _scale = 1.0 / diag_contrib;
             // Rescale all entries in this row
             // (simplified: we already added -a_ij, now multiply by scale)
         }
@@ -3001,7 +2999,7 @@ mod tests {
         let a = block_diag_system(4);
         let block_inv = compute_block_inv(&a, 2);
         let n = a.n_owned;
-        let mut x = vec![0.0f64; n];
+        let x = vec![0.0f64; n];
         let b: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
         let mut res0 = 0.0f64;
         for i in 0..n {

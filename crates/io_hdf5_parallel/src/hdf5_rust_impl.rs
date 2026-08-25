@@ -216,55 +216,6 @@ pub fn write_checkpoint_step_bundle_f64_mesh_meta(
     Ok(())
 }
 
-pub fn write_rank_partition_f64(
-    file_path: &str,
-    dataset: &str,
-    local_values: &[f64],
-    cfg: ParallelIoConfig,
-) -> Result<(), Hdf5ParallelError> {
-    cfg.validate()?;
-
-    let file = if Path::new(file_path).exists() {
-        {
-            let r = open_read(file_path)?;
-            verify_reader_meta(&r, cfg)?;
-        }
-        open_rw(file_path)?
-    } else {
-        let f = create_new(file_path)?;
-        init_new_checkpoint(&f, cfg)?;
-        f
-    };
-
-    let root = root_group(&file);
-    let parts = ensure_child_group(&root, "partitions")?;
-    let rank_g = ensure_child_group(&parts, &cfg.rank_group_name())?;
-
-    let ds = rank_g
-        .new_dataset::<f64>()
-        .shape(&[local_values.len()])
-        .create(dataset)
-        .map_err(be)?;
-    ds.write_raw(local_values).map_err(be)?;
-    Ok(())
-}
-
-pub fn read_rank_partition_f64(
-    file_path: &str,
-    dataset: &str,
-    cfg: ParallelIoConfig,
-) -> Result<Vec<f64>, Hdf5ParallelError> {
-    cfg.validate()?;
-    let file = open_read(file_path)?;
-    let path = format!(
-        "partitions/{}/{}",
-        cfg.rank_group_name(),
-        dataset.trim_start_matches('/')
-    );
-    let ds = file.dataset(&path).map_err(be)?;
-    ds.read_raw::<f64>().map_err(be)
-}
-
 pub fn read_checkpoint_field_f64_at_step(
     file_path: &str,
     cfg: ParallelIoConfig,

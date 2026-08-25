@@ -12,7 +12,7 @@
 
 use crate::constrained_operator::RectangularConstrainedOperator;
 use crate::SolverConfig;
-use fem_element::lagrange::factory::{H1TriPk, QuadQk, TriPk};
+use fem_element::lagrange::factory::{H1TriPk, QuadQk};
 use fem_element::ReferenceElement;
 use fem_linalg::CsrMatrix;
 use fem_mesh::{topology::MeshTopology, ElementType};

@@ -352,7 +352,7 @@ impl VectorReferenceElement for QuadRTk {
         let d = rt_data(self.order);
         let p = d.p;
         let (_cx, dcx) = bary_eval(&d.cp, xi[0]);
-        let (cy, dcy) = bary_eval(&d.cp, xi[1]);
+        let (_cy, dcy) = bary_eval(&d.cp, xi[1]);
         let (ox, _) = bary_eval(&d.op, xi[0]);
         let (oy, _) = bary_eval(&d.op, xi[1]);
         let mut o = 0;

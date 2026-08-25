@@ -16,28 +16,17 @@
 //! - [`pvd`]            — ParaView `.pvd` collection writer
 //! - [`pvtu_writer`]    — ParaView `.pvtu` parallel piece collection writer
 
-/// Plugin API traits for pro IO extensions.
-pub mod plugin;
-
 pub mod gmsh;
 pub mod gmsh_writer;
-pub mod pvd;
-pub mod pvtu_writer;
 pub mod netgen;
 pub mod abaqus;
 pub mod vtk;
 pub mod vtk_reader;
-pub mod matrix_market;
 pub mod mfem;
 pub mod nurbs_mesh;
 pub mod xdmf;
 pub mod glvis;
-pub mod pumi;
-pub mod sidre;
-pub mod cgns_exodus;
 pub mod imported_workflow;
-pub mod stl_obj;
-pub mod data_collection;
 
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
@@ -45,7 +34,6 @@ pub mod hdf5;
 pub use gmsh::{read_msh, read_msh_file, MshFile};
 pub use gmsh_writer::{write_msh, write_msh_file};
 pub use fem_mesh::curved::CurvedMesh;
-pub use pvtu_writer::{PvtuCollection, write_pvtu};
 pub use netgen::{
 	read_netgen_vol,
 	read_netgen_vol_file,
@@ -55,12 +43,7 @@ pub use netgen::{
 pub use abaqus::{read_abaqus_inp, read_abaqus_inp_file, read_abaqus_inp_full, read_abaqus_inp_full_file, AbaqusInpData};
 pub use vtk::{DataArray, VtkWriter};
 pub use vtk_reader::{read_vtu, read_vtu_mesh, read_vtu_str, VtuData};
-pub use matrix_market::{read_matrix_market, read_matrix_market_coo, write_matrix_market, MmioError};
 pub use xdmf::{write_xdmf, write_xdmf_mixed, xdmf_topology_code, XdmfField, XdmfCenter};
-pub use stl_obj::{read_stl, read_stl_file, read_obj, read_obj_file};
-pub use pumi::read_smb;
-pub use sidre::{write_sidre_blueprint, read_sidre_blueprint};
-pub use data_collection::DataCollection;
 pub use imported_workflow::{
 	DATASET_ELEM_TAGS,
 	hdf5_field_values_path,
@@ -102,8 +85,6 @@ pub use imported_workflow::{
 	xdmf_nodal_workflow_fields,
 	xdmf_nodal_scalar_field,
 };
-
-pub use cgns_exodus::{read_exodus, read_exodus_hdf5, read_cgns};
 
 #[cfg(feature = "hdf5")]
 pub use hdf5::{

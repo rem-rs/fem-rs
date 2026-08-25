@@ -124,7 +124,7 @@ impl DofPartition {
         partition: &MeshPartition,
         comm: &Comm,
     ) -> Self {
-        let local_rank = comm.rank();
+        let _local_rank = comm.rank();
         let dofs_per_elem = space.element_dofs(0).len();
         let n_local_elems = partition.n_owned_elems + partition.n_ghost_elems;
         let n_owned = partition.n_owned_elems * dofs_per_elem;
@@ -267,7 +267,7 @@ impl DofPartition {
             "DofPartition: only P1, P2 and P3 (quad) supported"
         );
         let order = dof_manager.order as usize;
-        let interior_dofs_per = if order == 2 { 1 } else { (order - 1) * (order - 1) };
+        let _interior_dofs_per = if order == 2 { 1 } else { (order - 1) * (order - 1) };
 
         let local_rank = comm.rank();
         let n_owned_vertices = partition.n_owned_nodes;

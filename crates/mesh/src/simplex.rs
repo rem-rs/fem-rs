@@ -237,7 +237,6 @@ impl<const D: usize> Mesh<D> {
         e: ElemId,
         xi: &[f64],
     ) -> (nalgebra::DMatrix<f64>, f64, Vec<f64>) {
-        use fem_element::ReferenceElement as _;
         use fem_element::lagrange::factory::{ElemType as FactoryElemType, QuadQk, ref_elem as factory_ref_elem};
         let dim = D;
         let et = self.element_type_at(e);

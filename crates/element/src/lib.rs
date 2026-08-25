@@ -35,13 +35,10 @@
 //! | [`TriRT0`]  | unit triangle   | 3    |
 //! | [`TetRT0`]  | unit tet        | 4    |
 
-pub mod basis_cache;
 pub mod bernstein;
-pub mod bernstein_simplex;
 pub mod bezier_extraction;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
-pub mod hierarchical;
 pub mod iga;
 pub mod lagrange;
 pub mod nedelec;
@@ -56,19 +53,13 @@ pub mod quadrature;
 pub mod raviart_thomas;
 pub mod reference;
 pub mod serendipity;
-pub mod tri6_geom;
 
-pub use bernstein::{
-    bernstein_dders, bernstein_ders, bernstein_ders_2d, bernstein_vals, bernstein_vals_2d,
-    bernstein_vals_3d, BernsteinHexPk, BernsteinQuadPk, BernsteinSegPk,
-};
-pub use bernstein_simplex::{BernsteinTetPk, BernsteinTriPk};
+pub use bernstein::{bernstein_dders, bernstein_ders, bernstein_vals};
 pub use brezzi_douglas_marini::{HexBDMk, QuadBDMk, TetBDMk, TriBDMk};
 pub use crouzeix_raviart::{
     cr1_basis, cr1_grad, cr1_tet_basis, cr1_tet_grad, cr2_tet_basis, cr2_tet_grad, cr2_tri_basis,
     cr2_tri_grad, CrTet1, CrTet2, CrTri1, CrTri2, CrouzeixRaviart1, CrouzeixRaviartVec1,
 };
-pub use hierarchical::{HierarchicalSegPk, HierarchicalTetPk, HierarchicalTriPk};
 pub use lagrange::{
     ref_elem, vec_ref_elem, ElemType, H1TriPk, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex, LagrangePrism,
     LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle, PrismPk,
@@ -81,7 +72,6 @@ pub use nedelec::{
     TetND1, TetND2, TetNDk, TriND1, TriND2, TriNDk,
 };
 pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec};
-pub use quadrature::{tri_rule_named, TriQuadRule};
 pub use raviart_thomas::{
     HexRT0, HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT0, QuadRT1, QuadRTk,
     TetRT0, TetRT1, TetRT2, TetRTk, TriRT0, TriRT1, TriRT2, TriRTk,

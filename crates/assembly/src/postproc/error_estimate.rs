@@ -442,7 +442,7 @@ where
     let scalar_space = fem_space::H1Space::new(mref.clone(), order);
     let quad_order = (order as u8) * 2 + 2;
     let mass = MassIntegrator { rho: 1.0 };
-    let mut m_mat = Assembler::assemble_bilinear(&scalar_space, &[&mass], quad_order);
+    let m_mat = Assembler::assemble_bilinear(&scalar_space, &[&mass], quad_order);
 
     // RHS per component: rhs[c][s] = ∫_Ω ∂u_c/∂x_d · φ_s (vector of length d per scalar dof).
     let dofs = gf.dofs();

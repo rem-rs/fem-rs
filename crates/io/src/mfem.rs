@@ -13,7 +13,6 @@ use fem_core::{FemError, FemResult};
 use fem_mesh::{
     element_type::ElementType,
     simplex::{GeometryData, Mesh},
-    topology::MeshTopology,
 };
 
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
@@ -1052,20 +1051,6 @@ fn grid_sfc_ordering_3d(nx: usize, ny: usize, nz: usize) -> Vec<(i32, i32, i32)>
     coords
 }
 
-// ─── GridFunction .gf I/O ────────────────────────────────────────────────
-
-/// Metadata for a `.gf` GridFunction file.
-#[derive(Debug, Clone)]
-pub struct GfInfo {
-    pub dim: usize,
-    pub n_dofs: usize,
-    pub order: u8,
-    /// Number of vector components (1 for scalar, >1 for vector spaces).
-    pub vdim: usize,
-    /// Space type name, e.g. "H1", "L2", "VectorH1", "HCurl", "HDiv".
-    pub space_type: String,
-}
-
 /// Write a `.gf` GridFunction file (minimal MFEM-compatible format).
 ///
 /// Stores dimension, space type, order, vdim, and DOF values.
@@ -1085,37 +1070,6 @@ pub fn write_gf<W: Write>(
         writeln!(writer, "{v:.16e}")?;
     }
     Ok(())
-}
-
-/// Read a `.gf` GridFunction file, returning metadata and the DOF vector.
-pub fn read_gf<R: Read>(reader: R) -> FemResult<(GfInfo, Vec<f64>)> {
-    let mut r = BufReader::new(reader);
-    let mut line = String::new();
-
-    r.read_line(&mut line)?;
-    if !line.trim().starts_with("MFEM grid function") {
-        return Err(FemError::Mesh(format!("expected 'MFEM grid function' header, got: {line}")));
-    }
-
-    read_line(&mut r)?; // dimension
-    let dim = read_uint(&mut r)?;
-    read_line(&mut r)?; // n_dofs
-    let n = read_uint(&mut r)?;
-    read_line(&mut r)?; // order
-    let order = read_uint(&mut r)?;
-    read_line(&mut r)?; // vdim
-    let vdim = read_uint(&mut r)?;
-    read_line(&mut r)?; // space_type
-    let mut space_type = String::new();
-    r.read_line(&mut space_type)?;
-    let space_type = space_type.trim().to_string();
-
-    let mut dofs = Vec::with_capacity(n);
-    for _ in 0..n {
-        let vals = read_f64_line(&mut r)?;
-        dofs.push(vals[0]);
-    }
-    Ok((GfInfo { dim, n_dofs: n, order: order as u8, vdim, space_type }, dofs))
 }
 
 /// Convenience: write a `.gf` file to disk.
@@ -1258,51 +1212,34 @@ pub fn write_mfem_gf_file(
     Ok(())
 }
 
-/// Convenience: read a `.gf` file from disk.
-pub fn read_gf_file(path: impl AsRef<std::path::Path>) -> FemResult<(GfInfo, Vec<f64>)> {
-    read_gf(std::fs::File::open(path)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
 
     #[test]
-    fn gf_write_then_read() {
-        let dofs: Vec<f64> = (0..10).map(|i| i as f64 * 1.5).collect();
+    fn write_gf_emits_legacy_header_and_metadata() {
+        // The custom "MFEM grid function v1.0" writer is still used by
+        // ex23/ex32/ex34; pin its exact line layout so it cannot regress.
         let mut buf = Vec::new();
-        write_gf(&mut buf, 2, &dofs, "H1", 1, 1).unwrap();
-        let (info, data) = read_gf(buf.as_slice()).unwrap();
-        assert_eq!(info.dim, 2);
-        assert_eq!(info.n_dofs, 10);
-        assert_eq!(info.order, 1);
-        assert_eq!(info.vdim, 1);
-        assert_eq!(info.space_type, "H1");
-        for (a, b) in dofs.iter().zip(data.iter()) {
-            assert!((a - b).abs() < 1e-14);
-        }
-    }
-
-    #[test]
-    fn gf_vector_space_roundtrip() {
-        let dofs: Vec<f64> = (0..50).map(|i| (i as f64).sin()).collect();
-        let mut buf = Vec::new();
-        write_gf(&mut buf, 3, &dofs, "VectorH1", 2, 3).unwrap();
-        let (info, data) = read_gf(buf.as_slice()).unwrap();
-        assert_eq!(info.dim, 3);
-        assert_eq!(info.n_dofs, 50);
-        assert_eq!(info.order, 2);
-        assert_eq!(info.vdim, 3);
-        assert_eq!(info.space_type, "VectorH1");
-        assert_eq!(data.len(), 50);
+        write_gf(&mut buf, 2, &[1.0, 2.0, 3.0], "H1", 1, 1).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("MFEM grid function v1.0"));
+        assert!(lines.contains(&"dimension"));
+        assert!(lines.contains(&"n_dofs"));
+        assert!(lines.contains(&"order"));
+        assert!(lines.contains(&"vdim"));
+        assert!(lines.contains(&"space_type"));
+        // DOF values are written with 16 significant digits.
+        assert!(lines.iter().any(|l| l.starts_with("1.0000000000000000e")));
+        assert_eq!(lines[lines.len() - 1], "3.0000000000000000e0");
     }
 
     #[test]
     fn elem_type_roundtrip() {
         let cases = [
-            (ElementType::Line2, 1u32), (ElementType::Tri3, 2u32),
-            (ElementType::Quad4, 3u32), (ElementType::Tet4, 4u32),
+            (ElementType::Line2, 1u32), (ElementType::Tri3, 2u32),            (ElementType::Quad4, 3u32), (ElementType::Tet4, 4u32),
             (ElementType::Hex8, 5u32), (ElementType::Prism6, 6u32),
             (ElementType::Pyramid5, 7u32), (ElementType::Line3, 8u32),
             (ElementType::Tri6, 9u32), (ElementType::Tet10, 11u32),

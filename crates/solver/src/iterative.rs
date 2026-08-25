@@ -6,7 +6,7 @@ use linlvo::precond::{IlukPrecond, IlutPrecond};
 use linlvo::{
     core::scalar::Scalar as linlvoScalar,
     iterative::{BiCgStab, ConjugateGradient, Fgmres, Gmres, Idrs, Tfqmr},
-    DenseVec, GaussSeidelSmoother, IldltPrecond, Ilu0Precond, JacobiPrecond, KrylovSolver,
+    DenseVec, IldltPrecond, Ilu0Precond, JacobiPrecond, KrylovSolver,
     Preconditioner, SsorPrecond,
 };
 use linlvo::{LinearOperator, Vector};

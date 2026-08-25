@@ -52,7 +52,7 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     // both adjacent elements' longest edges should also be bisected.
     // We simply bisect the entire element (all edges) for simplicity.
     // This over-refines slightly but guarantees conformity.
-    let mut elems_to_refine: std::collections::HashSet<ElemId> = marked_set.clone();
+    let elems_to_refine: std::collections::HashSet<ElemId> = marked_set.clone();
     // (longest-edge neighbour propagation removed to match MFEM GeneralRefinement)
 
     // ── 2. Collect new midpoint nodes ─────────────────────────────────────────
@@ -432,4 +432,60 @@ fn longest_edge_tri(mesh: &Mesh<2>, ns: &[NodeId]) -> (NodeId, NodeId) {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Signed area ×2 of a Tri3 (cross product); positive for CCW orientation.
+    fn tri_area2(mesh: &Mesh<2>, e: ElemId) -> f64 {
+        let ns = mesh.elem_nodes(e);
+        let a = mesh.coords_of(ns[0]);
+        let b = mesh.coords_of(ns[1]);
+        let c = mesh.coords_of(ns[2]);
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    }
+
+    #[test]
+    fn refine_single_tri_red_refinement_preserves_area() {
+        // Red refinement splits a Tri3 into 4 children (all 3 edges
+        // bisected).  Unit square has 2 Tri3; refining one gives 5 elements.
+        let mesh = Mesh::<2>::unit_square_tri(1);
+        let n_elems0 = mesh.n_elems();
+        let n_nodes0 = mesh.n_nodes();
+        let area0: f64 = (0..n_elems0 as ElemId).map(|e| tri_area2(&mesh, e)).sum();
+
+        let refined = refine_marked(&mesh, &[0]);
+        assert_eq!(refined.n_elems(), n_elems0 + 3);
+        assert!(refined.n_nodes() > n_nodes0);
+        let area1: f64 = (0..refined.n_elems() as ElemId)
+            .map(|e| tri_area2(&refined, e))
+            .sum();
+        assert!(
+            (area1 - area0).abs() < 1e-14,
+            "total area changed: {area0} -> {area1}"
+        );
+        // Every child must be a valid, non-degenerate triangle.
+        for e in 0..refined.n_elems() as ElemId {
+            assert!(tri_area2(&refined, e).abs() > 1e-14, "degenerate child {e}");
+        }
+    }
+    #[test]
+    fn refine_both_tris_red_refinement_shared_midpoints() {
+        // Both triangles refined: shared diagonal midpoint is created once,
+        // so the result has 8 elements and 5 new nodes (5 distinct edges).
+        let mesh = Mesh::<2>::unit_square_tri(1);
+        let refined = refine_marked(&mesh, &[0, 1]);
+        assert_eq!(refined.n_elems(), 8);
+        assert_eq!(refined.n_nodes(), 4 + 5);
+        let area: f64 = (0..8).map(|e| tri_area2(&refined, e)).sum();
+        assert!((area - 2.0).abs() < 1e-14, "unit square area = {area}");
+    }
+    #[test]
+    fn refine_marked_rejects_non_tri() {
+        let mesh = Mesh::<2>::unit_square_quad(1);
+        let result = std::panic::catch_unwind(|| refine_marked(&mesh, &[0]));
+        assert!(result.is_err(), "Quad4 mesh must be rejected");
+    }
 }

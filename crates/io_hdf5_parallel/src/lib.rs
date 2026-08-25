@@ -454,68 +454,6 @@ pub fn write_checkpoint_step_bundle_f64(
     Ok(())
 }
 
-/// Write a local rank partition as a per-rank dataset.
-///
-/// File layout:
-/// - `/meta/world_size` (attribute)
-/// - `/partitions/rank_XXXXXX/<dataset>`
-pub fn write_rank_partition_f64(
-    file_path: &str,
-    dataset: &str,
-    local_values: &[f64],
-    cfg: ParallelIoConfig,
-) -> Result<(), Hdf5ParallelError> {
-    cfg.validate()?;
-
-    #[cfg(feature = "hdf5")]
-    {
-        return hdf5_rust_impl::write_rank_partition_f64(file_path, dataset, local_values, cfg);
-    }
-
-    #[cfg(not(feature = "hdf5"))]
-    {
-        let mut db = portable_load_db(file_path)?;
-        portable_ensure_world_size(&mut db, cfg.world_size)?;
-        let rank_entry = db
-            .rank_partitions
-            .entry(cfg.rank)
-            .or_insert_with(std::collections::BTreeMap::new);
-        rank_entry.insert(dataset.to_string(), local_values.to_vec());
-        portable_save_db(file_path, &db)
-    }
-}
-
-/// Read a local rank partition from a per-rank dataset.
-pub fn read_rank_partition_f64(
-    file_path: &str,
-    dataset: &str,
-    cfg: ParallelIoConfig,
-) -> Result<Vec<f64>, Hdf5ParallelError> {
-    cfg.validate()?;
-
-    #[cfg(feature = "hdf5")]
-    {
-        return hdf5_rust_impl::read_rank_partition_f64(file_path, dataset, cfg);
-    }
-
-    #[cfg(not(feature = "hdf5"))]
-    {
-        let db = portable_load_db(file_path)?;
-        let vals = db
-            .rank_partitions
-            .get(&cfg.rank)
-            .and_then(|m| m.get(dataset))
-            .cloned()
-            .ok_or_else(|| {
-                Hdf5ParallelError::InvalidCheckpoint(format!(
-                    "missing portable partition rank={} dataset={}",
-                    cfg.rank, dataset
-                ))
-            })?;
-        Ok(vals)
-    }
-}
-
 /// Write one checkpoint step for all local rank fields.
 ///
 /// Layout:

@@ -6,7 +6,7 @@
 //! partial pivoting (mirroring LAPACK `dgetrf`/`dgetrs` semantics), and a
 //! forward/backward block substitution in `Mult`.
 
-use crate::iterative::{diag, dot, fmt_g, into_result_from_cg};
+use crate::iterative::{dot, fmt_g, into_result_from_cg};
 use crate::SolveResult;
 use fem_linalg::SolverConfig;
 

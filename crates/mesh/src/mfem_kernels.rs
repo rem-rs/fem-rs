@@ -146,7 +146,7 @@ fn kernel_vector2g(
         mu = n1.copysign(*d1);
         n1 = -*d21 * (*d21 / (*d1 + mu)); // = d1 - mu
         *d1 = mu;
-        let (mut n1v, mut n2v);
+        let (n1v, n2v);
         if n1.abs() <= d21.abs() {
             n1v = n1 / *d21;
             mu = (2.0 / (1.0 + n1v * n1v)) * (n1v * *d12 + *d2);
@@ -192,7 +192,7 @@ fn kernel_vector3g_aux(
     c32: &mut f64,
 ) -> usize {
     let kdim;
-    let (mut mu, mut n1, mut n2, mut n3, mut s1, mut s2, mut s3) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut mu, mut n1, n2, n3, mut s1, s2, s3);
 
     s1 = (*c21).hypot(*c31);
     n1 = (*d1).hypot(s1);
@@ -288,11 +288,7 @@ fn kernel_vector3s(
     let mut c12 = d12;
     let mut c13 = d13;
     let mut c23 = d23;
-    let mut c21 = 0.0;
-    let mut c31 = 0.0;
-    let mut c32 = 0.0;
-    let mut col = 1;
-    let mut row = 1;
+    let (mut c21, mut c31, mut c32, col, mut row);
 
     // l1-norms of the columns
     c32 = d1.abs() + c12.abs() + c13.abs();
@@ -397,8 +393,8 @@ fn reduce3s(
     v3: &mut f64,
     g: &mut f64,
 ) -> usize {
-    let mut k = 1;
-    let (mut s, mut w1, mut w2, mut w3) = (0.0, 0.0, 0.0, 0.0);
+    let k;
+    let (mut s, mut w1, mut w2, mut w3);
 
     if mode == 0 {
         if z1.abs() <= z3.abs() {

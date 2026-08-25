@@ -9,7 +9,6 @@
 //! - [`sparsity`] �?`SparsityPattern`: non-zero structure built from DOF connectivity
 //! - [`dense`]    �?small dense operations (LU factorisation, matmat) for coarse-grid solves
 //! - [`block`]    �?`BlockMatrix` / `BlockVector` for mixed / saddle-point problems
-//! - [`hmatrix`]  �?H-matrix infrastructure: cluster tree, bounding boxes, block cluster tree
 //!
 //! ## Feature flags
 //!
@@ -29,8 +28,6 @@ pub mod dense;
 pub mod sparsity;
 pub mod vector;
 pub mod block;
-pub mod pool;
-pub mod hmatrix;
 
 #[cfg(feature = "direct")]
 pub mod solver_types;
@@ -43,8 +40,6 @@ pub use csr::{csr_spmm_parallel, spadd_parallel, spmv_parallel_min_rows, FEM_LIN
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
 pub use block::{BlockMatrix, BlockVector};
-pub use dense::DenseTensor;
-pub use pool::{CooVectorPool, PooledCooVectors};
 
 // Re-exports from linlvo for Block Low-Rank compression
 #[cfg(feature = "direct")]
@@ -60,7 +55,6 @@ pub use solver_types::{SolverConfig, SolverError, SolveResult, PrintLevel, fem_t
 #[cfg(feature = "kani")]
 #[allow(unexpected_cfgs)]
 mod kani_proofs {
-    use crate::CsrMatrix;
     use crate::CsrMatrix;
 
     /// Prove that SpMV never panics for a well-formed CSR matrix.

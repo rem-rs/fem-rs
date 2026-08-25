@@ -147,11 +147,6 @@ pub trait FiniteStrainMaterial: Send + Sync {
 
 // ─── Built-in helpers ──────────────────────────────────────────────────────
 
-/// Number of stress/strain components for a given spatial dimension.
-pub fn n_voigt_components(is_3d: bool) -> usize {
-    if is_3d { 6 } else { 3 }
-}
-
 /// Build the linear elasticity stiffness matrix from E and ν.
 ///
 /// Returns the 6×6 or 3×3 stiffness in Voigt notation, row-major.
@@ -184,16 +179,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn n_components_2d() {
-        assert_eq!(n_voigt_components(false), 3);
-    }
-
-    #[test]
-    fn n_components_3d() {
-        assert_eq!(n_voigt_components(true), 6);
-    }
-
-    #[test]
     fn linear_elastic_3d_symmetric() {
         let D = linear_elastic_stiffness(200e9, 0.3, true);
         assert_eq!(D.len(), 36);
@@ -210,6 +195,34 @@ mod tests {
         let D = linear_elastic_stiffness(200e9, 0.3, false);
         assert_eq!(D.len(), 9);
         assert!(D[0] > D[1]); // c11 > c12
+    }
+
+    #[test]
+    fn linear_elastic_plane_strain_matches_lami_constants_and_3d() {
+        // Plane-strain stiffness (ε_xx, ε_yy, γ_xy) with
+        // c11 = λ + 2μ, c12 = λ, c33 = μ.
+        let e = 200e9;
+        let nu = 0.3;
+        let lam = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        let mu = e / (2.0 * (1.0 + nu));
+        let d2 = linear_elastic_stiffness(e, nu, false);
+        assert!((d2[0] - (lam + 2.0 * mu)).abs() < 1e-3, "c11 = {}", d2[0]);
+        assert!((d2[1] - lam).abs() < 1e-3, "c12 = {}", d2[1]);
+        assert!((d2[8] - mu).abs() < 1e-3, "c33 = {}", d2[8]);
+        // Symmetry
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((d2[i * 3 + j] - d2[j * 3 + i]).abs() < 1e-12);
+            }
+        }
+        // The in-plane block of the 3D stiffness must agree with the 2D one.
+        let d3 = linear_elastic_stiffness(e, nu, true);
+        for (i, j) in [(0, 0), (0, 1), (1, 1)] {
+            assert!((d2[i * 3 + j] - d3[i * 6 + j]).abs() < 1e-3);
+        }
+        // Out-of-plane strain σ_zz = λ(ε_xx + ε_yy): the 3D row 2 equals λ, λ, 0.
+        assert!((d3[2 * 6 + 0] - lam).abs() < 1e-3);
+        assert!((d3[2 * 6 + 1] - lam).abs() < 1e-3);
     }
 
     #[test]
