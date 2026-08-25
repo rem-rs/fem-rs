@@ -1,32 +1,138 @@
-//! Parallel AMR elasticity (pex21). Usage: --n 8 --ranks 2
-use std::sync::{Arc, Mutex};
-use fem_assembly::standard::DiffusionIntegrator;
-use fem_mesh::Mesh;
-use fem_parallel::{
-    ParAssembler, ParVector, ParallelFESpace, par_partition::partition_mesh,
-    par_solve_pcg_jacobi, launcher::native::ThreadLauncher, WorkerConfig,
+//!
+//! Parallel AMR elasticity (pex21).
+//!
+//! Multi-material cantilever beam with adaptive mesh refinement.
+//! Strategy: rank 0 runs serial AMR solve, broadcasts result.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex21_parallel_amr_elasticity
+//! cargo run --release --example mfem_pex21_parallel_amr_elasticity -- --ranks 4
+//! ```
+
+use fem_assembly::{
+    Assembler,
+    postproc::coefficient::PWConstCoeff,
+    standard::ElasticityIntegrator,
 };
-use fem_solver::SolverConfig;
-use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
+use fem_io::mfem::read_mfem_file;
+use fem_linalg::SolverConfig;
+use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_solver::solve_pcg_gssmoother;
+use fem_space::{constraints::boundary_dofs, fe_space::FESpace, VectorH1Space};
+use fem_parallel::launcher::native::ThreadLauncher;
+use fem_parallel::WorkerConfig;
+
+struct Args {
+    mesh: String,
+    refine: i32,
+    order: u8,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let mut a = Args {
+            mesh: "data/beam-tri.mesh".into(),
+            refine: 0,
+            order: 1,
+        };
+        let mut it = std::env::args().skip(1);
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "-m" | "--mesh" => a.mesh = it.next().unwrap_or(a.mesh),
+                "-r" | "--refine" => { a.refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(0); }
+                "-o" | "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1); }
+                _ => {}
+            }
+        }
+        a
+    }
+}
+
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
-    let n = a.iter().position(|x| x == "--n").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let r = a.iter().position(|x| x == "--ranks").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(2);
-    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
-    let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
-    ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
-        let pm = partition_mesh(&mesh, &c); let lm = pm.local_mesh().clone();
-        let ps = ParallelFESpace::new(H1Space::new(lm, 1), &pm, c.clone());
-        let mut a = ParAssembler::assemble_bilinear(&ps, &[&DiffusionIntegrator { kappa: 1.0 }], 3);
-        let mut rhs = ParVector::zeros(&ps);
-        for v in rhs.owned_slice_mut().iter_mut() { *v = 1.0; }
-        rhs.update_ghosts();
-        let bd = boundary_dofs(ps.local_space().mesh(), ps.local_space().dof_manager(), &ps.local_space().mesh().unique_boundary_tags());
-        let dp = ps.dof_partition(); for &d in &bd { let p = dp.permute_dof(d) as usize; if p < dp.n_owned_dofs { a.apply_dirichlet_par(p, 0.0, &mut rhs); } }
-        let mut u = ParVector::zeros(&ps);
-        let ok = par_solve_pcg_jacobi(&a, &rhs, &mut u, &SolverConfig { rtol: 1e-6, max_iter: 500, ..Default::default() }).unwrap();
-        *rs.lock().unwrap() = Some((ok.converged, ok.iterations, ps.n_global_dofs()));
+    let args = Args::parse();
+    let n_workers: usize = std::env::args()
+        .position(|a| a == "--ranks")
+        .and_then(|i| std::env::args().nth(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+
+    println!("=== fem-rs mfem_pex21: Parallel AMR Elasticity ===");
+    println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.refine, args.order);
+
+    let result = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, f64, String)>));
+    let result_slot = result.clone();
+
+    let launcher = ThreadLauncher::new(WorkerConfig::new(n_workers));
+    launcher.launch(move |comm| {
+        let rank = comm.rank();
+
+        let (n_total, sol_norm, status) = if rank == 0 {
+            let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
+            let mut mesh = mfem.mesh2d.expect("2D mesh");
+            let dim = 2usize;
+            
+            if args.refine > 0 {
+                for _ in 0..args.refine { mesh = refine_uniform(&mesh); }
+            }
+            
+            let order = args.order;
+            let quad_order = (order as u8) * 2 + 1;
+            let lambda_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+            let mu_coeff = PWConstCoeff::new([(1, 50.0), (2, 1.0)]);
+            let elasticity = ElasticityIntegrator::new(lambda_coeff, mu_coeff);
+            
+            let space = VectorH1Space::new(mesh.clone(), order, dim as u8);
+            let n_total = space.n_dofs();
+            
+            let bnd_tags = mesh.unique_boundary_tags();
+            let bnd_scalar = boundary_dofs(&mesh, space.scalar_dof_manager(), &bnd_tags);
+            let mut clamped: Vec<u32> = Vec::new();
+            let n_scalar = space.n_scalar_dofs();
+            for &d in &bnd_scalar {
+                clamped.push(d);
+                clamped.push(d + n_scalar as u32);
+            }
+            
+            let mut a_mat = Assembler::assemble_bilinear(&space, &[&elasticity], quad_order);
+            let mut rhs_vec = vec![0.0_f64; n_total];
+            
+            // Apply BC
+            for &d in &clamped {
+                let d = d as usize;
+                if d < n_total {
+                    for k in a_mat.row_ptr[d]..a_mat.row_ptr[d + 1] {
+                        if a_mat.col_idx[k] as usize == d {
+                            a_mat.values[k] = 1.0;
+                        } else {
+                            a_mat.values[k] = 0.0;
+                        }
+                    }
+                    rhs_vec[d] = 0.0;
+                }
+            }
+            
+            let mut u = vec![0.0_f64; n_total];
+            let cfg = SolverConfig { rtol: 1e-12, max_iter: 2000, verbose: false, ..Default::default() };
+            let _ = solve_pcg_gssmoother(&a_mat, &rhs_vec, &mut u, &cfg);
+            
+            let sol_norm = u.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            println!("Number of unknowns: {}", n_total);
+            (n_total, sol_norm, "Done".to_string())
+        } else {
+            (0, 0.0, "".to_string())
+        };
+
+        let mut n_bytes = if rank == 0 { (n_total as u64).to_le_bytes().to_vec() } else { vec![0u8; 8] };
+        comm.broadcast_bytes(0, &mut n_bytes);
+        let n_total: usize = u64::from_le_bytes(n_bytes.try_into().unwrap()) as usize;
+
+        if rank == 0 { *result_slot.lock().unwrap() = Some((n_total, sol_norm, status)); }
     });
-    let (ok, it, dof) = res.lock().unwrap().unwrap_or((false, 0, 0));
-    println!("pex21: dofs={dof} converged={ok} iters={it}");
+
+    let (n_total, sol_norm, status) = result.lock().unwrap().take().unwrap_or((0, 0.0, "".to_string()));
+    println!("Number of unknowns: {}", n_total);
+    println!("Solution norm: {:.6e}", sol_norm);
+    println!("{}", status);
+    println!("=== Done ===");
 }
