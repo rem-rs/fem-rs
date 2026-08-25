@@ -192,7 +192,7 @@ fn main() {
         let partition = par_mesh.partition();
 
         let space_local = L2Space::new(local_mesh.clone(), order);
-        let n_scalar_owned = space_local.n_dofs() / (partition.n_owned_elems() as usize) * order as usize;
+        let n_scalar_owned = space_local.n_dofs() / (partition.n_owned_elems as usize) * order as usize;
         let part = DofPartition::from_l2_space(&space_local, partition, &comm);
         let ps = ParallelFESpace::new_with_dof_partition(space_local, part, comm.clone());
         let scalar_owned = ps.dof_partition().n_owned_dofs;
