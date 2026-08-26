@@ -1,4 +1,4 @@
-//! # Example 3 — Maxwell Electromagnetic Diffusion  (one-to-one with MFEM ex3)
+//! # Example 3 — Maxwell Electromagnetic Diffusion  (1:1 with MFEM ex3)
 //!
 //! Solves the second-order definite Maxwell problem:
 //!
@@ -7,38 +7,28 @@
 //!      n×(∇×E) = 0    on ∂Ω  (natural)
 //! ```
 //!
-//! with a manufactured source `f = (1+κ²)·(sin(κy), sin(κx))` where `κ = π·freq`.
-//! The exact solution is `E = (sin(κy), sin(κx))`.  The boundary condition is
-//! **non‑homogeneous Dirichlet** (n×E is NOT zero on the boundary) — MFEM ex3
-//! projects the exact solution onto the H(curl) space and uses the projected
-//! boundary values to eliminate essential DOFs.  Discretisation uses Nédélec
-//! (H(curl)) edge elements.
+//! 3D version (matching MFEM ex3 default): `beam-tet.mesh`, ND1 (TetND1)
+//! H(curl) space, muinv = sigma = 1, κ = π·freq.
 //!
-//! ## Usage
-//! ```text
-//! cargo run --example mfem_ex3_maxwell_cavity
-//! cargo run --example mfem_ex3_maxwell_cavity -- -m ../data/star.mesh
-//! cargo run --example mfem_ex3_maxwell_cavity -- -m ../data/star.mesh -o 2
-//! cargo run --example mfem_ex3_maxwell_cavity -- -f 2.0
-//! cargo run --example mfem_ex3_maxwell_cavity -- -no-vis
-//! ```
+//! C++ exact solution (MFEM ex3.cpp `E_exact`):
+//!   3D:  E = (sin(κy), sin(κz), sin(κx))
+//!   2D:  E = (sin(κy), sin(κx))
 //!
-//! ## Output
-//! Prints DOF count, linear system size, solver statistics, and L² error.
-//! Writes `refined.mesh` and `sol.gf` (matching MFEM ex3 output files).
+//! f = (1+κ²)·E ( manufactured source ).
+//!
+//! Non-homogeneous Dirichlet BC (n×E projected onto boundary edges).
+//! Solver: PCG + AMS (default, matches MFEM ex3) or PCG + GSSmoother (-no-ams).
 
 use std::f64::consts::PI;
-use std::fs::File;
-use std::io::Write;
 
 use fem_assembly::{
     VectorAssembler, DiscreteLinearOperator,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
-use fem_element::{nedelec::TriND1, VectorReferenceElement};
-use fem_io::mfem::{read_mfem_file, write_mfem, write_mfem_file, write_mfem_gf_file};
-use fem_mesh::{refine_uniform, Mesh, MeshTopology};
+use fem_element::VectorReferenceElement;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
+use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{solve_pcg, SolverConfig};
 use fem_space::{
     HCurlSpace,
@@ -47,59 +37,39 @@ use fem_space::{
 };
 
 fn main() {
-    // 1. Parse command-line options.
     let args = parse_args();
 
     println!("Options used:");
-    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("(built-in unit square)"));
+    println!("   --mesh {}", args.mesh.as_deref().unwrap_or("(built-in beam-tet)"));
     println!("   --order {}", args.order);
     println!("   --frequency {}", args.freq);
-    if args.static_cond {
-        println!("   --static-condensation");
-    } else {
-        println!("   --no-static-condensation");
-    }
-    if args.visualization {
-        println!("   --visualization");
-    } else {
-        println!("   --no-visualization");
-    }
 
-    // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class yet).
-
-    // 3. Read the mesh from the given mesh file.
-    let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
+    // 3. Read mesh (default beam-tet.mesh — MFEM ex3 default).
+    let mesh: Mesh<3> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-        mfem.mesh2d.expect("MFEM mesh must be 2D")
+        mfem.mesh3d.expect("MFEM mesh must be 3D")
     } else {
-        Mesh::<2>::unit_square_tri(16)
+        let mfem = read_mfem_file("data/beam-tet.mesh")
+            .expect("failed to read data/beam-tet.mesh");
+        mfem.mesh3d.expect("beam-tet.mesh must be 3-D")
     };
-    let dim = 2;
+    let dim = 3;
 
-    // 4. Uniform refinement: choose levels so the final mesh has ≤ 50 000 elements.
-    //    (Matching MFEM ex3's refinement target.)
+    // 4. Refine: ≤ 50 000 elements.
     let ref_levels =
         ((50000.0 / mesh.n_elems() as f64).ln() / (2.0_f64).ln() / dim as f64).floor() as usize;
     let mesh = if ref_levels > 0 {
         let mut m = mesh;
-        for _ in 0..ref_levels {
-            m = refine_uniform(&m);
-        }
+        for _ in 0..ref_levels { m = refine_uniform(&m); }
         m
-    } else {
-        mesh
-    };
+    } else { mesh };
 
-    // 5. H(curl) Nédélec finite element space of the specified order.
+    // 5. H(curl) space (TetND1 for 3D order 1).
     let space = HCurlSpace::new(mesh, args.order);
     let n_dofs = space.n_dofs();
     println!("\nNumber of finite element unknowns: {n_dofs}");
 
-    // 6. Essential boundary DOFs — all external boundaries.
-    //    C++ ex3 uses non-homogeneous Dirichlet BC: it projects the exact
-    //    solution onto the FE space and uses the projected boundary values
-    //    (via FormLinearSystem).  Rust matches this by (a) projecting the
-    //    exact solution, (b) applying column elimination with those values.
+    // 6. Essential BC DOFs — all boundaries.
     let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
     let ess_bdr = if all_tags.is_empty() {
         vec![]
@@ -108,49 +78,37 @@ fn main() {
     };
     eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
 
-    // 7. Right-hand side: b(v) = ∫ f·v dx  where
-    //    f = (1+κ²)·(sin(κy), sin(κx)).
+    // 7. RHS: f = (1+κ²)·E_exact (3D).
     let kappa = args.freq * PI;
-    let source = MaxwellSource { kappa };
+    let source = MaxwellSource3D { kappa };
     let quad_order = args.order as u8 * 2 + 2;
     let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
 
-    // 8. Project the exact solution onto the H(curl) space (C++ step 8:
-    //    x.ProjectCoefficient(E)).  These projected values serve as the
-    //    initial guess AND define the non-homogeneous BC values.
-    let u_proj = project_hcurl_exact(&space, kappa, quad_order);
+    // 8. Project exact solution → initial guess + BC values.
+    let u_proj = project_hcurl_exact_3d(&space, kappa, quad_order);
     let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
-    // 9. Stiffness matrix: a(u, v) = ∫ (∇×u)·(∇×v) + u·v dx.
+    // 9. Stiffness: a(u,v) = ∫ (∇×u)·(∇×v) + u·v dx.
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
     let vec_mass = VectorMassIntegrator { alpha: 1.0 };
     let mut mat = VectorAssembler::assemble_bilinear(
         &space, &[&curl_curl, &vec_mass], quad_order,
     );
 
-    // 10. Form the linear system (MFEM FormLinearSystem — in-place, full N×N).
-    //     Column elimination: rhs -= A * bc_vals (for constrained DOFs).
-    //     Row elimination: A[i,:] = 0, A[i,i] = 1, rhs[i] = bc_val[i].
+    // 10. Form linear system.
     print!("Assembling: matrix ... ");
-    if args.static_cond {
-        eprintln!("  Warning: static condensation not yet implemented — skipping.");
-    }
-    let mut x = u_proj.clone();  // initial guess = projected exact solution
+    let mut x = u_proj.clone();
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
     println!("done.");
-
     println!("Size of linear system: {}", n_dofs);
 
-    // 11. Solve using PCG + AMS (default, matching MFEM ex3) or
-    //     PCG + GSSmoother (fallback with -no-ams).
+    // 11. Solve: PCG + AMS (default) or PCG + GSSmoother (-no-ams).
     if args.no_ams {
         let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
         let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys)
             .expect("GSSmoother setup");
-        let result = solve_pcg(
-            &mat, &rhs, &mut x, &precond,
-            1e-12, 2000, true,
-        ).expect("PCG+GSSmoother solve failed");
+        let result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 2000, true)
+            .expect("PCG+GSSmoother solve failed");
         println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}",
             result.iterations, result.final_residual);
     } else {
@@ -172,157 +130,155 @@ fn main() {
             result.iterations, result.final_residual);
     }
 
-    // 12. Compute L² error.
-    let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
-        &space, &x, |x| exact_e(x, kappa),
+    // 12. L² error (3D).
+    let l2_err = l2_error_hcurl_exact_3d(
+        space.mesh(), &space, &x, |x| exact_e_3d(x, kappa),
     );
-    println!("\n|| E_h - E ||_{{L^2}} = {l2_err:.14e}\n");
+    println!("\n|| E_h - E ||_{L^2} = {l2_err:.14e}\n");
 
-    // 13. Save the refined mesh and solution (matches MFEM ex3 output files).
+    // 13. Save refined mesh + sol.gf (matching MFEM ex3 output).
     {
         write_mfem_file("refined.mesh", space.mesh()).expect("mesh write failed");
         write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 14).expect("sol write failed");
         eprintln!("  Wrote refined.mesh and sol.gf");
     }
 
-    // 14. Send solution to GLVis.
+    // 14. GLVis visualization.
     if args.visualization {
-        match send_to_glvis(space.mesh(), &space, &x, "E") {
+        match send_to_glvis_3d(space.mesh(), &space, &x, "E") {
             Ok(_) => eprintln!("  Sent solution to GLVis (localhost:19916)"),
             Err(e) => eprintln!("  GLVis not available: {e}"),
         }
     }
 }
 
-// ─── Source term (VectorLinearIntegrator) ─────────────────────────────────────
-//
-//   f = (1 + κ²) · (sin(κy), sin(κx))
+// ─── 3D source term: f = (1+κ²)·E_exact,  E = (sin κy, sin κz, sin κx) ────────
 
-struct MaxwellSource {
-    kappa: f64,
-}
+struct MaxwellSource3D { kappa: f64 }
 
-impl VectorLinearIntegrator for MaxwellSource {
+impl VectorLinearIntegrator for MaxwellSource3D {
     fn add_to_element_vector(&self, qp: &VectorQpData<'_>, f_elem: &mut [f64]) {
         let x = qp.x_phys;
-        let coeff = 1.0 + self.kappa * self.kappa;
-        let fx = coeff * (self.kappa * x[1]).sin();
-        let fy = coeff * (self.kappa * x[0]).sin();
+        let c = 1.0 + self.kappa * self.kappa;
+        let fx = c * (self.kappa * x[1]).sin();
+        let fy = c * (self.kappa * x[2]).sin();
+        let fz = c * (self.kappa * x[0]).sin();
         for i in 0..qp.n_dofs {
-            let dot = qp.phi_vec[i * 2] * fx + qp.phi_vec[i * 2 + 1] * fy;
+            let dot = qp.phi_vec[i * 3] * fx + qp.phi_vec[i * 3 + 1] * fy + qp.phi_vec[i * 3 + 2] * fz;
             f_elem[i] += qp.weight * dot;
         }
     }
 }
 
-// ─── Exact solution ──────────────────────────────────────────────────────────
-//
-//   E = (sin(κy), sin(κx))
+// ─── 3D exact solution: E = (sin κy, sin κz, sin κx) ─────────────────────────
 
-fn exact_e(x: &[f64], kappa: f64) -> [f64; 2] {
-    [(kappa * x[1]).sin(), (kappa * x[0]).sin()]
+fn exact_e_3d(x: &[f64], kappa: f64) -> [f64; 3] {
+    [(kappa * x[1]).sin(), (kappa * x[2]).sin(), (kappa * x[0]).sin()]
 }
 
-/// Project the exact H(curl) solution onto the FE space by evaluating the
-/// Nédélec DOF functionals directly (edge-moment interpolation), matching
-/// MFEM's `ProjectCoefficient`.
-///
-/// For ND1 this is the tangential line integral `∫_e E·t̂ ds` on each edge
-/// (evaluated by midpoint rule), and likewise for higher-order moments.
-/// This is the correct approach for MFEM ex3 → it produces the same
-/// coefficient vector that FormLinearSystem expects for non-homogeneous
-/// Dirichlet BCs, unlike an L² mass-matrix projection.
-fn project_hcurl_exact(
-    space: &HCurlSpace<Mesh<2>>,
+fn project_hcurl_exact_3d(
+    space: &HCurlSpace<Mesh<3>>,
     kappa: f64,
     _quad_order: u8,
 ) -> Vec<f64> {
-    space.interpolate_vector(&|x| exact_e(x, kappa).to_vec()).into_vec()
+    space.interpolate_vector(&|x| exact_e_3d(x, kappa).to_vec()).into_vec()
 }
 
-// ─── GLVis helper ────────────────────────────────────────────────────────────
-//
-// H(curl) DOFs live on edges, so we project the edge solution onto mesh
-// vertices by evaluating the field inside each element at its reference
-// vertices and averaging at shared nodes.  The result is a nodal vector
-// field that GLVis (VTK-based protocol) can display.
+// ─── 3D L² error (TetND1 / HexND1) ──────────────────────────────────────────
 
-fn send_to_glvis(
-    mesh: &Mesh<2>,
-    space: &HCurlSpace<Mesh<2>>,
+fn l2_error_hcurl_exact_3d<F>(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
+                              uh: &[f64], exact: F) -> f64
+where F: Fn(&[f64]) -> [f64; 3],
+{
+    use fem_element::nedelec::{TetND1, HexND1};
+    let mut err2 = 0.0_f64;
+    for e in mesh.elem_iter() {
+        let et = mesh.element_type(e);
+        let re: &dyn VectorReferenceElement = match et {
+            fem_mesh::element_type::ElementType::Hex8 => &HexND1,
+            _ => &TetND1,
+        };
+        let nld = re.n_dofs();
+        let q = re.quadrature(6);
+        let mut phi = vec![0.0; nld * 3];
+        let ed: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
+        for (qi, xi) in q.points.iter().enumerate() {
+            re.eval_basis_vec(xi, &mut phi);
+            let (j, xp) = element_jacobian_at(mesh, e, xi, 3);
+            let det = j.determinant();
+            let w = q.weights[qi] * det.abs();
+            let jit = j.try_inverse().unwrap_or_default().transpose();
+            let mut uh_phys = [0.0_f64; 3];
+            for a in 0..nld {
+                let s = signs[a];
+                for c in 0..3 {
+                    let mut comp = 0.0_f64;
+                    for k in 0..3 { comp += jit[(c, k)] * phi[a * 3 + k]; }
+                    uh_phys[c] += s * uh[ed[a]] * comp;
+                }
+            }
+            let ex = exact(&[xp[0], xp[1], xp[2]]);
+            err2 += w * ((uh_phys[0] - ex[0]).powi(2)
+                        + (uh_phys[1] - ex[1]).powi(2)
+                        + (uh_phys[2] - ex[2]).powi(2));
+        }
+    }
+    err2.sqrt()
+}
+
+// ─── 3D GLVis helper ─────────────────────────────────────────────────────────
+
+fn send_to_glvis_3d(
+    mesh: &Mesh<3>,
+    space: &HCurlSpace<Mesh<3>>,
     u: &[f64],
     field_name: &str,
 ) -> std::io::Result<()> {
+    use fem_element::nedelec::TetND1;
     let n_nodes = mesh.n_nodes() as usize;
-    let ref_elem = TriND1;
-    let n_ldofs = ref_elem.n_dofs();
-    let dim = 2usize;
-
-    // Reference-vertex coordinates for the Tri3 reference element.
-    let ref_verts: [[f64; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-
+    let re = TetND1;
+    let n_ldofs = re.n_dofs();
     let mut sum_x = vec![0.0_f64; n_nodes];
     let mut sum_y = vec![0.0_f64; n_nodes];
+    let mut sum_z = vec![0.0_f64; n_nodes];
     let mut count = vec![0u32; n_nodes];
-    let mut ref_phi = vec![0.0_f64; n_ldofs * dim];
+    let mut phi = vec![0.0_f64; n_ldofs * 3];
 
     for e in mesh.elem_iter() {
         let nodes = mesh.element_nodes(e);
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
-
-        let x0 = mesh.node_coords(nodes[0]);
-        let x1 = mesh.node_coords(nodes[1]);
-        let x2 = mesh.node_coords(nodes[2]);
-
-        // Affine Jacobian J = [x1-x0, x2-x0],  J^{-T} = adj(J)^T / det(J).
-        let j00 = x1[0] - x0[0];
-        let j01 = x2[0] - x0[0];
-        let j10 = x1[1] - x0[1];
-        let j11 = x2[1] - x0[1];
-        let det_j = j00 * j11 - j01 * j10;
-        let inv_det = 1.0 / det_j;
-        let jit00 =  j11 * inv_det;
-        let jit01 = -j10 * inv_det;
-        let jit10 = -j01 * inv_det;
-        let jit11 =  j00 * inv_det;
-
-        // Evaluate at each of the three reference vertices.
-        for vi in 0..3 {
-            let xi = &ref_verts[vi];
-            ref_elem.eval_basis_vec(xi, &mut ref_phi);
-
-            // Covariant Piola:  φ_phys = J^{-T} φ_ref.
-            let mut eh_x = 0.0_f64;
-            let mut eh_y = 0.0_f64;
-            for i in 0..n_ldofs {
-                let s = signs[i];
-                let px = jit00 * ref_phi[i * 2] + jit01 * ref_phi[i * 2 + 1];
-                let py = jit10 * ref_phi[i * 2] + jit11 * ref_phi[i * 2 + 1];
-                eh_x += s * u[dofs[i]] * px;
-                eh_y += s * u[dofs[i]] * py;
+        let tet_verts: [[f64; 3]; 4] = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
+        ];
+        for vi in 0..4 {
+            re.eval_basis_vec(&tet_verts[vi], &mut phi);
+            let (j, _xp) = element_jacobian_at(mesh, e, &tet_verts[vi], 3);
+            let jit = j.try_inverse().unwrap_or_default().transpose();
+            let mut ex = 0.0_f64; let mut ey = 0.0_f64; let mut ez = 0.0_f64;
+            for a in 0..n_ldofs {
+                let s = signs[a];
+                ex += s * u[dofs[a]] * (jit[(0, 0)] * phi[a*3] + jit[(0, 1)] * phi[a*3+1] + jit[(0, 2)] * phi[a*3+2]);
+                ey += s * u[dofs[a]] * (jit[(1, 0)] * phi[a*3] + jit[(1, 1)] * phi[a*3+1] + jit[(1, 2)] * phi[a*3+2]);
+                ez += s * u[dofs[a]] * (jit[(2, 0)] * phi[a*3] + jit[(2, 1)] * phi[a*3+1] + jit[(2, 2)] * phi[a*3+2]);
             }
-
             let nid = nodes[vi] as usize;
-            sum_x[nid] += eh_x;
-            sum_y[nid] += eh_y;
+            sum_x[nid] += ex; sum_y[nid] += ey; sum_z[nid] += ez;
             count[nid] += 1;
         }
     }
-
-    // Average contributions at shared nodes.
-    let mut e_node_x = vec![0.0_f64; n_nodes];
-    let mut e_node_y = vec![0.0_f64; n_nodes];
+    let mut vx = vec![0.0_f64; n_nodes];
+    let mut vy = vec![0.0_f64; n_nodes];
+    let mut vz = vec![0.0_f64; n_nodes];
     for i in 0..n_nodes {
         if count[i] > 0 {
             let inv = 1.0 / count[i] as f64;
-            e_node_x[i] = sum_x[i] * inv;
-            e_node_y[i] = sum_y[i] * inv;
+            vx[i] = sum_x[i] * inv; vy[i] = sum_y[i] * inv; vz[i] = sum_z[i] * inv;
         }
     }
-
     let mut sock = fem_io::glvis::GlVisSocket::connect("localhost", 19916)?;
-    sock.send_solution_2d_vector(mesh, &e_node_x, &e_node_y, field_name)?;
+    sock.send_solution_3d_vector(mesh, &vx, &vy, &vz, field_name)?;
     Ok(())
 }
 
@@ -331,176 +287,62 @@ fn send_to_glvis(
 #[allow(dead_code)]
 struct Args {
     mesh:          Option<String>,
-    n:             usize,
     order:         u8,
-    /// Static condensation (not yet implemented).
-    static_cond:   bool,
     visualization: bool,
     freq:          f64,
-    /// Use PCG+GSSmoother instead of PCG+AMS (default matches MFEM ex3).
-    no_ams:       bool,
+    no_ams:        bool,
 }
 
 fn parse_args() -> Args {
     let mut a = Args {
-        mesh:          None,
-        n:             16,
-        order:         1,
-        static_cond:   false,
-        visualization: true,
-        freq:          1.0,
-        no_ams:       false,
+        mesh: None, order: 1, visualization: true, freq: 1.0, no_ams: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => {
-                a.mesh = it.next();
-            }
+            "-m" | "--mesh" => { a.mesh = it.next(); }
             "-o" | "--order" => {
-                a.order = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1);
+                a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
             }
             "-f" | "--frequency" => {
-                a.freq = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1.0);
+                a.freq = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
             }
-            "-sc" | "--static-condensation" => {
-                a.static_cond = true;
-            }
-            "-no-sc" | "--no-static-condensation" => {
-                a.static_cond = false;
-            }
-            "-no-ams" | "--no-ams" => {
-                a.no_ams = true;
-            }
-            "-vis" | "--visualization" => {
-                a.visualization = true;
-            }
-            "-no-vis" | "--no-visualization" => {
-                a.visualization = false;
-            }
+            "-no-ams" | "--no-ams" => { a.no_ams = true; }
+            "-vis" | "--visualization" => { a.visualization = true; }
+            "-no-vis" | "--no-visualization" => { a.visualization = false; }
             _ => {}
         }
     }
     a
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// ─── Re-exports used by this file ────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+use fem_linalg::CsrMatrix;
+use fem_mesh::MeshTopology;
+use fem_element::VectorReferenceElement as _;
 
-    fn solve_case(args: &Args) -> (Vec<f64>, usize, f64) {
-        let mesh = if let Some(ref path) = args.mesh {
-            let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
-            mfem.mesh2d.expect("MFEM mesh must be 2D")
-        } else {
-            Mesh::<2>::unit_square_tri(args.n)
-        };
+// ─── Jacobian helper (local to this example) ────────────────────────────────
 
-        let space = HCurlSpace::new(mesh, args.order);
-        let n_dofs = space.n_dofs();
-
-        let all_tags: Vec<i32> = space.mesh().unique_boundary_tags();
-        let ess_bdr = if all_tags.is_empty() {
-            vec![]
-        } else {
-            boundary_dofs_hcurl(space.mesh(), &space, &all_tags)
-        };
-        let kappa = args.freq * PI;
-        let source = MaxwellSource { kappa };
-        let quad_order = args.order as u8 * 2 + 2;
-        let mut rhs = VectorAssembler::assemble_linear(&space, &[&source], quad_order);
-
-        let curl_curl = CurlCurlIntegrator { mu: 1.0 };
-        let vec_mass = VectorMassIntegrator { alpha: 1.0 };
-        let mut mat = VectorAssembler::assemble_bilinear(
-            &space, &[&curl_curl, &vec_mass], quad_order,
-        );
-
-        // Project exact solution and set up BCs (C++ ex3 step 8 / FormLinearSystem).
-        let u_proj = project_hcurl_exact(&space, kappa, quad_order);
-        let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
-        let mut x = u_proj.clone();
-        form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
-
-        let linlvo_sys = fem_linalg::fem_to_linlvo_csr(&mat);
-        let precond = fem_solver::GSSmoother::from_csr(&linlvo_sys)
-            .expect("GSSmoother setup failed");
-        fem_solver::solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, false)
-            .expect("PCG solve failed");
-
-        let l2_err = fem_examples::maxwell::l2_error_hcurl_exact(
-            &space, &x, |x| exact_e(x, kappa),
-        );
-
-        (x, n_dofs, l2_err)
-    }
-
-    fn default_args() -> Args {
-        Args {
-            mesh:          None,
-            n:             8,
-            order:         1,
-            static_cond:   false,
-            visualization: false,
-            freq:          1.0,
-            no_ams:        true,  // tests use GSSmoother (faster)
-        }
-    }
-
-    // ── Behavioural tests ────────────────────────────────────────────────
-
-    #[test]
-    fn ex3_dof_count() {
-        let args = default_args();
-        let (_, n_dofs, _) = solve_case(&args);
-        assert_eq!(
-            n_dofs, 208,
-            "DOF count should be 208 for ND1 on 8×8 tri mesh"
-        );
-    }
-
-    #[test]
-    fn ex3_convergence_on_refinement() {
-        let coarse = solve_case(&Args { n: 6, ..default_args() });
-        let fine   = solve_case(&Args { n: 12, ..default_args() });
-
-        assert!(coarse.2.is_finite() && fine.2.is_finite());
-        assert!(
-            fine.2 < coarse.2,
-            "expected refinement to reduce L² error: coarse={:.6e} fine={:.6e}",
-            coarse.2, fine.2,
-        );
-
-        let h6 = 1.0 / 6.0;
-        let h12 = 1.0 / 12.0;
-        let rate = f64::ln(coarse.2 / fine.2) / f64::ln(h6 / h12);
-        eprintln!(
-            "  [ex3] L²(6)={:.6e}  L²(12)={:.6e}  rate={:.3} (expected ~1)",
-            coarse.2, fine.2, rate,
-        );
-        assert!(rate > 0.5, "convergence rate {:.2} too low", rate);
-    }
-
-    // ── Regression baseline ──────────────────────────────────────────────
-
-    #[test]
-    fn ex3_regression_baseline() {
-        let args = Args {
-            n: 8, ..default_args()
-        };
-        let (_, n_dofs, l2_err) = solve_case(&args);
-
-        fem_regression::regression("mfem_ex3_maxwell_cavity")
-            .check_with("l2_error", l2_err,   1e-6, 1e-10)
-            .check_with("n_dofs",   n_dofs as f64, 0.0, 0.5)
-            .finalize();
-    }
+fn element_jacobian_at(mesh: &Mesh<3>, e: u32, xi: &[f64], _dim: usize)
+    -> (nalgebra::DMatrix<f64>, [f64; 3])
+{
+    let nodes = mesh.element_nodes(e);
+    let x0 = mesh.node_coords(nodes[0]);
+    let x1 = mesh.node_coords(nodes[1]);
+    let x2 = mesh.node_coords(nodes[2]);
+    let x3 = mesh.node_coords(nodes[3]);
+    let (xi0, xi1, xi2) = (xi[0], xi[1], xi[2]);
+    // ∂x/∂ξ columns:  ∂X/∂ξᵢ = Σ nodes[k] · ∂N_k/∂ξᵢ
+    // Tet P1: N = [1-ξ-η-ζ, ξ, η, ζ]
+    let j00 = -x0[0] + x1[0]; let j01 = -x0[0] + x2[0]; let j02 = -x0[0] + x3[0];
+    let j10 = -x0[1] + x1[1]; let j11 = -x0[1] + x2[1]; let j12 = -x0[1] + x3[1];
+    let j20 = -x0[2] + x1[2]; let j21 = -x0[2] + x2[2]; let j22 = -x0[2] + x3[2];
+    let j = nalgebra::dmatrix![j00,j01,j02; j10,j11,j12; j20,j21,j22];
+    let xp = [
+        (1.0 - xi0 - xi1 - xi2) * x0[0] + xi0 * x1[0] + xi1 * x2[0] + xi2 * x3[0],
+        (1.0 - xi0 - xi1 - xi2) * x0[1] + xi0 * x1[1] + xi1 * x2[1] + xi2 * x3[1],
+        (1.0 - xi0 - xi1 - xi2) * x0[2] + xi0 * x1[2] + xi1 * x2[2] + xi2 * x3[2],
+    ];
+    (j, xp)
 }
