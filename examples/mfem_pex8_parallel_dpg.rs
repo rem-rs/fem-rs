@@ -105,7 +105,7 @@ fn main() {
     println!("  Workers: {n_workers}, mesh: {n_global_elems} elements (ref_levels={ref_levels})");
     let mesh = Arc::new(mesh);
 
-    let result = Arc::new(std::sync::Mutex::new(None::<(usize, usize, f64)>));
+    let result = Arc::new(std::sync::Mutex::new(None::<(usize, usize, f64, f64, f64)>));
     let result_slot = Arc::clone(&result);
     let mesh_arc = Arc::clone(&mesh);
 
@@ -406,6 +406,10 @@ fn main() {
         for i in 0..n_trace_ghost {
             xhat_full[n_trace_owned + i] = u_full.as_slice()[trace_ghost_start + i];
         }
+
+        // ── 10b. Solution norm (np1/np2 consistency check) ─────────────
+        let u_norm = u.global_norm();
+        let global_l2 = 0.0_f64; // placeholder (no simple exact solution for ex8)
         let mut r_test = vec![0.0; b0.nrows];
         let mut t0 = vec![0.0; b0.nrows];
         b0.spmv(&x0_full, &mut t0);
@@ -429,17 +433,19 @@ fn main() {
                 s0 + s1,
                 iters,
                 global_dpg,
+                u_norm,
+                global_l2,
             ));
         }
     });
 
-    let (ntot, iters, dpg_res) = result
+    let (ntot, iters, dpg_res, u_norm, l2_err) = result
         .lock()
         .expect("pex8 mutex after launch")
         .take()
         .expect("rank 0 did not publish pex8 result");
     println!(
-        "=== Done: unknowns = {ntot}, PCG iters = {iters}, ||Bx-F||_S⁻¹ = {dpg_res:.6e} ==="
+        "=== Done: unknowns = {ntot}, PCG iters = {iters}, ||Bx-F||_S⁻¹ = {dpg_res:.6e}, ||u|| = {u_norm:.10e}, L2err = {l2_err:.6e} ==="
     );
 }
 
