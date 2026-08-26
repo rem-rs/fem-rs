@@ -40,11 +40,16 @@ fn main() {
     // 2. Device setup — skipped (no Rust equivalent of MFEM's Device class).
 
     // 3. Read the mesh from the given mesh file.
+    //    MFEM ex1 defaults to `star.mesh` (20-element triangular mesh); the
+    //    refinement loop below then targets ≤ 50 000 elements, matching C++.
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
-    } else {
+    } else if args.n > 0 {
         Mesh::<2>::unit_square_tri(args.n)
+    } else {
+        let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
+        mfem.mesh2d.expect("MFEM mesh must be 2D")
     };
     let dim = 2;
 
@@ -140,7 +145,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut a = Args {
         mesh:          None,
-        n:             16,
+        n:             0, // 0 → default to data/star.mesh (MFEM ex1 default)
         order:         1,
         _static_cond:  false,
         visualization: true,
@@ -159,6 +164,9 @@ fn parse_args() -> Args {
             }
             "-sc" | "--static-condensation" => {
                 a._static_cond = true;
+            }
+            "-n" | "--n" => {
+                a.n = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
             "-vis" | "--visualization" => {
                 a.visualization = true;
