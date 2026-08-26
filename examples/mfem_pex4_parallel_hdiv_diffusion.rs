@@ -27,8 +27,8 @@ use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_assembler::{permute_csr, permute_vec};
 use fem_parallel::{
-    ParCsrMatrix, ParVector, ParallelFESpace, WorkerConfig,
-    par_partition::partition_mesh, par_solve_gmres_jacobi, par_solve_pcg_jacobi,
+    ParAmgConfig, ParCsrMatrix, ParVector, ParallelFESpace, SmootherType, WorkerConfig,
+    par_partition::partition_mesh, par_solve_pcg_amg,
 };
 use fem_parallel::par_mesh::ParallelMesh;
 use fem_solver::SolverConfig;
@@ -143,29 +143,54 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
             comm.clone(),
         );
 
-        // 6. Essential BCs with the projected boundary values.  The row
-        //    elimination (diag=1, rhs[ess]=value) with columns retained is
-        //    mathematically equivalent to MFEM's symmetric FormLinearSystem:
-        //    the un-eliminated ess columns carry the A·x_bc contribution on
-        //    the LHS, so B must NOT be pre-subtracted (that would double it).
-        for &d in &ess {
-            let pid = dof_part.permute_dof(d) as usize;
-            if pid < n_owned {
-                let bc_val = u.owned_slice()[pid];
-                a_mat.apply_dirichlet_par(pid, bc_val, &mut rhs);
+        // 6. Essential BCs with the projected boundary values.
+        //    DIAG_KEEP elimination (symmetric, matching C++ FormLinearSystem)
+        //    + PCG + AMG (C++: HyprePCG + HypreAMS).
+        let ess_global: Vec<u32> = ess
+            .iter()
+            .map(|&d| dof_part.global_dof(dof_part.permute_dof(d)))
+            .collect();
+        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
+        for r in 0..comm.size() as i32 {
+            if r == comm.rank() { continue; }
+            let mut bytes = Vec::with_capacity(ess_global.len() * 4);
+            for &g in &ess_global {
+                bytes.extend_from_slice(&g.to_le_bytes());
+            }
+            sends.push((r, bytes));
+        }
+        let incoming = comm.alltoallv_bytes(&sends);
+        let mut all_bnd: std::collections::HashSet<u32> = ess_global.iter().copied().collect();
+        for (_, bytes) in incoming {
+            for chunk in bytes.chunks_exact(4) {
+                all_bnd.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
             }
         }
+        let clamped: Vec<usize> = (0..dof_part.n_owned_dofs)
+            .filter(|&pid| all_bnd.contains(&dof_part.global_dof(pid as u32)))
+            .collect();
+        for &pid in &clamped {
+            let bc_val = u.owned_slice()[pid];
+            a_mat.apply_dirichlet_par_keep_diag(pid, bc_val, &mut rhs);
+        }
 
-        // 7. Solve: GMRES + Jacobi (C++: CG + HypreAMS, rtol 1e-12). GMRES
-        //    because the row-only Dirichlet elimination leaves a nonsymmetric
-        //    system (columns retained).
+        // 7. Solve: PCG + AMG (C++: HyprePCG + HypreAMS, rtol 1e-12).
         let cfg = SolverConfig {
             rtol: 1e-8,
             max_iter: 5000,
             verbose: false,
             ..SolverConfig::default()
         };
-        let res = par_solve_gmres_jacobi(&a_mat, &rhs, &mut u, 50, &cfg).unwrap();
+        let amg_cfg = ParAmgConfig {
+            smoother: SmootherType::SymmetricGaussSeidel,
+            n_pre_smooth: 2,
+            n_post_smooth: 2,
+            smoothed_prolongation: true,
+            block_size: 1,
+            use_global_aggregation: false,
+            ..ParAmgConfig::default()
+        };
+        let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).unwrap();
 
         // 8. L2 error over owned elements (u partition order → dm order).
         //    compute_hdiv_l2_error_owned already returns the sqrt'ed norm, so
