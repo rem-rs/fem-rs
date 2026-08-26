@@ -171,7 +171,10 @@ macro_rules! amr_loop {
             for n in 0..nn {
                 let c = mesh.node_coords(n as u32);
                 for d in 0..dim {
-                    let u_d = if (n as usize) < ns_final { u_final[d * ns_final + (n as usize)] } else { 0.0 };
+                    let u_d = if (n as usize) < ns_final
+                        && d * ns_final + (n as usize) < u_final.len() {
+                        u_final[d * ns_final + (n as usize)]
+                    } else { 0.0 };
                     def_coords[(n as usize) * dim + d] = c[d] + u_d;
                 }
             }
