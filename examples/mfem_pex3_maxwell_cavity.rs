@@ -6,9 +6,8 @@
 //! ref_levels (≤1000 elems → 2) then 2 parallel uniform refinements
 //! (4 total, done serially before partitioning), ND1 (ND_FECollection(1,2))
 //! H(curl) space, muinv = sigma = 1, exact solution
-//! `E = (sin(κy), sin(κx))`, `f = (1+κ²)·E`, κ = π.  CG + AMS in C++;
-//! Rust uses GMRES + Jacobi (row-only Dirichlet elimination leaves a
-//! nonsymmetric system, see pex4 notes).
+//! `E = (sin(κy), sin(κx))`, `f = (1+κ²)·E`, κ = π.  C++ uses HyprePCG + HypreAMS;
+//! Rust uses PCG + AMG (DIAG_KEEP symmetric elimination, matching C++ FormLinearSystem).
 //!
 //! ## Usage
 //! ```bash
@@ -31,13 +30,12 @@ use fem_io::glvis::GlVisSocket;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
 use fem_parallel::{
     ParVectorAssembler, ParVector, ParallelFESpace,
-    par_partition::partition_mesh, par_solve_gmres_jacobi,
-    WorkerConfig,
+    par_partition::partition_mesh,
+    WorkerConfig, DofPartition, ParAmgConfig, SmootherType, par_solve_pcg_amg,
 };
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_solver::SolverConfig;
 use fem_space::{HCurlSpace, fe_space::FESpace, constraints::boundary_dofs_hcurl};
-use fem_parallel::DofPartition;
 
 struct Src { kappa: f64 }
 impl VectorLinearIntegrator for Src {
@@ -128,10 +126,8 @@ fn main() {
         let mut rhs = ParVectorAssembler::assemble_linear(&ps, &[&Src { kappa }], quad_order);
 
         // PEC BC — zero tangential field on all boundaries.  Non-homogeneous
-        // (MFEM ex3p: x.ProjectCoefficient(E)): row-only elimination with
-        // columns retained carries the A·x_bc contribution on the LHS, so B
-        // must NOT be pre-subtracted; the resulting system is nonsymmetric →
-        // solve with GMRES (see pex4 notes).
+        // (MFEM ex3p: x.ProjectCoefficient(E)): DIAG_KEEP elimination (symmetric
+        // system, matching C++ FormLinearSystem) + PCG + AMG (C++: HyprePCG + HypreAMS).
         let bdr = boundary_dofs_hcurl(ps.local_space().mesh(), ps.local_space(), &[1]);
         let dp = ps.dof_partition();
         let n_owned = dp.n_owned_dofs;
@@ -146,17 +142,49 @@ fn main() {
             comm.clone(),
         );
 
-        for &d in &bdr {
-            let p = dp.permute_dof(d) as usize;
-            if p < n_owned {
-                let bc_val = u.owned_slice()[p];
-                stiff.apply_dirichlet_par(p, bc_val, &mut rhs);
+        // Collect global IDs of locally-essential DOFs for cross-rank exchange
+        // (matching C++ GetEssentialTrueDofs + parallel distribution).
+        let local_bnd_global: Vec<u32> = bdr
+            .iter()
+            .map(|&d| dp.global_dof(dp.permute_dof(d)))
+            .collect();
+        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
+        for r in 0..comm.size() as i32 {
+            if r == comm.rank() { continue; }
+            let mut bytes = Vec::with_capacity(local_bnd_global.len() * 4);
+            for &g in &local_bnd_global {
+                bytes.extend_from_slice(&g.to_le_bytes());
             }
+            sends.push((r, bytes));
+        }
+        let incoming = comm.alltoallv_bytes(&sends);
+        let mut all_bnd: std::collections::HashSet<u32> = local_bnd_global.iter().copied().collect();
+        for (_, bytes) in incoming {
+            for chunk in bytes.chunks_exact(4) {
+                all_bnd.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
+            }
+        }
+        // DIAG_KEEP elimination for owned essential DOFs (symmetric, keeps diag).
+        let clamped: Vec<usize> = (0..dp.n_owned_dofs)
+            .filter(|&pid| all_bnd.contains(&dp.global_dof(pid as u32)))
+            .collect();
+        for &pid in &clamped {
+            let bc_val = u.owned_slice()[pid];
+            stiff.apply_dirichlet_par_keep_diag(pid, bc_val, &mut rhs);
         }
 
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..Default::default() };
-        let res = par_solve_gmres_jacobi(&stiff, &rhs, &mut u, 50, &cfg)
-            .expect("GMRES solve failed");
+        let amg_cfg = ParAmgConfig {
+            smoother: SmootherType::SymmetricGaussSeidel,
+            n_pre_smooth: 2,
+            n_post_smooth: 2,
+            smoothed_prolongation: true,
+            block_size: 1,
+            use_global_aggregation: false,
+            ..ParAmgConfig::default()
+        };
+        let res = par_solve_pcg_amg(&stiff, &rhs, &mut u, &amg_cfg, &cfg)
+            .expect("PCG+AMG solve failed");
 
         if comm.rank() == 0 {
             println!("PCG Iterations = {}", res.iterations);
