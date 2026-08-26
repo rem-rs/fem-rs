@@ -1,190 +1,370 @@
-//! Parallel geometric multigrid (pex26). Usage: --n 16 --ranks 2 --levels 3
+//! # Parallel Example 26 — Geometric Multigrid (1:1 with MFEM ex26p)
+//!
+//! Parallel Poisson −Δu = 1 with homogeneous Dirichlet BC, solved with PCG
+//! preconditioned by a geometric multigrid (p-refinement hierarchy P1→P2→P4,
+//! matching MFEM ex26p defaults: `-or 2`, no geometric refinements).
+//!
+//! C++ ex26p flow:
+//!   1. serial mesh → uniform refine so NE ≤ 1000
+//!   2. ParMesh = partition(serial mesh), then 2 parallel uniform refinements
+//!   3. ParFiniteElementSpaceHierarchy: coarse P1 + order refinements P2, P4
+//!   4. DiffusionMultigrid: coarse = AMG + CG; fine = Chebyshev smoothers
+//!   5. CGSolver(rtol 1e-12, max 2000) with the MG as preconditioner
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex26_parallel_geom_mg -- --ranks 2
+//! cargo run --release --example mfem_pex26_parallel_geom_mg -- --ranks 4 -or 1
+//! ```
+
 use std::sync::{Arc, Mutex};
-use fem_assembly::Assembler;
-use fem_assembly::standard::DiffusionIntegrator;
-use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::Mesh;
-use fem_mesh::topology::MeshTopology;
-use fem_parallel::{
-    launcher::native::ThreadLauncher, WorkerConfig, par_partition::partition_mesh,
+
+use fem_assembly::{
+    Assembler,
+    standard::{DiffusionIntegrator, DomainSourceIntegrator},
 };
-use fem_solver::{SolverConfig, GeomMGHierarchy, GeomMGPrecond, solve_vcycle_geom_mg};
-use fem_space::H1Space;
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_parallel::ParAssembler;
+use fem_parallel::launcher::native::ThreadLauncher;
+use fem_parallel::par_partition::partition_mesh;
+use fem_parallel::par_refine::par_uniform_refine;
+use fem_parallel::par_assembler::permute_vec;
+use fem_parallel::{
+    DofPartition, ParCsrMatrix, ParVector, ParallelFESpace,
+    WorkerConfig,
+};
+use fem_solver::SolverConfig;
+use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
+use fem_space::build_h1_prolongation_matrix;
+
+/// One level's prolongation/restriction pair (local CSR, partition order).
+struct MgTransfer {
+    /// Prolongation P: fine_owned × coarse_total (fine ← coarse).
+    prolong_local: fem_linalg::CsrMatrix<f64>,
+    /// Restriction R: coarse_owned × fine_total (coarse ← fine).
+    restrict_local: fem_linalg::CsrMatrix<f64>,
+    coarse_owned: usize,
+    /// Coarse-space DofPartition (for global-id cross-rank sum).
+    coarse_dp_for_global: DofPartition,
+}
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
-    let n = a.iter().position(|x| x == "--n").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(16);
-    let r = a.iter().position(|x| x == "--ranks").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(2);
-    let levels: usize = a.iter().position(|x| x == "--levels").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let args: Vec<String> = std::env::args().collect();
+    let ranks: usize = arg(&args, "--ranks").unwrap_or(2);
+    let order_refs: usize = arg(&args, "-or").unwrap_or(2);
+    let par_refs: usize = arg(&args, "-rp").unwrap_or(2);
 
-    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
-    let res = Arc::new(Mutex::new(None)); let rs = Arc::clone(&res);
+    // 1. Serial mesh (star.mesh — ex26p default) + uniform refine ≤ 1000 elems.
+    let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
+    let mut mesh: Mesh<2> = mfem.mesh2d.expect("star.mesh must be 2-D");
+    let dim = 2;
+    let ne = mesh.n_elems();
+    let auto_ser = if ne > 0 {
+        ((1000.0 / ne as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as usize
+    } else { 0 };
+    let ser_refs = if args.iter().any(|a| a == "-rs") { arg(&args, "-rs").unwrap() } else { auto_ser };
+    for _ in 0..ser_refs { mesh = fem_mesh::refine_uniform(&mesh); }
+    let mesh = Arc::new(mesh);
 
-    ThreadLauncher::new(WorkerConfig::new(r)).launch(move |c| {
-        let pm = partition_mesh(&mesh, &c);
-        let lm = pm.local_mesh().clone();
+    let result = Arc::new(Mutex::new(None::<String>));
+    let result_slot = Arc::clone(&result);
+    let mesh_arc = Arc::clone(&mesh);
 
-        // Build GMG hierarchy on local mesh
-        let mut meshes = vec![lm];
-        for _l in 1..levels {
-            let refined = refine_tri_mesh(meshes.last().unwrap());
-            meshes.push(refined);
+    ThreadLauncher::new(WorkerConfig::new(ranks)).launch(move |comm| {
+        let rank = comm.rank();
+        // 2. Partition + parallel uniform refinements.
+        let mut pm = partition_mesh(&mesh_arc, &comm);
+        for _ in 0..par_refs { pm = par_uniform_refine(&pm); }
+        let local_mesh = pm.local_mesh().clone();
+
+        // 3. p-refinement hierarchy: orders 1, 2, 4, ...
+        let mut orders: Vec<u8> = vec![1];
+        for k in 1..=order_refs { orders.push(1u8 << k); }
+        let n_levels = orders.len();
+
+        // Parallel spaces per level (same local mesh, different order).
+        let mut spaces: Vec<ParallelFESpace<H1Space<Mesh<2>>>> = Vec::new();
+        for &o in &orders {
+            let dm = fem_space::dof_manager::DofManager::new(&local_mesh, o);
+            spaces.push(ParallelFESpace::new_with_dof_manager(
+                H1Space::new(local_mesh.clone(), o), &pm, &dm, comm.clone(),
+            ));
+        }
+        let n_global = spaces.last().unwrap().n_global_dofs();
+        if rank == 0 { println!("Number of finite element unknowns: {n_global}"); }
+
+        // 4. Boundary (all) → homogeneous Dirichlet.
+        let bnd_tags: Vec<i32> = local_mesh.unique_boundary_tags();
+        let qo = |o: u8| (2 * o + 1).max(3) as u8;
+
+        // 5. Assemble diffusion matrix per level + symmetric BC elimination.
+        let mut mats: Vec<ParCsrMatrix> = Vec::with_capacity(n_levels);
+        for (i, sp) in spaces.iter().enumerate() {
+            let mut m = ParAssembler::assemble_bilinear(sp, &[&DiffusionIntegrator { kappa: 1.0 }], qo(orders[i]));
+            let bc = boundary_dofs(sp.local_space().mesh(), sp.local_space().dof_manager(), &bnd_tags);
+            let owned_ess: Vec<usize> = bc.iter()
+                .map(|&d| sp.dof_partition().permute_dof(d as u32) as usize)
+                .filter(|&p| p < sp.dof_partition().n_owned_dofs)
+                .collect();
+            m.eliminate_diag_symmetric(&owned_ess, 1.0);
+            mats.push(m);
         }
 
-        // Assemble stiffness at each level
-        let mut matrices: Vec<CsrMatrix<f64>> = Vec::with_capacity(levels);
-        for l in 0..levels {
-            let space = H1Space::new(meshes[l].clone(), 1);
-            let stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 2);
-            matrices.push(stiff);
+        // 6. Build MgTransfer per level boundary (fine ← coarse).
+        let mut transfers: Vec<MgTransfer> = Vec::with_capacity(n_levels - 1);
+        for l in 0..n_levels - 1 {
+            let c_dm = fem_space::dof_manager::DofManager::new(&local_mesh, orders[l]);
+            let f_dm = fem_space::dof_manager::DofManager::new(&local_mesh, orders[l + 1]);
+            let p_dm = build_h1_prolongation_matrix(&local_mesh, &c_dm, &local_mesh, &f_dm);
+            let fine_dp = spaces[l + 1].dof_partition().clone();
+            let coarse_dp = spaces[l].dof_partition().clone();
+            let (prolong_local, restrict_local) = to_partition_order(
+                &p_dm, &fine_dp, &coarse_dp,
+            );
+            if rank == 0 {
+
+                    orders[l], orders[l + 1],
+                    prolong_local.nrows, prolong_local.ncols,
+                    restrict_local.nrows, restrict_local.ncols,
+                    spaces[l].dof_partition().n_owned_dofs);
+            }
+
+                l, mats[l].n_ghost(), l, spaces[l].dof_partition().n_ghost_dofs);
+            transfers.push(MgTransfer {
+                prolong_local,
+                restrict_local,
+                coarse_owned: spaces[l].dof_partition().n_owned_dofs,
+                coarse_dp_for_global: spaces[l].dof_partition().clone(),
+            });
         }
 
-        // Build prolongation between levels
-        let mut prolongs: Vec<CsrMatrix<f64>> = Vec::with_capacity(levels);
-        for l in 0..levels - 1 {
-            let p = build_prolongation(&meshes[l], &meshes[l + 1]);
-            prolongs.push(p);
-        }
+        // 7. RHS on the finest space.
+        let fine_sp = spaces.last().unwrap();
+        let fine_order = *orders.last().unwrap();
+        let mut rhs_local = Assembler::assemble_linear(
+            fine_sp.local_space(), &[&DomainSourceIntegrator::new(|_| 1.0)], qo(fine_order),
+        );
+        let bc_fine = boundary_dofs(
+            fine_sp.local_space().mesh(), fine_sp.local_space().dof_manager(), &bnd_tags,
+        );
+        for &d in &bc_fine { rhs_local[d as usize] = 0.0; }
+        let dp_fine = fine_sp.dof_partition();
+        let rhs_perm = permute_vec(&rhs_local, dp_fine);
+        let mut rhs = ParVector::from_local_raw(
+            rhs_perm, dp_fine.n_owned_dofs, fine_sp.dof_ghost_exchange_arc(), comm.clone(),
+        );
+        rhs.update_ghosts();
+        let mut u = ParVector::zeros(fine_sp);
 
-        let hierarchy = GeomMGHierarchy::new(matrices, prolongs);
-        let mg = GeomMGPrecond::default();
-        let cfg = SolverConfig { rtol: 1e-8, max_iter: 100, ..Default::default() };
-
-        let n_dofs = hierarchy.levels[0].nrows;
-        let b = vec![1.0_f64; n_dofs];
-        let mut x = vec![0.0_f64; n_dofs];
-        let result = solve_vcycle_geom_mg(&hierarchy.levels[0], &b, &mut x, &hierarchy, &mg, &cfg);
-
-        let (ok, it) = match &result {
-            Ok(r) => (r.converged, r.iterations),
-            Err(_) => (false, 0),
+        // 8. MG preconditioner (PCG wrapper: r → z via V-cycle).
+        let n_owned_fine = dp_fine.n_owned_dofs;
+        let ghost_arc = fine_sp.dof_ghost_exchange_arc();
+        let comm2 = comm.clone();
+        let mats_arc = Arc::new(mats);
+        let trans_arc = Arc::new(transfers);
+        let mats_pc = Arc::clone(&mats_arc);
+        let precond = move |r: &[f64], z: &mut [f64]| {
+            let n_ghost_fine = mats_pc[n_levels - 1].n_ghost();
+            let mut rv = ParVector::zeros_raw(n_owned_fine, n_ghost_fine, ghost_arc.clone(), comm2.clone());
+            rv.owned_slice_mut().copy_from_slice(r);
+            rv.update_ghosts();
+            let mut zv = ParVector::zeros_like(&rv);
+            v_cycle(&trans_arc, &mats_pc, n_levels - 1, &rv, &mut zv, &comm2);
+            z[..n_owned_fine].copy_from_slice(&zv.as_slice()[..n_owned_fine]);
         };
-        *rs.lock().unwrap() = Some((ok, it, n_dofs));
+        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..Default::default() };
+        let res = fem_parallel::par_solve_pcg_precond(
+            &mats_arc[n_levels - 1], &rhs, &mut u, &precond, &cfg,
+        ).expect("PCG failed");
+        if rank == 0 {
+            *result_slot.lock().unwrap() = Some(format!(
+                "pex26: dofs={n_global} converged={} iters={} residual={:.3e}",
+                res.converged, res.iterations, res.final_residual,
+            ));
+        }
     });
 
-    let (ok, it, dof) = res.lock().unwrap().unwrap_or((false, 0, 0));
-    println!("pex26(levels={levels}): dofs={dof} converged={ok} iters={it}");
+    let taken = result.lock().expect("pex26 result mutex").take();
+    if let Some(s) = taken { println!("{s}"); }
 }
 
-// ─── Uniform mesh refinement (2D triangles) ────────────────────────────────
+/// Convert a dm-order prolongation P (fine_dm × coarse_dm) into partition-order
+/// local CSR matrices:
+///   - P_local: fine_owned × (coarse_owned + coarse_ghost)
+///   - R_local: coarse_owned × (fine_owned + fine_ghost)
+fn to_partition_order(
+    p_dm: &fem_linalg::CsrMatrix<f64>,
+    fine_dp: &DofPartition,
+    coarse_dp: &DofPartition,
+) -> (fem_linalg::CsrMatrix<f64>, fem_linalg::CsrMatrix<f64>) {
+    let n_fine_total = fine_dp.n_total_dofs();
+    let n_coarse_total = coarse_dp.n_total_dofs();
+    let n_fine_owned = fine_dp.n_owned_dofs;
 
-fn refine_tri_mesh(mesh: &Mesh<2>) -> Mesh<2> {
-    let n_nodes = mesh.n_nodes();
-    let n_elems = mesh.n_elems();
-    let mut edge_map: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    let mut p_coo = fem_linalg::CooMatrix::<f64>::new(n_fine_owned, n_coarse_total);
+    // Restriction covers ALL coarse slots (owned + ghost): each rank's local
+    // fine→coarse contributions go into owned *and* ghost coarse rows, then
+    // the V-cycle accumulates ghost contributions back to the owner.
+    let mut r_coo = fem_linalg::CooMatrix::<f64>::new(n_coarse_total, n_fine_total);
 
-    // Collect existing coordinates
-    let mut new_coords: Vec<f64> = Vec::with_capacity(2 * n_nodes);
-    for i in 0..n_nodes {
-        let c = mesh.node_coords(i as u32);
-        new_coords.push(c[0]);
-        new_coords.push(c[1]);
-    }
-    let mut next_node = n_nodes;
-    let mut new_conn = Vec::new();
-    let mut new_tags = Vec::new();
-
-    for e in 0..n_elems as u32 {
-        let ns = mesh.element_nodes(e);
-        let (a, b, c) = (ns[0] as usize, ns[1] as usize, ns[2] as usize);
-
-        let m_ab = mid(a, b, mesh, &mut new_coords, &mut edge_map, &mut next_node);
-        let m_bc = mid(b, c, mesh, &mut new_coords, &mut edge_map, &mut next_node);
-        let m_ca = mid(c, a, mesh, &mut new_coords, &mut edge_map, &mut next_node);
-
-        let children = [
-            [a as u32, m_ab as u32, m_ca as u32],
-            [m_ab as u32, b as u32, m_bc as u32],
-            [m_ca as u32, m_bc as u32, c as u32],
-            [m_ab as u32, m_bc as u32, m_ca as u32],
-        ];
-        for child in &children {
-            new_conn.extend_from_slice(child);
-            new_tags.push(1i32);
+    for fdm in 0..p_dm.nrows {
+        let fpart = fine_dp.permute_dof(fdm as u32) as usize;
+        if fpart >= n_fine_owned { continue; }
+        for k in p_dm.row_ptr[fdm]..p_dm.row_ptr[fdm + 1] {
+            let cdm = p_dm.col_idx[k] as usize;
+            let cpart = coarse_dp.permute_dof(cdm as u32) as usize;
+            let v = p_dm.values[k];
+            if v.abs() < 1e-30 { continue; }
+            p_coo.add(fpart, cpart, v);
+            // Row cpart may be owned or ghost; all contributions are kept
+            // locally and accumulated across ranks via reverse ghost.
+            r_coo.add(cpart, fpart, v);
         }
     }
-
-    Mesh::<2>::uniform(
-        new_coords, new_conn, new_tags,
-        fem_mesh::ElementType::Tri3,
-        vec![], vec![],
-        fem_mesh::ElementType::Line2,
-    )
+    (p_coo.into_csr(), r_coo.into_csr())
 }
 
-fn mid(
-    a: usize, b: usize,
-    mesh: &Mesh<2>,
-    coords: &mut Vec<f64>,
-    edge_map: &mut std::collections::HashMap<(u32, u32), usize>,
-    next_node: &mut usize,
-) -> usize {
-    let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
-    *edge_map.entry(key).or_insert_with(|| {
-        let ca = mesh.node_coords(a as u32);
-        let cb = mesh.node_coords(b as u32);
-        coords.push(0.5 * (ca[0] + cb[0]));
-        coords.push(0.5 * (ca[1] + cb[1]));
-        let idx = *next_node;
-        *next_node += 1;
-        idx
-    })
+/// Recursive V-cycle on the p-refinement hierarchy.
+/// `lvl` = matrix level (0 = P1, 1 = P2, ...); `b`/`x` live in the `lvl` space.
+/// `transfers[l]` carries P_{l+1} ← P_l (fine ← coarse).
+fn v_cycle(
+    transfers: &[MgTransfer],
+    mats: &[ParCsrMatrix],
+    lvl: usize,
+    b: &ParVector,
+    x: &mut ParVector,
+    comm: &fem_parallel::Comm,
+) {
+    let n_own = mats[lvl].n_owned();
+
+    // Coarsest level (P1): parallel CG with loose tolerance (the small P1
+    // system converges quickly; a few iterations suffice for the MG cycle).
+    if lvl == 0 {
+        let cfg = SolverConfig { rtol: 1e-4, atol: 0.0, max_iter: 30, verbose: false, ..Default::default() };
+        let mut xc = x.clone_vec();
+        xc.owned_slice_mut().fill(0.0);
+        let _ = fem_parallel::par_solve_cg(&mats[lvl], b, &mut xc, &cfg);
+        x.owned_slice_mut().copy_from_slice(&xc.as_slice()[..n_own]);
+
+        return;
+    }
+
+    let omega = 0.8;
+    // Pre-smooth: damped Jacobi.
+    let diag: Vec<f64> = mats[lvl].diag_block().diagonal();
+    for i in 0..n_own {
+        let d = if diag[i].abs() > 1e-30 { diag[i] } else { 1.0 };
+        x.as_slice_mut()[i] = omega * b.as_slice()[i] / d;
+    }
+
+    x.update_ghosts();
+
+
+    // Residual: r = b - A*x
+    let mut ax = ParVector::zeros_like(b);
+
+    mats[lvl].spmv(x, &mut ax);
+
+    let mut r = ParVector::zeros_like(b);
+    for i in 0..n_own { r.as_slice_mut()[i] = b.as_slice()[i] - ax.as_slice()[i]; }
+    r.update_ghosts();
+
+    // Restrict: r_c = R_{l-1} * r  (coarse_owned rows × fine_total cols).
+    let tr = &transfers[lvl - 1];
+    let n_coarse_own = tr.coarse_owned;
+    let mut r_c = vec![0.0_f64; n_coarse_own];
+    local_spmv(&tr.restrict_local, r.as_slice(), &mut r_c);
+    // Cross-rank sum of the coarse residual by GLOBAL dof id: each rank's
+    // local restriction contributes to the coarse dof's owner, which sums.
+    let coarse_dp = &transfers[lvl - 1].coarse_dp_for_global;
+    let global_r_c = global_sum_by_dof(&r_c, coarse_dp, comm);
+    let n_coarse_ghost = mats[lvl - 1].n_ghost();
+    let mut rv_c = ParVector::zeros_raw(
+        n_coarse_own, n_coarse_ghost,
+        mats[lvl - 1].ghost_exchange_arc(), comm.clone(),
+    );
+    rv_c.owned_slice_mut().copy_from_slice(&global_r_c);
+    rv_c.update_ghosts();
+    let mut ev_c = ParVector::zeros_like(&rv_c);
+    v_cycle(transfers, mats, lvl - 1, &rv_c, &mut ev_c, comm);
+
+    // Prolong: x += P_{l-1} * e_c  (fine_owned × coarse_total)
+    // Sync the coarse correction to ghost slots first (the recursive coarse
+    // solve only fills owned slots; prolongation needs ghost values too).
+    ev_c.update_ghosts();
+    let mut corr = vec![0.0_f64; n_own];
+    local_spmv(&tr.prolong_local, ev_c.as_slice(), &mut corr);
+    for i in 0..n_own { x.as_slice_mut()[i] += corr[i]; }
+    x.update_ghosts();
+
+    // Post-smooth: damped Jacobi on (b - A*x) residual update.
+    let mut ax2 = ParVector::zeros_like(b);
+    mats[lvl].spmv(x, &mut ax2);
+    let diag2: Vec<f64> = mats[lvl].diag_block().diagonal();
+    for i in 0..n_own {
+        let d = if diag2[i].abs() > 1e-30 { diag2[i] } else { 1.0 };
+        x.as_slice_mut()[i] += omega * (b.as_slice()[i] - ax2.as_slice()[i]) / d;
+    }
+    x.update_ghosts();
 }
 
-// ─── Prolongation ──────────────────────────────────────────────────────────
+/// Local CSR SpMV (diag-only; the operator's column range covers the input).
+fn local_spmv(a: &fem_linalg::CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+    for i in 0..a.nrows.min(y.len()) {
+        let mut s = 0.0;
+        for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let c = a.col_idx[k] as usize;
+            if c < x.len() { s += a.values[k] * x[c]; }
+        }
+        y[i] = s;
+    }
+}
 
-fn build_prolongation(mesh_fine: &Mesh<2>, mesh_coarse: &Mesh<2>) -> CsrMatrix<f64> {
-    let n_fine = mesh_fine.n_nodes();
-    let n_coarse = mesh_coarse.n_nodes();
-    let mut coo = CooMatrix::<f64>::new(n_fine, n_coarse);
+/// Sum `local` (indexed by coarse owned slots) across ranks by GLOBAL dof id.
+/// Each rank broadcasts its (gid, value) pairs; every rank accumulates the
+/// entries whose gid it owns (looked up via `local_dof`).  Correct for the
+/// mixed vertex/edge/interior global-id layout of `DofPartition`.
+fn global_sum_by_dof(
+    local: &[f64],
+    coarse_dp: &DofPartition,
+    comm: &fem_parallel::Comm,
+) -> Vec<f64> {
+    let n_owned = coarse_dp.n_owned_dofs;
+    let n_ranks = comm.size() as i32;
+    let rank = comm.rank();
 
-    for e_c in 0..mesh_coarse.n_elems() as u32 {
-        let cnodes = mesh_coarse.element_nodes(e_c);
-        let c0 = cnodes[0] as usize; let c1 = cnodes[1] as usize; let c2 = cnodes[2] as usize;
-        let cp = [
-            mesh_coarse.node_coords(cnodes[0]),
-            mesh_coarse.node_coords(cnodes[1]),
-            mesh_coarse.node_coords(cnodes[2]),
-        ];
+    // Broadcast (gid, value) of every owned slot to every other rank.
+    let mut send_bundles: Vec<(i32, Vec<u8>)> = Vec::new();
+    for r in 0..n_ranks {
+        if r == rank { continue; }
+        let mut payload = Vec::with_capacity(n_owned * 12);
+        for i in 0..n_owned {
+            let gid = coarse_dp.global_dof(i as u32);
+            payload.extend_from_slice(&gid.to_le_bytes());
+            payload.extend_from_slice(&local[i].to_le_bytes());
+        }
+        send_bundles.push((r, payload));
+    }
+    let recv = comm.alltoallv_bytes(&send_bundles);
 
-        for fn_idx in 0..n_fine {
-            let fp = mesh_fine.node_coords(fn_idx as u32);
-            let (bx, by, bz) = barycentric(cp[0], cp[1], cp[2], fp);
-            if bx >= -1e-10 && by >= -1e-10 && bz >= -1e-10 {
-                coo.add(fn_idx, c0, bx);
-                coo.add(fn_idx, c1, by);
-                coo.add(fn_idx, c2, bz);
+    // Start with our own contributions.
+    let mut owned_sum = local.to_vec();
+    // Accumulate contributions whose gid we own.
+    for (_src, bytes) in recv {
+        for chunk in bytes.chunks_exact(12) {
+            let gid = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+            let val = f64::from_le_bytes(chunk[4..12].try_into().unwrap());
+            if let Some(lid) = coarse_dp.local_dof(gid) {
+                if (lid as usize) < n_owned {
+                    owned_sum[lid as usize] += val;
+                }
             }
         }
     }
-    coo.into_csr()
+    owned_sum
 }
 
-fn barycentric(a: &[f64], b: &[f64], c: &[f64], p: &[f64]) -> (f64, f64, f64) {
-    let v0 = [c[0] - a[0], c[1] - a[1]];
-    let v1 = [b[0] - a[0], b[1] - a[1]];
-    let v2 = [p[0] - a[0], p[1] - a[1]];
-    let d00 = v0[0] * v0[0] + v0[1] * v0[1];
-    let d01 = v0[0] * v1[0] + v0[1] * v1[1];
-    let d11 = v1[0] * v1[0] + v1[1] * v1[1];
-    let d20 = v2[0] * v0[0] + v2[1] * v0[1];
-    let d21 = v2[0] * v1[0] + v2[1] * v1[1];
-    let denom = (d00 * d11 - d01 * d01).max(1e-30);
-    let v = (d11 * d20 - d01 * d21) / denom;
-    let w = (d00 * d21 - d01 * d20) / denom;
-    let u = 1.0 - v - w;
-    (u, w, v)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn geom_mg_converges_serial() {
-        let mesh = Mesh::<2>::unit_square_tri(4);
-        let n0 = mesh.n_nodes();
-        let refined = refine_tri_mesh(&mesh);
-        assert!(refined.n_nodes() > n0, "refinement should increase nodes");
-    }
+fn arg(args: &[String], key: &str) -> Option<usize> {
+    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok())
 }

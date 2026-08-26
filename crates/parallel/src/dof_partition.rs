@@ -263,8 +263,8 @@ impl DofPartition {
         // partition machinery: vertices, then edges (sorted by global node
         // pair), then element-interior DOFs (element order).
         assert!(
-            dof_manager.order == 2 || dof_manager.order == 3,
-            "DofPartition: only P1, P2 and P3 (quad) supported"
+            dof_manager.order >= 2 && dof_manager.order <= 4,
+            "DofPartition: only P2..=P4 (quad) supported"
         );
         let order = dof_manager.order as usize;
         let _interior_dofs_per = if order == 2 { 1 } else { (order - 1) * (order - 1) };
