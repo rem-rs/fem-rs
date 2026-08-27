@@ -11,7 +11,7 @@
 //! ```
 
 use fem_amg::AmgConfig;
-use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_ame};
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::{SolverConfig, eigen::LobpcgConfig};
@@ -88,10 +88,9 @@ fn main() {
                 let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr_attrs, &ess_bdr, 1.0, 1.0, qo);
                 let n_free = sys.hcurl_free_dofs.len();
                 println!("  Free DOFs: {n_free}, nullspace dim: {}", sys.constraints.ncols());
-                let eig_cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: true, ..LobpcgConfig::default() };
-                let inner_cfg = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..SolverConfig::default() };
-                let result = solve_hcurl_eigen_preconditioned_amg(&sys, args.nev, &eig_cfg, AmgConfig::default(), &inner_cfg)
-                    .expect("LOBPCG failed");
+                let eig_cfg = fem_solver::eigen::AmeConfig::default();
+                let result = solve_hcurl_eigen_ame(&sys, args.nev, &eig_cfg)
+                    .expect("AME failed");
                 for (i, &lam) in result.eigenvalues.iter().enumerate() {
                     println!("Eigenmode {}, Lambda = {:.14e}", i + 1, lam);
                 }
@@ -107,10 +106,9 @@ fn main() {
                 let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr_attrs, &ess_bdr, 1.0, 1.0, qo);
                 let n_free = sys.hcurl_free_dofs.len();
                 println!("  Free DOFs: {n_free}, nullspace dim: {}", sys.constraints.ncols());
-                let eig_cfg = LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: true, ..LobpcgConfig::default() };
-                let inner_cfg = SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..SolverConfig::default() };
-                let result = solve_hcurl_eigen_preconditioned_amg(&sys, args.nev, &eig_cfg, AmgConfig::default(), &inner_cfg)
-                    .expect("LOBPCG failed");
+                let eig_cfg = fem_solver::eigen::AmeConfig::default();
+                let result = solve_hcurl_eigen_ame(&sys, args.nev, &eig_cfg)
+                    .expect("AME failed");
                 for (i, &lam) in result.eigenvalues.iter().enumerate() {
                     println!("Eigenmode {}, Lambda = {:.14e}", i + 1, lam);
                 }
