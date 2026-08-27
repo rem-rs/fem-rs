@@ -154,30 +154,34 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
-    // G: owned_nd × total_h1.  Gᵀ: total_h1 × owned_nd.
-    // B: owned_nd × total_nd (diag + offd).
-    // Gᵀ·B: total_h1 × total_nd — but we only need owned columns of B
-    // (ghost columns couple to ghost rows of G which are zero).
-    let b_diag = b.diag_block().clone(); // owned_nd × owned_nd
-    // Gᵀ·B_owned: total_h1 × owned_nd.
-    let gtb = g.transpose().multiply(&b_diag);
-    // (Gᵀ·B)·G: total_h1 × total_h1.
-    let gtbg = gtb.multiply(g);
-    // Extract owned×owned submatrix (ghost H¹ dofs would make it singular).
-    let mut coo = CooMatrix::<f64>::new(n_owned_h1, n_owned_h1);
-    for r in 0..n_owned_h1 {
-        if r >= gtbg.nrows { break; }
-        for k in gtbg.row_ptr[r]..gtbg.row_ptr[r + 1] {
-            let c = gtbg.col_idx[k] as usize;
-            if c < n_owned_h1 {
-                coo.add(r, c, gtbg.values[k]);
-            }
+    let n_owned_nd = b.n_owned();
+    let n_ghost_nd = b.n_ghost();
+    let n_total_nd = n_owned_nd + n_ghost_nd;
+    let n_total_h1 = g.ncols;
+
+    // Full local B (owned_nd × total_nd).
+    let b_local = b.to_local_matrix();
+
+    // Extend G (owned_nd × total_h1) to full size (total_nd × total_h1) by
+    // padding ghost rows with zeros — ghost rows of G are zero because
+    // ParDiscreteLinearOperator::gradient returns only owned rows.
+    let mut g_coo = CooMatrix::<f64>::new(n_total_nd, n_total_h1);
+    for r in 0..g.nrows.min(n_owned_nd) {
+        for k in g.row_ptr[r]..g.row_ptr[r + 1] {
+            g_coo.add(r, g.col_idx[k] as usize, g.values[k]);
         }
     }
-    let gtbg_owned = coo.into_csr();
-    // Wrap as ParCsrMatrix (owned_h1 rows, owned_h1 columns).
+    let g_full = g_coo.into_csr();
+
+    // B·G: owned_nd × total_h1.
+    let bg = b_local.multiply(&g_full);
+    // Gᵀ: total_h1 × total_nd.
+    let gt = g_full.transpose();
+    // Gᵀ·(B·G): total_h1 × total_h1.
+    let gtbg = gt.multiply(&bg);
+    // Wrap as ParCsrMatrix (owned_h1 rows, total_h1 columns).
     ParCsrMatrix::from_local_matrix(
-        &gtbg_owned,
+        &gtbg,
         n_owned_h1,
         b.ghost_exchange_arc(),
         b.comm().clone(),
