@@ -75,9 +75,9 @@ impl<'a, M: MeshTopology> ParGradientProjector<'a, M> {
             nodal,
             nodal_hierarchy,
             nodal_cfg: SolverConfig {
-                rtol: 1e-12,
-                atol: 0.0,
-                max_iter: 500,
+                rtol: 1e-10,
+                atol: 1e-14,
+                max_iter: 1000,
                 verbose: false,
                 ..SolverConfig::default()
             },
@@ -154,32 +154,32 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
+    // Use only owned H¹ columns of G and owned×owned block of B.
+    // G: owned_nd × total_h1 → extract owned_h1 columns: owned_nd × owned_h1
+    // B diag: owned_nd × owned_nd
+    // Gᵀ·B·G: owned_h1 × owned_h1 (non-singular, no ghost DOFs).
+    let b_diag = b.diag_block().clone();
     let n_owned_nd = b.n_owned();
-    let n_ghost_nd = b.n_ghost();
-    let n_total_nd = n_owned_nd + n_ghost_nd;
-    let n_total_h1 = g.ncols;
 
-    // Full local B (owned_nd × total_nd).
-    let b_local = b.to_local_matrix();
-
-    // Extend G (owned_nd × total_h1) to full size (total_nd × total_h1) by
-    // padding ghost rows with zeros — ghost rows of G are zero because
-    // ParDiscreteLinearOperator::gradient returns only owned rows.
-    let mut g_coo = CooMatrix::<f64>::new(n_total_nd, n_total_h1);
+    // Extract owned-h1-columns of G.
+    let mut g_coo = CooMatrix::<f64>::new(n_owned_nd, n_owned_h1);
     for r in 0..g.nrows.min(n_owned_nd) {
         for k in g.row_ptr[r]..g.row_ptr[r + 1] {
-            g_coo.add(r, g.col_idx[k] as usize, g.values[k]);
+            let c = g.col_idx[k] as usize;
+            if c < n_owned_h1 {
+                g_coo.add(r, c, g.values[k]);
+            }
         }
     }
-    let g_full = g_coo.into_csr();
+    let g_owned = g_coo.into_csr();
 
-    // B·G: owned_nd × total_h1.
-    let bg = b_local.multiply(&g_full);
-    // Gᵀ: total_h1 × total_nd.
-    let gt = g_full.transpose();
-    // Gᵀ·(B·G): total_h1 × total_h1.
+    // B·G: owned_nd × owned_h1.
+    let bg = b_diag.multiply(&g_owned);
+    // Gᵀ: owned_h1 × owned_nd.
+    let gt = g_owned.transpose();
+    // Gᵀ·(B·G): owned_h1 × owned_h1.
     let gtbg = gt.multiply(&bg);
-    // Wrap as ParCsrMatrix (owned_h1 rows, total_h1 columns).
+    // Wrap as ParCsrMatrix (owned_h1 rows, owned_h1 columns).
     ParCsrMatrix::from_local_matrix(
         &gtbg,
         n_owned_h1,
