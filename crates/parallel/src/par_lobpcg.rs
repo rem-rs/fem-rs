@@ -45,6 +45,7 @@ pub fn par_lobpcg(
     k: usize,
     precond: &dyn Fn(&[f64], &mut [f64]),
     projector: Option<&dyn Fn(&mut [ParVector])>,
+    constraint_basis: Option<&[ParVector]>,
     nullspace_skip: f64,
     max_iter: usize,
     tol: f64,
@@ -252,6 +253,26 @@ pub fn par_lobpcg(
             }
         }
         apply_projector(&mut r);
+        // Project residual against the constraint basis (B-orthonormal):
+        // r -= Y (Yᵀ B r), the B-projection that keeps LOBPCG in the
+        // B-orthogonal complement of the gradient nullspace.
+        if let Some(y) = constraint_basis {
+            if !y.is_empty() {
+                for j in 0..k {
+                    let mut by = ParVector::zeros_like(&r[j]);
+                    bm.spmv(&mut r[j], &mut by);
+                    let mut coeffs = vec![0.0_f64; y.len()];
+                    for (i, yi) in y.iter().enumerate() {
+                        coeffs[i] = yi.global_dot(&by);
+                    }
+                    for (i, yi) in y.iter().enumerate() {
+                        for s in 0..n_owned {
+                            r[j].owned_slice_mut()[s] -= coeffs[i] * yi.owned_slice()[s];
+                        }
+                    }
+                }
+            }
+        }
 
         // ── 5. Residual norms (absolute for the soft-lock check) ───────────
         let mut max_res = 0.0f64;
