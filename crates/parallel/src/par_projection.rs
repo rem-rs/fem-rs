@@ -143,6 +143,35 @@ impl<'a, M: MeshTopology> ParGradientProjector<'a, M> {
     }
 }
 
+/// Assemble the nodal (H¹) operator `GᵀBG` from the discrete gradient `G`
+/// and the pencil mass matrix `B` (H(curl)).
+///
+/// `G` has owned H(curl) rows × total H¹ columns (partition ordering);
+/// `B` is the H(curl) mass matrix as a `ParCsrMatrix`.
+/// Returns a `ParCsrMatrix` with owned H¹ rows × total H¹ columns.
+pub fn assemble_nodal_from_gradient(
+    g: &CsrMatrix<f64>,
+    b: &ParCsrMatrix,
+    n_owned_h1: usize,
+) -> ParCsrMatrix {
+    // B diag block (owned_nd × owned_nd) — G has owned_nd rows, so we need
+    // B's owned×owned block for B·G to be conformable.
+    let b_diag = b.diag_block().clone();
+    // B·G: owned_nd × total_h1.
+    let bg = b_diag.multiply(g);
+    // Gᵀ: total_h1 × owned_nd.
+    let gt = g.transpose();
+    // Gᵀ·(B·G): total_h1 × total_h1.
+    let gtbg = gt.multiply(&bg);
+    // Wrap as ParCsrMatrix (owned_h1 rows, total_h1 columns).
+    ParCsrMatrix::from_local_matrix(
+        &gtbg,
+        n_owned_h1,
+        b.ghost_exchange_arc(),
+        b.comm().clone(),
+    )
+}
+
 /// PCG with a pre-built AMG hierarchy as preconditioner (the body of
 /// [`crate::par_solve_pcg_amg`] with the hierarchy built once).
 fn pcg_with_hierarchy(

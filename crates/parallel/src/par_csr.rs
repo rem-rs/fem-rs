@@ -137,6 +137,39 @@ impl ParCsrMatrix {
     /// Off-diagonal block (owned × ghost columns).
     pub fn offd_block(&self) -> &CsrMatrix<f64> { &self.offd }
 
+    /// Deep copy of `self` (clone diag, offd, ghost exchange, comm).
+    pub fn clone_vec(&self) -> Self {
+        ParCsrMatrix {
+            diag: self.diag.clone(),
+            offd: self.offd.clone(),
+            n_owned: self.n_owned,
+            n_ghost: self.n_ghost,
+            dof_ghost_exchange: self.dof_ghost_exchange.clone(),
+            comm: self.comm.clone(),
+        }
+    }
+
+    /// Build a full local `CsrMatrix` (n_owned × n_total) from diag + offd.
+    /// Columns `[0, n_owned)` come from `diag`; columns
+    /// `[n_owned, n_total)` come from `offd` (shifted by `n_owned`).
+    pub fn to_local_matrix(&self) -> CsrMatrix<f64> {
+        let n_local = self.n_owned + self.n_ghost;
+        let mut coo = CooMatrix::<f64>::new(self.n_owned, n_local);
+        let d = &self.diag;
+        for r in 0..d.nrows {
+            for k in d.row_ptr[r]..d.row_ptr[r + 1] {
+                coo.add(r, d.col_idx[k] as usize, d.values[k]);
+            }
+        }
+        let o = &self.offd;
+        for r in 0..o.nrows {
+            for k in o.row_ptr[r]..o.row_ptr[r + 1] {
+                coo.add(r, o.col_idx[k] as usize + self.n_owned, o.values[k]);
+            }
+        }
+        coo.into_csr()
+    }
+
     /// Mutable diagonal block.
     pub fn diag_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.diag }
 
