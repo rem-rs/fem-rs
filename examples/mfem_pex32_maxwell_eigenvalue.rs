@@ -119,7 +119,7 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
     if rank == 0 { eprintln!("\nSolving for eigenvalues using ParLOBPCG + AMS"); }
     // nullspace_skip excludes Ritz values with |λ| < 0.5 from selection,
     // skipping the gradient nullspace (λ=0) of the curl-curl pencil.
-    let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), None, 0.3, 300, 1e-6);
+    let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), None, 0.5, 300, 1e-6);
 
     if rank == 0 {
         for (i, &l) in res.eigenvalues.iter().enumerate() { eprintln!("  Eigenmode {}: lambda = {:.15e}", i+1, l); }

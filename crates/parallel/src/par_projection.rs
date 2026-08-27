@@ -19,7 +19,7 @@
 //! `GᵀBG` is solved with PCG + a pre-built [`ParAmgHierarchy`] V-cycle
 //! (rebuilt once, reused across all applications).
 
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::MeshTopology;
 use fem_solver::SolverConfig;
 
@@ -154,8 +154,7 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
-    // B diag block (owned_nd × owned_nd) — G has owned_nd rows, so B·G
-    // requires B's owned×owned block for B·G to be conformable.
+    // B diag block (owned_nd × owned_nd).
     let b_diag = b.diag_block().clone();
     // B·G: owned_nd × total_h1.
     let bg = b_diag.multiply(g);
@@ -163,9 +162,21 @@ pub fn assemble_nodal_from_gradient(
     let gt = g.transpose();
     // Gᵀ·(B·G): total_h1 × total_h1.
     let gtbg = gt.multiply(&bg);
-    // Wrap as ParCsrMatrix (owned_h1 rows, total_h1 columns).
+    // Extract owned×owned submatrix (ghost H¹ dofs would make it singular).
+    let mut coo = CooMatrix::<f64>::new(n_owned_h1, n_owned_h1);
+    for r in 0..n_owned_h1 {
+        if r >= gtbg.nrows { break; }
+        for k in gtbg.row_ptr[r]..gtbg.row_ptr[r + 1] {
+            let c = gtbg.col_idx[k] as usize;
+            if c < n_owned_h1 {
+                coo.add(r, c, gtbg.values[k]);
+            }
+        }
+    }
+    let gtbg_owned = coo.into_csr();
+    // Wrap as ParCsrMatrix (owned_h1 rows, owned_h1 columns).
     ParCsrMatrix::from_local_matrix(
-        &gtbg,
+        &gtbg_owned,
         n_owned_h1,
         b.ghost_exchange_arc(),
         b.comm().clone(),
