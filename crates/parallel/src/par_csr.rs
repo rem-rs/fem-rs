@@ -258,6 +258,27 @@ impl ParCsrMatrix {
     /// problems where the RHS is not a fixed vector but the mass‑matrix
     /// product B x_k.  Symmetry is preserved (A_ij = A_ji for all i,j).
     pub fn eliminate_diag_symmetric(&mut self, owned_dofs: &[usize], val: f64) {
+        self.eliminate_diag_symmetric_with_ghost(owned_dofs, &[], val)
+    }
+
+    /// Like [`eliminate_diag_symmetric`](Self::eliminate_diag_symmetric),
+    /// but also zeroes the offd columns of `ghost_boundary_cols` (ghost‑side
+    /// slots, i.e. offd column indices) so that boundary DOFs owned by other
+    /// ranks have their *column* contributions removed on this rank too.
+    ///
+    /// Without this, a boundary DOF `d` owned on rank A appears in rank B's
+    /// offd block as a ghost column whose values survive elimination (rank B
+    /// only zeroes rows of its own boundary DOFs).  The resulting operator
+    /// has A_ij ≠ A_ji across ranks for boundary‑adjacent pairs — asymmetric,
+    /// which breaks PCG/CG on np > 1.  The caller obtains these indices by
+    /// permuting the boundary DOFs to partition order and keeping slots
+    /// ≥ `n_owned_dofs` (minus `n_owned_dofs`).
+    pub fn eliminate_diag_symmetric_with_ghost(
+        &mut self,
+        owned_dofs: &[usize],
+        ghost_boundary_cols: &[usize],
+        val: f64,
+    ) {
         let n_owned = self.n_owned;
         let diag = &mut self.diag;
 
@@ -293,12 +314,21 @@ impl ParCsrMatrix {
                 }
             }
         }
-        // Column entries in offd are ghost‑side and not touched — they are
-        // owned by the rank that owns that column.  The Rayleigh–Ritz
-        // projection (which uses global_dot) sees the outer product
-        // x^T * A * y, and the offd column entries enter as non‑owned
-        // contributions from the other rank's row.  Zeroing the *row* on
-        // each rank is sufficient for locality correctness.
+
+        // ── Zero offd columns of boundary DOFs owned by other ranks ──
+        if self.n_ghost > 0 && !ghost_boundary_cols.is_empty() {
+            let offd = &mut self.offd;
+            let mut cols: std::collections::HashSet<usize> =
+                ghost_boundary_cols.iter().copied().collect();
+            for i in 0..n_owned {
+                for p in offd.row_ptr[i]..offd.row_ptr[i + 1] {
+                    let c = offd.col_idx[p] as usize;
+                    if cols.contains(&c) {
+                        offd.values[p] = 0.0;
+                    }
+                }
+            }
+        }
     }
 }
 

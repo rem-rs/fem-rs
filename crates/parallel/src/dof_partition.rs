@@ -304,39 +304,63 @@ impl DofPartition {
             // endpoint" — but local node ids are renumbered per-rank after
             // partitioning, so which of the DOFs is "first" is not
             // cross-rank consistent (it can flip for the same global edge).
-            // dof_key must identify the GLOBAL endpoint a DOF is nearer to
-            // (0 = near the global-min endpoint).  For a single DOF per edge
-            // (P2) dof_key is trivially 0 and the DofManager stores no edge
-            // coordinates; only P3+ (multiple DOFs per edge) needs the
-            // coordinate-distance test (rank-independent).
+            // dof_key must identify the DOF's position along the edge counted
+            // from the GLOBAL min endpoint (0..per_edge-1).  For a single DOF
+            // per edge (P2) dof_key is trivially 0 and the DofManager stores
+            // no edge coordinates.  For P3+ (multiple DOFs per edge) the key
+            // is the rank-consistent order of the DOFs' parameter along the
+            // edge — a plain near-endpoint test collides for mid-edge DOFs
+            // (e.g. P4's center GLL node satisfies da == db and would share
+            // the near-min key with the quarter-point DOF, giving two ghost
+            // slots the same global id → duplicated columns in spmv).
             let per_edge = dofs.len();
             let (ca, cb) = (dof_manager.dof_coord(local_a), dof_manager.dof_coord(local_b));
-            for (k, &local_dof_id) in dofs.iter().enumerate() {
-                let dof_key = if per_edge == 1 {
-                    0
-                } else {
-                    let c = dof_manager.dof_coord(local_dof_id);
-                    let mut da = 0.0;
-                    let mut db = 0.0;
-                    for d in 0..c.len() {
-                        da += (c[d] - ca[d]).powi(2);
-                        db += (c[d] - cb[d]).powi(2);
-                    }
-                    let near_a = da <= db;
-                    if (ga < gb) == near_a { 0 } else { 1 }
-                };
-                let _ = k;
+            if per_edge == 1 {
                 let info = EdgeDofInfo {
-                    local_dof_id,
+                    local_dof_id: dofs[0],
                     global_node_a: gna,
                     global_node_b: gnb,
                     owner: edge_owner,
-                    dof_key,
+                    dof_key: 0,
                 };
                 if edge_owner == local_rank {
                     owned_edges.push(info);
                 } else {
                     ghost_edges.push(info);
+                }
+            } else {
+                // Parameter t ∈ [0,1] of each DOF along (ca → cb), then
+                // re-based to the global-min endpoint; the sorted order is
+                // the rank-independent dof_key.
+                let mut t_sorted: Vec<(f64, u32)> = dofs.iter().map(|&local_dof_id| {
+                    let c = dof_manager.dof_coord(local_dof_id);
+                    let mut t = 0.0;
+                    let mut len2 = 0.0;
+                    for d in 0..c.len() {
+                        let ab = cb[d] - ca[d];
+                        t += (c[d] - ca[d]) * ab;
+                        len2 += ab * ab;
+                    }
+                    let t_ab = if len2 > 0.0 { t / len2 } else { 0.0 };
+                    let t_global = if ga < gb { t_ab } else { 1.0 - t_ab };
+                    (t_global, local_dof_id)
+                }).collect();
+                t_sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let key_of: std::collections::HashMap<u32, u32> = t_sorted.iter().enumerate()
+                    .map(|(k, &(_, did))| (did, k as u32)).collect();
+                for &local_dof_id in dofs.iter() {
+                    let info = EdgeDofInfo {
+                        local_dof_id,
+                        global_node_a: gna,
+                        global_node_b: gnb,
+                        owner: edge_owner,
+                        dof_key: key_of[&local_dof_id],
+                    };
+                    if edge_owner == local_rank {
+                        owned_edges.push(info);
+                    } else {
+                        ghost_edges.push(info);
+                    }
                 }
             }
         }

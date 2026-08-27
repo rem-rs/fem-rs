@@ -42,7 +42,8 @@ use fem_space::build_h1_prolongation_matrix;
 struct MgTransfer {
     /// Prolongation P: fine_owned × coarse_total (fine ← coarse).
     prolong_local: fem_linalg::CsrMatrix<f64>,
-    /// Restriction R: coarse_owned × fine_total (coarse ← fine).
+    /// Restriction R: coarse_total × fine_total (coarse ← fine; ghost
+    /// columns are zero — the owning rank computes them).
     restrict_local: fem_linalg::CsrMatrix<f64>,
     coarse_owned: usize,
     /// Coarse-space DofPartition (for global-id cross-rank sum).
@@ -99,6 +100,10 @@ fn main() {
         let qo = |o: u8| (2 * o + 1).max(3) as u8;
 
         // 5. Assemble diffusion matrix per level + symmetric BC elimination.
+        //    Boundary DOFs owned by other ranks appear as ghost slots on this
+        //    rank; their offd *column* contributions must be zeroed too, or
+        //    the operator becomes asymmetric across ranks (A_ij ≠ A_ji for
+        //    boundary pairs) and PCG/CG stagnate on np > 1.
         let mut mats: Vec<ParCsrMatrix> = Vec::with_capacity(n_levels);
         for (i, sp) in spaces.iter().enumerate() {
             let mut m = ParAssembler::assemble_bilinear(sp, &[&DiffusionIntegrator { kappa: 1.0 }], qo(orders[i]));
@@ -107,7 +112,12 @@ fn main() {
                 .map(|&d| sp.dof_partition().permute_dof(d as u32) as usize)
                 .filter(|&p| p < sp.dof_partition().n_owned_dofs)
                 .collect();
-            m.eliminate_diag_symmetric(&owned_ess, 1.0);
+            let ghost_ess: Vec<usize> = bc.iter()
+                .map(|&d| sp.dof_partition().permute_dof(d as u32) as usize)
+                .filter(|&p| p >= sp.dof_partition().n_owned_dofs && p < sp.dof_partition().n_total_dofs())
+                .map(|p| p - sp.dof_partition().n_owned_dofs)
+                .collect();
+            m.eliminate_diag_symmetric_with_ghost(&owned_ess, &ghost_ess, 1.0);
             mats.push(m);
         }
 
@@ -123,14 +133,18 @@ fn main() {
                 &p_dm, &fine_dp, &coarse_dp,
             );
             if rank == 0 {
-
+                println!(
+                    "transfer {} -> {}: prolong {}x{}, restrict {}x{}, coarse_owned {}",
                     orders[l], orders[l + 1],
                     prolong_local.nrows, prolong_local.ncols,
                     restrict_local.nrows, restrict_local.ncols,
-                    spaces[l].dof_partition().n_owned_dofs);
+                    spaces[l].dof_partition().n_owned_dofs,
+                );
+                println!(
+                    "level {}: mat_ghost {} dp_ghost {}",
+                    l, mats[l].n_ghost(), spaces[l].dof_partition().n_ghost_dofs,
+                );
             }
-
-                l, mats[l].n_ghost(), l, spaces[l].dof_partition().n_ghost_dofs);
             transfers.push(MgTransfer {
                 prolong_local,
                 restrict_local,
@@ -164,13 +178,14 @@ fn main() {
         let mats_arc = Arc::new(mats);
         let trans_arc = Arc::new(transfers);
         let mats_pc = Arc::clone(&mats_arc);
+        let trans_pc = Arc::clone(&trans_arc);
         let precond = move |r: &[f64], z: &mut [f64]| {
             let n_ghost_fine = mats_pc[n_levels - 1].n_ghost();
             let mut rv = ParVector::zeros_raw(n_owned_fine, n_ghost_fine, ghost_arc.clone(), comm2.clone());
             rv.owned_slice_mut().copy_from_slice(r);
             rv.update_ghosts();
             let mut zv = ParVector::zeros_like(&rv);
-            v_cycle(&trans_arc, &mats_pc, n_levels - 1, &rv, &mut zv, &comm2);
+            v_cycle(&trans_pc, &mats_pc, n_levels - 1, &rv, &mut zv, &comm2);
             z[..n_owned_fine].copy_from_slice(&zv.as_slice()[..n_owned_fine]);
         };
         let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 2000, verbose: false, ..Default::default() };
@@ -192,7 +207,9 @@ fn main() {
 /// Convert a dm-order prolongation P (fine_dm × coarse_dm) into partition-order
 /// local CSR matrices:
 ///   - P_local: fine_owned × (coarse_owned + coarse_ghost)
-///   - R_local: coarse_owned × (fine_owned + fine_ghost)
+///   - R_local: coarse_total × fine_total (rows cover coarse owned + ghost;
+///     columns only the fine-owned slots — ghost columns are left zero because
+///     the owning rank computes those contributions, avoiding double count)
 fn to_partition_order(
     p_dm: &fem_linalg::CsrMatrix<f64>,
     fine_dp: &DofPartition,
@@ -205,7 +222,7 @@ fn to_partition_order(
     let mut p_coo = fem_linalg::CooMatrix::<f64>::new(n_fine_owned, n_coarse_total);
     // Restriction covers ALL coarse slots (owned + ghost): each rank's local
     // fine→coarse contributions go into owned *and* ghost coarse rows, then
-    // the V-cycle accumulates ghost contributions back to the owner.
+    // the V-cycle accumulates them by global id.
     let mut r_coo = fem_linalg::CooMatrix::<f64>::new(n_coarse_total, n_fine_total);
 
     for fdm in 0..p_dm.nrows {
@@ -218,7 +235,7 @@ fn to_partition_order(
             if v.abs() < 1e-30 { continue; }
             p_coo.add(fpart, cpart, v);
             // Row cpart may be owned or ghost; all contributions are kept
-            // locally and accumulated across ranks via reverse ghost.
+            // locally and accumulated across ranks via global_sum_by_dof.
             r_coo.add(cpart, fpart, v);
         }
     }
@@ -260,23 +277,28 @@ fn v_cycle(
 
     x.update_ghosts();
 
-
     // Residual: r = b - A*x
     let mut ax = ParVector::zeros_like(b);
-
     mats[lvl].spmv(x, &mut ax);
 
     let mut r = ParVector::zeros_like(b);
     for i in 0..n_own { r.as_slice_mut()[i] = b.as_slice()[i] - ax.as_slice()[i]; }
     r.update_ghosts();
 
-    // Restrict: r_c = R_{l-1} * r  (coarse_owned rows × fine_total cols).
+    // Restrict: r_c = R_{l-1} * r  (ALL coarse rows owned+ghost × fine cols;
+    // fine ghost columns are zero by construction — the owning rank computes
+    // them — so local_spmv needs the full ghosted fine residual).
     let tr = &transfers[lvl - 1];
     let n_coarse_own = tr.coarse_owned;
-    let mut r_c = vec![0.0_f64; n_coarse_own];
+    let n_coarse_total = tr.restrict_local.nrows;
+    let mut r_c = vec![0.0_f64; n_coarse_total];
     local_spmv(&tr.restrict_local, r.as_slice(), &mut r_c);
-    // Cross-rank sum of the coarse residual by GLOBAL dof id: each rank's
-    // local restriction contributes to the coarse dof's owner, which sums.
+    // Cross-rank sum of the coarse residual by GLOBAL dof id.  Each rank's
+    // local restriction fills owned AND ghost coarse rows: a coarse dof's
+    // fine contributions come from the ranks owning its fine dofs, and those
+    // ranks may hold the coarse dof only as a ghost slot.  Broadcasting
+    // every local slot by gid and summing per gid is exact (no double
+    // counting: fine-owned columns are non-zero only on the owning rank).
     let coarse_dp = &transfers[lvl - 1].coarse_dp_for_global;
     let global_r_c = global_sum_by_dof(&r_c, coarse_dp, comm);
     let n_coarse_ghost = mats[lvl - 1].n_ghost();
@@ -284,7 +306,7 @@ fn v_cycle(
         n_coarse_own, n_coarse_ghost,
         mats[lvl - 1].ghost_exchange_arc(), comm.clone(),
     );
-    rv_c.owned_slice_mut().copy_from_slice(&global_r_c);
+    rv_c.owned_slice_mut().copy_from_slice(&global_r_c[..n_coarse_own]);
     rv_c.update_ghosts();
     let mut ev_c = ParVector::zeros_like(&rv_c);
     v_cycle(transfers, mats, lvl - 1, &rv_c, &mut ev_c, comm);
@@ -321,25 +343,31 @@ fn local_spmv(a: &fem_linalg::CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
     }
 }
 
-/// Sum `local` (indexed by coarse owned slots) across ranks by GLOBAL dof id.
-/// Each rank broadcasts its (gid, value) pairs; every rank accumulates the
-/// entries whose gid it owns (looked up via `local_dof`).  Correct for the
-/// mixed vertex/edge/interior global-id layout of `DofPartition`.
+/// Sum `local` (indexed by ALL local coarse slots — owned + ghost) across
+/// ranks by GLOBAL dof id.  Each rank broadcasts every local slot's
+/// (gid, value); every rank accumulates incoming values into the slot for
+/// that gid.  Contributions from different ranks are disjoint (a fine-owned
+/// restriction column is non-zero only on the rank owning that fine dof),
+/// so the sum is the exact global restriction: every slot ends up holding
+/// the full global value for its gid.
 fn global_sum_by_dof(
     local: &[f64],
     coarse_dp: &DofPartition,
     comm: &fem_parallel::Comm,
 ) -> Vec<f64> {
+    let n_total = coarse_dp.n_total_dofs();
     let n_owned = coarse_dp.n_owned_dofs;
+    debug_assert!(local.len() >= n_total);
     let n_ranks = comm.size() as i32;
     let rank = comm.rank();
 
-    // Broadcast (gid, value) of every owned slot to every other rank.
+    // Broadcast (gid, value) of every local slot (owned + ghost) to every
+    // other rank.
     let mut send_bundles: Vec<(i32, Vec<u8>)> = Vec::new();
     for r in 0..n_ranks {
         if r == rank { continue; }
-        let mut payload = Vec::with_capacity(n_owned * 12);
-        for i in 0..n_owned {
+        let mut payload = Vec::with_capacity(n_total * 12);
+        for i in 0..n_total {
             let gid = coarse_dp.global_dof(i as u32);
             payload.extend_from_slice(&gid.to_le_bytes());
             payload.extend_from_slice(&local[i].to_le_bytes());
@@ -348,21 +376,19 @@ fn global_sum_by_dof(
     }
     let recv = comm.alltoallv_bytes(&send_bundles);
 
-    // Start with our own contributions.
-    let mut owned_sum = local.to_vec();
-    // Accumulate contributions whose gid we own.
+    // Start with our own contributions (owned + ghost slots).
+    let mut sum = local[..n_total].to_vec();
+    // Accumulate every incoming (gid, value) into that gid's local slot.
     for (_src, bytes) in recv {
         for chunk in bytes.chunks_exact(12) {
             let gid = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
             let val = f64::from_le_bytes(chunk[4..12].try_into().unwrap());
             if let Some(lid) = coarse_dp.local_dof(gid) {
-                if (lid as usize) < n_owned {
-                    owned_sum[lid as usize] += val;
-                }
+                sum[lid as usize] += val;
             }
         }
     }
-    owned_sum
+    sum
 }
 
 fn arg(args: &[String], key: &str) -> Option<usize> {
