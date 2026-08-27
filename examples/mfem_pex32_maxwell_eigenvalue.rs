@@ -39,10 +39,12 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
         let sys = assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr_attrs, &ess_bdr, 1.0, 1.0, qo);
         let n_free = sys.hcurl_free_dofs.len();
         eprintln!("  Free DOFs: {n_free}, nullspace dim: {}", sys.constraints.ncols());
-        let eig_cfg = LobpcgConfig { max_iter: 300, tol: 1e-8, verbose: true, ..Default::default() };
-        let inner_cfg = fem_solver::SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..Default::default() };
-        let res = solve_hcurl_eigen_preconditioned_amg(&sys, args.nev, &eig_cfg, fem_amg::AmgConfig::default(), &inner_cfg)
-            .expect("LOBPCG failed");
+        // Use AME (Auxiliary-space Maxwell Eigensolver) — it handles the
+        // gradient nullspace internally via the discrete divergence-free
+        // projector P = I − G(GᵀMG)⁻¹GᵀM combined with the AMS preconditioner.
+        let ame_cfg = fem_solver::eigen::AmeConfig::default();
+        let res = fem_examples::maxwell::solve_hcurl_eigen_ame(&sys, args.nev, &ame_cfg)
+            .expect("AME failed");
         for (i, &lam) in res.eigenvalues.iter().enumerate() {
             eprintln!("Eigenmode {}, Lambda = {:.14e}", i + 1, lam);
         }
