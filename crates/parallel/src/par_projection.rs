@@ -154,13 +154,11 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
-    // Full local B (owned_nd × total_nd) — G has owned_nd rows, so B·G
-    // requires B's full local columns (diag + offd) to capture ghost
-    // contributions. Using only the diag block loses the off-diagonal
-    // coupling and yields an imprecise projector.
-    let b_local = b.to_local_matrix();
+    // B diag block (owned_nd × owned_nd) — G has owned_nd rows, so B·G
+    // requires B's owned×owned block for B·G to be conformable.
+    let b_diag = b.diag_block().clone();
     // B·G: owned_nd × total_h1.
-    let bg = b_local.multiply(g);
+    let bg = b_diag.multiply(g);
     // Gᵀ: total_h1 × owned_nd.
     let gt = g.transpose();
     // Gᵀ·(B·G): total_h1 × total_h1.
