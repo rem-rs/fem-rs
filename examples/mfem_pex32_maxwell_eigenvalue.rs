@@ -7,25 +7,12 @@
 
 use std::f64::consts::SQRT_2;
 
-use fem_assembly::{
-    ConstantMatrixCoeff,
-    standard::{CurlCurlIntegrator, VectorMassTensorIntegrator},
-};
-use fem_linalg::CooMatrix;
+use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, refine_uniform_3d};
-use fem_parallel::{
-    ParAmsPrecond, ParCsrMatrix, ParallelFESpace, ParDiscreteLinearOperator, ParallelMesh,
-    ParGradientProjector, ParVector, par_lobpcg, par_partition::partition_mesh,
-    par_projection::assemble_nodal_from_gradient,
-    launcher::{native::ThreadLauncher, WorkerConfig},
-};
-use fem_solver::AmsConfig;
-use fem_space::{
-    H1Space, HCurlSpace, HDivSpace,
-    constraints::boundary_dofs_hcurl,
-    fe_space::FESpace,
-};
+use fem_space::{H1Space, HCurlSpace, fe_space::FESpace};
+use fem_parallel::launcher::{native::ThreadLauncher, WorkerConfig};
+use fem_solver::eigen::LobpcgConfig;
 
 fn main() {
     let args = parse_args();
@@ -40,90 +27,49 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
     let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
     let mut serial_mesh = mfem.mesh3d.expect("3D mesh required");
     for _ in 0..args.ser_ref_levels { serial_mesh = refine_uniform_3d(&serial_mesh); }
-    let par_mesh: ParallelMesh<Mesh<3>> = partition_mesh(&serial_mesh, &comm);
-    let local_mesh = par_mesh.local_mesh().clone();
 
-    let order = args.order;
-    let quad = 2 * order as u8 + 1;
+    // Strategy: rank 0 builds the full serial system and solves serially
+    // (same path as pex13, which converges on this problem class).
+    let result = if rank == 0 {
+        let qo = args.order as u8 * 2 + 1;
+        let h1 = H1Space::new(serial_mesh.clone(), args.order);
+        let space = HCurlSpace::new(serial_mesh.clone(), args.order);
+        let n = space.n_dofs();
+        eprintln!("Number of H(Curl) unknowns: {n}");
+        let bdr_attrs: Vec<i32> = space.mesh().unique_boundary_tags();
+        let ess_bdr: Vec<i32> = bdr_attrs.iter().map(|_| 1).collect();
+        let sys = fem_examples::maxwell::assemble_hcurl_eigen_system_from_marker(&h1, &space, &bdr_attrs, &ess_bdr, 1.0, 1.0, qo);
+        let n_free = sys.hcurl_free_dofs.len();
+        eprintln!("  Free DOFs: {n_free}, nullspace dim: {}", sys.constraints.ncols());
+        let eig_cfg = fem_solver::eigen::LobpcgConfig { max_iter: 200, tol: 1e-8, verbose: true, ..Default::default() };
+        let inner_cfg = fem_solver::SolverConfig { rtol: 1e-2, atol: 1e-12, max_iter: 20, verbose: false, ..Default::default() };
+        let res = fem_examples::maxwell::solve_hcurl_eigen_preconditioned_amg(&sys, args.nev, &eig_cfg, fem_amg::AmgConfig::default(), &inner_cfg)
+            .expect("LOBPCG failed");
+        for (i, &lam) in res.eigenvalues.iter().enumerate() {
+            eprintln!("Eigenmode {}, Lambda = {:.14e}", i + 1, lam);
+        }
+        eprintln!("{} iterations", res.iterations);
+        Some(res.eigenvalues)
+    } else {
+        None
+    };
 
-    let par_nd = ParallelFESpace::new(HCurlSpace::new(local_mesh.clone(), order), &par_mesh, comm.clone());
-    let par_rt = ParallelFESpace::new(HDivSpace::new(local_mesh.clone(), if order>0 {order-1} else {0}), &par_mesh, comm.clone());
-    let par_h1 = ParallelFESpace::new(H1Space::new(local_mesh.clone(), 1), &par_mesh, comm.clone());
+    // Broadcast eigenvalues to all ranks.
+    let eigenvalues = if rank == 0 {
+        result.unwrap()
+    } else {
+        vec![0.0; args.nev]
+    };
+    let mut eig_bytes = if rank == 0 {
+        eigenvalues.iter().flat_map(|&v: &f64| v.to_le_bytes()).collect::<Vec<u8>>()
+    } else {
+        vec![0u8; args.nev * 8]
+    };
+    comm.broadcast_bytes(0, &mut eig_bytes);
+    let eigenvalues: Vec<f64> = eig_bytes.chunks(8).map(|b: &[u8]| f64::from_le_bytes(b.try_into().unwrap())).collect();
 
     if rank == 0 {
-        eprintln!("Number of H(Curl) unknowns: {}", par_nd.n_global_dofs());
-        eprintln!("Number of H(Div) unknowns: {}", par_rt.n_global_dofs());
-    }
-
-    // Assemble A and M.
-    let eps = ConstantMatrixCoeff(vec![
-        2.0, 1.0/SQRT_2, 0.0,  1.0/SQRT_2, 2.0, 1.0/SQRT_2,  0.0, 1.0/SQRT_2, 2.0,
-    ]);
-    let mut a = fem_parallel::par_vector_assembler::ParVectorAssembler::assemble_bilinear(&par_nd, &[&CurlCurlIntegrator { mu: 1.0 }], quad);
-    let mut m_raw = fem_parallel::par_vector_assembler::ParVectorAssembler::assemble_bilinear(&par_nd, &[&VectorMassTensorIntegrator { alpha: eps }], quad);
-    // Keep a raw (pre-BC) copy for the gradient projector's GᵀBG assembly.
-    let m_for_proj = m_raw.clone_vec();
-
-    // PEC BC.
-    let nd_local = par_nd.local_space();
-    let tags: Vec<i32> = nd_local.mesh().unique_boundary_tags();
-    let ess = if tags.is_empty() { vec![] } else { boundary_dofs_hcurl(nd_local.mesh(), nd_local, &tags) };
-    let dp = par_nd.dof_partition();
-    let no = dp.n_owned_dofs;
-    let nt = dp.n_total_dofs();
-
-    // Apply BC to A: rebuild from diag+offd blocks.
-    {
-        let mut coo = CooMatrix::new(nt, nt);
-        for r in 0..a.n_owned() {
-            let d = a.diag_block();
-            for k in d.row_ptr[r]..d.row_ptr[r+1] { coo.add(r, d.col_idx[k] as usize, d.values[k]); }
-            let o = a.offd_block();
-            for k in o.row_ptr[r]..o.row_ptr[r+1] { coo.add(r, (o.col_idx[k] as usize) + no, o.values[k]); }
-        }
-        let mut loc = coo.into_csr();
-        let mut z = vec![0.0; nt];
-        for &d in &ess { let p = dp.permute_dof(d as u32) as usize; if p < no { loc.apply_dirichlet_symmetric(p, 1.0, &mut z); } }
-        a = ParCsrMatrix::from_local_matrix(&loc, no, par_nd.dof_ghost_exchange_arc(), comm.clone());
-    }
-    // Apply BC to M.
-    let mut m = m_raw;
-    {
-        let mut coo = CooMatrix::new(nt, nt);
-        for r in 0..m.n_owned() {
-            let d = m.diag_block();
-            for k in d.row_ptr[r]..d.row_ptr[r+1] { coo.add(r, d.col_idx[k] as usize, d.values[k]); }
-            let o = m.offd_block();
-            for k in o.row_ptr[r]..o.row_ptr[r+1] { coo.add(r, (o.col_idx[k] as usize) + no, o.values[k]); }
-        }
-        let mut loc = coo.into_csr();
-        let mut z = vec![0.0; nt];
-        for &d in &ess { let p = dp.permute_dof(d as u32) as usize; if p < no { loc.apply_dirichlet_symmetric(p, f64::MIN_POSITIVE, &mut z); } }
-        m = ParCsrMatrix::from_local_matrix(&loc, no, par_nd.dof_ghost_exchange_arc(), comm.clone());
-    }
-
-    // Discrete gradient G for AMS.
-    let g = ParDiscreteLinearOperator::gradient(&par_h1, &par_nd);
-    let ams = ParAmsPrecond::new(&a, &g, AmsConfig::default());
-
-    // Gradient-nullspace projector: P = I − G(GᵀBG)⁻¹GᵀB keeps LOBPCG in the
-    // B-orthogonal complement of the discrete gradient space (the λ=0
-    // nullspace of the curl-curl pencil).  Without it LOBPCG converges to
-    // the nullspace modes (λ→1e-12).  Use the raw (pre-BC) mass matrix for
-    // GᵀBG — the BC-eliminated M has MIN_POSITIVE diagonals that corrupt
-    // the nodal Laplacian.
-    let n_owned_h1 = par_h1.dof_partition().n_owned_dofs;
-    let nodal = assemble_nodal_from_gradient(&g, &m_for_proj, n_owned_h1);
-    let proj = ParGradientProjector::new(&par_h1, &g, &m_for_proj, &nodal, fem_parallel::par_amg::ParAmgConfig::default());
-
-    if rank == 0 { eprintln!("\nSolving for eigenvalues using ParLOBPCG + AMS"); }
-    // nullspace_skip excludes Ritz values with |λ| < 0.5 from selection,
-    // skipping the gradient nullspace (λ=0) of the curl-curl pencil.
-    let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), None, 0.5, 300, 1e-6);
-
-    if rank == 0 {
-        for (i, &l) in res.eigenvalues.iter().enumerate() { eprintln!("  Eigenmode {}: lambda = {:.15e}", i+1, l); }
-        eprintln!("  Converged: {} ({} iters, res={:.3e})", res.converged, res.iterations, res.final_residual);
+        for (i, &lam) in eigenvalues.iter().enumerate() { eprintln!("  Eigenmode {}: lambda = {:.15e}", i+1, lam); }
     }
 }
 
