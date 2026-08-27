@@ -75,9 +75,9 @@ impl<'a, M: MeshTopology> ParGradientProjector<'a, M> {
             nodal,
             nodal_hierarchy,
             nodal_cfg: SolverConfig {
-                rtol: 1e-10,
+                rtol: 1e-12,
                 atol: 0.0,
-                max_iter: 200,
+                max_iter: 500,
                 verbose: false,
                 ..SolverConfig::default()
             },
@@ -154,11 +154,13 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
-    // B diag block (owned_nd × owned_nd) — G has owned_nd rows, so we need
-    // B's owned×owned block for B·G to be conformable.
-    let b_diag = b.diag_block().clone();
+    // Full local B (owned_nd × total_nd) — G has owned_nd rows, so B·G
+    // requires B's full local columns (diag + offd) to capture ghost
+    // contributions. Using only the diag block loses the off-diagonal
+    // coupling and yields an imprecise projector.
+    let b_local = b.to_local_matrix();
     // B·G: owned_nd × total_h1.
-    let bg = b_diag.multiply(g);
+    let bg = b_local.multiply(g);
     // Gᵀ: total_h1 × owned_nd.
     let gt = g.transpose();
     // Gᵀ·(B·G): total_h1 × total_h1.

@@ -16,8 +16,7 @@ use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, refine_uniform_3d};
 use fem_parallel::{
     ParAmsPrecond, ParCsrMatrix, ParallelFESpace, ParDiscreteLinearOperator, ParallelMesh,
-    ParGradientProjector, ParVector, par_lobpcg, par_partition::partition_mesh,
-    par_projection::assemble_nodal_from_gradient,
+    par_lobpcg, par_partition::partition_mesh,
     launcher::{native::ThreadLauncher, WorkerConfig},
 };
 use fem_solver::AmsConfig;
@@ -60,9 +59,7 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
         2.0, 1.0/SQRT_2, 0.0,  1.0/SQRT_2, 2.0, 1.0/SQRT_2,  0.0, 1.0/SQRT_2, 2.0,
     ]);
     let mut a = fem_parallel::par_vector_assembler::ParVectorAssembler::assemble_bilinear(&par_nd, &[&CurlCurlIntegrator { mu: 1.0 }], quad);
-    let mut m_raw = fem_parallel::par_vector_assembler::ParVectorAssembler::assemble_bilinear(&par_nd, &[&VectorMassTensorIntegrator { alpha: eps }], quad);
-    // Keep a raw (pre-BC) copy for the gradient projector's GᵀBG assembly.
-    let m_for_proj = m_raw.clone_vec();
+    let mut m = fem_parallel::par_vector_assembler::ParVectorAssembler::assemble_bilinear(&par_nd, &[&VectorMassTensorIntegrator { alpha: eps }], quad);
 
     // PEC BC.
     let nd_local = par_nd.local_space();
@@ -87,7 +84,6 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
         a = ParCsrMatrix::from_local_matrix(&loc, no, par_nd.dof_ghost_exchange_arc(), comm.clone());
     }
     // Apply BC to M.
-    let mut m = m_raw;
     {
         let mut coo = CooMatrix::new(nt, nt);
         for r in 0..m.n_owned() {
@@ -106,27 +102,15 @@ fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
     let g = ParDiscreteLinearOperator::gradient(&par_h1, &par_nd);
     let ams = ParAmsPrecond::new(&a, &g, AmsConfig::default());
 
-    // Gradient-nullspace projector: P = I − G(GᵀBG)⁻¹GᵀB keeps LOBPCG in the
-    // B-orthogonal complement of the discrete gradient space (the λ=0
-    // nullspace of the curl-curl pencil).  Without it LOBPCG converges to
-    // the nullspace modes (λ→1e-12).  Use the raw (pre-BC) mass matrix for
-    // GᵀBG — the BC-eliminated M has MIN_POSITIVE diagonals that corrupt
-    // the nodal Laplacian.
-    let n_owned_h1 = par_h1.dof_partition().n_owned_dofs;
-    let nodal = assemble_nodal_from_gradient(&g, &m_for_proj, n_owned_h1);
-    let proj = ParGradientProjector::new(&par_h1, &g, &m_for_proj, &nodal, fem_parallel::par_amg::ParAmgConfig::default());
-
     if rank == 0 { eprintln!("\nSolving for eigenvalues using ParLOBPCG + AMS"); }
+    // nullspace_skip excludes Ritz values with |λ| < 0.5 from selection,
+    // skipping the gradient nullspace (λ=0) of the curl-curl pencil.
     let res = par_lobpcg::par_lobpcg(&a, Some(&m), args.nev, &|r, z| ams.apply(r, z), None, 0.5, 300, 1e-6);
 
     if rank == 0 {
         for (i, &l) in res.eigenvalues.iter().enumerate() { eprintln!("  Eigenmode {}: lambda = {:.15e}", i+1, l); }
         eprintln!("  Converged: {} ({} iters, res={:.3e})", res.converged, res.iterations, res.final_residual);
-        let d2 = Mesh::<2>::unit_square_tri(1);
-        let mut f = std::fs::File::create("refined.mesh").expect("refined.mesh");
-        fem_io::mfem::write_mfem(&mut f, &d2, Some(&local_mesh)).expect("write");
     }
-    if rank == 0 { eprintln!("\nFinished."); }
 }
 
 struct Args {
