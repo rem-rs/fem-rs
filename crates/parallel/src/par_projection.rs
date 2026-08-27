@@ -154,14 +154,15 @@ pub fn assemble_nodal_from_gradient(
     b: &ParCsrMatrix,
     n_owned_h1: usize,
 ) -> ParCsrMatrix {
-    // B diag block (owned_nd × owned_nd).
-    let b_diag = b.diag_block().clone();
-    // B·G: owned_nd × total_h1.
-    let bg = b_diag.multiply(g);
-    // Gᵀ: total_h1 × owned_nd.
-    let gt = g.transpose();
-    // Gᵀ·(B·G): total_h1 × total_h1.
-    let gtbg = gt.multiply(&bg);
+    // G: owned_nd × total_h1.  Gᵀ: total_h1 × owned_nd.
+    // B: owned_nd × total_nd (diag + offd).
+    // Gᵀ·B: total_h1 × total_nd — but we only need owned columns of B
+    // (ghost columns couple to ghost rows of G which are zero).
+    let b_diag = b.diag_block().clone(); // owned_nd × owned_nd
+    // Gᵀ·B_owned: total_h1 × owned_nd.
+    let gtb = g.transpose().multiply(&b_diag);
+    // (Gᵀ·B)·G: total_h1 × total_h1.
+    let gtbg = gtb.multiply(g);
     // Extract owned×owned submatrix (ghost H¹ dofs would make it singular).
     let mut coo = CooMatrix::<f64>::new(n_owned_h1, n_owned_h1);
     for r in 0..n_owned_h1 {
