@@ -116,7 +116,7 @@ run_one() {
         cpp_bin="${name}p_cpp"
         ca="-rs 0 $ca"
     fi
-    wsl -e bash -c "timeout 150 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
+    wsl -e bash -c "timeout 300 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
 
     local rd=$(extract_dof "$rout")
     local cd=$(extract_dof "$cout")
