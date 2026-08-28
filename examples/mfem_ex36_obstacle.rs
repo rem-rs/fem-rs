@@ -354,6 +354,7 @@ fn parse_args() -> Args {
         match a.as_str() {
             "-o" | "--order" => args.order = next().parse().unwrap(),
             "-r" | "--refs" => args.refs = next().parse().unwrap(),
+            "-m" | "--mesh" => { next(); },  // mesh is built internally, skip value
             "-mi" | "--max-it" => args.max_it = next().parse().unwrap(),
             "-tol" | "--tol" => args.tol = next().parse().unwrap(),
             "-step" | "--step" => args.alpha = next().parse().unwrap(),

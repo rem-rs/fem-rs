@@ -1806,25 +1806,64 @@ where
     move |f| {
         let mesh = space.mesh();
         let fn_nodes = mesh.face_nodes(f);
-        let (elem, _) = mesh.face_elements(f);
+        let nfn = fn_nodes.len();
+        if nfn == 0 { return vec![]; }
+
+        // Find the element that actually contains ALL face nodes.
+        // In non-conformingly refined meshes face_elements(f) may report a
+        // stale owner (or 0 as fallback) whose node list does not include the
+        // face nodes, so we scan all elements to find a match.
+        let (elem, _ghost) = mesh.face_elements(f);
+        let mut owner = elem;
         let elem_nodes = mesh.element_nodes(elem);
         let elem_dofs  = space.element_dofs(elem);
 
-        // Find local vertex positions of the two face nodes.
-        let pos_a = elem_nodes.iter().position(|&n| n == fn_nodes[0])
-            .expect("face node 0 not in element");
-        let pos_b = elem_nodes.iter().position(|&n| n == fn_nodes[1])
-            .expect("face node 1 not in element");
+        // Quick path: the reported owner contains the face nodes.
+        let owner_has_all = fn_nodes.iter().all(|&n| elem_nodes.contains(&n));
+        if !owner_has_all {
+            // Slow path: find an element that contains all face nodes.
+            let n_elems = mesh.n_elements() as u32;
+            let mut found = false;
+            for e in 0..n_elems {
+                let en = mesh.element_nodes(e);
+                if fn_nodes.iter().all(|&n| en.contains(&n)) {
+                    owner = e;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Last resort: fall back to P1 face DOFs on the reported owner.
+                return fn_nodes.iter().map(|&n| n as DofId).collect();
+            }
+        }
 
-        let dof_a = elem_dofs[pos_a];
-        let dof_b = elem_dofs[pos_b];
+        let elem_nodes = mesh.element_nodes(owner);
+        let elem_dofs  = space.element_dofs(owner);
+
+        // Find local vertex positions of the face nodes.
+        let mut dofs: Vec<DofId> = Vec::with_capacity(nfn + 1);
+        for &n in fn_nodes {
+            if let Some(pos) = elem_nodes.iter().position(|&en| en == n) {
+                dofs.push(elem_dofs[pos]);
+            } else {
+                // Should not happen after the owner search above.
+                return fn_nodes.iter().map(|&n| n as DofId).collect();
+            }
+        }
 
         // For TriP2 the edge DOF positions relative to vertex positions are:
         //   edge(v0→v1) = dofs[3],  edge(v1→v2) = dofs[4],  edge(v0→v2) = dofs[5]
-        // Generalised: edge DOF for sorted (min_pos, max_pos) in {(0,1),(1,2),(0,2)}.
-        let edge_dof = find_edge_dof(elem_nodes, elem_dofs, pos_a, pos_b);
+        if nfn >= 2 && elem_dofs.len() >= 6 {
+            let pos_a = elem_nodes.iter().position(|&n| n == fn_nodes[0]);
+            let pos_b = elem_nodes.iter().position(|&n| n == fn_nodes[1]);
+            if let (Some(pa), Some(pb)) = (pos_a, pos_b) {
+                let edge_dof = find_edge_dof(elem_nodes, elem_dofs, pa, pb);
+                dofs.push(edge_dof);
+            }
+        }
 
-        vec![dof_a, dof_b, edge_dof]
+        dofs
     }
 }
 

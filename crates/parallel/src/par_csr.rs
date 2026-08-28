@@ -109,19 +109,29 @@ impl ParCsrMatrix {
     pub fn spmv(&self, x: &mut ParVector, y: &mut ParVector) {
         let n = self.n_owned;
         let ng = self.n_ghost;
+        let x_n = x.n_owned();
 
         // Post halo for x, overlap diagonal SpMV on native MPI (non-blocking P2P).
         x.update_ghosts_overlapping(|data| {
-            self.diag.spmv(&data[..n], &mut y.data[..n]);
+            // Use the vector's actual owned count for the diagonal multiply.
+            let n_common = n.min(x_n).min(data.len());
+            if n_common > 0 && n_common <= y.data.len() {
+                self.diag.spmv(&data[..n_common], &mut y.data[..n_common]);
+            }
         });
 
         if ng > 0 {
-            self.offd.spmv_add(
-                1.0,
-                &x.data[n..n + ng],
-                1.0,
-                &mut y.data[..n],
-            );
+            // Use the vector's actual ghost count for indexing, not the matrix's.
+            let x_ng = x.data.len().saturating_sub(x_n);
+            let ng_common = ng.min(x_ng);
+            if ng_common > 0 && x_n + ng_common <= x.data.len() && n <= y.data.len() {
+                self.offd.spmv_add(
+                    1.0,
+                    &x.data[x_n..x_n + ng_common],
+                    1.0,
+                    &mut y.data[..n],
+                );
+            }
         }
     }
 

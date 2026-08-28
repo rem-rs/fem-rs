@@ -13,7 +13,7 @@
 
 #![allow(non_snake_case)]
 
-use fem_assembly::assembler::face_dofs_p1;
+use fem_assembly::assembler::face_dofs_p2;
 use fem_assembly::static_cond::condense_global;
 use fem_assembly::postproc::coefficient::PWConstCoeff;
 use fem_assembly::postproc::error_estimate::zz_estimator_stress;
@@ -27,6 +27,7 @@ use fem_mesh::{Mesh, MeshTopology};
 use fem_solver::solve_pcg_gssmoother;
 use fem_solver::solve_sparse_lu;
 use fem_space::constraints::boundary_dofs;
+use fem_space::H1Space;
 use fem_space::constraints::prolong::prolongate_pk_hanging;
 use fem_space::dof_manager::DofManager;
 use fem_space::{FESpace, VectorH1Space};
@@ -77,7 +78,9 @@ macro_rules! amr_loop {
             let mut ess: Vec<usize> = Vec::new();
             for &d in &ess_bdr { ess.push(d as usize); ess.push(d as usize + n_scalar); }
 
-            let fdofs = face_dofs_p1(space.mesh());
+            // Build a scalar H1 space for boundary assembly (Neumann BC)
+            let scalar_space = H1Space::new(mesh.clone(), order);
+            let fdofs = face_dofs_p2(&scalar_space);
             let neumann = NeumannIntegrator::new(|_: &[f64], _: &[f64]| -1.0e-2);
             let traction = Assembler::assemble_boundary_linear(
                 n_scalar, space.mesh(), &fdofs, order, &[&neumann], &[2], quad_order_u8,
