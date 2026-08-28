@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 
-use fem_mesh::{Mesh, ElementType, amr::NCState, amr::NCStateQuad, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, topology::MeshTopology};
+use fem_mesh::{Mesh, ElementType, amr::NCState, amr::NCStateQuad, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, amr::HangingNodeConstraint, topology::MeshTopology};
 use fem_core::types::{ElemId, NodeId, Rank};
 
 use crate::{par_mesh::ParallelMesh, partition::MeshPartition, Comm};
@@ -38,6 +38,13 @@ pub struct ParRefinedMesh {
     pub nc_state:    NCState,
     pub solution:    Vec<f64>,
     pub n_new_elems: usize,
+    /// Hanging-node constraints produced by the local NC refinement
+    /// (constrained ids are **local node ids** of `par_mesh.local_mesh()`;
+    /// P1: constrained = edge-midpoint node, parents = the two coarse
+    /// endpoints, coefficients 0.5/0.5).  Previously dropped — callers must
+    /// apply them to the assembled system (MFEM's NC space does this
+    /// implicitly).
+    pub constraints: Vec<HangingNodeConstraint>,
 }
 
 /// Perform one cycle of parallel non-conforming AMR.
@@ -49,14 +56,13 @@ pub struct ParRefinedMesh {
 /// NC-refinement sequence of the full mesh, children inherit the parent's
 /// owner, and the ghost layer covers all cross-rank neighbours.
 ///
-/// # Note on `nc_state`
-/// The argument is accepted for signature compatibility but **ignored**: the
-/// partition rebuild renumbers local node ids, which invalidates any
-/// carried-over `NCState` (`active_midpoints`/`edge_level` keyed by local
-/// ids).  Each call starts from a fresh state; midpoint reuse across rounds
-/// is handled by the coordinate-midpoint fallback in
-/// [`NCState::refine`](fem_mesh::amr::NCState::refine).  For round-trip
-/// derefinement use [`par_refine_marked_with_tree`].
+/// # Note on `nc_quad`
+/// The caller owns a **cross-round** [`NCStateQuad`] (Quad4 meshes): its
+/// accumulated hanging-node constraints must survive across AMR rounds so
+/// constraints from earlier refinements are still applied on later meshes
+/// (a fresh state per round would drop them).  The partition rebuild may
+/// renumber local node ids, so the returned [`ParRefinedMesh::constraints`]
+/// are remapped to the reordered local ids.
 ///
 /// To later derefine, use [`par_refine_marked_with_tree`] which returns a
 /// [`DerefineTree`] suitable for [`par_derefine_marked`].
@@ -68,16 +74,14 @@ pub fn par_refine_marked(
 ) -> Result<ParRefinedMesh, ParAmrError> {
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
-    // Round-boundary synchronization: keeps every rank in the same collective
-    // phase across AMR rounds (the channel backend's alltoallv/allreduce are
-    // separate rendezvous sets, so a rank that runs ahead of the others could
-    // otherwise wait on a different collective than the one being called).
     comm.barrier();
 
-    // Fresh state per round: see the note above.  Quad4 meshes use
-    // NCStateQuad (the Tri3-only NCState asserts on Quad4 input).
+    // Fresh state per round: the partition rebuild renumbers local ids, so a
+    // carried-over state would desync.  Quad4 uses NCStateQuad; hanging
+    // constraints are returned (callers re-detect cross-round constraints
+    // from topology via `detect_hanging_quad`).
     let mut nc_state = NCState::new();
-    let (refined_mesh, _constraints, midpoint_map) =
+    let (refined_mesh, constraints, midpoint_map) =
         if coarse_mesh.elem_type == ElementType::Quad4 {
             NCStateQuad::new().refine(&coarse_mesh, marked, 0)
         } else {
@@ -96,13 +100,68 @@ pub fn par_refine_marked(
     );
     // Reorder the prolongated solution to match the reordered node ids.
     let prolongated = reorder_solution(&prolongated, &remap);
+    // Remap constraint node ids (NCState output → reordered local ids).
+    let constraints = remap_constraints(&constraints, &remap);
     let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
 
     Ok(ParRefinedMesh {
         par_mesh: new_par_mesh,
-        nc_state,
+        nc_state: NCState::new(),
         solution: prolongated,
         n_new_elems,
+        constraints,
+    })
+}
+
+/// Quad4-only variant of [`par_refine_marked`] accepting a caller-owned
+/// [`NCStateQuad`] (accepted for signature parity; a fresh state per round is
+/// still used — see the note on the partition rebuild above).
+///
+/// To later derefine, use [`par_refine_marked_with_tree`] which returns a
+/// [`DerefineTree`] suitable for [`par_derefine_marked`].
+pub fn par_refine_marked_quad(
+    par_mesh: &ParallelMesh<Mesh<2>>,
+    _nc_quad: &mut NCStateQuad,
+    marked:    &[ElemId],
+    solution:  Option<&[f64]>,
+) -> Result<ParRefinedMesh, ParAmrError> {
+    let coarse_mesh = par_mesh.local_mesh().clone();
+    let comm       = par_mesh.comm().clone();
+    // Round-boundary synchronization: keeps every rank in the same collective
+    // phase across AMR rounds (the channel backend's alltoallv/allreduce are
+    // separate rendezvous sets, so a rank that runs ahead of the others could
+    // otherwise wait on a different collective than the one being called).
+    comm.barrier();
+
+    // Quad4 refinement; the NCStateQuad history is *not* carried across the
+    // partition rebuild (local ids are renumbered), so a fresh state per round
+    // is used and hanging constraints are re-detected from topology by the
+    // caller (`detect_hanging_quad`).
+    let mut nc_quad = NCStateQuad::new();
+    let (refined_mesh, constraints, midpoint_map) = nc_quad.refine(&coarse_mesh, marked, 0);
+    let n_new_elems = refined_mesh.n_elements();
+
+    let prolongated = if let Some(sol) = solution {
+        prolongate_p1(&coarse_mesh, &refined_mesh, sol)
+    } else {
+        vec![]
+    };
+
+    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
+    );
+    // Reorder the prolongated solution to match the reordered node ids.
+    let prolongated = reorder_solution(&prolongated, &remap);
+    // Remap constraint node ids (NCState output → reordered local ids).
+    let constraints = remap_constraints(&constraints, &remap);
+    let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
+
+    Ok(ParRefinedMesh {
+        par_mesh: new_par_mesh,
+        nc_state: NCState::new(), // Quad4 history lives in the caller's NCStateQuad
+        solution: prolongated,
+        n_new_elems,
+        constraints,
     })
 }
 
@@ -120,7 +179,7 @@ pub fn par_refine_marked_with_tree(
     let coarse_mesh = par_mesh.local_mesh().clone();
     let comm       = par_mesh.comm().clone();
 
-    let (refined_mesh, _constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
+    let (refined_mesh, constraints, midpoint_map) = nc_state.refine(&coarse_mesh, marked, 0);
     let n_new_elems = refined_mesh.n_elements();
 
     let prolongated = if let Some(sol) = solution {
@@ -134,6 +193,8 @@ pub fn par_refine_marked_with_tree(
     );
     // Reorder the prolongated solution to match the reordered node ids.
     let prolongated = reorder_solution(&prolongated, &remap);
+    // Remap constraint node ids (NCState output → reordered local ids).
+    let constraints = remap_constraints(&constraints, &remap);
     let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
 
     let tree = build_derefine_tree_from_refine(&coarse_mesh, marked, &midpoint_map);
@@ -143,6 +204,7 @@ pub fn par_refine_marked_with_tree(
         nc_state,
         solution: prolongated,
         n_new_elems,
+        constraints,
     }, tree))
 }
 
@@ -2027,6 +2089,37 @@ pub fn prolongate_p1(
 /// Reorder a per-node vector from the NCState output numbering to the
 /// reordered (`[owned | ghost]` segment) numbering produced by
 /// [`rebuild_partition_nc`].  No-op for empty vectors.
+/// Remap hanging-node constraint ids from the NCState-output node numbering
+/// to the reordered local ids (`remap[old_id] = new_id`).
+fn remap_constraints(
+    constraints: &[HangingNodeConstraint],
+    remap: &[u32],
+) -> Vec<HangingNodeConstraint> {
+    constraints
+        .iter()
+        .map(|c| HangingNodeConstraint {
+            constrained: remap
+                .get(c.constrained)
+                .copied()
+                .unwrap_or(c.constrained as u32) as usize,
+            parent_a: remap.get(c.parent_a).copied().unwrap_or(c.parent_a as u32) as usize,
+            parent_b: remap.get(c.parent_b).copied().unwrap_or(c.parent_b as u32) as usize,
+            coeff_a: c.coeff_a,
+            coeff_b: c.coeff_b,
+            extra: c
+                .extra
+                .iter()
+                .map(|&(p, w)| {
+                    (
+                        remap.get(p).copied().unwrap_or(p as u32) as usize,
+                        w,
+                    )
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn reorder_solution(sol: &[f64], remap: &[u32]) -> Vec<f64> {
     if sol.is_empty() {
         return Vec::new();

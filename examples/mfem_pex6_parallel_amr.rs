@@ -34,7 +34,7 @@ use std::sync::Arc;
 use fem_assembly::postproc::l2_zz::l2_zz_estimator;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_core::{ElemId, Rank};
-use fem_mesh::amr::NCState;
+use fem_mesh::amr::{detect_hanging_quad, HangingNodeConstraint};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
@@ -79,11 +79,16 @@ fn main() {
     launcher.launch(move |comm| {
         let rank = comm.rank();
         let mut par_mesh = partition_mesh(&mesh_arc, &comm);
-        let mut nc = NCState::new();
+        // Hanging-node constraints are re-detected from the current mesh
+        // topology each round (partition rebuilds renumber local ids, so a
+        // carried-over NCStateQuad would desync across ranks).
 
         let mut it = 0usize;
         let mut final_dofs = 0usize;
         let mut total_iters = 0usize;
+        // Hanging-node constraints from the previous round's refinement
+        // (ids are local node ids of the current local mesh).
+        let mut hanging_constraints: Vec<HangingNodeConstraint> = Vec::new();
         loop {
             let local_mesh = par_mesh.local_mesh();
             let partition = par_mesh.partition();
@@ -102,6 +107,22 @@ fn main() {
             let dm = ps.local_space().dof_manager();
             let ess = boundary_dofs(local_mesh, dm, &local_mesh.unique_boundary_tags());
             let dp = ps.dof_partition();
+            // Drop constraints referencing nodes outside the current DOF
+            // range (extra-ghost nodes: in the mesh but not DOFs — their
+            // owning rank handles them).  Mesh::n_nodes may include them, so
+            // filter against the DOF partition instead.
+            let n_dofs = dp.n_total_dofs();
+            hanging_constraints.retain(|c| {
+                c.constrained < n_dofs
+                    && c.parent_a < n_dofs
+                    && c.parent_b < n_dofs
+                    && c.extra.iter().all(|&(p, _)| p < n_dofs)
+            });
+            // Apply hanging-node constraints from the previous refinement
+            // (MFEM NC spaces constrain hanging dofs implicitly: PᵀKP, Pᵀf).
+            if !hanging_constraints.is_empty() {
+                a_mat.apply_hanging_constraints(&hanging_constraints, &mut rhs, &dp);
+            }
             for &d in &ess {
                 let p = dp.permute_dof(d) as usize;
                 if p < dp.n_owned_dofs {
@@ -121,7 +142,17 @@ fn main() {
             };
             let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg)
                 .expect("par_solve_pcg_amg failed");
-            let global_dofs = ps.n_global_dofs();
+            // C++ ex6p prints `GlobalTrueVSize` — the true dof count after
+            // eliminating the hanging-node constraints (the raw `n_global_dofs`
+            // counts hanging dofs as independent unknowns).  Subtract the
+            // globally-owned hanging dof count.
+            let n_hanging_owned = hanging_constraints
+                .iter()
+                .filter(|c| dp.is_owned_dof(c.constrained as u32))
+                .count();
+            let n_hanging_global =
+                comm.allreduce_sum_i64(n_hanging_owned as i64) as usize;
+            let global_dofs = ps.n_global_dofs().saturating_sub(n_hanging_global);
             final_dofs = global_dofs;
             total_iters += res.iterations;
             if rank == 0 {
@@ -132,7 +163,17 @@ fn main() {
             }
 
             // 2. dm-order nodal solution (H1 P1: partition dof order == node order).
+            //    Recover hanging-node values (constrained dofs were set to 0
+            //    by the identity rows): u[c] = 0.5·(u[a] + u[b]).
+            //    ParVector is in partition order — permute node ids.
             u.update_ghosts();
+            for c in &hanging_constraints {
+                let pa = dp.permute_dof(c.parent_a as u32) as usize;
+                let pb = dp.permute_dof(c.parent_b as u32) as usize;
+                let pc = dp.permute_dof(c.constrained as u32) as usize;
+                let v = 0.5 * (u.as_slice()[pa] + u.as_slice()[pb]);
+                u.as_slice_mut()[pc] = v;
+            }
             let mut u_dm = vec![0.0_f64; local_mesh.n_nodes()];
             for pid in 0..dp.n_total_dofs() {
                 let dmid = dp.unpermute_dof(pid as u32) as usize;
@@ -189,10 +230,16 @@ fn main() {
                 .filter(|&e| marked_global.contains(&partition.global_elem(e as u32)))
                 .map(|e| e as ElemId)
                 .collect();
-            let r = par_refine_marked(&par_mesh, nc, &marked_local, Some(&u_dm))
+            let r = par_refine_marked(&par_mesh, fem_mesh::amr::NCState::new(), &marked_local, Some(&u_dm))
                 .expect("par_refine_marked failed");
             par_mesh = r.par_mesh;
-            nc = r.nc_state;
+            // Fresh topology-based detection (includes carried-over hanging
+            // nodes from earlier rounds — unlike the per-round fresh refine
+            // constraints).  Drop constraints referencing extra-ghost nodes
+            // (id ≥ n_nodes: partition-rebuild artifacts, not DOFs — their
+            // owning rank handles them).
+            let n_local_nodes = par_mesh.local_mesh().n_nodes();
+            hanging_constraints = detect_hanging_quad(par_mesh.local_mesh());
 
             // 5b. Load rebalancing after refinement (C++: pmesh->Rebalance()).
             //     Element gids are preserved, so the next round's marks and

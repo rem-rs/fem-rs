@@ -13,6 +13,7 @@ use crate::comm::Comm;
 use crate::dof_partition::DofPartition;
 use crate::ghost::GhostExchange;
 use crate::par_vector::ParVector;
+use fem_mesh::amr::HangingNodeConstraint;
 
 /// A distributed CSR matrix: `diag` block (owned columns) + `offd` block
 /// (ghost columns).
@@ -256,6 +257,133 @@ impl ParCsrMatrix {
     pub fn diag_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.diag }
 
     pub fn offd_block_mut(&mut self) -> &mut CsrMatrix<f64> { &mut self.offd }
+
+    /// Apply hanging-node constraints to the assembled system:
+    /// `K' = Pᵀ K P`, `f' = Pᵀ f` (constrained dofs eliminated, identity rows
+    /// left for the constrained dofs so the solver can run on the full local
+    /// vector).  Only **owned** constrained rows are processed; ghost rows are
+    /// handled by their owning rank.  Constraint ids are **local dof ids**
+    /// (P1: constrained = hanging edge-midpoint node, parents = coarse
+    /// endpoints, coefficients 0.5/0.5).
+    ///
+    /// Mirrors the serial `apply_hanging_constraints` (PᵀKP via COO rebuild)
+    /// but keeps the matrix `n_local × n_local` so it can be re-split into
+    /// diag/offd blocks afterwards.
+    pub fn apply_hanging_constraints(
+        &mut self,
+        constraints: &[HangingNodeConstraint],
+        rhs: &mut ParVector,
+        dof_part: &DofPartition,
+    ) {
+        if constraints.is_empty() {
+            return;
+        }
+        let n_owned = self.n_owned;
+        let n_local = n_owned + self.n_ghost;
+
+        // Constraint ids are local **node ids** (H1 P1: dof id = node id);
+        // the assembled matrix/rhs live in partition order — permute.
+        let permute = |id: usize| dof_part.permute_dof(id as u32) as usize;
+        let mut constraint_map: std::collections::HashMap<usize, Vec<(usize, f64)>> =
+            std::collections::HashMap::new();
+        for c in constraints {
+            constraint_map.insert(
+                permute(c.constrained),
+                c.parents()
+                    .map(|(p, w)| (permute(p), w))
+                    .collect(),
+            );
+        }
+
+        fn expand_dof(
+            dof: usize,
+            weight: f64,
+            cmap: &std::collections::HashMap<usize, Vec<(usize, f64)>>,
+            out: &mut Vec<(usize, f64)>,
+            depth: usize,
+        ) {
+            if depth > 20 {
+                return;
+            }
+            if let Some(parents) = cmap.get(&dof) {
+                for &(p, coeff) in parents {
+                    expand_dof(p, weight * coeff, cmap, out, depth + 1);
+                }
+            } else {
+                out.push((dof, weight));
+            }
+        }
+
+        // ── K' = Pᵀ K P on the full local matrix (n_local × n_local) ─────────
+        let a = self.to_local_matrix();
+        let mut coo = CooMatrix::<f64>::new(n_local, n_local);
+        for i in 0..n_local {
+            if i >= n_owned {
+                continue; // ghost rows: owned by another rank
+            }
+            let mut i_targets = Vec::new();
+            expand_dof(i, 1.0, &constraint_map, &mut i_targets, 0);
+            for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let j = a.col_idx[k] as usize;
+                let v = a.values[k];
+                if v.abs() < 1e-30 {
+                    continue;
+                }
+                let mut j_targets = Vec::new();
+                expand_dof(j, 1.0, &constraint_map, &mut j_targets, 0);
+                for &(ii, ai) in &i_targets {
+                    if ii >= n_local {
+                        continue;
+                    }
+                    for &(jj, aj) in &j_targets {
+                        if jj >= n_local {
+                            continue;
+                        }
+                        coo.add(ii, jj, v * ai * aj);
+                    }
+                }
+            }
+        }
+        // Identity rows for owned constrained dofs (solver keeps them = 0).
+        for c in constraints {
+            let ci = permute(c.constrained);
+            if ci < n_owned {
+                coo.add(ci, ci, 1.0);
+            }
+        }
+        let new_a = coo.into_csr_sorted();
+
+        // ── f' = Pᵀ f (owned part) ───────────────────────────────────────────
+        let mut new_rhs = vec![0.0_f64; n_owned];
+        for i in 0..n_owned {
+            let r = rhs.data[i];
+            if r.abs() < 1e-30 {
+                continue;
+            }
+            let mut targets = Vec::new();
+            expand_dof(i, 1.0, &constraint_map, &mut targets, 0);
+            for &(d, w) in &targets {
+                if d < n_owned {
+                    new_rhs[d] += w * r;
+                }
+            }
+        }
+        for c in constraints {
+            let ci = permute(c.constrained);
+            if ci < n_owned {
+                new_rhs[ci] = 0.0;
+            }
+        }
+        rhs.data[..n_owned].copy_from_slice(&new_rhs);
+
+        // ── Re-split into diag/offd blocks ───────────────────────────────────
+        // NB: use `from_local_matrix` (square diag), NOT the partition-aware
+        // variant — a non-square diag breaks csr_spmm in the AMG solver
+        // (pex33 regression lesson).
+        let ge = self.dof_ghost_exchange.clone();
+        let comm = self.comm.clone();
+        *self = ParCsrMatrix::from_local_matrix(&new_a, n_owned, ge, comm);
+    }
 
     /// Ghost exchange handle.
     pub fn ghost_exchange_handle(&self) -> Arc<GhostExchange> { self.dof_ghost_exchange.clone() }

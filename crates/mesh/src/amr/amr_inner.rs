@@ -2492,8 +2492,7 @@ pub fn refine_nonconforming_quad(
     mesh: &Mesh<2>,
     marked: &[ElemId],
     project_boundary: Option<&ProjectionConfig>,
-) -> (Mesh<2>, Vec<HangingNodeConstraint>) {
-    assert!(
+) -> (Mesh<2>, Vec<HangingNodeConstraint>) {    assert!(
         mesh.elem_type == ElementType::Quad4,
         "refine_nonconforming_quad: only Quad4 meshes are supported"
     );
@@ -2706,6 +2705,74 @@ struct NCStateQuadSnapshot {
     leaf_order: Vec<ElemId>,
     /// element → root mapping at snapshot time.
     elem_root: HashMap<ElemId, usize>,
+}
+
+/// Detect hanging-node constraints on a Quad4 NC mesh **purely from topology
+/// and coordinates** (no refinement history — safe after any partition
+/// rebuild that renumbers local ids).
+///
+/// A node `m` is hanging iff it is the midpoint (by coordinates, exact
+/// `0.5·a + 0.5·b` match) of an edge `(a,b)` that is used as a **full** edge
+/// by some (coarse) element while at least one element uses the half-edges
+/// `(a,m)` or `(m,b)` (refined neighbour).  P1 constraint:
+/// `u[m] = 0.5·(u[a] + u[b])`.
+pub fn detect_hanging_quad(mesh: &Mesh<2>) -> Vec<HangingNodeConstraint> {
+    use std::collections::{HashMap, HashSet};
+    let n_elems = mesh.n_elems();
+    let n_nodes = mesh.n_nodes();
+
+    // All element edges as unordered keys, plus per-element edge lists.
+    let mut full_edges: HashSet<(u32, u32)> = HashSet::new();
+    let mut elem_edges: Vec<[(u32, u32); 4]> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let mut edges = [(0u32, 0u32); 4];
+        for k in 0..4 {
+            let (a, b) = (ns[k], ns[(k + 1) % 4]);
+            let key = if a < b { (a, b) } else { (b, a) };
+            full_edges.insert(key);
+            edges[k] = key;
+        }
+        elem_edges.push(edges);
+    }
+    let _ = &elem_edges;
+
+    // Node coordinates for midpoint matching.
+    let coords_of = |n: NodeId| -> [f64; 2] {
+        let c = mesh.coords_of(n);
+        [c[0], c[1]]
+    };
+    // Coordinate → node id (exact bit match: midpoints are created as
+    // 0.5·a + 0.5·b).
+    let mut coord_to_node: HashMap<(u64, u64), NodeId> = HashMap::new();
+    for n in 0..n_nodes as NodeId {
+        let [x, y] = coords_of(n);
+        coord_to_node.insert((x.to_bits(), y.to_bits()), n);
+    }
+
+    let mut constraints = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    for &(a, b) in &full_edges {
+        let [ax, ay] = coords_of(a);
+        let [bx, by] = coords_of(b);
+        let mx = 0.5 * ax + 0.5 * bx;
+        let my = 0.5 * ay + 0.5 * by;
+        let Some(&m) = coord_to_node.get(&(mx.to_bits(), my.to_bits())) else {
+            continue;
+        };
+        if m == a || m == b || !seen.insert(m) {
+            continue; // degenerate or already constrained
+        }
+        // Check that a refined neighbour uses the half-edges (a,m) / (m,b):
+        // m is the midpoint of a full edge that appears as halves elsewhere.
+        let (lo, hi) = if a < m { (a, m) } else { (m, a) };
+        let (mlo, mhi) = if m < b { (m, b) } else { (b, m) };
+        let half_used = full_edges.contains(&(lo, hi)) || full_edges.contains(&(mlo, mhi));
+        if half_used {
+            constraints.push(HangingNodeConstraint::new_p1(m as usize, a as usize, b as usize));
+        }
+    }
+    constraints
 }
 
 /// MFEM `quad_hilbert_child_order` (ncmesh_tables.hpp): the order in which the
