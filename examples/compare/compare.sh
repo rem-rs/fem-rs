@@ -33,6 +33,12 @@ extract_dof() {
     # Hyperelastic format: "Number of velocity/deformation unknowns: 1170"
     val=$(grep -oE "Number of velocity/deformation unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # Wave equation format: "Number of temperature unknowns: 5281"
+    val=$(grep -oE "Number of temperature unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # General pattern: "Number of XXX unknowns: N"
+    val=$(grep -oE "Number of [a-zA-Z]+ unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     echo ""
 }
 
