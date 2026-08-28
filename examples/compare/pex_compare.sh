@@ -68,8 +68,13 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of [a-zA-Z/]+ unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "Number of velocity/deformation unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "unknowns = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # DPG format: "Trial space,     X0   : 5281 (order 1)"
+    val=$(grep "Trial space" "$1" 2>/dev/null | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
+    [ -n "$val" ] && [ "$val" != "0" ] && echo "$val" && return
     echo ""
 }
 
@@ -85,12 +90,17 @@ run_pex() {
 
     # Rust np=1/2/4
     local rc1=0 rc2=0 rc4=0
-    "./target/release/examples/${bin}.exe" --ranks 1 -m "$DATA_DIR/$mesh" $ra > "$r1" 2>&1 || rc1=$?
-    "./target/release/examples/${bin}.exe" --ranks 2 -m "$DATA_DIR/$mesh" $ra > "$r2" 2>&1 || rc2=$?
+    local mesh_arg=""
+    # mesh 为 "default" 时不传 -m（示例内部用默认网格+加密）
+    if [ "$mesh" != "default" ]; then
+        mesh_arg="-m $DATA_DIR/$mesh"
+    fi
+    "./target/release/examples/${bin}.exe" --ranks 1 $mesh_arg $ra > "$r1" 2>&1 || rc1=$?
+    "./target/release/examples/${bin}.exe" --ranks 2 $mesh_arg $ra > "$r2" 2>&1 || rc2=$?
     if [ -n "$SKIP_NP4" ]; then
         cp "$r2" "$r4"  # np4 跳过时复用 np2
     else
-        "./target/release/examples/${bin}.exe" --ranks 4 -m "$DATA_DIR/$mesh" $ra > "$r4" 2>&1 || rc4=$?
+        "./target/release/examples/${bin}.exe" --ranks 4 $mesh_arg $ra > "$r4" 2>&1 || rc4=$?
     fi
 
     if [ $rc1 -ne 0 ] || grep -q "panic" "$r1"; then
@@ -108,7 +118,16 @@ run_pex() {
 
     # C++ np=1 (mpirun -np 1, WSL 中 np>1 段错误)
     local cpp_bin="ex${name#pex}p_cpp"
-    wsl -e bash -c "timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ra} 2>&1" > "$c1" 2>&1
+    local cpp_mesh_arg="-m ${CPP_DATA}/${mesh}"
+    if [ "$mesh" = "default" ]; then
+        cpp_mesh_arg="-m ${CPP_DATA}/star.mesh"
+    fi
+    # Rust 用 -r，C++ 用 -rs/-rp（转换）
+    local cpp_ra="$ra"
+    if [[ "$cpp_ra" == *"-r "* ]]; then
+        cpp_ra=$(echo "$cpp_ra" | sed 's/-r \([0-9]*\)/-rs \1 -rp 0/')
+    fi
+    wsl -e bash -c "timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} ${cpp_mesh_arg} ${cpp_ra} 2>&1" > "$c1" 2>&1
 
     # DOF 提取
     local d1=$(extract_dof "$r1")
@@ -136,12 +155,12 @@ run_pex() {
 declare -A PEX_MESH
 PEX_MESH[pex1]="star.mesh|-no-vis"
 PEX_MESH[pex2]="beam-tri.mesh|-no-vis"
-PEX_MESH[pex3]="star.mesh|-no-vis"
+PEX_MESH[pex3]="default|-no-vis"
 PEX_MESH[pex4]="star.mesh|-no-vis"
 PEX_MESH[pex5]="star.mesh|-r 1 -no-vis"
 PEX_MESH[pex6]="star.mesh|-no-vis"
 PEX_MESH[pex7]="star.mesh|-no-vis"
-PEX_MESH[pex8]="star.mesh|-no-vis"
+PEX_MESH[pex8]="star.mesh|-r 5 -no-vis"
 PEX_MESH[pex9]="star.mesh|-no-vis"
 PEX_MESH[pex10]="beam-quad.mesh|-r 2 -o 2 -dt 3 -no-vis"
 PEX_MESH[pex12]="beam-tri.mesh|-n 5 -no-vis"
