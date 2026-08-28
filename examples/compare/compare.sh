@@ -12,7 +12,21 @@ OUT_DIR="tmp/cmp"
 mkdir -p "$OUT_DIR"
 
 extract_dof() {
-    grep -oE "Number of (finite element )?unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1 || true
+    # Try multiple patterns for DOF extraction
+    local val=""
+    # Pattern 1: "Number of finite element unknowns: N"
+    val=$(grep -oE "Number of finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # Pattern 2: "Number of unknowns: N"
+    val=$(grep -oE "Number of unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # Pattern 3: "dim(R+W) = N" (mixed Darcy)
+    val=$(grep -oE "dim\(R\+W\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # Pattern 4: "Unknowns: N"
+    val=$(grep -oE "Unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    echo ""
 }
 
 extract_ev() {
