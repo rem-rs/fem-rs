@@ -240,6 +240,11 @@ MESH_ARGS[ex39]="compass.msh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex40]="star.mesh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex41]="periodic-square.mesh|-p 0 -r 2 -o 3 -no-vis|-p 0 -r 2 -o 3 -no-vis|dof+iter"
 
+# ─── 并行示例配置 ───────────────────────────────────────────────
+# Rust 用 --ranks N，C++ 用 mpirun -np 1（np=2+ 在 WSL 中段错误）
+# 比对策略: Rust np=1/2/4 一致 + Rust np1 vs C++ np1 DOF 一致
+# 并行示例不在此脚本比对（用 pex_compare.sh 单独处理）
+
 if [ "$1" = "--all" ]; then
     for name in $(echo "${!MESH_ARGS[@]}" | tr ' ' '\n' | sort -V); do
         IFS='|' read -r mesh ra ca modes <<< "${MESH_ARGS[$name]}"
