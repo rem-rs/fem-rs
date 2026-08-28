@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""MFEM 示例 1:1 比对工具（Git Bash / Windows 原生）"""
+"""MFEM 示例 1:1 比对工具"""
 import argparse, json, os, re, subprocess, sys
 
 def paths():
-    d = r"C:\Users\lilu\works\fem-pro\fem-rs"
+    d = "/mnt/c/Users/lilu/works/fem-pro/fem-rs"
     return {"win": d, "data": os.path.join(d, "data"), "cpp": "/home/quan/mfem49/data"}
 
 def load():
@@ -14,16 +14,17 @@ def run_rust(p, exe, mesh, args, ranks=None):
     mp = os.path.join(p["data"], mesh)
     if ranks is not None:
         args = args.replace("{ranks}", str(ranks))
-    cmd = [os.path.join(p["win"], "target", "release", "examples", exe + ".exe"),
-           "-m", mp] + args.split()
+    exe_path = os.path.join(p["win"], "target/release/examples", exe + ".exe")
+    # WSL2: run Windows .exe via cmd.exe /c with proper quoting
+    cmd = f'cmd.exe /c ""{exe_path}" -m "{mp}" {args} 2>&1"'
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=150, cwd=p["win"])
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=150, cwd=p["win"])
         return r.stdout + "\n" + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
         return "TIMEOUT", -1
 
 def run_cpp(p, name, mesh, args):
-    cmd = f"wsl -e bash -c \"timeout 150 ~/bin/{name} -m {p['cpp']}/{mesh} {args} 2>&1\""
+    cmd = f"timeout 150 ~/bin/{name} -m {p['cpp']}/{mesh} {args} 2>&1"
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=150)
         return r.stdout + "\n" + r.stderr, r.returncode
@@ -66,7 +67,7 @@ def conv_avg(text):
     m = re.search(r"Average reduction factor\s*=\s*([-\d.eE]+)", text)
     return float(m.group(1)) if m else None
 
-def cmp(a, b, tol=1e-6):
+def cmp_val(a, b, tol=1e-6):
     if a is None and b is None: return "  ✓ N/A", True
     if a is None: return f"  ✗ rust=None cpp={b}", False
     if b is None: return f"  ✗ rust={a} cpp=None", False
@@ -76,7 +77,7 @@ def cmp(a, b, tol=1e-6):
         return f"  ✗ rust={a} cpp={b}", False
     if isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b): return f"  ✗ len {len(a)} vs {len(b)}", False
-        ok = all(cmp(x,y,tol)[1] for x,y in zip(a,b))
+        ok = all(cmp_val(x,y,tol)[1] for x,y in zip(a,b))
         return f"  {'✓' if ok else '✗'} {len(a)} values", ok
     return (f"  ✓ ={a}", True) if str(a)==str(b) else (f"  ✗ rust={a} cpp={b}", False)
 
@@ -114,12 +115,9 @@ def compare(name, cfg, p):
         return r
 
     rd, cd = dof(ro), dof(co)
-    if rd is None and cd is None:
-        r["status"] = "NODATA"
-    elif rd is None:
-        r["status"] = "NO_RUST_DOF"
-    elif cd is None:
-        r["status"] = "NO_CPP_DOF"
+    if rd is None and cd is None: r["status"] = "NODATA"
+    elif rd is None: r["status"] = "NO_RUST_DOF"
+    elif cd is None: r["status"] = "NO_CPP_DOF"
     elif rd == cd:
         r["status"] = "OK"
         r["lines"].append(f"  DOF: {rd}")
@@ -131,41 +129,41 @@ def compare(name, cfg, p):
         if m == "dof": continue
         if m == "eigenvalue":
             a, b = evs(ro), evs(co)
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  eigenvalue{line}")
         elif m == "iter":
             a, b = iters(ro, "CG"), iters(co, "CG")
             if a is None: a = iters(ro, "MINRES")
             if b is None: b = iters(co, "MINRES")
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  iter{line}")
         elif m == "minres":
             a, b = iters(ro, "MINRES"), iters(co, "MINRES")
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  minres{line}")
         elif m == "fgmres":
             a, b = iters(ro, "FGMRES"), iters(co, "FGMRES")
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  fgmres{line}")
         elif m == "newton":
             a, b = newton(ro), newton(co)
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  newton{line}")
         elif m == "objective":
             a, b = obj(ro), obj(co)
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  objective{line}")
         elif m == "marked":
             a, b = marked(ro), marked(co)
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  marked{line}")
         elif m == "conv_avg":
             a, b = conv_avg(ro), conv_avg(co)
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  conv_avg{line}")
         elif m == "cg":
             a, b = iters(ro, "CG"), iters(co, "CG")
-            line, _ = cmp(a, b, tol)
+            line, _ = cmp_val(a, b, tol)
             r["lines"].append(f"  cg{line}")
 
     return r
@@ -197,10 +195,10 @@ def main():
     p = paths()
 
     if args.list:
-        print("\n".join(sorted(k for k in cfg if k != "general")))
+        print("\n".join(sorted(k for k in cfg if not k.startswith("_"))))
         return
 
-    keys = [k for k in cfg if k != "general"] if args.all else args.examples
+    keys = [k for k in cfg if not k.startswith("_")] if args.all else args.examples
     results = [compare(k, cfg[k], p) for k in keys if k in cfg]
     report(results)
 
