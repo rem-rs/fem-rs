@@ -1,13 +1,18 @@
 #!/bin/bash
 # MFEM 示例 1:1 比对工具 (Git Bash)
 # 用法: bash compare.sh ex1 ex2 ex3
+#       bash compare.sh --all
 
 # Go to project root
-cd /c/Users/lilu/works/fem-pro/fem-rs
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$PROJECT_ROOT" ]; then
+    PROJECT_ROOT="/c/Users/lilu/works/fem-pro/fem-rs"
+fi
+cd "$PROJECT_ROOT"
 
-DATA_DIR="data"
+DATA_DIR="$PROJECT_ROOT/data"
 CPP_DATA="/home/quan/mfem49/data"
-OUT_DIR="tmp/cmp"
+OUT_DIR="$PROJECT_ROOT/tmp/cmp"
 mkdir -p "$OUT_DIR"
 
 extract_dof() {
@@ -53,8 +58,53 @@ run_one() {
     echo "=== $name ==="
 
     local rc=0
+    # Map example name to Rust binary name
+    local exe_name="${name}"
+    case "$name" in
+        ex1) exe_name="mfem_ex1_poisson" ;;
+        ex2) exe_name="mfem_ex2_elasticity" ;;
+        ex3) exe_name="mfem_ex3_maxwell_cavity" ;;
+        ex4) exe_name="mfem_ex4_darcy" ;;
+        ex5) exe_name="mfem_ex5_mixed_darcy" ;;
+        ex6) exe_name="mfem_ex6_flux_recovery" ;;
+        ex7) exe_name="mfem_ex7_surface_poisson" ;;
+        ex8) exe_name="mfem_ex8_dpg_2x2" ;;
+        ex9) exe_name="mfem_ex9_dg_advection" ;;
+        ex10) exe_name="mfem_ex10_hyperelastic_dyn" ;;
+        ex11) exe_name="mfem_ex11_eigenvalue" ;;
+        ex12) exe_name="mfem_ex12_elastic_eigen" ;;
+        ex13) exe_name="mfem_ex13_eigenvalue" ;;
+        ex14) exe_name="mfem_ex14_dg_poisson" ;;
+        ex15) exe_name="mfem_ex15_dynamic_amr" ;;
+        ex16) exe_name="mfem_ex16_nonlinear_heat" ;;
+        ex17) exe_name="mfem_ex17_dg_elasticity" ;;
+        ex18) exe_name="mfem_ex18_euler" ;;
+        ex19) exe_name="mfem_ex19_hyperelastic_incomp" ;;
+        ex20) exe_name="mfem_ex20_symplectic" ;;
+        ex21) exe_name="mfem_ex21_amr_elasticity" ;;
+        ex22) exe_name="mfem_ex22_complex_helmholtz" ;;
+        ex23) exe_name="mfem_ex23_wave_equation" ;;
+        ex24) exe_name="mfem_ex24_discrete_ops" ;;
+        ex25) exe_name="mfem_ex25_pml_maxwell" ;;
+        ex26) exe_name="mfem_ex26_geom_mg" ;;
+        ex27) exe_name="mfem_ex27_robin_bc" ;;
+        ex28) exe_name="mfem_ex28_sliding_elasticity" ;;
+        ex29) exe_name="mfem_ex29_curved_poisson" ;;
+        ex30) exe_name="mfem_ex30_aniso_amr" ;;
+        ex31) exe_name="mfem_ex31_anisotropic_maxwell" ;;
+        ex32) exe_name="mfem_ex32_maxwell_eigenvalue" ;;
+        ex33) exe_name="mfem_ex33_fractional_diffusion" ;;
+        ex34) exe_name="mfem_ex34_magnetostatics" ;;
+        ex35) exe_name="mfem_ex35_complex_oscillator" ;;
+        ex36) exe_name="mfem_ex36_obstacle" ;;
+        ex37) exe_name="mfem_ex37_topology_optimization" ;;
+        ex38) exe_name="mfem_ex38_implicit_integration" ;;
+        ex39) exe_name="mfem_ex39_compass" ;;
+        ex40) exe_name="mfem_ex40_eikonal" ;;
+        ex41) exe_name="mfem_ex41_imex" ;;
+    esac
     # Git Bash can run .exe directly
-    "target/release/examples/${name}.exe" -m "data/${mesh}" $ra > "$rout" 2>&1 || rc=$?
+    "target/release/examples/${exe_name}.exe" -m "data/${mesh}" $ra > "$rout" 2>&1 || rc=$?
     if [ $rc -ne 0 ] || grep -q "panic" "$rout"; then
         echo "  FAIL (rust exit=$rc)"
         return

@@ -1,7 +1,6 @@
 @echo off
 REM MFEM 示例 1:1 比对工具 (Windows cmd)
 REM 用法: compare.bat ex1 ex2 ex3
-REM       compare.bat --all
 
 setlocal enabledelayedexpansion
 
@@ -90,7 +89,8 @@ if errorlevel 1 (
 
 REM --- C++ ---
 REM Try serial binary first, then parallel
-if exist "\\wsl$\Ubuntu\home\quan\bin\%NAME%_cpp" (
+wsl -e bash -c "test -x ~/bin/%NAME%_cpp" >nul 2>&1
+if not errorlevel 1 (
     wsl -e bash -c "timeout 150 ~/bin/%NAME%_cpp -m /home/quan/mfem49/data/%MESH% %CA%" > "%OUT_DIR%\%NAME%_cpp.log" 2>&1
 ) else (
     wsl -e bash -c "timeout 150 ~/bin/%NAME%p_cpp -m /home/quan/mfem49/data/%MESH% -rs 0 %CA%" > "%OUT_DIR%\%NAME%_cpp.log" 2>&1
@@ -99,8 +99,20 @@ if exist "\\wsl$\Ubuntu\home\quan\bin\%NAME%_cpp" (
 REM --- Compare ---
 set RUST_VAL=
 set CPP_VAL=
-for /f "usebackq tokens=*" %%a in (`python -c "import re; t=open(r'%OUT_DIR%\%NAME%_rust.log').read(); m=re.search(r'Number of (finite element )?unknowns: (\d+)', t); print(m.group(2) if m else '')"`) do set RUST_VAL=%%a
-for /f "usebackq tokens=*" %%a in (`python -c "import re; t=open(r'%OUT_DIR%\%NAME%_cpp.log').read(); m=re.search(r'Number of (finite element )?unknowns: (\d+)', t); print(m.group(2) if m else '')"`) do set CPP_VAL=%%a
+
+REM Extract DOF from Rust output
+for /f "usebackq tokens=*" %%a in (`grep -oE "Number of (finite element )?unknowns: [0-9]+" "%OUT_DIR%\%NAME%_rust.log" 2^>nul`) do (
+    for /f "tokens=*" %%b in ("%%a") do (
+        for /f "tokens=*" %%c in ('echo %%b ^| grep -oE "[0-9]+"') do set RUST_VAL=%%c
+    )
+)
+
+REM Extract DOF from C++ output
+for /f "usebackq tokens=*" %%a in (`grep -oE "Number of (finite element )?unknowns: [0-9]+" "%OUT_DIR%\%NAME%_cpp.log" 2^>nul`) do (
+    for /f "tokens=*" %%b in ("%%a") do (
+        for /f "tokens=*" %%c in ('echo %%b ^| grep -oE "[0-9]+"') do set CPP_VAL=%%c
+    )
+)
 
 if "%RUST_VAL%"=="" (
     set /a COUNT_FAIL+=1
