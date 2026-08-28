@@ -19,7 +19,7 @@ impl Args {
     fn parse() -> Self {
         // MFEM ex13p defaults: beam-tet.mesh, ser_ref_levels=2, par_ref_levels=1
         // (total 3 uniform refinements in the serial port), order=1, nev=5.
-        let mut a = Args { mesh: "data/beam-tri.mesh".to_string(), ser_ref_levels: 3, order: 1, nev: 5, use_ame: false };
+        let mut a = Args { mesh: "data/beam-tet.mesh".to_string(), ser_ref_levels: 2, order: 1, nev: 5, use_ame: false };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {

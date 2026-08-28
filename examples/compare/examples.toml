@@ -114,7 +114,7 @@ args    = "-no-vis"
 compare = "dof"
 
 [ex18]
-mesh    = "star.mesh"
+mesh    = "periodic-square.mesh"
 args    = "-no-vis"
 compare = "dof"
 

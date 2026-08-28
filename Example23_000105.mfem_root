@@ -1,0 +1,41 @@
+{
+  "dsets": {
+    "main": {
+      "cycle": 105,
+      "domains": 1,
+      "fields": {
+        "rate": {
+          "path": "Example23_000105/rate.%06d",
+          "tags": {
+            "assoc": "nodes",
+            "basis": "H1_2D_P4",
+            "comps": "1",
+            "lod": "4",
+            "order": "4"
+          }
+        },
+        "solution": {
+          "path": "Example23_000105/solution.%06d",
+          "tags": {
+            "assoc": "nodes",
+            "basis": "H1_2D_P4",
+            "comps": "1",
+            "lod": "4",
+            "order": "4"
+          }
+        }
+      },
+      "mesh": {
+        "format": "0",
+        "path": "Example23_000105/mesh.%06d",
+        "tags": {
+          "max_lods": "32",
+          "spatial_dim": "2",
+          "topo_dim": "2"
+        }
+      },
+      "time": 1.0500000000000007,
+      "time_step": 0
+    }
+  }
+}

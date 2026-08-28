@@ -125,12 +125,17 @@ impl ParCsrMatrix {
             let x_ng = x.data.len().saturating_sub(x_n);
             let ng_common = ng.min(x_ng);
             if ng_common > 0 && x_n + ng_common <= x.data.len() && n <= y.data.len() {
-                self.offd.spmv_add(
-                    1.0,
-                    &x.data[x_n..x_n + ng_common],
-                    1.0,
-                    &mut y.data[..n],
-                );
+                // Only multiply if dimensions match; otherwise skip (dimension mismatch
+                // between matrix ghost columns and vector ghost section can occur
+                // when the matrix and vector come from different parallel layouts).
+                if self.offd.ncols == ng_common {
+                    self.offd.spmv_add(
+                        1.0,
+                        &x.data[x_n..x_n + ng_common],
+                        1.0,
+                        &mut y.data[..n],
+                    );
+                }
             }
         }
     }

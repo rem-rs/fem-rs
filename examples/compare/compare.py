@@ -2,28 +2,16 @@
 """MFEM 示例 1:1 比对工具
 
 用法:
-    python compare.py --all              # 跑全部示例
-    python compare.py ex1 ex11 ex27      # 跑指定示例
-    python compare.py --list             # 列出所有示例
-    python compare.py --summary          # 汇总报告
+    python3 compare.py --all              # 跑全部示例
+    python3 compare.py ex1 ex11 ex27      # 跑指定示例
+    python3 compare.py --list             # 列出所有示例
+    python3 compare.py --summary          # 汇总报告
 
-比对模式:
-    dof         — 比对 DOF 数
-    iter        — 比对迭代数
-    cg          — 比对 CG 迭代数
-    minres      — 比对 MINRES 迭代数
-    fgmres      — 比对 FGMRES 迭代数
-    eigenvalue  — 比对特征值
-    sol_gf      — 比对 sol.gf 文件（需要 ref 指向比对脚本）
-    newton      — 比对 Newton 迭代数
-    conv_avg    — 比对平均缩减因子
-    marked      — 比对标记元素数
-    objective   — 比对目标函数值
-    energy      — 比对能量
-    residual    — 比对残差
+运行环境: WSL (python3 可用)
 """
 import argparse
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -31,36 +19,57 @@ import toml
 
 # ─── 路径配置 ─────────────────────────────────────────────────────────────────
 
-WIN_DIR = r"C:\Users\lilu\works\fem-pro\fem-rs"
-DATA_WIN = os.path.join(WIN_DIR, "data")
-DATA_CPP = "/home/quan/mfem49/data"
-CPP_BIN = os.path.join(WIN_DIR, "tools", "compare")
-CONFIG_PATH = os.path.join(WIN_DIR, "examples", "compare", "examples.toml")
+def detect_paths():
+    """自动检测运行环境，返回路径配置"""
+    # 检测是否在 WSL 中
+    try:
+        with open("/proc/version", "r") as f:
+            version = f.read().lower()
+        in_wsl = "microsoft" in version or "wsl" in version
+    except:
+        in_wsl = False
+    
+    if in_wsl:
+        # WSL 环境：通过 /mnt/c 访问 Windows 文件
+        win_dir = "/mnt/c/Users/lilu/works/fem-pro/fem-rs"
+    else:
+        # Windows 原生环境
+        win_dir = r"C:\Users\lilu\works\fem-pro\fem-rs"
+    
+    data_win = os.path.join(win_dir, "data")
+    data_cpp = "/home/quan/mfem49/data"
+    
+    return {
+        "win_dir": win_dir,
+        "data_win": data_win,
+        "data_cpp": data_cpp,
+    }
 
 
 def load_config():
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples.toml")
+    with open(config_path, "r", encoding="utf-8") as f:
         return toml.load(f)
 
 
-def run_rust(exe, mesh, args, ranks=None):
+def run_rust(paths, exe, mesh, args, ranks=None):
     """运行 Rust .exe，返回 (stdout+stderr, returncode)"""
-    mesh_path = os.path.join(DATA_WIN, mesh)
+    mesh_path = os.path.join(paths["data_win"], mesh)
     if ranks is not None:
         args = args.replace("{ranks}", str(ranks))
-    cmd = [os.path.join(WIN_DIR, "target", "release", "examples", f"{exe}.exe"),
-           "-m", mesh_path] + args.split()
+    exe_path = os.path.join(paths["win_dir"], "target", "release", "examples", f"{exe}.exe")
+    cmd = [exe_path, "-m", mesh_path] + args.split()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=150, cwd=WIN_DIR)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=150, cwd=paths["win_dir"])
         return r.stdout + "\n" + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
         return "TIMEOUT", -1
 
 
-def run_cpp(bin_name, mesh, args):
+def run_cpp(paths, bin_name, mesh, args):
     """运行 C++ 参考（通过 WSL），返回 (stdout+stderr, returncode)"""
-    mesh_cpp = os.path.join(DATA_CPP, mesh)
-    cmd = f'timeout 150 ~/bin/{bin_name} -m {mesh_cpp} {args}'
+    mesh_cpp = os.path.join(paths["data_cpp"], mesh)
+    cmd = f"timeout 150 ~/bin/{bin_name} -m {mesh_cpp} {args}"
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=150)
         return r.stdout + "\n" + r.stderr, r.returncode
