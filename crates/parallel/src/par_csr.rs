@@ -10,6 +10,7 @@ use std::sync::Arc;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 use crate::comm::Comm;
+use crate::dof_partition::DofPartition;
 use crate::ghost::GhostExchange;
 use crate::par_vector::ParVector;
 
@@ -46,6 +47,72 @@ impl ParCsrMatrix {
         comm: Comm,
     ) -> Self {
         ParCsrMatrix { diag, offd, n_owned, n_ghost, dof_ghost_exchange, comm }
+    }
+
+    /// Build from a local matrix (n_local x n_local where n_local = n_owned + n_ghost).
+    ///
+    /// Discards ghost rows (they are handled by the owning rank).  Splits
+    /// columns into `diag` (col < n_owned) and `offd` (col >= n_owned,
+    /// remapped to 0-based ghost index).
+    ///
+    /// `dof_part` is used to identify which ghost columns are actually cross-rank
+    /// (owned by other ranks) vs local ghost-element DOFs owned by this rank.
+    /// Only cross-rank ghost columns are placed in the offd block; local
+    /// ghost-element columns are added to the diag block.
+    pub fn from_local_matrix_with_partition(
+        local: &CsrMatrix<f64>,
+        n_owned: usize,
+        dof_part: &DofPartition,
+        dof_ghost_exchange: Arc<GhostExchange>,
+        comm: Comm,
+    ) -> Self {
+        let n_local = local.nrows;
+        let n_ghost = n_local.saturating_sub(n_owned);
+
+        // Build a set of cross-rank ghost local IDs for fast lookup.
+        let cross_rank_ghosts: std::collections::HashSet<usize> = dof_part
+            .ghost_dofs()
+            .map(|(lid, _)| lid as usize)
+            .collect();
+
+        // Map from local ghost column index to offd column index.
+        let ghost_col_map: std::collections::HashMap<usize, usize> = dof_part
+            .ghost_dofs()
+            .enumerate()
+            .map(|(idx, (lid, _))| (lid as usize, idx))
+            .collect();
+
+        let n_cross_rank = cross_rank_ghosts.len();
+        // Diag block: n_owned x (n_owned + local_ghost_cols)
+        // But we use n_owned x n_owned for the owned-owned part,
+        // and a separate structure for owned-local_ghost part.
+        // For simplicity, use n_owned x n_local for diag (sparse).
+        let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_local);
+        let mut offd_coo = CooMatrix::<f64>::new(n_owned, n_cross_rank);
+
+        for row in 0..n_owned {
+            for k in local.row_ptr[row]..local.row_ptr[row + 1] {
+                let col = local.col_idx[k] as usize;
+                let val = local.values[k];
+                if val == 0.0 { continue; }
+                if col < n_owned {
+                    diag_coo.add(row, col, val);
+                } else if cross_rank_ghosts.contains(&col) {
+                    // Cross-rank ghost column -> offd block.
+                    if let Some(&offd_col) = ghost_col_map.get(&col) {
+                        offd_coo.add(row, offd_col, val);
+                    }
+                } else {
+                    // Local ghost-element column (owned by this rank) -> diag block.
+                    diag_coo.add(row, col, val);
+                }
+            }
+        }
+
+        let diag = diag_coo.into_csr();
+        let offd = offd_coo.into_csr();
+
+        ParCsrMatrix { diag, offd, n_owned, n_ghost: n_cross_rank, dof_ghost_exchange, comm }
     }
 
     /// Build from a local matrix (n_local x n_local where n_local = n_owned + n_ghost).
