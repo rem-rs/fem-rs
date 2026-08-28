@@ -72,6 +72,12 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "unknowns = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "unknowns: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "dofs: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "DOFs: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     # 摘要格式: "pex22: dofs=289 ..."
     val=$(grep -oE "dofs=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
@@ -128,6 +134,7 @@ run_pex() {
         cpp_mesh_arg="-m ${CPP_DATA}/star.mesh"
     fi
     # 特殊处理：pex7 C++ 用 -e -o -r（不用 -m）
+    local cpp_ra="$ra"
     if [ "$name" = "pex7" ]; then
         cpp_mesh_arg=""
         cpp_ra="-e 0 -o 1 -r 0 -no-vis"
@@ -135,6 +142,17 @@ run_pex() {
         # pex33 C++ 用 -r（refs），且 C++ 的 -r 比 Rust 少 1
         local rust_r=$(echo "$ra" | grep -oE '\-r [0-9]+' | grep -oE '[0-9]+' | head -1)
         cpp_ra=$(echo "$ra" | sed "s/-r [0-9]*/-r $((rust_r - 1))/")
+    elif [ "$name" = "pex36" ]; then
+        # pex36 C++ 自建网格（无 -m），用 -r 3
+        cpp_mesh_arg=""
+        cpp_ra="-r 3 -no-vis"
+    elif [ "$name" = "pex29" ]; then
+        # pex29 C++ 用 -mt/-mo/-rs/-rp，且 rs 比 Rust 多 1
+        cpp_mesh_arg="-mt 4 -mo 3"
+        cpp_ra="-rs 3 -rp 0 -no-vis"
+    elif [[ "$cpp_ra" == *"-rs "* ]] || [[ "$cpp_ra" == *"-rp "* ]]; then
+        # 已用 -rs/-rp 格式，直接传（不转换）
+        :
     else
         # Rust 用 -r，C++ 用 -rs/-rp（转换；-rs 不转换）
         if [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
@@ -193,14 +211,14 @@ PEX_MESH[pex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
 PEX_MESH[pex26]="star.mesh|-no-vis"
 PEX_MESH[pex27]="inline-quad.mesh|-no-vis"
 PEX_MESH[pex28]="inline-quad.mesh|-no-vis"
-PEX_MESH[pex29]="disc-nurbs.mesh|-no-vis"
+PEX_MESH[pex29]="default|-rs 2 -no-vis"
 PEX_MESH[pex30]="star.mesh|-no-vis"
 PEX_MESH[pex31]="beam-tri.mesh|-o 1 -r 1 -no-vis"
-PEX_MESH[pex32]="fichera.mesh|-no-vis"
+PEX_MESH[pex32]="fichera.mesh|-rs 2 -rp 0 -no-vis"
 PEX_MESH[pex33]="square-disc.mesh|-r 3 -alpha 0.33 -o 2 -no-vis"
 PEX_MESH[pex34]="fichera-mixed.mesh|-no-vis"
 PEX_MESH[pex35]="fichera-mixed.mesh|-p 0 -o 1 -no-vis"
-PEX_MESH[pex36]="disc-nurbs.mesh|-no-vis"
+PEX_MESH[pex36]="default|-r 3 -no-vis"
 PEX_MESH[pex37]="star.mesh|-no-vis"
 PEX_MESH[pex39]="compass.msh|-no-vis"
 PEX_MESH[pex40]="star.mesh|-no-vis"
