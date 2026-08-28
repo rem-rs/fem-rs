@@ -1,12 +1,12 @@
 @echo off
-setlocal enabledelayedexpansion
 REM MFEM 示例 1:1 比对工具 (Windows 批处理)
 REM 用法: compare.bat ex1 ex2 ex3
 REM       compare.bat --all
 
+setlocal enabledelayedexpansion
+
 set WIN_DIR=C:\Users\lilu\works\fem-pro\fem-rs
 set DATA_DIR=%WIN_DIR%\data
-set CPP_DATA=\\wsl$\Ubuntu\home\quan\mfem49\data
 set OUT_DIR=%WIN_DIR%\tmp\cmp
 if not exist %OUT_DIR% mkdir %OUT_DIR%
 
