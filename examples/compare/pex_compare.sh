@@ -72,6 +72,9 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "unknowns = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # 摘要格式: "pex22: dofs=289 ..."
+    val=$(grep -oE "dofs=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     # DPG format: "Trial space,     X0   : 5281 (order 1)"
     val=$(grep "Trial space" "$1" 2>/dev/null | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
     [ -n "$val" ] && [ "$val" != "0" ] && echo "$val" && return
@@ -178,7 +181,7 @@ PEX_MESH[pex18]="star.mesh|-no-vis"
 PEX_MESH[pex19]="beam-quad.mesh|-o 2 -r 0 -no-vis"
 PEX_MESH[pex20]="star.mesh|-no-vis"
 PEX_MESH[pex21]="beam-tri.mesh|-o 2 -no-vis"
-PEX_MESH[pex22]="inline-quad.mesh|-p 0 -no-vis"
+PEX_MESH[pex22]="inline-quad.mesh|-rs 2 -rp 0 -p 0 -no-vis"
 PEX_MESH[pex24]="star.mesh|-p 2 -o 2 -no-vis"
 PEX_MESH[pex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
 PEX_MESH[pex26]="star.mesh|-no-vis"
