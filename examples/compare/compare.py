@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""MFEM 示例 1:1 比对工具"""
+"""MFEM 示例 1:1 比对工具（Git Bash / Windows 原生）"""
 import argparse, json, os, re, subprocess, sys
 
 def paths():
-    d = "/mnt/c/Users/lilu/works/fem-pro/fem-rs"
+    d = r"C:\Users\lilu\works\fem-pro\fem-rs"
     return {"win": d, "data": os.path.join(d, "data"), "cpp": "/home/quan/mfem49/data"}
 
 def load():
@@ -14,17 +14,16 @@ def run_rust(p, exe, mesh, args, ranks=None):
     mp = os.path.join(p["data"], mesh)
     if ranks is not None:
         args = args.replace("{ranks}", str(ranks))
-    exe_path = os.path.join(p["win"], "target/release/examples", exe + ".exe")
-    # WSL2: run Windows .exe via cmd.exe /c with proper quoting
-    cmd = f'cmd.exe /c ""{exe_path}" -m "{mp}" {args} 2>&1"'
+    cmd = [os.path.join(p["win"], "target", "release", "examples", exe + ".exe"),
+           "-m", mp] + args.split()
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=150, cwd=p["win"])
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=150, cwd=p["win"])
         return r.stdout + "\n" + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
         return "TIMEOUT", -1
 
 def run_cpp(p, name, mesh, args):
-    cmd = f"timeout 150 ~/bin/{name} -m {p['cpp']}/{mesh} {args} 2>&1"
+    cmd = f"wsl -e bash -c \"timeout 150 ~/bin/{name} -m {p['cpp']}/{mesh} {args} 2>&1\""
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=150)
         return r.stdout + "\n" + r.stderr, r.returncode
