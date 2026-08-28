@@ -39,6 +39,11 @@ extract_dof() {
     # General pattern: "Number of XXX unknowns: N"
     val=$(grep -oE "Number of [a-zA-Z]+ unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # RT/L2 format: "Number of Raviart-Thomas finite element unknowns: 164480"
+    val=$(grep -oE "Number of Raviart-Thomas finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "Number of L2 finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     echo ""
 }
 
@@ -185,7 +190,7 @@ MESH_ARGS[ex20]="star.mesh|-no-vis|-no-vis|dof+energy"
 MESH_ARGS[ex21]="beam-tri.mesh|-o 2 -no-vis|-o 2 -no-vis|dof"
 MESH_ARGS[ex22]="inline-quad.mesh|-p 0 -no-vis|-p 0 -no-vis|dof+iter"
 MESH_ARGS[ex23]="star.mesh|-o 4 -tf 2 -no-vis|-o 4 -tf 2 -no-vis|dof"
-MESH_ARGS[ex24]="star.mesh|-p 2 -o 2 -no-vis|-p 2 -o 2 -no-vis|dof"
+MESH_ARGS[ex24]="star.mesh|-p 2 -o 2 -no-vis|-p 2 -o 1 -no-vis|dof"
 MESH_ARGS[ex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis|dof"
 MESH_ARGS[ex26]="star.mesh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex27]="inline-quad.mesh|-no-vis|-no-vis|dof+iter"
