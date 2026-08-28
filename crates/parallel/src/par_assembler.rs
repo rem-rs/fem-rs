@@ -46,10 +46,9 @@ impl ParAssembler {
             local_mat
         };
 
-        ParCsrMatrix::from_local_matrix_with_partition(
+        ParCsrMatrix::from_local_matrix(
             &permuted_mat,
             dof_part.n_owned_dofs,
-            dof_part,
             par_space.dof_ghost_exchange_arc(),
             par_space.comm().clone(),
         )
@@ -107,10 +106,9 @@ impl ParAssembler {
             local_mat
         };
 
-        ParCsrMatrix::from_local_matrix_with_partition(
+        ParCsrMatrix::from_local_matrix(
             &permuted_mat,
             dof_part.n_owned_dofs,
-            dof_part,
             par_space.dof_ghost_exchange_arc(),
             par_space.comm().clone(),
         )

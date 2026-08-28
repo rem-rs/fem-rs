@@ -75,6 +75,8 @@ extract_dof() {
     # 摘要格式: "pex22: dofs=289 ..."
     val=$(grep -oE "dofs=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "Number of degrees of freedom: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     # DPG format: "Trial space,     X0   : 5281 (order 1)"
     val=$(grep "Trial space" "$1" 2>/dev/null | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
     [ -n "$val" ] && [ "$val" != "0" ] && echo "$val" && return
@@ -125,15 +127,19 @@ run_pex() {
     if [ "$mesh" = "default" ]; then
         cpp_mesh_arg="-m ${CPP_DATA}/star.mesh"
     fi
-    # Rust 用 -r，C++ 用 -rs/-rp（转换；-rs 不转换）
-    local cpp_ra="$ra"
-    if [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
-        cpp_ra=$(echo "$cpp_ra" | sed 's/ -r \([0-9]*\)/ -rs \1 -rp 0/; s/^-r \([0-9]*\)/-rs \1 -rp 0/')
-    fi
     # 特殊处理：pex7 C++ 用 -e -o -r（不用 -m）
     if [ "$name" = "pex7" ]; then
         cpp_mesh_arg=""
         cpp_ra="-e 0 -o 1 -r 0 -no-vis"
+    elif [ "$name" = "pex33" ]; then
+        # pex33 C++ 用 -r（refs），且 C++ 的 -r 比 Rust 少 1
+        local rust_r=$(echo "$ra" | grep -oE '\-r [0-9]+' | grep -oE '[0-9]+' | head -1)
+        cpp_ra=$(echo "$ra" | sed "s/-r [0-9]*/-r $((rust_r - 1))/")
+    else
+        # Rust 用 -r，C++ 用 -rs/-rp（转换；-rs 不转换）
+        if [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
+            cpp_ra=$(echo "$cpp_ra" | sed 's/ -r \([0-9]*\)/ -rs \1 -rp 0/; s/^-r \([0-9]*\)/-rs \1 -rp 0/')
+        fi
     fi
     wsl -e bash -c "timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} ${cpp_mesh_arg} ${cpp_ra} 2>&1" > "$c1" 2>&1
 
@@ -191,7 +197,7 @@ PEX_MESH[pex29]="disc-nurbs.mesh|-no-vis"
 PEX_MESH[pex30]="star.mesh|-no-vis"
 PEX_MESH[pex31]="beam-tri.mesh|-o 1 -r 1 -no-vis"
 PEX_MESH[pex32]="fichera.mesh|-no-vis"
-PEX_MESH[pex33]="square-disc.mesh|-alpha 0.33 -o 2 -no-vis"
+PEX_MESH[pex33]="square-disc.mesh|-r 3 -alpha 0.33 -o 2 -no-vis"
 PEX_MESH[pex34]="fichera-mixed.mesh|-no-vis"
 PEX_MESH[pex35]="fichera-mixed.mesh|-p 0 -o 1 -no-vis"
 PEX_MESH[pex36]="disc-nurbs.mesh|-no-vis"
