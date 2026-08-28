@@ -146,6 +146,10 @@ run_pex() {
         # pex36 C++ 自建网格（无 -m），用 -r 3
         cpp_mesh_arg=""
         cpp_ra="-r 3 -no-vis"
+    elif [ "$name" = "pex20" ]; then
+        # pex20 C++ 自建弹簧系统（无 -m），比对能量而非 DOF
+        cpp_mesh_arg=""
+        cpp_ra="-no-vis"
     elif [ "$name" = "pex29" ]; then
         # pex29 C++ 用 -mt/-mo/-rs/-rp，且 rs 比 Rust 多 1
         cpp_mesh_arg="-mt 4 -mo 3"
@@ -171,6 +175,19 @@ run_pex() {
     echo "  C++  DOF:  np1=$dc"
 
     # 判定: np1=np2=np4 一致 + np1 与 C++ 一致
+    if [ "$name" = "pex20" ]; then
+        # 能量比对（辛积分器输出均值/标准差）
+        local e1=$(grep -oE "^0: [0-9.eE+-]+[[:space:]]+[0-9.eE+-]+" "$r1" 2>/dev/null | head -1)
+        local ec=$(grep -oE "^0: [0-9.eE+-]+[[:space:]]+[0-9.eE+-]+" "$c1" 2>/dev/null | head -1)
+        if [ -n "$e1" ] && [ "$e1" = "$ec" ]; then
+            echo "  OK (energy: $e1)"
+        elif [ -n "$e1" ] && [ -n "$ec" ]; then
+            echo "  DIFF_ENERGY (rust=$e1 cpp=$ec)"
+        else
+            echo "  NO_ENERGY"
+        fi
+        return
+    fi
     if [ -n "$d1" ] && [ "$d1" = "$d2" ] && [ "$d1" = "$d4" ]; then
         if [ -n "$dc" ] && [ "$d1" = "$dc" ]; then
             echo "  OK (dof=$d1, np1=np2=np4=C++)"
@@ -203,7 +220,7 @@ PEX_MESH[pex16]="star.mesh|-rs 2 -rp 0 -no-vis"
 PEX_MESH[pex17]="beam-tri.mesh|-r 4 -no-vis"
 PEX_MESH[pex18]="star.mesh|-no-vis"
 PEX_MESH[pex19]="beam-quad.mesh|-o 2 -r 0 -no-vis"
-PEX_MESH[pex20]="star.mesh|-no-vis"
+PEX_MESH[pex20]="default|-no-vis"
 PEX_MESH[pex21]="beam-tri.mesh|-o 2 -no-vis"
 PEX_MESH[pex22]="inline-quad.mesh|-rs 2 -rp 0 -p 0 -no-vis"
 PEX_MESH[pex24]="star.mesh|-p 2 -o 2 -no-vis"
