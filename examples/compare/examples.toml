@@ -1,0 +1,472 @@
+# MFEM 示例 1:1 比对配置
+#
+# 每个示例的配置项：
+#   mesh        — 默认 mesh 文件（相对 data/）
+#   rust_args   — 传给 Rust 示例的参数
+#   cpp_args    — 传给 C++ 参考的参数（含 -m 的 WSL 路径会由 compare.py 自动转换）
+#   compare     — 比对模式：dof | eigenvalue | sol_gf | residual | conv_avg | none
+#   tolerance   — 比对容差（默认 1e-6）
+#   note        — 备注说明
+
+[general]
+# 全局设置
+mesh_dir_rust = "data"
+mesh_dir_cpp  = "/home/quan/mfem49/data"
+cpp_bin_dir   = "~/bin"
+
+# ─── 串行示例 ─────────────────────────────────────────────────────────────────
+
+[ex0]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+conv_avg"
+
+[ex1]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex2]
+mesh    = "beam-tri.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex3]
+mesh    = "beam-tet.mesh"
+args    = "-no-vis"
+compare = "dof+cg"
+
+[ex4]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex5]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+minres"
+note    = "MINRES 迭代数可能因预处理器实现不同而有差异（Rust 423 vs C++ 396）"
+
+[ex6]
+mesh    = "square-disc.mesh"
+args    = "-o 1 -no-vis"
+compare = "dof"
+
+[ex7]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex8]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+conv_avg"
+
+[ex9]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof"
+
+[ex10]
+mesh    = "beam-quad.mesh"
+args    = "-r 2 -o 2 -dt 3 -no-vis"
+compare = "dof+newton"
+
+[ex11]
+mesh    = "star.mesh"
+args    = "-no-vis"
+cpp_args = "-rs 0"
+compare = "eigenvalue"
+tolerance = 1e-4
+
+[ex12]
+mesh    = "beam-tri.mesh"
+args    = "-n 5 -no-vis"
+cpp_args = "-rs 0 -n 5"
+compare = "eigenvalue"
+tolerance = 1e-4
+
+[ex13]
+mesh    = "beam-tri.mesh"
+args    = "--ame -no-vis"
+cpp_args = "-rs 0 -rp 0"
+compare = "eigenvalue"
+tolerance = 1e-4
+
+[ex14]
+mesh    = "star.mesh"
+args    = "-r 4 -o 2 -no-vis"
+compare = "dof+iter"
+
+[ex15]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+marked"
+
+[ex16]
+mesh    = "star.mesh"
+args    = "-r 2 -o 2 -no-vis"
+compare = "dof+iter"
+
+[ex17]
+mesh    = "beam-tri.mesh"
+args    = "-no-vis"
+compare = "dof"
+
+[ex18]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof"
+
+[ex19]
+mesh    = "beam-quad.mesh"
+args    = "-o 2 -r 0 -no-vis"
+compare = "dof+newton"
+
+[ex20]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+energy"
+
+[ex21]
+mesh    = "beam-tri.mesh"
+args    = "-o 2 -no-vis"
+compare = "dof"
+
+[ex22]
+mesh    = "inline-quad.mesh"
+args    = "-p 0 -no-vis"
+compare = "dof+iter"
+
+[ex23]
+mesh    = "star.mesh"
+args    = "-o 4 -tf 2 -no-vis"
+compare = "dof"
+
+[ex24]
+mesh    = "star.mesh"
+args    = "-p 2 -o 2 -no-vis"
+compare = "dof"
+
+[ex25]
+mesh    = "inline-quad.mesh"
+args    = "-o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
+compare = "dof"
+
+[ex26]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex27]
+mesh    = "inline-quad.mesh"
+args    = "-no-vis"
+compare = "sol_gf"
+tolerance = 1e-6
+ref = "tools/compare_ex27_gf.py"
+
+[ex28]
+mesh    = "inline-quad.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex29]
+mesh    = "disc-nurbs.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex30]
+mesh    = "star.mesh"
+args    = "-o 1 -no-vis"
+compare = "dof+marked"
+
+[ex31]
+mesh    = "beam-tri.mesh"
+args    = "-o 1 -r 1 -no-vis"
+compare = "dof+iter"
+
+[ex32]
+mesh    = "fichera.mesh"
+args    = "-no-vis"
+cpp_args = "-rs 0"
+compare = "eigenvalue"
+tolerance = 1e-4
+
+[ex33]
+mesh    = "square-disc.mesh"
+args    = "-alpha 0.33 -o 2 -no-vis"
+compare = "dof+iter"
+
+[ex34]
+mesh    = "fichera-mixed.mesh"
+args    = "-no-vis"
+compare = "dof+cg"
+
+[ex35]
+mesh    = "fichera-mixed.mesh"
+args    = "-p 0 -o 1 -no-vis"
+cpp_args = "-p 0 -o 1 -no-vis -rs 0"
+compare = "dof+fgmres"
+
+[ex36]
+mesh    = "disc-nurbs.mesh"
+args    = "-no-vis"
+compare = "dof+newton"
+
+[ex37]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+objective"
+
+[ex38]
+mesh    = "inline-segment.mesh"
+args    = "-no-vis"
+compare = "dof"
+
+[ex39]
+mesh    = "compass.msh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex40]
+mesh    = "star.mesh"
+args    = "-no-vis"
+compare = "dof+iter"
+
+[ex41]
+mesh    = "periodic-square.mesh"
+args    = "-p 0 -r 2 -o 3 -no-vis"
+compare = "dof+iter"
+
+# ─── 并行示例 ─────────────────────────────────────────────────────────────────
+
+[pex1]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex2]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex3]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex4]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex5]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex6]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex7]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex8]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex9]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex10]
+mesh    = "beam-quad.mesh"
+args    = "--ranks {ranks} -r 2 -o 2 -dt 3 -no-vis"
+compare = "dof+newton"
+np = [1, 2, 4]
+
+[pex12]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -n 5 -no-vis"
+compare = "eigenvalue"
+tolerance = 1e-4
+np = [1, 2, 4]
+
+[pex13]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "eigenvalue"
+tolerance = 1e-4
+np = [1, 2, 4]
+
+[pex14]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -r 4 -o 2 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex15]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex16]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -r 2 -o 2 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex17]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex18]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex19]
+mesh    = "beam-quad.mesh"
+args    = "--ranks {ranks} -o 2 -r 0 -no-vis"
+compare = "dof+newton"
+np = [1, 2, 4]
+
+[pex20]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex21]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -o 2 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex22]
+mesh    = "inline-quad.mesh"
+args    = "--ranks {ranks} -p 0 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex24]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -p 2 -o 2 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex25]
+mesh    = "inline-quad.mesh"
+args    = "--ranks {ranks} -o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex26]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex27]
+mesh    = "inline-quad.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex28]
+mesh    = "inline-quad.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex29]
+mesh    = "disc-nurbs.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex30]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex31]
+mesh    = "beam-tri.mesh"
+args    = "--ranks {ranks} -o 1 -r 1 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex32]
+mesh    = "fichera.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "eigenvalue"
+tolerance = 1e-4
+np = [1, 2, 4]
+
+[pex33]
+mesh    = "square-disc.mesh"
+args    = "--ranks {ranks} -alpha 0.33 -o 2 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex34]
+mesh    = "fichera-mixed.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex35]
+mesh    = "fichera-mixed.mesh"
+args    = "--ranks {ranks} -p 0 -o 1 -no-vis"
+compare = "dof+fgmres"
+np = [1, 2, 4]
+
+[pex36]
+mesh    = "disc-nurbs.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof+newton"
+np = [1, 2, 4]
+
+[pex37]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof+objective"
+np = [1, 2, 4]
+
+[pex39]
+mesh    = "compass.msh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex40]
+mesh    = "star.mesh"
+args    = "--ranks {ranks} -no-vis"
+compare = "dof"
+np = [1, 2, 4]
+
+[pex41]
+mesh    = "periodic-square.mesh"
+args    = "--ranks {ranks} -p 0 -r 2 -o 3 -no-vis"
+compare = "dof"
+np = [1, 2, 4]
