@@ -233,13 +233,6 @@ fn main() {
             let r = par_refine_marked(&par_mesh, fem_mesh::amr::NCState::new(), &marked_local, Some(&u_dm))
                 .expect("par_refine_marked failed");
             par_mesh = r.par_mesh;
-            // Fresh topology-based detection (includes carried-over hanging
-            // nodes from earlier rounds — unlike the per-round fresh refine
-            // constraints).  Drop constraints referencing extra-ghost nodes
-            // (id ≥ n_nodes: partition-rebuild artifacts, not DOFs — their
-            // owning rank handles them).
-            let n_local_nodes = par_mesh.local_mesh().n_nodes();
-            hanging_constraints = detect_hanging_quad(par_mesh.local_mesh());
 
             // 5b. Load rebalancing after refinement (C++: pmesh->Rebalance()).
             //     Element gids are preserved, so the next round's marks and
@@ -247,13 +240,29 @@ fn main() {
             if do_rebalance {
                 par_mesh = par_repartition(par_mesh)
                     .expect("par_repartition failed");
-                if rank == 0 {
-                    println!(
-                        "  rebalanced: {} elements across {} ranks",
-                        par_mesh.global_n_elems(),
-                        comm.size()
-                    );
-                }
+            }
+
+            // Detect hanging constraints on the FINAL mesh of this round
+            // (after repartitioning — it renumbers local ids, so detecting
+            // earlier would leave stale ids).  Topology+coordinate detection
+            // (no refinement history): safe on every rank.
+            // Drop constraints referencing extra-ghost nodes (id ≥ n_nodes:
+            // partition-rebuild artifacts, not DOFs — their owning rank
+            // handles them).
+            let n_local_nodes = par_mesh.local_mesh().n_nodes();
+            hanging_constraints = detect_hanging_quad(par_mesh.local_mesh());
+            hanging_constraints.retain(|c| {
+                c.constrained < n_local_nodes
+                    && c.parent_a < n_local_nodes
+                    && c.parent_b < n_local_nodes
+                    && c.extra.iter().all(|&(p, _)| p < n_local_nodes)
+            });
+            if do_rebalance && rank == 0 {
+                println!(
+                    "  rebalanced: {} elements across {} ranks",
+                    par_mesh.global_n_elems(),
+                    comm.size()
+                );
             }
             it += 1;
         }
