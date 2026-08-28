@@ -122,10 +122,15 @@ run_pex() {
     if [ "$mesh" = "default" ]; then
         cpp_mesh_arg="-m ${CPP_DATA}/star.mesh"
     fi
-    # Rust 用 -r，C++ 用 -rs/-rp（转换）
+    # Rust 用 -r，C++ 用 -rs/-rp（转换；-rs 不转换）
     local cpp_ra="$ra"
-    if [[ "$cpp_ra" == *"-r "* ]]; then
-        cpp_ra=$(echo "$cpp_ra" | sed 's/-r \([0-9]*\)/-rs \1 -rp 0/')
+    if [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
+        cpp_ra=$(echo "$cpp_ra" | sed 's/ -r \([0-9]*\)/ -rs \1 -rp 0/; s/^-r \([0-9]*\)/-rs \1 -rp 0/')
+    fi
+    # 特殊处理：pex7 C++ 用 -e -o -r（不用 -m）
+    if [ "$name" = "pex7" ]; then
+        cpp_mesh_arg=""
+        cpp_ra="-e 0 -o 1 -r 0 -no-vis"
     fi
     wsl -e bash -c "timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} ${cpp_mesh_arg} ${cpp_ra} 2>&1" > "$c1" 2>&1
 
@@ -164,7 +169,7 @@ PEX_MESH[pex8]="star.mesh|-r 5 -no-vis"
 PEX_MESH[pex9]="star.mesh|-no-vis"
 PEX_MESH[pex10]="beam-quad.mesh|-r 2 -o 2 -dt 3 -no-vis"
 PEX_MESH[pex12]="beam-tri.mesh|-n 5 -no-vis"
-PEX_MESH[pex13]="beam-tri.mesh|-no-vis"
+PEX_MESH[pex13]="beam-tri.mesh|-rs 3 -rp 0 -no-vis"
 PEX_MESH[pex14]="star.mesh|-r 4 -o 2 -no-vis"
 PEX_MESH[pex15]="star.mesh|-no-vis"
 PEX_MESH[pex16]="star.mesh|-r 2 -o 2 -no-vis"
