@@ -1,10 +1,9 @@
 #!/bin/bash
 # MFEM 示例 1:1 比对工具 (Git Bash)
 # 用法: bash compare.sh ex1 ex2 ex3
-#       bash compare.sh --all
 
 # Go to project root
-cd "$(git rev-parse --show-toplevel 2>/dev/null || echo /c/Users/lilu/works/fem-pro/fem-rs)"
+cd /c/Users/lilu/works/fem-pro/fem-rs
 
 DATA_DIR="data"
 CPP_DATA="/home/quan/mfem49/data"
@@ -12,19 +11,16 @@ OUT_DIR="tmp/cmp"
 mkdir -p "$OUT_DIR"
 
 extract_dof() {
-    # Try multiple patterns for DOF extraction
     local val=""
-    # Pattern 1: "Number of finite element unknowns: N"
     val=$(grep -oE "Number of finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    # Pattern 2: "Number of unknowns: N"
     val=$(grep -oE "Number of unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    # Pattern 3: "dim(R+W) = N" (mixed Darcy)
-    val=$(grep -oE "dim\(R\+W\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    val=$(grep -oE "Unknowns: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    # Pattern 4: "Unknowns: N"
-    val=$(grep -oE "Unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    val=$(grep -oE "NDoFs: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "dim\(R\+W\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
     echo ""
 }
@@ -49,67 +45,28 @@ extract_conv_avg() {
     grep -oE "Average reduction factor = [-+0-9.eE]+" "$1" 2>/dev/null | grep -oE "[-+0-9.eE]+$" || true
 }
 
-# 示例名称 -> Rust 二进制文件名
-declare -A EXE_MAP
-EXE_MAP[ex1]="mfem_ex1_poisson"
-EXE_MAP[ex2]="mfem_ex2_elasticity"
-EXE_MAP[ex3]="mfem_ex3_maxwell_cavity"
-EXE_MAP[ex4]="mfem_ex4_darcy"
-EXE_MAP[ex5]="mfem_ex5_mixed_darcy"
-EXE_MAP[ex6]="mfem_ex6_flux_recovery"
-EXE_MAP[ex7]="mfem_ex7_surface_poisson"
-EXE_MAP[ex8]="mfem_ex8_dpg_2x2"
-EXE_MAP[ex9]="mfem_ex9_dg_advection"
-EXE_MAP[ex10]="mfem_ex10_hyperelastic_dyn"
-EXE_MAP[ex11]="mfem_ex11_eigenvalue"
-EXE_MAP[ex12]="mfem_ex12_elastic_eigen"
-EXE_MAP[ex13]="mfem_ex13_eigenvalue"
-EXE_MAP[ex14]="mfem_ex14_dg_poisson"
-EXE_MAP[ex15]="mfem_ex15_dynamic_amr"
-EXE_MAP[ex16]="mfem_ex16_nonlinear_heat"
-EXE_MAP[ex17]="mfem_ex17_dg_elasticity"
-EXE_MAP[ex18]="mfem_ex18_euler"
-EXE_MAP[ex19]="mfem_ex19_hyperelastic_incomp"
-EXE_MAP[ex20]="mfem_ex20_symplectic"
-EXE_MAP[ex21]="mfem_ex21_amr_elasticity"
-EXE_MAP[ex22]="mfem_ex22_complex_helmholtz"
-EXE_MAP[ex23]="mfem_ex23_wave_equation"
-EXE_MAP[ex24]="mfem_ex24_discrete_ops"
-EXE_MAP[ex25]="mfem_ex25_pml_maxwell"
-EXE_MAP[ex26]="mfem_ex26_geom_mg"
-EXE_MAP[ex27]="mfem_ex27_robin_bc"
-EXE_MAP[ex28]="mfem_ex28_sliding_elasticity"
-EXE_MAP[ex29]="mfem_ex29_curved_poisson"
-EXE_MAP[ex30]="mfem_ex30_aniso_amr"
-EXE_MAP[ex31]="mfem_ex31_anisotropic_maxwell"
-EXE_MAP[ex32]="mfem_ex32_maxwell_eigenvalue"
-EXE_MAP[ex33]="mfem_ex33_fractional_diffusion"
-EXE_MAP[ex34]="mfem_ex34_magnetostatics"
-EXE_MAP[ex35]="mfem_ex35_complex_oscillator"
-EXE_MAP[ex36]="mfem_ex36_obstacle"
-EXE_MAP[ex37]="mfem_ex37_topology_optimization"
-EXE_MAP[ex38]="mfem_ex38_implicit_integration"
-EXE_MAP[ex39]="mfem_ex39_compass"
-EXE_MAP[ex40]="mfem_ex40_eikonal"
-EXE_MAP[ex41]="mfem_ex41_imex"
-
 run_one() {
     local name="$1" mesh="$2" ra="$3" ca="$4" modes="$5"
     local rout="$OUT_DIR/${name}_rust.log"
     local cout="$OUT_DIR/${name}_cpp.log"
-    local exe_name="${EXE_MAP[$name]:-$name}"
 
     echo "=== $name ==="
 
     local rc=0
     # Git Bash can run .exe directly
-    "target/release/examples/${exe_name}.exe" -m "data/${mesh}" $ra > "$rout" 2>&1 || rc=$?
+    "target/release/examples/${name}.exe" -m "data/${mesh}" $ra > "$rout" 2>&1 || rc=$?
     if [ $rc -ne 0 ] || grep -q "panic" "$rout"; then
         echo "  FAIL (rust exit=$rc)"
         return
     fi
 
-    wsl -e bash -c "timeout 150 ~/bin/${name}_cpp -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
+    # Try serial C++ binary first, then parallel with -rs 0
+    local cpp_bin="${name}_cpp"
+    if ! wsl -e bash -c "test -x ~/bin/${cpp_bin}" 2>/dev/null; then
+        cpp_bin="${name}p_cpp"
+        ca="-rs 0 $ca"
+    fi
+    wsl -e bash -c "timeout 150 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
 
     local rd=$(extract_dof "$rout")
     local cd=$(extract_dof "$cout")
