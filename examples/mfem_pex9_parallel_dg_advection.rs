@@ -72,8 +72,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let _n: usize = parse_arg(&args, "-n").unwrap_or(6); // kept for CLI compat (mesh size now from -m)
-    let order: u8 = parse_arg(&args, "-o").map(|o| o as u8).unwrap_or(1);
-    let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(0);
+    // C++ ex9p defaults: `order = 3` (DG) and `ser_ref_levels = 2`.
+    let order: u8 = parse_arg(&args, "-o").map(|o| o as u8).unwrap_or(3);
+    let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(2);
     let dt: f64 = parse_arg_f64(&args, "-dt").unwrap_or(0.01);
     let t_final: f64 = parse_arg_f64(&args, "-tf").unwrap_or(2.0);
 

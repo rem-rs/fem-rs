@@ -68,6 +68,11 @@ fn run_case(n_workers: usize, offset: f64, order: u8) -> RunResult {
     for _ in 0..ref_levels {
         mesh = refine_uniform(&mesh);
     }
+    // C++ ex28p: `par_ref_levels = 1` — one uniform refinement on the
+    // ParMesh after partitioning (256 → 1024 quads, 32×32).  The global
+    // solve happens on the rank-0 full mesh, so refine once more here to
+    // match the C++ global mesh exactly (1024 quads → 2178 unknowns).
+    mesh = refine_uniform(&mesh);
     let mesh = Arc::new(mesh);
 
     let result = Arc::new(std::sync::Mutex::new(None::<RunResult>));

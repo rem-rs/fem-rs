@@ -31,9 +31,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use fem_assembly::postproc::l2_zz::l2_zz_estimator;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_core::{ElemId, Rank};
-use fem_mesh::amr::{NCState, dorfler_mark, zz_estimator};
+use fem_mesh::amr::NCState;
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
@@ -48,7 +49,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let max_dofs: usize = parse_arg(&args, "-md").unwrap_or(100_000);
-    let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(1);
+    // C++ ex6p has no `-r` option: it starts from the coarse mesh (star.mesh,
+    // 20 quads).  `-r` is only a debugging aid, default 0.
+    let ref_levels: usize = parse_arg(&args, "-r").unwrap_or(0);
     // C++ ex6p: `if (do_rebalance) pmesh->Rebalance();` after each refine.
     let do_rebalance = !args.iter().any(|a| a == "--no-rebalance");
 
@@ -136,18 +139,31 @@ fn main() {
                 u_dm[dmid] = u.as_slice()[pid];
             }
 
-            // 3. ZZ error indicators + global Dörfler(0.7) marking.
-            let eta = zz_estimator(local_mesh, &u_dm);
+            // 3. L2-projection ZZ error indicators (C++ ex6p:
+            //    L2ZienkiewiczZhuEstimator, flux → RT0 smooth).
+            let eta = l2_zz_estimator(local_mesh, &u_dm);
             let owned_gids: Vec<u32> = (0..partition.n_owned_elems)
                 .map(|e| partition.global_elem(e as u32))
                 .collect();
             let owned_eta: Vec<f64> = eta[..partition.n_owned_elems].to_vec();
             let global_eta =
                 gather_global_eta(&comm, par_mesh.global_n_elems(), &owned_gids, &owned_eta);
-            let marked_global: BTreeSet<ElemId> =
-                dorfler_mark(&global_eta, 0.7).into_iter().collect();
-            let n_marked =
-                comm.allreduce_sum_i64(marked_global.len() as i64) as usize;
+            // C++ ex6p: `ThresholdRefiner::SetTotalErrorFraction(0.7)` with the
+            // default `total_norm_p = infinity()` marks every element with
+            // `η_K > 0.7 · ‖η‖_∞ = 0.7 · max_K η_K` (NOT Dörfler accumulation —
+            // that is a different refinement strategy).
+            let global_max = global_eta.iter().cloned().fold(0.0_f64, f64::max);
+            let threshold = 0.7 * global_max;
+            let marked_global: BTreeSet<ElemId> = global_eta
+                .iter()
+                .enumerate()
+                .filter(|&(_, &e)| e > threshold)
+                .map(|(i, _)| i as ElemId)
+                .collect();
+            // `marked_global` is a replicated global set (gather_global_eta
+            // broadcasts), so its length is already the global mark count —
+            // an allreduce SUM would count it once per rank.
+            let n_marked = marked_global.len();
             if rank == 0 {
                 println!(
                     "  marked {n_marked} / {} elements",

@@ -24,24 +24,27 @@ use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::WorkerConfig;
 
 struct Args {
-    mesh: String,
+    mesh: Option<String>,
     refine: i32,
     order: u8,
 }
 
 impl Args {
     fn parse() -> Self {
+        // C++ ex37p defaults: `Mesh::MakeCartesian2D(3, 1, QUADRILATERAL,
+        // true, 3.0, 1.0)`, `ref_levels = 5`, `order = 2`.  ex37p has no
+        // `-m` option (self-built mesh); keep `-m` for debugging only.
         let mut a = Args {
-            mesh: "data/beam-tri.mesh".into(),
-            refine: 2,
-            order: 1,
+            mesh: None,
+            refine: 5,
+            order: 2,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "-m" | "--mesh" => a.mesh = it.next().unwrap_or(a.mesh),
-                "-r" | "--refine" => { a.refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(2); }
-                "-o" | "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1); }
+                "-m" | "--mesh" => a.mesh = Some(it.next().unwrap_or_default()),
+                "-r" | "--refine" => { a.refine = it.next().and_then(|v| v.parse().ok()).unwrap_or(5); }
+                "-o" | "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(2); }
                 _ => {}
             }
         }
@@ -58,7 +61,13 @@ fn main() {
         .unwrap_or(2);
 
     println!("=== fem-rs mfem_pex37: Parallel Topology Optimization ===");
-    println!("  Workers: {}, Mesh: {}, Refine: {}, Order: {}", n_workers, args.mesh, args.refine, args.order);
+    println!(
+        "  Workers: {}, Mesh: {}, Refine: {}, Order: {}",
+        n_workers,
+        args.mesh.as_deref().unwrap_or("MakeCartesian2D(3,1)"),
+        args.refine,
+        args.order
+    );
 
     let result = std::sync::Arc::new(std::sync::Mutex::new(None::<(usize, f64, String)>));
     let result_slot = result.clone();
@@ -68,8 +77,15 @@ fn main() {
         let rank = comm.rank();
 
         let (n_total, sol_norm, status) = if rank == 0 {
-            let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
-            let mut mesh = mfem.mesh2d.expect("2D mesh");
+            let mut mesh = match &args.mesh {
+                Some(m) => read_mfem_file(m)
+                    .expect("failed to read mesh")
+                    .mesh2d
+                    .expect("2D mesh"),
+                // C++ ex37p: `Mesh::MakeCartesian2D(3, 1, QUADRILATERAL,
+                // true, 3.0, 1.0)` — 3×1 quad beam, 3.0 × 1.0.
+                None => fem_mesh::Mesh::<2>::make_cartesian_2d(3, 1, 3.0, 1.0),
+            };
             let dim = 2usize;
             
             if args.refine > 0 {

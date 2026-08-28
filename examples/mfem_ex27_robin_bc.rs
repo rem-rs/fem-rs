@@ -47,7 +47,6 @@ fn main() {
 fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     let space = H1Space::new(mesh.clone(), a.order as u8);
     let n = space.n_dofs();
-    println!("\nNumber of finite element unknowns: {}", n);
 
     let mut stiff = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: a.mat_val }], 3);
     // Robin: add a·u·v on the Robin boundary (tag 2)
@@ -62,6 +61,9 @@ fn solve_h1(a: &Args, mesh: &Mesh<2>) {
     // Periodic seam: u(x=1) = u(x=-1).  Slave = tag 6 (x=1), master = tag 5
     // (x=-1); the shift x_slave + offset = x_master gives offset = [-2, 0].
     let pairs = identify_periodic_dof_pairs(mesh, space.dof_manager(), 5, 6, &[-2.0, 0.0], 1e-10);
+    // C++ ex27 prints the number of TRUE unknowns (seam DOFs merged by the
+    // v2v stitch): n − merged pairs.
+    println!("\nNumber of finite element unknowns: {}", n - pairs.len());
     let periodic_constraints: Vec<HangingNodeConstraint> = pairs.iter()
         .map(|&(slave, master)| HangingNodeConstraint {
             constrained: slave as usize,

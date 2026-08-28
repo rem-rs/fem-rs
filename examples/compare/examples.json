@@ -56,7 +56,7 @@
   "pex6":  {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
   "pex7":  {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
   "pex8":  {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
-  "pex9":  {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
+  "pex9":  {"mesh": "periodic-hexagon.mesh", "args": "--ranks {ranks} -r 2 -no-vis", "compare": "dof", "np": [1, 2, 4]},
   "pex10": {"mesh": "beam-quad.mesh", "args": "--ranks {ranks} -r 2 -o 2 -dt 3 -no-vis", "compare": "dof+newton", "np": [1, 2, 4]},
   "pex12": {"mesh": "beam-tri.mesh", "args": "--ranks {ranks} -n 5 -no-vis", "compare": "eigenvalue", "tolerance": 0.001, "np": [1, 2, 4]},
   "pex13": {"mesh": "beam-tri.mesh", "args": "--ranks {ranks} -no-vis", "compare": "eigenvalue", "tolerance": 0.001, "np": [1, 2, 4]},

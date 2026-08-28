@@ -28,7 +28,7 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of Raviart-Thomas finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    val=$(grep -oE "Number of L2 finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    val=$(grep -oE "Number of L2 finite element unknowns: [0-9]+" "$1" 2>/dev/null | sed 's/.*: *\([0-9]*\).*/\1/' | head -1)
     [ -n "$val" ] && echo "$val" && return
     # H(curl) format: "DOFs: H(Curl)=114 H¹(z)=51 total=165"
     val=$(grep -oE "total=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
@@ -39,8 +39,8 @@ extract_dof() {
     # Fractional format: "Number of degrees of freedom: 20096"
     val=$(grep -oE "Number of degrees of freedom: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    # SubMesh format: "SubMesh H1 DOFs: 34, RT DOFs: 110"
-    val=$(grep -oE "SubMesh H1 DOFs: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    # SubMesh format: "SubMesh H1 DOFs: 34, RT DOFs: 110"（H1 含数字，用 sed 截取）
+    val=$(grep -oE "SubMesh H1 DOFs: [0-9]+" "$1" 2>/dev/null | sed 's/.*DOFs: *\([0-9]*\).*/\1/' | head -1)
     [ -n "$val" ] && echo "$val" && return
     # Element count: "Number of Elements 590"
     val=$(grep -oE "Number of Elements [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)

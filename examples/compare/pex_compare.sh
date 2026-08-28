@@ -60,6 +60,14 @@ extract_dof() {
     local val=""
     val=$(grep -oE "Number of finite element unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # Size of linear system (pex34, 第一个系统) — 放在 DOFs: 模式之前，
+    # 避免 pex34 的 "SubMesh H1 DOFs: 155" 抢先匹配
+    val=$(grep -oE "Size of linear system: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # DPG format: "Number of unknowns: X0 = 20801, ..." (Rust pex8) —
+    # 不能用 grep -oE "[0-9]+"（会先匹配 "X0" 里的 0），用 sed 截取
+    val=$(grep -oE "X0 = [0-9]+" "$1" 2>/dev/null | sed 's/.*X0 = //' | head -1)
+    [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Unknowns: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
@@ -78,10 +86,15 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "DOFs: *[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
-    # 摘要格式: "pex22: dofs=289 ..."
+    # 摘要格式: "pex22: dofs=289 ..." / "=== Done: dofs = 5120 ..."
     val=$(grep -oE "dofs=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "dofs = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of degrees of freedom: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # Size of linear system (pex34, 第一个系统)
+    val=$(grep -oE "Size of linear system: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
     # DPG format: "Trial space,     X0   : 5281 (order 1)"
     val=$(grep "Trial space" "$1" 2>/dev/null | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
@@ -146,6 +159,25 @@ run_pex() {
         # pex36 C++ 自建网格（无 -m），用 -r 3
         cpp_mesh_arg=""
         cpp_ra="-r 3 -no-vis"
+    elif [ "$name" = "pex37" ]; then
+        # ex37p 自建网格 MakeCartesian2D(3,1)（无 -m）；默认 r5/o2
+        cpp_mesh_arg=""
+        cpp_ra="-r 5 -o 2 -no-vis"
+    elif [ "$name" = "pex28" ]; then
+        # ex28p 自建梯形网格 build_trapezoid_mesh（无 -m）；Rust 同构
+        cpp_mesh_arg=""
+        cpp_ra="-no-vis"
+    elif [ "$name" = "pex34" ]; then
+        # ex34p 硬编码 mesh_file（无 -m，相对路径 ../data/fichera-mixed.mesh），
+        # 必须从 /home/quan/mfem49/examples 运行
+        cpp_cd="cd /home/quan/mfem49/examples && "
+        cpp_mesh_arg=""
+        cpp_ra="-rs 1 -rp 1 -no-vis"
+    elif [ "$name" = "pex8" ]; then
+        # ex8p 无 -rs/-rp 参数：ref_levels 内部固定为
+        # floor(log(5000/NE)/log(2)/dim)（star.mesh → 3 次），Rust -r 5 实测
+        # 产生相同 DPG 空间（X0=20801）
+        cpp_ra="-no-vis"
     elif [ "$name" = "pex20" ]; then
         # pex20 C++ 自建弹簧系统（无 -m），比对能量而非 DOF
         cpp_mesh_arg=""
@@ -163,7 +195,7 @@ run_pex() {
             cpp_ra=$(echo "$cpp_ra" | sed 's/ -r \([0-9]*\)/ -rs \1 -rp 0/; s/^-r \([0-9]*\)/-rs \1 -rp 0/')
         fi
     fi
-    wsl -e bash -c "timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} ${cpp_mesh_arg} ${cpp_ra} 2>&1" > "$c1" 2>&1
+    wsl -e bash -c "${cpp_cd:-}timeout 300 mpirun --allow-run-as-root -np 1 ~/bin/${cpp_bin} ${cpp_mesh_arg} ${cpp_ra} 2>&1" > "$c1" 2>&1
 
     # DOF 提取
     local d1=$(extract_dof "$r1")
@@ -227,7 +259,7 @@ PEX_MESH[pex24]="star.mesh|-p 2 -o 2 -no-vis"
 PEX_MESH[pex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
 PEX_MESH[pex26]="star.mesh|-no-vis"
 PEX_MESH[pex27]="inline-quad.mesh|-no-vis"
-PEX_MESH[pex28]="inline-quad.mesh|-no-vis"
+PEX_MESH[pex28]="default|-no-vis"
 PEX_MESH[pex29]="default|-rs 2 -no-vis"
 PEX_MESH[pex30]="star.mesh|-no-vis"
 PEX_MESH[pex31]="beam-tri.mesh|-o 1 -r 1 -no-vis"
@@ -236,7 +268,7 @@ PEX_MESH[pex33]="square-disc.mesh|-r 3 -alpha 0.33 -o 2 -no-vis"
 PEX_MESH[pex34]="fichera-mixed.mesh|-no-vis"
 PEX_MESH[pex35]="fichera-mixed.mesh|-p 0 -o 1 -no-vis"
 PEX_MESH[pex36]="default|-r 3 -no-vis"
-PEX_MESH[pex37]="star.mesh|-no-vis"
+PEX_MESH[pex37]="default|-no-vis"
 PEX_MESH[pex39]="compass.msh|-no-vis"
 PEX_MESH[pex40]="star.mesh|-no-vis"
 PEX_MESH[pex41]="periodic-square.mesh|-p 0 -r 2 -o 3 -no-vis"
