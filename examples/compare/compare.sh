@@ -27,6 +27,12 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "dim\(R\+W\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # DPG format: "Trial space,     X0   : 5281 (order 1)"
+    val=$(grep "Trial space" "$1" 2>/dev/null | head -1 | sed 's/.*: *\([0-9]*\).*/\1/')
+    [ -n "$val" ] && [ "$val" != "0" ] && echo "$val" && return
+    # Hyperelastic format: "Number of velocity/deformation unknowns: 1170"
+    val=$(grep -oE "Number of velocity/deformation unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     echo ""
 }
 
@@ -116,7 +122,12 @@ run_one() {
         cpp_bin="${name}p_cpp"
         ca="-rs 0 $ca"
     fi
-    wsl -e bash -c "timeout 300 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
+    # Special handling for ex7 (C++ doesn't support -m)
+    if [ "$name" = "ex7" ]; then
+        wsl -e bash -c "timeout 300 ~/bin/${cpp_bin} ${ca}" > "$cout" 2>&1
+    else
+        wsl -e bash -c "timeout 300 ~/bin/${cpp_bin} -m ${CPP_DATA}/${mesh} ${ca}" > "$cout" 2>&1
+    fi
 
     local rd=$(extract_dof "$rout")
     local cd=$(extract_dof "$cout")
@@ -151,12 +162,12 @@ MESH_ARGS[ex3]="beam-tet.mesh|-no-vis|-no-vis|dof+cg"
 MESH_ARGS[ex4]="star.mesh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex5]="star.mesh|-no-vis|-no-vis|dof+minres"
 MESH_ARGS[ex6]="square-disc.mesh|-o 1 -no-vis|-o 1 -no-vis|dof"
-MESH_ARGS[ex7]="star.mesh|-no-vis|-no-vis|dof+iter"
+MESH_ARGS[ex7]="star.mesh|-no-vis|-e 0 -o 2 -r 2 -no-vis -snap|dof+iter"
 MESH_ARGS[ex8]="star.mesh|-no-vis|-no-vis|dof+conv_avg"
 MESH_ARGS[ex9]="star.mesh|-no-vis|-no-vis|dof"
 MESH_ARGS[ex10]="beam-quad.mesh|-r 2 -o 2 -dt 3 -no-vis|-r 2 -o 2 -dt 3 -no-vis|dof+newton"
-MESH_ARGS[ex11]="star.mesh|-no-vis|-rs 0|eigenvalue"
-MESH_ARGS[ex12]="beam-tri.mesh|-n 5 -no-vis|-rs 0 -n 5|eigenvalue"
+MESH_ARGS[ex11]="star.mesh|-no-vis||eigenvalue"
+MESH_ARGS[ex12]="beam-tri.mesh|-n 5 -no-vis|-n 5|eigenvalue"
 MESH_ARGS[ex13]="beam-tet.mesh|--ame -no-vis|-rs 0 -rp 0|eigenvalue"
 MESH_ARGS[ex14]="star.mesh|-r 4 -o 2 -no-vis|-r 4 -o 2 -no-vis|dof+iter"
 MESH_ARGS[ex15]="star.mesh|-no-vis|-no-vis|dof+marked"
