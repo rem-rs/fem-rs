@@ -136,14 +136,201 @@ pub fn l2_zz_estimator(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> Vec<f64> {
         cm.add(i, j, v);
     }
     let a = cm.into_csr_sorted();
+
+    // ── 2b. Hanging-flux constraints (MFEM true-dof semantics) ─────────────
+    // On a non-conforming mesh the RT0 space has a slave flux DOF on each
+    // fine half-edge: flux continuity requires `u_fine = ±0.5·u_coarse`
+    // (same flux density over half the edge length).  MFEM eliminates these
+    // slave DOFs via the conforming prolongation P (true-dof space); a plain
+    // serial solve with the slave DOFs as independent unknowns does NOT
+    // reproduce C++ at 2nd+ level hanging edges (pex6 it3: np1 marked 10 vs
+    // C++ 25 — the flux field of the slave edges decouples from the master).
+    // At 1st-level hanging edges the slave value happens to come out as
+    // ±0.5·master automatically, which is why it0-it2 aligned without this
+    // constraint.
+    //
+    // Enforce the constraint in the local (dm-order) mass matrix: the slave
+    // row becomes `x_s − c·x_m = 0` (row s: 1 at s, −c at m; RHS 0).  The
+    // slave/master pair is detected purely from topology+coordinates (any
+    // edge whose midpoint is a mesh node is a master; its two halves are
+    // slaves), which covers 2nd+ level edges (m2 = mid(a,m1) where m1 is
+    // itself hanging — the parent edge (a,m1) need not be an element edge).
+    let mut slave_deps: Vec<(u32, f64, u32)> = Vec::new(); // (slave, coef, master)
+    let mut edge_of_dof: Vec<(u32, u32)> = vec![(u32::MAX, u32::MAX); n_rt_dofs];
+    {
+        // RT0 edge dof → endpoint node ids (local), via first element.
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for (li, (ia, ib)) in [(0usize, 1usize), (1, 2), (2, 3), (3, 0)]
+                .iter()
+                .enumerate()
+            {
+                let d = elem_rt_dofs[e as usize][li] as usize;
+                if edge_of_dof[d] == (u32::MAX, u32::MAX) {
+                    edge_of_dof[d] = (ns[*ia], ns[*ib]);
+                }
+            }
+        }
+        let coords = |n: u32| -> [f64; 2] {
+            let c = mesh.coords_of(n);
+            [c[0], c[1]]
+        };
+        // 1. Master edges: edge (a,b) with some other node m at its midpoint.
+        let mut node_list: Vec<u32> = edge_of_dof
+            .iter()
+            .flat_map(|&(a, b)| [a, b])
+            .filter(|&n| n != u32::MAX)
+            .collect();
+        node_list.sort_unstable();
+        node_list.dedup();
+        let mut master_edges: Vec<(u32, u32, u32)> = Vec::new(); // (a, b, mid)
+        for &(a, b) in edge_of_dof.iter() {
+            if a == u32::MAX {
+                continue;
+            }
+            let (mx, my) = {
+                let ca = coords(a);
+                let cb = coords(b);
+                (0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]))
+            };
+            for &m in &node_list {
+                if m == a || m == b {
+                    continue;
+                }
+                let cm = coords(m);
+                if (cm[0] - mx).abs() < 1e-9 && (cm[1] - my).abs() < 1e-9 {
+                    master_edges.push((a.min(b), a.max(b), m));
+                    break;
+                }
+            }
+        }
+        master_edges.sort_unstable();
+        master_edges.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+        // 2. Slave half-edge dofs: (a,m) or (m,b) of a master (a,b,m).
+        let master_dof: std::collections::HashMap<(u32, u32), u32> = master_edges
+            .iter()
+            .filter_map(|&(a, b, _m)| {
+                edge_of_dof
+                    .iter()
+                    .position(|&(x, y)| x.min(y) == a && x.max(y) == b)
+                    .map(|i| ((a, b), i as u32))
+            })
+            .collect();
+        for d in 0..n_rt_dofs as u32 {
+            let (a, b) = edge_of_dof[d as usize];
+            if a == u32::MAX {
+                continue;
+            }
+            for &(pa, pb, mid) in &master_edges {
+                // slave edge endpoints = {master endpoint, midpoint}
+                let (lo, hi) = (a.min(b), a.max(b));
+                let is_slave = (lo == pa.min(pb) || lo == pa.max(pb) || lo == mid)
+                    && (hi == pa.min(pb) || hi == pa.max(pb) || hi == mid)
+                    && (lo == mid) != (hi == mid)
+                    && lo != hi;
+                if !is_slave {
+                    continue;
+                }
+                if let Some(&md) = master_dof.get(&(pa, pb)) {
+                    // sign: slave's low endpoint equals master's low endpoint
+                    // → +0.5, else −0.5 (MFEM: one half-edge +0.5, other −0.5)
+                    let sign = if lo == pa.min(pb) { 1.0 } else { -1.0 };
+                    slave_deps.push((d, 0.5 * sign, md));
+                }
+            }
+        }
+        slave_deps.sort_by_key(|x| (x.0, x.2));
+        slave_deps.dedup();
+    }
+    let a = a;
     let mut x = vec![0.0_f64; n_rt_dofs];
-    let cfg = SolverConfig {
-        rtol: 1e-12,
-        max_iter: 200,
-        verbose: false,
-        ..SolverConfig::default()
-    };
-    solve_pcg_gssmoother(&a, &b, &mut x, &cfg).expect("RT0 L2 projection solve failed");
+    if !slave_deps.is_empty() && std::env::var("L2ZZ_NOCONSTRAINT").is_err() {
+        // ── true-dof elimination (MFEM PᵀAP semantics) ─────────────────────
+        // MFEM's estimator solves the L2 projection on the *true-dof* space:
+        // `A_true = Pᵀ A P`, `b_true = Pᵀ b` with P the conforming
+        // prolongation (slave flux dof s = ±0.5·master, chained at 2nd+ level
+        // where the master is itself a slave).  A row-replacement
+        // approximation (slave row → x_s − c·x_m = 0) is NOT equivalent: it
+        // drops the A_sm/A_ss/b_s contributions folded into the master rows
+        // by PᵀAP, which only goes unnoticed while the slave values happen to
+        // equal ±0.5·master anyway (1st-level edges).  pex6 it3 (2nd-level
+        // hanging edges): row-replacement marked 40 vs C++ 25, PᵀAP should
+        // match C++.
+        let slave_rows: std::collections::HashSet<u32> =
+            slave_deps.iter().map(|(s, _, _)| *s).collect();
+        // Free (true) dofs, in ascending order — their index in the true
+        // space is their position here.
+        let free_dofs: Vec<u32> = (0..n_rt_dofs as u32)
+            .filter(|d| !slave_rows.contains(d))
+            .collect();
+        // Chain-expand each slave to its ultimate free master (2nd+ level:
+        // master may itself be a slave).
+        let master_of: std::collections::HashMap<u32, (u32, f64)> = slave_deps
+            .iter()
+            .map(|&(s, c, m)| (s, (m, c)))
+            .collect();
+        let mut p_entries: Vec<(u32, usize, f64)> = Vec::new(); // (full dof, true idx, coef)
+        for (i, &f) in free_dofs.iter().enumerate() {
+            p_entries.push((f, i, 1.0));
+        }
+        for &(s, c0, m0) in &slave_deps {
+            let mut coef = c0;
+            let mut cur = m0;
+            let mut guard = 0;
+            while let Some(&(m, c)) = master_of.get(&cur) {
+                coef *= c;
+                cur = m;
+                guard += 1;
+                assert!(guard < 64, "hanging-flux dependency cycle");
+            }
+            let idx = free_dofs.binary_search(&cur).expect("slave chain ends at slave");
+            p_entries.push((s, idx, coef));
+        }
+        // A_true = Pᵀ A P, b_true = Pᵀ b.
+        let n_true = free_dofs.len();
+        let mut coo_true = CooMatrix::new(n_true, n_true);
+        let mut b_true = vec![0.0_f64; n_true];
+        for &(p_row, p_ti, p_v) in &p_entries {
+            for k in a.row_ptr[p_row as usize]..a.row_ptr[p_row as usize + 1] {
+                let col = a.col_idx[k] as usize;
+                let av = a.values[k];
+                // column of A is a full dof — find its true index via P
+                if let Some((q_ti, q_v)) = p_entries.iter().find(|&&(r, _, _)| r as usize == col).map(|&(_, ti, v)| (ti, v)) {
+                    coo_true.add(p_ti, q_ti, p_v * av * q_v);
+                }
+            }
+            // b_true = Pᵀ b: only free rows of b contribute through P (slave
+            // rows of b are folded with their coef — b itself has no slave
+            // rows, it is assembled per-element into all dofs; MFEM Pᵀb sums
+            // b_master + c·b_slave).
+            let bv = b[p_row as usize];
+            if bv != 0.0 {
+                b_true[p_ti] += p_v * bv;
+            }
+        }
+        let a_true = coo_true.into_csr_sorted();
+        let mut y = vec![0.0_f64; n_true];
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            max_iter: 200,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_pcg_gssmoother(&a_true, &b_true, &mut y, &cfg)
+            .expect("RT0 L2 projection solve failed");
+        // x = P y
+        for &(p_row, p_ti, p_v) in &p_entries {
+            x[p_row as usize] += p_v * y[p_ti];
+        }
+    } else {
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            max_iter: 200,
+            verbose: false,
+            ..SolverConfig::default()
+        };
+        solve_pcg_gssmoother(&a, &b, &mut x, &cfg).expect("RT0 L2 projection solve failed");
+    }
 
     // ── 3. Per-element error (MFEM `ComputeElementLpDistance` with the
     //        L2ZienkiewiczZhuEstimator default `local_norm_p = 1`):

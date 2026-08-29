@@ -364,7 +364,11 @@ impl ParCsrMatrix {
             }
         }
         // Exchange ghost rows: group by (global_row, global_col) at the owner.
-        if comm.size() > 1 && !row_sends.is_empty() {
+        // NOTE: all ranks must enter the alltoallv (a rank with no sends
+        // still participates with an empty payload), otherwise the collective
+        // deadlocks — pex6 RT0 flux constraints can leave one rank with empty
+        // row_sends while the other has entries.
+        if comm.size() > 1 {
             // coalesce per-rank lists
             let payloads: Vec<(Rank, Vec<u8>)> = row_sends
                 .iter()
@@ -444,7 +448,7 @@ impl ParCsrMatrix {
                 }
             }
         }
-        if comm.size() > 1 && !rhs_sends.is_empty() {
+        if comm.size() > 1 { // all ranks enter (empty sends are fine)
             let payloads: Vec<(Rank, Vec<u8>)> = rhs_sends
                 .iter()
                 .map(|(&dst, list)| {

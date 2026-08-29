@@ -2716,62 +2716,109 @@ struct NCStateQuadSnapshot {
 /// by some (coarse) element while at least one element uses the half-edges
 /// `(a,m)` or `(m,b)` (refined neighbour).  P1 constraint:
 /// `u[m] = 0.5·(u[a] + u[b])`.
+///
+/// Multi-level: from every element edge the bisection chain is walked
+/// recursively (`(a,b)` → `(a,m)`, `(m,b)` → ...), recording every midpoint
+/// the element does not contain.  A pure one-level "midpoint of a full edge"
+/// scan misses 2nd+ level hanging nodes whose parent edge `(a,m1)` is no
+/// longer an element edge (pex6 it3: unknowns 321 vs C++ 291, ~30 missed
+/// constraints).
 pub fn detect_hanging_quad(mesh: &Mesh<2>) -> Vec<HangingNodeConstraint> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     let n_elems = mesh.n_elems();
     let n_nodes = mesh.n_nodes();
-
-    // All element edges as unordered keys, plus per-element edge lists.
-    let mut full_edges: HashSet<(u32, u32)> = HashSet::new();
-    let mut elem_edges: Vec<[(u32, u32); 4]> = Vec::with_capacity(n_elems);
-    for e in 0..n_elems as ElemId {
-        let ns = mesh.elem_nodes(e);
-        let mut edges = [(0u32, 0u32); 4];
-        for k in 0..4 {
-            let (a, b) = (ns[k], ns[(k + 1) % 4]);
-            let key = if a < b { (a, b) } else { (b, a) };
-            full_edges.insert(key);
-            edges[k] = key;
-        }
-        elem_edges.push(edges);
-    }
-    let _ = &elem_edges;
 
     // Node coordinates for midpoint matching.
     let coords_of = |n: NodeId| -> [f64; 2] {
         let c = mesh.coords_of(n);
         [c[0], c[1]]
     };
-    // Coordinate → node id (exact bit match: midpoints are created as
-    // 0.5·a + 0.5·b).
-    let mut coord_to_node: HashMap<(u64, u64), NodeId> = HashMap::new();
+    // Coordinate → node id.  Keyed by 9-decimal-rounded string (1e-9
+    // tolerance), NOT exact bit match: 2nd+ level hanging nodes are created
+    // by *accumulated* bisection (m2 = mid(a, m1), m1 = mid(a,b)), so their
+    // coordinates differ from a freshly computed 0.5a+0.5b by rounding at
+    // the ~1e-16..1e-15 level and `to_bits` exact matching misses them
+    // (pex6 it3: unknowns 321 vs C++ 291, ~30 missed 2nd-level constraints).
+    // This mirrors the multi-level walk in `refine_uniform` (also 9-decimal
+    // keys).  The half-edge check below still guards against collinear
+    // vertices, so the tolerance cannot introduce false positives.
+    let mut coord_to_node: HashMap<String, NodeId> = HashMap::new();
     for n in 0..n_nodes as NodeId {
         let [x, y] = coords_of(n);
-        coord_to_node.insert((x.to_bits(), y.to_bits()), n);
+        coord_to_node.entry(format!("{:.9},{:.9}", x, y)).or_insert(n);
+    }
+
+    // Multi-level walk: from each element edge (a,b), recurse into the two
+    // halves.  A midpoint m that exists as a mesh node but is NOT contained
+    // in the element is hanging (the element uses (a,b) as a full edge while
+    // a refined neighbour uses (a,m)/(m,b)).  m's own parent edge (a,m) may
+    // itself be bisected further (m2 = mid(a,m)), so recurse.
+    //
+    // The half-edge check (sub-segments (a,m)/(m,b) used by some element)
+    // distinguishes a true hanging node from a collinear mesh vertex that
+    // happens to lie at the midpoint of an unrelated element edge (it0-it2
+    // regression lesson: incident-edge-pair scans mis-flag straight-line
+    // vertices).
+    fn walk(
+        a: NodeId,
+        b: NodeId,
+        coord_to_node: &HashMap<String, NodeId>,
+        coords_of: &dyn Fn(NodeId) -> [f64; 2],
+        contains: &dyn Fn(NodeId) -> bool,
+        elem_edges: &std::collections::HashSet<(u32, u32)>,
+        seen: &mut std::collections::HashSet<u32>,
+        out: &mut Vec<HangingNodeConstraint>,
+    ) {
+        let [ax, ay] = coords_of(a);
+        let [bx, by] = coords_of(b);
+        let key = format!("{:.9},{:.9}", 0.5 * ax + 0.5 * bx, 0.5 * ay + 0.5 * by);
+        let Some(&m) = coord_to_node.get(&key) else {
+            return; // no node at the midpoint: no (finer) split here
+        };
+        if m == a || m == b || contains(m) {
+            return; // degenerate, or m is a node of this element (not hanging)
+        }
+        // m is a hanging node iff at least one half-edge (a,m)/(m,b) is an
+        // element edge (refined neighbour) — even at level 2+ where the
+        // parent edge (a,m1) is no longer an element edge itself.
+        let (lo, hi) = if a < m { (a, m) } else { (m, a) };
+        let (mlo, mhi) = if m < b { (m, b) } else { (b, m) };
+        let half_used = elem_edges.contains(&(lo, hi)) || elem_edges.contains(&(mlo, mhi));
+        if !half_used {
+            return; // collinear vertex at the midpoint, not a hanging node
+        }
+        if !seen.insert(m) {
+            return;
+        }
+        out.push(HangingNodeConstraint::new_p1(m as usize, a as usize, b as usize));
+        walk(a, m, coord_to_node, coords_of, contains, elem_edges, seen, out);
+        walk(m, b, coord_to_node, coords_of, contains, elem_edges, seen, out);
+    }
+
+    // All element edges as unordered keys (for the half-edge check above).
+    let mut elem_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        for k in 0..4 {
+            let (a, b) = (ns[k], ns[(k + 1) % 4]);
+            let key = if a < b { (a, b) } else { (b, a) };
+            elem_edges.insert(key);
+        }
     }
 
     let mut constraints = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    for &(a, b) in &full_edges {
-        let [ax, ay] = coords_of(a);
-        let [bx, by] = coords_of(b);
-        let mx = 0.5 * ax + 0.5 * bx;
-        let my = 0.5 * ay + 0.5 * by;
-        let Some(&m) = coord_to_node.get(&(mx.to_bits(), my.to_bits())) else {
-            continue;
-        };
-        if m == a || m == b || !seen.insert(m) {
-            continue; // degenerate or already constrained
-        }
-        // Check that a refined neighbour uses the half-edges (a,m) / (m,b):
-        // m is the midpoint of a full edge that appears as halves elsewhere.
-        let (lo, hi) = if a < m { (a, m) } else { (m, a) };
-        let (mlo, mhi) = if m < b { (m, b) } else { (b, m) };
-        let half_used = full_edges.contains(&(lo, hi)) || full_edges.contains(&(mlo, mhi));
-        if half_used {
-            constraints.push(HangingNodeConstraint::new_p1(m as usize, a as usize, b as usize));
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for e in 0..n_elems as ElemId {
+        let ns = mesh.elem_nodes(e);
+        let contains = |m: NodeId| ns.contains(&m);
+        for k in 0..4 {
+            let a = ns[k];
+            let b = ns[(k + 1) % 4];
+            walk(a, b, &coord_to_node, &coords_of, &contains, &elem_edges, &mut seen, &mut constraints);
         }
     }
+    constraints.sort_by_key(|c| c.constrained);
+    constraints.dedup_by(|a, b| a.constrained == b.constrained);
     constraints
 }
 
@@ -3126,6 +3173,22 @@ impl NCStateQuad {
         let mut new_coords: Vec<f64> = mesh.coords.clone();
         let mut next_node = mesh.n_nodes() as NodeId;
 
+        // Pre-existing mesh nodes by rounded coordinate, for midpoint reuse.
+        // A marked element's edge may already carry a midpoint from a
+        // *previous* refinement round (a hanging edge that this element now
+        // refines further).  `self.active_midpoints` normally records those,
+        // but `par_refine_marked` rebuilds a fresh `NCStateQuad` per round
+        // (partition rebuild renumbers ids), so the history is empty and a
+        // naive get-or-create would duplicate the midpoint node (pex6 it3:
+        // 30 duplicated coords, unknowns 321 vs C++ 291).  Look the midpoint
+        // up by coordinate like MFEM `Mesh::GetId` (9-decimal tolerance for
+        // accumulated bisection rounding), reusing the existing node.
+        let mut coord_to_node: HashMap<String, NodeId> = HashMap::new();
+        for n in 0..mesh.n_nodes() as NodeId {
+            let c = mesh.coords_of(n);
+            coord_to_node.entry(format!("{:.9},{:.9}", c[0], c[1])).or_insert(n);
+        }
+
         // Refined elements in leaf (Hilbert) order — the order in which they
         // appear in the old leaf_order; propagate any stragglers at the end.
         let mut marked_leaf: Vec<ElemId> = self.leaf_order.iter()
@@ -3158,6 +3221,19 @@ impl NCStateQuad {
                 }
                 let xa = mesh.coords_of(a);
                 let xb = mesh.coords_of(b);
+                // Reuse a midpoint already present in the mesh (created by a
+                // previous round's refinement of this same edge): looking it
+                // up by rounded coordinate matches MFEM `Mesh::GetId`.  This
+                // is what keeps a second-round refinement of a hanging edge
+                // from duplicating the midpoint node.  (Must run before the
+                // 0.5·pa+0.5·pb push below, which would create the dup.)
+                let mkey = format!("{:.9},{:.9}", 0.5 * xa[0] + 0.5 * xb[0], 0.5 * xa[1] + 0.5 * xb[1]);
+                if let Some(&m) = coord_to_node.get(&mkey) {
+                    if m != a && m != b {
+                        midpoint_map.insert(key, m);
+                        return m;
+                    }
+                }
                 // MFEM CalcVertexPos for a scale-0.5 edge node:
                 //   pos = (1-s)·pa + s·pb = 0.5·pa + 0.5·pb
                 // (NOT 0.5·(pa+pb) — differs by 1 ulp and propagates into the
