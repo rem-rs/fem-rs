@@ -135,6 +135,7 @@ pub mod par_direct;
 pub mod par_dpg_trace;
 pub mod par_ams;
 pub mod par_discrete_operator;
+pub mod par_l2zz;
 pub mod par_lobpcg;
 pub mod par_projection;
 pub mod par_space;

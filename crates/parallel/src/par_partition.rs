@@ -225,6 +225,62 @@ pub(crate) fn extract_submesh_from_partition<const D: usize>(
     extract_submesh_from_partition_impl(mesh, target_rank, elem_part, false)
 }
 
+/// Detect non-conforming (hanging) edge sharing between two elements.
+///
+/// MFEM's NC meshes treat a refined element's half-edge (child edge) and the
+/// coarse parent edge as the *same* interface: the fine element's node at the
+/// coarse-edge midpoint (`0.5·(u+v)` in physical coordinates) makes the two
+/// elements adjacent for ghost-layer purposes, even though they share only
+/// one vertex id (`common == 1`, which fails the `common >= face_dim` test).
+///
+/// Without this, a rank that owns a refined element would not pull the coarse
+/// neighbour (whose nodes are the hanging node's parents) into its ghost
+/// layer, and the parallel hanging-node constraints PᵀKP would reference
+/// parent DOFs that are not present locally (pex6 deep-water: np2 matrix
+/// rows differ from np1 on parent rows).
+fn shares_hanging_edge<const D: usize>(
+    mesh: &Mesh<D>,
+    a_nodes: &[u32],
+    b_nodes: &[u32],
+) -> bool {
+    // For every edge (u,v) of element a, if its physical midpoint is a node
+    // of element b (and not u/v itself), the elements share a hanging edge.
+    let midpoint_in = |u: u32, v: u32, nodes: &[u32]| -> bool {
+        let cu = mesh.coords_of(u);
+        let cv = mesh.coords_of(v);
+        nodes.iter().any(|&n| {
+            if n == u || n == v {
+                return false;
+            }
+            let cn = mesh.coords_of(n);
+            for d in 0..D {
+                let mid = 0.5 * (cu[d] + cv[d]);
+                if (cn[d] - mid).abs() > 1e-9 {
+                    return false;
+                }
+            }
+            true
+        })
+    };
+    // Element a's edges.
+    let n = a_nodes.len();
+    for i in 0..n {
+        let (u, v) = (a_nodes[i], a_nodes[(i + 1) % n]);
+        if midpoint_in(u, v, b_nodes) {
+            return true;
+        }
+    }
+    // Element b's edges (fine element might be `a`, coarse `b`).
+    let n = b_nodes.len();
+    for i in 0..n {
+        let (u, v) = (b_nodes[i], b_nodes[(i + 1) % n]);
+        if midpoint_in(u, v, a_nodes) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Identity-node variant of [`extract_submesh_from_partition`]: local node ids
 /// stay equal to global ids (see [`partition_mesh_identity`]).
 pub(crate) fn extract_submesh_from_partition_identity<const D: usize>(
@@ -296,11 +352,19 @@ fn extract_submesh_from_partition_impl<const D: usize>(
         for e in 0..n_elems as u32 {
             if local_elem_set.contains(&e) { continue; }
             let en = mesh.elem_nodes(e);
-            let shares_face = local_elem_set.iter().any(|&l| {
+            let mut shares_face = false;
+            for &l in local_elem_set.iter() {
                 let ln = mesh.elem_nodes(l);
                 let common = en.iter().filter(|n| ln.contains(n)).count();
-                common >= face_dim
-            });
+                if common >= face_dim {
+                    shares_face = true;
+                    break;
+                }
+                if shares_hanging_edge(mesh, &en, &ln) {
+                    shares_face = true;
+                    break;
+                }
+            }
             if shares_face {
                 local_elem_set.insert(e);
                 extra_ghost.push(e);

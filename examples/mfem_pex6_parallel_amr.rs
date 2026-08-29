@@ -182,7 +182,16 @@ fn main() {
 
             // 3. L2-projection ZZ error indicators (C++ ex6p:
             //    L2ZienkiewiczZhuEstimator, flux → RT0 smooth).
-            let eta = l2_zz_estimator(local_mesh, &u_dm);
+            //    np1: serial estimator (validated bit-for-bit vs C++).
+            //    np>1: parallel estimator — the RT0 projection must be
+            //    solved on the GLOBAL (cross-rank) space, otherwise each
+            //    rank's local projection differs from C++ and the marking
+            //    drifts (pex6 deep-water: np2 it2 marked 12 vs np1 40).
+            let eta = if comm.size() > 1 {
+                fem_parallel::par_l2zz::l2_zz_estimator_parallel(&par_mesh, &comm, &u_dm)
+            } else {
+                l2_zz_estimator(local_mesh, &u_dm)
+            };
             let owned_gids: Vec<u32> = (0..partition.n_owned_elems)
                 .map(|e| partition.global_elem(e as u32))
                 .collect();
