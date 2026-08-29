@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use fem_core::Rank;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 use crate::comm::Comm;
@@ -317,6 +318,10 @@ impl ParCsrMatrix {
         // ── K' = Pᵀ K P on the full local matrix (n_local × n_local) ─────────
         let a = self.to_local_matrix();
         let mut coo = CooMatrix::<f64>::new(n_local, n_local);
+        // cross-rank row sends (PᵀKP): rank → Vec<(global_row, Vec<(global_col, val)>)>
+        let mut row_sends: std::collections::HashMap<Rank, Vec<(u32, Vec<(u32, f64)>)>> =
+            std::collections::HashMap::new();
+        let comm = self.comm.clone();
         for i in 0..n_local {
             if i >= n_owned {
                 continue; // ghost rows: owned by another rank
@@ -339,7 +344,69 @@ impl ParCsrMatrix {
                         if jj >= n_local {
                             continue;
                         }
-                        coo.add(ii, jj, v * ai * aj);
+                        let entry = v * ai * aj;
+                        if entry.abs() < 1e-30 {
+                            continue;
+                        }
+                        if ii < n_owned {
+                            coo.add(ii, jj, entry);
+                        } else {
+                            // row ii is a ghost dof: its owner must fold this
+                            // entry into its copy of row ii.
+                            let owner = dof_part.dof_owner(ii as u32);
+                            row_sends
+                                .entry(owner)
+                                .or_default()
+                                .push((dof_part.global_dof(ii as u32), vec![(dof_part.global_dof(jj as u32), entry)]));
+                        }
+                    }
+                }
+            }
+        }
+        // Exchange ghost rows: group by (global_row, global_col) at the owner.
+        if comm.size() > 1 && !row_sends.is_empty() {
+            // coalesce per-rank lists
+            let payloads: Vec<(Rank, Vec<u8>)> = row_sends
+                .iter()
+                .map(|(&dst, list)| {
+                    let mut buf = Vec::new();
+                    for &(gr, ref row) in list {
+                        buf.extend_from_slice(&gr.to_le_bytes());
+                        buf.extend_from_slice(&(row.len() as u32).to_le_bytes());
+                        for &(gc, v) in row {
+                            buf.extend_from_slice(&gc.to_le_bytes());
+                            buf.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                    (dst, buf)
+                })
+                .collect();
+            let incoming = comm.alltoallv_bytes(&payloads);
+            let gid_to_local: std::collections::HashMap<u32, u32> = (0..n_local)
+                .map(|d| (dof_part.global_dof(d as u32), d as u32))
+                .collect();
+            for (_src, bytes) in incoming {
+                let mut off = 0usize;
+                while off + 8 <= bytes.len() {
+                    let gr = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+                    let n_ent = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().unwrap()) as usize;
+                    off += 8;
+                    let Some(&li) = gid_to_local.get(&gr) else {
+                        off += n_ent * 12;
+                        continue;
+                    };
+                    let li = li as usize;
+                    if li >= n_owned {
+                        off += n_ent * 12;
+                        continue;
+                    }
+                    for _ in 0..n_ent {
+                        let gc = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+                        let val = f64::from_le_bytes(bytes[off + 4..off + 12].try_into().unwrap());
+                        off += 12;
+                        if let Some(&lc) = gid_to_local.get(&gc) {
+                            coo.add(li, lc as usize, val);
+                        }
                     }
                 }
             }
@@ -353,8 +420,11 @@ impl ParCsrMatrix {
         }
         let new_a = coo.into_csr_sorted();
 
-        // ── f' = Pᵀ f (owned part) ───────────────────────────────────────────
+        // ── f' = Pᵀ f (owned + cross-rank ghost-parent contributions) ───────
         let mut new_rhs = vec![0.0_f64; n_owned];
+        // cross-rank rhs sends: rank → Vec<(global_dof, contribution)>
+        let mut rhs_sends: std::collections::HashMap<Rank, Vec<(u32, f64)>> =
+            std::collections::HashMap::new();
         for i in 0..n_owned {
             let r = rhs.data[i];
             if r.abs() < 1e-30 {
@@ -365,6 +435,38 @@ impl ParCsrMatrix {
             for &(d, w) in &targets {
                 if d < n_owned {
                     new_rhs[d] += w * r;
+                } else if d < n_local {
+                    let owner = dof_part.dof_owner(d as u32);
+                    rhs_sends
+                        .entry(owner)
+                        .or_default()
+                        .push((dof_part.global_dof(d as u32), w * r));
+                }
+            }
+        }
+        if comm.size() > 1 && !rhs_sends.is_empty() {
+            let payloads: Vec<(Rank, Vec<u8>)> = rhs_sends
+                .iter()
+                .map(|(&dst, list)| {
+                    let mut buf = Vec::with_capacity(list.len() * 12);
+                    for &(g, c) in list {
+                        buf.extend_from_slice(&g.to_le_bytes());
+                        buf.extend_from_slice(&c.to_le_bytes());
+                    }
+                    (dst, buf)
+                })
+                .collect();
+            let incoming = comm.alltoallv_bytes(&payloads);
+            let gid_to_owned: std::collections::HashMap<u32, usize> = (0..n_owned)
+                .map(|d| (dof_part.global_dof(d as u32), d))
+                .collect();
+            for (_src, bytes) in incoming {
+                for chunk in bytes.chunks_exact(12) {
+                    let g = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                    let c = f64::from_le_bytes(chunk[4..12].try_into().unwrap());
+                    if let Some(&d) = gid_to_owned.get(&g) {
+                        new_rhs[d] += c;
+                    }
                 }
             }
         }

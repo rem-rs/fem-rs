@@ -165,14 +165,157 @@ pub fn l2_zz_estimator_parallel(
         cm.add(i, j, v);
     }
     let local_a = cm.into_csr_sorted();
-    let permuted_a = permute_csr(&local_a, dp);
+
+    // ── 2b. Hanging-flux constraints (MFEM true-dof semantics) ─────────────
+    //  On a non-conforming mesh the RT0 space has a slave flux DOF on each
+    //  fine half-edge: flux continuity requires `u_fine = ±0.5·u_coarse`
+    //  (same flux density over half the edge length).  MFEM eliminates these
+    //  slave DOFs via the conforming prolongation P (true-dof space); Rust's
+    //  HDivSpace keeps them as independent DOFs, so the parallel assembly
+    //  across a hanging edge does not match C++ (pex6 deep-water: np2 it2
+    //  marked 12 vs np1/C++ 40).
+    //
+    //  Enforce the constraint in the LOCAL (dm-order) mass matrix without
+    //  changing the DOF count (DofPartition/permutation/global assembly stay
+    //  untouched): the slave row becomes `x_s − c·x_m = 0` (row s: 1 at s,
+    //  −c at m; RHS 0); free rows keep the original equations.  The solution
+    //  then satisfies u_s = c·u_m by construction, identical to MFEM's
+    //  true-dof solution on the free DOFs.  The slave/master pair always
+    //  lives on the same rank (both half-edges and the coarse edge are local
+    //  once the ghost layer is complete), so this is purely local and
+    //  consistent across ranks.
+    let mut slave_deps: Vec<(u32, f64, u32)> = Vec::new(); // (slave, coef, master)
+    let mut edge_of_dof: Vec<(u32, u32)> = vec![(u32::MAX, u32::MAX); n_rt_dofs];
+    {
+        // RT0 edge dof → endpoint node ids (local), via first element.
+        for e in 0..n_local_elems as fem_core::ElemId {
+            let ns = local_mesh.elem_nodes(e);
+            for (li, (ia, ib)) in [(0usize, 1usize), (1, 2), (2, 3), (3, 0)]
+                .iter()
+                .enumerate()
+            {
+                let d = elem_rt_dofs[e as usize][li] as usize;
+                if edge_of_dof[d] == (u32::MAX, u32::MAX) {
+                    edge_of_dof[d] = (ns[*ia], ns[*ib]);
+                }
+            }
+        }
+        let coords = |n: u32| -> [f64; 2] {
+            let c = local_mesh.coords_of(n);
+            [c[0], c[1]]
+        };
+        // 1. Master edges: edge (a,b) with some other node m at its midpoint.
+        let mut node_list: Vec<u32> = edge_of_dof
+            .iter()
+            .flat_map(|&(a, b)| [a, b])
+            .filter(|&n| n != u32::MAX)
+            .collect();
+        node_list.sort_unstable();
+        node_list.dedup();
+        let mut master_edges: Vec<(u32, u32, u32)> = Vec::new(); // (a, b, mid)
+        for &(a, b) in edge_of_dof.iter() {
+            if a == u32::MAX {
+                continue;
+            }
+            let (mx, my) = {
+                let ca = coords(a);
+                let cb = coords(b);
+                (0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]))
+            };
+            for &m in &node_list {
+                if m == a || m == b {
+                    continue;
+                }
+                let cm = coords(m);
+                if (cm[0] - mx).abs() < 1e-9 && (cm[1] - my).abs() < 1e-9 {
+                    master_edges.push((a.min(b), a.max(b), m));
+                    break;
+                }
+            }
+        }
+        master_edges.sort_unstable();
+        master_edges.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+        // 2. Slave half-edge dofs: (a,m) or (m,b) of a master (a,b,m).
+        let master_dof: std::collections::HashMap<(u32, u32), u32> = master_edges
+            .iter()
+            .filter_map(|&(a, b, _m)| {
+                edge_of_dof
+                    .iter()
+                    .position(|&(x, y)| x.min(y) == a && x.max(y) == b)
+                    .map(|i| ((a, b), i as u32))
+            })
+            .collect();
+        for d in 0..n_rt_dofs as u32 {
+            let (a, b) = edge_of_dof[d as usize];
+            if a == u32::MAX {
+                continue;
+            }
+            for &(pa, pb, mid) in &master_edges {
+                // slave edge endpoints = {master endpoint, midpoint}
+                let (lo, hi) = (a.min(b), a.max(b));
+                let is_slave = (lo == pa.min(pb) || lo == pa.max(pb) || lo == mid)
+                    && (hi == pa.min(pb) || hi == pa.max(pb) || hi == mid)
+                    && (lo == mid) != (hi == mid)
+                    && lo != hi;
+                if !is_slave {
+                    continue;
+                }
+                if let Some(&md) = master_dof.get(&(pa, pb)) {
+                    // sign: slave's low endpoint equals master's low endpoint
+                    // → +0.5, else −0.5 (MFEM: one half-edge +0.5, other −0.5)
+                    let sign = if lo == pa.min(pb) { 1.0 } else { -1.0 };
+                    slave_deps.push((d, 0.5 * sign, md));
+                }
+            }
+        }
+        slave_deps.sort_by_key(|x| (x.0, x.2));
+        slave_deps.dedup();
+    }
+    let mut permuted_a = permute_csr(&local_a, dp);
+    let mut permuted_b = permute_vec(&b, dp);
+    if !slave_deps.is_empty() {
+        // Apply flux-continuity constraints in PARTITION order (after
+        // permute_csr, which applies sign corrections): replace each slave
+        // row with x_s − c·x_m = 0 (RHS 0).  Free rows keep the mass
+        // equations, so the solution satisfies u_s = c·u_m by construction —
+        // matching MFEM's true-dof (PᵀAP) solution on the free DOFs.  The
+        // slave/master pair always lives on the same rank once the ghost
+        // layer is complete.
+        let mut cm_p = CooMatrix::new(n_total_dofs, n_total_dofs);
+        let slave_rows: std::collections::HashSet<usize> =
+            slave_deps.iter().map(|(s, _, _)| dp.permute_dof(*s) as usize).collect();
+        for row in 0..n_total_dofs {
+            if slave_rows.contains(&row) {
+                continue; // rebuilt below
+            }
+            for k in permuted_a.row_ptr[row]..permuted_a.row_ptr[row + 1] {
+                let col = permuted_a.col_idx[k] as usize;
+                let val = permuted_a.values[k];
+                if val != 0.0 {
+                    cm_p.add(row, col, val);
+                }
+            }
+        }
+        for &(s, c, m) in &slave_deps {
+            let ps = dp.permute_dof(s) as usize;
+            let pm = dp.permute_dof(m) as usize;
+            // dm 序物理约束 u_s = c·u_m；partition 序含 sign，约束系数需
+            // 乘 sign_m/sign_s（permute 后 x_s^p = (sign_m/sign_s)·c·x_m^p）。
+            let sign_s = dp.sign_correction(s);
+            let sign_m = dp.sign_correction(m);
+            let c_p = c * sign_m / sign_s;
+            cm_p.add(ps, ps, 1.0);
+            cm_p.add(ps, pm, -c_p);
+            permuted_b[ps] = 0.0;
+        }
+        permuted_a = cm_p.into_csr_sorted();
+    }
     let a_mat = ParCsrMatrix::from_local_matrix(
         &permuted_a,
         n_owned_dofs,
         rt_par.dof_ghost_exchange_arc(),
         comm.clone(),
     );
-    let permuted_b = permute_vec(&b, dp);
     let rhs = ParVector::from_local_raw(
         permuted_b,
         n_owned_dofs,
@@ -209,6 +352,7 @@ pub fn l2_zz_estimator_parallel(
         };
         x_dm[dm] = x.as_slice()[pid] * s;
     }
+
 
     let mut eta = vec![0.0_f64; n_local_elems];
     for e in 0..n_local_elems {

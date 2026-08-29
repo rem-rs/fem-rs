@@ -38,7 +38,7 @@ use fem_mesh::amr::{detect_hanging_quad, HangingNodeConstraint};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
-use fem_parallel::par_amr::{par_refine_marked, par_repartition};
+use fem_parallel::par_amr::{par_refine_marked, par_repartition_with_hanging};
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{Comm, ParAssembler, ParVector, ParallelFESpace, WorkerConfig};
 use fem_solver::SolverConfig;
@@ -107,7 +107,6 @@ fn main() {
             let dm = ps.local_space().dof_manager();
             let ess = boundary_dofs(local_mesh, dm, &local_mesh.unique_boundary_tags());
             let dp = ps.dof_partition();
-            // Drop constraints referencing nodes outside the current DOF
             // range (extra-ghost nodes: in the mesh but not DOFs — their
             // owning rank handles them).  Mesh::n_nodes may include them, so
             // filter against the DOF partition instead.
@@ -140,6 +139,7 @@ fn main() {
                 verbose: false,
                 ..SolverConfig::default()
             };
+            let _ = &cfg;
             let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg)
                 .expect("par_solve_pcg_amg failed");
             // C++ ex6p prints `GlobalTrueVSize` — the true dof count after
@@ -241,13 +241,14 @@ fn main() {
                 .collect();
             let r = par_refine_marked(&par_mesh, fem_mesh::amr::NCState::new(), &marked_local, Some(&u_dm))
                 .expect("par_refine_marked failed");
+            let hanging_edges = r.hanging_edges.clone();
             par_mesh = r.par_mesh;
 
             // 5b. Load rebalancing after refinement (C++: pmesh->Rebalance()).
             //     Element gids are preserved, so the next round's marks and
             //     the NC-refinement sequence stay globally consistent.
             if do_rebalance {
-                par_mesh = par_repartition(par_mesh)
+                par_mesh = par_repartition_with_hanging(par_mesh, &hanging_edges)
                     .expect("par_repartition failed");
             }
 

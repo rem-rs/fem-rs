@@ -45,6 +45,14 @@ pub struct ParRefinedMesh {
     /// apply them to the assembled system (MFEM's NC space does this
     /// implicitly).
     pub constraints: Vec<HangingNodeConstraint>,
+    /// Hanging edges of the refined mesh as **global node id triples**
+    /// `(parent_a, parent_b, mid)` — every coarse (parent) edge whose
+    /// midpoint exists in the current mesh, reduced across ranks.  A later
+    /// [`par_repartition`] uses this table (instead of geometric midpoint
+    /// detection) to pull the coarse element and the opposite fine elements
+    /// of each hanging edge into the ghost layer — pure topology, no
+    /// coordinate lookup deadlock (pex6 deep-water).
+    pub hanging_edges: Vec<(u32, u32, u32)>,
 }
 
 /// Perform one cycle of parallel non-conforming AMR.
@@ -95,7 +103,7 @@ pub fn par_refine_marked(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
         &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
     );
     // Reorder the prolongated solution to match the reordered node ids.
@@ -110,6 +118,7 @@ pub fn par_refine_marked(
         solution: prolongated,
         n_new_elems,
         constraints,
+        hanging_edges,
     })
 }
 
@@ -147,7 +156,7 @@ pub fn par_refine_marked_quad(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
         &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
     );
     // Reorder the prolongated solution to match the reordered node ids.
@@ -162,6 +171,7 @@ pub fn par_refine_marked_quad(
         solution: prolongated,
         n_new_elems,
         constraints,
+        hanging_edges,
     })
 }
 
@@ -188,7 +198,7 @@ pub fn par_refine_marked_with_tree(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap) = rebuild_partition_nc(
+    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
         &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
     );
     // Reorder the prolongated solution to match the reordered node ids.
@@ -205,6 +215,7 @@ pub fn par_refine_marked_with_tree(
         solution: prolongated,
         n_new_elems,
         constraints,
+        hanging_edges,
     }, tree))
 }
 
@@ -285,7 +296,12 @@ fn rebuild_partition_nc(
     marked_local: &[ElemId],
     midpoint_map: &HashMap<(NodeId, NodeId), NodeId>,
     comm: &Comm,
-) -> (Mesh<2>, MeshPartition, Vec<u32>) {
+) -> (
+    Mesh<2>,
+    MeshPartition,
+    Vec<u32>,
+    Vec<(u32, u32, u32)>,
+) {
     let rank = comm.rank();
     let partition = par_mesh.partition();
     let local_mesh = par_mesh.local_mesh();
@@ -911,7 +927,21 @@ fn rebuild_partition_nc(
     );
     // The reordered `refined_mesh` keeps local node ids = partition segment
     // order (owned first, then ghost), matching from_partitioner.
-    (refined_mesh, new_partition, remap)
+    // 8. Hanging-edge table (global node ids): every coarse (parent) edge
+    //    whose midpoint exists in the current mesh, i.e. (parent_a, parent_b,
+    //    mid_gid).  `global_mid` was reduced across ranks (step 5), so it
+    //    covers cross-rank coarse edges whose midpoint lives elsewhere.
+    //    This is the *authoritative* topology the next par_repartition uses
+    //    to pull the coarse element (and the opposite fine elements) of each
+    //    hanging edge into the ghost layer — pure topology, no coordinate
+    //    midpoint detection (which deadlocks: identifying the coarse element
+    //    needs its nodes in node_info, requesting them needs the coarse
+    //    element identified first, pex6 deep-water).
+    let hanging_edges: Vec<(u32, u32, u32)> = global_mid
+        .iter()
+        .map(|(&(a, b), &(mid, _o))| (a, b, mid))
+        .collect();
+    (refined_mesh, new_partition, remap, hanging_edges)
 }
 
 // ─── DerefineTree building ──────────────────────────────────────────────────
@@ -1316,6 +1346,27 @@ pub fn par_derefine_marked(
 /// ghost layer are identical to the previous implementation.
 pub fn par_repartition(
     par_mesh: ParallelMesh<Mesh<2>>,
+) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
+    par_repartition_impl(par_mesh, None)
+}
+
+/// [`par_repartition`] with the hanging-edge table from the preceding
+/// [`par_refine_marked`] (global node id triples `(parent_a, parent_b, mid)`).
+/// `pass2b` then pulls the coarse element and the opposite fine elements of
+/// each hanging edge into the ghost layer by **pure topology** (the table +
+/// node reference sets), replacing the geometric midpoint detection that
+/// deadlocks when the coarse element's nodes are absent from `node_info`
+/// (pex6 deep-water).  Pass `None` to keep the legacy geometric detection.
+pub fn par_repartition_with_hanging(
+    par_mesh: ParallelMesh<Mesh<2>>,
+    hanging_edges: &[(u32, u32, u32)],
+) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
+    par_repartition_impl(par_mesh, Some(hanging_edges))
+}
+
+fn par_repartition_impl(
+    par_mesh: ParallelMesh<Mesh<2>>,
+    hanging_edges: Option<&[(u32, u32, u32)]>,
 ) -> Result<ParallelMesh<Mesh<2>>, ParAmrError> {
     let comm = par_mesh.comm().clone();
     let size = comm.size();
@@ -2104,6 +2155,22 @@ pub fn par_repartition(
         // another rank — that parent (holding the hanging node's parent
         // DOFs) must enter the ghost layer for both H1 constraints and the
         // RT0 L2-projection flux space (pex6 deep-water).
+        // Topology tables from the hanging-edge list (global node ids):
+        // `mid_of[parent_edge] = mid` and `sub_of[sub_edge] = (pa, pb, mid)`.
+        // These replace the geometric midpoint detection below for every
+        // hanging edge known from the preceding refinement — pure topology
+        // (edge endpoints in the node reference sets), no coordinate lookup
+        // that would need the coarse element's nodes in node_info first.
+        let mut mid_of: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut sub_of: HashMap<(u32, u32), (u32, u32, u32)> = HashMap::new();
+        if let Some(hanging) = hanging_edges {
+            for &(pa, pb, mid) in hanging {
+                let pk = edge_key(pa, pb);
+                mid_of.insert(pk, mid);
+                sub_of.insert(edge_key(pa, mid), (pa, pb, mid));
+                sub_of.insert(edge_key(mid, pb), (pa, pb, mid));
+            }
+        }
         let mut to_scan: Vec<u32> = owned_set
             .iter()
             .chain(ghost_nn.iter())
@@ -2120,57 +2187,131 @@ pub fn par_repartition(
                 }
                 if let Some((_t, conn)) = elem_data.get(&g) {
                     for (a, b) in edges_of(conn) {
-                        let (Some(ia), Some(ib)) =
-                            (node_info.get(&a), node_info.get(&b))
-                        else {
-                            continue;
-                        };
-                        let ea: HashSet<u32> = ia.refs.iter().map(|r| r.0).collect();
-                        let eb: HashSet<u32> = ib.refs.iter().map(|r| r.0).collect();
-                        for (eg, o, _t, eg_conn) in &ia.refs {
-                            let via_mid = !eb.contains(eg)
-                                && (midpoint_node_of_p(&node_info, a, b, eg_conn)
-                                    || edge_partner_for_mid_p(&node_info, b, a, eg_conn));
-                            if *o != rank
-                                && !owned_set.contains(eg)
-                                && !ghost_nn.contains(eg)
-                                && !ghost_fc.contains(eg)
-                                && (eb.contains(eg) || via_mid)
-                            {
-                                if via_mid {
-                                    hanging_fc_count += 1;
-                                    if trace {
-                                        eprintln!(
-                                            "[r{rank}] par_repartition: pass2b hanging closure g={g} edge({a},{b}) via eg={eg} (owner {o}) conn={eg_conn:?}"
-                                        );
+                        // ── Topological hanging-edge closure (pass2c) ──────                        // `a`, `b` are global node ids (elem_data conns are
+                        // global).  If (a,b) is a sub-edge of a hanging edge,
+                        // `g` is a fine element → the coarse element holding
+                        // the parent edge must enter the ghost layer.  If
+                        // (a,b) is the parent edge itself, `g` is coarse →
+                        // the opposite fine elements must enter.
+                        let ek = edge_key(a, b);
+                        if let Some(&mid) = mid_of.get(&ek) {
+                            // g holds the parent edge: pull in fine elements
+                            // that reference (a, mid) or (mid, b).
+                            for (u, v) in [(a, mid), (mid, b)] {
+                                if let Some(iu) = node_info.get(&u) {
+                                    for (eg, o, _t, eg_conn) in &iu.refs {
+                                        if eg_conn.contains(&v)
+                                            && *o != rank
+                                            && !owned_set.contains(eg)
+                                            && !ghost_nn.contains(eg)
+                                            && !ghost_fc.contains(eg)
+                                        {
+                                            ghost_fc.insert(*eg);
+                                            to_scan.push(*eg);
+                                            added = true;
+                                            hanging_fc_count += 1;
+                                            if trace {
+                                                eprintln!(
+                                                    "[r{rank}] par_repartition: pass2c coarse g={g} parent edge({a},{b}) mid={mid} pulls fine eg={eg} via ({u},{v})"
+                                                );
+                                            }
+                                        }
                                     }
                                 }
-                                ghost_fc.insert(*eg);
-                                to_scan.push(*eg);
-                                added = true;
+                            }
+                        } else if let Some(&(pa, pb, mid)) = sub_of.get(&ek) {
+                            // g holds a sub-edge of hanging edge (pa,pb,mid):
+                            // pull in the coarse element referencing (pa,pb).
+                            if let Some(ipa) = node_info.get(&pa) {
+                                for (eg, o, _t, eg_conn) in &ipa.refs {
+                                    if eg_conn.contains(&pb)
+                                        && *o != rank
+                                        && !owned_set.contains(eg)
+                                        && !ghost_nn.contains(eg)
+                                        && !ghost_fc.contains(eg)
+                                    {
+                                        ghost_fc.insert(*eg);
+                                        to_scan.push(*eg);
+                                        added = true;
+                                        hanging_fc_count += 1;
+                                        if trace {
+                                            eprintln!(
+                                                "[r{rank}] par_repartition: pass2c fine g={g} sub-edge({a},{b}) of ({pa},{pb}) mid={mid} pulls coarse eg={eg}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
-                        for (eg, o, _t, eg_conn) in &ib.refs {
-                            let via_mid = !ea.contains(eg)
-                                && (midpoint_node_of_p(&node_info, a, b, eg_conn)
-                                    || edge_partner_for_mid_p(&node_info, a, b, eg_conn));
-                            if *o != rank
-                                && !owned_set.contains(eg)
-                                && !ghost_nn.contains(eg)
-                                && !ghost_fc.contains(eg)
-                                && (ea.contains(eg) || via_mid)
-                            {
-                                if via_mid {
-                                    hanging_fc_count += 1;
-                                    if trace {
-                                        eprintln!(
-                                            "[r{rank}] par_repartition: pass2b hanging closure g={g} edge({a},{b}) via eg={eg} (owner {o}) conn={eg_conn:?}"
-                                        );
+                        // ── Topological full-edge closure (pass2b) ─────────
+                        //  `eg_conn.contains(&b)` — eg is in E(a) and its
+                        //  connectivity contains b ⟺ eg shares the full edge
+                        //  (a,b).  Pure topology: unlike the previous
+                        //  `node_info.get(&b)`-based check, this does NOT
+                        //  need b's node record, which may be absent when the
+                        //  opposite element arrived late in the closure
+                        //  (pex6 deep-water: edge (58,97)'s partner 122 was
+                        //  never pulled because node 97 was not requested).
+                        let ia = node_info.get(&a);
+                        let ib = node_info.get(&b);
+                        if let Some(ia) = ia {
+                            for (eg, o, _t, eg_conn) in &ia.refs {
+                                let shares_full = eg_conn.contains(&b);
+                                let via_mid = ib.map_or(false, |ib| {
+                                    let eb: HashSet<u32> =
+                                        ib.refs.iter().map(|r| r.0).collect();
+                                    !eb.contains(eg)
+                                        && (midpoint_node_of_p(&node_info, a, b, eg_conn)
+                                            || edge_partner_for_mid_p(&node_info, b, a, eg_conn))
+                                });
+                                if *o != rank
+                                    && !owned_set.contains(eg)
+                                    && !ghost_nn.contains(eg)
+                                    && !ghost_fc.contains(eg)
+                                    && (shares_full || via_mid)
+                                {
+                                    if via_mid {
+                                        hanging_fc_count += 1;
+                                        if trace {
+                                            eprintln!(
+                                                "[r{rank}] par_repartition: pass2b hanging closure g={g} edge({a},{b}) via eg={eg} (owner {o}) conn={eg_conn:?}"
+                                            );
+                                        }
                                     }
+                                    ghost_fc.insert(*eg);
+                                    to_scan.push(*eg);
+                                    added = true;
                                 }
-                                ghost_fc.insert(*eg);
-                                to_scan.push(*eg);
-                                added = true;
+                            }
+                        }
+                        if let Some(ib) = ib {
+                            for (eg, o, _t, eg_conn) in &ib.refs {
+                                let shares_full = eg_conn.contains(&a);
+                                let via_mid = ia.map_or(false, |ia| {
+                                    let ea: HashSet<u32> =
+                                        ia.refs.iter().map(|r| r.0).collect();
+                                    !ea.contains(eg)
+                                        && (midpoint_node_of_p(&node_info, a, b, eg_conn)
+                                            || edge_partner_for_mid_p(&node_info, a, b, eg_conn))
+                                });
+                                if *o != rank
+                                    && !owned_set.contains(eg)
+                                    && !ghost_nn.contains(eg)
+                                    && !ghost_fc.contains(eg)
+                                    && (shares_full || via_mid)
+                                {
+                                    if via_mid {
+                                        hanging_fc_count += 1;
+                                        if trace {
+                                            eprintln!(
+                                                "[r{rank}] par_repartition: pass2b hanging closure g={g} edge({a},{b}) via eg={eg} (owner {o}) conn={eg_conn:?}"
+                                            );
+                                        }
+                                    }
+                                    ghost_fc.insert(*eg);
+                                    to_scan.push(*eg);
+                                    added = true;
+                                }
                             }
                         }
                     }
