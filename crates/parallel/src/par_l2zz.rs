@@ -61,6 +61,7 @@ pub fn l2_zz_estimator_parallel(
     par_mesh: &ParallelMesh<Mesh<2>>,
     comm: &Comm,
     u_dm: &[f64],
+    hanging_edges: &[(u32, u32, u32)],
 ) -> Vec<f64> {
     let local_mesh = par_mesh.local_mesh();
     assert_eq!(
@@ -186,6 +187,7 @@ pub fn l2_zz_estimator_parallel(
     //  consistent across ranks.
     let mut slave_deps: Vec<(u32, f64, u32)> = Vec::new(); // (slave, coef, master)
     let mut edge_of_dof: Vec<(u32, u32)> = vec![(u32::MAX, u32::MAX); n_rt_dofs];
+    let partition = par_mesh.partition();
     {
         // RT0 edge dof → endpoint node ids (local), via first element.
         for e in 0..n_local_elems as fem_core::ElemId {
@@ -212,7 +214,25 @@ pub fn l2_zz_estimator_parallel(
             .collect();
         node_list.sort_unstable();
         node_list.dedup();
-        let mut master_edges: Vec<(u32, u32, u32)> = Vec::new(); // (a, b, mid)
+        let mut master_edges: Vec<(u32, u32, u32)> = Vec::new(); // (a, b, mid), LOCAL ids
+        // (a) Globally-merged hanging edges (from the caller): convert global
+        // node ids → local ids.  Ranks lacking the coarse element (nodes not
+        // in the ghost layer) simply skip that edge — the rank holding it
+        // imposes the constraint; from_local_matrix folds across ranks.
+        {
+            let partition = par_mesh.partition();
+            for &(ga, gb, gmid) in hanging_edges {
+                if let (Some(a), Some(b), Some(m)) = (
+                    partition.local_node(ga),
+                    partition.local_node(gb),
+                    partition.local_node(gmid),
+                ) {
+                    master_edges.push((a.min(b), a.max(b), m));
+                }
+            }
+        }
+        // (b) Local geometric scan (covers edges the caller's global merge
+        //     missed, e.g. single-rank or no-hanging_edges path).
         for &(a, b) in edge_of_dof.iter() {
             if a == u32::MAX {
                 continue;
@@ -250,9 +270,14 @@ pub fn l2_zz_estimator_parallel(
             if a == u32::MAX {
                 continue;
             }
+            // Slave detection on LOCAL ids, sign on the local node order
+            // (matches the serial estimator's `lo == pa.min(pb)` on the
+            // serial mesh; the parallel gids are assigned by the rebuild
+            // assigner, whose order does NOT match MFEM's UpdateVertices
+            // creation order, so using gids here flips signs).
+            let (lo, hi) = (a.min(b), a.max(b));
             for &(pa, pb, mid) in &master_edges {
                 // slave edge endpoints = {master endpoint, midpoint}
-                let (lo, hi) = (a.min(b), a.max(b));
                 let is_slave = (lo == pa.min(pb) || lo == pa.max(pb) || lo == mid)
                     && (hi == pa.min(pb) || hi == pa.max(pb) || hi == mid)
                     && (lo == mid) != (hi == mid)
@@ -273,55 +298,45 @@ pub fn l2_zz_estimator_parallel(
     }
     let mut permuted_a = permute_csr(&local_a, dp);
     let mut permuted_b = permute_vec(&b, dp);
-    if !slave_deps.is_empty() {
-        // Apply flux-continuity constraints in PARTITION order (after
-        // permute_csr, which applies sign corrections): replace each slave
-        // row with x_s − c·x_m = 0 (RHS 0).  Free rows keep the mass
-        // equations, so the solution satisfies u_s = c·u_m by construction —
-        // matching MFEM's true-dof (PᵀAP) solution on the free DOFs.  The
-        // slave/master pair always lives on the same rank once the ghost
-        // layer is complete.
-        let mut cm_p = CooMatrix::new(n_total_dofs, n_total_dofs);
-        let slave_rows: std::collections::HashSet<usize> =
-            slave_deps.iter().map(|(s, _, _)| dp.permute_dof(*s) as usize).collect();
-        for row in 0..n_total_dofs {
-            if slave_rows.contains(&row) {
-                continue; // rebuilt below
-            }
-            for k in permuted_a.row_ptr[row]..permuted_a.row_ptr[row + 1] {
-                let col = permuted_a.col_idx[k] as usize;
-                let val = permuted_a.values[k];
-                if val != 0.0 {
-                    cm_p.add(row, col, val);
-                }
-            }
-        }
-        for &(s, c, m) in &slave_deps {
-            let ps = dp.permute_dof(s) as usize;
-            let pm = dp.permute_dof(m) as usize;
-            // dm 序物理约束 u_s = c·u_m；partition 序含 sign，约束系数需
-            // 乘 sign_m/sign_s（permute 后 x_s^p = (sign_m/sign_s)·c·x_m^p）。
-            let sign_s = dp.sign_correction(s);
-            let sign_m = dp.sign_correction(m);
-            let c_p = c * sign_m / sign_s;
-            cm_p.add(ps, ps, 1.0);
-            cm_p.add(ps, pm, -c_p);
-            permuted_b[ps] = 0.0;
-        }
-        permuted_a = cm_p.into_csr_sorted();
-    }
-    let a_mat = ParCsrMatrix::from_local_matrix(
+    let mut a_mat = ParCsrMatrix::from_local_matrix(
         &permuted_a,
         n_owned_dofs,
         rt_par.dof_ghost_exchange_arc(),
         comm.clone(),
     );
-    let rhs = ParVector::from_local_raw(
+    let mut rhs = ParVector::from_local_raw(
         permuted_b,
         n_owned_dofs,
         rt_par.dof_ghost_exchange_arc(),
         comm.clone(),
     );
+    if !slave_deps.is_empty() {
+        // RT0 hanging-flux constraints as MFEM true-dof elimination
+        // (PᵀKP / Pᵀf with cross-rank folding): each slave flux DOF is
+        // constrained to ±0.5·master.  A row-replacement (slave row →
+        // x_s−c·x_m=0) is NOT equivalent at 2nd+ level hanging edges (the
+        // A_sm/A_ss/b_s contributions folded into the master rows are
+        // dropped; serial pex6 it3: row-replacement marked 40 vs PᵀAP 25 =
+        // C++).  Constraint coefficient: the permuted system satisfies
+        // x^p = S·x_dm, so x_s = c·x_m becomes x_s^p = c·sign_s·sign_m·x_m^p.
+        use fem_mesh::amr::HangingNodeConstraint;
+        let constraints: Vec<HangingNodeConstraint> = slave_deps
+            .iter()
+            .map(|&(s, c, m)| {
+                let sign_s = dp.sign_correction(s);
+                let sign_m = dp.sign_correction(m);
+                HangingNodeConstraint::new_weighted(
+                    s as usize,
+                    m as usize,
+                    m as usize, // unused second parent (coeff 0)
+                    c * sign_s * sign_m,
+                    0.0,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        a_mat.apply_hanging_constraints(&constraints, &mut rhs, dp);
+    }
     let mut x = ParVector::zeros_like(&rhs);
     let amg_cfg = ParAmgConfig {
         smoother: SmootherType::SymmetricGaussSeidel,
@@ -351,6 +366,28 @@ pub fn l2_zz_estimator_parallel(
             1.0
         };
         x_dm[dm] = x.as_slice()[pid] * s;
+    }
+    // Slave flux values: apply_hanging_constraints eliminates slave DOFs in
+    // the true-dof system (their rows become identity with 0 RHS, so the
+    // solver leaves them 0); recover u_s = c0·u_master (chained at 2nd+ level
+    // where the master is itself a slave), in dm order.
+    if !slave_deps.is_empty() {
+        let master_of: std::collections::HashMap<u32, (u32, f64)> = slave_deps
+            .iter()
+            .map(|&(s, c, m)| (s, (m, c)))
+            .collect();
+        for &(s, c0, m0) in &slave_deps {
+            let mut coef = c0;
+            let mut cur = m0;
+            let mut guard = 0;
+            while let Some(&(m, c)) = master_of.get(&cur) {
+                coef *= c;
+                cur = m;
+                guard += 1;
+                assert!(guard < 64, "hanging-flux dependency cycle");
+            }
+            x_dm[s as usize] = coef * x_dm[cur as usize];
+        }
     }
 
 

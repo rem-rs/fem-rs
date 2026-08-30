@@ -188,7 +188,60 @@ fn main() {
             //    rank's local projection differs from C++ and the marking
             //    drifts (pex6 deep-water: np2 it2 marked 12 vs np1 40).
             let eta = if comm.size() > 1 {
-                fem_parallel::par_l2zz::l2_zz_estimator_parallel(&par_mesh, &comm, &u_dm)
+                // Hanging edges of the CURRENT mesh, globally merged: each                // rank detects on its own (owned+ghost) mesh, which can miss
+                // a 2nd-level hanging edge whose fine elements live on other
+                // ranks; the union over ranks (dedup by edge) is the
+                // globally-consistent set.  The parallel RT0 estimator needs
+                // it to constrain every slave flux DOF (np2 it3 marked 1 vs
+                // np1/C++ 25 without it).
+                let hc_now = fem_mesh::amr::detect_hanging_quad(local_mesh);
+                let part_now = par_mesh.partition();
+                let mut edge_min: std::collections::BTreeMap<(u32, u32), u32> =
+                    std::collections::BTreeMap::new();
+                for c in &hc_now {
+                    let a = part_now.global_node(c.parent_a.min(c.parent_b) as u32);
+                    let b = part_now.global_node(c.parent_a.max(c.parent_b) as u32);
+                    let m = part_now.global_node(c.constrained as u32);
+                    edge_min
+                        .entry((a, b))
+                        .and_modify(|mm| *mm = (*mm).min(m))
+                        .or_insert(m);
+                }
+                let mut payload = Vec::with_capacity(edge_min.len() * 12);
+                for (&(a, b), &m) in &edge_min {
+                    payload.extend_from_slice(&a.to_le_bytes());
+                    payload.extend_from_slice(&b.to_le_bytes());
+                    payload.extend_from_slice(&m.to_le_bytes());
+                }
+                let sends: Vec<(i32, Vec<u8>)> = (0..comm.size() as i32)
+                    .map(|r| (r, payload.clone()))
+                    .collect();
+                for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+                    for chunk in bytes.chunks_exact(12) {
+                        let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                        let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                        let m = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                        edge_min
+                            .entry((a.min(b), a.max(b)))
+                            .and_modify(|mm| *mm = (*mm).min(m))
+                            .or_insert(m);
+                    }
+                }
+                let hang_global: Vec<(u32, u32, u32)> = edge_min
+                    .iter()
+                    .map(|(&(a, b), &m)| (a, b, m))
+                    .collect();
+                fem_parallel::par_l2zz::l2_zz_estimator_parallel(
+                    &par_mesh, &comm, &u_dm, &hang_global,
+                )
+            } else if std::env::var("PEX6_FORCE_PAR_L2ZZ").is_ok() {
+                // Single-rank par_l2zz (debugging): the rebuild gids equal the
+                // local ids and sign corrections are ±1, so this must match
+                // the serial PᵀAP estimator exactly if the parallel
+                // constraint math is right.
+                fem_parallel::par_l2zz::l2_zz_estimator_parallel(
+                    &par_mesh, &comm, &u_dm, &[],
+                )
             } else {
                 l2_zz_estimator(local_mesh, &u_dm)
             };
