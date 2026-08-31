@@ -108,8 +108,22 @@ where
         par_mesh: &ParallelMesh<M>,
         comm: Comm,
     ) -> Self {
-        let dof_partition = DofPartition::from_edge_space(
-            &local_space, par_mesh.partition(), &comm,
+        Self::new_for_edge_space_ordered(local_space, par_mesh, comm, None)
+    }
+
+    /// [`Self::new_for_edge_space`] with the MFEM `UpdateVertices` node
+    /// creation order (`gid → order`); see
+    /// [`DofPartition::from_edge_space_ordered`] — needed after an AMR
+    /// partition rebuild whose gids are not in MFEM creation order
+    /// (pex6 np2 RT0 orientation).
+    pub fn new_for_edge_space_ordered<M: MeshTopology>(
+        local_space: S,
+        par_mesh: &ParallelMesh<M>,
+        comm: Comm,
+        creation_order: Option<&std::collections::HashMap<u32, u32>>,
+    ) -> Self {
+        let dof_partition = DofPartition::from_edge_space_ordered(
+            &local_space, par_mesh.partition(), &comm, creation_order,
         );
         Self::finish(local_space, dof_partition, &comm)
     }

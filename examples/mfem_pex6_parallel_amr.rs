@@ -28,7 +28,7 @@
 //!   cargo run --release --example mfem_pex6_parallel_amr -- --ranks 4 -md 50000
 //!   cargo run --release --example mfem_pex6_parallel_amr -- --ranks 4 --no-rebalance
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use fem_assembly::postproc::l2_zz::l2_zz_estimator;
@@ -38,7 +38,7 @@ use fem_mesh::amr::{detect_hanging_quad, HangingNodeConstraint};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
-use fem_parallel::par_amr::{par_refine_marked, par_repartition_with_hanging};
+use fem_parallel::par_amr::{par_refine_marked_ordered, par_repartition_with_hanging};
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{Comm, ParAssembler, ParVector, ParallelFESpace, WorkerConfig};
 use fem_solver::SolverConfig;
@@ -79,6 +79,13 @@ fn main() {
     launcher.launch(move |comm| {
         let rank = comm.rank();
         let mut par_mesh = partition_mesh(&mesh_arc, &comm);
+        // MFEM UpdateVertices node creation order (`gid → order`), threaded
+        // across AMR rounds: the parallel RT0 L2ZZ estimator needs it for a
+        // rank-invariant hanging-flux slave sign (np2 it3 deep-water — a
+        // partition rebuild renumbers local ids, flipping the local-id sign
+        // test).  Initial mesh nodes keep their original order.
+        let mut creation_order: HashMap<u32, u32> =
+            (0..mesh_arc.n_nodes() as u32).map(|g| (g, g)).collect();
         // Hanging-node constraints are re-detected from the current mesh
         // topology each round (partition rebuilds renumber local ids, so a
         // carried-over NCStateQuad would desync across ranks).
@@ -232,7 +239,7 @@ fn main() {
                     .map(|(&(a, b), &m)| (a, b, m))
                     .collect();
                 fem_parallel::par_l2zz::l2_zz_estimator_parallel(
-                    &par_mesh, &comm, &u_dm, &hang_global,
+                    &par_mesh, &comm, &u_dm, &hang_global, &creation_order,
                 )
             } else if std::env::var("PEX6_FORCE_PAR_L2ZZ").is_ok() {
                 // Single-rank par_l2zz (debugging): the rebuild gids equal the
@@ -240,7 +247,7 @@ fn main() {
                 // the serial PᵀAP estimator exactly if the parallel
                 // constraint math is right.
                 fem_parallel::par_l2zz::l2_zz_estimator_parallel(
-                    &par_mesh, &comm, &u_dm, &[],
+                    &par_mesh, &comm, &u_dm, &[], &creation_order,
                 )
             } else {
                 l2_zz_estimator(local_mesh, &u_dm)
@@ -292,9 +299,16 @@ fn main() {
                 .filter(|&e| marked_global.contains(&partition.global_elem(e as u32)))
                 .map(|e| e as ElemId)
                 .collect();
-            let r = par_refine_marked(&par_mesh, fem_mesh::amr::NCState::new(), &marked_local, Some(&u_dm))
-                .expect("par_refine_marked failed");
+            let r = par_refine_marked_ordered(
+                &par_mesh,
+                fem_mesh::amr::NCState::new(),
+                &marked_local,
+                Some(&u_dm),
+                &creation_order,
+            )
+            .expect("par_refine_marked_ordered failed");
             let hanging_edges = r.hanging_edges.clone();
+            creation_order = r.creation_order;
             par_mesh = r.par_mesh;
 
             // 5b. Load rebalancing after refinement (C++: pmesh->Rebalance()).

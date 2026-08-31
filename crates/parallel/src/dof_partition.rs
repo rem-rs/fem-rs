@@ -602,6 +602,29 @@ impl DofPartition {
     where
         S::Mesh: MeshTopology,
     {
+        Self::from_edge_space_ordered(space, partition, comm, None)
+    }
+
+    /// [`Self::from_edge_space`] with the caller-supplied MFEM `UpdateVertices`
+    /// node creation order (`gid → order`).  The default path measures the
+    /// global edge orientation by node **gid** order (`ga < gb`), which is the
+    /// MFEM order for meshes whose gids come from a plain partition.  After
+    /// [`crate::par_amr::rebuild_partition_nc`] the gids are assigned by the
+    /// rebuild assigner (owner/edge ordering), which does NOT match MFEM's
+    /// creation order — every RT0/ND DOF whose endpoints' relative order
+    /// differs then gets the wrong orientation (np2 pex6: the whole RT0
+    /// solution comes out negated → eta/marking drift).  Passing the
+    /// creation order re-measures the orientation against the
+    /// cross-rank-consistent MFEM order.
+    pub(crate) fn from_edge_space_ordered<S: FESpace>(
+        space: &S,
+        partition: &MeshPartition,
+        comm: &Comm,
+        creation_order: Option<&HashMap<u32, u32>>,
+    ) -> Self
+    where
+        S::Mesh: MeshTopology,
+    {
         let local_rank = comm.rank();
         let mesh = space.mesh();
         let n_space_dofs = space.n_dofs();
@@ -713,7 +736,14 @@ impl DofPartition {
 
                     // Sign correction: local_sign * d = global_sign, so d = global_sign / local_sign.
                     let local_sign: f64 = if local_a < local_b { 1.0 } else { -1.0 };
-                    let global_sign: f64 = if ga < gb { 1.0 } else { -1.0 };
+                    let global_sign: f64 = match creation_order {
+                        Some(co) => {
+                            let ca = co.get(&ga).copied().unwrap_or(ga);
+                            let cb = co.get(&gb).copied().unwrap_or(gb);
+                            if ca < cb { 1.0 } else { -1.0 }
+                        }
+                        None => if ga < gb { 1.0 } else { -1.0 },
+                    };
                     sign_corr[dof_id as usize] = global_sign / local_sign;
                 } else {
                     // Interior DOF: record with element info for ownership later.

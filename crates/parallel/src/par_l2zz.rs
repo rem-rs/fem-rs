@@ -62,6 +62,7 @@ pub fn l2_zz_estimator_parallel(
     comm: &Comm,
     u_dm: &[f64],
     hanging_edges: &[(u32, u32, u32)],
+    creation_order: &std::collections::HashMap<u32, u32>,
 ) -> Vec<f64> {
     let local_mesh = par_mesh.local_mesh();
     assert_eq!(
@@ -76,7 +77,18 @@ pub fn l2_zz_estimator_parallel(
     // wrapper partitions its DOFs across ranks (cross-rank face DOFs are
     // owned by the lowest rank and mirrored as ghosts elsewhere).
     let rt_local: HDivSpace<Mesh<2>> = HDivSpace::new(local_mesh.clone(), 0);
-    let rt_par = ParallelFESpace::new_for_edge_space(rt_local.clone(), par_mesh, comm.clone());
+    // `new_for_edge_space_ordered`: after an AMR partition rebuild the node
+    // gids are NOT in MFEM's UpdateVertices creation order, which would flip
+    // the RT0 edge orientation (`ga < gb` test) and negate the recovered
+    // flux (np2 pex6: the whole RT0 solution comes out negated → eta/marking
+    // drift).  Measuring the orientation against the creation order keeps it
+    // rank-invariant and MFEM-consistent.
+    let rt_par = ParallelFESpace::new_for_edge_space_ordered(
+        rt_local.clone(),
+        par_mesh,
+        comm.clone(),
+        Some(creation_order),
+    );
     let dp = rt_par.dof_partition();
     let n_total_dofs = dp.n_total_dofs();
     let n_owned_dofs = dp.n_owned_dofs;
@@ -265,16 +277,22 @@ pub fn l2_zz_estimator_parallel(
                     .map(|i| ((a, b), i as u32))
             })
             .collect();
+        // Slave sign measured in the MFEM `UpdateVertices` node creation
+        // order (`creation_order`: gid → order, threaded across AMR rounds
+        // by the caller — a partition rebuild renumbers local ids per rank,
+        // so the local-id test `lo == pa.min(pb)` flips across ranks, np2
+        // it3: same physical slave edge gets +1 on one rank, −1 on the
+        // other → marked 1 vs np1/C++ 25).  The coarse edge's "min"
+        // endpoint is the one created first.
+        let part = par_mesh.partition();
+        let gid_of = |n: u32| part.global_node(n);
         for d in 0..n_rt_dofs as u32 {
             let (a, b) = edge_of_dof[d as usize];
             if a == u32::MAX {
                 continue;
             }
-            // Slave detection on LOCAL ids, sign on the local node order
-            // (matches the serial estimator's `lo == pa.min(pb)` on the
-            // serial mesh; the parallel gids are assigned by the rebuild
-            // assigner, whose order does NOT match MFEM's UpdateVertices
-            // creation order, so using gids here flips signs).
+            // Slave detection on LOCAL ids (the endpoint *set* is rank
+            // invariant even though the ordering is not).
             let (lo, hi) = (a.min(b), a.max(b));
             for &(pa, pb, mid) in &master_edges {
                 // slave edge endpoints = {master endpoint, midpoint}
@@ -286,9 +304,21 @@ pub fn l2_zz_estimator_parallel(
                     continue;
                 }
                 if let Some(&md) = master_dof.get(&(pa, pb)) {
-                    // sign: slave's low endpoint equals master's low endpoint
-                    // → +0.5, else −0.5 (MFEM: one half-edge +0.5, other −0.5)
-                    let sign = if lo == pa.min(pb) { 1.0 } else { -1.0 };
+                    // sign: +1 when the slave half-edge departs from the
+                    // coarse edge's first-created (MFEM "min") endpoint,
+                    // −1 otherwise.
+                    let (gpa, gpb) = (gid_of(pa), gid_of(pb));
+                    let min_end = if creation_order[&gpa] < creation_order[&gpb] {
+                        gpa
+                    } else {
+                        gpb
+                    };
+                    let coarse_end = if gid_of(lo) == gpa || gid_of(lo) == gpb {
+                        gid_of(lo)
+                    } else {
+                        gid_of(hi)
+                    };
+                    let sign = if coarse_end == min_end { 1.0 } else { -1.0 };
                     slave_deps.push((d, 0.5 * sign, md));
                 }
             }
@@ -317,19 +347,25 @@ pub fn l2_zz_estimator_parallel(
         // x_s−c·x_m=0) is NOT equivalent at 2nd+ level hanging edges (the
         // A_sm/A_ss/b_s contributions folded into the master rows are
         // dropped; serial pex6 it3: row-replacement marked 40 vs PᵀAP 25 =
-        // C++).  Constraint coefficient: the permuted system satisfies
-        // x^p = S·x_dm, so x_s = c·x_m becomes x_s^p = c·sign_s·sign_m·x_m^p.
+        // C++).
         use fem_mesh::amr::HangingNodeConstraint;
         let constraints: Vec<HangingNodeConstraint> = slave_deps
             .iter()
             .map(|&(s, c, m)| {
-                let sign_s = dp.sign_correction(s);
-                let sign_m = dp.sign_correction(m);
+                // Physical flux-continuity coefficient directly: the RT0
+                // DOF value IS the physical flux (∫σ·n̂ ds), so the
+                // permuted-space constraint is x_s^p = c·x_m^p with no
+                // per-rank sign correction.  Multiplying by
+                // sign_s·sign_m would depend on which element first saw
+                // each DOF locally — a per-rank choice — and flip the
+                // weight on ranks whose local node ordering differs
+                // (np2 pex6 it2: sign_m=-1 on one rank vs +1 on the
+                // serial mesh → PᵀKP wrong → marked 5 vs 40).
                 HangingNodeConstraint::new_weighted(
                     s as usize,
                     m as usize,
                     m as usize, // unused second parent (coeff 0)
-                    c * sign_s * sign_m,
+                    c,
                     0.0,
                     Vec::new(),
                 )
@@ -348,7 +384,7 @@ pub fn l2_zz_estimator_parallel(
         verbose: false,
         ..SolverConfig::default()
     };
-    par_solve_pcg_amg(&a_mat, &rhs, &mut x, &amg_cfg, &cfg)
+    let res = par_solve_pcg_amg(&a_mat, &rhs, &mut x, &amg_cfg, &cfg)
         .expect("parallel RT0 L2 projection solve failed");
     x.update_ghosts();
 
@@ -371,17 +407,45 @@ pub fn l2_zz_estimator_parallel(
     // the true-dof system (their rows become identity with 0 RHS, so the
     // solver leaves them 0); recover u_s = c0·u_master (chained at 2nd+ level
     // where the master is itself a slave), in dm order.
+    //
+    // The recovery runs in the local (dm) basis: x_dm = S·x_p, so the
+    // physical constraint x_s^p = c·x_m^p becomes
+    // x_s_dm = c·S_s·S_m·x_m_dm (S = per-DOF sign_correction, ±1).  On the
+    // serial mesh S=1 for the constrained DOFs and c alone is right; after a
+    // partition rebuild the local node ordering flips S_m on some ranks and
+    // the missing S product negates the recovered slave flux (np2 pex6 it2:
+    // elements next to a hanging edge get η ≈ 6.9e-3 vs 2.9e-4 → marked 9).
     if !slave_deps.is_empty() {
         let master_of: std::collections::HashMap<u32, (u32, f64)> = slave_deps
             .iter()
             .map(|&(s, c, m)| (s, (m, c)))
             .collect();
         for &(s, c0, m0) in &slave_deps {
-            let mut coef = c0;
+            let sign_s = if needs_sign {
+                dp.sign_correction(s)
+            } else {
+                1.0
+            };
+            let sign_m = if needs_sign {
+                dp.sign_correction(m0)
+            } else {
+                1.0
+            };
+            let mut coef = c0 * sign_s * sign_m;
             let mut cur = m0;
             let mut guard = 0;
             while let Some(&(m, c)) = master_of.get(&cur) {
-                coef *= c;
+                let sign_cur = if needs_sign {
+                    dp.sign_correction(cur)
+                } else {
+                    1.0
+                };
+                let sign_m2 = if needs_sign {
+                    dp.sign_correction(m)
+                } else {
+                    1.0
+                };
+                coef *= c * sign_cur * sign_m2;
                 cur = m;
                 guard += 1;
                 assert!(guard < 64, "hanging-flux dependency cycle");
@@ -389,7 +453,6 @@ pub fn l2_zz_estimator_parallel(
             x_dm[s as usize] = coef * x_dm[cur as usize];
         }
     }
-
 
     let mut eta = vec![0.0_f64; n_local_elems];
     for e in 0..n_local_elems {

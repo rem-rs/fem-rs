@@ -10,6 +10,17 @@ use fem_core::types::{ElemId, NodeId, Rank};
 
 use crate::{par_mesh::ParallelMesh, partition::MeshPartition, Comm};
 
+/// MFEM `quad_hilbert_child_order` (ncmesh_tables.hpp): the order in which the
+/// 4 children of a refined quad are visited, per Hilbert-curve state.  This
+/// determines the *leaf element order* (`CollectLeafElements`) and hence the
+/// MFEM element numbering and `UpdateVertices` node-creation order — the same
+/// table [`fem_mesh::amr::NCStateQuad`] uses (amr_inner.rs).  `rebuild_partition_nc`
+/// needs a copy because the amr_inner table is private.
+const QUAD_HILBERT_CHILD_ORDER: [[u8; 4]; 8] = [
+    [0, 1, 2, 3], [0, 3, 2, 1], [1, 2, 3, 0], [1, 0, 3, 2],
+    [2, 3, 0, 1], [2, 1, 0, 3], [3, 0, 1, 2], [3, 2, 1, 0],
+];
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Errors from parallel AMR operations.
@@ -53,6 +64,13 @@ pub struct ParRefinedMesh {
     /// of each hanging edge into the ghost layer — pure topology, no
     /// coordinate lookup deadlock (pex6 deep-water).
     pub hanging_edges: Vec<(u32, u32, u32)>,
+    /// MFEM `UpdateVertices` node creation order of the current mesh
+    /// (`gid → order`, replicated across ranks).  A partition rebuild
+    /// renumbers local node ids per rank, which would flip the RT0
+    /// hanging-flux slave sign (`lo == pa.min(pb)` test); this table lets
+    /// the parallel L2ZZ estimator measure the sign against the coarse
+    /// edge's first-created endpoint instead (pex6 np2 it3).
+    pub creation_order: HashMap<u32, u32>,
 }
 
 /// Perform one cycle of parallel non-conforming AMR.
@@ -103,9 +121,10 @@ pub fn par_refine_marked(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
-        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
-    );
+    let (refined_mesh, new_partition, remap, hanging_edges, creation_order) =
+        rebuild_partition_nc(
+            &refined_mesh, par_mesh, marked, &midpoint_map, &comm, &HashMap::new(),
+        );
     // Reorder the prolongated solution to match the reordered node ids.
     let prolongated = reorder_solution(&prolongated, &remap);
     // Remap constraint node ids (NCState output → reordered local ids).
@@ -119,6 +138,66 @@ pub fn par_refine_marked(
         n_new_elems,
         constraints,
         hanging_edges,
+        creation_order,
+    })
+}
+
+/// [`par_refine_marked`] with the caller-supplied MFEM `UpdateVertices` node
+/// creation order of the coarse mesh (`gid → order`; empty on the first
+/// round).  The returned [`ParRefinedMesh::creation_order`] carries the
+/// order of the refined mesh, so a caller (pex6) can thread it across AMR
+/// rounds — the parallel RT0 L2ZZ estimator needs it for a rank-invariant
+/// hanging-flux slave sign (np2 it3 deep-water).  `nc_state` is accepted
+/// for signature parity with [`par_refine_marked`]; a fresh state per round
+/// is used (the partition rebuild renumbers local ids).
+pub fn par_refine_marked_ordered(
+    par_mesh: &ParallelMesh<Mesh<2>>,
+    _nc_state: NCState,
+    marked:    &[ElemId],
+    solution:  Option<&[f64]>,
+    creation_in: &HashMap<u32, u32>,
+) -> Result<ParRefinedMesh, ParAmrError> {
+    let coarse_mesh = par_mesh.local_mesh().clone();
+    let comm       = par_mesh.comm().clone();
+    comm.barrier();
+
+    // Fresh state per round: the partition rebuild renumbers local ids, so a
+    // carried-over state would desync.  Quad4 uses NCStateQuad; hanging
+    // constraints are returned (callers re-detect cross-round constraints
+    // from topology via `detect_hanging_quad`).
+    let mut nc_state = NCState::new();
+    let (refined_mesh, constraints, midpoint_map) =
+        if coarse_mesh.elem_type == ElementType::Quad4 {
+            NCStateQuad::new().refine(&coarse_mesh, marked, 0)
+        } else {
+            nc_state.refine(&coarse_mesh, marked, 0)
+        };
+    let n_new_elems = refined_mesh.n_elements();
+
+    let prolongated = if let Some(sol) = solution {
+        prolongate_p1(&coarse_mesh, &refined_mesh, sol)
+    } else {
+        vec![]
+    };
+
+    let (refined_mesh, new_partition, remap, hanging_edges, creation_order) =
+        rebuild_partition_nc(
+            &refined_mesh, par_mesh, marked, &midpoint_map, &comm, creation_in,
+        );
+    // Reorder the prolongated solution to match the reordered node ids.
+    let prolongated = reorder_solution(&prolongated, &remap);
+    // Remap constraint node ids (NCState output → reordered local ids).
+    let constraints = remap_constraints(&constraints, &remap);
+    let new_par_mesh = ParallelMesh::new(refined_mesh, comm, new_partition);
+
+    Ok(ParRefinedMesh {
+        par_mesh: new_par_mesh,
+        nc_state: NCState::new(),
+        solution: prolongated,
+        n_new_elems,
+        constraints,
+        hanging_edges,
+        creation_order,
     })
 }
 
@@ -156,9 +235,10 @@ pub fn par_refine_marked_quad(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
-        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
-    );
+    let (refined_mesh, new_partition, remap, hanging_edges, creation_order) =
+        rebuild_partition_nc(
+            &refined_mesh, par_mesh, marked, &midpoint_map, &comm, &HashMap::new(),
+        );
     // Reorder the prolongated solution to match the reordered node ids.
     let prolongated = reorder_solution(&prolongated, &remap);
     // Remap constraint node ids (NCState output → reordered local ids).
@@ -172,6 +252,7 @@ pub fn par_refine_marked_quad(
         n_new_elems,
         constraints,
         hanging_edges,
+        creation_order,
     })
 }
 
@@ -198,9 +279,10 @@ pub fn par_refine_marked_with_tree(
         vec![]
     };
 
-    let (refined_mesh, new_partition, remap, hanging_edges) = rebuild_partition_nc(
-        &refined_mesh, par_mesh, marked, &midpoint_map, &comm,
-    );
+    let (refined_mesh, new_partition, remap, hanging_edges, creation_order) =
+        rebuild_partition_nc(
+            &refined_mesh, par_mesh, marked, &midpoint_map, &comm, &HashMap::new(),
+        );
     // Reorder the prolongated solution to match the reordered node ids.
     let prolongated = reorder_solution(&prolongated, &remap);
     // Remap constraint node ids (NCState output → reordered local ids).
@@ -216,6 +298,7 @@ pub fn par_refine_marked_with_tree(
         n_new_elems,
         constraints,
         hanging_edges,
+        creation_order,
     }, tree))
 }
 
@@ -290,17 +373,29 @@ fn gather_counts(comm: &Comm, my_count: i64) -> Vec<i64> {
 ///
 /// Children inherit the parent's owner; a midpoint is owned by the owner of
 /// its smallest referencing marked element.
+///
+/// `creation_in` is the MFEM `UpdateVertices` node creation order of the
+/// coarse mesh (`gid → order`, append-only counter; empty on the first
+/// call).  The returned creation order appends the new nodes in
+/// (element-gid, corner-j) first-appearance scan order — the same rule MFEM
+/// uses to number vertices — so a later RT0 hanging-flux slave sign can be
+/// measured against the coarse edge's first-created endpoint even after a
+/// partition rebuild renumbers local ids (np2 it3 deep-water).  The returned
+/// table is replicated across ranks (alltoallv merge).
+#[allow(clippy::too_many_arguments)]
 fn rebuild_partition_nc(
     refined: &Mesh<2>,
     par_mesh: &ParallelMesh<Mesh<2>>,
     marked_local: &[ElemId],
     midpoint_map: &HashMap<(NodeId, NodeId), NodeId>,
     comm: &Comm,
+    creation_in: &HashMap<u32, u32>,
 ) -> (
     Mesh<2>,
     MeshPartition,
     Vec<u32>,
     Vec<(u32, u32, u32)>,
+    HashMap<u32, u32>,
 ) {
     let rank = comm.rank();
     let partition = par_mesh.partition();
@@ -370,7 +465,90 @@ fn rebuild_partition_nc(
             gids.sort_unstable();
             coarse_by_nodes.insert(gids, e);
         }
-        let mut child_k: HashMap<u32, u32> = HashMap::new();
+        // Global Hilbert states (pex6 it3 deep-water fix): the child index `k`
+        // below must be the *geometric* Hilbert child index — the position of
+        // the child's slot in `QUAD_HILBERT_CHILD_ORDER[parent_state]` — not a
+        // counter over the local refined output order.  The local output order
+        // is NCStateQuad's leaf order derived from each rank's *local* root
+        // states (init_root_states_quad over the local coarse element
+        // sequence), which differs across ranks after a partition rebuild: the
+        // same physical child then gets a different `new_elem_gid` on
+        // different ranks and the (new_elem_gid, j) ordering is not the
+        // globally-consistent MFEM UpdateVertices SFC order (np2 it3 marked
+        // 1 vs np1/C++ 25).  Every rank rebuilds the full coarse element
+        // table (owned ∪ ghost, dedup by gid), sorts by gid and runs the
+        // MFEM InitRootState algorithm over that *global* sequence — identical
+        // on every rank, and equal to the local computation on np1.
+        let mut global_conns: BTreeMap<u32, [u32; 4]> = BTreeMap::new();
+        for e in 0..n_local_elems {
+            let g = partition.global_elem(e as u32);
+            let ns = local_mesh.elem_nodes(e as u32);
+            let mut c = [0u32; 4];
+            for (i, &n) in ns.iter().enumerate() {
+                c[i] = partition.global_node(n);
+            }
+            global_conns.entry(g).or_insert(c);
+        }
+        if comm.size() > 1 {
+            let mut payload = Vec::with_capacity(global_conns.len() * 20);
+            for (&g, &c) in &global_conns {
+                payload.extend_from_slice(&g.to_le_bytes());
+                for &n in &c {
+                    payload.extend_from_slice(&n.to_le_bytes());
+                }
+            }
+            let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+                .map(|r| (r, payload.clone()))
+                .collect();
+            for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+                for chunk in bytes.chunks_exact(20) {
+                    let g = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                    let mut c = [0u32; 4];
+                    for (i, s) in chunk[4..20].chunks_exact(4).enumerate() {
+                        c[i] = u32::from_le_bytes(s.try_into().unwrap());
+                    }
+                    global_conns.entry(g).or_insert(c);
+                }
+            }
+        }
+        let mut global_states: HashMap<u32, u8> =
+            HashMap::with_capacity(global_conns.len());
+        {
+            // MFEM InitRootState over the gid-sorted global coarse sequence
+            // (amr_inner.rs::init_root_states_quad, node ids replaced by
+            // global gids — the shared-node tests are equivalent).
+            let gids: Vec<u32> = global_conns.keys().copied().collect();
+            let mut entry_node: i64 = -2;
+            for (i, &g) in gids.iter().enumerate() {
+                let el = &global_conns[&g];
+                let v_in = if entry_node >= 0 {
+                    el.iter().position(|&n| n as i64 == entry_node)
+                } else {
+                    None
+                }
+                .unwrap_or(0);
+                let mut shared = [false; 4];
+                if i + 1 < gids.len() {
+                    let next = &global_conns[&gids[i + 1]];
+                    for j in 0..4 {
+                        if let Some(p) = el.iter().position(|&n| n == next[j]) {
+                            shared[p] = true;
+                        }
+                    }
+                }
+                let mut state = (2 * v_in) as usize;
+                for j in 0..2 {
+                    let exit = QUAD_HILBERT_CHILD_ORDER[state + j][3] as usize;
+                    if shared[exit] {
+                        state += j;
+                        break;
+                    }
+                }
+                global_states.insert(g, state as u8);
+                let exit = QUAD_HILBERT_CHILD_ORDER[state][3] as usize;
+                entry_node = el[exit] as i64;
+            }
+        }
         for e in 0..n_refined as ElemId {
             let ns = refined.elem_nodes(e);
             // A refined (child) element has a centre node: a new node that is
@@ -409,9 +587,40 @@ fn rebuild_partition_nc(
                     n_orig
                 )
             });
-            let k = child_k.entry(pg).or_insert(0);
-            new_elem_gid[e as usize] = (prefix[pg as usize] + *k as usize) as u32;
-            *k += 1;
+            // Geometric Hilbert child index: a refined child's old (pre-refine)
+            // nodes contain exactly one corner of its parent — that corner
+            // fixes the child slot (XY split 0..3); the parent's *global*
+            // Hilbert state then gives the child's position in the SFC output
+            // order.  Cross-rank consistent because slot (geometry) and
+            // state (global coarse table) both are.
+            let k: u32 = if centre.is_some() {
+                let coarse_e = gid_to_coarse[&pg];
+                let pns = local_mesh.elem_nodes(coarse_e as u32);
+                let corner_gid = ns
+                    .iter()
+                    .filter(|&&n| (n as usize) < n_orig)
+                    .map(|&n| gid_of(n))
+                    .find(|&g| pns.iter().any(|&pn| gid_of(pn) == g))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "rebuild_partition_nc: refined Quad4 child {e} \
+                             (nodes {ns:?}) of parent {pg} has no parent corner"
+                        )
+                    });
+                let slot = pns
+                    .iter()
+                    .position(|&pn| gid_of(pn) == corner_gid)
+                    .expect("corner gid in parent nodes") as u8;
+                let st = global_states[&pg] as usize;
+                QUAD_HILBERT_CHILD_ORDER[st]
+                    .iter()
+                    .position(|&c| c == slot)
+                    .expect("child slot in Hilbert order") as u32
+            } else {
+                // Unrefined element: keeps its parent's single position.
+                0
+            };
+            new_elem_gid[e as usize] = (prefix[pg as usize] + k as usize) as u32;
             let coarse_e = gid_to_coarse[&pg];
             new_elem_owner[e as usize] = partition.elem_owner[coarse_e];
             if let Some(c) = centre {
@@ -941,7 +1150,106 @@ fn rebuild_partition_nc(
         .iter()
         .map(|(&(a, b), &(mid, _o))| (a, b, mid))
         .collect();
-    (refined_mesh, new_partition, remap, hanging_edges)
+
+    // 8. MFEM UpdateVertices node creation order (appended to `creation_in`):
+    //    existing nodes keep their order; new nodes are numbered by scanning
+    //    the refined elements in (element gid, corner j) order, first
+    //    appearance wins — identical to MFEM STEP 3 over the Hilbert-ordered
+    //    leaf sequence (element gids ARE that sequence after step 3).  The
+    //    table is merged across ranks so every rank can answer for any node
+    //    gid (extra-ghost midpoints created by other ranks included).
+    let mut creation = creation_in.clone();
+    {
+        // Global first-appearance key per node gid: (element gid, corner j)
+        // of the first refined element referencing the node — the same scan
+        // MFEM UpdateVertices STEP 3 performs over the Hilbert-ordered leaf
+        // sequence.  Each rank scans its local elements, then the per-gid
+        // minimum is reduced across ranks, so EVERY rank computes the same
+        // global key (a per-rank local scan + or_insert merge would keep
+        // whichever rank's *local* counter value arrived first, which is not
+        // the global position — flipping the relative order of endpoints on
+        // different ranks and negating the RT0 slave constraint weight,
+        // np2 pex6 it2 marked 5 vs 40).
+        let mut local_first: HashMap<u32, (u32, u32)> = HashMap::new();
+        for e in 0..n_refined as ElemId {
+            let ns = refined.elem_nodes(e);
+            for (j, &n) in ns.iter().enumerate() {
+                let g = new_gid[n as usize];
+                let key = (new_elem_gid[e as usize], j as u32);
+                match local_first.get_mut(&g) {
+                    Some(k) => {
+                        if key < *k {
+                            *k = key;
+                        }
+                    }
+                    None => {
+                        local_first.insert(g, key);
+                    }
+                }
+            }
+        }
+        let mut global_first: HashMap<u32, (u32, u32)> = local_first.clone();
+        if comm.size() > 1 {
+            let mut payload = Vec::with_capacity(local_first.len() * 12);
+            for (&g, &(ge, j)) in &local_first {
+                payload.extend_from_slice(&g.to_le_bytes());
+                payload.extend_from_slice(&ge.to_le_bytes());
+                payload.extend_from_slice(&j.to_le_bytes());
+            }
+            let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+                .map(|r| (r, payload.clone()))
+                .collect();
+            for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+                for chunk in bytes.chunks_exact(12) {
+                    let g = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                    let ge = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                    let j = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                    let key = (ge, j);
+                    match global_first.get_mut(&g) {
+                        Some(k) => {
+                            if key < *k {
+                                *k = key;
+                            }
+                        }
+                        None => {
+                            global_first.insert(g, key);
+                        }
+                    }
+                }
+            }
+        }
+        // Append new nodes in global (element gid, corner j) order.
+        let mut next_rank = creation.values().copied().max().unwrap_or(0) + 1;
+        let mut order: Vec<(u32, u32, u32)> = global_first
+            .iter()
+            .map(|(&g, &(ge, j))| (ge, j, g))
+            .collect();
+        order.sort_unstable();
+        for &(_, _, g) in &order {
+            if !creation.contains_key(&g) {
+                creation.insert(g, next_rank);
+                next_rank += 1;
+            }
+        }
+    }
+    if comm.size() > 1 {
+        let mut payload = Vec::with_capacity(creation.len() * 8);
+        for (&g, &r) in &creation {
+            payload.extend_from_slice(&g.to_le_bytes());
+            payload.extend_from_slice(&r.to_le_bytes());
+        }
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, payload.clone()))
+            .collect();
+        for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+            for chunk in bytes.chunks_exact(8) {
+                let g = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                let r = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                creation.entry(g).or_insert(r);
+            }
+        }
+    }
+    (refined_mesh, new_partition, remap, hanging_edges, creation)
 }
 
 // ─── DerefineTree building ──────────────────────────────────────────────────
