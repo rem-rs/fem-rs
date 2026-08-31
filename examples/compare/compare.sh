@@ -45,6 +45,12 @@ extract_dof() {
     # Element count: "Number of Elements 590"
     val=$(grep -oE "Number of Elements [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # ex19 mixed elasticity: "DOFs: displacement=102, pressure=18" /
+    # C++ "dim(u) = 102"（取位移子空间维度）
+    val=$(grep -oE "DOFs: displacement=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    val=$(grep -oE "dim\(u\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     echo ""
 }
 
@@ -53,8 +59,10 @@ find_cpp_bin() {
     local name="$1"
     local bin=""
     
-    # 尝试各种可能的二进制文件名
-    for suffix in "" "p" "_cpp" "p_cpp"; do
+    # 尝试各种可能的二进制文件名（_cpp 串行优先，避免 exNp 并行版抢先——
+    # ~/bin 同时存在 ex16_cpp 与 ex16p，原顺序 "" "p" "_cpp" "p_cpp" 会选到
+    # 并行 ex16p，导致串行比对用错二进制（-r/-rs 参数不识别、DOF 4 倍差））
+    for suffix in "" "_cpp" "p_cpp" "p"; do
         bin="${name}${suffix}"
         if wsl -e bash -c "test -x ~/bin/${bin}" 2>/dev/null; then
             echo "$bin"
@@ -194,6 +202,15 @@ run_one() {
             echo "  conv_avg: rust=$ra_ cpp=$ca_"
         fi
     fi
+
+    # 比对 energy（ex20 辛积分器输出均值/标准差，取标题后第一行两个数）
+    if [[ "$modes" == *"energy"* ]]; then
+        local re_=$(grep -A1 "Mean and standard deviation of the energy" "$rout" 2>/dev/null | tail -1 | grep -oE "[0-9.eE+-]+" | head -2 | tr '\n' ' ')
+        local ce_=$(grep -A1 "Mean and standard deviation of the energy" "$cout" 2>/dev/null | tail -1 | grep -oE "[0-9.eE+-]+" | head -2 | tr '\n' ' ')
+        if [ -n "$re_" ] && [ -n "$ce_" ]; then
+            echo "  energy: rust=[$re_] cpp=[$ce_]"
+        fi
+    fi
 }
 
 # 示例配置
@@ -215,7 +232,7 @@ MESH_ARGS[ex14]="star.mesh|-r 4 -o 2 -no-vis|-r 4 -o 2 -no-vis|dof+iter"
 MESH_ARGS[ex15]="star.mesh|-no-vis|-no-vis|dof+marked"
 MESH_ARGS[ex16]="star.mesh|-r 2 -o 2 -no-vis|-r 2 -o 2 -no-vis|dof+iter"
 MESH_ARGS[ex17]="beam-tri.mesh|-no-vis|-no-vis|dof"
-MESH_ARGS[ex18]="periodic-square.mesh|-no-vis|-no-vis|dof"
+MESH_ARGS[ex18]="periodic-square.mesh|-o 1 -no-vis|-o 1 -no-vis|dof"
 MESH_ARGS[ex19]="beam-quad.mesh|-o 2 -r 0 -no-vis|-o 2 -r 0 -no-vis|dof+newton"
 MESH_ARGS[ex20]="star.mesh|-no-vis|-no-vis|dof+energy"
 MESH_ARGS[ex21]="beam-tri.mesh|-o 2 -no-vis|-o 2 -no-vis|dof"

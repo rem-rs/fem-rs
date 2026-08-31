@@ -74,6 +74,9 @@ extract_dof() {
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "dim\(R\+W\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # pex19 mixed incompressible elasticity: C++ "dim(u+p) = 120"
+    val=$(grep -oE "dim\(u\+p\) = [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of [a-zA-Z/]+ unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
     val=$(grep -oE "Number of velocity/deformation unknowns: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
@@ -151,6 +154,10 @@ run_pex() {
     if [ "$name" = "pex7" ]; then
         cpp_mesh_arg=""
         cpp_ra="-e 0 -o 1 -r 0 -no-vis"
+    elif [ "$name" = "pex5" ]; then
+        # ex5p 用 -r 不用 -rs/-rp（脚本的 -r → -rs 转换会让它报
+        # "Unrecognized option: -rs" 而拿不到 unknowns）
+        cpp_ra="-r 1 -no-vis"
     elif [ "$name" = "pex33" ]; then
         # pex33 C++ 用 -r（refs），且 C++ 的 -r 比 Rust 少 1
         local rust_r=$(echo "$ra" | grep -oE '\-r [0-9]+' | grep -oE '[0-9]+' | head -1)
@@ -163,6 +170,10 @@ run_pex() {
         # ex37p 自建网格 MakeCartesian2D(3,1)（无 -m）；默认 r5/o2
         cpp_mesh_arg=""
         cpp_ra="-r 5 -o 2 -no-vis"
+    elif [ "$name" = "pex27" ]; then
+        # ex27p 自建网格（无 -m，Robinson 无旋场构造）
+        cpp_mesh_arg=""
+        cpp_ra="-no-vis"
     elif [ "$name" = "pex28" ]; then
         # ex28p 自建梯形网格 build_trapezoid_mesh（无 -m）；Rust 同构
         cpp_mesh_arg=""
@@ -191,7 +202,9 @@ run_pex() {
         :
     else
         # Rust 用 -r，C++ 用 -rs/-rp（转换；-rs 不转换）
-        if [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
+        if [ "$name" = "pex5" ]; then
+            : # ex5p 用 -r（已在特殊处理设置 cpp_ra="-r 1"），跳过转换
+        elif [[ "$cpp_ra" == *" -r "* ]] || [[ "$cpp_ra" == -*" -r "* ]] || [[ "$cpp_ra" == "-r "* ]]; then
             cpp_ra=$(echo "$cpp_ra" | sed 's/ -r \([0-9]*\)/ -rs \1 -rp 0/; s/^-r \([0-9]*\)/-rs \1 -rp 0/')
         fi
     fi
@@ -246,23 +259,23 @@ PEX_MESH[pex9]="star.mesh|-no-vis"
 PEX_MESH[pex10]="beam-quad.mesh|-r 2 -o 2 -dt 3 -no-vis"
 PEX_MESH[pex12]="beam-tri.mesh|-n 5 -no-vis"
 PEX_MESH[pex13]="beam-tri.mesh|-rs 3 -rp 0 -no-vis"
-PEX_MESH[pex14]="star.mesh|-r 4 -o 2 -no-vis"
+PEX_MESH[pex14]="star.mesh|-rs 4 -rp 0 -o 2 -no-vis"
 PEX_MESH[pex15]="star.mesh|-no-vis"
 PEX_MESH[pex16]="star.mesh|-rs 2 -rp 0 -no-vis"
 PEX_MESH[pex17]="beam-tri.mesh|-r 4 -no-vis"
-PEX_MESH[pex18]="star.mesh|-no-vis"
+PEX_MESH[pex18]="star.mesh|-o 1 -no-vis"
 PEX_MESH[pex19]="beam-quad.mesh|-o 2 -r 0 -no-vis"
 PEX_MESH[pex20]="default|-no-vis"
 PEX_MESH[pex21]="beam-tri.mesh|-o 2 -no-vis"
 PEX_MESH[pex22]="inline-quad.mesh|-rs 2 -rp 0 -p 0 -no-vis"
-PEX_MESH[pex24]="star.mesh|-p 2 -o 2 -no-vis"
-PEX_MESH[pex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis"
+PEX_MESH[pex24]="star.mesh|-p 2 -o 1 -no-vis"
+PEX_MESH[pex25]="inline-quad.mesh|-o 2 -f 5.0 -rs 3 -rp 0 -prob 4 -no-vis"
 PEX_MESH[pex26]="star.mesh|-no-vis"
 PEX_MESH[pex27]="inline-quad.mesh|-no-vis"
 PEX_MESH[pex28]="default|-no-vis"
 PEX_MESH[pex29]="default|-rs 2 -no-vis"
 PEX_MESH[pex30]="star.mesh|-no-vis"
-PEX_MESH[pex31]="beam-tri.mesh|-o 1 -r 1 -no-vis"
+PEX_MESH[pex31]="beam-tri.mesh|-o 1 -rs 1 -rp 0 -no-vis"
 PEX_MESH[pex32]="fichera.mesh|-rs 2 -rp 0 -no-vis"
 PEX_MESH[pex33]="square-disc.mesh|-r 3 -alpha 0.33 -o 2 -no-vis"
 PEX_MESH[pex34]="fichera-mixed.mesh|-no-vis"

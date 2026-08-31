@@ -863,6 +863,40 @@ pub fn compute_coeff_l2_norm(
     norm2.sqrt()
 }
 
+/// Same as [`compute_coeff_l2_norm`] but restricted to the first `n_elems`
+/// elements of the local mesh (`0..n_elems`).  Parallel use: a partitioned
+/// mesh lists owned elements first and ghosts after, so summing this over the
+/// owned range per rank and allreducing the squares gives the true global
+/// norm without double-counting ghost elements.
+pub fn compute_coeff_l2_norm_first_n(
+    mesh: &impl MeshTopology,
+    coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+    quad_order: u8,
+    n_elems: usize,
+) -> f64 {
+    let dim = mesh.topological_dim() as usize;
+    let mut norm2 = 0.0;
+    for e in 0..n_elems as u32 {
+        let elem_type = mesh.element_type(e);
+        // Quad integration lives on [0,1]^2 with weight sum 1 (MFEM IntRules
+        // convention); QuadQ1's quadrature is on [-1,1]^2 (weight sum 4) and
+        // would give 4x the MFEM norm.  Use quad_rule_01 for quads.
+        let quad = if matches!(elem_type, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) {
+            fem_element::quadrature::quad_rule_01(quad_order)
+        } else {
+            ref_elem_vol(elem_type, 1).quadrature(quad_order)
+        };
+        let nodes = mesh.element_nodes(e);
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (_jac, det_j, xp) = element_jacobian(mesh, e, nodes, xi, dim);
+            let w = quad.weights[q] * det_j.abs();
+            let fv = coeff(&xp);
+            norm2 += w * fv * fv;
+        }
+    }
+    norm2.sqrt()
+}
+
 /// Project a vector function onto the tangential component of HCurl boundary DOFs.
 ///
 /// For each boundary edge on a face with attribute in `bdr_attr`, evaluates
