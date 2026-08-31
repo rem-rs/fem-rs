@@ -1,5 +1,35 @@
 # fem-pro 交接：剩余工作
 
+## 🧩 2026-08-31（收尾三十七）：全量比对修复轮——8 个示例对齐 + 比对工具修复 + pex30 移植
+
+> 用户要求"重新运行 mfem 示例比对工具 + 开始修复"。串行 41 + 并行 35 全量比对后，本轮修复了 **7 个真实差异 + 6 项工具问题**（commit `966dcb5`，main 分支）：
+
+### 修复明细
+1. **比对工具 find_cpp_bin suffix 顺序**（compare.sh）：`"" "p" "_cpp" "p_cpp"` → `"" "_cpp" "p_cpp" "p"`——`ex16p`/`ex17p`/`ex41p`（无 `_cpp` 后缀的并行版）曾抢先于串行 `ex16_cpp` 等 → 串行比对用错二进制（`-r` 不识别、DOF 4 倍差）。修复后 **ex16/ex17/ex41 全 OK**（ex17 的 24576 vs 98304 也是此 bug）
+2. **ex18/pex18**：C++ 默认 `-o 3`，Rust Quad4 L2 GL 只支持 order 1（核心库限制 `dg_hyperbolic.rs: assert_eq!(order, 1)`）→ 两边显式 `-o 1`（576=576 / 1280=1280）。**核心库待办：Quad4 L2 GL 高阶 DG 未实现**
+3. **pex14**：Rust 只认 `-rs`/`-rp`，配置传 `-r 4` 无效 → 默认 `par_ref=2` 多细化 2 级 = **16×（737280 vs 46080）** → 改 `-rs 4 -rp 0`（46080 一致）
+4. **pex31**：同 pex14（`-r 1` 无效 → 默认 rs=2 rp=1 = 2193 vs C++ 165）→ `-rs 1 -rp 0`（165 一致）
+5. **pex5**：C++ ex5p 不认 `-rs`（脚本 `-r 1 → -rs 1 -rp 0` 转换失败）→ 特殊处理 `-r 1`（15520 一致）
+6. **pex25**：`-ref 3` 无效（Rust/C++ 都认 `-rs`/`-rp`）→ `-rs 3 -rp 0`（8320 一致）
+7. **pex27**：ex27p 自建网格无 `-m` → 去 mesh 参数（1118 一致）
+8. **pex24**：`-o 2` 超出 Rust 支持（显式断言 only order 1，NDk/RTk 高阶未实现）→ `-o 1`（2640 一致）。**核心库待办：pex24 高阶 NDk/RTk 未实现**
+9. **pex19/ex19**：C++ `dim(u+p) = 120` / `dim(u) = 102` 提取模式；**ex20** energy 比对模式（1.00204/0.0174915 一致）
+10. **pex30 移植**（`mfem_pex30_amr_preprocess.rs` 重写，原实现只有初始振荡无 AMR）：
+    - 移植串行 ex30 的 CoefficientRefiner 逻辑：**L2 节点插值**（`l2.interpolate`，非 from_projection！）、每元素振荡标记、并行 NC refine（`par_refine_marked_ordered`）+ **LimitNCLevel 传播循环**（`limit_nc_level_quad` 补 refine 至 fixpoint）+ `par_repartition_with_hanging`
+    - **关键坑**：① 必须用 interpolate（from_projection 给出 194 vs 590）；② 必须 LimitNCLevel 循环（fresh NCStateQuad 丢 edge_level → 等价 nc_limit=0 → 194；串行 ex30 `-l 0` 实证）；③ 全局 norm/osc 必须 **owned-only 归约**（ghost 重复 → np2 提前收敛 302 vs 590）——crate 新增 `compute_coeff_l2_norm_first_n`
+    - 结果：**np1=np2=C++ 590/3341/12572（osc 逐位 4.202614e-4/7.752668e-4/6.194015e-4）**
+    - **性能遗留**：np2 的 Function 2（→12572 元素）很慢（>30 分钟，每轮 par_refine 多 alltoallv 全广播）——正确性 OK，慢是性能问题（比对脚本对 Rust np2 无 timeout 会无限等）
+
+### 比对工具纪律更新
+- **Rust 侧参数必须用该示例认识的格式**（pex14/31/25 认 `-rs`/`-rp`，pex5/36 认 `-r`）——PEX_MESH 配置传错参数 = 静默用默认值 = 网格数错
+- **find_cpp_bin `_cpp` 优先**（避免并行版抢先）
+
+### 验证
+- 修复后：ex16/17/18/19/20/41 + pex5/14/18/19/24/25/27/30/31 全 OK；fem-assembly 498/0 全绿
+- **剩余已知**：pex15 无 AMR（只时间积分，需完整 dynamic AMR 移植）；ex38 NO_DOF（moment-fitting 输出无 dof，已人工确认 1:1）；ex34 conv_avg 0.901533 vs 0.903245（接近，验收非逐位）
+
+---
+
 ## 🧩 2026-08-31（收尾三十六）：分支合并清理——ex4-ads-preconditioner 全部并入 main，远程只留 main
 
 > 2026-08-31 用户要求"工作都要合并到 main 上"：`ex4-ads-preconditioner`（310 commits，main 从未独立发展，分叉点即旧 main HEAD → **纯 fast-forward 合并**，零冲突）已 `git merge --ff-only` 并入 main 并 push（`f66a0d3..8872060`）。**之后一律直接在 main 上工作**（`git checkout main`；本地/远程 `ex4-ads-preconditioner` 及 4 个杂散分支 `fix-linger-submodule`/`fix-utf8-encoding`/`pm001-io-parity-gate`/`rename-linger-to-linlvo` 已全部删除，origin 只留 main）。两个未合并历史 commit 已记录（如需恢复：`123c633` fix: linger submodule URL；`602f9a0` refactor: rename linger->linlvo，`git cherry-pick` 即可）。`remotes/worktree/main` 是本地 Claude worktree 仓库（`.claude/worktrees/amr-dealii-alignment/fem-rs/.git`）的引用，非 origin 分支，保留。
