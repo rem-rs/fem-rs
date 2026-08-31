@@ -405,8 +405,33 @@ fn rebuild_partition_nc(
     let n_local_elems = n_owned_elems + n_ghost_elems;
     let n_orig = local_mesh.n_nodes();
     let n_global_elems = par_mesh.global_n_elems();
-    let n_global_old_nodes = par_mesh.global_n_nodes();
     let gid_of = |local: u32| partition.global_node(local);
+
+    // New-node gid base: the highest gid in use + 1, NOT the physical node
+    // count.  After partition rebuilds the gid space can have holes (extra
+    // ghost midpoints appended by a rebuild and then dropped by the
+    // following repartition leave gaps), so `max_gid >= n_nodes`; allocating
+    // fresh gids from `n_global_old_nodes` would then collide with existing
+    // high gids (pex6 np2 it4: new edge midpoints got gids 341-346 already
+    // held by old hanging nodes → the same gid mapped to different physical
+    // nodes on different ranks → repartition's per-gid coordinate merge
+    // picked the wrong one → 6 hanging nodes lost + elements deformed,
+    // unknowns 380 vs np1 386, marked 3 vs 50).
+    let local_max_gid = partition.global_node_ids.iter().copied().max().unwrap_or(0);
+    let global_max_gid = if comm.size() > 1 {
+        let mut payload = local_max_gid.to_le_bytes().to_vec();
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, payload.clone()))
+            .collect();
+        let mut mx = local_max_gid;
+        for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+            mx = mx.max(u32::from_le_bytes(bytes[0..4].try_into().unwrap()));
+        }
+        mx
+    } else {
+        local_max_gid
+    };
+    let n_gid_base = global_max_gid as usize + 1;
 
     // 1. Global marked set (every rank contributes its owned marks).
     let mut owned_marked: Vec<u32> = marked_local
@@ -746,7 +771,7 @@ fn rebuild_partition_nc(
     let all_counts: Vec<i64>;
     if comm.size() == 1 {
         for (idx, &ek) in local_new_edges.iter().enumerate() {
-            edge_gid.insert(ek, (n_global_old_nodes + idx) as u32);
+            edge_gid.insert(ek, (n_gid_base + idx) as u32);
         }
         all_counts = vec![local_new_edges.len() as i64];
     } else {
@@ -787,7 +812,7 @@ fn rebuild_partition_nc(
 
     // Assign ids in sorted edge order.
     for (idx, &ek) in my_edges.iter().enumerate() {
-        edge_gid.insert(ek, (n_global_old_nodes + base + idx) as u32);
+        edge_gid.insert(ek, (n_gid_base + base + idx) as u32);
     }
 
     // Reply to every requester (same order as the request).
@@ -828,7 +853,7 @@ fn rebuild_partition_nc(
         let n_edge_new: usize = all_counts.iter().map(|&c| c as usize).sum();
         if comm.size() == 1 {
             for (idx, &ge) in local_centers.keys().enumerate() {
-                center_gid.insert(ge, (n_global_old_nodes + n_edge_new + idx) as u32);
+                center_gid.insert(ge, (n_gid_base + n_edge_new + idx) as u32);
             }
         } else {
             let mut center_req: HashMap<Rank, Vec<u32>> = HashMap::new();
@@ -870,7 +895,7 @@ fn rebuild_partition_nc(
             for (idx, &ge) in my_center_elems.iter().enumerate() {
                 center_gid.insert(
                     ge,
-                    (n_global_old_nodes + n_edge_new + center_base + idx) as u32,
+                    (n_gid_base + n_edge_new + center_base + idx) as u32,
                 );
             }
             let reply_payloads: Vec<(Rank, Vec<u8>)> = center_req_by_requester
