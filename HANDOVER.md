@@ -1,5 +1,11 @@
 # fem-pro 交接：剩余工作
 
+## 🧩 2026-08-31（收尾三十六）：分支合并清理——ex4-ads-preconditioner 全部并入 main，远程只留 main
+
+> 2026-08-31 用户要求"工作都要合并到 main 上"：`ex4-ads-preconditioner`（310 commits，main 从未独立发展，分叉点即旧 main HEAD → **纯 fast-forward 合并**，零冲突）已 `git merge --ff-only` 并入 main 并 push（`f66a0d3..8872060`）。**之后一律直接在 main 上工作**（`git checkout main`；本地/远程 `ex4-ads-preconditioner` 及 4 个杂散分支 `fix-linger-submodule`/`fix-utf8-encoding`/`pm001-io-parity-gate`/`rename-linger-to-linlvo` 已全部删除，origin 只留 main）。两个未合并历史 commit 已记录（如需恢复：`123c633` fix: linger submodule URL；`602f9a0` refactor: rename linger->linlvo，`git cherry-pick` 即可）。`remotes/worktree/main` 是本地 Claude worktree 仓库（`.claude/worktrees/amr-dealii-alignment/fem-rs/.git`）的引用，非 origin 分支，保留。
+
+---
+
 ## 🧩 2026-08-31（收尾三十五）：pex6 np2 it4+ 分岔根因 = rebuild_partition_nc gid 基数冲突（np2 it4 386/50 全对齐 C++，it0-it10 轨迹一致）
 
 ### 一句话启动词
@@ -45,7 +51,7 @@
 2. 历史遗留（低优先，勿优先做）：ex15 收尾已接受差异（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
 
 ### 环境 / 工具 / 纪律（勿丢）
-- 分支 `ex4-ads-preconditioner`（fem-rs），已 push；根仓库 main 已 push
+- **分支：直接工作并推送到 `main`**（fem-rs 与根仓库 fem-pro 都是 main；2026-08-31 已合并清理 ex4-ads-preconditioner，勿再建旁支）
 - C++ 参考：串行 `~/bin/exN_cpp`；并行 `~/bin/exNp_cpp`（**np>1 WSL 段错误，只用 np1**）
 - 重编译纪律：`cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
 - 比对工具：`examples/compare/compare.sh`（串行）、`examples/compare/pex_compare.sh`（并行）；配置 `examples/compare/examples.json`；比对缓存 `tmp/cmp/*.log`
