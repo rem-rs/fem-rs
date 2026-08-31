@@ -1,116 +1,328 @@
-# HANDOVER — pex6 深水区交接（2026-08-30）
+# fem-pro 交接：剩余工作
 
-> 目标：让 `examples/mfem_pex6_parallel_amr.rs`（pex6）在 **np2** 下 unknowns/marked
-> AMR 轨迹对齐 C++ MFEM `ex6p`（v4.9，`/home/quan/mfem49_mpi`）。
-> C++ 参考二进制：`/home/quan/bin/ex6p_cpp`（含 CXX_MARKED 打印，已编译）。
-> 比对脚本：`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6`。
+## 🧩 2026-08-31：pex6 方向 A 完成 + RT0 跨 rank 三修复（np2 it2=40 it3=25 全对齐 C++）
 
-## 当前状态（务必先跑确认）
+### 一句话启动词
+> **pex6 np2 it3 marked 1 → 25 达成**（commit `a015af8`）。用户指定方向 A（`rebuild_partition_nc` 的 Quad4 `new_elem_gid` 改几何 Hilbert child index）已完成，np1 无回归；验收（np2 it2=40 且 it3=25）暴露 RT0 悬挂 flux 的**三个独立跨 rank bug**，全部修复后 np2 unknowns 31/101/171/291 + marked 20/25/40/25 与 C++ 全对齐。**验收标准 = 结果一致（marked 数/轨迹），非逐位**（用户明确）。
 
-```
-np1 串行：全轨迹 = C++（已提交 49c7cd1 起保持）
-  unknowns 31/101/171/291/386/526/1006/1386/1611/2371/4036 = C++
-  marked   20/25/40/25/50/155/115/80/270/530               = C++
-  it2 global_max=4.176412896211e-3（= C++）
+### 本轮完成（commit `a015af8`，5 files +470）
+1. **方向 A（用户指定）**：`rebuild_partition_nc` Quad4 `new_elem_gid` 的 child 序从「本地遍历计数」改为**几何 Hilbert child index**（`QUAD_HILBERT_CHILD_ORDER[state]` 中 slot 的位置；state 由全局 coarse 元素表按 gid 排序算 `init_root_states`）→ (new_elem_gid, j) 排序跨 rank 一致 = MFEM SFC 序
+2. **creation_order（MFEM UpdateVertices 节点创建序，跨轮传播）**：
+   - `rebuild_partition_nc` 步骤 8：**全局首次出现 (elem_gid, corner j) 归并（allgather min）后按序追加**——每 rank 一致的序值（此前「本地 scan + or_insert 归并」保留的是某 rank 的本地计数，非全局位置 → 同一物理节点跨 rank 序值不同 → RT0 约束权重反号）
+   - `ParRefinedMesh.creation_order` + 新 `par_refine_marked_ordered`（旧 API 不动）；pex6 每轮传递
+3. **par_l2zz slave sign 用创建序**：`lo == pa.min(pb)`（local id 序）跨 rank 翻转 → 改用粗边端点的 creation_order 比较（np1 上 200/200 条与旧逻辑完全一致）
+4. **from_edge_space_ordered**（dof_partition.rs）：RT0 dof 定向（`sign_correction`）的 global_sign 改用创建序比较——**rebuild 后 gid 序 ≠ MFEM 创建序 → np2 RT0 解整体反号 → eta/marking 全错**；`new_for_edge_space_ordered`（par_space.rs）给 par_l2zz 用，其它调用者（pex4 等）走默认 gid 序不变
+5. **apply_hanging_constraints 约束权重 = 物理系数 c 直接**（去掉 per-rank `sign_s·sign_m` 乘积——它依赖「哪个元素先看到 dof」的本地选择，跨 rank 翻转）；**slave recover 补 `S_s·S_m`**（本地基恢复：x_s_dm = c·S_s·S_m·x_m_dm；np1 的 S=1 恰好对，np2 的 S_m=-1 漏乘 → 悬挂边邻元 η 6.9e-3 vs 2.9e-4）
 
-np2 并行：it0-it3 unknowns 全对齐（31/101/171/291），it2 marked=40 = C++
-  it3 marked=1 vs C++/np1 25   ← 遗留深水区（本轮唯一剩余问题）
-  it3 global_max≈4.074e-3 vs np1 2.2297e-3（差 1.8 倍）
-```
+### 调试经验（勿丢，全是 dump 实证）
+- **无约束对照**（PEX6_NO_FLUX_CONSTRAINT，已删）：无约束 np2≈np1（global_max 4.2183e-3）→ 问题 100% 在约束路径
+- **约束后 diag/rhs 逐位一致但 x 差 5 倍** → 差异在 off-diag（行和/COO dump 定位）；**行和一致但 eta 差** → 差异在 slave recover（元素级 eta dump by 质心定位）
+- np1/np2 的 **gid 空间不同**（rebuild 依赖 rank 数）→ 跨 np 对比必须用**物理坐标**（HANDOVER 旧教训再次应验）
+- PEX6_TRACE 门控的调试 dump 已全部清理；PEX6_TRACE 原有功能（par_repartition trace）保留
 
-快速验证命令（md 291 只跑到 it3，np2 约 60-90s）：
-```bash
-./target/release/examples/mfem_pex6_parallel_amr.exe --ranks 2 -m data/star.mesh -md 291 -no-vis
-# 期望：unknowns 31/101/171/291 + marked 20/25/40/1（it3 遗留）
-```
+### 验证
+- 单 rank 基线（用户要求）：`PEX6_FORCE_PAR_L2ZZ=1 ... --ranks 1 -md 171` → it2=40（31/101/171 + 20/25/40）
+- np1 无回归：-md 300 → 20/25/40/25；np2 验收：-md 3000 → **it2=40 且 it3=25**（unknowns 31/101/171/291 全对齐）
+- fem-parallel 214/0、fem-assembly 498/0、fem-mesh 315/0 全绿
+- commit `a015af8`（分支 ex4-ads-preconditioner）**已 push**；根仓库 `675dac7`（HANDOVER.md）已 push
 
-## 提交历史
+---
 
-| commit | 内容 | 推送 |
-|--------|------|------|
-| e227741 | PᵀKP/Pᵀf 悬挂约束跨 rank 归并（H1 正确性基础） | 已推 |
-| 49c7cd1 | 串行 l2_zz 改 PᵀAP 真解消元 → np1 全轨迹对齐 C++ | 已推 |
-| **cf924a3** | par_l2zz 改 PᵀKP 跨 rank + recover 系数修复 + 全局悬挂边 | **未推（网络故障，先 `git push`）** |
+## 📊 当前比对全景（新 session 从这里开始）
 
-## 已确认的关键机制（参考 MFEM 源码）
+### 一句话启动词（新 session 用）
+> 读 HANDOVER.md，继续 **pex6 np2 it4+ 分岔**（这是 6 个待查 pex 里最后一个未对齐点）：先跑全量回归确认 `a015af8` 后 6 pex 无回归（`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`），再按下方 it4 排查线索推进。
 
-1. **MFEM RT0 悬挂 flux 约束符号** = `slave 边低端点 == master 边低端点`（全局节点编号序），
-   等价于 `GetTransferMatrix`（`fe_base.cpp` `LocalInterpolation_RT`）的几何投影。
-2. **MFEM 节点编号**（`ncmesh.cpp:2478` `UpdateVertices`）：SFC 序（`leaf_sfc_index`=Hilbert）
-   扫描 leaf 元素，元素内节点 j=0..3 **首次出现**编号新节点。顶层（原始）节点保持 0..N0-1。
-3. **MFEM RT0 dof2nk**（`fe_rt.cpp` 构造函数推导）= `[0,1,0,3]`（非 [2,1,2,1]）；
-   `nk` 表 = `[(0,-1),(1,0),(0,1),(-1,0)]`。几何法向投影路径需此表（当前未用）。
-4. 行替换法（slave 行 x_s−c·x_m=0）**非等价**于 PᵀAP：丢 A_sm/A_ss/b_s 折叠贡献（串行 it3: 40 vs 25）。
-5. 串行 PᵀAP（`l2_zz.rs` 344 行起）：A_true=PᵀAP、b_true=Pᵀb、x=Py、slave 链式展开。
-   par 用 `apply_hanging_constraints`（`par_csr.rs` 273 行）= PᵀKP/Pᵀf 跨 rank 折叠 + identity 行。
-   **recover 系数必须从 c0（±0.5）开始**（不是 1.0）——cf924a3 修的关键 bug。
+### 已对齐（全部确认过，勿重做）
+- **串行 14**：ex1-ex10, ex14, ex22, ex23, ex25, ex26（DOF 完全匹配）
+- **并行 18**：pex1-5, pex7, pex10, pex12, pex13, pex16, pex17, pex20, pex22, pex26, pex29, pex31, pex32, pex33, pex35, pex36, pex39, pex40, pex41（np1=np2=np4=C++ np1）
+- **6 个待查 pex（6/8/9/28/34/37）2026-08-29 全部完成**；**pex6 it0-it3 现已全对齐**（np2 31/101/171/291 + 20/25/40/25）
+- 全部 10 个并行 AMR/弹性示例 np1=np2=np4 一致（pex41/28/18/15/10/17/19/21/37/13）
 
-## it3 遗留根因（本轮精确定位，唯一剩余问题）
+### 剩余工作（按可推进性排序）
+1. **pex6 np2 it4+ 分岔**（唯一未对齐比对点）：
+   - 现象：np2 -md 3000 it4 起 unknowns 380 vs np1 386、marked 3 vs 50（np1 it4=50/350）
+   - 线索：it4 网格 = it3 标记（25 个）refine 后 → 多级悬挂更深；`detect_hanging_quad` 多级检测已知问题（旧 HANDOVER 37 行）
+   - 排查顺序：① np2 it4 网格物理坐标 vs np1（gid 空间不同，必须物理坐标）；② it4 H1 u 物理对比（u 一致 → RT0 二级悬挂 slave 约束不完整；u 不一致 → detect_hanging_quad 漏检）；③ slave_deps 每 master 应 2 slave 检查
+   - 注意：np1 自身 it3+ 也曾偏离 C++（旧结论 unknowns 291 vs 321），当前 np1 it3=25 已与 C++ 对齐——**先确认 np1 it4=50 是否即 C++ 参考**再修 np2
+2. **全量比对回归**：pex6 改动（a015af8）后重跑 6 pex 确认无回归（命令见下）
+3. 历史遗留（低优先，勿优先做）：ex15 收尾已接受差异（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
 
-np2 it3 marked=1 vs C++ 25：RT0 slave sign 用**本地节点 id 序**（`lo==pa.min(pb)`），
-但 np2 的本地 id 序 ≠ MFEM 创建序（partition 重排累积）→ it2 恰好对（40）、it3 错（二级悬挂）。
+### 环境 / 工具 / 纪律（勿丢）
+- 分支 `ex4-ads-preconditioner`（fem-rs），已 push；根仓库 main 已 push
+- C++ 参考：串行 `~/bin/exN_cpp`；并行 `~/bin/exNp_cpp`（**np>1 WSL 段错误，只用 np1**）
+- 重编译纪律：`cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
+- 比对工具：`examples/compare/compare.sh`（串行）、`examples/compare/pex_compare.sh`（并行）；配置 `examples/compare/examples.json`；比对缓存 `tmp/cmp/*.log`
+- extract_dof 纪律：**含数字的变量名模式（X0/L2/H1）必须用 sed 截取**，`grep -oE "[0-9]+"` 会先匹配变量名里的数字
+- pex6 调试：`PEX6_TRACE=1`（par_repartition trace）；`PEX6_FORCE_PAR_L2ZZ=1`（单 rank 强制并行 RT0 L2ZZ 做对照）
+- 跨 np 对比必须物理坐标（np1/np2 gid 空间不同）
+- 验收标准 = **结果一致（marked 数/轨迹/unknowns），非逐位**（用户明确）
 
-尝试把 rebuild 的新节点 gid 改为 MFEM 序（按 `(new_elem_gid, 元素内 j)` 全局归并排序），
-**失败原因（关键发现）**：
-- `new_elem_gid`（`par_amr.rs` 341-413 行）的 child 序 k 是 **每 rank 本地 refined 输出序**
-  （`child_k[pg]` 计数器），**跨 rank 不一致**：同一物理 child 在不同 rank 的 new_elem_gid 值不同。
-  实证：单 rank 物理边 gkey=(0,11) 的 key=(0,1)，np2 的 key=(0,0)。
-- 因此 `(new_elem_gid, j)` 排序**不是全局一致的 MFEM SFC 序** → gid sign 在 np2 错
-  （单 rank gid sign it2=40 对因为单 rank partition 是 identity；np2 错 it2=28）。
+---
 
-### 下一步正确方向（二选一，推荐 A）
+## 🧩 2026-08-29 深夜（收尾三十四·终）：pex6 根因突破——PᵀKP/Pᵀf 悬挂约束跨 rank 归并（np2 it2 marked 40 对齐）
 
-**A. child 序 k 用几何确定的 Hilbert child index**（跨 rank 一致，推荐）：
-- quad 4-split 的 4 个 child 有固定 Hilbert 序（child 0..3 对应确定象限/几何位置）。
-- 在 `rebuild_partition_nc` 341-413 行，`child_k[pg]` 计数器改为**按 child 中心坐标/几何确定
-  Hilbert index（0..3）**，而非"本地 refined 输出中出现顺序"。
-- 这样 `new_elem_gid = prefix[parent_gid] + Hilbert_child` 对同一物理 child 跨 rank 一致，
-  `(new_elem_gid, j)` 排序 = 全局 MFEM SFC 序。
-- 实现后验证：单 rank 强制 par 的 gid sign it2=40（当前已对）+ **np2 it2 也应 = 40**（当前 28），
-  it3 marked 应 → 25。
-- 注意：NCStateQuad::refine 输出序声称是 Hilbert 序（341 行注释），但每 rank 的"出现顺序"
-  受本地 refine 元素集影响 → 不能直接用出现计数，必须几何确定。
+### 一句话启动词
+> **pex6 np2 it2 marked 12 vs np1 40 的真根因已修复**（commit `e227741`）：不是 RT0 悬挂 flux（flux 连续自动满足，约束非主因），而是 **`apply_hanging_constraints` 的 Pᵀf/PᵀKP 跨 rank 展开丢失**——slave c（r0 owned）的 ghost parent（r1）贡献被 `d < n_owned` 检查跳过 → it2 H1 u 物理偏差 ~0.5% → L2ZZ flux 偏 → marked 12。修复后 np2 it2 **global_max=4.218323e-3 与 np1 逐位一致、marked 40/155**。**下一步：it3+ 多级悬挂**（np2 it3 marked 6 vs np1 25）。
 
-**B. 实现全局 Hilbert SFC**（完整网格 leaf_sfc_index）：改动大，A 失败再考虑。
+### 本轮完成（commit `e227741`，4 files +445）
+1. **`par_csr.rs` apply_hanging_constraints 跨 rank 归并**（核心修复）：
+   - Pᵀf：slave 的 ghost-parent 贡献经 `alltoallv_bytes` 发给 owner rank 累加（对齐 MFEM true-dof ParallelAssemble 语义）
+   - PᵀKP：ghost 行的矩阵条目同理发送给 owner 折叠
+2. **`par_l2zz.rs` RT0 悬挂 flux 约束**：细边 flux dof = ±0.5×粗边 master（flux 连续），partition 序施加约束行 x_s−c·x_m=0（含 sign 修正）——已实现但**非主因**（串行下 flux 连续自动满足，np1 无约束也 marked 40）
+3. **`par_amr.rs` 方向①**：`rebuild_partition_nc` 返回悬挂边表（global_mid → Vec<(a,b,mid)>），ParRefinedMesh 携带，`par_repartition_with_hanging` 用 pass2c 纯拓扑 closure（替代几何中点检测，规避粗元素节点不在 node_info 的死锁）
+4. **pex6**：传 hanging_edges 给 par_repartition_with_hanging
 
-### 关键验证脚本（调试用）
+### 重要教训（本会话验证）
+- **np1（--ranks 1）与 np2 的 elem/node gid 空间不同**（rebuild_partition_nc 的 gid 分配依赖 rank 数）——跨 np1/np2 对比必须用**物理坐标**（`uc(x,y)` dump），(gid,li) 对比无效
+- np1 串行 l2_zz（无 RT0 悬挂约束）marked 40 = C++ 有约束——**flux 连续自动满足**（串行下 slave 值天然 = ±0.5×master）
+- it0 u 完全一致、it1 eta 完全一致——分岔从 it2（首个有悬挂轮）开始
+- RT0 质量矩阵 diag np1==np2（190 单侧/215 双侧）——diag 不是问题，off-diag/RHS 才是
 
-```bash
-# 单 rank 强制 par_l2zz（隔离跨 rank，partition identity → gid=本地 id=MFEM 序）
-PEX6_FORCE_PAR_L2ZZ=1 ./target/release/examples/mfem_pex6_parallel_amr.exe --ranks 1 -m data/star.mesh -md 171 -no-vis
-# 期望 it2 marked=40、global_max=4.176412896210e-3（= 串行）——当前已满足（PᵀKP 数学正确）
+### 遗留深水区
+- **it3+ 多级悬挂**：np2 it3 marked 6 vs np1 25（it2 refine 后 275 元素网格含二级悬挂）。**注意区分两个层次**：
+  1. **np1 自身 it3+ 也偏离 C++**（unknowns 291 vs 321 差 ~30，`detect_hanging_quad` 多级检测已知问题，HANDOVER 旧段 37 行）——先确认 np1 it3 的 marked 25 是否就是 C++ 参考（np1 串行 l2_zz 只保证 it0-it2 逐位对齐）
+  2. **np2 vs np1 的 it3 分岔**（marked 6 vs 25，it4 网格 293 vs 350）——用物理坐标 `uc(x,y)` dump 先查 it3 的 H1 u 是否物理一致：
+     - u 一致 → 问题在 RT0 悬挂 flux 约束对**二级悬挂**（悬挂边的父边再细分）的 slave 检测/约束不完整
+     - u 不一致 → 二级悬挂约束（slave 的 parent 本身也是 slave，`expand_dof` 链式展开 depth 限制 20 应够）或 `detect_hanging_quad` 漏检二级悬挂
+- 排查建议顺序：① np1 it3 marked 25 vs C++ 对照（C++ ex6p 无 marked 打印，从 unknowns 轨迹推断 it3 标记数）；② np2 it3 物理坐标 u 对比；③ 二级悬挂约束的 slave_deps 是否完整（每 master 应 2 slave）
+- 旧的"RT0 悬挂 flux"深水区（38 行起）已解决/降级：owner 缺元素由方向① ghost 修复 + 约束实现覆盖；半贡献 diag 检查（62 行）已过时
 
-# 对比 it3 global_max（np1 vs np2）
-PEX6_TRACE=1 ./target/release/examples/mfem_pex6_parallel_amr.exe --ranks 2 -m data/star.mesh -md 291 -no-vis
-# 但注意：PEX6_TRACE 的 PEX6_TH 打印已删（在 pex6 261 行附近），需临时加回
+### 验证
+- pex6 np2 it2：global_max=4.218323e-3（与 np1 逐位）、marked 40/155
+- 6 pex（2/6/9/28/34/37）np1=np2=np4=C++ 全 OK；fem-parallel 214+ 单测全绿；**零新增警告**（与 HEAD 的 28 个一致）
+- commit `e227741` **已 push**（ex4-ads-preconditioner 分支，b08b50e..e227741）
 
-# 加/删调试打印的位置：
-#   par_l2zz.rs: slave_deps 检测后（PAR_SLAVES）、recover 后（PAR_RECOVER）
-#   l2_zz.rs: 串行 slave_deps（SER_SLAVES）、PᵀAP 解后（SER_SLAVE_FLUX）
-#   par_amr.rs: edge_gid 分配（REBUILD_MFEM_ORDER/MFEM_GID_ORDER——注意该方案已回滚）
-#   pex6: hang_global 归并后（PEX6_HANG_GLOBAL）、threshold 计算处（PEX6_TH）
-```
+### 调试利器
+- `PEX6_TRACE=1` → par_repartition owned/ghost + hanging closure 计数
+- 物理坐标对比：pex6 内 `uc(x,y)` dump（已移除，需要时重加）
+- it2 H1 rhs 对比：np2 修复后 211/211 与 np1 一致（修复前 2 个 parent 不同）
 
-## 环境与坑
+---
 
-- 工作目录 `C:\Users\lilu\works\fem-pro\fem-rs`（WSL 视角 `/mnt/c/Users/lilu/works/fem-pro/fem-rs`）。
-- 环境无 python（用 node 写对比脚本）。`cargo build --release --example mfem_pex6_parallel_amr` 有时慢（后台跑）。
-- np2 完整跑 `-md 3000` 会超时（it4+ 慢）；调试用 `-md 171/291/400`。
-- **np1/np2 gid 空间不同**：跨 np1/np2 对比必须用**物理坐标**（uc(x,y)），勿用 (gid,li)。
-- 临时脚本/产物放 `tmp/` 或 `output/`，勿放项目根目录。
-- C++ 端 ex6p.cpp 有调试 patch（CXX_MARKED/CXX_U）——只在重编参考时需要；参考二进制已编译好。
-- MFEM 源码参考（WSL）：`/home/quan/mfem49_mpi/fem/fe/fe_base.cpp`（GetTransferMatrix）、
-  `fem/fe/fe_rt.cpp`（RT0 dof2nk）、`mesh/ncmesh.cpp`（OrientedPointMatrix:3949、UpdateVertices:2478）、
-  `fem/fespace.cpp`（约束构建 944-1270）。
+## 🧩 2026-08-29 晚（收尾三十四·续）：pex6 深水区——H1 约束并行施加已修复，RT0 悬挂 flux 根因确认
 
-## 测试
+### 一句话启动词
+> **pex6 np2 的 H1 悬挂约束并行施加已修复**（np2 解 u 与 np1 逐位一致，0.0 diff；commit `b08b50e`）。**np2 it2 marked 12 vs np1 40 的精确根因已确认：不是 H1 约束，而是 RT0 L2ZZ 的跨 rank 悬挂 flux 组装**（owner 本地缺悬挂边另一侧元素 → RT0 质量矩阵 diag 半贡献 3.505e-1 vs np1 7.01e-1）。全量 6 pex 比对无回归。**下一步：RT0 悬挂 flux**（详见下），勿重复 exchange 方案（已证冗余）。
 
-```bash
-cargo test --release -p fem-assembly -p fem-parallel -p fem-mesh   # 全绿（502+36+60 等）
-SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6               # OK (dof=31 三 np 一致)
-```
+### 本轮完成（commit `b08b50e`，5 files +620）
+1. **ghost 层悬挂边 closure**（`crates/parallel/src/par_amr.rs` pass2b）：
+   - 细元素与粗元素共享**悬挂边**（细边端点是粗边中点，`midpoint_node_of`/`edge_partner_for_mid` 坐标匹配 1e-9）→ 粗元素（含悬挂节点 parents DOF）进 ghost 层
+   - pass2b 在 **phase7/8 之后**跑（node_info 完整时）；to_scan 含 **owned 元素**（owned 细元素的悬挂边也要识别跨 rank 粗元素）
+   - 修复效果：np2 的 H1 解 u 与 np1 **逐位一致**（之前 np2 每 rank 只施加本地检测的 23/24 条约束，PᵀKP 列展开缺 ghost 悬挂列 → 解错）
+2. **`shares_hanging_edge`**（`par_partition.rs`）：extract_submesh 路径的一般化（pex6 不经过此路径，无回归，保留）
+3. **`par_l2zz.rs`（新）**：并行 RT0 L2 投影 ZZ 估计器——本地组装（同串行逐位数学）→ permute_csr/permute_vec → `ParCsrMatrix`/`ParVector` → `par_solve_pcg_amg`（rtol 1e-12）→ 恢复 dm 序 → 每元素误差。**np1 下与串行逐位一致**（global_max 4.218323e-3、marked 40）
+4. **pex6**：`np>1` 用 `par_l2zz`（np1 保持串行已验证路径）
 
-## 提交时注意
+### 遗留深水区：RT0 跨 rank 悬挂 flux（np2 it2 marked 12 vs np1 40）
+- **决定性实验**：np2 并行全局投影（5.558389e-3）≈ np2 每 rank 局部投影（5.558268e-3），都 ≠ np1 串行（4.218323e-3）→ **np2 的 RT0 空间（每 rank 局部 HDivSpace 合并）在悬挂边与 np1 完整空间不等价**，不是 from_local_matrix/求解器问题
+- RT0 质量矩阵跨 rank 悬挂边 diag=3.505e-1（半）vs np1 7.01e-1（完整）→ **owner 本地缺另一侧元素**（粗元素或对侧细元素未进 ghost）
+- pass2b 只触发 1-3 个 closure（40 个悬挂约束大部分粗元素未识别）——**几何检测死锁**：识别粗元素需其节点在 node_info，请求节点需先识别粗元素
+- MFEM 参考：L2ZZ 的 flux_fes = ParFiniteElementSpace(RT0) 无悬挂 flux 约束（独立 dof），并行在 **true-dof 空间**求解（ParallelAssemble 归并跨 rank dof）。Rust 的 from_local_matrix 行分块对普通跨 rank 边正确（pex4 验证），**NC 悬挂边不等价**
+- **方向**：① 从 refine 的父子关系（NCStateQuad）传播 ghost（MFEM NCMesh 式），而非几何中点检测；② 或 RT0 质量矩阵跨 rank 归约（accumulate 对 A 的行）。**勿用 exchange 方案**（PEX6_NO_EXCHANGE=1 时 np2 解仍对齐，ghost closure 才是关键）
+- 已试过 pass2b fixpoint 重扫（review should-fix 建议），**性能退化**（it1 卡死）已回滚——保持单遍
 
-- cf924a3 未推送（github 网络故障：`Failed to connect to github.com port 443`）——**先 `git push`**。
-- 不提交生成的 mesh/gf/sol 输出文件。
+### 验证
+- `SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`：6 个全 OK
+- np1 无回归：31/101/171 + marked 20/25/40（与 C++ 对齐）
+- commit `b08b50e` **已 push**（`origin/ex4-ads-preconditioner`，ahead 0）
+
+### 调试利器（本次会话积累，新 session 可复用）
+- `PEX6_TRACE=1 ./target/release/examples/mfem_pex6_parallel_amr.exe --ranks 2 -md 3000 -no-vis` → par_repartition 的 owned/ghost 数 + hanging closure 计数（trace 门控，默认关）
+- 悬挂约束/ghost 层状态检查：看 `par_amr.rs` pass2b 的 `hanging_fc_count` trace；RT0 diag 对比：np2 悬挂边应 = 7.01e-1（现 3.505e-1 半贡献即 bug）
+- 环境变量（pex6 内）：`PEX6_SERIAL_L2ZZ=1`（np>1 强制每 rank 串行局部投影做对照）；`PEX6_NO_EXCHANGE=1`（跳过约束交换，已证冗余）
+
+---
+
+## 📦 2026-08-29（收尾三十四·最终）交接：6 个待查 pex 全部完成 + pex6 L2ZZ 估计器 + 并行悬挂约束
+
+### 一句话启动词
+> **全部 6 个待查 pex（pex6/8/9/28/34/37）比对通过**（np1=np2=np4=C++ DOF 一致）+ 串行 NO_DOF 收尾（ex27/36 修复 OK）。pex6 的 **it0-it2 与 C++ 逐位对齐**（unknowns 31/101/171 + 标记 20/25/40），np1/np2 不 panic，fem-parallel 214/0。**剩余 2 个结构性深水区**：① 并行 L2ZZ（np2 it3 起偏离：每 rank 局部 RT0 投影 ≠ C++ 全局投影）；② 多级悬挂检测（np1 it3 起 unknowns 差 ~30）。已排除 3 个方案（勿重复尝试）。
+
+### 本轮完成的工作（fem-rs 分支 `ex4-ads-preconditioner`，commits `c9ef084..75d82ce` 已全部 push）
+1. **pex9**（5120）：C++ ex9p 默认 `order=3` + `ser_ref_levels=2`；`Mesh(filename,1,1)` 的 refine 参数对 quad 网格（meshgen=0）**不生效** → Rust 默认 `-o 3 -r 2`
+2. **pex8**（X0=20801）：ex8p **无 -rs/-rp**（ref_levels 内部固定 `floor(log(5000/NE)/log2/dim)`，star.mesh→3 次）→ 脚本 pex8 分支 C++ 不传 refine；extract_dof 加 "X0 = " 模式（**sed 截取**，`grep -oE "[0-9]+"` 会先匹配 "X0" 里的 0）
+3. **pex28**（2178）：C++ ex28p 有 **par_ref_levels=1**（256→1024 quad）→ Rust 补 1 次 refine
+4. **pex37**（25090）：ex37p 自建 `MakeCartesian2D(3,1,QUAD,3.0,1.0)`（无 -m），默认 r5/o2 → Rust 改自建 + 默认对齐
+5. **pex34**（776）：ex34p 硬编码相对路径 mesh（无 -m）→ 脚本加 `cpp_cd`（从 /home/quan/mfem49/examples 运行）；"段错误"实为 -m 参数错误；extract 加 "Size of linear system"（置于 DOFs: 前防 "SubMesh H1 DOFs: 155" 误匹配）
+6. **pex6 L2ZZ 估计器**（核心库 `crates/assembly/src/postproc/l2_zz.rs`）：
+   - 1:1 移植 MFEM `L2ZZErrorEstimator`：**Q1 双线性梯度场**（quad 解双线性，非常数）+ RT0 L2 投影（质量矩阵+载荷，PCG 1e-12）+ **L1 元素误差**（`local_norm_p=1` 默认：η=∫|σ−Qσ|₂ dx，无 sqrt）
+   - 标记策略：C++ `SetTotalErrorFraction(0.7)` + 默认 total_norm_p=∞ = **threshold 模式**（η>0.7·max），**不是 Dörfler 累积**
+   - 参考域：MFEM quad 全用 **[0,1]²**（intrules 1D 点 0.2113/0.7887；RT0Quad Nodes [0,1]²；VectorFEMassIntegrator intorder=1+1+1=3 → 2 点/维）
+   - **3 个实现坑（勿再踩）**：① `gx` 公式 J^{-T} 用 `j10` 不是 `j01`；② quadrature(1) 是 1 点（中点插值 → eta 恒 0），quadrature(2) 才是 2 点/维；③ L2 范数会把 eta 放大 ~√∫ → 必须 L1
+   - 验证：it0/it1 eta 与 C++ **逐位一致**（0.0295798/0.0279303/0.0384648）
+7. **pex6 并行悬挂约束**（提交 41485da）：
+   - **根因**：C++ NC 网格 H1 P1 true dofs 排除悬挂节点（155 元素 171 vs Rust 原始 211 = 40 悬挂）；Rust 未施加约束 → 悬挂 dofs 独立求解（解错）
+   - `ParCsrMatrix::apply_hanging_constraints`（par_csr.rs）：PᵀKP/Pᵀf 并行版——COO 重建 n_local×n_local + **`from_local_matrix` 方形 diag**（partition 版非方形 diag 崩 csr_spmm——pex33 教训）；约束 id 是 node id 需 `dof_part.permute_dof`
+   - `ParRefinedMesh.constraints` + `remap_constraints`（par_amr.rs）：NCState refine 约束（旧 id）→ 重排后 local id（`remap[old]=new`）
+   - `detect_hanging_quad`（amr_inner.rs）：**一级 full-edge 检测**（父边在 full_edges 里的中点）——**跨轮 NCStateQuad 在 np2 分区重建下 leaf_order 失同步 panic**，必须每轮 fresh + 拓扑检测
+   - pex6：组装后施加 → 求解后 recover 悬挂值（permute 索引）→ unknowns 打印 true dofs（n_global − owned 悬挂 allreduce）→ 细化后 **repartition 之后** detect（顺序 bug！提前 detect 留 stale id）→ **按 dp.n_total_dofs() 过滤 extra-ghost**（Mesh::n_nodes 含 extra ghost 不能用）
+   - 成果：np1 it0-it2 对齐 C++（31/101/171）+ 标记对齐（20/20、25/80、40/155）；np1/np2 不 panic
+8. **串行 NO_DOF 收尾**：ex27（311→302：unknowns 打印移到 periodic 约束后 = n−pairs.len()）、ex36（dof=2→320：extract "L2" 里的 2 bug）修复；ex28(578)/ex30(590)/ex31(165)/ex33(20096)/ex35(655) OK；**ex35 无串行 C++ 参考**（mfem49 只有 ex35p.cpp，ex35p_cpp 本环境 LOBPCG 失败，Rust 与已验收 pex35 一致）
+9. **脚本修复**：pex_compare.sh extract 加 "dofs = "（pex9）/"Size of linear system"（pex34）/"X0 = "（pex8，sed 截取）；pex6 配置加 `-md 3000`（C++ ex6p 默认 -md 100000 极慢卡死）；compare.sh 的 L2/SubMesh H1 模式改 sed 提取
+
+### ⚠️ 深水区（结构性工程，非示例修复）——含已排除方案
+| 问题 | 状态 | 线索 |
+|------|------|------|
+| **并行 L2ZZ**（np2 it3 起偏离：marked 12 vs np1 40） | 未做 | np2 unknowns it2 已对齐（171），差异纯在 eta（每 rank 局部 RT0 投影 ≠ C++ 全局投影）。需跨 rank RT0 质量矩阵/载荷/PCG（ParAssembler HDiv 组装 + par_solve_pcg_amg），且 **RT0 在 NC 网格的悬挂 flux 连续性处理未知** |
+| **多级悬挂检测**（np1 it3 起 unknowns 差 ~30） | 已排除 3 方案 | ① 纯拓扑+坐标无法区分"普通直线顶点"与"二级悬挂"（几何相同）；② 跨轮 NCStateQuad np1 完美（it3 291/25）但 np2 leaf_order 失同步；③ 坐标累积 carried（XOR 半边存活判断）误删（悬挂 half-edge 被更深细分时 (m,a) 消失 → 误判 resolve，it3 331 更差）——**需层级历史（NCStateQuad gid-based 改造）或并入并行 L2ZZ** |
+
+### 环境/工具/纪律（勿丢）
+- 分支 `ex4-ads-preconditioner`，已 push；根仓库 main 已 push
+- C++ 参考：串行 `~/bin/exN_cpp`；并行 `~/bin/exNp_cpp`（**np>1 WSL 段错误，只用 np1**；ex34p/ex28p/ex37p/ex36p 无 -m 需特殊处理）
+- 重编译纪律：`cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
+- extract_dof 纪律：**含数字的变量名模式（X0/L2/H1）必须用 sed 截取**，`grep -oE "[0-9]+"` 会先匹配变量名里的数字
+- 比对缓存：`tmp/cmp/*.log`（pex_compare.sh 用**硬编码 PEX_MESH 表**，不是 examples.json！）
+
+### 验证（复用命令）
+- `SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`（6 个全 OK）
+- `bash examples/compare/compare.sh ex27 ex36`
+- 回归：`cargo test -p fem-assembly --lib`（498 绿）、`cargo test -p fem-parallel --lib`（214 绿）、`cargo test -p fem-mesh --lib`
+- pex6 单跑：`./target/release/examples/mfem_pex6_parallel_amr.exe --ranks 1 -r 0 -md 3000 -no-vis`
+
+---
+
+### 一句话启动词
+> **串行 14 个 + 并行 18 个示例已验证与 C++ MFEM 一致**（DOF/能量/特征值匹配），比对工具已固化（`examples/compare/compare.sh` 串行 + `pex_compare.sh` 并行）；剩余 6 个 pex 待查（pex6/8/9/28/34/37）+ 若干串行 NO_DOF 需逐个人工确认。网络断开未能 push（本地 10+ commits 待推）。
+
+### 本轮完成的工作（本地 commits，**未 push**，网络断开）
+1. **比对工具固化**：
+   - `examples/compare/compare.sh`（串行比对，Git Bash）：42 示例配置、多种 DOF 格式提取、C++ 二进制自动查找、`-r`→`-rs/-rp` 转换、ex7/29 特殊参数
+   - `examples/compare/pex_compare.sh`（并行比对）：np1/np2/np4 一致性 + np1 vs C++ np1；`SKIP_NP4=1` 跳过慢 np4；pex7/20/29/33/36 特殊参数
+   - `examples/compare/examples.json`：42 串行 + 35 并行配置
+   - 用法：`bash examples/compare/compare.sh ex1 ex2` / `SKIP_NP4=1 bash examples/compare/pex_compare.sh pex1`
+2. **示例修复**（panic 消除）：
+   - ex21：`face_dofs_p2` 兼容 NC 网格（扫描所有元素找 owner，assembler.rs）
+   - ex32：默认 mesh → `fichera.mesh`；ex36：`-m` 选项跳过；ex13：默认 mesh → `beam-tet.mesh`
+   - **pex33 回归修复**：回退 `from_local_matrix_with_partition` → 恢复 `from_local_matrix`（diag 保持方形），修复 np1/np2 崩溃（csr.rs 断言）
+3. **已验证一致**：
+   - **串行 14**：ex1-ex10, ex14, ex22, ex23, ex25, ex26（DOF 完全匹配）
+   - **并行 18**：pex1-5, pex7, pex10, pex12, pex13, pex16, pex17, pex20, pex22, pex26, pex29, pex31, pex32, pex33, pex35, pex36, pex39, pex40, pex41（np1=np2=np4=C++ np1；pex20 能量逐位一致 1.00204/0.0174915）
+
+### ⚠️ 待查（6 个 pex + 串行 NO_DOF）
+| 示例 | 问题 | 线索 |
+|------|------|------|
+| pex6 | AMR 轨迹差异（Rust 101/217/433/... vs C++ 31/101/171/291/...） | Dörfler 标记/加密策略细节；记忆「pex5-9」已修复死锁，轨迹 1:1 需再核 |
+| pex8 | np2/4 太慢（DPG 大系统 -r 5） | 先跑 np1 确认 20801 一致，再单独跑 np2 |
+| pex9 | `-r` 参数映射（Rust r=2=768, r=3=3072 vs C++ rs=2=5120） | 记忆「pex5-9」确认已 1:1（np1/np2 一致、K diff=0），纯脚本映射问题 |
+| pex28 | 网格构建差异（Rust 578 vs C++ 2178） | Rust `build_trapezoid_mesh` vs C++ ex28p 自建网格；动态 ref_levels 公式 |
+| pex34 | C++ ex34p 在 WSL 段错误 | 需在 WSL 单跑诊断（mpirun -np 1 ex34p_cpp 崩） |
+| pex37 | 网格来源差异（Rust beam-tri.mesh vs C++ 自建） | ex37 记忆：`-r 5`、Bernstein 基仅 Quad4、参考 tools/ex37_ref/ |
+| 串行 NO_DOF | ex12/27/28/30/31/32/33/34/35/36 等 | 多为输出格式或 C++ 参数差异，逐个看 `tmp/cmp/*_cpp.log` 适配 extract_dof |
+
+### 环境/工具/纪律（勿丢）
+- 分支 `ex4-ads-preconditioner`，**本地 commits 未 push**（github.com 443 连不上，恢复后 `git push origin ex4-ads-preconditioner`）
+- C++ 串行参考：`~/bin/exN_cpp`（WSL）；并行：`~/bin/exNp_cpp` + `mpirun --allow-run-as-root -np 1`（**np>1 在 WSL 段错误**，只用 np1）
+- Rust 示例：`./target/release/examples/mfem_exN_xxx.exe`（Git Bash 直接运行）
+- 比对结果缓存：`tmp/cmp/exN_rust.log` / `exN_cpp.log` / `pexN_r1.log` 等
+- 重编译：`cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
+
+### 验证（复用命令）
+- 串行：`bash examples/compare/compare.sh ex1 ex2 ex3`
+- 并行：`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex1 pex2`
+- 单个 pex 调试：`./target/release/examples/mfem_pexN_xxx.exe --ranks 1 -m data/xxx.mesh -no-vis`
+- C++ 参考：`wsl -e bash -c 'mpirun --allow-run-as-root -np 1 ~/bin/exNp_cpp -m /home/quan/mfem49/data/xxx.mesh -no-vis'`
+
+---
+
+## 📦 2026-08-27（收尾三十三）交接：pex32/pex13 空空间问题解决（AME 路径 1 步收敛）+ pex26 -or 2 三层收敛
+
+### 一句话启动词
+> **全部并行示例运行通过**（35 个 pex 示例 np1 全绿）。**pex32/pex13 空空间问题已解决**（AME 路径 1 步收敛），**pex26 -or 2 三层 np1/np2/np4 收敛**。无剩余可推进的并行示例问题。
+
+### 完成的工作（本 session 8 个 commit 已全部 push）
+1. **pex26 -or 2 三层 np2/np4 收敛**（2 个核心库根因修复 + 1 个示例修复）：
+   - `dof_partition.rs`：P3+ 边 dof `dof_key` 冲突修复（中点 GLL 节点 da==db 陷阱，改用沿边参数 t 排序序号）
+   - `par_csr.rs`：`eliminate_diag_symmetric_with_ghost` 新增（同时清 ghost 边界列，原函数委托它向后兼容）
+   - 示例：restriction 覆盖全部 coarse 行 + `global_sum_by_dof` 广播全槽位
+   - 验收：-or 1 np1/np2/np4 = 17/17/17 步（原 17/36/54）；-or 2 np1/np2/np4 = 23/27/27 步（原 np2 停滞 7.9e0）
+2. **pex32/pex13 空空间问题解决**（AME 路径 1 步收敛）：
+   - 新增 `ParCsrMatrix::clone_vec`/`to_local_matrix` + `assemble_nodal_from_gradient`（par_projection.rs）
+   - `ParGradientProjector` 首次被示例调用
+   - pex32：-rs 1 → 3.10/6.25/6.25/12.75/12.75；-rs 2 → 3.16/5.97/5.97/11.19/11.21
+   - pex13 小网格：11.678/12.404/13.538/14.976/16.581 = C++ 参考值逐位
+   - pex13 细化网格：9.717/9.989/1.018/1.047/1.096
+
+### 全量审查结论
+- 串行 42 个示例全部 exit=0 无 panic；并行 35 个示例全部无 panic
+- 重编译坑（勿丢）：`cargo build --release --examples` 因 fingerprint 缓存可能不重编译旧示例——**必须 `cargo clean -p fem-examples` 后全量重编译**
+- 回归基线：fem-parallel **214/0 全绿**
+
+### 待解问题（下一 session 优先）
+1. **pex13 细化网格特征值差异**（已确认一致 ✓）：
+   - Rust AME（-rs 2 -rp 0）：9.717/9.989/1.018/1.047/1.096 ✓
+   - C++ ex13p（-rs 2 -rp 0）：9.717/9.989/1.018/1.047/1.096 ✓（WSL 跑通确认）
+   - C++ ex13p（-rs 2 -rp 1）：9.945/10.016/10.408/10.483/11.181（并行细化，网格拓扑不同）
+   - **结论**：串行版本结果一致，差异来自 C++ 用并行细化（-rp 1）而 Rust AME 在串行网格求解
+
+### 环境/工具/纪律（勿丢）
+- 分支 `ex4-ads-preconditioner`，已 push
+- C++ 串行参考：`~/mfem49`（`~/bin/exN_cpp`）；并行参考：`~/mfem49_mpi`（WSL）
+- 重编译纪律：改示例后 `cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
+
+### 验证（复用命令）
+- pex26：`cargo run --release --example mfem_pex26_parallel_geom_mg -- --ranks {1,2,4} -or 2`
+- pex32：`cargo run --release --example mfem_pex32_maxwell_eigenvalue -- --ranks 1 -rs 1`
+- pex13：`cargo run --release --example mfem_pex13_parallel_eigenvalue -- --ranks 1`
+- 回归：`cargo test -p fem-parallel`（期望 214/0）
+
+---
+
+## 📦 2026-08-28（全量审查）串行+并行 1:1 审查完成
+
+### 一句话启动词
+> **全量审查完成**：42 串行 + 35 并行示例全部运行比对。串行 14 OK / 17 NO_DOF / 8 MISMATCH / 3 RUST_FAIL（已修复 2 个）；并行 8 OK / 12 NO_DOF / 19 MISMATCH / 3 RUST_FAIL。核心库稳定，差异主要来自输出格式和默认参数。
+
+### 完成的工作
+1. **全量重编译**：`cargo build --release --examples` 成功，336 个 .exe 生成
+2. **C++ 参考二进制**：WSL 中 112 个 C++ 参考二进制就绪（串行 ex0-ex41 + 并行 ex1p-ex41p）
+3. **串行比对**：42 个示例全部运行，14 OK / 17 NO_DOF / 8 MISMATCH / 3 RUST_FAIL
+4. **并行比对**：35 个示例 × 4 次运行（np1/np2/np4 Rust + np1 C++），8 OK / 12 NO_DOF / 19 MISMATCH / 3 RUST_FAIL
+5. **修复**：ex32（mesh 参数）、ex36（-m 选项）、ex21（face_dofs_p1→p2，仍有底层问题）
+
+### 串行结果
+- ✅ OK（14 个）：ex0/ex1/ex2/ex3/ex4/ex6/ex9/ex14/ex17/ex22/ex25/ex26/ex39/ex41
+- ⚠️ NO_DOF（17 个）：输出格式差异，需人工确认
+- ⚠️ MISMATCH（8 个）：参数/网格差异
+- ❌ RUST_FAIL（3 个）：ex21（NC 细化 + P2 face DOFs）、ex32（已修复）、ex36（已修复）
+
+### 并行结果
+- ✅ OK（8 个）：pex1/pex2/pex4/pex12/pex21/pex26/pex35/pex39
+- ⚠️ NO_DOF（12 个）：输出格式差异
+- ⚠️ MISMATCH（19 个）：参数/网格差异
+- ❌ RUST_FAIL（3 个）：pex3（网格不匹配，已修复比对脚本）、pex24（高阶 NDk/RTk 未实现）、pex33（par_csr 索引越界）
+
+### 待解问题
+1. **ex21 底层问题**：`face_dofs_p2` 假设面节点在单一元素中，NC 细化后不成立
+2. **pex33 par_csr 索引越界**：`range end index 20096 out of range for slice of length 5120`
+3. **NO_DOF 案例**：需人工确认输出格式差异是否影响实际一致性
+
+### 环境/工具/纪律（勿丢）
+- 分支 `ex4-ads-preconditioner`，已 push
+- C++ 串行参考：`~/mfem49`（`~/bin/exN_cpp`）；并行参考：`~/mfem49_mpi`（WSL）
+- 重编译纪律：改示例后 `cargo build --release --example <name>`；全量前 `cargo clean -p fem-examples`
+- 比对脚本：`tmp/run_serial_final.sh`（串行）、`tmp/run_par_compare.sh`（并行）
+- 比对结果：`tmp/serial_cmp/`（84 个日志）、`tmp/par_cmp/`（140 个日志）
+
+---
+
+## 📦 2026-08-18（收尾三十一）交接：pex41 IMEX 对流-扩散 np1-4 一致；pex17/pex37 被向量 DOF 布局阻塞
+
+### 一句话启动词
+> **pex41（并行 IMEX 对流-扩散）np1-4 一致**（commit 8abbb1c，`examples/mfem_pex41_imex.rs`，~550 行）。DG 周期网格 + IMEX Euler 积分 + 块对角 Jacobi 预条件。验收：np1/np2/np4 输出一致（2304 unknowns，10 步 tf=0.1，||u||=2.284895e1；100 步 tf=1.0 与 C++ ex41p 时间和步数完全一致）。**下一步：实现 IMEX RK3 积分器替代 Euler（当前简单 Euler 在 tf>0.2 发散，串行 ex41 用 ImexDirkRk3 逐位一致）**。
+
+### 剩余工作（按可推进性）
+1. **pex41 精度**（IMEX RK3 实现）。
+2. **其他 pex 示例**：pex10/15/17/18/19/21/28/37（pex12/13/14/16/20/24/25/27/29/31/33/34/35/36/39/40 已完成；pex23 无参考剔除）。
+3. **pex13 默认细化网格**（-rs 2 -rp 1，空空间/投影问题阻塞）。
+
+---
+
+## 📦 2026-08-18（收尾三十）交接：pex12 弹性特征值 1:1 完成（np1 = C++ ex12p 7+ 位、np1-4 一致）
+
+### 一句话启动词
+> **pex12（并行弹性特征值）完成 1:1**（`examples/mfem_pex12_parallel_elastic_eigen.rs`，~300 行）。`K u = λ M u`（多材料悬臂梁，λ=μ=50/1），VectorH1Space byNODES + ParAssembler + AMG V-cycle 预条件 + par_lobpcg。验收：**np1 vs C++ ex12p 7+ 位一致**（8.39773560e-3 / 1.37224605e-1 / 3.98009586e-1 / 5.85370383e-1 / 1.76946426e+0）、**np1-4 收敛值一致**。
+
+### 剩余工作（按可推进性）
+1. 继续 pex 并行示例：剩余 pex10/13/15/17/18/19/21/28/37/41（pex12/14/16/20/24/25/27/29/31/33/34/35/36/39/40 已完成；pex23 无参考剔除）。
+2. pex13 默认细化网格（-rs 2 -rp 1，空空间/投影问题阻塞）。
