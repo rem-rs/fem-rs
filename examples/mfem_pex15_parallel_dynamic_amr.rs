@@ -293,6 +293,15 @@ fn main() {
                     .map(|e| e as ElemId)
                     .collect();
                     par_mesh = new_pm;
+                    if std::env::var("PEX15_TRACE").is_ok() && rank == 0 {
+                        let lm2 = par_mesh.local_mesh();
+                        let cmax = (0..lm2.n_elems() as u32)
+                            .flat_map(|e| lm2.elem_nodes(e as fem_core::ElemId))
+                            .max()
+                            .unwrap_or(0);
+                        eprintln!("[pex15-refine] after refine: elems={} nodes={} conn_max={cmax}",
+                            lm2.n_elems(), lm2.n_nodes());
+                    }
                     if extra.is_empty() {
                         break;
                     }
