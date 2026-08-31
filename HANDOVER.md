@@ -1,52 +1,48 @@
 # fem-pro 交接：剩余工作
 
-## 🧩 2026-08-31：pex6 方向 A 完成 + RT0 跨 rank 三修复（np2 it2=40 it3=25 全对齐 C++）
+## 🧩 2026-08-31（收尾三十五）：pex6 np2 it4+ 分岔根因 = rebuild_partition_nc gid 基数冲突（np2 it4 386/50 全对齐 C++，it0-it10 轨迹一致）
 
 ### 一句话启动词
-> **pex6 np2 it3 marked 1 → 25 达成**（commit `a015af8`）。用户指定方向 A（`rebuild_partition_nc` 的 Quad4 `new_elem_gid` 改几何 Hilbert child index）已完成，np1 无回归；验收（np2 it2=40 且 it3=25）暴露 RT0 悬挂 flux 的**三个独立跨 rank bug**，全部修复后 np2 unknowns 31/101/171/291 + marked 20/25/40/25 与 C++ 全对齐。**验收标准 = 结果一致（marked 数/轨迹），非逐位**（用户明确）。
+> **pex6 全部对齐完成**（commit `23cd3e1`）：np2 it4 分岔（unknowns 380 vs 386、marked 3 vs 50）的根因是 **`rebuild_partition_nc` 新节点 gid 基数用了物理节点数 `n_global_old_nodes`，而 np2 的 gid 空间有历史空洞（max gid > 物理节点数）→ 新 gid 与旧悬挂节点 gid 撞车 → 同 gid 跨 rank 指向不同物理点 → repartition 坐标按 gid 错配 → it4 丢 6 节点、解错**。修复：新 gid 基数改用**全局 max gid + 1**。修复后 np2/np4 的 unknowns 31/101/171/291/386/526/1006/1386/1611/2371/4036 + marked 20/25/40/25/50/155/115/80/270/530/420 与 np1/C++ 完全一致（it0-it10 全轨迹）。**pex6 三个待查点（np2 it2/it3/it4）全部解决，比对全景无剩余待查项**。
 
-### 本轮完成（commit `a015af8`，5 files +470）
-1. **方向 A（用户指定）**：`rebuild_partition_nc` Quad4 `new_elem_gid` 的 child 序从「本地遍历计数」改为**几何 Hilbert child index**（`QUAD_HILBERT_CHILD_ORDER[state]` 中 slot 的位置；state 由全局 coarse 元素表按 gid 排序算 `init_root_states`）→ (new_elem_gid, j) 排序跨 rank 一致 = MFEM SFC 序
-2. **creation_order（MFEM UpdateVertices 节点创建序，跨轮传播）**：
-   - `rebuild_partition_nc` 步骤 8：**全局首次出现 (elem_gid, corner j) 归并（allgather min）后按序追加**——每 rank 一致的序值（此前「本地 scan + or_insert 归并」保留的是某 rank 的本地计数，非全局位置 → 同一物理节点跨 rank 序值不同 → RT0 约束权重反号）
-   - `ParRefinedMesh.creation_order` + 新 `par_refine_marked_ordered`（旧 API 不动）；pex6 每轮传递
-3. **par_l2zz slave sign 用创建序**：`lo == pa.min(pb)`（local id 序）跨 rank 翻转 → 改用粗边端点的 creation_order 比较（np1 上 200/200 条与旧逻辑完全一致）
-4. **from_edge_space_ordered**（dof_partition.rs）：RT0 dof 定向（`sign_correction`）的 global_sign 改用创建序比较——**rebuild 后 gid 序 ≠ MFEM 创建序 → np2 RT0 解整体反号 → eta/marking 全错**；`new_for_edge_space_ordered`（par_space.rs）给 par_l2zz 用，其它调用者（pex4 等）走默认 gid 序不变
-5. **apply_hanging_constraints 约束权重 = 物理系数 c 直接**（去掉 per-rank `sign_s·sign_m` 乘积——它依赖「哪个元素先看到 dof」的本地选择，跨 rank 翻转）；**slave recover 补 `S_s·S_m`**（本地基恢复：x_s_dm = c·S_s·S_m·x_m_dm；np1 的 S=1 恰好对，np2 的 S_m=-1 漏乘 → 悬挂边邻元 η 6.9e-3 vs 2.9e-4）
+### 本轮完成（1 file +35，crates/parallel/src/par_amr.rs）
+1. **根因**（dump 实证，非猜测）：
+   - np2 it4 网格物理坐标 vs np1：**it3 完全一致**（341 节点/275 元素/多边形 0 差异），**it4 np2 少 6 个悬挂节点**（406 vs 400）+ 24 个元素多边形差异（= 6 节点 × 4 元素）
+   - 节点消失阶段：`it3_rebuild`（refine 后 repartition 前）**6 节点还在**（gid 341-346），`it4_pre`（repartition 后）**消失** → 丢失发生在 `par_repartition_with_hanging`
+   - 真根因：`it3_rebuild` 已存在 **gid 冲突**（gid 341/342/344 在两 rank 指向不同物理坐标：r0 是新建边中点、r1 是旧悬挂节点）。np2 it3 的 gid 空间**不连续有空洞**（341 个 gid、max=346、缺 140/162/177-180）——rebuild 分配的新 gid 在 repartition 时若节点未被元素引用会被丢弃 → 空洞累积 → max gid > 物理节点数
+   - `rebuild_partition_nc` 原用 `n_global_old_nodes`（= allreduce 物理节点数 341）做新 gid 基数 → 撞上旧悬挂节点 gid 341-346 → 同 gid 跨 rank 异义 → repartition Phase 3 `coord_coords.entry(gid).or_insert` 保留先到者 → 坐标错配
+   - np1 无此问题：gid 连续 0..340，悬挂节点 gid 322-327 < 341 不冲突
+2. **修复**：新节点 gid 基数 = **全局 max gid + 1**（`local_max_gid` 用 `partition.global_node_ids`，alltoallv 归并 max；`comm.size()==1` 时退化为本地）。4 处 gid 分配（edge midpoint ×2 + centre ×2）改用 `n_gid_base`。np1 的 gid 连续所以行为不变（无回归）
 
-### 调试经验（勿丢，全是 dump 实证）
-- **无约束对照**（PEX6_NO_FLUX_CONSTRAINT，已删）：无约束 np2≈np1（global_max 4.2183e-3）→ 问题 100% 在约束路径
-- **约束后 diag/rhs 逐位一致但 x 差 5 倍** → 差异在 off-diag（行和/COO dump 定位）；**行和一致但 eta 差** → 差异在 slave recover（元素级 eta dump by 质心定位）
-- np1/np2 的 **gid 空间不同**（rebuild 依赖 rank 数）→ 跨 np 对比必须用**物理坐标**（HANDOVER 旧教训再次应验）
-- PEX6_TRACE 门控的调试 dump 已全部清理；PEX6_TRACE 原有功能（par_repartition trace）保留
+### 调试经验（勿丢）
+- **跨 np 对比必须物理坐标**（gid 空间不同），但更要警惕 **gid 冲突**（同 gid 不同 rank 指向不同物理点）——它让 repartition 的按-gid 坐标归并静默错配，网格"看起来一样"实际元素已变形
+- **阶段 dump 定位节点丢失**：pre（repartition 后）/ rebuild（repartition 前）两阶段 dump 对比，一次定位丢失发生在 repartition
+- **gid 空间空洞检查**：`sorted(all gids)` 缺失值 + max vs 物理节点数，1 条命令确认冲突风险
+- 本次未用 slave_deps（RT0 约束）排查——HANDOVER 旧线索③在该场景不适用（it3 marked 集物理一致、网格一致，分岔在 rebuild 的 H1 gid 分配）
+- PEX6_DUMP 门控调试 dump 已清理（pex6 恢复 HEAD）；PEX6_TRACE/PEX6_FORCE_PAR_L2ZZ 保留
 
 ### 验证
-- 单 rank 基线（用户要求）：`PEX6_FORCE_PAR_L2ZZ=1 ... --ranks 1 -md 171` → it2=40（31/101/171 + 20/25/40）
-- np1 无回归：-md 300 → 20/25/40/25；np2 验收：-md 3000 → **it2=40 且 it3=25**（unknowns 31/101/171/291 全对齐）
-- fem-parallel 214/0、fem-assembly 498/0、fem-mesh 315/0 全绿
-- commit `a015af8`（分支 ex4-ads-preconditioner）**已 push**；根仓库 `675dac7`（HANDOVER.md）已 push
+- np2/np4 -md 3000：**it0-it10 全轨迹与 np1/C++ 一致**（unknowns 31/101/171/291/386/526/1006/1386/1611/2371/4036 + marked 20/25/40/25/50/155/115/80/270/530/420）；it4 从 380/3 → 386/50
+- it4 物理坐标：np2/np4 均 406 节点、6 目标悬挂节点全恢复、0 gid 冲突
+- 6 pex 回归（pex6/8/9/28/34/37）np1=np2=np4=C++ 全 OK；fem-parallel 214/0、fem-mesh 315/0 全绿
+- commit `23cd3e1`（分支 ex4-ads-preconditioner）已 push
 
 ---
 
 ## 📊 当前比对全景（新 session 从这里开始）
 
 ### 一句话启动词（新 session 用）
-> 读 HANDOVER.md，继续 **pex6 np2 it4+ 分岔**（这是 6 个待查 pex 里最后一个未对齐点）：先跑全量回归确认 `a015af8` 后 6 pex 无回归（`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`），再按下方 it4 排查线索推进。
+> 读 HANDOVER.md。**pex6 已全部对齐**（commit `23cd3e1`，收尾三十五）：np2/np4 it0-it10 全轨迹与 np1/C++ 一致（unknowns 31/101/171/291/386/526/1006/1386/1611/2371/4036 + marked 20/25/40/25/50/155/115/80/270/530/420）。根因 = `rebuild_partition_nc` 新节点 gid 基数用物理节点数，np2 gid 空间有空洞 → 与旧悬挂 gid 撞车。**当前比对全景无剩余待查项**；如需推进，看下方"历史遗留（低优先）"或全量回归重跑。
 
 ### 已对齐（全部确认过，勿重做）
 - **串行 14**：ex1-ex10, ex14, ex22, ex23, ex25, ex26（DOF 完全匹配）
 - **并行 18**：pex1-5, pex7, pex10, pex12, pex13, pex16, pex17, pex20, pex22, pex26, pex29, pex31, pex32, pex33, pex35, pex36, pex39, pex40, pex41（np1=np2=np4=C++ np1）
-- **6 个待查 pex（6/8/9/28/34/37）2026-08-29 全部完成**；**pex6 it0-it3 现已全对齐**（np2 31/101/171/291 + 20/25/40/25）
+- **6 个待查 pex（6/8/9/28/34/37）全部完成**；**pex6 已全对齐**（np2/np4 与 np1/C++ it0-it10 轨迹一致）
 - 全部 10 个并行 AMR/弹性示例 np1=np2=np4 一致（pex41/28/18/15/10/17/19/21/37/13）
 
 ### 剩余工作（按可推进性排序）
-1. **pex6 np2 it4+ 分岔**（唯一未对齐比对点）：
-   - 现象：np2 -md 3000 it4 起 unknowns 380 vs np1 386、marked 3 vs 50（np1 it4=50/350）
-   - 线索：it4 网格 = it3 标记（25 个）refine 后 → 多级悬挂更深；`detect_hanging_quad` 多级检测已知问题（旧 HANDOVER 37 行）
-   - 排查顺序：① np2 it4 网格物理坐标 vs np1（gid 空间不同，必须物理坐标）；② it4 H1 u 物理对比（u 一致 → RT0 二级悬挂 slave 约束不完整；u 不一致 → detect_hanging_quad 漏检）；③ slave_deps 每 master 应 2 slave 检查
-   - 注意：np1 自身 it3+ 也曾偏离 C++（旧结论 unknowns 291 vs 321），当前 np1 it3=25 已与 C++ 对齐——**先确认 np1 it4=50 是否即 C++ 参考**再修 np2
-2. **全量比对回归**：pex6 改动（a015af8）后重跑 6 pex 确认无回归（命令见下）
-3. 历史遗留（低优先，勿优先做）：ex15 收尾已接受差异（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
+1. **全量比对回归**（维护性）：`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`（收尾三十五后 6 pex 全 OK，改核心库后重跑确认）
+2. 历史遗留（低优先，勿优先做）：ex15 收尾已接受差异（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
 
 ### 环境 / 工具 / 纪律（勿丢）
 - 分支 `ex4-ads-preconditioner`（fem-rs），已 push；根仓库 main 已 push
