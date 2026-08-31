@@ -2,7 +2,7 @@
 
 ## 🧩 2026-08-31（收尾三十七）：全量比对修复轮——8 个示例对齐 + 比对工具修复 + pex30 移植
 
-> 用户要求"重新运行 mfem 示例比对工具 + 开始修复"。串行 41 + 并行 35 全量比对后，本轮修复了 **7 个真实差异 + 6 项工具问题**（commit `966dcb5`，main 分支）：
+> 用户要求"重新运行 mfem 示例比对工具 + 开始修复"。串行 41 + 并行 35 全量比对后，本轮修复了 **7 个真实差异 + 7 项工具问题**（commits `966dcb5` + `ee3d59d`，main 分支，**3 commits 未 push——网络断开**：966dcb5/ee0114f/ee3d59d 待推）：
 
 ### 修复明细
 1. **比对工具 find_cpp_bin suffix 顺序**（compare.sh）：`"" "p" "_cpp" "p_cpp"` → `"" "_cpp" "p_cpp" "p"`——`ex16p`/`ex17p`/`ex41p`（无 `_cpp` 后缀的并行版）曾抢先于串行 `ex16_cpp` 等 → 串行比对用错二进制（`-r` 不识别、DOF 4 倍差）。修复后 **ex16/ex17/ex41 全 OK**（ex17 的 24576 vs 98304 也是此 bug）
@@ -14,7 +14,9 @@
 7. **pex27**：ex27p 自建网格无 `-m` → 去 mesh 参数（1118 一致）
 8. **pex24**：`-o 2` 超出 Rust 支持（显式断言 only order 1，NDk/RTk 高阶未实现）→ `-o 1`（2640 一致）。**核心库待办：pex24 高阶 NDk/RTk 未实现**
 9. **pex19/ex19**：C++ `dim(u+p) = 120` / `dim(u) = 102` 提取模式；**ex20** energy 比对模式（1.00204/0.0174915 一致）
-10. **pex30 移植**（`mfem_pex30_amr_preprocess.rs` 重写，原实现只有初始振荡无 AMR）：
+10. **ex29**（补充 ee3d59d）：串行 ex29_cpp 用 `-r`（NURBS 网格 -mt/-mo/-r，不认 -rs/-rp）→ ca 改 `-mt 4 -mo 3 -r 0`（48 一致）
+11. **ex15/ex40**（补充 ee3d59d）：ex15 AMR 迭代 `number of unknowns:` 提取（sed 取 unknowns 避开 Iteration 序号，101 一致）；ex40 `Number of H(div) dofs:` 提取（10400 一致）
+12. **pex30 移植**（`mfem_pex30_amr_preprocess.rs` 重写，原实现只有初始振荡无 AMR）：
     - 移植串行 ex30 的 CoefficientRefiner 逻辑：**L2 节点插值**（`l2.interpolate`，非 from_projection！）、每元素振荡标记、并行 NC refine（`par_refine_marked_ordered`）+ **LimitNCLevel 传播循环**（`limit_nc_level_quad` 补 refine 至 fixpoint）+ `par_repartition_with_hanging`
     - **关键坑**：① 必须用 interpolate（from_projection 给出 194 vs 590）；② 必须 LimitNCLevel 循环（fresh NCStateQuad 丢 edge_level → 等价 nc_limit=0 → 194；串行 ex30 `-l 0` 实证）；③ 全局 norm/osc 必须 **owned-only 归约**（ghost 重复 → np2 提前收敛 302 vs 590）——crate 新增 `compute_coeff_l2_norm_first_n`
     - 结果：**np1=np2=C++ 590/3341/12572（osc 逐位 4.202614e-4/7.752668e-4/6.194015e-4）**
@@ -25,8 +27,12 @@
 - **find_cpp_bin `_cpp` 优先**（避免并行版抢先）
 
 ### 验证
-- 修复后：ex16/17/18/19/20/41 + pex5/14/18/19/24/25/27/30/31 全 OK；fem-assembly 498/0 全绿
-- **剩余已知**：pex15 无 AMR（只时间积分，需完整 dynamic AMR 移植）；ex38 NO_DOF（moment-fitting 输出无 dof，已人工确认 1:1）；ex34 conv_avg 0.901533 vs 0.903245（接近，验收非逐位）
+- 修复后：ex15/16/17/18/19/20/29/40/41 + pex5/14/18/19/24/25/27/30/31 全 OK；fem-assembly 498/0 全绿
+- **修复后全量回归终态**（SKIP_NP4=1）：
+  - **串行 38/41 OK**：ex11/12/13/32 为 eigenvalue 模式（已确认一致，无 DOF 行属正常）；ex38 NO_DOF（moment-fitting 输出无 dof，已人工确认 1:1）；ex34 conv_avg 0.901533 vs 0.903245（接近，验收=一致非逐位）
+  - **并行 33/35 OK**：pex15 DIFF_CPP（Rust 无 AMR，31 vs C++ 101——遗留待办）；pex30 未入脚本全量（np2 Function 2 慢会卡死脚本，已单独验证 np1=np2=C++）
+  - ex8 串行 conv_avg 0.829 vs 0.609（DOF 5281 一致，conv_avg 附加信息不同，未深究）
+- **剩余已知**：pex15 无 AMR（只时间积分，需完整 dynamic AMR 移植——下一轮优先项）；ex38 NO_DOF；ex34/ex8 conv_avg；pex30 np2 Function 2 性能慢
 
 ---
 
@@ -68,17 +74,22 @@
 ## 📊 当前比对全景（新 session 从这里开始）
 
 ### 一句话启动词（新 session 用）
-> 读 HANDOVER.md。**pex6 已全部对齐**（commit `23cd3e1`，收尾三十五）：np2/np4 it0-it10 全轨迹与 np1/C++ 一致（unknowns 31/101/171/291/386/526/1006/1386/1611/2371/4036 + marked 20/25/40/25/50/155/115/80/270/530/420）。根因 = `rebuild_partition_nc` 新节点 gid 基数用物理节点数，np2 gid 空间有空洞 → 与旧悬挂 gid 撞车。**当前比对全景无剩余待查项**；如需推进，看下方"历史遗留（低优先）"或全量回归重跑。
+> 读 HANDOVER.md。**pex6 已全对齐**（收尾三十五，`23cd3e1`）；**全量比对修复轮完成**（收尾三十七，`966dcb5`/`ee0114f`/`ee3d59d`，**3 commits 未 push——网络断开，恢复后先 `git push origin main`**）。修复后终态：**串行 38/41 OK + 并行 33/35 OK**。**下一轮优先项 = pex15 完整 dynamic AMR 移植**（当前 Rust 无 AMR，只时间积分，unknowns 31 vs C++ 101），细节见下"剩余工作①"。
 
 ### 已对齐（全部确认过，勿重做）
-- **串行 14**：ex1-ex10, ex14, ex22, ex23, ex25, ex26（DOF 完全匹配）
-- **并行 18**：pex1-5, pex7, pex10, pex12, pex13, pex16, pex17, pex20, pex22, pex26, pex29, pex31, pex32, pex33, pex35, pex36, pex39, pex40, pex41（np1=np2=np4=C++ np1）
-- **6 个待查 pex（6/8/9/28/34/37）全部完成**；**pex6 已全对齐**（np2/np4 与 np1/C++ it0-it10 轨迹一致）
-- 全部 10 个并行 AMR/弹性示例 np1=np2=np4 一致（pex41/28/18/15/10/17/19/21/37/13）
+- **串行 38/41 OK**：全部 DOF 比对通过；ex11/12/13/32 eigenvalue 已确认（无 DOF 行正常）；ex38 NO_DOF（moment-fitting 无 dof 行，已人工确认 1:1）；ex34 conv_avg 0.901533 vs 0.903245（接近，验收=一致非逐位）；ex8 conv_avg 0.829 vs 0.609（DOF 一致，未深究）
+- **并行 33/35 OK**：pex1-14, pex16-29, pex31-41 全部 np1=np2=np4=C++（含 pex5/14/18/19/24/25/27/31 本轮修复）；pex15 DIFF_CPP（遗留）；pex30 单独验证 np1=np2=C++（590/3341/12572，np2 Function 2 慢不适宜入脚本全量）
+- pex6 np2/np4 it0-it10 全轨迹 = C++（收尾三十五）
 
 ### 剩余工作（按可推进性排序）
-1. **全量比对回归**（维护性）：`SKIP_NP4=1 bash examples/compare/pex_compare.sh pex6 pex8 pex9 pex28 pex34 pex37`（收尾三十五后 6 pex 全 OK，改核心库后重跑确认）
-2. 历史遗留（低优先，勿优先做）：ex15 收尾已接受差异（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
+1. **pex15 完整 dynamic AMR 移植**（唯一未对齐并行示例）：
+   - 现状：`mfem_pex15_parallel_dynamic_amr.rs` 只有固定网格时间积分（rank0 组装+积分，打印初始 unknowns 31）；C++ ex15p 是 dynamic AMR（时间步进 + 每 N 步 AMR 细化，打印 Iteration: 1 unknowns: 101 等）
+   - 参考：串行 `examples/mfem_ex15_dynamic_amr.rs` 已 1:1（HANDOVER 旧段记录：Dörfler 标记、marked 340=340、`LimitNCLevel 传播时机`根因 = C++ refine 后 while 循环 vs Rust refine 前单轮）；并行基础设施用 pex6/pex30 已验证的 `par_refine_marked_ordered` + `par_repartition_with_hanging`
+   - 验收：np1=np2=np4=C++（Iteration 序列 101/181/641/... 对齐）
+2. **push 遗留**：`git push origin main`（966dcb5/ee0114f/ee3d59d 未推，网络恢复后）
+3. 核心库待办（非阻塞，示例已用 -o 1 对齐）：pex24 高阶 NDk/RTk 未实现；Quad4 L2 GL 高阶 DG（dg_hyperbolic.rs assert order=1）未实现
+4. pex30 np2 Function 2 性能（>25 分钟，par_refine 多 alltoallv 全广播）——正确性已证，仅性能
+5. 历史遗留（低优先，勿优先做）：ex15 串行已收尾（验收=一致非逐位）；pex13 细化网格（-rs 2 -rp 1）C++ 并行细化拓扑不同已确认非 bug；ex21 NC+P2 face DOFs 底层问题；fem-assembly stokes_darcy_coupled 预存在失败
 
 ### 环境 / 工具 / 纪律（勿丢）
 - **分支：直接工作并推送到 `main`**（fem-rs 与根仓库 fem-pro 都是 main；2026-08-31 已合并清理 ex4-ads-preconditioner，勿再建旁支）
