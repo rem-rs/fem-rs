@@ -45,6 +45,12 @@ extract_dof() {
     # Element count: "Number of Elements 590"
     val=$(grep -oE "Number of Elements [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
     [ -n "$val" ] && echo "$val" && return
+    # ex15 dynamic AMR: "Iteration: 1, number of unknowns: 101"（取 unknowns，用 sed 避开 Iteration 序号）
+    val=$(grep -oE "number of unknowns: [0-9]+" "$1" 2>/dev/null | sed 's/.*unknowns: *\([0-9]*\).*/\1/' | head -1)
+    [ -n "$val" ] && echo "$val" && return
+    # H(div) format: "Number of H(div) dofs: 10400"
+    val=$(grep -oE "Number of H\(div\) dofs: [0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    [ -n "$val" ] && echo "$val" && return
     # ex19 mixed elasticity: "DOFs: displacement=102, pressure=18" /
     # C++ "dim(u) = 102"（取位移子空间维度）
     val=$(grep -oE "DOFs: displacement=[0-9]+" "$1" 2>/dev/null | grep -oE "[0-9]+" | head -1)
@@ -243,7 +249,7 @@ MESH_ARGS[ex25]="inline-quad.mesh|-o 2 -f 5.0 -ref 3 -prob 4 -no-vis|-o 2 -f 5.0
 MESH_ARGS[ex26]="star.mesh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex27]="inline-quad.mesh|-no-vis|-no-vis|dof+iter"
 MESH_ARGS[ex28]="inline-quad.mesh|-no-vis|-no-vis|dof+iter"
-MESH_ARGS[ex29]="disc-nurbs.mesh|-no-vis|-mt 4 -mo 3 -rs 0 -rp 0 -no-vis|dof+iter"
+MESH_ARGS[ex29]="disc-nurbs.mesh|-no-vis|-mt 4 -mo 3 -r 0 -no-vis|dof+iter"
 MESH_ARGS[ex30]="star.mesh|-o 1 -no-vis|-o 1 -no-vis|dof+marked"
 MESH_ARGS[ex31]="beam-tri.mesh|-o 1 -r 1 -no-vis|-o 1 -r 1 -no-vis|dof+iter"
 MESH_ARGS[ex32]="fichera.mesh|-rs 2 -no-vis|-rs 2 -rp 0 -no-vis|eigenvalue"
