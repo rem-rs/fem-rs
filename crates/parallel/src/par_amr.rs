@@ -621,19 +621,37 @@ fn rebuild_partition_nc(
             let k: u32 = if centre.is_some() {
                 let coarse_e = gid_to_coarse[&pg];
                 let pns = local_mesh.elem_nodes(coarse_e as u32);
+                let n_part = partition.global_node_ids.len();
                 let corner_gid = ns
                     .iter()
-                    .filter(|&&n| (n as usize) < n_orig)
+                    .filter(|&&n| (n as usize) < n_orig && (n as usize) < n_part)
                     .map(|&n| gid_of(n))
-                    .find(|&g| pns.iter().any(|&pn| gid_of(pn) == g))
+                    .find(|&g| {
+                        pns.iter()
+                            .filter(|&&pn| (pn as usize) < n_part)
+                            .any(|&pn| gid_of(pn) == g)
+                    })
                     .unwrap_or_else(|| {
+                        let pgids: Vec<u32> = ns
+                            .iter()
+                            .filter(|&&n| (n as usize) < n_part)
+                            .map(|&n| gid_of(n))
+                            .collect();
+                        let ppgids: Vec<u32> = pns
+                            .iter()
+                            .filter(|&&pn| (pn as usize) < n_part)
+                            .map(|&pn| gid_of(pn))
+                            .collect();
                         panic!(
                             "rebuild_partition_nc: refined Quad4 child {e} \
-                             (nodes {ns:?}) of parent {pg} has no parent corner"
+                             (nodes {ns:?} gids {pgids:?}) of parent {pg} \
+                             (coarse_e {coarse_e} nodes {pns:?} gids {ppgids:?}) \
+                             n_orig={n_orig} n_part={n_part} has no parent corner"
                         )
                     });
                 let slot = pns
                     .iter()
+                    .filter(|&&pn| (pn as usize) < n_part)
                     .position(|&pn| gid_of(pn) == corner_gid)
                     .expect("corner gid in parent nodes") as u8;
                 let st = global_states[&pg] as usize;
