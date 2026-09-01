@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, QuadQ1, QuadQ2, QuadQk, HexQ1, HexQ2, HexQ3}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP3, QuadQ1, QuadQ2, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1, PrismRTk};
 use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1036,7 +1036,7 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 0) |
         (ElementType::Hex8 | ElementType::Hex20, 0) => Box::new(P0),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
         (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),

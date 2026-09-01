@@ -3,7 +3,8 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP3};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::nedelec::{TetND1, TriND1, TetND2, TriND2};
 use fem_element::raviart_thomas::{TetRT0, TriRT0, TetRT1, TriRT1, TriRT2};
 use fem_element::reference::VectorReferenceElement;
@@ -18,7 +19,7 @@ use fem_space::fe_space::{FESpace, SpaceType};
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),

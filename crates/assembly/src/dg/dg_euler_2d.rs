@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use nalgebra::DMatrix;
 use fem_mesh::topology::MeshTopology;
+use fem_element::lagrange::factory::TriPk;
 use fem_element::lagrange::SegP1;
 use fem_element::ReferenceElement;
 
@@ -361,9 +362,10 @@ fn affine_map(mesh:&dyn MeshTopology,nodes:&[u32],xi:&[f64])->(f64,f64){
 
 fn ref_elem_vol(et: fem_mesh::element_type::ElementType, o: u8) -> Box<dyn ReferenceElement> {
     use fem_mesh::element_type::ElementType::*;
-    use fem_element::lagrange::*;
+    use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::*;
     match (et, o) {
-        (Tri3,1)=>Box::new(TriP1),(Tri3,2)=>Box::new(TriP2),(Tri3,3)=>Box::new(TriP3),
+        (Tri3,1)=>Box::new(TriP1),(Tri3,2)=>Box::new(TriPk::new(2)),(Tri3,3)=>Box::new(TriP3),
         (Tet4,1)=>Box::new(TetP1),(Tet4,2)=>Box::new(TetP2),(Tet4,3)=>Box::new(TetP3),
         _=>panic!("ref_elem_vol: unsupported ({et:?}, o={o})"),
     }
@@ -413,7 +415,8 @@ fn build_interior_faces(mesh:&dyn MeshTopology)->Vec<(u32,u32,Vec<u32>)>{
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
-    use fem_element::lagrange::*;
+    use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::*;
 
     fn make_dg(n: usize, order: u8) -> DgEuler2D {
         let mesh = Mesh::<2>::unit_square_tri(n);

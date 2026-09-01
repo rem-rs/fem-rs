@@ -715,7 +715,8 @@ impl NativeComplexAssembler {
         quad_order: u8,
     ) -> NativeComplexSystem {
         use fem_element::{ReferenceElement,
-            lagrange::{TriP1, TriP2, TetP1, TetP2, QuadQ1, QuadQ2, QuadQ4}};
+            lagrange::{TriP1, TetP1, TetP2, QuadQ1, QuadQ2, QuadQ4},
+            lagrange::factory::TriPk};
         use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
         let mesh    = space.mesh();
@@ -736,7 +737,7 @@ impl NativeComplexAssembler {
 
             // Reference element 鈥?choose by type and polynomial order
             let ref_elem: Box<dyn ReferenceElement> = match (etype, order) {
-                (ElementType::Tri6, _) => Box::new(TriP2),
+                (ElementType::Tri6, _) => Box::new(TriPk::new(2)),
                 (ElementType::Tri3, _) => Box::new(TriP1),
                 (ElementType::Tet4, _) => Box::new(TetP1),
                 (ElementType::Quad4, 1) => Box::new(QuadQ1),
@@ -747,7 +748,7 @@ impl NativeComplexAssembler {
             };
             // Override for P2 orders
             let ref_elem: Box<dyn ReferenceElement> = match (etype, order) {
-                (ElementType::Tri3,  2) => Box::new(TriP2),
+                (ElementType::Tri3,  2) => Box::new(TriPk::new(2)),
                 (ElementType::Tet4,  2) => Box::new(TetP2),
                 _ => ref_elem,
             };

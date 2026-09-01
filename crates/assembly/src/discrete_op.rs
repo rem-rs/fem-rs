@@ -42,7 +42,7 @@ use fem_element::{
     quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1,
     TriRT2, VectorReferenceElement,
 };
-use fem_element::lagrange::TriP2;
+use fem_element::lagrange::factory::TriPk;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
 use nalgebra::DMatrix;
@@ -353,7 +353,7 @@ impl DiscreteLinearOperator {
         let gl_pts = [0.5 * (1.0 - sq35), 0.5, 0.5 * (1.0 + sq35)];
         let gl_wts = [5.0f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
 
-        let p2_elem  = TriP2;
+        let p2_elem  = TriPk::new(2);
         let quad_int = p2_elem.quadrature(4); // degree-4 triangle rule
 
         // ── Precompute edge rows of G_ref (rows 0..5, J-independent).

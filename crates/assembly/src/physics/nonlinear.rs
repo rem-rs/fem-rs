@@ -735,7 +735,7 @@ fn solve_2x2(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
 // 鈹€鈹€鈹€ NonlinearDiffusionForm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3}};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1, TriP3}, lagrange::factory::TriPk};
 use fem_linalg::CooMatrix;
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -925,7 +925,7 @@ where
 fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3, 3) => Box::new(TriP3),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),

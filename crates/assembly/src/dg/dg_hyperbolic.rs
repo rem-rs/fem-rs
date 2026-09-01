@@ -11,7 +11,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use fem_element::reference::ReferenceElement;
 use fem_element::quadrature::gauss_legendre_01;
-use fem_element::lagrange::tri::{TriP1, TriP2, TriP3};
+use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::tri::{TriP1, TriP3};
 use fem_element::lagrange::QuadL2GL;
 use fem_core::types::NodeId;
 use fem_mesh::element_type::ElementType;
@@ -225,7 +226,7 @@ fn make_ref_elem(mesh: &dyn MeshTopology, order: u8) -> (Box<dyn ReferenceElemen
         ElemShape::Tri => {
             match order {
                 1 => (Box::new(TriP1), shape),
-                2 => (Box::new(TriP2), shape),
+                2 => (Box::new(TriPk::new(2)), shape),
                 3 => (Box::new(TriP3), shape),
                 _ => (Box::new(TriP1), shape),
             }

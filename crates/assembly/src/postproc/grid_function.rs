@@ -6,7 +6,8 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::lagrange::{TetP1, TetP2, TetP3, TriP1, TriP3};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::quadrature::quad_rule_01;
 use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, QuadratureRule, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
@@ -26,7 +27,7 @@ use crate::standard::{DomainSourceIntegrator, MassIntegrator};
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
         // Quad4: order 0 (L² P0) is the constant element; orders 1+ use
         // QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the

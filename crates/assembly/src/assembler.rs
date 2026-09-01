@@ -9,8 +9,9 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
-    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
+    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP3, TriP4,
                 QuadQ1, QuadQ2, QuadQ4, HexQ1},
+    lagrange::factory::TriPk,
     quadrature::quad_rule_01,
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
@@ -221,7 +222,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => {
             Box::new(fem_element::lagrange::H1TriPk::new(3))
         }
@@ -269,7 +270,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriP4),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
@@ -333,7 +334,7 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
         (ElementType::Line2, 3) => Box::new(SegP3),
         (ElementType::Line2, 4) => Box::new(SegP4),
         (ElementType::Tri3,  1) => Box::new(TriP1),
-        (ElementType::Tri3,  2) => Box::new(TriP2),
+        (ElementType::Tri3,  2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3,  3) => Box::new(TriP3),
         (ElementType::Tri3,  4) => Box::new(TriP4),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),

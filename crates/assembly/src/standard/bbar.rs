@@ -48,9 +48,10 @@ use nalgebra::DMatrix;
 use fem_core::types::ElemId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3, TriP4,
+    lagrange::{SegP1, TetP1, TetP2, TetP3, TriP1, TriP3, TriP4,
                QuadQ1, HexQ1},
 };
+use fem_element::lagrange::factory::TriPk;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::CooMatrix;
 use fem_linalg::CsrMatrix;
@@ -65,7 +66,7 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriP1), // P0 handled elsewhere
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriP4),
         (ElementType::Tet4, 1) => Box::new(TetP1),

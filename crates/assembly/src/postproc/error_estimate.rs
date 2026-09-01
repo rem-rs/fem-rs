@@ -3,7 +3,8 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP2, TriP3};
+use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP3};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::ReferenceElement;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
@@ -19,7 +20,7 @@ use crate::Assembler;
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),

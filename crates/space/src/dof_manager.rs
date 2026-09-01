@@ -1951,9 +1951,7 @@ impl DofManager {
                 if p >= 2 {
                     // 3 edges, each with (p-1) DOFs, ordered near-first-vertex to
                     // near-second.  Edge 2 follows the MFEM/`H1TriPk` counter-
-                    // clockwise ring (v2→v0), NOT (v0→v2): with (n0,n2) the
-                    // shared edge DOFs came out in opposite order on neighbouring
-                    // elements, corrupting every P3 (and higher) assembly.
+                    // clockwise ring (v2→v0), NOT (v0→v2).
                     let edges = [(n0, n1), (n1, n2), (n2, n0)];
                     let mut off = 3;
                     for &(a, b) in &edges {

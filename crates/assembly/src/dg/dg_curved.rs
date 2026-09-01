@@ -16,10 +16,11 @@ use fem_space::fe_space::FESpace;
 use crate::interior_faces::InteriorFaceList;
 
 fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::{TriP1, TriP2, TriP3, TetP1, TetP2, TetP3};
+    use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::{TriP1, TriP3, TetP1, TetP2, TetP3};
     match (et, order) {
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriP2),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
         (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
         (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),

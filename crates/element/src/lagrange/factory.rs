@@ -50,8 +50,9 @@ fn equispaced_nodes_tri(p: usize) -> Vec<[f64; 2]> {
     for k in 1..p {
         nodes.push([0.0, k as f64 / p as f64]);
     }
-    for j in 1..=(p - 2) {
-        for i in 1..=(p - 1 - j) {
+    // Interior nodes: i from p-2 down to 1, j from p-1-i down to 1 (matches TriP4 IJK ordering)
+    for i in (1..=(p - 2)).rev() {
+        for j in (1..=(p - 1 - i)).rev() {
             nodes.push([i as f64 / p as f64, j as f64 / p as f64]);
         }
     }
