@@ -15,6 +15,8 @@ pub mod cad;
 pub mod curved;
 pub mod element_type;
 pub mod moving_mesh;
+pub mod step_iges;
+pub mod nurbs_from_cad;
 pub mod point_locator;
 pub mod simplex;
 pub mod submesh;

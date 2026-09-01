@@ -101,6 +101,9 @@ pub use precond::*;
 
 pub mod adaptive;
 pub mod bdf;
+
+// Re-export fem-amg so downstream crates import AMG via `fem_solver::amg`.
+pub use fem_amg as amg;
 pub mod block;
 pub mod block_gmres;
 pub mod block_operator;

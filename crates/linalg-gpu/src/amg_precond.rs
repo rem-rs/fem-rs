@@ -19,7 +19,7 @@ const JACOBI_AMG_F64_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/jacobi
 /// Multi-level V-cycles fall back to CPU until deeper level matrices are
 /// accessible for GPU-based coarse-grid correction.
 pub struct GpuAmgPrecond {
-    cpu_solver: fem_amg::AmgSolver<f64>,
+    cpu_solver: fem_solver::amg::AmgSolver<f64>,
     diag_inv_gpu: DeviceBuffer,
     params_buf: wgpu::Buffer,
     pipeline: wgpu::ComputePipeline,
@@ -32,15 +32,15 @@ impl GpuAmgPrecond {
     pub fn new(
         ctx: &GpuContext,
         a: &fem_linalg::CsrMatrix<f64>,
-        config: fem_amg::AmgConfig,
-        cycle: fem_amg::CycleType,
+        config: fem_solver::amg::AmgConfig,
+        cycle: fem_solver::amg::CycleType,
     ) -> Self {
         assert!(ctx.features.native_f64, "GpuAmgPrecond requires SHADER_F64 (f64 GPU support)");
         let n = a.nrows as u32;
         let diag_inv: Vec<f64> = (0..a.nrows)
             .map(|i| { let d = a.get(i, i); if d.abs() > 1e-14 { 1.0 / d } else { 1.0 } })
             .collect();
-        let cpu_solver = fem_amg::AmgSolver::setup(a, config).with_cycle(cycle);
+        let cpu_solver = fem_solver::amg::AmgSolver::setup(a, config).with_cycle(cycle);
 
         let device = &ctx.device;
         let diag_inv_gpu = DeviceBuffer::from_slice(device, &diag_inv, wgpu::BufferUsages::STORAGE, "amg_diag_inv");

@@ -8,7 +8,7 @@
 //! problems — it converges in far fewer iterations than point preconditioners
 //! (Jacobi, SSOR).
 
-use fem_amg::{AmgConfig, AmgSolver};
+use fem_solver::amg::{AmgConfig, AmgSolver};
 use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, fem_to_linlvo_csr};
 use fem_mesh::MeshTopology;
 use fem_solver::{

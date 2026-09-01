@@ -28,7 +28,6 @@ pub mod p_refine;
 pub mod vector_h1;
 pub mod block_fe_space;
 pub mod cr_space;
-pub mod vector_cr;
 pub mod vem;
 pub mod dpg_trace;
 
@@ -39,7 +38,6 @@ pub use fe_space::{FESpace, SpaceType};
 pub use ordering::Ordering;
 pub use h1::H1Space;
 pub use cr_space::CRSpace;
-pub use vector_cr::VectorCRSpace;
 pub use l2::{L2Basis, L2Space};
 pub use hcurl::HCurlSpace;
 pub use hdiv::HDivSpace;

@@ -609,7 +609,7 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
     cfg:     &fem_solver::LobpcgConfig,
 ) -> Result<fem_solver::EigenResult, String> {
     use fem_solver::{SolverConfig};
-    use fem_amg::solve_amg_cg;
+    use fem_solver::amg::solve_amg_cg;
     use nalgebra::DMatrix;
 
     // Convert the discrete gradient columns to a dense constraint matrix so
@@ -632,7 +632,7 @@ pub fn solve_hcurl_eigen_preconditioned_amg(
     let k_reg = k_curl.axpby(1.0, m_mass, reg);
 
     // AMG preconditioner: one V-cycle per LOBPCG residual block column.
-    let amg_cfg = fem_amg::AmgConfig::default();
+    let amg_cfg = fem_solver::amg::AmgConfig::default();
     let amg_prec = move |r: &DMatrix<f64>| -> DMatrix<f64> {
         let nrows = r.nrows();
         let ncols = r.ncols();
