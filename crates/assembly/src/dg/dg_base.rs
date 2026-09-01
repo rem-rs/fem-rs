@@ -13,12 +13,12 @@ use fem_element::{
     ReferenceElement,
     lagrange::{
         SegP1, SegP2, SegP3,
-        TriP1, TriP3,
-        TetP1, TetP2, TetP3,
+        TriP1,
+        TetP1, TetP2,
         QuadQ1, QuadQ2, QuadQk,
         factory::QuadL2GL,
     },
-    lagrange::factory::TriPk,
+    lagrange::factory::{TriPk, TetPk},
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -34,7 +34,7 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
+        (ElementType::Tri3, 3) => Box::new(TriPk::new(3)),
         // Quad4 in the DG/L2 path uses the Gauss-Legendre tensor basis
         // (MFEM L2_FECollection / DG_FECollection default), on [0,1]².
         (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
@@ -42,7 +42,7 @@ pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Quad4, 3) => Box::new(QuadL2GL::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         _ => panic!("ref_elem_vol: unsupported ({et:?}, order={order})"),
     }
 }

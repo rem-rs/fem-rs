@@ -13,7 +13,7 @@
 //! - Optimal test functions from local Gram solve (H¹-like inner product)
 //! - Element stiffness assembled via Petrov-Galerkin: K_e = B^T M_V^{-1} B
 
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP3}, lagrange::factory::TriPk, quadrature::tri_rule};
+use fem_element::{ReferenceElement, lagrange::{TriP1}, lagrange::factory::TriPk, quadrature::tri_rule};
 use fem_linalg::CooMatrix;
 use fem_mesh::MeshTopology;
 
@@ -63,7 +63,7 @@ pub fn solve_dpg_stokes_2d<M: MeshTopology>(
     let n_test_p = 6;  // P2 pressure test DOFs
     let n_trial_v = 3; // P1 per component
 
-    let tri_p3 = TriP3;
+    let tri_p3 = TriPk::new(3);
     let tri_p2 = TriPk::new(2);
     let qr = tri_rule(7);
     let n_elems = mesh.n_elements();

@@ -10,7 +10,7 @@
 //! - Bilinear form: a(u,v) = ∫ λ(∇·u)(∇·v) + 2μ ε(u):ε(v) dx
 //! - Optimal test functions via local H¹ Gram matrix solve
 
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP3}, quadrature::tri_rule};
+use fem_element::{ReferenceElement, lagrange::{TriP1}, lagrange::factory::TriPk, quadrature::tri_rule};
 use fem_linalg::CooMatrix;
 use fem_mesh::MeshTopology;
 
@@ -54,7 +54,7 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
     let n_trial = 6;  // P1 × 2 components
     let n_v = 10;     // P3 DOFs per component
 
-    let tri_p3 = TriP3;
+    let tri_p3 = TriPk::new(3);
     let qr = tri_rule(7);
 
     let mut coo = CooMatrix::<f64>::new(n_total, n_total);

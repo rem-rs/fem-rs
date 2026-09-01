@@ -48,10 +48,9 @@ use nalgebra::DMatrix;
 use fem_core::types::ElemId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, TetP1, TetP2, TetP3, TriP1, TriP3, TriP4,
-               QuadQ1, HexQ1},
+    lagrange::{SegP1, TetP1, TetP2, TriP1, QuadQ1, HexQ1},
 };
-use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::factory::{TriPk, TetPk};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::CooMatrix;
 use fem_linalg::CsrMatrix;
@@ -67,11 +66,11 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriP1), // P0 handled elsewhere
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
-        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriP4),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
+        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         (ElementType::Quad4, _) => Box::new(fem_element::lagrange::factory::QuadQk::new(order as usize)),
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>

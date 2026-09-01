@@ -35,7 +35,7 @@
 
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TetP3, TriP1}, lagrange::factory::TriPk};
+use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TriP1}, lagrange::factory::{TriPk, TetPk}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 use fem_mesh::ElementTransformation;
@@ -314,7 +314,7 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, o) => Box::new(fem_element::lagrange::H1TriPk::new(o as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQ1),
         (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQ2),
         (ElementType::Hex8, 1) => Box::new(fem_element::lagrange::hex::HexQ1),

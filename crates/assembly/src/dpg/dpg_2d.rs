@@ -7,7 +7,7 @@
 //! suppresses the standard DPG RHS. We use the Galerkin RHS instead
 //! (stable, convergent Petrov-Galerkin method).
 
-use fem_element::{ReferenceElement, lagrange::TriP3};
+use fem_element::{ReferenceElement, lagrange::factory::TriPk};
 use fem_element::quadrature::tri_rule;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::MeshTopology;
@@ -36,7 +36,7 @@ pub fn solve_dpg_poisson_2d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64) -> f
     let n_elem = mesh.n_elements();
     let n_test = 10;
     let n_trial = 3;
-    let tri_p3 = TriP3;
+    let tri_p3 = TriPk::new(3);
     let qr = tri_rule(7);
 
     let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);

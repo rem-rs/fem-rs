@@ -9,9 +9,9 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
-    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TetP3, TriP1, TriP3, TriP4,
+    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TriP1,
                 QuadQ1, QuadQ2, QuadQ4, HexQ1},
-    lagrange::factory::TriPk,
+    lagrange::factory::{TriPk, TetPk},
     quadrature::quad_rule_01,
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
@@ -234,7 +234,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         }
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
         (ElementType::Quad4, 0) => Box::new(P0 { dim: 2 }),
         // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
@@ -271,11 +271,11 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
-        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriP4),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
+        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
-        (ElementType::Tet4, 3)                           => Box::new(TetP3),
+        (ElementType::Tet4, 3)                           => Box::new(TetPk::new(3)),
         (ElementType::Tet4, o)                           => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
         (ElementType::Quad4, 0)                          => Box::new(P0 { dim: 2 }),
         // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
@@ -335,8 +335,8 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
         (ElementType::Line2, 4) => Box::new(SegP4),
         (ElementType::Tri3,  1) => Box::new(TriP1),
         (ElementType::Tri3,  2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3,  3) => Box::new(TriP3),
-        (ElementType::Tri3,  4) => Box::new(TriP4),
+        (ElementType::Tri3,  3) => Box::new(TriPk::new(3)),
+        (ElementType::Tri3,  4) => Box::new(TriPk::new(4)),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         _ => panic!("ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"),

@@ -34,8 +34,8 @@ use nalgebra::linalg::SVD;
 
 use fem_element::{
     ReferenceElement,
-    lagrange::{TriP1, TriP3, TetP1, TetP2, TetP3},
-    lagrange::factory::TriPk,
+    lagrange::{TriP1, TetP1, TetP2},
+    lagrange::factory::{TriPk, TetPk},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -1017,10 +1017,10 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) => Box::new(TriP3),
+        (ElementType::Tri3, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         // Quadrilateral elements (straight-sided or curved via isoparametric mapping)
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),

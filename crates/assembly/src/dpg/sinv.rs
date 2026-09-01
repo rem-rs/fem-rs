@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 
 use fem_element::{
     ReferenceElement,
-    lagrange::{QuadL2GL, TriP1, TriP3, QuadQ2},
+    lagrange::{QuadL2GL, TriP1, QuadQ2},
     lagrange::factory::TriPk,
     quadrature::{tri_rule, quad_rule_01},
 };
@@ -45,7 +45,7 @@ fn ref_elem(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         _ => panic!("SinvBuilder ref_elem: unsupported ({elem_type:?}, order={order})"),
@@ -161,7 +161,7 @@ impl<M: MeshTopology> SinvBuilder<M> {
         let (ref_elem, nt) = match (et, order) {
             (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3usize),
             (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriPk::new(2)) as Box<dyn ReferenceElement>, 6),
-            (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriP3) as Box<dyn ReferenceElement>, 10),
+            (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriPk::new(3)) as Box<dyn ReferenceElement>, 10),
             (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4),
             (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9),
             _ => panic!("SinvBuilder: unsupported ({et:?}, order={order})"),

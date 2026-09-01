@@ -189,8 +189,8 @@ pub struct Poisson2DForm;
 
 impl<M: MeshTopology> BilinearForm<M> for Poisson2DForm {
     fn eval(&self, mesh: &M, e: u32, n_test: usize, n_trial: usize) -> (Vec<f64>, Vec<f64>) {
-        use fem_element::{ReferenceElement, lagrange::TriP3, quadrature::tri_rule};
-        let tri_p3 = TriP3;
+        use fem_element::{ReferenceElement, lagrange::factory::TriPk, quadrature::tri_rule};
+        let tri_p3 = TriPk::new(3);
         let qr = tri_rule(7);
         let mut phi = vec![0.0; n_test];
         let mut dphi = vec![0.0; n_test * 2];
@@ -247,8 +247,8 @@ pub struct Poisson3DForm;
 
 impl<M: MeshTopology> BilinearForm<M> for Poisson3DForm {
     fn eval(&self, mesh: &M, e: u32, n_test: usize, n_trial: usize) -> (Vec<f64>, Vec<f64>) {
-        use fem_element::{ReferenceElement, lagrange::TetP3, quadrature::tet_rule};
-        let tet_p3 = TetP3;
+        use fem_element::{ReferenceElement, lagrange::factory::TetPk, quadrature::tet_rule};
+        let tet_p3 = TetPk::new(3);
         let qr = tet_rule(6);
         let mut phi = vec![0.0; n_test];
         let mut dphi = vec![0.0; n_test * 3];

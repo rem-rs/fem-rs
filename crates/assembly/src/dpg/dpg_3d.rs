@@ -5,7 +5,7 @@
 //!
 //! Galerkin RHS (same rationale as 2D — stable, convergent Petrov-Galerkin).
 
-use fem_element::{ReferenceElement, lagrange::TetP3};
+use fem_element::{ReferenceElement, lagrange::factory::TetPk};
 use fem_element::quadrature::tet_rule;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::MeshTopology;
@@ -43,7 +43,7 @@ pub fn solve_dpg_poisson_3d<M: MeshTopology>(mesh: &M, f: &dyn Fn(f64, f64, f64)
     let n_elem = mesh.n_elements();
     let n_test = 20;
     let n_trial = 4;
-    let tet_p3 = TetP3;
+    let tet_p3 = TetPk::new(3);
     let qr = tet_rule(6);
 
     let mut coo = CooMatrix::<f64>::new(n_nodes, n_nodes);

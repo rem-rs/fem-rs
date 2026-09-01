@@ -12,7 +12,7 @@
 //! - Bilinear form: B(u,v) = ∫(∇u·∇v - k²·uv) dx
 //! - Stabilization via local H¹ Gram matrix solve M_V^{-1} B
 
-use fem_element::{ReferenceElement, lagrange::{TriP1, TriP3}, quadrature::tri_rule};
+use fem_element::{ReferenceElement, lagrange::{TriP1}, lagrange::factory::TriPk, quadrature::tri_rule};
 use fem_linalg::CooMatrix;
 use fem_mesh::MeshTopology;
 
@@ -55,7 +55,7 @@ pub fn solve_dpg_maxwell_2d<M: MeshTopology>(
     let n_trial = 3;
     let k2 = k * k;
 
-    let tri_p3 = TriP3;
+    let tri_p3 = TriPk::new(3);
     let tri_p1 = TriP1;
     let qr = tri_rule(7);
 

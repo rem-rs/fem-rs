@@ -3,8 +3,8 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TetP3, TriP1, TriP3};
-use fem_element::lagrange::factory::TriPk;
+use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TriP1};
+use fem_element::lagrange::factory::{TriPk, TetPk};
 use fem_element::ReferenceElement;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
@@ -21,12 +21,12 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriP3),
+        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetP3),
+        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }

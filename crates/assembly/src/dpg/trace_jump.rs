@@ -12,7 +12,7 @@
 use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement,
-    lagrange::{QuadL2GL, TriP1, TriP3, QuadQ1, QuadQ2},
+    lagrange::{QuadL2GL, TriP1, QuadQ1, QuadQ2},
     lagrange::factory::TriPk,
     quadrature::seg_rule_arbitrary,
 };
@@ -60,7 +60,7 @@ fn ref_elem_for_space(
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3, true),
         (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriPk::new(2)) as Box<dyn ReferenceElement>, 6, true),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriP3) as Box<dyn ReferenceElement>, 10, true),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriPk::new(3)) as Box<dyn ReferenceElement>, 10, true),
         // L2 P1 on quads uses Gauss-Legendre nodal basis (MFEM
         // L2_FECollection default BasisType::GaussLegendre) on [0,1]² — NOT
         // the equally-spaced QuadQ1.  Using QuadQ1 here made Bhat
