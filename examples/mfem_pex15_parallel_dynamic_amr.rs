@@ -273,6 +273,35 @@ fn main() {
                     .filter(|&e| marked_global.contains(&partition.global_elem(e as u32)))
                     .map(|e| e as ElemId)
                     .collect();
+                if std::env::var("PEX15_DBG").is_ok() && rank == 0 {
+                    let lm = par_mesh.local_mesh();
+                    eprintln!("[dbg-mark] t={time} it={ref_it} n_marked={n_marked} to_refine={}",
+                        to_refine.len());
+                    for &e in to_refine.iter().take(10) {
+                        let g = partition.global_elem(e);
+                        let ns = lm.elem_nodes(e);
+                        let cstr = |n: NodeId| {
+                            let c = lm.coords_of(n);
+                            format!("({:.6},{:.6})", c[0], c[1])
+                        };
+                        eprintln!("[dbg-mark]   gid={g} nodes {ns:?} coords {}{}{}{}",
+                            cstr(ns[0]), cstr(ns[1]), cstr(ns[2]), cstr(ns[3]));
+                    }
+                    // Dump elements gid 145/281 if present (pre-refine view).
+                    for g in [145u32, 281] {
+                        if let Some(e) = (0..lm.n_elems() as u32)
+                            .find(|&e| partition.global_elem(e) == g)
+                        {
+                            let ns = lm.elem_nodes(e as ElemId);
+                            let cstr = |n: NodeId| {
+                                let c = lm.coords_of(n);
+                                format!("({:.9},{:.9})", c[0], c[1])
+                            };
+                            eprintln!("[dbg-mark] pre-refine gid={g} nodes {ns:?} coords {}{}{}{}",
+                                cstr(ns[0]), cstr(ns[1]), cstr(ns[2]), cstr(ns[3]));
+                        }
+                    }
+                }
                 loop {
                     let before_parents = collect_refine_parents(&par_mesh);
                     let r = par_refine_marked_ordered(
@@ -296,11 +325,58 @@ fn main() {
                     if std::env::var("PEX15_TRACE").is_ok() && rank == 0 {
                         let lm2 = par_mesh.local_mesh();
                         let cmax = (0..lm2.n_elems() as u32)
-                            .flat_map(|e| lm2.elem_nodes(e as fem_core::ElemId))
+                            .flat_map(|e| lm2.elem_nodes(e as fem_core::ElemId).iter().copied())
                             .max()
                             .unwrap_or(0);
                         eprintln!("[pex15-refine] after refine: elems={} nodes={} conn_max={cmax}",
                             lm2.n_elems(), lm2.n_nodes());
+                        // Duplicate-coordinate node check + overlapping
+                        // elements (same centre, 4-corner average).
+                        let part2 = par_mesh.partition();
+                        let mut coord_map: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+                        for n in 0..lm2.n_nodes() as u32 {
+                            let c = lm2.coords_of(n as NodeId);
+                            coord_map.entry(((c[0] * 1e6).round() as i64, (c[1] * 1e6).round() as i64))
+                                .or_default().push(n);
+                        }
+                        let dupn: Vec<_> = coord_map.iter().filter(|(_, v)| v.len() > 1).collect();
+                        if !dupn.is_empty() {
+                            eprintln!("[pex15-refine] DUP NODES: {}", dupn.len());
+                            for (k, v) in dupn.iter().take(8) {
+                                let g: Vec<u32> = v.iter().map(|&n| part2.global_node(n)).collect();
+                                eprintln!("[pex15-refine]   coord {k:?} local {v:?} gids {g:?}");
+                            }
+                        }
+                        let mut cmap2: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+                        for e in 0..lm2.n_elems() as u32 {
+                            let ns = lm2.elem_nodes(e as ElemId);
+                            let mut sx = 0.0f64; let mut sy = 0.0f64;
+                            for &n in ns { let c = lm2.coords_of(n); sx += c[0]; sy += c[1]; }
+                            cmap2.entry(((sx / 4.0 * 1e6).round() as i64, (sy / 4.0 * 1e6).round() as i64))
+                                .or_default().push(part2.global_elem(e));
+                        }
+                        let dup2: Vec<_> = cmap2.iter().filter(|(_, v)| v.len() > 1).collect();
+                        if !dup2.is_empty() {
+                            eprintln!("[pex15-refine] OVERLAP ELEMS: {} (may be false positive)", dup2.len());
+                            for (k, v) in dup2.iter().take(8) {
+                                // Dedup: repeated gid = same element (partition
+                                // lookup or loop artifact), not an overlap.
+                                let uniq: std::collections::BTreeSet<u32> = v.iter().copied().collect();
+                                if uniq.len() <= 1 { continue; }
+                                eprintln!("[pex15-refine]   centre {k:?} elems {v:?}");
+                                for &g in &uniq {
+                                    let e = (0..lm2.n_elems() as u32)
+                                        .find(|&e| part2.global_elem(e) == g).unwrap();
+                                    let ns = lm2.elem_nodes(e as ElemId);
+                                    let cstr = |n: NodeId| {
+                                        let c = lm2.coords_of(n);
+                                        format!("({:.6},{:.6})", c[0], c[1])
+                                    };
+                                    eprintln!("[pex15-refine]     elem {g} nodes {ns:?} coords {}{}{}{}",
+                                        cstr(ns[0]), cstr(ns[1]), cstr(ns[2]), cstr(ns[3]));
+                                }
+                            }
+                        }
                     }
                     if extra.is_empty() {
                         break;
@@ -316,6 +392,25 @@ fn main() {
             // current mesh).
             let derefined = if !last_global_eta.is_empty() {
                 if std::env::var("PEX15_TRACE").is_ok() && rank == 0 {
+                    // Overlap check: any two elements sharing 3+ corner
+                    // coordinates (or same centre)?
+                    let lm = par_mesh.local_mesh();
+                    let part = par_mesh.partition();
+                    let mut centre_map: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+                    for e in 0..lm.n_elems() as u32 {
+                        let ns = lm.elem_nodes(e as ElemId);
+                        let mut sx = 0.0f64; let mut sy = 0.0f64;
+                        for &n in ns { let c = lm.coords_of(n); sx += c[0]; sy += c[1]; }
+                        centre_map.entry(((sx / 4.0 * 1e6).round() as i64, (sy / 4.0 * 1e6).round() as i64))
+                            .or_default().push(part.global_elem(e));
+                    }
+                    let dup: Vec<_> = centre_map.iter().filter(|(_, v)| v.len() > 1).collect();
+                    if !dup.is_empty() {
+                        eprintln!("[pex15-deref] OVERLAP: {} duplicate-centre groups:", dup.len());
+                        for (k, v) in dup.iter().take(10) {
+                            eprintln!("[pex15-deref]   centre {k:?} elems {v:?}");
+                        }
+                    }
                     let cand: Vec<u32> = refine_tree.records.iter()
                         .filter(|&(_, ch)| ch.iter().all(|&c| (c as usize) < last_global_eta.len()))
                         .map(|(&p, _)| p).collect();
@@ -338,6 +433,41 @@ fn main() {
                 // MFEM UpdateVertices creation order to the new identity.
                 let n = par_mesh.local_mesh().n_nodes();
                 creation_order = (0..n as u32).map(|g| (g, g)).collect();
+                if std::env::var("PEX15_TRACE").is_ok() && rank == 0 {
+                    // Overlap check on the rebuilt mesh (dedup by gid).
+                    let lm = par_mesh.local_mesh();
+                    let part = par_mesh.partition();
+                    // Elements referencing nodes 531/488/277/487 or gid 110.
+                    for e in 0..lm.n_elems() as u32 {
+                        let g = part.global_elem(e);
+                        let ns = lm.elem_nodes(e as ElemId);
+                        if g == 110 || ns.contains(&531) || ns.contains(&488) {
+                            let cstr = |n: NodeId| {
+                                let c = lm.coords_of(n);
+                                format!("({:.6},{:.6})", c[0], c[1])
+                            };
+                            eprintln!("[pex15-deref]   elem {e} gid {g} nodes {ns:?} coords {}{}{}{}",
+                                cstr(ns[0]), cstr(ns[1]), cstr(ns[2]), cstr(ns[3]));
+                        }
+                    }
+                    let mut cmap3: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
+                    for e in 0..lm.n_elems() as u32 {
+                        let ns = lm.elem_nodes(e as ElemId);
+                        let mut sx = 0.0f64; let mut sy = 0.0f64;
+                        for &n in ns { let c = lm.coords_of(n); sx += c[0]; sy += c[1]; }
+                        cmap3.entry(((sx / 4.0 * 1e6).round() as i64, (sy / 4.0 * 1e6).round() as i64))
+                            .or_default().push(part.global_elem(e));
+                    }
+                    let mut real_dup = 0usize;
+                    for (k, v) in cmap3.iter() {
+                        let uniq: std::collections::BTreeSet<u32> = v.iter().copied().collect();
+                        if uniq.len() > 1 {
+                            real_dup += 1;
+                            eprintln!("[pex15-deref] REBUILT OVERLAP centre {k:?} elems {v:?}");
+                        }
+                    }
+                    eprintln!("[pex15-deref] rebuilt mesh overlap groups = {real_dup}");
+                }
             }
 
             time += dt;
@@ -489,6 +619,12 @@ fn args_order() -> u8 {
 struct RefineTree {
     records: HashMap<u32, [u32; 4]>,
     parent_corners: HashMap<u32, [[f64; 2]; 4]>,
+    /// Child element **centres** (XY-split coordinates) recorded at refine
+    /// time.  Element gids are renumbered by every later refine, so a
+    /// recorded child gid can point at an unrelated element by the time the
+    /// tree is used for derefinement — re-locate each child in the current
+    /// mesh by its centre coordinate instead.
+    child_centres: HashMap<u32, [[f64; 2]; 4]>,
 }
 
 /// Populate/refresh `tree` from one parallel refine round: every refined
@@ -540,16 +676,34 @@ fn update_refine_tree(
 
     // For each parent, find children among the after-mesh elements whose
     // corner set contains the parent center (1e-9 tolerance, like
-    // detect_hanging_quad).
+    // detect_hanging_quad) AND whose geometry matches a direct child —
+    // ≥2 of the parent's edge midpoints (by coordinate) among its corners.
+    // A multi-level refine (a refined child refined further by
+    // limit_nc_level propagation) makes the grandCHILDREN also contain the
+    // parent center; the midpoint count separates them (a grandchild holds
+    // ≤1 parent edge midpoint — its own parent's other corners are the
+    // parent's ¼ points / centre).  Recording a grandchild group as the
+    // parent's children makes a later derefine remove the wrong elements
+    // (pex15 t=0: recovered parents coexist with their children → next
+    // refine duplicates them).
     let mut payload: Vec<u8> = Vec::new();
-    let mut found: Vec<(u32, u32)> = Vec::new(); // (parent, child)
+    let mut found: Vec<(u32, u32, [f64; 2], [[f64; 2]; 4])> = Vec::new(); // (parent, child, child centre, parent corners)
     for &(pg, pc, corners) in before_parents {
         // NOTE: no "parent still present" gid check — the parallel rebuild
         // reuses the parent's gid for its first child, so the gid survives
         // a refine.  A parent is refined iff its center became a corner of
         // some after-elements; an unrefined parent's center is never a
         // corner (it lies strictly inside the parent).
+        // Parent edge midpoints (coordinates, 1e-9 match).
+        let p_mid: Vec<[f64; 2]> = (0..4)
+            .map(|i| {
+                let a = corners[i];
+                let b = corners[(i + 1) % 4];
+                [0.5 * a[0] + 0.5 * b[0], 0.5 * a[1] + 0.5 * b[1]]
+            })
+            .collect();
         let mut children: Vec<u32> = Vec::new();
+        let mut centres: Vec<[f64; 2]> = Vec::new();
         for e in 0..mesh_after.n_elems() as u32 {
             let g = part_after.global_elem(e);
             let ns = mesh_after.elem_nodes(e as ElemId);
@@ -561,54 +715,89 @@ fn update_refine_tree(
                     break;
                 }
             }
-            if has {
+            if !has {
+                continue;
+            }
+            // Direct-child check: ≥2 parent edge midpoints among corners.
+            let n_mid = p_mid
+                .iter()
+                .filter(|m| {
+                    ns.iter().any(|&n| {
+                        let c = mesh_after.coords_of(n);
+                        (c[0] - m[0]).abs() < 1e-9 && (c[1] - m[1]).abs() < 1e-9
+                    })
+                })
+                .count();
+            if n_mid >= 2 {
                 children.push(g);
+                // XY-split centre of the child (0.5·mid01 + 0.5·mid23) —
+                // used later to re-locate the child after gid renumbering.
+                let c0 = mesh_after.coords_of(ns[0]);
+                let c1 = mesh_after.coords_of(ns[1]);
+                let c2 = mesh_after.coords_of(ns[2]);
+                let c3 = mesh_after.coords_of(ns[3]);
+                let (m01x, m01y) = (0.5 * c0[0] + 0.5 * c1[0], 0.5 * c0[1] + 0.5 * c1[1]);
+                let (m23x, m23y) = (0.5 * c2[0] + 0.5 * c3[0], 0.5 * c2[1] + 0.5 * c3[1]);
+                centres.push([0.5 * m01x + 0.5 * m23x, 0.5 * m01y + 0.5 * m23y]);
             }
         }
         if children.len() >= 4 {
-            children.sort_unstable();
-            for &c in children.iter().take(4) {
-                found.push((pg, c));
+            // Sort children and their centres in lockstep by gid.
+            let mut idx: Vec<usize> = (0..children.len()).collect();
+            idx.sort_by_key(|&i| children[i]);
+            for &i in idx.iter().take(4) {
+                found.push((pg, children[i], centres[i], corners));
             }
         } else if std::env::var("PEX15_TRACE").is_ok() && children.len() > 0 {
             eprintln!("[pex15-tree] parent {pg} children={children:?} (<4)");
         }
     }
-    for &(p, c) in &found {
+    for &(p, c, ctr, crns) in &found {
         payload.extend_from_slice(&p.to_le_bytes());
         payload.extend_from_slice(&c.to_le_bytes());
+        payload.extend_from_slice(&ctr[0].to_le_bytes());
+        payload.extend_from_slice(&ctr[1].to_le_bytes());
+        for cr in &crns {
+            payload.extend_from_slice(&cr[0].to_le_bytes());
+            payload.extend_from_slice(&cr[1].to_le_bytes());
+        }
     }
     // Merge across ranks.
-    let mut pairs: Vec<(u32, u32)> = found;
+    let mut pairs: Vec<(u32, u32, [f64; 2], [[f64; 2]; 4])> = found;
     if comm.size() > 1 {
         let sends: Vec<(Rank, Vec<u8>)> =
             (0..comm.size() as i32).map(|r| (r, payload.clone())).collect();
         for (_src, bytes) in comm.alltoallv_bytes(&sends) {
-            for chunk in bytes.chunks_exact(8) {
+            for chunk in bytes.chunks_exact(88) {
+                let mut crns = [[0.0f64; 2]; 4];
+                for (j, cr) in crns.iter_mut().enumerate() {
+                    cr[0] = f64::from_le_bytes(chunk[24 + j * 16..32 + j * 16].try_into().unwrap());
+                    cr[1] = f64::from_le_bytes(chunk[32 + j * 16..40 + j * 16].try_into().unwrap());
+                }
                 pairs.push((
                     u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
                     u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+                    [
+                        f64::from_le_bytes(chunk[8..16].try_into().unwrap()),
+                        f64::from_le_bytes(chunk[16..24].try_into().unwrap()),
+                    ],
+                    crns,
                 ));
             }
         }
     }
-    // Aggregate parent → up to 4 children.
-    let mut by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
-    for &(p, c) in &pairs {
-        by_parent.entry(p).or_default().push(c);
+    // Aggregate parent → up to 4 children (gid + centre, lockstep).
+    let mut by_parent: HashMap<u32, Vec<(u32, [f64; 2], [[f64; 2]; 4])>> = HashMap::new();
+    for &(p, c, ctr, crns) in &pairs {
+        by_parent.entry(p).or_default().push((c, ctr, crns));
     }
     for (p, mut cs) in by_parent {
-        cs.sort_unstable();
-        cs.dedup();
+        cs.sort_by_key(|&(c, _, _)| c);
+        cs.dedup_by_key(|&mut (c, _, _)| c);
         if cs.len() >= 4 {
-            tree.records.insert(p, [cs[0], cs[1], cs[2], cs[3]]);
-            // Parent corners from the first before_parents entry with this gid.
-            for &(g, _, corners) in before_parents {
-                if g == p {
-                    tree.parent_corners.insert(p, corners);
-                    break;
-                }
-            }
+            tree.records.insert(p, [cs[0].0, cs[1].0, cs[2].0, cs[3].0]);
+            tree.child_centres.insert(p, [cs[0].1, cs[1].1, cs[2].1, cs[3].1]);
+            tree.parent_corners.insert(p, cs[0].2);
         }
     }
 }
@@ -650,17 +839,10 @@ fn parallel_derefine(
     let n_elems = par_mesh.global_n_elems();
     let mesh = par_mesh.local_mesh();
 
-    // Candidate parents: recorded and all 4 children are current leaves.
-    // A child is a leaf iff its center is not a mesh node (a subdivided
-    // child's gid slot is reused by a grandchild, so gid presence alone is
-    // not sufficient).
-    let current: std::collections::HashSet<u32> = (0..n_elems as u32).collect();
-    let mut candidates: Vec<u32> = Vec::new();
-    for (&p, ch) in &tree.records {
-        if ch.iter().all(|&c| current.contains(&c)) {
-            candidates.push(p);
-        }
-    }
+    // Candidate parents: recorded groups (children relocated by centre
+    // coordinates later, on rank 0 — the recorded gids are stale after gid
+    // renumbering).
+    let mut candidates: Vec<u32> = tree.records.keys().copied().collect();
     candidates.sort_unstable();
     if candidates.is_empty() {
         return false;
@@ -668,29 +850,31 @@ fn parallel_derefine(
 
     // 2. Global mesh data → rank 0 (elements: gid → tag+corners; nodes:
     //    gid → coords).  Every rank submits its local (owned+ghost) view.
-    let (elems_g, nodes_g): (HashMap<u32, Vec<u32>>, HashMap<u32, [f64; 2]>) =
-        if comm.rank() == 0 {
-            let mut elems: HashMap<u32, Vec<u32>> = HashMap::new();
-            let mut nodes: HashMap<u32, [f64; 2]> = HashMap::new();
-            // np1: SerialBackend::alltoallv returns nothing — keep our own.
-            let mut elem_payload = Vec::new();
-            for e in 0..mesh.n_elems() as u32 {
-                let g = partition.global_elem(e);
-                let ns = mesh.elem_nodes(e as ElemId);
-                let tag = mesh.element_tag(e as ElemId) as u32;
-                elem_payload.extend_from_slice(&g.to_le_bytes());
-                elem_payload.extend_from_slice(&tag.to_le_bytes());
-                for &n in ns {
-                    elem_payload.extend_from_slice(&partition.global_node(n).to_le_bytes());
-                }
+    //    IMPORTANT: every rank must CALL alltoallv_bytes (collective); only
+    //    rank 0 parses the result.  A `if comm.rank() == 0` guard around the
+    //    call deadlocks np2 (rank 1 never joins the collective).
+    let mut elems_g: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut nodes_g: HashMap<u32, [f64; 2]> = HashMap::new();
+    {
+        let mut elem_payload = Vec::new();
+        for e in 0..mesh.n_elems() as u32 {
+            let g = partition.global_elem(e);
+            let ns = mesh.elem_nodes(e as ElemId);
+            let tag = mesh.element_tag(e as ElemId) as u32;
+            elem_payload.extend_from_slice(&g.to_le_bytes());
+            elem_payload.extend_from_slice(&tag.to_le_bytes());
+            for &n in ns {
+                elem_payload.extend_from_slice(&partition.global_node(n).to_le_bytes());
             }
-            let elem_sends: Vec<(Rank, Vec<u8>)> =
-                (0..comm.size() as i32).map(|r| (r, elem_payload.clone())).collect();
-            let recv_e: Vec<(Rank, Vec<u8>)> = if comm.size() > 1 {
-                comm.alltoallv_bytes(&elem_sends)
-            } else {
-                vec![(0, elem_payload)]
-            };
+        }
+        let elem_sends: Vec<(Rank, Vec<u8>)> =
+            (0..comm.size() as i32).map(|r| (r, elem_payload.clone())).collect();
+        let recv_e: Vec<(Rank, Vec<u8>)> = if comm.size() > 1 {
+            comm.alltoallv_bytes(&elem_sends)
+        } else {
+            vec![(0, elem_payload)]
+        };
+        if comm.rank() == 0 {
             for (_src, bytes) in recv_e {
                 for rec in bytes.chunks_exact(24) {
                     let g = u32::from_le_bytes(rec[0..4].try_into().unwrap());
@@ -699,37 +883,37 @@ fn parallel_derefine(
                     for k in 0..4 {
                         cs.push(u32::from_le_bytes(rec[8 + k * 4..12 + k * 4].try_into().unwrap()));
                     }
-                    elems.insert(g, vec![tag, cs[0], cs[1], cs[2], cs[3]]);
+                    elems_g.insert(g, vec![tag, cs[0], cs[1], cs[2], cs[3]]);
                 }
             }
-            let mut node_payload = Vec::new();
-            let n_nodes_part = partition.global_node_ids.len();
-            for n in 0..n_nodes_part as u32 {
-                let g = partition.global_node(n);
-                let c = mesh.coords_of(n as NodeId);
-                node_payload.extend_from_slice(&g.to_le_bytes());
-                node_payload.extend_from_slice(&c[0].to_le_bytes());
-                node_payload.extend_from_slice(&c[1].to_le_bytes());
-            }
-            let node_sends: Vec<(Rank, Vec<u8>)> =
-                (0..comm.size() as i32).map(|r| (r, node_payload.clone())).collect();
-            let recv_n: Vec<(Rank, Vec<u8>)> = if comm.size() > 1 {
-                comm.alltoallv_bytes(&node_sends)
-            } else {
-                vec![(0, node_payload)]
-            };
+        }
+        let mut node_payload = Vec::new();
+        let n_nodes_part = partition.global_node_ids.len();
+        for n in 0..n_nodes_part as u32 {
+            let g = partition.global_node(n);
+            let c = mesh.coords_of(n as NodeId);
+            node_payload.extend_from_slice(&g.to_le_bytes());
+            node_payload.extend_from_slice(&c[0].to_le_bytes());
+            node_payload.extend_from_slice(&c[1].to_le_bytes());
+        }
+        let node_sends: Vec<(Rank, Vec<u8>)> =
+            (0..comm.size() as i32).map(|r| (r, node_payload.clone())).collect();
+        let recv_n: Vec<(Rank, Vec<u8>)> = if comm.size() > 1 {
+            comm.alltoallv_bytes(&node_sends)
+        } else {
+            vec![(0, node_payload)]
+        };
+        if comm.rank() == 0 {
             for (_src, bytes) in recv_n {
                 for rec in bytes.chunks_exact(20) {
                     let g = u32::from_le_bytes(rec[0..4].try_into().unwrap());
                     let x = f64::from_le_bytes(rec[4..12].try_into().unwrap());
                     let y = f64::from_le_bytes(rec[12..20].try_into().unwrap());
-                    nodes.insert(g, [x, y]);
+                    nodes_g.insert(g, [x, y]);
                 }
             }
-            (elems, nodes)
-        } else {
-            (HashMap::new(), HashMap::new())
-        };
+        }
+    }
 
     // 3. Rank 0: choose groups + execute.
     let mut chosen: Vec<u32> = Vec::new();
@@ -740,11 +924,52 @@ fn parallel_derefine(
             .iter()
             .map(|(_, c)| ((c[0] * 1e6).round() as i64, (c[1] * 1e6).round() as i64))
             .collect();
+        // Element XY-split centre from its 4 corner gids (same formula as
+        // NCStateQuad::refine).
+        let elem_centre = |rec: &[u32], nodes: &HashMap<u32, [f64; 2]>| -> Option<[f64; 2]> {
+            let n1 = nodes.get(&rec[1])?;
+            let n2 = nodes.get(&rec[2])?;
+            let n3 = nodes.get(&rec[3])?;
+            let n4 = nodes.get(&rec[4])?;
+            let (m01x, m01y) = (0.5 * n1[0] + 0.5 * n2[0], 0.5 * n1[1] + 0.5 * n2[1]);
+            let (m23x, m23y) = (0.5 * n3[0] + 0.5 * n4[0], 0.5 * n3[1] + 0.5 * n4[1]);
+            Some([0.5 * m01x + 0.5 * m23x, 0.5 * m01y + 0.5 * m23y])
+        };
+        // Quantized element-centre → gid index (1e-6), for O(1) child
+        // re-location instead of a per-group scan of all elements (np2
+        // derefine was spending minutes).
+        let mut centre_index: HashMap<(i64, i64), u32> = HashMap::new();
+        for (g, rec) in &elems_g {
+            if let Some(ec) = elem_centre(rec, &nodes_g) {
+                centre_index
+                    .entry(((ec[0] * 1e6).round() as i64, (ec[1] * 1e6).round() as i64))
+                    .or_insert(*g);
+            }
+        }
+        // Re-locate the 4 children of a recorded group in the CURRENT mesh
+        // by matching the recorded child centres (recorded gids are stale
+        // after every refine renumbers the element ids).
+        let relocate = |centres: &[[f64; 2]; 4]| -> Option<[u32; 4]> {
+            let mut out = [0u32; 4];
+            for (k, ctr) in centres.iter().enumerate() {
+                out[k] = *centre_index
+                    .get(&((ctr[0] * 1e6).round() as i64, (ctr[1] * 1e6).round() as i64))?;
+            }
+            Some(out)
+        };
         let mut n_over_thresh = 0usize;
         let mut n_not_leaf = 0usize;
         let mut n_missing_elem = 0usize;
+        let mut n_stale_gid = 0usize;
         for &p in &candidates {
-            let ch = tree.records[&p];
+            let Some(centres) = tree.child_centres.get(&p) else {
+                n_missing_elem += 1;
+                continue;
+            };
+            let Some(ch) = relocate(centres) else {
+                n_stale_gid += 1;
+                continue;
+            };
             let agg: f64 = ch.iter().map(|&c| global_eta[c as usize]).sum();
             if agg >= threshold {
                 n_over_thresh += 1;
@@ -768,8 +993,20 @@ fn parallel_derefine(
                     all_leaf = false;
                     break;
                 };
-                let cx = 0.25 * (n1[0] + n2[0] + n3[0] + n4[0]);
-                let cy = 0.25 * (n1[1] + n2[1] + n3[1] + n4[1]);
+                // A refined quad's centre node sits at the XY-split centre
+                // (0.5·mid01 + 0.5·mid23, each midpoint 0.5·pa + 0.5·pb) —
+                // NOT the 4-corner average, which differs by >1e-6 on the
+                // curved star.mesh elements.  A child that was itself
+                // refined has its centre node present in the mesh; using the
+                // average here misses it (quantization) and wrongly treats
+                // the child as a leaf, so the parent group gets coarsened
+                // while the grandchild survives → the recovered parent
+                // coexists with its children (pex15 it1: overlapping
+                // elements after the next refine).
+                let (m01x, m01y) = (0.5 * n1[0] + 0.5 * n2[0], 0.5 * n1[1] + 0.5 * n2[1]);
+                let (m23x, m23y) = (0.5 * n3[0] + 0.5 * n4[0], 0.5 * n3[1] + 0.5 * n4[1]);
+                let cx = 0.5 * m01x + 0.5 * m23x;
+                let cy = 0.5 * m01y + 0.5 * m23y;
                 if node_set.contains(&((cx * 1e6).round() as i64, (cy * 1e6).round() as i64)) {
                     all_leaf = false;
                     break;
@@ -782,7 +1019,7 @@ fn parallel_derefine(
             }
         }
         if std::env::var("PEX15_TRACE").is_ok() {
-            eprintln!("[pex15-deref] chosen={} over_thresh={n_over_thresh} not_leaf={n_not_leaf} missing={n_missing_elem}",
+            eprintln!("[pex15-deref] chosen={} over_thresh={n_over_thresh} not_leaf={n_not_leaf} missing={n_missing_elem} stale_gid={n_stale_gid}",
                 chosen.len());
         }
         // Remove children, restore parents (corners = child k's corner k).
@@ -791,8 +1028,12 @@ fn parallel_derefine(
         // skip a group whose children were already removed by another group.
         let mut elems = elems_g;
         let mut executed: Vec<u32> = Vec::new();
+        let mut next_gid = elems.keys().max().copied().unwrap_or(0) + 1;
         for &p in &chosen {
-            let ch = tree.records[&p];
+            // Re-locate the children in the current mesh by centre
+            // coordinates (recorded gids are stale after gid renumbering).
+            let Some(centres) = tree.child_centres.get(&p) else { continue };
+            let Some(ch) = relocate(centres) else { continue };
             if ch.iter().any(|&c| !elems.contains_key(&c)) {
                 continue;
             }
@@ -810,11 +1051,43 @@ fn parallel_derefine(
                     .unwrap_or_else(|| panic!("parent corner ({}, {}) not found", c[0], c[1]));
             }
             let tag = elems[&ch[0]][0];
+            if std::env::var("PEX15_DBG").is_ok() && (p == 186 || p == 110) {
+                let c = |g: u32| nodes_g.get(&g).copied().unwrap_or([f64::NAN, f64::NAN]);
+                eprintln!(
+                    "[dbg-deref-exec] p={p} children={ch:?} parent_corners_gids={corner_gids:?} \
+                     p_corners=({:.9},{:.9})({:.9},{:.9})({:.9},{:.9})({:.9},{:.9})",
+                    c(corner_gids[0])[0], c(corner_gids[0])[1],
+                    c(corner_gids[1])[0], c(corner_gids[1])[1],
+                    c(corner_gids[2])[0], c(corner_gids[2])[1],
+                    c(corner_gids[3])[0], c(corner_gids[3])[1],
+                );
+                for &cc in &ch {
+                    if let Some(rec) = elems.get(&cc) {
+                        let c2 = |g: u32| nodes_g.get(&g).copied().unwrap_or([f64::NAN, f64::NAN]);
+                        eprintln!(
+                            "[dbg-deref-exec]   child {cc} nodes {:?} coords ({:.6},{:.6})({:.6},{:.6})({:.6},{:.6})({:.6},{:.6})",
+                            &rec[1..], c2(rec[1])[0], c2(rec[1])[1], c2(rec[2])[0], c2(rec[2])[1],
+                            c2(rec[3])[0], c2(rec[3])[1], c2(rec[4])[0], c2(rec[4])[1]
+                        );
+                    }
+                }
+            }
             elems.remove(&ch[0]);
             elems.remove(&ch[1]);
             elems.remove(&ch[2]);
             elems.remove(&ch[3]);
-            elems.insert(p, vec![tag, corner_gids[0], corner_gids[1], corner_gids[2], corner_gids[3]]);
+            // The recorded parent gid `p` may be held by an unrelated element
+            // (gid spaces differ across refine rounds) — inserting would
+            // silently drop that element.  Use a fresh gid instead; the gids
+            // are renumbered by the rebuild anyway (they only order the
+            // sorted output).
+            let pg_new = if elems.contains_key(&p) {
+                next_gid += 1;
+                next_gid - 1
+            } else {
+                p
+            };
+            elems.insert(pg_new, vec![tag, corner_gids[0], corner_gids[1], corner_gids[2], corner_gids[3]]);
             executed.push(p);
         }
         let chosen = executed;

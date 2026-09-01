@@ -85,10 +85,14 @@ pub fn l2_zz_rt1_estimator_global(
     global_edges.sort_unstable();
     global_edges.dedup();
     if std::env::var("PEX15_DBG").is_ok() {
-        eprintln!("[dbg-rt1] local_edges={} global_edges={} n_nodes_local={n_nodes_local} n_owned={n_owned} n_ghost={}",
-            local_edges.len(), global_edges.len(), partition.n_ghost_elems);
-        let maxg = node_gid.iter().max().copied().unwrap_or(0);
-        eprintln!("[dbg-rt1] max node_gid={maxg}");
+        // Which global edges are NOT referenced by any owned element?
+        let used: std::collections::HashSet<(u32, u32)> = local_edges.iter().copied().collect();
+        let unused: Vec<(u32, u32)> = global_edges.iter().copied().filter(|e| !used.contains(e)).collect();
+        eprintln!("[dbg-rt1] local_edges={} global_edges={} unused_by_owned={}",
+            local_edges.len(), global_edges.len(), unused.len());
+        for &e in unused.iter().take(5) {
+            eprintln!("[dbg-rt1]   unused edge {e:?}");
+        }
     }
     let edge_dof = build_edge_dof_map(&global_edges);
     let n_edges_global = global_edges.len() as u32;
@@ -98,6 +102,24 @@ pub fn l2_zz_rt1_estimator_global(
     //  2. Owned-element assembly (global dof ids) 
     let owned: Vec<ElemId> = (0..n_owned).map(|e| e as ElemId).collect();
     let mut b_local = vec![0.0f64; n_dofs];
+    if std::env::var("PEX15_DBG").is_ok() {
+        // Check global elem id uniqueness (dup gids = rebuild bug).
+        let mut seen: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for e in 0..n_owned as u32 {
+            seen.entry(partition.global_elem(e)).or_default().push(e);
+        }
+        let dups: Vec<_> = seen.iter().filter(|(_, v)| v.len() > 1).collect();
+        if !dups.is_empty() {
+            eprintln!("[dbg-rt1] DUP ELEM GIDS: {}", dups.len());
+            for (g, v) in dups.iter().take(5) {
+                eprintln!("[dbg-rt1]   gid {g} local elems {v:?}");
+            }
+        } else {
+            eprintln!("[dbg-rt1] elem gids unique ({} owned)", n_owned);
+        }
+        eprintln!("[dbg-rt1] n_owned={n_owned} n_local={n_local} n_dofs={n_dofs} n_edges={n_edges_global} n_int_base={}",
+            n_edges_global * 2);
+    }
     let coo_local = assemble_rt1_system(
         local_mesh, &node_gid, &elem_dofs, u_dm, &owned, &elem_gid, &edge_dof,
         n_edges_global, &mut b_local,
@@ -126,12 +148,12 @@ pub fn l2_zz_rt1_estimator_global(
         let mut coos = vec![Vec::new(); size as usize];
         let mut bs = vec![Vec::new(); size as usize];
         for (src, bytes) in coo_recv {
-            let mut v = Vec::with_capacity(bytes.len() / 20);
-            for chunk in bytes.chunks_exact(20) {
+            let mut v = Vec::with_capacity(bytes.len() / 16);
+            for chunk in bytes.chunks_exact(16) {
                 v.push((
                     u32::from_le_bytes(chunk[0..4].try_into().unwrap()),
                     u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
-                    f64::from_le_bytes(chunk[8..20].try_into().unwrap()),
+                    f64::from_le_bytes(chunk[8..16].try_into().unwrap()),
                 ));
             }
             coos[src as usize] = v;
@@ -149,11 +171,34 @@ pub fn l2_zz_rt1_estimator_global(
     };
 
     let slaves = {
-        // Global node coordinates for edge-orientation signs.
+        // Global node coordinates for edge-orientation signs.  In np>1 the
+        // local partition table covers only the local nodes, but the merged
+        // hang_global constraints reference cross-rank nodes — collect every
+        // rank's node coordinates (gid → coords) so all constraint endpoints
+        // resolve (pex15 np2: coords[&a] missing → panic).
         let mut gcoords: HashMap<u32, [f64; 2]> = HashMap::new();
         for n in 0..n_nodes_local as u32 {
             let c = local_mesh.coords_of(n as fem_core::NodeId);
             gcoords.insert(node_gid[n as usize], [c[0], c[1]]);
+        }
+        if comm.size() > 1 {
+            let mut payload = Vec::with_capacity(n_nodes_local * 20);
+            for &g in &node_gid {
+                let c = gcoords[&g];
+                payload.extend_from_slice(&g.to_le_bytes());
+                payload.extend_from_slice(&c[0].to_le_bytes());
+                payload.extend_from_slice(&c[1].to_le_bytes());
+            }
+            let sends: Vec<(fem_core::Rank, Vec<u8>)> =
+                (0..comm.size() as i32).map(|r| (r, payload.clone())).collect();
+            for (_src, bytes) in comm.alltoallv_bytes(&sends) {
+                for chunk in bytes.chunks_exact(20) {
+                    let g = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                    let x = f64::from_le_bytes(chunk[4..12].try_into().unwrap());
+                    let y = f64::from_le_bytes(chunk[12..20].try_into().unwrap());
+                    gcoords.entry(g).or_insert([x, y]);
+                }
+            }
         }
         let raw = rt1_hanging_constraints(hang_global, &edge_dof, &gcoords);
         if std::env::var("PEX15_DBG").is_ok() && rank == 0 {
@@ -202,6 +247,9 @@ pub fn l2_zz_rt1_estimator_global(
             let dmin = diag.values().cloned().fold(f64::MAX, f64::min);
             let dmax = diag.values().cloned().fold(0.0f64, f64::max);
             eprintln!("[dbg-rt1] diag: min={dmin:.3e} max={dmax:.3e}");
+            for b in [3386u32, 3388, 3958, 3960] {
+                eprintln!("[dbg-rt1]   orig base {b} diag = {:?}", diag.get(&b));
+            }
         }
         solve_rt1_projection(&coo_all, &b_all, n_dofs, &slaves)
     } else {

@@ -228,6 +228,16 @@ impl MeshPartition {
         if self.node_id_identity {
             local_id
         } else {
+            if (local_id as usize) >= self.global_node_ids.len() {
+                if std::env::var("PEX15_DBG").is_ok() {
+                    eprintln!(
+                        "[dbg-gn] global_node({local_id}) OOB len={} n_owned={} n_total={}",
+                        self.global_node_ids.len(),
+                        self.n_owned_nodes,
+                        self.n_owned_nodes + self.n_ghost_nodes
+                    );
+                }
+            }
             self.global_node_ids[local_id as usize]
         }
     }

@@ -3253,7 +3253,8 @@ impl NCStateQuad {
             let centre = |e: ElemId,
                               center_map: &mut HashMap<ElemId, NodeId>,
                               new_coords: &mut Vec<f64>,
-                              next_node: &mut NodeId| -> NodeId {
+                              next_node: &mut NodeId,
+                              coord_to_node: &HashMap<String, NodeId>| -> NodeId {
                 if let Some(&c) = center_map.get(&e) { return c; }
                 // MFEM XY split centre: midel = nodes.GetId(mid01, mid23) with
                 // CalcVertexPos = 0.5·pos(mid01) + 0.5·pos(mid23), where each
@@ -3270,8 +3271,25 @@ impl NCStateQuad {
                     let xb = mesh.coords_of(ns2[3]);
                     (0.5 * xa[0] + 0.5 * xb[0], 0.5 * xa[1] + 0.5 * xb[1])
                 };
-                new_coords.push(0.5 * m01x + 0.5 * m23x);
-                new_coords.push(0.5 * m01y + 0.5 * m23y);
+                let cx = 0.5 * m01x + 0.5 * m23x;
+                let cy = 0.5 * m01y + 0.5 * m23y;
+                // MFEM `nodes.GetId(mid01, mid23)`: the centre of a refined
+                // element may already exist in the mesh — a *derefined*
+                // (recovered) parent keeps its old centre node (the parallel
+                // derefine rebuilds compact nodes, and the old centre is
+                // still referenced by finer surviving neighbours), so a later
+                // re-refinement of the same element would otherwise duplicate
+                // the centre coordinate (pex15 t=0.01: dup nodes 528↔678 →
+                // overlapping elements 145/281 → rebuild_partition_nc panic).
+                let mkey = format!("{:.9},{:.9}", cx, cy);
+                if let Some(&m) = coord_to_node.get(&mkey) {
+                    if ns2.iter().all(|&n| n != m) {
+                        center_map.insert(e, m);
+                        return m;
+                    }
+                }
+                new_coords.push(cx);
+                new_coords.push(cy);
                 let id = *next_node;
                 *next_node += 1;
                 center_map.insert(e, id);
@@ -3283,22 +3301,22 @@ impl NCStateQuad {
                 match ch {
                     0 => {
                         let _ = mid(n0, n1, &mut midpoint_map, &mut new_coords, &mut next_node);
-                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node, &coord_to_node);
                         let _ = mid(n3, n0, &mut midpoint_map, &mut new_coords, &mut next_node);
                     }
                     1 => {
                         let _ = mid(n0, n1, &mut midpoint_map, &mut new_coords, &mut next_node);
                         let _ = mid(n1, n2, &mut midpoint_map, &mut new_coords, &mut next_node);
-                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node, &coord_to_node);
                     }
                     2 => {
-                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node, &coord_to_node);
                         let _ = mid(n1, n2, &mut midpoint_map, &mut new_coords, &mut next_node);
                         let _ = mid(n2, n3, &mut midpoint_map, &mut new_coords, &mut next_node);
                     }
                     3 => {
                         let _ = mid(n3, n0, &mut midpoint_map, &mut new_coords, &mut next_node);
-                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node);
+                        let _ = centre(e, &mut center_map, &mut new_coords, &mut next_node, &coord_to_node);
                         let _ = mid(n2, n3, &mut midpoint_map, &mut new_coords, &mut next_node);
                     }
                     _ => unreachable!(),

@@ -574,29 +574,71 @@ fn rebuild_partition_nc(
                 entry_node = el[exit] as i64;
             }
         }
+        let n_part = partition.global_node_ids.len();
         for e in 0..n_refined as ElemId {
             let ns = refined.elem_nodes(e);
-            // A refined (child) element has a centre node: a new node that is
-            // not an edge midpoint, sitting exactly at its parent's centroid.
-            let centre = ns
+            // Centre node of the element: a node whose coordinates match the
+            // XY-split centroid of some coarse element AND whose parent's
+            // structure is verified — exactly one parent corner and ≥2 of
+            // the parent's edge midpoints (by coordinate) are among this
+            // element's nodes.  A refined CHILD is [parent corner, parent
+            // edge mid, parent centre, parent edge mid]: it holds 1 corner
+            // and 2 edge midpoints of its parent.  A GRANDCHILD holds the
+            // grandparent's centre (as its own parent's corner) but only ≤1
+            // of the grandparent's edge midpoints (its own parent's other
+            // corners are the grandparent's ¼ points / centre), so the
+            // midpoint count disambiguates (gid collisions: pex15 it2).
+            let centre_node = ns
                 .iter()
-                .find(|&&n| (n as usize) >= n_orig && !mid_values.contains(&n))
+                .find(|&&n| {
+                    let c = refined.node_coords(n);
+                    let key = (c[0].to_bits(), c[1].to_bits());
+                    match centroid_to_elem.get(&key) {
+                        Some(&ce) => {
+                            let pns = local_mesh.elem_nodes(ce as u32);
+                            let pc = |i: usize| local_mesh.node_coords(pns[i]);
+                            let mut n_corners = 0usize;
+                            let mut n_mid = 0usize;
+                            for i in 0..4 {
+                                if ns.iter().any(|&nn| nn == pns[i]) {
+                                    n_corners += 1;
+                                }
+                                let (mx, my) = (
+                                    0.5 * pc(i)[0] + 0.5 * pc((i + 1) % 4)[0],
+                                    0.5 * pc(i)[1] + 0.5 * pc((i + 1) % 4)[1],
+                                );
+                                if ns.iter().any(|&nn| {
+                                    let nc = refined.node_coords(nn);
+                                    (nc[0] - mx).abs() < 1e-9 && (nc[1] - my).abs() < 1e-9
+                                }) {
+                                    n_mid += 1;
+                                }
+                            }
+                            n_corners == 1 && n_mid >= 2
+                        }
+                        None => false,
+                    }
+                })
                 .copied();
-            let parent = if let Some(c) = centre {
-                let cxy = refined.node_coords(c);
-                let key = (cxy[0].to_bits(), cxy[1].to_bits());
-                centroid_to_elem
-                    .get(&key)
-                    .map(|&coarse_e| partition.global_elem(coarse_e as u32))
-            } else {
-                // Unrefined element: all old nodes, match the coarse element
-                // by its (sorted) node-gid set.
-                let mut gids: Vec<u32> =
-                    ns.iter().map(|&n| partition.global_node(n)).collect();
-                gids.sort_unstable();
-                coarse_by_nodes
-                    .get(&gids)
-                    .map(|&coarse_e| partition.global_elem(coarse_e as u32))
+            let centre_match = centre_node.map(|cn| {
+                let c = refined.node_coords(cn);
+                centroid_to_elem[&(c[0].to_bits(), c[1].to_bits())]
+            });
+            let parent = match centre_match {
+                Some(ce) => Some(partition.global_elem(ce as u32)),
+                None => {
+                    // Unrefined element: all old nodes, match the coarse
+                    // element by its (sorted) node-gid set.
+                    let mut gids: Vec<u32> = ns
+                        .iter()
+                        .filter(|&&n| (n as usize) < n_part)
+                        .map(|&n| partition.global_node(n))
+                        .collect();
+                    gids.sort_unstable();
+                    coarse_by_nodes
+                        .get(&gids)
+                        .map(|&coarse_e| partition.global_elem(coarse_e as u32))
+                }
             };
             let pg = parent.unwrap_or_else(|| {
                 let ns = refined.elem_nodes(e);
@@ -618,10 +660,9 @@ fn rebuild_partition_nc(
             // Hilbert state then gives the child's position in the SFC output
             // order.  Cross-rank consistent because slot (geometry) and
             // state (global coarse table) both are.
-            let k: u32 = if centre.is_some() {
+            let k: u32 = if centre_node.is_some() {
                 let coarse_e = gid_to_coarse[&pg];
                 let pns = local_mesh.elem_nodes(coarse_e as u32);
-                let n_part = partition.global_node_ids.len();
                 let corner_gid = ns
                     .iter()
                     .filter(|&&n| (n as usize) < n_orig && (n as usize) < n_part)
@@ -642,6 +683,63 @@ fn rebuild_partition_nc(
                             .filter(|&&pn| (pn as usize) < n_part)
                             .map(|&pn| gid_of(pn))
                             .collect();
+                        if std::env::var("PEX15_DBG").is_ok() {
+                            let c = |n: NodeId| {
+                                let cc = refined.node_coords(n);
+                                format!("({:.9}, {:.9})", cc[0], cc[1])
+                            };
+                            let pc = |n: NodeId| {
+                                let cc = local_mesh.node_coords(n);
+                                format!("({:.9}, {:.9})", cc[0], cc[1])
+                            };
+                            eprintln!(
+                                "[dbg-rebuild] child {e} nodes {ns:?} coords {}{}{}{}",
+                                c(ns[0]), c(ns[1]), c(ns[2]), c(ns[3])
+                            );
+                            eprintln!(
+                                "[dbg-rebuild] coarse_e {coarse_e} nodes {pns:?} coords {}{}{}{}",
+                                pc(pns[0]), pc(pns[1]), pc(pns[2]), pc(pns[3])
+                            );
+                            let c0 = local_mesh.node_coords(pns[0]);
+                            let c1 = local_mesh.node_coords(pns[1]);
+                            let c2 = local_mesh.node_coords(pns[2]);
+                            let c3 = local_mesh.node_coords(pns[3]);
+                            let (m01x, m01y) = (0.5 * c0[0] + 0.5 * c1[0], 0.5 * c0[1] + 0.5 * c1[1]);
+                            let (m23x, m23y) = (0.5 * c2[0] + 0.5 * c3[0], 0.5 * c2[1] + 0.5 * c3[1]);
+                            eprintln!(
+                                "[dbg-rebuild] coarse centre ({:.9}, {:.9}) key ({:016x},{:016x})",
+                                0.5 * m01x + 0.5 * m23x, 0.5 * m01y + 0.5 * m23y,
+                                (0.5 * m01x + 0.5 * m23x).to_bits(), (0.5 * m01y + 0.5 * m23y).to_bits()
+                            );
+                            if let Some(cen) = centre_node {
+                                let cxy = refined.node_coords(cen);
+                                eprintln!(
+                                    "[dbg-rebuild] child centre node {cen} coord ({:.9}, {:.9}) key ({:016x},{:016x})",
+                                    cxy[0], cxy[1], cxy[0].to_bits(), cxy[1].to_bits()
+                                );
+                            }
+                            // List all coarse elements whose centre matches
+                            // within 1e-9 (the centroid_to_elem key is
+                            // bit-exact; this shows near-misses).
+                            let cxy = refined.node_coords(centre_node.unwrap());
+                            for e2 in 0..n_local_elems {
+                                let qns = local_mesh.elem_nodes(e2 as u32);
+                                let q0 = local_mesh.node_coords(qns[0]);
+                                let q1 = local_mesh.node_coords(qns[1]);
+                                let q2 = local_mesh.node_coords(qns[2]);
+                                let q3 = local_mesh.node_coords(qns[3]);
+                                let (mx, my) = (
+                                    0.5 * (0.5 * q0[0] + 0.5 * q1[0]) + 0.5 * (0.5 * q2[0] + 0.5 * q3[0]),
+                                    0.5 * (0.5 * q0[1] + 0.5 * q1[1]) + 0.5 * (0.5 * q2[1] + 0.5 * q3[1]),
+                                );
+                                if (mx - cxy[0]).abs() < 1e-6 && (my - cxy[1]).abs() < 1e-6 {
+                                    eprintln!(
+                                        "[dbg-rebuild]   coarse elem {e2} gid {} centre ({:.9}, {:.9}) nodes {:?}",
+                                        partition.global_elem(e2 as u32), mx, my, qns
+                                    );
+                                }
+                            }
+                        }
                         panic!(
                             "rebuild_partition_nc: refined Quad4 child {e} \
                              (nodes {ns:?} gids {pgids:?}) of parent {pg} \
@@ -666,10 +764,75 @@ fn rebuild_partition_nc(
             new_elem_gid[e as usize] = (prefix[pg as usize] + k as usize) as u32;
             let coarse_e = gid_to_coarse[&pg];
             new_elem_owner[e as usize] = partition.elem_owner[coarse_e];
-            if let Some(c) = centre {
+            if let Some(c) = centre_node {
                 local_centers
                     .entry(pg)
                     .or_insert((c, partition.elem_owner[coarse_e]));
+            }
+        }
+        if std::env::var("PEX15_DBG").is_ok() {
+            // Duplicate gid detection for this round.
+            let mut seen: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+            for (e, &g) in new_elem_gid.iter().enumerate() {
+                seen.entry(g).or_default().push(e);
+            }
+            let dups: Vec<_> = seen.iter().filter(|(_, v)| v.len() > 1).collect();
+            if !dups.is_empty() {
+                eprintln!("[dbg-rebuild] DUP GID this round: {}", dups.len());
+                for (g, v) in dups.iter().take(6) {
+                    eprintln!("[dbg-rebuild]   gid {g} local {v:?}");
+                    // Recompute parent assignment per conflicting element.
+                    for &e in v.iter().take(2) {
+                        let ns2 = refined.elem_nodes(e as ElemId);
+                        let centre2 = ns2.iter().find(|&&nn| {
+                            let cc = refined.node_coords(nn);
+                            let kk = (cc[0].to_bits(), cc[1].to_bits());
+                            match centroid_to_elem.get(&kk) {
+                                Some(&ce) => {
+                                    let pns2 = local_mesh.elem_nodes(ce as u32);
+                                    let pc2 = |i: usize| local_mesh.node_coords(pns2[i]);
+                                    let mut nc = 0usize;
+                                    let mut nm = 0usize;
+                                    for i in 0..4 {
+                                        if ns2.iter().any(|&nnn| nnn == pns2[i]) { nc += 1; }
+                                        let (mx, my) = (
+                                            0.5 * pc2(i)[0] + 0.5 * pc2((i + 1) % 4)[0],
+                                            0.5 * pc2(i)[1] + 0.5 * pc2((i + 1) % 4)[1],
+                                        );
+                                        if ns2.iter().any(|&nnn| {
+                                            let ncc = refined.node_coords(nnn);
+                                            (ncc[0] - mx).abs() < 1e-9 && (ncc[1] - my).abs() < 1e-9
+                                        }) { nm += 1; }
+                                    }
+                                    nc == 1 && nm >= 2
+                                }
+                                None => false,
+                            }
+                        }).copied();
+                        let pg2 = match centre2 {
+                            Some(cn) => {
+                                let cc = refined.node_coords(cn);
+                                let ce = centroid_to_elem[&(cc[0].to_bits(), cc[1].to_bits())];
+                                Some(partition.global_elem(ce as u32))
+                            }
+                            None => {
+                                let mut gids2: Vec<u32> = ns2.iter()
+                                    .filter(|&&nn| (nn as usize) < n_part)
+                                    .map(|&nn| partition.global_node(nn)).collect();
+                                gids2.sort_unstable();
+                                coarse_by_nodes.get(&gids2).map(|&ce| partition.global_elem(ce as u32))
+                            }
+                        };
+                        let cstr = |n: NodeId| {
+                            let c = refined.node_coords(n);
+                            format!("({:.6},{:.6})", c[0], c[1])
+                        };
+                        eprintln!("[dbg-rebuild]     elem {e} pg={pg2:?} nodes {ns2:?} coords {}{}{}{}",
+                            cstr(ns2[0]), cstr(ns2[1]), cstr(ns2[2]), cstr(ns2[3]));
+                    }
+                }
+            } else {
+                eprintln!("[dbg-rebuild] gids unique this round ({n_refined})");
             }
         }
     } else {

@@ -259,6 +259,10 @@ pub fn assemble_rt1_system(
     for &e in elems {
         let gid = elem_gid(e);
         let nodes = mesh.elem_nodes(e);
+        if std::env::var("PEX15_DBG").is_ok() && (gid == 40 || gid == 41 || gid == 183) {
+            eprintln!("[dbg-rt1] assemble elem {e} gid {gid} nodes {nodes:?} n_int_base={n_int_base} interior_base={}",
+                n_int_base + gid * 4);
+        }
         let c = |i: usize| mesh.coords_of(nodes[i]);
         let ue: Vec<f64> = elem_dofs[e as usize]
             .iter()
@@ -460,16 +464,27 @@ pub fn solve_rt1_projection(
     if std::env::var("PEX15_DBG").is_ok() {
         let mut dmin = f64::MAX;
         let mut dmax = 0.0f64;
+        let mut n_zero_rows = 0usize;
         for i in 0..n_true {
+            let mut row_norm2 = 0.0f64;
             for k in a_true.row_ptr[i]..a_true.row_ptr[i + 1] {
+                let v = a_true.values[k];
+                row_norm2 += v * v;
                 if a_true.col_idx[k] as usize == i {
-                    let v = a_true.values[k].abs();
-                    dmin = dmin.min(v);
-                    dmax = dmax.max(v);
+                    let av = v.abs();
+                    dmin = dmin.min(av);
+                    dmax = dmax.max(av);
+                }
+            }
+            if row_norm2 == 0.0 {
+                n_zero_rows += 1;
+                if n_zero_rows <= 20 {
+                    let base = i / 2;
+                    eprintln!("[dbg-rt1]   zero row {i} (free base {base} -> orig base {})", free_bases[base]);
                 }
             }
         }
-        eprintln!("[dbg-rt1] A_true diag: min={dmin:.3e} max={dmax:.3e} n_true={n_true}");
+        eprintln!("[dbg-rt1] A_true diag: min={dmin:.3e} max={dmax:.3e} n_true={n_true} zero_rows={n_zero_rows}");
         // Rebuild as dense to check eigenvalues (small systems only).
         if n_true <= 4000 {
             let mut mat = nalgebra::DMatrix::<f64>::zeros(n_true, n_true);
