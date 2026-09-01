@@ -8,7 +8,7 @@ use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 
 use super::surface::get_coord3;
-use super::surface::{SurfaceTri6BilinearIntegrator, SurfaceTri6LinearIntegrator};
+use super::surface::{surface_metric_at, pseudo_inverse, SurfaceTri6BilinearIntegrator, SurfaceTri6LinearIntegrator};
 
 // ─── P2 Jacobian and metric helpers ────────────────────────────────────────
 
@@ -35,31 +35,6 @@ fn p2_jacobian_at(x: &[[f64; 3]; 6], xi: f64, eta: f64) -> [[f64; 3]; 2] {
         for c in 0..3 { j0[c] += dxi[i] * x[i][c]; j1[c] += det[i] * x[i][c]; }
     }
     [j0, j1]
-}
-
-/// Metric tensor and surface area factor at a given Jacobian.
-fn surface_metric_at(j: &[[f64; 3]; 2]) -> (f64, f64) {
-    let g00: f64 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
-    let g01: f64 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
-    let g11: f64 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
-    let det_g: f64 = g00 * g11 - g01 * g01;
-    let sqrt_det_g: f64 = det_g.sqrt().max(1e-30);
-    (det_g, sqrt_det_g)
-}
-
-/// Pseudo-inverse for a 3x2 Jacobian.
-fn pseudo_inverse_tri6(j: &[[f64; 3]; 2], det_g: f64) -> [[f64; 2]; 3] {
-    let inv_det = 1.0 / det_g.max(1e-30);
-    let g00: f64 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
-    let g01: f64 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
-    let g11: f64 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
-    let ginvt = [[g11 * inv_det, -g01 * inv_det], [-g01 * inv_det, g00 * inv_det]];
-    let mut p = [[0.0; 2]; 3];
-    for r in 0..3 {
-        p[r][0] = ginvt[0][0] * j[0][r] + ginvt[0][1] * j[1][r];
-        p[r][1] = ginvt[1][0] * j[0][r] + ginvt[1][1] * j[1][r];
-    }
-    p
 }
 
 /// Surface Jacobian at centroid – public for use in error computation.
@@ -107,26 +82,30 @@ fn p2_surface_gradients_at(pinv: &[[f64; 2]; 3], xi: f64, eta: f64) -> [[f64; 3]
     sg
 }
 
-// ─── Tri6 surface integrators ─────────────────────────────────────────────
+// ─── P2 surface integrators ───────────────────────────────────────────────
 
-/// Surface diffusion (Laplace-Beltrami) for P2 (Tri6).
-/// Uses 3-point quadrature for accuracy on curved surfaces.
+/// Surface diffusion (Laplace-Beltrami) bilinear form for Tri6: `∫_Γ ∇_Γ u · ∇_Γ v dS`
 pub struct SurfaceTri6DiffusionIntegrator;
 
 impl SurfaceTri6DiffusionIntegrator {
     pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        let qpts = [[2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0], [1.0/6.0, 1.0/6.0]];
+        // 3-point Gauss quadrature on reference triangle
+        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
         let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
+
         for q in 0..3 {
             let (xi, eta) = (qpts[q][0], qpts[q][1]);
             let j = p2_jacobian_at(elem_nodes, xi, eta);
             let (det_g, sqrt_det_g) = surface_metric_at(&j);
-            let pinv = pseudo_inverse_tri6(&j, det_g);
+            let pinv = pseudo_inverse(&j, &[[j[0][0]*j[0][0]+j[0][1]*j[0][1]+j[0][2]*j[0][2], j[0][0]*j[1][0]+j[0][1]*j[1][1]+j[0][2]*j[1][2]], [j[0][0]*j[1][0]+j[0][1]*j[1][1]+j[0][2]*j[1][2], j[1][0]*j[1][0]+j[1][1]*j[1][1]+j[1][2]*j[1][2]]], det_g);
             let sg = p2_surface_gradients_at(&pinv, xi, eta);
-            let area_factor = qwt[q] * sqrt_det_g;
+
+            let area_factor = sqrt_det_g * qwt[q];
+
             for i in 0..6 {
                 for j in 0..6 {
-                    let dot = sg[i][0]*sg[j][0] + sg[i][1]*sg[j][1] + sg[i][2]*sg[j][2];
+                    let mut dot = 0.0;
+                    for c in 0..3 { dot += sg[i][c] * sg[j][c]; }
                     k_elem[i * 6 + j] += dot * area_factor;
                 }
             }
@@ -134,83 +113,71 @@ impl SurfaceTri6DiffusionIntegrator {
     }
 }
 
-/// Surface mass for P2 (Tri6): `int_Gamma u v dS` — 3-point quadrature
+/// Surface mass bilinear form for Tri6: `∫_Γ u v dS`
 pub struct SurfaceTri6MassIntegrator;
 
 impl SurfaceTri6MassIntegrator {
     pub fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        let qpts = [[2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0], [1.0/6.0, 1.0/6.0]];
+        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
         let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
+
         for q in 0..3 {
             let (xi, eta) = (qpts[q][0], qpts[q][1]);
             let j = p2_jacobian_at(elem_nodes, xi, eta);
             let (_det_g, sqrt_det_g) = surface_metric_at(&j);
-            let w = qwt[q] * sqrt_det_g;
             let phi = p2_basis_tri6(xi, eta);
+
+            let area_factor = sqrt_det_g * qwt[q];
+
             for i in 0..6 {
                 for j in 0..6 {
-                    k_elem[i * 6 + j] += phi[i] * phi[j] * w;
+                    k_elem[i * 6 + j] += phi[i] * phi[j] * area_factor;
                 }
             }
         }
     }
 }
 
-/// Surface domain source for P2 (Tri6): `int_Gamma f(x) v(x) dS`
+/// Surface domain source linear form for Tri6: `∫_Γ f(x) v(x) dS`
 pub struct SurfaceTri6DomainSourceIntegrator<'a> {
     pub f: &'a dyn Fn(&[f64; 3]) -> f64,
 }
 
 impl SurfaceTri6DomainSourceIntegrator<'_> {
     pub fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 6], f_elem: &mut [f64; 6]) {
-        let qpts = [[2.0/3.0, 1.0/6.0], [1.0/6.0, 2.0/3.0], [1.0/6.0, 1.0/6.0]];
+        let qpts = [[0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
         let qwt = [1.0/6.0, 1.0/6.0, 1.0/6.0];
+
         for q in 0..3 {
             let (xi, eta) = (qpts[q][0], qpts[q][1]);
             let j = p2_jacobian_at(elem_nodes, xi, eta);
             let (_det_g, sqrt_det_g) = surface_metric_at(&j);
-            let w = qwt[q] * sqrt_det_g;
             let phi = p2_basis_tri6(xi, eta);
-            let xp = [
-                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[0]).sum::<f64>(),
-                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[1]).sum::<f64>(),
-                phi.iter().zip(elem_nodes.iter()).map(|(&p, &n)| p * n[2]).sum::<f64>(),
-            ];
-            let f_val = (self.f)(&xp);
+
+            let area_factor = sqrt_det_g * qwt[q];
+
+            // Physical point for source evaluation
+            let mut x_phys = [0.0; 3];
             for i in 0..6 {
-                f_elem[i] += f_val * phi[i] * w;
+                for c in 0..3 {
+                    x_phys[c] += phi[i] * elem_nodes[i][c];
+                }
+            }
+            let f_val = (self.f)(&x_phys);
+
+            for i in 0..6 {
+                f_elem[i] += f_val * phi[i] * area_factor;
             }
         }
     }
 }
 
-// ─── Trait impls ───────────────────────────────────────────────────────────
+// ─── Surface Assembler for Tri6 ───────────────────────────────────────────
 
-impl SurfaceTri6BilinearIntegrator for SurfaceTri6DiffusionIntegrator {
-    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        self.add_to_element_matrix(elem_nodes, k_elem);
-    }
-}
-
-impl SurfaceTri6BilinearIntegrator for SurfaceTri6MassIntegrator {
-    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
-        self.add_to_element_matrix(elem_nodes, k_elem);
-    }
-}
-
-impl SurfaceTri6LinearIntegrator for SurfaceTri6DomainSourceIntegrator<'_> {
-    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 6], f_elem: &mut [f64; 6]) {
-        self.add_to_element_vector(elem_nodes, f_elem);
-    }
-}
-
-// ─── Tri6 Surface Assembler ───────────────────────────────────────────────
-
-/// Assemble surface forms on Tri6 (P2, 6-node) elements.
+/// Assemble a surface bilinear form using a Tri6 surface integrator.
 pub struct SurfaceTri6Assembler;
 
 impl SurfaceTri6Assembler {
-    /// Assemble a bilinear form over all Tri6 elements.
     pub fn assemble_bilinear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceTri6BilinearIntegrator],
@@ -219,15 +186,19 @@ impl SurfaceTri6Assembler {
         let n_dofs = space.n_dofs();
         let ne = mesh.n_elements() as u32;
         let mut coo = CooMatrix::new(n_dofs, n_dofs);
+
         for e in 0..ne {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
             if nodes.len() < 6 { continue; }
-            let x: [[f64; 3]; 6] = {
-                let mut arr = [[0.0; 3]; 6];
-                for i in 0..6 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
-                arr
-            };
+            let x: [[f64; 3]; 6] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+                get_coord3(mesh, nodes[4]),
+                get_coord3(mesh, nodes[5]),
+            ];
             let mut ke = [0.0; 36];
             for integ in integrators {
                 integ.add_to_element_matrix(&x, &mut ke);
@@ -241,7 +212,6 @@ impl SurfaceTri6Assembler {
         coo.into_csr()
     }
 
-    /// Assemble a linear form over all Tri6 elements.
     pub fn assemble_linear<S: FESpace>(
         space: &S,
         integrators: &[&dyn SurfaceTri6LinearIntegrator],
@@ -250,15 +220,19 @@ impl SurfaceTri6Assembler {
         let n_dofs = space.n_dofs();
         let ne = mesh.n_elements() as u32;
         let mut rhs = vec![0.0; n_dofs];
+
         for e in 0..ne {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
             if nodes.len() < 6 { continue; }
-            let x: [[f64; 3]; 6] = {
-                let mut arr = [[0.0; 3]; 6];
-                for i in 0..6 { let c = get_coord3(mesh, nodes[i]); arr[i] = [c[0], c[1], c[2]]; }
-                arr
-            };
+            let x: [[f64; 3]; 6] = [
+                get_coord3(mesh, nodes[0]),
+                get_coord3(mesh, nodes[1]),
+                get_coord3(mesh, nodes[2]),
+                get_coord3(mesh, nodes[3]),
+                get_coord3(mesh, nodes[4]),
+                get_coord3(mesh, nodes[5]),
+            ];
             let mut fe = [0.0; 6];
             for integ in integrators {
                 integ.add_to_element_vector(&x, &mut fe);
@@ -268,5 +242,44 @@ impl SurfaceTri6Assembler {
             }
         }
         rhs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tri6_surface_diffusion_runs() {
+        let x = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.5, 0.0],
+        ];
+        let integ = SurfaceTri6DiffusionIntegrator;
+        let mut ke = [0.0; 36];
+        integ.add_to_element_matrix(&x, &mut ke);
+        let trace: f64 = (0..6).map(|i| ke[i * 6 + i]).sum();
+        assert!(trace > 0.0, "diffusion matrix trace should be positive");
+    }
+
+    #[test]
+    fn tri6_surface_mass_runs() {
+        let x = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.5, 0.0],
+        ];
+        let integ = SurfaceTri6MassIntegrator;
+        let mut ke = [0.0; 36];
+        integ.add_to_element_matrix(&x, &mut ke);
+        let trace: f64 = (0..6).map(|i| ke[i * 6 + i]).sum();
+        assert!(trace > 0.0, "mass matrix trace should be positive");
     }
 }

@@ -63,7 +63,7 @@ fn surface_jacobian(x: &[[f64; 3]; 3]) -> ([[f64; 3]; 2], [[f64; 2]; 2], f64, [f
 /// Compute the pseudo-inverse J_pinv = (JᵀJ)⁻¹Jᵀ  �?2×3 matrix.
 ///
 /// Used for surface gradient: `∇_Γ u = J_pinvᵀ · ∇_ξ u = G⁻�?· Jᵀ · ∇_ξ u`
-fn pseudo_inverse(j: &[[f64; 3]; 2], g: &[[f64; 2]; 2], det_g: f64) -> [[f64; 2]; 3] {
+pub fn pseudo_inverse(j: &[[f64; 3]; 2], g: &[[f64; 2]; 2], det_g: f64) -> [[f64; 2]; 3] {
     let inv_det = 1.0 / det_g.max(1e-30);
     let g_inv_00 = g[1][1] * inv_det;
     let g_inv_01 = -g[0][1] * inv_det;
@@ -649,13 +649,18 @@ pub fn q2_jacobian_at(x: &[[f64; 3]; 9], xi: f64, eta: f64) -> [[f64; 3]; 2] {
     [j0, j1]
 }
 
-/// Metric tensor and surface area factor from a 2×3 Jacobian.
-fn q2_metric_at(j: &[[f64; 3]; 2]) -> (f64, f64) {
+/// Metric tensor and surface area factor at a given Jacobian.
+pub fn surface_metric_at(j: &[[f64; 3]; 2]) -> (f64, f64) {
     let g00 = j[0][0]*j[0][0] + j[0][1]*j[0][1] + j[0][2]*j[0][2];
     let g01 = j[0][0]*j[1][0] + j[0][1]*j[1][1] + j[0][2]*j[1][2];
     let g11 = j[1][0]*j[1][0] + j[1][1]*j[1][1] + j[1][2]*j[1][2];
     let det_g = g00 * g11 - g01 * g01;
     (det_g, det_g.sqrt().max(1e-30))
+}
+
+/// Metric tensor and surface area factor from a 2×3 Jacobian (Quad variant, delegates to surface_metric_at).
+fn q2_metric_at(j: &[[f64; 3]; 2]) -> (f64, f64) {
+    surface_metric_at(j)
 }
 
 /// Pseudo-inverse for a 3×2 Jacobian (Quad9 variant).
