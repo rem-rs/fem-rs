@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use fem_amg::AmgConfig;
+use fem_solver::amg::AmgConfig;
 use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg, solve_hcurl_eigen_ame};
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d};
 use fem_mesh::{refine_uniform, Mesh};

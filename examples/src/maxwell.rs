@@ -41,7 +41,7 @@
 
 use std::collections::HashSet;
 
-use fem_amg::AmgConfig;
+use fem_solver::amg::AmgConfig;
 use fem_assembly::{
     DiscreteLinearOperator,
     HcurlMatrixFreeOperator, MatFreeOperator,

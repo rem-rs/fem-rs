@@ -10,7 +10,7 @@
 //! cargo run --release --example mfem_pex13_parallel_eigenvalue -- --ranks 4
 //! ```
 
-use fem_amg::AmgConfig;
+use fem_solver::amg::AmgConfig;
 use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_ame};
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, Mesh};

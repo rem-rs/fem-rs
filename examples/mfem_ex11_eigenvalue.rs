@@ -18,7 +18,7 @@
 //! cargo run --example mfem_ex11_eigenvalue -- -m data/ball-nurbs.mesh -rs 0 -n 3 -o -1
 //! ```
 
-use fem_amg::{AmgConfig, solve_amg_cg};
+use fem_solver::amg::{AmgConfig, solve_amg_cg};
 use fem_assembly::{
     Assembler, postproc::vector_l2_norm,
     standard::{DiffusionIntegrator, MassIntegrator},

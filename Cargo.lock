@@ -914,6 +914,7 @@ name = "fem-solver"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "fem-amg",
  "fem-assembly",
  "fem-core",
  "fem-element",

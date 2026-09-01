@@ -1,5 +1,3 @@
-#![allow(clippy::needless_range_loop)]
-
 //! # fem-space
 //!
 //! Finite element spaces: DOF management for H¹, L², H(curl), and H(div).
@@ -27,17 +25,14 @@ pub mod iga_fe_space;
 pub mod p_refine;
 pub mod vector_h1;
 pub mod block_fe_space;
-pub mod cr_space;
-pub mod vem;
 pub mod dpg_trace;
 
-pub mod complex;
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
 pub use ordering::Ordering;
 pub use h1::H1Space;
-pub use cr_space::CRSpace;
+
 pub use l2::{L2Basis, L2Space};
 pub use hcurl::HCurlSpace;
 pub use hdiv::HDivSpace;
@@ -47,5 +42,4 @@ pub use constraints::{apply_dirichlet, apply_dirichlet_diag_one, eliminate_diric
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use dpg_trace::{DpgTraceSpace, FaceInfo};
-pub use complex::ComplexGridFunction;
 

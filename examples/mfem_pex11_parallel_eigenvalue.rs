@@ -15,7 +15,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use fem_amg::{AmgConfig, solve_amg_cg};
+use fem_solver::amg::{AmgConfig, solve_amg_cg};
 use fem_assembly::{
     Assembler,
     standard::{DiffusionIntegrator, MassIntegrator},

@@ -21,7 +21,7 @@
 //! cargo run --example mfem_ex12_elastic_eigen -- -m data/beam-hex-nurbs.mesh -n 3 -o -1
 //! ```
 
-use fem_amg::{AmgConfig, AmgHierarchy, CycleType};
+use fem_solver::amg::{AmgConfig, AmgHierarchy, CycleType};
 use fem_assembly::{
     Assembler, postproc::vector_l2_norm,
     standard::{ElasticityIntegrator, VectorH1MassIntegrator},
@@ -98,7 +98,7 @@ fn solve_eig(a: &CsrMatrix<f64>, m: &CsrMatrix<f64>, ess: &[usize],
             // Nodal (system) AMG on the BC-eliminated A: the byNODES vector
             // layout needs hypre-SetNodal-style block-diagonal interpolation —
             // plain scalar RS-AMG is non-SPD on the 2×2 block matrix.
-            use fem_amg::CoarsenStrategy;
+            use fem_solver::amg::CoarsenStrategy;
             let la = fem_to_linlvo_csr(&ab);
             let mut amg_cfg = AmgConfig::default();
             amg_cfg.strategy = CoarsenStrategy::RugeStüben;
