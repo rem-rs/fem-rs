@@ -14,7 +14,6 @@ pub mod boundary;
 pub mod cad;
 pub mod curved;
 pub mod element_type;
-pub mod step_iges;
 pub mod point_locator;
 pub mod simplex;
 pub mod submesh;
