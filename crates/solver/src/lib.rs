@@ -118,8 +118,6 @@ pub mod events;
 pub mod geometric_mg;
 pub mod lor;
 pub mod multiphysics;
-pub mod multiphysics_sync;
-pub mod multiphysics_templates;
 pub mod multirate;
 pub mod ode;
 pub mod blockilu;
@@ -149,15 +147,7 @@ pub use multiphysics::{
     CoupledLinearStrategy, CoupledNewtonConfig, CoupledNewtonResult, CoupledNewtonSolver,
     CoupledProblem, CoupledSolveError,
 };
-pub use multiphysics_sync::{
-    compose_sync_error, compose_weighted_sync_error, RelativeL2Tracker, RelativeScalarTracker,
-    TemplateSyncPolicy,
-};
-pub use multiphysics_templates::{
-    builtin_template_catalog, builtin_template_spec, BuiltinMultiphysicsTemplate,
-    MultiphysicsTemplateNode, MultiphysicsTemplateSpec, TemplateCouplingStyle,
-    TemplateRuntimeConfig,
-};
+
 pub use multirate::{
     run_multirate, run_multirate_adaptive, MultiRateAdaptiveConfig, MultiRateConfig,
     MultiRateError, MultiRateStats,
