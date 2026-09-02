@@ -129,10 +129,12 @@ fn poisson_bicgstab() {
 }
 
 // ── Non-conforming AMR convergence test ────────────────────────────────────
-
+/// NC AMR convergence test using the high-level error_estimate API.
 #[test]
 fn poisson_nc_amr_convergence() {
-    use fem_mesh::amr::{NCState, zz_estimator, dorfler_mark};
+    use fem_assembly::postproc::error_estimate::zz_estimator;
+    use fem_assembly::postproc::grid_function::GridFunction;
+    use fem_mesh::amr::NCState;
     use fem_space::constraints::{apply_hanging_constraints, recover_hanging_values};
     let mut mesh = Mesh::<2>::unit_square_tri(2);
     let mut nc_state = NCState::new();
@@ -163,8 +165,9 @@ fn poisson_nc_amr_convergence() {
         errors.push(err);
 
         if level < 5 {
-            let eta = zz_estimator(&mesh, &u);
-            let marked = dorfler_mark(&eta, 0.5);
+            let gf = GridFunction::new(&space, u.clone());
+            let indicators = zz_estimator(&gf);
+            let marked = indicators.dorfler_mark(0.5);
             let (new_mesh, new_c, _) = nc_state.refine(&mesh, &marked, 0);
             mesh = new_mesh;
             hanging_constraints = new_c;
