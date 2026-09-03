@@ -79,4 +79,99 @@ pub use raviart_thomas::{
 };
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};
+
+/// Map type for finite element spaces (MFEM 4.10).
+///
+/// Describes how DOFs are mapped from reference to physical space:
+/// - `VALUE`: Point values (standard Lagrange)
+/// - `INTEGRAL`: Integral moments (e.g., RT face integrals)
+/// - `H_DIV`: H(div) mapping (contravariant Piola)
+/// - `H_CURL`: H(curl) mapping (covariant Piola)
+/// - `H_DIV_R1D`: H(div) mapping for 1D elements
+/// - `H_CURL_R1D`: H(curl) mapping for 1D elements
+/// - `H_DIV_R2D`: H(div) mapping for 2D elements
+/// - `H_CURL_R2D`: H(curl) mapping for 2D elements
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MapType {
+    /// Point values (standard Lagrange).
+    VALUE = 1,
+    /// Integral moments (e.g., RT face integrals).
+    INTEGRAL = 2,
+    /// H(div) mapping (contravariant Piola).
+    H_DIV = 3,
+    /// H(curl) mapping (covariant Piola).
+    H_CURL = 4,
+    /// H(div) mapping for 1D elements.
+    H_DIV_R1D = 5,
+    /// H(curl) mapping for 1D elements.
+    H_CURL_R1D = 6,
+    /// H(div) mapping for 2D elements.
+    H_DIV_R2D = 7,
+    /// H(curl) mapping for 2D elements.
+    H_CURL_R2D = 8,
+}
+
+impl Default for MapType {
+    fn default() -> Self {
+        MapType::VALUE
+    }
+}
+
+impl MapType {
+    /// Returns `true` if this map type uses integral moments (no physical weight).
+    pub fn is_integral(&self) -> bool {
+        matches!(self, MapType::INTEGRAL)
+    }
+
+    /// Returns `true` if this map type uses H(div) mapping.
+    pub fn is_hdiv(&self) -> bool {
+        matches!(
+            self,
+            MapType::H_DIV | MapType::H_DIV_R1D | MapType::H_DIV_R2D
+        )
+    }
+
+    /// Returns `true` if this map type uses H(curl) mapping.
+    pub fn is_hcurl(&self) -> bool {
+        matches!(
+            self,
+            MapType::H_CURL | MapType::H_CURL_R1D | MapType::H_CURL_R2D
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MapType;
+
+    #[test]
+    fn map_type_is_integral() {
+        assert!(MapType::INTEGRAL.is_integral());
+        assert!(!MapType::VALUE.is_integral());
+        assert!(!MapType::H_DIV.is_integral());
+    }
+
+    #[test]
+    fn map_type_is_hdiv() {
+        assert!(MapType::H_DIV.is_hdiv());
+        assert!(MapType::H_DIV_R1D.is_hdiv());
+        assert!(MapType::H_DIV_R2D.is_hdiv());
+        assert!(!MapType::VALUE.is_hdiv());
+        assert!(!MapType::H_CURL.is_hdiv());
+    }
+
+    #[test]
+    fn map_type_is_hcurl() {
+        assert!(MapType::H_CURL.is_hcurl());
+        assert!(MapType::H_CURL_R1D.is_hcurl());
+        assert!(MapType::H_CURL_R2D.is_hcurl());
+        assert!(!MapType::VALUE.is_hcurl());
+        assert!(!MapType::H_DIV.is_hcurl());
+    }
+
+    #[test]
+    fn map_type_default() {
+        assert_eq!(MapType::default(), MapType::VALUE);
+    }
+}
 // Use fem_element::iga::* instead (migration target)
