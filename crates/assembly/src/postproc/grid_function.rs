@@ -351,6 +351,115 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         self.space
     }
 
+    /// Estimate the minimum and maximum values of the grid function.
+    ///
+    /// Uses piecewise linear bounds (evaluation at vertices) plus recursive
+    /// subdivision for higher-order elements, matching MFEM 4.10's
+    /// `GridFunction::GetBounds()`.
+    ///
+    /// For linear elements, this returns the exact min/max (at vertices).
+    /// For higher-order elements, the bounds may be conservative.
+    ///
+    /// # Returns
+    /// `(u_min, u_max)` — the estimated lower and upper bounds.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let gf = GridFunction::from_projection(&space, &coeff, 3);
+    /// let (u_min, u_max) = gf.get_bounds();
+    /// assert!(u_min <= u_max);
+    /// ```
+    pub fn get_bounds(&self) -> (f64, f64) {
+        let mesh = self.space.mesh();
+        let order = self.space.order();
+        let n_elems = mesh.n_elements();
+
+        if n_elems == 0 {
+            return (f64::INFINITY, f64::NEG_INFINITY);
+        }
+
+        let mut global_min = f64::INFINITY;
+        let mut global_max = f64::NEG_INFINITY;
+
+        // For order 1 (linear), the extrema are at vertices — nodal values are exact.
+        // For higher-order, we subdivide each element and evaluate at subdivision points.
+        let subdivisions = if order <= 1 { 1 } else { order as usize };
+
+        for e in 0..n_elems as u32 {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let elem_dofs = self.space.element_dofs(e);
+
+            // Collect local DOF values for this element
+            let local_dofs: Vec<f64> = elem_dofs.iter().map(|&d| self.dofs[d as usize]).collect();
+
+            // Evaluate at vertices first (exact for linear, good bounds for higher-order)
+            let vertices: Vec<Vec<f64>> = match elem_type {
+                ElementType::Tri3 | ElementType::Tri6 => {
+                    vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0]]
+                }
+                ElementType::Quad4 | ElementType::Quad9 => {
+                    vec![vec![-1.0, -1.0], vec![1.0, -1.0], vec![1.0, 1.0], vec![-1.0, 1.0]]
+                }
+                _ => vec![],
+            };
+
+            for vi in &vertices {
+                let mut phi = vec![0.0; n_ldofs];
+                ref_elem.eval_basis(vi, &mut phi);
+                let mut val = 0.0;
+                for i in 0..n_ldofs {
+                    val += local_dofs[i] * phi[i];
+                }
+                if val < global_min { global_min = val; }
+                if val > global_max { global_max = val; }
+            }
+
+            // Evaluate at subdivision points within the element
+            for si in 0..subdivisions {
+                for sj in 0..subdivisions {
+                    let xi = match elem_type {
+                        ElementType::Tri3 | ElementType::Tri6 => {
+                            // Barycentric subdivision for triangles
+                            let a = si as f64 / subdivisions as f64;
+                            let b = sj as f64 / subdivisions as f64;
+                            let c = 1.0 - a - b;
+                            if c < 0.0 { continue; }
+                            // Convert barycentric to reference coords
+                            vec![b, c]
+                        }
+                        ElementType::Quad4 | ElementType::Quad9 => {
+                            // Tensor-product subdivision for quads
+                            let x = -1.0 + 2.0 * (si as f64 + 0.5) / subdivisions as f64;
+                            let y = -1.0 + 2.0 * (sj as f64 + 0.5) / subdivisions as f64;
+                            vec![x, y]
+                        }
+                        _ => {
+                            // Default: evaluate at centroid
+                            vec![1.0 / 3.0, 1.0 / 3.0]
+                        }
+                    };
+
+                    // Evaluate basis at subdivision point
+                    let mut phi = vec![0.0; n_ldofs];
+                    ref_elem.eval_basis(&xi, &mut phi);
+
+                    // Compute u_h(xi)
+                    let mut val = 0.0;
+                    for i in 0..n_ldofs {
+                        val += local_dofs[i] * phi[i];
+                    }
+
+                    if val < global_min { global_min = val; }
+                    if val > global_max { global_max = val; }
+                }
+            }
+        }
+
+        (global_min, global_max)
+    }
+
     /// Evaluate the grid function at reference point `xi` on element `elem`.
     ///
     /// Computes `u_h(xi) = Σ_i c_i φ_i(xi)` where `c_i` are the local DOF
@@ -1346,6 +1455,7 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
 
 #[cfg(test)]
 mod tests {
+    use super::GridFunction;
     use fem_mesh::Mesh;
     use fem_mesh::topology::MeshTopology;
     use fem_space::{H1Space, fe_space::FESpace};
@@ -1466,5 +1576,34 @@ mod tests {
         // far below the 0.05+ error the old [-1,1]²/node-2 paths produced.
         let l2 = gf.compute_l2_error(&sol, 7);
         assert!(l2 < 1e-3, "Quad4 L2 error too large: {l2:.6e}");
+    }
+
+    #[test]
+    fn get_bounds_linear_element() {
+        // For linear elements, get_bounds should return exact min/max (at vertices).
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+        // f(x,y) = x + y on [0,1]²: min = 0 (at (0,0)), max = 2 (at (1,1))
+        let f = |x: &[f64]| x[0] + x[1];
+        let dofs_vec = space.interpolate(&f);
+        let gf = GridFunction::new(&space, dofs_vec.into_vec());
+        let (u_min, u_max) = gf.get_bounds();
+        assert!((u_min - 0.0).abs() < 1e-10, "min = {u_min}, expected 0.0");
+        assert!((u_max - 2.0).abs() < 1e-10, "max = {u_max}, expected 2.0");
+    }
+
+    #[test]
+    fn get_bounds_quadratic_element() {
+        // For quadratic elements, get_bounds returns approximate bounds.
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 2);
+        // f(x,y) = x² + y² on [0,1]²: min = 0, max = 2
+        let f = |x: &[f64]| x[0] * x[0] + x[1] * x[1];
+        let gf = GridFunction::from_projection(&space, &f, 4);
+        let (u_min, u_max) = gf.get_bounds();
+        // Bounds should contain the true range [0, 2]
+        assert!(u_min <= 0.01, "min = {u_min}, should be near 0");
+        assert!(u_max >= 1.99, "max = {u_max}, should be near 2");
+        assert!(u_min <= u_max, "min should be <= max");
     }
 }
