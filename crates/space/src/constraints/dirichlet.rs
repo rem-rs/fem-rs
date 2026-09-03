@@ -295,6 +295,93 @@ pub fn boundary_dofs(
     out
 }
 
+/// Extract the edge DOFs on the perimeter loop of a set of boundary elements.
+///
+/// Given a set of boundary tags, this function finds the edges that lie on
+/// the **boundary of the boundary region** — i.e., edges that belong to exactly
+/// one boundary face in the selected set.  These are the "perimeter" edges
+/// of the region.
+///
+/// This is useful for imposing boundary conditions on boundary edge DOFs
+/// (e.g., for H(curl) problems where tangential components on the boundary
+/// of a surface must be constrained).
+///
+/// Matches MFEM 4.10 `FiniteElementSpace::GetBoundaryLoopEdgeDofs`.
+///
+/// # Arguments
+/// * `mesh`  — mesh providing boundary face data
+/// * `dm`    — DOF manager for the space (provides edge-to-DOF mapping)
+/// * `tags`  — boundary tags to select
+///
+/// # Returns
+/// Sorted vector of edge DOF IDs on the perimeter loop.
+///
+/// # Example
+/// ```rust,ignore
+/// use fem_space::constraints::boundary_loop_edge_dofs;
+///
+/// // Get edge DOFs on the perimeter of boundary tags 1, 2
+/// let edge_dofs = boundary_loop_edge_dofs(&mesh, &dm, &[1, 2]);
+/// ```
+pub fn boundary_loop_edge_dofs(
+    mesh: &dyn fem_mesh::topology::MeshTopology,
+    dm:   &DofManager,
+    tags: &[i32],
+) -> Vec<DofId> {
+    use std::collections::HashMap;
+
+    // Count how many times each edge appears in the selected boundary faces.
+    // Edges that appear exactly once are on the perimeter.
+    let mut edge_count: HashMap<EdgeKey, u32> = HashMap::new();
+
+    for f in 0..mesh.n_boundary_faces() as u32 {
+        if tags.contains(&mesh.face_tag(f)) {
+            let nodes = mesh.face_nodes(f);
+            if nodes.len() <= 2 {
+                // 2D: boundary face is an edge (2 nodes) → 1 edge
+                if nodes.len() == 2 {
+                    let ek = EdgeKey::new(nodes[0], nodes[1]);
+                    *edge_count.entry(ek).or_insert(0) += 1;
+                }
+            } else {
+                // 3D: boundary face is a polygon (3+ nodes) → multiple edges
+                for i in 0..nodes.len() {
+                    let a = nodes[i];
+                    let b = nodes[(i + 1) % nodes.len()];
+                    let ek = EdgeKey::new(a, b);
+                    *edge_count.entry(ek).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Collect DOFs from edges that appear exactly once (perimeter edges)
+    let mut dof_set: std::collections::HashSet<DofId> = std::collections::HashSet::new();
+
+    for (ek, count) in &edge_count {
+        if *count == 1 {
+            // This edge is on the perimeter
+            if let Some(edge_dofs) = dm.edge_pk_map.get(ek) {
+                for &dof in edge_dofs {
+                    dof_set.insert(dof);
+                }
+            }
+            // Also check legacy edge_dof_map (P2) and edge_dof2_map (P3)
+            if let Some(&dof) = dm.edge_dof_map.get(ek) {
+                dof_set.insert(dof);
+            }
+            if let Some(&[d0, d1]) = dm.edge_dof2_map.get(ek) {
+                dof_set.insert(d0);
+                dof_set.insert(d1);
+            }
+        }
+    }
+
+    let mut out: Vec<DofId> = dof_set.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
 /// Convenience wrapper around [`boundary_dofs`] that returns `Vec<usize>` instead of `Vec<DofId>`.
 ///
 /// This is the most common type needed for constraint matrix construction,

@@ -30,7 +30,6 @@ pub use periodic::*;
 pub use prolong::*;
 pub use mpc::*;
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use fem_linalg::{CooMatrix, CsrMatrix};
@@ -91,6 +90,30 @@ mod tests {
         // At least some DOFs should be edge-midpoint DOFs (index >= n_nodes)
         let edge_dofs: Vec<_> = dofs.iter().filter(|&&d| d as usize >= n_nodes).collect();
         assert!(!edge_dofs.is_empty(), "no edge-midpoint boundary DOFs found for P2");
+    }
+
+    #[test]
+    fn boundary_loop_edge_dofs_perimeter() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let dm   = DofManager::new(&mesh, 2);
+        let loop_dofs = super::boundary_loop_edge_dofs(&mesh, &dm, &[1, 2, 3, 4]);
+        assert!(!loop_dofs.is_empty(), "no perimeter edge DOFs found");
+        for &d in &loop_dofs {
+            assert!((d as usize) < dm.n_dofs, "DOF {d} out of range");
+        }
+        for i in 1..loop_dofs.len() {
+            assert!(loop_dofs[i] > loop_dofs[i-1], "DOFs not sorted");
+        }
+    }
+
+    #[test]
+    fn boundary_loop_edge_dofs_partial() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let dm   = DofManager::new(&mesh, 2);
+        let full_dofs = super::boundary_loop_edge_dofs(&mesh, &dm, &[1, 2, 3, 4]);
+        let partial_dofs = super::boundary_loop_edge_dofs(&mesh, &dm, &[1]);
+        assert!(partial_dofs.len() <= full_dofs.len(),
+            "partial ({}) should give <= full ({})", partial_dofs.len(), full_dofs.len());
     }
 
     #[test]
