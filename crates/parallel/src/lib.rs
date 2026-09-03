@@ -178,6 +178,7 @@ pub use par_lobpcg::{par_lobpcg, ParLobpcgResult};
 pub use par_mesh::ParallelMesh;
 pub use par_projection::ParGradientProjector;
 pub use par_mixed_assembler::ParMixedAssembler;
+pub use par_mixed_assembler::{ParMixedSesquilinearForm, ParMixedComplexSystem};
 pub use par_ras::{
 	RasConfig, RasHpcDiagnostics, RasLocalSolverKind, RasPrecond, par_solve_gmres_ras,
 	par_solve_pcg_ras, summarize_ras_hpc,

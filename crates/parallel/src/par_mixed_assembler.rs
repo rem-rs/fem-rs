@@ -215,3 +215,138 @@ fn extract_owned_rows(
     }
     coo.into_csr()
 }
+
+// ─── ParMixedSesquilinearForm — parallel complex mixed bilinear form ─────────
+//
+// Mirrors MFEM 4.10's ParMixedSesquilinearForm: parallel complex-valued mixed
+// bilinear forms with two different spaces (trial and test).
+
+use fem_assembly::complex::Convention;
+
+/// Parallel complex-valued mixed bilinear form `b(u, v)` where `u ∈ U` (trial)
+/// and `v ∈ V` (test) are different parallel spaces.
+///
+/// Produces a `MixedComplexSystem` with rectangular matrices:
+/// - `k_re`: n_owned_test × n_trial (real part)
+/// - `k_im`: n_owned_test × n_trial (imaginary part)
+pub struct ParMixedSesquilinearForm<'a, 'b, 'c, S1: FESpace + Send + Sync, S2: FESpace + Send + Sync> {
+    trial_par_space: &'a ParallelFESpace<S1>,
+    test_par_space: &'a ParallelFESpace<S2>,
+    conv: Convention,
+    quad_order: u8,
+    pairs: Vec<(
+        &'b dyn MixedBilinearIntegrator,
+        Option<&'c dyn MixedBilinearIntegrator>,
+    )>,
+}
+
+impl<'a, 'b, 'c, S1: FESpace + Send + Sync, S2: FESpace + Send + Sync>
+    ParMixedSesquilinearForm<'a, 'b, 'c, S1, S2>
+{
+    pub fn new(
+        trial_par_space: &'a ParallelFESpace<S1>,
+        test_par_space: &'a ParallelFESpace<S2>,
+        conv: Convention,
+        quad_order: u8,
+    ) -> Self {
+        ParMixedSesquilinearForm {
+            trial_par_space,
+            test_par_space,
+            conv,
+            quad_order,
+            pairs: Vec::new(),
+        }
+    }
+
+    /// Add a mixed integrator pair (real and imaginary parts).
+    pub fn add_mixed_domain_integrator_pair(
+        &mut self,
+        re_integ: &'b dyn MixedBilinearIntegrator,
+        im_integ: Option<&'c dyn MixedBilinearIntegrator>,
+    ) {
+        self.pairs.push((re_integ, im_integ));
+    }
+
+    /// Assemble the parallel mixed complex system.
+    pub fn assemble(self) -> ParMixedComplexSystem {
+        let mut re_all: Vec<&dyn MixedBilinearIntegrator> = Vec::new();
+        let mut im_all: Vec<&dyn MixedBilinearIntegrator> = Vec::new();
+        for (re, im) in &self.pairs {
+            re_all.push(*re);
+            if let Some(im) = im {
+                im_all.push(*im);
+            }
+        }
+
+        let n_trial = self.trial_par_space.local_space().n_dofs();
+        let n_test = self.test_par_space.local_space().n_dofs();
+
+        let k_re = if !re_all.is_empty() {
+            ParMixedAssembler::assemble_bilinear(
+                self.test_par_space,
+                self.trial_par_space,
+                &re_all,
+                self.quad_order,
+            )
+        } else {
+            CsrMatrix::new_empty(n_test, n_trial)
+        };
+
+        let k_im = if !im_all.is_empty() {
+            ParMixedAssembler::assemble_bilinear(
+                self.test_par_space,
+                self.trial_par_space,
+                &im_all,
+                self.quad_order,
+            )
+        } else {
+            CsrMatrix::new_empty(n_test, n_trial)
+        };
+
+        ParMixedComplexSystem {
+            k_re,
+            k_im,
+            n_trial,
+            n_test,
+            omega: 0.0,
+        }
+    }
+}
+
+/// Parallel complex system with rectangular matrices (mixed spaces).
+#[derive(Debug, Clone)]
+pub struct ParMixedComplexSystem {
+    /// Real part: n_owned_test × n_trial.
+    pub k_re: CsrMatrix<f64>,
+    /// Imaginary part: n_owned_test × n_trial.
+    pub k_im: CsrMatrix<f64>,
+    /// Number of trial DOFs.
+    pub n_trial: usize,
+    /// Number of test DOFs.
+    pub n_test: usize,
+    /// Frequency (for Helmholtz-type problems).
+    pub omega: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn par_mixed_complex_system_shape() {
+        // ParMixedComplexSystem should have correct dimensions
+        let k_re = CsrMatrix::<f64>::new_empty(5, 10);
+        let k_im = CsrMatrix::<f64>::new_empty(5, 10);
+        let sys = ParMixedComplexSystem {
+            k_re,
+            k_im,
+            n_trial: 10,
+            n_test: 5,
+            omega: 0.0,
+        };
+        assert_eq!(sys.n_trial, 10);
+        assert_eq!(sys.n_test, 5);
+        assert_eq!(sys.k_re.nrows, 5);
+        assert_eq!(sys.k_re.ncols, 10);
+    }
+}
