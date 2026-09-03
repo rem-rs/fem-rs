@@ -535,6 +535,28 @@ fn identity_matrix(n: usize) -> Vec<Vec<f64>> {
     m
 }
 
+/// Compute Gauss-Chebyshev (1st kind) points and weights on `[-1, 1]`.
+///
+/// Gauss-Chebyshev quadrature integrates functions with weight `1/sqrt(1-x²)`.
+/// Nodes: `x_k = cos((2k+1)π/(2n))`, weights: `w_k = π/n`.
+///
+/// This is a special case of Gauss-Jacobi with `α = β = -0.5`.
+pub fn gauss_chebyshev(n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        return (vec![], vec![]);
+    }
+    let pi = std::f64::consts::PI;
+    let mut pts = Vec::with_capacity(n);
+    let w = pi / n as f64;
+    for k in 0..n {
+        let x = ((2.0 * k as f64 + 1.0) * pi / (2.0 * n as f64)).cos();
+        pts.push(x);
+    }
+    pts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let wts = vec![w; n];
+    (pts, wts)
+}
+
 /// Evaluate Legendre polynomial P_n(x) and P_{n-1}(x) using recurrence.
 fn legendre_poly(n: usize, x: f64) -> (f64, f64) {
     if n == 0 {
@@ -2471,6 +2493,24 @@ mod gauss_jacobi_tests {
         let rule = stroud_tri_rule();
         for (i, &w) in rule.weights.iter().enumerate() {
             assert!(w > 0.0, "weight[{i}] = {w} is not positive");
+        }
+    }
+
+    use super::gauss_chebyshev;
+
+    #[test]
+    fn gauss_chebyshev_nodes() {
+        let (pts, wts) = gauss_chebyshev(4);
+        assert_eq!(pts.len(), 4);
+        assert_eq!(wts.len(), 4);
+        // All weights should be equal to π/4
+        let expected_w = std::f64::consts::PI / 4.0;
+        for (i, &w) in wts.iter().enumerate() {
+            assert!((w - expected_w).abs() < 1e-14, "w[{i}] = {w}, expected {expected_w}");
+        }
+        // Nodes should be symmetric about 0
+        for i in 0..pts.len() / 2 {
+            assert!((pts[i] + pts[pts.len() - 1 - i]).abs() < 1e-14, "nodes not symmetric");
         }
     }
 }

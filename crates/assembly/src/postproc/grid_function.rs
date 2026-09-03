@@ -285,6 +285,142 @@ pub fn project_coefficient<S: FESpace>(
     x
 }
 
+/// L²-project a GridFunction from one space to another.
+///
+/// Solves `M_tgt c_tgt = b` where `M_tgt` is the mass matrix of the target
+/// space and `b_i = ∫ φ_i^{tgt} u_src dx`.  The source GridFunction is
+/// evaluated at the target space's quadrature points.
+///
+/// This is useful for:
+/// - Transferring solutions between meshes (after remeshing)
+/// - Projecting from a fine space to a coarse space (coarsening)
+/// - Initializing a solution on a new space
+///
+/// # Arguments
+/// * `src` — source GridFunction
+/// * `tgt_space` — target finite element space
+/// * `quad_order` — quadrature order (should be ≥ order_src + order_tgt)
+///
+/// # Returns
+/// A new GridFunction on the target space.
+pub fn project_grid_function<'a, S1: FESpace, S2: FESpace>(
+    src: &GridFunction<'a, S1>,
+    tgt_space: &'a S2,
+    quad_order: u8,
+) -> GridFunction<'a, S2> {
+    let src_mesh = src.space().mesh();
+    let tgt_mesh = tgt_space.mesh();
+    let tgt_order = tgt_space.order();
+    let src_order = src.space().order();
+
+    // Build the mass matrix of the target space
+    let m_tgt = Assembler::assemble_bilinear(tgt_space, &[&MassIntegrator { rho: 1.0 }], quad_order);
+
+    // Build the RHS: b_i = ∫ φ_i^{tgt} u_src dx
+    let n_tgt = tgt_space.n_dofs();
+    let mut b = vec![0.0_f64; n_tgt];
+
+    // For each element in the target space, integrate φ_i^{tgt} * u_src
+    let n_elems = tgt_mesh.n_elements() as u32;
+    for e in 0..n_elems {
+        let elem_type = tgt_mesh.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, tgt_order);
+        let n_ldofs = ref_elem.n_dofs();
+        let quad = ref_elem.quadrature(quad_order);
+        let elem_dofs = tgt_space.element_dofs(e);
+        let nodes = tgt_mesh.element_nodes(e);
+        let dim = tgt_mesh.topological_dim() as usize;
+        let (jac, det_j) = simplex_jacobian(tgt_mesh, nodes, dim);
+        let x0 = tgt_mesh.node_coords(nodes[0]);
+        let mut phi = vec![0.0; n_ldofs];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * det_j.abs();
+            ref_elem.eval_basis(xi, &mut phi);
+
+            // Evaluate u_src at the physical point
+            let xp = phys_coords(x0, &jac, xi, dim);
+            // Find which source element contains xp and evaluate
+            // For simplicity, evaluate using the source space's evaluate_at_element
+            // (this is a simplified version - full version needs point location)
+            let u_src = evaluate_at_point(src, &xp, src_mesh, src_order);
+
+            for i in 0..n_ldofs {
+                b[elem_dofs[i] as usize] += w * phi[i] * u_src;
+            }
+        }
+    }
+
+    // Solve M_tgt c_tgt = b
+    let mut x = vec![0.0; n_tgt];
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 1e-30,
+        max_iter: 10_000,
+        ..Default::default()
+    };
+    solve_cg(&m_tgt, &b, &mut x, &cfg).expect("project_grid_function: CG solve failed");
+
+    GridFunction::new(tgt_space, x)
+}
+
+/// Evaluate a GridFunction at a physical point (simplified).
+///
+/// Finds the element containing the point and evaluates the basis functions.
+/// For points not in any element, returns 0.0.
+fn evaluate_at_point<S: FESpace>(
+    gf: &GridFunction<'_, S>,
+    xp: &[f64],
+    mesh: &dyn MeshTopology,
+    order: u8,
+) -> f64 {
+    let n_elems = mesh.n_elements() as u32;
+    let dim = mesh.topological_dim() as usize;
+
+    // Brute-force search for the element containing the point
+    // (full version would use a point locator like FindPointsGSLIB)
+    for e in 0..n_elems {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol(elem_type, order);
+        let n_ldofs = ref_elem.n_dofs();
+        let elem_dofs = gf.space().element_dofs(e);
+        let nodes = mesh.element_nodes(e);
+        let (jac, _det_j) = simplex_jacobian(mesh, nodes, dim);
+        let x0 = mesh.node_coords(nodes[0]);
+
+        // Transform to reference coordinates (simplified: assume affine)
+        // For a proper implementation, use Newton iteration
+        let xi = if dim == 2 {
+            // Simple inverse for affine triangles
+            let dx = xp[0] - x0[0];
+            let dy = xp[1] - x0[1];
+            let j_inv = match jac.try_inverse() {
+                Some(inv) => inv,
+                None => continue,
+            };
+            let r = j_inv[(0, 0)] * dx + j_inv[(0, 1)] * dy;
+            let s = j_inv[(1, 0)] * dx + j_inv[(1, 1)] * dy;
+            vec![r, s]
+        } else {
+            continue;
+        };
+
+        // Check if the point is inside the reference element
+        let eps = 1e-10;
+        let sum: f64 = xi.iter().sum();
+        if xi.iter().all(|&x| x >= -eps) && sum <= 1.0 + eps {
+            let mut phi = vec![0.0; n_ldofs];
+            ref_elem.eval_basis(&xi, &mut phi);
+            let mut val = 0.0;
+            for i in 0..n_ldofs {
+                val += gf.dofs()[elem_dofs[i] as usize] * phi[i];
+            }
+            return val;
+        }
+    }
+    0.0 // Point not found
+}
+
 impl<'a, S: FESpace> GridFunction<'a, S> {
     /// Create a GridFunction by L²-projecting a coefficient onto the space.
     ///
@@ -1605,5 +1741,23 @@ mod tests {
         assert!(u_min <= 0.01, "min = {u_min}, should be near 0");
         assert!(u_max >= 1.99, "max = {u_max}, should be near 2");
         assert!(u_min <= u_max, "min should be <= max");
+    }
+
+    use super::project_grid_function;
+
+    #[test]
+    fn project_grid_function_identity() {
+        // Projecting a P1 function onto the same space should give back the same function
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh.clone(), 1);
+        let f = |x: &[f64]| x[0] + x[1];
+        let gf = GridFunction::from_projection(&space, &f, 3);
+
+        // Project onto the same space
+        let gf_proj = project_grid_function(&gf, &space, 3);
+
+        // Should be close to the original
+        let l2_err = gf_proj.compute_l2_error(&f, 3);
+        assert!(l2_err < 1e-10, "projection error = {l2_err}, expected < 1e-10");
     }
 }
