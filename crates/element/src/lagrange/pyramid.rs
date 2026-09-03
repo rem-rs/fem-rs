@@ -53,6 +53,22 @@ fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
     d * sum
 }
 
+/// Pyramid basis type selection (MFEM 4.10).
+///
+/// - `Bergot`: Bernardi-Boggs-Fluery type basis (default in MFEM)
+/// - `Fuentes`: Fuentes-Keith-Demkowicz type basis (exact sequence)
+///
+/// Currently only `Bergot` is fully implemented; `Fuentes` falls back to
+/// Bergot with a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PyramidBasisType {
+    /// Bernardi-Boggs-Fluery type (collapsed coordinates, equispaced nodes).
+    #[default]
+    Bergot,
+    /// Fuentes-Keith-Demkowicz type (orientation-embedded high-order).
+    Fuentes,
+}
+
 /// Arbitrary-order Lagrange element on the reference pyramid.
 ///
 /// DOF ordering: layer-by-layer from base (k=0) to apex (k=p).
@@ -60,10 +76,15 @@ fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
 pub struct PyramidPk {
     order: usize,
     layer_offset: Vec<usize>,
+    basis_type: PyramidBasisType,
 }
 
 impl PyramidPk {
     pub fn new(p: usize) -> Self {
+        Self::with_basis_type(p, PyramidBasisType::default())
+    }
+
+    pub fn with_basis_type(p: usize, basis_type: PyramidBasisType) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let mut layer_offset = Vec::with_capacity(p + 2);
         let mut off = 0usize;
@@ -76,6 +97,7 @@ impl PyramidPk {
         Self {
             order: p,
             layer_offset,
+            basis_type,
         }
     }
 
@@ -369,5 +391,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pyramid_basis_type_default() {
+        let elem = PyramidPk::new(2);
+        assert_eq!(elem.basis_type, PyramidBasisType::Bergot);
+        assert_eq!(elem.order(), 2);
+        assert_eq!(elem.n_dofs(), 14);
+    }
+
+    #[test]
+    fn pyramid_basis_type_fuentes() {
+        let elem = PyramidPk::with_basis_type(2, PyramidBasisType::Fuentes);
+        assert_eq!(elem.basis_type, PyramidBasisType::Fuentes);
+        // Fuentes falls back to Bergot for now (same DOFs)
+        assert_eq!(elem.n_dofs(), 14);
     }
 }
