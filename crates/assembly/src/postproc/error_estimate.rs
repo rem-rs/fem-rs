@@ -1551,6 +1551,6 @@ mod tests {
 // converts to ElementIndicators for API consistency.
 
 pub fn zz_estimator_l2_hdiv(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> ElementIndicators {
-    let eta = crate::postproc::l2_zz::l2_zz_estimator(mesh, u);
+    let eta = crate::postproc::l2_zz_rt1::l2_zz_estimator(mesh, u);
     ElementIndicators::new(eta, "ZZ(L2-Hdiv)")
 }

@@ -1,6 +1,6 @@
 //! Parallel L2-projection Zienkiewicz–Zhu error estimator.
 //!
-//! Parallel counterpart of [`fem_assembly::postproc::l2_zz::l2_zz_estimator`]
+//! Parallel counterpart of [`fem_assembly::postproc::l2_zz_rt1::l2_zz_estimator`]
 //! (itself a 1:1 port of MFEM's `L2ZienkiewiczZhuEstimator`, validated
 //! bit-for-bit against ex6p on `star.mesh`).
 //!

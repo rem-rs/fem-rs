@@ -759,3 +759,193 @@ mod tests {
         assert!(total > 0.0 && total.is_finite(), "quadratic η sum = {total}");
     }
 }
+
+// ─── RT0 ZZ estimator (migrated from l2_zz.rs) ─────────────────────────────
+// This is the RT0 special case of the L2-projection Zienkiewicz–Zhu error
+// estimator. It uses QuadRTk::new(0) (RT0) basis and scalar ±0.5 hanging-flux
+// constraints. For the RT1 variant, see the functions above.
+
+/// Element-wise L2(→RT0) ZZ error indicators `η_K` for a P1 solution `u`
+/// on a Quad4 mesh. Returns one `η_K` per element.
+pub fn l2_zz_estimator(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> Vec<f64> {
+    assert_eq!(
+        mesh.element_type_at(0),
+        fem_mesh::element_type::ElementType::Quad4,
+        "l2_zz_estimator currently supports Quad4 meshes only"
+    );
+    let n_elems = mesh.n_elems();
+
+    let rt: HDivSpace<fem_mesh::Mesh<2>> = HDivSpace::new(mesh.clone(), 0);
+    let n_rt_dofs = rt.n_dofs();
+
+    let qr = QuadRTk::new(0).quadrature(2);
+    let dn = |x: f64, y: f64| -> [[f64; 2]; 4] {
+        [
+            [-(1.0 - y), -(1.0 - x)],
+            [1.0 - y, -x],
+            [y, x],
+            [-y, 1.0 - x],
+        ]
+    };
+
+    let mut coo = Vec::<(usize, usize, f64)>::new();
+    let mut b = vec![0.0_f64; n_rt_dofs];
+    let mut phi_qp = vec![vec![0.0_f64; 4 * 8]; n_elems];
+    let mut grad_qp = vec![vec![[0.0_f64; 2]; 4]; n_elems];
+    let mut wdet_qp = vec![vec![0.0_f64; 4]; n_elems];
+    let mut elem_rt_dofs = Vec::<Vec<u32>>::with_capacity(n_elems);
+
+    for e in 0..n_elems as ElemId {
+        let nodes = mesh.elem_nodes(e);
+        let c = |i: usize| mesh.coords_of(nodes[i]);
+        let ue = [
+            u[nodes[0] as usize],
+            u[nodes[1] as usize],
+            u[nodes[2] as usize],
+            u[nodes[3] as usize],
+        ];
+        let rt_dofs: Vec<u32> = rt.element_dofs(e).to_vec();
+        let signs: Vec<f64> = rt.element_signs(e).to_vec();
+        elem_rt_dofs.push(rt_dofs.clone());
+
+        let mut phi = [0.0_f64; 8];
+        let mut phi_ref = [0.0_f64; 8];
+        for (q, xi) in qr.points.iter().enumerate() {
+            let (x, y) = (xi[0], xi[1]);
+            let j00 = -(1.0 - y) * c(0)[0] + (1.0 - y) * c(1)[0] + y * c(2)[0] - y * c(3)[0];
+            let j01 = -(1.0 - x) * c(0)[0] - x * c(1)[0] + x * c(2)[0] + (1.0 - x) * c(3)[0];
+            let j10 = -(1.0 - y) * c(0)[1] + (1.0 - y) * c(1)[1] + y * c(2)[1] - y * c(3)[1];
+            let j11 = -(1.0 - x) * c(0)[1] - x * c(1)[1] + x * c(2)[1] + (1.0 - x) * c(3)[1];
+            let det = j00 * j11 - j01 * j10;
+            let inv_det = 1.0 / det;
+
+            let d = dn(x, y);
+            let g_ref0 = ue[0] * d[0][0] + ue[1] * d[1][0] + ue[2] * d[2][0] + ue[3] * d[3][0];
+            let g_ref1 = ue[0] * d[0][1] + ue[1] * d[1][1] + ue[2] * d[2][1] + ue[3] * d[3][1];
+            let gx = (j11 * g_ref0 - j10 * g_ref1) * inv_det;
+            let gy = (-j01 * g_ref0 + j00 * g_ref1) * inv_det;
+            grad_qp[e as usize][q] = [gx, gy];
+
+            QuadRTk::new(0).eval_basis_vec(xi, &mut phi_ref);
+            for i in 0..4 {
+                let s = signs[i];
+                phi[i * 2] = (j00 * phi_ref[i * 2] + j01 * phi_ref[i * 2 + 1]) * inv_det * s;
+                phi[i * 2 + 1] = (j10 * phi_ref[i * 2] + j11 * phi_ref[i * 2 + 1]) * inv_det * s;
+            }
+            let w = qr.weights[q] * det.abs();
+            wdet_qp[e as usize][q] = w;
+            for i in 0..4 {
+                phi_qp[e as usize][q * 8 + i * 2] = phi[i * 2];
+                phi_qp[e as usize][q * 8 + i * 2 + 1] = phi[i * 2 + 1];
+            }
+
+            for i in 0..4 {
+                for j in 0..4 {
+                    let dot = phi[i * 2] * phi[j * 2] + phi[i * 2 + 1] * phi[j * 2 + 1];
+                    coo.push((rt_dofs[i] as usize, rt_dofs[j] as usize, w * dot));
+                }
+            }
+            for i in 0..4 {
+                b[rt_dofs[i] as usize] += w * (phi[i * 2] * gx + phi[i * 2 + 1] * gy);
+            }
+        }
+    }
+
+    let mut cm = CooMatrix::new(n_rt_dofs, n_rt_dofs);
+    for (i, j, v) in coo {
+        cm.add(i, j, v);
+    }
+    let a = cm.into_csr_sorted();
+
+    let mut slave_deps: Vec<(u32, f64, u32)> = Vec::new();
+    let mut edge_of_dof: Vec<(u32, u32)> = vec![(u32::MAX, u32::MAX); n_rt_dofs];
+    {
+        for e in 0..n_elems as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for (li, (ia, ib)) in [(0usize, 1usize), (1, 2), (2, 3), (3, 0)].iter().enumerate() {
+                let d = elem_rt_dofs[e as usize][li] as usize;
+                if edge_of_dof[d] == (u32::MAX, u32::MAX) {
+                    edge_of_dof[d] = (ns[*ia], ns[*ib]);
+                }
+            }
+        }
+        let coords = |n: u32| -> [f64; 2] {
+            let c = mesh.coords_of(n);
+            [c[0], c[1]]
+        };
+        let mut node_list: Vec<u32> = edge_of_dof.iter().flat_map(|&(a, b)| [a, b]).filter(|&n| n != u32::MAX).collect();
+        node_list.sort_unstable();
+        node_list.dedup();
+        let mut master_edges: Vec<(u32, u32, u32)> = Vec::new();
+        for &(a, b) in edge_of_dof.iter() {
+            if a == u32::MAX { continue; }
+            let (mx, my) = {
+                let ca = coords(a);
+                let cb = coords(b);
+                (0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]))
+            };
+            for &m in &node_list {
+                if m == a || m == b { continue; }
+                let cm = coords(m);
+                if (cm[0] - mx).abs() < 1e-9 && (cm[1] - my).abs() < 1e-9 {
+                    master_edges.push((a.min(b), a.max(b), m));
+                    break;
+                }
+            }
+        }
+        master_edges.sort_unstable();
+        master_edges.dedup_by(|x, y| x.0 == y.0 && x.1 == y.1);
+        let master_dof: std::collections::HashMap<(u32, u32), u32> = master_edges
+            .iter()
+            .filter_map(|&(a, b, _m)| {
+                edge_of_dof.iter().position(|&(x, y)| x.min(y) == a && x.max(y) == b)
+                    .map(|i| ((a, b), i as u32))
+            })
+            .collect();
+        for d in 0..n_rt_dofs as u32 {
+            let (a, b) = edge_of_dof[d as usize];
+            if a == u32::MAX { continue; }
+            for &(pa, pb, mid) in &master_edges {
+                let (lo, hi) = (a.min(b), a.max(b));
+                let is_slave = (lo == pa.min(pb) || lo == pa.max(pb) || lo == mid)
+                    && (hi == pa.min(pb) || hi == pa.max(pb) || hi == mid)
+                    && (lo == mid) != (hi == mid)
+                    && lo != hi;
+                if !is_slave { continue; }
+                if let Some(&md) = master_dof.get(&(pa, pb)) {
+                    let sign = if lo == pa.min(pb) { 1.0 } else { -1.0 };
+                    slave_deps.push((d, 0.5 * sign, md));
+                }
+            }
+        }
+        slave_deps.sort_by_key(|x| (x.0, x.2));
+        slave_deps.dedup();
+    }
+    let a = a;
+    let mut x = vec![0.0_f64; n_rt_dofs];
+    if !slave_deps.is_empty() && std::env::var("L2ZZ_NOCONSTRAINT").is_err() {
+        let slave_rows: std::collections::HashSet<u32> = slave_deps.iter().map(|(s, _, _)| *s).collect();
+        let free_dofs: Vec<u32> = (0..n_rt_dofs as u32).filter(|d| !slave_rows.contains(d)).collect();
+        let master_of: std::collections::HashMap<u32, (u32, f64)> = slave_deps.iter().map(|&(s, c, m)| (s, (m, c))).collect();
+        let mut p_entries: Vec<(u32, usize, f64)> = Vec::new();
+        for (i, &f) in free_dofs.iter().enumerate() {
+            p_entries.push((f, i, 1.0));
+        }
+        for &(s, c0, m0) in &slave_deps {
+            let mut coef = c0;
+            let mut cur = m0;
+            let mut guard = 0;
+            while let Some(&(m, c)) = master_of.get(&cur) {
+                coef *= c;
+                cur = m;
+                guard += 1;
+                assert!(guard < 64, "hanging-flux dependency cycle");
+            }
+            let idx = free_dofs.binary_search(&cur).expect("slave chain ends at slave");
+            p_entries.push((s, idx, coef));
+        }
+        let n_true = free_dofs.len();
+        let mut coo_true = CooMatrix::new(n_true, n_true);
+        let mut b_true = vec![0.0_f64; n_true];
+     
+

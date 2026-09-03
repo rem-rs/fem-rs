@@ -31,7 +31,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use fem_assembly::postproc::l2_zz::l2_zz_estimator;
+use fem_assembly::postproc::l2_zz_rt1::l2_zz_estimator;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
 use fem_core::{ElemId, Rank};
 use fem_mesh::amr::{detect_hanging_quad, HangingNodeConstraint};
