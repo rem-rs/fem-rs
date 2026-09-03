@@ -49,6 +49,7 @@ pub mod nonconforming;
 /// `NurbsMesh2D`, etc. remain in `nurbs` but are re-exported from `iga` for
 /// migration convenience.
 pub mod nurbs;
+pub mod nurbs_vector;
 pub mod quadrature;
 pub mod raviart_thomas;
 pub mod reference;

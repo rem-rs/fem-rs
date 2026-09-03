@@ -399,7 +399,7 @@ impl MagneticDiffusionEOperator {
         let (a0_red, a0_rhs, free_p, constrained_p) =
             form_linear_system(&self.a0, &rhs_p, &self.poisson_ess_tdofs, &bc_p);
         let mut x_p = vec![0.0; a0_red.nrows];
-        let cfg = SolverConfig { rtol: 1e-12, atol: 0.0, max_iter: 1000, verbose: false, ..Default::default() };
+        let cfg = SolverConfig { rtol: 1e-8, atol: 0.0, max_iter: 5000, verbose: false, ..Default::default() };
         solve_cg(&a0_red, &a0_rhs, &mut x_p, &cfg).expect("Poisson CG solve");
         let p_new = recover_fem_solution(&x_p, &free_p, &constrained_p, &bc_p, self.n_h1);
 

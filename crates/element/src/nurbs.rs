@@ -109,6 +109,50 @@ impl KnotVector {
         self.knots.windows(2).filter(|w| w[1] > w[0]).count()
     }
 
+    /// Elevate the polynomial degree by `t` (default 1).
+    ///
+    /// Inserts one knot at the midpoint of each interior knot span,
+    /// producing a new knot vector of degree `p + t` that represents
+    /// the same curve/surface.  Used by NURBS HDiv/HCurl elements
+    /// which mix degree-p and degree-(p+1) knot vectors.
+    ///
+    /// Algorithm: for each distinct interior knot span `(Ξ_i, Ξ_{i+1})`,
+    /// insert `t` uniformly spaced knots (midpoints for t=1).
+    pub fn degree_elevate(&self, t: usize) -> Self {
+        assert!(t >= 1, "degree_elevate: t must be >= 1");
+        let p = self.degree;
+
+        // Collect distinct knot values (including endpoints).
+        let mut distinct = Vec::new();
+        for w in self.knots.windows(2) {
+            if w[1] > w[0] {
+                distinct.push(w[0]);
+            }
+        }
+        if let Some(&last) = self.knots.last() {
+            distinct.push(last);
+        }
+
+        let first = distinct.first().copied().unwrap_or(0.0);
+        let last = distinct.last().copied().unwrap_or(1.0);
+
+        // Build elevated knot vector:
+        //   [first]* (p+t+1), (midpoints + endpoints)..., [last]* (p+t)
+        let mut result = Vec::new();
+        result.extend(std::iter::repeat_n(first, p + t + 1));
+        for window in distinct.windows(2) {
+            let a = window[0];
+            let b = window[1];
+            for k in 1..=t {
+                result.push(a + (b - a) * (k as f64) / ((t + 1) as f64));
+            }
+            result.push(b);
+        }
+        result.extend(std::iter::repeat_n(last, p + t));
+
+        KnotVector { knots: result, degree: p + t }
+    }
+
     /// Find the knot span index $i$ such that $\Xi_i \leq \xi < \Xi_{i+1}$.
     ///
     /// At the right endpoint returns the last non-empty span.

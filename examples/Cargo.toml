@@ -326,6 +326,9 @@ path = "mfem_miniapp_tesla.rs"
 name = "mfem_miniapp_volta"
 path = "mfem_miniapp_volta.rs"
 [[example]]
+name = "mfem_nurbs_miniapp_solenoidal"
+path = "mfem_nurbs_miniapp_solenoidal.rs"
+[[example]]
 name = "mfem_ex15_dump_p1_it3"
 path = "mfem_ex15_dump_p1_it3.rs"
 [[example]]

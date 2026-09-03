@@ -29,7 +29,8 @@
 //! $$f_A   = \int_\Omega f\, R_A\, \mathrm{d}\Omega$$
 
 use fem_core::types::DofId;
-use fem_element::iga::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
+// Re-export for downstream users.
+pub use fem_element::iga::{NurbsMesh2D, NurbsMesh3D, NurbsPatch2DData, NurbsPatch3DData};
 use fem_element::quadrature::seg_rule;
 use fem_element::reference::{QuadratureRule, ReferenceElement};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1504,6 +1505,291 @@ fn csr_axpy_solve(
         .unwrap_or_else(|| rhs.to_vec())
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NURBS HDiv / HCurl vector assembly
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// These functions assemble matrices for divergence-conforming (H(div)) and
+// curl-conforming (H(curl)) NURBS spaces, following the Piola transform:
+//
+//   HDiv:  v_phys = J * v_ref / det(J)   (contravariant Piola)
+//   HCurl: v_phys = J^{-T} * v_ref       (covariant Piola)
+//
+// Reference: Buffa, De Falco, Sangalli [2010], Evans, Hughes [2013].
+
+use fem_element::nurbs_vector::{NurbsHDiv2D, NurbsHDiv3D, NurbsHCurl2D, NurbsHCurl3D};
+use fem_element::reference::VectorReferenceElement;
+
+/// Assemble the H(div) mass matrix for a 2D NURBS patch: M_{AB} = ∫ (v_A · v_B) dΩ.
+///
+/// Uses the contravariant Piola transform: v_phys = J * v_ref / det(J).
+/// `pd` provides the geometry (knot vectors, control points, weights).
+/// `elem` is the NURBS HDiv reference element (mixed-degree B-spline basis).
+pub fn assemble_nurbs_hdiv_mass_2d(
+    pd: &NurbsPatch2DData,
+    elem: &NurbsHDiv2D,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n = elem.n_dofs;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    let qr = patch_quad_2d(pd, quad_order);
+
+    let mut basis_ref = vec![0.0_f64; n * 2];
+    let mut jac = [[0.0_f64; 2]; 2];
+    let mut x_phys = [0.0_f64; 2];
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        // Evaluate reference-space basis functions.
+        elem.eval_basis_vec(qp_xi, &mut basis_ref);
+
+        // Compute Jacobian and physical coordinates.
+        let patch = fem_element::iga::NurbsPatch2D::new(
+            pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone()
+        );
+        let mut grads_xi = vec![0.0_f64; patch.n_dofs() * 2];
+        patch.eval_grad_basis(qp_xi, &mut grads_xi);
+        let mut basis = vec![0.0_f64; patch.n_dofs()];
+        patch.eval_basis(qp_xi, &mut basis);
+
+        jac = [[0.0_f64; 2]; 2];
+        x_phys = [0.0_f64; 2];
+        for a in 0..patch.n_dofs() {
+            x_phys[0] += basis[a] * pd.control_pts[a][0];
+            x_phys[1] += basis[a] * pd.control_pts[a][1];
+            let dru = grads_xi[a * 2];
+            let drv = grads_xi[a * 2 + 1];
+            jac[0][0] += pd.control_pts[a][0] * dru;
+            jac[0][1] += pd.control_pts[a][0] * drv;
+            jac[1][0] += pd.control_pts[a][1] * dru;
+            jac[1][1] += pd.control_pts[a][1] * drv;
+        }
+        let det_j = jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0];
+        let w = qp_w * det_j.abs();
+
+        // Piola transform: v_phys = J * v_ref / det(J)
+        let inv_det = 1.0 / det_j;
+        for a in 0..n {
+            let vax_ref = basis_ref[a * 2];
+            let vay_ref = basis_ref[a * 2 + 1];
+            let vax_phys = (jac[0][0] * vax_ref + jac[0][1] * vay_ref) * inv_det;
+            let vay_phys = (jac[1][0] * vax_ref + jac[1][1] * vay_ref) * inv_det;
+
+            for b in 0..n {
+                let vbx_ref = basis_ref[b * 2];
+                let vby_ref = basis_ref[b * 2 + 1];
+                let vbx_phys = (jac[0][0] * vbx_ref + jac[0][1] * vby_ref) * inv_det;
+                let vby_phys = (jac[1][0] * vbx_ref + jac[1][1] * vby_ref) * inv_det;
+
+                let m = (vax_phys * vbx_phys + vay_phys * vby_phys) * w;
+                if m.abs() > 1e-30 {
+                    coo.add(a, b, m);
+                }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the L2 mass matrix for a 2D NURBS patch (scalar): M_{AB} = ∫ R_A * R_B dΩ.
+pub fn assemble_nurbs_l2_mass_2d(
+    pd: &NurbsPatch2DData,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let patch = fem_element::iga::NurbsPatch2D::new(
+        pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone()
+    );
+    let n = patch.n_dofs();
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    let qr = patch_quad_2d(pd, quad_order);
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        let map = physical_map_2d(pd, qp_xi);
+        let w = qp_w * map.det_j.abs();
+        let mut basis = vec![0.0_f64; n];
+        patch.eval_basis(qp_xi, &mut basis);
+
+        for a in 0..n {
+            let ba = basis[a];
+            for b in 0..n {
+                let m = ba * basis[b] * w;
+                coo.add(a, b, m);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the divergence operator B_{AB} = ∫ (div v_A) * p_B dΩ.
+///
+/// `elem_hdiv` is the NURBS HDiv reference element.
+/// `n_l2` is the number of L2 DOFs (scalar NURBS basis).
+/// Returns a matrix of size `(n_l2, n_hdiv)`.
+pub fn assemble_nurbs_divergence_2d(
+    pd: &NurbsPatch2DData,
+    elem_hdiv: &NurbsHDiv2D,
+    n_l2: usize,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n_hdiv = elem_hdiv.n_dofs;
+    let mut coo = CooMatrix::<f64>::new(n_l2, n_hdiv);
+    let qr = patch_quad_2d(pd, quad_order);
+
+    let mut div_ref = vec![0.0_f64; n_hdiv];
+    let mut basis_ref = vec![0.0_f64; n_hdiv * 2];
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        // Evaluate reference-space divergence.
+        elem_hdiv.eval_div(qp_xi, &mut div_ref);
+        elem_hdiv.eval_basis_vec(qp_xi, &mut basis_ref);
+
+        // Compute Jacobian.
+        let map = physical_map_2d(pd, qp_xi);
+        let det_j = map.det_j;
+        let w = qp_w * det_j.abs();
+
+        // Physical divergence: div_phys = div_ref / det(J)
+        // (since div(J * v_ref / det(J)) = div_ref / det(J) for constant J)
+        let inv_det = 1.0 / det_j;
+
+        // Evaluate L2 basis.
+        let patch = fem_element::iga::NurbsPatch2D::new(
+            pd.kv_u.clone(), pd.kv_v.clone(), pd.weights.clone()
+        );
+        let mut l2_basis = vec![0.0_f64; n_l2];
+        patch.eval_basis(qp_xi, &mut l2_basis);
+
+        for a in 0..n_l2 {
+            let pa = l2_basis[a];
+            for b in 0..n_hdiv {
+                let div_phys = div_ref[b] * inv_det;
+                let m = div_phys * pa * w;
+                if m.abs() > 1e-30 {
+                    coo.add(a, b, m);
+                }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the H(div) load vector: f_A = ∫ f · v_A dΩ.
+///
+/// `f_x` and `f_y` are functions that compute the physical-domain force
+/// at a parametric point.
+pub fn assemble_nurbs_hdiv_load_2d(
+    pd: &NurbsPatch2DData,
+    elem: &NurbsHDiv2D,
+    quad_order: u8,
+    f_x: &dyn Fn(&[f64]) -> f64,
+    f_y: &dyn Fn(&[f64]) -> f64,
+) -> Vec<f64> {
+    let n = elem.n_dofs;
+    let mut rhs = vec![0.0_f64; n];
+    let qr = patch_quad_2d(pd, quad_order);
+
+    let mut basis_ref = vec![0.0_f64; n * 2];
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        elem.eval_basis_vec(qp_xi, &mut basis_ref);
+        let map = physical_map_2d(pd, qp_xi);
+        let det_j = map.det_j;
+        let w = qp_w * det_j.abs();
+        let inv_det = 1.0 / det_j;
+
+        // Physical force at this point.
+        let xf = map.x_phys;
+        let fx = f_x(xf.as_slice());
+        let fy = f_y(xf.as_slice());
+
+        for a in 0..n {
+            let vax_ref = basis_ref[a * 2];
+            let vay_ref = basis_ref[a * 2 + 1];
+            let vax_phys = (map.jac[0][0] * vax_ref + map.jac[0][1] * vay_ref) * inv_det;
+            let vay_phys = (map.jac[1][0] * vax_ref + map.jac[1][1] * vay_ref) * inv_det;
+
+            rhs[a] += (fx * vax_phys + fy * vay_phys) * w;
+        }
+    }
+    rhs
+}
+
+/// Assemble the H(curl) mass matrix for a 2D NURBS patch: M_{AB} = ∫ (v_A · v_B) dΩ.
+///
+/// Uses the covariant Piola transform: v_phys = J^{-T} * v_ref.
+pub fn assemble_nurbs_hcurl_mass_2d(
+    pd: &NurbsPatch2DData,
+    elem: &NurbsHCurl2D,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n = elem.n_dofs;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    let qr = patch_quad_2d(pd, quad_order);
+
+    let mut basis_ref = vec![0.0_f64; n * 2];
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        elem.eval_basis_vec(qp_xi, &mut basis_ref);
+        let map = physical_map_2d(pd, qp_xi);
+        let w = qp_w * map.det_j.abs();
+
+        // Piola transform: v_phys = J^{-T} * v_ref
+        let ji = map.jac_inv_t;
+        for a in 0..n {
+            let vax_ref = basis_ref[a * 2];
+            let vay_ref = basis_ref[a * 2 + 1];
+            let vax_phys = ji[0][0] * vax_ref + ji[0][1] * vay_ref;
+            let vay_phys = ji[1][0] * vax_ref + ji[1][1] * vay_ref;
+
+            for b in 0..n {
+                let vbx_ref = basis_ref[b * 2];
+                let vby_ref = basis_ref[b * 2 + 1];
+                let vbx_phys = ji[0][0] * vbx_ref + ji[0][1] * vby_ref;
+                let vby_phys = ji[1][0] * vbx_ref + ji[1][1] * vby_ref;
+
+                let m = (vax_phys * vbx_phys + vay_phys * vby_phys) * w;
+                if m.abs() > 1e-30 {
+                    coo.add(a, b, m);
+                }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Assemble the H(curl) stiffness matrix for a 2D NURBS patch: K_{AB} = ∫ (curl v_A) * (curl v_B) dΩ.
+pub fn assemble_nurbs_hcurl_stiffness_2d(
+    pd: &NurbsPatch2DData,
+    elem: &NurbsHCurl2D,
+    quad_order: u8,
+) -> CsrMatrix<f64> {
+    let n = elem.n_dofs;
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    let qr = patch_quad_2d(pd, quad_order);
+
+    let mut curl_ref = vec![0.0_f64; n];
+
+    for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
+        elem.eval_curl(qp_xi, &mut curl_ref);
+        let map = physical_map_2d(pd, qp_xi);
+        let w = qp_w * map.det_j.abs();
+
+        // Physical curl (scalar in 2D): curl_phys = curl_ref / det(J)
+        let inv_det = 1.0 / map.det_j;
+
+        for a in 0..n {
+            let ca = curl_ref[a] * inv_det;
+            for b in 0..n {
+                let cb = curl_ref[b] * inv_det;
+                let m = ca * cb * w;
+                if m.abs() > 1e-30 {
+                    coo.add(a, b, m);
+                }
+            }
+        }
+    }
+    coo.into_csr()
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2110,6 +2396,87 @@ mod tests {
             assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);
         }
         assert!(result.is_ok(), "3D Newton did not converge");
+    }
+
+    // ─── NURBS HDiv / HCurl assembly tests ─────────────────────────────────────
+
+    #[test]
+    fn nurbs_hdiv_mass_2d_assembles() {
+        use fem_element::iga::NurbsKnotVector;
+        let kv = NurbsKnotVector::uniform(1, 1);
+        let pd = NurbsPatch2DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            control_pts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
+        };
+        let elem = NurbsHDiv2D::new(1, 1);
+        let m = assemble_nurbs_hdiv_mass_2d(&pd, &elem, 4);
+        assert_eq!(m.nrows, elem.n_dofs);
+        for i in 0..m.nrows {
+            for p in m.row_ptr[i]..m.row_ptr[i + 1] {
+                if m.col_idx[p] as usize == i {
+                    assert!(m.values[p] > 0.0, "M[{i},{i}] > 0");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nurbs_l2_mass_2d_assembles() {
+        use fem_element::iga::NurbsKnotVector;
+        let kv = NurbsKnotVector::uniform(1, 1);
+        let pd = NurbsPatch2DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            control_pts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
+        };
+        let m = assemble_nurbs_l2_mass_2d(&pd, 4);
+        assert_eq!(m.nrows, 4);
+    }
+
+    #[test]
+    fn nurbs_divergence_2d_assembles() {
+        use fem_element::iga::NurbsKnotVector;
+        let kv = NurbsKnotVector::uniform(1, 1);
+        let pd = NurbsPatch2DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            control_pts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
+        };
+        let elem = NurbsHDiv2D::new(1, 1);
+        let n_l2 = 4;
+        let b = assemble_nurbs_divergence_2d(&pd, &elem, n_l2, 4);
+        assert_eq!(b.nrows, n_l2);
+        assert_eq!(b.ncols, elem.n_dofs);
+    }
+
+    #[test]
+    fn nurbs_hcurl_mass_2d_assembles() {
+        use fem_element::iga::NurbsKnotVector;
+        let kv = NurbsKnotVector::uniform(1, 1);
+        let pd = NurbsPatch2DData {
+            kv_u: kv.clone(),
+            kv_v: kv.clone(),
+            control_pts: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            weights: vec![1.0; 4],
+            tag: 1,
+        };
+        let elem = NurbsHCurl2D::new(1, 1);
+        let m = assemble_nurbs_hcurl_mass_2d(&pd, &elem, 4);
+        assert_eq!(m.nrows, elem.n_dofs);
+        for i in 0..m.nrows {
+            for p in m.row_ptr[i]..m.row_ptr[i + 1] {
+                if m.col_idx[p] as usize == i {
+                    assert!(m.values[p] > 0.0, "M[{i},{i}] > 0");
+                }
+            }
+        }
     }
 }
 

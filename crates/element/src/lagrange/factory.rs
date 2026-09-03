@@ -1858,6 +1858,10 @@ pub enum VecFamily {
     Nedelec,
     RaviartThomas,
     BrezziDouglasMarini,
+    /// NURBS H(div) space (divergence-conforming IGA, requires knot vectors).
+    NURBS_HDiv,
+    /// NURBS H(curl) space (curl-conforming IGA, requires knot vectors).
+    NURBS_HCurl,
 }
 
 /// Create a vector-valued reference element by family, type, and order.

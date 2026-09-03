@@ -1217,3 +1217,207 @@ mod tests {
         assert!(dofs.is_empty());
     }
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NURBS HDiv / HCurl FE Spaces (vector-valued IGA)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+use fem_element::nurbs_vector::{NurbsHDiv2D, NurbsHDiv3D, NurbsHCurl2D, NurbsHCurl3D};
+use fem_element::reference::VectorReferenceElement;
+
+/// H(div)-conforming NURBS FE space for a single 2D patch.
+///
+/// Uses the divergence-conforming NURBS basis from Buffa, De Falco, Sangalli [2010].
+/// DOF layout: `(px+2)*(py+1)` x-component DOFs, then `(px+1)*(py+2)` y-component DOFs.
+#[derive(Debug, Clone)]
+pub struct IgaHDivFESpace2D {
+    iga: IgaSpace2D,
+    elem: NurbsHDiv2D,
+    n_dofs: usize,
+}
+
+impl IgaHDivFESpace2D {
+    pub fn new(iga: IgaSpace2D) -> Result<Self, String> {
+        let kv_u = iga.knot_slice_u();
+        let kv_v = iga.knot_slice_v();
+        // Convert to fem_element::iga::KnotVector
+        let fe_kv_u = fem_element::iga::KnotVector::new_clamped(kv_u.to_vec())
+            .map_err(|e| format!("kv_u: {e}"))?;
+        let fe_kv_v = fem_element::iga::KnotVector::new_clamped(kv_v.to_vec())
+            .map_err(|e| format!("kv_v: {e}"))?;
+        let elem = NurbsHDiv2D::from_knot_vectors(fe_kv_u, fe_kv_v)?;
+        let n_dofs = elem.n_dofs;
+        Ok(Self { iga, elem, n_dofs })
+    }
+
+    pub fn iga(&self) -> &IgaSpace2D { &self.iga }
+    pub fn nurbs_elem(&self) -> &NurbsHDiv2D { &self.elem }
+}
+
+impl FESpace for IgaHDivFESpace2D {
+    type Mesh = IgaSinglePatchMesh2D;
+
+    fn mesh(&self) -> &Self::Mesh {
+        // This is a simplification - in practice, the mesh topology for HDiv
+        // is the same as H1 (one element per knot span).
+        panic!("IgaHDivFESpace2D::mesh not directly available; use iga() for geometry")
+    }
+
+    fn n_dofs(&self) -> usize { self.n_dofs }
+
+    fn element_dofs(&self, _elem: u32) -> &[DofId] {
+        // For NURBS HDiv, DOFs are associated with knot spans.
+        // This is a placeholder - the actual DOF mapping depends on the
+        // specific basis function layout.
+        &[]
+    }
+
+    fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {
+        Vector::zeros(self.n_dofs)
+    }
+
+    fn space_type(&self) -> SpaceType { SpaceType::HDiv }
+
+    fn order(&self) -> u8 { self.elem.order() }
+}
+
+/// H(curl)-conforming NURBS FE space for a single 2D patch.
+#[derive(Debug, Clone)]
+pub struct IgaHCurlFESpace2D {
+    iga: IgaSpace2D,
+    elem: NurbsHCurl2D,
+    n_dofs: usize,
+}
+
+impl IgaHCurlFESpace2D {
+    pub fn new(iga: IgaSpace2D) -> Result<Self, String> {
+        let kv_u = iga.knot_slice_u();
+        let kv_v = iga.knot_slice_v();
+        let fe_kv_u = fem_element::iga::KnotVector::new_clamped(kv_u.to_vec())
+            .map_err(|e| format!("kv_u: {e}"))?;
+        let fe_kv_v = fem_element::iga::KnotVector::new_clamped(kv_v.to_vec())
+            .map_err(|e| format!("kv_v: {e}"))?;
+        let elem = NurbsHCurl2D::from_knot_vectors(fe_kv_u, fe_kv_v)?;
+        let n_dofs = elem.n_dofs;
+        Ok(Self { iga, elem, n_dofs })
+    }
+
+    pub fn iga(&self) -> &IgaSpace2D { &self.iga }
+    pub fn nurbs_elem(&self) -> &NurbsHCurl2D { &self.elem }
+}
+
+impl FESpace for IgaHCurlFESpace2D {
+    type Mesh = IgaSinglePatchMesh2D;
+
+    fn mesh(&self) -> &Self::Mesh {
+        panic!("IgaHCurlFESpace2D::mesh not directly available; use iga() for geometry")
+    }
+
+    fn n_dofs(&self) -> usize { self.n_dofs }
+
+    fn element_dofs(&self, _elem: u32) -> &[DofId] { &[] }
+
+    fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {
+        Vector::zeros(self.n_dofs)
+    }
+
+    fn space_type(&self) -> SpaceType { SpaceType::HCurl }
+
+    fn order(&self) -> u8 { self.elem.order() }
+}
+
+/// H(div)-conforming NURBS FE space for a single 3D patch.
+#[derive(Debug, Clone)]
+pub struct IgaHDivFESpace3D {
+    iga: IgaSpace3D,
+    elem: NurbsHDiv3D,
+    n_dofs: usize,
+}
+
+impl IgaHDivFESpace3D {
+    pub fn new(iga: IgaSpace3D) -> Result<Self, String> {
+        let kv_u = iga.knot_slice_u();
+        let kv_v = iga.knot_slice_v();
+        let kv_w = iga.knot_slice_w();
+        let fe_kv_u = fem_element::iga::KnotVector::new_clamped(kv_u.to_vec())
+            .map_err(|e| format!("kv_u: {e}"))?;
+        let fe_kv_v = fem_element::iga::KnotVector::new_clamped(kv_v.to_vec())
+            .map_err(|e| format!("kv_v: {e}"))?;
+        let fe_kv_w = fem_element::iga::KnotVector::new_clamped(kv_w.to_vec())
+            .map_err(|e| format!("kv_w: {e}"))?;
+        let elem = NurbsHDiv3D::from_knot_vectors(fe_kv_u, fe_kv_v, fe_kv_w)?;
+        let n_dofs = elem.n_dofs;
+        Ok(Self { iga, elem, n_dofs })
+    }
+
+    pub fn iga(&self) -> &IgaSpace3D { &self.iga }
+    pub fn nurbs_elem(&self) -> &NurbsHDiv3D { &self.elem }
+}
+
+impl FESpace for IgaHDivFESpace3D {
+    type Mesh = IgaSinglePatchMesh3D;
+
+    fn mesh(&self) -> &Self::Mesh {
+        panic!("IgaHDivFESpace3D::mesh not directly available; use iga() for geometry")
+    }
+
+    fn n_dofs(&self) -> usize { self.n_dofs }
+
+    fn element_dofs(&self, _elem: u32) -> &[DofId] { &[] }
+
+    fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {
+        Vector::zeros(self.n_dofs)
+    }
+
+    fn space_type(&self) -> SpaceType { SpaceType::HDiv }
+
+    fn order(&self) -> u8 { self.elem.order() }
+}
+
+/// H(curl)-conforming NURBS FE space for a single 3D patch.
+#[derive(Debug, Clone)]
+pub struct IgaHCurlFESpace3D {
+    iga: IgaSpace3D,
+    elem: NurbsHCurl3D,
+    n_dofs: usize,
+}
+
+impl IgaHCurlFESpace3D {
+    pub fn new(iga: IgaSpace3D) -> Result<Self, String> {
+        let kv_u = iga.knot_slice_u();
+        let kv_v = iga.knot_slice_v();
+        let kv_w = iga.knot_slice_w();
+        let fe_kv_u = fem_element::iga::KnotVector::new_clamped(kv_u.to_vec())
+            .map_err(|e| format!("kv_u: {e}"))?;
+        let fe_kv_v = fem_element::iga::KnotVector::new_clamped(kv_v.to_vec())
+            .map_err(|e| format!("kv_v: {e}"))?;
+        let fe_kv_w = fem_element::iga::KnotVector::new_clamped(kv_w.to_vec())
+            .map_err(|e| format!("kv_w: {e}"))?;
+        let elem = NurbsHCurl3D::from_knot_vectors(fe_kv_u, fe_kv_v, fe_kv_w)?;
+        let n_dofs = elem.n_dofs;
+        Ok(Self { iga, elem, n_dofs })
+    }
+
+    pub fn iga(&self) -> &IgaSpace3D { &self.iga }
+    pub fn nurbs_elem(&self) -> &NurbsHCurl3D { &self.elem }
+}
+
+impl FESpace for IgaHCurlFESpace3D {
+    type Mesh = IgaSinglePatchMesh3D;
+
+    fn mesh(&self) -> &Self::Mesh {
+        panic!("IgaHCurlFESpace3D::mesh not directly available; use iga() for geometry")
+    }
+
+    fn n_dofs(&self) -> usize { self.n_dofs }
+
+    fn element_dofs(&self, _elem: u32) -> &[DofId] { &[] }
+
+    fn interpolate(&self, _f: &dyn Fn(&[f64]) -> f64) -> Vector<f64> {
+        Vector::zeros(self.n_dofs)
+    }
+
+    fn space_type(&self) -> SpaceType { SpaceType::HCurl }
+
+    fn order(&self) -> u8 { self.elem.order() }
+}

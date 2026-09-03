@@ -85,5 +85,17 @@
   "pex37": {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof+objective", "np": [1, 2, 4]},
   "pex39": {"mesh": "compass.msh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
   "pex40": {"mesh": "star.mesh", "args": "--ranks {ranks} -no-vis", "compare": "dof", "np": [1, 2, 4]},
-  "pex41": {"mesh": "periodic-square.mesh", "args": "--ranks {ranks} -p 0 -r 2 -o 3 -no-vis", "compare": "dof", "np": [1, 2, 4]}
+  "pex41": {"mesh": "periodic-square.mesh", "args": "--ranks {ranks} -p 0 -r 2 -o 3 -no-vis", "compare": "dof", "np": [1, 2, 4]},
+
+  "_doc_miniapps": "Miniapp 1:1 比对配置。MPI 程序用 mpirun -n 1 运行。",
+  "mini_joule": {"mesh": "cylinder-hex.mesh", "args": "-p rod -tf 3 -dt 0.5 -no-vis", "cpp_args": "-m miniapps/electromagnetics/cylinder-hex.mesh -p rod -tf 3 -dt 0.5 -no-vis", "compare": "dof+trajectory", "mpi": true},
+  "mini_lorentz": {"mesh": "inline-hex.mesh", "args": "-er Volta-AMR-Parallel -ec 2 -x0 '0.5 0.5 0.9' -p0 '1 0 0' -no-vis", "cpp_args": "-m miniapps/electromagnetics/inline-hex.mesh -er Volta-AMR-Parallel -ec 2 -x0 '0.5 0.5 0.9' -p0 '1 0 0' -no-vis", "compare": "dof", "mpi": true},
+  "mini_maxwell": {"mesh": "inline-hex.mesh", "args": "-abcs '-1' -dp '-0.3 0.0 0.0 0.3 0.0 0.0 0.1 1 .5 .5' -no-vis", "cpp_args": "-m miniapps/electromagnetics/inline-hex.mesh -abcs '-1' -dp '-0.3 0.0 0.0 0.3 0.0 0.0 0.1 1 .5 .5' -no-vis", "compare": "dof", "mpi": true},
+  "mini_tesla": {"mesh": "inline-hex.mesh", "args": "-ubbc '0 0 1' -no-vis", "cpp_args": "-m miniapps/electromagnetics/inline-hex.mesh -ubbc '0 0 1' -no-vis", "compare": "dof", "mpi": true},
+  "mini_volta": {"mesh": "inline-hex.mesh", "args": "-dbcs '1 6' -dbcv '0 1' -no-vis", "cpp_args": "-m miniapps/electromagnetics/inline-hex.mesh -dbcs '1 6' -dbcv '0 1' -no-vis", "compare": "dof", "mpi": true},
+  "mini_nurbs_solenoidal": {"mesh": "square-nurbs.mesh", "args": "-o 2 -r 0 -no-vis", "cpp_args": "-m miniapps/meshes/square-nurbs.mesh -o 2 -r 0 -no-vis", "compare": "dof+error", "mpi": true},
+  "mini_nurbs_ex1": {"mesh": "square-nurbs.mesh", "args": "-o 2 -no-vis", "cpp_args": "-m miniapps/meshes/square-nurbs.mesh -o 2 -no-vis", "compare": "dof+iter", "mpi": true},
+  "mini_nurbs_ex3": {"mesh": "square-nurbs.mesh", "args": "-o 2 -r 1 -no-vis", "cpp_args": "-m miniapps/meshes/square-nurbs.mesh -o 2 -r 1 -no-vis", "compare": "dof", "mpi": true},
+  "mini_nurbs_ex5": {"mesh": "square-nurbs.mesh", "args": "-o 2 -r 1 -no-vis", "cpp_args": "-m miniapps/meshes/square-nurbs.mesh -o 2 -r 1 -no-vis", "compare": "dof", "mpi": true},
+  "mini_nurbs_ex24": {"mesh": "pipe-nurbs-2d.mesh", "args": "-o 2 -r 1 -p 0 -no-vis", "cpp_args": "-m miniapps/meshes/pipe-nurbs-2d.mesh -o 2 -r 1 -p 0 -no-vis", "compare": "dof", "mpi": true}
 }
