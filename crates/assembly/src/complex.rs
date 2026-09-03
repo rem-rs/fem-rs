@@ -45,6 +45,7 @@ use crate::assembler::Assembler;
 use crate::vector_assembler::VectorAssembler;
 use crate::integrator::{BilinearIntegrator, LinearIntegrator, QpData};
 use crate::vector_integrator::VectorBilinearIntegrator;
+use crate::mixed::{MixedAssembler, MixedBilinearIntegrator};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ComplexOperator — convention for 2×2 block layout
@@ -422,6 +423,153 @@ impl<'a, 'b, S: FESpace + Send + Sync> SesquilinearForm<'a, 'b, S> {
         };
 
         ComplexSystem { k_re, k_im, omega: 0.0 }
+    }
+}
+
+// === MixedSesquilinearForm — complex-valued mixed bilinear form ===
+//
+// Mirrors MFEM 4.10's MixedSesquilinearForm: two different spaces (trial and
+// test) with complex-valued coefficients.  Produces rectangular matrices
+// (n_test × n_trial) for both real and imaginary parts.
+//
+// Typical use: complex-valued Stokes/Darcy flow where trial = velocity,
+// test = pressure.
+
+/// Complex-valued mixed bilinear form `b(u, v)` where `u ∈ U` (trial) and
+/// `v ∈ V` (test) are different spaces.
+///
+/// Produces a `ComplexSystem` with rectangular matrices:
+/// - `k_re`: n_test × n_trial (real part)
+/// - `k_im`: n_test × n_trial (imaginary part)
+pub struct MixedSesquilinearForm<'a, 'b, 'c, S1: FESpace + Send + Sync, S2: FESpace + Send + Sync> {
+    trial_space: &'a S1,
+    test_space: &'a S2,
+    conv: Convention,
+    quad_order: u8,
+    pairs: Vec<(
+        &'b dyn MixedBilinearIntegrator,
+        Option<&'c dyn MixedBilinearIntegrator>,
+    )>,
+}
+
+impl<'a, 'b, 'c, S1: FESpace + Send + Sync, S2: FESpace + Send + Sync>
+    MixedSesquilinearForm<'a, 'b, 'c, S1, S2>
+{
+    pub fn new(trial_space: &'a S1, test_space: &'a S2, conv: Convention, quad_order: u8) -> Self {
+        MixedSesquilinearForm {
+            trial_space,
+            test_space,
+            conv,
+            quad_order,
+            pairs: Vec::new(),
+        }
+    }
+
+    /// Add a mixed integrator pair (real and imaginary parts).
+    pub fn add_mixed_domain_integrator_pair(
+        &mut self,
+        re_integ: &'b dyn MixedBilinearIntegrator,
+        im_integ: Option<&'c dyn MixedBilinearIntegrator>,
+    ) {
+        self.pairs.push((re_integ, im_integ));
+    }
+
+    /// Assemble the mixed complex system.
+    pub fn assemble(self) -> MixedComplexSystem {
+        let mut re_all: Vec<&dyn MixedBilinearIntegrator> = Vec::new();
+        let mut im_all: Vec<&dyn MixedBilinearIntegrator> = Vec::new();
+        for (re, im) in &self.pairs {
+            re_all.push(*re);
+            if let Some(im) = im {
+                im_all.push(*im);
+            }
+        }
+
+        let n_trial = self.trial_space.n_dofs();
+        let n_test = self.test_space.n_dofs();
+
+        let k_re = if !re_all.is_empty() {
+            MixedAssembler::assemble_bilinear(
+                self.test_space,
+                self.trial_space,
+                &re_all,
+                self.quad_order,
+            )
+        } else {
+            CsrMatrix::new_empty(n_test, n_trial)
+        };
+
+        let k_im = if !im_all.is_empty() {
+            MixedAssembler::assemble_bilinear(
+                self.test_space,
+                self.trial_space,
+                &im_all,
+                self.quad_order,
+            )
+        } else {
+            CsrMatrix::new_empty(n_test, n_trial)
+        };
+
+        MixedComplexSystem {
+            k_re,
+            k_im,
+            n_trial,
+            n_test,
+            omega: 0.0,
+        }
+    }
+}
+
+/// Complex system with rectangular matrices (mixed spaces).
+#[derive(Debug, Clone)]
+pub struct MixedComplexSystem {
+    /// Real part: n_test × n_trial.
+    pub k_re: CsrMatrix<f64>,
+    /// Imaginary part: n_test × n_trial.
+    pub k_im: CsrMatrix<f64>,
+    /// Number of trial DOFs.
+    pub n_trial: usize,
+    /// Number of test DOFs.
+    pub n_test: usize,
+    /// Frequency (for Helmholtz-type problems).
+    pub omega: f64,
+}
+
+impl MixedComplexSystem {
+    /// Convert to a flat 2×2 block CSR matrix using the given convention.
+    ///
+    /// Layout: [k_re, -k_im; k_im, k_re] (HERMITIAN) or
+    ///         [k_re, k_im; k_im, k_re] (SYMMETRIC).
+    pub fn to_flat_csr_with_conv(&self, conv: Convention) -> CsrMatrix<f64> {
+        let nt = self.n_trial;
+        let ns = self.n_test;
+        let tot = 2 * ns;
+        let tot_cols = 2 * nt;
+        let mut coo = CooMatrix::<f64>::new(tot, tot_cols);
+        let tr = conv.tr_sign();
+        let br = conv.br_sign();
+
+        for i in 0..ns {
+            for p in self.k_re.row_ptr[i]..self.k_re.row_ptr[i + 1] {
+                let j = self.k_re.col_idx[p] as usize;
+                let v = self.k_re.values[p];
+                if v != 0.0 {
+                    coo.add(i, j, v);
+                    coo.add(ns + i, nt + j, br * v);
+                }
+            }
+        }
+        for i in 0..ns {
+            for p in self.k_im.row_ptr[i]..self.k_im.row_ptr[i + 1] {
+                let j = self.k_im.col_idx[p] as usize;
+                let v = self.k_im.values[p];
+                if v != 0.0 {
+                    coo.add(i, nt + j, tr * v);
+                    coo.add(ns + i, j, v);
+                }
+            }
+        }
+        coo.into_csr()
     }
 }
 
@@ -1345,5 +1493,54 @@ mod tests {
 
         let l2_err = gf.compute_lp_error(2.0, &exact_re, &exact_im, 3, &space);
         assert!((l2_err - 0.01).abs() < 1e-4, "L² error = {l2_err}, expected ~0.01");
+    }
+
+    use super::{MixedSesquilinearForm, MixedComplexSystem};
+    use crate::mixed::PressureDivIntegrator;
+
+    #[test]
+    fn mixed_sesquilinear_form_rectangular() {
+        // MixedSesquilinearForm should produce rectangular matrices
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let velocity_space = fem_space::vector_h1::VectorH1Space::new(mesh.clone(), 1, 2);
+        let pressure_space = H1Space::new(mesh.clone(), 1);
+
+        let form = MixedSesquilinearForm::new(
+            &velocity_space,
+            &pressure_space,
+            Convention::Hermitian,
+            3,
+        );
+
+        let sys = form.assemble();
+        // velocity_space has 2*n_dofs (2D vector), pressure_space has n_dofs
+        assert_eq!(sys.n_trial, velocity_space.n_dofs());
+        assert_eq!(sys.n_test, pressure_space.n_dofs());
+        assert_eq!(sys.k_re.nrows, pressure_space.n_dofs());
+        assert_eq!(sys.k_re.ncols, velocity_space.n_dofs());
+    }
+
+    #[test]
+    fn mixed_sesquilinear_form_with_integrator() {
+        // Test with a real integrator (PressureDivIntegrator)
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let velocity_space = fem_space::vector_h1::VectorH1Space::new(mesh.clone(), 1, 2);
+        let pressure_space = H1Space::new(mesh.clone(), 1);
+
+        let mut form = MixedSesquilinearForm::new(
+            &velocity_space,
+            &pressure_space,
+            Convention::Hermitian,
+            3,
+        );
+        form.add_mixed_domain_integrator_pair(&PressureDivIntegrator, None);
+
+        let sys: MixedComplexSystem = form.assemble();
+        // Should have non-zero real part
+        let nnz_re: usize = sys.k_re.row_ptr.windows(2).map(|w| w[1] - w[0]).sum();
+        assert!(nnz_re > 0, "k_re should have non-zero entries");
+        // Imaginary part should be zero (no imaginary integrator)
+        let nnz_im: usize = sys.k_im.row_ptr.windows(2).map(|w| w[1] - w[0]).sum();
+        assert_eq!(nnz_im, 0, "k_im should be empty");
     }
 }
