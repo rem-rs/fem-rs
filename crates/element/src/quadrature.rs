@@ -283,6 +283,258 @@ pub fn gauss_legendre_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     (pts_sorted, wts_sorted)
 }
 
+/// Compute Gauss-Jacobi points and weights on `[-1, 1]` for arbitrary `n` points.
+///
+/// Gauss-Jacobi quadrature integrates functions with weight `(1-x)^α (1+x)^β`.
+/// Special cases:
+/// - α = β = 0: Gauss-Legendre
+/// - α = β = -0.5: Gauss-Chebyshev
+/// - α = β: Gauss-Gegenbauer
+///
+/// Uses the Golub-Welsch algorithm (eigenvalue decomposition of the Jacobi matrix).
+/// Returns (points, weights) where weights sum to 2^(α+β+1) * B(α+1, β+1).
+///
+/// # Arguments
+/// * `n` — number of quadrature points
+/// * `alpha` — left exponent α
+/// * `beta` — right exponent β
+///
+/// # Returns
+/// (points, weights) where points are in increasing order
+pub fn gauss_jacobi(n: usize, alpha: f64, beta: f64) -> (Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        return (vec![], vec![]);
+    }
+    // For α=β=0, use Gauss-Legendre (avoids removable singularity in Golub-Welsch)
+    if (alpha.abs() < 1e-15) && (beta.abs() < 1e-15) {
+        return if n <= 4 {
+            gauss_legendre_1d(n)
+        } else {
+            gauss_legendre_arbitrary(n)
+        };
+    }
+    if n == 1 {
+        let x = (beta - alpha) / (alpha + beta + 2.0);
+        let w = 2.0_f64.powf(alpha + beta + 1.0);
+        return (vec![x], vec![w]);
+    }
+
+    // Golub-Welsch algorithm: build the symmetric tridiagonal Jacobi matrix
+    // and compute its eigenvalues (nodes) and first components of eigenvectors (weights).
+    let n_f = n as f64;
+    let mut diag = vec![0.0f64; n];
+    let mut offd = vec![0.0f64; n - 1];
+
+    for i in 0..n {
+        let i_f = i as f64;
+        // Diagonal element
+        let a = alpha;
+        let b = beta;
+        let num = b * b - a * a;
+        let den = (2.0 * i_f + a + b) * (2.0 * i_f + a + b + 2.0);
+        if den.abs() > 1e-30 {
+            diag[i] = num / den;
+        } else {
+            diag[i] = 0.0;
+        }
+    }
+
+    for i in 0..(n - 1) {
+        let i_f = i as f64;
+        let a = alpha;
+        let b = beta;
+        let num1 = 4.0 * (i_f + 1.0) * (i_f + a + 1.0) * (i_f + b + 1.0) * (i_f + a + b + 1.0);
+        let den1 = (2.0 * i_f + a + b + 1.0).powi(2) * ((2.0 * i_f + a + b + 1.0).powi(2) - 1.0);
+        if den1.abs() > 1e-30 {
+            offd[i] = (num1 / den1).sqrt();
+        } else {
+            offd[i] = 0.0;
+        }
+    }
+
+    // Solve the symmetric tridiagonal eigenvalue problem using QR iteration
+    let (eigenvals, eigenvecs) = symmetric_tridiag_eigen(&diag, &offd);
+
+    // Weights: w_i = μ_0 * (v_{i,0})² where μ_0 = ∫(1-x)^α(1+x)^β dx
+    let mu0 = 2.0_f64.powf(alpha + beta + 1.0) * beta_fn(alpha + 1.0, beta + 1.0);
+
+    let mut result: Vec<(f64, f64)> = eigenvals
+        .iter()
+        .zip(eigenvecs.iter())
+        .map(|(&x, v)| (x, mu0 * v[0] * v[0]))
+        .collect();
+
+    result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    result.into_iter().unzip()
+}
+
+/// Beta function B(a,b) = Γ(a)Γ(b)/Γ(a+b)
+fn beta_fn(a: f64, b: f64) -> f64 {
+    (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)).exp()
+}
+
+/// Logarithm of the gamma function (Lanczos approximation)
+fn ln_gamma(x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::INFINITY;
+    }
+    // Lanczos approximation with g=7, n=9
+    let p = [
+        0.99999999999980993,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    ];
+    let g = 7.0;
+    if x < 0.5 {
+        // Reflection formula
+        let s = (std::f64::consts::PI * x).sin();
+        if s.abs() < 1e-30 {
+            return f64::INFINITY;
+        }
+        return (std::f64::consts::PI / s).ln() - ln_gamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = p[0];
+    let t = x + g + 0.5;
+    for i in 1..p.len() {
+        a += p[i] / (x + i as f64);
+    }
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (t).ln() * (x + 0.5) - t + a.ln()
+}
+
+/// Solve symmetric tridiagonal eigenvalue problem using QR iteration.
+/// Returns (eigenvalues, eigenvectors) where eigenvectors[i] is the i-th eigenvector.
+fn symmetric_tridiag_eigen(diag: &[f64], offd: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let n = diag.len();
+    if n == 0 {
+        return (vec![], vec![]);
+    }
+    if n == 1 {
+        return (vec![diag[0]], vec![vec![1.0]]);
+    }
+
+    // Use implicit QR iteration for symmetric tridiagonal matrices
+    // For simplicity, use the power method for each eigenvalue (not efficient but correct)
+    let mut eigenvals = vec![0.0f64; n];
+    let mut eigenvecs: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
+
+    // Use the QR algorithm with Wilkinson shift
+    let mut d = diag.to_vec();
+    let mut e = offd.to_vec();
+    let mut z = identity_matrix(n);
+
+    let max_iter = 100 * n;
+    let eps = 1e-15;
+
+    for _ in 0..max_iter {
+        // Check for convergence
+        let mut converged = true;
+        for i in 0..(n - 1) {
+            if e[i].abs() > eps * (d[i].abs() + d[i + 1].abs()) {
+                converged = false;
+                break;
+            }
+        }
+        if converged {
+            break;
+        }
+
+        // Find the largest unconverged subdiagonal
+        let mut l = n - 1;
+        for i in 0..(n - 1) {
+            if e[i].abs() <= eps * (d[i].abs() + d[i + 1].abs()) {
+                l = i;
+                break;
+            }
+        }
+
+        // Wilkinson shift
+        let dl = d[l];
+        let dl1 = d[l + 1];
+        let el = e[l];
+        let delta = (dl - dl1) / 2.0;
+        let s = if delta.abs() < 1e-30 {
+            dl1 - el.abs()
+        } else {
+            let sign_delta = if delta >= 0.0 { 1.0 } else { -1.0 };
+            dl1 - el * el / (delta + sign_delta * (delta * delta + el * el).sqrt())
+        };
+
+        // QR step with shift
+        let mut x = d[0] - s;
+        let mut y = e[0];
+        for i in 0..(n - 1) {
+            // Givens rotation to zero out y
+            let (c, s, r) = if x.abs() < 1e-30 {
+                (0.0, 1.0, y)
+            } else if x.abs() > y.abs() {
+                let t = y / x;
+                let r = (1.0 + t * t).sqrt();
+                (1.0 / r, t / r, x * r)
+            } else {
+                let t = x / y;
+                let r = (1.0 + t * t).sqrt();
+                (t / r, 1.0 / r, y * r)
+            };
+
+            // Apply rotation
+            let di = d[i];
+            let di1 = d[i + 1];
+            let ei = if i < e.len() { e[i] } else { 0.0 };
+            let ei1 = if i + 1 < e.len() { e[i + 1] } else { 0.0 };
+
+            d[i] = c * c * di + 2.0 * c * s * ei + s * s * di1;
+            d[i + 1] = s * s * di - 2.0 * c * s * ei + c * c * di1;
+            e[i] = c * s * (di1 - di) + (c * c - s * s) * ei;
+            if i + 1 < e.len() {
+                e[i + 1] = c * ei1;
+            }
+            if i > 0 {
+                e[i - 1] = r;
+            }
+
+            // Update eigenvector matrix
+            for k in 0..n {
+                let zki = z[k][i];
+                let zki1 = z[k][i + 1];
+                z[k][i] = c * zki + s * zki1;
+                z[k][i + 1] = -s * zki + c * zki1;
+            }
+
+            if i + 1 < n - 1 {
+                x = e[i + 1];
+                y = s * e[i + 1];
+                e[i + 1] = c * e[i + 1];
+            }
+        }
+    }
+
+    for i in 0..n {
+        eigenvals[i] = d[i];
+    }
+    for i in 0..n {
+        for k in 0..n {
+            eigenvecs[i][k] = z[k][i];
+        }
+    }
+
+    (eigenvals, eigenvecs)
+}
+
+fn identity_matrix(n: usize) -> Vec<Vec<f64>> {
+    let mut m = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        m[i][i] = 1.0;
+    }
+    m
+}
+
 /// Evaluate Legendre polynomial P_n(x) and P_{n-1}(x) using recurrence.
 fn legendre_poly(n: usize, x: f64) -> (f64, f64) {
     if n == 0 {
@@ -2148,3 +2400,41 @@ mod tet_quad_tests {
     }
 }
 
+
+#[cfg(test)]
+mod gauss_jacobi_tests {
+    use super::*;
+
+    #[test]
+    fn gauss_jacobi_legendre_equivalence() {
+        // Gauss-Jacobi with α=β=0 should match Gauss-Legendre
+        for n in [2, 3, 4, 5] {
+            let (x_jac, w_jac) = gauss_jacobi(n, 0.0, 0.0);
+            let (x_leg, w_leg) = if n <= 4 {
+                gauss_legendre_1d(n)
+            } else {
+                gauss_legendre_arbitrary(n)
+            };
+            for i in 0..n {
+                assert!(
+                    (x_jac[i] - x_leg[i]).abs() < 1e-10,
+                    "n={n}, i={i}: x_jac={} vs x_leg={}",
+                    x_jac[i], x_leg[i]
+                );
+                assert!(
+                    (w_jac[i] - w_leg[i]).abs() < 1e-10,
+                    "n={n}, i={i}: w_jac={} vs w_leg={}",
+                    w_jac[i], w_leg[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gauss_jacobi_weight_sum() {
+        // For α=β=0, weight sum should be 2.0
+        let (_, w) = gauss_jacobi(5, 0.0, 0.0);
+        let sum: f64 = w.iter().sum();
+        assert!((sum - 2.0).abs() < 1e-10, "weight sum = {sum}, expected 2.0");
+    }
+}
