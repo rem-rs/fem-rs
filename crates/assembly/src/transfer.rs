@@ -498,6 +498,117 @@ pub fn transfer_h1_p1_nonmatching_l2_projection(
     ))
 }
 
+/// Transfer field values from source to target using coefficient-weighted L2
+/// projection on target H1 P1 space (2D triangular meshes).
+///
+/// This conserves the weighted integral `∫ coeff * u dx` instead of just `∫ u dx`.
+/// Useful for conserving density-weighted momentum, energy, etc.
+///
+/// Matches MFEM 4.10 `L2ProjectionGridTransfer` coefficient-weighted transfer.
+///
+/// # Arguments
+/// * `source_space` — source H1 P1 space
+/// * `source_values` — source field values
+/// * `target_space` — target H1 P1 space
+/// * `coeff` — coefficient function `fn(&[f64]) -> f64`
+/// * `tol` — point locator tolerance
+/// * `quad_order` — quadrature order
+pub fn transfer_h1_p1_nonmatching_l2_projection_weighted(
+    source_space: &H1Space<Mesh<2>>,
+    source_values: &[f64],
+    target_space: &H1Space<Mesh<2>>,
+    coeff: &dyn Fn(&[f64]) -> f64,
+    tol: f64,
+    quad_order: u8,
+) -> Result<(Vec<f64>, TransferStats), TransferError> {
+    if source_space.order() != 1 || target_space.order() != 1 {
+        return Err(TransferError::UnsupportedSpaceOrder);
+    }
+    if source_values.len() != source_space.n_dofs() {
+        return Err(TransferError::SourceLengthMismatch {
+            expected: source_space.n_dofs(),
+            got: source_values.len(),
+        });
+    }
+
+    let source_mesh = source_space.mesh();
+    let target_mesh = target_space.mesh();
+    let source_locator = TriPointLocator::new(source_mesh);
+
+    let n_tgt = target_space.n_dofs();
+    let mut mass_coo = CooMatrix::<f64>::new(n_tgt, n_tgt);
+    let mut rhs = vec![0.0_f64; n_tgt];
+
+    let ref_elem = TriP1;
+    let quad = ref_elem.quadrature(quad_order.max(2));
+    let mut phi = vec![0.0_f64; ref_elem.n_dofs()];
+
+    let mut located = 0usize;
+    let mut extrapolated = 0usize;
+
+    for e in 0..target_mesh.n_elems() as u32 {
+        let nodes = target_mesh.elem_nodes(e);
+        let x0 = target_mesh.coords_of(nodes[0]);
+        let x1 = target_mesh.coords_of(nodes[1]);
+        let x2 = target_mesh.coords_of(nodes[2]);
+        let j00 = x1[0] - x0[0];
+        let j01 = x2[0] - x0[0];
+        let j10 = x1[1] - x0[1];
+        let j11 = x2[1] - x0[1];
+        let det_j = (j00 * j11 - j01 * j10).abs();
+
+        let elem_dofs = target_space.element_dofs(e);
+        let mut m_elem = vec![0.0_f64; 9];
+        let mut b_elem = [0.0_f64; 3];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            ref_elem.eval_basis(xi, &mut phi);
+            let xq = [x0[0] + j00 * xi[0] + j01 * xi[1], x0[1] + j10 * xi[0] + j11 * xi[1]];
+            let (us, found) = sample_source_tri(
+                source_mesh,
+                &source_locator,
+                source_values,
+                &xq,
+                tol,
+            );
+            if found {
+                located += 1;
+            } else {
+                extrapolated += 1;
+            }
+
+            let coeff_val = coeff(&xq);
+            let w = quad.weights[q] * det_j;
+            for i in 0..3 {
+                b_elem[i] += w * phi[i] * coeff_val * us;
+                for j in 0..3 {
+                    m_elem[i * 3 + j] += w * phi[i] * phi[j] * coeff_val;
+                }
+            }
+        }
+
+        let dofs: Vec<usize> = elem_dofs.iter().map(|&d| d as usize).collect();
+        mass_coo.add_element_matrix(&dofs, &m_elem);
+        for i in 0..3 {
+            rhs[dofs[i]] += b_elem[i];
+        }
+    }
+
+    let mass = mass_coo.into_csr();
+    let mut out = vec![0.0_f64; n_tgt];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-14, max_iter: 5_000, ..SolverConfig::default() };
+    solve_cg(&mass, &rhs, &mut out, &cfg)
+        .map_err(|e| TransferError::LinearSolveFailed(e.to_string()))?;
+
+    Ok((
+        out,
+        TransferStats {
+            located_count: located,
+            extrapolated_count: extrapolated,
+        },
+    ))
+}
+
 /// Transfer field values from source to target using L2 projection on target
 /// H1 P1 space (3D tetrahedral meshes).
 pub fn transfer_h1_p1_nonmatching_l2_projection_3d(
@@ -1747,6 +1858,43 @@ mod nc_transfer_tests {
         for i in 0..n_fine {
             assert!((u_matrix[i] - u_direct[i]).abs() < 1e-12,
                 "dof {i}: direct={} matrix={}", u_direct[i], u_matrix[i]);
+        }
+    }
+
+    use super::transfer_h1_p1_nonmatching_l2_projection_weighted;
+
+    #[test]
+    fn l2_projection_weighted_constant_coeff() {
+        // With constant coefficient=1, weighted transfer should match standard transfer
+        let src_mesh = Mesh::<2>::unit_square_tri(4);
+        let tgt_mesh = Mesh::<2>::unit_square_tri(2);
+        let src_space = H1Space::new(src_mesh.clone(), 1);
+        let tgt_space = H1Space::new(tgt_mesh.clone(), 1);
+
+        // Create a linear source field: u = x + y using interpolate
+        let f = |x: &[f64]| x[0] + x[1];
+        let src_dofs_vec = src_space.interpolate(&f);
+        let src_dofs: Vec<f64> = src_dofs_vec.into_vec();
+
+        // Standard transfer
+        let (std_result, _) =
+            transfer_h1_p1_nonmatching_l2_projection(&src_space, &src_dofs, &tgt_space, 1e-10, 3)
+                .unwrap();
+
+        // Weighted transfer with constant coefficient=1
+        let (wtd_result, _) = transfer_h1_p1_nonmatching_l2_projection_weighted(
+            &src_space, &src_dofs, &tgt_space, &|_| 1.0, 1e-10, 3,
+        )
+        .unwrap();
+
+        // Results should be identical
+        for i in 0..std_result.len() {
+            assert!(
+                (std_result[i] - wtd_result[i]).abs() < 1e-8,
+                "dof {i}: std={} wtd={}",
+                std_result[i],
+                wtd_result[i]
+            );
         }
     }
 }
