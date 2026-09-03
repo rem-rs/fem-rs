@@ -54,6 +54,16 @@ impl<M: MeshTopology> H1Space<M> {
     pub fn dof_manager(&self) -> &DofManager { &self.dm }
     /// Mutable reference to the DOF manager.
     pub fn dof_manager_mut(&mut self) -> &mut DofManager { &mut self.dm }
+    /// Reference to the underlying mesh as a trait object.
+    pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
+
+    /// Uniform polynomial order.
+    pub fn get_order(&self) -> u8 { self.order }
+
+    /// Global DOF indices for element `elem` as `&[u32]`.
+    pub fn element_dofs_u32(&self, elem: u32) -> &[u32] {
+        self.dm.element_dofs(elem)
+    }
 
     /// Current per-element orders (None for uniform).
     pub fn elem_orders(&self) -> Option<&[u8]> {

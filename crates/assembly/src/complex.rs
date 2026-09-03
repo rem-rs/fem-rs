@@ -35,6 +35,10 @@
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr, solve_gmres_complex};
 use fem_mesh::ElementTransformation;
+use fem_mesh::topology::MeshTopology;
+use fem_element::ReferenceElement;
+use fem_mesh::element_type::ElementType;
+use crate::postproc::grid_function::{ref_elem_vol, simplex_jacobian, phys_coords};
 use fem_space::fe_space::FESpace;
 
 use crate::assembler::Assembler;
@@ -478,6 +482,96 @@ impl ComplexGridFunction {
         let im: f64 = self.u_im.iter().map(|x| x * x).sum();
         (re + im).sqrt()
     }
+
+    /// Compute the L^p error for a complex-valued scalar field.
+    ///
+    /// Computes ‖u_h − u_exact‖_{L^p} where u_h is the complex grid function
+    /// and u_exact is the exact complex coefficient.  The L^p norm for complex
+    /// fields is (∫ |u_h − u_exact|^p)^(1/p) where |·| is the complex modulus.
+    ///
+    /// Matches MFEM 4.10 ComplexGridFunction::ComputeLpError.
+    pub fn compute_lp_error(
+        &self,
+        p: f64,
+        exact_re: &dyn Fn(&[f64]) -> f64,
+        exact_im: &dyn Fn(&[f64]) -> f64,
+        quad_order: u8,
+        space: &dyn ComplexGridFunctionSpace,
+    ) -> f64 {
+        let mesh = space.mesh();
+        let dim = mesh.topological_dim() as usize;
+        let order = space.order();
+        let n_elems = mesh.n_elements();
+
+        if n_elems == 0 { return 0.0; }
+
+        let mut err_sum = 0.0f64;
+        let mut max_err = 0.0f64;
+
+        for e in 0..n_elems as u32 {
+            let elem_type = mesh.element_type(e);
+            let ref_elem = ref_elem_vol(elem_type, order);
+            let n_ldofs = ref_elem.n_dofs();
+            let quad = ref_elem.quadrature(quad_order);
+            let elem_dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let x0 = mesh.node_coords(nodes[0]);
+            let mut phi = vec![0.0; n_ldofs];
+
+            for (q, xi) in quad.points.iter().enumerate() {
+                let w = quad.weights[q] * det_j.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                let mut uh_re = 0.0;
+                let mut uh_im = 0.0;
+                for i in 0..n_ldofs {
+                    let dof = elem_dofs[i] as usize;
+                    uh_re += self.u_re[dof] * phi[i];
+                    uh_im += self.u_im[dof] * phi[i];
+                }
+                let xp = phys_coords(x0, &jac, xi, dim);
+                let ue_re = exact_re(&xp);
+                let ue_im = exact_im(&xp);
+                let dr = uh_re - ue_re;
+                let di = uh_im - ue_im;
+                let mod_sq = dr * dr + di * di;
+                if p.is_infinite() {
+                    if mod_sq > max_err { max_err = mod_sq; }
+                } else {
+                    err_sum += w * mod_sq.powf(p / 2.0);
+                }
+            }
+        }
+
+        if p.is_infinite() {
+            max_err.sqrt()
+        } else {
+            err_sum.powf(1.0 / p)
+        }
+    }
+
+    /// Compute the L^∞ (maximum) error for a complex-valued scalar field.
+    ///
+    /// Computes max |u_h − u_exact| over all quadrature points.
+    /// Convenience wrapper around compute_lp_error(f64::INFINITY, ...).
+    ///
+    /// Matches MFEM 4.10 ComplexGridFunction::ComputeMaxError.
+    pub fn compute_max_error(
+        &self,
+        exact_re: &dyn Fn(&[f64]) -> f64,
+        exact_im: &dyn Fn(&[f64]) -> f64,
+        quad_order: u8,
+        space: &dyn ComplexGridFunctionSpace,
+    ) -> f64 {
+        self.compute_lp_error(f64::INFINITY, exact_re, exact_im, quad_order, space)
+    }
+}
+
+/// Trait abstracting the FE space operations needed by ComplexGridFunction.
+pub trait ComplexGridFunctionSpace {
+    fn mesh(&self) -> &dyn MeshTopology;
+    fn order(&self) -> u8;
+    fn element_dofs(&self, elem: u32) -> &[u32];
 }
 
 // 鈹€鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -970,7 +1064,7 @@ mod native_complex_tests {
 
         // Apply zero Dirichlet BCs on boundary DOFs
         let bd_dofs = fem_space::constraints::boundary_dofs(
-            space.mesh() as &dyn fem_mesh::topology::MeshTopology,
+            fem_space::fe_space::FESpace::mesh(&space) as &dyn fem_mesh::topology::MeshTopology,
             space.dof_manager(),
             &[1, 2, 3, 4],
         );
@@ -1009,7 +1103,7 @@ mod native_complex_tests {
         let mut b_re_nat = vec![1.0_f64; n];
         let mut b_im_nat = vec![0.0_f64; n];
         let bd = boundary_dofs(
-            space.mesh() as &dyn fem_mesh::topology::MeshTopology,
+            fem_space::fe_space::FESpace::mesh(&space) as &dyn fem_mesh::topology::MeshTopology,
             space.dof_manager(), &[1, 2, 3, 4],
         );
         let bd_usize: Vec<usize> = bd.iter().map(|&d| d as usize).collect();
@@ -1026,7 +1120,7 @@ mod native_complex_tests {
             omega, 3,
         );
         let bd2 = boundary_dofs(
-            space.mesh() as &dyn fem_mesh::topology::MeshTopology,
+            fem_space::fe_space::FESpace::mesh(&space) as &dyn fem_mesh::topology::MeshTopology,
             space.dof_manager(), &[1, 2, 3, 4],
         );
         let bd2_usize: Vec<usize> = bd2.iter().map(|&d| d as usize).collect();
@@ -1050,6 +1144,21 @@ mod native_complex_tests {
 // 鈹€鈹€鈹€ Tests (original 2脳2 block) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 #[cfg(test)]
+
+// ─── ComplexGridFunctionSpace impl for H1Space ─────────────────────────────
+
+impl<M: MeshTopology + Clone> ComplexGridFunctionSpace for fem_space::H1Space<M> {
+    fn mesh(&self) -> &dyn MeshTopology {
+        self.mesh_topology()
+    }
+    fn order(&self) -> u8 {
+        self.get_order()
+    }
+    fn element_dofs(&self, elem: u32) -> &[u32] {
+        self.element_dofs_u32(elem)
+    }
+}
+
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
@@ -1173,6 +1282,68 @@ mod tests {
         assert_eq!(&rhs[..n], f_re.as_slice());
         assert_eq!(&rhs[n..], f_im.as_slice());
     }
+
+    /// Test compute_lp_error for a complex field against exact solution.
+    #[test]
+
+    /// Test compute_lp_error for a complex field against exact solution.
+    #[test]
+    fn complex_compute_lp_error_l2() {
+        let mesh = Mesh::<2>::unit_square_tri(8);
+        let space = H1Space::new(mesh, 1);
+
+        // Exact solution: u = (x + iy) * (x + iy) = x² - y² + 2ixy
+        let exact_re = |x: &[f64]| x[0] + x[1];
+        let exact_im = |x: &[f64]| x[0] - x[1];
+
+        let dofs_re = space.interpolate(&exact_re);
+        let dofs_im = space.interpolate(&exact_im);
+        let gf = ComplexGridFunction {
+            u_re: dofs_re.into_vec(),
+            u_im: dofs_im.into_vec(),
+        };
+
+        let l2_err = gf.compute_lp_error(2.0, &exact_re, &exact_im, 3, &space);
+        assert!(l2_err < 1e-10, "L² error = {l2_err}, expected < 1e-10");
+    }
+
+    /// Test compute_max_error for a complex field.
+    #[test]
+    fn complex_compute_max_error() {
+        let mesh = Mesh::<2>::unit_square_tri(8);
+        let space = H1Space::new(mesh, 1);
+
+        let exact_re = |x: &[f64]| x[0];
+        let exact_im = |x: &[f64]| x[1];
+
+        let dofs_re = space.interpolate(&exact_re);
+        let dofs_im = space.interpolate(&exact_im);
+        let gf = ComplexGridFunction {
+            u_re: dofs_re.into_vec(),
+            u_im: dofs_im.into_vec(),
+        };
+
+        let max_err = gf.compute_max_error(&exact_re, &exact_im, 3, &space);
+        assert!(max_err < 1e-10, "L^∞ error = {max_err}, expected < 1e-10");
+    }
+
+    /// Test compute_lp_error with a perturbed field.
+    #[test]
+    fn complex_compute_lp_error_perturbed() {
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let space = H1Space::new(mesh, 1);
+
+        let exact_re = |x: &[f64]| x[0];
+        let exact_im = |_x: &[f64]| 0.0;
+
+        let dofs_re = space.interpolate(&|x: &[f64]| x[0] + 0.01);
+        let dofs_im = space.interpolate(&|_x: &[f64]| 0.0);
+        let gf = ComplexGridFunction {
+            u_re: dofs_re.into_vec(),
+            u_im: dofs_im.into_vec(),
+        };
+
+        let l2_err = gf.compute_lp_error(2.0, &exact_re, &exact_im, 3, &space);
+        assert!((l2_err - 0.01).abs() < 1e-4, "L² error = {l2_err}, expected ~0.01");
+    }
 }
-
-

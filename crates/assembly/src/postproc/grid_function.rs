@@ -24,7 +24,7 @@ use crate::standard::{DomainSourceIntegrator, MassIntegrator};
 
 // ─── Reference element factory (mirrors assembler.rs) ──────────────────────
 
-fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
@@ -61,7 +61,7 @@ impl ReferenceElement for P0 {
 
 // ─── Jacobian helpers (same as assembler.rs) ───────────────────────────────
 
-fn simplex_jacobian<M: MeshTopology>(    mesh: &M,
+pub(crate) fn simplex_jacobian(mesh: &dyn MeshTopology,
     geo_nodes: &[u32],
     dim: usize,
 ) -> (DMatrix<f64>, f64) {
@@ -111,7 +111,7 @@ fn simplex_jacobian<M: MeshTopology>(    mesh: &M,
     }
 }
 
-fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {    let mut xp = x0.to_vec();
+pub(crate) fn phys_coords(x0: &[f64], j: &DMatrix<f64>, xi: &[f64], dim: usize) -> Vec<f64> {    let mut xp = x0.to_vec();
     for i in 0..dim {
         for k in 0..dim {
             xp[i] += j[(i, k)] * xi[k];
