@@ -1445,6 +1445,23 @@ fn wv_tri_params(order: u8) -> (Option<f64>, Vec<(f64, f64)>, Vec<(f64, f64, f64
 
 // ─── Tetrahedron ──────────────────────────────────────────────────────────────
 
+/// Stroud conical quadrature rule for triangles (order 2, 3 points).
+///
+/// All-positive weights, exact for polynomials up to degree 2.
+/// Reference: A.H. Stroud, "Approximate Calculation of Multiple Integrals" (1971).
+///
+/// Weights sum to 0.5 (area of reference triangle).
+pub fn stroud_tri_rule() -> QuadratureRule {
+    let points: Vec<Vec<f64>> = vec![
+        vec![1.0 / 2.0, 0.0],
+        vec![0.0, 1.0 / 2.0],
+        vec![1.0 / 2.0, 1.0 / 2.0],
+    ];
+    let weights: Vec<f64> = vec![1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0];
+
+    QuadratureRule { points, weights }
+}
+
 /// Quadrature rule on the reference tetrahedron `(0,0,0),(1,0,0),(0,1,0),(0,0,1)`.
 ///
 /// Weights sum to 1/6 (volume of reference tet).
@@ -2436,5 +2453,24 @@ mod gauss_jacobi_tests {
         let (_, w) = gauss_jacobi(5, 0.0, 0.0);
         let sum: f64 = w.iter().sum();
         assert!((sum - 2.0).abs() < 1e-10, "weight sum = {sum}, expected 2.0");
+    }
+
+    use super::stroud_tri_rule;
+
+    #[test]
+    fn stroud_tri_weight_sum() {
+        let rule = stroud_tri_rule();
+        let sum: f64 = rule.weights.iter().sum();
+        assert!((sum - 0.5).abs() < 1e-14, "weight sum = {sum}, expected 0.5");
+        assert_eq!(rule.points.len(), 3);
+        assert_eq!(rule.weights.len(), 3);
+    }
+
+    #[test]
+    fn stroud_tri_all_positive_weights() {
+        let rule = stroud_tri_rule();
+        for (i, &w) in rule.weights.iter().enumerate() {
+            assert!(w > 0.0, "weight[{i}] = {w} is not positive");
+        }
     }
 }
