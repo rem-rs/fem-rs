@@ -60,28 +60,23 @@
 //!   [`VectorAssembler`].  Backed by the workspace-pinned [`reed`](https://github.com/rem-rs/reed)
 //!   crates.
 
-pub mod amr_mf;
-pub mod amr_adaptive;
 pub mod assembler;
 pub mod backend;
 pub mod complex;
 pub mod constraints;
 pub mod integrator;
 pub mod standard;
-pub mod block_assembler;
 pub mod mixed;
 pub mod interior_faces;
 pub mod partial;
 pub mod vector_integrator;
 pub mod vector_assembler;
-mod assembler_iga_fespace;
+
 pub mod discrete_op;
 pub mod transfer;
 /// High-level Form abstractions (BilinearForm / LinearForm).
 pub mod form;
 pub mod ams_solver;
-pub mod hdiv_error;
-pub mod hybridization;
 pub mod static_cond;
 pub mod h1_quad_order_hint;
 pub mod lor_factory;
@@ -93,7 +88,6 @@ pub mod cut;
 pub mod boundary;
 pub mod postproc;
 /// User Element framework — experimental.
-pub mod uel;
 
 // 鈹€鈹€ Method-family subdirectories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
@@ -117,12 +111,10 @@ pub use wg::*;
 
 /// Contact mechanics (Signorini, friction, mortar, Nitsche).
 pub mod contact;
-pub mod explicit_dynamics;
-pub mod explicit_j2;
+
 pub use contact::*;
 
 
-pub mod umat_integration;
 
 /// Isogeometric Analysis (IGA).
 pub mod iga;
@@ -144,7 +136,6 @@ pub use reed::{
 };
 
 /// Plugin API traits for pro-assembly extensions.
-pub mod plugin;
 
 pub use h1_quad_order_hint::{h1_tet_quad_order, h1_tri_quad_order};
 
@@ -167,9 +158,6 @@ pub use boundary::vector_boundary::{
     VectorBdQpData, TangentialMassIntegrator, HdivNormalFluxIntegrator,
 };
 pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator, HDivL2ScaledDiv};
-pub use block_assembler::{
-    assemble_mixed_block, assemble_diagonal_block, assemble_system_2x2,
-};
 pub use interior_faces::InteriorFaceList;
 pub use physics::nonlinear::{LinearSolver, NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
 pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};
@@ -182,7 +170,6 @@ pub use postproc::grid_function::GridFunction;
 pub use postproc::grid_function::{project_coefficient, project_hcurl_coefficient, project_hcurl_coefficient_2d,
                                    project_hdiv_coefficient_2d, project_hdiv_coefficient_3d,
                                    project_bdr_coefficient_tangent, project_bdr_coefficient_tangent_2d};
-pub use amr_mf::{AmrAwareOperator, SimpleDiffusionOp, GeometricMultigrid, apply_hanging_constraints_2d, build_constraint_matrix_2d};
 pub use iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_1d, assemble_bilinear_diffusion_iga_1d_physical,
     assemble_bilinear_helmholtz_iga_1d, assemble_bilinear_helmholtz_iga_1d_physical,
@@ -191,7 +178,6 @@ pub use iga::iga_assembler::{
     assemble_bilinear_diffusion_iga_2d, assemble_bilinear_helmholtz_iga_2d,
     assemble_bilinear_mass_iga_2d, assemble_linear_source_iga_2d,
 };
-pub use assembler_iga_fespace::{Iga1dBilinearItem, Iga2dBilinearItem};
 pub use postproc::postprocess::{compute_element_gradients, compute_h1_error, compute_kelly_indicators, recover_gradient_nodal};
 pub use transfer::{
     build_prolongation_h1,

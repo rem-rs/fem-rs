@@ -154,9 +154,6 @@ path = "mfem_ex37_topology_optimization.rs"
 name = "mfem_ex38_implicit_integration"
 path = "mfem_ex38_implicit_integration.rs"
 [[example]]
-name = "mfem_ex38_immersed_boundary"
-path = "mfem_ex38_immersed_boundary.rs"
-[[example]]
 name = "mfem_ex39_compass"
 path = "mfem_ex39_compass.rs"
 [[example]]

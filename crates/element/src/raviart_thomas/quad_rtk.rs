@@ -312,10 +312,28 @@ impl VectorReferenceElement for QuadRTk {
         self.order as u8
     }
     fn n_dofs(&self) -> usize {
+        if self.order == 0 {
+            return 4;
+        }
         2 * (self.order + 1) * (self.order + 2)
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
+        if self.order == 0 {
+            // RT0 Piola form (matches QuadRT0 exactly):
+            // Φ₀ = (0, y−1) — bottom, Φ₁ = (x, 0) — right,
+            // Φ₂ = (0, y) — top,    Φ₃ = (x−1, 0) — left.
+            let (x, y) = (xi[0], xi[1]);
+            values[0] = 0.0;
+            values[1] = y - 1.0;
+            values[2] = x;
+            values[3] = 0.0;
+            values[4] = 0.0;
+            values[5] = y;
+            values[6] = x - 1.0;
+            values[7] = 0.0;
+            return;
+        }
         let d = rt_data(self.order);
         let p = d.p;
         let (cx, _) = bary_eval(&d.cp, xi[0]);
@@ -349,6 +367,13 @@ impl VectorReferenceElement for QuadRTk {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
+        if self.order == 0 {
+            // RT0: div Φ_i = 1 for all four basis functions.
+            for v in div_vals.iter_mut() {
+                *v = 1.0;
+            }
+            return;
+        }
         let d = rt_data(self.order);
         let p = d.p;
         let (_cx, dcx) = bary_eval(&d.cp, xi[0]);
@@ -378,9 +403,17 @@ impl VectorReferenceElement for QuadRTk {
         quad_rule_01(order)
     }
 
-    /// MFEM `RT_QuadrilateralElement` node coordinates: `(cp[i], op[j])` /
-    /// `(op[i], cp[j])` in tensor-product order, permuted by `dof_map`.
+    /// For k = 0: 4 edge midpoints in CCW order (bottom, right, top, left).
+    /// For k > 0: MFEM `RT_QuadrilateralElement` node coordinates.
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        if self.order == 0 {
+            return vec![
+                vec![0.5, 0.0], // f₀ bottom midpoint
+                vec![1.0, 0.5], // f₁ right midpoint
+                vec![0.5, 1.0], // f₂ top midpoint
+                vec![0.0, 0.5], // f₃ left midpoint
+            ];
+        }
         let d = rt_data(self.order);
         let p = d.p;
         let mut c = vec![vec![0.0; 2]; d.dof];
@@ -416,25 +449,30 @@ mod tests {
     }
 
     #[test]
-    fn matches_quad_rt0() {
-        // k = 0 must reproduce QuadRT0 exactly: (0,y-1)/(x,0)/(0,y)/(x-1,0).
+    fn k0_piola_form() {
+        // k = 0 must reproduce the RT0 Piola form exactly:
+        // Φ₀=(0,y-1), Φ₁=(x,0), Φ₂=(0,y), Φ₃=(x-1,0).
         let k = QuadRTk::new(0);
-        let r0 = crate::raviart_thomas::QuadRT0;
-        let mut vk = vec![0.0; 8];
-        let mut v0 = vec![0.0; 8];
-        let mut dk = vec![0.0; 4];
-        let mut d0 = vec![0.0; 4];
-        for xi in k.quadrature(5).points {
-            k.eval_basis_vec(&xi, &mut vk);
-            k.eval_div(&xi, &mut dk);
-            r0.eval_basis_vec(&xi, &mut v0);
-            r0.eval_div(&xi, &mut d0);
-            for i in 0..8 {
-                assert!((vk[i] - v0[i]).abs() < 1e-14, "phi[{i}] k0={} rt0={}", vk[i], v0[i]);
-            }
-            for i in 0..4 {
-                assert!((dk[i] - d0[i]).abs() < 1e-14, "div[{i}]");
-            }
+        let mut v = vec![0.0; 8];
+        let mut d = vec![0.0; 4];
+        // At (0.3, 0.7):
+        k.eval_basis_vec(&[0.3, 0.7], &mut v);
+        k.eval_div(&[0.3, 0.7], &mut d);
+        // Φ₀ = (0, y-1) = (0, -0.3)
+        assert!((v[0] - 0.0).abs() < 1e-15);
+        assert!((v[1] - (-0.3)).abs() < 1e-15);
+        // Φ₁ = (x, 0) = (0.3, 0)
+        assert!((v[2] - 0.3).abs() < 1e-15);
+        assert!((v[3] - 0.0).abs() < 1e-15);
+        // Φ₂ = (0, y) = (0, 0.7)
+        assert!((v[4] - 0.0).abs() < 1e-15);
+        assert!((v[5] - 0.7).abs() < 1e-15);
+        // Φ₃ = (x-1, 0) = (-0.7, 0)
+        assert!((v[6] - (-0.7)).abs() < 1e-15);
+        assert!((v[7] - 0.0).abs() < 1e-15);
+        // div = 1 for all
+        for i in 0..4 {
+            assert!((d[i] - 1.0).abs() < 1e-15, "div[{i}] = {}", d[i]);
         }
     }
 

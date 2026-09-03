@@ -29,8 +29,8 @@ use fem_assembly::{
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
     lagrange::{TriP1, TriP2, TriP3, TriP4, HexQ1, QuadQ2},
-    nedelec::{TriND1, TriND2, HexNDk, TetND1, TetND2},
-    raviart_thomas::{TriRT0, TriRT1},
+    nedelec::{TriNDk::new(1), TriND2, HexNDk, TetNDk::new(1), TetND2},
+    raviart_thomas::{TriRT1, TriRTk},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, topology::MeshTopology};
@@ -590,7 +590,7 @@ fn solve_maxwell_2d(n: usize) -> f64 {
 
     // L2 error
     let mut err_sq = 0.0;
-    let ref_elem = TriND1;
+    let ref_elem = TriNDk::new(1);
     let n_vdofs = ref_elem.n_dofs();
     let mut ref_phi = vec![0.0; n_vdofs * 2];
     let mut phys_phi = vec![0.0; n_vdofs * 2];
@@ -745,7 +745,7 @@ fn solve_darcy_2d(n: usize) -> f64 {
 
     // L2 error
     let mut err_sq = 0.0;
-    let ref_elem = TriRT0;
+    let ref_elem = TriRTk::new(0);
     let n_vdofs = ref_elem.n_dofs();
     let mut ref_phi = vec![0.0; n_vdofs * 2];
     let mut phys_phi = vec![0.0; n_vdofs * 2];
@@ -1095,7 +1095,7 @@ fn solve_darcy_mixed_rt0_p0(n: usize) -> (f64, f64) {
     let ph = &sol[n_sigma..];
 
     // Flux L閾?error
-    let ref_rt = TriRT0;
+    let ref_rt = TriRTk::new(0);
     let n_vdofs = ref_rt.n_dofs();
     let mut ref_phi = vec![0.0; n_vdofs * 2];
     let mut phys_phi = vec![0.0; n_vdofs * 2];
@@ -1919,7 +1919,7 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
     let u = dense_solve(&mat_mut, &rhs);
 
     let ref_elem: Box<dyn VectorReferenceElement> = match order {
-        1 => Box::new(TetND1),
+        1 => Box::new(TetNDk::new(1)),
         2 => Box::new(TetND2),
         _ => panic!("unsupported order {order}"),
     };
@@ -2007,13 +2007,13 @@ fn maxwell_3d_tet_nd1_convergence() {
     }).unzip();
     let rates_l2 = convergence_rate(&errors_l2, &ns);
     let rates_curl = convergence_rate(&errors_curl, &ns);
-    eprintln!("3D Maxwell TetND1: L² err={:?} rates={:?}, curl err={:?} rates={:?}",
+    eprintln!("3D Maxwell TetNDk::new(1): L² err={:?} rates={:?}, curl err={:?} rates={:?}",
         errors_l2, rates_l2, errors_curl, rates_curl);
     // ND1 L² theory: O(h) for the field (lowest-order Nedelec)
-    assert!(rates_l2[0] > 0.5, "TetND1 L² rate {:.2} < 0.5 (too low)", rates_l2[0]);
-    assert!(errors_curl[0].is_finite(), "TetND1 curl error not finite");
-    assert!(errors_curl[1] < errors_curl[0], "TetND1 curl error should decrease (h=1/2→1/3)");
-    eprintln!("TetND1 rates: L²={:.4?}, curl={:.4?}", rates_l2, rates_curl);
+    assert!(rates_l2[0] > 0.5, "TetNDk::new(1) L² rate {:.2} < 0.5 (too low)", rates_l2[0]);
+    assert!(errors_curl[0].is_finite(), "TetNDk::new(1) curl error not finite");
+    assert!(errors_curl[1] < errors_curl[0], "TetNDk::new(1) curl error should decrease (h=1/2→1/3)");
+    eprintln!("TetNDk::new(1) rates: L²={:.4?}, curl={:.4?}", rates_l2, rates_curl);
     // Regression baseline for the coarsest mesh
     fem_regression::regression("team3_hcurl_3d_mms")
         .check("l2_err_n2", errors_l2[0])

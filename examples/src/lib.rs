@@ -29,7 +29,6 @@ use fem_mesh::{ElementType, MeshTopology, Mesh};
 pub mod checkpoint_text;
 pub mod hdf5_checkpoint;
 pub mod maxwell;
-pub mod template_runner;
 pub mod workflow_cli;
 pub use maxwell::{
     BoundarySelection, FirstOrderForceModel3D, FirstOrderMaxwell3DSkeleton, FirstOrderMaxwellOp,

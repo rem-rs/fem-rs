@@ -5,8 +5,8 @@ use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TriP1};
 use fem_element::lagrange::factory::{TriPk, TetPk};
-use fem_element::nedelec::{TetND1, TriND1, TetND2, TriND2};
-use fem_element::raviart_thomas::{TetRT0, TriRT0, TetRT1, TriRT1, TriRT2};
+use fem_element::nedelec::{TetND2, TriND2, TriNDk, TetNDk};
+use fem_element::raviart_thomas::{TetRT1, TriRT1, TriRT2, TriRTk, TetRTk};
 use fem_element::reference::VectorReferenceElement;
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
@@ -30,16 +30,16 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
 
 fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
     match (space_type, dim, order) {
-        (SpaceType::HCurl, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, 2, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
         (SpaceType::HCurl, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
-        (SpaceType::HCurl, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, 3, 1) => Box::new(TetNDk::new(1)),
         (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
-        (SpaceType::HDiv, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, 2, 0) => Box::new(TriRTk::new(0)),
         (SpaceType::HDiv, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, 2, 2) => Box::new(TriRT2),
-        (SpaceType::HDiv, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, 3, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, 3, 1) => Box::new(TetRT1),
         _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),
     }

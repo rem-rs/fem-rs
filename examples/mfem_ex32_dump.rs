@@ -167,7 +167,7 @@ fn main() {
             &fem_assembly::standard::VectorMassTensorIntegrator { alpha: eps2 }, 2);
 
         // DIAGNOSTIC: element-0 assembly intermediates at first quad point.
-        use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::HexQ1, nedelec::HexND1};
+        use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::HexQ1, nedelec::HexNDk};
         use fem_assembly::isoparametric_jacobian;
         let nodes = mesh.element_nodes(0);
         let geo = HexQ1;
@@ -176,7 +176,7 @@ fn main() {
             let (jac, det, _xp) = isoparametric_jacobian(&mesh, nodes, &geo, xi, 3);
             let jit = jac.clone().try_inverse().unwrap().transpose();
             let mut rp = vec![0.0_f64; 36];
-            HexND1.eval_basis_vec(xi, &mut rp);
+            HexNDk::new(1).eval_basis_vec(xi, &mut rp);
             let mut pp = vec![0.0_f64; 36];
             for i in 0..12 {
                 for r in 0..3 {
@@ -194,7 +194,7 @@ fn main() {
             let (jac, det, _xp) = isoparametric_jacobian(&mesh, nodes, &geo, xi, 3);
             let jit = jac.clone().try_inverse().unwrap().transpose();
             let mut rp = vec![0.0_f64; 36];
-            HexND1.eval_basis_vec(xi, &mut rp);
+            HexNDk::new(1).eval_basis_vec(xi, &mut rp);
             let mut pp = vec![0.0_f64; 36];
             for i in 0..12 {
                 for r in 0..3 {

@@ -73,14 +73,29 @@ impl VectorReferenceElement for QuadNDk {
         self.order as u8
     }
     fn n_dofs(&self) -> usize {
+        if self.order == 1 {
+            return 4;
+        }
         2 * self.order * (self.order + 1)
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        let p = self.order;
-        let nodes = self.nodes();
         let x = xi[0];
         let y = xi[1];
+        if self.order == 1 {
+            // Whitney 1-form (matches former QuadND1)
+            values[0] = 1.0 - y;
+            values[1] = 0.0;
+            values[2] = 0.0;
+            values[3] = x;
+            values[4] = -y;
+            values[5] = 0.0;
+            values[6] = 0.0;
+            values[7] = x - 1.0;
+            return;
+        }
+        let p = self.order;
+        let nodes = self.nodes();
         values.fill(0.0);
 
         // Edge 0 (y=0): tangent +x
@@ -128,6 +143,13 @@ impl VectorReferenceElement for QuadNDk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
+        if self.order == 1 {
+            curl_vals[0] = 1.0;
+            curl_vals[1] = 1.0;
+            curl_vals[2] = 1.0;
+            curl_vals[3] = 1.0;
+            return;
+        }
         let p = self.order;
         let nodes = self.nodes();
         let x = xi[0];
@@ -201,6 +223,14 @@ impl VectorReferenceElement for QuadNDk {
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        if self.order == 1 {
+            return vec![
+                vec![0.5, 0.0],
+                vec![1.0, 0.5],
+                vec![0.5, 1.0],
+                vec![0.0, 0.5],
+            ];
+        }
         let p = self.order;
         let nodes = self.nodes();
         let n = self.n_dofs();

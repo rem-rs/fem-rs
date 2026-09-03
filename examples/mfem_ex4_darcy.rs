@@ -371,11 +371,11 @@ fn send_to_glvis(
 ) -> std::io::Result<()> {
     // Project H(div) solution onto mesh nodes by evaluating the RT field
     // at element vertices and averaging at shared nodes.
-    use fem_element::{raviart_thomas::TriRT0, reference::VectorReferenceElement};
+    use fem_element::{raviart_thomas::TriRTk, reference::VectorReferenceElement};
     use fem_mesh::ElementTransformation;
 
     let n_nodes = mesh.n_nodes() as usize;
-    let ref_elem = TriRT0;
+    let ref_elem = TriRTk::new(0);
     let n_ldofs = ref_elem.n_dofs();
     let dim = 2usize;
 

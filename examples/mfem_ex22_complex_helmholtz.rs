@@ -383,7 +383,7 @@ fn solve_2d_p1(mesh: &Mesh<2>, cfg: &Config, omega: f64,
                stiffness_coef: f64, mass_coef: f64, loss_coef: f64,
                quad_order: u8, exact_sol_known: bool, dim: usize) {
     use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::TriND1;
+    use fem_element::nedelec::{TriNDk};
 
     let space = HCurlSpace::new(mesh.clone(), cfg.order as u8);
     let n = space.n_dofs();
@@ -585,11 +585,11 @@ fn l2_error_hcurl(mesh: &Mesh<2>, space: &HCurlSpace<Mesh<2>>,
                    mu: f64, epsilon: f64, sigma: f64, omega: f64,
                    quad_order: u8) -> (f64, f64) {
     use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::TriND1;
+    use fem_element::nedelec::{TriNDk};
 
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
-        let re = TriND1;
+        let re = TriNDk::new(1);
         let nld = re.n_dofs();
         let q = re.quadrature(quad_order);
         let mut phi = vec![0.0; nld * 2];
@@ -625,7 +625,7 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                   mu: f64, epsilon: f64, sigma: f64, omega: f64,
                   quad_order: u8) -> (f64, f64) {
     use fem_element::VectorReferenceElement;
-    use fem_element::raviart_thomas::{QuadRT0, TriRT0};
+    use fem_element::raviart_thomas::{QuadRTk, TriRTk};
     use fem_mesh::element_type::ElementType;
 
     // H(Div) Piola (contravariant, 2-D): φ_phys = J·φ_ref / det J.
@@ -641,7 +641,7 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
         let signs = space.element_signs(e);
         match et {
             ElementType::Tri3 => {
-                let re = TriRT0;
+                let re = TriRTk::new(0);
                 let nld = re.n_dofs();
                 let q = re.quadrature(quad_order);
                 let mut phi = vec![0.0; nld * 2];
@@ -673,7 +673,7 @@ fn l2_error_hdiv(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>,
                 }
             }
             ElementType::Quad4 => {
-                let re = QuadRT0;
+                let re = QuadRTk::new(0);
                 let nld = re.n_dofs();
                 let q = re.quadrature(quad_order);
                 let mut phi = vec![0.0; nld * 2];
@@ -1011,13 +1011,13 @@ fn l2_error_hcurl_3d(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>,
                       mu: f64, epsilon: f64, sigma: f64, omega: f64,
                       quad_order: u8) -> (f64, f64) {
     use fem_element::VectorReferenceElement;
-    use fem_element::nedelec::{TetND1, HexND1};
+    use fem_element::nedelec::{TetNDk, HexNDk};
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
         let re: &dyn VectorReferenceElement = match et {
-            fem_mesh::element_type::ElementType::Hex8 => &HexND1,
-            _ => &TetND1,
+            fem_mesh::element_type::ElementType::Hex8 => &HexNDk::new(1),
+            _ => &TetNDk::new(1),
         };
         let nld = re.n_dofs();
         let q = re.quadrature(quad_order);
@@ -1059,13 +1059,13 @@ fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
                      mu: f64, epsilon: f64, sigma: f64, omega: f64,
                      quad_order: u8) -> (f64, f64) {
     use fem_element::VectorReferenceElement;
-    use fem_element::raviart_thomas::{TetRT0, HexRT0};
+    use fem_element::raviart_thomas::{HexRTk, TetRTk};
     let mut er2 = 0.0; let mut ei2 = 0.0;
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
         let re: &dyn VectorReferenceElement = match et {
-            fem_mesh::element_type::ElementType::Hex8 => &HexRT0,
-            _ => &TetRT0,
+            fem_mesh::element_type::ElementType::Hex8 => &HexRTk::new(0),
+            _ => &TetRTk::new(0),
         };
         let nld = re.n_dofs();
         let q = re.quadrature(quad_order);

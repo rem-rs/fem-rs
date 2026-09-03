@@ -7,19 +7,12 @@ use std::collections::{HashMap, BTreeMap, BTreeSet, HashSet};
 
 use fem_mesh::{Mesh, ElementType, amr::NCState, amr::NCStateQuad, amr::DerefineTree, amr::DerefineRecord, amr::derefine_marked, amr::HangingNodeConstraint, topology::MeshTopology};
 use fem_core::types::{ElemId, NodeId, Rank};
+use fem_mesh::amr::QUAD_HILBERT_CHILD_ORDER;
 
 use crate::{par_mesh::ParallelMesh, partition::MeshPartition, Comm};
 
 /// MFEM `quad_hilbert_child_order` (ncmesh_tables.hpp): the order in which the
-/// 4 children of a refined quad are visited, per Hilbert-curve state.  This
-/// determines the *leaf element order* (`CollectLeafElements`) and hence the
-/// MFEM element numbering and `UpdateVertices` node-creation order — the same
-/// table [`fem_mesh::amr::NCStateQuad`] uses (amr_inner.rs).  `rebuild_partition_nc`
-/// needs a copy because the amr_inner table is private.
-const QUAD_HILBERT_CHILD_ORDER: [[u8; 4]; 8] = [
-    [0, 1, 2, 3], [0, 3, 2, 1], [1, 2, 3, 0], [1, 0, 3, 2],
-    [2, 3, 0, 1], [2, 1, 0, 3], [3, 0, 1, 2], [3, 2, 1, 0],
-];
+/// 4 children of a refined quad are visited, per Hilbert-curve state.
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 

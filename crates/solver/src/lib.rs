@@ -199,12 +199,9 @@ pub use lor::{
     solve_vcycle_geom_mg, AmgConfig, GeomMGHierarchy, GeomMGPrecond, LorAmgPrecond, LorPrecond,
 };
 pub use ode::{
-    AbmState, AdamsBashforthMoulton, Bdf2, Bdf2State, CrankNicolson, ForwardEuler,
-    GeneralizedAlpha, GeneralizedAlpha2, GeneralizedAlpha2State, GeneralizedAlphaState,
-    HamiltonianSystem, ImexArk3, ImexEuler, ImexOperator, ImexRk3, ImexSsp2, ImexTimeStepper,
-    ImplicitEuler, ImplicitTimeStepper, LeapfrogStepper, Newmark, NewmarkState, Rk4, Rk45,
-    SIAVSolver, Sdirk2, TimeStepper, VerletStepper, Yoshida4Stepper,
-    ImexDirkRk3, ImexExpImplEuler, ImexRk2_222, ImexRk2_232,
+    Bdf2, Bdf2State, ForwardEuler, ImexArk3, ImexDirkRk3, ImexEuler, ImexExpImplEuler,
+    ImexOperator, ImexRk2_222, ImexRk2_232, ImexRk3, ImexSsp2, ImexTimeStepper,
+    ImplicitEuler, ImplicitTimeStepper, Rk4, Sdirk2, TimeStepper,
 };
 pub use p_multigrid::{
     build_pmg_hierarchy_1d_laplacian, fmg_solve, solve_vcycle_pmg, PmgHierarchy, PmgPrecond,

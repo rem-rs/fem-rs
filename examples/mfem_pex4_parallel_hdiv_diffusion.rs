@@ -22,7 +22,7 @@ use std::sync::Arc;
 use fem_assembly::standard::{GradDivIntegrator, VectorMassIntegrator};
 use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
 use fem_assembly::{VectorAssembler, hdiv_error::compute_hdiv_l2_error_owned};
-use fem_element::{raviart_thomas::{QuadRT0, TriRT0}, reference::VectorReferenceElement};
+use fem_element::{raviart_thomas::{QuadRTk, TriRTk}, reference::VectorReferenceElement};
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_assembler::{permute_csr, permute_vec};
@@ -312,7 +312,7 @@ fn parse_arg_str<'a>(args: &'a [String], flag: &str) -> Option<String> {
 // Keep imports used by the owned-element L2 error helper below.
 #[allow(unused)]
 fn _imports_for_error(_p: &ParallelMesh<Mesh<2>>) {
-    let _ = TriRT0;
-    let _ = QuadRT0;
+    let _ = TriRTk::new(0);
+    let _ = QuadRTk::new(0);
     let _ = 0.0_f64;
 }

@@ -93,10 +93,10 @@ fn project_2d(space: &HCurlSpace<Mesh<2>>, k: f64) -> Vec<f64> {
 }
 
 fn l2_err_2d<F: Fn(&[f64]) -> [f64; 2]>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: F) -> f64 {
-    use fem_element::nedelec::TriND1;
+    use fem_element::nedelec::{TriNDk};
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
-        let r = TriND1; let n = r.n_dofs(); let q = r.quadrature(6);
+        let r = TriNDk::new(1); let n = r.n_dofs(); let q = r.quadrature(6);
         let mut p = vec![0.0; n*2];
         let d: Vec<usize> = sp.element_dofs(e).iter().map(|&x| x as usize).collect();
         let s = sp.element_signs(e);
@@ -210,12 +210,12 @@ fn jac_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 
 }
 
 fn l2_err_3d<F: Fn(&[f64]) -> [f64; 3]>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>, u: &[f64], ex: F) -> f64 {
-    use fem_element::nedelec::{TetND1, HexND1};
+    use fem_element::nedelec::{TetNDk, HexNDk};
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
         let r: &dyn VectorReferenceElement = match mesh.element_type(e) {
-            fem_mesh::element_type::ElementType::Hex8 => &HexND1,
-            _ => &TetND1,
+            fem_mesh::element_type::ElementType::Hex8 => &HexNDk::new(1),
+            _ => &TetNDk::new(1),
         };
         let n = r.n_dofs(); let q = r.quadrature(6);
         let mut p = vec![0.0; n*3];

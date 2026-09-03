@@ -1869,23 +1869,23 @@ pub fn vec_ref_elem(
     let p = order as usize;
     match (family, etype) {
         (VecFamily::Nedelec, ElemType::Tri) => Box::new(crate::nedelec::TriNDk::new(p)),
-        (VecFamily::Nedelec, ElemType::Quad) if p == 1 => Box::new(crate::nedelec::QuadND1),
+        (VecFamily::Nedelec, ElemType::Quad) if p == 1 => Box::new(crate::nedelec::QuadNDk::new(1)),
         (VecFamily::Nedelec, ElemType::Quad) => Box::new(crate::nedelec::QuadNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Tet) => Box::new(crate::nedelec::TetNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Hex) => Box::new(crate::nedelec::HexNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Prism) => Box::new(crate::nedelec::PrismNDk::new(p)),
         (VecFamily::Nedelec, ElemType::Pyramid) => Box::new(crate::nedelec::PyraNDk::new(p)),
         (VecFamily::RaviartThomas, ElemType::Tri) if p == 0 => {
-            Box::new(crate::raviart_thomas::TriRT0)
+            Box::new(crate::raviart_thomas::TriRTk::new(0))
         }
         (VecFamily::RaviartThomas, ElemType::Quad) if p == 0 => {
-            Box::new(crate::raviart_thomas::QuadRT0)
+            Box::new(crate::raviart_thomas::QuadRTk::new(0))
         }
         (VecFamily::RaviartThomas, ElemType::Tet) if p == 0 => {
-            Box::new(crate::raviart_thomas::TetRT0)
+            Box::new(crate::raviart_thomas::TetRTk::new(0))
         }
         (VecFamily::RaviartThomas, ElemType::Hex) if p == 0 => {
-            Box::new(crate::raviart_thomas::HexRT0)
+            Box::new(crate::raviart_thomas::HexRTk::new(0))
         }
         (VecFamily::RaviartThomas, ElemType::Tri) => {
             Box::new(crate::raviart_thomas::TriRTk::new(p))

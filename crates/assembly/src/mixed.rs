@@ -17,8 +17,8 @@
 
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQ1, QuadQ2, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::{TriPk, TetPk}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
-use fem_element::raviart_thomas::{QuadRT0, QuadRT1, TriRT0, TriRT1, TetRT0, TetRT1, HexRT0, HexRT1, PrismRTk};
-use fem_element::nedelec::{TriND1, TetND1, QuadND1, QuadNDk, HexND1, HexNDk, PrismND1, PrismNDk};
+use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
+use fem_element::nedelec::{TetND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TriND2, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use crate::vector_assembler::{isoparametric_jacobian, geo_ref_elem_from_mesh};
@@ -1062,30 +1062,30 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
 
 pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Result<Box<dyn VectorReferenceElement>, String> {
     Ok(match (space, elem_type, order) {
-        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriRT1),
-        (SpaceType::HDiv, ElementType::Quad4, 0) => Box::new(QuadRT0),
+        (SpaceType::HDiv, ElementType::Quad4, 0) => Box::new(QuadRTk::new(0)),
         (SpaceType::HDiv, ElementType::Quad4, 1) => Box::new(QuadRT1),
         (SpaceType::HDiv, ElementType::Quad4, o) if o >= 2 => {
             Box::new(fem_element::raviart_thomas::QuadRTk::new(o as usize))
         }
-        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetRT1),
-        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
-        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriND1),
-        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetND1),
-        (SpaceType::HCurl, ElementType::Quad4, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Quad4, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 2) => Box::new(QuadNDk::new(2)),
-        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad8 | ElementType::Quad9, 2) => Box::new(QuadNDk::new(2)),
-        (SpaceType::HCurl, ElementType::Hex8, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex8, 1) => Box::new(HexNDk::new(1)),
         (SpaceType::HCurl, ElementType::Hex8, 2) => Box::new(HexNDk::new(2)),
-        (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexNDk::new(1)),
         (SpaceType::HCurl, ElementType::Hex20, 2) => Box::new(HexNDk::new(2)),
-        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
-        (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRT1),
         (SpaceType::HDiv, ElementType::Prism6, 0) => Box::new(PrismRTk::new(0)),
         (SpaceType::HDiv, ElementType::Prism6, 1) => Box::new(PrismRTk::new(1)),

@@ -299,7 +299,7 @@ pub struct TetRTk {
 }
 impl TetRTk {
     pub fn new(p: usize) -> Self {
-        assert!(p >= 1);
+        assert!(p >= 0);
         TetRTk { order: p }
     }
 }
@@ -367,6 +367,12 @@ impl VectorReferenceElement for TetRTk {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
+        if self.order == 0 {
+            for v in div_vals.iter_mut() {
+                *v = 3.0;
+            }
+            return;
+        }
         let k = self.order;
         let d = tet_data(k);
         let n = d.n;
@@ -424,6 +430,14 @@ impl VectorReferenceElement for TetRTk {
         crate::quadrature::tet_rule(order)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        if self.order == 0 {
+            return vec![
+                vec![1.0/3.0, 1.0/3.0, 1.0/3.0], // face opposite v₀
+                vec![0.0, 1.0/3.0, 1.0/3.0],     // face opposite v₁
+                vec![1.0/3.0, 0.0, 1.0/3.0],     // face opposite v₂
+                vec![1.0/3.0, 1.0/3.0, 0.0],     // face opposite v₃
+            ];
+        }
         let k = self.order;
         let n = self.n_dofs();
         let face_dofs_per_face = (k + 1) * (k + 2) / 2;

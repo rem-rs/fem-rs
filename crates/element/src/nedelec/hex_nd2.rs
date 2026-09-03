@@ -2,7 +2,7 @@
 //!
 //! This implementation provides 2 edge moments per edge (24 DOFs total).
 
-use crate::nedelec::hex::HexND1;
+use crate::nedelec::hex_ndk::HexNDk;
 use crate::quadrature::hex_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
@@ -22,7 +22,7 @@ impl VectorReferenceElement for HexND2 {
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let mut low = vec![0.0_f64; 12 * 3];
-        HexND1.eval_basis_vec(xi, &mut low);
+        HexNDk::new(1).eval_basis_vec(xi, &mut low);
 
         // Duplicate each ND1 edge mode into two ND2 edge modes with linear split
         // along the edge direction. This yields two independent edge moments.
@@ -51,7 +51,7 @@ impl VectorReferenceElement for HexND2 {
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
         let mut low_curl = vec![0.0_f64; 12 * 3];
-        HexND1.eval_curl(xi, &mut low_curl);
+        HexNDk::new(1).eval_curl(xi, &mut low_curl);
 
         let x = xi[0];
         let y = xi[1];

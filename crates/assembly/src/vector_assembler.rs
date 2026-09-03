@@ -18,8 +18,8 @@ use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexND1, HexND2, HexNDk, PrismND1, PrismNDk, QuadND1, QuadND2, QuadNDk, TetND1, TetND2, TetNDk, TriND1, TriND2};
-use fem_element::raviart_thomas::{TriRT0, TetRT0, TriRT1, TriRT2, TetRT1, TetRT2, QuadRT0, HexRT0, QuadRT1, HexRT1, PrismRTk};
+use fem_element::nedelec::{HexND2, HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
+use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRT1, HexRTk, QuadRT1, TriRTk, TetRTk, PrismRTk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -40,42 +40,42 @@ pub(crate) fn vec_ref_elem(
     order: u8,
 ) -> Box<dyn VectorReferenceElement> {
     match (space_type, elem_type, dim, order) {
-        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
         // 2-D surface elements embedded in 3-D (e.g. a boundary submesh of a
         // 3-D mesh): `dim = 3` is the embedding dimension, the reference
         // element is the same 2-D Nédélec basis as the `dim = 2` cases.
-        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 1) => Box::new(TriND1),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 2) => Box::new(TriND2),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
-        (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
         (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
-        (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadND1),
+        (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 3, 2) => Box::new(QuadND2),
         (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
-        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetND1),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => Box::new(TetNDk::new(o as usize)),
-        (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexND1),
+        (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexNDk::new(1)),
         // HCurlSpace builds HexND2 with 54 DOFs (24 edge + 24 face + 6
         // interior), matching HexNDk::new(2) — NOT the legacy HexND2 (24
         // edge-only) element.  Using HexND2 left rows 24..53 of every element
         // unassembled (zero rows) → singular system.
         (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex8, 3, o) if o >= 3 => Box::new(HexNDk::new(o as usize)),
-        (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRT0),
+        (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRTk::new(0)),
         (SpaceType::HDiv, ElementType::Quad4, 2, 1) => Box::new(QuadRT1),
         (SpaceType::HDiv, ElementType::Quad4, 2, o) if o >= 2 => {
             Box::new(fem_element::raviart_thomas::QuadRTk::new(o as usize))
         }
-        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRT0),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),
-        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRT0),
+        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex8, 3, 1) => Box::new(HexRT1),
-        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRT0),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),
         (SpaceType::HDiv, ElementType::Prism6, 3, 0) => Box::new(PrismRTk::new(0)),
@@ -971,16 +971,16 @@ impl VectorAssembler {
         hdiv_space: &HDivSpace<M>,
         quad_order: u8,
     ) -> CsrMatrix<f64> {
-        use fem_element::nedelec::TriND1;
-        use fem_element::raviart_thomas::TriRT0;
+        use fem_element::nedelec::{TriNDk};
+        use fem_element::raviart_thomas::TriRTk;
         use fem_element::VectorReferenceElement;
 
         let mesh = hcurl_space.mesh();
         let dim = 2usize;
         let n_hcurl = hcurl_space.n_dofs();
         let n_hdiv = hdiv_space.n_dofs();
-        let nd1 = TriND1;
-        let rt0 = TriRT0;
+        let nd1 = TriNDk::new(1);
+        let rt0 = TriRTk::new(0);
         let n_nd1 = nd1.n_dofs();  // 3
         let n_rt0 = rt0.n_dofs();  // 3
 
@@ -1256,7 +1256,7 @@ mod tests {
         use fem_core::{ElemId, FaceId, NodeId};
         use fem_mesh::element_type::ElementType;
         use fem_mesh::topology::MeshTopology;
-        use fem_element::nedelec::QuadND1;
+        use fem_element::nedelec::QuadNDk;
         use fem_element::VectorReferenceElement;
         use nalgebra::DMatrix;
 
@@ -1282,7 +1282,7 @@ mod tests {
 
         let mesh = ShearQuad;
         let space = HCurlSpace::new(mesh, 1);
-        let ref_elem = QuadND1;
+        let ref_elem = QuadNDk::new(1);
         let n_ldofs = ref_elem.n_dofs();
         let dim = 2;
         let xi = &[0.5, 0.5]; // centre of the [0,1]² reference domain

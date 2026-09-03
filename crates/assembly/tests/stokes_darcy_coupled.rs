@@ -32,7 +32,7 @@ use fem_assembly::{
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
     lagrange::TriP2,
-    raviart_thomas::TriRT0,
+    raviart_thomas::{TriRTk},
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{Mesh, topology::MeshTopology, element_type::ElementType};
@@ -534,7 +534,7 @@ fn solve_darcy_on_mesh(mesh: Mesh<2>, _n_sub: usize) -> (f64, f64) {
     let ph = &sol[n_sigma..];
 
     // Flux L² error
-    let ref_rt = TriRT0;
+    let ref_rt = TriRTk::new(0);
     let n_vd = ref_rt.n_dofs();
     let mut ref_phi_v = vec![0.0; n_vd * 2];
     let mut phys_phi = vec![0.0; n_vd * 2];

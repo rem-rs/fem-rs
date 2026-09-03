@@ -26,7 +26,7 @@
 //! | Type       | Reference domain | DOFs |
 //! |------------|-----------------|------|
 //! | [`TriND1`] | unit triangle   | 3    |
-//! | [`QuadND1`]| reference quad  | 4    |
+//! 
 //! | [`TetND1`] | unit tet        | 6    |
 //!
 //! ## H(div) Raviart-Thomas elements
@@ -68,13 +68,13 @@ pub use lagrange::{
     TetPk, TriP1, TriP10, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriPk, VecFamily,
 };
 pub use nedelec::{
-    HexND1, HexND2, HexNDk, PrismND1, PrismNDk, PyraND1, PyraNDk, QuadND1, QuadND2, QuadNDk,
-    TetND1, TetND2, TetNDk, TriND1, TriND2, TriNDk,
+    HexND2, HexNDk, PrismND1, PrismNDk, PyraND1, PyraNDk, QuadND2, QuadNDk,
+    TetND2, TetNDk, TriND2, TriNDk,
 };
 pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec};
 pub use raviart_thomas::{
-    HexRT0, HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT0, QuadRT1, QuadRTk,
-    TetRT0, TetRT1, TetRT2, TetRTk, TriRT0, TriRT1, TriRT2, TriRTk,
+    HexRT1, HexRTk, PrismRT0, PrismRTk, PyraRT0, PyraRTk, QuadRT1, QuadRTk,
+    TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk,
 };
 pub use reference::{QuadratureRule, ReferenceElement, VectorReferenceElement};
 pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};

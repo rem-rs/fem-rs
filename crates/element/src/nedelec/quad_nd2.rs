@@ -116,7 +116,7 @@ mod tests {
         //   bottom: Φ0+Φ1 = (1-y, 0)     right: Φ2+Φ3 = (0, x)
         //   top:    Φ4+Φ5 = (-y, 0)      left:  Φ6+Φ7 = (0, x-1)
         let elem = QuadND2;
-        let nd1 = crate::nedelec::QuadND1;
+        let nd1 = crate::nedelec::QuadNDk::new(1);
         let mut vals = vec![0.0; 16];
         let mut ref1 = vec![0.0; 8];
         let mut curl = vec![0.0; 8];

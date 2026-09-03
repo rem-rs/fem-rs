@@ -344,6 +344,12 @@ impl VectorReferenceElement for HexRTk {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
+        if self.order == 0 {
+            for v in div_vals.iter_mut() {
+                *v = 0.125;
+            }
+            return;
+        }
         let k = self.order;
         let d = hex_data(k);
         let n = d.n;
@@ -476,6 +482,16 @@ impl VectorReferenceElement for HexRTk {
         crate::quadrature::hex_rule(order)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        if self.order == 0 {
+            return vec![
+                vec![0.0, 0.0, -1.0], // z=-1
+                vec![0.0, -1.0, 0.0], // y=-1
+                vec![1.0, 0.0, 0.0],  // x=+1
+                vec![0.0, 1.0, 0.0],  // y=+1
+                vec![-1.0, 0.0, 0.0], // x=-1
+                vec![0.0, 0.0, 1.0],  // z=+1
+            ];
+        }
         let k = self.order;
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);

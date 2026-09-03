@@ -2827,7 +2827,7 @@ pub fn detect_hanging_quad(mesh: &Mesh<2>) -> Vec<HangingNodeConstraint> {
 /// determines the *leaf element order* (`CollectLeafElements`) and hence the
 /// MFEM Mesh element numbering, edge table order and face (element-centre)
 /// DOF numbering — all of which feed the H1 Q2 global DOF numbering.
-const QUAD_HILBERT_CHILD_ORDER: [[u8; 4]; 8] = [
+pub const QUAD_HILBERT_CHILD_ORDER: [[u8; 4]; 8] = [
     [0, 1, 2, 3], [0, 3, 2, 1], [1, 2, 3, 0], [1, 0, 3, 2],
     [2, 3, 0, 1], [2, 1, 0, 3], [3, 0, 1, 2], [3, 2, 1, 0],
 ];

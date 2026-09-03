@@ -52,7 +52,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, TangentialTraceLFIntegrator, VectorMassIntegrator, VectorMassTensorIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
-use fem_element::nedelec::TriND1;
+use fem_element::nedelec::{TriNDk};
 use fem_linalg::CsrMatrix;
 use fem_mesh::{Mesh, element_type::ElementType, topology::MeshTopology};
 use fem_solver::{EigenResult, LobpcgConfig, SolveResult, SolverConfig, solve_cg_operator, solve_pcg_jacobi, solve_pcg_precond};
@@ -1528,7 +1528,7 @@ where
     F: Fn(&[f64]) -> [f64; 2],
     G: Fn(&[f64]) -> f64,
 {
-    use fem_element::nedelec::QuadND1;
+    use fem_element::nedelec::QuadNDk;
     use fem_element::VectorReferenceElement;
 
     let mesh = space.mesh();
@@ -1542,7 +1542,7 @@ where
 
         match elem_type {
             ElementType::Tri3 => {
-                let ref_elem = TriND1;
+                let ref_elem = TriNDk::new(1);
                 let quad = ref_elem.quadrature(6);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
@@ -1599,7 +1599,7 @@ where
                 // Quad4 H(Curl) error — L² only, no curl contribution yet.
                 // The curl error for Quad4/QuadND1 is element-local and
                 // can be added when needed (PR welcome).
-                let ref_elem = QuadND1;
+                let ref_elem = QuadNDk::new(1);
                 let quad = ref_elem.quadrature(6);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
@@ -1712,7 +1712,7 @@ where
     F: Fn(&[f64]) -> [f64; 2],
     P: Fn(u32) -> bool,
 {
-    use fem_element::nedelec::QuadND1;
+    use fem_element::nedelec::QuadNDk;
     use fem_element::VectorReferenceElement;
 
     let mesh = space.mesh();
@@ -1729,7 +1729,7 @@ where
 
         match elem_type {
             ElementType::Tri3 => {
-                let ref_elem = TriND1;
+                let ref_elem = TriNDk::new(1);
                 let quad = ref_elem.quadrature(6);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];
@@ -1766,7 +1766,7 @@ where
                 }
             }
             ElementType::Quad4 => {
-                let ref_elem = QuadND1;
+                let ref_elem = QuadNDk::new(1);
                 let quad = ref_elem.quadrature(6);
                 let n_ldofs = ref_elem.n_dofs();
                 let mut ref_phi = vec![0.0; n_ldofs * 2];

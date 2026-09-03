@@ -41,8 +41,8 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::nedelec::{TetND1, TetND2, TriND1, TriND2};
-use fem_element::raviart_thomas::{QuadRT0, TetRT0, TriRT0};
+use fem_element::nedelec::{TetND2, TriND2, TriNDk, TetNDk, QuadNDk};
+use fem_element::raviart_thomas::{QuadRTk, TetRT1, TriRT1, TriRTk, TetRTk};
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::ElementTransformation;

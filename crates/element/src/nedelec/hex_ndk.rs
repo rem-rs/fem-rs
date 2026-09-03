@@ -276,6 +276,40 @@ impl VectorReferenceElement for HexNDk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
+        if self.order == 1 {
+            let x = xi[0];
+            let y = xi[1];
+            let z = xi[2];
+            curl_vals.fill(0.0);
+            curl_vals[1] = -0.125 * (1.0 - y);
+            curl_vals[2] = 0.125 * (1.0 - z);
+            curl_vals[3] = 0.125 * (1.0 + x);
+            curl_vals[5] = 0.125 * (1.0 - z);
+            curl_vals[6] = 0.0;
+            curl_vals[7] = -0.125 * (1.0 + y);
+            curl_vals[8] = -0.125 * (1.0 - z);
+            curl_vals[9] = 0.125 * (1.0 - x);
+            curl_vals[11] = -0.125 * (1.0 - z);
+            curl_vals[12] = 0.0;
+            curl_vals[13] = 0.125 * (1.0 - y);
+            curl_vals[14] = 0.125 * (1.0 + z);
+            curl_vals[15] = -0.125 * (1.0 + x);
+            curl_vals[17] = 0.125 * (1.0 + z);
+            curl_vals[18] = 0.0;
+            curl_vals[19] = 0.125 * (1.0 + y);
+            curl_vals[20] = -0.125 * (1.0 + z);
+            curl_vals[21] = -0.125 * (1.0 - x);
+            curl_vals[23] = -0.125 * (1.0 + z);
+            curl_vals[24] = -0.125 * (1.0 - x);
+            curl_vals[25] = 0.125 * (1.0 - y);
+            curl_vals[27] = -0.125 * (1.0 + x);
+            curl_vals[28] = -0.125 * (1.0 - y);
+            curl_vals[30] = 0.125 * (1.0 + x);
+            curl_vals[31] = -0.125 * (1.0 + y);
+            curl_vals[33] = 0.125 * (1.0 - x);
+            curl_vals[34] = 0.125 * (1.0 + y);
+            return;
+        }
         let p = self.order;
         let nd = self.nodes();
         let x = xi[0];
@@ -640,6 +674,22 @@ impl VectorReferenceElement for HexNDk {
         crate::quadrature::hex_rule(o)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        if self.order == 1 {
+            return vec![
+                vec![0.0, -1.0, -1.0],
+                vec![1.0, 0.0, -1.0],
+                vec![0.0, 1.0, -1.0],
+                vec![-1.0, 0.0, -1.0],
+                vec![0.0, -1.0, 1.0],
+                vec![1.0, 0.0, 1.0],
+                vec![0.0, 1.0, 1.0],
+                vec![-1.0, 0.0, 1.0],
+                vec![-1.0, -1.0, 0.0],
+                vec![1.0, -1.0, 0.0],
+                vec![1.0, 1.0, 0.0],
+                vec![-1.0, 1.0, 0.0],
+            ];
+        }
         let p = self.order;
         let nd = self.nodes();
         let n = self.n_dofs();

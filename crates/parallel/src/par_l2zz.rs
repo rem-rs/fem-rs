@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use fem_core::Rank;
-use fem_element::raviart_thomas::QuadRT0;
+use fem_element::raviart_thomas::QuadRTk;
 use fem_element::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::Mesh;
@@ -95,7 +95,7 @@ pub fn l2_zz_estimator_parallel(
     let n_rt_dofs = rt_local.n_dofs();
 
     // 4-point Gauss-Legendre rule on [0,1]² (same as the serial estimator).
-    let qr = QuadRT0.quadrature(2);
+    let qr = QuadRTk::new(0).quadrature(2);
     let dn = |x: f64, y: f64| -> [[f64; 2]; 4] {
         [
             [-(1.0 - y), -(1.0 - x)],
@@ -147,7 +147,7 @@ pub fn l2_zz_estimator_parallel(
             let gy = (-j01 * g_ref0 + j00 * g_ref1) * inv_det;
             grad_qp[e as usize][q] = [gx, gy];
 
-            QuadRT0.eval_basis_vec(xi, &mut phi_ref);
+            QuadRTk::new(0).eval_basis_vec(xi, &mut phi_ref);
             for i in 0..4 {
                 let s = signs[i];
                 phi[i * 2] = (j00 * phi_ref[i * 2] + j01 * phi_ref[i * 2 + 1]) * inv_det * s;

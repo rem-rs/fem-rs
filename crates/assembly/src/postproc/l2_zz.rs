@@ -24,7 +24,7 @@
 //! Currently supports 2-D **Quad4** meshes (ex6p / pex6 use `star.mesh`).
 
 use fem_core::ElemId;
-use fem_element::raviart_thomas::QuadRT0;
+use fem_element::raviart_thomas::QuadRTk;
 use fem_element::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_solver::{SolverConfig, solve_pcg_gssmoother};
@@ -49,7 +49,7 @@ pub fn l2_zz_estimator(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> Vec<f64> {
     // 4-point Gauss-Legendre rule on [0,1]² (MFEM IntRules for the SQUARE:
     // 1-D points 0.2113…/0.7887…, 2 points/dim).  Everything — the Q1 flux
     // gradient, the RT0 basis and the geometry Jacobian — lives on [0,1]².
-    let qr = QuadRT0.quadrature(2);
+    let qr = QuadRTk::new(0).quadrature(2);
     // Q1 (H1) shape-function gradients on [0,1]² (MFEM solution basis):
     //   N0=(1-x)(1-y) N1=x(1-y) N2=xy N3=(1-x)y
     let dn = |x: f64, y: f64| -> [[f64; 2]; 4] {
@@ -104,7 +104,7 @@ pub fn l2_zz_estimator(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> Vec<f64> {
 
             // RT0 physical basis via contravariant Piola + orientation signs
             // on the [0,1]² reference domain (MFEM RT0Quad / intrules).
-            QuadRT0.eval_basis_vec(xi, &mut phi_ref);
+            QuadRTk::new(0).eval_basis_vec(xi, &mut phi_ref);
             for i in 0..4 {
                 let s = signs[i];
                 phi[i * 2] = (j00 * phi_ref[i * 2] + j01 * phi_ref[i * 2 + 1]) * inv_det * s;

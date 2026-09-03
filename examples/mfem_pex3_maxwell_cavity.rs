@@ -24,7 +24,7 @@ use fem_assembly::{
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
 };
-use fem_element::{VectorReferenceElement, nedelec::{TriND1, QuadND1}};
+use fem_element::{VectorReferenceElement, nedelec::{TriNDk, QuadNDk}};
 use fem_io::mfem::{read_mfem_file, write_mfem};
 use fem_io::glvis::GlVisSocket;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
@@ -213,7 +213,7 @@ fn main() {
         if visualization {
             let lm = ps.local_space().mesh();
             let n_nodes = lm.n_nodes() as usize;
-            let ref_elem = TriND1;
+            let ref_elem = TriNDk::new(1);
             let n_ldofs = ref_elem.n_dofs();
             let ref_verts: [[f64; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
 

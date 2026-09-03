@@ -1543,3 +1543,14 @@ mod tests {
         );
     }
 }
+
+// ─── H(div) RT0 ZZ estimator (wrapper for l2_zz::l2_zz_estimator) ──────────
+// This provides the MFEM L2ZZEstimator (H(div) RT0 projection) interface
+// that returns ElementIndicators, matching the other estimators in this module.
+// The raw l2_zz_estimator is Quad4-only and returns Vec<f64>; this wrapper
+// converts to ElementIndicators for API consistency.
+
+pub fn zz_estimator_l2_hdiv(mesh: &fem_mesh::Mesh<2>, u: &[f64]) -> ElementIndicators {
+    let eta = crate::postproc::l2_zz::l2_zz_estimator(mesh, u);
+    ElementIndicators::new(eta, "ZZ(L2-Hdiv)")
+}

@@ -8,7 +8,7 @@
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
-use fem_element::nedelec::{TriND1, TetND1};
+use fem_element::nedelec::{TriNDk, TetNDk};
 use fem_element::lagrange::{SegP1, TriP1, TetP1};
 use fem_element::{ReferenceElement, VectorReferenceElement};
 
@@ -29,7 +29,7 @@ where
     F: Fn(&[f64]) -> Vec<f64> + Send + Sync,
 {
     let n_elems = mesh.n_elements(); let tau = 1.0;
-    let nd = TriND1; let seg = SegP1;
+    let nd = TriNDk::new(1); let seg = SegP1;
     let qr_vol = nd.quadrature(3); let qr_face = seg.quadrature(3);
     let n_qp_face = qr_face.n_points();
     let n_ldofs = 3; let sk_dpe = 1;
@@ -116,8 +116,8 @@ where
     F: Fn(&[f64]) -> Vec<f64> + Send + Sync,
 {
     let n_elems = mesh.n_elements(); let tau = 1.0;
-    let nd = TetND1;                      // 6 edge DOFs per tet
-    let face_ref = TriND1;                // 3 edge DOFs per face skeleton
+    let nd = TetNDk::new(1);                      // 6 edge DOFs per tet
+    let face_ref = TriNDk::new(1);                // 3 edge DOFs per face skeleton
     let qr_vol = nd.quadrature(3);
     let n_qp_face = face_ref.quadrature(3).n_points();
     let qr_face = face_ref.quadrature(3);

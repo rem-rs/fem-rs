@@ -39,7 +39,7 @@ use std::collections::HashSet;
 
 use fem_mesh::ElementType;
 use fem_element::{
-    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriND1, TriND2, TriRT1,
+    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriND2, TriRT1, TriNDk,
     TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;
@@ -563,7 +563,7 @@ impl DiscreteLinearOperator {
         let mut coo = CooMatrix::<f64>::new(n_l2, n_hcurl);
 
         // Reference curls for TriND1: [2, 2, -2] (constant)
-        let ref_elem = TriND1;
+        let ref_elem = TriNDk::new(1);
         let mut curl_ref = vec![0.0; ref_elem.n_dofs()];
         ref_elem.eval_curl(&[0.0, 0.0], &mut curl_ref);
 
