@@ -329,6 +329,9 @@ path = "mfem_miniapp_volta.rs"
 name = "mfem_miniapp_pic"
 path = "mfem_miniapp_pic.rs"
 [[example]]
+name = "mfem_miniapp_nurbs_info"
+path = "mfem_miniapp_nurbs_info.rs"
+[[example]]
 name = "mfem_nurbs_miniapp_solenoidal"
 path = "mfem_nurbs_miniapp_solenoidal.rs"
 [[example]]
