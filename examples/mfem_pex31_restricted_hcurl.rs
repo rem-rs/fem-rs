@@ -198,8 +198,15 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
 
 fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
     match et {
-        ElementType::Tri3 => (3, TriNDk::new(1) as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn),
-        ElementType::Quad4 => (4, &QuadNDk::new(1) as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn),
+        ElementType::Tri3 => {
+            // Leak to get 'static lifetime (acceptable for singleton reference elements)
+            let nd: &'static TriNDk = Box::leak(Box::new(TriNDk::new(1)));
+            (3, nd as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn)
+        },
+        ElementType::Quad4 => {
+            let nd: &'static QuadNDk = Box::leak(Box::new(QuadNDk::new(1)));
+            (3, nd as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn)
+        },
         _ => panic!("unsupported element type {et:?}"),
     }
 }
