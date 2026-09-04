@@ -283,3 +283,5 @@ mod tests {
         assert!(trace > 0.0, "mass matrix trace should be positive");
     }
 }
+
+

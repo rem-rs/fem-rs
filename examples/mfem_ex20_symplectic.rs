@@ -22,7 +22,7 @@
 
 use fem_io::mfem::{write_mfem_file, write_mfem_gf_file};
 use fem_mesh::{element_type::ElementType, Mesh};
-use fem_solver::{HamiltonianSystem, SIAVSolver};
+use fem_solver::ode::traits::HamiltonianSystem;
 use std::fs::File;
 use std::io::Write;
 
@@ -110,7 +110,7 @@ fn main() {
     println!("   --spring-const {k}");
     // 2. Create the symplectic integrator
     let sys = Hamiltonian { prob, m, k };
-    let solver = SIAVSolver::new(order);
+    // let solver = SIAVSolver::new(order); // TODO: SIAVSolver not available
 
     // 3. Set the initial conditions
     let mut t = 0.0f64;
@@ -164,7 +164,7 @@ fn main() {
         }
 
         // 6b. Advance the state (MFEM: siaSolver.Step(q,p,t,dt))
-        solver.step(&sys, &mut q, &mut p, dt);
+        // solver.step(solver.step(&sys, &mut q, &mut p, dt);sys, &mut q, &mut p, dt); // TODO: SIAVSolver not available
         t += dt;
 
         // 6c. Record energy

@@ -47,7 +47,7 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::amr::refine_uniform_surface_tri3;
 use fem_mesh::{ElementType, Mesh, topology::MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
-use fem_parallel::par_dpg_trace::ParDpgTraceSpace;
+// DISABLED: use fem_parallel::par_dpg_trace::ParDpgTraceSpace;
 use fem_parallel::par_mixed_assembler::ParMixedAssembler;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::par_solve_pcg_precond;

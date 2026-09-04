@@ -107,6 +107,12 @@ pub use hdg::*;
 pub mod wg;
 pub use wg::*;
 
+/// H(div) error computation utilities.
+pub mod hdiv_error;
+
+/// Hybridization methods for H(div) problems.
+pub mod hybridization;
+
 /// eXtended Finite Element Method (XFEM).
 
 /// Contact mechanics (Signorini, friction, mortar, Nitsche).
