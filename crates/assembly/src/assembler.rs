@@ -107,6 +107,29 @@ struct P0 {
     dim: u8,
 }
 
+/// Constant (P0) element on the standard tetrahedron reference domain
+/// (volume 1/6): the generic [`P0`] with `dim: 3` uses the hex `[-1,1]³`
+/// Gauss rule (weight sum 8), which scales the L2 volume integral by
+/// `8/(1/6) = 48` on tets.  `tet_rule` has weight sum 1/6, matching the
+/// simplex `ElementTransformation` reference volume.
+struct P0Tet;
+
+impl ReferenceElement for P0Tet {
+    fn dim(&self) -> u8 { 3 }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
+        for x in g.iter_mut() { *x = 0.0; }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        fem_element::quadrature::tet_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0; 3]]
+    }
+}
+
 impl ReferenceElement for P0 {
     fn dim(&self) -> u8 { self.dim }
     fn order(&self) -> u8 { 0 }
@@ -273,7 +296,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
-        (ElementType::Tet4, 0)                           => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on tets
+        (ElementType::Tet4, 0)                           => Box::new(P0Tet), // L2 P0 (constant) on tets
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetPk::new(3)),
