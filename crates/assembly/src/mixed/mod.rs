@@ -803,11 +803,14 @@ where
 /// `ParMixedBilinearForm(HCurlFESpace_, HDivFESpace_)`.  Used by
 /// Tesla (magnetostatics) and Volta (electrostatics) mini apps for
 /// coupling the vector potential A ∈ H(curl) to the flux B ∈ H(div).
-pub fn assemble_hcurl_hdiv_mixed<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+pub fn assemble_hcurl_hdiv_mixed<
+    M: fem_mesh::topology::MeshTopology + Clone + 'static,
+    C: ScalarCoeff,
+>(
     nd_space: &HCurlSpace<M>,
     rt_space: &HDivSpace<M>,
     quad_order: u8,
-    eps: f64,
+    eps: C,
 ) -> CsrMatrix<f64>
 where
     M: fem_mesh::topology::MeshTopology,
@@ -853,17 +856,26 @@ where
         let nodes = mesh.element_nodes(e);
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let (w, jit, det_j): (f64, nalgebra::DMatrix<f64>, f64) = if use_iso {
+            let (w, jit, det_j, xp): (f64, nalgebra::DMatrix<f64>, f64, Vec<f64>) = if use_iso {
                 let g: &dyn ReferenceElement = ge.as_deref().unwrap();
-                let (jac, det, _) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
-                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det)
+                let (jac, det, xp) = isoparametric_jacobian(mesh, &nodes, g, xi, dim);
+                (quad.weights[qi] * det.abs(), jac.try_inverse().unwrap().transpose(), det, xp)
             } else {
                 let tr = fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes);
-                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone(), tr.det_j())
+                let xp = tr.map_to_physical(xi);
+                (quad.weights[qi] * tr.det_j().abs(), tr.jacobian_inv_t().clone(), tr.det_j(), xp)
             };
 
             nd_ref.eval_basis_vec(xi, &mut nd_basis);
             rt_ref.eval_basis_vec(xi, &mut rt_basis);
+
+            // Volta/Tesla: the coupling coefficient (permittivity) may be
+            // spatially varying (`-ds` dielectric sphere, `-pwe` piecewise
+            // constant), so evaluate it at each quadrature point.
+            let eps_v = {
+                let ctx = CoeffCtx::from_qp(&xp, dim, e, mesh.element_tag(e), None, None);
+                eps.eval(&ctx)
+            };
 
             // Original Jacobian J (from J^{-T})
             let jac = jit.clone().try_inverse().map(|m| m.transpose())
@@ -885,7 +897,7 @@ where
                     let rt_z = if dim > 2 { sj_rt * inv_det * (0..dim).map(|d| jac[(2,d)] * rt_basis[i*dim + d]).sum::<f64>() } else { 0.0 };
 
                     let dot = nd_x * rt_x + nd_y * rt_y + nd_z * rt_z;
-                    me[i * ng_nd + j] += w * eps * dot;
+                    me[i * ng_nd + j] += w * eps_v * dot;
                 }
             }
         }
