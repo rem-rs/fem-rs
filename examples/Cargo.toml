@@ -290,6 +290,9 @@ path = "mfem_miniapp_volta.rs"
 name = "mfem_miniapp_tesla"
 path = "mfem_miniapp_tesla.rs"
 [[example]]
+name = "mfem_miniapp_lorentz"
+path = "mfem_miniapp_lorentz.rs"
+[[example]]
 name = "mfem_ex15_dump_p1_it3"
 path = "mfem_ex15_dump_p1_it3.rs"
 [[example]]
