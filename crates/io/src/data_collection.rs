@@ -15,7 +15,7 @@
 //! fixed by MFEM and the only escaping needed is `"`/`\` in names.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// A grid-function field to store in the collection.
@@ -98,6 +98,97 @@ fn gf_text(basis: &str, vdim: u32, values: &[f64]) -> String {
         s.push_str(&format!("{v:.14e}\n"));
     }
     s
+}
+
+/// Parse a `.mfem_root` JSON file and extract field metadata.
+pub fn read_visit_root(root_path: &Path) -> std::io::Result<(usize, usize, Vec<DcField>)> {
+    let content = fs::read_to_string(root_path)?;
+    let content = content.trim();
+
+    // Extract cycle
+    let cycle = extract_json_number(&content, "\"cycle\":")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing cycle"))?;
+
+    // Extract domains
+    let domains = extract_json_number(&content, "\"domains\":")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing domains"))?;
+
+    // Extract fields - find "fields": { ... }
+    let mut fields = Vec::new();
+    if let Some(fields_start) = content.find("\"fields\":") {
+        let fields_str = &content[fields_start..];
+        // Find each field entry
+        let mut pos = 0;
+        while let Some(name_start) = fields_str[pos..].find('"') {
+            let name_start = pos + name_start + 1;
+            if let Some(name_end) = fields_str[name_start..].find('"') {
+                let name = &fields_str[name_start..name_start + name_end];
+                // Find basis
+                if let Some(basis_pos) = fields_str[name_start..].find("\"basis\":") {
+                    let basis_start = name_start + basis_pos + 9;
+                    if let Some(basis_end) = fields_str[basis_start..].find('"') {
+                        let basis = &fields_str[basis_start..basis_start + basis_end];
+                        // Find comps (vdim)
+                        let vdim = extract_json_number(&fields_str[name_start..], "\"comps\":")
+                            .unwrap_or(1) as u32;
+                        // Find order
+                        let order = extract_json_number(&fields_str[name_start..], "\"order\":")
+                            .unwrap_or(1) as u32;
+                        fields.push(DcField {
+                            name: name.to_string(),
+                            basis: basis.to_string(),
+                            order,
+                            vdim,
+                            values: Vec::new(),
+                        });
+                    }
+                }
+                pos = name_start + name_end + 1;
+                if pos > fields_str.len() { break; }
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok((cycle, domains, fields))
+}
+
+/// Extract a number from JSON content after a key.
+fn extract_json_number(content: &str, key: &str) -> Option<usize> {
+    let pos = content.find(key)? + key.len();
+    let rest = &content[pos..];
+    let rest = rest.trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Read a grid-function slice file.
+pub fn read_gf_slice(path: &Path) -> std::io::Result<(String, u32, Vec<f64>)> {
+    let content = fs::read_to_string(path)?;
+    let mut lines = content.lines();
+    // Skip header lines
+    let mut basis = String::new();
+    let mut vdim = 1u32;
+    for line in &mut lines {
+        if line.starts_with("FiniteElementCollection:") {
+            basis = line["FiniteElementCollection:".len()..].trim().to_string();
+        } else if line.starts_with("VDim:") {
+            vdim = line["VDim:".len()..].trim().parse().unwrap_or(1);
+        } else if line.is_empty() {
+            break;
+        }
+    }
+    // Read values
+    let mut values = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if let Ok(v) = line.parse::<f64>() {
+            values.push(v);
+        }
+    }
+    Ok((basis, vdim, values))
 }
 
 /// Save a VisIt-style DataCollection under `out_dir` (default ".").
