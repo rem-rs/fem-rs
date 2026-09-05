@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fem_assembly::postproc::coefficient::FnCoeff;
-use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+use fem_assembly::standard::{CurlCurlIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator};
+use fem_assembly::coefficient::FnVectorCoeff;
 use fem_mesh::topology::MeshTopology;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
@@ -153,28 +154,15 @@ impl TeslaSolver {
         let mut a = ParVector::zeros(&self.nd);
         let mut jd = ParVector::zeros(&self.nd);
 
-        // Magnetization source.
+        // Magnetization source: weakCurlMuInv: ∫ μ⁻¹ · curl(M) · v dx.
         if let Some(m_params) = &self.m_coef {
             let m_fn = m_field_fn(m_params);
-            let rt_local = self.rt.local_space();
-            let n_rt = rt_local.n_dofs();
-            let mut m_data = vec![0.0_f64; n_rt];
-            for e in 0..local_mesh.n_elements() {
-                let dofs = rt_local.element_dofs(e as u32);
-                let nodes = local_mesh.element_nodes(e as u32);
-                let x_phys = [
-                    local_mesh.node_coords(nodes[0])[0],
-                    local_mesh.node_coords(nodes[0])[1],
-                    local_mesh.node_coords(nodes[0])[2],
-                ];
-                let m_val = m_fn(&x_phys);
-                for d in 0..3 {
-                    m_data[dofs[0] as usize] += m_val[d];
-                }
-            }
-            let mut m_vec = ParVector::from_local_raw(
-                m_data, self.rt.dof_partition().n_owned_dofs,
-                self.rt.dof_ghost_exchange_arc(), comm.clone());
+            let m_coeff = FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
+                let v = m_fn(x);
+                for d in 0..3 { out[d] = v[d]; }
+            });
+            let m_integ = VectorDomainLFIntegrator { f: m_coeff };
+            let mut m_vec = ParVectorAssembler::assemble_linear(&self.rt, &[&m_integ], qo);
             m_vec.update_ghosts();
 
             let mu_inv_coeff4 = FnCoeff(&|x: &[f64]| self.mu_inv_mode.value(x));
@@ -188,25 +176,12 @@ impl TeslaSolver {
         // Volumetric current.
         if let Some(cr) = &self.j_coef {
             let j_fn = current_ring_fn(cr);
-            let nd_local = self.nd.local_space();
-            let n_nd = nd_local.n_dofs();
-            let mut j_data = vec![0.0_f64; n_nd * 3];
-            for e in 0..local_mesh.n_elements() {
-                let dofs = nd_local.element_dofs(e as u32);
-                let nodes = local_mesh.element_nodes(e as u32);
-                let x_phys = [
-                    local_mesh.node_coords(nodes[0])[0],
-                    local_mesh.node_coords(nodes[0])[1],
-                    local_mesh.node_coords(nodes[0])[2],
-                ];
-                let j_val = j_fn(&x_phys);
-                for d in 0..3 {
-                    j_data[dofs[0] as usize * 3 + d] += j_val[d];
-                }
-            }
-            let mut jr = ParVector::from_local_raw(
-                j_data, self.nd.dof_partition().n_owned_dofs,
-                self.nd.dof_ghost_exchange_arc(), comm.clone());
+            let j_coeff = FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
+                let v = j_fn(x);
+                for d in 0..3 { out[d] = v[d]; }
+            });
+            let j_integ = VectorDomainLFIntegrator { f: j_coeff };
+            let jr = ParVectorAssembler::assemble_linear(&self.nd, &[&j_integ], qo);
             jd.as_slice_mut().iter_mut().zip(jr.as_slice()).for_each(|(j, v)| *j += *v);
         }
 
