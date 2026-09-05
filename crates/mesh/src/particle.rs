@@ -167,6 +167,90 @@ impl ParticleSet {
         (sum, wgt)
     }
 
+    // ── Vector field interpolation (3D) ─────────────────────────────────────
+
+    /// Interpolate a vector field (3 components) onto particles (3D).
+    ///
+    /// `field` is a flat array `[n_nodes * 3]` with the vector field at mesh nodes.
+    /// `data_idx` is the starting index in `p.data` where the 3 components are written.
+    pub fn interpolate_vector_3d(&mut self, mesh: &Mesh<3>, field: &[f64], data_idx: usize) {
+        for p in &mut self.particles {
+            if let Some(e) = p.elem {
+                let ns = mesh.elem_nodes(e);
+                for d in 0..3 {
+                    p.data[data_idx + d] = ns.iter().enumerate()
+                        .map(|(k, &n)| p.barycentric[k] * field[n as usize * 3 + d])
+                        .sum();
+                }
+            }
+        }
+    }
+
+    // ── Boris algorithm ─────────────────────────────────────────────────────
+
+    /// Advance particles one timestep using the Boris algorithm (3D).
+    ///
+    /// `p.data` layout: `[mass(0), charge(1), mom_x(2), mom_y(3), mom_z(4), E_x(5), E_y(6), E_z(7), B_x(8), B_y(9), B_z(10)]`
+    /// Momentum is in units of mass·velocity (p = m·v).
+    pub fn boris_step(&mut self, dt: f64) {
+        let half_dt = 0.5 * dt;
+        for p in &mut self.particles {
+            let mass = p.data[0];
+            let charge = p.data[1];
+            let q_half_dt_over_m = charge * half_dt / mass;
+
+            // Copy fields out to avoid borrow conflicts
+            let ex = p.data[5]; let ey = p.data[6]; let ez = p.data[7];
+            let bx = p.data[8]; let by = p.data[9]; let bz = p.data[10];
+            let mom_x = p.data[2]; let mom_y = p.data[3]; let mom_z = p.data[4];
+
+            // Half-step electric field acceleration: v_minus = v + q·E·dt/2m
+            let v_minus = [
+                mom_x / mass + q_half_dt_over_m * ex,
+                mom_y / mass + q_half_dt_over_m * ey,
+                mom_z / mass + q_half_dt_over_m * ez,
+            ];
+
+            // Rotation due to magnetic field
+            let t = [
+                charge * half_dt * bx / mass,
+                charge * half_dt * by / mass,
+                charge * half_dt * bz / mass,
+            ];
+            let t_mag2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
+            let s = [
+                2.0 * t[0] / (1.0 + t_mag2),
+                2.0 * t[1] / (1.0 + t_mag2),
+                2.0 * t[2] / (1.0 + t_mag2),
+            ];
+
+            // v_minus x t
+            let v_minus_x_t = [
+                v_minus[1] * t[2] - v_minus[2] * t[1],
+                v_minus[2] * t[0] - v_minus[0] * t[2],
+                v_minus[0] * t[1] - v_minus[1] * t[0],
+            ];
+
+            // v_plus = v_minus + (v_minus x t) x s
+            let v_plus = [
+                v_minus[0] + v_minus_x_t[1] * s[2] - v_minus_x_t[2] * s[1],
+                v_minus[1] + v_minus_x_t[2] * s[0] - v_minus_x_t[0] * s[2],
+                v_minus[2] + v_minus_x_t[0] * s[1] - v_minus_x_t[1] * s[0],
+            ];
+
+            // Update momentum: m·(v_plus + q·E·dt/2m)
+            p.data[2] = mass * (v_plus[0] + q_half_dt_over_m * ex);
+            p.data[3] = mass * (v_plus[1] + q_half_dt_over_m * ey);
+            p.data[4] = mass * (v_plus[2] + q_half_dt_over_m * ez);
+
+            // Full step position update
+            p.x[0] += p.data[2] / mass * dt;
+            p.x[1] += p.data[3] / mass * dt;
+            p.x[2] += p.data[4] / mass * dt;
+            p.elem = None; // Invalidate element ownership
+        }
+    }
+
     // ── VTK output ──────────────────────────────────────────────────────────
 
     /// Write particles to a legacy VTK file for ParaView.
