@@ -365,3 +365,7 @@ path = "mfem_mini_nurbs_ex5.rs"
 [[example]]
 name = "mfem_mini_nurbs_ex24"
 path = "mfem_mini_nurbs_ex24.rs"
+
+[[example]]
+name = "mfem_mini_nurbs_printfunc"
+path = "mfem_mini_nurbs_printfunc.rs"
