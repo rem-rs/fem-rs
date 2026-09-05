@@ -273,6 +273,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
+        (ElementType::Tet4, 0)                           => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on tets
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),
         (ElementType::Tet4, 3)                           => Box::new(TetPk::new(3)),

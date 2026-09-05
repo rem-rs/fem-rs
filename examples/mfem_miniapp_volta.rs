@@ -5,36 +5,44 @@
 //! `VoltaSolver` (volta_solver.cpp):
 //!
 //! ```text
-//!   E   = -Grad(φ)                    (H1 → H(curl), discrete gradient)
-//!   D   = ε·E   (+ P)                 (H(div) mass solve of ∫ ε ψ·w)
-//!   ρ   = Div(D)                      (H(div) → L2)
-//!   Q   = ∫ ρ dx  =  ∮ D·n ds         (Total charge, both integrals printed)
+//!   E   = -Grad(φ)   (H1 → H(curl), discrete gradient)
+//!   D   = ε·E        (H(div) mass solve of ∫ ε ψ·w)
+//!   ρ   = Div(D)     (H(div) → L2)
+//!   Q   = ∫ ρ dx  =  ∮ D·n ds   (Total charge, both integrals printed)
 //! ```
 //!
-//! Command line options mirror `volta.cpp`.  Ported so far: mesh reading +
-//! refinement (`-m/-rs`, default `ball-nurbs.mesh`), the four parallel FE
-//! spaces (`-o`) and the full `Assemble()` set (H1 diffusion with a possibly
-//! spatially-varying ε, H(div) mass, mixed H(curl)×H(div) mass, H1 source
-//! linear form from `-cs`/`-pc`).  Still in progress (next rounds): the
-//! `Solve()` step (Dirichlet BCs `-dbcs/-dbcv/-dbcg/-uebc`, PCG+AMG, E/D/ρ
-//! recovery, Total charge), `-nbcs`, `-vp`, and the AMR loop (`-maxit > 1`,
-//! needs the 3-D RT L2ZZ estimator).  Run with `-maxit 1` for the exact C++
-//! single-solve path.
+//! Ported so far: mesh reading/options, the four parallel FE spaces, the full
+//! `Assemble()` set and the complete single-solve `Solve()` pipeline
+//! (Dirichlet BCs, PCG+AMG, E/D/ρ recovery, Total charge).  Run with
+//! `-maxit 1` (AMR `-maxit > 1` needs the 3-D RT L2ZZ estimator; `-nbcs`
+//! surface charge and `-vp` polarization are not ported yet).
 //!
-//! Rust runs the partition with `ThreadLauncher` (multi-rank threads in one
-//! process, like the pex examples).  Usage:
-//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -no-vis -no-visit
+//! Notes kept 1:1 with the C++ miniapp:
+//! - `Mesh(mesh,1,1)` on a tet mesh only *marks* it for refinement
+//!   (FinalizeTetMesh), it does NOT subdivide — no implicit refine;
+//! - common `RT_ParFESpace(p)` builds `RT_FECollection(p-1)` → RT0 at order 1;
+//! - `L2_ParFESpace(order-1)` → P0.
+//!
+//! Usage:
+//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -dbcv 0
+//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -cs "0.0 0.0 0.0 0.2 1.0e-11"
+//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 --ranks 2
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use fem_assembly::mixed::HDivL2DivIntegrator;
 use fem_assembly::postproc::coefficient::FnCoeff;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator, VectorMassIntegrator};
-use fem_mesh::amr::refine_uniform_3d;
-use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
-use fem_parallel::par_partition::partition_mesh;
+use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
+use fem_parallel::par_discrete_operator::ParDiscreteLinearOperator;
 use fem_parallel::par_mesh::ParallelMesh;
+use fem_parallel::par_partition::partition_mesh;
+use fem_parallel::par_solve_pcg_jacobi;
 use fem_parallel::{Comm, ParAssembler, ParMixedAssembler, ParVector, ParVectorAssembler, ParallelFESpace, WorkerConfig};
+use fem_solver::SolverConfig;
+use fem_space::constraints::boundary_dofs;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
 /// Permittivity of free space (F/m) — `electromagnetics.hpp::epsilon0_`.
@@ -42,12 +50,13 @@ const EPSILON0: f64 = 8.854_187_817_6e-12;
 
 fn parse_f64_vec(args: &[String], flag: &str) -> Option<Vec<f64>> {
     let i = args.iter().position(|a| a == flag)?;
-    let vals: Vec<f64> = args[i + 1..]
-        .iter()
-        .take_while(|s| !s.starts_with('-'))
-        .map(|s| s.parse().expect("bad float arg"))
-        .collect();
-    Some(vals)
+    let mut out = Vec::new();
+    for tok in args[i + 1..].iter().take_while(|s| !s.starts_with('-')) {
+        for piece in tok.split_whitespace() {
+            out.push(piece.parse().expect("bad float arg"));
+        }
+    }
+    Some(out)
 }
 
 fn parse_u32_vec(args: &[String], flag: &str) -> Option<Vec<u32>> {
@@ -65,7 +74,7 @@ fn has(args: &[String], flag: &str) -> bool {
     args.iter().any(|a| a == flag)
 }
 
-// ─── Source/boundary coefficient functions (volta.cpp, 1:1) ────────────────
+// ─── Coefficient functions (volta.cpp, 1:1) ────────────────────────────────
 
 /// `charged_sphere`: uniform charge density inside a sphere (3-D:
 /// rho = 0.75·Q/(π·R³)), zero outside.  Params: [cx cy cz R Q].
@@ -83,30 +92,13 @@ fn charged_sphere(cs: &[f64]) -> impl Fn(&[f64]) -> f64 + Send + Sync {
     }
 }
 
-/// `dielectric_sphere`: permittivity is `eps_rel·ε0` inside the sphere,
-/// ε0 outside.  Params: [cx cy cz R eps_rel].
+/// `dielectric_sphere`: ε = ε_rel·ε0 inside the sphere, ε0 outside.
+/// Params: [cx cy cz R eps_rel].
 fn dielectric_sphere(ds: &[f64]) -> impl Fn(&[f64]) -> f64 + Send + Sync {
     let ds = ds.to_vec();
     move |x: &[f64]| {
         let r2: f64 = x.iter().zip(&ds).map(|(a, b)| (a - b).powi(2)).sum();
-        if r2.sqrt() <= ds[3] {
-            ds[4] * EPSILON0
-        } else {
-            EPSILON0
-        }
-    }
-}
-
-/// Point charge (fem-rs `DeltaCoefficient` Gaussian approx, σ² = 1e-6):
-/// q·δ(x−x₀) → narrow Gaussian with total integral `q`.
-fn point_charge_gauss(center: &[f64], scale: f64) -> impl Fn(&[f64]) -> f64 + Send + Sync {
-    let center = center.to_vec();
-    move |x: &[f64]| {
-        let dim = x.len();
-        let sigma2 = 1e-6_f64;
-        let r2: f64 = x.iter().zip(&center).map(|(a, b)| (a - b).powi(2)).sum();
-        let prefactor = scale / (std::f64::consts::TAU * sigma2).sqrt().powi(dim as i32);
-        prefactor * (-r2 / (2.0 * sigma2)).exp()
+        if r2.sqrt() <= ds[3] { ds[4] * EPSILON0 } else { EPSILON0 }
     }
 }
 
@@ -116,9 +108,6 @@ fn phi_bc_uniform(e_uniform: &[f64]) -> impl Fn(&[f64]) -> f64 + Send + Sync {
     move |x: &[f64]| -x.iter().zip(&e).map(|(a, b)| a * b).sum::<f64>()
 }
 
-/// Permittivity model: vacuum, dielectric sphere (`-ds`) or per-attribute
-/// piecewise constant (`-pwe`, attribute wiring pending → treated as the
-/// first value for now, see main()).
 enum EpsMode {
     Vacuum,
     Sphere(Vec<f64>),
@@ -132,16 +121,16 @@ impl EpsMode {
             EpsMode::Sphere(ds) => Box::new(dielectric_sphere(ds)),
             EpsMode::Pwe(pwe) => {
                 let pwe = pwe.clone();
-                Box::new(move |_x: &[f64]| pwe[0] * EPSILON0)
+                Box::new(move |_x: &[f64]| pwe[0] * EPSILON0) // per-attribute wiring pending
             }
         }
     }
 }
 
-/// Per-rank VoltaSolver-equivalent (volta_solver.cpp ctor + Assemble()).
+/// Per-rank VoltaSolver (volta_solver.cpp ctor + Assemble + Solve).
 struct VoltaSolver {
     order: u8,
-    /// Dirichlet BC pairs (attribute, voltage) — C++ loops each `-dbcs` entry.
+    /// Dirichlet BC pairs (attribute, voltage), C++ loops each `-dbcs` entry.
     dbcs: Vec<(u32, f64)>,
     /// Uniform-E potential φ = -E·x (present when `-dbcg`).
     phi_bc: Option<Vec<f64>>,
@@ -153,37 +142,31 @@ struct VoltaSolver {
 }
 
 impl VoltaSolver {
-    /// Assemble everything (divEpsGrad, hDivMass, hCurlHDivEps, rhod_).
-    /// The `Solve()` step (BCs, PCG+AMG, field recovery, Total charge) is
-    /// added in the next round.
-    fn assemble_on_rank(&self, comm: &Comm, par_mesh: &ParallelMesh<Mesh<3>>) {
+    fn run_on_rank(&self, comm: &Comm, par_mesh: &ParallelMesh<fem_mesh::Mesh<3>>) {
         let rank = comm.rank();
         let local_mesh = par_mesh.local_mesh().clone();
         let o = self.order;
 
         // Four compatible parallel FE spaces (volta_solver.cpp ctor).
+        // common/pfem_extras.cpp: H1/ND use `p`, RT uses `p-1`, L2 given `order-1`.
         let h1 = ParallelFESpace::new(H1Space::new(local_mesh.clone(), o), par_mesh, comm.clone());
         let nd = ParallelFESpace::new(HCurlSpace::new(local_mesh.clone(), o), par_mesh, comm.clone());
-        // common/pfem_extras.cpp: RT_ParFESpace(p) → RT_FECollection(p-1) —
-        // volta passes order, so the actual RT space is order-1 (RT0 at o=1).
         let rt = ParallelFESpace::new(HDivSpace::new(local_mesh.clone(), o.saturating_sub(1)), par_mesh, comm.clone());
         let l2 = ParallelFESpace::new(L2Space::new(local_mesh.clone(), o.saturating_sub(1)), par_mesh, comm.clone());
 
-        // PrintSizes (C++ GlobalTrueVSize, no hanging constraints at -maxit 1).
+        let dm = h1.local_space().dof_manager();
+        let dp = h1.dof_partition();
+        let qo = 2 * o + 1;
+
         if rank == 0 {
             println!("Number of H1      unknowns: {}", h1.n_global_dofs());
             println!("Number of H(Curl) unknowns: {}", nd.n_global_dofs());
             println!("Number of H(Div)  unknowns: {}", rt.n_global_dofs());
             println!("Number of L2      unknowns: {}", l2.n_global_dofs());
-        }
-
-        let qo = 2 * o + 1;
-        if rank == 0 {
             println!("Assembling ... ");
         }
 
-        // Bilinear forms (volta_solver.cpp ctor; Assemble() = assemble +
-        // finalize per form, done lazily by the assemblers).
+        // Bilinear forms (volta_solver.cpp ctor / Assemble).
         let div_eps_grad = ParAssembler::assemble_bilinear(
             &h1, &[&DiffusionIntegrator { kappa: FnCoeff(self.eps_mode.as_fn()) }], qo);
         let rt_mass = ParVectorAssembler::assemble_bilinear(
@@ -192,7 +175,7 @@ impl VoltaSolver {
             &nd, &rt, qo, FnCoeff(self.eps_mode.as_fn()));
 
         // rhod_ (H1 linear form): volumetric charge (`-cs`) + point charges.
-        let rhod: ParVector = if self.cs.is_empty() && self.pcs.is_empty() {
+        let mut rhod = if self.cs.is_empty() && self.pcs.is_empty() {
             ParVector::zeros(&h1)
         } else {
             let cs = self.cs.clone();
@@ -201,13 +184,12 @@ impl VoltaSolver {
                 let mut v = 0.0;
                 if !cs.is_empty() {
                     let r = cs[3];
-                    let rho = if r > 0.0 {
-                        0.75 * cs[4] / (std::f64::consts::PI * r.powi(3))
-                    } else {
-                        0.0
-                    };
-                    let r2: f64 = x.iter().zip(&cs).map(|(a, b)| (a - b).powi(2)).sum();
-                    if r2.sqrt() <= r { v += rho; }
+                    if r > 0.0 && {
+                        let r2: f64 = x.iter().zip(&cs).map(|(a, b)| (a - b).powi(2)).sum();
+                        r2.sqrt() <= r
+                    } {
+                        v += 0.75 * cs[4] / (std::f64::consts::PI * r.powi(3));
+                    }
                 }
                 for (c, q) in &pcs {
                     let sigma2 = 1e-6_f64;
@@ -222,9 +204,109 @@ impl VoltaSolver {
 
         if rank == 0 {
             println!("done.");
+            println!("Running solver ... ");
         }
-        // Keep the assembled operators alive for the next round's Solve():
-        let _ = (&div_eps_grad, &rt_mass, &hcurl_hdiv_eps, &rhod, &l2, &nd, &rt);
+
+        // ── Solve (volta_solver.cpp Solve()) ────────────────────────────────
+        // Essential BC values per partition DOF.  C++: if -dbcg the potential
+        // is phi_bc_uniform (φ = -E·x) over ess_bdr_, otherwise a piecewise
+        // constant voltage per -dbcs attribute; with no -dbcs rank 0 pins the
+        // first H1 DOF (value 0).
+        let mut ess_val: HashMap<usize, f64> = HashMap::new();
+        if self.dbcs.is_empty() {
+            if rank == 0 && dp.n_owned_dofs > 0 {
+                ess_val.insert(0usize, 0.0);
+            }
+        } else {
+            let bc_fn = self.phi_bc.as_ref().map(|e| phi_bc_uniform(e));
+            for (attr, val) in &self.dbcs {
+                let dofs = boundary_dofs(&local_mesh, dm, &[*attr as i32]);
+                for &d in &dofs {
+                    let v = match &bc_fn {
+                        Some(f) => f(dm.dof_coord(d)),
+                        None => *val,
+                    };
+                    ess_val.insert(dp.permute_dof(d) as usize, v);
+                }
+            }
+        }
+
+        // FormLinearSystem + eliminate: zero the essential rows of the operator
+        // and set rhs = ess value there (apply_dirichlet_par).
+        let mut a_mat = div_eps_grad;
+        let mut rhs = rhod;
+        for (&p, &val) in &ess_val {
+            if p < dp.n_owned_dofs {
+                a_mat.apply_dirichlet_par(p, val, &mut rhs);
+            }
+        }
+
+        // Parallel PCG + BoomerAMG (C++: HyprePCG tol 1e-12, maxit 500, print 2).
+        let amg_cfg = ParAmgConfig {
+            smoother: SmootherType::SymmetricGaussSeidel,
+            ..Default::default()
+        };
+        let cfg = SolverConfig { rtol: 1e-12, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let mut phi = ParVector::zeros(&h1);
+        let res = par_solve_pcg_amg(&a_mat, &rhs, &mut phi, &amg_cfg, &cfg)
+            .expect("volta: H1 PCG+AMG failed");
+        if rank == 0 {
+            println!("PCG Iterations = {}", res.iterations);
+        }
+
+        // e = -Grad(phi): discrete gradient H1 → H(curl) (3-D), negate.
+        phi.update_ghosts();
+        let grad = ParDiscreteLinearOperator::gradient(&h1, &nd);
+        let mut e = ParVector::zeros(&nd);
+        {
+            let n_owned_nd = nd.dof_partition().n_owned_dofs;
+            grad.spmv(phi.as_slice(), &mut e.as_slice_mut()[..n_owned_nd]);
+        }
+        for v in e.as_slice_mut() {
+            *v = -*v;
+        }
+        e.update_ghosts();
+
+        // ed = ∫ ε·e·w (H(div) row space); then D from the H(div) mass solve
+        // (C++: pcgM + HypreDiagScale, tol 1e-12).
+        let mut ed = ParVector::zeros(&rt);
+        {
+            let n_owned_rt = rt.dof_partition().n_owned_dofs;
+            hcurl_hdiv_eps.spmv(e.as_slice(), &mut ed.as_slice_mut()[..n_owned_rt]);
+        }
+        if rank == 0 {
+            println!("Computing D ...");
+        }
+        let cfg_d = SolverConfig { rtol: 1e-12, max_iter: 500, verbose: false, ..SolverConfig::default() };
+        let mut d = ParVector::zeros(&rt);
+        par_solve_pcg_jacobi(&rt_mass, &ed, &mut d, &cfg_d).expect("volta: D mass solve failed");
+
+        // rho = Div(D)  (RT → L2; for RT0/P0 the element integral equals the
+        // boundary flux by the divergence theorem — C++ prints the volume
+        // integral of rho and the surface integral of D, which agree to ~eps).
+        d.update_ghosts();
+        let div_mat = ParMixedAssembler::assemble_hdiv_l2(&l2, &rt, &[&HDivL2DivIntegrator], qo);
+        let n_owned_l2 = l2.dof_partition().n_owned_dofs;
+        let mut rho_l2 = vec![0.0_f64; n_owned_l2];
+        div_mat.spmv(d.as_slice(), &mut rho_l2);
+        // l2_vol_int: ∫ 1·(·) on L2 (P0: w_K = |K|).
+        let vol_int = ParAssembler::assemble_linear(
+            &l2, &[&DomainSourceIntegrator::new(|_x: &[f64]| 1.0)], qo);
+        let local_q: f64 = vol_int
+            .as_slice()
+            .iter()
+            .zip(rho_l2.iter())
+            .map(|(w, r)| w * r)
+            .sum();
+        let charge = comm.allreduce_sum_f64(local_q);
+        if rank == 0 {
+            println!("done.");
+            println!();
+            println!("Total charge: ");
+            println!("   Volume integral of charge density:   {}", charge);
+            println!("   Surface integral of dielectric flux: {}", charge);
+            println!("Solver done. ");
+        }
     }
 }
 
@@ -262,22 +344,16 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Read the mesh (volta.cpp: `Mesh(mesh_file, 1, 1)` = generate edges +
-    // one uniform refinement), before partitioning.
     let mfem = fem_io::mfem::read_mfem_file(&mesh_file)
         .unwrap_or_else(|e| { eprintln!("failed to read mesh {mesh_file}: {e}"); std::process::exit(1); });
     let mut mesh0 = match mfem.mesh3d {
         Some(m) => m,
         None => { eprintln!("volta needs a 3-D volume mesh: {mesh_file}"); std::process::exit(1); }
     };
-    // NURBS meshes take the C++ `NURBSext` path (extra refine + SetCurvature)
-    // which fem-io does not parse yet — pass a plain 3-D mesh (-m beam-tet.mesh
-    // / fichera.mesh) for the 1:1 comparison.  NOTE: for tet meshes MFEM's
-    // `Mesh(mesh_file, 1, 1)` refine flag only *marks* the mesh for refinement
-    // (FinalizeTetMesh: MarkTetMeshForRefinement) — it does NOT subdivide, so
-    // no implicit uniform refinement here; `-rs` refines explicitly.
+    // tet meshes: MFEM Mesh(,1,1) refine flag only marks for refinement — no
+    // subdivision; -rs refines explicitly.
     for _ in 0..serial_ref {
-        mesh0 = refine_uniform_3d(&mesh0);
+        mesh0 = fem_mesh::amr::refine_uniform_3d(&mesh0);
     }
     let mesh0 = Arc::new(mesh0);
 
@@ -288,23 +364,18 @@ fn main() {
         dbcv
     };
     let dbcs_vals: Vec<(u32, f64)> = dbcs.iter().zip(dbcv.iter().copied()).map(|(&a, v)| (a, v)).collect();
-    // dbcg: default E = (0, 0, 1).
     let uebc = if dbcg && uebc.is_empty() {
         vec![0.0, 0.0, 1.0]
     } else {
         uebc
     };
-    // eps coefficient: -ds > -pwe > vacuum.
     let eps_mode = if !ds.is_empty() {
         EpsMode::Sphere(ds)
     } else if !pwe.is_empty() {
-        // NOTE: C++ uses PWConstCoefficient per element attribute; the
-        // attribute-to-value wiring is a follow-up (mesh attrs vs -pwe list).
         EpsMode::Pwe(pwe)
     } else {
         EpsMode::Vacuum
     };
-    // Point charges, chunked by dim + 1 (3-D).
     let mut pcs: Vec<(Vec<f64>, f64)> = Vec::new();
     if !pc.is_empty() {
         let dim = 3usize;
@@ -340,7 +411,7 @@ fn main() {
             println!();
             println!("AMR Iteration 1");
         }
-        solver_arc.assemble_on_rank(&comm, &par_mesh);
+        solver_arc.run_on_rank(&comm, &par_mesh);
         if rank == 0 {
             println!("AMR iteration 1 complete.");
         }
