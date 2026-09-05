@@ -1033,7 +1033,27 @@ impl DofPartition {
                 _ => panic!("from_face_space: unsupported element type {et:?}"),
             }
         }
-        let dofs_per_face = space.order() as usize + 1;
+        // Per-face DOF counts (per element type): RT_k on a tri face has
+        // (k+1)(k+2)/2 DOFs, on a quad face (k+1)², while the prism space
+        // (hdiv.rs build_3d_prism) uses k+1 DOFs on *every* face.  The serial
+        // HDivSpace emits `dofs_per_face` consecutive DOFs per face (in
+        // faces_for_elem order), then its interior DOFs — so the parallel
+        // face/interior split must use these counts, not the RT0-only `k+1`.
+        fn face_dof_counts(et: fem_mesh::ElementType, k: usize) -> Vec<usize> {
+            use fem_mesh::ElementType;
+            match et {
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    let f = (k + 1) * (k + 2) / 2;
+                    vec![f; 4]
+                }
+                ElementType::Hex8 => {
+                    let f = (k + 1) * (k + 1);
+                    vec![f; 6]
+                }
+                ElementType::Prism6 => vec![k + 1; 5],
+                _ => panic!("face_dof_counts: unsupported element type {et:?}"),
+            }
+        }
 
         // Per-face metadata: the space-canonical (first-seen) vertex order,
         // the min-global-element-id face order (global canonical), and the
@@ -1057,16 +1077,25 @@ impl DofPartition {
             let dofs = space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
             let elem_gid = partition.global_elem(e);
-            let (faces, _n_interior) = faces_for_elem(mesh.element_type(e), space.order() as usize);
-            let n_face_dofs_total = faces.len() * dofs_per_face;
+            let et = mesh.element_type(e);
+            let (faces, _n_interior) = faces_for_elem(et, space.order() as usize);
+            let fcounts = face_dof_counts(et, space.order() as usize);
+            // Prefix offsets: face f owns element dofs [off[f], off[f]+fcounts[f]).
+            let mut face_off = Vec::with_capacity(fcounts.len());
+            let mut acc = 0usize;
+            for &n in &fcounts {
+                face_off.push(acc);
+                acc += n;
+            }
+            let n_face_dofs_total = acc;
 
             for (i, &dof_id) in dofs.iter().enumerate() {
                 if i >= n_face_dofs_total {
                     interior_dofs.push((dof_id, e, i as u32));
                     continue;
                 }
-                let face_idx = i / dofs_per_face;
-                let pos = i % dofs_per_face;
+                let face_idx = face_off.partition_point(|&o| o <= i) - 1;
+                let pos = i - face_off[face_idx];
                 let (fv, _is_tri) = &faces[face_idx];
                 let verts_global: Vec<u32> =
                     fv.iter().map(|&li| partition.global_node(nodes[li])).collect();
