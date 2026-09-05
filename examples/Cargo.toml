@@ -46,15 +46,6 @@ path = "mfem_ex0_mesh_intro.rs"
 name = "mfem_ex10_hyperelastic_dyn"
 path = "mfem_ex10_hyperelastic_dyn.rs"
 [[example]]
-name = "mfem_ex11_eigenvalue"
-path = "mfem_ex11_eigenvalue.rs"
-[[example]]
-name = "mfem_ex12_elastic_eigen"
-path = "mfem_ex12_elastic_eigen.rs"
-[[example]]
-name = "mfem_ex13_eigenvalue"
-path = "mfem_ex13_eigenvalue.rs"
-[[example]]
 name = "mfem_ex14_dg_poisson"
 path = "mfem_ex14_dg_poisson.rs"
 [[example]]
@@ -127,23 +118,11 @@ path = "mfem_ex31_anisotropic_maxwell.rs"
 name = "mfem_ex31_dump"
 path = "mfem_ex31_dump.rs"
 [[example]]
-name = "mfem_ex32_maxwell_eigenvalue"
-path = "mfem_ex32_maxwell_eigenvalue.rs"
-[[example]]
-name = "mfem_ex32_dump"
-path = "mfem_ex32_dump.rs"
-[[example]]
-name = "mfem_ex33_fractional_laplacian"
-path = "mfem_ex33_fractional_laplacian.rs"
-[[example]]
 name = "mfem_ex33_fractional_diffusion"
 path = "mfem_ex33_fractional_diffusion.rs"
 [[example]]
 name = "mfem_ex34_magnetostatics"
 path = "mfem_ex34_magnetostatics.rs"
-[[example]]
-name = "mfem_ex35_complex_oscillator"
-path = "mfem_ex35_complex_oscillator.rs"
 [[example]]
 name = "mfem_ex36_obstacle"
 path = "mfem_ex36_obstacle.rs"
@@ -227,9 +206,6 @@ path = "mfem_pex21_parallel_amr_elasticity.rs"
 name = "mfem_pex22_parallel_complex_helmholtz"
 path = "mfem_pex22_parallel_complex_helmholtz.rs"
 [[example]]
-name = "mfem_pex23_parallel_wave"
-path = "mfem_pex23_parallel_wave.rs"
-[[example]]
 name = "mfem_pex24_parallel_discrete_ops"
 path = "mfem_pex24_parallel_discrete_ops.rs"
 [[example]]
@@ -247,9 +223,6 @@ path = "mfem_pex28_parallel_sliding_elasticity.rs"
 [[example]]
 name = "mfem_pex29_surface_poisson"
 path = "mfem_pex29_surface_poisson.rs"
-[[example]]
-name = "mfem_pex2_mixed_darcy"
-path = "mfem_pex2_mixed_darcy.rs"
 [[example]]
 name = "mfem_pex2_parallel_elasticity"
 path = "mfem_pex2_parallel_elasticity.rs"
@@ -311,35 +284,8 @@ path = "mfem_pex8_parallel_dpg.rs"
 name = "mfem_pex9_parallel_dg_advection"
 path = "mfem_pex9_parallel_dg_advection.rs"
 [[example]]
-name = "mfem_miniapp_joule"
-path = "mfem_miniapp_joule.rs"
-[[example]]
-name = "mfem_miniapp_lorentz"
-path = "mfem_miniapp_lorentz.rs"
-[[example]]
-name = "mfem_miniapp_maxwell"
-path = "mfem_miniapp_maxwell.rs"
-[[example]]
-name = "mfem_miniapp_tesla"
-path = "mfem_miniapp_tesla.rs"
-[[example]]
 name = "mfem_miniapp_volta"
 path = "mfem_miniapp_volta.rs"
-[[example]]
-name = "mfem_miniapp_pic"
-path = "mfem_miniapp_pic.rs"
-[[example]]
-name = "mfem_miniapp_nurbs_info"
-path = "mfem_miniapp_nurbs_info.rs"
-[[example]]
-name = "mfem_miniapp_compare_dc"
-path = "mfem_miniapp_compare_dc.rs"
-[[example]]
-name = "mfem_miniapp_pref321"
-path = "mfem_miniapp_pref321.rs"
-[[example]]
-name = "mfem_nurbs_miniapp_solenoidal"
-path = "mfem_nurbs_miniapp_solenoidal.rs"
 [[example]]
 name = "mfem_ex15_dump_p1_it3"
 path = "mfem_ex15_dump_p1_it3.rs"
