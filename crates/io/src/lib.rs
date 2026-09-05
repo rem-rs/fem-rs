@@ -23,6 +23,7 @@ pub mod abaqus;
 pub mod vtk;
 pub mod vtk_reader;
 pub mod mfem;
+pub mod data_collection;
 pub mod nurbs_mesh;
 pub mod xdmf;
 pub mod glvis;
