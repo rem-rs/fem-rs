@@ -44,7 +44,11 @@ where
         local_space: S,
         par_mesh: &ParallelMesh<M>,
         comm: Comm,
-    ) -> Self {
+    ) -> Self
+    where
+        S: 'static,
+        M: 'static,
+    {
         let dof_partition = match local_space.space_type() {
             SpaceType::HCurl => {
                 DofPartition::from_edge_space(&local_space, par_mesh.partition(), &comm)
@@ -55,6 +59,15 @@ where
                 } else {
                     DofPartition::from_edge_space(&local_space, par_mesh.partition(), &comm)
                 }
+            }
+            SpaceType::L2 => {
+                // Discontinuous L2 DOFs are owned by their element (no sharing):
+                // the generic `from_mesh_partition` fallback is wrong (it counts
+                // P1-style node DOFs, e.g. 36 nodes vs 48 P0 elements).
+                let l2 = (&local_space as &dyn std::any::Any)
+                    .downcast_ref::<fem_space::L2Space<M>>()
+                    .expect("SpaceType::L2 requires fem_space::L2Space");
+                DofPartition::from_l2_space(l2, par_mesh.partition(), &comm)
             }
             _ => DofPartition::from_mesh_partition(par_mesh.partition(), &comm),
         };

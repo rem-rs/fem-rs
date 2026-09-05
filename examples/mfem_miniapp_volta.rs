@@ -164,7 +164,9 @@ impl VoltaSolver {
         // Four compatible parallel FE spaces (volta_solver.cpp ctor).
         let h1 = ParallelFESpace::new(H1Space::new(local_mesh.clone(), o), par_mesh, comm.clone());
         let nd = ParallelFESpace::new(HCurlSpace::new(local_mesh.clone(), o), par_mesh, comm.clone());
-        let rt = ParallelFESpace::new(HDivSpace::new(local_mesh.clone(), o), par_mesh, comm.clone());
+        // common/pfem_extras.cpp: RT_ParFESpace(p) → RT_FECollection(p-1) —
+        // volta passes order, so the actual RT space is order-1 (RT0 at o=1).
+        let rt = ParallelFESpace::new(HDivSpace::new(local_mesh.clone(), o.saturating_sub(1)), par_mesh, comm.clone());
         let l2 = ParallelFESpace::new(L2Space::new(local_mesh.clone(), o.saturating_sub(1)), par_mesh, comm.clone());
 
         // PrintSizes (C++ GlobalTrueVSize, no hanging constraints at -maxit 1).
@@ -270,9 +272,11 @@ fn main() {
     };
     // NURBS meshes take the C++ `NURBSext` path (extra refine + SetCurvature)
     // which fem-io does not parse yet — pass a plain 3-D mesh (-m beam-tet.mesh
-    // / fichera.mesh) for the 1:1 comparison.
-    mesh0 = refine_uniform_3d(&mesh0);
-    for _ in 1..serial_ref {
+    // / fichera.mesh) for the 1:1 comparison.  NOTE: for tet meshes MFEM's
+    // `Mesh(mesh_file, 1, 1)` refine flag only *marks* the mesh for refinement
+    // (FinalizeTetMesh: MarkTetMeshForRefinement) — it does NOT subdivide, so
+    // no implicit uniform refinement here; `-rs` refines explicitly.
+    for _ in 0..serial_ref {
         mesh0 = refine_uniform_3d(&mesh0);
     }
     let mesh0 = Arc::new(mesh0);
