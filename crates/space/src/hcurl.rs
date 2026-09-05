@@ -383,6 +383,18 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// ## ND1 (order 1)
     /// Midpoint-evaluated tangential moment per edge.
     ///
+    /// Total number of global DOFs.
+    pub fn n_dofs(&self) -> usize { self.n_dofs }
+
+    /// Global DOF indices for element `elem`.
+    pub fn element_dofs(&self, elem: u32) -> &[DofId] {
+        let s = self.elem_offsets[elem as usize];
+        &self.dofs_flat[s..self.elem_offsets[elem as usize + 1]]
+    }
+
+    /// Reference to the underlying mesh.
+    pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
+
     /// ## NDk (k >= 2)
     /// k-point Gauss-Legendre edge moments. Tri interior/Tet face moments for k >= 2.
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {

@@ -231,6 +231,10 @@ impl<Re: VectorCoeff, Im: VectorCoeff> ComplexVectorCoeff for ComplexVectorFromV
 /// ```
 pub struct FnCoeff<F>(pub F);
 
+impl<F: Clone> Clone for FnCoeff<F> {
+    fn clone(&self) -> Self { FnCoeff(self.0.clone()) }
+}
+
 impl<F: Fn(&[f64]) -> f64 + Send + Sync> ScalarCoeff for FnCoeff<F> {
     #[inline]
     fn eval(&self, ctx: &CoeffCtx<'_>) -> f64 { (self.0)(ctx.x) }

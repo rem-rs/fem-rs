@@ -356,6 +356,18 @@ impl<M: MeshTopology> L2Space<M> {
 impl<M: MeshTopology> L2Space<M> {
     /// Flat DOF-node coordinates (`n_dofs * dim`), in the same per-element
     /// order as the assembly basis (H1/QuadQk order for quads).
+    /// Total number of global DOFs.
+    pub fn n_dofs(&self) -> usize { self.n_dofs }
+
+    /// Global DOF indices for element `elem`.
+    pub fn element_dofs(&self, elem: u32) -> &[DofId] {
+        let start = elem as usize * self.dofs_per_elem;
+        &self.elem_dofs[start..start + self.dofs_per_elem]
+    }
+
+    /// Reference to the underlying mesh.
+    pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
+
     pub fn dof_coords(&self) -> &[f64] {
         &self.dof_coords
     }

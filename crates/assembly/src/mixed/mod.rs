@@ -919,11 +919,14 @@ where
 /// This is the matrix form of MFEM's `VectorFECurlIntegrator` on
 /// `ParMixedBilinearForm(HDivFESpace_, HCurlFESpace_)`.  Used by Tesla
 /// (magnetostatics) for magnetization source coupling `weakCurlMuInv_`.
-pub fn assemble_hcurl_hdiv_weak_curl<M: fem_mesh::topology::MeshTopology + Clone + 'static>(
+pub fn assemble_hcurl_hdiv_weak_curl<
+    M: fem_mesh::topology::MeshTopology + Clone + 'static,
+    C: ScalarCoeff,
+>(
     nd_space: &HCurlSpace<M>,
     rt_space: &HDivSpace<M>,
     quad_order: u8,
-    nu: f64,
+    nu: C,
 ) -> CsrMatrix<f64>
 where
     M: fem_mesh::topology::MeshTopology,
@@ -1018,7 +1021,12 @@ where
                     let dot = cx*wx + cy*wy + cz*wz;
                     let s_nd = if j < nd_signs.len() { nd_signs[j] } else { 1.0 };
                     let s_rt = if i < rt_signs.len() { rt_signs[i] } else { 1.0 };
-                    me[i * ng_nd + j] += w * nu * s_nd * s_rt * dot;
+                    let nu_v = {
+                        let xp = vec![0.0; dim]; // TODO: compute physical point for coefficient eval
+                        let ctx = CoeffCtx::from_qp(&xp, dim, e, mesh.element_tag(e), None, None);
+                        nu.eval(&ctx)
+                    };
+                    me[i * ng_nd + j] += w * nu_v * s_nd * s_rt * dot;
                 }
             }
         }

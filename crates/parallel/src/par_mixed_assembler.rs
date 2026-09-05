@@ -138,11 +138,25 @@ impl ParMixedAssembler {
         rt_par: &ParallelFESpace<fem_space::HDivSpace<M>>,
         quad_order: u8,
     ) -> CsrMatrix<f64> {
+        Self::assemble_hcurl_hdiv_curl_with_coeff(nd_par, rt_par, quad_order, 1.0_f64)
+    }
+
+    /// Parallel mixed assembly for H(curl) × H(div) curl coupling with coefficient.
+    pub fn assemble_hcurl_hdiv_curl_with_coeff<M, C>(
+        nd_par: &ParallelFESpace<fem_space::HCurlSpace<M>>,
+        rt_par: &ParallelFESpace<fem_space::HDivSpace<M>>,
+        quad_order: u8,
+        coeff: C,
+    ) -> CsrMatrix<f64>
+    where
+        M: fem_mesh::topology::MeshTopology + Clone + 'static,
+        C: fem_assembly::postproc::coefficient::ScalarCoeff,
+    {
         let local_mat = assemble_hcurl_hdiv_weak_curl(
             nd_par.local_space(),
             rt_par.local_space(),
             quad_order,
-            1.0,
+            coeff,
         );
         let row_part = rt_par.dof_partition();
         let col_part = nd_par.dof_partition();

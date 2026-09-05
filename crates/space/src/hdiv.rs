@@ -994,6 +994,23 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
     }
 
+    /// Total number of global DOFs.
+    pub fn n_dofs(&self) -> usize { self.n_dofs }
+
+    /// Global DOF indices for element `elem`.
+    pub fn element_dofs(&self, elem: u32) -> &[DofId] {
+        if !self.elem_offsets.is_empty() {
+            let s = self.elem_offsets[elem as usize];
+            &self.dofs_flat[s..self.elem_offsets[elem as usize + 1]]
+        } else {
+            let start = elem as usize * self.dofs_per_elem;
+            &self.dofs_flat[start..start + self.dofs_per_elem]
+        }
+    }
+
+    /// Reference to the underlying mesh.
+    pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
+
     /// Vector-valued interpolation via the RT DOF functional.
     ///
     /// ## RT0 (order 0)
