@@ -163,6 +163,11 @@ fn extract_json_number(content: &str, key: &str) -> Option<usize> {
     rest[..end].parse().ok()
 }
 
+/// Read a mesh slice file (MFEM text format).
+pub fn read_mesh_slice(path: &Path) -> std::io::Result<String> {
+    fs::read_to_string(path)
+}
+
 /// Read a grid-function slice file.
 pub fn read_gf_slice(path: &Path) -> std::io::Result<(String, u32, Vec<f64>)> {
     let content = fs::read_to_string(path)?;
