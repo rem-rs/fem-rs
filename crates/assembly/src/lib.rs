@@ -163,7 +163,7 @@ pub use boundary::vector_boundary::{
     VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator, VectorBoundaryLinearIntegrator,
     VectorBdQpData, TangentialMassIntegrator, HdivNormalFluxIntegrator,
 };
-pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator, HDivL2ScaledDiv};
+pub use mixed::{MixedAssembler, MixedBilinearIntegrator, DivIntegrator, PressureDivIntegrator, HDivL2ScaledDiv, HCurlH1WeakDiv, HCurlH1WeakDivIntegrator, assemble_hcurl_h1_weak_div};
 pub use interior_faces::InteriorFaceList;
 pub use physics::nonlinear::{LinearSolver, NonlinearForm, NewtonSolver, NewtonConfig, NewtonResult, JfNKConfig, JfNKSolver, AndersonConfig, AndersonAccelerator, finite_diff_jacobian, FdNonlinearForm, LbfgsConfig, LbfgsResult, LbfgsSolver, TrustRegionConfig, TrustRegionResult, TrustRegionSolver};
 pub use physics::nonlinear_hyperelasticity::{HyperelasticityForm, HyperelasticModel};

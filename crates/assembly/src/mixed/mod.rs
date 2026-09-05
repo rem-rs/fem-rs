@@ -423,6 +423,75 @@ pub trait HCurlH1Integrator: Send + Sync {
     );
 }
 
+/// Integrator for HCurl×H¹ weak divergence `b(v, u) = -∫ v (∇·u) dx` (MFEM
+/// `VectorFEWeakDivergenceIntegrator`).  Row space = H¹ (scalar test), column
+/// space = HCurl (vector trial).  The weak-divergence form is:
+///   M[i,j] = -∫ (Q / det(J)) · adj(J)^T · grad(v_i) · u_j dx
+/// which is the canonical mixed term in the DivergenceFreeProjector.
+pub trait HCurlH1WeakDivIntegrator: Send + Sync {
+    fn add_to_element_matrix(
+        &self,
+        qp_scalar: &QpData<'_>,
+        vec_col: &[f64],
+        dim: usize,
+        inv_jac_t: &nalgebra::DMatrix<f64>,
+        det_j: f64,
+        m_elem: &mut [f64],
+    );
+}
+
+/// `b(v, u) = -∫ v (∇·u) dx` — weak divergence for DivergenceFreeProjector.
+pub struct HCurlH1WeakDiv<C: ScalarCoeff = f64> {
+    pub coeff: C,
+}
+
+impl<C: ScalarCoeff> HCurlH1WeakDiv<C> {
+    pub fn new(coeff: C) -> Self { Self { coeff } }
+}
+
+impl<C: ScalarCoeff> HCurlH1WeakDivIntegrator for HCurlH1WeakDiv<C> {
+    fn add_to_element_matrix(
+        &self,
+        qp_scalar: &QpData<'_>,
+        vec_col: &[f64],
+        dim: usize,
+        inv_jac_t: &nalgebra::DMatrix<f64>,
+        det_j: f64,
+        m_elem: &mut [f64],
+    ) {
+        let n_r = qp_scalar.n_dofs;
+        let n_c = vec_col.len() / dim;
+        let w = qp_scalar.weight;
+        let ctx = CoeffCtx::from_qp(
+            qp_scalar.x_phys, qp_scalar.dim, qp_scalar.elem_id, qp_scalar.elem_tag,
+            Some(qp_scalar.phi), qp_scalar.elem_dofs,
+        );
+        let q_val = self.coeff.eval(&ctx);
+        let inv_det_j = if det_j.abs() > 1e-15 { 1.0 / det_j } else { 0.0 };
+
+        for j in 0..n_r {
+            // Physical gradient of H¹ basis: adj(J)^T · grad_ref
+            let mut grad_phys = [0.0_f64; 3];
+            for d in 0..dim {
+                for dd in 0..dim {
+                    grad_phys[d] += inv_jac_t[(d, dd)] * qp_scalar.grad_phys[j * dim + dd];
+                }
+            }
+            for i in 0..n_c {
+                // HCurl basis (physical): J^{-T} · u_ref
+                let mut u_phys = [0.0_f64; 3];
+                for d in 0..dim {
+                    for dd in 0..dim {
+                        u_phys[d] += inv_jac_t[(d, dd)] * vec_col[i * dim + dd];
+                    }
+                }
+                let dot = grad_phys[0] * u_phys[0] + grad_phys[1] * u_phys[1] + grad_phys[2] * u_phys[2];
+                m_elem[j * n_c + i] += -w * q_val * inv_det_j * dot;
+            }
+        }
+    }
+}
+
 /// ∫ φ · curl(E) dx — curl coupling for Maxwell gauge fixing.
 pub struct HCurlH1CurlIntegrator;
 
@@ -445,6 +514,76 @@ impl HCurlH1Integrator for HCurlH1CurlIntegrator {
             }
         }
     }
+}
+
+/// Assemble HCurl × H¹ weak divergence form (for DivergenceFreeProjector).
+///
+/// Computes `M[i,j] = -∫ (Q / det(J)) · adj(J)^T · grad(v_i) · u_j dx`
+/// where `v_i ∈ H¹` (rows) and `u_j ∈ HCurl` (columns).
+pub fn assemble_hcurl_h1_weak_div<SR, SC>(
+    row_space: &SR,   // H¹ (scalar test)
+    col_space: &SC,   // HCurl (vector trial)
+    integrators: &[&dyn HCurlH1WeakDivIntegrator],
+    quad_order: u8,
+) -> CsrMatrix<f64>
+where
+    SR: FESpace,
+    SC: FESpace,
+{
+    let mesh = row_space.mesh();
+    let dim = mesh.dim() as usize;
+    let n_rows = row_space.n_dofs();
+    let n_cols = col_space.n_dofs();
+    let mut coo = CooMatrix::<f64>::new(n_rows, n_cols);
+
+    for e in mesh.elem_iter() {
+        let elem_type = mesh.element_type(e);
+        let order_c = col_space.order();
+        let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HCurl).unwrap();
+        let n_c = ref_c.n_dofs();
+        let ref_r = ref_elem_vol(elem_type, row_space.order()).unwrap();
+        let n_r = ref_r.n_dofs();
+        let quad = ref_r.quadrature(quad_order);
+
+        let global_rows: Vec<usize> = row_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let global_cols: Vec<usize> = col_space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let nodes = mesh.element_nodes(e);
+        let elem_tag = mesh.element_tag(e);
+        let tr = ElementTransformation::from_simplex_nodes(mesh, nodes);
+
+        let n_elem_r = global_rows.len();
+        let n_elem_c = global_cols.len();
+        let mut m_elem = vec![0.0_f64; n_elem_r * n_elem_c];
+        let mut phi_r = vec![0.0; n_r];
+        let mut grad_r = vec![0.0; n_r * dim];
+        let mut grad_phys = vec![0.0; n_r * dim];
+        let mut vec_col = vec![0.0; n_c * dim];
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let w = quad.weights[q] * tr.det_j().abs();
+            let det_j = tr.det_j();
+            let j_inv_t = tr.jacobian_inv_t().clone();
+            ref_r.eval_basis(xi, &mut phi_r);
+            ref_r.eval_grad_basis(xi, &mut grad_r);
+            transform_grads(&j_inv_t, &grad_r, &mut grad_phys, n_r, dim);
+            ref_c.eval_basis_vec(xi, &mut vec_col);
+            let xp = tr.map_to_physical(xi);
+            let qp_r = QpData {
+                n_dofs: n_elem_r, dim, weight: w, phys_weight: w,
+                ref_weight: quad.weights[q], phi: &phi_r, grad_phys: &grad_phys,
+                x_phys: &xp, elem_id: e, elem_tag, elem_dofs: None,
+            };
+            for integ in integrators {
+                integ.add_to_element_matrix(&qp_r, &vec_col, dim, &j_inv_t, det_j, &mut m_elem);
+            }
+        }
+        for (ir, &gr) in global_rows.iter().enumerate() {
+            for (ic, &gc) in global_cols.iter().enumerate() {
+                coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
+            }
+        }
+    }
+    coo.into_csr()
 }
 
 /// Assemble HCurl × H¹ mixed bilinear form.
@@ -1304,6 +1443,21 @@ mod tests {
     use super::*;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
+
+    /// Test: weak divergence matrix has correct shape.
+    #[test]
+    fn hcurl_h1_weak_div_shape() {
+        use fem_space::HCurlSpace;
+        let mesh = Mesh::<3>::unit_cube_tet(2);
+        let mesh2 = Mesh::<3>::unit_cube_tet(2);
+        let h1 = H1Space::new(mesh, 1);
+        let nd = HCurlSpace::new(mesh2, 1);
+        let integ = HCurlH1WeakDiv::new(1.0_f64);
+        let mat = assemble_hcurl_h1_weak_div(&h1, &nd, &[&integ], 3);
+        assert_eq!(mat.nrows, h1.n_dofs());
+        assert_eq!(mat.ncols, nd.n_dofs());
+        assert!(mat.nnz() > 0);
+    }
 
     /// B = ∫ p (∇·u) dx should have the right shape.
     #[test]

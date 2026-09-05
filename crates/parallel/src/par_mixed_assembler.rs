@@ -9,6 +9,7 @@ use fem_space::fe_space::FESpace;
 use fem_assembly::mixed::{
     MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed,
     assemble_hcurl_h1_gradient, assemble_hcurl_hdiv_weak_curl,
+    assemble_hcurl_h1_weak_div, HCurlH1WeakDiv, HCurlH1WeakDivIntegrator,
 };
 
 use crate::dof_partition::DofPartition;
@@ -171,11 +172,40 @@ impl ParMixedAssembler {
         extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
     }
 
-    /// Parallel mixed assembly for the H(curl) × H(div) mass coupling
-    /// `∫ ε · ψ_j · w_i dx` (MFEM `VectorFEMassIntegrator` on
-    /// `ParMixedBilinearForm(HCurlFESpace_, HDivFESpace_)` — Volta's
-    /// `hCurlHDivEps_` / `hCurlHDiv_`), via the serial
-    /// [`fem_assembly::mixed::assemble_hcurl_hdiv_mixed`] path.
+    /// Parallel mixed assembly for the H(curl) × H¹ weak divergence
+    /// `b(v, u) = -∫ v (∇·u) dx` (MFEM `VectorFEWeakDivergenceIntegrator`
+    /// on `ParMixedBilinearForm(HCurlFESpace_, H1FESpace_)`), via the serial
+    /// [`fem_assembly::mixed::assemble_hcurl_h1_weak_div`] path.
+    ///
+    /// Returns a CSR with `n_owned_row` (H¹) rows and `n_total_col`
+    /// (H(curl)) columns.
+    pub fn assemble_hcurl_h1_weak_div<M>(
+        h1_par: &ParallelFESpace<fem_space::H1Space<M>>,
+        nd_par: &ParallelFESpace<fem_space::HCurlSpace<M>>,
+        quad_order: u8,
+    ) -> CsrMatrix<f64>
+    where
+        M: fem_mesh::topology::MeshTopology + Clone + 'static,
+    {
+        let integ = HCurlH1WeakDiv::new(1.0_f64);
+        let local_mat = assemble_hcurl_h1_weak_div(
+            h1_par.local_space(),
+            nd_par.local_space(),
+            &[&integ],
+            quad_order,
+        );
+        let row_part = h1_par.dof_partition();
+        let col_part = nd_par.dof_partition();
+        let needs_perm = row_part.needs_permutation() || col_part.needs_permutation();
+        let permuted_mat = if needs_perm {
+            permute_rect_csr(&local_mat, row_part, col_part)
+        } else {
+            local_mat
+        };
+        let n_owned_rows = row_part.n_owned_dofs;
+        let n_total_cols = col_part.n_total_dofs();
+        extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
+    }
     ///
     /// `eps` may be a spatially-varying [`fem_assembly::postproc::coefficient::ScalarCoeff`]
     /// (Volta `-ds` dielectric sphere / `-pwe` piecewise-constant ε).
