@@ -156,6 +156,46 @@ impl ParMixedAssembler {
         let n_total_cols = col_part.n_total_dofs();
         extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
     }
+
+    /// Parallel mixed assembly for the H(curl) × H(div) mass coupling
+    /// `∫ ε · ψ_j · w_i dx` (MFEM `VectorFEMassIntegrator` on
+    /// `ParMixedBilinearForm(HCurlFESpace_, HDivFESpace_)` — Volta's
+    /// `hCurlHDivEps_` / `hCurlHDiv_`), via the serial
+    /// [`fem_assembly::mixed::assemble_hcurl_hdiv_mixed`] path.
+    ///
+    /// `eps` may be a spatially-varying [`fem_assembly::postproc::coefficient::ScalarCoeff`]
+    /// (Volta `-ds` dielectric sphere / `-pwe` piecewise-constant ε).
+    ///
+    /// Returns a CSR with `n_owned_row` (H(div)) rows and `n_total_col`
+    /// (H(curl)) columns.
+    pub fn assemble_hcurl_hdiv_mass<M, C>(
+        nd_par: &ParallelFESpace<fem_space::HCurlSpace<M>>,
+        rt_par: &ParallelFESpace<fem_space::HDivSpace<M>>,
+        quad_order: u8,
+        eps: C,
+    ) -> CsrMatrix<f64>
+    where
+        M: fem_mesh::topology::MeshTopology + Clone + 'static,
+        C: fem_assembly::postproc::coefficient::ScalarCoeff,
+    {
+        let local_mat = fem_assembly::mixed::assemble_hcurl_hdiv_mixed(
+            nd_par.local_space(),
+            rt_par.local_space(),
+            quad_order,
+            eps,
+        );
+        let row_part = rt_par.dof_partition();
+        let col_part = nd_par.dof_partition();
+        let needs_perm = row_part.needs_permutation() || col_part.needs_permutation();
+        let permuted_mat = if needs_perm {
+            permute_rect_csr(&local_mat, row_part, col_part)
+        } else {
+            local_mat
+        };
+        let n_owned_rows = row_part.n_owned_dofs;
+        let n_total_cols = col_part.n_total_dofs();
+        extract_owned_rows(&permuted_mat, n_owned_rows, n_total_cols)
+    }
 }
 
 /// Permute a rectangular CSR matrix using row and column DOF partitions.
