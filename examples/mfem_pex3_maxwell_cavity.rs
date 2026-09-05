@@ -91,8 +91,8 @@ fn main() {
     } else if n != 16 {
         Mesh::<2>::unit_square_tri(n)
     } else {
-        let mfem = read_mfem_file("data/star.mesh")
-            .expect("failed to read data/star.mesh");
+        let mfem = read_mfem_file("data/beam-tet.mesh")
+            .expect("failed to read data/beam-tet.mesh");
         let m = mfem.mesh2d.expect("star.mesh must be 2-D");
         let mut m = m;
         for _ in 0..4 {

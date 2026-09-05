@@ -190,7 +190,10 @@ pub(crate) fn piola_hcurl_basis(
 /// H(curl) curl transform.
 ///
 /// - 2-D: `curl_phys[i] = curl_ref[i] / det_j` (scalar)
-/// - 3-D: `curl_phys[i] = J · curl_ref[i] / det_j` (vector)
+/// - 3-D: `curl_phys[i] = curl_ref[i] * J^T / det_j` (vector, covariant)
+///
+/// Matches MFEM `FiniteElement::CalcPhysCurlShape` (fe_base.cpp):
+/// `MultABt(vshape, Trans.Jacobian(), curl_shape); curl_shape *= 1/Weight();`
 pub(crate) fn piola_hcurl_curl(
     jac: &DMatrix<f64>,
     det_j: f64,
@@ -206,14 +209,15 @@ pub(crate) fn piola_hcurl_curl(
             phys_curl[i] = ref_curl[i] * inv_det;
         }
     } else {
-        // 3-D vector curl: J · curl_ref / det_j
+        // 3-D vector curl: curl_phys = curl_ref * J^T / det_j
+        // (covariant Piola: curl transforms as a 1-form / covector)
         for i in 0..n_dofs {
-            for r in 0..3 {
+            for c in 0..3 {
                 let mut s = 0.0;
-                for c in 0..3 {
-                    s += jac[(r, c)] * ref_curl[i * 3 + c];
+                for r in 0..3 {
+                    s += ref_curl[i * 3 + r] * jac[(r, c)];
                 }
-                phys_curl[i * 3 + r] = s * inv_det;
+                phys_curl[i * 3 + c] = s * inv_det;
             }
         }
     }

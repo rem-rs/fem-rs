@@ -293,11 +293,23 @@ impl VectorReferenceElement for TetNDk {
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let k = self.order;
-        let d = tet_data(k);
-        let n = d.n;
         let x = xi[0];
         let y = xi[1];
         let z = xi[2];
+
+        if k == 1 {
+            // MFEM 4.10 Nedelec1TetFiniteElement::CalcVShape
+            values[0] = 1.0 - y - z; values[1] = x; values[2] = x;
+            values[3] = y; values[4] = 1.0 - x - z; values[5] = y;
+            values[6] = z; values[7] = z; values[8] = 1.0 - x - y;
+            values[9] = -y; values[10] = x; values[11] = 0.0;
+            values[12] = -z; values[13] = 0.0; values[14] = x;
+            values[15] = 0.0; values[16] = -z; values[17] = y;
+            return;
+        }
+
+        let d = tet_data(k);
+        let n = d.n;
         let mut mv = vec![0.0; ((k + 1) * (k + 2) * (k + 3) / 2) * 3];
         let mut idx = 0usize;
         for deg in 0..=k {
@@ -327,11 +339,22 @@ impl VectorReferenceElement for TetNDk {
             values[i * 3 + 2] = vz;
         }
     }
-
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
         let k = self.order;
+        let n = k * (k + 2) * (k + 3) / 2;
+
+        if k == 1 {
+            // MFEM 4.10 Nedelec1TetFiniteElement::CalcCurlShape
+            curl_vals[0] = 0.0; curl_vals[1] = -2.0; curl_vals[2] = 2.0;
+            curl_vals[3] = 2.0; curl_vals[4] = 0.0; curl_vals[5] = -2.0;
+            curl_vals[6] = -2.0; curl_vals[7] = 2.0; curl_vals[8] = 0.0;
+            curl_vals[9] = 0.0; curl_vals[10] = 0.0; curl_vals[11] = 2.0;
+            curl_vals[12] = 0.0; curl_vals[13] = -2.0; curl_vals[14] = 0.0;
+            curl_vals[15] = 2.0; curl_vals[16] = 0.0; curl_vals[17] = 0.0;
+            return;
+        }
+
         let d = tet_data(k);
-        let n = d.n;
         let x = xi[0];
         let y = xi[1];
         let z = xi[2];
@@ -341,9 +364,7 @@ impl VectorReferenceElement for TetNDk {
             let mut deg = 0usize;
             loop {
                 let n_ad = 3 * (deg + 1) * (deg + 2) / 2;
-                if rem < n_ad {
-                    break;
-                }
+                if rem < n_ad { break; }
                 rem -= n_ad;
                 deg += 1;
             }
@@ -353,17 +374,12 @@ impl VectorReferenceElement for TetNDk {
             let mut a = 0usize;
             loop {
                 let n_r = deg - a + 1;
-                if r2 < n_r {
-                    break;
-                }
+                if r2 < n_r { break; }
                 r2 -= n_r;
                 a += 1;
             }
             let b = r2;
             let c = deg - a - b;
-            // curl of (x^a y^b z^c, 0, 0): (0, c·x^a y^b z^(c-1), -b·x^a y^(b-1) z^c)
-            // curl of (0, x^a y^b z^c, 0): (-c·x^a y^b z^(c-1), 0, a·x^(a-1) y^b z^c)
-            // curl of (0, 0, x^a y^b z^c): (b·x^a y^(b-1) z^c, -a·x^(a-1) y^b z^c, 0)
             let xp = x.powi(a as i32);
             let yp = y.powi(b as i32);
             let zp = z.powi(c as i32);
@@ -404,7 +420,6 @@ impl VectorReferenceElement for TetNDk {
             curl_vals[i * 3 + 2] = cz;
         }
     }
-
     fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
         for v in div_vals.iter_mut() {
             *v = 0.0;

@@ -42,6 +42,10 @@ fn main() {
     // 3. Read the mesh from the given mesh file.
     //    MFEM ex1 defaults to `star.mesh` (20-element triangular mesh); the
     //    refinement loop below then targets ≤ 50 000 elements, matching C++.
+    // 3. Read the mesh.  MFEM ex1: `Mesh mesh(mesh_file, 1, 1)` reads with
+    //    `generate_edges=1` and `refine=1` — one automatic uniform refinement
+    //    on load.  fem-parallel's `read_mfem_file` does not refine on load, so
+    //    we apply one extra refinement to match.
     let mesh: Mesh<2> = if let Some(ref path) = args.mesh {
         let mfem = read_mfem_file(path).expect("failed to read MFEM mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
@@ -51,6 +55,7 @@ fn main() {
         let mfem = read_mfem_file("data/star.mesh").expect("failed to read data/star.mesh");
         mfem.mesh2d.expect("MFEM mesh must be 2D")
     };
+    let mesh = refine_uniform(&mesh);  // matching C++ `Mesh(mesh_file, 1, 1)`
     let dim = 2;
 
     // 4. Uniform refinement: choose levels so the final mesh has ≤ 50 000 elements.
@@ -70,7 +75,10 @@ fn main() {
     let space = H1Space::new(mesh.clone(), args.order);
     let n_full = space.n_dofs();
 
-    // 6. Essential (Dirichlet) boundary DOFs — all external boundaries.
+    // Print BEFORE assembly (matching C++ output order).
+    println!("\nNumber of finite element unknowns: {n_full}");
+
+    // 6. Essential (Dirichlet) boundary DOFs.
     let dm = space.dof_manager();
     let mesh_ref = space.mesh();
     let all_tags: Vec<i32> = mesh_ref.unique_boundary_tags();
@@ -84,8 +92,6 @@ fn main() {
     let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
     let mut rhs = Assembler::assemble_linear(&space, &[&source], args.order * 2 + 1);
 
-    // 8. Solution vector x — zero initial guess (built by expand_from_reduced).
-
     // 9. Stiffness matrix: a(u, v) = ∫ ∇u · ∇v dx.
     let diffusion = DiffusionIntegrator { kappa: 1.0 };
     let mut mat = Assembler::assemble_bilinear(&space, &[&diffusion], args.order * 2 + 1);
@@ -94,21 +100,16 @@ fn main() {
     let bnd_vals = vec![0.0_f64; bnd.len()];
     let mut x = vec![0.0_f64; n_full];
     form_linear_system(&mut mat, &mut rhs, &mut x, &bnd, &bnd_vals);
+    println!("Size of linear system: {}", n_full);
 
-    // 11. Solve: PCG with symmetric Gauss-Seidel preconditoner (ω = 1 = GS).
-    let n_sys = n_full;
+    // 11. Solve: PCG with symmetric Gauss-Seidel preconditioner (ω = 1 = GS).
+    //     MFEM ex1: GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0)
     let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&mat);
     let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
-    let _result =
-        solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 500, true)
-            .expect("solver failed");
+    let _result = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-12, 200, true)
+        .expect("solver failed");
 
-    // 12. Print summary.
-    println!();
-    println!("Number of finite element unknowns: {}", n_full);
-    println!("Size of linear system:            {}", n_sys);
-
-    // 14. Save the refined mesh and solution (MFEM ex1 step 13).
+    // 13. Save the refined mesh and solution (MFEM ex1 step 13).
     {
         let mut mesh_f = File::create("refined.mesh").expect("cannot create refined.mesh");
         write_mfem(&mut mesh_f, mesh_ref, None).expect("mesh write failed");
@@ -116,7 +117,6 @@ fn main() {
         for &v in &x {
             writeln!(sol_f, "{:.14e}", v).expect("sol write failed");
         }
-        eprintln!("  Wrote refined.mesh and sol.gf");
     }
 
     // 15. Send solution to GLVis (MFEM ex1 step 14).

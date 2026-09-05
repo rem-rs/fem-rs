@@ -297,6 +297,7 @@ struct Args {
     alpha: f64,
     kappa: f64,
     ode_solver_type: i32, // 1=BE, 2=SDIRK2, 3=SDIRK33, 22=Midpoint, 23=SDIRK23
+    solve_implicit_state: bool, // MFEM 4.10: -imp-state option
 }
 
 fn parse_args() -> Args {
@@ -309,6 +310,7 @@ fn parse_args() -> Args {
         alpha: 1.0e-2,
         kappa: 0.5,
         ode_solver_type: 3, // SDIRK33 (default, matching C++ -s 23)
+        solve_implicit_state: false, // MFEM 4.10 default
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -321,6 +323,7 @@ fn parse_args() -> Args {
             "-a"  | "--alpha"   => a.alpha       = it.next().unwrap_or("0.01".into()).parse().unwrap_or(0.01),
             "-k"  | "--kappa"   => a.kappa       = it.next().unwrap_or("0.5".into()).parse().unwrap_or(0.5),
             "-s"  | "--ode-solver" => a.ode_solver_type = it.next().unwrap_or("3".into()).parse().unwrap_or(3),
+            "-imp-state" | "--implicit-state" | "-imp-slope" | "--implicit-slope" => a.solve_implicit_state = true,
             _ => {}
         }
     }

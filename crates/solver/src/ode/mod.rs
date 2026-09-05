@@ -16,6 +16,7 @@
 pub mod explicit;
 pub mod imex;
 pub mod implicit;
+pub mod symplectic;
 pub mod traits;
 
 pub use explicit::{ForwardEuler, Rk4};
@@ -24,5 +25,6 @@ pub use imex::{
     ImexSsp2, ImexTimeStepper,
 };
 pub use implicit::{Bdf2, Bdf2State, ImplicitEuler, Sdirk2};
+pub use symplectic::{SIAVSolver, Yoshida4};
 pub use traits::ImplicitTimeStepper;
 pub use traits::{ImexOperator, TimeStepper};

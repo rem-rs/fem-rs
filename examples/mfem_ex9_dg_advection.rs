@@ -205,12 +205,13 @@ fn main() {
 
 /// Detect periodic face pairs for 'boundary 0' meshes and assemble their
 /// flux contributions using each element's OWN face nodes.
-struct Args { mesh: String, problem: usize, refine: usize, order: u8, dt: f64, t_final: f64, ode_solver: usize }
+struct Args { mesh: String, problem: usize, refine: usize, order: u8, dt: f64, t_final: f64, ode_solver: usize, solve_implicit_state: bool }
 impl Args {
     fn parse() -> Self {
         let mut mesh = "../data/periodic-hexagon.mesh".to_string();
         let mut problem = 0usize; let mut refine = 2usize; let mut order = 3u8;
         let mut dt = 0.01_f64; let mut t_final = 10.0_f64; let mut ode_solver = 4usize;
+        let mut solve_implicit_state = false;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() { match arg.as_str() {
             "-m"|"--mesh" => { mesh = it.next().unwrap_or(mesh); }
@@ -220,9 +221,10 @@ impl Args {
             "-dt"|"--time-step" => { dt = it.next().and_then(|s|s.parse().ok()).unwrap_or(dt); }
             "-tf"|"--t-final" => { t_final = it.next().and_then(|s|s.parse().ok()).unwrap_or(t_final); }
             "-s"|"--ode-solver" => { ode_solver = it.next().and_then(|s|s.parse().ok()).unwrap_or(ode_solver); }
+            "-imp-state"|"--implicit-state"|"-imp-slope"|"--implicit-slope" => solve_implicit_state = true,
             "-no-vis"|"--no-visualization" => {}
             _ => {}
         }}
-        Args { mesh, problem, refine, order, dt, t_final, ode_solver }
+        Args { mesh, problem, refine, order, dt, t_final, ode_solver, solve_implicit_state }
     }
 }

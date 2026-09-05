@@ -350,3 +350,33 @@ path = "mfem_ex15_dump_flow.rs"
 name = "mfem_ex15_dump_T002"
 path = "mfem_ex15_dump_T002.rs"
 
+[[example]]
+name = "mfem_mini_nurbs_solenoidal"
+path = "mfem_mini_nurbs_solenoidal.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex3"
+path = "mfem_mini_nurbs_ex3.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex1"
+path = "mfem_mini_nurbs_ex1.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex5"
+path = "mfem_mini_nurbs_ex5.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex24"
+path = "mfem_mini_nurbs_ex24.rs"
+[[example]]
+name = "mfem_mini_nurbs_solenoidal"
+path = "mfem_mini_nurbs_solenoidal.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex1"
+path = "mfem_mini_nurbs_ex1.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex3"
+path = "mfem_mini_nurbs_ex3.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex5"
+path = "mfem_mini_nurbs_ex5.rs"
+[[example]]
+name = "mfem_mini_nurbs_ex24"
+path = "mfem_mini_nurbs_ex24.rs"

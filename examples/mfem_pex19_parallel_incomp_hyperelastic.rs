@@ -29,7 +29,7 @@ struct Args {
 impl Args {
     fn parse() -> Self {
         let mut a = Args {
-            mesh: "data/beam-quad.mesh".into(),
+            mesh: "data/beam-tet.mesh".into(),
             refine: 0,
             order: 1,
             mu: 1.0,

@@ -136,7 +136,7 @@ struct Args {
 impl Args {
     fn parse() -> Self {
         let mut a = Args {
-            mesh: "data/star.mesh".into(),
+            mesh: "data/star-hilbert.mesh".into(),
             problem: 0,
             nfeatures: 1,
             order: 2,

@@ -23,7 +23,7 @@
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_ex33_fractional_diffusion
-//! cargo run --example mfem_ex33_fractional_diffusion -- -m data/square-disc.mesh -alpha 0.33 -o 2
+//! cargo run --example mfem_ex33_fractional_diffusion -- -m data/star.mesh -alpha 0.33 -o 2
 //! cargo run --example mfem_ex33_fractional_diffusion -- -m data/inline-quad.mesh -ver -alpha 1.2 -o 2 -r 2
 //! ```
 //!
@@ -531,7 +531,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut a = Args {
-        mesh: "data/square-disc.mesh".to_string(),
+        mesh: "data/star.mesh".to_string(),
         order: 2,
         refs: 3,
         alpha: 0.33,

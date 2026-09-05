@@ -61,9 +61,11 @@ fn main() {
     }
 
     // 2. Read the mesh from the given mesh file.
+    //    MFEM ex2: `Mesh mesh(mesh_file, 1, 1)` reads with `refine=1`.
     let mesh_path = args.mesh.as_deref().unwrap_or("../data/beam-tri.mesh");
     let mfem_file = read_mfem_file(mesh_path).expect("failed to read MFEM mesh");
     let mut mesh: Mesh<2> = mfem_file.mesh2d.expect("MFEM mesh must be 2D");
+    mesh = refine_uniform(&mesh);  // matching C++ `Mesh(mesh_file, 1, 1)`
 
     // Verify that the mesh has ≥2 materials and ≥2 boundary attributes.
     let n_materials = mesh.elem_tags.iter().max().copied().unwrap_or(0);
@@ -159,6 +161,7 @@ fn main() {
     println!("Size of linear system: {n_sys}");
 
     // 11. Solve the full system: PCG + GSSmoother (SSOR, ω = 1).
+    //     MFEM: GSSmoother M(A); PCG(A, M, B, X, 1, 500, 1e-8, 0.0)
     let linlvo_mat = fem_to_linlvo_csr(&mat);
     let precond = GSSmoother::from_csr(&linlvo_mat).expect("SSOR setup failed");
     let _res = solve_pcg(&mat, &rhs, &mut x, &precond, 1e-8, 500, true)

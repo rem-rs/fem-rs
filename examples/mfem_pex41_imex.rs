@@ -30,7 +30,7 @@ use fem_solver::{
     SolverConfig,
 };
 use fem_space::fe_space::FESpace;
-use fem_space::{L2Basis, L2Space};
+use fem_space::{L2Basis, L2Space, H1Space, VectorH1Space};
 
 struct Args {
     mesh_file: String,

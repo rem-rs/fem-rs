@@ -60,6 +60,13 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
             }
         }
     }
+
+    /// MFEM `CurlCurlIntegrator::GetIntegrationOrder`: for Pk space
+    /// `order = 2*el.GetOrder() - 2`, otherwise `2*el.GetOrder()`.
+    /// ND elements are Pk, so for order=1 → 0 (1-point rule).
+    fn integration_order(&self, space_order: u8) -> Option<u8> {
+        if space_order <= 1 { Some(1) } else { Some(2 * space_order - 2) }
+    }
 }
 
 // ─── Anisotropic (tensor) ────────────────────────────────────────────────────

@@ -39,7 +39,7 @@ use std::collections::HashSet;
 
 use fem_mesh::ElementType;
 use fem_element::{
-    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriND2, TriRT1, TriNDk,
+    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriNDk, TriND2, TriRT1,
     TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;

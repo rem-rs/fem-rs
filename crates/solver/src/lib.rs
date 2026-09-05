@@ -129,6 +129,7 @@ pub mod p_multigrid;
 /// Plugin API traits for pro-solver extensions.
 pub mod plugin;
 pub mod sdc;
+pub mod adjoint;
 /// Additive Schwarz domain-decomposition preconditioner.
 pub mod schwarz;
 

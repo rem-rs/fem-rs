@@ -46,6 +46,13 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for VectorMassIntegrator<C> {
             }
         }
     }
+
+    /// MFEM `VectorFEMassIntegrator::GetIntegrationOrder`:
+    /// `order = Trans.OrderW() + 2*el.GetOrder()`. For affine simplex,
+    /// `OrderW() = 1`, so order = 1 + 2*1 = 3 for order=1.
+    fn integration_order(&self, space_order: u8) -> Option<u8> {
+        Some(1 + 2 * space_order)
+    }
 }
 
 // ─── Anisotropic (tensor) ────────────────────────────────────────────────────

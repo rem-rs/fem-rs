@@ -18,6 +18,7 @@ use fem_parallel::{
     launcher::native::ThreadLauncher, WorkerConfig,
 };
 use fem_space::{H1Space, constraints::boundary_dofs};
+use fem_io::mfem::read_mfem_file;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -26,7 +27,8 @@ fn main() {
     let freq = a.iter().position(|x| x == "--freq").and_then(|i| a.get(i+1)).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let omega = 2.0 * std::f64::consts::PI * freq;
 
-    let mesh = Arc::new(Mesh::<2>::unit_square_tri(n));
+    let mfem = read_mfem_file("data/inline-quad.mesh").expect("failed to read inline-quad.mesh");
+    let mesh = Arc::new(mfem.mesh2d.expect("inline-quad.mesh must be 2D"));
     let result = Arc::new(Mutex::new(None));
     let r2 = Arc::clone(&result);
 

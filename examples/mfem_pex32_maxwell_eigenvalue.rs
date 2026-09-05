@@ -77,7 +77,7 @@ struct Args {
     mesh_file: String, ser_ref_levels: usize, order: u8, nev: usize, ranks: usize,
 }
 fn parse_args() -> Args {
-    let mut a = Args { mesh_file: "data/fichera.mesh".into(), ser_ref_levels: 1, order: 1, nev: 5, ranks: 1 };
+    let mut a = Args { mesh_file: "data/inline-quad.mesh".into(), ser_ref_levels: 1, order: 1, nev: 5, ranks: 1 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {

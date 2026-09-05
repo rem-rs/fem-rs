@@ -8,7 +8,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::{
-    VectorAssembler, DiscreteLinearOperator,
+    VectorAssembler, DiscreteLinearOperator, VectorBilinearIntegrator,
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
@@ -16,11 +16,7 @@ use fem_element::VectorReferenceElement;
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_mesh::{Mesh, MeshTopology, amr::refine_uniform};
 use fem_solver::{solve_pcg, SolverConfig};
-use fem_space::{
-    HCurlSpace,
-    fe_space::FESpace,
-    constraints::{boundary_dofs_hcurl, form_linear_system},
-};
+use fem_space::{HCurlSpace, fe_space::FESpace, constraints::{boundary_dofs_hcurl, form_linear_system}};
 
 fn main() {
     let args = parse_args();
@@ -28,6 +24,13 @@ fn main() {
     println!("   --mesh {}", args.mesh.as_deref().unwrap_or("(built-in beam-tet)"));
     println!("   --order {}", args.order);
     println!("   --frequency {}", args.freq);
+    println!("   --no-static-condensation");
+    println!("   --no-partial-assembly");
+    println!("   --conforming");
+    println!("   --device cpu");
+    println!("   --no-visualization");
+    println!("Device configuration: cpu");
+    println!("Memory configuration: host-std");
 
     let mfem = if let Some(ref path) = args.mesh {
         read_mfem_file(path).expect("failed to read MFEM mesh")
@@ -57,10 +60,9 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
 
     let tags = space.mesh().unique_boundary_tags();
     let ess_bdr = boundary_dofs_hcurl(space.mesh(), &space, &tags);
-    eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
 
     let kappa = args.freq * PI;
-    let qo = args.order as u8 * 2 + 2;
+    let qo = args.order as u8 * 2;
     let mut rhs = VectorAssembler::assemble_linear(&space, &[&Src2D { kappa }], qo);
     let u_proj = project_2d(&space, kappa);
     let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
@@ -71,8 +73,7 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
 
     solve_report_2d(&space, &mut x, &rhs, args, kappa);
     write_mfem_file("refined.mesh", space.mesh()).unwrap();
-    write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 14).unwrap();
-    eprintln!("  Wrote refined.mesh and sol.gf");
+    write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 8).unwrap();
 }
 
 struct Src2D { kappa: f64 }
@@ -92,29 +93,45 @@ fn project_2d(space: &HCurlSpace<Mesh<2>>, k: f64) -> Vec<f64> {
     space.interpolate_vector(&|x| exact_2d(x, k).to_vec()).into_vec()
 }
 
-fn l2_err_2d<F: Fn(&[f64]) -> [f64; 2]>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: F) -> f64 {
-    use fem_element::nedelec::{TriNDk};
+fn l2_err_2d<F>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: &F) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 2],
+{
+    use fem_element::nedelec::TriNDk;
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
-        let r = TriNDk::new(1); let n = r.n_dofs(); let q = r.quadrature(6);
+        let r = TriNDk::new(1);
+        let n = r.n_dofs();
+        let q = r.quadrature(6);
         let mut p = vec![0.0; n*2];
         let d: Vec<usize> = sp.element_dofs(e).iter().map(|&x| x as usize).collect();
         let s = sp.element_signs(e);
-        let nd = mesh.element_nodes(e);
-        let x0 = mesh.node_coords(nd[0]); let x1 = mesh.node_coords(nd[1]); let x2 = mesh.node_coords(nd[2]);
-        let dj = ((x1[0]-x0[0])*(x2[1]-x0[1]) - (x2[0]-x0[0])*(x1[1]-x0[1])).abs();
-        let ij = 1.0 / dj.max(1e-30);
-        let (j00,j01,j10,j11) = (x1[1]*ij, -x1[0]*ij, -x2[1]*ij, x2[0]*ij);
+        let nd = mesh.elem_nodes(e);
+        let x0 = mesh.node_coords(nd[0]);
+        let x1 = mesh.node_coords(nd[1]);
+        let x2 = mesh.node_coords(nd[2]);
+        // Jacobian: J = [x1-x0 | x2-x0] (columns are edge vectors)
+        let j00 = x1[0]-x0[0]; let j01 = x2[0]-x0[0];
+        let j10 = x1[1]-x0[1]; let j11 = x2[1]-x0[1];
+        let det_j = j00*j11 - j01*j10;
+        let inv_det = 1.0 / det_j;
+        // H(curl) covariant Piola: phi_phys = J^{-T} * phi_ref
+        // J^{-T} = adj(J)/det = [[j11, -j01], [-j10, j00]] / det
+        let jt00 =  j11*inv_det; let jt01 = -j01*inv_det;
+        let jt10 = -j10*inv_det; let jt11 =  j00*inv_det;
         for (qi, xi) in q.points.iter().enumerate() {
             r.eval_basis_vec(xi, &mut p);
-            let w = q.weights[qi] * dj;
+            let w = q.weights[qi] * det_j.abs();
             let mut uh = [0.0; 2];
             for a in 0..n {
                 let sa = s[a];
-                uh[0] += sa * u[d[a]] * (j00*p[a*2] + j01*p[a*2+1]);
-                uh[1] += sa * u[d[a]] * (j10*p[a*2] + j11*p[a*2+1]);
+                uh[0] += sa * u[d[a]] * (jt00*p[a*2] + jt01*p[a*2+1]);
+                uh[1] += sa * u[d[a]] * (jt10*p[a*2] + jt11*p[a*2+1]);
             }
-            let xp = [(1.0-xi[0]-xi[1])*x0[0]+xi[0]*x1[0]+xi[1]*x2[0], (1.0-xi[0]-xi[1])*x0[1]+xi[0]*x1[1]+xi[1]*x2[1]];
+            let xp = [
+                (1.0-xi[0]-xi[1])*x0[0]+xi[0]*x1[0]+xi[1]*x2[0],
+                (1.0-xi[0]-xi[1])*x0[1]+xi[0]*x1[1]+xi[1]*x2[1]
+            ];
             let e = ex(&xp);
             e2 += w * ((uh[0]-e[0]).powi(2) + (uh[1]-e[1]).powi(2));
         }
@@ -123,11 +140,11 @@ fn l2_err_2d<F: Fn(&[f64]) -> [f64; 2]>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>
 }
 
 fn solve_report_2d(sp: &HCurlSpace<Mesh<2>>, x: &mut [f64], b: &[f64], a: &Args, k: f64) {
-    let qo = a.order as u8 * 2 + 2;
+    let qo = a.order as u8 * 2;
     let mut mat = VectorAssembler::assemble_bilinear(sp, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
     if a.no_ams {
         let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(&mat)).unwrap();
-        let r = solve_pcg(&mat, b, x, &precond, 1e-12, 2000, true).unwrap();
+        let r = solve_pcg(&mat, b, x, &precond, 1e-12, 500, true).unwrap();
         println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
@@ -139,7 +156,7 @@ fn solve_report_2d(sp: &HCurlSpace<Mesh<2>>, x: &mut [f64], b: &[f64], a: &Args,
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp.mesh(), sp, x, |xi| exact_2d(xi, k)));
+    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp.mesh(), sp, x, &|xi| exact_2d(xi, k)));
 }
 
 // ─── 3D ─────────────────────────────────────────────────────────────────────
@@ -155,10 +172,9 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
 
     let tags = space.mesh().unique_boundary_tags();
     let ess_bdr = boundary_dofs_hcurl(space.mesh(), &space, &tags);
-    eprintln!("  Boundary DOFs: {} / {}", ess_bdr.len(), n_dofs);
 
     let kappa = args.freq * PI;
-    let qo = args.order as u8 * 2 + 2;
+    let qo = args.order as u8 * 2;
     let mut rhs = VectorAssembler::assemble_linear(&space, &[&Src3D { kappa }], qo);
     let u_proj = project_3d(&space, kappa);
     let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
@@ -167,10 +183,10 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
     let mut x = u_proj.clone();
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
-    solve_report_3d(&space, &mut x, &rhs, args, kappa);
+    solve_report(&space, &mut x, &rhs, args, &mat);
+    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa)));
     write_mfem_file_3d("refined.mesh", space.mesh()).unwrap();
-    write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 14).unwrap();
-    eprintln!("  Wrote refined.mesh and sol.gf");
+    write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 8).unwrap();
 }
 
 struct Src3D { kappa: f64 }
@@ -209,7 +225,10 @@ fn jac_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 
     (j, xp)
 }
 
-fn l2_err_3d<F: Fn(&[f64]) -> [f64; 3]>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>, u: &[f64], ex: F) -> f64 {
+fn l2_err_3d<F>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>, u: &[f64], ex: &F) -> f64
+where
+    F: Fn(&[f64]) -> [f64; 3],
+{
     use fem_element::nedelec::{TetNDk, HexNDk};
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
@@ -242,24 +261,21 @@ fn l2_err_3d<F: Fn(&[f64]) -> [f64; 3]>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>
     e2.sqrt()
 }
 
-fn solve_report_3d(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, k: f64) {
-    let qo = a.order as u8 * 2 + 2;
-    let mut mat = VectorAssembler::assemble_bilinear(sp, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
+fn solve_report(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, mat: &fem_linalg::CsrMatrix<f64>) {
     if a.no_ams {
-        let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(&mat)).unwrap();
-        let r = solve_pcg(&mat, b, x, &precond, 1e-12, 2000, true).unwrap();
+        let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(mat)).unwrap();
+        let r = solve_pcg(mat, b, x, &precond, 1e-12, 500, true).unwrap();
         println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
         use fem_linalg::fem_to_linlvo_csr as ftl;
         let g = DiscreteLinearOperator::gradient(&fem_space::H1Space::new(sp.mesh().clone(), 1), sp).unwrap();
-        let r = solve_pcg_ams(&mat, &ftl(&g), b, x, &AmsSolverConfig {
+        let r = solve_pcg_ams(mat, &ftl(&g), b, x, &AmsSolverConfig {
             inner_cfg: SolverConfig { rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true, ..SolverConfig::default() },
             ams_cfg: AmsConfig::default(),
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(sp.mesh(), sp, x, |xi| exact_3d(xi, k)));
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -268,7 +284,8 @@ fn solve_report_3d(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args,
 struct Args { mesh: Option<String>, order: u8, freq: f64, no_ams: bool, vis: bool }
 
 fn parse_args() -> Args {
-    let mut a = Args { order: 1, freq: 1.0, ..Args::default() };
+    // MFEM ex3 defaults: GSSmoother + PCG (no AMS, max_iter=500, rtol=1e-12).
+    let mut a = Args { order: 1, freq: 1.0, no_ams: true, ..Args::default() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -276,6 +293,7 @@ fn parse_args() -> Args {
             "-o" | "--order" => { a.order = it.next().and_then(|v| v.parse().ok()).unwrap_or(1); }
             "-f" | "--frequency" => { a.freq = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0); }
             "-no-ams" => { a.no_ams = true; }
+            "-ams" => { a.no_ams = false; }
             "-vis" => { a.vis = true; }
             "-no-vis" => { a.vis = false; }
             _ => {}

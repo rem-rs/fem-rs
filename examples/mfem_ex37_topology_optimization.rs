@@ -22,7 +22,7 @@
 
 use fem_assembly::{
     Assembler,
-    physics::topology_optimization::{sigmoid, inv_sigmoid, der_sigmoid, HelmholtzFilter},
+    physics::topology_optimization::{sigmoid, inv_sigmoid, HelmholtzFilter},
     postproc::coefficient::{ScalarCoeff, CoeffCtx, product},
     standard::elasticity::ElasticityIntegrator,
 };
@@ -41,6 +41,7 @@ struct Args {
     ref_levels: usize,
     order: usize,
     alpha: f64,
+    growth: f64,
     epsilon: f64,
     max_it: usize,
     ntol: f64,
@@ -56,10 +57,11 @@ fn parse_args() -> Args {
         ref_levels: 5,
         order: 2,
         alpha: 1.0,
+        growth: 2.0,
         epsilon: 0.01,
         max_it: 1000,
         ntol: 1e-4,
-        itol: 1e-1,
+        itol: 1e-2,
         vol_frac: 0.5,
         lambda: 1.0,
         mu: 1.0,
@@ -71,10 +73,11 @@ fn parse_args() -> Args {
             "-r" | "--refine" => args.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(5),
             "-o" | "--order" => args.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(2),
             "-alpha" => args.alpha = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "-growth" | "--alpha-growth-rate" => args.growth = it.next().and_then(|s| s.parse().ok()).unwrap_or(2.0),
             "-epsilon" => args.epsilon = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.01),
             "-mi" | "--max-it" => args.max_it = it.next().and_then(|s| s.parse().ok()).unwrap_or(1000),
             "-ntol" => args.ntol = it.next().and_then(|s| s.parse().ok()).unwrap_or(1e-4),
-            "-itol" => args.itol = it.next().and_then(|s| s.parse().ok()).unwrap_or(1e-1),
+            "-itol" => args.itol = it.next().and_then(|s| s.parse().ok()).unwrap_or(1e-2),
             "-vf" | "--volume-fraction" => args.vol_frac = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.5),
             "-lambda" => args.lambda = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
             "-mu" => args.mu = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
@@ -460,11 +463,16 @@ fn solve_control_mass(
     g
 }
 
-// ── Bregman volume projection (MFEM ex37 `proj`): Newton on
+// ── Bregman volume projection (MFEM 4.10 ex37 `proj`): Illinois method on
 //    f(c) = ∫ sigmoid(ψ + c) dx − target_volume, ψ ← ψ + c. ────────────────
+//
+//    1. a = −max|alpha_grad|, b = max|alpha_grad|
+//    2. Compute f(a), f(b) where f(c) = ∫sigmoid(ψ+c)dx − target
+//    3. Illinois false-position iteration with bisection fallback ──────────
 
-fn bregman_projection(
+fn illinois_projection(
     psi: &mut [f64],
+    alpha_grad: &[f64],
     mesh: &Mesh<2>,
     control_space: &L2Space<Mesh<2>>,
     target_volume: f64,
@@ -476,10 +484,10 @@ fn bregman_projection(
     let n_c = control_ref.n_dofs();
     let quad = control_ref.quadrature(2);
     let mut cphi = vec![0.0_f64; n_c];
-    let mut done = false;
-    for _ in 0..max_its {
-        let mut f = -target_volume;
-        let mut df = 0.0;
+
+    // Helper: compute ∫sigmoid(ψ + y)dx for a scalar offset y
+    let mut compute_f = |y: f64| -> f64 {
+        let mut sum = -target_volume;
         for e in 0..mesh.n_elements() as u32 {
             let cdofs = control_space.element_dofs(e);
             for (q, xi) in quad.points.iter().enumerate() {
@@ -490,21 +498,52 @@ fn bregman_projection(
                 for (i, &d) in cdofs.iter().enumerate() {
                     psv += psi[d as usize] * cphi[i];
                 }
-                f += sigmoid(psv) * w;
-                df += der_sigmoid(psv) * w;
+                sum += sigmoid(psv + y) * w;
             }
         }
-        let dc = -f / df;
-        for v in psi.iter_mut() {
-            *v += dc;
+        sum
+    };
+
+    // a = -max|alpha_grad|, b = max|alpha_grad|
+    let max_ag = alpha_grad.iter().map(|g| g.abs()).fold(0.0_f64, f64::max);
+    let mut a = -max_ag;
+    let mut b = max_ag;
+    let mut f_a = compute_f(a);
+    let mut f_b = compute_f(b);
+
+    let mut c = 0.0;
+    let mut side = 0i32;
+    let mut done = false;
+
+    for _ in 0..max_its {
+        // False position step
+        c = (f_a * b - f_b * a) / (f_a - f_b);
+        if (b - a).abs() < tol * (b + a).abs() {
+            done = true;
+            break;
         }
-        if dc.abs() < tol {
+        let f_c = compute_f(c);
+        if f_c * f_b > 0.0 {
+            b = c;
+            f_b = f_c;
+            if side == -1 { f_a /= 2.0; }
+            side = -1;
+        } else if f_c * f_a > 0.0 {
+            a = c;
+            f_a = f_c;
+            if side == 1 { f_b /= 2.0; }
+            side = 1;
+        } else {
             done = true;
             break;
         }
     }
     if !done {
         eprintln!("Projection reached maximum iteration without converging. Result may not be accurate.");
+    }
+    // Apply ψ ← ψ + c (constant shift, matching C++ psi += c)
+    for v in psi.iter_mut() {
+        *v += c;
     }
     // Final volume ∫ sigmoid(ψ) dx
     let mut vol = 0.0;
@@ -656,9 +695,9 @@ fn main() {
     let mut alpha = args.alpha;
 
     for k in 1..=args.max_it {
-        // C++: alpha *= k/(k-1) for k>1 (telescoping: alpha_k = alpha_1·k)
+        // C++ 4.10: alpha = pow(k, growth) for k>1
         if k > 1 {
-            alpha *= k as f64 / (k - 1) as f64;
+            alpha = (k as f64).powf(args.growth);
         }
 
         println!("\nStep = {k}");
@@ -699,11 +738,12 @@ fn main() {
         let control_rhs = assemble_control_rhs(&mesh, &control_space, &filter_space, &w_filter);
         let grad = solve_control_mass(&mesh, &control_space, &control_rhs);
 
-        // f) Update ψ ← proj(ψ - α·G)  (Bregman volume projection)
+        // f) Update ψ ← proj(ψ - α·G, alpha_grad)  (Illinois method in 4.10)
         for i in 0..n_control {
             psi[i] -= alpha * grad[i];
         }
-        let material_volume = bregman_projection(&mut psi, &mesh, &control_space, target_volume, 1e-12, 10);
+        let alpha_grad: Vec<f64> = grad.iter().map(|&g| g * alpha).collect();
+        let material_volume = illinois_projection(&mut psi, &alpha_grad, &mesh, &control_space, target_volume, 1e-12, 100);
 
         // g) Norms: ||ρ-ρ_old||_L1, reduced gradient = increment/α
         let norm_increment = l1_rho_increment(&psi, &psi_old, &mesh, &control_space);

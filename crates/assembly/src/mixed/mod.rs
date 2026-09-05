@@ -34,6 +34,12 @@ use crate::assembler::assembly_parallel_min_elems;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+// ─── Submodules ─────────────────────────────────────────────────────────────
+
+pub mod face_edge_table;
+
+pub use face_edge_table::FaceEdgeTable;
+
 // ─── MixedBilinearIntegrator ──────────────────────────────────────────────────
 
 /// An integrator for a mixed bilinear form `b(u, v)`.

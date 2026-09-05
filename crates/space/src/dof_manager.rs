@@ -167,10 +167,10 @@ impl DofManager {
                             6 => Self::build_p2_prism(mesh),
                             5 => Self::build_p2_pyramid(mesh),
                             8 => Self::build_q2_hex(mesh),
-                            _ => Self::build_p2_tet(mesh),
+                            _ => Self::build_pk(mesh, 2),
                         }
                     } else {
-                        Self::build_p2_tet(mesh)
+                        Self::build_pk(mesh, 2)
                     }
                 } else if mesh.n_elements() > 0
                     && mesh.element_nodes(0).len() == 4
@@ -178,7 +178,7 @@ impl DofManager {
                 {
                     Self::build_q2_quad(mesh)
                 } else {
-                    Self::build_p2(mesh)
+                    Self::build_pk(mesh, 2)
                 }
             }
             3 => {
@@ -193,7 +193,7 @@ impl DofManager {
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
                     if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
                 }
-                Self::build_p3(mesh)
+                Self::build_pk(mesh, 3)
             }
             _ => {
                 // General arbitrary-order path for p >= 4
@@ -587,8 +587,8 @@ impl DofManager {
             dofs_flat[base + 6] = d6;
 
             let [d7, d8] = get_edge_dofs(n2, n0, &mut next_edge_dof, &mut edge2_map);
-            dofs_flat[base + 7] = d7;
-            dofs_flat[base + 8] = d8;
+            dofs_flat[base + 7] = d8; // near_n0 (closer to vertex 0)
+            dofs_flat[base + 8] = d7; // near_n2 (closer to vertex 2)
             // Bubble DOF assigned in pass 2.
         }
 
@@ -1950,9 +1950,9 @@ impl DofManager {
 
                 if p >= 2 {
                     // 3 edges, each with (p-1) DOFs, ordered near-first-vertex to
-                    // near-second.  Edge 2 follows the MFEM/`H1TriPk` counter-
-                    // clockwise ring (v2→v0), NOT (v0→v2).
-                    let edges = [(n0, n1), (n1, n2), (n2, n0)];
+                    // near-second.  Edge 2 is (v0→v2) matching TriPk's
+                    // H1TriPk edge ordering.
+                    let edges = [(n0, n1), (n1, n2), (n0, n2)];
                     let mut off = 3;
                     for &(a, b) in &edges {
                         let edge_dofs = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
@@ -2133,6 +2133,7 @@ impl DofManager {
             }
         }
 
+        let bubble_dof_start = n_nodes + edge_pk_map.len() * edge_dofs_per + face_pk_map.len() * face_dofs_per;
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
@@ -2142,7 +2143,7 @@ impl DofManager {
             edge_pk_map,
             face_pk_map,
             quad_face_pk_map,
-            bubble_dof_start: n_dofs,
+            bubble_dof_start,
             n_volume_dofs: volume_dofs_per,
             elem_orders: None,
         }
@@ -2160,6 +2161,36 @@ impl DofManager {
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
+
+
+    #[test]
+    fn pk3_matches_build_p3_tri() {
+        // Verify that build_pk(mesh, 3) produces the same DOF ordering as build_p3_tri
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let dm_pk = DofManager::new(&mesh, 3);
+        let dm_p3 = DofManager::build_p3(&mesh);
+        assert_eq!(dm_pk.n_dofs, dm_p3.n_dofs, "n_dofs mismatch");
+        assert_eq!(dm_pk.dofs_flat, dm_p3.dofs_flat, "dofs_flat mismatch");
+        assert_eq!(dm_pk.dof_coords.len(), dm_p3.dof_coords.len(), "dof_coords length mismatch");
+        for (a, b) in dm_pk.dof_coords.iter().zip(dof_coords_iter(&dm_p3)) {
+            assert!((a - b).abs() < 1e-14, "dof_coords mismatch: {} vs {}", a, b);
+        }
+    }
+
+    fn dof_coords_iter(dm: &DofManager) -> impl Iterator<Item = f64> + '_ {
+        dm.dof_coords.iter().copied()
+    }
+
+    #[test]
+    fn pk2_matches_build_p2() {
+        // Verify that build_pk(mesh, 2) produces the same DOF ordering as build_p2
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let dm_pk = DofManager::new(&mesh, 2);
+        let dm_p2 = DofManager::build_p2(&mesh);
+        assert_eq!(dm_pk.n_dofs, dm_p2.n_dofs, "n_dofs mismatch");
+        assert_eq!(dm_pk.dofs_flat, dm_p2.dofs_flat, "dofs_flat mismatch");
+        assert_eq!(dm_pk.dof_coords, dm_p2.dof_coords, "dof_coords mismatch");
+    }
 
     #[test]
     fn p1_unit_square_dof_count() {
@@ -2363,12 +2394,12 @@ mod tests {
         let mesh = Mesh::<3>::unit_cube_tet(1);
         let dm = DofManager::new(&mesh, 3);
         // Elements sharing an edge should share the 2 edge DOFs.
-        // Verify edge_dof2_map has consistent entries.
-        assert!(!dm.edge_dof2_map.is_empty(), "TetP3 should have non-empty edge_dof2_map");
+        // Verify edge_pk_map has consistent entries (build_pk uses edge_pk_map).
+        assert!(!dm.edge_pk_map.is_empty(), "TetP3 should have non-empty edge_pk_map");
         // Each edge DOF pair must be unique.
-        let mut all_dof_pairs: Vec<[u32; 2]> = dm.edge_dof2_map.values().copied().collect();
+        let mut all_dof_pairs: Vec<Vec<u32>> = dm.edge_pk_map.values().map(|v| v.clone()).collect();
         let len = all_dof_pairs.len();
-        all_dof_pairs.sort_unstable();
+        all_dof_pairs.sort();
         all_dof_pairs.dedup();
         assert_eq!(all_dof_pairs.len(), len, "TetP3 edge DOF pairs must be unique per edge");
     }

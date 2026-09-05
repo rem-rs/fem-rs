@@ -285,3 +285,21 @@ mod tests {
 }
 
 
+
+impl SurfaceTri6BilinearIntegrator for SurfaceTri6DiffusionIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+impl SurfaceTri6BilinearIntegrator for SurfaceTri6MassIntegrator {
+    fn add_to_element_matrix(&self, elem_nodes: &[[f64; 3]; 6], k_elem: &mut [f64; 36]) {
+        self.add_to_element_matrix(elem_nodes, k_elem);
+    }
+}
+
+impl SurfaceTri6LinearIntegrator for SurfaceTri6DomainSourceIntegrator<'_> {
+    fn add_to_element_vector(&self, elem_nodes: &[[f64; 3]; 6], f_elem: &mut [f64; 6]) {
+        self.add_to_element_vector(elem_nodes, f_elem);
+    }
+}

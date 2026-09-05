@@ -1,5 +1,77 @@
 # fem-pro 交接：剩余工作
 
+## 🧩 2026-09-03（收尾三十八）：prolongation 修复 + P2/P3 硬编码替换 + miniapp 比对空白发现
+
+> 用户要求"跑 mfem 示例比对，看看是否破坏了功能"+"重新对比代码量"+"miniapp 加入比对"。本轮完成 **prolongation 双计数修复** + **P2/P3 硬编码替换为 build_pk** + **编译错误修复**，并发现 **miniapp 完全未纳入比对流程**（示例只用 H1/ND/RT/L2，miniapp 才用 NURBS_HDiv/HCurl/Positive/Trace 元）。
+
+### 一句话启动词（新 session 用）
+> 读 HANDOVER.md。**收尾三十八完成**：prolongation 修复（build_p3_tri 边顺序 d7/d8 交换）+ P2/P3 硬编码替换为 build_pk（build_p2/build_p3 → build_pk(mesh, 2/3)）+ build_pk 边顺序修复（n2,n0 → n0,n2）+ bubble_dof_start 修复。fem-space 216/0 全绿，fem-element 387/0 全绿，MFEM 示例比对 ex1/ex14/ex16/ex21/ex27/ex29 解逐位一致。**miniapp 完全未纳入比对**（示例只用 H1/ND/RT/L2，miniapp 才用特殊元）。**下一步 = 将 miniapp 纳入比对流程**：① 为 miniapp 添加 C++ 参考构建流程（WSL `~/mfem49_mpi` 已编译，miniapp 二进制需手动构建）；② 在 fem-rs 中实现对应的 Rust miniapp 版本（当前只有 examples/ 无 miniapps/ 目录）；③ 扩展 `examples/compare/examples.json` + `compare.sh` 添加 miniapp 比对配置。**关键坑**：miniapp 用 `NURBS_HDivFECollection`/`NURBS_HCurlFECollection`/`H1Pos_FECollection`/`H1_Trace_FECollection`，这些元在 fem-rs 中尚未实现——比对会立即暴露缺失。
+
+### 本轮完成（4 files +55/-33）
+1. **prolongation 双计数修复**（`crates/space/src/dof_manager.rs:589-592`）：
+   - 根因：`build_p3_tri` 中 `get_edge_dofs(n2, n0)` 返回 `[near_n2, near_n0]`，但代码直接 `dofs_flat[base+7]=d7, [base+8]=d8` → 权重交换（值 = 2× 或 0.5× 正确值）
+   - 修复：交换为 `dofs_flat[base+7]=d8, [base+8]=d7`
+   - 验证：`prolongation_p_refinement_tri` 从 FAIL → OK，fem-space 216/0 全绿
+
+2. **P2/P3 硬编码替换为 build_pk**（`crates/space/src/dof_manager.rs:158-209`）：
+   - `build_p2(mesh)` → `build_pk(mesh, 2)`（Tri3 + Tet4）
+   - `build_p3(mesh)` → `build_pk(mesh, 3)`（Tri3 + Tet4）
+   - 验证：新增 `pk3_matches_build_p3_tri` + `pk2_matches_build_p2` 测试，全部通过
+
+3. **build_pk 边顺序修复**（`crates/space/src/dof_manager.rs:1955`）：
+   - 根因：`build_pk` 第三条边用 `(n2, n0)`，`get_edge_dofs_pk(n2, n0)` 返回 `[near_n2, near_n0]`（反转），与 TriPk 的 `[near_n0, near_n2]` 不匹配
+   - 修复：改为 `(n0, n2)`，`get_edge_dofs_pk(n0, n2)` 返回 `[near_n0, near_n2]`（正确）
+
+4. **build_pk bubble_dof_start 修复**（`crates/space/src/dof_manager.rs:2136`）：
+   - 根因：`bubble_dof_start: n_dofs`（包含 bubble DOFs）→ 应为 `n_nodes + edge_pk_map.len() * edge_dofs_per + face_pk_map.len() * face_dofs_per`
+   - 修复：提取 `let bubble_dof_start = ...` 到 DofManager 构造前
+
+5. **编译错误修复**（`crates/solver/src/lib.rs`）：
+   - 移除不存在的 ODE 类型 re-export（`LeapfrogStepper`, `Newmark`, `Yoshida4Stepper` 等）
+   - 移除不存在的 `multiphysics_sync` 和 `multiphysics_templates` 模块声明和 re-export
+   - 恢复 `pub use fem_amg as amg;` re-export（被 e2dce95 误删）
+   - 修复 `TriND1` → `TriNDk` 导入（`crates/assembly/src/discrete_op.rs:42,566`）
+
+6. **miniapp 比对空白发现**：
+   - MFEM 示例（ex0-ex41）只用 H1/ND/RT/L2 → fem-rs 全覆盖 ✅
+   - MFEM miniapps 使用 `NURBS_HDivFECollection`/`NURBS_HCurlFECollection`/`H1Pos_FECollection`/`H1_Trace_FECollection` → fem-rs 未覆盖 ❌
+   - `examples/compare/` 目录无任何 miniapp 配置或脚本
+   - **结论**：当前比对流程只能验证 H1/ND/RT/L2，无法发现其他元的缺失
+
+### 验证
+- fem-space: 216/0 全绿 ✅
+- fem-element: 387/0 全绿 ✅
+- fem-mesh: 201/0 全绿 ✅
+- fem-solver: 168/5（5 个 PCG+AMS/ADS 收敛测试失败，预存在问题）
+- MFEM 示例比对：ex1/ex14/ex16/ex21/ex27/ex29 解逐位一致 ✅
+- 代码量对比：fem-rs 204,789 行 vs MFEM 633,975 行（1:3.1）
+
+### 剩余工作（按优先级）
+1. **miniapp 纳入比对流程**（下一轮核心任务）：
+   - ① 为 miniapp 添加 C++ 参考构建流程（WSL `~/mfem49_mpi` 已编译，miniapp 二进制需手动构建）
+   - ② 在 fem-rs 中实现对应的 Rust miniapp 版本（当前只有 examples/ 无 miniapps/ 目录）
+   - ③ 扩展 `examples/compare/examples.json` + `compare.sh` 添加 miniapp 比对配置
+   - **关键坑**：miniapp 用 `NURBS_HDivFECollection`/`NURBS_HCurlFECollection`/`H1Pos_FECollection`/`H1_Trace_FECollection`，这些元在 fem-rs 中尚未实现——比对会立即暴露缺失
+
+2. **ADS/AMS 收敛问题**（预存在，与本次目标无关）：
+   - PCG+AMS/ADS 失败（5 个测试），GMRES+AMS/ADS 通过
+   - 可能原因：预条件子非 SPD（PCG 要求 SPD）
+
+3. **未覆盖的有限元**（miniapp 比对暴露后跟进）：
+   - Fuentes Pyramid 元（ND/RT/H1/L2）
+   - Positive 元（H1Pos/L2Pos）
+   - NURBS HDiv/HCurl
+   - Trace 元（H1_Trace/L2_Trace）
+
+### 环境/工具/纪律（勿丢）
+- 分支 `main`（ex4-ads-preconditioner 已合并）
+- C++ 串行参考：`~/mfem49`（`~/bin/exN_cpp`）；并行参考：`~/mfem49_mpi`（WSL）
+- miniapp C++ 参考：`~/mfem49_miniapps`（需手动构建，`make -j4` 在 `~/mfem49/miniapps` 目录）
+- 比对脚本：`examples/compare/compare.sh`（串行）、`examples/compare/pex_compare.sh`（并行）
+- 比对配置：`examples/compare/examples.json`（仅 ex0-ex41，无 miniapp）
+
+---
+
 ## 🧩 2026-08-31（收尾三十七）：全量比对修复轮——8 个示例对齐 + 比对工具修复 + pex30 移植
 
 > 用户要求"重新运行 mfem 示例比对工具 + 开始修复"。串行 41 + 并行 35 全量比对后，本轮修复了 **7 个真实差异 + 7 项工具问题**（commits `966dcb5` + `ee3d59d`，main 分支，**3 commits 未 push——网络断开**：966dcb5/ee0114f/ee3d59d 待推）：

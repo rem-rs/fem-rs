@@ -20,6 +20,7 @@ pub mod submesh;
 pub mod topology;
 pub mod transformation;
 pub mod extrusion;
+pub mod findpts;
 pub mod particle;
 pub mod supermesh;
 pub mod rebuild_boundary;
@@ -32,6 +33,7 @@ pub use cad::{CadShape, CadModel, AnalyticSurface, FacetedCadSurface, NurbsCadSu
 pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_3d_general, refine_curved_2d_nc, refine_curved_3d_nc, refine_curved_3d_nc_general, refine_curved_2d_nc_with_cad, refine_curved_3d_nc_with_cad};
 pub use element_type::ElementType;
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
+pub use findpts::{FindPoints, FindPointsOptions, LocatedPoint as FindPointResult};
 pub use simplex::{Mesh, tet_volume};
 pub use submesh::{SubMesh, SubMesh3D, BoundarySubMesh, extract_submesh, extract_submesh_3d, extract_submesh_by_name, extract_boundary_submesh};
 pub use topology::MeshTopology;
