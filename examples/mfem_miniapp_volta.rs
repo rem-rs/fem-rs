@@ -248,7 +248,7 @@ impl VoltaSolver {
         };
         let cfg = SolverConfig { rtol: 1e-12, max_iter: 500, verbose: false, ..SolverConfig::default() };
         let mut phi = ParVector::zeros(&h1);
-        let res = par_solve_pcg_amg(&a_mat, &rhs, &mut phi, &amg_cfg, &cfg)
+        let res = par_solve_pcg_jacobi(&a_mat, &rhs, &mut phi, &cfg) // FIXME(amg): par_solve_pcg_amg stalls on 3-D tet H1 (res 1.0); jacobi converges (24 it) — AMG 3-D issue tracked separately
             .expect("volta: H1 PCG+AMG failed");
         if rank == 0 {
             println!("PCG Iterations = {}", res.iterations);
@@ -289,7 +289,9 @@ impl VoltaSolver {
         let n_owned_l2 = l2.dof_partition().n_owned_dofs;
         let mut rho_l2 = vec![0.0_f64; n_owned_l2];
         div_mat.spmv(d.as_slice(), &mut rho_l2);
-        // l2_vol_int: ∫ 1·(·) on L2 (P0: w_K = |K|).
+        // rho_l2_K: per-element divergence (values match C++ rho_ elementwise
+        // in the source region).  Total charge = volume integral ∫ρ dx =
+        // Σ_K |K|·rho_K — computed with the L2 P0 weights below.
         let vol_int = ParAssembler::assemble_linear(
             &l2, &[&DomainSourceIntegrator::new(|_x: &[f64]| 1.0)], qo);
         let local_q: f64 = vol_int
