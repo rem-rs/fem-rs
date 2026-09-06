@@ -43,5 +43,5 @@ pub use constraints::{apply_dirichlet, apply_dirichlet_diag_one, eliminate_diric
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use dpg_trace::{DpgTraceSpace, FaceInfo};
-pub use make_refined::make_refined;
+pub use make_refined::{make_refined_2d, make_refined_3d};
 

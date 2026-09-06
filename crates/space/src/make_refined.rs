@@ -47,46 +47,53 @@ fn find_local_dof<const D: usize>(
     })
 }
 
-/// Build a refined mesh by subdividing every `orig` element into `nref^dim`
-/// sub-elements whose corners are the H1(order = `nref`, Gauss-Lobatto) nodes.
+/// LOR mesh refinement (`Mesh::MakeRefined` equivalent), 1:1 with MFEM 4.10's
+/// `Mesh::MakeRefined(orig, nref, BasisType::GaussLobatto)`.
 ///
-/// Currently supports `Quad4` (D=2, nref = 2..4) and `Tri3` (D=2, nref = 2)
-/// meshes with a uniform element type and matches MFEM's
-/// `MakeRefined(orig, nref, BasisType::GaussLobatto)` output vertex-, element-
-/// and boundary-for-element (verified against the MFEM 4.10 reference library).
+/// Supported and verified (vertex-, element- and boundary-for-element against
+/// the MFEM 4.10 reference library):
+/// - `make_refined_2d`: Quad4 (nref = 2..4), Tri3 (nref = 2);
+/// - `make_refined_3d`: Hex8 (any nref ≥ 2; single and multi-hex verified).
 ///
-/// Hex8 and Tri3 (nref ≥ 3) are NOT yet supported: fem-rs' `HexQk`
-/// reference-element DOF layout differs from MFEM's H1 hex ordering, and the
-/// DofManager's simplex (Tri/Tet) edge-DOF coordinates are equally spaced while
-/// MFEM H1 uses Gauss-Lobatto nodes for p ≥ 3 — the refined-vertex numbering
-/// cannot be made 1:1 without first aligning these (plus P-refinement /
-/// prolongation code that assumes equal spacing) with MFEM.  See
-/// `output/miniapp_gap_audit.md` (G3 notes).
-pub fn make_refined<const D: usize>(orig: &Mesh<D>, nref: usize) -> Mesh<D>
-where
-    [(); D]: ,
-{
+/// The 3-D hex numbering is computed internally in the exact MFEM order
+/// (vertices → all edges in `Geometry::CUBE::Edges` order → all faces in
+/// `CUBE::FaceVert` order → volumes; GLL node positions), WITHOUT using the
+/// DofManager/HexQk (whose edge/face ordering differs from MFEM) — the LOR
+/// consumers only build P1 spaces on the returned mesh.
+///
+/// Tri3 with nref ≥ 3 and Tet4 are not supported yet: the DofManager's
+/// simplex edge-DOF coordinates are equally spaced while MFEM H1 uses
+/// Gauss-Lobatto nodes for p ≥ 3, so the refined-vertex numbering cannot be
+/// made 1:1 without first aligning the simplex DOF coordinates (plus
+/// P-refinement/prolongation code that assumes equal spacing) with MFEM.
+/// See `output/miniapp_gap_audit.md` (G3 notes).
+/// LOR mesh refinement for 2-D meshes (Quad4 nref = 2..4, Tri3 nref = 2).
+pub fn make_refined_2d(orig: &Mesh<2>, nref: usize) -> Mesh<2> {
     assert!(nref >= 2, "make_refined: nref must be >= 2");
-    if D == 2 && orig.elem_type == ElementType::Tri3 {
-        // The Tri3 implementation is verified 1:1 for nref = 2 only: the
-        // DofManager's simplex (Tri/Tet) edge-DOF coordinates are equally
-        // spaced while MFEM H1 uses Gauss-Lobatto nodes for p >= 3, so the
-        // refined-vertex numbering cannot be made 1:1 without first aligning
-        // the simplex DOF coordinates (and P-refinement/prolongation code
-        // that assumes equal spacing) with MFEM — see make_refined.rs docs.
-        assert!(nref <= 2, "make_refined: Tri3 with nref >= 3 is not 1:1 yet (see docs)");
-    }
-    match (D, orig.elem_type) {
-        (2, ElementType::Quad4) => refine_tensor(orig, nref),
-        (2, ElementType::Tri3) => refine_tri(orig, nref),
-        (3, ElementType::Hex8) => panic!(
-            "make_refined: Hex8 is not 1:1 yet — the fem-rs HexQk reference-element
-             DOF layout differs from MFEM H1 hex (see make_refined.rs doc); porting
-             requires aligning HexQk with MFEM Geometry::CUBE edges/faces first",
+    match orig.elem_type {
+        ElementType::Quad4 => refine_tensor(orig, nref),
+        ElementType::Tri3 => {
+            // The Tri3 implementation is verified 1:1 for nref = 2 only: the
+            // DofManager's simplex (Tri/Tet) edge-DOF coordinates are equally
+            // spaced while MFEM H1 uses Gauss-Lobatto nodes for p >= 3.
+            assert!(nref <= 2, "make_refined: Tri3 with nref >= 3 is not 1:1 yet (see docs)");
+            refine_tri(orig, nref)
+        }
+        et => panic!(
+            "make_refined_2d: unsupported element type {et:?}; \
+             supported: Quad4 and Tri3"
         ),
-        (d, et) => panic!(
-            "make_refined: unsupported (dim={d}, elem_type={et:?}); \
-             supported: Quad4 (2D) and Tri3 (2D)"
+    }
+}
+
+/// LOR mesh refinement for 3-D all-Hex8 meshes (any nref >= 2).
+pub fn make_refined_3d(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
+    assert!(nref >= 2, "make_refined: nref must be >= 2");
+    match orig.elem_type {
+        ElementType::Hex8 => refine_hex(orig, nref),
+        et => panic!(
+            "make_refined_3d: unsupported element type {et:?}; \
+             supported: Hex8"
         ),
     }
 }
@@ -602,6 +609,349 @@ where
     None
 }
 
+/// H1(order = p, Gauss-Lobatto) DOF numbering of an all-Hex8 mesh, following
+/// MFEM exactly:
+///   1. vertices = original nodes (ids unchanged);
+///   2. ALL edge DOFs — element traversal in mesh order, each element's 12
+///      edges in MFEM `Geometry::CUBE::Edges` order, shared edges keep the
+///      first-assigned block of (p-1) DOFs (direction = first encounter);
+///   3. ALL face DOFs — element traversal, 6 faces in MFEM `CUBE::FaceVert`
+///      order, (p-1)² DOFs per face, shared faces keep their block;
+///   4. volume DOFs — one (p-1)³ block per element.
+/// This reproduces MFEM `FiniteElementSpace::Construct` for H1 on hex meshes
+/// (verified against the MFEM 4.10 reference `MakeRefined` dumps).  The
+/// DofManager / HexQk are deliberately NOT used: their internal edge/face
+/// ordering differs from MFEM, and the LOR consumers only need the resulting
+/// refined mesh (P1 on it).
+fn h1_hex_numbering(orig: &Mesh<3>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
+    const EDGES: [[usize; 2]; 12] = [
+        [0, 1], [1, 2], [3, 2], [0, 3], [4, 5], [5, 6],
+        [7, 6], [4, 7], [0, 4], [1, 5], [2, 6], [3, 7],
+    ];
+    const FACES: [[usize; 4]; 6] = [
+        [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+        [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+    ];
+    let n_elems = orig.n_elems();
+    let n_nodes = orig.n_nodes();
+    let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+    let edge_dofs_per = p - 1;
+    let face_dofs_per = (p - 1) * (p - 1);
+    let vol_dofs_per = (p - 1) * (p - 1) * (p - 1);
+
+    // Per-element local DOF lists (vertices 8 + edges + faces + volume).
+    let mut elem_dofs: Vec<Vec<u32>> = vec![Vec::new(); n_elems];
+    // Edge blocks keyed by sorted vertex pair, in first-encounter order;
+    // (a, b) keeps the creation direction (edge DOFs ordered a → b).
+    let mut edge_key_order: Vec<[u32; 2]> = Vec::new();
+    let mut edge_blocks: std::collections::HashMap<[u32; 2], (u32, u32, Vec<u32>)> =
+        std::collections::HashMap::new();
+    let mut face_key_order: Vec<[u32; 4]> = Vec::new();
+    let mut face_blocks: std::collections::HashMap<Vec<u32>, (u32, u32, u32, u32, Vec<u32>)> =
+        std::collections::HashMap::new();
+
+    let mut next = n_nodes as u32;
+
+    // Phase 1: vertices + edges (all elements).
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        debug_assert_eq!(ns.len(), 8);
+        elem_dofs[e].extend_from_slice(ns);
+        for &[la, lb] in &EDGES {
+            let (a, b) = (ns[la], ns[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let block = edge_blocks.entry(key).or_insert_with(|| {
+                let ids: Vec<u32> = (0..edge_dofs_per)
+                    .map(|_| {
+                        let d = next;
+                        next += 1;
+                        d
+                    })
+                    .collect();
+                edge_key_order.push(key);
+                (a, b, ids)
+            });
+            elem_dofs[e].extend_from_slice(&block.2);
+        }
+    }
+    // Phase 2: faces.
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        for &fq in &FACES {
+            let q = [ns[fq[0]], ns[fq[1]], ns[fq[2]], ns[fq[3]]];
+            let mut skey = q.to_vec();
+            skey.sort_unstable();
+            let block = face_blocks.entry(skey).or_insert_with(|| {
+                let ids: Vec<u32> = (0..face_dofs_per)
+                    .map(|_| {
+                        let d = next;
+                        next += 1;
+                        d
+                    })
+                    .collect();
+                face_key_order.push([q[0], q[1], q[2], q[3]]);
+                (q[0], q[1], q[2], q[3], ids)
+            });
+            elem_dofs[e].extend_from_slice(&block.4);
+        }
+    }
+    // Phase 3: volumes.
+    for e in 0..n_elems {
+        for _ in 0..vol_dofs_per {
+            elem_dofs[e].push(next);
+            next += 1;
+        }
+    }
+    let n_dofs = next as usize;
+
+    // Coordinates.
+    let dim = 3usize;
+    let mut coords = vec![0.0f64; n_dofs * dim];
+    for n in 0..n_nodes {
+        let c = orig.node_coords(n as u32);
+        coords[n * dim..n * dim + dim].copy_from_slice(c);
+    }
+    // Edge DOF positions: along (a→b) at the GLL interior points.
+    for &key in &edge_key_order {
+        let (a, b, ids) = &edge_blocks[&key];
+        let ca = orig.node_coords(*a);
+        let cb = orig.node_coords(*b);
+        for (k, &did) in ids.iter().enumerate() {
+            let t = gll[k + 1];
+            let base = did as usize * dim;
+            for d in 0..dim {
+                coords[base + d] = (1.0 - t) * ca[d] + t * cb[d];
+            }
+        }
+    }
+    // Face DOF positions: bilinear in (u, v), u along (a→b), v along (a→d),
+    // u = gll[i], v = gll[j], j outer / i inner (MFEM H1 hex layout).
+    for &q in &face_key_order {
+        let (a, b, c, d, ids) = &face_blocks[&{
+            let mut s = q.to_vec();
+            s.sort_unstable();
+            s
+        }];
+        let pa = orig.node_coords(*a);
+        let pb = orig.node_coords(*b);
+        let pc = orig.node_coords(*c);
+        let pd = orig.node_coords(*d);
+        for j in 1..p {
+            for i in 1..p {
+                let (u, v) = (gll[i], gll[j]);
+                let kk = (j - 1) * (p - 1) + (i - 1);
+                let did = ids[kk];
+                let base = did as usize * dim;
+                for dd in 0..dim {
+                    coords[base + dd] = (1.0 - u) * (1.0 - v) * pa[dd]
+                        + u * (1.0 - v) * pb[dd]
+                        + u * v * pc[dd]
+                        + (1.0 - u) * v * pd[dd];
+                }
+            }
+        }
+    }
+    // Volume DOF positions: trilinear, i inner / j middle / k outer.
+    let vol_start = n_nodes + edge_key_order.len() * edge_dofs_per
+        + face_key_order.len() * face_dofs_per;
+    let mut vi = 0usize; // volume DOF index (element-major)
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        let c: Vec<[f64; 3]> = ns
+            .iter()
+            .map(|&n| {
+                let cc = orig.node_coords(n);
+                [cc[0], cc[1], cc[2]]
+            })
+            .collect();
+        for k in 1..p {
+            for j in 1..p {
+                for i in 1..p {
+                    let (u, v, w) = (gll[i], gll[j], gll[k]);
+                    let did = vol_start + vi;
+                    let base = did * dim;
+                    for dd in 0..dim {
+                        coords[base + dd] = (1.0 - u) * (1.0 - v) * (1.0 - w) * c[0][dd]
+                            + u * (1.0 - v) * (1.0 - w) * c[1][dd]
+                            + u * v * (1.0 - w) * c[2][dd]
+                            + (1.0 - u) * v * (1.0 - w) * c[3][dd]
+                            + (1.0 - u) * (1.0 - v) * w * c[4][dd]
+                            + u * (1.0 - v) * w * c[5][dd]
+                            + u * v * w * c[6][dd]
+                            + (1.0 - u) * v * w * c[7][dd];
+                    }
+                    vi += 1;
+                }
+            }
+        }
+    }
+    debug_assert_eq!(vol_start + vi, n_dofs);
+    (coords, elem_dofs)
+}
+
+/// Subdivide every original hexahedron into `nref³` sub-hexahedra whose
+/// corners are the H1(order = nref, Gauss-Lobatto) nodes, with the H1 DOF
+/// numbering taken directly from MFEM (see `h1_hex_numbering`).
+fn refine_hex(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
+    let p = nref;
+    let p1 = p + 1;
+    let dim = 3usize;
+    let xi = gll_1d(p1);
+
+    let (coords, elem_dofs) = h1_hex_numbering(orig, p);
+    let n_elems = orig.n_elems();
+
+    let mut scale = 0.0f64;
+    for n in 0..orig.n_nodes() as u32 {
+        for d in 0..dim {
+            let c = orig.node_coords(n)[d].abs();
+            if c > scale {
+                scale = c;
+            }
+        }
+    }
+    let tol = 1e-7 * scale.max(1.0);
+
+    let nodes_per_elem = p1 * p1 * p1;
+    let mut conn: Vec<NodeId> = Vec::new();
+    let mut elem_tags: Vec<i32> = Vec::new();
+
+    // Sub-hex corner offsets: bottom face CCW then top face CCW.
+    const CORNER_OFF: [[usize; 3]; 8] = [
+        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+    ];
+
+    for e in 0..n_elems as u32 {
+        let ns = orig.element_nodes(e);
+        let c: Vec<[f64; 3]> = ns
+            .iter()
+            .map(|&n| {
+                let cc = orig.node_coords(n);
+                [cc[0], cc[1], cc[2]]
+            })
+            .collect();
+        let edofs = &elem_dofs[e as usize];
+        debug_assert_eq!(edofs.len(), nodes_per_elem, "H1({p}) nodes per hex");
+        // Local DOF physical positions.
+        let mut local: Vec<(usize, [f64; 3])> = Vec::with_capacity(nodes_per_elem);
+        for (kk, &did) in edofs.iter().enumerate() {
+            let base = did as usize * dim;
+            local.push((kk, [coords[base], coords[base + 1], coords[base + 2]]));
+        }
+        // Map every lattice point (ix, iy, iz) to its local DOF index by
+        // physical matching (trilinear isoparametric map).
+        let mut lattice = vec![usize::MAX; nodes_per_elem];
+        for iz in 0..p1 {
+            for iy in 0..p1 {
+                for ix in 0..p1 {
+                    let (u, v, w) = (xi[ix], xi[iy], xi[iz]);
+                    let mut target = [0.0; 3];
+                    for dd in 0..3 {
+                        target[dd] = (1.0 - u) * (1.0 - v) * (1.0 - w) * c[0][dd]
+                            + u * (1.0 - v) * (1.0 - w) * c[1][dd]
+                            + u * v * (1.0 - w) * c[2][dd]
+                            + (1.0 - u) * v * (1.0 - w) * c[3][dd]
+                            + (1.0 - u) * (1.0 - v) * w * c[4][dd]
+                            + u * (1.0 - v) * w * c[5][dd]
+                            + u * v * w * c[6][dd]
+                            + (1.0 - u) * v * w * c[7][dd];
+                    }
+                    let flat = (iz * p1 + iy) * p1 + ix;
+                    lattice[flat] = find_local_dof(&local, &target, tol).unwrap_or_else(|| {
+                        panic!(
+                            "make_refined: could not match hex lattice point {flat} \
+                             (phys {target:?}) to an H1({p}) DOF of element {e}"
+                        )
+                    });
+                }
+            }
+        }
+        // Emit sub-hexahedra: lattice cell (jx, jy, jz), corner c.
+        for jz in 0..p {
+            for jy in 0..p {
+                for jx in 0..p {
+                    for coff in &CORNER_OFF {
+                        let ix = jx + coff[0];
+                        let iy = jy + coff[1];
+                        let iz = jz + coff[2];
+                        let flat = (iz * p1 + iy) * p1 + ix;
+                        conn.push(edofs[lattice[flat]] as NodeId);
+                    }
+                    elem_tags.push(orig.elem_tags[e as usize]);
+                }
+            }
+        }
+    }
+
+    // Boundary faces: every boundary quad becomes p×p sub-quads whose corners
+    // are the face's (p+1)² H1 nodes (bilinear parameterisation).
+    let n_faces = orig.n_faces();
+    let mut face_conn: Vec<NodeId> = Vec::new();
+    let mut face_tags: Vec<i32> = Vec::new();
+    for f in 0..n_faces as u32 {
+        let bverts = orig.bface_nodes(f);
+        debug_assert_eq!(bverts.len(), 4);
+        let mut corners = [[0.0; 3]; 4];
+        for (k, &n) in bverts.iter().enumerate() {
+            let c = orig.node_coords(n);
+            corners[k] = [c[0], c[1], c[2]];
+        }
+        // Find an element containing all 4 face vertices; its local DOFs
+        // contain every face node.
+        let mut owner: Option<&Vec<u32>> = None;
+        for e in 0..n_elems as u32 {
+            let ns = orig.element_nodes(e);
+            if bverts.iter().all(|w| ns.contains(w)) {
+                owner = Some(&elem_dofs[e as usize]);
+                break;
+            }
+        }
+        let owner = owner.expect("boundary face owner element");
+        let find_node = |u: f64, v: f64| -> u32 {
+            let mut pt = [0.0; 3];
+            for dd in 0..3 {
+                pt[dd] = (1.0 - u) * (1.0 - v) * corners[0][dd]
+                    + u * (1.0 - v) * corners[1][dd]
+                    + u * v * corners[2][dd]
+                    + (1.0 - u) * v * corners[3][dd];
+            }
+            for &dof in owner {
+                let base = dof as usize * dim;
+                let dc = [coords[base], coords[base + 1], coords[base + 2]];
+                if (0..3).all(|dd| (dc[dd] - pt[dd]).abs() <= tol) {
+                    return dof;
+                }
+            }
+            panic!("make_refined: 3D boundary node not found at {pt:?}");
+        };
+        let mut grid: Vec<u32> = Vec::with_capacity(p1 * p1);
+        for jy in 0..p1 {
+            for ix in 0..p1 {
+                grid.push(find_node(xi[ix], xi[jy]));
+            }
+        }
+        for jy in 0..p {
+            for ix in 0..p {
+                let idx = |i: usize, j: usize| j * p1 + i;
+                face_conn.push(grid[idx(ix, jy)]);
+                face_conn.push(grid[idx(ix + 1, jy)]);
+                face_conn.push(grid[idx(ix + 1, jy + 1)]);
+                face_conn.push(grid[idx(ix, jy + 1)]);
+                face_tags.push(orig.face_tags[f as usize]);
+            }
+        }
+    }
+
+    Mesh::uniform(
+        coords, conn, elem_tags, orig.elem_type,
+        face_conn, face_tags, orig.face_type,
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,7 +967,7 @@ mod tests {
         // 2×2 quad → nref 2: 25 verts / 16 elems / 16 bdr.  Vertex and element
         // values below are the MFEM 4.10 reference MakeRefined output.
         let q = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
-        let r = make_refined(&q, 2);
+        let r = make_refined_2d(&q, 2);
         assert_eq!(r.n_nodes(), 25);
         assert_eq!(r.n_elems(), 16);
         assert_eq!(r.n_faces(), 16);
@@ -629,7 +979,7 @@ mod tests {
         let c21 = v2(&r, 21);
         assert!((c21.0 - 0.25).abs() < 1e-12 && (c21.1 - 0.25).abs() < 1e-12);
         // nref=3: 49 verts / 36 elems / 24 bdr (MFEM Q2RF3).
-        let r3 = make_refined(&q, 3);
+        let r3 = make_refined_2d(&q, 3);
         assert_eq!(r3.n_nodes(), 49);
         assert_eq!(r3.n_elems(), 36);
         assert_eq!(r3.n_faces(), 24);
@@ -641,7 +991,7 @@ mod tests {
         // 16 bdr.  Values below are the MFEM 4.10 reference MakeRefined output
         // (T2RF2).
         let t = Mesh::<2>::make_cartesian_2d_tri(2, 2, 1.0, 1.0);
-        let r = make_refined(&t, 2);
+        let r = make_refined_2d(&t, 2);
         assert_eq!(r.n_nodes(), 25);
         assert_eq!(r.n_elems(), 32);
         assert_eq!(r.n_faces(), 16);
@@ -655,4 +1005,44 @@ mod tests {
         assert!((c9.0 - 0.25).abs() < 1e-12 && (c9.1 - 0.25).abs() < 1e-12);
     }
 
+    #[test]
+    fn hex_refined_matches_mfem() {
+        // 1×1×1 hex → nref 2: 27 verts / 8 elems / 24 bdr.  Corner order and
+        // numbering are the MFEM 4.10 reference output (H1RF2/3/4, H1X2RF2/3).
+        let h = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+        let r = make_refined_3d(&h, 2);
+        assert_eq!(r.n_nodes(), 27);
+        assert_eq!(r.n_elems(), 8);
+        assert_eq!(r.n_faces(), 24);
+        let e0 = r.element_nodes(0);
+        assert_eq!(&e0[..], &[0u32, 8, 20, 11, 16, 21, 26, 24]);
+        let e7 = r.element_nodes(7);
+        assert_eq!(&e7[..], &[26u32, 22, 18, 23, 25, 13, 7, 14]);
+        // nref=3: 64 / 27 / 54; nref=4: 125 / 64 / 96.
+        let r3 = make_refined_3d(&h, 3);
+        assert_eq!(r3.n_nodes(), 64);
+        assert_eq!(r3.n_elems(), 27);
+        assert_eq!(r3.n_faces(), 54);
+        let r4 = make_refined_3d(&h, 4);
+        assert_eq!(r4.n_nodes(), 125);
+        assert_eq!(r4.n_elems(), 64);
+        assert_eq!(r4.n_faces(), 96);
+    }
+
+    #[test]
+    fn multi_hex_refined_matches_mfem() {
+        // Two stacked hexes (shared face): MFEM two-phase numbering
+        // (H1X2RF2: 45 verts; H1X2RF3 with nref=3).
+        let h2 = Mesh::<3>::make_cartesian_3d(1, 2, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+        let r = make_refined_3d(&h2, 2);
+        assert_eq!(r.n_nodes(), 45);
+        assert_eq!(r.n_elems(), 16);
+        assert_eq!(r.n_faces(), 40);
+        let c24 = r.node_coords(24);
+        assert!((c24[0] - 1.0).abs() < 1e-12 && (c24[1] - 0.75).abs() < 1e-12);
+        let r3 = make_refined_3d(&h2, 3);
+        assert_eq!(r3.n_nodes(), 112);
+        assert_eq!(r3.n_elems(), 54);
+    }
 }
+
