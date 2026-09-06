@@ -219,3 +219,16 @@ pub use vec_fe_curl::VectorFECurlIntegrator;
 pub use diffusion2::Diffusion2Integrator;
 pub use hyperelastic_nl::HyperelasticNLFIntegrator;
 pub use elasticity_component::ElasticityComponentIntegrator;
+pub mod vector_boundary_lf;
+pub mod sbm2_dirichlet;
+pub mod sbm2_neumann;
+pub mod misc_integrators;
+
+pub use vector_boundary_lf::VectorBoundaryLFIntegrator;
+pub use sbm2_dirichlet::{SBM2DirichletLFIntegrator, SBM2DirichletIntegrator};
+pub use sbm2_neumann::{SBM2NeumannLFIntegrator, SBM2NeumannIntegrator};
+pub use misc_integrators::{
+    VectorDivergenceIntegrator, VectorConvectionNLFIntegrator,
+    WhiteGaussianNoiseDomainLFIntegrator, NormalTraceJumpIntegrator,
+    NonconservativeDGTraceIntegrator, MixedWeakGradDotIntegrator,
+};
