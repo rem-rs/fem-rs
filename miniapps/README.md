@@ -18,14 +18,15 @@ miniapps/
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1, 编译+运行通过)
 │   └── extruder.rs          ← 2D→3D 拉伸 (1:1, 编译+运行通过)
+│   └── (twist/klein-bottle/toroid/trimmer/reflector: 需低层 API)
 ├── toys/                    ← 对应 miniapps/toys/
 │   ├── automata.rs          ← 1D 元胞自动机 (1:1, 编译+运行通过)
 │   ├── life.rs              ← Conway 生命游戏 (1:1, 编译通过)
 │   ├── lissajous.rs         ← Lissajous 旋转曲面 (核心逻辑 1:1, 文件输出受限)
 │   ├── mondrian.rs          ← PGM 图片→AMR 网格 (1:1, 编译+运行通过)
-│   └── mandel.rs            ← Mandelbrot AMR (核心逻辑 1:1, Quad4 退化为全网格细化)
+│   ├── mandel.rs            ← Mandelbrot AMR (核心逻辑 1:1, Quad4 退化)
+│   └── (snake/rubik/spiral: 需 3D 低层 API 或外部文件)
 ├── fluids/                  ← 对应 miniapps/fluids/
-├── dpg/                     ← 对应 miniapps/dpg/
 └── ...
 ```
 
