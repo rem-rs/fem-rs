@@ -25,6 +25,20 @@ pub mod particle;
 pub mod supermesh;
 pub mod rebuild_boundary;
 pub mod mfem_kernels;
+pub mod tmop;
+
+pub use tmop::invariants::{InvariantsEvaluator2D, InvariantsEvaluator3D};
+pub use tmop::metrics::{
+    TmopQualityMetric, TmopQualityMetric3D,
+    TmopMetric001, TmopMetric002, TmopMetric007, TmopMetric009,
+    TmopMetric014, TmopMetric022, TmopMetric050, TmopMetric055, TmopMetric056,
+    TmopMetric058, TmopMetric077, TmopAMetric014, TmopAMetric050,
+    TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304,
+    TmopMetric315, TmopMetric316, TmopMetric318, TmopMetric321, TmopMetric323, TmopMetric360,
+};
+pub use tmop::target::{TargetConstructor, TargetType, ideal_shape_jac_2d, ideal_shape_jac_3d};
+pub use tmop::check::{check_metric_2d, check_metric_3d, run_tmop_check_metric, MetricCheckResult};
+pub use tmop::integrator::{TmopIntegrator2D, TmopIntegrator3D};
 
 pub use amr::{mark_tet_mesh_for_refinement, tet_select_rt_debug, refine_marked, closure_refine, closure_refine_default, refine_marked_with_tree, derefine_marked, DerefineTree, DerefineRecord, refine_nonconforming, refine_nonconforming_3d, refine_nonconforming_quad, refine_nonconforming_hex, refine_nonconforming_quad_aniso, refine_nonconforming_hex_aniso, refine_nonconforming_prism, refine_nonconforming_prism_aniso, refine_nonconforming_pyramid, refine_nonconforming_pyramid_aniso, refine_nonconforming_tri_aniso, refine_nonconforming_tet_aniso, QuadRefineDir, HexRefineDir, TriRefineDir, TetRefineDir, PrismRefineDir, PyramidRefineDir, refine_uniform, refine_uniform_3d, refine_prism6_uniform, refine_pyramid5_uniform, refine_hex8_uniform, refine_hex20_uniform, refine_hex27_uniform, prolongate_p1, restrict_to_coarse_p1, HangingNodeConstraint, HangingFaceConstraint, HangingQuadFaceConstraint, limit_nc_level_quad, NCState, NCState3D, NCStateQuad, NCStateHex, make_conforming_tri};
 pub use amr::{p_refine_tri3_to_tri6, p_refine_tri6_to_tri10, p_refine_tet4_to_tet10, p_refine_tet10_to_tet20, p_refine_quad4_to_quad9, p_refine_hex8_to_hex20, p_refine_hex20_to_hex27, p_prolongate_p1_to_p2};
