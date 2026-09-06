@@ -333,3 +333,31 @@ path = "../miniapps/tools/tmop_check_metric.rs"
 [[example]]
 name = "tmop_metric_magnitude"
 path = "../miniapps/tools/tmop_metric_magnitude.rs"
+
+[[example]]
+name = "toys_automata"
+path = "../miniapps/toys/automata.rs"
+
+[[example]]
+name = "toys_life"
+path = "../miniapps/toys/life.rs"
+
+[[example]]
+name = "toys_lissajous"
+path = "../miniapps/toys/lissajous.rs"
+
+[[example]]
+name = "toys_mondrian"
+path = "../miniapps/toys/mondrian.rs"
+
+[[example]]
+name = "toys_mandel"
+path = "../miniapps/toys/mandel.rs"
+
+[[example]]
+name = "mesh_shaper"
+path = "../miniapps/meshing/shaper.rs"
+
+[[example]]
+name = "mesh_extruder"
+path = "../miniapps/meshing/extruder.rs"
