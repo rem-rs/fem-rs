@@ -85,6 +85,7 @@ pub fn make_refined_3d(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
     assert!(nref >= 2, "make_refined: nref must be >= 2");
     match orig.elem_type {
         ElementType::Hex8 => refine_hex(orig, nref),
+        ElementType::Tet4 => refine_tet(orig, nref),
         et => panic!(
             "make_refined_3d: unsupported element type {et:?}; \
              supported: Hex8"
@@ -1048,6 +1049,241 @@ fn refine_hex(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
         face_conn, face_tags, orig.face_type,
     )
 }
+
+/// H1(order = p, Gauss-Lobatto) DOF numbering of an all-Tet4 mesh in the exact
+/// MFEM order: vertices, then ALL edge DOFs (element traversal, edges in MFEM
+/// `Geometry::TETRAHEDRON::Edges` order {0-1,0-2,0-3,1-2,1-3,2-3}, shared
+/// edges keep the first-assigned block).  Currently supports p = 2 (vertices +
+/// 6 edge midpoints per tet); face (p ≥ 3) and volume (p ≥ 4) DOFs are not
+/// implemented yet.
+fn h1_tet_numbering(orig: &Mesh<3>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
+    assert!(p == 2, "h1_tet_numbering: only p = 2 is implemented so far");
+    const EDGES: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+    let n_elems = orig.n_elems();
+    let n_nodes = orig.n_nodes();
+    let edge_dofs_per = p - 1; // 1 for p = 2
+
+    let mut elem_dofs: Vec<Vec<u32>> = vec![Vec::new(); n_elems];
+    let mut edge_key_order: Vec<[u32; 2]> = Vec::new();
+    let mut edge_blocks: std::collections::HashMap<[u32; 2], (u32, u32, Vec<u32>)> =
+        std::collections::HashMap::new();
+    let mut next = n_nodes as u32;
+
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        debug_assert_eq!(ns.len(), 4);
+        elem_dofs[e].extend_from_slice(ns);
+        for &[la, lb] in &EDGES {
+            let (a, b) = (ns[la], ns[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let block = edge_blocks.entry(key).or_insert_with(|| {
+                let ids: Vec<u32> = (0..edge_dofs_per)
+                    .map(|_| {
+                        let d = next;
+                        next += 1;
+                        d
+                    })
+                    .collect();
+                edge_key_order.push(key);
+                (a, b, ids)
+            });
+            elem_dofs[e].extend_from_slice(&block.2);
+        }
+    }
+    let n_dofs = next as usize;
+    debug_assert_eq!(n_dofs, n_nodes + edge_key_order.len() * edge_dofs_per);
+
+    let dim = 3usize;
+    let mut coords = vec![0.0f64; n_dofs * dim];
+    for n in 0..n_nodes {
+        let c = orig.node_coords(n as u32);
+        coords[n * dim..n * dim + dim].copy_from_slice(c);
+    }
+    // Edge midpoints along the canonical (min → max) direction.
+    for &key in &edge_key_order {
+        let (a, b) = (key[0], key[1]);
+        let (_, _, ids) = &edge_blocks[&key];
+        let ca = orig.node_coords(a);
+        let cb = orig.node_coords(b);
+        for (k, &did) in ids.iter().enumerate() {
+            let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64; // midpoint for p=2
+            let base = did as usize * dim;
+            for d in 0..dim {
+                coords[base + d] = (1.0 - t) * ca[d] + t * cb[d];
+            }
+        }
+    }
+    (coords, elem_dofs)
+}
+
+/// Subdivide every original tetrahedron into 8 sub-tetrahedra (nref = 2, the
+/// classic 1→8 subdivision; MFEM `GeometryRefiner::Refine(TETRAHEDRON, 2)`)
+/// whose corners are the 4 vertices + 6 edge midpoints of the original tet.
+/// Sub-tet connectivity and ordering replicate the MFEM 4.10 reference output
+/// (T1RF2 dump: a 1×1×1 box cut into 6 tets, refined once → 48 sub-tets).
+fn refine_tet(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
+    assert_eq!(nref, 2, "refine_tet: only nref = 2 is implemented so far");
+    let p = 2usize;
+    let dim = 3usize;
+
+    let (coords, elem_dofs) = h1_tet_numbering(orig, p);
+    let n_elems = orig.n_elems();
+
+    // Lattice: 10 points = 4 vertices (indices 0..3) + 6 edge midpoints
+    // (4..9, in MFEM TET edge order).  Barycentric coordinates (l0,l1,l2,l3).
+    let bary: [[f64; 4]; 10] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.5, 0.5, 0.0, 0.0], // edge (0,1)
+        [0.5, 0.0, 0.5, 0.0], // edge (0,2)
+        [0.5, 0.0, 0.0, 0.5], // edge (0,3)
+        [0.0, 0.5, 0.5, 0.0], // edge (1,2)
+        [0.0, 0.5, 0.0, 0.5], // edge (1,3)
+        [0.0, 0.0, 0.5, 0.5], // edge (2,3)
+    ];
+    // 1→8 subdivision of the reference tet (corner tets + inner tets), in the
+    // order of the MFEM 4.10 reference output.
+    const SUB: [[usize; 4]; 8] = [
+        [0, 4, 5, 6],
+        [4, 1, 7, 8],
+        [4, 7, 6, 8],
+        [4, 6, 7, 5],
+        [6, 8, 9, 3],
+        [6, 5, 9, 7],
+        [6, 9, 8, 7],
+        [5, 7, 2, 9],
+    ];
+
+    let mut scale = 0.0f64;
+    for n in 0..orig.n_nodes() as u32 {
+        for d in 0..dim {
+            let c = orig.node_coords(n)[d].abs();
+            if c > scale {
+                scale = c;
+            }
+        }
+    }
+    let tol = 1e-7 * scale.max(1.0);
+
+    let mut conn: Vec<NodeId> = Vec::new();
+    let mut elem_tags: Vec<i32> = Vec::new();
+    for e in 0..n_elems as u32 {
+        let ns = orig.element_nodes(e);
+        debug_assert_eq!(ns.len(), 4);
+        let v = [
+            orig.node_coords(ns[0]),
+            orig.node_coords(ns[1]),
+            orig.node_coords(ns[2]),
+            orig.node_coords(ns[3]),
+        ];
+        let edofs = &elem_dofs[e as usize];
+        debug_assert_eq!(edofs.len(), 10, "H1(2) nodes per tet");
+        let mut local: Vec<(usize, [f64; 3])> = Vec::with_capacity(10);
+        for (kk, &dof) in edofs.iter().enumerate() {
+            let base = dof as usize * dim;
+            local.push((kk, [coords[base], coords[base + 1], coords[base + 2]]));
+        }
+        // Map lattice points to local DOF indices by physical matching.
+        let mut lattice = vec![usize::MAX; 10];
+        for (kk, lam) in bary.iter().enumerate() {
+            let mut target = [0.0; 3];
+            for d in 0..3 {
+                target[d] = lam[0] * v[0][d] + lam[1] * v[1][d] + lam[2] * v[2][d]
+                    + lam[3] * v[3][d];
+            }
+            lattice[kk] = find_local_dof(&local, &target, tol).unwrap_or_else(|| {
+                panic!(
+                    "make_refined: could not match tet lattice point {kk} \
+                     (phys {target:?}) to an H1(2) DOF of element {e}"
+                )
+            });
+        }
+        for t in &SUB {
+            for &li in t {
+                conn.push(edofs[lattice[li]] as NodeId);
+            }
+            elem_tags.push(orig.elem_tags[e as usize]);
+        }
+    }
+
+    // Boundary faces: every boundary triangle becomes 4 sub-triangles with
+    // the 3 edge midpoints (1→4).  Ordering follows the MFEM reference.
+    let mut face_conn: Vec<NodeId> = Vec::new();
+    let mut face_tags: Vec<i32> = Vec::new();
+    for f in 0..orig.n_faces() as u32 {
+        let bverts = orig.bface_nodes(f);
+        debug_assert_eq!(bverts.len(), 3);
+        let mut owner: Option<&Vec<u32>> = None;
+        for e in 0..n_elems as u32 {
+            let ns = orig.element_nodes(e);
+            if bverts.iter().all(|w| ns.contains(w)) {
+                owner = Some(&elem_dofs[e as usize]);
+                break;
+            }
+        }
+        let owner = owner.expect("boundary face owner tet");
+        let find = |lam: [f64; 3], c: &[[f64; 3]; 3]| -> u32 {
+            let mut pt = [0.0; 3];
+            for d in 0..3 {
+                pt[d] = lam[0] * c[0][d] + lam[1] * c[1][d] + lam[2] * c[2][d];
+            }
+            for &dof in owner {
+                let base = dof as usize * dim;
+                let dc = [coords[base], coords[base + 1], coords[base + 2]];
+                if (0..3).all(|dd| (dc[dd] - pt[dd]).abs() <= tol) {
+                    return dof;
+                }
+            }
+            panic!("make_refined: tet boundary node not found at {pt:?}");
+        };
+        let mk = |n: u32| -> [f64; 3] {
+            let cc = orig.node_coords(n);
+            [cc[0], cc[1], cc[2]]
+        };
+        let c = [mk(bverts[0]), mk(bverts[1]), mk(bverts[2])];
+        // 1→4 subdivision: corner triangles then the central one, in MFEM's
+        // order (verified via T1RF2 boundary rows).
+        let m01 = find([0.5, 0.5, 0.0], &c);
+        let m12 = find([0.0, 0.5, 0.5], &c);
+        let m20 = find([0.5, 0.0, 0.5], &c);
+        let (b0, b1, b2) = (c[0], c[1], c[2]);
+        // Recover the corner vertex dofs by matching exact coordinates.
+        let corner = |i: usize| -> u32 {
+            let tgt = [c[i][0], c[i][1], c[i][2]];
+            for &dof in owner {
+                let base = dof as usize * dim;
+                if (coords[base] - tgt[0]).abs() <= tol
+                    && (coords[base + 1] - tgt[1]).abs() <= tol
+                    && (coords[base + 2] - tgt[2]).abs() <= tol
+                {
+                    return dof;
+                }
+            }
+            panic!("tet boundary corner not found");
+        };
+        let _ = (b0, b1, b2);
+        let v0 = corner(0);
+        let v1 = corner(1);
+        let v2 = corner(2);
+        let tris: [[u32; 3]; 4] = [
+            [v0, m01, m20],
+            [m01, m12, m20],
+            [m01, v1, m12],
+            [m20, m12, v2],
+        ];
+        for t in &tris {
+            face_conn.extend_from_slice(t);
+            face_tags.push(orig.face_tags[f as usize]);
+        }
+    }
+
+    Mesh::uniform(
+        coords, conn, elem_tags, orig.elem_type,
+        face_conn, face_tags, orig.face_type,
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,6 +1375,21 @@ mod tests {
         let r3 = make_refined_3d(&h2, 3);
         assert_eq!(r3.n_nodes(), 112);
         assert_eq!(r3.n_elems(), 54);
+    }
+
+    #[test]
+    fn tet_refined_matches_mfem() {
+        // 1×1×1 box cut into 6 tets, MakeRefined(2): 27 verts / 48 elems /
+        // 48 bdr (MFEM T1RF2).
+        let t = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let r = make_refined_3d(&t, 2);
+        assert_eq!(r.n_nodes(), 27);
+        assert_eq!(r.n_elems(), 48);
+        assert_eq!(r.n_faces(), 48);
+        // First original tet (7,0,3,1) → 8 sub-tets; sub-tet 0 corners
+        // (7, 8, 9, 10) in the MFEM 4.10 reference.
+        let e0 = r.element_nodes(0);
+        assert_eq!(&e0[..], &[7u32, 8, 9, 10]);
     }
 }
 
