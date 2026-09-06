@@ -329,3 +329,7 @@ path = "mfem_miniapp_gridfunction_bounds.rs"
 [[example]]
 name = "tmop_check_metric"
 path = "tmop_check_metric.rs"
+
+[[example]]
+name = "tmop_metric_magnitude"
+path = "tmop_metric_magnitude.rs"
