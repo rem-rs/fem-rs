@@ -22,4 +22,5 @@ pub use metrics::{
     TmopMetric058, TmopMetric077, TmopAMetric014, TmopAMetric050,
     TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304,
     TmopMetric315, TmopMetric316, TmopMetric318, TmopMetric321, TmopMetric323, TmopMetric360,
+    TmopQualityMetric3D,
 };
