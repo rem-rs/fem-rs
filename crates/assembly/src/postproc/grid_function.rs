@@ -769,7 +769,49 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         }
         bounds
     }
+
+    /// Locate a physical point and evaluate the scalar grid function.
+    pub fn get_value(&self, x: &[f64]) -> Option<f64> {
+        let (elem, bary) = self.space.mesh().locate(x, 1e-10)?;
+        Some(self.evaluate_at_element(elem, &bary))
+    }
+
+    /// Locate a physical point and evaluate the vector grid function.
+    pub fn get_vector_value(&self, x: &[f64]) -> Option<Vec<f64>> {
+        let (elem, bary) = self.space.mesh().locate(x, 1e-10)?;
+        Some(self.evaluate_vector_at_element(elem, &bary))
+    }
+
+    /// Locate a physical point and evaluate the gradient.
+    pub fn get_gradient(&self, x: &[f64]) -> Option<Vec<f64>> {
+        let (elem, bary) = self.space.mesh().locate(x, 1e-10)?;
+        Some(self.evaluate_gradient_at_element(elem, &bary))
+    }
+
+    /// Locate a physical point and evaluate the curl of an H(curl) field.
+    pub fn get_curl(&self, x: &[f64]) -> Option<Vec<f64>> {
+        let (elem, bary) = self.space.mesh().locate(x, 1e-10)?;
+        Some(self.evaluate_curl_at_element(elem, &bary))
+    }
+
+    /// Locate a physical point and evaluate the divergence of an H(div) field.
+    pub fn get_divergence(&self, x: &[f64]) -> Option<f64> {
+        let (elem, bary) = self.space.mesh().locate(x, 1e-10)?;
+        Some(self.evaluate_div_at_element(elem, &bary))
+    }
+
     /// Extract nodal values.
+    pub fn get_nodal_values(&self) -> Vec<f64> {
+        let mesh = self.space.mesh();
+        let n_nodes = mesh.n_nodes();
+        let mut nodal = vec![0.0; n_nodes as usize];
+        for n in 0..n_nodes {
+            let coords = mesh.node_coords(n as u32);
+            nodal[n as usize] = self.get_value(coords).unwrap_or(0.0);
+        }
+        nodal
+    }
+
     pub fn compute_l1_error(
         &self,
         exact: &dyn Fn(&[f64]) -> f64,

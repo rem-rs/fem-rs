@@ -169,6 +169,9 @@ pub trait MeshTopology: Send + Sync {
         None
     }
 
+    /// Locate a physical point in the mesh. Returns None if outside.
+    fn locate(&self, _x: &[f64], _tol: f64) -> Option<(u32, Vec<f64>)> { None }
+
     /// Clone the mesh into a boxed trait object.
     /// Required for dimension-agnostic code with dynamic dispatch.
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync + 'static> {

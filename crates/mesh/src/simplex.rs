@@ -2051,6 +2051,15 @@ impl<const D: usize> MeshTopology for Mesh<D> {
 
     fn edge_iter(&self) -> std::ops::Range<u32> { 0..self.n_edges() as u32 }
 
+    fn locate(&self, x: &[f64], tol: f64) -> Option<(u32, Vec<f64>)> {
+        let dim = self.dim() as usize;
+        if x.len() < dim { return None; }
+        let finder = crate::findpts::FindPoints::new(self);
+        let opts = crate::findpts::FindPointsOptions { tol, ..Default::default() };
+        let p: Vec<f64> = (0..dim).map(|i| x[i]).collect();
+        finder.locate(&p.try_into().unwrap_or([0.0; 3]), &opts).map(|lp| (lp.elem, lp.barycentric))
+    }
+
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync> {
         Box::new(self.clone())
     }
