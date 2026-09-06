@@ -268,3 +268,106 @@ fn face_elements_not_built_returns_zero() {
         "before build_face_to_elem, should return (0, None)"
     );
 }
+
+// ─── make_cartesian_3d (MFEM MakeCartesian3D, verified 1:1 vs MFEM 4.10
+//     reference libmfem.a) ────────────────────────────────────────────────────
+
+#[test]
+fn make_cartesian_3d_hex_counts_and_tags() {
+    // nx=2, ny=3, nz=4, sx=1, sy=2, sz=3
+    let m = Mesh::<3>::make_cartesian_3d(2, 3, 4, ElementType::Hex8, 1.0, 2.0, 3.0, true);
+    assert_eq!(m.n_nodes(), (2 + 1) * (3 + 1) * (4 + 1)); // 60
+    assert_eq!(m.n_elems(), 2 * 3 * 4); // 24
+    assert_eq!(m.n_faces(), 2 * (2 * 3 + 2 * 4 + 3 * 4)); // 52
+    assert_eq!(m.face_ids_with_tag(1).len(), 2 * 3); // bottom
+    assert_eq!(m.face_ids_with_tag(6).len(), 2 * 3); // top
+    assert_eq!(m.face_ids_with_tag(5).len(), 3 * 4); // left
+    assert_eq!(m.face_ids_with_tag(3).len(), 3 * 4); // right
+    assert_eq!(m.face_ids_with_tag(2).len(), 2 * 4); // front
+    assert_eq!(m.face_ids_with_tag(4).len(), 2 * 4); // back
+}
+
+#[test]
+fn make_cartesian_3d_hex_vertex_ordering_matches_mfem() {
+    // VTX(x,y,z) = x + (y + z*(ny+1))*(nx+1); sx, sy, sz divide first like MFEM.
+    let m = Mesh::<3>::make_cartesian_3d(2, 3, 4, ElementType::Hex8, 1.0, 2.0, 3.0, true);
+    let c0 = m.coords_of(0);
+    assert_eq!([c0[0], c0[1], c0[2]], [0.0, 0.0, 0.0]);
+    let c_last = m.coords_of(59);
+    assert!((c_last[0] - 1.0).abs() < 1e-15);
+    assert!((c_last[1] - 2.0).abs() < 1e-15);
+    assert!((c_last[2] - 3.0).abs() < 1e-15);
+    // vertex 3 = VTX(0,1,0) has y = sy/ny = 2/3
+    let c3 = m.coords_of(3);
+    assert!((c3[1] - 2.0 / 3.0).abs() < 1e-15);
+}
+
+#[test]
+fn make_cartesian_3d_hex_sfc_element_order_matches_mfem() {
+    // MakeCartesian3D defaults to sfc_ordering=true (Hilbert SFC). For the
+    // 2×3×4 box the MFEM 4.10 reference library produces the lexicographic
+    // hex (0,0,0) first, then (0,0,1) — verified against libmfem.a.
+    let m = Mesh::<3>::make_cartesian_3d(2, 3, 4, ElementType::Hex8, 1.0, 2.0, 3.0, true);
+    let e0 = m.element_nodes(0);
+    assert_eq!(
+        &e0[..],
+        &[0u32, 1, 4, 3, 12, 13, 16, 15],
+        "sfc first hex should be the (x,y,z)=(0,0,0) box (MFEM reference)"
+    );
+    let e1 = m.element_nodes(1);
+    assert_eq!(
+        &e1[..],
+        &[12u32, 13, 16, 15, 24, 25, 28, 27],
+        "sfc second hex is (0,0,1) in the MFEM 4.10 reference library"
+    );
+    // Lexicographic ordering puts (1,0,0) second instead.
+    let ml = Mesh::<3>::make_cartesian_3d(2, 3, 4, ElementType::Hex8, 1.0, 2.0, 3.0, false);
+    let l1 = ml.element_nodes(1);
+    assert_eq!(&l1[..], &[1u32, 2, 5, 4, 13, 14, 17, 16]);
+}
+
+#[test]
+fn make_cartesian_3d_tet_split_matches_mfem_reference_lib() {
+    // 1×1×1 box → 6 tets.  Vertex order of the MFEM 4.10 reference lib is
+    // (vi[6], vi[0], vi[c], vi[b]) per source row (0,b,c,6), empirically
+    // verified against libmfem.a (checked-in 4.10-dev sources list the rows
+    // as (0,b,c,6); the reference library predates that rewrite).
+    let m = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, true);
+    assert_eq!(m.n_elems(), 6);
+    assert_eq!(m.n_faces(), 12);
+    let expected: [[u32; 4]; 6] = [
+        [7, 0, 3, 1],
+        [7, 0, 1, 5],
+        [7, 0, 5, 4],
+        [7, 0, 2, 3],
+        [7, 0, 6, 2],
+        [7, 0, 4, 6],
+    ];
+    for (i, exp) in expected.iter().enumerate() {
+        let v = m.element_nodes(i as u32);
+        assert_eq!(&v[..], exp, "tet {i} mismatch");
+    }
+    // boundary: bottom quad (0,2,3,1) splits as (3,0,2),(0,3,1) in the lib
+    let bottom: Vec<Vec<u32>> = m
+        .face_ids_with_tag(1)
+        .into_iter()
+        .map(|f| m.bface_nodes(f).to_vec())
+        .collect();
+    assert_eq!(bottom, vec![vec![3, 0, 2], vec![0, 3, 1]]);
+}
+
+#[test]
+fn make_cartesian_3d_tet_larger_counts() {
+    let m = Mesh::<3>::make_cartesian_3d(2, 3, 4, ElementType::Tet4, 1.0, 2.0, 3.0, true);
+    assert_eq!(m.n_nodes(), 60);
+    assert_eq!(m.n_elems(), 6 * 2 * 3 * 4); // 144
+    assert_eq!(m.n_faces(), 2 * (2 * 3 + 2 * 4 + 3 * 4) * 2); // 104 tris
+    for tag in 1..=6 {
+        let per_face = match tag {
+            1 | 6 => 2 * 3,
+            5 | 3 => 3 * 4,
+            _ => 2 * 4,
+        };
+        assert_eq!(m.face_ids_with_tag(tag).len(), 2 * per_face, "tag {tag}");
+    }
+}

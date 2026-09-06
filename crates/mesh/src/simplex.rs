@@ -1502,11 +1502,7 @@ impl<const D: usize> Mesh<D> {
         for i in 0..nx {
             add_edge(&mut face_conn, &mut face_tags, nid(i,0), nid(i+1,0), 1);
         }
-        // Right edge (x = sx)
-        for j in 0..ny {
-            add_edge(&mut face_conn, &mut face_tags, nid(nx,j), nid(nx,j+1), 2);
-        }
-        // Top edge (y = sy)
+        // Top edge (y = sy) — MFEM emits top before the vertical sides.
         for i in 0..nx {
             add_edge(&mut face_conn, &mut face_tags, nid(i+1,ny), nid(i,ny), 3);
         }
@@ -1514,13 +1510,488 @@ impl<const D: usize> Mesh<D> {
         for j in 0..ny {
             add_edge(&mut face_conn, &mut face_tags, nid(0,j+1), nid(0,j), 4);
         }
+        // Right edge (x = sx)
+        for j in 0..ny {
+            add_edge(&mut face_conn, &mut face_tags, nid(nx,j), nid(nx,j+1), 2);
+        }
 
         Mesh::uniform(
             coords, conn, elem_tags, ElementType::Quad4,
             face_conn, face_tags, ElementType::Line2,
         )
     }
+    /// Generate a Cartesian (structured) hex/tet mesh of a box domain,
+    /// matching MFEM's `Mesh::MakeCartesian3D(nx, ny, nz, type, sx, sy, sz,
+    /// sfc_ordering)`.
+    ///
+    /// - Vertex numbering: x fastest, then y, then z
+    ///   (`VTX(x,y,z) = x + (y + z*(ny+1))*(nx+1)`, as in MFEM `Make3D`).
+    /// - `sfc_ordering` controls the element order for `Hex8` exactly like
+    ///   MFEM: `true` = Hilbert space-filling-curve ordering
+    ///   (`NCMesh::GridSfcOrdering3D`), `false` = lexicographic `z → y → x`
+    ///   loops.  Tets are always lexicographic (MFEM only SFC-orders HEX).
+    /// - `Hex8` element corner ordering is the MFEM `Make3D` layout
+    ///   `(VTX(x,y,z), VTX(x+1,y,z), VTX(x+1,y+1,z), VTX(x,y+1,z), …top…)`.
+    /// - Each `Tet4` box is split into 6 tetrahedra.  The vertex order below
+    ///   reproduces, vertex-for-vertex, the output of the MFEM 4.10 reference
+    ///   `libmfem.a` used for all fem-rs 1:1 comparisons (its `AddHexAsTets`
+    ///   stores each tet as `(vi[6], vi[0], vi[c], vi[b])` for the source
+    ///   table rows `(0, b, c, 6)`; the checked-in 4.10-dev sources list the
+    ///   rows as `(0, b, c, 6)` but the reference library was built from an
+    ///   earlier revision — verified empirically against `libmfem.a`).
+    /// - Boundary quad faces are emitted in MFEM's order with MFEM's tags:
+    ///   bottom `z=0` → 1, front `y=0` → 2, right `x=sx` → 3, back `y=sy` → 4,
+    ///   left `x=0` → 5, top `z=sz` → 6.  Loop nesting matches MFEM: bottom/top
+    ///   `y` outer `x` inner, left/right `z` outer `y` inner, front/back `x`
+    ///   outer `z` inner.  Each boundary quad is split into 2 triangles for
+    ///   the `Tet4` case as `(q2, q0, q1)` then `(q0, q2, q3)` (again matching
+    ///   the reference library's `AddBdrQuadAsTriangles`).
+    ///
+    /// Only `Hex8` and `Tet4` are currently supported (MFEM also allows WEDGE
+    /// and PYRAMID via `AddHexAsWedges` / `AddHexAsPyramids`).
+    pub fn make_cartesian_3d(
+        nx: usize,
+        ny: usize,
+        nz: usize,
+        elem_type: ElementType,
+        sx: f64,
+        sy: f64,
+        sz: f64,
+        sfc_ordering: bool,
+    ) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 3, "make_cartesian_3d requires D = 3");
+        assert!(nx > 0 && ny > 0 && nz > 0, "make_cartesian_3d: sizes must be > 0");
+        let (npx, npy, npz) = (nx + 1, ny + 1, nz + 1);
+        let mut coords = Vec::with_capacity(npx * npy * npz * 3);
+        for z in 0..npz {
+            for y in 0..npy {
+                for x in 0..npx {
+                    // MFEM: coord = ((real_t) x / nx) * sx  (divide first).
+                    coords.push((x as f64 / nx as f64) * sx);
+                    coords.push((y as f64 / ny as f64) * sy);
+                    coords.push((z as f64 / nz as f64) * sz);
+                }
+            }
+        }
 
+        // MFEM VTX macro (x fastest, then y, then z).
+        let nid = |x: usize, y: usize, z: usize| -> NodeId {
+            (x + (y + z * npy) * npx) as NodeId
+        };
+
+        // Hilbert space-filling-curve ordering of the box lattice, copied from
+        // MFEM NCMesh::GridSfcOrdering3D / HilbertSfc3D (mesh/ncmesh.cpp).
+        fn sgn(v: i32) -> i32 {
+            if v < 0 {
+                -1
+            } else if v > 0 {
+                1
+            } else {
+                0
+            }
+        }
+        // Appends lattice points (x, y, z) along a Hilbert curve through the
+        // w×h×d box.  Mirrors MFEM's HilbertSfc3D argument order: (x,y,z) is
+        // the origin and (ax,ay,az), (bx,by,bz), (cx,cy,cz) are the three
+        // (signed) side vectors of lengths w, h, d.
+        fn hilbert_3d(
+            x: i32,
+            y: i32,
+            z: i32,
+            ax: i32,
+            ay: i32,
+            az: i32,
+            bx: i32,
+            by: i32,
+            bz: i32,
+            cx: i32,
+            cy: i32,
+            cz: i32,
+            out: &mut Vec<(i32, i32, i32)>,
+        ) {
+            let w = (ax + ay + az).abs();
+            let h = (bx + by + bz).abs();
+            let d = (cx + cy + cz).abs();
+            let dax = sgn(ax);
+            let day = sgn(ay);
+            let daz = sgn(az);
+            let dbx = sgn(bx);
+            let dby = sgn(by);
+            let dbz = sgn(bz);
+            let dcx = sgn(cx);
+            let dcy = sgn(cy);
+            let dcz = sgn(cz);
+
+            // trivial row/column fills
+            if h == 1 && d == 1 {
+                for i in 0..w {
+                    out.push((x + i * dax, y + i * day, z + i * daz));
+                }
+                return;
+            }
+            if w == 1 && d == 1 {
+                for i in 0..h {
+                    out.push((x + i * dbx, y + i * dby, z + i * dbz));
+                }
+                return;
+            }
+            if w == 1 && h == 1 {
+                for i in 0..d {
+                    out.push((x + i * dcx, y + i * dcy, z + i * dcz));
+                }
+                return;
+            }
+
+            let mut ax2 = ax / 2;
+            let mut ay2 = ay / 2;
+            let mut az2 = az / 2;
+            let mut bx2 = bx / 2;
+            let mut by2 = by / 2;
+            let mut bz2 = bz / 2;
+            let mut cx2 = cx / 2;
+            let mut cy2 = cy / 2;
+            let mut cz2 = cz / 2;
+            let w2 = (ax2 + ay2 + az2).abs();
+            let h2 = (bx2 + by2 + bz2).abs();
+            let d2 = (cx2 + cy2 + cz2).abs();
+
+            // prefer even steps
+            if (w2 & 0x1) != 0 && w > 2 {
+                ax2 += dax;
+                ay2 += day;
+                az2 += daz;
+            }
+            if (h2 & 0x1) != 0 && h > 2 {
+                bx2 += dbx;
+                by2 += dby;
+                bz2 += dbz;
+            }
+            if (d2 & 0x1) != 0 && d > 2 {
+                cx2 += dcx;
+                cy2 += dcy;
+                cz2 += dcz;
+            }
+
+            // wide case, split in w only
+            if 2 * w > 3 * h && 2 * w > 3 * d {
+                hilbert_3d(x, y, z, ax2, ay2, az2, bx, by, bz, cx, cy, cz, out);
+                hilbert_3d(
+                    x + ax2,
+                    y + ay2,
+                    z + az2,
+                    ax - ax2,
+                    ay - ay2,
+                    az - az2,
+                    bx,
+                    by,
+                    bz,
+                    cx,
+                    cy,
+                    cz,
+                    out,
+                );
+            }
+            // do not split in d
+            else if 3 * h > 4 * d {
+                hilbert_3d(x, y, z, bx2, by2, bz2, cx, cy, cz, ax2, ay2, az2, out);
+                hilbert_3d(
+                    x + bx2,
+                    y + by2,
+                    z + bz2,
+                    ax,
+                    ay,
+                    az,
+                    bx - bx2,
+                    by - by2,
+                    bz - bz2,
+                    cx,
+                    cy,
+                    cz,
+                    out,
+                );
+                hilbert_3d(
+                    x + (ax - dax) + (bx2 - dbx),
+                    y + (ay - day) + (by2 - dby),
+                    z + (az - daz) + (bz2 - dbz),
+                    -bx2,
+                    -by2,
+                    -bz2,
+                    cx,
+                    cy,
+                    cz,
+                    -(ax - ax2),
+                    -(ay - ay2),
+                    -(az - az2),
+                    out,
+                );
+            }
+            // do not split in h
+            else if 3 * d > 4 * h {
+                hilbert_3d(x, y, z, cx2, cy2, cz2, ax2, ay2, az2, bx, by, bz, out);
+                hilbert_3d(
+                    x + cx2,
+                    y + cy2,
+                    z + cz2,
+                    ax,
+                    ay,
+                    az,
+                    bx,
+                    by,
+                    bz,
+                    cx - cx2,
+                    cy - cy2,
+                    cz - cz2,
+                    out,
+                );
+                hilbert_3d(
+                    x + (ax - dax) + (cx2 - dcx),
+                    y + (ay - day) + (cy2 - dcy),
+                    z + (az - daz) + (cz2 - dcz),
+                    -cx2,
+                    -cy2,
+                    -cz2,
+                    -(ax - ax2),
+                    -(ay - ay2),
+                    -(az - az2),
+                    bx,
+                    by,
+                    bz,
+                    out,
+                );
+            }
+            // regular case, split in all w/h/d
+            else {
+                hilbert_3d(x, y, z, bx2, by2, bz2, cx2, cy2, cz2, ax2, ay2, az2, out);
+                hilbert_3d(
+                    x + bx2,
+                    y + by2,
+                    z + bz2,
+                    cx,
+                    cy,
+                    cz,
+                    ax2,
+                    ay2,
+                    az2,
+                    bx - bx2,
+                    by - by2,
+                    bz - bz2,
+                    out,
+                );
+                hilbert_3d(
+                    x + (bx2 - dbx) + (cx - dcx),
+                    y + (by2 - dby) + (cy - dcy),
+                    z + (bz2 - dbz) + (cz - dcz),
+                    ax,
+                    ay,
+                    az,
+                    -bx2,
+                    -by2,
+                    -bz2,
+                    -(cx - cx2),
+                    -(cy - cy2),
+                    -(cz - cz2),
+                    out,
+                );
+                hilbert_3d(
+                    x + (ax - dax) + bx2 + (cx - dcx),
+                    y + (ay - day) + by2 + (cy - dcy),
+                    z + (az - daz) + bz2 + (cz - dcz),
+                    -cx,
+                    -cy,
+                    -cz,
+                    -(ax - ax2),
+                    -(ay - ay2),
+                    -(az - az2),
+                    bx - bx2,
+                    by - by2,
+                    bz - bz2,
+                    out,
+                );
+                hilbert_3d(
+                    x + (ax - dax) + (bx2 - dbx),
+                    y + (ay - day) + (by2 - dby),
+                    z + (az - daz) + (bz2 - dbz),
+                    -bx2,
+                    -by2,
+                    -bz2,
+                    cx2,
+                    cy2,
+                    cz2,
+                    -(ax - ax2),
+                    -(ay - ay2),
+                    -(az - az2),
+                    out,
+                );
+            }
+        }
+        // GridSfcOrdering3D(nx, ny, nz): the longest side becomes the main
+        // ("a") axis of the Hilbert curve.
+        let (elem_kind, face_kind, subdiv) = match elem_type {
+            ElementType::Hex8 => (ElementType::Hex8, ElementType::Quad4, 1usize),
+            ElementType::Tet4 => (ElementType::Tet4, ElementType::Tri3, 6usize),
+            other => panic!(
+                "make_cartesian_3d: element type {other:?} not supported \
+                 (only Hex8 and Tet4, matching MFEM MakeCartesian3D)"
+            ),
+        };
+
+        let n_box = nx * ny * nz;
+        let mut conn =
+            Vec::with_capacity(n_box * subdiv * if elem_type == ElementType::Hex8 { 8 } else { 4 });
+        let mut elem_tags = Vec::with_capacity(n_box * subdiv);
+
+        let mut push_hex = |v: [NodeId; 8]| {
+            if elem_type == ElementType::Hex8 {
+                conn.extend_from_slice(&v);
+                elem_tags.push(1);
+            } else {
+                // Reference-lib AddHexAsTets storage order (see doc comment):
+                //   (vi[6], vi[0], vi[c], vi[b]) per source row (0, b, c, 6).
+                const HEX_TO_TET: [[usize; 4]; 6] = [
+                    [6, 0, 2, 1],
+                    [6, 0, 1, 5],
+                    [6, 0, 5, 4],
+                    [6, 0, 3, 2],
+                    [6, 0, 7, 3],
+                    [6, 0, 4, 7],
+                ];
+                for t in &HEX_TO_TET {
+                    conn.extend_from_slice(&[v[t[0]], v[t[1]], v[t[2]], v[t[3]]]);
+                    elem_tags.push(1);
+                }
+            }
+        };
+
+        if elem_type == ElementType::Hex8 && sfc_ordering {
+            let mut sfc: Vec<(i32, i32, i32)> = Vec::with_capacity(n_box);
+            let (nx, ny, nz) = (nx as i32, ny as i32, nz as i32);
+            if nx >= ny && nx >= nz {
+                hilbert_3d(0, 0, 0, nx, 0, 0, 0, ny, 0, 0, 0, nz, &mut sfc);
+            } else if ny >= nx && ny >= nz {
+                hilbert_3d(0, 0, 0, 0, ny, 0, nx, 0, 0, 0, 0, nz, &mut sfc);
+            } else {
+                hilbert_3d(0, 0, 0, 0, 0, nz, nx, 0, 0, 0, ny, 0, &mut sfc);
+            }
+            debug_assert_eq!(sfc.len(), n_box);
+            for &(x, y, z) in &sfc {
+                let (x, y, z) = (x as usize, y as usize, z as usize);
+                // Hex8 local layout: bottom face CCW (0,1,2,3) at z,
+                // top face (4,5,6,7) at z+1 — identical to MFEM Make3D.
+                push_hex([
+                    nid(x, y, z),
+                    nid(x + 1, y, z),
+                    nid(x + 1, y + 1, z),
+                    nid(x, y + 1, z),
+                    nid(x, y, z + 1),
+                    nid(x + 1, y, z + 1),
+                    nid(x + 1, y + 1, z + 1),
+                    nid(x, y + 1, z + 1),
+                ]);
+            }
+        } else {
+            // Lexicographic z → y → x (MFEM Make3D non-SFC branch; MFEM also
+            // uses this for all TETRAHEDRON meshes).
+            for z in 0..nz {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        push_hex([
+                            nid(x, y, z),
+                            nid(x + 1, y, z),
+                            nid(x + 1, y + 1, z),
+                            nid(x, y + 1, z),
+                            nid(x, y, z + 1),
+                            nid(x + 1, y, z + 1),
+                            nid(x + 1, y + 1, z + 1),
+                            nid(x, y + 1, z + 1),
+                        ]);
+                    }
+                }
+            }
+        }
+
+        // Boundary faces, in MFEM Make3D order with MFEM's loop nesting:
+        //   bottom/top: y outer, x inner;  left/right: z outer, y inner;
+        //   front/back: x outer, z inner.
+        // Tags: bottom (z=0) 1, top (z=nz) 6, left (x=0) 5, right (x=nx) 3,
+        //       front (y=0) 2, back (y=ny) 4.
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        let mut push_quad = |q: [NodeId; 4], tag: i32| {
+            if elem_type == ElementType::Hex8 {
+                face_conn.extend_from_slice(&q);
+                face_tags.push(tag);
+            } else {
+                // Reference-lib AddBdrQuadAsTriangles storage order:
+                //   (q2, q0, q1) then (q0, q2, q3).
+                face_conn.extend_from_slice(&[q[2], q[0], q[1]]);
+                face_tags.push(tag);
+                face_conn.extend_from_slice(&[q[0], q[2], q[3]]);
+                face_tags.push(tag);
+            }
+        };
+        for y in 0..ny {
+            for x in 0..nx {
+                // bottom z = 0, tag 1
+                push_quad(
+                    [nid(x, y, 0), nid(x, y + 1, 0), nid(x + 1, y + 1, 0), nid(x + 1, y, 0)],
+                    1,
+                );
+            }
+        }
+        for y in 0..ny {
+            for x in 0..nx {
+                // top z = nz, tag 6
+                push_quad(
+                    [nid(x, y, nz), nid(x + 1, y, nz), nid(x + 1, y + 1, nz), nid(x, y + 1, nz)],
+                    6,
+                );
+            }
+        }
+        for z in 0..nz {
+            for y in 0..ny {
+                // left x = 0, tag 5
+                push_quad(
+                    [nid(0, y, z), nid(0, y, z + 1), nid(0, y + 1, z + 1), nid(0, y + 1, z)],
+                    5,
+                );
+            }
+        }
+        for z in 0..nz {
+            for y in 0..ny {
+                // right x = nx, tag 3
+                push_quad(
+                    [nid(nx, y, z), nid(nx, y + 1, z), nid(nx, y + 1, z + 1), nid(nx, y, z + 1)],
+                    3,
+                );
+            }
+        }
+        for x in 0..nx {
+            for z in 0..nz {
+                // front y = 0, tag 2
+                push_quad(
+                    [nid(x, 0, z), nid(x + 1, 0, z), nid(x + 1, 0, z + 1), nid(x, 0, z + 1)],
+                    2,
+                );
+            }
+        }
+        for x in 0..nx {
+            for z in 0..nz {
+                // back y = ny, tag 4
+                push_quad(
+                    [nid(x, ny, z), nid(x, ny, z + 1), nid(x + 1, ny, z + 1), nid(x + 1, ny, z)],
+                    4,
+                );
+            }
+        }
+
+        Mesh::uniform(
+            coords, conn, elem_tags, elem_kind,
+            face_conn, face_tags, face_kind,
+        )
+    }
     /// Generate a coaxial cable cross-section mesh (annular region).
     ///
     /// Outer square boundary `[-a, a]²`, inner circular conductor radius `r`.
