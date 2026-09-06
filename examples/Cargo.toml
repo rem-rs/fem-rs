@@ -284,14 +284,14 @@ path = "mfem_pex8_parallel_dpg.rs"
 name = "mfem_pex9_parallel_dg_advection"
 path = "mfem_pex9_parallel_dg_advection.rs"
 [[example]]
-name = "mfem_miniapp_volta"
-path = "mfem_miniapp_volta.rs"
+name = "miniapp_volta"
+path = "../miniapps/electromagnetics/volta.rs"
 [[example]]
-name = "mfem_miniapp_tesla"
-path = "mfem_miniapp_tesla.rs"
+name = "miniapp_tesla"
+path = "../miniapps/electromagnetics/tesla.rs"
 [[example]]
-name = "mfem_miniapp_lorentz"
-path = "mfem_miniapp_lorentz.rs"
+name = "miniapp_lorentz"
+path = "../miniapps/electromagnetics/lorentz.rs"
 [[example]]
 name = "mfem_ex15_dump_p1_it3"
 path = "mfem_ex15_dump_p1_it3.rs"
@@ -303,33 +303,33 @@ name = "mfem_ex15_dump_T002"
 path = "mfem_ex15_dump_T002.rs"
 
 [[example]]
-name = "mfem_mini_nurbs_solenoidal"
-path = "mfem_mini_nurbs_solenoidal.rs"
+name = "mini_nurbs_solenoidal"
+path = "../miniapps/nurbs/nurbs_solenoidal.rs"
 [[example]]
-name = "mfem_mini_nurbs_ex3"
-path = "mfem_mini_nurbs_ex3.rs"
+name = "mini_nurbs_ex3"
+path = "../miniapps/nurbs/nurbs_ex3.rs"
 [[example]]
-name = "mfem_mini_nurbs_ex1"
-path = "mfem_mini_nurbs_ex1.rs"
+name = "mini_nurbs_ex1"
+path = "../miniapps/nurbs/nurbs_ex1.rs"
 [[example]]
-name = "mfem_mini_nurbs_ex5"
-path = "mfem_mini_nurbs_ex5.rs"
+name = "mini_nurbs_ex5"
+path = "../miniapps/nurbs/nurbs_ex5.rs"
 [[example]]
-name = "mfem_mini_nurbs_ex24"
-path = "mfem_mini_nurbs_ex24.rs"
+name = "mini_nurbs_ex24"
+path = "../miniapps/nurbs/nurbs_ex24.rs"
 
 [[example]]
-name = "mfem_mini_nurbs_printfunc"
-path = "mfem_mini_nurbs_printfunc.rs"
+name = "mini_nurbs_printfunc"
+path = "../miniapps/nurbs/nurbs_printfunc.rs"
 
 [[example]]
-name = "mfem_miniapp_gridfunction_bounds"
-path = "mfem_miniapp_gridfunction_bounds.rs"
+name = "miniapp_gridfunction_bounds"
+path = "../miniapps/tools/gridfunction_bounds.rs"
 
 [[example]]
 name = "tmop_check_metric"
-path = "tmop_check_metric.rs"
+path = "../miniapps/tools/tmop_check_metric.rs"
 
 [[example]]
 name = "tmop_metric_magnitude"
-path = "tmop_metric_magnitude.rs"
+path = "../miniapps/tools/tmop_metric_magnitude.rs"

@@ -1,0 +1,8 @@
+//! Mixed scalar weak gradient integrator.
+use crate::integrator::QpData;
+use crate::mixed::MixedBilinearIntegrator;
+
+pub struct MixedScalarWeakGradientIntegrator;
+
+impl MixedBilinearIntegrator for MixedScalarWeakGradientIntegrator {
+    fn add_to_element_matrix(&self, qp_row: &QpData<_ qp_col:
