@@ -1,4 +1,3 @@
-//! ODE / Time integrators.
 //!
 //! Provides a unified [`TimeStepper`] trait plus concrete integrators:
 //!
@@ -12,19 +11,22 @@
 //! | IMEX Euler      | IMEX  | 1     | split stiff/non-stiff |
 //! | IMEX SSP-RK2    | IMEX  | 2     | split stiff/non-stiff |
 //! | IMEX RK3 / ARK3 | IMEX  | 3     | split stiff/non-stiff |
+//! | Complex CN      | Implicit | 2     | Schrödinger-type    |
 
 pub mod explicit;
 pub mod imex;
 pub mod implicit;
 pub mod symplectic;
 pub mod traits;
+pub mod complex_cn;
 
 pub use explicit::{ForwardEuler, Rk4};
 pub use imex::{
     ImexArk3, ImexDirkRk3, ImexEuler, ImexExpImplEuler, ImexRk2_222, ImexRk2_232, ImexRk3,
     ImexSsp2, ImexTimeStepper,
 };
-pub use implicit::{Bdf2, Bdf2State, ImplicitEuler, Sdirk2};
+pub use implicit::{Bdf2, Bdf2State, CrankNicolson, ImplicitEuler, Sdirk2};
 pub use symplectic::{SIAVSolver, Yoshida4};
-pub use traits::ImplicitTimeStepper;
-pub use traits::{ImexOperator, TimeStepper};
+pub use traits::{ImplicitTimeStepper, ImexOperator, TimeStepper};
+pub use complex_cn::{build_complex_hamiltonian, build_complex_hamiltonian_real,
+                     ComplexCrankNicolson};
