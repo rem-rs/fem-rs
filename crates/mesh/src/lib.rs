@@ -17,6 +17,7 @@ pub mod element_type;
 pub mod point_locator;
 pub mod simplex;
 pub mod submesh;
+pub mod par_submesh;
 pub mod topology;
 pub mod transformation;
 pub mod extrusion;
