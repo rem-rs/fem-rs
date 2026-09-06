@@ -21,6 +21,7 @@ use fem_mesh::Mesh;
 
 use crate::assembler::Assembler;
 use crate::standard::{DomainSourceIntegrator, MassIntegrator};
+use crate::vector_assembler::{piola_hcurl_basis, piola_hcurl_curl, piola_hdiv_basis, piola_hdiv_div};
 
 // ─── Reference element factory (mirrors assembler.rs) ──────────────────────
 
@@ -657,6 +658,118 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     }
 
     /// Compute the L¹ error norm: `‖u_h − u_exact‖_{L¹}`.
+
+    /// Evaluate the vector field u_h(xi) on element `elem` for vector-valued
+    /// spaces (H(curl), H(div), VectorH1).
+    pub fn evaluate_vector_at_element(&self, elem: u32, xi: &[f64]) -> Vec<f64> {
+        let mesh = self.space.mesh();
+        let edim = mesh.dim() as usize;
+        let order = self.space.order();
+        let stype = self.space.space_type();
+        let elem_type = mesh.element_type(elem);
+        let vre = crate::vector_assembler::vec_ref_elem(stype, elem_type, edim, order);
+        let n_ldofs = vre.n_dofs();
+        let elem_dofs = self.space.element_dofs(elem);
+        let signs = self.space.element_signs(elem);
+        let nodes = mesh.element_nodes(elem);
+        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        let mut ref_vals = vec![0.0; n_ldofs * edim];
+        vre.eval_basis_vec(xi, &mut ref_vals);
+        if let Some(sgns) = signs {
+            for i in 0..n_ldofs { for d in 0..edim { ref_vals[i * edim + d] *= sgns[i]; } }
+        }
+        let mut phys_vals = vec![0.0; n_ldofs * edim];
+        match stype {
+            fem_space::fe_space::SpaceType::HCurl => {
+                piola_hcurl_basis(&jac.transpose(), &ref_vals, &mut phys_vals, n_ldofs, edim);
+            }
+            fem_space::fe_space::SpaceType::HDiv => {
+                piola_hdiv_basis(&jac, det_j, &ref_vals, &mut phys_vals, n_ldofs, edim);
+            }
+            _ => { piola_hdiv_basis(&jac, det_j, &ref_vals, &mut phys_vals, n_ldofs, edim); }
+        }
+        let mut val = vec![0.0; edim];
+        for i in 0..n_ldofs {
+            let c = self.dofs[elem_dofs[i] as usize];
+            for d in 0..edim { val[d] += c * phys_vals[i * edim + d]; }
+        }
+        val
+    }
+    /// Evaluate the curl of an H(curl) field at reference point `xi` on element `elem`.
+    pub fn evaluate_curl_at_element(&self, elem: u32, xi: &[f64]) -> Vec<f64> {
+        let mesh = self.space.mesh();
+        let edim = mesh.dim() as usize;
+        let order = self.space.order();
+        let stype = self.space.space_type();
+        let elem_type = mesh.element_type(elem);
+        let vre = crate::vector_assembler::vec_ref_elem(stype, elem_type, edim, order);
+        let n_ldofs = vre.n_dofs();
+        let elem_dofs = self.space.element_dofs(elem);
+        let signs = self.space.element_signs(elem);
+        let nodes = mesh.element_nodes(elem);
+        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        let is_surface = mesh.topological_dim() as usize != edim;
+        let curl_dim = if edim == 2 || is_surface { 1 } else { 3 };
+        let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
+        vre.eval_curl(xi, &mut ref_curl);
+        if let Some(sgns) = signs {
+            for i in 0..n_ldofs { for d in 0..curl_dim { ref_curl[i * curl_dim + d] *= sgns[i]; } }
+        }
+        let mut phys_curl = vec![0.0; n_ldofs * curl_dim];
+        piola_hcurl_curl(&jac, det_j, &ref_curl, &mut phys_curl, n_ldofs, edim);
+        let mut val = vec![0.0; curl_dim];
+        for i in 0..n_ldofs {
+            let c = self.dofs[elem_dofs[i] as usize];
+            for d in 0..curl_dim { val[d] += c * phys_curl[i * curl_dim + d]; }
+        }
+        val
+    }
+    /// Evaluate the divergence of an H(div) field at reference point `xi` on element `elem`.
+    pub fn evaluate_div_at_element(&self, elem: u32, xi: &[f64]) -> f64 {
+        let mesh = self.space.mesh();
+        let edim = mesh.dim() as usize;
+        let order = self.space.order();
+        let stype = self.space.space_type();
+        let elem_type = mesh.element_type(elem);
+        let vre = crate::vector_assembler::vec_ref_elem(stype, elem_type, edim, order);
+        let n_ldofs = vre.n_dofs();
+        let elem_dofs = self.space.element_dofs(elem);
+        let signs = self.space.element_signs(elem);
+        let nodes = mesh.element_nodes(elem);
+        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        let mut ref_div = vec![0.0; n_ldofs];
+        vre.eval_div(xi, &mut ref_div);
+        if let Some(sgns) = signs { for i in 0..n_ldofs { ref_div[i] *= sgns[i]; } }
+        let mut phys_div = vec![0.0; n_ldofs];
+        piola_hdiv_div(det_j, &ref_div, &mut phys_div, n_ldofs);
+        let mut val = 0.0;
+        for i in 0..n_ldofs { val += self.dofs[elem_dofs[i] as usize] * phys_div[i]; }
+        val
+    }
+    /// Compute per-element min/max bounds.
+    pub fn get_element_bounds(&self) -> Vec<(f64, f64)> {
+        let mesh = self.space.mesh();
+        let n_elems = mesh.n_elements();
+        let mut bounds = Vec::with_capacity(n_elems as usize);
+        for e in 0..n_elems {
+            let order = self.space.element_order(e as u32);
+            let subdivisions = if order <= 1 { 1 } else { order as usize };
+            let mut local_min = f64::INFINITY;
+            let mut local_max = f64::NEG_INFINITY;
+            for si in 0..subdivisions {
+                for sj in 0..subdivisions {
+                    let xi = vec![si as f64 / subdivisions as f64,
+                                   sj as f64 / subdivisions as f64];
+                    let val = self.evaluate_at_element(e as u32, &xi);
+                    if val < local_min { local_min = val; }
+                    if val > local_max { local_max = val; }
+                }
+            }
+            bounds.push((local_min, local_max));
+        }
+        bounds
+    }
+    /// Extract nodal values.
     pub fn compute_l1_error(
         &self,
         exact: &dyn Fn(&[f64]) -> f64,

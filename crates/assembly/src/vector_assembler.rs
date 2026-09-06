@@ -224,7 +224,7 @@ pub(crate) fn piola_hcurl_curl(
 }
 
 /// Contravariant Piola transform for H(div): φ_phys = J φ_ref / det_j
-fn piola_hdiv_basis(
+pub(crate) fn piola_hdiv_basis(
     jac: &DMatrix<f64>,
     det_j: f64,
     ref_vals: &[f64],
@@ -245,7 +245,7 @@ fn piola_hdiv_basis(
 }
 
 /// H(div) divergence transform: div_phys = div_ref / det_j
-fn piola_hdiv_div(
+pub(crate) fn piola_hdiv_div(
     det_j: f64,
     ref_div: &[f64],
     phys_div: &mut [f64],
