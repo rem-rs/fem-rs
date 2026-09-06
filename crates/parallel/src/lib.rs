@@ -198,3 +198,4 @@ pub use par_hdf5::{par_write_mesh_and_fields, ParHdf5Options, ParallelWriteMode}
 pub use pmesh::{write_pmesh, read_pmesh};
 #[cfg(feature = "hdf5")]
 pub use checkpoint::{write_checkpoint, read_checkpoint, CheckpointData};
+pub mod surface_current;

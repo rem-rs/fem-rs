@@ -51,6 +51,39 @@ impl ParticleSet {
     /// Remove particles whose element is `None` (outside domain).
     pub fn remove_outside(&mut self) { self.particles.retain(|p| p.elem.is_some()); }
 
+    /// Retain only particles that are inside the mesh (elem is Some).
+    /// Mirrors MFEM's particle removal after `FindPointsGSLIB` reports misses.
+    pub fn retain_inside(&mut self) { self.particles.retain(|p| p.elem.is_some()); }
+
+    /// Locate particles in a 3D mesh using BVH-based FindPoints.
+    ///
+    /// More robust than `locate_3d` (which uses naive TetPointLocator).
+    /// Particles outside the mesh get `elem = None`.
+    pub fn find_in_mesh_3d(&mut self, mesh: &Mesh<3>, tol: f64) {
+        let finder = crate::findpts::FindPoints::new(mesh);
+        let opts = crate::findpts::FindPointsOptions { tol, ..Default::default() };
+        let points: Vec<[f64; 3]> = self.particles.iter().map(|p| [p.x[0], p.x[1], p.x[2]]).collect();
+        let results = finder.locate_batch(&points, &opts);
+        for (p, res) in self.particles.iter_mut().zip(results.iter()) {
+            if let Some(lp) = res {
+                p.elem = Some(lp.elem);
+                p.barycentric = lp.barycentric.clone();
+            } else {
+                p.elem = None;
+                p.barycentric = vec![0.0; 4];
+            }
+        }
+    }
+
+    /// Locate in 3D mesh + interpolate a vector field onto particles.
+    ///
+    /// Combines `find_in_mesh_3d` + `interpolate_vector_3d` in one call,
+    /// matching MFEM's `FindPointsGSLIB::FindPoints()` + `Interpolate()`.
+    pub fn find_and_interpolate_3d(&mut self, mesh: &Mesh<3>, field: &[f64], data_idx: usize, tol: f64) {
+        self.find_in_mesh_3d(mesh, tol);
+        self.interpolate_vector_3d(mesh, field, data_idx);
+    }
+
     /// Retain only particles satisfying `predicate` (borrows `Particle`).
     ///
     /// MFEM equivalent: `ParticleSet::RemoveParticles` with a custom index list.
@@ -369,6 +402,82 @@ mod tests {
     }
 
     #[test]
+    fn find_in_mesh_3d_inside() {
+        let mesh = Mesh::<3>::unit_cube_tet(4);
+        let mut ps = ParticleSet::new(3);
+        ps.add_particle(vec![0.5, 0.5, 0.5], 1);
+        ps.find_in_mesh_3d(&mesh, 1e-10);
+        assert!(ps.get(0).elem.is_some(), "particle at center should be inside");
+    }
+
+    #[test]
+    fn find_in_mesh_3d_outside() {
+        let mesh = Mesh::<3>::unit_cube_tet(4);
+        let mut ps = ParticleSet::new(3);
+        ps.add_particle(vec![5.0, 5.0, 5.0], 1);
+        ps.find_in_mesh_3d(&mesh, 1e-10);
+        assert!(ps.get(0).elem.is_none(), "particle outside unit cube should not be located");
+    }
+
+    #[test]
+    fn find_and_interpolate_vector_3d() {
+        let mesh = Mesh::<3>::unit_cube_tet(4);
+        let mut ps = ParticleSet::new(3);
+        ps.add_particle(vec![0.3, 0.3, 0.3], 4);
+        // Constant field E = (0, 0, 1) — should interpolate exactly regardless of barycentric weights
+        let nn = mesh.n_nodes();
+        let mut field = vec![0.0; nn * 3];
+        for n in 0..nn {
+            field[n * 3 + 2] = 1.0;
+        }
+        ps.find_and_interpolate_3d(&mesh, &field, 1, 1e-10);
+        assert!(ps.get(0).elem.is_some());
+        assert!((ps.get(0).data[1] - 0.0).abs() < 1e-10, "E_x should be ~0, got {}", ps.get(0).data[1]);
+        assert!((ps.get(0).data[2] - 0.0).abs() < 1e-10, "E_y should be ~0, got {}", ps.get(0).data[2]);
+        assert!((ps.get(0).data[3] - 1.0).abs() < 1e-10, "E_z should be ~1, got {}", ps.get(0).data[3]);
+    }
+
+    #[test]
+    fn boris_step_with_interpolated_field() {
+        // Use find_and_interpolate_3d to set E field on particle, then Boris step
+        let mesh = Mesh::<3>::unit_cube_tet(4);
+        let mut ps = ParticleSet::new(3);
+        ps.add_particle(vec![0.5, 0.5, 0.5], 11);
+        // Set mass + charge
+        ps.get_mut(0).data[0] = 1.0;
+        ps.get_mut(0).data[1] = 1.0;
+        // Uniform E = (0, 0, 1), zero B
+        let nn = mesh.n_nodes();
+        let mut efield = vec![0.0; nn * 3];
+        for n in 0..nn {
+            efield[n * 3 + 2] = 1.0;
+        }
+        ps.find_and_interpolate_3d(&mesh, &efield, 5, 1e-10);
+        // Set B = 0
+        for i in 0..ps.n_particles() {
+            let p = ps.get_mut(i);
+            p.data[8] = 0.0; p.data[9] = 0.0; p.data[10] = 0.0;
+        }
+        ps.boris_step(0.01);
+        let p = ps.get(0);
+        assert!((p.data[2] - 0.0).abs() < 1e-10);
+        assert!((p.data[3] - 0.0).abs() < 1e-10);
+        assert!((p.data[4] - 0.01).abs() < 1e-10, "mom_z should be ~0.01, got {}", p.data[4]);
+    }
+
+    #[test]
+    fn retain_inside_filters() {
+        let mesh = Mesh::<3>::unit_cube_tet(4);
+        let mut ps = ParticleSet::new(3);
+        ps.add_particle(vec![0.5, 0.5, 0.5], 1);
+        ps.add_particle(vec![5.0, 5.0, 5.0], 1);
+        ps.find_in_mesh_3d(&mesh, 1e-10);
+        assert_eq!(ps.n_particles(), 2);
+        ps.retain_inside();
+        assert_eq!(ps.n_particles(), 1);
+    }
+
+        #[test]
     fn boundary_emitter() {
         let mesh = Mesh::<2>::unit_square_tri(4);
         let mut ps = ParticleSet::new(2);

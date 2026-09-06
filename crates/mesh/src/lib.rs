@@ -41,3 +41,4 @@ pub use transformation::{ElementTransformation, geometry_jacobian, element_jacob
 pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
 pub use particle::ParticleSet;
 pub use supermesh::{build_supermesh, SupermeshElement};
+pub mod nurbs_mesh;
