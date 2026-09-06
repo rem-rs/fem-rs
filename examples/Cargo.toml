@@ -359,5 +359,9 @@ name = "mesh_shaper"
 path = "../miniapps/meshing/shaper.rs"
 
 [[example]]
+name = "mesh_twist"
+path = "../miniapps/meshing/twist.rs"
+
+[[example]]
 name = "mesh_extruder"
 path = "../miniapps/meshing/extruder.rs"
