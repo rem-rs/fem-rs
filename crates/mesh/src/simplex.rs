@@ -1520,6 +1520,80 @@ impl<const D: usize> Mesh<D> {
             face_conn, face_tags, ElementType::Line2,
         )
     }
+    /// Generate a Cartesian triangular mesh of a rectangular domain
+    /// `[0,sx] × [0,sy]`, matching MFEM's `Mesh::MakeCartesian2D(nx, ny,
+    /// TRIANGLE, false, sx, sy, false)`.
+    ///
+    /// Each of the `nx × ny` boxes is split into 2 triangles along the
+    /// bottom-left → top-right diagonal, in MFEM `Make2D`'s order:
+    /// first `(BL, TR, TL)`, then `(BL, BR, TR)` — the latter stored as
+    /// `(TR, BL, BR)` to reproduce the reference library's vertex storage
+    /// (verified against the MFEM 4.10 `libmfem.a`).
+    ///
+    /// Boundary edges are emitted in MFEM's order with MFEM's tags:
+    /// bottom `y=0` → 1, top `y=sy` → 3, left `x=0` → 4, right `x=sx` → 2
+    /// (bottom and top first, exactly like `Make2D`).
+    pub fn make_cartesian_2d_tri(nx: usize, ny: usize, sx: f64, sy: f64) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 2, "make_cartesian_2d_tri requires D = 2");
+        let (npx, npy) = (nx + 1, ny + 1);
+        let mut coords = Vec::with_capacity(npx * npy * 2);
+        for j in 0..npy {
+            for i in 0..npx {
+                coords.push((i as f64 / nx as f64) * sx);
+                coords.push((j as f64 / ny as f64) * sy);
+            }
+        }
+        let nid = |i: usize, j: usize| -> NodeId { (j * npx + i) as NodeId };
+
+        let mut conn = Vec::with_capacity(nx * ny * 6);
+        let mut elem_tags = Vec::with_capacity(nx * ny * 2);
+        for j in 0..ny {
+            for i in 0..nx {
+                let (bl, br, tr, tl) = (
+                    nid(i, j),
+                    nid(i + 1, j),
+                    nid(i + 1, j + 1),
+                    nid(i, j + 1),
+                );
+                // MFEM Make2D (TRIANGLE): (BL,TR,TL) stored as-is …
+                conn.extend_from_slice(&[bl, tr, tl]);
+                elem_tags.push(1);
+                // … then (BL,BR,TR), stored as (TR,BL,BR) in the reference lib.
+                conn.extend_from_slice(&[tr, bl, br]);
+                elem_tags.push(1);
+            }
+        }
+
+        // Boundary edges, MFEM Make2D order: bottom(1), top(3), left(4),
+        // right(2) — content/direction identical to Make2D.
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        let mut add_edge = |a: NodeId, b: NodeId, tag: i32| {
+            face_conn.push(a);
+            face_conn.push(b);
+            face_tags.push(tag);
+        };
+        for i in 0..nx {
+            add_edge(nid(i, 0), nid(i + 1, 0), 1); // bottom
+        }
+        for i in 0..nx {
+            add_edge(nid(i + 1, ny), nid(i, ny), 3); // top (reversed)
+        }
+        for j in 0..ny {
+            add_edge(nid(0, j + 1), nid(0, j), 4); // left (reversed)
+        }
+        for j in 0..ny {
+            add_edge(nid(nx, j), nid(nx, j + 1), 2); // right
+        }
+
+        Mesh::uniform(
+            coords, conn, elem_tags, ElementType::Tri3,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
     /// Generate a Cartesian (structured) hex/tet mesh of a box domain,
     /// matching MFEM's `Mesh::MakeCartesian3D(nx, ny, nz, type, sx, sy, sz,
     /// sfc_ordering)`.

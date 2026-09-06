@@ -50,23 +50,35 @@ fn find_local_dof<const D: usize>(
 /// Build a refined mesh by subdividing every `orig` element into `nref^dim`
 /// sub-elements whose corners are the H1(order = `nref`, Gauss-Lobatto) nodes.
 ///
-/// Currently supports `Quad4` (D=2) meshes with a uniform element type and
-/// matches MFEM's `MakeRefined(orig, nref, BasisType::GaussLobatto)` output
-/// vertex-, element- and boundary-for-element (verified against the MFEM 4.10
-/// reference library for nref = 2..4).
+/// Currently supports `Quad4` (D=2, nref = 2..4) and `Tri3` (D=2, nref = 2)
+/// meshes with a uniform element type and matches MFEM's
+/// `MakeRefined(orig, nref, BasisType::GaussLobatto)` output vertex-, element-
+/// and boundary-for-element (verified against the MFEM 4.10 reference library).
 ///
-/// Hex8 is NOT yet supported: fem-rs' `HexQk` reference-element DOF layout
-/// differs from MFEM's H1 hex ordering (edge order, two-phase global numbering,
-/// GLL face/volume node positions), so the refined-vertex numbering cannot be
-/// made 1:1 without first aligning `HexQk` with MFEM `Geometry::CUBE`
-/// edges/faces.  See `output/miniapp_gap_audit.md` (G3 notes).
+/// Hex8 and Tri3 (nref ≥ 3) are NOT yet supported: fem-rs' `HexQk`
+/// reference-element DOF layout differs from MFEM's H1 hex ordering, and the
+/// DofManager's simplex (Tri/Tet) edge-DOF coordinates are equally spaced while
+/// MFEM H1 uses Gauss-Lobatto nodes for p ≥ 3 — the refined-vertex numbering
+/// cannot be made 1:1 without first aligning these (plus P-refinement /
+/// prolongation code that assumes equal spacing) with MFEM.  See
+/// `output/miniapp_gap_audit.md` (G3 notes).
 pub fn make_refined<const D: usize>(orig: &Mesh<D>, nref: usize) -> Mesh<D>
 where
     [(); D]: ,
 {
     assert!(nref >= 2, "make_refined: nref must be >= 2");
+    if D == 2 && orig.elem_type == ElementType::Tri3 {
+        // The Tri3 implementation is verified 1:1 for nref = 2 only: the
+        // DofManager's simplex (Tri/Tet) edge-DOF coordinates are equally
+        // spaced while MFEM H1 uses Gauss-Lobatto nodes for p >= 3, so the
+        // refined-vertex numbering cannot be made 1:1 without first aligning
+        // the simplex DOF coordinates (and P-refinement/prolongation code
+        // that assumes equal spacing) with MFEM — see make_refined.rs docs.
+        assert!(nref <= 2, "make_refined: Tri3 with nref >= 3 is not 1:1 yet (see docs)");
+    }
     match (D, orig.elem_type) {
         (2, ElementType::Quad4) => refine_tensor(orig, nref),
+        (2, ElementType::Tri3) => refine_tri(orig, nref),
         (3, ElementType::Hex8) => panic!(
             "make_refined: Hex8 is not 1:1 yet — the fem-rs HexQk reference-element
              DOF layout differs from MFEM H1 hex (see make_refined.rs doc); porting
@@ -74,9 +86,197 @@ where
         ),
         (d, et) => panic!(
             "make_refined: unsupported (dim={d}, elem_type={et:?}); \
-             supported: Quad4 (2D) and Hex8 (3D)"
+             supported: Quad4 (2D) and Tri3 (2D)"
         ),
     }
+}
+
+/// Subdivide every original triangle into `nref²` sub-triangles whose corners
+/// are the H1(order = nref, Gauss-Lobatto) nodes.
+///
+/// The reference-lattice layout and sub-triangle connectivity replicate MFEM's
+/// `GeometryRefiner::Refine(TRIANGLE, …)` (`RefPts` in row-major rows of
+/// decreasing length, `RefGeoms` connecting each lattice point to its east /
+/// north-east neighbours), and the resulting vertex numbering follows the H1
+/// DOF ordering of the `DofManager` — both verified against the MFEM 4.10
+/// reference library (`T2RF2` dump: 2×2 MakeCartesian2D TRIANGLE mesh refined
+/// with nref = 2).
+fn refine_tri<const D: usize>(orig: &Mesh<D>, nref: usize) -> Mesh<D>
+where
+    [(); D]: ,
+{
+    debug_assert_eq!(D, 2);
+    let p = nref;
+    let dim = 2usize;
+
+    // 1D GLL nodes on [0,1] (endpoints included) — MFEM poly1d nodal points.
+    let cp: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+
+    // MFEM GeometryRefiner::Refine(TRIANGLE, p): RefPts in rows j = 0..p of
+    // decreasing length (p+1-j points), barycentric-normalised cp positions.
+    let npts = (p + 1) * (p + 2) / 2;
+    let mut ref_x = vec![0.0f64; npts];
+    let mut ref_y = vec![0.0f64; npts];
+    let mut k = 0usize;
+    for j in 0..=p {
+        for i in 0..=(p - j) {
+            let den = cp[i] + cp[j] + cp[p - i - j];
+            ref_x[k] = cp[i] / den;
+            ref_y[k] = cp[j] / den;
+            k += 1;
+        }
+    }
+    debug_assert_eq!(k, npts);
+
+    // MFEM RefGeoms: for each lattice point k of row j, the (up to two)
+    // triangles (k, k+1, k+p-j+1) and — unless the row's last point —
+    // (k+1, k+p-j+2, k+p-j+1).
+    let mut sub: Vec<[usize; 3]> = Vec::with_capacity(p * p);
+    let mut row_k = 0usize; // lattice index of row j's first point
+    for j in 0..p {
+        for i in 0..(p - j) {
+            let kk = row_k + i;
+            sub.push([kk, kk + 1, kk + p - j + 1]);
+            if i + j + 1 < p {
+                sub.push([kk + 1, kk + p - j + 2, kk + p - j + 1]);
+            }
+        }
+        row_k += p - j + 1;
+    }
+    debug_assert_eq!(sub.len(), p * p);
+
+    let dm = DofManager::new(orig, p as u8);
+    let ndofs = dm.n_dofs;
+    let n_elems = orig.n_elems();
+    let n_orig_nodes = orig.n_nodes();
+
+    let mut coords: Vec<f64> = Vec::with_capacity(ndofs * dim);
+    for d in 0..ndofs as u32 {
+        coords.extend_from_slice(dm.dof_coord(d));
+    }
+
+    let mut scale = 0.0f64;
+    for n in 0..n_orig_nodes as u32 {
+        for d in 0..D {
+            let c = orig.node_coords(n)[d].abs();
+            if c > scale {
+                scale = c;
+            }
+        }
+    }
+    let tol = 1e-7 * scale.max(1.0);
+
+    let mut conn: Vec<NodeId> = Vec::new();
+    let mut elem_tags: Vec<i32> = Vec::new();
+    for e in 0..n_elems as u32 {
+        let ns = orig.element_nodes(e);
+        debug_assert_eq!(ns.len(), 3);
+        let c = [
+            orig.node_coords(ns[0]),
+            orig.node_coords(ns[1]),
+            orig.node_coords(ns[2]),
+        ];
+        let edofs = dm.element_dofs(e);
+        debug_assert_eq!(edofs.len(), npts, "H1({p}) nodes per tri");
+        // Local DOF physical positions.
+        let mut local: Vec<(usize, [f64; D])> = Vec::with_capacity(npts);
+        for (kk, &dof) in edofs.iter().enumerate() {
+            let dc = dm.dof_coord(dof);
+            let mut arr = [0.0; D];
+            arr.copy_from_slice(dc);
+            local.push((kk, arr));
+        }
+        // Map every lattice point to a local DOF index by physical matching.
+        let mut lattice = vec![usize::MAX; npts];
+        for kk in 0..npts {
+            let x = ref_x[kk];
+            let y = ref_y[kk];
+            let target = [
+                (1.0 - x - y) * c[0][0] + x * c[1][0] + y * c[2][0],
+                (1.0 - x - y) * c[0][1] + x * c[1][1] + y * c[2][1],
+            ];
+            lattice[kk] = find_local_dof(&local, &target, tol).unwrap_or_else(|| {
+                panic!(
+                    "make_refined: could not match tri lattice point {kk} \
+                     (phys {target:?}) to an H1({p}) DOF of element {e}"
+                )
+            });
+        }
+        for t in &sub {
+            conn.push(edofs[lattice[t[0]]]);
+            conn.push(edofs[lattice[t[1]]]);
+            conn.push(edofs[lattice[t[2]]]);
+            elem_tags.push(orig.elem_tags[e as usize]);
+        }
+    }
+
+    // Boundary: each boundary edge (Line2) becomes p segments between the p+1
+    // GLL points on that edge, in the boundary-face direction.
+    let mut face_conn: Vec<NodeId> = Vec::new();
+    let mut face_tags: Vec<i32> = Vec::new();
+    for f in 0..orig.n_faces() as u32 {
+        let bverts = orig.bface_nodes(f);
+        debug_assert_eq!(bverts.len(), 2);
+        let (a, b) = (bverts[0], bverts[1]);
+        let ca = orig.node_coords(a);
+        let cb = orig.node_coords(b);
+        let mut seg: Vec<NodeId> = Vec::with_capacity(p + 1);
+        for kk in 0..=p {
+            let t = cp[kk];
+            let pt = [(1.0 - t) * ca[0] + t * cb[0], (1.0 - t) * ca[1] + t * cb[1]];
+            seg.push(find_boundary_edge_node(orig, &dm, a, b, &pt, tol).unwrap_or_else(|| {
+                panic!("make_refined: boundary node not found for edge {a}-{b}")
+            }));
+        }
+        for kk in 0..p {
+            face_conn.push(seg[kk]);
+            face_conn.push(seg[kk + 1]);
+            face_tags.push(orig.face_tags[f as usize]);
+        }
+    }
+
+    Mesh::uniform(
+        coords, conn, elem_tags, orig.elem_type,
+        face_conn, face_tags, orig.face_type,
+    )
+}
+
+/// Find the global DOF (refined-mesh node) at physical position `pt` on the
+/// boundary edge `a-b`, by scanning the elements containing both vertices.
+fn find_boundary_edge_node<const D: usize>(
+    orig: &Mesh<D>,
+    dm: &DofManager,
+    a: NodeId,
+    b: NodeId,
+    pt: &[f64],
+    tol: f64,
+) -> Option<u32>
+where
+    [(); D]: ,
+{
+    for e in 0..orig.n_elems() as u32 {
+        let ns = orig.element_nodes(e);
+        let has_a = ns.contains(&a);
+        let has_b = ns.contains(&b);
+        if !has_a || !has_b {
+            continue;
+        }
+        // Triangles: any two vertices are an edge.  Quads: must be adjacent
+        // corners (checked by the caller's geometry assumptions — for Quad4 we
+        // require the pair to be an actual edge, which the caller guarantees).
+        for &dof in dm.element_dofs(e) {
+            let dc = dm.dof_coord(dof);
+            if (0..D).all(|d| (dc[d] - pt[d]).abs() <= tol) {
+                return Some(dof);
+            }
+        }
+        return None;
+    }
+    None
 }
 
 fn refine_tensor<const D: usize>(orig: &Mesh<D>, nref: usize) -> Mesh<D>
@@ -433,6 +633,26 @@ mod tests {
         assert_eq!(r3.n_nodes(), 49);
         assert_eq!(r3.n_elems(), 36);
         assert_eq!(r3.n_faces(), 24);
+    }
+
+    #[test]
+    fn tri_refined_matches_mfem() {
+        // 2×2 MakeCartesian2D TRIANGLE mesh → nref 2: 25 verts / 32 elems /
+        // 16 bdr.  Values below are the MFEM 4.10 reference MakeRefined output
+        // (T2RF2).
+        let t = Mesh::<2>::make_cartesian_2d_tri(2, 2, 1.0, 1.0);
+        let r = make_refined(&t, 2);
+        assert_eq!(r.n_nodes(), 25);
+        assert_eq!(r.n_elems(), 32);
+        assert_eq!(r.n_faces(), 16);
+        // First original triangle (0,4,3) → 4 sub-triangles.
+        let e0 = r.element_nodes(0);
+        assert_eq!(&e0[..], &[0u32, 9, 11]);
+        let e1 = r.element_nodes(1);
+        assert_eq!(&e1[..], &[9u32, 10, 11]);
+        // vertex 9 = GLL midpoint of the (0,4) diagonal: (0.25, 0.25).
+        let c9 = v2(&r, 9);
+        assert!((c9.0 - 0.25).abs() < 1e-12 && (c9.1 - 0.25).abs() < 1e-12);
     }
 
 }
