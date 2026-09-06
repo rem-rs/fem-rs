@@ -98,6 +98,8 @@ pub use dg::*;
 /// Discontinuous Petrov-Galerkin (DPG) methods.
 pub mod dpg;
 pub use dpg::*;
+pub mod dpg_weakform;
+pub use dpg_weakform::*;
 
 /// Hybridizable Discontinuous Galerkin (HDG) methods.
 pub mod hdg;
