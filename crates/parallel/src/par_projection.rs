@@ -143,6 +143,50 @@ impl<'a, M: MeshTopology> ParGradientProjector<'a, M> {
     }
 }
 
+/// Parallel divergence-free projector for H(curl) spaces (MFEM
+/// `DivergenceFreeProjector`).  Given a vector `x` of Nedelec DoFs for an
+/// arbitrary vector field, computes the Nedelec DoFs of the divergence-free
+/// portion `y`.  The resulting vector satisfies `Div y = 0` in a weak sense.
+///
+/// Algorithm (matches MFEM):
+///   1. Apply the gradient projector: `y = P_grad(x)` (irrotational part)
+///   2. Compute divergence-free part: `x - y`
+pub struct ParDivergenceFreeProjector<'a, M: MeshTopology> {
+    gradient_proj: ParGradientProjector<'a, M>,
+}
+
+impl<'a, M: MeshTopology> ParDivergenceFreeProjector<'a, M> {
+    pub fn new(
+        h1: &'a ParallelFESpace<H1Space<M>>,
+        g: &CsrMatrix<f64>,
+        b: &'a ParCsrMatrix,
+        nodal: &'a ParCsrMatrix,
+        amg_cfg: ParAmgConfig,
+    ) -> Self {
+        let gradient_proj = ParGradientProjector::new(h1, g, b, nodal, amg_cfg);
+        ParDivergenceFreeProjector { gradient_proj }
+    }
+
+    /// Apply `P_divfree` to a single vector in place.
+    /// Computes `y = x - P_grad(x)` (divergence-free part).
+    pub fn apply(&self, x: &mut ParVector) {
+        let x_orig = x.clone_vec();
+        // Apply gradient projector: x ← P_grad(x) = x - G·(GᵀBG)⁻¹·GᵀBx
+        self.gradient_proj.apply(std::slice::from_mut(x));
+        // Compute divergence-free part: x ← x_orig - x
+        for i in 0..x.len() {
+            x.data[i] = x_orig.data[i] - x.data[i];
+        }
+    }
+
+    /// Apply `P_divfree` to a block of vectors in place.
+    pub fn apply_block(&self, block: &mut [ParVector]) {
+        for v in block {
+            self.apply(v);
+        }
+    }
+}
+
 /// Assemble the nodal (H¹) operator `GᵀBG` from the discrete gradient `G`
 /// and the pencil mass matrix `B` (H(curl)).
 ///

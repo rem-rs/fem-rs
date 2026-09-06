@@ -177,7 +177,7 @@ pub use par_csr::ParCsrMatrix;
 pub use par_discrete_operator::ParDiscreteLinearOperator;
 pub use par_lobpcg::{par_lobpcg, ParLobpcgResult};
 pub use par_mesh::ParallelMesh;
-pub use par_projection::ParGradientProjector;
+pub use par_projection::{ParGradientProjector, ParDivergenceFreeProjector};
 pub use par_mixed_assembler::ParMixedAssembler;
 pub use par_mixed_assembler::{ParMixedSesquilinearForm, ParMixedComplexSystem};
 pub use par_ras::{
