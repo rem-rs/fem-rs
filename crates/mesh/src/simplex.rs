@@ -2817,6 +2817,40 @@ impl<const D: usize> Mesh<D> {
         self.face_tags = new_face_tags;
     }
 
+    /// Get node coordinates as Vec.
+    pub fn node_coords_vec(&self, n: NodeId) -> Vec<f64> {
+        let off = n as usize * D;
+        self.coords[off..off + D].to_vec()
+    }
+
+    /// Get the face-to-element map (build if needed).
+    pub fn face_to_elem_map(&mut self) -> &Vec<ElemId> {
+        if self.face_to_elem.is_none() {
+            self.build_face_to_elem();
+        }
+        self.face_to_elem.as_ref().unwrap()
+    }
+
+    /// Iterate over all faces and their elements.
+    pub fn face_elements(&self, f: FaceId) -> Vec<ElemId> {
+        let mut result = Vec::new();
+        let npf = if self.n_faces() > 0 { self.face_conn.len() / self.n_faces() } else { 0 };
+        let fnodes: Vec<u32> = self.face_conn[f as usize * npf..f as usize * npf + npf].to_vec();
+        for e in 0..self.n_elems() {
+            let enodes = self.elem_nodes(e as ElemId);
+            if fnodes.iter().all(|n| enodes.contains(n)) {
+                result.push(e as ElemId);
+            }
+        }
+        result
+    }
+
+    /// Get face-to-element map (immutable).
+    pub fn face_to_elem(&self) -> Option<&Vec<ElemId>> {
+        self.face_to_elem.as_ref()
+    }
+
+
     // ─── Additional low-level API for meshing/ examples ──
 
     /// Get mutable element vertices slice.

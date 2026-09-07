@@ -212,7 +212,7 @@ fn boundary_face_outward_normal_2d(mesh: &Mesh<2>, face: u32) -> ([f64; 2], f64)
     let mut nx = ty / len;
     let mut ny = -tx / len;
 
-    let (elem, _) = mesh.face_elements(face);
+    let elem = mesh.face_elements(face).first().copied().unwrap_or(u32::MAX);
     let enodes = mesh.elem_nodes(elem);
     let mut opp = enodes[0];
     for &nid in enodes {
@@ -276,7 +276,7 @@ pub fn net_boundary_flux_h1_p1_2d(
     let mesh = space.mesh();
     let mut out = 0.0_f64;
     for f in mesh.face_iter() {
-        let (elem, other) = mesh.face_elements(f);
+        let elem = mesh.face_elements(f).first().copied().unwrap_or(u32::MAX); let other = None;
         if other.is_some() {
             continue;
         }
