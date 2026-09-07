@@ -385,3 +385,11 @@ path = "../miniapps/meshing/reflector.rs"
 [[example]]
 name = "mesh_extruder"
 path = "../miniapps/meshing/extruder.rs"
+
+[[example]]
+name = "mesh_explorer"
+path = "../miniapps/meshing/mesh-explorer.rs"
+
+[[example]]
+name = "mesh_quality"
+path = "../miniapps/meshing/mesh-quality.rs"
