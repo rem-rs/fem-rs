@@ -2816,6 +2816,112 @@ impl<const D: usize> Mesh<D> {
         self.face_conn = new_face_conn;
         self.face_tags = new_face_tags;
     }
+
+    // ─── Additional low-level API for meshing/ examples ──
+
+    /// Get mutable element vertices slice.
+    pub fn element_vertices_mut(&mut self, e: ElemId) -> &mut [NodeId] {
+        let npe = self.elem_type.nodes_per_element();
+        let off = e as usize * npe;
+        &mut self.conn[off..off + npe]
+    }
+
+    /// Get element attribute.
+    pub fn element_attribute(&self, e: ElemId) -> i32 {
+        self.elem_tags[e as usize]
+    }
+
+    /// Set element attribute.
+    pub fn set_element_attribute(&mut self, e: ElemId, attr: i32) {
+        self.elem_tags[e as usize] = attr;
+    }
+
+    /// Get boundary face attribute.
+    pub fn face_attribute(&self, f: FaceId) -> i32 {
+        self.face_tags[f as usize]
+    }
+
+    /// Set boundary face attribute.
+    pub fn set_face_attribute(&mut self, f: FaceId, attr: i32) {
+        self.face_tags[f as usize] = attr;
+    }
+
+    /// Add a boundary face (variable nodes).
+    pub fn add_bdr_face(&mut self, v: &[NodeId], attr: i32) -> FaceId {
+        let id = self.n_faces() as FaceId;
+        for &vi in v { self.face_conn.push(vi); }
+        self.face_tags.push(attr);
+        id
+    }
+
+    /// Add a boundary segment (2 nodes).
+    pub fn add_bdr_segment(&mut self, v: &[NodeId; 2], attr: i32) -> FaceId {
+        self.add_bdr_face(v, attr)
+    }
+
+    /// Add a boundary triangle (3 nodes).
+    pub fn add_bdr_triangle(&mut self, v: &[NodeId; 3], attr: i32) -> FaceId {
+        self.add_bdr_face(v, attr)
+    }
+
+    /// Add a boundary quad (4 nodes).
+    pub fn add_bdr_quad(&mut self, v: &[NodeId; 4], attr: i32) -> FaceId {
+        self.add_bdr_face(v, attr)
+    }
+
+    /// Get element base geometry type.
+    pub fn element_base_geometry(&self, e: ElemId) -> Option<ElementType> {
+        Some(self.element_type(e as ElemId))
+    }
+
+    /// Get face vertices as Vec.
+    pub fn face_vertices_vec(&self, f: FaceId) -> Vec<NodeId> {
+        self.face_conn.iter().copied().collect()
+    }
+
+    /// Get element vertices as Vec.
+    pub fn element_vertices_vec(&self, e: ElemId) -> Vec<NodeId> {
+        self.elem_nodes(e as ElemId).to_vec()
+    }
+
+    /// Get number of vertices per element.
+    pub fn element_nvertices(&self) -> usize {
+        self.elem_type.nodes_per_element()
+    }
+
+    /// Get face base geometry type.
+    pub fn face_base_geometry(&self, _f: FaceId) -> Option<ElementType> {
+        Some(self.face_type)
+    }
+
+    /// Get element center (centroid of vertices).
+    pub fn element_center(&self, e: ElemId) -> Vec<f64> {
+        let nodes = self.elem_nodes(e as ElemId);
+        let dim = D;
+        let mut center = vec![0.0; dim];
+        for n in nodes {
+            let c = self.coords_of(*n);
+            for d in 0..dim { center[d] += c[d]; }
+        }
+        for d in 0..dim { center[d] /= nodes.len() as f64; }
+        center
+    }
+
+    /// Get element size (max edge length).
+    pub fn element_size(&self, e: ElemId) -> f64 {
+        let nodes = self.elem_nodes(e as ElemId);
+        let mut max_dist = 0.0f64;
+        for i in 0..nodes.len() {
+            for j in (i+1)..nodes.len() {
+                let ci = self.coords_of(nodes[i]);
+                let cj = self.coords_of(nodes[j]);
+                let mut dist = 0.0f64;
+                for d in 0..D { dist += (ci[d] - cj[d]).powi(2); }
+                max_dist = max_dist.max(dist.sqrt());
+            }
+        }
+        max_dist
+    }
 }
 
 // ---------------------------------------------------------------------------
