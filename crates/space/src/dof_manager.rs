@@ -142,6 +142,14 @@ pub struct DofManager {
     /// Per-element polynomial orders for variable-order p-refinement.
     /// `None` for uniform-order DofManagers, `Some(orders)` for variable order.
     pub elem_orders: Option<Vec<u8>>,
+    /// Variable-order edge DOF variants (MFEM `var_edge_dofs`): per canonical
+    /// edge, one `(order, dofs)` pair (ascending order) per distinct adjacent
+    /// element order. Empty for uniform-order DofManagers.
+    pub edge_variants: HashMap<EdgeKey, Vec<(u8, Vec<DofId>)>>,
+    /// Variable-order face DOF variants (3D, MFEM `var_face_dofs`): per
+    /// canonical face, one `(order, dofs)` pair per distinct adjacent element
+    /// order. Empty for uniform-order DofManagers.
+    pub face_variants: HashMap<FaceKey, Vec<(u8, Vec<DofId>)>>,
 }
 
 impl DofManager {
@@ -286,6 +294,8 @@ impl DofManager {
             bubble_dof_start: n_nodes,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -361,6 +371,8 @@ impl DofManager {
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -508,6 +520,8 @@ impl DofManager {
             bubble_dof_start: n_nodes + n_edge_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -646,6 +660,8 @@ impl DofManager {
             bubble_dof_start,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -809,6 +825,8 @@ impl DofManager {
             bubble_dof_start,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -892,6 +910,8 @@ impl DofManager {
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -917,6 +937,8 @@ impl DofManager {
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
         // HexQk edge enumeration (vertex-index pairs), see HexQk::node_to_dof.
+        // This is the element-local dof POSITION order (aligned with the
+        // HexQk reference basis, cf. the tmop_form positional tests).
         const EDGES: [(usize, usize); 12] = [
             (1, 5), (2, 6), (3, 7), (0, 4), (0, 3), (1, 2),
             (5, 6), (4, 7), (0, 1), (3, 2), (7, 6), (4, 5),
@@ -927,10 +949,49 @@ impl DofManager {
             [0, 3, 7, 4], [1, 2, 6, 5], [0, 1, 5, 4],
             [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],
         ];
+        // MFEM's local hex topology (Geometry::Constants<Geometry::CUBE>):
+        // Edges[12] and FaceVert[6].  Global dof ids follow MFEM
+        // FiniteElementSpace::Construct — vertices, then ALL edge dofs, then
+        // ALL face dofs, then ALL volume dofs, with entity ids assigned
+        // first-touch in element order scanning each element's entities in
+        // MFEM's table order.  Numbering the entities inside the element loop
+        // (interleaving faces/volumes with edges of later elements) misnumbers
+        // them vs MFEM, which breaks reading MFEM `nodes` grid functions
+        // (mesh-optimizer cube.mesh: det(J) -17.4 instead of 0.125).
+        const MFEM_EDGES: [(usize, usize); 12] = [
+            (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
+            (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+        const MFEM_FACES: [[usize; 4]; 6] = [
+            [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+            [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+        ];
 
+        // Phase 1: vertex + edge dofs (all edges before any face/volume dof).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            assert_eq!(ns.len(), 8, "build_q2_hex requires 8-node hexahedra");
+            for &(a, b) in &MFEM_EDGES {
+                let key = EdgeKey::new(ns[a], ns[b]);
+                edge_map.entry(key).or_insert_with(|| {
+                    let d = next_dof; next_dof += 1; d
+                });
+            }
+        }
+        // Phase 2: face-center dofs.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            for quad in &MFEM_FACES {
+                let key = QuadFaceKey::new(ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]);
+                qface_map.entry(key).or_insert_with(|| {
+                    let d = next_dof; next_dof += 1; d
+                });
+            }
+        }
+        // Phase 3: volume-center dofs (element order), after all edge/face dofs.
+        for e in 0..n_elems as u32 {
+            let vol_dof = next_dof;
+            next_dof += 1;
+            let ns = mesh.element_nodes(e);
             let base = e as usize * dofs_per_elem;
 
             // Vertices (positions 0..8)
@@ -941,24 +1002,17 @@ impl DofManager {
             // Edge midpoints (positions 8..20)
             for (k, &(a, b)) in EDGES.iter().enumerate() {
                 let key = EdgeKey::new(ns[a], ns[b]);
-                let dof = *edge_map.entry(key).or_insert_with(|| {
-                    let d = next_dof; next_dof += 1; d
-                });
-                dofs_flat[base + 8 + k] = dof;
+                dofs_flat[base + 8 + k] = edge_map[&key];
             }
 
             // Face centers (positions 20..26)
             for (k, quad) in FACES.iter().enumerate() {
                 let key = QuadFaceKey::new(ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]);
-                let dof = *qface_map.entry(key).or_insert_with(|| {
-                    let d = next_dof; next_dof += 1; d
-                });
-                dofs_flat[base + 20 + k] = dof;
+                dofs_flat[base + 20 + k] = qface_map[&key];
             }
 
             // Volume center (position 26) — one per element.
-            dofs_flat[base + 26] = next_dof;
-            next_dof += 1;
+            dofs_flat[base + 26] = vol_dof;
         }
 
         let n_dofs = next_dof as usize;
@@ -1019,6 +1073,8 @@ impl DofManager {
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -1076,6 +1132,7 @@ impl DofManager {
             edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
             quad_face_pk_map:HashMap::new(),
             bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
+            edge_variants:HashMap::new(), face_variants:HashMap::new(),
         }
     }
 
@@ -1134,6 +1191,7 @@ impl DofManager {
             edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
             quad_face_pk_map:HashMap::new(),
             bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
+            edge_variants:HashMap::new(), face_variants:HashMap::new(),
         }
     }
 
@@ -1227,7 +1285,8 @@ impl DofManager {
             edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
             quad_face_pk_map:qface_map,
-            bubble_dof_start:n_dofs,n_volume_dofs:2,elem_orders:None,}
+            bubble_dof_start:n_dofs,n_volume_dofs:2,elem_orders:None,
+            edge_variants:HashMap::new(),face_variants:HashMap::new(),}
     }
 
     // ─── P3 (3-D Pyramid5) — 30 DOFs per element ──────────────────────────────
@@ -1299,7 +1358,8 @@ impl DofManager {
             edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
             edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
             quad_face_pk_map:qface_map,
-            bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,}
+            bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,
+            edge_variants:HashMap::new(),face_variants:HashMap::new(),}
     }
 
     // ─── Pk for 2-D Quad (tensor-product Qk) ──────────────────────────────────
@@ -1407,6 +1467,8 @@ impl DofManager {
             edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map: HashMap::new(), quad_face_pk_map: HashMap::new(),
             bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -1430,26 +1492,65 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
+        let edges: [(usize, usize); 12] = [
+            (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
+        let quad_faces: [(usize, usize, usize, usize); 6] = [
+            (0,1,2,3),(4,5,6,7),(0,1,5,4),(2,3,7,6),(0,3,7,4),(1,2,6,5)];
+        // MFEM's local hex topology (Geometry::Constants<Geometry::CUBE>);
+        // global entity ids are assigned first-touch in element order in this
+        // order.  See build_q2_hex for why the block order (edges → faces →
+        // volumes) must match MFEM FiniteElementSpace::Construct.
+        const MFEM_EDGES: [(usize, usize); 12] = [
+            (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
+            (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+        const MFEM_FACES: [[usize; 4]; 6] = [
+            [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+            [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+        ];
+
+        // Phase 1: vertex + edge dofs.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            for &(a, b) in &MFEM_EDGES {
+                get_edge_dofs_pk(ns[a], ns[b], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+            }
+        }
+        // Phase 2: face dofs.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            for &[a, b, c, d] in &MFEM_FACES {
+                let key = QuadFaceKey::new(ns[a], ns[b], ns[c], ns[d]);
+                quad_face_pk_map.entry(key).or_insert_with(|| {
+                    (0..face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+                });
+            }
+        }
+        // Phase 3: volume dofs (element order).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 8);
             let base = e as usize * dofs_per_elem;
             dofs_flat[base..base + 8].copy_from_slice(&ns[..8]);
-            let edges: [(usize, usize); 12] = [
-                (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
             let mut off = 8;
             for &(la, lb) in &edges {
-                let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
-                for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                let ed = edge_pk_map[&EdgeKey::new(ns[la], ns[lb])].clone();
+                // Edge dof ids follow the global (sorted-vertex) orientation;
+                // the element-local positions follow the local direction
+                // (la→lb), so reverse when the two disagree (MFEM
+                // DofTransformation edge flip).
+                if ns[la] < ns[lb] {
+                    dofs_flat[base + off..base + off + edge_dofs_per].copy_from_slice(&ed);
+                } else {
+                    for (k, &d) in ed.iter().rev().enumerate() {
+                        dofs_flat[base + off + k] = d;
+                    }
+                }
                 off += edge_dofs_per;
             }
-            let quad_faces: [(usize, usize, usize, usize); 6] = [
-                (0,1,2,3),(4,5,6,7),(0,1,5,4),(2,3,7,6),(0,3,7,4),(1,2,6,5)];
             for &(la, lb, lc, ld) in &quad_faces {
                 let key = QuadFaceKey::new(ns[la], ns[lb], ns[lc], ns[ld]);
-                let fd = quad_face_pk_map.entry(key).or_insert_with(|| {
-                    (0..face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
-                });
+                let fd = &quad_face_pk_map[&key];
                 for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
                 off += face_dofs_per;
             }
@@ -1516,6 +1617,8 @@ impl DofManager {
             edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map: HashMap::new(), quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: 0, elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -1707,6 +1810,8 @@ impl DofManager {
             edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map, quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -1885,6 +1990,8 @@ impl DofManager {
             edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
             face_pk_map, quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -2146,6 +2253,8 @@ impl DofManager {
             bubble_dof_start,
             n_volume_dofs: volume_dofs_per,
             elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 

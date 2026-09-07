@@ -779,6 +779,7 @@ dependencies = [
  "fem-element",
  "fem-linalg",
  "fem-mesh",
+ "fem-space",
  "linlvo",
  "rust-hdf5",
  "tempfile",
@@ -927,6 +928,7 @@ dependencies = [
  "log",
  "nalgebra 0.33.3",
  "nalgebra-sparse",
+ "num-traits",
  "thiserror 2.0.18",
  "wgpu",
 ]

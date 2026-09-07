@@ -1592,6 +1592,36 @@ where
             });
         }
 
+        // ── Commit the current iterate on non-convergence ────────────────
+        // Like MFEM's `MINRESSolver::Iterate` (which updates x every step),
+        // the partial iterate must survive a max-iter exhaustion: callers
+        // (e.g. the TMOP Newton line search) use it even when the linear
+        // solve failed.  Without this, a failed solve silently returns a
+        // zero step and the outer iteration stalls.
+        {
+            let k = iter;
+            let mut y = vec![0.0; k];
+            for i in (0..k).rev() {
+                let mut s = g[i];
+                if i + 1 < k {
+                    s -= r_sup1[i + 1] * y[i + 1];
+                }
+                if i + 2 < k {
+                    s -= r_sup2[i + 2] * y[i + 2];
+                }
+                y[i] = s / r_diag[i];
+            }
+            for i in 0..n {
+                x[i] = 0.0;
+            }
+            for j in 0..k {
+                let vj = &v[(j + 1) * n..(j + 2) * n];
+                for i in 0..n {
+                    x[i] += y[j] * vj[i];
+                }
+            }
+        }
+
         // ── Shift Givens history ─────────────────────────────────────────
         cs_older = cs_old;
         sn_older = sn_old;

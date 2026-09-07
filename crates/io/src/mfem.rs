@@ -9,11 +9,13 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 
-use fem_core::{FemError, FemResult};
+use fem_core::{FemError, FemResult, NodeId};
 use fem_mesh::{
     element_type::ElementType,
     simplex::{GeometryData, Mesh},
+    topology::MeshTopology,
 };
+use fem_space::dof_manager::DofManager;
 
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
@@ -160,6 +162,8 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // independent geometry nodes — this is how geometrically periodic meshes
     // (e.g. `periodic-square.mesh`) encode per-element geometry.
     let mut geometry: Option<GeometryData> = None;
+    // H1-continuous `nodes` section payload: (nodal order, values, ordering).
+    let mut h1_nodes: Option<(u8, Vec<f64>, usize)> = None;
 
     // Check if next line is "nodes" (MFEM v1.2 curved mesh format),
     // a dimension number (standard format), or a NURBS keyword (skip).
@@ -239,7 +243,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         let vdim_line = read_line(&mut r)?;     // "VDim: N"
         let _nodes_vdim: usize = vdim_line.split_whitespace().last()
             .and_then(|s| s.parse().ok()).unwrap_or(dim);
-        let _ordering = read_line(&mut r)?;     // "Ordering: ..."
+        let ordering_line = read_line(&mut r)?; // "Ordering: ..."
 
         // Read remaining values as DOF coefficient values.
         let mut raw: Vec<f64> = Vec::new();
@@ -250,7 +254,17 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             }
         }
         let fec_name = fec_line.split(':').nth(1).unwrap_or("").trim().to_string();
+        let nodes_ordering: usize = ordering_line.split(':').nth(1)
+            .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
         let is_l2_nodes = fec_name.starts_with("L2_");
+        if !is_l2_nodes {
+            // Continuous (H1) geometry: remember the nodal order so the
+            // high-order GeometryData can be attached once the mesh topology
+            // is built (the DOF numbering needs it).
+            if let Some(p) = parse_nodal_fec_order(&fec_name) {
+                h1_nodes = Some((p, raw.clone(), nodes_ordering));
+            }
+        }
         if is_l2_nodes && n_elem > 0 && raw.len() >= n_elem * dim {
             // Discontinuous (L2) geometry: every element owns an independent
             // set of `nodes_per_elem` geometry nodes (MFEM L2_T1_2D_P1 etc.).
@@ -323,43 +337,29 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 });
             }
         } else if raw.len() >= n_vert * dim {
-            // Continuous (H1) geometry: first n_vert DOFs are the vertex
-            // positions.  Build unique coordinate list (dedup by rounded
-            // values) for the remaining DOFs (edge/face/interior nodes).
-            let tol = 1e-10;
-            for chunk in raw.chunks(dim) {
-                if chunk.len() < dim { break; }
-                let mut dup = false;
-                for j in (0..coords.len()).step_by(dim) {
-                    let mut dist_sq = 0.0;
-                    for c in 0..dim {
-                        let d = coords[j + c] - chunk[c];
-                        dist_sq += d * d;
-                    }
-                    if dist_sq < tol {
-                        dup = true;
-                        break;
-                    }
-                }
-                if !dup {
-                    for &v in chunk.iter().take(dim) {
-                        coords.push(v);
-                    }
-                }
-                if coords.len() >= n_vert * dim { break; }
-            }
-            // Fallback: generate regular grid (common for structured meshes).
-            if coords.len() < n_vert * dim {
+            // Continuous (H1) geometry: vertex `i` is dof `i` of the `nodes`
+            // grid function (MFEM `Mesh::Loader` → `SetVerticesFromNodes`).
+            // The dof values are stored with the section's ordering:
+            //   Ordering: 0 (byNODES) — raw = [x of all dofs, y of all, z …],
+            //   Ordering: 1 (byVDIM)  — raw = interleaved [x y z] per dof.
+            // Reading interleaved triples from a byNODES stream (the previous
+            // behavior) scrambles the vertex coordinates of curved meshes
+            // (e.g. `cube.mesh`: vertex 0 became (0, 0.5, 1) instead of the
+            // origin, which then corrupts refinement midpoints).
+            if nodes_ordering == 0 {
+                let ndof = raw.len() / dim;
                 coords.clear();
-                let side = (n_vert as f64).sqrt().ceil() as usize;
-                for iy in 0..side {
-                    for ix in 0..side {
-                        let idx = iy * side + ix;
-                        if idx < n_vert {
-                            coords.push(ix as f64 / (side - 1).max(1) as f64);
-                            coords.push(iy as f64 / (side - 1).max(1) as f64);
-                        }
+                coords.resize(n_vert * dim, 0.0);
+                for v in 0..n_vert {
+                    for c in 0..dim {
+                        coords[v * dim + c] = raw[c * ndof + v];
                     }
+                }
+            } else {
+                coords.clear();
+                coords.reserve(n_vert * dim);
+                for i in 0..n_vert {
+                    coords.extend_from_slice(&raw[i * dim..i * dim + dim]);
                 }
             }
         }
@@ -427,6 +427,12 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             nc_vertex_view: None,
             geometry,
         };
+        let mut mesh = mesh;
+        if mesh.geometry.is_none() {
+            if let Some((p, raw, ord)) = &h1_nodes {
+                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim);
+            }
+        }
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
         let mut mesh = Mesh {
@@ -452,6 +458,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // edge is (v0,v1)).  Apply the same so element/vertex numbering and
         // the GS-sweep order match MFEM bit-for-bit.
         fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
+        if mesh.geometry.is_none() {
+            if let Some((p, raw, ord)) = &h1_nodes {
+                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim);
+            }
+        }
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }
 }
@@ -593,6 +604,82 @@ fn skip_comment(line: &str) -> &str {
     if trimmed.starts_with('#') || trimmed.is_empty() { return ""; }
     if let Some(idx) = trimmed.find('#') { return trimmed[..idx].trim(); }
     trimmed
+}
+
+/// Parse the polynomial order from an MFEM nodal FEC name, e.g.
+/// `Linear_2D` → 1, `Quadratic3D` → 2, `Cubic_2D` → 3, `H1_2D_P4` → 4.
+fn parse_nodal_fec_order(fec: &str) -> Option<u8> {
+    let f = fec.trim();
+    if f.starts_with("Linear_") || f.starts_with("LinearF") {
+        return Some(1);
+    }
+    if f.starts_with("Quadratic") {
+        return Some(2);
+    }
+    if f.starts_with("Cubic") {
+        return Some(3);
+    }
+    if let Some(pos) = f.rfind("_P") {
+        if let Ok(p) = f[pos + 2..].parse::<u8>() {
+            if (1..=9).contains(&p) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Build the high-order `GeometryData` for an H1-continuous `nodes` section:
+/// the file stores one coordinate triple per DOF of the order-`p` H1 space and
+/// the per-element geometry tables are the element DOF lists (H1 topological
+/// order, matching the `QuadQk::new(p)`/`HexQk::new(p)` assembly bases).
+fn build_h1_geometry<M: MeshTopology>(
+    mesh: &M,
+    order: u8,
+    raw: &[f64],
+    ordering: usize,
+    dim: usize,
+) -> Option<GeometryData> {
+    if order < 2 {
+        return None; // linear geometry needs no table
+    }
+    let dm = DofManager::new(mesh, order);
+    let n_dofs = dm.n_dofs;
+    if raw.len() < dim * n_dofs {
+        return None;
+    }
+    let mut dof_coords = vec![0.0f64; n_dofs * dim];
+    match ordering {
+        0 => {
+            // byNODES: [x of all dofs, y of all dofs, ...]
+            for c in 0..dim {
+                for d in 0..n_dofs {
+                    dof_coords[d * dim + c] = raw[c * n_dofs + d];
+                }
+            }
+        }
+        1 => {
+            // byVDIM: [x y (z)] per dof.
+            dof_coords.copy_from_slice(&raw[..dim * n_dofs]);
+        }
+        _ => return None,
+    }
+    let mut conn: Vec<NodeId> = Vec::new();
+    let npe = dm.element_dofs(0).len();
+    for e in 0..mesh.n_elements() {
+        let dofs = dm.element_dofs(e as u32);
+        if dofs.len() != npe {
+            return None; // mixed mesh: not supported by GeometryData layout
+        }
+        conn.extend(dofs.iter().copied());
+    }
+    Some(GeometryData {
+        order,
+        conn,
+        nodes_per_elem: npe,
+        coords: dof_coords,
+        n_nodes: n_dofs,
+    })
 }
 
 fn read_line(r: &mut impl BufRead) -> FemResult<String> {

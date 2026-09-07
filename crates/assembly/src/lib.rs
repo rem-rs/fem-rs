@@ -84,6 +84,7 @@ pub mod lor_factory;
 
 // 鈹€鈹€ Reorganised subdirectory modules 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 pub mod physics;
+pub mod tmop_form;
 pub mod cut;
 pub mod boundary;
 pub mod postproc;
