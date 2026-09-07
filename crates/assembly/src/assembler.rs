@@ -702,27 +702,28 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let is_surface = edim != tdim;
     let dim     = if is_surface { edim } else { edim }; // surface: 3-component true gradients
     let order   = space.element_order(e);
+    let order0  = space.element_order(0);
 
     // Mixed meshes (e.g. Tet4 + Prism6): the quadrature rule passed in is
     // built from the FIRST element type, which is invalid on other element
-    // types (wrong reference domain / weights).  Re-derive the rule from
-    // this element's own reference element whenever the type differs.
+    // types (wrong reference domain / weights).  Variable-order (hp) meshes:
+    // a different polynomial order means a different basis (QuadQk(p)), so
+    // both the rule and the reference element must be re-derived per element.
     let elem_type0 = mesh.element_type(0);
     let elem_type  = mesh.element_type(e);
+    let differs = elem_type != elem_type0 || order != order0;
     let quad_owned;
     let ref_elem_owned;
-    let quad: &QuadratureRule = if elem_type == elem_type0 {
+    let quad: &QuadratureRule = if !differs {
         quad
     } else {
-        // Mixed meshes: use the caller's quadrature order (like the uniform
-        // path) instead of reverse-engineering it from the first element's
-        // point count.
+        // Use the caller's quadrature order (like the uniform path).
         quad_owned = ref_elem_vol_for_space(space, elem_type, order).quadrature(quad_order);
         &quad_owned
     };
-    // Mixed meshes: also re-derive the reference element itself (basis,
-    // n_dofs) when the element type differs from the first element's.
-    let ref_elem: &dyn ReferenceElement = if elem_type == elem_type0 {
+    // Mixed/variable-order meshes: also re-derive the reference element itself
+    // (basis, n_dofs).
+    let ref_elem: &dyn ReferenceElement = if !differs {
         ref_elem
     } else {
         ref_elem_owned = ref_elem_vol_for_space(space, elem_type, order);

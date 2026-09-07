@@ -611,10 +611,11 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     /// Evaluate the grid function at reference point `xi` on element `elem`.
     ///
     /// Computes `u_h(xi) = Σ_i c_i φ_i(xi)` where `c_i` are the local DOF
-    /// coefficients and `φ_i` are the reference basis functions.
+    /// coefficients and `φ_i` are the reference basis functions.  Uses the
+    /// element's own polynomial order (variable-order/hp spaces).
     pub fn evaluate_at_element(&self, elem: u32, xi: &[f64]) -> f64 {
         let mesh = self.space.mesh();
-        let order = self.space.order();
+        let order = self.space.element_order(elem);
         let elem_type = mesh.element_type(elem);
         let ref_elem = ref_elem_vol(elem_type, order);
         let n_ldofs = ref_elem.n_dofs();

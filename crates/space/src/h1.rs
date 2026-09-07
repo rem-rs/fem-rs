@@ -7,7 +7,6 @@ use fem_mesh::topology::MeshTopology;
 use crate::dof_manager::DofManager;
 use crate::fe_space::{FESpace, SpaceType};
 use crate::p_refine::{self, PRefineConstraint, build_variable_order_dof_manager, smooth_order_field};
-
 /// Scalar H¹ finite element space using continuous Lagrange basis functions.
 ///
 /// Supports both uniform order (all elements same p) and variable order
@@ -99,6 +98,53 @@ impl<M: MeshTopology> H1Space<M> {
         for &e in elem_ids { if new_order < new_orders[e as usize] { new_orders[e as usize] = new_order; } }
         let max_order = new_orders.iter().max().copied().unwrap_or(self.order);
         (H1Space { mesh: self.mesh.clone(), dm: new_dm, order: max_order, elem_orders: Some(new_orders) }, constraints)
+    }
+
+    /// MFEM `FiniteElementSpace::PRefineAndUpdate(refs)` equivalent: apply
+    /// per-element order deltas `refs = [(elem, delta)]` (`delta` may be
+    /// negative), rebuild the variable-order space and return the mixed-order
+    /// constraints (and, on 2D non-conforming meshes, the hanging-edge
+    /// constraints).
+    ///
+    /// As in MFEM, `Update` is a full rebuild: solutions are not transferred.
+    pub fn p_refine_update(&self, refs: &[(ElemId, i8)]) -> (Self, Vec<PRefineConstraint>)
+    where M: Clone {
+        let mut orders = self.elem_orders.clone()
+            .unwrap_or_else(|| vec![self.order; self.mesh.n_elements()]);
+        for &(e, delta) in refs {
+            let p = orders[e as usize];
+            let new_p = (p as i16 + delta as i16).max(1) as u8;
+            orders[e as usize] = new_p;
+        }
+        self.with_element_orders(&orders)
+    }
+
+    /// MFEM `SetElementOrder` on every element followed by `Update(false)`:
+    /// set the complete per-element order array and rebuild the space,
+    /// returning the mixed-order / hanging constraints of the new space.
+    pub fn with_element_orders(&self, orders: &[u8]) -> (Self, Vec<PRefineConstraint>)
+    where M: Clone {
+        assert_eq!(orders.len(), self.mesh.n_elements(),
+            "orders length {} != n_elements {}", orders.len(), self.mesh.n_elements());
+        let dm = build_variable_order_dof_manager(&self.mesh, orders);
+        let constraints = p_refine::detect_p_constraints(&dm, &self.mesh, orders);
+        let max_order = orders.iter().max().copied().unwrap_or(self.order);
+        (H1Space {
+            mesh: self.mesh.clone(),
+            dm,
+            order: max_order,
+            elem_orders: Some(orders.to_vec()),
+        }, constraints)
+    }
+
+    /// Combined hp constraints of the current space: p-variant minimum-rule
+    /// constraints plus (on 2D non-conforming meshes) the hanging-edge
+    /// constraints.  Equivalent to MFEM's
+    /// `BuildConformingInterpolation` for variable-order H1 spaces.
+    pub fn hp_constraints(&self) -> Vec<PRefineConstraint> {
+        let orders: Vec<u8> = self.elem_orders.clone()
+            .unwrap_or_else(|| vec![self.order; self.mesh.n_elements()]);
+        p_refine::detect_p_constraints(&self.dm, &self.mesh, &orders)
     }
 
     /// Smooth the order field to limit jumps between adjacent elements.
@@ -291,5 +337,61 @@ mod tests {
         let (_, constraints) = space.refine_p(&[0], 3);
         assert!(!constraints.is_empty(),
             "P2/P3 interface should produce constraints");
+    }
+
+    // ── PRefineAndUpdate-equivalent API ────────────────────────────────────
+
+    #[test]
+    fn h1_p_refine_update_raises_order() {
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let space = H1Space::new(mesh, 1);
+        let n_before = space.n_dofs();
+        // MFEM: fespace.PRefineAndUpdate([pRefinement(elem, 1)])
+        let (updated, _constraints) = space.p_refine_update(&[(0, 1)]);
+        assert_eq!(updated.element_order(0), 2);
+        assert_eq!(updated.element_order(1), 1);
+        assert!(updated.n_dofs() > n_before);
+    }
+
+    #[test]
+    fn h1_p_refine_update_lowering_clamps_at_one() {
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let space = H1Space::new(mesh, 2);
+        let (updated, _) = space.p_refine_update(&[(3, -5)]);
+        assert_eq!(updated.element_order(3), 1);
+        assert_eq!(updated.element_order(0), 2);
+    }
+
+    #[test]
+    fn h1_with_element_orders_rebuilds() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let space = H1Space::new(mesh, 2);
+        let n = space.mesh().n_elements();
+        let mut orders = vec![2u8; n];
+        orders[0] = 4;
+        let (updated, constraints) = space.with_element_orders(&orders);
+        assert_eq!(updated.order(), 4);
+        assert!(updated.n_dofs() > space.n_dofs());
+        assert!(!constraints.is_empty(), "P2/P4 neighbors need constraints");
+        for e in 0..n as u32 {
+            assert_eq!(updated.element_order(e), orders[e as usize]);
+        }
+    }
+
+    #[test]
+    fn h1_hp_constraints_on_nc_mesh() {
+        // Isotropic refinement of one element of a 2x2 quad mesh, uniform
+        // order 2: constraints = hanging vertices + slave edge dofs.
+        use fem_mesh::amr::general_refinement::{general_refinement_2d, Refinement};
+        let m0 = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let r = general_refinement_2d(&m0, &[Refinement::new(0, 1, 0.5)]);
+        let mesh = r.mesh;
+        let space = H1Space::new_variable(mesh.clone(), vec![2u8; mesh.n_elems()]);
+
+        // X-split of element 0: one interior master edge (the shared edge
+        // with the neighbor above) with 2 slave segments (1 order-2 dof each)
+        // and 1 hanging vertex on it.  The boundary split node is not hanging.
+        let constraints = space.hp_constraints();
+        assert_eq!(constraints.len(), 3, "1 hanging vertex + 2 slave edge dofs");
     }
 }

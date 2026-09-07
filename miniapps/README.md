@@ -30,15 +30,39 @@ miniapps/
 │   ├── twist.rs / klein-bottle.rs / toroid.rs / trimmer.rs / reflector.rs
 │   ├── mesh-explorer.rs / mesh-quality.rs
 │   ├── polar-nc.rs          ← 极坐标 NC 网格
-│   └── ref321.rs            ← 3:1 各向异性细化 (1:1, order 1:
-│                                unknowns 与 C++ r=1..100 全对齐,
-│                                H1 连续性 ~0)
+│   ├── ref321.rs            ← 3:1 各向异性细化 (1:1, order 1:
+│   │                            unknowns 与 C++ r=1..100 全对齐,
+│   │                            H1 连续性 ~0)
+│   ├── mesh-optimizer.rs    ← TMOP 网格优化 (1:1, 2D quad/3D hex;
+│   │                            icf/cube/jagged 的 min det 与能量
+│   │                            与 C++ 逐位一致; 目标 tid 1/2/3,
+│   │                            线搜索 = TMOPNewtonSolver)
+│   └── hpref.rs             ← 随机 hp 细化 (1:1, 2D quad;
+│                                unknowns/h/p/最大阶与 C++ -n
+│                                3..1000 全对齐, H1 连续性 ~0)
 ├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
 ├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
 └── ...
 ```
 
 ## 本轮新增核心库能力 (fem-rs crates)
+
+- `fem_assembly::tmop_form` — TMOP 非线性 form：精确导数能量/梯度/Hessian
+  （走 `fem_mesh::tmop::metrics` 的 EvalP/AssembleH）、理想形目标
+  (UnitSize/EqualSize/GivenSize)、`tmop_newton_solve`（MFEM
+  TMOPNewtonSolver 的能量/min-det/残差线搜索 1:1）
+- `H1Space::p_refine_update` / `with_element_orders` — MFEM
+  `PRefineAndUpdate` / `SetElementOrder+Update`；DofManager variant 式
+  变阶边/面 DOF（MFEM `var_edge_dofs` 语义, 最小规则约束）
+- `fem_space::lor::{LorNd, LorRt}` — 向量空间 LOR：细化网格上的 ND1/RT0
+  + 带符号 dof 置换（MFEM `LORBase::GetDofPermutation`）；
+  `build_lor_ams_nd_*` / `build_lor_ads_rt_hex` = `LORSolver<HypreAMS/ADS>`
+- `fem_io` 读取 MFEM 弯曲网格 `nodes` 段的高阶 H1 几何（此前被丢弃），
+  按 `Mesh::SetVerticesFromNodes` 语义解码顶点
+- DofManager hex Qk 全局编号对齐 MFEM `FiniteElementSpace::Construct`
+  分块序（顶点→全部边→全部面→全部内部）
+
+上一轮新增（保留）：
 
 - `fem_mesh::amr::general_refinement` — 任意 scale 的 NC quad 细分
   (`Refinement{index,type,scale}`，MFEM `Mesh::GeneralRefinement`)

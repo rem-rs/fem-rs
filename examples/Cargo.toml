@@ -415,6 +415,14 @@ name = "mesh_ref321"
 path = "../miniapps/meshing/ref321.rs"
 
 [[example]]
+name = "mesh_hpref"
+path = "../miniapps/meshing/hpref.rs"
+
+[[example]]
+name = "mesh_optimizer"
+path = "../miniapps/meshing/mesh-optimizer.rs"
+
+[[example]]
 name = "tools_display_basis"
 path = "../miniapps/tools/display_basis.rs"
 
