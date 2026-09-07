@@ -329,7 +329,7 @@ impl VectorBoundaryAssembler {
             let nodes = mesh.face_nodes(f);
             if nodes.len() < 2 { continue; }
             // Find the adjacent element to apply orientation signs.
-            let (elem, _) = mesh.face_elements(f);
+            let elem = mesh.face_elements(f).first().copied().unwrap_or(0);
             let pa = mesh.node_coords(nodes[0]);
             let pb = mesh.node_coords(nodes[1]);
             let tx = pb[0] - pa[0]; let ty = pb[1] - pa[1];

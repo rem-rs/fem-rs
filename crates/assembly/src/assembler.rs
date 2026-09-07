@@ -1838,7 +1838,7 @@ where
         // In non-conformingly refined meshes face_elements(f) may report a
         // stale owner (or 0 as fallback) whose node list does not include the
         // face nodes, so we scan all elements to find a match.
-        let (elem, _ghost) = mesh.face_elements(f);
+        let (elem, _) = mesh.face_elements(f);
         let mut owner = elem;
         let elem_nodes = mesh.element_nodes(elem);
         let elem_dofs  = space.element_dofs(elem);

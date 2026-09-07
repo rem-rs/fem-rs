@@ -276,10 +276,7 @@ pub fn net_boundary_flux_h1_p1_2d(
     let mesh = space.mesh();
     let mut out = 0.0_f64;
     for f in mesh.face_iter() {
-        let elem = mesh.face_elements(f).first().copied().unwrap_or(u32::MAX); let other = None;
-        if other.is_some() {
-            continue;
-        }
+        let elem = mesh.face_elements(f).first().copied().unwrap_or(u32::MAX);
         let g = p1_tri_grad(mesh, elem, values, space);
         let (n, len) = boundary_face_outward_normal_2d(mesh, f);
         out += (g[0] * n[0] + g[1] * n[1]) * len;
