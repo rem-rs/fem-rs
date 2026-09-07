@@ -89,6 +89,7 @@ pub fn p_refine_tri3_to_tri6(
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
         geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
 
     (new_mesh, edge_to_new_node)
@@ -153,6 +154,7 @@ pub fn p_refine_tri6_to_tri10(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, centroids)
 }
@@ -229,6 +231,7 @@ pub fn p_refine_tet4_to_tet10(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, edge_to_new)
 }
@@ -305,6 +308,7 @@ pub fn p_refine_tet10_to_tet20(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, face_to_new)
 }
@@ -382,6 +386,7 @@ pub fn p_refine_quad4_to_quad9(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, edge_to_new)
 }
@@ -465,6 +470,7 @@ pub fn p_refine_hex8_to_hex20(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, edge_to_new)
 }
@@ -552,6 +558,7 @@ pub fn p_refine_hex20_to_hex27(
         face_types: None, face_offsets: None,
         face_to_elem: None,
         edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     (new_mesh, new_centroids)
 }

@@ -429,6 +429,7 @@ fn refine_local_mixed(mesh: &Mesh<2>) -> LocalRefine {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
+    vertex_parents: vec![],
     };
     LocalRefine {
         mesh: refined,
@@ -713,6 +714,7 @@ pub fn par_uniform_refine(par_mesh: &ParallelMesh<Mesh<2>>) -> ParallelMesh<Mesh
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
+        vertex_parents: vec![],
         }
     } else {
         Mesh::uniform(

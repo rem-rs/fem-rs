@@ -323,6 +323,7 @@ pub fn extract_boundary_submesh(mesh: &Mesh<3>, bdr_tags: &[i32]) -> BoundarySub
         conn: sub_conn,
         elem_tags: sub_elem_tags,
         elem_type: if all_uniform { first_type } else { ElementType::Tri3 },
+        vertex_parents: vec![],
         face_conn: sub_face_conn,
         face_tags: sub_face_tags.into_iter().map(|t| t as crate::BoundaryTag).collect(),
         face_type: ElementType::Line2,
@@ -591,6 +592,7 @@ pub fn extract_submesh_3d(mesh: &Mesh<3>, element_tags: &[i32]) -> SubMesh3D {
         conn: sub_conn,
         elem_tags: sub_elem_tags,
         elem_type: if all_uniform { first_type } else { ElementType::Tet4 },
+        vertex_parents: vec![],
         face_conn: sub_face_conn,
         face_tags: sub_face_tags.into_iter().map(|t| t as crate::BoundaryTag).collect(),
         face_type: if sub_face_types.is_empty() { ElementType::Tri3 }
@@ -665,6 +667,7 @@ mod tests {
             edge_conn: vec![],
             edge_to_elem: vec![],
             geometry: None, nc_vertex_view: None,
+        vertex_parents: vec![],
         }
     }
 

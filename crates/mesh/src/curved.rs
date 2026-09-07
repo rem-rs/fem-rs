@@ -595,7 +595,7 @@ fn _extract_linear_2d(curved: &CurvedMesh<2>) -> Mesh<2> {
         face_conn: curved.face_conn.clone(), face_tags: curved.face_tags.clone(),
         face_type: ElementType::Line2, elem_tags: curved.elem_tags.clone(),
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
-        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     }
 }
 
@@ -607,7 +607,7 @@ fn _extract_linear_3d(curved: &CurvedMesh<3>) -> Mesh<3> {
         face_conn: curved.face_conn.clone(), face_tags: curved.face_tags.clone(),
         face_type: ElementType::Tri3, elem_tags: curved.elem_tags.clone(),
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
-        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     }
 }
 
@@ -741,7 +741,7 @@ pub fn refine_curved_3d_general(curved: &CurvedMesh<3>) -> CurvedMesh<3> {
         face_type: lface_type,
         elem_tags: curved.elem_tags.clone(),
         elem_types: None, elem_offsets: None, face_types: lface_types, face_offsets: lface_offsets,
-        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     };
 
     // Refine linear mesh
@@ -799,7 +799,7 @@ pub fn refine_curved_3d_nc_general(curved: &CurvedMesh<3>, marked: &[usize]) -> 
         face_type: curved_face_type_3d(curved.elem_type),
         elem_tags: curved.elem_tags.clone(),
         elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
-        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None,
+        face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     };
 
     let mid: Vec<u32> = marked.iter().map(|&m| m as u32).collect();

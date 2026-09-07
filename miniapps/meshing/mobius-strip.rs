@@ -224,6 +224,7 @@ fn main() {
         edge_to_elem: mesh.edge_to_elem,
         geometry: mesh.geometry,
         nc_vertex_view: mesh.nc_vertex_view,
+        vertex_parents: vec![],
     };
 
     // Write the mesh manually since write_mfem_file_3d assumes 3D topology.

@@ -158,6 +158,10 @@ pub struct Mesh<const D: usize> {
     #[cfg_attr(feature = "serialize", serde(default))]
     #[cfg_attr(feature = "serialize", serde(skip_serializing_if = "Option::is_none"))]
     pub nc_vertex_view: Option<Vec<NodeId>>,
+
+    /// Temporary storage for `AddVertexParents` calls: (child, parent1, parent2).
+    #[cfg_attr(feature = "serialize", serde(default))]
+    pub vertex_parents: Vec<(NodeId, NodeId, NodeId)>,
 }
 
 impl<const D: usize> Mesh<D> {
@@ -1521,6 +1525,7 @@ impl<const D: usize> Mesh<D> {
             edge_conn: vec![], edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
+            vertex_parents: vec![],
         }
     }
 
@@ -2745,6 +2750,56 @@ impl<const D: usize> Mesh<D> {
         let id = self.n_nodes() as NodeId;
         self.coords.push(x); self.coords.push(y); self.coords.push(z);
         id
+    }
+
+    /// Add a 2D vertex (asserts D == 2).
+    pub fn add_vertex_2d(&mut self, x: f64, y: f64) -> NodeId {
+        assert_eq!(D, 2, "add_vertex_2d requires D = 2");
+        let id = self.n_nodes() as NodeId;
+        self.coords.push(x); self.coords.push(y);
+        id
+    }
+
+    /// Add a triangle element (asserts D == 2).
+    pub fn add_triangle(&mut self, v: &[NodeId; 3], attr: i32) -> ElemId {
+        assert_eq!(D, 2, "add_triangle requires D = 2");
+        let id = self.n_elems() as ElemId;
+        for &vi in v { self.conn.push(vi); }
+        self.elem_tags.push(attr);
+        id
+    }
+
+    /// Add a quadrilateral element (asserts D == 2).
+    pub fn add_quad(&mut self, v: &[NodeId; 4], attr: i32) -> ElemId {
+        assert_eq!(D, 2, "add_quad requires D = 2");
+        let id = self.n_elems() as ElemId;
+        for &vi in v { self.conn.push(vi); }
+        self.elem_tags.push(attr);
+        id
+    }
+
+    /// Record a hanging vertex relationship: vertex `i` is the midpoint of `p1` and `p2`.
+    /// Mirrors MFEM `Mesh::AddVertexParents(i, p1, p2)`.
+    pub fn add_vertex_parents(&mut self, i: NodeId, p1: NodeId, p2: NodeId) {
+        self.vertex_parents.push((i, p1, p2));
+        let off_i = i as usize * D;
+        let off_p1 = p1 as usize * D;
+        let off_p2 = p2 as usize * D;
+        for d in 0..D {
+            self.coords[off_i + d] = (self.coords[off_p1 + d] + self.coords[off_p2 + d]) * 0.5;
+        }
+    }
+
+    /// Finalize mesh construction after AddVertexParents calls.
+    pub fn finalize_mesh(&mut self) {
+        if !self.vertex_parents.is_empty() {
+            self.build_face_to_elem();
+        }
+    }
+
+    /// Finalize topology (boundary faces).
+    pub fn finalize_topology(&mut self) {
+        self.build_face_to_elem();
     }
 
     pub fn add_wedge(&mut self, v: &[NodeId; 6], attr: i32) -> ElemId {

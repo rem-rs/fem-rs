@@ -191,6 +191,7 @@ fn main() {
         edge_to_elem: mesh.edge_to_elem,
         geometry: mesh.geometry,
         nc_vertex_view: mesh.nc_vertex_view,
+        vertex_parents: vec![],
     };
 
     // Remove unused vertices
