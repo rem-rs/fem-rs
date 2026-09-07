@@ -335,6 +335,10 @@ name = "miniapp_compare_dc"
 path = "../miniapps/tools/compare-dc.rs"
 
 [[example]]
+name = "miniapp_lor_solvers"
+path = "../miniapps/solvers/lor_solvers.rs"
+
+[[example]]
 name = "tmop_check_metric"
 path = "../miniapps/tools/tmop_check_metric.rs"
 
