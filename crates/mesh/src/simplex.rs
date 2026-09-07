@@ -315,9 +315,291 @@ impl<const D: usize> Mesh<D> {
             }
             return;
         }
-        assert!(self.elem_type == ElementType::Quad4,
-            "set_curvature: only Tri3 and Quad4 are currently supported");
+        if self.elem_type == ElementType::Quad4 {
+            self.set_curvature_quad4(p);
+            return;
+        }
+        // 3D element types
+        if D == 3 {
+            match self.elem_type {
+                ElementType::Hex8 => { self.set_curvature_hex8(p); return; }
+                ElementType::Tet4 => { self.set_curvature_tet4(p); return; }
+                ElementType::Prism6 => { self.set_curvature_prism6(p); return; }
+                _ => {}
+            }
+        }
+        panic!("set_curvature: unsupported element type {:?} for D={}", self.elem_type, D);
+    }
 
+    /// Hex8 → HexQk geometry: trilinear interpolation of GLL nodal positions.
+    fn set_curvature_hex8(&mut self, p: usize) {
+        use fem_element::lagrange::factory::HexQk;
+        use fem_element::ReferenceElement;
+
+        let quad = HexQk::new(p);
+        let npe_new = quad.n_dofs(); // (p+1)³
+        let n_elems = self.n_elems();
+        let n_verts = self.n_nodes();
+
+        let dof_ref = quad.dof_coords();
+
+        let mut geom_conn = vec![0u32; n_elems * npe_new];
+        let mut geom_coords = self.coords.clone();
+        let mut next_geom = n_verts as NodeId;
+
+        // Edge map for dedup: edge key → (creator's first vertex, shared node ids in order).
+        let mut edge_map: std::collections::HashMap<(NodeId, NodeId), (NodeId, Vec<NodeId>)> =
+            std::collections::HashMap::new();
+
+        // Hex8 local edges in canonical order.
+        let hex_edges: Vec<(usize, usize)> = vec![
+            (0,1), (1,2), (2,3), (3,0), // bottom face edges
+            (4,5), (5,6), (6,7), (7,4), // top face edges
+            (0,4), (1,5), (2,6), (3,7), // vertical edges
+        ];
+
+        for e in 0..n_elems {
+            let verts = self.elem_nodes(e as ElemId);
+            let base = e * npe_new;
+
+            for d in 0..npe_new {
+                let rc = &dof_ref[d];
+                let on_xmin = (rc[0] + 1.0).abs() < 1e-12;
+                let on_xmax = (rc[0] - 1.0).abs() < 1e-12;
+                let on_ymin = (rc[1] + 1.0).abs() < 1e-12;
+                let on_ymax = (rc[1] - 1.0).abs() < 1e-12;
+                let on_zmin = (rc[2] + 1.0).abs() < 1e-12;
+                let on_zmax = (rc[2] - 1.0).abs() < 1e-12;
+
+                let n_face_flags = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
+                    .iter().filter(|&&b| b).count();
+
+                if n_face_flags >= 3 {
+                    // Vertex DOF
+                    let vx = if on_xmin { 0 } else { 1 };
+                    let vy = if on_ymin { 0 } else { 1 };
+                    let vz = if on_zmin { 0 } else { 1 };
+                    let local_v = match (vx, vy, vz) {
+                        (0,0,0) => 0, (1,0,0) => 1, (1,1,0) => 2, (0,1,0) => 3,
+                        (0,0,1) => 4, (1,0,1) => 5, (1,1,1) => 6, (0,1,1) => 7,
+                        _ => unreachable!(),
+                    };
+                    geom_conn[base + d] = verts[local_v];
+                } else if n_face_flags == 2 {
+                    // Edge DOF
+                    let mut edge_local: Option<(usize, f64)> = None;
+                    for (ei, &(a, b)) in hex_edges.iter().enumerate() {
+                        let va = verts[a];
+                        let vb = verts[b];
+                        let ca = self.coords_of(va);
+                        let cb = self.coords_of(vb);
+                        let mut on_edge = true;
+                        let mut t = 0.0;
+                        for dim in 0..3 {
+                            let fa = ca[dim];
+                            let fb = cb[dim];
+                            let f = rc[dim];
+                            if (fa - fb).abs() < 1e-12 {
+                                if (f - fa).abs() > 1e-12 { on_edge = false; break; }
+                            } else {
+                                t = (f - fa) / (fb - fa);
+                                if t < -1e-12 || t > 1.0 + 1e-12 { on_edge = false; break; }
+                            }
+                        }
+                        if on_edge {
+                            edge_local = Some((ei, t.clamp(0.0, 1.0)));
+                            break;
+                        }
+                    }
+                    if let Some((ei, t)) = edge_local {
+                        let (a, b) = hex_edges[ei];
+                        let va = verts[a];
+                        let vb = verts[b];
+                        let key = (va.min(vb), va.max(vb));
+                        let entry = edge_map.entry(key).or_insert_with(|| {
+                            let ca = self.coords_of(va);
+                            let cb = self.coords_of(vb);
+                            let mut new_ids = Vec::with_capacity(p - 1);
+                            for j in 0..(p - 1) {
+                                let tt = (j + 1) as f64 / p as f64;
+                                let mut x = [0.0_f64; 3];
+                                for dd in 0..3 { x[dd] = (1.0 - tt) * ca[dd] + tt * cb[dd]; }
+                                geom_coords.extend_from_slice(&x);
+                                new_ids.push(next_geom);
+                                next_geom += 1;
+                            }
+                            (va, new_ids)
+                        });
+                        let idx = (t * p as f64).round() as usize;
+                        let idx = idx.min(p - 1);
+                        geom_conn[base + d] = entry.1[idx];
+                    } else {
+                        // Face or interior DOF — trilinear interpolation.
+                        let x = Self::trilinear_interp_3d(verts, self, rc);
+                        geom_coords.extend_from_slice(&x);
+                        geom_conn[base + d] = next_geom;
+                        next_geom += 1;
+                    }
+                } else {
+                    // Face or interior DOF — trilinear interpolation.
+                    let x = Self::trilinear_interp_3d(verts, self, rc);
+                    geom_coords.extend_from_slice(&x);
+                    geom_conn[base + d] = next_geom;
+                    next_geom += 1;
+                }
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geom_conn,
+            nodes_per_elem: npe_new,
+            coords: geom_coords,
+            n_nodes: next_geom as usize,
+        });
+    }
+
+    fn trilinear_interp_3d(verts: &[NodeId], mesh: &Self, rc: &[f64]) -> [f64; 3] {
+        let xi = (rc[0] + 1.0) / 2.0;
+        let eta = (rc[1] + 1.0) / 2.0;
+        let zeta = (rc[2] + 1.0) / 2.0;
+        let mut x = [0.0_f64; 3];
+        for v in 0..8 {
+            let vc = mesh.coords_of(verts[v]);
+            let bx = if v & 1 != 0 { xi } else { 1.0 - xi };
+            let by = if v & 2 != 0 { eta } else { 1.0 - eta };
+            let bz = if v & 4 != 0 { zeta } else { 1.0 - zeta };
+            let w = bx * by * bz;
+            for d in 0..3 { x[d] += w * vc[d]; }
+        }
+        x
+    }
+
+    /// Tet4 → TetPk geometry: barycentric interpolation of GLL nodal positions.
+    fn set_curvature_tet4(&mut self, p: usize) {
+        use fem_element::lagrange::TetPk;
+        use fem_element::ReferenceElement;
+        let n_elems = self.n_elems();
+        let tet = TetPk::new(p);
+        let npe_new = tet.n_dofs();
+        let dof_ref = tet.dof_coords();
+        let mut geom_conn = Vec::with_capacity(n_elems * npe_new);
+        let mut geom_coords = self.coords.clone();
+        let mut next_id = self.n_nodes() as NodeId;
+
+        for e in 0..n_elems as ElemId {
+            let v = self.elem_nodes(e);
+            for d in 0..npe_new {
+                let xi = &dof_ref[d];
+                let is_v0 = xi[0].abs() < 1e-12 && xi[1].abs() < 1e-12 && xi[2].abs() < 1e-12;
+                let is_v1 = (xi[0]-1.0).abs() < 1e-12 && xi[1].abs() < 1e-12 && xi[2].abs() < 1e-12;
+                let is_v2 = xi[0].abs() < 1e-12 && (xi[1]-1.0).abs() < 1e-12 && xi[2].abs() < 1e-12;
+                let is_v3 = xi[0].abs() < 1e-12 && xi[1].abs() < 1e-12 && (xi[2]-1.0).abs() < 1e-12;
+                if is_v0 { geom_conn.push(v[0]); }
+                else if is_v1 { geom_conn.push(v[1]); }
+                else if is_v2 { geom_conn.push(v[2]); }
+                else if is_v3 { geom_conn.push(v[3]); }
+                else {
+                    let (x0, x1, x2, x3) = (
+                        self.node_coords(v[0]), self.node_coords(v[1]),
+                        self.node_coords(v[2]), self.node_coords(v[3]));
+                    let bary = [1.0-xi[0]-xi[1]-xi[2], xi[0], xi[1], xi[2]];
+                    let mut x = [0.0_f64; 3];
+                    for k in 0..4 {
+                        for dd in 0..3 { x[dd] += bary[k] * match k {
+                            0 => x0[dd], 1 => x1[dd], 2 => x2[dd], _ => x3[dd],
+                        }; }
+                    }
+                    geom_conn.push(next_id);
+                    geom_coords.extend_from_slice(&x);
+                    next_id += 1;
+                }
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geom_conn,
+            nodes_per_elem: npe_new,
+            coords: geom_coords,
+            n_nodes: next_id as usize,
+        });
+    }
+
+    /// Prism6 → geometry: barycentric interpolation.
+    fn set_curvature_prism6(&mut self, p: usize) {
+        let n_elems = self.n_elems();
+        let npe_new = (p+1) * (p+1) * (p+2) / 2;
+        let mut geom_conn = vec![0u32; n_elems * npe_new];
+        let mut geom_coords = self.coords.clone();
+        let mut next_id = self.n_nodes() as NodeId;
+
+        // Generate prism DOF reference positions.
+        let seg: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
+        let mut dof_ref = Vec::with_capacity(npe_new);
+        for iz in 0..=p {
+            for ir in 0..=p {
+                for is in 0..=(p - ir) {
+                    dof_ref.push([seg[ir], seg[is], seg[iz]]);
+                }
+            }
+        }
+
+        for e in 0..n_elems {
+            let verts = self.elem_nodes(e as ElemId);
+            let base = e * npe_new;
+            for d in 0..npe_new {
+                let rc = &dof_ref[d];
+                let mut is_vert = None;
+                for v in 0..6usize {
+                    let ref_pos = match v {
+                        0 => [0.0, 0.0, -1.0], 1 => [1.0, 0.0, -1.0], 2 => [0.0, 1.0, -1.0],
+                        3 => [0.0, 0.0, 1.0], 4 => [1.0, 0.0, 1.0], 5 => [0.0, 1.0, 1.0],
+                        _ => unreachable!(),
+                    };
+                    if (rc[0]-ref_pos[0]).abs() < 1e-12 && (rc[1]-ref_pos[1]).abs() < 1e-12
+                        && (rc[2]-ref_pos[2]).abs() < 1e-12 {
+                        is_vert = Some(v); break;
+                    }
+                }
+                if let Some(v) = is_vert {
+                    geom_conn[base + d] = verts[v];
+                } else {
+                    let r = rc[0];
+                    let s = rc[1];
+                    let t = (rc[2] + 1.0) / 2.0;
+                    let phi0 = (1.0 - r - s);
+                    let phi1 = r;
+                    let phi2 = s;
+                    let (x0, x1, x2, x3, x4, x5) = (
+                        self.node_coords(verts[0]), self.node_coords(verts[1]),
+                        self.node_coords(verts[2]), self.node_coords(verts[3]),
+                        self.node_coords(verts[4]), self.node_coords(verts[5]));
+                    let mut x = [0.0_f64; 3];
+                    for dd in 0..3 {
+                        let bottom = phi0*x0[dd] + phi1*x1[dd] + phi2*x2[dd];
+                        let top = phi0*x3[dd] + phi1*x4[dd] + phi2*x5[dd];
+                        x[dd] = (1.0 - t) * bottom + t * top;
+                    }
+                    geom_conn[base + d] = next_id;
+                    geom_coords.extend_from_slice(&x);
+                    next_id += 1;
+                }
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geom_conn,
+            nodes_per_elem: npe_new,
+            coords: geom_coords,
+            n_nodes: next_id as usize,
+        });
+    }
+
+    /// Quad4 → QuadQk geometry (previously inline).
+    fn set_curvature_quad4(&mut self, p: usize) {
+        assert!(self.elem_type == ElementType::Quad4);
         use std::collections::HashMap;
         use fem_element::lagrange::factory::QuadQk;
         use fem_element::ReferenceElement;
@@ -449,7 +731,7 @@ impl<const D: usize> Mesh<D> {
         }
 
         self.geometry = Some(GeometryData {
-            order,
+            order: p as u8,
             conn: geom_conn,
             nodes_per_elem: npe_new,
             coords: geom_coords,
