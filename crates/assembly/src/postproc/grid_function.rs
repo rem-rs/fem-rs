@@ -40,6 +40,17 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // Hex8/HexQk: Gauss-Lobatto nodes on [0,1]^3 (same family as QuadQk).
+        (ElementType::Hex8, o) => {
+            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
+        }
+        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o.max(1) as usize)),
+        (ElementType::Tri3 | ElementType::Tri6, o) => {
+            Box::new(fem_element::lagrange::TriPk::new(o.max(1) as usize))
+        }
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
+            Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))
+        }
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }

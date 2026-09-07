@@ -1807,6 +1807,63 @@ impl<const D: usize> Mesh<D> {
             face_conn, face_tags, ElementType::Line2,
         )
     }
+
+    /// `Mesh::MakeCartesian2D(nx, ny, QUADRILATERAL, ..., sfc_ordering=true)`:
+    /// identical to [`Mesh::make_cartesian_2d`] except the elements are
+    /// emitted along MFEM's Hilbert space-filling-curve ordering
+    /// ([`grid_sfc_ordering_2d`]).  Vertices and boundary edges are the same.
+    pub fn make_cartesian_2d_sfc(nx: usize, ny: usize, sx: f64, sy: f64) -> Self
+    where
+        [(); D]: ,
+    {
+        assert_eq!(D, 2, "make_cartesian_2d_sfc requires D = 2");
+        let npx = nx + 1;
+        let npy = ny + 1;
+        let mut coords = Vec::with_capacity(npx * npy * 2);
+        for j in 0..npy {
+            for i in 0..npx {
+                coords.push(i as f64 * sx / nx as f64);
+                coords.push(j as f64 * sy / ny as f64);
+            }
+        }
+
+        let nid = |i: usize, j: usize| -> NodeId { (j * npx + i) as NodeId };
+
+        let sfc = crate::amr::sfc_ordering::grid_sfc_ordering_2d(nx as i32, ny as i32);
+        assert_eq!(sfc.len(), nx * ny);
+
+        let mut conn = Vec::with_capacity(nx * ny * 4);
+        let mut elem_tags = Vec::with_capacity(nx * ny);
+        for &(i, j) in &sfc {
+            let (i, j) = (i as usize, j as usize);
+            conn.extend_from_slice(&[nid(i, j), nid(i + 1, j), nid(i + 1, j + 1), nid(i, j + 1)]);
+            elem_tags.push(1);
+        }
+
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        let mut add_edge = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>,
+                            a: NodeId, b: NodeId, tag: i32| {
+            fc.push(a); fc.push(b); ft.push(tag);
+        };
+        for i in 0..nx {
+            add_edge(&mut face_conn, &mut face_tags, nid(i, 0), nid(i + 1, 0), 1);
+        }
+        for i in 0..nx {
+            add_edge(&mut face_conn, &mut face_tags, nid(i + 1, ny), nid(i, ny), 3);
+        }
+        for j in 0..ny {
+            add_edge(&mut face_conn, &mut face_tags, nid(0, j + 1), nid(0, j), 4);
+        }
+        for j in 0..ny {
+            add_edge(&mut face_conn, &mut face_tags, nid(nx, j), nid(nx, j + 1), 2);
+        }
+
+        Mesh::uniform(
+            coords, conn, elem_tags, ElementType::Quad4,
+            face_conn, face_tags, ElementType::Line2,
+        )
+    }
     /// Generate a Cartesian triangular mesh of a rectangular domain
     /// `[0,sx] × [0,sy]`, matching MFEM's `Mesh::MakeCartesian2D(nx, ny,
     /// TRIANGLE, false, sx, sy, false)`.

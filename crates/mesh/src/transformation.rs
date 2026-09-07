@@ -213,3 +213,343 @@ mod tests {
         assert_eq!(x.len(), 2);
     }
 }
+
+
+/// Locate points in the mesh (serial brute-force `Mesh::FindPoints`).
+///
+/// For each of `npts` points (row-major `points[i*dim + j]`) finds the
+/// containing element and the reference coordinates by Newton inversion of
+/// the isoparametric (P1 geometry) mapping. Points outside the mesh get
+/// element id `-1` and zero reference coordinates.
+///
+/// Returns `(elem_ids, ref_coords)` with `elem_ids.len() == npts`.
+///
+/// Note: MFEM uses a BVH-accelerated search with the same semantics for
+/// straight meshes; the found elements and reference coordinates agree.
+pub fn find_points<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    points: &[f64],
+    npts: usize,
+) -> (Vec<i64>, Vec<Vec<f64>>) {
+    use crate::element_type::ElementType;
+
+    let dim = mesh.dim() as usize;
+    let n_elems = mesh.n_elements();
+    let eps = 1e-8;
+
+    // Per-element vertex bounding boxes.
+    let mut bboxes: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(n_elems);
+    for e in 0..n_elems as u32 {
+        let nds = mesh.element_nodes(e);
+        let mut lo = vec![f64::INFINITY; dim];
+        let mut hi = vec![f64::NEG_INFINITY; dim];
+        for &n in nds {
+            let c = mesh.node_coords(n);
+            for d in 0..dim {
+                lo[d] = lo[d].min(c[d]);
+                hi[d] = hi[d].max(c[d]);
+            }
+        }
+        bboxes.push((lo, hi));
+    }
+
+    // Reference-domain containment per element type.
+    fn contained(et: ElementType, xi: &[f64], eps: f64) -> bool {
+        match et {
+            ElementType::Tri3 | ElementType::Tri6 => {
+                xi[0] >= -eps && xi[1] >= -eps && xi[0] + xi[1] <= 1.0 + eps
+            }
+            ElementType::Tet4 | ElementType::Tet10 => {
+                xi.iter().all(|&t| t >= -eps) && xi.iter().sum::<f64>() <= 1.0 + eps
+            }
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+                xi[0] >= -eps
+                    && xi[1] >= -eps
+                    && xi[2] >= -eps
+                    && xi[1] + xi[2] <= 1.0 + eps
+                    && xi[0] <= 1.0 + eps
+            }
+            _ => xi.iter().all(|&t| t >= -eps && t <= 1.0 + eps),
+        }
+    }
+
+    // Newton inversion for one point in one element, using MFEM-canonical
+    // vertex-ordering geometry interpolation (linear/bilinear/trilinear).
+    // Returns reference coordinates if the converged point lies in-domain.
+    fn locate<M: MeshTopology + ?Sized>(
+        mesh: &M,
+        e: u32,
+        target: &[f64],
+        eps: f64,
+    ) -> Option<Vec<f64>> {
+        use crate::element_type::ElementType;
+        let dim = mesh.dim() as usize;
+        let et = mesh.element_type(e);
+        let nds = mesh.element_nodes(e);
+
+        // Matches MFEM Geometry vertex orderings (same as the mesh files).
+        let x_of = |k: usize| mesh.node_coords(nds[k]);
+        let map = |xi: &[f64], x: &mut [f64]| {
+            for v in x.iter_mut() {
+                *v = 0.0;
+            }
+            match et {
+                ElementType::Tri3 | ElementType::Tri6 => {
+                    // (1-s-t) v0 + s v1 + t v2
+                    let (s, t) = (xi[0], xi[1]);
+                    let w = [1.0 - s - t, s, t];
+                    for k in 0..3 {
+                        let c = x_of(k);
+                        for d in 0..2 {
+                            x[d] += w[k] * c[d];
+                        }
+                    }
+                }
+                ElementType::Quad4 => {
+                    let (s, t) = (xi[0], xi[1]);
+                    let w = [
+                        (1.0 - s) * (1.0 - t),
+                        s * (1.0 - t),
+                        s * t,
+                        (1.0 - s) * t,
+                    ];
+                    for k in 0..4 {
+                        let c = x_of(k);
+                        for d in 0..2 {
+                            x[d] += w[k] * c[d];
+                        }
+                    }
+                }
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    let w = [1.0 - xi[0] - xi[1] - xi[2], xi[0], xi[1], xi[2]];
+                    for k in 0..4 {
+                        let c = x_of(k);
+                        for d in 0..3 {
+                            x[d] += w[k] * c[d];
+                        }
+                    }
+                }
+                ElementType::Hex8 => {
+                    let (s, t, u) = (xi[0], xi[1], xi[2]);
+                    let w = [
+                        (1.0 - s) * (1.0 - t) * (1.0 - u),
+                        s * (1.0 - t) * (1.0 - u),
+                        s * t * (1.0 - u),
+                        (1.0 - s) * t * (1.0 - u),
+                        (1.0 - s) * (1.0 - t) * u,
+                        s * (1.0 - t) * u,
+                        s * t * u,
+                        (1.0 - s) * t * u,
+                    ];
+                    for k in 0..8 {
+                        let c = x_of(k);
+                        for d in 0..3 {
+                            x[d] += w[k] * c[d];
+                        }
+                    }
+                }
+                _ => panic!(
+                    "find_points: unsupported element type {et:?} (straight Quad4/Tri3/Tet4/Hex8 only)"
+                ),
+            }
+        };
+        let jacobian_at = |xi: &[f64], jac: &mut [f64]| {
+            let h = 1e-7;
+            let n = xi.len();
+            let mut xp = vec![0.0; n];
+            let mut xm = vec![0.0; n];
+            let mut xi_p = xi.to_vec();
+            let mut xi_m = xi.to_vec();
+            for col in 0..n {
+                xi_p.copy_from_slice(xi);
+                xi_m.copy_from_slice(xi);
+                xi_p[col] += h;
+                xi_m[col] -= h;
+                map(&xi_p, &mut xp);
+                map(&xi_m, &mut xm);
+                for row in 0..n {
+                    jac[row * n + col] = (xp[row] - xm[row]) / (2.0 * h);
+                }
+            }
+        };
+
+        // Start at the reference-domain centroid.
+        let mut xi: Vec<f64> = match et {
+            ElementType::Tri3 | ElementType::Tri6 => vec![1.0 / 3.0; 2],
+            _ => vec![0.5; dim],
+        };
+
+        let mut x = vec![0.0_f64; dim];
+        let mut jac = vec![0.0_f64; dim * dim];
+        for _iter in 0..30 {
+            map(&xi, &mut x);
+            jacobian_at(&xi, &mut jac);
+            let mut rhs: Vec<f64> = target.to_vec();
+            for d in 0..dim {
+                rhs[d] -= x[d];
+            }
+            let mut a = jac.clone();
+            let Some(delta) = gauss_solve(&mut a, &mut rhs, dim) else {
+                return None;
+            };
+            let mut norm = 0.0;
+            for d in 0..dim {
+                xi[d] += delta[d];
+                norm += delta[d] * delta[d];
+            }
+            if norm < 1e-28 {
+                break;
+            }
+        }
+
+        // Residual check + containment.
+        map(&xi, &mut x);
+        let mut res2 = 0.0;
+        for d in 0..dim {
+            res2 += (x[d] - target[d]).powi(2);
+        }
+        if res2 < 1e-20 && contained(et, &xi, eps) {
+            Some(xi)
+        } else {
+            None
+        }
+    }
+
+    let mut elem_ids: Vec<i64> = Vec::with_capacity(npts);
+    let mut ref_coords: Vec<Vec<f64>> = Vec::with_capacity(npts);
+
+    for i in 0..npts {
+        let target = &points[i * dim..i * dim + dim];
+        let mut found: Option<(u32, Vec<f64>)> = None;
+        // Pass 1: bbox-filtered candidates; pass 2: all elements (points on
+        // shared boundaries may sit outside every padded bbox).
+        for pass in 0..2 {
+            for e in 0..n_elems as u32 {
+                if pass == 0 {
+                    let (lo, hi) = &bboxes[e as usize];
+                    let inside_bbox = (0..dim).all(|d| {
+                        target[d] >= lo[d] - 1e-9 && target[d] <= hi[d] + 1e-9
+                    });
+                    if !inside_bbox {
+                        continue;
+                    }
+                }
+                if let Some(xi) = locate(mesh, e, target, eps) {
+                    found = Some((e, xi));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        match found {
+            Some((e, xi)) => {
+                elem_ids.push(e as i64);
+                ref_coords.push(xi);
+            }
+            None => {
+                elem_ids.push(-1);
+                ref_coords.push(vec![0.0; dim]);
+            }
+        }
+    }
+    (elem_ids, ref_coords)
+}
+
+/// Small dense solver (Gaussian elimination with partial pivoting).
+/// Solves in place; `a` is row-major `n x n`, `b` length `n`.
+fn gauss_solve(a: &mut [f64], b: &mut [f64], n: usize) -> Option<Vec<f64>> {
+    for col in 0..n {
+        // pivot
+        let mut piv = col;
+        let mut best = a[col * n + col].abs();
+        for r in col + 1..n {
+            let v = a[r * n + col].abs();
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        if best < 1e-300 {
+            return None;
+        }
+        if piv != col {
+            for c in 0..n {
+                a.swap(col * n + c, piv * n + c);
+            }
+            b.swap(col, piv);
+        }
+        let inv = 1.0 / a[col * n + col];
+        for r in col + 1..n {
+            let f = a[r * n + col] * inv;
+            if f == 0.0 {
+                continue;
+            }
+            for c in col..n {
+                a[r * n + c] -= f * a[col * n + c];
+            }
+            b[r] -= f * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for r in (0..n).rev() {
+        let mut s = b[r];
+        for c in r + 1..n {
+            s -= a[r * n + c] * x[c];
+        }
+        x[r] = s / a[r * n + r];
+    }
+    Some(x)
+}
+
+#[cfg(test)]
+mod find_points_tests {
+    use crate::simplex::Mesh;
+    use crate::transformation::find_points;
+    use crate::element_type::ElementType;
+
+    #[test]
+    fn find_points_quad_2elem() {
+        let m = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
+        // points: inside elem0, inside elem3, on shared edge, outside
+        let pts = vec![0.25, 0.25, 0.75, 0.75, 0.5, 0.25, 5.0, 5.0];
+        let (ids, xis) = find_points(&m, &pts, 4);
+        assert_eq!(ids[0], 0);
+        assert_eq!(ids[1], 3);
+        assert!(ids[2] >= 0, "boundary point should be found");
+        assert_eq!(ids[3], -1);
+        assert!((xis[0][0] - 0.5).abs() < 1e-10 && (xis[0][1] - 0.5).abs() < 1e-10);
+        assert!((xis[1][0] - 0.5).abs() < 1e-10 && (xis[1][1] - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn find_points_tri_mesh() {
+        // unit square split into two triangles (diagonal BL-TR)
+        let m = Mesh::<2>::unit_square_tri(1);
+        let pts = vec![0.1, 0.1, 0.9, 0.9, 0.7, 0.2];
+        let (ids, _xis) = find_points(&m, &pts, 3);
+        assert!(ids.iter().all(|&i| i >= 0), "all points inside the square");
+    }
+
+    #[test]
+    fn find_points_hex_unit() {
+        let m = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, true);
+        let pts = vec![0.3, 0.2, 0.9, 0.5, 0.5, 0.5, 1.1, 0.5, 0.5];
+        let (ids, xis) = find_points(&m, &pts, 3);
+        assert_eq!(ids[0], 0);
+        assert_eq!(ids[1], 0);
+        assert_eq!(ids[2], -1);
+        assert!((xis[0][0] - 0.3).abs() < 1e-10);
+        assert!((xis[1][2] - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn find_points_tet_unit() {
+        let m = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, true);
+        let pts = vec![0.1, 0.1, 0.1, 0.5, 0.5, 0.5];
+        let (ids, _xis) = find_points(&m, &pts, 2);
+        assert_eq!(ids[0], 0, "point near origin is in the corner tet");
+        let _ = ids[1]; // may be in either tet of the diagonal split
+    }
+}

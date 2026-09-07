@@ -113,40 +113,54 @@ pub fn read_visit_root(root_path: &Path) -> std::io::Result<(usize, usize, Vec<D
     let domains = extract_json_number(&content, "\"domains\":")
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing domains"))?;
 
-    // Extract fields - find "fields": { ... }
+    // Extract fields - find "fields": { ... } and parse each
+    // "name": { "path": ..., "tags": { "basis": ..., "comps": ..., ... } }
+    // entry with brace matching (handles both the C++ VisIt layout, where
+    // fields nest inside dsets.main, and the writer's own layout).
     let mut fields = Vec::new();
     if let Some(fields_start) = content.find("\"fields\":") {
-        let fields_str = &content[fields_start..];
-        // Find each field entry
-        let mut pos = 0;
-        while let Some(name_start) = fields_str[pos..].find('"') {
-            let name_start = pos + name_start + 1;
-            if let Some(name_end) = fields_str[name_start..].find('"') {
-                let name = &fields_str[name_start..name_start + name_end];
-                // Find basis
-                if let Some(basis_pos) = fields_str[name_start..].find("\"basis\":") {
-                    let basis_start = name_start + basis_pos + 9;
-                    if let Some(basis_end) = fields_str[basis_start..].find('"') {
-                        let basis = &fields_str[basis_start..basis_start + basis_end];
-                        // Find comps (vdim)
-                        let vdim = extract_json_number(&fields_str[name_start..], "\"comps\":")
-                            .unwrap_or(1) as u32;
-                        // Find order
-                        let order = extract_json_number(&fields_str[name_start..], "\"order\":")
-                            .unwrap_or(1) as u32;
-                        fields.push(DcField {
-                            name: name.to_string(),
-                            basis: basis.to_string(),
-                            order,
-                            vdim,
-                            values: Vec::new(),
-                        });
-                    }
+        let after_key = &content[fields_start..];
+        if let Some(rel) = after_key.find('{') {
+            let obj = match match_braces(&after_key[rel..]) {
+                Some(span) => &after_key[rel + 1..rel + span - 1],
+                None => "",
+            };
+            // Iterate top-level entries "name": { ... }.
+            let bytes = obj.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if bytes[i] != b'"' {
+                    i += 1;
+                    continue;
                 }
-                pos = name_start + name_end + 1;
-                if pos > fields_str.len() { break; }
-            } else {
-                break;
+                // key string
+                let Some(key_end) = obj[i + 1..].find('"') else { break };
+                let name = &obj[i + 1..i + 1 + key_end];
+                let mut j = i + 1 + key_end + 1;
+                // skip to value
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b':') {
+                    j += 1;
+                }
+                if j >= bytes.len() || bytes[j] != b'{' {
+                    i = j;
+                    continue;
+                }
+                // brace-match the value object
+                let Some(span) = match_braces(&obj[j..]) else { break };
+                let body = &obj[j..j + span];
+                let basis = extract_json_str(body, "\"basis\"");
+                let vdim = extract_json_usize(body, "\"comps\"").unwrap_or(1) as u32;
+                let order = extract_json_usize(body, "\"order\"").unwrap_or(1) as u32;
+                if let Some(basis) = basis {
+                    fields.push(DcField {
+                        name: name.to_string(),
+                        basis: basis.to_string(),
+                        order,
+                        vdim,
+                        values: Vec::new(),
+                    });
+                }
+                i = j + span;
             }
         }
     }
@@ -155,6 +169,61 @@ pub fn read_visit_root(root_path: &Path) -> std::io::Result<(usize, usize, Vec<D
 }
 
 /// Extract a number from JSON content after a key.
+/// Match a `{...}` block starting at `s[0] == '{'`; returns the span length
+/// including both braces.
+fn match_braces(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract a quoted string value following `"key":`.
+fn extract_json_str<'a>(content: &'a str, key: &str) -> Option<&'a str> {
+    let pos = content.find(key)? + key.len();
+    let rest = &content[pos..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Extract a numeric value following `"key":` (bare or quoted).
+fn extract_json_usize(content: &str, key: &str) -> Option<usize> {
+    if let Some(v) = extract_json_number(content, key) {
+        return Some(v);
+    }
+    extract_json_str(content, key)?.trim().parse().ok()
+}
+
 fn extract_json_number(content: &str, key: &str) -> Option<usize> {
     let pos = content.find(key)? + key.len();
     let rest = &content[pos..];

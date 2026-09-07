@@ -8,6 +8,8 @@ mod refine_2d;
 mod make_conforming;
 mod refinement_tree;
 mod schedule;
+pub mod general_refinement;
+pub mod sfc_ordering;
 pub use amr_inner::*;
 pub use refinement_tree::*;
 pub use amr_inner::{

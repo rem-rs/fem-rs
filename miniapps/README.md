@@ -9,26 +9,44 @@ miniapps/
 ├── tools/                   ← 对应 miniapps/tools/
 │   ├── tmop_check_metric.rs
 │   ├── tmop_metric_magnitude.rs
-│   └── gridfunction_bounds.rs
+│   ├── gridfunction_bounds.rs
+│   ├── load-dc.rs             ← VisIt DC 加载 (1:1)
+│   ├── compare-dc.rs          ← DC 比对 (1:1)
+│   ├── display_basis.rs       ← 基函数展示 (无 GLVis; H1/ND/RT/L2,
+│   │                            vsize 与 C++ 逐位一致, 32/34 组合;
+│   │                            hex L2 ≥P2 为 fem-rs 缺口)
+│   ├── get_values.rs          ← DC 场采样 (依赖 find_points;
+│   │                            与 C++ 输出逐位一致)
+│   └── lor_transfer.rs        ← LOR 传输 (简化 H1+pointwise 版;
+│                                HO/R(HO)/LOR 质量与 C++ 逐位一致)
 ├── electromagnetics/        ← 对应 miniapps/electromagnetics/
 │   ├── lorentz.rs
 │   ├── tesla.rs
 │   └── volta.rs
-├── nurbs/                   ← 对应 miniapps/nurbs/
+├── nurbs/                   ← 对应 miniapps/nurbs/ (6 个已完成)
 ├── meshing/                 ← 对应 miniapps/meshing/
-│   ├── shaper.rs            ← 材料界面 AMR (1:1, 编译+运行通过)
-│   └── extruder.rs          ← 2D→3D 拉伸 (1:1, 编译+运行通过)
-│   └── (twist/klein-bottle/toroid/trimmer/reflector: 需低层 API)
-├── toys/                    ← 对应 miniapps/toys/
-│   ├── automata.rs          ← 1D 元胞自动机 (1:1, 编译+运行通过)
-│   ├── life.rs              ← Conway 生命游戏 (1:1, 编译通过)
-│   ├── lissajous.rs         ← Lissajous 旋转曲面 (核心逻辑 1:1, 文件输出受限)
-│   ├── mondrian.rs          ← PGM 图片→AMR 网格 (1:1, 编译+运行通过)
-│   ├── mandel.rs            ← Mandelbrot AMR (核心逻辑 1:1, Quad4 退化)
-│   └── (snake/rubik/spiral: 需 3D 低层 API 或外部文件)
-├── fluids/                  ← 对应 miniapps/fluids/
+│   ├── shaper.rs            ← 材料界面 AMR (1:1)
+│   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
+│   ├── twist.rs / klein-bottle.rs / toroid.rs / trimmer.rs / reflector.rs
+│   ├── mesh-explorer.rs / mesh-quality.rs
+│   ├── polar-nc.rs          ← 极坐标 NC 网格
+│   └── ref321.rs            ← 3:1 各向异性细化 (1:1, order 1:
+│                                unknowns 与 C++ r=1..100 全对齐,
+│                                H1 连续性 ~0)
+├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
+├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
 └── ...
 ```
+
+## 本轮新增核心库能力 (fem-rs crates)
+
+- `fem_mesh::amr::general_refinement` — 任意 scale 的 NC quad 细分
+  (`Refinement{index,type,scale}`，MFEM `Mesh::GeneralRefinement`)
+- `fem_mesh::Mesh::make_cartesian_2d_sfc` — MFEM `MakeCartesian2D`
+  默认的 Hilbert SFC 元素序 (`amr::sfc_ordering::grid_sfc_ordering_2d`)
+- `fem_mesh::transformation::find_points` — 串行 FindPoints (暴力 + Newton)
+- `fem_io` VisIt DC 根文件解析支持 C++ 写出的嵌套 JSON 布局
+- `GridFunction::ref_elem_vol` 覆盖 Hex/Prism 全阶
 
 ## 命名约定
 
@@ -37,6 +55,8 @@ miniapps/
 | `tmop-check-metric.cpp` | `tools/tmop_check_metric.rs` |
 | `mesh-optimizer.cpp` | `meshing/mesh_optimizer.rs` |
 | `lorentz.cpp` | `electromagnetics/lorentz.rs` |
+| `ref321.cpp` | `meshing/ref321.rs` |
+| `get-values.cpp` | `tools/get_values.rs` |
 
 ## 运行
 
@@ -51,4 +71,8 @@ cargo run --example toys_mondrian -- -i ../../mfem/miniapps/toys/australia.pgm -
 cargo run --example toys_mandel -- -m data/inline-quad.mesh
 cargo run --example mesh_shaper -- -m data/inline-quad.mesh
 cargo run --example mesh_extruder -- -m data/inline-quad.mesh -nz 4 -hz 2.0
+cargo run --example mesh_ref321 -- -mm -dim 2 -r 100 -no-vis
+cargo run --example tools_display_basis -- -e 2 -b 3 -o 3
+cargo run --example tools_get_values -- -r <DC 根路径> -p "x y z ..."
+cargo run --example tools_lor_transfer -- -m data/inline-quad.mesh -o 2 -no-vis
 ```

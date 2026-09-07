@@ -200,6 +200,7 @@ fn mixed_mesh_elem_type_accessor() {
         edge_to_elem: vec![],
         nc_vertex_view: None,
         geometry: None,
+        vertex_parents: vec![],
     };
 
     assert!(mesh.is_mixed());
@@ -226,14 +227,15 @@ fn face_elements_after_build_all_boundary_faces_have_owner() {
             owner < mesh.n_elements() as u32,
             "boundary face {bf} should have an owned element, got {owner}"
         );
-        let (elem, neighbor) = mesh.face_elements(bf as u32);
-        assert_eq!(
-            elem, owner,
-            "face_elements returned wrong owner for face {bf}"
-        );
+        let elems = mesh.face_elements(bf as u32);
         assert!(
-            neighbor.is_none(),
-            "boundary face {bf} should have no neighbor"
+            elems.contains(&owner),
+            "face_elements should include owner {owner} for face {bf}, got {elems:?}"
+        );
+        assert_eq!(
+            elems.len(),
+            1,
+            "boundary face {bf} should have no neighbor, got {elems:?}"
         );
     }
 }
@@ -253,20 +255,17 @@ fn face_elements_3d_cube_each_boundary_face_has_owner() {
             owner < mesh.n_elements() as u32,
             "3-D boundary face {bf} should have an owner, got {owner}"
         );
-        let (elem, neighbor) = mesh.face_elements(bf as u32);
-        assert_eq!(elem, owner);
-        assert!(neighbor.is_none());
+        let elems = mesh.face_elements(bf as u32);
+        assert_eq!(elems, vec![owner]);
     }
 }
 
 #[test]
 fn face_elements_not_built_returns_zero() {
     let mesh = Mesh::<2>::unit_square_tri(4);
-    let (elem, _neighbor) = mesh.face_elements(0);
-    assert_eq!(
-        elem, 0,
-        "before build_face_to_elem, should return (0, None)"
-    );
+    // face_elements scans element connectivity directly (no face_to_elem needed).
+    let elems = mesh.face_elements(0);
+    assert_eq!(elems.len(), 1, "boundary face has exactly one adjacent element");
 }
 
 // ─── make_cartesian_3d (MFEM MakeCartesian3D, verified 1:1 vs MFEM 4.10

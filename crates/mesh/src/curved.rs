@@ -1180,7 +1180,7 @@ mod tests {
         let mesh2 = Mesh { coords, conn, elem_tags: vec![1i32], elem_type: ElementType::Prism6,
             face_conn: fc, face_tags: vec![1,2,3,4,5,6,7,8], face_type: ElementType::Tri3,
             elem_types:None, elem_offsets:None, face_types:None, face_offsets:None,
-            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view: None, geometry:None };
+            face_to_elem:None, edge_conn:vec![], edge_to_elem:vec![], nc_vertex_view: None, geometry:None, vertex_parents: vec![] };
         let curved2 = CurvedMesh::from_linear(&mesh2);
         let fine2 = refine_curved_3d_general(&curved2);
         let fine2_amr = refine_uniform_3d(&mesh2);
