@@ -25,6 +25,7 @@ pub mod iga_fe_space;
 pub mod p_refine;
 pub mod vector_h1;
 pub mod make_refined;
+pub mod lor;
 pub mod block_fe_space;
 pub mod dpg_trace;
 
@@ -44,4 +45,5 @@ pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use block_fe_space::BlockFESpace;
 pub use dpg_trace::{DpgTraceSpace, FaceInfo};
 pub use make_refined::{make_refined_2d, make_refined_3d};
+pub use lor::{LorNd, LorRt};
 

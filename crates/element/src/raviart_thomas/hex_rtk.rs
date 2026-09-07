@@ -1,4 +1,12 @@
 //! Arbitrary-order RT_k on reference hexahedron [-1,1]³ via Vandermonde.
+//!
+//! Local DOF order: six face blocks (each (k+1)² DOFs) in `HDivSpace::
+//! HEX_FACES` order — MFEM `Geometry::CUBE::FaceVert`: bottom z−, front y−,
+//! right x+, back y+, left x−, top z+ — followed by three interior blocks
+//! (k(k+1)² DOFs each, x/y/z components).  The face order matches the
+//! `HDivSpace::build_3d_hex` element-DOF layout so that the positional
+//! (basis i ↔ element_dofs[i]) pairing used by the vector assembler is
+//! geometrically consistent across neighbouring hexes.
 
 use crate::reference::VectorReferenceElement;
 use std::sync::OnceLock;
@@ -44,29 +52,24 @@ fn hex_data(k: usize) -> &'static HexRTkData {
         let mut v = vec![vec![0.0; mt]; n];
         let mut di = 0;
 
-        // Face -x: ∫ -Φ_x(-1,y,z)·y^a z^b dA
+        // Face blocks follow `HDivSpace::HEX_FACES` (MFEM `Geometry::CUBE::
+        // FaceVert`: bottom z−, front y−, right x+, back y+, left x−, top z+)
+        // so that the element's local DOF order matches the H(div) space's
+        // element-DOF layout (positional pairing in the vector assembler).
+        // Face -z: ∫ -Φ_z(x,y,-1)·x^a y^b dA
         for a in 0..=k {
             for b in 0..=k {
                 for j in 0..nx {
-                    let am = j / ((k + 1) * (k + 1));
-                    let r = j % ((k + 1) * (k + 1));
-                    v[di][j] = -(-1.0_f64).powi(am as i32) * i2(r / (k + 1) + a, r % (k + 1) + b);
-                }
-                for j in nx..mt {
                     v[di][j] = 0.0;
                 }
-                di += 1;
-            }
-        }
-        // Face +x: ∫ Φ_x(1,y,z)·y^a z^b dA
-        for a in 0..=k {
-            for b in 0..=k {
-                for j in 0..nx {
-                    let r = j % ((k + 1) * (k + 1));
-                    v[di][j] = 1.0 * i2(r / (k + 1) + a, r % (k + 1) + b);
-                }
-                for j in nx..mt {
+                for j in nx..nx + ny {
                     v[di][j] = 0.0;
+                }
+                for j in 0..nz {
+                    let am = j / ((k + 1) * (k + 2));
+                    let r = j % ((k + 1) * (k + 2));
+                    v[di][nx + ny + j] =
+                        -(-1.0_f64).powi((r % (k + 2)) as i32) * i2(am + a, r / (k + 2) + b);
                 }
                 di += 1;
             }
@@ -89,6 +92,19 @@ fn hex_data(k: usize) -> &'static HexRTkData {
                 di += 1;
             }
         }
+        // Face +x: ∫ Φ_x(1,y,z)·y^a z^b dA
+        for a in 0..=k {
+            for b in 0..=k {
+                for j in 0..nx {
+                    let r = j % ((k + 1) * (k + 1));
+                    v[di][j] = 1.0 * i2(r / (k + 1) + a, r % (k + 1) + b);
+                }
+                for j in nx..mt {
+                    v[di][j] = 0.0;
+                }
+                di += 1;
+            }
+        }
         // Face +y: ∫ Φ_y(x,1,z)·x^a z^b dA
         for a in 0..=k {
             for b in 0..=k {
@@ -106,20 +122,16 @@ fn hex_data(k: usize) -> &'static HexRTkData {
                 di += 1;
             }
         }
-        // Face -z: ∫ -Φ_z(x,y,-1)·x^a y^b dA
+        // Face -x: ∫ -Φ_x(-1,y,z)·y^a z^b dA
         for a in 0..=k {
             for b in 0..=k {
                 for j in 0..nx {
-                    v[di][j] = 0.0;
+                    let am = j / ((k + 1) * (k + 1));
+                    let r = j % ((k + 1) * (k + 1));
+                    v[di][j] = -(-1.0_f64).powi(am as i32) * i2(r / (k + 1) + a, r % (k + 1) + b);
                 }
-                for j in nx..nx + ny {
+                for j in nx..mt {
                     v[di][j] = 0.0;
-                }
-                for j in 0..nz {
-                    let am = j / ((k + 1) * (k + 2));
-                    let r = j % ((k + 1) * (k + 2));
-                    v[di][nx + ny + j] =
-                        -(-1.0_f64).powi((r % (k + 2)) as i32) * i2(am + a, r / (k + 2) + b);
                 }
                 di += 1;
             }

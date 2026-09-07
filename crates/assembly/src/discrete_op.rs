@@ -277,10 +277,16 @@ impl DiscreteLinearOperator {
                 }
                 ElementType::Tet4 | ElementType::Tet10 => &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)],
                 ElementType::Hex8 | ElementType::Hex20 => &[
-                    // MUST match HCurlSpace::HEX_EDGES order (hcurl.rs).
-                    (0, 1), (3, 2), (7, 6), (4, 5),   // x-edges
-                    (0, 3), (1, 2), (5, 6), (4, 7),   // y-edges
-                    (0, 4), (1, 5), (2, 6), (3, 7),   // z-edges
+                    // MUST match HCurlSpace::HEX_EDGES order (hcurl.rs), i.e.
+                    // MFEM `Geometry::Constants<Geometry::CUBE>::Edges`:
+                    //   (0,1),(1,2),(3,2),(0,3),(4,5),(5,6),(7,6),(4,7),
+                    //   (0,4),(1,5),(2,6),(3,7).
+                    // A previous version listed the edges grouped by
+                    // direction, which assigned gradient rows to the wrong
+                    // HCurl DOFs on hex meshes.
+                    (0, 1), (1, 2), (3, 2), (0, 3),
+                    (4, 5), (5, 6), (7, 6), (4, 7),
+                    (0, 4), (1, 5), (2, 6), (3, 7),
                 ],
                 ElementType::Prism6 | ElementType::Prism15 => &[
                     (0, 1), (0, 2), (1, 2), // bottom tri

@@ -59,9 +59,13 @@ impl QuadNDk {
         assert!(p >= 1);
         QuadNDk { order: p }
     }
+    /// Open p-point equispaced nodes on [0,1] (endpoints excluded): the
+    /// tangent-direction modes span P_{p-1}, which is what the Nédélec
+    /// tensor structure Q_{p-1,p} × Q_{p,p-1} requires.  With the closed
+    /// (p+1)-point nodes the span would miss the constant mode.
     fn nodes(&self) -> Vec<f64> {
         let p = self.order;
-        (0..=p).map(|i| i as f64 / p as f64).collect()
+        (0..p).map(|i| i as f64 / p as f64).collect()
     }
 }
 

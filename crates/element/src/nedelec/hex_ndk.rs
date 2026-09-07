@@ -1,6 +1,11 @@
-//! Nédélec-I on hex [-1,1]³ via tensor-product.
+//! Nédélec on hex [-1,1]³ via tensor-product.
 //! ND_k = Q_{k-1,k,k} × Q_{k,k-1,k} × Q_{k,k,k-1}
 //! Edge: 12k. Face: 12k(k-1). Interior: 3k(k-1)². n_dofs = 3k(k+1)².
+//!
+//! Each component uses the closed (k+1)-point equispaced basis in its two
+//! normal directions and the open k-point equispaced Lagrange basis along its
+//! tangent direction, so the local span is the true Nédélec space (in
+//! particular hex ND1 is the Whitney form x̂·ĥ(y)·ĥ(z), constant along edges).
 
 use crate::reference::VectorReferenceElement;
 
@@ -48,9 +53,21 @@ impl HexNDk {
         assert!(p >= 1);
         HexNDk { order: p }
     }
+    /// Closed (k+1)-point equispaced nodes on [-1,1] — used for the *normal*
+    /// (hat) directions of each component.
     fn nodes(&self) -> Vec<f64> {
         let p = self.order;
         (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect()
+    }
+    /// Open p-point equispaced nodes on [-1,1] — the tangent-direction modes
+    /// of each component must span P_{p-1} (ND_k = Q_{k-1,k,k} × …), so the
+    /// k Lagrange modes are taken over k open nodes (endpoints excluded).
+    /// With the closed nodes instead, the span misses the constant mode and
+    /// the space is *not* the Nédélec space (hex ND1 would carry a spurious
+    /// (1−x)/2 factor along every edge).
+    fn open_nodes(&self) -> Vec<f64> {
+        let p = self.order;
+        (0..p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect()
     }
 }
 
@@ -67,7 +84,7 @@ impl VectorReferenceElement for HexNDk {
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         let p = self.order;
-        let nd = self.nodes();
+        let ndo = self.open_nodes();
         let x = xi[0];
         let y = xi[1];
         let z = xi[2];
@@ -86,7 +103,7 @@ impl VectorReferenceElement for HexNDk {
             // MFEM edge numbers 0,2,4,6 → output positions 0,2,4,6.
             let e = [0usize, 2, 4, 6][ei];
             for j in 0..p {
-                values[(e * p + j) * 3] = lag(&nd, j, x) * hy * hz;
+                values[(e * p + j) * 3] = lag(&ndo, j, x) * hy * hz;
             }
         }
         let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
@@ -95,7 +112,7 @@ impl VectorReferenceElement for HexNDk {
             let hz = hat(z, z0);
             let e = [1usize, 3, 5, 7][ei];
             for j in 0..p {
-                values[(e * p + j) * 3 + 1] = lag(&nd, j, y) * hx * hz;
+                values[(e * p + j) * 3 + 1] = lag(&ndo, j, y) * hx * hz;
             }
         }
         let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
@@ -104,7 +121,7 @@ impl VectorReferenceElement for HexNDk {
             let hy = hat(y, y0);
             let e = 8 + ei;
             for j in 0..p {
-                values[(e * p + j) * 3 + 2] = lag(&nd, j, z) * hx * hy;
+                values[(e * p + j) * 3 + 2] = lag(&ndo, j, z) * hx * hy;
             }
         }
 
@@ -117,7 +134,7 @@ impl VectorReferenceElement for HexNDk {
                 let ym = 1.0 - y * y;
                 let hz = hat(z, -1.0);
                 for j in 0..p {
-                    values[off * 3] = lag(&nd, j, x) * ym * yi * hz;
+                    values[off * 3] = lag(&ndo, j, x) * ym * yi * hz;
                     off += 1;
                 }
             }
@@ -127,7 +144,7 @@ impl VectorReferenceElement for HexNDk {
                 let xm = 1.0 - x * x;
                 let hz = hat(z, -1.0);
                 for j in 0..p {
-                    values[off * 3 + 1] = lag(&nd, j, y) * xm * xi * hz;
+                    values[off * 3 + 1] = lag(&ndo, j, y) * xm * xi * hz;
                     off += 1;
                 }
             }
@@ -137,7 +154,7 @@ impl VectorReferenceElement for HexNDk {
                 let ym = 1.0 - y * y;
                 let hz = hat(z, 1.0);
                 for j in 0..p {
-                    values[off * 3] = lag(&nd, j, x) * ym * yi * hz;
+                    values[off * 3] = lag(&ndo, j, x) * ym * yi * hz;
                     off += 1;
                 }
             }
@@ -147,7 +164,7 @@ impl VectorReferenceElement for HexNDk {
                 let xm = 1.0 - x * x;
                 let hz = hat(z, 1.0);
                 for j in 0..p {
-                    values[off * 3 + 1] = lag(&nd, j, y) * xm * xi * hz;
+                    values[off * 3 + 1] = lag(&ndo, j, y) * xm * xi * hz;
                     off += 1;
                 }
             }
@@ -157,7 +174,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hy = hat(y, -1.0);
                 for j in 0..p {
-                    values[off * 3] = lag(&nd, j, x) * zm * zi * hy;
+                    values[off * 3] = lag(&ndo, j, x) * zm * zi * hy;
                     off += 1;
                 }
             }
@@ -167,7 +184,7 @@ impl VectorReferenceElement for HexNDk {
                 let xm = 1.0 - x * x;
                 let hy = hat(y, -1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, z) * xm * xi * hy;
+                    values[off * 3 + 2] = lag(&ndo, j, z) * xm * xi * hy;
                     off += 1;
                 }
             }
@@ -177,7 +194,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hy = hat(y, 1.0);
                 for j in 0..p {
-                    values[off * 3] = lag(&nd, j, x) * zm * zi * hy;
+                    values[off * 3] = lag(&ndo, j, x) * zm * zi * hy;
                     off += 1;
                 }
             }
@@ -187,7 +204,7 @@ impl VectorReferenceElement for HexNDk {
                 let xm = 1.0 - x * x;
                 let hy = hat(y, 1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, z) * xm * xi * hy;
+                    values[off * 3 + 2] = lag(&ndo, j, z) * xm * xi * hy;
                     off += 1;
                 }
             }
@@ -197,7 +214,7 @@ impl VectorReferenceElement for HexNDk {
                 let ym = 1.0 - y * y;
                 let hx = hat(x, -1.0);
                 for j in 0..p {
-                    values[off * 3 + 1] = lag(&nd, j, z) * ym * yi * hx;
+                    values[off * 3 + 1] = lag(&ndo, j, z) * ym * yi * hx;
                     off += 1;
                 }
             }
@@ -207,7 +224,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hx = hat(x, -1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, y) * zm * zi * hx;
+                    values[off * 3 + 2] = lag(&ndo, j, y) * zm * zi * hx;
                     off += 1;
                 }
             }
@@ -217,7 +234,7 @@ impl VectorReferenceElement for HexNDk {
                 let ym = 1.0 - y * y;
                 let hx = hat(x, 1.0);
                 for j in 0..p {
-                    values[off * 3 + 1] = lag(&nd, j, z) * ym * yi * hx;
+                    values[off * 3 + 1] = lag(&ndo, j, z) * ym * yi * hx;
                     off += 1;
                 }
             }
@@ -227,7 +244,7 @@ impl VectorReferenceElement for HexNDk {
                 let zm = 1.0 - z * z;
                 let hx = hat(x, 1.0);
                 for j in 0..p {
-                    values[off * 3 + 2] = lag(&nd, j, y) * zm * zi * hx;
+                    values[off * 3 + 2] = lag(&ndo, j, y) * zm * zi * hx;
                     off += 1;
                 }
             }
@@ -241,7 +258,7 @@ impl VectorReferenceElement for HexNDk {
                     let zl = z.powi(l as i32);
                     let bz = 1.0 - z * z;
                     for j in 0..p {
-                        values[off * 3] = lag(&nd, j, x) * by * yi * bz * zl;
+                        values[off * 3] = lag(&ndo, j, x) * by * yi * bz * zl;
                         off += 1;
                     }
                 }
@@ -254,7 +271,7 @@ impl VectorReferenceElement for HexNDk {
                     let zl = z.powi(l as i32);
                     let bz = 1.0 - z * z;
                     for j in 0..p {
-                        values[off * 3 + 1] = lag(&nd, j, y) * bx * xi * bz * zl;
+                        values[off * 3 + 1] = lag(&ndo, j, y) * bx * xi * bz * zl;
                         off += 1;
                     }
                 }
@@ -267,7 +284,7 @@ impl VectorReferenceElement for HexNDk {
                     let yl = y.powi(l as i32);
                     let by = 1.0 - y * y;
                     for j in 0..p {
-                        values[off * 3 + 2] = lag(&nd, j, z) * bx * xi * by * yl;
+                        values[off * 3 + 2] = lag(&ndo, j, z) * bx * xi * by * yl;
                         off += 1;
                     }
                 }
@@ -276,42 +293,12 @@ impl VectorReferenceElement for HexNDk {
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        if self.order == 1 {
-            let x = xi[0];
-            let y = xi[1];
-            let z = xi[2];
-            curl_vals.fill(0.0);
-            curl_vals[1] = -0.125 * (1.0 - y);
-            curl_vals[2] = 0.125 * (1.0 - z);
-            curl_vals[3] = 0.125 * (1.0 + x);
-            curl_vals[5] = 0.125 * (1.0 - z);
-            curl_vals[6] = 0.0;
-            curl_vals[7] = -0.125 * (1.0 + y);
-            curl_vals[8] = -0.125 * (1.0 - z);
-            curl_vals[9] = 0.125 * (1.0 - x);
-            curl_vals[11] = -0.125 * (1.0 - z);
-            curl_vals[12] = 0.0;
-            curl_vals[13] = 0.125 * (1.0 - y);
-            curl_vals[14] = 0.125 * (1.0 + z);
-            curl_vals[15] = -0.125 * (1.0 + x);
-            curl_vals[17] = 0.125 * (1.0 + z);
-            curl_vals[18] = 0.0;
-            curl_vals[19] = 0.125 * (1.0 + y);
-            curl_vals[20] = -0.125 * (1.0 + z);
-            curl_vals[21] = -0.125 * (1.0 - x);
-            curl_vals[23] = -0.125 * (1.0 + z);
-            curl_vals[24] = -0.125 * (1.0 - x);
-            curl_vals[25] = 0.125 * (1.0 - y);
-            curl_vals[27] = -0.125 * (1.0 + x);
-            curl_vals[28] = -0.125 * (1.0 - y);
-            curl_vals[30] = 0.125 * (1.0 + x);
-            curl_vals[31] = -0.125 * (1.0 + y);
-            curl_vals[33] = 0.125 * (1.0 - x);
-            curl_vals[34] = 0.125 * (1.0 + y);
-            return;
-        }
+        // All orders (including p = 1) go through the general tensor path:
+        // with the tangent modes taken over the p open nodes, the p = 1 edge
+        // basis is the true ND1 Whitney form x̂·ĥ(y)·ĥ(z) and its curl comes
+        // out constant, exactly as the closed/open tensor structure requires.
         let p = self.order;
-        let nd = self.nodes();
+        let ndo = self.open_nodes();
         let x = xi[0];
         let y = xi[1];
         let z = xi[2];
@@ -326,7 +313,7 @@ impl VectorReferenceElement for HexNDk {
             let e = [0usize, 2, 4, 6][ei];
             for j in 0..p {
                 let d = e * p + j;
-                let lx = lag(&nd, j, x);
+                let lx = lag(&ndo, j, x);
                 // x-edge Φ=(φ,0,0): curl = (0, ∂φ/∂z, −∂φ/∂y)
                 curl_vals[d * 3 + 1] = lx * hy * dhz;
                 curl_vals[d * 3 + 2] = -lx * dhy * hz;
@@ -341,7 +328,7 @@ impl VectorReferenceElement for HexNDk {
             let e = [1usize, 3, 5, 7][ei];
             for j in 0..p {
                 let d = e * p + j;
-                let ly = lag(&nd, j, y);
+                let ly = lag(&ndo, j, y);
                 // y-edge Φ=(0,φ,0): curl = (−∂φ/∂z, 0, ∂φ/∂x)
                 curl_vals[d * 3] = -ly * hx * dhz;
                 curl_vals[d * 3 + 2] = ly * dhx * hz;
@@ -356,7 +343,7 @@ impl VectorReferenceElement for HexNDk {
             let e = 8 + ei;
             for j in 0..p {
                 let d = e * p + j;
-                let lz = lag(&nd, j, z);
+                let lz = lag(&ndo, j, z);
                 // z-edge Φ=(0,0,φ): curl = (∂φ/∂y, −∂φ/∂x, 0)
                 curl_vals[d * 3] = lz * hx * dhy;
                 curl_vals[d * 3 + 1] = -lz * dhx * hy;
@@ -379,7 +366,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhz = hat_d(z, -1.0);
                 for j in 0..p {
                     let d = off;
-                    let lx = lag(&nd, j, x);
+                    let lx = lag(&ndo, j, x);
                     curl_vals[d * 3 + 1] = lx * ym * yi * dhz;
                     curl_vals[d * 3 + 2] = -lx * (-2.0 * y * yi + ym * dyi) * hz;
                     off += 1;
@@ -398,7 +385,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhz = hat_d(z, -1.0);
                 for j in 0..p {
                     let d = off;
-                    let ly = lag(&nd, j, y);
+                    let ly = lag(&ndo, j, y);
                     curl_vals[d * 3] = -xm * xi * ly * dhz;
                     curl_vals[d * 3 + 2] = (-2.0 * x * xi + xm * dxi) * ly * hz;
                     off += 1;
@@ -417,7 +404,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhz = hat_d(z, 1.0);
                 for j in 0..p {
                     let d = off;
-                    let lx = lag(&nd, j, x);
+                    let lx = lag(&ndo, j, x);
                     curl_vals[d * 3 + 1] = lx * ym * yi * dhz;
                     curl_vals[d * 3 + 2] = -lx * (-2.0 * y * yi + ym * dyi) * hz;
                     off += 1;
@@ -436,7 +423,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhz = hat_d(z, 1.0);
                 for j in 0..p {
                     let d = off;
-                    let ly = lag(&nd, j, y);
+                    let ly = lag(&ndo, j, y);
                     curl_vals[d * 3] = -xm * xi * ly * dhz;
                     curl_vals[d * 3 + 2] = (-2.0 * x * xi + xm * dxi) * ly * hz;
                     off += 1;
@@ -456,7 +443,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhy = hat_d(y, -1.0);
                 for j in 0..p {
                     let d = off;
-                    let lx = lag(&nd, j, x);
+                    let lx = lag(&ndo, j, x);
                     curl_vals[d * 3 + 1] = lx * (-2.0 * z * zi + zm * dzi) * hy;
                     curl_vals[d * 3 + 2] = -lx * zm * zi * dhy;
                     off += 1;
@@ -476,7 +463,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhy = hat_d(y, -1.0);
                 for j in 0..p {
                     let d = off;
-                    let lz = lag(&nd, j, z);
+                    let lz = lag(&ndo, j, z);
                     curl_vals[d * 3] = xm * xi * lz * dhy;
                     curl_vals[d * 3 + 1] = -(-2.0 * x * xi + xm * dxi) * lz * hy;
                     off += 1;
@@ -495,7 +482,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhy = hat_d(y, 1.0);
                 for j in 0..p {
                     let d = off;
-                    let lx = lag(&nd, j, x);
+                    let lx = lag(&ndo, j, x);
                     curl_vals[d * 3 + 1] = lx * (-2.0 * z * zi + zm * dzi) * hy;
                     curl_vals[d * 3 + 2] = -lx * zm * zi * dhy;
                     off += 1;
@@ -514,7 +501,7 @@ impl VectorReferenceElement for HexNDk {
                 let dhy = hat_d(y, 1.0);
                 for j in 0..p {
                     let d = off;
-                    let lz = lag(&nd, j, z);
+                    let lz = lag(&ndo, j, z);
                     curl_vals[d * 3] = xm * xi * lz * dhy;
                     curl_vals[d * 3 + 1] = -(-2.0 * x * xi + xm * dxi) * lz * hy;
                     off += 1;
@@ -529,8 +516,8 @@ impl VectorReferenceElement for HexNDk {
                 let dhx = hat_d(x, -1.0);
                 for j in 0..p {
                     let d = off;
-                    curl_vals[d * 3] = -ym * yi * lag_d(&nd, j, z) * hx;
-                    curl_vals[d * 3 + 2] = ym * yi * lag(&nd, j, z) * dhx;
+                    curl_vals[d * 3] = -ym * yi * lag_d(&ndo, j, z) * hx;
+                    curl_vals[d * 3 + 2] = ym * yi * lag(&ndo, j, z) * dhx;
                     off += 1;
                 }
             }
@@ -543,8 +530,8 @@ impl VectorReferenceElement for HexNDk {
                 let dhx = hat_d(x, -1.0);
                 for j in 0..p {
                     let d = off;
-                    curl_vals[d * 3] = lag_d(&nd, j, y) * zm * zi * hx;
-                    curl_vals[d * 3 + 1] = -lag(&nd, j, y) * zm * zi * dhx;
+                    curl_vals[d * 3] = lag_d(&ndo, j, y) * zm * zi * hx;
+                    curl_vals[d * 3 + 1] = -lag(&ndo, j, y) * zm * zi * dhx;
                     off += 1;
                 }
             }
@@ -557,8 +544,8 @@ impl VectorReferenceElement for HexNDk {
                 let dhx = hat_d(x, 1.0);
                 for j in 0..p {
                     let d = off;
-                    curl_vals[d * 3] = -ym * yi * lag_d(&nd, j, z) * hx;
-                    curl_vals[d * 3 + 2] = ym * yi * lag(&nd, j, z) * dhx;
+                    curl_vals[d * 3] = -ym * yi * lag_d(&ndo, j, z) * hx;
+                    curl_vals[d * 3 + 2] = ym * yi * lag(&ndo, j, z) * dhx;
                     off += 1;
                 }
             }
@@ -571,8 +558,8 @@ impl VectorReferenceElement for HexNDk {
                 let dhx = hat_d(x, 1.0);
                 for j in 0..p {
                     let d = off;
-                    curl_vals[d * 3] = lag_d(&nd, j, y) * zm * zi * hx;
-                    curl_vals[d * 3 + 1] = -lag(&nd, j, y) * zm * zi * dhx;
+                    curl_vals[d * 3] = lag_d(&ndo, j, y) * zm * zi * hx;
+                    curl_vals[d * 3 + 1] = -lag(&ndo, j, y) * zm * zi * dhx;
                     off += 1;
                 }
             }
@@ -596,7 +583,7 @@ impl VectorReferenceElement for HexNDk {
                     };
                     for j in 0..p {
                         let d = off;
-                        let lx = lag(&nd, j, x);
+                        let lx = lag(&ndo, j, x);
                         // curl_y = ∂Φ_x/∂z - ∂Φ_z/∂x (Φ_z=0 for x-comp, Φ_x has z-derivative)
                         curl_vals[d * 3 + 1] = lx * by * yi * (-2.0 * z * zl + bz * dzl);
                         // curl_z = ∂Φ_y/∂x - ∂Φ_x/∂y (Φ_y=0 for x-comp, Φ_x has y-derivative)
@@ -625,7 +612,7 @@ impl VectorReferenceElement for HexNDk {
                     };
                     for j in 0..p {
                         let d = off;
-                        let ly = lag(&nd, j, y);
+                        let ly = lag(&ndo, j, y);
                         // curl_x = ∂Φ_z/∂y - ∂Φ_y/∂z (Φ_z=0, Φ_y has z-derivative)
                         curl_vals[d * 3] = -bx * xi * ly * (-2.0 * z * zl + bz * dzl);
                         // curl_z = ∂Φ_y/∂x (Φ_x=0, Φ_y has x-derivative)
@@ -653,7 +640,7 @@ impl VectorReferenceElement for HexNDk {
                     };
                     for j in 0..p {
                         let d = off;
-                        let lz = lag(&nd, j, z);
+                        let lz = lag(&ndo, j, z);
                         // curl_x = ∂Φ_z/∂y (Φ_x=Φ_y=0, Φ_z has y-derivative)
                         curl_vals[d * 3] = bx * xi * (-2.0 * y * yl + by * dyl) * lz;
                         // curl_y = -∂Φ_z/∂x (Φ_z has x-derivative)
@@ -691,7 +678,7 @@ impl VectorReferenceElement for HexNDk {
             ];
         }
         let p = self.order;
-        let nd = self.nodes();
+        let ndo = self.open_nodes();
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);
         // Edge DOFs in MFEM CUBE edge order e0..e11 (matching `eval_basis_vec`
@@ -703,55 +690,59 @@ impl VectorReferenceElement for HexNDk {
         for ei in 0..4 {
             let (y0, z0) = x_edges[ei];
             for j in 0..p {
-                c.push(vec![nd[j], y0, z0]);
+                c.push(vec![ndo[j], y0, z0]);
             }
             let (x0, z0) = y_edges[ei];
             for j in 0..p {
-                c.push(vec![x0, nd[j], z0]);
+                c.push(vec![x0, ndo[j], z0]);
             }
         }
         for &(x0, y0) in &z_edges {
             for j in 0..p {
-                c.push(vec![x0, y0, nd[j]]);
+                c.push(vec![x0, y0, ndo[j]]);
             }
         }
         if p >= 2 {
             // Helper: bubble coordinate (avoids face centers and vertices)
             let bp = |i: usize| -> f64 { -1.0 + 2.0 * (i as f64 + 0.5) / (p as f64) };
-            // z-faces: 4 groups × p(p-1) each
+            // z-faces: 2 groups × p(p-1) each (x-tangent, then y-tangent):
+            // free coordinate carries the ndo lag anchor, the cross coordinate
+            // carries the bp(i) bubble anchor.
             for &zs in &[-1.0, 1.0] {
                 for _ in 0..2 {
                     // x-tangent, y-tangent
                     for i in 0..=(p - 2) {
                         let v = bp(i);
                         for j in 0..p {
-                            let u = nd[j];
+                            let u = ndo[j];
                             c.push(vec![u, v, zs]);
                         }
                     }
                 }
             }
-            // y-faces: 4 groups × p(p-1) each
+            // y-faces: 2 groups × p(p-1) each (x-tangent, then z-tangent).
             for &ys in &[-1.0, 1.0] {
                 for _ in 0..2 {
                     // x-tangent, z-tangent
                     for i in 0..=(p - 2) {
                         let v = bp(i);
                         for j in 0..p {
-                            let u = nd[j];
+                            let u = ndo[j];
                             c.push(vec![u, ys, v]);
                         }
                     }
                 }
             }
-            // x-faces: 4 groups × p(p-1) each
+            // x-faces: 2 groups × p(p-1) each (y-tangent, then z-tangent):
+            // free coordinate carries the ndo lag anchor, the cross coordinate
+            // carries the bp(i) bubble anchor (same convention as z/y-faces).
             for &xs in &[-1.0, 1.0] {
                 for _ in 0..2 {
                     // y-tangent, z-tangent
                     for i in 0..=(p - 2) {
                         let v = bp(i);
                         for j in 0..p {
-                            let u = nd[j];
+                            let u = ndo[j];
                             c.push(vec![xs, u, v]);
                         }
                     }
@@ -763,7 +754,7 @@ impl VectorReferenceElement for HexNDk {
                 for i in 0..=(p - 2) {
                     for l in 0..=(p - 2) {
                         for j in 0..p {
-                            c.push(vec![nd[j], bp2(i), bp2(l)]);
+                            c.push(vec![ndo[j], bp2(i), bp2(l)]);
                         }
                     }
                 }

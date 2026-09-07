@@ -1,8 +1,9 @@
 use fem_linalg::CsrMatrix as FemCsr;
 use fem_linalg::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linlvo::{
+    core::operator::LinearOperator,
     core::scalar::Scalar as linlvoScalar,
-    iterative::{ConjugateGradient, Gmres},
+    iterative::{ConjugateGradient, Fgmres, Gmres},
     precond::{AdsConfig, AdsPrecond, AmsConfig, AmsPrecond},
     sparse::CsrMatrix as linlvoCsr,
     DenseVec, KrylovSolver, Preconditioner,
@@ -103,20 +104,86 @@ pub fn solve_pcg_ams<T: linlvoScalar>(
     x: &mut [T],
     cfg: &AmsSolverConfig,
 ) -> Result<SolveResult, SolverError> {
-    check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
-    let lb = DenseVec::from_vec(b.to_vec());
-    let mut lx = DenseVec::from_vec(x.to_vec());
+    let mut lx: Vec<T> = x.to_vec();
 
     let ams = AmsPrecond::<T>::new(&la, g, cfg.ams_cfg.clone())
         .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
-    let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&ams), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
-        .map_err(SolverError::from)?;
+    // linger's CG converges on the preconditioned ENERGY `(B r, r)/(B r₀, r₀)`,
+    // which can dip below rtol (even via `|·|` across an energy zero) while
+    // the true residual `‖b − A x‖/‖b‖` is still 1–2 orders of magnitude too
+    // large.  Restart PCG from the current iterate, recomputing the true
+    // residual each round, until the true relative residual meets the
+    // tolerance or the PCG iteration budget is exhausted.
+    let mut total_iters = 0usize;
+    let mut final_residual = f64::INFINITY;
+    let mut converged = false;
+    let b_norm = b
+        .iter()
+        .fold(T::zero(), |s, &v| s + v * v)
+        .abs()
+        .sqrt();
+    let tol = <T as linlvoScalar>::from_f64(cfg.inner_cfg.rtol);
+    let atol = <T as linlvoScalar>::from_f64(cfg.inner_cfg.atol.max(0.0));
 
-    x.copy_from_slice(lx.as_slice());
-    Ok(into_result(res))
+    for _restart in 0..8 {
+        // r = b − A x (true residual).
+        let mut ax = vec![T::zero(); la.nrows()];
+        la.spmv(&lx, &mut ax);
+        let mut r = vec![T::zero(); la.nrows()];
+        for i in 0..la.nrows() {
+            r[i] = b[i] - ax[i];
+        }
+
+        let r_norm = r
+            .iter()
+            .fold(T::zero(), |s, &v| s + v * v)
+            .sqrt();
+
+        final_residual = num_traits::ToPrimitive::to_f64(&(r_norm / b_norm))
+            .unwrap_or(f64::INFINITY);
+        if r_norm <= tol * b_norm + atol {
+            converged = true;
+            break;
+        }
+        if total_iters >= cfg.inner_cfg.max_iter {
+            break;
+        }
+
+        // FGMRES round: robust to a non-SPD AMS cycle (V11 + SGS), unlike
+        // plain CG which breaks down when (p, A p) -> 0 mid-iteration.
+        let mut dx = DenseVec::zeros(la.nrows());
+        let res = Fgmres::<T>::new(30)
+            .solve(
+                &la,
+                Some(&ams),
+                &DenseVec::from_vec(r),
+                &mut dx,
+                &cfg.inner_cfg.to_linlvo(),
+            )
+            .map_err(SolverError::from)?;
+        total_iters += res.iterations;
+        let xs = lx.as_mut_slice();
+        let dxs = dx.as_slice();
+        for i in 0..la.nrows() {
+            xs[i] = xs[i] + dxs[i];
+        }
+        if res.converged && final_residual <= cfg.inner_cfg.rtol {
+            converged = true;
+            break;
+        }
+    }
+
+    if final_residual <= cfg.inner_cfg.rtol {
+        converged = true;
+    }
+    x.copy_from_slice(&lx);
+    Ok(SolveResult {
+        converged,
+        iterations: total_iters,
+        final_residual,
+    })
 }
 
 /// Solve an H(curl) system using GMRES with AMS preconditioner.
@@ -182,18 +249,77 @@ pub fn solve_pcg_ads<T: linlvoScalar>(
 ) -> Result<SolveResult, SolverError> {
     check_dims(a, b, x)?;
     let la = fem_to_linlvo_csr(a);
-    let lb = DenseVec::from_vec(b.to_vec());
-    let mut lx = DenseVec::from_vec(x.to_vec());
 
     let ads = AdsPrecond::<T>::new(&la, c, g, cfg.ads_cfg.clone())
         .map_err(|e| SolverError::Linlvo(e.to_string()))?;
 
-    let res = ConjugateGradient::<T>::default()
-        .solve(&la, Some(&ads), &lb, &mut lx, &cfg.inner_cfg.to_linlvo())
-        .map_err(SolverError::from)?;
+    // Same true-residual restart driver as `solve_pcg_ams` (see there): the
+    // preconditioned energy criterion can report convergence well before the
+    // true residual meets the tolerance.
+    let n = la.nrows();
+    let b_norm = b
+        .iter()
+        .fold(T::zero(), |s, &v| s + v * v)
+        .sqrt();
+    let tol = <T as linlvoScalar>::from_f64(cfg.inner_cfg.rtol);
+    let atol = <T as linlvoScalar>::from_f64(cfg.inner_cfg.atol.max(0.0));
 
-    x.copy_from_slice(lx.as_slice());
-    Ok(into_result(res))
+    let mut lx: Vec<T> = x.to_vec();
+    let mut total_iters = 0usize;
+    let mut final_residual = f64::INFINITY;
+    let mut converged = false;
+
+    for _restart in 0..8 {
+        let mut ax = vec![T::zero(); la.nrows()];
+        la.spmv(&lx, &mut ax);
+        let mut r = vec![T::zero(); la.nrows()];
+        for i in 0..la.nrows() {
+            r[i] = b[i] - ax[i];
+        }
+
+        let r_norm = r
+            .iter()
+            .fold(T::zero(), |s, &v| s + v * v)
+            .sqrt();
+
+        final_residual = num_traits::ToPrimitive::to_f64(&(r_norm / b_norm))
+            .unwrap_or(f64::INFINITY);
+        if r_norm <= tol * b_norm + atol {
+            converged = true;
+            break;
+        }
+        if total_iters >= cfg.inner_cfg.max_iter {
+            break;
+        }
+
+        // PCG for the correction dx (zero initial guess).
+        let mut dx = DenseVec::zeros(la.nrows());
+        let res = ConjugateGradient::<T>::default()
+            .solve(
+                &la,
+                Some(&ads),
+                &DenseVec::from_vec(r),
+                &mut dx,
+                &cfg.inner_cfg.to_linlvo(),
+            )
+            .map_err(SolverError::from)?;
+        total_iters += res.iterations;
+        let xs = lx.as_mut_slice();
+        let dxs = dx.as_slice();
+        for i in 0..la.nrows() {
+            xs[i] = xs[i] + dxs[i];
+        }
+    }
+
+    if final_residual <= cfg.inner_cfg.rtol {
+        converged = true;
+    }
+    x.copy_from_slice(&lx);
+    Ok(SolveResult {
+        converged,
+        iterations: total_iters,
+        final_residual,
+    })
 }
 
 /// Solve an H(div) system using GMRES with ADS preconditioner.

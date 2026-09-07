@@ -7,6 +7,7 @@ edition = "2021"
 fem-core   = { path = "../core" }
 fem-element = { path = "../element" }
 fem-linalg = { path = "../linalg", features = ["direct"] }
+num-traits  = { workspace = true }
 fem-mesh   = { path = "../mesh" }
 fem-amg    = { path = "../amg" }
 nalgebra   = { workspace = true }

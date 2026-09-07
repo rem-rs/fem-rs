@@ -1087,16 +1087,32 @@ mod tests {
 }
 
 // ─── AMS / ADS integration tests ─────────────────────────────────────────────
-
 #[cfg(test)]
 mod ams_ads_tests {
     use super::*;
     use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
     use fem_assembly::{DiscreteLinearOperator, VectorAssembler};
+    use fem_linalg::{CooMatrix, CsrMatrix};
     use fem_mesh::Mesh;
-    use fem_space::constraints::boundary_dofs_hcurl;
+    use fem_space::constraints::{boundary_dofs_hcurl, boundary_dofs_hdiv, eliminate_dirichlet};
     use fem_space::fe_space::FESpace;
-    use fem_space::{H1Space, HCurlSpace};
+    use fem_space::{H1Space, HCurlSpace, HDivSpace};
+
+    /// Keep only the rows of `m` whose dof is in `free` (row restriction of a
+    /// discrete operator to the unconstrained dofs).
+    fn restrict_rows(m: &CsrMatrix<f64>, free: &[usize]) -> CsrMatrix<f64> {
+        let set: std::collections::HashSet<usize> = free.iter().copied().collect();
+        let mut coo = CooMatrix::<f64>::new(free.len(), m.ncols);
+        let mut k = 0usize;
+        for i in 0..m.nrows {
+            if !set.contains(&i) { continue; }
+            for p in m.row_ptr[i]..m.row_ptr[i + 1] {
+                coo.add(k, m.col_idx[p] as usize, m.values[p]);
+            }
+            k += 1;
+        }
+        coo.into_csr()
+    }
 
     // ── AMS: H(curl) curl-curl + mass on 2-D unit square ──────────────────────
 
@@ -1109,7 +1125,7 @@ mod ams_ads_tests {
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
         let ndofs = hcurl.n_dofs();
 
-        let mut a = VectorAssembler::assemble_bilinear(
+        let a = VectorAssembler::assemble_bilinear(
             &hcurl,
             &[
                 &CurlCurlIntegrator { mu: 1.0 },
@@ -1120,14 +1136,19 @@ mod ams_ads_tests {
         let g_fem =
             DiscreteLinearOperator::gradient(&h1, &hcurl).expect("gradient assembly failed");
 
-        // Apply zero Dirichlet BCs symmetrically with diag=1.0 for AMS/PCG compatibility.
+        // Zero-tangential BCs on all boundaries: eliminate the constrained
+        // edge dofs and restrict the gradient rows to the free edge dofs
+        // (the library's proven PEC path, cf. `solve_hcurl_ams`).  Keeping
+        // the zeroed rows in A makes the nodal coarse operator GᵀAG singular
+        // (boundary-node columns vanish), which breaks the nodal AMG.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
-        let mut rhs = vec![1.0_f64; ndofs];
-        for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
-        }
+        let rhs = vec![1.0_f64; ndofs];
+        let zeros = vec![0.0_f64; bnd.len()];
+        let (a_r, rhs_r, free_map, _c_map) =
+            eliminate_dirichlet(&a, &rhs, &bnd, &zeros);
+        let g_red = restrict_rows(&g_fem, &free_map);
 
-        let g_linlvo = fem_to_linlvo_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_red);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
                 rtol: 1e-8,
@@ -1138,8 +1159,8 @@ mod ams_ads_tests {
             },
             ams_cfg: Default::default(),
         };
-        let mut x = vec![0.0_f64; ndofs];
-        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg).expect("PCG+AMS returned error");
+        let mut x = vec![0.0_f64; a_r.nrows];
+        let res = solve_pcg_ams(&a_r, &g_linlvo, &rhs_r, &mut x, &cfg).expect("PCG+AMS returned error");
         assert!(
             res.converged,
             "PCG+AMS did not converge in {} iters",
@@ -1150,6 +1171,17 @@ mod ams_ads_tests {
             "residual = {}",
             res.final_residual
         );
+        // Verify A x = rhs on the reduced (free-dof) system.
+        let mut ax = vec![0.0_f64; a_r.nrows];
+        a_r.spmv(&x, &mut ax);
+        let err: f64 = ax
+            .iter()
+            .zip(rhs_r.iter())
+            .map(|(ai, bi)| (ai - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(err < 1e-6, "reduced system residual {err:.3e}");
+        let _ = ndofs;
     }
 
     #[test]
@@ -1211,9 +1243,8 @@ mod ams_ads_tests {
         let mesh = Mesh::<2>::unit_square_tri(n);
         let h1 = H1Space::new(mesh.clone(), 1);
         let hcurl = HCurlSpace::new(mesh.clone(), 1);
-        let ndofs = hcurl.n_dofs();
 
-        let mut a = VectorAssembler::assemble_bilinear(
+        let a = VectorAssembler::assemble_bilinear(
             &hcurl,
             &[
                 &CurlCurlIntegrator { mu: 1.0 },
@@ -1223,14 +1254,15 @@ mod ams_ads_tests {
         );
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
-        // Apply BCs symmetrically with diag=1.0 for AMS/PCG compatibility.
+        // Eliminate constrained edge dofs + restrict G rows (PEC pattern):
+        // keeps the nodal coarse operator GᵀAG non-singular for the AMG.
         let bnd = boundary_dofs_hcurl(hcurl.mesh(), &hcurl, &[1, 2, 3, 4]);
-        let mut rhs = vec![1.0_f64; ndofs];
-        for &dof in &bnd {
-            a.apply_dirichlet_symmetric(dof as usize, 1.0, &mut rhs);
-        }
+        let rhs = vec![1.0_f64; hcurl.n_dofs()];
+        let zeros = vec![0.0_f64; bnd.len()];
+        let (a_r, rhs_r, free_map, _cm) = eliminate_dirichlet(&a, &rhs, &bnd, &zeros);
+        let g_red = restrict_rows(&g_fem, &free_map);
 
-        let g_linlvo = fem_to_linlvo_csr(&g_fem);
+        let g_linlvo = fem_to_linlvo_csr(&g_red);
         let cfg = AmsSolverConfig {
             inner_cfg: SolverConfig {
                 rtol: 1e-10,
@@ -1241,20 +1273,20 @@ mod ams_ads_tests {
             },
             ams_cfg: Default::default(),
         };
-        let mut x = vec![0.0_f64; ndofs];
-        let res = solve_pcg_ams(&a, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
+        let mut x = vec![0.0_f64; a_r.nrows];
+        let res = solve_pcg_ams(&a_r, &g_linlvo, &rhs_r, &mut x, &cfg).unwrap();
         assert!(res.converged);
 
-        // Verify Ax ≈ rhs
-        let mut ax = vec![0.0_f64; ndofs];
-        a.spmv(&x, &mut ax);
+        // Verify Ax ≈ rhs on the reduced (free-dof) system.
+        let mut ax = vec![0.0_f64; a_r.nrows];
+        a_r.spmv(&x, &mut ax);
         let err: f64 = ax
             .iter()
-            .zip(rhs.iter())
+            .zip(rhs_r.iter())
             .map(|(ai, bi)| (ai - bi).powi(2))
             .sum::<f64>()
             .sqrt();
-        let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
+        let rhs_norm: f64 = rhs_r.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
         assert!(
             err / rhs_norm < 1e-6,
             "relative residual = {}",
@@ -1314,7 +1346,7 @@ mod ams_ads_tests {
 
     #[test]
     fn pcg_ads_hdiv_3d_converges() {
-        use fem_space::constraints::boundary_dofs_hdiv;
+        use fem_space::constraints::{boundary_dofs_hdiv, eliminate_dirichlet};
         use fem_space::HDivSpace;
 
         let n = 2usize;
@@ -1322,10 +1354,9 @@ mod ams_ads_tests {
         let h1 = H1Space::new(mesh3.clone(), 1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
         let hdiv = HDivSpace::new(mesh3.clone(), 0);
-        let ndofs_hdiv = hdiv.n_dofs();
 
         // H(div) mass matrix (SPD)
-        let mut a_hdiv =
+        let a_hdiv =
             VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
 
         // Discrete curl C: HCurl -> HDiv and gradient G: H1 -> HCurl
@@ -1334,14 +1365,17 @@ mod ams_ads_tests {
         let g_fem =
             DiscreteLinearOperator::gradient(&h1, &hcurl).expect("gradient assembly failed");
 
-        // Apply zero normal-flux BCs via row-zeroing for ADS compatibility.
+        // Zero normal-flux BCs on all 6 faces: eliminate the constrained face
+        // dofs and restrict C's rows to the free face dofs (the library's PEC
+        // pattern).  Keeping the zeroed rows makes the auxiliary operators
+        // singular, which breaks the ADS nodal AMG under PCG.
         let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
-        let mut rhs = vec![1.0_f64; ndofs_hdiv];
-        for &dof in &bnd_hdiv {
-            a_hdiv.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
-        }
+        let rhs = vec![1.0_f64; hdiv.n_dofs()];
+        let zeros = vec![0.0_f64; bnd_hdiv.len()];
+        let (a_r, rhs_r, free_map, _cm) = eliminate_dirichlet(&a_hdiv, &rhs, &bnd_hdiv, &zeros);
+        let c_red = restrict_rows(&c_fem, &free_map);
 
-        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let c_linlvo = fem_to_linlvo_csr(&c_red);
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig {
@@ -1353,8 +1387,8 @@ mod ams_ads_tests {
             },
             ads_cfg: Default::default(),
         };
-        let mut x = vec![0.0_f64; ndofs_hdiv];
-        let res = solve_pcg_ads(&a_hdiv, &c_linlvo, &g_linlvo, &rhs, &mut x, &cfg)
+        let mut x = vec![0.0_f64; a_r.nrows];
+        let res = solve_pcg_ads(&a_r, &c_linlvo, &g_linlvo, &rhs_r, &mut x, &cfg)
             .expect("PCG+ADS returned error");
         assert!(
             res.converged,
@@ -1366,6 +1400,16 @@ mod ams_ads_tests {
             "residual = {}",
             res.final_residual
         );
+        // Verify A x = rhs on the reduced (free-dof) system.
+        let mut ax = vec![0.0_f64; a_r.nrows];
+        a_r.spmv(&x, &mut ax);
+        let err: f64 = ax
+            .iter()
+            .zip(rhs_r.iter())
+            .map(|(ai, bi)| (ai - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(err < 1e-6, "reduced system residual {err:.3e}");
     }
 
     #[test]
@@ -1420,7 +1464,7 @@ mod ams_ads_tests {
 
     #[test]
     fn pcg_ads_solution_satisfies_ax_eq_b() {
-        use fem_space::constraints::boundary_dofs_hdiv;
+        use fem_space::constraints::{boundary_dofs_hdiv, eliminate_dirichlet};
         use fem_space::HDivSpace;
 
         let n = 2usize;
@@ -1428,20 +1472,21 @@ mod ams_ads_tests {
         let h1 = H1Space::new(mesh3.clone(), 1);
         let hcurl = HCurlSpace::new(mesh3.clone(), 1);
         let hdiv = HDivSpace::new(mesh3.clone(), 0);
-        let ndofs_hdiv = hdiv.n_dofs();
 
-        let mut a_hdiv =
+        let a_hdiv =
             VectorAssembler::assemble_bilinear(&hdiv, &[&VectorMassIntegrator { alpha: 1.0 }], 3);
         let c_fem = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
         let g_fem = DiscreteLinearOperator::gradient(&h1, &hcurl).unwrap();
 
+        // Eliminate constrained face dofs + restrict C rows (PEC pattern):
+        // keeps the auxiliary operators non-singular for the ADS nodal AMG.
         let bnd_hdiv = boundary_dofs_hdiv(hdiv.mesh(), &hdiv, &[1, 2, 3, 4, 5, 6]);
-        let mut rhs = vec![1.0_f64; ndofs_hdiv];
-        for &dof in &bnd_hdiv {
-            a_hdiv.apply_dirichlet_row_zeroing(dof as usize, 0.0, &mut rhs);
-        }
+        let rhs = vec![1.0_f64; hdiv.n_dofs()];
+        let zeros = vec![0.0_f64; bnd_hdiv.len()];
+        let (a_r, rhs_r, free_map, _cm) = eliminate_dirichlet(&a_hdiv, &rhs, &bnd_hdiv, &zeros);
+        let c_red = restrict_rows(&c_fem, &free_map);
 
-        let c_linlvo = fem_to_linlvo_csr(&c_fem);
+        let c_linlvo = fem_to_linlvo_csr(&c_red);
         let g_linlvo = fem_to_linlvo_csr(&g_fem);
         let cfg = AdsSolverConfig {
             inner_cfg: SolverConfig {
@@ -1453,20 +1498,20 @@ mod ams_ads_tests {
             },
             ads_cfg: Default::default(),
         };
-        let mut x = vec![0.0_f64; ndofs_hdiv];
-        let res = solve_pcg_ads(&a_hdiv, &c_linlvo, &g_linlvo, &rhs, &mut x, &cfg).unwrap();
+        let mut x = vec![0.0_f64; a_r.nrows];
+        let res = solve_pcg_ads(&a_r, &c_linlvo, &g_linlvo, &rhs_r, &mut x, &cfg).unwrap();
         assert!(res.converged);
 
-        // Verify Ax ≈ rhs
-        let mut ax = vec![0.0_f64; ndofs_hdiv];
-        a_hdiv.spmv(&x, &mut ax);
+        // Verify Ax ≈ rhs on the reduced (free-dof) system.
+        let mut ax = vec![0.0_f64; a_r.nrows];
+        a_r.spmv(&x, &mut ax);
         let err: f64 = ax
             .iter()
-            .zip(rhs.iter())
+            .zip(rhs_r.iter())
             .map(|(ai, bi)| (ai - bi).powi(2))
             .sum::<f64>()
             .sqrt();
-        let rhs_norm: f64 = rhs.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
+        let rhs_norm: f64 = rhs_r.iter().map(|b| b.powi(2)).sum::<f64>().sqrt();
         assert!(
             err / rhs_norm < 1e-6,
             "relative residual = {}",
