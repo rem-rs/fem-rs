@@ -430,8 +430,8 @@ impl<const D: usize> Mesh<D> {
                             }
                             (va, new_ids)
                         });
-                        let idx = (t * p as f64).round() as usize;
-                        let idx = idx.min(p - 1);
+                        let idx = (t * (p - 1) as f64).round() as usize;
+                        let idx = idx.min(p - 2);
                         geom_conn[base + d] = entry.1[idx];
                     } else {
                         // Face or interior DOF — trilinear interpolation.
@@ -2738,6 +2738,83 @@ impl<const D: usize> Mesh<D> {
                 }
             }
         }
+    }
+
+    pub fn add_vertex_3d(&mut self, x: f64, y: f64, z: f64) -> NodeId {
+        assert_eq!(D, 3, "add_vertex_3d requires D = 3");
+        let id = self.n_nodes() as NodeId;
+        self.coords.push(x); self.coords.push(y); self.coords.push(z);
+        id
+    }
+
+    pub fn add_wedge(&mut self, v: &[NodeId; 6], attr: i32) -> ElemId {
+        assert_eq!(D, 3, "add_wedge requires D = 3");
+        let id = self.n_elems() as ElemId;
+        for &vi in v { self.conn.push(vi); }
+        self.elem_tags.push(attr);
+        id
+    }
+
+    pub fn add_hex(&mut self, v: &[NodeId; 8], attr: i32) -> ElemId {
+        assert_eq!(D, 3, "add_hex requires D = 3");
+        let id = self.n_elems() as ElemId;
+        for &vi in v { self.conn.push(vi); }
+        self.elem_tags.push(attr);
+        id
+    }
+
+    pub fn renumber_vertices(&mut self, v2v: &[i32]) {
+        for v in self.conn.iter_mut() { *v = v2v[*v as usize] as u32; }
+        for v in self.face_conn.iter_mut() { *v = v2v[*v as usize] as u32; }
+    }
+
+    pub fn remove_unused_vertices(&mut self) {
+        let nv = self.n_nodes();
+        let mut used = vec![false; nv];
+        for &v in &self.conn { used[v as usize] = true; }
+        for &v in &self.face_conn { used[v as usize] = true; }
+        let mut new_id = vec![-1i32; nv];
+        let mut new_coords = Vec::new();
+        let mut new_nv = 0i32;
+        for v in 0..nv {
+            if used[v] {
+                new_id[v] = new_nv; new_nv += 1;
+                let off = v * D;
+                for d in 0..D { new_coords.push(self.coords[off + d]); }
+            }
+        }
+        if new_nv as usize == nv { return; }
+        for v in self.conn.iter_mut() { *v = new_id[*v as usize] as u32; }
+        for v in self.face_conn.iter_mut() { *v = new_id[*v as usize] as u32; }
+        self.coords = new_coords;
+    }
+
+    pub fn remove_internal_boundaries(&mut self) {
+        let mut face_count = std::collections::HashMap::<Vec<u32>, u32>::new();
+        let local_faces = local_face_verts(D, self.elem_type);
+        let nf = self.n_faces();
+        let npf = if nf > 0 { self.face_conn.len() / nf } else { 0 };
+        for e in 0..self.n_elems() {
+            let nodes = self.elem_nodes(e as ElemId);
+            for fv in &local_faces {
+                let mut face_nodes: Vec<u32> = fv.iter().map(|&i| nodes[i]).collect();
+                face_nodes.sort();
+                *face_count.entry(face_nodes).or_insert(0) += 1;
+            }
+        }
+        let mut new_face_conn = Vec::new();
+        let mut new_face_tags = Vec::new();
+        for f in 0..nf {
+            let mut face_nodes: Vec<u32> = self.face_conn[f * npf..f * npf + npf].to_vec();
+            face_nodes.sort();
+            let count = face_count.get(&face_nodes).copied().unwrap_or(0);
+            if count <= 1 {
+                new_face_conn.extend_from_slice(&self.face_conn[f * npf..f * npf + npf]);
+                new_face_tags.push(if f < self.face_tags.len() { self.face_tags[f] } else { 1 });
+            }
+        }
+        self.face_conn = new_face_conn;
+        self.face_tags = new_face_tags;
     }
 }
 

@@ -371,5 +371,9 @@ name = "mesh_klein_bottle"
 path = "../miniapps/meshing/klein-bottle.rs"
 
 [[example]]
+name = "mesh_toroid"
+path = "../miniapps/meshing/toroid.rs"
+
+[[example]]
 name = "mesh_extruder"
 path = "../miniapps/meshing/extruder.rs"
