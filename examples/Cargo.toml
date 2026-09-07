@@ -403,5 +403,9 @@ name = "mesh_explorer"
 path = "../miniapps/meshing/mesh-explorer.rs"
 
 [[example]]
+name = "mesh_polar_nc"
+path = "../miniapps/meshing/polar-nc.rs"
+
+[[example]]
 name = "mesh_quality"
 path = "../miniapps/meshing/mesh-quality.rs"

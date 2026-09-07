@@ -88,8 +88,7 @@ pub fn p_refine_tri3_to_tri6(
         face_to_elem: None,
         edge_conn: Vec::new(),
         edge_to_elem: Vec::new(),
-        geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+        geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     };
 
     (new_mesh, edge_to_new_node)
@@ -153,8 +152,7 @@ pub fn p_refine_tri6_to_tri10(
         elem_offsets: Some(elem_offsets),
         face_types: None, face_offsets: None,
         face_to_elem: None,
-        edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None,
-    vertex_parents: vec![],
+        edge_conn: Vec::new(), edge_to_elem: Vec::new(), geometry: None, nc_vertex_view: None, vertex_parents: vec![],
     };
     (new_mesh, centroids)
 }
