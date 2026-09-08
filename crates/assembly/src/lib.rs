@@ -76,6 +76,9 @@ pub mod discrete_op;
 pub mod transfer;
 /// High-level Form abstractions (BilinearForm / LinearForm).
 pub mod form;
+/// Automatic differentiation: forward dual numbers + QFunction/QVectorFunc
+/// drivers (1:1 port of MFEM `linalg/dual.hpp` + `miniapps/autodiff/admfem.hpp`).
+pub mod ad;
 pub mod ams_solver;
 pub mod static_cond;
 pub mod h1_quad_order_hint;

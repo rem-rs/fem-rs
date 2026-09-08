@@ -358,7 +358,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
 /// polynomial was extrapolated there, corrupting the Jacobian (and hence the
 /// stiffness) on strongly curved cells (e.g. the ex27 hole regions).
 #[inline]
-fn geom_quad_point(_elem_type: ElementType, _order: u8, xi: &[f64]) -> Vec<f64> {
+pub(crate) fn geom_quad_point(_elem_type: ElementType, _order: u8, xi: &[f64]) -> Vec<f64> {
     // All Quad4 solution bases now live on [0,1]^d (QuadQk, order >= 1), and
     // simplex bases share their reference domain with the geometry element,
     // so quadrature points always arrive in the geometry's reference domain.
@@ -413,7 +413,7 @@ fn mesh_type_to_factory(et: ElementType) -> FactoryElemType {
 /// stiffness error).  HexQk lives on `[-1,1]^3` (its order-1 form coincides
 /// with HexQ1) and `geom_quad_point` leaves hex points unmapped, so the hex
 /// arm is unchanged in effect.
-fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElement>> {
+pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElement>> {
     let et = mesh.element_type(e);
     let g = mesh.geom_order();
     let is_quad_hex = matches!(et,
@@ -455,7 +455,7 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
 /// Affine if P1 simplex geometry (`geom_order == 1` and non-tensor-product).
 /// Non-affine for curved simplex elements (geom_order > 1) and all tensor-product
 /// elements (Quad/Hex) which use isoparametric mapping.
-fn is_affine(et: ElementType, geom_order: u8) -> bool {
+pub(crate) fn is_affine(et: ElementType, geom_order: u8) -> bool {
     if geom_order > 1 { return false; }
     matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
 }
@@ -610,7 +610,7 @@ fn transform_grads(
 
 /// MFEM `ElementTransformation::AdjugateJacobian()`: the classical adjugate
 /// (cofactor matrix) of J.  2-D: adj(J) = [[J11, -J01], [-J10, J00]].
-fn adjugate_2d(j: &DMatrix<f64>) -> DMatrix<f64> {
+pub(crate) fn adjugate_2d(j: &DMatrix<f64>) -> DMatrix<f64> {
     let mut a = DMatrix::<f64>::zeros(2, 2);
     a[(0, 0)] = j[(1, 1)];
     a[(0, 1)] = -j[(0, 1)];
@@ -623,7 +623,7 @@ fn adjugate_2d(j: &DMatrix<f64>) -> DMatrix<f64> {
 /// hexahedra/tetrahedra.  Missing before, so any non-affine 3-D assembly
 /// (e.g. ex34's SubMesh with curved/Hex geometry) hit an out-of-bounds
 /// `adj[(k,j)]` in [`transform_grads_adj`].
-fn adjugate_3d(j: &DMatrix<f64>) -> DMatrix<f64> {
+pub(crate) fn adjugate_3d(j: &DMatrix<f64>) -> DMatrix<f64> {
     let j00 = j[(0, 0)]; let j01 = j[(0, 1)]; let j02 = j[(0, 2)];
     let j10 = j[(1, 0)]; let j11 = j[(1, 1)]; let j12 = j[(1, 2)];
     let j20 = j[(2, 0)]; let j21 = j[(2, 1)]; let j22 = j[(2, 2)];
@@ -646,7 +646,7 @@ fn adjugate_3d(j: &DMatrix<f64>) -> DMatrix<f64> {
 /// carries `1/det` instead (MFEM `w = ip.weight / Trans.Weight()`), which
 /// keeps the floating-point path bit-identical (using J⁻¹ = adj/det and a
 /// `×det` weight differs by ~1 ulp).
-fn transform_grads_adj(
+pub(crate) fn transform_grads_adj(
     adj: &DMatrix<f64>,
     grad_ref: &[f64],
     grad_phys: &mut [f64],
