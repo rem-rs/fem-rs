@@ -1,7 +1,7 @@
-//! Low-order refined (LOR) discretizations for the vector spaces H(curl) and
-//! H(div) on tensor-product (quad / hex) meshes — the counterpart of MFEM's
-//! `LORDiscretization` for `ND_FECollection` / `RT_FECollection`
-//! (`fem/lor/lor.hpp`, `fem/lor/lor.cpp`).
+//! Low-order refined (LOR) discretizations for H(curl), H(div) and H1 spaces
+//! on tensor-product (quad / hex) meshes — the counterpart of MFEM's
+//! `LORDiscretization` for `ND_FECollection` / `RT_FECollection` / `H1_FECollection`
+//! (`fem/lor/lor.hpp`, `fem/lor/lor.cpp`, `fem/lor/lor_h1.hpp`).
 //!
 //! # What is built
 //!
@@ -20,6 +20,24 @@
 //!    `LORBase::ConstructLocalDofPermutation`).  For tensor-product ND/RT
 //!    spaces the LOR and HO dof sets are in bijection and the map is a signed
 //!    permutation (verified at construction time).
+//!
+//! # Scalar / vector H1 (elasticity)
+//!
+//! [`LorH1`] is the counterpart for `H1_FECollection` (MFEM
+//! `LORBase::ConstructDofPermutation` returns the identity for H1/L2 — the
+//! refined mesh vertices *are* the H1 dofs, in H1 dof order, so LOR and HO
+//! dof sets correspond 1:1).  In fem-rs the refined-mesh vertex numbering
+//! (MFEM `MakeRefined_` order, see [`crate::make_refined`]) can differ from
+//! the `DofManager` H1 numbering (edge-DOF directions), so [`LorH1`] builds
+//! the (unsigned) renumbering permutation `perm[i] = j` explicitly and
+//! validates it as a bijection.
+//!
+//! A vector H1 space ([`crate::vector_h1::VectorH1Space`], MFEM
+//! `Ordering::byNODES`) has LOR = per-component scalar H1 LOR (block
+//! structure): vector LOR dof `(c, i)` corresponds to HO vector dof
+//! `(c, perm[i])` — see [`LorH1::vector_perm`].  This is the discretization
+//! used by MFEM `miniapps/solvers/lor_elast.cpp` (block-diagonal LOR-AMG
+//! elasticity preconditioning).
 //!
 //! # Scope and limitations
 //!
@@ -48,7 +66,7 @@ use fem_mesh::simplex::Mesh;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::ElementType;
 
-use crate::dof_manager::EdgeKey;
+use crate::dof_manager::{DofManager, EdgeKey};
 use crate::fe_space::FESpace;
 use crate::hcurl::HCurlSpace;
 use crate::hdiv::HDivSpace;
@@ -1056,6 +1074,268 @@ fn build_rt_perm_2d(
     Ok(perm)
 }
 
+// ─── LOR H1 (scalar / vector elasticity) ────────────────────────────────────
+
+/// Low-order refined H1 discretization of a scalar Lagrange space — MFEM
+/// `LORDiscretization` for `H1_FECollection` (`fem/lor/`, batched kernel in
+/// `fem/lor/lor_h1.hpp`).
+///
+/// The LOR mesh subdivides every HO element into `order^dim` P1 sub-elements
+/// whose corners are the H1(`order`) Gauss-Lobatto dof positions
+/// ([`crate::make_refined::make_refined_2d`] / [`crate::make_refined::make_refined_3d`],
+/// i.e. MFEM `Mesh::MakeRefined`); the LOR space is P1 on that mesh, so an
+/// LOR dof is a refined-mesh node id.
+///
+/// `perm[i] = j` (all signs `+1`: H1 dofs are positive point evaluations)
+/// maps LOR dof `i` to the HO scalar dof `j` at the same lattice point.  MFEM
+/// returns the identity permutation for H1 (both spaces number dofs
+/// identically); here the two fem-rs numbering conventions can differ, so the
+/// map is constructed element-locally (by matching the dof coordinates at
+/// each lattice point — the same technique `make_refined` itself uses) and
+/// validated as a bijection.
+///
+/// For an `order = 1` space the LOR space is the space itself (identity
+/// permutation, unrefined mesh) — matching MFEM.
+pub struct LorH1<const D: usize> {
+    lor_mesh: Mesh<D>,
+    /// `perm[i] = j`: LOR dof `i` (refined-mesh node id) ↔ HO scalar dof `j`.
+    perm: Vec<u32>,
+    n_ho: usize,
+    refinement: usize,
+}
+
+impl<const D: usize> LorH1<D> {
+    /// The refined (LOR) mesh.  Its P1 dof numbering is the node numbering.
+    pub fn lor_mesh(&self) -> &Mesh<D> { &self.lor_mesh }
+
+    /// Number of scalar LOR dofs (refined-mesh nodes).
+    pub fn n_lor(&self) -> usize { self.lor_mesh.n_nodes() }
+
+    /// Number of HO scalar dofs.
+    pub fn n_ho(&self) -> usize { self.n_ho }
+
+    /// Permutation `perm[i] = j` (LOR dof → HO scalar dof), all signs `+1`.
+    pub fn perm(&self) -> &[u32] { &self.perm }
+
+    /// Refinement factor per direction (`order` for H1, like MFEM).
+    pub fn refinement(&self) -> usize { self.refinement }
+
+    /// Vector-space (byNODES) permutation: LOR vector dof
+    /// `c * n_scalar_lor + i` ↔ HO vector dof `c * n_scalar + perm[i]`.
+    ///
+    /// This is the dof correspondence of the LOR image of a vector H1 space
+    /// (`VectorH1Space` of `dim` components; MFEM `ParLORDiscretization` of a
+    /// `byNODES` vector fespace).
+    pub fn vector_perm(&self, n_scalar: usize, dim: usize) -> Vec<u32> {
+        let n_lor = self.n_lor();
+        let mut vp = vec![0u32; n_lor * dim];
+        for c in 0..dim {
+            for (i, &p) in self.perm.iter().enumerate() {
+                vp[c * n_lor + i] = (c * n_scalar + p as usize) as u32;
+            }
+        }
+        vp
+    }
+
+    /// Reorder an LOR-numbered matrix into HO scalar dof numbering:
+    /// `B[perm[i], perm[j]] = A[i][j]`.
+    pub fn ho_numbering(&self, a_lor: &CsrMatrix<f64>) -> CsrMatrix<f64> {
+        assert_eq!(a_lor.nrows, a_lor.ncols, "ho_numbering: matrix must be square");
+        assert_eq!(a_lor.nrows, self.perm.len(), "ho_numbering: matrix size mismatch");
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(self.n_ho, self.n_ho);
+        for i in 0..a_lor.nrows {
+            let gi = self.perm[i] as usize;
+            for r in a_lor.row_ptr[i]..a_lor.row_ptr[i + 1] {
+                let gj = self.perm[a_lor.col_idx[r] as usize] as usize;
+                let v = a_lor.values[r];
+                if v != 0.0 {
+                    coo.add(gi, gj, v);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// Prolongate: `x_ho[perm[i]] = x_lor[i]`.
+    pub fn prolongate(&self, x_lor: &[f64], x_ho: &mut [f64]) {
+        assert_eq!(x_lor.len(), self.perm.len());
+        assert_eq!(x_ho.len(), self.n_ho);
+        for (i, &p) in self.perm.iter().enumerate() {
+            x_ho[p as usize] = x_lor[i];
+        }
+    }
+
+    /// Restrict (transpose of [`LorH1::prolongate`]): `x_lor[i] = x_ho[perm[i]]`.
+    pub fn restrict(&self, x_ho: &[f64], x_lor: &mut [f64]) {
+        assert_eq!(x_lor.len(), self.perm.len());
+        assert_eq!(x_ho.len(), self.n_ho);
+        for (i, &p) in self.perm.iter().enumerate() {
+            x_lor[i] = x_ho[p as usize];
+        }
+    }
+
+    fn finish(lor_mesh: Mesh<D>, perm: Vec<u32>, n_ho: usize, k: usize) -> FemResult<Self> {
+        // Bijectivity validation (the H1 assumed-constraint map is a plain
+        // permutation; MFEM returns the identity for H1).
+        if perm.len() != lor_mesh.n_nodes() {
+            return Err(FemError::Other(
+                "LOR H1: permutation size does not match LOR dof count".into(),
+            ));
+        }
+        let mut seen_ho = vec![false; n_ho];
+        for &p in &perm {
+            let a = p as usize;
+            if a >= n_ho || seen_ho[a] {
+                return Err(FemError::Other(format!(
+                    "LOR H1: permutation is not a bijection (entry {p})"
+                )));
+            }
+            seen_ho[a] = true;
+        }
+        Ok(LorH1 { lor_mesh, perm, n_ho, refinement: k })
+    }
+}
+
+impl LorH1<2> {
+    /// LOR H1 discretization of the scalar Lagrange space of `order` on a 2-D
+    /// `mesh` (uniform order; Quad4 at any order, Tri3 at order <= 3;
+    /// `order == 1` is the identity path).
+    pub fn new(mesh: &Mesh<2>, order: u8) -> FemResult<Self> {
+        let k = order as usize;
+        if k == 0 {
+            return Err(FemError::Other("LOR H1: order must be >= 1".into()));
+        }
+        let dm = DofManager::new(mesh, order);
+        if k == 1 {
+            // MFEM: order-1 H1 LOR = the space itself (identity permutation).
+            let n = dm.n_dofs;
+            return Self::finish(mesh.clone(), (0..n as u32).collect(), n, 1);
+        }
+        let et = mesh.elem_type;
+        let supported = matches!(et, ElementType::Quad4) || (et == ElementType::Tri3 && k <= 3);
+        if !supported {
+            return Err(FemError::Other(format!(
+                "LOR H1 2D: {et:?} meshes at order {k} are not supported yet \
+                 (Quad4 any order, Tri3 <= 3, or order 1)"
+            )));
+        }
+        let lor_mesh = make_refined_2d(mesh, k);
+        let perm = build_h1_perm(mesh, &dm, &lor_mesh, k)?;
+        Self::finish(lor_mesh, perm, dm.n_dofs, k)
+    }
+}
+
+impl LorH1<3> {
+    /// LOR H1 discretization of the scalar Lagrange space of `order` on a 3-D
+    /// `mesh` (uniform order; Hex8 at any order, Tet4 at order 2;
+    /// `order == 1` is the identity path).
+    pub fn new(mesh: &Mesh<3>, order: u8) -> FemResult<Self> {
+        let k = order as usize;
+        if k == 0 {
+            return Err(FemError::Other("LOR H1: order must be >= 1".into()));
+        }
+        let dm = DofManager::new(mesh, order);
+        if k == 1 {
+            // MFEM: order-1 H1 LOR = the space itself (identity permutation).
+            let n = dm.n_dofs;
+            return Self::finish(mesh.clone(), (0..n as u32).collect(), n, 1);
+        }
+        let et = mesh.elem_type;
+        let supported = matches!(et, ElementType::Hex8) || (et == ElementType::Tet4 && k == 2);
+        if !supported {
+            return Err(FemError::Other(format!(
+                "LOR H1 3D: {et:?} meshes at order {k} are not supported yet \
+                 (Hex8 any order, Tet4 == 2, or order 1)"
+            )));
+        }
+        let lor_mesh = make_refined_3d(mesh, k);
+        let perm = build_h1_perm(mesh, &dm, &lor_mesh, k)?;
+        Self::finish(lor_mesh, perm, dm.n_dofs, k)
+    }
+}
+
+/// Build the H1 LOR permutation: for every macro element, its lattice points
+/// are exactly the corner nodes of its `k^dim` sub-elements on the LOR mesh;
+/// match each lattice node to the macro element's HO dof at the same
+/// physical position (both coordinate sets come from the same GLL
+/// interpolation, cf. `make_refined`).
+fn build_h1_perm<const D: usize>(
+    mesh: &Mesh<D>,
+    dm: &DofManager,
+    lor_mesh: &Mesh<D>,
+    k: usize,
+) -> FemResult<Vec<u32>> {
+    let n_lor = lor_mesh.n_nodes();
+    let mut perm = vec![u32::MAX; n_lor];
+    let mut filled = vec![false; n_lor];
+
+    // Coordinate tolerance: same convention as `make_refined` (both sides
+    // evaluate the same interpolation, so they agree to round-off).
+    let mut scale = 0.0_f64;
+    for n in 0..mesh.n_nodes() as u32 {
+        for d in 0..D {
+            let c = mesh.node_coords(n)[d].abs();
+            if c > scale {
+                scale = c;
+            }
+        }
+    }
+    let tol = 1e-7 * scale.max(1.0);
+
+    let n_sub = k.pow(D as u32);
+    let n_elem = mesh.n_elements() as u32;
+    for e in 0..n_elem {
+        let ho = dm.element_dofs(e);
+        // Lattice points of this macro element = union of sub-element corners.
+        let mut seen = std::collections::HashSet::new();
+        let mut lattice: Vec<u32> = Vec::new();
+        for s in 0..n_sub {
+            let le = e * (n_sub as u32) + s as u32;
+            for &v in lor_mesh.element_nodes(le) {
+                if seen.insert(v) {
+                    lattice.push(v);
+                }
+            }
+        }
+        for v in lattice {
+            let c = lor_mesh.node_coords(v);
+            let mut target: Option<u32> = None;
+            for &d in ho {
+                let dc = dm.dof_coord(d);
+                if (0..D).all(|q| (dc[q] - c[q]).abs() <= tol) {
+                    target = Some(d);
+                    break;
+                }
+            }
+            let t = target.ok_or_else(|| {
+                FemError::Other(format!(
+                    "LOR H1: lattice node {v} of element {e} has no matching \
+                     HO dof (mesh not a Gauss-Lobatto lattice?)"
+                ))
+            })?;
+            if filled[v as usize] {
+                if perm[v as usize] != t {
+                    return Err(FemError::Other(format!(
+                        "LOR H1: inconsistent mapping for LOR dof {v}"
+                    )));
+                }
+            } else {
+                perm[v as usize] = t;
+                filled[v as usize] = true;
+            }
+        }
+    }
+
+    if filled.iter().any(|&f| !f) {
+        return Err(FemError::Other(
+            "LOR H1: some LOR dofs were never mapped (nodes outside the \
+             macro lattice?)"
+                .into(),
+        ));
+    }
+    Ok(perm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,5 +1457,119 @@ mod tests {
         for (x, y) in off_a.iter().zip(off_b.iter()) {
             assert!((x - y).abs() < 1e-14);
         }
+    }
+
+    // ── LOR H1 tests ─────────────────────────────────────────────────────
+
+    fn assert_perm_bijection(perm: &[u32], n_ho: usize) {
+        assert_eq!(perm.len(), n_ho, "LOR and HO dof counts must match");
+        let mut seen = vec![false; n_ho];
+        for &p in perm {
+            assert!((p as usize) < n_ho, "perm entry {p} out of range");
+            assert!(!seen[p as usize], "duplicate perm target {p}");
+            seen[p as usize] = true;
+        }
+    }
+
+    #[test]
+    fn lor_h1_identity_for_order_one() {
+        let q = Mesh::<2>::unit_square_quad(2);
+        let lor = LorH1::<2>::new(&q, 1).unwrap();
+        assert_eq!(lor.refinement(), 1);
+        assert_eq!(lor.n_lor(), q.n_nodes());
+        assert!(lor.perm().iter().enumerate().all(|(i, &p)| p == i as u32));
+
+        let h = Mesh::<3>::make_cartesian_3d(2, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+        let lor3 = LorH1::<3>::new(&h, 1).unwrap();
+        assert!(lor3.perm().iter().enumerate().all(|(i, &p)| p == i as u32));
+    }
+
+    #[test]
+    fn lor_h1_quad_bijection_and_vertex_ids_preserved() {
+        for k in [2usize, 3usize] {
+            let mesh = Mesh::<2>::unit_square_quad(3);
+            let lor = LorH1::<2>::new(&mesh, k as u8).expect("LOR H1 quad");
+            assert_eq!(lor.refinement(), k);
+            assert_eq!(lor.lor_mesh().n_elems(), 9 * k * k);
+            assert_perm_bijection(lor.perm(), lor.n_ho());
+            // Original mesh vertices keep their dof ids (both numberings put
+            // vertices first, in mesh order).
+            for v in 0..mesh.n_nodes() as u32 {
+                assert_eq!(lor.perm()[v as usize], v, "vertex {v} remapped at k={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn lor_h1_hex_bijection() {
+        for k in [2usize, 3usize] {
+            let mesh = Mesh::<3>::make_cartesian_3d(2, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+            let lor = LorH1::<3>::new(&mesh, k as u8).expect("LOR H1 hex");
+            assert_eq!(lor.refinement(), k);
+            assert_eq!(lor.lor_mesh().n_elems(), 2 * k * k * k);
+            assert_perm_bijection(lor.perm(), lor.n_ho());
+            for v in 0..mesh.n_nodes() as u32 {
+                assert_eq!(lor.perm()[v as usize], v, "vertex {v} remapped at k={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn lor_h1_tri_and_tet_low_order() {
+        let tri = Mesh::<2>::make_cartesian_2d_tri(2, 2, 1.0, 1.0);
+        let lor_t = LorH1::<2>::new(&tri, 2).expect("LOR H1 tri (k=2)");
+        assert_perm_bijection(lor_t.perm(), lor_t.n_ho());
+        assert_eq!(lor_t.lor_mesh().n_elems(), 8 * 4); // 8 macro tris x nref^2
+
+        let tet = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let lor_te = LorH1::<3>::new(&tet, 2).expect("LOR H1 tet (k=2)");
+        assert_perm_bijection(lor_te.perm(), lor_te.n_ho());
+        assert_eq!(lor_te.lor_mesh().n_elems(), 6 * 8); // 6 macro tets x 1->8
+    }
+
+    #[test]
+    fn lor_h1_vector_perm_by_nodes() {
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let lor = LorH1::<2>::new(&mesh, 2).unwrap();
+        let n_scalar = lor.n_ho();
+        let n_lor = lor.n_lor();
+        let vp = lor.vector_perm(n_scalar, 2);
+        assert_eq!(vp.len(), 2 * n_lor);
+        // Component block structure: block c maps onto HO block c.
+        for c in 0..2 {
+            for (i, &p) in lor.perm().iter().enumerate() {
+                assert_eq!(vp[c * n_lor + i], (c * n_scalar + p as usize) as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn lor_h1_ho_numbering_preserves_symmetry_and_diagonal() {
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let lor = LorH1::<2>::new(&mesh, 2).unwrap();
+        let n = lor.n_lor();
+        let mut coo = fem_linalg::CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 2.0 + (i % 3) as f64);
+            if i + 1 < n {
+                coo.add(i, i + 1, -0.5);
+                coo.add(i + 1, i, -0.5);
+            }
+        }
+        let a = coo.into_csr();
+        let b = lor.ho_numbering(&a);
+        for i in 0..b.nrows {
+            for r in b.row_ptr[i]..b.row_ptr[i + 1] {
+                let j = b.col_idx[r] as usize;
+                assert!((b.values[r] - b.get(j, i)).abs() < 1e-14);
+            }
+        }
+        // Prolongate/restrict round trip through the permutation.
+        let x: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+        let mut y = vec![0.0; lor.n_ho()];
+        lor.prolongate(&x, &mut y);
+        let mut z = vec![0.0; n];
+        lor.restrict(&y, &mut z);
+        assert_eq!(x, z);
     }
 }

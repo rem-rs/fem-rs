@@ -393,6 +393,433 @@ fn jacobi_smooth(a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], omega: f64, sweep
     }
 }
 
+// ─── Elasticity (vector H1) LOR-AMG ──────────────────────────────────────────
+//
+// Block-diagonal low-order-refined preconditioning for vector H1 (linear
+// elasticity) systems — the serial analogue of MFEM
+// `miniapps/solvers/lor_elast.cpp`:
+//
+//   P⁻¹ = diag(AMG(A_00), …, AMG(A_{d-1,d-1})),
+//
+// where A_jj is the (j,j) scalar block of the elasticity operator
+//   a(u,v) = ∫ λ (∇·u)(∇·v) + 2μ ε(u):ε(v)
+// restricted to component j, assembled on the P1 low-order-refined mesh:
+//   A_jj = ∫ μ ∇u·∇v + (λ + μ) (∂_j u)(∂_j v)      (MFEM
+//          `ElasticityComponentIntegrator(lor_integrator, j, j)`).
+//
+// The HO system is `byNODES` (fem-space `VectorH1Space`), i.e. d contiguous
+// scalar blocks, so restriction/prolongation is a segment split.  This module
+// only depends on fem-mesh/fem-linalg/linlvo; the LOR mesh + dof permutation
+// live in `fem_space::lor::LorH1` (MFEM `LORBase::ConstructDofPermutation`
+// is the identity for H1; the permutation here is the explicit renumbering
+// between the refined-mesh vertex and DofManager conventions).
+
+use fem_mesh::element_type::ElementType;
+use fem_mesh::simplex::Mesh;
+use fem_mesh::topology::MeshTopology;
+
+/// Assemble the `dim` diagonal scalar blocks `A_jj` of the linear elasticity
+/// operator on the P1 space of the low-order-refined (LOR) mesh, in LOR
+/// numbering (refined-mesh node ids).
+///
+/// * `lambda` / `mu` — Lamé coefficient callbacks by element (material) tag.
+/// * Supports the P1 LOR element types produced by `make_refined`:
+///   Quad4 / Hex8 (any refinement), Tri3, Tet4.
+///
+/// The blocks are symmetric positive semi-definite; essential-dof handling is
+/// done inside [`LorElasticityPrecond::build`] (essential projection, see the
+/// type docs).
+pub fn assemble_lor_elasticity_blocks<const D: usize>(
+    lor_mesh: &Mesh<D>,
+    lambda: &dyn Fn(i32) -> f64,
+    mu: &dyn Fn(i32) -> f64,
+) -> Vec<CsrMatrix<f64>> {
+    assert!(D == 2 || D == 3, "assemble_lor_elasticity_blocks: D is 2 or 3");
+    let n = lor_mesh.n_nodes();
+    let dim = D; // component count = mesh dimension (runtime loops below)
+    let mut blocks: Vec<fem_linalg::CooMatrix<f64>> = (0..dim)
+        .map(|_| fem_linalg::CooMatrix::<f64>::new(n, n))
+        .collect();
+
+    // 2-point Gauss-Legendre per direction on [0, 1] (exact for the affine
+    // P1 tensor elements; slightly under-integrates curved bilinear faces,
+    // which is irrelevant for a preconditioner and matches the exactness of
+    // the order-1 identity path).
+    let (g1, w1) = fem_element::quadrature::gauss_legendre_01(2);
+
+    for e in 0..lor_mesh.n_elements() as u32 {
+        let nodes = lor_mesh.element_nodes(e);
+        let tag = lor_mesh.elem_tags[e as usize];
+        let lam = lambda(tag);
+        let mu_ = mu(tag);
+        let coords: Vec<[f64; 3]> = nodes
+            .iter()
+            .map(|&nd| {
+                let c = lor_mesh.node_coords(nd);
+                let mut a = [0.0_f64; 3];
+                a[..dim].copy_from_slice(&c[..dim]);
+                a
+            })
+            .collect();
+
+        match lor_mesh.elem_type {
+            ElementType::Tri3 => {
+                debug_assert_eq!(dim, 2, "Tri3 LOR block requires a 2-D mesh");
+                // Affine: constant J; 3-point degree-2 rule on the unit triangle.
+                const QP: [[f64; 2]; 3] = [
+                    [1.0 / 6.0, 1.0 / 6.0],
+                    [2.0 / 3.0, 1.0 / 6.0],
+                    [1.0 / 6.0, 2.0 / 3.0],
+                ];
+                const QW: [f64; 3] = [1.0 / 3.0; 3];
+                // Ref grads of [1-x-y, x, y], stride dim = 2.
+                let gref: [f64; 6] = [-1.0, -1.0, 1.0, 0.0, 0.0, 1.0];
+                // J[a][b] = dx_a/dxi_b (constant over the element).
+                let mut j = [[0.0_f64; 3]; 3];
+                for i in 0..3 {
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            j[a][b] += coords[i][a] * gref[i * 2 + b];
+                        }
+                    }
+                }
+                let (det, ginv) = invert_jacobian_dyn(&j, 2);
+                let mut gphys = [[0.0_f64; 3]; 3];
+                for i in 0..3 {
+                    for a in 0..2 {
+                        gphys[i][a] = ginv[0][a] * gref[i * 2] + ginv[1][a] * gref[i * 2 + 1];
+                    }
+                }
+                for qp in 0..3 {
+                    let w = QW[qp] * det;
+                    for jj in 0..dim {
+                        for i in 0..3 {
+                            for l in 0..3 {
+                                let lap = gphys[i][0] * gphys[l][0] + gphys[i][1] * gphys[l][1];
+                                blocks[jj].add(
+                                    nodes[i] as usize,
+                                    nodes[l] as usize,
+                                    w * (mu_ * lap + (lam + mu_) * gphys[i][jj] * gphys[l][jj]),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            ElementType::Quad4 => {
+                debug_assert_eq!(dim, 2, "Quad4 LOR block requires a 2-D mesh");
+                // Q1 corners in element node order (BL, BR, TR, TL).
+                const CORNERS: [[usize; 2]; 4] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+                for qx in 0..2 {
+                    for qy in 0..2 {
+                        let xi = [g1[qx], g1[qy]];
+                        let w = w1[qx] * w1[qy];
+                        let mut shape = [0.0_f64; 4];
+                        let mut gref = [0.0_f64; 8]; // stride dim = 2
+                        for (i, c) in CORNERS.iter().enumerate() {
+                            let mut s = [1.0_f64; 2];
+                            let mut d = [1.0_f64; 2];
+                            for a in 0..2 {
+                                s[a] = if c[a] == 1 { xi[a] } else { 1.0 - xi[a] };
+                                d[a] = if c[a] == 1 { 1.0 } else { -1.0 };
+                            }
+                            shape[i] = s[0] * s[1];
+                            gref[i * 2] = d[0] * s[1];
+                            gref[i * 2 + 1] = s[0] * d[1];
+                        }
+                        accumulate_p1_block(
+                            &coords, &shape, &gref, w, lam, mu_, dim, nodes, &mut blocks,
+                        );
+                    }
+                }
+            }
+            ElementType::Hex8 => {
+                debug_assert_eq!(dim, 3, "Hex8 LOR block requires a 3-D mesh");
+                // Trilinear Q1 corners in mesh order (bottom CCW then top CCW).
+                const CORNERS: [[usize; 3]; 8] = [
+                    [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                    [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+                ];
+                for qz in 0..2 {
+                    for qy in 0..2 {
+                        for qx in 0..2 {
+                            let xi = [g1[qx], g1[qy], g1[qz]];
+                            let w = w1[qx] * w1[qy] * w1[qz];
+                            let mut shape = [0.0_f64; 8];
+                            let mut gref = [0.0_f64; 24]; // stride dim = 3
+                            for (i, c) in CORNERS.iter().enumerate() {
+                                let mut s = [1.0_f64; 3];
+                                let mut d = [1.0_f64; 3];
+                                for a in 0..3 {
+                                    s[a] = if c[a] == 1 { xi[a] } else { 1.0 - xi[a] };
+                                    d[a] = if c[a] == 1 { 1.0 } else { -1.0 };
+                                }
+                                shape[i] = s[0] * s[1] * s[2];
+                                gref[i * 3] = d[0] * s[1] * s[2];
+                                gref[i * 3 + 1] = s[0] * d[1] * s[2];
+                                gref[i * 3 + 2] = s[0] * s[1] * d[2];
+                            }
+                            accumulate_p1_block(
+                                &coords, &shape, &gref, w, lam, mu_, dim, nodes, &mut blocks,
+                            );
+                        }
+                    }
+                }
+            }
+            et => panic!(
+                "assemble_lor_elasticity_blocks: unsupported P1 LOR element \
+                 {et:?} (supported: Quad4/Hex8/Tri3/Tet4)"
+            ),
+        }
+    }
+
+    blocks.into_iter().map(|b| b.into_csr()).collect()
+}
+
+/// Accumulate `w * (μ ∇Ni·∇Nl + (λ+μ) ∂_j Ni ∂_j Nl)` for all component
+/// blocks, transforming reference gradients (flattened, stride `dim`) through
+/// the element Jacobian.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_p1_block(
+    coords: &[[f64; 3]],
+    shape: &[f64],
+    gref: &[f64],
+    w: f64,
+    lam: f64,
+    mu: f64,
+    dim: usize,
+    nodes: &[u32],
+    blocks: &mut [fem_linalg::CooMatrix<f64>],
+) {
+    let n = shape.len();
+    debug_assert_eq!(gref.len(), n * dim);
+    // J[a][b] = dx_a/dxi_b.
+    let mut j = [[0.0_f64; 3]; 3];
+    for i in 0..n {
+        for a in 0..dim {
+            for b in 0..dim {
+                j[a][b] += coords[i][a] * gref[i * dim + b];
+            }
+        }
+    }
+    let (det, ginv) = invert_jacobian_dyn(&j, dim);
+    let w_det = w * det;
+    let mut gphys = vec![[0.0_f64; 3]; n];
+    for i in 0..n {
+        for a in 0..dim {
+            let mut s = 0.0;
+            for b in 0..dim {
+                s += ginv[b][a] * gref[i * dim + b];
+            }
+            gphys[i][a] = s;
+        }
+    }
+    for jj in 0..dim {
+        for i in 0..n {
+            for l in 0..n {
+                let mut lap = 0.0;
+                for a in 0..dim {
+                    lap += gphys[i][a] * gphys[l][a];
+                }
+                blocks[jj].add(
+                    nodes[i] as usize,
+                    nodes[l] as usize,
+                    w_det * (mu * lap + (lam + mu) * gphys[i][jj] * gphys[l][jj]),
+                );
+            }
+        }
+    }
+}
+
+/// Inverse (Gauss-Jordan with partial pivoting) and determinant of the
+/// leading `dim × dim` block of a 3×3 Jacobian `J[a][b] = dx_a/dxi_b`.
+fn invert_jacobian_dyn(j: &[[f64; 3]; 3], dim: usize) -> (f64, [[f64; 3]; 3]) {
+    let mut a = [[0.0_f64; 6]; 3];
+    for r in 0..dim {
+        for c in 0..dim {
+            a[r][c] = j[r][c];
+        }
+        a[r][dim + r] = 1.0;
+    }
+    let mut det_sign = 1.0_f64;
+    let mut det_abs = 1.0_f64;
+    for col in 0..dim {
+        let mut piv = col;
+        for r in col + 1..dim {
+            if a[r][col].abs() > a[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if a[piv][col].abs() < 1e-300 {
+            panic!("degenerate P1 element (pivot {col} is zero)");
+        }
+        if piv != col {
+            a.swap(col, piv);
+            det_sign = -det_sign;
+        }
+        det_abs *= a[col][col];
+        let d = a[col][col];
+        for c in 0..2 * dim {
+            a[col][c] /= d;
+        }
+        for r in 0..dim {
+            if r != col {
+                let f = a[r][col];
+                if f != 0.0 {
+                    for c in 0..2 * dim {
+                        a[r][c] -= f * a[col][c];
+                    }
+                }
+            }
+        }
+    }
+    let mut inv = [[0.0_f64; 3]; 3];
+    for r in 0..dim {
+        for c in 0..dim {
+            inv[r][c] = a[r][dim + c];
+        }
+    }
+    (det_sign * det_abs, inv)
+}
+
+/// Zero the rows/columns of essential dofs, put 1 on the diagonal, and drop
+/// the entries that became zero.  MFEM `EliminateBC(...,
+/// DiagonalPolicy::DIAG_ONE)` semantics; dropping the explicit zeros is
+/// required for the linlvo AMG setup, which otherwise produces a
+/// non-symmetric V-cycle (pattern zeros are treated as couplings) and breaks
+/// PCG on stiff problems.
+fn eliminate_diag_one(a: &CsrMatrix<f64>, dofs: &[usize]) -> CsrMatrix<f64> {
+    let mut ess = dofs.to_vec();
+    ess.sort_unstable();
+    ess.dedup();
+    let mut coo = fem_linalg::CooMatrix::<f64>::new(a.nrows, a.ncols);
+    for row in 0..a.nrows {
+        for k in a.row_ptr[row]..a.row_ptr[row + 1] {
+            let col = a.col_idx[k] as usize;
+            let v = a.values[k];
+            let constrained = ess.binary_search(&row).is_ok();
+            let v = if constrained {
+                if col == row { 1.0 } else { 0.0 }
+            } else if ess.binary_search(&col).is_ok() {
+                0.0
+            } else {
+                v
+            };
+            if v != 0.0 {
+                coo.add(row, col, v);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Congruence `B[perm[i], perm[j]] = A[i][j]` (plain H1 permutation —
+/// mirrors `fem_space::lor::LorH1::ho_numbering` without a fem-space
+/// dependency).
+fn permute_scalar(a: &CsrMatrix<f64>, perm: &[u32], n_ho: usize) -> CsrMatrix<f64> {
+    assert_eq!(a.nrows, a.ncols, "permute_scalar: matrix must be square");
+    assert_eq!(a.nrows, perm.len(), "permute_scalar: size mismatch");
+    let mut coo = fem_linalg::CooMatrix::<f64>::new(n_ho, n_ho);
+    for i in 0..a.nrows {
+        let gi = perm[i] as usize;
+        for r in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let gj = perm[a.col_idx[r] as usize] as usize;
+            let v = a.values[r];
+            if v != 0.0 {
+                coo.add(gi, gj, v);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Block-diagonal LOR-AMG preconditioner for `byNODES` vector H1 (elasticity)
+/// systems: `P⁻¹ = diag(AMG(A_00), …, AMG(A_{d-1,d-1}))` — the serial
+/// analogue of MFEM `BlockDiagonalPreconditioner` over LOR component blocks
+/// (`miniapps/solvers/lor_elast.cpp`, step 13(a)).
+///
+/// Each block gets the MFEM treatment: `EliminateBC(ess, DIAG_ONE)` on the
+/// permuted (HO-numbered) scalar block, followed by dropping the entries that
+/// became zero.  The trim pass is required for the linlvo AMG setup, which
+/// treats explicit pattern zeros as couplings: without it the
+/// smoothed-aggregation V-cycle is non-symmetric and PCG breaks down on stiff
+/// problems; with it the V-cycle is symmetric and robust.
+pub struct LorElasticityPrecond {
+    amg: Vec<AmgPrecond<f64>>,
+    n_scalar: usize,
+    dim: usize,
+}
+
+impl LorElasticityPrecond {
+    /// Number of scalar dofs per component.
+    pub fn n_scalar(&self) -> usize { self.n_scalar }
+
+    /// Number of components (blocks).
+    pub fn dim(&self) -> usize { self.dim }
+
+    /// Build the preconditioner.
+    ///
+    /// * `blocks_lor` — per-component scalar LOR matrices (LOR numbering, e.g.
+    ///   from [`assemble_lor_elasticity_blocks`]).
+    /// * `perm` — LOR dof → HO scalar dof map (from `fem_space::lor::LorH1`).
+    /// * `ess_ho_scalar` — essential scalar dofs in HO numbering (boundary
+    ///   attribute dofs of the HO scalar space); each block gets MFEM
+    ///   `DIAG_ONE` elimination at the corresponding set.
+    /// * `amg_cfg` — scalar AMG configuration (one hierarchy per component).
+    pub fn build(
+        blocks_lor: &[CsrMatrix<f64>],
+        perm: &[u32],
+        n_scalar: usize,
+        ess_ho_scalar: &[u32],
+        amg_cfg: &AmgConfig,
+    ) -> Self {
+        let dim = blocks_lor.len();
+        assert!(dim > 0, "LorElasticityPrecond: no blocks");
+        assert_eq!(perm.len(), n_scalar, "LorElasticityPrecond: perm/n_scalar mismatch");
+        let mut amg = Vec::with_capacity(dim);
+        let ess: Vec<usize> = ess_ho_scalar.iter().map(|&d| d as usize).collect();
+        for (c, b) in blocks_lor.iter().enumerate() {
+            assert_eq!(b.nrows, perm.len(), "LorElasticityPrecond: block {c} size");
+            let blk_ho = eliminate_diag_one(&permute_scalar(b, perm, n_scalar), &ess);
+            let hier = AmgHierarchy::build(fem_to_linlvo_csr(&blk_ho), amg_cfg.clone());
+            amg.push(AmgPrecond::new(hier));
+        }
+        LorElasticityPrecond { amg, n_scalar, dim }
+    }
+}
+
+impl Preconditioner for LorElasticityPrecond {
+    type Vector = DenseVec<f64>;
+
+    fn apply_precond(&self, x: &DenseVec<f64>, y: &mut DenseVec<f64>) {
+        let xs = x.as_slice();
+        let ys = y.as_mut_slice();
+        assert_eq!(xs.len(), self.dim * self.n_scalar, "LorElasticityPrecond: size");
+        for c in 0..self.dim {
+            let seg = &xs[c * self.n_scalar..(c + 1) * self.n_scalar];
+            let rhs = DenseVec::from_vec(seg.to_vec());
+            let mut z = DenseVec::from_vec(vec![0.0_f64; self.n_scalar]);
+            self.amg[c].apply_precond(&rhs, &mut z);
+            ys[c * self.n_scalar..(c + 1) * self.n_scalar].copy_from_slice(z.as_slice());
+        }
+    }
+}
+
+/// Convenience: build the elasticity LOR-AMG preconditioner from a
+/// `fem_space::lor::LorH1`-style permutation and the LOR blocks.
+///
+/// Equivalent to [`LorElasticityPrecond::build`]; kept as a named path for
+/// the MFEM `build_lor_elasticity` analogy.
+pub fn build_lor_elasticity(
+    blocks_lor: &[CsrMatrix<f64>],
+    perm: &[u32],
+    n_scalar: usize,
+    ess_ho_scalar: &[u32],
+    amg_cfg: &AmgConfig,
+) -> LorElasticityPrecond {
+    LorElasticityPrecond::build(blocks_lor, perm, n_scalar, ess_ho_scalar, amg_cfg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +1074,318 @@ mod tests {
             "GMRES+LOR‑AMG (P=I) failed: {} iters res={:.3e}",
             res.iterations, res.final_residual
         );
+    }
+
+    // ── Elasticity (vector H1) LOR-AMG tests ──────────────────────────────
+
+    use fem_assembly::standard::ElasticityIntegrator as HoElasticity;
+    use fem_space::constraints::{boundary_dofs, form_linear_system};
+    use fem_space::lor::LorH1;
+    use fem_space::VectorH1Space;
+
+    /// 2-D cantilever-style test system on an `n x n` unit-square quad mesh:
+    /// vector elasticity (lambda = mu = 1), order `order`, Dirichlet u = 0 on
+    /// the x = 0 edge, RHS = A * x_smooth on the free dofs (manufactured
+    /// solution `x_smooth`).  Returns the scalar essential dofs separately
+    /// (needed by [`LorElasticityPrecond::build`]).
+    #[allow(clippy::type_complexity)]
+    fn elasticity_system_2d(
+        n: usize,
+        order: u8,
+    ) -> (CsrMatrix<f64>, Vec<f64>, Vec<f64>, Vec<u32>, Mesh<2>) {
+        let mesh = Mesh::<2>::unit_square_quad(n);
+        let dim = 2usize;
+        let space = VectorH1Space::new(mesh.clone(), order, dim as u8);
+        let qo = 2 * order + 1;
+        let integ = HoElasticity::new(1.0_f64, 1.0_f64);
+        let mut a = fem_assembly::Assembler::assemble_bilinear(&space, &[&integ], qo);
+        let n_scalar = space.n_scalar_dofs();
+
+        let xs = space
+            .interpolate_vec(&|p| {
+                vec![
+                    (std::f64::consts::PI * p[0]).sin() * (std::f64::consts::PI * p[1]).sin(),
+                    std::f64::consts::PI * p[0].sin() * p[1] * (1.0 - p[1]),
+                ]
+            })
+            .as_slice()
+            .to_vec();
+
+        // Essential dofs: scalar dofs on the x = 0 boundary, both components.
+        let tags = mesh.unique_boundary_tags();
+        let b_all = boundary_dofs(&mesh, space.scalar_dof_manager(), &tags);
+        let ess_scalar: Vec<u32> = b_all
+            .into_iter()
+            .filter(|&d| space.scalar_dof_manager().dof_coord(d)[0] < 1e-12)
+            .collect();
+        assert!(!ess_scalar.is_empty(), "no essential dofs found");
+        let mut ess = Vec::with_capacity(2 * ess_scalar.len());
+        let mut rhs = xs.clone();
+        for &d in &ess_scalar {
+            rhs[d as usize] = 0.0;
+            rhs[n_scalar + d as usize] = 0.0;
+            ess.push(d);
+            ess.push(n_scalar as u32 + d);
+        }
+        let mut b = vec![0.0_f64; a.nrows];
+        a.spmv(&rhs, &mut b);
+        let vals = vec![0.0_f64; ess.len()];
+        let mut x0 = vec![0.0_f64; a.nrows];
+        form_linear_system(&mut a, &mut b, &mut x0, &ess, &vals);
+        (a, b, rhs, ess_scalar, mesh)
+    }
+
+    /// True relative residual ‖b − A x‖ / ‖b‖ (the Krylov solvers' convergence
+    /// flag can false-fire when a preconditioner loses positive-definiteness,
+    /// so the acceptance tests check the residual directly).
+    fn true_relres(a: &CsrMatrix<f64>, b: &[f64], x: &[f64]) -> f64 {
+        let mut ax = vec![0.0_f64; a.nrows];
+        a.spmv(x, &mut ax);
+        let bn: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let rn: f64 = b.iter().zip(ax.iter()).map(|(bv, av)| (bv - av) * (bv - av)).sum::<f64>().sqrt();
+        rn / bn
+    }
+
+    /// Assemble the LOR-AMG elasticity preconditioner for the test system.
+    fn lor_elasticity_precond_2d(
+        mesh: &Mesh<2>,
+        order: u8,
+        ess_scalar: &[u32],
+    ) -> LorElasticityPrecond {
+        let lor = LorH1::<2>::new(mesh, order).expect("LorH1");
+        let blocks = assemble_lor_elasticity_blocks(lor.lor_mesh(), &|_| 1.0, &|_| 1.0);
+        assert_eq!(blocks.len(), 2);
+        LorElasticityPrecond::build(
+            &blocks,
+            lor.perm(),
+            lor.n_ho(),
+            ess_scalar,
+            &AmgConfig::default(),
+        )
+    }
+
+    /// At order 1 the LOR mesh is the mesh itself and the LOR block A_jj must
+    /// equal the (j, j) diagonal block of the fully assembled vector
+    /// elasticity matrix (byNODES layout), up to round-off.
+    #[test]
+    fn lor_elasticity_p1_blocks_equal_vector_diagonal_blocks() {
+        let mesh = Mesh::<2>::unit_square_quad(3);
+        let space = VectorH1Space::new(mesh.clone(), 1, 2);
+        let integ = HoElasticity::new(1.0_f64, 1.0_f64);
+        // Fresh assembly WITHOUT essential-dof elimination (the elimination
+        // would zero the clamped rows of the comparison matrix).
+        let a = fem_assembly::Assembler::assemble_bilinear(&space, &[&integ], 3);
+        let n_scalar = space.n_scalar_dofs();
+        let blocks = assemble_lor_elasticity_blocks(&mesh, &|_| 1.0, &|_| 1.0);
+        for (j, blk) in blocks.iter().enumerate() {
+            assert_eq!(blk.nrows, n_scalar);
+            let off = j * n_scalar;
+            for i in 0..n_scalar {
+                for r in blk.row_ptr[i]..blk.row_ptr[i + 1] {
+                    let l = blk.col_idx[r] as usize;
+                    let v = blk.values[r];
+                    let want = a.get(off + i, off + l);
+                    assert!(
+                        (v - want).abs() <= 1e-10 * (1.0 + want.abs()),
+                        "A_{j}[{i},{l}] = {v} vs vector block {want}"
+                    );
+                }
+                // And every nonzero of the vector block is covered by the
+                // LOR block (same sparsity pattern).
+                for r in a.row_ptr[off + i]..a.row_ptr[off + i + 1] {
+                    let c = a.col_idx[r] as usize;
+                    if c >= off && c < off + n_scalar && a.values[r] != 0.0 {
+                        let got = blk.get(i, c - off);
+                        assert!(
+                            (got - a.values[r]).abs() <= 1e-10 * (1.0 + a.values[r].abs()),
+                            "vector A[{},{}) = {} vs LOR block {}",
+                            off + i,
+                            c,
+                            a.values[r],
+                            got
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Core acceptance: PCG + block-diagonal LOR-AMG iteration counts must
+    /// not grow under mesh refinement (order 2, 2-D quads).
+    #[test]
+    fn lor_elasticity_amg_iterations_mesh_independent_2d() {
+        let mut iters = Vec::new();
+        for n in [4usize, 8, 16] {
+            let (a, b, _x, ess, mesh) = elasticity_system_2d(n, 2);
+            let prec = lor_elasticity_precond_2d(&mesh, 2, &ess);
+            let mut x = vec![0.0_f64; a.nrows];
+            let cfg = SolverConfig {
+                rtol: 1e-8,
+                max_iter: 300,
+                ..Default::default()
+            };
+            let res = crate::solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+            println!(
+                "LOR-AMG 2D n={n:2}: dofs {:5}  iters {:3}  conv {}  true_relres {:.3e}",
+                a.nrows,
+                res.iterations,
+                res.converged,
+                true_relres(&a, &b, &x)
+            );
+            // The Krylov stopping criterion is the preconditioned residual
+            // norm (MFEM (B r, r) semantics), so the true residual legitimately
+            // sits above rtol; the guard only rejects pathological relres ~ 1.
+            assert!(
+                res.converged && true_relres(&a, &b, &x) <= 1e-2,
+                "n={n}: no honest convergence, res {:.3e}, true relres {:.3e}",
+                res.final_residual,
+                true_relres(&a, &b, &x)
+            );
+            iters.push(res.iterations);
+        }
+        assert!(iters.iter().all(|&it| it <= 40), "iterations {iters:?}");
+        assert!(
+            iters[2] <= iters[0] + 8,
+            "iteration growth n=4 -> n=16: {iters:?}"
+        );
+    }
+
+    /// Same acceptance in 3-D (order 2 hexes, 2 -> 4 refinement).
+    #[test]
+    fn lor_elasticity_amg_iterations_mesh_independent_3d() {
+        fn build(n: usize) -> (CsrMatrix<f64>, Vec<f64>, Vec<u32>, Mesh<3>) {
+            let mesh =
+                Mesh::<3>::make_cartesian_3d(n, n, n, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+            let dim = 3usize;
+            let space = VectorH1Space::new(mesh.clone(), 2, dim as u8);
+            let integ = HoElasticity::new(1.0_f64, 1.0_f64);
+            let mut a = fem_assembly::Assembler::assemble_bilinear(&space, &[&integ], 5);
+            let n_scalar = space.n_scalar_dofs();
+            let xs = space
+                .interpolate_vec(&|p| {
+                    vec![
+                        (std::f64::consts::PI * p[0]).sin(),
+                        (std::f64::consts::PI * p[1]).sin(),
+                        (std::f64::consts::PI * p[2]).sin() * p[1] * (1.0 - p[1]),
+                    ]
+                })
+                .as_slice()
+                .to_vec();
+            let tags = mesh.unique_boundary_tags();
+            let b_all = boundary_dofs(&mesh, space.scalar_dof_manager(), &tags);
+            let ess_scalar: Vec<u32> = b_all
+                .into_iter()
+                .filter(|&d| space.scalar_dof_manager().dof_coord(d)[0] < 1e-12)
+                .collect();
+            let mut rhs = xs.clone();
+            for &d in &ess_scalar {
+                for c in 0..dim {
+                    rhs[c * n_scalar + d as usize] = 0.0;
+                }
+            }
+            // Vector-expanded essential list for FormLinearSystem.
+            let mut ess = Vec::new();
+            for &d in &ess_scalar {
+                for c in 0..dim {
+                    ess.push((c * n_scalar) as u32 + d);
+                }
+            }
+            let mut b = vec![0.0_f64; a.nrows];
+            a.spmv(&rhs, &mut b);
+            let vals = vec![0.0_f64; ess.len()];
+            let mut x0 = vec![0.0_f64; a.nrows];
+            form_linear_system(&mut a, &mut b, &mut x0, &ess, &vals);
+            (a, b, ess_scalar, mesh)
+        }
+
+        let mut iters = Vec::new();
+        for n in [2usize, 4] {
+            let (a, b, ess_scalar, mesh) = build(n);
+            let lor = LorH1::<3>::new(&mesh, 2).expect("LorH1 hex");
+            let blocks = assemble_lor_elasticity_blocks(lor.lor_mesh(), &|_| 1.0, &|_| 1.0);
+            assert_eq!(blocks.len(), 3);
+            let prec = LorElasticityPrecond::build(
+                &blocks,
+                lor.perm(),
+                lor.n_ho(),
+                &ess_scalar,
+                &AmgConfig::default(),
+            );
+            let mut x = vec![0.0_f64; a.nrows];
+            let cfg = SolverConfig {
+                rtol: 1e-8,
+                max_iter: 300,
+                ..Default::default()
+            };
+            let res = crate::solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+            println!(
+                "LOR-AMG 3D n={n}: dofs {:5}  iters {:3}  conv {}  true_relres {:.3e}",
+                a.nrows,
+                res.iterations,
+                res.converged,
+                true_relres(&a, &b, &x)
+            );
+            // Same preconditioned-norm stopping semantics as the 2-D test.
+            assert!(
+                res.converged && true_relres(&a, &b, &x) <= 1e-2,
+                "n={n}: no honest convergence, res {:.3e}, true relres {:.3e}",
+                res.final_residual,
+                true_relres(&a, &b, &x)
+            );
+            iters.push(res.iterations);
+        }
+        assert!(iters.iter().all(|&it| it <= 60), "iterations {iters:?}");
+        assert!(
+            iters[1] <= iters[0] + 8,
+            "iteration growth n=2 -> n=4: {iters:?}"
+        );
+    }
+
+    /// The LOR-AMG solution matches an independent (Jacobi-CG) reference
+    /// solve of the same system.
+    #[test]
+    fn lor_elasticity_solution_matches_reference_solve() {
+        let (a, b, _x, ess, mesh) = elasticity_system_2d(6, 2);
+        let prec = lor_elasticity_precond_2d(&mesh, 2, &ess);
+        let mut x = vec![0.0_f64; a.nrows];
+        let cfg = SolverConfig {
+            rtol: 1e-12,
+            max_iter: 300,
+            ..Default::default()
+        };
+        let res = crate::solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+        assert!(res.converged);
+        let mut x_ref = vec![0.0_f64; a.nrows];
+        let cfg_ref = SolverConfig {
+            rtol: 1e-14,
+            max_iter: 50000,
+            ..Default::default()
+        };
+        let res_ref = crate::solve_pcg_jacobi(&a, &b, &mut x_ref, &cfg_ref).unwrap();
+        assert!(res_ref.converged);
+        let den = x_ref.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+        let err = x_ref
+            .iter()
+            .zip(x.iter())
+            .map(|(s, v)| (s - v).abs())
+            .fold(0.0_f64, f64::max);
+        // Solution error tracks the CG stopping tolerance (relres ~1e-12).
+        assert!(err <= 1e-5 * den, "solution error {err:.3e} / {den:.3e}");
+    }
+
+    /// Order 3 (refinement 3) end-to-end smoke with bounded iterations.
+    #[test]
+    fn lor_elasticity_order3_smoke() {
+        let (a, b, _x, ess, mesh) = elasticity_system_2d(4, 3);
+        let prec = lor_elasticity_precond_2d(&mesh, 3, &ess);
+        let mut x = vec![0.0_f64; a.nrows];
+        let cfg = SolverConfig {
+            rtol: 1e-8,
+            max_iter: 300,
+            ..Default::default()
+        };
+        let res = crate::solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+        assert!(res.converged, "order 3: res {:.3e}", res.final_residual);
+        assert!(res.iterations <= 60, "order 3 iterations {}", res.iterations);
     }
 }
