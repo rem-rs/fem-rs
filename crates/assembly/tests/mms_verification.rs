@@ -524,7 +524,6 @@ fn solve_helmholtz_2d_ho(n: usize, order: u8, k_sq: f64) -> f64 {
     l2_error_scalar(&x, &space)
 }
 
-#[ignore = "latent bug (pre-dates the 2026-09 session, hidden since the a9404c2 compile breakage): tri Pk>=3 Helmholtz MMS does not converge (rate ~0); investigation queued"]
 #[test]
 fn helmholtz_2d_p3_convergence() {
     let k_sq = PI * PI;
@@ -535,7 +534,6 @@ fn helmholtz_2d_p3_convergence() {
     assert!(rates[0] > 2.5, "Helmholtz P3 rate {:.2} < 2.5 (expected ~4)", rates[0]);
 }
 
-#[ignore = "latent bug (pre-dates the 2026-09 session, hidden since the a9404c2 compile breakage): tri Pk>=4 Helmholtz MMS does not converge (rate ~0); investigation queued"]
 #[test]
 fn helmholtz_2d_p4_convergence() {
     let k_sq = PI * PI;
@@ -1955,7 +1953,7 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
             ref_elem.eval_basis_vec(xi, &mut ref_phi);
             ref_elem.eval_curl(xi, &mut ref_curl);
             piola_hcurl(&j_inv_t, &ref_phi, &mut phys_phi, n_vdofs, 3);
-            piola_hcurl_curl(&j_inv_t, &jac, &ref_curl, &mut phys_curl, n_vdofs);
+            piola_hcurl_curl(&jac, det_j, &ref_curl, &mut phys_curl, n_vdofs);
 
             let mut uh = [0.0; 3];
             let mut curl_uh = [0.0; 3];
@@ -1976,13 +1974,17 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
 }
 
 /// Compute the Piola-transformed curl for H(curl) error computation.
-/// In 3D: curl_u_h = (1/det J) 鐠?J 鐠?curl_濡楀懓妾?
-fn piola_hcurl_curl(j_inv_t: &DMatrix<f64>, _jac: &DMatrix<f64>, ref_curl: &[f64], phys_curl: &mut [f64], n: usize) {
-    // Standard Piola transform for curls: (J^T)^{-1} * curl_濡楀懓妾? (contravariant)
+/// In 3D: curl_phys = J · curl_ref / det J (follows from φ_phys = J^{-T} φ_ref).
+/// NOTE: J, not Jᵀ — using the covariant (Jᵀ) transform for the curl is only
+/// valid for symmetric Jacobians and corrupts the curl error on tets.
+fn piola_hcurl_curl(jac: &DMatrix<f64>, det_j: f64, ref_curl: &[f64], phys_curl: &mut [f64], n: usize) {
+    let inv_det = 1.0 / det_j;
     for i in 0..n {
-        phys_curl[i * 3]     = j_inv_t[(0,0)]*ref_curl[i*3] + j_inv_t[(0,1)]*ref_curl[i*3+1] + j_inv_t[(0,2)]*ref_curl[i*3+2];
-        phys_curl[i * 3 + 1] = j_inv_t[(1,0)]*ref_curl[i*3] + j_inv_t[(1,1)]*ref_curl[i*3+1] + j_inv_t[(1,2)]*ref_curl[i*3+2];
-        phys_curl[i * 3 + 2] = j_inv_t[(2,0)]*ref_curl[i*3] + j_inv_t[(2,1)]*ref_curl[i*3+1] + j_inv_t[(2,2)]*ref_curl[i*3+2];
+        for d in 0..3 {
+            let mut s = 0.0;
+            for r in 0..3 { s += jac[(d, r)] * ref_curl[i * 3 + r]; }
+            phys_curl[i * 3 + d] = s * inv_det;
+        }
     }
 }
 
@@ -2000,7 +2002,6 @@ fn curl_e_maxwell_3d(x: &[f64]) -> [f64; 3] {
     ]
 }
 
-#[ignore = "latent bug (pre-dates the 2026-09 session, hidden since the a9404c2 compile breakage): tet ND1 Maxwell MMS L2 rate 0.43 < 0.5; investigation queued"]
 #[test]
 fn maxwell_3d_tet_nd1_convergence() {
     let ns = [2usize, 3, 4];

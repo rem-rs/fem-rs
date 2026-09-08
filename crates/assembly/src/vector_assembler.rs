@@ -190,10 +190,17 @@ pub(crate) fn piola_hcurl_basis(
 /// H(curl) curl transform.
 ///
 /// - 2-D: `curl_phys[i] = curl_ref[i] / det_j` (scalar)
-/// - 3-D: `curl_phys[i] = curl_ref[i] * J^T / det_j` (vector, covariant)
+/// - 3-D: `curl_phys[i] = J · curl_ref[i] / det_j` (vector)
 ///
-/// Matches MFEM `FiniteElement::CalcPhysCurlShape` (fe_base.cpp):
-/// `MultABt(vshape, Trans.Jacobian(), curl_shape); curl_shape *= 1/Weight();`
+/// Follows from the covariant Piola map `φ_phys = J^{-T} φ_ref`: differentiating
+/// through `ξ = J^{-1}(x − b)` gives `curl_x φ_phys = J · curl_ξ φ_ref / det J`
+/// (verified component-wise for general nonsymmetric `J`).  Matches MFEM
+/// `FiniteElement::CalcPhysCurlShape` (fe_base.cpp).
+///
+/// NOTE: the transform uses `J`, **not** `Jᵀ`.  Using `Jᵀ` (a covariant
+/// 1-form transform) is only equivalent for symmetric Jacobians (e.g.
+/// axis-aligned hexes); on general tetrahedra it silently corrupts every
+/// curl-curl matrix (ND1 Maxwell MMS rate 0.43 instead of 1).
 pub(crate) fn piola_hcurl_curl(
     jac: &DMatrix<f64>,
     det_j: f64,
@@ -209,13 +216,12 @@ pub(crate) fn piola_hcurl_curl(
             phys_curl[i] = ref_curl[i] * inv_det;
         }
     } else {
-        // 3-D vector curl: curl_phys = curl_ref * J^T / det_j
-        // (covariant Piola: curl transforms as a 1-form / covector)
+        // 3-D vector curl: curl_phys = J · curl_ref / det_j
         for i in 0..n_dofs {
             for c in 0..3 {
                 let mut s = 0.0;
                 for r in 0..3 {
-                    s += ref_curl[i * 3 + r] * jac[(r, c)];
+                    s += jac[(c, r)] * ref_curl[i * 3 + r];
                 }
                 phys_curl[i * 3 + c] = s * inv_det;
             }

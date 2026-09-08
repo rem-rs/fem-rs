@@ -2,12 +2,12 @@
   "name": "team3_hcurl_3d_mms",
   "metrics": {
     "l2_err_n2": {
-      "value": 0.5022258684862563,
+      "value": 0.5021493283881535,
       "rtol": 1e-6,
       "atol": 1e-10
     },
     "l2_err_n3": {
-      "value": 0.37302527748523934,
+      "value": 0.3730127069858746,
       "rtol": 1e-6,
       "atol": 1e-10
     }

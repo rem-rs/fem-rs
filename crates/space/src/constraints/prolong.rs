@@ -126,11 +126,16 @@ pub fn prolongate_pk_hanging<M: MeshTopology>(
     let mut u_fine = vec![0.0_f64; fine_dm.n_dofs];
     let n_coarse_elems = coarse_mesh.n_elements() as u32;
 
-    // Build the reference element for the coarse mesh.
+    // Build the reference element for the coarse mesh (H1 convention: tri
+    // order >= 3 uses Gauss-Lobatto H1TriPk, matching the assembler).
     let et = coarse_mesh.element_type(0);
     let ref_elem: Box<dyn fem_element::ReferenceElement> = match et {
         fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => {
-            Box::new(TriPk::new(p))
+            if p >= 3 {
+                Box::new(fem_element::lagrange::H1TriPk::new(p))
+            } else {
+                Box::new(TriPk::new(p))
+            }
         }
         fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10 => {
             Box::new(TetPk::new(p))
@@ -412,11 +417,19 @@ fn same_mesh_geometry<M: MeshTopology>(a: &M, b: &M) -> bool {
 }
 
 /// Reference Lagrange element for a 2-D mesh element type at any order.
+///
+/// Triangles of order >= 3 use the Gauss-Lobatto [`H1TriPk`] basis (MFEM
+/// `H1_FECollection`), matching the assembler and the `DofManager` layout —
+/// the equispaced `TriPk` matches only at p <= 2.
 fn lagrange_ref_2d(et: fem_mesh::ElementType, order: u8) -> Box<dyn ReferenceElement> {
     use fem_element::lagrange::{QuadQk, TriPk};
     match et {
         fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => {
-            Box::new(TriPk::new(order as usize))
+            if order >= 3 {
+                Box::new(fem_element::lagrange::H1TriPk::new(order as usize))
+            } else {
+                Box::new(TriPk::new(order as usize))
+            }
         }
         fem_mesh::ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
         _ => panic!("build_h1_prolongation_matrix: unsupported element type {et:?}"),

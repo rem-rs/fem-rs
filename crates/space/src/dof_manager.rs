@@ -544,10 +544,11 @@ impl DofManager {
 
         // DOF layout per element (10):
         //   0,1,2   → vertex DOFs (same as node IDs)
-        //   3,4     → edge(n0→n1): DOFs at 1/3 (near n0) and 2/3 (near n1)
-        //   5,6     → edge(n1→n2): DOFs at 1/3 (near n1) and 2/3 (near n2)
-        //   7,8     → edge(n2→n0): DOFs at 1/3 (near n2) and 2/3 (near n0)
-        //   (counter-clockwise ring, matching MFEM/H1TriPk)
+        //   3,4     → edge(n0→n1): DOFs near n0 and near n1 (GLL 1±1/√5 points)
+        //   5,6     → edge(n1→n2): DOFs near n1 and near n2
+        //   7,8     → edge(n2→n0): DOFs near n2 and near n0
+        //   (counter-clockwise ring, matching MFEM/H1TriPk: the last edge
+        //   runs from v2 toward v0)
         //   9       → bubble DOF (centroid)
         //
         // DOF numbering: vertex 0..n_nodes, then edge 2-DOFs, then bubble DOFs.
@@ -601,8 +602,8 @@ impl DofManager {
             dofs_flat[base + 6] = d6;
 
             let [d7, d8] = get_edge_dofs(n2, n0, &mut next_edge_dof, &mut edge2_map);
-            dofs_flat[base + 7] = d8; // near_n0 (closer to vertex 0)
-            dofs_flat[base + 8] = d7; // near_n2 (closer to vertex 2)
+            dofs_flat[base + 7] = d7; // near_n2 (H1TriPk edge-2 runs v2→v0)
+            dofs_flat[base + 8] = d8; // near_n0
             // Bubble DOF assigned in pass 2.
         }
 
@@ -625,16 +626,20 @@ impl DofManager {
             dof_coords[base .. base + dim].copy_from_slice(c);
         }
 
-        // Edge DOF coordinates: pair[0] at 1/3 from canonical-first toward second,
-        // pair[1] at 2/3 from canonical-first (= 1/3 from canonical-second).
+        // Edge DOF coordinates: pair[0] at gll[1] from canonical-first toward
+        // second, pair[1] at gll[2] (H1TriPk Gauss-Lobatto closed points,
+        // equal to 1/3, 2/3 only when p<=2 — here p=3 so gll = 1±1/√5 scaled).
+        let (g_pts, _) = fem_element::quadrature::gauss_lobatto_arbitrary(4);
+        let gll = |i: usize| -> f64 { 0.5 * (g_pts[i] + 1.0) };
         for (&EdgeKey(a, b), &[d0, d1]) in &edge2_map {
             let ca = mesh.node_coords(a);
             let cb = mesh.node_coords(b);
             let base0 = d0 as usize * dim;
             let base1 = d1 as usize * dim;
+            let (t0, t1) = (gll(1), gll(2));
             for d in 0..dim {
-                dof_coords[base0 + d] = (2.0 * ca[d] + cb[d]) / 3.0;
-                dof_coords[base1 + d] = (ca[d] + 2.0 * cb[d]) / 3.0;
+                dof_coords[base0 + d] = (1.0 - t0) * ca[d] + t0 * cb[d];
+                dof_coords[base1 + d] = (1.0 - t1) * ca[d] + t1 * cb[d];
             }
         }
 
@@ -2056,10 +2061,12 @@ impl DofManager {
                 dofs_flat[base + 2] = n2;
 
                 if p >= 2 {
-                    // 3 edges, each with (p-1) DOFs, ordered near-first-vertex to
-                    // near-second.  Edge 2 is (v0→v2) matching TriPk's
-                    // H1TriPk edge ordering.
-                    let edges = [(n0, n1), (n1, n2), (n0, n2)];
+                    // 3 edges, each with (p-1) DOFs, ordered along the element's
+                    // local edge direction.  Edge 2 is traversed (v2→v0),
+                    // matching the H1 assembly basis H1TriPk / MFEM
+                    // H1_TriangleElement, whose edge-3 DOFs run
+                    // (cp(p-i), 0) → i.e. from v2 toward v0.
+                    let edges = [(n0, n1), (n1, n2), (n2, n0)];
                     let mut off = 3;
                     for &(a, b) in &edges {
                         let edge_dofs = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
@@ -2158,15 +2165,27 @@ impl DofManager {
         }
 
         // Edge DOF coordinates: linear interpolation along each edge.
-        // DOF k (0-indexed) at fraction (k+1)/(p) from canonical-a to canonical-b.
-        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
-            let ca = mesh.node_coords(a);
-            let cb = mesh.node_coords(b);
-            for (k, &dof_id) in dofs.iter().enumerate() {
-                let t = (k + 1) as f64 / p as f64;
-                let base = dof_id as usize * dim;
-                for d in 0..dim {
-                    dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d];
+        // 2-D (triangles): the H1 assembly basis is H1TriPk (MFEM
+        // GaussLobatto closed points), so DOF k sits at fraction gll[k+1]
+        // from canonical-a to canonical-b (identical to equispaced for p<=2).
+        // 3-D (tets): the assembly basis is equispaced TetPk → fraction
+        // (k+1)/p.
+        {
+            let gll_01: Vec<f64> = if topo_dim == 2 && p >= 3 {
+                let (g, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
+                g.iter().map(|&x| 0.5 * (x + 1.0)).collect()
+            } else {
+                Vec::new()
+            };
+            for (&EdgeKey(a, b), dofs) in &edge_pk_map {
+                let ca = mesh.node_coords(a);
+                let cb = mesh.node_coords(b);
+                for (k, &dof_id) in dofs.iter().enumerate() {
+                    let t = if !gll_01.is_empty() { gll_01[k + 1] } else { (k + 1) as f64 / p as f64 };
+                    let base = dof_id as usize * dim;
+                    for d in 0..dim {
+                        dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d];
+                    }
                 }
             }
         }
@@ -2204,13 +2223,17 @@ impl DofManager {
             }
         }
 
-        // Volume/bubble DOF coordinates: use factory reference element for accuracy.
+        // Volume/bubble DOF coordinates: use the H1 assembly reference element
+        // for accuracy (2-D triangles: H1TriPk Gauss-Lobatto nodes; 3-D tets:
+        // equispaced TetPk), matching the basis the assembler evaluates.
         if volume_dofs_per > 0 {
-            use fem_element::lagrange::factory::{ref_elem, ElemType};
-            let ft = if topo_dim == 2 { ElemType::Tri } else { ElemType::Tet };
-            let factory = ref_elem(ft, order);
-            let ref_coords = factory.dof_coords();
-            // Volume DOFs in factory are the LAST volume_dofs_per entries.
+            let ref_coords: Vec<Vec<f64>> = if topo_dim == 2 {
+                fem_element::lagrange::H1TriPk::new(order as usize).dof_coords()
+            } else {
+                use fem_element::lagrange::factory::TetPk;
+                TetPk::new(order as usize).dof_coords()
+            };
+            // Volume DOFs in the reference element are the LAST volume_dofs_per entries.
             let vol_factory_start = dofs_per_elem - volume_dofs_per;
             let vol_start = n_nodes + edge_pk_map.len() * edge_dofs_per;
             for e in 0..n_elems as u32 {

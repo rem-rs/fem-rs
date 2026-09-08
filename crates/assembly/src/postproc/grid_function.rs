@@ -55,6 +55,27 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
     }
 }
 
+/// Reference element for evaluating a space's own DOF vector.
+///
+/// Mirrors the assembler dispatch (`assembler.rs::ref_elem_vol_for_space`):
+/// H1-type spaces on triangles of order >= 3 use the Gauss-Lobatto
+/// [`H1TriPk`](fem_element::lagrange::H1TriPk) basis — the fixed-order
+/// equispaced `TriPk` matches MFEM only at p <= 2 and silently mis-evaluates
+/// the solution otherwise.  L2/DG tri spaces keep the equispaced basis.
+pub(crate) fn ref_elem_vol_for_space(
+    stype: fem_space::fe_space::SpaceType,
+    elem_type: ElementType,
+    order: u8,
+) -> Box<dyn ReferenceElement> {
+    if stype != fem_space::fe_space::SpaceType::L2
+        && matches!(elem_type, ElementType::Tri3 | ElementType::Tri6)
+        && order >= 3
+    {
+        return Box::new(fem_element::lagrange::H1TriPk::new(order as usize));
+    }
+    ref_elem_vol(elem_type, order)
+}
+
 /// Constant (P0) reference element on `[0,1]²` — 1 DOF, basis ≡ 1.
 struct P0;
 
@@ -336,7 +357,7 @@ pub fn project_grid_function<'a, S1: FESpace, S2: FESpace>(
     let n_elems = tgt_mesh.n_elements() as u32;
     for e in 0..n_elems {
         let elem_type = tgt_mesh.element_type(e);
-        let ref_elem = ref_elem_vol(elem_type, tgt_order);
+        let ref_elem = ref_elem_vol_for_space(tgt_space.space_type(), elem_type, tgt_order);
         let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
         let elem_dofs = tgt_space.element_dofs(e);
@@ -393,7 +414,7 @@ fn evaluate_at_point<S: FESpace>(
     // (full version would use a point locator like FindPointsGSLIB)
     for e in 0..n_elems {
         let elem_type = mesh.element_type(e);
-        let ref_elem = ref_elem_vol(elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(gf.space().space_type(), elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
         let elem_dofs = gf.space().element_dofs(e);
         let nodes = mesh.element_nodes(e);
@@ -535,7 +556,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
 
         for e in 0..n_elems as u32 {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let elem_dofs = self.space.element_dofs(e);
 
@@ -617,7 +638,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mesh = self.space.mesh();
         let order = self.space.element_order(elem);
         let elem_type = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol(elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
 
         let elem_dofs = self.space.element_dofs(elem);
@@ -640,7 +661,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
         let elem_type = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol(elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
 
         let elem_dofs = self.space.element_dofs(elem);
@@ -836,7 +857,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mut err = 0.0;
         for e in mesh.elem_iter() {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
@@ -895,7 +916,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         for e in 0..n_owned_elems {
             let e = e as u32;
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
 
@@ -1037,7 +1058,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         for e in 0..n_owned_elems {
             let e = e as u32;
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
 
@@ -1134,7 +1155,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mut err = 0.0;
         for e in mesh.elem_iter() {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
@@ -1197,7 +1218,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     && matches!(elem_type, ElementType::Quad4) {
                     Box::new(fem_element::lagrange::QuadL2GL::new(order as usize))
                 } else {
-                    ref_elem_vol(elem_type, order)
+                    ref_elem_vol_for_space(self.space.space_type(), elem_type, order)
                 };
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
