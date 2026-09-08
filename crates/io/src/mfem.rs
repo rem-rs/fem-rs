@@ -757,12 +757,15 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
 
     let nx = read_param_usize(r, "nx")?;
     let ny = read_param_usize(r, "ny")?;
-    let _nz = if elem_type_str == "tet" || elem_type_str == "hex" {
+    // 3-D inline types (tet/hex/wedge/pyramid) also carry nz/sz
+    // (MFEM ReadInlineMesh, mesh_readers.cpp).
+    let is_3d = matches!(elem_type_str.as_str(), "tet" | "hex" | "wedge" | "pyramid");
+    let _nz = if is_3d {
         Some(read_param_usize(r, "nz")?)
     } else { None };
     let sx = read_param_f64(r, "sx")?;
     let sy = read_param_f64(r, "sy")?;
-    let _sz = if elem_type_str == "tet" || elem_type_str == "hex" {
+    let _sz = if is_3d {
         Some(read_param_f64(r, "sz")?)
     } else { None };
 
@@ -924,8 +927,84 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             }
             Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
         }
+        "wedge" => {
+            // MFEM ReadInlineMesh → Make3D(nx, ny, nz, WEDGE, ...) — row-major
+            // hex grid, each hex split into 2 prisms (AddHexAsWedges:
+            // {0,1,2,4,5,6}, {0,2,3,4,6,7}; prism vertices = bottom tri then
+            // top tri).
+            let nz = _nz.unwrap_or(1);
+            let sz = _sz.unwrap_or(1.0);
+            let (nxv, nyv, nzv) = (nx + 1, ny + 1, nz + 1);
+            let mut coords = Vec::with_capacity(nxv * nyv * nzv * 3);
+            for k in 0..nzv {
+                for j in 0..nyv {
+                    for i in 0..nxv {
+                        coords.push(i as f64 / nx as f64 * sx);
+                        coords.push(j as f64 / ny as f64 * sy);
+                        coords.push(k as f64 / nz as f64 * sz);
+                    }
+                }
+            }
+            let id = |x: usize, y: usize, z: usize| {
+                ((z * nyv + y) * nxv + x) as u32
+            };
+            const HEX_TO_WDG: [[usize; 6]; 2] = [
+                [0, 1, 2, 4, 5, 6],
+                [0, 2, 3, 4, 6, 7],
+            ];
+            let mut conn = Vec::with_capacity(nx * ny * nz * 2 * 6);
+            let mut elem_tags = Vec::with_capacity(nx * ny * nz * 2);
+            for z in 0..nz {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        let hex = [
+                            id(x, y, z), id(x + 1, y, z), id(x + 1, y + 1, z), id(x, y + 1, z),
+                            id(x, y, z + 1), id(x + 1, y, z + 1), id(x + 1, y + 1, z + 1),
+                            id(x, y + 1, z + 1),
+                        ];
+                        for w in HEX_TO_WDG {
+                            conn.extend(w.map(|k| hex[k]));
+                            elem_tags.push(1);
+                        }
+                    }
+                }
+            }
+            // Boundary triangles (bottom attr 1, top attr 6; sides 2–5 like
+            // Make3D's AddBdrQuadAsTriangles layout, simplified per face).
+            let mut face_conn = Vec::new();
+            let mut face_tags = Vec::new();
+            let mut bdr_tri = |quad: [u32; 4], tag: i32| {
+                face_conn.extend([quad[0], quad[1], quad[2]]);
+                face_tags.push(tag);
+                face_conn.extend([quad[0], quad[2], quad[3]]);
+                face_tags.push(tag);
+            };
+            for y in 0..ny {
+                for x in 0..nx {
+                    bdr_tri([id(x, y, 0), id(x, y + 1, 0), id(x + 1, y + 1, 0), id(x + 1, y, 0)], 1);
+                    bdr_tri([id(x, y, nz), id(x + 1, y, nz), id(x + 1, y + 1, nz), id(x, y + 1, nz)], 6);
+                }
+            }
+            for z in 0..nz {
+                for y in 0..ny {
+                    bdr_tri([id(0, y, z), id(0, y, z + 1), id(0, y + 1, z + 1), id(0, y + 1, z)], 5);
+                    bdr_tri([id(nx, y, z + 1), id(nx, y, z), id(nx, y + 1, z), id(nx, y + 1, z + 1)], 2);
+                }
+            }
+            for z in 0..nz {
+                for x in 0..nx {
+                    bdr_tri([id(x, 0, z + 1), id(x, 0, z), id(x + 1, 0, z), id(x + 1, 0, z + 1)], 4);
+                    bdr_tri([id(x, ny, z), id(x, ny, z + 1), id(x + 1, ny, z + 1), id(x + 1, ny, z)], 3);
+                }
+            }
+            let mesh = Mesh::uniform(
+                coords, conn, elem_tags, ElementType::Prism6,
+                face_conn, face_tags, ElementType::Tri3,
+            );
+            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+        }
         other => Err(FemError::Mesh(format!(
-            "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet)"
+            "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet, wedge)"
         ))),
     }
 }

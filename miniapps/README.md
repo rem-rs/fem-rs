@@ -40,6 +40,14 @@ miniapps/
 │   └── hpref.rs             ← 随机 hp 细化 (1:1, 2D quad;
 │                                unknowns/h/p/最大阶与 C++ -n
 │                                3..1000 全对齐, H1 连续性 ~0)
+├── gslib/                   ← 对应 miniapps/gslib/
+│   └── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
+│                                BVH + 等参元 Newton, code 0/1/2 与
+│                                dist² 语义对齐; glibc rand 逐位复现
+│                                随机点; 13 个数值用例 counts 与 C++
+│                                全对齐, max_err ~1e-15; -surf/-mpr/
+│                                -hr/-ft 2/3 及 NC/mixed/pyramid
+│                                网格裁剪 exit 3)
 ├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
 ├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
 └── ...
@@ -81,6 +89,7 @@ miniapps/
 | `lorentz.cpp` | `electromagnetics/lorentz.rs` |
 | `ref321.cpp` | `meshing/ref321.rs` |
 | `get-values.cpp` | `tools/get_values.rs` |
+| `findpts.cpp` | `gslib/findpts.rs` |
 
 ## 运行
 
@@ -99,4 +108,7 @@ cargo run --example mesh_ref321 -- -mm -dim 2 -r 100 -no-vis
 cargo run --example tools_display_basis -- -e 2 -b 3 -o 3
 cargo run --example tools_get_values -- -r <DC 根路径> -p "x y z ..."
 cargo run --example tools_lor_transfer -- -m data/inline-quad.mesh -o 2 -no-vis
+cargo run --example gslib_findpts -- -m data/rt-2d-q3.mesh -o 8 -mo 4 -no-vis
+cargo run --example gslib_findpts -- -m data/inline-quad.mesh -o 3 -pr -no-vis
+cargo run --example gslib_findpts -- -m data/inline-hex.mesh -o 3 -random 1 -npt 4 -no-vis
 ```

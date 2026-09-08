@@ -91,33 +91,59 @@ enum BvhNode<const D: usize> {
 /// query point (useful as a starting set for Newton iteration).
 pub struct Bvh<const D: usize> {
     root: BvhNode<D>,
+    /// Optional caller-supplied element AABBs (e.g. bounds covering the
+    /// curved high-order geometry, not just the corner vertices).
+    aabb_override: Option<Vec<Aabb<D>>>,
 }
 
 impl<const D: usize> Bvh<D> {
     /// Build a BVH from a mesh.
     pub fn new(mesh: &Mesh<D>) -> Self {
         let mut elems: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let root = Self::build_recursive(mesh, &mut elems);
-        Self { root }
+        let mut bvh = Self {
+            root: BvhNode::Leaf {
+                bbox: Aabb::new([0.0; D], [0.0; D]),
+                elem: 0,
+            },
+            aabb_override: None,
+        };
+        bvh.root = bvh.build_recursive(mesh, &mut elems);
+        bvh
+    }
+
+    /// Build a BVH from a mesh with caller-supplied per-element AABBs
+    /// (indexed by element id).
+    pub fn new_with_aabbs(mesh: &Mesh<D>, aabbs: Vec<Aabb<D>>) -> Self {
+        assert_eq!(aabbs.len(), mesh.n_elems(), "one AABB per element required");
+        let mut elems: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
+        let mut bvh = Self {
+            root: BvhNode::Leaf {
+                bbox: Aabb::new([0.0; D], [0.0; D]),
+                elem: 0,
+            },
+            aabb_override: Some(aabbs),
+        };
+        bvh.root = Self::build_recursive(&bvh, mesh, &mut elems);
+        bvh
     }
 
     /// Build the BVH recursively.
     ///
     /// Splits the element list by the median along the longest axis.
-    fn build_recursive(mesh: &Mesh<D>, elems: &mut [ElemId]) -> BvhNode<D> {
+    fn build_recursive(&self, mesh: &Mesh<D>, elems: &mut [ElemId]) -> BvhNode<D> {
         if elems.len() == 1 {
             let e = elems[0];
             return BvhNode::Leaf {
-                bbox: Self::elem_bbox(mesh, e),
+                bbox: self.elem_bbox(mesh, e),
                 elem: e,
             };
         }
 
         // Compute the bounding box of all elements in this node.
         let node_bbox = {
-            let mut b = Self::elem_bbox(mesh, elems[0]);
+            let mut b = self.elem_bbox(mesh, elems[0]);
             for &e in elems.iter().skip(1) {
-                b = Aabb::merge(&b, &Self::elem_bbox(mesh, e));
+                b = Aabb::merge(&b, &self.elem_bbox(mesh, e));
             }
             b
         };
@@ -138,14 +164,14 @@ impl<const D: usize> Bvh<D> {
 
         // Sort by center coordinate on the chosen axis and split at median.
         elems.sort_by(|&a, &b| {
-            let ca = Self::elem_bbox(mesh, a).center()[axis];
-            let cb = Self::elem_bbox(mesh, b).center()[axis];
+            let ca = self.elem_bbox(mesh, a).center()[axis];
+            let cb = self.elem_bbox(mesh, b).center()[axis];
             ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
         });
         let mid = elems.len() / 2;
 
-        let left = Box::new(Self::build_recursive(mesh, &mut elems[..mid]));
-        let right = Box::new(Self::build_recursive(mesh, &mut elems[mid..]));
+        let left = Box::new(self.build_recursive(mesh, &mut elems[..mid]));
+        let right = Box::new(self.build_recursive(mesh, &mut elems[mid..]));
 
         BvhNode::Inner {
             bbox: node_bbox,
@@ -154,8 +180,11 @@ impl<const D: usize> Bvh<D> {
         }
     }
 
-    /// Compute the AABB of element `e`.
-    fn elem_bbox(mesh: &Mesh<D>, e: ElemId) -> Aabb<D> {
+    /// Compute the AABB of element `e` (override if supplied).
+    fn elem_bbox(&self, mesh: &Mesh<D>, e: ElemId) -> Aabb<D> {
+        if let Some(aabbs) = &self.aabb_override {
+            return aabbs[e as usize].clone();
+        }
         let ns = mesh.elem_nodes(e);
         let mut lo = mesh.coords_of(ns[0]);
         let mut hi = mesh.coords_of(ns[0]);

@@ -253,9 +253,19 @@ impl<const D: usize> Mesh<D> {
 
         let geo_order = self.geom_order() as usize;
         // Geometry reference element for isoparametric Jacobians.
+        //
+        // Triangles: MFEM's H1 triangular element (H1_TriangleElement) places
+        // its boundary DOFs at Poly1D (Gauss-Lobatto) parameters, NOT at the
+        // equispaced positions of the plain Pk triangle — so curved-triangle
+        // geometry read from an MFEM `nodes` section must be interpolated
+        // with `H1TriPk` to reproduce the same curved shape (plain `TriPk`
+        // misinterpolates between the stored node values).
         let factory: Box<dyn fem_element::ReferenceElement> = match et {
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
                 Box::new(QuadQk::new(geo_order.max(1)))
+            }
+            ElementType::Tri3 | ElementType::Tri6 if geo_order >= 2 => {
+                Box::new(fem_element::lagrange::factory::H1TriPk::new(geo_order))
             }
             _ => factory_ref_elem(match et {
                 ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
