@@ -27,6 +27,8 @@ pub mod supermesh;
 pub mod rebuild_boundary;
 pub mod mfem_kernels;
 pub mod tmop;
+/// Kershaw anisotropic mesh transformation (miniapps/common `mesh_extras`).
+pub mod kershaw;
 
 pub use tmop::invariants::{InvariantsEvaluator2D, InvariantsEvaluator3D};
 pub use tmop::metrics::{

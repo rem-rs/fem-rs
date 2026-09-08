@@ -49,6 +49,23 @@ impl DiagonalSmoother {
         }
     }
 
+    /// Construct from a precomputed diagonal (MFEM
+    /// `OperatorJacobiSmoother(d, ess_tdofs)` with a caller-supplied `d`).
+    ///
+    /// The diag-smoothers miniapps build `d = |A| · 1` via `AbsMult`; MFEM's
+    /// setup then overrides `dinv[i] = damping` at essential dofs, which
+    /// corresponds to `d[ess] = 1 / damping` (damping defaults to 1).
+    pub fn from_diagonal(d: Vec<f64>) -> Self {
+        Self {
+            kind: SmootherType::Jacobi,
+            scale: 1.0,
+            sweeps: 1,
+            positive_diagonal: false,
+            iterative_mode: false,
+            d,
+        }
+    }
+
     /// Compute the (possibly positified) diagonal from `a` (MFEM `SetOperator`).
     pub fn setup(&mut self, a: &CsrMatrix<f64>) {
         let n = a.nrows;

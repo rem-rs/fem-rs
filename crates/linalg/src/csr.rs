@@ -242,6 +242,26 @@ impl<T: Scalar> CsrMatrix<T> {
         self.spmv_add_serial(alpha, x, beta, y);
     }
 
+    /// Compute `y_i = Σ_j |A_ij| x_j` (MFEM `SparseMatrix::AbsMult`).
+    ///
+    /// The "absolute value" of the operator applied row-wise: each entry is
+    /// replaced by its magnitude before the product.  This is the diagonal
+    /// estimator used by the absolute-L(1) Jacobi smoothers of the
+    /// diag-smoothers miniapps (`diag = |A| · 1`).
+    pub fn abs_mult(&self, x: &[T], y: &mut [T]) {
+        assert_eq!(x.len(), self.ncols);
+        assert_eq!(y.len(), self.nrows);
+        for (row, yi) in y.iter_mut().enumerate() {
+            let start = self.row_ptr[row];
+            let end = self.row_ptr[row + 1];
+            let mut s = T::zero();
+            for k in start..end {
+                s = s + self.values[k].abs() * x[self.col_idx[k] as usize];
+            }
+            *yi = s;
+        }
+    }
+
     fn spmv_serial(&self, x: &[T], y: &mut [T]) {
         for (row, yi) in y.iter_mut().enumerate() {
             let start = self.row_ptr[row];

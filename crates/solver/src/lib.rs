@@ -134,8 +134,11 @@ pub mod adjoint;
 pub mod schwarz;
 /// Diagonal stationary smoothers (MFEM `DSmoother`: Jacobi / l1-Jacobi).
 pub mod smoother;
+/// MFEM stationary linear iteration (SLI) + CG with exact print formats.
+pub mod sli;
 
 pub use smoother::{solve_l1_jacobi, DiagonalSmoother, SmootherType};
+pub use sli::{solve_cg_mfem, solve_sli, IterResult, SliOptions};
 
 
 pub use block::{

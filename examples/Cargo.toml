@@ -423,6 +423,10 @@ name = "mesh_optimizer"
 path = "../miniapps/meshing/mesh-optimizer.rs"
 
 [[example]]
+name = "mesh_fit_node_position"
+path = "../miniapps/meshing/fit-node-position.rs"
+
+[[example]]
 name = "tools_display_basis"
 path = "../miniapps/tools/display_basis.rs"
 
@@ -433,3 +437,7 @@ path = "../miniapps/tools/get_values.rs"
 [[example]]
 name = "tools_lor_transfer"
 path = "../miniapps/tools/lor_transfer.rs"
+
+[[example]]
+name = "diag_abs_l1_jacobi"
+path = "../miniapps/diag-smoothers/abs-l1-jacobi.rs"

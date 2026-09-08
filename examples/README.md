@@ -40,6 +40,7 @@ fem-pro/fem-rs/
 | `pex0_parallel_poisson.cpp` | `mfem_pex0_parallel_poisson.rs` | 并行示例 |
 | `tmop-check-metric.cpp` | `miniapps/tools/tmop_check_metric.rs` | miniapp，`-` → `_` |
 | `mesh-optimizer.cpp` | `miniapps/meshing/mesh_optimizer.rs` | miniapp |
+| `fit-node-position.cpp` | `miniapps/meshing/fit-node-position.rs` | miniapp，example 名 `mesh_fit_node_position` |
 | `schrodinger_flow.cpp` | `miniapps/fluids/schrodinger_flow.rs` | miniapp |
 
 ## 运行示例

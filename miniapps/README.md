@@ -23,6 +23,14 @@ miniapps/
 │   ├── lorentz.rs
 │   ├── tesla.rs
 │   └── volta.rs
+├── diag-smoothers/          ← 对应 miniapps/diag-smoothers/
+│   └── abs-l1-jacobi.rs     ← Absolute L(1)-Jacobi 光滑子 (1:1 串行版;
+│                                mass/diffusion/maxwell 三类系统, SLI/PCG,
+│                                abs_global + L(p,q) 元素级对角, Kershaw 网格;
+│                                -a 0/1 下迭代日志/ARF/L2 与 C++ 逐行一致,
+│                                2D 与 Kershaw 全对比逐位一致;
+│                                maxwell 3D hex 差 HexNDk 归一化 4×,
+│                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
 ├── nurbs/                   ← 对应 miniapps/nurbs/ (6 个已完成)
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
@@ -37,6 +45,12 @@ miniapps/
 │   │                            icf/cube/jagged 的 min det 与能量
 │   │                            与 C++ 逐位一致; 目标 tid 1/2/3,
 │   │                            线搜索 = TMOPNewtonSolver)
+│   ├── fit-node-position.rs ← TMOP 节点位置拟合到曲面 (1:1, 2D quad;
+│   │                            EnableSurfaceFitting: 能量/梯度/Hessian
+│   │                            拟合项 + 自适应拟合权 + 拟合误差终止;
+│   │                            square01 初始能量与迭代/线搜索决策序列
+│   │                            与 C++ 一致, 最终能量相对差 2.3e-10;
+│   │                            3D hex 与 tri/tet 裁剪 exit 3)
 │   └── hpref.rs             ← 随机 hp 细化 (1:1, 2D quad;
 │                                unknowns/h/p/最大阶与 C++ -n
 │                                3..1000 全对齐, H1 连续性 ~0)
