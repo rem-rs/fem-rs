@@ -141,7 +141,6 @@ pub fn compute_element_sizes(mesh: &Mesh<2>) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amr::zz_estimator;
     use crate::Mesh;
 
     #[test]
@@ -163,7 +162,15 @@ mod tests {
             let c = mesh.coords_of(i as u32);
             (std::f64::consts::PI * c[0]).sin() * (std::f64::consts::PI * c[1]).sin()
         }).collect();
-        let eta = zz_estimator(&mesh, &u);
+        // Synthetic per-element error indicator (nodal spread). The ZZ
+        // estimator this test originally used was removed from `amr` as dead
+        // code (40cdc1f); `compute_target_sizes` only needs eta[e] >= 0.
+        let eta: Vec<f64> = (0..mesh.n_elems()).map(|e| {
+            let ns = mesh.elem_nodes(e as u32);
+            let umax = ns.iter().map(|&n| u[n as usize]).fold(f64::MIN, f64::max);
+            let umin = ns.iter().map(|&n| u[n as usize]).fold(f64::MAX, f64::min);
+            umax - umin
+        }).collect();
         let h_cur = compute_element_sizes(&mesh);
 
         let h_target = compute_target_sizes(&eta, &h_cur, 0.3, 0.1, 1e-6, 1.0);
