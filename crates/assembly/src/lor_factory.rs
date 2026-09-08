@@ -633,12 +633,14 @@ mod lor_vector_tests {
     }
 
     /// PCG(+) iteration counts must stay (essentially) constant as the mesh
-    /// is refined — the defining property of LOR preconditioning.  Currently
-    /// #[ignore]d: fem-rs tracks equispaced tensor ND bases whose dof scaling
-    /// differs wildly from the LOR ND1 basis, so the assumed-constraint
-    /// transfer is not yet spectrally clean (needs GLL-type HO bases).
+    /// is refined — the defining property of LOR preconditioning.
     #[test]
-    #[ignore = "HO equispaced ND basis not GLL-like; see module docs"]
+    // Still ignored with the GLL/IntegratedGLL basis: the LOR matrix itself is
+    // spectrally equivalent (see lor_spectral_equivalence), but the full
+    // FGMRES+AMS solve through the assumed-constraint permutation does not
+    // converge within 500 iterations (pcg_iters helper) — solver-pipeline
+    // work beyond the basis convention.
+    #[ignore]
     fn lor_nd_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
             .iter()
@@ -657,7 +659,8 @@ mod lor_vector_tests {
     }
 
     #[test]
-    #[ignore = "HO equispaced RT basis not GLL-like; see module docs"]
+    // See lor_nd_pcg_iterations_mesh_independent comment.
+    #[ignore]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
             .iter()
@@ -677,7 +680,8 @@ mod lor_vector_tests {
 
     /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
     #[test]
-    #[ignore = "HO equispaced basis caveat; see module docs"]
+    // See lor_nd_pcg_iterations_mesh_independent comment (quad variant).
+    #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]
             .iter()
@@ -712,8 +716,11 @@ mod lor_vector_tests {
 
     /// Spectral equivalence: the extreme eigenvalues of the LOR matrix stay
     /// within a constant (mesh-independent) factor of the HO matrix's.
+    ///
+    /// Enabled by the ND/RT hex GLL + IntegratedGLL basis upgrade: the HO dof
+    /// scaling now matches the LOR ND1 basis, so both eigenvalue ratios are
+    /// O(1) (lam_max ratio ~2.5, lam_min ratio ~0.8 on the ND3 hex case).
     #[test]
-    #[ignore = "HO equispaced basis caveat; see module docs"]
     fn lor_spectral_equivalence() {
         let mesh = hex_mesh(2);
         let ho = HCurlSpace::new(mesh, 3);

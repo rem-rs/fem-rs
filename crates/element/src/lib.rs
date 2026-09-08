@@ -39,6 +39,10 @@ pub mod bernstein;
 pub mod bezier_extraction;
 pub mod brezzi_douglas_marini;
 pub mod crouzeix_raviart;
+/// 1-D Gauss-Lobatto nodal basis + integrated-GLL (Gerritsma) open basis on
+/// `[-1,1]` — the MFEM `(GaussLobatto, IntegratedGLL)` tensor-element
+/// convention used by the hexahedral ND/RT elements.
+pub mod gll_basis;
 pub mod iga;
 pub mod lagrange;
 pub mod nedelec;
@@ -62,11 +66,12 @@ pub use crouzeix_raviart::{
     cr2_tri_grad, CrTet1, CrTet2, CrTri1, CrTri2, CrouzeixRaviart1, CrouzeixRaviartVec1,
 };
 pub use lagrange::{
-    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex, LagrangePrism,
-    LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle, PrismPk,
-    PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4, QuadQk,
-    SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk, TetP1, TetP2, TetP3, TetP4, TetP5, TetP6,
-    TetPk, TriP1, TriP10, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8, TriP9, TriPk, VecFamily,
+    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexL2GL, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex,
+    LagrangePrism, LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron,
+    LagrangeTriangle, PrismPk, PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2,
+    QuadQ3, QuadQ4, QuadQk, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk, TetP1, TetP2, TetP3,
+    TetP4, TetP5, TetP6, TetPk, TriP1, TriP10, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8,
+    TriP9, TriPk, VecFamily,
 };
 pub use nedelec::{
     HexND2, HexNDk, PrismND1, PrismNDk, PyraND1, PyraNDk, QuadND2, QuadNDk,
@@ -139,6 +144,9 @@ impl MapType {
         )
     }
 }
+
+#[cfg(test)]
+mod testsupport;
 
 #[cfg(test)]
 mod tests {
