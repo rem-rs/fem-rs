@@ -83,6 +83,9 @@ pub mod ams_solver;
 pub mod static_cond;
 pub mod h1_quad_order_hint;
 pub mod lor_factory;
+/// Distance-field support library (1:1 port of MFEM
+/// `miniapps/common/dist_solver.*` + shifted-miniapp `marking`/`extrapolator`).
+pub mod dist_solver;
 
 
 // 鈹€鈹€ Reorganised subdirectory modules 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
