@@ -62,6 +62,27 @@ miniapps/
 │                                全对齐, max_err ~1e-15; -surf/-mpr/
 │                                -hr/-ft 2/3 及 NC/mixed/pyramid
 │                                网格裁剪 exit 3)
+├── spde/                    ← 对应 miniapps/spde/
+│   └── generate_random_field.rs ← Matérn 高斯随机场 SPDE (串行 1:1;
+│                                WhiteGaussianNoiseDomainLFIntegrator 真
+│                                随机版: minstd_rand0 +
+│                                libstdc++ normal_distribution 逐位
+│                                复现, 元素质量阵 Cholesky·L 乘
+│                                (CholeskyFactors 进 fem-linalg);
+│                                白噪声 RHS b 在 2×2 quad 网格与 C++
+│                                逐位一致, 2×1×1 hex 除 1–2 ulp 求和
+│                                顺序差全对齐 (单测钉死); AAA 部分分
+│                                式上提共享模块 fem_examples::
+│                                rational_approximation (ex33/pex33/
+│                                spde 共用); 整数阶+分数阶求解链/
+│                                Θ 各向异性张量/η 归一化/octet-truss
+│                                +粒子拓扑/URF/scale/offset/level-set
+│                                变换/ParaView 导出; 同 seed 可复现,
+│                                2D+3D, 场统计物理合理; -cbi
+│                                (IntegrateBC) 与非齐次 Dirichlet 裁
+│                                剪 exit 3; GLVis 不支持; C++ 为并行
+│                                -only miniapp, 全场数值对照不可行
+│                                (mfem49 串行), 对照走分段 C++ harness)
 ├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
 ├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
 └── ...
@@ -69,6 +90,18 @@ miniapps/
 
 ## 本轮新增核心库能力 (fem-rs crates)
 
+- `fem_linalg::dense::CholeskyFactors` — MFEM `CholeskyFactors` 镜像：
+  列主序 Cholesky–Crout 分解 + `LMult`（x←L·x），与 C++ 逐位同序
+- `fem_assembly::standard::WhiteGaussianNoiseDomainLFIntegrator`（真随机
+  版，替换占位实现）+ `Assembler::assemble_white_gaussian_noise` — MFEM
+  白噪声 RHS：libstdc++ `default_random_engine`(=minstd_rand0) +
+  `normal_distribution`(polar，含缓存态) 逐位复现，`generate_canonical`
+  2 抽取语义、seed≡0(mod 2³¹−1)→1 规则，逐元 Cholesky(质量阵)·L·噪声；
+  MFEM `LinearForm::Assemble` 元素循环 1:1
+- `fem_assembly::Assembler::mass_element_matrix` — 单元质量阵（列主序，
+  供白噪声积分器消费）
+- `fem_examples::rational_approximation` — ex33.hpp AAA 有理近似共享模块
+  （自 mfem_ex33/mfem_pex33 上提合并，三处共用）
 - `fem_assembly::tmop_form` — TMOP 非线性 form：精确导数能量/梯度/Hessian
   （走 `fem_mesh::tmop::metrics` 的 EvalP/AssembleH）、理想形目标
   (UnitSize/EqualSize/GivenSize)、`tmop_newton_solve`（MFEM
@@ -104,6 +137,7 @@ miniapps/
 | `ref321.cpp` | `meshing/ref321.rs` |
 | `get-values.cpp` | `tools/get_values.rs` |
 | `findpts.cpp` | `gslib/findpts.rs` |
+| `generate_random_field.cpp` | `spde/generate_random_field.rs` |
 
 ## 运行
 
@@ -122,6 +156,7 @@ cargo run --example mesh_ref321 -- -mm -dim 2 -r 100 -no-vis
 cargo run --example tools_display_basis -- -e 2 -b 3 -o 3
 cargo run --example tools_get_values -- -r <DC 根路径> -p "x y z ..."
 cargo run --example tools_lor_transfer -- -m data/inline-quad.mesh -o 2 -no-vis
+cargo run --example spde_generate_random_field -- -m data/ref-cube.mesh -r 2 -rp 1 -no-vis -no-rs
 cargo run --example gslib_findpts -- -m data/rt-2d-q3.mesh -o 8 -mo 4 -no-vis
 cargo run --example gslib_findpts -- -m data/inline-quad.mesh -o 3 -pr -no-vis
 cargo run --example gslib_findpts -- -m data/inline-hex.mesh -o 3 -random 1 -npt 4 -no-vis

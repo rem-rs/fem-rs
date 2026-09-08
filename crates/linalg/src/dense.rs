@@ -188,3 +188,117 @@ mod tests {
         );
     }
 }
+
+// -------------------------------------------------------------------------
+// Cholesky factorization (MFEM CholeskyFactors mirror)
+// -------------------------------------------------------------------------
+
+/// Cholesky factorization `A = L·Lᵀ` of a symmetric positive-definite matrix.
+///
+/// MFEM `CholeskyFactors` mirror: the matrix is stored **column-major** (MFEM
+/// `DenseMatrix` layout), and after [`CholeskyFactors::factor`] the lower
+/// triangle holds `L`. The factorization uses the same Cholesky–Crout
+/// recurrence and the same accumulation order as MFEM so results are
+/// bit-identical for identical input.
+pub struct CholeskyFactors {
+    /// Column-major `n×n` storage; lower triangle holds `L` after `factor`.
+    pub data: Vec<f64>,
+    n: usize,
+}
+
+impl CholeskyFactors {
+    /// Wrap column-major `n×n` data. The slice is copied (MFEM operates
+    /// in-place on external data; the copy keeps ownership simple).
+    pub fn new(data: &[f64], n: usize) -> FemResult<Self> {
+        if data.len() != n * n {
+            return Err(FemError::DimMismatch { expected: n * n, actual: data.len() });
+        }
+        Ok(Self { data: data.to_vec(), n })
+    }
+
+    /// Cholesky–Crout factorization (MFEM `CholeskyFactors::Factor`, TOL 0).
+    /// Returns `false` when the matrix is not numerically SPD.
+    pub fn factor(&mut self) -> bool {
+        let n = self.n;
+        let d = &mut self.data;
+        for j in 0..n {
+            let mut a = 0.0;
+            for k in 0..j {
+                a += d[j + k * n] * d[j + k * n];
+            }
+            if d[j + j * n] - a <= 0.0 {
+                return false; // not SPD
+            }
+            d[j + j * n] = (d[j + j * n] - a).sqrt();
+            for i in (j + 1)..n {
+                let mut a = 0.0;
+                for k in 0..j {
+                    a += d[i + k * n] * d[j + k * n];
+                }
+                d[i + j * n] = 1.0 / d[j + j * n] * (d[i + j * n] - a);
+            }
+        }
+        true
+    }
+
+    /// In-place `x ← L·x` (MFEM `CholeskyFactors::LMult` with n_rhs = 1).
+    /// Reads only the (factored) lower triangle.
+    pub fn l_mult(&self, x: &mut [f64]) {
+        let n = self.n;
+        let d = &self.data;
+        for j in (0..n).rev() {
+            let mut x_j = x[j] * d[j + j * n];
+            for i in 0..j {
+                x_j += x[i] * d[j + i * n];
+            }
+            x[j] = x_j;
+        }
+    }
+}
+
+#[cfg(test)]
+mod cholesky_tests {
+    use super::*;
+
+    #[test]
+    fn factor_lmult_matches_direct_product() {
+        // SPD matrix: A = [[4,2,-2],[2,10,2],[-2,2,5]] (column-major below).
+        let a = [
+            4.0, 2.0, -2.0, //
+            2.0, 10.0, 2.0, //
+            -2.0, 2.0, 5.0,
+        ];
+        let mut chol = CholeskyFactors::new(&a, 3).unwrap();
+        assert!(chol.factor());
+        let l = chol.data.clone();
+        // L Lᵀ must reproduce A (column-major product). The factorization is
+        // in-place: the strict upper triangle keeps the ORIGINAL A entries, so
+        // only the lower triangle (k <= row) may be used as L.
+        let lower = |i: usize, k: usize| if k <= i { l[i + k * 3] } else { 0.0 };
+        for j in 0..3 {
+            for i in 0..3 {
+                let mut dot = 0.0;
+                for k in 0..3 {
+                    dot += lower(i, k) * lower(j, k);
+                }
+                assert!((dot - a[j * 3 + i]).abs() < 1e-13);
+            }
+        }
+        // LMult: x ← Lx for x = [1,2,3].
+        let mut x = [1.0, 2.0, 3.0];
+        let expect: Vec<f64> = (0..3)
+            .map(|i| (0..=i).map(|k| l[i + k * 3] * x[k]).sum())
+            .collect();
+        chol.l_mult(&mut x);
+        for i in 0..3 {
+            assert!((x[i] - expect[i]).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn factor_rejects_indefinite() {
+        let a = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut chol = CholeskyFactors::new(&a, 3).unwrap();
+        assert!(!chol.factor());
+    }
+}

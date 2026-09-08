@@ -1563,6 +1563,121 @@ impl Assembler {
         rhs
     }
 
+    // ── White Gaussian noise right-hand side ────────────────────────────────
+
+    /// Element mass matrix in MFEM `DenseMatrix` column-major layout, as
+    /// consumed by `WhiteGaussianNoiseDomainLFIntegrator`. Weights follow
+    /// MFEM `MassIntegrator` (`Trans.Weight()` = |det J|); the element matrix
+    /// is produced by the standard [`MassIntegrator`] so it is bit-identical
+    /// to the global mass assembly.
+    pub(crate) fn mass_element_matrix<S: FESpace>(space: &S, e: u32) -> Vec<f64> {
+        use crate::standard::MassIntegrator;
+
+        let mesh  = space.mesh();
+        let edim  = mesh.dim() as usize;
+        let tdim  = mesh.topological_dim() as usize;
+        if edim != tdim {
+            panic!("mass_element_matrix: surface elements not supported (white noise uses volume elements)");
+        }
+        let dim    = edim;
+        let order  = space.element_order(e);
+        let elem_type = mesh.element_type(e);
+        let ref_elem  = ref_elem_vol_for_space(space, elem_type, order);
+        let n_ldofs   = ref_elem.n_dofs();
+        // MFEM MassIntegrator default rule: IntRules.Get(geom, 2p + OrderW()).
+        // OrderW() = 0 for the straight-sided geometries supported here.
+        let quad = ref_elem.quadrature(2 * order);
+
+        let n = n_ldofs;
+        let mut k_elem = vec![0.0_f64; n * n];
+        let mass = MassIntegrator { rho: 1.0 };
+        let mut phi = vec![0.0_f64; n_ldofs];
+
+        let nodes = mesh.element_nodes(e);
+        let elem_tag = mesh.element_tag(e);
+        let g_order = mesh.geom_order();
+        let affine = is_affine(elem_type, g_order);
+        let geo_elem = geo_ref_elem(mesh, e);
+
+        let affine_tr = if affine {
+            Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+        } else {
+            None
+        };
+
+        for (q, xi) in quad.points.iter().enumerate() {
+            let (w_phys, xp);
+            if affine {
+                let tr = affine_tr.as_ref().unwrap();
+                w_phys = quad.weights[q] * tr.det_j().abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                xp = tr.map_to_physical(xi);
+            } else {
+                let geo = geo_elem.as_ref().unwrap();
+                let geo_nds = mesh.geometry_nodes(e);
+                let xi_g = geom_quad_point(elem_type, order, xi);
+                let (_jac, det, xp_qp) = isoparametric_jacobian(
+                    mesh, geo_nds, geo.as_ref(), &xi_g, dim,
+                    mesh.geom_order() > 1, // curved → L2_T1 lexicographic order
+                );
+                w_phys = quad.weights[q] * det.abs();
+                ref_elem.eval_basis(xi, &mut phi);
+                xp = xp_qp;
+            }
+            let qp = QpData {
+                n_dofs:    n,
+                dim,
+                weight:    w_phys,
+                phys_weight: w_phys,
+                ref_weight: quad.weights[q],
+                phi:       &phi,
+                grad_phys: &[],
+                x_phys:    &xp,
+                elem_id:   e,
+                elem_tag,
+                elem_dofs: None,
+            };
+            mass.add_to_element_matrix(&qp, &mut k_elem);
+        }
+
+        // Row-major k_elem -> column-major MFEM layout: data[i + j*n] = (i,j).
+        let mut colmajor = vec![0.0_f64; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                colmajor[i + j * n] = k_elem[i * n + j];
+            }
+        }
+        colmajor
+    }
+
+    /// Assemble a white Gaussian noise right-hand side `b` with
+    /// `E[b bᵀ] = M` (the global mass matrix), MFEM
+    /// `WhiteGaussianNoiseDomainLFIntegrator` + `LinearForm::Assemble` 1:1.
+    ///
+    /// Elements are traversed in mesh order; per element the integrator draws
+    /// `n` normals from its seeded RNG chain and multiplies by the Cholesky
+    /// factor of the element mass matrix.
+    pub fn assemble_white_gaussian_noise<S: FESpace>(
+        space: &S,
+        integ: &mut crate::standard::WhiteGaussianNoiseDomainLFIntegrator,
+    ) -> Vec<f64> {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let mut rhs = vec![0.0_f64; n_dofs];
+        for e in mesh.elem_iter() {
+            let order = space.element_order(e);
+            let n = ref_elem_vol_for_space(space, mesh.element_type(e), order).n_dofs();
+            let raw_dofs: Vec<DofId> = space.element_dofs(e).to_vec();
+            debug_assert_eq!(raw_dofs.len(), n, "constrained elements are not supported");
+            let m_e = Self::mass_element_matrix(space, e);
+            let elvect = integ.assemble_element_vector(&m_e, n);
+            for (k, &d) in raw_dofs.iter().enumerate() {
+                rhs[d as usize] += elvect[k];
+            }
+        }
+        rhs
+    }
+
     // ── Boundary linear form ──────────────────────────────────────────────────
 
     /// Assemble boundary contributions (e.g. Neumann BCs) into a load vector.
