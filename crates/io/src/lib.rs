@@ -31,9 +31,11 @@ pub mod imported_workflow;
 
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
+pub mod matrix_market;
 
 pub use gmsh::{read_msh, read_msh_file, MshFile};
 pub use gmsh_writer::{write_msh, write_msh_file};
+pub use matrix_market::{read_matrix_market, write_matrix_market};
 pub use fem_mesh::curved::CurvedMesh;
 pub use netgen::{
 	read_netgen_vol,

@@ -16,6 +16,7 @@
 pub mod explicit;
 pub mod imex;
 pub mod implicit;
+pub mod structural;
 pub mod symplectic;
 pub mod traits;
 pub mod complex_cn;
@@ -26,6 +27,7 @@ pub use imex::{
     ImexSsp2, ImexTimeStepper,
 };
 pub use implicit::{Bdf2, Bdf2State, CrankNicolson, ImplicitEuler, Sdirk2};
+pub use structural::{Newmark, NewmarkState, GeneralizedAlpha, GeneralizedAlphaState};
 pub use symplectic::{SIAVSolver, Yoshida4};
 pub use traits::{ImplicitTimeStepper, ImexOperator, TimeStepper};
 pub use complex_cn::{build_complex_hamiltonian, build_complex_hamiltonian_real,

@@ -27,6 +27,7 @@ pub mod vector_h1;
 pub mod make_refined;
 pub mod lor;
 pub mod block_fe_space;
+pub mod cr_space;
 pub mod dpg_trace;
 
 
@@ -34,6 +35,7 @@ pub use dof_manager::{DofManager, EdgeKey, FaceKey};
 pub use fe_space::{FESpace, SpaceType};
 pub use ordering::Ordering;
 pub use h1::H1Space;
+pub use cr_space::CRSpace;
 
 pub use l2::{L2Basis, L2Space};
 pub use hcurl::HCurlSpace;

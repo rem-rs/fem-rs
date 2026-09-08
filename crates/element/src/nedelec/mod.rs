@@ -15,14 +15,18 @@
 //! | [`TriND1`] | triangle     | 3    | 1     |
 //! | [`TetND1`] | tetrahedron  | 6    | 1     |
 
+pub mod hex;
 pub mod hex_nd2;
 pub mod hex_ndk;
 pub mod prism;
 pub mod pyramid;
+pub mod quad;
 pub mod quad_nd2;
 pub mod quad_ndk;
+pub mod tet;
 pub mod tet_nd2;
 pub mod tet_ndk;
+pub mod tri;
 pub mod tri_nd2;
 pub mod tri_ndk;
 
@@ -35,4 +39,8 @@ pub use quad_ndk::QuadNDk;
 pub use tet_nd2::TetND2;
 pub use tet_ndk::TetNDk;
 pub use tri_nd2::TriND2;
+pub use tri::TriND1;
+pub use quad::QuadND1;
+pub use hex::HexND1;
+pub use tet::TetND1;
 pub use tri_ndk::TriNDk;
