@@ -132,6 +132,10 @@ pub mod sdc;
 pub mod adjoint;
 /// Additive Schwarz domain-decomposition preconditioner.
 pub mod schwarz;
+/// Diagonal stationary smoothers (MFEM `DSmoother`: Jacobi / l1-Jacobi).
+pub mod smoother;
+
+pub use smoother::{solve_l1_jacobi, DiagonalSmoother, SmootherType};
 
 
 pub use block::{
