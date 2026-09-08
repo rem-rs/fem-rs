@@ -1074,7 +1074,10 @@ impl DofManager {
             edge_dof_map: edge_map,
             edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map: HashMap::new(),
             face_pk_map: HashMap::new(),
-            quad_face_pk_map: HashMap::new(),
+            // Retain the face-center dof of every quad face so boundary-dof
+            // collection (boundary_dofs) can find the center dofs of boundary
+            // faces (needed for TMOP surface fitting on hex meshes).
+            quad_face_pk_map: qface_map.into_iter().map(|(k, d)| (k, vec![d])).collect(),
             bubble_dof_start: n_dofs,
             n_volume_dofs: 0,
             elem_orders: None,

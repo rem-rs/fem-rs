@@ -256,8 +256,20 @@ pub fn boundary_dofs(
                 boundary_edges.insert(EdgeKey::new(a, b));
             }
             // 3D face key
-            if nodes.len() >= 3 {
-                boundary_faces_3d.insert(FaceKey::new(nodes[0], nodes[1], nodes[2]));
+            if mesh.dim() == 3 {
+                if nodes.len() == 3 {
+                    boundary_faces_3d.insert(FaceKey::new(nodes[0], nodes[1], nodes[2]));
+                } else if nodes.len() == 4 {
+                    // Quad boundary face: look up its interior DOFs through the
+                    // quad face table (hex mesh boundary faces).
+                    if let Some(face_dofs) = dm.quad_face_pk_map.get(&QuadFaceKey::new(
+                        nodes[0], nodes[1], nodes[2], nodes[3],
+                    )) {
+                        for &dof in face_dofs {
+                            dof_set.insert(dof);
+                        }
+                    }
+                }
             }
         }
     }

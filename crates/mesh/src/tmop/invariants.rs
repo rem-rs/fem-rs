@@ -97,6 +97,10 @@ impl InvariantsEvaluator2D {
     fn eval_di1b(&mut self) {
         self.eval_state |= HAVE_DI1B;
         if !self.has(HAVE_I2B) { self.eval_i2b(); }
+        // MFEM: c2 = Get_I1b()/2 — the lazy getter must run before reading the
+        // cached field, otherwise dI1b degrades to (2/I2b)*J when dI1b is the
+        // first requested quantity (TMOP_Metric_002::EvalP path).
+        if !self.has(HAVE_I1B) { self.eval_i1b(); }
         let c1 = 2.0 / self.i2b;
         let c2 = self.i1b / 2.0;
         if !self.has(HAVE_DI2B) { self.eval_di2b(); }
@@ -946,19 +950,102 @@ impl InvariantsEvaluator3D {
     }
 
     pub fn assemble_dd_i2b(&mut self, w: f64, a: &mut [f64]) {
+        // ddI2b = X1 + X2 + X3 (MFEM InvariantsEvaluator3D::Assemble_ddI2b):
+        //   X1_ijkl = 16/9 w det^{-10/3} I2 DaJ_ij DaJ_kl
+        //             + 4/3 w det^{-10/3} I2 DaJ_il DaJ_kj
+        //   X2_jslt = -4/3 w det^{-7/3} [DdI2t_ij DaJ_kl + DaJ_ij DdI2t_kl]
+        //   X3_jslt = w det^{-4/3} D_is D_kt ddI2_jslt  (via Assemble_ddI2)
+        //
+        // Applying D from both sides:
+        //   A(i+nd*j,k+nd*l) +=
+        //      16/9 w det^{-10/3} I2 DaJ_ij DaJ_kl
+        //       + 4/3 w det^{-10/3} I2 DaJ_il DaJ_kj
+        //       - 4/3 w det^{-7/3} [ DdI2t_ij DaJ_kl + DaJ_ij DdI2t_kl ]
+        //       + w det^{-4/3} D_is D_kt ddI2_jslt
+        self.get_i3b_p(); // = det(J)^{-2/3}, evaluates I3b
         if !self.has(HAVE_DAJ_3D) { self.eval_daj(); }
+        if !self.has(HAVE_DDI2T_3D) { self.eval_ddi2t(); }
         let daj = self.get_daj();
+        let ddi2t = self.get_ddi2t();
         let nd = self.d_height;
         let ah = 3 * nd;
-        if !self.has(HAVE_I3B_3D) { self.eval_i3b(); }
-        let a_w = w / self.i3b;
+        let i3b_p = self.get_i3b_p();
+        let i3b = self.get_i3b();
+        let i2 = self.get_i2();
+        let a_c = w * i3b_p * i3b_p;           // w I3b^{-4/3}
+        let b_c = (-4.0 * a_c) / (3.0 * i3b);  // -4/3 w I3b^{-7/3}
+        let c_c = -b_c * i2 / i3b;             // +4/3 w I2 I3b^{-7/3}
+        let d_c = (4.0 * c_c) / 3.0;           // -16/3 w I2 I3b^{-7/3}
+
+        // Part 1: rank-1 d*DaJ (the ddI2 term).
         for i in 0..ah {
-            let avi = a_w * daj[i];
-            a[i + ah * i] += avi * daj[i];
+            let dvi = d_c * daj[i];
+            a[i + ah * i] += dvi * daj[i];
             for j in 0..i {
-                let avv = avi * daj[j];
-                a[i + ah * j] += avv;
-                a[j + ah * i] += avv;
+                let dvvt_ij = dvi * daj[j];
+                a[i + ah * j] += dvvt_ij;
+                a[j + ah * i] += dvvt_ij;
+            }
+        }
+        // Part 2: Assemble_ddI2(a, A) — the ddI2 contribution.
+        self.assemble_dd_i2(a_c, a);
+        // Part 3: DaJ/DdI2t block with coefficients c (DaJ) and b (DdI2t/bDaJ).
+        for i in 0..nd {
+            let i0 = i;
+            let i1 = i + nd;
+            let i2 = i + 2 * nd;
+            let c_daj_i = [c_c * daj[i0], c_c * daj[i1], c_c * daj[i2]];
+            let b_daj_i = [b_c * daj[i0], b_c * daj[i1], b_c * daj[i2]];
+            let b_ddi2t_i = [b_c * ddi2t[i0], b_c * ddi2t[i1], b_c * ddi2t[i2]];
+            // k == i
+            {
+                // l == j
+                for j in 0..3 {
+                    let ij = i + nd * j;
+                    a[ij + ah * ij] += (c_daj_i[j] + 2.0 * b_ddi2t_i[j]) * daj[ij];
+                }
+                // 0 <= l < j
+                for j in 1..3 {
+                    let ij = i + nd * j;
+                    for l in 0..j {
+                        let il = i + nd * l;
+                        let z_ii_jl = (c_daj_i[l] + b_ddi2t_i[l]) * daj[ij]
+                            + b_ddi2t_i[j] * daj[il];
+                        a[ij + ah * il] += z_ii_jl;
+                        a[il + ah * ij] += z_ii_jl;
+                    }
+                }
+            }
+            // 0 <= k < i
+            for k in 0..i {
+                // l == j
+                for j in 0..3 {
+                    let ij = i + nd * j;
+                    let kj = k + nd * j;
+                    let z_ik_jj = (c_daj_i[j] + b_ddi2t_i[j]) * daj[kj]
+                        + b_daj_i[j] * ddi2t[kj];
+                    a[ij + ah * kj] += z_ik_jj;
+                    a[kj + ah * ij] += z_ik_jj;
+                }
+                // 0 <= l < j
+                for j in 1..3 {
+                    let ij = i + nd * j;
+                    let kj = k + nd * j;
+                    for l in 0..j {
+                        let il = i + nd * l;
+                        let kl = k + nd * l;
+                        let z_ik_jl = c_daj_i[l] * daj[kj]
+                            + b_ddi2t_i[j] * daj[kl]
+                            + b_daj_i[j] * ddi2t[kl];
+                        a[ij + ah * kl] += z_ik_jl;
+                        a[kl + ah * ij] += z_ik_jl;
+                        let z_ik_lj = c_daj_i[j] * daj[kl]
+                            + b_ddi2t_i[l] * daj[kj]
+                            + b_daj_i[l] * ddi2t[kj];
+                        a[il + ah * kj] += z_ik_lj;
+                        a[kj + ah * il] += z_ik_lj;
+                    }
+                }
             }
         }
     }

@@ -163,12 +163,66 @@ pub fn metric_from_id_3d(id: i32, _min_det: &SharedMinDet) -> Option<TmopMetric>
     Some(m)
 }
 
+/// Surface fitting to prescribed node positions (MFEM
+/// `TMOP_Integrator::EnableSurfaceFitting(pos, smarker, coeff)`, the third
+/// overload in fem/tmop.hpp). It adds the term
+/// `sum_{i in S} c * 1/2 * (x_i - x_{t,i})^2` over the marked dofs S, with the
+/// per-dof weight divided by the number of elements sharing the dof (MFEM
+/// `surf_fit_dof_count` from `GridFunction::CountElementsPerVDof`). The
+/// gradient/Hessian of the term are the exact derivatives of the quadratic
+/// (`TMOP_QuadraticLimiter` with dist = 1).
+#[derive(Clone)]
+pub struct SurfFitPos {
+    /// Target positions `x_t`, layout `[c*n_scalar + s]` (MFEM `surf_fit_pos`,
+    /// Ordering::byNODES).
+    pub pos: Rc<Vec<f64>>,
+    /// Marked scalar dofs (MFEM `surf_fit_marker`).
+    pub marker: Rc<Vec<bool>>,
+    /// Element-sharing count per scalar dof (MFEM `surf_fit_dof_count`, the
+    /// count is identical for every component of a dof).
+    pub dof_count: Rc<Vec<f64>>,
+    /// Fitting weight `c` (MFEM `surf_fit_coeff`, a ConstantCoefficient mutated
+    /// by the adaptive surface fitting of `TMOPNewtonSolver`).
+    pub coeff: Rc<Cell<f64>>,
+}
+
+impl SurfFitPos {
+    pub fn new(
+        pos: Vec<f64>,
+        marker: Vec<bool>,
+        dof_count: Vec<f64>,
+        coeff: f64,
+    ) -> Self {
+        Self {
+            pos: Rc::new(pos),
+            marker: Rc::new(marker),
+            dof_count: Rc::new(dof_count),
+            coeff: Rc::new(Cell::new(coeff)),
+        }
+    }
+}
+
+/// MFEM `GridFunction::CountElementsPerVDof`: for every scalar dof, the number
+/// of elements whose dof tables reference it.
+pub fn count_elements_per_dof(topo: &dyn MeshTopology, dm: &DofManager) -> Vec<f64> {
+    let mut count = vec![0.0_f64; dm.n_dofs];
+    for e in 0..topo.n_elements() {
+        for &dof in dm.element_dofs(e as u32) {
+            count[dof as usize] += 1.0;
+        }
+    }
+    count
+}
+
 /// One `TMOP_Integrator`: metric + target (+ constant metric coefficient).
 pub struct TmopIntegrator {
     pub metric: TmopMetric,
     pub target: TmopTarget,
     /// MFEM `SetCoefficient` (ConstantCoefficient); 1.0 when unset.
     pub coeff: f64,
+    /// MFEM `surf_fit_pos`/`surf_fit_marker`/`surf_fit_coeff` when surface
+    /// fitting to prescribed positions is enabled (None otherwise).
+    pub surf_fit: Option<SurfFitPos>,
 }
 
 /// Per-element cached data: scalar dofs, reference element, quadrature rule.
@@ -465,9 +519,12 @@ impl<'a> TmopForm<'a> {
     }
 
     /// MFEM `TMOP_Integrator::GetElementEnergy` (LEGACY, integ_over_target).
+    /// Mirrors `NonlinearForm::GetGridFunctionEnergy`: one accumulator per
+    /// element, added to the total element-by-element (same summation tree as
+    /// the C++, so the line search sees bit-identical energies).
     pub fn energy(&self, dx: &[f64]) -> f64 {
         let dim = self.dim;
-        let mut energy = 0.0;
+        let mut total = 0.0;
         let mut pos = Vec::new();
         let mut dsh = Vec::new();
         let mut jtr2: Vec<[f64; 4]> = Vec::new();
@@ -478,6 +535,7 @@ impl<'a> TmopForm<'a> {
             self.element_positions(el, dx, &mut pos);
             let mut ds = vec![0.0; nd * dim];
             dsh.resize(nd * dim, 0.0);
+            let mut energy = 0.0;
             for integ in &self.integrators {
                 self.compute_element_targets(integ, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
@@ -543,9 +601,28 @@ impl<'a> TmopForm<'a> {
                         _ => panic!("metric dimension mismatch"),
                     }
                 }
+                // Contribution from the surface fitting term (MFEM
+                // GetElementEnergy, the `if (surface_fit)` block): evaluated at
+                // the FE nodal points, one term per marked dof.
+                if let Some(sf) = &integ.surf_fit {
+                    for (k, &dof) in el.edofs.iter().enumerate() {
+                        if !sf.marker[dof] {
+                            continue;
+                        }
+                        let w = sf.coeff.get() / sf.dof_count[dof];
+                        let mut d2 = 0.0;
+                        for c in 0..dim {
+                            let d = pos[k + c * nd] - sf.pos[c * self.n_scalar + dof];
+                            d2 += d * d;
+                        }
+                        // TMOP_QuadraticLimiter::Eval = 0.5*d2/dist^2, dist = 1.
+                        energy += w * (0.5 * d2);
+                    }
+                }
             }
+            total += energy;
         }
-        energy
+        total
     }
 
     /// MFEM `TMOP_Integrator::AssembleElementVectorExact`:
@@ -606,15 +683,21 @@ impl<'a> TmopForm<'a> {
                             let jpt = [[jpt_cm[0], jpt_cm[2]], [jpt_cm[1], jpt_cm[3]]];
                             let mut p = [[0.0f64; 2]; 2];
                             m.eval_p(&jpt, &mut p);
-                            // elvect(i, d) += Σ_k DS(i, k) P(d, k)  (AddMultABt).
-                            let p_cm = [p[0][0], p[1][0], p[0][1], p[1][1]];
-                            for i in 0..nd {
-                                for d in 0..2 {
-                                    let mut s = 0.0;
-                                    for k in 0..2 {
-                                        s += ds[i + k * nd] * p_cm[d + k * 2];
+                            // MFEM: `P *= weight_m;` then `AddMultABt(DS, P,
+                            // PMatO)` — the weight is folded into P before the
+                            // contraction, which runs k-outer / j / i-inner,
+                            // accumulating each product directly into elvect.
+                            for row in p.iter_mut() {
+                                for v in row.iter_mut() {
+                                    *v *= weight_m;
+                                }
+                            }
+                            for k in 0..2 {
+                                for j in 0..2 {
+                                    let bjk = p[j][k];
+                                    for i in 0..nd {
+                                        elvec[i + j * nd] += ds[i + k * nd] * bjk;
                                     }
-                                    elvec[i + d * nd] += weight_m * s;
                                 }
                             }
                         }
@@ -646,21 +729,36 @@ impl<'a> TmopForm<'a> {
                             ];
                             let mut p = [[0.0f64; 3]; 3];
                             m.eval_p(&jpt, &mut p);
-                            let p_cm = [
-                                p[0][0], p[1][0], p[2][0], p[0][1], p[1][1], p[2][1], p[0][2],
-                                p[1][2], p[2][2],
-                            ];
-                            for i in 0..nd {
-                                for d in 0..3 {
-                                    let mut s = 0.0;
-                                    for k in 0..3 {
-                                        s += ds[i + k * nd] * p_cm[d + k * 3];
+                            // MFEM: `P *= weight_m;` then AddMultABt (see 2D).
+                            for row in p.iter_mut() {
+                                for v in row.iter_mut() {
+                                    *v *= weight_m;
+                                }
+                            }
+                            for k in 0..3 {
+                                for j in 0..3 {
+                                    let bjk = p[j][k];
+                                    for i in 0..nd {
+                                        elvec[i + j * nd] += ds[i + k * nd] * bjk;
                                     }
-                                    elvec[i + d * nd] += weight_m * s;
                                 }
                             }
                         }
                         _ => panic!("metric dimension mismatch"),
+                    }
+                }
+                // MFEM `AssembleElemVecSurfFit`: elvect(s, d) += w * (x_s -
+                // x_{t,s})_d at the nodal point of every marked dof s
+                // (TMOP_QuadraticLimiter::Eval_d1, dist = 1).
+                if let Some(sf) = &integ.surf_fit {
+                    for (k, &dof) in el.edofs.iter().enumerate() {
+                        if !sf.marker[dof] {
+                            continue;
+                        }
+                        let w = sf.coeff.get() / sf.dof_count[dof];
+                        for c in 0..dim {
+                            elvec[k + c * nd] += w * (pos[k + c * nd] - sf.pos[c * self.n_scalar + dof]);
+                        }
                     }
                 }
             }
@@ -693,6 +791,11 @@ impl<'a> TmopForm<'a> {
             self.element_positions(el, dx, &mut pos);
             let mut ds = vec![0.0; nd * dim];
             dsh.resize(nd * dim, 0.0);
+            // MFEM keeps one dense element matrix per element, accumulated over
+            // all quadrature points (and the surface fitting term), and adds it
+            // into the sparse matrix once; mirror that exactly so the
+            // floating-point sums (and hence the Newton path) match the C++.
+            let mut elmat = vec![0.0f64; ah * ah];
             for integ in &self.integrators {
                 self.compute_element_targets(integ, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
@@ -700,7 +803,6 @@ impl<'a> TmopForm<'a> {
                         * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) }
                         * integ.coeff;
                     el.re.eval_grad_basis(&el.quad_points[q], &mut dsh);
-                    let mut elmat = vec![0.0f64; ah * ah];
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
                             let jrt = invert_2x2(&jtr2[q]);
@@ -762,20 +864,44 @@ impl<'a> TmopForm<'a> {
                         }
                         _ => panic!("metric dimension mismatch"),
                     }
-                    // Scatter (row = c_r*nd + i ↔ global c_r*n_scalar + dof).
-                    for k in 0..ah {
-                        let kr = k % nd;
-                        let cr = k / nd;
-                        let grow = cr * self.n_scalar + el.edofs[kr];
-                        for l in 0..ah {
-                            let lc = l % nd;
-                            let cc = l / nd;
-                            let gcol = cc * self.n_scalar + el.edofs[lc];
-                            let v = elmat[k + ah * l];
-                            if v != 0.0 {
-                                coo.add(grow, gcol, v);
-                            }
+                }
+                // MFEM `AssembleElemGradSurfFit`: for every marked dof s,
+                // mat(s+c1*nd, s+c1*nd) += w with w = coeff/count (the quadratic
+                // limiter's Eval_d2 = I with dist = 1). NOTE: like MFEM, the
+                // outer product of the fitting gradient is deliberately omitted
+                // here (its `surf_fit_pos` branch zeroes surf_fit_grad_e and
+                // keeps only the limiter Hessian), so the assembled Hessian of
+                // the fitting term is the constant w*I.
+                if let Some(sf) = &integ.surf_fit {
+                    for (k, &dof) in el.edofs.iter().enumerate() {
+                        if !sf.marker[dof] {
+                            continue;
                         }
+                        for c1 in 0..dim {
+                            let idx = c1 * nd + k;
+                            // w = surf_fit_normal * coeff, then entry *= 1/count
+                            // (the exact C++ operation order).
+                            let mut entry = sf.coeff.get();
+                            entry *= 1.0 / sf.dof_count[dof];
+                            elmat[idx + ah * idx] += entry;
+                        }
+                    }
+                }
+            }
+            // Single scatter of the element matrix (row = c_r*nd + i ↔ global
+            // c_r*n_scalar + dof), mirroring MFEM's `grad->AddMatrix(elmat,
+            // vdofs)`.
+            for k in 0..ah {
+                let kr = k % nd;
+                let cr = k / nd;
+                let grow = cr * self.n_scalar + el.edofs[kr];
+                for l in 0..ah {
+                    let lc = l % nd;
+                    let cc = l / nd;
+                    let gcol = cc * self.n_scalar + el.edofs[lc];
+                    let v = elmat[k + ah * l];
+                    if v != 0.0 {
+                        coo.add(grow, gcol, v);
                     }
                 }
             }
@@ -785,6 +911,60 @@ impl<'a> TmopForm<'a> {
             h.eliminate_essential_bc_diag_symmetric(dof, 1.0);
         }
         h
+    }
+
+    /// MFEM `TMOP_Integrator::GetSurfaceFittingErrors` (serial path):
+    /// average and maximum fitting error |x0 + dx - x_t| over the marked dofs,
+    /// maximized over all fitting integrators.
+    pub fn surf_fit_errors(&self, dx: &[f64]) -> (f64, f64) {
+        let dim = self.dim;
+        let mut err_avg = 0.0_f64;
+        let mut err_max = 0.0_f64;
+        for integ in &self.integrators {
+            let Some(sf) = &integ.surf_fit else {
+                continue;
+            };
+            let mut err_sum = 0.0_f64;
+            let mut max_loc = 0.0_f64;
+            let mut dof_cnt = 0_usize;
+            for dof in 0..self.n_scalar {
+                if !sf.marker[dof] {
+                    continue;
+                }
+                dof_cnt += 1;
+                let mut d2 = 0.0_f64;
+                for c in 0..dim {
+                    let p = self.x0[c * self.n_scalar + dof] + dx[c * self.n_scalar + dof];
+                    let d = p - sf.pos[c * self.n_scalar + dof];
+                    d2 += d * d;
+                }
+                let sigma = d2.sqrt(); // Vector::DistanceTo
+                max_loc = max_loc.max(sigma);
+                err_sum += sigma;
+            }
+            let avg_loc = if dof_cnt > 0 { err_sum / dof_cnt as f64 } else { 0.0 };
+            err_avg = err_avg.max(avg_loc);
+            err_max = err_max.max(max_loc);
+        }
+        (err_avg, err_max)
+    }
+
+    /// MFEM `TMOPNewtonSolver::GetSurfaceFittingWeight`: the current fitting
+    /// weight of every fitting integrator.
+    pub fn surf_fit_weights(&self) -> Vec<f64> {
+        self.integrators
+            .iter()
+            .filter_map(|integ| integ.surf_fit.as_ref().map(|sf| sf.coeff.get()))
+            .collect()
+    }
+
+    /// MFEM `TMOP_Integrator::UpdateSurfaceFittingWeight`: coeff *= factor.
+    pub fn update_surf_fit_weight(&self, factor: f64) {
+        for integ in &self.integrators {
+            if let Some(sf) = &integ.surf_fit {
+                sf.coeff.set(sf.coeff.get() * factor);
+            }
+        }
     }
 
     /// `TMOPNewtonSolver::ComputeMinDet`: minimum det(Jpr)/det(Wideal) over
@@ -1166,6 +1346,679 @@ fn compute_scaling_factor(
     scale
 }
 
+// ─── TMOPNewtonSolver with surface fitting (fit-node-position) ───────────────
+
+/// MFEM `IterativeSolver::PrintLevel` flags derived from the legacy
+/// `SetPrintLevel(int)` levels (linalg/solvers.cpp, `FromLegacyPrintLevel`).
+#[derive(Debug, Clone, Copy)]
+pub struct TmopPrintLevel {
+    pub none: bool,
+    pub errors: bool,
+    pub warnings: bool,
+    pub iterations: bool,
+    pub summary: bool,
+    pub first_and_last: bool,
+}
+
+impl TmopPrintLevel {
+    pub fn from_legacy(level: i32) -> Self {
+        let base = Self {
+            none: false,
+            errors: true,
+            warnings: true,
+            iterations: false,
+            summary: false,
+            first_and_last: false,
+        };
+        match level {
+            -1 => Self {
+                none: true,
+                errors: false,
+                warnings: false,
+                iterations: false,
+                summary: false,
+                first_and_last: false,
+            },
+            0 => base,
+            1 => Self {
+                iterations: true,
+                ..base
+            },
+            2 => Self {
+                summary: true,
+                ..base
+            },
+            3 => Self {
+                first_and_last: true,
+                ..base
+            },
+            _ => base, // MFEM warns and defaults to level 0
+        }
+    }
+}
+
+/// Adaptive surface fitting parameters of MFEM `TMOPNewtonSolver` (defaults
+/// from fem/tmop_tools.hpp).
+#[derive(Debug, Clone, Copy)]
+pub struct SurfFitNewtonParams {
+    /// `SetAdaptiveSurfaceFittingScalingFactor`: the fitting weight is
+    /// multiplied by at most this factor when the average fitting error does
+    /// not decrease sufficiently. 0 disables the adaptive weight updates.
+    pub scale_factor: f64,
+    /// `SetTerminationWithMaxSurfaceFittingError`: terminate the line search
+    /// (with scale 0) once the maximum fitting error drops below this
+    /// threshold. Negative disables it and makes the residual norm the
+    /// convergence criterion (MFEM `surf_fit_converge_error = false`).
+    pub max_err_limit: f64,
+    /// MFEM `surf_fit_err_rel_change_limit` (default 1e-3): increase the
+    /// fitting weight when the relative decrease of the average fitting error
+    /// per iteration is below this value.
+    pub err_rel_change_limit: f64,
+    /// MFEM `surf_fit_weight_limit` (default 1e10).
+    pub weight_limit: f64,
+    /// MFEM `surf_fit_adapt_count_limit` (default 10): terminate after this
+    /// many weight increases.
+    pub adapt_count_limit: usize,
+}
+
+impl SurfFitNewtonParams {
+    /// MFEM member defaults.
+    pub fn new() -> Self {
+        Self {
+            scale_factor: 0.0,
+            max_err_limit: -1.0,
+            err_rel_change_limit: 0.001,
+            weight_limit: 1e10,
+            adapt_count_limit: 10,
+        }
+    }
+
+    /// MFEM `surf_fit_converge_error` (set together with `max_err_limit`).
+    pub fn converge_error(&self) -> bool {
+        self.max_err_limit >= 0.0
+    }
+}
+
+impl Default for SurfFitNewtonParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// C `std::cout`/`%g` formatting with `sig` significant digits (MFEM prints
+/// doubles through `mfem::out` with the default precision of 6).
+fn fmt_gp(x: f64, sig: usize) -> String {
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    let exp = x.abs().log10().floor() as i32;
+    if !(-4..(sig as i32)).contains(&exp) {
+        fix_exp(format!("{:.*e}", sig - 1, x))
+    } else {
+        let decimals = (sig as i32 - 1 - exp).max(0) as usize;
+        let mut s = format!("{:.*}", decimals, x);
+        if s.contains('.') {
+            while s.ends_with('0') {
+                s.pop();
+            }
+            if s.ends_with('.') {
+                s.pop();
+            }
+        }
+        s
+    }
+}
+
+/// C `%g` with 6 significant digits.
+fn fmt_g6(x: f64) -> String {
+    fmt_gp(x, 6)
+}
+
+/// glibc `hypot` (sysdeps/ieee754/dbl-64/e_hypot.c, Borges 2019 correction),
+/// 1:1 port of the x86-64 baseline build (no FMA branch, which is what the
+/// reference libmfem links against on glibc systems). MFEM's MINRES calls
+/// `std::hypot`; a truncated (max_iter-limited) MINRES amplifies last-ulp
+/// differences of the platform libm into the Newton direction, so the Rust
+/// port must reproduce glibc's exact result rather than the UCRT one.
+fn hypot_glibc(x: f64, y: f64) -> f64 {
+    // #define SCALE 0x1p-600, LARGE_VAL 0x1p+511, TINY_VAL 0x1p-459, EPS 0x1p-54
+    const SCALE: f64 = f64::from_bits((((-600i64) + 1023) as u64) << 52);
+    const LARGE_VAL: f64 = f64::from_bits(((511u64 + 1023) << 52) as u64);
+    const TINY_VAL: f64 = f64::from_bits((((-459i64) + 1023) as u64) << 52);
+    const EPS: f64 = f64::from_bits((((-54i64) + 1023) as u64) << 52);
+
+    if !x.is_finite() || !y.is_finite() {
+        if x.is_infinite() || y.is_infinite() {
+            return f64::INFINITY;
+        }
+        return x + y;
+    }
+    let x = x.abs();
+    let y = y.abs();
+    let (ax, ay) = if x < y { (y, x) } else { (x, y) };
+
+    if ax > LARGE_VAL {
+        if ay <= ax * EPS {
+            return ax + ay;
+        }
+        return hypot_kernel(ax * SCALE, ay * SCALE) / SCALE;
+    }
+    if ay < TINY_VAL {
+        if ax >= ay / EPS {
+            return ax + ay;
+        }
+        return hypot_kernel(ax / SCALE, ay / SCALE) * SCALE;
+    }
+    if ay <= ax * EPS {
+        return ax + ay;
+    }
+    hypot_kernel(ax, ay)
+}
+
+/// Kernel of the glibc `hypot` port above: the no-FMA (`!__FP_FAST_FMA`)
+/// branch of glibc's e_hypot.c, which is what the x86-64 baseline reference
+/// libm uses. The FMA variant is intentionally not ported (dead code).
+fn hypot_kernel(ax: f64, ay: f64) -> f64 {
+    // Borges 2019 correction, no-FMA branch.
+    let mut h = (ax * ax + ay * ay).sqrt();
+    if h <= 2.0 * ay {
+        let delta = h - ay;
+        let t1 = ax * (2.0 * delta - ax);
+        let t2 = (delta - 2.0 * (ax - ay)) * delta;
+        h -= (t1 + t2) / (2.0 * h);
+    } else {
+        let delta = h - ax;
+        let t1 = 2.0 * delta * (ax - 2.0 * ay);
+        let t2 = (4.0 * delta - ay) * ay + delta * delta;
+        h -= (t1 + t2) / (2.0 * h);
+    }
+    h
+}
+
+/// Normalize Rust's `1.8633e-1` to C's `1.8633e-01`.
+fn fix_exp(s: String) -> String {
+    match s.find('e') {
+        Some(pos) => {
+            let (m, e) = s.split_at(pos);
+            let exp: i32 = e[1..].parse().unwrap();
+            format!("{}e{}{:02}", m, if exp < 0 { "-" } else { "+" }, exp.abs())
+        }
+        None => s,
+    }
+}
+
+#[inline]
+fn dot(x: &[f64], y: &[f64]) -> f64 {
+    x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
+}
+
+/// MFEM `MINRESSolver::Mult` (linalg/solvers.cpp, van der Vorst Fig. 6.9
+/// formulation) without a preconditioner, solving `H c = r` from `c = 0`.
+///
+/// This is a bit-level port of MFEM's recurrence; it intentionally does not
+/// reuse `fem_solver::solve_minres` (a classical Lanczos + back-substitution
+/// formulation) because the Newton iteration path of the 1:1 TMOP port must
+/// reproduce MFEM's floating-point rounding, or the outer line search may
+/// take different branches near its thresholds.
+fn minres_mfem(
+    h: &CsrMatrix<f64>,
+    b: &[f64],
+    x: &mut [f64],
+    rtol: f64,
+    atol: f64,
+    max_iter: usize,
+) {
+    let n = b.len();
+    for v in x.iter_mut() {
+        *v = 0.0;
+    }
+    let mut v0 = vec![0.0_f64; n];
+    let mut v1 = b.to_vec(); // iterative_mode = false: v1 = b
+    let mut q = vec![0.0_f64; n];
+    let mut w0 = vec![0.0_f64; n];
+    let mut w1 = vec![0.0_f64; n];
+
+    let mut eta = dot(&v1, &v1).sqrt(); // z = v1 (no preconditioner)
+    let mut beta = eta;
+    let norm_goal = (rtol * eta).max(atol);
+    if eta <= norm_goal {
+        return;
+    }
+    let (mut gamma0, mut gamma1) = (1.0_f64, 1.0_f64);
+    let (mut sigma0, mut sigma1) = (0.0_f64, 0.0_f64);
+
+    let mut it = 1_usize;
+    while it <= max_iter {
+        // v1 /= beta — MFEM's Vector::operator/= multiplies by the reciprocal.
+        let beta_inv = 1.0 / beta;
+        for v in v1.iter_mut() {
+            *v *= beta_inv;
+        }
+        // MFEM SparseMatrix::Mult: y = 0 then per-row sequential accumulation
+        // over the row's entries in storage order (NOT the 8-way blocked
+        // grouping of fem_linalg's spmv, which rounds differently and would
+        // derail the truncated MINRES iteration relative to the reference).
+        for row in 0..n {
+            let (s, e) = (h.row_ptr[row], h.row_ptr[row + 1]);
+            let mut sum = 0.0_f64;
+            for k in s..e {
+                sum += h.values[k] * v1[h.col_idx[k] as usize];
+            }
+            q[row] = sum;
+        }
+        let alpha = dot(&v1, &q);
+        if it > 1 {
+            // q.Add(-beta, v0) with v0 the PREVIOUS search direction
+            for i in 0..n {
+                q[i] -= beta * v0[i];
+            }
+        }
+        // add(q, -alpha, v1, v0): v0 = q - alpha*v1
+        for i in 0..n {
+            v0[i] = q[i] - alpha * v1[i];
+        }
+
+        let delta = gamma1 * alpha - gamma0 * sigma1 * beta;
+        let rho3 = sigma0 * beta;
+        let rho2 = sigma1 * alpha + gamma0 * gamma1 * beta;
+        beta = dot(&v0, &v0).sqrt(); // Norm(v0)
+        let rho1 = hypot_glibc(delta, beta);
+        if it == 1 {
+            // w0.Set(1./rho1, *z) with z == v1
+            let s = 1.0 / rho1;
+            for i in 0..n {
+                w0[i] = s * v1[i];
+            }
+        } else if it == 2 {
+            // add(1./rho1, *z, -rho2/rho1, w1, w0)
+            let s = 1.0 / rho1;
+            let t = -rho2 / rho1;
+            for i in 0..n {
+                w0[i] = s * v1[i] + t * w1[i];
+            }
+        } else {
+            // add(-rho3/rho1, w0, -rho2/rho1, w1, w0); w0.Add(1./rho1, *z)
+            let a = -rho3 / rho1;
+            let b2 = -rho2 / rho1;
+            for i in 0..n {
+                w0[i] = a * w0[i] + b2 * w1[i];
+            }
+            let s = 1.0 / rho1;
+            for i in 0..n {
+                w0[i] += s * v1[i];
+            }
+        }
+
+        gamma0 = gamma1;
+        gamma1 = delta / rho1;
+        // x.Add(gamma1*eta, w0)
+        let t = gamma1 * eta;
+        for i in 0..n {
+            x[i] += t * w0[i];
+        }
+        sigma0 = sigma1;
+        sigma1 = beta / rho1;
+        eta = -sigma1 * eta;
+        if eta.abs() <= norm_goal {
+            return; // converged = true
+        }
+        std::mem::swap(&mut v0, &mut v1);
+        std::mem::swap(&mut w0, &mut w1);
+        it += 1;
+    }
+    // Max-iter exhaustion: converged = false. The Newton solver ignores the
+    // MINRES convergence flag and uses the iterate as-is (MFEM semantics).
+}
+
+/// MFEM `TMOPNewtonSolver` for problems with (adaptive) surface fitting:
+/// the `NewtonSolver::Mult` loop with the TMOP `ProcessNewState` (fitting
+/// weight update) and `ComputeScalingFactor` (fitting-aware line search and
+/// fit-error termination) hooks. The essential dofs of the form see zero
+/// residual rows and an identity diagonal of the Hessian, exactly like the
+/// serial `NonlinearForm` with `SetEssentialVDofs`.
+#[allow(clippy::too_many_arguments)]
+pub fn tmop_newton_solve_surf_fit(
+    form: &TmopForm,
+    params: SurfFitNewtonParams,
+    newton_max_iter: usize,
+    newton_rtol: f64,
+    newton_abs_tol: f64,
+    lin_max_iter: usize,
+    lin_rtol: f64,
+    print_level: i32,
+    min_det: &SharedMinDet,
+) -> (Vec<f64>, TmopNewtonResult) {
+    let pl = TmopPrintLevel::from_legacy(print_level);
+    let n = form.n_dofs();
+    let mut x = vec![0.0_f64; n]; // displacement, iterative_mode = false
+    let mut r = vec![0.0_f64; n];
+    let mut c = vec![0.0_f64; n];
+
+    // MFEM mutable solver state.
+    let mut avg_err_prvs = 10000.0_f64; // surf_fit_avg_err_prvs
+    let mut adapt_count: usize = 0; // surf_fit_adapt_count
+    let mut coeff_update = false; // surf_fit_coeff_update (set by ComputeScalingFactor)
+    // The initial ProcessNewState(x = 0) is a no-op while coeff_update is
+    // false (the flag is only set at the end of ComputeScalingFactor).
+
+    form.gradient(&x, &mut r); // oper->Mult(x, r); b is empty: no subtraction
+    let norm0 = l2_norm(&r);
+    let mut norm = norm0;
+    let norm_goal = (newton_rtol * norm0).max(newton_abs_tol);
+    let converged;
+    let mut it = 0_usize;
+    let final_iter;
+
+    loop {
+        if pl.iterations {
+            print!("Newton iteration {:2} : ||r|| = {}", it, fmt_g6(norm));
+            if it > 0 {
+                print!(", ||r||/||r_0|| = {}", fmt_g6(norm / norm0));
+            }
+            println!();
+        }
+        if norm <= norm_goal {
+            converged = true;
+            final_iter = it;
+            break;
+        }
+        if it >= newton_max_iter {
+            converged = false;
+            final_iter = it;
+            break;
+        }
+
+        // prec->SetOperator(gradient); prec->Mult(r, c): MINRES from c = 0.
+        let hess = form.hessian(&x);
+        minres_mfem(&hess, &r, &mut c, lin_rtol, 0.0, lin_max_iter);
+        // The Hessian is eliminated at the essential dofs (identity diagonal,
+        // zero rows/columns) and the residual is zero there, so the Krylov
+        // solution vanishes at those dofs without explicit elimination of c
+        // (MFEM does not touch c either).
+
+        let scale = compute_scaling_factor_surf_fit(
+            form,
+            &params,
+            &x,
+            &r,
+            &c,
+            &pl,
+            &mut coeff_update,
+            &mut adapt_count,
+            min_det,
+        );
+        if scale == 0.0 {
+            converged = false;
+            final_iter = it;
+            break;
+        }
+        for i in 0..n {
+            x[i] -= scale * c[i];
+        }
+
+        // ProcessNewState(x): updates the adaptive fitting weight. This is the
+        // only place where `coeff_update` is consumed: inside the line search
+        // the flag is always false (it is set at the end of every
+        // ComputeScalingFactor and consumed right here).
+        process_new_state_surf_fit(
+            form,
+            &params,
+            &pl,
+            &x,
+            &mut coeff_update,
+            &mut adapt_count,
+            &mut avg_err_prvs,
+        );
+
+        form.gradient(&x, &mut r);
+        norm = l2_norm(&r);
+        it += 1;
+    }
+
+    // Summary printing (NewtonSolver::Mult tail).
+    if pl.summary || (!converged && pl.warnings) || pl.first_and_last {
+        println!("Newton: Number of iterations: {}", final_iter);
+        println!(
+            "   ||r|| = {},  ||r||/||r_0|| = {}",
+            fmt_g6(norm),
+            fmt_g6(norm / norm0)
+        );
+    }
+    if !converged && (pl.summary || pl.warnings) {
+        println!("Newton: No convergence!");
+    }
+
+    (
+        x,
+        TmopNewtonResult {
+            converged,
+            iterations: final_iter,
+            final_norm: norm,
+            initial_norm: norm0,
+        },
+    )
+}
+
+/// MFEM `TMOPNewtonSolver::ProcessNewState` (surface fitting part only): on
+/// the first call after every line search, adapt the fitting weight if the
+/// average fitting error did not decrease sufficiently.
+fn process_new_state_surf_fit(
+    form: &TmopForm,
+    params: &SurfFitNewtonParams,
+    pl: &TmopPrintLevel,
+    dx: &[f64],
+    coeff_update: &mut bool,
+    adapt_count: &mut usize,
+    avg_err_prvs: &mut f64,
+) {
+    if !*coeff_update {
+        return;
+    }
+    // Get surface fitting errors.
+    let (avg_err, max_err) = form.surf_fit_errors(dx);
+    // Get array with surface fitting weights.
+    let weights = form.surf_fit_weights();
+    let wmax = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let wmin = weights.iter().cloned().fold(f64::INFINITY, f64::min);
+    if pl.iterations {
+        println!(
+            "Avg/Max surface fitting error: {} {}",
+            fmt_g6(avg_err),
+            fmt_g6(max_err)
+        );
+        println!(
+            "Min/Max surface fitting weight: {} {}",
+            fmt_g6(wmin),
+            fmt_g6(wmax)
+        );
+    }
+    let change = *avg_err_prvs - avg_err;
+    let rel_change = change / *avg_err_prvs;
+    if rel_change < params.err_rel_change_limit
+        && (params.converge_error()
+            || (wmax < params.weight_limit && max_err > params.max_err_limit))
+    {
+        let factor = params.scale_factor.min(params.weight_limit / wmax);
+        form.update_surf_fit_weight(factor);
+        *adapt_count += 1;
+    } else {
+        *adapt_count = 0;
+    }
+    *avg_err_prvs = avg_err;
+    *coeff_update = false;
+}
+
+/// MFEM `TMOPNewtonSolver::ComputeScalingFactor` with surface fitting
+/// (serial, full assembly, no adaptive limiting).
+#[allow(clippy::too_many_arguments)]
+fn compute_scaling_factor_surf_fit(
+    form: &TmopForm,
+    params: &SurfFitNewtonParams,
+    d_in: &[f64],
+    r: &[f64],
+    c: &[f64],
+    pl: &TmopPrintLevel,
+    coeff_update: &mut bool,
+    adapt_count: &mut usize,
+    min_det: &SharedMinDet,
+) -> f64 {
+    let energy_in = form.energy(d_in);
+
+    let fitting = form.surf_fit_weights().len() > 0; // IsSurfaceFittingEnabled
+    let init_fit_max_err;
+    if fitting && params.converge_error() {
+        let (_avg, max) = form.surf_fit_errors(d_in);
+        init_fit_max_err = max;
+        if max < params.max_err_limit {
+            if pl.iterations || pl.warnings {
+                println!("TMOPNewtonSolver converged based on the surface fitting error.");
+            }
+            return 0.0;
+        }
+    } else {
+        init_fit_max_err = 0.0;
+    }
+
+    if *adapt_count >= params.adapt_count_limit {
+        if pl.iterations {
+            println!(
+                "TMOPNewtonSolver terminated based on max number of times \
+surface fitting weight canbe increased. "
+            );
+        }
+        return 0.0;
+    }
+
+    let min_det_t_in = form.min_det_j(d_in);
+    let untangling = min_det_t_in <= 0.0;
+    let untangle_factor = 1.5;
+    let min_detj_limit = 0.0;
+    if untangling {
+        min_det.set(untangle_factor * min_det_t_in);
+    }
+
+    let norm_in = l2_norm(r);
+    let mut scale = 1.0_f64;
+    let mut x_out_ok = false;
+    let mut energy_out = 0.0_f64;
+    let mut min_det_t_out = min_det_t_in;
+    let detj_factor = 0.5;
+    let n = d_in.len();
+    let mut d_out = vec![0.0_f64; n];
+
+    for _i in 0..12 {
+        for j in 0..n {
+            d_out[j] = d_in[j] - scale * c[j];
+        }
+        min_det_t_out = form.min_det_j(&d_out);
+        if !untangling && min_det_t_out <= min_detj_limit {
+            if pl.iterations {
+                println!("Scale = {} Neg det(J) found.", fmt_g6(scale));
+            }
+            scale *= detj_factor;
+            continue;
+        }
+        if untangling && min_det_t_out < min_det.get() {
+            if pl.iterations {
+                println!("Scale = {} Neg det(J) decreased.", fmt_g6(scale));
+            }
+            scale *= detj_factor;
+            continue;
+        }
+        if untangling {
+            x_out_ok = true;
+            break;
+        }
+
+        // ProcessNewState(d_out) is a no-op here: the fitting weight update
+        // flag is always false inside the line search (see
+        // process_new_state_surf_fit in the Newton loop).
+
+        // Ensure sufficient decrease in fitting error when converging based
+        // on the error.
+        if fitting && params.converge_error() {
+            let (_avg, max_fit_err) = form.surf_fit_errors(&d_out);
+            if max_fit_err >= 1.2 * init_fit_max_err {
+                if pl.iterations {
+                    println!("Scale = {} Surf fit err increased.", fmt_g6(scale));
+                }
+                scale *= 0.5;
+                continue;
+            }
+        }
+
+        energy_out = form.energy(&d_out);
+        if energy_out > energy_in + 0.2 * energy_in.abs() || energy_out.is_nan() {
+            if pl.iterations {
+                println!(
+                    "Scale = {} Increasing energy: {} --> {}",
+                    fmt_g6(scale),
+                    fmt_g6(energy_in),
+                    fmt_g6(energy_out)
+                );
+            }
+            scale *= 0.5;
+            continue;
+        }
+
+        let mut r_out = vec![0.0_f64; n];
+        form.gradient(&d_out, &mut r_out);
+        let norm_out = l2_norm(&r_out);
+        if norm_out > 1.2 * norm_in {
+            if pl.iterations {
+                println!(
+                    "Scale = {} Norm increased: {} --> {}",
+                    fmt_g6(scale),
+                    fmt_g6(norm_in),
+                    fmt_g6(norm_out)
+                );
+            }
+            scale *= 0.5;
+            continue;
+        }
+        x_out_ok = true;
+        break;
+    }
+
+    if untangling {
+        if min_det_t_out > 0.0 {
+            min_det.set(0.0);
+            if pl.iterations || pl.summary || pl.first_and_last {
+                println!("The mesh has been untangled at the used points!");
+            }
+        } else {
+            min_det.set(untangle_factor * min_det_t_out);
+        }
+    }
+
+    if pl.iterations || pl.summary || pl.first_and_last {
+        if untangling {
+            println!(
+                "Min det(T) change: {} -> {} with {} scaling.",
+                fmt_g6(min_det_t_in),
+                fmt_g6(min_det_t_out),
+                fmt_g6(scale)
+            );
+        } else {
+            println!(
+                "Energy decrease: {} --> {} or {}% with {} scaling.",
+                fmt_g6(energy_in),
+                fmt_g6(energy_out),
+                fmt_g6((energy_in - energy_out) / energy_in * 100.0),
+                fmt_g6(scale)
+            );
+        }
+    }
+
+    if !x_out_ok {
+        scale = 0.0;
+    }
+    if params.scale_factor > 0.0 {
+        *coeff_update = true;
+    }
+    scale
+}
+
 fn solve_linear(h: &CsrMatrix<f64>, r: &[f64], c: &mut [f64], lin: &TmopLinSolver) {
     let n = r.len();
     let linsol_rtol = 1e-12;
@@ -1439,6 +2292,7 @@ mod tests {
             metric: metric_from_id_2d(1, &SharedMinDet::new(0.0)).unwrap(),
             target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
             coeff: 1.0,
+            surf_fit: None,
         });
         form.finalize_targets();
 
@@ -1543,6 +2397,7 @@ mod tests {
             metric: metric_from_id_2d(1, &min_det).unwrap(),
             target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
             coeff: 1.0,
+            surf_fit: None,
         });
         form.finalize_targets();
         let e = form.energy(&vec![0.0; form.n_dofs()]);
@@ -1570,4 +2425,190 @@ mod tests {
             );
         }
     }
+
+    /// Surface fitting to prescribed positions (fit-node-position machinery):
+    /// the fitting term enters energy/gradient/Hessian as the exact quadratic
+    /// sum_i c/count_i * |x_i - x_{t,i}|^2 / 2, checked against finite
+    /// differences on a 2x2 quad mesh with the y=0 dofs fitted.
+    #[test]
+    fn surf_fit_energy_gradient_hessian_fd() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        let x0 = linear_mesh_positions(topo, &dm, order, 2);
+        form.set_x0(x0);
+        let n = dm.n_dofs;
+        let mut marker = vec![false; n];
+        let mut target = form.x0().to_vec();
+        let mut n_marked = 0;
+        for dof in 0..n {
+            if dm.dof_coord(dof as u32)[1] == 0.0 {
+                marker[dof] = true;
+                target[n + dof] -= 0.1;
+                n_marked += 1;
+            }
+        }
+        assert!(n_marked > 0);
+        let dof_count = count_elements_per_dof(topo, &dm);
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: Some(SurfFitPos::new(
+                target.clone(),
+                marker.clone(),
+                dof_count.clone(),
+                100.0,
+            )),
+        });
+        form.finalize_targets();
+
+        // Fitting errors at dx = 0: every marked dof is off by exactly 0.1.
+        let zeros = vec![0.0_f64; form.n_dofs()];
+        let (avg, max) = form.surf_fit_errors(&zeros);
+        assert!((max - 0.1).abs() < 1e-14, "max err = {max}");
+        assert!((avg - 0.1).abs() < 1e-14, "avg err = {avg}");
+
+        // Energy: metric part (mu_2 = 0 at J = I) + fit part. Total per-dof
+        // fitting weight: each element contributes c/count, so a dof shared by
+        // `count` elements sums up to the full weight c.
+        let mut fit = 0.0;
+        for dof in 0..n {
+            if marker[dof] {
+                fit += 100.0 * 0.5 * (0.1 * 0.1);
+            }
+        }
+        let e0 = form.energy(&zeros);
+        assert!((e0 - fit).abs() < 1e-12, "energy = {e0}, fit = {fit}");
+
+        // Gradient and Hessian vs finite differences at a perturbed point.
+        let n_tot = form.n_dofs();
+        let mut dx = vec![0.0_f64; n_tot];
+        for (i, v) in dx.iter_mut().enumerate() {
+            *v = 0.01 * (((i * 7) % 11) as f64 - 5.0);
+        }
+        let mut g = vec![0.0_f64; n_tot];
+        form.gradient(&dx, &mut g);
+        let h = 1e-6;
+        for k in (0..n_tot).step_by(5) {
+            let mut p = dx.clone();
+            p[k] += h;
+            let mut m = dx.clone();
+            m[k] -= h;
+            let fd = (form.energy(&p) - form.energy(&m)) / (2.0 * h);
+            assert!(
+                (fd - g[k]).abs() < 1e-5,
+                "grad mismatch at {k}: analytic {} fd {}",
+                g[k],
+                fd
+            );
+        }
+        // Hessian: the metric Hessian is the exact second derivative (check by
+        // FD of the metric-only gradient); the surf-fit Hessian is MFEM's
+        // Gauss-Newton form c*I per marked dof (block-diagonal, no gradient
+        // outer product) — check it analytically.
+        let hess = form.hessian(&dx);
+        let mut v = vec![0.0_f64; n_tot];
+        for (i, vi) in v.iter_mut().enumerate() {
+            *vi = (((i * 13) % 7) as f64 - 3.0) * 0.05;
+        }
+        {
+            // Metric-only form: H v vs FD of gradient.
+            let mut f2 = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+            f2.set_x0(form.x0().to_vec());
+            f2.push_integrator(TmopIntegrator {
+                metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+                target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+                coeff: 1.0,
+                surf_fit: None,
+            });
+            f2.finalize_targets();
+            let hm = f2.hessian(&dx);
+            let mut hv = vec![0.0_f64; n_tot];
+            hm.spmv(&v, &mut hv);
+            let eps = 1e-4;
+            let mut xp = dx.clone();
+            let mut xm = dx.clone();
+            for i in 0..n_tot {
+                xp[i] += eps * v[i];
+                xm[i] -= eps * v[i];
+            }
+            let mut gp = vec![0.0_f64; n_tot];
+            let mut gm = vec![0.0_f64; n_tot];
+            f2.gradient(&xp, &mut gp);
+            f2.gradient(&xm, &mut gm);
+            for k in 0..n_tot {
+                let fd = (gp[k] - gm[k]) / (2.0 * eps);
+                assert!(
+                    (fd - hv[k]).abs() < 1e-5,
+                    "metric hess action mismatch at {k}: analytic {} fd {}",
+                    hv[k],
+                    fd
+                );
+            }
+        }
+        // Surf-fit part: (H_total - H_metric) v == c * v at the marked dofs'
+        // rows (c = 100, all components), 0 elsewhere.
+        let hv_metric = {
+            let mut f2 = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+            f2.set_x0(form.x0().to_vec());
+            f2.push_integrator(TmopIntegrator {
+                metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+                target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+                coeff: 1.0,
+                surf_fit: None,
+            });
+            f2.finalize_targets();
+            let hm = f2.hessian(&dx);
+            let mut hv = vec![0.0_f64; n_tot];
+            hm.spmv(&v, &mut hv);
+            hv
+        };
+        let mut hv_tot = vec![0.0_f64; n_tot];
+        hess.spmv(&v, &mut hv_tot);
+        for k in 0..n_tot {
+            let surf = hv_tot[k] - hv_metric[k];
+            let expect = if marker[k % n] { 100.0 * v[k] } else { 0.0 };
+            assert!(
+                (surf - expect).abs() < 1e-9,
+                "surf hess mismatch at {k}: {} vs {}",
+                surf,
+                expect
+            );
+        }
+    }
+
+    /// `minres_mfem` solves a small SPD system to the requested tolerance.
+    #[test]
+    fn minres_mfem_spd_system() {
+        // H = tridiag(-1, 4, -1), n = 20; well-conditioned SPD.
+        let n = 20;
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo.add(i, i, 4.0);
+            if i > 0 {
+                coo.add(i, i - 1, -1.0);
+            }
+            if i + 1 < n {
+                coo.add(i, i + 1, -1.0);
+            }
+        }
+        let h = coo.into_csr();
+        let b: Vec<f64> = (0..n).map(|i| ((i % 5) as f64) - 2.0).collect();
+        let mut x = vec![0.0_f64; n];
+        minres_mfem(&h, &b, &mut x, 1e-12, 0.0, 100);
+        let mut r = vec![0.0_f64; n];
+        h.spmv(&x, &mut r);
+        for i in 0..n {
+            assert!(
+                (r[i] - b[i]).abs() < 1e-9,
+                "residual at {i}: {} vs {}",
+                r[i],
+                b[i]
+            );
+        }
+    }
 }
+

@@ -395,6 +395,7 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
         metric: metric.unwrap(),
         target,
         coeff: 1.0,
+        surf_fit: None,
     });
     form.finalize_targets();
 
