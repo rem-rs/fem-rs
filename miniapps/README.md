@@ -54,6 +54,16 @@ miniapps/
 │   └── hpref.rs             ← 随机 hp 细化 (1:1, 2D quad;
 │                                unknowns/h/p/最大阶与 C++ -n
 │                                3..1000 全对齐, H1 连续性 ~0)
+│   └── phpref.rs            ← 各向异性 p 细化 (串行 -np 1 语义;
+│                                unknowns/h/p/最大阶 + order.gf 逐值
+│                                与 C++ 串行 harness 全对齐 (-n 100/
+│                                1000/200-fo + aniso 变体),
+│                                H1 连续性 ~e-17; 迭代行×100 逐字节;
+│                                并行 PRefineAndUpdate/-proj/-dim 3
+│                                裁剪, 文件头 Port notes 记录)
+├── autodiff/                ← 对应 miniapps/autodiff/ (seq_example;
+│   └── autodiff_example.rs     pLaplacian 能量 Newton; 依赖
+│                                fem_assembly::ad 双数 AD)
 ├── gslib/                   ← 对应 miniapps/gslib/
 │   └── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
 │                                BVH + 等参元 Newton, code 0/1/2 与
@@ -90,6 +100,17 @@ miniapps/
 
 ## 本轮新增核心库能力 (fem-rs crates)
 
+- `fem_assembly::ad` — 双数自动微分 (MFEM `linalg/dual.hpp` +
+  `miniapps/autodiff/admfem.hpp` 1:1)：Dual 类型 + QFunction/
+  QVectorFunc 驱动，13 个单测对 FD/解析导数 <1e-12；示例
+  autodiff_example (pLaplacian Newton)
+- `fem_mesh::kdtree` — MFEM `fem/kdtree.hpp` KDTreeNodalProjection
+  移植 (KdTree + KdTreeNodalProjection, 10 单测)；
+  nodal-transfer miniapp 串行部分待接
+- `fem_space` hex P≥3 dof 修复 — `build_pk_hex` 与 HexQk GLL 装配基
+  对齐（边 slot 枚举/方向、面块序、边 dof GLL 坐标、三线性映射顶点
+  序 4 处错误；修复前单元 P3 52/64 slot 错、interpolate 误差 8e-3，
+  修复后 <1e-12；5 个新回归测试 hex_p3_gll_repro）
 - `fem_linalg::dense::CholeskyFactors` — MFEM `CholeskyFactors` 镜像：
   列主序 Cholesky–Crout 分解 + `LMult`（x←L·x），与 C++ 逐位同序
 - `fem_assembly::standard::WhiteGaussianNoiseDomainLFIntegrator`（真随机

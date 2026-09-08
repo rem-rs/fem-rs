@@ -419,6 +419,10 @@ name = "mesh_hpref"
 path = "../miniapps/meshing/hpref.rs"
 
 [[example]]
+name = "mesh_phpref"
+path = "../miniapps/meshing/phpref.rs"
+
+[[example]]
 name = "mesh_optimizer"
 path = "../miniapps/meshing/mesh-optimizer.rs"
 
@@ -445,3 +449,7 @@ path = "../miniapps/diag-smoothers/abs-l1-jacobi.rs"
 [[example]]
 name = "spde_generate_random_field"
 path = "../miniapps/spde/generate_random_field.rs"
+
+[[example]]
+name = "autodiff_example"
+path = "../miniapps/autodiff/autodiff_example.rs"
