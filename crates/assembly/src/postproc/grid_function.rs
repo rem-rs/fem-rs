@@ -57,23 +57,19 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
 
 /// Reference element for evaluating a space's own DOF vector.
 ///
-/// Mirrors the assembler dispatch (`assembler.rs::ref_elem_vol_for_space`):
-/// H1-type spaces on triangles of order >= 3 use the Gauss-Lobatto
-/// [`H1TriPk`](fem_element::lagrange::H1TriPk) basis — the fixed-order
-/// equispaced `TriPk` matches MFEM only at p <= 2 and silently mis-evaluates
-/// the solution otherwise.  L2/DG tri spaces keep the equispaced basis.
-pub(crate) fn ref_elem_vol_for_space(
-    stype: fem_space::fe_space::SpaceType,
+/// Delegates to the assembler dispatch
+/// (`assembler.rs::ref_elem_vol_for_space`) so GridFunction evaluation uses
+/// **exactly** the basis the DOF coefficients were assembled with — L2/DG
+/// spaces on tensor elements (Quad/Hex) get the lexicographic GL/GLL basis
+/// ([`QuadL2GL`](fem_element::lagrange::QuadL2GL)/[`HexL2GL`](fem_element::lagrange::HexL2GL)
+/// or `QuadQk::new_lex`/`HexQk::new_lex`), H1-type spaces on triangles of
+/// order >= 3 get the Gauss-Lobatto [`H1TriPk`](fem_element::lagrange::H1TriPk).
+pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
+    space: &S,
     elem_type: ElementType,
     order: u8,
 ) -> Box<dyn ReferenceElement> {
-    if stype != fem_space::fe_space::SpaceType::L2
-        && matches!(elem_type, ElementType::Tri3 | ElementType::Tri6)
-        && order >= 3
-    {
-        return Box::new(fem_element::lagrange::H1TriPk::new(order as usize));
-    }
-    ref_elem_vol(elem_type, order)
+    crate::assembler::ref_elem_vol_for_space(space, elem_type, order)
 }
 
 /// Constant (P0) reference element on `[0,1]²` — 1 DOF, basis ≡ 1.
@@ -357,7 +353,7 @@ pub fn project_grid_function<'a, S1: FESpace, S2: FESpace>(
     let n_elems = tgt_mesh.n_elements() as u32;
     for e in 0..n_elems {
         let elem_type = tgt_mesh.element_type(e);
-        let ref_elem = ref_elem_vol_for_space(tgt_space.space_type(), elem_type, tgt_order);
+        let ref_elem = ref_elem_vol_for_space(tgt_space, elem_type, tgt_order);
         let n_ldofs = ref_elem.n_dofs();
         let quad = ref_elem.quadrature(quad_order);
         let elem_dofs = tgt_space.element_dofs(e);
@@ -414,7 +410,7 @@ fn evaluate_at_point<S: FESpace>(
     // (full version would use a point locator like FindPointsGSLIB)
     for e in 0..n_elems {
         let elem_type = mesh.element_type(e);
-        let ref_elem = ref_elem_vol_for_space(gf.space().space_type(), elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(gf.space(), elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
         let elem_dofs = gf.space().element_dofs(e);
         let nodes = mesh.element_nodes(e);
@@ -556,7 +552,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
 
         for e in 0..n_elems as u32 {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let elem_dofs = self.space.element_dofs(e);
 
@@ -638,7 +634,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mesh = self.space.mesh();
         let order = self.space.element_order(elem);
         let elem_type = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
 
         let elem_dofs = self.space.element_dofs(elem);
@@ -661,7 +657,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
         let elem_type = mesh.element_type(elem);
-        let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+        let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
         let n_ldofs = ref_elem.n_dofs();
 
         let elem_dofs = self.space.element_dofs(elem);
@@ -857,7 +853,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mut err = 0.0;
         for e in mesh.elem_iter() {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
@@ -916,7 +912,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         for e in 0..n_owned_elems {
             let e = e as u32;
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
 
@@ -927,12 +923,27 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let g_order = mesh.geom_order();
             let use_ho_geo = g_order > 1;
 
-            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
-            let x0 = mesh.node_coords(nodes[0]);
-
             // Surface mesh: compute edge vectors for correct 3D coordinate mapping.
             let edim = mesh.dim() as usize;
             let is_surface = edim != dim;
+
+            // Straight tensor-product volume elements (Quad4/Hex8): the
+            // affine `simplex_jacobian` path is invalid (their Jacobian is
+            // not constant and their quadrature lives on [-1,1]^d); use the
+            // isoparametric (multilinear) geometry per quadrature point —
+            // same treatment as the assembler and `compute_l2_error_hcurl`.
+            let use_iso_vol = matches!(elem_type, ElementType::Quad4 | ElementType::Hex8)
+                && g_order <= 1
+                && !is_surface;
+            let geo_elem_vol = if use_iso_vol {
+                Some(crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e))
+            } else {
+                None
+            };
+
+            let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
+            let x0 = mesh.node_coords(nodes[0]);
+
             let (e1_3d, e2_3d) = if is_surface {
                 let x1 = mesh.node_coords(nodes[1]);
                 // Quad4 CCW: the (0,1) reference axis maps to node 3 (see
@@ -987,6 +998,18 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let det_g = (g00 * g11 - g01 * g01).abs();
                     let measure = det_g.sqrt();
                     (quad.weights[q] * measure, xp_curved)
+                } else if use_iso_vol {
+                    // Straight Quad4/Hex8: multilinear (isoparametric)
+                    // geometry.  The quadrature/solution points already live
+                    // in the geometry element's reference domain ([0,1]^d for
+                    // quads, [-1,1]^d for hexes), so no remap is needed.
+                    let ge = geo_elem_vol.as_ref().and_then(|g| g.as_deref()).unwrap();
+                    let (jac_iso, det_iso, xp_iso) =
+                        crate::vector_assembler::isoparametric_jacobian(
+                            mesh, nodes, ge, xi, dim,
+                        );
+                    let _ = &jac_iso;
+                    (quad.weights[q] * det_iso.abs(), xp_iso)
                 } else if use_ho_geo {
                     // Volume element with high-order geometry (curved 2D/3D
                     // body): evaluate through the geometry element, which
@@ -1058,7 +1081,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         for e in 0..n_owned_elems {
             let e = e as u32;
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
 
@@ -1155,7 +1178,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mut err = 0.0;
         for e in mesh.elem_iter() {
             let elem_type = mesh.element_type(e);
-            let ref_elem = ref_elem_vol_for_space(self.space.space_type(), elem_type, order);
+            let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
@@ -1218,7 +1241,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     && matches!(elem_type, ElementType::Quad4) {
                     Box::new(fem_element::lagrange::QuadL2GL::new(order as usize))
                 } else {
-                    ref_elem_vol_for_space(self.space.space_type(), elem_type, order)
+                    ref_elem_vol_for_space(self.space, elem_type, order)
                 };
             let n_ldofs = ref_elem.n_dofs();
             let quad = ref_elem.quadrature(quad_order);
@@ -1366,15 +1389,16 @@ pub fn project_bdr_coefficient_tangent(
             let mid = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5];
             let mut fval = [0.0_f64; 3];
             coeff(&mid, &mut fval);
-            // Tangential component: f · t  where t = (b-a)/|b-a|
+            // Tangential component scaled by the edge length: f · (b - a).
+            // MFEM's 3-D ND1 dof functional is ∫_edge u · (J t̂) ds, i.e. the
+            // tangential component times the edge VECTOR (|edge| scaling) —
+            // do NOT normalise (matches `project_bdr_coefficient_tangent_2d`
+            // and MFEM's `ProjectBdrCoefficientTangent`).
             let tx = pb[0] - pa[0];
             let ty = pb[1] - pa[1];
             let tz = pb[2] - pa[2];
-            let len = (tx*tx + ty*ty + tz*tz).sqrt();
-            if len > 0.0 {
-                let ft = (fval[0]*tx + fval[1]*ty + fval[2]*tz) / len;
-                for &d in &dofs { nd_dofs[d as usize] = ft; }
-            }
+            let ft = fval[0] * tx + fval[1] * ty + fval[2] * tz;
+            for &d in &dofs { nd_dofs[d as usize] = ft; }
         }
     }
 }

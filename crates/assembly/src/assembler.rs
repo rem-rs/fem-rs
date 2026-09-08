@@ -191,43 +191,57 @@ impl ReferenceElement for BiLinearGeo2D {
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial
-/// `order` for an **L2/DG** space: quad DOFs use MFEM's lexicographic tensor
-/// order (`DG_FECollection`), all other element types keep the H1 topological
+/// `order` for an **L2/DG** space: tensor elements (Quad/Hex) use MFEM's
+/// lexicographic `L2_DOF_MAP` order with the `L2_FECollection` default
+/// Gauss-Legendre nodes, all other element types keep the H1 topological
 /// ordering (which MFEM's L2 spaces on simplices also use).
 pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    if elem_type == ElementType::Quad4 {
-        match order {
+    match elem_type {
+        ElementType::Quad4 => match order {
             0 => Box::new(P0 { dim: 2 }),
             // MFEM L2_FECollection uses Gauss-Legendre tensor-product basis
             // (BasisType::GaussLegendre), NOT the GLL basis of H1.  QuadL2GL
             // reproduces it bit-identically on [0,1]² with lexicographic DOFs.
             o => Box::new(fem_element::lagrange::QuadL2GL::new(o as usize)),
-        }
-    } else {
-        ref_elem_vol(elem_type, order)
+        },
+        ElementType::Hex8 => match order {
+            0 => Box::new(P0 { dim: 3 }),
+            // MFEM L2_HexahedronElement(o, GaussLegendre): interior GL tensor
+            // nodes with lexicographic DOFs.  HexL2GL keeps the fem-rs hex
+            // reference domain [-1,1]³ (same as HexQk/hex_rule) so quadrature
+            // and the isoparametric Jacobian stay on a common domain.
+            o => Box::new(fem_element::lagrange::HexL2GL::new(o as usize)),
+        },
+        _ => ref_elem_vol(elem_type, order),
     }
 }
 
-/// Reference element for `space`: L2/DG spaces get the lexicographic quad
-/// DOF ordering ([`ref_elem_vol_l2`]), H1 spaces the topological one
-/// ([`ref_elem_vol_h1`]).
+/// Reference element for `space`: L2/DG spaces get the lexicographic
+/// tensor-product DOF ordering ([`ref_elem_vol_l2`]), H1 spaces the
+/// topological one ([`ref_elem_vol_h1`]).
 pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     space: &S,
     elem_type: ElementType,
     order: u8,
 ) -> Box<dyn ReferenceElement> {
     if space.space_type() == SpaceType::L2 {
-        if space.l2_basis() == Some(L2Basis::GaussLobatto) && elem_type == ElementType::Quad4 {
-            // MFEM `DG_FECollection(..., BasisType::GaussLobatto)` uses GLL
-            // nodes with lexicographic DOFs — `QuadQk::new_lex`, NOT the
-            // GL-noded `QuadL2GL` (which matches only `L2_FECollection`'s
-            // default `GaussLegendre`).  Using the wrong basis silently
-            // changes every element matrix (ex41 regression: M/S/K off by
-            // ~6×, IMEX diverged).
-            Box::new(fem_element::lagrange::factory::QuadQk::new_lex(order as usize))
-        } else {
-            ref_elem_vol_l2(elem_type, order)
+        // MFEM `DG_FECollection`/`L2_FECollection(btype)` with GaussLobatto
+        // uses GLL nodes with lexicographic DOFs (`L2_DOF_MAP`) on tensor
+        // elements — `QuadQk::new_lex`/`HexQk::new_lex`, NOT the GL-noded
+        // `QuadL2GL`/`HexL2GL` (which match only `L2_FECollection`'s default
+        // `GaussLegendre`).  Using the wrong basis silently changes every
+        // element matrix (ex41 regression: M/S/K off by ~6×, IMEX diverged).
+        let gll_lex = space.l2_basis() == Some(L2Basis::GaussLobatto)
+            && matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
+        if gll_lex && order >= 1 {
+            return match elem_type {
+                ElementType::Quad4 => Box::new(
+                    fem_element::lagrange::factory::QuadQk::new_lex(order as usize),
+                ),
+                _ => Box::new(fem_element::lagrange::factory::HexQk::new_lex(order as usize)),
+            };
         }
+        ref_elem_vol_l2(elem_type, order)
     } else {
         ref_elem_vol_h1(elem_type, order)
     }
@@ -296,6 +310,7 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
+        (ElementType::Tri3 | ElementType::Tri6, o) => Box::new(TriPk::new(o as usize)),
         (ElementType::Tet4, 0)                           => Box::new(P0Tet), // L2 P0 (constant) on tets
         (ElementType::Tet4, 1)                           => Box::new(TetP1),
         (ElementType::Tet4, 2)                           => Box::new(TetP2),

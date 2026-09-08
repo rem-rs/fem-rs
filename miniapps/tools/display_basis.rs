@@ -8,13 +8,17 @@
 //!
 //! Supported basis types in this port: H1 (b=0), Nedelec (b=1),
 //! Raviart-Thomas (b=2), L2 Gauss-Legendre (b=3), Fixed order 1 (b=4, ==
-//! H1 order 1).  Positive / Serendipity / Crouzeix-Raviart / Gauss
-//! discontinuous collections are not implemented in fem-rs and are rejected
-//! like the C++ FEC == NULL path.
+//! H1 order 1).  L2 is supported at any order on Quad/Hex (MFEM
+//! `L2_FECollection` Gauss-Legendre tensor nodes, lexicographic `L2_DOF_MAP`
+//! order — vsize and element VDofs match the C++ miniapp exactly) and on
+//! Tri/Tet up to order 3.  Positive / Serendipity / Crouzeix-Raviart /
+//! Gauss discontinuous collections are not implemented in fem-rs and are
+//! rejected like the C++ FEC == NULL path.
 //!
 //! Sample runs:
 //!   cargo run --release --example tools_display_basis -- -e 2 -b 3 -o 3
 //!   cargo run --release --example tools_display_basis -- -e 5 -b 1 -o 1
+//!   cargo run --release --example tools_display_basis -- -e 5 -b 3 -o 4
 //!   cargo run --release --example tools_display_basis -- -e 3 -b 2 -o 2
 
 use fem_mesh::{Mesh, element_type::ElementType};

@@ -10,9 +10,9 @@ pub mod tet;
 pub mod tri;
 
 pub use factory::{
-    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexQk, LagrangeHex, LagrangePrism, LagrangePyramid,
-    LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle, QuadL2GL, QuadPosQk, QuadQk, SegPk,
-    TetPk, TriPk, VecFamily,
+    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexL2GL, HexQk, LagrangeHex, LagrangePrism,
+    LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle,
+    QuadL2GL, QuadPosQk, QuadQk, SegPk, TetPk, TriPk, VecFamily,
 };
 pub use hex::{HexQ1, HexQ2, HexQ3};
 pub use prism::PrismPk;

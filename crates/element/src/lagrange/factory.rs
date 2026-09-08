@@ -1420,6 +1420,52 @@ impl ReferenceElement for QuadQk {
 /// The 1D basis uses the direct Lagrange formula `Π_{j≠i}(x−x_j)/(x_i−x_j)`
 /// on `[0,1]` (no reference-domain mapping), so the values match MFEM's L2
 /// element bit-for-bit.
+/// Direct 1D Lagrange values through `nodes` at `x`:
+/// `l_i(x) = Π_{j≠i} (x−x_j)/(x_i−x_j)`.
+///
+/// Shared by the Gauss-Legendre L² tensor elements ([`QuadL2GL`], [`HexL2GL`]);
+/// MFEM's L2 tensor elements evaluate the same nodal Lagrange product on
+/// `[0,1]` via `Poly_1D::Basis`, so the values match at the GL nodes.
+fn lagrange_1d_val(nodes: &[f64], x: f64) -> Vec<f64> {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let mut v = 1.0;
+            for (j, &xj) in nodes.iter().enumerate() {
+                if j != i {
+                    v *= (x - xj) / (xi - xj);
+                }
+            }
+            v
+        })
+        .collect()
+}
+
+/// Direct 1D Lagrange derivative values through `nodes` at `x`.
+fn lagrange_1d_der(nodes: &[f64], x: f64) -> Vec<f64> {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let mut s = 0.0;
+            for (m, &xm) in nodes.iter().enumerate() {
+                if m == i {
+                    continue;
+                }
+                let mut t = 1.0 / (xi - xm);
+                for (j, &xj) in nodes.iter().enumerate() {
+                    if j != i && j != m {
+                        t *= (x - xj) / (xi - xj);
+                    }
+                }
+                s += t;
+            }
+            s
+        })
+        .collect()
+}
+
 pub struct QuadL2GL {
     order: usize,
     nodes: Vec<f64>, // Gauss-Legendre nodes on [0,1]
@@ -1436,43 +1482,12 @@ impl QuadL2GL {
 
     /// Direct 1D Lagrange values at `x` (on [0,1]).
     fn lag1d_val(&self, x: f64) -> Vec<f64> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let mut v = 1.0;
-                for (j, &xj) in self.nodes.iter().enumerate() {
-                    if j != i {
-                        v *= (x - xj) / (xi - xj);
-                    }
-                }
-                v
-            })
-            .collect()
+        lagrange_1d_val(&self.nodes, x)
     }
 
     /// Direct 1D Lagrange derivative values at `x`.
     fn lag1d_der(&self, x: f64) -> Vec<f64> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(|(i, &xi)| {
-                let mut s = 0.0;
-                for (m, &xm) in self.nodes.iter().enumerate() {
-                    if m == i {
-                        continue;
-                    }
-                    let mut t = 1.0 / (xi - xm);
-                    for (j, &xj) in self.nodes.iter().enumerate() {
-                        if j != i && j != m {
-                            t *= (x - xj) / (xi - xj);
-                        }
-                    }
-                    s += t;
-                }
-                s
-            })
-            .collect()
+        lagrange_1d_der(&self.nodes, x)
     }
 
     /// Tensor-product DOF ordering: dof = iy*(p+1) + ix (x varies fastest,
@@ -1547,12 +1562,141 @@ impl ReferenceElement for QuadL2GL {
     }
 }
 
+// ─── HexL2GL ─────────────────────────────────────────────────────────────────
+
+/// Arbitrary-order L² Lagrange element on the reference hex `[-1,1]³` with
+/// **Gauss-Legendre** nodes — `(p+1)³` DOFs, matching MFEM's
+/// `L2_HexahedronElement` (`L2_FECollection`'s default
+/// `BasisType::GaussLegendre`): interior-only GL points, lexicographic
+/// tensor-product DOF order (`L2_DOF_MAP`: dof = `ix + iy·(p+1) + iz·(p+1)²`,
+/// x fastest) — NOT the H1 topological ordering of [`HexQk`].
+///
+/// MFEM places the GL nodes on `[0,1]³` (`Poly_1D::OpenPoints`, ascending);
+/// this element keeps the fem-rs hex convention `[-1,1]³` (same domain as
+/// [`HexQ1`]/[`HexQk`] and `hex_rule`), i.e. the MFEM basis composed with the
+/// affine map `ξ = 2x−1` — the same polynomial space with identical
+/// quadrature/Jacobian treatment in the assembler.  The 1D basis uses the
+/// direct Lagrange formula [`lagrange_1d_val`] on the GL nodes (same
+/// construction as [`QuadL2GL`]).
+pub struct HexL2GL {
+    order: usize,
+    nodes: Vec<f64>, // Gauss-Legendre nodes on [-1,1], ascending (MFEM order)
+}
+
+impl HexL2GL {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        // Gauss-Legendre nodes on [-1,1].  `gauss_legendre_arbitrary` returns
+        // descending nodes for n > 4 (Newton from the largest root) and the
+        // hard-coded ascending table for n <= 4; MFEM's
+        // `QuadratureFunctions1D::GaussLegendre` is always ascending, so sort
+        // to make the lexicographic DOF numbering match MFEM's.
+        let (mut nodes, _w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
+        if nodes.len() > 1 && nodes[0] > nodes[nodes.len() - 1] {
+            nodes.reverse();
+        }
+        Self { order: p, nodes }
+    }
+
+    /// Tensor-product DOF ordering: dof = `ix + iy·(p+1) + iz·(p+1)²`
+    /// (x varies fastest), matching MFEM's `L2_HexahedronElement`
+    /// `for (k) for (j) for (i) shape(o++) = sx(i)·sy(j)·sz(k)`.
+    fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
+        let p1 = self.order + 1;
+        ix + iy * p1 + iz * p1 * p1
+    }
+
+    fn all_dof_coords(&self) -> Vec<[f64; 3]> {
+        let p = self.order;
+        let n = (p + 1) * (p + 1) * (p + 1);
+        let mut coords = vec![[0.0, 0.0, 0.0]; n];
+        for iz in 0..=p {
+            for iy in 0..=p {
+                for ix in 0..=p {
+                    let dof = self.node_to_dof(ix, iy, iz);
+                    coords[dof] = [self.nodes[ix], self.nodes[iy], self.nodes[iz]];
+                }
+            }
+        }
+        coords
+    }
+
+    /// Tensor-product DOF index for the `(ix, iy, iz)` node.
+    pub fn dof_index(&self, ix: usize, iy: usize, iz: usize) -> usize {
+        self.node_to_dof(ix, iy, iz)
+    }
+}
+
+impl ReferenceElement for HexL2GL {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 1) * (self.order + 1)
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let (lx, ly, lz) = (
+            lagrange_1d_val(&self.nodes, xi[0]),
+            lagrange_1d_val(&self.nodes, xi[1]),
+            lagrange_1d_val(&self.nodes, xi[2]),
+        );
+        let p = self.order;
+        for iz in 0..=p {
+            for iy in 0..=p {
+                for ix in 0..=p {
+                    values[self.node_to_dof(ix, iy, iz)] = lx[ix] * ly[iy] * lz[iz];
+                }
+            }
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (lx, ly, lz) = (
+            lagrange_1d_val(&self.nodes, xi[0]),
+            lagrange_1d_val(&self.nodes, xi[1]),
+            lagrange_1d_val(&self.nodes, xi[2]),
+        );
+        let (dlx, dly, dlz) = (
+            lagrange_1d_der(&self.nodes, xi[0]),
+            lagrange_1d_der(&self.nodes, xi[1]),
+            lagrange_1d_der(&self.nodes, xi[2]),
+        );
+        let p = self.order;
+        for iz in 0..=p {
+            for iy in 0..=p {
+                for ix in 0..=p {
+                    let dof = self.node_to_dof(ix, iy, iz);
+                    grads[dof * 3] = dlx[ix] * ly[iy] * lz[iz];
+                    grads[dof * 3 + 1] = lx[ix] * dly[iy] * lz[iz];
+                    grads[dof * 3 + 2] = lx[ix] * ly[iy] * dlz[iz];
+                }
+            }
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        // [-1,1]³ tensor GL rule — same reference domain as the hex geometry
+        // element, so the assembler's `geom_quad_point` pass-through is exact.
+        hex_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.all_dof_coords().iter().map(|c| c.to_vec()).collect()
+    }
+}
+
 // ─── HexQk ───────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
 pub struct HexQk {
     order: usize,
     lag1d: Lagrange1D,
+    /// DOF ordering: `false` = MFEM H1_FECollection topological order
+    /// (vertices → edges → faces → interior, see [`HexQk::node_to_dof`]);
+    /// `true` = lexicographic tensor-product order `ix + iy·(p+1) + iz·(p+1)²`
+    /// (x fastest), which is what MFEM's `DG_FECollection`/`L2_FECollection`
+    /// with `BasisType::GaussLobatto` use (`L2_DOF_MAP`).
+    lex: bool,
 }
 
 impl HexQk {
@@ -1561,6 +1705,28 @@ impl HexQk {
         Self {
             order: p,
             lag1d: Lagrange1D::new(p),
+            lex: false,
+        }
+    }
+
+    /// HexQk with **lexicographic** (tensor-product) DOF ordering — matches
+    /// MFEM `L2_FECollection`/`DG_FECollection` with `BasisType::GaussLobatto`
+    /// (per-element DOFs are the GLL nodes in row-major order
+    /// `ix + iy·(p+1) + iz·(p+1)²`, x fastest).  The default [`HexQk::new`]
+    /// keeps the H1 topological ordering.
+    pub fn new_lex(p: usize) -> Self {
+        let mut h = HexQk::new(p);
+        h.lex = true;
+        h
+    }
+
+    /// DOF index for the tensor node `(ix, iy, iz)`.
+    fn dof_index(&self, ix: usize, iy: usize, iz: usize) -> usize {
+        if self.lex {
+            let p1 = self.order + 1;
+            ix + iy * p1 + iz * p1 * p1
+        } else {
+            self.node_to_dof(ix, iy, iz)
         }
     }
 
@@ -1718,7 +1884,7 @@ impl HexQk {
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
-                    let dof = self.node_to_dof(ix, iy, iz);
+                    let dof = self.dof_index(ix, iy, iz);
                     coords[dof] = [
                         self.lag1d.nodes[ix],
                         self.lag1d.nodes[iy],
@@ -1752,7 +1918,7 @@ impl ReferenceElement for HexQk {
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
-                    values[self.node_to_dof(ix, iy, iz)] = lx[ix] * ly[iy] * lz[iz];
+                    values[self.dof_index(ix, iy, iz)] = lx[ix] * ly[iy] * lz[iz];
                 }
             }
         }
@@ -1765,7 +1931,7 @@ impl ReferenceElement for HexQk {
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
-                    let dof = self.node_to_dof(ix, iy, iz);
+                    let dof = self.dof_index(ix, iy, iz);
                     grads[dof * 3] = dlx[ix] * ly[iy] * lz[iz];
                     grads[dof * 3 + 1] = lx[ix] * dly[iy] * lz[iz];
                     grads[dof * 3 + 2] = lx[ix] * ly[iy] * dlz[iz];
@@ -1781,7 +1947,7 @@ impl ReferenceElement for HexQk {
         for iz in 0..=p {
             for iy in 0..=p {
                 for ix in 0..=p {
-                    let dof = self.node_to_dof(ix, iy, iz);
+                    let dof = self.dof_index(ix, iy, iz);
                     let b = dof * 9;
                     hess[b] = hlx[ix] * ly[iy] * lz[iz];
                     hess[b + 1] = dlx[ix] * dly[iy] * lz[iz];
@@ -2219,6 +2385,100 @@ mod tests {
                 assert!((v1[i] - v2[i]).abs() < 1e-13, "H1 ({x},{y},{z}) i={i}");
             }
         }
+    }
+
+    // ── HexL2GL ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn hex_l2gl_n_dofs() {
+        for p in 1..=8 {
+            assert_eq!(HexL2GL::new(p).n_dofs(), (p + 1) * (p + 1) * (p + 1));
+        }
+    }
+
+    #[test]
+    fn hex_l2gl_pou() {
+        for p in 1..=4 {
+            check_pou(&HexL2GL::new(p));
+        }
+    }
+
+    #[test]
+    fn hex_l2gl_grad_zero() {
+        for p in 1..=3 {
+            check_grad_zero(&HexL2GL::new(p));
+        }
+    }
+
+    #[test]
+    fn hex_l2gl_nodal_interp() {
+        for p in 1..=4 {
+            check_nodal_interp(&HexL2GL::new(p));
+        }
+    }
+
+    /// The GL nodes must be ascending (MFEM `QuadratureFunctions1D::
+    /// GaussLegendre` order) so the lexicographic DOF numbering matches
+    /// MFEM's `L2_HexahedronElement` `L2_DOF_MAP`.
+    #[test]
+    fn hex_l2gl_nodes_ascending() {
+        for p in 1..=8 {
+            let (nodes, w) = crate::quadrature::gauss_legendre_arbitrary(p + 1);
+            let mut srt = nodes.clone();
+            srt.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(nodes, srt, "p={p}: HexL2GL node order must be ascending");
+            assert!((w.iter().sum::<f64>() - 2.0).abs() < 1e-12);
+        }
+    }
+
+    /// `HexL2GL` dof 0 sits at the (min, min, min) GL corner node and dof
+    /// `(p+1)² − 1` completes the first z-layer (x fastest), mirroring MFEM's
+    /// `for (k) for (j) for (i) shape(o++) = sx(i)·sy(j)·sz(k)`.
+    #[test]
+    fn hex_l2gl_lex_layout() {
+        let p = 3usize;
+        let el = HexL2GL::new(p);
+        let coords = el.dof_coords();
+        // dof index = ix + iy*(p+1) + iz*(p+1)^2
+        for iz in 0..=p {
+            for iy in 0..=p {
+                for ix in 0..=p {
+                    let o = el.dof_index(ix, iy, iz);
+                    assert_eq!(coords[o][0], coords[ix][0]);
+                    assert_eq!(coords[o][1], coords[iy * (p + 1)][1]);
+                    assert_eq!(coords[o][2], coords[iz * (p + 1) * (p + 1)][2]);
+                }
+            }
+        }
+    }
+
+    /// `HexQk::new_lex` reorders the GLL tensor nodes lexicographically; the
+    /// nodal interpolation property must hold in the lex layout too.
+    #[test]
+    fn hex_qk_lex_nodal_interp() {
+        for p in 1..=3 {
+            check_nodal_interp(&HexQk::new_lex(p));
+        }
+    }
+
+    #[test]
+    fn hex_qk_lex_coords() {
+        // p=1: GLL nodes are the corners; lex order must be
+        // (−,−,−),(+,−,−),(−,+,−),(+,+,−),(−,−,+),(+,−,+),(−,+,+),(+,+,+).
+        let lex = HexQk::new_lex(1);
+        let coords = lex.dof_coords();
+        let expected: Vec<Vec<f64>> = [(-1.0, -1.0, -1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0), (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0), (-1.0, 1.0, 1.0), (1.0, 1.0, 1.0)]
+            .iter()
+            .map(|&(x, y, z)| vec![x, y, z])
+            .collect();
+        assert_eq!(coords, expected);
+        // Same set of nodes as the default (H1-ordered) HexQk(1).
+        let h1 = HexQk::new(1);
+        let mut a = lex.dof_coords();
+        let mut b = h1.dof_coords();
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_eq!(a, b);
     }
 
     // ── Factory ───────────────────────────────────────────────────────────
