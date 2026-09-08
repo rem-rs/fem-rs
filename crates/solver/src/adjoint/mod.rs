@@ -16,6 +16,13 @@
 //!
 //! The gradient is verified against finite differences to machine precision.
 
+pub mod time_dependent;
+
+pub use time_dependent::{
+    AdjointBdfConfig, AdjointConfig, AdjointRunStats, AdjointSolver, AdjointTolerances,
+    Interpolation, TimeDependentAdjointOperator,
+};
+
 use fem_linalg::CsrMatrix;
 use crate::{SolverConfig, solve_cg};
 
