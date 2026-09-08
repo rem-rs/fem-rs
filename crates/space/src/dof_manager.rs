@@ -1500,68 +1500,194 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
-        let edges: [(usize, usize); 12] = [
-            (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)];
-        let quad_faces: [(usize, usize, usize, usize); 6] = [
-            (0,1,2,3),(4,5,6,7),(0,1,5,4),(2,3,7,6),(0,3,7,4),(1,2,6,5)];
-        // MFEM's local hex topology (Geometry::Constants<Geometry::CUBE>);
-        // global entity ids are assigned first-touch in element order in this
-        // order.  See build_q2_hex for why the block order (edges → faces →
-        // volumes) must match MFEM FiniteElementSpace::Construct.
-        const MFEM_EDGES: [(usize, usize); 12] = [
-            (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
-            (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
-        ];
-        const MFEM_FACES: [[usize; 4]; 6] = [
-            [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
-            [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+        // The element-local slot layout MUST match the H1 assembly basis the
+        // assembler evaluates: `ref_elem_vol_h1` → `HexQk::new(p)` (MFEM
+        // `H1_FECollection` GaussLobatto).  Instead of maintaining a
+        // hand-written edge/face convention (which drifted from HexQk and
+        // broke hex P>=3 assembly + interpolation — same family as the tri
+        // Pk>=3 fix), derive the edge/face slot runs directly from
+        // HexQk's reference DOF coordinates.
+        use fem_element::lagrange::factory::HexQk;
+        let ref_coords = HexQk::new(p).dof_coords(); // GLL nodes on [-1,1]^3
+        const BND_TOL: f64 = 1e-12;
+        // Q1 vertex layout: sign triples of the 8 vertices (bottom ring CCW
+        // 0..3, then top ring 4..7).  NOTE: NOT a binary bit encoding.
+        const Q1_SIGNS: [[usize; 3]; 8] = [
+            [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+            [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
         ];
 
-        // Phase 1: vertex + edge dofs.
+        // ── Edge runs, in HexQk slot order ────────────────────────────────────
+        // Each entry is (local a, local b, first slot): its `edge_dofs_per`
+        // slots run from near local vertex `a` toward `b` at the GLL
+        // parameters gll[1..p].  Slots of one edge are contiguous and share
+        // the signature (varying axis, sign bits of the two fixed axes).
+        let mut edge_runs: Vec<(usize, usize, usize)> = Vec::new();
+        {
+            let mut sig2run: HashMap<(usize, u8, u8), usize> = HashMap::new();
+            for slot in 8..8 + 12 * edge_dofs_per {
+                let rc = &ref_coords[slot];
+                let bnd: Vec<usize> = (0..3)
+                    .filter(|&d| (rc[d] + 1.0).abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
+                    .collect();
+                debug_assert_eq!(bnd.len(), 2, "HexQk slot {slot} expected on an edge");
+                let av = 3 - bnd[0] - bnd[1]; // varying axis (0+1+2 = 3)
+                let s0 = if rc[bnd[0]] > 0.0 { 1u8 } else { 0u8 };
+                let s1 = if rc[bnd[1]] > 0.0 { 1u8 } else { 0u8 };
+                let run = *sig2run.entry((av, s0, s1)).or_insert_with(|| {
+                    edge_runs.push((0, 0, slot));
+                    edge_runs.len() - 1
+                });
+                if edge_runs[run].2 == slot {
+                    // First slot of the run: it sits at gll[1] along the run
+                    // direction, i.e. near the end vertex `a`.
+                    let mut slo = [0usize; 3];
+                    let mut shi = [0usize; 3];
+                    slo[bnd[0]] = s0 as usize; shi[bnd[0]] = s0 as usize;
+                    slo[bnd[1]] = s1 as usize; shi[bnd[1]] = s1 as usize;
+                    shi[av] = 1;
+                    let (lo, hi) = (
+                        Q1_SIGNS.iter().position(|&s| s == slo).unwrap(),
+                        Q1_SIGNS.iter().position(|&s| s == shi).unwrap(),
+                    );
+                    if rc[av] < 0.0 {
+                        edge_runs[run] = (lo, hi, slot);
+                    } else {
+                        edge_runs[run] = (hi, lo, slot);
+                    }
+                }
+            }
+            assert_eq!(edge_runs.len(), 12, "HexQk: expected 12 edge runs");
+        }
+
+        // ── Face runs (HexQk face slot order); orientation-free: face slots
+        // are matched across elements by their physical GLL positions. ────────
+        // Each entry: (first slot, [4 local vertex indices of the face]).
+        let mut face_runs: Vec<(usize, [usize; 4])> = Vec::new();
+        {
+            let mut sig2run: HashMap<(usize, u8), usize> = HashMap::new();
+            for slot in 8 + 12 * edge_dofs_per..8 + 12 * edge_dofs_per + 6 * face_dofs_per {
+                let rc = &ref_coords[slot];
+                let bnd: Vec<usize> = (0..3)
+                    .filter(|&d| (rc[d] + 1.0).abs() < BND_TOL || (rc[d] - 1.0).abs() < BND_TOL)
+                    .collect();
+                debug_assert_eq!(bnd.len(), 1, "HexQk slot {slot} expected on a face");
+                let ax = bnd[0];
+                let s = if rc[ax] > 0.0 { 1u8 } else { 0u8 };
+                let run = *sig2run.entry((ax, s)).or_insert_with(|| {
+                    let verts: Vec<usize> = (0..8)
+                        .filter(|&v| Q1_SIGNS[v][ax] == s as usize)
+                        .collect();
+                    face_runs.push((slot, [verts[0], verts[1], verts[2], verts[3]]));
+                    face_runs.len() - 1
+                });
+                debug_assert!(
+                    face_runs[run].0 + face_dofs_per > slot,
+                    "HexQk face slots expected contiguous within a run",
+                );
+            }
+            assert_eq!(face_runs.len(), 6, "HexQk: expected 6 face runs");
+        }
+
+        // Physical position of a reference point via trilinear mapping of the
+        // element's 8 vertex coordinates.  Vertex i sits at the reference
+        // corner Q1_SIGNS[i] (ring order — NOT the binary bit pattern of i).
+        let phys_pos = |c: &[[f64; 3]], rc: &[f64]| -> [f64; 3] {
+            let mut xp = [0.0; 3];
+            for i in 0..8 {
+                let (sx, sy, sz) = (Q1_SIGNS[i][0], Q1_SIGNS[i][1], Q1_SIGNS[i][2]);
+                let nx = if sx == 1 { (1.0 + rc[0]) / 2.0 } else { (1.0 - rc[0]) / 2.0 };
+                let ny = if sy == 1 { (1.0 + rc[1]) / 2.0 } else { (1.0 - rc[1]) / 2.0 };
+                let nz = if sz == 1 { (1.0 + rc[2]) / 2.0 } else { (1.0 - rc[2]) / 2.0 };
+                let ni = nx * ny * nz;
+                for d in 0..3 { xp[d] += ni * c[i][d]; }
+            }
+            xp
+        };
+
+        // Phase 1: create edge DOFs (first touch, MFEM block order:
+        // all edges before any face/volume DOF).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            for &(a, b) in &MFEM_EDGES {
-                get_edge_dofs_pk(ns[a], ns[b], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+            for &(la, lb, _) in &edge_runs {
+                get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
             }
         }
-        // Phase 2: face dofs.
+
+        // Phase 2: create face DOFs + their physical positions (first touch).
+        // Canonical face Vec order = the first-touch element's slot order;
+        // every element (including the first) resolves its own slots onto the
+        // canonical Vec by matching GLL positions, which is orientation- and
+        // rotation-proof (unlike vertex-sign conventions).
+        let mut face_pos: HashMap<QuadFaceKey, Vec<[f64; 3]>> = HashMap::new();
+        let mut elem_coords: Vec<[f64; 3]> = Vec::with_capacity(8);
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            for &[a, b, c, d] in &MFEM_FACES {
-                let key = QuadFaceKey::new(ns[a], ns[b], ns[c], ns[d]);
-                quad_face_pk_map.entry(key).or_insert_with(|| {
-                    (0..face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+            elem_coords.clear();
+            for &n in ns.iter().take(8) {
+                let c = mesh.node_coords(n);
+                elem_coords.push([c[0], c[1], c[2]]);
+            }
+            for &(slot0, verts) in &face_runs {
+                let key = QuadFaceKey::new(ns[verts[0]], ns[verts[1]], ns[verts[2]], ns[verts[3]]);
+                face_pos.entry(key).or_insert_with(|| {
+                    let dofs: Vec<DofId> = (0..face_dofs_per)
+                        .map(|_| { let d = next_dof; next_dof += 1; d })
+                        .collect();
+                    let pos: Vec<[f64; 3]> = (0..face_dofs_per)
+                        .map(|k| phys_pos(&elem_coords, &ref_coords[slot0 + k]))
+                        .collect();
+                    quad_face_pk_map.insert(key, dofs);
+                    pos
                 });
             }
         }
-        // Phase 3: volume dofs (element order).
+        // Phase 3: element slot assignment (vertices → edges → faces →
+        // volume), with the edge/face slot order taken from the HexQk runs
+        // above.
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 8);
             let base = e as usize * dofs_per_elem;
             dofs_flat[base..base + 8].copy_from_slice(&ns[..8]);
             let mut off = 8;
-            for &(la, lb) in &edges {
-                let ed = edge_pk_map[&EdgeKey::new(ns[la], ns[lb])].clone();
-                // Edge dof ids follow the global (sorted-vertex) orientation;
-                // the element-local positions follow the local direction
-                // (la→lb), so reverse when the two disagree (MFEM
-                // DofTransformation edge flip).
-                if ns[la] < ns[lb] {
-                    dofs_flat[base + off..base + off + edge_dofs_per].copy_from_slice(&ed);
-                } else {
-                    for (k, &d) in ed.iter().rev().enumerate() {
-                        dofs_flat[base + off + k] = d;
-                    }
-                }
+            // Edges: get_edge_dofs_pk orients the Vec along the call order
+            // (ns[la]→ns[lb]), which is exactly the slot-run direction.
+            for &(la, lb, _) in &edge_runs {
+                let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
+                for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
                 off += edge_dofs_per;
             }
-            for &(la, lb, lc, ld) in &quad_faces {
-                let key = QuadFaceKey::new(ns[la], ns[lb], ns[lc], ns[ld]);
+            // Faces: match this element's slot GLL positions onto the
+            // canonical face Vec (robust to the neighbor's face orientation).
+            elem_coords.clear();
+            for &n in ns.iter().take(8) {
+                let c = mesh.node_coords(n);
+                elem_coords.push([c[0], c[1], c[2]]);
+            }
+            // Scale the match tolerance with the element size so large
+            // meshes don't hit absolute-epsilon round-off.
+            let scale = elem_coords.iter()
+                .fold(1.0_f64, |m, q| m.max(q[0].abs()).max(q[1].abs()).max(q[2].abs()));
+            let tol = 1e-9 * scale;
+            for &(slot0, verts) in &face_runs {
+                let key = QuadFaceKey::new(ns[verts[0]], ns[verts[1]], ns[verts[2]], ns[verts[3]]);
                 let fd = &quad_face_pk_map[&key];
-                for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
+                let pos = &face_pos[&key];
+                for k in 0..face_dofs_per {
+                    let p = phys_pos(&elem_coords, &ref_coords[slot0 + k]);
+                    // Exact match up to trilinear-mapping round-off.
+                    let j = pos.iter()
+                        .position(|&q| (q[0] - p[0]).abs() < tol
+                            && (q[1] - p[1]).abs() < tol
+                            && (q[2] - p[2]).abs() < tol)
+                        .unwrap_or_else(|| panic!(
+                            "build_pk_hex: face slot position {p:?} not found on face {key:?}"));
+                    dofs_flat[base + off + k] = fd[j];
+                }
                 off += face_dofs_per;
             }
+            // Volume: element-private, created in slot order.
             for _ in 0..volume_dofs_per {
                 dofs_flat[base + off] = next_dof; next_dof += 1; off += 1;
             }
@@ -1574,48 +1700,24 @@ impl DofManager {
             let base = n as usize * dim;
             dof_coords[base..base + dim].copy_from_slice(c);
         }
-        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
-            let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
-            for (k, &did) in dofs.iter().enumerate() {
-                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
-                let base = did as usize * dim;
-                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
-            }
-        }
-        // Face + volume DOF coords from factory ref element (trilinear interpolation)
-        if p >= 3 {
-            use fem_element::lagrange::factory::{ref_elem, ElemType};
-            let factory = ref_elem(ElemType::Hex, order);
-            let ref_coords = factory.dof_coords();
-            let face_vol_start = n_verts + n_edges * edge_dofs_per;
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                let c = [
-                    mesh.node_coords(ns[0]), mesh.node_coords(ns[1]),
-                    mesh.node_coords(ns[2]), mesh.node_coords(ns[3]),
-                    mesh.node_coords(ns[4]), mesh.node_coords(ns[5]),
-                    mesh.node_coords(ns[6]), mesh.node_coords(ns[7]),
-                ];
-                // Read the actual global DOF ids from dofs_flat: face/volume
-                // DOF ids are NOT a contiguous range (they interleave with
-                // edge DOFs created by later elements).
-                let ebase = e as usize * dofs_per_elem;
-                for k in 0..(n_faces * face_dofs_per + volume_dofs_per) {
-                    let did = dofs_flat[ebase + face_vol_start + k];
-                    let ri = n_verts + n_edges * edge_dofs_per + k;
-                    let rc = &ref_coords[ri];
-                    let (ex, ey, ez) = (rc[0], rc[1], rc[2]);
-                    let mut xp = [0.0; 3];
-                    for i in 0..8 {
-                        let nx = if (i & 1) != 0 { (1.0 + ex) / 2.0 } else { (1.0 - ex) / 2.0 };
-                        let ny = if (i & 2) != 0 { (1.0 + ey) / 2.0 } else { (1.0 - ey) / 2.0 };
-                        let nz = if (i & 4) != 0 { (1.0 + ez) / 2.0 } else { (1.0 - ez) / 2.0 };
-                        let ni = nx * ny * nz;
-                        for d in 0..3 { xp[d] += ni * c[i][d]; }
-                    }
-                    let base = did as usize * dim;
-                    dof_coords[base..base + 3].copy_from_slice(&xp);
-                }
+        // Edge/face/volume DOF coordinates: the HexQk GLL reference position
+        // of each slot, trilinearly mapped through the element.  For edge
+        // slots this is the exact linear interpolation at gll[1..p] (MFEM
+        // GaussLobatto), NOT the equispaced 1/p..(p-1)/p positions the old
+        // code wrote for p >= 3.  Interior DOFs are element-private, and
+        // edge/face DOFs map to the same physical point from every incident
+        // element, so repeated writes agree.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let c: [[f64; 3]; 8] = std::array::from_fn(|i| {
+                let ci = mesh.node_coords(ns[i]);
+                [ci[0], ci[1], ci[2]]
+            });
+            let ebase = e as usize * dofs_per_elem;
+            for slot in 8..dofs_per_elem {
+                let did = dofs_flat[ebase + slot] as usize;
+                let xp = phys_pos(&c, &ref_coords[slot]);
+                dof_coords[did * dim..did * dim + 3].copy_from_slice(&xp);
             }
         }
 
@@ -1629,7 +1731,6 @@ impl DofManager {
             face_variants: HashMap::new(),
         }
     }
-
     // ─── Pk for Prism (triangular prism) ──────────────────────────────────────
 
     /// General-order Lagrange DOF manager for triangular prism meshes.
