@@ -93,13 +93,42 @@ miniapps/
 │                                剪 exit 3; GLVis 不支持; C++ 为并行
 │                                -only miniapp, 全场数值对照不可行
 │                                (mfem49 串行), 对照走分段 C++ harness)
+├── multidomain/             ← 对应 miniapps/multidomain/ (H1 版串行
+│   └── multidomain.rs          裁剪; ParSubMesh→extract_submesh、
+│                                TransferMap→界面 dof 坐标匹配; 结构量
+│                                (NE/NV/dofs/ess 数) 与 C++ 全一致,
+│                                block 场终态相对差 7e-6; cylinder 发
+│                                散暴露内核缺口: refine_hex8_uniform
+│                                子单元模板 ≠ MFEM UniformRefinement3D
+│                                (P0 级发现, 见 round3_plan 债务);
+│                                _nd/_rt 版未做)
+├── adjoint/                 ← 对应 miniapps/adjoint/
+│   ├── adjoint_cvodes_roberts.rs ← Robertson 伴随敏感性 (自研
+│   │                              Nordsieck BDF 对位 CVODES 语义,
+│   │                              检查点二分; 对照 scipy Radau 参考
+│   │                              y(4e7)/G/dGdp 1e-4~1e-7 量化一致)
+│   └── adjoint_advection_diffusion.rs ← 串行子集; -fd 1 自洽
+│                                  (伴随 vs 有限差分 5.8e-7/1.2e-7)
 ├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
 ├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
-└── ...
+└── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
+                                 投影; C++ 对照 6/7 案例一致, 1 例暴露
+                                 tet io round-trip 取向归一化内核缺口)
 ```
 
 ## 本轮新增核心库能力 (fem-rs crates)
 
+- `fem_assembly::dist_solver` — MFEM `fem/dist_solver.*` 1:1 距离场
+  支撑库 (3924 行)：Heat/Normalization/p-Laplace 距离求解器、
+  PDEFilter (ScreenedPoisson/PUMPLaplacian)、Extrapolator
+  (Aslam/Bochkov)、ShiftedFaceMarker；14 单测含 3 组 C++ 串行交叉
+  验证 —— 解锁 shifted/ 三 miniapp
+- `fem_solver::adjoint::time_dependent` — TimeDependentAdjointOperator
+  对位 (自研 Nordsieck BDF 伴随 + 检查点二分, 8 单测; 过程中发现并
+  规避 bdf.rs k≥2 残差缺 l1 因子的既有缺陷)
+- 向量 H1 弹性 LOR (space/lor.rs LorVecH1 + solver/lor.rs 块对角
+  LOR-AMG 路径, 25 测试绿) — lor_elast miniapp 半成品在
+  miniapps/solvers/lor_elast.rs 未声明 (FGMRES 收敛未验证)
 - `fem_assembly::ad` — 双数自动微分 (MFEM `linalg/dual.hpp` +
   `miniapps/autodiff/admfem.hpp` 1:1)：Dual 类型 + QFunction/
   QVectorFunc 驱动，13 个单测对 FD/解析导数 <1e-12；示例

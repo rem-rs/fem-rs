@@ -453,3 +453,19 @@ path = "../miniapps/spde/generate_random_field.rs"
 [[example]]
 name = "autodiff_example"
 path = "../miniapps/autodiff/autodiff_example.rs"
+
+[[example]]
+name = "multidomain"
+path = "../miniapps/multidomain/multidomain.rs"
+
+[[example]]
+name = "adjoint_cvodes_roberts"
+path = "../miniapps/adjoint/adjoint_cvodes_roberts.rs"
+
+[[example]]
+name = "adjoint_advection_diffusion"
+path = "../miniapps/adjoint/adjoint_advection_diffusion.rs"
+
+[[example]]
+name = "tools_nodal_transfer"
+path = "../miniapps/tools/nodal_transfer.rs"
