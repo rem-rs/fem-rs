@@ -222,11 +222,15 @@ pub use elasticity_component::ElasticityComponentIntegrator;
 pub mod vector_boundary_lf;
 pub mod sbm2_dirichlet;
 pub mod sbm2_neumann;
+pub mod sbm3_dirichlet;
+pub mod sbm3_neumann;
 pub mod misc_integrators;
 
 pub use vector_boundary_lf::VectorBoundaryLFIntegrator;
 pub use sbm2_dirichlet::{SBM2DirichletLFIntegrator, SBM2DirichletIntegrator};
 pub use sbm2_neumann::{SBM2NeumannLFIntegrator, SBM2NeumannIntegrator};
+pub use sbm3_dirichlet::{Sbm3DirichletIntegrator, Sbm3DirichletLFIntegrator};
+pub use sbm3_neumann::{Sbm3NeumannIntegrator, Sbm3NeumannLFIntegrator};
 pub use misc_integrators::{
     VectorDivergenceIntegrator, VectorConvectionNLFIntegrator,
     WhiteGaussianNoiseDomainLFIntegrator, NormalTraceJumpIntegrator,
