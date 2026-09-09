@@ -838,6 +838,7 @@ dependencies = [
  "fem-assembly",
  "fem-core",
  "fem-element",
+ "fem-io",
  "fem-linalg",
  "fem-solver",
  "fem-space",
