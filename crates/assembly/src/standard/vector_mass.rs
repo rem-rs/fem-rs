@@ -47,11 +47,19 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for VectorMassIntegrator<C> {
         }
     }
 
-    /// MFEM `VectorFEMassIntegrator::GetIntegrationOrder`:
-    /// `order = Trans.OrderW() + 2*el.GetOrder()`. For affine simplex,
-    /// `OrderW() = 1`, so order = 1 + 2*1 = 3 for order=1.
+    /// MFEM `VectorFEMassIntegrator` (bilininteg.cpp):
+    /// `order = Trans.OrderW() + 2*el.GetOrder()`, where the RT/ND element
+    /// order is `GetOrder() = k + 1` (not the collection order `k`) and
+    /// `OrderW()` is geometry-dependent: 0 (affine simplex), 1 (affine quad),
+    /// 2 (affine hex).  A single geometry-free value must cover all reference
+    /// geometries, so return the affine-quad value `2k + 3`: it is bit-matching
+    /// on quads, and on simplices/hexes it over-integrates by one order — the
+    /// integral itself is exact, so only summation round-off differs.
+    /// Under-integrating (the previous `1 + 2k`) made the local RT mass blocks
+    /// rank-deficient (quad RT0 with a 1×1 rule: diag = pair coupling = 1/4),
+    /// i.e. a globally singular mass matrix.
     fn integration_order(&self, space_order: u8) -> Option<u8> {
-        Some(1 + 2 * space_order)
+        Some(2 * space_order + 3)
     }
 }
 
