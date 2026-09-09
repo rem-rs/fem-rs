@@ -118,7 +118,13 @@ pub mod complex_ams;
 pub mod constrained;
 pub mod constrained_operator;
 pub mod dae;
+/// Serial port of MFEM `miniapps/solvers/darcy_solver.{hpp,cpp}`
+/// (`BDPMinresSolver` + MFEM-format MINRES).
+pub mod darcy_solvers;
 pub mod div_free;
+/// Serial port of MFEM `miniapps/solvers/div_free_solver.{hpp,cpp}`
+/// (`DivFreeSolver`, decoupled + coupled modes).
+pub mod div_free_solver;
 pub mod eigen;
 pub mod events;
 pub mod geometric_mg;
