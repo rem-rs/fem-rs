@@ -111,6 +111,8 @@ pub use fem_amg as amg;
 pub mod block;
 pub mod block_gmres;
 pub mod block_operator;
+pub mod bpcg;
+pub mod bramble_pasciak;
 pub mod butcher;
 pub mod complex_ams;
 pub mod constrained;

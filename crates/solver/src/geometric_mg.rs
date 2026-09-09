@@ -1047,14 +1047,14 @@ fn estimate_max_eigenvalue_with_op(
 /// used by MFEM's `Vector::Randomize(seed)` → `srand(seed)` + `rand()`.
 /// `next()` returns the 31-bit `rand()` value; `rand_real()` =
 /// `rand()/(RAND_MAX+1)` (MFEM `rand_real` in linalg/vector.hpp).
-struct GlibcRand {
+pub(crate) struct GlibcRand {
     state: Vec<u32>,
     fptr: usize,
     rptr: usize,
 }
 
 impl GlibcRand {
-    fn new(seed: u32) -> Self {
+    pub(crate) fn new(seed: u32) -> Self {
         const DEG: usize = 31;
         const SEP: usize = 3;
         let mut state = vec![0u32; DEG];
@@ -1084,7 +1084,7 @@ impl GlibcRand {
     }
 
     /// One `rand()` draw (31-bit), pointer advance exactly as `__random_r`.
-    fn next(&mut self) -> u32 {
+    pub(crate) fn next(&mut self) -> u32 {
         let n = self.state.len();
         let val = self.state[self.fptr].wrapping_add(self.state[self.rptr]);
         self.state[self.fptr] = val;
@@ -1103,7 +1103,7 @@ impl GlibcRand {
     }
 
     /// `rand() / (RAND_MAX + 1)` with `RAND_MAX = 2^31 - 1` (MFEM `rand_real`).
-    fn rand_real(&mut self) -> f64 {
+    pub(crate) fn rand_real(&mut self) -> f64 {
         self.next() as f64 / 2147483648.0
     }
 }
