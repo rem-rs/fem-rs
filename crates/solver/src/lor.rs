@@ -14,7 +14,7 @@
 
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
 use fem_linalg::{csr_spmm, fem_to_linlvo_csr, CsrMatrix};
-pub use linlvo::amg::AmgConfig;
+pub use linlvo::amg::{AmgConfig, CoarsenStrategy, SmootherType};
 use linlvo::{
     amg::{AmgHierarchy, AmgPrecond},
     core::preconditioner::Preconditioner,
@@ -568,7 +568,7 @@ pub fn assemble_lor_elasticity_blocks<const D: usize>(
             }
             et => panic!(
                 "assemble_lor_elasticity_blocks: unsupported P1 LOR element \
-                 {et:?} (supported: Quad4/Hex8/Tri3/Tet4)"
+                 {et:?} (supported: Quad4/Hex8/Tri3)"
             ),
         }
     }
@@ -1207,6 +1207,87 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Higher-order (order 2 and 3) 3-D hex end-to-end: PCG + block-diagonal
+    /// LOR-AMG must converge with bounded iterations on the beam-like
+    /// 2x1x1 hex mesh.  (Entry-wise block equality with the HO diagonal
+    /// blocks holds only at order 1 — the P1 refined-mesh hat basis differs
+    /// from the HO nodal basis — so the permutation is exercised through the
+    /// solve instead.)
+    #[test]
+    fn lor_elasticity_hex_high_order_converges() {
+        fn build(order: u8) -> (CsrMatrix<f64>, Vec<f64>, Vec<u32>, Mesh<3>) {
+            let mesh =
+                Mesh::<3>::make_cartesian_3d(2, 1, 1, ElementType::Hex8, 1.0, 0.5, 0.5, false);
+            let dim = 3usize;
+            let space = VectorH1Space::new(mesh.clone(), order, dim as u8);
+            let integ = HoElasticity::new(1.0_f64, 1.0_f64);
+            let qo = 2 * order + 1;
+            let mut a = fem_assembly::Assembler::assemble_bilinear(&space, &[&integ], qo);
+            let n_scalar = space.n_scalar_dofs();
+            let xs = space
+                .interpolate_vec(&|p| {
+                    vec![
+                        (std::f64::consts::PI * p[0]).sin(),
+                        (std::f64::consts::PI * p[1]).sin(),
+                        p[0] * (1.0 - p[0]) * p[1] * (1.0 - p[1]),
+                    ]
+                })
+                .as_slice()
+                .to_vec();
+            let tags = mesh.unique_boundary_tags();
+            let b_all = boundary_dofs(&mesh, space.scalar_dof_manager(), &tags);
+            let ess_scalar: Vec<u32> = b_all
+                .into_iter()
+                .filter(|&d| space.scalar_dof_manager().dof_coord(d)[0] < 1e-12)
+                .collect();
+            let mut ess = Vec::new();
+            let mut rhs = xs.clone();
+            for &d in &ess_scalar {
+                for c in 0..dim {
+                    rhs[c * n_scalar + d as usize] = 0.0;
+                    ess.push((c * n_scalar) as u32 + d);
+                }
+            }
+            let mut b = vec![0.0_f64; a.nrows];
+            a.spmv(&rhs, &mut b);
+            let vals = vec![0.0_f64; ess.len()];
+            let mut x0 = vec![0.0_f64; a.nrows];
+            form_linear_system(&mut a, &mut b, &mut x0, &ess, &vals);
+            (a, b, ess_scalar, mesh)
+        }
+
+        for (order, max_iters) in [(2u8, 80usize), (3u8, 250usize)] {
+            let (a, b, ess_scalar, mesh) = build(order);
+            let lor = LorH1::<3>::new(&mesh, order).expect("LorH1 hex");
+            let blocks = assemble_lor_elasticity_blocks(lor.lor_mesh(), &|_| 1.0, &|_| 1.0);
+            assert_eq!(blocks.len(), 3);
+            let prec = LorElasticityPrecond::build(
+                &blocks,
+                lor.perm(),
+                lor.n_ho(),
+                &ess_scalar,
+                &AmgConfig::default(),
+            );
+            let mut x = vec![0.0_f64; a.nrows];
+            let cfg = SolverConfig {
+                rtol: 1e-8,
+                max_iter: max_iters,
+                ..Default::default()
+            };
+            let res = crate::solve_pcg_precond(&a, &b, &mut x, &prec, &cfg).unwrap();
+            assert!(
+                res.converged,
+                "order {order}: no convergence, res {:.3e}",
+                res.final_residual
+            );
+            assert!(
+                res.iterations <= max_iters,
+                "order {order}: {} iterations",
+                res.iterations
+            );
         }
     }
 
