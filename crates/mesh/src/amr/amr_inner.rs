@@ -1317,7 +1317,19 @@ vertex_parents: vec![],
         }
         _ => panic!("refine_uniform_3d: unsupported {:?}", mesh.elem_type),
     };
-    rebuild_3d_boundary(&mut result, mesh);
+    match mesh.elem_type {
+        // Hex8/Hex20/Hex27: `refine_nonconforming_hex` already rebuilt the
+        // boundary faces itself — topologically, from its own midpoint and
+        // face-center maps, in the exact MFEM `new_boundary` order. Running
+        // the coordinate-lookup rebuild here would be redundant for linear
+        // meshes and *wrong* for curved ones (new vertex coordinates are the
+        // exact geometry-dof picks, not recomputable averages).
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {}
+        // Tet/Prism/Pyramid meshes have linear vertex coordinates (only the
+        // Hex8 kernels carry curved geometry), so the coordinate-keyed
+        // rebuild is exact.
+        _ => rebuild_3d_boundary(&mut result, mesh, None),
+    }
     result
 }
 
@@ -1839,7 +1851,14 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
             nc_vertex_view: None,
 vertex_parents: vec![],
 };
-    rebuild_3d_boundary(&mut result, mesh);
+    rebuild_3d_boundary(
+        &mut result,
+        mesh,
+        Some(crate::rebuild_boundary::BoundaryRebuildMaps {
+            midpoints: &em,
+            quad_face_centers: &quad_fc,
+        }),
+    );
     result
 }
 
@@ -4251,7 +4270,7 @@ fn propagate_nc_limit_quad(
 /// Top    face (z=1, CCW from outside): 4,5,6,7
 /// Vertical edges: 0→4, 1→5, 2→6, 3→7
 /// ```
-fn local_edges_hex() -> [(usize, usize); 12] {
+pub(crate) fn local_edges_hex() -> [(usize, usize); 12] {
     [
         // Bottom face
         (0, 1), (1, 2), (2, 3), (3, 0),
@@ -4335,46 +4354,66 @@ pub fn refine_nonconforming_hex(
     let mut body_center_map: HashMap<ElemId, NodeId>         = HashMap::new();
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
+    // Curved (order-2) hex geometry: new vertices must take the *exact* parent
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
+    let geo = super::curved_hex::HexQ2Geometry::new(mesh);
 
     for &e in marked {
         let ns = mesh.elem_nodes(e);
 
         // Edge midpoints (12 per Hex8)
-        for &(a, b) in &local_edges_hex() {
+        for (li, &(a, b)) in local_edges_hex().iter().enumerate() {
             let key = edge_key(ns[a], ns[b]);
             midpoint_map.entry(key).or_insert_with(|| {
-                let xa = mesh.coords_of(ns[a]);
-                let xb = mesh.coords_of(ns[b]);
-                new_coords.push(0.5 * (xa[0] + xb[0]));
-                new_coords.push(0.5 * (xa[1] + xb[1]));
-                new_coords.push(0.5 * (xa[2] + xb[2]));
+                let xyz = match &geo {
+                    Some(g) => g.edge_pick(e, li),
+                    None => {
+                        let xa = mesh.coords_of(ns[a]);
+                        let xb = mesh.coords_of(ns[b]);
+                        [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1]), 0.5 * (xa[2] + xb[2])]
+                    }
+                };
+                new_coords.extend_from_slice(&xyz);
                 let id = next_node; next_node += 1; id
             });
         }
 
         // Face centroids (6 per Hex8)
-        for face in local_faces_hex() {
+        for (fi, face) in local_faces_hex().iter().enumerate() {
             let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
             let fkey = hex_face_key(fns);
             face_center_map.entry(fkey).or_insert_with(|| {
-                let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
-                for &fn_ in &fns {
-                    let c = mesh.coords_of(fn_);
-                    x += c[0]; y += c[1]; z += c[2];
-                }
-                new_coords.push(x / 4.0); new_coords.push(y / 4.0); new_coords.push(z / 4.0);
+                let xyz = match &geo {
+                    Some(g) => g.face_pick(e, fi),
+                    None => {
+                        let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+                        for &fn_ in &fns {
+                            let c = mesh.coords_of(fn_);
+                            x += c[0]; y += c[1]; z += c[2];
+                        }
+                        [x / 4.0, y / 4.0, z / 4.0]
+                    }
+                };
+                new_coords.extend_from_slice(&xyz);
                 let id = next_node; next_node += 1; id
             });
         }
 
         // Body centroid (1 per Hex8)
         body_center_map.entry(e).or_insert_with(|| {
-            let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
-            for k in 0..8 {
-                let c = mesh.coords_of(ns[k]);
-                x += c[0]; y += c[1]; z += c[2];
-            }
-            new_coords.push(x / 8.0); new_coords.push(y / 8.0); new_coords.push(z / 8.0);
+            let xyz = match &geo {
+                Some(g) => g.body_pick(e),
+                None => {
+                    let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+                    for k in 0..8 {
+                        let c = mesh.coords_of(ns[k]);
+                        x += c[0]; y += c[1]; z += c[2];
+                    }
+                    [x / 8.0, y / 8.0, z / 8.0]
+                }
+            };
+            new_coords.extend_from_slice(&xyz);
             let id = next_node; next_node += 1; id
         });
     }
@@ -4443,6 +4482,9 @@ pub fn refine_nonconforming_hex(
 
     let mut new_conn: Vec<NodeId> = Vec::new();
     let mut new_tags: Vec<i32>    = Vec::new();
+    // Fine element → (parent element, child octant) map for the refined
+    // high-order geometry (super::curved_hex::IDENTITY = copied element).
+    let mut fine_parent = Vec::<(ElemId, u8)>::with_capacity(n_elems * 8);
 
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
@@ -4450,6 +4492,7 @@ pub fn refine_nonconforming_hex(
 
         if marked_set.contains(&e) {
             let bc = *body_center_map.get(&e).unwrap();
+            fine_parent.extend((0..8u8).map(|ch| (e, ch)));
 
             // 8 children, one per corner
             // child 0: corner n0; edges (0,1),(0,3),(0,4); faces bottom(0),front(2),left(4)
@@ -4502,6 +4545,7 @@ pub fn refine_nonconforming_hex(
         } else {
             for k in 0..8 { new_conn.push(ns[k]); }
             new_tags.push(tag);
+            fine_parent.push((e, super::curved_hex::IDENTITY));
         }
     }
 
@@ -4586,25 +4630,27 @@ pub fn refine_nonconforming_hex(
         let m_da = midpoint_map.get(&edge_key(d, a)).copied();
 
         if let (Some(mab), Some(mbc), Some(mcd), Some(mda)) = (m_ab, m_bc, m_cd, m_da) {
-            // Compute face centroid
-            let coords: Vec<[f64; 3]> = [a, b, c, d].iter().map(|&n| mesh.coords_of(n)).collect();
-            let (fcx, fcy, fcz) = (
-                (coords[0][0] + coords[1][0] + coords[2][0] + coords[3][0]) / 4.0,
-                (coords[0][1] + coords[1][1] + coords[2][1] + coords[3][1]) / 4.0,
-                (coords[0][2] + coords[1][2] + coords[2][2] + coords[3][2]) / 4.0,
-            );
             // Use face_center_map if available, else create inline (boundary face)
             let fkey = hex_face_key([a, b, c, d]);
             let fc = if let Some(&existing) = face_center_map.get(&fkey) {
                 existing
             } else {
                 // Boundary face of an unrefined element whose edges were split
-                // by a refined neighbor — create face center inline.
+                // by a refined neighbor — create face center inline. For
+                // curved geometry take the *exact* face geometry-dof value
+                // from the adjacent element; otherwise the straight centroid.
                 let fc_id = next_node;
                 next_node += 1;
-                new_coords.push(fcx);
-                new_coords.push(fcy);
-                new_coords.push(fcz);
+                let xyz = match &geo {
+                    Some(g) => face_elems
+                        .get(&fkey)
+                        .and_then(|adj| {
+                            adj.iter().find_map(|&e2| g.face_pick_by_nodes(e2, [a, b, c, d]))
+                        })
+                        .unwrap_or_else(|| straight_face_center(mesh, [a, b, c, d])),
+                    None => straight_face_center(mesh, [a, b, c, d]),
+                };
+                new_coords.extend_from_slice(&xyz);
                 fc_id
             };
             // 4 child Quad4 faces
@@ -4622,10 +4668,25 @@ pub fn refine_nonconforming_hex(
         new_coords, new_conn, new_tags, ElementType::Hex8,
         new_face_conn, new_face_tags, ElementType::Quad4,
     );
+    if geo.is_some() {
+        new_mesh.geometry =
+            super::curved_hex::build_refined_hex_geometry(mesh, &new_mesh, &fine_parent);
+    }
     if let Some(config) = project_boundary {
         new_mesh = project_boundary_to_cad(&new_mesh, config, 3);
     }
     (new_mesh, constraints, face_constraints, midpoint_map)
+}
+
+/// Straight centroid of a quad's four corners (accumulator order matches the
+/// refinement kernels: per-component running sums over the corner list).
+fn straight_face_center(mesh: &Mesh<3>, fns: [NodeId; 4]) -> [f64; 3] {
+    let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for &n in &fns {
+        let c = mesh.coords_of(n);
+        x += c[0]; y += c[1]; z += c[2];
+    }
+    [x / 4.0, y / 4.0, z / 4.0]
 }
 
 // ─── Prism6 uniform refinement ──────────────────────────────────────────────
@@ -7201,16 +7262,59 @@ pub fn refine_hex8_uniform(
     let mut mm: HashMap<(NodeId,NodeId),NodeId> = HashMap::new();
     let mut fcm: HashMap<[NodeId;4],NodeId> = HashMap::new();
     let mut bcm: HashMap<ElemId,NodeId> = HashMap::new();
+    // Curved (order-2) hex geometry: new vertices must take the *exact* parent
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
+    let geo = super::curved_hex::HexQ2Geometry::new(mesh);
     let mut nc = mesh.coords.clone(); let mut nn = mesh.n_nodes() as NodeId;
     for &e in &marked_set {
         let ns = mesh.elem_nodes(e);
-        for &(a,b) in &local_edges_hex() { let k=edge_key(ns[a],ns[b]); mm.entry(k).or_insert_with(||{let xa=mesh.coords_of(ns[a]);let xb=mesh.coords_of(ns[b]);nc.push(0.5*(xa[0]+xb[0]));nc.push(0.5*(xa[1]+xb[1]));nc.push(0.5*(xa[2]+xb[2]));let id=nn;nn+=1;id}); }
-        for face in local_faces_hex() { let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]]; let fk=hex_face_key(fns); fcm.entry(fk).or_insert_with(||{let(mut x,mut y,mut z)=(0.0,0.0,0.0);for&fn_ in &fns{let c=mesh.coords_of(fn_);x+=c[0];y+=c[1];z+=c[2];}nc.push(x/4.0);nc.push(y/4.0);nc.push(z/4.0);let id=nn;nn+=1;id}); }
-        bcm.entry(e).or_insert_with(||{let(mut x,mut y,mut z)=(0.0,0.0,0.0);for k in 0..8{let c=mesh.coords_of(ns[k]);x+=c[0];y+=c[1];z+=c[2];}nc.push(x/8.0);nc.push(y/8.0);nc.push(z/8.0);let id=nn;nn+=1;id});
+        for (li, &(a,b)) in local_edges_hex().iter().enumerate() {
+            let k=edge_key(ns[a],ns[b]);
+            mm.entry(k).or_insert_with(||{
+                let xyz = match &geo {
+                    Some(g) => g.edge_pick(e, li),
+                    None => {
+                        let xa=mesh.coords_of(ns[a]);let xb=mesh.coords_of(ns[b]);
+                        [0.5*(xa[0]+xb[0]),0.5*(xa[1]+xb[1]),0.5*(xa[2]+xb[2])]
+                    }
+                };
+                nc.extend_from_slice(&xyz);let id=nn;nn+=1;id
+            });
+        }
+        for (fi, face) in local_faces_hex().iter().enumerate() {
+            let fns=[ns[face[0]],ns[face[1]],ns[face[2]],ns[face[3]]];
+            let fk=hex_face_key(fns);
+            fcm.entry(fk).or_insert_with(||{
+                let xyz = match &geo {
+                    Some(g) => g.face_pick(e, fi),
+                    None => {
+                        let(mut x,mut y,mut z)=(0.0,0.0,0.0);
+                        for&fn_ in &fns{let c=mesh.coords_of(fn_);x+=c[0];y+=c[1];z+=c[2];}
+                        [x/4.0,y/4.0,z/4.0]
+                    }
+                };
+                nc.extend_from_slice(&xyz);let id=nn;nn+=1;id
+            });
+        }
+        bcm.entry(e).or_insert_with(||{
+            let xyz = match &geo {
+                Some(g) => g.body_pick(e),
+                None => {
+                    let(mut x,mut y,mut z)=(0.0,0.0,0.0);
+                    for k in 0..8{let c=mesh.coords_of(ns[k]);x+=c[0];y+=c[1];z+=c[2];}
+                    [x/8.0,y/8.0,z/8.0]
+                }
+            };
+            nc.extend_from_slice(&xyz);let id=nn;nn+=1;id
+        });
     }
     let ge=|a:usize,b:usize,ns:&[NodeId]|->NodeId{*mm.get(&edge_key(ns[a],ns[b])).expect("em")};
     let gf=|fi:usize,ns:&[NodeId]|->NodeId{let f=local_faces_hex()[fi];*fcm.get(&hex_face_key([ns[f[0]],ns[f[1]],ns[f[2]],ns[f[3]]])).expect("fc")};
     let mut ncn=Vec::new();let mut nt=Vec::new();
+    // Fine element → (parent element, child octant) map for the refined
+    // high-order geometry (super::curved_hex::IDENTITY = copied element).
+    let mut fine_parent = Vec::<(ElemId, u8)>::new();
     for e in 0..n_elems as ElemId {
         let ns=mesh.elem_nodes(e);let tag=mesh.elem_tags[e as usize];
         if marked_set.contains(&e) { let bc=*bcm.get(&e).unwrap();
@@ -7222,7 +7326,11 @@ pub fn refine_hex8_uniform(
             ncn.extend_from_slice(&[gf(2,ns),ge(1,5,ns),gf(5,ns),bc,ge(4,5,ns),ns[5],ge(5,6,ns),gf(1,ns)]);nt.push(tag);
             ncn.extend_from_slice(&[bc,gf(5,ns),ge(2,6,ns),gf(3,ns),gf(1,ns),ge(5,6,ns),ns[6],ge(6,7,ns)]);nt.push(tag);
             ncn.extend_from_slice(&[gf(4,ns),bc,gf(3,ns),ge(3,7,ns),ge(7,4,ns),gf(1,ns),ge(6,7,ns),ns[7]]);nt.push(tag);
-        } else { for k in 0..8 { ncn.push(ns[k]); } nt.push(tag); }
+            for ch in 0..8u8 { fine_parent.push((e, ch)); }
+        } else {
+            for k in 0..8 { ncn.push(ns[k]); } nt.push(tag);
+            fine_parent.push((e, super::curved_hex::IDENTITY));
+        }
     }
     let mut c = Vec::new();
     for (&(a,b),&mid) in &mm { if let Some(adj)=edge_elems.get(&(a,b)) { if adj.iter().any(|e|!marked_set.contains(e)) { c.push(HangingNodeConstraint::new_p1(mid as usize,a as usize,b as usize)); } } }
@@ -7237,7 +7345,10 @@ pub fn refine_hex8_uniform(
             else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
         } else { nfc.extend_from_slice(&[a,b,c,d]);nft.push(tag); }
     }
-    let nm=Mesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
+    let mut nm=Mesh::uniform(nc,ncn,nt,ElementType::Hex8,nfc,nft,ElementType::Quad4);
+    if geo.is_some() {
+        nm.geometry = super::curved_hex::build_refined_hex_geometry(mesh, &nm, &fine_parent);
+    }
     (nm,c,mm)
 }
 

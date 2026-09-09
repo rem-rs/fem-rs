@@ -20,3 +20,5 @@ fem-assembly = { path = "../assembly" }
 fem-solver   = { path = "../solver" }
 fem-space    = { path = "../space" }
 fem-linalg   = { path = "../linalg" }
+
+fem-io       = { path = "../io" }

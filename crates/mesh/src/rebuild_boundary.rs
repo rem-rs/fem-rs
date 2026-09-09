@@ -1,20 +1,24 @@
 //! Rebuild boundary face data for a 3-D mesh after refinement.
 //!
-//! 3-D refinement functions (`refine_nonconforming_3d`, `refine_nonconforming_hex`,
-//! `refine_prism6_uniform`) produce meshes without `face_conn` / `face_tags`.
-//! This module provides `rebuild_3d_boundary` to reconstruct them from the
-//! original mesh's boundary faces, matching MFEM's `UniformRefinement3D_base`
-//! boundary-element generation **exactly**:
+//! 3-D refinement functions (`refine_nonconforming_3d`, `refine_prism6_uniform`,
+//! `refine_pyramid5_uniform`, `refine_mixed_3d`) produce meshes without
+//! `face_conn` / `face_tags`. This module provides `rebuild_3d_boundary` to
+//! reconstruct them from the original mesh's boundary faces, matching MFEM's
+//! `UniformRefinement3D_base` boundary-element generation **exactly**:
 //!
 //! - **order**: for each original boundary face (in order), its 4 child faces
 //!   are emitted in MFEM's refinement-template order;
 //! - **vertex order**: each child face uses MFEM's template vertex order
 //!   (e.g. tri child 0 = `(v0, mid(e0), mid(e2))`).
 //!
-//! This makes the refined mesh's `face_conn` identical to MFEM's boundary
-//! element order, which is required for 1:1 port-submesh extraction
-//! (`SubMesh::CreateFromBoundary` traversal order) and hence for
-//! `SubMesh::Transfer` dof-mapping equality (MFEM ex35).
+//! The refined child vertices are resolved **topologically** whenever the
+//! caller supplies the refinement's midpoint / face-center maps
+//! ([`BoundaryRebuildMaps`]); this is exact by construction and is the
+//! required mode for curved meshes, whose new vertex coordinates are
+//! geometry-dof picks that cannot be recomputed from the corner coordinates.
+//! Without maps the lookup falls back to coordinate matching (exact
+//! bit-pattern first, then a 1e-12-quantized nearest match so that a
+//! last-ulp difference between two accumulation orders cannot panic).
 
 use std::collections::HashMap;
 use fem_core::{ElemId, NodeId};
@@ -29,6 +33,110 @@ struct CKey([u64; 3]);
 impl CKey {
     fn of(c: &[f64; 3]) -> Self {
         CKey([c[0].to_bits(), c[1].to_bits(), c[2].to_bits()])
+    }
+}
+
+/// Quantized coordinate key: resolves last-ulp differences between the
+/// refinement's and the rebuild's accumulation orders (~1e-12 spatial
+/// resolution, far below any mesh feature size).
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+struct QKey([i64; 3]);
+
+fn qkey_of(c: &[f64; 3]) -> QKey {
+    QKey(c.map(|v| (v * 1e12).round() as i64))
+}
+
+/// Topological maps from the refinement: canonical entity keys → refined
+/// node ids. `midpoints` is keyed by the sorted node pair of the edge,
+/// `quad_face_centers` by the sorted 4-tuple of face corner nodes.
+pub struct BoundaryRebuildMaps<'a> {
+    pub midpoints: &'a HashMap<(NodeId, NodeId), NodeId>,
+    pub quad_face_centers: &'a HashMap<[NodeId; 4], NodeId>,
+}
+
+/// Coordinate-keyed vertex lookup used when no topological maps are
+/// available (linear meshes only).
+struct CoordLookup {
+    exact: HashMap<CKey, NodeId>,
+    quantized: Option<HashMap<QKey, NodeId>>,
+}
+
+impl CoordLookup {
+    fn new(refined: &Mesh<3>, original: &Mesh<3>) -> Self {
+        let mut exact = HashMap::new();
+        for v in original.n_nodes() as NodeId..refined.n_nodes() as NodeId {
+            exact.insert(CKey::of(&refined.coords_of(v)), v);
+        }
+        CoordLookup { exact, quantized: None }
+    }
+
+    fn get(&mut self, xyz: [f64; 3]) -> Option<NodeId> {
+        if let Some(&v) = self.exact.get(&CKey::of(&xyz)) {
+            return Some(v);
+        }
+        // First miss: build the quantized index once.
+        if self.quantized.is_none() {
+            let mut q: HashMap<QKey, NodeId> = HashMap::new();
+            for (&CKey(bits), &v) in &self.exact {
+                let c: [f64; 3] = std::array::from_fn(|k| f64::from_bits(bits[k]));
+                q.insert(qkey_of(&c), v);
+            }
+            self.quantized = Some(q);
+        }
+        self.quantized.as_ref().and_then(|m| m.get(&qkey_of(&xyz))).copied()
+    }
+
+    fn lookup(&mut self, xyz: [f64; 3], what: &str) -> NodeId {
+        self.get(xyz)
+            .unwrap_or_else(|| panic!("rebuild_3d_boundary: refined {what} vertex not found"))
+    }
+}
+
+/// Refined-vertex resolver for the boundary child templates.
+enum Resolver<'a> {
+    /// Entity-key lookup into the refinement's own maps (always exact).
+    Topological(BoundaryRebuildMaps<'a>),
+    /// Coordinate matching against the refined mesh (linear meshes).
+    Coordinate(CoordLookup),
+}
+
+impl Resolver<'_> {
+    fn mid(&mut self, a: NodeId, b: NodeId, original: &Mesh<3>) -> NodeId {
+        if let Resolver::Topological(maps) = self {
+            let key = if a < b { (a, b) } else { (b, a) };
+            return *maps
+                .midpoints
+                .get(&key)
+                .unwrap_or_else(|| panic!("rebuild_3d_boundary: midpoint of edge ({a},{b}) missing from refinement maps"));
+        }
+        let ca = original.coords_of(a);
+        let cb = original.coords_of(b);
+        let xyz = [0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]), 0.5 * (ca[2] + cb[2])];
+        match self {
+            Resolver::Topological(_) => unreachable!(),
+            Resolver::Coordinate(c) => c.lookup(xyz, "edge-midpoint"),
+        }
+    }
+
+    fn quad_center(&mut self, fns: [NodeId; 4], original: &Mesh<3>) -> NodeId {
+        if let Resolver::Topological(maps) = self {
+            let mut key = fns;
+            key.sort_unstable();
+            return *maps
+                .quad_face_centers
+                .get(&key)
+                .unwrap_or_else(|| panic!("rebuild_3d_boundary: quad face center {key:?} missing from refinement maps"));
+        }
+        let mut s = [0.0_f64; 3];
+        for &v in &fns {
+            let p = original.coords_of(v);
+            for k in 0..3 { s[k] += p[k]; }
+        }
+        let xyz = [s[0] / 4.0, s[1] / 4.0, s[2] / 4.0];
+        match self {
+            Resolver::Topological(_) => unreachable!(),
+            Resolver::Coordinate(c) => c.lookup(xyz, "quad-face-center"),
+        }
     }
 }
 
@@ -47,25 +155,21 @@ impl CKey {
 ///   ch0: (v0, m0, qf, m3)  ch1: (m0, v1, m1, qf)
 ///   ch2: (qf, m1, v2, m2)  ch3: (m3, qf, m2, v3)
 /// ```
-pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
+///
+/// `maps` supplies the refinement's midpoint / quad-face-center ids
+/// topologically (required for curved meshes, recommended always); with
+/// `None` the vertices are resolved by coordinate matching against the
+/// refined mesh (exact bit patterns, with a quantized fallback).
+pub fn rebuild_3d_boundary(
+    refined: &mut Mesh<3>,
+    original: &Mesh<3>,
+    maps: Option<BoundaryRebuildMaps<'_>>,
+) {
     if refined.n_elems() == 0 { return; }
 
-    // New vertices of the refined mesh: edge midpoints, quad-face centers and
-    // hex body centers, appended after the old vertices (MFEM offsets oedge /
-    // oface / oelem).  Look them up by exact coordinates.
-    let mut by_coord: HashMap<CKey, NodeId> = HashMap::new();
-    for v in original.n_nodes() as NodeId..refined.n_nodes() as NodeId {
-        let c = refined.coords_of(v);
-        by_coord.insert(CKey::of(&c), v);
-    }
-    let mid = |a: NodeId, b: NodeId| -> NodeId {
-        let ca = original.coords_of(a);
-        let cb = original.coords_of(b);
-        let key = CKey::of(&[0.5 * (ca[0] + cb[0]), 0.5 * (ca[1] + cb[1]), 0.5 * (ca[2] + cb[2])]);
-        by_coord
-            .get(&key)
-            .copied()
-            .expect("rebuild_3d_boundary: refined edge-midpoint vertex not found")
+    let mut resolver = match maps {
+        Some(m) => Resolver::Topological(m),
+        None => Resolver::Coordinate(CoordLookup::new(refined, original)),
     };
 
     let mut new_face_conn = Vec::<NodeId>::new();
@@ -84,7 +188,7 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
 
         let mut m = Vec::with_capacity(nv);
         for k in 0..nv {
-            m.push(mid(bfv[k], bfv[(k + 1) % nv]));
+            m.push(resolver.mid(bfv[k], bfv[(k + 1) % nv], original));
         }
 
         let mut emit = |conn: &[NodeId], ftype: ElementType| {
@@ -104,15 +208,7 @@ pub fn rebuild_3d_boundary(refined: &mut Mesh<3>, original: &Mesh<3>) {
         } else {
             let (v0, v1, v2, v3) = (bfv[0], bfv[1], bfv[2], bfv[3]);
             let (m0, m1, m2, m3) = (m[0], m[1], m[2], m[3]);
-            // Quad face center: same expression as the refinement
-            // (x/4.0 accumulation order must match refine_mixed_3d:
-            //  sum then divide by 4).
-            let mut s = [0.0_f64; 3];
-            for &v in bfv {
-                let p = original.coords_of(v);
-                for k in 0..3 { s[k] += p[k]; }
-            }
-            let qf = by_coord[&CKey::of(&[s[0] / 4.0, s[1] / 4.0, s[2] / 4.0])];
+            let qf = resolver.quad_center([v0, v1, v2, v3], original);
             emit(&[v0, m0, qf, m3], ElementType::Quad4);
             emit(&[m0, v1, m1, qf], ElementType::Quad4);
             emit(&[qf, m1, v2, m2], ElementType::Quad4);

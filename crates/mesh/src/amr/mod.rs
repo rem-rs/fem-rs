@@ -3,6 +3,7 @@ pub mod convergence;
 pub use convergence::{ConvergenceStudy, ConvergenceRecord};
 mod amr_inner;
 mod bisect;
+mod curved_hex;
 mod p_refine;
 mod refine_2d;
 mod make_conforming;
