@@ -497,3 +497,7 @@ path = "../miniapps/solvers/lor_elast.rs"
 [[example]]
 name = "block_solvers"
 path = "../miniapps/solvers/block_solvers.rs"
+
+[[example]]
+name = "schrodinger_flow"
+path = "../miniapps/fluids/schrodinger_flow.rs"
