@@ -54,11 +54,29 @@
    **用户决策（dec-b763bef38babdd08）**：立项真 DPG 内核——按 C++ dpg/util/
    `complexweakform.hpp`+`weakform.hpp` 移植 ComplexDpgOperator/骨架空间/图范
    数测试空间，替换现有 6 个伪 DPG 示例。前置：清 6 文件 ~22 条警告并降格标注。
-9. **高阶 L2（quad/hex 任意阶）+ IntegratedGLL 基 + L2/RT change-of-basis +
-   QuadratureSpace/QFCoeff** — 阻塞 hdiv-linear-solver/（5）+ display-basis 的 hex L2≥P2 缺口。
+9. ~~**高阶 L2（quad/hex 任意阶）+ IntegratedGLL 基 + L2/RT change-of-basis +
+   QuadratureSpace/QFCoeff**~~ — ✅ **2026-09-10 第七轮大部分完成**（并行代理 α）：
+   `fem_assembly::qspace`/`qfunction`（MFEM `fem/qspace.*`+`qfunction.*` 1:1：
+   QuadratureSpaceBase trait、Full/Compressed offsets、按几何 IntRule、
+   Integrate/ProjectGridFunction/save-load；19 新测试，fem-assembly 505 绿；
+   L2 quad/hex orders 1..3 插值 <1e-12 验证）。**剩余**：FaceQuadratureSpace
+   （需 Mesh interior-face 变换设施）、IntegratedGLL 基与 L2/RT change-of-basis、
+   hdiv-linear-solver 5 miniapp 翻译（核心件已解锁）。
 10. **ND/RT HO 基升级为 GLL/IntegratedGLL（dof2nk 约定）** — LOR 谱等价的前提
-    （第二轮 4 个 ignored 谱测试待启用）。
-11. **多层 divergence-free + Bramble-Pasciak CG + 弹性 sys-AMG** — 阻塞 solvers/ 3 个。
+    （第二轮 4 个 ignored 谱测试待启用）。**2026-09-10：对齐规格已备**（并行
+    代理 δ）：`tmp/gll_alignment_spec.md`（C++ dof_map/Nodes/两阶段编号精确
+    规格 + fem-rs 受影响调用点 file:line 清单 + 迁移方案与 R1-R6 风险）+
+    `tmp/gll_ref/`（19 个 C++ 硬数据 dump：gll_and_orders/fe_nodes p2..p5）。
+    实施仍属专项工程（上次破坏 moment_fitting/prolongation）。
+    另：make_refined Tet4 任意 nref≥2 已完成（逐位 T1RF3/RF4/T1X2RF3/4/T2RF4）。
+11. ~~**多层 divergence-free + Bramble-Pasciak CG + 弹性 sys-AMG**~~ — ✅ **2026-09-10
+    第七轮核心完成**（并行代理 γ）：BPCG（第六轮收尾）+ `darcy_solvers.rs`
+    （MFEM MINRES 1:1 + BdpMinresSolver）+ `div_free_solver.rs`（DFSData/
+    DFSSpaces/BBT/SaddleSchwarz/AuxSpace/Product/MG 全链，assembled 串行版）；
+    block_solvers `-solver {bpcg,bdp,dfs-dec,dfs-coupled}` 四模式同网格 L²
+    误差逐位一致（u 8.739e-2/p 1.379e-1 @rs0），迭代数与 C++ 串行 harness
+    互证 30=30/49=49，加密有界；fem-solver 224 绿。**剩余**：PA/matrix-free
+    变体、MLDivFreeSolver、弹性 sys-AMG、fem-amg 稳健性（见 D10）。
 12. **external 依赖类（明确不做或部分做）**：tribol（自研 contact 已有，可写自有版本）、
     parelag（ParELAG 库）、lsf_integral（Algoim）、convert-dc 的 Sidre/Conduit/FMS
     （可做 VisIt↔HDF5↔VTK 子集）、~~cvsRoberts~~（✅ 第四轮自研 BDF 复刻完成）。
@@ -88,6 +106,20 @@
   — ✅ 第六轮修复：`Mesh::locate` 返回值从 `lp.barycentric` 改为 `lp.xi.to_vec()`。
 - **D7（新，备忘）QuadQk 工厂基在 [0,1] 参考域**，而 quad/hex lagrange 基与
   求积在 [-1,1]——域约定需在文档/类型名显式标注（hooke/dfem 代理踩坑一次）。
+- **D8（新，P1 级，2026-09-10 β 代理发现）`Mesh::make_periodic` 破坏单元几何**：
+  合并接缝顶点后单元几何跨接缝畸变（装配面积 49≠16）；MFEM 靠 nodal GF
+  保留每单元无畸变几何 + 副本坐标（几何/DOF 分离）。fem-rs Mesh/H1Space
+  无此表达 → schrodinger_flow 在 miniapp 内局部实现周期张量 H¹ 绕过。
+  修复方向 = Mesh 层引入"几何节点 vs DOF 节点"分离（对位 MFEM Nodes GF）。
+- **D9（新，P0 级，2026-09-10 β 代理发现）`fem_linalg::solve_gmres_complex`
+  对复数系统发散**：Givens 旋转/g 更新被简化为实算术，CN 算子残差增至
+  ~5e3。schrodinger_flow 已在 miniapp 内实现标准复 GMRES（全 2×2 复
+  Givens，12 步达机器精度）——应把该实现回填 linalg 替换有缺陷版本，
+  并删除 miniapp 局部副本（死代码纪律）。
+- **D10（新，P2 级，2026-09-10 γ 代理发现）fem-amg 对未消元 Darcy
+  Schur/BBᵀ 不稳健**：V-cycle 在这些矩阵上非 SPD → CG/MINRES 停滞；
+  block_solvers 默认改 Dense 精确逆（仅中小问题可用）。大网格前需修
+  fem-amg（对齐 hypre BoomerAMG 的 null-space/消元处理）。
 
 ## 第五轮完成（2026-09-09）
 
@@ -96,6 +128,18 @@
 - ~~hooke~~（C++ harness Newton 序列逐行一致，终态 ‖U‖ 1e-15）
 - ~~dfem-minimal-surface~~（-der 0/1/2 三模式同终态）
 - ~~lor_elast~~（D5 验收达标）
+
+## 第七轮完成（2026-09-10，四代理并行 + 主会话集成）
+
+- ~~schrodinger_flow~~（fluids/ 首件；leapfrog/jet 对照 C++ (B r,r) 序列
+  与 ‖ψ‖²/lapl ~1e-14；绕过 D8/D9，见债务）
+- ~~block-solvers 四模式~~（BPCG + BDP-MINRES + DivFree×2，L² 误差逐位
+  一致，迭代数对 C++ harness 30=30/49=49）
+- ~~QuadratureSpace/QF~~（#9 核心件，fem_assembly::qspace/qfunction）
+- ~~make_refined Tet4 nref≥3~~（T1RF3/RF4 等逐位）+ GLL 对齐规格与
+  C++ 硬数据（tmp/gll_alignment_spec.md、tmp/gll_ref/）
+- 回归基线：fem-assembly 505 / fem-element 436 / fem-mesh 287 /
+  fem-solver 224 / fem-space 262，全绿；新文件零警告
 
 ## 下一步队列
 
