@@ -493,3 +493,7 @@ path = "../miniapps/dfem/dfem_minimal_surface.rs"
 [[example]]
 name = "lor_elast"
 path = "../miniapps/solvers/lor_elast.rs"
+
+[[example]]
+name = "block_solvers"
+path = "../miniapps/solvers/block_solvers.rs"
