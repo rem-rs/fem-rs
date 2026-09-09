@@ -469,3 +469,27 @@ path = "../miniapps/adjoint/adjoint_advection_diffusion.rs"
 [[example]]
 name = "tools_nodal_transfer"
 path = "../miniapps/tools/nodal_transfer.rs"
+
+[[example]]
+name = "shifted_distance"
+path = "../miniapps/shifted/shifted_distance.rs"
+
+[[example]]
+name = "shifted_diffusion"
+path = "../miniapps/shifted/shifted_diffusion.rs"
+
+[[example]]
+name = "shifted_extrapolate"
+path = "../miniapps/shifted/shifted_extrapolate.rs"
+
+[[example]]
+name = "hooke"
+path = "../miniapps/hooke/hooke.rs"
+
+[[example]]
+name = "dfem_minimal_surface"
+path = "../miniapps/dfem/dfem_minimal_surface.rs"
+
+[[example]]
+name = "lor_elast"
+path = "../miniapps/solvers/lor_elast.rs"

@@ -97,11 +97,30 @@ miniapps/
 │   └── multidomain.rs          裁剪; ParSubMesh→extract_submesh、
 │                                TransferMap→界面 dof 坐标匹配; 结构量
 │                                (NE/NV/dofs/ess 数) 与 C++ 全一致,
-│                                block 场终态相对差 7e-6; cylinder 发
-│                                散暴露内核缺口: refine_hex8_uniform
-│                                子单元模板 ≠ MFEM UniformRefinement3D
-│                                (P0 级发现, 见 round3_plan 债务);
+│                                block 场终态相对差 7e-6; cylinder 案
+│                                例促成 D1 修复(曲线 hex 细化顶点吸附,
+│                                480/480 逐角点对照), 待流水线复验;
 │                                _nd/_rt 版未做)
+├── shifted/                 ← 对应 miniapps/shifted/ (SBM3 内核:
+│   ├── shifted_distance.rs     sbm3_dirichlet/neumann 积分器 1:1,
+│   ├── shifted_diffusion.rs    Nitsche patch test 3D 4e-13;
+│   └── shifted_extrapolate.rs  distance/diffusion/extrapolate 串行
+│                                驱动, C++ harness lst=1 解范数 2e-5;
+│                                -vis/ParaView 裁剪; D6 locate 缺陷
+│                                的 workaround 已注明)
+├── hooke/                   ← 对应 miniapps/hooke/ (串行 1:1;
+│   └── hooke.rs                NeoHookean AD 材料 + matrix-free
+│                                弹性算子; C++ harness Newton 序列
+│                                逐行一致, 终态 ‖U‖ 1e-15)
+├── dfem/                    ← 对应 miniapps/dfem/ (串行 1:1;
+│   └── dfem_minimal_surface.rs 极小曲面, -der 0/1/2 三模式
+│                                (AD/解析/FD) 同终态; Scherk 边界)
+├── solvers/lor_elast.rs     ← 弹性 LOR-AMG (D5 验收达标: 迭代数
+│                                三档加密有界 25/32/37/40 等; C++
+│                                串行 harness 9 例 ‖X‖/能量 ≤5.9e-11,
+│                                dof checksum 逐位; 根因=linlvo AMG
+│                                默认 V-cycle 非对称, 换 RS+SGS 对齐
+│                                hypre 配置)
 ├── adjoint/                 ← 对应 miniapps/adjoint/
 │   ├── adjoint_cvodes_roberts.rs ← Robertson 伴随敏感性 (自研
 │   │                              Nordsieck BDF 对位 CVODES 语义,
