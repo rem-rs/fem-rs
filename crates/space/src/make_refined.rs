@@ -53,21 +53,16 @@ fn find_local_dof<const D: usize>(
 /// Supported and verified (vertex-, element- and boundary-for-element against
 /// the MFEM 4.10 reference library):
 /// - `make_refined_2d`: Quad4 (nref = 2..4), Tri3 (any nref ≥ 2);
-/// - `make_refined_3d`: Hex8 (any nref ≥ 2; single and multi-hex verified).
+/// - `make_refined_3d`: Hex8 (any nref ≥ 2; single and multi-hex verified),
+///   Tet4 (any nref ≥ 2; nref = 2/3/4 verified bit-for-bit, including a
+///   hand-built 2-tet mesh with mixed face/edge orientations).
 ///
-/// The 3-D hex numbering is computed internally in the exact MFEM order
-/// (vertices → all edges in `Geometry::CUBE::Edges` order → all faces in
-/// `CUBE::FaceVert` order → volumes; GLL node positions), WITHOUT using the
-/// DofManager/HexQk (whose edge/face ordering differs from MFEM) — the LOR
-/// consumers only build P1 spaces on the returned mesh.
-///
-/// Tri3 with nref ≥ 3 and Tet4 are not supported yet: the DofManager's
-/// simplex edge-DOF coordinates are equally spaced while MFEM H1 uses
-/// Gauss-Lobatto nodes for p ≥ 3, so the refined-vertex numbering cannot be
-/// made 1:1 without first aligning the simplex DOF coordinates (plus
-/// P-refinement/prolongation code that assumes equal spacing) with MFEM.
-/// See `output/miniapp_gap_audit.md` (G3 notes).
-/// LOR mesh refinement for 2-D meshes (Quad4 nref = 2..4, Tri3 nref = 2).
+/// All numbering is computed internally in the exact MFEM order (vertices →
+/// edges in `Geometry::*::Edges` order → faces in `FaceVert` order →
+/// volumes/interior; GLL node positions), WITHOUT using the
+/// DofManager/HexQk/Pk elements (whose edge/face ordering and simplex edge
+/// coordinates differ from MFEM) — the LOR consumers only build P1 spaces on
+/// the returned mesh.
 pub fn make_refined_2d(orig: &Mesh<2>, nref: usize) -> Mesh<2> {
     assert!(nref >= 2, "make_refined: nref must be >= 2");
     match orig.elem_type {
@@ -80,7 +75,7 @@ pub fn make_refined_2d(orig: &Mesh<2>, nref: usize) -> Mesh<2> {
     }
 }
 
-/// LOR mesh refinement for 3-D all-Hex8 meshes (any nref >= 2).
+/// LOR mesh refinement for 3-D all-Hex8 / all-Tet4 meshes (any nref >= 2).
 pub fn make_refined_3d(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
     assert!(nref >= 2, "make_refined: nref must be >= 2");
     match orig.elem_type {
@@ -88,7 +83,7 @@ pub fn make_refined_3d(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
         ElementType::Tet4 => refine_tet(orig, nref),
         et => panic!(
             "make_refined_3d: unsupported element type {et:?}; \
-             supported: Hex8"
+             supported: Hex8 and Tet4"
         ),
     }
 }
@@ -184,9 +179,10 @@ fn h1_tri_numbering(orig: &Mesh<2>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
             }
         }
     }
-    // Interior DOF positions: uniform barycentric grid points (i/p, j/p),
-    // i, j ≥ 1, i + j ≤ p - 1 — any enumeration order is fine (the lattice
-    // matching in refine_tri pairs them by physical coordinates).
+    // Interior DOF positions: MFEM H1_TriangleElement interior nodes are the
+    // GLL-normalized barycentric points (cp[p-i-j], cp[i], cp[j]) / w with
+    // w = cp[i] + cp[j] + cp[p-i-j], enumerated j outer / i inner — the same
+    // order MFEM assigns the interior dof ids in.
     let mut iid = 0usize;
     for e in 0..n_elems {
         let ns = orig.element_nodes(e as u32);
@@ -195,18 +191,19 @@ fn h1_tri_numbering(orig: &Mesh<2>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
             orig.node_coords(ns[1]),
             orig.node_coords(ns[2]),
         ];
-        for s in 2..p {
-            for i in 1..s {
-                let j = s - i;
-                if j > p - 1 {
-                    continue;
-                }
+        // MFEM interior enumeration order: j outer, i inner (this fixes the
+        // global ids of the interior dofs, which MFEM assigns in this order).
+        for j in 1..p {
+            for i in 1..(p - j) {
                 let did = n_nodes as usize + edge_key_order.len() * edge_dofs_per + iid;
                 iid += 1;
-                let (x, y) = (i as f64 / p as f64, j as f64 / p as f64);
+                let w = gll[i] + gll[j] + gll[p - i - j];
                 let base = did * dim;
                 for d in 0..dim {
-                    coords[base + d] = (1.0 - x - y) * c[0][d] + x * c[1][d] + y * c[2][d];
+                    coords[base + d] = (gll[p - i - j] * c[0][d]
+                        + gll[i] * c[1][d]
+                        + gll[j] * c[2][d])
+                        / w;
                 }
             }
         }
@@ -1050,25 +1047,98 @@ fn refine_hex(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
     )
 }
 
-/// H1(order = p, Gauss-Lobatto) DOF numbering of an all-Tet4 mesh in the exact
-/// MFEM order: vertices, then ALL edge DOFs (element traversal, edges in MFEM
-/// `Geometry::TETRAHEDRON::Edges` order {0-1,0-2,0-3,1-2,1-3,2-3}, shared
-/// edges keep the first-assigned block).  Currently supports p = 2 (vertices +
-/// 6 edge midpoints per tet); face (p ≥ 3) and volume (p ≥ 4) DOFs are not
-/// implemented yet.
-fn h1_tet_numbering(orig: &Mesh<3>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
-    assert!(p == 2, "h1_tet_numbering: only p = 2 is implemented so far");
+/// Global slot, inside a triangle face-DOF block, of the element-local face
+/// slot at H1 interior index pair `(i_fe, j_fe)`, when the block's canonical
+/// corner order is `base` and the element's local corner order is `test`
+/// (vertex id lists with identical vertex sets).
+///
+/// This replicates MFEM's combination of `Mesh::GetTriOrientation(base, test)`
+/// with `H1_FECollection::DofOrderForOrientation(Geometry::TRIANGLE, ori)`
+/// (`TriDofOrd` tables in `fem/fe_coll.cpp`), expressed as a pure integer
+/// weight permutation instead of precomputed tables: a tri slot at interior
+/// index `(i_fe, j_fe)` carries Gauss-Lobatto cp-indices
+/// `(p-i_fe-j_fe, i_fe, j_fe)` on the (corner0, corner1, corner2) weights; the
+/// global slot's indices are those weights re-ordered onto the canonical
+/// corners, converted back to an `(i_g, j_g)` pair and finally to the block
+/// slot number `T - (p-j_g)(p-1-j_g)/2 + i_g - 1` (`T = (p-1)(p-2)/2`).
+/// Verified against the dumped MFEM `TriDofOrd` tables for p = 3..6
+/// (`tmp/gll_ref/gll_and_orders_cpp.txt`).
+fn tri_face_global_slot(
+    base: &[u32; 3],
+    test: &[u32; 3],
+    p: usize,
+    i_fe: usize,
+    j_fe: usize,
+    tri_dof: usize,
+) -> usize {
+    let triple = [p - i_fe - j_fe, i_fe, j_fe];
+    let mut g = [0usize; 3];
+    for (k, gk) in g.iter_mut().enumerate() {
+        let q = test.iter().position(|&v| v == base[k]).expect(
+            "make_refined: face orientation lookup requires identical corner sets",
+        );
+        *gk = triple[q];
+    }
+    let (i_g, j_g) = (g[1], g[2]);
+    tri_dof - ((p - j_g) * (p - 1 - j_g)) / 2 + i_g - 1
+}
+
+/// Result of [`h1_tet_numbering`]: the refined-mesh vertex coordinates, the
+/// per-element H1 dof lists (in FE slot order), and the shared edge/face dof
+/// blocks needed to enumerate boundary-element dofs.
+struct TetNumbering {
+    coords: Vec<f64>,
+    elem_dofs: Vec<Vec<u32>>,
+    /// Edge dof blocks keyed by sorted vertex pair (dofs along min → max).
+    edge_blocks: std::collections::HashMap<[u32; 2], Vec<u32>>,
+    /// Face dof blocks keyed by sorted vertex triple, with the canonical
+    /// corner order (the creating element's FaceVert order) and the block ids.
+    face_blocks: std::collections::HashMap<[u32; 3], ([u32; 3], Vec<u32>)>,
+    face_dofs_per: usize,
+}
+
+/// H1(order = p, Gauss-Lobatto) DOF numbering of an all-Tet4 mesh, MFEM-exact:
+///   1. vertices = original nodes (ids unchanged);
+///   2. ALL edge DOFs — element traversal in mesh order, each element's 6
+///      edges in MFEM `Geometry::TETRAHEDRON::Edges` order {0-1,0-2,0-3,
+///      1-2,1-3,2-3}, shared edges keep the first-assigned block; the block is
+///      oriented along the canonical (min vertex id → max vertex id) direction
+///      (MFEM `Mesh::GetEdgeVertices` sorts, `GetElementEdges` marks reversed
+///      local traversals with orientation -1 and `SegDofOrd[1]` reverses).
+///   3. ALL face DOFs — element traversal, 4 faces in MFEM `FaceVert` order
+///      {{1,2,3},{0,3,2},{0,1,3},{0,2,1}}, (p-1)(p-2)/2 DOFs per face, shared
+///      faces keep the block of the first-encountering element, whose local
+///      `FaceVert` corner order defines the block layout (MFEM
+///      `Mesh::AddTriangleFaceElement`); other elements permute through
+///      `tri_face_global_slot`.
+///   4. volume DOFs — one (p-1)(p-2)(p-3)/6 block per element.
+/// This reproduces MFEM `FiniteElementSpace::GetElementDofs` for H1 on tet
+/// meshes (verified against the MFEM 4.10 reference element-dof dumps).
+///
+/// Face/interior DOF positions use the MFEM H1_TetrahedronElement node
+/// coordinates: GLL barycentric weights normalized by their sum (edges are
+/// unnormalized, which is exact since the two weights sum to 1).
+fn h1_tet_numbering(orig: &Mesh<3>, p: usize) -> TetNumbering {
     const EDGES: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+    const FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
     let n_elems = orig.n_elems();
     let n_nodes = orig.n_nodes();
-    let edge_dofs_per = p - 1; // 1 for p = 2
+    let cp: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+    let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
+    let face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+    let int_dofs_per = if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 };
 
     let mut elem_dofs: Vec<Vec<u32>> = vec![Vec::new(); n_elems];
+
+    // Phase 1: vertices + all edge blocks (first encounter, key (min, max)).
     let mut edge_key_order: Vec<[u32; 2]> = Vec::new();
-    let mut edge_blocks: std::collections::HashMap<[u32; 2], (u32, u32, Vec<u32>)> =
+    let mut edge_blocks: std::collections::HashMap<[u32; 2], Vec<u32>> =
         std::collections::HashMap::new();
     let mut next = n_nodes as u32;
-
     for e in 0..n_elems {
         let ns = orig.element_nodes(e as u32);
         debug_assert_eq!(ns.len(), 4);
@@ -1085,197 +1155,397 @@ fn h1_tet_numbering(orig: &Mesh<3>, p: usize) -> (Vec<f64>, Vec<Vec<u32>>) {
                     })
                     .collect();
                 edge_key_order.push(key);
-                (a, b, ids)
+                ids
             });
-            elem_dofs[e].extend_from_slice(&block.2);
+            if a < b {
+                elem_dofs[e].extend_from_slice(block);
+            } else {
+                // The element traverses this edge high → low; its local edge
+                // DOFs map to the global block in reverse order (MFEM
+                // orientation -1 ⇒ SegDofOrd[1]).
+                elem_dofs[e].extend(block.iter().rev());
+            }
+        }
+    }
+
+    // Phase 2: all face blocks (first encounter; the creating element's
+    // local FaceVert corner order becomes the block's canonical order).
+    let mut face_key_order: Vec<[u32; 3]> = Vec::new();
+    let mut face_blocks: std::collections::HashMap<[u32; 3], ([u32; 3], Vec<u32>)> =
+        std::collections::HashMap::new();
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        for &fq in &FACES {
+            let q = [ns[fq[0]], ns[fq[1]], ns[fq[2]]];
+            let mut skey = q;
+            skey.sort_unstable();
+            let block = face_blocks.entry(skey).or_insert_with(|| {
+                let ids: Vec<u32> = (0..face_dofs_per)
+                    .map(|_| {
+                        let d = next;
+                        next += 1;
+                        d
+                    })
+                    .collect();
+                face_key_order.push(q);
+                (q, ids)
+            });
+            let (canonical, ids) = (&block.0, &block.1);
+            // Local face slots in FE order: j_fe outer, i_fe inner.
+            for j_fe in 1..p {
+                for i_fe in 1..(p - j_fe) {
+                    let gslot = tri_face_global_slot(
+                        canonical, &q, p, i_fe, j_fe, face_dofs_per,
+                    );
+                    elem_dofs[e].push(ids[gslot]);
+                }
+            }
+        }
+    }
+
+    // Phase 3: interior DOFs (one block per element, in element order).
+    for e in 0..n_elems {
+        for _ in 0..int_dofs_per {
+            elem_dofs[e].push(next);
+            next += 1;
         }
     }
     let n_dofs = next as usize;
-    debug_assert_eq!(n_dofs, n_nodes + edge_key_order.len() * edge_dofs_per);
 
+    // Coordinates.
     let dim = 3usize;
     let mut coords = vec![0.0f64; n_dofs * dim];
     for n in 0..n_nodes {
         let c = orig.node_coords(n as u32);
         coords[n * dim..n * dim + dim].copy_from_slice(c);
     }
-    // Edge midpoints along the canonical (min → max) direction.
+    // Edge DOFs: GLL points along the canonical (min → max) direction.
     for &key in &edge_key_order {
-        let (a, b) = (key[0], key[1]);
-        let (_, _, ids) = &edge_blocks[&key];
-        let ca = orig.node_coords(a);
-        let cb = orig.node_coords(b);
-        for (k, &did) in ids.iter().enumerate() {
-            let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64; // midpoint for p=2
+        let ids = &edge_blocks[&key];
+        let ca = orig.node_coords(key[0]);
+        let cb = orig.node_coords(key[1]);
+        for (j, &did) in ids.iter().enumerate() {
+            let t = cp[j + 1];
             let base = did as usize * dim;
             for d in 0..dim {
                 coords[base + d] = (1.0 - t) * ca[d] + t * cb[d];
             }
         }
     }
-    (coords, elem_dofs)
+    // Face DOFs: GLL-normalized barycentric on the block's canonical corners,
+    // slot order = (j_fe outer, i_fe inner) — the block layout order.
+    for &q in &face_key_order {
+        let mut skey = q;
+        skey.sort_unstable();
+        let (_, ids) = &face_blocks[&skey];
+        let ca = orig.node_coords(q[0]);
+        let cb = orig.node_coords(q[1]);
+        let cc = orig.node_coords(q[2]);
+        let mut o = 0usize;
+        for j in 1..p {
+            for i in 1..(p - j) {
+                let w = cp[p - i - j] + cp[i] + cp[j];
+                let base = ids[o] as usize * dim;
+                for d in 0..dim {
+                    coords[base + d] =
+                        (cp[p - i - j] * ca[d] + cp[i] * cb[d] + cp[j] * cc[d]) / w;
+                }
+                o += 1;
+            }
+        }
+    }
+    // Interior DOFs: GLL-normalized barycentric, (k outer, j, i) per element.
+    let vol_start = n_nodes + edge_key_order.len() * edge_dofs_per
+        + face_key_order.len() * face_dofs_per;
+    let mut vi = 0usize;
+    for e in 0..n_elems {
+        let ns = orig.element_nodes(e as u32);
+        let c: Vec<[f64; 3]> = ns
+            .iter()
+            .map(|&n| {
+                let cc = orig.node_coords(n);
+                [cc[0], cc[1], cc[2]]
+            })
+            .collect();
+        for k in 1..p {
+            for j in 1..(p - k) {
+                for i in 1..(p - j - k) {
+                    let w = cp[i] + cp[j] + cp[k] + cp[p - i - j - k];
+                    let did = vol_start + vi;
+                    vi += 1;
+                    let base = did * dim;
+                    for d in 0..dim {
+                        coords[base + d] = (cp[p - i - j - k] * c[0][d]
+                            + cp[i] * c[1][d]
+                            + cp[j] * c[2][d]
+                            + cp[k] * c[3][d])
+                            / w;
+                    }
+                }
+            }
+        }
+    }
+    debug_assert_eq!(vol_start + vi, n_dofs);
+    TetNumbering {
+        coords,
+        elem_dofs,
+        edge_blocks,
+        face_blocks,
+        face_dofs_per,
+    }
 }
 
-/// Subdivide every original tetrahedron into 8 sub-tetrahedra (nref = 2, the
-/// classic 1→8 subdivision; MFEM `GeometryRefiner::Refine(TETRAHEDRON, 2)`)
-/// whose corners are the 4 vertices + 6 edge midpoints of the original tet.
-/// Sub-tet connectivity and ordering replicate the MFEM 4.10 reference output
-/// (T1RF2 dump: a 1×1×1 box cut into 6 tets, refined once → 48 sub-tets).
+/// Subdivide every original tetrahedron into `nref³` sub-tetrahedra whose
+/// corners are the H1(order = nref, Gauss-Lobatto) nodes, replicating MFEM
+/// `GeometryRefiner::Refine(TETRAHEDRON, nref)` exactly: the reference
+/// lattice is enumerated in lexicographic `(ii, jj, kk)` order, mapped onto
+/// the auxiliary tet `(0,0,0)-(0,0,1)-(1,1,1)-(0,1,1)`, and the `nref³`
+/// sub-tets are emitted per auxiliary cell `(k ≥ j ≥ i)` in the order
+/// zyx, [yzx, yxz], [xzy, [xyz], zxy] (see `fem/geom.cpp`).  Sub-tet corners
+/// are resolved through the element's lexicographic dof map (MFEM
+/// `H1_FECollection::GetDofMap(TETRAHEDRON)`), so no floating-point matching
+/// is involved.  Boundary triangles become `nref²` sub-triangles through the
+/// MFEM `Refine(TRIANGLE, nref)` lattice over the boundary element's own
+/// vertex order, with edge/face blocks permuted per orientation.
+/// Verified against the MFEM 4.10 reference dumps (T1RF2/T1RF3/T1RF4 for a
+/// 1×1×1 6-tet box, T1X2RF3/T1X2RF4 for a hand-built 2-tet mesh).
 fn refine_tet(orig: &Mesh<3>, nref: usize) -> Mesh<3> {
-    assert_eq!(nref, 2, "refine_tet: only nref = 2 is implemented so far");
-    let p = 2usize;
-    let dim = 3usize;
+    let p = nref;
+    let p1 = p + 1;
 
-    let (coords, elem_dofs) = h1_tet_numbering(orig, p);
+    let numbering = h1_tet_numbering(orig, p);
+    let coords = numbering.coords;
+    let elem_dofs = numbering.elem_dofs;
     let n_elems = orig.n_elems();
 
-    // Lattice: 10 points = 4 vertices (indices 0..3) + 6 edge midpoints
-    // (4..9, in MFEM TET edge order).  Barycentric coordinates (l0,l1,l2,l3).
-    let bary: [[f64; 4]; 10] = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-        [0.5, 0.5, 0.0, 0.0], // edge (0,1)
-        [0.5, 0.0, 0.5, 0.0], // edge (0,2)
-        [0.5, 0.0, 0.0, 0.5], // edge (0,3)
-        [0.0, 0.5, 0.5, 0.0], // edge (1,2)
-        [0.0, 0.5, 0.0, 0.5], // edge (1,3)
-        [0.0, 0.0, 0.5, 0.5], // edge (2,3)
-    ];
-    // 1→8 subdivision of the reference tet (corner tets + inner tets), in the
-    // order of the MFEM 4.10 reference output.
-    const SUB: [[usize; 4]; 8] = [
-        [0, 4, 5, 6],
-        [4, 1, 7, 8],
-        [4, 7, 6, 8],
-        [4, 6, 7, 5],
-        [6, 8, 9, 3],
-        [6, 5, 9, 7],
-        [6, 9, 8, 7],
-        [5, 7, 2, 9],
-    ];
+    // Tet lexicographic index: idx(i, j, k) = ndof - tet(p-k) - tri(p+1-k-j)+i
+    // (H1_TetrahedronElement lex_ordering; tet(n) = n(n+1)(n+2)/6,
+    // tri(n) = n(n+1)/2).  RefGeoms entries are these lexicographic indices.
+    let ndof = (p + 3) * (p + 2) * (p + 1) / 6;
+    let tet_num = |n: usize| n * (n + 1) * (n + 2) / 6;
+    let tri_num = |n: usize| n * (n + 1) / 2;
+    let lex_idx = |i: usize, j: usize, k: usize| {
+        ndof - tet_num(p - k) - tri_num(p + 1 - k - j) + i
+    };
 
-    let mut scale = 0.0f64;
-    for n in 0..orig.n_nodes() as u32 {
-        for d in 0..dim {
-            let c = orig.node_coords(n)[d].abs();
-            if c > scale {
-                scale = c;
+    // Lexicographic index → element-local FE slot.  The slot arrangement is
+    // the same for every tet, so the map is built once: 4 vertices, 6 edge
+    // groups, 4 face groups, then interior — exactly the order elem_dofs was
+    // assembled in by `h1_tet_numbering`.
+    let mut lex2slot = vec![0usize; ndof];
+    let mut slot = 0usize;
+    {
+        let set = |i: usize, j: usize, k: usize, slot: usize, m: &mut [usize]| {
+            m[lex_idx(i, j, k)] = slot;
+        };
+        set(0, 0, 0, slot, &mut lex2slot);
+        slot += 1;
+        set(p, 0, 0, slot, &mut lex2slot);
+        slot += 1;
+        set(0, p, 0, slot, &mut lex2slot);
+        slot += 1;
+        set(0, 0, p, slot, &mut lex2slot);
+        slot += 1;
+        const TET_EDGES: [[usize; 2]; 6] =
+            [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+        for &[la, lb] in &TET_EDGES {
+            for d in 1..p {
+                let (i, j, k) = match (la, lb) {
+                    (0, 1) => (d, 0, 0),
+                    (0, 2) => (0, d, 0),
+                    (0, 3) => (0, 0, d),
+                    (1, 2) => (p - d, d, 0),
+                    (1, 3) => (p - d, 0, d),
+                    (_, _) => (0, p - d, d), // (2, 3)
+                };
+                set(i, j, k, slot, &mut lex2slot);
+                slot += 1;
+            }
+        }
+        const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+        for &fq in &TET_FACES {
+            for j in 1..p {
+                for i in 1..(p - j) {
+                    let (i_, j_, k_) = if fq == [1, 2, 3] {
+                        (p - i - j, i, j)
+                    } else if fq == [0, 3, 2] {
+                        (0, j, i)
+                    } else if fq == [0, 1, 3] {
+                        (i, 0, j)
+                    } else {
+                        // [0, 2, 1]
+                        (j, i, 0)
+                    };
+                    set(i_, j_, k_, slot, &mut lex2slot);
+                    slot += 1;
+                }
+            }
+        }
+        for k in 1..p {
+            for j in 1..(p - k) {
+                for i in 1..(p - j - k) {
+                    set(i, j, k, slot, &mut lex2slot);
+                    slot += 1;
+                }
+            }
+        }
+        debug_assert_eq!(slot, ndof);
+    }
+
+    // Reference lattice: auxiliary-tet flat index → RefPts lexicographic index.
+    let mut vi_aux = vec![usize::MAX; p1 * p1 * p1];
+    for kk in 0..=p {
+        for jj in 0..=(p - kk) {
+            for ii in 0..=(p - jj - kk) {
+                let m = lex_idx(ii, jj, kk);
+                let (ia, ja, ka) = (jj, jj + kk, ii + jj + kk);
+                let l = ia + (ja + ka * p1) * p1;
+                vi_aux[l] = m;
             }
         }
     }
-    let tol = 1e-7 * scale.max(1.0);
+    let vix = |i: usize, j: usize, k: usize| -> usize {
+        let m = vi_aux[i + (j + k * p1) * p1];
+        debug_assert_ne!(m, usize::MAX, "unrefined aux lattice point");
+        m
+    };
+    // Sub-tets (as RefPts lexicographic indices), in MFEM RefGeoms order.
+    let mut sub_tets: Vec<[usize; 4]> = Vec::with_capacity(p * p * p);
+    for k in 0..p {
+        for j in 0..=k {
+            for i in 0..=j {
+                // zyx: (i,j,k)-(i,j,k+1)-(i+1,j+1,k+1)-(i,j+1,k+1)
+                sub_tets.push([vix(i, j, k), vix(i, j, k + 1), vix(i + 1, j + 1, k + 1), vix(i, j + 1, k + 1)]);
+                if j < k {
+                    // yzx: (i,j,k)-(i+1,j+1,k+1)-(i,j+1,k)-(i,j+1,k+1)
+                    sub_tets.push([vix(i, j, k), vix(i + 1, j + 1, k + 1), vix(i, j + 1, k), vix(i, j + 1, k + 1)]);
+                    // yxz: (i,j,k)-(i,j+1,k)-(i+1,j+1,k+1)-(i+1,j+1,k)
+                    sub_tets.push([vix(i, j, k), vix(i, j + 1, k), vix(i + 1, j + 1, k + 1), vix(i + 1, j + 1, k)]);
+                }
+                if i < j {
+                    // xzy: (i,j,k)-(i+1,j,k)-(i+1,j+1,k+1)-(i+1,j,k+1)
+                    sub_tets.push([vix(i, j, k), vix(i + 1, j, k), vix(i + 1, j + 1, k + 1), vix(i + 1, j, k + 1)]);
+                    if j < k {
+                        // xyz: (i,j,k)-(i+1,j+1,k+1)-(i+1,j,k)-(i+1,j+1,k)
+                        sub_tets.push([vix(i, j, k), vix(i + 1, j + 1, k + 1), vix(i + 1, j, k), vix(i + 1, j + 1, k)]);
+                    }
+                    // zxy: (i,j,k)-(i+1,j+1,k+1)-(i,j,k+1)-(i+1,j,k+1)
+                    sub_tets.push([vix(i, j, k), vix(i + 1, j + 1, k + 1), vix(i, j, k + 1), vix(i + 1, j, k + 1)]);
+                }
+            }
+        }
+    }
+    debug_assert_eq!(sub_tets.len(), p * p * p);
 
+    // Emit sub-tets per element.
     let mut conn: Vec<NodeId> = Vec::new();
     let mut elem_tags: Vec<i32> = Vec::new();
-    for e in 0..n_elems as u32 {
-        let ns = orig.element_nodes(e);
-        debug_assert_eq!(ns.len(), 4);
-        let v = [
-            orig.node_coords(ns[0]),
-            orig.node_coords(ns[1]),
-            orig.node_coords(ns[2]),
-            orig.node_coords(ns[3]),
-        ];
-        let edofs = &elem_dofs[e as usize];
-        debug_assert_eq!(edofs.len(), 10, "H1(2) nodes per tet");
-        let mut local: Vec<(usize, [f64; 3])> = Vec::with_capacity(10);
-        for (kk, &dof) in edofs.iter().enumerate() {
-            let base = dof as usize * dim;
-            local.push((kk, [coords[base], coords[base + 1], coords[base + 2]]));
-        }
-        // Map lattice points to local DOF indices by physical matching.
-        let mut lattice = vec![usize::MAX; 10];
-        for (kk, lam) in bary.iter().enumerate() {
-            let mut target = [0.0; 3];
-            for d in 0..3 {
-                target[d] = lam[0] * v[0][d] + lam[1] * v[1][d] + lam[2] * v[2][d]
-                    + lam[3] * v[3][d];
+    for e in 0..n_elems {
+        let edofs = &elem_dofs[e];
+        debug_assert_eq!(edofs.len(), ndof, "H1({p}) nodes per tet");
+        for st in &sub_tets {
+            for &m in st {
+                conn.push(edofs[lex2slot[m]] as NodeId);
             }
-            lattice[kk] = find_local_dof(&local, &target, tol).unwrap_or_else(|| {
-                panic!(
-                    "make_refined: could not match tet lattice point {kk} \
-                     (phys {target:?}) to an H1(2) DOF of element {e}"
-                )
-            });
-        }
-        for t in &SUB {
-            for &li in t {
-                conn.push(edofs[lattice[li]] as NodeId);
-            }
-            elem_tags.push(orig.elem_tags[e as usize]);
+            elem_tags.push(orig.elem_tags[e]);
         }
     }
 
-    // Boundary faces: every boundary triangle becomes 4 sub-triangles with
-    // the 3 edge midpoints (1→4).  Ordering follows the MFEM reference.
+    // Boundary faces: MFEM MakeRefined subdivides each boundary triangle
+    // through the TRIANGLE RefGeoms lattice over the boundary element's own
+    // vertex order; the boundary element's H1 dofs are its 3 vertices, then 3
+    // edge groups (tri edge order {0-1,1-2,2-0}, reversed per orientation),
+    // then the face block permuted by the face orientation.
+    let tri_ndof = (p + 1) * (p + 2) / 2;
+    let tri_lex = |i: usize, j: usize| ((2 * p + 3 - j) * j) / 2 + i;
+    let mut tri_lex2slot = vec![0usize; tri_ndof];
+    {
+        let mut slot = 0usize;
+        let set = |i: usize, j: usize, slot: usize, m: &mut Vec<usize>| {
+            m[tri_lex(i, j)] = slot;
+        };
+        set(0, 0, slot, &mut tri_lex2slot);
+        slot += 1;
+        set(p, 0, slot, &mut tri_lex2slot);
+        slot += 1;
+        set(0, p, slot, &mut tri_lex2slot);
+        slot += 1;
+        for d in 1..p {
+            set(d, 0, slot, &mut tri_lex2slot);
+            slot += 1;
+        } // edge {0,1}
+        for d in 1..p {
+            set(p - d, d, slot, &mut tri_lex2slot);
+            slot += 1;
+        } // edge {1,2}
+        for d in 1..p {
+            set(0, p - d, slot, &mut tri_lex2slot);
+            slot += 1;
+        } // edge {2,0}
+        for j in 1..p {
+            for i in 1..(p - j) {
+                set(i, j, slot, &mut tri_lex2slot);
+                slot += 1;
+            }
+        }
+        debug_assert_eq!(slot, tri_ndof);
+    }
+    const TRI_EDGES: [[usize; 2]; 3] = [[0, 1], [1, 2], [2, 0]];
+
     let mut face_conn: Vec<NodeId> = Vec::new();
     let mut face_tags: Vec<i32> = Vec::new();
     for f in 0..orig.n_faces() as u32 {
-        let bverts = orig.bface_nodes(f);
-        debug_assert_eq!(bverts.len(), 3);
-        let mut owner: Option<&Vec<u32>> = None;
-        for e in 0..n_elems as u32 {
-            let ns = orig.element_nodes(e);
-            if bverts.iter().all(|w| ns.contains(w)) {
-                owner = Some(&elem_dofs[e as usize]);
-                break;
+        let bv = orig.bface_nodes(f);
+        debug_assert_eq!(bv.len(), 3);
+        let q3 = [bv[0], bv[1], bv[2]];
+        // Boundary element's H1 dofs (tri FE slot order).
+        let mut rdofs: Vec<u32> = Vec::with_capacity(tri_ndof);
+        rdofs.extend_from_slice(bv);
+        for &[la, lb] in &TRI_EDGES {
+            let (a, b) = (bv[la], bv[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let block = &numbering.edge_blocks[&key];
+            if a < b {
+                rdofs.extend_from_slice(block);
+            } else {
+                rdofs.extend(block.iter().rev());
             }
         }
-        let owner = owner.expect("boundary face owner tet");
-        let find = |lam: [f64; 3], c: &[[f64; 3]; 3]| -> u32 {
-            let mut pt = [0.0; 3];
-            for d in 0..3 {
-                pt[d] = lam[0] * c[0][d] + lam[1] * c[1][d] + lam[2] * c[2][d];
+        let mut skey = q3;
+        skey.sort_unstable();
+        let (canonical, ids) = &numbering.face_blocks[&skey];
+        for j_fe in 1..p {
+            for i_fe in 1..(p - j_fe) {
+                let gslot = tri_face_global_slot(
+                    canonical,
+                    &q3,
+                    p,
+                    i_fe,
+                    j_fe,
+                    numbering.face_dofs_per,
+                );
+                rdofs.push(ids[gslot]);
             }
-            for &dof in owner {
-                let base = dof as usize * dim;
-                let dc = [coords[base], coords[base + 1], coords[base + 2]];
-                if (0..3).all(|dd| (dc[dd] - pt[dd]).abs() <= tol) {
-                    return dof;
+        }
+        debug_assert_eq!(rdofs.len(), tri_ndof);
+
+        // TRIANGLE RefGeoms over the running lex lattice index.
+        let mut k = 0usize;
+        for j in 0..p {
+            for i in 0..(p - j) {
+                for &m in &[k, k + 1, k + p - j + 1] {
+                    face_conn.push(rdofs[tri_lex2slot[m]] as NodeId);
                 }
-            }
-            panic!("make_refined: tet boundary node not found at {pt:?}");
-        };
-        let mk = |n: u32| -> [f64; 3] {
-            let cc = orig.node_coords(n);
-            [cc[0], cc[1], cc[2]]
-        };
-        let c = [mk(bverts[0]), mk(bverts[1]), mk(bverts[2])];
-        // 1→4 subdivision: corner triangles then the central one, in MFEM's
-        // order (verified via T1RF2 boundary rows).
-        let m01 = find([0.5, 0.5, 0.0], &c);
-        let m12 = find([0.0, 0.5, 0.5], &c);
-        let m20 = find([0.5, 0.0, 0.5], &c);
-        let (b0, b1, b2) = (c[0], c[1], c[2]);
-        // Recover the corner vertex dofs by matching exact coordinates.
-        let corner = |i: usize| -> u32 {
-            let tgt = [c[i][0], c[i][1], c[i][2]];
-            for &dof in owner {
-                let base = dof as usize * dim;
-                if (coords[base] - tgt[0]).abs() <= tol
-                    && (coords[base + 1] - tgt[1]).abs() <= tol
-                    && (coords[base + 2] - tgt[2]).abs() <= tol
-                {
-                    return dof;
+                face_tags.push(orig.face_tags[f as usize]);
+                if i + j + 1 < p {
+                    for &m in &[k + 1, k + p - j + 2, k + p - j + 1] {
+                        face_conn.push(rdofs[tri_lex2slot[m]] as NodeId);
+                    }
+                    face_tags.push(orig.face_tags[f as usize]);
                 }
+                k += 1;
             }
-            panic!("tet boundary corner not found");
-        };
-        let _ = (b0, b1, b2);
-        let v0 = corner(0);
-        let v1 = corner(1);
-        let v2 = corner(2);
-        let tris: [[u32; 3]; 4] = [
-            [v0, m01, m20],
-            [m01, m12, m20],
-            [m01, v1, m12],
-            [m20, m12, v2],
-        ];
-        for t in &tris {
-            face_conn.extend_from_slice(t);
-            face_tags.push(orig.face_tags[f as usize]);
+            k += 1; // the C++ RefGeoms loop advances k once per row as well
         }
     }
 
@@ -1390,6 +1660,169 @@ mod tests {
         // (7, 8, 9, 10) in the MFEM 4.10 reference.
         let e0 = r.element_nodes(0);
         assert_eq!(&e0[..], &[7u32, 8, 9, 10]);
+    }
+
+    #[test]
+    fn tet_refined_nref3_matches_mfem() {
+        // MFEM T1RF3 reference (tmp/gll_ref/T1RF3_cpp.txt).
+        let t = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let r = make_refined_3d(&t, 3);
+        assert_eq!(r.n_nodes(), 64);
+        assert_eq!(r.n_elems(), 162); // 6 tets × 3³ sub-tets
+        assert_eq!(r.n_faces(), 108); // 12 bdr tris × 3²
+        // v 8 = first interior GLL point (cp[1] along the (0,0,0)-(1,1,1)
+        // diagonal edge), v 9 = the second one.
+        let c8 = r.node_coords(8);
+        for d in 0..3 {
+            assert!((c8[d] - 0.27639320225002106).abs() < 1e-12);
+            assert!((r.node_coords(9)[d] - 0.72360679774997894).abs() < 1e-12);
+        }
+        // Sub-tets of the first original tet (7,0,3,1): the edge blocks are
+        // traversed reversed (7→0, 7→3, 7→1 are high→low), so the first
+        // corner-tet uses the far GLL dofs.
+        assert_eq!(&r.element_nodes(0)[..], &[7u32, 9, 11, 13]);
+        assert_eq!(&r.element_nodes(1)[..], &[9u32, 8, 49, 48]);
+        // Refined boundary face 0 of original face (3,0,2).
+        let b0 = &r.face_conn[0..3];
+        assert_eq!(b0, &[3u32, 15, 37]);
+    }
+
+    #[test]
+    fn tet_refined_nref4_matches_mfem() {
+        // MFEM T1RF4 reference (tmp/gll_ref/T1RF4_cpp.txt): exercises the
+        // face (3 dofs each) and interior (1 dof) H1 dofs with orientations.
+        let t = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let r = make_refined_3d(&t, 4);
+        assert_eq!(r.n_nodes(), 125); // 8 + 19·3 + 18·3 + 6
+        assert_eq!(r.n_elems(), 384); // 6 tets × 4³
+        assert_eq!(r.n_faces(), 192); // 12 bdr tris × 4²
+        let c8 = r.node_coords(8);
+        for d in 0..3 {
+            assert!((c8[d] - 0.17267316464601146).abs() < 1e-12);
+        }
+        assert_eq!(&r.element_nodes(0)[..], &[7u32, 10, 13, 16]);
+        assert_eq!(&r.face_conn[0..3], &[3u32, 19, 52]);
+    }
+
+    /// Hand-built 2-tet mesh (MFEM T1X2 dump): tets (0,1,2,3) and (1,2,3,4)
+    /// sharing face (1,2,3); boundary triangles listed in each tet's
+    /// FaceVert order, skipping the shared face.
+    fn two_tet_mesh() -> Mesh<3> {
+        let coords: Vec<f64> = [
+            [0.0f64, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+        ]
+        .iter()
+        .flat_map(|c| c.iter().copied())
+        .collect();
+        let conn: Vec<u32> = vec![0, 1, 2, 3, 1, 2, 3, 4];
+        let face_conn: Vec<u32> = vec![
+            0, 3, 2, // tet0 face {0,3,2}
+            0, 1, 3, // tet0 face {0,1,3}
+            0, 2, 1, // tet0 face {0,2,1}
+            2, 3, 4, // tet1 face {1,2,3}
+            1, 4, 3, // tet1 face {0,3,2}
+            1, 2, 4, // tet1 face {0,1,3}
+        ];
+        Mesh::uniform(
+            coords,
+            conn,
+            vec![1, 1],
+            ElementType::Tet4,
+            face_conn,
+            vec![1; 6],
+            ElementType::Tri3,
+        )
+    }
+
+    #[test]
+    fn two_tet_refined_matches_mfem() {
+        // MFEM T1X2RF3 / T1X2RF4 references (tmp/gll_ref/T1X2RF*.txt):
+        // mixed edge orientations and a shared face with orientation 5.
+        let t = two_tet_mesh();
+        let r3 = make_refined_3d(&t, 3);
+        assert_eq!(r3.n_nodes(), 30); // 5 + 9·2 + 7·1
+        assert_eq!(r3.n_elems(), 54); // 2 tets × 3³
+        assert_eq!(r3.n_faces(), 54); // 6 bdr tris × 3²
+        assert_eq!(&r3.element_nodes(0)[..], &[0u32, 5, 7, 9]);
+        assert_eq!(&r3.element_nodes(1)[..], &[5u32, 6, 26, 25]);
+        assert_eq!(&r3.face_conn[0..3], &[0u32, 9, 7]);
+        let c8 = r3.node_coords(8);
+        assert!(c8[0].abs() < 1e-12 && (c8[1] - 0.72360679774997894).abs() < 1e-12);
+
+        let r4 = make_refined_3d(&t, 4);
+        assert_eq!(r4.n_nodes(), 55); // 5 + 9·3 + 7·3 + 2
+        assert_eq!(r4.n_elems(), 128); // 2 tets × 4³
+        assert_eq!(r4.n_faces(), 96); // 6 bdr tris × 4²
+        assert_eq!(&r4.element_nodes(0)[..], &[0u32, 5, 8, 11]);
+        assert_eq!(&r4.face_conn[0..3], &[0u32, 11, 8]);
+    }
+
+    #[test]
+    fn tri_face_orientation_permutations_match_mfem() {
+        // Verify tri_face_global_slot against the MFEM
+        // H1_FECollection::DofOrderForOrientation(TRIANGLE, ori) tables
+        // dumped from the reference library
+        // (tmp/gll_ref/gll_and_orders_cpp.txt).  `test` is the local corner
+        // order expressed as test[i] = base[sigma[i]].
+        let base = [7u32, 11, 23];
+        let sigmas: [[usize; 3]; 6] =
+            [[0, 1, 2], [1, 0, 2], [1, 2, 0], [2, 1, 0], [2, 0, 1], [0, 2, 1]];
+        // p = 4: 3 face dofs.  Local slot o ↔ interior index pairs
+        // (1,1), (2,1), (1,2).
+        let expect4: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 1, 0],
+            [2, 0, 1],
+            [0, 2, 1],
+        ];
+        for (ori, sigma) in sigmas.iter().enumerate() {
+            let test = [base[sigma[0]], base[sigma[1]], base[sigma[2]]];
+            let pairs = [(1usize, 1usize), (2, 1), (1, 2)];
+            for (slot, &(i, j)) in pairs.iter().enumerate() {
+                let got = tri_face_global_slot(&base, &test, 4, i, j, 3);
+                assert_eq!(got, expect4[ori][slot], "p=4 ori={ori} slot={slot}");
+            }
+        }
+        // p = 5: 6 face dofs; dumped rows:
+        // ori 0..5: [0 1 2 3 4 5] / [2 1 0 4 3 5] / [2 4 5 1 3 0] /
+        //           [5 4 2 3 1 0] / [5 3 0 4 1 2] / [0 3 5 1 4 2]
+        let expect5: [[usize; 6]; 6] = [
+            [0, 1, 2, 3, 4, 5],
+            [2, 1, 0, 4, 3, 5],
+            [2, 4, 5, 1, 3, 0],
+            [5, 4, 2, 3, 1, 0],
+            [5, 3, 0, 4, 1, 2],
+            [0, 3, 5, 1, 4, 2],
+        ];
+        let pairs5: Vec<(usize, usize)> = (1..5)
+            .flat_map(|j| (1..(5 - j)).map(move |i| (i, j)))
+            .collect();
+        for (ori, sigma) in sigmas.iter().enumerate() {
+            let test = [base[sigma[0]], base[sigma[1]], base[sigma[2]]];
+            for (slot, &(i, j)) in pairs5.iter().enumerate() {
+                let got = tri_face_global_slot(&base, &test, 5, i, j, 6);
+                assert_eq!(got, expect5[ori][slot], "p=5 ori={ori} slot={slot}");
+            }
+        }
+    }
+
+    #[test]
+    fn tri_refined_nref4_matches_mfem() {
+        // MFEM T2RF4 reference: interior tri DOF positions are the
+        // GLL-normalized barycentric points (p ≥ 4), so the refinement must
+        // succeed and match the reference counts/order.
+        let t = Mesh::<2>::make_cartesian_2d_tri(2, 2, 1.0, 1.0);
+        let r = make_refined_2d(&t, 4);
+        assert_eq!(r.n_nodes(), 81);
+        assert_eq!(r.n_elems(), 128); // 32 tris × 4²
+        assert_eq!(r.n_faces(), 32); // 16 bdr edges × 4
+        assert_eq!(&r.element_nodes(0)[..], &[0u32, 9, 15]);
     }
 }
 
