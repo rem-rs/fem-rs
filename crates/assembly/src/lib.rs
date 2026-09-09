@@ -94,6 +94,10 @@ pub mod tmop_form;
 pub mod cut;
 pub mod boundary;
 pub mod postproc;
+/// QuadratureSpace / QuadratureFunction (1:1 port of MFEM `fem/qspace.*` +
+/// `fem/qfunction.*`).
+pub mod qspace;
+pub mod qfunction;
 /// User Element framework — experimental.
 
 // 鈹€鈹€ Method-family subdirectories 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€

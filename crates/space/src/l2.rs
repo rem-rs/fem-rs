@@ -551,4 +551,192 @@ mod tests {
             }
         }
     }
+
+    // ─── Higher-order Quad/Hex audit (orders 1..=3) ────────────────────────
+
+    /// Orders 1..=3 on Quad4: nodal interpolation of a polynomial with
+    /// per-axis degree ≤ order is exact, so the L² error vanishes.
+    #[test]
+    fn l2_quad_interp_l2_error_orders_1_to_3() {
+        for order in 1..=3u8 {
+            let mesh = Mesh::<2>::unit_square_quad(2);
+            let space = L2Space::new(mesh.clone(), order);
+            let f: Box<dyn Fn(&[f64]) -> f64> = match order {
+                1 => Box::new(|x: &[f64]| 2.0 * x[0] - 3.0 * x[1] + 1.0),
+                2 => Box::new(|x: &[f64]| x[0] * x[0] * x[1] - x[1] * x[1] + x[0] + 2.0),
+                _ => Box::new(|x: &[f64]| {
+                    x[0] * x[0] * x[0] * x[1] * x[1] + x[0] * x[1] * x[1] * x[1] - x[0] + 4.0
+                }),
+            };
+            // Nodal interpolation (GL nodes, exact for per-axis degree ≤ p).
+            let u = space.interpolate(&f);
+            let fe = fem_element::lagrange::QuadL2GL::new(order as usize);
+            // Re-evaluate the interpolant through its DOF values.
+            let mut err2 = 0.0_f64;
+            let quad = fe.quadrature(2 * order + 2);
+            let n = fe.n_dofs();
+            let mut phi = vec![0.0_f64; n];
+            for e in mesh.elem_iter() {
+                let c = space.element_dofs(e);
+                for (q, xi) in quad.points.iter().enumerate() {
+                    fe.eval_basis(xi, &mut phi);
+                    let (jac, xp) =
+                        fem_mesh::transformation::element_jacobian_at(&mesh, e, xi, 2);
+                    let det = jac.determinant().abs();
+                    let mut uh = 0.0;
+                    for (i, &p) in phi.iter().enumerate() {
+                        uh += p * u.as_slice()[c[i] as usize];
+                    }
+                    let e_ = uh - f(&xp);
+                    err2 += quad.weights[q] * det * e_ * e_;
+                }
+            }
+            let err = err2.sqrt();
+            assert!(
+                err < 1e-12,
+                "order {order}: interpolation L2 error {err:.3e} should vanish"
+            );
+        }
+    }
+
+    /// Orders 1..=3 on Hex8: same exactness statement in 3-D.
+    #[test]
+    fn l2_hex_interp_l2_error_orders_1_to_3() {
+        for order in 1..=3u8 {
+            let mesh = Mesh::<3>::unit_cube_hex(2);
+            let space = L2Space::new(mesh.clone(), order);
+            let f: Box<dyn Fn(&[f64]) -> f64> = match order {
+                1 => Box::new(|x: &[f64]| x[0] + 2.0 * x[1] - 3.0 * x[2] + 1.0),
+                2 => Box::new(|x: &[f64]| {
+                    x[0] * x[0] * x[1] + x[1] * x[1] * x[2] - x[2] * x[2] + 2.0
+                }),
+                _ => Box::new(|x: &[f64]| {
+                    x[0] * x[0] * x[0] * x[1] + x[1] * x[1] * x[2] * x[2] * x[2] - x[2] + 1.0
+                }),
+            };
+            let u = space.interpolate(&f);
+            let fe = fem_element::lagrange::HexL2GL::new(order as usize);
+            let quad = fe.quadrature(2 * order + 2);
+            let n = fe.n_dofs();
+            let mut phi = vec![0.0_f64; n];
+            let mut err2 = 0.0_f64;
+            for e in mesh.elem_iter() {
+                let c = space.element_dofs(e);
+                for (q, xi) in quad.points.iter().enumerate() {
+                    fe.eval_basis(xi, &mut phi);
+                    let (jac, xp) =
+                        fem_mesh::transformation::element_jacobian_at(&mesh, e, xi, 3);
+                    let det = jac.determinant().abs();
+                    let mut uh = 0.0;
+                    for (i, &p) in phi.iter().enumerate() {
+                        uh += p * u.as_slice()[c[i] as usize];
+                    }
+                    let e_ = uh - f(&xp);
+                    err2 += quad.weights[q] * det * e_ * e_;
+                }
+            }
+            let err = err2.sqrt();
+            assert!(
+                err < 1e-12,
+                "order {order}: interpolation L2 error {err:.3e} should vanish"
+            );
+        }
+    }
+
+    /// Element mass matrices of the tensor L² space are symmetric positive
+    /// definite on a genuinely non-affine (trapezoid) quad, orders 1..=3.
+    #[test]
+    fn l2_quad_element_mass_spd_distorted() {
+        // Trapezoid: (0,0),(1,0),(1.3,0.9),(0.1,1), area 1.055.
+        let coords = vec![0.0, 0.0, 1.0, 0.0, 1.3, 0.9, 0.1, 1.0];
+        let area: f64 = {
+            let c = |k: usize| [coords[2 * k], coords[2 * k + 1]];
+            let v = [c(0), c(1), c(2), c(3)];
+            let s = |a: [f64; 2], b: [f64; 2]| a[0] * b[1] - a[1] * b[0];
+            0.5 * (s(v[0], v[1]) + s(v[1], v[2]) + s(v[2], v[3]) + s(v[3], v[0]))
+        };
+        for order in 1..=3u8 {
+            let mesh = Mesh::<2>::uniform(
+                coords.clone(),
+                vec![0, 1, 2, 3],
+                vec![1],
+                fem_mesh::element_type::ElementType::Quad4,
+                vec![],
+                vec![],
+                fem_mesh::element_type::ElementType::Line2,
+            );
+            let fe = fem_element::lagrange::QuadL2GL::new(order as usize);
+            let n = fe.n_dofs();
+            let quad = fe.quadrature(2 * order + 2);
+            let mut m = nalgebra::DMatrix::<f64>::zeros(n, n);
+            let mut phi = vec![0.0_f64; n];
+            for (q, xi) in quad.points.iter().enumerate() {
+                fe.eval_basis(xi, &mut phi);
+                let (jac, _xp) =
+                    fem_mesh::transformation::element_jacobian_at(&mesh, 0, xi, 2);
+                let w = quad.weights[q] * jac.determinant().abs();
+                for j in 0..n {
+                    for i in 0..n {
+                        m[(i, j)] += w * phi[i] * phi[j];
+                    }
+                }
+            }
+            // Symmetry.
+            let asym = (&m - &m.transpose()).abs().max();
+            assert!(
+                asym < 1e-13,
+                "order {order}: mass asymmetry {asym:.3e}"
+            );
+            // Positive definiteness (all eigenvalues > 0).
+            let eig = m.clone().symmetric_eigen();
+            let min_ev = eig.eigenvalues.min();
+            assert!(
+                min_ev > 0.0,
+                "order {order}: min eigenvalue {min_ev:.3e} must be positive"
+            );
+            // ∫ 1 dV: the mass matrix applied to the all-ones partition of
+            // unity sums to the exact element area.
+            let total: f64 = m.sum();
+            assert!(
+                (total - area).abs() < 1e-12,
+                "order {order}: ∫1 = {total}, area {area}"
+            );
+        }
+    }
+
+    /// Element mass matrices of the tensor L² space on hex meshes are
+    /// symmetric positive definite, orders 1..=3.
+    #[test]
+    fn l2_hex_element_mass_spd() {
+        for order in 1..=3u8 {
+            let mesh = Mesh::<3>::unit_cube_hex(2);
+            let fe = fem_element::lagrange::HexL2GL::new(order as usize);
+            let n = fe.n_dofs();
+            let quad = fe.quadrature(2 * order + 2);
+            let mut m = nalgebra::DMatrix::<f64>::zeros(n, n);
+            let mut phi = vec![0.0_f64; n];
+            for (q, xi) in quad.points.iter().enumerate() {
+                fe.eval_basis(xi, &mut phi);
+                let (jac, _xp) =
+                    fem_mesh::transformation::element_jacobian_at(&mesh, 0, xi, 3);
+                // |J| = 0.5^3 on every axis-aligned half-cube.
+                let w = quad.weights[q] * jac.determinant().abs();
+                for j in 0..n {
+                    for i in 0..n {
+                        m[(i, j)] += w * phi[i] * phi[j];
+                    }
+                }
+            }
+            let asym = (&m - &m.transpose()).abs().max();
+            assert!(asym < 1e-13, "order {order}: mass asymmetry {asym:.3e}");
+            let eig = m.clone().symmetric_eigen();
+            assert!(
+                eig.eigenvalues.min() > 0.0,
+                "order {order}: mass matrix must be positive definite"
+            );
+            // ∫ 1 = 1/8 per element.
+            let total: f64 = m.sum();
+            assert!((total - 0.125).abs() < 1e-12, "order {order}: ∫1 = {total}");
+        }
+    }
 }
