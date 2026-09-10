@@ -307,6 +307,100 @@
 - 回归基线：fem-assembly **555** / fem-solver **244** / fem-mesh **290** /
   fem-space **274** / fem-io **122**，全绿；新文件零警告。
 
+## 第十一轮完成（2026-09-10，四代理 + 两代理续作 + 主会话集成）
+
+- **F 组装正确性四连修（全部含 C++ 对位）**：
+  ① **P1**：仿射快路径与等参路径用了两套约定（`{J⁻ᵀ∇φ, |detJ|}` vs MFEM 的
+  `{adjJᵀ∇φ, 1/|detJ|}`）→ 按 MFEM 写法写的积分器在单纯形上整体丢 |detJ|
+  （`K·x = M·1` 实测 0.75 → 修复后 5.6e-17；tri/tet/quad 均 ≤1e-13）；
+  ② hex 边界面被静默截成 3 角点（半面积 + 错法向）→ 按面自身 P1 参考元 +
+  面→单元仿射映射；③ 边界求积改为经 owner 等参几何前向映射（曲边弧长
+  1.0982466 vs 解析 1.0982301，旧弦线给 1.0000）；④ 单纯形仿射快路径改读
+  逐单元 `geometry_nodes`（周期三角网格单元质量阵与未周期化逐位相同）。
+- **G：`dpg_maxwell_2d` 整场 L2 收敛（第十轮遗留 #1 结案）**：根因**不是**
+  骨架/法向/trace——miniapp 里 ess 边界装配把实/虚分量错位
+  （`Ê = (E_y, −E_x)` 是复向量，通量需 `Re/Im(Ê·n)`，旧码把 `Im(E_y)` 当实部
+  → 实边界数据恒 0）。对照 C++：rnum=1 n=4 0.8819/0.8782、n=8 0.4753/0.4747、
+  n=16 0.2370/0.2369；误差随加密下降（rate −0.94 vs C++ −0.95）。
+  算子级证据：元素置换后 `max|A_cpp − S·A_rust·S| = 1.4e-12`（非 ess 自由度）。
+- **H：3D trace 骨架基（H1/RT/ND）**：+1590 行，MFEM dof 计数/编号逐位对照
+  （hex/tet × 3 类 × p=1..3 共 18 组面 dump 与元素 trace 块 dump **完全一致**，
+  面基值 ≤1e-14）；补 `DpgTransposedMixedCurlIntegrator`。**纠正规格**：
+  MFEM 无 `ND_TraceElement`，`ND_Trace_FECollection(p,dim) = ND_FECollection(p,dim−1)`。
+  3D 示例**未替换**（阻塞见 D24）。
+- **I：AMG 粗解 vendor 缺陷（D10 真根因）+ D14 复 FGMRES**：
+  `linlvo::direct::SparseLu` 默认 Rcm 重排下 `solve` 返回**置换解**
+  （最小复现 `max|A·A⁻¹−I| = 1.0` vs Natural 的 2.2e-16），而 AMG 粗层正用它
+  → V-cycle 非对称（`max|B−Bᵀ| = 7.8e-2`）→ CG 停滞。修复 =
+  `fem_amg::CorrectedAmgPrecond`（同 cycle，粗解 Natural + 缓存分解）：
+  star Schur rs0/1/2 = 3/5/5 迭代（修前 3 个配置停滞）、Darcy Schur
+  7/11/16、强对角占优 cond=1.05e3 = 4 迭代；新增 4 测试（含钉住 vendor
+  缺陷的 `sparselu_reordering_solve_is_not_an_inverse`）。D14 确认为真错：
+  复 FGMRES 的 MGS 内积**双重共轭** → 71→40 迭代、reported/true 残差
+  1.19→1.00；残差估计改 `hypot`。
+- **K（续作）：NURBS 示例族 API 迁移**——6 个示例恢复编译（详见 D21 的实质
+  问题，未擅自修）。
+- **L（续作）：fem-parallel P2 分区缺陷（D17 结案）**：`DofManager::new(mesh,2)`
+  对 Tri3 走 `build_pk`，边 dof 存在 `edge_pk_map`、返回的 `edge_dof_map`
+  是空表，而 partition 按 `order == 2` 选表 → 读到空表 → 所有边 dof 被当
+  元素内部 dof（每元素 3 个）而计数按硬编码 1 → 枚举 121 vs 计数 57。
+  修法 = 按"哪个表非空"选择 + 内部 dof 数从实际列表导出 + 两条不变量
+  debug_assert。fem-parallel **225/225**（前 217过/7败），新增跨分区 P2
+  一致性测试；quad Q2 路径无变化。
+- **主会话集成：示例编译门禁恢复（7 个坏示例 → 0）**：① 恢复被 `012c2ec`
+  以"无外部调用"删除的 `crates/parallel/src/par_dpg_trace.rs`（291 行，
+  pex8 实际在用；删除时只注释 import 未改主体）→ pex8 可编译**且可运行**
+  （np1: 1361 未知数、PCG 134、收敛）；② `mfem_ex7` 3 处 Mesh 字面量缺
+  `vertex_parents`；③ `mfem_pex27`/`pex5` 的 `face_elements` 遮蔽陷阱；
+  ④ `mfem_pex4`/`pex5` 误差函数签名漂移（见 D19）。
+- 回归基线（全绿）：fem-assembly **570** / fem-solver **244** / fem-mesh **290**
+  / fem-space **274** / fem-io **122** / fem-amg **23** / fem-linalg **63** /
+  fem-parallel **225**；**`cargo build --release --examples` 0 错误**。
+
+## 第十一轮新债务
+
+- ~~**D17 fem-parallel P2 分区**~~ — ✅ 第十一轮修复（代理 L）。
+- **D18 示例编译门禁缺失（已补）**：`--lib` 测试门不覆盖 examples，
+  导致 helmholtz_1d 语法损坏、NURBS 族、pex4/5/8/27、ex7 长期带病入库
+  （pex8 自 012c2ec 起编不过）。**纪律更新：收尾验证必须包含
+  `cargo build --release --examples --keep-going`**（`--keep-going` 才能一次
+  拿到全部失败，否则 cargo 遇错即止、每次只暴露一个）。
+- **D19（P1）`hdiv_error.rs` 是占位实现**（全部函数返回 0.0，四个
+  `_owned`/`_q` 变体只是转发）→ pex4/pex5/pex8 打印的 L2 误差恒为 0。
+  实现路径：用 `qspace/qfunction`（#9 已落地）+ 逐单元 owned 过滤
+  （并行语义：只累加本 rank owned 元素，再 allreduce 平方和开方），
+  对位 MFEM `ParGridFunction::ComputeL2Error`/`ComputeHdivError`。
+- **D20（P1）`face_elements` 遮蔽陷阱**：`Mesh<D>` 固有方法
+  `face_elements -> Vec<ElemId>`（simplex.rs:3059）遮蔽
+  `MeshTopology::face_elements -> (ElemId, Option<ElemId>)`（:3261），
+  两种返回类型在 16 处调用点混用（已两次引发示例编译错）。修法：固有方法
+  改名（如 `face_adjacent_elems`）并更新其 7 处调用点。
+- **D21 NURBS 示例族的实质缺口**（K 发现，未改）：`nurbs_ex1`/`ex3` 传**空
+  essential dof 集**（C++ 把全部边界属性设 essential）→ ex1 PCG 发散 panic、
+  ex3 停滞 1.1e-6；`nurbs_ex5`/`nurbs_ex24` **不是** C++ 对应示例的移植
+  （实为 H1 NS / mixed-Darcy 草稿，网格/阶/默认值都不同）；ex1 的
+  `ref_levels` 常数 50000 vs C++ 5000。
+- **D22（P1）fem-element NURBS 二阶导在区段端点错误**：`nurbs.rs:354-357`
+  用有限差分 ε=1e-6，但端点把 `xi±ε` 夹到 `xi0+1e-14`/`xi1−1e-14`，
+  对称模板被破坏（实测端点 d² ≈ 8e6，应为 ~32）；C++ `PrintFunctions`
+  是解析导数。
+- **D23 NURBS FE 集合未实现**：`NURBSFECollection`/`NURBS_HCurl`/
+  `NURBS_HDiv` + `NURBSExtension`（C++ 的 NURBS 空间），故 NURBS 示例的
+  dof 数与误差**不可能**与 C++ 对齐（现用 H1/ND/RT/L2 代替）。
+- **D24 DPG 3D 未替换 + 2D 高阶问题**：3D 示例仍伪 DPG，阻塞 =
+  `dpg_weakform.rs` 无向量 trace 支持 + `face_geo_at` 的 3D 法向多 0.5 因子
+  （MFEM `CalcOrtho` 无因子）；`ComplexDPGWeakForm::assemble` 在 `-o ≥ 2`
+  panic "complex test Gram not HPD on element 2"（纯内核高阶问题）；
+  骨架 trace 基节点用等距 `k/p` 而 MFEM RT-trace（INTEGRAL+GaussLegendre）
+  用 GL 开点（order ≥ 1 需对齐）。
+- **D25（P2）`crates/solver/src/lor.rs` 的 `LorAmgPrecond`** 仍直接包
+  vendor 的 `linlvo::amg::AmgPrecond` → 带同一粗解置换缺陷；改用
+  `fem_amg::CorrectedAmgPrecond`（或在 vendor 层修 `SparseLu` 的重排约定）。
+- **D26（P2）3D `Mesh::set_curvature(2)` 对 Hex8 生成退化几何**（F 发现）：
+  单 hex 上边界面 QP 处 detJ = 0.0（face 4 的 9 个 QP）与负值（face 3 最小
+  −0.236），且 2 阶几何节点错位（`set_curvature_hex8` 的边节点搜索把参考
+  坐标与物理坐标比较、trilinear 回退用顶点 bit 约定与 Hex8 节点序不一致）。
+
 ## 第十轮遗留（下一轮）
 
 1. **dpg_maxwell_2d 整场 L2 未收敛**（1.42/1.40 vs 0.88/0.48）——单元级
