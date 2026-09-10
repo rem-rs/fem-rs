@@ -16,14 +16,14 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQ1, QuadQ2, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::{TriPk, TetPk}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::{TriPk, TetPk}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
-use fem_element::nedelec::{TetND2, QuadNDk, HexNDk, PrismND1, PrismNDk, TriND2, TriNDk, TetNDk};
+use fem_element::nedelec::{QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use crate::vector_assembler::{isoparametric_jacobian, geo_ref_elem_from_mesh};
 use fem_space::fe_space::{FESpace, SpaceType};
-use fem_space::{HCurlSpace, H1Space, HDivSpace, L2Space};
+use fem_space::{HCurlSpace, H1Space, HDivSpace};
 
 use crate::integrator::QpData;
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
@@ -357,7 +357,7 @@ where
         let mut div_c_signed = vec![0.0; n_c];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac_q, det_j, xp) = if use_iso {
+            let (_jac_q, det_j, xp) = if use_iso {
                 let ge = geo_elem
                     .as_ref()
                     .expect("missing geometry reference element for isoparametric mixed assembly");
@@ -884,7 +884,7 @@ where
         let mut grad_r = vec![0.0; n_r * dim];
         let mut grad_phys = vec![0.0; n_r * dim];
         let mut vec_col = vec![0.0; n_c * dim];
-        let mut j_inv_t = nalgebra::DMatrix::<f64>::identity(dim, dim);
+        let mut j_inv_t;
 
         for (q, xi) in quad.points.iter().enumerate() {
             let (w, det_j, xp) = if use_iso {
@@ -1238,6 +1238,13 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
     Ok(match (space, elem_type, order) {
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriRT1),
+        // Tri RT tops out at order 2 (HDivSpace::validate_order); the MFEM
+        // Chebyshev-style TriRT2 matches both `vec_ref_elem` (vector_assembler)
+        // and the basis HDivSpace assigns DOFs for, so the mixed divergence
+        // matrix uses the same reference element as the volume path.
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2) => {
+            Box::new(fem_element::raviart_thomas::TriRT2)
+        }
         (SpaceType::HDiv, ElementType::Quad4, 0) => Box::new(QuadRTk::new(0)),
         (SpaceType::HDiv, ElementType::Quad4, 1) => Box::new(QuadRT1),
         (SpaceType::HDiv, ElementType::Quad4, o) if o >= 2 => {
@@ -1257,8 +1264,6 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         (SpaceType::HCurl, ElementType::Hex8, 2) => Box::new(HexNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexNDk::new(1)),
         (SpaceType::HCurl, ElementType::Hex20, 2) => Box::new(HexNDk::new(2)),
-        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRTk::new(0)),
-        (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
         (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRT1),
         (SpaceType::HDiv, ElementType::Prism6, 0) => Box::new(PrismRTk::new(0)),
@@ -1542,6 +1547,62 @@ mod tests {
         assert_eq!(b.ncols, vel.n_dofs());
         assert!(b.nrows > 0);
         assert!(b.ncols > 0);
+    }
+
+    /// D12 regression: the mixed assembler must support tri-RT2 (D12 debt:
+    /// `ref_elem_vec` only had tri HDiv orders 0/1, so
+    /// `assemble_hdiv_l2_mixed` panicked for an HDivSpace of order 2 even
+    /// though the space itself supports RT2 with 15 DOFs).
+    #[test]
+    fn ref_elem_vec_tri_rt2_supported() {
+        let e = ref_elem_vec(ElementType::Tri3, 2, SpaceType::HDiv).unwrap();
+        assert_eq!(e.n_dofs(), 15, "tri RT2 has 15 DOFs");
+        assert_eq!(ref_elem_vec(ElementType::Tri6, 2, SpaceType::HDiv).unwrap().n_dofs(), 15);
+    }
+
+    /// D12 correctness: with a P0 test row (φ = 1) the divergence entry
+    /// `D[0,c]` of the RT2 element on a triangle must equal
+    /// `sign_c · ∫_K̂ div Φ̂_c dξ` — the Piola |detJ| factors cancel between
+    /// the H(div) transform and the quadrature weight, so the assembled
+    /// entry reduces to the reference-domain integral of the reference
+    /// divergence (checked here against the element-crate `TriRT2` primitive).
+    #[test]
+    fn hdiv_l2_mixed_tri_rt2_divergence_theorem() {
+        use fem_element::reference::VectorReferenceElement;
+        use fem_element::raviart_thomas::TriRT2;
+        use fem_space::{HDivSpace, L2Space};
+
+        let mesh = Mesh::<2>::unit_square_tri(1);
+        let l2 = L2Space::new(mesh.clone(), 0);
+        let rt = HDivSpace::new(mesh.clone(), 2);
+        let d = assemble_hdiv_l2_mixed(&l2, &rt, &[&HDivL2DivIntegrator], 6);
+
+        let qr = TriRT2.quadrature(6);
+        let n_loc = TriRT2.n_dofs();
+        let mut ref_div = vec![0.0_f64; n_loc];
+        let mut expected = vec![0.0_f64; n_loc];
+        for (xi, w) in qr.points.iter().zip(qr.weights.iter()) {
+            TriRT2.eval_div(xi, &mut ref_div);
+            for (c, d_ref) in ref_div.iter().enumerate() {
+                expected[c] += w * d_ref;
+            }
+        }
+
+        for e in mesh.elem_iter() {
+            let dofs: Vec<usize> = rt.element_dofs(e).iter().map(|&x| x as usize).collect();
+            let signs = rt.element_signs(e);
+            // One P0 dof per element: the (only) row of this element.
+            let row = l2.element_dofs(e)[0] as usize;
+            for (c, &gc) in dofs.iter().enumerate() {
+                let got = d.get(row, gc);
+                let sign = if c < signs.len() { signs[c] } else { 1.0 };
+                assert!(
+                    (got - sign * expected[c]).abs() < 1e-12,
+                    "elem {e} dof {c}: assembled {got} vs ref-div {}",
+                    sign * expected[c]
+                );
+            }
+        }
     }
 
     #[test]

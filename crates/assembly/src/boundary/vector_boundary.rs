@@ -41,11 +41,10 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::nedelec::{TetND2, TriND2, TriNDk, TetNDk, QuadNDk};
-use fem_element::raviart_thomas::{QuadRTk, TetRT1, TriRT1, TriRTk, TetRTk};
+use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::ElementTransformation;
+use fem_mesh::{ElementTransformation, element_type::ElementType};
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -56,7 +55,7 @@ use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
 use crate::assembler::assembly_parallel_min_elems;
-use crate::vector_assembler::vec_ref_elem as vol_ref_elem;
+use crate::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian, vec_ref_elem as vol_ref_elem};
 
 // ─── Quadrature-point data ───────────────────────────────────────────────────
 
@@ -517,6 +516,90 @@ where
         )
 }
 
+/// Per-quadrature-point owner-element geometry for one boundary face.
+///
+/// `xi_ref` lives in the *owner element's* reference domain (the same domain
+/// the solution [`VectorReferenceElement`] evaluates on); `jac`/`det_j` are
+/// the owner's isoparametric (or affine simplex) Jacobian at that point.
+struct FaceQpGeometry {
+    weight: f64,
+    normal: Vec<f64>,
+    x_phys: Vec<f64>,
+    xi_ref: Vec<f64>,
+    jac: DMatrix<f64>,
+    det_j: f64,
+}
+
+/// Resolve the owner element of boundary face `f` and map every face
+/// quadrature point back to owner reference coordinates.
+///
+/// D13: the owner geometry must match the *volume* assembly — tensor-product
+/// owners (Quad/Hex/...) and curved meshes go through the isoparametric
+/// path (`geo_ref_elem_from_mesh` + `isoparametric_jacobian`, the same
+/// dispatch as `assemble_hdiv_l2_mixed`/`VectorAssembler`), only affine
+/// simplices use the direct `ElementTransformation::from_simplex_nodes`.
+/// The previous simplex-only inverse silently produced wrong reference
+/// coordinates (and hence wrong basis values) on quad owners, leaking DOF
+/// contributions across the whole element row.
+fn face_owner_geometry<M: MeshTopology>(
+    mesh: &M,
+    f: u32,
+    quad_order: u8,
+    dim: usize,
+) -> Option<(u32, Vec<FaceQpGeometry>)> {
+    let face_nodes = mesh.face_nodes(f);
+    let owner_elem = find_owner_element(mesh, face_nodes)?;
+    let elem_nodes = mesh.element_nodes(owner_elem);
+    let use_iso = mesh.geom_order() > 1
+        || !matches!(
+            mesh.element_type(owner_elem),
+            ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2
+        );
+    let geo_elem = if use_iso {
+        geo_ref_elem_from_mesh(mesh, owner_elem)
+    } else {
+        None
+    };
+    let affine_tr = if use_iso {
+        None
+    } else {
+        Some(ElementTransformation::from_simplex_nodes(mesh, elem_nodes))
+    };
+
+    let (face_qp_phys, face_weights, face_normals) =
+        face_quadrature(mesh, face_nodes, dim, quad_order);
+    let mut qps = Vec::with_capacity(face_weights.len());
+    for q in 0..face_weights.len() {
+        let x_phys = face_qp_phys[q * dim..(q + 1) * dim].to_vec();
+        let normal = face_normals[q * dim..(q + 1) * dim].to_vec();
+        let (xi_ref, jac, det_j) = match geo_elem.as_deref() {
+            Some(ge) => {
+                let geo_nds = mesh.geometry_nodes(owner_elem);
+                let xi = phys_to_ref_isoparametric(mesh, geo_nds, ge, &x_phys, dim);
+                let (jac, det, _) = isoparametric_jacobian(mesh, geo_nds, ge, &xi, dim);
+                (xi, jac, det)
+            }
+            None => {
+                let tr = affine_tr.as_ref().unwrap();
+                (
+                    phys_to_ref(mesh, elem_nodes, &x_phys, dim),
+                    tr.jacobian().clone(),
+                    tr.det_j(),
+                )
+            }
+        };
+        qps.push(FaceQpGeometry {
+            weight: face_weights[q],
+            normal,
+            x_phys,
+            xi_ref,
+            jac,
+            det_j,
+        });
+    }
+    Some((owner_elem, qps))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble_face_bilinear_contrib<S: FESpace>(
     space: &S,
@@ -534,33 +617,28 @@ where
     S::Mesh: MeshTopology,
 {
     let mesh = space.mesh();
-    let face_nodes = mesh.face_nodes(f);
-    let owner_elem = find_owner_element(mesh, face_nodes)?;
-    let elem_nodes = mesh.element_nodes(owner_elem);
-    let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
+    let (owner_elem, qps) = face_owner_geometry(mesh, f, quad_order, dim)?;
     let global_dofs: Vec<usize> = space
         .element_dofs(owner_elem)
         .iter()
         .map(|&d| d as usize)
         .collect();
     let signs_opt = space.element_signs(owner_elem);
-    let (face_qp_phys, face_weights, face_normals) = face_quadrature(mesh, face_nodes, dim, quad_order);
     let mut k_face = vec![0.0_f64; n_ldofs * n_ldofs];
-    for q in 0..face_qp_phys.len() / dim {
-        let xp = &face_qp_phys[q * dim..(q + 1) * dim];
-        let w = face_weights[q];
-        let norm = &face_normals[q * dim..(q + 1) * dim];
-        let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
-        vol_elem.eval_basis_vec(&xi_ref, ref_phi);
+    for qp in &qps {
+        vol_elem.eval_basis_vec(&qp.xi_ref, ref_phi);
         match stype {
             SpaceType::HCurl => {
-                let j_inv_t = tr.jacobian_inv_t().clone();
+                let j_inv_t = qp
+                    .jac
+                    .clone()
+                    .try_inverse()
+                    .expect("degenerate boundary owner element")
+                    .transpose();
                 piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
             }
             SpaceType::HDiv => {
-                let jac = tr.jacobian().clone();
-                let det_j = tr.det_j();
-                piola_hdiv_basis(&jac, det_j, ref_phi, phys_phi, n_ldofs, dim);
+                piola_hdiv_basis(&qp.jac, qp.det_j, ref_phi, phys_phi, n_ldofs, dim);
             }
             _ => unreachable!(),
         }
@@ -574,10 +652,10 @@ where
         let qp_data = VectorBdQpData {
             n_dofs: n_ldofs,
             dim,
-            weight: w,
+            weight: qp.weight,
             phi_vec: phys_phi,
-            normal: norm,
-            x_phys: xp,
+            normal: &qp.normal,
+            x_phys: &qp.x_phys,
             elem_id: owner_elem,
             elem_tag: mesh.face_tag(f),
         };
@@ -605,33 +683,28 @@ where
     S::Mesh: MeshTopology,
 {
     let mesh = space.mesh();
-    let face_nodes = mesh.face_nodes(f);
-    let owner_elem = find_owner_element(mesh, face_nodes)?;
-    let elem_nodes = mesh.element_nodes(owner_elem);
-    let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
+    let (owner_elem, qps) = face_owner_geometry(mesh, f, quad_order, dim)?;
     let global_dofs: Vec<usize> = space
         .element_dofs(owner_elem)
         .iter()
         .map(|&d| d as usize)
         .collect();
     let signs_opt = space.element_signs(owner_elem);
-    let (face_qp_phys, face_weights, face_normals) = face_quadrature(mesh, face_nodes, dim, quad_order);
     let mut f_face = vec![0.0_f64; n_ldofs];
-    for q in 0..face_qp_phys.len() / dim {
-        let xp = &face_qp_phys[q * dim..(q + 1) * dim];
-        let w = face_weights[q];
-        let norm = &face_normals[q * dim..(q + 1) * dim];
-        let xi_ref = phys_to_ref(mesh, elem_nodes, xp, dim);
-        vol_elem.eval_basis_vec(&xi_ref, ref_phi);
+    for qp in &qps {
+        vol_elem.eval_basis_vec(&qp.xi_ref, ref_phi);
         match stype {
             SpaceType::HCurl => {
-                let j_inv_t = tr.jacobian_inv_t().clone();
+                let j_inv_t = qp
+                    .jac
+                    .clone()
+                    .try_inverse()
+                    .expect("degenerate boundary owner element")
+                    .transpose();
                 piola_hcurl_basis(&j_inv_t, ref_phi, phys_phi, n_ldofs, dim);
             }
             SpaceType::HDiv => {
-                let jac = tr.jacobian().clone();
-                let det_j = tr.det_j();
-                piola_hdiv_basis(&jac, det_j, ref_phi, phys_phi, n_ldofs, dim);
+                piola_hdiv_basis(&qp.jac, qp.det_j, ref_phi, phys_phi, n_ldofs, dim);
             }
             _ => unreachable!(),
         }
@@ -645,10 +718,10 @@ where
         let qp_data = VectorBdQpData {
             n_dofs: n_ldofs,
             dim,
-            weight: w,
+            weight: qp.weight,
             phi_vec: phys_phi,
-            normal: norm,
-            x_phys: xp,
+            normal: &qp.normal,
+            x_phys: &qp.x_phys,
             elem_id: owner_elem,
             elem_tag: mesh.face_tag(f),
         };
@@ -735,6 +808,45 @@ fn phys_to_ref<M: MeshTopology>(
         }
     }
     xi
+}
+
+/// Invert the isoparametric element map `F(ξ) = xp` by Newton iteration.
+///
+/// `geo_elem` must be the same geometry reference element the volume
+/// assembly uses for this element (`geo_ref_elem_from_mesh`).  The
+/// iteration starts from the element centroid; straight-sided elements
+/// (the common case for boundary faces) converge quadratically in a
+/// handful of steps.
+fn phys_to_ref_isoparametric<M: MeshTopology>(
+    mesh:      &M,
+    geo_nodes: &[u32],
+    geo_elem:  &dyn ReferenceElement,
+    xp:        &[f64],
+    dim:       usize,
+) -> Vec<f64> {
+    let mut xi = vec![0.5_f64; dim];
+    let scale: f64 = xp.iter().map(|v| v.abs()).sum::<f64>() + 1.0;
+    for _ in 0..50 {
+        let (jac, _, fx) = isoparametric_jacobian(mesh, geo_nodes, geo_elem, &xi, dim);
+        let mut resid = vec![0.0_f64; dim];
+        let mut resid2 = 0.0_f64;
+        for i in 0..dim {
+            resid[i] = xp[i] - fx[i];
+            resid2 += resid[i] * resid[i];
+        }
+        if resid2.sqrt() < 1e-14 * scale {
+            return xi;
+        }
+        let j_inv = jac.try_inverse().expect("degenerate boundary owner element");
+        for i in 0..dim {
+            for k in 0..dim {
+                xi[i] += j_inv[(i, k)] * resid[k];
+            }
+        }
+    }
+    panic!(
+        "phys_to_ref_isoparametric: Newton did not converge (xp={xp:?}, xi={xi:?})"
+    );
 }
 
 /// Compute face quadrature points (in physical space), weights, and outward normals.
@@ -997,6 +1109,155 @@ mod tests {
                 let diff = (ds[i*n+j] - dt[i*n+j]).abs();
                 assert!(diff < 1e-12,
                     "scalar vs tensor M[{i},{j}]: {} vs {}", ds[i*n+j], dt[i*n+j]);
+            }
+        }
+    }
+
+    // ── D13: boundary linear form on tri AND quad owners (analytic) ─────────
+
+    /// H(div) boundary flux `b_i = ∫_Γ g (φ_i·n̂) ds` must satisfy
+    /// `b · c = ∮_Γ g (v·n̂) ds` exactly whenever `v = Σ c_i φ_i` is a
+    /// representable flux field.  With `g(x,y) = x` and `v = (1, 0)` (in RT0):
+    /// only the right edge of the unit square contributes → `∮ = 1`.
+    ///
+    /// D13 regression: quad owners previously went through the simplex
+    /// inverse map (`from_simplex_nodes` + affine `phys_to_ref`), producing
+    /// wrong reference coordinates and leaking DOF contributions; the D13
+    /// fix routes tensor-product owners through the isoparametric geometry.
+    #[test]
+    fn hdiv_boundary_flux_rt0_analytic_tri_and_quad() {
+        use fem_space::HDivSpace;
+
+        let g = |x: &[f64]| x[0];
+
+        for (name, mesh) in [
+            ("tri", Mesh::<2>::unit_square_tri(2)),
+            ("quad", Mesh::<2>::unit_square_quad(2)),
+        ] {
+            let rt = HDivSpace::new(mesh.clone(), 0);
+            let tags: Vec<i32> = (0..mesh.n_boundary_faces() as u32)
+                .map(|f| mesh.face_tag(f))
+                .collect();
+            let b = VectorBoundaryAssembler::assemble_boundary_linear(
+                &rt, &[&HdivNormalFluxIntegrator { g }], &tags, 4,
+            );
+
+            // Per-face analytic value: the RT0 normal trace of the owner-local
+            // basis on its own edge is the CONSTANT 1/|E| (Piola preserves the
+            // reference flux ∫ (φ·n̂) = 1), so the assembled (orientation-
+            // signed) entry is exactly  b_d = s_d · (1/|E|) ∫_E x ds.
+            let mut n_nonzero = 0_usize;
+            for f in 0..mesh.n_boundary_faces() as u32 {
+                let nds = mesh.face_nodes(f);
+                let p0 = mesh.node_coords(nds[0]);
+                let p1 = mesh.node_coords(nds[1]);
+                let mean_g = 0.5 * (p0[0] + p1[0]); // (1/len)·∫ x ds on a segment
+                // Owner = the element containing both face nodes.
+                let owner = mesh.elem_iter().find(|&e| {
+                    nds.iter().all(|n| mesh.element_nodes(e).contains(n))
+                }).expect("boundary face owner");
+                let dofs = rt.element_dofs(owner);
+                let signs = rt.element_signs(owner);
+                let dof = rt.edge_face_dof(EdgeKey::new(nds[0], nds[1]))
+                    .expect("RT0 edge dof") as usize;
+                let local = dofs.iter().position(|&d| d as usize == dof).unwrap();
+                let s = if local < signs.len() { signs[local] } else { 1.0 };
+                let got = b[dof];
+                assert!(
+                    (got - s * mean_g).abs() < 1e-12,
+                    "{name} face {f}: b[{dof}] = {got} (expected {})",
+                    s * mean_g
+                );
+                if got.abs() > 1e-14 {
+                    n_nonzero += 1;
+                }
+            }
+            // D13 leak check: with g = x the left edge (x = 0) is exactly
+            // zero, so the nonzero count must be (#boundary faces − #left
+            // faces) — the pre-D13 quad path leaked DOF contributions across
+            // the whole owner row (188 nonzeros instead of 64).
+            let n_left = (0..mesh.n_boundary_faces() as u32)
+                .filter(|&f| {
+                    let nds = mesh.face_nodes(f);
+                    let p0 = mesh.node_coords(nds[0]);
+                    let p1 = mesh.node_coords(nds[1]);
+                    p0[0].abs() < 1e-14 && p1[0].abs() < 1e-14
+                })
+                .count();
+            assert!(
+                n_nonzero == mesh.n_boundary_faces() - n_left,
+                "{name}: {n_nonzero} nonzeros (expected {})",
+                mesh.n_boundary_faces() - n_left
+            );
+        }
+    }
+
+    /// Closed-boundary divergence identity on a single-element quad mesh
+    /// (D13 quad-owner path: isoparametric geometry + Newton inverse map):
+    /// with g ≡ 1 and the boundary = ∂K,
+    ///   b_i = ∮_∂K Φ_i·n̂ ds = s_i·∮_∂K φ_i·n̂ ds = s_i·∫_K̂ div φ̂_i dξ̂,
+    /// where the last step is the divergence theorem in the reference domain
+    /// (the Piola transform preserves flux, |detJ| cancels).  The reference
+    /// side uses the element-crate `QuadRT1` primitives directly.
+    #[test]
+    fn hdiv_boundary_flux_rt1_quad_closed_boundary_identity() {
+        use fem_element::reference::VectorReferenceElement;
+        use fem_element::raviart_thomas::QuadRT1;
+        use fem_space::HDivSpace;
+
+        let mesh = Mesh::<2>::unit_square_quad(1);
+        let rt = HDivSpace::new(mesh.clone(), 1);
+        let tags: Vec<i32> = (0..mesh.n_boundary_faces() as u32)
+            .map(|f| mesh.face_tag(f))
+            .collect();
+        let b = VectorBoundaryAssembler::assemble_boundary_linear(
+            &rt, &[&HdivNormalFluxIntegrator { g: |_| 1.0 }], &tags, 6,
+        );
+
+        // ∫_[0,1]² div φ̂_i dξ̂ with the element's own quadrature.
+        let qr = QuadRT1.quadrature(6);
+        let n_loc = QuadRT1.n_dofs();
+        let mut ref_div = vec![0.0_f64; n_loc];
+        let mut int_div = vec![0.0_f64; n_loc];
+        for (xi, w) in qr.points.iter().zip(qr.weights.iter()) {
+            QuadRT1.eval_div(xi, &mut ref_div);
+            for (i, d) in ref_div.iter().enumerate() {
+                int_div[i] += w * d;
+            }
+        }
+
+        let owner = 0_u32;
+        let dofs = rt.element_dofs(owner);
+        let signs = rt.element_signs(owner);
+        for (i, &gd) in dofs.iter().enumerate() {
+            let s = if i < signs.len() { signs[i] } else { 1.0 };
+            let got = b[gd as usize];
+            let expected = s * int_div[i];
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "quad RT1 dof {i}: b = {got} (expected {expected})"
+            );
+        }
+    }
+
+    /// The boundary tangential mass on the quad unit square must be symmetric
+    /// (the pre-D13 quad path produced a garbage/leaking matrix).
+    #[test]
+    fn tangential_mass_symmetric_2d_quad() {
+        let mesh  = Mesh::<2>::unit_square_quad(4);
+        let space = HCurlSpace::new(mesh, 1);
+        let n     = space.n_dofs();
+
+        let integ = TangentialMassIntegrator { gamma: 1.0 };
+        let mat   = VectorBoundaryAssembler::assemble_boundary_bilinear(
+            &space, &[&integ], &[1, 2, 3, 4], 4,
+        );
+
+        let dense = mat.to_dense();
+        for i in 0..n {
+            for j in 0..n {
+                let diff = (dense[i * n + j] - dense[j * n + i]).abs();
+                assert!(diff < 1e-12, "B[{i},{j}] - B[{j},{i}] = {diff}");
             }
         }
     }

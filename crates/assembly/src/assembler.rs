@@ -8,9 +8,9 @@ use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
 use fem_element::{
-    QuadratureRule, ReferenceElement, PrismPk, PyramidPk, VectorReferenceElement,
+    QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
     lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TriP1,
-                QuadQ1, QuadQ2, QuadQ4, HexQ1},
+                QuadQ1, QuadQ2, HexQ1},
     lagrange::factory::{TriPk, TetPk},
     quadrature::quad_rule_01,
 };
@@ -127,6 +127,32 @@ impl ReferenceElement for P0Tet {
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         vec![vec![0.0; 3]]
+    }
+}
+
+/// Constant (P0) element on the standard triangle reference domain
+/// (area 1/2): the generic [`P0`] with `dim: 2` uses the square `[0,1]²`
+/// Gauss rule (weight sum 1), which doubles every standard assembly
+/// integral on triangles — the square-rule points fall outside the tri
+/// reference domain where the affine map still has |detJ| = 2·Area.
+/// `tri_rule` has weight sum 1/2 (MFEM `IntRules.Get(TRIANGLE, order)`
+/// semantics), matching the simplex `ElementTransformation` reference area
+/// (same defect class as [`P0Tet`]).
+struct P0Tri;
+
+impl ReferenceElement for P0Tri {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
+        for x in g.iter_mut() { *x = 0.0; }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        fem_element::quadrature::tri_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0; 2]]
     }
 }
 
@@ -257,7 +283,7 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
 /// [`TriPk`] (see [`ref_elem_vol_l2`]).
 pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => {
@@ -305,7 +331,7 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0 { dim: 2 }),
+        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
@@ -422,7 +448,6 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
         | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
         | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !is_quad_hex { return None; } // affine P1 simplex
-    use fem_element::lagrange::factory::QuadQk;
     match et {
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
             return if g <= 1 {
@@ -1298,7 +1323,6 @@ impl Assembler {
         // MFEM semantics: each integrator may select its own quadrature order.
         // If any integrator requests an explicit order, assemble integrators
         // individually on their own quadrature rules and accumulate.
-        let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
         let space_order = space.element_order(0);
         if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
@@ -1365,7 +1389,6 @@ impl Assembler {
         // MFEM semantics: each integrator may select its own quadrature order.
         // If any integrator requests an explicit order, assemble integrators
         // individually on their own quadrature rules and accumulate.
-        let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
         let space_order = space.element_order(0);
         if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
@@ -1489,7 +1512,6 @@ impl Assembler {
         integrators: &[&dyn LinearIntegrator],
         quad_order:  u8,
     ) -> Vec<f64> {
-        let mesh   = space.mesh();
         let n_dofs = space.n_dofs();
 
         // MFEM semantics: each integrator may select its own quadrature order
@@ -1972,7 +1994,6 @@ where
         let (elem, _) = mesh.face_elements(f);
         let mut owner = elem;
         let elem_nodes = mesh.element_nodes(elem);
-        let elem_dofs  = space.element_dofs(elem);
 
         // Quick path: the reported owner contains the face nodes.
         let owner_has_all = fn_nodes.iter().all(|&n| elem_nodes.contains(&n));
@@ -2090,5 +2111,27 @@ mod tests {
         assert_eq!(adaptive_assembly_threshold_for_threads(4), 16);
         assert_eq!(adaptive_assembly_threshold_for_threads(8), 8);
         assert_eq!(adaptive_assembly_threshold_for_threads(32), 8);
+    }
+
+    /// D11 regression: tri-P0 standard assembly integrals must not be doubled.
+    /// The old `P0 { dim: 2 }` element returned the square `[0,1]²` Gauss rule
+    /// (weight sum 1) for triangle owners, so `∫ 1 dx` on the unit square
+    /// evaluated to 2.0 (the affine tri map has |detJ| = 2·Area everywhere,
+    /// including outside the reference triangle).  `P0Tri` uses the MFEM
+    /// `IntRules.Get(TRIANGLE, ·)` rule (weight sum 1/2), so the element-mass
+    /// diagonal sums to the domain area.
+    #[test]
+    fn tri_p0_mass_not_doubled() {
+        use fem_space::L2Space;
+        use crate::standard::MassIntegrator;
+
+        let mesh = Mesh::<2>::unit_square_tri(3);
+        let l2 = L2Space::new(mesh, 0);
+        let m = Assembler::assemble_bilinear(&l2, &[&MassIntegrator { rho: 1.0 }], 2);
+        let diag_sum: f64 = (0..m.nrows).map(|i| m.get(i, i)).sum();
+        assert!(
+            (diag_sum - 1.0).abs() < 1e-12,
+            "Σ diag M for tri-P0 = {diag_sum} (expected 1.0; 2.0 means the square rule is back)"
+        );
     }
 }
