@@ -32,6 +32,42 @@ use linlvo::{
 // Re-export linlvo AMG config types so callers don't need to depend on linlvo directly.
 pub use linlvo::amg::{AmgConfig, AmgHierarchy, AmgPrecond, CoarsenStrategy, CycleType, SmootherType};
 
+// ─── hypre BoomerAMG-aligned configuration ───────────────────────────────────
+
+/// Configuration aligned with the **hypre BoomerAMG defaults** — the semantics
+/// MFEM relies on whenever it constructs a bare `HypreBoomerAMG` (e.g. on the
+/// Darcy Schur complement in `BDPMinresSolver`, `BBTSolver`, ex5p/ex5).
+///
+/// Item-by-item correspondence with BoomerAMG defaults:
+///
+/// | BoomerAMG default                       | fem-amg equivalent                       |
+/// |-----------------------------------------|------------------------------------------|
+/// | `strength_threshold = 0.25`             | `theta: 0.25`                            |
+/// | `coarsen_type = 10` (Falgout, RS-based) | `CoarsenStrategy::RugeStüben`            |
+/// | `interp_type = 6` (classical RS)        | RS direct interpolation                  |
+/// | `relax_type = 6` (hybrid symmetric      | `SmootherType::SymmetricGaussSeidel`     |
+/// | SOR/Jacobi, `relax_sweeps = 1` pre/post)| 1 pre + 1 post sweep                     |
+///
+/// The symmetric (forward + backward) Gauss–Seidel smoothing is the load-bearing
+/// choice: SGS is unconditionally convergent for SPD operators, which makes the
+/// V-cycle a symmetric positive-definite preconditioner as required by the
+/// CG/MINRES callers.  The plain [`AmgConfig::default()`] (smoothed aggregation
+/// + weighted Jacobi ω=2/3) produces V-cycles that are *not* reliably SPD on the
+/// strongly diagonally dominant Darcy Schur complements `S = B·diag(M)⁻¹·Bᵀ`
+/// (CG stagnates; per-level ρ(D⁻¹A_l) of SA hierarchies reaches the Jacobi
+/// stability limit 2/ω), so SPD-preconditioner consumers should prefer this
+/// preset.
+pub fn boomeramg_config() -> AmgConfig {
+    AmgConfig {
+        theta: 0.25,
+        strategy: CoarsenStrategy::RugeStüben,
+        smoother: SmootherType::SymmetricGaussSeidel,
+        pre_sweeps: 1,
+        post_sweeps: 1,
+        ..AmgConfig::default()
+    }
+}
+
 // ─── Chebyshev smoother ──────────────────────────────────────────────────────
 
 // ─── solve_amg_cg ────────────────────────────────────────────────────────────
@@ -171,6 +207,12 @@ impl<T: linlvoScalar> AmgSolver<T> {
     /// Number of levels in the AMG hierarchy.
     pub fn n_levels(&self) -> usize {
         self.hierarchy.n_levels()
+    }
+
+    /// Convergence rate of the most recent cycle application:
+    /// `‖r_after‖ / ‖r_before` at the finest level (NaN before the first call).
+    pub fn convergence_rate(&self) -> f64 {
+        self.hierarchy.convergence_rate()
     }
 
     /// Solve `A x = b` using the pre-built hierarchy.

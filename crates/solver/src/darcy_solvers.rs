@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::amg::{AmgConfig, AmgSolver};
+use crate::amg::{AmgSolver, boomeramg_config};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 /// MFEM `blocksolvers::IterSolveParameters`.
@@ -211,12 +211,15 @@ pub fn mfem_minres(
 /// Approximate inverse used for the Schur block of [`BdpMinresSolver`].
 ///
 /// C++ `BDPMinresSolver` always uses hypre `BoomerAMG` on `S`. The serial port
-/// keeps AMG as the default (`fem-amg` smoothed aggregation) and adds an exact
-/// dense inverse (used for 1:1 iteration-count comparisons against a serial
-/// C++ harness) and a weak Jacobi fallback.
+/// keeps AMG as the default, using the hypre-default-aligned
+/// [`boomeramg_config`] preset (Ruge–Stüben coarsening + symmetric
+/// Gauss–Seidel smoothing), and adds an exact dense inverse (used for 1:1
+/// iteration-count comparisons against a serial C++ harness) and a weak Jacobi
+/// fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchurMode {
-    /// fem-amg smoothed-aggregation AMG V-cycle (hypre BoomerAMG stand-in).
+    /// AMG V-cycle on `S` with the hypre BoomerAMG-default-aligned
+    /// [`boomeramg_config`] preset.
     Amg,
     /// Exact dense inverse of `S` (small problems only).
     Dense,
@@ -270,8 +273,12 @@ impl BdpMinresSolver {
         let schur = match schur_mode {
             SchurMode::Amg => {
                 // Guard zero rows (eliminated dofs) so the AMG hierarchy is SPD.
+                // hypre BoomerAMG default semantics (Ruge–Stüben coarsening +
+                // symmetric Gauss–Seidel smoothing): the smoothed-aggregation
+                // + weighted-Jacobi default produces non-SPD V-cycles on these
+                // Schur matrices and stalls CG/MINRES.
                 let s_guarded = guard_zero_diagonal(&s);
-                SchurApprox::Amg(AmgSolver::setup(&s_guarded, AmgConfig::default()))
+                SchurApprox::Amg(AmgSolver::setup(&s_guarded, boomeramg_config()))
             }
             SchurMode::Dense => {
                 let n = n_p;
@@ -540,5 +547,60 @@ mod tests {
         let mut sol = vec![1.0; 3]; // nonzero initial guess must be overwritten too
         solver.mult(&rhs, &mut sol);
         assert_eq!(sol[0], 0.0, "ess dof must be zeroed");
+    }
+
+    /// End-to-end regression (block-solvers Darcy, RT0×P0): BDP-MINRES with the
+    /// `SchurMode::Amg` Schur preconditioner converges with a
+    /// refinement-bounded iteration count.  Guards the regression where the
+    /// AMG V-cycle stalled MINRES at max_iter on inline-quad rs0/rs1 and
+    /// star.mesh (D10).
+    #[test]
+    fn bdp_amg_schur_real_darcy_refinement_bound() {
+        use fem_assembly::mixed::{HDivL2DivIntegrator, assemble_hdiv_l2_mixed};
+        use fem_assembly::standard::VectorMassIntegrator;
+        use fem_assembly::VectorAssembler;
+        use fem_mesh::{Mesh, refine_uniform};
+        use fem_space::{HDivSpace, L2Space};
+
+        // n_p per level: 16 → 64 → 256 (inline-quad rs0/rs1/rs2 sizes).
+        let mut mesh = Mesh::<2>::unit_square_quad(4);
+        for expected in [16usize, 64, 256] {
+            let u_sp = HDivSpace::new(mesh.clone(), 0);
+            let p_sp = L2Space::new(mesh.clone(), 0);
+            assert_eq!(p_sp.n_dofs(), expected);
+            let qo = 2u8;
+            let m = VectorAssembler::assemble_bilinear(
+                &u_sp,
+                &[&VectorMassIntegrator { alpha: 1.0 }],
+                qo,
+            );
+            let mut b = assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], qo);
+            for v in &mut b.values {
+                *v *= -1.0;
+            }
+
+            let param = IterSolveParameters {
+                print_level: 0,
+                max_iter: 300,
+                abs_tol: 1e-12,
+                rel_tol: 1e-8,
+            };
+            let solver = BdpMinresSolver::new(&m, &b, param, SchurMode::Amg);
+            let n = u_sp.n_dofs() + p_sp.n_dofs();
+            let rhs = vec![1.0_f64; n];
+            let mut sol = vec![0.0; n];
+            solver.mult(&rhs, &mut sol);
+            assert!(
+                solver.converged(),
+                "BDP+AMG did not converge at n_p = {expected}"
+            );
+            assert!(
+                solver.num_iterations() <= 120,
+                "BDP+AMG too slow at n_p = {expected}: {} iterations",
+                solver.num_iterations()
+            );
+
+            mesh = refine_uniform(&mesh);
+        }
     }
 }

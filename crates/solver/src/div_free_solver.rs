@@ -22,8 +22,10 @@
 //! block-solvers miniapp; this module consumes the resulting matrices only.
 //!
 //! Deviations from C++ (recorded):
-//! * hypre `BoomerAMG` → fem-amg smoothed aggregation (iteration counts
-//!   differ; solution accuracy is unaffected),
+//! * hypre `BoomerAMG` → fem-amg with the hypre-default-aligned preset
+//!   ([`fem_amg::boomeramg_config`]: Ruge–Stüben coarsening + symmetric
+//!   Gauss–Seidel smoothing; iteration counts differ slightly, solution
+//!   accuracy is unaffected),
 //! * hypre `HypreSmoother` (l1-Jacobi) → [`L1JacobiSmoother`] with a
 //!   zero-diagonal guard,
 //! * hypre `DropSmallEntries` is not applied (the assembled products are
@@ -69,11 +71,10 @@ impl Default for DfsParameters {
             bbt_solve_param: IterSolveParameters::default(),
             outer_solve_param: IterSolveParameters::default(),
             gmres_restart: 50,
-            // Dense (exact) Schur inverse: robust for the small coarse-level
-            // systems.  `SchurMode::Amg` (the C++ hypre BoomerAMG analogue)
-            // is available but fem-amg's V-cycle is not SPD-reliable on these
-            // uneliminated Darcy Schur matrices (recorded deviation).
-            coarse_schur_mode: SchurMode::Dense,
+            // AMG Schur inverse on the coarsest level (C++ hypre BoomerAMG
+            // analogue, `boomeramg_config()` preset).  Dense remains available
+            // as an exact fallback for small coarse systems.
+            coarse_schur_mode: SchurMode::Amg,
         }
     }
 }

@@ -133,6 +133,34 @@ fn main() {
         }
         // ── Block-diagonal-preconditioned MINRES (BDPMinresSolver) ───────────
         "bdp" => {
+            // Diagnostic: dump the assembled Schur complement S = B·diag(M)⁻¹·Bᵀ
+            // as index-1-based COO text (same triple format as MatrixMarket
+            // coordinate, without the header) for offline spectral analysis.
+            if let Some(path) = &args.dump_schur {
+                let bt = b_csr.transpose();
+                let mut minvbt = CooMatrix::<f64>::new(n_u, n_p);
+                for i in 0..n_u {
+                    let inv_d = 1.0 / m_csr.get(i, i).max(1e-300);
+                    for ptr in bt.row_ptr[i]..bt.row_ptr[i + 1] {
+                        let j = bt.col_idx[ptr] as usize;
+                        minvbt.add(i, j, bt.values[ptr] * inv_d);
+                    }
+                }
+                let s = b_csr.multiply(&minvbt.into_csr());
+                let mut text = String::with_capacity(s.values.len() * 32);
+                for i in 0..s.nrows {
+                    for ptr in s.row_ptr[i]..s.row_ptr[i + 1] {
+                        text.push_str(&format!(
+                            "{} {} {:.17e}\n",
+                            i + 1,
+                            s.col_idx[ptr] as usize + 1,
+                            s.values[ptr]
+                        ));
+                    }
+                }
+                std::fs::write(path, text).expect("dump-schur write failed");
+                eprintln!("[dump-schur] wrote {n_p}x{n_p} S to {path}");
+            }
             let schur = match args.schur.as_str() {
                 "amg" => SchurMode::Amg,
                 "diag" => SchurMode::Diag,
@@ -1477,8 +1505,12 @@ struct Args {
     solver: String,
     q_scaling: f64,
     m1_mode: String,
-    /// Schur preconditioner of the BDP/DFS coarse solve: dense|diag|amg.
+    /// Schur preconditioner of the BDP/DFS coarse solve: amg|dense|diag.
+    /// Default `amg` (hypre BoomerAMG analogue, `fem_amg::boomeramg_config`);
+    /// `dense` (exact inverse) remains as a fallback for small problems.
     schur: String,
+    /// Optional path: dump the assembled Schur complement S (COO text).
+    dump_schur: Option<String>,
     /// GMRES restart for the coupled DFS mode.
     restart: usize,
     verbose: bool,
@@ -1493,7 +1525,10 @@ fn parse_args() -> Args {
         solver: "bpcg".to_string(),
         q_scaling: 0.5,
         m1_mode: "diag".to_string(),
-        schur: "dense".to_string(),
+        // C++ block-solvers uses hypre BoomerAMG on the Schur complement
+        // (BDPMinresSolver); AMG is the default, Dense is the fallback.
+        schur: "amg".to_string(),
+        dump_schur: None,
         restart: 50,
         verbose: false,
     };
@@ -1521,6 +1556,9 @@ fn parse_args() -> Args {
             }
             "-schur" | "--schur-mode" => {
                 a.schur = it.next().unwrap_or_else(|| "dense".to_string());
+            }
+            "-dump-schur" | "--dump-schur" => {
+                a.dump_schur = it.next();
             }
             "-restart" | "--gmres-restart" => {
                 a.restart = it.next().and_then(|v| v.parse().ok()).unwrap_or(50);
