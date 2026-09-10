@@ -8,6 +8,8 @@ pub mod dpg_elasticity;
 pub mod sinv;
 pub mod trace_jump;
 pub mod dpg_operator;
+pub mod dpg_basis;
+pub mod dpg_integrators;
 
 pub use dpg::*;
 pub use dpg_2d::*;

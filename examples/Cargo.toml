@@ -501,3 +501,15 @@ path = "../miniapps/solvers/block_solvers.rs"
 [[example]]
 name = "schrodinger_flow"
 path = "../miniapps/fluids/schrodinger_flow.rs"
+
+[[example]]
+name = "dpg_helmholtz_1d"
+path = "../miniapps/dpg/dpg_helmholtz_1d.rs"
+
+[[example]]
+name = "dpg_poisson_2d"
+path = "../miniapps/dpg/dpg_poisson_2d.rs"
+
+[[example]]
+name = "dpg_acoustics_2d"
+path = "../miniapps/dpg/dpg_acoustics_2d.rs"
