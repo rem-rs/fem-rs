@@ -1,126 +1,156 @@
-//! True ultraweak DPG solver for `-u'' = f` on (0,1), u(0)=u(1)=0.
+//! True ultraweak DPG solver for the 1-D Poisson/Helmholtz problem
+//! `-u'' - k² u = f` on (0,1), u(0)=u(1)=0 (k=0 for Poisson).
 //!
-//! 1D companion of MFEM's `miniapps/dpg/diffusion.cpp` (the MFEM DPG weak
-//! form applies to 1D as well; fem-rs's shared DPG kernel in
-//! `fem_assembly::dpg_weakform` currently covers 2D/3D geometries, so this
-//! example writes the element loop out directly — the *method* is the same
-//! true ultraweak DPG: broken L2 trial fields, skeleton traces, enriched
-//! broken tests, element-wise `G = LLᵀ` inversion, `A = BᵀG⁻¹B` assembly).
+//! 1-D translation of MFEM's `miniapps/dpg/diffusion.cpp` (the MFEM DPG weak
+//! form machinery covers all dims; fem-rs's shared DPG kernel in
+//! `fem_assembly::dpg_weakform` covers 2-D/3-D geometries, so this example
+//! writes the element loop out directly — the *method* is the same true
+//! ultraweak DPG).  First-order system:  σ − u' = 0,  −σ' − k² u = f, with
+//! traces û = u|Γ, σ̂ = σ|Γ.
 //!
-//! First-order system:  σ − u' = 0,  −σ' = f, with traces û = u|Γ,
-//! σ̂ = σ|Γ.  Trial: u ∈ P1 (nodal), σ ∈ P0 broken, û ∈ P1 skeleton,
-//! σ̂ ∈ P0 skeleton.  Tests: τ ∈ P1, v ∈ P1 (broken), rows
+//! Trial spaces (order 1, cf. diffusion.cpp): u ∈ P0 broken, σ ∈ P0 broken,
+//! û ∈ P1 skeleton, σ̂ ∈ P0 skeleton.  Test spaces (order+1 enrichment):
+//! τ ∈ P1 broken (1-D `RT_{test_order-1}`), v ∈ P2 broken (`H¹_{test_order}`).
+//! Element rows (n = (−1, +1) the outward normals):
 //! ```text
-//!     (σ, τ)  + (u, τ') − <û, τ n> = 0        ∀ τ
-//!     −(σ, v') − <σ̂, v>            = −(f, v)  ∀ v
+//!     −(u, τ') − (σ, τ) + <û, τ n>              = 0        ∀ τ ∈ P1
+//!     (σ, v') − <σ̂, v n> − k² (u, v)            = (f, v)   ∀ v ∈ P2
 //! ```
-//! Manufactured solution u = sin(πx) (f = π² sin(πx)).
+//! Test (space-induced) norm: `(τ,τ) + (τ',τ') + (v,v) + (v',v')`.
+//!
+//! Manufactured solution u = sin(πx) (f = (π² − k²) sin(πx)).
 
-const QP: [f64; 2] = [0.2113248654051871, 0.7886751345948129];
-const QW: [f64; 2] = [0.5, 0.5];
 const PI: f64 = std::f64::consts::PI;
+
+/// 3-point Gauss-Legendre on [0,1] (exact through degree 5 — P2×P2 products).
+const QP: [f64; 3] = [0.5 * (1.0 - 0.7745966692414834), 0.5, 0.5 * (1.0 + 0.7745966692414834)];
+const QW: [f64; 3] = [5.0 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
+
+/// P2 basis on [0,1] (nodes 0, 1/2, 1) and its ξ-derivative.
+fn p2(xi: f64) -> [f64; 3] {
+    [(1.0 - xi) * (1.0 - 2.0 * xi), 4.0 * xi * (1.0 - xi), xi * (2.0 * xi - 1.0)]
+}
+fn p2_d(xi: f64) -> [f64; 3] {
+    [-3.0 + 4.0 * xi, 4.0 - 8.0 * xi, -1.0 + 4.0 * xi]
+}
 
 fn main() {
     let n_elem: usize = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(16);
+    let k: f64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     let h = 1.0 / n_elem as f64;
 
-    // Layout: u: n_elem+1 nodal; sigma: n_elem (P0); û: n_elem+1; σ̂: n_elem+1.
-    let n_u = n_elem + 1;
-    let n_sig = n_elem;
-    let n_hatu = n_elem + 1;
-    let n_hatsig = n_elem + 1;
+    // Layout: u: n (P0 broken), sigma: n (P0), û: n+1, σ̂: n+1.
+    let n_u = n_elem;
     let off_u = 0;
-    let off_s = n_u;
-    let off_hu = off_s + n_sig;
-    let off_hs = off_hu + n_hatu;
-    let n_total = off_hs + n_hatsig;
+    let off_s = off_u + n_u;
+    let off_hu = off_s + n_u;
+    let off_hs = off_hu + n_elem + 1;
+    let n_total = off_hs + n_elem + 1;
 
     let mut a_dense = vec![0.0_f64; n_total * n_total];
     let mut rhs = vec![0.0_f64; n_total];
 
-    // P1 basis on [0,1]: (1-x), x; derivative (-1, 1).
     for e in 0..n_elem {
-        let n_te = 4usize; // tau(2) + v(2)
+        // Tests: tau ∈ P1 (2 rows), v ∈ P2 (3 rows).
+        let n_te = 5usize;
         let mut g = vec![0.0_f64; n_te * n_te];
-        let mut bmat = vec![0.0_f64; n_te * 6]; // cols: sigma, u0, u1, huL, huR, hs
+        // cols: u_e, σ_e, û_e, û_{e+1}, σ̂_e, σ̂_{e+1}
+        let n_co = 6usize;
+        let mut bmat = vec![0.0_f64; n_te * n_co];
         let mut fvec = vec![0.0_f64; n_te];
 
-        for q in 0..2 {
-            let xq = QP[q];
-            let w = QW[q] * h;
-            let xm = xq; // local coordinate
-            // tau = v = P1 here; phi = (1-x, x), dphi = (-1, 1)
-            let phi = [1.0 - xm, xm];
-            let dphi = [-1.0, 1.0];
-            // tau rows: (sigma, tau): sigma P0 value on element = const (col 0),
-            // but sigma is a P0 unknown: B[tau_i, sigma_e] = int tau_i dx
+        // P1 (τ) values / derivatives: τ = (1-ξ, ξ), dτ/dξ = (-1, 1);
+        // ∫ τ' dx = dτ (the h factors cancel in the ∫·dx terms).
+        let dtau = [-1.0_f64, 1.0_f64];
+
+        for q in 0..3 {
+            let xi = QP[q];
+            let w = QW[q] * h; // physical weight
+            let tau = [1.0 - xi, xi];
+            let psi = p2(xi);
+            let dpsi = p2_d(xi); // dψ/dξ; dψ/dx = dψ/ξ / h
+
+            // Test norm blocks: (τ,τ) + (τ',τ') rows 0..2,
+            // (v,v) + (v',v') rows 2..5.
             for i in 0..2 {
-                g[i * n_te + i] += w; // (tau_i, tau_i) graph-norm mass on diag
                 for j in 0..2 {
-                    // tau graph norm: (tau', tau') too
-                    g[i * n_te + j] += w * dphi[i] * dphi[j];
-                    // v rows are also P1: v graph norm (v',v')+(v,v) sits in
-                    // rows 2..4, cols 2..4
-                    g[(2 + i) * n_te + (2 + j)] += w * (dphi[i] * dphi[j] + phi[i] * phi[j]);
+                    g[i * n_te + j] += w * tau[i] * tau[j]
+                        + QW[q] / h * dtau[i] * dtau[j];
                 }
-                // B[tau_i, sigma] = int tau_i dx
-                bmat[i * 6 + 0] += w * phi[i];
-                // B[tau_i, u_j] = int u_j tau_i' dx = dphi_i * int phi_j dx
-                bmat[i * 6 + 1] += dphi[i] * h * 0.5;
-                bmat[i * 6 + 2] += dphi[i] * h * 0.5;
-                // B[v_i, sigma] = -int v_i' dx = -(v_i(1)-v_i(0))
             }
-            // v rows: -(sigma, v') -> -(dphi_i) * sigma const: B[v_i, sigma] = -int v_i'
+            for i in 0..3 {
+                for j in 0..3 {
+                    g[(2 + i) * n_te + (2 + j)] += w * psi[i] * psi[j]
+                        + QW[q] / h * dpsi[i] * dpsi[j];
+                }
+            }
+
+            // Row τ: −(u, τ') − (σ, τ)   (traces added below).
+            //   −(u, τ_i') = −u_e ∫ τ_i' dx = −u_e dτ_i, per point −QW dτ_i
+            //   −(σ, τ_i)  = −σ_e ∫ τ_i dx, per point −w τ_i
             for i in 0..2 {
-                let row = 2 + i;
-                bmat[row * 6 + 0] += -w * dphi[i];
-                // RHS -(f, v) assembled with f = pi^2 sin(pi x)
-                let x_phys = e as f64 * h + xm * h;
-                let fv = PI * PI * (PI * x_phys).sin();
-                fvec[row] += w * fv * phi[i];
+                bmat[i * n_co] += -QW[q] * dtau[i];
+                bmat[i * n_co + 1] += -w * tau[i];
+            }
+            // Row v: (σ, v') − k² (u, v)   (traces added below).
+            //   (σ, v_j') = σ_e ∫ v_j' dx, per point QW dψ_j
+            //   −k² (u, v_j) = −k² u_e ∫ v_j dx, per point −k² w ψ_j
+            for j in 0..3 {
+                bmat[(2 + j) * n_co + 1] += QW[q] * dpsi[j];
+                bmat[(2 + j) * n_co] += -k * k * w * psi[j];
+                // RHS (f, v_j), f = (π² − k²) sin(πx).
+                let x_phys = (e as f64 + xi) * h;
+                fvec[2 + j] += w * (PI * PI - k * k) * (PI * x_phys).sin() * psi[j];
             }
         }
 
-        // Trace terms (point evaluations at the two faces):
-        // B[tau_i, huL] = +tau_i(0), B[tau_i, huR] = -tau_i(1)
-        // B[v_i, hsL]  = -v_i(0),    B[v_i, hsR]  = +v_i(1)
-        let tau0 = [1.0, 0.0];
-        let tau1 = [0.0, 1.0];
+        // Trace terms (point evaluations, outward normals n = (−1, +1)):
+        //   row τ: +<û, τ n>  →  B[τ_i, û_L] = −τ_i(0), B[τ_i, û_R] = +τ_i(1)
+        //   row v: −<σ̂, v n>  →  B[v_j, σ̂_L] = +v_j(0), B[v_j, σ̂_R] = −v_j(1)
         for i in 0..2 {
-            bmat[i * 6 + 3] += tau0[i];
-            bmat[i * 6 + 4] += -tau1[i];
-            bmat[(2 + i) * 6 + 4] += phi_right(i);
-            bmat[(2 + i) * 6 + 5] += -phi_right(i);
+            let t0 = if i == 0 { 1.0 } else { 0.0 };
+            let t1 = if i == 1 { 1.0 } else { 0.0 };
+            bmat[i * n_co + 2] += -t0;
+            bmat[i * n_co + 3] += t1;
+        }
+        for j in 0..3 {
+            let v0 = p2(0.0)[j];
+            let v1 = p2(1.0)[j];
+            bmat[(2 + j) * n_co + 4] += v0;
+            bmat[(2 + j) * n_co + 5] += -v1;
         }
 
         // Cholesky of G, Y = L⁻¹B, y = L⁻¹f, A_e = YᵀY, b_e = Yᵀy.
         let mut l = g.clone();
         for j in 0..n_te {
             let mut d = l[j * n_te + j];
-            for k in 0..j {
-                d -= l[j * n_te + k] * l[j * n_te + k];
+            for kk in 0..j {
+                d -= l[j * n_te + kk] * l[j * n_te + kk];
             }
             d = d.sqrt();
             l[j * n_te + j] = d;
             for i in (j + 1)..n_te {
                 let mut s = l[i * n_te + j];
-                for k in 0..j {
-                    s -= l[i * n_te + k] * l[j * n_te + k];
+                for kk in 0..j {
+                    s -= l[i * n_te + kk] * l[j * n_te + kk];
                 }
                 l[i * n_te + j] = s / d;
             }
         }
         let mut yb = bmat.clone();
         for i in 0..n_te {
-            for kk in 0..6 {
-                let mut s = yb[i * 6 + kk];
+            for c in 0..n_co {
+                let mut s = yb[i * n_co + c];
                 for j in 0..i {
-                    s -= l[i * n_te + j] * yb[j * 6 + kk];
+                    s -= l[i * n_te + j] * yb[j * n_co + c];
                 }
-                yb[i * 6 + kk] = s / l[i * n_te + i];
+                yb[i * n_co + c] = s / l[i * n_te + i];
             }
         }
         for i in 0..n_te {
@@ -130,42 +160,42 @@ fn main() {
             }
             fvec[i] = s / l[i * n_te + i];
         }
-        let mut a_e = vec![0.0_f64; 6 * 6];
-        let mut b_e = vec![0.0_f64; 6];
-        for i in 0..6 {
-            for j in 0..6 {
+        let mut a_e = vec![0.0_f64; n_co * n_co];
+        let mut b_e = vec![0.0_f64; n_co];
+        for i in 0..n_co {
+            for j in 0..n_co {
                 let mut s = 0.0;
-                for k in 0..n_te {
-                    s += yb[k * 6 + i] * yb[k * 6 + j];
+                for kk in 0..n_te {
+                    s += yb[kk * n_co + i] * yb[kk * n_co + j];
                 }
-                a_e[i * 6 + j] = s;
+                a_e[i * n_co + j] = s;
             }
             let mut s = 0.0;
-            for k in 0..n_te {
-                s += yb[k * 6 + i] * fvec[k];
+            for kk in 0..n_te {
+                s += yb[kk * n_co + i] * fvec[kk];
             }
             b_e[i] = s;
         }
 
-        // Scatter: cols/rows = sigma_e, u(e), u(e+1), hu(e), hu(e+1), hs(e).
+        // Scatter.
         let vdofs = [
-            off_s + e,
             off_u + e,
-            off_u + e + 1,
+            off_s + e,
             off_hu + e,
             off_hu + e + 1,
             off_hs + e,
+            off_hs + e + 1,
         ];
         for (li, &gd) in vdofs.iter().enumerate() {
             rhs[gd] += b_e[li];
             for (lj, &gd2) in vdofs.iter().enumerate() {
-                a_dense[gd * n_total + gd2] += a_e[li * 6 + lj];
+                a_dense[gd * n_total + gd2] += a_e[li * n_co + lj];
             }
         }
     }
 
-    // Essential BCs: û = 0 at x=0,1; σ̂ left free (natural).
-    let ess = [off_hu, off_hu + n_hatu - 1];
+    // Essential BCs: û = 0 at x=0,1 (u(0)=u(1)=0); σ̂ left free (natural).
+    let ess = [off_hu, off_hu + n_elem];
     for &d in &ess {
         for j in 0..n_total {
             a_dense[d * n_total + j] = 0.0;
@@ -184,8 +214,8 @@ fn main() {
             }
         }
         if best != c {
-            for k in 0..n_total {
-                a_dense.swap(c * n_total + k, best * n_total + k);
+            for kk in 0..n_total {
+                a_dense.swap(c * n_total + kk, best * n_total + kk);
             }
             rhs.swap(c, best);
         }
@@ -193,8 +223,8 @@ fn main() {
         for r in (c + 1)..n_total {
             let f = a_dense[r * n_total + c] / p;
             a_dense[r * n_total + c] = f;
-            for k in (c + 1)..n_total {
-                a_dense[r * n_total + k] -= f * a_dense[c * n_total + k];
+            for kk in (c + 1)..n_total {
+                a_dense[r * n_total + kk] -= f * a_dense[c * n_total + kk];
             }
         }
     }
@@ -210,25 +240,40 @@ fn main() {
         rhs[i] /= a_dense[i * n_total + i];
     }
 
-    // L2 error of u (P1 interpolation of the nodal values).
-    let mut err2 = 0.0;
+    // L2 errors of u and σ (both P0 cellwise constants).
+    let mut err2u = 0.0;
+    let mut err2s = 0.0;
     for e in 0..n_elem {
-        for q in 0..2 {
+        for q in 0..3 {
             let x = (e as f64 + QP[q]) * h;
-            let xl = QP[q];
-            let uh = rhs[off_u + e] * (1.0 - xl) + rhs[off_u + e + 1] * xl;
+            let uh = rhs[off_u + e];
             let ue = (PI * x).sin();
-            err2 += QW[q] * h * (uh - ue) * (uh - ue);
+            err2u += QW[q] * h * (uh - ue) * (uh - ue);
+            let sh = rhs[off_s + e];
+            let se = PI * (PI * x).cos();
+            err2s += QW[q] * h * (sh - se) * (sh - se);
         }
     }
-    println!("True 1D ultraweak DPG for -u'' = f (u = sin(pi x))");
-    println!("  elements = {n_elem}, L2 error = {:.3e}", err2.sqrt());
-}
-
-fn phi_right(i: usize) -> f64 {
-    if i == 1 {
-        1.0
-    } else {
-        0.0
+    println!("True 1D ultraweak DPG for -u'' - k^2 u = f (u = sin(pi x))");
+    println!(
+        "  elements = {n_elem}, k = {k}, L2 error u = {    // L2 error of u (P0 cellwise constants) and of σ.
+    let mut err2u = 0.0;
+    let mut err2s = 0.0;
+    for e in 0..n_elem {
+        for q in 0..3 {
+            let x = (e as f64 + QP[q]) * h;
+            let uh = rhs[off_u + e];
+            let ue = (PI * x).sin();
+            err2u += QW[q] * h * (uh - ue) * (uh - ue);
+            let sh = rhs[off_s + e];
+            let se = PI * (PI * x).cos();
+            err2s += QW[q] * h * (sh - se) * (sh - se);
+        }
     }
+    println!("True 1D ultraweak DPG for -u'' - k^2 u = f (u = sin(pi x))");
+    println!(
+        "  elements = {n_elem}, k = {k}, L2 error u = {:.3e}, sigma = {:.3e}",
+        err2u.sqrt(),
+        err2s.sqrt()
+    );
 }

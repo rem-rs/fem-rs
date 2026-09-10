@@ -272,6 +272,27 @@ impl DpgBilinear2 for DpgCurl2dNDIntegrator {
     }
 }
 
+/// 2-D pairing `(q ∇×G, F)` — MFEM `MixedCurlIntegrator(q)` used directly
+/// (no `TransposeIntegrator`) with an H(curl) trial and a scalar H1 test:
+/// `B[F_i, G_j] += w q F_i curl(G_j)`.
+pub struct DpgCurl2dNDTrialIntegrator {
+    /// Coefficient `q`.
+    pub q: f64,
+}
+
+impl DpgBilinear2 for DpgCurl2dNDTrialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        // test: scalar H1; trial: ND (scalar curl in trial.curl[j]).
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                m[i * nc + j] += ctx.w * self.q * test.phi[i] * trial.curl[j];
+            }
+        }
+    }
+}
+
 /// `(q ∇u, v)` with matrix/scalar coefficient — MFEM
 /// `MixedVectorGradientIntegrator(Q)`: trial scalar H1, test vector FE
 /// (H(div)/H(curl)); `B[v_i, u_j] += w Σ_{c,d} Q[c][d] (v_i)_c ∂u_j/∂x_d`.

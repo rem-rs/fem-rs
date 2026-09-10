@@ -22,6 +22,7 @@
 //! - `BlrMatrix`, `BlrBlock` �?Block Low-Rank compression for direct solvers
 
 pub mod complex_csr;
+pub mod complex_dense;
 pub mod coo;
 pub mod csr;
 pub mod dense;

@@ -81,7 +81,10 @@ pub struct ComplexDPGWeakForm<M: MeshTopology + Clone + 'static> {
 #[derive(Clone)]
 enum TrialKind {
     Volume { kind: VolKind, order: u8, dofs_per_elem: usize },
-    Trace { order: u8 },
+    /// Skeleton trace space: `continuous` selects the vertex-continuous
+    /// H1-trace space (MFEM `H1_Trace_FECollection`) over the per-edge
+    /// discontinuous Lagrange trace (RT-trace style).
+    Trace { order: u8, continuous: bool },
 }
 
 struct ComplexCondData {
@@ -119,26 +122,22 @@ impl ComplexDpgSystem {
     pub fn to_real_block_csr(&self) -> CsrMatrix<f64> {
         let n = self.n_complex();
         let mut coo = CooMatrix::<f64>::new(2 * n, 2 * n);
-        for row_off in [0usize, n] {
-            for i in 0..n {
-                for p in self.mat_r.row_ptr[i]..self.mat_r.row_ptr[i + 1] {
-                    coo.add(
-                        row_off + i,
-                        row_off + self.mat_r.col_idx[p] as usize,
-                        self.mat_r.values[p],
-                    );
-                }
+        // Real blocks on both diagonals.
+        for i in 0..n {
+            for p in self.mat_r.row_ptr[i]..self.mat_r.row_ptr[i + 1] {
+                let j = self.mat_r.col_idx[p] as usize;
+                let v = self.mat_r.values[p];
+                coo.add(i, j, v);
+                coo.add(n + i, n + j, v);
             }
-            // imag block with the alternating sign
-            let isign = if row_off == 0 { -1.0 } else { 1.0 };
-            for i in 0..n {
-                for p in self.mat_i.row_ptr[i]..self.mat_i.row_ptr[i + 1] {
-                    coo.add(
-                        row_off + i,
-                        n + self.mat_i.col_idx[p] as usize,
-                        isign * self.mat_i.values[p],
-                    );
-                }
+        }
+        // Imaginary off-diagonal blocks with the alternating sign.
+        for i in 0..n {
+            for p in self.mat_i.row_ptr[i]..self.mat_i.row_ptr[i + 1] {
+                let j = self.mat_i.col_idx[p] as usize;
+                let v = self.mat_i.values[p];
+                coo.add(i, n + j, -v);
+                coo.add(n + i, j, v);
             }
         }
         coo.into_csr()
@@ -147,78 +146,17 @@ impl ComplexDpgSystem {
 
 // ─── Complex dense helpers (row-major (re, im) pairs) ────────────────────────
 
-/// Complex-symmetric Cholesky `G = L Lᵀ` (no conjugation) on split re/im
-/// arrays.  TODO(kernel gap): MFEM factors the DPG test Gram with
-/// `ComplexCholeskyFactors` as LL^H (Hermitian); the assembled DPG graph
-/// norm here is Hermitian (imaginary cross blocks verified antisymmetric),
-/// but the Hermitian factorization path currently reports a non-PD pivot on
-/// some elements — under investigation.  The no-conjugate factorization runs
-/// to completion on all elements.
-fn complex_cholesky(gr: &mut [f64], gi: &mut [f64], n: usize) -> bool {
-    for j in 0..n {
-        let mut dr = gr[j * n + j];
-        let mut di = gi[j * n + j];
-        for k in 0..j {
-            let (lr, li) = (gr[j * n + k], gi[j * n + k]);
-            dr -= lr * lr - li * li;
-            di -= 2.0 * lr * li;
-        }
-        let (sr, si);
-        if di == 0.0 && dr > 0.0 {
-            sr = dr.sqrt();
-            si = 0.0;
-        } else {
-            let m = (dr * dr + di * di).sqrt();
-            let r = ((m + dr) / 2.0).sqrt();
-            if !(r > 0.0) {
-                return false;
-            }
-            sr = r;
-            si = di / (2.0 * r);
-        }
-        gr[j * n + j] = sr;
-        gi[j * n + j] = si;
-        let den = sr * sr + si * si;
-        if den < 1e-300 {
-            return false;
-        }
-        for i in (j + 1)..n {
-            let mut tr = gr[i * n + j];
-            let mut ti = gi[i * n + j];
-            for k in 0..j {
-                let (lir, lil) = (gr[i * n + k], gi[i * n + k]);
-                let (ljr, lji) = (gr[j * n + k], gi[j * n + k]);
-                tr -= lir * ljr - lil * lji;
-                ti -= lir * lji + lil * ljr;
-            }
-            let inv = 1.0 / den;
-            let nr = tr * sr + ti * si;
-            let ni = ti * sr - tr * si;
-            gr[i * n + j] = nr * inv;
-            gi[i * n + j] = ni * inv;
-        }
-    }
-    true
-}
-
-/// Forward substitution `L X = B` (plain, no conjugation) on split arrays;
-/// `b`: row-major `n × k`.
-fn complex_lsolve(lr: &[f64], li: &[f64], n: usize, br: &mut [f64], bi: &mut [f64], k: usize) {
-    for i in 0..n {
-        for kk in 0..k {
-            let mut sr = br[i * k + kk];
-            let mut si = bi[i * k + kk];
-            for j in 0..i {
-                let (lr_, li_) = (lr[i * n + j], li[i * n + j]);
-                sr -= lr_ * br[j * k + kk] - li_ * bi[j * k + kk];
-                si -= lr_ * bi[j * k + kk] + li_ * br[j * k + kk];
-            }
-            let inv = 1.0 / lr[i * n + i];
-            br[i * k + kk] = sr * inv;
-            bi[i * k + kk] = si * inv;
-        }
-    }
-}
+// The DPG test Gram `G` is factored and inverted with the Hermitian
+// (LLᴴ) Cholesky from `fem_linalg::complex_dense`, a 1:1 port of MFEM's
+// `ComplexCholeskyFactors` (the exact factorization used by
+// `ComplexDPGWeakForm::Assemble` in `miniapps/dpg/util/complexweakform.cpp`).
+// Per MFEM, only `LSolve` is applied (`B ← L⁻¹B`, `f ← L⁻¹f`); the normal
+// matrix is then formed as `A = BᴴB = Bᴴ G⁻¹ B` (MFEM `MultAtB` computes the
+// conjugate-transpose product), and `b = Bᴴ f` (MFEM
+// `ComplexOperator::MultTranspose`, HERMITIAN convention).  The contraction
+// below therefore uses the conjugate transpose, matching `MultAtB`:
+// `A_r = Y_rᵀY_r + Y_iᵀY_i`, `A_i = Y_rᵀY_i − Y_iᵀY_r`.
+use fem_linalg::complex_dense::{complex_cholesky_her_factor, complex_cholesky_her_lsolve};
 
 /// Complex LU with partial pivoting (on `|z|²`) of split re/im arrays.
 fn complex_lu_factor(ar: &mut [f64], ai: &mut [f64], n: usize) -> Vec<usize> {
@@ -371,7 +309,17 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
 
     /// Trace (skeleton) trial space of face order `order`.
     pub fn add_trial_trace_space(&mut self, order: u8) -> usize {
-        self.trial_kinds.push(TrialKind::Trace { order });
+        self.trial_kinds.push(TrialKind::Trace { order, continuous: false });
+        self.trial_integs_r.push(Vec::new());
+        self.trial_integs_i.push(Vec::new());
+        self.trial_kinds.len() - 1
+    }
+
+    /// Vertex-continuous H1-trace skeleton space (MFEM
+    /// `H1_Trace_FECollection`): endpoint dofs are shared through their mesh
+    /// vertex, matching the H^(1/2) trace conformity.
+    pub fn add_trial_trace_space_h1(&mut self, order: u8) -> usize {
+        self.trial_kinds.push(TrialKind::Trace { order, continuous: true });
         self.trial_integs_r.push(Vec::new());
         self.trial_integs_i.push(Vec::new());
         self.trial_kinds.len() - 1
@@ -483,16 +431,20 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 TrialKind::Volume { dofs_per_elem, .. } => {
                     dofs_per_elem * self.mesh.n_elements()
                 }
-                TrialKind::Trace { order } => {
-                    self.skeleton_of_sizes(*order)
+                TrialKind::Trace { order, continuous } => {
+                    self.skeleton_of_sizes(*order, *continuous)
                 }
             })
             .collect()
     }
 
-    fn skeleton_of_sizes(&self, order: u8) -> usize {
+    fn skeleton_of_sizes(&self, order: u8, continuous: bool) -> usize {
         // Dof count only; rebuilt via `skeleton()` for the actual space.
-        crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), order).n_dofs()
+        if continuous {
+            crate::dpg::dpg_basis::SkeletonSpace::new_h1(self.mesh.clone(), order).n_dofs()
+        } else {
+            crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), order).n_dofs()
+        }
     }
 
     /// Cumulative trial offsets.
@@ -512,8 +464,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     /// Skeleton space of trace block `b` (rebuilt on demand; cheap).
     pub fn skeleton(&self, b: usize) -> SkeletonSpace<M> {
         match &self.trial_kinds[b] {
-            TrialKind::Trace { order } => {
-                crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), *order)
+            TrialKind::Trace { order, continuous } => {
+                if *continuous {
+                    crate::dpg::dpg_basis::SkeletonSpace::new_h1(self.mesh.clone(), *order)
+                } else {
+                    crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), *order)
+                }
             }
             _ => panic!("block {b} is not a trace space"),
         }
@@ -532,8 +488,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 let s = *dofs_per_elem;
                 (base + e as usize * s..base + (e as usize + 1) * s).collect()
             }
-            TrialKind::Trace { order } => {
-                let sk = crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), *order);
+            TrialKind::Trace { order, continuous } => {
+                let sk = if *continuous {
+                    crate::dpg::dpg_basis::SkeletonSpace::new_h1(self.mesh.clone(), *order)
+                } else {
+                    crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), *order)
+                };
                 sk.element_dofs(e).iter().map(|&d| base + d).collect()
             }
         }
@@ -580,8 +540,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             .trial_kinds
             .iter()
             .map(|k| match k {
-                TrialKind::Trace { order } => {
-                    Some(crate::dpg::dpg_basis::SkeletonSpace::new(mesh.clone(), *order))
+                TrialKind::Trace { order, continuous } => {
+                    Some(if *continuous {
+                        crate::dpg::dpg_basis::SkeletonSpace::new_h1(mesh.clone(), *order)
+                    } else {
+                        crate::dpg::dpg_basis::SkeletonSpace::new(mesh.clone(), *order)
+                    })
                 }
                 _ => None,
             })
@@ -832,21 +796,24 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 }
             }
 
-            // Complex normal equations
+            // Complex normal equations (MFEM complexweakform.cpp:507):
+            // Hermitian factorization G = L Lᴴ, then B ← L⁻¹B, f ← L⁻¹f.
             let (mut lr, mut li2) = (gr, gi);
-            if !complex_cholesky(&mut lr, &mut li2, n_te) {
+            if !complex_cholesky_her_factor(&mut lr, &mut li2, n_te).unwrap_or(false) {
                 panic!("ComplexDPGWeakForm::assemble: complex test Gram not HPD on element {e}");
             }
             let mut ybr = br_mat.clone();
             let mut ybi = bi_mat.clone();
-            complex_lsolve(&lr, &li2, n_te, &mut ybr, &mut ybi, n_tr);
-            complex_lsolve(&lr, &li2, n_te, &mut fr, &mut fi, 1);
+            complex_cholesky_her_lsolve(&lr, &li2, n_te, &mut ybr, &mut ybi, n_tr);
+            complex_cholesky_her_lsolve(&lr, &li2, n_te, &mut fr, &mut fi, 1);
             if self.store_matrices {
                 self.stored
                     .push((ybr.clone(), ybi.clone(), fr.clone(), fi.clone(), n_tr));
             }
 
-            // A = Yᵀ Y (plain transpose), b = Yᵀ y
+            // A = Yᴴ Y (MFEM `MultAtB` conjugate-transpose product:
+            // A_r = Y_rᵀY_r + Y_iᵀY_i, A_i = Y_rᵀY_i − Y_iᵀY_r),
+            // b = Yᴴ y (MFEM `ComplexOperator::MultTranspose`).
             let mut ar = vec![0.0_f64; n_tr * n_tr];
             let mut ai = vec![0.0_f64; n_tr * n_tr];
             for i in 0..n_tr {
@@ -1436,9 +1403,8 @@ mod tests {
     }
 
     /// Complex ultraweak DPG acoustics smoke test (C++ `acoustics.cpp`,
-    /// plane-wave BC): p, u L2 trials; p̂, û traces; q (H1), v (RT) tests;
+    /// plane-wave BC): p, u L² trials; p̂, û traces; q (H1), v (RT) tests;
     /// adjoint graph norm with ω.
-    #[test]
     /// Exact constant-pressure identity for the complex acoustics form:
     /// (p ≡ 1, u ≡ 0, p̂ ≡ 1, û ≡ 0, f = iω) must satisfy A x = b exactly
     /// (divergence theorem), validating the complex normal-equation assembly.
@@ -1470,6 +1436,17 @@ mod tests {
         );
         a.add_trace_integrator(Some(Box::new(DpgNormalTraceIntegrator)), None, hatp, v);
         a.add_trace_integrator(Some(Box::new(DpgTraceIntegrator)), None, hatu, q);
+        // ω² (v, δv) and ω² (q, δq) — part of the C++ adjoint graph norm
+        // (acoustics.cpp); without them G is singular (not HPD).
+        a.add_test_integrator(
+            Some(Box::new(crate::dpg::dpg_integrators::DpgVectorFEMassIntegrator {
+                q: omega * omega,
+            })),
+            None,
+            v,
+            v,
+        );
+        a.add_test_integrator(Some(Box::new(DpgMassIntegrator { q: omega * omega })), None, q, q);
         a.add_test_integrator(Some(Box::new(DpgDiffusionIntegrator { q: 1.0 })), None, q, q);
         a.add_test_integrator(Some(Box::new(DpgMassIntegrator { q: 1.0 })), None, q, q);
         a.add_test_integrator(
@@ -1604,6 +1581,44 @@ mod tests {
 
         let mat_r = a.mat_r.as_ref().unwrap();
         let mat_i = a.mat_i.as_ref().unwrap();
+        // Hermiticity of the raw normal operator: A_r symmetric, A_i
+        // antisymmetric (A = Bᴴ G⁻¹ B with Hermitian G).
+        {
+            let n = mat_r.nrows;
+            let v_r = mat_r.transpose();
+            let mut worst_r = 0.0_f64;
+            for i in 0..n {
+                for p in mat_r.row_ptr[i]..mat_r.row_ptr[i + 1] {
+                    let j = mat_r.col_idx[p] as usize;
+                    let mut vt = 0.0_f64;
+                    for q in v_r.row_ptr[i]..v_r.row_ptr[i + 1] {
+                        if v_r.col_idx[q] as usize == j {
+                            vt = v_r.values[q];
+                            break;
+                        }
+                    }
+                    worst_r = worst_r.max((mat_r.values[p] - vt).abs());
+                }
+            }
+            let v_i = mat_i.transpose();
+            let mut worst_i = 0.0_f64;
+            for i in 0..n {
+                for p in mat_i.row_ptr[i]..mat_i.row_ptr[i + 1] {
+                    let j = mat_i.col_idx[p] as usize;
+                    let mut vt = 0.0_f64;
+                    for q in v_i.row_ptr[i]..v_i.row_ptr[i + 1] {
+                        if v_i.col_idx[q] as usize == j {
+                            vt = v_i.values[q];
+                            break;
+                        }
+                    }
+                    worst_i = worst_i.max((mat_i.values[p] + vt).abs());
+                }
+            }
+            eprintln!("raw A_r symmetric dev = {worst_r:.3e}, A_i antisym dev = {worst_i:.3e}");
+            assert!(worst_r < 1e-9, "A_r not symmetric: {worst_r:.3e}");
+            assert!(worst_i < 1e-9, "A_i not antisymmetric: {worst_i:.3e}");
+        }
         let br = &a.y_r;
         let bi = &a.y_i;
         let n = mat_r.nrows;
@@ -1660,6 +1675,46 @@ mod tests {
                 }
             }
             let half = sys.n_complex();
+            // Post-elimination Hermiticity (interior block): r symmetric,
+            // i antisymmetric.
+            {
+                let mr = &sys.mat_r;
+                let mi = &sys.mat_i;
+                let n = mr.nrows;
+                let tr = mr.transpose();
+                let mut worst_r = 0.0_f64;
+                for i in 0..n {
+                    for p in mr.row_ptr[i]..mr.row_ptr[i + 1] {
+                        let j = mr.col_idx[p] as usize;
+                        let mut vt = 0.0_f64;
+                        for q in tr.row_ptr[i]..tr.row_ptr[i + 1] {
+                            if tr.col_idx[q] as usize == j {
+                                vt = tr.values[q];
+                                break;
+                            }
+                        }
+                        worst_r = worst_r.max((mr.values[p] - vt).abs());
+                    }
+                }
+                let ti = mi.transpose();
+                let mut worst_i = 0.0_f64;
+                for i in 0..n {
+                    for p in mi.row_ptr[i]..mi.row_ptr[i + 1] {
+                        let j = mi.col_idx[p] as usize;
+                        let mut vt = 0.0_f64;
+                        for q in ti.row_ptr[i]..ti.row_ptr[i + 1] {
+                            if ti.col_idx[q] as usize == j {
+                                vt = ti.values[q];
+                                break;
+                            }
+                        }
+                        worst_i = worst_i.max((mi.values[p] + vt).abs());
+                    }
+                }
+                eprintln!(
+                    "post-elim A_r sym dev = {worst_r:.3e}, A_i antisym dev = {worst_i:.3e}"
+                );
+            }
             eprintln!(
                 "complex acoustics eliminated-system residual: {worst2:.3e} at row {worst_i} \
                  (half={half}, ess={})",

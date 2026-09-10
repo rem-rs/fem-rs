@@ -62,7 +62,7 @@ impl VolKind {
             VolKind::Scalar => n,
             VolKind::Vector { vdim } => n * vdim,
             VolKind::HDiv => vector_ref_elem(et, order).n_dofs(),
-            VolKind::HCurl => vector_ref_elem(et, order).n_dofs(),
+            VolKind::HCurl => hcurl_ref_elem(et, order).n_dofs(),
         }
     }
 }
@@ -259,6 +259,16 @@ pub fn eval_vol_space(
                     gphys[i * dim + r] = s;
                 }
             }
+            // 2-D vector curl of the scalar basis, MFEM
+            // `GradToVectorCurl2D`: curl φ = (∂φ/∂y, −∂φ/∂x).  Consumed by
+            // `DpgCurl2dPairingIntegrator` (Maxwell ultraweak pairing).
+            if dim == 2 {
+                out.curl.resize(n_scalar * 2, 0.0);
+                for i in 0..n_scalar {
+                    out.curl[i * 2] = gphys[i * 2 + 1];
+                    out.curl[i * 2 + 1] = -gphys[i * 2];
+                }
+            }
             // expand byNODES
             for _c in 0..vdim {
                 out.phi.extend_from_slice(&phi);
@@ -397,11 +407,33 @@ pub struct SkeletonSpace<M: MeshTopology> {
     elem_dofs: Vec<Vec<usize>>,
     n_dofs: usize,
     is_quad_face: Vec<bool>,
+    /// Per-face dof ids in `eval_face_lagrange` node order.  For the
+    /// discontinuous mode this is the contiguous offset range; for the
+    /// continuous H1-trace mode the corner dofs are the shared vertex dofs.
+    face_dof_lists: Vec<Vec<usize>>,
+    /// `true` for H1-trace (vertex-continuous) spaces: the two endpoint dofs
+    /// of each face are shared with the adjacent faces through the mesh
+    /// vertex they sit on (MFEM `H1_Trace_FECollection` semantics); `false`
+    /// for RT-trace-style spaces (all face dofs face-local).
+    continuous: bool,
 }
 
 impl<M: MeshTopology + Clone> SkeletonSpace<M> {
-    /// Build the skeleton space of face order `order` over `mesh`.
+    /// Build the (face-discontinuous) skeleton space of face order `order`.
     pub fn new(mesh: M, order: u8) -> Self {
+        Self::build(mesh, order, false)
+    }
+
+    /// Build the vertex-continuous H1-trace skeleton space (MFEM
+    /// `H1_Trace_FECollection`): endpoint dofs of each face are shared
+    /// through their mesh vertex, so the trace is continuous across the
+    /// skeleton.  The face dof order still matches [`eval_face_lagrange`]
+    /// (node `k` at parameter `k/p` along the first-seen face direction).
+    pub fn new_h1(mesh: M, order: u8) -> Self {
+        Self::build(mesh, order, true)
+    }
+
+    fn build(mesh: M, order: u8, continuous: bool) -> Self {
         let dim = mesh.dim() as usize;
         // Enumerate faces in first-seen order.
         let mut face_map: std::collections::HashMap<Vec<u32>, usize> =
@@ -455,22 +487,103 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 (p + 1) * (p + 2) / 2
             }
         };
-        let mut face_dof_offsets = Vec::with_capacity(face_info.len() + 1);
-        face_dof_offsets.push(0);
-        for f in 0..face_info.len() {
-            let n = dofs_per_face(is_quad_face[f]);
-            face_dof_offsets.push(face_dof_offsets[f] + n);
-        }
-        let n_dofs = face_dof_offsets[face_info.len()];
 
-        let mut elem_dofs = vec![Vec::new(); mesh.n_elements()];
-        for e in mesh.elem_iter() {
-            let ei = e as usize;
-            let lfs = &elem_local_faces[ei];
-            for &fid in lfs {
-                elem_dofs[ei].extend(face_dof_offsets[fid]..face_dof_offsets[fid + 1]);
+        let (face_dof_offsets, n_dofs, elem_dofs, face_dof_lists) = if !continuous {
+            let mut face_dof_offsets = Vec::with_capacity(face_info.len() + 1);
+            face_dof_offsets.push(0);
+            for f in 0..face_info.len() {
+                let n = dofs_per_face(is_quad_face[f]);
+                face_dof_offsets.push(face_dof_offsets[f] + n);
             }
-        }
+            let n_dofs = face_dof_offsets[face_info.len()];
+            let mut elem_dofs = vec![Vec::new(); mesh.n_elements()];
+            for e in mesh.elem_iter() {
+                let ei = e as usize;
+                for &fid in &elem_local_faces[ei] {
+                    elem_dofs[ei].extend(face_dof_offsets[fid]..face_dof_offsets[fid + 1]);
+                }
+            }
+            let face_dof_lists: Vec<Vec<usize>> = (0..face_info.len())
+                .map(|f| (face_dof_offsets[f]..face_dof_offsets[f + 1]).collect())
+                .collect();
+            (face_dof_offsets, n_dofs, elem_dofs, face_dof_lists)
+        } else {
+            // Vertex-continuous H1 trace.  DOF layout: skeleton vertices
+            // first (each mesh vertex is one dof, shared by all touching
+            // faces), then per-edge/face interior dofs.  The face dof list
+            // is ordered to match `eval_face_lagrange`: node k sits at
+            // parameter k/p, so the first/last nodes are the face's first /
+            // last corner vertex and the interior nodes follow.
+            let p = order as usize;
+            let mut vertex_dof: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            let mut n_vdofs = 0usize;
+            for f in 0..face_node_ids.len() {
+                for &v in &face_node_ids[f] {
+                    if p >= 1 && !vertex_dof.contains_key(&v) {
+                        vertex_dof.insert(v, n_vdofs);
+                        n_vdofs += 1;
+                    }
+                }
+            }
+            let interior_per_face = if dim == 2 {
+                (p + 1).saturating_sub(2)
+            } else if is_quad_face.iter().any(|&q| q) {
+                // quad faces: interior dofs per 1-D direction = p − 1,
+                // total (p−1)² per face (p ≥ 1)
+                let pi = p.saturating_sub(1);
+                pi * pi
+            } else {
+                // tri faces: interior dofs = (p−1)(p−2)/2
+                let pi = p.saturating_sub(1);
+                pi.max(0) * pi.saturating_sub(2).max(0) / 2
+            };
+            let mut face_dof_offsets = Vec::with_capacity(face_info.len() + 1);
+            face_dof_offsets.push(0);
+            for f in 0..face_info.len() {
+                let n = dofs_per_face(is_quad_face[f]);
+                face_dof_offsets.push(face_dof_offsets[f] + n);
+            }
+            let base = face_dof_offsets[face_info.len()];
+            // Per-face dofs: corner vertex dofs + shared interior range.
+            let mut face_dofs: Vec<Vec<usize>> = Vec::with_capacity(face_node_ids.len());
+            if dim == 2 {
+                for f in 0..face_node_ids.len() {
+                    let mut dofs = Vec::with_capacity(p + 1);
+                    dofs.push(vertex_dof[&face_node_ids[f][0]]);
+                    for k in 1..p {
+                        dofs.push(base + f * interior_per_face + (k - 1));
+                    }
+                    if p >= 1 {
+                        dofs.push(vertex_dof[&face_node_ids[f][1]]);
+                    }
+                    face_dofs.push(dofs);
+                }
+            } else {
+                // 3-D: only the per-face corner/interior mapping is needed by
+                // the current miniapps; order-1 H1 traces are vertex dofs.
+                for f in 0..face_node_ids.len() {
+                    let mut dofs = Vec::with_capacity(dofs_per_face(is_quad_face[f]));
+                    for &v in &face_node_ids[f] {
+                        dofs.push(vertex_dof[&v]);
+                    }
+                    let b2 = base + f * interior_per_face;
+                    for k in 0..interior_per_face {
+                        dofs.push(b2 + k);
+                    }
+                    face_dofs.push(dofs);
+                }
+            }
+            let n_dofs = base + face_node_ids.len() * interior_per_face;
+            let mut elem_dofs = vec![Vec::new(); mesh.n_elements()];
+            for e in mesh.elem_iter() {
+                let ei = e as usize;
+                for &fid in &elem_local_faces[ei] {
+                    elem_dofs[ei].extend_from_slice(&face_dofs[fid]);
+                }
+            }
+            (face_dof_offsets, n_dofs, elem_dofs, face_dofs)
+        };
 
         SkeletonSpace {
             mesh,
@@ -483,6 +596,8 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             elem_dofs,
             n_dofs,
             is_quad_face,
+            face_dof_lists,
+            continuous,
         }
     }
 
@@ -508,9 +623,18 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
         matches!(self.face_info[f], SkeletonFaceInfo::Boundary { .. })
     }
 
-    /// Global DOFs of face `f` (consecutive range).
+    /// Global DOFs of face `f` (consecutive range).  Only meaningful for the
+    /// discontinuous (RT-trace style) spaces — use [`Self::face_dof_list`]
+    /// for the continuous H1-trace mode.
     pub fn face_dofs(&self, f: usize) -> std::ops::Range<usize> {
         self.face_dof_offsets[f]..self.face_dof_offsets[f + 1]
+    }
+
+    /// Global DOF ids of face `f` in `eval_face_lagrange` node order
+    /// (valid in both modes; for the continuous H1-trace mode the corner
+    /// dofs are the shared skeleton-vertex dofs).
+    pub fn face_dof_list(&self, f: usize) -> &[usize] {
+        &self.face_dof_lists[f]
     }
 
     /// Face adjacency info.
@@ -772,6 +896,58 @@ pub fn tri_face_dof_index(a: usize, b: usize, p: usize) -> usize {
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
+
+    /// Finite-difference consistency: the reference curl reported by the
+    /// ND element matches curl of its reference vector basis.
+    #[test]
+    fn nd_curl_matches_basis_fd() {
+        for et in [ElementType::Quad4, ElementType::Tri3] {
+            for order in [1u8, 2u8] {
+                let fe = hcurl_ref_elem(et, order);
+                let n = fe.n_dofs();
+                let mut v = vec![0.0_f64; n * 2];
+                let mut c = vec![0.0_f64; n];
+                let mut vl = vec![0.0_f64; n * 2];
+                let mut vr = vec![0.0_f64; n * 2];
+                let mut vd = vec![0.0_f64; n * 2];
+                let mut vu = vec![0.0_f64; n * 2];
+                let h = 1e-6;
+                let pts: Vec<Vec<f64>> = match et {
+                    ElementType::Quad4 => {
+                        vec![vec![0.3, 0.4], vec![0.7, 0.6], vec![0.5, 0.2]]
+                    }
+                    _ => vec![vec![0.3, 0.3], vec![0.4, 0.2]],
+                };
+                for xi in &pts {
+                    fe.eval_basis_vec(xi, &mut v);
+                    fe.eval_curl(xi, &mut c);
+                    let mut xl = xi.clone();
+                    let mut xr = xi.clone();
+                    xl[0] -= h;
+                    xr[0] += h;
+                    fe.eval_basis_vec(&xl, &mut vl);
+                    fe.eval_basis_vec(&xr, &mut vr);
+                    let mut yl = xi.clone();
+                    let mut yr = xi.clone();
+                    yl[1] -= h;
+                    yr[1] += h;
+                    fe.eval_basis_vec(&yl, &mut vd);
+                    fe.eval_basis_vec(&yr, &mut vu);
+                    for i in 0..n {
+                        // ref curl = dv_y/dx - dv_x/dy
+                        let curl_fd = (vr[i * 2 + 1] - vl[i * 2 + 1]) / (2.0 * h)
+                            - (vu[i * 2] - vd[i * 2]) / (2.0 * h);
+                        assert!(
+                            (curl_fd - c[i]).abs() < 1e-5,
+                            "curl mismatch {et:?} order {order} dof {i}: {curl_fd} vs {}",
+                            c[i]
+                        );
+                        let _ = v;
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn skeleton_2d_counts() {

@@ -89,7 +89,9 @@ fn solve_level(
 
     let ps = a.add_trial_scalar_space(p - 1);
     let us = a.add_trial_vector_space(p - 1, 2);
-    let hatp = a.add_trial_trace_space(p);
+    // p̂ ∈ H^{1/2}(Γ): vertex-continuous H1 trace (MFEM H1_Trace_FECollection).
+    let hatp = a.add_trial_trace_space_h1(p);
+    // û ∈ H^{−1/2}(Γ): RT trace, per-edge discontinuous dofs.
     let hatu = a.add_trial_trace_space(p - 1);
     let q = a.add_test_space(VolKind::Scalar, test_order);
     let v = a.add_test_space(VolKind::HDiv, test_order - 1);
@@ -187,12 +189,13 @@ fn solve_level(
         if !sk.is_boundary_face(f) {
             continue;
         }
-        for k in 0..sk.dofs_per_face(f) {
-            ess.push(base + sk.face_dofs(f).start + k);
+        let dof_list: Vec<usize> = sk.face_dof_list(f).to_vec();
+        for (k, &dof) in dof_list.iter().enumerate() {
+            ess.push(base + dof);
             let pt = face_point(mesh, sk.face_nodes(f), sk.is_quad_face(f), sk.order(), k);
             let (pr, pi) = ex.p(&pt);
-            xr[base + sk.face_dofs(f).start + k] = pr;
-            xi[base + sk.face_dofs(f).start + k] = pi;
+            xr[base + dof] = pr;
+            xi[base + dof] = pi;
         }
     }
 
