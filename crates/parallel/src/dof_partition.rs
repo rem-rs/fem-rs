@@ -243,13 +243,18 @@ impl DofPartition {
 
     /// Build a DOF partition from a `DofManager` and `MeshPartition`.
     ///
-    /// For P1, delegates to `from_mesh_partition`.  For P2, adds edge DOFs
-    /// with ownership rule: `owner(edge) = min(owner(endpoint_a), owner(endpoint_b))`.
+    /// For P1, delegates to `from_mesh_partition`.  For P2+, adds edge DOFs
+    /// with ownership rule: `owner(edge) = min(owner(endpoint_a), owner(endpoint_b))`
+    /// (MFEM: the owner of a shared vertex/edge group is the smallest rank in
+    /// the group — `GroupTopology::Create` picks `groups.PickElementInSet(i)`,
+    /// i.e. the first/min rank, see general/communication.cpp:123).
     ///
-    /// Global DOF IDs:
+    /// Global DOF IDs follow MFEM `FiniteElementSpace::Construct`'s
+    /// vertex → edge → face/interior numbering (fem/fespace.cpp:2820-2856):
     /// - Vertex DOFs keep their global node IDs `[0, total_global_vertices)`.
     /// - Edge DOFs get IDs `[total_global_vertices, total_global_vertices + total_global_edges)`,
     ///   assigned via a prefix scan on owned-edge counts.
+    /// - Element-interior (bubble) DOFs come last, keyed by global element id.
     pub fn from_dof_manager(
         dof_manager: &DofManager,
         partition: &MeshPartition,
@@ -258,16 +263,15 @@ impl DofPartition {
         if dof_manager.order == 1 {
             return Self::from_mesh_partition(partition, comm);
         }
-        // P2 (quads: 1 edge DOF + 1 center DOF per element) and P3 (quads:
-        // p-1 edge DOFs + (p-1)² bubble DOFs per element) share the same
-        // partition machinery: vertices, then edges (sorted by global node
-        // pair), then element-interior DOFs (element order).
+        // P2 (triangle: 1 edge DOF per edge, no interior; quad: + 1 center DOF
+        // per element) and P3/P4 (p-1 edge DOFs + interior/bubble DOFs per
+        // element) share the same partition machinery: vertices, then edges
+        // (sorted by global node pair), then element-interior DOFs (element
+        // order).
         assert!(
             dof_manager.order >= 2 && dof_manager.order <= 4,
-            "DofPartition: only P2..=P4 (quad) supported"
+            "DofPartition: only P2..=P4 supported"
         );
-        let order = dof_manager.order as usize;
-        let _interior_dofs_per = if order == 2 { 1 } else { (order - 1) * (order - 1) };
 
         let local_rank = comm.rank();
         let n_owned_vertices = partition.n_owned_nodes;
@@ -277,9 +281,22 @@ impl DofPartition {
         let mut owned_edges: Vec<EdgeDofInfo> = Vec::new();
         let mut ghost_edges: Vec<EdgeDofInfo> = Vec::new();
 
-        // Each canonical edge -> its DOFs (P2: 1, P3: p-1), ordered from the
-        // near-first-vertex side (DofManager convention).
-        let edge_dofs_of: Vec<(EdgeKey, Vec<u32>)> = if order == 2 {
+        // Each canonical edge -> its DOFs, ordered from the near-first-vertex
+        // side (DofManager convention).
+        //
+        // The `DofManager` stores edge DOFs in one of two mutually exclusive
+        // maps, depending on which builder produced it:
+        //   - `edge_dof_map`:  1 DOF per edge — `build_q2_quad` (Q2 quads),
+        //     `build_q2_hex`, `build_p2`/`build_p2_tet`.
+        //   - `edge_pk_map`:  `p-1` interpolated DOFs per edge — every general
+        //     `build_pk*` path, including `build_pk_quad`/`build_pk_hex`.
+        // `DofManager::new(mesh, 2)` dispatches **Tri3 P2 to `build_pk(mesh, 2)`**
+        // (see `new`: only `npe == 4` 2-D elements reach `build_q2_quad`), so
+        // branching on `order == 2` alone reads the empty `edge_dof_map` and
+        // mis-classifies every triangle edge DOF as an element-interior DOF
+        // (25 vertices + 32 elements × 3 edge DOFs counted as 32 interior DOFs).
+        // Select on whichever map the builder actually populated instead.
+        let edge_dofs_of: Vec<(EdgeKey, Vec<u32>)> = if !dof_manager.edge_dof_map.is_empty() {
             dof_manager
                 .edge_dof_map
                 .iter()
@@ -292,7 +309,8 @@ impl DofPartition {
                 .map(|(k, v)| (*k, v.clone()))
                 .collect()
         };
-        for (EdgeKey(local_a, local_b), dofs) in edge_dofs_of {
+        for (EdgeKey(local_a, local_b), dofs) in &edge_dofs_of {
+            let (local_a, local_b) = (*local_a, *local_b);
             let ga = partition.global_node(local_a);
             let gb = partition.global_node(local_b);
             let owner_a = partition.node_owner(local_a);
@@ -380,16 +398,9 @@ impl DofPartition {
         // n_global_vertices + n_global_edges + global_elem_id ·
         // interior_dofs_per + k (unique on every rank holding the element,
         // no exchange needed).
-        let edge_dof_set: std::collections::HashSet<u32> = if order == 2 {
-            dof_manager.edge_dof_map.values().copied().collect()
-        } else {
-            dof_manager
-                .edge_pk_map
-                .values()
-                .flatten()
-                .copied()
-                .collect()
-        };
+        // Edge DOF ids from the same map that `edge_dofs_of` was read from.
+        let edge_dof_set: std::collections::HashSet<u32> =
+            edge_dofs_of.iter().flat_map(|(_, ds)| ds.iter().copied()).collect();
         let n_total_vertices_loc = dof_manager.n_vertex_dofs as u32;
         let mut owned_interior: Vec<(Vec<u32>, u32)> = Vec::new(); // (dm dofs, local elem)
         let mut ghost_interior: Vec<(Vec<u32>, u32, Rank)> = Vec::new();
@@ -411,7 +422,24 @@ impl DofPartition {
                 ghost_interior.push((interior, e as u32, owner));
             }
         }
-        let interior_dofs_per = if order == 2 { 1 } else { (order - 1) * (order - 1) };
+        // Interior DOF count per element, taken from the collected lists
+        // instead of a closed form in `order`: the formula differs per element
+        // shape (2-D triangle P3: (p-1)(p-2)/2; 2-D quad Qk: (p-1)²; 3-D tet
+        // P3 face+volume, …).  The global-id formula below requires a single
+        // count shared by every element (true for the uniform-order
+        // DofManagers this path supports).
+        let interior_dofs_per = owned_interior
+            .iter()
+            .map(|(b, _)| b.len())
+            .chain(ghost_interior.iter().map(|(b, _, _)| b.len()))
+            .max()
+            .unwrap_or(0);
+        debug_assert!(
+            owned_interior.iter().all(|(b, _)| b.len() == interior_dofs_per)
+                && ghost_interior.iter().all(|(b, _, _)| b.len() == interior_dofs_per),
+            "from_dof_manager: elements disagree on the interior DOF count \
+             (variable-order DofManagers are not supported by this partition)"
+        );
         let n_owned_interior = owned_interior.len() * interior_dofs_per;
         let n_ghost_interior = ghost_interior.len() * interior_dofs_per;
 
@@ -558,6 +586,29 @@ impl DofPartition {
         for (dm_id, &part_id) in dm_to_partition.iter().enumerate() {
             partition_to_dm[part_id as usize] = dm_id as u32;
         }
+
+        // The permutation must cover every DofManager DOF exactly once: the
+        // partition enumerates the same DOF set as the DofManager, so a missing
+        // or reused slot means some DOF was mis-classified (e.g. read from the
+        // wrong edge-DOF map) — and the inverted `partition_to_dm` above would
+        // silently alias it instead of failing.
+        debug_assert_eq!(
+            n_dm_dofs, total,
+            "from_dof_manager: DofManager has {n_dm_dofs} DOFs, partition classified {total}"
+        );
+        debug_assert!(
+            {
+                let mut seen = vec![false; n_dm_dofs];
+                dm_to_partition.iter().all(|&p| {
+                    let slot = &mut seen[p as usize];
+                    let first_time = !*slot;
+                    *slot = true;
+                    first_time
+                })
+            },
+            "from_dof_manager: dm_to_partition is not injective (a DofManager DOF \
+             is missing from the vertex/edge/interior classification)"
+        );
 
         // ── Reverse lookup ──────────────────────────────────────────────────
         let dof_global_to_local: HashMap<u32, u32> = global_dof_ids

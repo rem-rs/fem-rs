@@ -429,7 +429,10 @@ fn refine_local_mixed(mesh: &Mesh<2>) -> LocalRefine {
         edge_to_elem: vec![],
         geometry: None,
         nc_vertex_view: None,
-    vertex_parents: vec![],
+        // Uniform 1→4 refinement of every element produces no hanging
+        // vertices, so there are no MFEM `AddVertexParents` triples to record
+        // (mirrors `Mesh::uniform`, the conforming constructor).
+        vertex_parents: vec![],
     };
     LocalRefine {
         mesh: refined,
@@ -714,7 +717,9 @@ pub fn par_uniform_refine(par_mesh: &ParallelMesh<Mesh<2>>) -> ParallelMesh<Mesh
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
-        vertex_parents: vec![],
+            // Conforming uniform refinement — no hanging vertices, matching
+            // the `Mesh::uniform` branch below.
+            vertex_parents: vec![],
         }
     } else {
         Mesh::uniform(

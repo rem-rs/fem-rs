@@ -366,6 +366,113 @@ mod tests {
         );
     }
 
+    /// P2 (quadratic H¹) DOF partitioning must be partition-invariant: assemble
+    /// the diffusion matrix on np1 and np2, apply `y = A x` with `x = gid`, and
+    /// compare `y` for every owned DOF keyed by its **canonical mesh entity**
+    /// (vertex global node / sorted global node pair for an edge).  P2 edge DOF
+    /// gids are assigned per-rank in contiguous owner blocks, so they are NOT
+    /// comparable across partitions — the entity key is.  This exercises the
+    /// P2 vertex+edge ownership rule, the `dm_to_partition` permutation and the
+    /// ghost edge global-id exchange end to end.
+    #[test]
+    fn par_space_p2_matrix_consistent_across_partitions() {
+        use fem_assembly::standard::DiffusionIntegrator;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let mesh = Mesh::<2>::unit_square_tri(4);
+
+        // (entity kind, a, b, y): kind 0 = vertex (a = global node), kind 1 =
+        // edge (a, b = sorted global node pair).
+        type Entity = (u8, u32, u32);
+
+        fn run_partition<const N: usize>(mesh: Mesh<2>) -> Vec<(Entity, f64)> {
+            let out: Arc<Mutex<Option<Vec<(Entity, f64)>>>> = Arc::new(Mutex::new(None));
+            let out2 = Arc::clone(&out);
+            let launcher = ThreadLauncher::new(WorkerConfig::new(N));
+            launcher.launch(move |comm| {
+                let pmesh = partition_mesh(&mesh, &comm);
+                let local_mesh = pmesh.local_mesh().clone();
+                let dm = DofManager::new(&local_mesh, 2);
+                let local = H1Space::new(local_mesh, 2);
+                let ps = ParallelFESpace::new_with_dof_manager(local, &pmesh, &dm, comm.clone());
+
+                // DofManager local DOF -> canonical entity, read from the same
+                // maps `from_dof_manager` uses (vertex DOFs are node ids for the
+                // Tri3 P2 layout; edge DOFs live in `edge_pk_map`).
+                let part = pmesh.partition();
+                let mut entity_of: HashMap<u32, Entity> = HashMap::new();
+                for lid in 0..dm.n_vertex_dofs as u32 {
+                    entity_of.insert(lid, (0, part.global_node(lid), 0));
+                }
+                for (&fem_space::dof_manager::EdgeKey(a, b), dofs) in &dm.edge_pk_map {
+                    let (ga, gb) = (part.global_node(a), part.global_node(b));
+                    for &d in dofs {
+                        entity_of.insert(d, (1, ga.min(gb), ga.max(gb)));
+                    }
+                }
+
+                let diff = DiffusionIntegrator { kappa: 1.0 };
+                let a_mat = ParAssembler::assemble_bilinear(&ps, &[&diff], 4);
+                let dp = ps.dof_partition();
+                let mut x = ParVector::zeros(&ps);
+                for pid in 0..dp.n_owned_dofs {
+                    x.as_slice_mut()[pid] = dp.global_dof(pid as u32) as f64;
+                }
+                let mut y = ParVector::zeros(&ps);
+                a_mat.spmv(&mut x, &mut y);
+
+                let owned: Vec<(Entity, f64)> = (0..dp.n_owned_dofs)
+                    .map(|pid| {
+                        let dm_id = dp.unpermute_dof(pid as u32);
+                        let e = *entity_of
+                            .get(&dm_id)
+                            .expect("P2 consistency test: owned DOF not classified");
+                        (e, y.as_slice()[pid])
+                    })
+                    .collect();
+
+                if comm.rank() == 0 {
+                    let mut all = owned.clone();
+                    for src in 1..comm.size() as i32 {
+                        let flat: Vec<u32> = comm.recv(src, 121);
+                        let vals: Vec<f64> = comm.recv(src, 122);
+                        all.extend(
+                            flat.chunks_exact(3)
+                                .map(|c| (c[0] as u8, c[1], c[2]))
+                                .zip(vals),
+                        );
+                    }
+                    all.sort_unstable_by_key(|&(e, _)| e);
+                    *out2.lock().unwrap() = Some(all);
+                } else {
+                    let flat: Vec<u32> = owned
+                        .iter()
+                        .flat_map(|&((k, a, b), _)| [k as u32, a, b])
+                        .collect();
+                    let vals: Vec<f64> = owned.iter().map(|&(_, v)| v).collect();
+                    comm.send(0, 121, &flat);
+                    comm.send(0, 122, &vals);
+                }
+            });
+            let mut guard = out.lock().unwrap();
+            guard.take().unwrap()
+        }
+
+        let np1 = run_partition::<1>(mesh.clone());
+        let np2 = run_partition::<2>(mesh.clone());
+        assert_eq!(np1.len(), np2.len(), "P2 global DOF count mismatch");
+        let mut max_diff = 0.0_f64;
+        for ((e1, y1), (e2, y2)) in np1.iter().zip(np2.iter()) {
+            assert_eq!(e1, e2, "P2 entity key order mismatch");
+            max_diff = max_diff.max((y1 - y2).abs());
+        }
+        assert!(
+            max_diff < 1e-9,
+            "P2 matrix differs across partitions: max_diff={max_diff:e}"
+        );
+    }
+
     #[test]
     fn par_space_ghost_exchange_p1() {
         let mesh = Mesh::<2>::unit_square_tri(4);
