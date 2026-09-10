@@ -48,19 +48,29 @@ fn main() {
         // i.e. fem-rs basis_funs(span = ks+p, xi) with global parameter
         // xi = a + (b-a)·(j/(samples−1)) — C++ GetKnotLocation(xi, ks+Order).
         let span = ks + p;
+        let h = b - a;
         for j in 0..SAMPLES {
             let xi_local = j as f64 / (SAMPLES - 1) as f64;
-            let xi = a + (b - a) * xi_local;
+            // Same expression as MFEM's `GetKnotLocation(xi, ni)`
+            // (`xi*knot(ni+1) + (1-xi)*knot(ni)`), so the printed column is
+            // bit-identical to the C++ output.
+            let xi = xi_local * b + (1.0 - xi_local) * a;
             let (n, d1, d2) = kv.basis_funs_and_ders2(span, xi);
             print!("{xi}\t");
             for d in 0..=p {
                 print!("\t{}", n[d]);
             }
+            // MFEM's `KnotVector::CalcDShape` / `CalcD2Shape` return derivatives
+            // with respect to the *element reference* coordinate ξ ∈ [0,1]
+            // (u = a + ξ·h): MFEM scales by `p·h^k`.  fem-rs'
+            // `basis_funs_and_ders2` returns derivatives with respect to the
+            // knot parameter u, so convert back with the factors `h` and `h²`
+            // to print exactly what the C++ miniapp prints.
             for d in 0..=p {
-                print!("\t{}", d1[d]);
+                print!("\t{}", d1[d] * h);
             }
             for d in 0..=p {
-                print!("\t{}", d2[d]);
+                print!("\t{}", d2[d] * h * h);
             }
             println!();
         }

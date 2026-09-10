@@ -1,22 +1,30 @@
 //! Miniapp: NURBS Example 3 — Electromagnetic Diffusion (H(curl)).
 //! 1:1 port of MFEM nurbs_ex3.cpp. curl curl E + E = f.
 //!
-//! Port note (round K): the removed `CsrMatrix::apply_dirichlet_bc(&[], &b)` /
-//! `fem_linalg::recover_dirichlet_solution` pair imposed an **empty** set of
-//! essential DOFs.  That semantics is kept verbatim below (MFEM
-//! `FormLinearSystem` with an empty `ess_tdof_list`).  C++ nurbs_ex3.cpp marks
-//! all boundary attributes essential and projects E_exact into the boundary
-//! values; that difference is pre-existing and reported, not fixed here.
+//! Port note (round O): the essential (tangential) boundary condition is now
+//! the one of the C++ miniapp — *every* boundary attribute is marked essential
+//! (`ess_bdr = 1; GetEssentialTrueDofs(...)`), and the solution is initialized
+//! by projecting the exact field (`x.ProjectCoefficient(E_exact)`), so the
+//! boundary data is the non-homogeneous tangential trace of `E_exact`.  The
+//! earlier port passed an **empty** essential list, which left the tangential
+//! boundary values unconstrained (CG stalled at 1.1e-6).
+//!
+//! Known remaining difference (D23): fem-rs uses the Nédélec (ND) H(curl)
+//! space on the refined surface mesh, not a `NURBS_HCurlFECollection` +
+//! `NURBSExtension`, so the number of unknowns cannot match the C++ binary.
 
 use std::f64::consts::PI;
 use fem_assembly::{
     VectorAssembler,
     standard::{CurlCurlIntegrator, VectorMassIntegrator, VectorDomainLFIntegrator},
-    postproc::{coefficient::FnVectorCoeff, grid_function::compute_l2_error_hcurl},
+    postproc::{
+        coefficient::FnVectorCoeff,
+        grid_function::{compute_l2_error_hcurl, project_hcurl_coefficient, project_hcurl_coefficient_2d},
+    },
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_mesh::{MeshTopology, amr::{refine_uniform, refine_uniform_3d}};
-use fem_space::{HCurlSpace, fe_space::FESpace, constraints::form_linear_system};
+use fem_space::{HCurlSpace, fe_space::FESpace, constraints::{boundary_dofs_hcurl, form_linear_system}};
 use fem_solver::{GSSmoother, solve_pcg};
 use fem_linalg::fem_to_linlvo_csr;
 
@@ -47,7 +55,8 @@ fn parse_args() -> Args {
     a
 }
 
-/// `ref_levels = floor(log(50000/NE)/log(2)/dim)` when not given explicitly.
+/// `ref_levels = floor(log(50000/NE)/log(2)/dim)` when not given explicitly
+/// (C++ nurbs_ex3.cpp uses 50000).
 fn auto_ref_levels(n_elems: usize, dim: usize, requested: i32) -> i32 {
     if requested < 0 {
         ((50000.0_f64 / n_elems as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as i32
@@ -69,7 +78,18 @@ fn main() {
         for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
             m = refine_uniform(&m);
         }
-        run(HCurlSpace::new(m, args.order as u8), dim, kappa, &args, &|mm| {
+        let tags = m.unique_boundary_tags();
+        let space = HCurlSpace::new(m, args.order as u8);
+        // C++: `GridFunction x(fespace); x.ProjectCoefficient(E_exact);`
+        let x_proj = project_hcurl_coefficient_2d(
+            &space,
+            &|x: &[f64], out: &mut [f64]| {
+                let e = exact_e(x, kappa, dim);
+                out.copy_from_slice(&e[..out.len()]);
+            },
+            (args.order as u8) * 2 + 3,
+        );
+        run(space, dim, kappa, &args, &tags, x_proj, &|mm| {
             write_mfem_file("refined.mesh", mm).ok();
         });
     } else if let Some(mesh) = mfem.mesh3d {
@@ -78,7 +98,17 @@ fn main() {
         for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
             m = refine_uniform_3d(&m);
         }
-        run(HCurlSpace::new(m, args.order as u8), dim, kappa, &args, &|mm| {
+        let tags = m.unique_boundary_tags();
+        let space = HCurlSpace::new(m, args.order as u8);
+        let x_proj = project_hcurl_coefficient(
+            &space,
+            &|x: &[f64], out: &mut [f64]| {
+                let e = exact_e(x, kappa, dim);
+                out.copy_from_slice(&e[..out.len()]);
+            },
+            (args.order as u8) * 2 + 3,
+        );
+        run(space, dim, kappa, &args, &tags, x_proj, &|mm| {
             write_mfem_file_3d("refined.mesh", mm).ok();
         });
     } else {
@@ -87,12 +117,14 @@ fn main() {
 }
 
 /// Dimension-independent driver (the 2-D and 3-D paths differ only in the mesh
-/// refinement / mesh writer, which `main` has already dispatched on).
+/// refinement / projection / mesh writer, which `main` has already dispatched).
 fn run<M: MeshTopology>(
     space: HCurlSpace<M>,
     dim: usize,
     kappa: f64,
     args: &Args,
+    bdr_tags: &[i32],
+    x_proj: Vec<f64>,
     write_mesh: &dyn Fn(&M),
 ) {
     let qo = (args.order as u8) * 2 + 1;
@@ -114,14 +146,30 @@ fn run<M: MeshTopology>(
         qo,
     );
 
-    // MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` — with the empty
-    // essential list this file has always used, it is a no-op.
+    // C++: ess_bdr = 1 (all boundary attributes) → GetEssentialTrueDofs.
+    let ess_dofs = if bdr_tags.is_empty() {
+        Vec::new()
+    } else {
+        boundary_dofs_hcurl(space.mesh(), &space, bdr_tags)
+    };
+    println!("Number of knowns in essential BCs: {}", ess_dofs.len());
+
+    // C++: `GridFunction x(fespace); x.ProjectCoefficient(E);` followed by
+    // `a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B)` with the default
+    // `copy_interior = 0`, i.e. X keeps only the essential values (the exact
+    // tangential field on the boundary) and is zero in the interior.
     let mut a_mod = a_mat;
     let mut x = vec![0.0_f64; space.n_dofs()];
-    form_linear_system(&mut a_mod, &mut rhs, &mut x, &[], &[]);
+    let ess_vals: Vec<f64> = ess_dofs.iter().map(|&d| x_proj[d as usize]).collect();
+    form_linear_system(&mut a_mod, &mut rhs, &mut x, &ess_dofs, &ess_vals);
 
+    // C++ prints `A.Height()`; with MFEM's eliminated (but not reduced) matrix
+    // this is the full number of unknowns.
+    println!("Size of linear system: {}", space.n_dofs());
+
+    // C++ (NURBS branch): `GSSmoother M(*A); PCG(*A, M, B, X, 1, 1000, 1e-12, 0.0);`
     let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mod)).expect("GS failed");
-    solve_pcg(&a_mod, &rhs, &mut x, &gs, 1e-12, 500, true).expect("PCG failed");
+    solve_pcg(&a_mod, &rhs, &mut x, &gs, 1e-12, 1000, true).expect("PCG failed");
 
     let e_coeff = |x: &[f64]| exact_e(x, kappa, dim);
     let err = compute_l2_error_hcurl(&x, &space, &e_coeff, (2 * args.order as u8 + 2).max(3), None);

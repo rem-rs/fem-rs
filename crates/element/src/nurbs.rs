@@ -332,38 +332,131 @@ impl KnotVector {
     ///
     /// Returns `(N, dN, ddN)` where each has length `p+1`.
     ///
-    /// For degree ≤ 1, the second derivatives are identically zero.
-    /// For degree ≥ 2, uses centered finite differences on the basis values
-    /// (second-order accurate, O(eps²) error).  The evaluation point is clamped
-    /// to stay within the current knot span for robustness near span boundaries.
+    /// All three are evaluated analytically by the generalised triangular
+    /// scheme of Piegl & Tiller (Algorithm A2.3, p. 72) — the same recurrence
+    /// used by MFEM in `KnotVector::CalcDnShape` (`mesh/nurbs.cpp`).  The
+    /// derivatives are taken with respect to the knot-vector parameter `xi`
+    /// (not the element-local reference coordinate): where MFEM scales by
+    /// `p·h` / `p(p-1)·h²` (`h` = knot span) to obtain reference-coordinate
+    /// derivatives, here only the pure spline factors `p` / `p(p-1)` are
+    /// applied, consistent with [`Self::basis_funs_and_ders`].
+    ///
+    /// The scheme is analytic, so the results are exact to round-off
+    /// everywhere, including at both ends of a knot span.  At a knot of
+    /// multiplicity `p` the second derivative is discontinuous; the returned
+    /// value is the one-sided limit taken from the span passed in `span`
+    /// (same convention as MFEM's `CalcD2Shape`).
+    ///
+    /// For degree ≤ 1 the second derivatives are identically zero.
     pub fn basis_funs_and_ders2(&self, span: usize, xi: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let p = self.degree;
-        let (n, dn) = self.basis_funs_and_ders(span, xi);
+        let mut ders = self.basis_ders_n(span, xi, 2);
+        let dd = ders.pop().unwrap();
+        let d = ders.pop().unwrap();
+        let n = ders.pop().unwrap();
+        (n, d, dd)
+    }
 
-        // Degree ≤ 1: piecewise linear/constant → zero second derivative
-        if p <= 1 {
-            return (n, dn, vec![0.0; p + 1]);
+    /// Evaluate the `p+1` non-zero B-spline basis functions of the span
+    /// containing `xi`, together with their derivatives up to order `n_max`.
+    ///
+    /// Returns `result[0..=n_max]`, where `result[k][j]` is the `k`-th
+    /// derivative of `N_{span-p+j, p}(xi)` with respect to the knot-vector
+    /// parameter.  Derivatives of order higher than `p` are identically zero.
+    ///
+    /// This is Algorithm A2.3 of Piegl & Tiller, *The NURBS Book* (2nd ed.,
+    /// 1997): exactly the recurrence of MFEM's `KnotVector::CalcDnShape`.  The
+    /// only difference is the scaling — MFEM multiplies the order-`k`
+    /// derivative by `p(p-1)…(p-k+1)·h^k` to get the derivative with respect to
+    /// the element reference coordinate, whereas here only the pure spline
+    /// factor `p(p-1)…(p-k+1)` is applied.
+    fn basis_ders_n(&self, span: usize, xi: f64, n_max: usize) -> Vec<Vec<f64>> {
+        let p = self.degree;
+        let knots = &self.knots;
+        let nmax = n_max.min(p); // derivatives of order > p vanish
+
+        // ── Triangular `ndu` table (identical to `basis_funs_and_ders`) ─────
+        // ndu[r][j] = N_{span-p+r, j}(xi); the lower triangle stores the knot
+        // differences `right[r+1] + left[j-r]` used by the recurrence.
+        let mut ndu = vec![vec![0.0_f64; p + 1]; p + 1];
+        let mut left = vec![0.0_f64; p + 1];
+        let mut right = vec![0.0_f64; p + 1];
+
+        ndu[0][0] = 1.0;
+        for j in 1..=p {
+            left[j] = xi - knots[span + 1 - j];
+            right[j] = knots[span + j] - xi;
+            let mut saved = 0.0;
+            for r in 0..j {
+                ndu[j][r] = right[r + 1] + left[j - r];
+                let temp = if ndu[j][r].abs() < 1e-300 {
+                    0.0
+                } else {
+                    ndu[r][j - 1] / ndu[j][r]
+                };
+                ndu[r][j] = saved + right[r + 1] * temp;
+                saved = left[j - r] * temp;
+            }
+            ndu[j][j] = saved;
         }
 
-        let knots = &self.knots;
+        let mut ders = vec![vec![0.0_f64; p + 1]; n_max + 1];
+        for r in 0..=p {
+            ders[0][r] = ndu[r][p];
+        }
 
-        // Clamp the evaluation window so we stay within [knots[span], knots[span+1]]
-        let xi0 = knots[span];
-        let xi1 = knots[span + 1];
-        let h = (xi1 - xi0).max(1e-14);
-        let eps = 1e-6_f64.min(h * 0.25);
+        // ── Derivative recurrence (Algorithm A2.3) ─────────────────────────
+        // `a` is the two-row working array of blossom coefficients.
+        let mut a = vec![vec![0.0_f64; p + 1]; 2];
+        for r in 0..=p {
+            let mut s1 = 0usize;
+            let mut s2 = 1usize;
+            a[0][0] = 1.0;
+            for k in 1..=nmax {
+                let mut d = 0.0;
+                let rk = r as i64 - k as i64;
+                let pk = p as i64 - k as i64;
+                if r >= k {
+                    a[s2][0] = a[s1][0] / ndu[(pk + 1) as usize][rk as usize];
+                    d = a[s2][0] * ndu[rk as usize][pk as usize];
+                }
+                let j1: i64 = if rk >= -1 { 1 } else { -rk };
+                let j2: i64 = if r as i64 - 1 <= pk {
+                    k as i64 - 1
+                } else {
+                    p as i64 - r as i64
+                };
+                let mut j = j1;
+                while j <= j2 {
+                    let ju = j as usize;
+                    let denom = ndu[(pk + 1) as usize][(rk + j) as usize];
+                    a[s2][ju] = (a[s1][ju] - a[s1][ju - 1]) / denom;
+                    d += a[s2][ju] * ndu[(rk + j) as usize][pk as usize];
+                    j += 1;
+                }
+                if r as i64 <= pk {
+                    a[s2][k] = -a[s1][k - 1] / ndu[(pk + 1) as usize][r];
+                    // Here `j == j2 + 1 == k`, so the array entry to combine is
+                    // `a[s2][k]` (matching Algorithm A2.3).
+                    d += a[s2][k] * ndu[r][pk as usize];
+                }
+                ders[k][r] = d;
+                std::mem::swap(&mut s1, &mut s2);
+            }
+        }
 
-        let xi_p = (xi + eps).min(xi1 - 1e-14);
-        let xi_m = (xi - eps).max(xi0 + 1e-14);
+        // ── Rescale from the recurrence to the knot parameterisation ───────
+        // k-th derivative: multiply by p(p-1)…(p-k+1).
+        for k in 1..=nmax {
+            let mut factor = 1.0;
+            for i in 0..k {
+                factor *= (p - i) as f64;
+            }
+            for r in 0..=p {
+                ders[k][r] *= factor;
+            }
+        }
 
-        let (np, _) = self.basis_funs_and_ders(span, xi_p);
-        let (nm, _) = self.basis_funs_and_ders(span, xi_m);
-
-        let inv_eps2 = 1.0 / (eps * eps);
-        let ddn: Vec<f64> = (0..=p)
-            .map(|j| (np[j] - 2.0 * n[j] + nm[j]) * inv_eps2)
-            .collect();
-        (n, dn, ddn)
+        ders
     }
 }
 
@@ -2493,14 +2586,256 @@ mod tests {
 
     // ── Second derivative tests ──────────────────────────────────────────────
 
+    /// MFEM 4.10 reference values at **span endpoints**.
+    ///
+    /// The values `N`, `d1`, `d2` below were produced by MFEM's
+    /// `KnotVector::PrintFunctions` (`mesh/nurbs.cpp`), i.e. by
+    /// `CalcShape` / `CalcDShape` / `CalcD2Shape`, for the knot vectors and
+    /// elements listed here (read-only reference build `~/mfem410_mpi`).
+    ///
+    /// MFEM returns derivatives with respect to the *element reference*
+    /// coordinate `xi ∈ [0,1]` (`u = a + xi·h`), so the expected derivatives
+    /// with respect to the knot parameter are `d1/h` and `d2/h²`.
+    ///
+    /// Every case below evaluates at a span end (`xi = 0` or `xi = 1`), which
+    /// is exactly where the previous finite-difference implementation of
+    /// [`KnotVector::basis_funs_and_ders2`] broke: it clamped `xi ± eps` to
+    /// `[xi0 + 1e-14, xi1 - 1e-14]`, destroying the symmetric stencil and
+    /// dividing by `eps²` for an effective step of `1e-14` (measured error at
+    /// `u = 0` for the degree-2 case below: `-1.6e7` instead of `32`).
+    #[test]
+    fn bspline_ders2_matches_mfem_at_span_endpoints() {
+        // (knots, degree, `span` index, u, h, N_ref, d1_ref, d2_ref)
+        struct Case {
+            knots: Vec<f64>,
+            degree: usize,
+            span: usize,
+            u: f64,
+            h: f64,
+            n: Vec<f64>,
+            d1: Vec<f64>,
+            d2: Vec<f64>,
+        }
+        let cases = vec![
+            // uniform quadratic, one interior span per element
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 2,
+                u: 0.0,
+                h: 0.25,
+                n: vec![1.0, 0.0, 0.0],
+                d1: vec![-2.0, 2.0, 0.0],
+                d2: vec![2.0, -3.0, 1.0],
+            },
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 2,
+                u: 0.25,
+                h: 0.25,
+                n: vec![0.0, 0.5, 0.5],
+                d1: vec![0.0, -1.0, 1.0],
+                d2: vec![2.0, -3.0, 1.0],
+            },
+            // same knot, evaluated from the *next* span (one-sided limit)
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 3,
+                u: 0.25,
+                h: 0.25,
+                n: vec![0.5, 0.5, 0.0],
+                d1: vec![-1.0, 1.0, 0.0],
+                d2: vec![1.0, -2.0, 1.0],
+            },
+            // uniform cubic, both domain ends
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0, 1.0, 1.0],
+                degree: 3,
+                span: 3,
+                u: 0.0,
+                h: 1.0 / 3.0,
+                n: vec![1.0, 0.0, 0.0, 0.0],
+                d1: vec![-3.0, 3.0, 0.0, 0.0],
+                d2: vec![6.0, -9.0, 3.0, 0.0],
+            },
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0, 1.0, 1.0],
+                degree: 3,
+                span: 4,
+                u: 1.0 / 3.0,
+                h: 1.0 / 3.0,
+                n: vec![0.25, 7.0 / 12.0, 1.0 / 6.0, 0.0],
+                d1: vec![-0.75, 0.25, 0.5, 0.0],
+                d2: vec![1.5, -2.5, 1.0, 0.0],
+            },
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0, 1.0, 1.0],
+                degree: 3,
+                span: 5,
+                u: 1.0,
+                h: 1.0 / 3.0,
+                n: vec![0.0, 0.0, 0.0, 1.0],
+                d1: vec![0.0, 0.0, -3.0, 3.0],
+                d2: vec![0.0, 3.0, -9.0, 6.0],
+            },
+            // degree 4, single interior knot at 0.5 (C^3 → d² continuous)
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 4,
+                span: 4,
+                u: 0.0,
+                h: 0.5,
+                n: vec![1.0, 0.0, 0.0, 0.0, 0.0],
+                d1: vec![-4.0, 4.0, 0.0, 0.0, 0.0],
+                d2: vec![12.0, -18.0, 6.0, 0.0, 0.0],
+            },
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 4,
+                span: 5,
+                u: 0.5,
+                h: 0.5,
+                n: vec![0.125, 0.375, 0.375, 0.125, 0.0],
+                d1: vec![-0.5, -0.5, 0.5, 0.5, 0.0],
+                d2: vec![1.5, -1.5, -1.5, 1.5, 0.0],
+            },
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 4,
+                span: 5,
+                u: 1.0,
+                h: 0.5,
+                n: vec![0.0, 0.0, 0.0, 0.0, 1.0],
+                d1: vec![0.0, 0.0, 0.0, -4.0, 4.0],
+                d2: vec![0.0, 0.0, 6.0, -18.0, 12.0],
+            },
+            // non-uniform spans, degree 2: d² jumps across the interior knots
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 2,
+                u: 0.2,
+                h: 0.2,
+                n: vec![0.0, 0.6, 0.4],
+                d1: vec![0.0, -0.8, 0.8],
+                d2: vec![2.0, -2.8, 0.8],
+            },
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 3,
+                u: 0.2,
+                h: 0.3,
+                n: vec![0.6, 0.4, 0.0],
+                d1: vec![-1.2, 1.2, 0.0],
+                d2: vec![1.2, -2.2, 1.0],
+            },
+            Case {
+                knots: vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0],
+                degree: 2,
+                span: 5,
+                u: 1.0,
+                h: 0.2,
+                n: vec![0.0, 0.0, 1.0],
+                d1: vec![0.0, -2.0, 2.0],
+                d2: vec![0.8, -2.8, 2.0],
+            },
+            // degree 3 with an interior double knot at 0.5
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 3,
+                span: 4,
+                u: 0.5,
+                h: 0.25,
+                n: vec![0.0, 0.0, 0.5, 0.5],
+                d1: vec![0.0, 0.0, -1.5, 1.5],
+                d2: vec![0.0, 3.0, -6.0, 3.0],
+            },
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 3,
+                span: 6,
+                u: 0.5,
+                h: 0.25,
+                n: vec![0.5, 0.5, 0.0, 0.0],
+                d1: vec![-1.5, 1.5, 0.0, 0.0],
+                d2: vec![3.0, -6.0, 3.0, 0.0],
+            },
+            Case {
+                knots: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0,
+                ],
+                degree: 3,
+                span: 7,
+                u: 1.0,
+                h: 0.25,
+                n: vec![0.0, 0.0, 0.0, 1.0],
+                d1: vec![0.0, 0.0, -3.0, 3.0],
+                d2: vec![0.0, 3.0, -9.0, 6.0],
+            },
+        ];
+
+        for (ic, c) in cases.iter().enumerate() {
+            let kv = KnotVector::new(c.knots.clone(), c.degree);
+            let (n, d1, d2) = kv.basis_funs_and_ders2(c.span, c.u);
+            assert_eq!(n.len(), c.degree + 1);
+            for j in 0..=c.degree {
+                assert!(
+                    (n[j] - c.n[j]).abs() < 1e-13,
+                    "case {ic} (u={}, j={j}): N={:.17e} ref={:.17e}",
+                    c.u,
+                    n[j],
+                    c.n[j]
+                );
+                assert!(
+                    (d1[j] - c.d1[j] / c.h).abs() < 1e-12,
+                    "case {ic} (u={}, j={j}): d1={:.17e} ref={:.17e}",
+                    c.u,
+                    d1[j],
+                    c.d1[j] / c.h
+                );
+                assert!(
+                    (d2[j] - c.d2[j] / (c.h * c.h)).abs() < 1e-12,
+                    "case {ic} (u={}, j={j}): d2={:.17e} ref={:.17e}",
+                    c.u,
+                    d2[j],
+                    c.d2[j] / (c.h * c.h)
+                );
+            }
+            // partition of unity: sum N = 1, sum d1 = 0, sum d2 = 0
+            let s2: f64 = d2.iter().sum();
+            assert!(s2.abs() < 1e-12, "case {ic}: sum(d2) = {s2}");
+        }
+    }
+
     #[test]
     fn bspline_second_derivatives_match_fd() {
         // Degree 1 is piecewise linear (exact zero second derivative).
         // The FD comparison is noise-dominated (1e-16 / h^2 ~ 2e-4), so skip it.
+        //
+        // NOTE: the analytic values were exact already before the FD-based
+        // implementation was replaced; the residuals checked here are the FD
+        // error only (round-off ~ |N| * 1e-16 / eps² plus O(eps²) truncation).
+        // The exact MFEM reference check lives in
+        // `bspline_ders2_matches_mfem_at_span_endpoints`.  Step and tolerance
+        // are chosen so the round-off floor (~1e-6) stays well below 1e-5.
         for degree in 2..=4 {
             let kv = KnotVector::uniform(degree, 5);
-            let basis = BSplineBasis1D::new(kv);
-            let eps = 1e-6;
+            let basis = BSplineBasis1D::new(kv.clone());
+            let h_span = 1.0 / 5.0;
+            let eps = 1e-4 * h_span;
             for xi in [0.05, 0.15, 0.35, 0.5, 0.65, 0.85, 0.95] {
                 let (_, _, ddn) = basis.eval_with_ders2(xi);
                 let (np, _) = basis.eval_with_ders(xi + eps);
@@ -2510,7 +2845,7 @@ mod tests {
                 for j in 0..basis.n_basis() {
                     let fd = (np[j] - 2.0 * n0[j] + nm[j]) / (eps * eps);
                     assert!(
-                        (ddn[j] - fd).abs() < 1e-4,
+                        (ddn[j] - fd).abs() < 1e-5,
                         "degree={degree}, xi={xi}, j={j}: analytic={:.6e} fd={:.6e}",
                         ddn[j],
                         fd
@@ -2617,7 +2952,11 @@ mod tests {
     fn bspline_second_derivatives_nonuniform() {
         let kv = KnotVector::new(vec![0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0, 1.0, 1.0], 2);
         let basis = BSplineBasis1D::new(kv);
-        let eps = 1e-6;
+        // The analytic values are exact; the tolerance only has to absorb the
+        // finite-difference error, whose floor is |N| · 1e-16 / eps² ≈ 1e-10
+        // at this step (cf. `bspline_ders2_matches_mfem_at_span_endpoints` for
+        // the exact reference values).
+        let eps = 1e-5;
         for xi in [0.05, 0.15, 0.35, 0.65, 0.85, 0.95] {
             let (_, _, ddn) = basis.eval_with_ders2(xi);
             let (np, _) = basis.eval_with_ders((xi + eps).min(0.9999));
