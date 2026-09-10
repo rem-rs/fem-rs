@@ -140,7 +140,8 @@ pub fn hcurl_ref_elem(et: ElementType, order: u8) -> Box<dyn VectorReferenceElem
 }
 
 /// Volume quadrature rule for the element geometry (reference domain matched
-/// to the fem-element families: `[0,1]^dim`).
+/// to the fem-element families: `[0,1]^dim` for simplices and quads,
+/// `[−1,1]³` for hexahedra — see [`ref_node_coords`]).
 pub fn vol_quadrature(et: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
     match et {
         ElementType::Tri3 | ElementType::Tri6 => {
@@ -156,8 +157,15 @@ pub fn vol_quadrature(et: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
             (r.points, r.weights)
         }
         ElementType::Hex8 => {
-            // Tensor-product Gauss-Legendre on [0,1]^3.
-            let (pts1d, wts1d) = gauss_legendre_01(order as usize);
+            // Tensor-product Gauss-Legendre on `[−1,1]³`.  The hexahedral
+            // fem-element family (`HexL2GL`/`HexQk`/`HexRTk`/`HexNDk` and the
+            // `HexQ1` geometry element, all of which `eval_vol_space` and
+            // `geo_ref_elem_from_mesh` use) is defined on `[−1,1]³`, exactly
+            // like the rest of fem-rs's 3-D kernels; the DPG quadrature and
+            // reference geometry must use the same domain, otherwise
+            // `x(ξ)` only covers a sub-box of each element and the measure is
+            // off by `2^dim`.
+            let (pts1d, wts1d) = fem_element::quadrature::gauss_legendre_arbitrary(order as usize);
             let mut points = Vec::new();
             let mut weights = Vec::new();
             for (iz, &wz) in wts1d.iter().enumerate() {
@@ -551,33 +559,21 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             let p = order as usize;
             let n_vdofs = mesh.n_nodes();
             let vertex_dof = |v: u32| v as usize;
-            let interior_per_face = if dim == 2 {
-                (p + 1).saturating_sub(2)
-            } else if is_quad_face.iter().any(|&q| q) {
-                // quad faces: interior dofs per 1-D direction = p − 1,
-                // total (p−1)² per face (p ≥ 1)
-                let pi = p.saturating_sub(1);
-                pi * pi
-            } else {
-                // tri faces: interior dofs = (p−1)(p−2)/2
-                let pi = p.saturating_sub(1);
-                pi.max(0) * pi.saturating_sub(2).max(0) / 2
-            };
             let mut face_dof_offsets = Vec::with_capacity(face_info.len() + 1);
             face_dof_offsets.push(0);
             for f in 0..face_info.len() {
                 let n = dofs_per_face(is_quad_face[f]);
                 face_dof_offsets.push(face_dof_offsets[f] + n);
             }
-            // Interior dofs start AFTER the vertex dofs (MFEM
-            // `H1_Trace_FECollection`: face dofs live on mesh vertices and
-            // face-interior entities, so the global count is
-            // n_vertices_touched + n_faces × interior_per_face — NOT the
-            // per-face dof-count sum, which would leave phantom dofs).
-            let base = n_vdofs;
-            // Per-face dofs: corner vertex dofs + shared interior range.
-            let mut face_dofs: Vec<Vec<usize>> = Vec::with_capacity(face_node_ids.len());
-            if dim == 2 {
+            let (n_dofs, face_dofs) = if dim == 2 {
+                let interior_per_face = (p + 1).saturating_sub(2);
+                // Interior dofs start AFTER the vertex dofs (MFEM
+                // `H1_Trace_FECollection`: face dofs live on mesh vertices and
+                // face-interior entities, so the global count is
+                // n_vertices_touched + n_faces × interior_per_face — NOT the
+                // per-face dof-count sum, which would leave phantom dofs).
+                let base = n_vdofs;
+                let mut face_dofs: Vec<Vec<usize>> = Vec::with_capacity(face_node_ids.len());
                 for f in 0..face_node_ids.len() {
                     let mut dofs = Vec::with_capacity(p + 1);
                     dofs.push(vertex_dof(face_node_ids[f][0]));
@@ -589,22 +585,140 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     }
                     face_dofs.push(dofs);
                 }
+                (base + face_node_ids.len() * interior_per_face, face_dofs)
             } else {
-                // 3-D: only the per-face corner/interior mapping is needed by
-                // the current miniapps; order-1 H1 traces are vertex dofs.
-                for f in 0..face_node_ids.len() {
-                    let mut dofs = Vec::with_capacity(dofs_per_face(is_quad_face[f]));
-                    for &v in &face_node_ids[f] {
-                        dofs.push(vertex_dof(v));
+                // ── 3-D H1 trace = MFEM `H1_Trace_FECollection(p, 3)`
+                // (`H1_FECollection(p, 2)` on the skeleton): 1 dof per mesh
+                // vertex, `p − 1` per mesh EDGE (lines of the 3-D mesh, shared
+                // by every face meeting at the edge), and `(p−1)²` / `(p−1)(p−2)/2`
+                // face-interior dofs per quadrilateral / triangular face.
+                //
+                // The face dof list is built in the **trace-basis node order**
+                // of `eval_face_lagrange`: index `k` there is the tensor
+                // Lagrange node `(s,t) = (k%(p+1)/p, k/(p+1)/p)` on a quad
+                // face and the equispaced node `(a/p, b/p)`, `a+b ≤ p`, on a
+                // triangle.  Every node is mapped to the skeleton entity that
+                // carries it, so shared vertices/edges use a single global dof
+                // (the tensor order differs from MFEM's `[v0 v1 v2 v3 | edges |
+                // interior]` face-dof order, but the *association*
+                // basis-function ↔ global dof is what must be consistent, and
+                // this one is).
+                let n_edof = p.saturating_sub(1);
+                // Global edge table: first-seen order over (element, local
+                // edge), each edge stored in the canonical (min, max) vertex
+                // direction — same convention as `TraceSpace` / MFEM's
+                // `DSTable::Push(min, max)`.
+                let mut edge_map: std::collections::HashMap<(u32, u32), usize> =
+                    std::collections::HashMap::new();
+                let mut n_edges = 0usize;
+                for e in mesh.elem_iter() {
+                    let et = mesh.element_type(e);
+                    let en = mesh.element_nodes(e);
+                    for ev in mfem_local_edges(et) {
+                        let (a, b) = (en[ev[0]], en[ev[1]]);
+                        let key = if a < b { (a, b) } else { (b, a) };
+                        edge_map.entry(key).or_insert_with(|| {
+                            n_edges += 1;
+                            n_edges - 1
+                        });
                     }
-                    let b2 = base + f * interior_per_face;
-                    for k in 0..interior_per_face {
-                        dofs.push(b2 + k);
+                }
+                let e_base = n_vdofs;
+                let f_base = n_vdofs + n_edges * n_edof;
+                // Interior-dof base of each face (prefix sums, face order).
+                let mut if_base = Vec::with_capacity(face_info.len());
+                let mut acc = f_base;
+                for f in 0..face_info.len() {
+                    if_base.push(acc);
+                    acc += interior_per_face_of(p, is_quad_face[f]);
+                }
+                let mut face_dofs: Vec<Vec<usize>> = Vec::with_capacity(face_info.len());
+                for f in 0..face_info.len() {
+                    let cyc = &face_node_ids[f];
+                    let is_quad = is_quad_face[f];
+                    let mut dofs = Vec::with_capacity(dofs_per_face(is_quad));
+                    // Global dof of the face-local edge `ei` at face-local
+                    // parameter `u ∈ [0,1]` (measured from the edge's first
+                    // reference-face vertex); `u·p` must be an integer in
+                    // `1..=p−1`.
+                    let edge_dof = |ei: usize, u: f64| -> usize {
+                        let evert = mfem_face_edges(is_quad)[ei];
+                        let (a, b) = (cyc[evert[0]], cyc[evert[1]]);
+                        let key = if a < b { (a, b) } else { (b, a) };
+                        let g = *edge_map
+                            .get(&key)
+                            .expect("3-D H1 trace: face edge missing from edge table");
+                        let pos = if a < b { u } else { 1.0 - u };
+                        let m = (pos * p as f64).round();
+                        debug_assert!(m >= 1.0 && m <= (p - 1) as f64, "edge node out of range");
+                        e_base + g * n_edof + (m as usize - 1)
+                    };
+                    if is_quad {
+                        let mut ic = 0usize;
+                        for t in 0..=p {
+                            for s in 0..=p {
+                                let d = if (s == 0 || s == p) && (t == 0 || t == p) {
+                                    let ci = match (s == p, t == p) {
+                                        (false, false) => 0,
+                                        (true, false) => 1,
+                                        (true, true) => 2,
+                                        (false, true) => 3,
+                                    };
+                                    vertex_dof(cyc[ci])
+                                } else if s == 0 {
+                                    edge_dof(3, 1.0 - t as f64 / p as f64)
+                                } else if s == p {
+                                    edge_dof(1, t as f64 / p as f64)
+                                } else if t == 0 {
+                                    edge_dof(0, s as f64 / p as f64)
+                                } else if t == p {
+                                    edge_dof(2, 1.0 - s as f64 / p as f64)
+                                } else {
+                                    let d = if_base[f] + ic;
+                                    ic += 1;
+                                    d
+                                };
+                                dofs.push(d);
+                            }
+                        }
+                        debug_assert_eq!(ic, interior_per_face_of(p, true));
+                    } else {
+                        let mut ic = 0usize;
+                        for row in 0..=p {
+                            for a in 0..=row {
+                                let b = row - a;
+                                let d = if a == 0 && b == 0 {
+                                    vertex_dof(cyc[0])
+                                } else if a == p {
+                                    vertex_dof(cyc[1])
+                                } else if b == p {
+                                    vertex_dof(cyc[2])
+                                } else if a + b == p {
+                                    // hypotenuse (c1, c2): the node is at
+                                    // (s,t) = (a/p, b/p), i.e. `b/p` of the way
+                                    // from c1 = (1,0) to c2 = (0,1)
+                                    edge_dof(1, b as f64 / p as f64)
+                                } else if b == 0 {
+                                    // (c0, c1), parameter from c0
+                                    edge_dof(0, a as f64 / p as f64)
+                                } else if a == 0 {
+                                    // (c2, c0), parameter from c2
+                                    edge_dof(2, 1.0 - b as f64 / p as f64)
+                                } else {
+                                    let d = if_base[f] + ic;
+                                    ic += 1;
+                                    d
+                                };
+                                dofs.push(d);
+                            }
+                        }
+                        debug_assert_eq!(ic, interior_per_face_of(p, false));
                     }
+                    debug_assert_eq!(dofs.len(), dofs_per_face(is_quad));
                     face_dofs.push(dofs);
                 }
-            }
-            let n_dofs = base + face_node_ids.len() * interior_per_face;
+                (acc, face_dofs)
+            };
             let mut elem_dofs = vec![Vec::new(); mesh.n_elements()];
             for e in mesh.elem_iter() {
                 let ei = e as usize;
@@ -757,25 +871,37 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
 }
 
 /// Local face table (node indices into the element node list), matching
-/// MFEM's `Geometry::Constants` face-vertex tables for the fem-element
-/// reference domains.
+/// Local face vertex cycles, verbatim from MFEM
+/// `Geometry::Constants<ElemType>::FaceVert` — the same tables as
+/// [`mfem_local_faces`], keyed here off the element's node count (`local_face_table`
+/// is the node-index form used by the trace assemblers, `mfem_local_faces` the
+/// static `ElementType` form used by [`TraceSpace`]).
+///
+/// The winding matters: MFEM's tables list every face so that
+/// `J_s × J_t` (with `J_s` towards the 2nd and `J_t` towards the 3rd listed
+/// vertex) points **out of the element** — this is what makes the ±1
+/// element-face orientation of the trace assembly equal to the sign relating
+/// the canonical face normal to the element's outward normal.  An
+/// "outward-inconsistent" table entry (e.g. the lexicographic cycle
+/// `[0,1,2,3]` for a hexahedron's bottom face) silently flips the trace
+/// contribution of every element that meets the face through that local face.
 pub fn local_face_table(elem_nodes: &[u32], dim: usize) -> Vec<Vec<usize>> {
     match (elem_nodes.len(), dim) {
         (3, 2) => vec![vec![0, 1], vec![1, 2], vec![2, 0]],
         (4, 2) => vec![vec![0, 1], vec![1, 2], vec![2, 3], vec![3, 0]],
         (4, 3) => vec![
-            vec![0, 1, 2],
-            vec![0, 1, 3],
-            vec![0, 2, 3],
             vec![1, 2, 3],
+            vec![0, 3, 2],
+            vec![0, 1, 3],
+            vec![0, 2, 1],
         ],
         (8, 3) => vec![
-            vec![0, 1, 2, 3],
-            vec![4, 5, 6, 7],
+            vec![3, 2, 1, 0],
             vec![0, 1, 5, 4],
             vec![1, 2, 6, 5],
             vec![2, 3, 7, 6],
             vec![3, 0, 4, 7],
+            vec![4, 5, 6, 7],
         ],
         _ => panic!(
             "local_face_table: unsupported (npe={}, dim={})",
@@ -788,6 +914,12 @@ pub fn local_face_table(elem_nodes: &[u32], dim: usize) -> Vec<Vec<usize>> {
 // ─── Face parametrization ────────────────────────────────────────────────────
 
 /// Reference-domain node coordinates of the element geometries.
+///
+/// Simplices and quads use the fem-element `[0,1]^dim` convention; the
+/// hexahedral family (`HexQ1`/`HexQk`/`HexL2GL`/`HexRTk`/`HexNDk`) is defined
+/// on `[−1,1]³`, so the hex entries below are the `[−1,1]³` corners in the
+/// same (MFEM) vertex order.  [`vol_quadrature`] and the element bases must
+/// share this convention.
 pub fn ref_node_coords(et: ElementType) -> Vec<[f64; 3]> {
     match et {
         ElementType::Tri3 | ElementType::Tri6 => vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -804,14 +936,14 @@ pub fn ref_node_coords(et: ElementType) -> Vec<[f64; 3]> {
             [0.0, 0.0, 1.0],
         ],
         ElementType::Hex8 => vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 1.0],
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
             [1.0, 1.0, 1.0],
-            [0.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
         ],
         _ => panic!("ref_node_coords: unsupported {et:?}"),
     }
@@ -872,6 +1004,18 @@ pub fn face_param_to_elem_ref(
 }
 
 // ─── Face Lagrange basis ─────────────────────────────────────────────────────
+
+/// Face-interior dof count of an order-`p` H1 trace face:
+/// `(p−1)²` on a quadrilateral, `(p−1)(p−2)/2` on a triangle (MFEM
+/// `H1_FECollection(p, 2)`).
+fn interior_per_face_of(p: usize, is_quad: bool) -> usize {
+    let q = p.saturating_sub(1);
+    if is_quad {
+        q * q
+    } else {
+        q * p.saturating_sub(2) / 2
+    }
+}
 
 /// Tensor/Lagrange DOF count on a reference face of order `p`.
 pub fn face_basis_dofs(dim: usize, is_quad: bool, p: usize) -> usize {
@@ -2240,6 +2384,166 @@ mod trace_tests {
         }
     }
 
+    /// The vertex-continuous 3-D H1 trace skeleton
+    /// ([`SkeletonSpace::new_h1`]) must have MFEM's
+    /// `H1_Trace_FECollection(p, 3)` = `H1_FECollection(p, 2)` dof count
+    /// (1/vertex + `p−1`/edge + face-interior) and — crucially — a *consistent*
+    /// face-dof association: two faces that share a vertex/edge node must
+    /// reference the same global dof at the same physical point.
+    #[test]
+    fn skeleton_3d_h1_trace_counts_and_sharing() {
+        for (mesh, nv, ne, nf, counts) in [
+            (mfem_hex_2x1x1(), 12, 20, 11, [12usize, 43, 96]),
+            (mfem_tet_1x1x1(), 8, 19, 18, [8, 27, 64]),
+        ] {
+            assert_eq!(mesh.n_nodes(), nv);
+            for (i, p) in (1u8..=3).enumerate() {
+                let sk = SkeletonSpace::new_h1(mesh.clone(), p);
+                assert_eq!(sk.n_dofs(), counts[i], "H1 trace p={p} ndofs");
+                assert_eq!(sk.n_faces(), nf);
+                // Map every global dof to the physical point(s) it is used at.
+                let mut owner: std::collections::HashMap<usize, ([f64; 3], usize)> =
+                    std::collections::HashMap::new();
+                for f in 0..sk.n_faces() {
+                    let is_qf = sk.is_quad_face(f);
+                    let nfd = sk.dofs_per_face(f);
+                    let mut phi = vec![0.0; nfd];
+                    for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
+                        // The basis must be a nodal Kronecker delta at the dof
+                        // nodes: evaluate at node k and require phi = e_k.
+                        let node =
+                            crate::dpg_weakform::face_dof_params(3, is_qf, p as usize, k);
+                        eval_face_lagrange(3, is_qf, p as usize, &node, &mut phi);
+                        for (j, &v) in phi.iter().enumerate() {
+                            let want = if j == k { 1.0 } else { 0.0 };
+                            assert!(
+                                (v - want).abs() < 1e-12,
+                                "p={p} face {f}: basis not nodal at index {k}"
+                            );
+                        }
+                        let (xp, _, _) = face_point_3d_local(&sk, f, &node);
+                        match owner.get(&d) {
+                            None => {
+                                owner.insert(d, (xp, k));
+                            }
+                            Some(&(prev, _)) => {
+                                let dist: f64 = (0..3).map(|c| (prev[c] - xp[c]).abs()).sum();
+                                assert!(
+                                    dist < 1e-12,
+                                    "p={p}: shared dof {d} sits at two different points \
+                                     ({prev:?} vs {xp:?})"
+                                );
+                            }
+                        }
+                        if d < mesh.n_nodes() {
+                            let c = mesh.node_coords(d as u32);
+                            let dist: f64 = (0..3).map(|c2| (c[c2] - xp[c2]).abs()).sum();
+                            assert!(
+                                dist < 1e-12,
+                                "p={p}: corner dof {d} must be the mesh vertex at {xp:?}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(owner.len(), sk.n_dofs(), "every dof must be used");
+            }
+            let _ = (ne, nf);
+        }
+    }
+
+    /// Physical point of the canonical face parametrisation (local helper;
+    /// `face_point_3d` takes the `TraceSpace`, this takes the skeleton).
+    fn face_point_3d_local<M: MeshTopology + Clone>(
+        sk: &SkeletonSpace<M>,
+        f: usize,
+        param: &[f64],
+    ) -> ([f64; 3], f64, f64) {
+        let c: Vec<[f64; 3]> = sk
+            .face_nodes(f)
+            .iter()
+            .map(|&n| {
+                let p = sk.mesh().node_coords(n);
+                [p[0], p[1], p[2]]
+            })
+            .collect();
+        let (s, t) = (param[0], param[1]);
+        let mut x = [0.0; 3];
+        if sk.is_quad_face(f) {
+            for d in 0..3 {
+                x[d] = (1.0 - s) * (1.0 - t) * c[0][d]
+                    + s * (1.0 - t) * c[1][d]
+                    + s * t * c[2][d]
+                    + (1.0 - s) * t * c[3][d];
+            }
+        } else {
+            for d in 0..3 {
+                x[d] = (1.0 - s - t) * c[0][d] + s * c[1][d] + t * c[2][d];
+            }
+        }
+        (x, 0.0, 0.0)
+    }
+
+    /// The node-index face table used by the trace assemblers
+    /// ([`local_face_table`]) must be MFEM's `FaceVert` verbatim, i.e. the same
+    /// cycles as the static [`mfem_local_faces`] table — and each cycle must
+    /// have the outward winding (`J_s × J_t` points out of the reference
+    /// element), which is exactly what makes the ±1 element-face orientation
+    /// in the trace assembly equal to the sign relating the canonical face
+    /// normal to the element's outward normal.
+    #[test]
+    fn local_face_table_matches_mfem_facevert_and_is_outward() {
+        for (et, npe) in [
+            (ElementType::Tri3, 3usize),
+            (ElementType::Quad4, 4),
+            (ElementType::Tet4, 4),
+            (ElementType::Hex8, 8),
+        ] {
+            let dim = if npe == 3 || et == ElementType::Quad4 { 2 } else { 3 };
+            let dyn_tab = local_face_table(&vec![0u32; npe], dim);
+            let static_tab = mfem_local_faces(et, dim);
+            assert_eq!(dyn_tab.len(), static_tab.len(), "{et:?}");
+            for (i, (a, b)) in dyn_tab.iter().zip(static_tab.iter()).enumerate() {
+                assert_eq!(a.as_slice(), *b, "{et:?} local face {i}");
+            }
+            // Outward winding on the reference element: the face centroid
+            // direction relative to the reference centroid must agree with
+            // `J_s × J_t` of the cycle (2-D: the (dy, −dx) edge normal).
+            let rn = ref_node_coords(et);
+            let n_vert = if dim == 2 { 3 } else { rn.len() };
+            let cen = |idxs: &[usize]| -> Vec<f64> {
+                (0..3)
+                    .map(|d| idxs.iter().map(|&k| rn[k][d]).sum::<f64>() / idxs.len() as f64)
+                    .collect()
+            };
+            let all: Vec<usize> = (0..n_vert).collect();
+            let center = cen(&all);
+            for cyc in &dyn_tab {
+                let fcen = cen(cyc);
+                if dim == 2 {
+                    let a = rn[cyc[0]];
+                    let b = rn[cyc[1]];
+                    let n = [b[1] - a[1], -(b[0] - a[0])];
+                    let dot = n[1] * (fcen[1] - center[1]) + n[0] * (fcen[0] - center[0]);
+                    assert!(dot > 0.0, "{et:?} face {cyc:?}: 2-D edge normal not outward");
+                } else {
+                    let a = rn[cyc[0]];
+                    let c1 = rn[cyc[1]];
+                    let c2 = rn[cyc[2]];
+                    let s = [c1[0] - a[0], c1[1] - a[1], c1[2] - a[2]];
+                    let t = [c2[0] - a[0], c2[1] - a[1], c2[2] - a[2]];
+                    let n = [
+                        s[1] * t[2] - s[2] * t[1],
+                        s[2] * t[0] - s[0] * t[2],
+                        s[0] * t[1] - s[1] * t[0],
+                    ];
+                    let dot: f64 =
+                        (0..3).map(|d| n[d] * (fcen[d] - center[d])).sum();
+                    assert!(dot > 0.0, "{et:?} face {cyc:?}: 3-D face normal not outward");
+                }
+            }
+        }
+    }
+
     /// Per-face entity tables (canonical vertex cycles, face-local edges with
     /// orientations) against MFEM's `GetFaceVertices` / `GetFaceEdges`.
     #[test]
@@ -2394,6 +2698,96 @@ mod trace_tests {
                 samples.push(row);
             }
             assert_eq!(orthonormal_basis(&samples).len(), n, "p{p}: HexNDk samples rank");
+        }
+    }
+
+    /// The fem-rs `HexRTk(p)` element (used as the DPG 3-D H(div) test space
+    /// via [`VolKind::HDiv`]) must span MFEM's `RT_HexahedronElement` space,
+    /// the tensor Raviart–Thomas space
+    ///
+    /// ```text
+    ///     Q_{p+1,p,p} × Q_{p,p+1,p} × Q_{p,p,p+1}
+    /// ```
+    ///
+    /// (MFEM builds it from a *closed* GLL factor of degree `p+1` in the
+    /// normal direction and *open* Gauss–Legendre factors of degree `p` in the
+    /// two tangential ones, all on `[0,1]`; `HexRTk` uses the `[−1,1]` pullback
+    /// and different node sets).  Ranking the fem-rs samples against the
+    /// monomial span is what decides whether the `[−1,1]` vs `[0,1]`
+    /// parametrisation is only a *basis* difference (span preserved) or a
+    /// genuine *space* mismatch — the latter would silently break the 3-D DPG
+    /// test norm.
+    #[test]
+    fn rt_hex_span_is_tensor_rt() {
+        let ident = nalgebra::DMatrix::<f64>::identity(3, 3);
+        let quad = vol_quadrature(ElementType::Hex8, 4);
+        for p in 1u8..=2 {
+            let pu = p as usize;
+            let n = vector_ref_elem(ElementType::Hex8, p).n_dofs();
+            assert_eq!(n, 3 * (pu + 1) * (pu + 1) * (pu + 2));
+            let mut mono: Vec<Vec<f64>> = Vec::new();
+            for d in 0..3 {
+                let (ea, eb, ec) = match d {
+                    0 => (pu + 1, pu, pu),
+                    1 => (pu, pu + 1, pu),
+                    _ => (pu, pu, pu + 1),
+                };
+                for a in 0..=ea {
+                    for b in 0..=eb {
+                        for c in 0..=ec {
+                            let mut col = vec![0.0_f64; 3 * quad.0.len()];
+                            for (q, pts) in quad.0.iter().enumerate() {
+                                col[3 * q + d] = pts[0].powi(a as i32)
+                                    * pts[1].powi(b as i32)
+                                    * pts[2].powi(c as i32);
+                            }
+                            mono.push(col);
+                        }
+                    }
+                }
+            }
+            let mono_dim = 3 * (pu + 1) * (pu + 1) * (pu + 2);
+            assert_eq!(mono.len(), mono_dim);
+            let ob = orthonormal_basis(&mono);
+            assert_eq!(ob.len(), mono_dim, "p{p}: monomial basis must be independent");
+            let npts = quad.0.len();
+            let mut samples: Vec<Vec<f64>> = Vec::new();
+            let mut vals = VolVals::default();
+            for i in 0..n {
+                let mut row = vec![0.0_f64; 3 * npts];
+                for (q, pts) in quad.0.iter().enumerate() {
+                    eval_vol_space(
+                        VolKind::HDiv,
+                        p,
+                        ElementType::Hex8,
+                        3,
+                        &ident,
+                        1.0,
+                        &ident,
+                        pts,
+                        None,
+                        &mut vals,
+                    );
+                    for d in 0..3 {
+                        row[3 * q + d] = vals.phi[i * 3 + d];
+                    }
+                }
+                let mut w = row.clone();
+                for b in ob.iter() {
+                    let dp: f64 = w.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    for (k, bk) in b.iter().enumerate() {
+                        w[k] -= dp * bk;
+                    }
+                }
+                let rn: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+                let r0: f64 = row.iter().map(|x| x * x).sum::<f64>().sqrt();
+                assert!(
+                    rn <= 1e-10 * r0.max(1e-30),
+                    "p{p}: HexRTk dof {i} sample outside the tensor RT space ({rn} vs {r0})"
+                );
+                samples.push(row);
+            }
+            assert_eq!(orthonormal_basis(&samples).len(), n, "p{p}: HexRTk samples rank");
         }
     }
 

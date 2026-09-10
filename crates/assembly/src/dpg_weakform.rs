@@ -1382,7 +1382,7 @@ pub fn face_geo_at<M: MeshTopology + Clone>(
             dxs[d] = (c[1][d] - c[0][d]) * (1.0 - t) + (c[2][d] - c[3][d]) * t;
             dxt[d] = (c[3][d] - c[0][d]) * (1.0 - s) + (c[2][d] - c[1][d]) * s;
         }
-        let normal = cross_half(&dxs, &dxt);
+        let normal = cross3(&dxs, &dxt);
         let measure = norm3(&normal);
         (x, normal, measure)
     } else {
@@ -1399,17 +1399,23 @@ pub fn face_geo_at<M: MeshTopology + Clone>(
             d1[d] = c[1][d] - c[0][d];
             d2[d] = c[2][d] - c[0][d];
         }
-        let normal = cross_half(&d1, &d2);
+        let normal = cross3(&d1, &d2);
         let measure = norm3(&normal);
         (x, normal, measure)
     }
 }
 
-fn cross_half(a: &[f64; 3], b: &[f64; 3]) -> Vec<f64> {
+/// MFEM `CalcOrtho` for a 3-D face: the plain cross product `J_s × J_t` of the
+/// canonical face Jacobian columns (see `dpg_basis::face_normal_3d`), **without**
+/// the 1/2 reference-simplex factor.  Its Euclidean norm equals
+/// `Trans.Weight()` (the face surface measure) for both triangular and
+/// quadrilateral faces (`|a×b|² = |a|²|b|² − (a·b)²`), which is exactly what
+/// the trace integrators multiply their reference weights by.
+fn cross3(a: &[f64; 3], b: &[f64; 3]) -> Vec<f64> {
     vec![
-        0.5 * (a[1] * b[2] - a[2] * b[1]),
-        0.5 * (a[2] * b[0] - a[0] * b[2]),
-        0.5 * (a[0] * b[1] - a[1] * b[0]),
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
     ]
 }
 
@@ -1418,6 +1424,13 @@ fn norm3(v: &[f64]) -> f64 {
 }
 
 /// Face-DOF parameter coordinates matching `eval_face_lagrange`'s node order.
+///
+/// * 2-D edge: node `k` at `s = k/p`.
+/// * 3-D quad: tensor node `(s,t) = (k%(p+1)/p, k/(p+1)/p)`.
+/// * 3-D triangle: the enumeration of `eval_face_lagrange` is row-major over
+///   `row = a + b` (`row = 0..=p`, `a = 0..=row`, `b = row − a`), so index `k`
+///   satisfies `k = row(row+1)/2 + a` — *not* MFEM's `H1_TriangleElement`
+///   ordering `i*(p+1) − i(i−1)/2 + j` used by [`tri_face_dof_index`].
 pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize) -> Vec<f64> {
     if dim == 2 {
         vec![k as f64 / p as f64]
@@ -1426,11 +1439,10 @@ pub fn face_dof_params(dim: usize, is_quad: bool, p: usize, k: usize) -> Vec<f64
         let t = k / (p + 1);
         vec![s as f64 / p as f64, t as f64 / p as f64]
     } else {
-        // tri face: k = row*(p+1) - row*(row-1)/2 + a, node (a/p, b/p)
         let mut row = 0usize;
         let mut acc = 0usize;
-        while acc + (p + 1) - row <= k {
-            acc += (p + 1) - row;
+        while acc + (row + 1) <= k {
+            acc += row + 1;
             row += 1;
         }
         let a = k - acc;
@@ -1997,6 +2009,79 @@ mod tests {
             }
             eprintln!("elem {e}: sigma-block residual {w:.3e}");
         }
+    }
+
+    /// 3-D trace orientation convention: for every element and every local
+    /// face, `scale · n_canonical` (exactly what the trace assemblers use:
+    /// `ctx.normal` times `ctx.scale`) must be the element's **outward**
+    /// normal.  MFEM guarantees this by storing each face in its generating
+    /// element's local face cycle with the outward winding
+    /// (`Geometry::Constants<ElemType>::FaceVert`), so any local face table
+    /// whose cycles are not outward-consistent silently flips the sign of the
+    /// trace contributions on the affected faces.
+    #[test]
+    fn dpg_3d_canonical_face_normal_is_outward() {
+        for (mesh, name) in [
+            (Mesh::<3>::unit_cube_hex(1), "hex"),
+            (Mesh::<3>::unit_cube_tet(1), "tet"),
+        ] {
+            let sk = SkeletonSpace::new(mesh.clone(), 1);
+            for e in 0..mesh.n_elements() as u32 {
+                let nodes = mesh.element_nodes(e);
+                let center: Vec<f64> = (0..3)
+                    .map(|d| {
+                        nodes.iter().map(|&n| mesh.node_coords(n)[d]).sum::<f64>()
+                            / nodes.len() as f64
+                    })
+                    .collect();
+                let lfs = local_face_table(&nodes, 3);
+                for li in 0..lfs.len() {
+                    let fid = sk.elem_face_id(e, li);
+                    let scale = sk.elem_face_orientation(e, li) as f64;
+                    let is_qf = sk.is_quad_face(fid);
+                    let param = if is_qf { vec![0.5, 0.5] } else { vec![1.0 / 3.0, 1.0 / 3.0] };
+                    let (xp, normal, _m) = face_geo_at(&mesh, &sk, fid, &param, 3);
+                    let dot: f64 = (0..3).map(|d| normal[d] * (xp[d] - center[d])).sum();
+                    assert!(
+                        scale * dot > 0.0,
+                        "{name} elem {e} local face {li} (global {fid}): scale {scale} \
+                         flips the canonical normal away from the outward direction \
+                         (n·(x_face − x_elem) = {dot:.3e})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `face_geo_at` 3-D normal/measure must equal MFEM `CalcOrtho(J_face)`
+    /// (= `J_s × J_t`, no 1/2 factor) and the surface measure
+    /// `|J_s × J_t| = Trans.Weight()`: the divergence theorem
+    /// `∫_Ω ∇·w dV = ∫_∂Ω w·n dS` is the analytic identity that pins both.
+    #[test]
+    fn dpg_3d_face_measure_matches_divergence_theorem() {
+        // w(x) = x  →  ∇·w = 3,  ∫_∂Ω (x·n) dS = 3·|Ω| = 3 for the unit cube.
+        let mesh = Mesh::<3>::unit_cube_hex(1);
+        let sk = SkeletonSpace::new(mesh.clone(), 1);
+        let (fpts, fwts) = crate::dpg::dpg_basis::face_quadrature(3, true, 3);
+        let mut flux = 0.0_f64;
+        for f in 0..sk.n_faces() {
+            if !sk.is_boundary_face(f) {
+                continue;
+            }
+            for (qi, p) in fpts.iter().enumerate() {
+                let (xp, normal, measure) = face_geo_at(&mesh, &sk, f, p, 3);
+                assert!(
+                    (norm3(&normal) - measure).abs() < 1e-13,
+                    "measure must equal |CalcOrtho(J_face)|"
+                );
+                flux += fwts[qi] * (xp[0] * normal[0] + xp[1] * normal[1] + xp[2] * normal[2]);
+            }
+        }
+        assert!(
+            (flux - 3.0).abs() < 1e-12,
+            "divergence theorem: ∫_∂Ω x·n dS = {flux} (expected 3 = 3·|Ω|); \
+             the 1/2 factor in `cross_half` halves this"
+        );
     }
 
     /// Face param ↔ element-ref ↔ physical consistency on all geometries.

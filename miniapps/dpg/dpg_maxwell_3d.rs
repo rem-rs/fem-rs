@@ -7,16 +7,32 @@
 //! Ê,Ĥ ∈ `ND_Trace_FECollection(order,3)`、F,G ∈ `ND_FECollection(order+do,3)`、
 //! 复块算子 + 伴随图范数测试空间）**无法数值对照**。
 //!
-//! 真替换的**剩余阻塞点**（详见 `tmp/dpg3d/FINDINGS.md`）：
-//! 1. `dpg_weakform.rs` 只有标量面 Lagrange trace 支持（`eval_face_lagrange`
-//!    + `FaceVals::phi`）；ND trace 需要 `FaceVals::vec_phi` 与面-棱共享编号。
-//!    该文件归代理 G，本轮未改。
-//! 2. 同一文件 `face_geo_at` 的 3D 面法向带 0.5 因子（MFEM `CalcOrtho` 无），
-//!    3D 面 trace 积分整体差 2 倍。
-//! 3. `HexNDk` 是 MFEM `ND_HexahedronElement` 的**另一组基**（[−1,1]³ +
-//!    IntegratedGLL vs [0,1]³ + GaussLegendre）：空间相同（已用单测
-//!    `dpg_basis::trace_tests::nd_hex_span_is_tensor_nedelec` 钉死），
-//!    解不受影响，但单元矩阵不能逐位对照。
+//! 真替换的**剩余阻塞点**（第十二轮代理 P 复核后更新）：
+//! 1. `dpg_weakform.rs` / `complex_dpg_weakform.rs` 的 trace 分块仍只支持标量
+//!    面 Lagrange 基（`eval_face_lagrange` + `FaceVals::phi`）：ND trace 需要
+//!    向量面基（`FaceVals::vec_phi` + `eval_face_nd` + `map_face_nd_to_phys`）
+//!    与面-棱共享 dof 编号（`TraceSpace::new_nd` 已就绪且与 C++ 逐位一致，
+//!    但**尚未接进弱式装配**——第十二轮只完成了标量（H1/RT）trace 的 3D 接线，
+//!    见 `dpg_acoustics_3d.rs`）。`DpgTangentTraceIntegrator3D` 已是向量版。
+//! 2. `maxwell.cpp` 的 3D 分支还用到 `hatE,hatH ∈ ND_Trace(order,3)` 与
+//!    测试空间 `F,G ∈ ND_FECollection(order+do,3)`：`DpgTransposedMixedCurlIntegrator`
+//!    已就绪，但 ND trace 装配缺失（同 1）。
+//!
+//! **本轮已修复的（先前列出的）阻塞点**：
+//! * `face_geo_at` 的 3D 面法向 0.5 因子已去除（对齐 MFEM `CalcOrtho`），
+//!   2D 路径不变（`dpg_3d_face_measure_matches_divergence_theorem` 钉死：
+//!   单 hex 上 ∫_∂Ω x·n dS = 3 = 3|Ω|）。
+//! * 3D hex 的参考域已统一到 fem-element 的实际约定 `[−1,1]³`
+//!   （`vol_quadrature`/`ref_node_coords`），几何映射与体积基不再只覆盖
+//!   单元的一个子块（这正是 3D DPG 之前不收敛的根因）。
+//! * 3D `local_face_table` 改为 MFEM `FaceVert` 逐字表（外向绕向），
+//!   否则 trace 积分的 ±1 元素朝向不等于"法向 vs 外法向"的符号。
+//! * `SkeletonSpace::new_h1` 补齐 3D H1 trace 的棱/面内部 dof（p ≥ 2）。
+//!
+//! `HexNDk` 是 MFEM `ND_HexahedronElement` 的**另一组基**（[−1,1]³ +
+//! IntegratedGLL vs [0,1]³ + GaussLegendre）：空间相同（已用单测
+//! `dpg_basis::trace_tests::nd_hex_span_is_tensor_nedelec` 钉死），
+//! 解不受影响，但单元矩阵不能逐位对照。
 //!
 //! **已完成的前置件**（本轮，均在 `crates/assembly/src/dpg/dpg_basis.rs`）：
 //! `TraceSpace`（H1/RT/ND 三类 3D 骨架空间，面/棱实体表、全局 dof 编号、

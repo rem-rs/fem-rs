@@ -484,6 +484,18 @@ pub trait DpgTraceBilinear2: Send + Sync {
 }
 
 /// `<û, v>` — MFEM `TraceIntegrator` (RT-trace trial, scalar H1 test).
+///
+/// The weight is `ip.weight · measure · scale`: fem-rs's RT-trace trial basis
+/// is the *unscaled* reference face shape (a Lagrange basis on `[0,1]²` / an
+/// edge Lagrange basis on `[0,1]`), so the face measure must sit in the
+/// quadrature weight to integrate over the physical face.  MFEM instead
+/// divides the shape by `Trans.Weight()` (`INTEGRAL` map type) and then
+/// multiplies by `Trans.Weight()·ip.weight·scale`.  For the affine faces of
+/// the shipped meshes the two conventions differ by a per-face constant
+/// factor — a pure re-scaling of that face's trace dofs (`A → D A D`,
+/// `b → D b`, hence the same discrete solution) whose essential-BC
+/// calibration is what the 1-D/2-D miniapps document (a trace dof carries the
+/// flux, not the flux integral).
 pub struct DpgTraceIntegrator;
 
 impl DpgTraceBilinear2 for DpgTraceIntegrator {

@@ -480,6 +480,42 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         matches!(self.trial_kinds[b], TrialKind::Trace { .. })
     }
 
+    /// Physical point of face DOF `k` of skeleton face `f` (used for the
+    /// essential-BC projection of a trace space) — same convention as
+    /// [`crate::dpg_weakform::DpgWeakForm::face_dof_point`]: the DOF list of a
+    /// face is in the `eval_face_lagrange` node order, so node `k` sits at the
+    /// reference-face parameter `face_dof_params(dim, is_quad, p, k)`.
+    pub fn face_dof_point(&self, sk: &SkeletonSpace<M>, f: usize, k: usize) -> Vec<f64> {
+        let dim = self.dim;
+        let p = sk.order() as usize;
+        let nodes = sk.face_nodes(f);
+        let coords: Vec<Vec<f64>> =
+            nodes.iter().map(|&n| self.mesh.node_coords(n).to_vec()).collect();
+        let params = crate::dpg_weakform::face_dof_params(dim, sk.is_quad_face(f), p, k);
+        let mut x = vec![0.0; dim];
+        if dim == 2 {
+            let s = params[0];
+            for d in 0..dim {
+                x[d] = (1.0 - s) * coords[0][d] + s * coords[1][d];
+            }
+        } else if sk.is_quad_face(f) {
+            let (s, t) = (params[0], params[1]);
+            for d in 0..dim {
+                x[d] = (1.0 - s) * (1.0 - t) * coords[0][d]
+                    + s * (1.0 - t) * coords[1][d]
+                    + s * t * coords[2][d]
+                    + (1.0 - s) * t * coords[3][d];
+            }
+        } else {
+            let (s, t) = (params[0], params[1]);
+            let r = 1.0 - s - t;
+            for d in 0..dim {
+                x[d] = r * coords[0][d] + s * coords[1][d] + t * coords[2][d];
+            }
+        }
+        x
+    }
+
     /// Element vdofs of trial block `b` on element `e`.
     pub fn trial_element_vdofs(&self, b: usize, e: u32) -> Vec<usize> {
         let base = self.trial_offsets()[b];
