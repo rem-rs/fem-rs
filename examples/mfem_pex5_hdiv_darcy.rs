@@ -143,9 +143,15 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         let bdr_rhs_dm = assemble_bdr_rhs_par(
             u_par.local_space(), &par_mesh, &[1], &|x| -p_exact(x),
         );
-        let bdr_rhs_perm = fem_parallel::par_assembler::permute_vec(
+        let mut bdr_rhs_perm = fem_parallel::par_assembler::permute_vec(
             &bdr_rhs_dm, u_par.dof_partition(),
         );
+        // Boundary faces are integrated by their element owner, but the RT1
+        // edge dofs of a face whose owner element sits on the rank boundary
+        // may be owned by the neighbouring rank; those contributions land in
+        // local ghost slots and must be accumulated back to the dof owners
+        // (MFEM GroupComm::Bcast semantics), or they are silently dropped.
+        u_par.reverse_dof_exchange(&mut bdr_rhs_perm);
         let fu = ParVector::from_local_raw(
             bdr_rhs_perm,
             n_u,
@@ -233,7 +239,6 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         };
         let res = block_minres(&block, &rhs, &mut x, &cfg, &inv_m_diag, &schur_amg);
 
-        // TEMP (pex5 排查): dump a00 offd（gid 序）验证跨 rank 对称
         // 7. Errors (relative to exact-solution norms).
         let dp_u = u_par.dof_partition();
         let n_dm_u = u_par.local_space().n_dofs();
