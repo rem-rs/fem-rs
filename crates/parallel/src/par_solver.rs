@@ -1823,6 +1823,214 @@ mod tests {
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
     use fem_space::constraints::boundary_dofs;
+    use fem_linalg::complex_csr::ComplexCsr;
+
+    // ─── D14: par_solve_fgmres_complex correctness (known-solution systems) ──
+
+    /// Complex non-Hermitian tridiagonal test matrix used by the D14 tests.
+    ///
+    /// `A[i][i-1] = -1 - 0.5i`, `A[i][i] = 4 + i`, `A[i][i+1] = -1 + 2i`.
+    /// Asymmetric sub/super-diagonal imaginary parts make `A` non-Hermitian
+    /// (`A ≠ Aᴴ`) *and* non-symmetric (`A ≠ Aᵀ`), so a conjugation-convention
+    /// mistake in Arnoldi/Givens cannot cancel out.
+    fn complex_nonsym_tridiag(n: usize) -> ComplexCsr {
+        let mut row_ptr = vec![0usize; n + 1];
+        let mut col_idx: Vec<u32> = Vec::new();
+        let mut re_vals: Vec<f64> = Vec::new();
+        let mut im_vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push((i - 1) as u32); re_vals.push(-1.0); im_vals.push(-0.5);
+            }
+            col_idx.push(i as u32); re_vals.push(4.0); im_vals.push(1.0);
+            if i + 1 < n {
+                col_idx.push((i + 1) as u32); re_vals.push(-1.0); im_vals.push(2.0);
+            }
+            row_ptr[i + 1] = col_idx.len();
+        }
+        ComplexCsr { nrows: n, ncols: n, row_ptr, col_idx, re_vals, im_vals }
+    }
+
+    /// Apply the [`complex_nonsym_tridiag`] stencil to a known complex vector.
+    fn complex_nonsym_tridiag_apply(
+        n: usize, x_re: &[f64], x_im: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let (mut yr, mut yi) = (vec![0.0_f64; n], vec![0.0_f64; n]);
+        let mul = |ar: f64, ai: f64, xr: f64, xi: f64| (ar * xr - ai * xi, ar * xi + ai * xr);
+        for i in 0..n {
+            let mut sr = 0.0;
+            let mut si = 0.0;
+            if i > 0 {
+                let (r, m) = mul(-1.0, -0.5, x_re[i - 1], x_im[i - 1]);
+                sr += r; si += m;
+            }
+            {
+                let (r, m) = mul(4.0, 1.0, x_re[i], x_im[i]);
+                sr += r; si += m;
+            }
+            if i + 1 < n {
+                let (r, m) = mul(-1.0, 2.0, x_re[i + 1], x_im[i + 1]);
+                sr += r; si += m;
+            }
+            yr[i] = sr; yi[i] = si;
+        }
+        (yr, yi)
+    }
+
+    /// Wrap a single-rank `(diag, n_ghost = 0)` complex matrix as a
+    /// `ParComplexCsrMatrix` with a trivial ghost exchange.
+    fn wrap_single_rank_complex(
+        diag: ComplexCsr,
+        comm: &crate::comm::Comm,
+    ) -> crate::par_complex_csr::ParComplexCsrMatrix {
+        use std::sync::Arc;
+        let n = diag.nrows;
+        let offd = ComplexCsr {
+            nrows: n, ncols: 0,
+            row_ptr: vec![0usize; n + 1],
+            col_idx: Vec::new(), re_vals: Vec::new(), im_vals: Vec::new(),
+        };
+        crate::par_complex_csr::ParComplexCsrMatrix::new(
+            diag, offd, n, 0,
+            Arc::new(crate::ghost::GhostExchange::from_trivial()),
+            comm.clone(),
+        )
+    }
+
+    /// Exact complex residual `‖b − A·x‖/‖b‖` for the tridiagonal test stencil.
+    fn complex_relative_residual(
+        n: usize, x_re: &[f64], x_im: &[f64], b_re: &[f64], b_im: &[f64],
+    ) -> f64 {
+        let (ax_re, ax_im) = complex_nonsym_tridiag_apply(n, x_re, x_im);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            let dr = b_re[i] - ax_re[i];
+            let di = b_im[i] - ax_im[i];
+            num += dr * dr + di * di;
+            den += b_re[i] * b_re[i] + b_im[i] * b_im[i];
+        }
+        (num / den).sqrt()
+    }
+
+    /// D14(a) regression: solve a complex **non-Hermitian** system with a known
+    /// exact solution `x_star` (`b = A·x_star`) and require the computed
+    /// solution to match `x_star` to round-off.
+    ///
+    /// The residual norm alone is *not* sufficient here: a convention error in
+    /// the modified Gram–Schmidt conjugate or in the Givens rotation corrupts
+    /// the Hessenberg relation `A·Z = V·H̄`, which shows up as a wrong solution
+    /// vector even when the (cheap) residual estimate looks small.
+    #[test]
+    fn par_fgmres_complex_known_solution_nonsymmetric() {
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let n = 40usize;
+            let a_mat = wrap_single_rank_complex(complex_nonsym_tridiag(n), &comm);
+
+            // Known solution x_star (all components non-trivially complex).
+            let x_re_star: Vec<f64> = (0..n).map(|i| 1.0 + 0.01 * i as f64).collect();
+            let x_im_star: Vec<f64> = (0..n).map(|i| -0.5 + 0.02 * i as f64).collect();
+            let (b_re, b_im) = complex_nonsym_tridiag_apply(n, &x_re_star, &x_im_star);
+
+            use std::sync::Arc;
+            let pv = |data: Vec<f64>| {
+                ParVector::from_local_raw(
+                    data, n,
+                    Arc::new(crate::ghost::GhostExchange::from_trivial()),
+                    comm.clone(),
+                )
+            };
+            let b = crate::par_vector::ParComplexVector { re: pv(b_re), im: pv(b_im) };
+            let mut x = crate::par_vector::ParComplexVector {
+                re: pv(vec![0.0; n]), im: pv(vec![0.0; n]),
+            };
+
+            let cfg = SolverConfig { rtol: 1e-12, max_iter: 200, ..SolverConfig::default() };
+            // restart > n ⇒ one cycle spans the whole Krylov space, so full GMRES
+            // must be exact within n steps (+1 slack for the loop's post-check).
+            let res = par_solve_fgmres_complex::<fn(&[f64], &[f64], &mut [f64], &mut [f64])>(
+                &a_mat, &b, &mut x, n + 10, None, &cfg,
+            ).unwrap();
+            assert!(res.converged, "FGMRES did not converge: {} iters, res={:.3e}",
+                res.iterations, res.final_residual);
+            // Gate on the Gram–Schmidt convention: with V orthonormal (and A being
+            // a 40×40 matrix) the Krylov space is exhausted after at most n = 40
+            // Arnoldi steps.  The pre-fix code stored conj(⟨v_i, w⟩), which made V
+            // non-orthonormal and needed 71 steps for this system.
+            assert!(
+                res.iterations <= n + 1,
+                "full complex GMRES needed {} > n+1 iterations — the Arnoldi basis is not orthonormal",
+                res.iterations
+            );
+
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            for i in 0..n {
+                let dr = x.re.data[i] - x_re_star[i];
+                let di = x.im.data[i] - x_im_star[i];
+                num += dr * dr + di * di;
+                den += x_re_star[i] * x_re_star[i] + x_im_star[i] * x_im_star[i];
+            }
+            let rel_err = (num / den).sqrt();
+            assert!(
+                rel_err < 1e-9,
+                "FGMRES complex solution error too large: rel_err={:.3e} (iters={}, reported_res={:.3e})",
+                rel_err, res.iterations, res.final_residual
+            );
+        });
+    }
+
+    /// D14(b) regression: the recursive estimate that drives the in-cycle
+    /// convergence test must agree with the true 2-norm residual
+    /// `‖b − A·x‖/‖b‖`.
+    ///
+    /// Two defects used to break this agreement:
+    /// * `resid = max(|Re g[j+1]|, |Im g[j+1]|)` (∞-norm) — under-estimates
+    ///   `|g[j+1]|` by up to √2 and can exit a cycle early;
+    /// * the MGS conjugation defect (see
+    ///   [`par_fgmres_complex_known_solution_nonsymmetric`]) made `|g[j+1]|`
+    ///   meaningless altogether (measured 11 % mismatch at the round-off floor).
+    ///
+    /// With `rtol = 1e-6` the residual is far above the round-off floor, so the
+    /// agreement is sharp.  Measured after the fix: `reported / true = 1.0000`.
+    #[test]
+    fn par_fgmres_complex_reported_residual_matches_true_residual() {
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let n = 40usize;
+            let a_mat = wrap_single_rank_complex(complex_nonsym_tridiag(n), &comm);
+            let x_re_star: Vec<f64> = (0..n).map(|i| 1.0 + 0.01 * i as f64).collect();
+            let x_im_star: Vec<f64> = (0..n).map(|i| -0.5 + 0.02 * i as f64).collect();
+            let (b_re, b_im) = complex_nonsym_tridiag_apply(n, &x_re_star, &x_im_star);
+
+            use std::sync::Arc;
+            let pv = |data: Vec<f64>| {
+                ParVector::from_local_raw(
+                    data, n,
+                    Arc::new(crate::ghost::GhostExchange::from_trivial()),
+                    comm.clone(),
+                )
+            };
+            let b = crate::par_vector::ParComplexVector { re: pv(b_re.clone()), im: pv(b_im.clone()) };
+            let mut x = crate::par_vector::ParComplexVector {
+                re: pv(vec![0.0; n]), im: pv(vec![0.0; n]),
+            };
+
+            let cfg = SolverConfig { rtol: 1e-6, max_iter: 200, ..SolverConfig::default() };
+            let res = par_solve_fgmres_complex::<fn(&[f64], &[f64], &mut [f64], &mut [f64])>(
+                &a_mat, &b, &mut x, n + 10, None, &cfg,
+            ).unwrap();
+            assert!(res.converged);
+
+            let true_res = complex_relative_residual(n, &x.re.data, &x.im.data, &b_re, &b_im);
+            assert!(
+                (res.final_residual - true_res).abs() <= 0.05 * true_res,
+                "reported residual {:.6e} disagrees with the true residual {:.6e} (ratio {:.4})",
+                res.final_residual, true_res, res.final_residual / true_res
+            );
+        });
+    }
 
     #[test]
     fn par_cg_laplacian_serial() {
@@ -2697,11 +2905,19 @@ where
             a.spmv(&mut z[j], &mut w);
 
             // Modified Gram-Schmidt: h[i][j] = ⟨v_i, w⟩ = Σ conj(v_i)·w.
-            // `global_dot_complex(a, b)` = Σ a·conj(b), so ⟨v_i, w⟩ =
-            // conj(global_dot_complex(w, v_i)).
+            // `global_dot_complex(a, b)` = Σ a·conj(b), so with v_i of unit norm
+            // `w.global_dot_complex(&v[i])` = Σ w·conj(v_i) = Σ conj(v_i)·w
+            // (complex multiplication commutes) — i.e. it *is* ⟨v_i, w⟩, and it
+            // must be stored **without** an extra conjugation.  Taking the
+            // conjugate here (as this code used to) stores (w, v_i) instead, which
+            // makes V non-orthonormal: the Arnoldi relation A·Z = V·H̄ still holds
+            // by construction, but V^*V ≠ I, so the Hessenberg system no longer
+            // describes the true GMRES minimisation and the recursive residual
+            // estimate |g[j+1]| is meaningless.  The solver still converged because
+            // the exact residual is recomputed at every restart, but slowly.
             for i in 0..=j {
                 let dot = w.global_dot_complex(&v[i]);
-                h[i][j] = (dot.0, -dot.1);
+                h[i][j] = dot;
                 // w −= h[i][j]·v[i]
                 w.zaxpy(-h[i][j].0, -h[i][j].1, &v[i]);
             }
@@ -2749,7 +2965,11 @@ where
             g[j] = (nr, ni);
             g[j + 1] = (mr, mi);
 
-            let resid = g[j + 1].0.abs().max(g[j + 1].1.abs());
+            // Reduced-system residual estimate: the 2-norm |g[j+1]| (unpreconditioned
+            // relative residual, C++ `FGMRESSolver` convention).  The ∞-norm
+            // max(|Re|,|Im|) used here before under-estimates |g[j+1]| by up to a
+            // factor √2, letting the in-cycle test declare convergence too early.
+            let resid = g[j + 1].0.hypot(g[j + 1].1);
             if cfg.verbose && b.re.comm().is_root() {
                 log::info!("par_fgmres_complex iter {}: residual = {:.3e}", iter_total, resid / b_norm);
             }

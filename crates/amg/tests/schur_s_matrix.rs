@@ -10,13 +10,22 @@
 //!   Gauss–Seidel smoothing — hypre BoomerAMG default semantics) satisfies
 //!   this and converges in a small, refinement-bounded iteration count.
 //! * The plain `AmgConfig::default()` (smoothed aggregation + weighted
-//!   Jacobi ω = 2/3) does NOT: its V-cycles are not reliably SPD on these
-//!   matrices (CG stagnates at max_iter for small/irregular hierarchies;
-//!   SA per-level ρ(D⁻¹A_l) reaches the Jacobi stability limit 2/ω).
-//!   This is exactly why `darcy_solvers::SchurMode::Amg` pins the
-//!   BoomerAMG-aligned preset.
+//!   Jacobi ω = 2/3) *used to* fail on these matrices — CG stagnated at
+//!   `max_iter`.  The cause was traced (round 11, D10) to the AMG
+//!   coarsest-level solve rather than to the smoother or the coarsening:
+//!   `linlvo`'s cycle solves the coarse operator with `SparseLu` under its
+//!   default `Rcm` fill-reducing ordering, which returns a *permuted*
+//!   solution, so the coarse-grid correction was garbage and the V-cycle
+//!   operator was not symmetric (measured `max|B − Bᵀ| ≈ 7.8e-2` against
+//!   `‖B‖_F ≈ 0.76`).  `fem-amg` now drives every hierarchy through
+//!   `CorrectedAmgPrecond`, which factors the coarsest operator with
+//!   `OrderingMethod::Natural` (exact for it), so **both** presets are valid
+//!   SPD preconditioners here — see
+//!   `schur_default_config_amg_cg_converges_across_refinements`.
+//!   `darcy_solvers::SchurMode::Amg` still pins the BoomerAMG-aligned preset,
+//!   which needs somewhat fewer iterations.
 
-use fem_amg::{AmgSolver, boomeramg_config};
+use fem_amg::{AmgConfig, AmgSolver, boomeramg_config};
 use fem_assembly::mixed::{HDivL2DivIntegrator, assemble_hdiv_l2_mixed};
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::VectorAssembler;
@@ -120,6 +129,55 @@ fn schur_amg_cg_converges_across_refinements() {
         );
         assert!(
             iters <= 40,
+            "AMG-CG on Darcy Schur complement too slow at n_p = {n_p}: {iters} iterations"
+        );
+    }
+}
+
+/// D10 acceptance: the **default** configuration must also be a valid SPD CG
+/// preconditioner on the Darcy Schur complement (same matrices as above).
+///
+/// Before the coarsest-solve fix the V-cycle operator was not a valid SPD
+/// preconditioner on these matrices: on the dumped `star.mesh` Schur
+/// complements the measured asymmetry was `max|B − Bᵀ| = 7.8e-2` against
+/// `‖B‖_F = 0.76` for smoothed aggregation + weighted Jacobi, and CG either
+/// stalled at `max_iter` (levels 0/1) or converged only to a loose residual
+/// (level 2).  After the fix the asymmetry is at round-off (`≈1e-17`).
+#[test]
+fn schur_default_config_amg_cg_converges_across_refinements() {
+    for n_elem in [4usize, 8, 16] {
+        let mesh = Mesh::<2>::unit_square_quad(n_elem);
+        let s = assemble_schur(&mesh);
+        let n_p = s.nrows;
+        let solver = AmgSolver::setup(&s, AmgConfig::default());
+        assert!(
+            solver.n_levels() >= 2,
+            "expected a multilevel hierarchy for n_p = {n_p}"
+        );
+        let (iters, ok) = pcg_with_precond(&s, &|v: &[f64], w: &mut [f64]| {
+            let z = solver.precond_apply(v);
+            w.copy_from_slice(&z);
+        }, 200);
+        assert!(
+            ok,
+            "AMG-CG with AmgConfig::default() failed at n_p = {n_p} (n_elem = {n_elem})"
+        );
+        // Not worse than the RS+SGS preset by more than a small factor.
+        let solver_rs = AmgSolver::setup(&s, boomeramg_config());
+        let (iters_rs, ok_rs) = pcg_with_precond(&s, &|v: &[f64], w: &mut [f64]| {
+            let z = solver_rs.precond_apply(v);
+            w.copy_from_slice(&z);
+        }, 200);
+        assert!(ok_rs);
+        println!(
+            "n_p = {n_p:>4}: default(SA+WJ) {iters} iters, boomeramg(RS+SGS) {iters_rs} iters"
+        );
+        assert!(
+            iters <= iters_rs * 3 + 5,
+            "default config degraded AMG-CG at n_p = {n_p}: {iters} vs {iters_rs} iterations"
+        );
+        assert!(
+            iters <= 60,
             "AMG-CG on Darcy Schur complement too slow at n_p = {n_p}: {iters} iterations"
         );
     }
