@@ -5,7 +5,7 @@
 //! - [`geometry_jacobian`] — compute Jacobian at a reference point for any element type
 //! - [`xform_grads`] — transform reference gradients to physical space
 
-use fem_core::ElemId;
+use fem_core::{ElemId, NodeId};
 use nalgebra::DMatrix;
 
 use crate::topology::MeshTopology;
@@ -32,7 +32,12 @@ impl ElementTransformation {
 
     /// Build a simplex transformation from a node slice.
     ///
-    /// Uses the first `dim + 1` nodes as simplex vertices.
+    /// Uses the first `dim + 1` nodes as simplex vertices.  Coordinates come
+    /// from the vertex table (`node_coords`); callers that need per-element
+    /// geometry (curved / geometrically periodic meshes) should resolve the
+    /// geometry node ids themselves via [`MeshTopology::geometry_nodes`] /
+    /// [`MeshTopology::geom_coords_of`] (see [`element_jacobian_at`], and the
+    /// isoparametric assembly paths, which do exactly that).
     pub fn from_simplex_nodes<M: MeshTopology>(mesh: &M, geo_nodes: &[u32]) -> Self {
         let dim = mesh.dim() as usize;
         assert!(
@@ -116,8 +121,11 @@ impl ElementTransformation {
 /// reference point for a mesh element of any type (MFEM: `ElementTransformation`).
 ///
 /// Returns `(detJ, J^{-T})` where `J_{ij} = ∂x_i/∂ξ_j` is the Jacobian of
-/// the reference-to-physical mapping, computed from the element's nodal
-/// coordinates and the linear (P1) reference-element gradient basis.
+/// the reference-to-physical mapping, computed from the element's **geometry**
+/// nodal coordinates ([`MeshTopology::geometry_nodes`] / [`MeshTopology::geom_coords_of`]
+/// — per-element geometry when the mesh carries one, e.g. curved or
+/// geometrically periodic meshes; else the vertex table) and the linear (P1)
+/// reference-element gradient basis.
 ///
 /// Supports all element types: Tri3, Quad4, Tet4, Hex8, Prism6, etc.
 ///
@@ -130,14 +138,19 @@ pub fn geometry_jacobian(
     dim: usize,
 ) -> (f64, DMatrix<f64>) {
     let et = mesh.element_type(elem);
-    let nd = mesh.element_nodes(elem);
-    let n_ldofs = nd.len();
+    let n_pe = mesh.element_nodes(elem).len();
+    // Per-element geometry only when it is a P1-sized table (geometrically
+    // periodic meshes); high-order curved geometry keeps the previous
+    // vertex-table behavior here (the isoparametric paths handle curvature).
+    let gnodes = mesh.geometry_nodes(elem);
+    let nodes: &[NodeId] = if gnodes.len() == n_pe { gnodes } else { mesh.element_nodes(elem) };
+    let n_ldofs = nodes.len();
     let re_geom = et.ref_elem(1);
     let mut grad = vec![0.0_f64; n_ldofs * dim];
     re_geom.eval_grad_basis(xi, &mut grad);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
     for k in 0..n_ldofs {
-        let x = mesh.node_coords(nd[k]);
+        let x = mesh.geom_coords_of(nodes[k]);
         for i in 0..dim {
             for j in 0..dim {
                 jac[(i, j)] += x[i] * grad[k * dim + j];
@@ -163,12 +176,15 @@ pub fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim:
 /// at a reference point for a given element.
 ///
 /// Returns `(J, x_phys)` where `J_{ij} = ∂x_i/∂ξ_j` and `x_phys = x(ξ)`.
-/// Uses the linear (P1) reference element for the geometry mapping.
+/// Uses the linear (P1) reference element for the geometry mapping and the
+/// element's **geometry** coordinates ([`MeshTopology::geometry_nodes`] /
+/// [`MeshTopology::geom_coords_of`] — per-element geometry when present, e.g.
+/// curved or geometrically periodic meshes; else the vertex table).
 ///
 /// Supported element types: Tri3, Quad4, Tet4, Hex8, Prism6.
 ///
 /// MFEM: `ElementTransformation::Jacobian()` + `ElementTransformation::Transform()`
-pub fn element_jacobian_at<M: MeshTopology>(
+pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     mesh: &M,
     elem: u32,
     xi: &[f64],
@@ -181,11 +197,15 @@ pub fn element_jacobian_at<M: MeshTopology>(
     let mut phi = vec![0.0_f64; npe];
     re.eval_basis(xi, &mut phi);
     re.eval_grad_basis(xi, &mut grad);
-    let nodes = mesh.element_nodes(elem);
+    // Per-element geometry only when it is a P1-sized table (geometrically
+    // periodic meshes); high-order curved geometry keeps the previous
+    // vertex-table behavior here (the isoparametric paths handle curvature).
+    let gnodes = mesh.geometry_nodes(elem);
+    let nodes: &[NodeId] = if gnodes.len() == npe { gnodes } else { mesh.element_nodes(elem) };
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
     let mut xp = vec![0.0_f64; dim];
     for k in 0..npe {
-        let c = mesh.node_coords(nodes[k]);
+        let c = mesh.geom_coords_of(nodes[k]);
         for i in 0..dim {
             xp[i] += c[i] * phi[k];
             for j in 0..dim {

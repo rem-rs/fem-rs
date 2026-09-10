@@ -201,6 +201,21 @@ mod tests {
         assert_eq!(space.n_dofs(), space.mesh().n_nodes());
     }
 
+    /// Periodic seam DOFs are shared: on the 4×4 periodic quad grid the H¹
+    /// DOF count is `(nx·order)²` (MFEM `MakeCartesian2D + MakePeriodic`
+    /// semantics) — 16 for order 1 (the 16 merged lattice vertices), 64 for
+    /// order 2 (16 vertices + 32 seam-split edge DOFs + 16 interiors).
+    #[test]
+    fn h1_periodic_mesh_shares_seam_dofs() {
+        let mesh = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0)
+            .make_periodic(&[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])], 1e-10)
+            .unwrap();
+        let n1 = H1Space::new(mesh.clone(), 1).n_dofs();
+        assert_eq!(n1, 16, "Q1 on 4×4 periodic grid must have (4·1)² = 16 DOFs");
+        let n2 = H1Space::new(mesh, 2).n_dofs();
+        assert_eq!(n2, 64, "Q2 on 4×4 periodic grid must have (4·2)² = 64 DOFs");
+    }
+
     #[test]
     fn h1_p2_n_dofs_greater_than_n_nodes() {
         let mesh = Mesh::<2>::unit_square_tri(4);

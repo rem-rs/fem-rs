@@ -27,15 +27,16 @@
 //! `h×h(×h)` geometry — i.e. the FE operator is assembled from the unwrapped
 //! cartesian lattice and scattered into the merged (toroidal) DOF numbering.
 //!
-//! Core-library gaps worked around locally in this file (crates/ untouched):
-//! * `Mesh::make_periodic` merges seam vertices in connectivity *and*
-//!   coordinates, which turns the seam elements into distorted parallelograms
-//!   spanning the whole domain (assembled area ≠ domain area).  MFEM instead
-//!   keeps the per-element geometry of the original (unwrapped) mesh via its
-//!   nodal GridFunction.  fem-rs' `Mesh` cannot represent that geometry/DOF
-//!   split, so the periodic cartesian lattice, its H¹ space and the
-//!   mass/stiffness assembly are implemented here directly (exact Gauss
-//!   quadrature; identical DOF set, geometry and operator as MFEM).
+//! Core-library gaps worked around locally in this file:
+//! * **(2-D path fixed — de-bypassed.)** `Mesh::make_periodic` used to merge
+//!   seam vertices in connectivity *and* coordinates, turning seam elements
+//!   into distorted parallelograms.  The library now keeps the per-element
+//!   geometry of the original (unwrapped) mesh (MFEM nodal `Nodes` semantics,
+//!   order-1 `GeometryData` snapshot), so 2-D runs build the lattice with
+//!   `Mesh::make_cartesian_2d` + `make_periodic` + `H1Space` + `Assembler`
+//!   ([`LibraryLattice2D`]) — identical DOF set, geometry and operator as
+//!   MFEM.  The analytic [`CartesianH1`] tensor lattice remains for `D == 3`
+//!   (library gap: periodic `make_cartesian_3d`).
 //! * The C++ CN operators use PARTIAL (matrix-free) assembly; here the H1
 //!   mass/stiffness matrices are assembled into CSR and the complex forms
 //!   `C = M + ¼iħδt·A` / `R = M − ¼iħδt·A` are built from them
@@ -80,8 +81,11 @@
 //! cargo run --release --example schrodinger_flow -- --leapfrog -ms 4 -nx 8 -ny 8 -no-vis
 //! ```
 
+use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
+use fem_assembly::Assembler;
 use fem_linalg::complex_csr::{solve_gmres_complex_with, ComplexCoo, ComplexCsr};
 use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::Mesh;
 use fem_solver::{fmt_g, solve_cg_mfem, IterResult, SliOptions};
 
 const PI: f64 = std::f64::consts::PI;
@@ -585,6 +589,57 @@ impl<const D: usize> CartesianH1<D> {
     }
 }
 
+// ─── Library lattice (2-D de-bypassed path) ──────────────────────────────────
+
+/// 2-D periodic/free cartesian H¹ lattice built from the **library** stack:
+/// `Mesh::make_cartesian_2d` (+ `make_periodic`) → `H1Space` → `Assembler`
+/// mass/stiffness.  This replaced the analytic [`CartesianH1`] workaround for
+/// `D == 2` once `Mesh::make_periodic` kept per-element geometry (MFEM nodal
+/// `Nodes` semantics) — the operators are assembled from the per-element
+/// (unwrapped) geometry while the DOFs are shared across the seams.
+///
+/// `CartesianH1` remains the fallback for `D == 3` (`Mesh::make_cartesian_3d`
+/// + periodic identification is not yet available in the library).
+struct LibraryLattice2D {
+    ndofs: usize,
+    m_h1: CsrMatrix<f64>,
+    a_h1: CsrMatrix<f64>,
+    /// Physical DOF coordinates (`[x₀,y₀,x₁,y₁,…]`), used to sample the
+    /// initial phase / jet indicator at the DOF positions (C++ reads `x` from
+    /// the `nodes` GridFunction).
+    coords: Vec<f64>,
+}
+
+impl LibraryLattice2D {
+    fn new(nx: usize, ny: usize, sx: f64, sy: f64, order: usize, periodic: bool) -> Self {
+        use fem_space::{FESpace, H1Space};
+        let mesh = Mesh::<2>::make_cartesian_2d(nx, ny, sx, sy);
+        let mesh = if periodic {
+            // Boundary tags: 1 = bottom, 2 = right, 3 = top, 4 = left.
+            mesh.make_periodic(&[(4, 2, [sx, 0.0]), (1, 3, [0.0, sy])], 1e-10)
+                .expect("make_periodic on the cartesian grid")
+        } else {
+            mesh
+        };
+        let space = H1Space::new(mesh, order as u8);
+        // Exact quadrature (degree 2·order per direction) — the same
+        // polynomial integrands the analytic lattice integrates exactly.
+        let q = (2 * order) as u8;
+        let m_h1 = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], q);
+        let a_h1 =
+            Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], q);
+        let ndofs = space.n_dofs();
+        let dm = space.dof_manager();
+        let mut coords = Vec::with_capacity(ndofs * 2);
+        for d in 0..ndofs {
+            let c = dm.dof_coord(d as u32);
+            coords.push(c[0]);
+            coords.push(c[1]);
+        }
+        LibraryLattice2D { ndofs, m_h1, a_h1, coords }
+    }
+}
+
 // ─── Local solver helpers (crates/ kept untouched) ───────────────────────────
 
 /// MFEM `OrthoSolver` around an `OperatorJacobiSmoother` (the C++ miniapp's
@@ -714,6 +769,9 @@ fn cn_mult(
 struct SchrodingerSolver<const D: usize> {
     opt: Options,
     grid: CartesianH1<D>,
+    /// 2-D library backend (`Some` for `D == 2`): the de-bypassed path.
+    /// `None` keeps the analytic tensor lattice (3-D runs).
+    lib: Option<LibraryLattice2D>,
     /// H1 DOF count (C++ `ndofs`).
     ndofs: usize,
     /// H1 mass matrix M (`mass_h1` with `MassIntegrator(one)`).
@@ -750,12 +808,22 @@ impl<const D: usize> SchrodingerSolver<D> {
             sz[2] = opt.sz;
         }
         let grid = CartesianH1::new(n, sz, order, opt.periodic);
-        let ndofs = grid.ndofs;
-
-        // Exact Gauss quadrature (order+1 points per direction) reproduces
-        // MFEM's partially-assembled operators to round-off: both integrate
-        // the same polynomial integrands exactly.
-        let (m_h1, a_h1) = grid.assemble();
+        // 2-D runs assemble on the library periodic mesh (de-bypassed path);
+        // 3-D stays on the analytic tensor lattice (library gap: periodic
+        // `make_cartesian_3d`).
+        let lib = (D == 2).then(|| {
+            LibraryLattice2D::new(n[0], n[1], sz[0], sz[1], order, opt.periodic)
+        });
+        let (ndofs, m_h1, a_h1) = match &lib {
+            Some(l) => (l.ndofs, l.m_h1.clone(), l.a_h1.clone()),
+            None => {
+                // Exact Gauss quadrature (order+1 points per direction) reproduces
+                // MFEM's partially-assembled operators to round-off: both integrate
+                // the same polynomial integrands exactly.
+                let (m_h1, a_h1) = grid.assemble();
+                (grid.ndofs, m_h1, a_h1)
+            }
+        };
 
         // C = M + ¼iħδt A,  R = M − ¼iħδt A
         let dthq = opt.dt * opt.hbar / 4.0;
@@ -785,6 +853,7 @@ impl<const D: usize> SchrodingerSolver<D> {
         SchrodingerSolver {
             opt,
             grid,
+            lib,
             ndofs,
             m_h1,
             a_h1,
@@ -801,7 +870,17 @@ impl<const D: usize> SchrodingerSolver<D> {
     }
 
     /// DOF coordinate of `dof` (C++ reads the `nodes` GridFunction).
+    ///
+    /// 2-D runs: from the library H¹ space's DOF manager.  Note the seam DOFs
+    /// sit at the `x=0`-side coordinate of the identified pair (MFEM keeps one
+    /// replica per merged vertex); the analytic fallback used the `sx`-side
+    /// replica — both are the same point on the torus, and the initial data
+    /// are periodic, so the sampled DOF values agree to round-off.
     fn dof_x(&self, dof: usize) -> [f64; D] {
+        if let Some(ref lib) = self.lib {
+            debug_assert_eq!(D, 2);
+            return std::array::from_fn(|d| lib.coords[2 * dof + d]);
+        }
         self.grid.dof_coord(dof)
     }
 
@@ -1284,6 +1363,43 @@ mod gmres_tests {
         assert!((area - 16.0).abs() < 1e-10, "area {area}");
         let dmin = a.diagonal().iter().cloned().fold(f64::INFINITY, f64::min);
         assert!(dmin > 0.0, "stiffness diagonal min {dmin}");
+    }
+
+    /// The de-bypassed 2-D path (`LibraryLattice2D`: library periodic mesh +
+    /// H¹ space + Assembler) must reproduce the analytic tensor-lattice
+    /// operators: same physical operator, different (permuted) DOF numbering.
+    /// Checked through permutation-invariant quadratic forms of a periodic
+    /// sample function evaluated at each backend's own DOF coordinates.
+    #[test]
+    fn library_periodic_lattice_matches_analytic() {
+        let (nx, ny, sx, sy) = (4usize, 4usize, 1.0, 1.0);
+        let g = CartesianH1::<2>::new([nx, ny], [sx, sy], 1, true);
+        let (m0, a0) = g.assemble();
+        let lib = LibraryLattice2D::new(nx, ny, sx, sy, 1, true);
+        assert_eq!(lib.ndofs, g.ndofs, "(nx·order)² DOFs on the periodic grid");
+        assert_eq!(lib.ndofs, 16);
+
+        // Periodic sample: identical field values regardless of which replica
+        // coordinate (0- or sx-side) a seam DOF carries.
+        let tau = std::f64::consts::TAU;
+        let f = |x: f64, y: f64| (tau * x).sin() * (2.0 * tau * y).cos();
+        let v0: Vec<f64> = (0..g.ndofs)
+            .map(|d| { let c = g.dof_coord(d); f(c[0], c[1]) })
+            .collect();
+        let v1: Vec<f64> = (0..lib.ndofs)
+            .map(|d| f(lib.coords[2 * d], lib.coords[2 * d + 1]))
+            .collect();
+        let quad = |m: &CsrMatrix<f64>, v: &[f64]| -> f64 {
+            let mut y = vec![0.0_f64; v.len()];
+            m.spmv(v, &mut y);
+            v.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
+        };
+        let qm0 = quad(&m0, &v0);
+        let qm1 = quad(&lib.m_h1, &v1);
+        assert!((qm0 - qm1).abs() < 1e-12, "mass forms differ: {qm0} vs {qm1}");
+        let qa0 = quad(&a0, &v0);
+        let qa1 = quad(&lib.a_h1, &v1);
+        assert!((qa0 - qa1).abs() < 1e-10, "stiffness forms differ: {qa0} vs {qa1}");
     }
 
     #[test]

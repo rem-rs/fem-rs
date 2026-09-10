@@ -1392,7 +1392,7 @@ impl<const D: usize> Mesh<D> {
             new_face_tags.push(tag);
         }
 
-        Ok(Mesh::uniform(
+        let mut out = Mesh::uniform(
             new_coords,
             new_conn,
             self.elem_tags.clone(),
@@ -1400,7 +1400,42 @@ impl<const D: usize> Mesh<D> {
             new_face_conn,
             new_face_tags,
             self.face_type,
-        ))
+        );
+        out.geometry = self.periodic_geometry_snapshot(&remap);
+        Ok(out)
+    }
+
+    /// MFEM `MakePeriodic` geometry semantics: snapshot the per-element
+    /// geometry so every element keeps the coordinates of **its own side** of
+    /// a periodic seam while the connectivity (and hence the DOFs) is merged.
+    ///
+    /// MFEM copies the mesh, materializes the nodal `Nodes` GridFunction
+    /// (`SetCurvature`) *before* renumbering the vertices with `v2v`, so the
+    /// geometry is evaluated per element through `Nodes`' element dof values
+    /// (replica coordinates preserved), never through the merged vertex
+    /// table.  We mirror that with an order-1 [`GeometryData`] snapshot of
+    /// the pre-merge connectivity + coordinates; assembly reads it through
+    /// [`MeshTopology::geometry_nodes`] / [`MeshTopology::geom_coords_of`].
+    /// A mesh that already carries high-order geometry keeps it unchanged
+    /// (its conn/coords already index the pre-merge node table).
+    ///
+    /// Returns `None` when nothing was merged (identity `remap`) — the
+    /// vertices then already are the geometry, so no table is needed.
+    fn periodic_geometry_snapshot(&self, remap: &[NodeId]) -> Option<GeometryData> {
+        if let Some(ref geo) = self.geometry {
+            return Some(geo.clone());
+        }
+        let merged_any = remap.iter().enumerate().any(|(i, &r)| r != i as u32);
+        if !merged_any || self.elem_types.is_some() || self.elem_offsets.is_some() {
+            return None;
+        }
+        Some(GeometryData {
+            order: 1,
+            conn: self.conn.clone(),
+            nodes_per_elem: self.elem_type.nodes_per_element(),
+            coords: self.coords.clone(),
+            n_nodes: self.n_nodes(),
+        })
     }
 
     /// Make a periodic mesh with affine (rotation + translation) matching.
@@ -1486,7 +1521,7 @@ impl<const D: usize> Mesh<D> {
             for &n in ns { new_face_conn.push(new_id[n as usize]); }
             new_face_tags.push(tag);
         }
-        Ok(Mesh::<D>::uniform(
+        let mut out = Mesh::<D>::uniform(
             new_coords,
             new_conn,
             self.elem_tags.clone(),
@@ -1494,7 +1529,9 @@ impl<const D: usize> Mesh<D> {
             new_face_conn,
             new_face_tags,
             self.face_type,
-        ))
+        );
+        out.geometry = self.periodic_geometry_snapshot(&remap);
+        Ok(out)
     }
 
     /// Validate internal consistency.
@@ -3393,6 +3430,107 @@ mod tests {
         // No boundary faces should remain
         assert_eq!(pm.n_faces(), 0, "fully periodic mesh should have no boundary faces");
         assert_eq!(pm.n_elems(), m.n_elems());
+    }
+
+    /// MFEM `MakePeriodic` semantics: the connectivity (DOFs) is merged across
+    /// the seams while every element keeps its **unwrapped** per-element
+    /// geometry (MFEM's discontinuous nodal `Nodes` field, probe3.cpp against
+    /// MFEM 4.10 serial: per-element corner sets, NODE0 = (0,0), Σx = 32 over
+    /// the 16·4 geometry copies, every element area = 1/16).
+    #[test]
+    fn make_periodic_preserves_per_element_geometry() {
+        let m = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0);
+        let pm = m.make_periodic(
+            &[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])],
+            1e-10,
+        ).unwrap();
+
+        // Merged topology: 4×4 vertex lattice, 16 elements, no boundary.
+        assert_eq!(pm.n_nodes(), 16);
+        assert_eq!(pm.n_elems(), 16);
+        assert_eq!(pm.n_faces(), 0);
+
+        // Per-element geometry snapshot of the pre-merge (25-node) mesh.
+        let g = pm.geometry.as_ref()
+            .expect("make_periodic must keep per-element geometry (MFEM Nodes)");
+        assert_eq!(g.order, 1);
+        assert_eq!(g.nodes_per_elem, 4);
+        assert_eq!(g.n_nodes, 25);
+
+        // Every element's geometry corner set equals its unwrapped cell
+        // [i·h,(i+1)·h] × [j·h,(j+1)·h] — including seam-crossing elements.
+        let h = 0.25_f64;
+        let mut sum_x_geom = 0.0_f64;
+        let mut node0 = [0.0_f64; 2];
+        for e in 0..16usize {
+            let mut corners: Vec<[f64; 2]> = (0..4)
+                .map(|k| {
+                    let gid = g.conn[e * 4 + k] as usize;
+                    [g.coords[gid * 2], g.coords[gid * 2 + 1]]
+                })
+                .collect();
+            if e == 0 { node0 = corners[0]; }
+            for c in &corners { sum_x_geom += c[0]; }
+            let (i, j) = ((e % 4) as f64, (e / 4) as f64);
+            let mut want = vec![
+                [i * h, j * h],
+                [(i + 1.0) * h, j * h],
+                [(i + 1.0) * h, (j + 1.0) * h],
+                [i * h, (j + 1.0) * h],
+            ];
+            corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(corners, want, "element {e} geometry corners must be unwrapped");
+        }
+        assert_eq!(node0, [0.0, 0.0], "NODE0 (elem 0, first geometry corner)");
+        assert_eq!(sum_x_geom, 32.0, "Σx over per-element geometry copies (MFEM)");
+
+        // Per-element Jacobian identical to the pre-merge mesh (affine quad:
+        // det = h² = 1/16 exactly), through the per-element geometry table.
+        for e in 0..16u32 {
+            let (_, det, _) = pm.element_jacobian(e, &[0.5, 0.5]);
+            assert_eq!(det, 1.0 / 16.0, "element {e} detJ");
+            // dyn MeshTopology path (element_jacobian_at) as used in assembly.
+            let topo: &dyn MeshTopology = &pm;
+            let (jac, _) = crate::element_jacobian_at(topo, e, &[0.5, 0.5], 2);
+            assert_eq!(jac[(0, 0)], h, "element {e} J00 via element_jacobian_at");
+            assert_eq!(jac[(1, 1)], h, "element {e} J11 via element_jacobian_at");
+        }
+
+        // The merged vertex table stays inside [0, 3h]² (seam DOFs shared).
+        for n in 0..pm.n_nodes() {
+            assert!(pm.coords[n * 2] <= 3.0 * h && pm.coords[n * 2 + 1] <= 3.0 * h);
+        }
+
+        // A mesh with nothing merged (and no prior geometry) must not grow a
+        // geometry table; an already-periodic mesh keeps its existing one.
+        let same = m.make_periodic(&[], 1e-10).unwrap();
+        assert!(same.geometry.is_none());
+        let again = pm.make_periodic(&[], 1e-10).unwrap();
+        assert!(again.geometry.is_some());
+    }
+
+    /// Triangular periodic mesh: the mesh-crate geometry query
+    /// (`element_jacobian_at`) reads the per-element geometry, so
+    /// seam-crossing triangles keep their area.  (The affine H¹ assembly path
+    /// in fem-assembly still passes vertex ids — its periodic-tri gap is
+    /// documented; quad assembly reads `geometry_nodes`/`geom_coords_of`
+    /// directly and is fully fixed.)
+    #[test]
+    fn make_periodic_tri_keeps_element_areas() {
+        let m = Mesh::<2>::make_cartesian_2d_tri(2, 2, 1.0, 1.0);
+        let pm = m.make_periodic(
+            &[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])],
+            1e-10,
+        ).unwrap();
+        let half: f64 = 0.5; // each triangle area = 1/8 · … = h²/2 = 1/8
+        for e in 0..pm.n_elems() as u32 {
+            let topo: &dyn MeshTopology = &pm;
+            let (jac, _) = crate::element_jacobian_at(topo, e, &[1.0 / 3.0, 1.0 / 3.0], 2);
+            let det = (jac[(0, 0)] * jac[(1, 1)] - jac[(0, 1)] * jac[(1, 0)]).abs();
+            assert!((det - half * half).abs() < 1e-15, "elem {e} |detJ| = {det}");
+        }
+        assert!(pm.geometry.is_some(), "tri periodic mesh keeps per-element geometry");
     }
 
     #[test]
