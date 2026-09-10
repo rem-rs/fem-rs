@@ -513,3 +513,11 @@ path = "../miniapps/dpg/dpg_poisson_2d.rs"
 [[example]]
 name = "dpg_acoustics_2d"
 path = "../miniapps/dpg/dpg_acoustics_2d.rs"
+
+[[example]]
+name = "hdiv_darcy"
+path = "../miniapps/hdiv_linear_solver/darcy.rs"
+
+[[example]]
+name = "hdiv_grad_div"
+path = "../miniapps/hdiv_linear_solver/grad_div.rs"
