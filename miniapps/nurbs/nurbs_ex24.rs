@@ -1,5 +1,9 @@
 //! Miniapp: NURBS Example 24 — Mixed Formulation with NURBS.
 //! 1:1 port of MFEM nurbs_ex24.cpp.
+//!
+//! Port note (round K): the MINRES solver moved from `linlvo::MinresSolver::new`
+//! (which never existed) to `fem_solver::MinresSolver::solve`, the API used by
+//! the rest of the workspace (`crates/assembly/tests/element_convergence.rs`).
 
 use fem_assembly::{
     mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator},
@@ -11,8 +15,7 @@ use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::CsrMatrix;
 use fem_solver::block::BlockSystem;
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
-use fem_solver::GSSmoother;
-use fem_linalg::fem_to_linlvo_csr;
+use fem_solver::{MinresSolver, SolverConfig};
 
 struct Args { mesh: String, order: i32, ref_levels: i32 }
 
@@ -62,10 +65,9 @@ fn main() {
     let mut rhs_full = vec![0.0_f64; n];
     rhs_full[..n_u].copy_from_slice(&rhs);
 
-    let flat_linlvo = fem_to_linlvo_csr(&flat);
-    let params = linlvo::SolverParams { rtol: 1e-10, atol: 1e-10, max_iter: 10000, verbose: linlvo::VerboseLevel::Iterations, check_interval: 1 };
-    let mut solver = linlvo::MinresSolver::new(&flat_linlvo, &params);
-    solver.solve(&mut x, &rhs_full).expect("MINRES failed");
+    // MFEM `MINRESSolver`: rtol 1e-10, atol 1e-10, max_iter 10000.
+    let cfg = SolverConfig { rtol: 1e-10, atol: 1e-10, max_iter: 10000, verbose: true, ..SolverConfig::default() };
+    MinresSolver::solve(&flat, &rhs_full, &mut x, &cfg).expect("MINRES failed");
 
     let u_sol = x[..n_u].to_vec();
     let p_sol = x[n_u..].to_vec();

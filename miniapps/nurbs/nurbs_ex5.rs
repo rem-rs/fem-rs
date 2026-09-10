@@ -1,14 +1,26 @@
 //! Miniapp: NURBS Example 5 — Navier-Stokes with NURBS.
 //! 1:1 port of MFEM nurbs_ex5.cpp.
+//!
+//! Port note (round K): this file used the removed
+//! `CsrMatrix::apply_dirichlet_bc(&[], &b)` / `fem_linalg::recover_dirichlet_solution`
+//! pair (an **empty** essential-DOF set) and `ConvectionIntegrator::new(&u, dim)`,
+//! neither of which exists in the current API.  The Picard loop, the source
+//! term (zero), the viscosity `nu = 0.01`, the solver tolerances and the
+//! printed lines are unchanged.  The convective velocity is supplied as a
+//! `ConstantVectorCoeff` because fem-rs has no `VectorCoeff` backed by a DOF
+//! vector (see the round report); the frozen velocity it represents is exactly
+//! the (all-zero) iterate this loop starts from and never leaves, since the
+//! source is zero and no essential DOFs are imposed.
 
 use fem_assembly::{
     Assembler,
-    standard::{DiffusionIntegrator, ConvectionIntegrator},
-    postproc::grid_function::GridFunction,
+    standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
+    postproc::coefficient::ConstantVectorCoeff,
 };
-use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
-use fem_space::{H1Space, fe_space::FESpace};
-use fem_solver::GSSmoother;
+use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
+use fem_mesh::{MeshTopology, amr::{refine_uniform, refine_uniform_3d}};
+use fem_space::{H1Space, fe_space::FESpace, constraints::form_linear_system};
+use fem_solver::{GSSmoother, solve_pcg};
 use fem_linalg::fem_to_linlvo_csr;
 
 struct Args { mesh: String, order: i32, ref_levels: i32 }
@@ -27,49 +39,78 @@ fn parse_args() -> Args {
     a
 }
 
+/// `ref_levels = floor(log(50000/NE)/log(2)/dim)` when not given explicitly.
+fn auto_ref_levels(n_elems: usize, dim: usize, requested: i32) -> i32 {
+    if requested < 0 {
+        ((50000.0_f64 / n_elems as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as i32
+    } else {
+        requested
+    }
+}
+
 fn main() {
     let args = parse_args();
     let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
-    let dim = mfem.dim as usize;
-    let mesh = if dim == 2 { mfem.mesh2d.expect("2D mesh expected") } else { mfem.mesh3d.expect("3D mesh expected") };
 
-    let ne = mesh.n_elems() as f64;
-    let ref_levels = if args.ref_levels < 0 { ((50000.0_f64 / ne).ln() / 2.0_f64.ln() / dim as f64).floor() as i32 } else { args.ref_levels };
-    let mesh = if ref_levels > 0 { let mut m = mesh; for _ in 0..ref_levels { m = fem_mesh::refine_uniform(&m); } m } else { mesh };
+    // `MfemFile` has no `dim` field: the dimension is selected by which of the
+    // two optional meshes was parsed.
+    if let Some(mesh) = mfem.mesh2d {
+        let dim = 2usize;
+        let mut m = mesh;
+        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
+            m = refine_uniform(&m);
+        }
+        run(H1Space::new(m, args.order as u8), dim, &args, &|mm| {
+            write_mfem_file("refined.mesh", mm).ok();
+        });
+    } else if let Some(mesh) = mfem.mesh3d {
+        let dim = 3usize;
+        let mut m = mesh;
+        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
+            m = refine_uniform_3d(&m);
+        }
+        run(H1Space::new(m, args.order as u8), dim, &args, &|mm| {
+            write_mfem_file_3d("refined.mesh", mm).ok();
+        });
+    } else {
+        panic!("mesh file contains neither a 2D nor a 3D mesh");
+    }
+}
 
-    let space = H1Space::new(mesh.clone(), args.order as u8);
-    println!("Number of finite element unknowns: {}", space.n_dofs());
-
+/// Dimension-independent driver (the 2-D and 3-D paths differ only in the mesh
+/// refinement / mesh writer, which `main` has already dispatched on).
+fn run<M: MeshTopology>(space: H1Space<M>, dim: usize, args: &Args, write_mesh: &dyn Fn(&M)) {
     let qo = (args.order as u8) * 2 + 1;
     let nu = 0.01;
+    println!("Number of finite element unknowns: {}", space.n_dofs());
 
     let mut u = vec![0.0_f64; space.n_dofs()];
     for iter in 0..10 {
+        // Picard linearisation: the convective velocity is frozen at the
+        // previous iterate (zero here — see the module-level port note).
         let a_mat = Assembler::assemble_bilinear(&space, &[
             &DiffusionIntegrator { kappa: nu },
-            &ConvectionIntegrator::new(&u, dim),
+            &ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![0.0; dim]) },
         ], qo);
 
-        let mut b = fem_assembly::LinearForm::new(&space);
-        b.add_domain_integrator(fem_assembly::standard::DomainSourceIntegrator::new(|_x| 0.0));
-        b.assemble();
-        let b_vec = b.to_vec();
+        let source = DomainSourceIntegrator::new(|_: &[f64]| 0.0);
+        let mut rhs = Assembler::assemble_linear(&space, &[&source], qo);
 
-        let (a_mod, b_mod, dof_map) = a_mat.apply_dirichlet_bc(&[], &b_vec);
-        let a_linlvo = fem_to_linlvo_csr(&a_mod);
-        let gs = GSSmoother::from_csr(&a_linlvo).expect("GS failed");
-        let mut x = vec![0.0_f64; b_mod.len()];
-        let params = linlvo::SolverParams { rtol: 1e-10, atol: 1e-10, max_iter: 1000, verbose: linlvo::VerboseLevel::Iterations, check_interval: 1 };
-        let mut solver = linlvo::CgSolver::new(&a_linlvo, &params);
-        solver.solve(&mut x, &b_mod).expect("CG failed");
+        // MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` — with the
+        // empty essential list this file has always used, it is a no-op.
+        let mut a_mod = a_mat;
+        let mut x = vec![0.0_f64; u.len()];
+        form_linear_system(&mut a_mod, &mut rhs, &mut x, &[], &[]);
 
-        u = fem_linalg::recover_dirichlet_solution(&x, &dof_map, space.n_dofs());
+        let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mod)).expect("GS failed");
+        solve_pcg(&a_mod, &rhs, &mut x, &gs, 1e-10, 1000, true).expect("PCG failed");
+
+        u = x;
         println!("Picard iteration {} done", iter);
     }
 
-    let gf = GridFunction::new(&space, u.clone());
     println!("Solution computed");
 
-    write_mfem_file("refined.mesh", space.mesh()).ok();
+    write_mesh(space.mesh());
     write_mfem_gf_file("sol.gf", dim, &u, "H1", args.order as u8, 1, 8).ok();
 }

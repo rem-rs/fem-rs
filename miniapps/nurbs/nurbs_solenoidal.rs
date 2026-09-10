@@ -1,5 +1,9 @@
 //! Miniapp: NURBS Solenoidal — Project solenoidal velocity field.
 //! 1:1 port of MFEM nurbs_solenoidal.cpp.
+//!
+//! Port note (round K): the MINRES solver moved from `linlvo::MinresSolver::new`
+//! (which never existed) to `fem_solver::MinresSolver::solve`, the API used by
+//! the rest of the workspace (`crates/assembly/tests/element_convergence.rs`).
 
 use fem_assembly::{
     mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator},
@@ -11,7 +15,7 @@ use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_gf_file};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_solver::block::BlockSystem;
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
-use fem_solver::GSSmoother;
+use fem_solver::{GSSmoother, MinresSolver, SolverConfig};
 use fem_linalg::fem_to_linlvo_csr;
 
 fn exact_velocity_2d(x: &[f64]) -> [f64; 2] {
@@ -57,7 +61,12 @@ fn main() {
     let mut b_mat = assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], qo);
     for v in &mut b_mat.values { *v *= -1.0; }
 
-    let rhs = { let mut r = vec![0.0_f64; n_u]; let u_ex_proj = u_sp.interpolate_vector(&|x| exact_velocity_2d(x).to_vec()); m_mat.spmv(&u_ex_proj, &mut r); r };
+    let rhs = {
+        let mut r = vec![0.0_f64; n_u];
+        let u_ex_proj = u_sp.interpolate_vector(&|x| exact_velocity_2d(x).to_vec());
+        m_mat.spmv(u_ex_proj.as_slice(), &mut r);
+        r
+    };
 
     let bt = b_mat.transpose();
     let zero_l2 = CsrMatrix::<f64>::new_empty(n_p, n_p);
@@ -84,11 +93,10 @@ fn main() {
     let s_linlvo = fem_to_linlvo_csr(&s_mat);
     let _m_gs = GSSmoother::from_csr(&m_linlvo).expect("GS(M) failed");
     let _s_gs = GSSmoother::from_csr(&s_linlvo).expect("GS(S) failed");
-    let flat_linlvo = fem_to_linlvo_csr(&flat);
 
-    let params = linlvo::SolverParams { rtol: 1e-10, atol: 1e-10, max_iter: 10000, verbose: linlvo::VerboseLevel::Iterations, check_interval: 1 };
-    let mut solver = linlvo::MinresSolver::new(&flat_linlvo, &params);
-    solver.solve(&mut x, &rhs_full).expect("MINRES failed");
+    // MFEM `MINRESSolver`: rtol 1e-10, atol 1e-10, max_iter 10000.
+    let cfg = SolverConfig { rtol: 1e-10, atol: 1e-10, max_iter: 10000, verbose: true, ..SolverConfig::default() };
+    MinresSolver::solve(&flat, &rhs_full, &mut x, &cfg).expect("MINRES failed");
 
     let u_sol = x[..n_u].to_vec();
     let p_sol = x[n_u..].to_vec();
