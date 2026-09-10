@@ -256,22 +256,6 @@ fn main() {
     }
     println!("True 1D ultraweak DPG for -u'' - k^2 u = f (u = sin(pi x))");
     println!(
-        "  elements = {n_elem}, k = {k}, L2 error u = {    // L2 error of u (P0 cellwise constants) and of σ.
-    let mut err2u = 0.0;
-    let mut err2s = 0.0;
-    for e in 0..n_elem {
-        for q in 0..3 {
-            let x = (e as f64 + QP[q]) * h;
-            let uh = rhs[off_u + e];
-            let ue = (PI * x).sin();
-            err2u += QW[q] * h * (uh - ue) * (uh - ue);
-            let sh = rhs[off_s + e];
-            let se = PI * (PI * x).cos();
-            err2s += QW[q] * h * (sh - se) * (sh - se);
-        }
-    }
-    println!("True 1D ultraweak DPG for -u'' - k^2 u = f (u = sin(pi x))");
-    println!(
         "  elements = {n_elem}, k = {k}, L2 error u = {:.3e}, sigma = {:.3e}",
         err2u.sqrt(),
         err2s.sqrt()

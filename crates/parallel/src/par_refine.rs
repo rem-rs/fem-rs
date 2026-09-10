@@ -1043,6 +1043,7 @@ mod tests {
             edge_to_elem: vec![],
             geometry: None,
             nc_vertex_view: None,
+            vertex_parents: vec![],
         }
     }
 
