@@ -225,7 +225,7 @@ pub use lor::{
 pub use ode::{
     Bdf2, Bdf2State, ComplexCrankNicolson, ForwardEuler, ImexArk3, ImexDirkRk3, ImexEuler,
     ImexExpImplEuler, ImexOperator, ImexRk2_222, ImexRk2_232, ImexRk3, ImexSsp2, ImexTimeStepper,
-    ImplicitEuler, ImplicitTimeStepper, Rk4, Sdirk2, TimeStepper,
+    ImplicitEuler, ImplicitTimeStepper, Rk3Ssp, Rk4, Sdirk2, TimeStepper,
 };
 pub use p_multigrid::{
     build_pmg_hierarchy_1d_laplacian, fmg_solve, solve_vcycle_pmg, PmgHierarchy, PmgPrecond,
