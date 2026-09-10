@@ -263,6 +263,66 @@
   去 double #[test] 并补 ω² 图范数项），fem-linalg 58 绿；dpg/ 复数弱形
   式、新 miniapps 零警告。
 
+## 第十轮完成（2026-09-10，五代理并行；A 被中断，主会话接手完成其消费方接线）
+
+- **A（部分交付）DofTransformation 家族 + canonical 面方向**：
+  `fem_space::dof_transformation`（doftrans.hpp 1:1：DofTransformation/
+  NdDofTransformation/StatelessDofTransformation/FaceGeom/rt_trace_face_sign，
+  11 测试）；`SkeletonSpace` 面改按 MFEM canonical 方向存储（2D 边表
+  min→max）+ `elem_face_orientation()`；**DPG trace 装配的符号从"首见元素
+  ⇒ +1"改为按朝向**（旧规则仅在面按生成元素局部方向存储时等价）。
+  中断处置：A 的授权不含消费方 `dpg_weakform.rs`，遗留 1 个失败测试
+  （poisson 精确解一致性）；主会话定位根因（法向来自 canonical 而 scale
+  仍按首见 ⇒ 符号不一致）并完成接线 + 清未用导入 → DPG 45/45 绿。
+  **未达标**：`dpg_maxwell_2d` 整场 L2 仍不收敛（-n 4/8：1.422/1.404
+  vs C++ 0.882/0.475；单元矩阵级此前已逐位一致）→ 缺口在骨架/边界，
+  见遗留节。
+- **B Hybridization 真实现 + constraints 家族**：stub 替换为
+  `fem/hybridization.*` 1:1（H1/RT trace Schur、AssembleFaceMatrix、
+  GetMatrix/Finalize、消元回代）；`constrained.rs` 由 1/11 扩到
+  Elimination×3 / Penalty×3 / Eliminator / EliminationProjection。
+  测试 `hdiv_hybrid_matches_direct_face_dg_trace`（RT0/P0 与 P1 trace）、
+  `hybrid_vs_direct_vs_saddle_minres` 全绿。
+- **C DGMassInverse + L2FaceRestriction + PA 对流**：`dgmassinv.rs`
+  （MFEM `DGMassInverse` 1:1；P1/P2/P3 对照 C++ harness ≤1.5e-15，P1 硬编码
+  为常驻位级门）；`face_restriction.rs`（L2FaceRestriction Double/SingleValued
+  + Conforming；DG 内面 jump 算子经 face-restriction 与逐面直接装配
+  **逐位相等**）；`partial.rs` PAConvectionOperator。
+  ⁉️ 附带发现既有 bug：`standard::ConvectionIntegrator` 仿射路径丢
+  |det J|（unit_square_tri 上 max|K·x − M·1| = 0.75）→ 见遗留 #2。
+- **D TMOP 尾巴 + 估计器**：`TmopRemapEvaluator`（AdvectorCG 1:1：移动网格上
+  ConvectionIntegrator + Mass PCG、RK4 步进、dt=0.5·h_min/|u|、截断；
+  InterpolatorFP 变体）驱动 `UpdateTargetSpecification`；
+  `EnableAdaptiveLimiting`；mesh-optimizer 解锁 **-tid 5/6/7/8 + -alc**。
+  对照：`-tid 1 -alc 1.0 -nor` **逐位一致**（能量 13 位、网格 RMS 1e-8）；
+  `-tid 5` 初始能量逐位（4.6366e-01），remap 噪声后 0.26% 分叉。估计器：
+  `lp_error_estimator`、`ls_zz_estimator`、AnisotropicErrorEstimator trait
+  + `zz_estimator_aniso` + `amr_refiner::apply_aniso`。
+- **E ODE 高阶 + 网格 I/O + 曲率**：`ode/high_order.rs` 九个求解器（Rk2/Rk6/
+  Rk8/Ab5/ImplicitMidpoint/Sdirk34/Sdirk33/Esdirk32/Esdirk33，系数 1:1 抄自
+  linalg/ode.*，实测阶 + 刚性模型对照 C++ ≤1e-13）；io 新增 **TrueGrid 读
+  （对照 C++ dump 逐位）、CUBIT 读、NetCDF-3 自研读写、legacy VTK 写
+  （三网格逐字节一致）、Exodus II 写（roundtrip）**；`set_curvature` 补
+  Pyramid5（Tet4/Prism6 已有）+ 清 3 条既有警告。
+- 回归基线：fem-assembly **555** / fem-solver **244** / fem-mesh **290** /
+  fem-space **274** / fem-io **122**，全绿；新文件零警告。
+
+## 第十轮遗留（下一轮）
+
+1. **dpg_maxwell_2d 整场 L2 未收敛**（1.42/1.40 vs 0.88/0.48）——单元级
+   已逐位一致，故缺口在骨架与边界：候选 = 骨架 trace dof 的 ess 投影
+   （`ProjectBdrCoefficientNormal` 等价物的均值通量语义）、RHS 边界项、
+   或 ND trace 的逐元素 dof 变换（`NdDofTransformation` 已就位，需接入
+   maxwell 装配）。
+2. **`standard::ConvectionIntegrator` 仿射路径缺 |det J|**（P1 正确性 bug）：
+   `assembler.rs` 仿射分支应对位 MFEM 一律 `Mult(dshape, AdjugateJacobian)`；
+   修后全量回归。
+3. 3D ND-trace 骨架基（acoustics_3d/maxwell_3d 替换前置；规格见第九轮节）。
+4. TMOP `-ae 1`（InterpolatorFP）外推语义与 gslib 差异、tid 4/9–11 仍拒绝；
+   C++ 4.10 serial tid 5/6/8 触发 SetSerialDiscreteTargetSize 崩溃（用 4.9 参考）。
+5. 其余小尾巴：hex 面边界积分、曲线边界测度、D14 par 复 FGMRES、affine 快
+   路径周期几何、fem-amg vendor SA+WJ、BDM 棱柱、GridSfcOrdering3D。
+
 ## 第九轮遗留（下一轮 DPG 续作）
 
 - maxwell_2d 整场 L2 差异（骨架内面法向/trace dof 取向约定，见上）。
