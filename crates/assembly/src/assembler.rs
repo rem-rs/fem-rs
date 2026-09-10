@@ -484,6 +484,55 @@ pub(crate) fn is_affine(et: ElementType, geom_order: u8) -> bool {
     if geom_order > 1 { return false; }
     matches!(et, ElementType::Tri3 | ElementType::Tet4 | ElementType::Line2)
 }
+
+/// [`MeshTopology`] view whose node coordinates come from the mesh's
+/// **geometry** node table ([`MeshTopology::geom_coords_of`] /
+/// [`MeshTopology::geometry_nodes`]) instead of the folded vertex table.
+///
+/// Geometrically periodic meshes keep the *pre-merge* per-element geometry in
+/// that table (MFEM `MakePeriodic` snapshots the nodal `Nodes` grid function
+/// before renumbering the vertices with `v2v`), so a face/edge that crosses a
+/// periodic seam has its true (unfolded) coordinates only there.  Reading
+/// `node_coords` with geometry node ids would be wrong — the geometry table
+/// uses a different index range and can exceed the vertex table.
+///
+/// For meshes without per-element geometry this view is an exact pass-through
+/// (`geom_coords_of`/`geometry_nodes` fall back to
+/// `node_coords`/`element_nodes`), so it can be used unconditionally.
+pub(crate) struct GeomCoordView<'a, M: MeshTopology + ?Sized>(pub &'a M);
+
+impl<M: MeshTopology + ?Sized> MeshTopology for GeomCoordView<'_, M> {
+    fn dim(&self) -> u8 { self.0.dim() }
+    fn n_nodes(&self) -> usize { self.0.geom_n_nodes() }
+    fn n_elements(&self) -> usize { self.0.n_elements() }
+    fn n_boundary_faces(&self) -> usize { self.0.n_boundary_faces() }
+    fn element_nodes(&self, elem: u32) -> &[u32] { self.0.geometry_nodes(elem) }
+    fn element_type(&self, elem: u32) -> ElementType { self.0.element_type(elem) }
+    fn element_tag(&self, elem: u32) -> i32 { self.0.element_tag(elem) }
+    fn node_coords(&self, node: u32) -> &[f64] { self.0.geom_coords_of(node) }
+    fn face_nodes(&self, face: u32) -> &[u32] { self.0.face_nodes(face) }
+    fn face_tag(&self, face: u32) -> i32 { self.0.face_tag(face) }
+    fn face_elements(&self, face: u32) -> (u32, Option<u32>) { self.0.face_elements(face) }
+}
+
+/// Affine simplex [`ElementTransformation`] built from the element's
+/// **geometry** nodes.
+///
+/// This is the affine fast path's counterpart of the isoparametric branches,
+/// which already resolve `geometry_nodes` + `geom_coords_of`: on a
+/// geometrically periodic mesh the per-element geometry (not the merged
+/// vertex table) is what defines the element shape, and Tri3/Tet4 elements
+/// crossing a seam would otherwise be assembled with a folded, wrong Jacobian
+/// (round-9 leftover: Quad/Hex were fixed, simplices were not).
+///
+/// Non-periodic, non-curved meshes are bit-identical to
+/// `ElementTransformation::from_simplex_nodes(mesh, mesh.element_nodes(e))`.
+pub(crate) fn simplex_transformation<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    e: u32,
+) -> ElementTransformation {
+    ElementTransformation::from_simplex_nodes(&GeomCoordView(mesh), mesh.geometry_nodes(e))
+}
 ///
 /// `J_{ij}(ξ) = Σ_k x_k[i] · ∂φ_k/∂ξ_j`
 ///
@@ -787,7 +836,7 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
     let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
-        Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+        Some(simplex_transformation(mesh, e))
     } else {
         None
     };
@@ -850,18 +899,38 @@ fn accumulate_volume_bilinear_element<S: FESpace>(
         }
         if affine {
             let tr = affine_tr.as_ref().unwrap();
-            let w = quad.weights[q] * tr.det_j().abs();
+            // MFEM has no affine fast path: `ElementTransformation::Weight()` and
+            // `AdjugateJacobian()` are used for every element, and every
+            // integrator is written against them (DiffusionIntegrator:
+            // `dshapedxt = Mult(dshape, AdjugateJacobian)`, `w = ip.weight/Weight()`;
+            // ConvectionIntegrator: same dshapedxt with the bare `ip.weight`).
+            // This branch therefore keeps the *same* convention as the
+            // isoparametric branch below — grad_phys = adjJᵀ∇φ (|detJ|-scaled)
+            // and weight = ip.weight/|detJ| — so that both `weight × grad_phys`
+            // and `ip.weight × grad_phys` integrator families are correct.
+            // (Previously this branch stored the true J⁻ᵀ∇φ with weight
+            // ip.weight·|detJ|, which is equivalent only for the `weight × grad`
+            // family and silently dropped |detJ| for the `ip.weight × grad`
+            // family, e.g. ConvectionIntegrator.)
+            let w = quad.weights[q] / tr.det_j().abs();
 
             ref_elem.eval_basis(xi, &mut scratch.phi);
             ref_elem.eval_grad_basis(xi, &mut scratch.grad_ref);
-            transform_grads(tr.jacobian_inv_t(), &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
+            let adj = if dim == 3 {
+                adjugate_3d(tr.jacobian())
+            } else {
+                adjugate_2d(tr.jacobian())
+            };
+            transform_grads_adj(&adj, &scratch.grad_ref, &mut scratch.grad_phys, n_ldofs, dim);
 
             let xp = tr.map_to_physical(xi);
             let qp = QpData {
                 n_dofs:    n_elem_dofs,
                 dim,
                 weight:    w,
-                phys_weight: w,
+                // True physical measure (mass-type integrands), identical to the
+                // isoparametric branch below.
+                phys_weight: quad.weights[q] * tr.det_j().abs(),
                 ref_weight: quad.weights[q],
                 phi:       &scratch.phi,
                 grad_phys: &scratch.grad_phys,
@@ -963,7 +1032,7 @@ fn accumulate_volume_linear_element<S: FESpace>(
     let geo_elem = geo_ref_elem(mesh, e);
 
     let affine_tr = if affine {
-        Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+        Some(simplex_transformation(mesh, e))
     } else {
         None
     };
@@ -1615,14 +1684,13 @@ impl Assembler {
         let mass = MassIntegrator { rho: 1.0 };
         let mut phi = vec![0.0_f64; n_ldofs];
 
-        let nodes = mesh.element_nodes(e);
         let elem_tag = mesh.element_tag(e);
         let g_order = mesh.geom_order();
         let affine = is_affine(elem_type, g_order);
         let geo_elem = geo_ref_elem(mesh, e);
 
         let affine_tr = if affine {
-            Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+            Some(simplex_transformation(mesh, e))
         } else {
             None
         };
@@ -2067,6 +2135,82 @@ mod tests {
     use super::*;
     use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
+    use crate::standard::MassIntegrator;
+
+    /// Round-10 (round-9 leftover): the affine simplex fast path must read the
+    /// element's per-element **geometry** (MFEM `Nodes` snapshot), not the
+    /// merged vertex table — on a geometrically periodic mesh the seam-crossing
+    /// Tri3 elements otherwise get a folded (degenerate/mirrored) Jacobian.
+    ///
+    /// Verification: on a periodic 2×2 triangular mesh every element has the
+    /// same shape as in the un-periodised mesh, so the assembled element mass
+    /// matrices must agree element-by-element (this is exactly "per-element
+    /// detJ identical"), and `Σ M_ij = ∫_Ω 1 dx = 1`.
+    #[test]
+    fn periodic_tri_affine_path_keeps_element_geometry() {
+        let straight = Mesh::<2>::make_cartesian_2d_tri(3, 3, 1.0, 1.0);
+        let periodic = straight
+            .clone()
+            .make_periodic(&[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])], 1e-10)
+            .expect("make_periodic");
+        assert_eq!(periodic.geom_order(), 1, "periodic snapshot is order-1 geometry");
+        assert!(periodic.geometry.is_some(), "per-element geometry must be present");
+
+        let sp_s = H1Space::new(straight.clone(), 1);
+        let sp_p = H1Space::new(periodic.clone(), 1);
+        let (_, _, k_s, ld, ne) = Assembler::assemble_bilinear_with_elements(
+            &sp_s, &[&MassIntegrator { rho: 1.0 }], 3,
+        );
+        let (m_p, _, k_p, ld_p, _) = Assembler::assemble_bilinear_with_elements(
+            &sp_p, &[&MassIntegrator { rho: 1.0 }], 3,
+        );
+        assert_eq!(ld, ld_p);
+        assert_eq!(ne, periodic.n_elems() as usize);
+
+        let mut max_dev = 0.0_f64;
+        for e in 0..ne {
+            for i in 0..ld * ld {
+                max_dev = max_dev.max((k_s[e * ld * ld + i] - k_p[e * ld * ld + i]).abs());
+            }
+        }
+        eprintln!("periodic vs straight per-element mass: max |Δ| = {max_dev:.3e}");
+        assert!(
+            max_dev < 1e-15,
+            "per-element mass matrices differ (max |Δ| = {max_dev:.3e})"
+        );
+
+        // Global sanity: Σ_ij M_ij = ∫_Ω 1 dx = 1 for the (unit) periodic square.
+        let ones = vec![1.0_f64; m_p.nrows];
+        let mut y = vec![0.0_f64; m_p.nrows];
+        m_p.spmv(&ones, &mut y);
+        let total: f64 = y.iter().sum();
+        eprintln!("periodic Σ M_ij = {total:.15}");
+        assert!((total - 1.0).abs() < 1e-13, "Σ M_ij = {total} (expected 1)");
+
+        // Document what the pre-fix (merged vertex table) path would produce:
+        // every element of the straight mesh has |detJ| = h² (h = 1/3), while the
+        // folded chord of a seam-crossing triangle does not.
+        let h = 1.0 / 3.0;
+        let n_folded_wrong = (0..periodic.n_elems() as u32)
+            .filter(|&e| {
+                let nds = periodic.element_nodes(e);
+                let x0 = periodic.node_coords(nds[0]);
+                let x1 = periodic.node_coords(nds[1]);
+                let x2 = periodic.node_coords(nds[2]);
+                let det = ((x1[0] - x0[0]) * (x2[1] - x0[1])
+                    - (x1[1] - x0[1]) * (x2[0] - x0[0]))
+                    .abs();
+                (det - h * h).abs() > 1e-12
+            })
+            .count();
+        eprintln!(
+            "folded-vertex |detJ| ≠ {:.6} on {} of {} elements",
+            h * h,
+            n_folded_wrong,
+            periodic.n_elems()
+        );
+        assert!(n_folded_wrong > 0, "test setup: the folded table should be wrong here");
+    }
 
     #[test]
     fn assemble_bilinear_p1_returns_correct_size() {

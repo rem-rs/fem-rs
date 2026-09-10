@@ -44,7 +44,7 @@ use nalgebra::DMatrix;
 use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::{ElementTransformation, element_type::ElementType};
+use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -55,6 +55,7 @@ use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
 use crate::assembler::assembly_parallel_min_elems;
+use crate::assembler::simplex_transformation;
 use crate::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian, vec_ref_elem as vol_ref_elem};
 
 // ─── Quadrature-point data ───────────────────────────────────────────────────
@@ -520,7 +521,10 @@ where
 ///
 /// `xi_ref` lives in the *owner element's* reference domain (the same domain
 /// the solution [`VectorReferenceElement`] evaluates on); `jac`/`det_j` are
-/// the owner's isoparametric (or affine simplex) Jacobian at that point.
+/// the owner's isoparametric (or affine simplex) Jacobian at that point, and
+/// `x_phys`/`weight`/`normal` are evaluated from the same owner geometry, so
+/// curved boundary faces are integrated on the curve rather than on the
+/// straight corner chord.
 struct FaceQpGeometry {
     weight: f64,
     normal: Vec<f64>,
@@ -530,17 +534,85 @@ struct FaceQpGeometry {
     det_j: f64,
 }
 
-/// Resolve the owner element of boundary face `f` and map every face
-/// quadrature point back to owner reference coordinates.
+/// Reference-domain coordinates, inside the owner's **geometry** reference
+/// element, of the element's local nodes.
 ///
-/// D13: the owner geometry must match the *volume* assembly — tensor-product
-/// owners (Quad/Hex/...) and curved meshes go through the isoparametric
-/// path (`geo_ref_elem_from_mesh` + `isoparametric_jacobian`, the same
-/// dispatch as `assemble_hdiv_l2_mixed`/`VectorAssembler`), only affine
-/// simplices use the direct `ElementTransformation::from_simplex_nodes`.
-/// The previous simplex-only inverse silently produced wrong reference
-/// coordinates (and hence wrong basis values) on quad owners, leaking DOF
-/// contributions across the whole element row.
+/// Entry `i` corresponds to position `i` in [`MeshTopology::element_nodes`]:
+/// `vector_assembler::isoparametric_jacobian` pairs geometry node `k` with the
+/// geometry basis row `k`, so the reference position of that node is
+/// `dof_coords()[k]`.
+fn owner_ref_coords(geo: &dyn ReferenceElement, n_local: usize) -> Vec<Vec<f64>> {
+    let gd = geo.dof_coords();
+    assert!(
+        gd.len() >= n_local,
+        "owner_ref_coords: geometry element has {} nodes but the element has {n_local}",
+        gd.len()
+    );
+    gd[..n_local].to_vec()
+}
+
+/// `sqrt(det(J_faceᵀ J_face))` — the physical surface measure factor of the
+/// face Jacobian `J_face` (`dim × fdim`, row-major).
+fn face_measure(j_face: &[f64], dim: usize, fdim: usize) -> f64 {
+    if fdim == 1 {
+        let mut s = 0.0;
+        for r in 0..dim {
+            s += j_face[r] * j_face[r];
+        }
+        return s.sqrt();
+    }
+    let (mut g00, mut g01, mut g11) = (0.0, 0.0, 0.0);
+    for r in 0..dim {
+        let a = j_face[r * 2];
+        let b = j_face[r * 2 + 1];
+        g00 += a * a;
+        g01 += a * b;
+        g11 += b * b;
+    }
+    (g00 * g11 - g01 * g01).max(0.0).sqrt()
+}
+
+/// Outward unit normal of the face from its Jacobian columns.
+///
+/// Orientation convention (same as the previous straight-chord code, which
+/// derived it from the face node order): in 3-D the first two face directions
+/// are crossed (`(x_f1−x_f0) × (x_f2−x_f0)` for triangles,
+/// `(x_f1−x_f0) × (x_f3−x_f0)` for quadrilaterals, both CCW seen from
+/// outside); in 2-D the edge tangent is rotated by −90°, `n = (t_y, −t_x)`.
+fn face_normal(j_face: &[f64], dim: usize, fdim: usize) -> Vec<f64> {
+    if dim == 2 {
+        let (tx, ty) = (j_face[0], j_face[1]);
+        let len = (tx * tx + ty * ty).sqrt().max(1e-30);
+        return vec![ty / len, -tx / len];
+    }
+    debug_assert_eq!(fdim, 2, "3-D boundary faces must be triangles/quads");
+    let (a0, a1, a2) = (j_face[0], j_face[2], j_face[4]);
+    let (b0, b1, b2) = (j_face[1], j_face[3], j_face[5]);
+    let c = [
+        a1 * b2 - a2 * b1,
+        a2 * b0 - a0 * b2,
+        a0 * b1 - a1 * b0,
+    ];
+    let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt().max(1e-30);
+    vec![c[0] / len, c[1] / len, c[2] / len]
+}
+
+/// Resolve the owner element of boundary face `f` and evaluate the owner
+/// geometry at every face quadrature point.
+///
+/// This mirrors MFEM's `Mesh::GetFaceElementTransformations`: the face rule is
+/// defined on the *face's* reference element, and each face point is mapped
+/// into the owner's reference domain by the (affine) face-to-element map built
+/// from the reference positions of the face's local vertices — no Newton
+/// inversion of a straight-chord physical point is involved, so the mapping is
+/// exact for curved elements too.
+///
+/// The owner geometry itself follows the *volume* assembly dispatch: tensor
+/// product owners (Quad/Hex/...) and curved meshes go through the
+/// isoparametric path ([`geo_ref_elem_from_mesh`] + [`isoparametric_jacobian`]),
+/// affine simplices through the geometry-node-aware affine transformation.  The
+/// face measure and normal come from the owner Jacobian / face Jacobian, so
+/// `geom_order > 1` faces are integrated on the curved surface.
 fn face_owner_geometry<M: MeshTopology>(
     mesh: &M,
     f: u32,
@@ -563,33 +635,94 @@ fn face_owner_geometry<M: MeshTopology>(
     let affine_tr = if use_iso {
         None
     } else {
-        Some(ElementTransformation::from_simplex_nodes(mesh, elem_nodes))
+        Some(simplex_transformation(mesh, owner_elem))
     };
 
-    let (face_qp_phys, face_weights, face_normals) =
-        face_quadrature(mesh, face_nodes, dim, quad_order);
-    let mut qps = Vec::with_capacity(face_weights.len());
-    for q in 0..face_weights.len() {
-        let x_phys = face_qp_phys[q * dim..(q + 1) * dim].to_vec();
-        let normal = face_normals[q * dim..(q + 1) * dim].to_vec();
-        let (xi_ref, jac, det_j) = match geo_elem.as_deref() {
+    // ── Face reference element and rule ──────────────────────────────────────
+    // The face-to-element map is affine in reference space, so the P1 face
+    // element is the exact geometric map regardless of the solution order; the
+    // rule order is the caller's `quad_order`.
+    let face_type = match face_nodes.len() {
+        2 => ElementType::Line2,
+        3 => ElementType::Tri3,
+        4 => ElementType::Quad4,
+        n => panic!("boundary face with {n} nodes is not supported (only 2/3/4-node faces)"),
+    };
+    let face_ref = face_type.ref_elem(1);
+    let fdim = face_ref.dim() as usize;
+    assert_eq!(
+        fdim + 1,
+        dim,
+        "boundary face dimension {fdim} does not match mesh dimension {dim}"
+    );
+    let n_face_nodes = face_ref.n_dofs();
+    let fquad = face_ref.quadrature(quad_order);
+
+    // ── Owner reference coordinates of the face's local vertices ─────────────
+    let p1_ref;
+    let owner_geo: &dyn ReferenceElement = match geo_elem.as_deref() {
+        Some(ge) => ge,
+        None => {
+            p1_ref = mesh.element_type(owner_elem).ref_elem(1);
+            &*p1_ref
+        }
+    };
+    let rc = owner_ref_coords(owner_geo, elem_nodes.len());
+    let mut face_rc: Vec<Vec<f64>> = Vec::with_capacity(face_nodes.len());
+    for &n in face_nodes {
+        let local = elem_nodes.iter().position(|&e| e == n)?;
+        face_rc.push(rc[local].clone());
+    }
+
+    // ── Per-quadrature-point owner geometry ─────────────────────────────────
+    let mut nphi = vec![0.0_f64; n_face_nodes];
+    let mut ngrad = vec![0.0_f64; n_face_nodes * fdim];
+    let mut qps = Vec::with_capacity(fquad.weights.len());
+    for (q, xi_face) in fquad.points.iter().enumerate() {
+        face_ref.eval_basis(xi_face, &mut nphi);
+        face_ref.eval_grad_basis(xi_face, &mut ngrad);
+
+        // ξ_owner = Σᵢ Nᵢ(ξ_face)·ξ_owner,i  and
+        // M[c][j] = ∂ξ_owner[c]/∂ξ_face[j] = Σᵢ ∂Nᵢ/∂ξ_face[j]·ξ_owner,i[c]
+        let mut xi_ref = vec![0.0_f64; dim];
+        let mut m = vec![0.0_f64; dim * fdim];
+        for i in 0..n_face_nodes {
+            for c in 0..dim {
+                xi_ref[c] += nphi[i] * face_rc[i][c];
+                for j in 0..fdim {
+                    m[c * fdim + j] += ngrad[i * fdim + j] * face_rc[i][c];
+                }
+            }
+        }
+
+        // Owner geometry: physical point, volume Jacobian, det(J).
+        let (jac, det_j, x_phys) = match geo_elem.as_deref() {
             Some(ge) => {
                 let geo_nds = mesh.geometry_nodes(owner_elem);
-                let xi = phys_to_ref_isoparametric(mesh, geo_nds, ge, &x_phys, dim);
-                let (jac, det, _) = isoparametric_jacobian(mesh, geo_nds, ge, &xi, dim);
-                (xi, jac, det)
+                isoparametric_jacobian(mesh, geo_nds, ge, &xi_ref, dim)
             }
             None => {
                 let tr = affine_tr.as_ref().unwrap();
-                (
-                    phys_to_ref(mesh, elem_nodes, &x_phys, dim),
-                    tr.jacobian().clone(),
-                    tr.det_j(),
-                )
+                (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(&xi_ref))
             }
         };
+
+        // Face Jacobian J_face = J_owner · M, its measure and outward normal.
+        let mut j_face = vec![0.0_f64; dim * fdim];
+        for r in 0..dim {
+            for j in 0..fdim {
+                let mut s = 0.0;
+                for c in 0..dim {
+                    s += jac[(r, c)] * m[c * fdim + j];
+                }
+                j_face[r * fdim + j] = s;
+            }
+        }
+        let measure = face_measure(&j_face, dim, fdim);
+        let normal = face_normal(&j_face, dim, fdim);
+
         qps.push(FaceQpGeometry {
-            weight: face_weights[q],
+            weight: fquad.weights[q] * measure,
             normal,
             x_phys,
             xi_ref,
@@ -783,205 +916,6 @@ fn find_owner_element<M: MeshTopology>(mesh: &M, face_nodes: &[u32]) -> Option<u
         }
     }
     None
-}
-
-/// Map a physical point `xp` back to reference coordinates for a simplex element.
-///
-/// Solves J ξ = (xp − x0) where J is the element Jacobian.
-fn phys_to_ref<M: MeshTopology>(
-    mesh:       &M,
-    elem_nodes: &[u32],
-    xp:         &[f64],
-    dim:        usize,
-) -> Vec<f64> {
-    let tr = ElementTransformation::from_simplex_nodes(mesh, elem_nodes);
-    let x0 = mesh.node_coords(elem_nodes[0]);
-    let mut b = vec![0.0_f64; dim];
-    for i in 0..dim { b[i] = xp[i] - x0[i]; }
-
-    let j_inv = tr.jacobian().clone().try_inverse().expect("degenerate element");
-
-    let mut xi = vec![0.0_f64; dim];
-    for i in 0..dim {
-        for k in 0..dim {
-            xi[i] += j_inv[(i, k)] * b[k];
-        }
-    }
-    xi
-}
-
-/// Invert the isoparametric element map `F(ξ) = xp` by Newton iteration.
-///
-/// `geo_elem` must be the same geometry reference element the volume
-/// assembly uses for this element (`geo_ref_elem_from_mesh`).  The
-/// iteration starts from the element centroid; straight-sided elements
-/// (the common case for boundary faces) converge quadratically in a
-/// handful of steps.
-fn phys_to_ref_isoparametric<M: MeshTopology>(
-    mesh:      &M,
-    geo_nodes: &[u32],
-    geo_elem:  &dyn ReferenceElement,
-    xp:        &[f64],
-    dim:       usize,
-) -> Vec<f64> {
-    let mut xi = vec![0.5_f64; dim];
-    let scale: f64 = xp.iter().map(|v| v.abs()).sum::<f64>() + 1.0;
-    for _ in 0..50 {
-        let (jac, _, fx) = isoparametric_jacobian(mesh, geo_nodes, geo_elem, &xi, dim);
-        let mut resid = vec![0.0_f64; dim];
-        let mut resid2 = 0.0_f64;
-        for i in 0..dim {
-            resid[i] = xp[i] - fx[i];
-            resid2 += resid[i] * resid[i];
-        }
-        if resid2.sqrt() < 1e-14 * scale {
-            return xi;
-        }
-        let j_inv = jac.try_inverse().expect("degenerate boundary owner element");
-        for i in 0..dim {
-            for k in 0..dim {
-                xi[i] += j_inv[(i, k)] * resid[k];
-            }
-        }
-    }
-    panic!(
-        "phys_to_ref_isoparametric: Newton did not converge (xp={xp:?}, xi={xi:?})"
-    );
-}
-
-/// Compute face quadrature points (in physical space), weights, and outward normals.
-///
-/// Returns `(xp_flat, weights, normals_flat)` where:
-/// - `xp_flat` has length `n_qp * dim`  (row-major)
-/// - `weights` has length `n_qp`
-/// - `normals_flat` has length `n_qp * dim` (same normal repeated per QP)
-fn face_quadrature<M: MeshTopology>(
-    mesh:       &M,
-    face_nodes: &[u32],
-    dim:        usize,
-    quad_order: u8,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    match dim {
-        2 => face_quadrature_2d(mesh, face_nodes, quad_order),
-        3 => face_quadrature_3d(mesh, face_nodes, quad_order),
-        _ => panic!("face_quadrature: unsupported dim={dim}"),
-    }
-}
-
-/// 2-D edge quadrature (1-D Gauss-Legendre on [0,1] → edge parametrisation).
-fn face_quadrature_2d<M: MeshTopology>(
-    mesh:       &M,
-    face_nodes: &[u32],
-    quad_order: u8,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let x0 = mesh.node_coords(face_nodes[0]);
-    let x1 = mesh.node_coords(face_nodes[1]);
-    let dx = x1[0] - x0[0];
-    let dy = x1[1] - x0[1];
-    let len = (dx * dx + dy * dy).sqrt();
-
-    // Outward unit normal (pointing away from domain interior by convention).
-    // Convention: rotate edge tangent by -90°: n = (dy, -dx) / len.
-    let nx =  dy / len;
-    let ny = -dx / len;
-
-    // 1-D Gauss-Legendre points on [0, 1].
-    let (gpts, gwts) = gauss_legendre_1d(quad_order);
-    let n_qp = gpts.len();
-
-    let mut xp_flat  = Vec::with_capacity(n_qp * 2);
-    let mut weights  = Vec::with_capacity(n_qp);
-    let mut normals  = Vec::with_capacity(n_qp * 2);
-
-    for q in 0..n_qp {
-        let t = gpts[q];
-        xp_flat.push(x0[0] + t * dx);
-        xp_flat.push(x0[1] + t * dy);
-        weights.push(gwts[q] * len);
-        normals.push(nx);
-        normals.push(ny);
-    }
-
-    (xp_flat, weights, normals)
-}
-
-/// 3-D triangular face quadrature (reference triangle QP mapped to physical face).
-fn face_quadrature_3d<M: MeshTopology>(
-    mesh:       &M,
-    face_nodes: &[u32],
-    _quad_order: u8,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let pa = mesh.node_coords(face_nodes[0]);
-    let pb = mesh.node_coords(face_nodes[1]);
-    let pc = mesh.node_coords(face_nodes[2]);
-
-    let ab = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
-    let ac = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
-
-    // Cross product → normal (not yet normalised).
-    let cross = [
-        ab[1]*ac[2] - ab[2]*ac[1],
-        ab[2]*ac[0] - ab[0]*ac[2],
-        ab[0]*ac[1] - ab[1]*ac[0],
-    ];
-    let area2 = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
-    let area  = 0.5 * area2;
-    let nx    = cross[0] / area2;
-    let ny    = cross[1] / area2;
-    let nz    = cross[2] / area2;
-
-    // 3-point centroid quadrature on reference triangle (order 2).
-    // Points: (1/6,1/6), (2/3,1/6), (1/6,2/3) — weight 1/3 each.
-    let ref_pts = [(1.0/6.0, 1.0/6.0), (2.0/3.0, 1.0/6.0), (1.0/6.0, 2.0/3.0)];
-    let ref_w   = 1.0 / 3.0;
-    let n_qp    = ref_pts.len();
-
-    let mut xp_flat = Vec::with_capacity(n_qp * 3);
-    let mut weights = Vec::with_capacity(n_qp);
-    let mut normals = Vec::with_capacity(n_qp * 3);
-
-    for (s, t) in ref_pts {
-        xp_flat.push(pa[0] + s*ab[0] + t*ac[0]);
-        xp_flat.push(pa[1] + s*ab[1] + t*ac[1]);
-        xp_flat.push(pa[2] + s*ab[2] + t*ac[2]);
-        weights.push(ref_w * area);
-        normals.push(nx); normals.push(ny); normals.push(nz);
-    }
-
-    (xp_flat, weights, normals)
-}
-
-/// 1-D Gauss-Legendre quadrature on [0, 1] with `n` points (n = quad_order / 2 + 1).
-fn gauss_legendre_1d(order: u8) -> (Vec<f64>, Vec<f64>) {
-    // Map standard [-1,1] GL points to [0,1]: t = (xi + 1) / 2, w → w/2.
-    match order {
-        0 | 1 => (vec![0.5], vec![1.0]),
-        2 | 3 => {
-            let s = 1.0 / (3.0_f64).sqrt();
-            (
-                vec![0.5 * (1.0 - s), 0.5 * (1.0 + s)],
-                vec![0.5, 0.5],
-            )
-        }
-        4 | 5 => {
-            let s = (3.0_f64 / 5.0).sqrt();
-            (
-                vec![0.5*(1.0-s), 0.5, 0.5*(1.0+s)],
-                vec![5.0/18.0, 4.0/9.0, 5.0/18.0],
-            )
-        }
-        _ => {
-            // 4-point GL (exact up to degree 7).
-            let s1 = ((3.0 - 2.0*(6.0_f64/5.0).sqrt())/7.0).sqrt();
-            let s2 = ((3.0 + 2.0*(6.0_f64/5.0).sqrt())/7.0).sqrt();
-            let w1 = 0.5 + (1.0_f64/6.0)*(5.0_f64/6.0).sqrt();
-            let w2 = 0.5 - (1.0_f64/6.0)*(5.0_f64/6.0).sqrt();
-            (
-                vec![0.5*(1.0-s2), 0.5*(1.0-s1), 0.5*(1.0+s1), 0.5*(1.0+s2)],
-                vec![0.5*w2, 0.5*w1, 0.5*w1, 0.5*w2],
-            )
-        }
-    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1238,6 +1172,249 @@ mod tests {
                 "quad RT1 dof {i}: b = {got} (expected {expected})"
             );
         }
+    }
+
+    // ── Round-10: hex quad faces and curved boundary measure ────────────────
+
+    /// A single Hex8 element has 6 **quadrilateral** boundary faces.  For the
+    /// RT0 DOF attached to face `F`, `b_d = ∫_F g (φ_d·n) dS`; the Piola
+    /// transform preserves the reference flux, so with `g ≡ 1` every face
+    /// gives `|b_d| = 1` regardless of its area/shape.
+    ///
+    /// Round-10 regression: `face_quadrature_3d` built 3-D faces from the first
+    /// three corner nodes only, so a quad face silently became one of its two
+    /// corner triangles (half the measure, wrong normal) and `|b_d| = 0.5`.
+    #[test]
+    fn hdiv_boundary_flux_hex_quad_faces_analytic() {
+        use fem_space::HDivSpace;
+
+        let mesh = Mesh::<3>::unit_cube_hex(1);
+        assert_eq!(mesh.n_faces(), 6, "a single hex has 6 boundary quads");
+        assert_eq!(mesh.element_type(0), ElementType::Hex8);
+        for f in 0..mesh.n_boundary_faces() as u32 {
+            assert_eq!(mesh.face_nodes(f).len(), 4, "face {f} must be a quad");
+        }
+
+        let rt = HDivSpace::new(mesh.clone(), 0);
+        assert_eq!(rt.n_dofs(), 6, "RT0 on one hex → one dof per face");
+        let tags: Vec<i32> = (0..mesh.n_boundary_faces() as u32)
+            .map(|f| mesh.face_tag(f))
+            .collect();
+        let b = VectorBoundaryAssembler::assemble_boundary_linear(
+            &rt, &[&HdivNormalFluxIntegrator { g: |_| 1.0 }], &tags, 4,
+        );
+
+        for (d, &v) in b.iter().enumerate() {
+            assert!(
+                (v.abs() - 1.0).abs() < 1e-14,
+                "face dof {d}: |b| = {} (expected 1 = reference flux)",
+                v.abs()
+            );
+        }
+        // ... and the six unit-cube faces have total area 6.
+        let total: f64 = b.iter().map(|v| v.abs()).sum();
+        assert!((total - 6.0).abs() < 1e-13, "∮ 1 dS = {total} (expected 6)");
+    }
+
+    /// Linear measure probe: accumulates the effective quadrature weight
+    /// (`qp.weight`, i.e. rule weight × face measure) into local DOF 0, so a
+    /// single face yields exactly `∫_F 1 ds`.
+    struct MeasureProbe;
+
+    impl VectorBoundaryLinearIntegrator for MeasureProbe {
+        fn add_to_face_vector(&self, qp: &VectorBdQpData<'_>, f: &mut [f64]) {
+            f[0] += qp.weight;
+        }
+    }
+
+    /// Curved boundary measure: with an order-2 geometry whose top edge is
+    /// bowed into the parabola `y = 1 + a·x(1−x)`, `∫_F 1 ds` must be the ARC
+    /// length, not the corner chord.
+    ///
+    /// Round-10 regression: the face points used to be generated on the
+    /// straight corner chord (`face_quadrature_2d`) with the chord measure,
+    /// giving 1.0 here instead of ≈1.0982.
+    #[test]
+    fn boundary_measure_curved_edge_is_arc_length() {
+        use fem_space::HDivSpace;
+
+        let mut mesh = Mesh::<2>::unit_square_quad(1);
+        mesh.set_curvature(2);
+        let d = 0.2_f64; // vertical displacement of the top edge midpoint
+        {
+            let g = mesh.geometry.as_mut().expect("order-2 geometry");
+            let mut moved = 0;
+            for n in 0..g.n_nodes {
+                let c = &mut g.coords[2 * n..2 * n + 2];
+                // Only the top-edge midpoint (the corners stay put, so the
+                // curved mesh remains conforming).
+                if (c[0] - 0.5).abs() < 1e-14 && (c[1] - 1.0).abs() < 1e-14 {
+                    c[1] += d;
+                    moved += 1;
+                }
+            }
+            assert_eq!(moved, 1, "expected exactly one top-edge midpoint node");
+        }
+        assert_eq!(mesh.geom_order(), 2);
+
+        // The top boundary face: both nodes at y = 1 (unchanged by the bowing).
+        let top: Vec<u32> = (0..mesh.n_boundary_faces() as u32)
+            .filter(|&f| {
+                mesh.face_nodes(f)
+                    .iter()
+                    .all(|&n| (mesh.node_coords(n)[1] - 1.0).abs() < 1e-14)
+            })
+            .collect();
+        assert_eq!(top.len(), 1, "exactly one boundary face is the top edge");
+        let tag = mesh.face_tag(top[0]);
+
+        let space = HDivSpace::new(mesh.clone(), 0);
+        let b = VectorBoundaryAssembler::assemble_boundary_linear(
+            &space, &[&MeasureProbe], &[tag], 6,
+        );
+        let got: f64 = b.iter().sum();
+
+        // Q2 edge through (0,1), (0.5,1+d), (1,1) is y = 1 + 4d·x(1−x); the
+        // arc length of y = 1 + a·x(1−x) over [0,1] is
+        //   L = √(1+a²)/2 + asinh(a)/(2a).
+        let a = 4.0 * d;
+        let exact = 0.5 * (1.0 + a * a).sqrt() + (a + (1.0 + a * a).sqrt()).ln() / (2.0 * a);
+
+        // Same-rule reference: the discrete arc length Σ w_i √(1+y'(x_i)²)
+        // evaluated with the face rule the assembler used (order-6 → 4-point
+        // Gauss on [0,1]).  This checks the *measure* (the implementation must
+        // integrate the curve, not the chord) to machine precision; the
+        // (non-polynomial) quadrature error vs the closed-form arc length is
+        // ~1.5e-5 and is asserted separately below.
+        let rule = fem_element::lagrange::factory::ref_elem(
+            fem_element::lagrange::factory::ElemType::Seg,
+            1,
+        )
+        .quadrature(6);
+        let gauss_arc: f64 = rule
+            .points
+            .iter()
+            .zip(rule.weights.iter())
+            .map(|(s, w)| {
+                let x = s[0];
+                let dy = a * (1.0 - 2.0 * x);
+                w * (1.0 + dy * dy).sqrt()
+            })
+            .sum();
+
+        eprintln!(
+            "curved edge ∫1 ds = {got:.12}, same-rule curve = {gauss_arc:.12}, \
+             closed form = {exact:.12}, chord = 1.000000000000"
+        );
+        assert!(
+            (got - gauss_arc).abs() < 1e-13,
+            "∫_F 1 ds = {got} (same-rule curve integral = {gauss_arc})"
+        );
+        assert!(
+            (got - exact).abs() < 2e-5,
+            "∫_F 1 ds = {got} vs closed-form arc length {exact} \
+             (chord measure would give 1.0, i.e. 9.8e-2 off)"
+        );
+    }
+
+    /// Curved **hex** face measure: a single Hex8 whose order-2 geometry has a
+    /// bump on the `z = 1` face,
+    /// `z = 1 + b(1−x̃²)(1−ỹ²)` with `x̃ = 2x−1`, `ỹ = 2y−1`.
+    ///
+    /// The Q2 interpolant reproduces that (bi)quadratic surface exactly, so
+    /// `∫_F 1 dS = ∫∫ √(1 + z_x² + z_y²) dx dy` has a known value at any given
+    /// quadrature rule; the assembled measure must match it to machine
+    /// precision.  (With the old chord/3-corner face quadrature the top face
+    /// degenerated into half its area on a flat patch.)
+    ///
+    /// The geometry is built by hand: `Mesh::set_curvature` must not be used
+    /// for this test — see the `set_curvature_hex8` note in the round-10
+    /// report (it mis-assigns the order-2 geometry nodes of a Hex8, giving a
+    /// degenerate owner Jacobian).
+    #[test]
+    fn hex_quad_face_measure_curved_isoparametric() {
+        use fem_element::lagrange::factory::{ElemType as FEType, ref_elem};
+        use fem_space::HDivSpace;
+
+        let b = 0.2_f64;
+
+        // ── single Hex8 topology (unit cube) ────────────────────────────────
+        let mut mesh = Mesh::<3>::unit_cube_hex(1);
+        let n_vert = mesh.n_nodes();
+
+        // ── replace the geometry with a hand-built order-2 one ──────────────
+        let hex2 = ref_elem(FEType::Hex, 2);
+        let rc = hex2.dof_coords();
+        let npe = rc.len();
+        let mut conn = Vec::with_capacity(npe);
+        let mut coords = mesh.coords.clone();
+        for (d, r) in rc.iter().enumerate() {
+            let x = 0.5 * (r[0] + 1.0);
+            let y = 0.5 * (r[1] + 1.0);
+            let xt = 2.0 * x - 1.0;
+            let yt = 2.0 * y - 1.0;
+            let z = if (r[2] - 1.0).abs() < 1e-12 {
+                1.0 + b * (1.0 - xt * xt) * (1.0 - yt * yt)
+            } else {
+                0.5 * (r[2] + 1.0)
+            };
+            coords.extend_from_slice(&[x, y, z]);
+            conn.push(n_vert as u32 + d as u32);
+        }
+        let n_geo = n_vert + npe;
+        mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+            order: 2,
+            conn,
+            nodes_per_elem: npe,
+            coords,
+            n_nodes: n_geo,
+        });
+        assert_eq!(mesh.geom_order(), 2);
+
+        // ── top face (z = 1, tag 2) ─────────────────────────────────────────
+        let top: Vec<u32> = (0..mesh.n_boundary_faces() as u32)
+            .filter(|&f| {
+                mesh.face_nodes(f)
+                    .iter()
+                    .all(|&n| (mesh.node_coords(n)[2] - 1.0).abs() < 1e-14)
+            })
+            .collect();
+        assert_eq!(top.len(), 1);
+        let tag = mesh.face_tag(top[0]);
+
+        let space = HDivSpace::new(mesh.clone(), 0);
+        // quad_order 4 → 3×3 Gauss-Legendre on the face reference square.
+        let bvec = VectorBoundaryAssembler::assemble_boundary_linear(
+            &space, &[&MeasureProbe], &[tag], 4,
+        );
+        let got: f64 = bvec.iter().sum();
+
+        // Same-rule reference on the analytic parametrisation (x = s, y = t).
+        let rule = fem_element::lagrange::factory::ref_elem(FEType::Quad, 1).quadrature(4);
+        let ref_int: f64 = rule
+            .points
+            .iter()
+            .zip(rule.weights.iter())
+            .map(|(p, w)| {
+                let (xt, yt) = (2.0 * p[0] - 1.0, 2.0 * p[1] - 1.0);
+                let dz_dx = -4.0 * b * xt * (1.0 - yt * yt);
+                let dz_dy = -4.0 * b * yt * (1.0 - xt * xt);
+                w * (1.0 + dz_dx * dz_dx + dz_dy * dz_dy).sqrt()
+            })
+            .sum();
+
+        eprintln!(
+            "curved hex face ∫1 dS = {got:.12}, same-rule curved surface = {ref_int:.12}, \
+             flat face = 1.000000000000"
+        );
+        assert!(
+            (got - ref_int).abs() < 1e-13,
+            "∫_F 1 dS = {got} (same-rule curved surface integral = {ref_int})"
+        );
+        assert!(
+            got > 1.01,
+            "the measure must follow the curved face, got {got} (flat face = 1)"
+        );
     }
 
     /// The boundary tangential mass on the quad unit square must be symmetric
