@@ -339,10 +339,75 @@ impl<const D: usize> Mesh<D> {
                 ElementType::Hex8 => { self.set_curvature_hex8(p); return; }
                 ElementType::Tet4 => { self.set_curvature_tet4(p); return; }
                 ElementType::Prism6 => { self.set_curvature_prism6(p); return; }
+                ElementType::Pyramid5 => { self.set_curvature_pyramid5(p); return; }
                 _ => {}
             }
         }
         panic!("set_curvature: unsupported element type {:?} for D={}", self.elem_type, D);
+    }
+
+    /// Pyramid5 → PyramidPk geometry: linear-pyramid interpolation of the
+    /// high-order DOF positions.
+    ///
+    /// Consistent with `element_jacobian`, which evaluates the same
+    /// `PyramidPk` basis at the stored geometry nodes: the order-`p` DOF
+    /// coordinates are mapped through the *linear* pyramid shape functions of
+    /// the 5 vertices (base 0-3, apex 4).  Vertex DOFs land exactly on the
+    /// mesh vertices since the order-1 DOFs are nodal.
+    fn set_curvature_pyramid5(&mut self, p: usize) {
+        use fem_element::lagrange::pyramid::PyramidPk;
+        use fem_element::ReferenceElement;
+
+        let n_elems = self.n_elems();
+        let high = PyramidPk::new(p);
+        let npe_new = high.n_dofs();
+        let dof_ref = high.dof_coords();
+        let linear = PyramidPk::new(1);
+
+        let mut geom_conn = Vec::with_capacity(n_elems * npe_new);
+        let mut geom_coords = self.coords.clone();
+        let mut next_id = self.n_nodes() as NodeId;
+
+        let mut phi = vec![0.0_f64; 5];
+        for e in 0..n_elems {
+            let verts = self.elem_nodes(e as ElemId);
+            for d in 0..npe_new {
+                let rc = &dof_ref[d];
+                linear.eval_basis(rc, &mut phi);
+                let mut on_vertex = false;
+                for (k, &phik) in phi.iter().enumerate() {
+                    if (phik - 1.0).abs() < 1e-12 {
+                        // Nodal DOF: reuse the existing mesh vertex.
+                        geom_conn.push(verts[k]);
+                        on_vertex = true;
+                        break;
+                    }
+                }
+                if !on_vertex {
+                    let mut x = [0.0_f64; 3];
+                    for (k, &phik) in phi.iter().enumerate() {
+                        if phik == 0.0 {
+                            continue;
+                        }
+                        let xk = self.node_coords(verts[k]);
+                        for dd in 0..3 {
+                            x[dd] += phik * xk[dd];
+                        }
+                    }
+                    geom_conn.push(next_id);
+                    geom_coords.extend_from_slice(&x);
+                    next_id += 1;
+                }
+            }
+        }
+
+        self.geometry = Some(GeometryData {
+            order: p as u8,
+            conn: geom_conn,
+            nodes_per_elem: npe_new,
+            coords: geom_coords,
+            n_nodes: next_id as usize,
+        });
     }
 
     /// Hex8 → HexQk geometry: trilinear interpolation of GLL nodal positions.
@@ -582,7 +647,7 @@ impl<const D: usize> Mesh<D> {
                     let r = rc[0];
                     let s = rc[1];
                     let t = (rc[2] + 1.0) / 2.0;
-                    let phi0 = (1.0 - r - s);
+                    let phi0 = 1.0 - r - s;
                     let phi1 = r;
                     let phi2 = s;
                     let (x0, x1, x2, x3, x4, x5) = (
@@ -1889,8 +1954,8 @@ impl<const D: usize> Mesh<D> {
 
         let mut face_conn = Vec::new();
         let mut face_tags = Vec::new();
-        let mut add_edge = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>,
-                            a: NodeId, b: NodeId, tag: i32| {
+        let add_edge = |fc: &mut Vec<NodeId>, ft: &mut Vec<i32>,
+                        a: NodeId, b: NodeId, tag: i32| {
             fc.push(a); fc.push(b); ft.push(tag);
         };
         for i in 0..nx {
@@ -3068,7 +3133,11 @@ impl<const D: usize> Mesh<D> {
     }
 
     /// Get face vertices as Vec.
+    ///
+    /// TODO: the `f` parameter is currently unused (pre-existing); the call
+    /// returns the whole flat boundary connectivity.
     pub fn face_vertices_vec(&self, f: FaceId) -> Vec<NodeId> {
+        let _ = f;
         self.face_conn.iter().copied().collect()
     }
 
@@ -3573,6 +3642,82 @@ mod tests {
             .expect_err("expected missing set error");
         let msg = format!("{err}");
         assert!(msg.contains("named attribute set not found"));
+    }
+
+    #[test]
+    fn element_jacobian_pyramid_curved_straight_matches_linear() {
+        // Straight-sided single pyramid: set_curvature(2) must reproduce the
+        // exact linear mapping (the high-order geometry nodes lie on the
+        // straight edges/faces of the original pyramid).
+        let coords: Vec<f64> = vec![
+            0.0, 0.0, 0.0, // v0 base
+            1.0, 0.0, 0.0, // v1
+            0.0, 1.0, 0.0, // v2
+            1.0, 1.0, 0.0, // v3
+            0.0, 0.0, 1.0, // v4 apex
+        ];
+        let conn: Vec<u32> = vec![0, 1, 2, 3, 4];
+        let mut m = Mesh::<3> {
+            coords,
+            conn,
+            elem_tags: vec![1],
+            elem_type: ElementType::Pyramid5,
+            face_conn: vec![],
+            face_tags: vec![],
+            face_type: ElementType::Tri3,
+            elem_types: None,
+            elem_offsets: None,
+            face_types: None,
+            face_offsets: None,
+            face_to_elem: None,
+            edge_conn: vec![],
+            edge_to_elem: vec![],
+            geometry: None,
+            nc_vertex_view: None,
+            vertex_parents: vec![],
+        };
+        let (j_lin, det_lin, xp_lin) = m.element_jacobian(0, &[0.25, 0.25, 0.5]);
+        let (j_lin2, det_lin2, xp_lin2) = m.element_jacobian(0, &[0.125, 0.25, 0.375]);
+
+        m.set_curvature(2);
+        let g = m.geometry.as_ref().expect("geometry missing");
+        assert_eq!(g.order, 2);
+        assert_eq!(g.nodes_per_elem, 14); // (p+1)(p+2)(2p+3)/6 for p=2
+        assert_eq!(g.n_nodes, 5 + 9);
+        // The five vertex DOFs (layer k=0 corners and the apex) reuse the
+        // original mesh vertices; their stored positions must equal them.
+        for d in 0..14usize {
+            let node = g.conn[d] as usize;
+            if node < 5 {
+                for dd in 0..3 {
+                    assert!(
+                        (g.coords[node * 3 + dd] - m.coords[node * 3 + dd]).abs() < 1e-14,
+                        "vertex dof {d} moved"
+                    );
+                }
+            }
+        }
+        // Straight-sided: curved Jacobian == linear Jacobian.
+        let (j_cur, det_cur, xp_cur) = m.element_jacobian(0, &[0.25, 0.25, 0.5]);
+        for ij in 0..3 {
+            for d in 0..3 {
+                assert!((j_cur[(ij, d)] - j_lin[(ij, d)]).abs() < 1e-12);
+            }
+        }
+        assert!((det_cur - det_lin).abs() < 1e-12);
+        for dd in 0..3 {
+            assert!((xp_cur[dd] - xp_lin[dd]).abs() < 1e-12);
+        }
+        let (j_cur2, det_cur2, xp_cur2) = m.element_jacobian(0, &[0.125, 0.25, 0.375]);
+        for ij in 0..3 {
+            for d in 0..3 {
+                assert!((j_cur2[(ij, d)] - j_lin2[(ij, d)]).abs() < 1e-12);
+            }
+        }
+        assert!((det_cur2 - det_lin2).abs() < 1e-12);
+        for dd in 0..3 {
+            assert!((xp_cur2[dd] - xp_lin2[dd]).abs() < 1e-12);
+        }
     }
 
     #[test]

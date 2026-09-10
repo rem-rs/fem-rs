@@ -7,6 +7,11 @@
 //! - [`gmsh`]           — GMSH `.msh` v4.1 ASCII/binary reader → `Mesh`
 //! - [`netgen`]         — Netgen `.vol` ASCII reader (Tet4 baseline)
 //! - [`abaqus`]         — Abaqus `.inp` reader (C3D4/C3D8 baseline)
+//! - [`truegrid`]       — TrueGrid `.fgrid` reader (MFEM ReadTrueGridMesh port)
+//! - [`netcdf`]         — minimal NetCDF-3 (classic) reader for Genesis files
+//! - [`cubit`]          — Cubit/Genesis `.exo` reader (MFEM ReadCubit port)
+//! - [`vtk_legacy`]     — legacy (non-XML) `.vtk` writer (MFEM PrintVTK port)
+//! - [`exodus`]         — Exodus II/Genesis writer (MFEM PrintExodusII port)
 //! - [`vtk`]            — VTK UnstructuredGrid `.vtu` XML writer
 //! - [`vtk_reader`]     — VTK `.vtu` XML reader (point data arrays)
 //! - [`matrix_market`]  — Matrix Market `.mtx` reader/writer
@@ -20,6 +25,11 @@ pub mod gmsh;
 pub mod gmsh_writer;
 pub mod netgen;
 pub mod abaqus;
+pub mod truegrid;
+pub mod netcdf;
+pub mod cubit;
+pub mod vtk_legacy;
+pub mod exodus;
 pub mod vtk;
 pub mod vtk_reader;
 pub mod mfem;
