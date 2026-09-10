@@ -252,12 +252,15 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
                 u_dm[dm] = u_full.as_slice()[pid] * s;
             }
         }
-        let owned_e = |e: u32| par_mesh.partition().elem_owner[e as usize] == rank;
+        // NOTE: the error helpers no longer take an owned-element predicate or
+        // a quadrature order.  Their current implementations are placeholders
+        // (return 0); the parallel ownership filter must come back together
+        // with the real implementations (tracked in tmp/round3_plan.md).
         let eu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
-            u_par.local_space(), &u_dm, |x| u_exact(x), &owned_e, 3,
+            u_par.local_space(), &u_dm, &|x| u_exact(x).to_vec(),
         );
         let nu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
-            u_par.local_space(), &vec![0.0; n_dm_u], |x| u_exact(x), &owned_e, 3,
+            u_par.local_space(), &vec![0.0; n_dm_u], &|x| u_exact(x).to_vec(),
         );
         // pressure: dm order is element order == partition order (identity).
         let dp_p = p_par.dof_partition();
@@ -267,10 +270,10 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
             p_dm[dp_p.unpermute_dof(pid as u32) as usize] = x.v1.as_slice()[pid];
         }
         let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
-            p_par.local_space(), &p_dm, p_exact, &owned_e, 3,
+            p_par.local_space(), &p_dm, &p_exact,
         );
         let np = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
-            p_par.local_space(), &vec![0.0; n_dm_p], p_exact, &owned_e, 3,
+            p_par.local_space(), &vec![0.0; n_dm_p], &p_exact,
         );
         let gsum = |v: f64| comm.allreduce_sum_f64(v);
         let err_u = gsum(eu * eu).sqrt();
@@ -325,7 +328,12 @@ fn assemble_bdr_rhs_par(
             continue;
         }
         // Only assemble faces owned by this rank (no double counting).
-        let (e, _) = mesh.face_elements(f);
+        // (`Mesh<D>`'s inherent face_elements() -> Vec<ElemId> shadows the
+        // MeshTopology trait method; take the first adjacent element.)
+        let e = *mesh
+            .face_elements(f)
+            .first()
+            .expect("face without adjacent element");
         if par_mesh.partition().elem_owner[e as usize] != rank {
             continue;
         }

@@ -214,11 +214,14 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
                 u_dm[dm] = u_full.as_slice()[pid] * s;
             }
         }
+        // NOTE: the error helper no longer takes an owned-element predicate;
+        // its current implementation is a placeholder (returns 0), so the
+        // parallel ownership filter has to be restored together with the real
+        // implementation (tracked as a debt in tmp/round3_plan.md).
         let local_err = compute_hdiv_l2_error_owned(
             par_space.local_space(),
             &u_dm,
-            |p| exact_f(p, kappa),
-            &|e: u32| par_mesh.partition().elem_owner[e as usize] == rank,
+            &|p| exact_f(p, kappa).to_vec(),
         );
         let l2_err = comm.allreduce_sum_f64(local_err * local_err).sqrt();
 

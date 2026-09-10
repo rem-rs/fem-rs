@@ -44,23 +44,20 @@ use fem_assembly::{
 };
 use fem_core::{ElemId, Rank};
 use fem_linalg::{CooMatrix, CsrMatrix};
-use fem_mesh::amr::refine_uniform_surface_tri3;
 use fem_mesh::{ElementType, Mesh, topology::MeshTopology};
 use fem_parallel::launcher::native::ThreadLauncher;
-// DISABLED: use fem_parallel::par_dpg_trace::ParDpgTraceSpace;
-use fem_parallel::par_mixed_assembler::ParMixedAssembler;
+use fem_parallel::par_dpg_trace::ParDpgTraceSpace;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::par_solve_pcg_precond;
 use fem_parallel::{
-    DofPartition, GhostExchange, ParAssembler, ParCsrMatrix, ParVector, ParallelFESpace,
+    DofPartition, ParAssembler, ParCsrMatrix, ParVector, ParallelFESpace,
     WorkerConfig, ghost::GhostChannelDef,
     par_amg::{ParAmgConfig, ParAmgHierarchy},
     par_ams::ParAmsPrecond,
 };
 use fem_solver::SolverConfig;
-use fem_space::constraints::boundary_dofs;
 use fem_space::fe_space::FESpace;
-use fem_space::{DpgTraceSpace, H1Space, L2Space, FaceInfo};
+use fem_space::{H1Space, L2Space, FaceInfo};
 use linlvo::precond::AmsConfig;
 
 // ─── Mixed Diffusion Integrator (B0: trial × test) ───────────────────────────
