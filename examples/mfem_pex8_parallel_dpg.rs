@@ -84,7 +84,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let n_workers: usize = parse_arg(&args, "--ranks").unwrap_or(2);
     let order: usize = parse_arg(&args, "-o").unwrap_or(1);
-    let diag: bool = args.iter().any(|a| a == "--diag");
+    let _diag: bool = args.iter().any(|a| a == "--diag");
 
     println!("=== fem-rs mfem_pex8: Parallel DPG Poisson (H1 + trace + L2) ===");
 
@@ -237,7 +237,7 @@ fn main() {
             }
         };
         let mut a_coo = CooMatrix::<f64>::new(n_local, n_local);
-        let mut add_block = |dst: &CsrMatrix<f64>, row_block: usize, col_block: usize, row_owned: usize, n_row_local: usize| {
+        let mut add_block = |dst: &CsrMatrix<f64>, row_block: usize, col_block: usize, row_owned: usize, _n_row_local: usize| {
             for r in 0..row_owned {
                 let ur = if row_block == 0 { r } else { n_trial_owned + r };
                 for k in dst.row_ptr[r]..dst.row_ptr[r + 1] {
@@ -406,7 +406,29 @@ fn main() {
 
         // ── 10b. Solution norm (np1/np2 consistency check) ─────────────
         let u_norm = u.global_norm();
-        let global_l2 = 0.0_f64; // placeholder (no simple exact solution for ex8)
+        // MFEM ex8p never computes an error norm: the problem `-Δu = 1` with
+        // homogeneous Dirichlet data on ../data/star.mesh has no closed-form
+        // solution, so no L2 *discretization* error exists for this example.
+        // The fem-rs-only `L2err` diagnostic is therefore the genuine
+        // quadrature L² norm of the trial block, ‖x0_h‖_{L²(Ω)}: the same
+        // helper pex4/pex5 use for their errors (`fem_assembly::hdiv_error`),
+        // with the exact field taken as zero.  It replaces the former
+        // hard-coded 0.0 placeholder (debt D19) and must not be read as an
+        // error.  Owned elements only + sqrt(Σ local²), matching
+        // `ParGridFunction::ComputeL2Error`'s parallel reduction.
+        let owned = partition;
+        let r = rank;
+        let zeros_exact = |_x: &[f64]| 0.0_f64;
+        let local_l2 = fem_assembly::hdiv_error::compute_l2_error_scalar_filtered(
+            x0_par.local_space(),
+            &x0_full,
+            &zeros_exact,
+            Some(&|e| owned.elem_owner[e as usize] == r),
+        );
+        let global_l2 = {
+            let s = comm.allreduce_sum_f64(local_l2 * local_l2);
+            s.max(0.0).sqrt()
+        };
         let mut r_test = vec![0.0; b0.nrows];
         let mut t0 = vec![0.0; b0.nrows];
         b0.spmv(&x0_full, &mut t0);

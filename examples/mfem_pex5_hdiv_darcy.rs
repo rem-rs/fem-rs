@@ -252,15 +252,33 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
                 u_dm[dm] = u_full.as_slice()[pid] * s;
             }
         }
-        // NOTE: the error helpers no longer take an owned-element predicate or
-        // a quadrature order.  Their current implementations are placeholders
-        // (return 0); the parallel ownership filter must come back together
-        // with the real implementations (tracked in tmp/round3_plan.md).
-        let eu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
-            u_par.local_space(), &u_dm, &|x| u_exact(x).to_vec(),
+        // MFEM ex5p passes an explicit `irs` array to `ComputeL2Error`:
+        // `order_quad = max(2, 2*order+1)` = 3 for RT1/L2P1 — *not* the library
+        // default `2*fe->GetOrder()+3` (which would be 7 for RT1 on quads and 5
+        // for L2 P1) — and normalizes by
+        // `ComputeGlobalLpNorm(2, exact, pmesh, irs)` — the same rule
+        // integrated over owned elements.  `ParGridFunction::ComputeL2Error`
+        // itself integrates the *owned* elements of the local mesh only, so
+        // the local integrals are restricted to owned elements here (ghost
+        // elements would otherwise be counted once per rank).
+        let err_order = (2 * u_par.local_space().order() as u32 + 1).clamp(2, 255) as u8;
+        let owned = par_mesh.partition();
+        let r = rank;
+        let owned_only = |e: u32| owned.elem_owner[e as usize] == r;
+
+        let eu = fem_assembly::hdiv_error::compute_hdiv_l2_error_filtered_order(
+            u_par.local_space(),
+            &u_dm,
+            &|x| u_exact(x).to_vec(),
+            err_order,
+            Some(&owned_only),
         );
-        let nu = fem_assembly::hdiv_error::compute_hdiv_l2_error_owned_q(
-            u_par.local_space(), &vec![0.0; n_dm_u], &|x| u_exact(x).to_vec(),
+        let nu = fem_assembly::hdiv_error::compute_hdiv_l2_error_filtered_order(
+            u_par.local_space(),
+            &vec![0.0; n_dm_u],
+            &|x| u_exact(x).to_vec(),
+            err_order,
+            Some(&owned_only),
         );
         // pressure: dm order is element order == partition order (identity).
         let dp_p = p_par.dof_partition();
@@ -269,11 +287,19 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
         for pid in 0..dp_p.n_total_dofs() {
             p_dm[dp_p.unpermute_dof(pid as u32) as usize] = x.v1.as_slice()[pid];
         }
-        let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
-            p_par.local_space(), &p_dm, &p_exact,
+        let ep = fem_assembly::hdiv_error::compute_l2_error_scalar_filtered_order(
+            p_par.local_space(),
+            &p_dm,
+            &p_exact,
+            err_order,
+            Some(&owned_only),
         );
-        let np = fem_assembly::hdiv_error::compute_l2_error_scalar_owned_q(
-            p_par.local_space(), &vec![0.0; n_dm_p], &p_exact,
+        let np = fem_assembly::hdiv_error::compute_l2_error_scalar_filtered_order(
+            p_par.local_space(),
+            &vec![0.0; n_dm_p],
+            &p_exact,
+            err_order,
+            Some(&owned_only),
         );
         let gsum = |v: f64| comm.allreduce_sum_f64(v);
         let err_u = gsum(eu * eu).sqrt();
@@ -328,12 +354,10 @@ fn assemble_bdr_rhs_par(
             continue;
         }
         // Only assemble faces owned by this rank (no double counting).
-        // (`Mesh<D>`'s inherent face_elements() -> Vec<ElemId> shadows the
-        // MeshTopology trait method; take the first adjacent element.)
-        let e = *mesh
-            .face_elements(f)
-            .first()
-            .expect("face without adjacent element");
+        // Trait-qualified call: `Mesh<D>` also has an inherent
+        // `face_adjacent_elems`-style accessor, but the trait method is the one
+        // that returns the *first* adjacent element of the face.
+        let e = fem_mesh::MeshTopology::face_elements(mesh, f).0;
         if par_mesh.partition().elem_owner[e as usize] != rank {
             continue;
         }

@@ -21,8 +21,7 @@ use std::sync::Arc;
 
 use fem_assembly::standard::{GradDivIntegrator, VectorMassIntegrator};
 use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
-use fem_assembly::{VectorAssembler, hdiv_error::compute_hdiv_l2_error_owned};
-use fem_element::{raviart_thomas::{QuadRTk, TriRTk}, reference::VectorReferenceElement};
+use fem_assembly::VectorAssembler;
 use fem_mesh::{Mesh, refine_uniform};
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_assembler::{permute_csr, permute_vec};
@@ -30,7 +29,6 @@ use fem_parallel::{
     ParAmgConfig, ParCsrMatrix, ParVector, ParallelFESpace, SmootherType, WorkerConfig,
     par_partition::partition_mesh, par_solve_pcg_amg,
 };
-use fem_parallel::par_mesh::ParallelMesh;
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs_hdiv;
 use fem_space::fe_space::FESpace;
@@ -193,8 +191,15 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
         let res = par_solve_pcg_amg(&a_mat, &rhs, &mut u, &amg_cfg, &cfg).unwrap();
 
         // 8. L2 error over owned elements (u partition order → dm order).
-        //    compute_hdiv_l2_error_owned already returns the sqrt'ed norm, so
-        //    square before the global sum then sqrt again.
+        //    MFEM ex4p: `x.ComputeL2Error(F)` with no `irs` → the library
+        //    default `IntRules.Get(geom, 2*fe->GetOrder()+3)`, where the RT0
+        //    element reports `fe->GetOrder() == 1` (MFEM's RT elements store
+        //    `p+1`) → order 5.  `compute_hdiv_l2_error_filtered` mirrors that
+        //    convention exactly.
+        //    `ParGridFunction::ComputeL2Error` integrates the *owned* elements
+        //    only and reduces with `GlobalLpNorm(2, .)` = sqrt(Σ local²), so
+        //    the local integral is restricted to owned elements here (ghost
+        //    elements would otherwise be counted once per rank).
         let mut u_dm = vec![0.0_f64; n_dm];
         {
             // Fill owned AND ghost DOFs (owned elements reference ghost DOFs
@@ -214,14 +219,13 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
                 u_dm[dm] = u_full.as_slice()[pid] * s;
             }
         }
-        // NOTE: the error helper no longer takes an owned-element predicate;
-        // its current implementation is a placeholder (returns 0), so the
-        // parallel ownership filter has to be restored together with the real
-        // implementation (tracked as a debt in tmp/round3_plan.md).
-        let local_err = compute_hdiv_l2_error_owned(
+        let owned = par_mesh.partition();
+        let r = rank;
+        let local_err = fem_assembly::hdiv_error::compute_hdiv_l2_error_filtered(
             par_space.local_space(),
             &u_dm,
             &|p| exact_f(p, kappa).to_vec(),
+            Some(&|e| owned.elem_owner[e as usize] == r),
         );
         let l2_err = comm.allreduce_sum_f64(local_err * local_err).sqrt();
 
@@ -312,10 +316,3 @@ fn parse_arg_str<'a>(args: &'a [String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-// Keep imports used by the owned-element L2 error helper below.
-#[allow(unused)]
-fn _imports_for_error(_p: &ParallelMesh<Mesh<2>>) {
-    let _ = TriRTk::new(0);
-    let _ = QuadRTk::new(0);
-    let _ = 0.0_f64;
-}
