@@ -357,6 +357,80 @@
   / fem-space **274** / fem-io **122** / fem-amg **23** / fem-linalg **63** /
   fem-parallel **225**；**`cargo build --release --examples` 0 错误**。
 
+## 第十二轮完成（2026-09-10，四代理并行 + 主会话集成）
+
+- **M：`hdiv_error.rs` 真实现（D19 结案）**：1:1 移植 MFEM
+  `GridFunction::ComputeL2Error`（标量）与矢量重载（逆变 Piola 重建 +
+  |detJ| 权重 + 逐空间参考元/符号）；**关键正确性修正**：MFEM 的 RT 单元
+  `GetOrder()` 存的是 `p+1`（fe_rt.cpp），故默认求积阶是 `2(p+1)+3` 而非
+  `2p+3`——用错阶时 quad 上 2×2 规则积 4 次多项式（`u=(x²,0)` 在 RT0-quad
+  得 2.6e-16，真值 4.6585e-3）。并行语义新增 `*_filtered` API（owned 谓词）。
+  **结果**：pex4 误差从恒 0 → 与 C++ np2 **6~7 位一致**且每次加密减半；
+  pex8 L2err 0 → 2.91987e-1（np1==np2 到 1e-5）；14 新测试含 MFEM harness
+  对照 <1e-10。
+- **N：`face_elements` 遮蔽陷阱消除（D20）+ Hex8 曲率修复（D26）**：
+  固有方法改名 `face_adjacent_elems`（更新 4 代码 + 3 测试调用点；顺带修复
+  被陷阱长期掩盖的 `autodiff_example.rs` 编译错）；`set_curvature_hex8`
+  三个缺陷（边节点搜索用参考坐标比物理坐标 → 12 条边永不命中、trilinear
+  回退的顶点 bit 约定与 Hex8 节点序不一致、边节点等距而非 Lobatto）修后与
+  MFEM `SetCurvature` 节点差 **1.1e-16**（p=2，1 ulp）/ **逐位**（p=3）；
+  单 hex 全部 216 个面 QP `detJ = +0.125`（修前 8 个 QP 精确为 0、最小
+  −0.201）；第十轮的曲线 hex 边界测试变通已删除。
+- **O：NURBS 二阶导 + ex1/ex3 本质边界**：`basis_funs_and_ders2` 差分模板
+  在区段端点被夹断（有效步长 1e-14 却除 ε²）→ 改为解析 Piegl-Tiller A2.3
+  （同 MFEM `CalcDnShape`）；6 knot 向量 × 11 采样（含端点）对照 C++
+  ≤5.3e-14（修前端点 ~1.6e7）；`nurbs_printfunc` 与 C++ 45 行 ≤1.1e-15。
+  ex1/ex3 补全本质边界后**收敛**（ex1: 16641 未知/512 本质 dof/110 迭代、
+  ‖u‖_L2 与解析级数差 4e-10；ex3 2D/3D 均收敛、误差 O(h)）。
+- **P：3D DPG 五个真缺陷 + acoustics_3d 真替换**：**根因 = hex 参考域错配**
+  （fem-element hex 族在 [−1,1]³，而 dpg_basis 用 [0,1]³ 求积/参考坐标 →
+  体积映射只覆盖单元 1/8、测度差 8 倍、测试 Gram 近奇异 `G[0,0]=3.5e-5`
+  vs C++ 0.22）——修后 3D 声学 L2 由"随加密上升"变为**下降**；另修
+  ① 3D 面法向多 0.5 因子（`cross3` = MFEM `CalcOrtho`，散度定理验证
+  ∫x·n dS 由 1.5 → 3.0 = 3|Ω|）② `local_face_table` 3D 绕向非外向
+  （改 MFEM `FaceVert` 表）③ `SkeletonSpace::new_h1` 3D 分支缺棱/面内部
+  dof 且面 dof 序与基函数节点序不符（hex 2×1×1 p=1/2/3 = 12/43/96、tet =
+  8/27/64，与 C++ `H1_Trace_FECollection` 逐位一致）④ `face_dof_params`
+  三角面枚举非 `eval_face_lagrange` 的逆。`dpg_acoustics_3d` 升级为真
+  UW-DPG：dof 数与 C++ 逐位一致、n≤3 的 L2 在 1% 内（n=4 偏 8%，归因于
+  trial dof 编号排列差异，已写入文件头）。
+- 回归基线（全绿）：fem-assembly **589** / fem-element **437** /
+  fem-mesh **292** / fem-space **274** / fem-solver **244** /
+  fem-parallel **225** / fem-io **122** / fem-linalg **63** / fem-amg **23**；
+  **`cargo build --release --examples --keep-going` 0 错误**。
+
+## 第十二轮新债务
+
+- **D27（P1）pex5 np2 并行解有 ~20% 固定偏差**（M 发现）：同网格同维数下
+  np1 给 1.94e-5（与 C++ 一致）、np2 给 1.95e-1 且**加密不下降**；
+  `nu`/`np`（不依赖解）在 np1/np2 逐位相同 ⇒ owned 过滤/积分/allreduce 正确，
+  问题在 pex5 的**并行鞍点组装**（`b_owned`/`extract_owned_rows`/`bt` 跨 rank
+  对称）或 `ParBlockCsrMatrix2` + block MINRES 路径（属 fem_parallel）。
+- **D28（P1）`HDivSpace::interpolate_vector` 与装配基不一致**（M 发现）：
+  可精确表示的场其插值场严重错误——RT0-quad 上 `(1,0)`/`(x,y)` 正确（~1e-16），
+  但 tri-RT0 上 `(1,0)` 误差 **2.0**、quad-RT1 上 O(1)（1.7）；同一场的 L²
+  投影（assembler 路径）精确到 1e-15。影响所有用 `interpolate_vector` 做
+  "精确场投影"的示例（pex24 的 `ex_dm`、pex4 初值）。疑点：DOF 泛函/法向
+  归一化约定（`crates/space/src/hdiv.rs:1110`）。
+- **D29（P1）fem-rs H(curl) 阶 ≥ 2 路径本身是坏的**（O 发现）：常量场
+  `(1,0)`（任何 ND 空间都能精确表示）的 L² 投影误差在阶 2 为 **35.8**、
+  阶 1 仅 4.7e-7，且与求积阶（3…10）无关；对 E_exact 的投影误差阶 2 = 11.3
+  （阶 1 = 0.0058）。位置疑在 `crates/space`（ND2 基）或 `crates/assembly`
+  （`VectorMassIntegrator`/质量阵装配）——**标准 ND2 示例（ex3 等）很可能
+  同样受影响**，建议优先排查。
+- **D30（P2）`dpg_poisson_2d -o 3` panic** "test-space Gram not SPD on
+  element 0"（P 发现，2D quad 高阶图范数 Gram 疑似数值奇异）。
+- **D31（P2）`HexQk` 的 dof 序 ≠ MFEM `H1_HexahedronElement` 序**（N 发现）：
+  其边块编号用自身 `(face_i,face_j)` 表（MFEM dof 8 在 (0.5,0,0)，HexQk
+  dof 8 在 (1,−1,0)）。当前几何按 HexQk 序存储自洽，但依赖"HexQk 序 ==
+  MFEM H1 序"的高阶 hex 几何读取（`io/mfem.rs` 尚不支持 Hex27）或 H1 hex
+  全局 dof 编号逻辑需另行核查（与 GLL 对齐专项 D7/#10 同族）。
+- **D24 更新**：`dpg_maxwell_3d` 仍为伪 DPG——向量 trace 已就绪
+  （`TraceSpace::new_nd`/`eval_face_nd`/`map_face_nd_to_phys`/
+  `DpgTangentTraceIntegrator3D`），但**未接进装配**（缺
+  `add_trial_trace_space_nd` + 装配里按 `is_quad_face` 填 `vec_phi` +
+  棱共享编码）；`dpg_acoustics_3d` 的 n≥4/加密档仍有 8%/60% 缺口。
+
 ## 第十一轮新债务
 
 - ~~**D17 fem-parallel P2 分区**~~ — ✅ 第十一轮修复（代理 L）。
