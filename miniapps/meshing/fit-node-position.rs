@@ -226,6 +226,8 @@ free nodes), or use -fix-bnd."
         // The adaptive surface fitting multiplies this weight; keep the handle
         // to restore the initial weight for the FNP_DUMP energy report.
         coeff: fit_weight.clone(),
+        // MFEM surf_fit_normal: 1.0 (this driver does not use normalization).
+        normal: Cell::new(1.0),
     };
 
     let mut form = TmopForm::new(topo, dm, order, TmopQuadType::GaussLegendre, quad_order);
@@ -235,6 +237,8 @@ free nodes), or use -fix-bnd."
         target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
         coeff: 1.0,
         surf_fit: Some(surf_fit),
+        metric_normal: 1.0,
+        limiting: None,
     });
     form.finalize_targets();
     form.ess_vdofs = ess_vdofs;

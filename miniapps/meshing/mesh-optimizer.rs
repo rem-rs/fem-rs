@@ -11,11 +11,17 @@
 //!   316,318,321,323,360}. Other ids known to the C++ miniapp are rejected
 //!   with an explicit "not available in the Rust port" message.
 //! - Target ids 1 (ideal shape unit size), 2 (ideal shape equal size) and
-//!   3 (ideal shape, initial size). Discrete/analytic adaptivity targets
-//!   (4-11), limiting (`-lc`), adaptive limiting (`-alc`), normalization
-//!   (`-nor`), FD derivatives (`-fd`), PA (`-pa`), hr-adaptivity (`-hr`),
-//!   combos (`-cmb`), LBFGS (`-st 1`) and untangler barriers (`-btype`,
-//!   `-wctype`) are not ported yet and rejected when requested.
+//!   3 (ideal shape, initial size). Analytic/discrete adaptivity targets
+//!   (4-11) are not unlocked in this driver yet (the discrete target
+//!   construction exists in `fem_assembly::tmop_form`, but the C++ driver
+//!   remaps the fields onto the moved mesh at every Newton step through
+//!   `AdvectorCG`, which is not ported).
+//! - Limiting (`-lc`, `TMOP_QuadraticLimiter`, uniform distance), adaptive
+//!   limiting is NOT ported (`-alc` is rejected) and normalization (`-nor`,
+//!   `EnableNormalization`) are ported (v2).
+//! - FD derivatives (`-fd`), PA (`-pa`), hr-adaptivity (`-hr`), combos
+//!   (`-cmb`), LBFGS (`-st 1`) and untangler barriers (`-btype`, `-wctype`)
+//!   are not ported and rejected when requested.
 //! - GLVis output is not ported (`-vis` is accepted and ignored); the
 //!   `perturbed.mesh` / `optimized.mesh` outputs are written with a `nodes`
 //!   section exactly like the C++ (precision 6 / 14 respectively).
@@ -24,11 +30,12 @@
 //!   cargo run --release --example mesh_optimizer -- -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 2 -tid 1 -ni 200 -bnd -qt 1 -qo 8 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m jagged.mesh -o 2 -mid 22 -tid 1 -ni 50 -li 50 -qo 4 -no-vis
+//!   cargo run --release --example mesh_optimizer -- -m icf.mesh -o 1 -mid 1 -tid 1 -lc 0.02 -nor -no-vis
 
 use fem_assembly::tmop_form::{
     count_wrong_orientations, curved_mesh_positions, linear_mesh_positions, metric_from_id_2d,
-    metric_from_id_3d, tmop_newton_solve, SharedMinDet, TmopForm, TmopIntegrator, TmopLinSolver,
-    TmopQuadType, TmopTarget, TmopTargetType,
+    metric_from_id_3d, tmop_newton_solve, SharedMinDet, TmopForm, TmopIntegrator, TmopLimiterFunction,
+    TmopLimiting, TmopLinSolver, TmopQuadType, TmopTarget, TmopTargetType,
 };
 use fem_core::FemResult;
 use fem_io::mfem::read_mfem_file;
@@ -238,9 +245,6 @@ fn parse_args() -> Args {
     if a.jitter > 0.0 {
         unsupported("-ji");
     }
-    if a.lim_const != 0.0 {
-        unsupported("-lc");
-    }
     if a.adapt_lim_const != 0.0 {
         unsupported("-alc");
     }
@@ -258,9 +262,6 @@ fn parse_args() -> Args {
     }
     if a.hradaptivity {
         unsupported("-hr");
-    }
-    if a.normalization {
-        unsupported("-nor");
     }
     if a.fdscheme {
         unsupported("-fd");
@@ -375,7 +376,8 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
         3 => TmopTarget::new(TmopTargetType::IdealShapeGivenSize),
         _ => {
             println!(
-                "target_id {} requires adaptivity targets not ported yet",
+                "target_id {} requires adaptivity targets (AdvectorCG field \
+remap) not ported yet in this driver",
                 a.target_id
             );
             std::process::exit(3);
@@ -390,14 +392,36 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
     let quad_order = a.quad_order as u8;
 
     let mut form = TmopForm::new(topo, &dm, order, quad_type, quad_order);
-    form.set_x0(x0);
+    form.set_x0(x0.clone());
+
+    // Limiting distance (MFEM: a constant-in-space `dist` grid function; the
+    // small_phys_size value is relevant only with normalization). MFEM computes
+    // mesh_volume = sum_i Mesh::GetElementVolume(i) over the Qp nodal geometry.
+    let small_phys_size = form.mesh_volume().powf(1.0 / dim as f64) / 100.0;
+    let dist = if a.normalization { small_phys_size } else { 1.0 };
+
     form.push_integrator(TmopIntegrator {
         metric: metric.unwrap(),
         target,
         coeff: 1.0,
         surf_fit: None,
+        metric_normal: 1.0,
+        // MFEM `EnableLimiting(x0, dist, lim_coeff)` with the default
+        // TMOP_QuadraticLimiter.
+        limiting: (a.lim_const != 0.0).then(|| TmopLimiting {
+            nodes0: std::rc::Rc::new(x0.clone()),
+            coeff: a.lim_const,
+            dist,
+            lim_func: TmopLimiterFunction::Quadratic,
+            normal: 1.0,
+        }),
     });
     form.finalize_targets();
+    // MFEM `EnableNormalization(x0)`: has to be after the enabling of the
+    // limiting, as it computes normalization factors for these terms as well.
+    if a.normalization {
+        form.enable_normalization();
+    }
 
     // h0: minimal local mesh size per scalar dof (MFEM `Mesh::GetElementSize`:
     // det(J) at the element center, raised to 1/dim, of the new nodal mesh).
@@ -491,6 +515,12 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
     form.ess_vdofs = ess_vdofs;
 
     let init_energy = form.energy(&zeros);
+    let mut init_metric_energy = init_energy;
+    if a.lim_const != 0.0 {
+        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+        init_metric_energy = form.energy(&zeros);
+        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+    }
 
     let lin = match a.lin_solver {
         0 => TmopLinSolver::L1Jacobi(a.max_lin_iter as usize),
@@ -531,17 +561,23 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
     write_mfem_with_nodes("optimized.mesh", mesh, &x, dim, order, 14).expect("write optimized.mesh");
 
     let fin_energy = form.energy(&dx);
+    let mut fin_metric_energy = fin_energy;
+    if a.lim_const != 0.0 {
+        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+        fin_metric_energy = form.energy(&dx);
+        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+    }
     println!(
         "Initial strain energy: {} = metrics: {} + extra terms: {}",
         fmt_e4(init_energy),
-        fmt_e4(init_energy),
-        fmt_e4(0.0)
+        fmt_e4(init_metric_energy),
+        fmt_e4(init_energy - init_metric_energy)
     );
     println!(
         "  Final strain energy: {} = metrics: {} + extra terms: {}",
         fmt_e4(fin_energy),
-        fmt_e4(fin_energy),
-        fmt_e4(0.0)
+        fmt_e4(fin_metric_energy),
+        fmt_e4(fin_energy - fin_metric_energy)
     );
     println!(
         "The strain energy decreased by: {} %.",

@@ -11,8 +11,24 @@
 //! geometry, metric ids {1, 2, 7, 9, 14, 22, 50, 55, 56, 58, 77} in 2D and
 //! {301, 302, 303, 304, 315, 316, 318, 321, 323, 360} in 3D, target types
 //! {IDEAL_SHAPE_UNIT_SIZE, IDEAL_SHAPE_EQUAL_SIZE, IDEAL_SHAPE_GIVEN_SIZE}.
-//! Limiting / adaptive limiting / normalization / discrete-adaptivity targets
-//! are NOT implemented and rejected by the driver.
+//!
+//! Scope (v2 additions):
+//! - Limiting of the mesh displacements (`TMOP_Integrator::EnableLimiting`
+//!   with `TMOP_QuadraticLimiter` / `TMOP_ExponentialLimiter`), with a uniform
+//!   limiting distance (the C++ driver's constant `dist` grid function) and a
+//!   constant limiting weight `lim_coeff` (`ConstantCoefficient`).
+//! - Normalization (`EnableNormalization` / `ComputeNormalizationEnergies`):
+//!   `metric_normal = 1/E_metric(x0)`, `lim_normal = 1/E_lim(x0)`, and the
+//!   resulting `surf_fit_normal`.
+//! - Discrete-adaptivity target construction (`DiscreteAdaptTC` with
+//!   IDEAL_SHAPE_GIVEN_SIZE / GIVEN_SHAPE_AND_SIZE and discrete size /
+//!   aspect-ratio / skew / orientation coefficient fields). NOTE: the C++
+//!   remaps the fields onto the moved mesh at every Newton step through
+//!   `AdvectorCG`/`InterpolatorFP` (`UpdateTargetSpecification`); this port
+//!   evaluates the fields on the initial mesh positions only (no remap), so
+//!   the target Jacobians match the C++ exactly at the initial mesh, but a
+//!   full optimization diverges from C++ once the mesh moves.
+//! Adaptive limiting (`EnableAdaptiveLimiting`) is NOT implemented.
 
 use crate::assembler::ref_elem_vol_h1;
 use fem_element::quadrature::{gauss_lobatto_01_arbitrary, gauss_lobatto_arbitrary};
@@ -40,6 +56,13 @@ pub enum TmopTargetType {
     IdealShapeEqualSize,
     /// IDEAL_SHAPE_GIVEN_SIZE (target_id 3): target size from the initial mesh.
     IdealShapeGivenSize,
+    /// IDEAL_SHAPE_GIVEN_SIZE built by a `DiscreteAdaptTC` with a discrete
+    /// size field (mesh-optimizer target_id 5).
+    IdealShapeGivenSizeDiscrete,
+    /// GIVEN_SHAPE_AND_SIZE built by a `DiscreteAdaptTC` with discrete
+    /// size/aspect-ratio/skew/orientation fields (mesh-optimizer target ids
+    /// 6/7/8).
+    GivenShapeAndSizeDiscrete,
 }
 
 /// Target constructor state for one integrator (MFEM `TargetConstructor`).
@@ -50,6 +73,9 @@ pub struct TmopTarget {
     pub volume_scale: f64,
     /// MFEM `ComputeAvgVolume`: total physical volume / NE (from `x0`).
     pub avg_volume: f64,
+    /// Discrete-adaptivity specification (`DiscreteAdaptTC` fields); required
+    /// by the `*Discrete` target types, `None` otherwise.
+    pub discrete: Option<TmopDiscreteSpec>,
 }
 
 impl TmopTarget {
@@ -58,6 +84,18 @@ impl TmopTarget {
             target_type,
             volume_scale: 1.0,
             avg_volume: 0.0,
+            discrete: None,
+        }
+    }
+
+    /// MFEM `TargetConstructor::ContainsVolumeInfo`.
+    pub fn contains_volume_info(&self) -> bool {
+        match self.target_type {
+            TmopTargetType::IdealShapeUnitSize => false,
+            TmopTargetType::IdealShapeEqualSize
+            | TmopTargetType::IdealShapeGivenSize
+            | TmopTargetType::IdealShapeGivenSizeDiscrete
+            | TmopTargetType::GivenShapeAndSizeDiscrete => true,
         }
     }
 }
@@ -184,20 +222,186 @@ pub struct SurfFitPos {
     /// Fitting weight `c` (MFEM `surf_fit_coeff`, a ConstantCoefficient mutated
     /// by the adaptive surface fitting of `TMOPNewtonSolver`).
     pub coeff: Rc<Cell<f64>>,
+    /// MFEM `surf_fit_normal` (1.0 unless normalization is enabled, in which
+    /// case it becomes the limiting normalization factor).
+    pub normal: Cell<f64>,
 }
 
 impl SurfFitPos {
-    pub fn new(
-        pos: Vec<f64>,
-        marker: Vec<bool>,
-        dof_count: Vec<f64>,
-        coeff: f64,
-    ) -> Self {
+    pub fn new(pos: Vec<f64>, marker: Vec<bool>, dof_count: Vec<f64>, coeff: f64) -> Self {
         Self {
             pos: Rc::new(pos),
             marker: Rc::new(marker),
             dof_count: Rc::new(dof_count),
             coeff: Rc::new(Cell::new(coeff)),
+            normal: Cell::new(1.0),
+        }
+    }
+}
+
+/// MFEM `TMOP_LimiterFunction` (fem/tmop.hpp): the scalar limiting function
+/// f(x, x0, d) of the physical position x, the reference position x0 and the
+/// limiting distance d.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmopLimiterFunction {
+    /// `TMOP_QuadraticLimiter` (the MFEM default limiter).
+    Quadratic,
+    /// `TMOP_ExponentialLimiter`.
+    Exponential,
+}
+
+/// `|x - x0|^2` (MFEM `Vector::DistanceSquaredTo`: ascending component sum).
+fn dist_sq(x: &[f64], x0: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..x.len() {
+        let d = x[i] - x0[i];
+        sum += d * d;
+    }
+    sum
+}
+
+impl TmopLimiterFunction {
+    /// MFEM `TMOP_LimiterFunction::Eval(x, x0, dist)`.
+    pub fn eval(&self, x: &[f64], x0: &[f64], dist: f64) -> f64 {
+        let dist2 = dist * dist;
+        match self {
+            Self::Quadratic => 0.5 * dist_sq(x, x0) / dist2,
+            Self::Exponential => (10.0 * (dist_sq(x, x0) / dist2 - 1.0)).exp(),
+        }
+    }
+
+    /// MFEM `TMOP_LimiterFunction::Eval_d1`: gradient w.r.t. x.
+    pub fn eval_d1(&self, x: &[f64], x0: &[f64], dist: f64, d1: &mut [f64]) {
+        let dist2 = dist * dist;
+        match self {
+            Self::Quadratic => {
+                // subtract(1.0/(dist*dist), x, x0, d1)
+                let c = 1.0 / dist2;
+                for i in 0..x.len() {
+                    d1[i] = c * (x[i] - x0[i]);
+                }
+            }
+            Self::Exponential => {
+                let c = 20.0 * (10.0 * (dist_sq(x, x0) / dist2 - 1.0)).exp() / dist2;
+                for i in 0..x.len() {
+                    d1[i] = c * (x[i] - x0[i]);
+                }
+            }
+        }
+    }
+
+    /// MFEM `TMOP_LimiterFunction::Eval_d2`: Hessian w.r.t. x, written
+    /// row-major into `d2` (dim x dim).
+    pub fn eval_d2(&self, x: &[f64], x0: &[f64], dist: f64, d2: &mut [f64]) {
+        let dim = x.len();
+        let dist2 = dist * dist;
+        match self {
+            Self::Quadratic => {
+                let c = 1.0 / dist2;
+                for i in 0..dim {
+                    for j in 0..dim {
+                        d2[i * dim + j] = if i == j { c } else { 0.0 };
+                    }
+                }
+            }
+            Self::Exponential => {
+                // TMOP_ExponentialLimiter::Eval_d2.
+                let f = (10.0 * (dist_sq(x, x0) / dist2 - 1.0)).exp();
+                let d2s2 = dist2 * dist2;
+                let tmp: Vec<f64> = (0..dim).map(|i| x[i] - x0[i]).collect();
+                for i in 0..dim {
+                    for j in 0..dim {
+                        d2[i * dim + j] = 400.0 * tmp[i] * tmp[j] * f / d2s2;
+                    }
+                    d2[i * dim + i] += 20.0 * f / dist2;
+                }
+            }
+        }
+    }
+}
+
+/// The limiting term of one `TMOP_Integrator` (MFEM `EnableLimiting(n0, w0,
+/// lfunc)` / `EnableLimiting(n0, dist, w0, lfunc)`): `lim_nodes0` (the
+/// reference positions), `lim_coeff` (a constant `Coefficient`), the uniform
+/// value of the `dist` grid function (the C++ driver keeps `dist` constant in
+/// space, so the `GridFunction::GetValues` quadrature values reduce to the Qk
+/// interpolation of that constant), the limiter function and the
+/// normalization factor `lim_normal`.
+#[derive(Clone)]
+pub struct TmopLimiting {
+    /// MFEM `lim_nodes0`: reference positions, layout `[c*n_scalar + s]`.
+    pub nodes0: Rc<Vec<f64>>,
+    /// MFEM `lim_coeff` (ConstantCoefficient).
+    pub coeff: f64,
+    /// The constant value of the `dist` grid function dofs (1.0 by default in
+    /// the C++ driver; `small_phys_size` with normalization).
+    pub dist: f64,
+    /// MFEM `lim_func`.
+    pub lim_func: TmopLimiterFunction,
+    /// MFEM `lim_normal` (set by `TmopForm::enable_normalization`).
+    pub normal: f64,
+}
+
+/// Discrete-adaptivity target specification (MFEM `DiscreteAdaptTC`): the
+/// geometric parameters of the target given as FE fields. The fields are
+/// stored as scalar dof values of an H1 indicator space (Ordering::byNODES,
+/// component-major), evaluated at the metric quadrature points through that
+/// space's shape functions.
+///
+/// NOTE (gap vs C++): MFEM remaps these fields onto the moved mesh at every
+/// Newton step (`UpdateTargetSpecification` through `AdvectorCG` /
+/// `InterpolatorFP`). This port evaluates the fields on the initial mesh
+/// positions only; the target Jacobians match the C++ at the initial mesh.
+#[derive(Clone)]
+pub struct TmopDiscreteSpec {
+    /// Target size eta(x) dofs (`SetSerialDiscreteTargetSize`).
+    pub size: Option<Rc<Vec<f64>>>,
+    /// Target aspect ratio dofs, 1 component in 2D, 3 in 3D
+    /// (`SetSerialDiscreteTargetAspectRatio`).
+    pub aspect_ratio: Option<Rc<Vec<f64>>>,
+    /// Target skew dofs, 1 component in 2D, 3 in 3D
+    /// (`SetSerialDiscreteTargetSkew`).
+    pub skew: Option<Rc<Vec<f64>>>,
+    /// Target orientation dofs, 1 component in 2D, 3 in 3D
+    /// (`SetSerialDiscreteTargetOrientation`).
+    pub orientation: Option<Rc<Vec<f64>>>,
+    /// `SetMinSizeForTargets` (MFEM `lim_min_size`; negative disables it).
+    pub min_size: f64,
+    /// Order of the indicator FE space (C++ `ind_fec_order`).
+    pub order: u8,
+    /// Number of scalar indicator dofs.
+    pub n_ind: usize,
+    /// Indicator-space scalar dof table per mesh element.
+    pub element_dofs: Rc<Vec<Vec<usize>>>,
+    /// Per-element indicator shape values at the metric quadrature points,
+    /// `[e][q * nd_ind + k]`, prepared by `TmopForm::finalize_targets`.
+    pub qp_shapes: Option<Rc<Vec<Vec<f64>>>>,
+}
+
+impl TmopDiscreteSpec {
+    /// Create a spec from the indicator-space dof tables (the values are
+    /// provided component-wise in `size`/`aspect_ratio`/`skew`/`orientation`,
+    /// each of length `n_ind`, component-major byNODES layout).
+    pub fn new(
+        size: Option<Rc<Vec<f64>>>,
+        aspect_ratio: Option<Rc<Vec<f64>>>,
+        skew: Option<Rc<Vec<f64>>>,
+        orientation: Option<Rc<Vec<f64>>>,
+        min_size: f64,
+        order: u8,
+        n_ind: usize,
+        element_dofs: Rc<Vec<Vec<usize>>>,
+    ) -> Self {
+        Self {
+            size,
+            aspect_ratio,
+            skew,
+            orientation,
+            min_size,
+            order,
+            n_ind,
+            element_dofs,
+            qp_shapes: None,
         }
     }
 }
@@ -223,6 +427,11 @@ pub struct TmopIntegrator {
     /// MFEM `surf_fit_pos`/`surf_fit_marker`/`surf_fit_coeff` when surface
     /// fitting to prescribed positions is enabled (None otherwise).
     pub surf_fit: Option<SurfFitPos>,
+    /// MFEM `metric_normal`: 1.0 until normalization is enabled
+    /// (`EnableNormalization`), then 1/E_metric(x0).
+    pub metric_normal: f64,
+    /// MFEM `EnableLimiting` state (None when limiting is disabled).
+    pub limiting: Option<TmopLimiting>,
 }
 
 /// Per-element cached data: scalar dofs, reference element, quadrature rule.
@@ -382,9 +591,19 @@ impl<'a> TmopForm<'a> {
         self.integrators.push(integ);
     }
 
+    pub fn integrators(&self) -> &[TmopIntegrator] {
+        &self.integrators
+    }
+
+    pub fn integrators_mut(&mut self) -> &mut [TmopIntegrator] {
+        &mut self.integrators
+    }
+
     /// MFEM `TargetConstructor::ComputeAvgVolume` for every integrator whose
     /// target needs it: total physical volume of the `x0` mesh / NE, using a
     /// Gauss-Legendre rule of order `2*order` (exact for the polynomial det).
+    /// Also prepares the quadrature shape tables of discrete-adaptivity
+    /// targets (`TmopDiscreteSpec::qp_shapes`).
     pub fn finalize_targets(&mut self) {
         let ne = self.elems.len();
         let gl_order = 2 * self.order;
@@ -424,7 +643,174 @@ impl<'a> TmopForm<'a> {
                 }
                 integ.target.avg_volume = volume / ne as f64;
             }
+            // Discrete adaptivity: precompute the indicator-space shape values
+            // at the metric quadrature points of every element (MFEM evaluates
+            // `src_fes->GetFE(e_id)->CalcShape(ip, shape)` on the fly; the
+            // values are deterministic, so precomputing them is equivalent).
+            if let Some(spec) = &mut integ.target.discrete {
+                let mut tables: Vec<Vec<f64>> = Vec::with_capacity(ne);
+                for (e, el) in self.elems.iter().enumerate() {
+                    let ind_re = ref_elem_for(self.topo.element_type(e as u32), spec.order);
+                    // Normalize an arbitrary reference domain to MFEM's [0,1]^d.
+                    let ind_re: Box<dyn ReferenceElement> = if el_domain_is_unit(ind_re.as_ref()) {
+                        ind_re
+                    } else {
+                        Box::new(UnitDomainElem {
+                            inner: ind_re,
+                            dim: self.dim,
+                        })
+                    };
+                    let nd_ind = ind_re.n_dofs();
+                    let nqp = el.quad_points.len();
+                    let mut tab = vec![0.0f64; nqp * nd_ind];
+                    let mut sh = vec![0.0f64; nd_ind];
+                    for q in 0..nqp {
+                        ind_re.eval_basis(&el.quad_points[q], &mut sh);
+                        for (k, v) in sh.iter().enumerate() {
+                            tab[q * nd_ind + k] = *v;
+                        }
+                    }
+                    tables.push(tab);
+                }
+                spec.qp_shapes = Some(Rc::new(tables));
+            }
         }
+    }
+
+    /// MFEM `TMOP_Integrator::EnableNormalization(x)` (serial LEGACY path):
+    /// computes `metric_normal = 1/E_metric(x0)` and
+    /// `lim_normal = 1/E_lim(x0)` with `ComputeNormalizationEnergies`, where
+    /// `E_lim` is the integral of the unit weight over the targets. The
+    /// surface fitting weight normalization (`surf_fit_normal`) becomes the
+    /// limiting factor. Must be called after `set_x0`, the integrator setup
+    /// (including limiting) and `finalize_targets`.
+    pub fn enable_normalization(&mut self) {
+        let dim = self.dim;
+        let zeros = vec![0.0_f64; self.n_dofs()];
+        // Pass 1 (immutable): ComputeNormalizationEnergies per integrator.
+        let mut normals: Vec<(f64, f64)> = Vec::with_capacity(self.integrators.len());
+        for integ in &self.integrators {
+            let mut metric_energy = 0.0f64;
+            let mut lim_energy = 0.0f64;
+            let mut pos = Vec::new();
+            let mut dsh = Vec::new();
+            let mut jtr2: Vec<[f64; 4]> = Vec::new();
+            let mut jtr3: Vec<[f64; 9]> = Vec::new();
+            for (ei, el) in self.elems.iter().enumerate() {
+                let nd = el.edofs.len();
+                let nqp = el.quad_points.len();
+                self.element_positions(el, &zeros, &mut pos);
+                dsh.resize(nd * dim, 0.0);
+                self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
+                for q in 0..nqp {
+                    let weight = el.quad_weights[q]
+                        * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) };
+                    el.re.eval_grad_basis(&el.quad_points[q], &mut dsh);
+                    // Jpr = PMatI^T * DSh, Jpt = Jpr * Jrt (MFEM
+                    // `MultAtB(PMatI, DSh, Jpr); Mult(Jpr, Jrt, Jpt)`).
+                    match (&integ.metric, dim) {
+                        (TmopMetric::D2(m), 2) => {
+                            let mut jpr = [[0.0f64; 2]; 2];
+                            for a in 0..2 {
+                                for b in 0..2 {
+                                    let mut s = 0.0;
+                                    for i in 0..nd {
+                                        s += pos[i + a * nd] * dsh[i * 2 + b];
+                                    }
+                                    jpr[a][b] = s;
+                                }
+                            }
+                            let jrt = invert_2x2(&jtr2[q]);
+                            let mut jpt = [[0.0f64; 2]; 2];
+                            for a in 0..2 {
+                                for b in 0..2 {
+                                    let mut s = 0.0;
+                                    for j in 0..2 {
+                                        s += jpr[a][j] * jrt[j + b * 2];
+                                    }
+                                    jpt[a][b] = s;
+                                }
+                            }
+                            metric_energy += weight * m.eval_w(&jpt);
+                        }
+                        (TmopMetric::D3(m), 3) => {
+                            let mut jpr = [[0.0f64; 3]; 3];
+                            for a in 0..3 {
+                                for b in 0..3 {
+                                    let mut s = 0.0;
+                                    for i in 0..nd {
+                                        s += pos[i + a * nd] * dsh[i * 3 + b];
+                                    }
+                                    jpr[a][b] = s;
+                                }
+                            }
+                            let jrt = invert_3x3(&jtr3[q]);
+                            let mut jpt = [[0.0f64; 3]; 3];
+                            for a in 0..3 {
+                                for b in 0..3 {
+                                    let mut s = 0.0;
+                                    for j in 0..3 {
+                                        s += jpr[a][j] * jrt[j + b * 3];
+                                    }
+                                    jpt[a][b] = s;
+                                }
+                            }
+                            metric_energy += weight * m.eval_w(&jpt);
+                        }
+                        _ => panic!("metric dimension mismatch"),
+                    }
+                    lim_energy += weight;
+                }
+            }
+            if !integ.target.contains_volume_info() {
+                lim_energy = self.elems.len() as f64;
+            }
+            normals.push((1.0 / metric_energy, 1.0 / lim_energy));
+        }
+        // Pass 2 (mutable): metric_normal, lim_normal, surf_fit_normal.
+        for (integ, (metric_normal, lim_normal)) in
+            self.integrators.iter_mut().zip(normals.into_iter())
+        {
+            integ.metric_normal = metric_normal;
+            if let Some(lim) = &mut integ.limiting {
+                lim.normal = lim_normal;
+            }
+            if let Some(sf) = &integ.surf_fit {
+                sf.normal.set(lim_normal);
+            }
+        }
+    }
+
+    /// Total physical volume of the `x0` mesh (MFEM `Mesh::GetElementVolume`
+    /// summed over all elements): `Σ ∫ det(Jpr)` with a Gauss-Legendre rule of
+    /// order `order` (MFEM `OrderJ()` for a Qk geometry; exact for det(Jpr)).
+    pub fn mesh_volume(&self) -> f64 {
+        let dim = self.dim;
+        let mut volume = 0.0;
+        let zeros = vec![0.0_f64; self.n_dofs()];
+        let mut pos = Vec::new();
+        let mut dsh = Vec::new();
+        for el in &self.elems {
+            let nd = el.edofs.len();
+            self.element_positions(el, &zeros, &mut pos);
+            dsh.resize(nd * dim, 0.0);
+            let rule = el.re.quadrature(self.order);
+            for (q, xi) in rule.points.iter().enumerate() {
+                el.re.eval_grad_basis(xi, &mut dsh);
+                let mut jpr = [[0.0f64; 3]; 3];
+                for a in 0..dim {
+                    for b in 0..dim {
+                        let mut s = 0.0;
+                        for i in 0..nd {
+                            s += pos[i + a * nd] * dsh[i * dim + b];
+                        }
+                        jpr[a][b] = s;
+                    }
+                }
+                volume += rule.weights[q] * det_small(&jpr, dim);
+            }
+        }
+        volume
     }
 
     /// Per-element target Jacobians Jtr (column-major) at every quadrature
@@ -434,6 +820,7 @@ impl<'a> TmopForm<'a> {
     fn compute_element_targets(
         &self,
         integ: &TmopIntegrator,
+        e: usize,
         el: &TmopElemData,
         jtr_out: &mut Vec<[f64; 4]>,
         jtr_out_3d: &mut Vec<[f64; 9]>,
@@ -502,6 +889,164 @@ impl<'a> TmopForm<'a> {
                     }
                 }
             }
+            TmopTargetType::IdealShapeGivenSizeDiscrete
+            | TmopTargetType::GivenShapeAndSizeDiscrete => {
+                let spec = integ.target.discrete.as_ref().expect("call finalize_targets");
+                let tables = spec
+                    .qp_shapes
+                    .as_ref()
+                    .expect("call finalize_targets (qp_shapes)");
+                let nd_ind = spec.element_dofs[e].len();
+                Self::discrete_element_targets(
+                    spec,
+                    integ.target.target_type == TmopTargetType::GivenShapeAndSizeDiscrete,
+                    e,
+                    &tables[e],
+                    nd_ind,
+                    dim,
+                    jtr_out,
+                    jtr_out_3d,
+                );
+            }
+        }
+    }
+
+    /// Discrete-adaptivity element targets (MFEM
+    /// `DiscreteAdaptTC::ComputeElementTargets` for IDEAL_SHAPE_GIVEN_SIZE /
+    /// GIVEN_SHAPE_AND_SIZE). `shapes` holds the indicator-space shape values
+    /// at the quadrature points of element `e` (`spec.qp_shapes[e]`).
+    fn discrete_element_targets(
+        spec: &TmopDiscreteSpec,
+        given_shape_and_size: bool,
+        e: usize,
+        shapes: &[f64],
+        nd_ind: usize,
+        dim: usize,
+        jtr_out: &mut Vec<[f64; 4]>,
+        jtr_out_3d: &mut Vec<[f64; 9]>,
+    ) {
+        let dofs = &spec.element_dofs[e];
+        // byNODES multi-component layout: index = c*n_ind + dof.
+        let comp = |f: &Rc<Vec<f64>>, c: usize, k: usize| -> f64 { f[c * spec.n_ind + dofs[k]] };
+        let min_of = |f: &Rc<Vec<f64>>, c: usize| -> f64 {
+            let mut m = f64::INFINITY;
+            for k in 0..nd_ind {
+                m = m.min(comp(f, c, k));
+            }
+            m
+        };
+        let nqp = shapes.len() / nd_ind;
+        let mut jtr = [[0.0f64; 3]; 3];
+        for q in 0..nqp {
+            let sh = &shapes[q * nd_ind..(q + 1) * nd_ind];
+            // shape * par_vals (MFEM Vector dot product, ascending sum).
+            let dot = |f: &Rc<Vec<f64>>, c: usize| -> f64 {
+                let mut s = 0.0;
+                for (k, &sv) in sh.iter().enumerate() {
+                    s += sv * comp(f, c, k);
+                }
+                s
+            };
+            // Jtr = Wideal = I (quad/hex).
+            for r in jtr.iter_mut() {
+                *r = [0.0; 3];
+            }
+            for d in 0..dim {
+                jtr[d][d] = 1.0;
+            }
+            // Set size.
+            if let Some(sz) = &spec.size {
+                let mut min_size = min_of(sz, 0);
+                if spec.min_size > 0.0 {
+                    min_size = spec.min_size;
+                }
+                assert!(min_size > 0.0, "Non-positive size propagated in the target definition.");
+                let size_q = dot(sz, 0).max(min_size);
+                let sc = size_q.powf(1.0 / dim as f64);
+                for r in jtr.iter_mut().take(dim) {
+                    for v in r.iter_mut().take(dim) {
+                        *v *= sc;
+                    }
+                }
+            }
+            if given_shape_and_size {
+                // aspect ratio
+                if let Some(ar) = &spec.aspect_ratio {
+                    let d_rho = if dim == 2 {
+                        assert!(
+                            min_of(ar, 0) > 0.0,
+                            "Non-positive aspect-ratio propagated in the target definition."
+                        );
+                        let aspr = dot(ar, 0);
+                        [
+                            [1.0 / aspr.powf(0.5), 0.0, 0.0],
+                            [0.0, aspr.powf(0.5), 0.0],
+                            [0.0, 0.0, 0.0],
+                        ]
+                    } else {
+                        [
+                            [dot(ar, 0).powf(2.0 / 3.0), 0.0, 0.0],
+                            [0.0, dot(ar, 1).powf(2.0 / 3.0), 0.0],
+                            [0.0, 0.0, dot(ar, 2).powf(2.0 / 3.0)],
+                        ]
+                    };
+                    jtr = mat3_mul_dim(&d_rho, &jtr, dim);
+                }
+                // skew
+                if let Some(sk) = &spec.skew {
+                    let q_phi = if dim == 2 {
+                        let skew = dot(sk, 0);
+                        [
+                            [1.0, skew.cos(), 0.0],
+                            [0.0, skew.sin(), 0.0],
+                            [0.0, 0.0, 0.0],
+                        ]
+                    } else {
+                        let phi12 = dot(sk, 0);
+                        let phi13 = dot(sk, 1);
+                        let chi = dot(sk, 2);
+                        [
+                            [1.0, phi12.cos(), phi13.cos()],
+                            [0.0, phi12.sin(), phi13.sin() * chi.cos()],
+                            [0.0, 0.0, phi13.sin() * chi.sin()],
+                        ]
+                    };
+                    jtr = mat3_mul_dim(&q_phi, &jtr, dim);
+                }
+                // orientation
+                if let Some(ori) = &spec.orientation {
+                    let r_theta = if dim == 2 {
+                        let theta = dot(ori, 0);
+                        let (ct, st) = (theta.cos(), theta.sin());
+                        [[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 0.0]]
+                    } else {
+                        let theta = dot(ori, 0);
+                        let psi = dot(ori, 1);
+                        let beta = dot(ori, 2);
+                        let (ct, st) = (theta.cos(), theta.sin());
+                        let (cp, sp) = (psi.cos(), psi.sin());
+                        let (cb, sb) = (beta.cos(), beta.sin());
+                        // Ported verbatim from MFEM (the (0,0)/(1,0)/(2,0)
+                        // entries are assigned twice; the final values are the
+                        // last ones).
+                        [
+                            [-st * sb - ct * cp * cb, -st * cb + ct * cp * sb, 0.0],
+                            [ct * sb - st * cp * cb, ct * cb + st * cp * sb, 0.0],
+                            [sp * cb, -sp * sb, 0.0],
+                        ]
+                    };
+                    jtr = mat3_mul_dim(&r_theta, &jtr, dim);
+                }
+            }
+            if dim == 2 {
+                // Row-major [r*2 + c], the convention of `det_jtr2`/`invert_2x2`.
+                jtr_out.push([jtr[0][0], jtr[0][1], jtr[1][0], jtr[1][1]]);
+            } else {
+                jtr_out_3d.push([
+                    jtr[0][0], jtr[0][1], jtr[0][2], jtr[1][0], jtr[1][1], jtr[1][2], jtr[2][0],
+                    jtr[2][1], jtr[2][2],
+                ]);
+            }
         }
     }
 
@@ -529,7 +1074,12 @@ impl<'a> TmopForm<'a> {
         let mut dsh = Vec::new();
         let mut jtr2: Vec<[f64; 4]> = Vec::new();
         let mut jtr3: Vec<[f64; 9]> = Vec::new();
-        for el in &self.elems {
+        let mut shape: Vec<f64> = Vec::new();
+        let mut pos0: Vec<f64> = Vec::new();
+        let mut pt = [0.0f64; 3];
+        let mut pt0 = [0.0f64; 3];
+        let mut d_val = 0.0f64;
+        for (ei, el) in self.elems.iter().enumerate() {
             let nd = el.edofs.len();
             let nqp = el.quad_points.len();
             self.element_positions(el, dx, &mut pos);
@@ -537,7 +1087,7 @@ impl<'a> TmopForm<'a> {
             dsh.resize(nd * dim, 0.0);
             let mut energy = 0.0;
             for integ in &self.integrators {
-                self.compute_element_targets(integ, el, &mut jtr2, &mut jtr3, &mut dsh);
+                self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
                     // weight = ip.weight * det(Jtr) (integ_over_target).
                     let weight = el.quad_weights[q]
@@ -569,7 +1119,26 @@ impl<'a> TmopForm<'a> {
                                 }
                             }
                             let jpt = [[jpt_cm[0], jpt_cm[2]], [jpt_cm[1], jpt_cm[3]]];
-                            energy += weight * integ.coeff * m.eval_w(&jpt);
+                            // MFEM: val = metric_normal*EvalW; val *= coeff;
+                            // val += lim_normal*lim_func*lim_coeff;
+                            // energy += weight*val. The v1 path (normal == 1,
+                            // no limiting) keeps its original accumulation.
+                            if integ.metric_normal == 1.0 && integ.limiting.is_none() {
+                                energy += weight * integ.coeff * m.eval_w(&jpt);
+                            } else {
+                                let mut val = integ.metric_normal * m.eval_w(&jpt);
+                                val *= integ.coeff;
+                                if let Some(lim) = &integ.limiting {
+                                    limiting_point_data(
+                                        el, &pos, &lim.nodes0, self.n_scalar, dim, lim, q,
+                                        &mut shape, &mut pos0, &mut pt, &mut pt0, &mut d_val,
+                                    );
+                                    val += lim.normal
+                                        * lim.lim_func.eval(&pt[..dim], &pt0[..dim], d_val)
+                                        * lim.coeff;
+                                }
+                                energy += weight * val;
+                            }
                         }
                         (TmopMetric::D3(m), 3) => {
                             let jrt = invert_3x3(&jtr3[q]);
@@ -596,7 +1165,22 @@ impl<'a> TmopForm<'a> {
                                 [jpt_cm[1], jpt_cm[4], jpt_cm[7]],
                                 [jpt_cm[2], jpt_cm[5], jpt_cm[8]],
                             ];
-                            energy += weight * integ.coeff * m.eval_w(&jpt);
+                            if integ.metric_normal == 1.0 && integ.limiting.is_none() {
+                                energy += weight * integ.coeff * m.eval_w(&jpt);
+                            } else {
+                                let mut val = integ.metric_normal * m.eval_w(&jpt);
+                                val *= integ.coeff;
+                                if let Some(lim) = &integ.limiting {
+                                    limiting_point_data(
+                                        el, &pos, &lim.nodes0, self.n_scalar, dim, lim, q,
+                                        &mut shape, &mut pos0, &mut pt, &mut pt0, &mut d_val,
+                                    );
+                                    val += lim.normal
+                                        * lim.lim_func.eval(&pt[..dim], &pt0[..dim], d_val)
+                                        * lim.coeff;
+                                }
+                                energy += weight * val;
+                            }
                         }
                         _ => panic!("metric dimension mismatch"),
                     }
@@ -609,7 +1193,8 @@ impl<'a> TmopForm<'a> {
                         if !sf.marker[dof] {
                             continue;
                         }
-                        let w = sf.coeff.get() / sf.dof_count[dof];
+                        // MFEM: w = surf_fit_coeff * surf_fit_normal * 1.0/count.
+                        let w = (sf.coeff.get() * sf.normal.get()) / sf.dof_count[dof];
                         let mut d2 = 0.0;
                         for c in 0..dim {
                             let d = pos[k + c * nd] - sf.pos[c * self.n_scalar + dof];
@@ -637,7 +1222,13 @@ impl<'a> TmopForm<'a> {
         let mut jtr2: Vec<[f64; 4]> = Vec::new();
         let mut jtr3: Vec<[f64; 9]> = Vec::new();
         let mut elvec = Vec::new();
-        for el in &self.elems {
+        let mut shape: Vec<f64> = Vec::new();
+        let mut pos0: Vec<f64> = Vec::new();
+        let mut pt = [0.0f64; 3];
+        let mut pt0 = [0.0f64; 3];
+        let mut d_val = 0.0f64;
+        let mut d1v = [0.0f64; 3];
+        for (ei, el) in self.elems.iter().enumerate() {
             let nd = el.edofs.len();
             let nqp = el.quad_points.len();
             self.element_positions(el, dx, &mut pos);
@@ -651,11 +1242,13 @@ impl<'a> TmopForm<'a> {
                 *v = 0.0;
             }
             for integ in &self.integrators {
-                self.compute_element_targets(integ, el, &mut jtr2, &mut jtr3, &mut dsh);
+                self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
-                    let weight_m = el.quad_weights[q]
-                        * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) }
-                        * integ.coeff;
+                    // MFEM: weights(q) = ip.weight*det(Jtr);
+                    // weight_m = weights(q)*metric_normal (*= metric_coeff).
+                    let weight = el.quad_weights[q]
+                        * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) };
+                    let weight_m = weight * integ.metric_normal * integ.coeff;
                     el.re.eval_grad_basis(&el.quad_points[q], &mut dsh);
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
@@ -746,6 +1339,26 @@ impl<'a> TmopForm<'a> {
                         }
                         _ => panic!("metric dimension mismatch"),
                     }
+                    // MFEM `if (lim_coeff)` in AssembleElementVectorExact:
+                    // lim_func->Eval_d1(p, p0, d_vals(q), grad);
+                    // grad *= weights(q)*lim_normal*lim_coeff;
+                    // AddMultVWt(shape, grad, PMatO).
+                    if let Some(lim) = &integ.limiting {
+                        limiting_point_data(
+                            el, &pos, &lim.nodes0, self.n_scalar, dim, lim, q, &mut shape,
+                            &mut pos0, &mut pt, &mut pt0, &mut d_val,
+                        );
+                        lim.lim_func.eval_d1(&pt[..dim], &pt0[..dim], d_val, &mut d1v);
+                        let w_l = (weight * lim.normal) * lim.coeff;
+                        for c in 0..dim {
+                            d1v[c] *= w_l;
+                        }
+                        for (k, &sv) in shape.iter().enumerate() {
+                            for c in 0..dim {
+                                elvec[k + c * nd] += sv * d1v[c];
+                            }
+                        }
+                    }
                 }
                 // MFEM `AssembleElemVecSurfFit`: elvect(s, d) += w * (x_s -
                 // x_{t,s})_d at the nodal point of every marked dof s
@@ -755,7 +1368,7 @@ impl<'a> TmopForm<'a> {
                         if !sf.marker[dof] {
                             continue;
                         }
-                        let w = sf.coeff.get() / sf.dof_count[dof];
+                        let w = (sf.normal.get() * sf.coeff.get()) / sf.dof_count[dof];
                         for c in 0..dim {
                             elvec[k + c * nd] += w * (pos[k + c * nd] - sf.pos[c * self.n_scalar + dof]);
                         }
@@ -784,7 +1397,13 @@ impl<'a> TmopForm<'a> {
         let mut dsh = Vec::new();
         let mut jtr2: Vec<[f64; 4]> = Vec::new();
         let mut jtr3: Vec<[f64; 9]> = Vec::new();
-        for el in &self.elems {
+        let mut shape: Vec<f64> = Vec::new();
+        let mut pos0: Vec<f64> = Vec::new();
+        let mut pt = [0.0f64; 3];
+        let mut pt0 = [0.0f64; 3];
+        let mut d_val = 0.0f64;
+        let mut hess_lm = [0.0f64; 9];
+        for (ei, el) in self.elems.iter().enumerate() {
             let nd = el.edofs.len();
             let ah = nd * dim;
             let nqp = el.quad_points.len();
@@ -797,11 +1416,13 @@ impl<'a> TmopForm<'a> {
             // floating-point sums (and hence the Newton path) match the C++.
             let mut elmat = vec![0.0f64; ah * ah];
             for integ in &self.integrators {
-                self.compute_element_targets(integ, el, &mut jtr2, &mut jtr3, &mut dsh);
+                self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
-                    let weight_m = el.quad_weights[q]
-                        * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) }
-                        * integ.coeff;
+                    // MFEM: weights(q) = ip.weight*det(Jtr);
+                    // weight_m = weights(q)*metric_normal (*= metric_coeff).
+                    let weight = el.quad_weights[q]
+                        * if dim == 2 { det_jtr2(&jtr2[q]) } else { det_jtr3(&jtr3[q]) };
+                    let weight_m = weight * integ.metric_normal * integ.coeff;
                     el.re.eval_grad_basis(&el.quad_points[q], &mut dsh);
                     match (&integ.metric, dim) {
                         (TmopMetric::D2(m), 2) => {
@@ -864,24 +1485,50 @@ impl<'a> TmopForm<'a> {
                         }
                         _ => panic!("metric dimension mismatch"),
                     }
+                    // MFEM `if (lim_coeff)` in AssembleElementGradExact:
+                    // weight_m = weights(q)*lim_normal*lim_coeff;
+                    // lim_func->Eval_d2(p, p0, d_vals(q), hess);
+                    // elmat(d1*dof+i, d2*dof+j) += weight_m*shape_i*shape_j*hess(d1,d2).
+                    if let Some(lim) = &integ.limiting {
+                        limiting_point_data(
+                            el, &pos, &lim.nodes0, self.n_scalar, dim, lim, q, &mut shape,
+                            &mut pos0, &mut pt, &mut pt0, &mut d_val,
+                        );
+                        lim.lim_func.eval_d2(&pt[..dim], &pt0[..dim], d_val, &mut hess_lm);
+                        let w_l = (weight * lim.normal) * lim.coeff;
+                        for i in 0..nd {
+                            let w_shape_i = w_l * shape[i];
+                            for j in 0..nd {
+                                let w = w_shape_i * shape[j];
+                                for d1 in 0..dim {
+                                    for d2 in 0..dim {
+                                        let row = d1 * nd + i;
+                                        let col = d2 * nd + j;
+                                        elmat[row + ah * col] += w * hess_lm[d1 * dim + d2];
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 // MFEM `AssembleElemGradSurfFit`: for every marked dof s,
-                // mat(s+c1*nd, s+c1*nd) += w with w = coeff/count (the quadratic
-                // limiter's Eval_d2 = I with dist = 1). NOTE: like MFEM, the
-                // outer product of the fitting gradient is deliberately omitted
-                // here (its `surf_fit_pos` branch zeroes surf_fit_grad_e and
-                // keeps only the limiter Hessian), so the assembled Hessian of
-                // the fitting term is the constant w*I.
+                // mat(s+c1*nd, s+c1*nd) += w with w = normal*coeff/count (the
+                // quadratic limiter's Eval_d2 = I with dist = 1). NOTE: like
+                // MFEM, the outer product of the fitting gradient is
+                // deliberately omitted here (its `surf_fit_pos` branch zeroes
+                // surf_fit_grad_e and keeps only the limiter Hessian), so the
+                // assembled Hessian of the fitting term is the constant w*I.
                 if let Some(sf) = &integ.surf_fit {
                     for (k, &dof) in el.edofs.iter().enumerate() {
                         if !sf.marker[dof] {
                             continue;
                         }
+                        let w = sf.normal.get() * sf.coeff.get();
                         for c1 in 0..dim {
                             let idx = c1 * nd + k;
-                            // w = surf_fit_normal * coeff, then entry *= 1/count
-                            // (the exact C++ operation order).
-                            let mut entry = sf.coeff.get();
+                            // entry = w*(0 + 1*hess(c1,c1)) with hess = I, then
+                            // entry *= 1/count (the exact C++ operation order).
+                            let mut entry = w * 1.0;
                             entry *= 1.0 / sf.dof_count[dof];
                             elmat[idx + ah * idx] += entry;
                         }
@@ -1151,6 +1798,64 @@ fn det_small(j: &[[f64; 3]; 3], dim: usize) -> f64 {
                 + j[0][2] * (j[1][0] * j[2][1] - j[2][0] * j[1][1])
         }
         _ => unreachable!(),
+    }
+}
+
+/// C = A * B on the top-left dim x dim block (MFEM `Mult(A, B, C)`).
+fn mat3_mul_dim(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3], dim: usize) -> [[f64; 3]; 3] {
+    let mut c = [[0.0f64; 3]; 3];
+    for i in 0..dim {
+        for j in 0..dim {
+            let mut s = 0.0;
+            for k in 0..dim {
+                s += a[i][k] * b[k][j];
+            }
+            c[i][j] = s;
+        }
+    }
+    c
+}
+
+/// Quadrature-point data of the limiting term (MFEM: `el.CalcShape(ip, shape)`,
+/// `PMatI.MultTranspose(shape, p)`, `pos0.MultTranspose(shape, p0)` and
+/// `lim_dist->GetValues(el_id, ir, d_vals)` — the driver's `dist` grid function
+/// is constant in space, so the latter reduces to the Qk interpolation of that
+/// constant).
+#[allow(clippy::too_many_arguments)]
+fn limiting_point_data(
+    el: &TmopElemData,
+    pos: &[f64],
+    nodes0: &[f64],
+    n_scalar: usize,
+    dim: usize,
+    lim: &TmopLimiting,
+    q: usize,
+    shape: &mut Vec<f64>,
+    pos0: &mut Vec<f64>,
+    p: &mut [f64; 3],
+    p0: &mut [f64; 3],
+    d_val: &mut f64,
+) {
+    let nd = el.edofs.len();
+    shape.resize(nd, 0.0);
+    el.re.eval_basis(&el.quad_points[q], shape);
+    pos0.resize(nd * dim, 0.0);
+    for (k, &dof) in el.edofs.iter().enumerate() {
+        for c in 0..dim {
+            pos0[k + c * nd] = nodes0[c * n_scalar + dof];
+        }
+    }
+    *p = [0.0; 3];
+    *p0 = [0.0; 3];
+    for (k, &sv) in shape.iter().enumerate() {
+        for c in 0..dim {
+            p[c] += sv * pos[k + c * nd];
+            p0[c] += sv * pos0[k + c * nd];
+        }
+    }
+    *d_val = 0.0;
+    for &sv in shape.iter() {
+        *d_val += sv * lim.dist;
     }
 }
 
@@ -2293,6 +2998,8 @@ mod tests {
             target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
             coeff: 1.0,
             surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
         });
         form.finalize_targets();
 
@@ -2398,6 +3105,8 @@ mod tests {
             target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
             coeff: 1.0,
             surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
         });
         form.finalize_targets();
         let e = form.energy(&vec![0.0; form.n_dofs()]);
@@ -2462,6 +3171,8 @@ mod tests {
                 dof_count.clone(),
                 100.0,
             )),
+            metric_normal: 1.0,
+            limiting: None,
         });
         form.finalize_targets();
 
@@ -2523,6 +3234,8 @@ mod tests {
                 target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
                 coeff: 1.0,
                 surf_fit: None,
+                metric_normal: 1.0,
+                limiting: None,
             });
             f2.finalize_targets();
             let hm = f2.hessian(&dx);
@@ -2559,6 +3272,8 @@ mod tests {
                 target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
                 coeff: 1.0,
                 surf_fit: None,
+                metric_normal: 1.0,
+                limiting: None,
             });
             f2.finalize_targets();
             let hm = f2.hessian(&dx);
@@ -2608,6 +3323,476 @@ mod tests {
                 r[i],
                 b[i]
             );
+        }
+    }
+
+    // ─── v2: limiting / normalization / discrete adaptivity ─────────────────
+
+    /// A 2x2 quad mesh with a perturbed nodal configuration, metric 2 and the
+    /// quadratic limiter bound to x0 (the mesh-optimizer driver setup): the
+    /// energy/gradient/Hessian including the limiting term must satisfy the
+    /// exact derivative relations.
+    #[test]
+    fn limiting_energy_gradient_hessian_fd() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        let mut x0 = linear_mesh_positions(topo, &dm, order, 2);
+        for (i, v) in x0.iter_mut().enumerate() {
+            *v += 0.01 * (((i % 5) as f64) - 2.0);
+        }
+        form.set_x0(x0.clone());
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: Some(TmopLimiting {
+                nodes0: Rc::new(x0),
+                coeff: 0.4,
+                dist: 1.0,
+                lim_func: TmopLimiterFunction::Quadratic,
+                normal: 1.0,
+            }),
+        });
+        form.finalize_targets();
+
+        let n = form.n_dofs();
+        let mut dx = vec![0.0_f64; n];
+        for (i, v) in dx.iter_mut().enumerate() {
+            *v = 0.01 * (((i * 7) % 11) as f64 - 5.0);
+        }
+        let mut g = vec![0.0_f64; n];
+        form.gradient(&dx, &mut g);
+        let h = 1e-6;
+        for k in (0..n).step_by(5) {
+            let mut p = dx.clone();
+            p[k] += h;
+            let mut m = dx.clone();
+            m[k] -= h;
+            let fd = (form.energy(&p) - form.energy(&m)) / (2.0 * h);
+            assert!(
+                (fd - g[k]).abs() < 1e-5,
+                "grad mismatch at {k}: analytic {} fd {}",
+                g[k],
+                fd
+            );
+        }
+        // Hessian action: on the limiting-only functional (metric coeff 0) the
+        // energy is an exact quadratic in dx, so its Hessian is constant and a
+        // coarse central difference of the gradient is exact up to roundoff.
+        // (The metric part of the Hessian is covered by
+        // `surf_fit_energy_gradient_hessian_fd`.)
+        let mut form_lim = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        form_lim.set_x0(form.x0().to_vec());
+        form_lim.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 0.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: Some(TmopLimiting {
+                nodes0: Rc::new(form.x0().to_vec()),
+                coeff: 0.4,
+                dist: 1.0,
+                lim_func: TmopLimiterFunction::Quadratic,
+                normal: 1.0,
+            }),
+        });
+        form_lim.finalize_targets();
+        let hess = form_lim.hessian(&dx);
+        let v: Vec<f64> = (0..n).map(|i| (((i * 13) % 7) as f64 - 3.0) * 0.05).collect();
+        let mut hv = vec![0.0_f64; n];
+        hess.spmv(&v, &mut hv);
+        let eps = 1e-2;
+        let mut xp = dx.clone();
+        let mut xm = dx.clone();
+        for i in 0..n {
+            xp[i] += eps * v[i];
+            xm[i] -= eps * v[i];
+        }
+        let mut gp = vec![0.0_f64; n];
+        let mut gm = vec![0.0_f64; n];
+        form_lim.gradient(&xp, &mut gp);
+        form_lim.gradient(&xm, &mut gm);
+        for k in 0..n {
+            let fd = (gp[k] - gm[k]) / (2.0 * eps);
+            assert!(
+                (fd - hv[k]).abs() < 1e-9,
+                "hess action mismatch at {k}: analytic {} fd {}",
+                hv[k],
+                fd
+            );
+        }
+    }
+
+    /// Same derivative checks for the exponential limiter (energy/gradient).
+    #[test]
+    fn limiting_exponential_limiter_fd() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        let mut x0 = linear_mesh_positions(topo, &dm, order, 2);
+        for (i, v) in x0.iter_mut().enumerate() {
+            *v += 0.008 * (((i % 4) as f64) - 1.5);
+        }
+        form.set_x0(x0.clone());
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: Some(TmopLimiting {
+                nodes0: Rc::new(x0),
+                coeff: 0.3,
+                dist: 0.5,
+                lim_func: TmopLimiterFunction::Exponential,
+                normal: 1.0,
+            }),
+        });
+        form.finalize_targets();
+
+        let n = form.n_dofs();
+        let mut dx = vec![0.0_f64; n];
+        for (i, v) in dx.iter_mut().enumerate() {
+            *v = 0.005 * (((i * 7) % 11) as f64 - 5.0);
+        }
+        let mut g = vec![0.0_f64; n];
+        form.gradient(&dx, &mut g);
+        let h = 1e-7;
+        for k in (0..n).step_by(5) {
+            let mut p = dx.clone();
+            p[k] += h;
+            let mut m = dx.clone();
+            m[k] -= h;
+            let fd = (form.energy(&p) - form.energy(&m)) / (2.0 * h);
+            assert!(
+                (fd - g[k]).abs() < 1e-5,
+                "grad mismatch at {k}: analytic {} fd {}",
+                g[k],
+                fd
+            );
+        }
+    }
+
+    /// With metric coefficient 0 the functional reduces to the limiting term
+    /// alone: `sum_q weight_q * 0.5*|x(q)-x0(q)|^2/dist^2 * lim_coeff`, which
+    /// must be maximized at dx = 0 (limiter pulls the mesh back to x0).
+    #[test]
+    fn limiting_pulls_toward_reference_positions() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        let mut x0 = linear_mesh_positions(topo, &dm, order, 2);
+        for (i, v) in x0.iter_mut().enumerate() {
+            *v += 0.02 * (((i % 5) as f64) - 2.0);
+        }
+        form.set_x0(x0.clone());
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 0.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: Some(TmopLimiting {
+                nodes0: Rc::new(x0),
+                coeff: 0.4,
+                dist: 1.0,
+                lim_func: TmopLimiterFunction::Quadratic,
+                normal: 1.0,
+            }),
+        });
+        form.finalize_targets();
+        let zeros = vec![0.0_f64; form.n_dofs()];
+        let e0 = form.energy(&zeros);
+        // dx = 0 keeps every quadrature point at its reference position: the
+        // limiting term vanishes identically.
+        assert!(e0.abs() < 1e-12, "limiting energy at dx=0 = {e0}");
+        // Any displacement increases the limiting energy.
+        let mut dx = vec![0.0_f64; form.n_dofs()];
+        for (i, v) in dx.iter_mut().enumerate() {
+            *v = 0.01 * (((i * 7) % 11) as f64 - 5.0);
+        }
+        assert!(form.energy(&dx) > e0);
+        // One Newton step strictly reduces the energy.
+        let (dx1, res) = tmop_newton_solve(
+            &form,
+            &TmopLinSolver::Minres(100),
+            1e-8,
+            8,
+            0,
+            &SharedMinDet::new(0.0),
+        );
+        assert!(res.converged || res.iterations > 0);
+        assert!(
+            form.energy(&dx1) < form.energy(&dx),
+            "Newton must reduce the limiting energy"
+        );
+    }
+
+    /// `enable_normalization` reproduces `ComputeNormalizationEnergies`:
+    /// for the perturbed 2x2 mesh with metric 1, metric_normal = 1/E_metric
+    /// and the normalized energy satisfies E_norm(x0) = E(x0)/E_metric = 1.
+    #[test]
+    fn normalization_factors() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        // Without limiting: metric_normal = 1/E(x0), lim_energy = NE
+        // (IDEAL_SHAPE_UNIT_SIZE has no volume info).
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        let mut x0 = linear_mesh_positions(topo, &dm, order, 2);
+        for (i, v) in x0.iter_mut().enumerate() {
+            *v += 0.01 * (((i % 5) as f64) - 2.0);
+        }
+        form.set_x0(x0);
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(1, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        form.finalize_targets();
+        let zeros = vec![0.0_f64; form.n_dofs()];
+        let e_raw = form.energy(&zeros);
+        form.enable_normalization();
+        assert!((form.integrators()[0].metric_normal - 1.0 / e_raw).abs() < 1e-12);
+        let e_norm = form.energy(&zeros);
+        assert!((e_norm - 1.0).abs() < 1e-12, "normalized E(x0) = {e_norm}");
+        // The normalized functional is the unnormalized one scaled by the
+        // constant metric_normal, so the Newton path must visit the identical
+        // sequence of meshes: compare the two solutions.
+        let (dx_norm, res_norm) = tmop_newton_solve(
+            &form,
+            &TmopLinSolver::Minres(100),
+            1e-10,
+            30,
+            0,
+            &SharedMinDet::new(0.0),
+        );
+        let mut form_raw = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 7);
+        form_raw.set_x0(form.x0().to_vec());
+        form_raw.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(1, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        form_raw.finalize_targets();
+        let (dx_raw, res_raw) = tmop_newton_solve(
+            &form_raw,
+            &TmopLinSolver::Minres(100),
+            1e-10,
+            30,
+            0,
+            &SharedMinDet::new(0.0),
+        );
+        assert_eq!(res_norm.converged, res_raw.converged);
+        let max_diff = dx_norm
+            .iter()
+            .zip(dx_raw.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_diff < 1e-10, "normalized vs raw dx: {max_diff}");
+    }
+
+    /// Discrete-adaptivity target: IDEAL_SHAPE_GIVEN_SIZE with a size field
+    /// only. The expected element-Jacobians were generated by the C++ probe
+    /// (`DiscreteAdaptTC::ComputeElementTargets`, MFEM 4.9/4.10, 2x2 unit quad
+    /// mesh, order-2 nodal space, order-1 indicator space, IntRules(SQUARE,3)).
+    #[test]
+    fn discrete_target_size_vs_cpp() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let dm1 = DofManager::new(&mesh, 1);
+        let topo: &dyn MeshTopology = &mesh;
+        let n1 = dm1.n_dofs;
+        // Indicator fields interpolated at the order-1 dofs (the same
+        // functions as the C++ probe).
+        let size_field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                let (x, y) = (c[0], c[1]);
+                0.02 + 0.05 * x * y + 0.01 * (3.0 * x).sin()
+            })
+            .collect();
+        let min_size = size_field.iter().cloned().fold(f64::INFINITY, f64::min);
+        let element_dofs: Rc<Vec<Vec<usize>>> = Rc::new(
+            (0..topo.n_elements())
+                .map(|e| dm1.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+                .collect(),
+        );
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 3);
+        form.set_x0(linear_mesh_positions(topo, &dm, order, 2));
+        let mut target = TmopTarget::new(TmopTargetType::IdealShapeGivenSizeDiscrete);
+        target.discrete = Some(TmopDiscreteSpec::new(
+            Some(Rc::new(size_field)),
+            None,
+            None,
+            None,
+            min_size,
+            1,
+            n1,
+            element_dofs,
+        ));
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target,
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        form.finalize_targets();
+        // Element 0 of the mesh: Jtr(q) = size(q)^(1/2) * I (the C++ probe
+        // prints the same four values at the IntRules(SQUARE, 3) points).
+        let expected: [[f64; 4]; 4] = [
+            [0.15055292232997675, 0.0, 0.0, 0.15055292232997675],
+            [0.17306163139618605, 0.0, 0.0, 0.17306163139618605],
+            [0.15553548878374299, 0.0, 0.0, 0.15553548878374299],
+            [0.18879115651236916, 0.0, 0.0, 0.18879115651236916],
+        ];
+        let mut jtr2: Vec<[f64; 4]> = Vec::new();
+        let mut jtr3: Vec<[f64; 9]> = Vec::new();
+        let mut dsh = Vec::new();
+        let integ = &form.integrators()[0];
+        let el = &form.elems[0];
+        form.compute_element_targets(integ, 0, el, &mut jtr2, &mut jtr3, &mut dsh);
+        assert_eq!(jtr2.len(), 4);
+        for (q, e) in expected.iter().enumerate() {
+            for c in 0..4 {
+                assert!(
+                    (jtr2[q][c] - e[c]).abs() < 1e-13,
+                    "q{q}[{c}]: {} vs {}",
+                    jtr2[q][c],
+                    e[c]
+                );
+            }
+        }
+    }
+
+    /// Discrete-adaptivity target: GIVEN_SHAPE_AND_SIZE with size + aspect
+    /// ratio + skew + orientation fields, element 0 (C++ probe case 2).
+    #[test]
+    fn discrete_target_shape_and_size_vs_cpp() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let dm1 = DofManager::new(&mesh, 1);
+        let topo: &dyn MeshTopology = &mesh;
+        let n1 = dm1.n_dofs;
+        let size_field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                let (x, y) = (c[0], c[1]);
+                0.02 + 0.05 * x * y + 0.01 * (3.0 * x).sin()
+            })
+            .collect();
+        let aspr_field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                let (x, y) = (c[0], c[1]);
+                1.0 + 2.0 * x + 0.5 * y * y
+            })
+            .collect();
+        let ori_field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                let (x, y) = (c[0], c[1]);
+                std::f64::consts::PI * y * (1.0 - y) * (2.0 * std::f64::consts::PI * x).cos()
+            })
+            .collect();
+        let skew_field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                let (x, y) = (c[0], c[1]);
+                0.3 * x + 0.2 * y
+            })
+            .collect();
+        let min_size = size_field.iter().cloned().fold(f64::INFINITY, f64::min);
+        let element_dofs: Rc<Vec<Vec<usize>>> = Rc::new(
+            (0..topo.n_elements())
+                .map(|e| dm1.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+                .collect(),
+        );
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 3);
+        form.set_x0(linear_mesh_positions(topo, &dm, order, 2));
+        let mut target = TmopTarget::new(TmopTargetType::GivenShapeAndSizeDiscrete);
+        target.discrete = Some(TmopDiscreteSpec::new(
+            Some(Rc::new(size_field)),
+            Some(Rc::new(aspr_field)),
+            Some(Rc::new(skew_field)),
+            Some(Rc::new(ori_field)),
+            min_size,
+            1,
+            n1,
+            element_dofs,
+        ));
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target,
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        form.finalize_targets();
+        let expected: [[f64; 4]; 4] = [
+            [
+                0.13470303647480519,
+                0.16564850745144186,
+                0.01294760362425087,
+                0.024807727515924173,
+            ],
+            [
+                0.12786586309735384,
+                0.23293614487330014,
+                -0.012290417170862504,
+                0.010164446958251919,
+            ],
+            [
+                0.12729864224224097,
+                0.15885574745613223,
+                0.047570654930314774,
+                0.080332085438534165,
+            ],
+            [
+                0.12873027963043773,
+                0.25602514187336189,
+                -0.048105648289078547,
+                -0.041436951652293399,
+            ],
+        ];
+        let mut jtr2: Vec<[f64; 4]> = Vec::new();
+        let mut jtr3: Vec<[f64; 9]> = Vec::new();
+        let mut dsh = Vec::new();
+        let integ = &form.integrators()[0];
+        let el = &form.elems[0];
+        form.compute_element_targets(integ, 0, el, &mut jtr2, &mut jtr3, &mut dsh);
+        assert_eq!(jtr2.len(), 4);
+        for (q, e) in expected.iter().enumerate() {
+            for c in 0..4 {
+                assert!(
+                    (jtr2[q][c] - e[c]).abs() < 1e-13,
+                    "q{q}[{c}]: {} vs {}",
+                    jtr2[q][c],
+                    e[c]
+                );
+            }
         }
     }
 }
