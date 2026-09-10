@@ -495,12 +495,16 @@ name = "lor_elast"
 path = "../miniapps/solvers/lor_elast.rs"
 
 [[example]]
-name = "block_solvers"
-path = "../miniapps/solvers/block_solvers.rs"
+name = "multidomain_nd"
+path = "../miniapps/multidomain/multidomain_nd.rs"
 
 [[example]]
-name = "schrodinger_flow"
-path = "../miniapps/fluids/schrodinger_flow.rs"
+name = "multidomain_rt"
+path = "../miniapps/multidomain/multidomain_rt.rs"
+
+[[example]]
+name = "plor_solvers"
+path = "../miniapps/solvers/plor_solvers.rs"
 
 [[example]]
 name = "dpg_helmholtz_1d"
@@ -515,9 +519,33 @@ name = "dpg_acoustics_2d"
 path = "../miniapps/dpg/dpg_acoustics_2d.rs"
 
 [[example]]
+name = "dpg_maxwell_2d"
+path = "../miniapps/dpg/dpg_maxwell_2d.rs"
+
+[[example]]
+name = "dpg_acoustics_3d"
+path = "../miniapps/dpg/dpg_acoustics_3d.rs"
+
+[[example]]
+name = "dpg_maxwell_3d"
+path = "../miniapps/dpg/dpg_maxwell_3d.rs"
+
+[[example]]
+name = "block_solvers"
+path = "../miniapps/solvers/block_solvers.rs"
+
+[[example]]
+name = "schrodinger_flow"
+path = "../miniapps/fluids/schrodinger_flow.rs"
+
+[[example]]
 name = "hdiv_darcy"
 path = "../miniapps/hdiv_linear_solver/darcy.rs"
 
 [[example]]
 name = "hdiv_grad_div"
 path = "../miniapps/hdiv_linear_solver/grad_div.rs"
+
+[[example]]
+name = "mfem_pex0_parallel_poisson"
+path = "mfem_pex0_parallel_poisson.rs"
