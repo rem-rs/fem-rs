@@ -1,4 +1,28 @@
 //! 3D Maxwell DPG solver.
+//!
+//! ⚠️ **STATUS（第十一轮代理 H 复核）：这不是真 DPG。** 本文件是手写的
+//! P1（节点）Galerkin 复系统 + `solve_cg_complex`，注释中的 "DPG" 名不副实：
+//! `omega` 参数未使用、虚部恒 0、没有骨架 trace 未知量、没有 DPG 正规方程
+//! `A = BᵀG⁻¹B`。与 C++ `miniapps/dpg/maxwell.cpp` 的 3D 分支（E,H ∈ (L²)³、
+//! Ê,Ĥ ∈ `ND_Trace_FECollection(order,3)`、F,G ∈ `ND_FECollection(order+do,3)`、
+//! 复块算子 + 伴随图范数测试空间）**无法数值对照**。
+//!
+//! 真替换的**剩余阻塞点**（详见 `tmp/dpg3d/FINDINGS.md`）：
+//! 1. `dpg_weakform.rs` 只有标量面 Lagrange trace 支持（`eval_face_lagrange`
+//!    + `FaceVals::phi`）；ND trace 需要 `FaceVals::vec_phi` 与面-棱共享编号。
+//!    该文件归代理 G，本轮未改。
+//! 2. 同一文件 `face_geo_at` 的 3D 面法向带 0.5 因子（MFEM `CalcOrtho` 无），
+//!    3D 面 trace 积分整体差 2 倍。
+//! 3. `HexNDk` 是 MFEM `ND_HexahedronElement` 的**另一组基**（[−1,1]³ +
+//!    IntegratedGLL vs [0,1]³ + GaussLegendre）：空间相同（已用单测
+//!    `dpg_basis::trace_tests::nd_hex_span_is_tensor_nedelec` 钉死），
+//!    解不受影响，但单元矩阵不能逐位对照。
+//!
+//! **已完成的前置件**（本轮，均在 `crates/assembly/src/dpg/dpg_basis.rs`）：
+//! `TraceSpace`（H1/RT/ND 三类 3D 骨架空间，面/棱实体表、全局 dof 编号、
+//! 面内 dof 顺序与 `EncodeDof` 符号编码、面单元基值、切向协变物理映射）
+//! 与 C++ 逐位一致；3D 所需积分器已核对补齐
+//! （新增 `DpgTransposedMixedCurlIntegrator` = `(E,∇×F)`）。
 
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr};
 use fem_solver::complex_ams::solve_cg_complex;

@@ -350,6 +350,43 @@ impl DpgBilinear2 for DpgMixedVectorWeakDivergenceIntegrator {
     }
 }
 
+/// `(E, ∇×F)` (3-D) — MFEM `TransposeIntegrator(MixedCurlIntegrator(q))` as
+/// used by `miniapps/dpg/maxwell.cpp` for `dim == 3`: an H(curl) trial
+/// (`F`, the ND test space of the DPG there) paired with a `vdim`-expanded
+/// scalar-L2 test (`E ∈ (L²)³`).  `MixedCurlIntegrator` returns
+/// `(dimc·n_test) × n_trial` rows laid out component-major
+/// (`d·test_dof + i`), which is exactly the `byNODES` expansion fem-rs uses
+/// for [`VolKind::Vector`]:
+///
+/// ```text
+///     B[E_{c,i}, F_j] += w q (∇×F_j)_c E_i
+/// ```
+///
+/// (`w = ip.weight · |det J|`; `MixedCurlIntegrator` multiplies by
+/// `Trans.Weight()` itself.)  `trial` is the H(curl) side, `test` the
+/// `vdim`-expanded scalar side.
+pub struct DpgTransposedMixedCurlIntegrator {
+    /// Coefficient `q`.
+    pub q: f64,
+}
+
+impl DpgBilinear2 for DpgTransposedMixedCurlIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let nsc = test.n_scalar;
+        let nt = trial.n_scalar;
+        for c in 0..d {
+            for i in 0..nsc {
+                let row = c * nsc + i;
+                for j in 0..nt {
+                    m[row * nt + j] +=
+                        ctx.w * self.q * test.phi[row] * trial.curl[j * d + c];
+                }
+            }
+        }
+    }
+}
+
 /// `(q ∇×v, u)` (3-D) — MFEM `MixedVectorCurlIntegrator(Q)`:
 /// trial H(curl), test vector FE (H(div)/H(curl)).
 pub struct DpgMixedVectorCurlIntegrator {
@@ -618,5 +655,33 @@ mod tests {
         let mut m = vec![0.0; 4];
         DpgMixedScalarWeakGradientIntegrator { q: 1.0 }.assemble2(&ctx, &r, &t, &mut m);
         assert!((m[0] + 3.0).abs() < 1e-14, "weak gradient must be negative");
+    }
+
+    /// `TransposeIntegrator(MixedCurlIntegrator)` layout: the test side is a
+    /// `byNODES`-expanded scalar element (`vdim` components) and the trial an
+    /// H(curl) element; entry `[c·n_scalar + i, j]` pairs test component `c`
+    /// with the trial curl component `c`.
+    #[test]
+    fn transposed_mixed_curl_layout() {
+        let ctx = VolCtx { w: 1.0, x: vec![0.0, 0.0, 0.0], dim: 3, elem: 0 };
+        let mut test = vals(6, 3, 0.0);
+        test.n_scalar = 2;
+        test.n_expanded = 6;
+        test.phi = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let mut trial = vals(2, 1, 0.0);
+        trial.curl = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut m = vec![0.0; 6 * 2];
+        DpgTransposedMixedCurlIntegrator { q: 2.0 }.assemble2(&ctx, &trial, &test, &mut m);
+        for c in 0..3 {
+            for i in 0..2 {
+                for j in 0..2 {
+                    let want = 2.0 * test.phi[c * 2 + i] * trial.curl[j * 3 + c];
+                    assert!(
+                        (m[(c * 2 + i) * 2 + j] - want).abs() < 1e-15,
+                        "entry ({c},{i},{j})"
+                    );
+                }
+            }
+        }
     }
 }

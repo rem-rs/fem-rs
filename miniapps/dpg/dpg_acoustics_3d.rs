@@ -1,5 +1,26 @@
 //! 3D Acoustics DPG (Discontinuous Petrov-Galerkin) solver for Helmholtz.
 //!
+//! ⚠️ **STATUS（第十一轮代理 H 复核）：这不是真 DPG。** 本文件是手写的 P1
+//! Galerkin 复系统 + `solve_cg_complex`：没有骨架 trace 未知量（p̂/û）、
+//! 没有 DPG 正规方程 `A = BᵀG⁻¹B`、没有伴随图范数测试空间；`∇p + iωu = 0`
+//! 的复耦合退化为实数 P1 Poisson 项。与 C++ `miniapps/dpg/acoustics.cpp`
+//! （p ∈ L²、u ∈ (L²)³、p̂ ∈ `H1_Trace_FECollection(order,3)`、
+//! û ∈ `RT_Trace_FECollection(order-1,3)`、q ∈ H¹(order+do)、v ∈ RT(order+do)）
+//! **无法数值对照**。
+//!
+//! 真替换的**剩余阻塞点**（详见 `tmp/dpg3d/FINDINGS.md`）：
+//! 1. `dpg_weakform.rs` 的 trace 分块只支持标量面 Lagrange 基；且 3D 三角面
+//!    的 `SkeletonSpace` 语义与 `RT_Trace_FECollection` 不一致（3D RT trace
+//!    无棱 dof、面内部 = L2 面空间），骨架 H1 trace 的 3D 分支持久化也只在
+//!    2D 验证过。该文件归代理 G，本轮未改。
+//! 2. 同一文件 `face_geo_at` 的 3D 面法向/measure 只有 MFEM 的一半
+//!    （`cross_half` vs MFEM `CalcOrtho`），所有 3D 面 trace 积分差 2 倍。
+//!
+//! **已完成的前置件**（本轮）：`crates/assembly/src/dpg/dpg_basis.rs` 的
+//! `TraceSpace`（H1/RT/ND）与 C++ `*_Trace_FECollection` 的 dof 计数、
+//! 全局编号、面实体表逐位一致（`tmp/dpg3d/ndtrace_dump.txt` diff 全等），
+//! 3D 所需积分器已核对（acoustics 3D 无缺口）。
+//!
 //! Solves the first-order system:
 //!   ∇p + iωu = 0  in Ω
 //!   ∇·u + iωp = f  in Ω

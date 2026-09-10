@@ -969,6 +969,940 @@ pub fn tri_face_dof_index(a: usize, b: usize, p: usize) -> usize {
     row * (p + 1) - row * (row - 1) / 2 + a
 }
 
+// ─── MFEM reference-interval point sets ──────────────────────────────────────
+
+/// MFEM `Poly_1D::ClosedPoints(n)`: the `n + 1` Gauss-Lobatto points on
+/// `[0,1]`, ascending.  (`Polynomial degree n`, endpoints included.)
+pub fn lobatto_points_01(n: usize) -> Vec<f64> {
+    if n == 0 {
+        return vec![0.0];
+    }
+    fem_element::quadrature::gauss_lobatto_01_arbitrary(n + 1).0
+}
+
+/// MFEM `Poly_1D::OpenPoints(n)`: the `n + 1` Gauss-Legendre points on
+/// `[0,1]`, ascending (endpoints excluded).
+pub fn legendre_points_01(n: usize) -> Vec<f64> {
+    if n == 0 {
+        return vec![0.5];
+    }
+    fem_element::quadrature::gauss_legendre_01(n + 1).0
+}
+
+/// Lagrange basis at the nodes `pts` (ascending), evaluated at `x`.
+fn lagrange_at(pts: &[f64], x: f64, out: &mut [f64]) {
+    let n = pts.len();
+    for j in 0..n {
+        let mut v = 1.0;
+        for k in 0..n {
+            if k != j {
+                v *= (x - pts[k]) / (pts[j] - pts[k]);
+            }
+        }
+        out[j] = v;
+    }
+}
+
+// ─── MFEM ND face (trace) elements ───────────────────────────────────────────
+
+/// Row-major dense inverse (Gauss–Jordan).  Matrices here are the small
+/// Vandermonde systems of the ND face elements (`n ≤ 30`).
+fn dense_inverse(a: &[f64], n: usize) -> Vec<f64> {
+    let mut m = vec![0.0_f64; n * 2 * n];
+    for i in 0..n {
+        for j in 0..n {
+            m[i * 2 * n + j] = a[i * n + j];
+        }
+        m[i * 2 * n + n + i] = 1.0;
+    }
+    for c in 0..n {
+        let mut piv = c;
+        let mut bv = m[c * 2 * n + c].abs();
+        for r in (c + 1)..n {
+            let v = m[r * 2 * n + c].abs();
+            if v > bv {
+                bv = v;
+                piv = r;
+            }
+        }
+        assert!(bv > 1e-14, "dense_inverse: singular Vandermonde");
+        if piv != c {
+            for k in 0..2 * n {
+                m.swap(c * 2 * n + k, piv * 2 * n + k);
+            }
+        }
+        let p = m[c * 2 * n + c];
+        for k in 0..2 * n {
+            m[c * 2 * n + k] /= p;
+        }
+        for r in 0..n {
+            if r != c {
+                let f = m[r * 2 * n + c];
+                if f != 0.0 {
+                    for k in 0..2 * n {
+                        m[r * 2 * n + k] -= f * m[c * 2 * n + k];
+                    }
+                }
+            }
+        }
+    }
+    let mut inv = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            inv[i * n + j] = m[i * 2 * n + n + j];
+        }
+    }
+    inv
+}
+
+/// Reference DOF count of the ND trace face element — MFEM
+/// `ND_TriangleElement::GetDof()` / `ND_QuadrilateralElement::GetDof()`
+/// (`p(p+2)` resp. `2p(p+1)`), split into edge and face-interior parts.
+pub fn nd_face_dofs(p: usize, is_quad: bool) -> usize {
+    let n_edges = if is_quad { 4 } else { 3 };
+    n_edges * p + nd_face_interior_dofs(p, is_quad)
+}
+
+/// Face-interior DOF count of the ND trace face element (MFEM
+/// `ND_dof[TRIANGLE] = p(p−1)`, `ND_dof[SQUARE] = 2p(p−1)`).
+pub fn nd_face_interior_dofs(p: usize, is_quad: bool) -> usize {
+    let pm1 = p.saturating_sub(1);
+    if is_quad {
+        2 * p * pm1
+    } else {
+        p * pm1
+    }
+}
+
+/// Reference coordinates of the DOFs of MFEM `ND_TriangleElement(p)` /
+/// `ND_QuadrilateralElement(p)` in the element's DOF order.
+pub fn nd_face_dof_nodes(p: usize, is_quad: bool) -> Vec<[f64; 2]> {
+    let mut out = Vec::with_capacity(nd_face_dofs(p, is_quad));
+    let eop = legendre_points_01(p - 1); // p points
+    if is_quad {
+        let cp = lobatto_points_01(p); // p+1 points
+        for i in 0..p {
+            out.push([eop[i], cp[0]]);
+        }
+        for j in 0..p {
+            out.push([cp[p], eop[j]]);
+        }
+        for i in 0..p {
+            out.push([eop[p - 1 - i], cp[p]]);
+        }
+        for j in 0..p {
+            out.push([cp[0], eop[p - 1 - j]]);
+        }
+        for j in 1..p {
+            for i in 0..p {
+                out.push([eop[i], cp[j]]);
+            }
+        }
+        for j in 0..p {
+            for i in 1..p {
+                out.push([cp[i], eop[j]]);
+            }
+        }
+    } else {
+        for i in 0..p {
+            out.push([eop[i], 0.0]);
+        }
+        for i in 0..p {
+            out.push([eop[p - 1 - i], eop[i]]);
+        }
+        for i in 0..p {
+            out.push([0.0, eop[p - 1 - i]]);
+        }
+        if p >= 2 {
+            let iop = legendre_points_01(p - 2); // p-1 points
+            let pm2 = p - 2;
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let w = iop[i] + iop[j] + iop[pm2 - i - j];
+                    out.push([iop[i] / w, iop[j] / w]);
+                    out.push([iop[i] / w, iop[j] / w]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `tk` direction vectors of MFEM `ND_TriangleElement`
+/// (`tk = {1,0, −1,1, 0,−1, 0,1}`).
+const ND_TRI_TK: [[f64; 2]; 4] = [[1.0, 0.0], [-1.0, 1.0], [0.0, -1.0], [0.0, 1.0]];
+
+/// `dof2tk` of MFEM `ND_TriangleElement(p)` (index into [`ND_TRI_TK`]).
+fn nd_tri_dof2tk(p: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(nd_face_dofs(p, false));
+    for _ in 0..p {
+        out.push(0);
+    }
+    for _ in 0..p {
+        out.push(1);
+    }
+    for _ in 0..p {
+        out.push(2);
+    }
+    if p >= 2 {
+        let pm2 = p - 2;
+        for j in 0..=pm2 {
+            for i in 0..=(pm2 - j) {
+                let _ = (i, j);
+                out.push(0);
+                out.push(3);
+            }
+        }
+    }
+    out
+}
+
+/// MFEM `Poly_1D::CalcBasis(p, x, u)` = `CalcChebyshev(p, x, u)`: the
+/// hierarchical Chebyshev basis `u_k = T_k(2x − 1)`, `k = 0..=p`.
+fn chebyshev_basis(p: usize, x: f64, out: &mut [f64]) {
+    out[0] = 1.0;
+    if p == 0 {
+        return;
+    }
+    let z = 2.0 * x - 1.0;
+    out[1] = z;
+    for n in 1..p {
+        out[n + 1] = 2.0 * z * out[n] - out[n - 1];
+    }
+}
+
+/// The polynomial expansion functions of MFEM `ND_TriangleElement(p)`
+/// (before the Vandermonde inversion), row-major `[n_basis × 2]`.
+fn nd_tri_expansion(p: usize, x: f64, y: f64) -> Vec<f64> {
+    let pm1 = p - 1;
+    let mut lx = vec![0.0; pm1 + 1];
+    let mut ly = vec![0.0; pm1 + 1];
+    let mut ll = vec![0.0; pm1 + 1];
+    chebyshev_basis(pm1, x, &mut lx);
+    chebyshev_basis(pm1, y, &mut ly);
+    chebyshev_basis(pm1, 1.0 - x - y, &mut ll);
+    let c = 1.0 / 3.0;
+    let n_basis = 2 * (pm1 + 1) * (pm1 + 2) / 2 + (pm1 + 1);
+    let mut out = vec![0.0_f64; n_basis * 2];
+    let mut n = 0;
+    for j in 0..=pm1 {
+        for i in 0..=(pm1 - j) {
+            let s = lx[i] * ly[j] * ll[pm1 - i - j];
+            out[n * 2] = s;
+            out[n * 2 + 1] = 0.0;
+            n += 1;
+            out[n * 2] = 0.0;
+            out[n * 2 + 1] = s;
+            n += 1;
+        }
+    }
+    for j in 0..=pm1 {
+        let s = lx[pm1 - j] * ly[j];
+        out[n * 2] = s * (y - c);
+        out[n * 2 + 1] = -s * (x - c);
+        n += 1;
+    }
+    out
+}
+
+/// Evaluate the reference basis of MFEM `ND_TriangleElement(p)` at `(x, y)`;
+/// `out` is row-major `[n_dofs × 2]` in the element's DOF order.
+pub fn nd_tri_basis(p: usize, x: f64, y: f64, out: &mut [f64]) {
+    assert!(p >= 1, "nd_tri_basis requires p >= 1");
+    let pm1 = p - 1;
+    let n_basis = 2 * (pm1 + 1) * (pm1 + 2) / 2 + (pm1 + 1);
+    let nodes = nd_face_dof_nodes(p, false);
+    let d2t = nd_tri_dof2tk(p);
+    let n_dof = nodes.len();
+    assert_eq!(out.len(), n_dof * 2);
+    // Vandermonde T[n_basis × n_dof]: T[k][m] = expansion_k(node_m) · tk_m
+    let mut t = vec![0.0_f64; n_basis * n_dof];
+    for m in 0..n_dof {
+        let e = nd_tri_expansion(p, nodes[m][0], nodes[m][1]);
+        let tk = ND_TRI_TK[d2t[m]];
+        for k in 0..n_basis {
+            t[k * n_dof + m] = e[k * 2] * tk[0] + e[k * 2 + 1] * tk[1];
+        }
+    }
+    let tinv = dense_inverse(&t, n_basis); // [n_dof × n_basis]
+    let u = nd_tri_expansion(p, x, y);
+    for m in 0..n_dof {
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for k in 0..n_basis {
+            let c = tinv[m * n_basis + k];
+            vx += c * u[k * 2];
+            vy += c * u[k * 2 + 1];
+        }
+        out[m * 2] = vx;
+        out[m * 2 + 1] = vy;
+    }
+}
+
+/// Evaluate the reference basis of MFEM `ND_QuadrilateralElement(p)` at
+/// `(s, t)`; `out` is row-major `[n_dofs × 2]` in the element's DOF order.
+pub fn nd_quad_basis(p: usize, s: f64, t: f64, out: &mut [f64]) {
+    assert!(p >= 1, "nd_quad_basis requires p >= 1");
+    let cp = lobatto_points_01(p); // p+1
+    let op = legendre_points_01(p - 1); // p
+    let mut lcx = vec![0.0; p + 1];
+    let mut lcy = vec![0.0; p + 1];
+    let mut lox = vec![0.0; p];
+    let mut loy = vec![0.0; p];
+    lagrange_at(&cp, s, &mut lcx);
+    lagrange_at(&cp, t, &mut lcy);
+    lagrange_at(&op, s, &mut lox);
+    lagrange_at(&op, t, &mut loy);
+    assert_eq!(out.len(), nd_face_dofs(p, true) * 2);
+    let mut k = 0;
+    for i in 0..p {
+        out[k * 2] = lox[i] * lcy[0];
+        out[k * 2 + 1] = 0.0;
+        k += 1;
+    }
+    for j in 0..p {
+        out[k * 2] = 0.0;
+        out[k * 2 + 1] = lcx[p] * loy[j];
+        k += 1;
+    }
+    for i in 0..p {
+        out[k * 2] = -lox[p - 1 - i] * lcy[p];
+        out[k * 2 + 1] = 0.0;
+        k += 1;
+    }
+    for j in 0..p {
+        out[k * 2] = 0.0;
+        out[k * 2 + 1] = -lcx[0] * loy[p - 1 - j];
+        k += 1;
+    }
+    for j in 1..p {
+        for i in 0..p {
+            out[k * 2] = lox[i] * lcy[j];
+            out[k * 2 + 1] = 0.0;
+            k += 1;
+        }
+    }
+    for j in 0..p {
+        for i in 1..p {
+            out[k * 2] = 0.0;
+            out[k * 2 + 1] = lcx[i] * loy[j];
+            k += 1;
+        }
+    }
+}
+
+/// Reference ND face basis (dispatcher over the face geometry).
+pub fn eval_face_nd(p: usize, is_quad: bool, param: &[f64], out: &mut [f64]) {
+    if is_quad {
+        nd_quad_basis(p, param[0], param[1], out);
+    } else {
+        nd_tri_basis(p, param[0], param[1], out);
+    }
+}
+
+/// Covariant (tangential) map of a reference face 2-vector to physical space —
+/// MFEM `VectorFiniteElement::CalcVShape_ND(Trans, shape)` with `Trans` the
+/// face transformation: `w = J (JᵀJ)⁻¹ v` (equivalently `v · J⁺` with the
+/// left inverse `J⁺ = (JᵀJ)⁻¹Jᵀ`).
+///
+/// `jac` holds the two surface-tangent columns `∂x/∂s`, `∂x/∂t`.
+pub fn map_face_nd_to_phys(jac: &[[f64; 3]; 2], v: &[f64; 2]) -> [f64; 3] {
+    let j0 = jac[0];
+    let j1 = jac[1];
+    let g00 = j0[0] * j0[0] + j0[1] * j0[1] + j0[2] * j0[2];
+    let g01 = j0[0] * j1[0] + j0[1] * j1[1] + j0[2] * j1[2];
+    let g11 = j1[0] * j1[0] + j1[1] * j1[1] + j1[2] * j1[2];
+    let det = g00 * g11 - g01 * g01;
+    let y0 = (g11 * v[0] - g01 * v[1]) / det;
+    let y1 = (g00 * v[1] - g01 * v[0]) / det;
+    [
+        j0[0] * y0 + j1[0] * y1,
+        j0[1] * y0 + j1[1] * y1,
+        j0[2] * y0 + j1[2] * y1,
+    ]
+}
+
+// ─── MFEM mesh-entity tables ─────────────────────────────────────────────────
+
+/// Local edge vertex pairs, verbatim from MFEM
+/// `Geometry::Constants<ElemType>::Edges`.
+pub fn mfem_local_edges(et: ElementType) -> &'static [[usize; 2]] {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => &[[0, 1], [1, 2], [2, 0]],
+        ElementType::Quad4 => &[[0, 1], [1, 2], [2, 3], [3, 0]],
+        ElementType::Tet4 => &[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]],
+        ElementType::Hex8 => &[
+            [0, 1],
+            [1, 2],
+            [3, 2],
+            [0, 3],
+            [4, 5],
+            [5, 6],
+            [7, 6],
+            [4, 7],
+            [0, 4],
+            [1, 5],
+            [2, 6],
+            [3, 7],
+        ],
+        _ => panic!("mfem_local_edges: unsupported {et:?}"),
+    }
+}
+
+/// Local face vertex cycles, verbatim from MFEM
+/// `Geometry::Constants<ElemType>::FaceVert` (2-D: the element's edges).
+pub fn mfem_local_faces(et: ElementType, dim: usize) -> &'static [&'static [usize]] {
+    match (et, dim) {
+        (ElementType::Tri3 | ElementType::Tri6, 2) => &[&[0, 1], &[1, 2], &[2, 0]],
+        (ElementType::Quad4, 2) => &[&[0, 1], &[1, 2], &[2, 3], &[3, 0]],
+        (ElementType::Tet4, 3) => &[&[1, 2, 3], &[0, 3, 2], &[0, 1, 3], &[0, 2, 1]],
+        (ElementType::Hex8, 3) => &[
+            &[3, 2, 1, 0],
+            &[0, 1, 5, 4],
+            &[1, 2, 6, 5],
+            &[2, 3, 7, 6],
+            &[3, 0, 4, 7],
+            &[4, 5, 6, 7],
+        ],
+        _ => panic!("mfem_local_faces: unsupported {et:?} dim {dim}"),
+    }
+}
+
+/// Face-local edge vertex pairs — MFEM `Triangle::GetEdgeVertices` /
+/// `Quadrilateral::GetEdgeVertices` (the reference face's edge cycle).
+pub fn mfem_face_edges(is_quad: bool) -> &'static [[usize; 2]] {
+    if is_quad {
+        &[[0, 1], [1, 2], [2, 3], [3, 0]]
+    } else {
+        &[[0, 1], [1, 2], [2, 0]]
+    }
+}
+
+/// MFEM `FiniteElementSpace::EncodeDof`: sign-encodes a negative local index
+/// into a global DOF id.
+pub fn encode_dof(base: usize, idx: i32) -> i32 {
+    if idx >= 0 {
+        base as i32 + idx
+    } else {
+        -1 - (base as i32 + (-1 - idx))
+    }
+}
+
+// ─── 3-D face geometry (canonical face parametrisation) ─────────────────────
+
+/// Physical coordinates of the canonical face parametrisation of face `f`:
+/// affine on triangles (reference `(0,0),(1,0),(0,1)`), bilinear on quads
+/// (reference `[0,1]²`, vertices in the face's canonical cycle order) — the
+/// same map MFEM's `GetFaceTransformation` builds.
+pub fn face_point_3d<M: MeshTopology>(tr: &TraceSpace<M>, f: usize, param: &[f64]) -> [f64; 3] {
+    let c = face_vertex_coords(tr, f);
+    let (s, t) = (param[0], param[1]);
+    let mut x = [0.0; 3];
+    if tr.is_quad_face(f) {
+        for d in 0..3 {
+            x[d] = (1.0 - s) * (1.0 - t) * c[0][d]
+                + s * (1.0 - t) * c[1][d]
+                + s * t * c[2][d]
+                + (1.0 - s) * t * c[3][d];
+        }
+    } else {
+        for d in 0..3 {
+            x[d] = (1.0 - s - t) * c[0][d] + s * c[1][d] + t * c[2][d];
+        }
+    }
+    x
+}
+
+/// Physical coordinates of the canonical face vertices.
+fn face_vertex_coords<M: MeshTopology>(tr: &TraceSpace<M>, f: usize) -> Vec<[f64; 3]> {
+    tr.face_nodes(f)
+        .iter()
+        .map(|&n| {
+            let p = tr.mesh().node_coords(n);
+            [p[0], p[1], p[2]]
+        })
+        .collect()
+}
+
+/// Face Jacobian columns `(∂x/∂s, ∂x/∂t)` of the canonical face
+/// parametrisation at `param` (constant on affine triangles, bilinear on
+/// quads).
+pub fn face_jacobian_3d<M: MeshTopology>(
+    tr: &TraceSpace<M>,
+    f: usize,
+    param: &[f64],
+) -> [[f64; 3]; 2] {
+    let c = face_vertex_coords(tr, f);
+    let (s, t) = (param[0], param[1]);
+    let mut jac = [[0.0; 3]; 2];
+    if tr.is_quad_face(f) {
+        for d in 0..3 {
+            jac[0][d] = (c[1][d] - c[0][d]) * (1.0 - t) + (c[2][d] - c[3][d]) * t;
+            jac[1][d] = (c[3][d] - c[0][d]) * (1.0 - s) + (c[2][d] - c[1][d]) * s;
+        }
+    } else {
+        for d in 0..3 {
+            jac[0][d] = c[1][d] - c[0][d];
+            jac[1][d] = c[2][d] - c[0][d];
+        }
+    }
+    jac
+}
+
+/// MFEM `CalcOrtho(J_face)` for a 3-D face: the cross product `J_s × J_t`
+/// (column-major `d` order of the MFEM helper).  Note the MFEM convention:
+/// for a triangular face the length is `2 · area` (the reference triangle has
+/// area 1/2), for a quad face it is the reference-square-normalised surface
+/// Jacobian — NOT the Euclidean face measure.  Paired with MFEM's
+/// reference-domain quadrature weights this integrates exactly like
+/// `Trans.Weight()`.
+pub fn face_normal_3d(jac: &[[f64; 3]; 2]) -> [f64; 3] {
+    let (a, b) = (jac[0], jac[1]);
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// Euclidean norm.
+pub fn norm3(v: &[f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+// ─── Trace (skeleton) spaces ─────────────────────────────────────────────────
+
+/// Trace-space family — 1:1 with MFEM's `*_Trace_FECollection` classes:
+///
+/// | kind | MFEM collection | per-vertex | per-edge | per tri face | per quad face |
+/// |------|-----------------|-----------|----------|--------------|---------------|
+/// | H1 | `H1_Trace_FECollection(p,dim)` = `H1_FECollection(p, dim−1)` | 1 | p−1 | (p−1)(p−2)/2 | (p−1)² |
+/// | Rt | `RT_Trace_FECollection(p,dim)` = `RT_FECollection(p, dim)` restricted to faces | 0 | 0 | (p+1)(p+2)/2 | (p+1)² |
+/// | Nd | `ND_Trace_FECollection(p,dim)` = `ND_FECollection(p, dim−1)` | 0 | p | p(p−1) | 2p(p−1) |
+///
+/// For `Rt` the collection is built through MFEM's `InitFaces(p, dim, …)`
+/// (`fe_coll.cpp`), which populates ONLY the face geometries of the given
+/// dimension — so a 3-D `RT_Trace` space has face-interior DOFs only (its
+/// face element is `L2_TriangleElement(p)` / `L2_QuadrilateralElement(p)`),
+/// while a 2-D one has edge DOFs only (`L2_SegmentElement(p)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceKind {
+    /// Continuous nodal trace (`H1_Trace_FECollection`).
+    H1,
+    /// Normal-moment trace (`RT_Trace_FECollection`); orientation handled by
+    /// the ±1 scale of the trace integrators (MFEM `TraceIntegrator`).
+    Rt,
+    /// Tangential-vector trace (`ND_Trace_FECollection`); the edge DOFs are
+    /// shared between the faces meeting at that edge.
+    Nd,
+}
+
+/// Mesh-skeleton trace space with MFEM-compatible entity tables and global
+/// DOF numbering.
+///
+/// The entity enumeration follows MFEM exactly so that, on a mesh whose node
+/// and element numbering matches MFEM's, the global trace DOF ids agree
+/// DOF-for-DOF:
+///
+/// * **edges** are numbered in first-seen order over `(element, local edge)`
+///   pairs (MFEM `Mesh::GetVertexToVertexTable` + `DSTable::Push(min,max)`
+///   canonicalises each edge to its `(min vertex, max vertex)` direction);
+/// * **faces** are numbered in first-seen order over `(element, local face)`
+///   pairs, where the local face list is MFEM
+///   `Geometry::Constants<>::FaceVert`; the face keeps the generating
+///   ("Elem1") element's local vertex cycle verbatim (MFEM
+///   `Mesh::GenerateFaces` stores `FaceInfo` with Elem1 as generator);
+/// * the global DOF numbering is MFEM's `Base` layout: all vertex DOFs, then
+///   all edge DOFs, then the face-interior DOFs face by face;
+/// * an edge DOF list runs along the edge's **global** direction
+///   `(min → max)`, and a face's DOF list is
+///   `[vertex dofs | edge dofs (face-local edge order, oriented) | interior]`
+///   — exactly MFEM `FiniteElementSpace::GetFaceDofs`.
+///
+/// Signed (sign-encoded) ids as returned by MFEM are produced by
+/// [`Self::face_signed_dofs`] / [`Self::element_signed_dofs`] /
+/// [`Self::element_trace_signed_dofs`]; the unsigned ids used by the DPG
+/// trace assembly are [`Self::face_dof_list`] /
+/// [`Self::element_trace_dof_list`] (with the orientation signs left to the
+/// trace integrators' ±1 `scale`, as in MFEM's `AssembleTraceFaceMatrix`).
+pub struct TraceSpace<M: MeshTopology> {
+    mesh: M,
+    dim: usize,
+    order: u8,
+    kind: TraceKind,
+    /// Canonical face vertex cycles (generating element's local face).
+    faces: Vec<Vec<u32>>,
+    /// Per face: `(global edge id, orientation of the face-local edge
+    /// direction against the global edge direction)`.
+    face_edge_list: Vec<Vec<(usize, i32)>>,
+    /// Generating element ("Elem1") and the other element ("Elem2") of a face.
+    face_elems: Vec<(u32, Option<u32>)>,
+    /// Element faces in MFEM local face order.
+    elem_faces: Vec<Vec<usize>>,
+    /// Element face orientation parity (±1) against the canonical face cycle.
+    elem_face_ori: Vec<Vec<i32>>,
+    /// Global edge table, each entry `(min vertex, max vertex)`.
+    edges: Vec<[u32; 2]>,
+    n_vdof: usize,
+    n_edof: usize,
+    /// Interior DOFs per face.
+    face_nf: Vec<usize>,
+    /// First global face-interior DOF of each face.
+    face_fbase: Vec<usize>,
+    n_dofs: usize,
+    /// Per face: DOF ids in the face element's DOF order (unsigned).
+    face_dof_list: Vec<Vec<usize>>,
+    /// Per face: MFEM sign-encoded DOF ids (`GetFaceDofs`).
+    face_signed: Vec<Vec<i32>>,
+    /// Per element: the DPG trace block = concatenation of the element's
+    /// faces' [`Self::face_dof_list`] in local face order (unsigned) — this is
+    /// what MFEM's `DPGWeakForm::Assemble` builds from `GetFaceVDofs`.
+    elem_trace_dof_list: Vec<Vec<usize>>,
+}
+
+impl<M: MeshTopology> TraceSpace<M> {
+    /// Continuous nodal trace (MFEM `H1_Trace_FECollection(p, dim)`).
+    pub fn new_h1(mesh: M, p: u8) -> Self {
+        Self::build(mesh, p, TraceKind::H1)
+    }
+
+    /// Normal-moment trace (MFEM `RT_Trace_FECollection(p, dim)`).
+    pub fn new_rt(mesh: M, p: u8) -> Self {
+        Self::build(mesh, p, TraceKind::Rt)
+    }
+
+    /// Tangential-vector trace (MFEM `ND_Trace_FECollection(p, dim)`).
+    pub fn new_nd(mesh: M, p: u8) -> Self {
+        Self::build(mesh, p, TraceKind::Nd)
+    }
+
+    fn build(mesh: M, order: u8, kind: TraceKind) -> Self {
+        let dim = mesh.dim() as usize;
+        assert!(dim == 2 || dim == 3, "TraceSpace: dim {dim} unsupported");
+
+        // ── entity tables (MFEM ordering) ───────────────────────────────────
+        let mut edge_map: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        let mut edges: Vec<[u32; 2]> = Vec::new();
+        let mut face_map: std::collections::HashMap<Vec<u32>, usize> =
+            std::collections::HashMap::new();
+        let mut faces: Vec<Vec<u32>> = Vec::new();
+        let mut face_elems: Vec<(u32, Option<u32>)> = Vec::new();
+        let mut elem_faces: Vec<Vec<usize>> = vec![Vec::new(); mesh.n_elements()];
+        let mut elem_face_ori: Vec<Vec<i32>> = vec![Vec::new(); mesh.n_elements()];
+
+        for e in 0..mesh.n_elements() as u32 {
+            let et = mesh.element_type(e);
+            let en = mesh.element_nodes(e);
+            for ev in mfem_local_edges(et) {
+                let (a, b) = (en[ev[0]], en[ev[1]]);
+                let key = if a < b { (a, b) } else { (b, a) };
+                edge_map.entry(key).or_insert_with(|| {
+                    edges.push([key.0, key.1]);
+                    edges.len() - 1
+                });
+            }
+            let lfs = mfem_local_faces(et, dim);
+            for lf in lfs.iter() {
+                let cyc: Vec<u32> = lf.iter().map(|&k| en[k]).collect();
+                let mut key = cyc.clone();
+                key.sort_unstable();
+                let fid = match face_map.get(&key) {
+                    Some(&f) => {
+                        let cur = face_elems[f];
+                        debug_assert!(cur.1.is_none());
+                        face_elems[f] = (cur.0, Some(e));
+                        f
+                    }
+                    None => {
+                        let f = faces.len();
+                        face_map.insert(key, f);
+                        faces.push(cyc.clone());
+                        face_elems.push((e, None));
+                        f
+                    }
+                };
+                elem_faces[e as usize].push(fid);
+                elem_face_ori[e as usize].push(cycle_orientation(&faces[fid], &cyc));
+            }
+        }
+
+        // ── per-entity DOF counts ───────────────────────────────────────────
+        let p = order as usize;
+        let (n_vdof, n_edof) = match kind {
+            TraceKind::H1 => (1usize, p.saturating_sub(1)),
+            TraceKind::Rt => (0usize, 0usize),
+            TraceKind::Nd => (0usize, p),
+        };
+        let face_nf: Vec<usize> = faces
+            .iter()
+            .map(|v| {
+                let is_quad = v.len() == 4;
+                match kind {
+                    TraceKind::H1 => {
+                        let q = p.saturating_sub(1);
+                        if is_quad {
+                            q * q
+                        } else {
+                            q.saturating_sub(1) * q / 2
+                        }
+                    }
+                    TraceKind::Rt => {
+                        if is_quad {
+                            (p + 1) * (p + 1)
+                        } else {
+                            (p + 1) * (p + 2) / 2
+                        }
+                    }
+                    TraceKind::Nd => nd_face_interior_dofs(p, is_quad),
+                }
+            })
+            .collect();
+
+        // ── face-local edge lists (reference face edge cycle, oriented) ─────
+        let face_edge_list: Vec<Vec<(usize, i32)>> = faces
+            .iter()
+            .map(|v| {
+                let is_quad = v.len() == 4;
+                mfem_face_edges(is_quad)
+                    .iter()
+                    .map(|ev| {
+                        let a = v[ev[0]];
+                        let b = v[ev[1]];
+                        let key = if a < b { (a, b) } else { (b, a) };
+                        let eid = *edge_map
+                            .get(&key)
+                            .expect("TraceSpace: face edge missing from edge table");
+                        (eid, if a < b { 1 } else { -1 })
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // ── global DOF numbering (MFEM Base layout) ─────────────────────────
+        let n_dofs_v = mesh.n_nodes() * n_vdof;
+        let n_dofs_e = edges.len() * n_edof;
+        let mut face_fbase = Vec::with_capacity(faces.len());
+        let mut acc = n_dofs_v + n_dofs_e;
+        for f in 0..faces.len() {
+            face_fbase.push(acc);
+            acc += face_nf[f];
+        }
+        let n_dofs = acc;
+
+        // ── per-face DOF lists ──────────────────────────────────────────────
+        let mut face_dof_list: Vec<Vec<usize>> = Vec::with_capacity(faces.len());
+        let mut face_signed: Vec<Vec<i32>> = Vec::with_capacity(faces.len());
+        for f in 0..faces.len() {
+            let mut dofs: Vec<usize> = Vec::new();
+            let mut signed: Vec<i32> = Vec::new();
+            if n_vdof > 0 {
+                for &v in &faces[f] {
+                    for j in 0..n_vdof {
+                        dofs.push(v as usize * n_vdof + j);
+                        signed.push((v as usize * n_vdof + j) as i32);
+                    }
+                }
+            }
+            if n_edof > 0 {
+                for &(eid, ori) in &face_edge_list[f] {
+                    let base = n_dofs_v + eid * n_edof;
+                    for j in 0..n_edof {
+                        if ori > 0 {
+                            dofs.push(base + j);
+                            signed.push(encode_dof(base, j as i32));
+                        } else {
+                            // Face-local edge reversed w.r.t. the global edge
+                            // direction: MFEM's `DofOrderForOrientation`
+                            // (`SegDofOrd[1][j] = -1 - (n-1-j)` for ND, `n-1-j`
+                            // for H1).
+                            let idx = n_edof - 1 - j;
+                            dofs.push(base + idx);
+                            signed.push(if kind == TraceKind::Nd {
+                                encode_dof(base, -1 - (n_edof - 1 - j) as i32)
+                            } else {
+                                encode_dof(base, idx as i32)
+                            });
+                        }
+                    }
+                }
+            }
+            for j in 0..face_nf[f] {
+                dofs.push(face_fbase[f] + j);
+                signed.push((face_fbase[f] + j) as i32);
+            }
+            let n_face_edges = if faces[f].len() == 4 { 4 } else { 3 };
+            assert_eq!(
+                dofs.len(),
+                faces[f].len() * n_vdof + n_face_edges * n_edof + face_nf[f]
+            );
+            face_dof_list.push(dofs);
+            face_signed.push(signed);
+        }
+
+        // ── element trace blocks (concatenated per-face DOF lists) ──────────
+        let mut elem_trace_dof_list: Vec<Vec<usize>> = vec![Vec::new(); mesh.n_elements()];
+        for e in 0..mesh.n_elements() as u32 {
+            let mut trace_dofs: Vec<usize> = Vec::new();
+            for &fid in &elem_faces[e as usize] {
+                trace_dofs.extend_from_slice(&face_dof_list[fid]);
+            }
+            elem_trace_dof_list[e as usize] = trace_dofs;
+        }
+
+        TraceSpace {
+            mesh,
+            dim,
+            order,
+            kind,
+            faces,
+            face_edge_list,
+            face_elems,
+            elem_faces,
+            elem_face_ori,
+            edges,
+            n_vdof,
+            n_edof,
+            face_nf,
+            face_fbase,
+            n_dofs,
+            face_dof_list,
+            face_signed,
+            elem_trace_dof_list,
+        }
+    }
+
+    /// Trace family.
+    pub fn kind(&self) -> TraceKind {
+        self.kind
+    }
+
+    /// Face-element order (`p`).
+    pub fn order(&self) -> u8 {
+        self.order
+    }
+
+    /// Mesh dimension.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Total number of skeleton DOFs.
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
+
+    /// Number of faces (2-D: edges).
+    pub fn n_faces(&self) -> usize {
+        self.faces.len()
+    }
+
+    /// Number of mesh edges (2-D: equal to [`Self::n_faces`]).
+    pub fn n_edges(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// DOFs per vertex / per edge / per face-interior.
+    pub fn dofs_per_entity(&self) -> (usize, usize) {
+        (self.n_vdof, self.n_edof)
+    }
+
+    /// Canonical vertex cycle of face `f` (generating element's local face).
+    pub fn face_nodes(&self, f: usize) -> &[u32] {
+        &self.faces[f]
+    }
+
+    /// Whether face `f` is a quadrilateral.
+    pub fn is_quad_face(&self, f: usize) -> bool {
+        self.faces[f].len() == 4
+    }
+
+    /// Face-local edges of face `f`: `(global edge id, orientation)`.
+    pub fn face_edges(&self, f: usize) -> &[(usize, i32)] {
+        &self.face_edge_list[f]
+    }
+
+    /// `(Elem1, Option<Elem2>)` of face `f`.
+    pub fn face_elements(&self, f: usize) -> (u32, Option<u32>) {
+        self.face_elems[f]
+    }
+
+    /// `true` when face `f` has a single adjacent element.
+    pub fn is_boundary_face(&self, f: usize) -> bool {
+        self.face_elems[f].1.is_none()
+    }
+
+    /// Interior DOFs of face `f`.
+    pub fn face_interior_dofs(&self, f: usize) -> usize {
+        self.face_nf[f]
+    }
+
+    /// DOFs of face `f` (unsigned, face-element order).
+    pub fn face_dof_list(&self, f: usize) -> &[usize] {
+        &self.face_dof_list[f]
+    }
+
+    /// DOFs of face `f`, MFEM sign-encoded (`GetFaceDofs`).
+    pub fn face_signed_dofs(&self, f: usize) -> &[i32] {
+        &self.face_signed[f]
+    }
+
+    /// Global face id of the element's `li`-th local face.
+    pub fn elem_face_id(&self, e: u32, li: usize) -> usize {
+        self.elem_faces[e as usize][li]
+    }
+
+    /// Orientation parity (±1) of the element's `li`-th local face against the
+    /// canonical face cycle (the generating element is `+1`).
+    pub fn elem_face_orientation(&self, e: u32, li: usize) -> i32 {
+        self.elem_face_ori[e as usize][li]
+    }
+
+    /// Trace block of element `e`: the concatenation of its faces' DOF lists in
+    /// local face order (unsigned) — MFEM's `DPGWeakForm::Assemble` trace
+    /// layout (`GetFaceVDofs` over `GetElementFaces`).
+    pub fn element_trace_dof_list(&self, e: u32) -> &[usize] {
+        &self.elem_trace_dof_list[e as usize]
+    }
+
+    /// Sign-encoded trace block of element `e` (same layout), i.e. MFEM's
+    /// concatenation of `GetFaceVDofs(face)` over the element's local faces.
+    pub fn element_trace_signed_dofs(&self, e: u32) -> Vec<i32> {
+        let mut out = Vec::new();
+        for li in 0..self.elem_faces[e as usize].len() {
+            let fid = self.elem_faces[e as usize][li];
+            out.extend_from_slice(&self.face_signed[fid]);
+        }
+        out
+    }
+
+    /// Mesh reference.
+    pub fn mesh(&self) -> &M {
+        &self.mesh
+    }
+}
+
+/// Orientation parity of a face's local vertex cycle against the canonical
+/// cycle: `+1` for rotations (same directed cycle), `−1` for reflections.
+fn cycle_orientation(canonical: &[u32], local: &[u32]) -> i32 {
+    let n = canonical.len();
+    debug_assert_eq!(n, local.len());
+    if n == 2 {
+        return if canonical[0] == local[0] { 1 } else { -1 };
+    }
+    let start = canonical
+        .iter()
+        .position(|&x| x == local[0])
+        .unwrap_or_else(|| panic!("cycle_orientation: face node mismatch"));
+    if (0..n).all(|k| canonical[(start + k) % n] == local[k]) {
+        return 1;
+    }
+    if (0..n).all(|k| canonical[(start + n - k % n) % n] == local[k]) {
+        return -1;
+    }
+    panic!("cycle_orientation: non-manifold face cycle {canonical:?} vs {local:?}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,3 +2048,659 @@ mod tests {
         }
     }
 }
+
+/// 3-D trace-space (`*_Trace_FECollection`) port checks against hard data
+/// dumped from MFEM 4.10 (`tmp/dpg3d/ndtrace_dump.txt`, produced by
+/// `tmp/dpg3d/ndtrace_dump.cpp`).
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use fem_mesh::Mesh;
+
+    /// MFEM `Mesh::MakeCartesian3D(1,1,1,HEXAHEDRON)` — one element on the
+    /// unit cube, MFEM node/element numbering.
+    fn mfem_hex_1x1x1() -> Mesh<3> {
+        let mut coords = Vec::new();
+        for k in 0..2 {
+            for j in 0..2 {
+                for i in 0..2 {
+                    coords.push(i as f64);
+                    coords.push(j as f64);
+                    coords.push(k as f64);
+                }
+            }
+        }
+        let conn: Vec<u32> = vec![0, 1, 3, 2, 4, 5, 7, 6];
+        let bfaces: [[u32; 4]; 6] = [
+            [3, 2, 1, 0],
+            [0, 1, 5, 4],
+            [1, 3, 7, 5],
+            [3, 2, 6, 7],
+            [2, 0, 4, 6],
+            [4, 5, 7, 6],
+        ];
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        for (i, f) in bfaces.iter().enumerate() {
+            face_conn.extend_from_slice(f);
+            face_tags.push(i as i32 + 1);
+        }
+        Mesh::<3>::uniform(
+            coords,
+            conn,
+            vec![1],
+            ElementType::Hex8,
+            face_conn,
+            face_tags,
+            ElementType::Quad4,
+        )
+    }
+
+    /// MFEM `Mesh::MakeCartesian3D(2,1,1,HEXAHEDRON)`: identical node and
+    /// element numbering (node id = i + 3j + 6k, hex vertex order
+    /// `(i,j,k),(i+1,j,k),(i+1,j+1,k),(i,j+1,k),+k`).
+    fn mfem_hex_2x1x1() -> Mesh<3> {
+        let mut coords = Vec::new();
+        for k in 0..2 {
+            for j in 0..2 {
+                for i in 0..3 {
+                    coords.push(i as f64 * 0.5);
+                    coords.push(j as f64);
+                    coords.push(k as f64);
+                }
+            }
+        }
+        let conn: Vec<u32> = vec![
+            0, 1, 4, 3, 6, 7, 10, 9, //
+            1, 2, 5, 4, 7, 8, 11, 10,
+        ];
+        // Boundary faces (MFEM's stored cycles, single-element faces).
+        let bfaces: [[u32; 4]; 10] = [
+            [3, 4, 1, 0],
+            [0, 1, 7, 6],
+            [4, 3, 9, 10],
+            [3, 0, 6, 9],
+            [6, 7, 10, 9],
+            [4, 5, 2, 1],
+            [1, 2, 8, 7],
+            [2, 5, 11, 8],
+            [5, 4, 10, 11],
+            [7, 8, 11, 10],
+        ];
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        for (i, f) in bfaces.iter().enumerate() {
+            face_conn.extend_from_slice(f);
+            face_tags.push(i as i32 + 1);
+        }
+        Mesh::<3>::uniform(
+            coords,
+            conn,
+            vec![1, 1],
+            ElementType::Hex8,
+            face_conn,
+            face_tags,
+            ElementType::Quad4,
+        )
+    }
+
+    /// MFEM `Mesh::MakeCartesian3D(1,1,1,TETRAHEDRON)`: 8 nodes, 6 tets split
+    /// around the main diagonal `0–7` (Kuhn/Freudenthal, MFEM's ordering).
+    fn mfem_tet_1x1x1() -> Mesh<3> {
+        let mut coords = Vec::new();
+        for k in 0..2 {
+            for j in 0..2 {
+                for i in 0..2 {
+                    coords.push(i as f64);
+                    coords.push(j as f64);
+                    coords.push(k as f64);
+                }
+            }
+        }
+        let conn: Vec<u32> = vec![
+            7, 0, 3, 1, //
+            7, 0, 1, 5, //
+            7, 0, 5, 4, //
+            7, 0, 2, 3, //
+            7, 0, 6, 2, //
+            7, 0, 4, 6,
+        ];
+        // MFEM's stored boundary triangle cycles (all faces are boundary).
+        let bfaces: [[u32; 3]; 18] = [
+            [0, 3, 1],
+            [7, 1, 3],
+            [7, 0, 1],
+            [7, 3, 0],
+            [0, 1, 5],
+            [7, 5, 1],
+            [7, 0, 5],
+            [0, 5, 4],
+            [7, 4, 5],
+            [7, 0, 4],
+            [0, 2, 3],
+            [7, 3, 2],
+            [7, 2, 0],
+            [0, 6, 2],
+            [7, 2, 6],
+            [7, 6, 0],
+            [0, 4, 6],
+            [7, 6, 4],
+        ];
+        let mut face_conn = Vec::new();
+        let mut face_tags = Vec::new();
+        for (i, f) in bfaces.iter().enumerate() {
+            face_conn.extend_from_slice(f);
+            face_tags.push(i as i32 + 1);
+        }
+        Mesh::<3>::uniform(
+            coords,
+            conn,
+            vec![1; 6],
+            ElementType::Tet4,
+            face_conn,
+            face_tags,
+            ElementType::Tri3,
+        )
+    }
+
+    /// DOF counts (`ndofs`) dumped from MFEM for the two reference meshes.
+    #[test]
+    fn trace_dof_counts_match_cpp() {
+        let hex = mfem_hex_2x1x1();
+        let tet = mfem_tet_1x1x1();
+        // (kind, order) -> hex ndofs / tet ndofs (from ndtrace_dump.txt)
+        let expected: &[(TraceKind, u8, usize, usize)] = &[
+            (TraceKind::Nd, 1, 20, 19),
+            (TraceKind::Nd, 2, 84, 74),
+            (TraceKind::Nd, 3, 192, 165),
+            (TraceKind::H1, 1, 12, 8),
+            (TraceKind::H1, 2, 43, 27),
+            (TraceKind::H1, 3, 96, 64),
+            (TraceKind::Rt, 1, 44, 54),
+            (TraceKind::Rt, 2, 99, 108),
+            (TraceKind::Rt, 3, 176, 180),
+        ];
+        for &(kind, p, n_hex, n_tet) in expected {
+            let sh = match kind {
+                TraceKind::Nd => TraceSpace::new_nd(hex.clone(), p),
+                TraceKind::H1 => TraceSpace::new_h1(hex.clone(), p),
+                TraceKind::Rt => TraceSpace::new_rt(hex.clone(), p),
+            };
+            let st = match kind {
+                TraceKind::Nd => TraceSpace::new_nd(tet.clone(), p),
+                TraceKind::H1 => TraceSpace::new_h1(tet.clone(), p),
+                TraceKind::Rt => TraceSpace::new_rt(tet.clone(), p),
+            };
+            assert_eq!(sh.n_dofs(), n_hex, "{kind:?} p{p} hex ndofs");
+            assert_eq!(st.n_dofs(), n_tet, "{kind:?} p{p} tet ndofs");
+            assert_eq!(sh.n_faces(), 11);
+            assert_eq!(sh.n_edges(), 20);
+            assert_eq!(st.n_faces(), 18);
+            assert_eq!(st.n_edges(), 19);
+        }
+    }
+
+    /// Per-face entity tables (canonical vertex cycles, face-local edges with
+    /// orientations) against MFEM's `GetFaceVertices` / `GetFaceEdges`.
+    #[test]
+    fn trace_face_tables_match_cpp() {
+        let hex = mfem_hex_2x1x1();
+        let tr = TraceSpace::new_nd(hex, 1);
+        let want_verts: [[u32; 4]; 11] = [
+            [3, 4, 1, 0],
+            [0, 1, 7, 6],
+            [1, 4, 10, 7],
+            [4, 3, 9, 10],
+            [3, 0, 6, 9],
+            [6, 7, 10, 9],
+            [4, 5, 2, 1],
+            [1, 2, 8, 7],
+            [2, 5, 11, 8],
+            [5, 4, 10, 11],
+            [7, 8, 11, 10],
+        ];
+        let want_edges: [[(usize, i32); 4]; 11] = [
+            [(2, 1), (1, -1), (0, -1), (3, 1)],
+            [(0, 1), (9, 1), (4, -1), (8, -1)],
+            [(1, 1), (10, 1), (5, -1), (9, -1)],
+            [(2, -1), (11, 1), (6, 1), (10, -1)],
+            [(3, -1), (8, 1), (7, 1), (11, -1)],
+            [(4, 1), (5, 1), (6, -1), (7, -1)],
+            [(14, 1), (13, -1), (12, -1), (1, 1)],
+            [(12, 1), (18, 1), (15, -1), (9, -1)],
+            [(13, 1), (19, 1), (16, -1), (18, -1)],
+            [(14, -1), (10, 1), (17, 1), (19, -1)],
+            [(15, 1), (16, 1), (17, -1), (5, -1)],
+        ];
+        for f in 0..11 {
+            assert_eq!(tr.face_nodes(f), &want_verts[f], "face {f} verts");
+            assert_eq!(tr.face_edges(f), &want_edges[f], "face {f} edges");
+        }
+    }
+
+    fn orthonormal_basis(cols: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        let mut out: Vec<Vec<f64>> = Vec::new();
+        for c in cols {
+            let mut w = c.clone();
+            let c0: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            for _sweep in 0..2 {
+                for b in out.iter() {
+                    let d: f64 = w.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    for (k, bk) in b.iter().enumerate() {
+                        w[k] -= d * bk;
+                    }
+                }
+            }
+            let rn: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if rn > 1e-11 * c0.max(1e-30) {
+                for x in w.iter_mut() {
+                    *x /= rn;
+                }
+                out.push(w);
+            }
+        }
+        out
+    }
+
+    /// The fem-rs `HexNDk(p)` element (used as the DPG 3-D H(curl) test space
+    /// via [`VolKind::HCurl`]) must span exactly MFEM's `ND_HexahedronElement`
+    /// space, the tensor Nédélec space
+    ///
+    /// ```text
+    ///     Q_{p−1,p,p} × Q_{p,p−1,p} × Q_{p,p,p−1}
+    /// ```
+    ///
+    /// (MFEM builds that element as a tensor product of the *closed*
+    /// (Gauss-Lobatto) 1-D basis of degree `p` in the two transversal
+    /// directions and the *open* (Gauss-Legendre) basis of degree `p−1` in the
+    /// tangential one; both 1-D bases span the full 1-D polynomial space of
+    /// their degree).  fem-rs's element uses a different node set and the
+    /// `[−1,1]³` parametrisation, which is a basis (not a space) difference —
+    /// this test pins that so the DPG element normal equations, which are
+    /// invariant under a test-basis change, stay comparable with MFEM's.
+    #[test]
+    fn nd_hex_span_is_tensor_nedelec() {
+        let ident = nalgebra::DMatrix::<f64>::identity(3, 3);
+        let quad = vol_quadrature(ElementType::Hex8, 4);
+        for p in 1u8..=3 {
+            let pu = p as usize;
+            let n = hcurl_ref_elem(ElementType::Hex8, p).n_dofs();
+            assert_eq!(n, 3 * pu * (pu + 1) * (pu + 1));
+            // Monomial columns: (component, a, b, c) with the tensor Nédélec
+            // degree bounds; sample rows are (quadrature point, component).
+            let mut mono: Vec<Vec<f64>> = Vec::new();
+            for d in 0..3 {
+                let (ea, eb, ec) = match d {
+                    0 => (pu - 1, pu, pu),
+                    1 => (pu, pu - 1, pu),
+                    _ => (pu, pu, pu - 1),
+                };
+                for a in 0..=ea {
+                    for b in 0..=eb {
+                        for c in 0..=ec {
+                            let mut col = vec![0.0_f64; 3 * quad.0.len()];
+                            for (q, pts) in quad.0.iter().enumerate() {
+                                col[3 * q + d] =
+                                    pts[0].powi(a as i32) * pts[1].powi(b as i32) * pts[2].powi(c as i32);
+                            }
+                            mono.push(col);
+                        }
+                    }
+                }
+            }
+            let mono_dim = 3 * pu * (pu + 1) * (pu + 1);
+            assert_eq!(mono.len(), mono_dim);
+            // Orthonormal basis of the monomial span.
+            let ob = orthonormal_basis(&mono);
+            assert_eq!(ob.len(), mono_dim, "p{p}: monomial basis must be independent");
+            // Every fem-rs basis sample must lie in that span, and the samples
+            // must be independent (=> the spans are equal).
+            let npts = quad.0.len();
+            let mut samples: Vec<Vec<f64>> = Vec::new();
+            let mut vals = VolVals::default();
+            for i in 0..n {
+                let mut row = vec![0.0_f64; 3 * npts];
+                for (q, pts) in quad.0.iter().enumerate() {
+                    eval_vol_space(
+                        VolKind::HCurl,
+                        p,
+                        ElementType::Hex8,
+                        3,
+                        &ident,
+                        1.0,
+                        &ident,
+                        pts,
+                        None,
+                        &mut vals,
+                    );
+                    for d in 0..3 {
+                        row[3 * q + d] = vals.phi[i * 3 + d];
+                    }
+                }
+                // residual after projection onto the monomial span
+                let mut w = row.clone();
+                for b in ob.iter() {
+                    let dp: f64 = w.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                    for (k, bk) in b.iter().enumerate() {
+                        w[k] -= dp * bk;
+                    }
+                }
+                let rn: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+                let r0: f64 = row.iter().map(|x| x * x).sum::<f64>().sqrt();
+                assert!(
+                    rn <= 1e-10 * r0.max(1e-30),
+                    "p{p}: HexNDk dof {i} sample outside the tensor Nedelec space ({rn} vs {r0})"
+                );
+                samples.push(row);
+            }
+            assert_eq!(orthonormal_basis(&samples).len(), n, "p{p}: HexNDk samples rank");
+        }
+    }
+
+    fn trace_face_dofs_match_cpp_hex() {
+        let hex = mfem_hex_2x1x1();
+        let cases: &[(TraceKind, u8, &[&[i32]])] = &[
+            (
+                TraceKind::Nd,
+                1,
+                &[
+                    &[2, -2, -1, 3],
+                    &[0, 9, -5, -9],
+                    &[1, 10, -6, -10],
+                    &[-3, 11, 6, -11],
+                    &[-4, 8, 7, -12],
+                    &[4, 5, -7, -8],
+                    &[14, -14, -13, 1],
+                    &[12, 18, -16, -10],
+                    &[13, 19, -17, -19],
+                    &[-15, 10, 17, -20],
+                    &[15, 16, -18, -6],
+                ],
+            ),
+            (
+                TraceKind::Nd,
+                2,
+                &[
+                    &[4, 5, -4, -3, -2, -1, 6, 7, 40, 41, 42, 43],
+                    &[0, 1, 18, 19, -10, -9, -18, -17, 44, 45, 46, 47],
+                    &[2, 3, 20, 21, -12, -11, -20, -19, 48, 49, 50, 51],
+                    &[-6, -5, 22, 23, 12, 13, -22, -21, 52, 53, 54, 55],
+                    &[-8, -7, 16, 17, 14, 15, -24, -23, 56, 57, 58, 59],
+                    &[8, 9, 10, 11, -14, -13, -16, -15, 60, 61, 62, 63],
+                    &[28, 29, -28, -27, -26, -25, 2, 3, 64, 65, 66, 67],
+                    &[24, 25, 36, 37, -32, -31, -20, -19, 68, 69, 70, 71],
+                    &[26, 27, 38, 39, -34, -33, -38, -37, 72, 73, 74, 75],
+                    &[-30, -29, 20, 21, 34, 35, -40, -39, 76, 77, 78, 79],
+                    &[30, 31, 32, 33, -36, -35, -12, -11, 80, 81, 82, 83],
+                ],
+            ),
+            (
+                TraceKind::H1,
+                1,
+                &[
+                    &[3, 4, 1, 0],
+                    &[0, 1, 7, 6],
+                    &[1, 4, 10, 7],
+                    &[4, 3, 9, 10],
+                    &[3, 0, 6, 9],
+                    &[6, 7, 10, 9],
+                    &[4, 5, 2, 1],
+                    &[1, 2, 8, 7],
+                    &[2, 5, 11, 8],
+                    &[5, 4, 10, 11],
+                    &[7, 8, 11, 10],
+                ],
+            ),
+            (
+                TraceKind::Rt,
+                2,
+                &[
+                    &[0, 1, 2, 3, 4, 5, 6, 7, 8],
+                    &[9, 10, 11, 12, 13, 14, 15, 16, 17],
+                    &[18, 19, 20, 21, 22, 23, 24, 25, 26],
+                    &[27, 28, 29, 30, 31, 32, 33, 34, 35],
+                    &[36, 37, 38, 39, 40, 41, 42, 43, 44],
+                    &[45, 46, 47, 48, 49, 50, 51, 52, 53],
+                    &[54, 55, 56, 57, 58, 59, 60, 61, 62],
+                    &[63, 64, 65, 66, 67, 68, 69, 70, 71],
+                    &[72, 73, 74, 75, 76, 77, 78, 79, 80],
+                    &[81, 82, 83, 84, 85, 86, 87, 88, 89],
+                    &[90, 91, 92, 93, 94, 95, 96, 97, 98],
+                ],
+            ),
+        ];
+        for (kind, p, want) in cases {
+            let tr = match kind {
+                TraceKind::Nd => TraceSpace::new_nd(hex.clone(), *p),
+                TraceKind::H1 => TraceSpace::new_h1(hex.clone(), *p),
+                TraceKind::Rt => TraceSpace::new_rt(hex.clone(), *p),
+            };
+            for (f, w) in want.iter().enumerate() {
+                assert_eq!(tr.face_signed_dofs(f), *w, "{kind:?} p{p} face {f}");
+                assert_eq!(tr.face_dof_list(f).len(), w.len());
+            }
+        }
+    }
+
+    /// MFEM `GetFaceDofs` for the tet mesh, all three families / orders.
+    #[test]
+    fn trace_face_dofs_match_cpp_tet() {
+        let tet = mfem_tet_1x1x1();
+        // ND_Trace p=2 (from ndtrace_dump.txt lines 3547ff)
+        let tr = TraceSpace::new_nd(tet.clone(), 2);
+        let want: [&[i32]; 18] = [
+            &[6, 7, -12, -11, -10, -9, 38, 39],
+            &[-6, -5, 10, 11, 2, 3, 40, 41],
+            &[-2, -1, 8, 9, 4, 5, 42, 43],
+            &[-4, -3, -8, -7, 0, 1, 44, 45],
+            &[8, 9, 16, 17, -16, -15, 46, 47],
+            &[-14, -13, -18, -17, 4, 5, 48, 49],
+            &[-2, -1, 14, 15, 12, 13, 50, 51],
+            &[14, 15, -24, -23, -22, -21, 52, 53],
+            &[-20, -19, 22, 23, 12, 13, 54, 55],
+            &[-2, -1, 20, 21, 18, 19, 56, 57],
+            &[26, 27, 28, 29, -8, -7, 58, 59],
+            &[-4, -3, -30, -29, 24, 25, 60, 61],
+            &[-26, -25, -28, -27, 0, 1, 62, 63],
+            &[32, 33, -36, -35, -28, -27, 64, 65],
+            &[-26, -25, 34, 35, 30, 31, 66, 67],
+            &[-32, -31, -34, -33, 0, 1, 68, 69],
+            &[20, 21, 36, 37, -34, -33, 70, 71],
+            &[-32, -31, -38, -37, 18, 19, 72, 73],
+        ];
+        for (f, w) in want.iter().enumerate() {
+            assert_eq!(tr.face_signed_dofs(f), *w, "ND p2 tet face {f}");
+        }
+        // H1_Trace p=1: one DOF per mesh vertex, in the face's vertex order.
+        let h1 = TraceSpace::new_h1(tet, 1);
+        assert_eq!(h1.n_dofs(), 8);
+        assert_eq!(h1.face_signed_dofs(0), &[0, 3, 1]);
+        assert_eq!(h1.face_signed_dofs(1), &[7, 1, 3]);
+    }
+
+    /// MFEM `ND_TriangleElement` / `ND_QuadrilateralElement` reference basis
+    /// values, verbatim from the harness dump (hex face 0, quad; tet face 0,
+    /// triangle).
+    #[test]
+    fn nd_face_basis_values_match_cpp() {
+        // Quad, p = 2, at (0.25, 0.25) — hex mesh face 0.
+        let want_quad_p2: [[f64; 2]; 12] = [
+            [0.34987976320958225, 0.0],
+            [0.025120236790417763, 0.0],
+            [0.0, -0.11662658773652743],
+            [0.0, -0.0083734122634725877],
+            [0.0083734122634725877, 0.0],
+            [0.11662658773652743, 0.0],
+            [0.0, -0.025120236790417763],
+            [0.0, -0.34987976320958225],
+            [0.6997595264191645, 0.0],
+            [0.050240473580835526, 0.0],
+            [0.0, 0.6997595264191645],
+            [0.0, 0.050240473580835526],
+        ];
+        let mut out = vec![0.0; 24];
+        nd_quad_basis(2, 0.25, 0.25, &mut out);
+        for (k, w) in want_quad_p2.iter().enumerate() {
+            assert!(
+                (out[k * 2] - w[0]).abs() < 1e-14,
+                "quad p2 dof {k} x: {} vs {}",
+                out[k * 2],
+                w[0]
+            );
+            assert!(
+                (out[k * 2 + 1] - w[1]).abs() < 1e-14,
+                "quad p2 dof {k} y: {} vs {}",
+                out[k * 2 + 1],
+                w[1]
+            );
+        }
+        // Quad, p = 2, at (0.3, 0.7).
+        let want_quad_p2_b: [[f64; 2]; 12] = [
+            [-0.10156921938165304, 0.0],
+            [-0.018430780618346947, 0.0],
+            [0.0, -0.018430780618346954],
+            [0.0, -0.10156921938165306],
+            [-0.043005154776142869, 0.0],
+            [-0.23699484522385705, 0.0],
+            [0.0, -0.23699484522385716],
+            [0.0, -0.04300515477614289],
+            [0.71098453567157149, 0.0],
+            [0.12901546432842864, 0.0],
+            [0.0, 0.12901546432842864],
+            [0.0, 0.71098453567157138],
+        ];
+        nd_quad_basis(2, 0.3, 0.7, &mut out);
+        for (k, w) in want_quad_p2_b.iter().enumerate() {
+            assert!(
+                (out[k * 2] - w[0]).abs() < 1e-14,
+                "quad p2 (0.3,0.7) dof {k} x: {} vs {}",
+                out[k * 2],
+                w[0]
+            );
+            assert!(
+                (out[k * 2 + 1] - w[1]).abs() < 1e-14,
+                "quad p2 (0.3,0.7) dof {k} y: {} vs {}",
+                out[k * 2 + 1],
+                w[1]
+            );
+        }
+        // Triangle, p = 2, at (0.2, 0.3) — tet mesh face 0.
+        let want_tri_p2: [f64; 16] = [
+            0.21686533479473216,
+            0.061961524227066286,
+            -0.14686533479473216,
+            -0.041961524227066331,
+            0.10098076211353299,
+            -0.067320508075688734,
+            0.049019237886466727,
+            -0.03267949192431116,
+            -0.0080384757729336856,
+            -0.021435935394489822,
+            -0.11196152422706616,
+            -0.2985640646055101,
+            1.0799999999999998,
+            -0.1199999999999999,
+            -0.26999999999999963,
+            0.78000000000000003,
+        ];
+        let mut out = vec![0.0; 16];
+        nd_tri_basis(2, 0.2, 0.3, &mut out);
+        for (k, &w) in want_tri_p2.iter().enumerate() {
+            assert!((out[k] - w).abs() < 1e-14, "tri p2 entry {k}: {} vs {w}", out[k]);
+        }
+        // Nodal property of the reference basis: the DOF functionals
+        // `u ↦ ⟨u(node_k), tk_k⟩` reproduce the Kronecker delta, i.e.
+        // `⟨φ_m(node_k), tk_k⟩ = δ_mk`.  `tk_k` is MFEM's direction vector for
+        // DOF `k` (`tk = {1,0, −1,1, 0,−1, 0,1}` for triangles, the
+        // sign-encoded edge/interior components for quads).
+        for (p, is_quad) in [(1usize, true), (2, true), (3, true), (1, false), (2, false), (3, false)] {
+            let nodes = nd_face_dof_nodes(p, is_quad);
+            let nd = nodes.len();
+            let tk: Vec<[f64; 2]> = if is_quad {
+                let mut t = Vec::new();
+                t.extend(std::iter::repeat([1.0, 0.0]).take(p));
+                t.extend(std::iter::repeat([0.0, 1.0]).take(p));
+                t.extend(std::iter::repeat([-1.0, 0.0]).take(p));
+                t.extend(std::iter::repeat([0.0, -1.0]).take(p));
+                for j in 1..p {
+                    for _i in 0..p {
+                        t.push([1.0, 0.0]);
+                        let _ = j;
+                    }
+                }
+                for _j in 0..p {
+                    for _i in 1..p {
+                        t.push([0.0, 1.0]);
+                    }
+                }
+                t
+            } else {
+                let mut t = Vec::new();
+                t.extend(std::iter::repeat([1.0, 0.0]).take(p));
+                t.extend(std::iter::repeat([-1.0, 1.0]).take(p));
+                t.extend(std::iter::repeat([0.0, -1.0]).take(p));
+                if p >= 2 {
+                    let pm2 = p - 2;
+                    for j in 0..=pm2 {
+                        for i in 0..=(pm2 - j) {
+                            let _ = (i, j);
+                            t.push([1.0, 0.0]);
+                            t.push([0.0, 1.0]);
+                        }
+                    }
+                }
+                t
+            };
+            assert_eq!(tk.len(), nd);
+            for k in 0..nd {
+                let mut v = vec![0.0; nd * 2];
+                eval_face_nd(p, is_quad, &[nodes[k][0], nodes[k][1]], &mut v);
+                for m in 0..nd {
+                    let dot = v[m * 2] * tk[k][0] + v[m * 2 + 1] * tk[k][1];
+                    let want = if m == k { 1.0 } else { 0.0 };
+                    assert!(
+                        (dot - want).abs() < 1e-11,
+                        "p{p} quad={is_quad} dof functional {k}(φ_{m}) = {dot}, want {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Physical (tangential covariant) map of the ND face basis against the
+    /// harness dump: hex face 0 at (0.3, 0.7), p = 2.
+    #[test]
+    fn nd_face_physical_map_matches_cpp() {
+        let hex = mfem_hex_2x1x1();
+        let tr = TraceSpace::new_nd(hex, 2);
+        let jac = face_jacobian_3d(&tr, 0, &[0.3, 0.7]);
+        let mut ref_vals = vec![0.0; tr.face_dof_list(0).len() * 2];
+        eval_face_nd(2, tr.is_quad_face(0), &[0.3, 0.7], &mut ref_vals);
+        let want: [[f64; 3]; 12] = [
+            [-0.20313843876330609, 0.0, 0.0],
+            [-0.036861561236693895, 0.0, 0.0],
+            [0.0, 0.018430780618346954, 0.0],
+            [0.0, 0.10156921938165306, 0.0],
+            [-0.086010309552285738, 0.0, 0.0],
+            [-0.47398969044771411, 0.0, 0.0],
+            [0.0, 0.23699484522385716, 0.0],
+            [0.0, 0.04300515477614289, 0.0],
+            [1.421969071343143, 0.0, 0.0],
+            [0.25803092865685728, 0.0, 0.0],
+            [0.0, -0.12901546432842864, 0.0],
+            [0.0, -0.71098453567157138, 0.0],
+        ];
+        for (k, w) in want.iter().enumerate() {
+            let p = map_face_nd_to_phys(&jac, &[ref_vals[k * 2], ref_vals[k * 2 + 1]]);
+            for c in 0..3 {
+                assert!(
+                    (p[c] - w[c]).abs() < 1e-14,
+                    "dof {k} phys[{c}]: {} vs {}",
+                    p[c],
+                    w[c]
+                );
+            }
+        }
+    }
+}
+
