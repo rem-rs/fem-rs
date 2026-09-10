@@ -15,7 +15,7 @@ use fem_solver::{solve_pcg_gssmoother, SolverConfig};
 use crate::postproc::grid_function::GridFunction;
 use crate::standard::MassIntegrator;
 use crate::Assembler;
-// ─── Reference element helper (same as grid_function.rs) ──────────────────────
+// âââ Reference element helper (same as grid_function.rs) ââââââââââââââââââââââ
 
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
@@ -31,20 +31,20 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     }
 }
 
-/// True for simplex element types (Tri3, Tri6, Tet4, …).
+/// True for simplex element types (Tri3, Tri6, Tet4, â¦).
 fn is_simplex(elem_type: ElementType) -> bool {
     matches!(elem_type, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
 }
 
 /// Geometric-mapping Jacobian at reference point `xi` on element `e`.
 ///
-/// **Simplex** (Tri3, Tri6, Tet4): P1 mapping → constant Jacobian from nodes 0..dim.
-/// **Quad** (Quad4): Q1 bilinear mapping → correct bilinear Jacobian at (ξ,η).
+/// **Simplex** (Tri3, Tri6, Tet4): P1 mapping â constant Jacobian from nodes 0..dim.
+/// **Quad** (Quad4): Q1 bilinear mapping â correct bilinear Jacobian at (Î¾,Î·).
 ///
-/// Returns `(J, det J)` where J is the `dim × dim` Jacobian matrix.
+/// Returns `(J, det J)` where J is the `dim Ã dim` Jacobian matrix.
 fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (DMatrix<f64>, f64) {
     if is_simplex(elem_type) {
-        // Simplex: P1 mapping, Jacobian = [x1-x0, x2-x0, …] (constant)
+        // Simplex: P1 mapping, Jacobian = [x1-x0, x2-x0, â¦] (constant)
         let x0 = mesh.node_coords(nodes[0]);
         let mut j = DMatrix::<f64>::zeros(dim, dim);
         for col in 0..dim {
@@ -56,7 +56,7 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usiz
         let det = j.determinant();
         (j, det)
     } else if dim == 2 && nodes.len() >= 4 {
-        // Quad: Q1 bilinear mapping at (ξ, η)
+        // Quad: Q1 bilinear mapping at (Î¾, Î·)
         let (e, n) = (xi[0], xi[1]);
         let c = |i: usize| mesh.node_coords(nodes[i]);
         let j00 = 0.25 * (-(1.0 - n) * c(0)[0] + (1.0 - n) * c(1)[0] + (1.0 + n) * c(2)[0] - (1.0 + n) * c(3)[0]);
@@ -93,7 +93,7 @@ fn transform_grads(j_inv_t: &DMatrix<f64>, grad_ref: &[f64], grad_phys: &mut [f6
     }
 }
 
-/// Evaluate the physical gradient ∇u_h at reference point `xi` on element `e`,
+/// Evaluate the physical gradient âu_h at reference point `xi` on element `e`,
 /// using the correct geometric Jacobian and the full basis (including edge and
 /// interior DOFs for higher-order spaces).
 fn eval_grad_at<M: MeshTopology>(
@@ -130,16 +130,16 @@ fn eval_grad_at<M: MeshTopology>(
     grad
 }
 
-// ─── ElementIndicators ───────────────────────────────────────────────────────
+// âââ ElementIndicators âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 #[derive(Debug, Clone)]
 pub struct ElementIndicators {
     pub eta: Vec<f64>,
     pub total_error: f64,
     pub estimator_name: &'static str,
-    /// Per-element anisotropic refinement flags (bit k set ⇒ direction k is
+    /// Per-element anisotropic refinement flags (bit k set â direction k is
     /// dominant in the flux error, MFEM `ZZErrorEstimator` aniso_flags:
-    /// threshold 0.15·3/dim on d_xyz[k]/Σd_xyz).  `None` when the estimator
+    /// threshold 0.15Â·3/dim on d_xyz[k]/Î£d_xyz).  `None` when the estimator
     /// did not compute directional energies (isotropic path).
     pub aniso_flags: Option<Vec<u8>>,
 }
@@ -166,7 +166,7 @@ impl ElementIndicators {
 
     /// Mark elements whose error exceeds a local absolute threshold.
     ///
-    /// Returns indices of elements with `η > max_err`.
+    /// Returns indices of elements with `Î· > max_err`.
     /// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
     pub fn threshold_mark(&self, max_err: f64) -> Vec<u32> {
         self.eta
@@ -179,7 +179,7 @@ impl ElementIndicators {
 
     /// Mark elements whose error is below a derefinement threshold.
     ///
-    /// Returns indices of elements with `η < threshold`.
+    /// Returns indices of elements with `Î· < threshold`.
     /// Equivalent to MFEM's `ThresholdDerefiner::SetThreshold(threshold)`.
     pub fn derefine_mark(&self, threshold: f64) -> Vec<u32> {
         self.eta
@@ -193,7 +193,7 @@ impl ElementIndicators {
 
 /// Mark elements whose error exceeds a local absolute threshold.
 ///
-/// Returns indices of elements with `η > max_err`.
+/// Returns indices of elements with `Î· > max_err`.
 /// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
 pub fn threshold_mark(eta: &[f64], max_err: f64) -> Vec<u32> {
     eta.iter()
@@ -205,7 +205,7 @@ pub fn threshold_mark(eta: &[f64], max_err: f64) -> Vec<u32> {
 
 /// Mark elements whose error is below a derefinement threshold.
 ///
-/// Returns indices of elements with `η < threshold`.
+/// Returns indices of elements with `Î· < threshold`.
 /// Equivalent to MFEM's `ThresholdDerefiner::SetThreshold(threshold)`.
 pub fn derefine_mark(eta: &[f64], threshold: f64) -> Vec<u32> {
     eta.iter()
@@ -268,22 +268,21 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
 /// Zienkiewicz-Zhu stress-recovery estimator for linear elasticity
 /// (1:1 with MFEM ex21's `ZienkiewiczZhuEstimator` + `ElasticityIntegrator`).
 ///
-/// Per element the **stress** `σ(u) = λ tr(ε)I + 2μ ε` (symmetric tensor,
+/// Per element the **stress** `Ï(u) = Î» tr(Îµ)I + 2Î¼ Îµ` (symmetric tensor,
 /// `dim(dim+1)/2` components) is evaluated at the centroid; a nodal average
-/// gives the recovered `σ*`; then `η_K = ‖σ_h|_K − σ*|_K‖_{L²(K)}`.
+/// gives the recovered `Ï*`; then `Î·_K = âÏ_h|_K â Ï*|_Kâ_{LÂ²(K)}`.
 ///
-/// `lam`/`mu` map an element attribute to the Lamé constants (the C++ side
+/// `lam`/`mu` map an element attribute to the LamÃ© constants (the C++ side
 /// evaluates `PWConstCoefficient` per element).
 pub fn zz_estimator_stress<M, S>(gf: &GridFunction<'_, S>, lam: &dyn Fn(i32) -> f64, mu: &dyn Fn(i32) -> f64) -> ElementIndicators
 where M: MeshTopology, S: FESpace<Mesh = M> {
-    use fem_element::ReferenceElement;
     let m: &M = gf.space().mesh();
     let ne = m.n_elements(); let d = m.dim() as usize;
     let tdim = d * (d + 1) / 2; // symmetric tensor components
     let order = gf.space().order();
     let dofs = gf.dofs();
 
-    // σ_h per element per flux-node (P1 flux element → mesh vertices).
+    // Ï_h per element per flux-node (P1 flux element â mesh vertices).
     let mut eg: Vec<Vec<Vec<f64>>> = vec![Vec::new(); ne];
     for e in 0..ne as u32 {
         let elem_type = m.element_type(e);
@@ -341,7 +340,7 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         eg[e as usize] = sigmas;
     }
 
-    // Nodal average of the stress (recovered σ*).
+    // Nodal average of the stress (recovered Ï*).
     let nn = m.n_nodes();
     let mut ns: Vec<Vec<f64>> = (0..nn).map(|_| vec![0.0; tdim]).collect();
     let mut nc = vec![0u32; nn];
@@ -354,7 +353,7 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
     }
     for n in 0..nn { if nc[n] > 0 { for di in 0..tdim { ns[n][di] /= nc[n] as f64; } } }
 
-    // Element error: strain energy of s = σ_h − σ* at the centroid (the flux
+    // Element error: strain energy of s = Ï_h â Ï* at the centroid (the flux
     // difference is linear on P1; a 1-point rule matches MFEM's integration
     // order for P1 flux elements).
     let mut eta = vec![0.0; ne];
@@ -410,14 +409,14 @@ fn ref_vertex_coords(d: usize, npe: usize, k: usize) -> Vec<f64> {
     xi
 }
 ///
-/// Recovers a smoothed gradient per component by solving the global L²
+/// Recovers a smoothed gradient per component by solving the global LÂ²
 /// projection on the **scalar** solution space:
-/// `(G_c, v) = (∂u_c/∂x_d, v)`  for each component `c` and direction `d`,
-/// then `η_K = ‖∇u_h|_K − G|_K‖_{L²(K)}` summed over components.
+/// `(G_c, v) = (âu_c/âx_d, v)`  for each component `c` and direction `d`,
+/// then `Î·_K = ââu_h|_K â G|_Kâ_{LÂ²(K)}` summed over components.
 ///
 /// This is the vector analogue of [`zz_estimator_l2`]; MFEM ex21 uses
 /// `L2ZienkiewiczZhuEstimator` with `H1FluxReproducer`, whose recovery space
-/// is the same-order H¹ space (flux = stress here is approximated by the
+/// is the same-order HÂ¹ space (flux = stress here is approximated by the
 /// per-component gradient recovery).
 pub fn zz_estimator_l2_vector<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
 where
@@ -438,14 +437,14 @@ where
         return ElementIndicators::new(vec![0.0; ne], "ZZ-vec");
     }
 
-    // Recovery space = scalar H¹ of the same order (mass matrix and RHS live
-    // on the scalar space; the vector solution indexes dof c·n_scalar + s).
+    // Recovery space = scalar HÂ¹ of the same order (mass matrix and RHS live
+    // on the scalar space; the vector solution indexes dof cÂ·n_scalar + s).
     let scalar_space = fem_space::H1Space::new(mref.clone(), order);
     let quad_order = (order as u8) * 2 + 2;
     let mass = MassIntegrator { rho: 1.0 };
     let m_mat = Assembler::assemble_bilinear(&scalar_space, &[&mass], quad_order);
 
-    // RHS per component: rhs[c][s] = ∫_Ω ∂u_c/∂x_d · φ_s (vector of length d per scalar dof).
+    // RHS per component: rhs[c][s] = â«_Î© âu_c/âx_d Â· Ï_s (vector of length d per scalar dof).
     let dofs = gf.dofs();
     let mut rhs = vec![vec![vec![0.0; n_scalar]; d]; d];
 
@@ -469,7 +468,7 @@ where
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
             transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, d);
 
-            // grad_u[c][dir] = Σ_i u[c*n_scalar + dof_i] · ∂φ_i/∂x_dir
+            // grad_u[c][dir] = Î£_i u[c*n_scalar + dof_i] Â· âÏ_i/âx_dir
             let mut grad_u = vec![vec![0.0; d]; d];
             for i in 0..n_ldofs {
                 let s = elem_dofs[i] as usize;
@@ -522,7 +521,7 @@ where
         }
     }
 
-    // Element error: η_K = sqrt( Σ_c Σ_di ∫_K (∂u_c/∂x_d − G_{c,di})² )
+    // Element error: Î·_K = sqrt( Î£_c Î£_di â«_K (âu_c/âx_d â G_{c,di})Â² )
     let mut eta = vec![0.0; ne];
     for e in 0..ne as u32 {
         let elem_type = mref.element_type(e);
@@ -570,7 +569,7 @@ where
     ElementIndicators::new(eta, "ZZ-vec")
 }
 
-/// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible).
+/// ZZ gradient-recovery error estimator using **LÂ² projection** (MFEM-compatible).
 ///
 /// This is a convenience wrapper for conforming (non-NC) meshes.
 /// For non-conforming meshes with hanging nodes, use [`zz_estimator_l2_nc`].
@@ -582,16 +581,16 @@ where
     zz_estimator_l2_nc(gf, &[])
 }
 
-/// ZZ gradient-recovery error estimator using **L² projection** (MFEM-compatible),
+/// ZZ gradient-recovery error estimator using **LÂ² projection** (MFEM-compatible),
 /// with hanging-node constraint support for non-conforming meshes.
 ///
-/// Recovers a smoothed gradient `G(u)` by solving the global L² projection:
+/// Recovers a smoothed gradient `G(u)` by solving the global LÂ² projection:
 /// ```text
-/// (G, v) = (∇u_h, v)   ∀ v ∈ V_h
+/// (G, v) = (âu_h, v)   â v â V_h
 /// ```
-/// where `V_h` is a scalar H¹ FE space of the **same order** as the solution.
-/// This yields `M·g = f`, where M is the mass matrix and
-/// `f_d[i] = ∫_Ω ∂u_h/∂x_d · φ_i dΩ`.
+/// where `V_h` is a scalar HÂ¹ FE space of the **same order** as the solution.
+/// This yields `MÂ·g = f`, where M is the mass matrix and
+/// `f_d[i] = â«_Î© âu_h/âx_d Â· Ï_i dÎ©`.
 ///
 /// Key features:
 /// - **Same-order recovery**: the recovered gradient space has the same polynomial
@@ -604,7 +603,7 @@ where
 ///
 /// The per-element error indicator is:
 /// ```text
-/// η_K = ‖∇u_h|_K − G|_K‖_{L²(K)}
+/// Î·_K = ââu_h|_K â G|_Kâ_{LÂ²(K)}
 /// ```
 pub fn zz_estimator_l2_nc<M, S>(gf: &GridFunction<'_, S>, constraints: &[HangingNodeConstraint]) -> ElementIndicators
 where
@@ -616,16 +615,16 @@ where
     let d = mref.dim() as usize;
     let order = gf.space().order();
 
-    // ── 1. Use the solution space as the recovery space ─────────────────────
+    // ââ 1. Use the solution space as the recovery space âââââââââââââââââââââ
     let space_ref: &S = gf.space();
     let nd = space_ref.n_dofs();
 
-    // ── 2. Assemble mass matrix M on the solution space ─────────────────────
+    // ââ 2. Assemble mass matrix M on the solution space âââââââââââââââââââââ
     let quad_order = (order as u8) * 2 + 2;
     let mass = MassIntegrator { rho: 1.0 };
     let mut m_mat = Assembler::assemble_bilinear(space_ref, &[&mass], quad_order);
 
-    // ── 3. Assemble RHS F_d for each component ─────────────────────────────
+    // ââ 3. Assemble RHS F_d for each component âââââââââââââââââââââââââââââ
     let dofs = gf.dofs();
     let mut rhs = vec![vec![0.0; nd]; d];
 
@@ -667,14 +666,14 @@ where
         }
     }
 
-    // ── 4. Apply hanging-node constraints to M and each RHS component ──────
+    // ââ 4. Apply hanging-node constraints to M and each RHS component ââââââ
     if !constraints.is_empty() {
         for di in 0..d {
             apply_hanging_constraints(&mut m_mat, &mut rhs[di], constraints);
         }
     }
 
-    // ── 5. Solve M·g_d = rhs_d for each component ──────────────────────────
+    // ââ 5. Solve MÂ·g_d = rhs_d for each component ââââââââââââââââââââââââââ
     let cfg = SolverConfig {
         rtol: 1e-14,
         max_iter: 500,
@@ -692,14 +691,14 @@ where
         }
     }
 
-    // ── 6. Recover hanging-node DOFs for each component ────────────────────
+    // ââ 6. Recover hanging-node DOFs for each component ââââââââââââââââââââ
     if !constraints.is_empty() {
         for di in 0..d {
             recover_hanging_values(&mut g[di], constraints);
         }
     }
 
-    // ── 7. Compute element error indicators ────────────────────────────────
+    // ââ 7. Compute element error indicators ââââââââââââââââââââââââââââââââ
     let mut eta = vec![0.0; ne as usize];
     let mut phi = Vec::new();
     let mut grad_ref = Vec::new();
@@ -753,32 +752,32 @@ where
         eta[e as usize] = err_sq.sqrt();
     }
 
-    ElementIndicators::new(eta, "ZZ(L²)")
+    ElementIndicators::new(eta, "ZZ(LÂ²)")
 }
 
 /// ZZ error estimator using **DOF-level averaging** (MFEM-compatible, serial version).
 ///
 /// This matches MFEM's `ZienkiewiczZhuEstimator` algorithm:
-/// 1. For each element, compute ∇u_h at the **flux space's DOF locations**
+/// 1. For each element, compute âu_h at the **flux space's DOF locations**
 ///    (all DOF nodes of the element, not just vertex nodes): for Q2 this includes
 ///    edge midpoints and interior nodes.
-/// 2. **DOF averaging** (equivalent to `ComputeFlux` → `SumFluxAndCount`):
-///    for each global DOF, average ∇u_h from all adjacent elements.
-/// 3. For each element, integrate ‖∇u_h − G‖² using the flux space's shape
+/// 2. **DOF averaging** (equivalent to `ComputeFlux` â `SumFluxAndCount`):
+///    for each global DOF, average âu_h from all adjacent elements.
+/// 3. For each element, integrate ââu_h â GâÂ² using the flux space's shape
 ///    functions and the integrator's `ComputeFluxEnergy` integration rule
-///    (full quadrature at `2 × order`).
+///    (full quadrature at `2 Ã order`).
 ///
 /// The per-element error is:
 /// ```text
-/// η_K² = ∫_K ‖∇u_h − G‖² dΩ  ≈  f^T · M_K · f
+/// Î·_KÂ² = â«_K ââu_h â GâÂ² dÎ©  â  f^T Â· M_K Â· f
 /// ```
-/// where `f = flux_coeff − smoothed_coeff` are the DOF coefficients of the
+/// where `f = flux_coeff â smoothed_coeff` are the DOF coefficients of the
 /// flux difference and `M_K` is the element mass matrix.
 ///
 /// `hanging` is accepted for API compatibility but is NOT used by the
 /// recovery: matching MFEM's `SumFluxAndCount` (gridfunc.cpp), hanging DOFs
 /// participate in the plain DOF average through the fine neighbor elements
-/// that use them as (positive) corner DOFs — there is no parent
+/// that use them as (positive) corner DOFs â there is no parent
 /// interpolation and no skipping.  (The 0.5/0.5 parent interpolation is only
 /// applied to the solution GridFunction via `recover_hanging_values`.)
 pub fn zz_estimator_nodal<M, S>(
@@ -795,13 +794,13 @@ where
     let d = m.dim() as usize;
     let order = gf.space().order();
 
-    // ── 1. Compute element gradients at ALL DOF locations ───────────────────
+    // ââ 1. Compute element gradients at ALL DOF locations âââââââââââââââââââ
     // Like MFEM's SumFluxAndCount (gridfunc.cpp): for each element, compute
-    // ∇u_h at each DOF of the element (vertex, edge, interior) using the
+    // âu_h at each DOF of the element (vertex, edge, interior) using the
     // correct geometric Jacobian.  Accumulate at global DOFs and count.
     //
     // Hanging DOFs are NOT skipped: they appear as (positive) corner DOFs of
-    // the fine neighbor elements, which contribute to the average — the same
+    // the fine neighbor elements, which contribute to the average â the same
     // set of elements that defines their constrained value.  MFEM's H1
     // Q1 element dofs are just its 4 corner nodes (Mesh::GetElementVertices),
     // so a hanging node is never a dof of the large parent element; it is
@@ -814,8 +813,8 @@ where
         let elem_type = m.element_type(e);
         let elem_dofs = gf.space().element_dofs(e);
         let ref_elem = ref_elem_vol(elem_type, order);
-        let n_ldofs = ref_elem.n_dofs();
-        let nodes = m.element_nodes(e);
+        let _ = ref_elem.n_dofs();
+        
 
         // Get DOF reference coordinates for this element type
         let dof_coords = ref_elem.dof_coords();
@@ -841,12 +840,12 @@ where
         }
     }
 
-    // ── 2. Per-element error via element mass matrix ────────────────────────
+    // ââ 2. Per-element error via element mass matrix ââââââââââââââââââââââââ
     // Like MFEM: for each element, compute flux_coeff at DOFs (element flux),
-    // subtract dof_grad (smoothed flux), and integrate ‖diff‖² via
-    // ComputeFluxEnergy (i.e., f^T · M_elem · f).
+    // subtract dof_grad (smoothed flux), and integrate âdiffâÂ² via
+    // ComputeFluxEnergy (i.e., f^T Â· M_elem Â· f).
     //
-    // M_elem is the element mass matrix with integration rule 2×order.
+    // M_elem is the element mass matrix with integration rule 2Ãorder.
     let quad_order = (order as u8) * 2;
     let mut eta = vec![0.0; ne];
     let mut aniso = vec![0u8; ne];
@@ -859,7 +858,7 @@ where
         let nodes = m.element_nodes(e);
         let quad = ref_elem.quadrature(quad_order);
 
-        // Compute flux difference DOF vector f = (element flux − smoothed flux)
+        // Compute flux difference DOF vector f = (element flux â smoothed flux)
         // at the flux-space DOF coordinates (MFEM ComputeElementFlux evaluates
         // the gradient at fluxelem.GetNodes()).
         let dof_coords = ref_elem.dof_coords();
@@ -874,16 +873,16 @@ where
             }
         }
 
-        // Energy: ∫‖f‖² (physical components) with per-direction d_xyz
+        // Energy: â«âfâÂ² (physical components) with per-direction d_xyz
         // mirroring MFEM `DiffusionIntegrator::ComputeFluxEnergy`'s d_energy
         // (fem/bilininteg.cpp): at each quadrature point expand f via the
         // (physical) shape functions, then decompose the energy into
-        // REFERENCE-domain components through vec = Jᵀ·pointflux:
-        //     eng    += w·|detJ|·(pointflux·pointflux)
-        //     d_xyz[k] += w·|detJ|·(Jᵀ·pointflux)ₖ²
+        // REFERENCE-domain components through vec = JáµÂ·pointflux:
+        //     eng    += wÂ·|detJ|Â·(pointfluxÂ·pointflux)
+        //     d_xyz[k] += wÂ·|detJ|Â·(JáµÂ·pointflux)âÂ²
         // (total energy is the physical L2 norm; the directional split is
-        //  done in the reference frame — this is what MFEM's aniso_flags
-        //  threshold 0.15·3/dim is applied to).
+        //  done in the reference frame â this is what MFEM's aniso_flags
+        //  threshold 0.15Â·3/dim is applied to).
         let mut d_xyz = vec![0.0; d];
         let mut eng: f64 = 0.0;
         let mut phi = vec![0.0; n_ldofs];
@@ -891,7 +890,7 @@ where
             let (jac, det_j) = geom_jacobian(m, nodes, xi, d, elem_type);
             let w_det = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
-            // pointflux(k) = Σ_j f[j,k]·φ_j(xi)
+            // pointflux(k) = Î£_j f[j,k]Â·Ï_j(xi)
             let mut pointflux = vec![0.0; d];
             for k in 0..d {
                 for j in 0..n_ldofs {
@@ -899,7 +898,7 @@ where
                 }
             }
             eng += w_det * (pointflux.iter().map(|v| v * v).sum::<f64>());
-            // ref-domain components: vec = Jᵀ·pointflux
+            // ref-domain components: vec = JáµÂ·pointflux
             let mut vec = vec![0.0; d];
             for r in 0..d {
                 for c in 0..d {
@@ -914,7 +913,7 @@ where
         eta[e as usize] = eng.sqrt();
         // MFEM aniso_flags (gridfunc.cpp ZZErrorEstimator): the directional
         // split uses the REFERENCE-domain energy d_xyz, so the ratio is
-        // d_xyz[k] / Σ_k d_xyz[k] — NOT eng (physical norm).
+        // d_xyz[k] / Î£_k d_xyz[k] â NOT eng (physical norm).
         let sum_e: f64 = d_xyz.iter().sum();
         if sum_e > 0.0 {
             let thresh = 0.15 * 3.0 / d as f64;
@@ -946,8 +945,8 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         let nd = m.element_nodes(e);
         let faces: Vec<Vec<u32>> = if nd.len() >= 3 {
             let (n0,n1,n2) = (nd[0], nd[1], nd[2]);
-            // 2-D triangles (3 nodes) → 3 edges; 2-D quads (4 nodes) → 4 edges.
-            // The bare `d == 2` check is insufficient — quads also satisfy d == 2
+            // 2-D triangles (3 nodes) â 3 edges; 2-D quads (4 nodes) â 4 edges.
+            // The bare `d == 2` check is insufficient â quads also satisfy d == 2
             // but need the full 4-edge list, not the triangle edge list.
             if nd.len() == 3 { vec![vec![n0,n1], vec![n1,n2], vec![n0,n2]] }
             else if nd.len() >= 4 { let n3 = nd[3]; vec![vec![n0,n1], vec![n1,n2], vec![n2,n3], vec![n3,n0]] }
@@ -986,20 +985,20 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
     ElementIndicators::new(eta, "Kelly")
 }
 
-// ─── Residual-based a posteriori error estimator ──────────────────────────
+// âââ Residual-based a posteriori error estimator ââââââââââââââââââââââââââ
 
 /// Residual-based a posteriori error estimator for Poisson-type problems.
 ///
 /// For each element `e`:
 /// ```text
-/// η_e² = h_e² ∫_e (f + Δu_h)² dx  +  ½ Σ_{f ∈ ∂e} h_f ∫_f [[∂u_h/∂n]]² ds
+/// Î·_eÂ² = h_eÂ² â«_e (f + Îu_h)Â² dx  +  Â½ Î£_{f â âe} h_f â«_f [[âu_h/ân]]Â² ds
 /// ```
 /// where:
-/// - `r_e = f + Δu_h` is the element interior residual (Δu_h = 0 for P1)
-/// - `j_f = [[∂u_h/∂n]]` is the jump of normal derivative across interior face `f`
+/// - `r_e = f + Îu_h` is the element interior residual (Îu_h = 0 for P1)
+/// - `j_f = [[âu_h/ân]]` is the jump of normal derivative across interior face `f`
 /// - `h_e` is the element diameter, `h_f` the face diameter
 ///
-/// For P1 Lagrange elements, `Δu_h = 0` so the interior residual reduces to `f`.
+/// For P1 Lagrange elements, `Îu_h = 0` so the interior residual reduces to `f`.
 ///
 /// # Arguments
 /// * `gf` - GridFunction containing the finite element solution
@@ -1019,7 +1018,7 @@ where
     // Barycentric coordinates for element centroid evaluation
     let xi: Vec<f64> = if d == 2 { vec![1.0 / 3.0; 2] } else { vec![0.25; 4] };
 
-    // ─── Per-element data ──────────────────────────────────────────────────
+    // âââ Per-element data ââââââââââââââââââââââââââââââââââââââââââââââââââ
     let mut elem_grad: Vec<Vec<f64>> = Vec::with_capacity(ne);
     let mut elem_diam: Vec<f64> = Vec::with_capacity(ne);
     let mut elem_vols: Vec<f64> = Vec::with_capacity(ne);
@@ -1049,14 +1048,14 @@ where
         elem_diam.push(max_d.max(1e-14));
     }
 
-    // ─── Interior residual: h_e² ∫_e f² dx ────────────────────────────────
+    // âââ Interior residual: h_eÂ² â«_e fÂ² dx ââââââââââââââââââââââââââââââââ
     let mut eta_sq = vec![0.0; ne];
     for e in 0..ne as u32 {
         let f_val = f(&elem_centroid[e as usize]);
         eta_sq[e as usize] = elem_diam[e as usize].powi(2) * f_val * f_val * elem_vols[e as usize];
     }
 
-    // ─── Face jump term ───────────────────────────────────────────────────
+    // âââ Face jump term âââââââââââââââââââââââââââââââââââââââââââââââââââ
     // Build face map: sorted node set -> [elem0, elem1]
     let mut face_map: std::collections::HashMap<Vec<u32>, Vec<u32>> = std::collections::HashMap::new();
     for e in 0..ne as u32 {
@@ -1125,7 +1124,7 @@ where
             vec![cr[0] / len, cr[1] / len, cr[2] / len]
         };
 
-        // Jump: [[∇u_h · n]]
+        // Jump: [[âu_h Â· n]]
         let jump: f64 = (0..d).map(|k| (elem_grad[e0][k] - elem_grad[e1][k]) * normal[k]).sum();
         let jump_sq = jump * jump;
 
@@ -1154,12 +1153,12 @@ where
 ///
 /// Estimates the error in a quantity of interest `J(u)`:
 /// ```text
-/// |J(u) - J(u_h)| ≈ Σ_K η_K
-/// η_K = |∫_K f · ω_K dx| + ½ Σ_{f ⊂ ∂K} ∫_f [[∇u_h · n]] · ω_f ds
+/// |J(u) - J(u_h)| â Î£_K Î·_K
+/// Î·_K = |â«_K f Â· Ï_K dx| + Â½ Î£_{f â âK} â«_f [[âu_h Â· n]] Â· Ï_f ds
 /// ```
 ///
-/// The dual fluctuation `ω_K` on element K approximates `z_h - ẑ_h` via
-/// the element-wise deviation from the mean: `ω_K² = h_K²/12 · |∇z_h|²`.
+/// The dual fluctuation `Ï_K` on element K approximates `z_h - zÌ_h` via
+/// the element-wise deviation from the mean: `Ï_KÂ² = h_KÂ²/12 Â· |âz_h|Â²`.
 /// This yields a non-zero indicator even for P1 x P1 spaces, equivalent to
 /// the standard heuristic DWR estimator used in deal.II and MFEM.
 ///
@@ -1169,7 +1168,7 @@ where
 /// * `f` - Source function `f(x, y, z)` returning the right-hand side value
 ///
 /// # Returns
-/// Element-wise error indicators `η_K` in `ElementIndicators`.
+/// Element-wise error indicators `Î·_K` in `ElementIndicators`.
 pub fn dwr_estimator<M, S>(
     u_gf: &GridFunction<'_, S>,
     z_dofs: &[f64],
@@ -1184,11 +1183,11 @@ where
     let d = m.dim() as usize;
 
     let xi: Vec<f64> = if d == 2 { vec![1.0 / 3.0; 2] } else { vec![0.25; 4] };
-    // ─── Per-element data ──────────────────────────────────────────────────
+    // âââ Per-element data ââââââââââââââââââââââââââââââââââââââââââââââââââ
     let mut elem_grad: Vec<Vec<f64>> = Vec::with_capacity(ne);
     let mut elem_vols: Vec<f64> = Vec::with_capacity(ne);
     let mut elem_centroid: Vec<Vec<f64>> = Vec::with_capacity(ne);
-    // Dual gradient (for computing ω_K ≈ mean deviation)
+    // Dual gradient (for computing Ï_K â mean deviation)
     let mut dual_grad: Vec<Vec<f64>> = Vec::with_capacity(ne);
     let mut elem_diam: Vec<f64> = Vec::with_capacity(ne);
 
@@ -1216,7 +1215,7 @@ where
         }
         elem_diam.push(max_d.max(1e-14));
 
-        // Dual gradient (for ω_K computation)
+        // Dual gradient (for Ï_K computation)
         // Use Stokes' formula on P1 or directly compute from DOFs
         if d == 2 && nodes.len() == 3 {
             let (n0, n1, n2) = (nodes[0], nodes[1], nodes[2]);
@@ -1228,7 +1227,7 @@ where
             let j10 = y1 - y0; let j11 = y2 - y0;
             let det = j00 * j11 - j01 * j10;
             let inv_det = if det.abs() > 1e-30 { 1.0 / det } else { 0.0 };
-            // (z1 - z0) = ∇z · (x1-x0, y1-y0); (z2 - z0) = ∇z · (x2-x0, y2-y0)
+            // (z1 - z0) = âz Â· (x1-x0, y1-y0); (z2 - z0) = âz Â· (x2-x0, y2-y0)
             let dzx = inv_det * ( j11 * (z1 - z0) - j10 * (z2 - z0));
             let dzy = inv_det * (-j01 * (z1 - z0) + j00 * (z2 - z0));
             dual_grad.push(vec![dzx, dzy]);
@@ -1250,8 +1249,8 @@ where
 
     let mut eta = vec![0.0_f64; ne];
 
-    // ─── Interior contribution: ∫_K f · ω_K dx ────────────────────────────
-    // ω_K² = h_K² · |∇z_h|² (scaled to approximate L2 deviation from mean)
+    // âââ Interior contribution: â«_K f Â· Ï_K dx ââââââââââââââââââââââââââââ
+    // Ï_KÂ² = h_KÂ² Â· |âz_h|Â² (scaled to approximate L2 deviation from mean)
     for e in 0..ne {
         let f_val = f(&elem_centroid[e]);
         let grad_z_sq: f64 = dual_grad[e].iter().map(|&g| g * g).sum();
@@ -1259,7 +1258,7 @@ where
         eta[e] += f_val.abs() * omega * elem_vols[e];
     }
 
-    // ─── Face jump contribution: ½ ∫_f [[∇u_h · n]] · ω_f ds ─────────────
+    // âââ Face jump contribution: Â½ â«_f [[âu_h Â· n]] Â· Ï_f ds âââââââââââââ
     // Build face map: sorted node set -> [elem0, elem1]
     let mut face_map: std::collections::HashMap<Vec<u32>, Vec<u32>> = std::collections::HashMap::new();
     for e in 0..ne as u32 {
@@ -1309,7 +1308,7 @@ where
             vec![cr[0] / len, cr[1] / len, cr[2] / len]
         };
 
-        // Jump: [[∇u_h · n]]
+        // Jump: [[âu_h Â· n]]
         let jump: f64 = (0..d).map(|k| (elem_grad[e0][k] - elem_grad[e1][k]) * normal[k]).sum();
 
         let face_area = if d == 2 {
@@ -1348,13 +1347,726 @@ where
     ElementIndicators::new(eta, "DWR")
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// âââ AnisotropicErrorEstimator / LpErrorEstimator / LS-ZZ (fem/estimators.*) ââ
+
+/// MFEM `AnisotropicErrorEstimator`: an error estimator that additionally
+/// provides one anisotropic flag per element (bit `k` set â the flux error is
+/// dominant in direction `k`, i.e. the element should be split in direction
+/// `k`).
+pub trait AnisotropicErrorEstimator {
+    /// MFEM `GetLocalErrors`.
+    fn get_local_errors(&self) -> &[f64];
+    /// MFEM `GetTotalError`.
+    fn get_total_error(&self) -> f64;
+    /// MFEM `GetAnisotropicFlags`: empty when anisotropic estimates are not
+    /// available or not enabled.
+    fn get_anisotropic_flags(&self) -> Vec<i32>;
+}
+
+impl AnisotropicErrorEstimator for ElementIndicators {
+    fn get_local_errors(&self) -> &[f64] {
+        &self.eta
+    }
+    fn get_total_error(&self) -> f64 {
+        self.total_error
+    }
+    fn get_anisotropic_flags(&self) -> Vec<i32> {
+        match &self.aniso_flags {
+            Some(v) => v.iter().map(|&b| b as i32).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// P1/Q1 basis values of the element vertices at a reference point `xi`
+/// (natural domains: simplex [0,1]^d barycentric, quad/hex [-1,1]^d).
+fn vertex_shapes(_elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
+    let mut s = vec![0.0_f64; npe];
+    match npe {
+        3 => {
+            s[0] = 1.0 - xi[0] - xi[1];
+            s[1] = xi[0];
+            s[2] = xi[1];
+        }
+        4 if xi.len() == 2 => {
+            let (e, n) = (xi[0], xi[1]);
+            s[0] = 0.25 * (1.0 - e) * (1.0 - n);
+            s[1] = 0.25 * (1.0 + e) * (1.0 - n);
+            s[2] = 0.25 * (1.0 + e) * (1.0 + n);
+            s[3] = 0.25 * (1.0 - e) * (1.0 + n);
+        }
+        4 => {
+            s[0] = 1.0 - xi[0] - xi[1] - xi[2];
+            s[1] = xi[0];
+            s[2] = xi[1];
+            s[3] = xi[2];
+        }
+        8 => {
+            for (k, v) in s.iter_mut().enumerate() {
+                let sx = if k & 1 != 0 { xi[0] } else { -xi[0] };
+                let sy = if k & 2 != 0 { xi[1] } else { -xi[1] };
+                let sz = if k & 4 != 0 { xi[2] } else { -xi[2] };
+                *v = 0.125 * (1.0 + sx) * (1.0 + sy) * (1.0 + sz);
+            }
+        }
+        _ => {}
+    }
+    s
+}
+
+/// Physical coordinates of a reference point under the linear element
+/// geometry (the geometric model of all estimators in this file).
+fn phys_point<M: MeshTopology>(
+    mesh: &M,
+    nodes: &[u32],
+    xi: &[f64],
+    dim: usize,
+    elem_type: ElementType,
+) -> Vec<f64> {
+    let shapes = vertex_shapes(elem_type, xi, nodes.len());
+    let mut x = vec![0.0_f64; dim];
+    for (i, &n) in nodes.iter().enumerate() {
+        let xc = mesh.node_coords(n);
+        for d in 0..dim {
+            x[d] += shapes[i] * xc[d];
+        }
+    }
+    x
+}
+
+/// Gauss-Legendre rule of total polynomial degree `order` on the natural
+/// reference domain of the element geometry.
+fn geom_rule(elem_type: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
+    use fem_element::quadrature as q;
+    match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 => {
+            let r = q::tri_rule(order);
+            (r.points, r.weights)
+        }
+        ElementType::Quad4 => {
+            let r = q::quad_rule(order);
+            (r.points, r.weights)
+        }
+        ElementType::Tet4 | ElementType::Tet10 => {
+            let r = q::tet_rule(order);
+            (r.points, r.weights)
+        }
+        ElementType::Hex8 => {
+            let r = q::hex_rule(order);
+            (r.points, r.weights)
+        }
+        other => panic!("geom_rule: unsupported element type {other:?}"),
+    }
+}
+
+/// MFEM `LpErrorEstimator` + `GridFunction::ComputeElementLpErrors`: per
+/// element,
+///
+/// ```text
+/// eta_e = ( â«_e |u_h - u_ex|^p dx )^(1/p)          (finite p)
+/// eta_e = max_q |u_h(x_q) - u_ex(x_q)|             (p = infinity)
+/// ```
+///
+/// with the integration rule of order `2*order + 3`. `total_error` mirrors
+/// the C++ `pow(error_estimates.Sum(), 1/p)` for finite `p` (note: this is
+/// *not* the global Lp norm; it is kept verbatim for 1:1 behavior). For
+/// `p = INFINITY` the C++ total is degenerate (`pow(sum, 0)`), so the max
+/// element error is reported instead.
+pub fn lp_error_estimator<M, S>(
+    gf: &GridFunction<'_, S>,
+    p: f64,
+    exact: &dyn Fn(&[f64]) -> f64,
+) -> ElementIndicators
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+{
+    let m: &M = gf.space().mesh();
+    let ne = m.n_elements() as usize;
+    let d = m.dim() as usize;
+    let order = gf.space().order();
+    let _dofs = gf.dofs();
+    let inf = f64::INFINITY;
+
+    let mut eta = vec![0.0_f64; ne];
+    for e in 0..ne as u32 {
+        let elem_type = m.element_type(e);
+        let (points, weights) = geom_rule(elem_type, 2 * order + 3);
+        let nodes = m.element_nodes(e);
+        for (q, xi) in points.iter().enumerate() {
+            let (_, det) = geom_jacobian(m, nodes, xi, d, elem_type);
+            let x = phys_point(m, nodes, xi, d, elem_type);
+            let uh = gf.evaluate_at_element(e, xi);
+            let mut diff = (uh - exact(&x)).abs();
+            if p < inf {
+                diff = diff.powf(p);
+                eta[e as usize] += weights[q] * det * diff;
+            } else {
+                eta[e as usize] = eta[e as usize].max(diff);
+            }
+        }
+        if p < inf {
+            // negative quadrature weights may cause the error to be negative
+            eta[e as usize] = eta[e as usize].abs().powf(1.0 / p);
+        }
+    }    let total = if p < inf {
+        let sum: f64 = eta.iter().sum();
+        sum.powf(1.0 / p)
+    } else {
+        eta.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    };
+    ElementIndicators {
+        eta,
+        total_error: total,
+        estimator_name: "Lp",
+        aniso_flags: None,
+    }
+}
+
+/// Shifted Legendre polynomials P~_0..P~_order at `x` (MFEM
+/// `Linear1D::CalcLegendre`: P~_n(x) = P_n(2x-1)).
+fn calc_legendre_shifted(order: u8, x: f64, poly: &mut [f64]) {
+    poly[0] = 1.0;
+    if order >= 1 {
+        poly[1] = 2.0 * x - 1.0;
+    }
+    for n in 2..=order as usize {
+        poly[n] = ((2 * n - 1) as f64 * (2.0 * x - 1.0) * poly[n - 1]
+            - (n - 1) as f64 * poly[n - 2])
+            / n as f64;
+    }
+}
+
+/// MFEM `TensorProductLegendre`: tensor-product shifted Legendre basis of
+/// degree `order` per dimension, mapped from the (rotated, 2D) bounding box
+/// `[xmin, xmax]` to [0,1]^dim.
+fn tensor_product_legendre(
+    dim: usize,
+    order: u8,
+    x: &[f64],
+    xmin: &[f64],
+    xmax: &[f64],
+    angle: f64,
+    midpoint: &[f64],
+) -> Vec<f64> {
+    let rotate = dim == 2 && (angle != 0.0 || midpoint.iter().any(|&v| v != 0.0));
+    let xr = |c: usize| -> f64 {
+        if rotate {
+            let tx = x[0] - midpoint[0];
+            let ty = x[1] - midpoint[1];
+            match c {
+                0 => tx * (-angle).cos() - ty * (-angle).sin(),
+                _ => tx * (-angle).sin() + ty * (-angle).cos(),
+            }
+        } else {
+            x[c]
+        }
+    };
+    let np = order as usize + 1;
+    let mut px = vec![0.0_f64; np];
+    let mut py = vec![0.0_f64; np];
+    let mut pz = vec![0.0_f64; np];
+    calc_legendre_shifted(order, (xr(0) - xmin[0]) / (xmax[0] - xmin[0]), &mut px);
+    if dim > 1 {
+        calc_legendre_shifted(order, (xr(1) - xmin[1]) / (xmax[1] - xmin[1]), &mut py);
+    }
+    if dim == 3 {
+        calc_legendre_shifted(order, (xr(2) - xmin[2]) / (xmax[2] - xmin[2]), &mut pz);
+    }
+    let nb = (np as u32).pow(dim as u32) as usize;
+    let mut poly = vec![0.0_f64; nb];
+    match dim {
+        1 => poly[..np].copy_from_slice(&px),
+        2 => {
+            for j in 0..np {
+                for i in 0..np {
+                    poly[i + np * j] = px[i] * py[j];
+                }
+            }
+        }
+        3 => {
+            for k in 0..np {
+                for j in 0..np {
+                    for i in 0..np {
+                        poly[i + np * j + np * np * k] = px[i] * py[j] * pz[k];
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+    poly
+}
+
+/// MFEM `GridFunction::ComputeElementGradError`: the L2 error of the gradient
+/// against `exgrad` on element `e`, rule of order `2*order + 3`.
+fn compute_element_grad_error<M, S>(
+    gf: &GridFunction<'_, S>,
+    e: u32,
+    exgrad: &dyn Fn(&[f64]) -> Vec<f64>,
+    flux_order: u8,
+    (points, weights): (&[Vec<f64>], &[f64]),
+) -> f64
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+{
+    let m: &M = gf.space().mesh();
+    let d = m.dim() as usize;
+    let elem_type = m.element_type(e);
+    let nodes = m.element_nodes(e);
+    let _ = flux_order;
+    let mut err = 0.0_f64;
+    for (q, xi) in points.iter().enumerate() {
+        let (_, det) = geom_jacobian(m, nodes, xi, d, elem_type);
+        let x = phys_point(m, nodes, xi, d, elem_type);
+        let grad = gf.evaluate_gradient_at_element(e, xi);
+        let ex = exgrad(&x);
+        let mut e2 = 0.0_f64;
+        for c in 0..d {
+            e2 += (ex[c] - grad[c]) * (ex[c] - grad[c]);
+        }
+        err += weights[q] * det * e2;
+    }
+    err.abs().sqrt()
+}
+
+/// MFEM `LSZZErrorEstimator` for the diffusion flux of a scalar H1 field: the
+/// flux `âu_h` of the two elements of every interior face patch (with equal
+/// attributes) is fitted by a global tensor-product shifted-Legendre
+/// polynomial of degree `patch_order` (least squares over the `2p+1`-order
+/// Gauss points of the patch, rotated bounding box in 2D); the element error
+/// is the L2 norm of `poly â âu_h` per face contribution, calibrated by
+/// `eta /= counters/2`.
+///
+/// Deviation vs C++: the flux is always the physical gradient (the C++
+/// delegates to `BilinearFormIntegrator::ComputeElementFlux`); boundary-face
+/// patches and attribute-crossing patches are skipped exactly like the C++
+/// (`counters == 0` â `eta = INFINITY`).
+pub fn ls_zz_estimator<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+{
+    let m: &M = gf.space().mesh();
+    let d = m.dim() as usize;
+    let ne = m.n_elements() as usize;
+    let order = gf.space().order();
+
+    let mut error_estimates = vec![0.0_f64; ne];
+    let mut counters = vec![0_u32; ne];
+    let mut total_error = 0.0_f64;
+
+    // Interior face patches (shared sorted node key â the two side elements).
+    let mut fm = std::collections::HashMap::<Vec<u32>, Vec<u32>>::new();
+    for e in 0..ne as u32 {
+        let nd = m.element_nodes(e);
+        let faces: Vec<Vec<u32>> = if nd.len() == 3 {
+            vec![vec![nd[0], nd[1]], vec![nd[1], nd[2]], vec![nd[0], nd[2]]]
+        } else if nd.len() == 4 && d == 2 {
+            vec![
+                vec![nd[0], nd[1]],
+                vec![nd[1], nd[2]],
+                vec![nd[2], nd[3]],
+                vec![nd[3], nd[0]],
+            ]
+        } else if d == 3 {
+            vec![
+                vec![nd[1], nd[2], nd[3]],
+                vec![nd[0], nd[2], nd[3]],
+                vec![nd[0], nd[1], nd[3]],
+                vec![nd[0], nd[1], nd[2]],
+            ]
+        } else {
+            continue;
+        };
+        for f in &faces {
+            let mut k = f.clone();
+            k.sort_unstable();
+            fm.entry(k).or_default().push(e);
+        }
+    }
+
+    for (key, patch) in &fm {
+        if patch.len() != 2 {
+            continue; // boundary face
+        }
+        let (el1, el2) = (patch[0], patch[1]);
+        // Skip patches crossing an attribute interface
+        // (subdomain_reconstruction = true, the C++ default).
+        if m.element_tag(el1) != m.element_tag(el2) {
+            continue;
+        }
+
+        let patch_order = order.max(order);
+        let np = patch_order as usize + 1;
+        let nb = (np as u32).pow(d as u32) as usize;
+        let flux_order = 2 * patch_order + 1;
+
+        // 2.B. Rotated bounding box of the patch (2D: aligned with the face).
+        let mut xmin = vec![f64::INFINITY; d];
+        let mut xmax = vec![f64::NEG_INFINITY; d];
+        let mut angle = 0.0_f64;
+        let mut midpoint = vec![0.0_f64; d];
+        if d == 2 {
+            let (a, b) = (m.node_coords(key[0]), m.node_coords(key[1]));
+            for dd in 0..2 {
+                midpoint[dd] = 0.5 * (a[dd] + b[dd]);
+            }
+            angle = (b[1] - a[1]).atan2(b[0] - a[0]);
+        }
+        for &ielem in patch {
+            let et = m.element_type(ielem);
+            let (points, _w) = geom_rule(et, flux_order);
+            let nodes = m.element_nodes(ielem);
+            for xi in &points {
+                let x = phys_point(m, nodes, xi, d, et);
+                let xr: Vec<f64> = if d == 2 {
+                    let tx = x[0] - midpoint[0];
+                    let ty = x[1] - midpoint[1];
+                    vec![
+                        tx * (-angle).cos() - ty * (-angle).sin(),
+                        tx * (-angle).sin() + ty * (-angle).cos(),
+                    ]
+                } else {
+                    x.clone()
+                };
+                for dd in 0..d {
+                    xmax[dd] = xmax[dd].max(xr[dd]);
+                    xmin[dd] = xmin[dd].min(xr[dd]);
+                }
+            }
+        }
+
+        // 2.C. Normal equations over the patch quadrature points.
+        let mut a_mat = DMatrix::<f64>::zeros(nb, nb);
+        let mut b_mat = DMatrix::<f64>::zeros(nb, d);
+        for &ielem in patch {
+            let et = m.element_type(ielem);
+            let (points, _w) = geom_rule(et, flux_order);
+            let nodes = m.element_nodes(ielem);
+            for xi in &points {
+                let (_, det) = geom_jacobian(m, nodes, xi, d, et);
+                let x = phys_point(m, nodes, xi, d, et);
+                let fl = gf.evaluate_gradient_at_element(ielem, xi);
+                let pvec = tensor_product_legendre(d, patch_order, &x, &xmin, &xmax, angle, &midpoint);
+                for l in 0..nb {
+                    for lp in 0..nb {
+                        a_mat[(l, lp)] += pvec[l] * pvec[lp];
+                    }
+                    for n in 0..d {
+                        b_mat[(l, n)] += pvec[l] * fl[n];
+                    }
+                }
+                let _ = det;
+            }
+        }
+
+        // 2.D/2.E. Tichonov regularization and solve.
+        for i in 0..nb {
+            a_mat[(i, i)] += 0.0; // tichonov_coeff = 0 (C++ default)
+        }
+        // Note: the C++ checks factorization success and retries with a
+        // 1e-8 diagonal shift when singular; nalgebra's LU solve handles the
+        // (square, generically nonsingular) system directly.
+        let lu = a_mat.clone().lu();
+        let coeffs = lu.solve(&b_mat).expect("LSZZErrorEstimator: singular normal equations");
+
+        // 2.F/3. Gradient error of the global polynomial per element.
+        let exgrad = |x: &[f64]| -> Vec<f64> {
+            let pvec = tensor_product_legendre(d, patch_order, x, &xmin, &xmax, angle, &midpoint);
+            let mut f = vec![0.0_f64; d];
+            for i in 0..nb {
+                for j in 0..d {
+                    f[j] += coeffs[(i, j)] * pvec[i];
+                }
+            }
+            f
+        };
+        let mut patch_error = 0.0_f64;
+        for &ielem in patch {
+            let et = m.element_type(ielem);
+            let (points, weights) = geom_rule(et, 2 * order + 3);
+            let element_error = compute_element_grad_error(
+                gf,
+                ielem,
+                &exgrad,
+                flux_order,
+                (&points, &weights),
+            );
+            let element_error = element_error * element_error;
+            patch_error += element_error;
+            error_estimates[ielem as usize] += element_error;
+            counters[ielem as usize] += 1;
+        }
+        total_error += patch_error;
+    }
+
+    // 4. Calibration.
+    for (eta_e, cnt) in error_estimates.iter_mut().zip(counters.iter()) {
+        if *cnt == 0 {
+            *eta_e = f64::INFINITY;
+        } else {
+            *eta_e /= *cnt as f64 / 2.0;
+            *eta_e = eta_e.sqrt();
+        }
+    }
+    let total = (total_error / d as f64).sqrt();
+    ElementIndicators {
+        eta: error_estimates,
+        total_error: total,
+        estimator_name: "LS-ZZ",
+        aniso_flags: None,
+    }
+}
+
+/// MFEM `ZienkiewiczZhuEstimator` with `SetAnisotropic(true)`: the ZZ gradient
+/// recovery error with per-element anisotropic flags from the directional
+/// flux energies (MFEM `DiffusionIntegrator::ComputeFluxEnergy` with
+/// `d_energy`): `d_xyz[k] = â« (J^T Îflux)_kÂ² dx` over the rule of order
+/// `2*(order+1)`; bit `k` of the flag is set when
+/// `d_xyz[k]/Î£d_xyz > 0.15Â·3/dim`.
+///
+/// The recovered (smooth) flux is the nodal-averaged gradient of
+/// [`zz_estimator`], evaluated on the element by vertex interpolation.
+pub fn zz_estimator_aniso<M, S>(gf: &GridFunction<'_, S>) -> ElementIndicators
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+{
+    let m: &M = gf.space().mesh();
+    let ne = m.n_elements() as usize;
+    let d = m.dim() as usize;
+    let order = gf.space().order();
+
+    // Element gradients at the vertices + nodal recovery (as zz_estimator).
+    let eg: Vec<Vec<Vec<f64>>> = (0..ne as u32)
+        .map(|e| {
+            let nodes = m.element_nodes(e);
+            let npe = nodes.len();
+            (0..npe)
+                .map(|k| {
+                    let xi = ref_vertex_coords(d, npe, k);
+                    gf.evaluate_gradient_at_element(e, &xi)
+                })
+                .collect()
+        })
+        .collect();
+    let nn = m.n_nodes();
+    let mut ns: Vec<Vec<f64>> = (0..nn).map(|_| vec![0.0; d]).collect();
+    let mut nc = vec![0_u32; nn];
+    for e in 0..ne as u32 {
+        for (k, &n) in m.element_nodes(e).iter().enumerate() {
+            for di in 0..d {
+                ns[n as usize][di] += eg[e as usize][k][di];
+            }
+            nc[n as usize] += 1;
+        }
+    }
+    for n in 0..nn {
+        if nc[n] > 0 {
+            for di in 0..d {
+                ns[n as usize][di] /= nc[n as usize] as f64;
+            }
+        }
+    }
+
+    let thresh = 0.15 * 3.0 / d as f64;
+    let mut eta = vec![0.0_f64; ne];
+    let mut flags = vec![0_u8; ne];
+    for e in 0..ne as u32 {
+        let et = m.element_type(e);
+        let nodes = m.element_nodes(e);
+        let npe = nodes.len();
+        let (points, weights) = geom_rule(et, 2 * (order + 1));
+        let mut energy = 0.0_f64;
+        let mut d_xyz = vec![0.0_f64; d];
+        for (q, xi) in points.iter().enumerate() {
+            let (jac, det) = geom_jacobian(m, nodes, xi, d, et);
+            let flux = gf.evaluate_gradient_at_element(e, xi);
+            // Recovered flux interpolated from the nodal values.
+            let shapes = vertex_shapes(et, xi, npe);
+            let mut rec = vec![0.0_f64; d];
+            for (k, &n) in nodes.iter().enumerate() {
+                for di in 0..d {
+                    rec[di] += shapes[k] * ns[n as usize][di];
+                }
+            }
+            let w = weights[q] * det;
+            for c in 0..d {
+                let dfc = flux[c] - rec[c];
+                energy += w * dfc * dfc;
+                // (J^T Δflux)_k with Δflux = flux − rec at this point.
+                let mut jtf = 0.0_f64;
+                for dd in 0..d {
+                    jtf += jac[(dd, c)] * (flux[dd] - rec[dd]);
+                }
+                d_xyz[c] += w * jtf * jtf;
+            }
+        }
+        eta[e as usize] = energy.max(0.0).sqrt();
+        let sum: f64 = d_xyz.iter().sum();
+        if sum > 0.0 {
+            let mut flag = 0_u8;
+            for k in 0..d {
+                if d_xyz[k] / sum > thresh {
+                    flag |= 1 << k;
+                }
+            }
+            flags[e as usize] = flag;
+        }
+    }
+    let total_error = eta.iter().map(|v| v * v).sum::<f64>().sqrt();
+    ElementIndicators {
+        eta,
+        total_error,
+        estimator_name: "ZZ-aniso",
+        aniso_flags: Some(flags),
+    }
+}
+
+// âââ Tests âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
+
+    /// Lp estimator: the exact field reproduced by the FE space gives ~0.
+    #[test]
+    fn lp_error_exact_field() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 2);
+        let d = s.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        let ind = lp_error_estimator(&gf, 2.0, &|x| x[0] * x[0] + x[1] * x[1]);
+        for &e in &ind.eta {
+            assert!(e < 1e-10, "L2 error should vanish, got {e}");
+        }
+        // C++-verbatim total: pow(sum(eta), 1/p) { tiny etas still amplify.
+        let want = ind.eta.iter().sum::<f64>().powf(0.5);
+        assert!((ind.total_error - want).abs() < 1e-14);
+        assert!(ind.total_error < 1e-5);
+    }
+
+    /// Lp estimator on a constant offset: every element error is the offset
+    /// (analytically known error field).
+    #[test]
+    fn lp_error_known_offset() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|x| x[0] + x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        // Constant error field |u_h - (u_h + 0.5)| = 0.5: the Lp element error
+        // is 0.5 * area^(1/p) (triangles of the 4x4 mesh have area 1/32).
+        let area = 1.0_f64 / 32.0;
+        let ind1 = lp_error_estimator(&gf, 1.0, &|x| x[0] + x[1] + 0.5);
+        for &e in &ind1.eta {
+            assert!((e - 0.5 * area).abs() < 1e-12, "L1 eta = {e}");
+        }
+        let ind2 = lp_error_estimator(&gf, 2.0, &|x| x[0] + x[1] + 0.5);
+        for &e in &ind2.eta {
+            assert!((e - 0.5 * area.sqrt()).abs() < 1e-12, "L2 eta = {e}");
+        }
+        let inf = f64::INFINITY;
+        let indinf = lp_error_estimator(&gf, inf, &|x| x[0] + x[1] + 0.5);
+        for &e in &indinf.eta {
+            assert!((e - 0.5).abs() < 1e-12, "Linf eta = {e}");
+        }
+        // C++-verbatim total: pow(sum(eta), 1/p).
+        let want = (0.5 * area * ind1.eta.len() as f64).powf(1.0);
+        assert!((ind1.total_error - want).abs() < 1e-12);
+    }
+
+    /// Lp estimator with a linear error ramp: eta = (â« (cÂ·h)Â²)^(1/2) is
+    /// element-size dependent; check the value on one element analytically.
+    #[test]
+    fn lp_error_ramp_l2_value() {
+        // Single unit square, Q1, u_h = 0; exact = 2x â error density (2x)Â².
+        // â«âÂ¹â«âÂ¹ 4xÂ² dx dy = 4/3 â eta = sqrt(4/3).
+        let m = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|_| 0.0);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        let ind = lp_error_estimator(&gf, 2.0, &|x| 2.0 * x[0]);
+        assert!((ind.eta[0] - (4.0_f64 / 3.0).sqrt()).abs() < 1e-12, "eta = {}", ind.eta[0]);
+    }
+
+    /// LS-ZZ: exact for fields whose gradient lies in the patch-polynomial
+    /// space (linear u â constant gradient).
+    #[test]
+    fn ls_zz_linear_exact() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|x| x[0] + x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        let ind = ls_zz_estimator(&gf);
+        for &e in &ind.eta {
+            assert!(e < 1e-10, "LS-ZZ should be exact for linear u, got {e}");
+        }
+    }
+
+    /// LS-ZZ for a quadratic field on P1 elements: the fitted flux is the P1
+    /// gradient (piecewise constant, element-dependent), which the degree-1
+    /// patch polynomial cannot represent exactly - nonzero error, and smaller
+    /// than for a trigonometric field.
+    #[test]
+    fn ls_zz_quadratic_exact_trig_nonzero() {
+        let m = Mesh::<2>::unit_square_tri(4);
+        let s = H1Space::new(m, 1);
+        let d = s.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
+        let gf = GridFunction::new(&s, d.as_slice().to_vec());
+        let ind = ls_zz_estimator(&gf);
+        let quad_total: f64 = ind.eta.iter().sum();
+        assert!(quad_total > 1e-6, "quadratic LS-ZZ should be nonzero: {quad_total}");
+
+        let d2 = s.interpolate(&|x| (std::f64::consts::PI * x[0]).sin());
+        let gf2 = GridFunction::new(&s, d2.as_slice().to_vec());
+        let ind2 = ls_zz_estimator(&gf2);
+        let trig_total: f64 = ind2.eta.iter().sum();
+        assert!(
+            trig_total > 1e-4,
+            "LS-ZZ should be nonzero for a trigonometric field"
+        );
+        assert!(
+            quad_total < trig_total,
+            "quadratic flux error {quad_total} should beat trig {trig_total}"
+        );
+    }
+
+    /// Anisotropic ZZ: for u = xÂ² the flux error is x-dominant (flag bit 0),
+    /// for u = yÂ² it is y-dominant (flag bit 1).
+    #[test]
+    fn zz_aniso_flags_direction() {
+        let m = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let s = H1Space::new(m, 2);
+
+        let d0 = s.interpolate(&|x| x[0] * x[0]);
+        let gf0 = GridFunction::new(&s, d0.as_slice().to_vec());
+        let ind0 = zz_estimator_aniso(&gf0);
+        let flags0 = ind0.get_anisotropic_flags();
+        assert_eq!(flags0.len(), ind0.eta.len());
+        for (e, &f) in flags0.iter().enumerate() {
+            assert!(
+                f & 1 != 0 || f & 2 != 0,
+                "element {e}: expected a split flag, got {f}"
+            );
+            assert!(f & 1 != 0, "element {e}: u=x^2 must flag direction 0 (f={f})");
+        }
+
+        let d1 = s.interpolate(&|x| x[1] * x[1]);
+        let gf1 = GridFunction::new(&s, d1.as_slice().to_vec());
+        let ind1 = zz_estimator_aniso(&gf1);
+        for (e, &f) in ind1.get_anisotropic_flags().iter().enumerate() {
+            assert!(f & 2 != 0, "element {e}: u=y^2 must flag direction 1 (f={f})");
+        }
+
+        // The trait object path (MFEM AnisotropicErrorEstimator).
+        let ani: &dyn AnisotropicErrorEstimator = &ind0;
+        assert_eq!(ani.get_local_errors().len(), ind0.eta.len());
+        assert!((ani.get_total_error() - ind0.total_error).abs() < 1e-14);
+    }
 
     #[test] fn zz_linear_exact() {
         let m = Mesh::<2>::unit_square_tri(4);
@@ -1369,7 +2081,7 @@ mod tests {
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
-        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-10, "L² estimator should be exact for linear functions, got e={e}"); }
+        for &e in &zz_estimator_l2(&gf).eta { assert!(e < 1e-10, "LÂ² estimator should be exact for linear functions, got e={e}"); }
     }
 
     #[test] fn zz_l2_quadratic_nonzero() {
@@ -1378,14 +2090,14 @@ mod tests {
         let d = s.interpolate(&|x| x[0]*x[0] + x[1]*x[1]);
         let gf = GridFunction::new(&s, d.as_slice().to_vec());
         let eta = zz_estimator_l2(&gf).eta;
-        assert!(eta.iter().sum::<f64>() > 0.0, "L² estimator should be > 0 for quadratic");
-        // L² projection should give more accurate recovery → smaller total L² error
-        // Compare against DOF-level averaging (both using full L² quadrature)
+        assert!(eta.iter().sum::<f64>() > 0.0, "LÂ² estimator should be > 0 for quadratic");
+        // LÂ² projection should give more accurate recovery â smaller total LÂ² error
+        // Compare against DOF-level averaging (both using full LÂ² quadrature)
         let eta_nodal = zz_estimator_nodal(&gf, &[]).eta;
         let total_l2: f64 = eta.iter().sum();
         let total_nodal: f64 = eta_nodal.iter().sum();
         assert!(total_l2 < total_nodal,
-            "L² projection ({:.6e}) should beat DOF-level nodal averaging ({:.6e}) for quadratic",
+            "LÂ² projection ({:.6e}) should beat DOF-level nodal averaging ({:.6e}) for quadratic",
             total_l2, total_nodal);
     }
 
@@ -1437,7 +2149,7 @@ mod tests {
     #[test]
     fn dwr_linear_u_linear_z() {
         // u = x + y, f = 0, z = x + y (dual = primal)
-        // For a linear solution where dual = primal, ω_K should be zero
+        // For a linear solution where dual = primal, Ï_K should be zero
         // (since z_h is linear and nodal recovery doesn't change it)
         let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
@@ -1452,8 +2164,8 @@ mod tests {
 
     #[test]
     fn dwr_quadratic_u_nonlinear_z() {
-        // u = x^2 + y^2, f = -4, z = sin(πx)sin(πy) (nonlinear dual, poorly resolved by P1)
-        // DWR should be > 0 since ω_K ≠ 0 for the dual
+        // u = x^2 + y^2, f = -4, z = sin(Ïx)sin(Ïy) (nonlinear dual, poorly resolved by P1)
+        // DWR should be > 0 since Ï_K â  0 for the dual
         let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let u_dofs = s.interpolate(&|x| x[0] * x[0] + x[1] * x[1]);
@@ -1468,7 +2180,7 @@ mod tests {
     fn dwr_refinement_reduces_indicator() {
         // Primal with quadratic solution + source, dual solved for a different RHS
         // u = x^2 + y^2, f = -4 (constant source)
-        // z = sin(πx) * y (dual differs from primal, has more structure)
+        // z = sin(Ïx) * y (dual differs from primal, has more structure)
         let f_u = &|_: &[f64]| -4.0;
         let z_fn = &|x: &[f64]| (std::f64::consts::PI * x[0]).sin() * x[1];
         let m_coarse = Mesh::<2>::unit_square_tri(2);
@@ -1494,9 +2206,9 @@ mod tests {
 
     #[test]
     fn residual_linear_solution() {
-        // u = x + y  =>  -Δu = 0, f = 0
+        // u = x + y  =>  -Îu = 0, f = 0
         // For linear functions, the residual estimator should be near zero
-        // since ∇u is constant, face jumps are zero.
+        // since âu is constant, face jumps are zero.
         let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
         let d = s.interpolate(&|x| x[0] + x[1]);
@@ -1509,7 +2221,7 @@ mod tests {
 
     #[test]
     fn residual_quadratic_nonzero() {
-        // u = x^2 + y^2  =>  -Δu = -4, f = -4
+        // u = x^2 + y^2  =>  -Îu = -4, f = -4
         // P1 approx of quadratic has non-zero face jumps
         let m = Mesh::<2>::unit_square_tri(4);
         let s = H1Space::new(m, 1);
@@ -1521,7 +2233,7 @@ mod tests {
 
     #[test]
     fn residual_refinement_reduces_error() {
-        // u = sin(πx)sin(πy) => f = 2π² sin(πx)sin(πy)
+        // u = sin(Ïx)sin(Ïy) => f = 2ÏÂ² sin(Ïx)sin(Ïy)
         let f = &|x: &[f64]| 2.0 * std::f64::consts::PI * std::f64::consts::PI
             * (std::f64::consts::PI * x[0]).sin()
             * (std::f64::consts::PI * x[1]).sin();
@@ -1544,7 +2256,7 @@ mod tests {
     }
 }
 
-// ─── H(div) RT0 ZZ estimator (wrapper for l2_zz::l2_zz_estimator) ──────────
+// âââ H(div) RT0 ZZ estimator (wrapper for l2_zz::l2_zz_estimator) ââââââââââ
 // This provides the MFEM L2ZZEstimator (H(div) RT0 projection) interface
 // that returns ElementIndicators, matching the other estimators in this module.
 // The raw l2_zz_estimator is Quad4-only and returns Vec<f64>; this wrapper

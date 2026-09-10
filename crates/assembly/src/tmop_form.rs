@@ -22,13 +22,14 @@
 //!   resulting `surf_fit_normal`.
 //! - Discrete-adaptivity target construction (`DiscreteAdaptTC` with
 //!   IDEAL_SHAPE_GIVEN_SIZE / GIVEN_SHAPE_AND_SIZE and discrete size /
-//!   aspect-ratio / skew / orientation coefficient fields). NOTE: the C++
-//!   remaps the fields onto the moved mesh at every Newton step through
-//!   `AdvectorCG`/`InterpolatorFP` (`UpdateTargetSpecification`); this port
-//!   evaluates the fields on the initial mesh positions only (no remap), so
-//!   the target Jacobians match the C++ exactly at the initial mesh, but a
-//!   full optimization diverges from C++ once the mesh moves.
-//! Adaptive limiting (`EnableAdaptiveLimiting`) is NOT implemented.
+//!   aspect-ratio / skew / orientation coefficient fields), including the
+//!   `UpdateTargetSpecification` remap of the fields onto the moving mesh
+//!   through the `AdvectorCG` / `InterpolatorFP` evaluators
+//!   ([`TmopRemapEvaluator`], driven by `TmopForm::process_new_state` at the
+//!   exact `TMOPNewtonSolver::ProcessNewState` call points).
+//! - Adaptive limiting (`TMOP_Integrator::EnableAdaptiveLimiting`): the
+//!   limiting fields are remapped like the target specification and penalized
+//!   quadratically (`-alc` of mesh-optimizer).
 
 use crate::assembler::ref_elem_vol_h1;
 use fem_element::quadrature::{gauss_lobatto_01_arbitrary, gauss_lobatto_arbitrary};
@@ -44,7 +45,7 @@ use fem_mesh::tmop::metrics::{
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, solve_minres, solve_minres_jacobi, solve_minres_precond};
 use fem_space::dof_manager::DofManager;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Target-matrix construction type (MFEM `TargetConstructor::TargetType`).
@@ -348,10 +349,13 @@ pub struct TmopLimiting {
 /// component-major), evaluated at the metric quadrature points through that
 /// space's shape functions.
 ///
-/// NOTE (gap vs C++): MFEM remaps these fields onto the moved mesh at every
-/// Newton step (`UpdateTargetSpecification` through `AdvectorCG` /
-/// `InterpolatorFP`). This port evaluates the fields on the initial mesh
-/// positions only; the target Jacobians match the C++ at the initial mesh.
+/// MFEM remaps these fields onto the moved mesh at every Newton step
+/// (`DiscreteAdaptTC::UpdateTargetSpecification` through `AdvectorCG` /
+/// `InterpolatorFP`, see [`TmopRemapEvaluator`]). The remapped values are
+/// stored in `remapped` (packed byNODES in the field order size, aspect
+/// ratio, skew, orientation) and read by the target construction once the
+/// remap has been set up with `TmopForm::set_discrete_remapper`; before the
+/// first remap the initial fields are used.
 #[derive(Clone)]
 pub struct TmopDiscreteSpec {
     /// Target size eta(x) dofs (`SetSerialDiscreteTargetSize`).
@@ -376,6 +380,13 @@ pub struct TmopDiscreteSpec {
     /// Per-element indicator shape values at the metric quadrature points,
     /// `[e][q * nd_ind + k]`, prepared by `TmopForm::finalize_targets`.
     pub qp_shapes: Option<Rc<Vec<Vec<f64>>>>,
+    /// MFEM `tspec`: the packed initial field values (component order: size,
+    /// aspect ratio, skew, orientation).
+    pub(crate) packed0: Rc<Vec<f64>>,
+    /// MFEM `tspec` after the last `UpdateTargetSpecification` remap; `None`
+    /// until a remap evaluator is attached and the solver calls
+    /// `TmopForm::process_new_state`.
+    pub(crate) remapped: RefCell<Option<Rc<Vec<f64>>>>,
 }
 
 impl TmopDiscreteSpec {
@@ -392,6 +403,12 @@ impl TmopDiscreteSpec {
         n_ind: usize,
         element_dofs: Rc<Vec<Vec<usize>>>,
     ) -> Self {
+        let mut packed0 = Vec::new();
+        for f in [&size, &aspect_ratio, &skew, &orientation] {
+            if let Some(v) = f {
+                packed0.extend_from_slice(v);
+            }
+        }
         Self {
             size,
             aspect_ratio,
@@ -402,6 +419,30 @@ impl TmopDiscreteSpec {
             n_ind,
             element_dofs,
             qp_shapes: None,
+            packed0: Rc::new(packed0),
+            remapped: RefCell::new(None),
+        }
+    }
+
+    /// Number of packed components (`DiscreteAdaptTC::ncomp`).
+    pub fn ncomp(&self) -> usize {
+        self.packed0.len() / self.n_ind
+    }
+
+    /// The current tspec values: the last remap result, or the initial fields.
+    pub(crate) fn packed_current(&self) -> Vec<f64> {
+        match self.remapped.borrow().as_ref() {
+            Some(v) => v.as_ref().clone(),
+            None => self.packed0.as_ref().clone(),
+        }
+    }
+
+    /// The packed values the element-target construction reads (the remapped
+    /// state when present, the initial fields otherwise).
+    fn current(&self) -> Rc<Vec<f64>> {
+        match self.remapped.borrow().as_ref() {
+            Some(v) => v.clone(),
+            None => self.packed0.clone(),
         }
     }
 }
@@ -417,6 +458,726 @@ pub fn count_elements_per_dof(topo: &dyn MeshTopology, dm: &DofManager) -> Vec<f
     }
     count
 }
+
+// ─── Field remap evaluators (fem/tmop_tools.cpp) ─────────────────────────────
+
+/// The evaluator kind used to remap discrete fields onto the moving mesh
+/// (mesh-optimizer `-ae`): `AdvectorCG` (0, the default) or `InterpolatorFP`
+/// (1, MFEM_USE_GSLIB path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmopRemapKind {
+    /// MFEM `AdvectorCG`: conservative remap by advecting the field with the
+    /// mesh displacement velocity (RK4 in time + CG solve of the mass matrix).
+    AdvectorCG,
+    /// MFEM `InterpolatorFP`: pointwise interpolation of the initial field at
+    /// the new mesh node positions.
+    InterpolatorFP,
+}
+
+/// One scalar FE space on the mesh, owned by a remap evaluator (MFEM keeps
+/// these in the copied `Mesh` / `FiniteElementSpace`).
+struct RemapSpaceElem {
+    dofs: Vec<usize>,
+    re: Box<dyn ReferenceElement>,
+}
+
+/// MFEM `AdvectorCG` / `InterpolatorFP` (serial, H1 fields, quad/hex meshes):
+/// remaps a packed byNODES multi-component field from the initial mesh
+/// positions (`nodes0`) to new mesh positions.
+///
+/// Like the C++ evaluators, the state is *incremental*: after every
+/// `compute_at_new_position` the internal `nodes0`/`field0` are updated, so
+/// consecutive remaps transport the field through the increment only.
+pub struct TmopRemapEvaluator {
+    kind: TmopRemapKind,
+    dim: usize,
+    /// Nodal (mesh geometry) space.
+    elems_nodal: Vec<RemapSpaceElem>,
+    n_nodal: usize,
+    /// Field (advection) space.
+    elems_field: Vec<RemapSpaceElem>,
+    n_field: usize,
+    /// MFEM `AdvectorCG::dt_scale` (0.5).
+    dt_scale: f64,
+    /// MFEM `nodes0` / `field0`: incremental remap state (packed byNODES).
+    nodes0: Vec<f64>,
+    field0: Vec<f64>,
+    ncomp: usize,
+    /// Per-element quadrature rules of the advection operators (mass:
+    /// `trial+test+OrderW`, convection: `OrderGrad+Order+el_order`, both
+    /// Gauss-Legendre tensor rules as in MFEM's `IntRules`).
+    quad_mass: Vec<(Vec<Vec<f64>>, Vec<f64>)>,
+    quad_conv: Vec<(Vec<Vec<f64>>, Vec<f64>)>,
+    /// InterpolatorFP: per-element bounding boxes of the initial geometry and
+    /// the field-space dof coordinates.
+    interp_boxes: Vec<[f64; 6]>,
+    field_dof_coords: Vec<Vec<f64>>,
+}
+
+impl TmopRemapEvaluator {
+    /// Build the two spaces (MFEM
+    /// `AdaptivityEvaluator::SetSerialMetaInfo(m, f)` copies the mesh and
+    /// creates the field space on it).
+    pub fn new(
+        kind: TmopRemapKind,
+        topo: &dyn MeshTopology,
+        dm_nodal: &DofManager,
+        order_nodal: u8,
+        dm_field: &DofManager,
+        order_field: u8,
+        dt_scale: f64,
+    ) -> Self {
+        let dim = topo.dim() as usize;
+        let elem = |dm: &DofManager, order: u8, e: u32| -> RemapSpaceElem {
+            let raw = ref_elem_for(topo.element_type(e), order);
+            let re: Box<dyn ReferenceElement> = if el_domain_is_unit(raw.as_ref()) {
+                raw
+            } else {
+                Box::new(UnitDomainElem {
+                    inner: raw,
+                    dim,
+                })
+            };
+            RemapSpaceElem {
+                dofs: dm
+                    .element_dofs(e)
+                    .iter()
+                    .map(|&d| d as usize)
+                    .collect(),
+                re,
+            }
+        };
+        let ne = topo.n_elements() as usize;
+        let elems_nodal: Vec<RemapSpaceElem> =
+            (0..ne as u32).map(|e| elem(dm_nodal, order_nodal, e)).collect();
+        let elems_field: Vec<RemapSpaceElem> =
+            (0..ne as u32).map(|e| elem(dm_field, order_field, e)).collect();
+        // Advection quadrature rules (only needed by AdvectorCG; MFEM
+        // ConvectionIntegrator: order = OrderGrad + Order + test order with
+        // IsoparametricTransformation OrderGrad = k*(d-1)+(l-1), Order = k for
+        // Qk spaces; MassIntegrator: order = trial + test + OrderW with
+        // OrderW = k*d - 1).
+        let mut quad_mass = Vec::with_capacity(ne);
+        let mut quad_conv = Vec::with_capacity(ne);
+        for e in 0..ne {
+            let (mass, conv) = if kind == TmopRemapKind::AdvectorCG {
+                let k = order_nodal as usize;
+                let l = order_field as usize;
+                let d = dim;
+                let m_order = (l + l + (k * d - 1)) as u8;
+                let c_order = (k * (d - 1) + (l - 1) + k + l) as u8;
+                let rule = |re: &dyn ReferenceElement, order: u8| {
+                    let r = re.quadrature(order);
+                    (r.points, r.weights)
+                };
+                (
+                    rule(elems_field[e].re.as_ref(), m_order),
+                    rule(elems_field[e].re.as_ref(), c_order),
+                )
+            } else {
+                ((Vec::new(), Vec::new()), (Vec::new(), Vec::new()))
+            };
+            quad_mass.push(mass);
+            quad_conv.push(conv);
+        }
+        let field_dof_coords: Vec<Vec<f64>> = elems_field
+            .first()
+            .map(|el| el.re.dof_coords())
+            .unwrap_or_default();
+        Self {
+            kind,
+            dim,
+            n_nodal: dm_nodal.n_dofs,
+            n_field: dm_field.n_dofs,
+            dt_scale,
+            nodes0: Vec::new(),
+            field0: Vec::new(),
+            ncomp: 0,
+            quad_mass,
+            quad_conv,
+            interp_boxes: Vec::new(),
+            field_dof_coords,
+            elems_nodal,
+            elems_field,
+        }
+    }
+
+    /// MFEM `AdaptivityEvaluator::SetInitialField`.
+    pub fn set_initial_field(&mut self, init_nodes: &[f64], init_field: &[f64]) {
+        assert_eq!(init_nodes.len(), self.dim * self.n_nodal);
+        assert_eq!(init_field.len() % self.n_field, 0);
+        self.nodes0 = init_nodes.to_vec();
+        self.field0 = init_field.to_vec();
+        self.ncomp = init_field.len() / self.n_field;
+        if self.kind == TmopRemapKind::InterpolatorFP {
+            // Element bounding boxes of the initial geometry (findpoints).
+            self.interp_boxes = self
+                .elems_nodal
+                .iter()
+                .map(|el| {
+                    let mut box_ = [f64::INFINITY; 6];
+                    for &dof in &el.dofs {
+                        for c in 0..self.dim {
+                            let v = init_nodes[c * self.n_nodal + dof];
+                            box_[c] = box_[c].min(v);
+                            box_[c + 3] = box_[c + 3].max(v);
+                        }
+                    }
+                    box_
+                })
+                .collect();
+        }
+    }
+
+    /// MFEM `AdaptivityEvaluator::ComputeAtNewPosition` (byNODES).
+    pub fn compute_at_new_position(&mut self, new_mesh_nodes: &[f64], new_field: &mut Vec<f64>) {
+        assert_eq!(self.nodes0.len(), new_mesh_nodes.len());
+        assert_eq!(new_field.len(), self.ncomp * self.n_field);
+        new_field.copy_from_slice(&self.field0);
+        match self.kind {
+            TmopRemapKind::AdvectorCG => {
+                for c in 0..self.ncomp {
+                    self.advector_scalar(new_mesh_nodes, new_field, c);
+                }
+            }
+            TmopRemapKind::InterpolatorFP => {
+                self.interpolator(new_mesh_nodes, new_field);
+            }
+        }
+        // Without this, the next remap would start from the initial mesh, i.e.,
+        // every consecutive remap would be more expensive (C++ comment).
+        self.field0.copy_from_slice(new_field);
+        self.nodes0.copy_from_slice(new_mesh_nodes);
+    }
+
+    /// Minimum MFEM `Mesh::GetElementSize(i)` over the mesh at `nodes`
+    /// (type 0 size: `pow(|det J(center)|, 1/dim)` of the nodal geometry).
+    fn h_min(&self, nodes: &[f64]) -> f64 {
+        let dim = self.dim;
+        let center = vec![0.5_f64; dim];
+        let mut h_min = f64::INFINITY;
+        for el in &self.elems_nodal {
+            let nd = el.dofs.len();
+            let mut dsh = vec![0.0_f64; nd * dim];
+            el.re.eval_grad_basis(&center, &mut dsh);
+            let mut jpr = [[0.0_f64; 3]; 3];
+            for a in 0..dim {
+                for b in 0..dim {
+                    let mut s = 0.0;
+                    for (i, &dof) in el.dofs.iter().enumerate() {
+                        s += nodes[a * self.n_nodal + dof] * dsh[i * dim + b];
+                    }
+                    jpr[a][b] = s;
+                }
+            }
+            let det = det_small(&jpr, dim);
+            let h = det.abs().powf(1.0 / dim as f64);
+            h_min = h_min.min(h);
+        }
+        h_min
+    }
+
+    /// MFEM `AdvectorCG::ComputeAtNewPositionScalar` for component `c`.
+    fn advector_scalar(&self, new_mesh_nodes: &[f64], new_field: &mut [f64], c: usize) {
+        let nf = self.n_field;
+        let nn = self.n_nodal;
+        let comp = &mut new_field[c * nf..(c + 1) * nf];
+        let minv = comp.iter().cloned().fold(f64::INFINITY, f64::min);
+        let maxv = comp.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        // Velocity of the positions: u = new_mesh_nodes - nodes0 (on the
+        // nodal space).
+        let u: Vec<f64> = (0..self.dim * nn)
+            .map(|i| new_mesh_nodes[i] - self.nodes0[i])
+            .collect();
+        // Compute some time step [mesh_size / speed].
+        let h_min = self.h_min(&self.nodes0);
+        let mut v2_max = 0.0_f64;
+        for i in 0..nn {
+            let mut vel = 0.0;
+            for d in 0..self.dim {
+                vel += u[d * nn + i] * u[d * nn + i];
+            }
+            v2_max = v2_max.max(vel);
+        }
+        if v2_max == 0.0 {
+            // No need to change the field.
+            return;
+        }
+        let v_max = v2_max.sqrt();
+        let dt = self.dt_scale * h_min / v_max;
+        let mut t = 0.0_f64;
+        let mut last_step = false;
+        while !last_step {
+            let mut step = dt;
+            if t + dt >= 1.0 {
+                step = 1.0 - t;
+                last_step = true;
+            }
+            self.rk4_step(comp, &u, &mut t, step);
+        }
+        // Trim the overshoots and undershoots.
+        for v in comp.iter_mut() {
+            if *v < minv {
+                *v = minv;
+            }
+            if *v > maxv {
+                *v = maxv;
+            }
+        }
+    }
+
+    /// MFEM `RK4Solver::Step` applied to the scalar component with the
+    /// advection operator evaluated at the moving mesh (`f->SetTime(t)`).
+    fn rk4_step(&self, x: &mut [f64], u: &[f64], t: &mut f64, dt: f64) {
+        let k1 = self.advector_mult(x, u, *t);
+        let y: Vec<f64> = x.iter().zip(k1.iter()).map(|(a, b)| a + dt / 2.0 * b).collect();
+        let mut z: Vec<f64> = x.iter().zip(k1.iter()).map(|(a, b)| a + dt / 6.0 * b).collect();
+
+        let k2 = self.advector_mult(&y, u, *t + dt / 2.0);
+        let y: Vec<f64> = x.iter().zip(k2.iter()).map(|(a, b)| a + dt / 2.0 * b).collect();
+        for (zv, kv) in z.iter_mut().zip(k2.iter()) {
+            *zv += dt / 3.0 * kv;
+        }
+
+        let k3 = self.advector_mult(&y, u, *t + dt / 2.0);
+        let y: Vec<f64> = x.iter().zip(k3.iter()).map(|(a, b)| a + dt * b).collect();
+        for (zv, kv) in z.iter_mut().zip(k3.iter()) {
+            *zv += dt / 3.0 * kv;
+        }
+
+        let k4 = self.advector_mult(&y, u, *t + dt);
+        for (xv, (zv, kv)) in x.iter_mut().zip(z.iter().zip(k4.iter())) {
+            *xv = zv + dt / 6.0 * kv;
+        }
+        *t += dt;
+    }
+
+    /// MFEM `SerialAdvectorCGOper::Mult`: move the mesh to `x0 + t*u`, reassemble
+    /// the convection (K) and mass (M) operators on it and solve
+    /// `M di/dt = K ind` by PCG (Jacobi, rtol 1e-12, max 100 iterations).
+    fn advector_mult(&self, ind: &[f64], u: &[f64], t: f64) -> Vec<f64> {
+        let dim = self.dim;
+        let n = self.n_nodal;
+        let nf = self.n_field;
+        // Current mesh positions (nodal space, byNODES).
+        let xnow: Vec<f64> = (0..dim * n).map(|i| self.nodes0[i] + t * u[i]).collect();
+        let ne = self.elems_field.len();
+        let mut coo = CooMatrix::<f64>::new(nf, nf);
+        let mut coo_m = CooMatrix::<f64>::new(nf, nf);
+        let mut rhs = vec![0.0_f64; nf];
+        for e in 0..ne {
+            let fel = &self.elems_field[e];
+            let nel = &self.elems_nodal[e];
+            let ndf = fel.dofs.len();
+            let (cp, cw) = &self.quad_conv[e];
+            let (mp, mw) = &self.quad_mass[e];
+            let mut kel = vec![0.0_f64; ndf * ndf];
+            let mut mel = vec![0.0_f64; ndf * ndf];
+            let mut dsh = vec![0.0_f64; ndf * dim];
+            let mut sh = vec![0.0_f64; ndf];
+            let mut shn = vec![0.0_f64; nel.dofs.len()];
+            let mut dshn = vec![0.0_f64; nel.dofs.len() * dim];
+            for q in 0..cp.len() {
+                // Geometry (Jpr) of the element at the moved positions.
+                nel.re.eval_basis(&cp[q], &mut shn);
+                nel.re.eval_grad_basis(&cp[q], &mut dshn);
+                let mut jpr = [[0.0_f64; 3]; 3];
+                for a in 0..dim {
+                    for b in 0..dim {
+                        let mut s = 0.0;
+                        for (i, &dof) in nel.dofs.iter().enumerate() {
+                            s += xnow[a * n + dof] * dshn[i * dim + b];
+                        }
+                        jpr[a][b] = s;
+                    }
+                }
+                // Velocity values at the quadrature point.
+                let mut vec1 = [0.0_f64; 3];
+                for d in 0..dim {
+                    let mut s = 0.0;
+                    for (i, &dof) in nel.dofs.iter().enumerate() {
+                        s += u[d * n + dof] * shn[i];
+                    }
+                    // MFEM: vec1 = Q * (alpha * ip.weight), alpha = 1.
+                    vec1[d] = s * cw[q];
+                }
+                // adjJ = adj(Jpr) (cofactor matrix, no det division).
+                let adj = adjugate(&jpr, dim);
+                let mut vec2 = [0.0_f64; 3];
+                for m in 0..dim {
+                    let mut s = 0.0;
+                    for d in 0..dim {
+                        s += adj[m][d] * vec1[d];
+                    }
+                    vec2[m] = s;
+                }
+                fel.re.eval_basis(&cp[q], &mut sh);
+                fel.re.eval_grad_basis(&cp[q], &mut dsh);
+                // BdFidxT(j) = dshape(j,:) . vec2 (reference gradients).
+                let mut bdf = vec![0.0_f64; ndf];
+                for j in 0..ndf {
+                    let mut s = 0.0;
+                    for m in 0..dim {
+                        s += dsh[j * dim + m] * vec2[m];
+                    }
+                    bdf[j] = s;
+                }
+                // AddMultVWt(shape, BdFidxT, elmat).
+                for i in 0..ndf {
+                    for j in 0..ndf {
+                        kel[i * ndf + j] += sh[i] * bdf[j];
+                    }
+                }
+            }
+            for q in 0..mp.len() {
+                fel.re.eval_basis(&mp[q], &mut sh);
+                nel.re.eval_grad_basis(&mp[q], &mut dshn);
+                let mut jpr = [[0.0_f64; 3]; 3];
+                for a in 0..dim {
+                    for b in 0..dim {
+                        let mut s = 0.0;
+                        for (i, &dof) in nel.dofs.iter().enumerate() {
+                            s += xnow[a * n + dof] * dshn[i * dim + b];
+                        }
+                        jpr[a][b] = s;
+                    }
+                }
+                // MassIntegrator: w = ip.weight * Trans.Weight().
+                let w = mw[q] * det_small(&jpr, dim);
+                // AddMult_a_VVt(w, shape, elmat).
+                for i in 0..ndf {
+                    for j in 0..ndf {
+                        mel[i * ndf + j] += w * sh[i] * sh[j];
+                    }
+                }
+            }
+            // Scatter (row = field dof).
+            for (i, &gi) in fel.dofs.iter().enumerate() {
+                for (j, &gj) in fel.dofs.iter().enumerate() {
+                    let v = kel[i * ndf + j];
+                    if v != 0.0 {
+                        coo.add(gi, gj, v);
+                    }
+                }
+                let mut acc = 0.0_f64;
+                for (j, &gj) in fel.dofs.iter().enumerate() {
+                    acc += kel[i * ndf + j] * ind[gj];
+                }
+                rhs[gi] += acc;
+            }
+            for (i, &gi) in fel.dofs.iter().enumerate() {
+                for (j, &gj) in fel.dofs.iter().enumerate() {
+                    let v = mel[i * ndf + j];
+                    if v != 0.0 {
+                        coo_m.add(gi, gj, v);
+                    }
+                }
+            }
+        }
+        let m = coo_m.into_csr();
+        // PCG (MFEM CGSolver, x0 = 0) with the Jacobi smoother as
+        // preconditioner.
+        pcg_jacobi(&m, &rhs, 1e-12, 100)
+    }
+
+    /// MFEM `InterpolatorFP::ComputeAtNewPosition` (same-FE-space path):
+    /// interpolate the initial field at the new node positions.
+    fn interpolator(&self, new_mesh_nodes: &[f64], new_field: &mut [f64]) {
+        // Query positions: the field-space dof positions on the new geometry.
+        let queries: Vec<Vec<f64>> = if self.n_field == self.n_nodal
+            && self.field_dof_coords.len() == self.elems_nodal[0].re.dof_coords().len()
+        {
+            (0..self.n_field)
+                .map(|i| {
+                    (0..self.dim)
+                        .map(|c| new_mesh_nodes[c * self.n_nodal + i])
+                        .collect()
+                })
+                .collect()
+        } else {
+            // MFEM `FiniteElementSpace::GetNodePositions`: the new mesh
+            // geometry evaluated at the field dof points.
+            let mut mapped = vec![0.0_f64; self.dim * self.n_field];
+            let ndn = self.elems_nodal[0].dofs.len();
+            let mut shn = vec![0.0_f64; ndn];
+            for (e, fel) in self.elems_field.iter().enumerate() {
+                let nel = &self.elems_nodal[e];
+                for (k, xi) in self.field_dof_coords.iter().enumerate() {
+                    self.elems_nodal[e].re.eval_basis(xi, &mut shn);
+                    for c in 0..self.dim {
+                        let mut s = 0.0;
+                        for (i, &dof) in nel.dofs.iter().enumerate() {
+                            s += new_mesh_nodes[c * self.n_nodal + dof] * shn[i];
+                        }
+                        mapped[c * self.n_field + fel.dofs[k]] = s;
+                    }
+                }
+                let _ = ndn;
+            }
+            (0..self.n_field)
+                .map(|i| {
+                    (0..self.dim)
+                        .map(|c| mapped[c * self.n_field + i])
+                        .collect()
+                })
+                .collect()
+        };
+        // FindPointsGSLIB equivalent: locate the element containing each query
+        // point on the initial (nodes0) geometry by Newton inversion, then
+        // interpolate the initial field there.
+        for (i, p) in queries.iter().enumerate() {
+            let (e, xi) = self
+                .find_point(p)
+                .unwrap_or_else(|| panic!("InterpolatorFP: point {:?} not found", p));
+            let fel = &self.elems_field[e];
+            let mut sh = vec![0.0_f64; fel.dofs.len()];
+            fel.re.eval_basis(&xi, &mut sh);
+            for c in 0..self.ncomp {
+                let mut s = 0.0;
+                for (k, &dof) in fel.dofs.iter().enumerate() {
+                    s += sh[k] * self.field0[c * self.n_field + dof];
+                }
+                new_field[c * self.n_field + i] = s;
+            }
+        }
+    }
+
+    /// FindPointsGSLIB replacement: Newton inversion of the isoparametric map
+    /// of every candidate element (bounding-box prefilter). Returns the
+    /// element index and reference coordinates. Query points outside the
+    /// initial mesh (possible when the optimized mesh bulges past its initial
+    /// bounding box) are extrapolated from the best-converged candidate.
+    fn find_point(&self, p: &[f64]) -> Option<(usize, Vec<f64>)> {
+        let dim = self.dim;
+        let tol = 1.0e-10;
+        let mut best: Option<(f64, usize, Vec<f64>)> = None;
+        // First pass with the bounding-box prefilter; query points outside the
+        // initial mesh bounding box (optimized mesh bulging past its starting
+        // shape) retry the full element list and are extrapolated.
+        for use_boxes in [true, false] {
+            'elements: for (e, nel) in self.elems_nodal.iter().enumerate() {
+                if use_boxes {
+                    let b = &self.interp_boxes[e];
+                    for c in 0..dim {
+                        if p[c] < b[c] - tol || p[c] > b[c + 3] + tol {
+                            continue 'elements;
+                        }
+                    }
+                } else if best.is_some() {
+                    break;
+                }
+                let nd = nel.dofs.len();
+                let mut xi: Vec<f64> = vec![0.5; dim];
+                let mut sh = vec![0.0_f64; nd];
+                let mut dsh = vec![0.0_f64; nd * dim];
+                for _ in 0..50 {
+                    nel.re.eval_basis(&xi, &mut sh);
+                    let mut f = [0.0_f64; 3];
+                    for c in 0..dim {
+                        let mut s = 0.0;
+                        for (k, &dof) in nel.dofs.iter().enumerate() {
+                            s += self.nodes0[c * self.n_nodal + dof] * sh[k];
+                        }
+                        f[c] = s - p[c];
+                    }
+                    let res = f[..dim].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                    if res < 1.0e-12 {
+                        let inside = xi.iter().enumerate().all(|(d, v)| {
+                            let lo = if nel.re.dof_coords()[0][d] < -0.25 { -1.0 } else { 0.0 };
+                            let hi = lo + 2.0;
+                            *v >= lo - tol && *v <= hi + tol
+                        });
+                        if inside {
+                            return Some((e, xi));
+                        }
+                        if best.as_ref().map_or(true, |(r, _, _)| res < *r) {
+                            best = Some((res, e, xi.clone()));
+                        }
+                        continue 'elements;
+                    }
+                    if best.as_ref().map_or(true, |(r, _, _)| res < *r) {
+                        best = Some((res, e, xi.clone()));
+                    }
+                    nel.re.eval_grad_basis(&xi, &mut dsh);
+                    let mut jpr = [[0.0_f64; 3]; 3];
+                    for a in 0..dim {
+                        for b in 0..dim {
+                            let mut s = 0.0;
+                            for (i, &dof) in nel.dofs.iter().enumerate() {
+                                s += self.nodes0[a * self.n_nodal + dof] * dsh[i * dim + b];
+                            }
+                            jpr[a][b] = s;
+                        }
+                    }
+                    let jac = jac_inverse(&jpr, dim);
+                    let mut dx = [0.0_f64; 3];
+                    for m in 0..dim {
+                        let mut s = 0.0;
+                        for d in 0..dim {
+                            s += jac[m][d] * f[d];
+                        }
+                        dx[m] = s;
+                    }
+                    for d in 0..dim {
+                        xi[d] -= dx[d];
+                    }
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        best.map(|(_, e, xi)| (e, xi))
+    }
+}
+
+/// MFEM `CalcAdjugate` (square): the adjugate (cofactor-transpose) matrix, no
+/// determinant division.
+fn adjugate(j: &[[f64; 3]; 3], dim: usize) -> [[f64; 3]; 3] {
+    match dim {
+        2 => [
+            [j[1][1], -j[0][1], 0.0],
+            [-j[1][0], j[0][0], 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        3 => [
+            [
+                j[1][1] * j[2][2] - j[1][2] * j[2][1],
+                j[0][2] * j[2][1] - j[0][1] * j[2][2],
+                j[0][1] * j[1][2] - j[0][2] * j[1][1],
+            ],
+            [
+                j[1][2] * j[2][0] - j[1][0] * j[2][2],
+                j[0][0] * j[2][2] - j[0][2] * j[2][0],
+                j[0][2] * j[1][0] - j[0][0] * j[1][2],
+            ],
+            [
+                j[1][0] * j[2][1] - j[1][1] * j[2][0],
+                j[0][1] * j[2][0] - j[0][0] * j[2][1],
+                j[0][0] * j[1][1] - j[0][1] * j[1][0],
+            ],
+        ],
+        _ => unreachable!(),
+    }
+}
+
+/// Full matrix inverse (MFEM `CalcInverse`), row-major `jac[m][d]`.
+fn jac_inverse(j: &[[f64; 3]; 3], dim: usize) -> [[f64; 3]; 3] {
+    match dim {
+        2 => {
+            let flat: [f64; 4] = [j[0][0], j[0][1], j[1][0], j[1][1]];
+            let inv = invert_2x2(&flat);
+            [
+                [inv[0], inv[1], 0.0],
+                [inv[2], inv[3], 0.0],
+                [0.0, 0.0, 0.0],
+            ]
+        }
+        3 => {
+            let m: [f64; 9] = [
+                j[0][0], j[0][1], j[0][2], j[1][0], j[1][1], j[1][2], j[2][0], j[2][1], j[2][2],
+            ];
+            let i = invert_3x3(&m);
+            [[i[0], i[1], i[2]], [i[3], i[4], i[5]], [i[6], i[7], i[8]]]
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// MFEM `PCG` with a Jacobi (diagonal) preconditioner: `M z = b` solved to
+/// relative tolerance `rtol` (abs tol 0), at most `max_iter` iterations.
+fn pcg_jacobi(m: &CsrMatrix<f64>, b: &[f64], rtol: f64, max_iter: usize) -> Vec<f64> {
+    let n = b.len();
+    let mut diag = vec![1.0_f64; n];
+    for row in 0..n {
+        let (s, e) = (m.row_ptr[row], m.row_ptr[row + 1]);
+        for k in s..e {
+            if m.col_idx[k] as usize == row {
+                diag[row] = m.values[k];
+            }
+        }
+        if diag[row] == 0.0 {
+            diag[row] = 1.0;
+        }
+    }
+    let mut x = vec![0.0_f64; n];
+    let mut r = b.to_vec();
+    let bnorm = l2_norm(b);
+    if bnorm == 0.0 {
+        return x;
+    }
+    let tol = rtol * bnorm;
+    let mut z = vec![0.0_f64; n];
+    let mut p = vec![0.0_f64; n];
+    let mut q = vec![0.0_f64; n];
+    for i in 0..n {
+        z[i] = r[i] / diag[i];
+    }
+    p.copy_from_slice(&z);
+    let mut rdotz: f64 = r.iter().zip(z.iter()).map(|(a, c)| a * c).sum();
+    for _ in 0..max_iter {
+        if l2_norm(&r) <= tol {
+            break;
+        }
+        m.spmv(p.as_slice(), q.as_mut_slice());
+        let pq: f64 = p.iter().zip(q.iter()).map(|(a, c)| a * c).sum();
+        if pq == 0.0 {
+            break;
+        }
+        let alpha = rdotz / pq;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * q[i];
+        }
+        if l2_norm(&r) <= tol {
+            break;
+        }
+        for i in 0..n {
+            z[i] = r[i] / diag[i];
+        }
+        let rdotz1: f64 = r.iter().zip(z.iter()).map(|(a, c)| a * c).sum();
+        let beta = rdotz1 / rdotz;
+        for i in 0..n {
+            p[i] = beta * p[i] + z[i];
+        }
+        rdotz = rdotz1;
+    }
+    x
+}
+
+/// Adaptive limiting term of one integrator (MFEM
+/// `TMOP_Integrator::EnableAdaptiveLimiting`): the energy
+/// `lim_normal * Σ_c coeff_c * ((z_c(x) - z_{0,c}(x))/delta_max_c)^2` added at
+/// the metric quadrature points, where `z_c` are the limiting fields remapped
+/// onto the moving mesh through a [`TmopRemapEvaluator`].
+pub struct TmopAdaptiveLimiting {
+    /// MFEM `adapt_lim_gf0`: initial (fixed) field dofs, packed byNODES as
+    /// `[c * n_field + i]`.
+    pub z0: Rc<Vec<f64>>,
+    /// MFEM `adapt_lim_gf`: current remapped field dofs, updated by
+    /// `TmopForm::process_new_state` through the adaptive-limiting evaluator.
+    pub(crate) z_cur: RefCell<Rc<Vec<f64>>>,
+    /// MFEM `adapt_lim_coeff` (one ConstantCoefficient per field). Mutated by
+    /// the driver around metric-only energy evaluations and by
+    /// `enable_normalization` (never).
+    pub coeffs: RefCell<Vec<f64>>,
+    /// MFEM `adapt_lim_delta_max` per field.
+    pub delta_max: Vec<f64>,
+    /// MFEM `lim_normal` (1.0 until `TmopForm::enable_normalization`).
+    pub(crate) normal: Cell<f64>,
+    /// Order of the limiting-field FE space (must equal the nodal space order:
+    /// the C++ driver only uses `-alc` when `ind_fec_order == mesh_poly_deg`,
+    /// which `AssembleElemVecAdaptLim`'s `el.ProjectGrad(el, ...)` requires).
+    pub order: u8,
+    /// Number of scalar limiting-field dofs.
+    pub n_field: usize,
+    /// Limiting-field scalar dof table per mesh element.
+    pub element_dofs: Rc<Vec<Vec<usize>>>,
+    /// Per-element limiting-space shape values at the metric quadrature
+    /// points, `[e][q * nd + k]`.
+    pub qp_shapes: Rc<Vec<Vec<f64>>>,
+}
+
 
 /// One `TMOP_Integrator`: metric + target (+ constant metric coefficient).
 pub struct TmopIntegrator {
@@ -467,6 +1228,17 @@ pub struct TmopForm<'a> {
     x0: Vec<f64>,
     /// Global ess vdofs (gradient zeroed, Hessian eliminated here).
     pub ess_vdofs: Vec<usize>,
+    /// Per-integrator discrete-target-spec remap evaluator
+    /// (`DiscreteAdaptTC::adapt_eval`), attached with
+    /// [`TmopForm::set_discrete_remapper`].
+    remap_evals: Vec<Option<RefCell<TmopRemapEvaluator>>>,
+    /// Per-integrator adaptive limiting term (`TMOP_Integrator`
+    /// adapt_lim_* state), attached with
+    /// [`TmopForm::enable_adaptive_limiting`].
+    adaptive_limiting: Vec<Option<TmopAdaptiveLimiting>>,
+    /// Per-integrator adaptive-limiting remap evaluator (MFEM
+    /// `adapt_lim_eval`).
+    al_evals: Vec<Option<RefCell<TmopRemapEvaluator>>>,
 }
 
 impl<'a> TmopForm<'a> {
@@ -562,6 +1334,9 @@ impl<'a> TmopForm<'a> {
             integrators: Vec::new(),
             x0: vec![0.0; dim * n_scalar],
             ess_vdofs: Vec::new(),
+            remap_evals: Vec::new(),
+            adaptive_limiting: Vec::new(),
+            al_evals: Vec::new(),
         }
     }
 
@@ -589,6 +1364,9 @@ impl<'a> TmopForm<'a> {
 
     pub fn push_integrator(&mut self, integ: TmopIntegrator) {
         self.integrators.push(integ);
+        self.remap_evals.push(None);
+        self.adaptive_limiting.push(None);
+        self.al_evals.push(None);
     }
 
     pub fn integrators(&self) -> &[TmopIntegrator] {
@@ -597,6 +1375,164 @@ impl<'a> TmopForm<'a> {
 
     pub fn integrators_mut(&mut self) -> &mut [TmopIntegrator] {
         &mut self.integrators
+    }
+
+    /// Attach the discrete-target-spec remap evaluator of integrator
+    /// `integ_idx` (MFEM `DiscreteAdaptTC::SetAdaptivityEvaluator` +
+    /// `FinalizeSerialDiscreteTargetSpec`, which initialize the evaluator with
+    /// the mesh nodes and the packed initial tspec). The integrator's target
+    /// must carry a `TmopDiscreteSpec`.
+    pub fn set_discrete_remapper(&mut self, integ_idx: usize, evaluator: TmopRemapEvaluator) {
+        let spec = self.integrators[integ_idx]
+            .target
+            .discrete
+            .as_ref()
+            .expect("set_discrete_remapper requires a discrete target spec");
+        let packed0 = spec.packed0.clone();
+        let mut ev = evaluator;
+        ev.set_initial_field(&self.x0, &packed0);
+        self.remap_evals[integ_idx] = Some(RefCell::new(ev));
+    }
+
+    /// MFEM `TMOP_Integrator::EnableAdaptiveLimiting`: enable the adaptive
+    /// limiting term of integrator `integ_idx` with the initial limiting
+    /// fields `z0` (one scalar dof vector per field, on the H1 space
+    /// (`dm_al`, `order_al`)), constant coefficients `coeffs` and maximum
+    /// field deltas `delta_max`; `evaluator` remaps the fields onto the moving
+    /// mesh during the optimization.
+    ///
+    /// The C++ driver only enables adaptive limiting when the limiting-field
+    /// space order equals the nodal space order (`ind_fec_order ==
+    /// mesh_poly_deg`); the gradient/Hessian assembly mirrors
+    /// `el.ProjectGrad(el, ...)` which requires it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enable_adaptive_limiting(
+        &mut self,
+        integ_idx: usize,
+        dm_al: &DofManager,
+        order_al: u8,
+        z0: &[Vec<f64>],
+        coeffs: Vec<f64>,
+        delta_max: Vec<f64>,
+        evaluator: TmopRemapEvaluator,
+    ) {
+        assert!(!z0.is_empty(), "Requires at least one field.");
+        assert_eq!(z0.len(), coeffs.len(), "Requires one coefficient per field.");
+        assert_eq!(z0.len(), delta_max.len(), "Requires one delta_max per field.");
+        assert!(delta_max.iter().all(|d| *d > 0.0), "Requires delta_max > 0.0.");
+        assert_eq!(
+            order_al, self.order,
+            "EnableAdaptiveLimiting requires the limiting-field space order to \
+             equal the mesh nodal space order (see AssembleElemVecAdaptLim)."
+        );
+        let n_al = dm_al.n_dofs;
+        let dim = self.dim;
+        let mut evaluator = evaluator;
+        // Packed initial fields (byNODES).
+        let mut packed = vec![0.0_f64; z0.len() * n_al];
+        for (c, zf) in z0.iter().enumerate() {
+            assert_eq!(zf.len(), n_al);
+            packed[c * n_al..(c + 1) * n_al].copy_from_slice(zf);
+        }
+        evaluator.set_initial_field(&self.x0, &packed);
+        // Limiting-space shape values at the metric quadrature points (as in
+        // the discrete-spec path of finalize_targets).
+        let mut tables: Vec<Vec<f64>> = Vec::with_capacity(self.elems.len());
+        for (e, el) in self.elems.iter().enumerate() {
+            let al_re = ref_elem_for(self.topo.element_type(e as u32), order_al);
+            let al_re: Box<dyn ReferenceElement> = if el_domain_is_unit(al_re.as_ref()) {
+                al_re
+            } else {
+                Box::new(UnitDomainElem {
+                    inner: al_re,
+                    dim,
+                })
+            };
+            let nd_ind = al_re.n_dofs();
+            let nqp = el.quad_points.len();
+            let mut tab = vec![0.0_f64; nqp * nd_ind];
+            let mut sh = vec![0.0_f64; nd_ind];
+            for q in 0..nqp {
+                al_re.eval_basis(&el.quad_points[q], &mut sh);
+                for (k, v) in sh.iter().enumerate() {
+                    tab[q * nd_ind + k] = *v;
+                }
+            }
+            tables.push(tab);
+        }
+        let element_dofs: Rc<Vec<Vec<usize>>> = Rc::new(
+            (0..self.topo.n_elements())
+                .map(|e| {
+                    dm_al
+                        .element_dofs(e as u32)
+                        .iter()
+                        .map(|&d| d as usize)
+                        .collect()
+                })
+                .collect(),
+        );
+        self.adaptive_limiting[integ_idx] = Some(TmopAdaptiveLimiting {
+            z0: Rc::new(packed.clone()),
+            z_cur: RefCell::new(Rc::new(packed.clone())),
+            coeffs: RefCell::new(coeffs),
+            delta_max,
+            normal: Cell::new(1.0),
+            order: order_al,
+            n_field: n_al,
+            element_dofs,
+            qp_shapes: Rc::new(tables),
+        });
+        self.al_evals[integ_idx] = Some(RefCell::new(evaluator));
+    }
+
+    /// Replace the adaptive limiting coefficients of integrator `integ_idx`
+    /// (the driver zeroes/restores them around metric-only energy reports).
+    pub fn set_adaptive_limiting_coeffs(&self, integ_idx: usize, vals: &[f64]) {
+        let al = self.adaptive_limiting[integ_idx]
+            .as_ref()
+            .expect("no adaptive limiting on this integrator");
+        *al.coeffs.borrow_mut() = vals.to_vec();
+    }
+
+    pub fn adaptive_limiting_coeffs(&self, integ_idx: usize) -> Vec<f64> {
+        match self.adaptive_limiting[integ_idx].as_ref() {
+            Some(al) => al.coeffs.borrow().clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// MFEM `TMOPNewtonSolver::ProcessNewState`: remap the discrete target
+    /// specification and the adaptive limiting fields onto the mesh positions
+    /// `x0 + dx` (the evaluators are called in the C++ order: tspec first,
+    /// adaptive limiting second). A no-op when none are enabled.
+    pub fn process_new_state(&self, dx: &[f64]) {
+        let n = self.n_dofs();
+        let has_remap = self.remap_evals.iter().any(Option::is_some)
+            || self.al_evals.iter().any(Option::is_some);
+        if !has_remap {
+            return;
+        }
+        let mut x_loc = vec![0.0_f64; n];
+        for i in 0..n {
+            x_loc[i] = self.x0[i] + dx[i];
+        }
+        for ii in 0..self.integrators.len() {
+            // DiscreteAdaptTC::UpdateTargetSpecification(x_loc, ...).
+            if let Some(ev) = &self.remap_evals[ii] {
+                if let Some(spec) = &self.integrators[ii].target.discrete {
+                    let mut tspec = spec.packed_current();
+                    ev.borrow_mut().compute_at_new_position(&x_loc, &mut tspec);
+                    *spec.remapped.borrow_mut() = Some(Rc::new(tspec));
+                }
+            }
+            // Adaptive limiting field remap (UpdateAfterMeshPositionChange).
+            if let Some(al) = &self.adaptive_limiting[ii] {
+                let ev = self.al_evals[ii].as_ref().unwrap();
+                let mut z = al.z_cur.borrow().as_ref().clone();
+                ev.borrow_mut().compute_at_new_position(&x_loc, &mut z);
+                *al.z_cur.borrow_mut() = Rc::new(z);
+            }
+        }
     }
 
     /// MFEM `TargetConstructor::ComputeAvgVolume` for every integrator whose
@@ -762,14 +1698,11 @@ impl<'a> TmopForm<'a> {
                     lim_energy += weight;
                 }
             }
-            if !integ.target.contains_volume_info() {
-                lim_energy = self.elems.len() as f64;
-            }
             normals.push((1.0 / metric_energy, 1.0 / lim_energy));
         }
         // Pass 2 (mutable): metric_normal, lim_normal, surf_fit_normal.
-        for (integ, (metric_normal, lim_normal)) in
-            self.integrators.iter_mut().zip(normals.into_iter())
+        for (i, (integ, (metric_normal, lim_normal))) in
+            self.integrators.iter_mut().zip(normals.into_iter()).enumerate()
         {
             integ.metric_normal = metric_normal;
             if let Some(lim) = &mut integ.limiting {
@@ -777,6 +1710,11 @@ impl<'a> TmopForm<'a> {
             }
             if let Some(sf) = &integ.surf_fit {
                 sf.normal.set(lim_normal);
+            }
+            // The adaptive limiting term is normalized with lim_normal too
+            // (MFEM AssembleElemVecAdaptLim uses lim_normal).
+            if let Some(al) = &self.adaptive_limiting[i] {
+                al.normal.set(lim_normal);
             }
         }
     }
@@ -896,14 +1834,19 @@ impl<'a> TmopForm<'a> {
                     .qp_shapes
                     .as_ref()
                     .expect("call finalize_targets (qp_shapes)");
-                let nd_ind = spec.element_dofs[e].len();
+                let vals = spec.current();
                 Self::discrete_element_targets(
-                    spec,
+                    &vals,
+                    spec.size.is_some(),
+                    spec.aspect_ratio.is_some(),
+                    spec.skew.is_some(),
+                    spec.orientation.is_some(),
+                    &spec.element_dofs[e],
+                    spec.n_ind,
+                    spec.min_size,
                     integ.target.target_type == TmopTargetType::GivenShapeAndSizeDiscrete,
-                    e,
-                    &tables[e],
-                    nd_ind,
                     dim,
+                    &tables[e],
                     jtr_out,
                     jtr_out_3d,
                 );
@@ -914,36 +1857,50 @@ impl<'a> TmopForm<'a> {
     /// Discrete-adaptivity element targets (MFEM
     /// `DiscreteAdaptTC::ComputeElementTargets` for IDEAL_SHAPE_GIVEN_SIZE /
     /// GIVEN_SHAPE_AND_SIZE). `shapes` holds the indicator-space shape values
-    /// at the quadrature points of element `e` (`spec.qp_shapes[e]`).
+    /// at the quadrature points of element `e` (`spec.qp_shapes[e]`); `vals`
+    /// holds the packed byNODES tspec dofs (the remapped state when a remap
+    /// evaluator is attached, the initial fields otherwise) with components in
+    /// the order size, aspect ratio, skew, orientation, matching the C++
+    /// `SetTspecAtIndex` append order. The `has_*` flags mirror the C++
+    /// `sizeidx`/`aspectratioidx`/`skewidx`/`orientationidx >= 0` checks.
+    #[allow(clippy::too_many_arguments)]
     fn discrete_element_targets(
-        spec: &TmopDiscreteSpec,
+        vals: &[f64],
+        has_size: bool,
+        has_aspr: bool,
+        has_skew: bool,
+        has_ori: bool,
+        dofs: &[usize],
+        n_ind: usize,
+        lim_min_size: f64,
         given_shape_and_size: bool,
-        e: usize,
-        shapes: &[f64],
-        nd_ind: usize,
         dim: usize,
+        shapes: &[f64],
         jtr_out: &mut Vec<[f64; 4]>,
         jtr_out_3d: &mut Vec<[f64; 9]>,
     ) {
-        let dofs = &spec.element_dofs[e];
         // byNODES multi-component layout: index = c*n_ind + dof.
-        let comp = |f: &Rc<Vec<f64>>, c: usize, k: usize| -> f64 { f[c * spec.n_ind + dofs[k]] };
-        let min_of = |f: &Rc<Vec<f64>>, c: usize| -> f64 {
+        let comp = |c: usize, k: usize| -> f64 { vals[c * n_ind + dofs[k]] };
+        let min_of = |c: usize| -> f64 {
             let mut m = f64::INFINITY;
-            for k in 0..nd_ind {
-                m = m.min(comp(f, c, k));
+            for k in 0..dofs.len() {
+                m = m.min(comp(c, k));
             }
             m
         };
-        let nqp = shapes.len() / nd_ind;
+        let nqp = shapes.len() / dofs.len();
         let mut jtr = [[0.0f64; 3]; 3];
         for q in 0..nqp {
-            let sh = &shapes[q * nd_ind..(q + 1) * nd_ind];
+            // Component cursor (MFEM sizeidx / aspectratioidx / skewidx /
+            // orientationidx): the fields are appended in the order they are
+            // set; it restarts at every quadrature point.
+            let mut idx = 0_usize;
+            let sh = &shapes[q * dofs.len()..(q + 1) * dofs.len()];
             // shape * par_vals (MFEM Vector dot product, ascending sum).
-            let dot = |f: &Rc<Vec<f64>>, c: usize| -> f64 {
+            let dot = |c: usize| -> f64 {
                 let mut s = 0.0;
                 for (k, &sv) in sh.iter().enumerate() {
-                    s += sv * comp(f, c, k);
+                    s += sv * comp(c, k);
                 }
                 s
             };
@@ -955,29 +1912,30 @@ impl<'a> TmopForm<'a> {
                 jtr[d][d] = 1.0;
             }
             // Set size.
-            if let Some(sz) = &spec.size {
-                let mut min_size = min_of(sz, 0);
-                if spec.min_size > 0.0 {
-                    min_size = spec.min_size;
+            if has_size {
+                let mut min_size = min_of(idx);
+                if lim_min_size > 0.0 {
+                    min_size = lim_min_size;
                 }
                 assert!(min_size > 0.0, "Non-positive size propagated in the target definition.");
-                let size_q = dot(sz, 0).max(min_size);
+                let size_q = dot(idx).max(min_size);
                 let sc = size_q.powf(1.0 / dim as f64);
                 for r in jtr.iter_mut().take(dim) {
                     for v in r.iter_mut().take(dim) {
                         *v *= sc;
                     }
                 }
+                idx += 1;
             }
             if given_shape_and_size {
                 // aspect ratio
-                if let Some(ar) = &spec.aspect_ratio {
+                if has_aspr {
                     let d_rho = if dim == 2 {
                         assert!(
-                            min_of(ar, 0) > 0.0,
+                            min_of(idx) > 0.0,
                             "Non-positive aspect-ratio propagated in the target definition."
                         );
-                        let aspr = dot(ar, 0);
+                        let aspr = dot(idx);
                         [
                             [1.0 / aspr.powf(0.5), 0.0, 0.0],
                             [0.0, aspr.powf(0.5), 0.0],
@@ -985,26 +1943,27 @@ impl<'a> TmopForm<'a> {
                         ]
                     } else {
                         [
-                            [dot(ar, 0).powf(2.0 / 3.0), 0.0, 0.0],
-                            [0.0, dot(ar, 1).powf(2.0 / 3.0), 0.0],
-                            [0.0, 0.0, dot(ar, 2).powf(2.0 / 3.0)],
+                            [dot(idx).powf(2.0 / 3.0), 0.0, 0.0],
+                            [0.0, dot(idx + 1).powf(2.0 / 3.0), 0.0],
+                            [0.0, 0.0, dot(idx + 2).powf(2.0 / 3.0)],
                         ]
                     };
                     jtr = mat3_mul_dim(&d_rho, &jtr, dim);
+                    idx += if dim == 2 { 1 } else { 3 };
                 }
                 // skew
-                if let Some(sk) = &spec.skew {
+                if has_skew {
                     let q_phi = if dim == 2 {
-                        let skew = dot(sk, 0);
+                        let skew = dot(idx);
                         [
                             [1.0, skew.cos(), 0.0],
                             [0.0, skew.sin(), 0.0],
                             [0.0, 0.0, 0.0],
                         ]
                     } else {
-                        let phi12 = dot(sk, 0);
-                        let phi13 = dot(sk, 1);
-                        let chi = dot(sk, 2);
+                        let phi12 = dot(idx);
+                        let phi13 = dot(idx + 1);
+                        let chi = dot(idx + 2);
                         [
                             [1.0, phi12.cos(), phi13.cos()],
                             [0.0, phi12.sin(), phi13.sin() * chi.cos()],
@@ -1012,17 +1971,18 @@ impl<'a> TmopForm<'a> {
                         ]
                     };
                     jtr = mat3_mul_dim(&q_phi, &jtr, dim);
+                    idx += if dim == 2 { 1 } else { 3 };
                 }
                 // orientation
-                if let Some(ori) = &spec.orientation {
+                if has_ori {
                     let r_theta = if dim == 2 {
-                        let theta = dot(ori, 0);
+                        let theta = dot(idx);
                         let (ct, st) = (theta.cos(), theta.sin());
                         [[ct, -st, 0.0], [st, ct, 0.0], [0.0, 0.0, 0.0]]
                     } else {
-                        let theta = dot(ori, 0);
-                        let psi = dot(ori, 1);
-                        let beta = dot(ori, 2);
+                        let theta = dot(idx);
+                        let psi = dot(idx + 1);
+                        let beta = dot(idx + 2);
                         let (ct, st) = (theta.cos(), theta.sin());
                         let (cp, sp) = (psi.cos(), psi.sin());
                         let (cb, sb) = (beta.cos(), beta.sin());
@@ -1038,6 +1998,7 @@ impl<'a> TmopForm<'a> {
                     jtr = mat3_mul_dim(&r_theta, &jtr, dim);
                 }
             }
+            let _ = idx; // the cursor value is only read across branches above
             if dim == 2 {
                 // Row-major [r*2 + c], the convention of `det_jtr2`/`invert_2x2`.
                 jtr_out.push([jtr[0][0], jtr[0][1], jtr[1][0], jtr[1][1]]);
@@ -1086,7 +2047,9 @@ impl<'a> TmopForm<'a> {
             let mut ds = vec![0.0; nd * dim];
             dsh.resize(nd * dim, 0.0);
             let mut energy = 0.0;
-            for integ in &self.integrators {
+            for (ii, integ) in self.integrators.iter().enumerate() {
+                // Adaptive limiting state (None when disabled).
+                let al = self.adaptive_limiting[ii].as_ref();
                 self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
                     // weight = ip.weight * det(Jtr) (integ_over_target).
@@ -1121,9 +2084,14 @@ impl<'a> TmopForm<'a> {
                             let jpt = [[jpt_cm[0], jpt_cm[2]], [jpt_cm[1], jpt_cm[3]]];
                             // MFEM: val = metric_normal*EvalW; val *= coeff;
                             // val += lim_normal*lim_func*lim_coeff;
+                            // val += adapt_lim_coeff*lim_normal*diff^2;
                             // energy += weight*val. The v1 path (normal == 1,
-                            // no limiting) keeps its original accumulation.
-                            if integ.metric_normal == 1.0 && integ.limiting.is_none() {
+                            // no limiting, no adaptive limiting) keeps its
+                            // original accumulation.
+                            if integ.metric_normal == 1.0
+                                && integ.limiting.is_none()
+                                && al.is_none()
+                            {
                                 energy += weight * integ.coeff * m.eval_w(&jpt);
                             } else {
                                 let mut val = integ.metric_normal * m.eval_w(&jpt);
@@ -1136,6 +2104,9 @@ impl<'a> TmopForm<'a> {
                                     val += lim.normal
                                         * lim.lim_func.eval(&pt[..dim], &pt0[..dim], d_val)
                                         * lim.coeff;
+                                }
+                                if let Some(al) = al {
+                                    val += al_energy_at_point(al, ei, q);
                                 }
                                 energy += weight * val;
                             }
@@ -1165,7 +2136,10 @@ impl<'a> TmopForm<'a> {
                                 [jpt_cm[1], jpt_cm[4], jpt_cm[7]],
                                 [jpt_cm[2], jpt_cm[5], jpt_cm[8]],
                             ];
-                            if integ.metric_normal == 1.0 && integ.limiting.is_none() {
+                            if integ.metric_normal == 1.0
+                                && integ.limiting.is_none()
+                                && al.is_none()
+                            {
                                 energy += weight * integ.coeff * m.eval_w(&jpt);
                             } else {
                                 let mut val = integ.metric_normal * m.eval_w(&jpt);
@@ -1178,6 +2152,9 @@ impl<'a> TmopForm<'a> {
                                     val += lim.normal
                                         * lim.lim_func.eval(&pt[..dim], &pt0[..dim], d_val)
                                         * lim.coeff;
+                                }
+                                if let Some(al) = al {
+                                    val += al_energy_at_point(al, ei, q);
                                 }
                                 energy += weight * val;
                             }
@@ -1241,7 +2218,7 @@ impl<'a> TmopForm<'a> {
             for v in elvec.iter_mut() {
                 *v = 0.0;
             }
-            for integ in &self.integrators {
+            for (ii, integ) in self.integrators.iter().enumerate() {
                 self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
                     // MFEM: weights(q) = ip.weight*det(Jtr);
@@ -1360,6 +2337,63 @@ impl<'a> TmopForm<'a> {
                         }
                     }
                 }
+                // MFEM `AssembleElemVecAdaptLim`: for every limiting field c,
+                // project its gradient on the current element geometry and add
+                // `shape(i) * gq(d)` with `gq = ∇z_c(q) * 2*(z-z0)/δ² *
+                // weights(q)*lim_normal*coeff_c` to elvect(i, d).
+                if let Some(al) = &self.adaptive_limiting[ii] {
+                    let cur = al.z_cur.borrow();
+                    let coeffs = al.coeffs.borrow();
+                    let nf = al.n_field;
+                    let mut gphys = vec![0.0_f64; nd * dim * nd];
+                    let mut grad_e = vec![0.0_f64; nd * dim];
+                    let mut gq = [0.0_f64; 3];
+                    let mut zq_al = vec![0.0_f64; coeffs.len()];
+                    let mut z0q_al = vec![0.0_f64; coeffs.len()];
+                    al_project_grad_matrix(el.re.as_ref(), &el.edofs, &pos, nd, dim, &mut gphys);
+                    for (c, coeff_c) in coeffs.iter().enumerate() {
+                        al_grad_e_from(
+                            &gphys,
+                            &cur[c * nf..(c + 1) * nf],
+                            &el.edofs,
+                            nd,
+                            dim,
+                            &mut grad_e,
+                        );
+                        for q in 0..nqp {
+                            shape.resize(nd, 0.0);
+                            el.re.eval_basis(&el.quad_points[q], &mut shape);
+                            for d in 0..dim {
+                                let mut s = 0.0;
+                                for i in 0..nd {
+                                    s += shape[i] * grad_e[i + d * nd];
+                                }
+                                gq[d] = s;
+                            }
+                            al_values_at_point(al, &cur, ei, q, &mut zq_al);
+                            al_values_at_point(al, &al.z0, ei, q, &mut z0q_al);
+                            let delta2 = al.delta_max[c] * al.delta_max[c];
+                            let weight = el.quad_weights[q]
+                                * if dim == 2 {
+                                    det_jtr2(&jtr2[q])
+                                } else {
+                                    det_jtr3(&jtr3[q])
+                                };
+                            for d in 0..dim {
+                                gq[d] *= 2.0 * (zq_al[c] - z0q_al[c]) / delta2;
+                            }
+                            for d in 0..dim {
+                                gq[d] *= weight * al.normal.get() * coeff_c;
+                            }
+                            // AddMultVWt(shape, gq, PMatO).
+                            for (k, &sv) in shape.iter().enumerate() {
+                                for d in 0..dim {
+                                    elvec[k + d * nd] += sv * gq[d];
+                                }
+                            }
+                        }
+                    }
+                }
                 // MFEM `AssembleElemVecSurfFit`: elvect(s, d) += w * (x_s -
                 // x_{t,s})_d at the nodal point of every marked dof s
                 // (TMOP_QuadraticLimiter::Eval_d1, dist = 1).
@@ -1415,7 +2449,7 @@ impl<'a> TmopForm<'a> {
             // into the sparse matrix once; mirror that exactly so the
             // floating-point sums (and hence the Newton path) match the C++.
             let mut elmat = vec![0.0f64; ah * ah];
-            for integ in &self.integrators {
+            for (ii, integ) in self.integrators.iter().enumerate() {
                 self.compute_element_targets(integ, ei, el, &mut jtr2, &mut jtr3, &mut dsh);
                 for q in 0..nqp {
                     // MFEM: weights(q) = ip.weight*det(Jtr);
@@ -1505,6 +2539,102 @@ impl<'a> TmopForm<'a> {
                                         let row = d1 * nd + i;
                                         let col = d2 * nd + j;
                                         elmat[row + ah * col] += w * hess_lm[d1 * dim + d2];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // MFEM `AssembleElemGradAdaptLim`: per limiting field c,
+                // entry(i,j) = factor * (grad outer product +
+                // (z(q)-z0(q)) * hess_q(d1,d2) * shape outer product) with
+                // factor = weights(q)*lim_normal*coeff*2/δ², added for i, j <= i
+                // (symmetric), i = idof + idim*nd.
+                if let Some(al) = &self.adaptive_limiting[ii] {
+                    let cur = al.z_cur.borrow();
+                    let coeffs = al.coeffs.borrow();
+                    let nf = al.n_field;
+                    let mut gphys = vec![0.0_f64; nd * dim * nd];
+                    let mut grad_e = vec![0.0_f64; nd * dim];
+                    let mut hess_e = vec![0.0_f64; nd * dim * dim];
+                    let mut gq = [0.0_f64; 3];
+                    let mut gg = [0.0_f64; 9]; // gg[d + m*dim]
+                    let mut zq_al = vec![0.0_f64; coeffs.len()];
+                    let mut z0q_al = vec![0.0_f64; coeffs.len()];
+                    al_project_grad_matrix(el.re.as_ref(), &el.edofs, &pos, nd, dim, &mut gphys);
+                    for (c, coeff_c) in coeffs.iter().enumerate() {
+                        al_grad_e_from(
+                            &gphys,
+                            &cur[c * nf..(c + 1) * nf],
+                            &el.edofs,
+                            nd,
+                            dim,
+                            &mut grad_e,
+                        );
+                        // hess_e(k + d*nd + m*(nd*dim)) =
+                        // Σ_j gphys(k + d*nd, j) * grad_e(j + m*nd).
+                        for v in hess_e.iter_mut() {
+                            *v = 0.0;
+                        }
+                        for k in 0..nd {
+                            for d in 0..dim {
+                                for m in 0..dim {
+                                    let mut s = 0.0;
+                                    for j in 0..nd {
+                                        s += gphys[k + d * nd + j * (nd * dim)]
+                                            * grad_e[j + m * nd];
+                                    }
+                                    hess_e[k + d * nd + m * (nd * dim)] = s;
+                                }
+                            }
+                        }
+                        let delta2 = al.delta_max[c] * al.delta_max[c];
+                        for q in 0..nqp {
+                            shape.resize(nd, 0.0);
+                            el.re.eval_basis(&el.quad_points[q], &mut shape);
+                            for d in 0..dim {
+                                let mut s = 0.0;
+                                for i in 0..nd {
+                                    s += shape[i] * grad_e[i + d * nd];
+                                }
+                                gq[d] = s;
+                            }
+                            // gg(c = d + m*dim) = Σ_i shape(i) *
+                            // hess_e(i + c*nd)  (the (dof, dim*dim) reshape).
+                            for c2 in 0..dim * dim {
+                                let mut s = 0.0;
+                                for i in 0..nd {
+                                    s += shape[i] * hess_e[i + c2 * nd];
+                                }
+                                gg[c2] = s;
+                            }
+                            al_values_at_point(al, &cur, ei, q, &mut zq_al);
+                            al_values_at_point(al, &al.z0, ei, q, &mut z0q_al);
+                            let weight = el.quad_weights[q]
+                                * if dim == 2 {
+                                    det_jtr2(&jtr2[q])
+                                } else {
+                                    det_jtr3(&jtr3[q])
+                                };
+                            let factor = weight * al.normal.get() * coeff_c * 2.0 / delta2;
+                            for i in 0..nd * dim {
+                                let idof = i % nd;
+                                let idim = i / nd;
+                                for j in 0..=i {
+                                    let jdof = j % nd;
+                                    let jdim = j / nd;
+                                    let entry = factor
+                                        * (gq[idim]
+                                            * shape[idof]
+                                            * gq[jdim]
+                                            * shape[jdof]
+                                            + (zq_al[c] - z0q_al[c])
+                                                * gg[idim + jdim * dim]
+                                                * shape[idof]
+                                                * shape[jdof]);
+                                    elmat[i + ah * j] += entry;
+                                    if i != j {
+                                        elmat[j + ah * i] += entry;
                                     }
                                 }
                             }
@@ -1689,6 +2819,22 @@ fn ref_elem_for(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     }
 }
 
+/// H1 Gauss-Lobatto reference element on MFEM's unit reference domain
+/// `[0,1]^dim` (the same normalization as the element data of `TmopForm`).
+/// Exposed for drivers that evaluate discrete fields (nodal projections,
+/// diffusion smoothing, derivatives) on the mesh outside of the form.
+pub fn tmop_ref_elem(et: ElementType, order: u8, dim: usize) -> Box<dyn ReferenceElement> {
+    let raw = ref_elem_for(et, order);
+    if el_domain_is_unit(raw.as_ref()) {
+        raw
+    } else {
+        Box::new(UnitDomainElem {
+            inner: raw,
+            dim,
+        })
+    }
+}
+
 #[inline]
 fn invert_2x2(m: &[f64; 4]) -> [f64; 4] {
     let det = m[0] * m[3] - m[1] * m[2];
@@ -1859,6 +3005,103 @@ fn limiting_point_data(
     }
 }
 
+/// Adaptive limiting energy term at quadrature point `q` of element `ei`
+/// (MFEM `GetElementEnergy`): `Σ_c coeff_c * lim_normal * diff_c^2` with
+/// `diff_c = (z_c(q) - z_{0,c}(q)) / delta_max_c`.
+fn al_energy_at_point(al: &TmopAdaptiveLimiting, ei: usize, q: usize) -> f64 {
+    let nd_al = al.element_dofs[ei].len();
+    let sh = &al.qp_shapes[ei][q * nd_al..(q + 1) * nd_al];
+    let dofs_al = &al.element_dofs[ei];
+    let cur = al.z_cur.borrow();
+    let coeffs = al.coeffs.borrow();
+    let mut val = 0.0;
+    for (c, coeff) in coeffs.iter().enumerate() {
+        let mut zq = 0.0;
+        let mut z0q = 0.0;
+        for (k, &sv) in sh.iter().enumerate() {
+            zq += sv * cur[c * al.n_field + dofs_al[k]];
+            z0q += sv * al.z0[c * al.n_field + dofs_al[k]];
+        }
+        let diff = (zq - z0q) / al.delta_max[c];
+        val += coeff * al.normal.get() * diff * diff;
+    }
+    val
+}
+
+/// MFEM `FiniteElement::ProjectGrad` (NodalFiniteElement) for the adaptive
+/// limiting term: the raw projection matrix of the current element geometry
+/// `pos`, `gphys[k + d*nd + j*(nd*dim)] = dφ_j/∂x_d` at the nodal point `k`.
+fn al_project_grad_matrix(
+    re: &dyn ReferenceElement,
+    dofs: &[usize],
+    pos: &[f64],
+    nd: usize,
+    dim: usize,
+    gphys: &mut [f64],
+) {
+    let coords = re.dof_coords();
+    let mut dsh = vec![0.0_f64; nd * dim];
+    let mut jac = [[0.0_f64; 3]; 3];
+    for v in gphys.iter_mut() {
+        *v = 0.0;
+    }
+    for (k, xi) in coords.iter().enumerate().take(nd) {
+        re.eval_grad_basis(xi, &mut dsh);
+        // Jpr at the nodal point (current trial geometry).
+        for a in 0..dim {
+            for b in 0..dim {
+                let mut s = 0.0;
+                for (i, _) in dofs.iter().enumerate() {
+                    s += pos[i + a * nd] * dsh[i * dim + b];
+                }
+                jac[a][b] = s;
+            }
+        }
+        let jac_inv = jac_inverse(&jac, dim);
+        for d in 0..dim {
+            for j in 0..nd {
+                let mut s = 0.0;
+                for m in 0..dim {
+                    s += dsh[j * dim + m] * jac_inv[m][d];
+                }
+                gphys[k + d * nd + j * (nd * dim)] = s;
+            }
+        }
+    }
+}
+
+/// `adapt_lim_gf_grad_e = grad_phys * z_e` (projected gradient dofs of the
+/// field `z`): `grad_e[k + d*nd] = ∂z/∂x_d at nodal point k`.
+fn al_grad_e_from(gphys: &[f64], z: &[f64], dofs: &[usize], nd: usize, dim: usize, grad_e: &mut [f64]) {
+    for v in grad_e.iter_mut() {
+        *v = 0.0;
+    }
+    for k in 0..nd {
+        for d in 0..dim {
+            let mut s = 0.0;
+            for (j, &dof) in dofs.iter().enumerate() {
+                s += gphys[k + d * nd + j * (nd * dim)] * z[dof];
+            }
+            grad_e[k + d * nd] = s;
+        }
+    }
+}
+
+/// Interpolate the adaptive limiting field values `z` (current or initial) at
+/// quadrature point `q` of element `ei`, for all components (`nal` values).
+fn al_values_at_point(al: &TmopAdaptiveLimiting, z: &[f64], ei: usize, q: usize, out: &mut [f64]) {
+    let nd_al = al.element_dofs[ei].len();
+    let sh = &al.qp_shapes[ei][q * nd_al..(q + 1) * nd_al];
+    let dofs_al = &al.element_dofs[ei];
+    for c in 0..al.coeffs.borrow().len() {
+        let mut s = 0.0;
+        for (k, &sv) in sh.iter().enumerate() {
+            s += sv * z[c * al.n_field + dofs_al[k]];
+        }
+        out[c] = s;
+    }
+}
+
 /// Inner linear solver choices (mesh-optimizer `-ls`).
 pub enum TmopLinSolver {
     /// 0: l1-Jacobi stationary iteration, `max_lin_iter` sweeps (DSmoother(1,1,it)).
@@ -1896,6 +3139,9 @@ pub fn tmop_newton_solve(
 ) -> (Vec<f64>, TmopNewtonResult) {
     let n = form.n_dofs();
     let mut x = vec![0.0f64; n]; // iterative_mode = false: dx starts at 0.
+    // NewtonSolver::Mult starts with ProcessNewState(x = 0): for remap
+    // evaluators this consumes a zero-velocity remap cycle (a value no-op).
+    form.process_new_state(&x);
     let mut r = vec![0.0f64; n];
     form.gradient(&x, &mut r);
     let norm0 = l2_norm(&r);
@@ -1933,6 +3179,7 @@ pub fn tmop_newton_solve(
         for i in 0..n {
             x[i] -= scale * c[i];
         }
+        form.process_new_state(&x);
         form.gradient(&x, &mut r);
         norm = l2_norm(&r);
     }
@@ -1999,6 +3246,10 @@ fn compute_scaling_factor(
             x_out_ok = true;
             break;
         }
+        // ProcessNewState(d_out): remap the discrete target specification and
+        // the adaptive limiting fields onto the trial mesh before the
+        // energy/residual checks.
+        form.process_new_state(&d_out);
         energy_out = form.energy(&d_out);
         if energy_out > energy_in + 0.2 * energy_in.abs() || energy_out.is_nan() {
             if verbosity > 0 {
@@ -2404,8 +3655,10 @@ pub fn tmop_newton_solve_surf_fit(
     let mut adapt_count: usize = 0; // surf_fit_adapt_count
     let mut coeff_update = false; // surf_fit_coeff_update (set by ComputeScalingFactor)
     // The initial ProcessNewState(x = 0) is a no-op while coeff_update is
-    // false (the flag is only set at the end of ComputeScalingFactor).
+    // false (the flag is only set at the end of ComputeScalingFactor); it
+    // consumes the initial remap cycle of the field evaluators.
 
+    form.process_new_state(&x);
     form.gradient(&x, &mut r); // oper->Mult(x, r); b is empty: no subtraction
     let norm0 = l2_norm(&r);
     let mut norm = norm0;
@@ -2461,10 +3714,9 @@ pub fn tmop_newton_solve_surf_fit(
             x[i] -= scale * c[i];
         }
 
-        // ProcessNewState(x): updates the adaptive fitting weight. This is the
-        // only place where `coeff_update` is consumed: inside the line search
-        // the flag is always false (it is set at the end of every
-        // ComputeScalingFactor and consumed right here).
+        // ProcessNewState(x): updates the adaptive fitting weight and remaps
+        // the discrete target spec / adaptive limiting fields.
+        form.process_new_state(&x);
         process_new_state_surf_fit(
             form,
             &params,
@@ -2635,9 +3887,10 @@ surface fitting weight canbe increased. "
             break;
         }
 
-        // ProcessNewState(d_out) is a no-op here: the fitting weight update
-        // flag is always false inside the line search (see
-        // process_new_state_surf_fit in the Newton loop).
+        // ProcessNewState(d_out): a no-op for the fitting weight (the update
+        // flag is always false inside the line search) but it remaps the
+        // discrete target spec / adaptive limiting fields when enabled.
+        form.process_new_state(&d_out);
 
         // Ensure sufficient decrease in fitting error when converging based
         // on the error.
@@ -2949,11 +4202,6 @@ pub fn count_wrong_orientations(topo: &dyn MeshTopology) -> usize {
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
-
-    /// DofManager element DOF order must match the reference element's
-    /// dof_coords order (this is what makes the TMOP position gather
-    /// `pos[k + c*nd]` and the assembled geometry tables consistent).
-    #[test]
 
     /// Straight hex mesh with P2 curvature: TMOP min det must be the exact
     /// linear value (1/8 for the unit cube split into 8 hexes).
@@ -3794,6 +5042,260 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `AdvectorCG` with a linear field and a uniform mesh translation: the
+    /// spatial function is preserved (C++ probe, MFEM 4.9 serial: field0 =
+    /// x, mesh shifted by +0.1 ⇒ remapped dofs = x + 0.1, clamped to the
+    /// original range). A zero-displacement remap (the ProcessNewState(x=0)
+    /// solver start) is a value no-op.
+    #[test]
+    fn advector_cg_uniform_translation() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let dm1 = DofManager::new(&mesh, 1);
+        let topo: &dyn MeshTopology = &mesh;
+        let x0 = linear_mesh_positions(topo, &dm, order, 2);
+        let n1 = dm1.n_dofs;
+        let field: Vec<f64> = (0..n1).map(|d| dm1.dof_coord(d as u32)[0]).collect();
+
+        let shift = 0.07_f64;
+        let mut new_nodes = x0.clone();
+        for i in 0..dm.n_dofs {
+            new_nodes[i] += shift;
+        }
+
+        let mut ev =
+            TmopRemapEvaluator::new(TmopRemapKind::AdvectorCG, topo, &dm, order, &dm1, 1, 0.5);
+        ev.set_initial_field(&x0, &field);
+        // Zero-displacement remap: no change.
+        let mut nf = field.clone();
+        ev.compute_at_new_position(&x0, &mut nf);
+        for (v, w) in nf.iter().zip(field.iter()) {
+            assert!((v - w).abs() < 1e-12);
+        }
+        // Translation: z_new(p) = z0(p), clamped to [min, max] of z0.
+        ev.compute_at_new_position(&new_nodes, &mut nf);
+        for d in 0..n1 {
+            let want = (dm1.dof_coord(d as u32)[0] + shift).min(1.0);
+            assert!(
+                (nf[d] - want).abs() < 1e-9,
+                "dof {d}: {} vs {want}",
+                nf[d]
+            );
+        }
+    }
+
+    /// `InterpolatorFP` (findpoints equivalent): direct interpolation of the
+    /// initial linear field at the new node positions.
+    #[test]
+    fn interpolator_fp_linear_field() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let dm1 = DofManager::new(&mesh, 1);
+        let topo: &dyn MeshTopology = &mesh;
+        let x0 = linear_mesh_positions(topo, &dm, order, 2);
+        let n1 = dm1.n_dofs;
+        let field: Vec<f64> = (0..n1)
+            .map(|d| {
+                let c = dm1.dof_coord(d as u32);
+                2.0 * c[0] - 3.0 * c[1] + 1.0
+            })
+            .collect();
+
+        let mut ev = TmopRemapEvaluator::new(
+            TmopRemapKind::InterpolatorFP,
+            topo,
+            &dm,
+            order,
+            &dm1,
+            1,
+            0.5,
+        );
+        ev.set_initial_field(&x0, &field);
+        let mut new_nodes = x0.clone();
+        for i in 0..dm.n_dofs {
+            new_nodes[i] += 0.03;
+            new_nodes[dm.n_dofs + i] -= 0.02;
+        }
+        let mut nf = field.clone();
+        ev.compute_at_new_position(&new_nodes, &mut nf);
+        for d in 0..n1 {
+            let c = dm1.dof_coord(d as u32);
+            let want = 2.0 * (c[0] + 0.03) - 3.0 * (c[1] - 0.02) + 1.0;
+            assert!(
+                (nf[d] - want).abs() < 1e-11,
+                "dof {d}: {} vs {want}",
+                nf[d]
+            );
+        }
+    }
+
+    /// `UpdateTargetSpecification` wiring: a discrete size target with an
+    /// attached AdvectorCG remaps the spec values through
+    /// `process_new_state`; with a linear size field and a uniform translation
+    /// the packed dofs become x + shift.
+    #[test]
+    fn discrete_target_remapper_updates_spec() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 2u8;
+        let dm = DofManager::new(&mesh, order);
+        let dm1 = DofManager::new(&mesh, 1);
+        let topo: &dyn MeshTopology = &mesh;
+        let x0 = linear_mesh_positions(topo, &dm, order, 2);
+        let n1 = dm1.n_dofs;
+        let size: Vec<f64> = (0..n1).map(|d| 0.1 + dm1.dof_coord(d as u32)[0]).collect();
+        let element_dofs: Rc<Vec<Vec<usize>>> = Rc::new(
+            (0..topo.n_elements())
+                .map(|e| dm1.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+                .collect(),
+        );
+        let min_size = 0.1_f64;
+
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 3);
+        form.set_x0(x0.clone());
+        let mut target = TmopTarget::new(TmopTargetType::IdealShapeGivenSizeDiscrete);
+        target.discrete = Some(TmopDiscreteSpec::new(
+            Some(Rc::new(size.clone())),
+            None,
+            None,
+            None,
+            min_size,
+            1,
+            n1,
+            element_dofs,
+        ));
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(2, &SharedMinDet::new(0.0)).unwrap(),
+            target,
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        form.finalize_targets();
+        let ev = TmopRemapEvaluator::new(TmopRemapKind::AdvectorCG, topo, &dm, order, &dm1, 1, 0.5);
+        form.set_discrete_remapper(0, ev);
+
+        let shift = 0.05_f64;
+        let dx: Vec<f64> = (0..form.n_dofs())
+            .map(|i| if i < dm.n_dofs { shift } else { 0.0 })
+            .collect();
+        form.process_new_state(&dx);
+        let spec = form.integrators()[0].target.discrete.as_ref().unwrap();
+        let cur = spec.remapped.borrow();
+        let cur = cur.as_ref().unwrap();
+        for d in 0..n1 {
+            // Clamp to [min, max] of the pre-advection field (C++ Trim).
+            let want = (0.1 + dm1.dof_coord(d as u32)[0] + shift).min(1.1);
+            assert!((cur[d] - want).abs() < 1e-9, "dof {d}: {} vs {want}", cur[d]);
+        }
+    }
+
+    /// Adaptive limiting term, C++-semantics invariants: (i) the penalty
+    /// energy measures the remap drift `z − z0` and vanishes identically
+    /// (energy AND gradient AND Hessian coupling) while the remapped field
+    /// equals its initial state; (ii) with the dofs frozen the energy is
+    /// invariant under mesh motion (its `dx`-dependence is carried by the
+    /// `process_new_state` remap, exactly like the C++ `ProcessNewState` /
+    /// `UpdateAfterMeshPositionChange` split).
+    #[test]
+    fn adaptive_limiting_semantics() {
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+        let order = 1u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let n = dm.n_dofs;
+        let x0 = linear_mesh_positions(topo, &dm, order, 2);
+        let mut form = TmopForm::new(topo, &dm, order, TmopQuadType::GaussLegendre, 4);
+        form.set_x0(x0.clone());
+        form.push_integrator(TmopIntegrator {
+            metric: metric_from_id_2d(1, &SharedMinDet::new(0.0)).unwrap(),
+            target: TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
+            coeff: 1.0,
+            surf_fit: None,
+            metric_normal: 1.0,
+            limiting: None,
+        });
+        let z0: Vec<f64> = (0..n)
+            .map(|d| {
+                let c = dm.dof_coord(d as u32);
+                2.0 * c[0] - c[1] + 0.3
+            })
+            .collect();
+        let ev =
+            TmopRemapEvaluator::new(TmopRemapKind::AdvectorCG, topo, &dm, order, &dm, order, 0.5);
+        form.enable_adaptive_limiting(0, &dm, order, &[z0], vec![0.7], vec![2.0], ev);
+        form.finalize_targets();
+
+        // (i) z_cur == z0 (remap has not run): penalty energy is identically 0
+        // and the limiter contributes nothing to the gradient.
+        let dx: Vec<f64> = (0..form.n_dofs())
+            .map(|i| 0.02 * ((i % 7) as f64 - 3.0))
+            .collect();
+        assert!(form.energy(&dx) > 0.0); // metric part only
+        form.set_adaptive_limiting_coeffs(0, &[0.0]);
+        let e_metric = form.energy(&dx);
+        form.set_adaptive_limiting_coeffs(0, &[0.7]);
+        assert!((form.energy(&dx) - e_metric).abs() < 1e-12);
+        let mut g = vec![0.0_f64; form.n_dofs()];
+        form.gradient(&dx, &mut g);
+        form.set_adaptive_limiting_coeffs(0, &[0.0]);
+        let mut g0 = vec![0.0_f64; form.n_dofs()];
+        form.gradient(&dx, &mut g0);
+        for (a, b) in g.iter().zip(g0.iter()) {
+            assert!((a - b).abs() < 1e-12, "zero-delta limiter must not act");
+        }
+        form.set_adaptive_limiting_coeffs(0, &[0.7]);
+
+        // (ii) frozen-dof dx-invariance of the penalty energy.
+        let h = 1e-6;
+        let mut p = dx.clone();
+        p[0] += h;
+        let mut m = dx.clone();
+        m[0] -= h;
+        form.set_adaptive_limiting_coeffs(0, &[0.0]);
+        let fd_metric = (form.energy(&p) - form.energy(&m)) / (2.0 * h);
+        form.set_adaptive_limiting_coeffs(0, &[0.7]);
+        let fd_full = (form.energy(&p) - form.energy(&m)) / (2.0 * h);
+        assert!(
+            (fd_metric - fd_full).abs() < 1e-9,
+            "frozen-dof limiter energy must be dx-invariant: {fd_metric} vs {fd_full}"
+        );
+
+        // (iii) a nontrivial remap state produces a nonzero penalty and a
+        // nonzero limiter gradient.
+        let z_pert: Vec<f64> = (0..n)
+            .map(|d| {
+                let c = dm.dof_coord(d as u32);
+                2.0 * c[0] - c[1] + 0.3 + 0.25 * (1.0 - c[0]) * c[1]
+            })
+            .collect();
+        if let Some(al) = form.adaptive_limiting[0].as_ref() {
+            *al.z_cur.borrow_mut() = Rc::new(z_pert);
+        }
+        form.set_adaptive_limiting_coeffs(0, &[0.0]);
+        let e_metric2 = form.energy(&dx);
+        form.set_adaptive_limiting_coeffs(0, &[0.7]);
+        assert!(
+            form.energy(&dx) > e_metric2 + 1e-6,
+            "penalty must add energy when z drifts from z0"
+        );
+        form.gradient(&dx, &mut g);
+        let mut max_diff = 0.0_f64;
+        for (a, b) in g.iter().zip(g0.iter()) {
+            max_diff = max_diff.max((a - b).abs());
+        }
+        assert!(max_diff > 1e-4, "limiter gradient must act: {max_diff}");
+        // Hessian assembles with the limiter and stays finite/positive diag.
+        let hess = form.hessian(&dx);
+        let mut min_diag = f64::INFINITY;
+        for i in 0..form.n_dofs() {
+            min_diag = min_diag.min(hess.get(i, i));
+        }
+        assert!(min_diag.is_finite());
     }
 }
 

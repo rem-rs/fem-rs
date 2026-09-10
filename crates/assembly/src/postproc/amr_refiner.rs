@@ -18,12 +18,14 @@
 use fem_core::ElemId;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
-use fem_mesh::amr::{HangingNodeConstraint, NcState2D};
+use fem_mesh::amr::{HangingNodeConstraint, NcState2D, QuadRefineDir};
 use fem_space::fe_space::FESpace;
 
 use crate::postproc::grid_function::GridFunction;
-use crate::postproc::error_estimate::{threshold_mark, kelly_estimator};
-use crate::postproc::flux_recovery::{zz_estimator_mfem, zz_estimator_mfem_nc, FluxRecovery};
+use crate::postproc::error_estimate::{
+    threshold_mark, AnisotropicErrorEstimator, ElementIndicators, kelly_estimator,
+};
+use crate::postproc::flux_recovery::{zz_estimator_mfem_nc, FluxRecovery};
 
 /// Threshold-based AMR refiner — MFEM `ThresholdRefiner` equivalent.
 ///
@@ -118,6 +120,49 @@ impl ThresholdRefiner {
         self.constraints = constraints;
         self.last_marked_count = marked.len();
         self.last_marked = marked;
+    }
+
+    /// Anisotropic threshold refinement (MFEM `ThresholdRefiner` driven by an
+    /// `AnisotropicErrorEstimator`, 2D Quad4 meshes): marked elements are cut
+    /// along the dominant flux-error direction — flag bit `k` set ⇒
+    /// `QuadRefineDir` X/Y, both bits ⇒ the 4-way split.
+    ///
+    /// The refinement goes through `refine_nonconforming_quad_aniso`, which
+    /// returns the hanging-node constraints but does not extend the
+    /// derefinement tree of a `NcState2D`; aniso splits followed by
+    /// derefinement are therefore not supported (a fem-mesh port gap, not an
+    /// estimator-interface one).
+    pub fn apply_aniso(
+        &mut self,
+        mesh: &mut Mesh<2>,
+        indicators: &ElementIndicators,
+    ) {
+        self.eta = indicators.eta.clone();
+        let flags = indicators.get_anisotropic_flags();
+        let marked: Vec<(ElemId, QuadRefineDir)> =
+            threshold_mark(&self.eta, self.local_err_goal)
+                .into_iter()
+                .map(|e| {
+                    let f = flags.get(e as usize).copied().unwrap_or(0);
+                    let dir = match (f & 1 != 0, f & 2 != 0) {
+                        (true, false) => QuadRefineDir::X,
+                        (false, true) => QuadRefineDir::Y,
+                        _ => QuadRefineDir::Both,
+                    };
+                    (e, dir)
+                })
+                .collect();
+        if marked.is_empty() {
+            self.last_marked_count = 0;
+            self.last_marked.clear();
+            return;
+        }
+        let (new_mesh, constraints) =
+            fem_mesh::amr::refine_nonconforming_quad_aniso(mesh, &marked, None);
+        *mesh = new_mesh;
+        self.constraints = constraints;
+        self.last_marked_count = marked.len();
+        self.last_marked = marked.iter().map(|&(e, _)| e).collect();
     }
 }
 

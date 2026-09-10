@@ -10,15 +10,18 @@
 //! - Metric ids: 2D {1,2,7,9,14,22,50,55,56,58,77}; 3D {301,302,303,304,315,
 //!   316,318,321,323,360}. Other ids known to the C++ miniapp are rejected
 //!   with an explicit "not available in the Rust port" message.
-//! - Target ids 1 (ideal shape unit size), 2 (ideal shape equal size) and
-//!   3 (ideal shape, initial size). Analytic/discrete adaptivity targets
-//!   (4-11) are not unlocked in this driver yet (the discrete target
-//!   construction exists in `fem_assembly::tmop_form`, but the C++ driver
-//!   remaps the fields onto the moved mesh at every Newton step through
-//!   `AdvectorCG`, which is not ported).
+//! - Target ids 1/2/3 (analytic ideal-shape) and the discrete-adaptivity ids
+//!   5 (discrete size), 6 (size + aspect ratio, 2D), 7 (aspect ratio, 3D) and
+//!   8 (size + orientation, 2D), with the `UpdateTargetSpecification` field
+//!   remap onto the moving mesh through `AdvectorCG` (`-ae 0`) or
+//!   `InterpolatorFP` (`-ae 1`; experimental: the findpoints kernel is a Newton-inversion
+//!   replacement for FindPointsGSLIB, see `TmopRemapEvaluator`). Target id 4
+//!   (analytic adaptivity) and the hr-adaptivity ids 9-11 are not ported.
 //! - Limiting (`-lc`, `TMOP_QuadraticLimiter`, uniform distance), adaptive
-//!   limiting is NOT ported (`-alc` is rejected) and normalization (`-nor`,
-//!   `EnableNormalization`) are ported (v2).
+//!   limiting (`-alc`, two `adapt_lim_fun`/`adapt_lim_fun2` fields on the
+//!   nodal space — the C++ driver only combines `-alc` with target ids whose
+//!   `ind_fec_order` equals the mesh order) and normalization (`-nor`,
+//!   `EnableNormalization`) are ported (v2/v3).
 //! - FD derivatives (`-fd`), PA (`-pa`), hr-adaptivity (`-hr`), combos
 //!   (`-cmb`), LBFGS (`-st 1`) and untangler barriers (`-btype`, `-wctype`)
 //!   are not ported and rejected when requested.
@@ -31,18 +34,24 @@
 //!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 2 -tid 1 -ni 200 -bnd -qt 1 -qo 8 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m jagged.mesh -o 2 -mid 22 -tid 1 -ni 50 -li 50 -qo 4 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m icf.mesh -o 1 -mid 1 -tid 1 -lc 0.02 -nor -no-vis
+//!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 94 -tid 5 -ni 50 -qo 4 -nor -no-vis
+//!   cargo run --release --example mesh_optimizer -- -m stretched2D.mesh -rs 1 -o 2 -mid 2 -tid 1 -ni 50 -qo 5 -nor -vl 1 -alc 1.0 -no-vis
 
 use fem_assembly::tmop_form::{
     count_wrong_orientations, curved_mesh_positions, linear_mesh_positions, metric_from_id_2d,
-    metric_from_id_3d, tmop_newton_solve, SharedMinDet, TmopForm, TmopIntegrator, TmopLimiterFunction,
-    TmopLimiting, TmopLinSolver, TmopQuadType, TmopTarget, TmopTargetType,
+    metric_from_id_3d, tmop_newton_solve, tmop_ref_elem, SharedMinDet, TmopDiscreteSpec, TmopForm,
+    TmopIntegrator, TmopLimiterFunction, TmopLimiting, TmopLinSolver, TmopQuadType, TmopRemapKind,
+    TmopRemapEvaluator, TmopTarget, TmopTargetType,
 };
 use fem_core::FemResult;
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, refine_uniform_3d};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::MeshTopology;
+use fem_element::reference::ReferenceElement;
+use fem_linalg::CooMatrix;
 use fem_space::constraints::boundary_dofs;
+use fem_space::dof_manager::DofManager;
 use fem_space::FESpace;
 use fem_space::H1Space;
 
@@ -245,9 +254,6 @@ fn parse_args() -> Args {
     if a.jitter > 0.0 {
         unsupported("-ji");
     }
-    if a.adapt_lim_const != 0.0 {
-        unsupported("-alc");
-    }
     if a.solver_type != 0 {
         unsupported("-st 1 (LBFGS)");
     }
@@ -287,8 +293,8 @@ fn parse_args() -> Args {
     if a.detj_bound {
         unsupported("-db");
     }
-    if a.adapt_eval != 0 {
-        unsupported("-ae 1");
+    if a.adapt_eval != 0 && a.adapt_eval != 1 {
+        unsupported("-ae (unknown adaptivity evaluator)");
     }
     if a.quad_type != 1 && a.quad_type != 2 {
         unsupported("-qt 3 (ClosedUniform)");
@@ -369,15 +375,127 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
         std::process::exit(3);
     }
 
+    // Indicator space for the discrete targets and adaptive limiting (MFEM
+    // ind_fec/ind_fes: order 1 for target ids 5-8, the mesh order otherwise).
+    let n_scalar = dm.n_dofs;
+    let ind_fec_order: u8 = if (5..=8).contains(&a.target_id) { 1 } else { order };
+    let dm_ind = DofManager::new(mesh, ind_fec_order);
+    let n_ind = dm_ind.n_dofs;
+    let ind_element_dofs: std::rc::Rc<Vec<Vec<usize>>> = std::rc::Rc::new(
+        (0..topo.n_elements())
+            .map(|e| dm_ind.element_dofs(e as u32).iter().map(|&d| d as usize).collect())
+            .collect(),
+    );
+
     // Target.
     let target = match a.target_id {
         1 => TmopTarget::new(TmopTargetType::IdealShapeUnitSize),
         2 => TmopTarget::new(TmopTargetType::IdealShapeEqualSize),
         3 => TmopTarget::new(TmopTargetType::IdealShapeGivenSize),
+        5 => {
+            // Discrete size (2D or 3D), MFEM case 5.
+            let fb = FieldBuilder {
+                topo,
+                dim,
+                dm,
+                order,
+                n_scalar,
+                re: tmop_ref_elem(topo.element_type(0), order, dim),
+                x0: &x0,
+                ind_dm: &dm_ind,
+                ind_order: ind_fec_order,
+                ind_re: tmop_ref_elem(topo.element_type(0), ind_fec_order, dim),
+            };
+            let size = fb.construct_size_gf();
+            let min_size = size.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mut t = TmopTarget::new(TmopTargetType::IdealShapeGivenSizeDiscrete);
+            t.discrete = Some(TmopDiscreteSpec::new(
+                Some(std::rc::Rc::new(size)),
+                None,
+                None,
+                None,
+                min_size,
+                ind_fec_order,
+                n_ind,
+                ind_element_dofs,
+            ));
+            t
+        }
+        6 => {
+            // Discrete size + aspect ratio (2D), MFEM case 6.
+            let fb = FieldBuilder {
+                topo,
+                dim,
+                dm,
+                order,
+                n_scalar,
+                re: tmop_ref_elem(topo.element_type(0), order, dim),
+                x0: &x0,
+                ind_dm: &dm_ind,
+                ind_order: ind_fec_order,
+                ind_re: tmop_ref_elem(topo.element_type(0), ind_fec_order, dim),
+            };
+            let (size, aspr) = tid6_fields(&fb);
+            let min_size = size.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mut t = TmopTarget::new(TmopTargetType::GivenShapeAndSizeDiscrete);
+            t.discrete = Some(TmopDiscreteSpec::new(
+                Some(std::rc::Rc::new(size)),
+                Some(std::rc::Rc::new(aspr)),
+                None,
+                None,
+                min_size,
+                ind_fec_order,
+                n_ind,
+                ind_element_dofs,
+            ));
+            t
+        }
+        7 => {
+            // Discrete aspect ratio (3D), MFEM case 7.
+            let mut aspr3 = vec![0.0_f64; 3 * n_ind];
+            for d in 0..n_ind {
+                let v = discrete_aspr_3d(dm_ind.dof_coord(d as u32));
+                for c in 0..3 {
+                    aspr3[c * n_ind + d] = v[c];
+                }
+            }
+            let mut t = TmopTarget::new(TmopTargetType::GivenShapeAndSizeDiscrete);
+            t.discrete = Some(TmopDiscreteSpec::new(
+                None,
+                Some(std::rc::Rc::new(aspr3)),
+                None,
+                None,
+                -0.1,
+                ind_fec_order,
+                n_ind,
+                ind_element_dofs,
+            ));
+            t
+        }
+        8 => {
+            // Discrete size + orientation (2D), MFEM case 8.
+            let size = vec![0.1 * 0.1; n_ind];
+            let ori = (0..n_ind)
+                .map(|d| discrete_ori_2d(dm_ind.dof_coord(d as u32)))
+                .collect::<Vec<f64>>();
+            let min_size = size.iter().cloned().fold(f64::INFINITY, f64::min);
+            let mut t = TmopTarget::new(TmopTargetType::GivenShapeAndSizeDiscrete);
+            t.discrete = Some(TmopDiscreteSpec::new(
+                Some(std::rc::Rc::new(size)),
+                None,
+                None,
+                Some(std::rc::Rc::new(ori)),
+                min_size,
+                ind_fec_order,
+                n_ind,
+                ind_element_dofs,
+            ));
+            t
+        }
         _ => {
             println!(
-                "target_id {} requires adaptivity targets (AdvectorCG field \
-remap) not ported yet in this driver",
+                "target_id {} requires analytic adaptivity (target 4) or \
+hr-adaptivity targets (9-11) not ported yet in this driver",
                 a.target_id
             );
             std::process::exit(3);
@@ -408,14 +526,54 @@ remap) not ported yet in this driver",
         metric_normal: 1.0,
         // MFEM `EnableLimiting(x0, dist, lim_coeff)` with the default
         // TMOP_QuadraticLimiter.
-        limiting: (a.lim_const != 0.0).then(|| TmopLimiting {
-            nodes0: std::rc::Rc::new(x0.clone()),
-            coeff: a.lim_const,
-            dist,
-            lim_func: TmopLimiterFunction::Quadratic,
-            normal: 1.0,
-        }),
-    });
+            limiting: (a.lim_const != 0.0).then(|| TmopLimiting {
+                nodes0: std::rc::Rc::new(x0.clone()),
+                coeff: a.lim_const,
+                dist,
+                lim_func: TmopLimiterFunction::Quadratic,
+                normal: 1.0,
+            }),
+        });
+    // MFEM DiscreteAdaptTC::SetAdaptivityEvaluator + FinalizeSerialDiscrete
+    // TargetSpec: the discrete target fields are remapped onto the moving mesh
+    // at every ProcessNewState (mesh-optimizer -ae 0: AdvectorCG, -ae 1:
+    // InterpolatorFP).
+    if (5..=8).contains(&a.target_id) {
+        let kind = if a.adapt_eval == 0 {
+            TmopRemapKind::AdvectorCG
+        } else {
+            TmopRemapKind::InterpolatorFP
+        };
+        let ev = TmopRemapEvaluator::new(kind, topo, &dm, order, &dm_ind, ind_fec_order, 0.5);
+        form.set_discrete_remapper(0, ev);
+    }
+
+    // Adaptive limiting (MFEM: two adapt_lim_fun fields projected on the
+    // indicator space; with the supported target ids 1-3 the indicator space
+    // order equals the mesh order, which the C++ limiter assembly requires).
+    if a.adapt_lim_const > 0.0 {
+        let z0_1 = (0..n_ind)
+            .map(|d| adapt_lim_fun(dm_ind.dof_coord(d as u32)))
+            .collect::<Vec<f64>>();
+        let z0_2 = (0..n_ind)
+            .map(|d| adapt_lim_fun2(dm_ind.dof_coord(d as u32)))
+            .collect::<Vec<f64>>();
+        let kind = if a.adapt_eval == 0 {
+            TmopRemapKind::AdvectorCG
+        } else {
+            TmopRemapKind::InterpolatorFP
+        };
+        let ev = TmopRemapEvaluator::new(kind, topo, &dm, order, &dm_ind, ind_fec_order, 0.5);
+        form.enable_adaptive_limiting(
+            0,
+            &dm_ind,
+            ind_fec_order,
+            &[z0_1, z0_2],
+            vec![a.adapt_lim_const, 0.5 * a.adapt_lim_const],
+            vec![1.0, 0.5],
+            ev,
+        );
+    }
     form.finalize_targets();
     // MFEM `EnableNormalization(x0)`: has to be after the enabling of the
     // limiting, as it computes normalization factors for these terms as well.
@@ -516,10 +674,20 @@ remap) not ported yet in this driver",
 
     let init_energy = form.energy(&zeros);
     let mut init_metric_energy = init_energy;
-    if a.lim_const != 0.0 {
-        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+    if a.lim_const > 0.0 || a.adapt_lim_const > 0.0 {
+        if a.lim_const > 0.0 {
+            form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+        }
+        if a.adapt_lim_const > 0.0 {
+            form.set_adaptive_limiting_coeffs(0, &[0.0, 0.0]);
+        }
         init_metric_energy = form.energy(&zeros);
-        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+        if a.lim_const > 0.0 {
+            form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+        }
+        if a.adapt_lim_const > 0.0 {
+            form.set_adaptive_limiting_coeffs(0, &[a.adapt_lim_const, 0.5 * a.adapt_lim_const]);
+        }
     }
 
     let lin = match a.lin_solver {
@@ -562,10 +730,20 @@ remap) not ported yet in this driver",
 
     let fin_energy = form.energy(&dx);
     let mut fin_metric_energy = fin_energy;
-    if a.lim_const != 0.0 {
-        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+    if a.lim_const > 0.0 || a.adapt_lim_const > 0.0 {
+        if a.lim_const > 0.0 {
+            form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = 0.0;
+        }
+        if a.adapt_lim_const > 0.0 {
+            form.set_adaptive_limiting_coeffs(0, &[0.0, 0.0]);
+        }
         fin_metric_energy = form.energy(&dx);
-        form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+        if a.lim_const > 0.0 {
+            form.integrators_mut()[0].limiting.as_mut().unwrap().coeff = a.lim_const;
+        }
+        if a.adapt_lim_const > 0.0 {
+            form.set_adaptive_limiting_coeffs(0, &[a.adapt_lim_const, 0.5 * a.adapt_lim_const]);
+        }
     }
     println!(
         "Initial strain energy: {} = metrics: {} + extra terms: {}",
@@ -599,6 +777,414 @@ fn quad_point_count(quad_type: TmopQuadType, quad_order: u8, dim: usize) -> usiz
         (_, 3) => fem_element::quadrature::hex_rule(quad_order).n_points(),
         _ => unreachable!(),
     }
+}
+
+// ─── Discrete target fields (miniapps/meshing/mesh-optimizer.hpp) ────────────
+
+/// `size_indicator`: semi-circle small-element indicator.
+fn size_indicator(x: &[f64]) -> f64 {
+    let (xc, yc) = (x[0] - 0.0, x[1] - 0.5);
+    let zc = if x.len() == 3 { x[2] - 0.5 } else { 0.0 };
+    let r = (xc * xc + yc * yc + zc * zc).sqrt();
+    let (r1, r2, sf) = (0.45_f64, 0.55_f64, 30.0_f64);
+    let val = 0.5 * (1.0 + (sf * (r - r1)).tanh()) - 0.5 * (1.0 + (sf * (r - r2)).tanh());
+    val.clamp(0.0, 1.0)
+}
+
+/// `material_indicator_2d`.
+fn material_indicator_2d(x: &[f64]) -> f64 {
+    let (mut xc, mut yc) = (x[0] - 0.5, x[1] - 0.5);
+    let th = 22.5_f64 * std::f64::consts::PI / 180.0;
+    let xn = th.cos() * xc + th.sin() * yc;
+    let yn = -th.sin() * xc + th.cos() * yc;
+    let th2 = if th > 45.0 * std::f64::consts::PI / 180.0 {
+        std::f64::consts::PI / 2.0 - th
+    } else {
+        th
+    };
+    let stretch = 1.0 / th2.cos();
+    xc = xn / stretch;
+    yc = yn / stretch;
+    let (tfac, s1, s2) = (20.0_f64, 3.0_f64, 3.0_f64);
+    let mut wgt = ((tfac * yc + s2 * (s1 * std::f64::consts::PI * xc).sin()) + 1.0).tanh();
+    if wgt > 1.0 {
+        wgt = 1.0;
+    }
+    if wgt < 0.0 {
+        wgt = 0.0;
+    }
+    wgt
+}
+
+/// `discrete_ori_2d`.
+fn discrete_ori_2d(x: &[f64]) -> f64 {
+    std::f64::consts::PI
+        * x[1]
+        * (1.0 - x[1])
+        * (2.0 * std::f64::consts::PI * x[0]).cos()
+}
+
+/// `discrete_aspr_3d`.
+fn discrete_aspr_3d(x: &[f64]) -> [f64; 3] {
+    let l1 = 1.0_f64;
+    let l2 = 1.0 + 5.0 * x[1];
+    let l3 = 1.0 + 10.0 * x[2];
+    [
+        l1 / (l2 * l3).powf(0.5),
+        l2 / (l1 * l3).powf(0.5),
+        l3 / (l2 * l1).powf(0.5),
+    ]
+}
+
+/// `adapt_lim_fun`: first adaptive limiting bump (center (0.1, 0.2[, 0])).
+fn adapt_lim_fun(x: &[f64]) -> f64 {
+    adapt_lim_bump(x, 0.1, 0.2, 0.0)
+}
+
+/// `adapt_lim_fun2`: second adaptive limiting bump (center (0.9, 0.2[, 0])).
+fn adapt_lim_fun2(x: &[f64]) -> f64 {
+    adapt_lim_bump(x, 0.9, 0.2, 0.0)
+}
+
+/// Shared body of the two `adapt_lim_fun*` coefficients (in 3D the z offset is
+/// 0.0 and the y/x centers are swapped between the two fields, per the C++).
+fn adapt_lim_bump(x: &[f64], cx: f64, cy: f64, _cz: f64) -> f64 {
+    let (r1, r2, sf) = (0.25_f64, 0.35_f64, 30.0_f64);
+    let (xc, yc, zc) = if x.len() == 2 {
+        (x[0] - cx, x[1] - cy, 0.0)
+    } else {
+        (x[0] - cx, x[1] - cy, x[2] - _cz)
+    };
+    let r = (xc * xc + yc * yc + zc * zc).sqrt();
+    let mut val = 0.5 * (1.0 + (sf * (r - r1)).tanh()) - 0.5 * (1.0 + (sf * (r - r2)).tanh());
+    val = val.max(0.0);
+    val = val.min(1.0);
+    val
+}
+
+/// Owned description of the nodal (mesh) and indicator (field) spaces used to
+/// build the discrete target / adaptive limiting fields of the driver.
+struct FieldBuilder<'a> {
+    topo: &'a dyn MeshTopology,
+    dim: usize,
+    /// Nodal (mesh geometry) space.
+    dm: &'a DofManager,
+    order: u8,
+    re: Box<dyn ReferenceElement>,
+    x0: &'a [f64],
+    n_scalar: usize,
+    /// Indicator (field) space.
+    ind_dm: &'a DofManager,
+    ind_order: u8,
+    ind_re: Box<dyn ReferenceElement>,
+}
+
+impl<'a> FieldBuilder<'a> {
+    /// Nodal projection of a scalar coefficient onto the indicator dofs (MFEM
+    /// `GridFunction::ProjectCoefficient` of an H1 space).
+    fn project_dofs(&self, f: &dyn Fn(&[f64]) -> f64) -> Vec<f64> {
+        (0..self.ind_dm.n_dofs)
+            .map(|d| f(self.ind_dm.dof_coord(d as u32)))
+            .collect()
+    }
+
+    /// det(Jpr) of the nodal geometry at the reference point `xi` of element e.
+    fn det_at(&self, e: u32, xi: &[f64]) -> f64 {
+        let nd = self.dm.element_dofs(e).len();
+        let mut dsh = vec![0.0_f64; nd * self.dim];
+        self.re.eval_grad_basis(xi, &mut dsh);
+        let mut jpr = [[0.0_f64; 3]; 3];
+        for a in 0..self.dim {
+            for b in 0..self.dim {
+                let mut s = 0.0;
+                for (i, &dof) in self.dm.element_dofs(e).iter().enumerate() {
+                    s += self.x0[a * self.n_scalar + dof as usize] * dsh[i * self.dim + b];
+                }
+                jpr[a][b] = s;
+            }
+        }
+        match self.dim {
+            2 => jpr[0][0] * jpr[1][1] - jpr[1][0] * jpr[0][1],
+            3 => {
+                jpr[0][0] * (jpr[1][1] * jpr[2][2] - jpr[2][1] * jpr[1][2])
+                    - jpr[0][1] * (jpr[1][0] * jpr[2][2] - jpr[2][0] * jpr[1][2])
+                    + jpr[0][2] * (jpr[1][0] * jpr[2][1] - jpr[2][0] * jpr[1][1])
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// `calc_mass_volume`: (mass of the indicator field, volume) with the
+    /// Gauss-Legendre rule of order `OrderJ()` (the nodal order).
+    fn integrate(&self, field: &[f64], rule_order: u8) -> (f64, f64) {
+        let rule = self.re.quadrature(rule_order);
+        let mut mass = 0.0_f64;
+        let mut vol = 0.0_f64;
+        let mut sh = vec![0.0_f64; self.ind_dm.element_dofs(0).len()];
+        for e in 0..self.topo.n_elements() {
+            let e = e as u32;
+            for (q, xi) in rule.points.iter().enumerate() {
+                self.ind_re.eval_basis(xi, &mut sh);
+                let mut gval = 0.0;
+                for (k, &dof) in self.ind_dm.element_dofs(e).iter().enumerate() {
+                    gval += sh[k] * field[dof as usize];
+                }
+                let w = rule.weights[q] * self.det_at(e, xi);
+                mass += gval * w;
+                vol += w;
+            }
+        }
+        (mass, vol)
+    }
+
+    /// `DiffuseField`: assemble the indicator-space Laplacian and apply
+    /// `steps` Jacobi smoothing iterations (`DSmoother(0, 1.0, smooth_steps)`
+    /// with `iterative_mode = true` and a zero right-hand side).
+    fn diffuse(&self, field: &mut [f64], steps: usize) {
+        let n = self.ind_dm.n_dofs;
+        let rule_order = self.order + self.ind_order + 2;
+        let rule = self.re.quadrature(rule_order);
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        let mut dsh = vec![0.0_f64; self.ind_dm.element_dofs(0).len() * self.dim];
+        let mut dshn = vec![0.0_f64; self.dm.element_dofs(0).len() * self.dim];
+        for e in 0..self.topo.n_elements() {
+            let e = e as u32;
+            let edofs = self.ind_dm.element_dofs(e);
+            let nd = edofs.len();
+            for (q, xi) in rule.points.iter().enumerate() {
+                self.ind_re.eval_grad_basis(xi, &mut dsh);
+                // Geometry Jacobian (nodal space) at the same reference point.
+                self.re.eval_grad_basis(xi, &mut dshn);
+                let mut jpr = [[0.0_f64; 3]; 3];
+                for a in 0..self.dim {
+                    for b in 0..self.dim {
+                        let mut s = 0.0;
+                        for (i, &dof) in self.dm.element_dofs(e).iter().enumerate() {
+                            s += self.x0[a * self.n_scalar + dof as usize]
+                                * dshn[i * self.dim + b];
+                        }
+                        jpr[a][b] = s;
+                    }
+                }
+                let w = rule.weights[q] * self.det_at(e, xi);
+                // Physical gradients DSh = DSh_ref * Jpr^{-1}, then the
+                // diffusion element matrix entries w * grad_i . grad_j.
+                for i in 0..nd {
+                    let mut gi = [0.0_f64; 3];
+                    for d in 0..self.dim {
+                        let mut s = 0.0;
+                        for m in 0..self.dim {
+                            s += dsh[i * self.dim + m] * jac_inv_entry(&jpr, m, d, self.dim);
+                        }
+                        gi[d] = s;
+                    }
+                    for j in 0..nd {
+                        let mut dot = 0.0;
+                        for d in 0..self.dim {
+                            let gj_d = (0..self.dim)
+                                .map(|m| {
+                                    dsh[j * self.dim + m]
+                                        * jac_inv_entry(&jpr, m, d, self.dim)
+                                })
+                                .sum::<f64>();
+                            dot += gi[d] * gj_d;
+                        }
+                        coo.add(edofs[i] as usize, edofs[j] as usize, w * dot);
+                    }
+                }
+            }
+        }
+        let lap = coo.into_csr();
+        // Jacobi smoother: x += D^{-1}(0 - A x), `steps` iterations.
+        let mut d = vec![1.0_f64; n];
+        for row in 0..n {
+            let (s, e) = (lap.row_ptr[row], lap.row_ptr[row + 1]);
+            for k in s..e {
+                if lap.col_idx[k] as usize == row {
+                    d[row] = if lap.values[k] != 0.0 { lap.values[k] } else { 1.0 };
+                }
+            }
+        }
+        let mut ax = vec![0.0_f64; n];
+        for _ in 0..steps {
+            lap.spmv(field, &mut ax);
+            for i in 0..n {
+                field[i] += -ax[i] / d[i];
+            }
+        }
+    }
+
+    /// `GridFunction::GetDerivative(comp=1, der_comp, der)`: nodal projection
+    /// of the `der_comp` physical gradient of `src` onto the indicator space
+    /// (with the shared-dof overlap division).
+    fn derivative(&self, src: &[f64], der_comp: usize) -> Vec<f64> {
+        let n = self.ind_dm.n_dofs;
+        let mut der = vec![0.0_f64; n];
+        let mut cnt = vec![0_u32; n];
+        let coords = self.ind_re.dof_coords();
+        let mut dsh = vec![0.0_f64; self.ind_dm.element_dofs(0).len() * self.dim];
+        for e in 0..self.topo.n_elements() {
+            let e = e as u32;
+            let edofs = self.ind_dm.element_dofs(e);
+
+            let ndn = self.dm.element_dofs(e).len();
+            let mut dshn = vec![0.0_f64; ndn * self.dim];
+            for (k, xi) in coords.iter().enumerate() {
+                self.ind_re.eval_grad_basis(xi, &mut dsh);
+                // Reference gradient of src at xi.
+                let mut pt_grad = [0.0_f64; 3];
+                for m in 0..self.dim {
+                    let mut s = 0.0;
+                    for (i, &dof) in edofs.iter().enumerate() {
+                        s += dsh[i * self.dim + m] * src[dof as usize];
+                    }
+                    pt_grad[m] = s;
+                }
+                // Inverse of the nodal geometry Jacobian at xi.
+                self.re.eval_grad_basis(xi, &mut dshn);
+                let mut jpr = [[0.0_f64; 3]; 3];
+                for a in 0..self.dim {
+                    for b in 0..self.dim {
+                        let mut s = 0.0;
+                        for (i, &dof) in self.dm.element_dofs(e).iter().enumerate() {
+                            s += self.x0[a * self.n_scalar + dof as usize]
+                                * dshn[i * self.dim + b];
+                        }
+                        jpr[a][b] = s;
+                    }
+                }
+                
+                let mut a = 0.0;
+                for m in 0..self.dim {
+                    a += jac_inv_entry(&jpr, m, der_comp, self.dim) * pt_grad[m];
+                }
+                der[edofs[k] as usize] += a;
+                cnt[edofs[k] as usize] += 1;
+            }
+        }
+        for i in 0..n {
+            der[i] /= cnt[i] as f64;
+        }
+        der
+    }
+
+    /// `ConstructSizeGF` (semi-circle indicator on a non-periodic mesh).
+    fn construct_size_gf(&self) -> Vec<f64> {
+        let mut size = self.project_dofs(&size_indicator);
+        let rule_order = self.order; // Tr.OrderJ() of the Qk nodal geometry
+        let (volume_ind, volume) = self.integrate(&size, rule_order);
+        let ne = self.topo.n_elements() as f64;
+        let size_ratio = if self.dim == 2 { 9.0 } else { 27.0 };
+        let small_el_size = volume_ind / ne + (volume - volume_ind) / (size_ratio * ne);
+        let big_el_size = size_ratio * small_el_size;
+        for v in size.iter_mut() {
+            *v = *v * small_el_size + (1.0 - *v) * big_el_size;
+        }
+        size
+    }
+}
+
+/// 3x3 inverse of a row-major matrix.
+fn inv3_rowmajor(m: &[f64; 9]) -> [f64; 9] {
+    let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+        + m[2] * (m[3] * m[7] - m[4] * m[6]);
+    let inv = 1.0 / det;
+    [
+        (m[4] * m[8] - m[5] * m[7]) * inv,
+        (m[2] * m[7] - m[1] * m[8]) * inv,
+        (m[1] * m[5] - m[2] * m[4]) * inv,
+        (m[5] * m[6] - m[3] * m[8]) * inv,
+        (m[0] * m[8] - m[2] * m[6]) * inv,
+        (m[2] * m[3] - m[0] * m[5]) * inv,
+        (m[3] * m[7] - m[4] * m[6]) * inv,
+        (m[1] * m[6] - m[0] * m[7]) * inv,
+        (m[0] * m[4] - m[1] * m[3]) * inv,
+    ]
+}
+
+/// Entry (m, d) of the inverse of the row-major Jacobian `jpr` (dξ_m/∂x_d).
+fn jac_inv_entry(jpr: &[[f64; 3]; 3], m: usize, d: usize, dim: usize) -> f64 {
+    match dim {
+        2 => {
+            let det = jpr[0][0] * jpr[1][1] - jpr[1][0] * jpr[0][1];
+            let inv = [
+                [jpr[1][1], -jpr[0][1]],
+                [-jpr[1][0], jpr[0][0]],
+            ];
+            inv[m][d] / det
+        }
+        3 => {
+            let m3: [f64; 9] = [
+                jpr[0][0], jpr[0][1], jpr[0][2], jpr[1][0], jpr[1][1], jpr[1][2], jpr[2][0],
+                jpr[2][1], jpr[2][2],
+            ];
+            inv3_rowmajor(&m3)[m * 3 + d]
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// MFEM mesh-optimizer case 6: the material interface indicator is diffused,
+/// its gradient magnitude defines the small-element region and the aspect
+/// ratio; the sizes are remapped so that small elements are 9x smaller.
+fn tid6_fields(fb: &FieldBuilder) -> (Vec<f64>, Vec<f64>) {
+    let mut disc = fb.project_dofs(&material_indicator_2d);
+    fb.diffuse(&mut disc, 2);
+
+    // Partials with respect to x and y of the diffused indicator.
+    let mut d_x = fb.derivative(&disc, 0);
+    let mut d_y = fb.derivative(&disc, 1);
+
+    // Squared magnitude of the gradient.
+    let mut size: Vec<f64> = d_x
+        .iter()
+        .zip(d_y.iter())
+        .map(|(a, b)| a.powf(2.0) + b.powf(2.0))
+        .collect();
+    let max = size.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    for v in d_x.iter_mut() {
+        *v = v.abs();
+    }
+    for v in d_y.iter_mut() {
+        *v = v.abs();
+    }
+    let (eps, aspr_ratio, size_ratio) = (0.01_f64, 20.0_f64, 40.0_f64);
+
+    for v in size.iter_mut() {
+        *v /= max;
+    }
+    let mut aspr = vec![0.0_f64; size.len()];
+    for i in 0..size.len() {
+        // The C++ first computes the gradient ratio here, then overwrites it
+        // with the magnitude-based expression (kept verbatim).
+        let _ratio = (d_x[i] + eps) / (d_y[i] + eps);
+        let mut a = 0.1 + 0.9 * (1.0 - size[i]) * (1.0 - size[i]);
+        if a > aspr_ratio {
+            a = aspr_ratio;
+        }
+        if a < 1.0 / aspr_ratio {
+            a = 1.0 / aspr_ratio;
+        }
+        aspr[i] = a;
+    }
+
+    let ne = fb.topo.n_elements() as f64;
+    let rule_order = fb.order; // Tr.OrderJ() of the Qk nodal geometry
+    let (volume_ind, volume) = fb.integrate(&size, rule_order);
+    let avg_zone_size = volume / ne;
+    let small_avg_ratio = (volume_ind + (volume - volume_ind) / size_ratio) / volume;
+    let small_zone_size = small_avg_ratio * avg_zone_size;
+    let big_zone_size = size_ratio * small_zone_size;
+
+    for v in size.iter_mut() {
+        let a = (big_zone_size - small_zone_size) / small_zone_size;
+        *v = big_zone_size / (1.0 + a * *v);
+    }
+
+    fb.diffuse(&mut size, 2);
+    fb.diffuse(&mut aspr, 2);
+    (size, aspr)
 }
 
 /// Write an MFEM mesh file whose geometry is a Qk nodal grid function (the
