@@ -19,7 +19,7 @@
 //! `Ref | Dofs | ω | L2 Error | Rate | PCG it`.
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
-use fem_assembly::dpg::dpg_basis::{SkeletonFaceInfo, SkeletonSpace, VolKind};
+use fem_assembly::dpg::dpg_basis::{SkeletonSpace, VolKind};
 use fem_assembly::dpg::dpg_integrators::{
     DpgCurl2dNDIntegrator, DpgCurl2dNDTrialIntegrator, DpgCurl2dPairingIntegrator,
     DpgCurlCurlIntegrator, DpgDiffusionIntegrator, DpgMassIntegrator,
@@ -33,6 +33,14 @@ use fem_mesh::{refine_uniform, Mesh, MeshTopology};
 use fem_solver::{solve_pcg_operator_precond, SolverConfig};
 
 const PI: f64 = std::f64::consts::PI;
+
+/// Inverse-transpose of a 2×2 Jacobian (probe helper).
+fn inv_transpose_2x2(jac: &nalgebra::DMatrix<f64>) -> nalgebra::DMatrix<f64> {
+    let (a, b, c, d) = (jac[(0, 0)], jac[(0, 1)], jac[(1, 0)], jac[(1, 1)]);
+    let det = a * d - b * c;
+    let inv_t = nalgebra::DMatrix::from_row_slice(2, 2, &[d / det, -c / det, -b / det, a / det]);
+    inv_t
+}
 
 struct Exact {
     omega: f64,
@@ -76,6 +84,12 @@ fn solve_level(
     let p = order;
     let test_order = order + delta_order;
     let mut a: ComplexDPGWeakForm<Mesh<2>> = ComplexDPGWeakForm::new(mesh.clone());
+    // Volume quadrature order 4 = 3×3 Gauss (MFEM: the strongest default
+    // order among the assembled integrators is the RHS
+    // `VectorFEDomainLFIntegrator`, `2*el.GetOrder() = 4` for the order-2 ND
+    // test space; the bilinear integrands are polynomial and exact under
+    // this rule, matching MFEM's per-integrator defaults).
+    a.set_quad_order(4);
 
     // Trial spaces: E (L2 vector, vdim 2), H (L2 scalar), Ê (RT trace,
     // order p−1), Ĥ (H1 trace, order p).
@@ -197,39 +211,27 @@ fn solve_level(
         let p0 = mesh.node_coords(nodes[0]);
         let p1 = mesh.node_coords(nodes[1]);
         let tangent = [p1[0] - p0[0], p1[1] - p0[1]];
-        // CalcOrtho normal (length = |e|), oriented OUTWARD: the boundary
-        // element's normal must point away from the adjacent element.
-        let mut normal = [tangent[1], -tangent[0]];
-        let mid = [(p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0];
-        // Adjacent element = first element of the face adjacency.
-        let elem = match sk.face_info(face) {
-            SkeletonFaceInfo::Boundary { elem, .. } => elem,
-            SkeletonFaceInfo::Interior { .. } => unreachable!("boundary face"),
-        };
-        let enodes = mesh.element_nodes(*elem);
-        let cen = [
-            enodes.iter().map(|&nd| mesh.node_coords(nd)[0]).sum::<f64>() / enodes.len() as f64,
-            enodes.iter().map(|&nd| mesh.node_coords(nd)[1]).sum::<f64>() / enodes.len() as f64,
-        ];
-        if (mid[0] - cen[0]) * normal[0] + (mid[1] - cen[1]) * normal[1] < 0.0 {
-            normal = [-normal[0], -normal[1]];
-        }
+        // CalcOrtho normal (length = |e|) of the CANONICAL (min,max) edge
+        // direction — exactly MFEM: ProjectBdrCoefficientNormal evaluates
+        // CalcOrtho of the boundary-element transformation, whose 2-D
+        // direction follows the global edge orientation, without any
+        // outward correction.
+        let normal = [tangent[1], -tangent[0]];
+
         let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
-        // Mean normal flux of the rotated E: (E_y, −E_x)·n / |e|.
-        let mut fr = 0.0;
-        let mut fi = 0.0;
-        for s in [0.2113248654051871, 0.7886751345948129] {
-            let xpt = [
-                p0[0] * (1.0 - s) + p1[0] * s,
-                p0[1] * (1.0 - s) + p1[1] * s,
-            ];
-            let ec = ex.e(&xpt);
-            let gn = ec[0].0 * normal[0] + ec[1].0 * normal[1];
-            let gn_i = ec[0].1 * normal[0] + ec[1].1 * normal[1];
-            fr += 0.5 * gn;
-            fi += 0.5 * gn_i;
-        }
-        let (mr, mi) = (fr / len, fi / len);
+        // C++ ProjectBdrCoefficientNormal(hatEex): hatEex is the ROTATED
+        // field (E_y, −E_x) and the projected value is its flux
+        // Ê = hatEex · n̂ at the trace dof node (edge midpoint for the
+        // order-0 RT trace).  With the VALUE-mapped trace basis used here
+        // the same trace function is the unscaled midpoint value.
+        let xpt = [(p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0];
+        let ec = ex.e(&xpt);
+        // rotate E: Ê = (E_y, −E_x)  (MFEM hatE_exact, 2-D)
+        let (er, ei) = (ec[1].0, ec[1].1);
+        let (exr, exi) = (-ec[0].0, -ec[0].1);
+        let gn = er * normal[0] + ei * normal[1];
+        let gn_i = exr * normal[0] + exi * normal[1];
+        let (mr, mi) = (gn / len, gn_i / len);
         for dof in sk.face_dofs(face) {
             ess.push(base + dof);
             xr[base + dof] = mr;
@@ -237,7 +239,111 @@ fn solve_level(
         }
     }
 
+    // DPG_PROBE=1: dump raw per-edge trace blocks B13 (<n×Ĥ,G>, ND test)
+    // like the C++ mb.cpp probe (raw-block A/B check).  Quadrilateral,
+    // straight-sided meshes only (probe uses the direct face→element map).
+    if std::env::var("DPG_PROBE").is_ok() {
+        let skh = SkeletonSpace::new_h1(mesh.clone(), p);
+        let g_order = test_order;
+        let et0 = mesh.element_type(0);
+        let g_fe = fem_assembly::dpg::dpg_basis::hcurl_ref_elem(et0, g_order);
+        let nd = g_fe.n_dofs();
+        println!("G ndof {nd}");
+        let geo = fem_assembly::vector_assembler::geo_ref_elem_from_mesh(mesh, 0);
+        for e in 0..mesh.n_elements() as u32 {
+            let nodes_e = mesh.element_nodes(e);
+            let lfs = fem_assembly::dpg::dpg_basis::local_face_table(&nodes_e, 2);
+            let geo_nodes_e = mesh.geometry_nodes(e).to_vec();
+            for (li, lf) in lfs.iter().enumerate() {
+                let fid = skh.elem_face_id(e, li);
+                let ori = skh.elem_face_orientation(e, li);
+                println!(
+                    "-- elem {e} local face {li} (global {fid}, ori {ori}) nodes {:?}",
+                    skh.face_nodes(fid)
+                );
+                let mut b13 = vec![0.0_f64; nd * 2];
+                let (fpts, fwts) = fem_assembly::dpg::dpg_basis::face_quadrature(2, false, 4);
+                for (q, fparam) in fpts.iter().enumerate() {
+                    let (_xp, normal, _measure) =
+                        fem_assembly::face_geo_at(mesh, &skh, fid, fparam, 2);
+                    let lf_eff: Vec<usize> = if ori < 0 {
+                        lf.iter().rev().copied().collect()
+                    } else {
+                        lf.to_vec()
+                    };
+                    let xi0 = fem_assembly::dpg::dpg_basis::face_param_to_elem_ref(
+                        et0, &lf_eff, false, fparam,
+                    );
+                    let (jac, det, _) = fem_assembly::vector_assembler::isoparametric_jacobian(
+                        mesh,
+                        &geo_nodes_e,
+                        geo.as_deref().unwrap(),
+                        &xi0,
+                        2,
+                    );
+                    let jit = inv_transpose_2x2(&jac);
+                    let mut tv = fem_assembly::dpg::dpg_basis::VolVals::default();
+                    fem_assembly::dpg::dpg_basis::eval_vol_space(
+                        VolKind::HCurl,
+                        g_order,
+                        et0,
+                        2,
+                        &jac,
+                        det,
+                        &jit,
+                        &xi0,
+                        None,
+                        &mut tv,
+                    );
+                    let mut fphi = vec![0.0_f64; 2];
+                    fem_assembly::dpg::dpg_basis::eval_face_lagrange(2, false, 1, fparam, &mut fphi);
+                    let w = fwts[q];
+                    for i in 0..tv.n_scalar {
+                        let cross = normal[1] * tv.phi[i * 2] - normal[0] * tv.phi[i * 2 + 1];
+                        for j in 0..2 {
+                            b13[i * 2 + j] += w * cross * fphi[j];
+                        }
+                    }
+                }
+                for i in 0..nd {
+                    println!("  B13 {i}: {:.12} {:.12}", b13[i * 2], b13[i * 2 + 1]);
+                }
+            }
+        }
+    }
+
     let (sys, xs, b) = a.form_linear_system(&ess, &xr, &xi);
+
+    // DPG_DUMP=1: dump the post-elimination real-doubled system in the
+    // mh3.cpp probe format for C++ A/B comparison.
+    if std::env::var("DPG_DUMP").is_ok() {
+        let big = sys.to_real_block_csr();
+        println!("N {}", big.nrows / 2);
+        // Structural anchors for the C++ A/B index mapping.
+        for e in 0..mesh.n_elements() as u32 {
+            let nodes = mesh.element_nodes(e);
+            let cx = nodes.iter().map(|&nd| mesh.node_coords(nd)[0]).sum::<f64>()
+                / nodes.len() as f64;
+            let cy = nodes.iter().map(|&nd| mesh.node_coords(nd)[1]).sum::<f64>()
+                / nodes.len() as f64;
+            println!("EC {e} {cx:.10} {cy:.10}");
+        }
+        let ske = a.skeleton(hate);
+        for f in 0..ske.n_faces() {
+            let mut vn: Vec<u32> = ske.face_nodes(f).to_vec();
+            vn.sort_unstable();
+            println!("EF {f} {} {}", vn[0], vn[1]);
+        }
+        println!("X{}", xs.iter().map(|v| format!(" {v:.14}")).collect::<String>());
+        println!("M{}", b.iter().map(|v| format!(" {v:.14}")).collect::<String>());
+        for i in 0..big.nrows {
+            let mut row = vec![0.0_f64; big.nrows];
+            let mut x = vec![0.0_f64; big.nrows];
+            x[i] = 1.0;
+            big.spmv(&x, &mut row);
+            println!("R{i}{}", row.iter().map(|v| format!(" {v:.14}")).collect::<String>());
+        }
+    }
 
     // Real doubled operator [[A_r, −A_i],[A_i, A_r]] + block GS preconditioner.
     let big: CsrMatrix<f64> = sys.to_real_block_csr();
@@ -285,12 +391,23 @@ fn solve_level(
                 sol_i[hb + e],
             );
         }
+        for e in 0..ne {
+            let nodes = mesh.element_nodes(e as u32);
+            let cx = nodes.iter().map(|&nd| mesh.node_coords(nd)[0]).sum::<f64>()
+                / nodes.len() as f64;
+            let cy = nodes.iter().map(|&nd| mesh.node_coords(nd)[1]).sum::<f64>()
+                / nodes.len() as f64;
+            println!("C {e} {cx:.10} {cy:.10}");
+        }
     }
 
     // L2 errors: E (2 comps) + H (1 comp), re + im.
     let err = errors(mesh, &sol_r, &sol_i, a.trial_offsets()[es], a.trial_offsets()[hs], p - 1, &ex);
 
-    let dofs = a.trial_block_sizes()[es] + a.trial_block_sizes()[hs];
+    // Dofs column matches the C++ miniapp definition: the sum over ALL
+    // trial spaces (`dofs += trial_fes[i]->GetTrueVSize()`), E and H only
+    // make up the L2 error.
+    let dofs = a.size();
     (dofs, err, iterations)
 }
 

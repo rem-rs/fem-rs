@@ -484,7 +484,12 @@ impl DpgTraceBilinear2 for DpgNormalTraceIntegrator {
 }
 
 /// `<n × v, û>` (2-D) — MFEM `TangentTraceIntegrator` in 2-D
-/// (H1-trace scalar trial, H(curl) ND test):  `B[ψ_i, û_j] += w (n×v_i) û_j`.
+/// (H1-trace scalar trial, H(curl) ND test):  `B[ψ_i, û_j] += w (n × v_i) û_j`.
+///
+/// Sign convention 1:1 with MFEM `TangentTraceIntegrator::cross_product`
+/// (`fem/bilininteg.hpp:4003`): the 2-D "cross" is
+/// `Z = n_y·v_x − n_x·v_y` — the negative of the usual 2-D cross product —
+/// with `n = CalcOrtho(J_face)` of the canonical (edge-table) direction.
 pub struct DpgTangentTraceIntegrator2D;
 
 impl DpgTraceBilinear2 for DpgTangentTraceIntegrator2D {
@@ -493,7 +498,8 @@ impl DpgTraceBilinear2 for DpgTangentTraceIntegrator2D {
         let nt = test.n_scalar;
         let nf = trial.phi.len();
         for i in 0..nt {
-            let n_cross_v = ctx.normal[0] * test.phi[i * 2 + 1] - ctx.normal[1] * test.phi[i * 2];
+            // MFEM 2-D cross: n_y·v_x − n_x·v_y
+            let n_cross_v = ctx.normal[1] * test.phi[i * 2] - ctx.normal[0] * test.phi[i * 2 + 1];
             for j in 0..nf {
                 m[i * nf + j] += w * n_cross_v * trial.phi[j];
             }

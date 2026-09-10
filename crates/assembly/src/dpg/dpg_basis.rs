@@ -393,7 +393,16 @@ pub enum SkeletonFaceInfo {
 ///   `(order+1)²`.
 /// * Faces are numbered in first-seen order while walking the elements
 ///   (matching `DpgTraceSpace` and MFEM's edge-table walk); a face's DOFs are
-///   consecutive, ordered along the first-seen node direction.
+///   consecutive, ordered along the face's **canonical direction**: in 2-D
+///   this is MFEM's edge-table direction `(min vertex, max vertex)` (MFEM
+///   `DSTable::Push` canonicalises every edge that way, so the global edge
+///   direction is not always the first-seen element's local direction); in
+///   3-D it is the generating (first-seen) element's local face vertex order
+///   (MFEM `FaceInfo`: Elem1 generates the face).  Trace bases and
+///   `face_geo_at` normals follow this canonical direction for BOTH adjacent
+///   elements, exactly like MFEM's `GetFaceElement` /
+///   `GetFaceElementTransformations`; the element side enters only through
+///   the ±1 scale (`rt_trace_face_sign(elem_face_orientation(..))`).
 /// * `element_dofs(elem)` concatenates the DOFs of all faces of the element in
 ///   the element's local face order.
 pub struct SkeletonSpace<M: MeshTopology> {
@@ -428,7 +437,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
     /// `H1_Trace_FECollection`): endpoint dofs of each face are shared
     /// through their mesh vertex, so the trace is continuous across the
     /// skeleton.  The face dof order still matches [`eval_face_lagrange`]
-    /// (node `k` at parameter `k/p` along the first-seen face direction).
+    /// (node `k` at parameter `k/p` along the face's canonical direction).
     pub fn new_h1(mesh: M, order: u8) -> Self {
         Self::build(mesh, order, true)
     }
@@ -448,8 +457,31 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
             let lfs = local_face_table(en, dim);
             for (li, lf) in lfs.iter().enumerate() {
                 let unsorted: Vec<u32> = lf.iter().map(|&k| en[k]).collect();
+                // Canonical face direction.  2-D: MFEM stores every edge
+                // directed (min vertex, max vertex) — the edge table is a
+                // `DSTable` (`Mesh::GetElementToEdgeTable`,
+                // `DSTable::Push(a,b) := Push_(min, max)`) — so the global
+                // edge direction is NOT always the first-seen element's
+                // local direction.  3-D: faces keep the generating
+                // (first-seen) element's local face vertex order (MFEM
+                // `FaceInfo`: Elem1 generates the face).
                 let mut key = unsorted.clone();
                 key.sort_unstable();
+                // Canonical face direction.  2-D: the (min vertex, max
+                // vertex) direction — MFEM's global edge orientation
+                // (`DSTable::Push(a,b) := Push_(min,max)`,
+                // `GetEdgeVertices`: "the two vertices are sorted ... and
+                // consistent with the global edge orientation").  3-D: the
+                // generating (first-seen) element's local face vertex order
+                // (MFEM `FaceInfo`: Elem1 generates the face).  Elements
+                // whose local face cycle runs opposite contribute through
+                // the orientation sign (`elem_face_orientation` →
+                // `rt_trace_face_sign`) and the reversed element-side
+                // parametrisation in the trace assembly.
+                let mut canonical = unsorted.clone();
+                if dim == 2 && canonical[0] > canonical[1] {
+                    canonical.swap(0, 1);
+                }
                 match face_map.get(&key) {
                     Some(&fid) => {
                         if let SkeletonFaceInfo::Boundary { elem: fe, local_face: fl } =
@@ -467,7 +499,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     None => {
                         let fid = face_info.len();
                         face_map.insert(key, fid);
-                        face_node_ids.push(unsorted);
+                        face_node_ids.push(canonical);
                         face_info.push(SkeletonFaceInfo::Boundary { elem: e, local_face: li });
                         is_quad_face.push(lf.len() == 4);
                         elem_local_faces[e as usize].push(fid);
@@ -508,24 +540,17 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 .collect();
             (face_dof_offsets, n_dofs, elem_dofs, face_dof_lists)
         } else {
-            // Vertex-continuous H1 trace.  DOF layout: skeleton vertices
-            // first (each mesh vertex is one dof, shared by all touching
-            // faces), then per-edge/face interior dofs.  The face dof list
-            // is ordered to match `eval_face_lagrange`: node k sits at
-            // parameter k/p, so the first/last nodes are the face's first /
-            // last corner vertex and the interior nodes follow.
+            // Vertex-continuous H1 trace.  DOF layout (MFEM
+            // `FiniteElementSpace::GetFaceDofs` with an H1 fec): corner dofs
+            // are the MESH VERTEX ids themselves (one dof per vertex, shared
+            // by all touching faces), interior face dofs follow after the
+            // vertex-dof count.  The face dof list is ordered to match
+            // `eval_face_lagrange`: node k sits at parameter k/p along the
+            // face's canonical direction, so the first/last nodes are the
+            // face's first/last corner vertex and the interior nodes follow.
             let p = order as usize;
-            let mut vertex_dof: std::collections::HashMap<u32, usize> =
-                std::collections::HashMap::new();
-            let mut n_vdofs = 0usize;
-            for f in 0..face_node_ids.len() {
-                for &v in &face_node_ids[f] {
-                    if p >= 1 && !vertex_dof.contains_key(&v) {
-                        vertex_dof.insert(v, n_vdofs);
-                        n_vdofs += 1;
-                    }
-                }
-            }
+            let n_vdofs = mesh.n_nodes();
+            let vertex_dof = |v: u32| v as usize;
             let interior_per_face = if dim == 2 {
                 (p + 1).saturating_sub(2)
             } else if is_quad_face.iter().any(|&q| q) {
@@ -544,18 +569,23 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 let n = dofs_per_face(is_quad_face[f]);
                 face_dof_offsets.push(face_dof_offsets[f] + n);
             }
-            let base = face_dof_offsets[face_info.len()];
+            // Interior dofs start AFTER the vertex dofs (MFEM
+            // `H1_Trace_FECollection`: face dofs live on mesh vertices and
+            // face-interior entities, so the global count is
+            // n_vertices_touched + n_faces × interior_per_face — NOT the
+            // per-face dof-count sum, which would leave phantom dofs).
+            let base = n_vdofs;
             // Per-face dofs: corner vertex dofs + shared interior range.
             let mut face_dofs: Vec<Vec<usize>> = Vec::with_capacity(face_node_ids.len());
             if dim == 2 {
                 for f in 0..face_node_ids.len() {
                     let mut dofs = Vec::with_capacity(p + 1);
-                    dofs.push(vertex_dof[&face_node_ids[f][0]]);
+                    dofs.push(vertex_dof(face_node_ids[f][0]));
                     for k in 1..p {
                         dofs.push(base + f * interior_per_face + (k - 1));
                     }
                     if p >= 1 {
-                        dofs.push(vertex_dof[&face_node_ids[f][1]]);
+                        dofs.push(vertex_dof(face_node_ids[f][1]));
                     }
                     face_dofs.push(dofs);
                 }
@@ -565,7 +595,7 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                 for f in 0..face_node_ids.len() {
                     let mut dofs = Vec::with_capacity(dofs_per_face(is_quad_face[f]));
                     for &v in &face_node_ids[f] {
-                        dofs.push(vertex_dof[&v]);
+                        dofs.push(vertex_dof(v));
                     }
                     let b2 = base + f * interior_per_face;
                     for k in 0..interior_per_face {
@@ -582,6 +612,9 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
                     elem_dofs[ei].extend_from_slice(&face_dofs[fid]);
                 }
             }
+            // `face_dof_offsets` carries the per-face dof-count prefix sums
+            // (used only by the discontinuous `face_dofs()` accessor); in the
+            // continuous mode it does not describe global dof ids.
             (face_dof_offsets, n_dofs, elem_dofs, face_dofs)
         };
 
@@ -666,6 +699,50 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
     /// Global face id of the element's `local_index`-th local face.
     pub fn elem_face_id(&self, elem: u32, local_index: usize) -> usize {
         self.elem_local_faces[elem as usize][local_index]
+    }
+
+    /// Orientation parity of the element's `local_index`-th local face
+    /// against the canonical (global face storage) direction.
+    ///
+    /// MFEM stores every interior face directed along the local face of the
+    /// element that generated it (`Mesh::FaceInfo`: "Elem1No always refers
+    /// to the element that generated the face"), which is exactly this
+    /// skeleton's canonical direction.  Returns `+1` when the element's
+    /// local face cycle matches the canonical directed cycle (the element is
+    /// MFEM's `Elem1`) and `−1` when it is the reverse cycle (`Elem2` — the
+    /// element's outward normal is opposite to the canonical face normal).
+    /// This is the input to `fem_space::dof_transformation::
+    /// rt_trace_face_sign` (the RT/trace orientation sign applied by MFEM's
+    /// trace integrators) and fixes the element-side reference
+    /// parametrisation for trace quadrature.
+    ///
+    /// Panics for non-manifold faces (node cycles that match neither
+    /// direction).
+    pub fn elem_face_orientation(&self, elem: u32, local_index: usize) -> i32 {
+        let fid = self.elem_local_faces[elem as usize][local_index];
+        let canonical = &self.face_node_ids[fid];
+        let en = self.mesh.element_nodes(elem);
+        let lfs = local_face_table(en, self.dim);
+        let local: Vec<u32> = lfs[local_index].iter().map(|&k| en[k]).collect();
+        let n = canonical.len();
+        debug_assert_eq!(n, local.len());
+        if n == 2 {
+            // A 2-cycle's "cyclic rotation" is its reversal: compare exactly.
+            return if canonical[0] == local[0] { 1 } else { -1 };
+        }
+        let start = canonical
+            .iter()
+            .position(|&x| x == local[0])
+            .unwrap_or_else(|| panic!("elem_face_orientation: face node mismatch"));
+        if (0..n).all(|k| canonical[(start + k) % n] == local[k]) {
+            return 1;
+        }
+        if (0..n).all(|k| canonical[(start + n - k % n) % n] == local[k]) {
+            return -1;
+        }
+        panic!(
+            "elem_face_orientation: non-manifold face {fid} (element {elem}, local {local_index})"
+        );
     }
 
     /// Mesh reference.

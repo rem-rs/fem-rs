@@ -14,6 +14,7 @@
 
 pub mod dof_manager;
 pub mod fe_space;
+pub mod dof_transformation;
 pub mod ordering;
 pub mod h1;
 pub mod l2;
@@ -32,6 +33,10 @@ pub mod dpg_trace;
 
 
 pub use dof_manager::{DofManager, EdgeKey, FaceKey};
+pub use dof_transformation::{
+    rt_trace_face_sign, DofTransformation, FaceGeom, NdDofTransformation,
+    StatelessDofTransformation,
+};
 pub use fe_space::{FESpace, SpaceType};
 pub use ordering::Ordering;
 pub use h1::H1Space;

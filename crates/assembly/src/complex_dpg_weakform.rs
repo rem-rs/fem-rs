@@ -26,11 +26,11 @@ use crate::dpg::dpg_basis::{
     eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, local_face_table, scalar_ref_elem,
     vol_quadrature, VolKind, VolVals,
 };
-use crate::dpg::dpg_basis::{SkeletonFaceInfo, SkeletonSpace};
+use crate::dpg::dpg_basis::SkeletonSpace;
 use crate::dpg::dpg_integrators::{
     DpgBilinear2, DpgLinear2, DpgTraceBilinear2, FaceCtx, FaceVals, VolCtx,
 };
-use crate::dpg_weakform::{element_geo_at, face_geo_at, inv_transpose};
+use crate::dpg_weakform::{element_geo_at, face_geo_at, inv_transpose, invert_element_map};
 use crate::vector_assembler::geo_ref_elem_from_mesh;
 
 // Re-exported for user convenience.
@@ -748,21 +748,48 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                         } else {
                             (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
                         };
-                        let scale = match sk.face_info(fid) {
-                            SkeletonFaceInfo::Boundary { .. } => 1.0,
-                            SkeletonFaceInfo::Interior { elem_first, .. } => {
-                                if *elem_first == e {
-                                    1.0
-                                } else {
-                                    -1.0
-                                }
-                            }
-                        };
+                        // RT/trace face orientation: the element whose local
+                        // face direction agrees with the canonical (stored)
+                        // face direction gets `+1`, the reversed one `−1`
+                        // (MFEM `Elem1`/`Elem2` sign inside
+                        // `TraceIntegrator` / `TangentTraceIntegrator`,
+                        // composed with the Elem1-local face
+                        // parametrisation: with the canonical storage this
+                        // is exactly C++'s scale relative to the canonical
+                        // face basis/normal).
+                        let ori = sk.elem_face_orientation(e, li);
+                        let scale = fem_space::dof_transformation::rt_trace_face_sign(ori);
                         let mut be = vec![0.0_f64; nr * nfd];
                         for (q, fparam) in fpts.iter().enumerate() {
                             let (xp, normal, measure) =
                                 face_geo_at(&mesh, sk, fid, fparam, dim);
-                            let xiref = face_param_to_elem_ref(et, lf, is_qf, fparam);
+                            // Element-side reference coordinates of the
+                            // canonical face quadrature point: the face basis
+                            // is evaluated in the canonical (Elem1)
+                            // parametrisation for BOTH sides (MFEM
+                            // `GetFaceElement`), so the element test basis
+                            // must be evaluated at the same physical point —
+                            // start from the element's local face
+                            // parametrisation, reversed when the element's
+                            // local direction is opposite to the canonical,
+                            // and Newton-refine onto the exact inverse image
+                            // of `xp` (MFEM `FaceElementTransformations`
+                            // chaining).
+                            let lf_eff: Vec<usize> = if ori < 0 {
+                                lf.iter().rev().copied().collect()
+                            } else {
+                                lf.to_vec()
+                            };
+                            let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, fparam);
+                            let xiref = invert_element_map(
+                                &mesh,
+                                simplex.as_ref(),
+                                geo,
+                                &geo_nodes,
+                                &xp,
+                                dim,
+                                &xi0,
+                            );
                             let (jac, det, _) = element_geo_at(
                                 &mesh, simplex.as_ref(), geo, &geo_nodes, &xiref, dim,
                             );

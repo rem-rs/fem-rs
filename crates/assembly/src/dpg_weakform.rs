@@ -45,7 +45,7 @@ use crate::dpg::dpg_basis::{
     eval_face_lagrange, eval_vol_space, face_param_to_elem_ref, local_face_table, ref_node_coords,
     scalar_ref_elem, vol_quadrature, VolKind, VolVals,
 };
-use crate::dpg::dpg_basis::{SkeletonFaceInfo, SkeletonSpace};
+use crate::dpg::dpg_basis::SkeletonSpace;
 use crate::dpg::dpg_integrators::{
     DpgBilinear2, DpgLinear2, DpgTraceBilinear2, FaceCtx, FaceVals, VolCtx,
 };
@@ -764,16 +764,16 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     } else {
                         (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
                     };
-                    let scale = match sk.face_info(fid) {
-                        SkeletonFaceInfo::Boundary { .. } => 1.0,
-                        SkeletonFaceInfo::Interior { elem_first, .. } => {
-                            if *elem_first == e {
-                                1.0
-                            } else {
-                                -1.0
-                            }
-                        }
-                    };
+                    // Sign of the element-side face contribution: the element's
+                    // local face cycle against the canonical (global face
+                    // storage) direction.  This is MFEM's element-face
+                    // orientation (`Elem2` faces carry the −1), and it makes
+                    // the element's outward normal consistent with the
+                    // canonical face normal returned by `face_geo_at` for
+                    // BOTH adjacent elements.  (The previous "first-seen
+                    // element ⇒ +1" rule was equivalent only while faces were
+                    // stored in the generating element's local direction.)
+                    let scale = sk.elem_face_orientation(e, li) as f64;
                     let mut be = vec![0.0_f64; nr * nfd];
                     for (q, fparam) in fpts.iter().enumerate() {
                         let (xp, normal, measure) =
@@ -1636,7 +1636,7 @@ mod tests {
         let mut ess = Vec::new();
         for f in 0..sk.n_faces() {
             if sk.is_boundary_face(f) {
-                for d in sk.face_dofs(f) {
+                for &d in sk.face_dof_list(f) {
                     ess.push(hat_base + d);
                 }
             }
@@ -1683,7 +1683,7 @@ mod tests {
         let mut ess2 = Vec::new();
         for f in 0..sk2.n_faces() {
             if sk2.is_boundary_face(f) {
-                for d in sk2.face_dofs(f) {
+                for &d in sk2.face_dof_list(f) {
                     ess2.push(hat_base2 + d);
                 }
             }
@@ -1761,12 +1761,16 @@ mod tests {
         }
 
         // û block: u on every skeleton face; σ̂ block: −σ·n̂ = 0.
+        // `face_dof_list` (not the `face_dofs` range) is the accessor valid in
+        // the continuous H1-trace mode: there the corner dofs are mesh-vertex
+        // ids, so a face's global dofs are not a consecutive range.
         let sk = a.skeleton(hatu);
         let hatu_base = offs[hatu];
         for f in 0..sk.n_faces() {
-            for k in 0..sk.dofs_per_face(f) {
+            let dofs = sk.face_dof_list(f).to_vec();
+            for (k, &d) in dofs.iter().enumerate() {
                 let pt = a.face_dof_point(&sk, f, k);
-                x[hatu_base + sk.face_dofs(f).start + k] = exact_u(&pt);
+                x[hatu_base + d] = exact_u(&pt);
             }
         }
 
@@ -1839,8 +1843,8 @@ mod tests {
         }
         let sk = a.skeleton(hatu);
         for f in 0..sk.n_faces() {
-            for k in 0..sk.dofs_per_face(f) {
-                x[offs[hatu] + sk.face_dofs(f).start + k] = 1.0;
+            for &d in sk.face_dof_list(f) {
+                x[offs[hatu] + d] = 1.0;
             }
         }
 
@@ -1928,16 +1932,8 @@ mod tests {
             let lfs = local_face_table(&nodes, 2);
             for (li, lf) in lfs.iter().enumerate() {
                 let fid = skh.elem_face_id(e, li);
-                let scale = match skh.face_info(fid) {
-                    SkeletonFaceInfo::Boundary { .. } => 1.0,
-                    SkeletonFaceInfo::Interior { elem_first, .. } => {
-                        if *elem_first == e {
-                            1.0
-                        } else {
-                            -1.0
-                        }
-                    }
-                };
+                // Same canonical-orientation convention as the assembly.
+                let scale = skh.elem_face_orientation(e, li) as f64;
                 let (fpts, fwts) = crate::dpg::dpg_basis::face_quadrature(2, false, 6);
                 let mut tv2 = VolVals::default();
                 for (q, fparam) in fpts.iter().enumerate() {
