@@ -3260,7 +3260,7 @@ impl<const D: usize> MeshTopology for Mesh<D> {
         let finder = crate::findpts::FindPoints::new(self);
         let opts = crate::findpts::FindPointsOptions { tol, ..Default::default() };
         let p: Vec<f64> = (0..dim).map(|i| x[i]).collect();
-        finder.locate(&p.try_into().unwrap_or([0.0; 3]), &opts).map(|lp| (lp.elem, lp.barycentric))
+        finder.locate(&p.try_into().unwrap_or([0.0; 3]), &opts).map(|lp| (lp.elem, lp.xi.to_vec()))
     }
 
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync> {

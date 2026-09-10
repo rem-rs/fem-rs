@@ -168,6 +168,120 @@ pub fn solve_bicgstab_ads_complex(
     )
 }
 
+/// Complex Conjugate Gradient (CG) solver for complex symmetric systems.
+///
+/// Solves `A * x = b` where A is complex symmetric (A = A^T, not A = A^H).
+/// Uses the complex inner product (u, v) = u^T v (not conjugate).
+///
+/// This is suitable for DPG systems which are complex coercive but not
+/// necessarily Hermitian.
+pub fn solve_cg_complex(
+    a: &ComplexCsr,
+    b_re: &[f64],
+    b_im: &[f64],
+    x_re: &mut [f64],
+    x_im: &mut [f64],
+    tol: f64,
+    max_iter: usize,
+) -> Result<(usize, f64), String> {
+    let n = a.nrows;
+    if b_re.len() != n || x_re.len() != n {
+        return Err(format!("Dimension mismatch: n={}, b={}, x={}", n, b_re.len(), x_re.len()));
+    }
+
+    // Helper: complex symmetric inner product (u, v) = u^T v (NOT conjugate)
+    let dot = |ur: &[f64], ui: &[f64], vr: &[f64], vi: &[f64]| -> (f64, f64) {
+        let mut re = 0.0f64;
+        let mut im = 0.0f64;
+        for i in 0..n {
+            // (ur + i*ui) * (vr + i*vi) = (ur*vr - ui*vi) + i*(ur*vi + ui*vr)
+            re += ur[i] * vr[i] - ui[i] * vi[i];
+            im += ur[i] * vi[i] + ui[i] * vr[i];
+        }
+        (re, im)
+    };
+
+    // Helper: complex axpy y += alpha * x
+    let axpy = |yr: &mut [f64], yi: &mut [f64], xr: &[f64], xi: &[f64], alpha_re: f64, alpha_im: f64| {
+        for i in 0..n {
+            // (alpha_re + i*alpha_im) * (xr + i*xi) = (alpha_re*xr - alpha_im*xi) + i*(alpha_re*xi + alpha_im*xr)
+            let dr = alpha_re * xr[i] - alpha_im * xi[i];
+            let di = alpha_re * xi[i] + alpha_im * xr[i];
+            yr[i] += dr;
+            yi[i] += di;
+        }
+    };
+
+    // r0 = b - A*x0
+    let mut r_re = vec![0.0f64; n];
+    let mut r_im = vec![0.0f64; n];
+    let mut ap_re = vec![0.0f64; n];
+    let mut ap_im = vec![0.0f64; n];
+    a.spmv_into(x_re, x_im, &mut ap_re, &mut ap_im);
+    for i in 0..n {
+        r_re[i] = b_re[i] - ap_re[i];
+        r_im[i] = b_im[i] - ap_im[i];
+    }
+
+    let mut p_re = r_re.clone();
+    let mut p_im = r_im.clone();
+
+    let mut rs_old = dot(&r_re, &r_im, &r_re, &r_im);
+    let norm_b = dot(b_re, b_im, b_re, b_im);
+    let tol_sq = (tol * tol).max(1e-32) * (norm_b.0 + norm_b.1).max(1.0);
+
+    for iter in 0..max_iter {
+        // Check convergence
+        let rs_norm_sq = rs_old.0 * rs_old.0 + rs_old.1 * rs_old.1;
+        if rs_norm_sq <= tol_sq {
+            // Copy result back
+            x_re.copy_from_slice(&p_re);
+            x_im.copy_from_slice(&p_im);
+            return Ok((iter, rs_norm_sq.sqrt()));
+        }
+
+        // alpha_k = (r_k, r_k) / (p_k, A*p_k)
+        a.spmv_into(&p_re, &p_im, &mut ap_re, &mut ap_im);
+        let pap = dot(&p_re, &p_im, &ap_re, &ap_im);
+        let pap_norm_sq = pap.0 * pap.0 + pap.1 * pap.1;
+        if pap_norm_sq < 1e-64 {
+            return Err("CG breakdown: (p, A*p) is near zero".to_string());
+        }
+        // alpha = rs_old / pap = (rs_old_re + i*rs_old_im) / (pap_re + i*pap_im)
+        // = (rs_old_re + i*rs_old_im) * (pap_re - i*pap_im) / |pap|^2
+        let alpha_re = (rs_old.0 * pap.0 + rs_old.1 * pap.1) / pap_norm_sq;
+        let alpha_im = (rs_old.1 * pap.0 - rs_old.0 * pap.1) / pap_norm_sq;
+
+        // x_{k+1} = x_k + alpha_k * p_k
+        axpy(x_re, x_im, &p_re, &p_im, alpha_re, alpha_im);
+
+        // r_{k+1} = r_k - alpha_k * A*p_k
+        axpy(&mut r_re, &mut r_im, &ap_re, &ap_im, -alpha_re, -alpha_im);
+
+        let rs_new = dot(&r_re, &r_im, &r_re, &r_im);
+        let beta_norm_sq = rs_new.0 * rs_new.0 + rs_new.1 * rs_new.1;
+        if beta_norm_sq < 1e-64 {
+            return Ok((iter + 1, beta_norm_sq.sqrt()));
+        }
+        // beta_k = (r_{k+1}, r_{k+1}) / (r_k, r_k)
+        let beta_re = (rs_new.0 * rs_old.0 + rs_new.1 * rs_old.1) / (rs_old.0 * rs_old.0 + rs_old.1 * rs_old.1);
+        let beta_im = (rs_new.1 * rs_old.0 - rs_new.0 * rs_old.1) / (rs_old.0 * rs_old.0 + rs_old.1 * rs_old.1);
+
+        // p_{k+1} = r_{k+1} + beta_k * p_k
+        let p_old_re = p_re.clone();
+        let p_old_im = p_im.clone();
+        for i in 0..n {
+            p_re[i] = r_re[i] + beta_re * p_old_re[i] - beta_im * p_old_im[i];
+            p_im[i] = r_im[i] + beta_re * p_old_im[i] + beta_im * p_old_re[i];
+        }
+
+        rs_old = rs_new;
+    }
+
+    let rs_norm_sq = rs_old.0 * rs_old.0 + rs_old.1 * rs_old.1;
+    Err(format!("CG did not converge in {} iterations (residual={:.3e})", max_iter, rs_norm_sq.sqrt()))
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Extract the real part of a `ComplexCsr` as a linlvo CSR matrix.

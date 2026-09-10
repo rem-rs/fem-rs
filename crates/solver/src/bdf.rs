@@ -9,7 +9,8 @@
 //!
 //! 1. **Predict**: `ẑ ← P(z)` (Pascal triangle matrix)
 //! 2. **Evaluate**: `f(t+h, ẑ₀)`
-//! 3. **Correct**: solve `(I − h·αₖ·J)·δ = h·f − ẑ₁`, then `z⁺ = ẑ + l·δ`
+//! 3. **Correct**: solve `(l1·I − h·J)·δ = h·f − ẑ₁` where `l1 = L_COEFFS[k][1]`,
+//!    then `z⁺ = ẑ + l·δ`
 //!
 //! Coefficients `αₖ` and correction vector `l` depend on the current order `k`.
 
@@ -200,7 +201,6 @@ impl BdfIntegrator {
         let k = state.order;
         let dt = state.dt;
         let n = state.n_vars();
-        let alpha_k = BDF_ALPHA[k];
         let tnp1 = t + dt;
 
         // ── 1. Predict: ẑ[i] = Σⱼ P[i][j] · z[j] ──────────────────────────
@@ -220,10 +220,14 @@ impl BdfIntegrator {
             .collect();
 
         // ── 2. Newton correction on δ ──────────────────────────────────────
-        // Solve G(δ) = δ - h·α·f(t+h, ẑ₀ + δ) + ẑ₁ = 0
-        // with Newton: (I - h·α·J) Δδ = -G(δ)
+        // Solve G(δ) = l1·δ - h·f(t+h, ẑ₀ + δ) + ẑ₁ = 0
+        // with Newton: (l1·I − h·J) Δδ = −G(δ)
+        // where l1 = L_COEFFS[k][1] = 1/α_k (the Nordsieck correction weight
+        // for the first derivative).  Note: for k=1, l1=1 so this reduces
+        // to the standard form; for k≥2 the l1 factor is required.
         let z0_pred = &zp_pred[0];
         let z1_curr = &zp_pred[1];
+        let l1 = L_COEFFS[k][1];
 
         let mut delta = vec![0.0; n];
         let mut y = z0_pred.to_vec(); // y = ẑ₀ + δ
@@ -234,10 +238,10 @@ impl BdfIntegrator {
             let mut fy = vec![0.0; n];
             rhs(tnp1, &y, &mut fy);
 
-            // Compute F(δ) = δ - h*α*f(y) + ẑ₁
+            // Compute F(δ) = l1·δ − h·f(y) + ẑ₁
             let mut norm_f = 0.0;
             for i in 0..n {
-                let val = delta[i] - dt * alpha_k * fy[i] + z1_curr[i];
+                let val = l1 * delta[i] - dt * fy[i] + z1_curr[i];
                 let scale = newton.atol + newton.rtol * y[i].abs().max(1e-15);
                 norm_f += (val / scale).powi(2);
             }
@@ -253,13 +257,13 @@ impl BdfIntegrator {
                 jac = Some(jac_fn(tnp1, &y));
             }
 
-            // Solve (I - h*α*J) Δδ = -F(δ) = -δ + h*α*f(y) - ẑ₁
+            // Solve (l1·I − h·J) Δδ = −F(δ) = −l1·δ + h·f(y) − ẑ₁
             let mut rhs_lin = vec![0.0; n];
             for i in 0..n {
-                rhs_lin[i] = -delta[i] + dt * alpha_k * fy[i] - z1_curr[i];
+                rhs_lin[i] = -l1 * delta[i] + dt * fy[i] - z1_curr[i];
             }
             let jac = jac.as_ref().unwrap();
-            let sys = build_identity_minus_dt_jac_scaled(jac, 1.0, dt * alpha_k);
+            let sys = build_identity_minus_dt_jac_scaled(jac, l1, dt);
             let mut ddelta = vec![0.0; n];
             let cfg = SolverConfig {
                 rtol: 1e-10,

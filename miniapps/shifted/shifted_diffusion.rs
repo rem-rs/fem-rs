@@ -17,9 +17,6 @@
 //!   SBM integrators do not discriminate faces per level set yet.
 //! * The analytic distance vector (`Dist_Vector_Coefficient`) sets D = 0 at
 //!   the (measure-zero) circle centre where the radial direction is undefined.
-//! * The PDE-filtered level-set field is projected onto the solution space by
-//!   explicit nodal averaging because `GridFunction::get_value` (via
-//!   `Mesh::locate`/findpts) currently mis-evaluates (fem-rs core issue).
 //!
 //! Sample runs:
 //!   cargo run --release --example shifted_diffusion -- -rs 2 -o 2 -lst 2 -no-vis
@@ -160,42 +157,6 @@ impl SaveMesh for Mesh<3> {
     }
 }
 
-/// Quantised 3-D key for coordinate-table lookups (DOF coordinates are exact
-/// on the shared mesh, so a 1e-9 rounding is unambiguous).
-fn quant_key(x: &[f64]) -> [i64; 3] {
-    let q = |v: f64| (v * 1e9).round() as i64;
-    [q(x[0]), q(x[1]), q(if x.len() > 2 { x[2] } else { 0.0 })]
-}
-
-/// `GridFunction::ProjectDiscCoefficient(ARITHMETIC)` of `gf` onto `space`:
-/// evaluate `gf` at the space's element-DOF reference points and average the
-/// contributions per global DOF.  (`gf` may live on a different-order space
-/// of the same mesh; used to move the order-2 filter output onto the
-/// solution space because `GridFunction::get_value`/`Mesh::locate`
-/// currently mis-evaluate.)
-fn project_disc_nodal<const D: usize>(
-    mesh: &Mesh<D>,
-    space: &H1Space<Mesh<D>>,
-    order: u8,
-    gf: &GridFunction<'_, H1Space<Mesh<D>>>,
-) -> Vec<f64> {
-    let n = space.n_dofs();
-    let mut out = vec![0.0_f64; n];
-    let mut cnt = vec![0.0_f64; n];
-    for e in mesh.elem_iter() {
-        let coords = mesh.element_type(e).ref_elem(order).dof_coords();
-        let edofs = space.element_dofs(e);
-        for (i, xi) in coords.iter().enumerate() {
-            out[edofs[i] as usize] += gf.evaluate_at_element(e, xi);
-            cnt[edofs[i] as usize] += 1.0;
-        }
-    }
-    for (v, c) in out.iter_mut().zip(cnt.iter()) {
-        *v /= *c;
-    }
-    out
-}
-
 fn main() {
     let args = parse_args();
     let mfem = read_mfem_file(&args.mesh_file)
@@ -254,8 +215,7 @@ where
     // level sets; plain projection for the Neumann level set.  The filter
     // runs on an internal order-2 H1 space which is then projected onto the
     // solution space (PDEFilter::Filter -> ffield.ProjectDiscCoefficient);
-    // implemented here as explicit nodal averaging over the element DOF
-    // points (see module docs for the get_value caveat).
+    // implemented here by evaluating the filtered field at the solution DOFs.
     // Comparison aid: RUST_ANALYTIC_LS=1 skips the PDE filter (analytic
     // +-1 marking, matching the serial C++ harness).
     let analytic_ls = std::env::var("RUST_ANALYTIC_LS").is_ok();
@@ -266,9 +226,16 @@ where
         let n2 = H1Space::<Mesh<D>>::new(mesh.clone(), 2).n_dofs();
         let mut filtered = vec![0.0_f64; n2];
         filter.filter_coeff(Box::new(FnDist(ls_fn)), &mut filtered);
-        let fs2 = H1Space::new(mesh.clone(), 2);
-        let gf2 = GridFunction::new(&fs2, filtered);
-        project_disc_nodal(&mesh, &space, order, &gf2)
+        let fs2 = std::sync::Arc::new(H1Space::new(mesh.clone(), 2));
+        let dofs2 = std::sync::Arc::new(filtered);
+        let dm = space.dof_manager();
+        (0..space.n_dofs() as u32)
+            .map(|dof| {
+                let x = dm.dof_coord(dof);
+                let gf = GridFunction::new(fs2.as_ref(), (*dofs2).clone());
+                gf.get_value(&x).unwrap_or(0.0)
+            })
+            .collect()
     } else {
         space.interpolate(&nl_fn).as_slice().to_vec()
     };
@@ -308,9 +275,6 @@ where
     } else {
         // Discrete distance vector via the heat method on the filtered combo
         // level set (MFEM: HeatDistanceSolver(2 dx²).ComputeVectorDistance).
-        // The filtered field is projected onto the solution space by nodal
-        // averaging and handed to the solver through a quantised coordinate
-        // lookup table (get_value/locate workaround).
         let mut filter: PDEFilter<Mesh<D>> = PDEFilter::new(mesh.clone(), 2.0 * dx);
         let n2 = H1Space::<Mesh<D>>::new(mesh.clone(), 2).n_dofs();
         let mut filtered = vec![0.0_f64; n2];
@@ -329,18 +293,12 @@ where
             v.expect("combo level set requires at least one level set")
         };
         filter.filter_coeff(Box::new(FnDist(combo)), &mut filtered);
-        let fs2 = H1Space::new(mesh.clone(), 2);
-        let gf2 = GridFunction::new(&fs2, filtered);
-        let proj_dofs = project_disc_nodal(&mesh, &space, order, &gf2);
-
-        let dm = space.dof_manager();
-        let mut table: std::collections::HashMap<[i64; 3], f64> =
-            std::collections::HashMap::new();
-        for dof in 0..space.n_dofs() as u32 {
-            let x = dm.dof_coord(dof);
-            table.insert(quant_key(x), proj_dofs[dof as usize]);
-        }
-        let ls_filt = move |x: &[f64]| *table.get(&quant_key(x)).unwrap_or(&0.0);
+        let fs2 = std::sync::Arc::new(H1Space::new(mesh.clone(), 2));
+        let dofs2 = std::sync::Arc::new(filtered);
+        let ls_filt = move |x: &[f64]| {
+            let gf = GridFunction::new(fs2.as_ref(), (*dofs2).clone());
+            gf.get_value(x).unwrap_or(0.0)
+        };
 
         let space_v = VectorH1Space::new(mesh.clone(), order, dim as u8);
         let mut solver = HeatDistanceSolver::new(2.0 * dx * dx);
@@ -560,7 +518,7 @@ where
         max_iter: 500,
         ..Default::default()
     };
-    let mut res = match solve_amg_gmres(&a, &b, &mut xx, &AmgConfig::default(), 50, &cfg) {
+    let res = match solve_amg_gmres(&a, &b, &mut xx, &AmgConfig::default(), 50, &cfg) {
         Ok(r) => r,
         Err(e) => {
             // Jacobi-preconditioned GMRES fallback (the AMG hierarchy can

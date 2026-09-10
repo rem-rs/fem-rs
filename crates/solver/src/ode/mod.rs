@@ -21,7 +21,7 @@ pub mod symplectic;
 pub mod traits;
 pub mod complex_cn;
 
-pub use explicit::{ForwardEuler, Rk4};
+pub use explicit::{ForwardEuler, Rk3Ssp, Rk4};
 pub use imex::{
     ImexArk3, ImexDirkRk3, ImexEuler, ImexExpImplEuler, ImexRk2_222, ImexRk2_232, ImexRk3,
     ImexSsp2, ImexTimeStepper,

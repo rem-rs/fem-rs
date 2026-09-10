@@ -1,6 +1,7 @@
 //! Miscellaneous missing integrators.
 use crate::integrator::{BilinearIntegrator, QpData};
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
+use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 use fem_linalg::dense::CholeskyFactors;
 
 pub struct VectorDivergenceIntegrator<C: ScalarCoeff = f64> {
@@ -203,18 +204,123 @@ impl<C: ScalarCoeff> BilinearIntegrator for NonconservativeDGTraceIntegrator<C> 
     }
 }
 
-pub struct MixedWeakGradDotIntegrator;
+/// Bilinear integrator for the mixed weak grad-dot operator `(v · u)(∇·w)`.
+///
+/// `v` is a vector coefficient (typically `-alpha * velocity_profile`).
+/// Used in the multidomain_rt miniapp for the convection term `-α∇(v·p)`.
+///
+/// At a quadrature point:
+///   K_ij += w · (v · phi_j) · div_i
+pub struct MixedWeakGradDotIntegrator<V: VectorCoeff> {
+    pub velocity: V,
+}
 
-impl BilinearIntegrator for MixedWeakGradDotIntegrator {
-    fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
+impl<V: VectorCoeff> VectorBilinearIntegrator for MixedWeakGradDotIntegrator<V> {
+    fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
         let n = qp.n_dofs;
         let dim = qp.dim;
+        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
         let w = qp.weight;
+        let mut v = vec![0.0_f64; dim];
+        self.velocity.eval(&ctx, &mut v);
         for i in 0..n {
+            let di = qp.div[i];
             for j in 0..n {
                 let mut dot = 0.0;
-                for c in 0..dim { dot += qp.grad_phys[i * dim + c] * qp.phi[j]; }
-                k_elem[i * n + j] += w * dot;
+                for c in 0..dim {
+                    dot += v[c] * qp.phi_vec[j * dim + c];
+                }
+                k_elem[i * n + j] += w * dot * di;
+            }
+        }
+    }
+}
+
+// ─── MixedWeakCurlCrossIntegrator (H(curl) convection) ──────────────────────
+//
+// Weak form: ∫ (v × u) · (∇ × w) dx
+//
+// This is the weak form of ∇×(v×u) after integration by parts.
+// Used in the multidomain_nd miniapp for the convection term α∇×(v×H).
+//
+// At a quadrature point:
+//   K_ij += w · (v × phi_j) · curl_i
+//
+// where v is the vector coefficient (already scaled by alpha),
+// phi_j is basis function j (vector), and curl_i is the curl of basis function i.
+
+/// Bilinear integrator for the mixed weak curl-cross operator `(v × u)·(∇ × w)`.
+///
+/// `v` is a vector coefficient (typically `alpha * velocity_profile`).
+pub struct MixedWeakCurlCrossIntegrator<V: VectorCoeff> {
+    pub velocity: V,
+}
+
+impl<V: VectorCoeff> VectorBilinearIntegrator for MixedWeakCurlCrossIntegrator<V> {
+    fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
+        let n = qp.n_dofs;
+        let dim = qp.dim;
+        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
+        let w = qp.weight;
+        let mut v = vec![0.0_f64; dim];
+        self.velocity.eval(&ctx, &mut v);
+
+        if dim == 2 || qp.is_surface {
+            // 2-D: scalar curl, phi_j is a 2-vector
+            // (v × phi_j) in 2D = v[0]*phi_j[1] - v[1]*phi_j[0] (scalar cross product)
+            // curl_i is scalar
+            for i in 0..n {
+                let ci = qp.curl[i];
+                for j in 0..n {
+                    let cross = v[0] * qp.phi_vec[j * dim + 1] - v[1] * qp.phi_vec[j * dim];
+                    k_elem[i * n + j] += w * cross * ci;
+                }
+            }
+        } else {
+            // 3-D: vector curl, phi_j is a 3-vector, curl_i is a 3-vector
+            // (v × phi_j) · curl_i = dot(cross(v, phi_j), curl_i)
+            for i in 0..n {
+                let c_i = [qp.curl[i * 3], qp.curl[i * 3 + 1], qp.curl[i * 3 + 2]];
+                for j in 0..n {
+                    let phi_j = [qp.phi_vec[j * 3], qp.phi_vec[j * 3 + 1], qp.phi_vec[j * 3 + 2]];
+                    let cross = [
+                        v[1] * phi_j[2] - v[2] * phi_j[1],
+                        v[2] * phi_j[0] - v[0] * phi_j[2],
+                        v[0] * phi_j[1] - v[1] * phi_j[0],
+                    ];
+                    k_elem[i * n + j] += w * (cross[0] * c_i[0] + cross[1] * c_i[1] + cross[2] * c_i[2]);
+                }
+            }
+        }
+    }
+}
+
+// ─── DivDivIntegrator (H(div) diffusion) ───────────────────────────────────
+//
+// Weak form: ∫ κ (∇·u) (∇·v) dx
+//
+// Used in the multidomain_rt miniapp for the diffusion term ∇(κ∇·p).
+// The coefficient `kappa` is typically passed as `-kappa` to match the
+// sign convention in the weak form after integration by parts.
+//
+// At a quadrature point:
+//   K_ij += w · kappa · div_i · div_j
+
+/// Bilinear integrator for the div-div operator `κ (∇·u)(∇·v)`.
+pub struct DivDivIntegrator<C: ScalarCoeff = f64> {
+    pub kappa: C,
+}
+
+impl<C: ScalarCoeff> VectorBilinearIntegrator for DivDivIntegrator<C> {
+    fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
+        let n = qp.n_dofs;
+        let dim = qp.dim;
+        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
+        let w = qp.weight * self.kappa.eval(&ctx);
+        for i in 0..n {
+            let di = qp.div[i];
+            for j in 0..n {
+                k_elem[i * n + j] += w * di * qp.div[j];
             }
         }
     }

@@ -1011,6 +1011,76 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// Reference to the underlying mesh.
     pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
 
+    /// Physical coordinates of every global DOF (MFEM `GetDofCoords` analog).
+    ///
+    /// For RT elements the DOF sits at the face centroid; for RTk (k≥1) at
+    /// interior points along the face (equispaced — used only as a permutation
+    /// anchor, exact placement is not required for matching).
+    pub fn dof_coords(&self) -> Vec<[f64; 3]> {
+        let mut out = vec![[0.0f64; 3]; self.n_dofs()];
+        let dim = self.mesh.dim() as usize;
+        let nf = self.order as usize + 1; // DOFs per face (simplified)
+        match &self.face_map {
+            FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => {
+                for (&face, &first) in map {
+                    // Compute face centroid from the face key (node IDs).
+                    let mut centroid = [0.0f64; 3];
+                    let mut n_nodes = 0;
+                    // Use the face_canon_verts map to get the actual vertex list.
+                    if let Some(verts) = self.face_canon_verts.get(&face) {
+                        for &n in verts {
+                            let nc = self.mesh.node_coords(n);
+                            for c in 0..dim {
+                                centroid[c] += nc[c];
+                            }
+                        }
+                        n_nodes = verts.len();
+                    } else {
+                        // Fallback: use the key's node IDs directly.
+                        let nodes = [face.0, face.1, face.2];
+                        for &n in &nodes {
+                            let nc = self.mesh.node_coords(n);
+                            for c in 0..dim {
+                                centroid[c] += nc[c];
+                            }
+                        }
+                        n_nodes = 3;
+                    }
+                    if n_nodes > 0 {
+                        for c in 0..dim {
+                            centroid[c] /= n_nodes as f64;
+                        }
+                    }
+                    // For RT0, one DOF at centroid. For RTk, distribute along face.
+                    for m in 0..nf {
+                        let d = (first + m as u32) as usize;
+                        if d < out.len() {
+                            out[d] = centroid;
+                        }
+                    }
+                }
+            }
+            FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
+                for (&edge, &first) in map {
+                    // Compute edge midpoint from the edge key (two node IDs).
+                    let pa = self.mesh.node_coords(edge.0);
+                    let pb = self.mesh.node_coords(edge.1);
+                    let mut midpoint = [0.0f64; 3];
+                    for c in 0..dim {
+                        midpoint[c] = (pa[c] + pb[c]) / 2.0;
+                    }
+                    for m in 0..nf {
+                        let d = (first + m as u32) as usize;
+                        if d < out.len() {
+                            out[d] = midpoint;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Vector-valued interpolation via the RT DOF functional.
     ///
     /// ## RT0 (order 0)

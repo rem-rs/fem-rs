@@ -477,7 +477,30 @@ pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> 
 ///
 /// Supports 2D and 3D meshes with uniform or mixed element types.
 /// Uses 1-based node indexing (MFEM convention).
+///
+/// For 3D meshes containing tetrahedra, the mesh is cloned and normalized
+/// with `mark_tet_mesh_for_refinement` before writing, so that programmatically
+/// created meshes round-trip with the same canonical tet orientation that
+/// `read_mfem` produces (longest edge = (v0,v1)).
 pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
+    // D2: tet io round-trip orientation normalization.
+    // read_mfem applies mark_tet_mesh_for_refinement (MarkTetMeshForRefinement)
+    // on read to canonicalize tet vertex order.  write_mfem must apply the
+    // same normalization so meshes created programmatically round-trip.
+    let needs_normalization = mesh_3d.map_or(false, has_tet4);
+    let tet_normalized: Option<Mesh<3>> = if needs_normalization {
+        let mut clone = (*mesh_3d.unwrap()).clone();
+        fem_mesh::mark_tet_mesh_for_refinement(&mut clone);
+        Some(clone)
+    } else {
+        None
+    };
+    // If the 3D mesh contained tets, use the normalized clone; otherwise
+    // fall back to the original mesh reference.
+    let mesh_3d: Option<&Mesh<3>> = match tet_normalized.as_ref() {
+        Some(n) => Some(n),
+        None => mesh_3d,
+    };
     let (dim, coords, conn, elem_tags, elem_type, face_conn, face_tags, elem_types_opt)
         = if let Some(m3) = mesh_3d {
             (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type,
@@ -570,6 +593,15 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
         writeln!(writer)?;
     }
     Ok(())
+}
+
+/// Returns `true` if the 3D mesh contains any Tet4 elements (uniform or mixed).
+fn has_tet4(mesh: &Mesh<3>) -> bool {
+    if let Some(ref etypes) = mesh.elem_types {
+        etypes.iter().any(|et| *et == ElementType::Tet4)
+    } else {
+        mesh.elem_type == ElementType::Tet4
+    }
 }
 
 /// Write a mesh to MFEM `.mesh` file on disk.

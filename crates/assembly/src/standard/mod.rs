@@ -235,4 +235,5 @@ pub use misc_integrators::{
     VectorDivergenceIntegrator, VectorConvectionNLFIntegrator,
     WhiteGaussianNoiseDomainLFIntegrator, NormalTraceJumpIntegrator,
     NonconservativeDGTraceIntegrator, MixedWeakGradDotIntegrator,
+    MixedWeakCurlCrossIntegrator, DivDivIntegrator,
 };

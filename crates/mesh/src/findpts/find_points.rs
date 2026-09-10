@@ -31,8 +31,6 @@ pub struct LocatedPoint<const D: usize> {
     /// Barycentric coordinates (length `D + 1`).
     pub barycentric: Vec<f64>,
 }
-
-/// Options for FindPoints queries.
 #[derive(Debug, Clone)]
 pub struct FindPointsOptions {
     /// Convergence tolerance for Newton iteration (physical-space residual).

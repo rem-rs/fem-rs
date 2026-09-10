@@ -94,20 +94,20 @@ miniapps/
 │                                -only miniapp, 全场数值对照不可行
 │                                (mfem49 串行), 对照走分段 C++ harness)
 ├── multidomain/             ← 对应 miniapps/multidomain/ (H1 版串行
-│   └── multidomain.rs          裁剪; ParSubMesh→extract_submesh、
-│                                TransferMap→界面 dof 坐标匹配; 结构量
-│                                (NE/NV/dofs/ess 数) 与 C++ 全一致,
+│   ├── multidomain.rs          裁剪; ParSubMesh→extract_submesh、
+│   ├── multidomain_nd.rs       TransferMap→界面 dof 坐标匹配; 结构量
+│   └── multidomain_rt.rs       (NE/NV/dofs/ess 数) 与 C++ 全一致,
 │                                block 场终态相对差 7e-6; cylinder 案
 │                                例促成 D1 修复(曲线 hex 细化顶点吸附,
 │                                480/480 逐角点对照), 待流水线复验;
-│                                _nd/_rt 版未做)
+│                                _nd/_rt 版已添加(H(curl)/H(div) 变体)
 ├── shifted/                 ← 对应 miniapps/shifted/ (SBM3 内核:
 │   ├── shifted_distance.rs     sbm3_dirichlet/neumann 积分器 1:1,
 │   ├── shifted_diffusion.rs    Nitsche patch test 3D 4e-13;
 │   └── shifted_extrapolate.rs  distance/diffusion/extrapolate 串行
 │                                驱动, C++ harness lst=1 解范数 2e-5;
 │                                -vis/ParaView 裁剪; D6 locate 缺陷
-│                                的 workaround 已注明)
+│                                的 workaround 已移除)
 ├── hooke/                   ← 对应 miniapps/hooke/ (串行 1:1;
 │   └── hooke.rs                NeoHookean AD 材料 + matrix-free
 │                                弹性算子; C++ harness Newton 序列
@@ -121,6 +121,9 @@ miniapps/
 │                                dof checksum 逐位; 根因=linlvo AMG
 │                                默认 V-cycle 非对称, 换 RS+SGS 对齐
 │                                hypre 配置)
+├── solvers/plor_solvers.rs  ← LOR 求解器 miniapp (H1 空间串行
+│                                版本; PCG + LOR-AMG 预条件; 2D
+│                                inline-quad.mesh 默认)
 ├── adjoint/                 ← 对应 miniapps/adjoint/
 │   ├── adjoint_cvodes_roberts.rs ← Robertson 伴随敏感性 (自研
 │   │                              Nordsieck BDF 对位 CVODES 语义,
@@ -129,7 +132,26 @@ miniapps/
 │   └── adjoint_advection_diffusion.rs ← 串行子集; -fd 1 自洽
 │                                  (伴随 vs 有限差分 5.8e-7/1.2e-7)
 ├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
-├── fluids/                  ← 对应 miniapps/fluids/ (未开始)
+├── dpg/                     ← 对应 miniapps/dpg/ (真 ultraweak DPG:
+│   ├── dpg_poisson_2d.rs       ComplexDPGWeakForm 复块内核 + 骨架
+│   ├── dpg_acoustics_2d.rs     空间/Hermitian 复 Cholesky;
+│   ├── dpg_maxwell_2d.rs       poisson_2d 真 UW-DPG L² 与 C++ 四位一致;
+│   ├── dpg_helmholtz_1d.rs     acoustics_2d rnum=4 4×4/8×8: 1.434/1.364
+│   ├── dpg_acoustics_3d.rs     vs C++ 1.429/1.382 (0.4%/1.3%), PCG 24/33
+│   └── dpg_maxwell_3d.rs       vs 24/33; maxwell_2d 真 UW-DPG 已替换
+│                                (4×4/8×8: 1.549/1.454 vs C++ 0.882/0.475,
+│                                PCG 41/60 vs 43/81; 幅值/块结构 A00、A11
+│                                与 C++ 逐位一致, 内面 trace 法向约定差
+│                                待修); helmholtz_1d 真 1D UW-DPG 重写
+│                                (O(h) 收敛 u/σ, k=0/5 稳定); 3D 两个仍
+│                                为占位 (缺 3D ND-trace 骨架基)
+├── fluids/schrodinger_flow.rs ← 不可压 Schrödinger 流 (ISF) 串行 1:1:
+│                                CN 复 GMRES + 逐 DOF 归一化 + gauge 投影
+│                                (OrthoSolver); leapfrog/jet 对照 C++
+│                                (B r,r) 序列与 ‖ψ‖²/lapl ~1e-14;
+│                                内核缺口绕过: make_periodic 几何畸变
+│                                (局部张量 H¹) + solve_gmres_complex
+│                                Givens 实数化发散 (局部标准复 GMRES)
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)

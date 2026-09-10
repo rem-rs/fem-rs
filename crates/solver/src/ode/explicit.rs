@@ -380,6 +380,54 @@ impl AdamsBashforthMoulton {
     }
 }
 
+// ─── RK3SSP (Strong Stability Preserving RK3, Shu-Osher) ───────────────────
+//
+// 3rd-order strong stability preserving Runge–Kutta (SSP-RK3, also called
+// Heun's 3rd order or SSP(3,3)). Used in the multidomain miniapps for time
+// integration of the convection-diffusion ODE system.
+//
+// Stages:
+//   u^(1) = u^n + dt · f(t^n, u^n)
+//   u^(2) = 3/4 · u^n + 1/4 · u^(1) + 1/4 · dt · f(t^n + dt, u^(1))
+//   u^{n+1} = 1/3 · u^n + 2/3 · u^(2) + 2/3 · dt · f(t^n + dt/2, u^(2))
+//
+// SSP coefficient: C = 1 (optimal for 3-stage 3rd-order RK).
+
+/// 3rd-order strong stability preserving Runge–Kutta (SSP-RK3).
+pub struct Rk3Ssp;
+
+impl TimeStepper for Rk3Ssp {
+    fn step<F>(&self, t: f64, dt: f64, u: &mut [f64], rhs: F)
+    where
+        F: Fn(f64, &[f64], &mut [f64]),
+    {
+        let n = u.len();
+        let mut k1 = vec![0.0_f64; n];
+        let mut k2 = vec![0.0_f64; n];
+        let mut k3 = vec![0.0_f64; n];
+        let mut tmp = vec![0.0_f64; n];
+
+        // Stage 1: u^(1) = u^n + dt · f(t^n, u^n)
+        rhs(t, u, &mut k1);
+        for i in 0..n {
+            tmp[i] = u[i] + dt * k1[i];
+        }
+
+        // Stage 2: u^(2) = 3/4 · u^n + 1/4 · u^(1) + 1/4 · dt · f(t^n + dt, u^(1))
+        rhs(t + dt, &tmp, &mut k2);
+        for i in 0..n {
+            tmp[i] = 0.75 * u[i] + 0.25 * tmp[i] + 0.25 * dt * k2[i];
+        }
+
+        // Stage 3: u^{n+1} = 1/3 · u^n + 2/3 · u^(2) + 2/3 · dt · f(t^n + dt/2, u^(2))
+        // Note: MFEM's RK3SSPSolver evaluates at t + dt/2 for the third stage
+        rhs(t + 0.5 * dt, &tmp, &mut k3);
+        for i in 0..n {
+            u[i] = (1.0 / 3.0) * u[i] + (2.0 / 3.0) * tmp[i] + (2.0 / 3.0) * dt * k3[i];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
