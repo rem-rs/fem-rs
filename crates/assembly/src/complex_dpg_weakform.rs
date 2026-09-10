@@ -30,7 +30,9 @@ use crate::dpg::dpg_basis::SkeletonSpace;
 use crate::dpg::dpg_integrators::{
     DpgBilinear2, DpgLinear2, DpgTraceBilinear2, FaceCtx, FaceVals, VolCtx,
 };
-use crate::dpg_weakform::{element_geo_at, face_geo_at, inv_transpose, invert_element_map};
+use crate::dpg_weakform::{
+    element_geo_at, face_geo_at, face_geo_nodes, inv_transpose, invert_element_map,
+};
 use crate::vector_assembler::geo_ref_elem_from_mesh;
 
 // Re-exported for user convenience.
@@ -85,6 +87,10 @@ enum TrialKind {
     /// H1-trace space (MFEM `H1_Trace_FECollection`) over the per-edge
     /// discontinuous Lagrange trace (RT-trace style).
     Trace { order: u8, continuous: bool },
+    /// 3-D vector (ND) trace space — MFEM `ND_Trace_FECollection(order, dim)`:
+    /// `order` DOFs per mesh edge (shared by every face meeting the edge)
+    /// plus face-interior DOFs (`p(p−1)` / `2p(p−1)` per triangle / quad).
+    TraceNd { order: u8 },
 }
 
 struct ComplexCondData {
@@ -325,6 +331,18 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         self.trial_kinds.len() - 1
     }
 
+    /// 3-D vector (ND) trace trial space (MFEM `ND_Trace_FECollection(order,
+    /// dim)` = `ND_FECollection(order, dim−1)` on the skeleton): edge dofs
+    /// shared across faces with MFEM orientation signs, face-interior dofs
+    /// face-private.
+    pub fn add_trial_trace_space_nd(&mut self, order: u8) -> usize {
+        assert!(self.dim == 3, "ND trace spaces are only wired for 3-D meshes");
+        self.trial_kinds.push(TrialKind::TraceNd { order });
+        self.trial_integs_r.push(Vec::new());
+        self.trial_integs_i.push(Vec::new());
+        self.trial_kinds.len() - 1
+    }
+
     /// Broken test space.
     pub fn add_test_space(&mut self, kind: VolKind, order: u8) -> usize {
         self.test_kinds.push((kind, order));
@@ -404,10 +422,10 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     /// `EnableStaticCondensation()`.
     pub fn enable_static_condensation(&mut self) {
         let exposed: Vec<usize> = (0..self.trial_kinds.len())
-            .filter(|&i| matches!(self.trial_kinds[i], TrialKind::Trace { .. }))
+            .filter(|&i| self.is_trace_block(i))
             .collect();
         let private: Vec<usize> = (0..self.trial_kinds.len())
-            .filter(|&i| matches!(self.trial_kinds[i], TrialKind::Volume { .. }))
+            .filter(|&i| !self.is_trace_block(i))
             .collect();
         assert!(!exposed.is_empty());
         self.cond = Some((exposed, private));
@@ -433,6 +451,9 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 }
                 TrialKind::Trace { order, continuous } => {
                     self.skeleton_of_sizes(*order, *continuous)
+                }
+                TrialKind::TraceNd { order } => {
+                    crate::dpg::dpg_basis::TraceSpace::new_nd(self.mesh.clone(), *order).n_dofs()
                 }
             })
             .collect()
@@ -475,9 +496,22 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         }
     }
 
+    /// ND vector trace space of trial block `b` (rebuilt on demand; cheap).
+    pub fn nd_trace(&self, b: usize) -> crate::dpg::dpg_basis::TraceSpace<M> {
+        match &self.trial_kinds[b] {
+            TrialKind::TraceNd { order } => {
+                crate::dpg::dpg_basis::TraceSpace::new_nd(self.mesh.clone(), *order)
+            }
+            _ => panic!("block {b} is not an ND trace space"),
+        }
+    }
+
     /// Whether trial block `b` is a trace space.
     pub fn is_trace_block(&self, b: usize) -> bool {
-        matches!(self.trial_kinds[b], TrialKind::Trace { .. })
+        matches!(
+            self.trial_kinds[b],
+            TrialKind::Trace { .. } | TrialKind::TraceNd { .. }
+        )
     }
 
     /// Physical point of face DOF `k` of skeleton face `f` (used for the
@@ -516,6 +550,31 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         x
     }
 
+    /// Per-position orientation signs (+1/-1) of trial block `b` on element
+    /// `e` in the `trial_element_vdofs` order (volume blocks: all +1; trace
+    /// blocks: the MFEM sign-encoded face-dof signs).  Converts global-basis
+    /// coefficients to element-local ones (and back, being an involution).
+    pub fn element_dof_signs(&self, b: usize, e: u32) -> Vec<f64> {
+        match &self.trial_kinds[b] {
+            TrialKind::Volume { .. } => {
+                let n = self.trial_element_vdofs(b, e).len();
+                vec![1.0; n]
+            }
+            TrialKind::Trace { .. } => {
+                // scalar fem-rs traces carry no orientation signs
+                let n = self.trial_element_vdofs(b, e).len();
+                vec![1.0; n]
+            }
+            TrialKind::TraceNd { order } => {
+                let tr = crate::dpg::dpg_basis::TraceSpace::new_nd(self.mesh.clone(), *order);
+                tr.element_trace_signed_dofs(e)
+                    .iter()
+                    .map(|&sd| if sd < 0 { -1.0 } else { 1.0 })
+                    .collect()
+            }
+        }
+    }
+
     /// Element vdofs of trial block `b` on element `e`.
     pub fn trial_element_vdofs(&self, b: usize, e: u32) -> Vec<usize> {
         let base = self.trial_offsets()[b];
@@ -531,6 +590,10 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                     crate::dpg::dpg_basis::SkeletonSpace::new(self.mesh.clone(), *order)
                 };
                 sk.element_dofs(e).iter().map(|&d| base + d).collect()
+            }
+            TrialKind::TraceNd { order } => {
+                let tr = crate::dpg::dpg_basis::TraceSpace::new_nd(self.mesh.clone(), *order);
+                tr.element_trace_dof_list(e).iter().map(|&d| base + d).collect()
             }
         }
     }
@@ -582,6 +645,17 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                     } else {
                         crate::dpg::dpg_basis::SkeletonSpace::new(mesh.clone(), *order)
                     })
+                }
+                _ => None,
+            })
+            .collect();
+        // ND vector trace spaces for `TraceNd` blocks (rebuilt once).
+        let nd_traces: Vec<Option<crate::dpg::dpg_basis::TraceSpace<M>>> = self
+            .trial_kinds
+            .iter()
+            .map(|k| match k {
+                TrialKind::TraceNd { order } => {
+                    Some(crate::dpg::dpg_basis::TraceSpace::new_nd(mesh.clone(), *order))
                 }
                 _ => None,
             })
@@ -651,6 +725,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                             .collect(),
                     )),
                     TrialKind::Trace { .. } => qp_trial.push(None),
+                    TrialKind::TraceNd { .. } => qp_trial.push(None),
                 }
             }
 
@@ -658,7 +733,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             for b in 0..nblocks {
                 let n = match &self.trial_kinds[b] {
                     TrialKind::Volume { dofs_per_elem, .. } => *dofs_per_elem,
-                    TrialKind::Trace { .. } => skeletons[b].as_ref().unwrap().element_dofs(e).len(),
+                    TrialKind::Trace { .. } => {
+                        skeletons[b].as_ref().unwrap().element_dofs(e).len()
+                    }
+                    TrialKind::TraceNd { .. } => {
+                        nd_traces[b].as_ref().unwrap().element_trace_dof_list(e).len()
+                    }
                 };
                 tr_offs.push(tr_offs.last().unwrap() + n);
             }
@@ -768,91 +848,197 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             let lfs = local_face_table(&nodes, dim);
             for (target, list) in [(&mut br_mat, &self.trace_integs_r), (&mut bi_mat, &self.trace_integs_i)] {
                 for (tbb, tb, integ) in list {
-                    let sk = skeletons[*tbb].as_ref().unwrap();
                     let nr = test_sizes[*tb];
                     let col_base = tr_offs[*tbb];
-                    for (li, lf) in lfs.iter().enumerate() {
-                        let fid = sk.elem_face_id(e, li);
-                        let nfd = sk.dofs_per_face(fid);
-                        let is_qf = if dim == 3 { sk.is_quad_face(fid) } else { false };
-                        let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if dim == 3 {
-                            if is_qf {
-                                (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                    if let TrialKind::TraceNd { order } = self.trial_kinds[*tbb] {
+                        // ── ND vector (3-D) trace path ─────────────────────
+                        // Face basis: MFEM `ND_Trace_FECollection` face
+                        // element, evaluated in the CANONICAL face
+                        // parametrisation (MFEM `GetFaceElement` +
+                        // `GetFaceElementTransformations`, the same face
+                        // transformation for both adjacent elements) and
+                        // covariantly mapped (MFEM `CalcVShape_ND`), with the
+                        // per-element outward-normal sign (`scale`, MFEM
+                        // TangentTraceIntegrator's Elem1/Elem2 ±1) and the
+                        // MFEM edge-orientation signs (`face_signed_dofs`,
+                        // `SparseMatrix::AddSubMatrix` signed-vdof decoding —
+                        // applied to the element columns before the normal
+                        // equations, which is algebraically identical).
+                        let tr = nd_traces[*tbb].as_ref().unwrap();
+                        let p_us = order as usize;
+                        for (li, lf) in lfs.iter().enumerate() {
+                            let fid = tr.elem_face_id(e, li);
+                            let is_qf = tr.is_quad_face(fid);
+                            let nfd = crate::dpg::dpg_basis::nd_face_dofs(p_us, is_qf);
+                            let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if is_qf {
+                                (
+                                    &face_rule_quad.as_ref().unwrap().0,
+                                    &face_rule_quad.as_ref().unwrap().1,
+                                )
                             } else {
-                                (&face_rule_tri.as_ref().unwrap().0, &face_rule_tri.as_ref().unwrap().1)
+                                (
+                                    &face_rule_tri.as_ref().unwrap().0,
+                                    &face_rule_tri.as_ref().unwrap().1,
+                                )
+                            };
+                            let ori = tr.elem_face_orientation(e, li);
+                            let scale = fem_space::dof_transformation::rt_trace_face_sign(ori);
+                            let signed = tr.face_signed_dofs(fid);
+                            let mut be = vec![0.0_f64; nr * nfd];
+                            for (q, fparam) in fpts.iter().enumerate() {
+                                let (xp, normal, measure) =
+                                    face_geo_nodes(&mesh, tr.face_nodes(fid), is_qf, fparam, dim);
+                                let lf_eff: Vec<usize> = if ori < 0 {
+                                    lf.iter().rev().copied().collect()
+                                } else {
+                                    lf.to_vec()
+                                };
+                                // For an ori<0 (reversed) face the element local face map is the
+                                // TRANSPOSE of the canonical map (x_local(a,b) = x_can(b,a)):
+                                // pass the transposed parameter so the test basis is
+                                // evaluated at the same physical point as the face
+                                // basis (MFEM Loc1/Loc2 in `SetAllIntPoints`).
+                                let fparam_e: Vec<f64> = if ori < 0 { vec![fparam[1], fparam[0]] } else { fparam.to_vec() };
+                                let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, &fparam_e);
+                                let xiref = invert_element_map(
+                                    &mesh,
+                                    simplex.as_ref(),
+                                    geo,
+                                    &geo_nodes,
+                                    &xp,
+                                    dim,
+                                    &xi0,
+                                );
+                                let (jac, det, _) = element_geo_at(
+                                    &mesh, simplex.as_ref(), geo, &geo_nodes, &xiref, dim,
+                                );
+                                let jit = inv_transpose(&jac, dim);
+                                let mut tv = VolVals::default();
+                                let (k, o) = &self.test_kinds[*tb];
+                                eval_vol_space(*k, *o, et, dim, &jac, det, &jit, &xiref, None, &mut tv);
+                                let fjac = crate::dpg::dpg_basis::face_jacobian_3d(tr, fid, fparam);
+                                let mut ref2d = vec![0.0_f64; 2 * nfd];
+                                crate::dpg::dpg_basis::eval_face_nd(p_us, is_qf, fparam, &mut ref2d);
+                                let mut vec_phi = vec![0.0_f64; 3 * nfd];
+                                for (j, &sd) in signed.iter().enumerate() {
+                                    let mut v = crate::dpg::dpg_basis::map_face_nd_to_phys(
+                                        &fjac,
+                                        &[ref2d[2 * j], ref2d[2 * j + 1]],
+                                    );
+                                    if sd < 0 {
+                                        v = [-v[0], -v[1], -v[2]];
+                                    }
+                                    vec_phi[3 * j..3 * j + 3].copy_from_slice(&v);
+                                }
+                                let ctx = FaceCtx {
+                                    ip_weight: fwts[q],
+                                    measure,
+                                    normal,
+                                    scale,
+                                    dim,
+                                    x: xp,
+                                };
+                                let fv = FaceVals { phi: Vec::new(), vec_phi };
+                                integ.assemble_trace2(&ctx, &fv, &tv, &mut be);
                             }
-                        } else {
-                            (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
-                        };
-                        // RT/trace face orientation: the element whose local
-                        // face direction agrees with the canonical (stored)
-                        // face direction gets `+1`, the reversed one `−1`
-                        // (MFEM `Elem1`/`Elem2` sign inside
-                        // `TraceIntegrator` / `TangentTraceIntegrator`,
-                        // composed with the Elem1-local face
-                        // parametrisation: with the canonical storage this
-                        // is exactly C++'s scale relative to the canonical
-                        // face basis/normal).
-                        let ori = sk.elem_face_orientation(e, li);
-                        let scale = fem_space::dof_transformation::rt_trace_face_sign(ori);
-                        let mut be = vec![0.0_f64; nr * nfd];
-                        for (q, fparam) in fpts.iter().enumerate() {
-                            let (xp, normal, measure) =
-                                face_geo_at(&mesh, sk, fid, fparam, dim);
-                            // Element-side reference coordinates of the
-                            // canonical face quadrature point: the face basis
-                            // is evaluated in the canonical (Elem1)
-                            // parametrisation for BOTH sides (MFEM
-                            // `GetFaceElement`), so the element test basis
-                            // must be evaluated at the same physical point —
-                            // start from the element's local face
-                            // parametrisation, reversed when the element's
-                            // local direction is opposite to the canonical,
-                            // and Newton-refine onto the exact inverse image
-                            // of `xp` (MFEM `FaceElementTransformations`
-                            // chaining).
-                            let lf_eff: Vec<usize> = if ori < 0 {
-                                lf.iter().rev().copied().collect()
-                            } else {
-                                lf.to_vec()
-                            };
-                            let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, fparam);
-                            let xiref = invert_element_map(
-                                &mesh,
-                                simplex.as_ref(),
-                                geo,
-                                &geo_nodes,
-                                &xp,
-                                dim,
-                                &xi0,
-                            );
-                            let (jac, det, _) = element_geo_at(
-                                &mesh, simplex.as_ref(), geo, &geo_nodes, &xiref, dim,
-                            );
-                            let jit = inv_transpose(&jac, dim);
-                            let mut tv = VolVals::default();
-                            let (k, o) = &self.test_kinds[*tb];
-                            eval_vol_space(*k, *o, et, dim, &jac, det, &jit, &xiref, None, &mut tv);
-                            let mut fphi = vec![0.0_f64; nfd];
-                            eval_face_lagrange(dim, is_qf, sk.order() as usize, fparam, &mut fphi);
-                            let ctx = FaceCtx {
-                                ip_weight: fwts[q],
-                                measure,
-                                normal,
-                                scale,
-                                dim,
-                                x: xp,
-                            };
-                            let fv = FaceVals::scalar(fphi);
-                            integ.assemble_trace2(&ctx, &fv, &tv, &mut be);
+                            let r0 = test_offsets[*tb];
+                            let coff: usize = (0..li)
+                                .map(|l2| {
+                                    let f2 = tr.elem_face_id(e, l2);
+                                    crate::dpg::dpg_basis::nd_face_dofs(p_us, tr.is_quad_face(f2))
+                                })
+                                .sum();
+                            for i in 0..nr {
+                                for j in 0..nfd {
+                                    target[(r0 + i) * n_tr + col_base + coff + j] += be[i * nfd + j];
+                                }
+                            }
                         }
-                        let r0 = test_offsets[*tb];
-                        let coff: usize = (0..li)
-                            .map(|l2| sk.dofs_per_face(sk.elem_face_id(e, l2)))
-                            .sum();
-                        for i in 0..nr {
-                            for j in 0..nfd {
-                                target[(r0 + i) * n_tr + col_base + coff + j] += be[i * nfd + j];
+                    } else {
+                        let sk = skeletons[*tbb].as_ref().unwrap();
+                        for (li, lf) in lfs.iter().enumerate() {
+                            let fid = sk.elem_face_id(e, li);
+                            let nfd = sk.dofs_per_face(fid);
+                            let is_qf = if dim == 3 { sk.is_quad_face(fid) } else { false };
+                            let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if dim == 3 {
+                                if is_qf {
+                                    (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                                } else {
+                                    (&face_rule_tri.as_ref().unwrap().0, &face_rule_tri.as_ref().unwrap().1)
+                                }
+                            } else {
+                                (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                            };
+                            // RT/trace face orientation: the element whose local
+                            // face direction agrees with the canonical (stored)
+                            // face direction gets `+1`, the reversed one `−1`
+                            // (MFEM `Elem1`/`Elem2` sign inside
+                            // `TraceIntegrator` / `TangentTraceIntegrator`,
+                            // composed with the Elem1-local face
+                            // parametrisation: with the canonical storage this
+                            // is exactly C++'s scale relative to the canonical
+                            // face basis/normal).
+                            let ori = sk.elem_face_orientation(e, li);
+                            let scale = fem_space::dof_transformation::rt_trace_face_sign(ori);
+                            let mut be = vec![0.0_f64; nr * nfd];
+                            for (q, fparam) in fpts.iter().enumerate() {
+                                let (xp, normal, measure) =
+                                    face_geo_at(&mesh, sk, fid, fparam, dim);
+                                // Element-side reference coordinates of the
+                                // canonical face quadrature point: the face basis
+                                // is evaluated in the canonical (Elem1)
+                                // parametrisation for BOTH sides (MFEM
+                                // `GetFaceElement`), so the element test basis
+                                // must be evaluated at the same physical point —
+                                // start from the element's local face
+                                // parametrisation, reversed when the element's
+                                // local direction is opposite to the canonical,
+                                // and Newton-refine onto the exact inverse image
+                                // of `xp` (MFEM `FaceElementTransformations`
+                                // chaining).
+                                let lf_eff: Vec<usize> = if ori < 0 {
+                                    lf.iter().rev().copied().collect()
+                                } else {
+                                    lf.to_vec()
+                                };
+                                let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, fparam);
+                                let xiref = invert_element_map(
+                                    &mesh,
+                                    simplex.as_ref(),
+                                    geo,
+                                    &geo_nodes,
+                                    &xp,
+                                    dim,
+                                    &xi0,
+                                );
+                                let (jac, det, _) = element_geo_at(
+                                    &mesh, simplex.as_ref(), geo, &geo_nodes, &xiref, dim,
+                                );
+                                let jit = inv_transpose(&jac, dim);
+                                let mut tv = VolVals::default();
+                                let (k, o) = &self.test_kinds[*tb];
+                                eval_vol_space(*k, *o, et, dim, &jac, det, &jit, &xiref, None, &mut tv);
+                                let mut fphi = vec![0.0_f64; nfd];
+                                eval_face_lagrange(dim, is_qf, sk.order() as usize, fparam, &mut fphi);
+                                let ctx = FaceCtx {
+                                    ip_weight: fwts[q],
+                                    measure,
+                                    normal,
+                                    scale,
+                                    dim,
+                                    x: xp,
+                                };
+                                let fv = FaceVals::scalar(fphi);
+                                integ.assemble_trace2(&ctx, &fv, &tv, &mut be);
+                            }
+                            let r0 = test_offsets[*tb];
+                            let coff: usize = (0..li)
+                                .map(|l2| sk.dofs_per_face(sk.elem_face_id(e, l2)))
+                                .sum();
+                            for i in 0..nr {
+                                for j in 0..nfd {
+                                    target[(r0 + i) * n_tr + col_base + coff + j] += be[i * nfd + j];
+                                }
                             }
                         }
                     }
@@ -1242,13 +1428,24 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     }
 
     /// `RecoverFEMSolution` for the stacked solution `[x_r; x_i]`; returns
-    /// `(x_r, x_i)` over the full trial layout.
+    /// `(x_r, x_i)` over the full trial layout.  With static condensation
+    /// `xs` is the condensed (exposed-block) solution and the private
+    /// (volume-block) dofs are back-solved element-wise.
     pub fn recover_fem_solution(&self, xs: &[f64]) -> (Vec<f64>, Vec<f64>) {
-        let n = self.size();
+        let n_exposed: usize = self
+            .cond_data
+            .as_ref()
+            .map(|cd| {
+                cd.exposed_blocks
+                    .iter()
+                    .map(|&b| self.trial_block_sizes()[b])
+                    .sum()
+            })
+            .unwrap_or_else(|| self.size());
         let (xr, xi) = unstack(xs);
-        assert_eq!(xr.len(), n);
-        let mut out_r = vec![0.0_f64; n];
-        let mut out_i = vec![0.0_f64; n];
+        assert_eq!(xr.len(), n_exposed);
+        let mut out_r = vec![0.0_f64; self.size()];
+        let mut out_i = vec![0.0_f64; self.size()];
         match &self.cond_data {
             Some(cd) => {
                 // `xs` is compact exposed-dof stacked [re; im]; scatter global.
@@ -1264,15 +1461,26 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 for e in 0..self.mesh.n_elements() as u32 {
                     let (lur, lui, piv) = &cd.lu[e as usize];
                     let (n_priv, n_exp) = cd.sizes[e as usize];
+                    // gather the element-local exposed coefficients in the
+                    // element's column layout ([hatE | hatH] face order),
+                    // sigma-decoded from the global solution
                     let mut xer = vec![0.0_f64; n_exp];
                     let mut xei = vec![0.0_f64; n_exp];
-                    for (bj, &b) in cd.exposed_blocks.iter().enumerate() {
+                    let mut loc = 0usize;
+                    // compact exposed index of the first exposed block
+                    let cbase = self.dof_offsets[cd.exposed_blocks[0]];
+                    for &b in cd.exposed_blocks.iter() {
                         let vd = self.trial_element_vdofs(b, e);
-                        let base = self.dof_offsets[b];
+                        let signs = self.element_dof_signs(b, e);
                         for (li, &g) in vd.iter().enumerate() {
-                            xer[eoffs[bj] + li] = xr[eoffs[bj] + (g - base)];
-                            xei[eoffs[bj] + li] = xi[eoffs[bj] + (g - base)];
+                            // global-to-compact: g sits in the exposed-block
+                            // global range, compact index = g - cbase
+                            let xgv = xr[g - cbase];
+                            let xgi = xi[g - cbase];
+                            xer[loc + li] = signs[li] * xgv;
+                            xei[loc + li] = signs[li] * xgi;
                         }
+                        loc += vd.len();
                     }
                     let a_pe = &cd.pe[e as usize];
                     let mut rhsr = cd.bpe[e as usize].0.clone();
@@ -1328,9 +1536,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             let mut off = 0usize;
             for b in 0..self.trial_kinds.len() {
                 let vd = self.trial_element_vdofs(b, e as u32);
+                // local coefficients: sigma-decode the global values for the
+                // trace blocks (the stored B is the raw element matrix).
+                let signs = self.element_dof_signs(b, e as u32);
                 for (li, &g) in vd.iter().enumerate() {
-                    ur[off + li] = x_r[g];
-                    ui[off + li] = x_i[g];
+                    ur[off + li] = signs[li] * x_r[g];
+                    ui[off + li] = signs[li] * x_i[g];
                 }
                 off += vd.len();
             }
@@ -1348,6 +1559,35 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             out.push(r2.sqrt());
         }
         out
+    }
+
+    /// `BlockMat_r()`: reference to the assembled real block matrix.
+    pub fn block_mat_r(&self) -> &CsrMatrix<f64> {
+        self.mat_r.as_ref().expect("assemble() must run first")
+    }
+
+    /// `BlockMat_i()`: reference to the assembled imaginary block matrix.
+    pub fn block_mat_i(&self) -> &CsrMatrix<f64> {
+        self.mat_i.as_ref().expect("assemble() must run first")
+    }
+
+    /// Reference to the assembled real right-hand side.
+    pub fn rhs_r(&self) -> &[f64] {
+        &self.y_r
+    }
+
+    /// Reference to the assembled imaginary right-hand side.
+    pub fn rhs_i(&self) -> &[f64] {
+        &self.y_i
+    }
+
+    /// Stored per-element normal system when
+    /// [`Self::store_matrices`] was enabled: `(L⁻¹B_r, L⁻¹B_i, L⁻¹f_r,
+    /// L⁻¹f_i, n_trial)` of element `e` (row-major; the test Gram
+    /// `G = L Lᴴ` is the only transform applied).  Debug/verification hook.
+    pub fn element_stored(&self, e: usize) -> (&[f64], &[f64], &[f64], &[f64], usize) {
+        let (ybr, ybi, fr, fi, n_tr) = &self.stored[e];
+        (ybr, ybi, fr, fi, *n_tr)
     }
 
     /// `Update()` — same AMR caveat as the real weak form.

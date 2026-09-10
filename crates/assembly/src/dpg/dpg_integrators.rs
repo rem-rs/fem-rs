@@ -387,6 +387,41 @@ impl DpgBilinear2 for DpgTransposedMixedCurlIntegrator {
     }
 }
 
+/// `(q E, ∇×F)` (3-D) — MFEM `TransposeIntegrator(MixedCurlIntegrator(q))`
+/// as used by `miniapps/dpg/maxwell.cpp` (3-D) for the pairings
+/// `(E, ∇×F)` / `(H, ∇×G)`: the *trial* side is a `vdim`-expanded scalar-L2
+/// block (`E`/`H` ∈ (L²)³, `byNODES` layout) and the *test* side an H(curl)
+/// ND block (interleaved).  `MixedCurlIntegrator` returns
+/// `(dimc·n_E) × n_F` rows laid out component-major (`d·n_E + j`), which the
+/// `TransposeIntegrator` turns into
+///
+/// ```text
+///     B[F_i, E_{c,j}] += w q (∇×F_i)_c E_j
+/// ```
+///
+/// (`w = ip.weight · |det J|`; `trial` carries the expanded-L2 values, `test`
+/// the H(curl) values.)
+pub struct DpgCurl3dPairingIntegrator {
+    /// Coefficient `q`.
+    pub q: f64,
+}
+
+impl DpgBilinear2 for DpgCurl3dPairingIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let nsc = trial.n_scalar;
+        let nc = trial.n_expanded;
+        let nt = test.n_scalar;
+        for i in 0..nt {
+            for c in 0..3 {
+                let curl_c = test.curl[i * 3 + c];
+                for j in 0..nsc {
+                    m[i * nc + c * nsc + j] += ctx.w * self.q * curl_c * trial.phi[c * nsc + j];
+                }
+            }
+        }
+    }
+}
+
 /// `(q ∇×v, u)` (3-D) — MFEM `MixedVectorCurlIntegrator(Q)`:
 /// trial H(curl), test vector FE (H(div)/H(curl)).
 pub struct DpgMixedVectorCurlIntegrator {
@@ -559,11 +594,19 @@ impl DpgTraceBilinear2 for DpgTangentTraceIntegrator2D {
 /// `<n × v, ψ>` (3-D) — MFEM `TangentTraceIntegrator` in 3-D
 /// (ND-trace vector trial, H(curl) ND test):
 /// `B[v_i, ψ_j] += w Σ_c (n × v_i)_c (ψ_j)_c`.
+///
+/// Sign note (MFEM 4.9, serial harness `signprobe`): the C++ pipeline
+/// (`TangentTraceIntegrator` elmat + signed `GetFaceVDofs` scatter +
+/// `ProjectBdrCoefficientTangent` data) satisfies the ultraweak identity
+/// `(E,∇×F) + <n×Ê,F> = 0` only when the assembled trace block is the
+/// NEGATIVE of `∫ (n×F_i)·Ê_j`; the raw `AddMult_a_ABt` elmat form alone
+/// gives the opposite sign.  The minus is folded here so that the block
+/// matches the effective MFEM system element-for-element.
 pub struct DpgTangentTraceIntegrator3D;
 
 impl DpgTraceBilinear2 for DpgTangentTraceIntegrator3D {
     fn assemble_trace2(&self, ctx: &FaceCtx, trial: &FaceVals, test: &VolVals, m: &mut [f64]) {
-        let w = ctx.ip_weight * ctx.scale;
+        let w = -ctx.ip_weight * ctx.scale;
         let nt = test.n_scalar;
         let nf = trial.vec_phi.len() / 3;
         for i in 0..nt {

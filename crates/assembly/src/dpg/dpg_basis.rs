@@ -1272,6 +1272,65 @@ pub fn nd_face_dof_nodes(p: usize, is_quad: bool) -> Vec<[f64; 2]> {
     out
 }
 
+/// Reference tangent direction `tk` of every DOF of MFEM
+/// `ND_TriangleElement(p)` / `ND_QuadrilateralElement(p)`, in the element's
+/// DOF order (matching [`nd_face_dof_nodes`] / [`eval_face_nd`]).
+///
+/// Used by the ND-trace interpolation of boundary data — MFEM
+/// `VectorFiniteElement::Project_ND`: `dof_k = v(x_k) · (J tk_k)` with `J` the
+/// canonical face Jacobian at the DOF node `x_k`.  The directions follow the
+/// reference-face cycle: on a quad, edges 0/1 run +s/+t while edges 2/3 run
+/// the cycle direction (−s/−t) — MFEM `dof2tk` = 0,1,2,3 with
+/// `tk = {±e_s, ±e_t}`; interior x-/y-dofs use +s/+t.  On a triangle the
+/// directions are MFEM's `tk = {e_s, −e_s+e_t, e_t, e_t}` per edge/interior.
+pub fn nd_face_dof_tangents(p: usize, is_quad: bool) -> Vec<[f64; 2]> {
+    let mut out = Vec::with_capacity(nd_face_dofs(p, is_quad));
+    if is_quad {
+        for _ in 0..p {
+            out.push([1.0, 0.0]); // edge 0: +s
+        }
+        for _ in 0..p {
+            out.push([0.0, 1.0]); // edge 1: +t
+        }
+        for _ in 0..p {
+            out.push([-1.0, 0.0]); // edge 2: cycle direction (−s)
+        }
+        for _ in 0..p {
+            out.push([0.0, -1.0]); // edge 3: cycle direction (−t)
+        }
+        for _ in 1..p {
+            for _ in 0..p {
+                out.push([1.0, 0.0]); // interior x-dofs
+            }
+        }
+        for _ in 0..p {
+            for _ in 1..p {
+                out.push([0.0, 1.0]); // interior y-dofs
+            }
+        }
+    } else {
+        for _ in 0..p {
+            out.push(ND_TRI_TK[0]);
+        }
+        for _ in 0..p {
+            out.push(ND_TRI_TK[1]);
+        }
+        for _ in 0..p {
+            out.push(ND_TRI_TK[2]);
+        }
+        if p >= 2 {
+            let pm2 = p - 2;
+            for _j in 0..=pm2 {
+                for _i in 0..=(pm2 - _j) {
+                    out.push(ND_TRI_TK[0]);
+                    out.push(ND_TRI_TK[3]);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The `tk` direction vectors of MFEM `ND_TriangleElement`
 /// (`tk = {1,0, −1,1, 0,−1, 0,1}`).
 const ND_TRI_TK: [[f64; 2]; 4] = [[1.0, 0.0], [-1.0, 1.0], [0.0, -1.0], [0.0, 1.0]];

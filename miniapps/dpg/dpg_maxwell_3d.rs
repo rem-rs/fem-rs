@@ -1,143 +1,453 @@
-//! 3D Maxwell DPG solver.
+//! True ultraweak DPG solver for the 3-D Maxwell equations — complex valued.
 //!
-//! ⚠️ **STATUS（第十一轮代理 H 复核）：这不是真 DPG。** 本文件是手写的
-//! P1（节点）Galerkin 复系统 + `solve_cg_complex`，注释中的 "DPG" 名不副实：
-//! `omega` 参数未使用、虚部恒 0、没有骨架 trace 未知量、没有 DPG 正规方程
-//! `A = BᵀG⁻¹B`。与 C++ `miniapps/dpg/maxwell.cpp` 的 3D 分支（E,H ∈ (L²)³、
-//! Ê,Ĥ ∈ `ND_Trace_FECollection(order,3)`、F,G ∈ `ND_FECollection(order+do,3)`、
-//! 复块算子 + 伴随图范数测试空间）**无法数值对照**。
+//! 1:1 port of the 3-D path of MFEM's `miniapps/dpg/maxwell.cpp` (serial,
+//! plane-wave problem, `inline-hex.mesh`): first-order system
+//! ```text
+//!     i ω μ H + ∇ × E = 0        in Ω
+//!     −i ω ε E + ∇ × H = J       in Ω
+//!     E × n = E₀                 on ∂Ω
+//! ```
+//! with E, H ∈ (L²)³, Ê ∈ H₋₁/₂(curl)(Γₕ), Ĥ ∈ H₋₁/₂(curl)(Γₕ):
+//! ```text
+//!     i ω μ (H,F) + (E, ∇×F) + <n×Ê, F> = 0       ∀ F ∈ H(curl,Ω)
+//!     −i ω ε (E,G) + (H, ∇×G) + <n×Ĥ, G> = (J,G)  ∀ G ∈ H(curl,Ω)
+//! ```
+//! Adjoint graph norm on the test space `F × G` (both broken ND of order
+//! `order+delta_order`).  Plane-wave solution
+//! E = (e^{−iω(x+y+z)}, 0, 0), H = (0, e^{−iω(x+y+z)}, −e^{−iω(x+y+z)})/μ.
 //!
-//! 真替换的**剩余阻塞点**（第十二轮代理 P 复核后更新）：
-//! 1. `dpg_weakform.rs` / `complex_dpg_weakform.rs` 的 trace 分块仍只支持标量
-//!    面 Lagrange 基（`eval_face_lagrange` + `FaceVals::phi`）：ND trace 需要
-//!    向量面基（`FaceVals::vec_phi` + `eval_face_nd` + `map_face_nd_to_phys`）
-//!    与面-棱共享 dof 编号（`TraceSpace::new_nd` 已就绪且与 C++ 逐位一致，
-//!    但**尚未接进弱式装配**——第十二轮只完成了标量（H1/RT）trace 的 3D 接线，
-//!    见 `dpg_acoustics_3d.rs`）。`DpgTangentTraceIntegrator3D` 已是向量版。
-//! 2. `maxwell.cpp` 的 3D 分支还用到 `hatE,hatH ∈ ND_Trace(order,3)` 与
-//!    测试空间 `F,G ∈ ND_FECollection(order+do,3)`：`DpgTransposedMixedCurlIntegrator`
-//!    已就绪，但 ND trace 装配缺失（同 1）。
+//! Trial spaces (C++ `maxwell.cpp`, `dim == 3`):
 //!
-//! **本轮已修复的（先前列出的）阻塞点**：
-//! * `face_geo_at` 的 3D 面法向 0.5 因子已去除（对齐 MFEM `CalcOrtho`），
-//!   2D 路径不变（`dpg_3d_face_measure_matches_divergence_theorem` 钉死：
-//!   单 hex 上 ∫_∂Ω x·n dS = 3 = 3|Ω|）。
-//! * 3D hex 的参考域已统一到 fem-element 的实际约定 `[−1,1]³`
-//!   （`vol_quadrature`/`ref_node_coords`），几何映射与体积基不再只覆盖
-//!   单元的一个子块（这正是 3D DPG 之前不收敛的根因）。
-//! * 3D `local_face_table` 改为 MFEM `FaceVert` 逐字表（外向绕向），
-//!   否则 trace 积分的 ±1 元素朝向不等于"法向 vs 外法向"的符号。
-//! * `SkeletonSpace::new_h1` 补齐 3D H1 trace 的棱/面内部 dof（p ≥ 2）。
+//! | block | fem-rs | MFEM |
+//! |---|---|---|
+//! | E  | `L2(order−1)`, vdim 3 | `L2_FECollection(order−1,3)` × 3 |
+//! | H  | `L2(order−1)`, vdim 3 | `L2_FECollection(order−1,3)` × 3 |
+//! | Ê  | `TraceSpace::new_nd(order)` | `ND_Trace_FECollection(order,3)` |
+//! | Ĥ  | `TraceSpace::new_nd(order)` | `ND_Trace_FECollection(order,3)` |
+//! | F,G | `HCurl(order+do)` | `ND_FECollection(order+do,3)` |
 //!
-//! `HexNDk` 是 MFEM `ND_HexahedronElement` 的**另一组基**（[−1,1]³ +
-//! IntegratedGLL vs [0,1]³ + GaussLegendre）：空间相同（已用单测
-//! `dpg_basis::trace_tests::nd_hex_span_is_tensor_nedelec` 钉死），
-//! 解不受影响，但单元矩阵不能逐位对照。
+//! The ND trace wiring (edge dofs shared across faces with MFEM orientation
+//! signs, covariantly mapped face bases in the canonical face
+//! parametrisation, per-element outward sign) lives in
+//! `crates/assembly/src/{complex_dpg_weakform,dpg_weakform,dpg/dpg_basis}.rs`.
 //!
-//! **已完成的前置件**（本轮，均在 `crates/assembly/src/dpg/dpg_basis.rs`）：
-//! `TraceSpace`（H1/RT/ND 三类 3D 骨架空间，面/棱实体表、全局 dof 编号、
-//! 面内 dof 顺序与 `EncodeDof` 符号编码、面单元基值、切向协变物理映射）
-//! 与 C++ 逐位一致；3D 所需积分器已核对补齐
-//! （新增 `DpgTransposedMixedCurlIntegrator` = `(E,∇×F)`）。
+//! Output table matches the C++ miniapp:
+//! `Ref | Dofs | ω | L2 Error | Rate | PCG it`.
+//!
+//! Reference (C++ MFEM 4.9 harness `wsl ~/work/mx3/maxwell3d`, `rnum 1.0`,
+//! `-do 1`, no `-sc`; hex `n×n×n` = `MakeCartesian3D(n,n,n,HEX)`):
+//!
+//! ```text
+//!   n |  o | Ref |  Dofs |  C++ L2  | C++ it |   fem-rs L2 | it
+//!   2 |  1 |   0 |   156 | 1.723    |     22 |
+//!   2 |  1 |   1 |   984 | 1.313    |     50 |
+//!   2 |  2 |   0 |   888 | 9.547e-1 |     66 |
+//!   2 |  2 |   1 |  6192 | 2.707e-1 |    118 |
+//!   4 |  1 |   0 |   984 | 1.313    |     51 |
+//!   4 |  1 |   1 |  6960 | 7.617e-1 |     96 |
+//! ```
 
-use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr};
-use fem_solver::complex_ams::solve_cg_complex;
+use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
+use fem_assembly::dpg::dpg_basis::{
+    face_jacobian_3d, face_point_3d, nd_face_dof_nodes, nd_face_dof_tangents, VolKind,
+};
+use fem_assembly::dpg::dpg_integrators::{
+    DpgCurl3dPairingIntegrator, DpgCurlCurlIntegrator, DpgMixedVectorCurlIntegrator,
+    DpgMixedVectorWeakCurlIntegrator, DpgTangentTraceIntegrator3D, DpgTVectorFEMassIntegrator,
+    DpgVectorFEDomainLFIntegrator, DpgVectorFEMassIntegrator,
+};
+use fem_assembly::dpg_weakform::DpgBlockGs;
+use fem_mesh::{element_type::ElementType, refine_uniform_3d, Mesh, MeshTopology};
+use fem_solver::{solve_pcg_operator_precond, SolverConfig};
 
-fn build_maxwell_dpg_3d(
-    nx: usize, ny: usize, nz: usize,
-    omega: f64, j_re: f64, j_im: f64,
-) -> (ComplexCsr, Vec<f64>, Vec<f64>) {
-    let hx = 1.0 / nx as f64;
-    let hy = 1.0 / ny as f64;
-    let hz = 1.0 / nz as f64;
-    let n_vertices = (nx + 1) * (ny + 1) * (nz + 1);
-    let n_e = 3 * n_vertices;
-    let n_h = 3 * n_vertices;
-    let n_trial = n_e + n_h;
-    let quad_pts = [-0.5773502691896258, 0.5773502691896258];
-    let quad_wts = [1.0, 1.0];
-    let mut a_coo = ComplexCoo::new(n_trial, n_trial);
-    let mut b_re = vec![0.0f64; n_trial];
-    let mut b_im = vec![0.0f64; n_trial];
+const PI: f64 = std::f64::consts::PI;
+const DIM: usize = 3;
 
-    for i in 0..n_e {
-        let vtx = i / 3;
-        let ix = vtx % (nx + 1);
-        let iy = (vtx / (nx + 1)) % (ny + 1);
-        let iz = vtx / ((nx + 1) * (ny + 1));
-        if ix == 0 || ix == nx || iy == 0 || iy == ny || iz == 0 || iz == nz {
-            a_coo.add(i, i, 1.0, 0.0);
+#[derive(Clone)]
+struct Exact {
+    omega: f64,
+    mu: f64,
+    epsilon: f64,
+}
+
+impl Exact {
+    /// Plane wave e^{−iωΣx} = (c, −s): c = cos(ωσ), pw_im = −sin(ωσ).
+    fn pw(&self, x: &[f64]) -> (f64, f64) {
+        let a = self.omega * x.iter().sum::<f64>();
+        (a.cos(), -a.sin())
+    }
+    /// E = (pw, 0, 0).
+    fn e(&self, x: &[f64]) -> [(f64, f64); 3] {
+        let pw = self.pw(x);
+        [(pw.0, pw.1), (0.0, 0.0), (0.0, 0.0)]
+    }
+    /// H = i ∇×E / (ω μ) = (0, pw, −pw)/μ.
+    fn h(&self, x: &[f64]) -> [(f64, f64); 3] {
+        let pw = self.pw(x);
+        [
+            (0.0, 0.0),
+            (pw.0 / self.mu, pw.1 / self.mu),
+            (-pw.0 / self.mu, -pw.1 / self.mu),
+        ]
+    }
+    /// J = −iωεE + ∇×H = iω pw (2/μ − ε, −1/μ, −1/μ):
+    /// J_r = −ω s (ε − 2/μ, 1/μ, 1/μ)·(−1) = ω s (ε − 2/μ, 1/μ, 1/μ)
+    /// with s = pw_im = −sin(ωσ); J_i = ω c (2/μ − ε, −1/μ, −1/μ)
+    /// (C++ `rhs_func_r` / `rhs_func_i`).
+    fn j(&self, x: &[f64]) -> [(f64, f64); 3] {
+        let (c, s) = self.pw(x);
+        let k = 1.0 / self.mu;
+        let a = 2.0 * k - self.epsilon;
+        [
+            (-self.omega * s * (self.epsilon - 2.0 * k), self.omega * c * a),
+            (self.omega * s * k, -self.omega * c * k),
+            (self.omega * s * k, -self.omega * c * k),
+        ]
+    }
+}
+
+/// One level build + solve; returns `(dofs, l2 err, pcg its)`.
+#[allow(clippy::too_many_lines)]
+fn solve_level(
+    mesh: &Mesh<3>,
+    order: u8,
+    delta_order: u8,
+    omega: f64,
+    mu: f64,
+    epsilon: f64,
+    static_cond: bool,
+) -> (usize, f64, usize) {
+    let p = order;
+    let test_order = order + delta_order;
+    let mut a: ComplexDPGWeakForm<Mesh<3>> = ComplexDPGWeakForm::new(mesh.clone());
+    // All volume integrands are polynomial of degree ≤ 2·test_order (the
+    // mass/graph-norm blocks dominate); a Gauss rule of `2·test_order`
+    // points per direction integrates degree `4·test_order − 1` exactly.
+    a.set_quad_order((2 * test_order).min(10));
+
+    let es = a.add_trial_vector_space(p - 1, DIM);
+    let hs = a.add_trial_vector_space(p - 1, DIM);
+    // Ê, Ĥ ∈ H₋₁/₂(curl)(Γₕ): ND trace spaces
+    // (MFEM ND_Trace_FECollection(order,3)).
+    let hate = a.add_trial_trace_space_nd(p);
+    let hath = a.add_trial_trace_space_nd(p);
+    let f = a.add_test_space(VolKind::HCurl, test_order);
+    let g = a.add_test_space(VolKind::HCurl, test_order);
+
+    // (E, ∇×F)
+    a.add_trial_integrator(Some(Box::new(DpgCurl3dPairingIntegrator { q: 1.0 })), None, es, f);
+    // −i ω ε (E, G)
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgTVectorFEMassIntegrator { q: -epsilon * omega })),
+        es,
+        g,
+    );
+    // (H, ∇×G)
+    a.add_trial_integrator(Some(Box::new(DpgCurl3dPairingIntegrator { q: 1.0 })), None, hs, g);
+    // i ω μ (H, F)
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgTVectorFEMassIntegrator { q: mu * omega })),
+        hs,
+        f,
+    );
+    // < n×Ê, F >
+    a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator3D)), None, hate, f);
+    // < n×Ĥ, G >
+    a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator3D)), None, hath, g);
+
+    // Adjoint graph norm on the broken test space (C++ 3-D branch).  The C++
+    // `AddTestIntegrator(bfi, n, m)` lands in the (m,n) block of G, so the
+    // row/col arguments below are the C++ pair reversed.
+    // (∇×G, ∇×δG) + (G, δG)
+    a.add_test_integrator(Some(Box::new(DpgCurlCurlIntegrator { q: 1.0 })), None, g, g);
+    a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, g, g);
+    // (∇×F, ∇×δF) + (F, δF) + μ²ω² (F, δF)
+    a.add_test_integrator(Some(Box::new(DpgCurlCurlIntegrator { q: 1.0 })), None, f, f);
+    a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, f, f);
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassIntegrator { q: mu * mu * omega * omega })),
+        None,
+        f,
+        f,
+    );
+    // −i ω μ (F, ∇×δG) → G[G,F];  −i ω ε (∇×F, δG) → G[G,F]
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: -mu * omega })),
+        g,
+        f,
+    );
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorCurlIntegrator { q: -epsilon * omega })),
+        g,
+        f,
+    );
+    // i ω ε (∇×G, δF) → G[F,G];  i ω μ (G, ∇×δF) → G[F,G]
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorCurlIntegrator { q: epsilon * omega })),
+        f,
+        g,
+    );
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: mu * omega })),
+        f,
+        g,
+    );
+    // ε² ω² (G, δG)
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassIntegrator { q: epsilon * epsilon * omega * omega })),
+        None,
+        g,
+        g,
+    );
+
+    // RHS (J, G) on the G test block.
+    let ex = Exact { omega, mu, epsilon };
+    let ex_rhs_r = ex.clone();
+    let ex_rhs_i = ex.clone();
+    a.add_domain_lf_integrator(
+        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+            f: move |x: &[f64], out: &mut [f64]| {
+                let jr = ex_rhs_r.j(x);
+                for (o, v) in out.iter_mut().zip(jr.iter()) {
+                    *o = v.0;
+                }
+            },
+        })),
+        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+            f: move |x: &[f64], out: &mut [f64]| {
+                let ji = ex_rhs_i.j(x);
+                for (o, v) in out.iter_mut().zip(ji.iter()) {
+                    *o = v.1;
+                }
+            },
+        })),
+        g,
+    );
+
+    // C++ `EnableStaticCondensation()`: keep only the trace blocks (Ê, Ĥ).
+    if static_cond {
+        a.enable_static_condensation();
+    }
+    a.assemble();
+
+    // Essential BCs: Ê = E₀ (tangential projection of the exact E) on the
+    // whole boundary — MFEM `ProjectBdrCoefficientTangent`:
+    // `dof_k = E(x_k) · (J tk_k)` at the ND face-dof nodes, with the MFEM
+    // edge-orientation signs from the sign-encoded face dof list.
+    let tr = a.nd_trace(hate);
+    let base = a.trial_offsets()[hate];
+    let p_us = p as usize;
+    let mut ess = Vec::new();
+    let mut xr = vec![0.0_f64; a.size()];
+    let mut xi = vec![0.0_f64; a.size()];
+    for face in 0..tr.n_faces() {
+        if !tr.is_boundary_face(face) {
+            continue;
+        }
+        let is_quad = tr.is_quad_face(face);
+        let nodes = nd_face_dof_nodes(p_us, is_quad);
+        let tks = nd_face_dof_tangents(p_us, is_quad);
+        let dof_list = tr.face_dof_list(face).to_vec();
+        let signed = tr.face_signed_dofs(face).to_vec();
+        for (j, &dof) in dof_list.iter().enumerate() {
+            ess.push(base + dof);
+            let param = &nodes[j];
+            let xk = face_point_3d(&tr, face, param);
+            let jac = face_jacobian_3d(&tr, face, param);
+            let tk = tks[j];
+            // physical tangent J·tk
+            let jt: Vec<f64> = (0..3)
+                .map(|d| jac[0][d] * tk[0] + jac[1][d] * tk[1])
+                .collect();
+            let ec = ex.e(&xk);
+            let mut vr = ec[0].0 * jt[0] + ec[1].0 * jt[1] + ec[2].0 * jt[2];
+            let mut vi = ec[0].1 * jt[0] + ec[1].1 * jt[1] + ec[2].1 * jt[2];
+            if signed[j] < 0 {
+                vr = -vr;
+                vi = -vi;
+            }
+            xr[base + dof] = vr;
+            xi[base + dof] = vi;
         }
     }
 
-    for iz in 0..nz {
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let v000 = iz * (nx + 1) * (ny + 1) + iy * (nx + 1) + ix;
-                let v100 = v000 + 1;
-                let v110 = v000 + (nx + 1) + 1;
-                let v010 = v000 + (nx + 1);
-                let v001 = v000 + (nx + 1) * (ny + 1);
-                let v101 = v001 + 1;
-                let v111 = v001 + (nx + 1) + 1;
-                let v011 = v001 + (nx + 1);
-                let e_dofs = [3*v000, 3*v100, 3*v110, 3*v010, 3*v001, 3*v101, 3*v111, 3*v011];
-                let h_dofs = [n_e + 3*v000, n_e + 3*v100, n_e + 3*v110, n_e + 3*v010, n_e + 3*v001, n_e + 3*v101, n_e + 3*v111, n_e + 3*v011];
+    let (sys, xs, b) = a.form_linear_system(&ess, &xr, &xi);
 
-                for i in 0..8 {
-                    for comp in 0..3 {
-                        let e_row = e_dofs[i] + comp;
-                        let on_boundary = ix == 0 || ix == nx || iy == 0 || iy == ny || iz == 0 || iz == nz;
-                        for j in 0..8 {
-                            let mut a_val_re = 0.0f64;
-                            for (xi, wi) in quad_pts.iter().zip(quad_wts.iter()) {
-                                for (eta, wj) in quad_pts.iter().zip(quad_wts.iter()) {
-                                    for (zeta, wk) in quad_pts.iter().zip(quad_wts.iter()) {
-                                        let w = *wi * *wj * *wk;
-                                        let jac = hx * hy * hz / 8.0;
-                                        let term = w * jac;
-                                        a_val_re += term;
-                                    }
-                                }
-                            }
-                            if !on_boundary {
-                                a_coo.add(e_row, e_dofs[j] + comp, a_val_re, 0.0);
-                            }
-                            a_coo.add(e_row, h_dofs[j] + comp, a_val_re, 0.0);
-                        }
-                        if !on_boundary {
-                            let mut b_val_re = 0.0f64;
-                            for (xi, wi) in quad_pts.iter().zip(quad_wts.iter()) {
-                                for (eta, wj) in quad_pts.iter().zip(quad_wts.iter()) {
-                                    for (zeta, wk) in quad_pts.iter().zip(quad_wts.iter()) {
-                                        let w = *wi * *wj * *wk;
-                                        let jac = hx * hy * hz / 8.0;
-                                        b_val_re += w * jac * j_re;
-                                    }
-                                }
-                            }
-                            b_re[e_row] += b_val_re;
-                        }
+    // Real doubled operator [[A_r, −A_i],[A_i, A_r]] + block-diagonal
+    // symmetric Gauss–Seidel preconditioner (C++ `BlockOperator` +
+    // `BlockDiagonalPreconditioner` of `GSSmoother`s on the real blocks).
+    let big = sys.to_real_block_csr();
+    let half = sys.n_complex();
+    let nb = sys.offsets.len() - 1;
+    let mut off2: Vec<usize> = sys.offsets.clone();
+    for k in 1..=nb {
+        off2.push(half + sys.offsets[k]);
+    }
+    let precond = DpgBlockGs::from_matrix(&big, &off2);
+    let cfg = SolverConfig { rtol: 1e-10, max_iter: 2000, ..SolverConfig::default() };
+    let apply = |x: &[f64], y: &mut [f64]| big.spmv(x, y);
+    let pc = move |r: &[f64], z: &mut [f64]| precond.apply(r, z);
+    let mut sol = xs;
+    let result = solve_pcg_operator_precond(big.nrows, apply, &b, &mut sol, pc, &cfg);
+    let iterations = match result {
+        Ok(r) => r.iterations,
+        Err(_) => 0,
+    };
+
+    let (sol_r, sol_i) = a.recover_fem_solution(&sol);
+
+    if std::env::var("DPG_DEBUG").is_ok() {
+        let res = a.compute_residual_silent(&sol_r, &sol_i);
+        let worst = res.iter().cloned().fold(0.0_f64, f64::max);
+        eprintln!("DPG_DEBUG: max element residual after solve = {worst:.3e}");
+        let mut lin = vec![0.0_f64; big.nrows];
+        big.spmv(&sol, &mut lin);
+        let worst2 = b.iter().zip(lin.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        eprintln!("DPG_DEBUG: linear residual after PCG = {worst2:.3e}");
+    }
+
+    let err = errors(
+        mesh,
+        &sol_r,
+        &sol_i,
+        a.trial_offsets()[es],
+        a.trial_offsets()[hs],
+        p - 1,
+        &ex,
+    );
+
+    // C++ dofs column: Σ trial_fes[i]->GetTrueVSize().
+    let dofs = a.size();
+    (dofs, err, iterations)
+}
+
+/// L² errors of E (3 comps) and H (3 comps), re + im combined (C++
+/// `sqrt(E_err² + H_err²)` with `ComputeL2Error`).
+fn errors(
+    mesh: &Mesh<3>,
+    sol_r: &[f64],
+    sol_i: &[f64],
+    e_base: usize,
+    h_base: usize,
+    order: u8,
+    ex: &Exact,
+) -> f64 {
+    let dim = DIM;
+    let et = mesh.element_type(0);
+    let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(et, order);
+    let n = fe.n_dofs();
+    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 4);
+    let mut phi = vec![0.0_f64; n];
+    let mut err2 = 0.0_f64;
+    let is_simplex = matches!(et, ElementType::Tet4);
+    for e in 0..mesh.n_elements() as u32 {
+        let nodes = mesh.element_nodes(e);
+        let tr = if is_simplex {
+            Some(fem_mesh::ElementTransformation::from_simplex_nodes(mesh, nodes))
+        } else {
+            None
+        };
+        let geo =
+            if is_simplex { None } else { fem_assembly::vector_assembler::geo_ref_elem_from_mesh(mesh, e) };
+        let gnodes = if is_simplex { Vec::new() } else { mesh.geometry_nodes(e).to_vec() };
+        for (qi, xiq) in qpts.iter().enumerate() {
+            let (det, xp) = if let Some(t) = tr.as_ref() {
+                (t.det_j(), t.map_to_physical(xiq))
+            } else {
+                let (_jac, det, xp) = fem_assembly::vector_assembler::isoparametric_jacobian(
+                    mesh, &gnodes, geo.as_deref().unwrap(), xiq, dim,
+                );
+                (det, xp)
+            };
+            fe.eval_basis(xiq, &mut phi);
+            let ee = ex.e(&xp);
+            let hh = ex.h(&xp);
+            for (block_base, exact) in [(e_base, &ee), (h_base, &hh)] {
+                for c in 0..dim {
+                    let mut cr = 0.0;
+                    let mut ci = 0.0;
+                    for i in 0..n {
+                        cr += sol_r[block_base + e as usize * n * dim + c * n + i] * phi[i];
+                        ci += sol_i[block_base + e as usize * n * dim + c * n + i] * phi[i];
                     }
+                    err2 += qwts[qi]
+                        * det.abs()
+                        * ((cr - exact[c].0).powi(2) + (ci - exact[c].1).powi(2));
                 }
             }
         }
     }
-    let a = a_coo.into_complex_csr();
-    (a, b_re, b_im)
+    err2.sqrt()
 }
 
 fn main() {
-    let nx = 2; let ny = 2; let nz = 2;
-    let omega = 2.0 * std::f64::consts::PI;
-    let j_re = 1.0; let j_im = 0.0;
-    println!("Solving 3D Maxwell DPG");
-    let (a, b_re, b_im) = build_maxwell_dpg_3d(nx, ny, nz, omega, j_re, j_im);
-    println!("  System size: {} DOFs", a.nrows);
-    let mut x_re = vec![0.0f64; a.nrows];
-    let mut x_im = vec![0.0f64; a.nrows];
-    match solve_cg_complex(&a, &b_re, &b_im, &mut x_re, &mut x_im, 1e-10, 500) {
-        Ok((iters, res)) => println!("  Converged in {} iterations, residual = {:.6e}", iters, res),
-        Err(e) => eprintln!("  Solver failed: {}", e),
+    let mut n = 2usize;
+    let mut order = 1i32;
+    let mut delta_order = 1i32;
+    let mut ref_levels = 0i32;
+    let mut rnum = 1.0f64;
+    let mut tet = false;
+    let mut static_cond = false;
+    let mut i = 1;
+    let args: Vec<String> = std::env::args().collect();
+    while i < args.len() {
+        match args[i].as_str() {
+            "-n" => n = args[i + 1].parse().unwrap(),
+            "-o" | "--order" => order = args[i + 1].parse().unwrap(),
+            "-do" | "--delta-order" => delta_order = args[i + 1].parse().unwrap(),
+            "-ref" | "--refinements" => ref_levels = args[i + 1].parse().unwrap(),
+            "-rnum" | "--number-of-wavelengths" => rnum = args[i + 1].parse().unwrap(),
+            "-tet" => tet = true,
+            "-sc" | "--static-condensation" => static_cond = true,
+            "-no-vis" | "--no-visualization" => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    let omega = 2.0 * PI * rnum;
+    println!("Ultraweak DPG for 3D Maxwell (MFEM maxwell.cpp port, plane wave)");
+    println!("  ω = {omega}, order={order}, delta_order={delta_order}");
+    println!(
+        "  mesh: {}({n}) (C++ -m data/inline-hex.mesh ≙ hex 4×4×4)",
+        if tet { "unit_cube_tet" } else { "unit_cube_hex" }
+    );
+    println!("\n  Ref |    Dofs    |    ω    |  L2 Error  |  Rate  | PCG it |");
+    println!("{}", "-".repeat(62));
+
+    let mut mesh = if tet {
+        Mesh::<3>::unit_cube_tet(n)
+    } else {
+        Mesh::<3>::unit_cube_hex(n)
+    };
+    let mut err0 = 0.0;
+    let mut dof0 = 0usize;
+    for it in 0..=ref_levels {
+        let (dofs, err, iters) = solve_level(
+            &mesh,
+            order.max(1) as u8,
+            delta_order.max(0) as u8,
+            omega,
+            1.0,
+            1.0,
+            static_cond,
+        );
+        let rate = if it > 0 && err0 > 0.0 && dofs > dof0 {
+            (DIM as f64) * (err0 / err).ln() / (dof0 as f64 / dofs as f64).ln()
+        } else {
+            0.0
+        };
+        err0 = err;
+        dof0 = dofs;
+        println!("{it:5} | {dofs:10} | {omega:7.3} | {err:10.3e} | {rate:6.2} | {iters:6} |");
+        if it == ref_levels {
+            break;
+        }
+        mesh = refine_uniform_3d(&mesh);
     }
 }

@@ -69,6 +69,13 @@ enum TrialSpace<M: MeshTopology> {
         /// Skeleton space (Lagrange face bases).
         skeleton: SkeletonSpace<M>,
     },
+    /// 3-D vector (ND) trace space — MFEM `ND_Trace_FECollection(order, dim)`:
+    /// `order` DOFs per mesh edge (shared across faces with MFEM orientation
+    /// signs) plus face-interior DOFs.
+    TraceNd {
+        /// ND skeleton space.
+        trace: crate::dpg::dpg_basis::TraceSpace<M>,
+    },
 }
 
 /// A broken (element-local) test space.
@@ -369,6 +376,21 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         self.trial_spaces.len() - 1
     }
 
+    /// Add a 3-D vector (ND) trace trial space — MFEM
+    /// `ND_Trace_FECollection(order, dim)` = `ND_FECollection(order, dim−1)`
+    /// on the skeleton: edge dofs shared across faces (MFEM orientation
+    /// signs) plus face-interior dofs.
+    pub fn add_trial_trace_space_nd(&mut self, order: u8) -> usize {
+        assert!(
+            self.dim == 3,
+            "ND trace spaces are only wired for 3-D meshes"
+        );
+        let tr = crate::dpg::dpg_basis::TraceSpace::new_nd(self.mesh.clone(), order);
+        self.trial_spaces.push(TrialSpace::TraceNd { trace: tr });
+        self.trial_integs.push(Vec::new());
+        self.trial_spaces.len() - 1
+    }
+
     /// Add a broken test space — MFEM `test_fec.Append(fec)`; returns the
     /// test block index.
     pub fn add_test_space(&mut self, kind: VolKind, order: u8) -> usize {
@@ -458,6 +480,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             .map(|s| match s {
                 TrialSpace::Volume { dofs_per_elem, .. } => dofs_per_elem * self.mesh.n_elements(),
                 TrialSpace::Trace { skeleton } => skeleton.n_dofs(),
+                TrialSpace::TraceNd { trace } => trace.n_dofs(),
             })
             .collect()
     }
@@ -485,7 +508,15 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
     pub fn skeleton(&self, b: usize) -> &SkeletonSpace<M> {
         match &self.trial_spaces[b] {
             TrialSpace::Trace { skeleton } => skeleton,
-            _ => panic!("block {b} is not a trace space"),
+            _ => panic!("block {b} is not a (scalar) trace space"),
+        }
+    }
+
+    /// Access the ND vector trace space of trial block `b`.
+    pub fn nd_trace(&self, b: usize) -> &crate::dpg::dpg_basis::TraceSpace<M> {
+        match &self.trial_spaces[b] {
+            TrialSpace::TraceNd { trace } => trace,
+            _ => panic!("block {b} is not an ND trace space"),
         }
     }
 
@@ -507,12 +538,15 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             TrialSpace::Trace { skeleton } => {
                 skeleton.element_dofs(e).iter().map(|&d| base + d).collect()
             }
+            TrialSpace::TraceNd { trace } => {
+                trace.element_trace_dof_list(e).iter().map(|&d| base + d).collect()
+            }
         }
     }
 
     /// Whether trial block `b` is a trace space.
     pub fn is_trace_block(&self, b: usize) -> bool {
-        matches!(self.trial_spaces[b], TrialSpace::Trace { .. })
+        matches!(self.trial_spaces[b], TrialSpace::Trace { .. } | TrialSpace::TraceNd { .. })
     }
 
     /// Physical point of face DOF `k` of skeleton face `f` (for essential BC
@@ -650,6 +684,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                             .collect(),
                     )),
                     TrialSpace::Trace { .. } => qp_trial.push(None),
+                    TrialSpace::TraceNd { .. } => qp_trial.push(None),
                 }
             }
 
@@ -659,6 +694,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                 let n = match &self.trial_spaces[b] {
                     TrialSpace::Volume { dofs_per_elem, .. } => *dofs_per_elem,
                     TrialSpace::Trace { skeleton } => skeleton.element_dofs(e).len(),
+                    TrialSpace::TraceNd { trace } => trace.element_trace_dof_list(e).len(),
                 };
                 tr_offs.push(tr_offs.last().unwrap() + n);
             }
@@ -745,12 +781,105 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             // Trace integrators: per local face (MFEM AssembleTraceFaceMatrix)
             let lfs = local_face_table(&nodes, dim);
             for (tbb, tb, integ) in &self.trace_integs {
+                let nr = test_sizes[*tb];
+                let col_base = tr_offs[*tbb];
+                if let TrialSpace::TraceNd { trace } = &self.trial_spaces[*tbb] {
+                    // ── ND vector (3-D) trace path: MFEM ND_Trace face basis in
+                    // the canonical face parametrisation (same face
+                    // transformation for both adjacent elements), covariantly
+                    // mapped, with the element-outward sign (`scale`, MFEM
+                    // TangentTraceIntegrator Elem1/Elem2 ±1) and the MFEM
+                    // edge-orientation signs (`face_signed_dofs`, the
+                    // `SparseMatrix::AddSubMatrix` signed-vdof decoding —
+                    // applied to the element columns before the normal
+                    // equations, which is algebraically identical).
+                    let p_us = trace.order() as usize;
+                    for (li, lf) in lfs.iter().enumerate() {
+                        let fid = trace.elem_face_id(e, li);
+                        let is_qf = trace.is_quad_face(fid);
+                        let nfd = crate::dpg::dpg_basis::nd_face_dofs(p_us, is_qf);
+                        let (fpts, fwts): (&Vec<Vec<f64>>, &Vec<f64>) = if is_qf {
+                            (&face_rule_quad.as_ref().unwrap().0, &face_rule_quad.as_ref().unwrap().1)
+                        } else {
+                            (&face_rule_tri.as_ref().unwrap().0, &face_rule_tri.as_ref().unwrap().1)
+                        };
+                        let scale = trace.elem_face_orientation(e, li) as f64;
+                        let signed = trace.face_signed_dofs(fid);
+                        let mut be = vec![0.0_f64; nr * nfd];
+                        for (q, fparam) in fpts.iter().enumerate() {
+                            let (xp, normal, measure) =
+                                face_geo_nodes(&mesh, trace.face_nodes(fid), is_qf, fparam, dim);
+                            let lf_eff: Vec<usize> = if scale < 0.0 {
+                                lf.iter().rev().copied().collect()
+                            } else {
+                                lf.to_vec()
+                            };
+                            // Initial guess from the element's local face
+                            // parametrisation; Newton-invert to the exact
+                            // reference coordinates of the physical face point.
+                            let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, fparam);
+                            let xiref = invert_element_map(
+                                &mesh,
+                                simplex.as_ref(),
+                                geo,
+                                &geo_nodes,
+                                &xp,
+                                dim,
+                                &xi0,
+                            );
+                            let (jac, det, _) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, &xiref, dim,
+                            );
+                            let jit = inv_transpose(&jac, dim);
+                            let mut tv = VolVals::default();
+                            let ts = &self.test_spaces[*tb];
+                            eval_vol_space(
+                                ts.kind, ts.order, et, dim, &jac, det, &jit, &xiref, None, &mut tv,
+                            );
+                            let fjac = crate::dpg::dpg_basis::face_jacobian_3d(trace, fid, fparam);
+                            let mut ref2d = vec![0.0_f64; 2 * nfd];
+                            crate::dpg::dpg_basis::eval_face_nd(p_us, is_qf, fparam, &mut ref2d);
+                            let mut vec_phi = vec![0.0_f64; 3 * nfd];
+                            for (j, &sd) in signed.iter().enumerate() {
+                                let mut v = crate::dpg::dpg_basis::map_face_nd_to_phys(
+                                    &fjac,
+                                    &[ref2d[2 * j], ref2d[2 * j + 1]],
+                                );
+                                if sd < 0 {
+                                    v = [-v[0], -v[1], -v[2]];
+                                }
+                                vec_phi[3 * j..3 * j + 3].copy_from_slice(&v);
+                            }
+                            let ctx = FaceCtx {
+                                ip_weight: fwts[q],
+                                measure,
+                                normal,
+                                scale,
+                                dim,
+                                x: xp,
+                            };
+                            let fv = FaceVals { phi: Vec::new(), vec_phi };
+                            integ.assemble_trace2(&ctx, &fv, &tv, &mut be);
+                        }
+                        let r0 = test_offsets[*tb];
+                        let coff: usize = (0..li)
+                            .map(|l2| {
+                                let f2 = trace.elem_face_id(e, l2);
+                                crate::dpg::dpg_basis::nd_face_dofs(p_us, trace.is_quad_face(f2))
+                            })
+                            .sum();
+                        for i in 0..nr {
+                            for j in 0..nfd {
+                                bmat[(r0 + i) * n_tr + col_base + coff + j] += be[i * nfd + j];
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let sk = match &self.trial_spaces[*tbb] {
                     TrialSpace::Trace { skeleton } => skeleton,
                     _ => panic!("trace integrator on non-trace block"),
                 };
-                let nr = test_sizes[*tb];
-                let col_base = tr_offs[*tbb];
                 for (li, lf) in lfs.iter().enumerate() {
                     let fid = sk.elem_face_id(e, li);
                     let nfd = sk.dofs_per_face(fid);
@@ -778,6 +907,17 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     for (q, fparam) in fpts.iter().enumerate() {
                         let (xp, normal, measure) =
                             face_geo_at(&mesh, sk, fid, fparam, dim);
+                        // For an ori<0 (reversed) face the element's local
+                        // face map is the TRANSPOSE of the canonical map
+                        // (x_local(a,b) = x_can(b,a)): pass the transposed
+                        // parameter so the test basis is evaluated at the
+                        // same physical point as the face basis (MFEM
+                        // Loc1/Loc2 chaining in `SetAllIntPoints`).
+                        let fparam_e: Vec<f64> = if scale < 0.0 && is_qf {
+                            vec![fparam[1], fparam[0]]
+                        } else {
+                            fparam.to_vec()
+                        };
                         // Initial guess from the element's local face
                         // parametrization; Newton-invert to the exact
                         // reference coordinates of the physical face point.
@@ -785,7 +925,7 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                             et,
                             lf,
                             is_quad_face_geom && is_qf,
-                            fparam,
+                            &fparam_e,
                         );
                         let xiref = invert_element_map(
                             &mesh,
@@ -1345,7 +1485,19 @@ pub fn face_geo_at<M: MeshTopology + Clone>(
     param: &[f64],
     dim: usize,
 ) -> (Vec<f64>, Vec<f64>, f64) {
-    let fnodes = sk.face_nodes(f);
+    face_geo_nodes(mesh, sk.face_nodes(f), sk.is_quad_face(f), param, dim)
+}
+
+/// [`face_geo_at`] over explicit face nodes (used by the ND trace assembly,
+/// whose skeleton is a [`crate::dpg::dpg_basis::TraceSpace`], not a
+/// [`SkeletonSpace`]).
+pub fn face_geo_nodes<M: MeshTopology>(
+    mesh: &M,
+    fnodes: &[u32],
+    is_quad_face: bool,
+    param: &[f64],
+    dim: usize,
+) -> (Vec<f64>, Vec<f64>, f64) {
     let c: Vec<Vec<f64>> = fnodes.iter().map(|&n| mesh.node_coords(n).to_vec()).collect();
     if dim == 2 {
         let s = param[0];
@@ -1359,7 +1511,7 @@ pub fn face_geo_at<M: MeshTopology + Clone>(
         let normal = vec![dy, -dx];
         let measure = (dx * dx + dy * dy).sqrt();
         (x, normal, measure)
-    } else if sk.is_quad_face(f) {
+    } else if is_quad_face {
         let (s, t) = (param[0], param[1]);
         let x = vec![
             (1.0 - s) * (1.0 - t) * c[0][0]
