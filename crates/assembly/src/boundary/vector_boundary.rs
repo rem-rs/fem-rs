@@ -329,7 +329,7 @@ impl VectorBoundaryAssembler {
             let nodes = mesh.face_nodes(f);
             if nodes.len() < 2 { continue; }
             // Find the adjacent element to apply orientation signs.
-            let elem = mesh.face_elements(f).first().copied().unwrap_or(0);
+            let elem = mesh.face_adjacent_elems(f).first().copied().unwrap_or(0);
             let pa = mesh.node_coords(nodes[0]);
             let pb = mesh.node_coords(nodes[1]);
             let tx = pb[0] - pa[0]; let ty = pb[1] - pa[1];
@@ -1327,10 +1327,11 @@ mod tests {
     /// precision.  (With the old chord/3-corner face quadrature the top face
     /// degenerated into half its area on a flat patch.)
     ///
-    /// The geometry is built by hand: `Mesh::set_curvature` must not be used
-    /// for this test — see the `set_curvature_hex8` note in the round-10
-    /// report (it mis-assigns the order-2 geometry nodes of a Hex8, giving a
-    /// degenerate owner Jacobian).
+    /// The order-2 geometry comes from `Mesh::set_curvature` (fixed in round 12,
+    /// D26: it used to mis-assign the Hex8 geometry nodes and produce a
+    /// degenerate Jacobian), with the `z = 1` nodal values then bowed.  This
+    /// doubles as a regression that the assembly path consumes the geometry
+    /// produced by `set_curvature`.
     #[test]
     fn hex_quad_face_measure_curved_isoparametric() {
         use fem_element::lagrange::factory::{ElemType as FEType, ref_elem};
@@ -1340,35 +1341,29 @@ mod tests {
 
         // ── single Hex8 topology (unit cube) ────────────────────────────────
         let mut mesh = Mesh::<3>::unit_cube_hex(1);
-        let n_vert = mesh.n_nodes();
 
-        // ── replace the geometry with a hand-built order-2 one ──────────────
+        // ── order-2 geometry from set_curvature, bowing the z = 1 face ──────
+        mesh.set_curvature(2);
         let hex2 = ref_elem(FEType::Hex, 2);
         let rc = hex2.dof_coords();
-        let npe = rc.len();
-        let mut conn = Vec::with_capacity(npe);
-        let mut coords = mesh.coords.clone();
-        for (d, r) in rc.iter().enumerate() {
-            let x = 0.5 * (r[0] + 1.0);
-            let y = 0.5 * (r[1] + 1.0);
-            let xt = 2.0 * x - 1.0;
-            let yt = 2.0 * y - 1.0;
-            let z = if (r[2] - 1.0).abs() < 1e-12 {
-                1.0 + b * (1.0 - xt * xt) * (1.0 - yt * yt)
-            } else {
-                0.5 * (r[2] + 1.0)
-            };
-            coords.extend_from_slice(&[x, y, z]);
-            conn.push(n_vert as u32 + d as u32);
+        {
+            let npe = mesh.geometry.as_ref().expect("order-2 geometry").nodes_per_elem;
+            assert_eq!(npe, rc.len());
+            let conn = mesh.geometry.as_ref().unwrap().conn.clone();
+            let g = mesh.geometry.as_mut().unwrap();
+            let mut bumped = 0;
+            for (d, r) in rc.iter().enumerate() {
+                if (r[2] - 1.0).abs() > 1e-12 {
+                    continue; // only the z = 1 face
+                }
+                let n = conn[d] as usize;
+                let xt = 2.0 * g.coords[3 * n] - 1.0;
+                let yt = 2.0 * g.coords[3 * n + 1] - 1.0;
+                g.coords[3 * n + 2] = 1.0 + b * (1.0 - xt * xt) * (1.0 - yt * yt);
+                bumped += 1;
+            }
+            assert_eq!(bumped, 9, "expected the 3x3 z = 1 geometry nodes");
         }
-        let n_geo = n_vert + npe;
-        mesh.geometry = Some(fem_mesh::simplex::GeometryData {
-            order: 2,
-            conn,
-            nodes_per_elem: npe,
-            coords,
-            n_nodes: n_geo,
-        });
         assert_eq!(mesh.geom_order(), 2);
 
         // ── top face (z = 1, tag 2) ─────────────────────────────────────────

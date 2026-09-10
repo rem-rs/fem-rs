@@ -60,6 +60,23 @@ fn local_element_edges(dim: usize, elem_type: ElementType) -> Vec<[usize; 2]> {
     }
 }
 
+/// Reference-cube corner coordinates `[-1,1]³` of the 8 `Hex8` vertices, in the
+/// mesh/MFEM vertex order (`v0..v7` = bottom face CCW, then top face CCW).
+///
+/// This is the ordering of `Mesh::element_nodes` for `Hex8` (see also the
+/// `HEX_CORNERS` lattice table in `fem-space::lor`): `v2 = (1,1,-1)`,
+/// `v3 = (-1,1,-1)`, `v6 = (1,1,1)`, `v7 = (-1,1,1)`.
+const HEX8_REF_CORNERS: [[f64; 3]; 8] = [
+    [-1.0, -1.0, -1.0],
+    [1.0, -1.0, -1.0],
+    [1.0, 1.0, -1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [-1.0, 1.0, 1.0],
+];
+
 /// High-order geometry data for curved meshes (set via [`Mesh::set_curvature`]).
 ///
 /// When present, the mesh's geometry is represented using polynomial order
@@ -410,7 +427,24 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    /// Hex8 → HexQk geometry: trilinear interpolation of GLL nodal positions.
+    /// Hex8 → HexQk geometry: the linear (trilinear) geometry re-expressed in
+    /// the order-`p` Gauss–Lobatto basis.
+    ///
+    /// This is the MFEM `Mesh::SetCurvature` procedure: `Mesh::GetNodes`
+    /// projects the identity vector coefficient through the **linear** element
+    /// transformation (`ProjectCoefficient(XYZ_VectorFunction)` →
+    /// `FiniteElement::Project` evaluates the coefficient at `T_lin(ip)`), so
+    /// every geometry node of an element sits at `T_lin(rc)`, the linear map
+    /// evaluated at that node's reference position.  Because the multilinear
+    /// map of a straight-sided hex is interpolated *exactly* by nodal Q_p
+    /// bases, the resulting high-order geometry is identical (to round-off) to
+    /// the linear one and `det J` cannot change sign.
+    ///
+    /// Vertex DOFs reuse the mesh vertices; edge DOFs are shared between the
+    /// elements meeting at that mesh edge (keyed by the vertex pair), so the
+    /// geometry stays C0-continuous.  Face/interior nodes are created per
+    /// element — for a straight-sided hex the duplicates coincide, so the
+    /// geometry map is still single-valued.
     fn set_curvature_hex8(&mut self, p: usize) {
         use fem_element::lagrange::factory::HexQk;
         use fem_element::ReferenceElement;
@@ -418,24 +452,28 @@ impl<const D: usize> Mesh<D> {
         let quad = HexQk::new(p);
         let npe_new = quad.n_dofs(); // (p+1)³
         let n_elems = self.n_elems();
-        let n_verts = self.n_nodes();
 
         let dof_ref = quad.dof_coords();
 
         let mut geom_conn = vec![0u32; n_elems * npe_new];
         let mut geom_coords = self.coords.clone();
-        let mut next_geom = n_verts as NodeId;
+        let mut next_geom = self.n_nodes() as NodeId;
 
-        // Edge map for dedup: edge key → (creator's first vertex, shared node ids in order).
-        let mut edge_map: std::collections::HashMap<(NodeId, NodeId), (NodeId, Vec<NodeId>)> =
+        // Ascending 1-D Gauss–Lobatto node coordinates of the tensor grid,
+        // i.e. the coordinates of the p+1 nodes on each reference axis.
+        let mut gll: Vec<f64> = dof_ref.iter().map(|c| c[0]).collect();
+        gll.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        gll.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+        // Shared edge nodes: edge key = (min vertex, max vertex) → ids ordered
+        // from the min vertex towards the max vertex.
+        let mut edge_map: std::collections::HashMap<(NodeId, NodeId), Vec<NodeId>> =
             std::collections::HashMap::new();
 
-        // Hex8 local edges in canonical order.
-        let hex_edges: Vec<(usize, usize)> = vec![
-            (0,1), (1,2), (2,3), (3,0), // bottom face edges
-            (4,5), (5,6), (6,7), (7,4), // top face edges
-            (0,4), (1,5), (2,6), (3,7), // vertical edges
-        ];
+        // Local vertex index whose reference corner lies at `pos`.
+        let corner_at = |pos: &[f64]| -> Option<usize> {
+            (0..8).find(|&v| (0..3).all(|a| (HEX8_REF_CORNERS[v][a] - pos[a]).abs() < 1e-12))
+        };
 
         for e in 0..n_elems {
             let verts = self.elem_nodes(e as ElemId);
@@ -443,84 +481,64 @@ impl<const D: usize> Mesh<D> {
 
             for d in 0..npe_new {
                 let rc = &dof_ref[d];
-                let on_xmin = (rc[0] + 1.0).abs() < 1e-12;
-                let on_xmax = (rc[0] - 1.0).abs() < 1e-12;
-                let on_ymin = (rc[1] + 1.0).abs() < 1e-12;
-                let on_ymax = (rc[1] - 1.0).abs() < 1e-12;
-                let on_zmin = (rc[2] + 1.0).abs() < 1e-12;
-                let on_zmax = (rc[2] - 1.0).abs() < 1e-12;
-
-                let n_face_flags = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
-                    .iter().filter(|&&b| b).count();
-
-                if n_face_flags >= 3 {
-                    // Vertex DOF
-                    let vx = if on_xmin { 0 } else { 1 };
-                    let vy = if on_ymin { 0 } else { 1 };
-                    let vz = if on_zmin { 0 } else { 1 };
-                    let local_v = match (vx, vy, vz) {
-                        (0,0,0) => 0, (1,0,0) => 1, (1,1,0) => 2, (0,1,0) => 3,
-                        (0,0,1) => 4, (1,0,1) => 5, (1,1,1) => 6, (0,1,1) => 7,
-                        _ => unreachable!(),
-                    };
-                    geom_conn[base + d] = verts[local_v];
-                } else if n_face_flags == 2 {
-                    // Edge DOF
-                    let mut edge_local: Option<(usize, f64)> = None;
-                    for (ei, &(a, b)) in hex_edges.iter().enumerate() {
-                        let va = verts[a];
-                        let vb = verts[b];
-                        let ca = self.coords_of(va);
-                        let cb = self.coords_of(vb);
-                        let mut on_edge = true;
-                        let mut t = 0.0;
-                        for dim in 0..3 {
-                            let fa = ca[dim];
-                            let fb = cb[dim];
-                            let f = rc[dim];
-                            if (fa - fb).abs() < 1e-12 {
-                                if (f - fa).abs() > 1e-12 { on_edge = false; break; }
-                            } else {
-                                t = (f - fa) / (fb - fa);
-                                if t < -1e-12 || t > 1.0 + 1e-12 { on_edge = false; break; }
-                            }
-                        }
-                        if on_edge {
-                            edge_local = Some((ei, t.clamp(0.0, 1.0)));
-                            break;
-                        }
-                    }
-                    if let Some((ei, t)) = edge_local {
-                        let (a, b) = hex_edges[ei];
-                        let va = verts[a];
-                        let vb = verts[b];
-                        let key = (va.min(vb), va.max(vb));
-                        let entry = edge_map.entry(key).or_insert_with(|| {
-                            let ca = self.coords_of(va);
-                            let cb = self.coords_of(vb);
-                            let mut new_ids = Vec::with_capacity(p - 1);
-                            for j in 0..(p - 1) {
-                                let tt = (j + 1) as f64 / p as f64;
-                                let mut x = [0.0_f64; 3];
-                                for dd in 0..3 { x[dd] = (1.0 - tt) * ca[dd] + tt * cb[dd]; }
-                                geom_coords.extend_from_slice(&x);
-                                new_ids.push(next_geom);
-                                next_geom += 1;
-                            }
-                            (va, new_ids)
-                        });
-                        let idx = (t * (p - 1) as f64).round() as usize;
-                        let idx = idx.min(p - 2);
-                        geom_conn[base + d] = entry.1[idx];
+                // Which reference axes are pinned to ±1 (i.e. to a face)?
+                let mut free_axis = None;
+                let mut n_pinned = 0usize;
+                for a in 0..3 {
+                    if (rc[a] + 1.0).abs() < 1e-12 || (rc[a] - 1.0).abs() < 1e-12 {
+                        n_pinned += 1;
                     } else {
-                        // Face or interior DOF — trilinear interpolation.
-                        let x = Self::trilinear_interp_3d(verts, self, rc);
-                        geom_coords.extend_from_slice(&x);
-                        geom_conn[base + d] = next_geom;
-                        next_geom += 1;
+                        free_axis = Some(a);
                     }
+                }
+
+                if n_pinned == 3 {
+                    // Vertex DOF: reuse the existing mesh vertex (HexQk orders
+                    // the 8 vertex DOFs in the mesh vertex order).
+                    let local_v = corner_at(rc).expect("hex vertex DOF at a reference corner");
+                    geom_conn[base + d] = verts[local_v];
+                } else if n_pinned == 2 {
+                    // Edge DOF: exactly one free axis, `rc[free]` is an interior
+                    // Lobatto node of that axis.
+                    let fa = free_axis.expect("hex edge DOF has one free axis");
+                    let rank = gll
+                        .iter()
+                        .position(|&g| (g - rc[fa]).abs() < 1e-12)
+                        .expect("hex edge DOF at a Lobatto node");
+                    debug_assert!(rank >= 1 && rank < p);
+                    // The two end vertices of the edge: free axis at -1 and +1.
+                    let end = |sign: f64| -> usize {
+                        let mut pos = [rc[0], rc[1], rc[2]];
+                        pos[fa] = sign;
+                        corner_at(&pos).expect("hex edge end vertex")
+                    };
+                    let (va, vb) = (verts[end(-1.0)], verts[end(1.0)]);
+                    let key = (va.min(vb), va.max(vb));
+                    let ids = edge_map.entry(key).or_insert_with(|| {
+                        // Order the nodes from the min vertex to the max vertex;
+                        // `gll[1..=p-1]` are the interior Lobatto coordinates,
+                        // i.e. `t = (gll[r]+1)/2` is the parameter from the end
+                        // at reference -1.
+                        let ca = self.coords_of(key.0);
+                        let cb = self.coords_of(key.1);
+                        let mut ids = Vec::with_capacity(p - 1);
+                        for &g in &gll[1..p] {
+                            let t = 0.5 * (g + 1.0);
+                            let mut x = [0.0_f64; 3];
+                            for dd in 0..3 {
+                                x[dd] = (1.0 - t) * ca[dd] + t * cb[dd];
+                            }
+                            geom_coords.extend_from_slice(&x);
+                            ids.push(next_geom);
+                            next_geom += 1;
+                        }
+                        ids
+                    });
+                    // Rank of this node counted from the min vertex.
+                    let idx = if va < vb { rank - 1 } else { p - 1 - rank };
+                    geom_conn[base + d] = ids[idx];
                 } else {
-                    // Face or interior DOF — trilinear interpolation.
+                    // Face or interior DOF: position from the linear map.
                     let x = Self::trilinear_interp_3d(verts, self, rc);
                     geom_coords.extend_from_slice(&x);
                     geom_conn[base + d] = next_geom;
@@ -538,18 +556,25 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
+    /// Evaluate the linear (trilinear) `Hex8` map at the reference point `rc`:
+    /// the multilinear interpolant of the 8 vertex coordinates in the mesh
+    /// `Hex8` vertex order (see [`HEX8_REF_CORNERS`]).
     fn trilinear_interp_3d(verts: &[NodeId], mesh: &Self, rc: &[f64]) -> [f64; 3] {
-        let xi = (rc[0] + 1.0) / 2.0;
-        let eta = (rc[1] + 1.0) / 2.0;
-        let zeta = (rc[2] + 1.0) / 2.0;
         let mut x = [0.0_f64; 3];
-        for v in 0..8 {
+        for (v, corner) in HEX8_REF_CORNERS.iter().enumerate() {
+            // Multilinear hat function of vertex `v`: 1 at its corner, 0 at all
+            // the others (product of the 1-D hats on each axis).
+            let mut w = 1.0;
+            for a in 0..3 {
+                w *= 0.5 * (1.0 + rc[a] * corner[a]);
+            }
+            if w == 0.0 {
+                continue;
+            }
             let vc = mesh.coords_of(verts[v]);
-            let bx = if v & 1 != 0 { xi } else { 1.0 - xi };
-            let by = if v & 2 != 0 { eta } else { 1.0 - eta };
-            let bz = if v & 4 != 0 { zeta } else { 1.0 - zeta };
-            let w = bx * by * bz;
-            for d in 0..3 { x[d] += w * vc[d]; }
+            for d in 0..3 {
+                x[d] += w * vc[d];
+            }
         }
         x
     }
@@ -3055,8 +3080,19 @@ impl<const D: usize> Mesh<D> {
         self.face_to_elem.as_ref().unwrap()
     }
 
-    /// Iterate over all faces and their elements.
-    pub fn face_elements(&self, f: FaceId) -> Vec<ElemId> {
+    /// All elements adjacent to boundary face `f` (computed by scanning the
+    /// element connectivity, no `face_to_elem` table needed).
+    ///
+    /// Returns a `Vec` because a boundary face may be touched by more than one
+    /// element (e.g. non-conformingly refined meshes).
+    ///
+    /// NOTE: this is *not* MFEM's `Mesh::GetFaceElements(face, &elem1, &elem2)`
+    /// — that is [`MeshTopology::face_elements`] (same name range, but
+    /// returning `(ElemId, Option<ElemId>)`).  The two used to be spelled
+    /// identically, which made call sites resolve to whichever version was in
+    /// scope; the `Vec`-returning inherent method is therefore named
+    /// `face_adjacent_elems`.
+    pub fn face_adjacent_elems(&self, f: FaceId) -> Vec<ElemId> {
         let mut result = Vec::new();
         let npf = if self.n_faces() > 0 { self.face_conn.len() / self.n_faces() } else { 0 };
         let fnodes: Vec<u32> = self.face_conn[f as usize * npf..f as usize * npf + npf].to_vec();
@@ -3747,6 +3783,434 @@ mod tests {
         // Off-centre: ∂y/∂ξ = 0.1·(1−2ξ) = 0.05 at ξ=0.25.
         let (jq, _, _) = m.element_jacobian(0, &[0.25, 0.5]);
         assert!((jq[(1, 0)] - 0.05).abs() < 1e-12);
+    }
+
+    /// Sheared single `Hex8` with a non-parallelepiped shape: the top face is
+    /// translated/rotated relative to the bottom face, so the linear map is
+    /// genuinely multilinear (not affine).  Vertex order is the MFEM `Hex8`
+    /// order (bottom face CCW, then top face CCW).
+    fn sheared_hex_mesh() -> Mesh<3> {
+        Mesh::<3> {
+            coords: vec![
+                0.0, 0.0, 0.0, // v0
+                1.0, 0.0, 0.0, // v1
+                1.0, 1.0, 0.0, // v2
+                0.0, 1.0, 0.0, // v3
+                0.25, 0.1, 1.0, // v4
+                1.1, 0.2, 1.0, // v5
+                0.9, 1.3, 1.0, // v6
+                0.1, 0.9, 1.0, // v7
+            ],
+            conn: vec![0, 1, 2, 3, 4, 5, 6, 7],
+            elem_tags: vec![1],
+            elem_type: ElementType::Hex8,
+            face_conn: vec![],
+            face_tags: vec![],
+            face_type: ElementType::Quad4,
+            elem_types: None,
+            elem_offsets: None,
+            face_types: None,
+            face_offsets: None,
+            face_to_elem: None,
+            edge_conn: vec![],
+            edge_to_elem: vec![],
+            geometry: None,
+            nc_vertex_view: None,
+            vertex_parents: vec![],
+        }
+    }
+
+    /// Reference points of the 6 hex faces (one free axis pinned to ±1) plus
+    /// face-interior samples, used to probe `det J` on the whole boundary.
+    fn hex_boundary_probe_points() -> Vec<[f64; 3]> {
+        let mut pts = Vec::new();
+        for a in 0..3 {
+            for sign in [-1.0f64, 1.0] {
+                for &r in &[-2.0f64 / 3.0, 0.0, 2.0 / 3.0] {
+                    for &s in &[-2.0f64 / 3.0, 0.0, 2.0 / 3.0] {
+                        let mut xi = [0.0f64; 3];
+                        xi[a] = sign;
+                        xi[(a + 1) % 3] = r;
+                        xi[(a + 2) % 3] = s;
+                        pts.push(xi);
+                    }
+                }
+            }
+        }
+        pts
+    }
+
+    #[test]
+    fn set_curvature_hex8_straight_geometry_is_linear() {
+        // A straight-sided hex: the order-p Gauss-Lobatto geometry must
+        // reproduce the *linear* map exactly, so the isoparametric Jacobian is
+        // identical to the linear one and det J keeps its sign everywhere.
+        for (name, mut m) in [
+            ("unit_cube_hex(1)", Mesh::<3>::unit_cube_hex(1)),
+            (
+                "cartesian 2x2x2",
+                Mesh::<3>::make_cartesian_3d(2, 2, 2, ElementType::Hex8, 1.0, 1.0, 1.0, true),
+            ),
+            ("sheared hex", sheared_hex_mesh()),
+        ] {
+            for p in [2u8, 3] {
+                m.set_curvature(p);
+                let g = m.geometry.as_ref().expect("geometry missing");
+                assert_eq!(g.order, p);
+                assert_eq!(g.nodes_per_elem, (p as usize + 1).pow(3), "{name}");
+
+                // Sample points: the order-p nodal points of every element plus
+                // the boundary probe points (faces of the reference cube).
+                let mut probes = hex_boundary_probe_points();
+                {
+                    use fem_element::lagrange::factory::HexQk;
+                    use fem_element::ReferenceElement;
+                    probes.extend(
+                        HexQk::new(p as usize)
+                            .dof_coords()
+                            .iter()
+                            .map(|c| [c[0], c[1], c[2]]),
+                    );
+                }
+                probes.push([0.1, -0.2, 0.35]);
+
+                let mut m_lin = m.clone();
+                m_lin.geometry = None;
+
+                for e in 0..m.n_elems() {
+                    for xi in &probes {
+                        let (j_cur, det_cur, x_cur) = m.element_jacobian(e as u32, xi);
+                        let (j_lin, det_lin, x_lin) = m_lin.element_jacobian(e as u32, xi);
+                        assert!(
+                            det_cur > 1e-12,
+                            "{name} p={p} e={e} xi={xi:?}: det J = {det_cur} (must be > 0)"
+                        );
+                        for i in 0..3 {
+                            assert!(
+                                (x_cur[i] - x_lin[i]).abs() < 1e-12,
+                                "{name} p={p} e={e} xi={xi:?}: x[{i}] {} vs linear {}",
+                                x_cur[i],
+                                x_lin[i]
+                            );
+                            for d in 0..3 {
+                                assert!(
+                                    (j_cur[(i, d)] - j_lin[(i, d)]).abs() < 1e-12,
+                                    "{name} p={p} e={e} xi={xi:?}: J[{i},{d}] {} vs linear {}",
+                                    j_cur[(i, d)],
+                                    j_lin[(i, d)]
+                                );
+                            }
+                        }
+                        assert!(
+                            (det_cur - det_lin).abs() < 1e-12,
+                            "{name} p={p} e={e} xi={xi:?}: det {} vs linear {}",
+                            det_cur,
+                            det_lin
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn set_curvature_hex8_nodes_match_mfem_set_curvature() {
+        // Ground truth: MFEM 4.10 `Mesh::SetCurvature(order)` on the sheared
+        // hex, dumped per element as (H1 reference node, geometry node value)
+        // pairs via `GridFunction::GetElementVDofs` (harness: tmp/traps/
+        // d26_dump.cpp, mesh `tmp/traps/shear2.mesh`).  The reference points
+        // are given in MFEM's `[0,1]³` convention; `HexQk` uses `[-1,1]³`, so
+        // the test maps `rc_ours = 2*rc_mfem - 1` before matching.  The dof
+        // *order* differs between MFEM's H1_HexahedronElement and `HexQk`, so
+        // the comparison is keyed on the reference coordinates.
+        let mfem_2: [([f64; 3], [f64; 3]); 27] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, 1.0], [0.25, 0.1, 1.0]),
+            ([1.0, 0.0, 1.0], [1.1, 0.2, 1.0]),
+            ([1.0, 1.0, 1.0], [0.9, 1.3, 1.0]),
+            ([0.0, 1.0, 1.0], [0.1, 0.9, 1.0]),
+            ([0.5, 0.0, 0.0], [0.5, 0.0, 0.0]),
+            ([1.0, 0.5, 0.0], [1.0, 0.5, 0.0]),
+            ([0.5, 1.0, 0.0], [0.5, 1.0, 0.0]),
+            ([0.0, 0.5, 0.0], [0.0, 0.5, 0.0]),
+            ([0.5, 0.0, 1.0], [0.675, 0.15, 1.0]),
+            ([1.0, 0.5, 1.0], [1.0, 0.75, 1.0]),
+            ([0.5, 1.0, 1.0], [0.5, 1.1, 1.0]),
+            ([0.0, 0.5, 1.0], [0.175, 0.5, 1.0]),
+            ([0.0, 0.0, 0.5], [0.125, 0.05, 0.5]),
+            ([1.0, 0.0, 0.5], [1.05, 0.1, 0.5]),
+            ([1.0, 1.0, 0.5], [0.95, 1.15, 0.5]),
+            ([0.0, 1.0, 0.5], [0.05, 0.95, 0.5]),
+            ([0.5, 0.5, 0.0], [0.5, 0.5, 0.0]),
+            ([0.5, 0.0, 0.5], [0.5875, 0.075, 0.5]),
+            ([1.0, 0.5, 0.5], [1.0, 0.625, 0.5]),
+            ([0.5, 1.0, 0.5], [0.5, 1.05, 0.5]),
+            ([0.0, 0.5, 0.5], [0.0875, 0.5, 0.5]),
+            ([0.5, 0.5, 1.0], [0.5875, 0.625, 1.0]),
+            ([0.5, 0.5, 0.5], [0.54375, 0.5625, 0.5]),
+        ];
+
+        let mfem_3: [([f64; 3], [f64; 3]); 64] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, 1.0], [0.25, 0.10000000000000001, 1.0]),
+            ([1.0, 0.0, 1.0], [1.1000000000000001, 0.20000000000000001, 1.0]),
+            ([1.0, 1.0, 1.0], [0.90000000000000002, 1.3, 1.0]),
+            ([0.0, 1.0, 1.0], [0.10000000000000001, 0.90000000000000002, 1.0]),
+            ([0.27639320225002106, 0.0, 0.0], [0.27639320225002106, 0.0, 0.0]),
+            ([0.72360679774997894, 0.0, 0.0], [0.72360679774997894, 0.0, 0.0]),
+            ([1.0, 0.27639320225002106, 0.0], [1.0, 0.27639320225002106, 0.0]),
+            ([1.0, 0.72360679774997894, 0.0], [1.0, 0.72360679774997894, 0.0]),
+            ([0.27639320225002106, 1.0, 0.0], [0.27639320225002106, 1.0, 0.0]),
+            ([0.72360679774997894, 1.0, 0.0], [0.72360679774997894, 1.0, 0.0]),
+            ([0.0, 0.27639320225002106, 0.0], [0.0, 0.27639320225002106, 0.0]),
+            ([0.0, 0.72360679774997894, 0.0], [0.0, 0.72360679774997894, 0.0]),
+            (
+                [0.27639320225002106, 0.0, 1.0],
+                [0.48493422191251795, 0.12763932022500213, 1.0],
+            ),
+            (
+                [0.72360679774997894, 0.0, 1.0],
+                [0.8650657780874822, 0.17236067977499792, 1.0],
+            ),
+            (
+                [1.0, 0.27639320225002106, 1.0],
+                [1.0447213595499958, 0.50403252247502317, 1.0],
+            ),
+            (
+                [1.0, 0.72360679774997894, 1.0],
+                [0.95527864045000432, 0.99596747752497683, 1.0],
+            ),
+            (
+                [0.27639320225002106, 1.0, 1.0],
+                [0.32111456180001685, 1.0105572809000085, 1.0],
+            ),
+            (
+                [0.72360679774997894, 1.0, 1.0],
+                [0.67888543819998326, 1.1894427190999917, 1.0],
+            ),
+            (
+                [0.0, 0.27639320225002106, 1.0],
+                [0.20854101966249683, 0.32111456180001685, 1.0],
+            ),
+            (
+                [0.0, 0.72360679774997894, 1.0],
+                [0.14145898033750315, 0.67888543819998326, 1.0],
+            ),
+            (
+                [0.0, 0.0, 0.27639320225002106],
+                [0.069098300562505266, 0.027639320225002109, 0.27639320225002106],
+            ),
+            (
+                [0.0, 0.0, 0.72360679774997894],
+                [0.18090169943749473, 0.072360679774997896, 0.72360679774997894],
+            ),
+            (
+                [1.0, 0.0, 0.27639320225002106],
+                [1.0276393202250023, 0.055278640450004218, 0.27639320225002106],
+            ),
+            (
+                [1.0, 0.0, 0.72360679774997894],
+                [1.0723606797749978, 0.14472135954999579, 0.72360679774997894],
+            ),
+            (
+                [1.0, 1.0, 0.27639320225002106],
+                [0.97236067977499796, 1.0829179606750063, 0.27639320225002106],
+            ),
+            (
+                [1.0, 1.0, 0.72360679774997894],
+                [0.92763932022500217, 1.2170820393249937, 0.72360679774997894],
+            ),
+            (
+                [0.0, 1.0, 0.27639320225002106],
+                [0.027639320225002109, 0.97236067977499796, 0.27639320225002106],
+            ),
+            (
+                [0.0, 1.0, 0.72360679774997894],
+                [0.072360679774997896, 0.92763932022500217, 0.72360679774997894],
+            ),
+            (
+                [0.27639320225002106, 0.72360679774997894, 0.0],
+                [0.27639320225002106, 0.72360679774997894, 0.0],
+            ),
+            (
+                [0.72360679774997894, 0.72360679774997894, 0.0],
+                [0.72360679774997894, 0.72360679774997894, 0.0],
+            ),
+            (
+                [0.27639320225002106, 0.27639320225002106, 0.0],
+                [0.27639320225002106, 0.27639320225002106, 0.0],
+            ),
+            (
+                [0.72360679774997894, 0.27639320225002106, 0.0],
+                [0.72360679774997894, 0.27639320225002106, 0.0],
+            ),
+            (
+                [0.27639320225002106, 0.0, 0.27639320225002106],
+                [0.33403252247502313, 0.035278640450004214, 0.27639320225002106],
+            ),
+            (
+                [0.72360679774997894, 0.0, 0.27639320225002106],
+                [0.76270509831248412, 0.047639320225002113, 0.27639320225002106],
+            ),
+            (
+                [0.27639320225002106, 0.0, 0.72360679774997894],
+                [0.42729490168751583, 0.0923606797749979, 0.72360679774997894],
+            ),
+            (
+                [0.72360679774997894, 0.0, 0.72360679774997894],
+                [0.82596747752497679, 0.12472135954999579, 0.72360679774997894],
+            ),
+            (
+                [1.0, 0.27639320225002106, 0.27639320225002106],
+                [1.0123606797749978, 0.33931116292502739, 0.27639320225002106],
+            ),
+            (
+                [1.0, 0.72360679774997894, 0.27639320225002106],
+                [0.98763932022500212, 0.79888543819998303, 0.27639320225002106],
+            ),
+            (
+                [1.0, 0.27639320225002106, 0.72360679774997894],
+                [1.0323606797749978, 0.44111456180001685, 0.72360679774997894],
+            ),
+            (
+                [1.0, 0.72360679774997894, 0.72360679774997894],
+                [0.9676393202250021, 0.92068883707497251, 0.72360679774997894],
+            ),
+            (
+                [0.72360679774997894, 1.0, 0.27639320225002106],
+                [0.71124611797498105, 1.0523606797749978, 0.27639320225002106],
+            ),
+            (
+                [0.27639320225002106, 1.0, 0.27639320225002106],
+                [0.28875388202501895, 1.0029179606750063, 0.27639320225002106],
+            ),
+            (
+                [0.72360679774997894, 1.0, 0.72360679774997894],
+                [0.69124611797498103, 1.1370820393249936, 0.72360679774997894],
+            ),
+            (
+                [0.27639320225002106, 1.0, 0.72360679774997894],
+                [0.30875388202501897, 1.007639320225002, 0.72360679774997894],
+            ),
+            (
+                [0.0, 0.72360679774997894, 0.27639320225002106],
+                [0.039098300562505267, 0.71124611797498105, 0.27639320225002106],
+            ),
+            (
+                [0.0, 0.27639320225002106, 0.27639320225002106],
+                [0.057639320225002108, 0.28875388202501895, 0.27639320225002106],
+            ),
+            (
+                [0.0, 0.72360679774997894, 0.72360679774997894],
+                [0.1023606797749979, 0.69124611797498103, 0.72360679774997894],
+            ),
+            (
+                [0.0, 0.27639320225002106, 0.72360679774997894],
+                [0.15090169943749471, 0.30875388202501897, 0.72360679774997894],
+            ),
+            (
+                [0.27639320225002106, 0.27639320225002106, 1.0],
+                [0.43965558146251371, 0.37167184270002529, 1.0],
+            ),
+            (
+                [0.72360679774997894, 0.27639320225002106, 1.0],
+                [0.81360679774997902, 0.45347524157501473, 1.0],
+            ),
+            (
+                [0.27639320225002106, 0.72360679774997894, 1.0],
+                [0.36639320225002114, 0.76652475842498524, 1.0],
+            ),
+            (
+                [0.72360679774997894, 0.72360679774997894, 1.0],
+                [0.73034441853748633, 0.90832815729997474, 1.0],
+            ),
+            (
+                [0.27639320225002106, 0.27639320225002106, 0.27639320225002106],
+                [0.32151781404751922, 0.30272757079002616, 0.27639320225002106],
+            ),
+            (
+                [0.72360679774997894, 0.27639320225002106, 0.27639320225002106],
+                [0.74848218595248073, 0.32533747416002023, 0.27639320225002106],
+            ),
+            (
+                [0.27639320225002106, 0.72360679774997894, 0.27639320225002106],
+                [0.30126859045252297, 0.73546903033498434, 0.27639320225002106],
+            ),
+            (
+                [0.72360679774997894, 0.72360679774997894, 0.27639320225002106],
+                [0.72546903033498444, 0.77466252583997974, 0.27639320225002106],
+            ),
+            (
+                [0.27639320225002106, 0.27639320225002106, 0.72360679774997894],
+                [0.39453096966501561, 0.34533747416002025, 0.72360679774997883],
+            ),
+            (
+                [0.72360679774997894, 0.27639320225002106, 0.72360679774997894],
+                [0.788731409547477, 0.40453096966501562, 0.72360679774997883],
+            ),
+            (
+                [0.27639320225002106, 0.72360679774997894, 0.72360679774997894],
+                [0.34151781404751913, 0.75466252583997984, 0.72360679774997894],
+            ),
+            (
+                [0.72360679774997894, 0.72360679774997894, 0.72360679774997894],
+                [0.72848218595248093, 0.85727242920997393, 0.72360679774997883],
+            ),
+        ];
+
+        for (p, table) in [(2usize, &mfem_2[..]), (3, &mfem_3[..])] {
+            let mut m = sheared_hex_mesh();
+            m.set_curvature(p as u8);
+            let g = m.geometry.as_ref().expect("geometry missing");
+            let (npe, order) = (g.nodes_per_elem, g.order as usize);
+            assert_eq!(order, p);
+            assert_eq!(npe, table.len());
+
+            let (dof_ref, geom): (Vec<[f64; 3]>, Vec<[f64; 3]>) = {
+                use fem_element::lagrange::factory::HexQk;
+                use fem_element::ReferenceElement;
+                let rc = HexQk::new(p).dof_coords();
+                let x = (0..npe)
+                    .map(|d| {
+                        let n = g.conn[d] as usize;
+                        [g.coords[3 * n], g.coords[3 * n + 1], g.coords[3 * n + 2]]
+                    })
+                    .collect();
+                (rc.into_iter().map(|c| [c[0], c[1], c[2]]).collect(), x)
+            };
+
+            for d in 0..npe {
+                let rc_mfem = [
+                    0.5 * (dof_ref[d][0] + 1.0),
+                    0.5 * (dof_ref[d][1] + 1.0),
+                    0.5 * (dof_ref[d][2] + 1.0),
+                ];
+                let (k, _) = table
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (rc, _))| {
+                        (0..3).all(|a| (rc[a] - rc_mfem[a]).abs() < 1e-12)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("no MFEM node at reference point {rc_mfem:?} (dof {d})")
+                    });
+                let want = table[k].1;
+                for a in 0..3 {
+                    assert!(
+                        (geom[d][a] - want[a]).abs() <= 1e-15 * want[a].abs().max(1.0),
+                        "p={p} dof {d} (ref {rc_mfem:?}) axis {a}: got {} want {} (MFEM)",
+                        geom[d][a],
+                        want[a]
+                    );
+                }
+            }
+        }
     }
 
     #[test]

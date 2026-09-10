@@ -149,11 +149,9 @@ fn solve_h1(a: &Args, pm: &fem_parallel::ParallelMesh<Mesh<2>>, comm: &fem_paral
         let space = ps.local_space();
         Arc::new(move |f: u32| -> Vec<DofId> {
             let fn_ = mesh.face_nodes(f);
-            // `Mesh<D>` carries an inherent face_elements() -> Vec<ElemId> that
-            // shadows the MeshTopology trait method returning (elem1, elem2);
-            // take the first adjacent element (= MFEM's elem1).
+            // First element adjacent to the face (= MFEM's `elem1`).
             let elem = *mesh
-                .face_elements(f)
+                .face_adjacent_elems(f)
                 .first()
                 .expect("boundary face without adjacent element");
             let en = mesh.element_nodes(elem);
@@ -437,9 +435,9 @@ fn l2_face_dofs_closure<S: FESpace<Mesh = Mesh<2>>>(space: &S) -> impl Fn(u32) -
     move |f: u32| {
         let mesh = space.mesh();
         let fn_ = mesh.face_nodes(f);
-        // The inherent face_elements() (Vec<ElemId>) shadows the trait one.
+        // First element adjacent to the face (= MFEM's `elem1`).
         let elem = *mesh
-            .face_elements(f)
+            .face_adjacent_elems(f)
             .first()
             .expect("boundary face without adjacent element");
         let en = mesh.element_nodes(elem);

@@ -227,10 +227,10 @@ fn face_elements_after_build_all_boundary_faces_have_owner() {
             owner < mesh.n_elements() as u32,
             "boundary face {bf} should have an owned element, got {owner}"
         );
-        let elems = mesh.face_elements(bf as u32);
+        let elems = mesh.face_adjacent_elems(bf as u32);
         assert!(
             elems.contains(&owner),
-            "face_elements should include owner {owner} for face {bf}, got {elems:?}"
+            "face_adjacent_elems should include owner {owner} for face {bf}, got {elems:?}"
         );
         assert_eq!(
             elems.len(),
@@ -255,17 +255,34 @@ fn face_elements_3d_cube_each_boundary_face_has_owner() {
             owner < mesh.n_elements() as u32,
             "3-D boundary face {bf} should have an owner, got {owner}"
         );
-        let elems = mesh.face_elements(bf as u32);
+        let elems = mesh.face_adjacent_elems(bf as u32);
         assert_eq!(elems, vec![owner]);
     }
 }
 
 #[test]
-fn face_elements_not_built_returns_zero() {
+fn face_adjacent_elems_not_built_returns_zero() {
     let mesh = Mesh::<2>::unit_square_tri(4);
-    // face_elements scans element connectivity directly (no face_to_elem needed).
-    let elems = mesh.face_elements(0);
+    // face_adjacent_elems scans element connectivity directly (no face_to_elem
+    // needed).
+    let elems = mesh.face_adjacent_elems(0);
     assert_eq!(elems.len(), 1, "boundary face has exactly one adjacent element");
+}
+
+#[test]
+fn face_elements_trait_returns_owner_pair() {
+    // `MeshTopology::face_elements` (MFEM `Mesh::GetFaceElements`) returns the
+    // (elem1, elem2) pair and does NOT need the inherent Vec-returning
+    // `face_adjacent_elems` (which used to shadow it under the same name).
+    let mut mesh = Mesh::<3>::unit_cube_tet(2);
+    mesh.build_face_to_elem();
+    let f2e = mesh.face_to_elem.as_ref().unwrap();
+    for bf in 0..mesh.n_boundary_faces() as u32 {
+        let (e1, e2) = MeshTopology::face_elements(&mesh, bf);
+        assert_eq!(e1, f2e[bf as usize], "face {bf} owner");
+        assert_eq!(e2, None, "boundary face {bf} has no second element");
+        assert!(mesh.face_adjacent_elems(bf).contains(&e1));
+    }
 }
 
 // ─── make_cartesian_3d (MFEM MakeCartesian3D, verified 1:1 vs MFEM 4.10
