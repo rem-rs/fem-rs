@@ -295,9 +295,35 @@ pub fn solve_gmres_complex(
     solve_gmres_complex_with(a, b_re, b_im, x_re, x_im, tol, max_iter, restart, &jacobi)
 }
 
+/// Apply one row `(g0, g1)` of a complex 2×2 Givens rotation to the pair
+/// `(h1, h2)`: `out = g0·h1 + g1·h2` (component-wise complex arithmetic).
+#[inline]
+fn givens_row_apply(
+    g0: (f64, f64),
+    g1: (f64, f64),
+    h1: (f64, f64),
+    h2: (f64, f64),
+) -> (f64, f64) {
+    (
+        g0.0 * h1.0 - g0.1 * h1.1 + g1.0 * h2.0 - g1.1 * h2.1,
+        g0.0 * h1.1 + g0.1 * h1.0 + g1.0 * h2.1 + g1.1 * h2.0,
+    )
+}
+
 /// GMRES for complex systems with a caller-provided preconditioner.
 ///
-/// `apply_prec(r_re, r_im) -> (z_re, z_im)` should compute `z = M⁻¹·r`.
+/// `apply_prec(r_re, r_im) -> (z_re, z_im)` should compute `z = M⁻¹·r`
+/// (left preconditioning: the Krylov space is built from `M⁻¹A`).
+///
+/// Standard restarted complex GMRES: Arnoldi with modified Gram-Schmidt using
+/// the Hermitian inner product, and full 2×2 complex Givens rotations
+/// `G = (1/r)·[[h̄₁, h̄₂], [−h₂, h₁]]`, `r = √(|h₁|² + |h₂|²)`, which
+/// annihilate the sub-diagonal entry exactly, followed by the complex
+/// back-substitution `H y = g`.  Convergence is measured on the relative
+/// residual `‖b − A x‖ / ‖b‖` (the cheap recursive estimate `|g_{j+1}|`
+/// drives the in-cycle check; the true residual is recomputed at the end of
+/// every restart cycle).  The best iterate is returned even on
+/// non-convergence (soft failure), together with `(iterations, rel_res)`.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_complex_with<F>(
     a: &ComplexCsr,
@@ -316,6 +342,9 @@ where
     let n = a.nrows;
     assert_eq!(b_re.len(), n);
     assert_eq!(b_im.len(), n);
+    if n == 0 {
+        return Ok((0, 0.0));
+    }
     if x_re.len() != n { *x_re = vec![0.0; n]; }
     if x_im.len() != n { *x_im = vec![0.0; n]; }
 
@@ -331,7 +360,7 @@ where
     };
 
     let norm2 = |vr: &[f64], vi: &[f64]| -> f64 {
-        (vr.iter().map(|v| v * v).sum::<f64>() + vi.iter().map(|v| v * v).sum::<f64>()).sqrt()
+        vr.iter().zip(vi.iter()).map(|(u, v)| u * u + v * v).sum::<f64>().sqrt()
     };
 
     // Compute initial residual r = b - A*x
@@ -351,130 +380,112 @@ where
     }
 
     let mut total_iter = 0usize;
-    let m = restart.min(n);
+    let m = restart.max(1).min(n);
 
-    for _outer in 0..(max_iter.div_ceil(m)).max(1) {
+    'restart: while total_iter < max_iter {
         // Arnoldi with modified Gram-Schmidt
         let mut v_re: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
         let mut v_im: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
         let mut h = vec![vec![(0.0_f64, 0.0_f64); m]; m + 1]; // H[i][j]
-        let mut c_cos = vec![0.0_f64; m];
-        let mut c_sin = vec![(0.0_f64, 0.0_f64); m];
+        // Givens rotations stored as full 2×2 complex unitaries
+        // G = (1/r)·[[conj(h1), conj(h2)], [−h2, h1]] (rows orthonormal).
+        let mut givens: Vec<[(f64, f64); 4]> = Vec::with_capacity(m);
         let mut g = vec![(0.0_f64, 0.0_f64); m + 1]; // RHS of reduced system
 
         // Apply preconditioner to r: z0 = M^{-1} r
         let (z0_re, z0_im) = apply_prec(&r_re, &r_im);
         let beta = norm2(&z0_re, &z0_im);
+        if beta <= 1e-300 {
+            // Preconditioned residual vanished: x solves the system to
+            // round-off.  Refresh the true residual and stop.
+            a.spmv_into(x_re, x_im, &mut r_re, &mut r_im);
+            for i in 0..n {
+                r_re[i] = b_re[i] - r_re[i];
+                r_im[i] = b_im[i] - r_im[i];
+            }
+            res = norm2(&r_re, &r_im) / b_norm;
+            break 'restart;
+        }
         g[0] = (beta, 0.0);
 
         // v0 = z0 / beta
-        let inv_beta = if beta > 1e-300 { 1.0 / beta } else { 0.0 };
-        v_re.push(z0_re.iter().map(|&x| x * inv_beta).collect());
-        v_im.push(z0_im.iter().map(|&x| x * inv_beta).collect());
+        v_re.push(z0_re.iter().map(|&x| x / beta).collect());
+        v_im.push(z0_im.iter().map(|&x| x / beta).collect());
 
-        let mut j_end = 0;
+        let mut k = 0usize; // number of Arnoldi columns built
         for j in 0..m {
-            j_end = j;
+            k = j + 1;
             total_iter += 1;
 
             // w = M^{-1} A v_j
             let mut av_re = vec![0.0; n];
             let mut av_im = vec![0.0; n];
             a.spmv_into(&v_re[j], &v_im[j], &mut av_re, &mut av_im);
-            let (w_re, w_im) = apply_prec(&av_re, &av_im);
-            let mut ww_re = w_re;
-            let mut ww_im = w_im;
+            let (mut w_re, mut w_im) = apply_prec(&av_re, &av_im);
 
             // Modified Gram-Schmidt orthogonalization
             for i in 0..=j {
-                let (hr, hi) = dot2(&v_re[i], &v_im[i], &ww_re, &ww_im);
+                let (hr, hi) = dot2(&v_re[i], &v_im[i], &w_re, &w_im);
                 h[i][j] = (hr, hi);
                 for k in 0..n {
-                    ww_re[k] -= hr * v_re[i][k] - hi * v_im[i][k];
-                    ww_im[k] -= hr * v_im[i][k] + hi * v_re[i][k];
+                    w_re[k] -= hr * v_re[i][k] - hi * v_im[i][k];
+                    w_im[k] -= hr * v_im[i][k] + hi * v_re[i][k];
                 }
             }
-            let w_norm = norm2(&ww_re, &ww_im);
+            let w_norm = norm2(&w_re, &w_im);
             h[j + 1][j] = (w_norm, 0.0);
 
             // New Arnoldi vector
             if w_norm > 1e-300 {
-                let inv_wn = 1.0 / w_norm;
-                v_re.push(ww_re.iter().map(|&x| x * inv_wn).collect());
-                v_im.push(ww_im.iter().map(|&x| x * inv_wn).collect());
+                v_re.push(w_re.iter().map(|&x| x / w_norm).collect());
+                v_im.push(w_im.iter().map(|&x| x / w_norm).collect());
             } else {
+                // happy breakdown: the Krylov space already spans the solution
                 v_re.push(vec![0.0; n]);
                 v_im.push(vec![0.0; n]);
             }
 
-            // Apply previous Givens rotations to new column
-            for i in 0..j {
-                let (cr, si_re, si_im) = (c_cos[i], c_sin[i].0, c_sin[i].1);
-                let h_ir = h[i][j].0;
-                let h_ii = h[i][j].1;
-                let h_i1r = h[i + 1][j].0;
-                let h_i1i = h[i + 1][j].1;
-                h[i][j] = (cr * h_ir - si_re * h_i1r + si_im * h_i1i,
-                            cr * h_ii - si_re * h_i1i - si_im * h_i1r);
-                h[i+1][j] = (si_re * h_ir + cr * h_i1r - si_im * h_ii,  // simplified
-                              si_re * h_ii + cr * h_i1i + si_im * h_ir);
-                // Corrected complex Givens rotation application
-                let new_i_r = cr * h_ir - (si_re * h_i1r - si_im * h_i1i);
-                let new_i_i = cr * h_ii - (si_re * h_i1i + si_im * h_i1r);
-                let new_i1_r = si_re * h_ir + si_im * h_ii + cr * h_i1r;
-                let new_i1_i = -si_im * h_ir + si_re * h_ii + cr * h_i1i;
-                h[i][j]   = (new_i_r, new_i_i);
-                h[i+1][j] = (new_i1_r, new_i1_i);
+            // Apply previous Givens rotations to the new column
+            for (i, gt) in givens.iter().enumerate().take(j) {
+                let h1 = h[i][j];
+                let h2 = h[i + 1][j];
+                h[i][j] = givens_row_apply(gt[0], gt[1], h1, h2);
+                h[i + 1][j] = givens_row_apply(gt[2], gt[3], h1, h2);
             }
 
-            // Compute new Givens rotation for (h[j][j], h[j+1][j])
-            let a_r = h[j][j].0;
-            let a_i = h[j][j].1;
-            let b_r = h[j + 1][j].0;
-            let _b_i = h[j + 1][j].1;
-            let numer = (a_r * a_r + a_i * a_i + b_r * b_r + _b_i * _b_i).sqrt();
-            let denom = if numer > 1e-300 { numer } else { 1.0 };
-            let cos_j = (a_r * a_r + a_i * a_i).sqrt() / denom;
-            // sin_j = conj(a) * b / (|a| * denom) — simplify to real sin for stability
-            let a_norm = (a_r * a_r + a_i * a_i).sqrt();
-            let (s_r, s_i) = if a_norm > 1e-300 {
-                ((a_r * b_r + a_i * _b_i) / (a_norm * denom),
-                 (a_r * _b_i - a_i * b_r) / (a_norm * denom))
-            } else { (0.0, 0.0) };
-            c_cos[j] = cos_j;
-            c_sin[j] = (s_r, s_i);
-
-            // Apply rotation to h[j][j] and h[j+1][j]
-            h[j][j] = (cos_j * a_r + s_r * b_r - s_i * _b_i,
-                        cos_j * a_i + s_r * _b_i + s_i * b_r);
+            // New Givens rotation annihilating h[j+1][j]:
+            // G = (1/r)·[[conj(h1), conj(h2)], [−h2, h1]],  r = ‖(h1, h2)‖
+            let h1 = h[j][j];
+            let h2 = h[j + 1][j];
+            let rot = (h1.0 * h1.0 + h1.1 * h1.1 + h2.0 * h2.0 + h2.1 * h2.1).sqrt();
+            let gt = if rot < 1e-300 {
+                [(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]
+            } else {
+                [
+                    (h1.0 / rot, -h1.1 / rot),
+                    (h2.0 / rot, -h2.1 / rot),
+                    (-h2.0 / rot, -h2.1 / rot),
+                    (h1.0 / rot, h1.1 / rot),
+                ]
+            };
+            givens.push(gt);
+            h[j][j] = givens_row_apply(gt[0], gt[1], h1, h2);
             h[j + 1][j] = (0.0, 0.0);
 
-            // Apply rotation to g
-            let g_j = g[j];
-            g[j + 1] = (-s_r * g_j.0 + s_i * g_j.1, -s_r * g_j.1 - s_i * g_j.0);
-            g[j] = (cos_j * g_j.0 + s_r * g_j.0 + s_i * g_j.1,
-                    cos_j * g_j.1 + s_r * g_j.1 - s_i * g_j.0);
-            // Simplified: g[j] = (cos_j * |g_j|, 0)
-            let g_j_norm = (g_j.0 * g_j.0 + g_j.1 * g_j.1).sqrt();
-            g[j]     = (cos_j * g_j_norm, 0.0);
-            g[j + 1] = (-(s_r * g_j.0 + s_i * g_j.1) / g_j_norm.max(1e-300) * g_j_norm,
-                         (s_i * g_j.0 - s_r * g_j.1) / g_j_norm.max(1e-300) * g_j_norm);
-            // Correct formulas:
-            g[j]     = (cos_j * g_j_norm, 0.0);
-            let _g_j1 = g_j_norm * (s_r * s_r + s_i * s_i).sqrt();
-            let s_norm = (s_r * s_r + s_i * s_i).sqrt();
-            g[j + 1] = (-s_norm * g_j_norm, 0.0);
+            // Apply the rotation to the reduced RHS
+            let g1 = g[j];
+            let g2 = g[j + 1];
+            g[j] = givens_row_apply(gt[0], gt[1], g1, g2);
+            g[j + 1] = givens_row_apply(gt[2], gt[3], g1, g2);
 
-            // Residual estimate
-            res = g[j + 1].0.abs() / b_norm;
+            // Residual estimate |g[j+1]|
+            res = g[j + 1].0.hypot(g[j + 1].1) / b_norm;
             if res < tol || total_iter >= max_iter {
-                j_end = j;
                 break;
             }
         }
 
         // Back-substitution: solve upper triangular H * y = g
-        let k = j_end + 1;
         let mut y_re = vec![0.0_f64; k];
         let mut y_im = vec![0.0_f64; k];
         for i in (0..k).rev() {
@@ -508,17 +519,13 @@ where
         }
         res = norm2(&r_re, &r_im) / b_norm;
 
-        if res < tol || total_iter >= max_iter {
-            break;
+        if res < tol {
+            break 'restart;
         }
     }
 
-    if res <= tol || total_iter == 0 {
-        Ok((total_iter, res))
-    } else {
-        // Return best solution even on non-convergence (soft failure)
-        Ok((total_iter, res))
-    }
+    // Return the best iterate even on non-convergence (soft failure)
+    Ok((total_iter, res))
 }
 
 // ─── Complex BiCGSTAB ────────────────────────────────────────────────────────
@@ -760,6 +767,126 @@ mod tests {
         assert!((x_im[0] - 1.0).abs() < 1e-6, "x_im[0] = {}", x_im[0]);
         assert!((x_re[1] - 2.0).abs() < 1e-6, "x_re[1] = {}", x_re[1]);
         assert!((x_im[1] + 1.0).abs() < 1e-6, "x_im[1] = {}", x_im[1]);
+    }
+
+    #[test]
+    fn complex_gmres_spd_system() {
+        // Real symmetric positive definite system stored as complex
+        // (zero imaginary part): A = [[3,1,0],[1,3,1],[0,1,3]], x = [1,2,3],
+        // b = A·x = [5,10,11].
+        let row_ptr = vec![0, 2, 5, 7];
+        let col_idx = vec![0u32, 1, 0, 1, 2, 1, 2];
+        let re_vals = vec![3.0, 1.0, 1.0, 3.0, 1.0, 1.0, 3.0];
+        let im_vals = vec![0.0; 7];
+        let a = ComplexCsr { nrows: 3, ncols: 3, row_ptr, col_idx, re_vals, im_vals };
+        let b_re = vec![5.0, 10.0, 11.0];
+        let b_im = vec![0.0; 3];
+
+        let mut x_re = vec![0.0; 3];
+        let mut x_im = vec![0.0; 3];
+        let (iters, res) = solve_gmres_complex(
+            &a, &b_re, &b_im, &mut x_re, &mut x_im,
+            1e-13, 100, 50, true,
+        ).unwrap();
+        assert!(iters > 0);
+        assert!(res < 1e-12, "SPD GMRES residual too large: {res:e}");
+        assert!((x_re[0] - 1.0).abs() < 1e-10);
+        assert!((x_re[1] - 2.0).abs() < 1e-10);
+        assert!((x_re[2] - 3.0).abs() < 1e-10);
+        assert!(x_im.iter().all(|&v| v.abs() < 1e-10));
+    }
+
+    #[test]
+    fn complex_gmres_nonhermitian_system() {
+        // Genuinely complex non-Hermitian system with known exact solution:
+        // A = [[2+i, 1, 0.5], [0.3, 3−i, 1], [0, 0.4, 1+2i]],
+        // x_exact = [1+i, 2−i, 0.5+0.5i]; b is formed by the spmv itself.
+        let mut coo = ComplexCoo::new(3, 3);
+        coo.add(0, 0, 2.0, 1.0);
+        coo.add(0, 1, 1.0, 0.0);
+        coo.add(0, 2, 0.5, 0.0);
+        coo.add(1, 0, 0.3, 0.0);
+        coo.add(1, 1, 3.0, -1.0);
+        coo.add(1, 2, 1.0, 0.0);
+        coo.add(2, 1, 0.4, 0.0);
+        coo.add(2, 2, 1.0, 2.0);
+        let a = coo.into_complex_csr();
+
+        let x_true_re = vec![1.0, 2.0, 0.5];
+        let x_true_im = vec![1.0, -1.0, 0.5];
+        let mut b_re = vec![0.0; 3];
+        let mut b_im = vec![0.0; 3];
+        a.spmv_into(&x_true_re, &x_true_im, &mut b_re, &mut b_im);
+
+        let mut x_re = vec![0.0; 3];
+        let mut x_im = vec![0.0; 3];
+        let (iters, res) = solve_gmres_complex(
+            &a, &b_re, &b_im, &mut x_re, &mut x_im,
+            1e-13, 100, 50, true,
+        ).unwrap();
+        assert!(iters > 0);
+        assert!(res < 1e-12, "non-Hermitian GMRES residual too large: {res:e}");
+        for i in 0..3 {
+            assert!((x_re[i] - x_true_re[i]).abs() < 1e-10, "x_re[{i}] = {}", x_re[i]);
+            assert!((x_im[i] - x_true_im[i]).abs() < 1e-10, "x_im[{i}] = {}", x_im[i]);
+        }
+    }
+
+    #[test]
+    fn complex_gmres_schrodinger_operator() {
+        // Schrödinger Crank–Nicolson-type operator C = M + i·ω·A on a periodic
+        // 1D P1 lattice (n = 32): M = tridiag(h/6, 4h/6, h/6),
+        // A = tridiag(−1/h, 2/h, −1/h).  Unpreconditioned restarted GMRES
+        // (restart 50, as in the C++ `GMRESSolver` default) must drive the
+        // relative residual below 1e-12 — this operator class is what exposed
+        // the old real-only Givens-rotation bug.
+        use crate::CooMatrix;
+        let n = 32usize;
+        let h = 1.0_f64 / n as f64;
+        let omega = 0.37_f64;
+        let mut coo_m = CooMatrix::<f64>::new(n, n);
+        let mut coo_a = CooMatrix::<f64>::new(n, n);
+        for i in 0..n {
+            coo_m.add(i, i, 4.0 * h / 6.0);
+            coo_a.add(i, i, 2.0 / h);
+            coo_m.add(i, (i + 1) % n, h / 6.0);
+            coo_m.add(i, (i + n - 1) % n, h / 6.0);
+            coo_a.add(i, (i + 1) % n, -1.0 / h);
+            coo_a.add(i, (i + n - 1) % n, -1.0 / h);
+        }
+        let mass = coo_m.into_csr();
+        let stiff = coo_a.into_csr();
+
+        let mut coo_c = ComplexCoo::new(n, n);
+        for i in 0..n {
+            for p in mass.row_ptr[i]..mass.row_ptr[i + 1] {
+                coo_c.add(i, mass.col_idx[p] as usize, mass.values[p], 0.0);
+            }
+            for p in stiff.row_ptr[i]..stiff.row_ptr[i + 1] {
+                coo_c.add(i, stiff.col_idx[p] as usize, 0.0, omega * stiff.values[p]);
+            }
+        }
+        let c = coo_c.into_complex_csr();
+
+        let x_true_re: Vec<f64> =
+            (0..n).map(|i| ((i as f64) * 0.7).sin() * (1.0 + 0.3 * (0.31 * i as f64).cos())).collect();
+        let x_true_im: Vec<f64> = (0..n).map(|i| (0.53 * i as f64).cos()).collect();
+        let mut b_re = vec![0.0; n];
+        let mut b_im = vec![0.0; n];
+        c.spmv_into(&x_true_re, &x_true_im, &mut b_re, &mut b_im);
+
+        let mut x_re = vec![0.0; n];
+        let mut x_im = vec![0.0; n];
+        let (iters, res) = solve_gmres_complex(
+            &c, &b_re, &b_im, &mut x_re, &mut x_im,
+            1e-13, 200, 50, false,
+        ).unwrap();
+        assert!(iters > 0);
+        assert!(res < 1e-12, "Schrödinger GMRES residual {res:e} after {iters} iters");
+        for i in 0..n {
+            assert!((x_re[i] - x_true_re[i]).abs() < 1e-9, "x_re[{i}] = {}", x_re[i]);
+            assert!((x_im[i] - x_true_im[i]).abs() < 1e-9, "x_im[{i}] = {}", x_im[i]);
+        }
     }
 
     #[test]

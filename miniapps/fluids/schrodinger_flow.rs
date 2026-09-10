@@ -80,7 +80,7 @@
 //! cargo run --release --example schrodinger_flow -- --leapfrog -ms 4 -nx 8 -ny 8 -no-vis
 //! ```
 
-use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr};
+use fem_linalg::complex_csr::{solve_gmres_complex_with, ComplexCoo, ComplexCsr};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_solver::{fmt_g, solve_cg_mfem, IterResult, SliOptions};
 
@@ -668,190 +668,11 @@ impl CgFirstAndLast {
 
 // ─── Crank–Nicolson time step ────────────────────────────────────────────────
 
-/// Restarted unpreconditioned complex GMRES(m) solving `C x = b` from `x = 0`
-/// with MFEM `GMRESSolver` semantics (`iterative_mode = false`, threshold
-/// `max(rel_tol·‖b‖, abs_tol)`, inner-iteration counter across restarts).
-///
-/// Core-gap workaround: `fem_linalg::complex_csr::solve_gmres_complex`
-/// diverges on this operator — its Givens-rotation/`g` update is simplified
-/// to real arithmetic (the rotation output is overwritten as
-/// `g = (c·|g|, −|s|·|g|)`) and produces the wrong least-squares residual for
-/// a genuinely complex Hessenberg matrix (observed: residual grows to ~5e3
-/// on the 64-dof CN operator).  This local implementation uses the standard
-/// complex Givens rotation
-/// `G = [[c, s], [−s̄, c]]`, `c = |h1|/r`, `s = (h1/|h1|)·conj(h2)/r`,
-/// `r = √(|h1|²+|h2|²)`, which annihilates `h2` exactly.
-#[allow(clippy::too_many_arguments)]
-fn solve_gmres_mfem(
-    a: &ComplexCsr,
-    b_re: &[f64],
-    b_im: &[f64],
-    x_re: &mut Vec<f64>,
-    x_im: &mut Vec<f64>,
-    rel_tol: f64,
-    max_iter: usize,
-    m: usize,
-) -> (usize, f64) {
-    let n = a.nrows;
-    x_re.iter_mut().for_each(|v| *v = 0.0);
-    x_im.iter_mut().for_each(|v| *v = 0.0);
-
-    // r = b − A x (= b for x = 0)
-    let mut r_re = vec![0.0_f64; n];
-    let mut r_im = vec![0.0_f64; n];
-    a.spmv_into(x_re, x_im, &mut r_re, &mut r_im);
-    for i in 0..n {
-        r_re[i] = b_re[i] - r_re[i];
-        r_im[i] = b_im[i] - r_im[i];
-    }
-    let norm = |vre: &[f64], vim: &[f64]| -> f64 {
-        vre.iter().zip(vim.iter()).map(|(a, b)| a * a + b * b).sum::<f64>().sqrt()
-    };
-    let b_norm = norm(b_re, b_im);
-    let mut beta = norm(&r_re, &r_im);
-    // MFEM: threshold = max(rel_tol·beta0, abs_tol); abs_tol is 0 here.
-    let threshold = rel_tol * b_norm;
-    if b_norm == 0.0 || beta <= threshold {
-        return (0, beta);
-    }
-
-        let m = m.min(n);
-        let mut total_iter = 0usize;
-        let mut final_res = beta;
-
-        'restart: while total_iter < max_iter {
-            // Krylov basis
-            let mut v_re: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
-            let mut v_im: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
-            v_re.push(r_re.iter().map(|v| v / beta).collect());
-            v_im.push(r_im.iter().map(|v| v / beta).collect());
-            let mut h = vec![vec![(0.0_f64, 0.0_f64); m]; m + 1];
-            // Givens rotations stored as full 2x2 complex unitaries
-            // G = [[g00, g01], [g10, g11]] with rows orthonormal.
-            let mut givens: Vec<[(f64, f64); 4]> = Vec::with_capacity(m);
-            let mut g = vec![(0.0_f64, 0.0_f64); m + 1];
-            g[0] = (beta, 0.0);
-
-            let mut j = 0usize;
-            while j < m && total_iter < max_iter {
-                total_iter += 1;
-                // w = A v_j
-                let mut w_re = vec![0.0_f64; n];
-                let mut w_im = vec![0.0_f64; n];
-                a.spmv_into(&v_re[j], &v_im[j], &mut w_re, &mut w_im);
-                // modified Gram-Schmidt against v_0..v_j
-                for i in 0..=j {
-                    let (mut hr, mut hi) = (0.0_f64, 0.0_f64);
-                    for k in 0..n {
-                        hr += v_re[i][k] * w_re[k] + v_im[i][k] * w_im[k];
-                        hi += v_re[i][k] * w_im[k] - v_im[i][k] * w_re[k];
-                    }
-                    h[i][j] = (hr, hi);
-                    for k in 0..n {
-                        w_re[k] -= hr * v_re[i][k] - hi * v_im[i][k];
-                        w_im[k] -= hr * v_im[i][k] + hi * v_re[i][k];
-                    }
-                }
-                let w_norm = norm(&w_re, &w_im);
-                h[j + 1][j] = (w_norm, 0.0);
-                if w_norm > 1e-300 {
-                    v_re.push(w_re.iter().map(|v| v / w_norm).collect());
-                    v_im.push(w_im.iter().map(|v| v / w_norm).collect());
-                } else {
-                    // happy breakdown
-                    v_re.push(vec![0.0; n]);
-                    v_im.push(vec![0.0; n]);
-                }
-
-                // apply the previous Givens rotations to column j
-                for i in 0..j {
-                    let gt = givens[i];
-                    let h1 = h[i][j];
-                    let h2 = h[i + 1][j];
-                    h[i][j] = (gt[0].0 * h1.0 - gt[0].1 * h1.1 + gt[1].0 * h2.0 - gt[1].1 * h2.1,
-                               gt[0].0 * h1.1 + gt[0].1 * h1.0 + gt[1].0 * h2.1 + gt[1].1 * h2.0);
-                    h[i + 1][j] = (gt[2].0 * h1.0 - gt[2].1 * h1.1 + gt[3].0 * h2.0 - gt[3].1 * h2.1,
-                                   gt[2].0 * h1.1 + gt[2].1 * h1.0 + gt[3].0 * h2.1 + gt[3].1 * h2.0);
-                }
-
-                // new Givens rotation annihilating h[j+1][j]:
-                // G = (1/r) [[conj(h1), conj(h2)], [-h2, h1]],  r = ‖(h1,h2)‖
-                let h1 = h[j][j];
-                let h2 = h[j + 1][j];
-                let r = (h1.0 * h1.0 + h1.1 * h1.1 + h2.0 * h2.0 + h2.1 * h2.1).sqrt();
-                let gt = if r < 1e-300 {
-                    [(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]
-                } else {
-                    [
-                        (h1.0 / r, -h1.1 / r),
-                        (h2.0 / r, -h2.1 / r),
-                        (-h2.0 / r, -h2.1 / r),
-                        (h1.0 / r, h1.1 / r),
-                    ]
-                };
-                givens.push(gt);
-                h[j][j] = (gt[0].0 * h1.0 - gt[0].1 * h1.1 + gt[1].0 * h2.0 - gt[1].1 * h2.1,
-                           gt[0].0 * h1.1 + gt[0].1 * h1.0 + gt[1].0 * h2.1 + gt[1].1 * h2.0);
-                h[j + 1][j] = (0.0, 0.0);
-                let g1 = g[j];
-                let g2 = g[j + 1];
-                g[j] = (gt[0].0 * g1.0 - gt[0].1 * g1.1 + gt[1].0 * g2.0 - gt[1].1 * g2.1,
-                        gt[0].0 * g1.1 + gt[0].1 * g1.0 + gt[1].0 * g2.1 + gt[1].1 * g2.0);
-                g[j + 1] = (gt[2].0 * g1.0 - gt[2].1 * g1.1 + gt[3].0 * g2.0 - gt[3].1 * g2.1,
-                            gt[2].0 * g1.1 + gt[2].1 * g1.0 + gt[3].0 * g2.1 + gt[3].1 * g2.0);
-
-                final_res = g[j + 1].0.hypot(g[j + 1].1);
-                j += 1;
-                if final_res <= threshold {
-                    break;
-                }
-            }
-
-        // back-substitution: solve H y = g (upper triangular, k = j rows)
-        let k = j;
-        let mut y_re = vec![0.0_f64; k];
-        let mut y_im = vec![0.0_f64; k];
-        for i in (0..k).rev() {
-            let (mut sr, mut si) = g[i];
-            for jj in (i + 1)..k {
-                let (hr, hi) = h[i][jj];
-                sr -= hr * y_re[jj] - hi * y_im[jj];
-                si -= hr * y_im[jj] + hi * y_re[jj];
-            }
-            let (hr, hi) = h[i][i];
-            let den = hr * hr + hi * hi;
-            if den > 1e-300 {
-                y_re[i] = (sr * hr + si * hi) / den;
-                y_im[i] = (si * hr - sr * hi) / den;
-            }
-        }
-        // x += V y
-        for jj in 0..k {
-            for i in 0..n {
-                x_re[i] += y_re[jj] * v_re[jj][i] - y_im[jj] * v_im[jj][i];
-                x_im[i] += y_re[jj] * v_im[jj][i] + y_im[jj] * v_re[jj][i];
-            }
-        }
-
-        if final_res <= threshold {
-            break 'restart;
-        }
-        // new residual for the next cycle
-        a.spmv_into(x_re, x_im, &mut r_re, &mut r_im);
-        for i in 0..n {
-            r_re[i] = b_re[i] - r_re[i];
-            r_im[i] = b_im[i] - r_im[i];
-        }
-        beta = norm(&r_re, &r_im);
-        final_res = beta;
-    }
-
-    (total_iter, final_res / b_norm)
-}
-
 /// One CN solve ψⁿ⁺¹ = C⁻¹ R ψⁿ (MFEM `CrankNicolsonTimeBaseSolver::Mult`):
 /// z = R ψⁿ, then GMRES on C with the C++ defaults (unpreconditioned,
-/// restart `m = 50`, `iterative_mode = false`).
+/// restart `m = 50`, `iterative_mode = false`) via the library
+/// `fem_linalg::complex_csr::solve_gmres_complex_with` (standard complex
+/// Givens rotations, MFEM-GMRESSolver-convergent relative residual).
 ///
 /// A free function so both wavefunctions can borrow the shared operators
 /// while `SchrodingerSolver` is mutably borrowed.
@@ -866,8 +687,17 @@ fn cn_mult(
     let mut z_re = vec![0.0_f64; n];
     let mut z_im = vec![0.0_f64; n];
     r_form.spmv_into(&psi.0, &psi.1, &mut z_re, &mut z_im);
-    let (_iters, res) =
-        solve_gmres_mfem(c_form, &z_re, &z_im, &mut psi.0, &mut psi.1, rtol, max_iter, 50);
+    // MFEM `gmres_solver.iterative_mode = false`: every solve starts from
+    // x = 0 (the incoming ψⁿ only builds the RHS).
+    psi.0.iter_mut().for_each(|v| *v = 0.0);
+    psi.1.iter_mut().for_each(|v| *v = 0.0);
+    // C++ `GMRESSolver()` runs without a preconditioner.
+    let identity =
+        |vr: &[f64], vi: &[f64]| -> (Vec<f64>, Vec<f64>) { (vr.to_vec(), vi.to_vec()) };
+    let (_iters, res) = solve_gmres_complex_with(
+        c_form, &z_re, &z_im, &mut psi.0, &mut psi.1, rtol, max_iter, 50, &identity,
+    )
+    .unwrap();
     // MFEM_VERIFY(gmres_solver.GetConverged(), "Crank Nicolson solver failed")
     assert!(res <= rtol, "Crank Nicolson solver failed (res = {res:e})");
 }
@@ -1425,6 +1255,23 @@ fn run<const D: usize>(opt: Options, stats: bool) {
 mod gmres_tests {
     use super::*;
 
+    /// Unpreconditioned restarted GMRES through the library solver
+    /// (the CN-solve path: C++ `GMRESSolver()` has no preconditioner).
+    fn gmres_unpreconditioned(
+        c: &ComplexCsr,
+        b_re: &[f64],
+        b_im: &[f64],
+        xr: &mut Vec<f64>,
+        xi: &mut Vec<f64>,
+        tol: f64,
+        max_iter: usize,
+        m: usize,
+    ) -> (usize, f64) {
+        let identity =
+            |vr: &[f64], vi: &[f64]| -> (Vec<f64>, Vec<f64>) { (vr.to_vec(), vi.to_vec()) };
+        solve_gmres_complex_with(c, b_re, b_im, xr, xi, tol, max_iter, m, &identity).unwrap()
+    }
+
     #[test]
     fn cartesian_o2_periodic_assembly_is_sound() {
         let g = CartesianH1::<2>::new([8, 8], [4.0, 4.0], 2, true);
@@ -1449,7 +1296,7 @@ mod gmres_tests {
             let b = [(2.0f64, -1.0f64)];
             let mut xr = vec![0.0];
             let mut xi = vec![0.0];
-            let (it, res) = solve_gmres_mfem(&c, &[b[0].0], &[b[0].1], &mut xr, &mut xi, 1e-13, 50, 10);
+            let (it, res) = gmres_unpreconditioned(&c, &[b[0].0], &[b[0].1], &mut xr, &mut xi, 1e-13, 50, 10);
             println!("n=1 iters={it} res={res:e} x=({},{})", xr[0], xi[0]);
             assert!(res < 1e-10);
         }
@@ -1466,7 +1313,7 @@ mod gmres_tests {
             c.spmv_into(&x_true_re, &x_true_im, &mut b_re, &mut b_im);
             let mut xr = vec![0.0; 2];
             let mut xi = vec![0.0; 2];
-            let (it, res) = solve_gmres_mfem(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 50, 10);
+            let (it, res) = gmres_unpreconditioned(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 50, 10);
             println!("n=2diag iters={it} res={res:e} x=({xr:?},{xi:?})");
             assert!(res < 1e-10);
         }
@@ -1485,7 +1332,7 @@ mod gmres_tests {
             c.spmv_into(&x_true_re, &x_true_im, &mut b_re, &mut b_im);
             let mut xr = vec![0.0; 2];
             let mut xi = vec![0.0; 2];
-            let (it, res) = solve_gmres_mfem(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 50, 10);
+            let (it, res) = gmres_unpreconditioned(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 50, 10);
             println!("n=2full iters={it} res={res:e} x=({xr:?},{xi:?})");
             assert!(res < 1e-10);
         }
@@ -1507,8 +1354,7 @@ mod gmres_tests {
 
         let mut xr = vec![0.0; n];
         let mut xi = vec![0.0; n];
-        let (iters, res) =
-            solve_gmres_mfem(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 200, 10);
+        let (iters, res) = gmres_unpreconditioned(&c, &b_re, &b_im, &mut xr, &mut xi, 1e-13, 200, 10);
         println!("iters={iters} res={res:e}");
         for i in 0..n {
             assert!((xr[i] - x_true_re[i]).abs() < 1e-9, "re[{i}] {} vs {}", xr[i], x_true_re[i]);
