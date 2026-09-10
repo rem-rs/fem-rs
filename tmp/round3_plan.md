@@ -141,6 +141,46 @@
 - 回归基线：fem-assembly 505 / fem-element 436 / fem-mesh 287 /
   fem-solver 224 / fem-space 262，全绿；新文件零警告
 
+## 第八轮完成（2026-09-10，四代理并行 + 主会话集成）
+
+- **D9 修复**（P0）：`fem_linalg::solve_gmres_complex` 重写为标准 2×2 复
+  Givens（原实现实数化 → 复系统发散）；schrodinger_flow 删局部副本改调
+  库版，复跑输出逐字节一致；fem-linalg 56 绿。新记录：par_solver 的
+  par_solve_fgmres_complex 两处可疑（MGS 共轭方向、Givens 相位约定，D14）。
+- **真 DPG 内核（部分，3/6）**：`dpg_weakform` 全量重写（Assemble/静态凝聚/
+  FormLinearSystem/ComputeResidual/RecoverFEMSolution）+ `complex_dpg_
+  weakform`（复块算子 [[Ar,−Ai],[Ai,Ar]]）+ `dpg/dpg_integrators.rs` +
+  `dpg/dpg_basis.rs`（骨架空间/面 Newton 逆映射）。poisson_2d 真 ultraweak
+  替换完成：L² 误差细网格与 C++ 四位有效数字一致；acoustics_2d 装配过
+  恒等式检验但求解受 D15 阻塞；helmholtz_1d 有 NaN 待调（D16）；
+  **maxwell_2d/acoustics_3d/maxwell_3d 仍是伪 DPG 待替换**。
+- **TMOP v2**：limiting（Quadratic/Exponential——4.10 无 VM/Hr/Hw，任务书
+  记忆有误）+ normalization + discrete-adaptivity 目标；mesh-optimizer 解锁
+  -lc/-nor；5 组 C++ 对照能量**逐位一致**（S1/W1 优化坐标差 0.0）；
+  v1 路径位级不变。剩余：AdvectorCG/InterpolatorFP、adaptive limiting、
+  PA 化、tmop_amr。
+- **hdiv-linear-solver 2/2**（C++ 目录实为 2 miniapp + 3 共享件）：
+  darcy（-o3 L² 误差与 C++ 6 位一致）+ grad_div(-sp)；QF 真实用于质量
+  阵/投影（#9 解锁点）。**挖出三个内核缺陷 D11-D13**。
+
+**新债务（2026-09-10 第八轮发现）**：
+- **D11（P0）tri-P0 求积加倍**：`assembler.rs` P0{dim:2}.quadrature 返回
+  [0,1]² 方形规则用于 tri 参考域 → tri-P0 一切标准装配积分 ×2（实测
+  ∫1·v = 2.0）。修复 = 换三角形规则 + 全量回归（可能有测试钉住错值）。
+- **D12（P2）混合装配器缺 tri-RT2**：`mixed/mod.rs ref_elem_vec` HDiv Tri3|Tri6
+  只有 0/1 阶（HDivSpace 本身支持 RT2）→ assemble_hdiv_l2_mixed panic。
+- **D13（P1）边界积分子仅支持单纯形 owner**：`boundary/vector_boundary.rs
+  assemble_face_linear_contrib` 用 from_simplex_nodes 反求 owner 参考点，
+  quad 边界面 DOF 贡献泄漏（应 64 非零实测 188）。hdiv darcy 的 b_rt
+  暂用提升式 b_rt = Dᵀp − Rq 绕过（-o1 差 0.46% 的来源）。
+- **D14（P2）par_solve_fgmres_complex 可疑**：MGS 内积存 (dot.0, −dot.1)
+  疑似多取一次共轭；Givens (c 实, s 复) 相位约定与串行不同。需复非
+  Hermitian 已知解系统验证。
+- **D15（P1）复 Hermitian Cholesky 缺失**：ComplexDPGWeakForm 的 G 已验证
+  Hermitian 但 Hermitian 因子化误报非 PD → 暂用复对称 LLᵀ（高 ω 不可信）。
+- **D16（P2）dpg_helmholtz_1d NaN**：1D UW-DPG 输出 NaN，装配项待查
+  （共享内核不支持 dim=1，示例自带元素循环有占位嫌疑）。
+
 ## 下一步队列
 
 1. ~~**D2 tet io round-trip 修复**~~ — ✅ 第六轮完成：`write_mfem` 中对 3D tet 网格 clone + apply `mark_tet_mesh_for_refinement`。
