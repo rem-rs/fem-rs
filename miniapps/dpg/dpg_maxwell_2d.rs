@@ -220,22 +220,67 @@ fn solve_level(
 
         let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
         // C++ ProjectBdrCoefficientNormal(hatEex): hatEex is the ROTATED
-        // field (E_y, −E_x) and the projected value is its flux
-        // Ê = hatEex · n̂ at the trace dof node (edge midpoint for the
-        // order-0 RT trace).  With the VALUE-mapped trace basis used here
-        // the same trace function is the unscaled midpoint value.
-        let xpt = [(p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0];
-        let ec = ex.e(&xpt);
-        // rotate E: Ê = (E_y, −E_x)  (MFEM hatE_exact, 2-D)
-        let (er, ei) = (ec[1].0, ec[1].1);
-        let (exr, exi) = (-ec[0].0, -ec[0].1);
-        let gn = er * normal[0] + ei * normal[1];
-        let gn_i = exr * normal[0] + exi * normal[1];
-        let (mr, mi) = (gn / len, gn_i / len);
-        for dof in sk.face_dofs(face) {
+        // field Ê = (E_y, −E_x) (MFEM `hatE_exact`, 2-D) and the projected
+        // dof is its flux Ê = hatEex · n̂ evaluated at the trace dof node
+        // (the face midpoint for the order-0 RT trace).  fem-rs's trace
+        // trial function is the *unscaled* normal component in the canonical
+        // (min,max) face direction — C++'s RT-trace dof carries the same
+        // quantity times the face measure (INTEGRAL map type), so the value
+        // here is the flux itself, not the flux integral.
+        let nloc = sk.dofs_per_face(face);
+        for (k, dof) in sk.face_dofs(face).enumerate() {
+            // Trace dof node `k/(nloc−1)` along the canonical direction
+            // (`eval_face_lagrange` node convention; single midpoint when
+            // the face has one dof).
+            let t = if nloc <= 1 { 0.5 } else { k as f64 / (nloc - 1) as f64 };
+            let xpt = [p0[0] + t * (p1[0] - p0[0]), p0[1] + t * (p1[1] - p0[1])];
+            let ec = ex.e(&xpt);
+            // rotate E: hatE = (E_y, −E_x); flux = Re/Im(hatE · normal).
+            let gn = ec[1].0 * normal[0] + (-ec[0].0) * normal[1];
+            let gn_i = ec[1].1 * normal[0] + (-ec[0].1) * normal[1];
             ess.push(base + dof);
-            xr[base + dof] = mr;
-            xi[base + dof] = mi;
+            xr[base + dof] = gn / len;
+            xi[base + dof] = gn_i / len;
+        }
+    }
+
+    // DPG_SKEL=1: dump the skeleton face / vertex dof topology (probe use).
+    if std::env::var("DPG_SKEL").is_ok() {
+        println!("NODES {}", mesh.n_nodes());
+        for v in 0..mesh.n_nodes() as u32 {
+            let c = mesh.node_coords(v);
+            println!("V {v} {:.17} {:.17}", c[0], c[1]);
+        }
+        for f in 0..sk.n_faces() {
+            let nodes = sk.face_nodes(f);
+            let c0 = mesh.node_coords(nodes[0]);
+            let c1 = mesh.node_coords(nodes[1]);
+            println!(
+                "F {f} bdr {} n {} dof {} c {:.17} {:.17} {:.17} {:.17}",
+                sk.is_boundary_face(f) as u8,
+                nodes.len(),
+                sk.face_dof_list(f)[0],
+                c0[0],
+                c0[1],
+                c1[0],
+                c1[1]
+            );
+        }
+        let skh = SkeletonSpace::new_h1(mesh.clone(), p);
+        println!("H1DOFS {}", skh.n_dofs());
+        for f in 0..skh.n_faces() {
+            let nodes = skh.face_nodes(f);
+            let c0 = mesh.node_coords(nodes[0]);
+            let c1 = mesh.node_coords(nodes[1]);
+            println!(
+                "HF {f} nodes {:?} dofs {:?} c {:.17} {:.17} {:.17} {:.17}",
+                nodes,
+                skh.face_dof_list(f),
+                c0[0],
+                c0[1],
+                c1[0],
+                c1[1]
+            );
         }
     }
 
@@ -376,19 +421,23 @@ fn solve_level(
             let _ = i;
         }
         eprintln!("DPG_DEBUG: linear residual after PCG = {worst:.3e}");
-        // E dofs (re, im) per element (P0, component-interleaved), H dofs.
+        // E dofs per element: the trial block is element-blocked with
+        // component-major in-element layout (`c*n + i`), H is one dof per
+        // element — same indexing as `errors()`.
         let ne = mesh.n_elements() as usize;
         let eb = a.trial_offsets()[es];
         let hb = a.trial_offsets()[hs];
+        let ncmp =
+            fem_assembly::dpg::dpg_basis::scalar_ref_elem(mesh.element_type(0), p - 1).n_dofs();
         for e in 0..ne {
             println!(
                 "E[{e}] x=({:+.4},{:+.4})i y=({:+.4},{:+.4})i  H re={:+.4} im={:+.4}",
-                sol_r[eb + 2 * e],
-                sol_i[eb + 2 * e],
-                sol_r[eb + 2 * e + 1],
-                sol_i[eb + 2 * e + 1],
-                sol_r[hb + e],
-                sol_i[hb + e],
+                sol_r[eb + 2 * ncmp * e],
+                sol_i[eb + 2 * ncmp * e],
+                sol_r[eb + 2 * ncmp * e + ncmp],
+                sol_i[eb + 2 * ncmp * e + ncmp],
+                sol_r[hb + ncmp * e],
+                sol_i[hb + ncmp * e],
             );
         }
         for e in 0..ne {
