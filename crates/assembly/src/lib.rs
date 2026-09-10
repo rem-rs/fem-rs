@@ -106,6 +106,12 @@ pub mod qfunction;
 pub mod dg;
 pub use dg::*;
 
+/// DG mass inverse (1:1 port of MFEM `fem/dgmassinv.*`).
+pub mod dgmassinv;
+/// Face restrictions (1:1 port of MFEM `fem/restriction.*`):
+/// `L2FaceRestriction` / `ConformingFaceRestriction`.
+pub mod face_restriction;
+
 /// Discontinuous Petrov-Galerkin (DPG) methods.
 pub mod dpg;
 pub use dpg::*;

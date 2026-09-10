@@ -33,7 +33,7 @@
 //! op.apply(&x, &mut y);  // y += K x  (matrix-free)
 //! ```
 
-use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, lagrange::{TetP1, TetP2, TriP1}, lagrange::factory::{TriPk, TetPk}};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -299,6 +299,137 @@ impl<S: FESpace> LumpedMassOperator<S> {
     pub fn apply_inverse(&self, x: &[f64], y: &mut [f64]) {
         for i in 0..self.diag.len() {
             y[i] = if self.diag[i].abs() > 1e-14 { x[i] / self.diag[i] } else { 0.0 };
+        }
+    }
+}
+
+// ─── PA convection ────────────────────────────────────────────────────────────
+
+/// Matrix-free (partially assembled) convection operator
+/// `K x` with `K[i,j] = ∫ φᵢ (v·∇φⱼ) dx` (MFEM `ConvectionIntegrator`
+/// with `AssemblePA` / `AddMultPA`).
+///
+/// MFEM's PA path precomputes the per-quadrature scaled flux
+/// `op(q) = α·W(q)·adj(J)·v(q)` (`PAConvectionSetup2D`) and applies it with
+/// tensor contractions (`PAConvectionApply2D`).  This port stores the same
+/// per-quadrature velocity data set and evaluates the identical quantity
+/// `y_e[i] += W(q)·φᵢ(q)·(v(q)·∇u(q))` through the element loop used by the
+/// other PA operators here — mathematically equal to the C++ kernel (only
+/// the summation order differs), and additionally valid on simplices, where
+/// MFEM's tensor DofToQuad path aborts.
+///
+/// Sign convention matches the fem-rs [`crate::standard::ConvectionIntegrator`]
+/// (`+(v·∇u)·v_test`; MFEM's `ConvectionIntegrator` carries a leading `-α`,
+/// its `ConservativeConvectionIntegrator` the transpose).
+pub struct PAConvectionOperator<S: FESpace, V: VectorCoeff> {
+    space:      S,
+    velocity:   V,
+    quad_order: u8,
+}
+
+impl<S: FESpace, V: VectorCoeff> PAConvectionOperator<S, V> {
+    /// Construct the operator (MFEM `ConvectionIntegrator::AssemblePA`).
+    ///
+    /// - `space`      — FE space (ownership taken).
+    /// - `velocity`   — convection velocity `v` (vector coefficient).
+    /// - `quad_order` — quadrature order; MFEM's default rule is
+    ///   `2p + OrderW()` (`ConvectionIntegrator::GetRule`).
+    pub fn new(space: S, velocity: V, quad_order: u8) -> Self {
+        PAConvectionOperator { space, velocity, quad_order }
+    }
+}
+
+impl<S: FESpace, V: VectorCoeff> MatFreeOperator for PAConvectionOperator<S, V> {
+    fn n_dofs(&self) -> usize { self.space.n_dofs() }
+
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        use fem_mesh::ElementTransformation;
+        use fem_space::SpaceType;
+
+        let mesh = self.space.mesh();
+        let dim  = mesh.dim() as usize;
+        let order = self.space.order();
+        let is_l2 = self.space.space_type() == SpaceType::L2;
+        let _ = is_l2;
+
+        let mut phi      = Vec::<f64>::new();
+        let mut grad_ref = Vec::<f64>::new();
+        let mut grad_phys = Vec::<f64>::new();
+        let mut vel = [0.0_f64; 3];
+
+        for e in mesh.elem_iter() {
+            let et = mesh.element_type(e);
+            // Basis dispatch identical to the assembled (EA) path — H1 GLL
+            // tensor quads, L2 GL / GLL tensor quads, simplex nodal bases.
+            let re = crate::assembler::ref_elem_vol_for_space(&self.space, et, order);
+            let n    = re.n_dofs();
+            let quad = re.quadrature(self.quad_order);
+            let gd: Vec<usize> = self.space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let nodes = mesh.element_nodes(e);
+            let elem_tag = mesh.element_tag(e);
+
+            // Geometry: affine simplex transform, or the isoparametric
+            // (multi)linear geometry map — same as the EA assembler.
+            let affine = matches!(et, ElementType::Tri3 | ElementType::Tet4)
+                && mesh.geom_order() <= 1;
+            let affine_tr = if affine {
+                Some(ElementTransformation::from_simplex_nodes(mesh, nodes))
+            } else {
+                None
+            };
+            let geo_elem = if affine { None } else { geo_ref_elem(et) };
+
+            phi.resize(n, 0.0);
+            grad_ref.resize(n * dim, 0.0);
+            grad_phys.resize(n * dim, 0.0);
+
+            let x_elem: Vec<f64> = gd.iter().map(|&di| x[di]).collect();
+            let mut y_elem = vec![0.0_f64; n];
+
+            for (qi, xi) in quad.points.iter().enumerate() {
+                let (jac, _det_j, xp) = if let Some(tr) = &affine_tr {
+                    (tr.jacobian().clone(), tr.det_j(), tr.map_to_physical(xi))
+                } else {
+                    let ge = geo_elem.as_ref()
+                        .expect("geo_ref_elem for non-affine element");
+                    isoparametric_jacobian(mesh, nodes, ge.as_ref(), xi, dim)
+                };
+                // MFEM PA convention (PAConvectionSetup2D): the per-quadrature
+                // data carries adj(J) and the bare quadrature weight —
+                // `op(q) = α·W(q)·adj(J)·v(q)` — so the gradient transform is
+                // `grad = adj(J)·∇_ref` (scaled by |det J|) and no explicit
+                // |J| factor is multiplied in.
+                let adj = if dim == 3 {
+                    crate::assembler::adjugate_3d(&jac)
+                } else {
+                    crate::assembler::adjugate_2d(&jac)
+                };
+                let w = quad.weights[qi];
+                re.eval_basis(xi, &mut phi);
+                re.eval_grad_basis(xi, &mut grad_ref);
+                crate::assembler::transform_grads_adj(
+                    &adj, &grad_ref, &mut grad_phys, n, dim);
+
+                let ctx = CoeffCtx::from_qp(&xp, dim, e, elem_tag, None, None);
+                self.velocity.eval(&ctx, &mut vel[..dim]);
+
+                // ∇u at this qp = Σⱼ xⱼ (adj(J)·∇φⱼ)  [= |J|·∇_phys u].
+                let grad_u: Vec<f64> = (0..dim).map(|d| {
+                    x_elem.iter().zip(grad_phys.chunks(dim))
+                        .map(|(&xj, gj)| xj * gj[d]).sum::<f64>()
+                }).collect();
+
+                // y_e[i] += W φᵢ (v·|J|∇u)  = ∫ φᵢ (v·∇u) dV contribution.
+                for i in 0..n {
+                    let v_dot_grad_u: f64 = (0..dim)
+                        .map(|d| vel[d] * grad_u[d]).sum();
+                    y_elem[i] += w * phi[i] * v_dot_grad_u;
+                }
+            }
+
+            for (i, &gi) in gd.iter().enumerate() {
+                y[gi] += y_elem[i];
+            }
         }
     }
 }
@@ -758,6 +889,86 @@ mod tests {
         y_sum.iter_mut().zip(y2.iter()).for_each(|(a, b)| *a += b);
         let err: f64 = y_sum.iter().zip(twice.iter()).map(|(a,b)|(a-b).powi(2)).sum::<f64>().sqrt();
         assert!(err < 1e-13, "linearity check: {err:.3e}");
+    }
+
+    // ── PA convection ──────────────────────────────────────────────────────────
+
+    /// Exactness identity for the PA convection operator on simplices:
+    /// with `v = (1, 0)` and `u_h = x` (so `v·∇u = 1`), `K·x` must equal
+    /// `M·1` where `M` is the assembled mass matrix.
+    ///
+    /// (The EA `ConvectionIntegrator` on the affine path currently drops the
+    /// `|det J|` factor — `max|K·x − M·1| = 0.75` on this mesh — so the EA
+    /// matrix is not usable as the reference here; the quad EA path is
+    /// adjugate-based and correct, see the next test.)
+    #[test]
+    fn pa_convection_tri_mass_identity() {
+        use crate::postproc::coefficient::ConstantVectorCoeff;
+        use crate::standard::MassIntegrator;
+
+        let mesh = fem_mesh::Mesh::<2>::unit_square_tri(2);
+        let space = H1Space::new(mesh, 1);
+        let n = space.n_dofs();
+        let m = Assembler::assemble_bilinear(&space, &[&MassIntegrator { rho: 1.0 }], 2);
+        let op = PAConvectionOperator::new(
+            space, ConstantVectorCoeff(vec![1.0, 0.0]), 2);
+
+        // P1 H1: dof i sits at mesh node i; u_h = x so ∂u/∂x = 1.
+        // (Mesh coordinates are queried through a fresh copy — the space was
+        // moved into the operator.)
+        let mesh2 = fem_mesh::Mesh::<2>::unit_square_tri(2);
+        let xcol: Vec<f64> = (0..n).map(|i| mesh2.node_coords(i as u32)[0]).collect();
+        let ones = vec![1.0_f64; n];
+        let mut kx = vec![0.0_f64; n];
+        let mut m1 = vec![0.0_f64; n];
+        op.apply_zero(&xcol, &mut kx);
+        m.spmv(&ones, &mut m1);
+        let err: f64 = kx.iter().zip(m1.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(err < 1e-13, "PA convection mass identity: {err:.3e}");
+    }
+
+    /// Same parity with a spatially varying velocity on a quad mesh (tensor
+    /// path, the configuration MFEM's PA convection supports).
+    #[test]
+    fn pa_convection_matches_assembled_quad_var_velocity() {
+        use crate::postproc::coefficient::FnVectorCoeff;
+        use crate::standard::ConvectionIntegrator;
+
+        let mesh = Mesh::<2>::make_cartesian_2d(3, 2, 1.0, 2.0);
+        let space = H1Space::new(mesh, 2);
+        let n = space.n_dofs();
+        // v = (x·y, 1 − x)
+        let k_asm = Assembler::assemble_bilinear(
+            &space,
+            &[&ConvectionIntegrator {
+                velocity: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                    out[0] = x[0] * x[1];
+                    out[1] = 1.0 - x[0];
+                }),
+            }],
+            4);
+        let op = PAConvectionOperator::new(
+            space,
+            FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0] * x[1];
+                out[1] = 1.0 - x[0];
+            }),
+            4);
+
+        let x: Vec<f64> = (0..n).map(|i| (((i * 5) % 11) as f64 - 5.0) / 5.0).collect();
+        let mut y_mf = vec![0.0_f64; n];
+        let mut y_asm = vec![0.0_f64; n];
+        op.apply_zero(&x, &mut y_mf);
+        k_asm.spmv(&x, &mut y_asm);
+
+        let err: f64 = y_mf.iter().zip(y_asm.iter())
+            .map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+        let scale: f64 = y_asm.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(
+            err / scale.max(1e-15) < 1e-11,
+            "quad P2 var-velocity: PA convection vs assembled rel err = {:.3e}",
+            err / scale.max(1e-15)
+        );
     }
 
     // ── H(curl) partial assembly ──────────────────────────────────────────────
