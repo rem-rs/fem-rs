@@ -316,9 +316,11 @@ impl TetFaceAnchor {
 /// element's local tangents expressed in the canonical tangent basis — MFEM's
 /// `ND_DofTransformation::T(ori)` relation, which no scalar sign can express.
 ///
-/// Consumers must apply it as `A_canon = S·A_local·Sᵀ` for the element matrix
-/// and `b_canon = S·b_local` for the load vector; the primal (GridFunction)
-/// dof vector is `u_local = S·u_canon`.
+/// Consumers must apply it as `A_canon = Sᵀ·A_local·S` for the element matrix
+/// and `b_canon = Sᵀ·b_local` for the load vector, because `S` maps canonical
+/// DOFs to element-local ones (`u_local = S·u_canon`).  Equivalently, with
+/// MFEM's `T = S⁻¹` (`v_t = T·v`, `A_t = T⁻ᵀ A T⁻¹`) this is the same
+/// relation — `S` *is* the transformation MFEM calls `T⁻¹`.
 #[derive(Debug, Clone, Copy)]
 pub struct FaceDofBlock {
     /// First element-local DOF of the pair.

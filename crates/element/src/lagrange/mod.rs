@@ -10,7 +10,7 @@ pub mod tet;
 pub mod tri;
 
 pub use factory::{
-    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexL2GL, HexQk, LagrangeHex, LagrangePrism,
+    ref_elem, vec_ref_elem, ElemType, H1TetPk, H1TriPk, HexL2GL, HexQk, LagrangeHex, LagrangePrism,
     LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle,
     QuadL2GL, QuadPosQk, QuadQk, SegPk, TetPk, TriPk, VecFamily,
 };

@@ -4,11 +4,26 @@
 //! Supports both 2D and 3D (matching MFEM ex3.cpp `dim` dispatch).
 //!
 //! Default: data/beam-tet.mesh (3D, 32016 unknowns). Use `-m data/star.mesh` for 2D.
+//!
+//! # Canonical (shared-face) DOF basis — D48
+//!
+//! Assembly and reconstruction always use the **canonical** DOF basis, i.e.
+//! MFEM's `DofTransformation` convention: the element matrix/vector is rotated
+//! into the shared-face basis (`A ← Tᵀ·A·T`, `b ← Tᵀ·b`,
+//! [`VectorAssembler::assemble_bilinear_nd_canonical`]) and the solution is
+//! rotated back per element (`u_local = T·u_canon`,
+//! [`fem_assembly::vector_assembler::nd_element_local_dofs`]) exactly where
+//! MFEM calls `DofTransformation::InvTransformPrimal`
+//! (`GridFunction::GetVectorValues`).  This is a no-op for spaces without
+//! shared-face DOF pairs (2-D, hex, ND1) and is what makes the tet `NDk`
+//! (k ≥ 2) discretisation conforming.  `-no-canonical` selects the historical
+//! element-local pair (non-conforming, kept for the A/B comparison).
 
 use std::f64::consts::PI;
 
 use fem_assembly::{
     VectorAssembler, DiscreteLinearOperator, VectorBilinearIntegrator,
+    vector_assembler::{nd_element_local_dofs, nd_element_local_dofs_signed},
     vector_integrator::{VectorLinearIntegrator, VectorQpData},
     standard::{CurlCurlIntegrator, VectorMassIntegrator},
 };
@@ -47,6 +62,54 @@ fn main() {
     }
 }
 
+// ─── D48 assembly/reconstruction mode switch ────────────────────────────────
+
+/// Bilinear assembly for the selected DOF-basis mode.  `canonical` applies the
+/// D37/D48 shared-face rotation (MFEM's `DofTransformation`), otherwise the
+/// historical element-local path is used.
+fn assemble_bilinear<M: MeshTopology>(
+    canonical: bool,
+    sp: &HCurlSpace<M>,
+    ints: &[&dyn VectorBilinearIntegrator],
+    qo: u8,
+) -> fem_linalg::CsrMatrix<f64> {
+    if canonical {
+        VectorAssembler::assemble_bilinear_nd_canonical(sp, ints, qo)
+    } else {
+        VectorAssembler::assemble_bilinear(sp, ints, qo)
+    }
+}
+
+/// Load-vector counterpart of [`assemble_bilinear`].
+fn assemble_linear<M: MeshTopology>(
+    canonical: bool,
+    sp: &HCurlSpace<M>,
+    ints: &[&dyn VectorLinearIntegrator],
+    qo: u8,
+) -> Vec<f64> {
+    if canonical {
+        VectorAssembler::assemble_linear_nd_canonical(sp, ints, qo)
+    } else {
+        VectorAssembler::assemble_linear(sp, ints, qo)
+    }
+}
+
+/// Element-local DOF values for the selected mode: `u_local = T·u_canon` on the
+/// canonical basis (MFEM `DofTransformation::InvTransformPrimal`), or the
+/// scalar-sign gather that matches the element-local assembly.
+fn element_local_dofs<M: MeshTopology>(
+    canonical: bool,
+    sp: &HCurlSpace<M>,
+    e: u32,
+    x: &[f64],
+) -> Vec<f64> {
+    if canonical {
+        nd_element_local_dofs(sp, e, x)
+    } else {
+        nd_element_local_dofs_signed(sp, e, x)
+    }
+}
+
 // ─── 2D ─────────────────────────────────────────────────────────────────────
 
 fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
@@ -63,11 +126,11 @@ fn solve_2d(args: &Args, mut mesh: Mesh<2>) {
 
     let kappa = args.freq * PI;
     let qo = args.order as u8 * 2;
-    let mut rhs = VectorAssembler::assemble_linear(&space, &[&Src2D { kappa }], qo);
+    let mut rhs = assemble_linear(args.canonical, &space, &[&Src2D { kappa }], qo);
     let u_proj = project_2d(&space, kappa);
     let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
-    let mut mat = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
+    let mut mat = assemble_bilinear(args.canonical, &space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut x = u_proj.clone();
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
@@ -93,19 +156,25 @@ fn project_2d(space: &HCurlSpace<Mesh<2>>, k: f64) -> Vec<f64> {
     space.interpolate_vector(&|x| exact_2d(x, k).to_vec()).into_vec()
 }
 
-fn l2_err_2d<F>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: &F) -> f64
+fn l2_err_2d<F>(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64], ex: &F, canonical: bool) -> f64
 where
     F: Fn(&[f64]) -> [f64; 2],
 {
     use fem_element::nedelec::TriNDk;
+    let k = sp.order() as usize;
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
-        let r = TriNDk::new(1);
+        // Order-generic reference element: with `TriNDk::new(1)` the first
+        // three DOFs of an ND2 element were contracted with the ND1 basis,
+        // i.e. the reported error was meaningless for `-o 2` (D48).
+        let r = TriNDk::new(k);
         let n = r.n_dofs();
-        let q = r.quadrature(6);
+        // MFEM `GridFunction::ComputeL2Error` (fem/gridfunc.cpp:3410):
+        // intorder = 2*fe->GetOrder() + 3.
+        let q = r.quadrature((2 * k + 3) as u8);
         let mut p = vec![0.0; n*2];
-        let d: Vec<usize> = sp.element_dofs(e).iter().map(|&x| x as usize).collect();
-        let s = sp.element_signs(e);
+        // Reconstruction on the element basis (`u_local = T·u_canon`).
+        let uloc = element_local_dofs(canonical, sp, e, u);
         let nd = mesh.elem_nodes(e);
         let x0 = mesh.node_coords(nd[0]);
         let x1 = mesh.node_coords(nd[1]);
@@ -124,9 +193,8 @@ where
             let w = q.weights[qi] * det_j.abs();
             let mut uh = [0.0; 2];
             for a in 0..n {
-                let sa = s[a];
-                uh[0] += sa * u[d[a]] * (jt00*p[a*2] + jt01*p[a*2+1]);
-                uh[1] += sa * u[d[a]] * (jt10*p[a*2] + jt11*p[a*2+1]);
+                uh[0] += uloc[a] * (jt00*p[a*2] + jt01*p[a*2+1]);
+                uh[1] += uloc[a] * (jt10*p[a*2] + jt11*p[a*2+1]);
             }
             let xp = [
                 (1.0-xi[0]-xi[1])*x0[0]+xi[0]*x1[0]+xi[1]*x2[0],
@@ -141,22 +209,25 @@ where
 
 fn solve_report_2d(sp: &HCurlSpace<Mesh<2>>, x: &mut [f64], b: &[f64], a: &Args, k: f64) {
     let qo = a.order as u8 * 2;
-    let mut mat = VectorAssembler::assemble_bilinear(sp, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
+    let mat = assemble_bilinear(a.canonical, sp, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
     if a.no_ams {
         let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(&mat)).unwrap();
-        let r = solve_pcg(&mat, b, x, &precond, 1e-12, 500, true).unwrap();
-        println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
+        // MFEM prints "PCG: No convergence!" and still reports the error; do
+        // the same instead of aborting, so the L^2 number stays comparable.
+        match solve_pcg(&mat, b, x, &precond, 1e-12, 500, true) {
+            Ok(r) => println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
+            Err(_) => println!("PCG: No convergence!"),
+        }
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
         use fem_linalg::fem_to_linlvo_csr as ftl;
         let g = DiscreteLinearOperator::gradient(&fem_space::H1Space::new(sp.mesh().clone(), 1), sp).unwrap();
-        let r = solve_pcg_ams(&mat, &ftl(&g), b, x, &AmsSolverConfig {
-            inner_cfg: SolverConfig { rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true, ..SolverConfig::default() },
+        let r = solve_pcg_ams(&mat, &ftl(&g), b, x, &AmsSolverConfig {            inner_cfg: SolverConfig { rtol: 1e-12, atol: 1e-20, max_iter: 2000, verbose: true, ..SolverConfig::default() },
             ams_cfg: AmsConfig::default(),
         }).unwrap();
         println!("PCG+AMS: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
     }
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp.mesh(), sp, x, &|xi| exact_2d(xi, k)));
+    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_2d(sp.mesh(), sp, x, &|xi| exact_2d(xi, k), a.canonical));
 }
 
 // ─── 3D ─────────────────────────────────────────────────────────────────────
@@ -175,16 +246,16 @@ fn solve_3d(args: &Args, mut mesh: Mesh<3>) {
 
     let kappa = args.freq * PI;
     let qo = args.order as u8 * 2;
-    let mut rhs = VectorAssembler::assemble_linear(&space, &[&Src3D { kappa }], qo);
+    let mut rhs = assemble_linear(args.canonical, &space, &[&Src3D { kappa }], qo);
     let u_proj = project_3d(&space, kappa);
     let bc_vals: Vec<f64> = ess_bdr.iter().map(|&d| u_proj[d as usize]).collect();
 
-    let mut mat = VectorAssembler::assemble_bilinear(&space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
+    let mut mat = assemble_bilinear(args.canonical, &space, &[&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }], qo);
     let mut x = u_proj.clone();
     form_linear_system(&mut mat, &mut rhs, &mut x, &ess_bdr, &bc_vals);
 
     solve_report(&space, &mut x, &rhs, args, &mat);
-    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa)));
+    println!("\n|| E_h - E ||_{{L^2}} = {:.14e}\n", l2_err_3d(space.mesh(), &space, &x, &|xi| exact_3d(xi, kappa), args.canonical));
     write_mfem_file_3d("refined.mesh", space.mesh()).unwrap();
     write_mfem_gf_file("sol.gf", dim, &x, "ND", args.order, dim, 8).unwrap();
 }
@@ -207,11 +278,48 @@ fn project_3d(space: &HCurlSpace<Mesh<3>>, k: f64) -> Vec<f64> {
     space.interpolate_vector(&|x| exact_3d(x, k).to_vec()).into_vec()
 }
 
+/// Physical Jacobian of element `e` at `xi` and the physical point.
+///
+/// Handles the two volume geometries ex3 can produce: the affine `Tet4`
+/// (`J = [P1-P0 | P2-P0 | P3-P0]`) and the **trilinear** `Hex8` (MFEM's vertex
+/// order = bottom face CCW then top face CCW on the `[-1,1]³` cube).  The hex
+/// case used to fall into the tet branch and read nodes 0..3 (a coplanar,
+/// hence singular, "Jacobian"), so the hex `L²` error was `||E||` exactly.
 fn jac_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 3]) {
     let n = mesh.element_nodes(e);
+    if n.len() == 8 {
+        const C: [[f64; 3]; 8] = [
+            [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+        ];
+        let mut j = nalgebra::DMatrix::<f64>::zeros(3, 3);
+        let mut xp = [0.0_f64; 3];
+        for (i, c) in C.iter().enumerate() {
+            let p = mesh.node_coords(n[i]);
+            let a = [
+                1.0 + xi[0] * c[0],
+                1.0 + xi[1] * c[1],
+                1.0 + xi[2] * c[2],
+            ];
+            // dN_i/dξ_c = c_c (1 + ξ_d ξ_i^d)(1 + ξ_e ξ_i^e) / 8
+            let dn = [
+                c[0] * a[1] * a[2] / 8.0,
+                a[0] * c[1] * a[2] / 8.0,
+                a[0] * a[1] * c[2] / 8.0,
+            ];
+            let ni = a[0] * a[1] * a[2] / 8.0;
+            for d in 0..3 {
+                for cc in 0..3 {
+                    j[(d, cc)] += p[d] * dn[cc];
+                }
+                xp[d] += p[d] * ni;
+            }
+        }
+        return (j, xp);
+    }
     let x0 = mesh.node_coords(n[0]); let x1 = mesh.node_coords(n[1]);
     let x2 = mesh.node_coords(n[2]); let x3 = mesh.node_coords(n[3]);
-    let (a,b,c) = (xi[0], xi[1], xi[2]);
+    let (a, b, c) = (xi[0], xi[1], xi[2]);
     let j = nalgebra::dmatrix![
         -x0[0]+x1[0], -x0[0]+x2[0], -x0[0]+x3[0];
         -x0[1]+x1[1], -x0[1]+x2[1], -x0[1]+x3[1];
@@ -225,21 +333,29 @@ fn jac_3d(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 
     (j, xp)
 }
 
-fn l2_err_3d<F>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>, u: &[f64], ex: &F) -> f64
+fn l2_err_3d<F>(mesh: &Mesh<3>, sp: &HCurlSpace<Mesh<3>>, u: &[f64], ex: &F, canonical: bool) -> f64
 where
     F: Fn(&[f64]) -> [f64; 3],
 {
     use fem_element::nedelec::{TetNDk, HexNDk};
+    let k = sp.order() as usize;
     let mut e2 = 0.0;
     for e in mesh.elem_iter() {
+        // Order-generic reference element (D48): `*NDk::new(1)` contracted the
+        // first 6 DOFs of an ND2 element with the ND1 basis.
         let r: &dyn VectorReferenceElement = match mesh.element_type(e) {
-            fem_mesh::element_type::ElementType::Hex8 => &HexNDk::new(1),
-            _ => &TetNDk::new(1),
+            fem_mesh::element_type::ElementType::Hex8 => &HexNDk::new(k),
+            _ => &TetNDk::new(k),
         };
-        let n = r.n_dofs(); let q = r.quadrature(6);
+        let n = r.n_dofs();
+        // MFEM `GridFunction::ComputeL2Error` (fem/gridfunc.cpp:3463):
+        // intorder = 2*fe->GetOrder() + 3.
+        let q = r.quadrature((2 * k + 3) as u8);
         let mut p = vec![0.0; n*3];
-        let d: Vec<usize> = sp.element_dofs(e).iter().map(|&x| x as usize).collect();
-        let s = sp.element_signs(e);
+        // Reconstruction on the element basis (`u_local = T·u_canon`), the
+        // exact analogue of MFEM's `doftrans.InvTransformPrimal` in
+        // `GridFunction::GetVectorValues`.
+        let uloc = element_local_dofs(canonical, sp, e, u);
         for (qi, xi) in q.points.iter().enumerate() {
             r.eval_basis_vec(xi, &mut p);
             let (j, xp) = jac_3d(mesh, e, xi);
@@ -247,11 +363,10 @@ where
             let jt = j.try_inverse().unwrap_or_default().transpose();
             let mut uh = [0.0; 3];
             for a in 0..n {
-                let sa = s[a];
                 for c in 0..3 {
                     let mut v = 0.0;
-                    for k in 0..3 { v += jt[(c,k)] * p[a*3+k]; }
-                    uh[c] += sa * u[d[a]] * v;
+                    for kk in 0..3 { v += jt[(c,kk)] * p[a*3+kk]; }
+                    uh[c] += uloc[a] * v;
                 }
             }
             let ex = ex(&xp);
@@ -264,8 +379,12 @@ where
 fn solve_report(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, mat: &fem_linalg::CsrMatrix<f64>) {
     if a.no_ams {
         let precond = fem_solver::GSSmoother::from_csr(&fem_linalg::fem_to_linlvo_csr(mat)).unwrap();
-        let r = solve_pcg(mat, b, x, &precond, 1e-12, 500, true).unwrap();
-        println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual);
+        // MFEM prints "PCG: No convergence!" and still reports the error; do
+        // the same instead of aborting, so the L^2 number stays comparable.
+        match solve_pcg(mat, b, x, &precond, 1e-12, 500, true) {
+            Ok(r) => println!("PCG+GSSmoother: {} iters, ||r||/||b|| = {:.3e}", r.iterations, r.final_residual),
+            Err(_) => println!("PCG: No convergence!"),
+        }
     } else {
         use fem_solver::{solve_pcg_ams, AmsSolverConfig, AmsConfig};
         use fem_linalg::fem_to_linlvo_csr as ftl;
@@ -281,11 +400,13 @@ fn solve_report(sp: &HCurlSpace<Mesh<3>>, x: &mut [f64], b: &[f64], a: &Args, ma
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
-struct Args { mesh: Option<String>, order: u8, freq: f64, no_ams: bool, vis: bool }
+struct Args { mesh: Option<String>, order: u8, freq: f64, no_ams: bool, vis: bool, canonical: bool }
 
 fn parse_args() -> Args {
     // MFEM ex3 defaults: GSSmoother + PCG (no AMS, max_iter=500, rtol=1e-12).
-    let mut a = Args { order: 1, freq: 1.0, no_ams: true, ..Args::default() };
+    // `canonical` defaults to true: MFEM always applies its DofTransformation,
+    // so the canonical basis is the 1:1 translation (D48).
+    let mut a = Args { order: 1, freq: 1.0, no_ams: true, canonical: true, ..Args::default() };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -294,6 +415,8 @@ fn parse_args() -> Args {
             "-f" | "--frequency" => { a.freq = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.0); }
             "-no-ams" => { a.no_ams = true; }
             "-ams" => { a.no_ams = false; }
+            "-canonical" => { a.canonical = true; }
+            "-no-canonical" => { a.canonical = false; }
             "-vis" => { a.vis = true; }
             "-no-vis" => { a.vis = false; }
             _ => {}

@@ -120,7 +120,15 @@ pub fn geo_ref_elem_from_mesh(
     let order = if g > 1 { g } else { 1 };
     let ft = match et {
         ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
-        ElementType::Tet4 | ElementType::Tet10 => FactoryElemType::Tet,
+        ElementType::Tet4 | ElementType::Tet10 => {
+            // Must match `assembler::geo_ref_elem`: the curved-tet geometry
+            // table written by the io layer follows MFEM's
+            // `H1_TetrahedronElement` slot order (Gauss-Lobatto nodes), while
+            // the generic factory element `TetPk` is equispaced (D49).
+            return Some(Box::new(
+                fem_element::lagrange::H1TetPk::new(order as usize),
+            ));
+        }
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
             // Quad vector bases (RT/ND) and the QuadQk geometry share the
             // [0,1]² reference domain — use QuadQk for every geometric order.
@@ -885,6 +893,78 @@ pub fn apply_face_block_transform_vector(blocks: &[FaceDofBlock], b: &mut [f64])
     b.copy_from_slice(&out);
 }
 
+/// Reverse of [`apply_face_block_transform_matrix`] / the D37 (D48)
+/// **reconstruction** step: the element's own (signed) local DOF values of an
+/// H(curl) space evaluated from a vector held in the **canonical** (global)
+/// basis — `u_local = T·u_canon`.
+///
+/// ## Why every reconstruction consumer needs this
+///
+/// `HCurlSpace`'s tet `NDk` (k ≥ 2) face DOFs are the *face-creating* element's
+/// functionals ([`fem_space::hcurl::FaceDofBlock`]); a neighbouring element sees
+/// the same two global DOFs but its own two local functionals are a full 2×2
+/// rotation `T = T(face)` of them — no scalar sign can express it.  The
+/// assembled operator only describes the same bilinear form when it is rotated
+/// into the shared basis (`A ← Tᵀ·A·T`, done by
+/// [`VectorAssembler::assemble_bilinear_nd_canonical`]), and then the solved
+/// vector is canonical: interpolating it with the element's local basis
+/// functions *without* this call is simply wrong near any shared face.
+///
+/// The return value is the signed local coefficient vector (the convention of
+/// `FESpace::element_signs`, i.e. the coefficients of the element's own
+/// reference-element basis functions), ready to be contracted with
+/// `eval_basis_vec`.  This is MFEM's
+/// `DofTransformation::InvTransformPrimal` (fe/doftrans.hpp: "used to transform
+/// DoFs from a global vector back to their element-local form ... before it can
+/// be used to compute a local interpolation").
+///
+/// For spaces without shared-face DOF pairs (2-D, hex, ND1) the block list is
+/// empty and this reduces to `signs[dof] · x[dof]`.
+pub fn nd_element_local_dofs<M: MeshTopology>(
+    space: &HCurlSpace<M>,
+    e: u32,
+    x: &[f64],
+) -> Vec<f64> {
+    let mut u = nd_element_local_dofs_signed(space, e, x);
+    apply_face_blocks_to_local_dofs(space.element_face_blocks(e), x, &mut u);
+    u
+}
+
+/// Element-local signed DOF values under the **scalar** sign convention alone
+/// (`signs[slot] · x[global]`), i.e. without the face-block rotation.
+///
+/// This is the matching reconstruction for the element-local assembly path
+/// ([`VectorAssembler::assemble_bilinear`] / `assemble_linear`), which is a
+/// *non-conforming* discretisation for tet `NDk` (k ≥ 2).  It exists so that a
+/// caller can flip between the two paths as a unit — see
+/// [`nd_element_local_dofs`] for the canonical one.
+pub fn nd_element_local_dofs_signed<M: MeshTopology>(
+    space: &HCurlSpace<M>,
+    e: u32,
+    x: &[f64],
+) -> Vec<f64> {
+    space
+        .element_dofs(e)
+        .iter()
+        .zip(space.element_signs(e).iter())
+        .map(|(&d, &s)| s * x[d as usize])
+        .collect()
+}
+
+/// In-place core of [`nd_element_local_dofs`]: overwrite the slots of the
+/// face-DOF pairs of `u` with `T·u_canon` (the rest of `u` is left as is).
+///
+/// `u` must already hold the element's local DOF values (see
+/// [`nd_element_local_dofs`]); the canonical values are read from the *global*
+/// vector `x` through [`FaceDofBlock::canon_dofs`].
+pub fn apply_face_blocks_to_local_dofs(blocks: &[FaceDofBlock], x: &[f64], u: &mut [f64]) {
+    for b in blocks {
+        let c = [x[b.canon_dofs[0] as usize], x[b.canon_dofs[1] as usize]];
+        u[b.slot] = b.s[0][0] * c[0] + b.s[0][1] * c[1];
+        u[b.slot + 1] = b.s[1][0] * c[0] + b.s[1][1] * c[1];
+    }
+}
+
 // ─── VectorAssembler ────────────────────────────────────────────────────────
 
 /// Quadrature order for 2D ND2→RT2 mixed curl–`H(div)` volume pairing on triangles.
@@ -914,8 +994,40 @@ impl VectorAssembler {
     ///
     /// The DOF vector produced by the solve is then in the canonical basis; a
     /// GridFunction / error evaluator must convert it per element with
-    /// `u_local = T·u_canon` — see [`Self::assemble_linear_nd_canonical`].
+    /// `u_local = T·u_canon` — see [`nd_element_local_dofs`] and
+    /// [`Self::assemble_linear_nd_canonical`].
+    ///
+    /// Quadrature selection mirrors [`Self::assemble_bilinear`] exactly
+    /// (per-integrator `integration_order` dispatch first, `quad_order` for the
+    /// rest), so the **only** difference to the default path is the face-block
+    /// rotation and no other bit of the assembly changes.
     pub fn assemble_bilinear_nd_canonical<M: MeshTopology>(
+        space: &HCurlSpace<M>,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        let n = space.n_dofs();
+        let space_order = space.element_order(0);
+        if integrators
+            .iter()
+            .any(|i| i.integration_order(space_order).is_some())
+        {
+            let mut acc: Option<CsrMatrix<f64>> = None;
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let m = Self::assemble_bilinear_nd_canonical_many(space, &[*integ], qo);
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => a.add(&m),
+                });
+            }
+            return acc.unwrap_or_else(|| CsrMatrix::new_empty(n, n));
+        }
+        Self::assemble_bilinear_nd_canonical_many(space, integrators, quad_order)
+    }
+
+    /// Core canonical-basis bilinear loop (no per-integrator order dispatch).
+    fn assemble_bilinear_nd_canonical_many<M: MeshTopology>(
         space: &HCurlSpace<M>,
         integrators: &[&dyn VectorBilinearIntegrator],
         quad_order: u8,
@@ -936,8 +1048,34 @@ impl VectorAssembler {
     }
 
     /// Load vector counterpart of [`Self::assemble_bilinear_nd_canonical`]
-    /// (`b ← Tᵀ·b`).
+    /// (`b ← Tᵀ·b`), with the same per-integrator quadrature selection as
+    /// [`Self::assemble_linear`].
     pub fn assemble_linear_nd_canonical<M: MeshTopology>(
+        space: &HCurlSpace<M>,
+        integrators: &[&dyn VectorLinearIntegrator],
+        quad_order: u8,
+    ) -> Vec<f64> {
+        let n = space.n_dofs();
+        let space_order = space.element_order(0);
+        if integrators
+            .iter()
+            .any(|i| i.integration_order(space_order).is_some())
+        {
+            let mut acc = vec![0.0_f64; n];
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let v = Self::assemble_linear_nd_canonical_many(space, &[*integ], qo);
+                for i in 0..n {
+                    acc[i] += v[i];
+                }
+            }
+            return acc;
+        }
+        Self::assemble_linear_nd_canonical_many(space, integrators, quad_order)
+    }
+
+    /// Core canonical-basis load loop (no per-integrator order dispatch).
+    fn assemble_linear_nd_canonical_many<M: MeshTopology>(
         space: &HCurlSpace<M>,
         integrators: &[&dyn VectorLinearIntegrator],
         quad_order: u8,

@@ -22,6 +22,7 @@ use fem_assembly::{
         VectorDiffusionIntegrator, VectorDomainLFIntegrator, VectorH1MassIntegrator, VectorMassIntegrator,
     },
     mixed::DivIntegrator,
+    vector_assembler::nd_element_local_dofs,
     vector_integrator::VectorBilinearIntegrator,
     postproc::coefficient::FnVectorCoeff,
     DiscreteLinearOperator,
@@ -41,7 +42,8 @@ use fem_solver::{
 use fem_space::{
     H1Space, HCurlSpace, HDivSpace, L2Space, VectorH1Space,
     fe_space::FESpace,
-    constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv},
+    constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv,
+                 form_linear_system},
 };
 use nalgebra::{DMatrix, DVector};
 
@@ -1913,14 +1915,37 @@ fn tet_jac(n0: &[f64], n1: &[f64], n2: &[f64], n3: &[f64]) -> (DMatrix<f64>, f64
     (jac, det_j)
 }
 
+/// Which boundary condition / assembly convention a 3-D Maxwell tet MMS uses.
+#[derive(Clone, Copy, PartialEq)]
+enum TetMaxwellMode {
+    /// Homogeneous `E_tan = 0` on the element-local (pre-D48) assembly: the
+    /// exact solution has a *non-zero* tangential trace, so the measured error
+    /// is dominated by that boundary-layer mismatch.  Kept as the ND1 baseline.
+    PecElementLocal,
+    /// Exact tangential trace imposed on every boundary DOF
+    /// ([`boundary_dofs_hcurl`], D47) with the canonical (D48) assembly and the
+    /// matching canonical reconstruction (`u_local = T·u_canon`) — the ex3
+    /// pipeline, where the L2/curl errors measure the discretisation itself.
+    DirichletCanonical,
+}
+
 fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
+    solve_maxwell_3d_tet_mode(n, order, TetMaxwellMode::PecElementLocal)
+}
+
+fn solve_maxwell_3d_tet_mode(n: usize, order: u8, mode: TetMaxwellMode) -> (f64, f64) {
     let mesh = Mesh::<3>::unit_cube_tet(n);
     let hcurl = HCurlSpace::new(mesh.clone(), order);
+    let canonical = mode == TetMaxwellMode::DirichletCanonical;
 
     let curl_curl = CurlCurlIntegrator { mu: 1.0 };
     let mass = VectorMassIntegrator { alpha: 1.0 };
-    let mat = VectorAssembler::assemble_bilinear(
-        &hcurl, &[&curl_curl as &dyn VectorBilinearIntegrator, &mass], 5);
+    let integrators: [&dyn VectorBilinearIntegrator; 2] = [&curl_curl, &mass];
+    let mat = if canonical {
+        VectorAssembler::assemble_bilinear_nd_canonical(&hcurl, &integrators, 5)
+    } else {
+        VectorAssembler::assemble_bilinear(&hcurl, &integrators, 5)
+    };
 
     let src = VectorDomainLFIntegrator {
         f: FnVectorCoeff(Box::new(move |x: &[f64], out: &mut [f64]| {
@@ -1928,11 +1953,25 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
             out[0] = fv[0]; out[1] = fv[1]; out[2] = fv[2];
         })),
     };
-    let mut rhs = VectorAssembler::assemble_linear(&hcurl, &[&src], 5);
+    let mut rhs = if canonical {
+        VectorAssembler::assemble_linear_nd_canonical(&hcurl, &[&src], 5)
+    } else {
+        VectorAssembler::assemble_linear(&hcurl, &[&src], 5)
+    };
 
     let bdofs = boundary_dofs_hcurl(&mesh, &hcurl, &[1, 2, 3, 4, 5, 6]);
     let mut mat_mut = mat;
-    apply_dirichlet(&mut mat_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    if canonical {
+        // Non-homogeneous essential BC: the interpolant's tangential trace.
+        let u_proj = hcurl
+            .interpolate_vector(&|x| e_maxwell_3d(x).to_vec())
+            .into_vec();
+        let bc: Vec<f64> = bdofs.iter().map(|&d| u_proj[d as usize]).collect();
+        let mut x0 = u_proj.clone();
+        form_linear_system(&mut mat_mut, &mut rhs, &mut x0, &bdofs, &bc);
+    } else {
+        apply_dirichlet(&mut mat_mut, &mut rhs, &bdofs, &vec![0.0; bdofs.len()]);
+    }
 
     let u = dense_solve(&mat_mut, &rhs);
 
@@ -1954,6 +1993,17 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
         let nodes = hcurl.mesh().element_nodes(e);
         let dofs = hcurl.element_dofs(e);
         let signs = hcurl.element_signs(e);
+        // Element-local DOFs: `u_local = T·u_canon` on the canonical basis
+        // (MFEM `DofTransformation::InvTransformPrimal`), scalar signs only on
+        // the element-local one.
+        let uloc: Vec<f64> = if canonical {
+            nd_element_local_dofs(&hcurl, e, &u)
+        } else {
+            dofs.iter()
+                .zip(signs.iter())
+                .map(|(&d, &s)| s * u[d as usize])
+                .collect()
+        };
         let n0 = hcurl.mesh().node_coords(nodes[0]);
         let n1 = hcurl.mesh().node_coords(nodes[1]);
         let n2 = hcurl.mesh().node_coords(nodes[2]);
@@ -1976,10 +2026,9 @@ fn solve_maxwell_3d_tet(n: usize, order: u8) -> (f64, f64) {
             let mut uh = [0.0; 3];
             let mut curl_uh = [0.0; 3];
             for k in 0..n_vdofs {
-                let s = signs[k];
                 for d in 0..3 {
-                    uh[d] += u[dofs[k] as usize] * s * phys_phi[3 * k + d];
-                    curl_uh[d] += u[dofs[k] as usize] * s * phys_curl[3 * k + d];
+                    uh[d] += uloc[k] * phys_phi[3 * k + d];
+                    curl_uh[d] += uloc[k] * phys_curl[3 * k + d];
                 }
             }
             err_l2_sq += w * ((uh[0]-ue[0]).powi(2) + (uh[1]-ue[1]).powi(2) + (uh[2]-ue[2]).powi(2));
@@ -2050,7 +2099,7 @@ fn maxwell_3d_tet_nd2_convergence() {
     // boundary layer mismatch that degrades curl convergence. For now: diagnostic-only.
     let ns = [2usize, 3];
     let (errors_l2, errors_curl): (Vec<f64>, Vec<f64>) = ns.iter().map(|&n| {
-        let (l2, curl) = solve_maxwell_3d_tet(n, 2);
+        let (l2, curl) = solve_maxwell_3d_tet_mode(n, 2, TetMaxwellMode::DirichletCanonical);
         (l2, curl)
     }).unzip();
     eprintln!("3D Maxwell TetND2 (diagnostic): L閾?err={:?}, curl err={:?}",
