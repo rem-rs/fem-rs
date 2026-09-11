@@ -36,7 +36,9 @@ impl<V: VectorCoeff> BilinearIntegrator for VectorConvectionNLFIntegrator<V> {
         let n = qp.n_dofs;
         let dim = qp.dim;
         let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
-        let w = qp.weight;
+        // `grad_phys` carries the adjugate scaling, so pair it with the bare
+        // quadrature weight (see VectorConvectionIntegrator).
+        let w = qp.ref_weight;
         let mut v_buf = vec![0.0; dim];
         self.velocity.eval(&ctx, &mut v_buf);
         for i in 0..n {

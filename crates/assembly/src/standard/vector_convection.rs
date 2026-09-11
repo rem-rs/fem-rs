@@ -67,7 +67,13 @@ impl<'a> BilinearIntegrator for VectorConvectionIntegrator<'a> {
         }
 
         // Now assemble: K[(k,a),(l,a)] += w · φ_k · (w_qp · ∇φ_l)
-        let w = qp.weight;
+        // `grad_phys` follows the assembler's adjugate convention, i.e. it is
+        // |det J| · J⁻ᵀ∇φ rather than the true physical gradient, so the
+        // convection family must pair it with the bare quadrature weight
+        // (MFEM `ConvectionIntegrator` convention).  Using `weight` (=
+        // ip.weight / |det J|) or `phys_weight` (= ip.weight·|det J|) both
+        // scale the matrix by a power of |det J| on non-unit-sized elements.
+        let w = qp.ref_weight;
         for k in 0..n_nodes {
             let phi_k = qp.phi[k];
             for l in 0..n_nodes {
@@ -133,5 +139,51 @@ mod tests {
         let dense = mat.to_dense();
         let max_val: f64 = dense.iter().map(|&v| v.abs()).fold(0.0, f64::max);
         assert!(max_val < 1e-14, "zero velocity should give zero matrix, got max={max_val}");
+    }
+
+    /// The convection form is a physical volume integral, but `grad_phys` is
+    /// stored with the assembler's adjugate scaling (`|det J|·J⁻ᵀ∇φ`), so the
+    /// integrand must be paired with the bare quadrature weight.  With the
+    /// convecting field equal to the linear field `u = (x, y)` we have
+    /// `w · ∇u_x = x = u_x`, hence the `x`-component of `K u` must equal
+    /// `M_scalar · (interpolated x)` exactly.  Meshes with `|det J| != 1`
+    /// expose either wrong convention (the candidates agree on unit-sized
+    /// elements, which is why this goes unnoticed on `unit_square_tri`).
+    #[test]
+    fn vector_convection_uses_adjugate_weight_convention() {
+        for (nx, ny) in [(2usize, 1usize), (3, 2)] {
+            let mesh = Mesh::<2>::make_cartesian_2d(nx, ny, 2.0, 1.0);
+            let vspace = VectorH1Space::new(mesh.clone(), 1, 2);
+            let sspace = fem_space::H1Space::new(mesh, 1);
+            let n_scalar = vspace.n_scalar_dofs();
+            assert_eq!(n_scalar, sspace.n_dofs());
+
+            let u = vspace.interpolate_vec(&|x| vec![x[0], x[1]]);
+            let integ = VectorConvectionIntegrator::new(u.as_slice(), n_scalar);
+            let k = Assembler::assemble_bilinear(&vspace, &[&integ], 4);
+            let mut ku = vec![0.0_f64; vspace.n_dofs()];
+            k.spmv(u.as_slice(), &mut ku);
+
+            // Reference: mass matrix applied to the interpolated x coordinate.
+            let m = Assembler::assemble_bilinear(
+                &sspace,
+                &[&crate::standard::MassIntegrator { rho: 1.0 }],
+                4,
+            );
+            let x_coeff = fem_space::fe_space::FESpace::interpolate(&sspace, &|p| p[0]);
+            let mut mx = vec![0.0_f64; n_scalar];
+            m.spmv(x_coeff.as_slice(), &mut mx);
+
+            let scale = mx.iter().map(|v| v.abs()).fold(0.0_f64, f64::max).max(1.0);
+            let err = ku[..n_scalar]
+                .iter()
+                .zip(&mx)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                err < 1e-12 * scale,
+                "nx={nx} ny={ny}: max|(K u)_x - M x| = {err:.3e} (scale {scale:.3e})"
+            );
+        }
     }
 }
