@@ -165,6 +165,32 @@ pub fn quad_orientation(base: [u32; 4], test: [u32; 4]) -> usize {
     if test[(i + 1) % 4] == base[1] { 2 * i } else { 2 * i + 1 }
 }
 
+/// Row-major index of barycentric grid point `(j, i)` (`i + j <= p`,
+/// `k = p − i − j`) in the degree-`p` triangular dof grid — MFEM's
+/// `TriDof − ((pp2−j)(pp1−j))/2 + i`.
+fn tri_grid_index(p: usize, j: usize, i: usize) -> usize {
+    j * (2 * p + 3 - j) / 2 + i
+}
+
+/// Map the element-local face-grid slot `(j, i)` to the canonical face dof
+/// index for face orientation `r` (`GetTriOrientation` value 0..5), following
+/// MFEM `RT_FECollection::InitFaces` `TriDofOrd`:
+/// r=0: (j,i); r=1: (j,k); r=2: (i,k); r=3: (k,i); r=4: (k,j); r=5: (i,j)
+/// with `k = p − i − j`.  Odd `r` additionally flip the dof sign
+/// ([`rt_face_sign`]).
+fn tri_face_grid_transform(p: usize, r: usize, j: usize, i: usize) -> usize {
+    let k = p - i - j;
+    let (a, b) = match r % 6 {
+        0 => (j, i),
+        1 => (j, k),
+        2 => (i, k),
+        3 => (k, i),
+        4 => (k, j),
+        _ => (i, j),
+    };
+    tri_grid_index(p, a, b)
+}
+
 /// RT `DofOrderForOrientation`: odd orientation flips the sign of the face DOFs
 /// (for all RT orders — `RT_FECollection::InitFaces` puts a `-1-` prefix on
 /// every odd-orientation row of `TriDofOrd`/`QuadDofOrd`).
@@ -501,19 +527,19 @@ impl<M: MeshTopology> HDivSpace<M> {
                         next_dof += nd;
                         d
                     });
-                    // NOTE (D28): the slot layout must stay exactly as it is
-                    // here — `crates/assembly/src/discrete_op.rs` (its
-                    // RT1/RT2 discrete-divergence/curl operators) reads these
-                    // dofs back with the *canonical-moment* semantics of this
-                    // same block layout, so any re-ordering or per-edge slot
-                    // reversal breaks those operators.  The consequence is
-                    // that for tri/tet RT1/RT2 `interpolate_vector` must keep
-                    // serving the canonical-moment values (see
-                    // `interpolate_vector_legacy`) instead of the
-                    // reference-dual values that would make the
-                    // vector-assembler reconstruction exact.
+                    // D34: for k ≥ 1 the per-edge dofs are nodal flux samples
+                    // ordered along the element's local edge direction
+                    // (v_i→v_j, matching TriRT1/TriRT2).  A neighbour listing
+                    // the shared edge in the opposing direction maps its slot
+                    // k to the same physical point as this element's slot
+                    // (k+1−1−k') — so the global slots are reversed, exactly
+                    // like MFEM's RT `DofOrderForOrientation(SEGMENT, -1)` and
+                    // like `build_2d_quad`.  The element sign (outward vs
+                    // canonical normal) is orthogonal to this reversal.
+                    let rev = gi > gj;
                     for k in 0..dofs_per_face {
-                        dofs_flat.push(first + k as u32);
+                        let kk = if rev { dofs_per_face - 1 - k } else { k };
+                        dofs_flat.push(first + kk as u32);
                         signs_flat.push(sign);
                     }
                 }
@@ -616,9 +642,16 @@ impl<M: MeshTopology> HDivSpace<M> {
                 let [la, lb, lc] = TET_FACES_CANON[lf];
                 let local = [verts[la], verts[lb], verts[lc]];
                 let key = FaceKey::new(local[0], local[1], local[2]);
-                let sign = match face_canon.get(&key) {
-                    Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                    _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+                let (sign, orientation) = match face_canon.get(&key) {
+                    Some(FaceCanon::Tri(base)) => {
+                        let o = tri_orientation(*base, local);
+                        (rt_face_sign(o), o)
+                    }
+                    _ => {
+                        face_canon.insert(key, FaceCanon::Tri(local));
+                        face_canon_verts.entry(key).or_insert_with(|| local.to_vec());
+                        (1.0, 0)
+                    }
                 };
 
                 if dofs_per_face == 1 {
@@ -626,11 +659,28 @@ impl<M: MeshTopology> HDivSpace<M> {
                     dofs_flat.push(dof);
                     signs_flat.push(sign);
                 } else {
-                    // Multiple DOFs per face (3 for RT1, 3+ for BDM)
+                    // Multiple DOFs per face (3 for RT1, 6 for RT2, 3+ for BDM)
                     let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=dofs_per_face as DofId; d });
-                    for k in 0..dofs_per_face as DofId {
-                        dofs_flat.push(first + k);
-                        signs_flat.push(sign);
+                    if !is_bdm {
+                        // D34: the nodal face grid of the RT basis
+                        // (TetRT1/TetRT2, MFEM `(j, i)` point patterns) must
+                        // rotate/mirror with the face orientation so that both
+                        // sides of a shared face agree on which physical point
+                        // each global dof samples — MFEM's `TriDofOrd`
+                        // (DofOrderForOrientation for triangular faces).
+                        for j in 0..=k {
+                            for i in 0..=(k - j) {
+                                let c = tri_face_grid_transform(k, orientation, j, i);
+                                dofs_flat.push(first + c as DofId);
+                                signs_flat.push(sign);
+                            }
+                        }
+                    } else {
+                        // BDM face dofs keep the identity slot layout.
+                        for kk in 0..dofs_per_face as DofId {
+                            dofs_flat.push(first + kk);
+                            signs_flat.push(sign);
+                        }
                     }
                 }
             }
@@ -1159,31 +1209,33 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// missing change of basis — which is what makes the result exact for every
     /// field representable in the space.
     ///
-    /// Slot alignment across element interfaces (which global dof carries which
-    /// sample) is handled at construction time where possible: quad 2-D edges
-    /// reverse their slot order on negatively directed edges (`build_2d_quad`)
-    /// and hex faces rotate/reflect their `(k+1)^2` grid with the face
-    /// orientation (`build_3d_hex`), mirroring MFEM's
-    /// `DofOrderForOrientation`.  For tri/tet RT1/RT2 the slot layout is
-    /// pinned by `crates/assembly/src/discrete_op.rs` (canonical-moment
-    /// semantics), so those combinations are served by
-    /// [`Self::interpolate_vector_legacy`] instead of this engine.
-    ///
-    /// Supported by this engine: RT0 on triangles/quads/tets/hexes/prisms,
-    /// RT1/RT2 on quads, and RT1 on hexes.  BDM, pyramids, and tri/tet
-    /// RT1/RT2 are served by the legacy path.
+/// Slot alignment across element interfaces (which global dof carries which
+/// sample) is handled at construction time: quad 2-D edges and tri 2-D edges
+/// reverse their slot order on negatively directed edges (`build_2d_quad` /
+/// `build_2d_tri`), tet faces rotate/mirror their barycentric grid with the
+/// face orientation (`build_3d_tet`, MFEM `TriDofOrd`) and hex faces rotate/
+/// reflect their `(k+1)^2` grid (`build_3d_hex`), mirroring MFEM's
+/// `DofOrderForOrientation`.  With the D33/D34 element fixes
+/// (TetRTk/TetRT1/TetRT2, TriRT1) every RT reference basis is exactly dual to
+/// its slot sample set, so the dual matrix is the identity and the dof values
+/// coincide with MFEM `Project_RT` (up to fem-rs' unnormalised-normal scaling).
+///
+/// Supported by this engine: RT0/RT1/RT2 on triangles, RTk on quads,
+/// RT0/RT1/RT2 on tets, RT0..2 on hexes, RT0 on prisms.  BDM and pyramids are
+/// served by the legacy path.
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         // Combinations whose dof values must keep the historical
-        // canonical-moment semantics (discrete_op) or that predate this
-        // engine (BDM, pyramids) are served by the legacy path.
+        // canonical-moment semantics (BDM consumers) or that predate this
+        // engine (pyramids) are served by the legacy path.  Since D33/D34 the
+        // tet RT bases (TetRTk/TetRT1/TetRT2) and the tri RT bases
+        // (TriRTk/TriRT1/TriRT2) are flux-dual with per-face support, so RT on
+        // tri/quad/tet/hex/prism is served by this engine.
         let needs_legacy = self.is_bdm
             || (0..self.mesh.n_elements() as u32).any(|e| {
                 matches!(
                     (self.mesh.element_type(e), self.order),
-                    (ElementType::Tri3 | ElementType::Tri6, 1..=2)
-                        | (ElementType::Tet4 | ElementType::Tet10, 1..=2)
-                        | (ElementType::Pyramid5, _)
+                    (ElementType::Pyramid5, _)
                 )
             });
         if needs_legacy {
@@ -1195,17 +1247,16 @@ impl<M: MeshTopology> HDivSpace<M> {
             let order = self.order;
             let supported = matches!(
                 (et, order),
-                (ElementType::Tri3 | ElementType::Tri6, 0)
+                (ElementType::Tri3 | ElementType::Tri6, 0..=2)
                     | (ElementType::Quad4, 0..=6)
-                    | (ElementType::Tet4 | ElementType::Tet10, 0)
+                    | (ElementType::Tet4 | ElementType::Tet10, 0..=2)
                     | (ElementType::Hex8, 0..=2)
                     | (ElementType::Prism6, 0)
             );
             assert!(
                 supported,
                 "HDivSpace::interpolate_vector: RT order {order} on {et:?} is not supported \
-                 (tri/tet RT1/RT2 are served by the legacy canonical-moment path; prism \
-                 RTk with k>=1 and BDM are unsupported)"
+                 (prism RTk with k>=1 and BDM are unsupported)"
             );
 
             let rows = interp_rows(et, order);
@@ -1288,6 +1339,9 @@ impl<M: MeshTopology> HDivSpace<M> {
                         *di = val;
                     }
                     let re: Box<dyn VectorReferenceElement> = match order {
+                        // D33/D34: must pair with the SAME element the vector
+                        // assembler uses (`vec_ref_elem`): TetRTk(0), TetRT1,
+                        // TetRT2 — all flux-dual with per-face support.
                         0 => Box::new(TetRTk::new(0)),
                         1 => Box::new(TetRT1),
                         _ => Box::new(TetRT2),
@@ -1772,22 +1826,16 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
     };
     match elem_type {
         // Reference dual block order = TRI_FACES = [hyp (1,2), left (0,2),
-        // bottom (0,1)] (the engine only serves tri RT0; TriRTk(0)'s dual
-        // order matches TRI_FACES).
+        // bottom (0,1)] with Gauss-Legendre nodal samples ascending along the
+        // listed edge direction, then MFEM interior component samples.
+        // Table shared with the element crate (`TriRT1::mfem_tri_nodal_dofs`).
         ElementType::Tri3 | ElementType::Tri6 => {
-            let gl = gauss_legendre_01(k + 1).0;
-            const FACES: [([f64; 2], [f64; 2], [f64; 2]); 3] = [
-                ([1.0, 0.0], [-1.0, 1.0], [1.0, 1.0]),
-                ([0.0, 0.0], [0.0, 1.0], [-1.0, 0.0]),
-                ([0.0, 0.0], [1.0, 0.0], [0.0, -1.0]),
-            ];
-            for (p, u, nk) in FACES {
-                for &t in &gl {
-                    rows.push(InterpRow {
-                        xi: [p[0] + t * u[0], p[1] + t * u[1], 0.0],
-                        nk: [nk[0], nk[1], 0.0],
-                    });
-                }
+            let (pts, nks) = fem_element::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs(k);
+            for (p, nk) in pts.iter().zip(nks.iter()) {
+                rows.push(InterpRow {
+                    xi: [p[0], p[1], 0.0],
+                    nk: [nk[0], nk[1], 0.0],
+                });
             }
         }
         // QUAD_FACES order: bottom (0,1), right (1,2), top (2,3), left (3,0).
@@ -1823,49 +1871,12 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
             }
         }
         // TET_FACES_CANON order: (1,2,3), (0,3,2), (0,1,3), (0,2,1).
+        // MFEM RT_TetrahedronElement nodal table (points + normals shared with
+        // the element crate, `tet_rt1::mfem_nodal_dofs`).
         ElementType::Tet4 | ElementType::Tet10 => {
-            let bop = gauss_legendre_01(k + 1).0;
-            const FACES: [([f64; 3], [f64; 3], [f64; 3], [f64; 3]); 4] = [
-                ([1.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0], [1.0, 1.0, 1.0]),
-                ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]),
-                ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]),
-                ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]),
-            ];
-            for (p, u, v, nk) in FACES {
-                for j in 0..=k {
-                    for i in 0..=(k - j) {
-                        let wsum = bop[i] + bop[j] + bop[k - i - j];
-                        let s = bop[i] / wsum;
-                        let t = bop[j] / wsum;
-                        rows.push(InterpRow {
-                            xi: [
-                                p[0] + s * u[0] + t * v[0],
-                                p[1] + s * u[1] + t * v[1],
-                                p[2] + s * u[2] + t * v[2],
-                            ],
-                            nk,
-                        });
-                    }
-                }
-            }
-            if k >= 1 {
-                let iop = gauss_legendre_01(k).0;
-                for d in 0..k {
-                    for a in 0..=d {
-                        for b in 0..=(d - a) {
-                            let c = d - a - b;
-                            let wsum = iop[a] + iop[b] + iop[c] + iop[k - 1 - d];
-                            let xi = [
-                                iop[a] / wsum,
-                                iop[b] / wsum,
-                                iop[c] / wsum,
-                            ];
-                            for comp in 0..3 {
-                                rows.push(InterpRow { xi, nk: axis(comp) });
-                            }
-                        }
-                    }
-                }
+            let (pts, nks) = fem_element::raviart_thomas::tet_rt1::mfem_nodal_dofs(k);
+            for (p, nk) in pts.iter().zip(nks.iter()) {
+                rows.push(InterpRow { xi: *p, nk: *nk });
             }
         }
         // HEX_FACES order: bottom z-, front y-, right x+, back y+, left x-, top z+.
@@ -2234,30 +2245,39 @@ mod tests {
         assert!(vals.iter().all(|x| x.is_finite()));
     }
 
-    /// tri/tet RT1 keep the LEGACY canonical-moment dof semantics (required
-    /// by `crates/assembly/src/discrete_op.rs`); pin those values here.  The
-    /// interior slots 6/7 carry ∫Φ_x dA·detJ and ∫Φ_y dA·detJ: for the
-    /// constant field (1,0) on element 0 of `unit_square_tri(2)` (detJ =
-    /// 0.25, quadrature weight sum 0.5) both equal 0.125.  NOTE: these are
-    /// not the reference-dual values, so the vector-assembler reconstruction
-    /// of this vector is not exact (the D28 defect remains open for tri RT1).
+    /// tri/tet RT1/RT2 use the dual engine with MFEM **nodal** semantics
+    /// (D34): each slot carries the pointwise normal-flux sample
+    /// `f(x_s)·cof(J)·nk_s` (scaled by the element sign).  For the constant
+    /// field (1,0) on element 0 of `unit_square_tri(2)` (`cof = 0.5·I`): the
+    /// hypotenuse samples are ±0.5, the left-edge samples have the opposite
+    /// sign, the bottom-edge samples vanish (flux ⊥ n̂), interior sample 6
+    /// (nk (0,−1)) vanishes and interior sample 7 (nk (−1,0)) repeats the
+    /// left-edge value.
     #[test]
-    fn hdiv_interpolate_vector_constant_2d_rt1_legacy_semantics() {
+    fn hdiv_interpolate_vector_constant_2d_rt1_nodal_semantics() {
         let mesh = Mesh::<2>::unit_square_tri(2);
         let space = HDivSpace::new(mesh, 1);
         let g = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
         let dofs = space.element_dofs(0);
-        let i6 = dofs[6] as usize;
-        let i7 = dofs[7] as usize;
+        let s = |k: usize| g.as_slice()[dofs[k] as usize];
+        let v_hyp = s(0);
+        assert!((v_hyp.abs() - 0.5).abs() < 1e-12, "hyp sample magnitude");
         assert!(
-            (g.as_slice()[i6] - 0.125).abs() < 1e-12,
-            "legacy interior ∫Φ_x·detJ should be 0.125, got {}",
-            g.as_slice()[i6]
+            (s(1) - v_hyp).abs() < 1e-12,
+            "hyp nodes share the constant sample value"
         );
         assert!(
-            g.as_slice()[i7].abs() < 1e-12,
-            "legacy interior ∫Φ_y·detJ should vanish for (1,0), got {}",
-            g.as_slice()[i7]
+            (s(2) - v_hyp).abs() < 1e-12 && (s(3) - v_hyp).abs() < 1e-12,
+            "left samples repeat the hyp value after orientation signs"
+        );
+        assert!(
+            s(4).abs() < 1e-12 && s(5).abs() < 1e-12,
+            "bottom samples vanish for f = (1,0)"
+        );
+        assert!(s(6).abs() < 1e-12, "interior (0,−1) sample vanishes");
+        assert!(
+            (s(7) - s(2)).abs() < 1e-12,
+            "interior (−1,0) sample equals left-edge sample"
         );
     }
 

@@ -278,12 +278,27 @@ fn tet_data(k: usize) -> &'static TetRTkData {
                     }
                 }
             }
-            sel.push(c);
+            // D33: two related fixes here.
+            // (1) The Gauss-Jordan reduction satisfies R · V · P = [I | X],
+            //     where R is the accumulated *row-operation* matrix (the right
+            //     block) and P the accumulated column permutation.  The dual
+            //     basis therefore is phi_j = sum_a R[a][j] · mono_{cp[a]} —
+            //     i.e. the coefficient matrix is the TRANSPOSE of the right
+            //     block, paired with the permuted monomials cp[j].  The old
+            //     code used the un-transposed block paired with monomial j,
+            //     silently assuming no column swap ever happens AND that R
+            //     were already the coefficient matrix; both are false, the
+            //     basis was not dual to the face-flux functionals (basis
+            //     functions carried normal traces on several faces at once),
+            //     which broke tet RT0/1/2 interpolation and L2 projection.
+            // (2) `sel` records cp[c], the monomial pivot column c was drawn
+            //     from, which eval_basis_vec/eval_div use via `monomap`.
+            sel.push(cp[c]);
         }
         let mut coeff = vec![0.0; n * n];
         for i in 0..n {
             for j in 0..n {
-                coeff[i * n + j] = row[i][mt + sel[j]];
+                coeff[i * n + j] = row[j][mt + i];
             }
         }
         TetRTkData {
@@ -475,6 +490,7 @@ impl VectorReferenceElement for TetRTk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn coeff_non_singular() {
         for k in 1..=4 {
@@ -486,6 +502,7 @@ mod tests {
             assert!(s > 0.1, "k={k}");
         }
     }
+
     #[test]
     fn finite() {
         for k in 1..=3 {
@@ -502,4 +519,141 @@ mod tests {
             }
         }
     }
+
+    /// D33 regression: the constructed basis must be *dual* to the moment
+    /// functionals used to build it, i.e. `D_i(phi_j) = delta_ij`.  Before the
+    /// D33 fix the Gauss-Jordan column permutation was dropped, the basis
+    /// functions were paired with the wrong monomials, and the duality failed
+    /// (which broke tet RT interpolation and L2 projection end-to-end).
+    #[test]
+    fn basis_dual_to_moment_functionals() {
+        for k in 0..=3usize {
+            let e = TetRTk::new(k);
+            let n = e.n_dofs();
+            let qr = crate::quadrature::tri_rule_arbitrary(((3 * k) as u8).max(2));
+
+            let mut dual = vec![0.0f64; n * n];
+            let mut phi = vec![0.0f64; n * 3];
+            let mut row = 0usize;
+
+            // Face 0 (x+y+z=1, nk=(1,1,1)): ∫ (Φx+Φy+Φz) s^a t^b dA.
+            for dg in 0..=k {
+                for a in 0..=dg {
+                    let b = dg - a;
+                    for (qp, w) in qr.points.iter().zip(qr.weights.iter()) {
+                        let (s, t) = (qp[0], qp[1]);
+                        e.eval_basis_vec(&[1.0 - s - t, s, t], &mut phi);
+                        for j in 0..n {
+                            dual[row * n + j] += w
+                                * (phi[j * 3] + phi[j * 3 + 1] + phi[j * 3 + 2])
+                                * s.powi(a as i32)
+                                * t.powi(b as i32);
+                        }
+                    }
+                    row += 1;
+                }
+            }
+            // Faces 1..3 with outward normals −x, −y, −z: ∫ (−Φc) u^a v^b dA.
+            // The construction parametrises face 1 by (y,z), face 2 by (x,z),
+            // face 3 by (x,y) — all via the same (u,v) triangle quadrature.
+            for (face, comp) in [(1usize, 0usize), (2, 1), (3, 2)] {
+                for dg in 0..=k {
+                    for a in 0..=dg {
+                        let b = dg - a;
+                        for (qp, w) in qr.points.iter().zip(qr.weights.iter()) {
+                            let (u, v) = (qp[0], qp[1]);
+                            let pt: [f64; 3] = match face {
+                                1 => [0.0, u, v],
+                                2 => [u, 0.0, v],
+                                _ => [u, v, 0.0],
+                            };
+                            e.eval_basis_vec(&pt, &mut phi);
+                            for j in 0..n {
+                                dual[row * n + j] += w * (-phi[j * 3 + comp])
+                                    * u.powi(a as i32)
+                                    * v.powi(b as i32);
+                            }
+                        }
+                        row += 1;
+                    }
+                }
+            }
+            // Interior monomial moments ∫ Φ_comp · x^a y^b z^c dV, deg ≤ k−1.
+            if k >= 1 {
+                let qv = crate::quadrature::tet_rule(((3 * k) as u8).max(2));
+                for dg in 0..=(k - 1) {
+                    for a in 0..=dg {
+                        for b in 0..=(dg - a) {
+                            let c = dg - a - b;
+                            for comp in 0..3 {
+                                for (qp, w) in qv.points.iter().zip(qv.weights.iter()) {
+                                    e.eval_basis_vec(qp, &mut phi);
+                                    let mono = qp[0].powi(a as i32)
+                                        * qp[1].powi(b as i32)
+                                        * qp[2].powi(c as i32);
+                                    for j in 0..n {
+                                        dual[row * n + j] += w * phi[j * 3 + comp] * mono;
+                                    }
+                                }
+                                row += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(row, n, "k={k}");
+            for i in 0..n {
+                for j in 0..n {
+                    let exp = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (dual[i * n + j] - exp).abs() < 1e-9,
+                        "k={k}: D_{i}(phi_{j}) = {}, expected {exp}",
+                        dual[i * n + j]
+                    );
+                }
+            }
+        }
+    }
+
+    /// D33 regression: every basis function must have a vanishing normal trace
+    /// on all faces outside its own slot block (interior-supported functions on
+    /// no face at all).  Without per-face support the assembler's global
+    /// reconstruction is inconsistent across neighbouring elements.
+    #[test]
+    fn per_face_normal_support() {
+        let nks: [[f64; 3]; 4] = [
+            [1.0, 1.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ];
+        let pts: [[f64; 3]; 4] = [
+            [0.42, 0.27, 0.31],
+            [0.0, 0.3, 0.4],
+            [0.3, 0.0, 0.4],
+            [0.3, 0.4, 0.0],
+        ];
+        for k in 0..=2usize {
+            let e = TetRTk::new(k);
+            let n = e.n_dofs();
+            let face_dofs = (k + 1) * (k + 2) / 2;
+            let mut phi = vec![0.0f64; n * 3];
+            for (f, pt) in pts.iter().enumerate() {
+                e.eval_basis_vec(pt, &mut phi);
+                for j in 0..n {
+                    let flux = phi[j * 3] * nks[f][0]
+                        + phi[j * 3 + 1] * nks[f][1]
+                        + phi[j * 3 + 2] * nks[f][2];
+                    let in_block = j < 4 * face_dofs && j / face_dofs == f;
+                    if !in_block {
+                        assert!(
+                            flux.abs() < 1e-9,
+                            "k={k}: face {f}: basis {j} normal trace = {flux}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
+

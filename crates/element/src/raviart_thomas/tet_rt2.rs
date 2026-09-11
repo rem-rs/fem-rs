@@ -1,19 +1,17 @@
-//! Raviart-Thomas RT2 element on the reference tetrahedron.
+//! MFEM-nodal Raviart-Thomas RT2 element on the reference tetrahedron — 36 DOFs.
 //!
-//! # Space: RT_2 = [P_2]^3 + (x,y,z)*P~2
-//! dim = 30 + 6 = 36 DOFs.
-//!
-//! # DOFs (36 total)
-//! - 6 normal-flux face moments per face x 4 faces = 24 face DOFs
-//! - 12 interior DOFs (integral u.w dV for w in [P_1]^3)
-//!
-//! Basis evaluation delegates to the generic TetRTk::new(2) implementation.
+//! Thin wrapper over the shared MFEM `RT_TetrahedronElement` port in
+//! [`super::tet_rt1`]: nodal flux functionals at the Gauss-Legendre face nodes
+//! (order `p = 2` per face direction) plus 12 interior component samples
+//! (order `p − 1 = 1`), slot-ordered faces-first in MFEM `FaceVert` order
+//! `(1,2,3), (0,3,2), (0,1,3), (0,2,1)` — matching `HDivSpace::build_3d_tet`.
 
+use super::tet_rt1::{eval_nodal_tet_basis, eval_nodal_tet_div, nodal_tet_dof_coords};
 use crate::quadrature::tet_rule;
-use crate::raviart_thomas::TetRTk;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
-/// Raviart-Thomas RT2 H(div) element on the reference tetrahedron - 36 DOFs, order 2.
+/// Raviart-Thomas RT2 H(div) element on the reference tetrahedron — 36 DOFs,
+/// order 2, MFEM nodal flux-dual semantics.
 pub struct TetRT2;
 
 impl VectorReferenceElement for TetRT2 {
@@ -24,15 +22,15 @@ impl VectorReferenceElement for TetRT2 {
         2
     }
     fn n_dofs(&self) -> usize {
-        36
+        (2 + 1) * (2 + 2) * (2 + 4) / 2 // 36
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        TetRTk::new(2).eval_basis_vec(xi, values);
+        eval_nodal_tet_basis(2, xi, values);
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        TetRTk::new(2).eval_div(xi, div_vals);
+        eval_nodal_tet_div(2, xi, div_vals);
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
@@ -44,63 +42,79 @@ impl VectorReferenceElement for TetRT2 {
     fn quadrature(&self, order: u8) -> QuadratureRule {
         tet_rule(order)
     }
+
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        // RT2 on reference tetrahedron: 6 face moments per face x 4 faces = 24
-        // face DOFs, plus 12 interior DOFs. We assign each DOF a physical-space
-        // location: face DOFs sit on the open face (strictly inside the 2-simplex),
-        // interior DOFs scatter within the tet. These coordinates are intended for
-        // visualization, nodal identification, and DOF-graph layout - not for
-        // basis evaluation (which goes through TetRTk).
-        let face_lattice: [(f64, f64, f64); 6] = [
-            (0.6, 0.2, 0.2),
-            (0.2, 0.6, 0.2),
-            (0.2, 0.2, 0.6),
-            (0.4, 0.4, 0.2),
-            (0.4, 0.2, 0.4),
-            (0.2, 0.4, 0.4),
-        ];
-        let mut c = Vec::with_capacity(36);
-        // Face 0 (x + y + z = 1):  (a, b, c)
-        for &(a, b, cc) in &face_lattice {
-            c.push(vec![a, b, cc]);
-        }
-        // Face 1 (x = 0):  (0, b, c)
-        for &(_a, b, cc) in &face_lattice {
-            c.push(vec![0.0, b, cc]);
-        }
-        // Face 2 (y = 0):  (b, 0, c)
-        for &(_a, b, cc) in &face_lattice {
-            c.push(vec![b, 0.0, cc]);
-        }
-        // Face 3 (z = 0):  (b, c, 0)
-        for &(_a, b, cc) in &face_lattice {
-            c.push(vec![b, cc, 0.0]);
-        }
-        // Interior 12 DOFs - hand-picked symmetric scatter inside the unit tet.
-        let interior: [[f64; 3]; 12] = [
-            [0.40, 0.20, 0.20],
-            [0.20, 0.40, 0.20],
-            [0.20, 0.20, 0.40],
-            [0.20, 0.20, 0.20],
-            [0.30, 0.30, 0.20],
-            [0.30, 0.20, 0.30],
-            [0.20, 0.30, 0.30],
-            [0.25, 0.25, 0.25],
-            [0.15, 0.25, 0.35],
-            [0.35, 0.15, 0.25],
-            [0.25, 0.35, 0.15],
-            [0.10, 0.30, 0.30],
-        ];
-        for &p in &interior {
-            c.push(vec![p[0], p[1], p[2]]);
-        }
-        c
+        nodal_tet_dof_coords(2)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raviart_thomas::tet_rt1::TET_NK;
+
+    /// RT2 nodal duality: D_m(Φ_i) = Φ_i(x_m)·nk_m = δ_mi.
+    #[test]
+    fn tet_rt2_nodal_duality() {
+        let e = TetRT2;
+        let n = e.n_dofs();
+        let bop = crate::quadrature::gauss_legendre_01(3).0;
+        let iop = crate::quadrature::gauss_legendre_01(2).0;
+        let mut dual = vec![0.0f64; n * n];
+        let mut phi = vec![0.0f64; n * 3];
+        let mut m = 0usize;
+        for (f, nk) in TET_NK.iter().enumerate() {
+            for j in 0..=2 {
+                for i in 0..=(2 - j) {
+                    let w = bop[i] + bop[j] + bop[2 - i - j];
+                    let b0 = bop[2 - i - j] / w;
+                    let b1 = bop[i] / w;
+                    let b2 = bop[j] / w;
+                    let pt: [f64; 3] = match f {
+                        0 => [b0, b1, b2],
+                        1 => [0.0, b2, b1],
+                        2 => [b1, 0.0, b2],
+                        _ => [b2, b1, 0.0],
+                    };
+                    e.eval_basis_vec(&pt, &mut phi);
+                    for ii in 0..n {
+                        dual[m * n + ii] = phi[ii * 3] * nk[0]
+                            + phi[ii * 3 + 1] * nk[1]
+                            + phi[ii * 3 + 2] * nk[2];
+                    }
+                    m += 1;
+                }
+            }
+        }
+        for d in 0..2 {
+            for j in 0..(2 - d) {
+                for i in 0..(2 - d - j) {
+                    let w = iop[i] + iop[j] + iop[d] + iop[1 - i - j - d];
+                    let pt = [iop[i] / w, iop[j] / w, iop[d] / w];
+                    for nk in &TET_NK[1..4] {
+                        e.eval_basis_vec(&pt, &mut phi);
+                        for ii in 0..n {
+                            dual[m * n + ii] = phi[ii * 3] * nk[0]
+                                + phi[ii * 3 + 1] * nk[1]
+                                + phi[ii * 3 + 2] * nk[2];
+                        }
+                        m += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(m, n);
+        for (a, row) in dual.chunks(n).enumerate() {
+            for (b, val) in row.iter().enumerate() {
+                let exp = if a == b { 1.0 } else { 0.0 };
+                assert!(
+                    (val - exp).abs() < 1e-9,
+                    "D_{a}(phi_{b}) = {}, expected {exp}",
+                    val
+                );
+            }
+        }
+    }
 
     #[test]
     fn tet_rt2_n_dofs() {
@@ -109,18 +123,18 @@ mod tests {
 
     #[test]
     fn tet_rt2_basis_finite() {
-        let elem = TetRT2;
+        let e = TetRT2;
         let mut v = vec![0.0; 36 * 3];
         for xi in &[
-            vec![0., 0., 0.],
-            vec![1., 0., 0.],
-            vec![0., 1., 0.],
-            vec![0., 0., 1.],
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
             vec![0.25, 0.25, 0.25],
             vec![0.0, 0.5, 0.5],
         ] {
-            elem.eval_basis_vec(xi, &mut v);
-            for &val in &v {
+            e.eval_basis_vec(xi, &mut v);
+            for val in &v {
                 assert!(val.is_finite(), "non-finite at {xi:?}: {val}");
             }
         }
@@ -128,75 +142,13 @@ mod tests {
 
     #[test]
     fn tet_rt2_div_finite() {
-        let elem = TetRT2;
+        let e = TetRT2;
         let mut div = vec![0.0; 36];
-        let qr = elem.quadrature(3);
+        let qr = e.quadrature(3);
         for xi in &qr.points {
-            elem.eval_div(xi, &mut div);
-            for &d in &div {
+            e.eval_div(xi, &mut div);
+            for d in &div {
                 assert!(d.is_finite());
-            }
-        }
-    }
-
-    #[test]
-    fn tet_rt2_dof_coords_layout() {
-        let elem = TetRT2;
-        let coords = elem.dof_coords();
-        assert_eq!(coords.len(), 36, "RT2 has 36 DOFs");
-
-        // Face DOFs: first 24 must lie on the corresponding face plane.
-        // Face 0: x + y + z = 1
-        for i in 0..6 {
-            let p = &coords[i];
-            let s = p[0] + p[1] + p[2];
-            assert!((s - 1.0).abs() < 1e-12, "face 0 dof {i}: x+y+z = {s}");
-        }
-        // Face 1: x = 0
-        for i in 6..12 {
-            assert!(
-                coords[i][0].abs() < 1e-12,
-                "face 1 dof {i}: x = {}",
-                coords[i][0]
-            );
-        }
-        // Face 2: y = 0
-        for i in 12..18 {
-            assert!(
-                coords[i][1].abs() < 1e-12,
-                "face 2 dof {i}: y = {}",
-                coords[i][1]
-            );
-        }
-        // Face 3: z = 0
-        for i in 18..24 {
-            assert!(
-                coords[i][2].abs() < 1e-12,
-                "face 3 dof {i}: z = {}",
-                coords[i][2]
-            );
-        }
-        // Interior DOFs strictly inside the unit tet
-        for i in 24..36 {
-            let p = &coords[i];
-            assert!(
-                p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0,
-                "interior dof {i} has non-positive coord: {p:?}"
-            );
-            assert!(
-                p[0] + p[1] + p[2] < 1.0 - 1e-12,
-                "interior dof {i} not strictly inside: x+y+z = {}",
-                p[0] + p[1] + p[2]
-            );
-        }
-
-        // All face DOFs must be distinct (no two-fold duplicates)
-        for i in 0..24 {
-            for j in (i + 1)..24 {
-                let d = (coords[i][0] - coords[j][0]).abs()
-                    + (coords[i][1] - coords[j][1]).abs()
-                    + (coords[i][2] - coords[j][2]).abs();
-                assert!(d > 1e-9, "face DOFs {i} and {j} coincide");
             }
         }
     }

@@ -5,18 +5,21 @@
 //! dim = 6 + 2 = 8.
 //!
 //! # DOF functionals (8 total)
-//! 2 normal-flux moments per edge (3 edges × 2 = 6) + 2 interior moments:
+//! 2 normal-flux point samples per edge (3 edges × 2 = 6) + 2 interior samples:
 //!
 //! | DOF | Location | Functional |
 //! |-----|----------|------------|
-//! | 0   | edge f₀ (v₁v₂, hyp.) | ∫ Φ·n̂₀ dσ     (n̂₀=(1,1)/√2, len=√2) |
-//! | 1   | edge f₀  | ∫ Φ·n̂₀ · t dσ  (t = param along edge) |
-//! | 2   | edge f₁ (v₀v₂, left) | ∫ Φ·n̂₁ dσ   (n̂₁=(-1,0)) |
-//! | 3   | edge f₁  | ∫ Φ·n̂₁ · t dσ |
-//! | 4   | edge f₂ (v₀v₁, bot.) | ∫ Φ·n̂₂ dσ   (n̂₂=(0,-1)) |
-//! | 5   | edge f₂  | ∫ Φ·n̂₂ · t dσ |
-//! | 6   | interior | ∫_T Φ_x dA |
-//! | 7   | interior | ∫_T Φ_y dA |
+//! | 0   | edge f₀ (v₁v₂, hyp.) | Φ·n̂₀ at node 0   (n̂₀=(1,1)) |
+//! | 1   | edge f₀  | Φ·n̂₀ at node 1 |
+//! | 2   | edge f₁ (v₀v₂, left) | Φ·n̂₁ at node 0   (n̂₁=(-1,0)) |
+//! | 3   | edge f₁  | Φ·n̂₁ at node 1 |
+//! | 4   | edge f₂ (v₀v₁, bot.) | Φ·n̂₂ at node 0   (n̂₂=(0,-1)) |
+//! | 5   | edge f₂  | Φ·n̂₂ at node 1 |
+//! | 6   | interior | Φ·(0,-1) at (1/3,1/3) |
+//! | 7   | interior | Φ·(-1,0) at (1/3,1/3) |
+//!
+//! Edge samples ascend along the listed edge direction, matching `TriRT2`
+//! and `HDivSpace`'s `TRI_FACES` slot order (D34).
 
 use std::sync::OnceLock;
 
@@ -62,15 +65,65 @@ fn eval_monomial_divs(x: f64, y: f64, divs: &mut [f64; 8]) {
     divs[7] = 3.0 * y;
 }
 
+/// MFEM nodal dof table for order `k` (k ≥ 1) on the reference triangle:
+/// `(points, normals)` in `HDivSpace`'s `TRI_FACES` slot order — hypotenuse
+/// (v₁v₂) nk=(1,1), left (v₀v₂) nk=(−1,0), bottom (v₀v₁) nk=(0,−1) with
+/// `k+1` Gauss-Legendre samples per edge ascending along the listed edge
+/// direction, then the MFEM interior component samples nk=(0,−1), (−1,0)
+/// at the degree-`k−1` open points.  Shared by `HDivSpace::interpolate_vector`
+/// and the discrete operators (`crates/assembly/src/discrete_op.rs`).
+pub fn mfem_tri_nodal_dofs(k: usize) -> &'static (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+    static CACHE: [OnceLock<(Vec<[f64; 2]>, Vec<[f64; 2]>)>; 5] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    CACHE[k].get_or_init(|| {
+        use crate::quadrature::gauss_legendre_01;
+        let gl = gauss_legendre_01(k + 1).0;
+        let mut pts = Vec::new();
+        let mut nks = Vec::new();
+        for (p, u, nk) in [
+            ([1.0, 0.0], [-1.0, 1.0], [1.0, 1.0]),
+            ([0.0, 0.0], [0.0, 1.0], [-1.0, 0.0]),
+            ([0.0, 0.0], [1.0, 0.0], [0.0, -1.0]),
+        ] {
+            for &t in &gl {
+                pts.push([p[0] + t * u[0], p[1] + t * u[1]]);
+                nks.push(nk);
+            }
+        }
+        if k >= 1 {
+            let iop = gauss_legendre_01(k).0;
+            for j in 0..k {
+                for i in 0..(k - j) {
+                    let w = iop[i] + iop[j] + iop[k - 1 - i - j];
+                    let pt = [iop[i] / w, iop[j] / w];
+                    pts.push(pt);
+                    nks.push([0.0, -1.0]);
+                    pts.push(pt);
+                    nks.push([-1.0, 0.0]);
+                }
+            }
+        }
+        (pts, nks)
+    })
+}
+
 /// Build 8×8 Vandermonde matrix V[k][j] = DOF_k(m_j).
-///
 /// Matches MFEM `RT_TriangleElement` (fem/fe/fe_rt.cpp): **nodal** DOFs.
 /// Edge DOF nodes are the Gauss-Legendre open points on each edge
 /// (`poly1d.OpenPoints(1)` → (1∓1/√3)/2 = 0.2113248654, 0.7886751346);
 /// interior DOFs are both at (1/3, 1/3).  The functional is the point
 /// evaluation of the normal component φ·nk with the *unnormalised* edge
-/// normals `nk = {0,-1, 1,1, -1,0}` (hypotenuse normal has length √2 —
-/// MFEM keeps it unnormalised, which affects the basis scaling).
+/// normals `nk = {0,-1, 1,1, -1,0}` (MFEM keeps the hypotenuse normal
+/// unnormalised, which affects the basis scaling).
+///
+/// Slot order (D34): faces in `HDivSpace`'s `TRI_FACES` order — hypotenuse
+/// (v₁v₂), left (v₀v₂), bottom (v₀v₁) — with samples ascending along the
+/// listed edge direction, matching `TriRT2` and the interpolation rows.
 fn build_vandermonde() -> [[f64; 8]; 8] {
     let mut v = [[0.0f64; 8]; 8];
 
@@ -79,27 +132,25 @@ fn build_vandermonde() -> [[f64; 8]; 8] {
 
     let mut mono = [0.0f64; 16];
 
-    // Edge 0: bottom, nodes (t, 0), nk = (0,-1)
+    // Edge 0: hypotenuse (1-t, t), t ascending (v1→v2), nk = (1,1)
+    for (k, &t) in gl.iter().enumerate() {
+        eval_monomials(1.0 - t, t, &mut mono);
+        for j in 0..8 {
+            v[k][j] = mono[j * 2] + mono[j * 2 + 1]; // m_j · (1,1)
+        }
+    }
+    // Edge 1: left (0, t), t ascending (v0→v2), nk = (-1,0)
+    for (k, &t) in gl.iter().enumerate() {
+        eval_monomials(0.0, t, &mut mono);
+        for j in 0..8 {
+            v[2 + k][j] = -mono[j * 2]; // m_j · (-1,0)
+        }
+    }
+    // Edge 2: bottom (t, 0), t ascending (v0→v1), nk = (0,-1)
     for (k, &t) in gl.iter().enumerate() {
         eval_monomials(t, 0.0, &mut mono);
         for j in 0..8 {
-            v[k][j] = -mono[j * 2 + 1]; // m_j · (0,-1)
-        }
-    }
-    // Edge 1: hypotenuse, nodes (t2, t1) with (t_hi, t_lo) pairs, nk = (1,1)
-    for k in 0..2 {
-        let (x, y) = (gl[1 - k], gl[k]); // MFEM: Set2(bop[p-i], bop[i]) for i=0..p
-        eval_monomials(x, y, &mut mono);
-        for j in 0..8 {
-            v[2 + k][j] = mono[j * 2] + mono[j * 2 + 1]; // m_j · (1,1)
-        }
-    }
-    // Edge 2: left, nodes (0, t), nk = (-1,0)
-    for k in 0..2 {
-        let t = gl[1 - k]; // MFEM: Set2(0., bop[p-i])
-        eval_monomials(0.0, t, &mut mono);
-        for j in 0..8 {
-            v[4 + k][j] = -mono[j * 2]; // m_j · (-1,0)
+            v[4 + k][j] = -mono[j * 2 + 1]; // m_j · (0,-1)
         }
     }
     // Interior DOFs: both at (1/3, 1/3); dof2nk = 0 → nk=(0,-1), dof2nk = 2 → nk=(-1,0)
@@ -230,15 +281,15 @@ impl VectorReferenceElement for TriRT1 {
         let gl_lo = 0.5 * (1.0 - 1.0 / 3.0f64.sqrt());
         let gl_hi = 0.5 * (1.0 + 1.0 / 3.0f64.sqrt());
         vec![
-            // Edge 0 (bottom, (0,0)→(1,0)): GL nodes
+            // Edge 0 (hypotenuse (1,0)→(0,1)): GL nodes, t ascending
+            vec![1.0 - gl_lo, gl_lo],
+            vec![1.0 - gl_hi, gl_hi],
+            // Edge 1 (left (0,0)→(0,1)): GL nodes, t ascending
+            vec![0.0, gl_lo],
+            vec![0.0, gl_hi],
+            // Edge 2 (bottom (0,0)→(1,0)): GL nodes, t ascending
             vec![gl_lo, 0.0],
             vec![gl_hi, 0.0],
-            // Edge 1 (hypotenuse, (1,0)→(0,1)): MFEM Set2(bop[p-i], bop[i])
-            vec![gl_hi, gl_lo],
-            vec![gl_lo, gl_hi],
-            // Edge 2 (left, (0,1)→(0,0)): MFEM Set2(0., bop[p-i])
-            vec![0.0, gl_hi],
-            vec![0.0, gl_lo],
             // Interior: both at (1/3, 1/3)
             vec![1.0 / 3.0, 1.0 / 3.0],
             vec![1.0 / 3.0, 1.0 / 3.0],
@@ -280,7 +331,8 @@ mod tests {
     /// Nodal basis (MFEM RT_TriangleElement semantics): the DOF functional
     /// is the *point evaluation* of the normal component at the node, i.e.
     /// DOF_k(Φ_i) = Φ_i(node_k)·nk_k = δ_{ki}.  Nodes are the Gauss-Legendre
-    /// open points on each edge; interior DOFs both at (1/3,1/3).
+    /// open points on each edge; interior DOFs both at (1/3,1/3).  Edge blocks
+    /// follow `TRI_FACES` order: hypotenuse, left, bottom.
     #[test]
     fn rt1_nodal_basis() {
         let elem = TriRT1;
@@ -288,12 +340,12 @@ mod tests {
         let gl_hi = 0.5 * (1.0 + 1.0 / 3.0f64.sqrt());
         // node_k + normal (unnormalised nk, as MFEM fe_rt.cpp)
         let nodes: [(f64, f64, f64, f64); 8] = [
-            (gl_lo, 0.0, 0.0, -1.0),  // edge0 (0,1)
+            (1.0 - gl_lo, gl_lo, 1.0, 1.0), // edge0 hyp (1,2)
+            (1.0 - gl_hi, gl_hi, 1.0, 1.0),
+            (0.0, gl_lo, -1.0, 0.0), // edge1 left (0,2)
+            (0.0, gl_hi, -1.0, 0.0),
+            (gl_lo, 0.0, 0.0, -1.0), // edge2 bottom (0,1)
             (gl_hi, 0.0, 0.0, -1.0),
-            (gl_hi, gl_lo, 1.0, 1.0), // edge1 (1,2)
-            (gl_lo, gl_hi, 1.0, 1.0),
-            (0.0, gl_hi, -1.0, 0.0),  // edge2 (2,0)
-            (0.0, gl_lo, -1.0, 0.0),
             (1.0 / 3.0, 1.0 / 3.0, 0.0, -1.0), // interior, dof2nk=0 → nk[0]
             (1.0 / 3.0, 1.0 / 3.0, -1.0, 0.0), // interior, dof2nk=2 → nk[2]
         ];
