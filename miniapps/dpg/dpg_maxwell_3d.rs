@@ -53,12 +53,17 @@
 //! uncondensed solve (the reduced-system scatter used element-local exposed
 //! indices and the recovery double-applied `A_pp⁻¹`).  The remaining
 //! whole-field L2 gap at `-o 1` is 2.0% (within tolerance).  The `-o 2` gap
-//! (1.395 vs 2.707e-1) is diagnosed to the *test-space basis*: fem-rs's
-//! `HexNDk(2)`/`(3)` reference functions differ from MFEM's
-//! `ND_FECollection(2/3,3)` (raw moments differ, e.g. `∫F_0 = (2,1,1)` vs
-//! `(0.389,0.278,0.5)` and `∫curl F_0 = −1/6 vs −1/8`, both quadrature-exact),
-//! which degrades the DPG projection at higher test orders — element-level
-//! (`crates/element/src/nedelec/hex_ndk.rs`), tracked with the ND k≥2 work.
+//! (1.395 vs 2.707e-1) is **not** a test-space basis artefact: round 15 made
+//! `HexNDk` nodal and confirmed it spans the same tensor-Nédélec space as
+//! MFEM's `ND_FECollection(2/3,3)` — the disproof is that the whole-field
+//! result is bit-for-bit unchanged after that rework, and that the gap is
+//! essentially order-independent in the test space (`-do 0`, where the test
+//! order is 2 and the spans certainly agree, already shows the full 1.57×:
+//! C++ 9.482e-1 vs 1.489 here).  The remaining suspects are the trial side
+//! (`L2(1)×3` + `ND_Trace(2)`, cf. D45: use of a face-discontinuous skeleton
+//! for `û` where MFEM uses `H1_Trace_FECollection`) and the test norm `G`,
+//! whose four graph-norm cross blocks are the only assembly step still without
+//! any regression coverage.  Tracked as D36 (round 15 correction).
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::{

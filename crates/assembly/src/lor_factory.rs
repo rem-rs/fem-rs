@@ -634,17 +634,63 @@ mod lor_vector_tests {
 
     /// PCG(+) iteration counts must stay (essentially) constant as the mesh
     /// is refined — the defining property of LOR preconditioning.
+    ///
+    /// # Why this is still ignored (D40, round 15)
+    ///
+    /// The failure is **not** in the vendor `AmsPrecond`/`AdsPrecond` (the
+    /// round-14 hypothesis).  Bisecting the pipeline on the 3-D hex case
+    /// (`hex_mesh(2)`, order 3, FGMRES(30), rtol 1e-8; the non-converged rows
+    /// are after 200 iterations) gives:
+    ///
+    /// | system | preconditioner | result |
+    /// |---|---|---|
+    /// | A_LOR, n=882  | raw vendor AMS | 33 iters, err 1.2e-6 |
+    /// | A_HO,  n=882  | `LorSolver` wrapper | no convergence, residual 9.1e-1 |
+    /// | A_LOR, n=6084 | raw vendor AMS | 43 iters, err 7.6e-6 |
+    /// | A_HO,  n=6084 | `LorSolver` wrapper | no convergence, residual 9.4e-1 |
+    /// | RT A_LOR, n=240  | raw vendor ADS | 30 iters, err 1.4e-5 |
+    /// | RT A_HO,  n=240  | wrapper | residual 1.6e-3 |
+    /// | RT A_LOR, n=1728 | raw vendor ADS | 52 iters, err 2.2e-4 |
+    /// | RT A_HO,  n=1728 | wrapper | residual 1.8e-2 |
+    ///
+    /// So AMS/ADS *on the LOR matrix* are healthy and mesh-independent
+    /// (30 → 52 iterations for a 7× dof increase); the HO-level solve dies in
+    /// fem-rs's own transfer wrapper, `LorSolver::apply_precond`
+    /// (`M⁻¹ = Πᵀ S AMS(A_LOR) S Π`).  Diagnostics on that wrapper:
+    ///
+    /// * the permutation is a valid signed bijection (`|perm|` covers all
+    ///   HO dofs exactly once: 882/882, 96 negative — no duplicates, no
+    ///   unset dofs);
+    /// * dropping the equilibration (`Πᵀ AMS Π`), inverting it
+    ///   (`Πᵀ S⁻¹ AMS S⁻¹ Π`) or making it one-sided all still fail
+    ///   (residuals 9.2e-1 / 7.1e-1 / 4.4e-1 after 200 iterations), so the
+    ///   diagonal scaling is not the root cause;
+    /// * the model the wrapper assumes — that the LOR and HO dof vectors of
+    ///   the *same* function differ by one diagonal factor per dof — does not
+    ///   hold: interpolating smooth fields into both spaces (no permutation
+    ///   involved) gives `|x_HO[|p_i|] / x_LOR[i]|` spreads of 1.6×
+    ///   (constant field) to 35× (smooth field) across the dofs.
+    ///
+    /// Cause: fem-rs's LOR space (`crates/space/src/lor.rs`) does not use
+    /// MFEM's "same functional" convention (MFEM's LOR basis is built so the
+    /// LOR/HO dofs correspond with ±1 and *no* rescaling — `LORBase::
+    /// ConstructDofPermutation` + basis pair GaussLobatto/IntegratedGLL, see
+    /// `fem/lor/lor.cpp`).  With mismatched dof functionals the congruence
+    /// `A_LOR ≈ S·Π·A_HO·Πᵀ·S` that the wrapper relies on simply does not
+    /// hold, so `Πᵀ S A_LOR⁻¹ S Π` is not an approximation of `A_HO⁻¹` at all.
+    ///
+    /// Fix (needs `crates/space/src/lor.rs`, outside this round's scope):
+    /// rebuild the LOR space/DOF correspondence with matching functionals
+    /// (then `S → I` and the wrapper collapses to `Π AMS Πᵀ`), or replace the
+    /// diagonal wrapper by a genuine smoothed transfer built as an explicit
+    /// sparse prolongation, like the working H¹ path
+    /// (`crates/assembly/src/transfer.rs` + `LorAmgPrecond`).  Estimated
+    /// effort: 1–2 days including MFEM cross-validation (the property is
+    /// theoretical, so LOR AMS/ADS results must be checked against MFEM's
+    /// `LORSolver<HypreAMS/HypreADS>` on the same mesh).
     #[test]
-    // Still ignored with the GLL/IntegratedGLL basis: the LOR matrix itself is
-    // spectrally equivalent (see lor_spectral_equivalence), but the full
-    // FGMRES+AMS solve through the assumed-constraint permutation does not
-    // converge within 500 iterations (pcg_iters helper) — solver-pipeline
-    // work beyond the basis convention.
-    // Round-14 re-probe (with `fem_amg::CorrectedAmgPrecond` now used for the
-    // scalar LOR-AMG path, which these tests do NOT exercise — the inner
-    // solvers here are the vendor `AmsPrecond`/`AdsPrecond`): all three still
-    // fail with `ConvergenceFailed { max_iter: 500 }`, final preconditioned
-    // residual ND hex 8.4e-1, RT hex 2.3e-4, ND/RT quad 5.7e-2.
+    // See the doc comment above (D40): blocked on the LOR transfer, not on the
+    // vendor AMS/ADS.
     #[ignore]
     fn lor_nd_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
@@ -664,7 +710,7 @@ mod lor_vector_tests {
     }
 
     #[test]
-    // See lor_nd_pcg_iterations_mesh_independent comment.
+    // See the doc comment of lor_nd_pcg_iterations_mesh_independent (D40).
     #[ignore]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
@@ -685,7 +731,10 @@ mod lor_vector_tests {
 
     /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
     #[test]
-    // See lor_nd_pcg_iterations_mesh_independent comment (quad variant).
+    // See the doc comment of lor_nd_pcg_iterations_mesh_independent (D40):
+    // blocked on the HO<->LOR transfer wrapper, not on the vendor AMS/ADS.
+    // The quad variant uses the same wrapper (build_lor_ams_nd_quad /
+    // build_lor_jacobi_rt_quad).
     #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]

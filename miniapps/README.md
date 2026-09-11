@@ -146,7 +146,9 @@ miniapps/
 │                                n2-o1 1.757 vs C++ 1.723 (2.0%), dof 数
 │                                逐位 156/984/888/6192, hex2 trace 恒等式
 │                                机器精度, -sc==未凝聚); -o2 差距 =
-│                                HexNDk(2) 基与 MFEM 不同 (D36);
+│                                trial 侧 或 测试范数 G (round 15 证伪
+│                                "HexNDk 基不同" 说: nodal 重写前后整场
+│                                逐位不变且差距对测试阶不敏感, D36 更正);
 │                                acoustics_3d 真 UW-DPG (round 14 n=4
 │                                缺口消失: 0.7757/0.4229 vs C++
 │                                0.7765/0.4231 <0.1%); poisson_2d -o3
@@ -160,6 +162,14 @@ miniapps/
 │                                内核缺口绕过: make_periodic 几何畸变
 │                                (局部张量 H¹) + solve_gmres_complex
 │                                Givens 实数化发散 (局部标准复 GMRES)
+├── fluids/navier_kovasznay.rs ← 首个 navier 求解器 miniapp (MFEM
+│                                miniapps/fluids/navier/navier_kovasznay.cpp
+│                                1:1) + 内核 crates/solver/src/navier.rs
+│                                (BDFk/EXTk 含变 dt、三次求解、CFL、
+│                                Orthogonalize/MeanZero、PrintInfo 格式);
+│                                与 C++ 10 步 err_u/CFL 打印 6 位逐位一致、
+│                                MVIN/HELM 迭代数相同、-cr exit 0; 剩余 8 个
+│                                navier miniapp 与内核缺口见 round3_plan D46
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
