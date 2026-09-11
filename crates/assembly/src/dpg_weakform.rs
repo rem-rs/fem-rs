@@ -288,9 +288,18 @@ pub(crate) fn lu_factor(a: &mut [f64], n: usize) -> Vec<usize> {
 pub(crate) fn lu_solve(lu: &[f64], n: usize, piv: &[usize], b: &mut [f64]) {
     let y: Vec<f64> = piv.iter().map(|&p| b[p]).collect();
     for i in 0..n {
+        // Forward substitution `L z = P b` must accumulate the *already
+        // substituted* components `b[j]` (= z_j).  For j == 0 the raw
+        // permuted entry `y[0]` coincides with z_0, but for j >= 1 it does
+        // not: using `y[j]` here silently returns a wrong solve for any
+        // n >= 3 (it drops the `L[i,j]·L[j,k]` couplings).  That bug made
+        // the real `DpgWeakForm` static-condensation Schur system, RHS
+        // reduction and private back-solve inconsistent for trial order
+        // p >= 2 (D39); the complex weak form always used the correct
+        // `b[j]` form (`complex_lu_solve`).
         let mut s = y[i];
         for j in 0..i {
-            s -= lu[i * n + j] * y[j];
+            s -= lu[i * n + j] * b[j];
         }
         b[i] = s;
     }
@@ -1279,6 +1288,12 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             for i in 0..b.len() {
                 b[i] -= corr[i];
             }
+            // MFEM `S->PartMult(ess_rtdof_list, X, *y)`: the eliminated
+            // rows carry a unit diagonal, so the prescribed values (the
+            // initial-guess entries at the essential dofs) must be written
+            // back into `B`.  Without this step the essential rows read
+            // `B = y − S_e x` instead of the Dirichlet data.
+            part_mult_assign(&mat2, &ess_compact, &xc, &mut b);
             self.reduced_mat = Some(mat2.clone());
             let offsets = eoffs.clone();
             (DpgSystem::Condensed { mat: mat2, offsets }, xc, b)
@@ -1291,6 +1306,9 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
             for i in 0..b.len() {
                 b[i] -= corr[i];
             }
+            // MFEM `DPGWeakForm::EliminateVDofsInRHS` =
+            // `mat_e->AddMult(x, b, -1)` + `mat->PartMult(vdofs, x, b)`.
+            part_mult_assign(&mat2, ess_dofs, &xg, &mut b);
             let mut xs = vec![0.0_f64; mat.nrows];
             if copy_interior {
                 xs.copy_from_slice(&xg);
@@ -1671,6 +1689,24 @@ pub(crate) fn eliminate_row_cols(mat: &CsrMatrix<f64>, dofs: &[usize]) -> (CsrMa
         a_coo.add(d, d, 1.0);
     }
     (e_coo.into_csr(), a_coo.into_csr())
+}
+
+/// MFEM `SparseMatrix::PartMult(vdofs, x, b)`: for each `d` in `dofs`
+/// **assign** `b[d] = Σ_j mat[d,j]·x[j]` (partial row extraction of the
+/// post-elimination matrix, whose essential rows are unit diagonals).
+///
+/// This is the second half of MFEM's `EliminateVDofsInRHS`
+/// (`mat_e->AddMult(x, b, -1); mat->PartMult(vdofs, x, b);`) and of
+/// `BlockStaticCondensation::ReduceSystem`
+/// (`S_e->AddMult(X, y, -1.); S->PartMult(ess_rtdof_list, X, y);`).
+fn part_mult_assign(mat: &CsrMatrix<f64>, dofs: &[usize], x: &[f64], b: &mut [f64]) {
+    for &d in dofs {
+        let mut s = 0.0_f64;
+        for p in mat.row_ptr[d]..mat.row_ptr[d + 1] {
+            s += mat.values[p] * x[mat.col_idx[p] as usize];
+        }
+        b[d] = s;
+    }
 }
 
 // ─── Block preconditioner ────────────────────────────────────────────────────
@@ -2350,7 +2386,10 @@ mod tests {
     }
 
     fn build_same(mesh: Mesh<2>) -> DpgWeakForm<Mesh<2>> {
-        let p = 1u8;
+        build_p(mesh, 1)
+    }
+
+    fn build_p(mesh: Mesh<2>, p: u8) -> DpgWeakForm<Mesh<2>> {
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh);
         let u = a.add_trial_scalar_space(p - 1);
         let sig = a.add_trial_vector_space(p - 1, 2);
@@ -2381,6 +2420,260 @@ mod tests {
         a.add_test_integrator(Box::new(DpgMassIntegrator { q: 1.0 }), v, v);
         a.add_domain_lf_integrator(Box::new(DpgDomainLFIntegrator { f: |_| 1.0 }), v);
         a
+    }
+
+    /// Dense Gaussian elimination for the small diagnostic systems below.
+    fn dense_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Vec<f64> {
+        for k in 0..n {
+            let mut piv = k;
+            for i in k + 1..n {
+                if a[i * n + k].abs() > a[piv * n + k].abs() {
+                    piv = i;
+                }
+            }
+            if piv != k {
+                for j in 0..n {
+                    a.swap(k * n + j, piv * n + j);
+                }
+                b.swap(k, piv);
+            }
+            let d = a[k * n + k];
+            for i in k + 1..n {
+                let f = a[i * n + k] / d;
+                if f != 0.0 {
+                    for j in k..n {
+                        a[i * n + j] -= f * a[k * n + j];
+                    }
+                    b[i] -= f * b[k];
+                }
+            }
+        }
+        for k in (0..n).rev() {
+            let mut s = b[k];
+            for j in k + 1..n {
+                s -= a[k * n + j] * b[j];
+            }
+            b[k] = s / a[k * n + k];
+        }
+        b
+    }
+
+    fn dense_from_csr(m: &CsrMatrix<f64>) -> Vec<f64> {
+        let n = m.nrows;
+        let mut out = vec![0.0_f64; n * n];
+        for i in 0..n {
+            for p in m.row_ptr[i]..m.row_ptr[i + 1] {
+                out[i * n + m.col_idx[p] as usize] = m.values[p];
+            }
+        }
+        out
+    }
+
+    /// D39 regression (element level): the statically condensed system must be
+    /// exactly the Schur complement of the assembled normal equations, and
+    /// recovering the eliminated (volume) dofs from its solution must satisfy
+    /// the *uncondensed* system `A x = y`.
+    ///
+    /// This is MFEM `BlockStaticCondensation::ComputeSolution`: the private
+    /// dofs are back-solved element-wise as `x_p = A_pp⁻¹ (b_p − A_pe x_e)`.
+    /// Both sides are solved here with a dense Gaussian elimination, so the
+    /// check is not limited by an iterative solver's tolerance.
+    #[test]
+    fn dpg_sc_equals_uncondensed_element_identity() {
+        for p in 1u8..=3 {
+            let mesh = Mesh::<2>::unit_square_quad(2);
+            // uncondensed reference system (no BC elimination: `B = y`, `A`)
+            let mut a1 = build_p(mesh.clone(), p);
+            a1.assemble();
+            let (sys_full, _xs, y_full) = a1.form_linear_system(&[], &[], false);
+            let mat_full = sys_full.matrix().clone();
+            // condensed system
+            let mut a2 = build_p(mesh.clone(), p);
+            a2.enable_static_condensation();
+            a2.assemble();
+            let (sys_cond, _xsc, bc) = a2.form_linear_system(&[], &[], false);
+            let s_cond = sys_cond.matrix().clone();
+
+            // (a) Schur identity `S_asm == A_ee − A_ep A_pp⁻¹ A_pe`, with the
+            // right-hand side built from the uncondensed global matrix.
+            let offs = a1.trial_offsets();
+            let n = mat_full.nrows;
+            let n_priv = offs[2];
+            let n_exp = n - offs[2];
+            let a_dense = dense_from_csr(&mat_full);
+            let at = |i: usize, j: usize| a_dense[i * n + j];
+            let mut a_pp = vec![0.0_f64; n_priv * n_priv];
+            for i in 0..n_priv {
+                for j in 0..n_priv {
+                    a_pp[i * n_priv + j] = at(i, j);
+                }
+            }
+            // A_pp is block-diagonal over elements (the trial volume spaces are
+            // broken L²), so inverting it as one dense block is exact.
+            let mut ape_inv = vec![0.0_f64; n_priv * n_exp];
+            for j in 0..n_exp {
+                let col: Vec<f64> = (0..n_priv).map(|i| at(i, n_priv + j)).collect();
+                let sol = dense_solve(a_pp.clone(), col, n_priv);
+                for i in 0..n_priv {
+                    ape_inv[i * n_exp + j] = sol[i];
+                }
+            }
+            let schur_ref = |i: usize, j: usize| -> f64 {
+                let mut acc = at(n_priv + i, n_priv + j);
+                for k in 0..n_priv {
+                    acc -= at(n_priv + i, k) * ape_inv[k * n_exp + j];
+                }
+                acc
+            };
+            let mut worst_s = 0.0_f64;
+            let mut scale_s = 0.0_f64;
+            for i in 0..n_exp {
+                for j in 0..n_exp {
+                    let want = schur_ref(i, j);
+                    scale_s = scale_s.max(want.abs());
+                    worst_s = worst_s.max((s_cond.get(i, j) - want).abs());
+                }
+            }
+            assert!(
+                worst_s < 1e-11 * scale_s.max(1.0),
+                "p={p}: assembled Schur matrix != A_ee - A_ep A_pp^-1 A_pe \
+                 (dev {worst_s:.3e}, scale {scale_s:.3e})"
+            );
+
+            // (b) recovery: solving the condensed system exactly and
+            // back-solving the private dofs reproduces `A x = y`.
+            let s_dense = dense_from_csr(&s_cond);
+            let xe = dense_solve(s_dense, bc, s_cond.nrows);
+            let x = a2.recover_fem_solution(&xe);
+            let mut ax = vec![0.0_f64; n];
+            mat_full.spmv(&x, &mut ax);
+            let mut worst_r = 0.0_f64;
+            for i in 0..n {
+                worst_r = worst_r.max((ax[i] - y_full[i]).abs());
+            }
+            // Without BC elimination the system is singular (the constant mode
+            // `u ≡ 1, û ≡ 1`), so the residual is compared with the same
+            // system solved directly.
+            let x1 = dense_solve(dense_from_csr(&mat_full), y_full.clone(), n);
+            let mut ax1 = vec![0.0_f64; n];
+            mat_full.spmv(&x1, &mut ax1);
+            let mut base = 0.0_f64;
+            for i in 0..n {
+                base = base.max((ax1[i] - y_full[i]).abs());
+            }
+            assert!(
+                worst_r <= 10.0 * base.max(1e-14),
+                "p={p}: condensed recovery does not satisfy A x = y \
+                 (res {worst_r:.3e} vs uncondensed {base:.3e})"
+            );
+        }
+    }
+
+    /// D39 regression: with essential (Dirichlet) dofs on the trace block the
+    /// statically condensed and the uncondensed systems must produce the same
+    /// recovered solution at every trial order.
+    ///
+    /// This is the case that was broken: MFEM's `EliminateVDofsInRHS` /
+    /// `BlockStaticCondensation::ReduceSystem` pair the `mat_e·x` subtraction
+    /// with the assignment `B[d] = x[d]` (`PartMult`), and every
+    /// static-condensation solve goes through `lu_solve`.
+    #[test]
+    fn dpg_sc_equals_uncondensed_with_dirichlet() {
+        let pi = std::f64::consts::PI;
+        let exact = |x: &[f64]| (pi * (x[0] + x[1])).sin();
+        for p in 1u8..=3 {
+            for refn in 0u8..=1 {
+                let mut mesh = Mesh::<2>::unit_square_quad(2);
+                for _ in 0..refn {
+                    mesh = fem_mesh::refine_uniform(&mesh);
+                }
+                let mut a1 = build_p(mesh.clone(), p);
+                a1.assemble();
+                let mut a2 = build_p(mesh.clone(), p);
+                a2.enable_static_condensation();
+                a2.assemble();
+
+                let offs = a1.trial_offsets();
+                let hatu = 2usize;
+                let sk = a1.skeleton(hatu);
+                let mut ess = Vec::new();
+                let mut x_full = vec![0.0_f64; a1.size()];
+                for f in 0..sk.n_faces() {
+                    if !sk.is_boundary_face(f) {
+                        continue;
+                    }
+                    for k in 0..sk.dofs_per_face(f) {
+                        let d = sk.face_dofs(f).start + k;
+                        ess.push(offs[hatu] + d);
+                        let pt = a1.face_dof_point(&sk, f, k);
+                        x_full[offs[hatu] + d] = exact(&pt);
+                    }
+                }
+                let (sys1, _x1, b1) = a1.form_linear_system(&ess, &x_full, false);
+                let (sys2, _x2, b2) = a2.form_linear_system(&ess, &x_full, false);
+                let m1 = sys1.matrix().clone();
+                let m2 = sys2.matrix().clone();
+                let s1 = dense_solve(dense_from_csr(&m1), b1, m1.nrows);
+                let s2 = dense_solve(dense_from_csr(&m2), b2, m2.nrows);
+                let r1 = a1.recover_fem_solution(&s1);
+                let r2 = a2.recover_fem_solution(&s2);
+                let scale = r1.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let mut worst = 0.0f64;
+                let mut wi = 0usize;
+                for i in 0..r1.len() {
+                    let d = (r1[i] - r2[i]).abs();
+                    if d > worst {
+                        worst = d;
+                        wi = i;
+                    }
+                }
+                assert!(
+                    worst <= 1e-10 * scale,
+                    "p={p} ref={refn}: static condensation != uncondensed \
+                     (max|dx|={worst:.3e}, rel {:.3e}, dof {wi})",
+                    worst / scale
+                );
+            }
+        }
+    }
+
+    /// D39 regression: `lu_solve` must solve `A x = b` exactly for `n ≥ 3`.
+    ///
+    /// The forward substitution `L z = P b` has to accumulate the
+    /// *already-substituted* components; using the raw permuted RHS `y[j]`
+    /// instead silently drops the `L[i,j]·L[j,k]` couplings (they coincide only
+    /// for `j == 0`), which corrupted every static-condensation solve with more
+    /// than two eliminated dofs per element.
+    #[test]
+    fn lu_solve_matches_dense_solve() {
+        for n in 1..=12usize {
+            let mut a = vec![0.0_f64; n * n];
+            for (i, row) in a.chunks_mut(n).enumerate() {
+                for (j, v) in row.iter_mut().enumerate() {
+                    *v = if i == j {
+                        4.0 + i as f64
+                    } else {
+                        1.0 / (1 + i * n + j) as f64
+                    };
+                }
+            }
+            let mut lu = a.clone();
+            let piv = lu_factor(&mut lu, n);
+            for k in 0..n {
+                let mut rhs = vec![0.0_f64; n];
+                rhs[k] = 1.0;
+                let want = dense_solve(a.clone(), rhs.clone(), n);
+                lu_solve(&lu, n, &piv, &mut rhs);
+                for i in 0..n {
+                    assert!(
+                        (want[i] - rhs[i]).abs() < 1e-12,
+                        "n={n} column {k} row {i}: LU {} vs dense {}",
+                        rhs[i],
+                        want[i]
+                    );
+                }
+            }
+        }
     }
 }
 

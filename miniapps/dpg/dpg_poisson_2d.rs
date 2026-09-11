@@ -163,7 +163,12 @@ fn solve_level(
     let mat: &CsrMatrix<f64> = sys.matrix();
     let n = mat.nrows;
     let cfg = SolverConfig {
-        rtol: 1e-10,
+        // C++ uses reltol 1e-10; `DPG_RTOL` tightens it for diagnostics (e.g.
+        // comparing the `-sc` and uncondensed solution vectors).
+        rtol: std::env::var("DPG_RTOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1e-10),
         max_iter: 2000,
         ..SolverConfig::default()
     };
@@ -205,6 +210,14 @@ fn solve_level(
 
     // Dofs column: volume (u + σ) dofs, exactly like C++ `l2dofs`.
     let l2dofs = a.trial_block_sizes()[u] + a.trial_block_sizes()[sig];
+    if std::env::var("DPG_DEBUG").is_ok() {
+        eprintln!(
+            "DPG_DEBUG: static_cond={static_cond} order={order} dofs={l2dofs} \
+             err={err:.17e} its={} sum_x={:.17e}",
+            result.iterations,
+            sum_x(&x)
+        );
+    }
     (l2dofs, err, result.iterations)
 }
 
