@@ -149,10 +149,13 @@ miniapps/
 │                                trial 侧 或 测试范数 G (round 15 证伪
 │                                "HexNDk 基不同" 说: nodal 重写前后整场
 │                                逐位不变且差距对测试阶不敏感, D36 更正);
-│                                round 16 再次更正: 装配矩阵 (含 4 个
+│                                round 16 更正: 装配矩阵 (含 4 个
 │                                graph-norm cross block) 与 C++ ≤7e-15
-│                                一致 ⇒ G/trial 均已排除, 差距在 miniapp
-│                                复数路径 RHS/BC 接线 (D36 第三次表述);
+│                                一致 ⇒ G/trial 均已排除; round 17 结案:
+│                                根因是 miniapp 制造解 RHS 的 J_r[0] 多一个
+│                                负号 ⇒ -o 2 由 5.15× 偏差 → 全部对齐 C++
+│                                (9.547e-1/2.707e-1, rate -1.95, PCG
+│                                66/119 vs 66/118), -o 1 → 1.723 = C++;
 │                                acoustics_3d 真 UW-DPG (round 14 n=4
 │                                缺口消失: 0.7757/0.4229 vs C++
 │                                0.7765/0.4231 <0.1%); poisson_2d -o3
@@ -180,6 +183,15 @@ miniapps/
 │                                每步相同, -cr exit 0; g_bdr 已切内核
 │                                VectorBoundaryNormalLFIntegrator (D46③),
 │                                kovasznay 同步切换后仍保持 6 位一致
+├── fluids/navier_shear.rs     ← 第 3 个 (navier_shear.cpp 1:1, 双剪切层
+│                                全周期): CFL/迭代数/各 L2 范数全 10 步与
+│                                C++ 逐字节一致 (cfl 7.56030E-02, MVIN
+│                                4/9, PRES 47/76, HELM 6/6); 初始条件
+│                                用本地 project_vel 绕过周期网格 DOF 坐标
+│                                缺陷 (D56)
+├── fluids/navier_kovasznay_vs.rs ← 第 4 个 (自适应时间步: provisional +
+│                                CFL 接受/拒绝 + dt 预测 + 历史排队):
+│                                CFL/Time/dt 全 5 步逐字节一致, err_u 6 位
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
