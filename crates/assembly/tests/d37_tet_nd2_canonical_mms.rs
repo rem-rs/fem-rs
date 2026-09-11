@@ -180,21 +180,94 @@ fn ess_bdr_hcurl_full(mesh: &Mesh<3>, space: &HCurlSpace<Mesh<3>>) -> Vec<fem_co
     out
 }
 
+/// D58: the historical element-local (non-canonical) matrix, built from the
+/// explicit per-element accumulator with the same per-integrator quadrature
+/// dispatch as `VectorAssembler::assemble_bilinear` (whose default became the
+/// canonical path in D58).
+fn assemble_bilinear_element_local<M: MeshTopology>(
+    space: &HCurlSpace<M>,
+    integrators: &[&dyn VectorBilinearIntegrator],
+    qo: u8,
+) -> fem_linalg::CsrMatrix<f64> {
+    use fem_linalg::CooMatrix;
+    let n = space.n_dofs();
+    let space_order = space.element_order(0);
+    let mut coo = CooMatrix::<f64>::new(n, n);
+    if integrators
+        .iter()
+        .any(|i| i.integration_order(space_order).is_some())
+    {
+        let mut acc = fem_linalg::CsrMatrix::new_empty(n, n);
+        for integ in integrators {
+            let qo_i = integ.integration_order(space_order).unwrap_or(qo);
+            let mut c = CooMatrix::<f64>::new(n, n);
+            for e in 0..space.mesh().n_elements() as u32 {
+                fem_assembly::vector_assembler::accumulate_vector_bilinear_element(
+                    space, e, &[*integ][..], qo_i, &mut c,
+                );
+            }
+            acc = acc.add(&c.into_csr());
+        }
+        return acc;
+    }
+    for e in 0..space.mesh().n_elements() as u32 {
+        fem_assembly::vector_assembler::accumulate_vector_bilinear_element(
+            space, e, integrators, qo, &mut coo,
+        );
+    }
+    coo.into_csr()
+}
+
+/// The historical element-local (non-canonical) load vector.
+fn assemble_linear_element_local<M: MeshTopology>(
+    space: &HCurlSpace<M>,
+    integrators: &[&dyn VectorLinearIntegrator],
+    qo: u8,
+) -> Vec<f64> {
+    let n = space.n_dofs();
+    let space_order = space.element_order(0);
+    let mut rhs = vec![0.0_f64; n];
+    if integrators
+        .iter()
+        .any(|i| i.integration_order(space_order).is_some())
+    {
+        for integ in integrators {
+            let qo_i = integ.integration_order(space_order).unwrap_or(qo);
+            let mut r = vec![0.0_f64; n];
+            for e in 0..space.mesh().n_elements() as u32 {
+                fem_assembly::vector_assembler::accumulate_vector_linear_element(
+                    space, e, &[*integ][..], qo_i, &mut r,
+                );
+            }
+            for i in 0..n {
+                rhs[i] += r[i];
+            }
+        }
+        return rhs;
+    }
+    for e in 0..space.mesh().n_elements() as u32 {
+        fem_assembly::vector_assembler::accumulate_vector_linear_element(
+            space, e, integrators, qo, &mut rhs,
+        );
+    }
+    rhs
+}
+
 fn solve_on(mesh: &Mesh<3>, use_blocks: bool) -> (f64, usize) {
     let space = HCurlSpace::new(mesh.clone(), 2);
     let integrators: [&dyn VectorBilinearIntegrator; 2] =
         [&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }];
     let qo = 6;
     let mut mat = if use_blocks {
-        VectorAssembler::assemble_bilinear_nd_canonical(&space, &integrators, qo)
-    } else {
         VectorAssembler::assemble_bilinear(&space, &integrators, qo)
+    } else {
+        assemble_bilinear_element_local(&space, &integrators, qo)
     };
     let src = Src;
     let mut rhs = if use_blocks {
-        VectorAssembler::assemble_linear_nd_canonical(&space, &[&src], qo)
-    } else {
         VectorAssembler::assemble_linear(&space, &[&src], qo)
+    } else {
+        assemble_linear_element_local(&space, &[&src], qo)
     };
     let u_proj = space.interpolate_vector(&exact);
     let _tags = space.mesh().unique_boundary_tags();
@@ -263,6 +336,55 @@ fn d37_integration_order_only_changes_assembly() {
     let mesh = Mesh::<2>::unit_square_tri(1);
     let space = HCurlSpace::new(mesh, 2);
     assert!(space.element_face_blocks(0).is_empty());
+}
+
+/// D58: the default assembly entry (`assemble_bilinear` / `assemble_linear`)
+/// is now the canonical one — it must reproduce the dedicated
+/// `*_nd_canonical` entry points bit-for-bit on tet ND2, where the face
+/// blocks are non-trivial.
+#[test]
+fn d58_default_entry_matches_nd_canonical_entry() {
+    let mesh = Mesh::<3>::unit_cube_tet(2);
+    let space = HCurlSpace::new(mesh, 2);
+    assert!(!space.element_face_blocks(0).is_empty(), "tet ND2 must carry face blocks");
+    let integrators: [&dyn VectorBilinearIntegrator; 2] =
+        [&CurlCurlIntegrator { mu: 1.0 }, &VectorMassIntegrator { alpha: 1.0 }];
+    let m_default = VectorAssembler::assemble_bilinear(&space, &integrators, 6);
+    let m_canon = VectorAssembler::assemble_bilinear_nd_canonical(&space, &integrators, 6);
+    let d1 = m_default.to_dense();
+    let d2 = m_canon.to_dense();
+    let mut diff = 0.0_f64;
+    for (a, b) in d1.iter().zip(d2.iter()) {
+        diff = diff.max((a - b).abs());
+    }
+    assert_eq!(diff, 0.0, "default vs nd_canonical bilinear differ by {diff}");
+
+    let src = Src;
+    let b_default = VectorAssembler::assemble_linear(&space, &[&src], 6);
+    let b_canon = VectorAssembler::assemble_linear_nd_canonical(&space, &[&src], 6);
+    let diff = b_default
+        .iter()
+        .zip(b_canon.iter())
+        .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()));
+    assert_eq!(diff, 0.0, "default vs nd_canonical load differ by {diff}");
+}
+
+/// D58: spaces without shared-face DOF pairs must report an empty block list
+/// through the `FESpace` accessor — their default-assembly path is untouched
+/// (hex ND2's quad-face anchors are a separate map, D55).
+#[test]
+fn d58_spaces_without_face_blocks_report_empty() {
+    use fem_space::HDivSpace;
+
+    // hex ND2: quad-face DOFs are shared through anchors, not 2×2 blocks.
+    let hex = Mesh::<3>::unit_cube_hex(1);
+    let hex_nd2 = HCurlSpace::new(hex, 2);
+    assert!(FESpace::element_face_blocks(&hex_nd2, 0).is_empty());
+
+    // RT space: no face blocks ever.
+    let tri = Mesh::<2>::unit_square_tri(1);
+    let rt1 = HDivSpace::new(tri, 1);
+    assert!(FESpace::element_face_blocks(&rt1, 0).is_empty());
 }
 
 /// Assembly self-consistency: a field inside the space must be recovered

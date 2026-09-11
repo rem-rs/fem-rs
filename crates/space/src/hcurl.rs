@@ -841,12 +841,26 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
     /// The element's face-DOF block transforms into the canonical
     /// (face-creating element) basis (D37).  Empty when the space has no
-    /// shared face-DOF pairs (2-D spaces, hex NDk, k = 1).
+    /// shared face-DOF pairs (2-D spaces, hex/prism NDk at any k, k = 1).
     ///
     /// For element matrices assembled in the element's own (signed) local
     /// DOFs, the canonical representation is `A ← Tᵀ·A·T` and `b ← Tᵀ·b`, with
     /// `T` the block-diagonal map built from these blocks; the primal dof
     /// vector satisfies `u_local = T·u_canon`.
+    ///
+    /// D55 note (hex NDk stays block-free *by MFEM design*, not by omission):
+    /// `ND_FECollection::DofTransformationForGeometry` returns NULL for
+    /// tensor-product geometries, so `ND_HexahedronElement` never receives a
+    /// `DofTransformation`, and `ND_DofTransformation::TransformPrimal`
+    /// applies the 2×2 `T(ori)` matrices to **triangular** faces only.  MFEM
+    /// relates hex quad-face DOFs across elements through the signed
+    /// permutation `ND_FECollection::QuadDofOrd[ori]` baked into the dof
+    /// table — the same functional-level signed permutation this space
+    /// computes in `match_face_dof`.  Adding 2×2 blocks for hex faces would
+    /// therefore *diverge* from MFEM; the beam-hex `-o 2` discrepancy that
+    /// motivated D55 was traced to the curl-curl quadrature order (see
+    /// `examples/mfem_ex3_maxwell_cavity.rs` `assemble_mat_mfem_rule`) and is
+    /// covered by `crates/assembly/tests/d55_hex_nd2_system_regression.rs`.
     pub fn element_face_blocks(&self, e: u32) -> &[FaceDofBlock] {
         &self.elem_face_blocks[e as usize]
     }
@@ -1185,6 +1199,13 @@ impl<M: MeshTopology> FESpace for HCurlSpace<M> {
 
     fn element_signs(&self, elem: u32) -> Option<&[f64]> {
         Some(self.element_signs(elem))
+    }
+
+    // D58: forward to the inherent method (tet NDk (k ≥ 2) face blocks; empty
+    // for 2-D, hex and k = 1).  Calls the inherent fn explicitly so the trait
+    // method does not recurse into itself.
+    fn element_face_blocks(&self, elem: u32) -> &[FaceDofBlock] {
+        HCurlSpace::element_face_blocks(self, elem)
     }
 }
 

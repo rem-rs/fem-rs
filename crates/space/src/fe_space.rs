@@ -89,6 +89,21 @@ pub trait FESpace: Send + Sync {
         None // default: no sign correction needed
     }
 
+    /// Per-element face-DOF block transforms into the canonical (shared-face)
+    /// basis (D37/D48): empty means the historical element-local convention.
+    ///
+    /// Each [`crate::hcurl::FaceDofBlock`] relates one element's two local face
+    /// DOFs to the shared canonical pair (`u_local = S·u_canon`); consumers use
+    /// it to rotate an element matrix into the canonical basis
+    /// (`A ← Sᵀ·A·S`, `b ← Sᵀ·b`) or a canonical solution vector back to the
+    /// element basis (`u_local = S·u_canon`, MFEM
+    /// `DofTransformation::InvTransformPrimal`).  Only `HCurlSpace` on tet
+    /// NDk (k ≥ 2) currently returns a non-empty list — for every other space
+    /// (H¹, L², VectorH1, RT/HDiv, 2-D/ND1/hex Nédélec) the default is exact.
+    fn element_face_blocks(&self, _elem: u32) -> &[crate::hcurl::FaceDofBlock] {
+        &[] // default: no shared-face DOF pairs
+    }
+
     /// If this is an L² (DG) space, the node placement of its discontinuous
     /// Lagrange basis ([`crate::L2Basis::GaussLegendre`] or
     /// [`crate::L2Basis::GaussLobatto`]).  Returns `None` for all other

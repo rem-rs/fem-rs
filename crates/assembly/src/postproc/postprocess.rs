@@ -312,6 +312,17 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
     for e in mesh.elem_iter() {
         let elem_dofs = space.element_dofs(e);
         let signs = space.element_signs(e);
+        // D58 canonical reconstruction: with face blocks (tet NDk, k ≥ 2) the
+        // global vector is canonical → `u_local = S·u_canon` and the curl
+        // basis is used unsigned; empty blocks → historical signed path.
+        let blocks = space.element_face_blocks(e);
+        let uloc = if blocks.is_empty() {
+            None
+        } else {
+            Some(crate::vector_assembler::element_local_dofs_canonical(
+                space, e, dofs,
+            ))
+        };
         let nodes = mesh.element_nodes(e);
 
         let (jac, det_j) = simplex_jacobian(mesh, nodes);
@@ -338,10 +349,12 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
         }
 
         // Apply orientation signs.
-        if let Some(s) = signs {
-            for i in 0..n_ldofs {
-                for c in 0..curl_dim {
-                    phys_curl[i * curl_dim + c] *= s[i];
+        if uloc.is_none() {
+            if let Some(s) = signs {
+                for i in 0..n_ldofs {
+                    for c in 0..curl_dim {
+                        phys_curl[i * curl_dim + c] *= s[i];
+                    }
                 }
             }
         }
@@ -349,7 +362,10 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
         // Sum contributions: curl(u_h) = Σ_i c_i curl(φ_i)
         let mut curl_val = vec![0.0; curl_dim];
         for i in 0..n_ldofs {
-            let c = dofs[elem_dofs[i] as usize];
+            let c = match &uloc {
+                Some(u) => u[i],
+                None => dofs[elem_dofs[i] as usize],
+            };
             for d in 0..curl_dim {
                 curl_val[d] += c * phys_curl[i * curl_dim + d];
             }

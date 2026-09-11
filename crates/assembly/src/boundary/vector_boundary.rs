@@ -56,7 +56,10 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 use crate::assembler::assembly_parallel_min_elems;
 use crate::assembler::simplex_transformation;
-use crate::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian, vec_ref_elem as vol_ref_elem};
+use crate::vector_assembler::{
+    apply_face_block_transform_matrix, apply_face_block_transform_vector,
+    geo_ref_elem_from_mesh, isoparametric_jacobian, vec_ref_elem as vol_ref_elem,
+};
 
 // ─── Quadrature-point data ───────────────────────────────────────────────────
 
@@ -796,6 +799,15 @@ where
             integ.add_to_face_matrix(&qp_data, &mut k_face);
         }
     }
+    // D58: rotate the face element matrix into the canonical (shared-face)
+    // DOF basis, `K ← Sᵀ·K·S` — MFEM applies `doftrans.TransformDual` to the
+    // boundary-integral element matrices too (BilinearForm::Assemble).  No-op
+    // for spaces without face blocks.
+    apply_face_block_transform_matrix(
+        space.element_face_blocks(owner_elem),
+        &mut k_face,
+        n_ldofs,
+    );
     Some((global_dofs, k_face))
 }
 
@@ -862,6 +874,13 @@ where
             integ.add_to_face_vector(&qp_data, &mut f_face);
         }
     }
+    // D58: rotate the face load vector into the canonical basis, `f ← Sᵀ·f`
+    // (the linear-form counterpart of the `K ← Sᵀ·K·S` above).  No-op for
+    // spaces without face blocks.
+    apply_face_block_transform_vector(
+        space.element_face_blocks(owner_elem),
+        &mut f_face,
+    );
     Some((global_dofs, f_face))
 }
 

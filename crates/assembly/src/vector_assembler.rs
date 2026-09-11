@@ -850,8 +850,19 @@ pub fn apply_face_block_transform_matrix(blocks: &[FaceDofBlock], a: &mut [f64],
     if blocks.is_empty() {
         return;
     }
+    apply_face_block_transform_matrix_rows(blocks, a, n);
+    apply_face_block_transform_matrix_cols(blocks, a, n);
+}
+
+/// Row (test / range side) half of [`apply_face_block_transform_matrix`]:
+/// `A ← Tᵀ·A`.  For a mixed form whose **row** space carries face blocks this
+/// is MFEM's `TransformDualRows` half of `MixedBilinearForm::Assemble`
+/// (`elmat ← T_ran⁻ᵀ·elmat·…`, with `T_ran = T⁻¹`).  `blocks` empty → no-op.
+pub fn apply_face_block_transform_matrix_rows(blocks: &[FaceDofBlock], a: &mut [f64], n: usize) {
+    if blocks.is_empty() {
+        return;
+    }
     let t = face_block_transform_dense(blocks, n);
-    // rows: a ← Tᵀ·a
     let mut ta = vec![0.0_f64; n * n];
     for i in 0..n {
         for j in 0..n {
@@ -862,16 +873,29 @@ pub fn apply_face_block_transform_matrix(blocks: &[FaceDofBlock], a: &mut [f64],
             ta[i * n + j] = s;
         }
     }
-    // columns: a ← ta·T
+    a.copy_from_slice(&ta);
+}
+
+/// Column (trial / domain side) half of [`apply_face_block_transform_matrix`]:
+/// `A ← A·T`.  For a mixed form whose **column** space carries face blocks
+/// this is MFEM's `TransformDual` domain half (`…·elmat·T_dom⁻¹`, with
+/// `T_dom = T⁻¹`).  `blocks` empty → no-op.
+pub fn apply_face_block_transform_matrix_cols(blocks: &[FaceDofBlock], a: &mut [f64], n: usize) {
+    if blocks.is_empty() {
+        return;
+    }
+    let t = face_block_transform_dense(blocks, n);
+    let mut at = vec![0.0_f64; n * n];
     for i in 0..n {
         for j in 0..n {
             let mut s = 0.0;
             for k in 0..n {
-                s += ta[i * n + k] * t[k * n + j];
+                s += a[i * n + k] * t[k * n + j];
             }
-            a[i * n + j] = s;
+            at[i * n + j] = s;
         }
     }
+    a.copy_from_slice(&at);
 }
 
 /// Rotate one element load vector into the canonical shared-face basis:
@@ -925,9 +949,7 @@ pub fn nd_element_local_dofs<M: MeshTopology>(
     e: u32,
     x: &[f64],
 ) -> Vec<f64> {
-    let mut u = nd_element_local_dofs_signed(space, e, x);
-    apply_face_blocks_to_local_dofs(space.element_face_blocks(e), x, &mut u);
-    u
+    element_local_dofs_canonical(space, e, x)
 }
 
 /// Element-local signed DOF values under the **scalar** sign convention alone
@@ -965,6 +987,25 @@ pub fn apply_face_blocks_to_local_dofs(blocks: &[FaceDofBlock], x: &[f64], u: &m
     }
 }
 
+/// [`FESpace`]-generic form of [`nd_element_local_dofs`]: the element's local
+/// (signed) DOF values of a canonical global vector `x`, i.e. the signed
+/// gather `signs[i]·x[dof_i]` followed by the face-block rotation
+/// `u_local = S·u_canon` ([`apply_face_blocks_to_local_dofs`]).  Spaces without
+/// face blocks (the trait default) reduce to the signed gather.
+pub fn element_local_dofs_canonical<S: FESpace>(space: &S, e: u32, x: &[f64]) -> Vec<f64> {
+    let dofs = space.element_dofs(e);
+    let mut u: Vec<f64> = match space.element_signs(e) {
+        Some(signs) => dofs
+            .iter()
+            .zip(signs.iter())
+            .map(|(&d, &s)| s * x[d as usize])
+            .collect(),
+        None => dofs.iter().map(|&d| x[d as usize]).collect(),
+    };
+    apply_face_blocks_to_local_dofs(space.element_face_blocks(e), x, &mut u);
+    u
+}
+
 // ─── VectorAssembler ────────────────────────────────────────────────────────
 
 /// Quadrature order for 2D ND2→RT2 mixed curl–`H(div)` volume pairing on triangles.
@@ -982,6 +1023,11 @@ pub struct VectorAssembler;
 impl VectorAssembler {
     /// Assemble an H(curl) Nédélec bilinear form in the **canonical**
     /// (shared-face) DOF basis — the D37 fix for tet `NDk` (k ≥ 2).
+    ///
+    /// Since D58 this produces exactly the same matrix as the default
+    /// [`Self::assemble_bilinear`] (which now applies the face blocks for
+    /// every space that provides them); the entry point is kept for explicit
+    /// HCurlSpace-typed callers and the D37/D48 regression tests.
     ///
     /// `HCurlSpace`'s global face DOFs are the face-creating element's
     /// functionals; a neighbouring element's two face DOFs per face point are
@@ -1008,13 +1054,16 @@ impl VectorAssembler {
     ) -> CsrMatrix<f64> {
         let n = space.n_dofs();
         let space_order = space.element_order(0);
+        let elem_type = space.mesh().element_type(0);
         if integrators
             .iter()
-            .any(|i| i.integration_order(space_order).is_some())
+            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
         {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
-                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let qo = integ
+                    .integration_order_for(space_order, elem_type)
+                    .unwrap_or(quad_order);
                 let m = Self::assemble_bilinear_nd_canonical_many(space, &[*integ], qo);
                 acc = Some(match acc {
                     None => m,
@@ -1095,6 +1144,22 @@ impl VectorAssembler {
     }
 
     /// Assemble the global stiffness matrix for a vector bilinear form.
+    ///
+    /// Applies Piola transforms, DOF orientation signs **and** (D58) the
+    /// per-element face-block rotation into the canonical (shared-face) DOF
+    /// basis whenever the space provides [`FESpace::element_face_blocks`]
+    /// (tet NDk, k ≥ 2): `A ← Sᵀ·A·S`.  For spaces without shared-face DOF
+    /// pairs this is bit-identical to the historical element-local assembly.
+    /// This is MFEM's `DofTransformation`-aware `BilinearForm::Assemble`; the
+    /// DOF vector produced by a solve is in the canonical basis and must be
+    /// reconstructed per element with [`element_local_dofs_canonical`] /
+    /// [`nd_element_local_dofs`] (`u_local = S·u_canon`,
+    /// `DofTransformation::InvTransformPrimal`).
+    ///
+    /// Quadrature selection mirrors MFEM: each integrator may select its own
+    /// quadrature order — if any integrator requests an explicit order,
+    /// assemble integrators individually on their own quadrature rules and
+    /// accumulate.
     pub fn assemble_bilinear<S>(
         space: &S,
         integrators: &[&dyn VectorBilinearIntegrator],
@@ -1109,12 +1174,20 @@ impl VectorAssembler {
 
         // MFEM semantics: each integrator may select its own quadrature order.
         // If any integrator requests an explicit order, assemble integrators
-        // individually on their own quadrature rules and accumulate.
+        // individually on their own quadrature rules and accumulate.  The
+        // element type is passed through so geometry-aware integrators (e.g.
+        // CurlCurlIntegrator's Pk vs Qk distinction) can pick MFEM's order.
         let space_order = space.element_order(0);
-        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+        let elem_type = mesh.element_type(0);
+        if integrators
+            .iter()
+            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
+        {
             let mut acc: Option<CsrMatrix<f64>> = None;
             for integ in integrators {
-                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let qo = integ
+                    .integration_order_for(space_order, elem_type)
+                    .unwrap_or(quad_order);
                 let m = Self::assemble_bilinear_single(space, *integ, qo);
                 acc = Some(match acc {
                     None => m,
@@ -1141,6 +1214,13 @@ impl VectorAssembler {
     }
 
     /// Core bilinear assembly loop (no per-integrator order dispatch).
+    ///
+    /// D58: this is the **default** (canonical) entry — per element the
+    /// space's [`FESpace::element_face_blocks`] are applied
+    /// (`A ← Sᵀ·A·S`); for spaces without shared-face DOF pairs the list is
+    /// empty and the loop is bit-identical to the historical element-local
+    /// one.  Use [`accumulate_vector_bilinear_element`] for the explicit
+    /// element-local (non-canonical) accumulation.
     fn assemble_bilinear_single_many<S>(
         space: &S,
         integrators: &[&dyn VectorBilinearIntegrator],
@@ -1161,7 +1241,10 @@ impl VectorAssembler {
                     .into_par_iter()
                     .map(|e| {
                         let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
-                        accumulate_vector_bilinear_element(space, e, integrators, quad_order, &mut local);
+                        let blocks = space.element_face_blocks(e);
+                        accumulate_vector_bilinear_element_blocks(
+                            space, e, integrators, quad_order, &mut local, blocks,
+                        );
                         local
                     })
                     .reduce(
@@ -1177,7 +1260,10 @@ impl VectorAssembler {
 
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
         for e in mesh.elem_iter() {
-            accumulate_vector_bilinear_element(space, e, integrators, quad_order, &mut coo);
+            let blocks = space.element_face_blocks(e);
+            accumulate_vector_bilinear_element_blocks(
+                space, e, integrators, quad_order, &mut coo, blocks,
+            );
         }
         coo.into_csr()
     }
@@ -1349,6 +1435,9 @@ impl VectorAssembler {
     }
 
     /// Assemble the global load vector for a vector linear form.
+    ///
+    /// Canonical (D58) default entry — see [`Self::assemble_bilinear`]; the
+    /// per-element face-block rotation is `b ← Sᵀ·b`.
     pub fn assemble_linear<S>(
         space: &S,
         integrators: &[&dyn VectorLinearIntegrator],
@@ -1390,6 +1479,10 @@ impl VectorAssembler {
     }
 
     /// Core load-vector assembly loop (no per-integrator order dispatch).
+    ///
+    /// D58: default (canonical) entry — per element the space's
+    /// [`FESpace::element_face_blocks`] are applied (`b ← Sᵀ·b`); empty
+    /// blocks leave the loop bit-identical to the element-local one.
     fn assemble_linear_single_many<S>(
         space: &S,
         integrators: &[&dyn VectorLinearIntegrator],
@@ -1411,7 +1504,10 @@ impl VectorAssembler {
                     .fold(
                         || vec![0.0_f64; n_dofs],
                         |mut local, e| {
-                            accumulate_vector_linear_element(space, e, integrators, quad_order, &mut local);
+                            let blocks = space.element_face_blocks(e);
+                            accumulate_vector_linear_element_blocks(
+                                space, e, integrators, quad_order, &mut local, blocks,
+                            );
                             local
                         },
                     )
@@ -1429,7 +1525,10 @@ impl VectorAssembler {
 
         let mut rhs = vec![0.0_f64; n_dofs];
         for e in mesh.elem_iter() {
-            accumulate_vector_linear_element(space, e, integrators, quad_order, &mut rhs);
+            let blocks = space.element_face_blocks(e);
+            accumulate_vector_linear_element_blocks(
+                space, e, integrators, quad_order, &mut rhs, blocks,
+            );
         }
         rhs
     }

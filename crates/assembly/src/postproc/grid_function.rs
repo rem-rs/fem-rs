@@ -21,7 +21,10 @@ use fem_mesh::Mesh;
 
 use crate::assembler::Assembler;
 use crate::standard::{DomainSourceIntegrator, MassIntegrator};
-use crate::vector_assembler::{piola_hcurl_basis, piola_hcurl_curl, piola_hdiv_basis, piola_hdiv_div};
+use crate::vector_assembler::{
+    element_local_dofs_canonical, piola_hcurl_basis, piola_hcurl_curl, piola_hdiv_basis,
+    piola_hdiv_div,
+};
 
 // ─── Reference element factory (mirrors assembler.rs) ──────────────────────
 
@@ -700,12 +703,24 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let n_ldofs = vre.n_dofs();
         let elem_dofs = self.space.element_dofs(elem);
         let signs = self.space.element_signs(elem);
+        // D58 canonical reconstruction: when the space carries face blocks
+        // (tet NDk, k ≥ 2) the global vector is in the canonical basis and the
+        // element-local coefficients are `u_local = S·u_canon`; the basis is
+        // then used *unsigned*.  Empty blocks → historical signed-basis path.
+        let blocks = self.space.element_face_blocks(elem);
+        let uloc = if blocks.is_empty() {
+            None
+        } else {
+            Some(element_local_dofs_canonical(self.space, elem, &self.dofs))
+        };
         let nodes = mesh.element_nodes(elem);
         let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
         let mut ref_vals = vec![0.0; n_ldofs * edim];
         vre.eval_basis_vec(xi, &mut ref_vals);
-        if let Some(sgns) = signs {
-            for i in 0..n_ldofs { for d in 0..edim { ref_vals[i * edim + d] *= sgns[i]; } }
+        if uloc.is_none() {
+            if let Some(sgns) = signs {
+                for i in 0..n_ldofs { for d in 0..edim { ref_vals[i * edim + d] *= sgns[i]; } }
+            }
         }
         let mut phys_vals = vec![0.0; n_ldofs * edim];
         match stype {
@@ -719,7 +734,10 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         }
         let mut val = vec![0.0; edim];
         for i in 0..n_ldofs {
-            let c = self.dofs[elem_dofs[i] as usize];
+            let c = match &uloc {
+                Some(u) => u[i],
+                None => self.dofs[elem_dofs[i] as usize],
+            };
             for d in 0..edim { val[d] += c * phys_vals[i * edim + d]; }
         }
         val
@@ -735,20 +753,32 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let n_ldofs = vre.n_dofs();
         let elem_dofs = self.space.element_dofs(elem);
         let signs = self.space.element_signs(elem);
+        // D58 canonical reconstruction (see `evaluate_vector_at_element`).
+        let blocks = self.space.element_face_blocks(elem);
+        let uloc = if blocks.is_empty() {
+            None
+        } else {
+            Some(element_local_dofs_canonical(self.space, elem, &self.dofs))
+        };
         let nodes = mesh.element_nodes(elem);
         let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
         let is_surface = mesh.topological_dim() as usize != edim;
         let curl_dim = if edim == 2 || is_surface { 1 } else { 3 };
         let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
         vre.eval_curl(xi, &mut ref_curl);
-        if let Some(sgns) = signs {
-            for i in 0..n_ldofs { for d in 0..curl_dim { ref_curl[i * curl_dim + d] *= sgns[i]; } }
+        if uloc.is_none() {
+            if let Some(sgns) = signs {
+                for i in 0..n_ldofs { for d in 0..curl_dim { ref_curl[i * curl_dim + d] *= sgns[i]; } }
+            }
         }
         let mut phys_curl = vec![0.0; n_ldofs * curl_dim];
         piola_hcurl_curl(&jac, det_j, &ref_curl, &mut phys_curl, n_ldofs, edim);
         let mut val = vec![0.0; curl_dim];
         for i in 0..n_ldofs {
-            let c = self.dofs[elem_dofs[i] as usize];
+            let c = match &uloc {
+                Some(u) => u[i],
+                None => self.dofs[elem_dofs[i] as usize],
+            };
             for d in 0..curl_dim { val[d] += c * phys_curl[i * curl_dim + d]; }
         }
         val
@@ -1603,6 +1633,14 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
         let quad = vre.quadrature(quad_order);
         let elem_dofs: Vec<usize> = nd_space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = nd_space.element_signs(e);
+        // D58: canonical reconstruction `u_local = S·u_canon` when the space
+        // carries face blocks (tet NDk, k ≥ 2); otherwise the historical
+        // scalar-sign gather.
+        let uloc = if nd_space.element_face_blocks(e).is_empty() {
+            None
+        } else {
+            Some(crate::vector_assembler::nd_element_local_dofs(nd_space, e, dofs))
+        };
         let mut ref_bv = vec![0.0; n_ldofs * dim];
         let nodes = mesh.element_nodes(e);
         let use_iso = matches!(et,
@@ -1629,14 +1667,16 @@ pub fn compute_l2_error_hcurl<M: MeshTopology>(
             // HCurl covariant Piola: φ_phys = J^{-T} · φ̂_ref
             let mut uh = vec![0.0; dim];
             for i in 0..n_ldofs {
-                let s = signs[i] as f64;
-                let coeff = dofs[elem_dofs[i]];
+                let coeff = match &uloc {
+                    Some(u) => u[i],
+                    None => signs[i] * dofs[elem_dofs[i]],
+                };
                 for c in 0..dim {
                     let mut sum = 0.0;
                     for k in 0..dim {
                         sum += jac_inv_t[(c, k)] * ref_bv[i * dim + k];
                     }
-                    uh[c] += s * coeff * sum;
+                    uh[c] += coeff * sum;
                 }
             }
 

@@ -21,7 +21,10 @@ use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRT1, HexR
 use fem_element::nedelec::{QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
-use crate::vector_assembler::{isoparametric_jacobian, geo_ref_elem_from_mesh};
+use crate::vector_assembler::{
+    apply_face_block_transform_matrix_cols, apply_face_block_transform_matrix_rows,
+    geo_ref_elem_from_mesh, isoparametric_jacobian,
+};
 use fem_space::fe_space::{FESpace, SpaceType};
 use fem_space::{HCurlSpace, H1Space, HDivSpace};
 
@@ -586,6 +589,14 @@ where
                 integ.add_to_element_matrix(&qp_r, &vec_col, dim, &j_inv_t, det_j, &mut m_elem);
             }
         }
+        // D58: rotate the HCurl (trial) columns into the canonical shared-face
+        // basis, `M ← M·S` (MFEM `TransformDual` domain half).  No-op without
+        // face blocks.
+        apply_face_block_transform_matrix_cols(
+            col_space.element_face_blocks(e),
+            &mut m_elem,
+            n_elem_c,
+        );
         for (ir, &gr) in global_rows.iter().enumerate() {
             for (ic, &gc) in global_cols.iter().enumerate() {
                 coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
@@ -647,6 +658,14 @@ where
                 integ.add_to_element_matrix(&qp_r, &curl_c_vec, dim, &mut m_elem);
             }
         }
+        // D58: rotate the HCurl (trial) columns into the canonical shared-face
+        // basis, `M ← M·S` — MFEM's `TransformDual` domain half.  No-op for
+        // spaces without face blocks.
+        apply_face_block_transform_matrix_cols(
+            col_space.element_face_blocks(e),
+            &mut m_elem,
+            n_elem_c,
+        );
         for (ir, &gr) in global_rows.iter().enumerate() {
             for (ic, &gc) in global_cols.iter().enumerate() {
                 coo.add(gr, gc, m_elem[ir * n_elem_c + ic]);
@@ -789,6 +808,14 @@ where
                 }
             }
         }
+        // D58: rotate the HCurl (test) rows into the canonical shared-face
+        // basis, `M ← Sᵀ·M` — MFEM's `TransformDual` range half.  No-op for
+        // spaces without face blocks.
+        apply_face_block_transform_matrix_rows(
+            nd_space.element_face_blocks(e),
+            &mut me,
+            n_g_nd,
+        );
         for (ir, &r) in global_nd.iter().enumerate() {
             for (ic, &c) in global_h1.iter().enumerate() {
                 let v = me[ir * n_g_h1 + ic];
@@ -1049,6 +1076,14 @@ where
                 }
             }
         }
+        // D58: rotate the ND (trial) columns into the canonical shared-face
+        // basis, `M ← M·S` (MFEM `TransformDual` domain half).  No-op for
+        // spaces without face blocks.
+        apply_face_block_transform_matrix_cols(
+            nd_space.element_face_blocks(e),
+            &mut me,
+            ng_nd,
+        );
         for (ir, &r) in global_rt.iter().enumerate() {
             for (ic, &c) in global_nd.iter().enumerate() {
                 let v = me[ir * ng_nd + ic];
@@ -1178,6 +1213,14 @@ where
                 }
             }
         }
+        // D58: rotate the ND (trial) columns into the canonical shared-face
+        // basis, `M ← M·S` (MFEM `TransformDual` domain half).  No-op for
+        // spaces without face blocks.
+        apply_face_block_transform_matrix_cols(
+            nd_space.element_face_blocks(e),
+            &mut me,
+            ng_nd,
+        );
         for (ir, &r) in global_rt.iter().enumerate() {
             for (ic, &c) in global_nd.iter().enumerate() {
                 let v = me[ir * ng_nd + ic];
