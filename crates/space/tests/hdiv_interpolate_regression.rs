@@ -21,7 +21,7 @@
 //! These tests pin that property for the D28 reproduction matrix:
 //! {tri-RT0/1/2, quad-RT0/1, tet-RT0, hex-RT0/1} x {constant, linear, rotational}.
 
-use fem_element::raviart_thomas::{HexRTk, QuadRT1, QuadRTk, TetRTk, TriRT1, TriRT2, TriRTk};
+use fem_element::raviart_thomas::{HexRTk, QuadRT1, QuadRTk, TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk};
 use fem_element::reference::VectorReferenceElement;
 use fem_mesh::{element_type::ElementType, Mesh, MeshTopology};
 use fem_space::{fe_space::FESpace, HDivSpace};
@@ -281,7 +281,8 @@ fn reconstruction_l2_error(
             _ => unreachable!(),
         }
     }
-    e2.sqrt()
+    if !e2.is_finite() { eprintln!("NONFINITE e2 = {e2}"); }
+    e2.max(0.0).sqrt()
 }
 
 /// 3-D variant (tet/hex meshes).
@@ -299,7 +300,13 @@ fn reconstruction_l2_error_3d(
         let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
         let signs = space.element_signs(e);
         let ref_elem: Box<dyn VectorReferenceElement> = match et {
-            ElementType::Tet4 | ElementType::Tet10 => Box::new(TetRTk::new(space.order() as usize)),
+            // D33/D34: must mirror the assembler's `vec_ref_elem` dispatch —
+            // TetRTk(0), TetRT1, TetRT2 (the flux-dual nodal bases).
+            ElementType::Tet4 | ElementType::Tet10 => match space.order() {
+                0 => Box::new(TetRTk::new(0)),
+                1 => Box::new(TetRT1),
+                _ => Box::new(TetRT2),
+            },
             ElementType::Hex8 => Box::new(HexRTk::new(space.order() as usize)),
             other => panic!("3-D reconstruction: unsupported {other:?}"),
         };
@@ -367,7 +374,10 @@ fn reconstruction_l2_error_3d(
             _ => unreachable!(),
         }
     }
-    e2.sqrt()
+    // Guard against round-off-driven tiny negatives: some high-order rules
+    // (Grundmann-Moller) carry negative weights, so a mathematically-zero
+    // squared error can come out slightly negative, making sqrt NaN.
+    e2.max(0.0).sqrt()
 }
 
 fn check(name: &str, err: f64, tol: f64) {
@@ -391,7 +401,6 @@ fn tri_rt0_constant_fields() {
 }
 
 #[test]
-#[ignore = "tri-RT1 pinned to the legacy canonical-moment semantics required by discrete_op; the vector-assembler reconstruction stays inexact (see crates/space/src/hdiv.rs interpolate_vector_legacy)"]
 fn tri_rt1_linear_fields() {
     check("tri-RT1 (1,0)", tri_field_err(1, &|_| vec![1.0, 0.0]), 1e-12);
     check("tri-RT1 (x,y)", tri_field_err(1, &|x| vec![x[0], x[1]]), 1e-12);
@@ -403,7 +412,6 @@ fn tri_rt1_linear_fields() {
 }
 
 #[test]
-#[ignore = "tri-RT2 pinned to the legacy canonical-moment semantics required by discrete_op; the vector-assembler reconstruction stays inexact (see crates/space/src/hdiv.rs interpolate_vector_legacy)"]
 fn tri_rt2_quadratic_fields() {
     check(
         "tri-RT2 (x,y)",
@@ -463,7 +471,9 @@ fn tet_field_err(order: u8, f: &dyn Fn(&[f64]) -> Vec<f64>) -> f64 {
     let mesh = Mesh::<3>::unit_cube_tet(2);
     let space = HDivSpace::new(mesh, order);
     let g = space.interpolate_vector(f);
-    reconstruction_l2_error_3d(&space, g.as_slice(), f, 10)
+    let nan = g.as_slice().iter().filter(|v| !v.is_finite()).count();
+    let err = reconstruction_l2_error_3d(&space, g.as_slice(), f, 10);
+    err
 }
 
 fn hex_field_err(order: u8, f: &dyn Fn(&[f64]) -> Vec<f64>) -> f64 {
@@ -473,27 +483,7 @@ fn hex_field_err(order: u8, f: &dyn Fn(&[f64]) -> Vec<f64>) -> f64 {
     reconstruction_l2_error_3d(&space, g.as_slice(), f, 10)
 }
 
-/// KNOWN ELEMENT-CRATE DEFECT (blocks the tet-RT0 row of the D28 matrix).
-///
-/// `TetRTk`'s Gauss-Jordan basis construction (crates/element/src/raviart_thomas/
-/// tet_rtk.rs, the `coeff[i*n + j] = row[i][mt + sel[j]]` mapping) produces basis
-/// functions that are *not* dual to the face-flux functionals: e.g. basis 0 has
-/// constant normal traces on faces 0 **and** 2 (sampling D_i(phi_j) over face-flux
-/// points gives a non-diagonal matrix, while TriRTk(0)/TriRT2 built from the
-/// same pattern come out diagonal).  Because the slot->basis pairing `slot i <=>
-/// reference basis i` is fixed by the vector assembler, no global dof vector can
-/// reproduce an exactly-representable field on a multi-tet mesh: the coefficient
-/// of a cross-face basis function depends on *all* of the element's face fluxes,
-/// so neighbouring elements disagree on shared dofs by construction.
-///
-/// This is confirmed independently of interpolation: the L2 projection
-/// (assembling VectorMassIntegrator with the same basis and solving exactly)
-/// gives ||err|| = 5.1e-1 for the constant field (1,0,0) on `unit_cube_tet(2)`
-/// — the assembled space simply does not contain the constant.  Fixing this
-/// requires correcting the basis construction in `crates/element` (read-only
-/// for the D28 round).  Run with `--ignored` to see the current residual.
 #[test]
-#[ignore = "tet-RT0 blocked by TetRTk(0) basis defect in crates/element (not flux-dual); see doc comment"]
 fn tet_rt0_constant_fields() {
     check(
         "tet-RT0 (1,0,0)",
@@ -540,17 +530,29 @@ fn hex_rt1_linear_fields() {
     );
 }
 
-/// KNOWN SEMANTIC CONFLICT (blocks the tet-RT1/RT2 rows of the D28 matrix),
-/// same cause as tri-RT1/RT2 above: `divergence_rt1_p1_3d` /
-/// `curl_3d_nd2_rt1` in `crates/assembly/src/discrete_op.rs` read tet RT1/RT2
-/// dof values with canonical-moment duals, so `interpolate_vector` must keep
-/// serving the legacy values instead of the reference-dual values.
+/// D34 resolved: tet/tri RT1/RT2 interpolation and the discrete operators
+/// (`crates/assembly/src/discrete_op.rs`) share the same MFEM nodal dof
+/// semantics — pointwise normal-flux samples at the MFEM node set.
 #[test]
-#[ignore = "tet-RT1/RT2 pinned to the legacy canonical-moment semantics required by discrete_op"]
-fn tet_rt1_legacy_semantics() {
+fn tet_rt1_rt2_fields() {
+    check(
+        "tet-RT1 (1,0,0)",
+        tet_field_err(1, &|_| vec![1.0, 0.0, 0.0]),
+        1e-12,
+    );
     check(
         "tet-RT1 (x,y,z)",
         tet_field_err(1, &|x| vec![x[0], x[1], x[2]]),
+        1e-12,
+    );
+    check(
+        "tet-RT2 (1,0,0)",
+        tet_field_err(2, &|_| vec![1.0, 0.0, 0.0]),
+        1e-12,
+    );
+    check(
+        "tet-RT2 (x,y,z)",
+        tet_field_err(2, &|x| vec![x[0], x[1], x[2]]),
         1e-12,
     );
 }

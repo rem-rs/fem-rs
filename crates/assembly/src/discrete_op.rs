@@ -45,7 +45,7 @@ use fem_element::{
 use fem_element::lagrange::factory::TriPk;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementTransformation};
-use nalgebra::DMatrix;
+use fem_space::dof_manager::FaceKey;
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
@@ -81,6 +81,9 @@ pub enum DiscreteOpError {
 
 /// Local RT2 Vandermonde and P2-sampled divergences for the RT2→P2 reconstruction on an
 /// affine triangle (`dmat[i,k] = DOF_i^{RT2}(Φ_k^{ref})`, `ymat[p,k] = div(Φ_k)(x_p)/det_j`).
+///
+/// D34: the dof rows use the MFEM **nodal** functionals (signed pointwise
+/// normal-flux samples shared with `HDivSpace::interpolate_vector`).
 #[allow(clippy::too_many_arguments)]
 fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
     mesh: &M,
@@ -90,15 +93,12 @@ fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
     j10: f64,
     j11: f64,
     det_j: f64,
-    jit: &DMatrix<f64>,
-    bop: &[f64],
-    iop: &[f64],
+    signs: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
     const N_RT2: usize = 15;
     const N_L2: usize = 6;
     let n_rt2 = N_RT2;
     let n_l2_local = N_L2;
-    let tri_faces = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
 
     let x0 = mesh.node_coords(nodes[0]);
     let x1 = mesh.node_coords(nodes[1]);
@@ -109,65 +109,20 @@ fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
     let mut prim = [[0.0_f64; 2]; N_RT2];
     let mut div_prim = [0.0_f64; N_RT2];
 
+    let (dof_pts, dof_nks) = fem_element::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs(2);
+
     for k in 0..n_rt2 {
-        let mut dof_k = [0.0_f64; N_RT2];
-
-        for (edge_local, &(li, lj)) in tri_faces.iter().enumerate() {
-            let va = nodes[li];
-            let vb = nodes[lj];
-            let (a, b) = if va < vb { (va, vb) } else { (vb, va) };
-            let pa = mesh.node_coords(a);
-            let pb = mesh.node_coords(b);
-            let tx = pb[0] - pa[0];
-            let ty = pb[1] - pa[1];
-            let nx = ty;
-            let ny = -tx;
-            for q in 0..3 {
-                let t = bop[q];
-                let xp = pa[0] + t * tx;
-                let yp = pa[1] + t * ty;
-                let xix = xp - x0[0];
-                let xiy = yp - x0[1];
-                let inv_det = 1.0 / det_j;
-                let xi0 = inv_det * (j11 * xix - j01 * xiy);
-                let xi1 = inv_det * (-j10 * xix + j00 * xiy);
-
-                TriRT2::mfem_primitives_and_divs(xi0, xi1, &mut prim, &mut div_prim);
-                let urx = prim[k][0];
-                let ury = prim[k][1];
-                let upx = (j00 * urx + j01 * ury) / det_j;
-                let upy = (j10 * urx + j11 * ury) / det_j;
-                let flux = upx * nx + upy * ny;
-                dof_k[3 * edge_local + q] = flux;
-            }
-        }
-
-        let pdeg = 2usize;
-        let mut row = 9usize;
-        for jj in 0..pdeg {
-            for ii in 0..(pdeg - jj) {
-                let wsum = iop[ii] + iop[jj] + iop[pdeg - 1 - ii - jj];
-                let xr = iop[ii] / wsum;
-                let yr = iop[jj] / wsum;
-                TriRT2::mfem_primitives_and_divs(xr, yr, &mut prim, &mut div_prim);
-                let urx = prim[k][0];
-                let ury = prim[k][1];
-                let upx = (j00 * urx + j01 * ury) / det_j;
-                let upy = (j10 * urx + j11 * ury) / det_j;
-                let f0 = upx;
-                let f1 = upy;
-                let ur0 = det_j * (jit[(0, 0)] * f0 + jit[(1, 0)] * f1);
-                let ur1 = det_j * (jit[(0, 1)] * f0 + jit[(1, 1)] * f1);
-                dof_k[row] = -ur1;
-                row += 1;
-                dof_k[row] = -ur0;
-                row += 1;
-            }
-        }
-        debug_assert_eq!(row, N_RT2);
-
-        for i in 0..n_rt2 {
-            dmat[i * n_rt2 + k] = dof_k[i];
+        for s in 0..n_rt2 {
+            let (xi, nk) = (&dof_pts[s], &dof_nks[s]);
+            TriRT2::mfem_primitives_and_divs(xi[0], xi[1], &mut prim, &mut div_prim);
+            let urx = prim[k][0];
+            let ury = prim[k][1];
+            let upx = (j00 * urx + j01 * ury) / det_j;
+            let upy = (j10 * urx + j11 * ury) / det_j;
+            // cof(J)·nk (unnormalised physical normal)
+            let nx = j11 * nk[0] - j10 * nk[1];
+            let ny = -j01 * nk[0] + j00 * nk[1];
+            dmat[s * n_rt2 + k] = signs[s] * (upx * nx + upy * ny);
         }
 
         let sample_pts = [
@@ -325,6 +280,16 @@ impl DiscreteLinearOperator {
 
     // ── Order-2 numerical gradient (P2 → ND2, 2D triangles only) ─────────────
 
+    /// D32: all ND2 dof rows use the MFEM **nodal** point-value functionals
+    /// `σ_i(F) = F(x_i)·t̂_i` (Gauss points on the edges, `(1/3,1/3)` interior),
+    /// consistent with `TriND2` / `HCurlSpace` (anti-diagonal reversal pairing
+    /// encoded in `element_dofs`/`element_signs`).
+    ///
+    /// Because the covariant pullback of the physical gradient is the reference
+    /// gradient (`Jᵀ·J^{-T}∇_ref φ = ∇_ref φ`), every row is J-independent and
+    /// evaluated once on the reference element.  The per-element scatter just
+    /// applies `HCurlSpace::element_signs` (the ±1 of the reversal transform)
+    /// and writes into the (already permuted) global slots.
     fn gradient_p2_nd2<M: MeshTopology>(
         h1_space: &H1Space<M>,
         hcurl_space: &HCurlSpace<M>,
@@ -338,149 +303,71 @@ impl DiscreteLinearOperator {
         let n_p2  = h1_space.n_dofs();
         let mut coo = CooMatrix::<f64>::new(n_nd2, n_p2);
 
-        // ── Overview: G[i,j] = DOF_i^{phys}(∇_phys φ_j)
-        //
-        // By the Nédélec pullback (H(curl) covariant):
-        //   DOF_i^{phys}(F_phys) = DOF_i^{ref}(J^T F_phys)
-        //   J^T (J^{-T} ∇_ref φ_j) = ∇_ref φ_j
-        //
-        // So for EDGE DOFs (tangential moments) the entries are J-independent:
-        //   G_edge[i,j] = DOF_i^{ref}(∇_ref φ_j)   (i = 0..5)
-        //
-        // For INTERIOR DOFs (L2 moments of components), the physical DOF is:
-        //   DOF_6^{phys}(F_phys) = ∫_{T_phys} F_x dA = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_x dξ
-        //   DOF_7^{phys}(F_phys) = ∫_{T_phys} F_y dA = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_y dξ
-        // These depend on J.  They are computed per element.
-        let n_p2_local  = 6usize;
+        let n_p2_local = 6usize;
         let dim = 2usize;
 
-        // 3-point Gauss-Legendre on [0,1] (exact for polys ≤ degree 5).
-        let sq35: f64 = (3.0f64 / 5.0).sqrt();
-        let gl_pts = [0.5 * (1.0 - sq35), 0.5, 0.5 * (1.0 + sq35)];
-        let gl_wts = [5.0f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
+        // 2-point Gauss-Legendre on [0,1] — the ND2 edge dof points
+        // (MFEM `OpenPoints(1)`), matching `TriND2::GL2`.
+        let (gl2, _) = gauss_legendre_01(2);
 
-        let p2_elem  = TriPk::new(2);
-        let quad_int = p2_elem.quadrature(4); // degree-4 triangle rule
+        let p2_elem = TriPk::new(2);
 
-        // ── Precompute edge rows of G_ref (rows 0..5, J-independent).
-        let mut g_edge = vec![0.0f64; 6 * n_p2_local]; // rows 0..5
-        let mut p2_grads = vec![0.0f64; n_p2_local * dim];
+        // ── Reference rows (all 8, J-independent).
+        // (point, tangent) per slot, mirroring `TriND2` slot order:
+        // e₀ (v0→v1) tang (1,0); e₁ (v1→v2) tang (−1,1);
+        // e₂ (v2→v0) tang (0,−1); interior (1/3,1/3) tang (1,0),(0,1).
+        let g_ref: Vec<f64> = {
+            let mut pts_tans: [([f64; 2], [f64; 2]); 8] = [([0.0; 2], [0.0; 2]); 8];
+            let mut row = 0usize;
+            for &t in gl2.iter() {
+                pts_tans[row] = ([t, 0.0], [1.0, 0.0]);
+                row += 1;
+            }
+            for &t in gl2.iter() {
+                pts_tans[row] = ([1.0 - t, t], [-1.0, 1.0]);
+                row += 1;
+            }
+            for &t in gl2.iter() {
+                pts_tans[row] = ([0.0, 1.0 - t], [0.0, -1.0]);
+                row += 1;
+            }
+            pts_tans[row] = ([1.0 / 3.0, 1.0 / 3.0], [1.0, 0.0]);
+            row += 1;
+            pts_tans[row] = ([1.0 / 3.0, 1.0 / 3.0], [0.0, 1.0]);
+            assert_eq!(row + 1, 8);
 
-        // Edge e₀: bottom, param (t,0), tangential = v_x
-        for k in 0..3 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            p2_elem.eval_grad_basis(&[t, 0.0], &mut p2_grads);
-            for j in 0..n_p2_local {
-                let vx = p2_grads[j * dim];
-                g_edge[j] += w * vx;
-                g_edge[n_p2_local + j] += w * vx * t;
+            let mut g = vec![0.0f64; 8 * n_p2_local];
+            let mut p2_grads = vec![0.0f64; n_p2_local * dim];
+            for (r, (pt, tang)) in pts_tans.iter().enumerate() {
+                p2_elem.eval_grad_basis(pt, &mut p2_grads);
+                for j in 0..n_p2_local {
+                    g[r * n_p2_local + j] = p2_grads[j * dim] * tang[0]
+                        + p2_grads[j * dim + 1] * tang[1];
+                }
             }
-        }
-        // Edge e₁: hypotenuse, param (1−t, t), tangential = −v_x+v_y
-        for k in 0..3 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            p2_elem.eval_grad_basis(&[1.0 - t, t], &mut p2_grads);
-            for j in 0..n_p2_local {
-                let mom = -p2_grads[j * dim] + p2_grads[j * dim + 1];
-                g_edge[2 * n_p2_local + j] += w * mom;
-                g_edge[3 * n_p2_local + j] += w * mom * t;
-            }
-        }
-        // Edge e₂: left, param (0,t), tangential = v_y
-        for k in 0..3 {
-            let (t, w) = (gl_pts[k], gl_wts[k]);
-            p2_elem.eval_grad_basis(&[0.0, t], &mut p2_grads);
-            for j in 0..n_p2_local {
-                let vy = p2_grads[j * dim + 1];
-                g_edge[4 * n_p2_local + j] += w * vy;
-                g_edge[5 * n_p2_local + j] += w * vy * t;
-            }
-        }
+            g
+        };
 
         // ── Scatter into global COO, one element at a time.
         //
-        // Each global ND2 DOF is written by the first element that claims it
-        // (shared edge DOFs: de Rham guarantees adjacent elements agree).
-        // Interior bubble DOFs are element-local (never shared), so no
-        // visited check is needed for them — but we include them in the same set
-        // for uniformity.
+        // Local slot s maps to global `nd2_dofs[s]`; `element_signs[s]` is the
+        // ±1 of the edge-reversal transform (aligned +1, reversed −1), so the
+        // global entry is `sign_s · σ_s^{ref}(∇φ)`.  Adjacent elements now
+        // agree exactly (nodal functionals), so first-writer-wins stays valid.
         let mut visited = HashSet::with_capacity(n_nd2);
 
         for e in mesh.elem_iter() {
-            let nodes    = mesh.element_nodes(e);
             let h1_dofs  = h1_space.element_dofs(e);    // 6 global P2 DOFs
             let nd2_dofs = hcurl_space.element_dofs(e); // 8 global ND2 DOFs
             let nd2_signs = hcurl_space.element_signs(e);
-            let tri_edges = [(0usize, 1usize), (1usize, 2usize), (0usize, 2usize)];
 
-            // ── Interior DOF rows (6 and 7) — depend on J.
-            // DOF_6^{phys}(∇_phys φ_j) = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_x dξ
-            // DOF_7^{phys}(∇_phys φ_j) = |det_J| ∫_{T_ref} (J^{-T} ∇_ref φ_j)_y dξ
-            let transform = ElementTransformation::from_simplex_nodes(mesh, nodes);
-            let jit       = transform.jacobian_inv_t(); // J^{-T}
-            let abs_det   = transform.det_j().abs();
-            let jit00 = jit[(0,0)]; let jit01 = jit[(0,1)];
-            let jit10 = jit[(1,0)]; let jit11 = jit[(1,1)];
-
-            let mut g_int = vec![0.0f64; 2 * n_p2_local]; // rows 6 and 7
-            for (xi, &w) in quad_int.points.iter().zip(quad_int.weights.iter()) {
-                p2_elem.eval_grad_basis(xi, &mut p2_grads);
-                for j in 0..n_p2_local {
-                    let gx = p2_grads[j * dim];
-                    let gy = p2_grads[j * dim + 1];
-                    // J^{-T} ∇_ref φ_j
-                    let phys_x = jit00 * gx + jit01 * gy;
-                    let phys_y = jit10 * gx + jit11 * gy;
-                    g_int[j] += w * phys_x; // DOF 6
-                    g_int[n_p2_local + j] += w * phys_y; // DOF 7
-                }
-            }
-            // Scale by |det_J|
-            for v in g_int.iter_mut() { *v *= abs_det; }
-
-            // ── Scatter edge rows (0..5) with proper ND2 edge-moment orientation transform.
-            // For reversed edge orientation, moments transform as:
-            //   [m0, m1]_global = [-m0_local, -m0_local + m1_local].
-            for (edge_local, &(li, lj)) in tri_edges.iter().enumerate() {
-                let (gi, gj) = (nodes[li], nodes[lj]);
-                let same_orient = gi < gj;
-
-                let gd0 = nd2_dofs[2 * edge_local] as usize;
-                let gd1 = nd2_dofs[2 * edge_local + 1] as usize;
-
-                if visited.insert(gd0) {
-                    for (j_local, &global_p2) in h1_dofs.iter().enumerate() {
-                        let l0 = g_edge[(2 * edge_local) * n_p2_local + j_local];
-                        let v0 = if same_orient { l0 } else { -l0 };
-                        if v0.abs() > 1e-15 {
-                            coo.add(gd0, global_p2 as usize, v0);
-                        }
-                    }
-                }
-
-                if visited.insert(gd1) {
-                    for (j_local, &global_p2) in h1_dofs.iter().enumerate() {
-                        let l0 = g_edge[(2 * edge_local) * n_p2_local + j_local];
-                        let l1 = g_edge[(2 * edge_local + 1) * n_p2_local + j_local];
-                        let v1 = if same_orient { l1 } else { -l0 + l1 };
-                        if v1.abs() > 1e-15 {
-                            coo.add(gd1, global_p2 as usize, v1);
-                        }
-                    }
-                }
-            }
-
-            // ── Scatter interior rows (6,7).
-            for i_int in 0..2usize {
-                let i_local = 6 + i_int;
-                let g_nd2 = nd2_dofs[i_local] as usize;
-                if !visited.insert(g_nd2) { continue; }
-
+            for (i_local, &g_nd2) in nd2_dofs.iter().enumerate() {
+                if !visited.insert(g_nd2 as usize) { continue; }
                 let sign = nd2_signs[i_local];
                 for (j_local, &global_p2) in h1_dofs.iter().enumerate() {
-                    let val = sign * g_int[i_int * n_p2_local + j_local];
+                    let val = sign * g_ref[i_local * n_p2_local + j_local];
                     if val.abs() > 1e-15 {
-                        coo.add(g_nd2, global_p2 as usize, val);
+                        coo.add(g_nd2 as usize, global_p2 as usize, val);
                     }
                 }
             }
@@ -603,6 +490,12 @@ impl DiscreteLinearOperator {
 
     // ── ND2 -> P1 curl in 2D ────────────────────────────────────────────────
 
+    /// D32: the ND2 dof rows are the MFEM **nodal** point-value functionals
+    /// `σ(F) = F(x_i)·t̂` (edge Gauss points with the canonical tangent, the
+    /// interior `(1/3,1/3)` component samples), orientation-consistent with
+    /// `HCurlSpace` (`element_dofs` already encodes the anti-diagonal reversal
+    /// permutation, so the row's canonical slot index is recovered from the
+    /// global id).  `interpolate_vector` feeds exactly these canonical values.
     fn curl_2d_nd2_p1<M: MeshTopology>(
         hcurl_space: &HCurlSpace<M>,
         l2_space: &L2Space<M>,
@@ -615,12 +508,13 @@ impl DiscreteLinearOperator {
 
         let ref_elem = TriND2;
         let n_nd2 = ref_elem.n_dofs(); // 8
-        let tri_edges = [(0usize, 1usize), (1usize, 2usize), (0usize, 2usize)];
+        // Slot block order matches `HCurlSpace::TRI_EDGES_MFEM`
+        // (= (0,1),(1,2),(2,0)); the vertex *pair* of entry 2 equals the
+        // legacy (0,2) pair, so the canonical (min,max) is unchanged.
+        let tri_edges = [(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)];
 
-        // 3-point Gauss-Legendre on [0,1] for edge moments.
-        let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
-        let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
-        let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
+        // 2-point Gauss-Legendre on [0,1] — the ND2 edge dof points.
+        let (gl2, _) = gauss_legendre_01(2);
 
         // Physical spanning fields matching TriND2 monomial space:
         // m0=(1,0), m1=(x,0), m2=(y,0), m3=(0,1), m4=(0,x), m5=(0,y),
@@ -657,60 +551,50 @@ impl DiscreteLinearOperator {
             let hcurl_dofs = hcurl_space.element_dofs(e);
             let l2_dofs = l2_space.element_dofs(e);
 
-            // Geometry for interior quadrature mapping.
+            // Geometry for interior dof mapping.
             let x0 = mesh.node_coords(nodes[0]);
             let x1 = mesh.node_coords(nodes[1]);
             let x2 = mesh.node_coords(nodes[2]);
             let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
             let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
-            let det_j = (j00 * j11 - j01 * j10).abs();
 
             // D (8x8): ND2 DOFs of spanning fields. Y (3x8): nodal curls.
             let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
             let mut ymat = vec![0.0_f64; 3 * n_nd2];
 
-            let qr = ref_elem.quadrature(4);
             for k in 0..n_nd2 {
                 let mut dof_k = [0.0_f64; 8];
 
-                // Edge moments in canonical global orientation (a < b).
+                // Edge rows: nodal point values along the canonical (min,max)
+                // direction; the canonical slot index of each element slot is
+                // recovered from its global id (adjacent ids per block).
                 for (edge_local, &(li, lj)) in tri_edges.iter().enumerate() {
-                    let va = nodes[li];
-                    let vb = nodes[lj];
-                    let (a, b) = if va < vb { (va, vb) } else { (vb, va) };
-                    let pa = mesh.node_coords(a);
-                    let pb = mesh.node_coords(b);
+                    let gi = nodes[li];
+                    let gj = nodes[lj];
+                    let (ga, gb) = if gi < gj { (gi, gj) } else { (gj, gi) };
+                    let pa = mesh.node_coords(ga);
+                    let pb = mesh.node_coords(gb);
                     let tx = pb[0] - pa[0];
                     let ty = pb[1] - pa[1];
 
-                    let mut mom0 = 0.0_f64;
-                    let mut mom1 = 0.0_f64;
-                    for q in 0..3 {
-                        let t = gl_pts[q];
-                        let w = gl_wts[q];
+                    let first = hcurl_dofs[2 * edge_local].min(hcurl_dofs[2 * edge_local + 1]);
+                    for m in 0..2usize {
+                        let j_canon = (hcurl_dofs[2 * edge_local + m] - first) as usize;
+                        let t = gl2[j_canon];
                         let xp = pa[0] + t * tx;
                         let yp = pa[1] + t * ty;
                         let (fx, fy) = eval_field(k, xp, yp);
-                        let tangential = fx * tx + fy * ty;
-                        mom0 += w * tangential;
-                        mom1 += w * tangential * t;
+                        dof_k[2 * edge_local + m] = fx * tx + fy * ty;
                     }
-                    dof_k[2 * edge_local] = mom0;
-                    dof_k[2 * edge_local + 1] = mom1;
                 }
 
-                // Interior moments.
-                let mut int_x = 0.0_f64;
-                let mut int_y = 0.0_f64;
-                for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                    let xp = x0[0] + j00 * xi[0] + j01 * xi[1];
-                    let yp = x0[1] + j10 * xi[0] + j11 * xi[1];
-                    let (fx, fy) = eval_field(k, xp, yp);
-                    int_x += w * fx;
-                    int_y += w * fy;
-                }
-                dof_k[6] = int_x * det_j;
-                dof_k[7] = int_y * det_j;
+                // Interior rows: point values at the reference (1/3,1/3) with
+                // tangents (1,0)/(0,1): σ = (J t̂)·F — matches
+                // `HCurlSpace::interpolate_vector`.
+                let xc = [x0[0] + (j00 + j01) / 3.0, x0[1] + (j10 + j11) / 3.0];
+                let (fx, fy) = eval_field(k, xc[0], xc[1]);
+                dof_k[6] = fx * j00 + fy * j10;
+                dof_k[7] = fx * j01 + fy * j11;
 
                 for i in 0..n_nd2 {
                     dmat[i * n_nd2 + k] = dof_k[i];
@@ -766,11 +650,12 @@ impl DiscreteLinearOperator {
 
         let ref_elem = TriND2;
         let n_nd2 = ref_elem.n_dofs(); // 8
-        let tri_edges = [(0usize, 1usize), (1usize, 2usize), (0usize, 2usize)];
+        // Slot block order matches `HCurlSpace::TRI_EDGES_MFEM` (the vertex
+        // pair of entry 2 equals the legacy (0,2) pair).
+        let tri_edges = [(0usize, 1usize), (1usize, 2usize), (2usize, 0usize)];
 
-        let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
-        let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
-        let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
+        // 2-point Gauss-Legendre on [0,1] — the ND2 edge dof points.
+        let (gl2, _) = gauss_legendre_01(2);
 
         let eval_field = |k: usize, x: f64, y: f64| -> (f64, f64) {
             match k {
@@ -811,51 +696,39 @@ impl DiscreteLinearOperator {
             let j10 = x1[1] - x0[1];
             let j01 = x2[0] - x0[0];
             let j11 = x2[1] - x0[1];
-            let det_j = (j00 * j11 - j01 * j10).abs();
 
             let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
             let mut ymat = vec![0.0_f64; 6 * n_nd2];
-            let qr = ref_elem.quadrature(4);
 
+            // D32: nodal dof rows (see `curl_2d_nd2_p1`).
             for k in 0..n_nd2 {
                 let mut dof_k = [0.0_f64; 8];
 
                 for (edge_local, &(li, lj)) in tri_edges.iter().enumerate() {
-                    let va = nodes[li];
-                    let vb = nodes[lj];
-                    let (a, b) = if va < vb { (va, vb) } else { (vb, va) };
-                    let pa = mesh.node_coords(a);
-                    let pb = mesh.node_coords(b);
+                    let gi = nodes[li];
+                    let gj = nodes[lj];
+                    let (ga, gb) = if gi < gj { (gi, gj) } else { (gj, gi) };
+                    let pa = mesh.node_coords(ga);
+                    let pb = mesh.node_coords(gb);
                     let tx = pb[0] - pa[0];
                     let ty = pb[1] - pa[1];
 
-                    let mut mom0 = 0.0_f64;
-                    let mut mom1 = 0.0_f64;
-                    for q in 0..3 {
-                        let t = gl_pts[q];
-                        let w = gl_wts[q];
+                    let first = hcurl_dofs[2 * edge_local].min(hcurl_dofs[2 * edge_local + 1]);
+                    for m in 0..2usize {
+                        let j_canon = (hcurl_dofs[2 * edge_local + m] - first) as usize;
+                        let t = gl2[j_canon];
                         let xp = pa[0] + t * tx;
                         let yp = pa[1] + t * ty;
                         let (fx, fy) = eval_field(k, xp, yp);
-                        let tangential = fx * tx + fy * ty;
-                        mom0 += w * tangential;
-                        mom1 += w * tangential * t;
+                        dof_k[2 * edge_local + m] = fx * tx + fy * ty;
                     }
-                    dof_k[2 * edge_local] = mom0;
-                    dof_k[2 * edge_local + 1] = mom1;
                 }
 
-                let mut int_x = 0.0_f64;
-                let mut int_y = 0.0_f64;
-                for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                    let xp = x0[0] + j00 * xi[0] + j01 * xi[1];
-                    let yp = x0[1] + j10 * xi[0] + j11 * xi[1];
-                    let (fx, fy) = eval_field(k, xp, yp);
-                    int_x += w * fx;
-                    int_y += w * fy;
-                }
-                dof_k[6] = int_x * det_j;
-                dof_k[7] = int_y * det_j;
+                // Interior rows: point values at the reference (1/3,1/3).
+                let xc = [x0[0] + (j00 + j01) / 3.0, x0[1] + (j10 + j11) / 3.0];
+                let (fx, fy) = eval_field(k, xc[0], xc[1]);
+                dof_k[6] = fx * j00 + fy * j10;
+                dof_k[7] = fx * j01 + fy * j11;
 
                 for i in 0..n_nd2 {
                     dmat[i * n_nd2 + k] = dof_k[i];
@@ -1070,11 +943,14 @@ impl DiscreteLinearOperator {
         if mesh.dim() == 2 {
             let rt1_elem = TriRT1;
             let n_rt1    = rt1_elem.n_dofs(); // 8
-            let tri_faces = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
 
-            let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
-            let gl_pts = [0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)];
-            let gl_wts = [5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0];
+            // D34: the H(div) dofs carry MFEM **nodal** semantics — pointwise
+            // normal-flux samples `f(x_s)·cof(J)·nk_s` scaled by the element
+            // sign (matching `HDivSpace::interpolate_vector`).  The local
+            // matrix rows are therefore those signed nodal functionals applied
+            // to the physical RT1 monomial primitives.
+            let (dof_pts, dof_nks) =
+                fem_element::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs(1);
 
             let eval_field = |k: usize, x: f64, y: f64| -> (f64, f64) {
                 match k {
@@ -1113,56 +989,22 @@ impl DiscreteLinearOperator {
                 let x2 = mesh.node_coords(nodes[2]);
                 let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
                 let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
-                let det_j = (j00 * j11 - j01 * j10).abs();
+                let signs = hdiv_space.element_signs(e);
 
                 let mut dmat = vec![0.0_f64; n_rt1 * n_rt1];
                 let n_l2_local = l2_dofs.len(); // 3 (P1) or 6 (P2)
                 let mut ymat = vec![0.0_f64; n_l2_local * n_rt1];
-                let qr = rt1_elem.quadrature(4);
 
                 for k in 0..n_rt1 {
-                    let mut dof_k = [0.0_f64; 8];
-                    for (edge_local, &(li, lj)) in tri_faces.iter().enumerate() {
-                        let va = nodes[li];
-                        let vb = nodes[lj];
-                        let (a, b) = if va < vb { (va, vb) } else { (vb, va) };
-                        let pa = mesh.node_coords(a);
-                        let pb = mesh.node_coords(b);
-                        let tx = pb[0] - pa[0];
-                        let ty = pb[1] - pa[1];
-                        let nx = ty;
-                        let ny = -tx;
-
-                        let mut mom0 = 0.0_f64;
-                        let mut mom1 = 0.0_f64;
-                        for q in 0..3 {
-                            let t = gl_pts[q];
-                            let w = gl_wts[q];
-                            let xp = pa[0] + t * tx;
-                            let yp = pa[1] + t * ty;
-                            let (fx, fy) = eval_field(k, xp, yp);
-                            let flux = fx * nx + fy * ny;
-                            mom0 += w * flux;
-                            mom1 += w * flux * (2.0 * t - 1.0);
-                        }
-                        dof_k[2 * edge_local] = mom0;
-                        dof_k[2 * edge_local + 1] = mom1;
-                    }
-
-                    let mut int_x = 0.0_f64;
-                    let mut int_y = 0.0_f64;
-                    for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                    for s in 0..n_rt1 {
+                        let (xi, nk) = (&dof_pts[s], &dof_nks[s]);
                         let xp = x0[0] + j00 * xi[0] + j01 * xi[1];
                         let yp = x0[1] + j10 * xi[0] + j11 * xi[1];
                         let (fx, fy) = eval_field(k, xp, yp);
-                        int_x += w * fx;
-                        int_y += w * fy;
-                    }
-                    dof_k[6] = int_x * det_j;
-                    dof_k[7] = int_y * det_j;
-
-                    for i in 0..n_rt1 {
-                        dmat[i * n_rt1 + k] = dof_k[i];
+                        // cof(J)·nk (unnormalised physical normal)
+                        let nx = j11 * nk[0] - j10 * nk[1];
+                        let ny = -j01 * nk[0] + j00 * nk[1];
+                        dmat[s * n_rt1 + k] = signs[s] * (fx * nx + fy * ny);
                     }
                     let sample_pts = [
                         [x0[0], x0[1]],
@@ -1203,12 +1045,6 @@ impl DiscreteLinearOperator {
         } else {
             let rt1_elem = TetRT1;
             let n_rt1 = rt1_elem.n_dofs(); // 15
-            let tet_faces = [
-                (1usize, 2usize, 3usize),
-                (0usize, 2usize, 3usize),
-                (0usize, 1usize, 3usize),
-                (0usize, 1usize, 2usize),
-            ];
 
             let eval_field = |k: usize, x: f64, y: f64, z: f64| -> [f64; 3] {
                 match k {
@@ -1251,8 +1087,9 @@ impl DiscreteLinearOperator {
                 }
             };
 
-            let qr_face = TriRT1.quadrature(4);
-            let qr_vol = rt1_elem.quadrature(4);
+            // D34: nodal dofs (MFEM RT_TetrahedronElement semantics) shared
+            // with the element crate.
+            let (dof_pts, dof_nks) = fem_element::raviart_thomas::tet_rt1::mfem_nodal_dofs(1);
 
             for e in mesh.elem_iter() {
                 let hdiv_dofs = hdiv_space.element_dofs(e);
@@ -1270,104 +1107,41 @@ impl DiscreteLinearOperator {
                 let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
                 let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
                 let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
-                let det_j = (j0[0] * (j1[1] * j2[2] - j1[2] * j2[1])
-                    - j1[0] * (j0[1] * j2[2] - j0[2] * j2[1])
-                    + j2[0] * (j0[1] * j1[2] - j0[2] * j1[1])).abs();
+                // cof(J) = det(J)·J^{-T} (adjugate transpose)
+                let cof = [
+                    [
+                        j1[1] * j2[2] - j1[2] * j2[1],
+                        j0[2] * j2[1] - j0[1] * j2[2],
+                        j0[1] * j1[2] - j0[2] * j1[1],
+                    ],
+                    [
+                        j1[2] * j2[0] - j1[0] * j2[2],
+                        j0[0] * j2[2] - j0[2] * j2[0],
+                        j0[2] * j1[0] - j0[0] * j1[2],
+                    ],
+                    [
+                        j1[0] * j2[1] - j1[1] * j2[0],
+                        j0[1] * j2[0] - j0[0] * j2[1],
+                        j0[0] * j1[1] - j0[1] * j1[0],
+                    ],
+                ];
+                let signs = hdiv_space.element_signs(e);
 
                 for k in 0..n_rt1 {
-                    let mut dof_k = vec![0.0_f64; n_rt1];
-
-                    // Face moments in canonical global orientation (sorted face vertices).
-                    for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
-                        let mut fv = [nodes[la], nodes[lb], nodes[lc]];
-                        fv.sort_unstable();
-                        let pa = mesh.node_coords(fv[0]);
-                        let pb = mesh.node_coords(fv[1]);
-                        let pc = mesh.node_coords(fv[2]);
-
-                        let ds = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-                        let dt = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-                        let cx = ds[1] * dt[2] - ds[2] * dt[1];
-                        let cy = ds[2] * dt[0] - ds[0] * dt[2];
-                        let cz = ds[0] * dt[1] - ds[1] * dt[0];
-                        let jac_area = (cx * cx + cy * cy + cz * cz).sqrt();
-                        let n_unit = [cx / jac_area, cy / jac_area, cz / jac_area];
-
-                        let mut m0 = 0.0_f64;
-                        let mut m1 = 0.0_f64;
-                        let mut m2 = 0.0_f64;
-                        for (xi2, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
-                            let s = xi2[0];
-                            let t = xi2[1];
-                            let pt = [
-                                pa[0] + s * ds[0] + t * dt[0],
-                                pa[1] + s * ds[1] + t * dt[1],
-                                pa[2] + s * ds[2] + t * dt[2],
-                            ];
-                            let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                            let nflux = fv[0] * n_unit[0] + fv[1] * n_unit[1] + fv[2] * n_unit[2];
-                            let d_sigma = w * jac_area;
-                            // Match HDivSpace face moment order: (p=0,q=0), (p=0,q=1), (p=1,q=0)
-                            //                                  = [1, t, s]
-                            m0 += d_sigma * nflux;
-                            m1 += d_sigma * nflux * t;
-                            m2 += d_sigma * nflux * s;
+                    for s in 0..n_rt1 {
+                        let (xi, nk) = (&dof_pts[s], &dof_nks[s]);
+                        let xp = [
+                            x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
+                            x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
+                            x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
+                        ];
+                        let fv = eval_field(k, xp[0], xp[1], xp[2]);
+                        let mut val = 0.0;
+                        for r in 0..3 {
+                            val += fv[r]
+                                * (cof[r][0] * nk[0] + cof[r][1] * nk[1] + cof[r][2] * nk[2]);
                         }
-
-                        dof_k[3 * face_local] = m0;
-                        dof_k[3 * face_local + 1] = m1;
-                        dof_k[3 * face_local + 2] = m2;
-                    }
-
-                    // Interior moments with contravariant Piola pullback.
-                    // ∫_Ω F_i dV = ∫_ref (detJ * J^{-1} * F_phys)_i dξ
-                    // For an affine tet, detJ and J^{-1} are constant, so we
-                    // accumulate the unweighted sums and transform at the end.
-                    let mut int_x = 0.0_f64;
-                    let mut int_y = 0.0_f64;
-                    let mut int_z = 0.0_f64;
-                    for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
-                        let pt = [
-                            x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
-                            x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
-                            x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
-                        ];
-                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                        int_x += w * fv[0];
-                        int_y += w * fv[1];
-                        int_z += w * fv[2];
-                    }
-                    // Interior moments with contravariant Piola pullback.
-                    // ∫_Ω F_i dV = ∫_ref (detJ * J^{-1} * F_phys)_i dξ
-                    // For an affine tet, detJ and J^{-1} are constant, so we
-                    // accumulate the unweighted sums and transform at the end.
-                    let mut int_x = 0.0_f64;
-                    let mut int_y = 0.0_f64;
-                    let mut int_z = 0.0_f64;
-                    for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
-                        let pt = [
-                            x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
-                            x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
-                            x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
-                        ];
-                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                        int_x += w * fv[0];
-                        int_y += w * fv[1];
-                        int_z += w * fv[2];
-                    }
-                    // J = [j0 j1 j2] (columns are ∂x/∂ξ, ∂x/∂η, ∂x/∂ζ)
-                    let jac = nalgebra::Matrix3::new(
-                        j0[0], j1[0], j2[0],
-                        j0[1], j1[1], j2[1],
-                        j0[2], j1[2], j2[2],
-                    );
-                    let j_inv_t = jac.try_inverse().expect("singular Jacobian in divergence_rt1_p1").transpose();
-                    dof_k[12] = det_j * (j_inv_t[(0,0)] * int_x + j_inv_t[(1,0)] * int_y + j_inv_t[(2,0)] * int_z);
-                    dof_k[13] = det_j * (j_inv_t[(0,1)] * int_x + j_inv_t[(1,1)] * int_y + j_inv_t[(2,1)] * int_z);
-                    dof_k[14] = det_j * (j_inv_t[(0,2)] * int_x + j_inv_t[(1,2)] * int_y + j_inv_t[(2,2)] * int_z);
-
-                    for i in 0..n_rt1 {
-                        dmat[i * n_rt1 + k] = dof_k[i];
+                        dmat[s * n_rt1 + k] = signs[s] * val;
                     }
                     let sample_pts = [
                         [x0[0], x0[1], x0[2]],
@@ -1382,7 +1156,8 @@ impl DiscreteLinearOperator {
                         [0.5 * (x2[0] + x3[0]), 0.5 * (x2[1] + x3[1]), 0.5 * (x2[2] + x3[2])],
                     ];
                     for p in 0..n_l2_local {
-                        ymat[p * n_rt1 + k] = eval_div(k, sample_pts[p][0], sample_pts[p][1], sample_pts[p][2]);
+                        ymat[p * n_rt1 + k] =
+                            eval_div(k, sample_pts[p][0], sample_pts[p][1], sample_pts[p][2]);
                     }
                 }
 
@@ -1435,9 +1210,6 @@ impl DiscreteLinearOperator {
         let n_hdiv = hdiv_space.n_dofs();
         let mut coo = CooMatrix::new(n_l2, n_hdiv);
 
-        let (bop, _) = gauss_legendre_01(3);
-        let (iop, _) = gauss_legendre_01(2);
-
         for e in mesh.elem_iter() {
             let hdiv_dofs = hdiv_space.element_dofs(e);
             let l2_dofs = l2_space.element_dofs(e);
@@ -1461,11 +1233,10 @@ impl DiscreteLinearOperator {
             let j11 = x2[1] - x0[1];
             let det_j = j00 * j11 - j01 * j10;
 
-            let transform = ElementTransformation::from_simplex_nodes(mesh, nodes);
-            let jit = transform.jacobian_inv_t();
+            let signs = hdiv_space.element_signs(e);
 
             let (dmat, ymat) =
-                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, jit, &bop, &iop);
+                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, signs);
 
             let mut dt = vec![0.0_f64; n_rt2 * n_rt2];
             for i in 0..n_rt2 {
@@ -1737,7 +1508,7 @@ impl DiscreteLinearOperator {
             (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
         ];
 
-        // Same spanning set as TetND2 monomial implementation.
+        // Same spanning set as the TetND2 monomial implementation.
         let eval_field = |k: usize, x: f64, y: f64, z: f64| -> [f64; 3] {
             match k {
                 0 => [1.0, 0.0, 0.0],
@@ -1789,22 +1560,19 @@ impl DiscreteLinearOperator {
             }
         };
 
-        // 4-point Gauss-Legendre on [0,1].
-        let sq6_5 = (6.0f64 / 5.0).sqrt();
-        let ta = ((3.0 - 2.0 * sq6_5) / 7.0).sqrt();
-        let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
-        let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
-        let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
-        let gl_pts = [
-            0.5 * (1.0 - tb),
-            0.5 * (1.0 - ta),
-            0.5 * (1.0 + ta),
-            0.5 * (1.0 + tb),
-        ];
-        let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
+        // D32: the ND2 dof rows are the MFEM **nodal** point-value functionals:
+        // edges = `F(x_i)·t̂` at the 2-point Gauss points with the canonical
+        // tangent (orientation recovered from the global ids, exactly like
+        // `curl_2d_nd2_p1`); faces = `F(centroid)·w` with the shared face
+        // anchor tangents from `HCurlSpace` (identical to
+        // `HCurlSpace::interpolate_vector`).
+        let (gl2, _) = gauss_legendre_01(2);
 
-        let qr_face = TriRT1.quadrature(4);
-        let qr_vol = rt1_elem.quadrature(4);
+        // D34: the RT1 dof rows use the MFEM nodal functionals (signed
+        // pointwise normal-flux samples), shared with
+        // `HDivSpace::interpolate_vector`.
+        let (rt_dof_pts, rt_dof_nks) = fem_element::raviart_thomas::tet_rt1::mfem_nodal_dofs(1);
+        debug_assert_eq!(rt_dof_pts.len(), n_rt1);
         let mut visited_rt1 = HashSet::with_capacity(n_hdiv);
 
         for e in mesh.elem_iter() {
@@ -1822,16 +1590,34 @@ impl DiscreteLinearOperator {
             let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
             let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
             let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
-            let det_abs = (j0[0] * (j1[1] * j2[2] - j1[2] * j2[1])
-                - j1[0] * (j0[1] * j2[2] - j0[2] * j2[1])
-                + j2[0] * (j0[1] * j1[2] - j0[2] * j1[1]))
-                .abs();
+            // cof(J) = det(J)·J^{-T} (adjugate transpose) and the element dof
+            // signs (both shared with `HDivSpace::interpolate_vector`).
+            let cof = [
+                [
+                    j1[1] * j2[2] - j1[2] * j2[1],
+                    j0[2] * j2[1] - j0[1] * j2[2],
+                    j0[1] * j1[2] - j0[2] * j1[1],
+                ],
+                [
+                    j1[2] * j2[0] - j1[0] * j2[2],
+                    j0[0] * j2[2] - j0[2] * j2[0],
+                    j0[2] * j1[0] - j0[0] * j1[2],
+                ],
+                [
+                    j1[0] * j2[1] - j1[1] * j2[0],
+                    j0[1] * j2[0] - j0[0] * j2[1],
+                    j0[0] * j1[1] - j0[1] * j1[0],
+                ],
+            ];
+            let rt_signs = hdiv_space.element_signs(e);
 
             for k in 0..n_nd2 {
                 let mut dof_nd2 = vec![0.0_f64; n_nd2];
-                let mut dof_rt1 = vec![0.0_f64; n_rt1];
 
-                // ND2 edge moments (2 per edge) in global edge orientation.
+                // ND2 edge rows: nodal point values along the canonical
+                // (min,max) direction; the canonical slot index of each
+                // element slot is recovered from its global id (adjacent ids
+                // per block).
                 for (edge_local, &(li, lj)) in tet_edges.iter().enumerate() {
                     let gi = nodes[li];
                     let gj = nodes[lj];
@@ -1840,111 +1626,62 @@ impl DiscreteLinearOperator {
                     let pb = mesh.node_coords(gb);
                     let tau = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
 
-                    let mut m0 = 0.0_f64;
-                    let mut m1 = 0.0_f64;
-                    for q in 0..4 {
-                        let t = gl_pts[q];
-                        let w = gl_wts[q];
+                    let first = hcurl_dofs[2 * edge_local].min(hcurl_dofs[2 * edge_local + 1]);
+                    for m in 0..2usize {
+                        let j_canon = (hcurl_dofs[2 * edge_local + m] - first) as usize;
+                        let t = gl2[j_canon];
                         let pt = [
                             pa[0] + t * tau[0],
                             pa[1] + t * tau[1],
                             pa[2] + t * tau[2],
                         ];
                         let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                        let tang = fv[0] * tau[0] + fv[1] * tau[1] + fv[2] * tau[2];
-                        m0 += w * tang;
-                        m1 += w * tang * t;
+                        dof_nd2[2 * edge_local + m] =
+                            fv[0] * tau[0] + fv[1] * tau[1] + fv[2] * tau[2];
                     }
-
-                    dof_nd2[2 * edge_local] = m0;
-                    dof_nd2[2 * edge_local + 1] = m1;
                 }
 
-                // ND2 face tangential moments and RT1 face normal moments.
+                // ND2 face rows: point values at the face centroid with the
+                // shared-face anchor tangents (creation element's TetND2 slot
+                // tangents — the same functionals that produced the dof
+                // values fed into this operator).
                 for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
-                    let mut fvtx = [nodes[la], nodes[lb], nodes[lc]];
-                    fvtx.sort_unstable();
-                    let pa = mesh.node_coords(fvtx[0]);
-                    let pb = mesh.node_coords(fvtx[1]);
-                    let pc = mesh.node_coords(fvtx[2]);
-
-                    let ds = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-                    let dt = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-                    let cross = [
-                        ds[1] * dt[2] - ds[2] * dt[1],
-                        ds[2] * dt[0] - ds[0] * dt[2],
-                        ds[0] * dt[1] - ds[1] * dt[0],
+                    let key = FaceKey::new(nodes[la], nodes[lb], nodes[lc]);
+                    let [pa, w0, w1] = hcurl_space
+                        .face_tangent_anchor(key)
+                        .expect("tet face must have an interpolation anchor");
+                    let centroid = [
+                        pa[0] + (w0[0] + w1[0]) / 3.0,
+                        pa[1] + (w0[1] + w1[1]) / 3.0,
+                        pa[2] + (w0[2] + w1[2]) / 3.0,
                     ];
-                    let jac_area =
-                        (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
-                    let n_unit = [cross[0] / jac_area, cross[1] / jac_area, cross[2] / jac_area];
-
-                    let mut nd_t1 = 0.0_f64;
-                    let mut nd_t2 = 0.0_f64;
-                    let mut rt_m0 = 0.0_f64;
-                    let mut rt_m1 = 0.0_f64;
-                    let mut rt_m2 = 0.0_f64;
-
-                    for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
-                        let s = xi[0];
-                        let t = xi[1];
-                        let pt = [
-                            pa[0] + s * ds[0] + t * dt[0],
-                            pa[1] + s * ds[1] + t * dt[1],
-                            pa[2] + s * ds[2] + t * dt[2],
-                        ];
-
-                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                        let cv = eval_curl(k, pt[0], pt[1], pt[2]);
-                        let d_sigma = w * jac_area;
-
-                        nd_t1 += d_sigma * (fv[0] * ds[0] + fv[1] * ds[1] + fv[2] * ds[2]);
-                        nd_t2 += d_sigma * (fv[0] * dt[0] + fv[1] * dt[1] + fv[2] * dt[2]);
-
-                        let nflux = cv[0] * n_unit[0] + cv[1] * n_unit[1] + cv[2] * n_unit[2];
-                        rt_m0 += d_sigma * nflux;
-                        rt_m1 += d_sigma * nflux * t;
-                        rt_m2 += d_sigma * nflux * s;
-                    }
-
-                    dof_nd2[12 + 2 * face_local] = nd_t1;
-                    dof_nd2[12 + 2 * face_local + 1] = nd_t2;
-
-                    dof_rt1[3 * face_local] = rt_m0;
-                    dof_rt1[3 * face_local + 1] = rt_m1;
-                    dof_rt1[3 * face_local + 2] = rt_m2;
+                    let fv = eval_field(k, centroid[0], centroid[1], centroid[2]);
+                    dof_nd2[12 + 2 * face_local] =
+                        fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
+                    dof_nd2[12 + 2 * face_local + 1] =
+                        fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
                 }
 
-                // RT1 interior moments of curl(field) with contravariant Piola pullback.
-                let mut int_x = 0.0_f64;
-                let mut int_y = 0.0_f64;
-                let mut int_z = 0.0_f64;
-                for (xi, &w) in qr_vol.points.iter().zip(qr_vol.weights.iter()) {
+                for i in 0..n_nd2 {
+                    dmat[i * n_nd2 + k] = dof_nd2[i];
+                }
+
+                // D34: RT1 nodal dofs of curl(field): signed pointwise samples
+                // curl Φ_k(x_p)·(cof(J)·n̂_p) (same functionals as
+                // `HDivSpace::interpolate_vector`).
+                for p in 0..n_rt1 {
+                    let (xi, nk) = (&rt_dof_pts[p], &rt_dof_nks[p]);
                     let pt = [
                         x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
                         x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
                         x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
                     ];
                     let cv = eval_curl(k, pt[0], pt[1], pt[2]);
-                    int_x += w * cv[0];
-                    int_y += w * cv[1];
-                    int_z += w * cv[2];
-                }
-                let jac = nalgebra::Matrix3::new(
-                    j0[0], j1[0], j2[0],
-                    j0[1], j1[1], j2[1],
-                    j0[2], j1[2], j2[2],
-                );
-                let j_inv_t = jac.try_inverse().expect("singular Jacobian in curl_3d_nd2_rt1").transpose();
-                dof_rt1[12] = det_abs * (j_inv_t[(0,0)] * int_x + j_inv_t[(1,0)] * int_y + j_inv_t[(2,0)] * int_z);
-                dof_rt1[13] = det_abs * (j_inv_t[(0,1)] * int_x + j_inv_t[(1,1)] * int_y + j_inv_t[(2,1)] * int_z);
-                dof_rt1[14] = det_abs * (j_inv_t[(0,2)] * int_x + j_inv_t[(1,2)] * int_y + j_inv_t[(2,2)] * int_z);
-
-                for i in 0..n_nd2 {
-                    dmat[i * n_nd2 + k] = dof_nd2[i];
-                }
-                for p in 0..n_rt1 {
-                    ymat[p * n_nd2 + k] = dof_rt1[p];
+                    let mut val = 0.0;
+                    for r in 0..3 {
+                        val += cv[r] * (cof[r][0] * nk[0] + cof[r][1] * nk[1] + cof[r][2] * nk[2]);
+                    }
+                    ymat[p * n_nd2 + k] = rt_signs[p] * val;
                 }
             }
 
@@ -2321,12 +2058,23 @@ mod tests {
 
         let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
 
-        // A = (x*y, y*z, z*x), so curl(A) = (-y, -z, -x).
-        let a = hcurl.interpolate_vector(&|x| vec![x[0] * x[1], x[1] * x[2], x[2] * x[0]]);
+        // D32: the commuting identity `C·Π(f) = Π_RT(curl f)` is exact for
+        // fields **in** the ND2 span (nodal interpolators are not an exact
+        // cochain map for out-of-space fields — only integral-moment
+        // interpolators are).  Use the in-span mode
+        // A = (−xy, x², 0) + (0, −yz, y²) + (−z², 0, zx), whose curl is the
+        // linear field (3y, −3z, 3x) ⊂ RT1.
+        let a = hcurl.interpolate_vector(&|x| {
+            vec![
+                -x[0] * x[1] - x[2] * x[2],
+                x[0] * x[0] - x[1] * x[2],
+                x[2] * x[0] + x[1] * x[1],
+            ]
+        });
         let mut ca = vec![0.0; hdiv.n_dofs()];
         c.spmv(a.as_slice(), &mut ca);
 
-        let curl_interp = hdiv.interpolate_vector(&|x| vec![-x[1], -x[2], -x[0]]);
+        let curl_interp = hdiv.interpolate_vector(&|x| vec![3.0 * x[1], -3.0 * x[2], 3.0 * x[0]]);
 
         let max_err: f64 = (0..hdiv.n_dofs())
             .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
@@ -2338,6 +2086,12 @@ mod tests {
     }
 
     /// Test: Curl ND2->RT1 in 3D — randomized commuting stress test.
+    ///
+    /// D32: randomizes over **linear** fields — P1³ ⊂ ND2 with constant curl
+    /// ⊂ RT1 — so the commuting identity `C·Π(A) = Π_RT(curl A)` holds
+    /// exactly for the nodal (point-value) interpolators (they are an exact
+    /// cochain map only on the space; quadratic fields generally leave the
+    /// per-element physical span under affine pullback).
     #[test]
     fn curl_3d_nd2_rt1_commuting_randomized_stress() {
         let mesh = Mesh::<3>::unit_cube_tet(2);
@@ -2349,46 +2103,34 @@ mod tests {
 
         for seed in 0..8u64 {
             let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let mut coeffs = [0.0f64; 9];
-            for k in 0..9 {
+            let mut coeffs = [0.0f64; 12];
+            for k in 0..12 {
                 state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let r = ((state >> 11) as f64) / ((1u64 << 53) as f64);
                 coeffs[k] = 2.0 * r - 1.0;
             }
 
-            let [a, b, c0, d, e, f, g, h, i] = coeffs;
+            let [a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3] = coeffs else {
+                unreachable!()
+            };
 
-            // A = (a*x*y + b*x*z + c*y*z,
-            //      d*x*y + e*x*z + f*y*z,
-            //      g*x*y + h*x*z + i*y*z)
-            let a_h = hcurl.interpolate_vector(&|x| {
-                let xx = x[0];
-                let yy = x[1];
-                let zz = x[2];
+            // A = (a0 + a1·x + a2·y + a3·z, b0 + b1·x + b2·y + b3·z,
+            //      c0 + c1·x + c2·y + c3·z)
+            let a_h = hcurl.interpolate_vector(&|x: &[f64]| {
+                let (xx, yy, zz) = (x[0], x[1], x[2]);
                 vec![
-                    a * xx * yy + b * xx * zz + c0 * yy * zz,
-                    d * xx * yy + e * xx * zz + f * yy * zz,
-                    g * xx * yy + h * xx * zz + i * yy * zz,
+                    a0 + a1 * xx + a2 * yy + a3 * zz,
+                    b0 + b1 * xx + b2 * yy + b3 * zz,
+                    c0 + c1 * xx + c2 * yy + c3 * zz,
                 ]
             });
 
             let mut ca = vec![0.0; hdiv.n_dofs()];
             c.spmv(a_h.as_slice(), &mut ca);
 
-            // curl(A) = (
-            //   (g-e)*x + (-f)*y + i*z,
-            //   b*x + (c-g)*y + (-h)*z,
-            //   (-a)*x + d*y + (e-c)*z
-            // )
-            let curl_interp = hdiv.interpolate_vector(&|x| {
-                let xx = x[0];
-                let yy = x[1];
-                let zz = x[2];
-                vec![
-                    (g - e) * xx - f * yy + i * zz,
-                    b * xx + (c0 - g) * yy - h * zz,
-                    -a * xx + d * yy + (e - c0) * zz,
-                ]
+            // curl(A) = (c2 − b3, a3 − c1, b1 − a2) — constant.
+            let curl_interp = hdiv.interpolate_vector(&|_x: &[f64]| {
+                vec![c2 - b3, a3 - c1, b1 - a2]
             });
 
             let max_err: f64 = (0..hdiv.n_dofs())
@@ -2637,6 +2379,10 @@ mod tests {
     }
 
     /// Test: ND2->P2 curl commutes with interpolation.
+    ///
+    /// D32: the identity `C·Π(f) = Π(curl f)` is exact only for fields **in**
+    /// the ND2 span (nodal interpolation is exact there).  Use the monomial
+    /// `F = (−xy, x²)` (the rotational ND2 mode), whose curl is `3x`.
     #[test]
     fn curl_2d_nd2_p2_commutes_with_interpolation() {
         let mesh  = Mesh::<2>::unit_square_tri(4);
@@ -2646,16 +2392,16 @@ mod tests {
 
         let c = DiscreteLinearOperator::curl_2d(&hcurl, &l2).unwrap();
 
-        // F = (x^2, x*y), so curl(F) = d/dx(x*y) - d/dy(x^2) = y.
-        let f = hcurl.interpolate_vector(&|x| vec![x[0] * x[0], x[0] * x[1]]);
+        // F = (-x*y, x^2) ∈ ND2, curl(F) = d/dx(x^2) - d/dy(-x*y) = 3x.
+        let f = hcurl.interpolate_vector(&|x| vec![-x[0] * x[1], x[0] * x[0]]);
         let mut cf = vec![0.0; l2.n_dofs()];
         c.spmv(f.as_slice(), &mut cf);
 
-        let c_interp = l2.interpolate(&|x| x[1]);
+        let c_interp = l2.interpolate(&|x| 3.0 * x[0]);
         let max_err: f64 = (0..l2.n_dofs())
             .map(|i| (cf[i] - c_interp.as_slice()[i]).abs())
             .fold(0.0, f64::max);
-        assert!(max_err < 1e-8, "ND2->P2: curl(x^2,xy) should be y, max error = {max_err}");
+        assert!(max_err < 1e-8, "ND2->P2: curl(-xy,x^2) should be 3x, max error = {max_err}");
     }
 
     /// Gradient P2→ND1: unsupported HCurl order returns error.
@@ -2707,6 +2453,13 @@ mod tests {
     }
 
     /// Test: Divergence RT1->P2 commutes with interpolation.
+    ///
+    /// D34 correction: the test field must lie **in RT₁** for the composite
+    /// `D ∘ interpolate` to reproduce the exact divergence (the nodal dof
+    /// semantics, like MFEM `Project_RT`, interpolates exactly only fields of
+    /// the space; the pre-D34 moment interpolation additionally projected
+    /// `div` of out-of-space fields, which is why `F = (x², y²) ∉ RT₁` used to
+    /// pass).  `F = (x², xy) = x·(x, y)` ∈ RT₁ with `div F = 3x`.
     #[test]
     fn divergence_rt1_p2_commutes_with_interpolation() {
         let mesh  = Mesh::<2>::unit_square_tri(4);
@@ -2714,14 +2467,14 @@ mod tests {
         let mesh2 = Mesh::<2>::unit_square_tri(4);
         let l2    = L2Space::new(mesh2, 2);
 
-        // F = (x^2, y^2), so div F = 2x + 2y.
-        let f = hdiv.interpolate_vector(&|x| vec![x[0] * x[0], x[1] * x[1]]);
+        // F = (x^2, xy), so div F = 3x.
+        let f = hdiv.interpolate_vector(&|x| vec![x[0] * x[0], x[0] * x[1]]);
 
         let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
         let mut div_f = vec![0.0; l2.n_dofs()];
         d.spmv(f.as_slice(), &mut div_f);
 
-        let div_interp = l2.interpolate(&|x| 2.0 * x[0] + 2.0 * x[1]);
+        let div_interp = l2.interpolate(&|x| 3.0 * x[0]);
 
         let max_err: f64 = (0..l2.n_dofs())
             .map(|i| (div_f[i] - div_interp.as_slice()[i]).abs())
@@ -2993,37 +2746,41 @@ mod tests {
 
         for seed in 0..8u64 {
             let mut state = seed.wrapping_mul(11400714819323198485).wrapping_add(1);
-            let mut coeffs = [0.0f64; 9];
-            for k in 0..9 {
+            let mut coeffs = [0.0f64; 15];
+            for k in 0..15 {
                 state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let r = ((state >> 11) as f64) / ((1u64 << 53) as f64);
                 coeffs[k] = 2.0 * r - 1.0;
             }
 
-            let [a, b, c, d0, e, f, g, h, i] = coeffs;
+            // D34 correction: the random field is drawn from RT₁ itself
+            // (P₁³ ⊕ x·P̃₁) — see the 2-D note above.  With
+            // [a1,a2,a3,a4, b1,b2,b3,b4, c1,c2,c3,c4, β1,β2,β3]:
+            let [a1, a2, a3, a4, b1, b2, b3, b4, c1, c2, c3, c4, beta1, beta2, beta3] = coeffs;
 
-            // F = (
-            //   a*x^2 + b*x*y + c*x*z,
-            //   d*y^2 + e*x*y + f*y*z,
-            //   g*z^2 + h*x*z + i*y*z
-            // )
             let f_h = hdiv.interpolate_vector(&|x| {
                 let xx = x[0];
                 let yy = x[1];
                 let zz = x[2];
                 vec![
-                    a * xx * xx + b * xx * yy + c * xx * zz,
-                    d0 * yy * yy + e * xx * yy + f * yy * zz,
-                    g * zz * zz + h * xx * zz + i * yy * zz,
+                    a1 + a2 * xx + a3 * yy + a4 * zz
+                        + beta1 * xx * xx + beta2 * xx * yy + beta3 * xx * zz,
+                    b1 + b2 * xx + b3 * yy + b4 * zz
+                        + beta1 * xx * yy + beta2 * yy * yy + beta3 * yy * zz,
+                    c1 + c2 * xx + c3 * yy + c4 * zz
+                        + beta1 * xx * zz + beta2 * yy * zz + beta3 * zz * zz,
                 ]
             });
 
             let mut div_f = vec![0.0; l2.n_dofs()];
             d.spmv(f_h.as_slice(), &mut div_f);
 
-            // div(F) = (2a+e+h)*x + (b+2d+i)*y + (c+f+2g)*z
+            // div(F) = (a2 + b3 + c4) + 4β1·x + 4β2·y + 4β3·z
             let div_interp = l2.interpolate(&|x| {
-                (2.0 * a + e + h) * x[0] + (b + 2.0 * d0 + i) * x[1] + (c + f + 2.0 * g) * x[2]
+                (a2 + b3 + c4)
+                    + 4.0 * beta1 * x[0]
+                    + 4.0 * beta2 * x[1]
+                    + 4.0 * beta3 * x[2]
             });
 
             let max_err: f64 = (0..l2.n_dofs())
