@@ -46,7 +46,7 @@ impl From<std::io::Error> for DcLoadError {
 ///
 /// Usage:
 /// ```no_run
-/// use fem_io::data_collection::load_visit_collection;
+/// use fem_io::data_collection_load::load_visit_collection;
 /// let (cycle, mesh_txt, fields) = load_visit_collection(
 ///     std::path::Path::new("output/Example23_000000.mfem_root")
 /// ).expect("failed to load data collection");

@@ -7,9 +7,11 @@
 //! Segment, Triangle, Quadrilateral, Tetrahedron, Hexahedron, Wedge, Pyramid.
 //! Format reference: https://mfem.org/mesh-format/
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult, NodeId};
+use fem_element::ReferenceElement;
 use fem_mesh::{
     element_type::ElementType,
     simplex::{GeometryData, Mesh},
@@ -661,10 +663,342 @@ fn parse_nodal_fec_order(fec: &str) -> Option<u8> {
     None
 }
 
+// ─── D41: MFEM-faithful H1 hexahedron geometry ───────────────────────────────
+//
+// MFEM numbers the DOFs of the H1 `nodes` grid function (fem/fespace.cpp,
+// `FiniteElementSpace::GetElementDofs`) as
+//
+//     [ vertices | edge blocks | face blocks | interior blocks ]
+//     vertex v            -> dof v
+//     mesh edge  E, slot t -> dof NV + E*(p-1) + t
+//     mesh face  F, slot o -> dof NV + NE*(p-1) + F*(p-1)^2 + o
+//     element e, slot o    -> dof NV + NE*(p-1) + NF*(p-1)^2 + e*(p-1)^3 + o
+//
+// with the mesh edge/face indices assigned by `Mesh::FinalizeTopology`
+// (`GetElementToEdgeTable` / `GenerateFaces`): element traversal order, local
+// entities in `Geometry::CUBE::Edges` / `FaceVert` order, first encounter wins.
+// Within an entity:
+//   * an edge slot counts from the element end vertex with the **smaller mesh
+//     vertex id** (`Mesh::GetElementEdges` sets `cor = v[e0] < v[e1] ? 1 : -1`
+//     and `H1_FECollection`'s `SegDofOrd[0]` is the identity);
+//   * a face slot `o = a + b*(p-1)` counts `a` along the face's `FaceVert`
+//     edge 0→1 and `b` along edge 0→3 of the **first** element that created
+//     the face (`QuadDofOrd[0]` is the identity), and every other element
+//     re-indexes through `QuadDofOrd[orientation]`.
+//
+// The fem-rs assembly bases (`QuadQk`/`HexQk`) use their own slot order, so
+// the file's dof ids cannot be handed to them directly (D31/D41).  The mapping
+// below is therefore built geometrically: every slot of the reference element
+// is classified from its own reference coordinate (vertex / edge / face /
+// interior, and where on that entity), then translated into MFEM's numbering.
+// This keeps `GeometryData::conn` in the reference element's slot order (which
+// is what the assembler indexes) without duplicating any slot table.
+
+/// MFEM `Constants<Geometry::CUBE>::Edges`: local edge `k` runs from local
+/// vertex `EDGES[k][0]` to `EDGES[k][1]`.
+const HEX_EDGES: [[usize; 2]; 12] = [
+    [0, 1], [1, 2], [3, 2], [0, 3], [4, 5], [5, 6], [7, 6], [4, 7], [0, 4], [1, 5], [2, 6], [3, 7],
+];
+/// MFEM `Constants<Geometry::CUBE>::FaceVert`: local face `f` lists its four
+/// local vertices in canonical order (reference square `0,0 → 1,0 → 1,1 → 0,1`).
+const HEX_FACES: [[usize; 4]; 6] = [
+    [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+];
+/// Reference-cube corners (`{0,1}³`) of the 8 local vertices, in
+/// `Geometry::CUBE::Vertices` order — the same order `HexQk` uses for its
+/// vertex slots.
+const HEX_CORNERS: [[usize; 3]; 8] = [
+    [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+];
+/// Square corners in the canonical (stored) face parameterisation `(a, b)`.
+const QUAD_CORNERS: [[i32; 2]; 4] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/// Outcome of the D41 hex geometry pass.
+enum HexGeom {
+    /// The mesh is not an all-Hex8 mesh — this path does not apply.
+    NotHex,
+    /// All-Hex8 mesh, but the `nodes` section cannot be mapped faithfully.
+    Unsupported(&'static str),
+    /// Faithful geometry table.
+    Built(GeometryData),
+}
+
+/// D41: reproduce MFEM's H1 `nodes` numbering for an all-Hex8 mesh and return
+/// the geometry table in the reference element's ([`HexQk`]) slot order.
+///
+/// `raw` is the `nodes` dof vector as stored in the file (`ordering` 0 =
+/// byNODES, 1 = byVDIM).  Returns [`HexGeom::NotHex`] for meshes that are not
+/// uniformly hexahedral so the caller can fall back to the simplex path.
+fn build_h1_hex_geometry<M: MeshTopology>(
+    mesh: &M,
+    order: u8,
+    raw: &[f64],
+    ordering: usize,
+) -> HexGeom {
+    let p = order as usize;
+    let e = p - 1; // dofs per edge (and per face row/column)
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if n_elems == 0 || n_vert == 0 {
+        return HexGeom::NotHex;
+    }
+    let mut n_hex = 0usize;
+    for el in 0..n_elems as u32 {
+        if mesh.element_nodes(el).len() == 8 {
+            n_hex += 1;
+        }
+    }
+    if n_hex == 0 {
+        return HexGeom::NotHex; // pure simplex/other mesh: not our business
+    }
+    if n_hex != n_elems {
+        // A mixed mesh containing hexahedra: the `nodes` dof blocks are sized
+        // per element geometry, so neither this mapper nor the uniform
+        // DofManager fallback can describe it.
+        return HexGeom::Unsupported("mixed-element mesh containing hexahedra");
+    }
+
+    // Mesh edges/faces in MFEM's enumeration (element traversal, then local
+    // entity order, first encounter wins).
+    let mut elems: Vec<[u32; 8]> = Vec::with_capacity(n_elems);
+    let mut edge_ids: HashMap<[u32; 2], u32> = HashMap::new();
+    let mut face_ids: HashMap<[u32; 4], u32> = HashMap::new();
+    let mut face_verts: Vec<[u32; 4]> = Vec::new();
+    for el in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(el);
+        let mut n8 = [0u32; 8];
+        n8.copy_from_slice(ns);
+        for &[la, lb] in HEX_EDGES.iter() {
+            let (a, b) = (n8[la], n8[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len() as u32;
+            edge_ids.entry(key).or_insert(next);
+        }
+        for fv in HEX_FACES.iter() {
+            let mut key = [n8[fv[0]], n8[fv[1]], n8[fv[2]], n8[fv[3]]];
+            key.sort_unstable();
+            let next = face_ids.len() as u32;
+            face_ids.entry(key).or_insert_with(|| {
+                face_verts.push([n8[fv[0]], n8[fv[1]], n8[fv[2]], n8[fv[3]]]);
+                next
+            });
+        }
+        elems.push(n8);
+    }
+    let n_edges = edge_ids.len();
+    let n_faces = face_ids.len();
+
+    let n_dofs = n_vert + n_edges * e + n_faces * e * e + n_elems * e * e * e;
+    if raw.len() < 3 * n_dofs {
+        return HexGeom::Unsupported("nodes section too short for the H1 hex space");
+    }
+    let mut coords = vec![0.0f64; n_dofs * 3];
+    match ordering {
+        0 => {
+            for c in 0..3 {
+                for g in 0..n_dofs {
+                    coords[g * 3 + c] = raw[c * n_dofs + g];
+                }
+            }
+        }
+        1 => coords.copy_from_slice(&raw[..3 * n_dofs]),
+        _ => return HexGeom::Unsupported("unknown nodes ordering"),
+    }
+
+    // Local-edge lookup: (varying axis, side of the two fixed axes) -> edge id.
+    let mut edge_lut: HashMap<(usize, usize, usize), usize> = HashMap::new();
+    for (k, &[la, lb]) in HEX_EDGES.iter().enumerate() {
+        let (ca, cb) = (HEX_CORNERS[la], HEX_CORNERS[lb]);
+        let av = match (0..3).find(|&d| ca[d] != cb[d]) {
+            Some(d) => d,
+            None => return HexGeom::Unsupported("degenerate HEX_EDGES table"),
+        };
+        let bnd: Vec<usize> = (0..3).filter(|&d| d != av).collect();
+        edge_lut.insert((av, ca[bnd[0]], ca[bnd[1]]), k);
+    }
+
+    let ref_elem = fem_element::lagrange::factory::HexQk::new(p);
+    let ref_coords = ref_elem.dof_coords();
+    let npe = ref_coords.len();
+    if npe != 8 + 12 * e + 6 * e * e + e * e * e {
+        return HexGeom::Unsupported("reference hex element is not the H1 order-p tensor basis");
+    }
+    // The 1-D GLL nodes of the reference basis: the tensor index of a slot is
+    // the position of its coordinate in this table (`HexQk` builds its 1-D
+    // basis from the same function, so the values match bit-for-bit).
+    let gll = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
+    if gll.len() != p + 1 {
+        return HexGeom::Unsupported("unexpected Gauss-Lobatto node count");
+    }
+
+    let edge_base = n_vert;
+    let face_base = edge_base + n_edges * e;
+    let interior_base = face_base + n_faces * e * e;
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * npe);
+    for (el, n8) in elems.iter().enumerate() {
+        let mut interior_seen = 0usize;
+        for c in ref_coords.iter() {
+            // Tensor index of the slot along each axis (GLL nodes, 0..=p).
+            let mut idx = [0usize; 3];
+            for d in 0..3 {
+                let k = match gll.iter().position(|&x| (x - c[d]).abs() < 1e-12) {
+                    Some(k) => k,
+                    None => {
+                        return HexGeom::Unsupported("reference slot is not on the GLL tensor grid")
+                    }
+                };
+                idx[d] = k;
+            }
+            let on_bnd = [
+                idx[0] == 0 || idx[0] == p,
+                idx[1] == 0 || idx[1] == p,
+                idx[2] == 0 || idx[2] == p,
+            ];
+            let nb = on_bnd.iter().filter(|&&b| b).count();
+            let g: usize = match nb {
+                // Vertex slot: the file stores vertex `v` as dof `v`.
+                3 => {
+                    let side = [idx[0] / p, idx[1] / p, idx[2] / p];
+                    match (0..8).find(|&k| HEX_CORNERS[k] == side) {
+                        Some(lv) => n8[lv] as usize,
+                        None => return HexGeom::Unsupported("bad vertex slot"),
+                    }
+                }
+                // Edge slot: shared, canonical direction = ascending vertex id.
+                2 => {
+                    let bnd: Vec<usize> = (0..3).filter(|&d| on_bnd[d]).collect();
+                    let av = match (0..3).find(|&d| !on_bnd[d]) {
+                        Some(d) => d,
+                        None => return HexGeom::Unsupported("bad edge slot"),
+                    };
+                    let key = (av, idx[bnd[0]] / p, idx[bnd[1]] / p);
+                    let k = match edge_lut.get(&key) {
+                        Some(&k) => k,
+                        None => return HexGeom::Unsupported("unmatched edge slot"),
+                    };
+                    let [la, lb] = HEX_EDGES[k];
+                    let t_local = if HEX_CORNERS[la][av] == 0 {
+                        idx[av] - 1
+                    } else {
+                        p - 1 - idx[av]
+                    };
+                    let (a, b) = (n8[la], n8[lb]);
+                    let ekey = if a < b { [a, b] } else { [b, a] };
+                    let ei = match edge_ids.get(&ekey) {
+                        Some(&ei) => ei as usize,
+                        None => return HexGeom::Unsupported("unmatched mesh edge"),
+                    };
+                    let t = if a < b { t_local } else { e - 1 - t_local };
+                    edge_base + ei * e + t
+                }
+                // Face slot: shared, canonical parameterisation = the first
+                // element's `FaceVert` order.
+                1 => {
+                    let ax = match (0..3).find(|&d| on_bnd[d]) {
+                        Some(d) => d,
+                        None => return HexGeom::Unsupported("bad face slot"),
+                    };
+                    let side = idx[ax] / p;
+                    let f = match (0..6).find(|&f| HEX_FACES[f].iter().all(|&v| HEX_CORNERS[v][ax] == side)) {
+                        Some(f) => f,
+                        None => return HexGeom::Unsupported("unmatched local face"),
+                    };
+                    let [l0, l1, _, l3] = HEX_FACES[f];
+                    // In-face indices (from the local vertex `l0`).
+                    let mut in_face = [0usize; 2];
+                    for (s, &lk) in [l1, l3].iter().enumerate() {
+                        let d = match (0..3).find(|&d| HEX_CORNERS[l0][d] != HEX_CORNERS[lk][d]) {
+                            Some(d) => d,
+                            None => return HexGeom::Unsupported("degenerate face slot"),
+                        };
+                        if d == ax {
+                            return HexGeom::Unsupported("degenerate face slot");
+                        }
+                        in_face[s] = if HEX_CORNERS[l0][d] == 0 { idx[d] } else { p - idx[d] };
+                        if in_face[s] == 0 || in_face[s] >= p {
+                            return HexGeom::Unsupported("face slot on a face edge");
+                        }
+                    }
+                    let mut fkey = [0u32; 4];
+                    for (k, &lv) in HEX_FACES[f].iter().enumerate() {
+                        fkey[k] = n8[lv];
+                    }
+                    fkey.sort_unstable();
+                    let fi = match face_ids.get(&fkey) {
+                        Some(&fi) => fi as usize,
+                        None => return HexGeom::Unsupported("unmatched mesh face"),
+                    };
+                    // Map the local face parameterisation onto the canonical
+                    // one (corner matching: at most a rotation/reflection).
+                    let cv = face_verts[fi];
+                    let corner_of = |v: u32| (0..4).find(|&i| cv[i] == v);
+                    let p0 = match corner_of(n8[l0]) {
+                        Some(i) => i,
+                        None => return HexGeom::Unsupported("face corner mismatch"),
+                    };
+                    let pu = match corner_of(n8[l1]) {
+                        Some(i) => i,
+                        None => return HexGeom::Unsupported("face corner mismatch"),
+                    };
+                    let pv = match corner_of(n8[l3]) {
+                        Some(i) => i,
+                        None => return HexGeom::Unsupported("face corner mismatch"),
+                    };
+                    let du = [
+                        QUAD_CORNERS[pu][0] - QUAD_CORNERS[p0][0],
+                        QUAD_CORNERS[pu][1] - QUAD_CORNERS[p0][1],
+                    ];
+                    let dv = [
+                        QUAD_CORNERS[pv][0] - QUAD_CORNERS[p0][0],
+                        QUAD_CORNERS[pv][1] - QUAD_CORNERS[p0][1],
+                    ];
+                    // Canonical parameter position of the slot, in GLL index
+                    // units along the stored face's own (a, b) axes.
+                    let u = QUAD_CORNERS[p0][0] * p as i32 + in_face[0] as i32 * du[0]
+                        + in_face[1] as i32 * dv[0];
+                    let v = QUAD_CORNERS[p0][1] * p as i32 + in_face[0] as i32 * du[1]
+                        + in_face[1] as i32 * dv[1];
+                    if u <= 0 || u >= p as i32 || v <= 0 || v >= p as i32 {
+                        return HexGeom::Unsupported("face slot outside the canonical face");
+                    }
+                    let o = (u - 1) as usize + (v - 1) as usize * e;
+                    face_base + fi * e * e + o
+                }
+                // Interior slot: private to the element; the file orders them
+                // per element, so keep the reference element's own order.
+                _ => {
+                    let g = interior_base + el * e * e * e + interior_seen;
+                    interior_seen += 1;
+                    g
+                }
+            };
+            conn.push(g as NodeId);
+        }
+        if interior_seen != e * e * e {
+            return HexGeom::Unsupported("unexpected interior slot count");
+        }
+    }
+
+    HexGeom::Built(GeometryData {
+        order,
+        conn,
+        nodes_per_elem: npe,
+        coords,
+        n_nodes: n_dofs,
+    })
+}
+
 /// Build the high-order `GeometryData` for an H1-continuous `nodes` section:
 /// the file stores one coordinate triple per DOF of the order-`p` H1 space and
 /// the per-element geometry tables are the element DOF lists (H1 topological
 /// order, matching the `QuadQk::new(p)`/`HexQk::new(p)` assembly bases).
+///
+/// D41: the H1 DOF numbering of the file is *MFEM's*, not fem-rs's.  For
+/// hexahedra the two differ (HexQk orders its edge/face blocks differently)
+/// and the difference is silent on load, so 3D hex meshes are routed through
+/// [`build_h1_hex_geometry`], which reproduces MFEM's numbering exactly.  If
+/// that fails the mesh is left without high-order geometry *and* a warning is
+/// printed — never a silently scrambled mapping (see `D41` notes below).
 fn build_h1_geometry<M: MeshTopology>(
     mesh: &M,
     order: u8,
@@ -674,6 +1008,39 @@ fn build_h1_geometry<M: MeshTopology>(
 ) -> Option<GeometryData> {
     if order < 2 {
         return None; // linear geometry needs no table
+    }
+    if dim == 3 {
+        match build_h1_hex_geometry(mesh, order, raw, ordering) {
+            HexGeom::Built(g) => return Some(g),
+            HexGeom::NotHex => {
+                // D41: meshes without hexahedra fall through to the historical
+                // `DofManager` numbering below, which is only known-good for
+                // quads.  For curved *tet* meshes it is measurably wrong
+                // (`data/escher-p2.mesh`: 11 of 42 elements pick up another
+                // element's edge dofs, max |Δ| ≈ 1.3) — a fix needs MFEM's
+                // `TriDofOrd` face orientations, so for now at least do not
+                // stay silent about it.
+                eprintln!(
+                    "warning (D41): high-order `nodes` geometry on a 3D mesh without \
+                     hexahedra is read with fem-rs's own H1 numbering, which is not \
+                     verified against MFEM for this element type"
+                );
+            }
+            HexGeom::Unsupported(why) => {
+                // D41: accepting the (wrong) DofManager slot order here would
+                // silently scramble the geometry of every curved hex mesh —
+                // the Jacobians, volumes and quadrature maps would all be
+                // built for a different isoparametric element.  Refuse instead
+                // (the mesh then degrades to its straight-line vertices, which
+                // are always correct).
+                eprintln!(
+                    "warning (D41): refusing to build high-order geometry for a \
+                     hexahedral mesh ({why}); the mesh is read as straight-sided \
+                     (geometric order 1)"
+                );
+                return None;
+            }
+        }
     }
     let dm = DofManager::new(mesh, order);
     let n_dofs = dm.n_dofs;
@@ -1504,5 +1871,61 @@ elements\n1\n1 5 1 2 3 4 5 6 7 8\n\nboundary\n6\n1 3 1 2 3 4\n1 3 5 6 7 8\n1 3 1
         assert_eq!(mesh.n_nodes(), 8);
         assert_eq!(mesh.n_elems(), 1);
         assert_eq!(mesh.n_faces(), 6);
+    }
+
+    /// D41: the hex `nodes` mapper binds each geometry slot to MFEM's dof id
+    /// (vertices, mesh-edge blocks, mesh-face blocks, per-element interior),
+    /// and refuses — with a warning, never a scrambled table — when the
+    /// section cannot be mapped.
+    #[test]
+    fn d41_hex_nodes_mapper_counts_and_safety_net() {
+        let mesh = Mesh::<3>::unit_cube_hex(2); // 27 vertices, 8 hexes
+        for p in 2..=4u8 {
+            let n_dofs = DofManager::new(&mesh, p).n_dofs;
+            let raw = vec![0.0f64; 3 * n_dofs];
+            match build_h1_hex_geometry(&mesh, p, &raw, 0) {
+                HexGeom::Built(g) => {
+                    // MFEM's H1 dof count: NV + NE*(p-1) + NF*(p-1)^2 + NE*(p-1)^3.
+                    let e = (p - 1) as usize;
+                    let expected = 27 + 54 * e + 36 * e * e + 8 * e * e * e;
+                    assert_eq!(g.n_nodes, expected, "p={p}");
+                    assert_eq!(g.order, p);
+                    assert_eq!(g.nodes_per_elem, (p as usize + 1).pow(3));
+                    assert_eq!(g.conn.len(), 8 * g.nodes_per_elem);
+                    // Every slot of an element resolves to a dof of its own
+                    // space, and the shared entities are shared.
+                    let mut seen = vec![false; g.n_nodes];
+                    for &n in g.conn.iter() {
+                        assert!((n as usize) < g.n_nodes);
+                        seen[n as usize] = true;
+                    }
+                    assert!(seen.iter().all(|&s| s), "p={p}: unused geometry dof");
+                }
+                _ => panic!("p={p}: full-length nodes section must map"),
+            }
+            // One value short: refuse instead of building a partial table.
+            let short = vec![0.0f64; 3 * n_dofs - 1];
+            assert!(
+                matches!(build_h1_hex_geometry(&mesh, p, &short, 0), HexGeom::Unsupported(_)),
+                "p={p}: truncated section must be rejected"
+            );
+        }
+        // Pure simplex meshes are not this mapper's business …
+        let tets = Mesh::<3>::unit_cube_tet(1);
+        assert!(matches!(
+            build_h1_hex_geometry(&tets, 2, &vec![0.0; 300], 0),
+            HexGeom::NotHex
+        ));
+        // … but a mixed mesh containing hexahedra cannot be numbered by either
+        // path, so it is refused rather than silently mis-numbered.
+        let mut mixed = Mesh::<3>::unit_cube_hex(1);
+        mixed.conn.extend_from_slice(&[0, 1, 2, 4]);
+        mixed.elem_types = Some(vec![ElementType::Hex8, ElementType::Tet4]);
+        mixed.elem_offsets = Some(vec![0, 8, 12]);
+        mixed.elem_tags.push(1);
+        assert!(matches!(
+            build_h1_hex_geometry(&mixed, 2, &vec![0.0; 300], 0),
+            HexGeom::Unsupported(_)
+        ));
     }
 }
