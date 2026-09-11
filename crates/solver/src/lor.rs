@@ -13,10 +13,11 @@
 //! that consumes the prolongation P once it is built.
 
 use crate::{solve_gmres, solve_pcg_jacobi, SolveResult, SolverConfig, SolverError};
+use fem_amg::CorrectedAmgPrecond;
 use fem_linalg::{csr_spmm, fem_to_linlvo_csr, CsrMatrix};
 pub use linlvo::amg::{AmgConfig, CoarsenStrategy, SmootherType};
 use linlvo::{
-    amg::{AmgHierarchy, AmgPrecond},
+    amg::AmgHierarchy,
     core::preconditioner::Preconditioner,
     DenseVec, Scalar as linlvoScalar,
 };
@@ -67,9 +68,14 @@ pub fn solve_gmres_lor<T: linlvoScalar>(
 ///
 /// `M⁻¹ = P · A_LO⁻¹ · Pᵀ` where `A_LO = Pᵀ · A_HO · P` and AMG is
 /// applied to `A_LO`.  `P` is the prolongation from P1 → high-order.
+///
+/// The AMG cycle is [`CorrectedAmgPrecond`] — same V/W-cycle as the vendor
+/// `linlvo::amg::AmgPrecond` but with an exact (Natural-ordering) coarsest
+/// solve, so the two-grid operator stays symmetric for PCG (see the `fem-amg`
+/// crate docs for the coarse-solve defect this avoids).
 pub struct LorAmgPrecond {
-    prolong: CsrMatrix<f64>, // P:  n_lo → n_hi  (n_hi × n_lo)
-    amg: AmgPrecond<f64>,    // AMG on A_LO
+    prolong: CsrMatrix<f64>,        // P:  n_lo → n_hi  (n_hi × n_lo)
+    amg: CorrectedAmgPrecond<f64>,  // AMG on A_LO
     n_lo: usize,
 }
 
@@ -95,7 +101,7 @@ impl LorAmgPrecond {
         let a_lo = build_lor_operator(a_ho, p);
         let la_lo = fem_to_linlvo_csr(&a_lo);
         let hier = AmgHierarchy::build(la_lo, amg_cfg.clone());
-        let amg = AmgPrecond::new(hier);
+        let amg = CorrectedAmgPrecond::new(hier);
         LorAmgPrecond {
             prolong: p.clone(),
             amg,
@@ -744,8 +750,14 @@ fn permute_scalar(a: &CsrMatrix<f64>, perm: &[u32], n_ho: usize) -> CsrMatrix<f6
 /// treats explicit pattern zeros as couplings: without it the
 /// smoothed-aggregation V-cycle is non-symmetric and PCG breaks down on stiff
 /// problems; with it the V-cycle is symmetric and robust.
+///
+/// The AMG blocks are [`CorrectedAmgPrecond`] (not the vendor `AmgPrecond`):
+/// the vendor cycle solves the coarsest level with a fill-reducing ordering
+/// whose triangular solve returns a permuted solution, making the V-cycle
+/// non-symmetric; [`CorrectedAmgPrecond`] is the same cycle with an exact
+/// (Natural-ordering) coarsest solve — see the `fem-amg` crate docs.
 pub struct LorElasticityPrecond {
-    amg: Vec<AmgPrecond<f64>>,
+    amg: Vec<CorrectedAmgPrecond<f64>>,
     n_scalar: usize,
     dim: usize,
 }
@@ -782,7 +794,7 @@ impl LorElasticityPrecond {
             assert_eq!(b.nrows, perm.len(), "LorElasticityPrecond: block {c} size");
             let blk_ho = eliminate_diag_one(&permute_scalar(b, perm, n_scalar), &ess);
             let hier = AmgHierarchy::build(fem_to_linlvo_csr(&blk_ho), amg_cfg.clone());
-            amg.push(AmgPrecond::new(hier));
+            amg.push(CorrectedAmgPrecond::new(hier));
         }
         LorElasticityPrecond { amg, n_scalar, dim }
     }

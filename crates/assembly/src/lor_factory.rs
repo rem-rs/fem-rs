@@ -640,6 +640,11 @@ mod lor_vector_tests {
     // FGMRES+AMS solve through the assumed-constraint permutation does not
     // converge within 500 iterations (pcg_iters helper) — solver-pipeline
     // work beyond the basis convention.
+    // Round-14 re-probe (with `fem_amg::CorrectedAmgPrecond` now used for the
+    // scalar LOR-AMG path, which these tests do NOT exercise — the inner
+    // solvers here are the vendor `AmsPrecond`/`AdsPrecond`): all three still
+    // fail with `ConvergenceFailed { max_iter: 500 }`, final preconditioned
+    // residual ND hex 8.4e-1, RT hex 2.3e-4, ND/RT quad 5.7e-2.
     #[ignore]
     fn lor_nd_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]

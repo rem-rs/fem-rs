@@ -1691,8 +1691,19 @@ impl ReferenceElement for HexL2GL {
 pub struct HexQk {
     order: usize,
     lag1d: Lagrange1D,
-    /// DOF ordering: `false` = MFEM H1_FECollection topological order
-    /// (vertices → edges → faces → interior, see [`HexQk::node_to_dof`]);
+    /// DOF ordering: `false` = H1 *topological* order (vertices → edges →
+    /// faces → interior, see [`HexQk::node_to_dof`]).
+    ///
+    /// NOTE (D31): this is **not** MFEM's `H1_FECollection` order — HexQk
+    /// enumerates edge blocks by its own (face_i, face_j) signature table and
+    /// faces by the axis order xmin/xmax/ymin/ymax/zmin/zmax, while MFEM's
+    /// `H1_DOF_MAP` uses `Constants<Geometry::CUBE>::Edges`/`FaceVert`.  See
+    /// the `hex_qk_to_mfem_h1_perm` test for the exact slot permutation
+    /// (HexQk → MFEM).  The fem-rs-side numbering (`DofManager::build_pk_hex`)
+    /// is *derived from* these slot runs, so the library is internally
+    /// consistent; only MFEM interop (curved high-order hex meshes,
+    /// MFEM-ordered dof dumps) needs the permutation.
+    ///
     /// `true` = lexicographic tensor-product order `ix + iy·(p+1) + iz·(p+1)²`
     /// (x fastest), which is what MFEM's `DG_FECollection`/`L2_FECollection`
     /// with `BasisType::GaussLobatto` use (`L2_DOF_MAP`).
@@ -2096,6 +2107,170 @@ pub fn vec_ref_elem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D31: permutation from a HexQk H1 slot to the MFEM
+    /// `H1_HexahedronElement` slot holding the same tensor node, computed in
+    /// closed form.  HexQk enumerates its edge blocks by its own
+    /// (face_i, face_j) signature table and its faces by the axis order
+    /// xmin/xmax/ymin/ymax/zmin/zmax, whereas MFEM uses
+    /// `Constants<Geometry::CUBE>::Edges` / `FaceVert`; the two layouts agree
+    /// on the 8 vertices (identity) and on the interior (lex, x fastest), and
+    /// differ on every edge/face block.
+    ///
+    /// Closed form (e = p-1; verified numerically against the MFEM 4.9/4.10
+    /// node dumps for p = 2..5, `tmp/gll_ref/fe_nodes_cpp.txt` HEX sections):
+    /// * edge blocks: HexQk ei → MFEM edge `[9,10,11,8,3,1,5,7,0,2,6,4][ei]`,
+    ///   with the block-internal order *reversed* for ei ∈ {1,3,5,6,7};
+    /// * face blocks: HexQk f → MFEM face `[4,2,1,3,0,5][f]`, row-flipped
+    ///   (fb → e-1-fb) for f = 2 and column-flipped (fa → e-1-fa) for f = 3;
+    /// * vertices and interior: identity.
+    ///
+    /// Reference: C++ `TensorBasisElement` H1_DOF_MAP generation
+    /// (`fem/fe/fe_base.cpp`), coordinates `tmp/gll_ref/fe_nodes_cpp.txt`.
+    fn hex_qk_to_mfem_h1_perm(p: usize) -> Vec<usize> {
+        let e = p - 1;
+        const E_MAP: [usize; 12] = [9, 10, 11, 8, 3, 1, 5, 7, 0, 2, 6, 4];
+        const E_REV: [bool; 12] = [
+            false, true, false, true, false, true, true, true, false, false, false, false,
+        ];
+        const F_MAP: [usize; 6] = [4, 2, 1, 3, 0, 5];
+        let mut perm: Vec<usize> = (0..8).collect();
+        for b in 0..12 {
+            for t in 0..e {
+                let tp = if E_REV[b] { e - 1 - t } else { t };
+                perm.push(8 + E_MAP[b] * e + tp);
+            }
+        }
+        for f in 0..6 {
+            for fb in 0..e {
+                for fa in 0..e {
+                    let fbn = if f == 2 { e - 1 - fb } else { fb };
+                    let fan = if f == 3 { e - 1 - fa } else { fa };
+                    perm.push(8 + 12 * e + F_MAP[f] * e * e + fbn * e + fan);
+                }
+            }
+        }
+        let base = 8 + 12 * e + 6 * e * e;
+        perm.extend(base..(p + 1) * (p + 1) * (p + 1));
+        perm
+    }
+
+    /// D31 pin: (a) the HexQk→MFEM permutation is exactly the documented
+    /// closed form (checked via per-slot tensor indices), (b) it is a
+    /// bijection, (c) applying it to `HexQk::dof_coords` reproduces MFEM's
+    /// node coordinates per slot (GLL tensor grid; MFEM slots enumerated by
+    /// the `H1_DOF_MAP` construction), and (d) the p=2 table matches the
+    /// hard data from the C++ dump bit-for-bit.
+    #[test]
+    fn hex_qk_to_mfem_h1_dof_permutation() {
+        for p in 2..=5 {
+            let hex = HexQk::new(p);
+            let e = p - 1;
+            let n = (p + 1) * (p + 1) * (p + 1);
+
+            // MFEM slot order (tensor indices), transcribed from
+            // `TensorBasisElement::TensorBasisElement`, H1_DOF_MAP, dims == 3.
+            let mut mfem: Vec<(usize, usize, usize)> = Vec::with_capacity(n);
+            // vertices
+            mfem.extend([
+                (0, 0, 0), (p, 0, 0), (p, p, 0), (0, p, 0),
+                (0, 0, p), (p, 0, p), (p, p, p), (0, p, p),
+            ]);
+            // edges: (0,1) (1,2) (3,2) (0,3) (4,5) (5,6) (7,6) (4,7)
+            //        (0,4) (1,5) (2,6) (3,7)
+            for i in 1..p { mfem.push((i, 0, 0)); }
+            for i in 1..p { mfem.push((p, i, 0)); }
+            for i in 1..p { mfem.push((i, p, 0)); }
+            for i in 1..p { mfem.push((0, i, 0)); }
+            for i in 1..p { mfem.push((i, 0, p)); }
+            for i in 1..p { mfem.push((p, i, p)); }
+            for i in 1..p { mfem.push((i, p, p)); }
+            for i in 1..p { mfem.push((0, i, p)); }
+            for i in 1..p { mfem.push((0, 0, i)); }
+            for i in 1..p { mfem.push((p, 0, i)); }
+            for i in 1..p { mfem.push((p, p, i)); }
+            for i in 1..p { mfem.push((0, p, i)); }
+            // faces: (3,2,1,0) (0,1,5,4) (1,2,6,5) (2,3,7,6) (3,0,4,7) (4,5,6,7)
+            for j in 1..p {
+                for i in 1..p { mfem.push((i, p - j, 0)); }
+            }
+            for j in 1..p {
+                for i in 1..p { mfem.push((i, 0, j)); }
+            }
+            for j in 1..p {
+                for i in 1..p { mfem.push((p, i, j)); }
+            }
+            for j in 1..p {
+                for i in 1..p { mfem.push((p - i, p, j)); }
+            }
+            for j in 1..p {
+                for i in 1..p { mfem.push((0, p - i, j)); }
+            }
+            for j in 1..p {
+                for i in 1..p { mfem.push((i, j, p)); }
+            }
+            // interior
+            for k in 1..p {
+                for j in 1..p {
+                    for i in 1..p { mfem.push((i, j, k)); }
+                }
+            }
+            assert_eq!(mfem.len(), n, "p={p}: MFEM slot count");
+
+            // (a)+(b): the closed-form perm (HexQk slot → MFEM slot) is the
+            // inverse of the slot-by-slot `dof_index` map (MFEM slot's tensor
+            // node → HexQk slot), and is a bijection.
+            let perm = hex_qk_to_mfem_h1_perm(p);
+            let mut dof_to_mfem = vec![0usize; n];
+            for (m, &(i, j, k)) in mfem.iter().enumerate() {
+                dof_to_mfem[hex.dof_index(i, j, k)] = m;
+            }
+            assert_eq!(perm, dof_to_mfem, "p={p}: closed form vs inverse dof_index");
+            let mut seen = perm.clone();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..n).collect::<Vec<_>>(), "p={p}: bijective");
+
+            // (c): permuted HexQk coords reproduce MFEM's per-slot GLL grid.
+            // MFEM nodes live on [0,1]³; HexQk on [-1,1]³ (same 1-D GLL nodes).
+            let qk01: Vec<Vec<f64>> = hex
+                .dof_coords()
+                .iter()
+                .map(|c| c.iter().map(|&v| 0.5 * (v + 1.0)).collect())
+                .collect();
+            for h in 0..n {
+                let (i, j, k) = mfem[perm[h]];
+                // [0,1] coordinates of the tensor node (same 1-D GLL nodes).
+                let want = [
+                    0.5 * (hex.lag1d.nodes[i] + 1.0),
+                    0.5 * (hex.lag1d.nodes[j] + 1.0),
+                    0.5 * (hex.lag1d.nodes[k] + 1.0),
+                ];
+                for d in 0..3 {
+                    assert!(
+                        (qk01[h][d] - want[d]).abs() < 1e-14,
+                        "p={p}: HexQk slot {h} coord {} vs its MFEM slot {} at ({i},{j},{k})",
+                        qk01[h][d],
+                        perm[h]
+                    );
+                }
+            }
+        }
+
+        // (d) p=2 hard data: permutation read off the C++ node dump
+        // (`tmp/gll_ref/fe_nodes_cpp.txt`, HEX p=2 ↔ HexQk::new(2).dof_coords).
+        assert_eq!(
+            hex_qk_to_mfem_h1_perm(2),
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, // vertices: identity
+                17, 18, 19, 16, // HexQk vertical edges → MFEM edges 9,10,11,8
+                11, 9, 13, 15, // bottom edges → MFEM 3,1,5,7
+                8, 10, 14, 12, // top edges → MFEM 0,2,6,4
+                24, 22, 21, 23, // faces xmin,xmax,ymin,ymax → MFEM 4,2,1,3
+                20, 25, // faces zmin,zmax → MFEM 0,5
+                26, // interior
+            ]
+        );
+    }
 
     fn check_pou(elem: &dyn ReferenceElement) {
         let order = elem.order() as usize;
