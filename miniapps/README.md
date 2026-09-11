@@ -141,15 +141,17 @@ miniapps/
 │   └── dpg_maxwell_3d.rs       vs 24/33; maxwell_2d 真 UW-DPG 整场 L²
 │                                收敛 (n=4/8/16: 0.882/0.475/0.237 vs C++
 │                                0.8819/0.4753/0.2370, rate −0.94 vs
-│                                −0.95); maxwell_3d round 13 真 UW-DPG
-│                                替换 (add_trial_trace_space_nd 接入,
-│                                dof 数与 C++ 逐位一致 156/984/888/6192,
-│                                单元级 exact-tuple 恒等式机器精度, PCG
-│                                22/22 48/50 同量级); 整场 L² 未达 C++
-│                                (n2-o1 1.753 vs 1.723; 缺口=多 hex 反向
-│                                quad 面 trace 残差, 见 D35);
-│                                acoustics_3d 真 UW-DPG (dof 与 C++ 逐位,
-│                                n≤3 L² 1% 内); helmholtz_1d 真 1D
+│                                −0.95); maxwell_3d 真 UW-DPG (round 13
+│                                替换, round 14 多 hex 反向面 trace 结案:
+│                                n2-o1 1.757 vs C++ 1.723 (2.0%), dof 数
+│                                逐位 156/984/888/6192, hex2 trace 恒等式
+│                                机器精度, -sc==未凝聚); -o2 差距 =
+│                                HexNDk(2) 基与 MFEM 不同 (D36);
+│                                acoustics_3d 真 UW-DPG (round 14 n=4
+│                                缺口消失: 0.7757/0.4229 vs C++
+│                                0.7765/0.4231 <0.1%); poisson_2d -o3
+│                                结案 (round 14: rate −2.97/−2.99 vs
+│                                −3.00, 误差 0.2%); helmholtz_1d 真 1D
 │                                UW-DPG (O(h) 收敛 u/σ, k=0/5 稳定)
 ├── fluids/schrodinger_flow.rs ← 不可压 Schrödinger 流 (ISF) 串行 1:1:
 │                                CN 复 GMRES + 逐 DOF 归一化 + gauge 投影

@@ -407,7 +407,36 @@
 - **D27 结案（主会话接手，代理超时前留的诊断探针立功）**：D27 代理留下的探针暴露两层问题：① 探针自身把 `allreduce_sum_f64` 写进 `if rank == 0` 分支 → np2 在 allreduce 永久死锁（0 CPU；np1 单 rank 快速路径无此问题）；② 死锁修复后探针给出决定性证据：算子对称性/配对全部 ~1e-14（矩阵组装正确）、trace(M) 与 np1 一致，但 **L1(b0) np2=152.445 vs np1=152.969**——rhs 丢载荷。**根因** = `assemble_bdr_rhs_par` 按"单元 owner rank"积分边界面，但跨 rank 边界面的 RT1 边 dof 可能归邻居 rank own，贡献落在本地 ghost 段后被 `ParVector::from_local_raw(_, n_u, _)` 截断丢弃。**修复** = rhs 组装后补一次 `u_par.reverse_dof_exchange(&mut bdr_rhs_perm)`（ghost→owner 归还，对位 MFEM GroupComm::Bcast；B 的行归属单元 owner 天然完整、M 经 trace 验证完整，无需改）。**验证**：L1(b0) np2 == np1（1.52969e2）；u 误差 np2 1.95e-1 → **2.92e-5**；rtol 收紧到 1e-10 后 **np1/np2 逐位一致**（-r1: 9.67937e-6，-r2: 1.70021e-6，三档加密单调下降）；rtol=1e-6 下 np2 与 np1 的 ~1.5× 差异为 MINRES 停机噪声（np2 迭代多 ~45%，迭代方向不同），非系统性缺陷。np1 路径逐位不变（1.94103e-5）。**纪律沉淀：并行示例的 rhs 组装后必须 reverse_dof_exchange（凡按单元 owner 组装、dof 归属可能跨 rank 的载荷都适用）**。诊断探针（TEMP 块）已按死代码纪律删除。
 - 回归基线（全绿）：element **439** / space **275** / assembly **589**（+6 个 HEAD 预存 ignored：lor_factory×3/hdg/contact/discrete_op debug）/ solver 244 / parallel 225 / mesh 292 / io 122 / linalg 63 / amg 23。
 
-## 第十三轮新债务
+## 第十四轮完成（2026-09-11，四代理并行 + 主会话集成续作）
+
+- **D32 结案（ND2 全几何 nodal 化，tri/quad/tet）**：根因升级表述——MFEM ND dof 真语义 = **点值泛函** `σ(Φ)=Φ(x_i)·t̂_i`（x_i = 边上 Gauss-Legendre 开点，t̂ = 未归一化参考切向；C++ harness 逐位确认），旧矩泛函 `∫Φ·t̂·t^m` 非反射不变 → pairing 破坏。round-13"中心化+单位化配方"失败点 = 单位化只做一侧产生残余 √2；正解是**根本不归一化**（两侧 J·t̂ 都精确等于物理边向量，点值 + 对称 Gauss 点使反向变换恰为符号反对角置换）。修复 = TriND2/TetND2/QuadND2 按 MFEM nodal 基重写（含 QuadND2 张量基 GL open × Lobatto closed、TetND2 面形心点值）；hcurl.rs 边 pairing 改 MFEM 编码（反向边 = 反序 + 符号 −1；k=1 保旧约定 ND1 逐位不变）；interpolate_vector k≥2 全链 nodal；3 点 Gauss 近似常数删除。**验证**：split 网格共享边 trace mismatch ≤1e-13（钉住）；tri ND2 Maxwell MMS rate −0.3 → **1.86**（mms 判据收紧，假绿钉死）；ex3 默认 ND1 输出逐位不变。
+- **discrete_op ND2 侧移植（主会话续作 A 代理）**：`gradient_p2_nd2` 重写为点值 + 符号 scatter（删二项式变换）；`curl_2d_nd2_p1/p2` D 行改 canonical 点值（反向边 j_canon 从全局 id 恢复）；`curl_3d_nd2_rt1` 重写为直接形式（参考基 curl 在 RT1 dof 点的通量采样，删 20×20 D⁻¹ 回路）；hcurl.rs 新增 `face_tangent_anchor`。**div_rt1_p1_2d 根因 = 测试场 (x²,y²) 越出 RT1 空间**（RT 实现自洽，通量一致性 2.9e-15），测试换 in-span 场。round-14 期间 18 红（lib 9 + high_order 2 + patch 7）全清。
+- **D35 结案（多 hex 反向 quad 面 trace）**：根因 = 反向面（Elem2，ori<0）的单元侧参考点 seed 用"反转 lf + 转置 fparam + Newton 反演"，0.5×1×1 hex210 上 Newton 落在 x_ref=−1+2e-16，而 HexNDk 基在 ±1 处分支差 0.94 → Elem2 trace 块污染（单 hex 全过、hex2 的 elem 2–7 挂的分层解释）。修复 = `dpg_basis::local_face_canonical_order`（MFEM `GetLocalQuadToHexTransformation` 的点矩阵直接插值语义；Newton 只留给曲线单元），四处 trace 路径改精确 seed。**验证**：hex2_p1 转正（F-rows 1.6e-15）；整场 n2-o1 **1.757 vs C++ 1.723（2.0%）**；-sc（complex 弱形式）== 未凝聚（解差 ~1e-12）；**dpg_acoustics_3d n=4 缺口消失**（ref0 0.7757 vs C++ 0.7765、ref1 0.4229 vs 0.4231，<0.1%——round-12 的 8%/60% 挂账结案）。
+- **D30 结案**：`dpg_poisson_2d -o 3` 不再 panic（Gram 装配修复）；prob0 -ref2 收敛率 −2.97/−2.99 vs C++ −3.00，同 dofs 误差 6.919e-3 vs 6.932e-3（0.2%）。
+- **D33 结案（TetRTk 基）**：两个叠加构造缺陷——①列配对丢失（消元产生列置换 P，旧代码用未置换下标）②右块未转置。修复 `tet_rtk.rs`（`sel.push(cp[c])` + `coeff[i*n+j]=row[j][mt+i]`）后基严格 `D_i(φ̂_j)=δ_ij` 且逐面支撑。tet RT0 插值 5.1e-1 → **7.1e-16**、L² 投影 → **0.0**；tet_rt1/tet_rt2 重写为 MFEM nodal 基（`mfem_nodal_dofs`/TET_NK 公共表）；tri_rt1 块序改空间 TRI_FACES 序。
+- **D34 结案（语义统一到 nodal）**：C++ 裁定（harness t6 探针）RT_Triangle/Tetrahedron = nodal 通量对偶基、4.10 源码表构成单位对偶阵。discrete_op 的 RT1/RT2 读法全部改 `dmat[s][k]=sign_s·Φ_k(x_s)·(cof(J)·n̂_s)`，与 interpolate_vector / Piola 重构三方自洽（de Rham 恒等式精确）；`hdiv_interpolate_regression` 4 个 #[ignore] **全部转正**（tri/tet RT0/1/2 插值 ≤2e-15）；ex4 = 2.16192 逐位不变。
+- **D25 结案（lor AMG）**：`LorAmgPrecond` + `LorElasticityPrecond` 换 `fem_amg::CorrectedAmgPrecond`（消除粗解置换缺陷的保险；现测试规模下迭代数逐位不变——LOR 层最粗层小，Rcm≈恒等）。plor_solvers 迭代 5/4/5/5/6（rs 0..4）、lor_elast 122/145/131 有界。lor_factory 3 个 ignored 转正失败（走 vendor AmsPrecond/AdsPrecond，不经 LorAmgPrecond；ND hex 残差 8.4e-1）→ 保留 ignore 并把复测数字写入注释（见 D40）。
+- **D31 核查完成（精确置换表已备，改动留专项）**：HexQk→MFEM H1 hex 闭式置换 = 边块映射 `[9,10,11,8,3,1,5,7,0,2,6,4]` 且 ei∈{1,3,5,6,7} 块内反序；面块 `[4,2,1,3,0,5]` 且 f=2 行翻、f=3 列翻；顶点/内部恒等（p=2..5 与 C++ dump 全 MATCH，p=2 硬表已钉进 factory.rs 测试）。影响面：① `io/mfem.rs` 高阶 hex `nodes` 读取局部置换 + 全局 face 编号双重失配（读弯曲 hex 网格静默错乱，建议先加拒绝/告警，见 D41）② `HexQ2`/`HexQ3` 手写布局是第三种序（mixed/partial 消费）③ HexQk 内部序改动三者原子迁移、留给 GLL 对齐专项（D7/#10）。
+- 回归基线（全绿，`cargo test --lib`）：amg 23 / assembly **585**+6 预存 ignore / element **446** / space 275 / solver 244 / parallel 225 / mesh 292 / io 122 / linalg 63；**`cargo build --release --examples --keep-going` 0 错误**。⚠️ 勘误：round-13 记录的 assembly"589"系多 package 输出归行误差，stash 实测 HEAD（af16729）= 585+6=591 与本轮逐测试一致，**零回归**。
+- 抽查（主会话复跑）：dpg_maxwell_3d n2-o1 = 1.757e0 ✓；dpg_acoustics_3d ref0 = 7.757e-1 ✓；ex4 = 2.16192 ✓；ex3 默认 = 3.9163e-1 ✓。
+
+## 第十四轮新债务
+
+- **D36（P1）HexNDk(2)/(3)（hex 张量 ND）基与 MFEM 不同**（B 发现）：`∫F_0 = (2,1,1)` vs C++ `(0.389,0.278,0.5)`、`∫curl F_0 = −1/6` vs `−1/8`（双方求积阶加密均不动 ⇒ 都精确 ⇒ 基函数确实不同；DPG 算子对测试基变换不变，故 span 相同则解应相同）。位置 `crates/element/src/nedelec/hex_ndk.rs`；**dpg_maxwell_3d -o 2 整场差距（1.395 vs 0.2707）即此**。修法 = 按 D32 同方法 nodal 化 hex 张量基（MFEM `ND_HexahedronElement`：open GL × closed Lobatto），修后复测 o2。
+- **D37（P2）tet ND2 面 dof 跨元 2×2 旋转**：MFEM 面切向对相邻元差 T(ori) 矩阵（`ND_DofTransformation::T_data` 六矩阵族），fem-rs 装配层标量符号框架表达不了 2×2 块变换（元素语义已 MFEM 精确；3D ND2 多元 curl-curl 精度受此限制；ex3 3D 默认 ND1 不受影响）。
+- **D38（P2）TriNDk/TetNDk/HexNDk（k≥3）仍为矩泛函 + 恒等 pairing**（A）：同族 nodal 化未做（无求解器验收覆盖），建议下轮统一。
+- **D39（P2）real DpgWeakForm 的 -sc 与非凝聚解不一致**（B）：round-14 修了 3 个机械 bug（恢复公式双重求解/局部索引散布/gather 错位）后从 panic 变可运行，但仍有布局/符号错位（poisson -o1: 2.836 vs 1.940）；complex 弱形式的 -sc 已完全修好。
+- **D40（P2）lor_factory 三 ignored 测试**：走 vendor AmsPrecond/AdsPrecond（粗解不可配置），FAGRDS 假设约束置换 500 步不收敛（ND hex 残差 8.4e-1、RT hex 2.3e-4、quad 5.7e-2）；需 solver 管线换自研 AMS 或修置换路径。
+- **D41（P3）io 高阶 hex `nodes` 读取静默错乱**（D31 影响面）：修复前读弯曲 hex 网格得错乱几何且无告警；建议先加显式拒绝/告警，再在 GLL 专项以 D31 置换表 + `make_refined` 编号器实现。
+- 备忘：ex3 求解管线 `solve_report_2d` 重组装未消简矩阵 + AMS 梯度每边 1 dof（examples/discrete_op 既有行为）；`ex24 -m beam-tet -p 1 -o 2` 触发 mixed 装配器不支持 HCurl/Tet order-2（`vec_ref_elem` 缺分支，预存）。
+
+## 第十三轮新债务（第 14 轮状态更新）
+
+- **D32** — ✅ 第 14 轮结案（见上）。
+- **D33** — ✅ 第 14 轮结案（见上）。
+- **D34** — ✅ 第 14 轮结案（统一到 nodal，见上）。
+- **D35** — ✅ 第 14 轮结案（maxwell_3d o1 档对齐 C++ 2% 内；o2 档差距转 **D36**）。
+- **D30** — ✅ 第 14 轮结案（B 接手完成）。
 
 - **D32（P1）ND k≥2 边 moment 泛函非反射不变**（D29 代理完整诊断，未修）：`∫Φ·t̂·t^m` 在 t→1−t 时常数模差常数偏移（u_0(1−t)=2−u_0(t)），相邻单元参考边不同（长 √2 vs 1）→ 全局切向不连续 → tri ND2 Maxwell 不收敛（rate −0.3；`mms_verification::maxwell_2d_nd2_convergence` 以 `errors[1]<10` 假绿；ex3 -o 2 同因不收敛）。修复配方（实验中 trace mismatch 已达 1.8e-15）：边权重中心化 `{(t−1/2)^m}`（TriND2 Vandermonde r_odd −= ½·r_even、TetND2 边闭包 `*t`→`*(t−0.5)`、QuadND2 边模中心化）、参考切线单位化（TetND2 对角边 /√2、TriND2 e1 行 /√2）、hcurl.rs 边 dof 符号 σ=s·(−1)^m + interpolate_vector k=2 权重同步；卡点 = split 网格斜边两侧参考长度差 √2，需改参考弧长补偿形式。同族：TetND2 的 8 个面 dof 旋转一致性未处理；`HCurlSpace::interpolate_vector` quad NDk≥2 内部 dof 恒 0；hcurl.rs k==2 的 3 点 Gauss 常数是近似写法。
 - **D33（P1）`TetRTk(0)` 基非通量对偶**（D28 代理发现）：`tet_rtk.rs` 的 Gauss-Jordan 基构造（`coeff[i*n+j]=row[i][mt+sel[j]]`）得到的基对偶错（D_i(φ̂_j) 非对角：基 0 在面 0 与面 2 同时有常值迹）→ 多四面体网格上任何插值实现都无法精确重构，且 **L² 投影路径同样失败**（(1,0,0) 在 unit_cube_tet(2) 误差 5.1e-1）——属空间/基缺陷。修法 = 对角化选取或转置块；修后 tet RT0/RT1/RT2 插值与 4 个 #[ignore] 回归测试可转正。
