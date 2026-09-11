@@ -1,6 +1,24 @@
 //! Standard finite element integrators.
 //!
 //! Re-exports the most commonly used integrators for convenience.
+//!
+//! # Which quadrature weight?
+//!
+//! `QpData` carries three weights and they are **not** interchangeable.  Pick
+//! by the shape of the integrand, not by the kind of element or space:
+//!
+//! | integrand | field | why |
+//! |---|---|---|
+//! | `∇φ·∇ψ` (times a coefficient), read through the assembler-provided `grad_phys` | `QpData::weight` | on the volume path `grad_phys = adj(J)ᵀ ∇φ`, so `weight × grad_phys` is already the physical measure — MFEM's `DiffusionIntegrator` (`w = ip.weight / Weight()`, `dshapedxt = dshape·AdjugateJacobian`) |
+//! | `φ·φ`, `φ·coeff`, `ρ u v`, `curl·curl` on a physical basis — any physical volume form built from *values* | `QpData::phys_weight` | always `ip.weight · |det J|`; using `weight` here is off by `1/|det J|²` on curved/stretched elements (measured 9× on `det J = 1/3`) |
+//! | `ip.weight` times a Jacobian factor the integrator supplies itself (e.g. `ConvectionIntegrator`, which scales the adjugate gradient) | `QpData::ref_weight` | the bare MFEM `ip.weight`, for MFEM's "measure implicit in the gradient" family |
+//! | anything on a face (`BoundaryBilinearIntegrator` / `BoundaryLinearIntegrator`) | `BdQpData::weight` | single-weight layout, always the physical face measure |
+//!
+//! Rationale, the per-assembler-path table and the counter-example are in
+//! `crate::integrator` under `QpData::weight`; the two helper macros below
+//! (`scalar_bilinear_integrator!` → `qp.weight`,
+//! `scalar_bilinear_integrator_phys!` → `qp.phys_weight`) encode the first two
+//! rows of the table.
 
 /// Helper macro for scalar bilinear integrators with a [`ScalarCoeff`] field.
 ///
@@ -42,9 +60,13 @@ macro_rules! scalar_bilinear_integrator {
 /// Like [`scalar_bilinear_integrator!`] but uses `qp.phys_weight` (the true
 /// physical measure `quadrature weight × |det J|`) instead of `qp.weight`.
 ///
-/// `qp.weight` follows the DiffusionIntegrator MFEM convention
-/// (`ip.weight / |det J|`) on the non-affine assembler path, which is wrong
-/// for mass-type integrands; `phys_weight` is always the physical measure.
+/// `qp.weight` is `ip.weight / |det J|` on the volume (linear *and*
+/// isoparametric) assembler path — the DiffusionIntegrator convention, correct
+/// when it multiplies the adjugate-scaled `grad_phys` but wrong by
+/// `1/|det J|²` for a mass-type integrand.  `phys_weight` is always the
+/// physical measure, so this is the macro for every `φ·φ`-shaped physical
+/// volume form (`MassIntegrator`, `VectorFEMassIntegrator`, the DG jump/mass
+/// terms, `SBM2*`, …).  See the module docs for the full selection table.
 macro_rules! scalar_bilinear_integrator_phys {
     ($name:ident, $field:ident, $doc:literal, |$qp:ident, $kelem:ident, $n:ident, $w:ident| $body:block) => {
         use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};

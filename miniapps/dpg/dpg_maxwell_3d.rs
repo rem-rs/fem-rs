@@ -35,35 +35,58 @@
 //! `Ref | Dofs | ω | L2 Error | Rate | PCG it`.
 //!
 //! Reference (C++ MFEM 4.9 harness `wsl ~/work/mx3/maxwell3d`, `rnum 1.0`,
-//! `-do 1`, no `-sc`; hex `n×n×n` = `MakeCartesian3D(n,n,n,HEX)`):
+//! `-sc` off; mesh `hex2.mesh` = 2×2×2 hex, i.e. C++ `-m hex2.mesh`):
 //!
 //! ```text
-//!   n |  o | Ref |  Dofs |  C++ L2  | C++ it |   fem-rs L2 (round 14) | it
-//!   2 |  1 |   0 |   156 | 1.723    |     22 |  1.757                 | 23
-//!   2 |  1 |   1 |   984 | 1.313    |     50 |
-//!   2 |  2 |   0 |   888 | 9.547e-1 |     66 |  1.446                 | 65
-//!   2 |  2 |   1 |  6192 | 2.707e-1 |    118 |  1.395                 | 126
-//!   4 |  1 |   0 |   984 | 1.313    |     51 |
-//!   4 |  1 |   1 |  6960 | 7.617e-1 |     96 |
+//!   n |  o | do | Ref |  Dofs | C++ L2   | C++ it | fem-rs L2 | fem it
+//!   2 |  1 |  0 |   0 |   156 | 1.732    |     55 | 1.732     |     56
+//!   2 |  1 |  0 |   1 |   984 | 1.212    |    114 | 1.212     |    114
+//!   2 |  1 |  1 |   0 |   156 | 1.723    |     22 | 1.723     |     22
+//!   2 |  1 |  1 |   1 |   984 | 1.313    |     50 | 1.313     |     49
+//!   2 |  2 |  0 |   0 |   888 | 9.482e-1 |    106 | 9.476e-1  |    103
+//!   2 |  2 |  0 |   1 |  6192 | 2.716e-1 |    563 | 2.715e-1  |    560
+//!   2 |  2 |  1 |   0 |   888 | 9.547e-1 |     66 | 9.547e-1  |     66
+//!   2 |  2 |  1 |   1 |  6192 | 2.707e-1 |    118 | 2.707e-1  |    119
 //! ```
 //!
 //! Round 14: the multi-hex reversed-face trace-assembly bug (D35) is fixed —
 //! per-element exact-tuple identities now hold to machine precision on
 //! multi-element hex/tet meshes at orders 1 and 2, and `-sc` matches the
 //! uncondensed solve (the reduced-system scatter used element-local exposed
-//! indices and the recovery double-applied `A_pp⁻¹`).  The remaining
-//! whole-field L2 gap at `-o 1` is 2.0% (within tolerance).  The `-o 2` gap
-//! (1.395 vs 2.707e-1) is **not** a test-space basis artefact: round 15 made
-//! `HexNDk` nodal and confirmed it spans the same tensor-Nédélec space as
-//! MFEM's `ND_FECollection(2/3,3)` — the disproof is that the whole-field
-//! result is bit-for-bit unchanged after that rework, and that the gap is
-//! essentially order-independent in the test space (`-do 0`, where the test
-//! order is 2 and the spans certainly agree, already shows the full 1.57×:
-//! C++ 9.482e-1 vs 1.489 here).  The remaining suspects are the trial side
-//! (`L2(1)×3` + `ND_Trace(2)`, cf. D45: use of a face-discontinuous skeleton
-//! for `û` where MFEM uses `H1_Trace_FECollection`) and the test norm `G`,
-//! whose four graph-norm cross blocks are the only assembly step still without
-//! any regression coverage.  Tracked as D36 (round 15 correction).
+//! indices and the recovery double-applied `A_pp⁻¹`).
+//!
+//! Round 15/16 ruled out the two core-library suspects for the `-o 2` gap,
+//! and round 17 closed D36: it was a **sign error in this file's manufactured
+//! RHS**, not in the weak form.  `Exact::j` returned the x-component of `J_r`
+//! with the wrong sign — `−ω s (ε − 2/μ)` where C++ `rhs_func_r` computes
+//! `+ω s (ε − 2/μ)` (`J_r(0) = ωε E_i(0) − 2ω E_i(0)/μ`, the second term being
+//! `curlH_r(0) = −curlcurlE_i(0)/(ωμ)`), while the other five components
+//! `(J_r[1], J_r[2], J_i[0..2])` were already exact.  Diagnostics that located
+//! it (harness in `tmp/mxprobe.cpp`, C++ side `~/work/mx3/mxprobe`):
+//!
+//! * the **assembled** complex blocks (`mat_r`/`mat_i`, per-block Frobenius
+//!   norms and entry sums) were already identical to C++ — round 16's
+//!   `tests/dpg_test_norm_regression.rs` result — so the only remaining
+//!   candidate was the RHS;
+//! * the pre-elimination RHS `y_r`/`y_i` showed a tell-tale half-and-half
+//!   pattern: `E`/`hatE` real parts and `H`/`hatH` imaginary parts matched
+//!   C++ to 1e-4 while their counterparts were off by up to 2.4×.  That is
+//!   exactly what a `J_r` error produces: `b_r = B_rᵀf_r + B_iᵀf_i` and
+//!   `b_i = B_rᵀf_i − B_iᵀf_r` (`ComplexOperator::MultTranspose`, HERMITIAN
+//!   convention), so the `f_r`-driven terms are the ones that break;
+//! * `rhs_func_r`/`rhs_func_i` evaluated component-wise settled it: at
+//!   `x = (0.1, 0.2, 0.3)` C++ gives `J_r = (−3.6931636609809155, +3.693…,
+//!   +3.693…)` while the port gave `+3.693…` for the first component.
+//!
+//! With that fixed the block norms, the PCG counts and the whole table agree
+//! with C++ (above).  The L² error is integrated with exactly MFEM's
+//! `ComputeL2Error` rule (`2*fe_order + 3`) — see `mfem_l2_rule_order` for
+//! why the hex case needs a conversion; without it the over-integrated rule
+//! shifts the reported error by ~1.5% (9.414e-1 vs 9.547e-1 at `-o 2 -do 1`).
+//! The one residual difference is that the volume/RHS assembly runs on a
+//! 6-point-per-direction Gauss rule where MFEM uses its degree-`2*test_order`
+//! rule (4 points): an over-integration that perturbs the RHS by ~1e-4
+//! relative (visible in the 4th digit of the block norms), not a defect.
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::{
@@ -108,16 +131,22 @@ impl Exact {
             (-pw.0 / self.mu, -pw.1 / self.mu),
         ]
     }
-    /// J = −iωεE + ∇×H = iω pw (2/μ − ε, −1/μ, −1/μ):
-    /// J_r = −ω s (ε − 2/μ, 1/μ, 1/μ)·(−1) = ω s (ε − 2/μ, 1/μ, 1/μ)
-    /// with s = pw_im = −sin(ωσ); J_i = ω c (2/μ − ε, −1/μ, −1/μ)
-    /// (C++ `rhs_func_r` / `rhs_func_i`).
+    /// J = −iωεE + ∇×H = iω pw (2/μ − ε, −1/μ, −1/μ).
+    ///
+    /// With `c = pw_re = cos(ωσ)` and `s = pw_im = −sin(ωσ)` (the comment's
+    /// `pw = c + i s`):
+    /// ```text
+    ///     J_r = ω s (ε − 2/μ, 1/μ, 1/μ)
+    ///     J_i = ω c (2/μ − ε, −1/μ, −1/μ)
+    /// ```
+    /// matching C++ `rhs_func_r` / `rhs_func_i` component by component
+    /// (`J_r(0) = ωε E_i(0) + curlH_r(0) = ωε pw_im − 2ω pw_im/μ`).
     fn j(&self, x: &[f64]) -> [(f64, f64); 3] {
         let (c, s) = self.pw(x);
         let k = 1.0 / self.mu;
         let a = 2.0 * k - self.epsilon;
         [
-            (-self.omega * s * (self.epsilon - 2.0 * k), self.omega * c * a),
+            (self.omega * s * (self.epsilon - 2.0 * k), self.omega * c * a),
             (self.omega * s * k, -self.omega * c * k),
             (self.omega * s * k, -self.omega * c * k),
         ]
@@ -373,6 +402,27 @@ fn solve_level(
     (dofs, err, iterations)
 }
 
+/// Argument for `fem_assembly::dpg::dpg_basis::vol_quadrature` that reproduces
+/// MFEM's `IntRules.Get(geom, deg)` — the rule `GridFunction::ComputeL2Error`
+/// selects with `deg = 2*fe->GetOrder() + 3` (`fem/gridfunc.cpp:3410`,
+/// `intorder = 2*fe->GetOrder() + 3`).
+///
+/// A 1-D Gauss rule with `n` points is exact for degree `2n − 1`, so in
+/// MFEM's convention (the argument is the *degree*) `n = (deg + 2) / 2`.
+/// `dpg_basis::vol_quadrature` follows that convention for simplices
+/// (`tri_rule`/`tet_rule`) and quads (`quad_rule_01`), but its **hex** branch
+/// calls `gauss_legendre_arbitrary(order)` — i.e. it reads the argument as a
+/// *point count*, unlike `fem_element::quadrature::hex_rule`.  This helper
+/// converts, so the L² error here is integrated with exactly the rule MFEM
+/// uses (see the round-17 note in the module header; the mismatch itself is
+/// a core-library inconsistency in `dpg_basis::vol_quadrature`).
+fn mfem_l2_rule_order(et: ElementType, deg: u8) -> u8 {
+    match et {
+        ElementType::Hex8 => (deg + 2) / 2,
+        _ => deg,
+    }
+}
+
 /// L² errors of E (3 comps) and H (3 comps), re + im combined (C++
 /// `sqrt(E_err² + H_err²)` with `ComputeL2Error`).
 fn errors(
@@ -388,7 +438,12 @@ fn errors(
     let et = mesh.element_type(0);
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(et, order);
     let n = fe.n_dofs();
-    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 3);
+    // MFEM `ComputeL2Error`: `IntRules.Get(geom, 2*order + 3)` with
+    // `order` the *L²* FE order (here `p - 1`).
+    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(
+        et,
+        mfem_l2_rule_order(et, 2 * order + 3),
+    );
     let mut phi = vec![0.0_f64; n];
     let mut err2 = 0.0_f64;
     let is_simplex = matches!(et, ElementType::Tet4);
@@ -495,5 +550,55 @@ fn main() {
             break;
         }
         mesh = refine_uniform_3d(&mesh);
+    }
+}
+
+/// D36 regression: the manufactured RHS `(J_r, J_i)` of `Exact::j` must match
+/// C++ `rhs_func_r` / `rhs_func_i` (`miniapps/dpg/maxwell.cpp`) component by
+/// component.  Reference values printed by the C++ probe
+/// (`tmp/mxprobe.cpp` → `JPROBE`, `ω = 2π`, `μ = ε = 1`) at the points used
+/// below; the round-17 defect was a sign error in `J_r[0]` only, which the
+/// first case catches (`+3.693…` vs the reference `−3.693…`).
+#[cfg(test)]
+mod d36_rhs_reference {
+    use super::{Exact, PI};
+
+    /// C++ `JPROBE` rows: `(x, J_r, J_i)`.  Entries printed as round-off
+    /// (`≤ 3e-15`) are stored as exact zeros.
+    const REF: [([f64; 3], [f64; 3], [f64; 3]); 4] = [
+        ([0.1, 0.2, 0.3],
+         [-3.6931636609809155, 3.6931636609809151, 3.6931636609809151],
+         [-5.0832036923152586, 5.0832036923152586, 5.0832036923152586]),
+        ([0.0, 0.0, 0.0],
+         [0.0, 0.0, 0.0],
+         [6.2831853071795862, -6.2831853071795862, -6.2831853071795862]),
+        ([0.25, 0.25, 0.25],
+         [-6.2831853071795862, 6.2831853071795862, 6.2831853071795862],
+         [0.0, 0.0, 0.0]),
+        ([0.5, 0.5, 0.5],
+         [0.0, 0.0, 0.0],
+         [-6.2831853071795862, 6.2831853071795862, 6.2831853071795862]),
+    ];
+
+    #[test]
+    fn j_matches_cpp_rhs_funcs() {
+        let ex = Exact { omega: 2.0 * PI, mu: 1.0, epsilon: 1.0 };
+        for &(x, ref_r, ref_i) in REF.iter() {
+            let j = ex.j(&x);
+            for c in 0..3 {
+                assert!(
+                    (j[c].0 - ref_r[c]).abs() < 1e-13,
+                    "J_r[{c}] at {x:?}: {} vs C++ {}",
+                    j[c].0,
+                    ref_r[c]
+                );
+                assert!(
+                    (j[c].1 - ref_i[c]).abs() < 1e-13,
+                    "J_i[{c}] at {x:?}: {} vs C++ {}",
+                    j[c].1,
+                    ref_i[c]
+                );
+            }
+        }
     }
 }

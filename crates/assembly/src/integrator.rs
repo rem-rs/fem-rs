@@ -8,29 +8,76 @@ use fem_core::types::ElemId;
 // ─── Volume integrals ─────────────────────────────────────────────────────────
 
 /// Data available to integrators at each volume quadrature point.
+///
+/// The three weights are **not** interchangeable; see [`weight`](Self::weight)
+/// for the selection rule and the counter-example.
 #[derive(Debug)]
 pub struct QpData<'a> {
     /// Number of local DOFs on this element.
     pub n_dofs:    usize,
     /// Spatial dimension.
     pub dim:       usize,
-    /// Effective integration weight: quadrature weight × |det J|.
-    pub weight:    f64,
-    /// Physical integration weight: quadrature weight × |det J|.
+    /// `ip.weight / |det J|` on the `BilinearForm` volume path; the physical
+    /// measure on every single-weight path.
     ///
-    /// Unlike [`weight`](Self::weight) (which follows the DiffusionIntegrator
-    /// MFEM convention `ip.weight / |det J|` on the non-affine path), this is
-    /// always the physical measure: `quadrature weight × |det J|`.  Use this
-    /// for integrators whose integrand is a physical volume form (e.g.
-    /// [`MassIntegrator`](crate::standard::MassIntegrator), `∫ ρ u v dΩ`).
+    /// Two conventions meet in this one field, and choosing the wrong one
+    /// silently rescales the integral:
+    ///
+    /// * `BilinearForm` **volume** assembly (`assembler.rs`, both the affine
+    ///   and the isoparametric branch — MFEM has no affine fast path) stores
+    ///   `ip.weight / |det J|` here, paired with an adjugate-scaled gradient
+    ///   `grad_phys = adj(J)ᵀ ∇φ = det(J)·J⁻ᵀ ∇φ`.  This is MFEM's
+    ///   `DiffusionIntegrator` convention (`dshapedxt = Mult(dshape,
+    ///   AdjugateJacobian)`, `w = ip.weight / Weight()`): for a `∇φ·∇ψ`-type
+    ///   integrand the product `weight × grad_phys` already carries the
+    ///   physical measure, so such integrators must read this field.
+    /// * Every path that stores a *single* weight puts the physical measure
+    ///   `ip.weight · |det J|` here, because its integrands never pair it
+    ///   with an adjugate-scaled gradient: the volume **linear (RHS)**
+    ///   assembly and the mass-only assembly (`assembler.rs`,
+    ///   `weight == phys_weight`), the 2-D-in-3-D surface path, the mixed
+    ///   bilinear path (`mixed/mod.rs`), the complex DPG path and
+    ///   [`BdQpData`] (face measure).
+    ///
+    /// **Selection rule** (by integrand, not by path): a physical *volume
+    /// form built from values* (`φφ`, `φ·coeff`, `ρuv`) is a mass-type form
+    /// and must use [`phys_weight`](Self::phys_weight); a `∇φ·∇ψ` form read
+    /// in the `assembler.rs` volume convention uses this field.  A form that
+    /// carries its own Jacobian factor (`ip.weight` times the adjugate
+    /// gradient, e.g. `ConvectionIntegrator`) uses
+    /// [`ref_weight`](Self::ref_weight) instead.
+    ///
+    /// **Counter-example (the round-15/16 weight-bug family).**  Writing a
+    /// mass-type integrand as `qp.weight * coeff * φφ` compiles, runs, and
+    /// converges — but on the non-affine volume path it is off by
+    /// `1/|det J|²`: measured on a 3×2 mesh with `det J = 1/3` it was a
+    /// factor of 9 (`max abs difference 1.185e0` against `MassIntegrator`).
+    /// The integrators that had to be moved to `phys_weight` for exactly
+    /// this reason are `VectorConvectionIntegrator`,
+    /// `VectorConvectionNLFIntegrator`, `NormalTraceJumpIntegrator`,
+    /// `NonconservativeDGTraceIntegrator` and the `SBM2` Dirichlet/Neumann
+    /// pair.
+    pub weight:    f64,
+    /// Physical integration weight: always `ip.weight · |det J|`.
+    ///
+    /// Unlike [`weight`](Self::weight) (which is `ip.weight / |det J|` on the
+    /// non-affine volume path, i.e. the DiffusionIntegrator convention), this
+    /// is always the physical measure.  Use it for every mass-type integrand,
+    /// i.e. an integrand that involves only values and coefficients (e.g.
+    /// [`MassIntegrator`](crate::standard::MassIntegrator), `∫ ρ u v dΩ`), and
+    /// never for a form that already pairs with the adjugate-scaled
+    /// `grad_phys` — that one must use [`weight`](Self::weight).
     pub phys_weight: f64,
-    /// Reference-domain quadrature weight `ip.weight` (MFEM convention).
+    /// Reference-domain quadrature weight `ip.weight`, bare.
     ///
     /// MFEM integrators disagree on how `ip.weight` combines with the
-    /// Jacobian: `DiffusionIntegrator` uses `ip.weight / |det J|` together
-    /// with the adjugate Jacobian, while `ConvectionIntegrator` uses plain
-    /// `ip.weight` (the `det J` is implicit in the adjugate).  This field is
-    /// always the bare quadrature weight, for integrators that need it.
+    /// Jacobian: `DiffusionIntegrator` uses `ip.weight / Trans.Weight()`
+    /// together with the adjugate Jacobian and `MassIntegrator` scales by
+    /// `Trans.Weight()`, while `ConvectionIntegrator` uses the plain
+    /// `ip.weight` (the `det J` is implicit in the adjugate-scaled gradient).
+    /// This field is the bare weight for that last family — integrators that
+    /// supply the measure themselves through a Jacobian factor — and for
+    /// reference-measure (non-physical) forms.
     pub ref_weight: f64,
     /// Basis function values at this quadrature point; length `n_dofs`.
     pub phi:       &'a [f64],
@@ -90,7 +137,10 @@ pub struct BdQpData<'a> {
     pub n_dofs:  usize,
     /// Spatial dimension of the embedding space.
     pub dim:     usize,
-    /// Effective integration weight: quadrature weight × face Jacobian (length in 2-D, area in 3-D).
+    /// Effective integration weight: quadrature weight × face Jacobian
+    /// (length in 2-D, area in 3-D).  This is the *physical face measure* —
+    /// the single-weight layout leaves no ambiguity here, unlike
+    /// [`QpData::weight`].
     pub weight:  f64,
     /// Basis function values at this quadrature point; length `n_dofs`.
     pub phi:     &'a [f64],
