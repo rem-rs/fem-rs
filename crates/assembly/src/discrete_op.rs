@@ -1647,14 +1647,13 @@ impl DiscreteLinearOperator {
                 // values fed into this operator).
                 for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
                     let key = FaceKey::new(nodes[la], nodes[lb], nodes[lc]);
-                    let [pa, w0, w1] = hcurl_space
-                        .face_tangent_anchor(key)
+                    let anchor = hcurl_space
+                        .face_anchor(key)
                         .expect("tet face must have an interpolation anchor");
-                    let centroid = [
-                        pa[0] + (w0[0] + w1[0]) / 3.0,
-                        pa[1] + (w0[1] + w1[1]) / 3.0,
-                        pa[2] + (w0[2] + w1[2]) / 3.0,
-                    ];
+                    // ND2: the canonical face carries a single DOF point (the
+                    // centroid) with its two anchor tangents.
+                    let centroid = anchor.point(0);
+                    let [w0, w1] = anchor.tangents(0);
                     let fv = eval_field(k, centroid[0], centroid[1], centroid[2]);
                     dof_nd2[12 + 2 * face_local] =
                         fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];

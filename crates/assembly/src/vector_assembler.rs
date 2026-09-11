@@ -23,6 +23,7 @@ use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRT
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
+use fem_space::hcurl::FaceDofBlock;
 use fem_space::{HCurlSpace, HDivSpace};
 
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator, VectorQpData};
@@ -291,6 +292,22 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
     integrators: &[&dyn VectorBilinearIntegrator],
     quad_order: u8,
     coo: &mut CooMatrix<f64>,
+) {
+    accumulate_vector_bilinear_element_blocks(space, e, integrators, quad_order, coo, &[]);
+}
+
+/// [`accumulate_vector_bilinear_element`] with the D37 ND face-DOF block
+/// transform applied: the element matrix is rotated into the canonical
+/// (shared-face) basis, `A ← Tᵀ·A·T`, before scattering.  `blocks` is the
+/// element's `HCurlSpace::element_face_blocks` list (empty → historical
+/// element-local behaviour).
+pub fn accumulate_vector_bilinear_element_blocks<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn VectorBilinearIntegrator],
+    quad_order: u8,
+    coo: &mut CooMatrix<f64>,
+    blocks: &[FaceDofBlock],
 ) {
     let mesh = space.mesh();
     let edim = mesh.dim() as usize;      // embedding dimension (3 for a surface mesh)
@@ -586,6 +603,7 @@ pub fn accumulate_vector_bilinear_element<S: FESpace>(
         }
     }
 
+    apply_face_block_transform_matrix(blocks, &mut k_elem, n);
     coo.add_element_matrix(&global_dofs, &k_elem);
 }
 
@@ -595,6 +613,19 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
     integrators: &[&dyn VectorLinearIntegrator],
     quad_order: u8,
     rhs: &mut [f64],
+) {
+    accumulate_vector_linear_element_blocks(space, e, integrators, quad_order, rhs, &[]);
+}
+
+/// [`accumulate_vector_linear_element`] with the D37 ND face-DOF block
+/// transform (`b ← Tᵀ·b`) applied before scattering.
+pub fn accumulate_vector_linear_element_blocks<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn VectorLinearIntegrator],
+    quad_order: u8,
+    rhs: &mut [f64],
+    blocks: &[FaceDofBlock],
 ) {
     let mesh = space.mesh();
     let edim = mesh.dim() as usize;
@@ -773,9 +804,85 @@ pub fn accumulate_vector_linear_element<S: FESpace>(
         }
     }
 
+    apply_face_block_transform_vector(blocks, &mut f_elem[..n_ldofs]);
     for (&d, &v) in global_dofs.iter().zip(f_elem.iter()) {
         rhs[d] += v;
     }
+}
+
+// ─── D37: ND face-DOF block transforms ──────────────────────────────────────
+
+/// Dense `n × n` block-diagonal transform `T` of one element built from its
+/// [`FaceDofBlock`]s (identity elsewhere): the map from the canonical
+/// (shared-face) DOF values to the element's own local DOF values,
+/// `u_local = T·u_canon`.  See `fem_space::hcurl::FaceDofBlock`.
+pub fn face_block_transform_dense(blocks: &[FaceDofBlock], n: usize) -> Vec<f64> {
+    let mut t = vec![0.0_f64; n * n];
+    for i in 0..n {
+        t[i * n + i] = 1.0;
+    }
+    for b in blocks {
+        for r in 0..2 {
+            for c in 0..2 {
+                t[(b.slot + r) * n + b.slot + c] = b.s[r][c];
+            }
+        }
+    }
+    t
+}
+
+/// Rotate one element matrix assembled in the element's own (signed) local
+/// DOFs into the canonical shared-face basis: `A ← Tᵀ·A·T`.  `blocks` empty →
+/// no-op (the historical element-local convention).
+///
+/// The transform `T` maps canonical dof values to the element's local ones
+/// (`u_local = T·u_canon`, see [`face_block_transform_dense`]), hence
+/// `B(u,v) = u_localᵀ A u_local = u_canonᵀ (Tᵀ A T) u_canon`.
+pub fn apply_face_block_transform_matrix(blocks: &[FaceDofBlock], a: &mut [f64], n: usize) {
+    if blocks.is_empty() {
+        return;
+    }
+    let t = face_block_transform_dense(blocks, n);
+    // rows: a ← Tᵀ·a
+    let mut ta = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += t[k * n + i] * a[k * n + j];
+            }
+            ta[i * n + j] = s;
+        }
+    }
+    // columns: a ← ta·T
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += ta[i * n + k] * t[k * n + j];
+            }
+            a[i * n + j] = s;
+        }
+    }
+}
+
+/// Rotate one element load vector into the canonical shared-face basis:
+/// `b ← Tᵀ·b`.
+pub fn apply_face_block_transform_vector(blocks: &[FaceDofBlock], b: &mut [f64]) {
+    if blocks.is_empty() {
+        return;
+    }
+    let n = b.len();
+    let t = face_block_transform_dense(blocks, n);
+    let mut out = vec![0.0_f64; n];
+    for i in 0..n {
+        let mut s = 0.0;
+        for k in 0..n {
+            s += t[k * n + i] * b[k];
+        }
+        out[i] = s;
+    }
+    b.copy_from_slice(&out);
 }
 
 // ─── VectorAssembler ────────────────────────────────────────────────────────
@@ -793,6 +900,62 @@ pub const TRI_ND2_RT2_MIXED_QUAD_ORDER: u8 = 6;
 pub struct VectorAssembler;
 
 impl VectorAssembler {
+    /// Assemble an H(curl) Nédélec bilinear form in the **canonical**
+    /// (shared-face) DOF basis — the D37 fix for tet `NDk` (k ≥ 2).
+    ///
+    /// `HCurlSpace`'s global face DOFs are the face-creating element's
+    /// functionals; a neighbouring element's two face DOFs per face point are
+    /// related to them by a full 2×2 change of basis (`FaceDofBlock`), which
+    /// the scalar [`FESpace::element_signs`] array cannot express.  This entry
+    /// point rotates every element matrix into that shared basis
+    /// (`A ← Tᵀ·A·T`) before scattering, which makes the assembled operator
+    /// conforming on shared faces (the element-local path used by
+    /// [`Self::assemble_bilinear`] is not, for k ≥ 2 tets).
+    ///
+    /// The DOF vector produced by the solve is then in the canonical basis; a
+    /// GridFunction / error evaluator must convert it per element with
+    /// `u_local = T·u_canon` — see [`Self::assemble_linear_nd_canonical`].
+    pub fn assemble_bilinear_nd_canonical<M: MeshTopology>(
+        space: &HCurlSpace<M>,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+    ) -> CsrMatrix<f64> {
+        let n = space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n, n);
+        for e in 0..space.mesh().n_elements() as u32 {
+            accumulate_vector_bilinear_element_blocks(
+                space,
+                e,
+                integrators,
+                quad_order,
+                &mut coo,
+                space.element_face_blocks(e),
+            );
+        }
+        coo.into_csr()
+    }
+
+    /// Load vector counterpart of [`Self::assemble_bilinear_nd_canonical`]
+    /// (`b ← Tᵀ·b`).
+    pub fn assemble_linear_nd_canonical<M: MeshTopology>(
+        space: &HCurlSpace<M>,
+        integrators: &[&dyn VectorLinearIntegrator],
+        quad_order: u8,
+    ) -> Vec<f64> {
+        let mut rhs = vec![0.0_f64; space.n_dofs()];
+        for e in 0..space.mesh().n_elements() as u32 {
+            accumulate_vector_linear_element_blocks(
+                space,
+                e,
+                integrators,
+                quad_order,
+                &mut rhs,
+                space.element_face_blocks(e),
+            );
+        }
+        rhs
+    }
+
     /// Assemble the global stiffness matrix for a vector bilinear form.
     pub fn assemble_bilinear<S>(
         space: &S,
