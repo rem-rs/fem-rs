@@ -1,16 +1,36 @@
 //! Nédélec hexahedral element `ND_k` on the reference hex `[-1,1]^3`.
 //!
-//! 1:1 port of MFEM `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)`
-//! (the basis pair MFEM documents for LOR-compatible ND spaces), pulled back
-//! from MFEM's natural interval `[0,1]` to `[-1,1]`.  The physical basis
-//! functions on a given hex are *identical* to MFEM's: the Jacobian factor 2
-//! of the `[-1,1]` map (`J = J_MFEM/2`, covariant transform `J^-T`) cancels
-//! the factor 1/2 of the pulled-back integrated open modes — every ND tensor
-//! function carries exactly one open factor along its component direction.
+//! 1:1 port of MFEM `ND_HexahedronElement(p, GaussLobatto, GaussLegendre)` —
+//! the element `ND_FECollection(p, dim)` builds by default, i.e. the ND hex
+//! element every miniapp/example actually uses (`dpg_maxwell_3d`, the LOR
+//! and Maxwell drivers): the **nodal** variant whose DOFs are the point-value
+//! functionals `σ_i(Φ) = Φ(x_i)·t̂_i` at MFEM's `FE::Nodes` (Gauss-Legendre
+//! open points along the component direction × GLL closed points across it)
+//! with the *unnormalized* reference tangents `t̂_i = ±e_a` (MFEM `dof2tk`).
+//!
+//! Pulled back from MFEM's natural interval `[0,1]` to `[-1,1]`: the physical
+//! basis functions on a given hex are *identical* to MFEM's.  The Jacobian
+//! factor 2 of the `[-1,1]` map (`J = J_MFEM/2`, covariant transform `J^-T`)
+//! is cancelled by the factor 1/2 of every pulled-back open mode — each ND
+//! tensor function carries exactly one open factor, along its component
+//! direction:
+//!
+//! ```text
+//!     o_a(ξ)  = (1/2)·ℓ_a(ξ̃),   ξ̃ = (ξ+1)/2,
+//! ```
+//!
+//! with `ℓ_a` MFEM's Gauss-Legendre nodal Lagrange polynomial of degree `k-1`
+//! at the `k` open points (the very points of `FE::Nodes`), so that
+//! `J^-T_ref · Φ_ref = Φ_MFEM` on the unit cube exactly as it did for the
+//! (now replaced) integrated-Gerritsma open modes `-Σ_{j<=a} c'_j` — see the
+//! round-15 D36 rework.  The previous `IntegratedGLL` basis spanned the same
+//! tensor space (so DPG's normal equations were unaffected) but its per-DOF
+//! functions were *not* the point-value duals that `HCurlSpace` and MFEM's
+//! `Project_ND` assume.
 //!
 //! Tensor structure per component (`c` = closed GLL nodal mode of degree `k`
-//! on `[-1,1]`, `o` = open integrated-Gerritsma mode with unit integral over
-//! `[-1,1]`, `±` hats are the endpoint GLL modes `c_0`/`c_k`):
+//! on `[-1,1]`, `o` = open Gauss-Legendre nodal mode of degree `k-1`, `±`
+//! hats are the endpoint GLL modes `c_0`/`c_k`):
 //!
 //! ```text
 //!     x-dofs: o(x)·c(y)·c(z)   y-dofs: c(x)·o(y)·c(z)   z-dofs: c(x)·c(y)·o(z)
@@ -27,12 +47,10 @@
 //! - `3k(k-1)^2` interior dofs (x-, y-, z-blocks; closed indices interior,
 //!   open index innermost).
 //!
-//! Unlike MFEM, no per-face orientation signs are folded into the basis: the
-//! fem-rs `HCurlSpace` orders face dofs in the element-local frame (consistent
-//! across neighbours on conforming meshes) and applies edge-orientation signs
-//! at the space level.  Per-dof *magnitudes* therefore match MFEM exactly;
-//! MFEM's negatively-oriented dofs differ only by the sign MFEM bakes in for
-//! its canonical face orientation.
+//! Cross-element orientation is *not* baked into the basis (fem-rs orders the
+//! face dofs in the element-local frame and `HCurlSpace` applies the
+//! orientation encoding); per-dof *magnitudes* therefore match MFEM exactly
+//! and MFEM's negatively-oriented dofs differ only by that sign.
 
 use crate::gll_basis::{gl_nodes, ClosedBasis};
 use crate::reference::VectorReferenceElement;
@@ -65,9 +83,9 @@ impl VectorReferenceElement for HexNDk {
         let vy = ClosedBasis::new(p).eval(xi[1]);
         let vz = ClosedBasis::new(p).eval(xi[2]);
         let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
-        let oxs = partial_open(&vx.dc);
-        let oys = partial_open(&vy.dc);
-        let ozs = partial_open(&vz.dc);
+        let oxs = open_basis(p, xi[0]).0;
+        let oys = open_basis(p, xi[1]).0;
+        let ozs = open_basis(p, xi[2]).0;
         values.fill(0.0);
 
         // Edge basis in MFEM `Geometry::Constants<Geometry::CUBE>::Edges`
@@ -203,9 +221,9 @@ impl VectorReferenceElement for HexNDk {
         let vz = ClosedBasis::new(p).eval(z);
         let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
         let (dcx, dcy, dcz) = (&vx.dc, &vy.dc, &vz.dc);
-        let oxs = partial_open(&vx.dc);
-        let oys = partial_open(&vy.dc);
-        let ozs = partial_open(&vz.dc);
+        let oxs = open_basis(p, x).0;
+        let oys = open_basis(p, y).0;
+        let ozs = open_basis(p, z).0;
 
         // For a dofs-along-d tensor function o(t_d)·C·D the curl only
         // differentiates the two CLOSED factors (the open direction is the
@@ -360,11 +378,39 @@ impl VectorReferenceElement for HexNDk {
         crate::quadrature::hex_rule(o)
     }
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.dof_layout().into_iter().map(|(x, _)| x.to_vec()).collect()
+    }
+}
+
+impl HexNDk {
+    /// Reference tangents of the local DOFs, same order as
+    /// [`VectorReferenceElement::dof_coords`].
+    ///
+    /// These are the reference images of the DOF functionals
+    /// `σ_i(Φ) = Φ(x_i)·t̂_i`: `t̂_i = 2·e_a` for the component direction `a` of
+    /// DOF `i`.  The magnitude 2 is the `[-1,1]` pull-back of MFEM's unit
+    /// `tk` (`J = J_MFEM/2`, so `J·t̂ = J_MFEM·tk` is the physical tangent —
+    /// the *unnormalized* edge/face vector), which is exactly the dual used by
+    /// `HCurlSpace::interpolate_vector` and MFEM
+    /// `VectorFiniteElement::Project_ND`.
+    pub fn dof_tangents(&self) -> Vec<[f64; 3]> {
+        self.dof_layout().into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// `(node, reference tangent)` of every local DOF in the element's local
+    /// order — the single source of truth behind [`dof_coords`](Self::dof_coords)
+    /// and [`dof_tangents`](Self::dof_tangents), mirroring the tensor blocks
+    /// of `eval_basis_vec` exactly (node = the open factor's Gauss-Legendre
+    /// point along the *component* direction, GLL points across it).
+    fn dof_layout(&self) -> Vec<([f64; 3], [f64; 3])> {
         let p = self.order;
         let gl = gl_nodes(p);
         let gll = crate::gll_basis::gll_nodes(p);
         let n = self.n_dofs();
-        let mut c = Vec::with_capacity(n);
+        let tx = [2.0, 0.0, 0.0];
+        let ty = [0.0, 2.0, 0.0];
+        let tz = [0.0, 0.0, 2.0];
+        let mut c: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(n);
         // Edge DOFs in MFEM CUBE edge order e0..e11 (matching `eval_basis_vec`
         // and `HCurlSpace::HEX_EDGES`).  Each edge carries p open modes
         // anchored at the Gauss-Legendre points (MFEM's ND dof positions).
@@ -374,16 +420,16 @@ impl VectorReferenceElement for HexNDk {
         for ei in 0..4 {
             let (y0, z0) = x_edges[ei];
             for j in 0..p {
-                c.push(vec![gl[j], y0, z0]);
+                c.push(([gl[j], y0, z0], tx));
             }
             let (x0, z0) = y_edges[ei];
             for j in 0..p {
-                c.push(vec![x0, gl[j], z0]);
+                c.push(([x0, gl[j], z0], ty));
             }
         }
         for &(x0, y0) in &z_edges {
             for j in 0..p {
-                c.push(vec![x0, y0, gl[j]]);
+                c.push(([x0, y0, gl[j]], tz));
             }
         }
         if p >= 2 {
@@ -391,29 +437,38 @@ impl VectorReferenceElement for HexNDk {
             // tangent blocks per face, HEX_QUAD_FACES order (z-, z+, y-, y+,
             // x-, x+).  Matches the eval_basis_vec blocks.
             for &zs in &[-1.0, 1.0] {
-                for _ in 0..2 {
-                    for i in 1..p {
-                        for j in 0..p {
-                            c.push(vec![gl[j], gll[i], zs]);
-                        }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([gl[j], gll[i], zs], tx));
+                    }
+                }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([gll[i], gl[j], zs], ty));
                     }
                 }
             }
             for &ys in &[-1.0, 1.0] {
-                for _ in 0..2 {
-                    for i in 1..p {
-                        for j in 0..p {
-                            c.push(vec![gl[j], ys, gll[i]]);
-                        }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([gl[j], ys, gll[i]], tx));
+                    }
+                }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([gll[i], ys, gl[j]], tz));
                     }
                 }
             }
             for &xs in &[-1.0, 1.0] {
-                for _ in 0..2 {
-                    for i in 1..p {
-                        for j in 0..p {
-                            c.push(vec![xs, gll[i], gl[j]]);
-                        }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([xs, gl[j], gll[i]], ty));
+                    }
+                }
+                for i in 1..p {
+                    for j in 0..p {
+                        c.push(([xs, gll[i], gl[j]], tz));
                     }
                 }
             }
@@ -421,46 +476,104 @@ impl VectorReferenceElement for HexNDk {
             for l in 1..p {
                 for i in 1..p {
                     for j in 0..p {
-                        c.push(vec![gl[j], gll[i], gll[l]]);
+                        c.push(([gl[j], gll[i], gll[l]], tx));
                     }
                 }
             }
             for l in 1..p {
                 for i in 1..p {
                     for j in 0..p {
-                        c.push(vec![gll[i], gl[j], gll[l]]);
+                        c.push(([gll[i], gl[j], gll[l]], ty));
                     }
                 }
             }
             for l in 1..p {
                 for i in 1..p {
                     for j in 0..p {
-                        c.push(vec![gll[i], gll[l], gl[j]]);
+                        c.push(([gll[i], gll[l], gl[j]], tz));
                     }
                 }
             }
         }
         while c.len() < n {
-            c.push(vec![0.0; 3]);
+            c.push(([0.0; 3], [0.0; 3]));
         }
         c
     }
 }
 
-/// Integrated (Gerritsma) open modes `o_i = -Σ_{j<=i} c'_j` from the closed
-/// basis derivatives (unit integral over [-1,1]; see [`crate::gll_basis`]).
-fn partial_open(dc: &[f64]) -> Vec<f64> {
-    let n = dc.len() - 1;
-    let mut o = vec![0.0_f64; n];
-    if n == 0 {
-        return o;
+/// Open (tangential) `p`-point Gauss-Legendre nodal modes of degree `p-1` on
+/// `[-1,1]`, scaled by `1/2`.
+///
+/// These are MFEM's `ND_HexahedronElement` open 1-D functions
+/// (`poly1d.GetBasis(p-1, BasisType::GaussLegendre)`, evaluated by
+/// `Poly_1D::Basis::Eval` as the degree-`p-1` Lagrange interpolation at the
+/// `OpenPoints(p-1, GaussLegendre)` nodes) — the *point-value* duals of the
+/// element's `FE::Nodes` open coordinates.  The extra `1/2` is the pull-back
+/// normalization of the `[0,1] -> [-1,1]` reference change: with
+/// `J = J_MFEM/2` and the covariant map `J^-T`, halving every open factor
+/// makes the physical basis (`V_phys = 2·V_ref` on the unit cube) equal to
+/// MFEM's, exactly as the former integrated-Gerritsma modes were normalized
+/// (unit integral over `[-1,1]` ≡ half of MFEM's `u_a`).  For `p = 1` the
+/// single mode is the constant `1/2`, bit-identical to the old Gerritsma mode
+/// `-c'_0`, so the ND1 paths are unchanged.
+///
+/// Returns `(values, derivatives)`.
+fn open_basis(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    debug_assert!(p >= 1, "open_basis requires p >= 1");
+    let nodes = gl_nodes(p);
+    let n = nodes.len();
+    let mut w = vec![1.0_f64; n];
+    for j in 0..n {
+        for k in 0..n {
+            if k != j {
+                w[j] /= nodes[j] - nodes[k];
+            }
+        }
     }
-    o[0] = -dc[0];
-    for i in 1..n {
-        o[i] = o[i - 1] - dc[i];
+    let mut c = vec![0.0_f64; n];
+    let mut dc = vec![0.0_f64; n];
+    // Exact evaluation at a node (the barycentric formula is singular there).
+    if let Some(m) = (0..n).find(|&m| x == nodes[m]) {
+        c[m] = 1.0;
+        let a0: f64 = (0..n)
+            .filter(|&k| k != m)
+            .map(|k| 1.0 / (nodes[m] - nodes[k]))
+            .sum();
+        dc[m] = a0;
+        for j in 0..n {
+            if j != m {
+                dc[j] = (w[j] / w[m]) / (nodes[m] - nodes[j]);
+            }
+        }
+    } else {
+        let mut lam = vec![0.0_f64; n];
+        let mut dlam = vec![0.0_f64; n];
+        let (mut s, mut ds) = (0.0_f64, 0.0_f64);
+        for j in 0..n {
+            let t = x - nodes[j];
+            lam[j] = w[j] / t;
+            dlam[j] = -w[j] / (t * t);
+            s += lam[j];
+            ds += dlam[j];
+        }
+        for j in 0..n {
+            c[j] = lam[j] / s;
+            dc[j] = (dlam[j] - c[j] * ds) / s;
+        }
     }
-    o
+    // Pull-back normalization to the [-1,1] reference interval.
+    for v in c.iter_mut() {
+        *v *= 0.5;
+    }
+    for v in dc.iter_mut() {
+        *v *= 0.5;
+    }
+    (c, dc)
 }
+
+#[cfg(test)]
+mod mfem_nodal_dump;
 
 #[cfg(test)]
 mod tests {
@@ -508,12 +621,13 @@ mod tests {
         }
     }
 
-    /// ND1 must be the integrated (unit edge integral) Whitney form:
-    /// the reference basis on edge e0 (y=z=-1) is `o_0(x)·hat·hat` with
-    /// `o_0 = 1/2`, so the physical line integral along a unit edge
-    /// (∫_{-1}^{1} phi_ref dx, see the Piola math in the module docs) is
-    /// exactly 1 — the dual used by `HCurlSpace::interpolate_vector` and the
-    /// tangential BC projection.
+    /// ND1 must be the Whitney form with unit reference edge integral: the
+    /// reference basis on edge e0 (y=z=-1) is `o_0(x)·hat·hat` with
+    /// `o_0 = 1/2` (both the Gauss-Legendre nodal degree-0 mode and the old
+    /// integrated mode evaluate to exactly 1/2), so the physical line
+    /// integral along a unit edge (∫_{-1}^{1} phi_ref dx, see the Piola math
+    /// in the module docs) is exactly 1 — the dual used by
+    /// `HCurlSpace::interpolate_vector` and the tangential BC projection.
     #[test]
     fn nd1_unit_edge_integral() {
         let e = HexNDk::new(1);
@@ -521,20 +635,22 @@ mod tests {
         e.eval_basis_vec(&[0.0, -1.0, -1.0], &mut v);
         // o_0(0) = 1/2, hats = 1.
         assert!((v[0] - 0.5).abs() < 1e-14, "ND1 e0 value {}", v[0]);
-        // Unit integral: ∫_{-1}^{1} o_0 dx = 1 (5-pt Gauss is exact).
+        // ∫_{-1}^{1} o_0 dx = 1 (5-pt Gauss is exact).
         let (xs, ws) = crate::quadrature::gauss_legendre_arbitrary(5);
-        let cb = ClosedBasis::new(1);
         let mut acc = 0.0;
         for (q, &x) in xs.iter().enumerate() {
-            acc += ws[q] * partial_open(&cb.eval(x).dc)[0];
+            acc += ws[q] * open_basis(1, x).0[0];
         }
         assert!((acc - 1.0).abs() < 1e-14, "∫ o_0 = {acc}");
     }
 
     /// MFEM `ND_HexahedronElement(1, GaussLobatto, IntegratedGLL)` reference
     /// values (unit-cube coords) at (x,y,z) = (0.137, -0.413, 0.621), dumped
-    /// from mfem-4.9 (tmp harness).  The fem-rs reference lives on [-1,1];
-    /// the *physical* basis on the unit cube (J = diag(1/2), so
+    /// from mfem-4.9 (tmp harness).  For `p = 1` the integrated and the
+    /// Gauss-Legendre nodal open bases coincide (both are the constant 1 in
+    /// MFEM's `[0,1]` normalisation), so this table still pins the ND1 path
+    /// bit-for-bit after the D36 nodal rework.  The fem-rs reference lives on
+    /// [-1,1]; the *physical* basis on the unit cube (J = diag(1/2), so
     /// V_phys = 2·V_ref and curl_phys = 4·curl_ref) must equal MFEM's.
     #[test]
     fn nd1_matches_mfem_reference() {
@@ -565,39 +681,184 @@ mod tests {
         }
     }
 
-    /// MFEM `ND_HexahedronElement(2, GaussLobatto, IntegratedGLL)` reference
-    /// (unit-cube coords) at (0.137, -0.413, 0.621).  MFEM's local dof order
-    /// differs from fem-rs's by the face-orientation permutation/sign
-    /// machinery fem-rs handles at the space level, so the comparison is on
-    /// the sorted magnitude spectrum of the V and curl columns: it locks the
-    /// basis *functions* (per-dof scales) without freezing the orientation
-    /// convention.
+    /// Every local DOF functional is the point value `σ_i(Φ) = Φ(x_i)·t̂_i`
+    /// with `(x_i, t̂_i) = (dof_coords[i], dof_tangents[i])`: the pairing
+    /// matrix `σ_i(φ_j)` must be the identity.  This is the "nodal D32
+    /// semantics" that `HCurlSpace::interpolate_vector`, the tangential BC
+    /// projection and MFEM's `Project_ND` all rely on — and it also pins the
+    /// `dof_coords`/`dof_tangents` layout against `eval_basis_vec`.
     #[test]
-    fn nd2_matches_mfem_reference_spectrum() {
-        let e = HexNDk::new(2);
-        let xi = [2.0 * 0.137 - 1.0, 2.0 * (-0.413) - 1.0, 2.0 * 0.621 - 1.0];
-        let n = e.n_dofs();
-        let mut v = vec![0.0; n * 3];
-        let mut c = vec![0.0; n * 3];
-        e.eval_basis_vec(&xi, &mut v);
-        e.eval_curl(&xi, &mut c);
-        let mfem = crate::testsupport::mfem_nd2_q0();
-        let mut vs: Vec<f64> = (0..n * 3).map(|i| (2.0 * v[i]).abs()).collect();
-        let mut cs: Vec<f64> = (0..n * 3).map(|i| (4.0 * c[i]).abs()).collect();
-        vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        cs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mv: Vec<f64> = mfem.iter().map(|r| r[0]).chain(mfem.iter().map(|r| r[1]))
-            .chain(mfem.iter().map(|r| r[2])).map(f64::abs).collect();
-        let mc: Vec<f64> = mfem.iter().map(|r| r[3]).chain(mfem.iter().map(|r| r[4]))
-            .chain(mfem.iter().map(|r| r[5])).map(f64::abs).collect();
-        let mut mv = mv; let mut mc = mc;
-        mv.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        mc.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        for (i, (&a, &b)) in vs.iter().zip(mv.iter()).enumerate() {
-            assert!((a - b).abs() < 1e-12, "V spectrum[{i}]: rust {a} vs mfem {b}");
+    fn dof_functionals_are_point_values() {
+        for k in 1..=3 {
+            let e = HexNDk::new(k);
+            let n = e.n_dofs();
+            let coords = e.dof_coords();
+            let tangents = e.dof_tangents();
+            assert_eq!(coords.len(), n);
+            assert_eq!(tangents.len(), n);
+            let mut v = vec![0.0_f64; n * 3];
+            for i in 0..n {
+                let xi = [coords[i][0], coords[i][1], coords[i][2]];
+                let t = tangents[i];
+                e.eval_basis_vec(&xi, &mut v);
+                for j in 0..n {
+                    let d = v[j * 3] * t[0] + v[j * 3 + 1] * t[1] + v[j * 3 + 2] * t[2];
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (d - want).abs() < 1e-12,
+                        "k={k}: σ_{i}(φ_{j}) = {d} (want {want})",
+                    );
+                }
+            }
         }
-        for (i, (&a, &b)) in cs.iter().zip(mc.iter()).enumerate() {
-            assert!((a - b).abs() < 1e-12, "curl spectrum[{i}]: rust {a} vs mfem {b}");
+    }
+
+    /// Per-DOF match against the MFEM `ND_HexahedronElement(p, GaussLobatto,
+    /// GaussLegendre)` dump (the element `ND_FECollection(p, dim)` builds by
+    /// default — what every MFEM miniapp/example uses): for every fem-rs DOF
+    /// there is exactly one MFEM DOF carrying the *same function* up to sign
+    /// (`V_femrs = V_mfem/2`, `curl_femrs = curl_mfem/4` on the unit cube) at
+    /// both sample points, and the match is a bijection.
+    ///
+    /// The sign is allowed because MFEM bakes the reference face/edge
+    /// orientations into its `dof_map` (`dof2tk` negatives), while fem-rs
+    /// keeps the element-local frame and applies the orientation encoding in
+    /// `HCurlSpace` — a convention difference, not a different basis.
+    #[test]
+    fn ndk_matches_mfem_nodal_dump() {
+        for k in 1..=3 {
+            let e = HexNDk::new(k);
+            let n = e.n_dofs();
+            // fem-rs reference points (0.137,-0.413,0.621) and (0.71,0.22,-0.53).
+            let pts = [[0.137, -0.413, 0.621], [0.71, 0.22, -0.53]];
+            let mut rust: Vec<Vec<[f64; 6]>> = Vec::new();
+            for pt in &pts {
+                let mut v = vec![0.0_f64; n * 3];
+                let mut c = vec![0.0_f64; n * 3];
+                e.eval_basis_vec(pt, &mut v);
+                e.eval_curl(pt, &mut c);
+                rust.push(
+                    (0..n)
+                        .map(|i| {
+                            [
+                                2.0 * v[i * 3],
+                                2.0 * v[i * 3 + 1],
+                                2.0 * v[i * 3 + 2],
+                                4.0 * c[i * 3],
+                                4.0 * c[i * 3 + 1],
+                                4.0 * c[i * 3 + 2],
+                            ]
+                        })
+                        .collect(),
+                );
+            }
+            let mfem: Vec<Vec<[f64; 6]>> =
+                (0..2).map(|q| mfem_nodal_dump::vc(k, q)).collect();
+            let mut seen = vec![usize::MAX; n];
+            for i in 0..n {
+                let mut hits = Vec::new();
+                for (j, row) in mfem[0].iter().enumerate() {
+                    for sgn in [1.0_f64, -1.0] {
+                        let ok = (0..6).all(|d| (rust[0][i][d] - sgn * row[d]).abs() < 1e-12)
+                            && (0..6)
+                                .all(|d| (rust[1][i][d] - sgn * mfem[1][j][d]).abs() < 1e-12);
+                        if ok {
+                            hits.push((j, sgn));
+                        }
+                    }
+                }
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "k={k}: fem-rs dof {i} matches {hits:?} MFEM dofs (expected exactly one)",
+                );
+                seen[i] = hits[0].0;
+                if hits[0].1 < 0.0 {
+                    // MFEM's orientation sign on this DOF.
+                    assert!(hits[0].1 == -1.0);
+                }
+            }
+            let mut sorted = seen.clone();
+            sorted.sort_unstable();
+            let want: Vec<usize> = (0..n).collect();
+            assert_eq!(sorted, want, "k={k}: the DOF match must be a bijection");
+        }
+    }
+
+    /// Raw reference moments `[∫F_i, ∫curl F_i]` over the reference hex must
+    /// match MFEM's dump through the same per-DOF bijection
+    /// (`∫F_femrs = 4·∫F_mfem`, `∫curl F_femrs = 2·∫curl F_mfem`), which
+    /// pins the per-DOF magnitudes *by integration* (independent of the
+    /// point-value sample above).
+    #[test]
+    fn ndk_moments_match_mfem_nodal_dump() {
+        for k in 1..=3 {
+            let e = HexNDk::new(k);
+            let n = e.n_dofs();
+            let qr = e.quadrature((2 * k + 6) as u8);
+            let mut v = vec![0.0_f64; n * 3];
+            let mut c = vec![0.0_f64; n * 3];
+            let mut m = vec![[0.0_f64; 6]; n];
+            for (q, xi) in qr.points.iter().enumerate() {
+                let w = qr.weights[q];
+                e.eval_basis_vec(xi, &mut v);
+                e.eval_curl(xi, &mut c);
+                for i in 0..n {
+                    for d in 0..3 {
+                        m[i][d] += w * v[i * 3 + d];
+                        m[i][3 + d] += w * c[i * 3 + d];
+                    }
+                }
+            }
+            // Same DOF bijection as the point-value test (recomputed here so
+            // the moment check stands alone).
+            let pts = [[0.137, -0.413, 0.621], [0.71, 0.22, -0.53]];
+            let mut rust_vc: Vec<Vec<[f64; 6]>> = Vec::new();
+            for pt in &pts {
+                let mut vv = vec![0.0_f64; n * 3];
+                let mut cc = vec![0.0_f64; n * 3];
+                e.eval_basis_vec(pt, &mut vv);
+                e.eval_curl(pt, &mut cc);
+                rust_vc.push(
+                    (0..n)
+                        .map(|i| {
+                            [
+                                2.0 * vv[i * 3],
+                                2.0 * vv[i * 3 + 1],
+                                2.0 * vv[i * 3 + 2],
+                                4.0 * cc[i * 3],
+                                4.0 * cc[i * 3 + 1],
+                                4.0 * cc[i * 3 + 2],
+                            ]
+                        })
+                        .collect(),
+                );
+            }
+            let mfem_vc: Vec<Vec<[f64; 6]>> =
+                (0..2).map(|q| mfem_nodal_dump::vc(k, q)).collect();
+            let mm = mfem_nodal_dump::moments(k);
+            for i in 0..n {
+                let j = (0..n)
+                    .find(|&j| {
+                        (0..6).all(|d| (rust_vc[0][i][d] - mfem_vc[0][j][d]).abs() < 1e-12)
+                            || (0..6).all(|d| (rust_vc[0][i][d] + mfem_vc[0][j][d]).abs() < 1e-12)
+                    })
+                    .unwrap_or_else(|| panic!("k={k}: no MFEM counterpart for dof {i}"));
+                let s = if (0..6).all(|d| (rust_vc[0][i][d] - mfem_vc[0][j][d]).abs() < 1e-12) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let scale = [4.0, 4.0, 4.0, 2.0, 2.0, 2.0];
+                for d in 0..6 {
+                    let want = s * scale[d] * mm[j][d];
+                    assert!(
+                        (m[i][d] - want).abs() < 1e-12,
+                        "k={k} dof {i} (mfem {j}) moment[{d}]: rust {} vs {want}",
+                        m[i][d],
+                    );
+                }
+            }
         }
     }
 

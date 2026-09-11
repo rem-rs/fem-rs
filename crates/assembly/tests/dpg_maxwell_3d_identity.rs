@@ -741,3 +741,26 @@ fn hex2_residual_documentation() {
     );
 }
 
+
+// ─── order-2 multi-hex identity (round 15, D36) ──────────────────────────────
+//
+// The round-14 order-2 identity test only ran on a *single* hex, so the
+// order-2 interior-face trace blocks (face-interior DOFs shared between
+// elements with differently oriented canonical face cycles) were never
+// exercised.  These variants pin them: with an exact polynomial tuple the
+// assembled `B x = f` identity must still hold to machine precision, i.e. the
+// ND trace face bases, the shared face DOF pairing and the covariant maps are
+// mutually consistent at order 2 on multi-hex meshes — including the
+// reversed-cycle (`Elem2`) face of every interior quad.
+
+#[test]
+fn maxwell_3d_identity_hex2_p2_linear_e() {
+    let mesh = Mesh::<3>::unit_cube_hex(2);
+    run_identity(&mesh, 2, 1, 0, 1e-10);
+}
+
+#[test]
+fn maxwell_3d_identity_hex210_p2_linear_e() {
+    let mesh = unit_box_hex(2, 1, 1);
+    run_identity(&mesh, 2, 1, 0, 1e-10);
+}

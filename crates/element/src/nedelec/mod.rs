@@ -13,9 +13,15 @@
 //! `σ^rev_m = −σ_{k−1−m}`, so `HCurlSpace` pairs shared edges with a signed
 //! anti-diagonal permutation (MFEM's own encoding).
 //!
+//! `HexNDk` (all orders `k ≥ 1`, round-15 D36) follows the same rule: it is a
+//! 1:1 port of MFEM `ND_HexahedronElement(p, GaussLobatto, GaussLegendre)` —
+//! the element `ND_FECollection(p, dim)` builds by default — with
+//! Gauss-Legendre open points along each component direction and GLL closed
+//! points across it; see `hex_ndk.rs`.
+//!
 //! ND1 keeps the classic edge line-integral DOF `DOF_i = ∫_{e_i} Φ·t̂ ds`, and
-//! the generic `*NDk` (k≥3) elements currently keep integral-moment edge DOFs
-//! (pending the same nodal redesign — see round-14 D32 report).
+//! the generic tri/tet `*NDk` (k≥3) elements currently keep integral-moment
+//! edge DOFs (pending the same nodal redesign — see round-14 D32 report).
 //!
 //! # Available elements
 //! | Type       | Domain       | DOFs | Order |

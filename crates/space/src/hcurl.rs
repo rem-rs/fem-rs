@@ -32,7 +32,9 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
+use fem_element::nedelec::HexNDk;
 use fem_element::quadrature::gauss_legendre_01;
+use fem_element::reference::VectorReferenceElement;
 use fem_linalg::Vector;
 use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
 
@@ -146,6 +148,132 @@ const PYRAMID_TRI_FACES: [(usize, usize, usize); 4] = [
     (3, 0, 4),
 ];
 
+// ─── Hex ND face-interior DOF geometry ──────────────────────────────────────
+
+/// Hex8 reference vertices (`fem-element` `HexQ1` order) on `[-1,1]³`.
+const HEX8_REF: [[f64; 3]; 8] = [
+    [-1.0, -1.0, -1.0],
+    [1.0, -1.0, -1.0],
+    [1.0, 1.0, -1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [-1.0, 1.0, 1.0],
+];
+
+/// Physical point and Jacobian of the trilinear hexahedron map at `xi`
+/// (Jacobian columns as `jac[component][derivative]`).
+fn hex_trilinear_map(verts: &[[f64; 3]; 8], xi: &[f64]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let (x, y, z) = (xi[0], xi[1], xi[2]);
+    let mut p = [0.0_f64; 3];
+    let mut jac = [[0.0_f64; 3]; 3];
+    for (i, v) in verts.iter().enumerate() {
+        let r = HEX8_REF[i];
+        let fx = 1.0 + r[0] * x;
+        let fy = 1.0 + r[1] * y;
+        let fz = 1.0 + r[2] * z;
+        let n = 0.125 * fx * fy * fz;
+        let dx = 0.125 * r[0] * fy * fz;
+        let dy = 0.125 * r[1] * fx * fz;
+        let dz = 0.125 * r[2] * fx * fy;
+        for d in 0..3 {
+            p[d] += n * v[d];
+            jac[d][0] += dx * v[d];
+            jac[d][1] += dy * v[d];
+            jac[d][2] += dz * v[d];
+        }
+    }
+    (p, jac)
+}
+
+/// The 8 hexahedron vertices of element `e` (the corners come first in the
+/// `Hex8`/`Hex20` node order).
+fn hex8_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 8] {
+    let nodes = mesh.element_nodes(e);
+    let mut v = [[0.0_f64; 3]; 8];
+    for i in 0..8 {
+        let c = mesh.node_coords(nodes[i]);
+        for d in 0..3 {
+            v[i][d] = c[d];
+        }
+    }
+    v
+}
+
+/// Physical point and tangent of every local DOF of one hex NDk face block.
+///
+/// `coords`/`tangents` are the element's full local DOF layout
+/// ([`HexNDk::dof_coords`] / [`HexNDk::dof_tangents`], the reference-frame
+/// point-value functionals `σ(Φ) = Φ(ξ)·t̂`); the face `lf` block occupies
+/// `12k + 2k(k-1)·lf ..` and its tangents are pushed through the element map
+/// (`t_phys = J(ξ)·t̂`, MFEM `Project_ND`'s `v(x)·(J tk)`).
+fn hex_face_slots(
+    verts: &[[f64; 3]; 8],
+    k: usize,
+    lf: usize,
+    coords: &[Vec<f64>],
+    tangents: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let ndf = 2 * k * (k - 1);
+    let off = 12 * k + ndf * lf;
+    let mut xs = Vec::with_capacity(ndf);
+    let mut ts = Vec::with_capacity(ndf);
+    for n in 0..ndf {
+        let xi = &coords[off + n];
+        let (x, jac) = hex_trilinear_map(verts, xi);
+        let tau = tangents[off + n];
+        let mut t = [0.0_f64; 3];
+        for d in 0..3 {
+            t[d] = jac[d][0] * tau[0] + jac[d][1] * tau[1] + jac[d][2] * tau[2];
+        }
+        xs.push(x);
+        ts.push(t);
+    }
+    (xs, ts)
+}
+
+/// Match one element-local face DOF `(x, t)` against a face's canonical DOF
+/// list — the same physical point with a parallel (same or opposite)
+/// physical tangent.  Returns `(canonical slot, sign)`.
+///
+/// This is the hex analogue of MFEM's `DofOrderForOrientation(QUARE, or)`
+/// signed permutation: because the DOFs are nodal point-value functionals
+/// with *unnormalized* tangents, an orientation change is exactly a signed
+/// permutation of the face DOFs.
+fn match_face_dof(
+    nodes: &[[f64; 3]],
+    tangents: &[[f64; 3]],
+    x: [f64; 3],
+    t: [f64; 3],
+) -> (usize, f64) {
+    let tol = 1e-9 * (1.0 + (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt());
+    let tn = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+    for (m, (an, at)) in nodes.iter().zip(tangents.iter()).enumerate() {
+        let dx = x[0] - an[0];
+        let dy = x[1] - an[1];
+        let dz = x[2] - an[2];
+        if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+            continue;
+        }
+        let an_n = (at[0] * at[0] + at[1] * at[1] + at[2] * at[2]).sqrt();
+        let c = (t[0] * at[0] + t[1] * at[1] + t[2] * at[2]) / (tn * an_n);
+        if c.abs() > 1.0 - 1e-9 {
+            return (m, if c > 0.0 { 1.0 } else { -1.0 });
+        }
+    }
+    panic!("HCurlSpace: no matching canonical hex face DOF at {x:?}");
+}
+
+/// Physical DOF points/tangents of one quad face's canonical ND DOF list,
+/// fixed by the face-creating element ("Elem1") — the global functionals of
+/// the face's shared DOFs (`σ_m(Φ) = Φ(x_m)·t_m`).
+#[derive(Debug, Clone)]
+struct NdFaceAnchor {
+    nodes: Vec<[f64; 3]>,
+    tangents: Vec<[f64; 3]>,
+}
+
 /// Local base quad face for pyramid.
 pub(crate) const PYRAMID_QUAD_FACE: [(usize, usize, usize, usize); 1] = [
     (0, 1, 2, 3),
@@ -180,6 +308,9 @@ pub struct HCurlSpace<M: MeshTopology> {
     face_anchor: HashMap<FaceKey, [[f64; 3]; 3]>,
     /// Quad-face → first global DOF for hex NDk (2k(k-1) DOFs per face).
     quad_face_to_dof: HashMap<QuadFaceKey, DofId>,
+    /// Quad-face → physical DOF points/tangents (`σ_m(Φ) = Φ(x_m)·t_m`) of
+    /// the face's canonical DOF list, fixed by the face-creating element.
+    quad_face_anchor: HashMap<QuadFaceKey, NdFaceAnchor>,
     /// Spatial dimension.
     dim: usize,
     /// Cell type used by this space.
@@ -202,6 +333,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_anchor: HashMap<FaceKey, [[f64; 3]; 3]> = HashMap::new();
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
+        let mut quad_face_anchor: HashMap<QuadFaceKey, NdFaceAnchor> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::new();
         let mut signs_flat = Vec::new();
@@ -285,12 +417,52 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     }
                     ElementType::Hex8 | ElementType::Hex20 => {
                         let ndf_quad = 2 * k * (k - 1);
-                        for &(la, lb, lc, ld) in &HEX_QUAD_FACES {
+                        // Element-local point-value/tangent layout of the face
+                        // blocks (HexNDk), computed once for this order.
+                        let (coords, tks) = if ndf_quad > 0 {
+                            let hnd = HexNDk::new(k);
+                            (hnd.dof_coords(), hnd.dof_tangents())
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+                        let verts8 = hex8_verts(&mesh, e);
+                        for (lf, &(la, lb, lc, ld)) in HEX_QUAD_FACES.iter().enumerate() {
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                            let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += ndf_quad as u32; d
-                            });
-                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &coords, &tks);
+                            match quad_face_anchor.get(&key) {
+                                None => {
+                                    let first_dof = next_dof;
+                                    next_dof += ndf_quad as u32;
+                                    quad_face_to_dof.insert(key, first_dof);
+                                    quad_face_anchor.insert(
+                                        key,
+                                        NdFaceAnchor { nodes: xs, tangents: ts },
+                                    );
+                                    for m in 0..ndf_quad {
+                                        dofs_flat.push(first_dof + m as u32);
+                                        signs_flat.push(1.0);
+                                    }
+                                }
+                                Some(anchor) => {
+                                    // MFEM `DofOrderForOrientation`: the shared
+                                    // face's DOFs are the canonical
+                                    // (creating-element) list, re-indexed by the
+                                    // orientation of this element's local face
+                                    // cycle with the sign of the covariant
+                                    // tangent alignment.
+                                    let first_dof = quad_face_to_dof[&key];
+                                    for n in 0..ndf_quad {
+                                        let (m, s) = match_face_dof(
+                                            &anchor.nodes,
+                                            &anchor.tangents,
+                                            xs[n],
+                                            ts[n],
+                                        );
+                                        dofs_flat.push(first_dof + m as u32);
+                                        signs_flat.push(s);
+                                    }
+                                }
+                            }
                         }
                     }
                     ElementType::Prism6 => {
@@ -362,6 +534,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             face_to_dof,
             face_anchor,
             quad_face_to_dof,
+            quad_face_anchor,
             dim,
             cell_type: first_cell_type,
         }
@@ -708,6 +881,54 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     }
                     let r = result.as_slice_mut();
                     for m in 0..nf { r[first_dof as usize + m] = moments[m]; }
+                }
+            }
+        } else if self.dim == 3
+            && k >= 2
+            && matches!(self.cell_type, ElementType::Hex8 | ElementType::Hex20)
+        {
+            // ── Hex NDk: point-value DOFs with the unnormalized physical
+            // tangents `J t̂` (MFEM `Project_ND`), matching the nodal element
+            // basis exactly (round-15 D36 rework).
+            //
+            // Face-interior DOFs are shared: their functionals are the
+            // face's canonical (face-creating element) list stored in
+            // `quad_face_anchor`.  Interior DOFs are element-owned, so their
+            // functionals use the owning element's map.
+            let ndf_quad = 2 * k * (k - 1);
+            let hnd = HexNDk::new(k);
+            let coords = hnd.dof_coords();
+            let tks = hnd.dof_tangents();
+            {
+                let r = result.as_slice_mut();
+                for (&key, &first_dof) in &self.quad_face_to_dof {
+                    let anchor = &self.quad_face_anchor[&key];
+                    for (m, (x, t)) in anchor.nodes.iter().zip(anchor.tangents.iter()).enumerate() {
+                        let fv = f(x);
+                        r[first_dof as usize + m] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                    }
+                }
+            }
+            let n_interior = 3 * k * (k - 1) * (k - 1);
+            if n_interior > 0 {
+                let off = 12 * k + 6 * ndf_quad;
+                for e in 0..n_elem as u32 {
+                    let verts8 = hex8_verts(&self.mesh, e);
+                    let dofs = self.element_dofs(e);
+                    let base = dofs.len() - n_interior;
+                    let r = result.as_slice_mut();
+                    for n in 0..n_interior {
+                        let xi = &coords[off + n];
+                        let (x, jac) = hex_trilinear_map(&verts8, xi);
+                        let tau = tks[off + n];
+                        let t = [
+                            jac[0][0] * tau[0] + jac[0][1] * tau[1] + jac[0][2] * tau[2],
+                            jac[1][0] * tau[0] + jac[1][1] * tau[1] + jac[1][2] * tau[2],
+                            jac[2][0] * tau[0] + jac[2][1] * tau[1] + jac[2][2] * tau[2],
+                        ];
+                        let fv = f(&x);
+                        r[dofs[base + n] as usize] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                    }
                 }
             }
         }
