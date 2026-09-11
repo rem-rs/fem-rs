@@ -587,6 +587,13 @@ impl<D: NavierDiscretization> NavierSolver<D> {
     pub fn set_max_bdf_order(&mut self, order: i32) {
         self.cfg.max_bdf_order = order;
     }
+    /// The public `dthist` member of the C++ class: the time-step history
+    /// `[dt(tₙ), dt(tₙ₋₁), dt(tₙ₋₂)]` that the variable-time-step miniapps
+    /// (`navier_kovasznay_vs`) queue through
+    /// [`Self::update_timestep_history`].
+    pub fn dthist(&self) -> [f64; 3] {
+        self.dthist
+    }
     /// `MvInv->GetNumIterations()` of the last step.
     pub fn iter_mvsolve(&self) -> i32 {
         self.iter_mvsolve
@@ -1235,6 +1242,40 @@ mod tests {
         assert!(cfl > 0.0);
         assert!(s.iter_mvsolve() > 0);
         assert!(s.iter_hsolve() > 0);
+    }
+
+    /// The *fully periodic* configuration (both essential DOF lists empty, as
+    /// for a mesh without boundary elements — MFEM's `periodic-square.mesh`):
+    /// no `FormSystemMatrix`/`FormLinearSystem` elimination at all, the
+    /// pressure solve runs with `OrthoSolver(GSSmoother)`, `resp` is
+    /// orthogonalised and `pn` is mean-zeroed.  This is the path
+    /// `navier_shear` exercises.
+    #[test]
+    fn toy_driver_fully_periodic_step() {
+        let mut disc = ToyDisc::new(2, 2, true);
+        disc.vel_ess.clear();
+        disc.pres_ess.clear();
+        let mut s = NavierSolver::new(
+            disc,
+            0.25,
+            NavierConfig { verbose: false, ..Default::default() },
+        );
+        s.velocity_mut().copy_from_slice(&[1.0, -0.5]);
+        s.setup(0.2);
+        let mut t = 0.0;
+        s.step(&mut t, 0.2, 0, false);
+        assert_eq!(t, 0.2);
+        assert!(s.velocity().iter().all(|v| v.is_finite()));
+        assert!(s.pressure().iter().all(|v| v.is_finite()));
+        // No essential DOF was ever eliminated.
+        assert!(s.disc.elim_calls.borrow().is_empty());
+        // Both `H` and `Sp` keep their diagonal (no `DIAG_KEEP` zeroing) and
+        // the pressure is mean-zeroed (`MeanZero`).
+        let pmean = s.pressure().iter().sum::<f64>() / s.pressure().len() as f64;
+        assert!(pmean.abs() < 1e-15, "mean p = {pmean}");
+        // `H` is reassembled with (bd0/dt, kin_vis) = (1/0.2, 0.25).
+        assert_eq!(s.disc.h_calls.borrow().len(), 2);
+        assert_eq!(s.disc.h_calls.borrow()[1], (1.0 / 0.2, 0.25));
     }
 
     /// The pressure-Dirichlet path (project + eliminate + no mean zero) is
