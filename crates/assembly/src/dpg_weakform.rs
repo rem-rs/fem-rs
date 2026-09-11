@@ -347,6 +347,18 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         self.quad_order = order;
     }
 
+    /// Set the face (trace) quadrature order — the rule used by the trace
+    /// integrators on the skeleton.  MFEM sizes each trace integrator's rule
+    /// from the two spaces it couples (`NormalTraceIntegrator` /
+    /// `TraceIntegrator`: `test_fe.GetOrder() + trial_face_fe.GetOrder()`),
+    /// which for the DPG trial/test pairs is `test_order + p − 1` (`p` the
+    /// trace order).  The face integrands are polynomials in the trace pair,
+    /// so any rule at least that high reproduces MFEM exactly; the default
+    /// `4` is too low for `test_order + p − 1 > 4` (e.g. `-o 3 -do 1`).
+    pub fn set_face_quad_order(&mut self, order: u8) {
+        self.face_quad_order = order;
+    }
+
     /// Add a broken scalar-L2 trial space of given `order` — MFEM
     /// `FiniteElementSpace(mesh, L2_FECollection(order, dim))`.  Returns the
     /// trial block index.
@@ -374,12 +386,33 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         self.trial_spaces.len() - 1
     }
 
-    /// Add a trace (skeleton) trial space of face order `order` — MFEM
-    /// `H1_Trace_FECollection(order, dim)` or `RT_Trace_FECollection(order,
-    /// dim)` (both traces are the nodal `P_order` space on each face; the RT
-    /// orientation sign lives in the trace integrators' ±1 scale).
+    /// Add a face-discontinuous trace (skeleton) trial space of face order
+    /// `order` — MFEM `RT_Trace_FECollection(order, dim)` (the trace of the
+    /// first-order-system flux, `σ̂ := −σ·n`).  Every face carries its own
+    /// `P_order` nodal dofs; the RT orientation sign lives in the trace
+    /// integrators' ±1 scale.
     pub fn add_trial_trace_space(&mut self, order: u8) -> usize {
         let sk = SkeletonSpace::new(self.mesh.clone(), order);
+        self.trial_spaces.push(TrialSpace::Trace { skeleton: sk });
+        self.trial_integs.push(Vec::new());
+        self.trial_spaces.len() - 1
+    }
+
+    /// Add a **vertex-continuous** H1-trace trial space of face order
+    /// `order` — MFEM `H1_Trace_FECollection(order, dim)`.
+    ///
+    /// The trace unknown `û` of the ultraweak first-order system lives in
+    /// `H^{1/2}(Γ_h)`, so its dofs are shared through the skeleton's
+    /// vertices/edges (a face-discontinuous space would double the boundary
+    /// trace and relax the inter-element continuity of `û`).  Concretely the
+    /// corner dofs of each face are the shared skeleton-vertex dofs and, in
+    /// 3-D, the `p−1` dofs on each face edge are shared by every face meeting
+    /// at that edge; see [`SkeletonSpace::new_h1`].  The face dof *order*
+    /// still matches [`eval_face_lagrange`] (node `k` at parameter `k/p`
+    /// along the face's canonical direction), so it is interchangeable with
+    /// [`Self::add_trial_trace_space`] in the assemblers.
+    pub fn add_trial_trace_space_h1(&mut self, order: u8) -> usize {
+        let sk = SkeletonSpace::new_h1(self.mesh.clone(), order);
         self.trial_spaces.push(TrialSpace::Trace { skeleton: sk });
         self.trial_integs.push(Vec::new());
         self.trial_spaces.len() - 1
@@ -1842,7 +1875,7 @@ mod tests {
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh);
         let u = a.add_trial_scalar_space(p - 1);
         let sig = a.add_trial_vector_space(p - 1, 2);
-        let hatu = a.add_trial_trace_space(p);
+        let hatu = a.add_trial_trace_space_h1(p);
         let hatsig = a.add_trial_trace_space(p - 1);
         let tau = a.add_test_space(VolKind::HDiv, p - 1 + 1); // RT_{p+δ-1}
         let v = a.add_test_space(VolKind::Scalar, p + 1); // H1_{p+δ}
@@ -1952,7 +1985,7 @@ mod tests {
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh.clone());
         let u = a.add_trial_scalar_space(p - 1);
         let sig = a.add_trial_vector_space(p - 1, 2);
-        let hatu = a.add_trial_trace_space(p);
+        let hatu = a.add_trial_trace_space_h1(p);
         let hatsig = a.add_trial_trace_space(p - 1);
         let tau = a.add_test_space(VolKind::HDiv, p);
         let v = a.add_test_space(VolKind::Scalar, p + 1);
@@ -2045,7 +2078,7 @@ mod tests {
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh.clone());
         let u = a.add_trial_scalar_space(p - 1);
         let sig = a.add_trial_vector_space(p - 1, 2);
-        let hatu = a.add_trial_trace_space(p);
+        let hatu = a.add_trial_trace_space_h1(p);
         let hatsig = a.add_trial_trace_space(p - 1);
         let tau = a.add_test_space(VolKind::HDiv, p);
         let v = a.add_test_space(VolKind::Scalar, p + 1);
@@ -2393,7 +2426,7 @@ mod tests {
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh);
         let u = a.add_trial_scalar_space(p - 1);
         let sig = a.add_trial_vector_space(p - 1, 2);
-        let hatu = a.add_trial_trace_space(p);
+        let hatu = a.add_trial_trace_space_h1(p);
         let hatsig = a.add_trial_trace_space(p - 1);
         let tau = a.add_test_space(VolKind::HDiv, p);
         let v = a.add_test_space(VolKind::Scalar, p + 1);
@@ -2602,8 +2635,10 @@ mod tests {
                     if !sk.is_boundary_face(f) {
                         continue;
                     }
-                    for k in 0..sk.dofs_per_face(f) {
-                        let d = sk.face_dofs(f).start + k;
+                    // `face_dof_list`: valid in both trace modes (in the
+                    // H1-trace mode the face corners are shared vertex dofs,
+                    // so the contiguous `face_dofs` range does not name them).
+                    for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
                         ess.push(offs[hatu] + d);
                         let pt = a1.face_dof_point(&sk, f, k);
                         x_full[offs[hatu] + d] = exact(&pt);

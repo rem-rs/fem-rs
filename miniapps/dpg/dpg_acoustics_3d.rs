@@ -302,7 +302,7 @@ fn errors(
     let et = mesh.element_type(0);
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(et, order);
     let n = fe.n_dofs();
-    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 4);
+    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 3);
     let mut phi = vec![0.0_f64; n];
     let mut err2p = 0.0;
     let mut err2u = 0.0;

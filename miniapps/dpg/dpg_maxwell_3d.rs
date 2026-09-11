@@ -124,6 +124,34 @@ impl Exact {
     }
 }
 
+/// `DPG_DUMP_MAT=<path>`: dump the assembled complex DPG normal-equation
+/// blocks (real/imag part, uncondensed trial layout, before any BC
+/// elimination) as `E R|I <row> <col> <value>` triplets plus the solution
+/// size/block layout.  The layout mirrors the C++ reference probe
+/// `tmp/d45/cdump.cpp` (which dumps `ComplexDPGWeakForm::BlockMat_r/i()`),
+/// so the entries can be compared one by one.
+fn dump_assembled(a: &ComplexDPGWeakForm<Mesh<3>>, path: &str) {
+    let sizes = a.trial_block_sizes();
+    let offs = a.trial_offsets();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "SIZE {}\nBLOCKS {sizes:?}\nOFFSETS {offs:?}\n",
+        a.size()
+    ));
+    for (tag, m) in [("R", a.block_mat_r()), ("I", a.block_mat_i())] {
+        for i in 0..m.nrows {
+            let mut row: Vec<(usize, f64)> = (m.row_ptr[i]..m.row_ptr[i + 1])
+                .map(|p| (m.col_idx[p] as usize, m.values[p]))
+                .collect();
+            row.sort_by_key(|&(c, _)| c);
+            for (c, v) in row {
+                out.push_str(&format!("E {tag} {i} {c} {v:.17e}\n"));
+            }
+        }
+    }
+    std::fs::write(path, out).expect("write matrix dump");
+}
+
 /// One level build + solve; returns `(dofs, l2 err, pcg its)`.
 #[allow(clippy::too_many_lines)]
 fn solve_level(
@@ -257,6 +285,10 @@ fn solve_level(
     a.store_matrices(true);
     a.assemble();
 
+    if let Ok(path) = std::env::var("DPG_DUMP_MAT") {
+        dump_assembled(&a, &path);
+    }
+
     // Essential BCs: Ê = E₀ (tangential projection of the exact E) on the
     // whole boundary — MFEM `ProjectBdrCoefficientTangent`:
     // `dof_k = E(x_k) · (J tk_k)` at the ND face-dof nodes, with the MFEM
@@ -348,9 +380,11 @@ fn solve_level(
         let names = ["E", "H", "hatE", "hatH"];
         for (bi, nm) in names.iter().enumerate() {
             let (r0, r1) = (offs[bi], offs[bi + 1]);
-            let sr: f64 = sol_r[r0..r1].iter().sum();
-            let si: f64 = sol_i[r0..r1].iter().sum();
-            eprintln!("DPG_DEBUG: block {nm} sum_re {sr:+.6e} sum_im {si:+.6e}");
+            // Norm (not sum): permutation/basis invariant, so directly
+            // comparable with the C++ harness' `CPPSUM` lines.
+            let sr: f64 = sol_r[r0..r1].iter().map(|v| v * v).sum::<f64>().sqrt();
+            let si: f64 = sol_i[r0..r1].iter().map(|v| v * v).sum::<f64>().sqrt();
+            eprintln!("DPG_DEBUG: block {nm} norm_re {sr:+.12e} norm_im {si:+.12e}");
         }
     }
 
@@ -384,7 +418,7 @@ fn errors(
     let et = mesh.element_type(0);
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(et, order);
     let n = fe.n_dofs();
-    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 4);
+    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 3);
     let mut phi = vec![0.0_f64; n];
     let mut err2 = 0.0_f64;
     let is_simplex = matches!(et, ElementType::Tet4);

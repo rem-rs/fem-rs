@@ -61,7 +61,7 @@ fn build_poisson_2d(mesh: &Mesh<2>, p: u8) -> (DpgWeakForm<Mesh<2>>, [usize; 4])
     let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh.clone());
     let u = a.add_trial_scalar_space(p - 1);
     let sig = a.add_trial_vector_space(p - 1, 2);
-    let hatu = a.add_trial_trace_space(p);
+    let hatu = a.add_trial_trace_space_h1(p);
     let hatsig = a.add_trial_trace_space(p - 1);
     let tau = a.add_test_space(VolKind::HDiv, test_order - 1);
     let v = a.add_test_space(VolKind::Scalar, test_order);
@@ -100,8 +100,9 @@ fn poisson_bcs(a: &DpgWeakForm<Mesh<2>>, hatu: usize) -> (Vec<usize>, Vec<f64>) 
         if !sk.is_boundary_face(f) {
             continue;
         }
-        for k in 0..sk.dofs_per_face(f) {
-            let d = sk.face_dofs(f).start + k;
+        // `face_dof_list` names the shared vertex dofs of the H1-trace mode
+        // (the contiguous `face_dofs` range does not).
+        for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
             ess.push(base + d);
             let pt = a.face_dof_point(&sk, f, k);
             x[base + d] = (PI * (pt[0] + pt[1])).sin();

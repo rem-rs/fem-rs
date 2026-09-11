@@ -81,6 +81,51 @@ impl fem_assembly::dpg::dpg_integrators::DpgBilinear2 for NegVectorMass {
     }
 }
 
+/// `DPG_DUMP_MAT=<path>`: dump the assembled DPG normal-equation matrix (in
+/// the uncondensed trial layout, before any BC elimination) and its
+/// right-hand side, so the entries can be compared one by one against the
+/// C++ reference probe `tmp/d45/ddump.cpp` (which dumps
+/// `DPGWeakForm::BlockMat()` after `Finalize`).  Format: `E <row> <col>
+/// <value>` triplets, `B <i> <value>` for the RHS, plus the block layout.
+fn dump_assembled(a: &mut DpgWeakForm<Mesh<2>>, path: &str) {
+    let n = a.size();
+    let sizes = a.trial_block_sizes();
+    let offs = a.trial_offsets();
+    // Trace-block element vdofs (compared against MFEM's `GetFaceVDofs`).
+    let mut vdof_lines = String::new();
+    for b in 0..a.n_trial_blocks() {
+        if !a.is_trace_block(b) {
+            continue;
+        }
+        for e in 0..a.mesh().n_elements() as u32 {
+            vdof_lines.push_str(&format!("TRACEFE {b} {e}"));
+            for d in a.trial_element_vdofs(b, e) {
+                vdof_lines.push_str(&format!(" {d}"));
+            }
+            vdof_lines.push('\n');
+        }
+    }
+    let x0 = vec![0.0_f64; n];
+    let (sys, _xs, b) = a.form_linear_system(&[], &x0, false);
+    let m = sys.matrix();
+    let mut out = String::new();
+    out.push_str(&format!("SIZE {n}\nBLOCKS {sizes:?}\nOFFSETS {offs:?}\n"));
+    out.push_str(&vdof_lines);
+    for i in 0..m.nrows {
+        let mut row: Vec<(usize, f64)> = (m.row_ptr[i]..m.row_ptr[i + 1])
+            .map(|p| (m.col_idx[p] as usize, m.values[p]))
+            .collect();
+        row.sort_by_key(|&(c, _)| c);
+        for (c, v) in row {
+            out.push_str(&format!("E {i} {c} {v:.17e}\n"));
+        }
+    }
+    for (i, &v) in b.iter().enumerate() {
+        out.push_str(&format!("B {i} {v:.17e}\n"));
+    }
+    std::fs::write(path, out).expect("write matrix dump");
+}
+
 /// Build and solve one refinement level; returns `(dofs, l2_error, pcg_its)`.
 fn solve_level(
     mesh: &Mesh<2>,
@@ -92,12 +137,36 @@ fn solve_level(
     let p = order;
     let test_order = order + delta_order;
     let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh.clone());
+    // Volume quadrature order = MFEM's `DomainLFIntegrator` default
+    // (`oa*order + ob` with the built-in `oa = 2`, `ob = 0`, applied to the
+    // H1 test element of order `test_order`), i.e. exactly `2·test_order`.
+    // fem-rs runs *all* volume integrands through one shared rule, and this
+    // order is also exact for every polynomial integrand here (the highest
+    // degree is the Q_test² test mass, degree `2·test_order`).  Matching the
+    // RHS quadrature matters: `f = −Δu` is not a polynomial, so a richer rule
+    // (the old default `6`) integrates `(f, v)` to a *different* value than
+    // C++ and shifts the whole DPG solution (0.46 % in the L2 error at
+    // order 1, confirming: with this order the σ-right-hand side agrees with
+    // the MFEM harness to 1e-16).
+    a.set_quad_order(2 * test_order);
+    // Face (trace) quadrature order = MFEM's `NormalTraceIntegrator` /
+    // `TraceIntegrator` rule `test_fe.GetOrder() + trial_face_fe.GetOrder()`
+    // (`fem/bilininteg.cpp:4501`, `:4435`), which for these pairs is
+    // `test_order + p − 1`.  The trace integrands are polynomials, so a
+    // higher rule is also exact, but a lower one is not: at `-o 3` the
+    // `û·(τ·n)` integrand has degree 7 while the old fixed default (order 4,
+    // exact to degree 5) left a 0.18 % difference.
+    a.set_face_quad_order(test_order + p - 1);
 
-    // Trial spaces: u (L2, p−1), σ (vector L2, p−1), û (trace, p),
-    // σ̂ (RT-trace ≡ nodal trace, p−1).
+    // Trial spaces: u (L2, p−1), σ (vector L2, p−1), û (H1-trace, p),
+    // σ̂ (RT-trace, p−1).  C++ diffusion.cpp:
+    //   u_fec    = L2_FECollection(order-1, dim)
+    //   sigma_fec= L2_FECollection(order-1, dim)
+    //   hatu_fec = H1_Trace_FECollection(order, dim)     ← vertex continuous
+    //   hatsigma_fec = RT_Trace_FECollection(order-1, dim)
     let u = a.add_trial_scalar_space(p - 1);
     let sig = a.add_trial_vector_space(p - 1, 2);
-    let hatu = a.add_trial_trace_space(p);
+    let hatu = a.add_trial_trace_space_h1(p);
     let hatsig = a.add_trial_trace_space(p - 1);
 
     // Broken test spaces: τ ∈ RT(test_order−1), v ∈ H¹(test_order).
@@ -133,7 +202,14 @@ fn solve_level(
     }
     a.assemble();
 
+    if let Ok(path) = std::env::var("DPG_DUMP_MAT") {
+        dump_assembled(&mut a, &path);
+    }
+
     // Essential BCs: û on the boundary (all boundary attributes, as in C++).
+    // `face_dof_list` is the global-dof form of the face dof range: in the
+    // H1-trace mode the face corners are shared skeleton-vertex dofs, so the
+    // contiguous `face_dofs` range would not name them.
     let sk = a.skeleton(hatu);
     let hatu_base = a.trial_offsets()[hatu];
     let mut ess = Vec::new();
@@ -142,11 +218,11 @@ fn solve_level(
         if !sk.is_boundary_face(f) {
             continue;
         }
-        for k in 0..sk.dofs_per_face(f) {
-            ess.push(hatu_base + sk.face_dofs(f).start + k);
+        for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
+            ess.push(hatu_base + d);
             if manufactured {
                 let pt = a.face_dof_point(&sk, f, k);
-                x_full[hatu_base + sk.face_dofs(f).start + k] = exact_u(&pt);
+                x_full[hatu_base + d] = exact_u(&pt);
             }
         }
     }
@@ -203,6 +279,9 @@ fn solve_level(
     let err = if manufactured {
         let err_u = l2_error_scalar(&x, a.trial_offsets()[u], mesh, p - 1, &exact_u);
         let err_s = l2_error_vector(&x, a.trial_offsets()[sig], mesh, p - 1, 2, &exact_sigma);
+        if std::env::var("DPG_DEBUG").is_ok() {
+            eprintln!("DPG_DEBUG: err_u = {err_u:.17e} err_sigma = {err_s:.17e}");
+        }
         (err_u * err_u + err_s * err_s).sqrt()
     } else {
         0.0
@@ -233,7 +312,7 @@ fn l2_error_scalar(
     let dim = 2usize;
     let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(
         mesh.element_type(0),
-        2 * order + 4,
+        2 * order + 3,
     );
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(mesh.element_type(0), order);
     let n = fe.n_dofs();
@@ -283,7 +362,7 @@ fn l2_error_vector(
     let dim = 2usize;
     let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(
         mesh.element_type(0),
-        2 * order + 4,
+        2 * order + 3,
     );
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(mesh.element_type(0), order);
     let n = fe.n_dofs();

@@ -753,6 +753,13 @@ impl<M: MeshTopology + Clone> SkeletonSpace<M> {
         self.order
     }
 
+    /// Whether this is the vertex-continuous H1-trace mode
+    /// ([`Self::new_h1`]) rather than the face-discontinuous RT-trace mode
+    /// ([`Self::new`]).
+    pub fn is_continuous(&self) -> bool {
+        self.continuous
+    }
+
     /// Total number of skeleton DOFs.
     pub fn n_dofs(&self) -> usize {
         self.n_dofs

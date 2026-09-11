@@ -291,6 +291,18 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         self.quad_order = order;
     }
 
+    /// Set the face (trace) quadrature order — the rule used by the trace
+    /// integrators on the skeleton.  MFEM sizes each trace integrator's rule
+    /// from the two spaces it couples (`TangentTraceIntegrator`:
+    /// `test_fe.GetOrder() + trial_face_fe.GetOrder()`), which for the DPG
+    /// trial/test pairs is `test_order + p − 1` (`p` the trace order).  The
+    /// face integrands are polynomials in the trace pair, so any rule at
+    /// least that high reproduces MFEM exactly; the default `4` is too low
+    /// for `test_order + p − 1 > 4`.
+    pub fn set_face_quad_order(&mut self, order: u8) {
+        self.face_quad_order = order;
+    }
+
     /// Broken scalar-L2 trial space (MFEM `L2_FECollection(order-1, dim)`).
     pub fn add_trial_scalar_space(&mut self, order: u8) -> usize {
         let n = scalar_ref_elem(self.mesh.element_type(0), order).n_dofs();
