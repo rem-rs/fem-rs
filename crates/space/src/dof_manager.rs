@@ -109,6 +109,12 @@ pub struct DofManager {
     /// CSR-like offsets into `dofs_flat` for mixed meshes.
     pub(crate) elem_dof_offsets: Option<Vec<usize>>,
     /// Coordinates of each DOF node (flat, `n_dofs × dim`).
+    ///
+    /// On meshes with per-element geometry (geometrically periodic) this is
+    /// rebuilt from the elements' own geometry nodes with last-writer-wins
+    /// semantics (MFEM `ProjectCoefficient`), so a seam DOF holds the
+    /// position it has in the *last* element containing it — see
+    /// [`DofManager::rebuild_dof_coords_periodic`].
     pub dof_coords: Vec<f64>,
     /// Spatial dimension.
     pub dim: usize,
@@ -161,9 +167,27 @@ impl DofManager {
     /// - 3-D tetrahedral meshes (`Tet4`) with `order = 2` or `order = 3`.
     /// - Any order `>= 4` on simplicial meshes via the general `build_pk` path.
     ///
+    /// On meshes with per-element geometry (geometrically periodic meshes,
+    /// see [`MeshTopology::geometry_nodes`]) the DOF coordinate table is
+    /// rebuilt from each element's own geometry nodes after the fold-based
+    /// construction (D56) — see [`DofManager::rebuild_dof_coords_periodic`].
+    ///
     /// # Panics
     /// Panics if the requested order is unsupported for the mesh type.
     pub fn new<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let mut dm = Self::build(mesh, order);
+        // D56: a periodic geometry snapshot keeps per-element coordinates, so
+        // the fold-based table above places seam DOFs at folded chord
+        // positions no element can see.  Rebuild per element (MFEM
+        // `ProjectCoefficient` semantics: evaluate at each element's own
+        // nodal points, last writer wins for shared DOFs).
+        if mesh.geom_order() == 1 && mesh.geom_n_nodes() != mesh.n_nodes() {
+            dm.rebuild_dof_coords_periodic(mesh);
+        }
+        dm
+    }
+
+    fn build<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         let topo_dim = mesh.topological_dim() as usize;
         match order {
             1 => Self::build_p1(mesh),
@@ -230,6 +254,11 @@ impl DofManager {
     }
 
     /// Physical coordinates of DOF `dof` (slice of length `dim`).
+    ///
+    /// On geometrically periodic meshes a shared (seam) DOF has no single
+    /// physical position: the returned value is its position in the last
+    /// element containing it (MFEM `ProjectCoefficient` last-writer-wins),
+    /// see [`DofManager::rebuild_dof_coords_periodic`].
     pub fn dof_coord(&self, dof: DofId) -> &[f64] {
         let start = dof as usize * self.dim;
         &self.dof_coords[start .. start + self.dim]
@@ -2390,6 +2419,77 @@ impl DofManager {
     /// For variable-order DofManagers, returns the per-element order.
     pub fn element_order(&self, elem: ElemId) -> u8 {
         self.elem_orders.as_ref().map_or(self.order, |orders| orders[elem as usize])
+    }
+
+    // ─── D56: periodic per-element geometry ────────────────────────────────────
+
+    /// Rebuild the DOF coordinate table from each element's **own** geometry
+    /// nodes ([`MeshTopology::geometry_nodes`] / [`MeshTopology::geom_coords_of`]).
+    ///
+    /// A geometrically periodic mesh carries an order-1 per-element geometry
+    /// snapshot (MFEM `MakePeriodic` materializes the nodal `Nodes` grid
+    /// function *before* merging vertices), so a shared (seam) DOF sits at a
+    /// *different* physical point in each of its elements — the folded vertex
+    /// table is only one image and the fold-based table built above also
+    /// places seam edge/face DOFs at chord midpoints no element can see.
+    /// MFEM's `GridFunction::ProjectCoefficient` resolves this by evaluating
+    /// the coefficient per element at each local DOF's nodal point under that
+    /// element's own transform and letting the last element win for shared
+    /// DOFs.  This method produces exactly the coordinate table that a
+    /// dof-wise evaluation then reproduces: each element maps its reference
+    /// DOF positions through its own (order-1, hence affine) geometry and
+    /// overwrites the global entries in element order.
+    ///
+    /// Element slot layouts must match the reference factories the H1
+    /// assembler evaluates (QuadQk / HexQk / H1TriPk / TetPk / PrismPk /
+    /// PyramidPk); an element whose builder layout does not line up with its
+    /// factory (slot-count mismatch) is skipped and keeps its fold-based
+    /// coordinates.
+    fn rebuild_dof_coords_periodic<M: MeshTopology>(&mut self, mesh: &M) {
+        use fem_element::lagrange::factory::{HexQk, QuadQk, TetPk};
+        use fem_element::lagrange::{H1TriPk, PrismPk, PyramidPk};
+
+        let dim = self.dim;
+        let topo_dim = mesh.topological_dim() as usize;
+        let n_elems = mesh.n_elements();
+        for e in 0..n_elems as u32 {
+            let p = self.element_order(e) as usize;
+            let npe = mesh.element_nodes(e).len();
+            let (ref_elem, q1): (Box<dyn ReferenceElement>, Box<dyn ReferenceElement>) =
+                match (npe, topo_dim) {
+                    (4, 2) => (Box::new(QuadQk::new(p)), Box::new(QuadQk::new(1))),
+                    (8, _) => (Box::new(HexQk::new(p)), Box::new(HexQk::new(1))),
+                    (3, 2) => (Box::new(H1TriPk::new(p)), Box::new(H1TriPk::new(1))),
+                    (4, _) => (Box::new(TetPk::new(p)), Box::new(TetPk::new(1))),
+                    (6, _) => (Box::new(PrismPk::new(p)), Box::new(PrismPk::new(1))),
+                    (5, _) => (Box::new(PyramidPk::new(p)), Box::new(PyramidPk::new(1))),
+                    _ => continue,
+                };
+            let dofs = self.element_dofs(e).to_vec();
+            let ref_dofs = ref_elem.dof_coords();
+            if dofs.len() != ref_dofs.len() {
+                // Slot layout not factory-aligned (e.g. a hand-rolled P2/P3
+                // prism/pyramid builder): leave the fold-based coordinates.
+                continue;
+            }
+            let gnodes = mesh.geometry_nodes(e);
+            let mut phi = vec![0.0_f64; gnodes.len()];
+            for (slot, rc) in ref_dofs.iter().enumerate() {
+                q1.eval_basis(rc, &mut phi);
+                let mut x = [0.0_f64; 3];
+                for (k, &phik) in phi.iter().enumerate() {
+                    if phik == 0.0 {
+                        continue;
+                    }
+                    let ck = mesh.geom_coords_of(gnodes[k]);
+                    for d in 0..dim {
+                        x[d] += phik * ck[d];
+                    }
+                }
+                let did = dofs[slot] as usize;
+                self.dof_coords[did * dim..did * dim + dim].copy_from_slice(&x[..dim]);
+            }
+        }
     }
 }
 

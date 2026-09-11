@@ -54,17 +54,16 @@
 //!   the periodic wrap-around is encoded; `Mesh::transform` scales the vertex
 //!   *and* the per-element geometry node coordinates, and `refine_uniform`
 //!   propagates the per-element geometry to the children.
-//! * The initial condition is projected **per element** by [`project_vel`],
-//!   replicating MFEM's `GridFunction::ProjectCoefficient(VectorCoefficient&)`
-//!   (evaluate at the physical DOF positions of each element, last element
-//!   wins for a shared DOF).  `VectorH1Space::interpolate_vec` /
-//!   `DofManager::dof_coord` cannot be used here: their DOF coordinate table is
-//!   built from the folded `Mesh::coords` array, which is *not* a valid
-//!   periodic image of every element's geometry, so the DOFs of the elements
-//!   straddling the periodic seam land at wrong physical positions (the
-//!   resulting IC had a `cfl` of 1.2e-1 instead of 7.6e-2 and a pressure norm
-//!   10³× too large).  This is a gap in `crates/space`.  The same helper is
-//!   what makes the element-wise projection tests exact.
+//! * The initial condition is projected with
+//!   [`VectorH1Space::interpolate_vec`], which matches MFEM's
+//!   `GridFunction::ProjectCoefficient`: since the D56 fix in `crates/space`
+//!   the `DofManager` DOF coordinate table is rebuilt from each element's
+//!   **own** geometry nodes on per-element-geometry (periodic) meshes with
+//!   last-writer-wins semantics, so a dof-wise evaluation reproduces the
+//!   per-element projection (`cfl` 7.56030E-02, pressure norm 3.17813E-02 —
+//!   the same numbers the local per-element `project_vel` workaround used to
+//!   produce before the fix; using the pre-fix folded coordinate table
+//!   instead gave `cfl` 1.2e-1 and a pressure norm 10³× too large).
 //! * Quadrature rules follow MFEM exactly: the volume forms use
 //!   `IntRules.Get(geom, 2*order + 1)`, and the L² norms
 //!   `GridFunction::ComputeL2Error`'s `2*order + 3`.
@@ -616,40 +615,6 @@ fn dist(a: &[f64], b: &[f64]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
-/// MFEM `GridFunction::ProjectCoefficient(VectorCoefficient&)` — evaluate the
-/// coefficient at the *physical* position of every local nodal DOF of every
-/// element and assign it; a DOF shared by several elements keeps the value
-/// written by the last element, exactly like MFEM's `data[vdofs[j]] = vals[j]`
-/// loop.
-///
-/// The physical position comes from the element's **own geometry nodes**
-/// (`Mesh::geometry_nodes` + the isoparametric map), *not* from the global DOF
-/// coordinate table: on a geometrically periodic mesh (`periodic-square.mesh`)
-/// the folded `Mesh::coords` array is not a valid periodic image of every
-/// element's geometry, so `DofManager::dof_coord` (built from
-/// `Mesh::node_coords`) misplaces the DOFs of the elements that straddle the
-/// periodic seam.  That makes `VectorH1Space::interpolate_vec` unusable here —
-/// a fem-rs gap in `crates/space`; the miniapp works around it locally.
-fn project_vel(disc: &ShearDisc, f: impl Fn(&[f64]) -> [f64; 2]) -> Vec<f64> {
-    let ref_elem = disc.h1_elem();
-    let n_ldofs = ref_elem.n_dofs();
-    let dof_pts = ref_elem.dof_coords();
-    let mut out = vec![0.0_f64; disc.n_vel()];
-    for e in 0..disc.mesh.n_elements() as u32 {
-        let dofs = disc.vel_space.element_dofs(e).to_vec();
-        let nodes = disc.geo_nodes(e);
-        let geo = geo_ref_elem_from_mesh(&disc.mesh, e).expect("quad geometry");
-        for k in 0..n_ldofs {
-            let (_jac, _det, xp) =
-                isoparametric_jacobian(&disc.mesh, &nodes, &*geo, &dof_pts[k], 2);
-            let v = f(&xp);
-            out[dofs[k * 2] as usize] = v[0];
-            out[dofs[k * 2 + 1] as usize] = v[1];
-        }
-    }
-    out
-}
-
 // ─── Added diagnostics (NOT part of the C++ miniapp) ────────────────────────
 
 /// `u_gf->ComputeL2Error(zero_vector_coeff)`, i.e. `‖u_h‖_L²`, with MFEM's
@@ -727,7 +692,7 @@ fn main() {
     let n_vel = disc.n_vel();
 
     // `u_ic->ProjectCoefficient(u_excoeff)`.
-    let ic = project_vel(&disc, vel_shear_ic);
+    let ic = disc.vel_space.interpolate_vec(&|x| vel_shear_ic(x).to_vec());
     let cfg = NavierConfig {
         verbose: true,
         ..Default::default()
@@ -880,6 +845,44 @@ mod tests {
         }
     }
 
+    /// D56 pin: on this per-element-geometry (periodic) mesh,
+    /// `VectorH1Space::interpolate_vec` must reproduce the per-element
+    /// `GridFunction::ProjectCoefficient` (evaluate at each element's own
+    /// nodal points, last writer wins) that the miniapp used to compute
+    /// locally before the fix — this is what makes the step-1 `cfl` come out
+    /// at the C++ value 7.56030E-02.
+    #[test]
+    fn interpolate_vec_matches_per_element_projection() {
+        let d = disc(6);
+        let ic = d.vel_space.interpolate_vec(&|x| vel_shear_ic(x).to_vec());
+
+        // The per-element replica (the former local `project_vel`).
+        let ref_elem = d.h1_elem();
+        let n_ldofs = ref_elem.n_dofs();
+        let dof_pts = ref_elem.dof_coords();
+        let mut replica = vec![0.0_f64; d.n_vel()];
+        for e in 0..d.mesh.n_elements() as u32 {
+            let dofs = d.vel_space.element_dofs(e).to_vec();
+            let nodes = d.geo_nodes(e);
+            let geo = geo_ref_elem_from_mesh(&d.mesh, e).expect("quad geometry");
+            for k in 0..n_ldofs {
+                let (_jac, _det, xp) =
+                    isoparametric_jacobian(&d.mesh, &nodes, &*geo, &dof_pts[k], 2);
+                let v = vel_shear_ic(&xp);
+                replica[dofs[k * 2] as usize] = v[0];
+                replica[dofs[k * 2 + 1] as usize] = v[1];
+            }
+        }
+        let mut max_diff = 0.0_f64;
+        for (a, b) in ic.as_slice().iter().zip(replica.iter()) {
+            max_diff = max_diff.max((a - b).abs());
+        }
+        assert!(
+            max_diff < 1e-12,
+            "interpolate_vec vs per-element projection max |diff| = {max_diff:.3e}"
+        );
+    }
+
     /// The shear initial condition is divergence free (`∂_x u_x = 0`,
     /// `∂_y u_y = 0`) and periodic in both directions.  Its L² norm is
     /// `‖u‖² = 2∫_0^{1/2} tanh²(ρ(y−1/4)) dy + δ²/2 ≈ 0.868`, matching the
@@ -917,13 +920,13 @@ mod tests {
     #[test]
     fn ic_l2_norm_matches_the_analytic_value() {
         let d = disc(6);
-        let u = project_vel(&d, vel_shear_ic);
+        let u = d.vel_space.interpolate_vec(&|x| vel_shear_ic(x).to_vec());
         // Each half of the profile: ∫_0^{1/2}tanh²(ρ(y−1/4))dy
         //   = (1/ρ)∫_{−ρ/4}^{ρ/4}tanh²(t)dt = 1/2 − 2tanh(ρ/4)/ρ.
         let rho = 30.0_f64;
         let half = 0.5 - 2.0 * (rho * 0.25).tanh() / rho;
         let exact = (2.0 * half + 0.05 * 0.05 * 0.5).sqrt();
-        let got = vel_l2_norm(&d, &u);
+        let got = vel_l2_norm(&d, u.as_slice());
         assert!(
             (got - exact).abs() < 1e-6,
             "‖u‖_L2 = {got}, analytic = {exact}"
@@ -976,11 +979,11 @@ mod tests {
     #[test]
     fn curl_2d_of_constant_field_is_zero() {
         let d = disc(2);
-        let u = project_vel(&d, |_x| [0.3, -0.7]);
+        let u = d.vel_space.interpolate_vec(&|_x| vec![0.3, -0.7]);
         let mut w = vec![0.0_f64; d.n_vel()];
-        d.compute_curl_2d(&u, &mut w, false);
+        d.compute_curl_2d(u.as_slice(), &mut w, false);
         assert!(w.iter().all(|v| v.abs() < 1e-14), "w = {w:?}");
-        d.compute_curl_2d(&u, &mut w, true);
+        d.compute_curl_2d(u.as_slice(), &mut w, true);
         assert!(w.iter().all(|v| v.abs() < 1e-14), "w = {w:?}");
     }
 
@@ -997,9 +1000,9 @@ mod tests {
     #[test]
     fn shear_ic_enstrophy_matches_the_analytic_value() {
         let d = disc(6);
-        let u = project_vel(&d, vel_shear_ic);
+        let u = d.vel_space.interpolate_vec(&|x| vel_shear_ic(x).to_vec());
         let mut w = vec![0.0_f64; d.n_vel()];
-        d.compute_curl_2d(&u, &mut w, false);
+        d.compute_curl_2d(u.as_slice(), &mut w, false);
         // The non-scalar branch leaves the second component identically zero.
         let n_scalar = d.vel_space.n_scalar_dofs();
         assert!(w[n_scalar..].iter().all(|v| *v == 0.0));
@@ -1018,7 +1021,7 @@ mod tests {
     #[test]
     fn driver_runs_fully_periodic_step() {
         let d = disc(2);
-        let ic = project_vel(&d, vel_shear_ic);
+        let ic = d.vel_space.interpolate_vec(&|x| vel_shear_ic(x).to_vec());
         let mut s = NavierSolver::new(
             d,
             1e-5,
@@ -1027,7 +1030,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        s.velocity_mut().copy_from_slice(&ic);
+        s.velocity_mut().copy_from_slice(ic.as_slice());
         s.setup(1e-3);
         let mut t = 0.0;
         s.step(&mut t, 1e-3, 0, false);
