@@ -81,51 +81,6 @@ impl fem_assembly::dpg::dpg_integrators::DpgBilinear2 for NegVectorMass {
     }
 }
 
-/// `DPG_DUMP_MAT=<path>`: dump the assembled DPG normal-equation matrix (in
-/// the uncondensed trial layout, before any BC elimination) and its
-/// right-hand side, so the entries can be compared one by one against the
-/// C++ reference probe `tmp/d45/ddump.cpp` (which dumps
-/// `DPGWeakForm::BlockMat()` after `Finalize`).  Format: `E <row> <col>
-/// <value>` triplets, `B <i> <value>` for the RHS, plus the block layout.
-fn dump_assembled(a: &mut DpgWeakForm<Mesh<2>>, path: &str) {
-    let n = a.size();
-    let sizes = a.trial_block_sizes();
-    let offs = a.trial_offsets();
-    // Trace-block element vdofs (compared against MFEM's `GetFaceVDofs`).
-    let mut vdof_lines = String::new();
-    for b in 0..a.n_trial_blocks() {
-        if !a.is_trace_block(b) {
-            continue;
-        }
-        for e in 0..a.mesh().n_elements() as u32 {
-            vdof_lines.push_str(&format!("TRACEFE {b} {e}"));
-            for d in a.trial_element_vdofs(b, e) {
-                vdof_lines.push_str(&format!(" {d}"));
-            }
-            vdof_lines.push('\n');
-        }
-    }
-    let x0 = vec![0.0_f64; n];
-    let (sys, _xs, b) = a.form_linear_system(&[], &x0, false);
-    let m = sys.matrix();
-    let mut out = String::new();
-    out.push_str(&format!("SIZE {n}\nBLOCKS {sizes:?}\nOFFSETS {offs:?}\n"));
-    out.push_str(&vdof_lines);
-    for i in 0..m.nrows {
-        let mut row: Vec<(usize, f64)> = (m.row_ptr[i]..m.row_ptr[i + 1])
-            .map(|p| (m.col_idx[p] as usize, m.values[p]))
-            .collect();
-        row.sort_by_key(|&(c, _)| c);
-        for (c, v) in row {
-            out.push_str(&format!("E {i} {c} {v:.17e}\n"));
-        }
-    }
-    for (i, &v) in b.iter().enumerate() {
-        out.push_str(&format!("B {i} {v:.17e}\n"));
-    }
-    std::fs::write(path, out).expect("write matrix dump");
-}
-
 /// Build and solve one refinement level; returns `(dofs, l2_error, pcg_its)`.
 fn solve_level(
     mesh: &Mesh<2>,
@@ -201,10 +156,6 @@ fn solve_level(
         a.enable_static_condensation();
     }
     a.assemble();
-
-    if let Ok(path) = std::env::var("DPG_DUMP_MAT") {
-        dump_assembled(&mut a, &path);
-    }
 
     // Essential BCs: û on the boundary (all boundary attributes, as in C++).
     // `face_dof_list` is the global-dof form of the face dof range: in the

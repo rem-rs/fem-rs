@@ -124,33 +124,7 @@ impl Exact {
     }
 }
 
-/// `DPG_DUMP_MAT=<path>`: dump the assembled complex DPG normal-equation
-/// blocks (real/imag part, uncondensed trial layout, before any BC
-/// elimination) as `E R|I <row> <col> <value>` triplets plus the solution
-/// size/block layout.  The layout mirrors the C++ reference probe
-/// `tmp/d45/cdump.cpp` (which dumps `ComplexDPGWeakForm::BlockMat_r/i()`),
-/// so the entries can be compared one by one.
-fn dump_assembled(a: &ComplexDPGWeakForm<Mesh<3>>, path: &str) {
-    let sizes = a.trial_block_sizes();
-    let offs = a.trial_offsets();
-    let mut out = String::new();
-    out.push_str(&format!(
-        "SIZE {}\nBLOCKS {sizes:?}\nOFFSETS {offs:?}\n",
-        a.size()
-    ));
-    for (tag, m) in [("R", a.block_mat_r()), ("I", a.block_mat_i())] {
-        for i in 0..m.nrows {
-            let mut row: Vec<(usize, f64)> = (m.row_ptr[i]..m.row_ptr[i + 1])
-                .map(|p| (m.col_idx[p] as usize, m.values[p]))
-                .collect();
-            row.sort_by_key(|&(c, _)| c);
-            for (c, v) in row {
-                out.push_str(&format!("E {tag} {i} {c} {v:.17e}\n"));
-            }
-        }
-    }
-    std::fs::write(path, out).expect("write matrix dump");
-}
+/// Build and solve one refinement level; returns `(dofs, l2_error, pcg_its)`.
 
 /// One level build + solve; returns `(dofs, l2 err, pcg its)`.
 #[allow(clippy::too_many_lines)]
@@ -284,10 +258,6 @@ fn solve_level(
     // whitened blocks, used by `ComputeResidual`).
     a.store_matrices(true);
     a.assemble();
-
-    if let Ok(path) = std::env::var("DPG_DUMP_MAT") {
-        dump_assembled(&a, &path);
-    }
 
     // Essential BCs: Ê = E₀ (tangential projection of the exact E) on the
     // whole boundary — MFEM `ProjectBdrCoefficientTangent`:
