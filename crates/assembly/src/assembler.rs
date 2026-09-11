@@ -10,7 +10,7 @@ use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
     lagrange::{SegP1, SegP2, TetP1, TetP2, TriP1,
-                QuadQ1, QuadQ2, HexQ1},
+                HexQ1},
     lagrange::factory::{TriPk, TetPk},
     quadrature::quad_rule_01,
 };
@@ -396,16 +396,27 @@ pub(crate) fn geom_quad_point(_elem_type: ElementType, _order: u8, xi: &[f64]) -
 /// The face reference element fixes both the quadrature rule of
 /// [`Assembler::assemble_boundary_linear`] / `assemble_boundary_bilinear` and
 /// the *pairing* between a face basis function `φᵢ` and the `i`-th entry of
-/// the caller's `face_dofs` list.  The two helpers that build such lists for
-/// H¹ spaces are [`face_dofs_p1`] (vertices only), [`face_dofs_p2`]
-/// (`[v0, v1, mid]`) and [`face_dofs_h1`] (every order, `[v0, v1, interior…]`
-/// — the MFEM `H1_SegmentElement` DOF order, see [`H1SegPk`]).
+/// the caller's `face_dofs` list.  The helper that builds such lists for H¹
+/// spaces is [`face_dofs_h1`] (every order and every face type; [`face_dofs_p1`]
+/// and [`face_dofs_p2`] are the older vertices-only / quadratic 2-D variants).
 ///
-/// Low orders keep the historical fixed-order elements so that existing
-/// callers (`face_dofs_p2`, e.g. the ex21 traction assembly) stay
-/// bit-identical; higher orders are served by [`H1SegPk`], the *trace* of the
-/// volume element (`SegP1`/`SegP2` coincide with it, `SegP3` — whose nodes are
-/// equispaced instead of Gauss-Lobatto — does not, so it is not used).
+/// The element is always the one MFEM's `FiniteElementSpace::GetBE` returns,
+/// i.e. `fec->GetFE(mesh->GetBdrElementGeometry(be), order)` — the *trace*
+/// element of the H¹ family on the face geometry:
+///
+/// * a segment face (2-D mesh) → `H1_SegmentElement(p)`, which is the trace of
+///   the volume element on its edge ([`H1SegPk`]);
+/// * a triangle face (tet mesh) → `H1_TriangleElement(p)`
+///   ([`H1TetFacePk`]): MFEM's 2-D triangular DOF *order* over the **volume**
+///   element's face **nodes**, so the face basis functions are the
+///   restrictions of the space's own basis functions;
+/// * a quad face (hex mesh) → `H1_QuadrilateralElement(p)` on `[0,1]²`, which
+///   is exactly [`fem_element::lagrange::factory::QuadQk`] (`QuadQ1`/`QuadQ2`
+///   live on `[-1,1]²` and are therefore not the boundary element).
+///
+/// The face element's DOF blocks are the 2-D topological ones (vertices →
+/// edges → interior, with the face's own edge directions) because that is what
+/// MFEM's `GetBdrElementDofs` returns and what [`face_dofs_h1`] pairs with.
 fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (face_elem_type, order) {
         // ── Historical fixed-order entries (bit-identical for old callers) ──
@@ -413,21 +424,176 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
         // closed Gauss-Lobatto points of p = 2, which are equidistant).
         (ElementType::Line2, 1) => Box::new(SegP1),
         (ElementType::Line2, 2) => Box::new(SegP2),
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
         // ── Order-generic entries ───────────────────────────────────────────
-        // MFEM's boundary element is the *trace* of the volume space, i.e.
-        // `H1_SegmentElement(p)` for a 2-D mesh whose faces are segments.
         (ElementType::Line2, o) if o >= 1 => Box::new(H1SegPk::new(o)),
-        (ElementType::Tri3, o) if o >= 1 => {
-            Box::new(fem_element::lagrange::factory::TriPk::new(o as usize))
-        }
+        (ElementType::Tri3, o) if o >= 1 => Box::new(H1TetFacePk::new(o as usize)),
         (ElementType::Quad4, o) if o >= 1 => {
             Box::new(fem_element::lagrange::factory::QuadQk::new(o as usize))
         }
         _ => panic!(
             "ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"
         ),
+    }
+}
+
+/// MFEM `H1_TriangleElement(p)` **DOF order** over the reference tetrahedron
+/// element's face **nodes** — the boundary element of a tetrahedral mesh.
+///
+/// MFEM's boundary element for a tetrahedron face is `H1_TriangleElement(p)`,
+/// a 2-D element whose DOF order is `[v0, v1, v2, edge0…, edge1…, edge2…,
+/// interior…]` (`fem/fe/fe_h1.cpp`), where edge 2 is traversed from `v2`
+/// towards `v0`.  Its DOFs are the *same mesh entities* as the volume
+/// element's face DOFs, so the two must agree to yield a basis that is the
+/// trace of the space's basis — and they do in MFEM because both elements put
+/// their nodes at the same parametric positions.
+///
+/// In fem-rs they do **not** in general: the H¹ tetrahedron basis the
+/// assembler uses ([`fem_element::lagrange::factory::TetPk`]) is *equispaced*
+/// while `H1_TriangleElement`'s nodes are the closed Gauss-Lobatto points
+/// (D49).  At `p = 3` the face edge nodes are at `1/3, 2/3` versus
+/// `0.2764, 0.7236`; using the Gauss-Lobatto element here would make the face
+/// basis functions *different functions* from the volume basis restricted to
+/// the face, so the boundary integral would be distributed onto the wrong DOFs
+/// (the D46② failure mode, measured as a per-DOF error of ~0.1 with the sum
+/// still exact).  This element therefore takes the `H1_TriangleElement` node
+/// *rule* and evaluates it with the closed points `cp[k] = k/p`, i.e. the
+/// volume element's own edge distribution, and then resolves every node
+/// against the volume element by evaluation (`H1TetFacePk::new`).
+///
+/// If D49 is ever fixed on the space side (H¹ tetrahedra switched to
+/// Gauss-Lobatto nodes) this element must be switched to the Gauss-Lobatto
+/// points with it — one line, next to the volume element it mirrors.
+struct H1TetFacePk {
+    order: usize,
+    /// The volume element whose face restriction this element is.
+    vol: Box<dyn ReferenceElement>,
+    /// Face reference coordinates of the DOFs, in `H1_TriangleElement` order.
+    nodes: Vec<[f64; 2]>,
+    /// Interior (volume) slot of each DOF: the index of the volume basis
+    /// function that is `1` at that node and `0` at all the others.
+    slots: Vec<usize>,
+    /// Scratch for the volume evaluation (`eval_basis` takes `&self`);
+    /// `Mutex` rather than `RefCell` because `ReferenceElement: Send + Sync`.
+    scratch: std::sync::Mutex<Vec<f64>>,
+}
+
+impl H1TetFacePk {
+    fn new(p: usize) -> Self {
+        assert!(p >= 1, "H1TetFacePk: order must be >= 1");
+        // The volume element whose face restriction this element is.
+        let vol: Box<dyn ReferenceElement> =
+            Box::new(fem_element::lagrange::factory::TetPk::new(p));
+        let pf = p as f64;
+        let cp = |k: usize| k as f64 / pf;
+
+        // `H1_TriangleElement`'s node rule (see the type docs) with the
+        // volume element's edge distribution.
+        let mut nodes: Vec<[f64; 2]> = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        for i in 1..p {
+            nodes.push([cp(i), 0.0]);
+        }
+        for i in 1..p {
+            nodes.push([cp(p - i), cp(i)]);
+        }
+        for i in 1..p {
+            nodes.push([0.0, cp(p - i)]);
+        }
+        for j in 1..p {
+            for i in 1..(p - j) {
+                let w = cp(i) + cp(j) + cp(p - i - j);
+                nodes.push([cp(i) / w, cp(j) / w]);
+            }
+        }
+
+        // Resolve every node against the volume element.  The volume basis is
+        // nodal at its own face nodes, so the DOF there is the unique slot
+        // whose basis function is 1; the position check below also verifies
+        // that the node rule above really is the volume element's.
+        let vol_coords = vol.dof_coords();
+        let mut vbuf = vec![0.0_f64; vol.n_dofs()];
+        let mut slots = Vec::with_capacity(nodes.len());
+        for nd in nodes.iter() {
+            vol.eval_basis(&[nd[0], nd[1], 0.0], &mut vbuf);
+            let (k, &v) = vbuf
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).expect("H1TetFacePk: NaN basis value"))
+                .expect("H1TetFacePk: empty volume element");
+            assert!(
+                v > 0.5,
+                "H1TetFacePk(p={p}): no volume basis function is nodal at {nd:?} \
+                 (largest value {v}) — is the volume element's node distribution still \
+                 the one this element's node rule assumes?"
+            );
+            let c = &vol_coords[k];
+            let d2 = (c[0] - nd[0]) * (c[0] - nd[0])
+                + (c[1] - nd[1]) * (c[1] - nd[1])
+                + c[2] * c[2];
+            assert!(
+                d2 < 1e-24,
+                "H1TetFacePk(p={p}): volume slot {k} sits at {c:?}, not at the face node \
+                 {nd:?} (distance {:.3e})",
+                d2.sqrt()
+            );
+            slots.push(k);
+        }
+        let n = vol.n_dofs();
+        Self {
+            order: p,
+            vol,
+            nodes,
+            slots,
+            scratch: std::sync::Mutex::new(vec![0.0; n]),
+        }
+    }
+
+    /// Evaluate the volume basis at `(u, v, 0)` and pick this face element's
+    /// DOFs: `out[k] = φ_{slots[k]}` (values), or the row-major `[n × 2]`
+    /// gradient `(∂/∂u, ∂/∂v)` of the same functions (the trace is embedded
+    /// affinely, so the face's own two partials are those of the volume
+    /// coordinates).
+    fn trace(&self, u: f64, v: f64, out: &mut [f64], grads: bool) {
+        let n = self.nodes.len();
+        let mut buf = self.scratch.lock().expect("H1TetFacePk scratch poisoned");
+        if grads {
+            buf.resize(3 * self.vol.n_dofs(), 0.0);
+            self.vol.eval_grad_basis(&[u, v, 0.0], &mut buf);
+            for (i, &k) in self.slots.iter().enumerate() {
+                out[i * 2] = buf[k * 3];
+                out[i * 2 + 1] = buf[k * 3 + 1];
+            }
+        } else {
+            buf.resize(self.vol.n_dofs(), 0.0);
+            self.vol.eval_basis(&[u, v, 0.0], &mut buf);
+            for (i, &k) in self.slots.iter().enumerate() {
+                out[i] = buf[k];
+            }
+        }
+        debug_assert_eq!(out.len(), if grads { 2 * n } else { n });
+    }
+}
+
+impl ReferenceElement for H1TetFacePk {
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.nodes.len()
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        self.trace(xi[0], xi[1], values, false);
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        self.trace(xi[0], xi[1], grads, true);
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        fem_element::quadrature::tri_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.nodes.iter().map(|c| vec![c[0], c[1]]).collect()
     }
 }
 
@@ -594,6 +760,17 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
             };
         }
         _ => {}
+    }
+    // Curved tetrahedra: MFEM's mesh `Nodes` are a grid function of the H¹
+    // collection, i.e. their parametric positions are the **closed
+    // Gauss-Lobatto** points — the equispaced `factory::TetPk` would interpret
+    // the same node values as belonging to different reference points (D49;
+    // 7.5e-2 error on a curved P3 fixture).  Straight P1 tets never get here
+    // (the affine fast path above), and `p = 2`'s closed points are the
+    // midpoints, so this only changes `p ≥ 3`.
+    if matches!(et, ElementType::Tet4 | ElementType::Tet10) && g > 1 {
+        return Some(Box::new(fem_element::lagrange::factory::H1TetPk::new(g as usize))
+                    as Box<dyn ReferenceElement>);
     }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
@@ -1254,25 +1431,23 @@ fn accumulate_boundary_linear_face(
     let face_type = match mesh.face_nodes(f).len() {
         2 => ElementType::Line2,
         3 => ElementType::Tri3,
+        4 => ElementType::Quad4,
         _ => panic!("unsupported boundary face node count"),
     };
     let ref_elem = ref_elem_face(face_type, order);
     let quad = ref_elem.quadrature(quad_order);
 
     let face_nodes = mesh.face_nodes(f);
-    let (face_j_mag, normal, p0, p1) = boundary_face_geom(mesh, f, face_nodes, dim);
+    let geom = boundary_face_geom(mesh, f, face_nodes, dim);
     let face_tag = mesh.face_tag(f);
 
     let mut phi = vec![0.0_f64; n_fdofs];
     let mut f_face = vec![0.0_f64; n_fdofs];
 
     for (q, xi) in quad.points.iter().enumerate() {
+        let (face_j_mag, normal, xp) = geom.eval(xi);
         let w = quad.weights[q] * face_j_mag;
         ref_elem.eval_basis(xi, &mut phi);
-
-        let xp: Vec<f64> = (0..dim)
-            .map(|i| p0[i] + (p1[i] - p0[i]) * xi[0])
-            .collect();
 
         let qp = BdQpData {
             n_dofs: n_fdofs,
@@ -1310,25 +1485,23 @@ fn accumulate_boundary_bilinear_face(
     let face_type = match mesh.face_nodes(f).len() {
         2 => ElementType::Line2,
         3 => ElementType::Tri3,
+        4 => ElementType::Quad4,
         _ => panic!("unsupported boundary face node count"),
     };
     let ref_elem = ref_elem_face(face_type, order);
     let quad = ref_elem.quadrature(quad_order);
 
     let face_nodes = mesh.face_nodes(f);
-    let (face_j_mag, normal, p0, p1) = boundary_face_geom(mesh, f, face_nodes, dim);
+    let geom = boundary_face_geom(mesh, f, face_nodes, dim);
     let face_tag = mesh.face_tag(f);
 
     let mut phi = vec![0.0_f64; n_fdofs];
     let mut k_face = vec![0.0_f64; n_fdofs * n_fdofs];
 
     for (q, xi) in quad.points.iter().enumerate() {
+        let (face_j_mag, normal, xp) = geom.eval(xi);
         let w = quad.weights[q] * face_j_mag;
         ref_elem.eval_basis(xi, &mut phi);
-
-        let xp: Vec<f64> = (0..dim)
-            .map(|i| p0[i] + (p1[i] - p0[i]) * xi[0])
-            .collect();
 
         let qp = BdQpData {
             n_dofs: n_fdofs,
@@ -2102,42 +2275,210 @@ impl Assembler {
     }
 }
 
-// ─── Face Jacobian and normal (2-D) ──────────────────────────────────────────
+// ─── Face Jacobian and normal (2-D edges and 3-D faces) ──────────────────────
 
-/// Compute the face Jacobian magnitude and outward unit normal for a 2-D boundary edge.
+/// Order-1 reference element of a boundary face's **geometry**: the segment
+/// `[0,1]`, the unit triangle, or the unit square `[0,1]²`.
 ///
-/// Returns `(|J_face|, n)` where `|J_face|` is the edge length and `n` is the
-/// unit outward normal (rotated 90° from the edge tangent, pointing away from
-/// the interior by convention `n = (dy, -dx) / |J_face|`).
-/// Boundary-face geometry: physical endpoints, length (`face_j_mag`) and the
-/// outward unit normal, for a 2-D boundary edge.
+/// Its vertex order is the corner order of [`MeshTopology::face_nodes`], so
+/// interpolating the face's corner coordinates with it reproduces MFEM's
+/// boundary transformation (`Mesh::GetBdrElementTransformation`, whose
+/// boundary element is the linear/bilinear map of the face corners on a
+/// straight mesh).  The same element also transports the *face's* reference
+/// coordinates into the owning volume element's reference element, which is
+/// how [`face_dofs_h1`] locates a face DOF inside its owner.
+pub(crate) fn face_geo_elem(face_type: ElementType) -> Box<dyn ReferenceElement> {
+    match face_type {
+        ElementType::Line2 => Box::new(SegP1),
+        ElementType::Tri3 => Box::new(TriP1),
+        // MFEM's boundary element for a hexahedron face is
+        // `H1_QuadrilateralElement`, which lives on `[0,1]²`.  `QuadQ1`/`QuadQ2`
+        // live on `[-1,1]²` and would evaluate the face geometry outside its
+        // reference domain.
+        ElementType::Quad4 => Box::new(fem_element::lagrange::factory::QuadQk::new(1)),
+        _ => panic!("face_geo_elem: unsupported boundary face type {face_type:?}"),
+    }
+}
+
+/// Geometry of one boundary face: the physical coordinates of its corners, in
+/// the corner order of [`MeshTopology::face_nodes`] (the vertex order of
+/// [`ref_elem_face`] and of [`face_geo_elem`]).
+struct FaceGeom {
+    /// Order-1 face geometry element ([`face_geo_elem`]).
+    geo: Box<dyn ReferenceElement>,
+    /// Physical corner coordinates; length 2 (segment), 3 (triangle) or 4 (quad).
+    pts: Vec<[f64; 3]>,
+    /// Physical dimension of the embedding space (2 or 3).
+    dim: usize,
+}
+
+impl FaceGeom {
+    /// Evaluate the face at the **face** reference point `xi`:
+    /// `(|J_face|, n, x_phys)`.
+    ///
+    /// * 2-D (a boundary edge): `t0 = ∂x/∂ξ` is the edge tangent,
+    ///   `|J_face| = |t0|`, and the outward unit normal is `t0` rotated by −90°
+    ///   (`(t0_y, −t0_x)/|t0|`) — MFEM's `CalcOrtho` for a 2×1 Jacobian.
+    /// * 3-D (a boundary face): `t0 = ∂x/∂ξ₀` and `t1 = ∂x/∂ξ₁` are the two
+    ///   face tangents, the *unnormalised* face normal is `t0 × t1`,
+    ///   `|J_face| = |t0 × t1|` and the unit outward normal is it divided by
+    ///   its length — MFEM's `CalcOrtho` for a 3×2 Jacobian.  Its orientation
+    ///   follows from the corner order, which puts the element interior on the
+    ///   left of `ξ₀` and below `ξ₁`.
+    fn eval(&self, xi: &[f64]) -> (f64, Vec<f64>, Vec<f64>) {
+        let n = self.pts.len();
+        let dim = self.dim;
+        // Reference dimension of the face: 1 for a segment, 2 for a tri/quad.
+        // It is the *stride* of `eval_grad_basis` (one gradient component per
+        // reference coordinate), which is not `dim` for a 2-D boundary edge.
+        let rdim = self.geo.dim() as usize;
+        let mut phi = vec![0.0_f64; n];
+        let mut grad = vec![0.0_f64; n * rdim];
+        self.geo.eval_basis(xi, &mut phi);
+        self.geo.eval_grad_basis(xi, &mut grad);
+
+        let mut x = vec![0.0_f64; dim];
+        let mut t0 = [0.0_f64; 3];
+        let mut t1 = [0.0_f64; 3];
+        for k in 0..n {
+            let g0 = grad[k * rdim];
+            let g1 = if rdim > 1 { grad[k * rdim + 1] } else { 0.0 };
+            for i in 0..dim {
+                x[i] += phi[k] * self.pts[k][i];
+                t0[i] += self.pts[k][i] * g0;
+                t1[i] += self.pts[k][i] * g1;
+            }
+        }
+
+        if dim == 2 {
+            // Historical *chord* interpolation of the physical point.  It
+            // coincides with the interpolated `Σᵏ φᵏ pᵏ` for a straight edge but
+            // rounds differently in the last ulp, so it is kept to leave every
+            // existing 2-D caller bit-identical.
+            let (p0, p1) = (self.pts[0], self.pts[1]);
+            for i in 0..2 {
+                x[i] = p0[i] + (p1[i] - p0[i]) * xi[0];
+            }
+            let j = (t0[0] * t0[0] + t0[1] * t0[1]).sqrt();
+            (j, vec![t0[1] / j, -t0[0] / j], x)
+        } else {
+            let c = [
+                t0[1] * t1[2] - t0[2] * t1[1],
+                t0[2] * t1[0] - t0[0] * t1[2],
+                t0[0] * t1[1] - t0[1] * t1[0],
+            ];
+            let j = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+            (j, vec![c[0] / j, c[1] / j, c[2] / j], x)
+        }
+    }
+}
+
+/// Build the [`FaceGeom`] of boundary face `f` (2-D edge or 3-D face).
 ///
-/// The endpoints come from the mesh's per-element geometry when present
-/// ([`MeshTopology::boundary_face_endpoints`]) — necessary for
-/// geometrically-periodic meshes where a wrapped boundary face spans the
-/// periodic seam (the folded vertex chord would over-count the face measure) —
-/// and fall back to the folded vertex coordinates otherwise.
+/// The corner coordinates come from the mesh's per-element geometry when
+/// present — [`MeshTopology::boundary_face_endpoints`] in 2-D, the owner's
+/// order-1 geometry slots in 3-D — so a face spanning a geometrically periodic
+/// seam is measured in its unfolded position instead of the folded vertex
+/// chord (`geom_coords_of` resolves the snapshot).  Otherwise the folded vertex
+/// table is used, which is bit-identical to it on every non-periodic mesh.
 fn boundary_face_geom(
     mesh: &dyn MeshTopology,
     f: u32,
     face_nodes: &[u32],
     dim: usize,
-) -> (f64, Vec<f64>, [f64; 2], [f64; 2]) {
-    assert_eq!(dim, 2, "boundary_face_geom currently only supports 2-D meshes");
-    let (p0, p1) = match mesh.boundary_face_endpoints(f) {
-        Some(e) => e,
-        None => {
-            let c0 = mesh.node_coords(face_nodes[0]);
-            let c1 = mesh.node_coords(face_nodes[1]);
-            ([c0[0], c0[1]], [c1[0], c1[1]])
-        }
+) -> FaceGeom {
+    let face_type = match face_nodes.len() {
+        2 => ElementType::Line2,
+        3 => ElementType::Tri3,
+        4 => ElementType::Quad4,
+        n => panic!("boundary_face_geom: unsupported boundary face with {n} nodes"),
     };
-    let dx = p1[0] - p0[0];
-    let dy = p1[1] - p0[1];
-    let len = (dx * dx + dy * dy).sqrt();
-    // Outward normal convention: rotate tangent (dx,dy) by -90° → (dy, -dx)
-    let normal = vec![dy / len, -dx / len];
-    (len, normal, p0, p1)
+    assert!(
+        dim == 2 || dim == 3,
+        "boundary_face_geom: unsupported embedding dimension {dim}"
+    );
+
+    let pts = if dim == 2 {
+        let (p0, p1) = match mesh.boundary_face_endpoints(f) {
+            Some(e) => e,
+            None => {
+                let c0 = mesh.node_coords(face_nodes[0]);
+                let c1 = mesh.node_coords(face_nodes[1]);
+                ([c0[0], c0[1]], [c1[0], c1[1]])
+            }
+        };
+        vec![[p0[0], p0[1], 0.0], [p1[0], p1[1], 0.0]]
+    } else {
+        // 3-D: read the corners through the owner element so `geom_coords_of`
+        // can resolve a per-element (unfolded) geometry snapshot.
+        let owner = face_owner(mesh, face_nodes);
+        let local = owner.map(|e| mesh.element_nodes(e));
+        let mut out = Vec::with_capacity(face_nodes.len());
+        for &n in face_nodes {
+            // Only an *order-1* geometry table has one slot per mesh vertex;
+            // higher-order tables index reference slots, not vertices, so they
+            // must not be indexed by the vertex position.
+            let c = match local
+                .and_then(|en| en.iter().position(|&x| x == n))
+                .filter(|_| owner.is_some() && mesh.geom_order() == 1)
+            {
+                Some(pos) => {
+                    let gn = mesh.geometry_nodes(owner.expect("owner present"));
+                    mesh.geom_coords_of(gn[pos])
+                }
+                None => mesh.node_coords(n),
+            };
+            out.push([c[0], c[1], *c.get(2).unwrap_or(&0.0)]);
+        }
+        out
+    };
+
+    assert_eq!(
+        pts.len(),
+        face_nodes.len(),
+        "boundary_face_geom: corner count mismatch"
+    );
+    FaceGeom {
+        geo: face_geo_elem(face_type),
+        pts,
+        dim,
+    }
+}
+
+/// Reference coordinates of the volume element's DOFs, **in the order of
+/// `space.element_dofs`**.
+///
+/// Normally this is just [`ref_elem_vol_for_space`]'s `dof_coords`, but
+/// tetrahedra need one correction: the H¹ space's local tet DOF order comes
+/// from `fem_space::DofManager`, which documents it as matching
+/// `fem_element::lagrange::factory::TetPk`, and the fixed-order
+/// `fem_element::lagrange::TetP2` publishes a `dof_coords` list **longer** than
+/// its own `n_dofs` (20 coordinates for a 10-DOF element, with the edge DOFs at
+/// 1/3 and 2/3 instead of the midpoints).  That list cannot locate a DOF, so
+/// tets are always read from the factory element instead.
+fn volume_dof_reference_coords<S: FESpace>(
+    space: &S,
+    elem_type: ElementType,
+    order: u8,
+) -> Vec<Vec<f64>> {
+    if matches!(elem_type, ElementType::Tet4 | ElementType::Tet10) {
+        return fem_element::lagrange::factory::TetPk::new(order as usize).dof_coords();
+    }
+    ref_elem_vol_for_space(space, elem_type, order).dof_coords()
+}
+
+/// The volume element that contains every node of boundary face `face_nodes`.
+///
+/// `MeshTopology::face_elements` is not consulted: it is stale on meshes whose
+/// face→element map was never built and on non-conformingly refined meshes, so
+/// the node-membership scan (over all elements) is both simpler and uniform with
+/// [`face_dofs_h1`]/[`face_dofs_p2`], which already fall back to it.
+fn face_owner(mesh: &dyn MeshTopology, face_nodes: &[u32]) -> Option<u32> {
+    let contains_all = |e: u32| {
+        let en = mesh.element_nodes(e);
+        face_nodes.iter().all(|&n| en.contains(&n))
+    };
+    (0..mesh.n_elements() as u32).find(|&e| contains_all(e))
 }
 
 // ─── Scatter helper ───────────────────────────────────────────────────────────
@@ -2237,32 +2578,46 @@ where
     }
 }
 
-/// Build the face DOF list for an H¹ space of **any** order.
+/// Build the face DOF list for an H¹ space of **any** order, in 2-D and 3-D.
 ///
 /// For each boundary face `f` this returns the space DOFs of the face in the
-/// order MFEM's boundary element lists them:
-/// `[dof(v0), dof(v1), interior…]`, where `v0 = mesh.face_nodes(f)[0]` and
-/// `v1 = mesh.face_nodes(f)[1]`, with the interior DOFs in increasing order
-/// along `v0 → v1`.
+/// order MFEM's boundary element ([`ref_elem_face`]) lists them:
+///
+/// * 2-D, a segment face → `[dof(v0), dof(v1), interior…]`, where
+///   `v0 = mesh.face_nodes(f)[0]` and `v1 = mesh.face_nodes(f)[1]`, with the
+///   interior DOFs in increasing order along `v0 → v1`
+///   (`H1_SegmentElement` order);
+/// * 3-D, a triangle or quad face → `[vertices…, edge blocks…, interior…]` in
+///   the face's own 2-D topology (`H1_TriangleElement` /
+///   `H1_QuadrilateralElement` order): the corners in `face_nodes` order, then
+///   each face edge's interior DOFs along that edge (edges
+///   `(v0,v1), (v1,v2), (v2,v0)` for a triangle, `(v0,v1), (v1,v2), (v2,v3),
+///   (v3,v0)` for a quad), then the face-interior DOFs in MFEM's `(j, i)`
+///   nested order.
 ///
 /// That is exactly the DOF order of the face reference element
-/// [`ref_elem_face`] builds (segment faces use [`H1SegPk`], whose DOF order is
-/// MFEM's `H1_SegmentElement` one), so `<face_dofs_h1> + assemble_boundary_*`
+/// [`ref_elem_face`] builds, so `<face_dofs_h1> + assemble_boundary_*`
 /// reproduces MFEM's boundary-element assembly.  Use it with
 /// [`Assembler::assemble_boundary_linear`] / `assemble_boundary_bilinear`
 /// whenever the space order is above 1 — [`face_dofs_p1`] only covers the
-/// vertices and [`face_dofs_p2`] only the quadratic case.
+/// vertices and [`face_dofs_p2`] only the quadratic 2-D case.
 ///
-/// The face DOFs are located geometrically: every reference-element DOF whose
-/// reference coordinate lies on the face's reference edge (`vertex(v0) →
-/// vertex(v1)`) is kept and sorted by its parameter along that edge.  No
-/// per-element-type edge table is needed, so this works for the trace of any
-/// tensor/simplex H¹ basis.
+/// The face DOFs are located geometrically, not through a per-element-type
+/// table: the face's own reference element gives the face coordinate of each of
+/// its DOFs, [`face_geo_elem`] transports that coordinate into the owning
+/// volume element's reference frame (affine for a segment/triangle face,
+/// bilinear for a quad face), and the volume element's DOF at that point is the
+/// answer ([`ref_elem_vol_for_space`]).  So this works for any H¹ basis whose
+/// `dof_coords` match the space's `element_dofs` ordering.  Note it must be the
+/// face's own reference element (and not the volume element restricted to the
+/// face): the face element's DOF *order* is what the boundary integrator pairs
+/// with, and MFEM's hex/tet face blocks are ordered by the 2-D entity, not by
+/// the volume element's slots.
 ///
 /// # Panics
-/// Panics if the face has no owning element containing both of its nodes, or
-/// if the face is not a segment (2-node) face — the 3-D face traces need
-/// triangle/quadrilateral DOF ordering, which no caller requires yet.
+/// Panics if no element contains all of the face's nodes, or if some face DOF
+/// has no volume-element DOF at its reference position (which would mean the
+/// space's `element_dofs` order disagrees with [`ref_elem_vol_for_space`]).
 pub fn face_dofs_h1<S>(space: &S) -> impl Fn(u32) -> Vec<DofId> + '_
 where
     S: FESpace,
@@ -2271,81 +2626,84 @@ where
     move |f| {
         let mesh = space.mesh();
         let fn_nodes = mesh.face_nodes(f);
-        assert_eq!(
-            fn_nodes.len(),
-            2,
-            "face_dofs_h1: only 2-node (segment) boundary faces are supported, face {f} has {} nodes",
-            fn_nodes.len()
-        );
-
-        // Owner search: trust `face_elements` first (it needs the lazy
-        // face→element map) and fall back to a scan, as `face_dofs_p2` does.
-        let (reported, _) = mesh.face_elements(f);
-        let contains_all = |e: u32| {
-            let en = mesh.element_nodes(e);
-            fn_nodes.iter().all(|&n| en.contains(&n))
+        let nfn = fn_nodes.len();
+        let face_type = match nfn {
+            2 => ElementType::Line2,
+            3 => ElementType::Tri3,
+            4 => ElementType::Quad4,
+            n => panic!(
+                "face_dofs_h1: boundary face {f} has {n} nodes; only segment (2), \
+                 triangle (3) and quad (4) faces are supported"
+            ),
         };
-        let mut owner = reported;
-        if !contains_all(owner) {
-            let mut found = false;
-            for e in 0..mesh.n_elements() as u32 {
-                if contains_all(e) {
-                    owner = e;
-                    found = true;
-                    break;
-                }
-            }
-            assert!(
-                found,
-                "face_dofs_h1: no element contains both nodes of boundary face {f}"
-            );
-        }
+
+        let owner = face_owner(mesh, fn_nodes).unwrap_or_else(|| {
+            panic!("face_dofs_h1: no element contains every node of boundary face {f}")
+        });
 
         let elem_nodes = mesh.element_nodes(owner);
         let elem_dofs = space.element_dofs(owner);
-        let re = ref_elem_vol_for_space(space, mesh.element_type(owner), space.order());
-        let coords = re.dof_coords();
-        debug_assert_eq!(coords.len(), elem_dofs.len());
-
-        let pos_of = |n: u32| elem_nodes.iter().position(|&en| en == n);
-        let (pa, pb) = (
-            pos_of(fn_nodes[0]).expect("face_dofs_h1: v0 not in the owning element"),
-            pos_of(fn_nodes[1]).expect("face_dofs_h1: v1 not in the owning element"),
+        let elem_type = mesh.element_type(owner);
+        let vol = ref_elem_vol_for_space(space, elem_type, space.order());
+        let vol_coords = volume_dof_reference_coords(space, elem_type, space.order());
+        assert_eq!(
+            vol_coords.len(),
+            elem_dofs.len(),
+            "face_dofs_h1: element {owner} is {elem_type:?} of order {} with {} element DOFs, \
+             but the volume reference element ({:?} order {}) has {} coordinates",
+            space.order(),
+            elem_dofs.len(),
+            std::any::type_name_of_val(vol.as_ref()),
+            vol.order(),
+            vol_coords.len(),
         );
-        let (a, b) = (&coords[pa], &coords[pb]);
-        let dim = a.len();
-        let ab: Vec<f64> = (0..dim).map(|k| b[k] - a[k]).collect();
-        let ab2: f64 = ab.iter().map(|x| x * x).sum();
-        assert!(ab2 > 0.0, "face_dofs_h1: degenerate face edge on element {owner}");
+        let dim = vol_coords[0].len();
 
-        // Parameter of every DOF on the edge and its squared distance to it.
-        let mut on_edge: Vec<(f64, usize)> = Vec::new();
-        for (k, c) in coords.iter().enumerate() {
-            let s = (0..dim).map(|j| (c[j] - a[j]) * ab[j]).sum::<f64>() / ab2;
-            let dev2: f64 = (0..dim)
-                .map(|j| {
-                    let d = c[j] - (a[j] + s * ab[j]);
-                    d * d
-                })
-                .sum();
-            if dev2 <= 1e-16 * ab2 {
-                on_edge.push((s, k));
-            }
+        // The face's corners as coordinates of the volume reference element, in
+        // the face's own corner order.
+        let mut corners: Vec<&[f64]> = Vec::with_capacity(nfn);
+        for &n in fn_nodes {
+            let pos = elem_nodes.iter().position(|&en| en == n).unwrap_or_else(|| {
+                panic!("face_dofs_h1: node {n} of face {f} is not in element {owner}")
+            });
+            corners.push(&vol_coords[pos]);
         }
-        on_edge.sort_by(|x, y| x.0.partial_cmp(&y.0).expect("face_dofs_h1: NaN parameter"));
-        assert!(
-            on_edge.len() >= 2,
-            "face_dofs_h1: only {} DOFs found on the edge of element {owner}",
-            on_edge.len()
-        );
 
-        // MFEM H¹ segment order: [v0, v1, interior along v0 → v1].
-        let (_, k0) = on_edge.remove(0);
-        let (_, k1) = on_edge.pop().expect("face_dofs_h1: edge DOF list underflow");
-        let mut dofs = Vec::with_capacity(on_edge.len() + 2);
-        dofs.push(elem_dofs[k0]);
-        dofs.push(elem_dofs[k1]);
-        dofs.extend(on_edge.iter().map(|&(_, k)| elem_dofs[k]));
+        let face_ref = ref_elem_face(face_type, space.order());
+        let geo = face_geo_elem(face_type);
+        let face_coords = face_ref.dof_coords();
+
+        let mut phi = vec![0.0_f64; nfn];
+        let mut dofs = Vec::with_capacity(face_coords.len());
+        for fc in face_coords.iter() {
+            geo.eval_basis(fc, &mut phi);
+            let mut x = vec![0.0_f64; dim];
+            for (k, c) in corners.iter().enumerate() {
+                for i in 0..dim {
+                    x[i] += phi[k] * c[i];
+                }
+            }
+            // Nearest volume DOF: the transported face coordinate is a face DOF
+            // position of the same H¹ family, so the match is exact up to the
+            // rounding of the map (≤ 1e-15), while distinct DOFs are at least
+            // ~1e-2 apart in the reference element.
+            let mut best = 0usize;
+            let mut best_d2 = f64::INFINITY;
+            for (k, c) in vol_coords.iter().enumerate() {
+                let d2: f64 = (0..dim).map(|i| (c[i] - x[i]) * (c[i] - x[i])).sum();
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = k;
+                }
+            }
+            assert!(
+                best_d2 < 1e-20,
+                "face_dofs_h1: no DOF of element {owner} at {x:?} (face {f} DOF {fc:?}, \
+                 nearest distance {:.3e}); does `element_dofs` match ref_elem_vol_for_space?",
+                best_d2.sqrt()
+            );
+            dofs.push(elem_dofs[best]);
+        }
         dofs
     }
 }
@@ -2743,5 +3101,536 @@ mod tests {
             "Σ diag M for tri-P0 = {diag_sum} (expected 1.0; 2.0 means the square rule is back)"
         );
     }
-}
 
+    // ─── D50: 3-D boundary assembly ──────────────────────────────────────────
+
+    /// The discrete divergence theorem, **per DOF**, for the *constant* test
+    /// vector `v = e_x`:
+    ///
+    /// ```text
+    /// ∮_Γ (e_x·n) φᵢ ds = ∫_Ω ∇·(e_x φᵢ) dV = ∫_Ω ∂φᵢ/∂x dV.
+    /// ```
+    ///
+    /// The left side is [`Assembler::assemble_boundary_linear`] with
+    /// [`VectorBoundaryNormalLFIntegrator`](crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator)
+    /// — the 3-D face Jacobian (`|t0 × t1|`), the outward normal and the
+    /// boundary element's shape functions.  The right side is
+    /// [`Assembler::assemble_linear`] with [`WeakDivConstLF`], a test-local
+    /// `∫ (e_x·∇φᵢ) dV` integrator running over the *volume* elements with
+    /// isoparametric Jacobians.  Both sides are exact for the constant `v` and
+    /// the degree-`p` basis, and they share no code, so comparing them DOF by
+    /// DOF pins:
+    ///
+    /// * the face basis function paired with each `face_dofs_h1` entry (a wrong
+    ///   face DOF order permutes the vector and destroys the equality);
+    /// * the face basis *nodes* (a face basis whose nodes are not the volume
+    ///   element's face nodes has the correct partition of unity but puts the
+    ///   flux on the wrong DOFs — the D46② failure mode);
+    /// * `|J_face|`, the outward normal and the physical quadrature points.
+    ///
+    /// A flipped face orientation shows up directly: the face at `x = 1` must
+    /// contribute `+∫φᵢ` and the one at `x = 0` `−∫φᵢ`.
+    ///
+    /// Deliberately *not* used here: `K·u` with `u_i = dof_coord(i)[0]`.  It
+    /// would be the same identity through a third path, but it needs
+    /// `DofManager::dof_coord`, which on tetrahedra only stores *approximate*
+    /// coordinates for face and volume DOFs (see the DofManager's
+    /// `build_pk`), so `u` would not be the interpolant of `x`.
+    struct WeakDivConstLF {
+        v: [f64; 3],
+    }
+
+    impl LinearIntegrator for WeakDivConstLF {
+        fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]) {
+            for k in 0..qp.n_dofs {
+                let g = &qp.grad_phys[k * qp.dim..(k + 1) * qp.dim];
+                let s: f64 = (0..qp.dim).map(|d| self.v[d] * g[d]).sum();
+                f_elem[k] += qp.weight * s;
+            }
+        }
+    }
+
+    fn check_divergence_theorem_3d(mesh: Mesh<3>, order: u8, label: &str) {
+        use crate::postproc::coefficient::FnVectorCoeff;
+
+        let space = H1Space::new(mesh, order);
+        // `order + 3` integrates both sides exactly: the volume integrand is
+        // `(e_x·∇φᵢ)·detJ` (degree `p - 1`, `detJ` constant on these straight
+        // meshes) and the face integrand is `φᵢ·|J_face|` where the bilinear
+        // face map makes `|J_face|` degree ≤ 2.
+        let quad_order = order + 3;
+
+        let vol = Assembler::assemble_linear(
+            &space,
+            &[&WeakDivConstLF { v: [1.0, 0.0, 0.0] }],
+            quad_order,
+        );
+
+        let integ = crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator {
+            v: FnVectorCoeff(|_x: &[f64], out: &mut [f64]| {
+                out[0] = 1.0;
+                out[1] = 0.0;
+                out[2] = 0.0;
+            }),
+        };
+        let tags: Vec<i32> = (1..=6).collect();
+        let rhs = Assembler::assemble_boundary_linear(
+            space.n_dofs(),
+            space.mesh(),
+            &face_dofs_h1(&space),
+            order,
+            &[&integ],
+            &tags,
+            quad_order,
+        );
+
+        let mut max_dev = 0.0_f64;
+        let mut worst = 0usize;
+        for i in 0..rhs.len() {
+            let d = (rhs[i] - vol[i]).abs();
+            if d > max_dev {
+                max_dev = d;
+                worst = i;
+            }
+        }
+        eprintln!(
+            "{label} order {order}: max |∮(v·n)φᵢ − ∫(v·∇φᵢ)| = {max_dev:.3e} (dof {worst}/{}), \
+             Σ∮ = {:.12}",
+            rhs.len(),
+            rhs.iter().sum::<f64>()
+        );
+        assert!(
+            max_dev < 1e-11,
+            "{label} order {order}: DOF {worst} of {}: ∮(v·n)φᵢ = {} but ∫(v·∇φᵢ) = {} \
+             (max |Δ| = {max_dev:.3e})",
+            rhs.len(),
+            rhs[worst],
+            vol[worst],
+        );
+    }
+
+    /// D50: `∫_Ω ∇·u dV = ∮_∂Ω u·n dS` for `u = (x, y, z)` — the divergence
+    /// theorem in the *global* sense, `Σᵢ rhsᵢ = 3|Ω|`.  Any face whose outward
+    /// normal points inward changes the sign of its own contribution, so this
+    /// is also the 3-D counterpart of
+    /// [`boundary_normal_is_outward_after_refinement`].
+    fn check_divergence_theorem_3d_total(mesh: Mesh<3>, order: u8, label: &str) {
+        use crate::postproc::coefficient::FnVectorCoeff;
+
+        let space = H1Space::new(mesh.clone(), order);
+        let integ = crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator {
+            v: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0];
+                out[1] = x[1];
+                out[2] = x[2];
+            }),
+        };
+        let tags: Vec<i32> = (1..=6).collect();
+        let rhs = Assembler::assemble_boundary_linear(
+            space.n_dofs(),
+            space.mesh(),
+            &face_dofs_h1(&space),
+            order,
+            &[&integ],
+            &tags,
+            2 * order + 2,
+        );
+        let total: f64 = rhs.iter().sum();
+        let want = 3.0 * volume_of(space.mesh());
+        eprintln!("{label} order {order}: Σ∮ (x,y,z)·n ds = {total:.12} (3|Ω| = {want:.12})");
+        assert!(
+            (total - want).abs() < 1e-11,
+            "{label} order {order}: Σ∮ = {total}, want 3|Ω| = {want}"
+        );
+    }
+
+    /// `|Ω|` of a Cartesian box; the 3-D fixtures are built by
+    /// `make_cartesian_3d`, whose domain is `[0,sx]×[0,sy]×[0,sz]`.
+    fn volume_of(mesh: &Mesh<3>) -> f64 {
+        let (lo, hi) = mesh.bounding_box();
+        (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2])
+    }
+
+    /// D50 acceptance: 3-D boundary assembly on hexahedra and tetrahedra
+    /// satisfies the discrete (per-DOF) and global divergence theorem, on
+    /// straight and uniformly refined meshes.
+    #[test]
+    fn boundary_assembly_3d_divergence_theorem() {
+        // (nx, ny, nz, sx, sy, sz, refinements, orders)
+        for etype in [ElementType::Hex8, ElementType::Tet4] {
+            for (nx, ny, nz, sx, sy, sz, refs, orders) in [
+                (1usize, 1usize, 1usize, 1.0, 1.0, 1.0, 0usize, &[1u8, 2, 3, 4, 5, 6][..]),
+                (2, 1, 3, 2.0, 1.5, 0.75, 0, &[1, 2, 3, 4, 5, 6][..]),
+                (2, 2, 2, 1.0, 1.0, 1.0, 1, &[2, 6][..]),
+            ] {
+                let mut mesh =
+                    Mesh::<3>::make_cartesian_3d(nx, ny, nz, etype, sx, sy, sz, false);
+                for _ in 0..refs {
+                    mesh = fem_mesh::refine_uniform_3d(&mesh);
+                }
+                let label = format!("{etype:?} {nx}x{ny}x{nz} + {refs}");
+                for &order in orders {
+                    check_divergence_theorem_3d(mesh.clone(), order, &label);
+                }
+                check_divergence_theorem_3d_total(mesh, 6, &label);
+            }
+        }
+    }
+
+    /// The face DOF list produced by [`face_dofs_h1`] in 3-D must be the one
+    /// the face reference element ([`ref_elem_face`]) pairs with: the vertices
+    /// first in `face_nodes` order, then the edge DOFs of the face's own 2-D
+    /// topology in increasing parameter, then the face interior.
+    #[test]
+    fn face_dofs_h1_3d_ordering() {
+        let mesh = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+        for order in [1u8, 2, 3, 6] {
+            let space = H1Space::new(mesh.clone(), order);
+            let fdofs = face_dofs_h1(&space);
+            let dm = space.dof_manager();
+            let np1 = order as usize + 1;
+            for f in space.mesh().face_iter() {
+                let d = fdofs(f);
+                assert_eq!(d.len(), np1 * np1, "order {order} face {f}");
+                let corners = space.mesh().face_nodes(f);
+                // Vertices first, in the face's own node order.
+                for (k, &n) in corners.iter().enumerate() {
+                    let c = space.mesh().node_coords(n);
+                    let dc = dm.dof_coord(d[k]);
+                    for i in 0..3 {
+                        assert!(
+                            (c[i] - dc[i]).abs() < 1e-12,
+                            "order {order} face {f}: DOF {k} must be vertex {n}"
+                        );
+                    }
+                }
+                if order < 2 {
+                    continue;
+                }
+                // Then, for each face edge, its interior DOFs in increasing
+                // parameter measured from the edge's first corner.
+                let mut at = corners.len();
+                for e in 0..corners.len() {
+                    let (a, b) = (corners[e], corners[(e + 1) % corners.len()]);
+                    let (pa, pb) = (space.mesh().node_coords(a), space.mesh().node_coords(b));
+                    let ab: Vec<f64> = (0..3).map(|i| pb[i] - pa[i]).collect();
+                    let prev = param(&dm.dof_coord(d[at - 1]), pa, &ab);
+                    for k in 0..(order as usize - 1) {
+                        let t = param(&dm.dof_coord(d[at + k]), pa, &ab);
+                        assert!(
+                            t > prev && t > 0.0 && t < 1.0,
+                            "order {order} face {f} edge {e}: DOF at {t} out of order"
+                        );
+                    }
+                    at += order as usize - 1;
+                }
+                assert!(
+                    at <= d.len(),
+                    "order {order} face {f}: {} edge DOFs but only {} total",
+                    at,
+                    d.len()
+                );
+            }
+        }
+
+        fn param(c: &[f64], a: &[f64], ab: &[f64]) -> f64 {
+            let ab2: f64 = ab.iter().map(|x| x * x).sum();
+            (0..3).map(|i| (c[i] - a[i]) * ab[i]).sum::<f64>() / ab2
+        }
+    }
+
+    /// D50: the 3-D face reference element must be MFEM's boundary element —
+    /// `H1_TriangleElement` / `H1_QuadrilateralElement` DOF order, with the
+    /// **volume** element's face nodes (so the face basis is the restriction of
+    /// the space's basis), and not `QuadQ1`/`QuadQ2` on `[-1,1]²`.
+    #[test]
+    fn ref_elem_face_3d_is_mfem_boundary_element() {
+        // Quad face: MFEM `H1_QuadrilateralElement` on `[0,1]²` — the hex
+        // volume element (`HexQk`) is itself Gauss-Lobatto, so the trace
+        // positions *are* the closed points.
+        let gll = fem_element::quadrature::gauss_lobatto_arbitrary(4).0;
+        let gll01 = |k: usize| 0.5 * (gll[k] + 1.0);
+        let quad = ref_elem_face(ElementType::Quad4, 3);
+        assert_eq!(quad.n_dofs(), 16);
+        assert_eq!(quad.dof_coords()[0], vec![0.0, 0.0]);
+        assert_eq!(quad.dof_coords()[1], vec![1.0, 0.0]);
+        assert_eq!(quad.dof_coords()[2], vec![1.0, 1.0]);
+        assert_eq!(quad.dof_coords()[3], vec![0.0, 1.0]);
+        // Bottom edge left → right, right edge bottom → top, top edge
+        // right → left, left edge top → bottom (H1_DOF_MAP).
+        assert_eq!(quad.dof_coords()[4], vec![gll01(1), 0.0]);
+        assert_eq!(quad.dof_coords()[6], vec![1.0, gll01(1)]);
+        assert_eq!(quad.dof_coords()[8], vec![gll01(2), 1.0]);
+        assert_eq!(quad.dof_coords()[10], vec![0.0, gll01(2)]);
+        // Interior, `(j, i)` nested with i fastest.
+        let base = 4 + 4 * 2;
+        assert_eq!(quad.dof_coords()[base], vec![gll01(1), gll01(1)]);
+        assert_eq!(quad.dof_coords()[base + 1], vec![gll01(2), gll01(1)]);
+        assert_eq!(quad.dof_coords()[base + 2], vec![gll01(1), gll01(2)]);
+        // `H1_DOF_MAP`'s `QuadQ1`/`QuadQ2` live on `[-1,1]²` — still the face
+        // geometry element's domain, which is what the transport needs.
+        assert_eq!(face_geo_elem(ElementType::Quad4).dof_coords()[2], vec![1.0, 1.0]);
+        assert_eq!(face_geo_elem(ElementType::Tri3).dof_coords()[1], vec![1.0, 0.0]);
+        assert_eq!(face_geo_elem(ElementType::Line2).dof_coords()[1], vec![1.0]);
+
+        // Triangle face: MFEM's `H1_TriangleElement` DOF order
+        // [v0, v1, v2, edge0…, edge1…, edge2…, interior…] over the *tet*
+        // volume element's face nodes.  The tet H¹ basis is equispaced
+        // (`factory::TetPk`), so the trace nodes are at `k/p` (see
+        // [`H1TetFacePk`]) — the DOF *order* is what must match MFEM, and the
+        // nodal property below pins that the elements are the volume
+        // element's traces.
+        for p in 1..=6usize {
+            let face = ref_elem_face(ElementType::Tri3, p as u8);
+            let vol = fem_element::lagrange::factory::TetPk::new(p);
+            let fcoords = face.dof_coords();
+            assert_eq!(fcoords.len(), (p + 1) * (p + 2) / 2, "p = {p}");
+            let vol_coords = vol.dof_coords();
+            let pp = p as f64;
+            let close = |a: &[f64], b: [f64; 2]| {
+                (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12
+            };
+            // Vertices.
+            assert!(close(&fcoords[0], [0.0, 0.0]));
+            assert!(close(&fcoords[1], [1.0, 0.0]));
+            assert!(close(&fcoords[2], [0.0, 1.0]));
+            // Edge blocks, in MFEM's order and directions.
+            for i in 1..p {
+                assert!(close(&fcoords[3 + i - 1], [i as f64 / pp, 0.0]), "p {p} e0 {i}");
+            }
+            for i in 1..p {
+                assert!(
+                    close(&fcoords[3 + (p - 1) + i - 1], [(p - i) as f64 / pp, i as f64 / pp]),
+                    "p {p} e1 {i}"
+                );
+            }
+            for i in 1..p {
+                assert!(
+                    close(&fcoords[3 + 2 * (p - 1) + i - 1], [0.0, (p - i) as f64 / pp]),
+                    "p {p} e2 {i}"
+                );
+            }
+            // Interior, `(j, i)` nested with i fastest.
+            let mut at = 3 + 3 * (p - 1);
+            for j in 1..p {
+                for i in 1..(p - j) {
+                    assert!(
+                        close(&fcoords[at], [i as f64 / pp, j as f64 / pp]),
+                        "p {p} interior {i},{j}"
+                    );
+                    at += 1;
+                }
+            }
+            assert_eq!(at, fcoords.len(), "p = {p}");
+
+            // Every node lies on a volume DOF, and the face basis is *nodal*
+            // there — i.e. the face basis functions really are the volume
+            // basis functions restricted to the face (a wrong slot resolution
+            // would break either of these).
+            let n = fcoords.len();
+            let mut vals = vec![0.0_f64; n];
+            for (k, fc) in fcoords.iter().enumerate() {
+                let on_face = vol_coords
+                    .iter()
+                    .any(|c| (c[0] - fc[0]).abs() < 1e-12 && (c[1] - fc[1]).abs() < 1e-12 && c[2].abs() < 1e-12);
+                assert!(on_face, "p {p}: face DOF {k} at {fc:?} is not a volume DOF");
+                face.eval_basis(fc, &mut vals);
+                for (l, &v) in vals.iter().enumerate() {
+                    let want = if l == k { 1.0 } else { 0.0 };
+                    assert!(
+                        (v - want).abs() < 1e-12,
+                        "p {p}: φ_{l}(node {k}) = {v}, want {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// D50 acceptance against **MFEM itself**: per boundary element and per
+    /// local face DOF, the 3-D boundary assembly must reproduce MFEM's
+    /// `BoundaryNormalLFIntegrator` (`∫_Γ (e_x·n) φ_k ds`).
+    ///
+    /// Reference data: serial MFEM 4.10 on `Mesh::MakeCartesian3D(1,1,1)`
+    /// (hexahedra and tetrahedra), orders 1…6, assembled with the explicit rule
+    /// `IntRules.Get(face_geom, p + 3)` — the same rule family and order that
+    /// `assemble_boundary_linear` is called with here (fem-rs mirrors MFEM's
+    /// point/weight layout, so the sums agree to round-off).  Harness:
+    /// `tests/data/bdr3d.cpp`, output `tests/data/bdr_3d_cpp.txt`.
+    ///
+    /// Per boundary face the test checks
+    /// * the attribute and the face vertices (i.e. that the two meshes and
+    ///   their boundary-element order coincide, which the whole comparison
+    ///   rests on);
+    /// * the face element's reference **DOF positions**, which pin the DOF
+    ///   order and the node placement;
+    /// * every entry `k` of the local vector.
+    ///
+    /// Hexahedron faces agree to round-off at every order.  Tetrahedron faces
+    /// agree only for `p ≤ 2`: at `p ≥ 3` MFEM's `H1_TriangleElement` places
+    /// the face nodes at the closed Gauss-Lobatto points while the fem-rs H¹
+    /// tetrahedron basis (`factory::TetPk`) is *equispaced*, so the two
+    /// assemblers integrate genuinely different basis functions (D49 — see
+    /// [`H1TetFacePk`]).  For those orders the test asserts the face node
+    /// positions are exactly the equispaced trace of the volume element (which
+    /// documents the gap) and reports the value difference.
+    #[test]
+    fn boundary_assembly_3d_matches_mfem_reference() {
+        use crate::postproc::coefficient::FnVectorCoeff;
+
+        const DUMP: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/bdr_3d_cpp.txt"
+        ));
+
+        struct Face {
+            tag: i32,
+            verts: Vec<u32>,
+            nodes: Vec<[f64; 2]>,
+            vals: Vec<f64>,
+        }
+        struct Case {
+            tet: bool,
+            p: u8,
+            faces: Vec<Face>,
+        }
+        let mut cases: Vec<Case> = Vec::new();
+        for line in DUMP.lines() {
+            let t: Vec<&str> = line.split_whitespace().collect();
+            match t.first().copied() {
+                Some("case") => {
+                    let p = t[2].trim_start_matches("p=").parse().unwrap();
+                    cases.push(Case { tet: t[1] == "tet", p, faces: Vec::new() });
+                }
+                Some("be") => {
+                    let tag: i32 = t[3].parse().unwrap();
+                    let nv: usize = t[7].parse().unwrap();
+                    let verts = t[11..11 + nv].iter().map(|v| v.parse().unwrap()).collect();
+                    cases.last_mut().unwrap().faces.push(Face {
+                        tag,
+                        verts,
+                        nodes: Vec::new(),
+                        vals: Vec::new(),
+                    });
+                }
+                Some("k") => {
+                    let f = cases.last_mut().unwrap().faces.last_mut().unwrap();
+                    assert_eq!(f.nodes.len(), t[1].parse::<usize>().unwrap());
+                    f.nodes.push([t[3].parse().unwrap(), t[4].parse().unwrap()]);
+                    f.vals.push(t[8].parse().unwrap());
+                }
+                Some(other) => panic!("unexpected dump token {other:?}"),
+                None => {}
+            }
+        }
+        assert_eq!(cases.len(), 12, "6 orders x 2 element types");
+
+        for case in &cases {
+            let etype = if case.tet { ElementType::Tet4 } else { ElementType::Hex8 };
+            let label = format!("{etype:?} p={}", case.p);
+            let agrees = !case.tet || case.p <= 2;
+            let mesh = Mesh::<3>::make_cartesian_3d(1, 1, 1, etype, 1.0, 1.0, 1.0, false);
+            let space = H1Space::new(mesh, case.p);
+            let fdofs = face_dofs_h1(&space);
+            let quad_order = case.p + 3;
+            let face_elt = ref_elem_face(
+                if case.tet { ElementType::Tri3 } else { ElementType::Quad4 },
+                case.p,
+            );
+            let integ = crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator {
+                v: FnVectorCoeff(|_x: &[f64], out: &mut [f64]| {
+                    out[0] = 1.0;
+                    out[1] = 0.0;
+                    out[2] = 0.0;
+                }),
+            };
+            assert_eq!(space.mesh().face_iter().len(), case.faces.len(), "{label}: faces");
+
+            let mut max_pos = 0.0_f64;
+            let mut max_val = 0.0_f64;
+            for (f, want) in space.mesh().face_iter().zip(case.faces.iter()) {
+                let fnodes = space.mesh().face_nodes(f);
+                assert_eq!(want.tag, space.mesh().face_tag(f), "{label}: face {f} tag");
+                assert_eq!(
+                    fnodes.to_vec(),
+                    want.verts,
+                    "{label}: face {f} vertices (the mesh and its boundary order must \
+                     match MFEM for this comparison to mean anything)"
+                );
+
+                let d = fdofs(f);
+                assert_eq!(d.len(), want.vals.len(), "{label}: face {f} DOF count");
+                for (k, (c, w)) in face_elt.dof_coords().iter().zip(want.nodes.iter()).enumerate()
+                {
+                    let dp = (c[0] - w[0]).abs().max((c[1] - w[1]).abs());
+                    max_pos = max_pos.max(dp);
+                    if agrees {
+                        assert!(
+                            dp < 1e-15,
+                            "{label}: face {f} DOF {k} node {c:?} != MFEM's {w:?}"
+                        );
+                    }
+                }
+
+                // The local face vector: a single-face accumulation read back at
+                // the face's own DOFs.
+                let mut local = vec![0.0_f64; space.n_dofs()];
+                accumulate_boundary_linear_face(
+                    space.mesh(),
+                    f,
+                    &fdofs,
+                    case.p,
+                    &[&integ],
+                    quad_order,
+                    &mut local,
+                );
+                for (k, &g) in d.iter().enumerate() {
+                    let dv = (local[g as usize] - want.vals[k]).abs();
+                    max_val = max_val.max(dv);
+                    if agrees {
+                        assert!(
+                            dv < 1e-12,
+                            "{label}: face {f} DOF {k}: ∫(e_x·n)φ_k = {} but MFEM has {} \
+                             (|Δ| = {dv:.3e})",
+                            local[g as usize],
+                            want.vals[k]
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "{label}: max |Δ node| = {max_pos:.3e}, max |Δ value| = {max_val:.3e}{}",
+                if agrees {
+                    ""
+                } else {
+                    "   (D49: MFEM's Gauss-Lobatto face nodes vs fem-rs's equispaced tet basis)"
+                }
+            );
+
+            if !agrees {
+                // The face nodes are the *equispaced* trace of the volume
+                // element — `k/p` along each face edge — while MFEM's are the
+                // closed Gauss-Lobatto points, and the two differ visibly.
+                let pp = case.p as f64;
+                for i in 1..case.p as usize {
+                    let c = &face_elt.dof_coords()[3 + i - 1];
+                    assert!(
+                        (c[0] - i as f64 / pp).abs() < 1e-12 && c[1].abs() < 1e-12,
+                        "p = {}: face edge node {i} at {c:?}, expected {}/{}",
+                        case.p,
+                        i,
+                        case.p
+                    );
+                }
+                let gll =
+                    fem_element::quadrature::gauss_lobatto_arbitrary(case.p as usize + 1).0;
+                let mfem_node = 0.5 * (gll[1] + 1.0);
+                assert!(
+                    (mfem_node - 1.0 / pp).abs() > 1e-3,
+                    "p = {}: Gauss-Lobatto and equispaced edge nodes should differ here",
+                    case.p
+                );
+            }
+        }
+    }
+
+}

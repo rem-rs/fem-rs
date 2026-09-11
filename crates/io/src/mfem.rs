@@ -1097,10 +1097,17 @@ enum TetGeom {
 /// through to fem-rs's own `DofManager` numbering, which silently gave 11 of
 /// the 42 elements of `data/escher-p2.mesh` another element's edge dofs.
 ///
-/// The reference element is the one the assembler uses for tet geometry
-/// (`fem_element::lagrange::factory::TetPk`, equispaced nodes on the unit
-/// tetrahedron), so its slots are classified by the *integer barycentric
-/// coordinates* of their node positions.
+/// The reference element is the one the assembler uses for tet geometry —
+/// `fem_element::lagrange::factory::H1TetPk`, MFEM's `H1_TetrahedronElement`
+/// (closed Gauss-Lobatto nodes, MFEM's DOF order; D49) — and its slots carry
+/// their *integer barycentric coordinates* (`H1TetPk::slot_labels`).
+///
+/// **Keep the two in step:** `geo_ref_elem` (`crates/assembly/src/assembler.rs`)
+/// builds the matching geometry element for the transform, and
+/// `vector_assembler::geo_ref_elem_from_mesh` still returns the *equispaced*
+/// `factory::TetPk` for tetrahedra — that copy must be switched to `H1TetPk`
+/// as well, otherwise a curved tet mesh (`geom_order ≥ 3`) is transformed with
+/// a different slot order than this table was built in.
 fn build_h1_tet_geometry<M: MeshTopology>(
     mesh: &M,
     order: u8,
@@ -1211,9 +1218,10 @@ struct TetFileSlots {
 
 /// Per-element slot map for a uniform Tet4 mesh: the geometry dof index MFEM's
 /// H1 numbering assigns to each reference-element slot, in
-/// `fem_element::lagrange::factory::TetPk`'s slot order, the slot's physical
-/// key (see [`TetFileSlots`]), and the total number of geometry dofs.  `Err`
-/// carries the reason the mesh cannot be mapped faithfully.
+/// `fem_element::lagrange::factory::H1TetPk`'s slot order (MFEM's
+/// `H1_TetrahedronElement` DOF order), the slot's physical key (see
+/// [`TetFileSlots`]), and the total number of geometry dofs.  `Err` carries the
+/// reason the mesh cannot be mapped faithfully.
 ///
 /// The entity enumeration is MFEM's: mesh edges/faces are numbered by element
 /// traversal, then local entity order (`TET_EDGES` / `TET_FACES`), first
@@ -1264,12 +1272,13 @@ fn tet_slot_map<M: MeshTopology>(
     let n_edges = edge_ids.len();
     let n_faces = face_ids.len();
 
-    // The reference element the assembler uses for tet geometry; its node
-    // positions are the equispaced barycentric grid, so the slot's integer
-    // barycentric coordinates are exactly `p·λ`.
-    let ref_elem = fem_element::lagrange::factory::TetPk::new(p);
-    let ref_coords = ref_elem.dof_coords();
-    let npe = ref_coords.len();
+    // The reference element the assembler uses for tet geometry: MFEM's
+    // `H1_TetrahedronElement(p)` (closed Gauss-Lobatto nodes, D49).  Its slots
+    // carry their integer barycentric coordinates directly (see
+    // `h1_tet_slot_labels`), which is what MFEM keys a geometric DOF by, so a
+    // slot is classified exactly instead of by rounding a node coordinate.
+    let labels = fem_element::lagrange::factory::H1TetPk::slot_labels(p);
+    let npe = labels.len();
     if npe != 4 + 6 * e + 4 * nf + nb {
         return Err("reference tet element is not the H1 order-p basis");
     }
@@ -1285,20 +1294,8 @@ fn tet_slot_map<M: MeshTopology>(
         let mut order = [0usize, 1, 2, 3];
         order.sort_by_key(|&m| n4[m]);
         let mut interior_seen = 0usize;
-        for c in ref_coords.iter() {
-            let lam = [1.0 - c[0] - c[1] - c[2], c[0], c[1], c[2]];
-            let mut idx = [0usize; 4];
-            for m in 0..4 {
-                let t = p as f64 * lam[m];
-                let r = t.round();
-                if (t - r).abs() > 1e-9 {
-                    return Err("slot is not on the integer barycentric grid");
-                }
-                idx[m] = r as usize;
-            }
-            if idx.iter().sum::<usize>() != p {
-                return Err("slot barycentric coordinates do not sum to the order");
-            }
+        for idx in labels.iter() {
+            let idx = *idx;
             let key = [idx[order[0]], idx[order[1]], idx[order[2]], idx[order[3]]];
             keys.push((el, key));
             let on_bnd: Vec<usize> = (0..4).filter(|&m| idx[m] > 0).collect();

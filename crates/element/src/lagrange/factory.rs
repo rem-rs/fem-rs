@@ -610,6 +610,311 @@ impl ReferenceElement for H1TriPk {
     }
 }
 
+// ─── H1TetPk: MFEM H1_TetrahedronElement (Gauss-Lobatto nodes) ──────────────
+
+/// Integer barycentric coordinates of MFEM `H1_TetrahedronElement(p)`'s node
+/// enumeration, in the order `(λ₁, λ₂, λ₃, λ₄)` with
+/// `λ₁ = 1-x-y-z, λ₂ = x, λ₃ = y, λ₄ = z` (so every entry sums to `p`).
+///
+/// The enumeration is `fem/fe/fe_h1.cpp`'s: vertices, then the six edges in
+/// `Geometry::TETRAHEDRON` order `(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)`,
+/// then the four faces in `Mesh::GenerateFaces`/`TET_FACES` order
+/// `{1,2,3}, {0,3,2}, {0,1,3}, {0,2,1}`, then the interior in MFEM's
+/// `(k, j, i)` nested order.
+///
+/// These labels are what the mesh loader keys a geometric DOF by (the *slot*
+/// of the reference element is a position; the label is its identity), so they
+/// are exposed separately from [`H1TetPk`]'s node coordinates — a position has
+/// to be rounded to an integer grid, a label does not.
+pub fn h1_tet_slot_labels(p: usize) -> Vec<[usize; 4]> {
+    assert!(p >= 1, "h1_tet_slot_labels: order must be >= 1");
+    let mut labels: Vec<[usize; 4]> = Vec::with_capacity((p + 1) * (p + 2) * (p + 3) / 6);
+    // vertices
+    labels.push([p, 0, 0, 0]);
+    labels.push([0, p, 0, 0]);
+    labels.push([0, 0, p, 0]);
+    labels.push([0, 0, 0, p]);
+    // edges (see `Tetrahedron::edges` in mesh/tetrahedron.cpp)
+    for i in 1..p {
+        labels.push([p - i, i, 0, 0]);
+    }
+    for i in 1..p {
+        labels.push([p - i, 0, i, 0]);
+    }
+    for i in 1..p {
+        labels.push([p - i, 0, 0, i]);
+    }
+    for i in 1..p {
+        labels.push([0, p - i, i, 0]);
+    }
+    for i in 1..p {
+        labels.push([0, p - i, 0, i]);
+    }
+    for i in 1..p {
+        labels.push([0, 0, p - i, i]);
+    }
+    // faces (see `Mesh::GenerateFaces`)
+    for j in 1..p {
+        for i in 1..(p - j) {
+            labels.push([0, p - i - j, i, j]);
+        }
+    }
+    for j in 1..p {
+        for i in 1..(p - j) {
+            labels.push([p - i - j, 0, j, i]);
+        }
+    }
+    for j in 1..p {
+        for i in 1..(p - j) {
+            labels.push([p - i - j, i, 0, j]);
+        }
+    }
+    for j in 1..p {
+        for i in 1..(p - j) {
+            labels.push([p - i - j, j, i, 0]);
+        }
+    }
+    // interior
+    for k in 1..p {
+        for j in 1..(p - k) {
+            for i in 1..(p - j - k) {
+                labels.push([p - i - j - k, i, j, k]);
+            }
+        }
+    }
+    debug_assert_eq!(labels.len(), (p + 1) * (p + 2) * (p + 3) / 6);
+    labels
+}
+
+/// MFEM `H1_TetrahedronElement(p)` clone on the reference tetrahedron
+/// `(0,0,0),(1,0,0),(0,1,0),(0,0,1)` — `(p+1)(p+2)(p+3)/6` DOFs at the **closed
+/// Gauss-Lobatto points** (MFEM `H1_FECollection`'s default
+/// `BasisType::GaussLobatto`), in MFEM's DOF order (see
+/// [`h1_tet_slot_labels`]).
+///
+/// This is the tetrahedron analogue of [`H1TriPk`], and it is *not*
+/// [`TetPk`]: `TetPk` uses **equispaced** nodes on the integer barycentric grid
+/// (so its DOFs sit at `k/p` along every edge).  For `p ≤ 2` the two coincide
+/// (the closed Gauss-Lobatto points of `p = 2` are the midpoints); from `p = 3`
+/// on they differ (`1/3` vs `0.2764`), which changes the isoparametric map of a
+/// curved mesh and, one level up, the H¹ basis itself.
+///
+/// The basis is the Vandermonde inverse of MFEM's *hierarchical* product basis
+/// `s_o = T_i(x)·T_j(y)·T_k(z)·T_l(1−x−y−z)` (o enumerated with `k` outer, `j`
+/// middle, `i` inner; `l = p−i−j−k`; `T_n` = the Chebyshev polynomial of
+/// degree `n` evaluated at `2ξ−1`, i.e. exactly `Poly_1D::CalcBasis`), so the
+/// functions are the unique nodal Lagrange basis at `nodes` and reproduce
+/// MFEM's `CalcShape`/`CalcDShape` up to round-off.  Using the Chebyshev basis
+/// rather than monomials keeps the Vandermonde inversion of the `p = 6`
+/// (84 DOF) element well conditioned.
+pub struct H1TetPk {
+    inner: std::sync::Arc<H1TetPkInner>,
+}
+
+struct H1TetPkInner {
+    order: usize,
+    nodes: Vec<[f64; 3]>,
+    lex: Vec<(usize, usize, usize)>,
+    /// Row-major DOF × DOF: `φ_m = Σ_o ti[m·dof+o]·s_o`.
+    ti: Vec<f64>,
+}
+
+/// Chebyshev polynomials `T_0..T_p` evaluated at `2x−1` (MFEM
+/// `Poly_1D::CalcChebyshev`).
+fn cheb_1d(p: usize, x: f64) -> Vec<f64> {
+    let mut u = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return u;
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+    }
+    u
+}
+
+/// Values and first derivatives of `T_0..T_p` at `2x−1` (MFEM
+/// `Poly_1D::CalcChebyshev(p, x, u, d)`).
+fn cheb_1d_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0_f64; p + 1];
+    let mut d = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return (u, d);
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    d[1] = 2.0;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+        d[n + 1] = (n as f64 + 1.0) * (z * d[n] / n as f64 + 2.0 * u[n]);
+    }
+    (u, d)
+}
+
+fn h1_tet_pk_build(p: usize) -> H1TetPkInner {
+    // Closed Gauss-Lobatto points on [0,1] (MFEM `poly1d.ClosedPoints(p)`).
+    let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+    let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+
+    let labels = h1_tet_slot_labels(p);
+    let mut nodes: Vec<[f64; 3]> = labels
+        .iter()
+        .map(|&[l, i, j, k]| {
+            let w = cp[i] + cp[j] + cp[k] + cp[l];
+            if w == 0.0 {
+                // A vertex: exactly one barycentric coordinate is 1.
+                [cp[i], cp[j], cp[k]]
+            } else {
+                // `w` is 1 for an edge node (two nonzero coordinates summing
+                // to p) and the MFEM normalisation otherwise.
+                [cp[i] / w, cp[j] / w, cp[k] / w]
+            }
+        })
+        .collect();
+    // Vertices: the formula above divides by `cp[l] = 1` (or `cp[i] = 1`), which
+    // is exact — but keep the explicit positions so the vertices are bit-exact.
+    nodes[0] = [cp[0], cp[0], cp[0]];
+    nodes[1] = [cp[p], cp[0], cp[0]];
+    nodes[2] = [cp[0], cp[p], cp[0]];
+    nodes[3] = [cp[0], cp[0], cp[p]];
+
+    // MFEM's basis enumeration: k outer, j middle, i inner.
+    let mut lex = Vec::with_capacity(nodes.len());
+    for k in 0..=p {
+        for j in 0..=(p - k) {
+            for i in 0..=(p - j - k) {
+                lex.push((i, j, k));
+            }
+        }
+    }
+    debug_assert_eq!(lex.len(), nodes.len());
+
+    let n = nodes.len();
+    let mut t = DMatrix::<f64>::zeros(n, n);
+    for (m, node) in nodes.iter().enumerate() {
+        let l = 1.0 - node[0] - node[1] - node[2];
+        let sx = cheb_1d(p, node[0]);
+        let sy = cheb_1d(p, node[1]);
+        let sz = cheb_1d(p, node[2]);
+        let sl = cheb_1d(p, l);
+        for (o, &(i, j, k)) in lex.iter().enumerate() {
+            t[(o, m)] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
+        }
+    }
+    let ti_m = t.try_inverse().expect("H1TetPk: singular Vandermonde matrix");
+    let mut ti = vec![0.0; n * n];
+    for m in 0..n {
+        for o in 0..n {
+            ti[m * n + o] = ti_m[(m, o)];
+        }
+    }
+    H1TetPkInner { order: p, nodes, lex, ti }
+}
+
+impl H1TetPk {
+    /// Build (or fetch from the per-order cache) the element.
+    ///
+    /// `geo_ref_elem` builds the geometry element **once per element**, and the
+    /// Vandermonde inversion is `O(dof³)` (≈ 6·10⁵ flops at `p = 6`), so the
+    /// tables are cached per order and shared.
+    pub fn new(p: usize) -> Self {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static CACHE: OnceLock<Mutex<HashMap<usize, Arc<H1TetPkInner>>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let inner = {
+            let mut m = cache.lock().expect("H1TetPk cache poisoned");
+            m.entry(p).or_insert_with(|| Arc::new(h1_tet_pk_build(p))).clone()
+        };
+        Self { inner }
+    }
+
+    /// MFEM's `H1_TetrahedronElement(p)` node enumeration — see
+    /// [`h1_tet_slot_labels`].
+    pub fn slot_labels(p: usize) -> Vec<[usize; 4]> {
+        h1_tet_slot_labels(p)
+    }
+}
+
+impl ReferenceElement for H1TetPk {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.inner.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.inner.nodes.len()
+    }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let p = self.inner.order;
+        let n = self.inner.nodes.len();
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let sx = cheb_1d(p, x);
+        let sy = cheb_1d(p, y);
+        let sz = cheb_1d(p, z);
+        let sl = cheb_1d(p, 1.0 - x - y - z);
+        let mut u = vec![0.0; n];
+        for (o, &(i, j, k)) in self.inner.lex.iter().enumerate() {
+            u[o] = sx[i] * sy[j] * sz[k] * sl[p - i - j - k];
+        }
+        for m in 0..n {
+            let mut acc = 0.0;
+            for o in 0..n {
+                acc += self.inner.ti[m * n + o] * u[o];
+            }
+            values[m] = acc;
+        }
+    }
+
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let p = self.inner.order;
+        let n = self.inner.nodes.len();
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let (sx, dx) = cheb_1d_d(p, x);
+        let (sy, dy) = cheb_1d_d(p, y);
+        let (sz, dz) = cheb_1d_d(p, z);
+        let (sl, dl) = cheb_1d_d(p, 1.0 - x - y - z);
+        // MFEM `H1_TetrahedronElement::CalcDShape`: the `1-x-y-z` coordinate
+        // contributes `-dshape_l` to every partial derivative.
+        let mut du = vec![0.0_f64; n * 3];
+        for (o, &(i, j, k)) in self.inner.lex.iter().enumerate() {
+            let l = p - i - j - k;
+            du[o * 3] = (dx[i] * sl[l] - sx[i] * dl[l]) * sy[j] * sz[k];
+            du[o * 3 + 1] = (dy[j] * sl[l] - sy[j] * dl[l]) * sx[i] * sz[k];
+            du[o * 3 + 2] = (dz[k] * sl[l] - sz[k] * dl[l]) * sx[i] * sy[j];
+        }
+        for m in 0..n {
+            let (mut gx, mut gy, mut gz) = (0.0, 0.0, 0.0);
+            for o in 0..n {
+                let c = self.inner.ti[m * n + o];
+                gx += c * du[o * 3];
+                gy += c * du[o * 3 + 1];
+                gz += c * du[o * 3 + 2];
+            }
+            grads[m * 3] = gx;
+            grads[m * 3 + 1] = gy;
+            grads[m * 3 + 2] = gz;
+        }
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tet_rule(order)
+    }
+
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.inner
+            .nodes
+            .iter()
+            .map(|c| vec![c[0], c[1], c[2]])
+            .collect()
+    }
+}
+
 // ─── TetPk ───────────────────────────────────────────────────────────────────
 
 /// Arbitrary-order Lagrange element on the reference tetrahedron —
