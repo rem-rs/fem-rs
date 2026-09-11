@@ -61,11 +61,36 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
         }
     }
 
-    /// MFEM `CurlCurlIntegrator::GetIntegrationOrder`: for Pk space
-    /// `order = 2*el.GetOrder() - 2`, otherwise `2*el.GetOrder()`.
-    /// ND elements are Pk, so for order=1 → 0 (1-point rule).
+    /// MFEM `CurlCurlIntegrator::GetIntegrationOrder`: `order = 2*el.GetOrder()
+    /// - 2` when `el.Space() == FunctionSpace::Pk`, otherwise `2*el.GetOrder()`
+    /// (bilininteg.cpp:2204-2210).  The simplex ND elements are Pk, while the
+    /// tensor-product ND elements (`ND_QuadrilateralElement`,
+    /// `ND_HexahedronElement`, `ND_WedgeElement`, via `VectorTensorFiniteElement`)
+    /// are Qk — so on quads/hexes/prisms the curl-curl form needs `2k`
+    /// (k = 2 → 3 points per direction, not 2).
     fn integration_order(&self, space_order: u8) -> Option<u8> {
         if space_order <= 1 { Some(1) } else { Some(2 * space_order - 2) }
+    }
+
+    fn integration_order_for(
+        &self,
+        space_order: u8,
+        elem_type: fem_mesh::element_type::ElementType,
+    ) -> Option<u8> {
+        use fem_mesh::element_type::ElementType;
+        let tensor = matches!(
+            elem_type,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+                | ElementType::Hex8 | ElementType::Hex20
+                | ElementType::Prism6 | ElementType::Prism15
+        );
+        if space_order <= 1 {
+            Some(1)
+        } else if tensor {
+            Some(2 * space_order)
+        } else {
+            Some(2 * space_order - 2)
+        }
     }
 }
 

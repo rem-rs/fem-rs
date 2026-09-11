@@ -80,13 +80,13 @@
 //!
 //! With that fixed the block norms, the PCG counts and the whole table agree
 //! with C++ (above).  The L² error is integrated with exactly MFEM's
-//! `ComputeL2Error` rule (`2*fe_order + 3`) — see `mfem_l2_rule_order` for
-//! why the hex case needs a conversion; without it the over-integrated rule
-//! shifts the reported error by ~1.5% (9.414e-1 vs 9.547e-1 at `-o 2 -do 1`).
-//! The one residual difference is that the volume/RHS assembly runs on a
-//! 6-point-per-direction Gauss rule where MFEM uses its degree-`2*test_order`
-//! rule (4 points): an over-integration that perturbs the RHS by ~1e-4
-//! relative (visible in the 4th digit of the block norms), not a defect.
+//! `ComputeL2Error` rule (`2*fe_order + 3`).  Round 18 closed the last
+//! core-library debt in this path (D54): `dpg_basis::vol_quadrature`'s hex
+//! branch read its argument as a Gauss-*point count* (6 points/direction at
+//! test order 3) instead of the *degree* MFEM's `IntRules.Get` takes (4
+//! points); the volume/RHS assembly now uses MFEM's rule, which removed the
+//! ~1e-4 relative RHS perturbation visible as the 0.06% ref0 residual at
+//! `-o 2 -do 0`.
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::{
@@ -402,27 +402,6 @@ fn solve_level(
     (dofs, err, iterations)
 }
 
-/// Argument for `fem_assembly::dpg::dpg_basis::vol_quadrature` that reproduces
-/// MFEM's `IntRules.Get(geom, deg)` — the rule `GridFunction::ComputeL2Error`
-/// selects with `deg = 2*fe->GetOrder() + 3` (`fem/gridfunc.cpp:3410`,
-/// `intorder = 2*fe->GetOrder() + 3`).
-///
-/// A 1-D Gauss rule with `n` points is exact for degree `2n − 1`, so in
-/// MFEM's convention (the argument is the *degree*) `n = (deg + 2) / 2`.
-/// `dpg_basis::vol_quadrature` follows that convention for simplices
-/// (`tri_rule`/`tet_rule`) and quads (`quad_rule_01`), but its **hex** branch
-/// calls `gauss_legendre_arbitrary(order)` — i.e. it reads the argument as a
-/// *point count*, unlike `fem_element::quadrature::hex_rule`.  This helper
-/// converts, so the L² error here is integrated with exactly the rule MFEM
-/// uses (see the round-17 note in the module header; the mismatch itself is
-/// a core-library inconsistency in `dpg_basis::vol_quadrature`).
-fn mfem_l2_rule_order(et: ElementType, deg: u8) -> u8 {
-    match et {
-        ElementType::Hex8 => (deg + 2) / 2,
-        _ => deg,
-    }
-}
-
 /// L² errors of E (3 comps) and H (3 comps), re + im combined (C++
 /// `sqrt(E_err² + H_err²)` with `ComputeL2Error`).
 fn errors(
@@ -439,11 +418,9 @@ fn errors(
     let fe = fem_assembly::dpg::dpg_basis::scalar_ref_elem(et, order);
     let n = fe.n_dofs();
     // MFEM `ComputeL2Error`: `IntRules.Get(geom, 2*order + 3)` with
-    // `order` the *L²* FE order (here `p - 1`).
-    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(
-        et,
-        mfem_l2_rule_order(et, 2 * order + 3),
-    );
+    // `order` the *L²* FE order (here `p - 1`); `vol_quadrature` takes the
+    // same degree argument on every geometry.
+    let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 2 * order + 3);
     let mut phi = vec![0.0_f64; n];
     let mut err2 = 0.0_f64;
     let is_simplex = matches!(et, ElementType::Tet4);

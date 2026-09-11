@@ -28,7 +28,7 @@
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
     lagrange::{factory::{TetPk, TriPk}, HexL2GL, QuadL2GL},
-    quadrature::{gauss_legendre_01, quad_rule_01, tet_rule, tri_rule},
+    quadrature::{gauss_legendre_01, hex_rule, quad_rule_01, tet_rule, tri_rule},
     raviart_thomas::{HexRTk, QuadRTk, TetRTk, TriRTk},
     nedelec::{HexNDk, QuadNDk, TetNDk, TriNDk},
 };
@@ -157,26 +157,20 @@ pub fn vol_quadrature(et: ElementType, order: u8) -> (Vec<Vec<f64>>, Vec<f64>) {
             (r.points, r.weights)
         }
         ElementType::Hex8 => {
-            // Tensor-product Gauss-Legendre on `[−1,1]³`.  The hexahedral
-            // fem-element family (`HexL2GL`/`HexQk`/`HexRTk`/`HexNDk` and the
-            // `HexQ1` geometry element, all of which `eval_vol_space` and
-            // `geo_ref_elem_from_mesh` use) is defined on `[−1,1]³`, exactly
-            // like the rest of fem-rs's 3-D kernels; the DPG quadrature and
-            // reference geometry must use the same domain, otherwise
-            // `x(ξ)` only covers a sub-box of each element and the measure is
-            // off by `2^dim`.
-            let (pts1d, wts1d) = fem_element::quadrature::gauss_legendre_arbitrary(order as usize);
-            let mut points = Vec::new();
-            let mut weights = Vec::new();
-            for (iz, &wz) in wts1d.iter().enumerate() {
-                for (iy, &wy) in wts1d.iter().enumerate() {
-                    for (ix, &wx) in wts1d.iter().enumerate() {
-                        points.push(vec![pts1d[ix], pts1d[iy], pts1d[iz]]);
-                        weights.push(wx * wy * wz);
-                    }
-                }
-            }
-            (points, weights)
+            // Tensor-product Gauss-Legendre on `[−1,1]³`, exactly
+            // [`fem_element::quadrature::hex_rule`]: the argument is the
+            // polynomial *degree* MFEM passes to `IntRules.Get(hex, deg)`
+            // (`(deg + 2) / 2` Gauss points per direction), matching the
+            // degree semantics of `tri_rule`/`tet_rule`/`quad_rule_01` above.
+            // The hexahedral fem-element family (`HexL2GL`/`HexQk`/`HexRTk`/
+            // `HexNDk` and the `HexQ1` geometry element, all of which
+            // `eval_vol_space` and `geo_ref_elem_from_mesh` use) is defined on
+            // `[−1,1]³`, exactly like the rest of fem-rs's 3-D kernels; the
+            // DPG quadrature and reference geometry must use the same domain,
+            // otherwise `x(ξ)` only covers a sub-box of each element and the
+            // measure is off by `2^dim`.
+            let r = hex_rule(order);
+            (r.points, r.weights)
         }
         _ => panic!("dpg_basis::vol_quadrature: unsupported {et:?}"),
     }
@@ -2723,7 +2717,10 @@ mod trace_tests {
     #[test]
     fn nd_hex_span_is_tensor_nedelec() {
         let ident = nalgebra::DMatrix::<f64>::identity(3, 3);
-        let quad = vol_quadrature(ElementType::Hex8, 4);
+        // Order 6 = 4 Gauss points per direction (exact degree 7): the p=3
+        // monomial columns contain y³/z³ factors, which need ≥ 4 samples per
+        // direction to stay independent (3 points can only span degree 2).
+        let quad = vol_quadrature(ElementType::Hex8, 6);
         for p in 1u8..=3 {
             let pu = p as usize;
             let n = hcurl_ref_elem(ElementType::Hex8, p).n_dofs();
@@ -2818,7 +2815,10 @@ mod trace_tests {
     #[test]
     fn rt_hex_span_is_tensor_rt() {
         let ident = nalgebra::DMatrix::<f64>::identity(3, 3);
-        let quad = vol_quadrature(ElementType::Hex8, 4);
+        // Order 6 = 4 Gauss points per direction: the p=2 monomial columns
+        // contain degree-3 normal factors, which need ≥ 4 samples per
+        // direction to stay independent.
+        let quad = vol_quadrature(ElementType::Hex8, 6);
         for p in 1u8..=2 {
             let pu = p as usize;
             let n = vector_ref_elem(ElementType::Hex8, p).n_dofs();

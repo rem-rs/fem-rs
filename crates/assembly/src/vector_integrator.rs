@@ -73,6 +73,21 @@ pub trait VectorBilinearIntegrator: Send + Sync {
     /// that integrator on its own quadrature rule of the requested order,
     /// independent of the others.
     fn integration_order(&self, _space_order: u8) -> Option<u8> { None }
+
+    /// Geometry-aware variant of [`integration_order`](Self::integration_order).
+    ///
+    /// Some MFEM integrators pick the order from the element's function space
+    /// (`el.Space() == Pk` vs `Qk`), not just from its order — e.g.
+    /// `CurlCurlIntegrator` uses `2k-2` for simplices but `2k` for
+    /// tensor-product elements.  The default ignores the geometry and
+    /// delegates to [`integration_order`](Self::integration_order).
+    fn integration_order_for(
+        &self,
+        space_order: u8,
+        _elem_type: fem_mesh::element_type::ElementType,
+    ) -> Option<u8> {
+        self.integration_order(space_order)
+    }
 }
 
 /// Accumulate a linear-form contribution for vector FE into the element
