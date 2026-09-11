@@ -3303,6 +3303,29 @@ impl<const D: usize> MeshTopology for Mesh<D> {
                 (0, None)
             }
         } else {
+            // D46④: the lazy face→element map has not been built, so this
+            // returns the `(0, None)` placeholder — which a caller cannot tell
+            // apart from a genuine "element 0 owns this face".  Returning a
+            // wrong owner silently corrupts any boundary assembly that trusts
+            // it (e.g. a boundary normal flux functional).
+            //
+            // `build_face_to_elem()` / `face_to_elem_map()` must be called
+            // after constructing or refining the mesh.  Warn once per process
+            // in debug builds instead of staying silent: the fix belongs in
+            // the caller, and some callers (`face_dofs_p2`) legitimately probe
+            // the reported owner and fall back to a scan, so this must not
+            // abort.
+            #[cfg(debug_assertions)]
+            {
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    eprintln!(
+                        "WARNING: Mesh::face_elements: face-to-element map not built; \
+                         returning the (0, None) fallback. Call build_face_to_elem() \
+                         after constructing or refining the mesh."
+                    );
+                });
+            }
             (0, None)
         }
     }

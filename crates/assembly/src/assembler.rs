@@ -9,7 +9,7 @@ use nalgebra::DMatrix;
 use fem_core::types::DofId;
 use fem_element::{
     QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, SegP2, SegP3, SegP4, TetP1, TetP2, TriP1,
+    lagrange::{SegP1, SegP2, TetP1, TetP2, TriP1,
                 QuadQ1, QuadQ2, HexQ1},
     lagrange::factory::{TriPk, TetPk},
     quadrature::quad_rule_01,
@@ -392,19 +392,144 @@ pub(crate) fn geom_quad_point(_elem_type: ElementType, _order: u8, xi: &[f64]) -
 }
 
 /// Return the solution reference element for a boundary face.
+///
+/// The face reference element fixes both the quadrature rule of
+/// [`Assembler::assemble_boundary_linear`] / `assemble_boundary_bilinear` and
+/// the *pairing* between a face basis function `φᵢ` and the `i`-th entry of
+/// the caller's `face_dofs` list.  The two helpers that build such lists for
+/// H¹ spaces are [`face_dofs_p1`] (vertices only), [`face_dofs_p2`]
+/// (`[v0, v1, mid]`) and [`face_dofs_h1`] (every order, `[v0, v1, interior…]`
+/// — the MFEM `H1_SegmentElement` DOF order, see [`H1SegPk`]).
+///
+/// Low orders keep the historical fixed-order elements so that existing
+/// callers (`face_dofs_p2`, e.g. the ex21 traction assembly) stay
+/// bit-identical; higher orders are served by [`H1SegPk`], the *trace* of the
+/// volume element (`SegP1`/`SegP2` coincide with it, `SegP3` — whose nodes are
+/// equispaced instead of Gauss-Lobatto — does not, so it is not used).
 fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (face_elem_type, order) {
+        // ── Historical fixed-order entries (bit-identical for old callers) ──
+        // `SegP1` and `SegP2` have exactly the trace nodes ([0,1] and the
+        // closed Gauss-Lobatto points of p = 2, which are equidistant).
         (ElementType::Line2, 1) => Box::new(SegP1),
         (ElementType::Line2, 2) => Box::new(SegP2),
-        (ElementType::Line2, 3) => Box::new(SegP3),
-        (ElementType::Line2, 4) => Box::new(SegP4),
-        (ElementType::Tri3,  1) => Box::new(TriP1),
-        (ElementType::Tri3,  2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3,  3) => Box::new(TriPk::new(3)),
-        (ElementType::Tri3,  4) => Box::new(TriPk::new(4)),
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        _ => panic!("ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"),
+        // ── Order-generic entries ───────────────────────────────────────────
+        // MFEM's boundary element is the *trace* of the volume space, i.e.
+        // `H1_SegmentElement(p)` for a 2-D mesh whose faces are segments.
+        (ElementType::Line2, o) if o >= 1 => Box::new(H1SegPk::new(o)),
+        (ElementType::Tri3, o) if o >= 1 => {
+            Box::new(fem_element::lagrange::factory::TriPk::new(o as usize))
+        }
+        (ElementType::Quad4, o) if o >= 1 => {
+            Box::new(fem_element::lagrange::factory::QuadQk::new(o as usize))
+        }
+        _ => panic!(
+            "ref_elem_face: unsupported (element_type={face_elem_type:?}, order={order})"
+        ),
+    }
+}
+
+/// MFEM `H1_SegmentElement(p)` — the **trace** of the volume
+/// `H1_FECollection` element on one of its edges, on the reference segment
+/// `[0, 1]`.
+///
+/// Two properties matter for a boundary form:
+///
+/// 1. **DOF order.**  MFEM orders the segment DOFs topologically
+///    (`fem/fe/fe_h1.cpp`: `Nodes.IntPoint(0).x = cp[0]`,
+///    `Nodes.IntPoint(1).x = cp[p]`, then the interior nodes in increasing
+///    order), i.e. `[v0, v1, interior ascending]`.  That differs from the
+///    ascending-`ξ` order of `lagrange::factory::SegPk` and of
+///    `SegP4`/`SegP5`/`SegP6` at `p ≥ 2`.
+/// 2. **DOF positions.**  They are the *edge nodes of the volume element* —
+///    the closed Gauss-Lobatto points (`Lagrange1D`, MFEM `ClosedPoints(p)`),
+///    which are **not** equispaced for `p ≥ 3`.  An equispaced face basis
+///    still satisfies `Σᵢ φᵢ = 1`, so a divergence-theorem check on the DOF
+///    *sum* passes while the per-DOF distribution is wrong: measured on the
+///    `navier_kovasznay` mesh (order 6) the per-DOF `g_bdr` was off by up to
+///    0.1 against the exact trace, with the flux sum exact.
+///
+/// Both are obtained here by *restricting the volume element*: evaluating the
+/// order-`p` tensor-product H¹ element (`QuadQk`, whose bottom-edge DOFs 0, 1
+/// and `4..4+p-1` are the vertices and the interior nodes in topological
+/// order — see that element's `pos_dof_map`) at `(ξ, 0)` and keeping those
+/// DOFs.  The trace of any tensor-product H¹ element on an edge is the same
+/// 1-D Gauss-Lobatto basis, so this is `H1_SegmentElement(p)` by construction
+/// and is consistent with the volume basis used by the assembler — no
+/// separate node table to keep in sync.
+///
+/// Hence the pairing contract of [`ref_elem_face`]: `face_dofs(f)` must list
+/// the space DOFs of the face as `[dof(v0), dof(v1), interior along v0 → v1]`,
+/// which is what [`face_dofs_h1`] produces.
+struct H1SegPk {
+    /// Volume H¹ element providing the trace (bottom edge only).
+    vol: Box<dyn ReferenceElement>,
+    /// Local indices of the bottom-edge DOFs of `vol`, in topological order.
+    edge: Vec<usize>,
+    /// Scratch for the volume evaluation (`eval_basis` takes `&self`);
+    /// `Mutex` rather than `RefCell` because `ReferenceElement: Send + Sync`.
+    scratch: std::sync::Mutex<Vec<f64>>,
+}
+
+impl H1SegPk {
+    fn new(p: u8) -> Self {
+        assert!(p >= 1, "H1SegPk: order must be >= 1");
+        let vol: Box<dyn ReferenceElement> =
+            Box::new(fem_element::lagrange::factory::QuadQk::new(p as usize));
+        let mut edge = vec![0, 1];
+        edge.extend(4..4 + (p as usize - 1));
+        let n = vol.n_dofs();
+        H1SegPk {
+            vol,
+            edge,
+            scratch: std::sync::Mutex::new(vec![0.0; n]),
+        }
+    }
+
+    /// Evaluate the volume basis at `ξ = (s, 0)` and pick the edge DOFs.
+    fn trace(&self, s: f64, out: &mut [f64], grads: bool) {
+        let mut buf = self.scratch.lock().expect("H1SegPk scratch poisoned");
+        let n = self.vol.n_dofs();
+        buf.resize(if grads { 2 * n } else { n }, 0.0);
+        if grads {
+            self.vol.eval_grad_basis(&[s, 0.0], &mut buf);
+        } else {
+            self.vol.eval_basis(&[s, 0.0], &mut buf);
+        }
+        for (i, &k) in self.edge.iter().enumerate() {
+            out[i] = if grads { buf[k * 2] } else { buf[k] };
+        }
+    }
+}
+
+impl ReferenceElement for H1SegPk {
+    fn dim(&self) -> u8 {
+        1
+    }
+    fn order(&self) -> u8 {
+        self.vol.order()
+    }
+    fn n_dofs(&self) -> usize {
+        self.edge.len()
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        self.trace(xi[0], values, false);
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        self.trace(xi[0], grads, true);
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        fem_element::quadrature::seg_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let vol_coords = self.vol.dof_coords();
+        // Bottom-edge DOFs: vertices first (in the face's own order), then the
+        // interior nodes ascending along `v0 → v1`.
+        let mut c = vec![vec![0.0], vec![1.0]];
+        c.extend(self.edge[2..].iter().map(|&k| vec![vol_coords[k][0]]));
+        c
     }
 }
 
@@ -2112,6 +2237,119 @@ where
     }
 }
 
+/// Build the face DOF list for an H¹ space of **any** order.
+///
+/// For each boundary face `f` this returns the space DOFs of the face in the
+/// order MFEM's boundary element lists them:
+/// `[dof(v0), dof(v1), interior…]`, where `v0 = mesh.face_nodes(f)[0]` and
+/// `v1 = mesh.face_nodes(f)[1]`, with the interior DOFs in increasing order
+/// along `v0 → v1`.
+///
+/// That is exactly the DOF order of the face reference element
+/// [`ref_elem_face`] builds (segment faces use [`H1SegPk`], whose DOF order is
+/// MFEM's `H1_SegmentElement` one), so `<face_dofs_h1> + assemble_boundary_*`
+/// reproduces MFEM's boundary-element assembly.  Use it with
+/// [`Assembler::assemble_boundary_linear`] / `assemble_boundary_bilinear`
+/// whenever the space order is above 1 — [`face_dofs_p1`] only covers the
+/// vertices and [`face_dofs_p2`] only the quadratic case.
+///
+/// The face DOFs are located geometrically: every reference-element DOF whose
+/// reference coordinate lies on the face's reference edge (`vertex(v0) →
+/// vertex(v1)`) is kept and sorted by its parameter along that edge.  No
+/// per-element-type edge table is needed, so this works for the trace of any
+/// tensor/simplex H¹ basis.
+///
+/// # Panics
+/// Panics if the face has no owning element containing both of its nodes, or
+/// if the face is not a segment (2-node) face — the 3-D face traces need
+/// triangle/quadrilateral DOF ordering, which no caller requires yet.
+pub fn face_dofs_h1<S>(space: &S) -> impl Fn(u32) -> Vec<DofId> + '_
+where
+    S: FESpace,
+    S::Mesh: MeshTopology,
+{
+    move |f| {
+        let mesh = space.mesh();
+        let fn_nodes = mesh.face_nodes(f);
+        assert_eq!(
+            fn_nodes.len(),
+            2,
+            "face_dofs_h1: only 2-node (segment) boundary faces are supported, face {f} has {} nodes",
+            fn_nodes.len()
+        );
+
+        // Owner search: trust `face_elements` first (it needs the lazy
+        // face→element map) and fall back to a scan, as `face_dofs_p2` does.
+        let (reported, _) = mesh.face_elements(f);
+        let contains_all = |e: u32| {
+            let en = mesh.element_nodes(e);
+            fn_nodes.iter().all(|&n| en.contains(&n))
+        };
+        let mut owner = reported;
+        if !contains_all(owner) {
+            let mut found = false;
+            for e in 0..mesh.n_elements() as u32 {
+                if contains_all(e) {
+                    owner = e;
+                    found = true;
+                    break;
+                }
+            }
+            assert!(
+                found,
+                "face_dofs_h1: no element contains both nodes of boundary face {f}"
+            );
+        }
+
+        let elem_nodes = mesh.element_nodes(owner);
+        let elem_dofs = space.element_dofs(owner);
+        let re = ref_elem_vol_for_space(space, mesh.element_type(owner), space.order());
+        let coords = re.dof_coords();
+        debug_assert_eq!(coords.len(), elem_dofs.len());
+
+        let pos_of = |n: u32| elem_nodes.iter().position(|&en| en == n);
+        let (pa, pb) = (
+            pos_of(fn_nodes[0]).expect("face_dofs_h1: v0 not in the owning element"),
+            pos_of(fn_nodes[1]).expect("face_dofs_h1: v1 not in the owning element"),
+        );
+        let (a, b) = (&coords[pa], &coords[pb]);
+        let dim = a.len();
+        let ab: Vec<f64> = (0..dim).map(|k| b[k] - a[k]).collect();
+        let ab2: f64 = ab.iter().map(|x| x * x).sum();
+        assert!(ab2 > 0.0, "face_dofs_h1: degenerate face edge on element {owner}");
+
+        // Parameter of every DOF on the edge and its squared distance to it.
+        let mut on_edge: Vec<(f64, usize)> = Vec::new();
+        for (k, c) in coords.iter().enumerate() {
+            let s = (0..dim).map(|j| (c[j] - a[j]) * ab[j]).sum::<f64>() / ab2;
+            let dev2: f64 = (0..dim)
+                .map(|j| {
+                    let d = c[j] - (a[j] + s * ab[j]);
+                    d * d
+                })
+                .sum();
+            if dev2 <= 1e-16 * ab2 {
+                on_edge.push((s, k));
+            }
+        }
+        on_edge.sort_by(|x, y| x.0.partial_cmp(&y.0).expect("face_dofs_h1: NaN parameter"));
+        assert!(
+            on_edge.len() >= 2,
+            "face_dofs_h1: only {} DOFs found on the edge of element {owner}",
+            on_edge.len()
+        );
+
+        // MFEM H¹ segment order: [v0, v1, interior along v0 → v1].
+        let (_, k0) = on_edge.remove(0);
+        let (_, k1) = on_edge.pop().expect("face_dofs_h1: edge DOF list underflow");
+        let mut dofs = Vec::with_capacity(on_edge.len() + 2);
+        dofs.push(elem_dofs[k0]);
+        dofs.push(elem_dofs[k1]);
+        dofs.extend(on_edge.iter().map(|&(_, k)| elem_dofs[k]));
+        dofs
+    }
+}
+
 /// Return the edge-midpoint DOF for the edge between local vertex positions `a` and `b`
 /// in a TriP2 element (with 6 DOFs: 3 vertex + 3 edge).
 ///
@@ -2136,6 +2374,233 @@ mod tests {
     use fem_mesh::Mesh;
     use fem_space::{H1Space, fe_space::FESpace};
     use crate::standard::MassIntegrator;
+    // Only the boundary-face tests need this: `SegP3` is the equispaced
+    // segment element that `ref_elem_face` must *not* use (its nodes are not
+    // the volume element's edge nodes).
+    use fem_element::lagrange::SegP3;
+
+    /// D46②: the order-generic face segment element is the *trace* of the
+    /// volume element, so at order 2 it must reproduce the fixed-order `SegP2`
+    /// exactly — and `SegP3` (equispaced nodes) must be **rejected**, because
+    /// the volume element's edge nodes are the closed Gauss-Lobatto points.
+    #[test]
+    fn h1_seg_pk_is_the_volume_trace() {
+        fn check_exact(order: u8, fixed: &dyn ReferenceElement) {
+            let gen = H1SegPk::new(order);
+            assert_eq!(gen.n_dofs(), fixed.n_dofs());
+            assert_eq!(gen.dof_coords(), fixed.dof_coords());
+            let mut a = vec![0.0_f64; gen.n_dofs()];
+            let mut b = vec![0.0_f64; gen.n_dofs()];
+            let mut ga = vec![0.0_f64; gen.n_dofs()];
+            let mut gb = vec![0.0_f64; gen.n_dofs()];
+            for s in [0.0, 0.25, 1.0 / 3.0, 0.5, 0.777, 1.0] {
+                gen.eval_basis(&[s], &mut a);
+                fixed.eval_basis(&[s], &mut b);
+                gen.eval_grad_basis(&[s], &mut ga);
+                fixed.eval_grad_basis(&[s], &mut gb);
+                for i in 0..a.len() {
+                    assert!(
+                        (a[i] - b[i]).abs() < 1e-13,
+                        "order {order} φ{i}({s}): {} vs {}",
+                        a[i],
+                        b[i]
+                    );
+                    assert!(
+                        (ga[i] - gb[i]).abs() < 1e-12,
+                        "order {order} φ{i}'({s}): {} vs {}",
+                        ga[i],
+                        gb[i]
+                    );
+                }
+            }
+        }
+        check_exact(1, &SegP1);
+        check_exact(2, &SegP2);
+
+        // Order 3: the fixed-order `SegP3` puts its interior DOFs at 1/3 and
+        // 2/3, the trace at the Gauss-Lobatto points (0.2764, 0.7236) — the
+        // equispaced basis would distribute a boundary integral to the wrong
+        // DOFs while keeping its sum (partition of unity) exact.
+        let gen3 = H1SegPk::new(3);
+        let gll = fem_element::lagrange::factory::QuadQk::new(3)
+            .dof_coords()
+            .iter()
+            .take(6)
+            .map(|c| c[0])
+            .collect::<Vec<_>>();
+        assert_eq!(gen3.dof_coords()[0], vec![0.0]);
+        assert_eq!(gen3.dof_coords()[1], vec![1.0]);
+        // Interior trace nodes == the volume element's bottom-edge nodes.
+        for (k, &x) in gll[4..6].iter().enumerate() {
+            assert_eq!(gen3.dof_coords()[2 + k], vec![x]);
+        }
+        assert!((gen3.dof_coords()[2][0] - 1.0 / 3.0).abs() > 1e-3);
+        assert_eq!(SegP3.dof_coords()[2], vec![1.0 / 3.0]);
+
+        // The ascending-order factory element has a different DOF *order* at
+        // p >= 2 (its DOF 1 is an interior node, not the second vertex).
+        let asc = fem_element::lagrange::factory::SegPk::new(3);
+        assert_eq!(asc.dof_coords()[1], vec![1.0 / 3.0]);
+        assert_eq!(gen3.dof_coords()[1], vec![1.0]);
+    }
+
+    /// D46②: `ref_elem_face` now serves every order, so an order-6 boundary
+    /// form can be assembled by the kernel instead of panicking.
+    #[test]
+    fn ref_elem_face_high_order() {
+        let re = ref_elem_face(ElementType::Line2, 6);
+        assert_eq!(re.n_dofs(), 7);
+        assert_eq!(re.order(), 6);
+        // Topological DOF order with the volume element's Gauss-Lobatto nodes.
+        assert_eq!(re.dof_coords()[0], vec![0.0]);
+        assert_eq!(re.dof_coords()[1], vec![1.0]);
+        let gll = fem_element::lagrange::factory::QuadQk::new(6).dof_coords();
+        for (k, c) in gll[4..9].iter().enumerate() {
+            assert_eq!(re.dof_coords()[2 + k], vec![c[0]]);
+        }
+        // Existing fixed-order entries keep working (ex21 relies on order 2).
+        assert_eq!(ref_elem_face(ElementType::Line2, 1).n_dofs(), 2);
+        assert_eq!(ref_elem_face(ElementType::Line2, 2).n_dofs(), 3);
+        assert_eq!(ref_elem_face(ElementType::Tri3, 5).n_dofs(), 21);
+    }
+
+    /// The face DOF list produced by [`face_dofs_h1`] must be the one the
+    /// order-6 face element pairs with: `[v0, v1, interior along v0 → v1]`,
+    /// all of them global DOFs of the space whose reference nodes sit on the
+    /// face's edge.
+    #[test]
+    fn face_dofs_h1_order_6_ordering() {
+        let mesh = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let space = H1Space::new(mesh, 6);
+        let fdofs = face_dofs_h1(&space);
+        let dm = space.dof_manager();
+        for f in space.mesh().face_iter() {
+            let n0 = space.mesh().face_nodes(f)[0];
+            let n1 = space.mesh().face_nodes(f)[1];
+            let p0 = space.mesh().node_coords(n0);
+            let p1 = space.mesh().node_coords(n1);
+            let d = fdofs(f);
+            assert_eq!(d.len(), 7, "face {f}");
+            // Vertices first, in the face's own node order…
+            assert_eq!(d[0], n0, "face {f}: first DOF must be v0");
+            assert_eq!(d[1], n1, "face {f}: second DOF must be v1");
+            // …then the interior DOFs in increasing order along v0 → v1.
+            let param = |dof: DofId| -> f64 {
+                let c = dm.dof_coord(dof);
+                let ab = [p1[0] - p0[0], p1[1] - p0[1]];
+                let t = ((c[0] - p0[0]) * ab[0] + (c[1] - p0[1]) * ab[1])
+                    / (ab[0] * ab[0] + ab[1] * ab[1]);
+                // Every DOF of the list sits exactly on the edge.
+                let ex = c[0] - (p0[0] + t * ab[0]);
+                let ey = c[1] - (p0[1] + t * ab[1]);
+                assert!(
+                    (ex * ex + ey * ey).sqrt() < 1e-12,
+                    "DOF {dof} is not on face {f}"
+                );
+                t
+            };
+            for k in 0..d.len() - 3 {
+                assert!(
+                    param(d[2 + k]) < param(d[3 + k]),
+                    "face {f}: interior DOFs not sorted along v0 -> v1"
+                );
+            }
+        }
+    }
+
+    /// D46②③ end to end: `∫_Γ (v·n) φᵢ ds` at order 6 via
+    /// `assemble_boundary_linear` + `face_dofs_h1` on the unit square, checked
+    /// against the divergence theorem and against the exact integral
+    /// `∮ (v·n) ψ ds` for `ψ = x` (both `∫_Ω ∇·v` and `∮ (v·n) x` equal 1 for
+    /// `v = (x, 0)`).
+    #[test]
+    fn boundary_normal_flux_order_6_divergence_theorem() {
+        use crate::postproc::coefficient::{FnVectorCoeff, VectorCoeff};
+        let mesh = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let space = H1Space::new(mesh, 6);
+        let integ = crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator {
+            v: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0];
+                out[1] = 0.0;
+            }),
+        };
+        // Sanity: the coefficient itself is a `VectorCoeff`.
+        let _: &dyn VectorCoeff = &integ.v;
+
+        let fdofs = face_dofs_h1(&space);
+        let rhs = Assembler::assemble_boundary_linear(
+            space.n_dofs(),
+            space.mesh(),
+            &fdofs,
+            6,
+            &[&integ],
+            &[1, 2, 3, 4],
+            7,
+        );
+        let total: f64 = rhs.iter().sum();
+        assert!((total - 1.0).abs() < 1e-12, "∮ v·n ds = {total}, want 1");
+
+        let dm = space.dof_manager();
+        let mut weighted = 0.0_f64;
+        for (i, &r) in rhs.iter().enumerate() {
+            weighted += r * dm.dof_coord(i as u32)[0];
+        }
+        assert!(
+            (weighted - 1.0).abs() < 1e-12,
+            "∮ (v·n) x ds = {weighted}, want 1"
+        );
+    }
+
+    /// `BdQpData::normal` must be the **outward** unit normal not only for a
+    /// single-element mesh but also after uniform refinement — where the
+    /// boundary faces are re-created and may not keep MFEM's "element on the
+    /// left of the vertex order" convention.  With `v = (x, 0)` the divergence
+    /// theorem gives `Σᵢ rhsᵢ = ∮ v·n ds = |Ω|` for every mesh; a flipped
+    /// normal changes the sign of its own face's contribution.
+    ///
+    /// This is the test that catches the kovasznay regression: its
+    /// `g_bdr = ∫_Γ (u_D·n) q ds` flips sign on every boundary edge whose
+    /// stored orientation is reversed, which blows the pressure solve up from
+    /// `err_p ≈ 1e-6` to `≈ 6`.
+    #[test]
+    fn boundary_normal_is_outward_after_refinement() {
+        // (nx, ny, sx, sy, refinements) — `sx`/`sy` are the *domain sizes*
+        // (MFEM `MakeCartesian2D`), so the area is `sx*sy` in every case.
+        for (nx, ny, sx, sy, refs) in [
+            (1usize, 1usize, 1.0, 1.0, 0usize),
+            (2, 4, 1.5, 2.0, 0),
+            (2, 4, 1.5, 2.0, 1),
+            (3, 3, 2.0, 2.0, 2),
+        ] {
+            let mut mesh = Mesh::<2>::make_cartesian_2d(nx, ny, sx, sy);
+            for _ in 0..refs {
+                mesh = fem_mesh::refine_uniform(&mesh);
+            }
+            let space = H1Space::new(mesh, 6);
+            let integ = crate::standard::boundary_flux::VectorBoundaryNormalLFIntegrator {
+                v: crate::postproc::coefficient::FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                    out[0] = x[0];
+                    out[1] = 0.0;
+                }),
+            };
+            let tags: Vec<i32> = (1..=4).collect();
+            let rhs = Assembler::assemble_boundary_linear(
+                space.n_dofs(),
+                space.mesh(),
+                &face_dofs_h1(&space),
+                6,
+                &[&integ],
+                &tags,
+                7,
+            );
+            let total: f64 = rhs.iter().sum();
+            let area = sx * sy;
+            assert!(
+                (total - area).abs() < 1e-12,
+                "{nx}x{ny} on {sx}x{sy} + {refs} refinements: area {area}, got {total}"
+            );
+        }
+    }
 
     /// Round-10 (round-9 leftover): the affine simplex fast path must read the
     /// element's per-element **geometry** (MFEM `Nodes` snapshot), not the
@@ -2279,3 +2744,4 @@ mod tests {
         );
     }
 }
+

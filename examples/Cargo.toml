@@ -543,6 +543,10 @@ name = "navier_kovasznay"
 path = "../miniapps/fluids/navier_kovasznay.rs"
 
 [[example]]
+name = "navier_mms"
+path = "../miniapps/fluids/navier_mms.rs"
+
+[[example]]
 name = "hdiv_darcy"
 path = "../miniapps/hdiv_linear_solver/darcy.rs"
 

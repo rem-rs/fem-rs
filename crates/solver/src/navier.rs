@@ -45,6 +45,44 @@
 //!   after the BDF order increases).  Reproduced here on purpose: `h_diag` is
 //!   snapshotted in [`NavierSolver::setup`].
 //! * The `PrintInfo` banner omits the `MFEM version` / `MFEM GIT` lines.
+//!
+//! # The `D`/`G` pairing and its boundary term
+//!
+//! The split scheme uses *both* mixed operators, and they are not transposes
+//! of one another.  With `D[i,(k,c)] = ∫ φᵢ ∂_c φ_k` and
+//! `G[(k,c),i] = ∫ φ_k ∂_c φᵢ`,
+//!
+//! ```text
+//! ∫_Ω φᵢ ∂_c φ_k = -∫_Ω φ_k ∂_c φᵢ + ∫_Γ φᵢ φ_k n_c ds
+//!   ⇒  Gᵀ = -D + B ,   B[i,(k,c)] = ∫_Γ φᵢ φ_k n_c ds ,
+//! ```
+//!
+//! and `B` is precisely the flux represented by the two boundary functionals
+//! of the scheme: `resp = -D·FText + FText_bdr - (bd0/dt)·g_bdr`, where
+//! `FText_bdr = ∫_Γ (FText·n) q` and `g_bdr = Σ ∫_Γ (u_D·n) q`.  Equivalently
+//! the pair satisfies the divergence theorem `D·u + Gᵀ·u = ∫_Γ (u·n) φ`,
+//! *not* `D = Gᵀ`.  Replacing either matrix by the transpose of the other —
+//! or dropping `B` from the right-hand side — silently changes the pressure
+//! Poisson problem; both must be assembled from their own MFEM integrator
+//! (`VectorDivergenceIntegrator`, `GradientIntegrator`).
+//!
+//! # Kernel status (D46)
+//!
+//! The boundary functionals are available in `fem-assembly` as
+//! `standard::VectorBoundaryNormalLFIntegrator`
+//! (`∫_Γ (v(x)·n) φᵢ ds`, MFEM's `BoundaryNormalLFIntegrator(VectorCoefficient&)`)
+//! assembled by `Assembler::assemble_boundary_linear` with the order-generic
+//! face element of `assembler::ref_elem_face` and the face DOF list from
+//! `assembler::face_dofs_h1`.  Note that fem-rs also exports a *different*
+//! type of the same name (`standard::BoundaryNormalLFIntegrator`) computing
+//! the scalar `∫_Γ g(x) φᵢ ds`.
+//!
+//! The miniapps still evaluate the `FText` functional with a small local face
+//! loop: its coefficient is a *velocity grid function*, and evaluating it on a
+//! face needs the owning element's DOF list, which the assembler's
+//! [`BdQpData`](https://docs.rs/fem-assembly) payload does not carry (it only
+//! exposes `phi`, not `elem_dofs`).  `g_bdr` — an analytic coefficient — is
+//! assembled by the kernel.
 
 use std::time::Instant;
 
@@ -125,9 +163,37 @@ pub trait NavierDiscretization {
     fn assemble_pressure_laplace(&self) -> CsrMatrix<f64>;
     /// `D_form` — `D[i,(k,c)] = ∫ φ_i ∂φ_k/∂x_c dx` (MFEM
     /// `VectorDivergenceIntegrator`, `n_pres × n_vel`).
+    ///
+    /// **`D` is not the exact transpose of [`Self::assemble_gradient`]**, even
+    /// though both discretize the same pair of spaces.  Element-wise
+    /// integration by parts gives
+    ///
+    /// ```text
+    /// ∫_Ω φ_i ∂_c φ_k dx = -∫_Ω φ_k ∂_c φ_i dx + ∫_Γ φ_i φ_k n_c ds ,
+    /// ```
+    ///
+    /// so `D` and `Gᵀ` differ by the boundary term `B[i,(k,c)] = ∫_Γ φ_i φ_k n_c ds`
+    /// — the term the split scheme carries explicitly through the
+    /// `FText_bdr`/`g_bdr` functionals.  Both matrices must therefore be
+    /// assembled independently, and the identity to test against is the
+    /// *divergence theorem*
+    ///
+    /// ```text
+    /// D·u + Gᵀ·u = ∫_Γ (u·n) φ  —  i.e. -∫∇p·u + ∫ p ∇·u = ∫_Γ p (u·n) ,
+    /// ```
+    ///
+    /// not `D = Gᵀ` (`navier_kovasznay`'s `divergence_theorem_identity`).
+    /// Filling in `G = Dᵀ` silently drops the boundary flux and changes the
+    /// pressure Poisson right-hand side.
     fn assemble_divergence(&self) -> CsrMatrix<f64>;
     /// `G_form` — `G[(k,c),i] = ∫ φ_k ∂φ_i/∂x_c dx` (MFEM
-    /// `GradientIntegrator`, `n_vel × n_pres`; `G = Dᵀ` on the same spaces).
+    /// `GradientIntegrator`, `n_vel × n_pres`).
+    ///
+    /// See [`Self::assemble_divergence`]: `G ≠ Dᵀ`; the two differ by the
+    /// boundary term `∫_Γ φ_k φ_i n_c ds`, which is exactly the flux the
+    /// `FText_bdr`/`g_bdr` boundary functionals carry.  In the split-scheme
+    /// algebra only `G·p` is used (`resu = Mv·Fext - G·p`), and it must be the
+    /// `GradientIntegrator` matrix, not `Dᵀ`.
     fn assemble_gradient(&self) -> CsrMatrix<f64>;
     /// `H_form` — `mass_coeff·Mv + visc_coeff·K_v` with `K_v` the vector
     /// Laplacian (`VectorDiffusionIntegrator`).  The C++ code reassembles

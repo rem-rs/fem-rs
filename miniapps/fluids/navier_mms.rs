@@ -1,110 +1,104 @@
-//! Navier Kovasznay — 1:1 serial port of MFEM 4.10
-//! `miniapps/fluids/navier/navier_kovasznay.cpp` (+ the shared
+//! Navier MMS — 1:1 serial port of MFEM 4.10
+//! `miniapps/fluids/navier/navier_mms.cpp` (+ the shared
 //! `navier_solver.{hpp,cpp}`, ported as `fem_solver::navier::NavierSolver`).
 //!
-//! Solve the steady Kovasznay flow at Re = 40 defined by
+//! Method of manufactured solutions for the transient incompressible
+//! Navier–Stokes equations on `[-1, 1]²`:
 //!
 //! ```text
-//! u = [1 - exp(L x) cos(2 pi y),  L / (2 pi) exp(L x) sin(2 pi y)]
-//! p = 1/2 (1 - exp(2 L x))
-//! L = Re/2 - sqrt(Re^2/4 + 4 pi^2)
+//! u = [ π sin(t) sin(πx)² sin(2πy),  −π sin(t) sin(2πx) sin(πy)² ]
+//! p = cos(πx) sin(t) sin(πy)
 //! ```
 //!
-//! on the rectangle `[-0.5, 1.0] x [-0.5, 1.5]` (the C++ mesh is
-//! `MakeCartesian2D(2, 4, QUADRILATERAL, false, 1.5, 2.0)` with every node
-//! coordinate shifted by `-0.5`).  Velocity Dirichlet data is applied on every
-//! boundary; the problem, although steady state, is time integrated with the
-//! split scheme up to `t_final` and compared with the known exact solution.
+//! The exact solution is substituted into the equations to obtain the
+//! symbolic forcing term, which the miniapp adds as an *acceleration* body
+//! force (`AddAccelTerm`, MFEM `VectorDomainLFIntegrator`) on every element;
+//! velocity Dirichlet data from the same exact solution is applied on every
+//! boundary (`AddVelDirichletBC`).  The numerical solution is then compared
+//! with the exact one at every step.
 //!
-//! Defaults: `-rs 1 -o 6 -dt 1e-3 -tf 1e-2`, kinematic viscosity 1/40.
+//! Defaults: `-rs 1 -o 5 -dt 0.25e-4 -tf 10*0.25e-4`, kinematic viscosity 1,
+//! 4 elements (the `data/inline-quad.mesh` 4×4 inline quad mesh scaled by 2 and
+//! shifted by −1), 10 time steps.
 //!
 //! # Port notes (deviations from the C++ miniapp)
 //!
 //! * **Serial**: the C++ miniapp runs on a `ParMesh` and needs an MPI + hypre
 //!   build.  This port and the C++ reference harness
-//!   (`tmp/navier_gen_serial_harness.py`, which mirrors the same sources with
-//!   `ParX -> X`) are both serial; all true-DOF == DOF.
-//! * **Full assembly, no numerical integration** (`-no-pa -no-ni` in C++
-//!   terms): partial assembly is not implemented in fem-rs and the C++ default
-//!   `-pa` path has no assembled analogue.  Both sides use Jacobi
-//!   (`DSmoother`) for `Mv`/`H` and `GSSmoother` inside `OrthoSolver` for `Sp`
-//!   (the C++ parallel default is LOR + `HypreBoomerAMG`).
+//!   (`$HOME/work/navier_ser/nmms.cpp`, the same source with `ParX → X`) are
+//!   both serial; all true-DOF == DOF.
+//! * **Full assembly, no numerical integration** (the C++ `-no-pa -no-ni`
+//!   configuration): partial assembly is not implemented in fem-rs and the
+//!   serial harness has no `EnablePA`.  Both sides use Jacobi
+//!   (`DSmoother`) for `Mv`/`H` and `GSSmoother` inside `OrthoSolver` for `Sp`.
 //! * Quadrature rules follow MFEM exactly: the volume forms use
-//!   `IntRules.Get(geom, 2*order + 1)` (7x7 Gauss for order 6) and the two
-//!   boundary normal fluxes use `BoundaryNormalLFIntegrator`'s default
-//!   `1*order + 1` (4 Gauss points per boundary edge).  The boundary rule is
-//!   *not* optional for a quantitative match: with a 7-point rule the C++
-//!   reference reports `err_p = 5.77e-07` instead of the default `1.01e-06`.
-//! * The boundary normal-flux functionals `∫_Γ (v·n) q ds`:
-//!   `g_bdr` (analytic velocity Dirichlet data) is assembled by the kernel —
-//!   `Assembler::assemble_boundary_linear` +
+//!   `IntRules.Get(geom, 2*order + 1)`, the acceleration form
+//!   `VectorDomainLFIntegrator`'s default `2*order`, the boundary normal
+//!   fluxes `BoundaryNormalLFIntegrator`'s default `1*order + 1`, and the L²
+//!   errors `GridFunction::ComputeL2Error`'s `2*order + 3`.
+//! * The mesh is read from `data/inline-quad.mesh` with `fem_io` (the INLINE
+//!   reader reproduces MFEM's Hilbert space-filling element ordering), then
+//!   scaled exactly like the C++ (`nodes *= 2; nodes -= 1`).
+//! * The boundary normal flux `g_bdr = ∫_Γ (u_D·n) q ds` is assembled by the
+//!   kernel — `Assembler::assemble_boundary_linear` +
 //!   `standard::VectorBoundaryNormalLFIntegrator` (MFEM's
-//!   `BoundaryNormalLFIntegrator(VectorCoefficient&)`) with
-//!   `assembler::face_dofs_h1` and the order-generic face element of
-//!   `assembler::ref_elem_face` (the *trace* of the volume element: closed
-//!   Gauss-Lobatto nodes in MFEM's topological DOF order), using MFEM's
-//!   default `1*order + 1` rule.  Before D46②③ `fem-assembly` had no
-//!   vector-coefficient boundary normal flux and no face element above order
-//!   4; `kernel_g_bdr_matches_volume_trace_assembly` now pins the kernel path
-//!   against the element-trace assembly DOF by DOF.
-//!   `FText_bdr` (a *grid function* coefficient) still uses the local face
-//!   loop below, because evaluating a velocity GF on a face needs the owning
-//!   element's DOF list, which the boundary quadrature-point payload does not
-//!   carry.  It evaluates the trace of the *volume* basis, which is exactly
-//!   what MFEM's boundary element assembly computes.
+//!   `BoundaryNormalLFIntegrator(VectorCoefficient&)`) with the order-generic
+//!   face element (`assembler::ref_elem_face`) and `assembler::face_dofs_h1`.
+//!   The `FText_bdr` functional still uses a local face loop, because its
+//!   coefficient is a *velocity grid function* and evaluating it on a face
+//!   needs the owning element's DOF list, which the boundary quadrature-point
+//!   payload does not carry (see [`MmsDisc::boundary_normal_lf`]).
 //! * `D` (MFEM `VectorDivergenceIntegrator`), `G` (MFEM `GradientIntegrator`)
-//!   and the convection residual `N(u) = -∫(u·∇u)·v` (MFEM
-//!   `VectorConvectionNLFIntegrator`) are assembled element-wise here:
-//!   * `mixed::ref_elem_vol` now covers order 6 (D46①), but the mixed
-//!     assembler still has no `H¹ × [H¹]^d` coupling path — the column space
-//!     would have to be handled component-wise, which
-//!     `accumulate_mixed_volume_element` does not do — so the two mixed forms
-//!     remain local;
-//!   * `G ≠ Dᵀ` — the two mixed forms differ by the boundary term
-//!     `∫_Γ φ_k φ_i n_c ds` (`∫φ_i∂_cφ_k = -∫φ_k∂_cφ_i + ∫_Γ φ_iφ_k n_c`),
-//!     which is exactly the flux carried by `FText_bdr`/`g_bdr`, so both must
-//!     be assembled independently (`divergence_theorem_identity` validates
-//!     `D·u + Gᵀ·u = ∫_Γ(u·n)φ`);
-//!   * `standard::VectorConvectionIntegrator` uses `QpData::weight` — the
-//!     `ip.weight/|detJ|` convention documented for `DiffusionIntegrator` —
-//!     instead of the bare `QpData::ref_weight` that the `ip.weight ·
-//!     adj(J)∇φ` convection family needs, so its matrix comes out
-//!     `1/|detJ|` too large.  On unit-sized elements the bug is invisible,
-//!     which is why its unit tests miss it: on
-//!     `Mesh::make_cartesian_2d(2, 1, 1, 1)` with `u = (x, y)`,
-//!     `Assembler::assemble_bilinear(&space, &[&VectorConvectionIntegrator
-//!     ::new(&u, n_scalar)], 5) · u` is exactly `2×` `M·u` (should be equal).
-//!     `convection_residual_of_linear_field` guards the local version.
-//! * The L² errors use MFEM's `ComputeL2Error` rule
-//!   (`intorder = 2*fe->GetOrder() + 3`); with the obvious `2*order` rule the
-//!   velocity error is off by ~23% because the exact solution is not a
-//!   polynomial.
+//!   and the convection residual `N(u) = −∫(u·∇u)·v` (MFEM
+//!   `VectorConvectionNLFIntegrator`) are assembled element-wise here: the
+//!   mixed assembler has no `H¹ × [H¹]^d` coupling path (`ref_elem_vol` now
+//!   covers order 5–6, but the column space would have to be component-wise),
+//!   and `standard::VectorConvectionIntegrator` uses the `ip.weight/|detJ|`
+//!   weight convention instead of the bare quadrature weight the
+//!   `ip.weight · adj(J)∇φ` convection family needs (see the `navier_kovasznay`
+//!   port notes; `crates/assembly/src/standard/vector_convection.rs`, D42).
+//! * `G ≠ Dᵀ`: the two mixed forms differ by the boundary term
+//!   `∫_Γ φ_k φ_i n_c ds`, which is exactly the flux `FText_bdr`/`g_bdr`
+//!   carry, so both are assembled independently; see the `Divergence
+//!   theorem` test.
 //! * `-vis` (GLVis) prints a notice and exits with code 3; `-pa`/`-ni` are
-//!   accepted for CLI parity but have no effect.  `-cr` follows the C++ check
-//!   (`err_u <= 1e-6`, `err_p <= 1e-5`) and exits with code 255 on failure
-//!   (C++ `return -1`).  The `Options used:` banner is not reproduced.
+//!   accepted for CLI parity but have no effect.  `-cr` follows the C++
+//!   check (`err_u <= 1e-3`, `err_p <= 1e-3`) and exits with code 255 on
+//!   failure (C++ `return -1`).  The `Options used:` banner is not
+//!   reproduced.
 //!
 //! # Verification
 //!
-//! Against the serial C++ mirror (`tmp/navier_serial_harness/`, the same 4.10
-//! miniapp sources with `ParX → X`, built against the WSL MFEM 4.9 library in
-//! the full-assembly/`-no-ni` configuration) this port reproduces `CFL`,
-//! `err_u` and `err_p` to all 6 printed digits at every step — final step
-//! `err_u = 6.57566e-07` vs `6.57565e-07`, `err_p = 1.01390e-06` vs
-//! `1.01391e-06`, `CFL = 6.23e-02` — with the same iteration counts
-//! (`MVIN`/`HELM` identical, `PRES` within ±2 because the DOF ordering — and
-//! hence the Gauss-Seidel smoother — differs) and the same `-cr` verdict
-//! (exit 0).
+//! Against the serial C++ mirror (`$HOME/work/navier_ser/nmms.cpp`, MFEM 4.9
+//! full-assembly library, run as `./nmms -no-vis`) this port reproduces the
+//! printed errors step by step:
+//!
+//! | step | C++ `err_u` | Rust `err_u` | C++ `err_p` | Rust `err_p` |
+//! |------|-------------|--------------|-------------|--------------|
+//! | 1    | 2.75455E-08 | 2.75455E-08  | 1.23108E-04 | 1.23108E-04  |
+//! | 10   | 8.67943E-09 | 8.67950E-09  | 1.11292E-06 | 1.11290E-06  |
+//!
+//! `MVIN` (8) and `PRES` (66, 66, 66, 67, 73, 73, 73, 63, 61, 61) are
+//! **identical at every step**; `HELM` is 11 instead of the C++ 10–11 (one
+//! extra CG step at `rtol = 1e-8`, i.e. a residual-trajectory rounding
+//! difference — the converged values still agree to all printed digits).  The
+//! step-to-step `err_u` differences are at the `1e-15` relative level: with
+//! `dt = 2.5e-5` the solution is essentially the exact one, so `err_u` is
+//! roundoff and follows the last bits of the two different Gauss-Seidel
+//! sweeps.  `-cr` exits 0 on both sides; `-o 3 -rs 2` (256 elements) agrees to
+//! all six printed digits at step 1 (`2.87613E-08` / `1.23099E-04`, `MVIN 12`,
+//! `PRES 70`).
 //!
 //! # Sample runs
 //!
 //! ```text
-//! cargo run --release --example navier_kovasznay -- -no-vis
-//! cargo run --release --example navier_kovasznay -- -o 4 -rs 2 -no-vis
+//! cargo run --release --example navier_mms -- -no-vis
+//! cargo run --release --example navier_mms -- -o 3 -rs 2 -no-vis
 //! ```
 
 use fem_assembly::assembler::face_dofs_h1;
-use fem_assembly::postproc::coefficient::FnVectorCoeff;
+use fem_assembly::integrator::{LinearIntegrator, QpData};
+use fem_assembly::postproc::coefficient::{CoeffCtx, FnVectorCoeff, VectorCoeff};
 use fem_assembly::standard::boundary_flux::VectorBoundaryNormalLFIntegrator;
 use fem_assembly::standard::{DiffusionIntegrator, VectorDiffusionIntegrator, VectorH1MassIntegrator};
 use fem_assembly::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
@@ -112,6 +106,7 @@ use fem_assembly::Assembler;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElem};
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::ReferenceElement;
+use fem_io::mfem::read_mfem_file;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::{refine_uniform, Mesh};
@@ -122,7 +117,46 @@ use fem_space::{H1Space, VectorH1Space};
 
 const PI: f64 = std::f64::consts::PI;
 
-// ─── Options (`struct s_NavierContext` in navier_kovasznay.cpp) ──────────────
+// ─── The manufactured solution (`vel`, `p`, `accel` in navier_mms.cpp) ───────
+
+/// `vel` — exact velocity.
+fn vel_mms(x: &[f64], t: f64) -> [f64; 2] {
+    let (xi, yi) = (x[0], x[1]);
+    [
+        PI * t.sin() * (PI * xi).sin().powi(2) * (2.0 * PI * yi).sin(),
+        -(PI * t.sin() * (2.0 * PI * xi).sin() * (PI * yi).sin().powi(2)),
+    ]
+}
+
+/// `p` — exact pressure.
+fn pres_mms(x: &[f64], t: f64) -> f64 {
+    (PI * x[0]).cos() * t.sin() * (PI * x[1]).sin()
+}
+
+/// `accel` — the symbolic forcing term, i.e. the part of
+/// `∂u/∂t + u·∇u − ν Δu + ∇p` that is *not* represented by the discrete
+/// operators (the manufactured source).  `kinvis = ctx.kinvis`.
+fn accel_mms(x: &[f64], t: f64, kinvis: f64) -> [f64; 2] {
+    let (xi, yi) = (x[0], x[1]);
+    let u0 = PI * t.sin() * (PI * xi).sin() * (PI * yi).sin()
+        * (-1.0
+            + 2.0 * PI.powi(2) * t.sin() * (PI * xi).sin() * (2.0 * PI * xi).sin() * (PI * yi).sin())
+        + PI
+            * (2.0 * kinvis * PI.powi(2) * (1.0 - 2.0 * (2.0 * PI * xi).cos()) * t.sin()
+                + t.cos() * (PI * xi).sin().powi(2))
+            * (2.0 * PI * yi).sin();
+    let u1 = PI * (PI * yi).cos() * t.sin()
+        * ((PI * xi).cos()
+            + 2.0 * kinvis * PI.powi(2) * (PI * yi).cos() * (2.0 * PI * xi).sin())
+        - PI * (t.cos() + 6.0 * kinvis * PI.powi(2) * t.sin())
+            * (2.0 * PI * xi).sin()
+            * (PI * yi).sin().powi(2)
+        + 4.0 * PI.powi(3) * (PI * yi).cos() * t.sin().powi(2) * (PI * xi).sin().powi(2)
+            * (PI * yi).sin().powi(3);
+    [u0, u1]
+}
+
+// ─── Options (`struct s_NavierContext` in navier_mms.cpp) ───────────────────
 
 /// `struct s_NavierContext`.
 struct Context {
@@ -131,9 +165,6 @@ struct Context {
     kinvis: f64,
     t_final: f64,
     dt: f64,
-    reference_pressure: f64,
-    reynolds: f64,
-    lam: f64,
     visualization: bool,
     checkres: bool,
     visport: i32,
@@ -141,36 +172,17 @@ struct Context {
 
 impl Context {
     fn new() -> Self {
-        let kinvis = 1.0 / 40.0;
-        let reynolds = 1.0 / kinvis;
         Context {
             ser_ref_levels: 1,
-            order: 6,
-            kinvis,
-            t_final: 10.0 * 0.001,
-            dt: 0.001,
-            reference_pressure: 0.0,
-            reynolds,
-            lam: 0.5 * reynolds - (0.25 * reynolds * reynolds + 4.0 * PI * PI).sqrt(),
+            order: 5,
+            kinvis: 1.0,
+            t_final: 10.0 * 0.25e-4,
+            dt: 0.25e-4,
             visualization: false,
             checkres: false,
             visport: 19916,
         }
     }
-}
-
-/// `vel_kovasznay` — exact velocity.
-fn vel_kovasznay(x: &[f64], _t: f64, lam: f64) -> [f64; 2] {
-    let (xi, yi) = (x[0], x[1]);
-    [
-        1.0 - (lam * xi).exp() * (2.0 * PI * yi).cos(),
-        lam / (2.0 * PI) * (lam * xi).exp() * (2.0 * PI * yi).sin(),
-    ]
-}
-
-/// `pres_kovasznay` — exact pressure.
-fn pres_kovasznay(x: &[f64], _t: f64, lam: f64, reference_pressure: f64) -> f64 {
-    0.5 * (1.0 - (2.0 * lam * x[0]).exp()) + reference_pressure
 }
 
 /// `OptionsParser` subset of the C++ miniapp (see the port notes).
@@ -202,35 +214,58 @@ fn parse_args(ctx: &mut Context) {
         }
         i += 1;
     }
-    ctx.reynolds = 1.0 / ctx.kinvis;
-    ctx.lam =
-        0.5 * ctx.reynolds - (0.25 * ctx.reynolds * ctx.reynolds + 4.0 * PI * PI).sqrt();
 }
 
 // ─── The [H¹]² × H¹ discretization ──────────────────────────────────────────
 
-/// Everything the split-scheme driver needs for Kovasznay flow.
-struct KovasznayDisc {
+/// The `∫ f(x)·v dx` body-force form on `[H¹]^d`.
+///
+/// MFEM's `VectorDomainLFIntegrator(VectorCoefficient&)` on a vector H¹ space:
+/// component `c` of row `k` uses the scalar basis function `φ_k` of the
+/// node-major (interleaved) element DOF layout of `VectorH1Space`
+/// (`dof = k*dim + c`), and `qp.weight` is the physical measure (`Tr.Weight()`).
+///
+/// fem-rs's `standard::VectorDomainLFIntegrator` is the *vector-basis* variant
+/// (`VectorAssembler`/H(curl)-H(div) `phi_vec`), which does not apply here.
+struct VectorH1DomainLF<V: VectorCoeff> {
+    f: V,
+}
+
+impl<V: VectorCoeff> LinearIntegrator for VectorH1DomainLF<V> {
+    fn add_to_element_vector(&self, qp: &QpData<'_>, f_elem: &mut [f64]) {
+        let d = qp.dim;
+        let n_nodes = qp.n_dofs / d;
+        let mut fv = [0.0_f64; 3];
+        let ctx = CoeffCtx::from_qp(qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag, None, None);
+        self.f.eval(&ctx, &mut fv[..d]);
+        for k in 0..n_nodes {
+            for c in 0..d {
+                f_elem[k * d + c] += qp.weight * fv[c] * qp.phi[k];
+            }
+        }
+    }
+}
+
+/// Everything the split-scheme driver needs for the MMS problem.
+struct MmsDisc {
     mesh: Mesh<2>,
     order: u8,
-    /// MFEM's `2*order + 1` rule (exact for every assembled form here).
+    /// MFEM's `2*order + 1` rule for the volume forms.
     quad_order: u8,
     vel_space: VectorH1Space<Mesh<2>>,
     pres_space: H1Space<Mesh<2>>,
     vel_ess: Vec<usize>,
     pres_ess: Vec<usize>,
     bdr_tags: Vec<i32>,
-    /// `∫ φ_i dx` on the pressure space (MFEM `MeanZero`'s `mass_lf` weights)
-    /// and the volume `∫ 1 dx`.
+    /// `∫ φ_i dx` on the pressure space (MFEM `MeanZero`'s weights) and `|Ω|`.
     pres_weights: Vec<f64>,
     volume: f64,
-    lam: f64,
+    kinvis: f64,
 }
 
-impl KovasznayDisc {
-    fn new(mesh: Mesh<2>, order: u8, lam: f64) -> Self {
-        // `Mesh::face_elements` (used by the boundary normal flux assembly)
-        // needs the lazy boundary-face -> element map.
+impl MmsDisc {
+    fn new(mesh: Mesh<2>, order: u8, kinvis: f64) -> Self {
+        // `Mesh::face_elements` needs the lazy boundary-face → element map.
         let mesh = {
             let mut m = mesh;
             m.build_face_to_elem();
@@ -242,8 +277,7 @@ impl KovasznayDisc {
         let max_tag = mesh.face_tags.iter().copied().max().unwrap_or(0);
         let bdr_tags: Vec<i32> = (1..=max_tag).collect();
 
-        // `GetEssentialTrueDofs(attr)` for the vector space: every scalar
-        // boundary dof, in both components.
+        // `AddVelDirichletBC(vel, attr)` with every attribute selected.
         let scalar_bnd = boundary_dofs(&mesh, vel_space.scalar_dof_manager(), &bdr_tags);
         let mut vel_ess: Vec<usize> = scalar_bnd
             .iter()
@@ -269,7 +303,7 @@ impl KovasznayDisc {
             }
         }
 
-        KovasznayDisc {
+        MmsDisc {
             mesh,
             order,
             quad_order,
@@ -280,21 +314,33 @@ impl KovasznayDisc {
             bdr_tags,
             pres_weights,
             volume,
-            lam,
+            kinvis,
         }
     }
 
     /// The reference element of the H¹ spaces (`QuadQk`, GLL nodes on
-    /// `[0,1]²`) — the element the assembler uses for `H1Space`/`VectorH1Space`.
+    /// `[0,1]²`).
     fn h1_elem(&self) -> Box<dyn ReferenceElement> {
         factory_ref_elem(FactoryElem::Quad, self.order)
     }
 
+    /// Number of boundary attributes of the mesh — the C++ `vel_ess_attr.Size()`
+    /// (every one of them carries the `vel` Dirichlet data, so the verbose
+    /// banner lists all of them).
+    fn n_bdr_attr(&self) -> usize {
+        self.bdr_tags.len()
+    }
+
     /// `∫_Γ (v·n) φ ds` over the tagged boundary edges with MFEM's
-    /// `BoundaryNormalLFIntegrator` quadrature (`1*order + 1`, i.e. 4 Gauss
-    /// points for order 6) and the trace of the *volume* basis as the test
-    /// functions — identical to MFEM's boundary element assembly, which uses
-    /// the boundary FE whose basis is precisely that trace.
+    /// `BoundaryNormalLFIntegrator` quadrature (`1*order + 1`) and the trace of
+    /// the *volume* basis as test functions.
+    ///
+    /// Used for the `FText_bdr` functional, whose coefficient is a *velocity
+    /// grid function*: the value is read from the element's own DOFs, so this
+    /// needs the owning element and its DOF list, which the kernel's
+    /// `BdQpData` payload does not expose.  `g_bdr` — an analytic coefficient —
+    /// goes through the kernel instead (see
+    /// [`NavierDiscretization::assemble_g_bdr`]).
     ///
     /// `value(elem, x_phys, phi_volume)` returns the vector coefficient at the
     /// quadrature point.
@@ -305,8 +351,7 @@ impl KovasznayDisc {
         let mut rhs = vec![0.0_f64; self.pres_space.n_dofs()];
         let ref_elem = self.h1_elem();
         let n_ldofs = ref_elem.n_dofs();
-        let n_pts = mfem_segment_points(self.order as usize + 1);
-        let (gpts, gwts) = gauss_legendre_01(n_pts);
+        let (gpts, gwts) = gauss_legendre_01(mfem_segment_points(self.order as usize + 1));
         let mut phi = vec![0.0_f64; n_ldofs];
         let mut f_face = vec![0.0_f64; n_ldofs];
 
@@ -317,9 +362,8 @@ impl KovasznayDisc {
             let (e, _) = self.mesh.face_elements(f);
             let enodes = self.mesh.element_nodes(e).to_vec();
             let fnodes = self.mesh.face_nodes(f).to_vec();
-            // The element's local edge (enodes[i], enodes[i+1]) matching the
-            // boundary face, and whether the face's node order agrees with the
-            // element's local traversal.
+            // The element's local edge matching the boundary face and whether
+            // the face's node order agrees with the element's local traversal.
             let mut local_edge = usize::MAX;
             let mut forward = true;
             for i in 0..enodes.len() {
@@ -400,7 +444,7 @@ fn edge_ref_point(li: usize, s: f64) -> Vec<f64> {
     }
 }
 
-/// `|det J|` of the (straight quad) element at the reference point `xi`.
+/// `|det J|` of the element at the reference point `xi`.
 fn element_det_j(mesh: &Mesh<2>, e: u32, xi: &[f64]) -> f64 {
     let nodes = mesh.element_nodes(e);
     let geo = geo_ref_elem_from_mesh(mesh, e).expect("quad geometry");
@@ -408,7 +452,7 @@ fn element_det_j(mesh: &Mesh<2>, e: u32, xi: &[f64]) -> f64 {
     det_j.abs()
 }
 
-impl NavierDiscretization for KovasznayDisc {
+impl NavierDiscretization for MmsDisc {
     fn n_vel(&self) -> usize {
         self.vel_space.n_dofs()
     }
@@ -439,12 +483,8 @@ impl NavierDiscretization for KovasznayDisc {
     }
 
     fn assemble_divergence(&self) -> CsrMatrix<f64> {
-        // `MixedAssembler` is not usable here: its `ref_elem_vol` only knows
-        // Quad4 up to order 3, so the mixed forms are assembled locally (see
-        // the port notes).  `D[i,(k,c)] = ∫ φ_i ∂φ_k/∂x_c dx` with the same
-        // 7x7 rule as the volume forms (exact for the degree `2*order - 1`
-        // integrand), the pressure basis for the rows and the interleaved
-        // velocity basis for the columns.
+        // `D[i,(k,c)] = ∫ φ_i ∂φ_k/∂x_c dx` (`VectorDivergenceIntegrator`), with
+        // `G ≠ Dᵀ` — see `assemble_gradient` and the divergence theorem test.
         let ref_elem = self.h1_elem();
         let n_p = ref_elem.n_dofs();
         let n_v = 2 * n_p;
@@ -456,9 +496,7 @@ impl NavierDiscretization for KovasznayDisc {
         for e in 0..self.mesh.n_elements() as u32 {
             let pdofs = self.pres_space.element_dofs(e);
             let vdofs = self.vel_space.element_dofs(e);
-            for v in mel.iter_mut() {
-                *v = 0.0;
-            }
+            mel.fill(0.0);
             let nodes = self.mesh.element_nodes(e);
             let geo = geo_ref_elem_from_mesh(&self.mesh, e).expect("quad geometry");
             for (q, xi) in quad.points.iter().enumerate() {
@@ -495,13 +533,12 @@ impl NavierDiscretization for KovasznayDisc {
     }
 
     fn assemble_gradient(&self) -> CsrMatrix<f64> {
-        // `G[(k,c), i] = ∫ φ_k ∂φ_i/∂x_c dx` (MFEM `GradientIntegrator`: test =
-        // velocity undifferentiated, trial = pressure differentiated).
+        // `G[(k,c), i] = ∫ φ_k ∂φ_i/∂x_c dx` (MFEM `GradientIntegrator`).
         //
-        // Note that `G ≠ Dᵀ`: the two mixed forms differ by the boundary term
-        // `∫_Γ φ_k φ_i n_c ds` (`∫φ_i∂_cφ_k = -∫φ_k∂_cφ_i + ∫_Γ φ_iφ_k n_c`),
-        // which is exactly the flux that `FText_bdr`/`g_bdr` carry; both
-        // matrices must therefore be assembled independently.
+        // `G ≠ Dᵀ`: the two differ by the boundary term
+        // `∫_Γ φ_k φ_i n_c ds` (`∫φ_i∂_cφ_k = −∫φ_k∂_cφ_i + ∫_Γ φ_iφ_k n_c`),
+        // which is exactly the flux `FText_bdr`/`g_bdr` carry, so the two
+        // matrices are assembled independently.
         let ref_elem = self.h1_elem();
         let n_p = ref_elem.n_dofs();
         let n_v = 2 * n_p;
@@ -562,15 +599,8 @@ impl NavierDiscretization for KovasznayDisc {
 
     fn convection_residual(&self, u: &[f64], out: &mut [f64]) {
         // `N->Mult(u, Nu)` for MFEM's `VectorConvectionNLFIntegrator` with
-        // `Q = 1`: `Nu_i = ∫ (u·∇u)·φ_i dx`, assembled element by element.
-        //
-        // This is deliberately *not* `VectorConvectionIntegrator` + `spmv`:
-        // fem-rs's integrator uses `QpData::weight` — the `ip.weight/|detJ|`
-        // convention documented for `DiffusionIntegrator` — instead of the
-        // bare `QpData::ref_weight` that the `ip.weight · adj(J)∇φ` convection
-        // family needs, so its matrix is `1/|detJ|` too large (invisible on
-        // unit-sized elements, which is why its unit tests miss it).  The
-        // element residual below is MFEM's `ip.weight * dshapedxt` form.
+        // `Q = 1`: `Nu_i = ∫ (u·∇u)·φ_i dx`, assembled element by element with
+        // MFEM's `ip.weight · dshapedxt` convention (see the port notes).
         out.fill(0.0);
         let ref_elem = self.h1_elem();
         let n_ldofs = ref_elem.n_dofs();
@@ -639,7 +669,7 @@ impl NavierDiscretization for KovasznayDisc {
         for &d in &self.vel_ess {
             let (scalar, comp) = if d < n_scalar { (d, 0) } else { (d - n_scalar, 1) };
             let x = dm.dof_coord(scalar as u32);
-            let v = vel_kovasznay(&x, t, self.lam);
+            let v = vel_mms(&x, t);
             out[d] = v[comp];
         }
     }
@@ -658,18 +688,14 @@ impl NavierDiscretization for KovasznayDisc {
         })
     }
 
-    /// `g_bdr = Σ ∫_Γ (u_D·n) q ds` — the analytic velocity Dirichlet data,
-    /// assembled by the kernel (`standard::VectorBoundaryNormalLFIntegrator`,
-    /// MFEM's `BoundaryNormalLFIntegrator(VectorCoefficient&)`) with MFEM's
-    /// default boundary rule `IntRules.Get(SEGMENT, 1*order + 1)` and the
-    /// order-generic face element/DOF list (`assembler::ref_elem_face` +
-    /// `assembler::face_dofs_h1`).  The `FText_bdr` functional above keeps the
-    /// local face loop, whose coefficient is a *grid function* (see its docs).
+    /// `g_bdr = Σ ∫_Γ (u_D·n) q ds` — assembled by the kernel
+    /// (`standard::VectorBoundaryNormalLFIntegrator`, MFEM's
+    /// `BoundaryNormalLFIntegrator(VectorCoefficient&)`) with MFEM's default
+    /// boundary rule `IntRules.Get(SEGMENT, 1*order + 1)`.
     fn assemble_g_bdr(&self, t: f64) -> Vec<f64> {
-        let lam = self.lam;
         let integ = VectorBoundaryNormalLFIntegrator {
             v: FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
-                let v = vel_kovasznay(x, t, lam);
+                let v = vel_mms(x, t);
                 out[0] = v[0];
                 out[1] = v[1];
             }),
@@ -685,9 +711,23 @@ impl NavierDiscretization for KovasznayDisc {
             self.order + 1,
         )
     }
+    /// `f_form` — the acceleration term `f^{n+1}` (MFEM
+    /// `VectorDomainLFIntegrator` with `f_form->Assemble()`, default rule
+    /// `2*order`).
+    fn assemble_accel(&self, t: f64) -> Vec<f64> {
+        let kinvis = self.kinvis;
+        let integ = VectorH1DomainLF {
+            f: FnVectorCoeff(move |x: &[f64], out: &mut [f64]| {
+                let a = accel_mms(x, t, kinvis);
+                out[0] = a[0];
+                out[1] = a[1];
+            }),
+        };
+        Assembler::assemble_linear(&self.vel_space, &[&integ], 2 * self.order)
+    }
 
-    /// MFEM `MeanZero(v)`: `v -= ∫v dx / vol(Ω)`, with the arithmetic constant
-    /// subtracted from *every* entry (as `GridFunction::operator-=(real_t)`).
+    /// MFEM `MeanZero(v)`: `v -= ∫v dx / vol(Ω)`, the arithmetic constant
+    /// subtracted from *every* entry (`GridFunction::operator-=(real_t)`).
     fn mean_zero(&self, v: &mut [f64]) {
         let integ: f64 = self
             .pres_weights
@@ -718,8 +758,8 @@ impl NavierDiscretization for KovasznayDisc {
                 self.mesh.geom_coords_of(nodes[1]),
                 self.mesh.geom_coords_of(nodes[2]),
             );
-            // `Mesh::GetElementSize(e, 1)` (the smallest singular value of the
-            // perfect Jacobian) on this axis-aligned mesh is `min(hx, hy)`.
+            // `Mesh::GetElementSize(e, 1)` on this axis-aligned mesh is
+            // `min(hx, hy)`.
             let hmin = hx.min(hy) / self.order as f64;
             let dofs = self.vel_space.element_dofs(e);
             for xi in ir.points.iter() {
@@ -753,13 +793,11 @@ impl NavierDiscretization for KovasznayDisc {
     }
 }
 
-impl KovasznayDisc {
-    /// `NavierSolver::ComputeCurl2D(u, cu, assume_scalar)`.
-    ///
-    /// MFEM accumulates the value of every local nodal DOF over the elements
-    /// sharing it and divides by the zone count, kept verbatim here (including
-    /// the zero second component of the non-scalar branch and the `+0` added
-    /// to the y-component of the output).
+impl MmsDisc {
+    /// `NavierSolver::ComputeCurl2D(u, cu, assume_scalar)` — MFEM accumulates
+    /// the value of every local nodal DOF over the elements sharing it and
+    /// divides by the zone count, kept verbatim (including the zero second
+    /// component of the non-scalar branch).
     fn compute_curl_2d(&self, u: &[f64], assume_scalar: bool) -> Vec<f64> {
         let nvs = self.vel_space.n_dofs();
         let mut zones = vec![0_i32; nvs];
@@ -825,12 +863,12 @@ fn main() {
         std::process::exit(3);
     }
 
-    // `Mesh::MakeCartesian2D(2, 4, QUADRILATERAL, false, 1.5, 2.0)`;
-    // `mesh.EnsureNodes(); *nodes -= 0.5;`; then `ser_ref_levels` uniform
-    // refinements.
-    let mut mesh = Mesh::<2>::make_cartesian_2d(2, 4, 1.5, 2.0);
+    // `Mesh("../../../data/inline-quad.mesh")`; `EnsureNodes()`;
+    // `*nodes *= 2.0; *nodes -= 1.0;` then `ser_ref_levels` refinements.
+    let mfem = read_mfem_file("data/inline-quad.mesh").expect("read data/inline-quad.mesh");
+    let mut mesh = mfem.mesh2d.expect("data/inline-quad.mesh is a 2-D mesh");
     for c in mesh.coords.iter_mut() {
-        *c -= 0.5;
+        *c = 2.0 * *c - 1.0;
     }
     for _ in 0..ctx.ser_ref_levels {
         mesh = refine_uniform(&mesh);
@@ -838,18 +876,29 @@ fn main() {
     println!("Number of elements: {}", mesh.n_elements());
 
     let order = ctx.order as u8;
-    let disc = KovasznayDisc::new(mesh, order, ctx.lam);
+    let disc = MmsDisc::new(mesh, order, ctx.kinvis);
+    let n_bdr_attr = disc.n_bdr_attr();
 
-    // Initial condition: `u_ic->ProjectCoefficient(u_excoeff)`.
+    // Initial condition: `u_ic->ProjectCoefficient(u_excoeff)` at t = 0.
     let ic = disc
         .vel_space
-        .interpolate_vec(&|x| vel_kovasznay(x, 0.0, ctx.lam).to_vec());
+        .interpolate_vec(&|x| vel_mms(x, 0.0).to_vec());
     let cfg = NavierConfig {
         verbose: true,
         ..Default::default()
     };
     let mut flowsolver = NavierSolver::new(disc, ctx.kinvis, cfg);
     flowsolver.velocity_mut().copy_from_slice(ic.as_slice());
+
+    // `AddVelDirichletBC(vel, attr)` / `AddAccelTerm(accel, domain_attr)`
+    // verbose lines of the C++ miniapp.  `attr` selects every boundary
+    // attribute (all entries are 1), so the banner lists the 0-based *array*
+    // indices `0 .. bdr_attributes.Max()` — exactly as the C++ loop does.
+    println!(
+        "Adding Velocity Dirichlet BC to attributes {}",
+        (0..n_bdr_attr).map(|i| format!("{i} ")).collect::<String>()
+    );
+    println!("Adding Acceleration term to attributes 0 ");
 
     let dt = ctx.dt;
     let t_final = ctx.t_final;
@@ -869,29 +918,14 @@ fn main() {
 
         let u_gf = flowsolver.velocity().to_vec();
         let p_gf = flowsolver.pressure().to_vec();
-        // `p_ex_gf.ProjectCoefficient(pres_kovasznay); MeanZero(p_ex_gf);`
-        let p_ex_v = flowsolver
-            .discretization()
-            .pres_space
-            .interpolate(&|x| pres_kovasznay(x, t, ctx.lam, ctx.reference_pressure));
-        let mut p_ex = vec![0.0_f64; p_ex_v.len()];
-        p_ex.copy_from_slice(p_ex_v.as_slice());
-        flowsolver.discretization().mean_zero(&mut p_ex);
-
         err_u = vel_l2_error(flowsolver.discretization(), &u_gf, t);
-        err_p = pres_l2_error(flowsolver.discretization(), &p_gf, &p_ex);
-        let cfl = flowsolver.compute_cfl(&u_gf, dt);
+        err_p = pres_l2_error(flowsolver.discretization(), &p_gf, t);
 
+        println!("{:>11} {:>11} {:>11} {:>11}", "Time", "dt", "err_u", "err_p");
         println!(
-            "{:>5} {:>8} {:>8} {:>8} {:>11} {:>11}",
-            "Order", "CFL", "Time", "dt", "err_u", "err_p"
-        );
-        println!(
-            "{:>5} {:>8} {:>8} {:>8} {:>11} {:>11} err",
-            format!("{:02}", ctx.order),
-            fmt_sci(cfl, 2, true),
-            fmt_sci(t, 2, true),
-            fmt_sci(dt, 2, true),
+            "{} {} {} {} err",
+            fmt_sci(t, 5, true),
+            fmt_sci(dt, 5, true),
             fmt_sci(err_u, 5, true),
             fmt_sci(err_p, 5, true),
         );
@@ -901,7 +935,7 @@ fn main() {
     flowsolver.print_timing_data();
 
     if ctx.checkres {
-        let (tol_u, tol_p) = (1e-6_f64, 1e-5_f64);
+        let (tol_u, tol_p) = (1e-3_f64, 1e-3_f64);
         if err_u > tol_u || err_p > tol_p {
             println!("Result has a larger error than expected.");
             std::process::exit(255);
@@ -909,14 +943,14 @@ fn main() {
     }
 }
 
-/// `u_gf->ComputeL2Error(u_excoeff)` — `IntRules.Get(geom, 2*order)`.
-fn vel_l2_error(disc: &KovasznayDisc, u: &[f64], t: f64) -> f64 {
+/// `u_gf->ComputeL2Error(u_excoeff)` — MFEM `ComputeL2Error` rule
+/// `intorder = 2*fe->GetOrder() + 3`.
+fn vel_l2_error(disc: &MmsDisc, u: &[f64], t: f64) -> f64 {
     let ref_elem = disc.h1_elem();
     let n_ldofs = ref_elem.n_dofs();
     let mut acc = 0.0_f64;
     let mut phi = vec![0.0_f64; n_ldofs];
     for e in 0..disc.mesh.n_elements() as u32 {
-        // MFEM `ComputeL2Error`: `intorder = 2*fe->GetOrder() + 3`.
         let quad = ref_elem.quadrature(2 * disc.order + 3);
         let dofs = disc.vel_space.element_dofs(e);
         let nodes = disc.mesh.element_nodes(e);
@@ -929,7 +963,7 @@ fn vel_l2_error(disc: &KovasznayDisc, u: &[f64], t: f64) -> f64 {
                 uh[0] += u[dofs[k * 2] as usize] * phi[k];
                 uh[1] += u[dofs[k * 2 + 1] as usize] * phi[k];
             }
-            let ue = vel_kovasznay(&xp, t, disc.lam);
+            let ue = vel_mms(&xp, t);
             let d2 = (uh[0] - ue[0]).powi(2) + (uh[1] - ue[1]).powi(2);
             acc += quad.weights[q] * det_j.abs() * d2;
         }
@@ -937,118 +971,173 @@ fn vel_l2_error(disc: &KovasznayDisc, u: &[f64], t: f64) -> f64 {
     acc.sqrt()
 }
 
-/// `p_gf->ComputeL2Error(p_ex_gf_coeff)` — the exact pressure lives in the
-/// same space, so the integrand is a polynomial and the rule is exact.
-fn pres_l2_error(disc: &KovasznayDisc, p: &[f64], p_ex: &[f64]) -> f64 {
+/// `p_gf->ComputeL2Error(p_excoeff)` — the exact pressure is *not* in the space,
+/// so the integrand is sampled directly (rule `2*order + 3`).
+fn pres_l2_error(disc: &MmsDisc, p: &[f64], t: f64) -> f64 {
     let ref_elem = disc.h1_elem();
     let n_ldofs = ref_elem.n_dofs();
     let mut acc = 0.0_f64;
     let mut phi = vec![0.0_f64; n_ldofs];
     for e in 0..disc.mesh.n_elements() as u32 {
-        // MFEM `ComputeL2Error`: `intorder = 2*fe->GetOrder() + 3`.
         let quad = ref_elem.quadrature(2 * disc.order + 3);
         let dofs = disc.pres_space.element_dofs(e);
+        let nodes = disc.mesh.element_nodes(e);
+        let geo = geo_ref_elem_from_mesh(&disc.mesh, e).expect("quad geometry");
         for (q, xi) in quad.points.iter().enumerate() {
             ref_elem.eval_basis(xi, &mut phi);
-            let mut d = 0.0_f64;
+            let (_j, det_j, xp) = isoparametric_jacobian(&disc.mesh, nodes, &*geo, xi, 2);
+            let mut ph = 0.0_f64;
             for (k, _) in phi.iter().enumerate() {
-                d += (p[dofs[k] as usize] - p_ex[dofs[k] as usize]) * phi[k];
+                ph += p[dofs[k] as usize] * phi[k];
             }
-            let det_j = element_det_j(&disc.mesh, e, xi);
-            acc += quad.weights[q] * det_j * d * d;
+            let d = ph - pres_mms(&xp, t);
+            acc += quad.weights[q] * det_j.abs() * d * d;
         }
     }
     acc.sqrt()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn disc() -> KovasznayDisc {
-        let mut mesh = Mesh::<2>::make_cartesian_2d(2, 4, 1.5, 2.0);
+    /// The MMS test mesh: `data/inline-quad.mesh` (4×4 inline quads) scaled by
+    /// 2 and shifted by −1, i.e. `[-1,1]²` with 16 elements.
+    fn mesh() -> Mesh<2> {
+        let mfem = read_mfem_file(data_path("inline-quad.mesh")).expect("inline-quad.mesh");
+        let mut mesh = mfem.mesh2d.expect("2-D");
         for c in mesh.coords.iter_mut() {
-            *c -= 0.5;
+            *c = 2.0 * *c - 1.0;
         }
-        let mesh = refine_uniform(&mesh);
-        KovasznayDisc::new(mesh, 6, -0.966_903_538_8)
+        mesh
     }
 
-    /// `∫_Γ (v·n) q ds` with `v = (x, 0)` and `q ≡ 1` equals
-    /// `∫_Ω ∇·v dx = |Ω| = 3` (divergence theorem), for both the analytic
-    /// coefficient and a velocity GridFunction holding the same field.
-    #[test]
-    fn boundary_normal_lf_matches_divergence_theorem() {
-        let d = disc();
-        let rhs = d.boundary_normal_lf(|_e, xp, _phi| [xp[0], 0.0]);
-        let sum: f64 = rhs.iter().sum();
-        assert!((sum - 3.0).abs() < 1e-12, "analytic: {sum}");
+    /// Locate a file in the repository `data/` directory: relative to the cwd
+    /// when the test runs from the repository root, otherwise relative to the
+    /// package manifest (`examples/`, `tmp/*_build/`, …).
+    fn data_path(name: &str) -> String {
+        let cands = [
+            format!("data/{name}"),
+            format!("{}/../data/{name}", env!("CARGO_MANIFEST_DIR")),
+            format!("{}/../../data/{name}", env!("CARGO_MANIFEST_DIR")),
+        ];
+        cands
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .cloned()
+            .unwrap_or_else(|| panic!("cannot locate data/{name}; tried {cands:?}"))
+    }
 
+    fn disc(order: u8) -> MmsDisc {
+        MmsDisc::new(mesh(), order, 1.0)
+    }
+
+    /// The inline mesh must cover `[-1,1]²` — MFEM's `nodes *= 2; nodes -= 1`.
+    #[test]
+    fn mesh_is_the_scaled_unit_square() {
+        let m = mesh();
+        assert_eq!(m.n_elements(), 16);
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for n in 0..m.n_nodes() as u32 {
+            let c = m.node_coords(n);
+            for d in 0..2 {
+                lo[d] = lo[d].min(c[d]);
+                hi[d] = hi[d].max(c[d]);
+            }
+        }
+        assert!((lo[0] + 1.0).abs() < 1e-15 && (lo[1] + 1.0).abs() < 1e-15);
+        assert!((hi[0] - 1.0).abs() < 1e-15 && (hi[1] - 1.0).abs() < 1e-15);
+    }
+
+    /// With the MMS data the boundary functional `g_bdr = ∫_Γ (u_D·n) q ds`
+    /// vanishes identically: every component of the exact velocity is zero on
+    /// the whole boundary of `[-1,1]²` (`sin(πx)`, `sin(2πx)`, `sin(πy)` and
+    /// `sin(2πy)` all vanish there), which is why this miniapp's error curves
+    /// do not depend on the boundary flux.
+    #[test]
+    fn mms_boundary_flux_vanishes() {
+        let d = disc(5);
+        for t in [0.0, 0.375e-4, 2.5e-3] {
+            let g = d.assemble_g_bdr(t);
+            let n: f64 = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(n < 1e-30, "|g_bdr| = {n} at t = {t}");
+        }
+    }
+
+    /// The kernel-assembled functional `∫_Γ (v·n) q ds` used for `g_bdr`
+    /// satisfies the divergence theorem on this mesh: for `v = (x, 0)`,
+    /// `Σᵢ rhsᵢ = ∮ v·n ds = |Ω| = 4`.
+    #[test]
+    fn kernel_boundary_normal_lf_divergence_theorem() {
+        let d = disc(5);
+        let integ = VectorBoundaryNormalLFIntegrator {
+            v: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+                out[0] = x[0];
+                out[1] = 0.0;
+            }),
+        };
+        let fdofs = face_dofs_h1(&d.pres_space);
+        let rhs = Assembler::assemble_boundary_linear(
+            d.pres_space.n_dofs(),
+            &d.mesh,
+            &fdofs,
+            d.order,
+            &[&integ],
+            &d.bdr_tags,
+            d.order + 1,
+        );
+        let total: f64 = rhs.iter().sum();
+        assert!((total - 4.0).abs() < 1e-12, "∮ v·n ds = {total}, want 4");
+    }
+
+    /// The acceleration term must reproduce MFEM's `VectorDomainLFIntegrator`
+    /// on `[H¹]²`: with a constant `f`, `∫ f·v dx` for `v = (1, 1)` (which the
+    /// space represents exactly) equals `f·(1,1) · |Ω| = 4 f`.
+    #[test]
+    fn accel_form_of_constant_is_area_times_constant() {
+        let d = disc(5);
+        // Reuse the miniapp's integrator with a constant vector coefficient.
+        let integ = VectorH1DomainLF {
+            f: fem_assembly::postproc::coefficient::ConstantVectorCoeff(vec![2.0, -3.0]),
+        };
+        let rhs = Assembler::assemble_linear(&d.vel_space, &[&integ], 2 * d.order);
+        // v ≡ (1,1) is in the space: Σ_i rhs_i φ_i(x_i) = ∫ f·v dx.
         let n_scalar = d.vel_space.n_scalar_dofs();
-        let dm = d.vel_space.scalar_dof_manager();
-        let mut u = vec![0.0_f64; d.vel_space.n_dofs()];
-        for dof in 0..n_scalar as u32 {
-            u[dof as usize] = dm.dof_coord(dof)[0];
+        let mut acc = 0.0_f64;
+        for s in 0..n_scalar {
+            acc += rhs[s]; // x-component, φ_s ≡ 1
+            acc += rhs[n_scalar + s]; // y-component
         }
-        let lhs = d.assemble_ftext_bdr(&u);
-        let sum: f64 = lhs.iter().sum();
-        assert!((sum - 3.0).abs() < 1e-12, "grid function: {sum}");
+        assert!((acc - 4.0 * (2.0 - 3.0)).abs() < 1e-12, "acc = {acc}");
     }
 
-    /// The convection residual of `u = (x, y)` is `∫ (u·∇u) φ_i dx = M·u`.
+    /// The manufactured solution satisfies the incompressibility constraint
+    /// `∇·u = 0` and gives a non-trivial CFL; the CFL helper is exercised here
+    /// even though the C++ miniapp does not print it.
     #[test]
-    fn convection_residual_of_linear_field() {
-        let mut mesh = Mesh::<2>::make_cartesian_2d(2, 1, 1.0, 1.0);
-        for c in mesh.coords.iter_mut() {
-            *c -= 0.5;
-        }
-        let d = KovasznayDisc::new(mesh, 2, -0.9);
-        let u = d.vel_space.interpolate_vec(&|x| vec![x[0], x[1]]);
+    fn exact_solution_is_divergence_free_and_cfl_is_finite() {
+        let d = disc(5);
+        let u = d.vel_space.interpolate_vec(&|x| vel_mms(x, 0.5).to_vec());
         let u = u.as_slice().to_vec();
-        let mut res = vec![0.0_f64; u.len()];
-        d.convection_residual(&u, &mut res);
-        let m = d.assemble_mass_velocity();
-        let mut mu = vec![0.0_f64; u.len()];
-        m.spmv(&u, &mut mu);
-        let num: f64 = res.iter().zip(mu.iter()).map(|(a, b)| (a - b).powi(2)).sum();
-        let den: f64 = mu.iter().map(|a| a * a).sum();
-        assert!((num / den).sqrt() < 1e-12, "rel = {}", (num / den).sqrt());
+        let cfl = d.compute_cfl(&u, 2.5e-5);
+        assert!(cfl.is_finite() && cfl > 0.0, "cfl = {cfl}");
+
+        // ∇·u = 0 pointwise (checked at a few interior points).
+        for p in [[-0.37, 0.11], [0.2, -0.6], [0.05, 0.05]] {
+            let h = 1e-6;
+            let dx = (vel_mms(&[p[0] + h, p[1]], 0.5)[0] - vel_mms(&[p[0] - h, p[1]], 0.5)[0])
+                / (2.0 * h);
+            let dy = (vel_mms(&[p[0], p[1] + h], 0.5)[1] - vel_mms(&[p[0], p[1] - h], 0.5)[1])
+                / (2.0 * h);
+            assert!((dx + dy).abs() < 1e-8, "div u = {}", dx + dy);
+        }
     }
 
-    /// The pressure Laplace matrix annihilates constants (pure-Neumann
-    /// nullspace) and `MeanZero` removes the mass-weighted mean.
-    #[test]
-    fn pressure_nullspace_and_mean_zero() {
-        let d = disc();
-        let sp = d.assemble_pressure_laplace();
-        let n = d.pres_space.n_dofs();
-        let ones = vec![1.0_f64; n];
-        let mut y = vec![0.0_f64; n];
-        sp.spmv(&ones, &mut y);
-        let norm: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-        assert!(norm < 1e-10, "|Sp·1| = {norm}");
-
-        let msum: f64 = d.pres_weights.iter().sum();
-        assert!((msum - d.volume).abs() < 1e-12);
-        assert!((d.volume - 3.0).abs() < 1e-12, "volume = {}", d.volume);
-
-        let mut v = vec![0.5_f64; n];
-        d.mean_zero(&mut v);
-        assert!(v.iter().all(|x| x.abs() < 1e-14));
-    }
-
-    /// Divergence theorem for the two mixed forms (exact for polynomials):
-    /// `∫ q ∇·u = -∫ ∇q·u + ∫_Γ q (u·n)`, i.e. `D·u + Gᵀ·u = ∫_Γ (u·n) q ds`
-    /// with the `D`/`G` assembled here.  (`G = Dᵀ` would *not* satisfy this —
-    /// the two matrices differ by exactly this boundary flux.)
+    /// `D·u + Gᵀ·u` must equal the boundary flux `∫_Γ (u·n) φ ds` for a
+    /// polynomial `u` — the divergence theorem that pins `G ≠ Dᵀ`.
     #[test]
     fn divergence_theorem_identity() {
-        let mut mesh = Mesh::<2>::make_cartesian_2d(2, 1, 1.0, 1.0);
-        for c in mesh.coords.iter_mut() {
-            *c -= 0.5;
-        }
-        let d = KovasznayDisc::new(mesh, 2, -0.9);
+        let d = disc(2);
         let u = d
             .vel_space
             .interpolate_vec(&|x| vec![x[0] * x[1], x[1] * x[1] * x[0]]);
@@ -1080,35 +1169,5 @@ mod tests {
             err = err.max((du[i] - bdr[i]).abs());
         }
         assert!(err < 1e-12 * scale, "err = {err}, scale = {scale}");
-    }
-
-    /// The kernel-assembled `g_bdr` (`standard::VectorBoundaryNormalLFIntegrator`
-    /// + `assembler::face_dofs_h1` + the *trace* face element of
-    /// `assembler::ref_elem_face`) must reproduce the element-trace assembly
-    /// used by `FText_bdr` — the functional MFEM's boundary element computes —
-    /// DOF by DOF.
-    ///
-    /// This is the regression test for the face element's DOF *positions*:
-    /// the face basis must be the trace of the volume basis (closed
-    /// Gauss-Lobatto nodes in topological order).  An equispaced face basis
-    /// (`SegP3`, `SegPk`, …) still reproduces `Σᵢ rhsᵢ` (partition of unity)
-    /// but spreads the flux over the wrong DOFs, so only a per-DOF comparison
-    /// catches it — the divergence-theorem tests pass either way.
-    #[test]
-    fn kernel_g_bdr_matches_volume_trace_assembly() {
-        let d = disc();
-        let t = 1.0e-3;
-        let kernel = d.assemble_g_bdr(t);
-        let local = d.boundary_normal_lf(|_e, xp, _phi| vel_kovasznay(xp, t, d.lam));
-        let scale = local.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-        assert!(scale > 0.0, "Kovasznay boundary flux must be non-zero");
-        let err = kernel
-            .iter()
-            .zip(local.iter())
-            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
-        assert!(
-            err <= 1e-14 * scale,
-            "max |kernel - local| = {err} (scale {scale})"
-        );
     }
 }

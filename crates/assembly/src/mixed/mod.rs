@@ -1203,12 +1203,51 @@ impl ReferenceElement for P0 {
     fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.0; 3]] }
 }
 
+/// Highest polynomial order [`ref_elem_vol`] will build.
+///
+/// The order-generic arms exist so that high-order mixed forms (e.g. the
+/// `[H¹]^d × H¹` Navier–Stokes coupling at order 6, see the
+/// `navier_kovasznay` miniapp) can be assembled with the kernel instead of
+/// hand-written element loops.  Anything above this bound is a programming
+/// error and returns `Err` rather than silently building a low-order basis.
+pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
+
+/// Scalar H¹ reference element for `elem_type` at polynomial `order`.
+///
+/// Used by the mixed-form assemblers for the *scalar* side of a coupling
+/// (the row space of [`assemble_h1_hdiv_mixed`], the scalar test space of
+/// [`assemble_hcurl_h1_weak_div`], and the column space of
+/// [`MixedAssembler::assemble_bilinear`]).
+///
+/// The low orders keep the historical fixed-order elements, so existing
+/// callers keep bit-identical results.  Orders ≥ 4 are delegated to the
+/// order-generic elements of [`fem_element::lagrange`] — the same table as
+/// `assembler::ref_elem_vol_h1`, i.e. MFEM `H1_FECollection` semantics
+/// (Gauss-Lobatto nodes, DOFs ordered vertices → edges → interior):
+/// `QuadQk`/`HexQk` for tensor elements, `H1TriPk` for triangles,
+/// `QuadSerendipityPk`/`HexSerendipityPk` for serendipity elements,
+/// `TetPk`/`PrismPk`/`PyramidPk` for the rest.
+///
+/// Before this table was extended it stopped at order 3 (Quad4/Hex8) and at
+/// order 1–3 for the other types, so every mixed form needed by a `H1`
+/// order-6 discretization returned `Err` (recorded as kernel gap D46① in the
+/// round-15 navier hand-over).
 pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
+    use fem_element::lagrange::{HexQk, H1TriPk, PrismPk, PyramidPk};
+
+    if order > REF_ELEM_VOL_MAX_ORDER {
+        return Err(format!(
+            "ref_elem_vol: unsupported ({elem_type:?}, order={order}); \
+             the order-generic path covers orders 0..={REF_ELEM_VOL_MAX_ORDER}"
+        ));
+    }
+
     Ok(match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) |
         (ElementType::Tet4 | ElementType::Tet10, 0) |
         (ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9, 0) |
         (ElementType::Hex8 | ElementType::Hex20, 0) => Box::new(P0),
+        // ── Historical fixed-order entries (bit-identical for old callers) ──
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
@@ -1227,9 +1266,24 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Hex20, 1) => Box::new(HexSerendipityPk::new(1)),
         (ElementType::Hex20, 2) => Box::new(HexSerendipityPk::new(2)),
         (ElementType::Hex20, 3) => Box::new(HexSerendipityPk::new(3)),
-        (ElementType::Prism6 | ElementType::Prism15, 1) => Box::new(fem_element::lagrange::PrismPk::new(1)),
-        (ElementType::Prism6 | ElementType::Prism15, 2) => Box::new(fem_element::lagrange::PrismPk::new(2)),
-        (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(fem_element::lagrange::PrismPk::new(3)),
+        (ElementType::Prism6 | ElementType::Prism15, 1) => Box::new(PrismPk::new(1)),
+        (ElementType::Prism6 | ElementType::Prism15, 2) => Box::new(PrismPk::new(2)),
+        (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(PrismPk::new(3)),
+        // ── Order-generic path (matches `assembler::ref_elem_vol_h1`) ───────
+        (ElementType::Tri3 | ElementType::Tri6, o) => Box::new(H1TriPk::new(o as usize)),
+        (ElementType::Tet4 | ElementType::Tet10, o) => Box::new(TetPk::new(o as usize)),
+        (ElementType::Quad4, o) => Box::new(QuadQk::new(o as usize)),
+        (ElementType::Quad8 | ElementType::Quad9, o) => {
+            Box::new(QuadSerendipityPk::new(o as usize))
+        }
+        (ElementType::Hex8, o) => Box::new(HexQk::new(o as usize)),
+        (ElementType::Hex20, o) => Box::new(HexSerendipityPk::new(o as usize)),
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
+            Box::new(PrismPk::new(o as usize))
+        }
+        (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
+            Box::new(PyramidPk::new(o as usize))
+        }
         _ => return Err(format!("ref_elem_vol: unsupported ({elem_type:?}, order={order})")),
     })
 }
@@ -1623,5 +1677,83 @@ mod tests {
     fn ref_elem_unsupported_returns_err() {
         assert!(ref_elem_vol(ElementType::Tri3, 99).is_err());
         assert!(ref_elem_vec(ElementType::Tri3, 99, SpaceType::HDiv).is_err());
+    }
+
+    /// D46①: the scalar H¹ table now covers the order-generic factory
+    /// elements, so order 6 (the navier miniapps' default) is available.
+    ///
+    /// Before the fix `ref_elem_vol(Quad4, 6)` returned `Err`, which made
+    /// every order-6 mixed form impossible to assemble with the kernel.
+    #[test]
+    fn ref_elem_vol_order_6_is_available_and_nodal() {
+        let re = ref_elem_vol(ElementType::Quad4, 6).unwrap();
+        assert_eq!(re.order(), 6);
+        assert_eq!(re.n_dofs(), 49);
+
+        // Nodal Lagrange basis: φᵢ evaluated at its own DOF coordinate is 1
+        // and 0 at every other DOF coordinate.
+        let mut phi = vec![0.0_f64; re.n_dofs()];
+        for (i, c) in re.dof_coords().iter().enumerate() {
+            re.eval_basis(c, &mut phi);
+            for (j, &p) in phi.iter().enumerate() {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((p - want).abs() < 1e-13, "φ{i}(x{j}) = {p}, want {want}");
+            }
+        }
+
+        // Must be the *same* element the H¹ assembler uses for a Quad4 mesh
+        // (`assembler::ref_elem_vol_h1`), otherwise the mixed and the
+        // standard assembly of a shared space would disagree.
+        let h1 = crate::assembler::ref_elem_vol_h1(ElementType::Quad4, 6);
+        assert_eq!(h1.n_dofs(), re.n_dofs());
+        assert_eq!(h1.dof_coords(), re.dof_coords());
+        let mut a = vec![0.0_f64; re.n_dofs()];
+        let mut b = vec![0.0_f64; re.n_dofs()];
+        for pt in [[0.13, 0.77], [0.5, 0.5], [0.9, 0.02]] {
+            re.eval_basis(&pt, &mut a);
+            h1.eval_basis(&pt, &mut b);
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert_eq!(x, y, "basis mismatch at {pt:?}");
+            }
+        }
+    }
+
+    /// D46① end to end: `MixedAssembler` (whose column space goes through
+    /// `ref_elem_vol`) reproduces `Assembler`'s scalar mass matrix at order 6.
+    ///
+    /// The integrators accumulate the same products in a different order
+    /// (`(w·φᵢ)·φⱼ` vs MFEM's shared `AddMult_a_VVt` product), so the entries
+    /// agree to rounding, not bit-wise.
+    #[test]
+    fn mixed_mass_order_6_matches_scalar_mass() {
+        use crate::assembler::Assembler;
+        use crate::standard::MassIntegrator;
+
+        let mesh = Mesh::<2>::make_cartesian_2d(2, 1, 1.0, 1.0);
+        let row = H1Space::new(mesh.clone(), 6);
+        let col = H1Space::new(mesh, 6);
+        // Same rule the volume forms use in the navier miniapps: 2*order+1.
+        let q = 2 * 6 + 1;
+        let m_mixed =
+            MixedAssembler::assemble_bilinear(&row, &col, &[&MixedScalarMassIntegrator], q);
+        let m_scalar = Assembler::assemble_bilinear(&row, &[&MassIntegrator { rho: 1.0 }], q);
+
+        assert_eq!(m_mixed.nrows, m_scalar.nrows);
+        assert_eq!(m_mixed.ncols, m_scalar.ncols);
+        let mut max_diff = 0.0_f64;
+        let mut max_val = 0.0_f64;
+        for i in 0..m_scalar.nrows {
+            for j in 0..m_scalar.ncols {
+                let a = m_mixed.get(i, j);
+                let b = m_scalar.get(i, j);
+                max_diff = max_diff.max((a - b).abs());
+                max_val = max_val.max(b.abs());
+            }
+        }
+        assert!(max_val > 0.0);
+        assert!(
+            max_diff <= 1e-14 * max_val,
+            "max |M_mixed - M_scalar| = {max_diff} (max entry {max_val})"
+        );
     }
 }

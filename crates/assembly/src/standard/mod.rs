@@ -207,7 +207,9 @@ pub use vector_source::VectorDomainLFIntegrator;
 pub use bbar::{assemble_bbar_elasticity, FBarIntegrator};
 pub use infinite::InfiniteDomainIntegrator;
 pub use shell_mitc4::{mitc4_shell_stiffness, mitc4_shell_mass};
-pub use boundary_flux::{BoundaryNormalLFIntegrator, VectorFEBoundaryFluxLFIntegrator};
+pub use boundary_flux::{
+    BoundaryNormalLFIntegrator, VectorBoundaryNormalLFIntegrator, VectorFEBoundaryFluxLFIntegrator,
+};
 pub use tangential_boundary::TangentialTraceLFIntegrator;
 
 pub use vec_fe_divergence::VectorFEDivergenceIntegrator;

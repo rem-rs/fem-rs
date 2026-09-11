@@ -17,7 +17,7 @@
 //! These types are provided for API completeness and naming consistency
 //! with MFEM.
 
-use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff, VectorCoeff};
 use crate::integrator::{BdQpData, BoundaryLinearIntegrator};
 
 /// Boundary linear integrator for `∫_Γ g(x) (n · v) ds`.
@@ -30,6 +30,14 @@ use crate::integrator::{BdQpData, BoundaryLinearIntegrator};
 ///
 /// For H(div) RT spaces where DOFs represent normal flux, this is
 /// equivalent to [`NeumannIntegrator`].
+///
+/// # Naming warning
+///
+/// This type is **not** MFEM's `BoundaryNormalLFIntegrator`: MFEM's class of
+/// that name takes a *vector* coefficient and computes `∫_Γ (v(x)·n) φᵢ ds`,
+/// which is [`VectorBoundaryNormalLFIntegrator`] here.  This scalar variant
+/// corresponds to MFEM's `BoundaryLFIntegrator` (`∫_Γ g(x) φᵢ ds`).  The
+/// semantics are kept as-is because existing consumers depend on them.
 ///
 /// # Example
 /// ```rust,ignore
@@ -51,6 +59,63 @@ impl<C: ScalarCoeff> BoundaryLinearIntegrator for BoundaryNormalLFIntegrator<C> 
         let w_g = qp.weight * self.g.eval(&ctx);
         for i in 0..qp.n_dofs {
             f_face[i] += w_g * qp.phi[i];
+        }
+    }
+}
+
+/// Boundary linear integrator for `∫_Γ (v(x)·n) φᵢ ds` — MFEM's
+/// `BoundaryNormalLFIntegrator(VectorCoefficient &)`.
+///
+/// `v` is an arbitrary [`VectorCoeff`] evaluated at the physical coordinates
+/// of the quadrature point and `n` is the **unit outward normal** of the
+/// boundary face.  `qp.weight` already carries MFEM's quadrature measure
+/// (`ip.weight × |J_face|`), so the accumulated element vector is
+/// `Σ_q ip.weight_q (v(x_q)·n_q) φᵢ(x_q)`, i.e. MFEM's
+/// `elvect.Add(ip.weight*(Qvec*nor), shape)` with `nor = CalcOrtho(Tr.Jacobian())`
+/// (the *unnormalised* face normal — the unit normal times `|J_face|`).
+///
+/// # Why a second type is needed
+///
+/// fem-rs's [`BoundaryNormalLFIntegrator`] computes the *scalar*
+/// `∫_Γ g(x) φᵢ ds` (a `ScalarCoeff` field), which is MFEM's
+/// `BoundaryLFIntegrator`.  Changing that type's semantics would silently
+/// break its consumers, so the MFEM-compatible *vector* functional lives in
+/// this separate type with an explicit name.
+///
+/// # Consumers
+///
+/// The Navier–Stokes miniapps (`miniapps/fluids/navier_*`) use it for the
+/// pressure-space functionals `FText_bdr = ∫_Γ (FText·n) q ds` and
+/// `g_bdr = ∫_Γ (u_D·n) q ds` of the split scheme
+/// (`navier_solver.cpp`: `BoundaryNormalLFIntegrator(*FText_gfcoeff)` and
+/// `BoundaryNormalLFIntegrator(*vel_dbc.coeff)`).  `assemble_boundary_linear`
+/// must be given a face reference element of the matching order (see
+/// `ref_elem_face`, which serves every order through
+/// `assembler::face_dofs_h1`) and MFEM's default rule
+/// `IntRules.Get(SEGMENT, 1*order + 1)` as `quad_order`.
+pub struct VectorBoundaryNormalLFIntegrator<C: VectorCoeff> {
+    /// The vector coefficient `v(x)`.
+    pub v: C,
+}
+
+impl<C: VectorCoeff> BoundaryLinearIntegrator for VectorBoundaryNormalLFIntegrator<C> {
+    /// `f_face[i] += w · (v(x)·n) · φᵢ`
+    fn add_to_face_vector(&self, qp: &BdQpData<'_>, f_face: &mut [f64]) {
+        let ctx = CoeffCtx::from_qp(
+            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+            Some(qp.phi), None,
+        );
+        // At most 3 components; `qp.dim` of the face is the mesh dimension.
+        let mut v = [0.0_f64; 3];
+        self.v.eval(&ctx, &mut v[..qp.dim]);
+        let vn: f64 = v[..qp.dim]
+            .iter()
+            .zip(qp.normal.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let w = qp.weight * vn;
+        for i in 0..qp.n_dofs {
+            f_face[i] += w * qp.phi[i];
         }
     }
 }
