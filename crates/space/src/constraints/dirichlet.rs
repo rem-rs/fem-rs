@@ -449,17 +449,36 @@ pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
         }
     }
 
-    // Collect hex face DOFs on tagged boundary faces (3D quad faces).
+    // Collect face-interior DOFs on tagged boundary faces (3D).
     if mesh.dim() == 3 && space.order() >= 2 {
         for f in 0..mesh.n_boundary_faces() as u32 {
-            if tags.contains(&mesh.face_tag(f)) {
-                let nodes = mesh.face_nodes(f);
-                if nodes.len() == 4 {
+            if !tags.contains(&mesh.face_tag(f)) {
+                continue;
+            }
+            let nodes = mesh.face_nodes(f);
+            match nodes.len() {
+                // Hex quad face (hex NDk, k >= 2).
+                4 => {
                     let key = QuadFaceKey::new(nodes[0], nodes[1], nodes[2], nodes[3]);
                     if let Some(mut fdofs) = space.quad_face_dofs(key) {
                         out.append(&mut fdofs);
                     }
                 }
+                // Tet triangular face (tet NDk, k >= 2): the face carries
+                // `2 * n_points = k(k-1)` DOFs sitting at the shared face
+                // anchor points, so an essential (PEC) BC must constrain them
+                // too — otherwise the ND2/ND3 tangential trace is only
+                // partially imposed and the solution is O(1) wrong (D47).
+                3 => {
+                    let key = FaceKey::new(nodes[0], nodes[1], nodes[2]);
+                    if let (Some(first), Some(anchor)) =
+                        (space.face_dof(key), space.face_anchor(key))
+                    {
+                        let n = 2 * anchor.n_points() as DofId;
+                        out.extend(first..first + n);
+                    }
+                }
+                _ => {}
             }
         }
     }
