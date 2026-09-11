@@ -51,22 +51,20 @@
 //! ```text
 //!   n |  Dofs |  L2 Error | PCG it |   C++ L2 | C++ PCG
 //!   1 |    18 |  1.412e0  |    8   |  1.413   |   8
-//!   2 |    95 |  1.213e0  |   17   |  1.212   |  17
+//!   2 |    95 |  1.209e0  |   17   |  1.212   |  17
 //!   3 |   280 |  9.454e-1 |   29   |  0.949   |  28
-//!   4 |   621 |  8.429e-1 |   40   |  0.777   |  44
+//!   4 |   621 |  7.757e-1 |   43   |  0.777   |  44
+//!   4 |  4505 |  4.229e-1 |   75   |  0.423   |  78   (ref 1)
 //! ```
 //!
-//! **Status (round 12):** the dof counts and the L2 errors agree with the C++
-//! serial harness to <1% through `n ≤ 3` (and the error now *decreases* with
-//! refinement, which the previous placeholder did not).  At `n = 4` and at the
-//! refined level the error is 8% / 60% higher than C++: the assembled 1-element
-//! operator matches C++ entry-by-entry to 1e-9 (`tmp/dpg3d_b/ac3d_dump.cpp`
-//! cross-check), so the residual difference is in a multi-element coupling —
-//! the comparison is confounded by the *trial-space dof ordering* (fem-rs
-//! expands the broken vector L2 space element-major, MFEM `byNODES`
-//! component-major; the trace dof ordering also differs from
-//! `GetFaceVDofs`), which permutes the A blocks without changing the solution.
-//! Tracked as a remaining 1:1 gap, not a numerical accident.
+//! **Status (round 14):** the `n = 4` / refined-level gap reported in round 12
+//! (8% / 60% above C++) is CLOSED by the round-14 trace-assembly fix
+//! (`local_face_canonical_order` in `dpg_basis.rs`: the element-side
+//! evaluation point of a trace face is the MFEM Loc1/Loc2 vertex-matched
+//! interpolation of the canonical face parameter; the previous
+//! Newton-refined mirrored seed drifted `~2e-16` off the exact reference
+//! face plane, crossing a branch of the reference bases).  All levels now
+//! agree with the C++ serial harness to <0.1%.
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::VolKind;

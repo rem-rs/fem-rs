@@ -32,21 +32,25 @@ const OMEGA: f64 = 1.7;
 const MU: f64 = 1.0;
 const EPS: f64 = 1.0;
 
-/// Exact E (real-valued): case 0 → (1, 0, 0); case 1 → (y, 0, 0).
-fn e_exact(case_no: u8, x: &[f64]) -> [f64; 3] {
+/// Exact E (real-valued): case 0 → `e_dir` (constant); case 1 → (y, 0, 0).
+fn e_exact(case_no: u8, dir: u8, x: &[f64]) -> [f64; 3] {
     match case_no {
-        0 => [1.0, 0.0, 0.0],
+        0 => {
+            let mut v = [0.0; 3];
+            v[dir as usize] = 1.0;
+            v
+        }
         _ => [x[1], 0.0, 0.0],
     }
 }
 
 /// Exact H = ∇×E / (i ω μ), real part (zero in both cases).
-fn h_exact_re(_case_no: u8, _x: &[f64]) -> [f64; 3] {
+fn h_exact_re(_case_no: u8, _dir: u8, _x: &[f64]) -> [f64; 3] {
     [0.0; 3]
 }
 
 /// Exact H imaginary part: case 1 → (0, 0, −1/ω) (H_z = 1/(iω)).
-fn h_exact_im(case_no: u8, _x: &[f64]) -> [f64; 3] {
+fn h_exact_im(case_no: u8, _dir: u8, _x: &[f64]) -> [f64; 3] {
     match case_no {
         0 => [0.0; 3],
         _ => [0.0, 0.0, -1.0 / OMEGA / MU],
@@ -54,9 +58,13 @@ fn h_exact_im(case_no: u8, _x: &[f64]) -> [f64; 3] {
 }
 
 /// Exact J = −iωεE + ∇×H (real, imag parts).
-fn j_exact(case_no: u8, x: &[f64]) -> ([f64; 3], [f64; 3]) {
+fn j_exact(case_no: u8, dir: u8, x: &[f64]) -> ([f64; 3], [f64; 3]) {
     match case_no {
-        0 => ([0.0; 3], [-OMEGA * EPS, 0.0, 0.0]),
+        0 => {
+            let mut ji = [0.0; 3];
+            ji[dir as usize] = -OMEGA * EPS;
+            ([0.0; 3], ji)
+        }
         _ => ([0.0; 3], [-OMEGA * EPS * x[1], 0.0, 0.0]),
     }
 }
@@ -176,6 +184,7 @@ fn set_exact(
     blocks: &[usize; 4],
     l2_order: u8,
     case_no: u8,
+    dir: u8,
 ) -> (Vec<f64>, Vec<f64>) {
     let mesh = a.mesh();
     let et = mesh.element_type(0);
@@ -192,9 +201,9 @@ fn set_exact(
     for e in 0..mesh.n_elements() as u32 {
         for (i, xii) in dof_par.iter().enumerate() {
             let xp = elem_point(mesh, e, xii);
-            let ev = e_exact(case_no, &xp);
-            let hr = h_exact_re(case_no, &xp);
-            let hi = h_exact_im(case_no, &xp);
+            let ev = e_exact(case_no, dir, &xp);
+            let hr = h_exact_re(case_no, dir, &xp);
+            let hi = h_exact_im(case_no, dir, &xp);
             for c in 0..3 {
                 xr[offs[es] + e as usize * 3 * n_e + c * n_e + i] = ev[c];
                 xr[offs[hs] + e as usize * 3 * n_e + c * n_e + i] = hr[c];
@@ -222,11 +231,11 @@ fn set_exact(
                     .map(|d| jac[0][d] * tk[0] + jac[1][d] * tk[1])
                     .collect();
                 let (vr, vi) = if field == 0 {
-                    let ev = e_exact(case_no, &xk);
+                    let ev = e_exact(case_no, dir, &xk);
                     (ev[0] * jt[0] + ev[1] * jt[1] + ev[2] * jt[2], 0.0)
                 } else {
-                    let hr = h_exact_re(case_no, &xk);
-                    let hi = h_exact_im(case_no, &xk);
+                    let hr = h_exact_re(case_no, dir, &xk);
+                    let hi = h_exact_im(case_no, dir, &xk);
                     (
                         hr[0] * jt[0] + hr[1] * jt[1] + hr[2] * jt[2],
                         hi[0] * jt[0] + hi[1] * jt[1] + hi[2] * jt[2],
@@ -247,6 +256,7 @@ fn residual_of(
     mesh: &Mesh<3>,
     p: u8,
     case_no: u8,
+    dir: u8,
     mode: Mode,
     with_rhs: bool,
 ) -> (f64, usize) {
@@ -254,17 +264,19 @@ fn residual_of(
     let g = 1; // G test block index (F = 0, G = 1)
     if with_rhs {
         let case_r = case_no;
+        let dir_r = dir;
         let case_i = case_no;
+        let dir_i = dir;
         a.add_domain_lf_integrator(
             Some(Box::new(DpgVectorFEDomainLFIntegrator {
                 f: move |x: &[f64], out: &mut [f64]| {
-                    let (jr, _) = j_exact(case_r, x);
+                    let (jr, _) = j_exact(case_r, dir_r, x);
                     out.copy_from_slice(&jr);
                 },
             })),
             Some(Box::new(DpgVectorFEDomainLFIntegrator {
                 f: move |x: &[f64], out: &mut [f64]| {
-                    let (_, ji) = j_exact(case_i, x);
+                    let (_, ji) = j_exact(case_i, dir_i, x);
                     out.copy_from_slice(&ji);
                 },
             })),
@@ -273,7 +285,7 @@ fn residual_of(
     }
     a.assemble();
 
-    let (xr, xi) = set_exact(&a, &blocks, p - 1, case_no);
+    let (xr, xi) = set_exact(&a, &blocks, p - 1, case_no, dir);
     let mat_r = a.block_mat_r();
     let mat_i = a.block_mat_i();
     let n = mat_r.nrows;
@@ -305,12 +317,12 @@ fn residual_of(
     worst
 }
 
-fn run_identity(mesh: &Mesh<3>, p: u8, case_no: u8, tol: f64) {
-    let (full, fi) = residual_of(mesh, p, case_no, Mode::All, true);
-    let (frows, _i) = residual_of(mesh, p, case_no, Mode::FRows, false);
-    let (grows, _i2) = residual_of(mesh, p, case_no, Mode::GRows, true);
+fn run_identity(mesh: &Mesh<3>, p: u8, case_no: u8, dir: u8, tol: f64) {
+    let (full, fi) = residual_of(mesh, p, case_no, dir, Mode::All, true);
+    let (frows, _i) = residual_of(mesh, p, case_no, dir, Mode::FRows, false);
+    let (grows, _i2) = residual_of(mesh, p, case_no, dir, Mode::GRows, true);
     eprintln!(
-        "identity p={p} case={case_no}: full {full:.3e} (dof {fi}) | F-rows {frows:.3e} | G-rows {grows:.3e}"
+        "identity p={p} case={case_no} dir={dir}: full {full:.3e} (dof {fi}) | F-rows {frows:.3e} | G-rows {grows:.3e}"
     );
     // sigma*m consistency across all (face, position) pairs per global dof
     if std::env::var("DPG_SIGMA_CHECK").is_ok() {
@@ -330,7 +342,7 @@ fn run_identity(mesh: &Mesh<3>, p: u8, case_no: u8, tol: f64) {
                 let jt: Vec<f64> = (0..3)
                     .map(|d| jac[0][d] * tk[0] + jac[1][d] * tk[1])
                     .collect();
-                let ev = e_exact(case_no, &xk);
+                let ev = e_exact(case_no, dir, &xk);
                 let m = ev[0] * jt[0] + ev[1] * jt[1] + ev[2] * jt[2];
                 let s = if signed[j] < 0 { -1.0 } else { 1.0 };
                 let v = s * m;
@@ -360,44 +372,145 @@ fn run_identity(mesh: &Mesh<3>, p: u8, case_no: u8, tol: f64) {
 #[test]
 fn maxwell_3d_identity_hex_p1_const_e() {
     let mesh = Mesh::<3>::unit_cube_hex(1);
-    run_identity(&mesh, 1, 0, 1e-10);
+    run_identity(&mesh, 1, 0, 0, 1e-10);
 }
 
-/// Multi-element variant: exercises the interior-face trace dof sharing.
-/// KNOWN GAP (this round): the multi-hex identity still shows a ~0.16 residual
-/// (trace rows) after the tk-cycle, tangent-trace-sign and transposed-param
-/// fixes; the per-element pieces (Stokes, face interpolation) all check out,
-/// so the remaining error is in the cross-element assembly of the reversed
-/// quad faces. Next round: compare the assembled B_tan columns on hex2
-/// against the C++ Loc2-based blocks element-by-element.
-#[ignore = "KNOWN GAP: multi-hex reversed-quad-face residual ~0.16 in trace rows; per-element Stokes/interp/sigma checks all pass; needs C++ Loc2 block-by-block comparison next round"]
+/// Multi-element variant: exercises the interior-face trace dof sharing and
+/// the Elem2 (reversed canonical-cycle) face of every interior quad.
+/// Regression for the round-14 fix: the element-side evaluation point of a
+/// trace face is now the MFEM Loc1/Loc2 vertex-matched interpolation of the
+/// canonical face parameter (exact reference face-plane coordinates), not a
+/// Newton-refined mirrored seed.
+#[test]
 fn maxwell_3d_identity_hex2_p1_const_e() {
     let mesh = Mesh::<3>::unit_cube_hex(2);
-    run_identity(&mesh, 1, 0, 1e-10);
+    for dir in 0..3u8 {
+        run_identity(&mesh, 1, 0, dir, 1e-10);
+    }
+}
+
+/// `nx × ny × nz` axis-aligned hex mesh of the unit cube (MFEM vertex order
+/// per hex, lexicographic element order) — used to isolate a single interior
+/// face orientation.
+fn unit_box_hex(nx: usize, ny: usize, nz: usize) -> Mesh<3> {
+    let (np_i, np_j, np_k) = (nx + 1, ny + 1, nz + 1);
+    let mut coords = Vec::new();
+    for k in 0..np_k {
+        for j in 0..np_j {
+            for i in 0..np_i {
+                coords.push(i as f64 / nx as f64);
+                coords.push(j as f64 / ny as f64);
+                coords.push(k as f64 / nz as f64);
+            }
+        }
+    }
+    let nid = |i: usize, j: usize, k: usize| -> u32 {
+        (k * np_i * np_j + j * np_i + i) as u32
+    };
+    let mut conn = Vec::new();
+    let mut elem_tags = Vec::new();
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                conn.extend_from_slice(&[
+                    nid(i, j, k),
+                    nid(i + 1, j, k),
+                    nid(i + 1, j + 1, k),
+                    nid(i, j + 1, k),
+                    nid(i, j, k + 1),
+                    nid(i + 1, j, k + 1),
+                    nid(i + 1, j + 1, k + 1),
+                    nid(i, j + 1, k + 1),
+                ]);
+                elem_tags.push(1i32);
+            }
+        }
+    }
+    let mut face_conn = Vec::new();
+    let mut face_tags = Vec::new();
+    let mut add_quad = |a: u32, b: u32, c: u32, d: u32, t: i32| {
+        face_conn.extend_from_slice(&[a, b, c, d]);
+        face_tags.push(t);
+    };
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if k == 0 {
+                    add_quad(nid(i, j, 0), nid(i, j + 1, 0), nid(i + 1, j + 1, 0), nid(i + 1, j, 0), 1);
+                }
+                if k == nz - 1 {
+                    add_quad(nid(i, j, nz), nid(i + 1, j, nz), nid(i + 1, j + 1, nz), nid(i, j + 1, nz), 2);
+                }
+                if j == 0 {
+                    add_quad(nid(i, 0, k), nid(i + 1, 0, k), nid(i + 1, 0, k + 1), nid(i, 0, k + 1), 3);
+                }
+                if j == ny - 1 {
+                    add_quad(nid(i, ny, k), nid(i, ny, k + 1), nid(i + 1, ny, k + 1), nid(i + 1, ny, k), 4);
+                }
+                if i == 0 {
+                    add_quad(nid(0, j, k), nid(0, j, k + 1), nid(0, j + 1, k + 1), nid(0, j + 1, k), 5);
+                }
+                if i == nx - 1 {
+                    add_quad(nid(nx, j, k), nid(nx, j + 1, k), nid(nx, j + 1, k + 1), nid(nx, j, k + 1), 6);
+                }
+            }
+        }
+    }
+    Mesh::uniform(
+        coords, conn, elem_tags, ElementType::Hex8, face_conn, face_tags, ElementType::Quad4,
+    )
+}
+
+/// 2×1×1: exactly one interior face (x-normal, Elem2 cycle = (B,A,D,C)
+/// reflection of the canonical cycle).
+#[test]
+fn maxwell_3d_identity_hex210_p1_const_e() {
+    let mesh = unit_box_hex(2, 1, 1);
+    for dir in 0..3u8 {
+        run_identity(&mesh, 1, 0, dir, 1e-10);
+    }
+}
+
+/// 1×2×1: one y-normal interior face.
+#[test]
+fn maxwell_3d_identity_hex020_p1_const_e() {
+    let mesh = unit_box_hex(1, 2, 1);
+    for dir in 0..3u8 {
+        run_identity(&mesh, 1, 0, dir, 1e-10);
+    }
+}
+
+/// 1×1×2: one z-normal interior face.
+#[test]
+fn maxwell_3d_identity_hex002_p1_const_e() {
+    let mesh = unit_box_hex(1, 1, 2);
+    for dir in 0..3u8 {
+        run_identity(&mesh, 1, 0, dir, 1e-10);
+    }
 }
 
 #[test]
 fn maxwell_3d_identity_tet2_p1_const_e() {
     let mesh = Mesh::<3>::unit_cube_tet(2);
-    run_identity(&mesh, 1, 0, 1e-10);
+    run_identity(&mesh, 1, 0, 0, 1e-10);
 }
 
 #[test]
 fn maxwell_3d_identity_hex_p2_linear_e() {
     let mesh = Mesh::<3>::unit_cube_hex(1);
-    run_identity(&mesh, 2, 1, 1e-10);
+    run_identity(&mesh, 2, 1, 0, 1e-10);
 }
 
 #[test]
 fn maxwell_3d_identity_tet_p1_const_e() {
     let mesh = Mesh::<3>::unit_cube_tet(1);
-    run_identity(&mesh, 1, 0, 1e-10);
+    run_identity(&mesh, 1, 0, 0, 1e-10);
 }
 
 #[test]
 fn maxwell_3d_identity_tet_p2_linear_e() {
     let mesh = Mesh::<3>::unit_cube_tet(1);
-    run_identity(&mesh, 2, 1, 1e-10);
+    run_identity(&mesh, 2, 1, 0, 1e-10);
 }
 
 /// FD validation of the 3-D ND element curl (`eval_curl` vs central
@@ -494,7 +607,7 @@ fn nd_hex_stokes_identity() {
         let is_qf = tr.is_quad_face(fid);
         let (fpts, fwts) = fem_assembly::dpg::dpg_basis::face_quadrature(3, is_qf, 6);
         for (q, fparam) in fpts.iter().enumerate() {
-            let (xp, normal, _ms) = fem_assembly::dpg_weakform::face_geo_nodes(
+            let (_xp, normal, _ms) = fem_assembly::dpg_weakform::face_geo_nodes(
                 &mesh,
                 tr.face_nodes(fid),
                 is_qf,
@@ -589,13 +702,10 @@ fn curl_pairing_integrator_direct() {
     assert!(worst < 1e-12, "curl pairing direct check fails: {worst:.3e}");
 }
 
-// ─── Decisive scalar diagnostics: xᵀAx vs analytic functional norms ─────────
 
-/// Final per-element residual report for hex2 (known gap documentation):
-/// elems 2-7 carry ~0.37-per-reversed-face residuals while elems 0-1 are
-/// machine-zero; all per-element pieces (Stokes, face interp, sigma·m
-/// consistency) individually check out, so the remaining error is in the
-/// cross-element assembly of the reversed quad faces (see the round report).
+
+/// Per-element row-sum sanity for hex2 (finite after assembly; the exact
+/// identity itself is pinned by `maxwell_3d_identity_hex2_p1_const_e`).
 #[test]
 fn hex2_residual_documentation() {
     let mesh = Mesh::<3>::unit_cube_hex(2);
@@ -630,3 +740,4 @@ fn hex2_residual_documentation() {
         "residuals must be finite"
     );
 }
+

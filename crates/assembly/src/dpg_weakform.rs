@@ -608,7 +608,21 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         }
         let n_te = test_offsets[test_offsets.len() - 1];
 
-        let (qpts, qwts) = vol_quadrature(et, self.quad_order);
+        // Effective volume quadrature: never below `2·max test order` so the
+        // test Gram (mass/stiffness products of order-`k` test bases) is
+        // integrated exactly AND has full rank — with too few quadrature
+        // points the Gram's rank is capped by the point count and the
+        // Cholesky factorization fails (e.g. H1(4)×RT(3) on a quad needs
+        // 25+24 independent point evaluations, a default 4×4 rule only
+        // provides 16).
+        let max_test_order = self
+            .test_spaces
+            .iter()
+            .map(|t| t.order)
+            .max()
+            .unwrap_or(1);
+        let q_order = self.quad_order.max(2 * max_test_order);
+        let (qpts, qwts) = vol_quadrature(et, q_order);
         let n_qp = qpts.len();
 
         let face_rule_tri = if dim == 3 {
@@ -624,6 +638,17 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
         let _ = ref_node_coords(et); // reference tables kept for curved-face extension
 
         let cond_info = self.cond.clone(); // Option<(exposed, private)>
+        let exp_compact_offs: Vec<usize> = match &cond_info {
+            Some((exp, _)) => {
+                let sizes = self.trial_block_sizes();
+                let mut o = vec![0usize];
+                for &b in exp {
+                    o.push(o.last().unwrap() + sizes[b]);
+                }
+                o
+            }
+            None => Vec::new(),
+        };
         let mut cond_lu: Vec<(Vec<f64>, Vec<usize>)> = Vec::new();
         let mut cond_pe: Vec<Vec<f64>> = Vec::new();
         let mut cond_bpe: Vec<Vec<f64>> = Vec::new();
@@ -809,15 +834,21 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                         for (q, fparam) in fpts.iter().enumerate() {
                             let (xp, normal, measure) =
                                 face_geo_nodes(&mesh, trace.face_nodes(fid), is_qf, fparam, dim);
-                            let lf_eff: Vec<usize> = if scale < 0.0 {
-                                lf.iter().rev().copied().collect()
-                            } else {
-                                lf.to_vec()
-                            };
-                            // Initial guess from the element's local face
-                            // parametrisation; Newton-invert to the exact
-                            // reference coordinates of the physical face point.
-                            let xi0 = face_param_to_elem_ref(et, &lf_eff, is_qf, fparam);
+                            // MFEM Loc1/Loc2: the element-side reference image of the
+                            // canonical face parameter interpolates the element's local
+                            // face vertices matched to the canonical cycle (MFEM
+                            // GetLocalQuadToHexTransformation point matrix `hv[qo[j]]`).
+                            // The exact seed keeps the reference face-plane coordinate
+                            // exact (x_ref = ±1) — Newton drift onto the interior branch
+                            // of the reference bases corrupts the trace block.
+                            let lf_can = crate::dpg::dpg_basis::local_face_canonical_order(
+                                &nodes,
+                                lf,
+                                trace.face_nodes(fid),
+                            );
+                            // Newton-invert to the exact reference coordinates of the
+                            // physical face point (no-op for straight elements).
+                            let xi0 = face_param_to_elem_ref(et, &lf_can, is_qf, fparam);
                             let xiref = invert_element_map(
                                 &mesh,
                                 simplex.as_ref(),
@@ -907,25 +938,23 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     for (q, fparam) in fpts.iter().enumerate() {
                         let (xp, normal, measure) =
                             face_geo_at(&mesh, sk, fid, fparam, dim);
-                        // For an ori<0 (reversed) face the element's local
-                        // face map is the TRANSPOSE of the canonical map
-                        // (x_local(a,b) = x_can(b,a)): pass the transposed
-                        // parameter so the test basis is evaluated at the
-                        // same physical point as the face basis (MFEM
-                        // Loc1/Loc2 chaining in `SetAllIntPoints`).
-                        let fparam_e: Vec<f64> = if scale < 0.0 && is_qf {
-                            vec![fparam[1], fparam[0]]
-                        } else {
-                            fparam.to_vec()
-                        };
-                        // Initial guess from the element's local face
-                        // parametrization; Newton-invert to the exact
-                        // reference coordinates of the physical face point.
+                        // MFEM Loc1/Loc2 (see the ND path above): the
+                        // element-side reference image of the canonical face
+                        // parameter interpolates the local face vertices
+                        // matched to the canonical cycle; Newton only refines
+                        // curved elements.
+                        let lf_can = crate::dpg::dpg_basis::local_face_canonical_order(
+                            &nodes,
+                            lf,
+                            sk.face_nodes(fid),
+                        );
+                        // Newton-invert to the exact reference coordinates of
+                        // the physical face point.
                         let xi0 = face_param_to_elem_ref(
                             et,
-                            lf,
+                            &lf_can,
                             is_quad_face_geom && is_qf,
-                            &fparam_e,
+                            fparam,
                         );
                         let xiref = invert_element_map(
                             &mesh,
@@ -1132,27 +1161,36 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     cond_bpe.push(xpp);
                     cond_sizes.push((n_priv, n_exp));
 
-                    // Scatter into the reduced system (compact exposed-dof
-                    // numbering; `eoff` maps exposed block order to Schur
-                    // indices).
+                    // Scatter into the reduced system over the GLOBAL
+                    // exposed-dof numbering (compact = preceding exposed
+                    // block sizes + the dof's offset inside its block): an
+                    // element's trace dofs repeat across faces/edges and the
+                    // accumulation must land on the same Schur row/col.
                     let mut eoff = vec![0usize];
                     for &b in exp_blocks {
                         eoff.push(eoff.last().unwrap() + (tr_offs[b + 1] - tr_offs[b]));
                     }
+                    let compact = |bi: usize, li: usize, vdofs: &[usize]| -> usize {
+                        let b = exp_blocks[bi];
+                        exp_compact_offs[bi] + (vdofs[li] - trial_offsets[b])
+                    };
                     for (bi, &b) in exp_blocks.iter().enumerate() {
                         let vdofs_i = self.trial_element_vdofs(b, e);
                         let r0 = eoff[bi];
                         for (li, _gd) in vdofs_i.iter().enumerate() {
-                            red_y.as_mut().unwrap()[r0 + li] += s_rhs[r0 + li];
+                            let ri = compact(bi, li, &vdofs_i);
+                            red_y.as_mut().unwrap()[ri] += s_rhs[r0 + li];
                         }
                         for (bj, &b2) in exp_blocks.iter().enumerate() {
                             let vdofs_j = self.trial_element_vdofs(b2, e);
                             let c0 = eoff[bj];
                             for li in 0..vdofs_i.len() {
+                                let ri = compact(bi, li, &vdofs_i);
                                 for cj in 0..vdofs_j.len() {
+                                    let ci = compact(bj, cj, &vdofs_j);
                                     let v = se[(r0 + li) * n_exp + c0 + cj];
                                     if v != 0.0 {
-                                        red_coo.as_mut().unwrap().add(r0 + li, c0 + cj, v);
+                                        red_coo.as_mut().unwrap().add(ri, ci, v);
                                     }
                                 }
                             }
@@ -1288,30 +1326,37 @@ impl<M: MeshTopology + Clone + 'static> DpgWeakForm<M> {
                     let (lu, piv) = &cd.lu[e as usize];
                     let (n_priv, n_exp) = cd.sizes[e as usize];
                     // gather x_e in the exposed-block order of this element
+                    // (left side: element-LOCAL exposed offsets; right side:
+                    // the compact global index of the same dof)
                     let mut x_e = vec![0.0_f64; n_exp];
+                    let mut loc_off = 0usize;
                     for (bj, &b) in cd.exposed_blocks.iter().enumerate() {
                         let vd = self.trial_element_vdofs(b, e);
                         let base = self.dof_offsets[b];
                         for (li, &g) in vd.iter().enumerate() {
-                            x_e[eoffs[bj] + li] = xs[eoffs[bj] + (g - base)];
+                            x_e[loc_off + li] = xs[eoffs[bj] + (g - base)];
                         }
+                        loc_off += vd.len();
                     }
                     // rhs = xpp - A_pe x_e, then solve
+                    // (`xpp` = A_pp⁻¹·b_p is already solved; the LU applies
+                    // only to the A_pe·x_e product: x_p = xpp − A_pp⁻¹A_pe x_e.)
                     let a_pe = &cd.pe[e as usize];
-                    let mut rhs = cd.bpe[e as usize].clone();
+                    let mut rhs = vec![0.0_f64; n_priv];
                     for i in 0..n_priv {
                         let mut s = 0.0;
                         for j in 0..n_exp {
                             s += a_pe[i * n_exp + j] * x_e[j];
                         }
-                        rhs[i] -= s;
+                        rhs[i] = s;
                     }
                     lu_solve(lu, n_priv, piv, &mut rhs);
+                    let bpe = &cd.bpe[e as usize];
                     let mut off = 0usize;
                     for &b in &cd.private_blocks {
                         let vd = self.trial_element_vdofs(b, e);
                         for (li, &g) in vd.iter().enumerate() {
-                            x[g] = rhs[off + li];
+                            x[g] = bpe[off + li] - rhs[off + li];
                         }
                         off += vd.len();
                     }

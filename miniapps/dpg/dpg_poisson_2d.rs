@@ -180,6 +180,18 @@ fn solve_level(
         .expect("PCG solve failed");
 
     let x = a.recover_fem_solution(&xs);
+    if std::env::var("DPG_DEBUG").is_ok() {
+        let offs = a.trial_offsets();
+        eprintln!(
+            "DPG_DEBUG: hatu (trace u) = {:?}",
+            &x[offs[hatu]..offs[hatu] + x.len().min(offs[3] - offs[hatu]).min(12)]
+        );
+        eprintln!("DPG_DEBUG: u(e0..e4) re = {:?}", &x[offs[u]..offs[u] + 4]);
+        eprintln!(
+            "DPG_DEBUG: sigma(e0) = {:?}",
+            &x[offs[sig]..offs[sig] + 2]
+        );
+    }
 
     // L2 error of (u, σ) against the exact solution (manufactured only;
     // C++ prints 0-rate rows for the general problem).

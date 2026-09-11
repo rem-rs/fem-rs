@@ -38,14 +38,27 @@
 //! `-do 1`, no `-sc`; hex `n×n×n` = `MakeCartesian3D(n,n,n,HEX)`):
 //!
 //! ```text
-//!   n |  o | Ref |  Dofs |  C++ L2  | C++ it |   fem-rs L2 | it
-//!   2 |  1 |   0 |   156 | 1.723    |     22 |
+//!   n |  o | Ref |  Dofs |  C++ L2  | C++ it |   fem-rs L2 (round 14) | it
+//!   2 |  1 |   0 |   156 | 1.723    |     22 |  1.757                 | 23
 //!   2 |  1 |   1 |   984 | 1.313    |     50 |
-//!   2 |  2 |   0 |   888 | 9.547e-1 |     66 |
-//!   2 |  2 |   1 |  6192 | 2.707e-1 |    118 |
+//!   2 |  2 |   0 |   888 | 9.547e-1 |     66 |  1.446                 | 65
+//!   2 |  2 |   1 |  6192 | 2.707e-1 |    118 |  1.395                 | 126
 //!   4 |  1 |   0 |   984 | 1.313    |     51 |
 //!   4 |  1 |   1 |  6960 | 7.617e-1 |     96 |
 //! ```
+//!
+//! Round 14: the multi-hex reversed-face trace-assembly bug (D35) is fixed —
+//! per-element exact-tuple identities now hold to machine precision on
+//! multi-element hex/tet meshes at orders 1 and 2, and `-sc` matches the
+//! uncondensed solve (the reduced-system scatter used element-local exposed
+//! indices and the recovery double-applied `A_pp⁻¹`).  The remaining
+//! whole-field L2 gap at `-o 1` is 2.0% (within tolerance).  The `-o 2` gap
+//! (1.395 vs 2.707e-1) is diagnosed to the *test-space basis*: fem-rs's
+//! `HexNDk(2)`/`(3)` reference functions differ from MFEM's
+//! `ND_FECollection(2/3,3)` (raw moments differ, e.g. `∫F_0 = (2,1,1)` vs
+//! `(0.389,0.278,0.5)` and `∫curl F_0 = −1/6 vs −1/8`, both quadrature-exact),
+//! which degrades the DPG projection at higher test orders — element-level
+//! (`crates/element/src/nedelec/hex_ndk.rs`), tracked with the ND k≥2 work.
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
 use fem_assembly::dpg::dpg_basis::{
@@ -234,6 +247,9 @@ fn solve_level(
     if static_cond {
         a.enable_static_condensation();
     }
+    // C++ maxwell.cpp calls `a->StoreMatrices()` unconditionally (per-element
+    // whitened blocks, used by `ComputeResidual`).
+    a.store_matrices(true);
     a.assemble();
 
     // Essential BCs: Ê = E₀ (tangential projection of the exact E) on the
@@ -310,6 +326,27 @@ fn solve_level(
         big.spmv(&sol, &mut lin);
         let worst2 = b.iter().zip(lin.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         eprintln!("DPG_DEBUG: linear residual after PCG = {worst2:.3e}");
+        eprintln!(
+            "DPG_DEBUG: E(e0) = {:+.6e} {:+.6e} {:+.6e} (re); im {:+.6e} {:+.6e} {:+.6e}",
+            sol_r[0], sol_r[1], sol_r[2], sol_i[0], sol_i[1], sol_i[2]
+        );
+        let hat_e0 = a.trial_offsets()[2];
+        eprintln!(
+            "DPG_DEBUG: hatE[0..8] re = {:?}",
+            &sol_r[hat_e0..hat_e0 + 8]
+        );
+        eprintln!(
+            "DPG_DEBUG: sol[0..8] (doubled) = {:?}",
+            &sol[0..8]
+        );
+        let offs = a.trial_offsets();
+        let names = ["E", "H", "hatE", "hatH"];
+        for (bi, nm) in names.iter().enumerate() {
+            let (r0, r1) = (offs[bi], offs[bi + 1]);
+            let sr: f64 = sol_r[r0..r1].iter().sum();
+            let si: f64 = sol_i[r0..r1].iter().sum();
+            eprintln!("DPG_DEBUG: block {nm} sum_re {sr:+.6e} sum_im {si:+.6e}");
+        }
     }
 
     let err = errors(

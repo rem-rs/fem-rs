@@ -913,6 +913,38 @@ pub fn local_face_table(elem_nodes: &[u32], dim: usize) -> Vec<Vec<usize>> {
 
 // ─── Face parametrization ────────────────────────────────────────────────────
 
+/// Element-local face vertex order matching the canonical (stored) face
+/// cycle — MFEM's `Loc1`/`Loc2` point-matrix convention
+/// (`Mesh::GetLocalQuadToHexTransformation` / `GetLocalTriToTetTransformation`
+/// build the point matrix with column `j` = the element-reference vertex of
+/// the local face vertex that coincides with canonical face vertex `j`,
+/// i.e. `hv[qo[j]]` / `tv[to[j]]`).
+///
+/// Feeding this order to [`face_param_to_elem_ref`] reproduces MFEM's
+/// `FaceElementTransformations::SetAllIntPoints` chaining exactly (the
+/// element-side reference image of a canonical face parameter), and — unlike
+/// a Newton-refined seed — keeps the reference face-plane coordinates exact
+/// (`x_ref = ±1`).  The exact plane coordinate matters: the ND/RT reference
+/// bases are evaluated with boundary special cases at the face plane, so a
+/// point drifted to `−1 + 2e−16` by Newton falls into the interior branch and
+/// corrupts the assembled trace block.
+pub fn local_face_canonical_order(nodes: &[u32], lf: &[usize], canonical: &[u32]) -> Vec<usize> {
+    canonical
+        .iter()
+        .map(|&c| {
+            lf.iter()
+                .copied()
+                .find(|&k| nodes[k as usize] == c)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "local_face_canonical_order: local face {lf:?} does not carry canonical \
+                         vertex {c}"
+                    )
+                })
+        })
+        .collect()
+}
+
 /// Reference-domain node coordinates of the element geometries.
 ///
 /// Simplices and quads use the fem-element `[0,1]^dim` convention; the
