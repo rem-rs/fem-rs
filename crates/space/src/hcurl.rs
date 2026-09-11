@@ -32,11 +32,11 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::nedelec::HexNDk;
+use fem_element::nedelec::{HexNDk, TetNDk, TriNDk};
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::Vector;
-use fem_mesh::{topology::MeshTopology, ElementTransformation, ElementType};
+use fem_mesh::{topology::MeshTopology, ElementType};
 
 use crate::dof_manager::{EdgeKey, FaceKey, QuadFaceKey};
 use crate::fe_space::{FESpace, SpaceType};
@@ -269,9 +269,168 @@ fn match_face_dof(
 /// fixed by the face-creating element ("Elem1") — the global functionals of
 /// the face's shared DOFs (`σ_m(Φ) = Φ(x_m)·t_m`).
 #[derive(Debug, Clone)]
-struct NdFaceAnchor {
+struct QuadFaceAnchor {
     nodes: Vec<[f64; 3]>,
     tangents: Vec<[f64; 3]>,
+}
+
+/// Physical DOF points and their canonical tangent pairs on one shared
+/// triangular face (Tet NDk, k≥2).
+///
+/// The face carries `k(k−1)/2` DOF points and two DOFs per point; the global
+/// functionals are
+///
+/// ```text
+/// σ^canon_{2p+0}(Φ) = Φ(x_p) · t[p][0]
+/// σ^canon_{2p+1}(Φ) = Φ(x_p) · t[p][1]
+/// ```
+///
+/// fixed by the face-creating element (MFEM's "Elem1") — the anchor every
+/// other element's face DOFs are expressed against.
+#[derive(Debug, Clone)]
+pub struct TetFaceAnchor {
+    pts: Vec<[f64; 3]>,
+    tans: Vec<[[f64; 3]; 2]>,
+}
+
+impl TetFaceAnchor {
+    /// Number of DOF points on the face (`k(k−1)/2`).
+    pub fn n_points(&self) -> usize {
+        self.pts.len()
+    }
+    /// Physical point of face-point `p`.
+    pub fn point(&self, p: usize) -> [f64; 3] {
+        self.pts[p]
+    }
+    /// The two canonical tangents at face-point `p`.
+    pub fn tangents(&self, p: usize) -> [[f64; 3]; 2] {
+        self.tans[p]
+    }
+}
+
+/// One 2×2 face-DOF block of one element (D37).
+///
+/// The element-local DOF pair at slots `slot`, `slot+1` (indices into
+/// [`HCurlSpace::element_dofs`]) carries the functionals `Σ_k s[n][k] ·
+/// σ^canon` of the canonical pair `canon_dofs[0..2]`, i.e. `s`'s rows are the
+/// element's local tangents expressed in the canonical tangent basis — MFEM's
+/// `ND_DofTransformation::T(ori)` relation, which no scalar sign can express.
+///
+/// Consumers must apply it as `A_canon = S·A_local·Sᵀ` for the element matrix
+/// and `b_canon = S·b_local` for the load vector; the primal (GridFunction)
+/// dof vector is `u_local = S·u_canon`.
+#[derive(Debug, Clone, Copy)]
+pub struct FaceDofBlock {
+    /// First element-local DOF of the pair.
+    pub slot: usize,
+    /// The two canonical global DOFs the pair maps onto.
+    pub canon_dofs: [DofId; 2],
+    /// Rows: the element's local tangents in the canonical tangent basis.
+    pub s: [[f64; 2]; 2],
+}
+
+/// Identity 2×2 block (the face-creating element's own convention).
+const ID2: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
+
+/// Match one element-local face DOF point against the anchor's point list —
+/// the shared-face physical point, with a symmetric barycentric GL set the
+/// correspondence is a permutation.
+fn match_face_point(anchor: &TetFaceAnchor, x: [f64; 3]) -> usize {
+    let tol = 1e-9 * (1.0 + (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt());
+    let mut best = usize::MAX;
+    let mut best_d = f64::INFINITY;
+    for (p, a) in anchor.pts.iter().enumerate() {
+        let d = ((x[0] - a[0]).powi(2) + (x[1] - a[1]).powi(2) + (x[2] - a[2]).powi(2)).sqrt();
+        if d < best_d {
+            best_d = d;
+            best = p;
+        }
+    }
+    assert!(
+        best_d <= tol,
+        "HCurlSpace: no canonical face DOF point at {x:?} (closest {best_d:e})"
+    );
+    best
+}
+
+/// Change of basis of one element's face tangent pair against a canonical
+/// pair: returns `s` with `t_n = Σ_k s[n][k]·w_k` (in-plane least squares,
+/// exact for the affine tet map), i.e. `sᵀ = (WᵀW)⁻¹ Wᵀ T`.
+fn face_pair_change_of_basis(t: &[[f64; 3]; 2], w: &[[f64; 3]; 2], ctx: &str) -> [[f64; 2]; 2] {
+    let dot = |a: &[f64; 3], b: &[f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let g = [[dot(&w[0], &w[0]), dot(&w[0], &w[1])], [dot(&w[1], &w[0]), dot(&w[1], &w[1])]];
+    let b = [[dot(&w[0], &t[0]), dot(&w[0], &t[1])], [dot(&w[1], &t[0]), dot(&w[1], &t[1])]];
+    let det = g[0][0] * g[1][1] - g[0][1] * g[1][0];
+    assert!(det.abs() > 1e-30, "HCurlSpace: degenerate face tangent pair ({ctx})");
+    // sᵀ = g⁻¹ b  (2×2)
+    let st = [
+        [(g[1][1] * b[0][0] - g[0][1] * b[1][0]) / det, (g[1][1] * b[0][1] - g[0][1] * b[1][1]) / det],
+        [(-g[1][0] * b[0][0] + g[0][0] * b[1][0]) / det, (-g[1][0] * b[0][1] + g[0][0] * b[1][1]) / det],
+    ];
+    // s = (sᵀ)ᵀ
+    [[st[0][0], st[1][0]], [st[0][1], st[1][1]]]
+}
+
+/// Physical DOF points and their two tangents of one local tet face block
+/// (MFEM `ND_TetrahedronElement` `Nodes`/`dof2tk`).
+///
+/// `k = 2` keeps the historical pre-D38 arithmetic (`pa + (w0+w1)/3` centroid
+/// with the `TET_FACE_TANGENTS` edge vectors) bit-for-bit; `k ≥ 3` pushes the
+/// general TetNDk face layout through the affine element map (`x = P₀ + J·ξ`,
+/// `t = J·t̂`), the same point-value functionals the element itself uses.
+fn tet_face_slots<M: MeshTopology>(
+    mesh: &M,
+    verts: &[fem_core::types::NodeId],
+    k: usize,
+    f: usize,
+) -> (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>) {
+    let (la, _lb, _lc) = TET_FACES[f];
+    if k == 2 {
+        let a0 = mesh.node_coords(verts[la]);
+        let (p0, n0, p1, n1) = TET_FACE_TANGENTS[f];
+        let g0 = mesh.node_coords(verts[p0]);
+        let h0 = mesh.node_coords(verts[n0]);
+        let g1 = mesh.node_coords(verts[p1]);
+        let h1 = mesh.node_coords(verts[n1]);
+        let w0 = [g0[0] - h0[0], g0[1] - h0[1], g0[2] - h0[2]];
+        let w1 = [g1[0] - h1[0], g1[1] - h1[1], g1[2] - h1[2]];
+        let pc = [
+            a0[0] + (w0[0] + w1[0]) / 3.0,
+            a0[1] + (w0[1] + w1[1]) / 3.0,
+            a0[2] + (w0[2] + w1[2]) / 3.0,
+        ];
+        return (vec![pc], vec![[w0, w1]]);
+    }
+    let nda = TetNDk::new(k);
+    let coords = nda.dof_coords();
+    let tks = nda.dof_tangents();
+    let nfd = 2 * (k * (k - 1) / 2);
+    let base = 6 * k + f * nfd;
+    let p0 = mesh.node_coords(verts[0]);
+    let mut jac = [[0.0_f64; 3]; 3];
+    for (c, lv) in [1usize, 2, 3].iter().enumerate() {
+        let p = mesh.node_coords(verts[*lv]);
+        for d in 0..3 {
+            jac[d][c] = p[d] - p0[d];
+        }
+    }
+    let mut pts = Vec::with_capacity(nfd / 2);
+    let mut tans = Vec::with_capacity(nfd / 2);
+    for i in 0..nfd / 2 {
+        let xi = &coords[base + 2 * i];
+        let mut x = [p0[0], p0[1], p0[2]];
+        let mut t = [[0.0_f64; 3]; 2];
+        for r in 0..3 {
+            x[r] += jac[r][0] * xi[0] + jac[r][1] * xi[1] + jac[r][2] * xi[2];
+            for c in 0..2 {
+                let tk = tks[base + 2 * i + c];
+                t[c][r] = jac[r][0] * tk[0] + jac[r][1] * tk[1] + jac[r][2] * tk[2];
+            }
+        }
+        pts.push(x);
+        tans.push(t);
+    }
+    (pts, tans)
 }
 
 /// Local base quad face for pyramid.
@@ -301,16 +460,18 @@ pub struct HCurlSpace<M: MeshTopology> {
     edge_to_dof: HashMap<EdgeKey, DofId>,
     /// Face → first global DOF map for 3D ND2 (second = first + 1).
     face_to_dof: HashMap<FaceKey, DofId>,
-    /// Face → tangent anchor for interpolation: `[P_a, w0, w1]` where the two
-    /// face DOF functionals are `Φ(P_c)·w0` and `Φ(P_c)·w1` with the centroid
-    /// `P_c = P_a + (w0 + w1)/3` (tangents fixed by the face-creating element,
-    /// matching the TetND2 slot tangents).
-    face_anchor: HashMap<FaceKey, [[f64; 3]; 3]>,
+    /// Face → canonical (shared) DOF functional anchor for 3-D tet NDk
+    /// (`k(k−1)/2` point-value pairs), fixed by the face-creating element.
+    face_anchor: HashMap<FaceKey, TetFaceAnchor>,
+    /// Per element: the 2×2 face-DOF block transforms into the canonical
+    /// (face-creating element) basis — empty for spaces without shared face
+    /// DOF pairs (2-D, hex, k = 1).  See [`FaceDofBlock`].
+    elem_face_blocks: Vec<Vec<FaceDofBlock>>,
     /// Quad-face → first global DOF for hex NDk (2k(k-1) DOFs per face).
     quad_face_to_dof: HashMap<QuadFaceKey, DofId>,
     /// Quad-face → physical DOF points/tangents (`σ_m(Φ) = Φ(x_m)·t_m`) of
     /// the face's canonical DOF list, fixed by the face-creating element.
-    quad_face_anchor: HashMap<QuadFaceKey, NdFaceAnchor>,
+    quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor>,
     /// Spatial dimension.
     dim: usize,
     /// Cell type used by this space.
@@ -331,9 +492,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
-        let mut face_anchor: HashMap<FaceKey, [[f64; 3]; 3]> = HashMap::new();
+        let mut face_anchor: HashMap<FaceKey, TetFaceAnchor> = HashMap::new();
+        let mut elem_face_blocks: Vec<Vec<FaceDofBlock>> = Vec::with_capacity(n_elem);
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
-        let mut quad_face_anchor: HashMap<QuadFaceKey, NdFaceAnchor> = HashMap::new();
+        let mut quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::new();
         let mut signs_flat = Vec::new();
@@ -344,6 +506,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
         for e in 0..n_elem as u32 {
             let cell_type = mesh.element_type(e);
             let verts = mesh.element_nodes(e);
+            let mut elem_blocks: Vec<FaceDofBlock> = Vec::new();
 
             // Per-element-type local edges.
             let local_edges: &[(usize, usize)] = match cell_type {
@@ -392,27 +555,64 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 let ndf = k * (k - 1);
                 match cell_type {
                     ElementType::Tet4 | ElementType::Tet10 => {
+                        // Nodal face DOFs (D38): the element's local face
+                        // slots are the point-value functionals at the TetNDk
+                        // face points (`k(k−1)/2` points × 2 tangents).  The
+                        // face-creating element fixes the *canonical* shared
+                        // functional list; every other element records, per
+                        // face point, the 2×2 change of basis into that list
+                        // (D37) — a full matrix, not a scalar sign.
+                        let nfp = k * (k - 1) / 2; // points per face
+                        let nfd = 2 * nfp; // dofs per face
+                        let fbase = 6 * k; // local slot of the first face dof
                         for (f, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += ndf as u32; d
+                                let d = next_dof; next_dof += nfd as u32; d
                             });
+                            // Physical DOF points and the two tangents per
+                            // point, from the element's own TetNDk layout.
+                            let (pts, tans) = tet_face_slots(&mesh, verts, k, f);
                             if !face_anchor.contains_key(&key) {
-                                // Fix the interpolation tangents from the
-                                // face-creating element (TetND2 slot
-                                // tangents, physical edge vectors).
-                                let a0 = mesh.node_coords(verts[la]);
-                                let (p0, n0, p1, n1) = TET_FACE_TANGENTS[f];
-                                let g0 = mesh.node_coords(verts[p0]);
-                                let h0 = mesh.node_coords(verts[n0]);
-                                let g1 = mesh.node_coords(verts[p1]);
-                                let h1 = mesh.node_coords(verts[n1]);
-                                let pa = [a0[0], a0[1], a0[2]];
-                                let w0 = [g0[0] - h0[0], g0[1] - h0[1], g0[2] - h0[2]];
-                                let w1 = [g1[0] - h1[0], g1[1] - h1[1], g1[2] - h1[2]];
-                                face_anchor.insert(key, [pa, w0, w1]);
+                                face_anchor.insert(
+                                    key,
+                                    TetFaceAnchor { pts: pts.clone(), tans: tans.clone() },
+                                );
+                                for i in 0..nfp {
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * nfd + 2 * i,
+                                        canon_dofs: [first_dof + 2 * i as u32, first_dof + 2 * i as u32 + 1],
+                                        s: ID2,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * i as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * i as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
+                            } else {
+                                let anchor = &face_anchor[&key];
+                                for i in 0..nfp {
+                                    let p = match_face_point(anchor, pts[i]);
+                                    let w = anchor.tangents(p);
+                                    let s = face_pair_change_of_basis(
+                                        &tans[i],
+                                        &w,
+                                        "tet face block transform",
+                                    );
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * nfd + 2 * i,
+                                        canon_dofs: [
+                                            first_dof + 2 * p as u32,
+                                            first_dof + 2 * p as u32 + 1,
+                                        ],
+                                        s,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * p as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * p as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
                             }
-                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
                         }
                     }
                     ElementType::Hex8 | ElementType::Hex20 => {
@@ -436,7 +636,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                                     quad_face_to_dof.insert(key, first_dof);
                                     quad_face_anchor.insert(
                                         key,
-                                        NdFaceAnchor { nodes: xs, tangents: ts },
+                                        QuadFaceAnchor { nodes: xs, tangents: ts },
                                     );
                                     for m in 0..ndf_quad {
                                         dofs_flat.push(first_dof + m as u32);
@@ -521,6 +721,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             }
 
             elem_offsets.push(dofs_flat.len());
+            elem_face_blocks.push(elem_blocks);
         }
 
         HCurlSpace {
@@ -533,6 +734,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             edge_to_dof,
             face_to_dof,
             face_anchor,
+            elem_face_blocks,
             quad_face_to_dof,
             quad_face_anchor,
             dim,
@@ -588,16 +790,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 }
             }
         }
-        // Tet face DOFs sit at the face centroid.
-        for (&FaceKey(a, b, c), &first) in &self.face_to_dof {
+        // Tet face DOFs sit at the canonical face DOF points (the
+        // face-creating element's TetNDk point-value sites).
+        for (&key, &first) in &self.face_to_dof {
             if self.order < 2 { break; }
-            let pa = self.mesh.node_coords(a);
-            let pb = self.mesh.node_coords(b);
-            let pc = self.mesh.node_coords(c);
-            for j in 0..2 {
-                let d = (first + j) as usize;
-                for k in 0..3 {
-                    out[d][k] = (pa[k] + pb[k] + pc[k]) / 3.0;
+            let anchor = &self.face_anchor[&key];
+            for p in 0..anchor.n_points() {
+                for j in 0..2 {
+                    let d = (first + 2 * p as u32 + j as u32) as usize;
+                    out[d] = anchor.point(p);
                 }
             }
         }
@@ -625,14 +826,27 @@ impl<M: MeshTopology> HCurlSpace<M> {
         self.face_to_dof.get(&face).copied()
     }
 
-    /// Interpolation anchor of a shared tet face (ND2): `[P_a, w0, w1]`.
+    /// Canonical (shared) DOF functional anchor of a tet face (NDk, k≥2).
     ///
-    /// The global face dof functionals are `Φ(P_c)·w0` and `Φ(P_c)·w1` with
-    /// the centroid `P_c = P_a + (w0 + w1)/3` — fixed by the face-creating
-    /// element's TetND2 slot tangents.  Consumers (`discrete_op`) must use the
-    /// same anchor when building dof rows for the shared face slots.
-    pub fn face_tangent_anchor(&self, face: FaceKey) -> Option<[[f64; 3]; 3]> {
-        self.face_anchor.get(&face).copied()
+    /// The face's global face DOFs are the point-value functionals
+    /// `σ_{2p+c}(Φ) = Φ(x_p)·t[p][c]` of the face-creating element; consumers
+    /// (`discrete_op`) must use the same anchor when building dof rows for the
+    /// shared face slots, and [`Self::element_face_blocks`] to relate another
+    /// element's local face DOFs to it.
+    pub fn face_anchor(&self, face: FaceKey) -> Option<&TetFaceAnchor> {
+        self.face_anchor.get(&face)
+    }
+
+    /// The element's face-DOF block transforms into the canonical
+    /// (face-creating element) basis (D37).  Empty when the space has no
+    /// shared face-DOF pairs (2-D spaces, hex NDk, k = 1).
+    ///
+    /// For element matrices assembled in the element's own (signed) local
+    /// DOFs, the canonical representation is `A ← Tᵀ·A·T` and `b ← Tᵀ·b`, with
+    /// `T` the block-diagonal map built from these blocks; the primal dof
+    /// vector satisfies `u_local = T·u_canon`.
+    pub fn element_face_blocks(&self, e: u32) -> &[FaceDofBlock] {
+        &self.elem_face_blocks[e as usize]
     }
 
     /// Look up all global DOFs associated with a quad face (hex NDk, k≥2).
@@ -662,10 +876,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
     pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
 
     /// ## NDk (k >= 2)
-    /// Point-value edge DOFs at Gauss-Legendre points (MFEM `Project_ND`
-    /// semantics); ND2 interior/face DOFs are point values as well.  k >= 3
-    /// interior/face DOFs keep the legacy moment semantics of the NDk
-    /// elements.
+    ///
+    /// Every DOF is the MFEM point-value functional `σ(Φ) = Φ(x_i)·t̂_i`: edge
+    /// DOFs at the Gauss-Legendre points of the canonical (min→max) edge
+    /// direction; tri interior / tet face / tet interior DOFs at MFEM's
+    /// `FE::Nodes` points with the `dof2tk` tangent pairs pushed through the
+    /// element map (`J·t̂`).  Tet face DOFs use the shared face's canonical
+    /// (face-creating element) functional list, so the returned values are the
+    /// canonical (global) dof values — see [`Self::element_face_blocks`] for
+    /// the per-element 2×2 change of basis (D37).
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         let k = self.order as usize;
@@ -796,91 +1015,96 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 }
             }
         } else if self.dim == 2 && k >= 3 && matches!(self.cell_type, ElementType::Tri3 | ElementType::Tri6) {
-            // Tri NDk (k >= 3): monomial-weighted interior moments
-            // (pre-D32 semantics of the TriNDk moment elements — pending the
-            // same nodal redesign, see round-14 report).
+            // Tri NDk (k >= 3) interior DOFs: point values at the MFEM
+            // `FE::Nodes` barycentric GL points with the reference tangents
+            // (1,0) and (0,1) pushed through the affine map (`J·t̂`, MFEM's
+            // `ND_TriangleElement` interior `dof2tk` pair) — the same nodal
+            // semantics as the k = 2 path, minus the centroid-only shorthand.
             let n_interior = k * (k - 1);
-            let qr = fem_element::quadrature::tri_rule((2 * k) as u8);
+            let tnd = TriNDk::new(k);
+            let coords = tnd.dof_coords();
+            let base = coords.len() - n_interior;
             for e in 0..n_elem as u32 {
                 let dofs = self.element_dofs(e);
                 let b_start = dofs.len() - n_interior;
                 let nodes = self.mesh.element_nodes(e);
-                let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                let det_j = transform.det_j().abs();
-                let jit = transform.jacobian_inv_t();
                 let x0 = self.mesh.node_coords(nodes[0]);
                 let x1 = self.mesh.node_coords(nodes[1]);
                 let x2 = self.mesh.node_coords(nodes[2]);
-                let j00 = x1[0]-x0[0]; let j10 = x1[1]-x0[1];
-                let j01 = x2[0]-x0[0]; let j11 = x2[1]-x0[1];
-                let mut row = 0usize;
-                for p in 0..k { for q in 0..(k - 1) { if p + q < k {
-                    let a = p; let b = q;
-                    let mut moment = 0.0;
-                    for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                        let xp = [x0[0]+j00*xi[0]+j01*xi[1], x0[1]+j10*xi[0]+j11*xi[1]];
-                        let fv = f(&xp);
-                        let ur0 = det_j * (jit[(0,0)]*fv[0] + jit[(1,0)]*fv[1]);
-                        let ur1 = det_j * (jit[(0,1)]*fv[0] + jit[(1,1)]*fv[1]);
-                        moment += w * (ur0 * xi[0].powi(a as i32) * xi[1].powi(b as i32)
-                                     + ur1 * xi[0].powi(b as i32) * xi[1].powi(a as i32));
-                    }
-                    result.as_slice_mut()[dofs[b_start + row] as usize] = moment;
-                    row += 1;
-                }}}
+                let j00 = x1[0] - x0[0];
+                let j10 = x1[1] - x0[1];
+                let j01 = x2[0] - x0[0];
+                let j11 = x2[1] - x0[1];
+                let r = result.as_slice_mut();
+                for m in 0..n_interior / 2 {
+                    let xi = &coords[base + 2 * m];
+                    let pt = [x0[0] + j00 * xi[0] + j01 * xi[1], x0[1] + j10 * xi[0] + j11 * xi[1]];
+                    let fv = f(&pt);
+                    r[dofs[b_start + 2 * m] as usize] = j00 * fv[0] + j10 * fv[1];
+                    r[dofs[b_start + 2 * m + 1] as usize] = j01 * fv[0] + j11 * fv[1];
+                }
             }
         } else if self.dim == 3 && k >= 2 && matches!(self.cell_type, ElementType::Tet4 | ElementType::Tet10) {
-            let nf = k * (k - 1);
-            if k == 2 {
-                // Tet ND2 face DOFs: point values at the face centroid with
-                // the face-creating element's tangent pair (TetND2 slot
-                // tangents).  Cross-element face pairing between differently
-                // oriented tets needs MFEM's 2×2 ND face rotations — the
-                // interpolation anchor matches the face-creating element.
-                for (&face_key, &first_dof) in &self.face_to_dof {
-                    let anchor = match self.face_anchor.get(&face_key) {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    let [pa, w0, w1] = *anchor;
-                    let pc = [
-                        pa[0] + (w0[0] + w1[0]) / 3.0,
-                        pa[1] + (w0[1] + w1[1]) / 3.0,
-                        pa[2] + (w0[2] + w1[2]) / 3.0,
-                    ];
-                    let fv = f(&pc);
-                    let r = result.as_slice_mut();
-                    r[first_dof as usize] = fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
-                    r[first_dof as usize + 1] = fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
+            // ── Tet NDk face DOFs: point values at the canonical (shared)
+            // face DOF points with the canonical tangent pair — the
+            // face-creating element's functionals, so the values are the
+            // canonical (global) dof values directly (no element orientation
+            // enters).  k ≥ 3 uses every face point of the TetNDk layout.
+            for (&face_key, &first_dof) in &self.face_to_dof {
+                let anchor = match self.face_anchor.get(&face_key) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let r = result.as_slice_mut();
+                for p in 0..anchor.n_points() {
+                    let x = anchor.point(p);
+                    let [w0, w1] = anchor.tangents(p);
+                    let fv = f(&x);
+                    r[first_dof as usize + 2 * p] =
+                        fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
+                    r[first_dof as usize + 2 * p + 1] =
+                        fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
                 }
-            } else {
-                // Tet NDk (k >= 3): polynomial-weighted tangential face
-                // moments (pre-D32 semantics of the TetNDk moment elements).
-                let qr_face = fem_element::quadrature::tri_rule((2 * k) as u8);
-                for (&FaceKey(a, b, c), &first_dof) in &self.face_to_dof {
-                    let pa = self.mesh.node_coords(a);
-                    let pb = self.mesh.node_coords(b);
-                    let pc = self.mesh.node_coords(c);
-                    let ds = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
-                    let dt = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
-                    let cross = [ds[1]*dt[2]-ds[2]*dt[1], ds[2]*dt[0]-ds[0]*dt[2], ds[0]*dt[1]-ds[1]*dt[0]];
-                    let jac_area = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
-                    let mut moments = vec![0.0_f64; nf];
-                    for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
-                        let (s, t) = (xi[0], xi[1]);
-                        let pt = [pa[0]+s*ds[0]+t*dt[0], pa[1]+s*ds[1]+t*dt[1], pa[2]+s*ds[2]+t*dt[2]];
-                        let fv = f(&pt);
-                        let d_sigma = w * jac_area;
-                        let mut idx = 0usize;
-                        for p in 0..k-1 { for q in 0..k-1-p {
-                            moments[idx] += d_sigma * (fv[0]*ds[0]+fv[1]*ds[1]+fv[2]*ds[2]) * s.powi(p as i32) * t.powi(q as i32);
-                            idx += 1;
-                            moments[idx] += d_sigma * (fv[0]*dt[0]+fv[1]*dt[1]+fv[2]*dt[2]) * s.powi(p as i32) * t.powi(q as i32);
-                            idx += 1;
-                        }}
+            }
+            if k >= 3 {
+                // Tet NDk (k ≥ 3) interior DOFs: point values at the MFEM
+                // `FE::Nodes` barycentric GL points with the reference
+                // tangents (1,0,0), (0,1,0), (0,0,1) pushed through the
+                // element's affine map — element-owned, so no orientation
+                // bookkeeping.
+                let n_interior = k * (k - 1) * (k - 2) / 2;
+                let tnd = TetNDk::new(k);
+                let coords = tnd.dof_coords();
+                let tks = tnd.dof_tangents();
+                let off = coords.len() - n_interior;
+                for e in 0..n_elem as u32 {
+                    let nodes = self.mesh.element_nodes(e);
+                    let dofs = self.element_dofs(e);
+                    let base = dofs.len() - n_interior;
+                    let p0 = self.mesh.node_coords(nodes[0]);
+                    let mut jac = [[0.0_f64; 3]; 3];
+                    for (c, lv) in [1usize, 2, 3].iter().enumerate() {
+                        let p = self.mesh.node_coords(nodes[*lv]);
+                        for d in 0..3 {
+                            jac[d][c] = p[d] - p0[d];
+                        }
                     }
                     let r = result.as_slice_mut();
-                    for m in 0..nf { r[first_dof as usize + m] = moments[m]; }
+                    for m in 0..n_interior {
+                        let xi = &coords[off + m];
+                        let mut x = [p0[0], p0[1], p0[2]];
+                        for d in 0..3 {
+                            x[d] += jac[d][0] * xi[0] + jac[d][1] * xi[1] + jac[d][2] * xi[2];
+                        }
+                        let fv = f(&x);
+                        let tk = tks[off + m];
+                        let t = [
+                            jac[0][0] * tk[0] + jac[0][1] * tk[1] + jac[0][2] * tk[2],
+                            jac[1][0] * tk[0] + jac[1][1] * tk[1] + jac[1][2] * tk[2],
+                            jac[2][0] * tk[0] + jac[2][1] * tk[1] + jac[2][2] * tk[2],
+                        ];
+                        r[dofs[base + m] as usize] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                    }
                 }
             }
         } else if self.dim == 3

@@ -1,65 +1,239 @@
 //! Arbitrary-order Nedelec-I element on the reference triangle `(0,0),(1,0),(0,1)`.
 //!
-//! Uses the same construction as MFEM `ND_TriangleElement`:
-//! - Edge DOFs at Gauss-Legendre open points
-//! - Whitney 1-forms for lowest order, polynomial expansion for higher order
-//! - Interior DOFs for k >= 2
+//! 1:1 port of MFEM `ND_TriangleElement(p)` (`fem/fe/fe_nd.cpp`, MFEM 4.10).
+//!
+//! # Space
+//! `N_p = P_{p-1}² ⊕ x^⊥ P̃_{p-1}` (dim = `p(p+2)`): `3p` edge DOFs (p per
+//! edge) plus `p(p-1)` interior (bubble) DOFs.
+//!
+//! # Construction (MFEM `ND_TriangleElement` verbatim)
+//!
+//! 1. **Raw basis `u`** (`p(p+2)` vector functions built from the hierarchical
+//!    1-D basis `shape_x/shape_y/shape_l = Poly_1D::CalcChebyshev(p−1, ·)`,
+//!    i.e. `T_j(2x−1)`, `T_j(2y−1)`, `T_j(2(1−x−y)−1)`):
+//!    * `s·e_x` and `s·e_y` for `s = shape_x(i)·shape_y(j)·shape_l(p−1−i−j)`,
+//!      `i+j ≤ p−1`;
+//!    * `s·(y−c, −(x−c))` for `s = shape_x(p−1−j)·shape_y(j)`, `c = 1/3`.
+//! 2. **Square Vandermonde** `A[b][m] = σ_m(u_b)`, inverted exactly as MFEM
+//!    does (`Ti.Factor(T)`): `Φ_i = Σ_b A⁻¹[i][b]·u_b`.
+//!
+//! # DOF semantics (D38 — MFEM nodal point-value functionals)
+//!
+//! Every DOF is a **point evaluation of the tangential component**
+//!
+//! ```text
+//! σ_i(Φ) = Φ(x_i) · t̂_i
+//! ```
+//!
+//! at the MFEM `FE::Nodes` point `x_i` along the fixed *unnormalized*
+//! reference tangent `t̂_i = tk + 2*dof2tk[i]`:
+//!
+//! | DOFs                | Points `x_i`                    | Tangent `t̂_i` |
+//! |---------------------|---------------------------------|---------------|
+//! | edge (0,1) `0..p`   | `(eop[i], 0)`                   | `(1, 0)`  |
+//! | edge (1,2) `p..2p`  | `(eop[p−1−i], eop[i])`          | `(−1, 1)` |
+//! | edge (2,0) `2p..3p` | `(0, eop[p−1−i])`               | `(0, −1)` |
+//! | interior `3p..`     | barycentric GL points           | `(1, 0)`, `(0, 1)` |
+//!
+//! with `eop = OpenPoints(p−1)` the p-point Gauss-Legendre rule on `[0,1]` and
+//! the interior points the barycentric combinations of `iop = OpenPoints(p−2)`
+//! (`(iop[i], iop[j], iop[p−2−i−j])/w`, `w = Σ iop`) — exactly MFEM's
+//! `Nodes.IntPoint` construction.  The interior DOFs are element-owned (a
+//! triangle has no shared 2-D face), so their tangent pair needs no
+//! orientation bookkeeping.
+//!
+//! The Gauss-Legendre point set is symmetric about `1/2`, so an edge reversal
+//! maps the edge DOFs to a **signed anti-diagonal permutation**
+//! (`σ^rev_m = −σ_{p−1−m}`) — MFEM's own `SegDofOrd` encoding, which is what
+//! makes `HCurlSpace` cross-element edge pairing conforming.  (The pre-D38
+//! integral moments `∫Φ·t̂ t^m dt` are not reflection invariant: reversal mixes
+//! them binomially, which scalar signs cannot express.)
+//!
+//! `TriND2` is the explicit order-2 specialization of the same functionals;
+//! the two agree to round-off (same functionals ⟹ same dual basis).
 
-use crate::quadrature::tri_rule;
+use crate::quadrature::{gauss_legendre_01, tri_rule};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 use std::sync::OnceLock;
 
+/// Chebyshev basis `T_0..T_p` on `[0,1]` (MFEM `Poly_1D::CalcChebyshev`).
+fn chebyshev(p: usize, x: f64) -> Vec<f64> {
+    let mut u = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return u;
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+    }
+    u
+}
+
+/// Chebyshev basis and its derivative w.r.t. `x` (MFEM
+/// `Poly_1D::CalcChebyshev(p, x, u, d)`).
+pub(crate) fn chebyshev_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0_f64; p + 1];
+    let mut d = vec![0.0_f64; p + 1];
+    u[0] = 1.0;
+    if p == 0 {
+        return (u, d);
+    }
+    let z = 2.0 * x - 1.0;
+    u[1] = z;
+    d[1] = 2.0;
+    for n in 1..p {
+        u[n + 1] = 2.0 * z * u[n] - u[n - 1];
+        d[n + 1] = (n + 1) as f64 * (z * d[n] / n as f64 + 2.0 * u[n]);
+    }
+    (u, d)
+}
+
+/// Dense `n × n` Gauss-Jordan inverse (row-major, partial pivoting); the shared
+/// linear-algebra step of the tri/tet Nédélec `Ti.Factor(T)`.
+pub(crate) fn invert_dense(n: usize, a: &[f64], tag: &str) -> Vec<f64> {
+    let mut m = vec![0.0_f64; n * 2 * n];
+    for i in 0..n {
+        for j in 0..n {
+            m[i * 2 * n + j] = a[i * n + j];
+        }
+        m[i * 2 * n + n + i] = 1.0;
+    }
+    for col in 0..n {
+        let mut piv = col;
+        let mut best = m[col * 2 * n + col].abs();
+        for r in col + 1..n {
+            let v = m[r * 2 * n + col].abs();
+            if v > best {
+                best = v;
+                piv = r;
+            }
+        }
+        assert!(
+            best > 1e-13,
+            "{tag}: singular Vandermonde (column {col}, pivot {best:e})"
+        );
+        if piv != col {
+            for j in 0..2 * n {
+                m.swap(col * 2 * n + j, piv * 2 * n + j);
+            }
+        }
+        let p = m[col * 2 * n + col];
+        for j in 0..2 * n {
+            m[col * 2 * n + j] /= p;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = m[r * 2 * n + col];
+            if f != 0.0 {
+                for j in 0..2 * n {
+                    m[r * 2 * n + j] -= f * m[col * 2 * n + j];
+                }
+            }
+        }
+    }
+    let mut inv = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            inv[i * n + j] = m[i * 2 * n + n + j];
+        }
+    }
+    inv
+}
+
+/// Bubble centre used by MFEM's raw basis (`ND_TriangleElement::c`).
+const C_BUBBLE: f64 = 1.0 / 3.0;
+
 struct TriNDkData {
-    coeff: Vec<f64>, // [n×n] row-major, C[i][j] for Φ_i = Σ_j C[i][j]·m_j
-    n: usize,        // dimension = k(k+2)
-    order: usize,
-    monomap: Vec<usize>, // selected monomial indices (length n)
+    /// Row-major `n × n`: `Φ_i = Σ_b ti[i][b]·u_b` (`ti = A⁻¹`, MFEM `Ti`).
+    ti: Vec<f64>,
+    n: usize,
 }
 
-fn edge_integral_x(p: usize, xi: f64, eta: f64) -> f64 {
-    if eta == 0.0 {
-        1.0 / (xi + p as f64 + 1.0)
-    } else {
-        0.0
+/// `(point, tangent)` of every local DOF, in MFEM `Nodes.IntPoint`/`dof2tk`
+/// slot order.  Shared by the Vandermonde builder and `dof_coords` /
+/// `dof_tangents`, so the element cannot drift from its own DOF layout.
+pub(crate) fn dof_table(k: usize) -> Vec<([f64; 2], [f64; 2])> {
+    let mut out = Vec::with_capacity(k * (k + 2));
+    let eop = gauss_legendre_01(k).0; // MFEM poly1d.OpenPoints(k-1): k nodes
+    let pm1 = k - 1;
+    for i in 0..k {
+        out.push(([eop[i], 0.0], [1.0, 0.0])); // (0,1)
     }
+    for i in 0..k {
+        out.push(([eop[pm1 - i], eop[i]], [-1.0, 1.0])); // (1,2)
+    }
+    for i in 0..k {
+        out.push(([0.0, eop[pm1 - i]], [0.0, -1.0])); // (2,0)
+    }
+    if k >= 2 {
+        let iop = gauss_legendre_01(k - 1).0; // MFEM OpenPoints(k-2): k-1 nodes
+        let pm2 = k - 2;
+        for j in 0..=pm2 {
+            for i in 0..=(pm2 - j) {
+                let w = iop[i] + iop[j] + iop[pm2 - i - j];
+                let p = [iop[i] / w, iop[j] / w];
+                out.push((p, [1.0, 0.0]));
+                out.push((p, [0.0, 1.0]));
+            }
+        }
+    }
+    out
 }
 
-fn edge_integral_y(p: usize, xi: f64, eta: f64) -> f64 {
-    if eta == 0.0 {
-        1.0 / (xi + p as f64 + 1.0)
-    } else {
-        0.0
+/// Evaluate the raw `u` basis (MFEM `ND_TriangleElement::CalcVShape`) into the
+/// flat array `ub[b*2], ub[b*2+1]`.
+fn eval_u(x: f64, y: f64, pm1: usize, ub: &mut [f64]) {
+    let (tx, _) = chebyshev_d(pm1, x);
+    let (ty, _) = chebyshev_d(pm1, y);
+    let (tl, _) = chebyshev_d(pm1, 1.0 - x - y);
+    let mut b = 0usize;
+    for j in 0..=pm1 {
+        for i in 0..=(pm1 - j) {
+            let s = tx[i] * ty[j] * tl[pm1 - i - j];
+            ub[b * 2] = s;
+            ub[b * 2 + 1] = 0.0;
+            ub[b * 2 + 2] = 0.0;
+            ub[b * 2 + 3] = s;
+            b += 2;
+        }
     }
+    for j in 0..=pm1 {
+        let s = tx[pm1 - j] * ty[j];
+        ub[b * 2] = s * (y - C_BUBBLE);
+        ub[b * 2 + 1] = -s * (x - C_BUBBLE);
+        b += 1;
+    }
+    debug_assert_eq!(b * 2, ub.len());
 }
 
-fn area_integral(ix: usize, iy: usize) -> f64 {
-    let mut num = 1.0_f64;
-    for i in 1..=ix {
-        num *= i as f64;
+/// Evaluate the raw `u` basis curls (MFEM
+/// `ND_TriangleElement::CalcCurlShape`).
+fn eval_u_curl(x: f64, y: f64, pm1: usize, uc: &mut [f64]) {
+    let (tx, dx) = chebyshev_d(pm1, x);
+    let (ty, dy) = chebyshev_d(pm1, y);
+    let (tl, dl) = chebyshev_d(pm1, 1.0 - x - y);
+    let mut b = 0usize;
+    for j in 0..=pm1 {
+        for i in 0..=(pm1 - j) {
+            let l = pm1 - i - j;
+            let ddx = (dx[i] * tl[l] - tx[i] * dl[l]) * ty[j];
+            let ddy = (dy[j] * tl[l] - ty[j] * dl[l]) * tx[i];
+            uc[b] = -ddy;
+            uc[b + 1] = ddx;
+            b += 2;
+        }
     }
-    for i in 1..=iy {
-        num *= i as f64;
+    for j in 0..=pm1 {
+        let i = pm1 - j;
+        uc[b] = -((dx[i] * (x - C_BUBBLE) + tx[i]) * ty[j]
+            + (dy[j] * (y - C_BUBBLE) + ty[j]) * tx[i]);
+        b += 1;
     }
-    let mut den = 1.0_f64;
-    for i in 1..=(ix + iy + 2) {
-        den *= i as f64;
-    }
-    num / den
-}
-
-fn beta_int(a: usize, bp: usize) -> f64 {
-    let mut num = 1.0_f64;
-    for i in 1..=a {
-        num *= i as f64;
-    }
-    for i in 1..=bp {
-        num *= i as f64;
-    }
-    let mut den = 1.0_f64;
-    for i in 1..=(a + bp + 1) {
-        den *= i as f64;
-    }
-    num / den
+    debug_assert_eq!(b, uc.len());
 }
 
 fn tri_data(k: usize) -> &'static TriNDkData {
@@ -78,156 +252,26 @@ fn tri_data(k: usize) -> &'static TriNDkData {
 }
 
 fn build_tri_data(k: usize) -> TriNDkData {
-    let n = k * (k + 2); // dimension
-
-    // Generate ALL monomials (comp, a, b) with degree a+b ≤ k
-    struct Mono {
-        comp: u8,
-        a: usize,
-        b: usize,
-    }
-    let mut monos: Vec<Mono> = Vec::new();
-    for deg in 0..=k {
-        for a in 0..=deg {
-            let b = deg - a;
-            monos.push(Mono { comp: 0, a, b });
-            monos.push(Mono { comp: 1, a, b });
+    let n = k * (k + 2);
+    let pm1 = k - 1;
+    let table = dof_table(k);
+    let mut a = vec![0.0_f64; n * n]; // A[b][m] = σ_m(u_b)
+    let mut ub = vec![0.0_f64; 2 * n];
+    for (m, (x, t)) in table.iter().enumerate() {
+        eval_u(x[0], x[1], pm1, &mut ub);
+        for b in 0..n {
+            a[b * n + m] = ub[b * 2] * t[0] + ub[b * 2 + 1] * t[1];
         }
     }
-    let m_total = monos.len(); // (k+1)(k+2)
-
-    // Build Vandermonde V[i][j] = DOF_i(m_j) for i=0..n-1, j=0..m_total-1
-    let mut v = vec![vec![0.0_f64; m_total]; n];
-
-    // DOFs 0..k-1: edge e0 (η=0), x-component tangential, moments ξ^p
-    for p in 0..k {
-        for (j, m) in monos.iter().enumerate() {
-            let val = if m.comp == 0 {
-                edge_integral_x(p, m.a as f64, m.b as f64)
-            } else {
-                edge_integral_y(p, m.a as f64, m.b as f64)
-            };
-            v[p][j] = val;
-        }
-    }
-
-    // DOFs k..2k-1: edge e1 (1-t,t), tangential = -Φ_x+Φ_y, moments t^p
-    for p in 0..k {
-        for (j, m) in monos.iter().enumerate() {
-            if m.comp == 0 {
-                let val = -beta_int(m.a, m.b + p);
-                v[k + p][j] = val;
-            } else {
-                let val = beta_int(m.a, m.b + p);
-                v[k + p][j] = val;
-            }
-        }
-    }
-
-    // DOFs 2k..3k-1: edge e2 (ξ=0, η from 0 to 1), tangential = Φ_y, moments η^p
-    for p in 0..k {
-        for (j, m) in monos.iter().enumerate() {
-            let val = if m.comp == 0 {
-                0.0
-            } else {
-                if m.a == 0 {
-                    1.0 / (m.b as f64 + p as f64 + 1.0)
-                } else {
-                    0.0
-                }
-            };
-            v[2 * k + p][j] = val;
-        }
-    }
-
-    // Interior DOFs 3k..n-1: ∫ Φ_x·x^ix y^iy dA and ∫ Φ_y·x^ix y^iy dA
-    let mut dof_idx = 3 * k;
-    if k >= 2 {
-        for deg in 0..=(k - 2) {
-            for ix in 0..=deg {
-                let iy = deg - ix;
-                for (j, m) in monos.iter().enumerate() {
-                    if m.comp == 0 {
-                        v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
-                    }
-                }
-                dof_idx += 1;
-                for (j, m) in monos.iter().enumerate() {
-                    if m.comp == 1 {
-                        v[dof_idx][j] = area_integral(m.a + ix, m.b + iy);
-                    }
-                }
-                dof_idx += 1;
-            }
-        }
-    }
-    assert_eq!(dof_idx, n);
-
-    // Gauss-Jordan with column pivoting to select n linearly independent monomials
-    let mut col_perm: Vec<usize> = (0..m_total).collect();
-    let mut row = vec![vec![0.0_f64; n + m_total]; n];
-    for i in 0..n {
-        for j in 0..m_total {
-            row[i][j] = v[i][j];
-        }
-        row[i][m_total + i] = 1.0;
-    }
-
-    let mut selected = Vec::new();
-    for col in 0..n {
-        let mut best_col = col;
-        let mut best_val = 0.0_f64;
-        for c in col..m_total {
-            let mut sum = 0.0_f64;
-            for r in 0..n {
-                sum += row[r][c].abs();
-            }
-            if sum > best_val {
-                best_val = sum;
-                best_col = c;
-            }
-        }
-        if best_col != col {
-            for r in 0..n {
-                row[r].swap(col, best_col);
-            }
-            col_perm.swap(col, best_col);
-        }
-        selected.push(col_perm[col]);
-
-        let pivot = row[col][col];
-        if pivot.abs() < 1e-14 {
-            continue;
-        }
-        for j in 0..(n + m_total) {
-            row[col][j] /= pivot;
-        }
-        for r in 0..n {
-            if r != col {
-                let factor = row[r][col];
-                for j in 0..(n + m_total) {
-                    row[r][j] -= factor * row[col][j];
-                }
-            }
-        }
-    }
-
-    let mut coeff = vec![0.0_f64; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            coeff[i * n + j] = row[i][m_total + j];
-        }
-    }
-
     TriNDkData {
-        coeff,
+        ti: invert_dense(n, &a, "TriNDk"),
         n,
-        order: k,
-        monomap: selected,
     }
 }
 
 /// Arbitrary-order Nedelec-I element on the reference triangle.
+///
+/// DOF layout = MFEM `ND_TriangleElement(p)` (`Nodes` + `dof2tk`).
 pub struct TriNDk {
     order: usize,
 }
@@ -236,6 +280,14 @@ impl TriNDk {
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "TriNDk requires order ≥ 1");
         TriNDk { order: p }
+    }
+
+    /// Reference tangents `t̂_i` of every local DOF (MFEM `tk`/`dof2tk`).
+    pub fn dof_tangents(&self) -> Vec<[f64; 2]> {
+        if self.order == 1 {
+            return vec![[1.0, 0.0], [-1.0, 1.0], [0.0, -1.0]];
+        }
+        dof_table(self.order).into_iter().map(|(_, t)| t).collect()
     }
 }
 
@@ -270,33 +322,16 @@ impl VectorReferenceElement for TriNDk {
         }
 
         let d = tri_data(k);
-        let x = xi[0];
-        let y = xi[1];
-        let n = d.n;
-        let m_total = (k + 1) * (k + 2);
-
-        let mut mono_vals = vec![0.0_f64; m_total * 2];
-        let mut idx = 0usize;
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                let v = x.powi(a as i32) * y.powi(b as i32);
-                mono_vals[idx * 2] = v;
-                mono_vals[idx * 2 + 1] = 0.0;
-                idx += 1;
-                mono_vals[idx * 2] = 0.0;
-                mono_vals[idx * 2 + 1] = v;
-                idx += 1;
-            }
-        }
-
-        for i in 0..n {
+        let (x, y) = (xi[0], xi[1]);
+        let mut ub = vec![0.0_f64; 2 * d.n];
+        eval_u(x, y, k - 1, &mut ub);
+        for i in 0..d.n {
             let mut vx = 0.0;
             let mut vy = 0.0;
-            for (ji, &sel) in d.monomap.iter().enumerate() {
-                let c = d.coeff[i * n + ji];
-                vx += c * mono_vals[sel * 2];
-                vy += c * mono_vals[sel * 2 + 1];
+            for b in 0..d.n {
+                let c = d.ti[i * d.n + b];
+                vx += c * ub[b * 2];
+                vy += c * ub[b * 2 + 1];
             }
             values[i * 2] = vx;
             values[i * 2 + 1] = vy;
@@ -306,7 +341,7 @@ impl VectorReferenceElement for TriNDk {
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
         let k = self.order;
 
-        // Special case k=1: constant curl [2, 2, -2]
+        // Special case k=1: constant curl [2, 2, −2]
         if k == 1 {
             curl_vals[0] = 2.0;
             curl_vals[1] = 2.0;
@@ -315,38 +350,12 @@ impl VectorReferenceElement for TriNDk {
         }
 
         let d = tri_data(k);
-        let x = xi[0];
-        let y = xi[1];
-        let n = d.n;
-
-        let mut curl_mono = vec![0.0_f64; d.monomap.len()];
-        for (ji, &sel) in d.monomap.iter().enumerate() {
-            let mut rem = sel;
-            let mut deg = 0usize;
-            loop {
-                let n_at_deg = 2 * (deg + 1);
-                if rem < n_at_deg {
-                    break;
-                }
-                rem -= n_at_deg;
-                deg += 1;
-            }
-            let comp = rem % 2;
-            let inner = rem / 2;
-            let a = inner;
-            let b = deg - inner;
-
-            if comp == 0 && b > 0 {
-                curl_mono[ji] = -(b as f64) * x.powi(a as i32) * y.powi((b - 1) as i32);
-            } else if comp == 1 && a > 0 {
-                curl_mono[ji] = (a as f64) * x.powi((a - 1) as i32) * y.powi(b as i32);
-            }
-        }
-
-        for i in 0..n {
+        let mut uc = vec![0.0_f64; d.n];
+        eval_u_curl(xi[0], xi[1], k - 1, &mut uc);
+        for i in 0..d.n {
             let mut s = 0.0;
-            for ji in 0..d.monomap.len() {
-                s += d.coeff[i * n + ji] * curl_mono[ji];
+            for b in 0..d.n {
+                s += d.ti[i * d.n + b] * uc[b];
             }
             curl_vals[i] = s;
         }
@@ -362,40 +371,18 @@ impl VectorReferenceElement for TriNDk {
         tri_rule(order)
     }
 
+    /// DOF sites (MFEM `FE::Nodes`): Gauss-Legendre points along every edge
+    /// (ascending along each edge's named direction) plus the barycentric GL
+    /// interior point values.
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let k = self.order;
-        let n = k * (k + 2);
-        let mut coords = Vec::with_capacity(n);
 
         // Special case k=1: edge midpoints (matches TriND1)
         if k == 1 {
-            coords.push(vec![0.5, 0.0]);
-            coords.push(vec![0.5, 0.5]);
-            coords.push(vec![0.0, 0.5]);
-            return coords;
+            return vec![vec![0.5, 0.0], vec![0.5, 0.5], vec![0.0, 0.5]];
         }
 
-        // Edge e0 (η=0): k points
-        for p in 0..k {
-            let t = (p + 1) as f64 / (k + 1) as f64;
-            coords.push(vec![t, 0.0]);
-        }
-        // Edge e1 ((1-t,t)): k points
-        for p in 0..k {
-            let t = (p + 1) as f64 / (k + 1) as f64;
-            coords.push(vec![1.0 - t, t]);
-        }
-        // Edge e2 (ξ=0): k points
-        for p in 0..k {
-            let t = (p + 1) as f64 / (k + 1) as f64;
-            coords.push(vec![0.0, t]);
-        }
-        // Interior: k(k-1) DOFs at barycentric coords
-        let remaining = n - coords.len();
-        for _ in 0..remaining {
-            coords.push(vec![1.0 / 3.0, 1.0 / 3.0]);
-        }
-        coords
+        dof_table(k).into_iter().map(|(p, _)| p.to_vec()).collect()
     }
 }
 
@@ -447,6 +434,41 @@ mod tests {
                     "DOF_{j}(Phi_{i}) = {dof}, expected {expected}"
                 );
             }
+        }
+    }
+
+    /// Nodal property for all orders: `σ_j(Φ_i) = δ_ij` with the element's own
+    /// `(dof_coords, dof_tangents)` table.
+    #[test]
+    fn nodal_basis_is_delta() {
+        for k in 2..=5usize {
+            let elem = TriNDk::new(k);
+            let n = elem.n_dofs();
+            let coords = elem.dof_coords();
+            let tangents = elem.dof_tangents();
+            let mut vals = vec![0.0; n * 2];
+            for j in 0..n {
+                elem.eval_basis_vec(&coords[j], &mut vals);
+                for i in 0..n {
+                    let s = vals[i * 2] * tangents[j][0] + vals[i * 2 + 1] * tangents[j][1];
+                    let expect = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (s - expect).abs() < 1e-10,
+                        "k={k}: DOF_{j}(Phi_{i}) = {s}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// DOF count and DOF-site count agree with MFEM `p(p+2)`.
+    #[test]
+    fn dof_counts() {
+        for k in 1..=5usize {
+            let e = TriNDk::new(k);
+            assert_eq!(e.n_dofs(), k * (k + 2));
+            assert_eq!(e.dof_coords().len(), k * (k + 2));
+            assert_eq!(e.dof_tangents().len(), k * (k + 2));
         }
     }
 }

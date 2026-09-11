@@ -4,14 +4,16 @@
 //! are the canonical choice for discretising the curl-curl operator that appears in
 //! Maxwell's equations.
 //!
-//! # DOF convention (order 2, 1:1 with MFEM `fe_nd.cpp`)
-//! The order-2 elements (`TriND2`, `QuadND2`, `TetND2`) use MFEM's **nodal
-//! point-value functionals**: `σ_i(Φ) = Φ(x_i)·t̂_i` at the DOF point
-//! `x_i = FE::Nodes` (Gauss-Legendre points on the edges) along the fixed
-//! reference tangent `t̂_i` (MFEM `tk` table).  The symmetric Gauss point sets
-//! make the edge DOFs reflection-invariant: an edge reversal maps
-//! `σ^rev_m = −σ_{k−1−m}`, so `HCurlSpace` pairs shared edges with a signed
-//! anti-diagonal permutation (MFEM's own encoding).
+//! # DOF convention (all orders, 1:1 with MFEM `fem/fe/fe_nd.cpp`)
+//!
+//! Every `*NDk` element uses MFEM's **nodal point-value functionals**:
+//! `σ_i(Φ) = Φ(x_i)·t̂_i` at the DOF point `x_i = FE::Nodes` — the
+//! Gauss-Legendre edge points plus MFEM's barycentric GL points for the
+//! interior/face DOFs — along the fixed reference tangent `t̂_i` (MFEM `tk`
+//! table).  The symmetric Gauss point sets make the edge DOFs
+//! reflection-invariant: an edge reversal maps `σ^rev_m = −σ_{k−1−m}`, so
+//! `HCurlSpace` pairs shared edges with a signed anti-diagonal permutation
+//! (MFEM's own encoding).
 //!
 //! `HexNDk` (all orders `k ≥ 1`, round-15 D36) follows the same rule: it is a
 //! 1:1 port of MFEM `ND_HexahedronElement(p, GaussLobatto, GaussLegendre)` —
@@ -19,9 +21,17 @@
 //! Gauss-Legendre open points along each component direction and GLL closed
 //! points across it; see `hex_ndk.rs`.
 //!
-//! ND1 keeps the classic edge line-integral DOF `DOF_i = ∫_{e_i} Φ·t̂ ds`, and
-//! the generic tri/tet `*NDk` (k≥3) elements currently keep integral-moment
-//! edge DOFs (pending the same nodal redesign — see round-14 D32 report).
+//! ND1 keeps the classic edge line-integral DOF `DOF_i = ∫_{e_i} Φ·t̂ ds`.
+//!
+//! `TriNDk`/`TetNDk` (round-16 D38) follow the same nodal rule at **every**
+//! order: the reference functions are built exactly as MFEM's
+//! `ND_TriangleElement`/`ND_TetrahedronElement` do (hierarchical Chebyshev `u`
+//! basis + `Ti = T⁻¹`), and the DOFs are the `FE::Nodes` point-value
+//! functionals with the `dof2tk` reference tangents — edge DOFs at the
+//! Gauss-Legendre open points, interior/face DOFs at MFEM's barycentric GL
+//! points.  Shared tet face DOF *pairs* are related between adjacent elements
+//! by a full 2×2 change of basis (MFEM `ND_DofTransformation`), see
+//! `fem_space::hcurl::FaceDofBlock`.
 //!
 //! # Available elements
 //! | Type       | Domain       | DOFs | Order |
