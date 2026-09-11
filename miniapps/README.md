@@ -149,6 +149,10 @@ miniapps/
 │                                trial 侧 或 测试范数 G (round 15 证伪
 │                                "HexNDk 基不同" 说: nodal 重写前后整场
 │                                逐位不变且差距对测试阶不敏感, D36 更正);
+│                                round 16 再次更正: 装配矩阵 (含 4 个
+│                                graph-norm cross block) 与 C++ ≤7e-15
+│                                一致 ⇒ G/trial 均已排除, 差距在 miniapp
+│                                复数路径 RHS/BC 接线 (D36 第三次表述);
 │                                acoustics_3d 真 UW-DPG (round 14 n=4
 │                                缺口消失: 0.7757/0.4229 vs C++
 │                                0.7765/0.4231 <0.1%); poisson_2d -o3
@@ -170,6 +174,12 @@ miniapps/
 │                                与 C++ 10 步 err_u/CFL 打印 6 位逐位一致、
 │                                MVIN/HELM 迭代数相同、-cr exit 0; 剩余 8 个
 │                                navier miniapp 与内核缺口见 round3_plan D46
+├── fluids/navier_mms.rs       ← 第 2 个 navier miniapp (navier_mms.cpp
+│                                1:1): 与 C++ step1 err_u 2.75455E-08 /
+│                                err_p 1.23108E-04 逐位一致, MVIN/PRES
+│                                每步相同, -cr exit 0; g_bdr 已切内核
+│                                VectorBoundaryNormalLFIntegrator (D46③),
+│                                kovasznay 同步切换后仍保持 6 位一致
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
