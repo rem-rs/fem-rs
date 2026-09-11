@@ -45,9 +45,14 @@
 //!   order; the LOR ND1/RT0 dof count must equal the HO dof count (checked);
 //! - `ref = 1` (ND1 / RT0 HO spaces) gives the identity permutation and the
 //!   unrefined mesh, matching MFEM;
-//! - the permutation is the exact MFEM assumed-constraint map only for bases
-//!   whose tangent-direction modes are ordered from the element's parametric
-//!   origin — true for the fem-rs Lagrange/hat tensor bases used here.
+//! - signs are the same-functional relative orientations of [`pair_sign`]
+//!   (MFEM's `ConstructLocalDofPermutation` sign-product semantics); the
+//!   hex interior slot tables follow the actual `HexNDk`/`HexRTk` layouts;
+//! - the perm-transfer preconditioner (`A_LOR ≈ Πᵀ A_HO Π`) is only
+//!   h/p-robust for MFEM's LOR-compatible basis pair (GaussLobatto,
+//!   IntegratedGLL) — MFEM's own default (…, GaussLegendre) vector basis
+//!   shows the same refinement growth (see the D40 note in
+//!   `fem-assembly::lor_factory`).
 //!
 //! # Use as a preconditioner
 //!
@@ -320,6 +325,24 @@ fn check_uniform<const D: usize>(mesh: &Mesh<D>, et: ElementType, what: &str) ->
     Ok(())
 }
 
+/// Canonical-orientation sign of the paired dofs: the product
+/// `sign(σ^HO_j(c)) · sign(σ^LOR_i(c))` of both spaces' canonical functionals
+/// evaluated on the constant field `c ≡ (1,…,1)` (`xh_one` / `xl_one`, from
+/// the spaces' canonical `interpolate_vector`).  On lattice meshes every
+/// ND/RT functional reduces to `±(F·e_axis)·(positive length)` for `c`, so the
+/// signs are nonzero and the product is exactly the relative orientation of
+/// the two canonical dofs — the fem-rs counterpart of the
+/// `s1·s2·s3·s4` sign product MFEM accumulates in
+/// `LORBase::ConstructLocalDofPermutation` (dof-map signs × vdof signs).
+///
+/// This is what makes the LOR/HO dof pairs *same-functional* (MFEM `fem/lor/`
+/// convention): with this sign the transfer `x_HO[|perm[i]|] = s·x_LOR[i]`
+/// maps the LOR coefficients of any field onto the corresponding HO
+/// coefficients (constant fields map with the exact ratio `k`).
+fn pair_sign(xh_one: &[f64], xl_one: &[f64], ho_dof: usize, lor_dof: usize) -> f64 {
+    xh_one[ho_dof].signum() * xl_one[lor_dof].signum()
+}
+
 /// Signed permutation for hex ND: LOR ND1 dof → HO ND_k dof.
 ///
 /// Lattice bookkeeping per macro element (local parametrization, indices
@@ -375,6 +398,14 @@ fn build_nd_perm_3d(
     let mut filled = vec![false; n_lor];
     let k3 = k * k * k;
 
+    // Canonical values of both spaces on the constant unit field — the
+    // same-functional orientation signs ([`pair_sign`]).
+    let unit = |_: &[f64]| vec![1.0_f64; 3];
+    let xh_one = ho.interpolate_vector(&unit);
+    let xl_one = lor.interpolate_vector(&unit);
+    let xh_one = xh_one.as_slice();
+    let xl_one = xl_one.as_slice();
+
     /// HCurl face-block index for the macro face fixed on axis `axis_fixed`
     /// at plane 0 (`false`) or k (`true`).  Block order: bottom z−, top z+,
     /// front y−, back y+, left x−, right x+.
@@ -400,14 +431,13 @@ fn build_nd_perm_3d(
         let verts = mesh.element_nodes(eh);
         let hd = ho.element_dofs(eh);
 
-        for kz in 0..k {
-            for ky in 0..k {
-                for kx in 0..k {
-                    let lor_elem = eh * (k3 as u32) + (kx + k * ky + k * k * kz) as u32;
-                    let ld = lor.element_dofs(lor_elem);
-                    let lverts = lor.mesh().element_nodes(lor_elem);
+                for kz in 0..k {
+                    for ky in 0..k {
+                        for kx in 0..k {
+                            let lor_elem = eh * (k3 as u32) + (kx + k * ky + k * k * kz) as u32;
+                            let ld = lor.element_dofs(lor_elem);
 
-                    for (sei, &(si, sj)) in HEX_EDGES.iter().enumerate() {
+                            for (sei, &(si, sj)) in HEX_EDGES.iter().enumerate() {
                         // Determine edge axis and lattice coordinates.
                         let c0 = HEX_CORNERS[si];
                         let c1 = HEX_CORNERS[sj];
@@ -424,21 +454,9 @@ fn build_nd_perm_3d(
                         let bnd1 = i1 == 0 || i1 == k;
                         let bnd2 = i2 == 0 || i2 == k;
 
-                        // Sign of the map: +1 whenever the LOR and HO dofs
-                        // use the same canonical orientation.  Both fem-rs
-                        // spaces define edge-dof canonical orientation as the
-                        // min→max vertex-id direction, so macro-edge and
-                        // macro-face dofs map with sign +1.  For
-                        // element-interior lattice edges the LOR canonical is
-                        // still min→max along the axis while the HO interior
-                        // basis points +axis, giving s = ±1 by id order.
-                        let (id_neg, id_pos) = if c0[axis] == 0 {
-                            (lverts[si], lverts[sj])
-                        } else {
-                            (lverts[sj], lverts[si])
-                        };
-                        let s_lor_axis = if id_neg < id_pos { 1.0_f64 } else { -1.0 };
-
+                        // Sign of the map: the relative orientation of the two
+                        // canonical functionals (MFEM's same-functional sign
+                        // product), measured on the constant unit field.
                         let n_edge_dofs = 12 * k;
                         let n_face_blk = 2 * k * (k - 1);
                         let int_base = n_edge_dofs + 6 * n_face_blk;
@@ -485,25 +503,30 @@ fn build_nd_perm_3d(
                             };
                             n_edge_dofs + blk + flat
                         } else {
-                            // Element-interior lattice edge.
+                            // Element-interior lattice edge.  HexNDk interior
+                            // block order: for each component the two closed
+                            // cross factors run (second-cross outer,
+                            // first-cross inner), the open interval innermost
+                            // (see `HexNDk::eval_basis_vec`).
                             let flat = match axis {
-                                0 => ((i1 - 1) * (k - 1) + (i2 - 1)) * k + a,
-                                1 => k * (k - 1) * (k - 1)
-                                    + ((i1 - 1) * (k - 1) + (i2 - 1)) * k
-                                    + a,
-                                _ => 2 * k * (k - 1) * (k - 1)
-                                    + ((i1 - 1) * (k - 1) + (i2 - 1)) * k
-                                    + a,
+                                0 => ((i2 - 1) * (k - 1) + (i1 - 1)) * k + a,
+                                1 => {
+                                    k * (k - 1) * (k - 1)
+                                        + ((i2 - 1) * (k - 1) + (i1 - 1)) * k
+                                        + a
+                                }
+                                _ => {
+                                    2 * k * (k - 1) * (k - 1)
+                                        + ((i2 - 1) * (k - 1) + (i1 - 1)) * k
+                                        + a
+                                }
                             };
                             int_base + flat
                         };
 
                         let g_lor = ld[sei] as usize;
-                        let is_interior = !bnd1 && !bnd2;
-                        // s = +1 for macro entities (identical min→max
-                        // canonical orientations); s_lor_axis for interiors.
-                        let s = if is_interior { s_lor_axis } else { 1.0 };
-                        let target = (s.signum() as isize * hd[slot] as isize) as i32;
+                        let s = pair_sign(xh_one, xl_one, hd[slot] as usize, g_lor);
+                        let target = (s as isize * hd[slot] as isize) as i32;
                         if filled[g_lor] {
                             if perm[g_lor] != target {
                                 return Err(FemError::Other(format!(
@@ -626,6 +649,14 @@ fn build_nd_perm_2d(
     let mut filled = vec![false; n_lor];
     let k2 = k * k;
 
+    // Canonical values of both spaces on the constant unit field — the
+    // same-functional orientation signs ([`pair_sign`]).
+    let unit = |_: &[f64]| vec![1.0_f64; 2];
+    let xh_one = ho.interpolate_vector(&unit);
+    let xl_one = lor.interpolate_vector(&unit);
+    let xh_one = xh_one.as_slice();
+    let xl_one = xl_one.as_slice();
+
     for eh in 0..n_elem {
         let verts = mesh.element_nodes(eh);
         let hd = ho.element_dofs(eh);
@@ -634,7 +665,6 @@ fn build_nd_perm_2d(
             for kx in 0..k {
                 let lor_elem = eh * (k2 as u32) + (kx + k * ky) as u32;
                 let ld = lor.element_dofs(lor_elem);
-                let lverts = lor.mesh().element_nodes(lor_elem);
 
                 for (sei, &(si, sj)) in QUAD_EDGES.iter().enumerate() {
                     let c0 = QUAD_CORNERS[si];
@@ -646,15 +676,7 @@ fn build_nd_perm_2d(
                     let i1 = base[d1] + c0[d1];
                     let bnd = i1 == 0 || i1 == k;
 
-                    // Sign: see build_nd_perm_3d (canonical min→max vs +axis).
-                    let (id_neg, id_pos) = if c0[axis] == 0 {
-                        (lverts[si], lverts[sj])
-                    } else {
-                        (lverts[sj], lverts[si])
-                    };
-                    let s_lor_axis = if id_neg < id_pos { 1.0_f64 } else { -1.0 };
-
-                    let (slot, _tgt): (usize, u32) = if bnd {
+                    let slot: usize = if bnd {
                         // Macro mesh edge: local edge index + mode.
                         let c_lo = QUAD_CORNERS
                             .iter()
@@ -680,7 +702,7 @@ fn build_nd_perm_2d(
                             (1, false) => 3, // left
                             _ => unreachable!(),
                         };
-                        (lei * k + a, eh)
+                        lei * k + a
                     } else {
                         // Element-interior lattice edge.
                         let flat = match axis {
@@ -689,12 +711,12 @@ fn build_nd_perm_2d(
                             // y-family: (i+1, j) = (i1, a)
                             _ => k * (k - 1) + (i1 - 1) * k + a,
                         };
-                        (n_edge_dofs + flat, eh)
+                        n_edge_dofs + flat
                     };
 
                     let g_lor = ld[sei] as usize;
-                    let s = if bnd { 1.0 } else { s_lor_axis };
-                    let target = (s.signum() as isize * hd[slot] as isize) as i32;
+                    let s = pair_sign(xh_one, xl_one, hd[slot] as usize, g_lor);
+                    let target = (s as isize * hd[slot] as isize) as i32;
                     if filled[g_lor] {
                         if perm[g_lor] != target {
                             return Err(FemError::Other(format!(
@@ -797,6 +819,14 @@ fn build_rt_perm_3d(
     let mut filled = vec![false; n_lor];
     let k3 = k * k * k;
 
+    // Canonical values of both spaces on the constant unit field — the
+    // same-functional orientation signs ([`pair_sign`]).
+    let unit = |_: &[f64]| vec![1.0_f64; 3];
+    let xh_one = ho.interpolate_vector(&unit);
+    let xl_one = lor.interpolate_vector(&unit);
+    let xh_one = xh_one.as_slice();
+    let xl_one = xl_one.as_slice();
+
     for eh in 0..n_elem {
         let hd = ho.element_dofs(eh);
 
@@ -808,9 +838,6 @@ fn build_rt_perm_3d(
 
                     // LOR RT0 subcell faces in HEX_FACES order: bottom z−,
                     // front y−, right x+, back y+, left x−, top z+.
-                    // Outward-normal sign of each subcell face (used as the
-                    // canonical orientation proxy for interior faces).
-                    const SUB_OUT: [f64; 6] = [-1.0, -1.0, 1.0, 1.0, -1.0, 1.0];
                     for f in 0..6 {
                         // (axis, plane) of the subcell face.
                         let (axis, plane) = match f {
@@ -831,7 +858,7 @@ fn build_rt_perm_3d(
                         let beta = base[d1];
                         let gamma = base[d2];
 
-                        let (slot, tgt): (usize, u32) = if alpha == 0 || alpha == k {
+                        let slot: usize = if alpha == 0 || alpha == k {
                             // Macro mesh face: local face index (HEX_FACES
                             // order: bottom z− 0, front y− 1, right x+ 2,
                             // back y+ 3, left x− 4, top z+ 5).
@@ -859,38 +886,37 @@ fn build_rt_perm_3d(
                                 1 => beta * k + gamma,
                                 _ => beta * k + gamma,
                             };
-                            (face_local * k * k + flat, eh)
+                            face_local * k * k + flat
                         } else {
-                            // Element-interior lattice face.
+                            // Element-interior lattice face.  HexRTk interior
+                            // block order (see `HexRTk::eval_basis_vec`):
+                            // x-block: z open outer, y open middle, x closed
+                            // innermost; y-block: z open outer, y closed
+                            // middle, x open innermost; z-block: z closed
+                            // outer, y open middle, x open innermost.  The
+                            // closed interior index equals the lattice plane.
                             let blk_sz = (k - 1) * k * k;
                             let flat = match axis {
-                                // x-block: (a,b,c) = (α-1, β, γ)
-                                0 => ((alpha - 1) * k + beta) * k + gamma,
-                                // y-block: (a,b,c) = (α_x, β_y-1, γ_z)
-                                1 => blk_sz + (beta * (k - 1) + (alpha - 1)) * k + gamma,
-                                // z-block: (a,b,c) = (α_x, β_y, γ_z-1)
-                                _ => 2 * blk_sz + (beta * k + gamma) * (k - 1) + (alpha - 1),
+                                0 => gamma * (k * (k - 1)) + beta * (k - 1) + (alpha - 1),
+                                1 => blk_sz + gamma * ((k - 1) * k) + (alpha - 1) * k + beta,
+                                _ => 2 * blk_sz + (alpha - 1) * (k * k) + gamma * k + beta,
                             };
-                            (n_face_dofs + flat, eh)
+                            n_face_dofs + flat
                         };
 
                         let g_lor = ld[f] as usize;
-                        let is_macro = alpha == 0 || alpha == k;
-                        // s = +1 for macro faces (first-seen outward normals
-                        // agree on both sides); interior faces take the FIRST
-                        // subcell.s outward-normal sign (the later subcell
-                        // facing the same lattice face is skipped).
-                        let s = if is_macro { 1.0 } else { SUB_OUT[f] };
-                        let target = (s.signum() as isize * hd[slot] as isize) as i32;
+                        // Sign: relative orientation of the two canonical
+                        // functionals (same-functional convention).
+                        let s = pair_sign(xh_one, xl_one, hd[slot] as usize, g_lor);
+                        let target = (s as isize * hd[slot] as isize) as i32;
                         if !filled[g_lor] {
                             perm[g_lor] = target;
                             filled[g_lor] = true;
-                        } else if is_macro && perm[g_lor] != target {
+                        } else if perm[g_lor] != target {
                             return Err(FemError::Other(format!(
                                 "LOR RT 3D: inconsistent mapping for LOR dof {g_lor}"
                             )));
                         }
-                        let _ = tgt;
                     }
                 }
             }
@@ -982,6 +1008,14 @@ fn build_rt_perm_2d(
     let mut filled = vec![false; n_lor];
     let k2 = k * k;
 
+    // Canonical values of both spaces on the constant unit field — the
+    // same-functional orientation signs ([`pair_sign`]).
+    let unit = |_: &[f64]| vec![1.0_f64; 2];
+    let xh_one = ho.interpolate_vector(&unit);
+    let xl_one = lor.interpolate_vector(&unit);
+    let xh_one = xh_one.as_slice();
+    let xl_one = xl_one.as_slice();
+
     for eh in 0..n_elem {
         let hd = ho.element_dofs(eh);
 
@@ -991,8 +1025,7 @@ fn build_rt_perm_2d(
                 let ld = lor.element_dofs(lor_elem);
 
                 // LOR RT0 subcell "faces" = 4 edges (QUAD_FACES order:
-                // bottom, right, top, left).  Outward-normal sign per face.
-                const SUB_OUT: [f64; 4] = [-1.0, 1.0, 1.0, -1.0];
+                // bottom, right, top, left).
                 for f in 0..4 {
                     // (axis, plane): x-faces are x-normal (right/left),
                     // y-faces y-normal (bottom/top).
@@ -1007,7 +1040,7 @@ fn build_rt_perm_2d(
                     let alpha = plane; // plane along `axis` (0..k)
                     let beta = base[d1]; // interval across
 
-                    let (slot, _tgt): (usize, u32) = if alpha == 0 || alpha == k {
+                    let slot: usize = if alpha == 0 || alpha == k {
                         // Macro mesh edge.  Local edge index in QUAD_FACES
                         // order; slot per the QuadRTk build_dof_map tables
                         // (bottom: α; right: k+β; top: 2k + (k-1-α);
@@ -1031,7 +1064,7 @@ fn build_rt_perm_2d(
                             (0, false) => 3 * k + (k - 1 - beta),
                             _ => unreachable!(),
                         };
-                        (slot, eh)
+                        slot
                     } else {
                         // Element-interior lattice face (2D: interior dofs).
                         let flat = match axis {
@@ -1045,17 +1078,18 @@ fn build_rt_perm_2d(
                                     + beta
                             }
                         };
-                        (flat, eh)
+                        flat
                     };
 
                     let g_lor = ld[f] as usize;
-                    let is_macro = alpha == 0 || alpha == k;
-                    let s = if is_macro { 1.0 } else { SUB_OUT[f] };
-                    let target = (s.signum() as isize * hd[slot] as isize) as i32;
+                    // Sign: relative orientation of the two canonical
+                    // functionals (same-functional convention).
+                    let s = pair_sign(xh_one, xl_one, hd[slot] as usize, g_lor);
+                    let target = (s as isize * hd[slot] as isize) as i32;
                     if !filled[g_lor] {
                         perm[g_lor] = target;
                         filled[g_lor] = true;
-                    } else if is_macro && perm[g_lor] != target {
+                    } else if perm[g_lor] != target {
                         return Err(FemError::Other(format!(
                             "LOR RT 2D: inconsistent mapping for LOR dof {g_lor}"
                         )));

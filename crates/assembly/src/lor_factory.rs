@@ -158,10 +158,6 @@ pub struct LorSolver<L, P> {
     pub a_lor: CsrMatrix<f64>,
     /// LOR-space preconditioner (AMS, ADS, Jacobi, ...).
     pub inner: P,
-    /// Symmetric diagonal equilibration s_i = sqrt(A_HO_diag[p_i] / A_LOR_diag[i]):
-    /// undoes the basis-dependent scaling difference between the HO and LOR
-    /// matrices (essential for equispaced/non-orthogonal HO bases).
-    diag_scale: Vec<f64>,
     n_ho: usize,
 }
 
@@ -169,11 +165,6 @@ impl<L, P> LorSolver<L, P> {
     /// Number of HO dofs (== number of LOR dofs).
     pub fn n_ho(&self) -> usize {
         self.n_ho
-    }
-
-    /// Symmetric diagonal equilibration factors (see field docs).
-    pub fn diag_scale(&self) -> &[f64] {
-        &self.diag_scale
     }
 }
 
@@ -189,24 +180,14 @@ impl<L: LorPerm + Send + Sync, P: Preconditioner<Vector = DenseVec<f64>>> Precon
             let s = if p < 0 { -1.0 } else { 1.0 };
             x_lor[i] = s * x.as_slice()[p.unsigned_abs() as usize];
         }
-        // Apply the inner LOR-space preconditioner with symmetric diagonal
-        // equilibration: z = S AMS(S r).
-        let mut r_scaled = DenseVec::from_vec(
-            x_lor.iter().zip(self.diag_scale.iter()).map(|(&r, &s)| r * s).collect(),
-        );
+        // Apply the inner LOR-space preconditioner.
         let mut z_lor = DenseVec::from_vec(vec![0.0_f64; perm.len()]);
-        self.inner.apply_precond(&r_scaled, &mut z_lor);
-        let z_scaled: Vec<f64> = z_lor
-            .as_slice()
-            .iter()
-            .zip(self.diag_scale.iter())
-            .map(|(&z, &s)| z * s)
-            .collect();
+        self.inner.apply_precond(&DenseVec::from_vec(x_lor), &mut z_lor);
         // Prolongate LOR → HO.
         let y_slice = y.as_mut_slice();
         for (i, &p) in perm.iter().enumerate() {
             let s = if p < 0 { -1.0 } else { 1.0 };
-            y_slice[p.unsigned_abs() as usize] = s * z_scaled[i];
+            y_slice[p.unsigned_abs() as usize] = s * z_lor.as_slice()[i];
         }
     }
 }
@@ -281,21 +262,10 @@ pub fn build_lor_ams_nd_hex(
     let inner = AmsPrecond::with_coords(&a_ll, &g_ll, &coords, ams_cfg)
         .map_err(|e| FemError::Other(format!("LOR-AMS setup: {e}")))?;
 
-    // Symmetric diagonal equilibration factors.
-    let n = lor.n_ho();
-    let perm = lor.perm();
-    let mut diag_scale = Vec::with_capacity(n);
-    for i in 0..n {
-        let dl = a_lor.get(i, i).abs().max(1e-30);
-        let dh = a_ho.get(perm[i].unsigned_abs() as usize, perm[i].unsigned_abs() as usize).abs().max(1e-30);
-        diag_scale.push((dh / dl).sqrt());
-    }
-
     Ok(LorSolver {
         lor,
         a_lor,
         inner,
-        diag_scale,
         n_ho: ho_space.n_dofs(),
     })
 }
@@ -333,21 +303,10 @@ pub fn build_lor_ams_nd_quad(
     let inner = AmsPrecond::with_coords(&a_ll, &g_ll, &coords, ams_cfg)
         .map_err(|e| FemError::Other(format!("LOR-AMS setup: {e}")))?;
 
-    // Symmetric diagonal equilibration factors.
-    let n = lor.n_ho();
-    let perm = lor.perm();
-    let mut diag_scale = Vec::with_capacity(n);
-    for i in 0..n {
-        let dl = a_lor.get(i, i).abs().max(1e-30);
-        let dh = a_ho.get(perm[i].unsigned_abs() as usize, perm[i].unsigned_abs() as usize).abs().max(1e-30);
-        diag_scale.push((dh / dl).sqrt());
-    }
-
     Ok(LorSolver {
         lor,
         a_lor,
         inner,
-        diag_scale,
         n_ho: ho_space.n_dofs(),
     })
 }
@@ -373,21 +332,10 @@ pub fn build_lor_jacobi_rt_quad(
     let inner = linlvo::JacobiPrecond::from_csr(&a_ll)
         .map_err(|e| FemError::Other(format!("LOR-Jacobi setup: {e}")))?;
 
-    // Symmetric diagonal equilibration factors.
-    let n = lor.n_ho();
-    let perm = lor.perm();
-    let mut diag_scale = Vec::with_capacity(n);
-    for i in 0..n {
-        let dl = a_lor.get(i, i).abs().max(1e-30);
-        let dh = a_ho.get(perm[i].unsigned_abs() as usize, perm[i].unsigned_abs() as usize).abs().max(1e-30);
-        diag_scale.push((dh / dl).sqrt());
-    }
-
     Ok(LorSolver {
         lor,
         a_lor,
         inner,
-        diag_scale,
         n_ho: ho_space.n_dofs(),
     })
 }
@@ -439,21 +387,10 @@ pub fn build_lor_ads_rt_hex(
     let inner = AdsPrecond::new(&a_ll, &c_ll, &g_ll, ads_cfg)
         .map_err(|e| FemError::Other(format!("LOR-ADS setup: {e}")))?;
 
-    // Symmetric diagonal equilibration factors.
-    let n = lor.n_ho();
-    let perm = lor.perm();
-    let mut diag_scale = Vec::with_capacity(n);
-    for i in 0..n {
-        let dl = a_lor.get(i, i).abs().max(1e-30);
-        let dh = a_ho.get(perm[i].unsigned_abs() as usize, perm[i].unsigned_abs() as usize).abs().max(1e-30);
-        diag_scale.push((dh / dl).sqrt());
-    }
-
     Ok(LorSolver {
         lor,
         a_lor,
         inner,
-        diag_scale,
         n_ho: ho_space.n_dofs(),
     })
 }
@@ -635,63 +572,60 @@ mod lor_vector_tests {
     /// PCG(+) iteration counts must stay (essentially) constant as the mesh
     /// is refined — the defining property of LOR preconditioning.
     ///
-    /// # Why this is still ignored (D40, round 15)
+    /// # Why this is still ignored (D40, round 18)
     ///
-    /// The failure is **not** in the vendor `AmsPrecond`/`AdsPrecond` (the
-    /// round-14 hypothesis).  Bisecting the pipeline on the 3-D hex case
-    /// (`hex_mesh(2)`, order 3, FGMRES(30), rtol 1e-8; the non-converged rows
-    /// are after 200 iterations) gives:
+    /// Round 18 fixed the round-17 root causes in `crates/space/src/lor.rs`:
+    /// (1) the LOR→HO permutation signs are now the same-functional relative
+    /// orientations (measured on the constant unit field, MFEM
+    /// `s1·s2·s3·s4` semantics), and (2) the hex ND/RT *interior* slot tables
+    /// were transposed against the actual `HexNDk`/`HexRTk` layouts.  With
+    /// those fixes the transfer is provably same-functional: the paired
+    /// canonical functionals agree exactly on constant fields (ratio `k` for
+    /// ND, `1` for RT, zero negative products), the energy ratio
+    /// `a_HO(Πu,Πu)/a_LOR(u,u)` is uniform (≈ 2/k²), and exact-inner PCG on
+    /// `A_HO` converges in every configuration that previously stagnated at
+    /// residual ≈ 9e-1.
     ///
-    /// | system | preconditioner | result |
-    /// |---|---|---|
-    /// | A_LOR, n=882  | raw vendor AMS | 33 iters, err 1.2e-6 |
-    /// | A_HO,  n=882  | `LorSolver` wrapper | no convergence, residual 9.1e-1 |
-    /// | A_LOR, n=6084 | raw vendor AMS | 43 iters, err 7.6e-6 |
-    /// | A_HO,  n=6084 | `LorSolver` wrapper | no convergence, residual 9.4e-1 |
-    /// | RT A_LOR, n=240  | raw vendor ADS | 30 iters, err 1.4e-5 |
-    /// | RT A_HO,  n=240  | wrapper | residual 1.6e-3 |
-    /// | RT A_LOR, n=1728 | raw vendor ADS | 52 iters, err 2.2e-4 |
-    /// | RT A_HO,  n=1728 | wrapper | residual 1.8e-2 |
+    /// What still fails is **h/p-robustness of the perm-congruenced pencil**
+    /// `Πᵀ A_HO Π ≈ c·A_LOR`: exact-inner PCG grows with refinement (ND3
+    /// hex 83 → 363 for n=2 → 4; RT1 hex 4 → 96 → 350), so the counts below
+    /// grow with `n` and the assertions cannot pass.  The MFEM 4.9 harness
+    /// (`$HOME/work/lor_pencil.cpp`, WSL) reproduces this **exactly** for the
+    /// same basis choice and proves it is a basis-level property, not a
+    /// pairing bug:
     ///
-    /// So AMS/ADS *on the LOR matrix* are healthy and mesh-independent
-    /// (30 → 52 iterations for a 7× dof increase); the HO-level solve dies in
-    /// fem-rs's own transfer wrapper, `LorSolver::apply_precond`
-    /// (`M⁻¹ = Πᵀ S AMS(A_LOR) S Π`).  Diagnostics on that wrapper:
+    /// | space, mesh | MFEM (GL, GaussLegendre) | MFEM (GL, IntegratedGLL) | fem-rs |
+    /// |---|---|---|---|
+    /// | ND2, 2x1x1 | 31 | 28 | (n.a.) |
+    /// | ND2, 2x2x2 | 38 | 29 | — |
+    /// | ND2, 4x4x4 | 90 | 36 | — |
+    /// | ND3, 2x2x2 | 185 | 32 | 83 |
+    /// | ND3, 4x4x4 | 637 | 33 | 363 |
+    /// | RT1, 2x1x1 | 15 | 14 | 96* |
+    /// | RT1, 2x2x2 | 26 | 18 | 350* |
+    /// | RT1, 4x4x4 | 60 | 20 | >600* |
     ///
-    /// * the permutation is a valid signed bijection (`|perm|` covers all
-    ///   HO dofs exactly once: 882/882, 96 negative — no duplicates, no
-    ///   unset dofs);
-    /// * dropping the equilibration (`Πᵀ AMS Π`), inverting it
-    ///   (`Πᵀ S⁻¹ AMS S⁻¹ Π`) or making it one-sided all still fail
-    ///   (residuals 9.2e-1 / 7.1e-1 / 4.4e-1 after 200 iterations), so the
-    ///   diagonal scaling is not the root cause;
-    /// * the model the wrapper assumes — that the LOR and HO dof vectors of
-    ///   the *same* function differ by one diagonal factor per dof — does not
-    ///   hold: interpolating smooth fields into both spaces (no permutation
-    ///   involved) gives `|x_HO[|p_i|] / x_LOR[i]|` spreads of 1.6×
-    ///   (constant field) to 35× (smooth field) across the dofs.
+    /// (\* fem-rs numbers are n=2→4 exact-inner PCG; MFEM's numbers come from
+    /// `LORDiscretization` + exact inner CG on the same mesh/coefficient.)
     ///
-    /// Cause: fem-rs's LOR space (`crates/space/src/lor.rs`) does not use
-    /// MFEM's "same functional" convention (MFEM's LOR basis is built so the
-    /// LOR/HO dofs correspond with ±1 and *no* rescaling — `LORBase::
-    /// ConstructDofPermutation` + basis pair GaussLobatto/IntegratedGLL, see
-    /// `fem/lor/lor.cpp`).  With mismatched dof functionals the congruence
-    /// `A_LOR ≈ S·Π·A_HO·Πᵀ·S` that the wrapper relies on simply does not
-    /// hold, so `Πᵀ S A_LOR⁻¹ S Π` is not an approximation of `A_HO⁻¹` at all.
+    /// MFEM warns for the (GaussLobatto, GaussLegendre) basis pair — the
+    /// fem-rs `HexNDk` duals since the round-15 D36 rework, i.e. MFEM's
+    /// `ND_FECollection` default — that "the LOR discretization is only
+    /// spectrally equivalent with basis types (Gauss-Lobatto, IntegratedGLL)".
+    /// The table shows that warning is exactly the gap: with IntegratedGLL
+    /// open modes MFEM's own perm transfer is h-robust.
     ///
-    /// Fix (needs `crates/space/src/lor.rs`, outside this round's scope):
-    /// rebuild the LOR space/DOF correspondence with matching functionals
-    /// (then `S → I` and the wrapper collapses to `Π AMS Πᵀ`), or replace the
-    /// diagonal wrapper by a genuine smoothed transfer built as an explicit
-    /// sparse prolongation, like the working H¹ path
-    /// (`crates/assembly/src/transfer.rs` + `LorAmgPrecond`).  Estimated
-    /// effort: 1–2 days including MFEM cross-validation (the property is
-    /// theoretical, so LOR AMS/ADS results must be checked against MFEM's
-    /// `LORSolver<HypreAMS/HypreADS>` on the same mesh).
+    /// # Continuation path
+    /// 1. Element crate: restore IntegratedGLL open modes (or add an
+    ///    IntegratedGLL variant) for `HexNDk`/`QuadNDk` — then this test
+    ///    should pass as-is (the fem-rs perm already matches MFEM's pairing:
+    ///    identical dof counts and negative-count structure on all checked
+    ///    meshes; see `pair_sign` in `fem_space::lor`).
+    /// 2. Alternative without element changes: explicit sparse prolongation
+    ///    (interpolate each LOR basis function into the HO space) and
+    ///    `M⁻¹ = P AMS(A_LOR) Pᵀ` — the H¹-path analogue.
     #[test]
-    // See the doc comment above (D40): blocked on the LOR transfer, not on the
-    // vendor AMS/ADS.
-    #[ignore]
+    #[ignore] // D40: blocked on the element-level basis pair (see above), not on the transfer.
     fn lor_nd_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
             .iter()
@@ -710,7 +644,9 @@ mod lor_vector_tests {
     }
 
     #[test]
-    // See the doc comment of lor_nd_pcg_iterations_mesh_independent (D40).
+    // D40 round 18: see the doc comment of lor_nd_pcg_iterations_mesh_independent
+    // — the pairing/sign fix is in, the remaining h-growth is the element-level
+    // basis pair (blocked on IntegratedGLL open modes).
     #[ignore]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
@@ -731,10 +667,9 @@ mod lor_vector_tests {
 
     /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
     #[test]
-    // See the doc comment of lor_nd_pcg_iterations_mesh_independent (D40):
-    // blocked on the HO<->LOR transfer wrapper, not on the vendor AMS/ADS.
-    // The quad variant uses the same wrapper (build_lor_ams_nd_quad /
-    // build_lor_jacobi_rt_quad).
+    // D40 round 18: see the doc comment of lor_nd_pcg_iterations_mesh_independent
+    // — the pairing/sign fix is in, the remaining h-growth is the element-level
+    // basis pair (blocked on IntegratedGLL open modes).
     #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]
