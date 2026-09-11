@@ -186,9 +186,9 @@ miniapps/
 ├── fluids/navier_shear.rs     ← 第 3 个 (navier_shear.cpp 1:1, 双剪切层
 │                                全周期): CFL/迭代数/各 L2 范数全 10 步与
 │                                C++ 逐字节一致 (cfl 7.56030E-02, MVIN
-│                                4/9, PRES 47/76, HELM 6/6); 初始条件
-│                                用本地 project_vel 绕过周期网格 DOF 坐标
-│                                缺陷 (D56)
+│                                4/9, PRES 47/76, HELM 6/6); round 18 起
+│                                初始条件用库内 interpolate_vec (D56 修复
+│                                周期网格 DOF 坐标后本地绕过已删)
 ├── fluids/navier_kovasznay_vs.rs ← 第 4 个 (自适应时间步: provisional +
 │                                CFL 接受/拒绝 + dt 预测 + 历史排队):
 │                                CFL/Time/dt 全 5 步逐字节一致, err_u 6 位
