@@ -1,22 +1,33 @@
 //! H(curl) finite element space for Nédélec edge elements.
 //!
-//! ## DOF association
+//! ## DOF association (D32 — MFEM nodal point-value semantics)
 //!
-//! Each DOF corresponds to a unique mesh edge.  The DOF functional is the
-//! tangential line integral: `DOF_e(u) = ∫_e u · t̂ ds`.
+//! Each edge carries `k = order` global DOFs.  For ND2 (and the nodal quad
+//! NDk bases) the DOF functionals are **point evaluations of the tangential
+//! component** at Gauss-Legendre points along the edge, with the tangent given
+//! by the physical edge vector — exactly MFEM's `ND_*Element` `FE::Nodes`
+//! semantics (`σ_j(Φ) = Φ(y_j)·τ`, `y_j = P_min + t_j·τ`, `τ = P_max − P_min`).
 //!
-//! For lowest-order Nédélec (ND1):
-//! - **2-D triangles**: 3 edge DOFs per element, `n_dofs = n_unique_edges`
-//! - **3-D tetrahedra**: 6 edge DOFs per element, `n_dofs = n_unique_edges`
+//! The Gauss points are symmetric about the edge midpoint, so an element whose
+//! local edge direction opposes the canonical (min→max) direction has its
+//! local slot `m` sitting at the same physical point as canonical slot
+//! `k−1−m`, with the opposite tangent: `σ^local_m = −ρ_{k−1−m}`.  The
+//! local→global mapping therefore uses a **signed anti-diagonal permutation**
+//! — the identical encoding to MFEM's element dof tables (reversed dof order
+//! + sign −1).  For ND1 (k=1) this reduces to the classic ±1 edge sign.
+//!
+//! (The pre-D32 integral-moment functionals `∫Φ·τ t^m dt` are *not*
+//! reflection invariant — reversal mixes moments binomially, which scalar
+//! signs cannot express — so adjacent elements disagreed on the shared-edge
+//! trace and curl-curl solutions were polluted.)
 //!
 //! ## Sign convention
 //!
 //! The canonical orientation of an edge is from the smaller to the larger
 //! vertex id — mirroring MFEM's `DSTable`-based `GetElementToEdgeTable`, whose
-//! `Push(a,b)` stores every edge as (min, max).  A local edge traversing the
-//! vertices in this direction has sign +1; otherwise −1.  The assembler
-//! multiplies each basis-function value by its sign to guarantee tangential
-//! continuity across elements.
+//! `Push(a,b)` stores every edge as (min, max).  The assembler multiplies each
+//! basis-function value by its sign (and uses the permuted global id) to
+//! guarantee tangential continuity across elements.
 
 use std::collections::HashMap;
 
@@ -30,8 +41,17 @@ use crate::fe_space::{FESpace, SpaceType};
 
 // ─── Local edge tables ──────────────────────────────────────────────────────
 
-/// Local edge vertex pairs for 2-D triangles (TriND1 ordering).
-const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
+/// Local edge vertex pairs for 2-D triangles.
+///
+/// ND1 (order 1) uses `TRI_EDGES_ND1` — the historical fem-rs convention with
+/// the third edge directed (0,2), which matches the TriND1 Whitney slot and
+/// keeps the assembled ND1 path bit-identical to the round-13 baseline.
+/// Orders ≥ 2 use `TRI_EDGES_MFEM` = MFEM `Geometry::Constants<TRIANGLE>::Edges`
+/// = (0,1),(1,2),(2,0), matching the TriND2 slot parametrizations exactly
+/// (slot `m` of each edge sits at the m-th Gauss point along the pair
+/// direction).
+pub const TRI_EDGES_ND1: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
+pub const TRI_EDGES_MFEM: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
 
 /// Local edge vertex pairs for 2-D quadrilaterals (QuadND1 ordering).
 const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
@@ -70,12 +90,29 @@ const PYRAMID_EDGES: [(usize, usize); 8] = [
     (0, 4), (1, 4), (2, 4), (3, 4), // apex edges
 ];
 
-/// Local face definitions for 3-D tetrahedra (TetND2 ordering).
+/// Local face definitions for 3-D tetrahedra (MFEM tet face order; sets match
+/// MFEM `(1,2,3),(0,3,2),(0,1,3),(0,2,1)`).
 const TET_FACES: [(usize, usize, usize); 4] = [
     (1, 2, 3),
     (0, 2, 3),
     (0, 1, 3),
     (0, 1, 2),
+];
+
+/// Face tangent slot table per `TET_FACES` entry, mirroring the TetND2
+/// (MFEM `ND_TetrahedronElement`) face `dof2tk` pairs.  For an entry
+/// `(p0, n0, p1, n1)`: slot 0 tangent = verts[p0] − verts[n0], slot 1 tangent
+/// = verts[p1] − verts[n1] (reference directions; physical images via the
+/// element Jacobian = the corresponding physical edge vectors).
+///   face (1,2,3): v2−v1, v3−v1
+///   face (0,3,2): v3−v0, v2−v0
+///   face (0,1,3): v1−v0, v3−v0
+///   face (0,2,1): v2−v0, v1−v0
+const TET_FACE_TANGENTS: [(usize, usize, usize, usize); 4] = [
+    (2, 1, 3, 1),
+    (3, 0, 2, 0),
+    (1, 0, 3, 0),
+    (2, 0, 1, 0),
 ];
 
 /// Local quad-face definitions for 3-D hexahedra (Quad4 face ordering).
@@ -136,6 +173,11 @@ pub struct HCurlSpace<M: MeshTopology> {
     edge_to_dof: HashMap<EdgeKey, DofId>,
     /// Face → first global DOF map for 3D ND2 (second = first + 1).
     face_to_dof: HashMap<FaceKey, DofId>,
+    /// Face → tangent anchor for interpolation: `[P_a, w0, w1]` where the two
+    /// face DOF functionals are `Φ(P_c)·w0` and `Φ(P_c)·w1` with the centroid
+    /// `P_c = P_a + (w0 + w1)/3` (tangents fixed by the face-creating element,
+    /// matching the TetND2 slot tangents).
+    face_anchor: HashMap<FaceKey, [[f64; 3]; 3]>,
     /// Quad-face → first global DOF for hex NDk (2k(k-1) DOFs per face).
     quad_face_to_dof: HashMap<QuadFaceKey, DofId>,
     /// Spatial dimension.
@@ -158,6 +200,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_anchor: HashMap<FaceKey, [[f64; 3]; 3]> = HashMap::new();
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::new();
@@ -172,7 +215,13 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
             // Per-element-type local edges.
             let local_edges: &[(usize, usize)] = match cell_type {
-                ElementType::Tri3 | ElementType::Tri6 => &TRI_EDGES,
+                ElementType::Tri3 | ElementType::Tri6 => {
+                    if k >= 2 {
+                        &TRI_EDGES_MFEM
+                    } else {
+                        &TRI_EDGES_ND1
+                    }
+                }
                 ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
                 ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
                 ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
@@ -182,22 +231,26 @@ impl<M: MeshTopology> HCurlSpace<M> {
             };
 
             // Edge DOFs.
+            //
+            // Canonical edge = (min vertex, max vertex); canonical slot j sits
+            // at the j-th Gauss point along (min→max).  A local slot m sits at
+            // the m-th Gauss point along the LOCAL pair direction, hence:
+            // aligned (gi < gj): slot m → global first+m, sign +1;
+            // reversed:          slot m → global first+(k−1−m), sign −1
+            // (MFEM encodes edge reversal exactly like this: reversed dof
+            // order + sign −1).
             for &(li, lj) in local_edges {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
-                // MFEM's canonical edge direction is (min, max): the DSTable
-                // used by `Mesh::GetElementToEdgeTable` swaps its Push
-                // arguments so every edge is stored/ordered from the smaller
-                // to the larger vertex id.  ND1's sign for an element-edge
-                // pair is +1 when the local direction agrees with the
-                // canonical (min→max) direction and −1 otherwise.
-                let sign = if gi < gj { 1.0 } else { -1.0 };
-                let nd = dofs_per_edge as u32;
+                let aligned = gi < gj;
+                let sign = if aligned { 1.0 } else { -1.0 };
+                let nd = dofs_per_edge as usize;
                 let first_dof = *edge_to_dof.entry(key).or_insert_with(|| {
-                    let d = next_dof; next_dof += nd; d
+                    let d = next_dof; next_dof += nd as u32; d
                 });
-                for m in 0..nd as usize {
-                    dofs_flat.push(first_dof + m as u32);
+                for m in 0..nd {
+                    let slot = if aligned { m } else { nd - 1 - m };
+                    dofs_flat.push(first_dof + slot as u32);
                     signs_flat.push(sign);
                 }
             }
@@ -207,11 +260,26 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 let ndf = k * (k - 1);
                 match cell_type {
                     ElementType::Tet4 | ElementType::Tet10 => {
-                        for &(la, lb, lc) in &TET_FACES {
+                        for (f, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
                                 let d = next_dof; next_dof += ndf as u32; d
                             });
+                            if !face_anchor.contains_key(&key) {
+                                // Fix the interpolation tangents from the
+                                // face-creating element (TetND2 slot
+                                // tangents, physical edge vectors).
+                                let a0 = mesh.node_coords(verts[la]);
+                                let (p0, n0, p1, n1) = TET_FACE_TANGENTS[f];
+                                let g0 = mesh.node_coords(verts[p0]);
+                                let h0 = mesh.node_coords(verts[n0]);
+                                let g1 = mesh.node_coords(verts[p1]);
+                                let h1 = mesh.node_coords(verts[n1]);
+                                let pa = [a0[0], a0[1], a0[2]];
+                                let w0 = [g0[0] - h0[0], g0[1] - h0[1], g0[2] - h0[2]];
+                                let w1 = [g1[0] - h1[0], g1[1] - h1[1], g1[2] - h1[2]];
+                                face_anchor.insert(key, [pa, w0, w1]);
+                            }
                             for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
                         }
                     }
@@ -292,6 +360,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             elem_offsets,
             edge_to_dof,
             face_to_dof,
+            face_anchor,
             quad_face_to_dof,
             dim,
             cell_type: first_cell_type,
@@ -325,23 +394,37 @@ impl<M: MeshTopology> HCurlSpace<M> {
 
     /// Physical coordinates of every global DOF (MFEM `GetDofCoords` analog).
     ///
-    /// For ND1 the DOF sits at the edge midpoint; for NDk (k≥2) at interior
-    /// points along the edge (equispaced — used only as a permutation anchor,
-    /// exact Gauss-Lobatto placement is not required for matching).
+    /// For ND1 the DOF sits at the edge midpoint; for NDk (k≥2) at the
+    /// Gauss-Legendre points along the canonical (min→max) edge direction —
+    /// the point-value DOF locations (MFEM `FE::Nodes` semantics).
     pub fn dof_coords(&self) -> Vec<[f64; 3]> {
         let mut out = vec![[0.0f64; 3]; self.n_dofs()];
         let dim = self.mesh.dim() as usize;
         let nd = self.order as usize;
+        let (gl_pts, _) = gauss_legendre_01(nd.max(1));
         for (&EdgeKey(a, b), &first) in &self.edge_to_dof {
             let pa = self.mesh.node_coords(a);
             let pb = self.mesh.node_coords(b);
             for m in 0..nd {
-                let t = if nd == 1 { 0.5 } else { (m as f64 + 1.0) / (nd as f64 + 1.0) };
+                let t = if nd == 1 { 0.5 } else { gl_pts[m] };
                 let d = (first + m as u32) as usize;
                 for c in 0..3 {
                     let xa = if c < dim { pa[c] } else { 0.0 };
                     let xb = if c < dim { pb[c] } else { 0.0 };
                     out[d][c] = (1.0 - t) * xa + t * xb;
+                }
+            }
+        }
+        // Tet face DOFs sit at the face centroid.
+        for (&FaceKey(a, b, c), &first) in &self.face_to_dof {
+            if self.order < 2 { break; }
+            let pa = self.mesh.node_coords(a);
+            let pb = self.mesh.node_coords(b);
+            let pc = self.mesh.node_coords(c);
+            for j in 0..2 {
+                let d = (first + j) as usize;
+                for k in 0..3 {
+                    out[d][k] = (pa[k] + pb[k] + pc[k]) / 3.0;
                 }
             }
         }
@@ -367,6 +450,16 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// Returns `None` for ND1 or if the face is not found.
     pub fn face_dof(&self, face: FaceKey) -> Option<DofId> {
         self.face_to_dof.get(&face).copied()
+    }
+
+    /// Interpolation anchor of a shared tet face (ND2): `[P_a, w0, w1]`.
+    ///
+    /// The global face dof functionals are `Φ(P_c)·w0` and `Φ(P_c)·w1` with
+    /// the centroid `P_c = P_a + (w0 + w1)/3` — fixed by the face-creating
+    /// element's TetND2 slot tangents.  Consumers (`discrete_op`) must use the
+    /// same anchor when building dof rows for the shared face slots.
+    pub fn face_tangent_anchor(&self, face: FaceKey) -> Option<[[f64; 3]; 3]> {
+        self.face_anchor.get(&face).copied()
     }
 
     /// Look up all global DOFs associated with a quad face (hex NDk, k≥2).
@@ -396,7 +489,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
     pub fn mesh_topology(&self) -> &dyn MeshTopology { &self.mesh }
 
     /// ## NDk (k >= 2)
-    /// k-point Gauss-Legendre edge moments. Tri interior/Tet face moments for k >= 2.
+    /// Point-value edge DOFs at Gauss-Legendre points (MFEM `Project_ND`
+    /// semantics); ND2 interior/face DOFs are point values as well.  k >= 3
+    /// interior/face DOFs keep the legacy moment semantics of the NDk
+    /// elements.
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         let k = self.order as usize;
@@ -415,158 +511,203 @@ impl<M: MeshTopology> HCurlSpace<M> {
             return result;
         }
 
-        // NDk (k >= 2): edge moments via Gauss quadrature.
-        // Use 3-point rule for k=2 (preserves existing de Rham tests),
-        // k-point rule for k > 2.
-        let (gl_pts, gl_wts) = if k == 2 {
-            let sq_3_5: f64 = (3.0_f64 / 5.0).sqrt();
-            (vec![0.5 * (1.0 - sq_3_5), 0.5, 0.5 * (1.0 + sq_3_5)],
-             vec![5.0_f64 / 18.0, 4.0 / 9.0, 5.0 / 18.0])
-        } else {
-            gauss_legendre_01(k)
-        };
+        // NDk (k >= 2): point-value edge DOFs (MFEM `Project_ND` semantics):
+        //   dof_j = Φ(y_j)·τ,  y_j = P_min + t_j·(P_max − P_min),  τ = P_max − P_min
+        // with t_j the k-point Gauss-Legendre nodes (MFEM `OpenPoints(k−1)`),
+        // i.e. exactly the canonical global DOF functionals.  Because the
+        // interpolation uses the canonical functional directly, the values are
+        // independent of any element's local orientation.
+        let (gl_pts, _gl_wts) = gauss_legendre_01(k);
 
-        // Step 1 — edge DOFs.
         let npts = gl_pts.len();
-        for (&EdgeKey(a, b), &first_dof) in &self.edge_to_dof {
-            let pa = self.mesh.node_coords(a);
-            let pb = self.mesh.node_coords(b);
-            let dim = self.dim;
-            let tangent: Vec<f64> = (0..dim).map(|d| pb[d] - pa[d]).collect();
-
-            let mut moments = vec![0.0_f64; k];
-            for ki in 0..npts {
-                let t = gl_pts[ki];
-                let w = gl_wts[ki];
-                let pt: Vec<f64> = (0..dim).map(|d| pa[d] + t * tangent[d]).collect();
-                let fval = f(&pt);
-                let flux: f64 = fval.iter().zip(&tangent).map(|(fi, ti)| fi * ti).sum();
-                for m in 0..k { moments[m] += w * flux * t.powi(m as i32); }
-            }
+        let n_elem = self.mesh.n_elements();
+        {
             let r = result.as_slice_mut();
-            for m in 0..k { r[first_dof as usize + m] = moments[m]; }
+            for (&EdgeKey(a, b), &first_dof) in &self.edge_to_dof {
+                let pa = self.mesh.node_coords(a);
+                let pb = self.mesh.node_coords(b);
+                let dim = self.dim;
+                for m in 0..npts {
+                    let t = gl_pts[m];
+                    let mut pt = [0.0_f64; 3];
+                    let mut tau = [0.0_f64; 3];
+                    for d in 0..dim {
+                        pt[d] = pa[d] + t * (pb[d] - pa[d]);
+                        tau[d] = pb[d] - pa[d];
+                    }
+                    let fval = f(&pt[..dim]);
+                    let dot: f64 = fval.iter().zip(tau[..dim].iter()).map(|(fi, ti)| fi * ti).sum();
+                    r[first_dof as usize + m] = dot;
+                }
+            }
         }
 
-        // Step 2 — interior/face DOFs.
-        if self.dim == 2 {
-            if k >= 2 && matches!(self.cell_type, ElementType::Tri3 | ElementType::Tri6) {
-                if k == 2 {
-                    // ND2: two vector-component interior moments (matching original discrete_op tests).
-                    let qr = fem_element::quadrature::tri_rule(4);
-                    let n_elem = self.mesh.n_elements();
-                    for e in 0..n_elem as u32 {
-                        let dofs = self.element_dofs(e);
-                        let bub0 = dofs[dofs.len() - 2] as usize;
-                        let bub1 = dofs[dofs.len() - 1] as usize;
-                        let nodes = self.mesh.element_nodes(e);
-                        let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                        let det_j = transform.det_j().abs();
-                        let x0 = self.mesh.node_coords(nodes[0]);
-                        let x1 = self.mesh.node_coords(nodes[1]);
-                        let x2 = self.mesh.node_coords(nodes[2]);
-                        let j00 = x1[0]-x0[0]; let j01 = x2[0]-x0[0];
-                        let j10 = x1[1]-x0[1]; let j11 = x2[1]-x0[1];
-                        let mut int_x = 0.0_f64; let mut int_y = 0.0_f64;
-                        for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                            let xp = [x0[0]+j00*xi[0]+j01*xi[1], x0[1]+j10*xi[0]+j11*xi[1]];
-                            let fv = f(&xp);
-                            int_x += w * fv[0]; int_y += w * fv[1];
-                        }
-                        let r = result.as_slice_mut();
-                        r[bub0] = int_x * det_j;
-                        r[bub1] = int_y * det_j;
-                    }
-                } else {
-                    // NDk (k >= 3): monomial-weighted tangential moments.
-                    let n_interior = k * (k - 1);
-                    let qr = fem_element::quadrature::tri_rule((2 * k) as u8);
-                    let n_elem = self.mesh.n_elements();
-                    for e in 0..n_elem as u32 {
-                        let dofs = self.element_dofs(e);
-                        let b_start = dofs.len() - n_interior;
-                        let nodes = self.mesh.element_nodes(e);
-                        let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
-                        let det_j = transform.det_j().abs();
-                        let jit = transform.jacobian_inv_t();
-                        let x0 = self.mesh.node_coords(nodes[0]);
-                        let x1 = self.mesh.node_coords(nodes[1]);
-                        let x2 = self.mesh.node_coords(nodes[2]);
-                        let j00 = x1[0]-x0[0]; let j10 = x1[1]-x0[1];
-                        let j01 = x2[0]-x0[0]; let j11 = x2[1]-x0[1];
-                        let mut row = 0usize;
-                        for p in 0..k { for q in 0..(k - 1) { if p + q < k {
-                            let a = p; let b = q;
-                            let mut moment = 0.0;
-                            for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
-                                let xp = [x0[0]+j00*xi[0]+j01*xi[1], x0[1]+j10*xi[0]+j11*xi[1]];
-                                let fv = f(&xp);
-                                let ur0 = det_j * (jit[(0,0)]*fv[0] + jit[(1,0)]*fv[1]);
-                                let ur1 = det_j * (jit[(0,1)]*fv[0] + jit[(1,1)]*fv[1]);
-                                moment += w * (ur0 * xi[0].powi(a as i32) * xi[1].powi(b as i32)
-                                             + ur1 * xi[0].powi(b as i32) * xi[1].powi(a as i32));
-                            }
-                            result.as_slice_mut()[dofs[b_start + row] as usize] = moment;
-                            row += 1;
-                        }}}
+        // Step 2 — face / interior DOFs.
+        if self.dim == 2 && k == 2 {
+            // ── ND2 interior DOFs: point values (MFEM Nodes semantics) ──
+            if matches!(self.cell_type, ElementType::Tri3 | ElementType::Tri6) {
+                // TriND2 interior slots (last two): point values at the
+                // reference (1/3,1/3) with tangents (1,0) and (0,1):
+                // σ = (J t̂)·Φ_phys with J(1,0) = x1−x0, J(0,1) = x2−x0.
+                for e in 0..n_elem as u32 {
+                    let dofs = self.element_dofs(e);
+                    let bub0 = dofs[dofs.len() - 2] as usize;
+                    let bub1 = dofs[dofs.len() - 1] as usize;
+                    let nodes = self.mesh.element_nodes(e);
+                    let x0 = self.mesh.node_coords(nodes[0]);
+                    let x1 = self.mesh.node_coords(nodes[1]);
+                    let x2 = self.mesh.node_coords(nodes[2]);
+                    let pt = [
+                        (x0[0] + x1[0] + x2[0]) / 3.0,
+                        (x0[1] + x1[1] + x2[1]) / 3.0,
+                    ];
+                    let fv = f(&pt);
+                    let r = result.as_slice_mut();
+                    r[bub0] = (x1[0] - x0[0]) * fv[0] + (x1[1] - x0[1]) * fv[1];
+                    r[bub1] = (x2[0] - x0[0]) * fv[0] + (x2[1] - x0[1]) * fv[1];
+                }
+            } else if matches!(self.cell_type, ElementType::Quad4 | ElementType::Quad8) {
+                // QuadND2 interior slots (8..12): x-comp point values at the
+                // reference (t_m, 1/2) with tangent J(1,0); y-comp at (1/2, t_m)
+                // with tangent J(0,1) — bilinear map through the 4 corners.
+                for e in 0..n_elem as u32 {
+                    let dofs = self.element_dofs(e);
+                    let nodes = self.mesh.element_nodes(e);
+                    let x0 = self.mesh.node_coords(nodes[0]);
+                    let x1 = self.mesh.node_coords(nodes[1]);
+                    let x2 = self.mesh.node_coords(nodes[2]);
+                    let x3 = self.mesh.node_coords(nodes[3]);
+                    let r = result.as_slice_mut();
+                    for (m, &t) in gl_pts.iter().enumerate() {
+                        // x-component at (t, 1/2)
+                        let (xi, eta) = (t, 0.5);
+                        let w = [
+                            (1.0 - xi) * (1.0 - eta),
+                            xi * (1.0 - eta),
+                            xi * eta,
+                            (1.0 - xi) * eta,
+                        ];
+                        let pt: Vec<f64> = (0..2)
+                            .map(|d| w[0] * x0[d] + w[1] * x1[d] + w[2] * x2[d] + w[3] * x3[d])
+                            .collect();
+                        let fv = f(&pt);
+                        // J(ξ,η)·(1,0) = ∂x/∂ξ = (1−η)(x1−x0) + η(x2−x3)
+                        let jt: Vec<f64> = (0..2)
+                            .map(|d| {
+                                (1.0 - eta) * (x1[d] - x0[d]) + eta * (x2[d] - x3[d])
+                            })
+                            .collect();
+                        r[dofs[8 + m] as usize] =
+                            fv[0] * jt[0] + fv[1] * jt[1];
+                        // y-component at (1/2, t)
+                        let (xi, eta) = (0.5, t);
+                        let w = [
+                            (1.0 - xi) * (1.0 - eta),
+                            xi * (1.0 - eta),
+                            xi * eta,
+                            (1.0 - xi) * eta,
+                        ];
+                        let pt: Vec<f64> = (0..2)
+                            .map(|d| w[0] * x0[d] + w[1] * x1[d] + w[2] * x2[d] + w[3] * x3[d])
+                            .collect();
+                        let fv = f(&pt);
+                        // J(ξ,η)·(0,1) = ∂x/∂η = (1−ξ)(x3−x0) + ξ(x2−x1)
+                        let jt: Vec<f64> = (0..2)
+                            .map(|d| {
+                                (1.0 - xi) * (x3[d] - x0[d]) + xi * (x2[d] - x1[d])
+                            })
+                            .collect();
+                        r[dofs[10 + m] as usize] =
+                            fv[0] * jt[0] + fv[1] * jt[1];
                     }
                 }
             }
+        } else if self.dim == 2 && k >= 3 && matches!(self.cell_type, ElementType::Tri3 | ElementType::Tri6) {
+            // Tri NDk (k >= 3): monomial-weighted interior moments
+            // (pre-D32 semantics of the TriNDk moment elements — pending the
+            // same nodal redesign, see round-14 report).
+            let n_interior = k * (k - 1);
+            let qr = fem_element::quadrature::tri_rule((2 * k) as u8);
+            for e in 0..n_elem as u32 {
+                let dofs = self.element_dofs(e);
+                let b_start = dofs.len() - n_interior;
+                let nodes = self.mesh.element_nodes(e);
+                let transform = ElementTransformation::from_simplex_nodes(&self.mesh, nodes);
+                let det_j = transform.det_j().abs();
+                let jit = transform.jacobian_inv_t();
+                let x0 = self.mesh.node_coords(nodes[0]);
+                let x1 = self.mesh.node_coords(nodes[1]);
+                let x2 = self.mesh.node_coords(nodes[2]);
+                let j00 = x1[0]-x0[0]; let j10 = x1[1]-x0[1];
+                let j01 = x2[0]-x0[0]; let j11 = x2[1]-x0[1];
+                let mut row = 0usize;
+                for p in 0..k { for q in 0..(k - 1) { if p + q < k {
+                    let a = p; let b = q;
+                    let mut moment = 0.0;
+                    for (xi, &w) in qr.points.iter().zip(qr.weights.iter()) {
+                        let xp = [x0[0]+j00*xi[0]+j01*xi[1], x0[1]+j10*xi[0]+j11*xi[1]];
+                        let fv = f(&xp);
+                        let ur0 = det_j * (jit[(0,0)]*fv[0] + jit[(1,0)]*fv[1]);
+                        let ur1 = det_j * (jit[(0,1)]*fv[0] + jit[(1,1)]*fv[1]);
+                        moment += w * (ur0 * xi[0].powi(a as i32) * xi[1].powi(b as i32)
+                                     + ur1 * xi[0].powi(b as i32) * xi[1].powi(a as i32));
+                    }
+                    result.as_slice_mut()[dofs[b_start + row] as usize] = moment;
+                    row += 1;
+                }}}
+            }
         } else if self.dim == 3 && k >= 2 && matches!(self.cell_type, ElementType::Tet4 | ElementType::Tet10) {
-            // Tet NDk face DOFs.
             let nf = k * (k - 1);
-            if nf > 0 {
-                if k == 2 {
-                    // ND2 face DOFs: two tangential moments (constant weighting).
-                    let qr_face = fem_element::quadrature::tri_rule(4);
-                    for (&FaceKey(a, b, c), &first_dof) in &self.face_to_dof {
-                        let pa = self.mesh.node_coords(a);
-                        let pb = self.mesh.node_coords(b);
-                        let pc = self.mesh.node_coords(c);
-                        let ds = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
-                        let dt = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
-                        let cross = [ds[1]*dt[2]-ds[2]*dt[1], ds[2]*dt[0]-ds[0]*dt[2], ds[0]*dt[1]-ds[1]*dt[0]];
-                        let jac_area = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
-                        let mut m0 = 0.0_f64; let mut m1 = 0.0_f64;
-                        for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
-                            let (s, t) = (xi[0], xi[1]);
-                            let pt = [pa[0]+s*ds[0]+t*dt[0], pa[1]+s*ds[1]+t*dt[1], pa[2]+s*ds[2]+t*dt[2]];
-                            let fv = f(&pt);
-                            let d_sigma = w * jac_area;
-                            m0 += d_sigma * (fv[0]*ds[0] + fv[1]*ds[1] + fv[2]*ds[2]);
-                            m1 += d_sigma * (fv[0]*dt[0] + fv[1]*dt[1] + fv[2]*dt[2]);
-                        }
-                        let r = result.as_slice_mut();
-                        r[first_dof as usize] = m0;
-                        r[first_dof as usize + 1] = m1;
+            if k == 2 {
+                // Tet ND2 face DOFs: point values at the face centroid with
+                // the face-creating element's tangent pair (TetND2 slot
+                // tangents).  Cross-element face pairing between differently
+                // oriented tets needs MFEM's 2×2 ND face rotations — the
+                // interpolation anchor matches the face-creating element.
+                for (&face_key, &first_dof) in &self.face_to_dof {
+                    let anchor = match self.face_anchor.get(&face_key) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let [pa, w0, w1] = *anchor;
+                    let pc = [
+                        pa[0] + (w0[0] + w1[0]) / 3.0,
+                        pa[1] + (w0[1] + w1[1]) / 3.0,
+                        pa[2] + (w0[2] + w1[2]) / 3.0,
+                    ];
+                    let fv = f(&pc);
+                    let r = result.as_slice_mut();
+                    r[first_dof as usize] = fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
+                    r[first_dof as usize + 1] = fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
+                }
+            } else {
+                // Tet NDk (k >= 3): polynomial-weighted tangential face
+                // moments (pre-D32 semantics of the TetNDk moment elements).
+                let qr_face = fem_element::quadrature::tri_rule((2 * k) as u8);
+                for (&FaceKey(a, b, c), &first_dof) in &self.face_to_dof {
+                    let pa = self.mesh.node_coords(a);
+                    let pb = self.mesh.node_coords(b);
+                    let pc = self.mesh.node_coords(c);
+                    let ds = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
+                    let dt = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
+                    let cross = [ds[1]*dt[2]-ds[2]*dt[1], ds[2]*dt[0]-ds[0]*dt[2], ds[0]*dt[1]-ds[1]*dt[0]];
+                    let jac_area = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
+                    let mut moments = vec![0.0_f64; nf];
+                    for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
+                        let (s, t) = (xi[0], xi[1]);
+                        let pt = [pa[0]+s*ds[0]+t*dt[0], pa[1]+s*ds[1]+t*dt[1], pa[2]+s*ds[2]+t*dt[2]];
+                        let fv = f(&pt);
+                        let d_sigma = w * jac_area;
+                        let mut idx = 0usize;
+                        for p in 0..k-1 { for q in 0..k-1-p {
+                            moments[idx] += d_sigma * (fv[0]*ds[0]+fv[1]*ds[1]+fv[2]*ds[2]) * s.powi(p as i32) * t.powi(q as i32);
+                            idx += 1;
+                            moments[idx] += d_sigma * (fv[0]*dt[0]+fv[1]*dt[1]+fv[2]*dt[2]) * s.powi(p as i32) * t.powi(q as i32);
+                            idx += 1;
+                        }}
                     }
-                } else {
-                    // NDk (k >= 3): polynomial-weighted tangential moments.
-                    let qr_face = fem_element::quadrature::tri_rule((2 * k) as u8);
-                    for (&FaceKey(a, b, c), &first_dof) in &self.face_to_dof {
-                        let pa = self.mesh.node_coords(a);
-                        let pb = self.mesh.node_coords(b);
-                        let pc = self.mesh.node_coords(c);
-                        let ds = [pb[0]-pa[0], pb[1]-pa[1], pb[2]-pa[2]];
-                        let dt = [pc[0]-pa[0], pc[1]-pa[1], pc[2]-pa[2]];
-                        let cross = [ds[1]*dt[2]-ds[2]*dt[1], ds[2]*dt[0]-ds[0]*dt[2], ds[0]*dt[1]-ds[1]*dt[0]];
-                        let jac_area = (cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]).sqrt();
-                        let mut moments = vec![0.0_f64; nf];
-                        for (xi, &w) in qr_face.points.iter().zip(qr_face.weights.iter()) {
-                            let (s, t) = (xi[0], xi[1]);
-                            let pt = [pa[0]+s*ds[0]+t*dt[0], pa[1]+s*ds[1]+t*dt[1], pa[2]+s*ds[2]+t*dt[2]];
-                            let fv = f(&pt);
-                            let d_sigma = w * jac_area;
-                            let mut idx = 0usize;
-                            for p in 0..k-1 { for q in 0..k-1-p {
-                                moments[idx] += d_sigma * (fv[0]*ds[0]+fv[1]*ds[1]+fv[2]*ds[2]) * s.powi(p as i32) * t.powi(q as i32);
-                                idx += 1;
-                                moments[idx] += d_sigma * (fv[0]*dt[0]+fv[1]*dt[1]+fv[2]*dt[2]) * s.powi(p as i32) * t.powi(q as i32);
-                                idx += 1;
-                            }}
-                        }
-                        let r = result.as_slice_mut();
-                        for m in 0..nf { r[first_dof as usize + m] = moments[m]; }
-                    }
+                    let r = result.as_slice_mut();
+                    for m in 0..nf { r[first_dof as usize + m] = moments[m]; }
                 }
             }
         }

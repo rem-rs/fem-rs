@@ -704,11 +704,29 @@ fn solve_maxwell_2d_nd2(n: usize) -> f64 {
 
 #[test]
 fn maxwell_2d_nd2_convergence() {
-    let ns = [2usize, 4];
+    // D32: with MFEM point-value edge DOFs + signed anti-diagonal reversal
+    // pairing, tri ND2 must converge at its full O(h²) L² rate (the old
+    // moment-dof pairing broke conformity and gave rate ≈ −0.3, hidden by a
+    // `errors[1] < 10` assertion).
+    let ns = [2usize, 4, 8];
     let errors: Vec<f64> = ns.iter().map(|&n| solve_maxwell_2d_nd2(n)).collect();
     let rates = convergence_rate(&errors, &ns);
     eprintln!("Maxwell ND2 errors: {:?}, rates: {:?}", errors, rates);
-    assert!(errors[1] < 10.0, "Maxwell ND2 L閾?error {:.2} is unexpectedly large", errors[1]);
+    assert!(
+        rates[0] > 1.5,
+        "Maxwell ND2 rate {:.2} < 1.5 (expected ~2)",
+        rates[0]
+    );
+    assert!(
+        rates[1] > 1.5,
+        "Maxwell ND2 rate {:.2} < 1.5 on the refined pair (expected ~2)",
+        rates[1]
+    );
+    assert!(
+        errors[2] < 5e-3,
+        "Maxwell ND2 L² error {:.3e} at n=8 too large",
+        errors[2]
+    );
 }
 
 // 闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩￠幇銊︽珳闁崇儤鍔忛弲鏌ュ煛閹般劍娅滈柍鐑樺姀閺呮煡鍩?

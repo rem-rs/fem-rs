@@ -1,28 +1,44 @@
 //! Nedelec-I order-2 element on the reference triangle `(0,0),(1,0),(0,1)`.
 //!
-//! # Space
-//! `N₂ = P₁² ⊕ x^⊥ P̃₁`  (dim = 6 + 2 = 8)
+//! 1:1 port of MFEM `ND_TriangleElement(2)` (`fe_nd.cpp`).
 //!
-//! Monomial basis (component-wise):
+//! # Space
+//! `N₂ = P₁² ⊕ s·x^⊥ P̃₁`  (dim = 6 + 2 = 8)
+//!
+//! # DOF semantics (D32 fix — MFEM nodal point-value functionals)
+//!
+//! Every DOF is a **point evaluation of the tangential component** at the DOF
+//! point `x_i = FE::Nodes` along a fixed reference tangent `t̂_i` taken from
+//! MFEM's `tk` table (the reference edge direction vectors, *unnormalized*):
+//!
 //! ```text
-//! m₀ = (1, 0)       m₁ = (ξ, 0)      m₂ = (η, 0)
-//! m₃ = (0, 1)       m₄ = (0, ξ)      m₅ = (0, η)
-//! m₆ = (−ξη, ξ²)   m₇ = (−η², ξη)
+//! σ_i(Φ) = Φ(x_i) · t̂_i
 //! ```
 //!
-//! # DOF functionals (8 total)
-//! Two tangential moments per edge, two interior moments:
+//! Edge DOF points are the 2-point Gauss-Legendre nodes on `[0,1]`
+//! (MFEM `OpenPoints(1)`, symmetric about `t = 1/2`), ordered ascending along
+//! each edge's named direction `(v_i → v_j)`.  Because the point set is
+//! reflection invariant (`1 − t_m = t_{1−m}`) the edge DOFs transform under an
+//! edge reversal as a **signed anti-diagonal permutation**
+//! (`σ^rev_m = −σ_{1−m}`), which is what makes the cross-element pairing
+//! conforming.  (The previous integral-moment functionals `∫Φ·t̂ t^m dt` are
+//! NOT reflection invariant — reversal mixes moments binomially — which
+//! polluted curl-curl solutions on split diagonals.)
 //!
-//! | DOF | Edge / interior | Functional |
-//! |-----|-----------------|------------|
-//! | 0   | e₀ (η=0, ξ↑)   | ∫₀¹ Φ_x(ξ,0) dξ           |
-//! | 1   | e₀              | ∫₀¹ Φ_x(ξ,0) · ξ dξ       |
-//! | 2   | e₁ (1−t,t)      | ∫₀¹ [−Φ_x + Φ_y](1−t,t) dt       |
-//! | 3   | e₁              | ∫₀¹ [−Φ_x + Φ_y](1−t,t) · t dt   |
-//! | 4   | e₂ (ξ=0, η↑)   | ∫₀¹ Φ_y(0,η) dη           |
-//! | 5   | e₂              | ∫₀¹ Φ_y(0,η) · η dη       |
-//! | 6   | interior        | ∫_T Φ_x dA                |
-//! | 7   | interior        | ∫_T Φ_y dA                |
+//! # DOF layout (MFEM slot order)
+//!
+//! | DOF | Edge / interior | Point          | Tangent    | Functional       |
+//! |-----|-----------------|----------------|------------|------------------|
+//! | 0   | e₀ (v₀→v₁)      | (t₀, 0)        | (1, 0)     | Φ_x(t₀,0)        |
+//! | 1   | e₀              | (t₁, 0)        | (1, 0)     | Φ_x(t₁,0)        |
+//! | 2   | e₁ (v₁→v₂)      | (1−t₀, t₀)     | (−1, 1)    | (−Φ_x+Φ_y)(pt)   |
+//! | 3   | e₁              | (1−t₁, t₁)     | (−1, 1)    | (−Φ_x+Φ_y)(pt)   |
+//! | 4   | e₂ (v₂→v₀)      | (0, 1−t₀)      | (0, −1)    | −Φ_y(0,1−t₀)     |
+//! | 5   | e₂              | (0, 1−t₁)      | (0, −1)    | −Φ_y(0,1−t₁)     |
+//! | 6   | interior        | (1/3, 1/3)     | (1, 0)     | Φ_x(1/3,1/3)     |
+//! | 7   | interior        | (1/3, 1/3)     | (0, 1)     | Φ_y(1/3,1/3)     |
+//!
+//! with `t₀ = (1−1/√3)/2`, `t₁ = (1+1/√3)/2`.
 
 use std::sync::OnceLock;
 
@@ -35,61 +51,40 @@ use crate::reference::{QuadratureRule, VectorReferenceElement};
 /// `Φ_i(ξ,η) = Σ_j C[i][j] · m_j(ξ,η)`
 static COEFF: OnceLock<[[f64; 8]; 8]> = OnceLock::new();
 
-/// Build the Vandermonde matrix V, where V[i,j] = DOF_i(m_j).
-fn build_vandermonde() -> [[f64; 8]; 8] {
-    // Reference triangle integrals:
-    //   ∫_T 1    = 1/2
-    //   ∫_T ξ    = 1/6
-    //   ∫_T η    = 1/6
-    //   ∫_T ξ²   = 1/12
-    //   ∫_T η²   = 1/12
-    //   ∫_T ξη   = 1/24
-    //
-    // Row 0: DOF_0 = ∫₀¹ (m_j)_x(ξ,0) dξ
-    let r0 = [1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    // Row 1: DOF_1 = ∫₀¹ (m_j)_x(ξ,0) · ξ dξ
-    let r1 = [0.5, 1.0 / 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    // Row 2: DOF_2 = ∫₀¹ [−(m_j)_x + (m_j)_y](1−t, t) dt
-    let r2 = [-1.0, -0.5, -0.5, 1.0, 0.5, 0.5, 0.5, 0.5];
-    // Row 3: DOF_3 = ∫₀¹ [−(m_j)_x + (m_j)_y](1−t, t) · t dt
-    let r3 = [
-        -0.5,
-        -1.0 / 6.0,
-        -1.0 / 3.0,
-        0.5,
-        1.0 / 6.0,
-        1.0 / 3.0,
-        1.0 / 6.0,
-        1.0 / 3.0,
-    ];
-    // Row 4: DOF_4 = ∫₀¹ (m_j)_y(0, η) dη
-    let r4 = [0.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.0, 0.0];
-    // Row 5: DOF_5 = ∫₀¹ (m_j)_y(0, η) · η dη
-    let r5 = [0.0, 0.0, 0.0, 0.5, 0.0, 1.0 / 3.0, 0.0, 0.0];
-    // Row 6: DOF_6 = ∫_T (m_j)_x dA
-    let r6 = [
-        0.5,
-        1.0 / 6.0,
-        1.0 / 6.0,
-        0.0,
-        0.0,
-        0.0,
-        -1.0 / 24.0,
-        -1.0 / 12.0,
-    ];
-    // Row 7: DOF_7 = ∫_T (m_j)_y dA
-    let r7 = [
-        0.0,
-        0.0,
-        0.0,
-        0.5,
-        1.0 / 6.0,
-        1.0 / 6.0,
-        1.0 / 12.0,
-        1.0 / 24.0,
-    ];
+/// 2-point Gauss-Legendre nodes on `[0,1]` — MFEM `OpenPoints(1)` (GaussLegendre).
+pub(crate) const GL2: [f64; 2] = [0.21132486540518710671, 0.78867513459481286553];
 
-    [r0, r1, r2, r3, r4, r5, r6, r7]
+/// Barycentric coordinates of the ND2 interior point (MFEM `iop` centroid).
+const INTERIOR: f64 = 1.0 / 3.0;
+
+/// Build the Vandermonde matrix V, where V[i,j] = DOF_i(m_j).
+///
+/// Every row is an exact point evaluation `t̂_i · m_j(x_i)` — no quadrature.
+fn build_vandermonde() -> [[f64; 8]; 8] {
+    let mut v = [[0.0f64; 8]; 8];
+    let mut mono = [0.0f64; 16];
+
+    let mut tangential_row = |row: usize, x: f64, y: f64, tx: f64, ty: f64| {
+        eval_monomials(x, y, &mut mono);
+        for (j, chunk) in mono.chunks_exact(2).enumerate() {
+            v[row][j] = chunk[0] * tx + chunk[1] * ty;
+        }
+    };
+
+    // Edge e₀ (v₀→v₁, η=0), tangent (1,0).
+    tangential_row(0, GL2[0], 0.0, 1.0, 0.0);
+    tangential_row(1, GL2[1], 0.0, 1.0, 0.0);
+    // Edge e₁ (v₁→v₂), point (1−t, t), tangent (−1,1).
+    tangential_row(2, 1.0 - GL2[0], GL2[0], -1.0, 1.0);
+    tangential_row(3, 1.0 - GL2[1], GL2[1], -1.0, 1.0);
+    // Edge e₂ (v₂→v₀), point (0, 1−t), tangent (0,−1).
+    tangential_row(4, 0.0, 1.0 - GL2[0], 0.0, -1.0);
+    tangential_row(5, 0.0, 1.0 - GL2[1], 0.0, -1.0);
+    // Interior (1/3,1/3): tangents (1,0), (0,1).
+    tangential_row(6, INTERIOR, INTERIOR, 1.0, 0.0);
+    tangential_row(7, INTERIOR, INTERIOR, 0.0, 1.0);
+
+    v
 }
 
 /// Invert an 8×8 matrix (row-major) using Gauss-Jordan elimination.
@@ -208,11 +203,8 @@ fn eval_monomial_curls(x: f64, y: f64, curls: &mut [f64; 8]) {
 ///
 /// Reference domain: triangle with vertices (0,0), (1,0), (0,1).
 ///
-/// DOF layout (2 per edge, 2 interior):
-/// - DOFs 0–1: edge e₀ (v₀→v₁, bottom)
-/// - DOFs 2–3: edge e₁ (v₁→v₂, hypotenuse)
-/// - DOFs 4–5: edge e₂ (v₀→v₂, left)
-/// - DOFs 6–7: interior bubble moments
+/// DOF layout (2 point-value DOFs per edge, 2 interior point values; MFEM
+/// `ND_TriangleElement(2)` slot order — see the module docs).
 pub struct TriND2;
 
 impl TriND2 {
@@ -283,23 +275,23 @@ impl VectorReferenceElement for TriND2 {
         tri_rule(order)
     }
 
-    /// DOF sites:
-    /// - 2 Gauss points per edge (at 1/3 and 2/3 along each edge)
-    /// - 2 interior points (barycentric coordinates)
+    /// DOF sites (MFEM `FE::Nodes`): 2 Gauss points per edge ordered along the
+    /// edge's named direction, plus the two interior point values at (1/3,1/3).
     fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let (t0, t1) = (GL2[0], GL2[1]);
         vec![
-            // Edge e₀ (η=0): ξ = 1/3 and 2/3
-            vec![1.0 / 3.0, 0.0],
-            vec![2.0 / 3.0, 0.0],
-            // Edge e₁ (v₁→v₂): param t=1/3 → (2/3, 1/3), t=2/3 → (1/3, 2/3)
-            vec![2.0 / 3.0, 1.0 / 3.0],
-            vec![1.0 / 3.0, 2.0 / 3.0],
-            // Edge e₂ (ξ=0): η = 1/3 and 2/3
-            vec![0.0, 1.0 / 3.0],
-            vec![0.0, 2.0 / 3.0],
+            // Edge e₀ (v₀→v₁, η=0)
+            vec![t0, 0.0],
+            vec![t1, 0.0],
+            // Edge e₁ (v₁→v₂): point (1−t, t)
+            vec![1.0 - t0, t0],
+            vec![1.0 - t1, t1],
+            // Edge e₂ (v₂→v₀): point (0, 1−t)
+            vec![0.0, 1.0 - t0],
+            vec![0.0, 1.0 - t1],
             // Interior
-            vec![1.0 / 3.0, 1.0 / 3.0],
-            vec![1.0 / 4.0, 1.0 / 4.0],
+            vec![INTERIOR, INTERIOR],
+            vec![INTERIOR, INTERIOR],
         ]
     }
 }
@@ -322,77 +314,37 @@ mod tests {
         );
     }
 
-    /// Nodal basis property: DOF_j(Φᵢ) ≈ δᵢⱼ.
-    /// We approximate each edge DOF via 4-point Gauss quadrature on [0,1].
+    /// Nodal basis property: DOF_j(Φᵢ) = δᵢⱼ exactly (point-value functionals).
     #[test]
-    fn nd2_nodal_basis() {
+    fn nd2_nodal_basis_point_values() {
         let elem = TriND2;
         let mut vals = vec![0.0; 16];
 
-        // 4-point Gauss-Legendre on [0,1]
-        let sq6_5 = (6.0f64 / 5.0).sqrt();
-        let ta = ((3.0 - 2.0 * sq6_5) / 7.0).sqrt();
-        let tb = ((3.0 + 2.0 * sq6_5) / 7.0).sqrt();
-        let wa = (18.0 + 30.0f64.sqrt()) / 36.0;
-        let wb = (18.0 - 30.0f64.sqrt()) / 36.0;
-        let gl_pts = [
-            0.5 * (1.0 - tb),
-            0.5 * (1.0 - ta),
-            0.5 * (1.0 + ta),
-            0.5 * (1.0 + tb),
+        // (point, tangent) per DOF, mirroring the Vandermonde rows.
+        let dofs: [([f64; 2], [f64; 2]); 8] = [
+            ([GL2[0], 0.0], [1.0, 0.0]),
+            ([GL2[1], 0.0], [1.0, 0.0]),
+            ([1.0 - GL2[0], GL2[0]], [-1.0, 1.0]),
+            ([1.0 - GL2[1], GL2[1]], [-1.0, 1.0]),
+            ([0.0, 1.0 - GL2[0]], [0.0, -1.0]),
+            ([0.0, 1.0 - GL2[1]], [0.0, -1.0]),
+            ([INTERIOR, INTERIOR], [1.0, 0.0]),
+            ([INTERIOR, INTERIOR], [0.0, 1.0]),
         ];
-        let gl_wts = [0.5 * wb, 0.5 * wa, 0.5 * wa, 0.5 * wb];
 
-        // DOF matrix (DOF_j applies to basis function i): should be identity
         let mut dof_mat = [[0.0f64; 8]; 8];
-
-        // --- Edge e₀: y=0, x in [0,1], tangent=(1,0), weight moments 1 and x ---
-        for (&t, &w) in gl_pts.iter().zip(gl_wts.iter()) {
-            elem.eval_basis_vec(&[t, 0.0], &mut vals);
+        for (j, (pt, tang)) in dofs.iter().enumerate() {
+            elem.eval_basis_vec(pt, &mut vals);
             for i in 0..8 {
-                let tang = vals[i * 2]; // Φ_x
-                dof_mat[0][i] += w * tang; // ∫ Φ_x dξ
-                dof_mat[1][i] += w * tang * t; // ∫ Φ_x · ξ dξ
+                dof_mat[j][i] = vals[i * 2] * tang[0] + vals[i * 2 + 1] * tang[1];
             }
         }
 
-        // --- Edge e₁: param (1-t, t), tangent=(-1,1), moment 1 and t ---
-        for (&t, &w) in gl_pts.iter().zip(gl_wts.iter()) {
-            let xi = [1.0 - t, t];
-            elem.eval_basis_vec(&xi, &mut vals);
-            for i in 0..8 {
-                let tang = -vals[i * 2] + vals[i * 2 + 1];
-                dof_mat[2][i] += w * tang;
-                dof_mat[3][i] += w * tang * t;
-            }
-        }
-
-        // --- Edge e₂: x=0, y in [0,1], tangent=(0,1), moments 1 and y ---
-        for (&t, &w) in gl_pts.iter().zip(gl_wts.iter()) {
-            elem.eval_basis_vec(&[0.0, t], &mut vals);
-            for i in 0..8 {
-                let tang = vals[i * 2 + 1]; // Φ_y
-                dof_mat[4][i] += w * tang;
-                dof_mat[5][i] += w * tang * t;
-            }
-        }
-
-        // --- Interior DOFs: ∫_T Φ_x dA and ∫_T Φ_y dA via triangle quadrature ---
-        let qr = elem.quadrature(6);
-        for (xi, w) in qr.points.iter().zip(qr.weights.iter()) {
-            elem.eval_basis_vec(xi, &mut vals);
-            for i in 0..8 {
-                dof_mat[6][i] += w * vals[i * 2];
-                dof_mat[7][i] += w * vals[i * 2 + 1];
-            }
-        }
-
-        // Check that dof_mat ≈ identity
         for j in 0..8 {
             for i in 0..8 {
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!(
-                    (dof_mat[j][i] - expected).abs() < 1e-10,
+                    (dof_mat[j][i] - expected).abs() < 1e-14,
                     "DOF_{j}(Phi_{i}) = {}, expected {expected}",
                     dof_mat[j][i]
                 );
@@ -400,17 +352,80 @@ mod tests {
         }
     }
 
+    /// 1:1 check against the C++ MFEM `ND_TriangleElement(2)` dump
+    /// (`tmp/d32/nd2_dump.cpp`, WSL `$HOME/work/nd2_dump`):
+    /// VShape at (0.137, 0.421) and curl at the same point.
+    #[test]
+    fn nd2_matches_mfem_dump() {
+        let elem = TriND2;
+        let mut phi = vec![0.0; 16];
+        elem.eval_basis_vec(&[0.137, 0.421], &mut phi);
+        let mfem_phi: [[f64; 2]; 8] = [
+            [0.076797256181313028, 0.018171371497132931],
+            [-0.22907425618131308, -0.054202371497133008],
+            [0.17216846137808234, -0.056026316410445164],
+            [-0.034922461378082706, 0.01136431641044499],
+            [-0.1163279694051417, -0.23845852160721462],
+            [-0.13164103059485799, -0.2698484783927852],
+            [1.2895229999999998, -0.0086310000000002322],
+            [-0.38521499999999942, 0.53635500000000047],
+        ];
+        for i in 0..8 {
+            assert!(
+                (phi[i * 2] - mfem_phi[i][0]).abs() < 1e-13,
+                "phi[{i}]_x = {}, expected {}",
+                phi[i * 2],
+                mfem_phi[i][0]
+            );
+            assert!(
+                (phi[i * 2 + 1] - mfem_phi[i][1]).abs() < 1e-13,
+                "phi[{i}]_y = {}, expected {}",
+                phi[i * 2 + 1],
+                mfem_phi[i][1]
+            );
+        }
+
+        let mut curl = vec![0.0; 8];
+        elem.eval_curl(&[0.137, 0.421], &mut curl);
+        let mfem_curl = [
+            1.3979132444627611,
+            -0.1869132444627612,
+            -0.22685364402434116,
+            1.2488536440243421,
+            1.8289403995615803,
+            1.9380596004384196,
+            -0.18899999999999942,
+            2.7449999999999992,
+        ];
+        for i in 0..8 {
+            assert!(
+                (curl[i] - mfem_curl[i]).abs() < 1e-13,
+                "curl[{i}] = {}, expected {}",
+                curl[i],
+                mfem_curl[i]
+            );
+        }
+    }
+
+    /// At the interior point the two interior DOFs evaluate to the unit
+    /// vectors (point-value DOFs): verified against the MFEM dump.
+    #[test]
+    fn nd2_interior_point_delta() {
+        let elem = TriND2;
+        let mut vals = vec![0.0; 16];
+        elem.eval_basis_vec(&[INTERIOR, INTERIOR], &mut vals);
+        for i in 0..6 {
+            assert!(vals[i * 2].abs() < 1e-14);
+            assert!(vals[i * 2 + 1].abs() < 1e-14);
+        }
+        assert!((vals[12] - 1.0).abs() < 1e-14 && vals[13].abs() < 1e-14);
+        assert!(vals[14].abs() < 1e-14 && (vals[15] - 1.0).abs() < 1e-14);
+    }
+
     /// Curl should be linear in (ξ,η) — check at several points.
     #[test]
     fn nd2_curl_is_linear() {
         let elem = TriND2;
-        let curl = vec![0.0; 8];
-        let curl2 = vec![0.0; 8];
-
-        let pts = [[0.1, 0.1], [0.5, 0.2], [0.2, 0.5], [1.0 / 3.0, 1.0 / 3.0]];
-        // Evaluate curl at p and at 2*p; for linear functions curl(2p)=2*curl(p) only at origin...
-        // Better test: verify curl changes linearly between two points.
-        // curl(t*p1 + (1-t)*p2) = t*curl(p1) + (1-t)*curl(p2)
         let p1 = [0.1, 0.2_f64];
         let p2 = [0.3, 0.1_f64];
         let t = 0.4f64;
@@ -429,9 +444,6 @@ mod tests {
                 cm[i]
             );
         }
-        let _ = pts; // suppress warning
-        let _ = curl;
-        let _ = curl2;
     }
 
     #[test]

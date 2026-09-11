@@ -30,17 +30,19 @@ fn curl_3d_nd2_rt1_commuting_ci() {
 
     let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
 
-    // A = (x*y, y*z, z*x), so curl(A) = (-y, -z, -x).
-    let a = hcurl.interpolate_vector(&|x| vec![x[0] * x[1], x[1] * x[2], x[2] * x[0]]);
+    // D32: the commuting identity is exact for fields **in** the ND2 span
+    // (nodal interpolators are an exact cochain map only on the space).
+    // In-span mode A = (−xy, x², 0), curl(A) = (0, 0, 3x) ⊂ RT1.
+    let a = hcurl.interpolate_vector(&|x| vec![-x[0] * x[1], x[0] * x[0], 0.0]);
     let mut ca = vec![0.0; hdiv.n_dofs()];
     c.spmv(a.as_slice(), &mut ca);
 
-    let curl_interp = hdiv.interpolate_vector(&|x| vec![-x[1], -x[2], -x[0]]);
+    let curl_interp = hdiv.interpolate_vector(&|x| vec![0.0, 0.0, 3.0 * x[0]]);
 
     let max_err: f64 = (0..hdiv.n_dofs())
         .map(|i| (ca[i] - curl_interp.as_slice()[i]).abs())
         .fold(0.0, f64::max);
-    assert!(max_err < 0.025, "ND2->RT1 commuting mismatch, max error={max_err}");
+    assert!(max_err < 1e-8, "ND2->RT1 commuting mismatch, max error={max_err}");
 }
 
 #[test]

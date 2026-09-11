@@ -159,7 +159,9 @@ fn div_op_3d(mesh: Mesh<3>, hdiv_o: u8, l2_o: u8, field: fn(&[f64]) -> Vec<f64>,
 }
 
 // Divergence operator: only RT1→P1 2D and RT1→P1 3D linear (already feature-tested in discrete_op.rs).
-#[test] fn div_rt1_p1_2d() { div_op(Mesh::<2>::unit_square_tri(4), 1, 1, |x| vec![x[0]*x[0], x[1]*x[1]], |x| 2.0*x[0]+2.0*x[1], 1e-10); }
+// D32/D34: the probe field must lie in RT1 (nodal interpolation is exact only
+// on the space): (x², x·y) = x·(x, y) ∈ RT1 with div = 3x.
+#[test] fn div_rt1_p1_2d() { div_op(Mesh::<2>::unit_square_tri(4), 1, 1, |x| vec![x[0]*x[0], x[0]*x[1]], |x| 3.0*x[0], 1e-10); }
 #[test] fn div_rt1_p1_3d() { div_op_3d(Mesh::<3>::unit_cube_tet(2), 1, 1, |x| vec![x[0], x[1], x[2]], |_| 3.0, 1e-8); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -197,7 +199,7 @@ fn curl2d(mesh: Mesh<2>, mesh2: Mesh<2>, hco: u8, l2o: u8, field: fn(&[f64]) -> 
 }
 
 #[test] fn curl_nd1_p0_2d() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 1, 0, |x| vec![x[0], x[1]], |_| 0.0, 1e-12); }
-#[test] fn curl_nd2_p1_2d() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[1], x[1]*x[1]], |x| -x[0], 1e-10); }
+#[test] fn curl_nd2_p1_2d() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![-x[0]*x[1], x[0]*x[0]], |x| 3.0*x[0], 1e-10); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 3D curl operator patches
@@ -215,7 +217,7 @@ fn curl3d(mesh: Mesh<3>, mesh2: Mesh<3>, hco: u8, hdo: u8, field: fn(&[f64]) -> 
 }
 
 #[test] fn curl_nd1_rt0_3d() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], x[1], x[2]], |_| vec![0.0, 0.0, 0.0], 1e-12); }
-#[test] fn curl_nd2_rt1_3d() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 2, 1, |x| vec![x[0]*x[1], x[1]*x[2], x[2]*x[0]], |x| vec![-x[1], -x[2], -x[0]], 0.025); }
+#[test] fn curl_nd2_rt1_3d() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 2, 1, |x| vec![-x[0]*x[1], x[0]*x[0], 0.0], |x| vec![0.0, 0.0, 3.0*x[0]], 1e-8); }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient operator patches
@@ -348,8 +350,10 @@ fn l2_interp<M: MeshTopology>(mesh: M, order: u8, exact: fn(&[f64]) -> f64, tol:
 #[test] fn hdiv_rt1_const_3d() { hdiv_interp(Mesh::<3>::unit_cube_tet(2), 1, |_| vec![0.0, 1.0, 0.0], 1e-12); }
 
 // Curl 2D extra fields: P0 curl is topological (exact), skip additional.
-// Curl 2D extra — ND2→P1 with new field
-#[test] fn curl_nd2_p1_2d_quad() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![x[0]*x[0], x[0]*x[1]], |x| x[1], 1e-10); }
+// Curl 2D extra — ND2→P1.  D32: fields must lie **in** the ND2 span (nodal
+// interpolation commutes with curl exactly only on the space): use the
+// rotational monomials (−xy, x²) / (−y², xy).
+#[test] fn curl_nd2_p1_2d_quad() { curl2d(Mesh::<2>::unit_square_tri(4), Mesh::<2>::unit_square_tri(4), 2, 1, |x| vec![-x[0]*x[1], x[0]*x[0]], |x| 3.0*x[0], 1e-10); }
 
 // Curl 3D more fields (ND1→RT0 topological, exact)
 #[test] fn curl_nd1_rt0_3d_lin() { curl3d(Mesh::<3>::unit_cube_tet(2), Mesh::<3>::unit_cube_tet(2), 1, 0, |x| vec![x[0], 0.0, 0.0], |_| vec![0.0, 0.0, 0.0], 1e-12); }

@@ -4,10 +4,18 @@
 //! are the canonical choice for discretising the curl-curl operator that appears in
 //! Maxwell's equations.
 //!
-//! # DOF convention
-//! Each DOF is associated with an edge.  The DOF value equals the line-integral of the
-//! vector field along that edge: `DOF_i = ∫_{e_i} Φ · t̂ ds`, where `t̂` is the unit
-//! tangent of edge `i`.
+//! # DOF convention (order 2, 1:1 with MFEM `fe_nd.cpp`)
+//! The order-2 elements (`TriND2`, `QuadND2`, `TetND2`) use MFEM's **nodal
+//! point-value functionals**: `σ_i(Φ) = Φ(x_i)·t̂_i` at the DOF point
+//! `x_i = FE::Nodes` (Gauss-Legendre points on the edges) along the fixed
+//! reference tangent `t̂_i` (MFEM `tk` table).  The symmetric Gauss point sets
+//! make the edge DOFs reflection-invariant: an edge reversal maps
+//! `σ^rev_m = −σ_{k−1−m}`, so `HCurlSpace` pairs shared edges with a signed
+//! anti-diagonal permutation (MFEM's own encoding).
+//!
+//! ND1 keeps the classic edge line-integral DOF `DOF_i = ∫_{e_i} Φ·t̂ ds`, and
+//! the generic `*NDk` (k≥3) elements currently keep integral-moment edge DOFs
+//! (pending the same nodal redesign — see round-14 D32 report).
 //!
 //! # Available elements
 //! | Type       | Domain       | DOFs | Order |
