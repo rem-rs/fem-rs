@@ -432,7 +432,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         let mut mesh = mesh;
         if mesh.geometry.is_none() {
             if let Some((p, raw, ord)) = &h1_nodes {
-                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim);
+                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim, None);
             }
         }
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
@@ -459,10 +459,23 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // refine=1 → MarkTetMeshForRefinement (vertex rotation so the longest
         // edge is (v0,v1)).  Apply the same so element/vertex numbering and
         // the GS-sweep order match MFEM bit-for-bit.
+        //
+        // D43: the rotation changes the H1 numbering, and MFEM's
+        // `PrepareNodeReorder`/`DoNodeReorder` renumber the `nodes` grid
+        // function along with it so the geometry is preserved.  Reproduce that
+        // by evaluating the slot map on the *pre-rotation* mesh (whose element
+        // order is exactly the file's) and re-attaching the file's node values
+        // to the same physical slots afterwards.
+        let tet_file_slots: Option<TetFileSlots> = match &h1_nodes {
+            Some((p, _, _)) if mesh.geometry.is_none() => {
+                tet_slot_map(&mesh, *p as usize).ok().map(|(conn, keys, _)| TetFileSlots { conn, keys })
+            }
+            _ => None,
+        };
         fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
         if mesh.geometry.is_none() {
             if let Some((p, raw, ord)) = &h1_nodes {
-                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim);
+                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim, tet_file_slots.as_ref());
             }
         }
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
@@ -988,6 +1001,384 @@ fn build_h1_hex_geometry<M: MeshTopology>(
     })
 }
 
+// ─── D43: MFEM-faithful H1 tetrahedron geometry ──────────────────────────────
+
+/// MFEM `Constants<Geometry::TETRAHEDRON>::Edges`: local edge `k` runs from
+/// local vertex `EDGES[k][0]` to `EDGES[k][1]` (both already ascending).
+const TET_EDGES: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+/// MFEM `Constants<Geometry::TETRAHEDRON>::FaceVert`: local face `f` lists its
+/// three local vertices (`f` is the vertex the face is *opposite*; the three
+/// are ordered as in `Mesh::GenerateFaces`).
+const TET_FACES: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+/// MFEM `Constants<Geometry::TRIANGLE>::Orient`: `Orient[o][i]` is the local
+/// vertex that ends up at position `i` under orientation `o`.
+const TRI_ORIENT: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [1, 0, 2],
+    [2, 0, 1],
+    [2, 1, 0],
+    [1, 2, 0],
+    [0, 2, 1],
+];
+
+/// MFEM `Mesh::GetTriOrientation(base, test)`: the orientation index `o` with
+/// `test[TRI_ORIENT[o][i]] == base[i]` (0 if the two orderings coincide).
+fn tri_orientation(base: &[u32; 3], test: &[u32; 3]) -> Option<usize> {
+    (0..6).find(|&o| (0..3).all(|i| test[TRI_ORIENT[o][i]] == base[i]))
+}
+
+/// Index, within the interior block of MFEM's `H1_TriangleElement`, of the
+/// face DOF at in-face integer coordinates `(a, b)` (measured from face vertex
+/// 0 towards vertices 1 and 2, so `a, b ≥ 1` and `a + b ≤ p - 1`).
+///
+/// This is the `o` of `H1_FECollection`'s `TriDofOrd` construction
+/// (`fem/fe_coll.cpp`): `TriDof - ((p-1-j)(p-2-j))/2 + i` with
+/// `(i, j) = (a-1, b-1)`.
+fn tri_face_index(p: usize, a: usize, b: usize) -> Option<usize> {
+    if p < 3 || a < 1 || b < 1 || a + b > p - 1 {
+        return None;
+    }
+    let (i, j) = (a - 1, b - 1);
+    let tri_dof = (p - 1) * (p - 2) / 2;
+    let (pm1, pm2) = (p - 1, p - 2);
+    if i + j >= pm2 {
+        return None;
+    }
+    Some(tri_dof - ((pm1 - j) * (pm2 - j)) / 2 + i)
+}
+
+/// MFEM `H1_FECollection::DofOrderForOrientation(TRIANGLE, or)[j]` — the
+/// canonical (stored) face DOF index for local face DOF `j`.
+fn tri_dof_ord(p: usize, orient: usize, j: usize) -> Option<usize> {
+    if p < 3 || orient > 5 {
+        return None;
+    }
+    let (pm1, pm2, pm3) = (p - 1, p - 2, p - 3);
+    let tri_dof = (p - 1) * (p - 2) / 2;
+    if j >= tri_dof {
+        return None;
+    }
+    for jj in 0..pm2 {
+        for ii in 0..(pm2 - jj) {
+            let o = tri_dof - ((pm1 - jj) * (pm2 - jj)) / 2 + ii;
+            if o != j {
+                continue;
+            }
+            let k = pm3 - jj - ii;
+            return Some(match orient {
+                0 => o,
+                1 => tri_dof - ((pm1 - jj) * (pm2 - jj)) / 2 + k,
+                2 => tri_dof - ((pm1 - ii) * (pm2 - ii)) / 2 + k,
+                3 => tri_dof - ((pm1 - k) * (pm2 - k)) / 2 + ii,
+                4 => tri_dof - ((pm1 - k) * (pm2 - k)) / 2 + jj,
+                _ => tri_dof - ((pm1 - ii) * (pm2 - ii)) / 2 + jj,
+            });
+        }
+    }
+    None
+}
+
+/// Outcome of the D43 tetrahedron geometry pass.
+enum TetGeom {
+    /// The mesh is not an all-Tet4 mesh — this path does not apply.
+    NotTet,
+    /// All-Tet4 mesh, but the `nodes` section cannot be mapped faithfully.
+    Unsupported(&'static str),
+    /// Faithful geometry table.
+    Built(GeometryData),
+}
+
+/// D43: reproduce MFEM's H1 `nodes` numbering for an all-Tet4 mesh and return
+/// the geometry table in the reference element's slot order.
+///
+/// Same construction as [`build_h1_hex_geometry`], with the tetrahedron's
+/// entity tables (`TET_EDGES`, `TET_FACES`) and MFEM's triangle DOF ordering
+/// (`TriDofOrd`) for the shared face blocks.  Until D43 this element type fell
+/// through to fem-rs's own `DofManager` numbering, which silently gave 11 of
+/// the 42 elements of `data/escher-p2.mesh` another element's edge dofs.
+///
+/// The reference element is the one the assembler uses for tet geometry
+/// (`fem_element::lagrange::factory::TetPk`, equispaced nodes on the unit
+/// tetrahedron), so its slots are classified by the *integer barycentric
+/// coordinates* of their node positions.
+fn build_h1_tet_geometry<M: MeshTopology>(
+    mesh: &M,
+    order: u8,
+    raw: &[f64],
+    ordering: usize,
+    file_slots: Option<&TetFileSlots>,
+) -> TetGeom {
+    let p = order as usize;
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if n_elems == 0 || n_vert == 0 {
+        return TetGeom::NotTet;
+    }
+    let mut n_tet = 0usize;
+    let mut n_other = 0usize;
+    for el in 0..n_elems as u32 {
+        match mesh.element_nodes(el).len() {
+            4 => n_tet += 1,
+            _ => n_other += 1,
+        }
+    }
+    if n_tet == 0 {
+        return TetGeom::NotTet;
+    }
+    if n_other != 0 {
+        // Any mixture (including hexes, which the D41 pass refuses separately)
+        // has per-element `nodes` blocks that no single numbering describes.
+        return TetGeom::Unsupported("mixed-element mesh containing tetrahedra");
+    }
+
+    let (conn, keys, n_dofs) = match tet_slot_map(mesh, p) {
+        Ok(c) => c,
+        Err(why) => return TetGeom::Unsupported(why),
+    };
+    let npe = conn.len() / n_elems;
+    if raw.len() < 3 * n_dofs {
+        return TetGeom::Unsupported("nodes section too short for the H1 tet space");
+    }
+    // The file's `nodes` dof vector, in the file's *own* numbering (which is
+    // the numbering of the mesh as recorded in the file's `elements` section).
+    let mut coords_file = vec![0.0f64; n_dofs * 3];
+    match ordering {
+        0 => {
+            for c in 0..3 {
+                for g in 0..n_dofs {
+                    coords_file[g * 3 + c] = raw[c * n_dofs + g];
+                }
+            }
+        }
+        1 => coords_file.copy_from_slice(&raw[..3 * n_dofs]),
+        _ => return TetGeom::Unsupported("unknown nodes ordering"),
+    }
+    // A curved mesh read with MFEM's `refine = 1` (which fem-rs mirrors with
+    // `mark_tet_mesh_for_refinement`) is renumbered: `PrepareNodeReorder` /
+    // `DoNodeReorder` permute the nodes grid function so the *geometry* is
+    // preserved under the rotated element vertex order.  Every geometry node
+    // belongs to a physical entity (a vertex, an edge, a face, or the element
+    // interior) at a definite position, which is exactly what the slot `keys`
+    // encode; transferring the file's node values through the keys therefore
+    // reproduces MFEM's renumbering.
+    let mut coords = coords_file.clone();
+    if let Some(fs) = file_slots {
+        if fs.conn.len() != conn.len() {
+            return TetGeom::Unsupported("file slot map size mismatch");
+        }
+        let mut value_of_key: HashMap<(usize, [usize; 4]), [f64; 3]> = HashMap::with_capacity(conn.len());
+        for (i, k) in fs.keys.iter().enumerate() {
+            let g = fs.conn[i] as usize;
+            value_of_key.insert(*k, [coords_file[g * 3], coords_file[g * 3 + 1], coords_file[g * 3 + 2]]);
+        }
+        for (i, k) in keys.iter().enumerate() {
+            let v = match value_of_key.get(k) {
+                Some(v) => *v,
+                None => return TetGeom::Unsupported("no file node for a physical slot"),
+            };
+            let g = conn[i] as usize;
+            coords[g * 3] = v[0];
+            coords[g * 3 + 1] = v[1];
+            coords[g * 3 + 2] = v[2];
+        }
+    }
+
+    TetGeom::Built(GeometryData {
+        order,
+        conn,
+        nodes_per_elem: npe,
+        coords,
+        n_nodes: n_dofs,
+    })
+}
+
+/// The file's own slot map for the D43 tetrahedral path.
+///
+/// `conn[i]` is the dof the file's `nodes` vector uses for slot `i` (with the
+/// element connectivity exactly as listed in the file), and `keys[i]` is the
+/// slot's *physical* key `(element, pattern)`: its integer barycentric
+/// coordinates in the labelling of the element's four vertices **sorted by
+/// global id**.  Two slots of the same element with the same key address the
+/// same physical node (the same vertex, or the same edge/face position
+/// measured from the mesh vertex with the smaller id), which is what makes the
+/// key usable to transfer the file's node values across MFEM's `refine = 1`
+/// renumbering (the rotation permutes an element's vertex *list* but keeps its
+/// vertex *set*).
+struct TetFileSlots {
+    conn: Vec<NodeId>,
+    keys: Vec<(usize, [usize; 4])>,
+}
+
+/// Per-element slot map for a uniform Tet4 mesh: the geometry dof index MFEM's
+/// H1 numbering assigns to each reference-element slot, in
+/// `fem_element::lagrange::factory::TetPk`'s slot order, the slot's physical
+/// key (see [`TetFileSlots`]), and the total number of geometry dofs.  `Err`
+/// carries the reason the mesh cannot be mapped faithfully.
+///
+/// The entity enumeration is MFEM's: mesh edges/faces are numbered by element
+/// traversal, then local entity order (`TET_EDGES` / `TET_FACES`), first
+/// encounter wins, and the stored face parameterisation is the first
+/// encountering element's `TET_FACES` order (`Mesh::AddTriangleFaceElement`
+/// stores the face verbatim from elem1, elem2 gets the orientation).
+fn tet_slot_map<M: MeshTopology>(
+    mesh: &M,
+    p: usize,
+) -> Result<(Vec<NodeId>, Vec<(usize, [usize; 4])>, usize), &'static str> {
+    let e = p - 1; // dofs per edge
+    let nf = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }; // dofs per face
+    let nb = if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 };
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if n_elems == 0 || n_vert == 0 {
+        return Err("empty mesh");
+    }
+
+    let mut elems: Vec<[u32; 4]> = Vec::with_capacity(n_elems);
+    let mut edge_ids: HashMap<[u32; 2], u32> = HashMap::new();
+    let mut face_ids: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut face_verts: Vec<[u32; 3]> = Vec::new();
+    for el in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(el);
+        if ns.len() != 4 {
+            return Err("mesh is not uniformly tetrahedral");
+        }
+        let mut n4 = [0u32; 4];
+        n4.copy_from_slice(ns);
+        for &[la, lb] in TET_EDGES.iter() {
+            let (a, b) = (n4[la], n4[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len() as u32;
+            edge_ids.entry(key).or_insert(next);
+        }
+        for fv in TET_FACES.iter() {
+            let mut key = [n4[fv[0]], n4[fv[1]], n4[fv[2]]];
+            key.sort_unstable();
+            let next = face_ids.len() as u32;
+            face_ids.entry(key).or_insert_with(|| {
+                face_verts.push([n4[fv[0]], n4[fv[1]], n4[fv[2]]]);
+                next
+            });
+        }
+        elems.push(n4);
+    }
+    let n_edges = edge_ids.len();
+    let n_faces = face_ids.len();
+
+    // The reference element the assembler uses for tet geometry; its node
+    // positions are the equispaced barycentric grid, so the slot's integer
+    // barycentric coordinates are exactly `p·λ`.
+    let ref_elem = fem_element::lagrange::factory::TetPk::new(p);
+    let ref_coords = ref_elem.dof_coords();
+    let npe = ref_coords.len();
+    if npe != 4 + 6 * e + 4 * nf + nb {
+        return Err("reference tet element is not the H1 order-p basis");
+    }
+
+    let edge_base = n_vert;
+    let face_base = edge_base + n_edges * e;
+    let interior_base = face_base + n_faces * nf;
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * npe);
+    let mut keys: Vec<(usize, [usize; 4])> = Vec::with_capacity(n_elems * npe);
+    for (el, n4) in elems.iter().enumerate() {
+        // Local vertex indices ordered by global vertex id: the key's position
+        // `m` always refers to the `m`-th smallest mesh vertex of the element.
+        let mut order = [0usize, 1, 2, 3];
+        order.sort_by_key(|&m| n4[m]);
+        let mut interior_seen = 0usize;
+        for c in ref_coords.iter() {
+            let lam = [1.0 - c[0] - c[1] - c[2], c[0], c[1], c[2]];
+            let mut idx = [0usize; 4];
+            for m in 0..4 {
+                let t = p as f64 * lam[m];
+                let r = t.round();
+                if (t - r).abs() > 1e-9 {
+                    return Err("slot is not on the integer barycentric grid");
+                }
+                idx[m] = r as usize;
+            }
+            if idx.iter().sum::<usize>() != p {
+                return Err("slot barycentric coordinates do not sum to the order");
+            }
+            let key = [idx[order[0]], idx[order[1]], idx[order[2]], idx[order[3]]];
+            keys.push((el, key));
+            let on_bnd: Vec<usize> = (0..4).filter(|&m| idx[m] > 0).collect();
+            let g: usize = match on_bnd.len() {
+                // Vertex slot: the file stores vertex `v` as dof `v`.
+                1 => n4[on_bnd[0]] as usize,
+                // Edge slot: shared, slot `t` counted from the local edge's
+                // first vertex, and from the end vertex with the smaller mesh
+                // vertex id (MFEM `cor = v[e0] < v[e1] ? 1 : -1`).
+                2 => {
+                    let (la, lb) = (on_bnd[0], on_bnd[1]);
+                    if !TET_EDGES.iter().any(|&e| e == [la, lb]) {
+                        return Err("unmatched local edge slot");
+                    }
+                    let t_local = idx[lb] - 1;
+                    let (a, b) = (n4[la], n4[lb]);
+                    let ekey = if a < b { [a, b] } else { [b, a] };
+                    let ei = match edge_ids.get(&ekey) {
+                        Some(&ei) => ei as usize,
+                        None => return Err("unmatched mesh edge"),
+                    };
+                    let t = if a < b { t_local } else { e - 1 - t_local };
+                    edge_base + ei * e + t
+                }
+                // Face slot: shared, canonical parameterisation = the first
+                // element's `TET_FACES` order; the other elements re-key
+                // through MFEM's `TriDofOrd[orientation]`.
+                3 => {
+                    if nf == 0 {
+                        return Err("face slot at order < 3");
+                    }
+                    let mis = match (0..4).find(|&m| idx[m] == 0) {
+                        Some(m) => m,
+                        None => return Err("bad face slot"),
+                    };
+                    let [l0, l1, l2] = TET_FACES[mis];
+                    let (a, b) = (idx[l1], idx[l2]);
+                    let j = match tri_face_index(p, a, b) {
+                        Some(j) => j,
+                        None => return Err("face slot outside the reference face"),
+                    };
+                    let mut fkey = [n4[l0], n4[l1], n4[l2]];
+                    fkey.sort_unstable();
+                    let fi = match face_ids.get(&fkey) {
+                        Some(&fi) => fi as usize,
+                        None => return Err("unmatched mesh face"),
+                    };
+                    let test = [n4[l0], n4[l1], n4[l2]];
+                    let orient = match tri_orientation(&face_verts[fi], &test) {
+                        Some(o) => o,
+                        None => return Err("face corner mismatch"),
+                    };
+                    let canon = match tri_dof_ord(p, orient, j) {
+                        Some(v) => v,
+                        None => return Err("unmatched face dof ordering"),
+                    };
+                    face_base + fi * nf + canon
+                }
+                // Interior slot: private to the element; MFEM's
+                // `H1_TetrahedronElement` enumerates them in the same order as
+                // the reference element, so keep the running index.
+                _ => {
+                    if interior_seen >= nb {
+                        return Err("unexpected interior slot count");
+                    }
+                    let g = interior_base + el * nb + interior_seen;
+                    interior_seen += 1;
+                    g
+                }
+            };
+            conn.push(g as NodeId);
+        }
+        if interior_seen != nb {
+            return Err("unexpected interior slot count");
+        }
+    }
+
+    Ok((conn, keys, n_vert + n_edges * e + n_faces * nf + n_elems * nb))
+}
+
 /// Build the high-order `GeometryData` for an H1-continuous `nodes` section:
 /// the file stores one coordinate triple per DOF of the order-`p` H1 space and
 /// the per-element geometry tables are the element DOF lists (H1 topological
@@ -1005,6 +1396,7 @@ fn build_h1_geometry<M: MeshTopology>(
     raw: &[f64],
     ordering: usize,
     dim: usize,
+    tet_file_slots: Option<&TetFileSlots>,
 ) -> Option<GeometryData> {
     if order < 2 {
         return None; // linear geometry needs no table
@@ -1013,18 +1405,27 @@ fn build_h1_geometry<M: MeshTopology>(
         match build_h1_hex_geometry(mesh, order, raw, ordering) {
             HexGeom::Built(g) => return Some(g),
             HexGeom::NotHex => {
-                // D41: meshes without hexahedra fall through to the historical
-                // `DofManager` numbering below, which is only known-good for
-                // quads.  For curved *tet* meshes it is measurably wrong
-                // (`data/escher-p2.mesh`: 11 of 42 elements pick up another
-                // element's edge dofs, max |Δ| ≈ 1.3) — a fix needs MFEM's
-                // `TriDofOrd` face orientations, so for now at least do not
-                // stay silent about it.
-                eprintln!(
-                    "warning (D41): high-order `nodes` geometry on a 3D mesh without \
-                     hexahedra is read with fem-rs's own H1 numbering, which is not \
-                     verified against MFEM for this element type"
-                );
+                // D43: all-tetrahedron meshes get the same faithful treatment.
+                // Meshes with neither hexahedra nor tetrahedra still fall
+                // through to fem-rs's own numbering below (with a warning).
+                match build_h1_tet_geometry(mesh, order, raw, ordering, tet_file_slots) {
+                    TetGeom::Built(g) => return Some(g),
+                    TetGeom::Unsupported(why) => {
+                        eprintln!(
+                            "warning (D43): refusing to build high-order geometry for a \
+                             tetrahedral mesh ({why}); the mesh is read as straight-sided \
+                             (geometric order 1)"
+                        );
+                        return None;
+                    }
+                    TetGeom::NotTet => {
+                        eprintln!(
+                            "warning (D41): high-order `nodes` geometry on a 3D mesh without \
+                             hexahedra is read with fem-rs's own H1 numbering, which is not \
+                             verified against MFEM for this element type"
+                        );
+                    }
+                }
             }
             HexGeom::Unsupported(why) => {
                 // D41: accepting the (wrong) DofManager slot order here would
