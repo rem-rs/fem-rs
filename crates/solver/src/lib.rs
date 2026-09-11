@@ -131,6 +131,9 @@ pub mod geometric_mg;
 pub mod lor;
 pub mod multiphysics;
 pub mod multirate;
+/// Transient incompressible Navier–Stokes split-scheme solver
+/// (MFEM `miniapps/fluids/navier/navier_solver`).
+pub mod navier;
 pub mod ode;
 pub mod blockilu;
 pub mod p_multigrid;

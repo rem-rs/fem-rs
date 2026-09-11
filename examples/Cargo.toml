@@ -539,6 +539,10 @@ name = "schrodinger_flow"
 path = "../miniapps/fluids/schrodinger_flow.rs"
 
 [[example]]
+name = "navier_kovasznay"
+path = "../miniapps/fluids/navier_kovasznay.rs"
+
+[[example]]
 name = "hdiv_darcy"
 path = "../miniapps/hdiv_linear_solver/darcy.rs"
 
