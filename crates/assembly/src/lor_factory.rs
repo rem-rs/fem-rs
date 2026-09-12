@@ -4,6 +4,24 @@
 //! and `fem-solver` (LorAmgPrecond).  Users can go from a Pk H1Space directly to
 //! a working LOR-AMG solver without manually building the prolongation matrix P.
 //!
+//! # Prolongation from the *refined* mesh (D72)
+//!
+//! The H¹ LOR discretization refines every macro element into `order^dim`
+//! P1 sub-elements whose corners are the H¹(`order`) Gauss-Lobatto dof
+//! positions (MFEM `Mesh::MakeRefined(mesh_ho, order)`), so the LOR space has
+//! exactly as many dofs as the HO space (`n_lor == n_ho`) and the
+//! assumed-constraint map `P: LOR → HO` is square and full rank — this is the
+//! construction in `fem-space`'s [`LorH1`](fem_space::lor::LorH1), and it is what
+//! `build_lor_amg_h1` uses.
+//!
+//! Building `P` instead from a P1 space on the *same* (unrefined) mesh, as this
+//! factory used to do, gives a rectangular `P` (289×81 for a `Q2`/`P2` space on
+//! the `16×16` mesh) of rank 81: `M⁻¹ = P·A_LO⁻¹·Pᵀ` is then rank deficient, so
+//! `A_HO`'s residual leaves `range(P)` immediately and the preconditioned
+//! energy `(M⁻¹r, r)` — linger's CG stopping test — collapses to zero while
+//! `‖A_HO x − b‖/‖b‖` is still ≈ 0.6.  Reported residuals after the fix are the
+//! true ones; `d72_lor_h1_true_residual.rs` pins this.
+//!
 //! # Usage
 //! ```rust,ignore
 //! use fem_assembly::lor_factory::build_lor_amg_h1;
@@ -16,19 +34,33 @@
 //! ```
 
 use fem_core::{FemError, FemResult};
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::Mesh;
 use fem_solver::lor::{AmgConfig, LorAmgPrecond};
 use fem_space::fe_space::FESpace;
 use fem_space::h1::H1Space;
+use fem_space::lor::LorH1;
 
-use crate::transfer::build_prolongation_h1;
+/// Assumed-constraint prolongation of an H¹ LOR: `P[perm[i], i] = 1`.
+///
+/// This is the matrix form of [`LorH1::prolongate`]: `P x_lor` renumbers the
+/// LOR (refined-mesh) dofs into the HO numbering.  `LorH1` guarantees that
+/// `perm` is a bijection onto `0..n_ho`, so `P` is square and orthogonal.
+fn lor_h1_prolongation<const D: usize>(lor: &LorH1<D>) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::<f64>::new(lor.n_ho(), lor.n_lor());
+    for (i, &j) in lor.perm().iter().enumerate() {
+        coo.add(j as usize, i, 1.0);
+    }
+    coo.into_csr()
+}
 
 /// Build a LOR-AMG preconditioner for a 2-D high-order H¹ space.
 ///
 /// This function:
-/// 1. Creates a P1 H1Space on the same mesh (the "low-order refined" space).
-/// 2. Builds the prolongation `P: P1 → Pk` via `build_prolongation_h1`.
+/// 1. Builds the LOR discretization of `pk_space` (`fem-space` [`LorH1<2>`]):
+///    the refined mesh (`make_refined_2d`, MFEM `MakeRefined`) and the LOR↔HO
+///    dof map.
+/// 2. Forms the assumed-constraint prolongation `P: LOR → Pk` (square).
 /// 3. Builds the LOR-AMG preconditioner `M⁻¹ = P · A_LO⁻¹ · Pᵀ`
 ///    where `A_LO = Pᵀ · A_HO · P`.
 ///
@@ -44,56 +76,55 @@ pub fn build_lor_amg_h1(
     a_ho: &CsrMatrix<f64>,
     amg_cfg: Option<AmgConfig>,
 ) -> FemResult<LorAmgPrecond> {
-    if pk_space.order() <= 1 {
-        return Err(fem_core::FemError::Other(
-            "build_lor_amg_h1: space order must be >= 2 (P1 needs no LOR)".into(),
-        ));
-    }
-
-    // Build the low-order P1 space on the same mesh.
-    let p1 = H1Space::new(pk_space.mesh().clone(), 1);
-
-    // Build prolongation P: P1 → Pk.
-    let tol = 0.1;  // point-location tolerance on reference element
-    let (p, stats) = build_prolongation_h1(&p1, pk_space, tol);
-
-    if stats.located_count == 0 {
-        return Err(fem_core::FemError::Other(
-            "build_lor_amg_h1: prolongation located 0 DOFs — mesh mismatch?".into(),
-        ));
-    }
-
-    let amg_cfg = amg_cfg.unwrap_or_default();
-
-    Ok(LorAmgPrecond::build(a_ho, &p, &amg_cfg))
+    build_lor_amg_h1_generic::<2>(pk_space, a_ho, amg_cfg, |m, k| LorH1::<2>::new(m, k), "2D")
 }
 
-/// Build a LOR-AMG preconditioner for a 3-D high-order H¹ space (Tet4 mesh).
+/// Build a LOR-AMG preconditioner for a 3-D high-order H¹ space.
+///
+/// Same construction as [`build_lor_amg_h1`], with the 3-D LOR discretization
+/// (`LorH1<3>`: hexahedra at any order, tetrahedra at order 2).
 pub fn build_lor_amg_h1_3d(
     pk_space: &H1Space<Mesh<3>>,
     a_ho: &CsrMatrix<f64>,
     amg_cfg: Option<AmgConfig>,
 ) -> FemResult<LorAmgPrecond> {
+    build_lor_amg_h1_generic::<3>(pk_space, a_ho, amg_cfg, |m, k| LorH1::<3>::new(m, k), "3D")
+}
+
+/// Shared H¹ LOR-AMG construction (dimension-generic `LorH1::new` is not).
+fn build_lor_amg_h1_generic<const D: usize>(
+    pk_space: &H1Space<Mesh<D>>,
+    a_ho: &CsrMatrix<f64>,
+    amg_cfg: Option<AmgConfig>,
+    lor_new: fn(&Mesh<D>, u8) -> FemResult<LorH1<D>>,
+    dim_label: &str,
+) -> FemResult<LorAmgPrecond> {
     if pk_space.order() <= 1 {
-        return Err(fem_core::FemError::Other(
-            "build_lor_amg_h1_3d: space order must be >= 2".into(),
-        ));
+        return Err(FemError::Other(format!(
+            "build_lor_amg_h1{dim_label}: space order must be >= 2 (P1 needs no LOR)"
+        )));
+    }
+    if a_ho.nrows != pk_space.n_dofs() || a_ho.ncols != pk_space.n_dofs() {
+        return Err(FemError::Other(format!(
+            "build_lor_amg_h1{dim_label}: A_HO is {}×{} but the space has {} dofs",
+            a_ho.nrows,
+            a_ho.ncols,
+            pk_space.n_dofs()
+        )));
     }
 
-    let p1 = H1Space::new(pk_space.mesh().clone(), 1);
-
-    use crate::transfer::build_prolongation_h1_3d;
-    let tol = 0.1;
-    let (p, stats) = build_prolongation_h1_3d(&p1, pk_space, tol);
-
-    if stats.located_count == 0 {
-        return Err(fem_core::FemError::Other(
-            "build_lor_amg_h1_3d: prolongation located 0 DOFs".into(),
-        ));
+    // LOR discretization: refined mesh + LOR↔HO dof bijection.
+    let lor = lor_new(pk_space.mesh(), pk_space.order())?;
+    if lor.n_ho() != pk_space.n_dofs() {
+        return Err(FemError::Other(format!(
+            "build_lor_amg_h1{dim_label}: LOR has {} HO dofs against {} in the space",
+            lor.n_ho(),
+            pk_space.n_dofs()
+        )));
     }
 
+    let p = lor_h1_prolongation(&lor);
     let amg_cfg = amg_cfg.unwrap_or_default();
-
     Ok(LorAmgPrecond::build(a_ho, &p, &amg_cfg))
 }
 

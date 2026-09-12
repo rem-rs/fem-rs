@@ -73,20 +73,17 @@ fn d64_tri_p1_to_p2_prolongation_is_the_nodal_interpolation() {
 
 /// The end-to-end acceptance path of `plor_solvers` on a quad mesh: the LOR-AMG
 /// preconditioner must build (no `TriPointLocator` panic, no "located 0 DOFs")
-/// and PCG must run to termination and report numbers.
+/// and PCG must run to termination *to the true tolerance* and report it.
 ///
-/// NOTE — pre-existing, *not* D64: `solve_pcg_lor_amg` inherits linger's CG
-/// stopping test, which with a preconditioner compares the **preconditioned
-/// energy** `(B r, r)/(B r₀, r₀)` against `rtol` while *reporting* the true
-/// residual.  fem-rs's H¹ LOR is `B = P·A_LO⁻¹·Pᵀ` with `P: P1(same mesh) → Pk`
-/// of size 289×81, hence rank 81 — `(B r, r)` vanishes as soon as `r` becomes
-/// orthogonal to `range(P)`, so CG "converges" after a few iterations with
-/// `‖A x − b‖/‖b‖ ≈ 0.6`.  MFEM's H¹ LOR refines the mesh (`lor.cpp`:
-/// `Mesh::MakeRefined(mesh_ho, order)`) so that `P` is square and full rank and
-/// the energy test is sound.  The *tri* path behaves identically (0.638 vs
-/// 0.585 here) — this is a property of the shared LOR/H¹ wiring, so the test
-/// asserts only that the quad path runs and agrees with the tri path's
-/// behaviour, not that the residual is small.
+/// NOTE — D72, fixed in round 22: this test used to assert only that the quad
+/// path "runs and reports", because `build_lor_amg_h1` built `P: P1(same
+/// mesh) → Qk` of size `289×81` (rank 81).  `B = P·A_LO⁻¹·Pᵀ` was therefore rank
+/// deficient, and linger's energy-based CG test (`(B r, r)/(B r₀, r₀)`, MFEM's
+/// `CGSolver` test) collapsed as soon as `r` left `range(P)`: PCG reported
+/// "converged" after 4 iterations with `‖A x − b‖/‖b‖ ≈ 0.585` on this mesh
+/// (0.638 on the tri path, and 0.585/0.638/… for `-rs 0..4`).  The factory now
+/// refines the mesh (`fem_space::lor::LorH1`, MFEM `Mesh::MakeRefined`), so `P`
+/// is square and full rank and the residual below must meet the tolerance.
 #[test]
 fn d64_quad_lor_amg_runs_and_reports() {
     use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
@@ -135,5 +132,11 @@ fn d64_quad_lor_amg_runs_and_reports() {
         (res.final_residual - rel).abs() < 1e-12,
         "reported {:.6e} vs true {rel:.6e}",
         res.final_residual
+    );
+    // ... and the convergence is real: before D72 this was ≈ 0.585.
+    assert!(res.converged, "PCG must report convergence: {res:?}");
+    assert!(
+        rel <= 1e-9,
+        "true residual must meet the tolerance, got {rel:.3e} (pre-D72: 0.585)"
     );
 }

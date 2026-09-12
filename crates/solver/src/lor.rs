@@ -149,6 +149,20 @@ impl Preconditioner for LorAmgPrecond {
 /// * `x`    – initial guess / solution
 /// * `lor`  – the LOR-AMG preconditioner (built once)
 /// * `cfg`  – convergence parameters
+///
+/// # Reported residual
+///
+/// linger's CG stops on the preconditioned **energy**
+/// `(B r, r)/(B r₀, r₀)` (MFEM's `CGSolver` test), which is only equivalent to
+/// `‖A x − b‖/‖b‖` up to the preconditioner's spectral spread.  With a strong
+/// LOR-AMG cycle the two differ by orders of magnitude: on `plor_solvers`'
+/// 16×16 H¹ system (`-m data/inline-tri.mesh -o 2 -rs 1`) the energy test
+/// returns after 6 iterations at a *true* relative residual of 1.4e-3 while
+/// `rtol = 1e-10`.  Like [`crate::solve_pcg_ams`] and [`crate::solve_pcg_ads`],
+/// this entry point therefore restarts CG from the current iterate,
+/// recomputing the true residual each round, until it meets the tolerance —
+/// so the returned `final_residual` is the true one *and* the reported
+/// convergence is real.
 pub fn solve_pcg_lor_amg(
     a_ho: &CsrMatrix<f64>,
     b: &[f64],
@@ -164,8 +178,49 @@ pub fn solve_pcg_lor_amg(
             rhs: b.len(),
         });
     }
-    // Delegate to `solve_pcg_precond` which takes any Preconditioner.
-    crate::solve_pcg_precond(a_ho, b, x, lor, cfg)
+
+    let b_norm = b.iter().fold(0.0_f64, |s, &v| s + v * v).sqrt();
+    let tol = cfg.rtol.max(0.0);
+    let atol = cfg.atol.max(0.0);
+    let mut total_iters = 0usize;
+    let mut final_residual = f64::INFINITY;
+    let mut converged = false;
+
+    for _round in 0..8 {
+        // r = b − A x (true residual).
+        let mut ax = vec![0.0_f64; n];
+        a_ho.spmv(x, &mut ax);
+        let mut r = vec![0.0_f64; n];
+        for i in 0..n {
+            r[i] = b[i] - ax[i];
+        }
+        let r_norm = r.iter().fold(0.0_f64, |s, &v| s + v * v).sqrt();
+        final_residual = r_norm / b_norm;
+        if r_norm <= tol * b_norm + atol {
+            converged = true;
+            break;
+        }
+        if total_iters >= cfg.max_iter {
+            break;
+        }
+
+        let sub_cfg = SolverConfig {
+            max_iter: cfg.max_iter - total_iters,
+            ..cfg.clone()
+        };
+        let mut dx = vec![0.0_f64; n];
+        let res = crate::solve_pcg_precond(a_ho, &r, &mut dx, lor, &sub_cfg)?;
+        total_iters += res.iterations;
+        for i in 0..n {
+            x[i] += dx[i];
+        }
+    }
+
+    Ok(SolveResult {
+        converged,
+        iterations: total_iters,
+        final_residual,
+    })
 }
 
 /// Solve `A_HO · x = b` using GMRES with the LOR-AMG preconditioner.
