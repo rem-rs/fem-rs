@@ -23,6 +23,15 @@
 //!   basis `(0,y-1)/(x,0)/(0,y)/(x-1,0)`.
 //! - k = 1: identical to [`QuadRT1`](super::QuadRT1) (single-square mass
 //!   matrices match to machine precision).
+//!
+//! # Open-basis variants
+//!
+//! [`QuadRTk::new`] is the `RT_FECollection(k, 2)` default (open =
+//! `BasisType::GaussLegendre`, nodal point-value DOFs).  The LOR-compatible
+//! pair MFEM documents (`fem/lor/lor.hpp`, `RT_QuadrilateralElement(k,
+//! GaussLobatto, IntegratedGLL)`) is [`QuadRTk::new_integrated_gll`]: same DOF
+//! count/layout/node positions, integrated Gerritsma open modes.  It is the
+//! 2-D analogue of [`HexRTk`](super::HexRTk) (which is IGLL-only).
 
 use crate::quadrature::quad_rule_01;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
@@ -294,14 +303,70 @@ fn rt_data(k: usize) -> &'static QuadRTkData {
     })
 }
 
+/// The 1-D open-factor kind of the RT tensor basis — MFEM's `ob_type`
+/// argument of `RT_QuadrilateralElement(p, cb_type, ob_type)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuadRTOpen {
+    /// MFEM `BasisType::GaussLegendre` — the `RT_FECollection(p, 2)` default
+    /// (what [`QuadRTk::new`] builds): nodal open modes at the `k+1`
+    /// Gauss-Legendre points, so every DOF is a point-value functional.
+    GaussLegendre,
+    /// MFEM `BasisType::IntegratedGLL` — the open half of the
+    /// `(GaussLobatto, IntegratedGLL)` pair MFEM documents for LOR
+    /// (`fem/lor/lor.hpp`), matching [`HexRTk`](super::HexRTk).  Open modes are
+    /// the integrated (Gerritsma) functions `o_i = -Σ_{j<=i} c'_j` built from
+    /// the degree-`(k+1)` GLL closed basis (`Poly_1D::Basis::EvalIntegrated`
+    /// with `scale_integrated = false`, MFEM's `INTEGRAL` map type; the
+    /// `is_nodal` flag is false).  Same DOF count, layout and node positions as
+    /// [`QuadRTk::new`]; only the open modes change.
+    IntegratedGLL,
+}
+
 pub struct QuadRTk {
     order: usize,
+    open: QuadRTOpen,
 }
 impl QuadRTk {
     pub fn new(p: usize) -> Self {
         assert!(p < 7, "QuadRTk: order {p} exceeds supported range");
-        QuadRTk { order: p }
+        QuadRTk { order: p, open: QuadRTOpen::GaussLegendre }
     }
+
+    /// MFEM `RT_QuadrilateralElement(p, GaussLobatto, IntegratedGLL)` — the
+    /// LOR-compatible basis pair (MFEM's `CheckBasisType` demands it for
+    /// `LORDiscretization`), the 2-D analogue of
+    /// [`HexRTk::new`](super::HexRTk::new).
+    pub fn new_integrated_gll(p: usize) -> Self {
+        assert!(p < 7, "QuadRTk: order {p} exceeds supported range");
+        QuadRTk { order: p, open: QuadRTOpen::IntegratedGLL }
+    }
+
+    /// The `k+1` open 1-D modes at `x ∈ [0,1]` (MFEM `obasis1d.Eval` /
+    /// `obasis1d.EvalIntegrated(dshape_c)`).
+    fn open_values(&self, x: f64) -> Vec<f64> {
+        let d = rt_data(self.order);
+        match self.open {
+            QuadRTOpen::GaussLegendre => bary_eval(&d.op, x).0,
+            QuadRTOpen::IntegratedGLL => partial_open(&bary_eval(&d.cp, x).1),
+        }
+    }
+}
+
+/// Integrated (Gerritsma) open modes `o_i = -Σ_{j<=i} c'_j` from the derivative
+/// array `d` of the degree-`(k+1)` closed GLL basis (`k+2` entries → `k+1`
+/// modes, unit integral over `[0,1]`): MFEM `Poly_1D::Basis::EvalIntegrated`
+/// with `scale_integrated = false`.
+fn partial_open(d: &[f64]) -> Vec<f64> {
+    let n = d.len() - 1;
+    let mut o = vec![0.0_f64; n];
+    if n == 0 {
+        return o;
+    }
+    o[0] = -d[0];
+    for i in 1..n {
+        o[i] = o[i - 1] - d[i];
+    }
+    o
 }
 
 impl VectorReferenceElement for QuadRTk {
@@ -338,8 +403,8 @@ impl VectorReferenceElement for QuadRTk {
         let p = d.p;
         let (cx, _) = bary_eval(&d.cp, xi[0]);
         let (cy, _) = bary_eval(&d.cp, xi[1]);
-        let (ox, _) = bary_eval(&d.op, xi[0]);
-        let (oy, _) = bary_eval(&d.op, xi[1]);
+        let ox = self.open_values(xi[0]);
+        let oy = self.open_values(xi[1]);
         values.fill(0.0);
         let mut o = 0;
         // x components: j = 0..p (open y), i = 0..p+1 (closed x)
@@ -378,8 +443,8 @@ impl VectorReferenceElement for QuadRTk {
         let p = d.p;
         let (_cx, dcx) = bary_eval(&d.cp, xi[0]);
         let (_cy, dcy) = bary_eval(&d.cp, xi[1]);
-        let (ox, _) = bary_eval(&d.op, xi[0]);
-        let (oy, _) = bary_eval(&d.op, xi[1]);
+        let ox = self.open_values(xi[0]);
+        let oy = self.open_values(xi[1]);
         let mut o = 0;
         // x components: d/dx [c_i(x)·o_j(y)] = dc_i(x)·o_j(y)
         for j in 0..=p {
@@ -541,5 +606,193 @@ mod tests {
                 assert!(col_max[i] > 1e-6, "k={k}: dof {i} has no nodal value");
             }
         }
+    }
+
+    /// The two open-basis variants are the ones MFEM distinguishes:
+    ///
+    /// - `GaussLegendre` (the `RT_FECollection(p, 2)` default): the open modes
+    ///   are *nodal* at the `p+1` Gauss-Legendre points, `o_i(op_j) = δ_ij`
+    ///   (`is_nodal = true`);
+    /// - `IntegratedGLL` (the LOR pair): the open modes are the Gerritsma
+    ///   subcell integrals `o_i = -Σ_{j<=i} c'_j`, so
+    ///   `∫_{I_j} o_i dt = δ_ij` over the `p+1` GLL sub-intervals of `[0,1]`
+    ///   (`Poly_1D::Basis::EvalIntegrated` with `scale_integrated = false`,
+    ///   `is_nodal = false`).
+    ///
+    /// Both share the DOF count, layout and node positions.
+    #[test]
+    fn integrated_gll_open_modes_are_subcell_integrals() {
+        let (xs, ws) = crate::quadrature::gauss_legendre_01_arbitrary(8);
+        for k in 0..=4usize {
+            let igll = QuadRTk::new_integrated_gll(k);
+            let gl = QuadRTk::new(k);
+            assert_eq!(igll.n_dofs(), gl.n_dofs(), "k={k}: dof count must match");
+            assert_eq!(igll.dof_coords(), gl.dof_coords(), "k={k}: nodes must match");
+            let d = rt_data(k);
+            assert_eq!(d.cp.len(), k + 2, "k={k}: closed GLL node count");
+            // Subcell integrals of the integrated modes.
+            for (j, sub) in d.cp.windows(2).enumerate() {
+                let (a, b) = (sub[0], sub[1]);
+                let mut acc = vec![0.0_f64; k + 1];
+                for (t, w) in xs.iter().zip(&ws) {
+                    let x = a + (b - a) * t;
+                    for (i, v) in igll.open_values(x).iter().enumerate() {
+                        acc[i] += w * (b - a) * v;
+                    }
+                }
+                for (i, v) in acc.iter().enumerate() {
+                    let expect = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (v - expect).abs() < 1e-12,
+                        "k={k}: ∫ over sub-interval {j} of mode {i} = {v}, expected {expect}"
+                    );
+                }
+            }
+            // Nodal values of the GaussLegendre modes at their own points.
+            for (i, p) in d.op.iter().enumerate() {
+                let vals = gl.open_values(*p);
+                for (l, v) in vals.iter().enumerate() {
+                    let expect = if l == i { 1.0 } else { 0.0 };
+                    assert!(
+                        (v - expect).abs() < 1e-12,
+                        "k={k}: o_{l}(op_{i}) = {v}, expected {expect}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// MFEM 4.10 reference for the D76 element
+    /// `RT_QuadrilateralElement(1, GaussLobatto, IntegratedGLL)`:
+    /// `M_ij = ∫ Φ_i·Φ_j` and `D_ij = ∫ (div Φ_i)(div Φ_j)` over the unit square.
+    ///
+    /// Provenance: `RT_FECollection(1, 2, GaussLobatto, IntegratedGLL)` on a
+    /// one-element `Mesh::MakeCartesian2D` quad, assembled with
+    /// `VectorFEMassIntegrator` / `DivDivIntegrator` and read back through
+    /// `BilinearForm::SpMat`.  Two traps had to be cleared before the numbers
+    /// were usable, and both are why the first attempt read 1.33e-1 off:
+    ///   * the global dof numbering follows the **mesh entities**, so
+    ///     `GetElementDofs(0)` is a permutation of the element-local order
+    ///     (`0 1 2 3 -6 -5 -8 -7 8 9 10 11` for this element) and the global
+    ///     matrix must be reindexed back into local order;
+    ///   * those entries are **signed** (negative = flipped dof, MFEM's
+    ///     `index i < 0` ⇒ dof `-1-i` with a sign flip), which HDiv needs.
+    /// The two-argument `CalcVShape` must also NOT be used for a probe like
+    /// this: the tensor RT element needs its element `Transformation`, and
+    /// without it MFEM returns a reference basis with eight of the twelve
+    /// columns identically zero.
+    ///
+    /// Entry-wise agreement pins the values, the normalization and the local dof
+    /// ordering in one shot — the check the round-23 pencil-only evidence was
+    /// missing.
+    const MFEM_RT_QUAD_P1_IGLL_MASS: [[f64; 12]; 12] = [
+        [0.3111111111111113, -0.0444444444444444, 0.0, 0.0, -0.0111111111111111, 0.07777777777777782, 0.0, 0.0, 0.0, 0.0, 0.15555555555555564, 0.0222222222222222],
+        [-0.0444444444444444, 0.31111111111111106, 0.0, 0.0, 0.07777777777777778, -0.0111111111111111, 0.0, 0.0, 0.0, 0.0, -0.022222222222222192, -0.15555555555555556],
+        [0.0, 0.0, 0.31111111111111134, -0.0444444444444444, 0.0, 0.0, -0.0111111111111111, 0.07777777777777782, 0.15555555555555564, 0.0222222222222222, 0.0, 0.0],
+        [0.0, 0.0, -0.0444444444444444, 0.31111111111111106, 0.0, 0.0, 0.07777777777777778, -0.0111111111111111, -0.022222222222222192, -0.15555555555555553, 0.0, 0.0],
+        [-0.0111111111111111, 0.07777777777777778, 0.0, 0.0, 0.31111111111111106, -0.04444444444444439, 0.0, 0.0, 0.0, 0.0, 0.022222222222222192, 0.15555555555555553],
+        [0.07777777777777782, -0.0111111111111111, 0.0, 0.0, -0.04444444444444439, 0.31111111111111134, 0.0, 0.0, 0.0, 0.0, -0.15555555555555564, -0.022222222222222195],
+        [0.0, 0.0, -0.0111111111111111, 0.07777777777777778, 0.0, 0.0, 0.31111111111111106, -0.0444444444444444, 0.022222222222222192, 0.15555555555555553, 0.0, 0.0],
+        [0.0, 0.0, 0.07777777777777782, -0.0111111111111111, 0.0, 0.0, -0.0444444444444444, 0.3111111111111113, -0.15555555555555564, -0.0222222222222222, 0.0, 0.0],
+        [0.0, 0.0, 0.15555555555555564, -0.022222222222222192, 0.0, 0.0, 0.022222222222222192, -0.15555555555555564, 1.2444444444444447, 0.1777777777777775, 0.0, 0.0],
+        [0.0, 0.0, 0.0222222222222222, -0.15555555555555553, 0.0, 0.0, 0.15555555555555553, -0.0222222222222222, 0.1777777777777775, 1.244444444444444, 0.0, 0.0],
+        [0.15555555555555564, -0.022222222222222192, 0.0, 0.0, 0.022222222222222192, -0.15555555555555564, 0.0, 0.0, 0.0, 0.0, 1.244444444444445, 0.17777777777777748],
+        [0.0222222222222222, -0.15555555555555556, 0.0, 0.0, 0.15555555555555553, -0.022222222222222195, 0.0, 0.0, 0.0, 0.0, 0.17777777777777748, 1.244444444444444],
+    ];
+
+    const MFEM_RT_QUAD_P1_IGLL_DIVDIV: [[f64; 12]; 12] = [
+        [5.444444444444443, -0.7777777777777762, -0.7777777777777775, 0.11111111111111084, 0.11111111111111084, -0.7777777777777775, -0.7777777777777762, 5.444444444444443, 6.2222222222222205, 0.8888888888888867, -6.2222222222222205, -0.8888888888888868],
+        [-0.7777777777777762, 5.444444444444441, 5.444444444444442, -0.7777777777777759, -0.7777777777777769, 0.11111111111111084, 0.11111111111111066, -0.7777777777777762, -6.222222222222217, -0.8888888888888864, 0.8888888888888868, 6.222222222222216],
+        [-0.7777777777777775, 5.444444444444442, 5.444444444444443, -0.7777777777777761, -0.7777777777777772, 0.11111111111111102, 0.11111111111111084, -0.7777777777777775, -6.2222222222222205, -0.8888888888888868, 0.8888888888888882, 6.222222222222219],
+        [0.11111111111111084, -0.7777777777777759, -0.7777777777777761, 5.444444444444441, 5.444444444444441, -0.7777777777777772, -0.777777777777777, 0.11111111111111084, 0.8888888888888868, 6.222222222222217, -0.8888888888888877, -6.222222222222216],
+        [0.11111111111111084, -0.7777777777777769, -0.7777777777777772, 5.444444444444441, 5.444444444444441, -0.7777777777777761, -0.7777777777777759, 0.11111111111111084, 0.8888888888888877, 6.222222222222216, -0.8888888888888868, -6.222222222222217],
+        [-0.7777777777777775, 0.11111111111111084, 0.11111111111111102, -0.7777777777777772, -0.7777777777777761, 5.444444444444443, 5.444444444444442, -0.7777777777777775, -0.8888888888888882, -6.222222222222218, 6.2222222222222205, 0.8888888888888868],
+        [-0.7777777777777762, 0.11111111111111066, 0.11111111111111084, -0.777777777777777, -0.7777777777777759, 5.444444444444442, 5.444444444444441, -0.7777777777777762, -0.8888888888888867, -6.222222222222216, 6.222222222222217, 0.8888888888888864],
+        [5.444444444444443, -0.7777777777777762, -0.7777777777777775, 0.11111111111111084, 0.11111111111111084, -0.7777777777777775, -0.7777777777777762, 5.444444444444443, 6.2222222222222205, 0.8888888888888867, -6.2222222222222205, -0.8888888888888868],
+        [6.2222222222222205, -6.222222222222217, -6.2222222222222205, 0.8888888888888868, 0.8888888888888877, -0.8888888888888882, -0.8888888888888867, 6.2222222222222205, 12.444444444444438, 1.7777777777777732, -7.111111111111106, -7.111111111111104],
+        [0.8888888888888867, -0.8888888888888864, -0.8888888888888868, 6.222222222222217, 6.222222222222216, -6.222222222222218, -6.222222222222216, 0.8888888888888867, 1.7777777777777732, 12.444444444444432, -7.111111111111104, -7.111111111111101],
+        [-6.2222222222222205, 0.8888888888888868, 0.8888888888888882, -0.8888888888888877, -0.8888888888888868, 6.2222222222222205, 6.222222222222217, -6.2222222222222205, -7.111111111111106, -7.111111111111104, 12.444444444444438, 1.7777777777777732],
+        [-0.8888888888888868, 6.222222222222216, 6.222222222222219, -6.222222222222216, -6.222222222222217, 0.8888888888888868, 0.8888888888888864, -0.8888888888888868, -7.111111111111104, -7.111111111111101, 1.7777777777777732, 12.44444444444443],
+    ];
+
+    /// Assemble the element mass and div-div matrices from a reference element's
+    /// own quadrature, in the reference square where `|det J| = 1` so the rule's
+    /// weights are the physical ones.
+    fn element_matrices(el: &dyn VectorReferenceElement) -> (Vec<f64>, Vec<f64>) {
+        let n = el.n_dofs();
+        let rule = el.quadrature(12);
+        let mut mass = vec![0.0_f64; n * n];
+        let mut ddiv = vec![0.0_f64; n * n];
+        let mut v = vec![0.0_f64; n * 2];
+        let mut dv = vec![0.0_f64; n];
+        for (q, xi) in rule.points.iter().enumerate() {
+            let w = rule.weights[q];
+            el.eval_basis_vec(xi, &mut v);
+            el.eval_div(xi, &mut dv);
+            for i in 0..n {
+                for j in 0..n {
+                    mass[i * n + j] += w * (v[2 * i] * v[2 * j] + v[2 * i + 1] * v[2 * j + 1]);
+                    ddiv[i * n + j] += w * dv[i] * dv[j];
+                }
+            }
+        }
+        (mass, ddiv)
+    }
+
+    /// D76: the LOR-compatible quad RT element must reproduce MFEM's element
+    /// matrices entry by entry.  This pins the basis *and* the dof order, which
+    /// the pencil metrics alone could not (a dof permutation leaves a pencil
+    /// flat).
+    #[test]
+    fn integrated_gll_p1_element_matrices_match_mfem_dump() {
+        let el = QuadRTk::new_integrated_gll(1);
+        assert_eq!(el.n_dofs(), 12);
+        let (mass, ddiv) = element_matrices(&el);
+        let mut worst_mass = 0.0_f64;
+        let mut worst_ddiv = 0.0_f64;
+        for i in 0..12 {
+            for j in 0..12 {
+                worst_mass =
+                    worst_mass.max((mass[i * 12 + j] - MFEM_RT_QUAD_P1_IGLL_MASS[i][j]).abs());
+                worst_ddiv =
+                    worst_ddiv.max((ddiv[i * 12 + j] - MFEM_RT_QUAD_P1_IGLL_DIVDIV[i][j]).abs());
+            }
+        }
+        assert!(
+            worst_mass < 1e-13,
+            "mass max|Δ| = {worst_mass:.3e} vs MFEM (the GaussLegendre variant differs by \
+             ~6e-1 here, so this test discriminates the open basis)"
+        );
+        assert!(worst_ddiv < 1e-13, "div-div max|Δ| = {worst_ddiv:.3e} vs MFEM");
+    }
+
+    /// The GaussLegendre variant must *not* reproduce the IGLL fixture, otherwise
+    /// the test above could pass for the wrong reason.
+    #[test]
+    fn integrated_gll_p1_differs_from_gauss_legendre() {
+        let gl = QuadRTk::new(1);
+        let igll = QuadRTk::new_integrated_gll(1);
+        let (m_gl, _) = element_matrices(&gl);
+        let (m_igll, _) = element_matrices(&igll);
+        let mut diff = 0.0_f64;
+        for i in 0..12 {
+            for j in 0..12 {
+                diff = diff.max((m_gl[i * 12 + j] - m_igll[i * 12 + j]).abs());
+            }
+        }
+        assert!(diff > 1e-3, "GL and IGLL variants coincide (diff {diff:.3e})");
+    }
+
+    /// MFEM gives identical `p = 0` element matrices for the `GaussLegendre` and
+    /// `IntegratedGLL` open bases (dumped the same way), so the Rust `p = 0`
+    /// special case must too.
+    #[test]
+    fn integrated_gll_p0_matches_gauss_legendre() {
+        let gl = QuadRTk::new(0);
+        let igll = QuadRTk::new_integrated_gll(0);
+        let (m_gl, d_gl) = element_matrices(&gl);
+        let (m_igll, d_igll) = element_matrices(&igll);
+        assert_eq!(m_gl, m_igll, "p = 0 mass blocks differ between open bases");
+        assert_eq!(d_gl, d_igll, "p = 0 div-div blocks differ between open bases");
     }
 }

@@ -137,6 +137,20 @@ fn l2_err_2d(mesh: &Mesh<2>, sp: &HCurlSpace<Mesh<2>>, u: &[f64]) -> f64 {
 }
 
 #[test]
+fn square2d_nd1_interpolation_matches_mfem() {
+    // The `rf0` (unrefined 2-triangle square) harness number from the module
+    // docs: interpolation of the ex3 exact field, no solve.
+    let mesh = square2();
+    let space = HCurlSpace::new(mesh, 1);
+    let u_proj = space.interpolate_vector(&|x| e_exact(x).to_vec()).into_vec();
+    let l2 = l2_err_2d(space.mesh(), &space, &u_proj);
+    assert!(
+        (l2 - 0.5281841004551823).abs() < 1e-9,
+        "interp L2 {l2} vs C++ 0.5281841004551823"
+    );
+}
+
+#[test]
 fn square2d_nd1_pipeline_matches_mfem() {
     let mut mesh = square2();
     for _ in 0..3 {

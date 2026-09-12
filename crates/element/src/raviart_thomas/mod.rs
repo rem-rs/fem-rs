@@ -39,7 +39,7 @@ pub use hex_rtk::{curl_tau, free_axes, HexRTk, HEX_RT_FACES};
 pub use prism::{PrismRT0, PrismRTk};
 pub use pyramid::{PyraRT0, PyraRTk};
 pub use quad_rt1::QuadRT1;
-pub use quad_rtk::QuadRTk;
+pub use quad_rtk::{QuadRTk, QuadRTOpen};
 pub use tet_rt1::TetRT1;
 pub use tet_rt2::TetRT2;
 pub use tet_rtk::TetRTk;
