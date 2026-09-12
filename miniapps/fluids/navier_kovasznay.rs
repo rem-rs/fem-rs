@@ -52,9 +52,12 @@
 //!   element's DOF list, which the boundary quadrature-point payload does not
 //!   carry.  It evaluates the trace of the *volume* basis, which is exactly
 //!   what MFEM's boundary element assembly computes.
-//! * `D` (MFEM `VectorDivergenceIntegrator`), `G` (MFEM `GradientIntegrator`)
-//!   and the convection residual `N(u) = -∫(u·∇u)·v` (MFEM
-//!   `VectorConvectionNLFIntegrator`) are assembled element-wise here:
+//! * `D` (MFEM `VectorDivergenceIntegrator`) and `G` (MFEM
+//!   `GradientIntegrator`) are assembled element-wise here, while the
+//!   convection residual `N(u) = -∫(u·∇u)·v` runs on the kernel since D52 —
+//!   `standard::nonlinear_form::NonlinearForm` +
+//!   `standard::VectorConvectionNLFIntegrator` (MFEM `NonlinearForm::Mult`
+//!   with `VectorConvectionNLFIntegrator`, `Q = 1`):
 //!   * `mixed::ref_elem_vol` now covers order 6 (D46①), but the mixed
 //!     assembler still has no `H¹ × [H¹]^d` coupling path — the column space
 //!     would have to be handled component-wise, which
@@ -65,16 +68,13 @@
 //!     which is exactly the flux carried by `FText_bdr`/`g_bdr`, so both must
 //!     be assembled independently (`divergence_theorem_identity` validates
 //!     `D·u + Gᵀ·u = ∫_Γ(u·n)φ`);
-//!   * `standard::VectorConvectionIntegrator` uses `QpData::weight` — the
-//!     `ip.weight/|detJ|` convention documented for `DiffusionIntegrator` —
-//!     instead of the bare `QpData::ref_weight` that the `ip.weight ·
-//!     adj(J)∇φ` convection family needs, so its matrix comes out
-//!     `1/|detJ|` too large.  On unit-sized elements the bug is invisible,
-//!     which is why its unit tests miss it: on
-//!     `Mesh::make_cartesian_2d(2, 1, 1, 1)` with `u = (x, y)`,
-//!     `Assembler::assemble_bilinear(&space, &[&VectorConvectionIntegrator
-//!     ::new(&u, n_scalar)], 5) · u` is exactly `2×` `M·u` (should be equal).
-//!     `convection_residual_of_linear_field` guards the local version.
+//!   * the convection integrator pins `int_rule = 2*order + 1` (MFEM
+//!     `SetIntRule`): MFEM's default `GetRule` is `2p + OrderGrad` = 3p for
+//!     2-D Qk on Q1 geometry, but both rules are exact for the degree-2p−1
+//!     integrand on straight elements, and `2p+1` keeps the run
+//!     bit-identical to the pre-D52 element loop (D42 history: the old
+//!     misnamed bilinear `VectorConvectionNLFIntegrator` used the
+//!     `ip.weight/|detJ|` weight on the scalar layout and is deleted).
 //! * The L² errors use MFEM's `ComputeL2Error` rule
 //!   (`intorder = 2*fe->GetOrder() + 3`); with the obvious `2*order` rule the
 //!   velocity error is off by ~23% because the exact solution is not a
@@ -106,7 +106,11 @@
 use fem_assembly::assembler::face_dofs_h1;
 use fem_assembly::postproc::coefficient::FnVectorCoeff;
 use fem_assembly::standard::boundary_flux::VectorBoundaryNormalLFIntegrator;
-use fem_assembly::standard::{DiffusionIntegrator, VectorDiffusionIntegrator, VectorH1MassIntegrator};
+use fem_assembly::standard::nonlinear_form::NonlinearForm;
+use fem_assembly::standard::{
+    DiffusionIntegrator, VectorConvectionNLFIntegrator, VectorDiffusionIntegrator,
+    VectorH1MassIntegrator,
+};
 use fem_assembly::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
 use fem_assembly::Assembler;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElem};
@@ -562,69 +566,25 @@ impl NavierDiscretization for KovasznayDisc {
 
     fn convection_residual(&self, u: &[f64], out: &mut [f64]) {
         // `N->Mult(u, Nu)` for MFEM's `VectorConvectionNLFIntegrator` with
-        // `Q = 1`: `Nu_i = ∫ (u·∇u)·φ_i dx`, assembled element by element.
+        // `Q = 1` (`nlcoeff.constant = -1` is applied by the solver):
+        // `Nu_i = ∫ (u·∇u)·φ_i dx`, now via the kernel `NonlinearForm`
+        // framework + `standard::VectorConvectionNLFIntegrator` (D52; the
+        // integrator is MFEM's `ip.weight · CalcPhysDShape` form on the
+        // interleaved `[H¹]²` layout).
         //
-        // This is deliberately *not* `VectorConvectionIntegrator` + `spmv`:
-        // fem-rs's integrator uses `QpData::weight` — the `ip.weight/|detJ|`
-        // convention documented for `DiffusionIntegrator` — instead of the
-        // bare `QpData::ref_weight` that the `ip.weight · adj(J)∇φ` convection
-        // family needs, so its matrix is `1/|detJ|` too large (invisible on
-        // unit-sized elements, which is why its unit tests miss it).  The
-        // element residual below is MFEM's `ip.weight * dshapedxt` form.
-        out.fill(0.0);
-        let ref_elem = self.h1_elem();
-        let n_ldofs = ref_elem.n_dofs();
-        let quad = ref_elem.quadrature(self.quad_order);
-        let mut phi = vec![0.0_f64; n_ldofs];
-        let mut grad_ref = vec![0.0_f64; n_ldofs * 2];
-        let mut grad_phys = vec![0.0_f64; n_ldofs * 2];
-        let mut el = vec![0.0_f64; 2 * n_ldofs];
-        for e in 0..self.mesh.n_elements() as u32 {
-            let dofs = self.vel_space.element_dofs(e);
-            let nodes = self.mesh.element_nodes(e);
-            let geo = geo_ref_elem_from_mesh(&self.mesh, e).expect("quad geometry");
-            el.fill(0.0);
-            for (q, xi) in quad.points.iter().enumerate() {
-                ref_elem.eval_basis(xi, &mut phi);
-                ref_elem.eval_grad_basis(xi, &mut grad_ref);
-                let (jac, det_j, _xp) = isoparametric_jacobian(&self.mesh, nodes, &*geo, xi, 2);
-                let jinv = jac.try_inverse().expect("degenerate element");
-                for k in 0..n_ldofs {
-                    for d in 0..2 {
-                        let mut g = 0.0_f64;
-                        for m in 0..2 {
-                            g += grad_ref[k * 2 + m] * jinv[(m, d)];
-                        }
-                        grad_phys[k * 2 + d] = g;
-                    }
-                }
-                let mut uh = [0.0_f64; 2];
-                for k in 0..n_ldofs {
-                    for c in 0..2 {
-                        uh[c] += u[dofs[k * 2 + c] as usize] * phi[k];
-                    }
-                }
-                let mut conv = [0.0_f64; 2];
-                for c in 0..2 {
-                    let mut grad_uc = [0.0_f64; 2];
-                    for l in 0..n_ldofs {
-                        let uc = u[dofs[l * 2 + c] as usize];
-                        grad_uc[0] += uc * grad_phys[l * 2];
-                        grad_uc[1] += uc * grad_phys[l * 2 + 1];
-                    }
-                    conv[c] = uh[0] * grad_uc[0] + uh[1] * grad_uc[1];
-                }
-                let w = quad.weights[q] * det_j.abs();
-                for k in 0..n_ldofs {
-                    for c in 0..2 {
-                        el[k * 2 + c] += w * phi[k] * conv[c];
-                    }
-                }
-            }
-            for (k, &g) in dofs.iter().enumerate() {
-                out[g as usize] += el[k];
-            }
-        }
+        // `int_rule` pins the volume rule to the `2*order + 1` rule this port
+        // validated against C++ (MFEM's default `GetRule` is
+        // `2p + OrderGrad` = 3p for 2-D Qk on Q1 geometry; both rules are
+        // exact for the degree-2p−1 integrand on straight elements, and the
+        // pinned rule keeps the output bit-identical to the pre-D52 local
+        // loop).  `convection_residual_of_linear_field` pins the math.
+        let integ = VectorConvectionNLFIntegrator {
+            coeff: 1.0,
+            int_rule: Some(i32::from(self.quad_order)),
+        };
+        let mut nf = NonlinearForm::new();
+        nf.add_domain_integrator(&integ);
+        nf.mult(&self.vel_space, u, out);
     }
 
     /// `ComputeCurl2D(u, cu)` followed by `ComputeCurl2D(cu, ccu, true)`.

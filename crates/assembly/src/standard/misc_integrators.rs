@@ -45,30 +45,6 @@ impl<C: ScalarCoeff> BilinearIntegrator for VectorDivergenceIntegrator<C> {
     }
 }
 
-pub struct VectorConvectionNLFIntegrator<V: VectorCoeff> {
-    pub velocity: V,
-}
-
-impl<V: VectorCoeff> BilinearIntegrator for VectorConvectionNLFIntegrator<V> {
-    fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
-        let n = qp.n_dofs;
-        let dim = qp.dim;
-        let ctx = CoeffCtx::from_qp(qp.x_phys, dim, qp.elem_id, qp.elem_tag, None, None);
-        // `grad_phys` carries the adjugate scaling, so pair it with the bare
-        // quadrature weight (see VectorConvectionIntegrator).
-        let w = qp.ref_weight;
-        let mut v_buf = vec![0.0; dim];
-        self.velocity.eval(&ctx, &mut v_buf);
-        for i in 0..n {
-            for j in 0..n {
-                let mut conv = 0.0;
-                for c in 0..dim { conv += v_buf[c] * qp.grad_phys[j * dim + c]; }
-                k_elem[i * n + j] += w * qp.phi[i] * conv;
-            }
-        }
-    }
-}
-
 /// White Gaussian noise right-hand side generator (MFEM 1:1).
 ///
 /// Per element this draws `n = element dofs` standard normals from the same
@@ -501,35 +477,5 @@ mod weight_convention_tests {
             (r - 1.0).abs() < 1e-9,
             "VectorDivergenceIntegrator scale ratio = {r} (expected 1)"
         );
-    }
-
-    /// D42 finding (documented, not fixed): `VectorConvectionNLFIntegrator`
-    /// indexes `grad_phys[j * dim + c]` for `j` over all `n_dofs`, i.e. the
-    /// *scalar-space* layout — it implements `∫ φᵢ (v·∇φⱼ) dx` with a vector
-    /// coefficient `v` (MFEM `ConvectionIntegrator`, bare `ip.weight`), not
-    /// MFEM's `VectorConvectionNLFIntegrator` (`nonlininteg.cpp` uses
-    /// `CalcPhysDShape` = the true gradient with `ip.weight·Trans.Weight()`,
-    /// on the interleaved `[H¹]^d` layout; on such a space the fem-rs indexing
-    /// overflows `grad_phys` and panics).  The weight itself (`ref_weight`) is
-    /// correct for the scalar-space operator, so `p = 1` grad factor and a
-    /// fixed `v` give the scale ratio `s¹ = 3`.
-    #[test]
-    fn vector_convection_nlf_is_a_scalar_space_operator() {
-        struct Ones;
-        impl crate::postproc::coefficient::VectorCoeff for Ones {
-            fn eval(&self, _ctx: &CoeffCtx<'_>, out: &mut [f64]) {
-                for v in out.iter_mut() {
-                    *v = 1.0;
-                }
-            }
-        }
-        let r = scale_ratio(|m| {
-            Assembler::assemble_bilinear(
-                &H1Space::new(m.clone(), 1),
-                &[&VectorConvectionNLFIntegrator { velocity: Ones }],
-                3,
-            )
-        });
-        assert!((r - 3.0).abs() < 1e-9, "scale ratio {r} != 3 (s¹)");
     }
 }
