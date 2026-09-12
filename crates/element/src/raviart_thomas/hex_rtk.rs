@@ -38,6 +38,53 @@
 use crate::gll_basis::{gl_nodes, ClosedBasis};
 use crate::reference::VectorReferenceElement;
 
+/// The six hex faces in `HDivSpace::HEX_FACES` order — MFEM
+/// `Geometry::Constants<Geometry::CUBE>::FaceVert`: bottom z−, front y−,
+/// right x+, back y+, left x−, top z+.
+///
+/// Each entry is `(normal axis, normal endpoint is the max (`k+1`) one,
+/// outward-normal sign, flip the first free-axis index, flip the second)`.
+///
+/// MFEM enumerates the `(k+1)^2` face dofs of `RT_HexahedronElement` in the
+/// face frame `(u,v)` of `FaceVert`, which is chosen so that
+/// `u × v = outward normal`.  For the bottom (z−), back (y+) and left (x−)
+/// faces that frame is a *reflection* of the increasing-axis frame the
+/// tensor basis is naturally written in, so those three faces enumerate one
+/// (or both, for z−) of their free GLL indices in reverse: slot `t` holds the
+/// basis function whose axis index is `k+1−t`, and the slot's node sits at
+/// that same reversed axis index (see `RT_HexahedronElement::dof_map`, which
+/// assigns e.g. the bottom face's slots to the z-block entries
+/// `(i, p−j)`).  The remaining three faces (y−, x+, z+) enumerate in the
+/// increasing-axis order.
+pub const HEX_RT_FACES: [(usize, bool, f64, bool, bool); 6] = [
+    (2, false, -1.0, false, true),  // z− : u=+x, v=−y → (i, k+1−j)
+    (1, false, -1.0, false, false), // y− : u=+x, v=+z → (i, j)
+    (0, true, 1.0, false, false),   // x+ : u=+y, v=+z → (i, j)
+    (1, true, 1.0, true, false),    // y+ : u=−x, v=+z → (k+1−i, j)
+    (0, false, -1.0, true, false),  // x− : u=−y, v=+z → (k+1−i, j)
+    (2, true, 1.0, false, false),   // z+ : u=+x, v=+y → (i, j)
+];
+
+/// The two free axes of `normal`, in increasing axis order.
+#[inline]
+pub fn free_axes(normal: usize) -> (usize, usize) {
+    match normal {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    }
+}
+
+/// Sign of the permutation `(a1, a2, normal)` — the `τ` of the curl identity
+/// `(∇×w e_c)_{a1} = τ ∂_{a2} w`, `(∇×w e_c)_{a2} = −τ ∂_{a1} w`.
+#[inline]
+pub fn curl_tau(normal: usize) -> f64 {
+    match normal {
+        1 => -1.0,
+        _ => 1.0,
+    }
+}
+
 pub struct HexRTk {
     order: usize,
 }
@@ -76,47 +123,31 @@ impl VectorReferenceElement for HexRTk {
         let m = k + 1;
 
         let mut off = 0usize;
-        // Face blocks in HDivSpace::HEX_FACES order (bottom z-, front y-,
-        // right x+, back y+, left x-, top z+); entries are
-        // (component axis, face coordinate, outward-normal sign).  The closed
-        // mode is anchored at the face endpoint node (index 0 or k+1).
-        let faces = [
-            (2, -1.0, -1.0),
-            (1, -1.0, -1.0),
-            (0, 1.0, 1.0),
-            (1, 1.0, 1.0),
-            (0, -1.0, -1.0),
-            (2, 1.0, 1.0),
-        ];
-        for &(axis, fc, s) in &faces {
-            let idx = if fc < 0.0 { 0 } else { k + 1 };
-            match axis {
-                0 => {
-                    // x-comp: s·c_idx(x)·o_i(y)·o_j(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            values[off * 3] = s * cx[idx] * oy[i] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                1 => {
-                    // y-comp: s·o_i(x)·c_idx(y)·o_j(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            values[off * 3 + 1] = s * ox[i] * cy[idx] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                _ => {
-                    // z-comp: s·o_i(x)·o_j(y)·c_idx(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            values[off * 3 + 2] = s * ox[i] * oy[j] * cz[idx];
-                            off += 1;
-                        }
-                    }
+        // Face blocks in HEX_FACES order; see `HEX_RT_FACES` for the frame.
+        for &(nc, at_max, s, f1, f2) in &HEX_RT_FACES {
+            let idx = if at_max { k + 1 } else { 0 };
+            let (a1, a2) = free_axes(nc);
+            let o1: &[f64] = match a1 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let o2: &[f64] = match a2 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let closed = match nc {
+                0 => cx[idx],
+                1 => cy[idx],
+                _ => cz[idx],
+            };
+            for j in 0..m {
+                let q = if f2 { m - 1 - j } else { j };
+                for i in 0..m {
+                    let p = if f1 { m - 1 - i } else { i };
+                    values[off * 3 + nc] = s * closed * o1[p] * o2[q];
+                    off += 1;
                 }
             }
         }
@@ -170,46 +201,32 @@ impl VectorReferenceElement for HexRTk {
         let m = k + 1;
 
         // The divergence only differentiates the single CLOSED factor.
-        // Face blocks first, same (axis, coordinate, sign) order as
-        // eval_basis_vec.
+        // Face blocks first, same face frame as eval_basis_vec.
         let mut off = 0usize;
-        let faces = [
-            (2, -1.0, -1.0),
-            (1, -1.0, -1.0),
-            (0, 1.0, 1.0),
-            (1, 1.0, 1.0),
-            (0, -1.0, -1.0),
-            (2, 1.0, 1.0),
-        ];
-        for &(axis, fc, s) in &faces {
-            let idx = if fc < 0.0 { 0 } else { k + 1 };
-            match axis {
-                0 => {
-                    // div = s·c'_idx(x)·o_i(y)·o_j(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            div_vals[off] = s * dcx[idx] * oy[i] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                1 => {
-                    // div = s·o_i(x)·c'_idx(y)·o_j(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            div_vals[off] = s * ox[i] * dcy[idx] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                _ => {
-                    // div = s·o_i(x)·o_j(y)·c'_idx(z)
-                    for j in 0..m {
-                        for i in 0..m {
-                            div_vals[off] = s * ox[i] * oy[j] * dcz[idx];
-                            off += 1;
-                        }
-                    }
+        for &(nc, at_max, s, f1, f2) in &HEX_RT_FACES {
+            let idx = if at_max { k + 1 } else { 0 };
+            let (a1, a2) = free_axes(nc);
+            let o1: &[f64] = match a1 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let o2: &[f64] = match a2 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let dclosed = match nc {
+                0 => dcx[idx],
+                1 => dcy[idx],
+                _ => dcz[idx],
+            };
+            for j in 0..m {
+                let q = if f2 { m - 1 - j } else { j };
+                for i in 0..m {
+                    let p = if f1 { m - 1 - i } else { i };
+                    div_vals[off] = s * dclosed * o1[p] * o2[q];
+                    off += 1;
                 }
             }
         }
@@ -262,50 +279,46 @@ impl VectorReferenceElement for HexRTk {
         let m = k + 1;
 
         let mut off = 0usize;
-        // Face dofs, same (axis, coordinate, sign) order as eval_basis_vec.
-        let faces = [
-            (2, -1.0, -1.0),
-            (1, -1.0, -1.0),
-            (0, 1.0, 1.0),
-            (1, 1.0, 1.0),
-            (0, -1.0, -1.0),
-            (2, 1.0, 1.0),
-        ];
-        for &(axis, fc, s) in &faces {
-            let idx = if fc < 0.0 { 0 } else { k + 1 };
-            match axis {
-                // x-comp: Phi = s·(c_idx·o_i·o_j, 0, 0)
-                //   curl = (0, s·c_idx·o_i·o'_j, -s·c_idx·o'_i·o_j)
-                0 => {
-                    for j in 0..m {
-                        for i in 0..m {
-                            curl_vals[off * 3 + 1] = s * cx[idx] * oy[i] * doz[j];
-                            curl_vals[off * 3 + 2] = -s * cx[idx] * doy[i] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                // y-comp: Phi = s·(0, o_i·c_idx·o_j, 0)
-                //   curl = (-s·o_i·c_idx·o'_j, 0, s·o'_i·c_idx·o_j)
-                1 => {
-                    for j in 0..m {
-                        for i in 0..m {
-                            curl_vals[off * 3] = -s * ox[i] * cy[idx] * doz[j];
-                            curl_vals[off * 3 + 2] = s * dox[i] * cy[idx] * oz[j];
-                            off += 1;
-                        }
-                    }
-                }
-                // z-comp: Phi = s·(0, 0, o_i·o_j·c_idx)
-                //   curl = (s·o_i·o'_j·c_idx, -s·o'_i·o_j·c_idx, 0)
-                _ => {
-                    for j in 0..m {
-                        for i in 0..m {
-                            curl_vals[off * 3] = s * ox[i] * doy[j] * cz[idx];
-                            curl_vals[off * 3 + 1] = -s * dox[i] * oy[j] * cz[idx];
-                            off += 1;
-                        }
-                    }
+        // Face dofs, same face frame as eval_basis_vec.  With
+        // `Φ = s·c(nc)·o_p(a1)·o_q(a2)·e_nc` the curl is
+        // `(∇×Φ)_{a1} = τ s c o_p o'_q` and `(∇×Φ)_{a2} = −τ s c o'_p o_q`,
+        // `τ = ε_{a1 a2 nc}` (only the two OPEN factors differentiate).
+        for &(nc, at_max, s, f1, f2) in &HEX_RT_FACES {
+            let idx = if at_max { k + 1 } else { 0 };
+            let (a1, a2) = free_axes(nc);
+            let tau = curl_tau(nc);
+            let o1: &[f64] = match a1 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let o2: &[f64] = match a2 {
+                0 => &ox,
+                1 => &oy,
+                _ => &oz,
+            };
+            let do1: &[f64] = match a1 {
+                0 => &dox,
+                1 => &doy,
+                _ => &doz,
+            };
+            let do2: &[f64] = match a2 {
+                0 => &dox,
+                1 => &doy,
+                _ => &doz,
+            };
+            let closed = match nc {
+                0 => cx[idx],
+                1 => cy[idx],
+                _ => cz[idx],
+            };
+            for j in 0..m {
+                let q = if f2 { m - 1 - j } else { j };
+                for i in 0..m {
+                    let p = if f1 { m - 1 - i } else { i };
+                    curl_vals[off * 3 + a1] = tau * s * closed * o1[p] * do2[q];
+                    curl_vals[off * 3 + a2] = -tau * s * closed * do1[p] * o2[q];
+                    off += 1;
                 }
             }
         }
@@ -367,32 +380,49 @@ impl VectorReferenceElement for HexRTk {
         let gl = gl_nodes(m);
         let n = self.n_dofs();
         let mut c = Vec::with_capacity(n);
-        // Face DOFs: (k+1)^2 per face in HEX_FACES order (bottom z-, front
-        // y-, right x+, back y+, left x-, top z+); the normal coordinate sits
-        // on the face, free coordinates at the GL points.
-        for &(sx, sy, sz) in &[
-            (0.0_f64, 0.0, -1.0), // z=-1 (free x, free y)
-            (0.0, -1.0, 0.0),     // y=-1 (free x, free z)
-            (1.0, 0.0, 0.0),      // x=+1 (free y, free z)
-            (0.0, 1.0, 0.0),      // y=+1
-            (-1.0, 0.0, 0.0),     // x=-1
-            (0.0, 0.0, 1.0),      // z=+1
-        ] {
+        // Face DOFs in HEX_FACES order.  Free coordinates sit at the open
+        // points, the normal coordinate on the face; the free-axis
+        // enumeration follows `HEX_RT_FACES` (MFEM's node convention, which
+        // relabels the reversed faces together with their basis function).
+        for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
+            let cnorm = if at_max { 1.0 } else { -1.0 };
+            let (a1, a2) = free_axes(nc);
             for j in 0..m {
+                let q = if f2 { m - 1 - j } else { j };
                 for i in 0..m {
-                    if sz != 0.0 {
-                        c.push(vec![gl[i], gl[j], sz]);
-                    } else if sy != 0.0 {
-                        c.push(vec![gl[i], sy, gl[j]]);
-                    } else {
-                        c.push(vec![sx, gl[i], gl[j]]);
-                    }
+                    let p = if f1 { m - 1 - i } else { i };
+                    let mut x = [0.0_f64; 3];
+                    x[nc] = cnorm;
+                    x[a1] = gl[p];
+                    x[a2] = gl[q];
+                    c.push(x.to_vec());
                 }
             }
         }
-        // Interior DOFs (k >= 1), mirroring the eval blocks.
-        for _ in 0..3 * k * m * m {
-            c.push(vec![0.0, 0.0, 0.0]);
+        // Interior DOFs (k >= 1), mirroring the eval blocks: the closed mode
+        // in one direction sits at the interior GLL nodes, the two open modes
+        // at the Gauss-Legendre (open) points.
+        let glc = gl_nodes(m + 1);
+        for l in 0..m {
+            for j in 0..m {
+                for i in 1..=k {
+                    c.push(vec![glc[i], gl[j], gl[l]]);
+                }
+            }
+        }
+        for l in 0..m {
+            for j in 1..=k {
+                for i in 0..m {
+                    c.push(vec![gl[i], glc[j], gl[l]]);
+                }
+            }
+        }
+        for l in 1..=k {
+            for j in 0..m {
+                for i in 0..m {
+                    c.push(vec![gl[i], gl[j], glc[l]]);
+                }
+            }
         }
         while c.len() < n {
             c.push(vec![0.0, 0.0, 0.0]);

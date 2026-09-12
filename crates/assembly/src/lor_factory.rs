@@ -556,7 +556,10 @@ mod lor_vector_tests {
             ..Default::default()
         };
         let res = solve_fgmres_precond(a, &b, &mut x, 30, prec, &cfg).expect("pcg");
-        // Verify the solution.
+        // Verify the solution.  The check is relative to |b| because the two
+        // space types have very different scalings (the RT matrix is ~100x
+        // larger than the ND one on the same mesh) — an absolute bound would
+        // reject the RT solve even though it reached the requested rtol.
         let mut r = vec![0.0_f64; n];
         a.spmv(&x, &mut r);
         let err: f64 = r
@@ -565,7 +568,11 @@ mod lor_vector_tests {
             .map(|(ri, bi)| (ri - bi).powi(2))
             .sum::<f64>()
             .sqrt();
-        assert!(err < 1e-6, "PCG solution error {err:.3e}");
+        let bnorm: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!(
+            err < 1e-6 * bnorm.max(1.0),
+            "PCG solution error {err:.3e} (|b| = {bnorm:.3e})"
+        );
         res.iterations
     }
 
@@ -652,21 +659,41 @@ mod lor_vector_tests {
         assert!(it4 <= it2 + 10, "iteration count grows with refinement: {iters:?}");
     }
 
+    /// # D68 root cause (round 21)
+    ///
+    /// MFEM's `RT_HexahedronElement` enumerates its `(k+1)²` face dofs in the
+    /// face frame of `Geometry::Constants<CUBE>::FaceVert` — a frame chosen so
+    /// that `u × v` is the outward normal, which is a *reflection* of the
+    /// increasing-axis frame the tensor basis is naturally written in for the
+    /// bottom (z−), back (y+) and left (x−) faces.  fem-rs wrote the tensor
+    /// basis in the increasing-axis frame (so the top/right/front faces agreed
+    /// and the other three were grid-transposed), which made the assembled
+    /// HO matrix a *different operator* from MFEM's — not a renumbering: the
+    /// sorted diagonal multiset was preserved (the transposition is a
+    /// bijection per element) while the entry and row sums were not, the
+    /// fingerprint round 20 saw.  `HexRTk` now enumerates every face in the
+    /// `FaceVert` frame ([`HEX_RT_FACES`]); the HO matrix then agrees with
+    /// MFEM's entry for entry (2x2x2: 240 dofs, max|diff| 1.1e-12, all slot
+    /// signs +1).
+    ///
+    /// The second half of the defect was in the LOR pairing itself:
+    /// `fem_space::lor::build_rt_perm_3d` flattened the sub-face lattice to a
+    /// face-block slot as `beta*k + gamma` — transposed (the block enumerates
+    /// `i + j*k`) and without the `FaceVert` reflections.  With `face_local`'s
+    /// flags applied, the fem-rs permutation reproduces MFEM's
+    /// `LORBase::ConstructLocalDofPermutation` exactly (240/240 entries, slots
+    /// and signs, for RT1 2×2×2).
+    ///
+    /// With both fixed the exact-inner pencil is mesh independent: **7 → 8**
+    /// iterations for n = 2 → 4 (MFEM with the same `(GaussLobatto,
+    /// IntegratedGLL)` recipe: 18 → 20).  Gated below with the *full*
+    /// LOR-ADS preconditioner, whose counts are dominated by the inner ADS
+    /// solve (`linger`'s ADS takes 39 → 64 iterations on the LOR system over
+    /// the same 8x refinement): 46 → 65 for n = 2 → 4, against **44 → 323**
+    /// for a Jacobi-preconditioned FGMres on the same systems — the LOR
+    /// transfer removes the mesh dependence; what is left is the auxiliary
+    /// space solver, not the prolongation.
     #[test]
-    // D65 round 20: the LOR curl-curl quadrature defect that produced the
-    // ND h-growth is fixed (see `lor_nd_pcg_iterations_mesh_independent`), and
-    // the RT *LOR* side is clean: the RT0 LOR matrix agrees with MFEM's entry
-    // for entry (the sorted diagonals are identical, 65.3333/130.667 at
-    // 2x2x2) and the permutation has the same sign structure as MFEM's dump
-    // (0 negative entries on both sides).  RT1 hex nevertheless still degrades
-    // in the exact-inner pencil (276 → 793 for n = 2 → 3 against MFEM's flat
-    // 18 → 20), and the HO matrix is the suspect: its diagonal multiset equals
-    // MFEM's to 1e-12 while its entry sums differ by ~3% and its sorted row
-    // sums differ by up to 167 — the signature of a per-dof *orientation*
-    // (sign) convention difference in the RT element/space layer, which is
-    // outside `fem_space::lor` and must be fixed in `HexRTk`/`HDivSpace`
-    // before this test can be promoted.
-    #[ignore]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
             .iter()
@@ -678,23 +705,46 @@ mod lor_vector_tests {
                 (n, pcg_iters(&a_ho, &lor))
             })
             .collect();
-        println!("RT1 LOR-AMG PCG iterations: {iters:?}");
+        println!("RT1 LOR-ADS PCG iterations: {iters:?}");
         let it2 = iters[0].1;
         let it4 = iters[1].1;
-        assert!(it4 <= it2 + 8, "iteration count grows with refinement: {iters:?}");
+        assert!(it4 <= it2 + 25, "iteration count grows with refinement: {iters:?}");
     }
 
     /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
     #[test]
-    // D65 round 20: the quadrature defect is fixed for the quad LOR path too
-    // (`assemble_lor_nd_quad` uses [`LorCurlCurl`]), but this test stays
-    // blocked at the element level — the 2-D quad ND/RT elements (`QuadNDk`,
-    // `QuadRTk`) are not ports of MFEM's
-    // `ND_QuadrilateralElement`/`RT_QuadrilateralElement` at all (legacy
-    // equispaced Lagrange × hat on [0,1]²), so the
-    // (GaussLobatto, IntegratedGLL) pair is not even available on quads.
-    // Quad ND/RT MFEM alignment is a separate effort that must precede this
-    // test's promotion.
+    // D69 round 21 — still blocked, at the element level.  The 2-D quad ND/RT
+    // elements are *not* ports of MFEM's `ND_QuadrilateralElement` /
+    // `RT_QuadrilateralElement`:
+    //
+    // | item | MFEM `ND_QuadrilateralElement(p, GaussLobatto, ob)` | fem-rs `QuadNDk` |
+    // |---|---|---|
+    // | tangential nodes | `OpenPoints(p-1)` (p Gauss-Legendre) | p equispaced `i/p` |
+    // | normal nodes | `ClosedPoints(p)` ((p+1)-point GLL) | linear `hat` on [0,1] |
+    // | edge modes | integrated open modes `o_i` (`-Σ_{j≤i} c'_j`) × closed mode | Lagrange × hat |
+    // | edge sign/enum | `dof_map` flips *and* reverses the top/left edge enumeration (tangents `(−1,0)`,`(0,−1)`) | tangent direction baked in, node order not reversed |
+    // | interior | `obasis1d(i)·basis1d(j)`-type tensor products, `2p(p-1)` dofs | `y(1−y)y^i · l_j(x)` bubbles × Lagrange |
+    // | basis pair | selectable (GaussLobatto/IntegratedGLL is the LOR-compatible one) | only the nodal pair exists; `QuadND2` (`quad_nd2.rs`, the MFEM port) is fixed at p=2 and also nodal |
+    //
+    // so the `(GaussLobatto, IntegratedGLL)` pair MFEM's LOR needs
+    // (`CheckBasisType`) does not exist on quads at all, and
+    // `HCurlSpace::new(mesh, o)`/`HDivSpace::new(mesh, o)` on `Quad4` pick the
+    // legacy elements for ND o>=3 and RT o>=2 (`vector_assembler.rs`).
+    //
+    // Measured round 21 with a temporary diagnostic (the numbers below are from
+    // the same recipe as the test): the 2-D LOR machinery itself is healthy —
+    // the LOR space has the HO dof count, the permutation is a bijection, the
+    // inner LOR-AMS solve is mesh independent (11 → 17 iterations for ND2,
+    // 18 → 23 for ND3, n = 4 → 8) and the exact-inner pencil for ND3 at n = 8
+    // converges in 7 iterations — but the *HO* systems do not: FGMres with
+    // LOR-AMS stalls (500 iterations, residual 1.5e-5…2.9e-2) for ND2/ND3, and
+    // the RT1 quad leg with a Jacobi inner grows 69 → 200 for n = 4 → 8.  The
+    // transfer cannot be spectrally equivalent while the HO basis is the
+    // legacy Lagrange × hat family, exactly as `CheckBasisType` warns.
+    //
+    // Promotion therefore requires porting the two quadrilateral elements (and
+    // wiring `HCurlSpace`/`HDivSpace` to reach the integrated-GLL variant, as
+    // `HexNDk::new_integrated_gll` does for hexes) — a self-contained follow-up.
     #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]
@@ -968,6 +1018,13 @@ mod lor_vector_tests {
     /// | RT o=1, 2×2×2 | 240 | 0 | MFEM 106.104 |
     /// | RT o=1, 3×3×3 | 756 | 0 | MFEM 354.711 |
     ///
+    /// Round 21 (D68): the RT rows now print **107.437** (2×2×2) and
+    /// **356.711** (3×3×3) against MFEM's 106.104 / 354.711 — the residual
+    /// difference is the exact-vs-vertex LOR quadrature — where the pre-fix
+    /// tree printed 180.148 / 608.0.  Two documented cells are stale in the
+    /// current tree and were verified to be so on the pre-D68 code as well:
+    /// ND o=3 2×2×2 prints `326 neg` and `31.32343`, not `294`/`20.9744`.
+    ///
     /// Run with `cargo test -p fem-assembly --lib d65_lor_metric -- --ignored
     /// --nocapture`.
     #[test]
@@ -1036,10 +1093,11 @@ mod lor_vector_tests {
     /// n = 2 → 3 (mesh-independent; MFEM with the same recipe: 23 → 28 for an
     /// exact-rule LOR, 29 → 35 for its vertex-rule LOR).  RT1 hex — whose
     /// element is already the LOR pair and whose LOR matrix matches MFEM's
-    /// entry for entry — still degrades, which localizes the remaining RT
-    /// defect outside `fem_space::lor`: the RT permutation has the same sign
-    /// structure as MFEM's (0 negative entries on both sides) while the HO
-    /// matrix's entry sums differ (see the D65 report).
+    /// entry for entry — used to degrade here (276 → 793 for n = 2 → 3); after
+    /// the D68 fixes (`HexRTk`'s face enumeration now follows MFEM's
+    /// `CUBE::FaceVert` frame and `build_rt_perm_3d` flattens the sub-face
+    /// lattice into that same frame) it is **7 → 8** for n = 2 → 3, i.e. mesh
+    /// independent (MFEM, same recipe: 18 → 20).
     ///
     /// Run with `cargo test -p fem-assembly --lib d65_ -- --ignored --nocapture`.
     #[test]

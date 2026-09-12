@@ -35,7 +35,7 @@ pub mod tri_rt2;
 pub mod tri_rtk;
 
 pub use hex_rt1::HexRT1;
-pub use hex_rtk::HexRTk;
+pub use hex_rtk::{curl_tau, free_axes, HexRTk, HEX_RT_FACES};
 pub use prism::{PrismRT0, PrismRTk};
 pub use pyramid::{PyraRT0, PyraRTk};
 pub use quad_rt1::QuadRT1;

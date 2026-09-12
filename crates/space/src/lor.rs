@@ -66,6 +66,7 @@
 use std::collections::HashMap;
 
 use fem_core::{FemError, FemResult};
+use fem_element::raviart_thomas::HEX_RT_FACES;
 use fem_linalg::CsrMatrix;
 use fem_mesh::simplex::Mesh;
 use fem_mesh::topology::MeshTopology;
@@ -876,17 +877,19 @@ fn build_rt_perm_3d(
                             if owner != eh {
                                 continue;
                             }
-                            // Flat within the k² face block:
-                            // x-faces: (a,b) = (β_y, γ_z); y-faces: (α_x, γ_z);
-                            // z-faces: (α_x, β_y).
-                            // In-plane coordinates: x-faces span (y,z); y-faces (x,z);
-                            // z-faces (x,y) — the first is the "a" (row) index.
-                            let flat = match axis {
-                                0 => beta * k + gamma,
-                                1 => beta * k + gamma,
-                                _ => beta * k + gamma,
-                            };
-                            face_local * k * k + flat
+                            // Flat within the k² face block.  `HexRTk`'s face
+                            // blocks enumerate the two free GLL indices in the
+                            // face frame `HEX_RT_FACES` prescribes (MFEM
+                            // `CUBE::FaceVert`, `u × v = outward normal`), i.e.
+                            // slot `i + j*k` with `i` along the first free axis
+                            // and `j` along the second, each reversed when the
+                            // frame's flag says so.
+                            let (_, _, _, f1, f2) = HEX_RT_FACES[face_local];
+                            let (fi, fj) = (
+                                if f1 { k - 1 - beta } else { beta },
+                                if f2 { k - 1 - gamma } else { gamma },
+                            );
+                            face_local * k * k + fi + fj * k
                         } else {
                             // Element-interior lattice face.  HexRTk interior
                             // block order (see `HexRTk::eval_basis_vec`):

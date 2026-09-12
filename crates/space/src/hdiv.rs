@@ -1879,38 +1879,30 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
                 rows.push(InterpRow { xi: *p, nk: *nk });
             }
         }
-        // HEX_FACES order: bottom z-, front y-, right x+, back y+, left x-, top z+.
+        // HEX_FACES order: bottom z-, front y-, right x+, back y+, left x-,
+        // top z+.  The two free coordinates of each face are enumerated in
+        // the frame `HEX_RT_FACES` prescribes (MFEM `CUBE::FaceVert`) — one
+        // index runs backwards on the bottom/back/left faces — matching the
+        // relabeling `HexRTk` applies to its basis functions and dof nodes.
         ElementType::Hex8 => {
+            use fem_element::raviart_thomas::{free_axes, HEX_RT_FACES};
             let gl = gauss_legendre_arbitrary(k + 1).0;
             let m = k + 1;
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [gl[i], gl[j], -1.0], nk: [0.0, 0.0, -1.0] });
-                }
-            }
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [gl[i], -1.0, gl[j]], nk: [0.0, -1.0, 0.0] });
-                }
-            }
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [1.0, gl[i], gl[j]], nk: [1.0, 0.0, 0.0] });
-                }
-            }
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [gl[i], 1.0, gl[j]], nk: [0.0, 1.0, 0.0] });
-                }
-            }
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [-1.0, gl[i], gl[j]], nk: [-1.0, 0.0, 0.0] });
-                }
-            }
-            for j in 0..m {
-                for i in 0..m {
-                    rows.push(InterpRow { xi: [gl[i], gl[j], 1.0], nk: [0.0, 0.0, 1.0] });
+            for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
+                let cnorm = if at_max { 1.0 } else { -1.0 };
+                let (a1, a2) = free_axes(nc);
+                let mut nk = [0.0_f64; 3];
+                nk[nc] = cnorm;
+                for j in 0..m {
+                    let q = if f2 { m - 1 - j } else { j };
+                    for i in 0..m {
+                        let p = if f1 { m - 1 - i } else { i };
+                        let mut xi = [0.0_f64; 3];
+                        xi[nc] = cnorm;
+                        xi[a1] = gl[p];
+                        xi[a2] = gl[q];
+                        rows.push(InterpRow { xi, nk });
+                    }
                 }
             }
             if k >= 1 {
