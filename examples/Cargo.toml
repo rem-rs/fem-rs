@@ -559,6 +559,10 @@ name = "navier_tgv"
 path = "../miniapps/fluids/navier_tgv.rs"
 
 [[example]]
+name = "navier_bifurcation"
+path = "../miniapps/fluids/navier_bifurcation.rs"
+
+[[example]]
 name = "hdiv_darcy"
 path = "../miniapps/hdiv_linear_solver/darcy.rs"
 

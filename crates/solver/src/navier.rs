@@ -210,6 +210,28 @@ pub trait NavierDiscretization {
     /// In 3-D (`navier_tgv`) this is `ComputeCurl3D` applied twice, matching
     /// the `dim == 3` branch of `NavierSolver::Step`.
     fn curl_curl(&self, u: &[f64]) -> Vec<f64>;
+
+    /// `ComputeCurl2D(Lext_gf, curlu_gf)` followed by
+    /// `ComputeCurl2D(curlu_gf, curlcurlu_gf, true)` (the `dim == 3` branch
+    /// calls `ComputeCurl3D` twice) — the two curls `NavierSolver::Step`
+    /// computes on the extrapolated velocity
+    /// `Lext = ab1·un + ab2·unm1 + ab3·unm2`, returned as
+    /// `(curlu_gf, curlcurlu_gf)`.
+    ///
+    /// The first of the two — MFEM's `GetCurrentVorticity()` — is what the
+    /// `navier_bifurcation` particle solver interpolates onto the particles
+    /// (`GridFunction &w_gf = *flow_solver.GetCurrentVorticity()`), so it has
+    /// to come out of the *step*, not from a re-run of the curl on the
+    /// accepted velocity.
+    ///
+    /// The default implementation delegates to [`Self::curl_curl`] and reports
+    /// an empty vorticity: the four miniapps that never call
+    /// `GetCurrentVorticity()` (`navier_mms`, `navier_kovasznay`,
+    /// `navier_kovasznay_vs`, `navier_shear`) then leave
+    /// [`NavierSolver::vorticity`] empty, exactly as before.
+    fn curl_curl_and_vorticity(&self, u: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        (Vec::new(), self.curl_curl(u))
+    }
     /// `ComputeCurl3D(u, cu)` — one application of MFEM's 3-D curl.
     ///
     /// Like `ComputeCurl2D` this is **not** a DG weak form but a nodal point
@@ -396,6 +418,10 @@ pub struct NavierSolver<D: NavierDiscretization> {
 
     vel: VelState,
     pn: Vec<f64>,
+    /// `curlu_gf` — `∇×Lext` of the last step
+    /// ([`NavierDiscretization::curl_curl_and_vorticity`]); empty when the
+    /// discretization does not implement the vorticity output.
+    curlu: Vec<f64>,
 
     // BDFk/EXTk bookkeeping.
     cur_step: i32,
@@ -445,6 +471,7 @@ impl<D: NavierDiscretization> NavierSolver<D> {
             h_diag: Vec::new(),
             vel: VelState::new(nv),
             pn: vec![0.0; np],
+            curlu: Vec::new(),
             cur_step: 0,
             dthist: [0.0; 3],
             bd0: 0.0,
@@ -591,6 +618,14 @@ impl<D: NavierDiscretization> NavierSolver<D> {
     pub fn pressure(&self) -> &[f64] {
         &self.pn
     }
+    /// `GetCurrentVorticity()` — `∇×Lext` of the last [`Self::step`], empty
+    /// unless the discretization implements
+    /// [`NavierDiscretization::curl_curl_and_vorticity`] with a non-empty
+    /// vorticity (only `navier_bifurcation`, which feeds it to its particle
+    /// solver, does).
+    pub fn vorticity(&self) -> &[f64] {
+        &self.curlu
+    }
     /// Mutable current velocity — the initial condition
     /// (`GetCurrentVelocity()->ProjectCoefficient`).
     pub fn velocity_mut(&mut self) -> &mut [f64] {
@@ -714,7 +749,8 @@ impl<D: NavierDiscretization> NavierSolver<D> {
                 + self.ab2 * self.vel.unm1[i]
                 + self.ab3 * self.vel.unm2[i];
         }
-        let cc = self.disc.curl_curl(&lext);
+        let (curlu, cc) = self.disc.curl_curl_and_vorticity(&lext);
+        self.curlu = curlu;
         for i in 0..nv {
             lext[i] = self.kin_vis * cc[i];
         }
