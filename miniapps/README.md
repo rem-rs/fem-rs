@@ -36,13 +36,15 @@ miniapps/
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
 │   │                            与 C++ 迭代块逐字节一致）
 │   ├── nurbs_ex3.rs         ← 1:1（H(curl): NurbsHCurlSpace 分组件 curl
-│   │                            扩展 + 合并 elem_dof + Piola 装配 + 局部
-│   │                            投影; 默认 -o 1 = 33540 dof / ess 516 /
+│   │                            扩展 + 合并 elem_dof + Piola 装配 +
+│   │                            ProjectCoefficientElementL2 默认投影 =
+│   │                            L2 单元局部投影 + LSQ 映回 + ./= Va;
+│   │                            默认 -o 1 = 33540 dof / ess 516 /
 │   │                            166 迭代块逐字节 / ARF 0.918732 / L2
-│   │                            8.41512e-06 全部 = C++, -r 1 亦逐字节;
-│   │                            缺口: ProjectCoefficientElementL2 未实现
-│   │                            ⇒ C++ 默认分派下 -r 1 误差 0.0509 vs 本
-│   │                            实现 0.0398, 细网格档不受影响）
+│   │                            8.41665e-06 全部 = C++; -r 1 = 24 dof /
+│   │                            10 迭代块逐字节 / ARF 0.128859 / L2
+│   │                            0.0508853 亦 = C++（三档均与 C++ 二进制
+│   │                            逐字节；未处理 remaining: sol.gf/refined.mesh））
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
@@ -217,6 +219,39 @@ miniapps/
 │                                100 步中 97 步 CFL 末位一致; 粒子用库内
 │                                crates/mesh/findpts (无裁剪, RNG 逐位复刻);
 │                                裁剪项: GLVis/ParaView/-traj (文档标注)
+├── fluids/navier_3dfoc.rs     ← 第 7 个 (navier_3dfoc.cpp 1:1, 曲线
+│                                box-cylinder, 内核零改动): DOF 16956/5652,
+│                                vel_ess_tdof 7149 = C++, Time/dt 表逐字节,
+│                                MVIN/PRES 迭代数每步相同, 五项矩阵统计
+│                                (Σ/Frobenius/迹/A·x) 一致到 1e-15;
+│                                两个可复用发现: 曲线网格求积阶必须含几何阶,
+│                                MFEM 张量参考单元是单位立方而 fem-rs 在
+│                                [-1,1]^d (仅影响 GetElementSize/CFL 类量);
+│                                HELM 第 2 步起差 1 = 残差卡阈值舍入;
+│                                裁剪: ParaView/PA-LOR-AMG/GLVis/8000 步窗
+├── fluids/navier_turbchan.rs  ← 第 8 个 (navier_turbchan.cpp 1:1, 周期
+│                                tanh 湍流通道, 内核零改动): MVIN/PRES 6 步
+│                                含残差逐位一致, order 5 的 dt/hmin/hmax/
+│                                dx+ 与 banner (1470150/490050 dof, vel_ess
+│                                36300) 逐位, order 1 的 |u|/|p|/CFL rel
+│                                < 1e-6; C++ 侧 UB: navier_turbchan.cpp:155
+│                                读未初始化 Array<int> (靠堆恰为 0 侥幸) ⇒
+│                                对照运行须显式清零 (否则 HELM 28 vs 30);
+│                                order 5 是纯 PA 档 (5.9e9 nnz ≈ 70GB,
+│                                两侧都跑不动) ⇒ order 1 是唯一可比档
+├── fluids/navier_cht.rs       ← 第 9 件 (navier_cht.cpp **部分交付, 退出码
+│                                3**, 重叠网格共轭传热): 已移植双域网格/加密
+│                                (默认档 11 elem + 24 solid; -r1 3 -r2 2 =
+│                                704/384 elem, VDOF 23042/11521, 热 dof 3185
+│                                全部 = C++) 与重叠传递算子 (4 阶解析场
+│                                插值误差 1.7e-13 / 2.27e-13, 未找到集合 =
+│                                流体挖去的 block 几何); 缺口: 无
+│                                OversetFindPointsGSLIB 对位、2D Tri3
+│                                SetCurvature(4) 缺失 (mesh/simplex.rs:848)、
+│                                流体侧 NavierDiscretization 与热
+│                                ConductionOperator(MixedDirectionalDerivative)
+│                                未移植; C++ 参考不可编 (本机所有 MFEM 构型
+│                                MFEM_USE_GSLIB=NO)
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
