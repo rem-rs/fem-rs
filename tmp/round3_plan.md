@@ -471,6 +471,24 @@
 - 回归基线（全绿）：amg 23 / assembly **605**（+6 预存 ignore）/ element **454** / io 123 / linalg 63 / mesh 292 / parallel 225 / solver **251** / space 275；**`cargo build --release --examples --keep-going` 0 错误**。
 - 抽查（主会话复跑）：`navier_shear` step1 cfl **7.56030E-02** 全列 = C++（绕过已删）✓；`dpg_maxwell_3d -o 2 -do 0` = **9.482e-1** = C++ ✓；ex3 2D **8.01477893043346e-2**、3D tet ND2 **1.57652991777406e-2** ✓（均走默认入口）；plor_solvers ✓。
 
+## 第十九轮完成（2026-09-11，四代理并行：三路交付 + GLL 路中途合理停点）
+
+- **D52 结案（NonlinearForm 内核化）**：`NonlinearForm`/`NonlinearFormIntegrator`/`NLQpData` 从 `dist_solver::filter` **迁移**（原文件 re-export 保历史路径）到 `crates/assembly/src/standard/nonlinear_form.rs`，与 `physics::nonlinear::NonlinearForm`（solver 侧 Newton 驱动抽象）按路径区分；框架扩展 `[H¹]^d` 交错布局与 `int_rule_order` 钩子。新 `VectorConvectionNLFIntegrator`（`standard/vector_convection_nlf.rs`）逐式对位 `nonlininteg.cpp:744`（真物理梯度 + `ip.weight·T.Weight()`），**Jacobian 也实现**（初版 gradEF 索引写反被 FD 测试抓出后修正）；旧的错误命名标量版删除（零调用方）。**验证**：单测 4 项（常场 9e-17、线性场 `N·u=M·u`、与本地循环逐位/order 6 2–3 ulp、Jacobian vs FD <1e-8）；`navier_mms` 换内核后除计时行外**逐字节一致**、`navier_kovasznay` 全部 err/CFL 行逐字节一致（step1 6.24210E-07）。
+- **navier 第 5 件交付：`navier_tgv` + 3D 周期构造验证**：**重要发现——mesh 层零修改即已可用**：round 9 的"3D 周期未实现"实际已被维度泛型 `Mesh::make_periodic` + `build_pk_hex` + round 18 D56 坐标重建覆盖。3³ torus：27 节点/27 单元/0 边界面、order 4 = 1728/5184 dof（= C++ PrintInfo）；`interpolate_vec` 与逐元素投影 <1e-12（D56 在 hex 上自动生效）。`ComputeCurl3D` 落地（C++ 语义 = 逐点导数投影非 DG 弱形式）。**tgv 对照**：step0 行（u_inf/p_inf/ke）与 C++ **逐字节一致**（9.86914E-01 0 1.24994E-01）、ke 打印位 11 行全同（全精度 rel ≤5.7e-10）、HELM/PRES 迭代**逐位一致**、解析衰减 `ke=⅛e^{−6νt}` 钉住；MVIN 差 0–1（双侧低于 rtol）。`schrodinger_flow` 2D 去绕过路径验证正常收敛。
+- **D61 结案（周期 <3 格/向 dof 少计）——附重要实证**：**MFEM 自己在 2 格/向全周期时直接 abort**（"Interior quadrilateral face found connecting elements 0, 1 and 2"）——顶点合并周期化方案在 2 格/向根本无法建网，故"与 C++ dof 数一致"字面上不可能；验收改钉**商复形拓扑真值**（2×2×2 torus：8 顶点+24 边+24 面+8 体）。修法（`dof_manager.rs` ~600 行，零 mesh 改动）：周期网格上在 `UnfoldedPeriodicMesh` 包装器（每元素 pre-merge 几何角点）上跑原 builder，实体 dof 按 **torus 实体商合并**（边签名 = 折叠顶点对 + 展开位移；面 = 角点集 + 相对最低角点像的偏移——平移不变且能区分半周期相位；多 dof 面类第二像按物理位置匹配）。**验证**：Q2 **34 → 64**、Q3 120 → 216（= 真值）；≥3 格与 C++ 交叉核对全部一致（n=3: 216/729、n=4: 512/1728/4096）；**无碰撞（≥3 格）时与折叠构建逐位相等**（pin 测试断言 dofs/实体 map/坐标全同）。
+- **D62 结案（周期 + 曲面门控）**：`rebuild_dof_coords_periodic` 的几何求值按 `geom_order()` 选高阶基并对**全部**几何节点求值；曲面周期网格同样走 D61 编号路径（`periodic_geometry_snapshot` 本就克隆 pre-merge 高阶几何）。**验证**：4×4 quad + `set_curvature(2)` + 周期正弦曲面：临时还原旧门实测插值误差 1.280e0，新门 <1e-12；曲面非周期逐位不变。
+- **D59 结案（3D 曲线边界面几何）**：`assembler.rs` 新增 `curved_boundary_face_geom`：`geom_order≥2` 的 3D 边界面改用**边界单元自身的曲面映射**（hex 面 `QuadQk(q)`、tet 面 `H1TetFacePk::new(q)`，控制点 = owner 元素的面几何节点）。**验证**：正弦底面 2×2×2 夹具（Q2 可精确表示）解析面积 1.02133645958114，修后装配差 **<1e-12**；角点版探针实测 1.0（差异 2.1e-2 存在性与修复均实证）。
+- **D63 推进（GLL 路，中途合理停点——代理超时但树上状态绿且连贯）**：`HexNDk` 新增 `NdOpenBasis::IntegratedGLL` 变体与 `new_integrated_gll(p)`（MFEM `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)`），`lor_factory` 新增 `d63_igll_pencil_diagnostics` 诊断测试。**诊断结论（重要）**：IntegratedGLL 基偶就位后 RT **quad** 路径收敛而 hex 仍不收敛 ⇒ **配对缺陷不是基缺陷**，剩余嫌疑收窄到 **LOR 空间（`fem_space::lor`）的面/内部 slot pairing 或同余符号**（几何配对审计在边块 dof 上与 `fem_space::lor` 一致）。三个 lor_factory 测试仍 `#[ignore]`（阻塞点 = LOR 空间接线，element 层已就绪）。阶段 A（HexQk 序）未动（按优先级先做 B）。
+- 回归基线（全绿，合并树）：amg 23 / assembly **612**（+7 预存 ignore：6 lor/hdg/contact/discrete_op + 1 d63 诊断）/ element **456** / io 123 / linalg 63 / mesh 292 / parallel 225 / solver **252** / space **277**；**`cargo build --release --examples --keep-going` 0 错误**（新注册 `navier_tgv`）。
+- 抽查（主会话复跑）：`navier_tgv` step0 = C++ 逐字节 ✓；`navier_shear`/`navier_kovasznay`/`navier_mms` 不劣化 ✓（各代理报告 + D52 逐字节验证）；`schrodinger_flow -jet -no-vis` 2D 去绕过路径收敛（PCG 77 it）✓。
+
+## 第十九轮新债务
+
+- **D65（P2）LOR hex 面/内部 slot pairing**（D63 诊断的收窄结论）：IntegratedGLL 基偶已就位（element 层），剩余嫌疑 = `fem_space::lor` 的面/内部 slot 配对或同余符号（RT quad 收敛 vs hex 不收敛的分叉证据）；转正三个 lor_factory 测试的最后一步。
+- **D66（P3）2D 曲线边界边仍走仿射弦**（D59 的 2D 对应；mesh 侧 `boundary_face_endpoints` 接口）。
+- **D67（P3）tgv 的 p_inf 相对差 ≤5.5e-4**：dof 排序不同（C++ torus 序 vs Rust 字典序）下 1e-6 容差停机的迭代噪声；PRES/HELM 迭代数逐位一致说明算子一致。逐位复现需 periodic-cube 排序镜像（不建议）。
+- 备忘：① `stash@{0}`（ex4-ads-preconditioner 分支）仍在，待用户决定；② 2 格/向周期网格无 MFEM 对应物（其自身 abort），fem-rs 按商复形真值处理；③ tgv 的 ParaView 落盘与 GLVis socket 未复刻（shear 先例，文档注明）。
+
 ## 第十八轮新债务
 
 - **D61（P2）周期网格某方向 <3 格时 dof 少计**：不同环面边/面共享同一顶点对，`EdgeKey`/`QuadFaceKey` 去重碰撞（2×2×2 hex Q2 得 34，Q1=8 正确）；MFEM 按 mesh 实体编号无此碰撞。≥3 格/向的实用网格不受影响（4×4、12×12 与 C++ 精确一致）。属拓扑编号修复，非坐标。

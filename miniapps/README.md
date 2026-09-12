@@ -192,6 +192,13 @@ miniapps/
 ├── fluids/navier_kovasznay_vs.rs ← 第 4 个 (自适应时间步: provisional +
 │                                CFL 接受/拒绝 + dt 预测 + 历史排队):
 │                                CFL/Time/dt 全 5 步逐字节一致, err_u 6 位
+├── fluids/navier_tgv.rs       ← 第 5 个 (navier_tgv.cpp 1:1, 3D 周期
+│                                Taylor-Green): step0 (u_inf/p_inf/ke) 与
+│                                C++ 逐字节一致, ke 打印位 11 行全同
+│                                (全精度 rel ≤5.7e-10), HELM/PRES 迭代逐位;
+│                                3D 周期构造验证可用 (27 torus 节点,
+│                                order 4 = 1728/5184 dof = C++); 解析衰减
+│                                ke=⅛·e^(−6νt) 钉住; ComputeCurl3D 入内核
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
