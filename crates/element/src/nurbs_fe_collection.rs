@@ -735,7 +735,15 @@ impl Nurbs1DFiniteElement {
     }
 
     /// MFEM `NURBS1DFiniteElement::CalcDShape` — derivative of the rational
-    /// basis with respect to the *parameter* `u`.
+    /// basis with respect to the span-local coordinate `xi` (the parameter
+    /// derivative `dN/du` is scaled by the span length inside
+    /// [`span_local_basis_deriv`], exactly as `KnotVector::CalcDShape` scales by
+    /// `Order * (knot(ip+1) - knot(ip))`).
+    ///
+    /// The operation order is MFEM's
+    /// (`sum = 1/sum; grad = sum*grad - (dsum*sum*sum)*shape`), not the
+    /// algebraically equal `(grad*sum - shape*dsum)/sum²`: the two differ in the
+    /// last ulp, and that is observable in the `nurbs_ex1 -o 2` PCG log.
     pub fn calc_dshape(&self, xi: f64, dshape: &mut [f64]) {
         let dof = self.n_dofs();
         assert_eq!(dshape.len(), dof, "Nurbs1DFiniteElement::calc_dshape size");
@@ -754,9 +762,12 @@ impl Nurbs1DFiniteElement {
             sum += vals[o];
             dsum += ders[o];
         }
-        let inv = 1.0 / (sum * sum);
+        // `add(sum, grad, -dsum*sum*sum, shape_x, grad)` with `sum` already
+        // replaced by its reciprocal.
+        let inv = 1.0 / sum;
+        let c = (-dsum) * inv * inv;
         for o in 0..dof {
-            dshape[o] = (ders[o] * sum - vals[o] * dsum) * inv;
+            dshape[o] = inv * ders[o] + c * vals[o];
         }
     }
 }

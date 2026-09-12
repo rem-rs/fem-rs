@@ -22,7 +22,7 @@
 use std::f64::consts::LN_2;
 
 use fem_linalg::fem_to_linlvo_csr;
-use fem_solver::{GSSmoother, solve_pcg};
+use fem_solver::{fmt_g, linlvoPreconditioner, solve_pcg, DenseVec, GSSmoother, SolverError};
 use fem_space::constraints::form_linear_system;
 use fem_space::nurbs_extension::NurbsExtension;
 use fem_space::nurbs_fe_space::NurbsFESpace;
@@ -124,5 +124,26 @@ fn main() {
 
     // C++: `GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0);`
     let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mat)).expect("GS smoother");
-    solve_pcg(&a_mat, &rhs, &mut x, &gs, 1e-12, 200, true).expect("PCG failed");
+    // MFEM's `CGSolver::Mult` prints `PCG: Number of iterations:`,
+    // `Average reduction factor =` and `PCG: No convergence!` after the
+    // iteration log when the solve stops at `max_iter` without converging;
+    // `solve_pcg` reports that case as an error instead, so the three lines are
+    // reproduced here.  `(B r₀, r₀)` is the solver's own opening value,
+    // recomputed with the same public preconditioner application from `r₀ = b`
+    // (`x` is identically zero before the solve).
+    if let Err(e) = solve_pcg(&a_mat, &rhs, &mut x, &gs, 1e-12, 200, true) {
+        let SolverError::ConvergenceFailed { max_iter, residual } = e else {
+            panic!("PCG failed: {e}");
+        };
+        let r0 = DenseVec::from_vec(rhs.clone());
+        let mut z0 = DenseVec::zeros(r0.len());
+        gs.apply_precond(&r0, &mut z0);
+        let nom0: f64 = r0.as_slice().iter().zip(z0.as_slice()).map(|(a, b)| a * b).sum();
+        println!("PCG: Number of iterations: {max_iter}");
+        println!(
+            "Average reduction factor = {}",
+            fmt_g((residual * residual / nom0).powf(0.5 / max_iter as f64))
+        );
+        println!("PCG: No convergence!");
+    }
 }

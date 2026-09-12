@@ -29,9 +29,11 @@
 //! all-true (no `mesh_elements` section), `activeVert` is trivial, the periodic
 //! `d_to_d` map is the identity, `NCNURBSExtension` master edges/faces are
 //! absent (as in a conforming mesh, where `IsMasterEdge`/`IsMasterFace` are
-//! false), and the `patches` mesh-file variant, boundary-element DOF tables,
-//! B-net/patch conversion, refinement and `Print`/`PrintSolution` are out of
-//! scope.  See the module tests for the coverage boundary.
+//! false), and the `patches` mesh-file variant, the per-row boundary-element
+//! DOF *table* (`{Self::boundary_sides}` reproduces the union it feeds into
+//! `GetEssentialTrueDofs`, with the attribute of each row), B-net/patch
+//! conversion, refinement and `Print`/`PrintSolution` are out of scope.  See
+//! the module tests for the coverage boundary.
 
 use fem_element::iga::KnotVector;
 use fem_element::nurbs_fe_collection::{degree_elevate, knot_n_elements, knot_ncp, knot_order};
@@ -328,9 +330,13 @@ pub struct NurbsExtension {
     /// Patch topology boundary elements.
     boundary: Vec<TopoElement>,
     /// For every entry of `boundary`, the patch-boundary entity it lies on:
-    /// `(patch, direction, low)`, where `low` marks the minimum-parameter side.
-    /// Filled by [`Self::generate_boundary_elements`] (dimensions 2 and 3).
-    bdr_sides: Vec<(usize, usize, bool)>,
+    /// `(patch, direction, low, attribute)`, where `low` marks the
+    /// minimum-parameter side and `attribute` is the boundary element's mesh
+    /// attribute — the same value `GetBdrAttribute(i)` returns (and
+    /// `GenerateBdrElementDofTable` records per `bel_dof` row).  Filled by
+    /// [`Self::generate_boundary_elements`] (dimensions 2 and 3) and by a
+    /// point-vertex lookup for the 1-D case.
+    bdr_sides: Vec<(usize, usize, bool, i32)>,
     /// Vertices per global edge (MFEM `edge_vertex`, canonicalised min/max).
     edge_vertex: Vec<(usize, usize)>,
     /// Global face vertex cycles (MFEM `Mesh::faces`), first-encounter order.
@@ -1516,15 +1522,18 @@ impl NurbsExtension {
     }
 
     /// For every boundary element, the patch-boundary entity it lies on:
-    /// `(patch, direction, low)` with `low` marking the minimum-parameter side.
+    /// `(patch, direction, low, attribute)` with `low` marking the
+    /// minimum-parameter side and `attribute` the mesh boundary attribute
+    /// (`GetBdrAttribute`).
     ///
     /// This is the `[direction, side]` an element's `NURBSFiniteElement` carries
     /// in MFEM (`NURBSPatchMap::SetBdrPatchVertexMap`'s orientation): a boundary
     /// element of patch `p` on the `low`/`high` side of direction `d` spans the
     /// control points `multi[d] == 0` / `multi[d] == NCP_d - 1`, which is exactly
-    /// the information `GetEssentialTrueDofs` needs.  Empty for 1-D meshes (a
-    /// 1-D boundary element is a point and carries no side).
-    pub fn boundary_sides(&self) -> &[(usize, usize, bool)] {
+    /// the information `GetEssentialTrueDofs` needs.  The attribute is what
+    /// `GetEssentialVDofs` tests against `bdr_attr_is_ess[GetBdrAttribute(i)-1]`,
+    /// i.e. what a *partial* essential mask needs.
+    pub fn boundary_sides(&self) -> &[(usize, usize, bool, i32)] {
         &self.bdr_sides
     }
 
@@ -1538,7 +1547,27 @@ impl NurbsExtension {
     fn compute_bdr_sides(&mut self) {
         self.bdr_sides.clear();
         let d = self.dim;
-        if d == 2 {
+        if d == 1 {
+            // A 1-D boundary element is a point at one end of its patch's
+            // segment: the `low`/`high` side of direction 0 is decided by which
+            // end of the patch element's own vertex pair it is (MFEM's
+            // `SetBdrPatchDofMap` maps the point through `v_spaceOffsets`, so
+            // `NURBSPatchMap::operator()(0)` returns exactly that endpoint's
+            // control point; `Generate1DBdrElementDofTable` then records it as
+            // the boundary element's single DOF).
+            for be in &self.boundary {
+                if be.verts.len() != 1 {
+                    continue;
+                }
+                let v = be.verts[0];
+                for (p, el) in self.elements.iter().enumerate() {
+                    if el.verts.len() == 2 && (el.verts[0] == v || el.verts[1] == v) {
+                        self.bdr_sides.push((p, 0, el.verts[0] == v, be.attr));
+                        break;
+                    }
+                }
+            }
+        } else if d == 2 {
             // Element local edge -> the element that owns it (every mesh edge
             // reaches at most one element here; interior edges are skipped).
             let mut owner: Vec<Option<(usize, usize)>> = vec![None; self.edge_vertex.len()];
@@ -1554,7 +1583,7 @@ impl NurbsExtension {
                 let e = self.find_edge(be.verts[0], be.verts[1]);
                 if let Some((p, j)) = owner[e] {
                     let (dir, low) = quad_edge_side(j);
-                    self.bdr_sides.push((p, dir, low));
+                    self.bdr_sides.push((p, dir, low, be.attr));
                 }
             }
         } else if d == 3 {
@@ -1588,7 +1617,7 @@ impl NurbsExtension {
                 let f = key_to_face[pos].1;
                 if let Some((p, k)) = owner[f] {
                     let (dir, low) = hex_face_side(k);
-                    self.bdr_sides.push((p, dir, low));
+                    self.bdr_sides.push((p, dir, low, be.attr));
                 }
             }
         }

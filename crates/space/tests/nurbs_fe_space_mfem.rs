@@ -720,3 +720,179 @@ fn hcurl_default_projection_matches_mfem_element_l2() {
         "3-D |x| = {n3:.17e}, MFEM 4.10824849371272016e0"
     );
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 1-D NURBS (`segment-nurbs.mesh`, `NURBS1DFiniteElement`)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// MFEM 4.10 dump of `nurbs_ex1 -m data/segment-nurbs.mesh -o 2 -r 2`: the
+/// un-eliminated system (4 elements, 6 DOFs) at 17 fixed decimals.
+const REF_1D: &str = include_str!("data/nurbs_ex1_segment_r2_o2_mfem.txt");
+const MESH1D: &str = include_str!("../../../data/segment-nurbs.mesh");
+
+fn space1d(ref_levels: usize, order: usize) -> NurbsFESpace {
+    NurbsFESpace::from_mesh_str(MESH1D, ref_levels, &[order]).expect("1-D NurbsFESpace")
+}
+
+#[test]
+fn segment_1d_system_matches_mfem_bit_for_bit() {
+    // The 1-D path replaces three MFEM pieces at once: `NURBS1DFiniteElement`
+    // (the span element), `IntRules.Get(Geometry::SEGMENT, order)` (the
+    // quadrature) and a `1 x 1` element transformation (`Weight() = J(0,0)`,
+    // `AdjugateJacobian = [1]`).  The assembled matrix and load vector must
+    // match MFEM *bit for bit*, so this test compares 17-digit decimals rather
+    // than a tolerance.
+    let s = space1d(2, 2);
+    assert_eq!(s.n_dofs(), 6);
+    assert_eq!(s.n_elements(), 4);
+
+    let want: Vec<&str> = REF_1D.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(want[0], format!("NDOF {}", s.n_dofs()));
+    assert_eq!(want[1], format!("NV {}", s.n_dofs()));
+
+    // `<row> <col> <value>` lines (MFEM's per-row column order is unsorted,
+    // which is why the comparison below is order-insensitive).
+    let mut got: Vec<(usize, usize, String)> = Vec::new();
+    let a = s.assemble_diffusion(1.0);
+    for i in 0..a.nrows {
+        for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+            got.push((i, a.col_idx[k] as usize, format!("{:.17}", a.values[k])));
+        }
+    }
+    let rhs = s.assemble_domain_lf(&|_| 1.0);
+    for (i, v) in rhs.iter().enumerate() {
+        got.push((usize::MAX, i, format!("{v:.17}")));
+    }
+
+    let mut want_parsed: Vec<(usize, usize, String)> = Vec::new();
+    for l in &want[2..] {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f[0] == "B" {
+            want_parsed.push((usize::MAX, f[1].parse().unwrap(), f[2].to_string()));
+        } else {
+            want_parsed.push((f[0].parse().unwrap(), f[1].parse().unwrap(), f[2].to_string()));
+        }
+    }
+    assert_eq!(want_parsed.len(), got.len());
+    for w in &want_parsed {
+        assert!(got.contains(w), "missing MFEM entry row {} col {} = {}", w.0, w.1, w.2);
+    }
+}
+
+#[test]
+fn segment_1d_space_invariants() {
+    let s = space1d(0, 1);
+    assert_eq!(s.n_elements(), 1);
+    assert_eq!(s.n_dofs(), 2);
+
+    // The 1-D analysis basis is `NURBS1DFiniteElement`: unit weights (the space
+    // extension resets them), a partition of unity in every element, and
+    // derivatives summing to zero.
+    for e in 0..s.n_elements() {
+        let nd = s.element_n_dofs(e);
+        assert_eq!(nd, 2);
+        let mut shape = vec![0.0; nd];
+        let mut grad = vec![0.0; nd];
+        for &xi in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            s.fe_shape(e, &[xi], &mut shape);
+            let sum: f64 = shape.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-15, "element {e} xi = {xi}: sum = {sum}");
+            s.fe_grad(e, &[xi], &mut grad);
+            let dsum: f64 = grad.iter().sum();
+            assert!(dsum.abs() < 1e-14, "element {e} xi = {xi}: sum dshape = {dsum}");
+        }
+    }
+
+    // Geometry: the single span's map is the line `[0,1]`, `det J = 1` (and
+    // `AdjugateJacobian = [1]`, so each element's 1-D Poisson matrix is
+    // `[1, -1; -1, 1]`).
+    let g = s.geometry(0, &[0.5]);
+    assert!((g.x[0] - 0.5).abs() < 1e-15, "x = {:?}", g.x);
+    assert!((g.jac[0][0] - 1.0).abs() < 1e-15, "J = {:?}", g.jac);
+    assert!((g.det_j - 1.0).abs() < 1e-15, "det J = {}", g.det_j);
+
+    // `ess_bdr = 1` marks the two endpoint control points: a 1-D boundary
+    // element is a point and `Generate1DBdrElementDofTable` gives one DOF each.
+    // Those are the two *mesh-vertex* DOFs `0` and `1` — see the note on
+    // `NURBSPatchMap::operator()(int)` below.
+    assert_eq!(s.boundary_dofs(), vec![0, 1]);
+
+    // The `nurbs_ex1` default refinement (`floor(log(5000/1)/log(2)/1)` = 12
+    // levels, 4096 elements) for both orders; these are MFEM 4.10's
+    // `Number of finite element unknowns` for `-m segment-nurbs.mesh`.
+    for (refl, order, ndof) in [(12usize, 1usize, 4097usize), (12, 2, 4098)] {
+        let s = space1d(refl, order);
+        assert_eq!(s.n_dofs(), ndof, "order {order}, {refl} refinements");
+        assert_eq!(s.n_elements(), 4096, "order {order}, {refl} refinements");
+        assert_eq!(s.orders(), &[order]);
+        // MFEM's 1-D `NURBSPatchMap::operator()(i)` maps the patch multi-index
+        // `i` through `F(i-1, NCP-2)`: `i = 0` and `i = NCP-1` return
+        // `verts[0]` / `verts[1]`, i.e. the **vertex** DOFs `0` and `1`, while
+        // the interior indices `1 .. NCP-2` get
+        // `p_space_offsets[p] + Or1D(i-1, NCP-2, 0)`, and for a *patch*
+        // (`opatch = 0`) `Or1D` reverses them: `i = 1` gets the largest
+        // interior offset.  The endpoint control points therefore carry DOFs
+        // `0` and `1` (not `0` and `NCP-1`), and `GetEssentialTrueDofs` —
+        // which collects the boundary elements' DOFs — returns exactly
+        // `{0, 1}` at every refinement level.  Confirmed against MFEM 4.10:
+        // the whole 200-iteration `nurbs_ex1 -o 1` / `-o 2` PCG log is
+        // byte-identical, which it could not be otherwise.
+        assert_eq!(s.boundary_dofs(), vec![0, 1]);
+    }
+    // `-r 1` — the smallest non-trivial systems (`Number of finite element
+    // unknowns` 3 and 4, `Size of linear system` the same).  The DOF rows show
+    // the reversal above: the interior DOFs come out in decreasing span order.
+    let s1 = space1d(1, 1);
+    assert_eq!((s1.n_dofs(), s1.n_elements()), (3, 2));
+    assert_eq!(s1.element_dof_table(), &[vec![0, 2], vec![2, 1]]);
+    assert_eq!(s1.boundary_dofs(), vec![0, 1]);
+    let s2 = space1d(1, 2);
+    assert_eq!((s2.n_dofs(), s2.n_elements()), (4, 2));
+    assert_eq!(s2.element_dof_table(), &[vec![0, 3, 2], vec![3, 2, 1]]);
+    assert_eq!(s2.boundary_dofs(), vec![0, 1]);
+}
+
+#[test]
+fn partial_essential_attributes_split_the_boundary_dofs() {
+    // `GetEssentialTrueDofs(ess_bdr)` unions `GetBdrElementDofs(i)` only over
+    // the boundary elements whose attribute is marked, i.e. the boundary DOFs
+    // grouped by `GetBdrAttribute`.  `boundary_dofs_marked` must reproduce that
+    // grouping; the union over *all* attributes is `boundary_dofs`.
+    let s = space1d(0, 1); // segment-nurbs.mesh: attributes 1 and 2, DOFs 0 and 1
+    assert_eq!(s.boundary_dofs_marked(&[true, true]), vec![0, 1]);
+    assert_eq!(s.boundary_dofs_marked(&[true, false]), vec![0]);
+    assert_eq!(s.boundary_dofs_marked(&[false, true]), vec![1]);
+    assert!(s.boundary_dofs_marked(&[false, false]).is_empty());
+    // A short mask is allowed (missing attributes count as not essential), and
+    // attribute 0 is never marked.
+    assert!(s.boundary_dofs_marked(&[]).is_empty());
+    assert!(s.boundary_dofs_marked(&[false]).is_empty());
+
+    // The same invariants on the 2-D multi-span `pipe-nurbs-2d.mesh`, whose four
+    // boundary attributes (1..4) each own a distinct side of the pipe: every
+    // attribute contributes at least one DOF, each group is a proper subset of
+    // the full boundary, and their union is exactly `boundary_dofs()`.
+    const PIPE: &str = include_str!("../../../data/pipe-nurbs-2d.mesh");
+    let s2 = NurbsFESpace::from_mesh_str(PIPE, 1, &[2]).expect("pipe space");
+    let nb = s2.extension().max_bdr_attribute() as usize;
+    assert_eq!(nb, 4, "pipe-nurbs-2d.mesh boundary attributes");
+    let all = s2.boundary_dofs();
+    assert!(!all.is_empty());
+    let mut union: Vec<u32> = Vec::new();
+    for a in 0..nb {
+        let mut mask = vec![false; nb];
+        mask[a] = true;
+        let group = s2.boundary_dofs_marked(&mask);
+        assert!(!group.is_empty(), "attribute {} is empty", a + 1);
+        assert!(group.len() < all.len(), "attribute {} spans the whole boundary", a + 1);
+        for d in group {
+            if !union.contains(&d) {
+                union.push(d);
+            }
+        }
+    }
+    union.sort_unstable();
+    assert_eq!(union, all);
+    assert_eq!(s2.boundary_dofs_marked(&vec![true; nb]), all);
+}
+

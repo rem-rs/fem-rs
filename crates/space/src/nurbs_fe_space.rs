@@ -45,17 +45,24 @@
 //!
 //! # Limitations
 //!
-//! * Dimensions 2 and 3 (1-D `segment-nurbs.mesh` meshes are rejected).
+//! * Dimensions 1, 2 and 3.  The 1-D case (`segment-nurbs.mesh`) uses MFEM's
+//!   `NURBS1DFiniteElement` and `IntRules.Get(Geometry::SEGMENT, order)`; the
+//!   element transformation is 1 x 1, so `Weight() = J(0,0)` and
+//!   `AdjugateJacobian = [1]` (MFEM's `DenseMatrix::Weight` /
+//!   `CalcAdjugate` for a `1 x 1` matrix).
 //! * [`NurbsFESpace::boundary_dofs`] implements MFEM's `ess_bdr = 1` case
-//!   (every mesh boundary attribute essential); the general boundary-attribute
-//!   map needs `NURBSExtension::GenerateBdrElementDofTable`, which is not ported.
+//!   (every mesh boundary attribute essential); [`NurbsFESpace::boundary_dofs_marked`]
+//!   is the per-attribute form (`GetEssentialTrueDofs(ess_bdr)`), built from the
+//!   boundary elements' attributes rather than from
+//!   `NURBSExtension::GenerateBdrElementDofTable` (whose `bel_dof` rows the
+//!   `ess_bdr = 1` union does not need).
 //! * Scalar (H¹) space: the vector `NURBS_HDiv`/`NURBS_HCurl` paths are outside
-//!   the delivered scope.
+//!   the delivered scope (they are dimensions 2 and 3 only, as in MFEM).
 
 use fem_element::iga::KnotVector;
 use fem_element::nurbs_fe_collection::{
     degree_elevate, knot_botella, knot_in_span, knot_order, knot_span_dparam, knot_span_shape,
-    NurbsScalar2D, NurbsScalar3D,
+    Nurbs1DFiniteElement, NurbsScalar2D, NurbsScalar3D,
 };
 use fem_element::nurbs_vector::{NurbsHCurl2D, NurbsHCurl3D};
 use fem_element::quadrature::gauss_legendre_01;
@@ -72,11 +79,18 @@ pub struct Rule {
     pub weights: Vec<f64>,
 }
 
-/// `IntRules.Get(Geometry::SQUARE/CUBE, order)` — Gauss-Legendre with
-/// `(order + 2)/2` points per direction on `[0,1]^dim` (`[0,1]²` reuses
-/// [`fem_element::quadrature::quad_rule_01`]).
+/// `IntRules.Get(Geometry::SEGMENT/SQUARE/CUBE, order)` — Gauss-Legendre with
+/// `(order + 2)/2` points per direction on `[0,1]^dim`.  MFEM's three
+/// `GetSegmentRealOrder`-style helpers all use `n = Order/2 + 1` points per
+/// direction, which agrees with `(order + 2)/2` for every `order >= 0`.
 pub fn nurbs_rule(dim: usize, order: u8) -> Rule {
     let n = ((order as usize + 2) / 2).max(1);
+    if dim == 1 {
+        // `IntRules.Get(Geometry::SEGMENT, order)`: the 1-D Gauss rule on the
+        // reference segment `[0,1]` (`QuadratureFunctions1D::GaussLegendre`).
+        let (xs, ws) = gauss_legendre_01(n);
+        return Rule { points: xs.iter().map(|&x| vec![x]).collect(), weights: ws };
+    }
     if dim == 2 {
         // MFEM's `IntRules.Get(Geometry::SQUARE, order)`: an `n x n` tensor
         // product of the 1-D Gauss rule, first index varying fastest.  Built
@@ -216,6 +230,8 @@ fn dense_lu_solve(mat: &mut [f64], n: usize, rhs: &mut [f64], tol: f64) -> bool 
 /// (`NURBSFiniteElement::ijk`) and one weight per local DOF (`LoadFE`).
 #[derive(Debug, Clone)]
 pub enum SpanElement {
+    /// MFEM `NURBS1DFiniteElement`.
+    One(Nurbs1DFiniteElement),
     /// MFEM `NURBS2DFiniteElement`.
     Two(NurbsScalar2D),
     /// MFEM `NURBS3DFiniteElement`.
@@ -226,6 +242,7 @@ impl SpanElement {
     /// `FiniteElement::GetDim`.
     pub fn dim(&self) -> usize {
         match self {
+            SpanElement::One(_) => 1,
             SpanElement::Two(_) => 2,
             SpanElement::Three(_) => 3,
         }
@@ -234,6 +251,7 @@ impl SpanElement {
     /// `FiniteElement::GetDof`.
     pub fn n_dofs(&self) -> usize {
         match self {
+            SpanElement::One(fe) => fe.n_dofs(),
             SpanElement::Two(fe) => fe.n_dofs(),
             SpanElement::Three(fe) => fe.n_dofs(),
         }
@@ -242,6 +260,7 @@ impl SpanElement {
     /// `FiniteElement::GetOrder` (`max(orders)` after `SetOrder`).
     pub fn order(&self) -> usize {
         match self {
+            SpanElement::One(fe) => fe.order(),
             SpanElement::Two(fe) => fe.order(),
             SpanElement::Three(fe) => fe.order(),
         }
@@ -250,22 +269,27 @@ impl SpanElement {
     /// `NURBSFiniteElement::SetIJK`.
     pub fn set_ijk(&mut self, ijk: &[usize; 3]) {
         match self {
+            SpanElement::One(fe) => fe.set_ijk(ijk[0]),
             SpanElement::Two(fe) => fe.set_ijk([ijk[0], ijk[1]]),
             SpanElement::Three(fe) => fe.set_ijk(*ijk),
         }
     }
 
-    /// `NURBS2D/3DFiniteElement::CalcShape`.
+    /// `NURBS1D/2D/3DFiniteElement::CalcShape`.
     pub fn shape(&self, xi: &[f64], values: &mut [f64]) {
         match self {
+            SpanElement::One(fe) => fe.calc_shape(xi[0], values),
             SpanElement::Two(fe) => fe.calc_shape(xi, values),
             SpanElement::Three(fe) => fe.calc_shape(xi, values),
         }
     }
 
-    /// `NURBS2D/3DFiniteElement::CalcDShape` (`dim` entries per DOF).
+    /// `NURBS1D/2D/3DFiniteElement::CalcDShape` (`dim` entries per DOF).
     pub fn grad(&self, xi: &[f64], grads: &mut [f64]) {
         match self {
+            // `NURBS1DFiniteElement::CalcDShape` fills a `DenseMatrix` with one
+            // column, i.e. exactly this DOF-major `dim = 1` layout.
+            SpanElement::One(fe) => fe.calc_dshape(xi[0], grads),
             SpanElement::Two(fe) => fe.calc_grad(xi, grads),
             SpanElement::Three(fe) => fe.calc_grad(xi, grads),
         }
@@ -285,7 +309,10 @@ pub struct Geometry {
 /// `CalcAdjugate` (MFEM `linalg/densemat.cpp`) of a `dim x dim` Jacobian.
 fn adjugate(j: &[[f64; 3]; 3], dim: usize) -> [[f64; 3]; 3] {
     let mut a = [[0.0_f64; 3]; 3];
-    if dim == 2 {
+    if dim == 1 {
+        // `CalcAdjugate` of a `1 x 1` matrix: `adja(0,0) = 1.0`.
+        a[0][0] = 1.0;
+    } else if dim == 2 {
         a[0][0] = j[1][1];
         a[0][1] = -j[0][1];
         a[1][0] = -j[1][0];
@@ -304,9 +331,13 @@ fn adjugate(j: &[[f64; 3]; 3], dim: usize) -> [[f64; 3]; 3] {
     a
 }
 
-/// `DenseMatrix::Det` (MFEM `linalg/densemat.cpp`).
+/// `DenseMatrix::Det` (MFEM `linalg/densemat.cpp`); for `dim = 1` this is also
+/// `DenseMatrix::Weight()` (a `1 x 1` matrix is square, so `Weight` returns
+/// `Det()` — MFEM's `fabs` is commented out there).
 fn det(j: &[[f64; 3]; 3], dim: usize) -> f64 {
-    if dim == 2 {
+    if dim == 1 {
+        j[0][0]
+    } else if dim == 2 {
         j[0][0] * j[1][1] - j[0][1] * j[1][0]
     } else {
         j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
@@ -359,9 +390,9 @@ impl NurbsFESpace {
     pub fn from_mesh_str(text: &str, ref_levels: usize, orders: &[usize]) -> Result<Self, String> {
         let geo = NurbsExtension::from_mesh_str(text)?;
         let dim = geo.dim();
-        if dim < 2 || dim > 3 {
+        if dim < 1 || dim > 3 {
             return Err(format!(
-                "NurbsFESpace: dimension {dim} is not supported (only 2 and 3)"
+                "NurbsFESpace: dimension {dim} is not supported (only 1, 2 and 3)"
             ));
         }
         let nodes = NurbsExtension::parse_nodes(text, geo.n_dofs())?;
@@ -479,6 +510,13 @@ impl NurbsFESpace {
         let ijk = self.ext.element_ijk(e);
         let weights = self.element_weights(e);
         match self.dim {
+            1 => {
+                let mut fe = Nurbs1DFiniteElement::new(kvs[0].knot_vector().clone())
+                    .expect("Nurbs1DFiniteElement::new");
+                fe.set_ijk(ijk[0]);
+                fe.set_weights(weights).expect("Nurbs1DFiniteElement::set_weights");
+                SpanElement::One(fe)
+            }
             2 => {
                 let mut fe = NurbsScalar2D::new(
                     kvs[0].knot_vector().clone(),
@@ -635,22 +673,46 @@ impl NurbsFESpace {
     /// boundary side is a mesh boundary, so the essential DOFs are the union
     /// over the *mesh boundary elements* of the control points of the
     /// patch-boundary entity each of them lies on
-    /// ([`NurbsExtension::boundary_sides`]).
+    /// ([`NurbsExtension::boundary_sides`]).  In 1-D a patch-boundary entity is
+    /// a single point, i.e. the endpoint control point (`NCP - 1 = 0` for the
+    /// "other" directions, so the loop degenerates to one DOF).
     ///
     /// `ess_bdr = 1` marks every mesh boundary attribute essential (the case
-    /// `nurbs_ex1` uses); a partial `ess_bdr` needs
-    /// `NURBSExtension::GenerateBdrElementDofTable`'s attribute per row, which
-    /// is not ported.
+    /// `nurbs_ex1` uses); for a partial mask use
+    /// [`Self::boundary_dofs_marked`], which is the same union restricted to
+    /// the marked attributes.
     pub fn boundary_dofs(&self) -> Vec<u32> {
+        let all = vec![true; self.ext.max_bdr_attribute().max(0) as usize];
+        self.boundary_dofs_marked(&all)
+    }
+
+    /// MFEM `FiniteElementSpace::GetEssentialTrueDofs(ess_bdr)` — the essential
+    /// DOFs of the *subset* of mesh boundary attributes marked in `ess_bdr`
+    /// (index `a - 1` is the mesh attribute `a`, as MFEM's
+    /// `bdr_attr_is_ess[GetBdrAttribute(i)-1]` test does; `ess_bdr` may be
+    /// shorter than the mesh's attribute count, missing entries counting as
+    /// not essential).
+    ///
+    /// This is the per-attribute form of [`Self::boundary_dofs`]: MFEM's
+    /// `GetEssentialVDofs` loops over the boundary elements and unions
+    /// `GetBdrElementDofs(i)` for the marked ones, so grouping by the boundary
+    /// attribute of each side is exactly `GenerateBdrElementDofTable`'s
+    /// `bel_dof` restricted to the marked rows.
+    pub fn boundary_dofs_marked(&self, ess_bdr: &[bool]) -> Vec<u32> {
         let dim = self.dim;
         let mut mark = vec![false; self.n_dofs()];
         // A patch-boundary entity can be shared by several boundary elements
-        // (one per knot span along it); each side is marked once.
-        let mut sides: Vec<(usize, usize, bool)> = self.ext.boundary_sides().to_vec();
+        // (one per knot span along it); each `(side, attribute)` is marked once.
+        let mut sides: Vec<(usize, usize, bool, i32)> = self.ext.boundary_sides().to_vec();
         sides.sort_unstable();
         sides.dedup();
 
-        for &(patch, dir, low) in &sides {
+        for &(patch, dir, low, attr) in &sides {
+            // `bdr_attr_is_ess[attr-1]`, with attribute 0 (unnumbered) never
+            // marked — MFEM's `bdr_attr_is_ess` is indexed the same way.
+            if attr < 1 || !ess_bdr.get((attr - 1) as usize).copied().unwrap_or(false) {
+                continue;
+            }
             let kvs = self.ext.patch_knot_vectors(patch).expect("element patch");
             let ncp: Vec<usize> = kvs.iter().map(|k| k.ncp()).collect();
             let idx = if low { 0 } else { ncp[dir] - 1 };
@@ -1126,11 +1188,11 @@ impl NurbsHCurlSpace {
 
         // One entry per boundary element; a side is shared by all spans along
         // it, so de-duplicate first (`activeBdrElem` enumeration order).
-        let mut sides: Vec<(usize, usize, bool)> = ext.boundary_sides().to_vec();
+        let mut sides: Vec<(usize, usize, bool, i32)> = ext.boundary_sides().to_vec();
         sides.sort_unstable();
         sides.dedup();
 
-        for &(patch, dir, low) in &sides {
+        for &(patch, dir, low, _attr) in &sides {
             for c in 0..dim {
                 // H_CURL `Generate{2,3}DBdrElementDofTable`: dofs exist iff the
                 // entity's tangential knot-vector order differs from
