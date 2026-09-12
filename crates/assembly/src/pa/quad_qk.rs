@@ -31,45 +31,21 @@ fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
     (0..n).map(|i| -1.0 + i as f64 * h).collect()
 }
 
-/// Evaluate Lagrange basis ℓ_i and dℓ_i/dx at a point x.
-fn lagrange_1d(x: f64, nodes: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let n = nodes.len();
-    let eps = 1e-15;
-    let mut vals = vec![0.0; n];
-    let mut ders = vec![0.0; n];
-    for i in 0..n {
-        let xi = nodes[i];
-        let mut val = 1.0;
-        let mut der = 0.0;
-        for j in 0..n {
-            if j == i {
-                continue;
-            }
-            let xj = nodes[j];
-            let d = xi - xj;
-            val *= (x - xj) / d;
-            if (x - xj).abs() > eps {
-                der += 1.0 / (x - xj);
-            }
-        }
-        vals[i] = val;
-        ders[i] = der * val;
-    }
-    (vals, ders)
-}
-
 /// Precompute 1D basis values at quadrature points.
+///
+/// The evaluation is the shared, node-safe one (`pa::tensor_1d`) — for this
+/// kernel's equispaced nodes the `p+1` Gauss–Legendre points hit a node at
+/// ξ = 0 whenever `p` is even, which the old product-only derivative formula
+/// got wrong exactly as it did for the hex kernels (D81).
+///
+/// NOTE (open, D83 candidate): `equispaced_1d_nodes` is *not* MFEM's
+/// `H1_FECollection` `BasisType::GaussLobatto` node set for `p ≥ 3`
+/// (`ref_elem_vol_h1(Quad4, p)` → `QuadQk::new(p)`), and the slot numbering
+/// (`quad_tensor_to_node`) is lexicographic rather than `QuadQk`'s topological
+/// H1 order — i.e. this 2-D kernel has not had its D77 migration yet.
 fn build_1d_basis_qp(p: usize, qpts: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
     let nodes = equispaced_1d_nodes(p);
-    let nq = qpts.len();
-    let mut phi = Vec::with_capacity(nq);
-    let mut dphi = Vec::with_capacity(nq);
-    for &q in qpts {
-        let (v, d) = lagrange_1d(q, &nodes);
-        phi.push(v);
-        dphi.push(d);
-    }
-    (phi, dphi)
+    crate::pa::tensor_1d::basis_at_points(&nodes, qpts)
 }
 
 fn gauss_legendre_1d_n(n: usize) -> (Vec<f64>, Vec<f64>) {

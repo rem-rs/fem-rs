@@ -34,32 +34,18 @@ fn hex_vertices() -> Vec<[f64; 3]> {
 }
 
 fn build_1d_basis(nodes: &[f64; 5]) -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
+    // D81: the 1-D table comes from `pa::tensor_1d`, whose *node* branch is
+    // load-bearing here — GL5 contains ξ = 0, which is a GLL(5) node, and the
+    // off-diagonal derivative ℓ_i'(0) = (w_i/w_0)/(0−x_i) is nonzero.  The
+    // pre-D81 local copy zeroed that whole off-diagonal row at a node, which is
+    // why the Q4 element matrix was off by ~3.6e-1.
+    let (phi, dphi) = crate::pa::tensor_1d::basis_at_points(nodes, &GL5_PTS);
     let mut b = [[0.0_f64; 5]; 5];
     let mut d = [[0.0_f64; 5]; 5];
     for q in 0..5 {
-        let t = GL5_PTS[q];
-        let at_node = nodes.iter().position(|&n| (t - n).abs() < 1e-15);
         for i in 0..5 {
-            if let Some(k) = at_node {
-                b[q][i] = if i == k { 1.0 } else { 0.0 };
-                if i != k {
-                    d[q][i] = 0.0;
-                } else {
-                    let mut s = 0.0;
-                    for j in 0..5 { if j != i { s += 1.0 / (nodes[i] - nodes[j]); } }
-                    d[q][i] = s;
-                }
-            } else {
-                let mut val = 1.0;
-                let mut der = 0.0;
-                for j in 0..5 { if j == i { continue; }
-                    let denom = nodes[i] - nodes[j];
-                    val *= (t - nodes[j]) / denom;
-                    der += 1.0 / (t - nodes[j]);
-                }
-                der *= val;
-                b[q][i] = val; d[q][i] = der;
-            }
+            b[q][i] = phi[q][i];
+            d[q][i] = dphi[q][i];
         }
     }
     (b, d)

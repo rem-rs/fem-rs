@@ -200,6 +200,43 @@ impl ReferenceElement for HexQ2 {
     }
 }
 
+// ─── Tensor-product layout (element-layer export) ─────────────────────────────
+
+/// `(ascending 1-D nodes, slot → tensor index)` of a tensor-product hex element.
+///
+/// This is the single derivation of "which tensor node `(ix, iy, iz)` does
+/// element-local slot `s` carry": both the CPU partial-assembly kernels
+/// (`fem-assembly`'s `pa::hex_layout`) and the GPU shader generator
+/// (`fem-linalg-gpu`'s `generate_hex_qk_wgsl`) build their slot tables from it,
+/// so a `HexQk`/`HexQ2`/`HexQ3` layout change cannot silently desynchronize
+/// them.
+///
+/// [`ReferenceElement::dof_coords`] hands out the element's own 1-D nodes
+/// bit-for-bit, so the distinct values of any axis coordinate *are* those nodes
+/// — the matching below is exact (`dedup`/`position` compare without tolerance).
+pub fn hex_tensor_layout(elem: &dyn ReferenceElement) -> (Vec<f64>, Vec<[usize; 3]>) {
+    let coords: Vec<[f64; 3]> = elem
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let mut nodes: Vec<f64> = coords.iter().map(|c| c[0]).collect();
+    nodes.sort_by(|a, b| a.partial_cmp(b).expect("hex node coordinate is finite"));
+    nodes.dedup();
+    let slots = coords
+        .iter()
+        .map(|c| {
+            let axis = |v: f64| {
+                nodes.iter().position(|&n| n == v).unwrap_or_else(|| {
+                    panic!("hex slot coordinate {v} is not one of the 1-D nodes {nodes:?}")
+                })
+            };
+            [axis(c[0]), axis(c[1]), axis(c[2])]
+        })
+        .collect();
+    (nodes, slots)
+}
+
 // ─── Q3 ───────────────────────────────────────────────────────────────────────
 
 /// Cubic Lagrange element on the reference hex `[-1,1]³` — 64 DOFs.

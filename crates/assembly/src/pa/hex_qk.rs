@@ -10,6 +10,14 @@
 //! DOFs in.  Before D77 this kernel used equispaced nodes in lexicographic
 //! order — a second, silent divergence from the element layer (and therefore
 //! from the assembled matrix) on top of the slot-order one.
+//!
+//! D81 closed the last one: the 1-D basis evaluation now goes through
+//! [`crate::pa::tensor_1d`], which handles quadrature points that land **on** a
+//! node.  The product-form derivative used here before returned 0 for every
+//! non-node basis function there, which for even `p` is not an edge case — the
+//! `p+1` Gauss–Legendre points contain ξ = 0, and ξ = 0 is a Gauss–Lobatto
+//! node for even `p`.  That is exactly why `p = 3` matched the assembled matrix
+//! to 3e-15 while `p = 2` / `p = 4` were off by O(1e-1).
 
 use crate::pa::hex_layout::{hex_slots, tensor_slots};
 use crate::pa::types::PaData;
@@ -32,47 +40,13 @@ fn hex_vertices() -> Vec<[f64; 3]> {
         .collect()
 }
 
-/// Evaluate Lagrange basis ℓ_i and dℓ_i/dx at a point x,
-/// given node positions `nodes` (length = p+1).
-fn lagrange_1d(x: f64, nodes: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let n = nodes.len();
-    let eps = 1e-15;
-    let mut vals = vec![0.0; n];
-    let mut ders = vec![0.0; n];
-    for i in 0..n {
-        let xi = nodes[i];
-        let mut val = 1.0;
-        let mut der = 0.0;
-        for j in 0..n {
-            if j == i {
-                continue;
-            }
-            let xj = nodes[j];
-            let d = xi - xj;
-            val *= (x - xj) / d;
-            // Handle coincident point: skip (removable singularity via product zero)
-            if (x - xj).abs() > eps {
-                der += 1.0 / (x - xj);
-            }
-        }
-        vals[i] = val;
-        ders[i] = der * val;
-    }
-    (vals, ders)
-}
-
-/// Precompute 1D basis values and derivatives for all quadrature points.
-/// Returns (phi, dphi) where phi[q][i] = ℓ_i(qpt[q]), same for dphi.
+/// Evaluate the 1-D basis and its derivative at every quadrature point of
+/// `qpts`, from node positions `nodes` (length = p+1).
+///
+/// The evaluation itself lives in [`crate::pa::tensor_1d`], whose node branch is
+/// what makes `p = 2` / `p = 4` reachable at all — see D81 there.
 fn build_1d_basis_qp(nodes: &[f64], qpts: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
-    let nq = qpts.len();
-    let mut phi = Vec::with_capacity(nq);
-    let mut dphi = Vec::with_capacity(nq);
-    for &q in qpts {
-        let (v, d) = lagrange_1d(q, nodes);
-        phi.push(v);
-        dphi.push(d);
-    }
-    (phi, dphi)
+    crate::pa::tensor_1d::basis_at_points(nodes, qpts)
 }
 
 /// Gauss–Legendre quadrature on [-1, 1] for arbitrary n.
@@ -361,79 +335,28 @@ mod tests {
         }
     }
 
-    /// D77 identity: for every hex order the assembler supports, the PA apply
-    /// (fixed-order *and* generic kernels) reproduces the assembled SpMV to
-    /// roundoff.  Order 2 exercises the legacy fem-rs p2 slot order
-    /// (`build_q2_hex`), orders ≥ 3 the MFEM `H1_HexahedronElement` order
-    /// (`build_pk_hex`) — the pre-D77 kernels were permutation-wrong on both.
-    /// D77 identity, **order 3 (verified)**: the PA apply reproduces the
-    /// assembled SpMV to roundoff.  The kernels now share the element layer's
-    /// GLL nodes *and* slot order, which is what made this hold — the pre-D77
-    /// kernels were equispaced *and* lexicographically ordered.
-    #[test]
-    fn hex_pa_apply_matches_assembled_matrix_p3() {
-        let p = 3u8;
-        let mesh = Mesh::<3>::unit_cube_hex(2);
-        let space = H1Space::new(mesh, p);
-        let mat = Assembler::assemble_bilinear(
-            &space,
-            &[&DiffusionIntegrator { kappa: 1.0 }],
-            2 * p + 2,
-        );
-        let n = space.n_dofs();
-        let elem_dofs = hex_elem_dofs(&space);
-        let mut rng: u64 = 42;
-        let x: Vec<f64> = (0..n)
-            .map(|_| {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((rng >> 11) as f64) / ((1u64 << 53) as f64)
-            })
-            .collect();
-        let mut y_ref = vec![0.0; n];
-        mat.spmv(&x, &mut y_ref);
-        let err = |y: &[f64]| -> f64 {
-            (0..n).map(|i| (y[i] - y_ref[i]).abs()).fold(0.0, f64::max)
-        };
-
-        let pd_qk = build_hex_qk_pa_data(space.mesh(), &|_| 1.0, p as usize);
-        let mut y_qk = vec![0.0; n];
-        pa_apply_hex_qk(&pd_qk, &elem_dofs, p as usize, &x, &mut y_qk);
-        let e = err(&y_qk);
-        assert!(e < 1e-12, "p=3: generic HexQk PA vs assembled {e:.2e}");
-
-        let pd = crate::pa::q3::build_hex_q3_pa_data(space.mesh(), &|_| 1.0);
-        let mut y = vec![0.0; n];
-        crate::pa::q3::pa_apply_hex_q3(&pd, &elem_dofs, &x, &mut y);
-        let e = err(&y);
-        assert!(e < 1e-12, "p=3: HexQ3 PA vs assembled {e:.2e}");
-        let mut y_sf = vec![0.0; n];
-        crate::pa::q3::pa_apply_hex_q3_sf(&pd, &elem_dofs, &x, &mut y_sf);
-        let e_sf = err(&y_sf);
-        assert!(e_sf < 1e-12, "p=3: HexQ3 SF PA vs assembled {e_sf:.2e}");
-    }
-
-    /// D77 **characterization** of the still-open p = 2 / p = 4 divergence.
+    /// D77/D81 identity, **every hex order the assembler supports** (p = 1..=5,
+    /// so both `build_q2_hex` (p = 2) and `build_pk_hex` (p ≥ 3) numbering):
+    /// the generic PA apply reproduces the assembled SpMV to roundoff.
     ///
-    /// With the slot maps bit-exactly equal to the element layer's (see the
-    /// pins above), `p = 2` (`build_q2_hex` numbering) and `p = 4`
-    /// (`build_pk_hex`) still disagree with the assembled matrix by O(1e-1).
-    /// Established while investigating:
-    /// * it is **not** a slot permutation: the best row-match against the
-    ///   assembled matrix is the identity and leaves a 2.4e-2 residual, and
-    ///   the exact-equality permutations would show ~1e-15;
-    /// * it is **not** quadrature accuracy: the difference is bit-identical
-    ///   for 3, 4 and 7 Gauss points per direction;
-    /// * both matrices are symmetric and constant-preserving (row sums ~1e-15);
-    /// * `p = 3` agrees to 3e-15, so the shared GLL/element-order pipeline is
-    ///   sound and the deviation is confined to the p = 2 / p = 4 basis path.
-    ///
-    /// Flip this to `< 1e-12` (and merge it into the p = 3 test above) once the
-    /// p = 2 / p = 4 side is resolved; the assertion currently documents the
-    /// open state instead of hiding it.
+    /// This used to be a characterization test asserting that p = 2 / p = 4
+    /// *still* diverged by O(1e-1).  The D81 root cause was in this kernel's own
+    /// 1-D Lagrange evaluation, not in the layout: the derivative was computed
+    /// as `ℓ_i(x)·Σ_{j≠i} 1/(x−x_j)`, which is only valid **off** the nodes.
+    /// The `p+1` Gauss–Legendre points contain ξ = 0 exactly when `p` is even,
+    /// and 0 is a Gauss–Lobatto node for even `p` — so for even orders one
+    /// quadrature point sits on a node, where the true `ℓ_i'(x_k)` for `i ≠ k`
+    /// is `(w_i/w_k)/(x_k−x_i) ≠ 0` and the old formula returned 0.  Odd orders
+    /// had no coincident point, which is why p = 3 always passed.
+    /// Per-entry evidence (element 0 matrices, before → after, p = 2):
+    /// `|K_asm − K_pa| = 1.3e-1 → 1.8e-15` (604/729 entries wrong, no pattern
+    /// beyond "every entry that touches the ξ/η/ζ = 0 plane"), p = 4:
+    /// `3.6e-1 → 8.4e-15`; `|K_asm − K_analytic|` was ~1e-15 throughout, i.e.
+    /// the assembled matrix was right and only the PA kernel was wrong.
     #[test]
-    fn hex_pa_apply_vs_assembled_p2_p4_open_divergence() {
-        for p in [2u8, 4u8] {
-            let mesh = Mesh::<3>::unit_cube_hex(1);
+    fn hex_pa_apply_matches_assembled_all_orders() {
+        for p in 1..=5u8 {
+            let mesh = Mesh::<3>::unit_cube_hex(2);
             let space = H1Space::new(mesh, p);
             let mat = Assembler::assemble_bilinear(
                 &space,
@@ -442,24 +365,77 @@ mod tests {
             );
             let n = space.n_dofs();
             let elem_dofs = hex_elem_dofs(&space);
-            let pd = build_hex_qk_pa_data(space.mesh(), &|_| 1.0, p as usize);
-            let mut max_err: f64 = 0.0;
-            for j in 0..n {
-                let mut e = vec![0.0; n];
-                e[j] = 1.0;
-                let mut yr = vec![0.0; n];
-                mat.spmv(&e, &mut yr);
-                let mut yp = vec![0.0; n];
-                pa_apply_hex_qk(&pd, &elem_dofs, p as usize, &e, &mut yp);
-                for i in 0..n {
-                    max_err = max_err.max((yp[i] - yr[i]).abs());
+            let mut rng: u64 = 42;
+            let x: Vec<f64> = (0..n)
+                .map(|_| {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((rng >> 11) as f64) / ((1u64 << 53) as f64)
+                })
+                .collect();
+            let mut y_ref = vec![0.0; n];
+            mat.spmv(&x, &mut y_ref);
+            // NaN-aware: `f64::max` *ignores* NaN, so a kernel that divides by
+            // zero at a node (the pre-D81 shape of this bug) would otherwise
+            // pass a `< 1e-12` comparison silently.
+            let err = |y: &[f64]| -> f64 {
+                (0..n)
+                    .map(|i| {
+                        let d = (y[i] - y_ref[i]).abs();
+                        if d.is_nan() || !y[i].is_finite() {
+                            f64::INFINITY
+                        } else {
+                            d
+                        }
+                    })
+                    .fold(0.0, f64::max)
+            };
+
+            let pd_qk = build_hex_qk_pa_data(space.mesh(), &|_| 1.0, p as usize);
+            let mut y_qk = vec![0.0; n];
+            pa_apply_hex_qk(&pd_qk, &elem_dofs, p as usize, &x, &mut y_qk);
+            let e = err(&y_qk);
+            assert!(e < 1e-12, "p={p}: generic HexQk PA vs assembled {e:.2e}");
+
+            // The order-specific kernels, each against the same assembled
+            // matrix: HexQ2/HexQ3/HexQ4 share the layout but carry their own
+            // quadrature constants (GL3/GL4/GL5) and — pre-D81 — their own 1-D
+            // tables (GL5 hit the ξ = 0 node for the same reason).  There is no
+            // fixed-order kernel above Q4.
+            let y_spec = match p {
+                1 => {
+                    let pd = crate::pa::hex_q1::build_hex_q1_pa_data(space.mesh(), &|_| 1.0);
+                    let mut y = vec![0.0; n];
+                    crate::pa::hex_q1::pa_apply_hex_q1(&pd, &elem_dofs, &x, &mut y);
+                    Some(y)
                 }
+                2 => {
+                    let pd = crate::pa::q2::build_hex_q2_pa_data(space.mesh(), &|_| 1.0);
+                    let mut y = vec![0.0; n];
+                    crate::pa::q2::pa_apply_hex_q2(&pd, &elem_dofs, &x, &mut y);
+                    Some(y)
+                }
+                3 => {
+                    let pd = crate::pa::q3::build_hex_q3_pa_data(space.mesh(), &|_| 1.0);
+                    let mut y = vec![0.0; n];
+                    crate::pa::q3::pa_apply_hex_q3(&pd, &elem_dofs, &x, &mut y);
+                    let mut y_sf = vec![0.0; n];
+                    crate::pa::q3::pa_apply_hex_q3_sf(&pd, &elem_dofs, &x, &mut y_sf);
+                    let e_sf = err(&y_sf);
+                    assert!(e_sf < 1e-12, "p=3: HexQ3 SF PA vs assembled {e_sf:.2e}");
+                    Some(y)
+                }
+                4 => {
+                    let pd = crate::pa::q4::build_hex_q4_pa_data(space.mesh(), &|_| 1.0);
+                    let mut y = vec![0.0; n];
+                    crate::pa::q4::pa_apply_hex_q4(&pd, &elem_dofs, &x, &mut y);
+                    Some(y)
+                }
+                _ => None,
+            };
+            if let Some(y) = y_spec {
+                let e = err(&y);
+                assert!(e < 1e-12, "p={p}: order-specific PA vs assembled {e:.2e}");
             }
-            assert!(
-                max_err > 1e-3,
-                "p={p}: the documented D77 divergence is gone ({max_err:.2e}) — \
-                 update this characterization test to assert identity"
-            );
         }
     }
 

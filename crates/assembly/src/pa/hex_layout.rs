@@ -13,43 +13,18 @@
 //! [`ReferenceElement::dof_coords`] at kernel start: the element layer stays
 //! the single source of truth and any future `HexQk` layout change (e.g. the
 //! pending `HexQk(2)` MFEM-order switch) is followed automatically.
+//!
+//! D82 moved the derivation itself into the element crate
+//! ([`fem_element::lagrange::hex::hex_tensor_layout`]) so that the GPU shader
+//! generator builds its slot tables from the same function instead of a second
+//! transcription of it.
 
 use fem_element::ReferenceElement;
 
-/// The 1-D node positions of a tensor-product hex element, ascending.
-///
-/// [`ReferenceElement::dof_coords`] hands out the element's own 1-D nodes
-/// bit-for-bit, so the distinct values of any axis coordinate *are* those
-/// nodes — no tolerance matching is involved (`dedup` compares exactly).
-pub(crate) fn axis_nodes(coords: &[[f64; 3]]) -> Vec<f64> {
-    let mut nodes: Vec<f64> = coords.iter().map(|c| c[0]).collect();
-    nodes.sort_by(|a, b| a.partial_cmp(b).expect("hex node coordinate is finite"));
-    nodes.dedup();
-    nodes
-}
-
-/// Slot → tensor index `(ix, iy, iz)` in the element's own DOF order,
-/// with `nodes` the ascending 1-D nodes of [`axis_nodes`].
-pub(crate) fn slot_tensor(coords: &[[f64; 3]], nodes: &[f64]) -> Vec<[usize; 3]> {
-    let axis = |v: f64| {
-        nodes
-            .iter()
-            .position(|&n| n == v)
-            .unwrap_or_else(|| panic!("hex slot coordinate {v} is not one of the 1-D nodes {nodes:?}"))
-    };
-    coords.iter().map(|c| [axis(c[0]), axis(c[1]), axis(c[2])]).collect()
-}
-
-/// `(1-D nodes, slot → tensor index)` of a tensor-product hex element.
+/// `(1-D nodes, slot → tensor index)` of a tensor-product hex element — the
+/// element layer's own derivation.
 pub(crate) fn hex_slots(elem: &dyn ReferenceElement) -> (Vec<f64>, Vec<[usize; 3]>) {
-    let coords: Vec<[f64; 3]> = elem
-        .dof_coords()
-        .into_iter()
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
-    let nodes = axis_nodes(&coords);
-    let slots = slot_tensor(&coords, &nodes);
-    (nodes, slots)
+    fem_element::lagrange::hex::hex_tensor_layout(elem)
 }
 
 /// Inverse of a slot → tensor map: `inv[ix][iy][iz]` = element-local slot.

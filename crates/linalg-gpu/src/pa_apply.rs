@@ -187,18 +187,32 @@ pub fn gpu_pa_apply_quad_q1_f64(gpu: &GpuContext, pa: &[f64], dofs: &[u32], x: &
 
 /// Generate a WGSL compute shader for Hex Qk diffusion PA for any degree p.
 ///
-/// Uses sum-factorized tensor contractions (like the CPU `pa_apply_hex_qk`),
-/// but with Lagrange basis evaluated via the general product formula instead
-/// of hardcoded per-degree basis functions.
+/// **D82**: the degree and the element-local layout come from the element layer
+/// — [`fem_element::lagrange::HexQk`]`::new(p)`, hence the GLL nodes and MFEM
+/// `H1_HexahedronElement` slot order that `DofManager::build_pk_hex` (and
+/// `build_q2_hex` for p = 2) numbers `H1Space` element DOFs in.  The generated
+/// `QA/QB/QC` tables are [`fem_element::lagrange::hex::hex_tensor_layout`]'s
+/// output verbatim, i.e. the same derivation the CPU PA kernels use.  Before
+/// D82 this emitted lexicographic slot indices over *equispaced* nodes — the
+/// pre-D77 CPU layout, which does not match the assembled matrix.
+///
+/// The 1-D basis (`bary`/`dary`) uses the exact product form of the Lagrange
+/// derivative, which stays correct when a quadrature point lands on a node
+/// (for even p, ξ = 0 is both a Gauss point and a GLL node).
 ///
 /// When `use_f64` is true, the generated shader uses `array<f64>` and `f64`
 /// types (requires `gpu.features.native_f64`).
+///
+/// The shipped `wgsl/hex_q3.wgsl` / `wgsl/hex_q4.wgsl` are this generator's
+/// output for p = 3 / p = 4 (footer comment aside), pinned by
+/// `tests::hex_q3_q4_wgsl_tables_match_element`.
 pub fn generate_hex_qk_wgsl(p: usize, use_f64: bool) -> String {
     let fp = if use_f64 { "f64" } else { "f32" };
     let nq = p + 1;
     let nloc = nq * nq * nq;
     let (qpts, qwts) = gauss_legendre_f64(nq);
-    let nodes = equispaced_1d_nodes(p);
+    let (nodes, slots) = hex_layout(p);
+    assert_eq!(slots.len(), nloc, "HexQk({p}) slot count");
 
     let qpts_str: String = qpts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
     let qwts_str: String = qwts.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
@@ -210,6 +224,11 @@ pub fn generate_hex_qk_wgsl(p: usize, use_f64: bool) -> String {
     let bzs: String = (0..nq).map(|i| format!("bz{i}")).collect::<Vec<_>>().join(",");
     let dzs: String = (0..nq).map(|i| format!("dz{i}")).collect::<Vec<_>>().join(",");
     let nqp = nq * nq;
+    // Slot → tensor index, exactly as the element layer hands it out.
+    let axis = |d: usize| -> String {
+        slots.iter().map(|t| t[d].to_string()).collect::<Vec<_>>().join(",")
+    };
+    let (qa, qb, qc) = (axis(0), axis(1), axis(2));
 
     let wgsl = format!(r#"
 struct PD{{data:array<{fp}>}}struct ED{{dofs:array<u32>}}struct XV{{vals:array<{fp}>}}struct ER{{vals:array<{fp}>}}
@@ -219,7 +238,13 @@ const GP:array<{fp},{nq}>=array({qpts_str});
 const GW:array<{fp},{nq}>=array({qwts_str});
 fn bary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=1.0;for(var j=0u;j<{nq}u;j++){{if(j!=i){{r*=(t-n[j])/(n[i]-n[j]);}}}}return r;}}
 fn dary(t:{fp},i:u32)->{fp}{{let n=array<{fp},{nq}>({nodes_str});var r=0.0;for(var m=0u;m<{nq}u;m++){{if(m==i){{continue;}}var term=1.0/(n[i]-n[m]);for(var j=0u;j<{nq}u;j++){{if(j!=i&&j!=m){{term*=(t-n[j])/(n[i]-n[j]);}}}}r+=term;}}return r;}}
-fn qka(n:u32)->u32{{return n%{nq}u;}}fn qkb(n:u32)->u32{{return(n/{nq}u)%{nq}u;}}fn qkc(n:u32)->u32{{return n/{nqp}u;}}
+// Slot -> tensor index in the element layer's own HexQk({p}) order
+// (`hex_tensor_layout`), i.e. the order `DofManager` numbers H1 element DOFs
+// in.  Pinned by `tests::hex_q3_q4_wgsl_tables_match_element`.
+const QA:array<u32,{nloc}>=array({qa});
+const QB:array<u32,{nloc}>=array({qb});
+const QC:array<u32,{nloc}>=array({qc});
+fn qka(n:u32)->u32{{return QA[n];}}fn qkb(n:u32)->u32{{return QB[n];}}fn qkc(n:u32)->u32{{return QC[n];}}
 @compute@workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id)gid:vec3<u32>){{
 let e=gid.x;var xe:array<{fp},{nloc}>;for(var i=0u;i<{nloc}u;i++){{xe[i]=xv.vals[ed.dofs[e*{nloc}u+i]];}}
@@ -250,6 +275,7 @@ for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}
         nq = nq, nloc = nloc, nqp = nqp, fp = fp,
         qpts_str = qpts_str, qwts_str = qwts_str, nodes_str = nodes_str,
         bxs = bxs, dxs = dxs, bys = bys, dys = dys, bzs = bzs, dzs = dzs,
+        qa = qa, qb = qb, qc = qc,
         zeros = (0..nloc-1).map(|_| ",0.0").collect::<String>(),
         bvals = (0..nq).map(|i| format!(
             "let bx{i}=bary(GP[qx],{i}u);let dx{i}=dary(GP[qx],{i}u);\
@@ -257,6 +283,12 @@ for(var i=0u;i<{nloc}u;i++){{er.vals[e*{nloc}u+i]=ye[i];}}}}
              let bz{i}=bary(GP[qz],{i}u);let dz{i}=dary(GP[qz],{i}u);")).collect::<Vec<_>>().join("\n"),
     );
     wgsl
+}
+
+/// `(ascending 1-D GLL nodes, slot → tensor index)` of `HexQk::new(p)` — the
+/// element layer's layout, which the GPU shaders must mirror exactly.
+fn hex_layout(p: usize) -> (Vec<f64>, Vec<[usize; 3]>) {
+    fem_element::lagrange::hex::hex_tensor_layout(&fem_element::lagrange::HexQk::new(p))
 }
 
 /// Run a dynamically generated Qk PA shader (f32).
@@ -320,27 +352,6 @@ fn gauss_legendre_f64(n: usize) -> (Vec<f64>, Vec<f64>) {
     }
 }
 
-/// Equispaced 1D nodes on [-1, 1] for degree p.
-///
-/// D77 remainder: the GPU mirror is **not yet migrated** to the element
-/// layer's layout.  The shaders shipped here still carry the pre-D77
-/// conventions — `hex_q2.wgsl`'s `q2map` has been fixed (pinned by
-/// `tests::hex_q2_wgsl_slots_match_element`), but `hex_q3.wgsl` /
-/// `hex_q4.wgsl` are still lexicographic (`q3a/q3b/q3c` index arithmetic) on
-/// **equispaced** nodes, and this generator emits `qka/qkb/qkc` lexicographic
-/// indices over `equispaced_1d_nodes`.  Both are exactly what the CPU kernels
-/// had before D77 (and what the assembled matrix disagrees with), so every
-/// GPU hex PA path above Q2 must be re-derived from `HexQk::new(p)` before it
-/// is used against `H1Space` element DOFs.  Not compile-verified on a GPU
-/// device here (no adapter in this environment); only the WGSL text and the
-/// crate build are checked.
-fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
-    let n = p + 1;
-    if n == 1 { return vec![0.0]; }
-    let h = 2.0 / (n as f64 - 1.0);
-    (0..n).map(|i| -1.0 + i as f64 * h).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,22 +382,7 @@ mod tests {
     /// element's own `dof_coords()` (exact value matching; the element hands
     /// out its 1-D nodes bit-for-bit).
     fn element_slots(elem: &dyn ReferenceElement) -> Vec<[usize; 3]> {
-        let coords = elem.dof_coords();
-        let mut nodes: Vec<f64> = coords.iter().map(|c| c[0]).collect();
-        nodes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        nodes.dedup();
-        coords
-            .iter()
-            .map(|c| {
-                let axis = |v: f64| {
-                    nodes
-                        .iter()
-                        .position(|&n| n == v)
-                        .unwrap_or_else(|| panic!("{v} is not a 1-D node of {nodes:?}"))
-                };
-                [axis(c[0]), axis(c[1]), axis(c[2])]
-            })
-            .collect()
+        fem_element::lagrange::hex::hex_tensor_layout(elem).1
     }
 
     /// D77 pin: `hex_q2.wgsl`'s hard-coded slot table is the element layer's
@@ -432,33 +428,103 @@ mod tests {
         );
     }
 
-    /// D77 remainder (documentation pin, not an assertion of correctness): the
-    /// Q3/Q4 shaders are still lexicographic on equispaced nodes, so their
-    /// tables must **not** accidentally look like the migrated Q2 one.  This
-    /// fails once someone migrates them, which is the intended reminder to
-    /// replace it with an equality pin against `HexQ3`/`HexQk(4)`.
+    /// D82 pin: `hex_q3.wgsl` / `hex_q4.wgsl` carry the element layer's slot
+    /// order slot-by-slot, and their `QA/QB/QC` tables are **exactly** the
+    /// shader this crate generates for p = 3 / p = 4.
+    ///
+    /// Before D82 both shaders were lexicographic (`q3a/q3b/q3c` index
+    /// arithmetic) over **equispaced** nodes — the pre-D77 CPU layout, which
+    /// disagrees with the assembled matrix and with the `H1Space` element DOF
+    /// numbering.  The GLL node arrays are pinned too (they are written with 16
+    /// decimals, so the check is on the text the generator produces).
     #[test]
-    fn hex_q3_q4_wgsl_still_pre_d77_lex() {
-        let q3 = u32_arrays(HEX_Q3_WGSL, "array<u32,64>(");
-        let q4 = u32_arrays(HEX_Q4_WGSL, "array<u32,125>(");
-        assert!(
-            q3.is_empty() && q4.is_empty(),
-            "hex_q3/q4.wgsl now carry literal index tables — migrate this pin to an \
-             equality check against HexQ3::dof_coords()/HexQk::new(4).dof_coords()"
+    fn hex_q3_q4_wgsl_tables_match_element() {
+        for (wgsl, elem, p) in [
+            (HEX_Q3_WGSL, &HexQ3 as &dyn ReferenceElement, 3usize),
+            (HEX_Q4_WGSL, &HexQk::new(4) as &dyn ReferenceElement, 4),
+        ] {
+            let nloc = (p + 1) * (p + 1) * (p + 1);
+            let marker = format!("array<u32,{nloc}>=array(");
+            let arrays = u32_arrays(wgsl, &marker);
+            assert_eq!(arrays.len(), 3, "p={p}: QA/QB/QC");
+            for a in &arrays {
+                assert_eq!(a.len(), nloc, "p={p}: full slot-length table");
+            }
+            let (nodes, want) = fem_element::lagrange::hex::hex_tensor_layout(elem);
+            assert_eq!(want.len(), nloc);
+            for n in 0..nloc {
+                assert_eq!(
+                    [arrays[0][n] as usize, arrays[1][n] as usize, arrays[2][n] as usize],
+                    want[n],
+                    "p={p} slot {n}: wgsl table vs element dof_coords"
+                );
+            }
+            // The 1-D nodes in the shader are the element's GLL nodes.
+            let nodes_str: String =
+                nodes.iter().map(|v| format!("{v:.16}")).collect::<Vec<_>>().join(",");
+            assert!(
+                wgsl.contains(&format!("array<f32,{}>({nodes_str})", p + 1)),
+                "p={p}: shader node array is not the element layer's GLL nodes"
+            );
+            // …and the shipped text *is* the generator's output for this degree
+            // (the files are CRLF in the working tree, the generator emits LF).
+            assert_eq!(
+                lf(wgsl),
+                lf(&generate_hex_qk_wgsl(p, false)),
+                "p={p}: wgsl/hex_q{p}.wgsl is stale — regenerate it with \
+                 generate_hex_qk_wgsl({p}, false)"
+            );
+        }
+    }
+
+    /// `\r\n` → `\n` and trailing-whitespace-trimmed: the shader files are
+    /// checked out with CRLF line endings, the generator emits LF.
+    fn lf(text: &str) -> String {
+        text.replace("\r\n", "\n").trim().to_string()
+    }
+
+    /// The `f64` variants are produced by `build.rs`'s textual `f32`→`f64`
+    /// substitution, which must agree with `generate_hex_qk_wgsl(p, true)`
+    /// (only `fp` differs between the two).
+    #[test]
+    fn hex_q3_q4_wgsl_f64_matches_generator() {
+        assert_eq!(
+            lf(HEX_Q3_F64_WGSL),
+            lf(&generate_hex_qk_wgsl(3, true)),
+            "f64 Q3 shader (build.rs substitution) vs generator"
         );
-        assert!(
-            HEX_Q3_WGSL.contains("q3a(n:u32)->u32{return n%4u;}"),
-            "hex_q3.wgsl lexicographic slot arm changed"
+        assert_eq!(
+            lf(HEX_Q4_F64_WGSL),
+            lf(&generate_hex_qk_wgsl(4, true)),
+            "f64 Q4 shader (build.rs substitution) vs generator"
         );
-        let lex3 = element_slots(&HexQ3);
-        assert_eq!(lex3.len(), 64);
-        // The lexicographic map the shader uses.
-        let shader: Vec<[usize; 3]> = (0..64).map(|n| [n % 4, (n / 4) % 4, n / 16]).collect();
-        assert_ne!(shader, lex3, "HexQ3 is no longer lexicographic — migrate the shader");
-        // The Q4 shader is the same shape.
-        assert!(HEX_Q4_WGSL.contains("q4a(n:u32)"), "hex_q4.wgsl lex arm changed");
-        let lex4: Vec<[usize; 3]> = (0..125).map(|n| [n % 5, (n / 5) % 5, n / 25]).collect();
-        assert_ne!(lex4, element_slots(&HexQk::new(4)), "HexQk(4) became lexicographic");
+    }
+
+    /// The generated `qk` shader keeps the element layer's layout for every
+    /// degree, and its node array is the element's GLL 1-D node set — not the
+    /// equispaced one the pre-D82 generator emitted (they coincide only up to
+    /// p = 2, where GLL *is* equispaced).
+    #[test]
+    fn generated_qk_wgsl_follows_element_layer() {
+        for p in 1..=5usize {
+            let wgsl = generate_hex_qk_wgsl(p, false);
+            let nloc = (p + 1) * (p + 1) * (p + 1);
+            let arrays = u32_arrays(&wgsl, &format!("array<u32,{nloc}>=array("));
+            assert_eq!(arrays.len(), 3, "p={p}");
+            let (nodes, want) = hex_layout(p);
+            let equispaced: Vec<f64> =
+                (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
+            if p >= 3 {
+                assert_ne!(nodes, equispaced, "p={p}: still equispaced for p >= 3");
+            }
+            for n in 0..nloc {
+                assert_eq!(
+                    [arrays[0][n] as usize, arrays[1][n] as usize, arrays[2][n] as usize],
+                    want[n],
+                    "p={p} slot {n}"
+                );
+            }
+        }
     }
 }
 

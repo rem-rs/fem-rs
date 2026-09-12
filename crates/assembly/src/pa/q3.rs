@@ -36,22 +36,17 @@ fn hex_vertices() -> Vec<[f64; 3]> {
 
 // ─── 1D Lagrange basis & derivatives at quadrature points ────────────────────
 fn build_1d_basis(nodes: &[f64; 4]) -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
+    // D81: shared, node-safe evaluation (`pa::tensor_1d`).  GL4 has no point on
+    // a GLL(4) node, so this order happened to survive the old product-only
+    // derivative formula — the shared helper removes the coincidence dependence
+    // for good.
+    let (phi, dphi) = crate::pa::tensor_1d::basis_at_points(nodes, &GL4_PTS);
     let mut b = [[0.0_f64; 4]; 4];
     let mut d = [[0.0_f64; 4]; 4];
     for q in 0..4 {
-        let t = GL4_PTS[q];
         for i in 0..4 {
-            let mut val = 1.0;
-            let mut der = 0.0;
-            for j in 0..4 {
-                if j == i { continue; }
-                let denom = nodes[i] - nodes[j];
-                val *= (t - nodes[j]) / denom;
-                der += 1.0 / (t - nodes[j]);
-            }
-            der *= val;
-            b[q][i] = val;
-            d[q][i] = der;
+            b[q][i] = phi[q][i];
+            d[q][i] = dphi[q][i];
         }
     }
     (b, d)

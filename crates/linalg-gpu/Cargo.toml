@@ -6,6 +6,11 @@ edition = "2021"
 [dependencies]
 fem-core   = { path = "../core" }
 fem-linalg = { path = "../linalg" }
+# The hex PA shaders must mirror the element layer's GLL nodes and slot order
+# (D82: `generate_hex_qk_wgsl` derives both from `HexQk` via
+# `lagrange::hex::hex_tensor_layout`), so the element crate is a real
+# dependency here, not just a dev one.
+fem-element = { path = "../element" }
 fem-amg    = { path = "../amg", optional = true }
 bytemuck   = { workspace = true }
 wgpu       = "27"
