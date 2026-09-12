@@ -563,6 +563,10 @@ name = "navier_3dfoc"
 path = "../miniapps/fluids/navier_3dfoc.rs"
 
 [[example]]
+name = "navier_turbchan"
+path = "../miniapps/fluids/navier_turbchan.rs"
+
+[[example]]
 name = "navier_bifurcation"
 path = "../miniapps/fluids/navier_bifurcation.rs"
 
