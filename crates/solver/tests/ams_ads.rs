@@ -218,6 +218,20 @@ fn ams_2d_hpc_improvement() {
     // default smoother/cycle pair.  Until then this test pins what the presets
     // actually deliver: both converge, and hpc stays within a small factor of
     // the default at both levels (10 vs 9 on 12×12, 41 vs 15 on 20×20).
+    //
+    // ROUND 23 ADDENDUM — the "one line" fix was attempted and measured, then
+    // REVERTED: `singularity_regularization = 1e-6` in `hpc_default` does give
+    // real convergence on this (real) path — hpc 37 iters / ‖Ax−b‖/‖b‖ =
+    // 7.365e-7 on 20×20, exactly the "hpc + reg 1e-6 → 37 / 7.4e-7" predicted
+    // above (verified bit-level with a probe computing the true residual) —
+    // but it REGRESSES every `*_complex` test below, which build their AMS from
+    // the same hpc preset: complex GMRES 12×12 goes from 15 iterations
+    // (converged) to a 500-iteration plateau at 8.4e-5, and complex BiCGSTAB
+    // (ω=2) stalls at 1.03e-2.  The complex path therefore *requires* the
+    // unregularised preset, and fixing the real-path false convergence needs
+    // the D72-style true-residual restart driver in `solve_gmres_ams`
+    // (crates/solver/src/precond.rs) or per-call-site config instead.  The
+    // 0.0 in `hpc_default` stays until that lands.
     assert!(
         i1_hpc <= 2 * i1_def + 5,
         "hpc must stay comparable to default on 12×12: {i1_hpc} vs {i1_def}"
@@ -512,23 +526,34 @@ fn complex_ams_2d_h_independent() {
     assert!(i2 <= i1 + 50, "Iters should not explode: {i1}→{i2}");
 }
 
-/// D73: the 16×16 complex level does **not** converge — kept as an explicit,
-/// ignored record of a core defect that is out of this round's file scope
-/// (`crates/solver/src/complex_ams.rs`, `crates/solver/src/iterative.rs`,
-/// `vendor/linger`), same convention as D40/D69.
+/// D73: the 16×16 complex level does **not** converge under the `hpc_default`
+/// preset — kept as an explicit, ignored record of a core defect, same
+/// convention as D40/D69.
 ///
 /// Measured after the D73 BC fix (symmetric DIAG_ONE elimination, so the real
 /// part handed to `build_ams_precond` is the same SPD operator the *real* 2-D
 /// AMS tests solve in 20 iterations): the complex GMRES-AMS run *plateaus*, and
 /// the plateau is independent of the restart length and of the iteration
 /// budget — 2000 iterations at restart 30/50/100/200 all stop at
-/// ‖r‖/‖b‖ = 7.0e-5 (tolerance 1e-6), and `solve_gmres_ams_complex` still
-/// returns `Ok`.  A 12×12 level converges in 15 iterations, so this is not a
-/// resolution artifact but a defect in the complex path (candidate: the
-/// complex GMRES recurrence / the way the real-part-AMS closure is applied to
-/// the imaginary block — see the D14 note about the complex Givens phase).
+/// ‖r‖/‖b‖ = 7.0e-5 (6.0e-5 when re-measured in round 23; tolerance 1e-6), and
+/// `solve_gmres_ams_complex` still returns `Ok`.  A 12×12 level converges in
+/// 15 iterations, so this is not a resolution artifact.
+///
+/// ROUND 23 ATTRIBUTION — the plateau belongs to the **hpc preset**, not to
+/// the complex GMRES recurrence.  On this very 16×16 system, the *default*
+/// preset (symmetric-Gauss-Seidel + multiplicative V(1,1) + nodal
+/// regularization 1e-6) converges in 22 iterations to 6.9e-7 — asserted below
+/// as a regression guard.  The failing ingredient is therefore hpc's
+/// weighted-Jacobi + additive cycle built from the real part `A_re` and
+/// applied to complex vectors: with reg 1e-6 (the round-23 experiment on the
+/// 12×12 level) it instead plateaus at 8.4e-5, i.e. the hpc cycle fails on the
+/// complex path at *both* regularization settings while the default cycle
+/// passes everywhere.  Recommended fix: stop using `hpc_default` for complex
+/// solves (default preset), or give the complex path a cycle whose nodal
+/// correction handles the imaginary component; un-ignore this test once hpc
+/// itself is fixed.
 #[test]
-#[ignore = "D73: complex GMRES-AMS plateaus at 7e-5 on the 16x16 mesh regardless of restart/budget; root cause is outside this round's scope"]
+#[ignore = "D73: complex GMRES-AMS plateaus at ~6-7e-5 on the 16x16 mesh under hpc_default regardless of restart/budget; default preset converges (22 it / 6.9e-7), so the defect is the hpc weighted-Jacobi+additive cycle on the complex path"]
 fn complex_ams_2d_16x16_plateau() {
     let omega = 1.0;
     let (a, g, b_re, b_im) = build_complex_maxwell_2d(8, omega);
@@ -548,6 +573,30 @@ fn complex_ams_2d_16x16_plateau() {
     )
     .expect("complex AMS returns Ok at the plateau");
     eprintln!("complex AMS 16×16 plateau: {iters} iters, res={res:.3e}");
+
+    // Round-23 attribution probe: the *default* preset (SGS + V(1,1) +
+    // reg 1e-6) converges where hpc (Jacobi + additive + reg 0) plateaus —
+    // this pins the defect to the hpc cycle, not the complex recurrence.
+    let mut x_re2 = vec![0.0; a.nrows];
+    let mut x_im2 = vec![0.0; a.nrows];
+    let (iters2, res2) = solve_gmres_ams_complex(
+        &a,
+        &g,
+        &b_re,
+        &b_im,
+        &mut x_re2,
+        &mut x_im2,
+        1e-6,
+        2000,
+        50,
+        linlvo::precond::AmsConfig::default(),
+    )
+    .expect("complex AMS default-config probe");
+    eprintln!("complex AMS 16×16 default-cfg: {iters2} iters, res={res2:.3e}");
+    assert!(
+        res2 <= 1e-6,
+        "default preset must converge on 16×16: {iters2} iters, res={res2:.3e}"
+    );
     assert!(res <= 1e-6, "plateaus at {res:.3e} (measured 7.0e-5)");
 }
 

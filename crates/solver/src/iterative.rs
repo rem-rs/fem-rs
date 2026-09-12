@@ -1133,7 +1133,7 @@ where
     let mut w = DenseVec::zeros(n);
 
     if verbose {
-        eprintln!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(gamma0));
+        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(gamma0));
     }
 
     for iter in 1..=max_iter {
@@ -1149,7 +1149,7 @@ where
         let gamma_new = r.dot(&z); // (B r_{k+1}, r_{k+1})
 
         if verbose {
-            eprintln!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(gamma_new));
+            println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(gamma_new));
         }
 
         if gamma_new < tol {
@@ -1158,7 +1158,7 @@ where
             if verbose {
                 // MFEM: pow(betanom/nom0, 0.5/final_iter)
                 let avg = (gamma_new / gamma0).powf(0.5 / iter as f64);
-                eprintln!("Average reduction factor = {}", fmt_g(avg));
+                println!("Average reduction factor = {}", fmt_g(avg));
             }
             return Ok(SolveResult {
                 converged: true,

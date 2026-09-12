@@ -65,14 +65,13 @@ where
 
 /// Strong-curvature fixture: the chord is visibly wrong (5.7·10⁻² short).
 ///
-/// The tolerance is 10⁻⁷ rather than machine precision because the one-point
-/// family used for the *reference* quadrature of a 1-D face is
-/// `fem_element::quadrature::seg_rule`, which caps at 4 Gauss points (degree
-/// 7) for any requested order; the √-integrand of an arc length is not
-/// polynomial, so its quadrature error bottoms out at ≈ 5·10⁻⁹ here.  See
-/// [`d66_quad_small_curvature_arc_length_is_machine_precise`] for the
-/// machine-precision check on a milder curve, where the capped rule is exact
-/// enough.
+/// D74: the tolerance is 10⁻¹² (machine-precision level).  It was 10⁻⁷ only
+/// because the 1-D face quadrature used to be silently capped at 4 Gauss
+/// points (degree 7) for any requested order, and the √-integrand of an arc
+/// length is not polynomial, so its quadrature error bottomed out at
+/// ≈ 4.9·10⁻⁹ here (measured 1.0571159335080944 vs analytic 1.0571159384280695).
+/// With the uncapped rule the measured arc length is 1.0571159384280713,
+/// i.e. 1.8·10⁻¹⁵ from the analytic value.
 #[test]
 fn d66_quad_curved_bottom_edge_arc_length_matches_analytic() {
     let h = 0.15;
@@ -86,7 +85,7 @@ fn d66_quad_curved_bottom_edge_arc_length_matches_analytic() {
         "probe: curved arc length must visibly differ from the chord value 1.0 (got {measured})"
     );
     assert!(
-        (measured - expected).abs() < 1.0e-7,
+        (measured - expected).abs() < 1.0e-12,
         "curved boundary arc length {measured:.16} vs analytic {expected:.16}"
     );
 }
@@ -128,20 +127,28 @@ fn d66_quad_curved_bottom_edge_constant_flux_matches_divergence_theorem() {
 }
 
 /// A straight (`geom_order == 1`) quad mesh must keep the historical
-/// chord/order-1 path: the arc length is exactly 1 and the constant flux is
-/// exactly −1.
+/// chord/order-1 path: the arc length is 1 and the constant flux is −1.
+///
+/// D74: the bar moved from 1e-15 to 5e-15.  The boundary quadrature request
+/// here is order 16, which used to be silently capped at the 4-point (degree-7)
+/// rule whose weights sum to 1 bit-exactly; it is now the correct 9-point
+/// Gauss rule whose Newton-iterated weights carry O(10⁻¹⁵) round-off in the
+/// sum (measured: length = 1.0000000000000016).  MFEM's double-precision
+/// `QuadratureFunctions1D::GaussLegendre` has the same property (its MPFR path
+/// exists precisely to go beyond it), so the geometric pin is kept at a
+/// round-off level, not a bit-exact one.
 #[test]
 fn d66_straight_quad_bottom_edge_is_unchanged() {
     let mesh = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
     assert_eq!(mesh.geom_order(), 1);
     let length = boundary_integral(&mesh, |_x, _n| 1.0);
     assert!(
-        (length - 1.0).abs() < 1.0e-15,
+        (length - 1.0).abs() < 5.0e-15,
         "straight bottom edge length {length:.16}, expected 1"
     );
     let flux = boundary_integral(&mesh, |_x, n| n[1]);
     assert!(
-        (flux + 1.0).abs() < 1.0e-15,
+        (flux + 1.0).abs() < 5.0e-15,
         "straight bottom edge ∫ u·n ds {flux:.16}, expected −1"
     );
 }

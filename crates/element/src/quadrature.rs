@@ -764,9 +764,20 @@ pub fn hex_lobatto_rule_arbitrary(order: u8) -> QuadratureRule {
 ///
 /// Uses `n` Gauss-Legendre points; exact for polynomials up to degree `2n-1`.
 /// Weights sum to 1 (length of the reference segment).
+///
+/// D74: `n` is no longer clamped at 4.  `n ≤ 5` (order ≤ 9) uses the
+/// hard-coded tables in [`gauss_legendre_01`] (bit-identical to MFEM's
+/// `Poly_1D::GaussLegendre`); higher orders Newton-iterate the nodes via
+/// [`gauss_legendre_01_arbitrary`], exactly like MFEM.  The old clamp left
+/// curved-boundary integrals stuck at ~5·10⁻⁹ relative error (the √-integrand
+/// of an arc length is not polynomial); see `d66_curved_boundary_edge`.
 pub fn seg_rule(order: u8) -> QuadratureRule {
-    let n = ((order as usize + 2) / 2).clamp(1, 4);
-    let (pts, wts) = gauss_legendre_01(n);
+    let n = ((order as usize + 2) / 2).max(1);
+    let (pts, wts) = if n <= 5 {
+        gauss_legendre_01(n)
+    } else {
+        gauss_legendre_01_arbitrary(n)
+    };
     QuadratureRule {
         points: pts.into_iter().map(|x| vec![x]).collect(),
         weights: wts,
@@ -2160,7 +2171,11 @@ mod tests {
 
     #[test]
     fn seg_weights_sum_to_one() {
-        for order in [1u8, 2, 3, 5, 7] {
+        // D74: orders ≥ 8 exercise the uncapped 5-point hard-coded table
+        // (order ≤ 9) and the Newton-iterated rules beyond it; their weight
+        // sums carry O(10⁻¹⁵) round-off (measured 1.55e-15 at order 16), same
+        // as MFEM's double-precision GaussLegendre.
+        for order in [0u8, 1, 2, 3, 5, 7, 8, 9, 10, 12, 16] {
             let r = seg_rule(order);
             assert!((weight_sum(&r) - 1.0).abs() < 1e-14, "order={order}");
         }

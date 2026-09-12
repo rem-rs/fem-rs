@@ -339,9 +339,21 @@ fn d37_integration_order_only_changes_assembly() {
 }
 
 /// D58: the default assembly entry (`assemble_bilinear` / `assemble_linear`)
-/// is now the canonical one — it must reproduce the dedicated
-/// `*_nd_canonical` entry points bit-for-bit on tet ND2, where the face
+/// is the canonical one — it must reproduce the dedicated
+/// `*_nd_canonical` entry points on tet ND2, where the face
 /// blocks are non-trivial.
+///
+/// D75: the historical `diff == 0.0` assertion was thread-count fragile.  On
+/// machines with ≥ 8 threads the 48-tet mesh enters the Rayon parallel path
+/// (`assembly_parallel_min_elems()` = 8 at 8+ threads), where contributions to
+/// the shared-face DOF entries are summed in nondeterministic reduction order,
+/// so entries differ by ~1 ulp between the two paths.  The env escape hatch
+/// (`FEM_ASSEMBLY_PARALLEL_MIN_ELEMS`) cannot be used to force serial from
+/// inside the test: it is read **once per process** through a `OnceLock`
+/// (`assembler.rs`), so sibling tests running concurrently in the same binary
+/// may initialize it first.  Hence a relative tolerance (1e-13 ≫ 1 ulp ≈
+/// 2.2e-16, still ≪ any real regression such as a wrong transform, which is
+/// O(1)) instead of bit equality.
 #[test]
 fn d58_default_entry_matches_nd_canonical_entry() {
     let mesh = Mesh::<3>::unit_cube_tet(2);
@@ -354,10 +366,16 @@ fn d58_default_entry_matches_nd_canonical_entry() {
     let d1 = m_default.to_dense();
     let d2 = m_canon.to_dense();
     let mut diff = 0.0_f64;
+    let mut scale = 0.0_f64;
     for (a, b) in d1.iter().zip(d2.iter()) {
         diff = diff.max((a - b).abs());
+        scale = scale.max(a.abs());
     }
-    assert_eq!(diff, 0.0, "default vs nd_canonical bilinear differ by {diff}");
+    eprintln!("d58: max|Δ| = {diff:.3e}, matrix scale = {scale:.3e}");
+    assert!(
+        diff <= 1.0e-13 * scale,
+        "default vs nd_canonical bilinear differ by {diff:.3e} (scale {scale:.3e})"
+    );
 
     let src = Src;
     let b_default = VectorAssembler::assemble_linear(&space, &[&src], 6);
@@ -366,7 +384,14 @@ fn d58_default_entry_matches_nd_canonical_entry() {
         .iter()
         .zip(b_canon.iter())
         .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()));
-    assert_eq!(diff, 0.0, "default vs nd_canonical load differ by {diff}");
+    let scale = b_default
+        .iter()
+        .fold(0.0_f64, |acc, a| acc.max(a.abs()));
+    eprintln!("d58 load: max|Δ| = {diff:.3e}, vector scale = {scale:.3e}");
+    assert!(
+        diff <= 1.0e-13 * scale,
+        "default vs nd_canonical load differ by {diff:.3e} (scale {scale:.3e})"
+    );
 }
 
 /// D58: spaces without shared-face DOF pairs must report an empty block list
