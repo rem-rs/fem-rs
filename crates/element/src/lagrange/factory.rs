@@ -1992,22 +1992,85 @@ impl ReferenceElement for HexL2GL {
 
 // ─── HexQk ───────────────────────────────────────────────────────────────────
 
+/// MFEM `Geometry::Constants<Geometry::CUBE>::Vertices` reference-cube corners
+/// (`{0,1}³`, 0 = low side of the axis): local vertices 0..3 are the bottom
+/// ring counter-clockwise, 4..7 the top ring.
+const HEX_VERT_SIDES: [[usize; 3]; 8] = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [1, 1, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+    [1, 0, 1],
+    [1, 1, 1],
+    [0, 1, 1],
+];
+
+/// MFEM `Constants<Geometry::CUBE>::Edges`: local edge `k` runs from local
+/// vertex `HEX_EDGE_VERTS[k][0]` to `HEX_EDGE_VERTS[k][1]`.  Every entry
+/// starts on the low side of its varying axis, so the H1 edge blocks run in
+/// ascending tensor-index order (asserted in [`HexQk::node_to_dof`]).
+const HEX_EDGE_VERTS: [[usize; 2]; 12] = [
+    [0, 1],
+    [1, 2],
+    [3, 2],
+    [0, 3],
+    [4, 5],
+    [5, 6],
+    [7, 6],
+    [4, 7],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+];
+
+/// MFEM `Constants<Geometry::CUBE>::FaceVert`: local face `f` lists its four
+/// local vertices in canonical face order (reference square
+/// `(0,0) → (1,0) → (1,1) → (0,1)`).
+const HEX_FACE_VERTS: [[usize; 4]; 6] = [
+    [3, 2, 1, 0],
+    [0, 1, 5, 4],
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [3, 0, 4, 7],
+    [4, 5, 6, 7],
+];
+
+/// Pre-D31 fem-rs H1 slot order for `p == 2`, still in force because
+/// `DofManager::build_q2_hex` (`crates/space/src/dof_manager.rs`) hard-codes it
+/// in its element-local `EDGES`/`FACES` tables: slot `s` carries the tensor
+/// node `LEGACY_P2_SLOTS[s]` (vertices 0..8 in ring order, then the 12 edges of
+/// that function's `EDGES` in order, then its 6 `FACES` in order, then the
+/// element centre).  Verified against the pre-D31
+/// `hex_qk_to_mfem_h1_perm(2)` hard table (`17,18,19,16, 11,9,13,15, 8,10,14,12,
+/// 24,22,21,23, 20,25, 26`).  `p >= 3` uses the MFEM order unconditionally;
+/// p = 2 joins it as soon as the crates/space table is switched (see
+/// `tests::hex_qk_p2_keeps_legacy_slot_order_until_dofmanager_follows`).
+const LEGACY_P2_SLOTS: [[usize; 3]; 27] = [
+    [0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0],
+    [0, 0, 2], [2, 0, 2], [2, 2, 2], [0, 2, 2],
+    [2, 0, 1], [2, 2, 1], [0, 2, 1], [0, 0, 1],
+    [0, 1, 0], [2, 1, 0], [2, 1, 2], [0, 1, 2],
+    [1, 0, 0], [1, 2, 0], [1, 2, 2], [1, 0, 2],
+    [0, 1, 1], [2, 1, 1], [1, 0, 1], [1, 2, 1],
+    [1, 1, 0], [1, 1, 2], [1, 1, 1],
+];
+
 /// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
 pub struct HexQk {
     order: usize,
     lag1d: Lagrange1D,
     /// DOF ordering: `false` = H1 *topological* order (vertices → edges →
-    /// faces → interior, see [`HexQk::node_to_dof`]).
-    ///
-    /// NOTE (D31): this is **not** MFEM's `H1_FECollection` order — HexQk
-    /// enumerates edge blocks by its own (face_i, face_j) signature table and
-    /// faces by the axis order xmin/xmax/ymin/ymax/zmin/zmax, while MFEM's
-    /// `H1_DOF_MAP` uses `Constants<Geometry::CUBE>::Edges`/`FaceVert`.  See
-    /// the `hex_qk_to_mfem_h1_perm` test for the exact slot permutation
-    /// (HexQk → MFEM).  The fem-rs-side numbering (`DofManager::build_pk_hex`)
-    /// is *derived from* these slot runs, so the library is internally
-    /// consistent; only MFEM interop (curved high-order hex meshes,
-    /// MFEM-ordered dof dumps) needs the permutation.
+    /// faces → interior) in **MFEM `H1_HexahedronElement` order** for
+    /// `p >= 3` — see [`HexQk::node_to_dof`], pinned against the C++ node dump
+    /// by `tests::hex_qk_dof_coords_match_mfem_node_dump` and
+    /// `tests::hex_qk_slots_match_mfem_h1_dof_map`.  `p == 2` is the one order
+    /// still on the pre-D31 fem-rs order because
+    /// `DofManager::build_q2_hex` (`crates/space`) hard-codes it (see
+    /// [`LEGACY_P2_SLOTS`]); the fem-rs global numbering otherwise
+    /// (`DofManager::build_pk_hex`, p >= 3) derives its edge/face slot runs
+    /// from `HexQk::dof_coords()` and follows this layout automatically.
     ///
     /// `true` = lexicographic tensor-product order `ix + iy·(p+1) + iz·(p+1)²`
     /// (x fastest), which is what MFEM's `DG_FECollection`/`L2_FECollection`
@@ -2046,151 +2109,106 @@ impl HexQk {
         }
     }
 
+    /// H1 *topological* DOF index of the tensor node `(ix, iy, iz)` — the
+    /// MFEM `H1_HexahedronElement` slot order (`TensorBasisElement`,
+    /// `H1_DOF_MAP`, dims == 3):
+    ///
+    /// * slots `0..8`: the 8 vertices in `CUBE::Vertices` order;
+    /// * then 12 edge blocks of `p-1` slots in `CUBE::Edges` order, each block
+    ///   running from its first stored local vertex to the second at the 1-D
+    ///   GLL parameters `1..=p-1` (block-internal order never reversed);
+    /// * then 6 face blocks of `(p-1)²` in `CUBE::FaceVert` order, block slot
+    ///   `(j-1)(p-1) + (i-1)` where `i` runs along the face's first stored
+    ///   edge direction and `j` along the second;
+    /// * then the `(p-1)³` interior slots with `iz` outermost, `iy` next, `ix`
+    ///   fastest.
+    ///
+    /// This is MFEM 4.9/4.10 bit-for-bit (the `HEX p=2..5` dumps in
+    /// `tmp/gll_ref/fe_nodes_cpp.txt` are pinned slot-by-slot by
+    /// `tests::hex_qk_dof_coords_match_mfem_node_dump`).  The pre-D31 fem-rs
+    /// order differed: it enumerated edge blocks by an internal
+    /// `(face_i, face_j)` signature table and faces as
+    /// `xmin/xmax/ymin/ymax/zmin/zmax`.  The global numbering in
+    /// `DofManager::build_pk_hex` is derived from `HexQk::dof_coords()`, so it
+    /// follows this layout automatically.
     fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
+        // p == 2 is the one order where the fem-rs global numbering does *not*
+        // follow this element: `DofManager::build_q2_hex` (crates/space) has
+        // the pre-D31 slot order hard-coded in its `EDGES`/`FACES` tables, so
+        // the two must switch together.
+        if self.order == 2 {
+            return LEGACY_P2_SLOTS
+                .iter()
+                .position(|s| s == &[ix, iy, iz])
+                .expect("hex p=2 slot");
+        }
         let p = self.order;
-        let x = self.lag1d.nodes[ix];
-        let y = self.lag1d.nodes[iy];
-        let z = self.lag1d.nodes[iz];
-        let tol = 1e-12;
+        let e = p.saturating_sub(1); // slots per edge == face row count
+        let idx = [ix, iy, iz];
+        let on_bnd = [
+            ix == 0 || ix == p,
+            iy == 0 || iy == p,
+            iz == 0 || iz == p,
+        ];
+        let n_bnd = on_bnd.iter().filter(|&&b| b).count();
+        let side = [
+            usize::from(ix == p),
+            usize::from(iy == p),
+            usize::from(iz == p),
+        ];
 
-        let on_xmin = (x + 1.0).abs() < tol;
-        let on_xmax = (x - 1.0).abs() < tol;
-        let on_ymin = (y + 1.0).abs() < tol;
-        let on_ymax = (y - 1.0).abs() < tol;
-        let on_zmin = (z + 1.0).abs() < tol;
-        let on_zmax = (z - 1.0).abs() < tol;
+        // Vertex: on all three pairs of boundary planes (this is also every
+        // slot of the p == 1 element).
+        if n_bnd == 3 {
+            return HEX_VERT_SIDES
+                .iter()
+                .position(|v| v == &side)
+                .expect("hex vertex corner");
+        }
 
-        let n_faces = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
-            .iter()
-            .filter(|&&b| b)
-            .count();
+        // Edge: exactly one free axis.  The edge is the `CUBE::Edges` entry
+        // whose endpoints differ along that axis and agree on the other two.
+        if n_bnd == 2 {
+            let av = (0..3).find(|&d| !on_bnd[d]).expect("hex edge axis");
+            let bnd: Vec<usize> = (0..3).filter(|&d| d != av).collect();
+            let k = HEX_EDGE_VERTS
+                .iter()
+                .position(|&[la, lb]| {
+                    HEX_VERT_SIDES[la][av] != HEX_VERT_SIDES[lb][av]
+                        && HEX_VERT_SIDES[la][bnd[0]] == side[bnd[0]]
+                        && HEX_VERT_SIDES[la][bnd[1]] == side[bnd[1]]
+                })
+                .expect("hex edge");
+            // `CUBE::Edges` starts every edge on the low side of its varying
+            // axis, so each block runs in ascending tensor-index order.
+            debug_assert_eq!(HEX_VERT_SIDES[HEX_EDGE_VERTS[k][0]][av], 0);
+            return 8 + k * e + (idx[av] - 1);
+        }
 
-        if n_faces >= 3 {
-            let vx = if on_xmin { 0 } else { 1 };
-            let vy = if on_ymin { 0 } else { 1 };
-            let vz = if on_zmin { 0 } else { 1 };
-            return match (vx, vy, vz) {
-                (0, 0, 0) => 0,
-                (1, 0, 0) => 1,
-                (1, 1, 0) => 2,
-                (0, 1, 0) => 3,
-                (0, 0, 1) => 4,
-                (1, 0, 1) => 5,
-                (1, 1, 1) => 6,
-                (0, 1, 1) => 7,
-                _ => unreachable!(),
+        // Face: exactly one boundary axis.  The face is the `FaceVert` row
+        // whose four vertices all carry that side.
+        if n_bnd == 1 {
+            let ax = (0..3).find(|&d| on_bnd[d]).expect("hex face axis");
+            let f = HEX_FACE_VERTS
+                .iter()
+                .position(|fv| fv.iter().all(|&v| HEX_VERT_SIDES[v][ax] == side[ax]))
+                .expect("hex face");
+            // `(row, col)` = `(j-1, i-1)` of MFEM's `for (j) for (i)` block
+            // enumeration, with the (i, j) tensor indices of each face.
+            let (row, col) = match f {
+                0 => (p - iy - 1, ix - 1),     // z = low:  (i, p-j, 0)
+                1 => (iz - 1, ix - 1),         // y = low:  (i, 0, j)
+                2 => (iz - 1, iy - 1),         // x = high: (p, i, j)
+                3 => (iz - 1, p - ix - 1),     // y = high: (p-i, p, j)
+                4 => (iz - 1, p - iy - 1),     // x = low:  (0, p-i, j)
+                _ => (iy - 1, ix - 1),         // z = high: (i, j, p)
             };
+            return 8 + 12 * e + f * e * e + row * e + col;
         }
 
-        let mut base = 8usize;
-
-        if n_faces == 2 {
-            let idx;
-            let local;
-
-            if !on_xmin && !on_xmax {
-                idx = ix;
-                local = if on_ymin && !on_ymax && !on_zmin && !on_zmax {
-                    ix
-                } else if on_ymax && !on_zmin && !on_zmax {
-                    p - ix
-                } else {
-                    ix
-                };
-            } else if !on_ymin && !on_ymax {
-                idx = iy;
-                local = if on_xmin && !on_xmax && on_zmin && !on_zmax {
-                    iy
-                } else {
-                    p - iy
-                };
-            } else {
-                idx = iz;
-                local = if on_ymin && !on_ymax && on_xmin && !on_xmax {
-                    p - iz
-                } else if !on_ymin && on_ymax && on_xmin && !on_xmax {
-                    iz
-                } else if !on_ymin && on_ymax && !on_xmin && on_xmax {
-                    p - iz
-                } else {
-                    iz
-                };
-            }
-
-            if idx > 0 && idx < p {
-                let faces: Vec<usize> = [on_xmin, on_xmax, on_ymin, on_ymax, on_zmin, on_zmax]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &b)| b)
-                    .map(|(i, _)| i)
-                    .collect();
-                let (f0, f1) = if faces[0] < faces[1] {
-                    (faces[0], faces[1])
-                } else {
-                    (faces[1], faces[0])
-                };
-                let ei = match (f0, f1) {
-                    (1, 2) => 0,
-                    (1, 3) => 1,
-                    (0, 3) => 2,
-                    (0, 2) => 3,
-                    (0, 4) => 4,
-                    (1, 4) => 5,
-                    (1, 5) => 6,
-                    (0, 5) => 7,
-                    (2, 4) => 8,
-                    (3, 4) => 9,
-                    (3, 5) => 10,
-                    (2, 5) => 11,
-                    _ => 0,
-                };
-                return base + ei * (p - 1) + (local - 1);
-            }
-        }
-
-        if n_faces == 0 && p >= 2 {
-            let vol_base = 8 + 12 * (p - 1) + 6 * (p - 1) * (p - 1);
-            return vol_base + (iz - 1) * (p - 1) * (p - 1) + (iy - 1) * (p - 1) + (ix - 1);
-        }
-
-        if p < 2 {
-            return 0;
-        }
-        base += 12 * (p - 1);
-        let face_idx = if on_xmin {
-            0
-        } else if on_xmax {
-            1
-        } else if on_ymin {
-            2
-        } else if on_ymax {
-            3
-        } else if on_zmin {
-            4
-        } else {
-            5
-        };
-
-        let (va, vb) = match face_idx {
-            0 | 1 => (iy, iz),
-            2 | 3 => (ix, iz),
-            4 | 5 => (ix, iy),
-            _ => unreachable!(),
-        };
-        if va == 0 || va == p || vb == 0 || vb == p {
-            return 0;
-        }
-
-        let (fa, fb) = match face_idx {
-            0 => (p - iy, iz),
-            1 => (iy, iz),
-            2 => (ix, p - iz),
-            3 => (ix, iz),
-            4 => (ix, p - iy),
-            5 => (ix, iy),
-            _ => unreachable!(),
-        };
-        base + face_idx * (p - 1) * (p - 1) + (fb - 1) * (p - 1) + (fa - 1)
+        // Interior: `iz` outermost, then `iy`, `ix` fastest.
+        let base = 8 + 12 * e + 6 * e * e;
+        base + (iz - 1) * e * e + (iy - 1) * e + (ix - 1)
     }
 
     fn all_dof_coords(&self) -> Vec<[f64; 3]> {
@@ -2413,168 +2431,266 @@ pub fn vec_ref_elem(
 mod tests {
     use super::*;
 
-    /// D31: permutation from a HexQk H1 slot to the MFEM
-    /// `H1_HexahedronElement` slot holding the same tensor node, computed in
-    /// closed form.  HexQk enumerates its edge blocks by its own
-    /// (face_i, face_j) signature table and its faces by the axis order
-    /// xmin/xmax/ymin/ymax/zmin/zmax, whereas MFEM uses
-    /// `Constants<Geometry::CUBE>::Edges` / `FaceVert`; the two layouts agree
-    /// on the 8 vertices (identity) and on the interior (lex, x fastest), and
-    /// differ on every edge/face block.
+    /// MFEM `H1_HexahedronElement` slot order expressed as *tensor indices*:
+    /// entry `s` holds the `(ix, iy, iz)` GLL tensor node that MFEM's
+    /// `H1_DOF_MAP` puts into slot `s`.  Transcribed from
+    /// `TensorBasisElement::TensorBasisElement` (`fem/fe/fe_base.cpp`,
+    /// dims == 3) using `Constants<Geometry::CUBE>::Vertices`/`Edges`/
+    /// `FaceVert` — vertices 0..3 bottom ring, 4..7 top ring; edges in
+    /// `CUBE::Edges` order, each block running from its first stored vertex to
+    /// the second; faces in `FaceVert` order with `(j)` outer and `(i)` inner;
+    /// interior with `(k)` outer, `(i)` fastest.
     ///
-    /// Closed form (e = p-1; verified numerically against the MFEM 4.9/4.10
-    /// node dumps for p = 2..5, `tmp/gll_ref/fe_nodes_cpp.txt` HEX sections):
-    /// * edge blocks: HexQk ei → MFEM edge `[9,10,11,8,3,1,5,7,0,2,6,4][ei]`,
-    ///   with the block-internal order *reversed* for ei ∈ {1,3,5,6,7};
-    /// * face blocks: HexQk f → MFEM face `[4,2,1,3,0,5][f]`, row-flipped
-    ///   (fb → e-1-fb) for f = 2 and column-flipped (fa → e-1-fa) for f = 3;
-    /// * vertices and interior: identity.
-    ///
-    /// Reference: C++ `TensorBasisElement` H1_DOF_MAP generation
-    /// (`fem/fe/fe_base.cpp`), coordinates `tmp/gll_ref/fe_nodes_cpp.txt`.
-    fn hex_qk_to_mfem_h1_perm(p: usize) -> Vec<usize> {
-        let e = p - 1;
-        const E_MAP: [usize; 12] = [9, 10, 11, 8, 3, 1, 5, 7, 0, 2, 6, 4];
-        const E_REV: [bool; 12] = [
-            false, true, false, true, false, true, true, true, false, false, false, false,
-        ];
-        const F_MAP: [usize; 6] = [4, 2, 1, 3, 0, 5];
-        let mut perm: Vec<usize> = (0..8).collect();
-        for b in 0..12 {
-            for t in 0..e {
-                let tp = if E_REV[b] { e - 1 - t } else { t };
-                perm.push(8 + E_MAP[b] * e + tp);
+    /// This is the reference for
+    /// [`tests::hex_qk_slots_match_mfem_h1_dof_map`]; the numeric ground truth
+    /// is the C++ dump in [`tests::hex_qk_dof_coords_match_mfem_node_dump`].
+    fn mfem_h1_hex_slot_nodes(p: usize) -> Vec<(usize, usize, usize)> {
+        let mut m: Vec<(usize, usize, usize)> = Vec::with_capacity((p + 1) * (p + 1) * (p + 1));
+        // vertices: bottom ring 0..3, top ring 4..7
+        m.extend([
+            (0, 0, 0), (p, 0, 0), (p, p, 0), (0, p, 0),
+            (0, 0, p), (p, 0, p), (p, p, p), (0, p, p),
+        ]);
+        // edges: (0,1) (1,2) (3,2) (0,3) (4,5) (5,6) (7,6) (4,7)
+        //        (0,4) (1,5) (2,6) (3,7)
+        for i in 1..p { m.push((i, 0, 0)); }
+        for i in 1..p { m.push((p, i, 0)); }
+        for i in 1..p { m.push((i, p, 0)); }
+        for i in 1..p { m.push((0, i, 0)); }
+        for i in 1..p { m.push((i, 0, p)); }
+        for i in 1..p { m.push((p, i, p)); }
+        for i in 1..p { m.push((i, p, p)); }
+        for i in 1..p { m.push((0, i, p)); }
+        for i in 1..p { m.push((0, 0, i)); }
+        for i in 1..p { m.push((p, 0, i)); }
+        for i in 1..p { m.push((p, p, i)); }
+        for i in 1..p { m.push((0, p, i)); }
+        // faces: (3,2,1,0) (0,1,5,4) (1,2,6,5) (2,3,7,6) (3,0,4,7) (4,5,6,7)
+        for j in 1..p { for i in 1..p { m.push((i, p - j, 0)); } }
+        for j in 1..p { for i in 1..p { m.push((i, 0, j)); } }
+        for j in 1..p { for i in 1..p { m.push((p, i, j)); } }
+        for j in 1..p { for i in 1..p { m.push((p - i, p, j)); } }
+        for j in 1..p { for i in 1..p { m.push((0, p - i, j)); } }
+        for j in 1..p { for i in 1..p { m.push((i, j, p)); } }
+        // interior
+        for k in 1..p {
+            for j in 1..p {
+                for i in 1..p { m.push((i, j, k)); }
             }
         }
-        for f in 0..6 {
-            for fb in 0..e {
-                for fa in 0..e {
-                    let fbn = if f == 2 { e - 1 - fb } else { fb };
-                    let fan = if f == 3 { e - 1 - fa } else { fa };
-                    perm.push(8 + 12 * e + F_MAP[f] * e * e + fbn * e + fan);
-                }
-            }
-        }
-        let base = 8 + 12 * e + 6 * e * e;
-        perm.extend(base..(p + 1) * (p + 1) * (p + 1));
-        perm
+        m
     }
 
-    /// D31 pin: (a) the HexQk→MFEM permutation is exactly the documented
-    /// closed form (checked via per-slot tensor indices), (b) it is a
-    /// bijection, (c) applying it to `HexQk::dof_coords` reproduces MFEM's
-    /// node coordinates per slot (GLL tensor grid; MFEM slots enumerated by
-    /// the `H1_DOF_MAP` construction), and (d) the p=2 table matches the
-    /// hard data from the C++ dump bit-for-bit.
+    /// D31 pin: `HexQk`'s H1 slot order **is** MFEM's
+    /// `H1_HexahedronElement` order, i.e. slot `s` of `dof_coords()` is the
+    /// tensor node [`mfem_h1_hex_slot_nodes`] assigns to `s`, and
+    /// `dof_index` inverts it.  Checked for p = 1 and p = 3..=5 (p = 2 is the
+    /// documented legacy exception, see
+    /// [`hex_qk_p2_keeps_legacy_slot_order_until_dofmanager_follows`]), plus
+    /// bijectivity.
     #[test]
-    fn hex_qk_to_mfem_h1_dof_permutation() {
-        for p in 2..=5 {
+    fn hex_qk_slots_match_mfem_h1_dof_map() {
+        for p in [1usize, 3, 4, 5] {
             let hex = HexQk::new(p);
-            let e = p - 1;
             let n = (p + 1) * (p + 1) * (p + 1);
-
-            // MFEM slot order (tensor indices), transcribed from
-            // `TensorBasisElement::TensorBasisElement`, H1_DOF_MAP, dims == 3.
-            let mut mfem: Vec<(usize, usize, usize)> = Vec::with_capacity(n);
-            // vertices
-            mfem.extend([
-                (0, 0, 0), (p, 0, 0), (p, p, 0), (0, p, 0),
-                (0, 0, p), (p, 0, p), (p, p, p), (0, p, p),
-            ]);
-            // edges: (0,1) (1,2) (3,2) (0,3) (4,5) (5,6) (7,6) (4,7)
-            //        (0,4) (1,5) (2,6) (3,7)
-            for i in 1..p { mfem.push((i, 0, 0)); }
-            for i in 1..p { mfem.push((p, i, 0)); }
-            for i in 1..p { mfem.push((i, p, 0)); }
-            for i in 1..p { mfem.push((0, i, 0)); }
-            for i in 1..p { mfem.push((i, 0, p)); }
-            for i in 1..p { mfem.push((p, i, p)); }
-            for i in 1..p { mfem.push((i, p, p)); }
-            for i in 1..p { mfem.push((0, i, p)); }
-            for i in 1..p { mfem.push((0, 0, i)); }
-            for i in 1..p { mfem.push((p, 0, i)); }
-            for i in 1..p { mfem.push((p, p, i)); }
-            for i in 1..p { mfem.push((0, p, i)); }
-            // faces: (3,2,1,0) (0,1,5,4) (1,2,6,5) (2,3,7,6) (3,0,4,7) (4,5,6,7)
-            for j in 1..p {
-                for i in 1..p { mfem.push((i, p - j, 0)); }
-            }
-            for j in 1..p {
-                for i in 1..p { mfem.push((i, 0, j)); }
-            }
-            for j in 1..p {
-                for i in 1..p { mfem.push((p, i, j)); }
-            }
-            for j in 1..p {
-                for i in 1..p { mfem.push((p - i, p, j)); }
-            }
-            for j in 1..p {
-                for i in 1..p { mfem.push((0, p - i, j)); }
-            }
-            for j in 1..p {
-                for i in 1..p { mfem.push((i, j, p)); }
-            }
-            // interior
-            for k in 1..p {
-                for j in 1..p {
-                    for i in 1..p { mfem.push((i, j, k)); }
-                }
-            }
+            let mfem = mfem_h1_hex_slot_nodes(p);
             assert_eq!(mfem.len(), n, "p={p}: MFEM slot count");
+            assert_eq!(hex.n_dofs(), n, "p={p}: HexQk dof count");
 
-            // (a)+(b): the closed-form perm (HexQk slot → MFEM slot) is the
-            // inverse of the slot-by-slot `dof_index` map (MFEM slot's tensor
-            // node → HexQk slot), and is a bijection.
-            let perm = hex_qk_to_mfem_h1_perm(p);
-            let mut dof_to_mfem = vec![0usize; n];
-            for (m, &(i, j, k)) in mfem.iter().enumerate() {
-                dof_to_mfem[hex.dof_index(i, j, k)] = m;
-            }
-            assert_eq!(perm, dof_to_mfem, "p={p}: closed form vs inverse dof_index");
-            let mut seen = perm.clone();
-            seen.sort_unstable();
-            assert_eq!(seen, (0..n).collect::<Vec<_>>(), "p={p}: bijective");
-
-            // (c): permuted HexQk coords reproduce MFEM's per-slot GLL grid.
-            // MFEM nodes live on [0,1]³; HexQk on [-1,1]³ (same 1-D GLL nodes).
-            let qk01: Vec<Vec<f64>> = hex
-                .dof_coords()
+            // The slot table is a bijection of the tensor grid …
+            let mut seen: Vec<usize> = mfem
                 .iter()
-                .map(|c| c.iter().map(|&v| 0.5 * (v + 1.0)).collect())
+                .map(|&(i, j, k)| i + j * (p + 1) + k * (p + 1) * (p + 1))
                 .collect();
-            for h in 0..n {
-                let (i, j, k) = mfem[perm[h]];
-                // [0,1] coordinates of the tensor node (same 1-D GLL nodes).
+            seen.sort_unstable();
+            assert_eq!(seen, (0..n).collect::<Vec<_>>(), "p={p}: slot table is a bijection");
+
+            // … and `dof_index` is exactly its inverse.
+            for (slot, &(i, j, k)) in mfem.iter().enumerate() {
+                assert_eq!(
+                    hex.dof_index(i, j, k),
+                    slot,
+                    "p={p}: HexQk tensor node ({i},{j},{k}) must be MFEM slot {slot}"
+                );
+            }
+
+            // `dof_coords()` carries the GLL tensor node of the slot's own
+            // tensor index (HexQk lives on [-1,1]³, MFEM on [0,1]³).
+            let coords = hex.dof_coords();
+            for (slot, &(i, j, k)) in mfem.iter().enumerate() {
                 let want = [
-                    0.5 * (hex.lag1d.nodes[i] + 1.0),
-                    0.5 * (hex.lag1d.nodes[j] + 1.0),
-                    0.5 * (hex.lag1d.nodes[k] + 1.0),
+                    hex.lag1d.nodes[i],
+                    hex.lag1d.nodes[j],
+                    hex.lag1d.nodes[k],
                 ];
                 for d in 0..3 {
                     assert!(
-                        (qk01[h][d] - want[d]).abs() < 1e-14,
-                        "p={p}: HexQk slot {h} coord {} vs its MFEM slot {} at ({i},{j},{k})",
-                        qk01[h][d],
-                        perm[h]
+                        (coords[slot][d] - want[d]).abs() < 1e-15,
+                        "p={p}: slot {slot} coord {d} = {} != GLL tensor node {want:?}",
+                        coords[slot][d]
                     );
                 }
             }
         }
+    }
 
-        // (d) p=2 hard data: permutation read off the C++ node dump
-        // (`tmp/gll_ref/fe_nodes_cpp.txt`, HEX p=2 ↔ HexQk::new(2).dof_coords).
-        assert_eq!(
-            hex_qk_to_mfem_h1_perm(2),
-            vec![
-                0, 1, 2, 3, 4, 5, 6, 7, // vertices: identity
-                17, 18, 19, 16, // HexQk vertical edges → MFEM edges 9,10,11,8
-                11, 9, 13, 15, // bottom edges → MFEM 3,1,5,7
-                8, 10, 14, 12, // top edges → MFEM 0,2,6,4
-                24, 22, 21, 23, // faces xmin,xmax,ymin,ymax → MFEM 4,2,1,3
-                20, 25, // faces zmin,zmax → MFEM 0,5
-                26, // interior
-            ]
-        );
+    /// D31 numeric ground truth: the per-slot node coordinates of MFEM 4.9/4.10
+    /// `H1_HexahedronElement` on `[0,1]³`, dumped from C++ (`node slot N xyz
+    /// …` in `tmp/gll_ref/fe_nodes_cpp.txt`, harness
+    /// `tmp/gll_ref/probe_fe_nodes.cpp`).  `HexQk::dof_coords()` mapped to
+    /// `[0,1]³` must reproduce them slot by slot — this pins the *whole*
+    /// layout (vertex/edge/face/interior block order and every block-internal
+    /// offset), not just its block structure.  p = 3 is used because it is the
+    /// lowest order that distinguishes the block-internal offsets (two slots
+    /// per edge, a 2×2 face block); p = 2's MFEM dump is reproduced by
+    /// `HexQk::new_lex(2)`-independent data once the p = 2 exception is lifted.
+    #[test]
+    fn hex_qk_dof_coords_match_mfem_node_dump() {
+        const HEX_P2: [[f64; 3]; 27] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.5, 0.0],
+            [0.5, 1.0, 0.0],
+            [0.0, 0.5, 0.0],
+            [0.5, 0.0, 1.0],
+            [1.0, 0.5, 1.0],
+            [0.5, 1.0, 1.0],
+            [0.0, 0.5, 1.0],
+            [0.0, 0.0, 0.5],
+            [1.0, 0.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [0.0, 1.0, 0.5],
+            [0.5, 0.5, 0.0],
+            [0.5, 0.0, 0.5],
+            [1.0, 0.5, 0.5],
+            [0.5, 1.0, 0.5],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.5, 1.0],
+            [0.5, 0.5, 0.5],
+        ];
+        const HEX_P3: [[f64; 3]; 64] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.27639320225002106, 0.0, 0.0],
+            [0.72360679774997894, 0.0, 0.0],
+            [1.0, 0.27639320225002106, 0.0],
+            [1.0, 0.72360679774997894, 0.0],
+            [0.27639320225002106, 1.0, 0.0],
+            [0.72360679774997894, 1.0, 0.0],
+            [0.0, 0.27639320225002106, 0.0],
+            [0.0, 0.72360679774997894, 0.0],
+            [0.27639320225002106, 0.0, 1.0],
+            [0.72360679774997894, 0.0, 1.0],
+            [1.0, 0.27639320225002106, 1.0],
+            [1.0, 0.72360679774997894, 1.0],
+            [0.27639320225002106, 1.0, 1.0],
+            [0.72360679774997894, 1.0, 1.0],
+            [0.0, 0.27639320225002106, 1.0],
+            [0.0, 0.72360679774997894, 1.0],
+            [0.0, 0.0, 0.27639320225002106],
+            [0.0, 0.0, 0.72360679774997894],
+            [1.0, 0.0, 0.27639320225002106],
+            [1.0, 0.0, 0.72360679774997894],
+            [1.0, 1.0, 0.27639320225002106],
+            [1.0, 1.0, 0.72360679774997894],
+            [0.0, 1.0, 0.27639320225002106],
+            [0.0, 1.0, 0.72360679774997894],
+            [0.27639320225002106, 0.72360679774997894, 0.0],
+            [0.72360679774997894, 0.72360679774997894, 0.0],
+            [0.27639320225002106, 0.27639320225002106, 0.0],
+            [0.72360679774997894, 0.27639320225002106, 0.0],
+            [0.27639320225002106, 0.0, 0.27639320225002106],
+            [0.72360679774997894, 0.0, 0.27639320225002106],
+            [0.27639320225002106, 0.0, 0.72360679774997894],
+            [0.72360679774997894, 0.0, 0.72360679774997894],
+            [1.0, 0.27639320225002106, 0.27639320225002106],
+            [1.0, 0.72360679774997894, 0.27639320225002106],
+            [1.0, 0.27639320225002106, 0.72360679774997894],
+            [1.0, 0.72360679774997894, 0.72360679774997894],
+            [0.72360679774997894, 1.0, 0.27639320225002106],
+            [0.27639320225002106, 1.0, 0.27639320225002106],
+            [0.72360679774997894, 1.0, 0.72360679774997894],
+            [0.27639320225002106, 1.0, 0.72360679774997894],
+            [0.0, 0.72360679774997894, 0.27639320225002106],
+            [0.0, 0.27639320225002106, 0.27639320225002106],
+            [0.0, 0.72360679774997894, 0.72360679774997894],
+            [0.0, 0.27639320225002106, 0.72360679774997894],
+            [0.27639320225002106, 0.27639320225002106, 1.0],
+            [0.72360679774997894, 0.27639320225002106, 1.0],
+            [0.27639320225002106, 0.72360679774997894, 1.0],
+            [0.72360679774997894, 0.72360679774997894, 1.0],
+            [0.27639320225002106, 0.27639320225002106, 0.27639320225002106],
+            [0.72360679774997894, 0.27639320225002106, 0.27639320225002106],
+            [0.27639320225002106, 0.72360679774997894, 0.27639320225002106],
+            [0.72360679774997894, 0.72360679774997894, 0.27639320225002106],
+            [0.27639320225002106, 0.27639320225002106, 0.72360679774997894],
+            [0.72360679774997894, 0.27639320225002106, 0.72360679774997894],
+            [0.27639320225002106, 0.72360679774997894, 0.72360679774997894],
+            [0.72360679774997894, 0.72360679774997894, 0.72360679774997894],
+        ];
+
+        let p = 3usize;
+        let hex = HexQk::new(p);
+        let coords = hex.dof_coords();
+        assert_eq!(coords.len(), HEX_P3.len(), "p={p}: slot count");
+        let mut max_err = 0.0_f64;
+        for (slot, want) in HEX_P3.iter().enumerate() {
+            for d in 0..3 {
+                let got = 0.5 * (coords[slot][d] + 1.0); // [-1,1] → [0,1]
+                max_err = max_err.max((got - want[d]).abs());
+                assert!(
+                    (got - want[d]).abs() < 1e-15,
+                    "p={p} slot {slot} coord {d}: got {got} want {} (C++ dump)",
+                    want[d]
+                );
+            }
+        }
+        assert!(max_err <= 1e-16, "p={p}: dump match must be bit-exact");
+
+        // p = 2 is the documented legacy exception.  Its slot order is pinned
+        // against the same C++ dump through the pre-D31 permutation table
+        // (`hex_qk_to_mfem_h1_perm(p=2)`, itself taken from the old test):
+        // legacy slot h holds the tensor node MFEM puts in slot PERM[h].
+        const PERM_P2: [usize; 27] = [
+            0, 1, 2, 3, 4, 5, 6, 7,
+            17, 18, 19, 16,
+            11, 9, 13, 15,
+            8, 10, 14, 12,
+            24, 22, 21, 23,
+            20, 25,
+            26,
+        ];
+        let hex2 = HexQk::new(2);
+        let coords2 = hex2.dof_coords();
+        assert_eq!(coords2.len(), HEX_P2.len());
+        for (slot, &mfem_slot) in PERM_P2.iter().enumerate() {
+            for d in 0..3 {
+                let got = 0.5 * (coords2[slot][d] + 1.0);
+                assert!(
+                    (got - HEX_P2[mfem_slot][d]).abs() < 1e-15,
+                    "p=2 legacy slot {slot} coord {d}: got {got} want {} (MFEM slot {mfem_slot})",
+                    HEX_P2[mfem_slot][d]
+                );
+            }
+        }
+        // … and it is *not* the MFEM order, i.e. the exception is real and the
+        // `DofManager::build_q2_hex` fix is still outstanding.  Once that fix
+        // lands this assertion (and `LEGACY_P2_SLOTS`) must be deleted and p=2
+        // folded into the loop above.
+        assert!(PERM_P2.iter().copied().ne(0..27usize));
     }
 
     fn check_pou(elem: &dyn ReferenceElement) {
