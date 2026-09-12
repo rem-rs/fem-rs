@@ -552,23 +552,28 @@ impl HexNDk {
 }
 
 /// Open (tangential) `p`-point Gauss-Legendre nodal modes of degree `p-1` on
-/// `[-1,1]`, scaled by `1/2`.
+/// `[0,1]`, scaled by `scale`.
 ///
-/// These are MFEM's `ND_HexahedronElement` open 1-D functions
-/// (`poly1d.GetBasis(p-1, BasisType::GaussLegendre)`, evaluated by
-/// `Poly_1D::Basis::Eval` as the degree-`p-1` Lagrange interpolation at the
-/// `OpenPoints(p-1, GaussLegendre)` nodes) — the *point-value* duals of the
-/// element's `FE::Nodes` open coordinates.  The extra `1/2` is the pull-back
-/// normalization of the `[0,1] -> [-1,1]` reference change: with
-/// `J = J_MFEM/2` and the covariant map `J^-T`, halving every open factor
-/// makes the physical basis (`V_phys = 2·V_ref` on the unit cube) equal to
-/// MFEM's, exactly as the former integrated-Gerritsma modes were normalized
-/// (unit integral over `[-1,1]` ≡ half of MFEM's `u_a`).  For `p = 1` the
-/// single mode is the constant `1/2`, bit-identical to the old Gerritsma mode
-/// `-c'_0`, so the ND1 paths are unchanged.
+/// These are MFEM's tensor open 1-D functions (`poly1d.GetBasis(p-1,
+/// BasisType::GaussLegendre)`, evaluated by `Poly_1D::Basis::Eval` as the
+/// degree-`p-1` Lagrange interpolation at the `OpenPoints(p-1, GaussLegendre)`
+/// nodes) — the *point-value* duals of the element's `FE::Nodes` open
+/// coordinates.  The function is the shared 1-D factor of the hex NDk element
+/// (`[-1,1]` reference, `scale = 0.5`) and of the quad `QuadND` element
+/// (`[0,1]` reference, `scale = 1.0`), which is exactly MFEM's sharing
+/// (`Poly_1D` is basis-type/degree-keyed, independent of the element shape).
+///
+/// The hex's extra `1/2` is the pull-back normalization of the `[0,1] ->
+/// [-1,1]` reference change: with `J = J_MFEM/2` and the covariant map `J^-T`,
+/// halving every open factor makes the physical basis (`V_phys = 2·V_ref` on
+/// the unit cube) equal to MFEM's, exactly as the former integrated-Gerritsma
+/// modes were normalized (unit integral over `[-1,1]` ≡ half of MFEM's `u_a`).
+/// For `p = 1` the single hex mode is the constant `1/2`, bit-identical to the
+/// old Gerritsma mode `-c'_0`, so the ND1 paths are unchanged; the quad's is
+/// the constant `1`.
 ///
 /// Returns `(values, derivatives)`.
-fn open_basis(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn open_basis_scaled(p: usize, x: f64, scale: f64) -> (Vec<f64>, Vec<f64>) {
     debug_assert!(p >= 1, "open_basis requires p >= 1");
     let nodes = gl_nodes(p);
     let n = nodes.len();
@@ -611,14 +616,21 @@ fn open_basis(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
             dc[j] = (dlam[j] - c[j] * ds) / s;
         }
     }
-    // Pull-back normalization to the [-1,1] reference interval.
+    // Pull-back normalization to the element's reference interval.
     for v in c.iter_mut() {
-        *v *= 0.5;
+        *v *= scale;
     }
     for v in dc.iter_mut() {
-        *v *= 0.5;
+        *v *= scale;
     }
     (c, dc)
+}
+
+/// Hex flavour of [`open_basis_scaled`]: the `[-1,1]` reference interval
+/// (`scale = 0.5`).
+#[inline]
+pub(crate) fn open_basis(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    open_basis_scaled(p, x, 0.5)
 }
 
 #[cfg(test)]
