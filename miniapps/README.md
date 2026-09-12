@@ -32,6 +32,17 @@ miniapps/
 │                                maxwell 3D hex 差 HexNDk 归一化 4×,
 │                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
 ├── nurbs/                   ← 对应 miniapps/nurbs/ (6 个已完成)
+│   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
+│   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
+│   │                            与 C++ 迭代块逐字节一致）
+│   ├── nurbs_ex3.rs         ← 1:1（H(curl): NurbsHCurlSpace 分组件 curl
+│   │                            扩展 + 合并 elem_dof + Piola 装配 + 局部
+│   │                            投影; 默认 -o 1 = 33540 dof / ess 516 /
+│   │                            166 迭代块逐字节 / ARF 0.918732 / L2
+│   │                            8.41512e-06 全部 = C++, -r 1 亦逐字节;
+│   │                            缺口: ProjectCoefficientElementL2 未实现
+│   │                            ⇒ C++ 默认分派下 -r 1 误差 0.0509 vs 本
+│   │                            实现 0.0398, 细网格档不受影响）
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
