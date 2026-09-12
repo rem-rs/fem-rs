@@ -449,6 +449,9 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQ1),
         (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQ2),
         (ElementType::Hex8, 1) => Box::new(fem_element::lagrange::hex::HexQ1),
+        // D31 stage A: HexQ2 is slot-identical to HexQk::new(2) (the layout
+        // DofManager::build_q2_hex numbers element dofs in), so the PA
+        // operator's rows/cols match the space's element dof order.
         (ElementType::Hex8, 2) => Box::new(fem_element::lagrange::hex::HexQ2),
         _ => panic!("partial ref_elem: unsupported ({et:?}, {order})"),
     }

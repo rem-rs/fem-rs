@@ -76,13 +76,20 @@ impl ReferenceElement for HexQ1 {
 
 // ─── Q2 ───────────────────────────────────────────────────────────────────────
 
-/// Biquadratic Lagrange element on the reference hex `[-1,1]³` — 27 DOFs.
+/// Quadratic Lagrange element on the reference hex `[-1,1]³` — 27 DOFs.
 ///
-/// Node ordering (MFEM-compatible tensorial):
-/// - 0..7:  8 vertices
-/// - 8..19: 12 edge midpoints (4 on bottom z=-1, 4 on top z=+1, 4 vertical)
-/// - 20..25: 6 face-centre DOFs (□0..□5: ζ=-1, ζ=+1, η=-1, η=+1, ξ=-1, ξ=+1)
-/// - 26:    volume-centre DOF (0,0,0)
+/// Slot order = [`crate::lagrange::factory::HexQk`]`::new(2)` (converged,
+/// D31 stage A): the layout of `DofManager::build_q2_hex` (crates/space),
+/// i.e. the fem-rs H1 order the factory keeps at `p == 2` until that table
+/// switches to the MFEM `H1_HexahedronElement` order (see
+/// `factory::LEGACY_P2_SLOTS`):
+///
+/// - 0..7:   8 vertices (bottom ring, then top ring)
+/// - 8..11:  vertical edge mids (1→5, 2→6, 3→7, 0→4)
+/// - 12..15: y-edge mids (3→0, 1→2, 5→6, 4→7)
+/// - 16..19: x-edge mids (0→1, 2→3, 6→7, 4→5)
+/// - 20..25: face centres (ξ=-1, ξ=+1, η=-1, η=+1, ζ=-1, ζ=+1)
+/// - 26:     volume centre (0,0,0)
 ///
 /// Basis: φᵢ = L_ix(ξᵢ)(ξ) · L_iy(ηᵢ)(η) · L_iz(ζᵢ)(ζ)
 /// where L(-1), L(0), L(+1) are the quadratic 1-D Lagrange polynomials.
@@ -99,28 +106,28 @@ const Q2_NODES_HEX: [(f64, f64, f64); 27] = {
     n[5] = (1.0, -1.0, 1.0);
     n[6] = (1.0, 1.0, 1.0);
     n[7] = (-1.0, 1.0, 1.0);
-    // edges: bottom z=-1 (0→1, 1→2, 2→3, 3→0)
-    n[8] = (0.0, -1.0, -1.0);
-    n[9] = (1.0, 0.0, -1.0);
-    n[10] = (0.0, 1.0, -1.0);
-    n[11] = (-1.0, 0.0, -1.0);
-    // edges: top z=+1 (4→5, 5→6, 6→7, 7→4)
-    n[12] = (0.0, -1.0, 1.0);
-    n[13] = (1.0, 0.0, 1.0);
-    n[14] = (0.0, 1.0, 1.0);
+    // edges: vertical (1→5, 2→6, 3→7, 0→4)
+    n[8] = (1.0, -1.0, 0.0);
+    n[9] = (1.0, 1.0, 0.0);
+    n[10] = (-1.0, 1.0, 0.0);
+    n[11] = (-1.0, -1.0, 0.0);
+    // edges: y-varying (3→0, 1→2, 5→6, 4→7)
+    n[12] = (-1.0, 0.0, -1.0);
+    n[13] = (1.0, 0.0, -1.0);
+    n[14] = (1.0, 0.0, 1.0);
     n[15] = (-1.0, 0.0, 1.0);
-    // edges: vertical (0→4, 1→5, 2→6, 3→7)
-    n[16] = (-1.0, -1.0, 0.0);
-    n[17] = (1.0, -1.0, 0.0);
-    n[18] = (1.0, 1.0, 0.0);
-    n[19] = (-1.0, 1.0, 0.0);
-    // face centres: ζ=-1, ζ=+1, η=-1, η=+1, ξ=-1, ξ=+1
-    n[20] = (0.0, 0.0, -1.0);
-    n[21] = (0.0, 0.0, 1.0);
+    // edges: x-varying (0→1, 2→3, 6→7, 4→5)
+    n[16] = (0.0, -1.0, -1.0);
+    n[17] = (0.0, 1.0, -1.0);
+    n[18] = (0.0, 1.0, 1.0);
+    n[19] = (0.0, -1.0, 1.0);
+    // face centres: ξ=-1, ξ=+1, η=-1, η=+1, ζ=-1, ζ=+1
+    n[20] = (-1.0, 0.0, 0.0);
+    n[21] = (1.0, 0.0, 0.0);
     n[22] = (0.0, -1.0, 0.0);
     n[23] = (0.0, 1.0, 0.0);
-    n[24] = (-1.0, 0.0, 0.0);
-    n[25] = (1.0, 0.0, 0.0);
+    n[24] = (0.0, 0.0, -1.0);
+    n[25] = (0.0, 0.0, 1.0);
     // volume centre
     n[26] = (0.0, 0.0, 0.0);
     n
@@ -195,102 +202,67 @@ impl ReferenceElement for HexQ2 {
 
 // ─── Q3 ───────────────────────────────────────────────────────────────────────
 
-/// Bicubic Lagrange element on the reference hex `[-1,1]³` — 64 DOFs.
+/// Cubic Lagrange element on the reference hex `[-1,1]³` — 64 DOFs.
 ///
-/// Tensor-product of degree-3 Lagrange polynomials through nodes
-/// at ξ ∈ {-1, -1/3, 1/3, 1}.
+/// Slot order = MFEM `H1_HexahedronElement(3)` = [`crate::lagrange::factory::HexQk`]`::new(3)`
+/// (converged, D31 stage A): 8 vertices in `CUBE::Vertices` order, then two
+/// slots per edge in `CUBE::Edges` order (each block ascending along the
+/// edge), then four slots per face in `CUBE::FaceVert` order (`j` outer,
+/// `i` inner), then the 2×2×2 interior (`k` outer, `i` fastest).
 ///
-/// Node ordering: vertices → edges → faces → volume (MFEM-compatible).
+/// The 1-D nodes are the Gauss-Lobatto points `{±1, ±1/√5}` — bit-identical
+/// to `HexQk::new(3)`'s `Lagrange1D` nodes (`quadrature::gauss_lobatto_1d(4)`),
+/// matching MFEM `H1_FECollection`'s `BasisType::GaussLobatto`.
 pub struct HexQ3;
 
-const Q3_NODES_HEX: [(f64, f64, f64); 64] = {
-    const N1D: [f64; 4] = [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0];
-    let mut n = [(0.0, 0.0, 0.0); 64];
-    // vertices (8)
-    n[0] = (N1D[0], N1D[0], N1D[0]);
-    n[1] = (N1D[3], N1D[0], N1D[0]);
-    n[2] = (N1D[3], N1D[3], N1D[0]);
-    n[3] = (N1D[0], N1D[3], N1D[0]);
-    n[4] = (N1D[0], N1D[0], N1D[3]);
-    n[5] = (N1D[3], N1D[0], N1D[3]);
-    n[6] = (N1D[3], N1D[3], N1D[3]);
-    n[7] = (N1D[0], N1D[3], N1D[3]);
-    // edges (12 × 2 = 24 DOFs on edges)
-    n[8] = (N1D[1], N1D[0], N1D[0]);
-    n[9] = (N1D[2], N1D[0], N1D[0]); // e0: 0→1
-    n[10] = (N1D[3], N1D[1], N1D[0]);
-    n[11] = (N1D[3], N1D[2], N1D[0]); // e1: 1→2
-    n[12] = (N1D[2], N1D[3], N1D[0]);
-    n[13] = (N1D[1], N1D[3], N1D[0]); // e2: 2→3 (reversed)
-    n[14] = (N1D[0], N1D[2], N1D[0]);
-    n[15] = (N1D[0], N1D[1], N1D[0]); // e3: 3→0 (reversed)
-    n[16] = (N1D[1], N1D[0], N1D[3]);
-    n[17] = (N1D[2], N1D[0], N1D[3]); // e4: 4→5
-    n[18] = (N1D[3], N1D[1], N1D[3]);
-    n[19] = (N1D[3], N1D[2], N1D[3]); // e5: 5→6
-    n[20] = (N1D[2], N1D[3], N1D[3]);
-    n[21] = (N1D[1], N1D[3], N1D[3]); // e6: 6→7 (reversed)
-    n[22] = (N1D[0], N1D[2], N1D[3]);
-    n[23] = (N1D[0], N1D[1], N1D[3]); // e7: 7→4 (reversed)
-    n[24] = (N1D[0], N1D[0], N1D[1]);
-    n[25] = (N1D[0], N1D[0], N1D[2]); // e8: 0→4
-    n[26] = (N1D[3], N1D[0], N1D[1]);
-    n[27] = (N1D[3], N1D[0], N1D[2]); // e9: 1→5
-    n[28] = (N1D[3], N1D[3], N1D[1]);
-    n[29] = (N1D[3], N1D[3], N1D[2]); // e10: 2→6
-    n[30] = (N1D[0], N1D[3], N1D[1]);
-    n[31] = (N1D[0], N1D[3], N1D[2]); // e11: 3→7
-                                      // faces (6 × (3-1)² = 24 DOFs)
-                                      // Face 0: z=min
-    n[32] = (N1D[1], N1D[1], N1D[0]);
-    n[33] = (N1D[2], N1D[1], N1D[0]);
-    n[34] = (N1D[1], N1D[2], N1D[0]);
-    n[35] = (N1D[2], N1D[2], N1D[0]);
-    // Face 1: z=max
-    n[36] = (N1D[1], N1D[1], N1D[3]);
-    n[37] = (N1D[2], N1D[1], N1D[3]);
-    n[38] = (N1D[1], N1D[2], N1D[3]);
-    n[39] = (N1D[2], N1D[2], N1D[3]);
-    // Face 2: y=min
-    n[40] = (N1D[1], N1D[0], N1D[1]);
-    n[41] = (N1D[2], N1D[0], N1D[1]);
-    n[42] = (N1D[1], N1D[0], N1D[2]);
-    n[43] = (N1D[2], N1D[0], N1D[2]);
-    // Face 3: y=max
-    n[44] = (N1D[1], N1D[3], N1D[1]);
-    n[45] = (N1D[2], N1D[3], N1D[1]);
-    n[46] = (N1D[1], N1D[3], N1D[2]);
-    n[47] = (N1D[2], N1D[3], N1D[2]);
-    // Face 4: x=min
-    n[48] = (N1D[0], N1D[1], N1D[1]);
-    n[49] = (N1D[0], N1D[2], N1D[1]);
-    n[50] = (N1D[0], N1D[1], N1D[2]);
-    n[51] = (N1D[0], N1D[2], N1D[2]);
-    // Face 5: x=max
-    n[52] = (N1D[3], N1D[1], N1D[1]);
-    n[53] = (N1D[3], N1D[2], N1D[1]);
-    n[54] = (N1D[3], N1D[1], N1D[2]);
-    n[55] = (N1D[3], N1D[2], N1D[2]);
-    // Volume interior ((3-1)³ = 8 DOFs)
-    n[56] = (N1D[1], N1D[1], N1D[1]);
-    n[57] = (N1D[2], N1D[1], N1D[1]);
-    n[58] = (N1D[1], N1D[2], N1D[1]);
-    n[59] = (N1D[2], N1D[2], N1D[1]);
-    n[60] = (N1D[1], N1D[1], N1D[2]);
-    n[61] = (N1D[2], N1D[1], N1D[2]);
-    n[62] = (N1D[1], N1D[2], N1D[2]);
-    n[63] = (N1D[2], N1D[2], N1D[2]);
-    n
-};
+/// 1-D GLL nodes for `p = 3` on `[-1,1]`.  Must stay bit-identical to
+/// `quadrature::gauss_lobatto_1d(4)` — `HexQk::new(3)` builds its nodes the
+/// same way, and the slot-layout pin test compares coordinates exactly.
+fn q3_nodes_1d() -> [f64; 4] {
+    let s = (1.0_f64 / 5.0).sqrt();
+    [-1.0, -s, s, 1.0]
+}
 
-fn hex_q3_lagrange_1d(x: f64) -> ([f64; 4], [f64; 4]) {
-    const NODES: [f64; 4] = [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0];
+/// Slot → tensor-node index `(ix, iy, iz)` (node coordinate = `q3_nodes_1d()[i]`).
+///
+/// This is the MFEM `H1_HexahedronElement(3)` dof map, i.e. exactly
+/// `factory::tests::mfem_h1_hex_slot_nodes(3)`; pinned slot-by-slot against
+/// `HexQk::new(3)` by [`tests::hex_q3_layout_matches_hex_qk3`].
+const Q3_SLOT_TENSOR: [[u8; 3]; 64] = [
+    // vertices: bottom ring 0..3, top ring 4..7
+    [0, 0, 0], [3, 0, 0], [3, 3, 0], [0, 3, 0],
+    [0, 0, 3], [3, 0, 3], [3, 3, 3], [0, 3, 3],
+    // edges, `CUBE::Edges` order, two slots per edge, ascending tensor index
+    [1, 0, 0], [2, 0, 0], // 0-1
+    [3, 1, 0], [3, 2, 0], // 1-2
+    [1, 3, 0], [2, 3, 0], // 3-2
+    [0, 1, 0], [0, 2, 0], // 0-3
+    [1, 0, 3], [2, 0, 3], // 4-5
+    [3, 1, 3], [3, 2, 3], // 5-6
+    [1, 3, 3], [2, 3, 3], // 7-6
+    [0, 1, 3], [0, 2, 3], // 4-7
+    [0, 0, 1], [0, 0, 2], // 0-4
+    [3, 0, 1], [3, 0, 2], // 1-5
+    [3, 3, 1], [3, 3, 2], // 2-6
+    [0, 3, 1], [0, 3, 2], // 3-7
+    // faces, `CUBE::FaceVert` order, `j` outer / `i` inner
+    [1, 2, 0], [2, 2, 0], [1, 1, 0], [2, 1, 0], // z low  (i, 3-j, 0)
+    [1, 0, 1], [2, 0, 1], [1, 0, 2], [2, 0, 2], // y low  (i, 0, j)
+    [3, 1, 1], [3, 2, 1], [3, 1, 2], [3, 2, 2], // x high (3, i, j)
+    [2, 3, 1], [1, 3, 1], [2, 3, 2], [1, 3, 2], // y high (3-i, 3, j)
+    [0, 2, 1], [0, 1, 1], [0, 2, 2], [0, 1, 2], // x low  (0, 3-i, j)
+    [1, 1, 3], [2, 1, 3], [1, 2, 3], [2, 2, 3], // z high (i, j, 3)
+    // interior: k outer, j middle, i fastest
+    [1, 1, 1], [2, 1, 1], [1, 2, 1], [2, 2, 1],
+    [1, 1, 2], [2, 1, 2], [1, 2, 2], [2, 2, 2],
+];
 
+fn hex_q3_lagrange_1d(x: f64, nodes: &[f64; 4]) -> ([f64; 4], [f64; 4]) {
     let mut vals = [1.0_f64; 4];
     for i in 0..4 {
         for j in 0..4 {
             if j != i {
-                vals[i] *= (x - NODES[j]) / (NODES[i] - NODES[j]);
+                vals[i] *= (x - nodes[j]) / (nodes[i] - nodes[j]);
             }
         }
     }
@@ -302,10 +274,10 @@ fn hex_q3_lagrange_1d(x: f64) -> ([f64; 4], [f64; 4]) {
             if m == i {
                 continue;
             }
-            let mut term = 1.0 / (NODES[i] - NODES[m]);
+            let mut term = 1.0 / (nodes[i] - nodes[m]);
             for j in 0..4 {
                 if j != i && j != m {
-                    term *= (x - NODES[j]) / (NODES[i] - NODES[j]);
+                    term *= (x - nodes[j]) / (nodes[i] - nodes[j]);
                 }
             }
             sum += term;
@@ -313,20 +285,6 @@ fn hex_q3_lagrange_1d(x: f64) -> ([f64; 4], [f64; 4]) {
         ders[i] = sum;
     }
     (vals, ders)
-}
-
-fn coord_to_q3_idx(c: f64) -> usize {
-    const NODES: [f64; 4] = [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0];
-    let mut best = 0usize;
-    let mut best_d = f64::MAX;
-    for (i, &n) in NODES.iter().enumerate() {
-        let d = (c - n).abs();
-        if d < best_d {
-            best_d = d;
-            best = i;
-        }
-    }
-    best
 }
 
 impl ReferenceElement for HexQ3 {
@@ -341,30 +299,26 @@ impl ReferenceElement for HexQ3 {
     }
 
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let (lx, _) = hex_q3_lagrange_1d(x);
-        let (ly, _) = hex_q3_lagrange_1d(y);
-        let (lz, _) = hex_q3_lagrange_1d(z);
-        for (i, &(xi_i, eta_i, zeta_i)) in Q3_NODES_HEX.iter().enumerate() {
-            let ix = coord_to_q3_idx(xi_i);
-            let iy = coord_to_q3_idx(eta_i);
-            let iz = coord_to_q3_idx(zeta_i);
-            values[i] = lx[ix] * ly[iy] * lz[iz];
+        let n1d = q3_nodes_1d();
+        let (lx, _) = hex_q3_lagrange_1d(xi[0], &n1d);
+        let (ly, _) = hex_q3_lagrange_1d(xi[1], &n1d);
+        let (lz, _) = hex_q3_lagrange_1d(xi[2], &n1d);
+        for (slot, t) in Q3_SLOT_TENSOR.iter().enumerate() {
+            let (ix, iy, iz) = (t[0] as usize, t[1] as usize, t[2] as usize);
+            values[slot] = lx[ix] * ly[iy] * lz[iz];
         }
     }
 
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        let (x, y, z) = (xi[0], xi[1], xi[2]);
-        let (lx, dlx) = hex_q3_lagrange_1d(x);
-        let (ly, dly) = hex_q3_lagrange_1d(y);
-        let (lz, dlz) = hex_q3_lagrange_1d(z);
-        for (i, &(xi_i, eta_i, zeta_i)) in Q3_NODES_HEX.iter().enumerate() {
-            let ix = coord_to_q3_idx(xi_i);
-            let iy = coord_to_q3_idx(eta_i);
-            let iz = coord_to_q3_idx(zeta_i);
-            grads[i * 3] = dlx[ix] * ly[iy] * lz[iz];
-            grads[i * 3 + 1] = lx[ix] * dly[iy] * lz[iz];
-            grads[i * 3 + 2] = lx[ix] * ly[iy] * dlz[iz];
+        let n1d = q3_nodes_1d();
+        let (lx, dlx) = hex_q3_lagrange_1d(xi[0], &n1d);
+        let (ly, dly) = hex_q3_lagrange_1d(xi[1], &n1d);
+        let (lz, dlz) = hex_q3_lagrange_1d(xi[2], &n1d);
+        for (slot, t) in Q3_SLOT_TENSOR.iter().enumerate() {
+            let (ix, iy, iz) = (t[0] as usize, t[1] as usize, t[2] as usize);
+            grads[slot * 3] = dlx[ix] * ly[iy] * lz[iz];
+            grads[slot * 3 + 1] = lx[ix] * dly[iy] * lz[iz];
+            grads[slot * 3 + 2] = lx[ix] * ly[iy] * dlz[iz];
         }
     }
 
@@ -373,9 +327,10 @@ impl ReferenceElement for HexQ3 {
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        Q3_NODES_HEX
+        let n1d = q3_nodes_1d();
+        Q3_SLOT_TENSOR
             .iter()
-            .map(|&(x, y, z)| vec![x, y, z])
+            .map(|t| vec![n1d[t[0] as usize], n1d[t[1] as usize], n1d[t[2] as usize]])
             .collect()
     }
 }
@@ -486,16 +441,79 @@ mod tests {
 
     #[test]
     fn hex_q3_node_dofs() {
+        let n1d = q3_nodes_1d();
         let mut phi = vec![0.0; 64];
-        for (i, &(x, y, z)) in Q3_NODES_HEX.iter().enumerate() {
-            HexQ3.eval_basis(&[x, y, z], &mut phi);
+        for (slot, t) in Q3_SLOT_TENSOR.iter().enumerate() {
+            let pt = [n1d[t[0] as usize], n1d[t[1] as usize], n1d[t[2] as usize]];
+            HexQ3.eval_basis(&pt, &mut phi);
             for j in 0..64 {
-                let expected = if i == j { 1.0 } else { 0.0 };
+                let expected = if slot == j { 1.0 } else { 0.0 };
                 assert!(
                     (phi[j] - expected).abs() < 1e-13,
-                    "node {i}, basis {j}: expected {expected}, got {}",
+                    "node {slot}, basis {j}: expected {expected}, got {}",
                     phi[j]
                 );
+            }
+        }
+    }
+
+    /// D31 stage-A convergence pin: `HexQ2`'s layout (slot order + node
+    /// coordinates + basis values) is **slot-by-slot identical** to the
+    /// order-generic `HexQk::new(2)` the space numbering (`build_q2_hex`)
+    /// follows — the two must stay in lockstep.
+    #[test]
+    fn hex_q2_layout_matches_hex_qk2() {
+        assert_layout_converged(&HexQ2, &crate::lagrange::factory::HexQk::new(2));
+    }
+
+    /// D31 stage-A convergence pin: `HexQ3`'s layout (slot order + GLL node
+    /// coordinates + basis values) is **slot-by-slot identical** to the
+    /// order-generic `HexQk::new(3)` the space numbering (`build_pk_hex`)
+    /// follows — the two must stay in lockstep.
+    #[test]
+    fn hex_q3_layout_matches_hex_qk3() {
+        assert_layout_converged(&HexQ3, &crate::lagrange::factory::HexQk::new(3));
+    }
+
+    /// Slot-by-slot equality of two hex elements: `dof_coords` bit-exact,
+    /// values/gradients at generic and nodal points to 1e-12 (the elements
+    /// use different 1-D evaluation formulas, so values may differ in the
+    /// last ulps only).
+    fn assert_layout_converged(a: &dyn ReferenceElement, b: &dyn ReferenceElement) {
+        assert_eq!(a.n_dofs(), b.n_dofs());
+        let n = a.n_dofs();
+        let (ca, cb) = (a.dof_coords(), b.dof_coords());
+        for (s, (pa, pb)) in ca.iter().zip(cb.iter()).enumerate() {
+            for d in 0..3 {
+                assert_eq!(
+                    pa[d], pb[d],
+                    "slot {s} coord {d}: {pa:?} vs {pb:?} (must be bit-identical)"
+                );
+            }
+        }
+        let mut va = vec![0.0; n];
+        let mut vb = vec![0.0; n];
+        let mut ga = vec![0.0; n * 3];
+        let mut gb = vec![0.0; n * 3];
+        let mut pts: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [0.3, -0.5, 0.7],
+            [-0.9, 0.44, 0.12],
+            [-1.0, 1.0, -1.0],
+        ];
+        for c in &ca {
+            pts.push([c[0], c[1], c[2]]);
+        }
+        for pt in &pts {
+            a.eval_basis(pt, &mut va);
+            b.eval_basis(pt, &mut vb);
+            for (i, (x, y)) in va.iter().zip(vb.iter()).enumerate() {
+                assert!((x - y).abs() < 1e-12, "pt {pt:?} slot {i}: {x} vs {y}");
+            }
+            a.eval_grad_basis(pt, &mut ga);
+            b.eval_grad_basis(pt, &mut gb);
+            for (i, (x, y)) in ga.iter().zip(gb.iter()).enumerate() {
+                assert!((x - y).abs() < 1e-12, "pt {pt:?} grad {i}: {x} vs {y}");
             }
         }
     }

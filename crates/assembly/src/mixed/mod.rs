@@ -1271,6 +1271,15 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// `QuadSerendipityPk`/`HexSerendipityPk` for serendipity elements,
 /// `TetPk`/`PrismPk`/`PyramidPk` for the rest.
 ///
+/// D31 stage A (GLL alignment): the hex entries at orders 2/3 were the last
+/// third ordering — `HexQ2`/`HexQ3` are now slot-identical to
+/// `HexQk::new(2)`/`HexQk::new(3)` (pinned in `fem-element`'s
+/// `hex_q2_layout_matches_hex_qk2` / `hex_q3_layout_matches_hex_qk3`), so
+/// every entry of this table agrees with the space numbering at every order.
+/// Hex order-2/3 numbers produced before this change are not reproducible:
+/// the old layouts disagreed with `DofManager`'s element dof order, and
+/// `HexQ3` additionally used equispaced instead of Gauss-Lobatto nodes.
+///
 /// Before this table was extended it stopped at order 3 (Quad4/Hex8) and at
 /// order 1–3 for the other types, so every mixed form needed by a `H1`
 /// order-6 discretization returned `Err` (recorded as kernel gap D46① in the
