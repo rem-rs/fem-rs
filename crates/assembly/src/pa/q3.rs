@@ -2,19 +2,40 @@
 //!
 //! Q3: 64 nodes (4×4×4), 4×4×4 Gauss quadrature.
 //! Uses direct per-qp, per-node computation (O(p⁶) naive, sufficient for p=3).
+//!
+//! The 1-D nodes and the element-local slot order are taken from
+//! [`fem_element::lagrange::hex::HexQ3`] (D77): GLL(4) nodes in MFEM's
+//! `H1_HexahedronElement(3)` order, which is what `DofManager::build_pk_hex`
+//! numbers `H1Space` element DOFs in.  The pre-D77 kernel used an equispaced
+//! 4-node table in lexicographic order — a second, silent divergence from the
+//! assembly (and from MFEM's `H1_FECollection`).
 
+use crate::pa::hex_layout::{hex_slots, tensor_slots};
 use crate::pa::types::PaData;
+use fem_element::lagrange::hex::{HexQ1, HexQ3};
+use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
-
-// ─── Q3 1D nodes on [-1, 1] ──────────────────────────────────────────────────
-const Q3_NODES: [f64; 4] = [-1.0, -1.0/3.0, 1.0/3.0, 1.0];
 
 // ─── 4-point Gauss–Legendre on [-1, 1] ──────────────────────────────────────
 const GL4_PTS: [f64; 4] = [-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526];
 const GL4_WTS: [f64; 4] = [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538];
 
+/// `(1-D GLL nodes, slot → tensor index)` of the 64-slot Q3 hex kernel.
+fn hex_q3_slots() -> (Vec<f64>, Vec<[usize; 3]>) {
+    hex_slots(&HexQ3)
+}
+
+/// The 8 trilinear (Q1) geometry nodes, in the mesh's corner node order.
+fn hex_vertices() -> Vec<[f64; 3]> {
+    HexQ1
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect()
+}
+
 // ─── 1D Lagrange basis & derivatives at quadrature points ────────────────────
-fn build_1d_basis() -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
+fn build_1d_basis(nodes: &[f64; 4]) -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
     let mut b = [[0.0_f64; 4]; 4];
     let mut d = [[0.0_f64; 4]; 4];
     for q in 0..4 {
@@ -24,9 +45,9 @@ fn build_1d_basis() -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
             let mut der = 0.0;
             for j in 0..4 {
                 if j == i { continue; }
-                let denom = Q3_NODES[i] - Q3_NODES[j];
-                val *= (t - Q3_NODES[j]) / denom;
-                der += 1.0 / (t - Q3_NODES[j]);
+                let denom = nodes[i] - nodes[j];
+                val *= (t - nodes[j]) / denom;
+                der += 1.0 / (t - nodes[j]);
             }
             der *= val;
             b[q][i] = val;
@@ -36,26 +57,22 @@ fn build_1d_basis() -> ([[f64; 4]; 4], [[f64; 4]; 4]) {
     (b, d)
 }
 
-fn hex_q3_ixyz(n: usize) -> (usize, usize, usize) {
-    (n % 4, (n / 4) % 4, n / 16)
-}
-
 /// Build PA data for Hex Q3 diffusion.
 pub fn build_hex_q3_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) -> f64) -> PaData {
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 64, 3);
-    let hex8_ref: [(f64,f64,f64);8] = [(-1.,-1.,-1.),(1.,-1.,-1.),(1.,1.,-1.),(-1.,1.,-1.),(-1.,-1.,1.),(1.,-1.,1.),(1.,1.,1.),(-1.,1.,1.)];
+    let hex8_ref = hex_vertices();
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64;3]> = (0..8).map(|i|{let c=mesh.node_coords(nodes[i]);[c[0],c[1],c[2]]}).collect();
         for (qz,&qz_pt) in GL4_PTS.iter().enumerate() { for (qy,&qy_pt) in GL4_PTS.iter().enumerate() { for (qx,&qx_pt) in GL4_PTS.iter().enumerate() {
             let qi = qz*16 + qy*4 + qx;
             let mut jac=[[0.0;3];3];
-            for i in 0..8{let(xi,et,zt)=hex8_ref[i];let d_xi=xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;let d_et=(1.0+xi*qx_pt)*et*(1.0+zt*qz_pt)/8.0;let d_zt=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt/8.0;for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}}
+            for i in 0..8{let[xi,et,zt]=hex8_ref[i];let d_xi=xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;let d_et=(1.0+xi*qx_pt)*et*(1.0+zt*qz_pt)/8.0;let d_zt=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt/8.0;for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}}
             let d=jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])-jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])+jac[0][2]*(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0]);
             let det_j=d.abs();let inv=1.0/d;
             let jit=|i:usize,j:usize|->f64{match(i,j){(0,0)=>(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])*inv,(0,1)=>(jac[0][2]*jac[2][1]-jac[0][1]*jac[2][2])*inv,(0,2)=>(jac[0][1]*jac[1][2]-jac[0][2]*jac[1][1])*inv,(1,0)=>(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv,(1,1)=>(jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv,(1,2)=>(jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv,(2,0)=>(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv,(2,1)=>(jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv,(2,2)=>(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv,_=>0.0}};
-            let mut xp=[0.0;3];for i in 0..8{let(xi,et,zt)=hex8_ref[i];let phi=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;for d in 0..3{xp[d]+=phi*v[i][d];}}
+            let mut xp=[0.0;3];for i in 0..8{let[xi,et,zt]=hex8_ref[i];let phi=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;for d in 0..3{xp[d]+=phi*v[i][d];}}
             let qd=pd.elem_qp_mut(e,qi);
             for a in 0..3{for b in 0..3{qd[a*3+b]=jit(a,b);}}qd[9]=det_j;qd[10]=kappa(&xp);
         }}}
@@ -65,7 +82,8 @@ pub fn build_hex_q3_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
 
 /// y += A·x for Hex Q3 diffusion (direct per-qp).
 pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (b, d) = build_1d_basis();
+    let (nodes, slots) = hex_q3_slots();
+    let (b, d) = build_1d_basis(&[nodes[0], nodes[1], nodes[2], nodes[3]]);
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < 64 { continue; }
@@ -82,7 +100,7 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
             let(bq,dq)=(b[qx],d[qx]);let(bqy,dqy)=(b[qy],d[qy]);let(bqz,dqz)=(b[qz],d[qz]);
 
             let mut rg = [[0.0_f64;3];64];
-            for n in 0..64{let(ix,iy,iz)=hex_q3_ixyz(n);rg[n]=[dq[ix]*bqy[iy]*bqz[iz],bq[ix]*dqy[iy]*bqz[iz],bq[ix]*bqy[iy]*dqz[iz]];}
+            for n in 0..64{let t=slots[n];let(ix,iy,iz)=(t[0],t[1],t[2]);rg[n]=[dq[ix]*bqy[iy]*bqz[iz],bq[ix]*dqy[iy]*bqz[iz],bq[ix]*bqy[iy]*dqz[iz]];}
             let mut fl=[0.0;3];
             for j in 0..64{let pg=[j0*rg[j][0]+j1*rg[j][1]+j2*rg[j][2],j3*rg[j][0]+j4*rg[j][1]+j5*rg[j][2],j6*rg[j][0]+j7*rg[j][1]+j8*rg[j][2]];fl[0]+=pg[0]*xe[j];fl[1]+=pg[1]*xe[j];fl[2]+=pg[2]*xe[j];}
             for i in 0..64{let pg=[j0*rg[i][0]+j1*rg[i][1]+j2*rg[i][2],j3*rg[i][0]+j4*rg[i][1]+j5*rg[i][2],j6*rg[i][0]+j7*rg[i][1]+j8*rg[i][2]];ye[i]+=sc*(pg[0]*fl[0]+pg[1]*fl[1]+pg[2]*fl[2]);}
@@ -95,20 +113,18 @@ pub fn pa_apply_hex_q3(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
 ///
 /// Uses 1D tensor contractions instead of full per-node loops.
 pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (b, d) = build_1d_basis();
-    // Precompute 1D basis gradients per qp: G[d][q][i] for direction d, qp q, node i
-    // G[0][q][i] = D[q][i], G[1][q][i] = B[q][i], G[2][q][i] = B[q][i] (for d=0)
-    // G[0][q][i] = B[q][i], G[1][q][i] = D[q][i], G[2][q][i] = B[q][i] (for d=1)
-    // G[0][q][i] = B[q][i], G[1][q][i] = B[q][i], G[2][q][i] = D[q][i] (for d=2)
-    // We store all 3×3×4×4 = 144 values: G_dir_axis[q][i] for dir=0,1,2 and axis=0,1,2
-    // Actually simpler: just use B and D directly as before.
+    let (nodes, slots) = hex_q3_slots();
+    let (b, d) = build_1d_basis(&[nodes[0], nodes[1], nodes[2], nodes[3]]);
+    // Tensor grid → element-local slot (the sum-factorized contraction runs on
+    // the tensor grid, so it needs the inverse of the slot map).
+    let inv = tensor_slots(&slots, 4);
 
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < 64 { continue; }
         let mut xe_3d = [[[0.0_f64; 4]; 4]; 4]; // [ix][iy][iz]
         for iz in 0..4 { for iy in 0..4 { for ix in 0..4 {
-            xe_3d[ix][iy][iz] = x[dofs[ix + iy*4 + iz*16] as usize];
+            xe_3d[ix][iy][iz] = x[dofs[inv[ix][iy][iz]] as usize];
         }}}
         let mut ye_3d = [[[0.0_f64; 4]; 4]; 4];
 
@@ -163,7 +179,7 @@ pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mu
         }}}
 
         for iz in 0..4 { for iy in 0..4 { for ix in 0..4 {
-            y[dofs[ix + iy*4 + iz*16] as usize] += ye_3d[ix][iy][iz];
+            y[dofs[inv[ix][iy][iz]] as usize] += ye_3d[ix][iy][iz];
         }}}
     }
 }
@@ -171,7 +187,31 @@ pub fn pa_apply_hex_q3_sf(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_element::ReferenceElement;
     use fem_mesh::Mesh;
+
+    /// D77 pin: the kernel's slot → tensor map is bit-identical to `HexQ3`'s
+    /// (== `HexQk::new(3)`'s == `DofManager::build_pk_hex`'s) `dof_coords()`,
+    /// and the 1-D nodes are its GLL(4) nodes — not the pre-D77 equispaced
+    /// lexicographic table.
+    #[test]
+    fn hex_q3_pa_slots_match_element() {
+        let (nodes, slots) = hex_q3_slots();
+        let coords = HexQ3.dof_coords();
+        assert_eq!(slots.len(), 64);
+        for (slot, t) in slots.iter().enumerate() {
+            for d in 0..3 {
+                assert_eq!(
+                    nodes[t[d]], coords[slot][d],
+                    "slot {slot} axis {d}: PA kernel must reproduce HexQ3::dof_coords bit-exactly"
+                );
+            }
+        }
+        // Pre-D77 the kernel loaded `dofs[ix + iy*4 + iz*16]` (lexicographic
+        // tensor order), a different permutation of the same 64 nodes.
+        let lex: Vec<[usize; 3]> = (0..64).map(|n| [n % 4, (n / 4) % 4, n / 16]).collect();
+        assert_ne!(slots, lex, "pre-D77 lexicographic tensor order");
+    }
 
     #[test]
     fn hex_q3_pa_finite() {
@@ -183,12 +223,14 @@ mod tests {
 
     #[test]
     fn hex_q3_1d_basis() {
-        let (b, d) = build_1d_basis();
+        let (nodes, _) = hex_q3_slots();
+        let nodes = [nodes[0], nodes[1], nodes[2], nodes[3]];
+        let (b, d) = build_1d_basis(&nodes);
         for q in 0..4 { assert!((b[q].iter().sum::<f64>()-1.0).abs()<1e-14); }
         for q in 0..4 { assert!(d[q].iter().sum::<f64>().abs()<1e-14); }
         for i in 0..4 { for j in 0..4 {
-            let t = Q3_NODES[j];
-            let mut val=1.0; for m in 0..4{if m!=i{val*=(t-Q3_NODES[m])/(Q3_NODES[i]-Q3_NODES[m]);}}
+            let t = nodes[j];
+            let mut val=1.0; for m in 0..4{if m!=i{val*=(t-nodes[m])/(nodes[i]-nodes[m]);}}
             let exp = if i==j{1.0}else{0.0};
             assert!((val-exp).abs()<1e-14,"ℓ_{i}(x_{j})={val} exp={exp}");
         }}

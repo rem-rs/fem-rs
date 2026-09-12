@@ -1,24 +1,44 @@
 //! Hex Q4 partial-assembly for diffusion.
 //!
-//! Uses HexQk generic from fem-element (works for any order).
 //! Q4: 125 nodes (5×5×5), 5×5×5 Gauss quadrature.
+//!
+//! The 1-D nodes and the element-local slot order come from
+//! [`fem_element::lagrange::factory::HexQk`]`::new(4)` (D77) — GLL(5) nodes in
+//! MFEM's `H1_HexahedronElement(4)` order, the layout `DofManager::build_pk_hex`
+//! numbers `H1Space` element DOFs in.  The pre-D77 kernel used equispaced
+//! nodes in lexicographic order.
 
+use crate::pa::hex_layout::{hex_slots, tensor_slots};
 use crate::pa::types::PaData;
+use fem_element::lagrange::hex::HexQ1;
+use fem_element::lagrange::HexQk;
+use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
 // ─── 5-point Gauss–Legendre on [-1, 1] (exact for degree 9) ─────────────────
 const GL5_PTS: [f64; 5] = [-0.906_179_845_938_664, -0.5384693101056831, 0.0, 0.5384693101056831, 0.906_179_845_938_664];
 const GL5_WTS: [f64; 5] = [0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891];
 
-// ─── 1D Q4 Lagrange on [-1, -0.5, 0, 0.5, 1] at quadrature points ──────────
-const Q4_NODES_1D: [f64; 5] = [-1.0, -0.5, 0.0, 0.5, 1.0];
+/// `(1-D GLL nodes, slot → tensor index)` of the 125-slot Q4 hex kernel.
+fn hex_q4_slots() -> (Vec<f64>, Vec<[usize; 3]>) {
+    hex_slots(&HexQk::new(4))
+}
 
-fn build_1d_basis() -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
+/// The 8 trilinear (Q1) geometry nodes, in the mesh's corner node order.
+fn hex_vertices() -> Vec<[f64; 3]> {
+    HexQ1
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect()
+}
+
+fn build_1d_basis(nodes: &[f64; 5]) -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
     let mut b = [[0.0_f64; 5]; 5];
     let mut d = [[0.0_f64; 5]; 5];
     for q in 0..5 {
         let t = GL5_PTS[q];
-        let at_node = Q4_NODES_1D.iter().position(|&n| (t - n).abs() < 1e-15);
+        let at_node = nodes.iter().position(|&n| (t - n).abs() < 1e-15);
         for i in 0..5 {
             if let Some(k) = at_node {
                 b[q][i] = if i == k { 1.0 } else { 0.0 };
@@ -26,16 +46,16 @@ fn build_1d_basis() -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
                     d[q][i] = 0.0;
                 } else {
                     let mut s = 0.0;
-                    for j in 0..5 { if j != i { s += 1.0 / (Q4_NODES_1D[i] - Q4_NODES_1D[j]); } }
+                    for j in 0..5 { if j != i { s += 1.0 / (nodes[i] - nodes[j]); } }
                     d[q][i] = s;
                 }
             } else {
                 let mut val = 1.0;
                 let mut der = 0.0;
                 for j in 0..5 { if j == i { continue; }
-                    let denom = Q4_NODES_1D[i] - Q4_NODES_1D[j];
-                    val *= (t - Q4_NODES_1D[j]) / denom;
-                    der += 1.0 / (t - Q4_NODES_1D[j]);
+                    let denom = nodes[i] - nodes[j];
+                    val *= (t - nodes[j]) / denom;
+                    der += 1.0 / (t - nodes[j]);
                 }
                 der *= val;
                 b[q][i] = val; d[q][i] = der;
@@ -45,11 +65,11 @@ fn build_1d_basis() -> ([[f64; 5]; 5], [[f64; 5]; 5]) {
     (b, d)
 }
 
-/// Build PA data for Hex Q4 diffusion via HexQk generic.
+/// Build PA data for Hex Q4 diffusion.
 pub fn build_hex_q4_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) -> f64) -> PaData {
     let n_elems = mesh.n_elements();
     let mut pd = PaData::new(n_elems, 125, 3);
-    let hex8_ref: [(f64,f64,f64);8] = [(-1.,-1.,-1.),(1.,-1.,-1.),(1.,1.,-1.),(-1.,1.,-1.),(-1.,-1.,1.),(1.,-1.,1.),(1.,1.,1.),(-1.,1.,1.)];
+    let hex8_ref = hex_vertices();
 
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
@@ -57,11 +77,11 @@ pub fn build_hex_q4_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
         for (qz,&qz_pt) in GL5_PTS.iter().enumerate() { for (qy,&qy_pt) in GL5_PTS.iter().enumerate() { for (qx,&qx_pt) in GL5_PTS.iter().enumerate() {
             let qi = qz*25 + qy*5 + qx;
             let mut jac=[[0.0;3];3];
-            for i in 0..8{let(xi,et,zt)=hex8_ref[i];let d_xi=xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;let d_et=(1.0+xi*qx_pt)*et*(1.0+zt*qz_pt)/8.0;let d_zt=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt/8.0;for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}}
+            for i in 0..8{let[xi,et,zt]=hex8_ref[i];let d_xi=xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;let d_et=(1.0+xi*qx_pt)*et*(1.0+zt*qz_pt)/8.0;let d_zt=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt/8.0;for d in 0..3{jac[0][d]+=d_xi*v[i][d];jac[1][d]+=d_et*v[i][d];jac[2][d]+=d_zt*v[i][d];}}
             let d=jac[0][0]*(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])-jac[0][1]*(jac[1][0]*jac[2][2]-jac[1][2]*jac[2][0])+jac[0][2]*(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0]);
             let det_j=d.abs();let inv=1.0/d;
             let jit=|i:usize,j:usize|->f64{match(i,j){(0,0)=>(jac[1][1]*jac[2][2]-jac[1][2]*jac[2][1])*inv,(0,1)=>(jac[0][2]*jac[2][1]-jac[0][1]*jac[2][2])*inv,(0,2)=>(jac[0][1]*jac[1][2]-jac[0][2]*jac[1][1])*inv,(1,0)=>(jac[1][2]*jac[2][0]-jac[1][0]*jac[2][2])*inv,(1,1)=>(jac[0][0]*jac[2][2]-jac[0][2]*jac[2][0])*inv,(1,2)=>(jac[0][2]*jac[1][0]-jac[0][0]*jac[1][2])*inv,(2,0)=>(jac[1][0]*jac[2][1]-jac[1][1]*jac[2][0])*inv,(2,1)=>(jac[0][1]*jac[2][0]-jac[0][0]*jac[2][1])*inv,(2,2)=>(jac[0][0]*jac[1][1]-jac[0][1]*jac[1][0])*inv,_=>0.0}};
-            let mut xp=[0.0;3];for i in 0..8{let(xi,et,zt)=hex8_ref[i];let phi=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;for d in 0..3{xp[d]+=phi*v[i][d];}}
+            let mut xp=[0.0;3];for i in 0..8{let[xi,et,zt]=hex8_ref[i];let phi=(1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt)/8.0;for d in 0..3{xp[d]+=phi*v[i][d];}}
             let qd=pd.elem_qp_mut(e,qi);
             for a in 0..3{for b in 0..3{qd[a*3+b]=jit(a,b);}}qd[9]=det_j;qd[10]=kappa(&xp);
         }}}
@@ -71,13 +91,16 @@ pub fn build_hex_q4_pa_data<M: MeshTopology>(mesh: &M, kappa: &dyn Fn(&[f64]) ->
 
 /// y += A·x for Hex Q4 diffusion (sum-factorized).
 pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
-    let (b, d) = build_1d_basis();
+    let (nodes, slots) = hex_q4_slots();
+    let (b, d) = build_1d_basis(&[nodes[0], nodes[1], nodes[2], nodes[3], nodes[4]]);
+    let inv = tensor_slots(&slots, 5);
+
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < 125 { continue; }
         let mut xe = [[[0.0_f64; 5]; 5]; 5];
         for iz in 0..5 { for iy in 0..5 { for ix in 0..5 {
-            xe[ix][iy][iz] = x[dofs[ix + iy*5 + iz*25] as usize];
+            xe[ix][iy][iz] = x[dofs[inv[ix][iy][iz]] as usize];
         }}}
         let mut ye = [[[0.0_f64; 5]; 5]; 5];
 
@@ -108,7 +131,7 @@ pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
         }}}
 
         for iz in 0..5{for iy in 0..5{for ix in 0..5{
-            y[dofs[ix+iy*5+iz*25] as usize] += ye[ix][iy][iz];
+            y[dofs[inv[ix][iy][iz]] as usize] += ye[ix][iy][iz];
         }}}
     }
 }
@@ -116,7 +139,28 @@ pub fn pa_apply_hex_q4(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_element::ReferenceElement;
     use fem_mesh::Mesh;
+
+    /// D77 pin: the kernel's slot → tensor map is bit-identical to
+    /// `HexQk::new(4)`'s `dof_coords()` (the layout `DofManager::build_pk_hex`
+    /// numbers), with its GLL(5) 1-D nodes.
+    #[test]
+    fn hex_q4_pa_slots_match_element() {
+        let (nodes, slots) = hex_q4_slots();
+        let coords = HexQk::new(4).dof_coords();
+        assert_eq!(slots.len(), 125);
+        for (slot, t) in slots.iter().enumerate() {
+            for d in 0..3 {
+                assert_eq!(
+                    nodes[t[d]], coords[slot][d],
+                    "slot {slot} axis {d}: PA kernel must reproduce HexQk(4)::dof_coords bit-exactly"
+                );
+            }
+        }
+        let lex: Vec<[usize; 3]> = (0..125).map(|n| [n % 5, (n / 5) % 5, n / 25]).collect();
+        assert_ne!(slots, lex, "pre-D77 lexicographic tensor order");
+    }
 
     #[test]
     fn hex_q4_pa_finite() {
@@ -129,7 +173,9 @@ mod tests {
     #[test]
     fn hex_q4_sf_self_consistent() {
         // First verify the 1D basis
-        let (b, d) = build_1d_basis();
+        let (nodes, _) = hex_q4_slots();
+        let nodes = [nodes[0], nodes[1], nodes[2], nodes[3], nodes[4]];
+        let (b, d) = build_1d_basis(&nodes);
         for q in 0..5 {
             let sum_b: f64 = b[q].iter().sum();
             assert!((sum_b-1.0).abs() < 1e-12, "Q4 POU failed at qp {q}: {sum_b}");

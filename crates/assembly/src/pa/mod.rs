@@ -11,6 +11,7 @@
 
 mod hex_q1;
 mod quad_q1;
+mod hex_layout;
 mod q2;
 mod q3;
 mod q4;

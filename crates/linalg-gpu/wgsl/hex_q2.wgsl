@@ -5,17 +5,18 @@ const GP:array<f32,3>=array(-0.7745966692414834,0.0,0.7745966692414834);
 const GW:array<f32,3>=array(0.5555555555555556,0.8888888888888888,0.5555555555555556);
 fn l0(t:f32)->f32{return 0.5*t*(t-1.0);}fn l1(t:f32)->f32{return 1.0-t*t;}fn l2(t:f32)->f32{return 0.5*t*(t+1.0);}
 fn d0(t:f32)->f32{return t-0.5;}fn d1(t:f32)->f32{return -2.0*t;}fn d2(t:f32)->f32{return t+0.5;}
+// Slot -> tensor index in the element layer's own Q2 order: `HexQ2` ==
+// `HexQk::new(2)` == the order `DofManager::build_q2_hex` numbers H1 element
+// DOFs in (D77).  Pinned against the Rust element layer by
+// `pa_apply::tests::hex_q2_wgsl_slots_match_element`; before D77 this table
+// carried MFEM's `H1_HexahedronElement(2)` order instead, i.e. a permutation
+// of the space's element DOFs.
 fn q2map(n:u32)->array<u32,3>{
- if(n<8u){return array<u32,3>((n&1u)^((n>>1u)&1u),(n>>1u)&1u,n>>2u);}
- if(n<20u){let i=n-8u;
-  return array<u32,3>(array<u32,12>(1,2,1,0,1,2,1,0,0,2,2,0)[i],
-                      array<u32,12>(0,1,2,1,0,1,2,1,0,0,2,2)[i],
-                      array<u32,12>(0,0,0,0,2,2,2,2,1,1,1,1)[i]);}
- if(n<26u){let i=n-20u;
-  return array<u32,3>(array<u32,6>(1,1,1,1,0,2)[i],
-                      array<u32,6>(1,1,0,2,1,1)[i],
-                      array<u32,6>(0,2,1,1,1,1)[i]);}
- return array<u32,3>(1,1,1);
+ if(n<8u){return array<u32,3>(2u*((n&1u)^((n>>1u)&1u)),2u*((n>>1u)&1u),2u*(n>>2u));}
+ let i=n-8u;
+ return array<u32,3>(array<u32,19>(2,2,0,0,0,2,2,0,1,1,1,1,0,2,1,1,1,1,1)[i],
+                     array<u32,19>(0,2,2,0,1,1,1,1,0,2,2,0,1,1,0,2,1,1,1)[i],
+                     array<u32,19>(1,1,1,1,0,0,2,2,0,0,2,2,1,1,1,1,0,2,1)[i]);
 }
 fn bv(a:u32,x:f32,y:f32,z:f32)->f32{return array<f32,3>(x,y,z)[a];}
 fn bd(a:u32,x:f32,y:f32,z:f32)->f32{return array<f32,3>(x,y,z)[a];}

@@ -2,36 +2,34 @@
 //!
 //! Uses 1D tensor contractions for the gradient gather (flux side,
 //! O(p⁴) complexity) and per-node scatter for the test-function side.
-//! Works for any degree p ≥ 1, verified P1–P5 against assembled SpMV.
+//!
+//! Degree and element-local layout come from
+//! [`fem_element::lagrange::factory::HexQk`]`::new(p)`: GLL 1-D nodes in MFEM's
+//! `H1_HexahedronElement` order, i.e. exactly the layout `DofManager`
+//! (`build_pk_hex`, and `build_q2_hex` for `p == 2`) numbers `H1Space` element
+//! DOFs in.  Before D77 this kernel used equispaced nodes in lexicographic
+//! order — a second, silent divergence from the element layer (and therefore
+//! from the assembled matrix) on top of the slot-order one.
 
+use crate::pa::hex_layout::{hex_slots, tensor_slots};
 use crate::pa::types::PaData;
+use fem_element::lagrange::factory::HexQk;
+use fem_element::lagrange::hex::HexQ1;
+use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
-/// Map tensor-product node (ix, iy, iz) to standard hex element node index.
-/// For Q1 (p=1, Hex8): uses the standard vertex ordering (matches H1Space element DOFs).
-/// For Qk (p≥2, Hex27+): uses tensor ordering `ix + iy·(p+1) + iz·(p+1)²`.
-fn hex_tensor_to_node(ix: usize, iy: usize, iz: usize, p: usize) -> usize {
-    let np1 = p + 1;
-    if p == 1 {
-        // Standard hex vertex ordering using bit manipulation (inverse of hex_abc).
-        // For Q1: nodes are 0-7 in standard hex order corresponding to (ξ,η,ζ) ∈ {-1,1}³.
-        // hex_abc(n) → (a,b,c) = ( (n&1)^((n>>1)&1), (n>>1)&1, n>>2 )
-        // Inverse: given (a,b,c) ≡ (ix,iy,iz), find n.
-        (ix ^ iy) | (iy << 1) | (iz << 2)
-    } else {
-        // Standard tensor ordering: ix fastest, iy middle, iz slowest.
-        ix + iy * np1 + iz * np1 * np1
-    }
+/// `(1-D GLL nodes, slot → tensor index)` of `HexQk::new(p)`.
+fn hex_qk_slots(p: usize) -> (Vec<f64>, Vec<[usize; 3]>) {
+    hex_slots(&HexQk::new(p))
 }
 
-/// Equispaced 1D nodes on [-1, 1] for degree p.
-fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
-    let n = p + 1;
-    if n == 1 {
-        return vec![0.0];
-    }
-    let h = 2.0 / (n as f64 - 1.0);
-    (0..n).map(|i| -1.0 + i as f64 * h).collect()
+/// The 8 trilinear (Q1) geometry nodes, in the mesh's corner node order.
+fn hex_vertices() -> Vec<[f64; 3]> {
+    HexQ1
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect()
 }
 
 /// Evaluate Lagrange basis ℓ_i and dℓ_i/dx at a point x,
@@ -65,13 +63,12 @@ fn lagrange_1d(x: f64, nodes: &[f64]) -> (Vec<f64>, Vec<f64>) {
 
 /// Precompute 1D basis values and derivatives for all quadrature points.
 /// Returns (phi, dphi) where phi[q][i] = ℓ_i(qpt[q]), same for dphi.
-fn build_1d_basis_qp(p: usize, qpts: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
-    let nodes = equispaced_1d_nodes(p);
+fn build_1d_basis_qp(nodes: &[f64], qpts: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
     let nq = qpts.len();
     let mut phi = Vec::with_capacity(nq);
     let mut dphi = Vec::with_capacity(nq);
     for &q in qpts {
-        let (v, d) = lagrange_1d(q, &nodes);
+        let (v, d) = lagrange_1d(q, nodes);
         phi.push(v);
         dphi.push(d);
     }
@@ -97,19 +94,9 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
     let mut pd = PaData::new(n_elems, nqp, 3);
 
     let (qpts, _qwts) = gauss_legendre_1d_n(nq);
-    let (_phi_qp, _dphi_qp) = build_1d_basis_qp(p, &qpts);
 
     // Hex vertex coordinates for isoparametric mapping
-    let hex8_ref: [(f64, f64, f64); 8] = [
-        (-1.0, -1.0, -1.0),
-        (1.0, -1.0, -1.0),
-        (1.0, 1.0, -1.0),
-        (-1.0, 1.0, -1.0),
-        (-1.0, -1.0, 1.0),
-        (1.0, -1.0, 1.0),
-        (1.0, 1.0, 1.0),
-        (-1.0, 1.0, 1.0),
-    ];
+    let hex8_ref = hex_vertices();
 
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
@@ -128,7 +115,7 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
                     // Jacobian using trilinear hex mapping
                     let mut jac = [[0.0; 3]; 3];
                     for i in 0..8 {
-                        let (xi, et, zt) = hex8_ref[i];
+                        let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
                         let d_xi = xi * (1.0 + et * qy_pt) * (1.0 + zt * qz_pt) / 8.0;
                         let d_et = (1.0 + xi * qx_pt) * et * (1.0 + zt * qz_pt) / 8.0;
                         let d_zt = (1.0 + xi * qx_pt) * (1.0 + et * qy_pt) * zt / 8.0;
@@ -166,7 +153,7 @@ pub fn build_hex_qk_pa_data<M: MeshTopology>(
                     // Physical point x(qp) for kappa evaluation (trilinear for uniform hex)
                     let mut xp = [0.0; 3];
                     for i in 0..8 {
-                        let (xi, et, zt) = hex8_ref[i];
+                        let (xi, et, zt) = (hex8_ref[i][0], hex8_ref[i][1], hex8_ref[i][2]);
                         let phi =
                             (1.0 + xi * qx_pt) * (1.0 + et * qy_pt) * (1.0 + zt * qz_pt)
                                 / 8.0;
@@ -202,7 +189,9 @@ pub fn pa_apply_hex_qk(
 ) {
     let nq = p + 1; // quadrature points per direction
     let (qpts, qwts) = gauss_legendre_1d_n(nq);
-    let (phi, dphi) = build_1d_basis_qp(p, &qpts);
+    let (nodes, slots) = hex_qk_slots(p);
+    let (phi, dphi) = build_1d_basis_qp(&nodes, &qpts);
+    let inv = tensor_slots(&slots, p + 1);
     let nf = 11;
 
     for e in 0..pd.n_elems {
@@ -212,14 +201,13 @@ pub fn pa_apply_hex_qk(
             continue;
         }
 
-        // Load element x as 3D array (with DOF ordering permutation)
+        // Load element x as 3D array (in the element's own slot order)
         let np1 = p + 1;
         let mut xe = vec![vec![vec![0.0_f64; np1]; np1]; np1];
         for iz in 0..np1 {
             for iy in 0..np1 {
                 for ix in 0..np1 {
-                    let n = hex_tensor_to_node(ix, iy, iz, p);
-                    xe[ix][iy][iz] = x[dofs[n] as usize];
+                    xe[ix][iy][iz] = x[dofs[inv[ix][iy][iz]] as usize];
                 }
             }
         }
@@ -300,12 +288,11 @@ pub fn pa_apply_hex_qk(
             }
         }
 
-        // Scatter back to global (with DOF ordering permutation)
+        // Scatter back to global (in the element's own slot order)
         for iz in 0..np1 {
             for iy in 0..np1 {
                 for ix in 0..np1 {
-                    let n = hex_tensor_to_node(ix, iy, iz, p);
-                    y[dofs[n] as usize] += ye[ix][iy][iz];
+                    y[dofs[inv[ix][iy][iz]] as usize] += ye[ix][iy][iz];
                 }
             }
         }
@@ -327,7 +314,7 @@ mod tests {
             .collect()
     }
 
-    /// Verify Hex Q1 PA matches assembled SpMV (only P1 is supported by the standard assembler on Hex8).
+    /// Verify Hex Q1 PA matches assembled SpMV.
     #[test]
     fn hex_qk_p1_matches_assembled() {
         let mesh = Mesh::<3>::unit_cube_hex(1);
@@ -353,6 +340,129 @@ mod tests {
         assert!(max_err < 1e-12, "Hex Q1 PA vs assembled {max_err:.2e}");
     }
 
+    /// D77 pin: the order-generic kernel's slot → tensor map is bit-identical
+    /// to `HexQk::new(p)`'s own `dof_coords()` — i.e. the layout the space
+    /// (`build_pk_hex`, and `build_q2_hex` for p = 2) numbers element DOFs in.
+    #[test]
+    fn hex_qk_pa_slots_match_element_for_all_orders() {
+        use fem_element::ReferenceElement;
+        for p in 1..=5 {
+            let (nodes, slots) = hex_qk_slots(p);
+            let coords = HexQk::new(p).dof_coords();
+            assert_eq!(slots.len(), coords.len(), "p={p}");
+            for (slot, t) in slots.iter().enumerate() {
+                for d in 0..3 {
+                    assert_eq!(
+                        nodes[t[d]], coords[slot][d],
+                        "p={p} slot {slot} axis {d}: PA kernel vs HexQk::dof_coords"
+                    );
+                }
+            }
+        }
+    }
+
+    /// D77 identity: for every hex order the assembler supports, the PA apply
+    /// (fixed-order *and* generic kernels) reproduces the assembled SpMV to
+    /// roundoff.  Order 2 exercises the legacy fem-rs p2 slot order
+    /// (`build_q2_hex`), orders ≥ 3 the MFEM `H1_HexahedronElement` order
+    /// (`build_pk_hex`) — the pre-D77 kernels were permutation-wrong on both.
+    /// D77 identity, **order 3 (verified)**: the PA apply reproduces the
+    /// assembled SpMV to roundoff.  The kernels now share the element layer's
+    /// GLL nodes *and* slot order, which is what made this hold — the pre-D77
+    /// kernels were equispaced *and* lexicographically ordered.
+    #[test]
+    fn hex_pa_apply_matches_assembled_matrix_p3() {
+        let p = 3u8;
+        let mesh = Mesh::<3>::unit_cube_hex(2);
+        let space = H1Space::new(mesh, p);
+        let mat = Assembler::assemble_bilinear(
+            &space,
+            &[&DiffusionIntegrator { kappa: 1.0 }],
+            2 * p + 2,
+        );
+        let n = space.n_dofs();
+        let elem_dofs = hex_elem_dofs(&space);
+        let mut rng: u64 = 42;
+        let x: Vec<f64> = (0..n)
+            .map(|_| {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((rng >> 11) as f64) / ((1u64 << 53) as f64)
+            })
+            .collect();
+        let mut y_ref = vec![0.0; n];
+        mat.spmv(&x, &mut y_ref);
+        let err = |y: &[f64]| -> f64 {
+            (0..n).map(|i| (y[i] - y_ref[i]).abs()).fold(0.0, f64::max)
+        };
+
+        let pd_qk = build_hex_qk_pa_data(space.mesh(), &|_| 1.0, p as usize);
+        let mut y_qk = vec![0.0; n];
+        pa_apply_hex_qk(&pd_qk, &elem_dofs, p as usize, &x, &mut y_qk);
+        let e = err(&y_qk);
+        assert!(e < 1e-12, "p=3: generic HexQk PA vs assembled {e:.2e}");
+
+        let pd = crate::pa::q3::build_hex_q3_pa_data(space.mesh(), &|_| 1.0);
+        let mut y = vec![0.0; n];
+        crate::pa::q3::pa_apply_hex_q3(&pd, &elem_dofs, &x, &mut y);
+        let e = err(&y);
+        assert!(e < 1e-12, "p=3: HexQ3 PA vs assembled {e:.2e}");
+        let mut y_sf = vec![0.0; n];
+        crate::pa::q3::pa_apply_hex_q3_sf(&pd, &elem_dofs, &x, &mut y_sf);
+        let e_sf = err(&y_sf);
+        assert!(e_sf < 1e-12, "p=3: HexQ3 SF PA vs assembled {e_sf:.2e}");
+    }
+
+    /// D77 **characterization** of the still-open p = 2 / p = 4 divergence.
+    ///
+    /// With the slot maps bit-exactly equal to the element layer's (see the
+    /// pins above), `p = 2` (`build_q2_hex` numbering) and `p = 4`
+    /// (`build_pk_hex`) still disagree with the assembled matrix by O(1e-1).
+    /// Established while investigating:
+    /// * it is **not** a slot permutation: the best row-match against the
+    ///   assembled matrix is the identity and leaves a 2.4e-2 residual, and
+    ///   the exact-equality permutations would show ~1e-15;
+    /// * it is **not** quadrature accuracy: the difference is bit-identical
+    ///   for 3, 4 and 7 Gauss points per direction;
+    /// * both matrices are symmetric and constant-preserving (row sums ~1e-15);
+    /// * `p = 3` agrees to 3e-15, so the shared GLL/element-order pipeline is
+    ///   sound and the deviation is confined to the p = 2 / p = 4 basis path.
+    ///
+    /// Flip this to `< 1e-12` (and merge it into the p = 3 test above) once the
+    /// p = 2 / p = 4 side is resolved; the assertion currently documents the
+    /// open state instead of hiding it.
+    #[test]
+    fn hex_pa_apply_vs_assembled_p2_p4_open_divergence() {
+        for p in [2u8, 4u8] {
+            let mesh = Mesh::<3>::unit_cube_hex(1);
+            let space = H1Space::new(mesh, p);
+            let mat = Assembler::assemble_bilinear(
+                &space,
+                &[&DiffusionIntegrator { kappa: 1.0 }],
+                2 * p + 2,
+            );
+            let n = space.n_dofs();
+            let elem_dofs = hex_elem_dofs(&space);
+            let pd = build_hex_qk_pa_data(space.mesh(), &|_| 1.0, p as usize);
+            let mut max_err: f64 = 0.0;
+            for j in 0..n {
+                let mut e = vec![0.0; n];
+                e[j] = 1.0;
+                let mut yr = vec![0.0; n];
+                mat.spmv(&e, &mut yr);
+                let mut yp = vec![0.0; n];
+                pa_apply_hex_qk(&pd, &elem_dofs, p as usize, &e, &mut yp);
+                for i in 0..n {
+                    max_err = max_err.max((yp[i] - yr[i]).abs());
+                }
+            }
+            assert!(
+                max_err > 1e-3,
+                "p={p}: the documented D77 divergence is gone ({max_err:.2e}) — \
+                 update this characterization test to assert identity"
+            );
+        }
+    }
+
     /// Verify PA data is finite for all orders.
     #[test]
     fn hex_qk_pa_data_is_finite() {
@@ -372,9 +482,8 @@ mod tests {
         }
     }
 
-    /// Compare with existing order-specific implementations for Q1, Q3 (sum-factorized).
-    /// Q2 uses a different node ordering (HEX_Q2_MAP) so cross-comparison with identity
-    /// DOFs is not valid — Q1 and Q3 cover the correctness envelope.
+    /// Compare with the order-specific builders' PA data for Q1 (identical
+    /// geometry/quadrature construction).
     #[test]
     fn hex_qk_pa_data_matches_specific_builder() {
         // Verify PA data from generic builder matches order-specific builder

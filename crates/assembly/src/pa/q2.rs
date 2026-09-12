@@ -4,11 +4,23 @@
 //! Quad Q2: 9 nodes, 3×3 Gauss qp.
 //!
 //! Uses full element matrix (no sum-factorization yet).
+//!
+//! The hex kernel's element-local slot order is [`fem_element::lagrange::hex::HexQ2`]'s
+//! own DOF order (== `HexQk::new(2)` == the order `DofManager::build_q2_hex`
+//! numbers `H1Space` element DOFs in); it is resolved from the element at
+//! kernel start via [`crate::pa::hex_layout`] instead of a private table
+//! (D77).
 
+use crate::pa::hex_layout::hex_slots;
 use crate::pa::types::PaData;
+use fem_element::lagrange::hex::{HexQ1, HexQ2};
+use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
 // ─── 1D Q2 Lagrange basis on [-1, 0, +1] ────────────────────────────────────
+//
+// Bit-identical to `HexQ2::hex_q2_1d` / `HexQk(2)`'s GLL(3) nodes: Gauss-Lobatto
+// for 3 nodes *is* the closed equispaced set {-1, 0, +1}.
 #[inline] fn l0(t: f64) -> f64 { 0.5 * t * (t - 1.0) }  // ℓ at -1
 #[inline] fn l1(t: f64) -> f64 { 1.0 - t * t }           // ℓ at 0
 #[inline] fn l2(t: f64) -> f64 { 0.5 * t * (t + 1.0) }   // ℓ at +1
@@ -20,25 +32,21 @@ use fem_mesh::topology::MeshTopology;
 const GL3_PTS: [f64; 3] = [-0.7745966692414834, 0.0, 0.7745966692414834];
 const GL3_WTS: [f64; 3] = [0.5555555555555556, 0.8888888888888888, 0.5555555555555556];
 
-// ─── Q2 hex node → (ix, iy, iz) ∈ {0,1,2}³ mapping ─────────────────────────
-const HEX_Q2_MAP: [(usize, usize, usize); 27] = {
-    let mut m = [(0, 0, 0); 27];
-    // vertices: 0..7
-    m[0] = (0, 0, 0); m[1] = (2, 0, 0); m[2] = (2, 2, 0); m[3] = (0, 2, 0);
-    m[4] = (0, 0, 2); m[5] = (2, 0, 2); m[6] = (2, 2, 2); m[7] = (0, 2, 2);
-    // edges bottom: 8..11
-    m[8] = (1, 0, 0); m[9] = (2, 1, 0); m[10] = (1, 2, 0); m[11] = (0, 1, 0);
-    // edges top: 12..15
-    m[12] = (1, 0, 2); m[13] = (2, 1, 2); m[14] = (1, 2, 2); m[15] = (0, 1, 2);
-    // edges vertical: 16..19
-    m[16] = (0, 0, 1); m[17] = (2, 0, 1); m[18] = (2, 2, 1); m[19] = (0, 2, 1);
-    // face centres: 20..25
-    m[20] = (1, 1, 0); m[21] = (1, 1, 2); m[22] = (1, 0, 1); m[23] = (1, 2, 1);
-    m[24] = (0, 1, 1); m[25] = (2, 1, 1);
-    // volume: 26
-    m[26] = (1, 1, 1);
-    m
-};
+/// `(1-D nodes, slot → tensor index)` of the 27-slot Q2 hex kernel — the
+/// element layer's own layout.
+fn hex_q2_slots() -> (Vec<f64>, Vec<[usize; 3]>) {
+    hex_slots(&HexQ2)
+}
+
+/// The 8 trilinear (Q1) geometry nodes on `[-1,1]³`, in the standard hex
+/// vertex order the mesh's 8 corner node ids are given in.
+fn hex_vertices() -> Vec<[f64; 3]> {
+    HexQ1
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1], c[2]])
+        .collect()
+}
 
 /// Build PA data for Hex Q2 diffusion.
 pub fn build_hex_q2_pa_data<M: MeshTopology>(
@@ -48,29 +56,11 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
     let nqp = 27; // 3×3×3
     let dim = 3;
     let mut pd = PaData::new(n_elems, nqp, dim);
+    let ref_nodes = hex_vertices();
 
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64; 3]> = (0..8).map(|i| { let c = mesh.node_coords(nodes[i]); [c[0], c[1], c[2]] }).collect();
-        // Compute physical coordinates for all 27 nodes from 8 vertices
-        let ref_nodes: [(f64, f64, f64); 27] = [
-            (-1.,-1.,-1.),( 1.,-1.,-1.),( 1., 1.,-1.),(-1., 1.,-1.),
-            (-1.,-1., 1.),( 1.,-1., 1.),( 1., 1., 1.),(-1., 1., 1.),
-            ( 0.,-1.,-1.),( 1., 0.,-1.),( 0., 1.,-1.),(-1., 0.,-1.),
-            ( 0.,-1., 1.),( 1., 0., 1.),( 0., 1., 1.),(-1., 0., 1.),
-            (-1.,-1., 0.),( 1.,-1., 0.),( 1., 1., 0.),(-1., 1., 0.),
-            ( 0., 0.,-1.),( 0., 0., 1.),( 0.,-1., 0.),( 0., 1., 0.),
-            (-1., 0., 0.),( 1., 0., 0.),( 0., 0., 0.),
-        ];
-        let _x: Vec<[f64; 3]> = ref_nodes.iter().map(|&(rx, ry, rz)| {
-            let mut xp = [0.0; 3];
-            for i in 0..8 {
-                let (xi, et, zt) = ref_nodes[i];
-                let phi = (1.0+xi*rx)*(1.0+et*ry)*(1.0+zt*rz) / 8.0;
-                for d in 0..3 { xp[d] += phi * v[i][d]; }
-            }
-            xp
-        }).collect();
 
         for (qz, &qz_pt) in GL3_PTS.iter().enumerate() {
             for (qy, &qy_pt) in GL3_PTS.iter().enumerate() {
@@ -80,8 +70,7 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                     // Jacobian J using Q1 (trilinear) mapping from 8 vertices
                     let mut jac = [[0.0_f64; 3]; 3];
                     for i in 0..8 {
-                        let (xi, et, zt) = ref_nodes[i];
-                        let _phi   = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
+                        let [xi, et, zt] = ref_nodes[i];
                         let d_xi  = xi*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
                         let d_et  = (1.0+xi*qx_pt)*et*(1.0+zt*qz_pt) / 8.0;
                         let d_zt  = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*zt / 8.0;
@@ -106,7 +95,7 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
                     // Physical point for κ (Q1 mapping)
                     let mut xp = [0.0; 3];
                     for i in 0..8 {
-                        let (xi, et, zt) = ref_nodes[i];
+                        let [xi, et, zt] = ref_nodes[i];
                         let phi = (1.0+xi*qx_pt)*(1.0+et*qy_pt)*(1.0+zt*qz_pt) / 8.0;
                         for d in 0..3 { xp[d] += phi * v[i][d]; }
                     }
@@ -124,6 +113,7 @@ pub fn build_hex_q2_pa_data<M: MeshTopology>(
 
 /// y += A·x for Hex Q2 diffusion (full element matrix).
 pub fn pa_apply_hex_q2(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [f64]) {
+    let (_, slots) = hex_q2_slots();
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         let nld = dofs.len();
@@ -151,7 +141,7 @@ pub fn pa_apply_hex_q2(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
                     // Precompute ref gradients at each qp for all 27 nodes
                     let mut rg = [[0.0_f64; 3]; 27];
                     for n in 0..27 {
-                        let (ix, iy, iz) = HEX_Q2_MAP[n];
+                        let (ix, iy, iz) = { let t = slots[n]; (t[0], t[1], t[2]) };
                         rg[n] = [dx[ix]*ly[iy]*lz[iz], lx[ix]*dy[iy]*lz[iz], lx[ix]*ly[iy]*dz[iz]];
                     }
 
@@ -184,6 +174,10 @@ pub fn pa_apply_hex_q2(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut [
 // Quad Q2 (9-node)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Slot → tensor index of the 9-node quad Q2 kernel: vertices, then the four
+/// edge midpoints in quad-edge order, then the centre — checked against
+/// [`fem_element::QuadQ2`]'s own order by
+/// [`tests::quad_q2_pa_slots_match_element`].
 const QUAD_Q2_MAP: [(usize, usize); 9] = [
     (0, 0), (2, 0), (2, 2), (0, 2),  // vertices
     (1, 0), (2, 1), (1, 2), (0, 1),  // edge midpoints
@@ -274,18 +268,58 @@ pub fn pa_apply_quad_q2(pd: &PaData, elem_dofs: &[Vec<u32>], x: &[f64], y: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_element::ReferenceElement;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
+    /// D77 pin: the kernel's slot → tensor map is **bit-identical** to
+    /// `HexQ2`'s (and hence `HexQk::new(2)`'s / `DofManager::build_q2_hex`'s)
+    /// own `dof_coords()`.  The pre-D77 `HEX_Q2_MAP` table failed this: it
+    /// carried MFEM's `H1_HexahedronElement(2)` order, not the fem-rs p2 order
+    /// the space numbers element DOFs in.
+    #[test]
+    fn hex_q2_pa_slots_match_element() {
+        let (nodes, slots) = hex_q2_slots();
+        let coords = HexQ2.dof_coords();
+        assert_eq!(slots.len(), coords.len());
+        for (slot, t) in slots.iter().enumerate() {
+            for d in 0..3 {
+                assert_eq!(
+                    nodes[t[d]], coords[slot][d],
+                    "slot {slot} axis {d}: PA kernel must reproduce HexQ2::dof_coords bit-exactly"
+                );
+            }
+        }
+        // … and it is not the pre-D77 order, i.e. the migration is real.
+        assert_ne!(
+            slots[16], [0, 0, 1],
+            "pre-D77 HEX_Q2_MAP put the (-1,-1,0) vertical-edge mid at slot 16"
+        );
+    }
+
     #[test]
     fn hex_q2_pa_finite() {
-        // Hex Q2: only test basic properties (H1Space on Hex8 doesn't expose 27 DOFs)
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let pd = build_hex_q2_pa_data(&mesh, &|_|1.0);
         // Verify PA data is finite
         assert!(pd.data.iter().all(|v| v.is_finite()));
         assert!(pd.data.iter().any(|&v| v != 0.0));
+    }
+
+    /// D77 inventory pin: the 2-D kernel's `QUAD_Q2_MAP` is compared against
+    /// the element layer's `QuadQ2` order instead of staying an unchecked
+    /// literal (unlike the hex map it was already the right order).
+    #[test]
+    fn quad_q2_pa_slots_match_element() {
+        use fem_element::QuadQ2;
+        let coords = QuadQ2.dof_coords();
+        assert_eq!(coords.len(), 9);
+        let nodes = [-1.0, 0.0, 1.0];
+        for (slot, &(ix, iy)) in QUAD_Q2_MAP.iter().enumerate() {
+            assert_eq!(nodes[ix], coords[slot][0], "slot {slot} ξ");
+            assert_eq!(nodes[iy], coords[slot][1], "slot {slot} η");
+        }
     }
 
     #[test]

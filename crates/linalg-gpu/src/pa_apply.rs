@@ -321,9 +321,144 @@ fn gauss_legendre_f64(n: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// Equispaced 1D nodes on [-1, 1] for degree p.
+///
+/// D77 remainder: the GPU mirror is **not yet migrated** to the element
+/// layer's layout.  The shaders shipped here still carry the pre-D77
+/// conventions — `hex_q2.wgsl`'s `q2map` has been fixed (pinned by
+/// `tests::hex_q2_wgsl_slots_match_element`), but `hex_q3.wgsl` /
+/// `hex_q4.wgsl` are still lexicographic (`q3a/q3b/q3c` index arithmetic) on
+/// **equispaced** nodes, and this generator emits `qka/qkb/qkc` lexicographic
+/// indices over `equispaced_1d_nodes`.  Both are exactly what the CPU kernels
+/// had before D77 (and what the assembled matrix disagrees with), so every
+/// GPU hex PA path above Q2 must be re-derived from `HexQk::new(p)` before it
+/// is used against `H1Space` element DOFs.  Not compile-verified on a GPU
+/// device here (no adapter in this environment); only the WGSL text and the
+/// crate build are checked.
 fn equispaced_1d_nodes(p: usize) -> Vec<f64> {
     let n = p + 1;
     if n == 1 { return vec![0.0]; }
     let h = 2.0 / (n as f64 - 1.0);
     (0..n).map(|i| -1.0 + i as f64 * h).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fem_element::lagrange::hex::{HexQ2, HexQ3};
+    use fem_element::lagrange::HexQk;
+    use fem_element::ReferenceElement;
+
+    /// Pull every numeric `array<u32,N>(...)` literal for the type `marker`
+    /// (e.g. `"array<u32,19>("`) from a WGSL source, in order.
+    fn u32_arrays(wgsl: &str, marker: &str) -> Vec<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut rest = wgsl;
+        while let Some(start) = rest.find(marker) {
+            let after = &rest[start + marker.len()..];
+            let close = after.find(')').expect("array literal close");
+            out.push(
+                after[..close]
+                    .split(',')
+                    .map(|s| s.trim().parse::<u32>().expect("u32 literal"))
+                    .collect(),
+            );
+            rest = &after[close..];
+        }
+        out
+    }
+
+    /// Slot → tensor index of a tensor-product hex element, derived from the
+    /// element's own `dof_coords()` (exact value matching; the element hands
+    /// out its 1-D nodes bit-for-bit).
+    fn element_slots(elem: &dyn ReferenceElement) -> Vec<[usize; 3]> {
+        let coords = elem.dof_coords();
+        let mut nodes: Vec<f64> = coords.iter().map(|c| c[0]).collect();
+        nodes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        nodes.dedup();
+        coords
+            .iter()
+            .map(|c| {
+                let axis = |v: f64| {
+                    nodes
+                        .iter()
+                        .position(|&n| n == v)
+                        .unwrap_or_else(|| panic!("{v} is not a 1-D node of {nodes:?}"))
+                };
+                [axis(c[0]), axis(c[1]), axis(c[2])]
+            })
+            .collect()
+    }
+
+    /// D77 pin: `hex_q2.wgsl`'s hard-coded slot table is the element layer's
+    /// Q2 order — slot by slot, bit-exact.  The pre-D77 table was MFEM's
+    /// (`H1_HexahedronElement(2)`) order, a permutation of the space's DOFs.
+    #[test]
+    fn hex_q2_wgsl_slots_match_element() {
+        let arrays = u32_arrays(HEX_Q2_WGSL, "array<u32,19>(");
+        assert_eq!(arrays.len(), 3, "q2map carries three index arrays");
+        for a in &arrays {
+            assert_eq!(a.len(), 19, "q2map off-vertex arrays hold slots 8..27");
+        }
+        let want = element_slots(&HexQ2);
+        assert_eq!(want.len(), 27);
+        for n in 0..27usize {
+            let got = if n < 8 {
+                // Vertex arm of `q2map`, transcribed bit-for-bit (the 0/1
+                // corner bit is the *node index* in the 0/2 slots of the
+                // 3-node quadratic basis).
+                let n = n as u32;
+                [
+                    (2 * (((n & 1) ^ ((n >> 1) & 1)) as usize)),
+                    (2 * ((n >> 1) & 1) as usize),
+                    (2 * (n >> 2) as usize),
+                ]
+            } else {
+                let i = n - 8;
+                [
+                    arrays[0][i] as usize,
+                    arrays[1][i] as usize,
+                    arrays[2][i] as usize,
+                ]
+            };
+            assert_eq!(got, want[n], "slot {n}: wgsl vs HexQ2::dof_coords");
+        }
+        // … and it is *not* the pre-D77 table, which put the (-1,-1,0)
+        // vertical-edge mid at slot 16 and MFEM's edge order at slots 8..20.
+        let old = [0u32, 0, 1];
+        assert_ne!(
+            [arrays[0][8], arrays[1][8], arrays[2][8]],
+            old,
+            "slot 16 is still the pre-D77 MFEM-order table"
+        );
+    }
+
+    /// D77 remainder (documentation pin, not an assertion of correctness): the
+    /// Q3/Q4 shaders are still lexicographic on equispaced nodes, so their
+    /// tables must **not** accidentally look like the migrated Q2 one.  This
+    /// fails once someone migrates them, which is the intended reminder to
+    /// replace it with an equality pin against `HexQ3`/`HexQk(4)`.
+    #[test]
+    fn hex_q3_q4_wgsl_still_pre_d77_lex() {
+        let q3 = u32_arrays(HEX_Q3_WGSL, "array<u32,64>(");
+        let q4 = u32_arrays(HEX_Q4_WGSL, "array<u32,125>(");
+        assert!(
+            q3.is_empty() && q4.is_empty(),
+            "hex_q3/q4.wgsl now carry literal index tables — migrate this pin to an \
+             equality check against HexQ3::dof_coords()/HexQk::new(4).dof_coords()"
+        );
+        assert!(
+            HEX_Q3_WGSL.contains("q3a(n:u32)->u32{return n%4u;}"),
+            "hex_q3.wgsl lexicographic slot arm changed"
+        );
+        let lex3 = element_slots(&HexQ3);
+        assert_eq!(lex3.len(), 64);
+        // The lexicographic map the shader uses.
+        let shader: Vec<[usize; 3]> = (0..64).map(|n| [n % 4, (n / 4) % 4, n / 16]).collect();
+        assert_ne!(shader, lex3, "HexQ3 is no longer lexicographic — migrate the shader");
+        // The Q4 shader is the same shape.
+        assert!(HEX_Q4_WGSL.contains("q4a(n:u32)"), "hex_q4.wgsl lex arm changed");
+        let lex4: Vec<[usize; 3]> = (0..125).map(|n| [n % 5, (n / 5) % 5, n / 25]).collect();
+        assert_ne!(lex4, element_slots(&HexQk::new(4)), "HexQk(4) became lexicographic");
+    }
+}
+

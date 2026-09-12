@@ -69,6 +69,14 @@ pub mod standard;
 pub mod mixed;
 pub mod interior_faces;
 pub mod partial;
+/// Tensor-product partial-assembly kernels (hex / quad / tet / prism):
+/// matrix-free element apply for diffusion, `y = A·x` without forming `A`.
+///
+/// Re-attached to the crate in D77.  The declaration was dropped by the
+/// b759cc6 module-grouping refactor, which left the whole `pa/` tree orphaned
+/// (never compiled, its self-tests never run) while `partial.rs` still
+/// referred to it in comments.
+pub mod pa;
 pub mod vector_integrator;
 pub mod vector_assembler;
 
