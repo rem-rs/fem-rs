@@ -621,6 +621,19 @@ impl LorNd<2> {
 }
 
 /// Signed permutation for quad ND: LOR ND1 dof → HO ND_k dof.
+///
+/// The slot tables follow **MFEM's `ND_QuadrilateralElement` layout**, which is
+/// what the LOR-compatible `(GaussLobatto, IntegratedGLL)` basis pair requires
+/// (and what [`fem_element::nedelec::QuadND`] implements): macro edges bottom
+/// `a` / right `k+a` with the top/left edges *reversed* (`k−1−a`, the
+/// `(off_x, off_y(+1))` pairing of MFEM's `ConstructLocalDofPermutation`), and
+/// the interior blocks with the x-family's open index fast (`(i1−1)·k + a`)
+/// but the y-family's **closed** index fast (`k(k−1) + (i1−1) + a·(k−1)`),
+/// because MFEM enumerates the y-family as `for j in 0..p { for i in 1..p }`.
+/// The legacy `QuadNDk` element orders those two blocks the other way around
+/// (and its top/left edges along the coordinate direction), so a permutation
+/// table transcribed from *it* cannot be mixed with MFEM's — the round-23 D69
+/// defect that made the quad LOR fail to converge.
 fn build_nd_perm_2d(
     mesh: &Mesh<2>,
     ho: &HCurlSpace<Mesh<2>>,
@@ -692,25 +705,39 @@ fn build_nd_perm_2d(
                         if owner != eh {
                             continue;
                         }
-                        // Local macro edge index: QUAD_EDGES order
-                        // (bottom 0, right 1, top 2, left 3); mode = interval
-                        // counted from the parametric origin (fem-rs modes use
-                        // l_j(x) from the origin on every edge).
-                        let lei = match (axis, i1 == k) {
-                            (0, false) => 0, // bottom
-                            (0, true) => 2,  // top
-                            (1, true) => 1,  // right
-                            (1, false) => 3, // left
+                        // Local macro edge slot: QUAD_EDGES order (bottom 0,
+                        // right 1, top 2, left 3).  The bottom/right edges
+                        // enumerate along +x/+y, so mode `a` is the open
+                        // index; the top/left edges are enumerated against
+                        // their coordinate direction (MFEM `dof_map` flips
+                        // *and* reverses), so the mode is `k−1−a` — the same
+                        // table `build_rt_perm_2d` uses, and the MFEM
+                        // `ConstructLocalDofPermutation` pairing
+                        // `(off_x, off_y(+1))` requires.
+                        let slot0 = match (axis, i1 == k) {
+                            (0, false) => a,                   // bottom
+                            (0, true) => 2 * k + (k - 1 - a),  // top
+                            (1, true) => k + a,                // right
+                            (1, false) => 3 * k + (k - 1 - a), // left
                             _ => unreachable!(),
                         };
-                        lei * k + a
+                        slot0
                     } else {
-                        // Element-interior lattice edge.
+                        // Element-interior lattice edge.  The HO slot is the
+                        // element's own local dof index, so the strides follow
+                        // MFEM `ND_QuadrilateralElement`'s `dof_map`
+                        // enumeration: the x-family interior block
+                        // (`for j in 1..p { for i in 0..p }`) has the *open*
+                        // index fast with stride `k`, while the y-family block
+                        // (`for j in 0..p { for i in 1..p }`) has the *closed*
+                        // index fast with stride 1 and the open one at stride
+                        // `k-1` (the interior closed index only spans `k-1`
+                        // values).
                         let flat = match axis {
-                            // x-family: (j, i+1) = (a, i1)
+                            // x-family: (open a, closed i1), open fast
                             0 => (i1 - 1) * k + a,
-                            // y-family: (i+1, j) = (i1, a)
-                            _ => k * (k - 1) + (i1 - 1) * k + a,
+                            // y-family: (open a, closed i1), closed fast
+                            _ => k * (k - 1) + (i1 - 1) + a * (k - 1),
                         };
                         n_edge_dofs + flat
                     };

@@ -19,8 +19,9 @@
 //! - [`QNdOpen::IntegratedGLL`] — MFEM `BasisType::IntegratedGLL`, the open half
 //!   of the `(GaussLobatto, IntegratedGLL)` basis pair MFEM documents for LOR
 //!   discretizations (`fem/lor/lor.hpp`): the integrated (Gerritsma) edge
-//!   functions `o_i = −Σ_{j≤i} c'_j` built from the degree-`p` GLL closed basis
-//!   (`Poly_1D::Basis::EvalIntegrated` with `ScaleIntegrated(false)`).
+//!   functions `o_i = −Σ_{j≤i} c'_j` built from the degree-`p` GLL closed
+//!   basis — MFEM's `Poly_1D::Basis(p−1, Integrated)` attaches an auxiliary
+//!   GLL basis of degree `(p−1)+1 = p` — with `ScaleIntegrated(false)`.
 //!
 //! The 1-D helpers are shared with the hex NDk element
 //! ([`crate::gll_basis::ClosedBasis`] / [`crate::gll_basis::open_basis`]), so a
@@ -28,22 +29,23 @@
 //!
 //! # Local DOF order (`dof_map`)
 //!
-//! Exactly MFEM's `dof_map` construction — the signed DOF index of the `o`-th
-//! tensor-product slot (x components first, then y components):
+//! Exactly MFEM's constructor order (see [`slot_table`]):
 //!
 //! ```text
 //! 0 .. p        bottom edge (y = 0),  +x   slot (i, 0)
 //! p .. 2p       right edge  (x = 1),  +y   slot (p, j)
 //! 2p .. 3p      top edge    (y = 1),  −x   slot (p−1−i, p)   (sign −1)
 //! 3p .. 4p      left edge   (x = 0),  −y   slot (0, p−1−j)   (sign −1)
-//! 4p .. 4p+k(k−1)          interior x components (sign +1)
-//! 4p+k(k−1) .. 2p(p+1)     interior y components (sign +1)
+//! 4p .. 4p+p(p−1)          interior x components (sign +1)
+//! 4p+p(p−1) .. 2p(p+1)     interior y components (sign +1)
 //! ```
 //!
 //! The top/left edges are **enumerated in reverse** of their coordinate order
 //! with MFEM's `−1 − idx` flip, so the local slot index of every edge increases
 //! from the edge's first to its second local vertex — which is exactly what
-//! `HCurlSpace`'s signed anti-diagonal edge pairing assumes.  Edge DOFs are the
+//! `HCurlSpace`'s signed anti-diagonal edge pairing assumes, and why the local
+//! numbering lines up slot-for-slot with `HCurlSpace`'s combinatorial quad
+//! layout (edges in `QUAD_EDGES` order, then interiors).  Edge DOFs are the
 //! nodal point-value functionals `σ(Φ) = Φ(x_i)·t̂_i` with `t̂_i = ±e_a`
 //! (MFEM `dof2tk`), so `dof_coords()[i]` is the node of `σ_i` and the sign of
 //! the functional is the sign baked into the basis function.
@@ -96,8 +98,9 @@ pub enum QNdOpen {
 ///   `(cp[ci], op[cj])`.  Kept explicit (rather than re-derived from `(oo,
 ///   oc)`) because the tensor-block slot number and the node indices are two
 ///   different bookkeepings of the same DOF.
-/// - `slot`: the tensor-block cell, `ci + cj·(p+1)` offset by the family block
-///   — distinct per DOF, used for the bijection checks.
+/// - `slot`: the MFEM constructor's tensor-slot number (`i + j·p` for the x
+///   family, `p(p+1) + i + j·(p+1)` for the y family) — distinct per DOF, used
+///   for the bijection checks.
 /// - `sign`: MFEM's `dof_map` orientation flip (`−1 − idx`), baked into the
 ///   basis function exactly as `CalcVShape` multiplies by `s`.
 #[derive(Clone, Copy, Debug)]
@@ -111,93 +114,93 @@ pub(crate) struct QNdSlot {
     pub sign: f64,
 }
 
-/// The local DOFs in MFEM's `Nodes` order — edges CCW from the bottom
-/// (`Geometry::Constants<QUARE>::Edges`) then the interiors, with every edge
-/// enumerated **along its local vertex direction**:
+/// The local DOFs in MFEM's `Nodes` order — a 1:1 transcription of the
+/// `ND_QuadrilateralElement` constructor (`fem/fe/fe_nd.cpp`): build the
+/// signed `dof_map` (tensor slot -> ±local index) in the constructor's write
+/// order, then invert it.
+///
+/// The resulting local DOF order is
 ///
 /// ```text
-/// x family   bottom (0,1), y=0   open i,       closed 0        sign +
-///            top    (2,3), y=1   open p − 1−i, closed p        sign −
-///            interior             open i,       closed 1..p−1
-/// y family   right  (1,2), x=1   open j,       closed p        sign +
-///            left   (3,0), x=0   open p − 1−j, closed 0        sign −
-///            interior             open j,       closed 1..p−1
+/// 0 .. p          bottom edge (0,1), y = 0   x family, open i ascending,  sign +
+/// p .. 2p         right edge  (1,2), x = 1   y family, open j ascending,  sign +
+/// 2p .. 3p        top edge    (2,3), y = 1   x family, open i descending, sign −
+/// 3p .. 4p        left edge   (3,0), x = 0   y family, open j descending, sign −
+/// 4p .. 4p+p(p−1)     interior x components (closed mode j = 1..p−1 outer)
+/// 4p+p(p−1) .. 2p(p+1) interior y components (closed mode i = 1..p−1 inner)
 /// ```
 ///
-/// The top and left edges run against their coordinate direction (the top edge
-/// from the top-left vertex rightwards, the left edge downwards), which is why
-/// their open index descends — that keeps the local DOF index increasing from
-/// each edge's first to its second local vertex, the ordering `HCurlSpace`'s
-/// signed anti-diagonal edge pairing assumes.  MFEM's `−1 − idx` flips become
-/// the `sign` field.
+/// which is exactly `HCurlSpace`'s combinatorial quad layout (the `QUAD_EDGES`
+/// cycle bottom/right/top/left, each edge's slots along its local vertex
+/// direction, then the interiors), and MFEM's own `FE::Nodes` numbering.
+/// (There is **no** single sort key that reproduces this for all `p` — the x
+/// tensor slots stride by `p` while the y slots stride by `p+1` — hence the
+/// literal `dof_map` transcription.)
 fn slot_table(p: usize) -> Vec<QNdSlot> {
-    let stride = p + 1;
-    let mut out = Vec::with_capacity(2 * p * (p + 1));
-    let push = |xfam: bool,
-                oo: usize,
-                oc: usize,
-                ci: usize,
-                cj: usize,
-                sign: f64,
-                out: &mut Vec<QNdSlot>| {
-        // MFEM constructor tensor position: x-wide slots use stride `p`, y
-        // slots stride `p+1` starting at `2p(p+1) - p`.
-        let slot = if xfam {
-            ci + cj * p
-        } else {
-            2 * p * (p + 1) - p + ci + cj * stride
-        };
-        out.push(QNdSlot { xfam, oo, oc, ci, cj, slot, sign });
-    };
-    // Local DOF order = MFEM's tensor-slot order: bottom, right, left, top,
-    // then the interiors.  (MFEM's constructor enumerates the edges in the
-    // `(2,3)/(3,0)` order after `(1,2)`, so the local DOF index does not follow
-    // the geometric CCW cycle; `HCurlSpace` only requires that each edge's
-    // local slots grow along that edge's own local direction.)
-    // x family — open mode along x, closed mode along y.
+    let dof2 = p * (p + 1);
+    // MFEM constructor `dof_map`: tensor slot -> signed local dof index.
+    let mut dof_map = vec![0_i32; 2 * dof2];
+    let mut o: i32 = 0;
+    // edges
     for i in 0..p {
-        // bottom edge (0,1), y = 0.
-        push(true, i, 0, i, 0, 1.0, &mut out);
-    }
-    // y family — open mode along y, closed mode along x.
-    for j in 0..p {
-        // right edge (1,2), x = 1.
-        push(false, j, p, p, j, 1.0, &mut out);
+        // (0,1): x slot `i + 0*p`.
+        dof_map[i] = o;
+        o += 1;
     }
     for j in 0..p {
-        // left edge (3,0), x = 0.
-        push(false, j, 0, 0, j, -1.0, &mut out);
+        // (1,2): y slot `p + j*(p+1)`.
+        dof_map[dof2 + p + j * (p + 1)] = o;
+        o += 1;
     }
     for i in 0..p {
-        // top edge (2,3), y = 1: MFEM flips the sign.
-        push(true, i, p, i, p, -1.0, &mut out);
+        // (2,3): x slot `(p-1-i) + p*p`, sign flip.
+        dof_map[(p - 1 - i) + p * p] = -1 - o;
+        o += 1;
     }
-    for oc in 1..p {
+    for j in 0..p {
+        // (3,0): y slot `0 + (p-1-j)*(p+1)`, sign flip.
+        dof_map[dof2 + (p - 1 - j) * (p + 1)] = -1 - o;
+        o += 1;
+    }
+    // interior: x-components (j outer, i inner), then y-components.
+    for j in 1..p {
         for i in 0..p {
-            // interior x block: closed mode 1..p−1, open index free.
-            push(true, i, oc, i, oc, 1.0, &mut out);
+            dof_map[i + j * p] = o;
+            o += 1;
         }
     }
-    for oc in 1..p {
-        for j in 0..p {
-            // interior y block: closed mode 1..p−1, open index free.
-            push(false, j, oc, oc, j, 1.0, &mut out);
+    for j in 0..p {
+        for i in 1..p {
+            dof_map[dof2 + i + j * (p + 1)] = o;
+            o += 1;
         }
     }
-    // Local DOF order = MFEM's global `Nodes` order: the x family first, then
-    // the y family, each in ascending tensor-slot order.  (MFEM's constructor
-    // enumerates the edges in the `(0,1)`, `(1,2)`, `(2,3)`, `(3,0)` order but
-    // its *nodes* — and therefore the effective DOF order — interleave the two
-    // families this way; `HCurlSpace` only requires that each edge's local slots
-    // grow along that edge's own local direction.)
-    out.sort_by_key(|sl| {
-        let (outer, inner) = if sl.xfam {
-            (sl.oc, sl.oo)
+    debug_assert_eq!(o as usize, 2 * dof2);
+    // Invert: local slot `idx` = the tensor cell whose dof_map entry is ±idx.
+    let mut out: Vec<Option<QNdSlot>> = vec![None; 2 * dof2];
+    for (tslot, &d) in dof_map.iter().enumerate() {
+        let (idx, sign) = if d < 0 {
+            ((-1 - d) as usize, -1.0)
         } else {
-            (sl.oo, sl.oc)
+            (d as usize, 1.0)
         };
-        (!sl.xfam, outer, inner)
-    });
+        // x slots are `i + j*p` (stride `p`), y slots `i + j*(p+1)` (stride
+        // `p+1`) offset by the x-block size `dof2`.
+        let (xfam, ci, cj) = if tslot < dof2 {
+            (true, tslot % p, tslot / p)
+        } else {
+            let s = tslot - dof2;
+            (false, s % (p + 1), s / (p + 1))
+        };
+        // x family: open index along x = `ci`, closed along y = `cj`; y family
+        // the reverse.
+        let (oo, oc) = if xfam { (ci, cj) } else { (cj, ci) };
+        out[idx] = Some(QNdSlot { xfam, oo, oc, ci, cj, slot: tslot, sign });
+    }
+    let out: Vec<QNdSlot> = out
+        .into_iter()
+        .map(|s| s.expect("ND quad dof_map is a bijection"))
+        .collect();
     debug_assert_eq!(out.len(), 2 * p * (p + 1));
     out
 }
@@ -237,26 +240,25 @@ fn open_modes(open: QNdOpen, p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
         // (`crate::gll_basis::gl_nodes`), so the quad builds its own `[0,1]`
         // barycentric evaluation.
         QNdOpen::GaussLegendre => open_basis_01(p, x),
-        // MFEM `BasisType::IntegratedGLL`: `o_i = −Σ_{j≤i} c'_j` from the
-        // degree-`p` GLL basis on `[0,1]` (`ScaleIntegrated(false)`).
         // MFEM `BasisType::IntegratedGLL`: `o_i = -sum_{j<=i} c'_j` (Gerritsma
-        // edge functions) built from the degree-`(p+1)` Gauss-Lobatto closed
-        // basis -- MFEM's `Poly_1D::Basis(Integrated)` constructs its auxiliary
-        // basis at degree `p+1`, which is what gives the modes unit subcell
-        // integrals.  `ScaleIntegrated(false)` leaves them un-scaled.
+        // edge functions).  MFEM builds `obasis1d = GetBasis(p-1, IntegratedGLL)`
+        // (`VectorTensorFiniteElement`, fe_base.cpp), whose `Integrated` basis
+        // carries an *auxiliary* GLL barycentric basis of degree
+        // `(p-1)+1 = p` — the same `p+1` points as the closed basis — and
+        // `EvalIntegrated` accumulates the auxiliary derivatives:
+        // `u[0] = -d[0], u[j] = u[j-1] - d[j]`.  The auxiliary derivative is
+        // taken w.r.t. the `[0,1]` reference coordinate (MFEM's `Poly_1D`
+        // bases are `[0,1]`-parameterised), which is `2 x d/dz` of the
+        // `[-1,1]`-parameterised `ClosedBasis`.  `ScaleIntegrated(false)`
+        // leaves the modes un-scaled by the subcell widths.
         QNdOpen::IntegratedGLL => {
-            let cb = ClosedBasis::new(p + 1);
+            let cb = ClosedBasis::new(p);
             let v = cb.eval(2.0 * x - 1.0);
             let mut o = vec![0.0_f64; p];
             let mut od = vec![0.0_f64; p];
             for i in 0..p {
-                o[i] = if i == 0 { -v.dc[0] } else { o[i - 1] - v.dc[i] };
-                od[i] = if i == 0 { -v.d2c[0] } else { od[i - 1] - v.d2c[i] };
-            }
-            // Chain factor of the `[0,1] -> [-1,1]` map.
-            for i in 0..p {
-                o[i] *= 0.5;
-                od[i] *= 0.5;
+                o[i] = if i == 0 { -2.0 * v.dc[0] } else { o[i - 1] - 2.0 * v.dc[i] };
+                od[i] = if i == 0 { -4.0 * v.d2c[0] } else { od[i - 1] - 4.0 * v.d2c[i] };
             }
             (o, od)
         }
@@ -368,19 +370,15 @@ impl QuadND {
             .map(|&sl| {
                 let p = self.order;
                 if sl.xfam {
-                    if sl.oc == 0 {
-                        [1.0, 0.0] // bottom edge, +x
-                    } else if sl.oc == p {
-                        [-1.0, 0.0] // top edge, −x
+                    if sl.oc == p {
+                        [-1.0, 0.0] // top edge (2,3), −x (MFEM dof2tk = 2)
                     } else {
-                        [1.0, 0.0] // interior x block
+                        [1.0, 0.0] // bottom edge + interior x block (tk = 0)
                     }
-                } else if sl.oo == p {
-                    [0.0, 1.0] // right edge, +y
-                } else if sl.oo == 0 && sl.oc == 0 {
-                    [0.0, -1.0] // left edge, −y
+                } else if sl.oc == 0 {
+                    [0.0, -1.0] // left edge (3,0), −y (MFEM dof2tk = 3)
                 } else {
-                    [0.0, 1.0] // interior y block
+                    [0.0, 1.0] // right edge + interior y block (tk = 1)
                 }
             })
             .collect()
@@ -532,24 +530,22 @@ mod tests {
         }
     }
 
-    /// Every local DOF owns a distinct tensor slot, and the slot families
-    /// respect the x-block / y-block split `eval_basis_vec` relies on.
+    /// Every local DOF owns a distinct tensor slot, and the local order is
+    /// MFEM's constructor order: the four edges (bottom, right, top, left)
+    /// first, then the interior x block, then the interior y block.
     #[test]
     fn slot_table_is_a_bijection() {
         for p in 1..=6usize {
             let slots = slot_table(p);
             let n_dof = 2 * p * (p + 1);
             assert_eq!(slots.len(), n_dof);
-            // Each family occupies a distinct half of the local DOF list.
-            for sl in &slots[..p * (p + 1)] {
-                assert!(sl.xfam, "p={p}: y-family DOF in the x block");
-            }
-            for sl in &slots[p * (p + 1)..] {
-                assert!(!sl.xfam, "p={p}: x-family DOF in the y block");
-            }
-            // Mode indices stay inside their 1-D arrays, signs are ±1, and every
-            // (family, open, closed) triple is used exactly once.
+            // Exactly p(p+1) dofs per family (the Q_{p-1,p} x Q_{p,p-1} split).
+            assert_eq!(slots.iter().filter(|sl| sl.xfam).count(), p * (p + 1));
+            // Mode indices stay inside their 1-D arrays, signs are ±1, every
+            // (family, open, closed) triple is used exactly once, and the MFEM
+            // tensor-slot numbers are distinct.
             let mut seen: Vec<(bool, usize, usize)> = Vec::new();
+            let mut tensor_slots: Vec<usize> = Vec::new();
             for sl in slots.iter() {
                 assert!(sl.oo < p, "p={p}: open index {} out of range", sl.oo);
                 assert!(sl.oc <= p, "p={p}: closed index {} out of range", sl.oc);
@@ -557,8 +553,42 @@ mod tests {
                 let key = (sl.xfam, sl.oo, sl.oc);
                 assert!(!seen.contains(&key), "p={p}: mode triple {key:?} reused");
                 seen.push(key);
+                assert!(
+                    !tensor_slots.contains(&sl.slot),
+                    "p={p}: tensor slot {} reused",
+                    sl.slot
+                );
+                tensor_slots.push(sl.slot);
             }
             assert_eq!(seen.len(), n_dof);
+            // Edge blocks in constructor order, each along its local vertex
+            // direction: bottom (+), right (+), top (−), left (−).
+            for (m, sl) in slots.iter().enumerate() {
+                match m / p {
+                    0 => {
+                        assert!(sl.xfam && sl.oc == 0 && sl.sign == 1.0, "p={p}: bottom block @{m}");
+                    }
+                    1 => {
+                        assert!(!sl.xfam && sl.oc == p && sl.sign == 1.0, "p={p}: right block @{m}");
+                    }
+                    2 => {
+                        assert!(sl.xfam && sl.oc == p && sl.sign == -1.0, "p={p}: top block @{m}");
+                    }
+                    _ if m < 4 * p => {
+                        assert!(!sl.xfam && sl.oc == 0 && sl.sign == -1.0, "p={p}: left block @{m}");
+                    }
+                    _ => {}
+                }
+            }
+            // Interior x block then interior y block, closed mode outer.
+            let int = &slots[4 * p..];
+            for (m, sl) in int.iter().enumerate() {
+                if m < p * (p - 1) {
+                    assert!(sl.xfam, "p={p}: interior x block @{m}");
+                } else {
+                    assert!(!sl.xfam, "p={p}: interior y block @{m}");
+                }
+            }
         }
     }
 
@@ -589,13 +619,9 @@ mod tests {
     }
 
     /// Per-DOF match against MFEM's `ND_QuadrilateralElement(p, GaussLobatto,
-    /// GaussLegendre)` dump: the node *set* and the `CalcVShape` /
-    /// `CalcCurlShape` values at three sample points must agree to `< 1e-12`.
-    ///
-    /// The local DOF numbering follows MFEM's node table through a node-keyed
-    /// bijection rather than slot-for-slot: `HCurlSpace` only requires that each
-    /// edge's local slots grow along that edge's own local direction (asserted in
-    /// `edge_slots_are_nodal`), and for `p = 1` the two orderings differ.
+    /// GaussLegendre)` dump: the node table and the `CalcVShape` /
+    /// `CalcCurlShape` values at three sample points, **slot for slot** — the
+    /// local DOF numbering is MFEM's constructor order (see [`slot_table`]).
     #[test]
     fn gauss_legendre_matches_mfem_dump() {
         for p in 1..=4usize {
@@ -609,23 +635,14 @@ mod tests {
                 _ => &mfem_quad_dump::NODES_4,
             };
             assert_eq!(coords.len(), n);
-            // Node-keyed bijection onto MFEM's DOF list.
-            let mut map = vec![usize::MAX; n];
-            let mut used = vec![false; n];
             for i in 0..n {
-                let hit = (0..n).find(|&j| {
-                    !used[j]
-                        && (coords[i][0] - mfem_nodes[j][0]).abs() < 1e-14
-                        && (coords[i][1] - mfem_nodes[j][1]).abs() < 1e-14
-                });
-                let j = hit.unwrap_or_else(|| {
-                    panic!(
-                        "p={p}: fem-rs node {i} {:?} has no MFEM counterpart",
-                        coords[i]
-                    )
-                });
-                used[j] = true;
-                map[i] = j;
+                assert!(
+                    (coords[i][0] - mfem_nodes[i][0]).abs() < 1e-14
+                        && (coords[i][1] - mfem_nodes[i][1]).abs() < 1e-14,
+                    "p={p}: node {i} {:?} != mfem {:?}",
+                    coords[i],
+                    mfem_nodes[i]
+                );
             }
 
             let pts = [[0.137, 0.621], [0.71, 0.22], [0.5, 0.5]];
@@ -649,24 +666,23 @@ mod tests {
                 e.eval_basis_vec(pt, &mut v);
                 e.eval_curl(pt, &mut c);
                 for i in 0..n {
-                    let j = map[i];
                     assert!(
-                        (v[i * 2] - mfem[j][0]).abs() < 1e-12,
-                        "p={p} q={q} phi[{i}]_x: {} vs mfem[{j}] {}",
+                        (v[i * 2] - mfem[i][0]).abs() < 1e-12,
+                        "p={p} q={q} phi[{i}]_x: {} vs mfem[i] {}",
                         v[i * 2],
-                        mfem[j][0]
+                        mfem[i][0]
                     );
                     assert!(
-                        (v[i * 2 + 1] - mfem[j][1]).abs() < 1e-12,
-                        "p={p} q={q} phi[{i}]_y: {} vs mfem[{j}] {}",
+                        (v[i * 2 + 1] - mfem[i][1]).abs() < 1e-12,
+                        "p={p} q={q} phi[{i}]_y: {} vs mfem[i] {}",
                         v[i * 2 + 1],
-                        mfem[j][1]
+                        mfem[i][1]
                     );
                     assert!(
-                        (c[i] - mfem[j][2]).abs() < 1e-12,
-                        "p={p} q={q} curl[{i}]: {} vs mfem[{j}] {}",
+                        (c[i] - mfem[i][2]).abs() < 1e-12,
+                        "p={p} q={q} curl[{i}]: {} vs mfem[i] {}",
                         c[i],
-                        mfem[j][2]
+                        mfem[i][2]
                     );
                 }
             }
@@ -674,17 +690,13 @@ mod tests {
     }
 
     /// Per-DOF match against MFEM's `ND_QuadrilateralElement(p, GaussLobatto,
-    /// IntegratedGLL)` dump — the LOR-compatible basis pair.  Same node table as
-    /// the Gauss-Legendre variant; only the open modes differ.
+    /// IntegratedGLL)` dump — the LOR-compatible basis pair.  Same node table
+    /// as the Gauss-Legendre variant; only the open modes differ.  For `p = 1`
+    /// the integrated mode is the constant `−c'_0 = 1`, so both variants
+    /// coincide with the Whitney element (the dumps are identical).
     #[test]
-    #[ignore = "IntegratedGLL parity is within ~3e-2 of MFEM 4.9 (degree of the Gerritsma auxiliary basis unresolved); GaussLegendre parity is exact"]
     fn integrated_gll_matches_mfem_dump() {
-        // `p = 1` is excluded: MFEM 4.9 reports the *Gauss-Legendre* Whitney
-        // values for `ND_QuadrilateralElement(1, GaussLobatto, IntegratedGLL)`
-        // (both dumps coincide), while the Gerritsma construction gives the
-        // constant `1/(2(p+1))` there; the round-22 port therefore only claims
-        // the `p >= 2` IntegratedGLL parity.  See the module docs.
-        for p in 2..=4usize {
+        for p in 1..=4usize {
             let e = QuadND::new_integrated_gll(p);
             let n = e.n_dofs();
             let pts = [[0.137, 0.621], [0.71, 0.22], [0.5, 0.5]];
@@ -735,7 +747,6 @@ mod tests {
     /// pairing `σ_i(φ_j) = φ_j(x_i)·t̂_i` is the identity, and every edge DOF
     /// vanishes tangentially on the other three edges.
     #[test]
-    #[ignore = "signed-tangent nodal pairing needs the p = 1 slot order fixed"]
     fn gauss_legendre_dofs_are_nodal() {
         for p in 1..=3usize {
             let e = QuadND::new(p);
@@ -758,11 +769,13 @@ mod tests {
         }
     }
 
-    /// Edge DOFs are supported on their own edge: on `y = 0` only the bottom
-    /// edge's x-component modes are nonzero, and on `x = 1` only the right
-    /// edge's y-component modes are.
+    /// Edge DOFs are *tangentially* supported on their own edge: on `y = 0`
+    /// the **tangential (x) component** of every basis function not anchored on
+    /// the bottom edge vanishes (the closed GLL factor is nodal at `y = 0`),
+    /// and on `x = 1` the tangential (y) component of every function not on the
+    /// right edge vanishes.  (Normal traces are unconstrained for H(curl), so
+    /// the *normal* components are generically nonzero on the edge.)
     #[test]
-    #[ignore = "local trace layout differs from MFEM for p = 1; see the module docs"]
     fn edge_dofs_have_local_trace() {
         for p in 2..=3usize {
             let e = QuadND::new(p);
@@ -770,67 +783,91 @@ mod tests {
             let coords = e.dof_coords();
             let tks = e.dof_tangents();
             let mut v = vec![0.0_f64; n * 2];
-            // y = 0: only x-DOFs anchored on the bottom edge survive.
+            // y = 0: only x-DOFs anchored on the bottom edge have an x-component.
             e.eval_basis_vec(&[0.37, 0.0], &mut v);
             for o in 0..n {
                 let on_bottom = tks[o][1] == 0.0 && coords[o][1] == 0.0;
                 let expect_zero = !on_bottom;
-                let val = v[o * 2].abs() + v[o * 2 + 1].abs();
                 assert!(
-                    !expect_zero || val < 1e-13,
-                    "p={p}: slot {o} leaks on y=0: {val}",
+                    !expect_zero || v[o * 2].abs() < 1e-13,
+                    "p={p}: slot {o} leaks tangentially on y=0: {}",
+                    v[o * 2],
                 );
+                // Bottom slots themselves are the surviving tangential modes.
+                if on_bottom {
+                    assert!(v[o * 2].abs() > 1e-8, "p={p}: bottom slot {o} degenerate");
+                }
             }
-            // x = 1: only y-DOFs anchored on the right edge survive.
+            // x = 1: only y-DOFs anchored on the right edge have a y-component.
             e.eval_basis_vec(&[1.0, 0.41], &mut v);
             for o in 0..n {
                 let on_right = tks[o][0] == 0.0 && coords[o][0] == 1.0;
-                let val = v[o * 2].abs() + v[o * 2 + 1].abs();
                 assert!(
-                    on_right || val < 1e-13,
-                    "p={p}: slot {o} leaks on x=1: {val}",
+                    on_right || v[o * 2 + 1].abs() < 1e-13,
+                    "p={p}: slot {o} leaks tangentially on x=1: {}",
+                    v[o * 2 + 1],
                 );
             }
         }
     }
 
     /// p = 1 must be the Whitney 1-form of MFEM's `ND_QuadrilateralElement(1)`:
-    /// `(1−y, 0)`, `(0, x)`, `(−y, 0)`, `(0, x−1)` with scalar curl 1.
+    /// in `Nodes` order `(1−y, 0)`, `(0, x)`, `(−y, 0)`, `(0, x−1)` at the
+    /// point `(0.3, 0.7)`, all with scalar curl 1.
     #[test]
-    #[ignore = "p = 1 Whitney values: the top/left edge slot order differs from MFEM; see the module docs"]
     fn p1_is_whitney() {
         let e = QuadND::new(1);
         let mut v = vec![0.0_f64; 8];
         let mut c = vec![0.0_f64; 4];
         e.eval_basis_vec(&[0.3, 0.7], &mut v);
         e.eval_curl(&[0.3, 0.7], &mut c);
-        // MFEM `ND_QuadrilateralElement(1)` in `Nodes` order: the bottom edge
-        // is the Whitney `(x, 0)`, the top edge `(−x, 0)` (its local direction
-        // runs from the top-left corner rightwards), the right edge `(0, 1 − x)`
-        // and the left edge `(0, x − 1)`; all four have scalar curl 1.
-        assert!((v[0] - 0.3).abs() < 1e-14, "phi0_x = {}", v[0]);
+        // MFEM `Nodes` order: bottom edge `(1−y, 0)`, right edge `(0, x)`,
+        // top edge `(−y, 0)` (its local direction runs from the top-right
+        // corner leftwards, so the sign is baked negative) and left edge
+        // `(0, −(1−x))`; all four have scalar curl 1.
+        assert!((v[0] - 0.3).abs() < 1e-14, "phi0_x = {}", v[0]); // 1−y
         assert!((v[1] - 0.0).abs() < 1e-14);
-        assert!((v[2] - 0.3).abs() < 1e-14, "phi1_x = {}", v[2]);
-        assert!((v[3] - 0.0).abs() < 1e-14, "phi1_y = {}", v[3]);
-        assert!((v[4] - 0.0).abs() < 1e-14, "phi2_x = {}", v[4]);
-        assert!((v[5] - 0.3).abs() < 1e-14, "phi2_y = {}", v[5]);
+        assert!((v[2] - 0.0).abs() < 1e-14, "phi1_x = {}", v[2]);
+        assert!((v[3] - 0.3).abs() < 1e-14, "phi1_y = {}", v[3]); // x
+        assert!((v[4] - (-0.7)).abs() < 1e-14, "phi2_x = {}", v[4]); // −y
+        assert!((v[5] - 0.0).abs() < 1e-14);
         assert!((v[6] - 0.0).abs() < 1e-14, "phi3_x = {}", v[6]);
-        assert!((v[7] - (-0.3)).abs() < 1e-14, "phi3_y = {}", v[7]);
+        assert!((v[7] - (-0.7)).abs() < 1e-14, "phi3_y = {}", v[7]); // x−1
         for i in 0..4 {
             assert!((c[i] - 1.0).abs() < 1e-14, "curl[{i}] = {}", c[i]);
         }
     }
 
-    /// The IntegratedGLL open modes are the Gerritsma functions: the curl of
-    /// every x-component interior mode has the subcell-constant structure, and
-    /// the basis is a partition of `Q_{p-1,p} × Q_{p,p-1}` (dimension check via
-    /// the local span of the constant field).
+    /// The IntegratedGLL open modes are the Gerritsma edge functions, yet the
+    /// x-family still spans constants: `Σ_j c_j(y) = 1` (closed GLL partition
+    /// of unity) and `1 ∈ span{o_i(x)}` (the `p` edge functions span
+    /// `P_{p-1}`), so some combination of the x-family tensor modes is the
+    /// constant field `u ≡ (1, 0)`.
     #[test]
-    #[ignore = "constant-field span check pending the IntegratedGLL p = 1 fix"]
     fn integrated_gll_span_contains_constant() {
         for p in 1..=3usize {
             let e = QuadND::new_integrated_gll(p);
             let n = e.n_dofs();
+            // 1-D: represent 1 in the open-mode basis (collocate at GL points).
+            let gl = gl_points_01(p);
+            let mut b = nalgebra::DMatrix::<f64>::zeros(p, p);
+            let rhs = nalgebra::DVector::from_element(p, 1.0);
+            for r in 0..p {
+                let (o, _) = open_modes(QNdOpen::IntegratedGLL, p, gl[r]);
+                for c in 0..p {
+                    b[(r, c)] = o[c];
+                }
+            }
+            let sol = b.lu().solve(&rhs).expect("open-mode collocation singular");
+            // x-family dof (i, j) carries coefficient `sign·b_i` for every j
+            // (the top-edge dof's baked-in sign has to be undone to represent
+            // the constant +1).
+            let xcoef: Vec<f64> = (0..n)
+                .map(|i| {
+                    let sl = &nd_data(p).slots[i];
+                    if sl.xfam { sl.sign * sol[sl.oo] } else { 0.0 }
+                })
+                .collect();
             let pts = [
                 [0.1f64, 0.2f64],
                 [0.5, 0.1],
@@ -839,26 +876,11 @@ mod tests {
                 [0.7, 0.4],
                 [0.2, 0.5],
             ];
-            let xidx: Vec<usize> = (0..n).filter(|&i| e.dof_tangents()[i][1] == 0.0).collect();
-            let m = xidx.len();
-            let mut a = nalgebra::DMatrix::<f64>::zeros(m, m);
-            let b = nalgebra::DVector::from_element(m, 1.0);
             let mut vals = vec![0.0; n * 2];
-            for (r, pt) in pts.iter().enumerate() {
-                e.eval_basis_vec(pt, &mut vals);
-                for (c, &i) in xidx.iter().enumerate() {
-                    a[(r, c)] = vals[i * 2];
-                }
-            }
-            let sol = a.lu().solve(&b).expect("x-comp collocation singular");
             let mut max_err = 0.0f64;
             for pt in &pts {
                 e.eval_basis_vec(pt, &mut vals);
-                let ux: f64 = xidx
-                    .iter()
-                    .zip(sol.iter())
-                    .map(|(&i, &c)| c * vals[i * 2])
-                    .sum();
+                let ux: f64 = (0..n).map(|i| xcoef[i] * vals[i * 2]).sum();
                 max_err = max_err.max((ux - 1.0).abs());
             }
             assert!(max_err < 1e-11, "p={p}: constant x-comp not representable");

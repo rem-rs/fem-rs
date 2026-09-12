@@ -153,33 +153,25 @@ use linlvo::precond::{AmsConfig, AmsPrecond, AdsConfig, AdsPrecond};
 use crate::discrete_op::DiscreteLinearOperator;
 use crate::standard::{CurlCurlIntegrator, GradDivIntegrator, VectorMassIntegrator};
 use crate::vector_assembler::VectorAssembler;
-use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
+use crate::vector_integrator::VectorBilinearIntegrator;
 
-/// Curl-curl kernel for the LOR assemblies, with the quadrature order left to
-/// the LOR assembler's global setting.
+/// Curl-curl kernel for the LOR assemblies.
 ///
 /// `CurlCurlIntegrator::integration_order_for` keeps MFEM's `GetIntegrationOrder`
-/// shortcut `space_order <= 1 → order 1`.  That is correct for the *simplex*
-/// ND1 elements (their curl is constant, so one point is exact) but not for the
-/// **tensor-product** ND1 elements the LOR space is built from: there the curl
-/// of `o(x)c(y)c(z)` carries `c'(y)c(z)`/`c(y)c'(z)`, so the curl-curl
-/// integrand is *quadratic* across each closed direction and a single point per
-/// direction under-integrates it — the LOR curl-curl block comes out exactly
-/// 3/4 of the correct value (verified against MFEM's
-/// `ND_FECollection(1, 3, GaussLobatto, IntegratedGLL)` matrix and against a
-/// direct element-level assembly at 1e-15).  Since the LOR forms are built on
-/// order-1 tensor elements by construction, this wrapper forwards the element
-/// kernel while letting the assembler use the exact rule it is asked for.
-struct LorCurlCurl {
-    mu: f64,
-}
-
-impl VectorBilinearIntegrator for LorCurlCurl {
-    fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
-        CurlCurlIntegrator { mu: self.mu }.add_to_element_matrix(qp, k_elem);
-    }
-}
-
+/// shortcut `space_order <= 1 → order 1` for *simplices*, where it is exact
+/// (the ND1 curl is constant).  The LOR space is a **tensor-product** ND1
+/// element (`Quad4`/`Hex8`/… on the refined mesh), and
+/// [`CurlCurlIntegrator::integration_order_for`] already carries MFEM's
+/// `GetIntegrationOrder` tensor branch for it — `2k` points per direction,
+/// needed because the curl of `o(x)c(y)c(z)` carries `c'(y)c(z)`/`c(y)c'(z)`,
+/// so the curl-curl integrand is *quadratic* across each closed direction and
+/// a single point per direction under-integrates it (the LOR curl-curl block
+/// then comes out exactly 3/4 of the correct value, D65).  The D65 wrapper
+/// `LorCurlCurl` — which forwarded this kernel and left the rule to the
+/// caller's global quadrature order — is therefore redundant and was removed
+/// in D71: the kernel selects the exact rule by itself, and the three LOR
+/// gates (hex ND, hex RT, quad ND) are bit-identical without it.
+///
 /// PCG-ready LOR solver: wraps an inner preconditioner built on the LOR
 /// matrix (in LOR dof numbering) and transfers through the assumed-constraint
 /// permutation so it can precondition the high-order system directly:
@@ -260,7 +252,7 @@ pub type LorJacobiSolverRtQuad = LorSolver<LorRt<2>, linlvo::JacobiPrecond<f64>>
 
 fn assemble_lor_nd(lor_space: &HCurlSpaceGeneric<fem_mesh::simplex::Mesh<3>>, mass: f64, curl_curl: f64) -> CsrMatrix<f64> {
     let mut integrators: Vec<&dyn VectorBilinearIntegrator> = Vec::new();
-    let cc = LorCurlCurl { mu: curl_curl };
+    let cc = CurlCurlIntegrator { mu: curl_curl };
     let m = VectorMassIntegrator { alpha: mass };
     if curl_curl != 0.0 {
         integrators.push(&cc);
@@ -398,7 +390,7 @@ pub fn build_lor_jacobi_rt_quad(
 
 fn assemble_lor_nd_quad(lor_space: &HCurlSpaceGeneric<fem_mesh::simplex::Mesh<2>>, mass: f64, curl_curl: f64) -> CsrMatrix<f64> {
     let mut integrators: Vec<&dyn VectorBilinearIntegrator> = Vec::new();
-    let cc = LorCurlCurl { mu: curl_curl };
+    let cc = CurlCurlIntegrator { mu: curl_curl };
     let m = VectorMassIntegrator { alpha: mass };
     if curl_curl != 0.0 { integrators.push(&cc); }
     if mass != 0.0 { integrators.push(&m); }
@@ -648,9 +640,11 @@ mod lor_vector_tests {
     /// exactly 3/4 of the correct value (measured against MFEM's
     /// `ND_FECollection(1, 3, GaussLobatto, IntegratedGLL)` matrix and against
     /// a direct element-level assembly, 1e-15).  LOR forms are order-1 tensor
-    /// by construction, so [`LorCurlCurl`] forwards the curl-curl kernel while
-    /// leaving the quadrature order to the LOR assembler; the LOR matrices now
-    /// agree with MFEM's (exact-rule) LOR matrices entry for entry.
+    /// by construction, and the kernel's `integration_order_for` already
+    /// selects the exact tensor rule (`2k`) on its own (D71 removed the D65
+    /// `LorCurlCurl` forwarder that did the same thing by hand); the LOR
+    /// matrices therefore agree with MFEM's (exact-rule) LOR matrices entry for
+    /// entry.
     ///
     /// With that in place the exact-inner pencil (`M⁻¹ = Πᵀ A_LOR⁻¹ Π`) on the
     /// LOR-compatible `(GaussLobatto, IntegratedGLL)` pair gives **10 → 11**
@@ -742,71 +736,298 @@ mod lor_vector_tests {
         assert!(it4 <= it2 + 25, "iteration count grows with refinement: {iters:?}");
     }
 
-    /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
+    /// 2-D quad ND LOR (ND3): scaling 4x4 vs 8x8 quads.
+    ///
+    /// # D69 (round 23): the interior y-family slot stride
+    ///
+    /// The ND leg uses the MFEM `ND_QuadrilateralElement` port
+    /// ([`fem_element::nedelec::QuadND`] with the LOR-compatible
+    /// `(GaussLobatto, IntegratedGLL)` pair, as MFEM's `CheckBasisType`
+    /// demands) through the test-local assembler
+    /// [`assemble_quad_nd_variant`] — the library `vec_ref_elem` still picks
+    /// the legacy Lagrange × hat element for quad ND o≥3, so the IGLL HO
+    /// matrix can only be built at the element level (exactly like the hex
+    /// D63 path).  The LOR space (ND1 on the refined mesh) and the
+    /// assumed-constraint permutation are the library ones; at order 1 all
+    /// open-basis variants coincide with the Whitney element.
+    ///
+    /// What was still broken in round 22 was the permutation's *interior*
+    /// table: `build_nd_perm_2d` wrote the y-family interior slot as
+    /// `k(k−1) + (i1−1)k + a`, i.e. with the open index fast — the layout of
+    /// the **legacy** `QuadNDk` element.  MFEM's `ND_QuadrilateralElement`
+    /// enumerates the y-family interior block as
+    /// `for j in 0..p { for i in 1..p }`, so there the *closed* index is fast
+    /// and the open index carries the stride `k−1`; the round-22 macro-edge
+    /// ("top/left reversed") table was already MFEM's, so the permutation
+    /// mixed the two layouts and the transfer was not an approximation of
+    /// A_HO at all.  With the stride corrected (`(i1−1) + a·(k−1)`) the
+    /// pencil collapses: exact-inner PCG (`M⁻¹ = Πᵀ A_LOR⁻¹ Π`) gives
+    /// **6 → 7** iterations for n = 2 → 8 against MFEM's 7 → 10 → 11 on the
+    /// same recipe, and the full LOR-AMS preconditioner gives **27 → 35**
+    /// for n = 4 → 8 (8x the elements).
+    ///
+    /// The 2-D quad H(div) leg is *not* part of this test:
+    /// [`lor_rt_quad_pcg_iterations_mesh_independent`] carries the measured
+    /// RT1 numbers and is still ignored.
     #[test]
-    // D69 round 21 — still blocked, at the element level.  The 2-D quad ND/RT
-    // elements are *not* ports of MFEM's `ND_QuadrilateralElement` /
-    // `RT_QuadrilateralElement`:
-    //
-    // | item | MFEM `ND_QuadrilateralElement(p, GaussLobatto, ob)` | fem-rs `QuadNDk` |
-    // |---|---|---|
-    // | tangential nodes | `OpenPoints(p-1)` (p Gauss-Legendre) | p equispaced `i/p` |
-    // | normal nodes | `ClosedPoints(p)` ((p+1)-point GLL) | linear `hat` on [0,1] |
-    // | edge modes | integrated open modes `o_i` (`-Σ_{j≤i} c'_j`) × closed mode | Lagrange × hat |
-    // | edge sign/enum | `dof_map` flips *and* reverses the top/left edge enumeration (tangents `(−1,0)`,`(0,−1)`) | tangent direction baked in, node order not reversed |
-    // | interior | `obasis1d(i)·basis1d(j)`-type tensor products, `2p(p-1)` dofs | `y(1−y)y^i · l_j(x)` bubbles × Lagrange |
-    // | basis pair | selectable (GaussLobatto/IntegratedGLL is the LOR-compatible one) | only the nodal pair exists; `QuadND2` (`quad_nd2.rs`, the MFEM port) is fixed at p=2 and also nodal |
-    //
-    // so the `(GaussLobatto, IntegratedGLL)` pair MFEM's LOR needs
-    // (`CheckBasisType`) does not exist on quads at all, and
-    // `HCurlSpace::new(mesh, o)`/`HDivSpace::new(mesh, o)` on `Quad4` pick the
-    // legacy elements for ND o>=3 and RT o>=2 (`vector_assembler.rs`).
-    //
-    // Measured round 21 with a temporary diagnostic (the numbers below are from
-    // the same recipe as the test): the 2-D LOR machinery itself is healthy —
-    // the LOR space has the HO dof count, the permutation is a bijection, the
-    // inner LOR-AMS solve is mesh independent (11 → 17 iterations for ND2,
-    // 18 → 23 for ND3, n = 4 → 8) and the exact-inner pencil for ND3 at n = 8
-    // converges in 7 iterations — but the *HO* systems do not: FGMres with
-    // LOR-AMS stalls (500 iterations, residual 1.5e-5…2.9e-2) for ND2/ND3, and
-    // the RT1 quad leg with a Jacobi inner grows 69 → 200 for n = 4 → 8.  The
-    // transfer cannot be spectrally equivalent while the HO basis is the
-    // legacy Lagrange × hat family, exactly as `CheckBasisType` warns.
-    //
-    // Promotion therefore requires porting the two quadrilateral elements (and
-    // wiring `HCurlSpace`/`HDivSpace` to reach the integrated-GLL variant, as
-    // `HexNDk::new_integrated_gll` does for hexes) — a self-contained follow-up.
-    #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]
             .iter()
             .map(|&n| {
                 let mesh = Mesh::<2>::unit_square_quad(n);
-                let ho = HCurlSpace::new(mesh, 3);
-                let cc = CurlCurlIntegrator { mu: 1.0 };
-                let m = VectorMassIntegrator { alpha: 1.0 };
-                let a_ho = VectorAssembler::assemble_bilinear(&ho, &[&cc, &m], 4);
+                let ho = HCurlSpace::new(mesh.clone(), 3);
+                let a_ho = assemble_quad_nd_variant(
+                    &ho,
+                    &mesh,
+                    &fem_element::nedelec::QuadND::new_integrated_gll(3),
+                );
                 let lor = build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default()).expect("build");
                 pcg_iters(&a_ho, &lor)
             })
             .collect();
-        println!("ND3 quad LOR-AMG PCG iterations: {nd_iters:?}");
-        assert!(nd_iters[1] <= nd_iters[0] + 8, "grew: {nd_iters:?}");
+        println!("ND3 quad (GaussLobatto, IntegratedGLL) LOR-AMG PCG iterations: {nd_iters:?}");
+        // Measured (round 23): 27 → 35.  The exact-inner pencil is flat
+        // (6 → 7, MFEM 7 → 10 → 11), so the residual growth is the AMS *inner*
+        // approximation on the LOR system — the same effect the hex ND leg
+        // documents (25 → 34, tolerance +10) and the hex RT leg documents for
+        // ADS (46 → 65, tolerance +25).
+        assert!(nd_iters[1] <= nd_iters[0] + 10, "grew: {nd_iters:?}");
+    }
 
-        let rt_iters: Vec<usize> = [4, 8]
-            .iter()
-            .map(|&n| {
-                let mesh = Mesh::<2>::unit_square_quad(n);
-                let ho = HDivSpace::new(mesh, 1);
-                let dd = GradDivIntegrator { kappa: 1.0 };
-                let m = VectorMassIntegrator { alpha: 1.0 };
-                let a_ho = VectorAssembler::assemble_bilinear(&ho, &[&dd, &m], 4);
-                let lor = build_lor_jacobi_rt_quad(&ho, &a_ho, 1.0, 1.0).expect("build");
-                pcg_iters(&a_ho, &lor)
-            })
-            .collect();
-        println!("RT1 quad LOR-AMG PCG iterations: {rt_iters:?}");
-        assert!(rt_iters[1] <= rt_iters[0] + 8, "grew: {rt_iters:?}");
+    /// 2-D quad RT1 LOR: measured, not yet mesh independent — ignored.
+    ///
+    /// # D69 (round 23) state
+    ///
+    /// The RT *permutation* matches MFEM's tables (`QuadRTk` and
+    /// `RT_QuadrilateralElement` agree: x-family interior `q·β + (α−1)` with
+    /// the closed index fast, y-family interior `q(q+1) + (α−1)(q+1) + β` with
+    /// the open index fast, and the round-22 top/left reversal is MFEM's
+    /// `(p−i)` enumeration), so this is not the round-23 ND defect.
+    /// Measured with the test recipe (HO RT1 curl… div-div + mass, LOR RT0 on
+    /// the 2x-refined mesh, Jacobi inner, FGMres(30), rtol 1e-8):
+    ///
+    /// | n | LOR-Jacobi FGMres | true residual | exact-inner PCG |
+    /// |---|---|---|---|
+    /// | 4 | 69 | 8.4e-9 | 10 |
+    /// | 8 | 200 | 9.9e-9 | 24 |
+    ///
+    /// MFEM's counterpart (`$HOME/work/d69_full 1 n 4 rt`: its
+    /// `LORDiscretization` with the collocated quadrature and an exact inner)
+    /// is 11 → 12, so the fem-rs transfer still grows at n = 8 (10 → 24) —
+    /// a genuine RT-specific defect on top of the weak inner.  Two things are
+    /// established by the measurements above and must not be re-litigated:
+    ///
+    /// - the growth is **not** a PCG-vs-FGMres artifact: PCG on the same
+    ///   system "converges" in 7 → 10 iterations at a *true* relative
+    ///   residual of 6.1e-5 / 6.2e-5, i.e. linger's PCG stopping test is not
+    ///   a true-residual test here, while FGMres reaches 1e-8 honestly.  Any
+    ///   future gate on this leg must use the FGMres number (or an explicitly
+    ///   recomputed residual), which is why `pcg_iters` uses FGMres.
+    /// - the inner is a bare **Jacobi** for a reason: linger has no 2-D ADS
+    ///   analogue, and the LOR-Jacobi composite is not SPD enough for PCG to
+    ///   be meaningful, so a large part of the 69 → 200 is the auxiliary
+    ///   solve, not the transfer (the hex RT leg sees the same split against
+    ///   ADS: 46 → 65 with a flat exact-inner pencil).
+    ///
+    /// Next step (self-contained): build the D65-style quad metric — compare
+    /// `assemble_lor_rt_quad` against MFEM's exact-rule RT0 matrix on the
+    /// refined mesh (`d69_full 1 n 1`, entry for entry) and against
+    /// `ho_numbering(a_lor)` for RT1, then re-measure the exact-inner pencil.
+    /// Run with `cargo test -p fem-assembly --lib lor_rt_quad -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore] // D69: RT1 quad LOR not mesh independent yet (numbers above)
+    fn lor_rt_quad_pcg_iterations_mesh_independent() {
+        struct ExactInner {
+            b: CsrMatrix<f64>,
+        }
+        impl fem_solver::Preconditioner for ExactInner {
+            type Vector = DenseVec<f64>;
+            fn apply_precond(&self, x: &DenseVec<f64>, y: &mut DenseVec<f64>) {
+                let rhs = x.as_slice().to_vec();
+                let mut z = vec![0.0_f64; rhs.len()];
+                let cfg = SolverConfig {
+                    rtol: 1e-12,
+                    atol: 1e-14,
+                    max_iter: 3000,
+                    verbose: false,
+                    ..Default::default()
+                };
+                solve_cg(&self.b, &rhs, &mut z, &cfg).expect("inner cg");
+                *y = DenseVec::from_vec(z);
+            }
+        }
+        for n in [4usize, 8] {
+            let mesh = Mesh::<2>::unit_square_quad(n);
+            let ho = HDivSpace::new(mesh, 1);
+            let dd = GradDivIntegrator { kappa: 1.0 };
+            let m = VectorMassIntegrator { alpha: 1.0 };
+            let a_ho = VectorAssembler::assemble_bilinear(&ho, &[&dd, &m], 4);
+            let lor = build_lor_jacobi_rt_quad(&ho, &a_ho, 1.0, 1.0).expect("LOR RT build");
+            let nn = a_ho.nrows;
+            let ones = vec![1.0_f64; nn];
+            let mut rhs = vec![0.0_f64; nn];
+            a_ho.spmv(&ones, &mut rhs);
+            let cfg = SolverConfig {
+                rtol: 1e-8,
+                atol: 0.0,
+                max_iter: 800,
+                verbose: false,
+                ..Default::default()
+            };
+            let exact = ExactInner { b: lor.lor.ho_numbering(&lor.a_lor) };
+            let mut x_exact = vec![0.0_f64; nn];
+            let r_exact = fem_solver::solve_pcg_precond(&a_ho, &rhs, &mut x_exact, &exact, &cfg);
+            let mut x_jac = vec![0.0_f64; nn];
+            let r_jac = fem_solver::solve_fgmres_precond(&a_ho, &rhs, &mut x_jac, 30, &lor, &cfg);
+            println!(
+                "RT1 quad LOR-AMG FGMres iterations: {:?} ({} iters), exact-inner {:?}",
+                r_jac.as_ref().map(|r| r.iterations).ok(),
+                pcg_iters(&a_ho, &lor),
+                r_exact.as_ref().map(|r| r.iterations).ok()
+            );
+        }
+    }
+
+    /// D69 diagnostic: quad IGLL pencil metrics.  Run with
+    /// `cargo test -p fem-assembly --lib d69_quad -- --ignored --nocapture`.
+    #[test]
+    #[ignore] // diagnostic, not a gate: prints the quad pencil metrics
+    fn d69_quad_pencil_diagnostics() {
+        // (1) Assembler parity: at k = 1 every open-basis variant is the
+        //     Whitney element, so the test-local assembler must reproduce the
+        //     library assembly of the legacy element to machine precision.
+        {
+            let mesh = Mesh::<2>::unit_square_quad(2);
+            let ho = HCurlSpace::new(mesh.clone(), 1);
+            let mine = assemble_quad_nd_variant(
+                &ho,
+                &mesh,
+                &fem_element::nedelec::QuadND::new(1),
+            );
+            let cc = CurlCurlIntegrator { mu: 1.0 };
+            let m = VectorMassIntegrator { alpha: 1.0 };
+            let lib = VectorAssembler::assemble_bilinear(&ho, &[&cc, &m], 4);
+            let mut dmax = 0.0_f64;
+            for i in 0..mine.nrows {
+                for r in mine.row_ptr[i]..mine.row_ptr[i + 1] {
+                    let j = mine.col_idx[r] as usize;
+                    dmax = dmax.max((mine.values[r] - lib.get(i, j)).abs());
+                }
+            }
+            println!("ND1 quad: test-local vs library max|diff| = {dmax:.3e}");
+        }
+
+        // (1b) Entry-multiset dump for the n = 1 ND3 IGLL matrix (compare
+        //      against MFEM's `$HOME/work/mfem_nd3_entries.txt`).
+        {
+            let mesh = Mesh::<2>::unit_square_quad(1);
+            let ho = HCurlSpace::new(mesh.clone(), 3);
+            let a = assemble_quad_nd_variant(
+                &ho,
+                &mesh,
+                &fem_element::nedelec::QuadND::new_integrated_gll(3),
+            );
+            let mut vals: Vec<f64> = Vec::new();
+            for i in 0..a.nrows {
+                for r in a.row_ptr[i]..a.row_ptr[i + 1] {
+                    vals.push(a.values[r]);
+                }
+            }
+            println!("fem-rs ND3 IGLL n=1: {} entries", vals.len());
+            let mut sorted = vals.clone();
+            sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            for v in &sorted {
+                println!("{v:.17}");
+            }
+        }
+
+        // (2) Exact-inner pencil + inner AMS quality on the IGLL ND3 system.
+        struct ExactInner {
+            b: CsrMatrix<f64>,
+        }
+        impl fem_solver::Preconditioner for ExactInner {
+            type Vector = DenseVec<f64>;
+            fn apply_precond(&self, x: &DenseVec<f64>, y: &mut DenseVec<f64>) {
+                let rhs = x.as_slice().to_vec();
+                let mut z = vec![0.0_f64; rhs.len()];
+                let cfg = SolverConfig {
+                    rtol: 1e-12,
+                    atol: 1e-14,
+                    max_iter: 3000,
+                    verbose: false,
+                    ..Default::default()
+                };
+                solve_cg(&self.b, &rhs, &mut z, &cfg).expect("inner cg");
+                *y = DenseVec::from_vec(z);
+            }
+        }
+        for n in [2usize, 4, 8] {
+            let mesh = Mesh::<2>::unit_square_quad(n);
+            let ho = HCurlSpace::new(mesh.clone(), 3);
+            let a_ho = assemble_quad_nd_variant(
+                &ho,
+                &mesh,
+                &fem_element::nedelec::QuadND::new_integrated_gll(3),
+            );
+            let lor = build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default())
+                .expect("LOR ND build");
+            let nn = a_ho.nrows;
+            let ones = vec![1.0_f64; nn];
+            let mut rhs = vec![0.0_f64; nn];
+            a_ho.spmv(&ones, &mut rhs);
+            // Plain CG (numbering-invariant operator diagnostic).
+            {
+                let cfg_plain = SolverConfig {
+                    rtol: 1e-8,
+                    atol: 0.0,
+                    max_iter: 2000,
+                    verbose: false,
+                    ..Default::default()
+                };
+                let mut xp = vec![0.0_f64; nn];
+                match solve_cg(&a_ho, &rhs, &mut xp, &cfg_plain) {
+                    Ok(r) => println!("ND3 quad IGLL n={n} plain CG: {} iters", r.iterations),
+                    Err(e) => println!("ND3 quad IGLL n={n} plain CG: FAILED {e}"),
+                }
+            }
+            let mut x0 = vec![0.0_f64; nn];
+            let cfg = SolverConfig {
+                rtol: 1e-8,
+                atol: 0.0,
+                max_iter: 800,
+                verbose: false,
+                ..Default::default()
+            };
+            let exact = ExactInner { b: lor.lor.ho_numbering(&lor.a_lor) };
+            match fem_solver::solve_pcg_precond(&a_ho, &rhs, &mut x0, &exact, &cfg) {
+                Ok(r) => println!("ND3 quad IGLL n={n} exact-inner PCG: {} iters", r.iterations),
+                Err(e) => println!("ND3 quad IGLL n={n} exact-inner PCG: FAILED {e}"),
+            }
+            let mut x1 = vec![0.0_f64; nn];
+            match fem_solver::solve_pcg_precond(&a_ho, &rhs, &mut x0, &lor, &cfg) {
+                Ok(r) => println!("ND3 quad IGLL n={n} LOR-AMS PCG: {} iters", r.iterations),
+                Err(e) => println!("ND3 quad IGLL n={n} LOR-AMS PCG: FAILED {e}"),
+            }
+            // Inner AMS quality on the LOR system itself (LOR numbering).
+            let nl = lor.a_lor.nrows;
+            let ones_l = vec![1.0_f64; nl];
+            let mut rhs_l = vec![0.0_f64; nl];
+            lor.a_lor.spmv(&ones_l, &mut rhs_l);
+            let mut x_l = vec![0.0_f64; nl];
+            let res = fem_solver::solve_fgmres_precond(
+                &lor.a_lor,
+                &rhs_l,
+                &mut x_l,
+                30,
+                &lor.inner,
+                &cfg,
+            );
+            println!(
+                "ND3 quad n={n} AMS inner solve on LOR system: {:?}",
+                res.map(|r| r.iterations)
+            );
+        }
     }
 
     /// Spectral equivalence: the extreme eigenvalues of the LOR matrix stay
@@ -916,6 +1137,78 @@ mod lor_vector_tests {
             }
             a.into_csr()
         }
+
+    /// Test-local affine-quad H(curl) assembler for an *arbitrary* `QuadND`
+    /// basis variant (the 2-D counterpart of [`assemble_hex_nd_variant`]):
+    /// assembles `(∇×u,∇×v) + (u,v)` with curl-curl quadrature `2k` and mass
+    /// `2k+3` (the library orders for a `Qk` tensor element).  Needed because
+    /// `HCurlSpace`'s library assembly path only reaches the legacy Lagrange ×
+    /// hat quad element, not the MFEM `ND_QuadrilateralElement` port.
+    fn assemble_quad_nd_variant(
+        ho: &HCurlSpace<Mesh<2>>,
+        mesh: &Mesh<2>,
+        el: &fem_element::nedelec::QuadND,
+    ) -> CsrMatrix<f64> {
+        use fem_element::reference::VectorReferenceElement as _;
+        let k = el.order() as usize;
+        let nd = el.n_dofs();
+        let qr_cc = fem_element::quadrature::quad_rule_01((2 * k) as u8);
+        let qr_m = fem_element::quadrature::quad_rule_01((2 * k + 3) as u8);
+        let mut a = fem_linalg::CooMatrix::<f64>::new(ho.n_dofs(), ho.n_dofs());
+        let mut v = vec![0.0_f64; nd * 2];
+        let mut c = vec![0.0_f64; nd];
+        for e in 0..mesh.n_elements() as u32 {
+            let verts = mesh.element_nodes(e);
+            // Affine quad map `x = p0 + J ξ` from the `[0,1]²` reference square;
+            // `unit_square_quad` elements are axis-aligned lattice cells.
+            let p0 = mesh.node_coords(verts[0]);
+            let p1 = mesh.node_coords(verts[1]);
+            let p3 = mesh.node_coords(verts[3]);
+            let h = [p1[0] - p0[0], p1[1] - p0[1]];
+            let g = [p3[0] - p0[0], p3[1] - p0[1]];
+            let det = h[0] * g[1] - h[1] * g[0];
+            // Covariant Piola `φ_phys = J^{-T} φ_ref`, `curl_phys = curl_ref/det`.
+            let jit = [[g[1] / det, -h[1] / det], [-g[0] / det, h[0] / det]];
+            let signs = ho.element_signs(e);
+            let dofs = ho.element_dofs(e);
+            let mut ae = vec![0.0_f64; nd * nd];
+            let mut add_rule = |rule: &fem_element::reference::QuadratureRule,
+                                curl_term: bool,
+                                ae: &mut Vec<f64>| {
+                for (q, xi) in rule.points.iter().enumerate() {
+                    let w = rule.weights[q] * det;
+                    el.eval_basis_vec(xi, &mut v);
+                    el.eval_curl(xi, &mut c);
+                    for i in 0..nd {
+                        let pix = jit[0][0] * v[i * 2] + jit[0][1] * v[i * 2 + 1];
+                        let piy = jit[1][0] * v[i * 2] + jit[1][1] * v[i * 2 + 1];
+                        let ci = c[i] / det;
+                        for j in 0..nd {
+                            let pjx = jit[0][0] * v[j * 2] + jit[0][1] * v[j * 2 + 1];
+                            let pjy = jit[1][0] * v[j * 2] + jit[1][1] * v[j * 2 + 1];
+                            let cj = c[j] / det;
+                            let dot = if curl_term {
+                                ci * cj
+                            } else {
+                                pix * pjx + piy * pjy
+                            };
+                            ae[i * nd + j] += w * signs[i] * signs[j] * dot;
+                        }
+                    }
+                }
+            };
+            add_rule(&qr_cc, true, &mut ae);
+            add_rule(&qr_m, false, &mut ae);
+            for i in 0..nd {
+                for j in 0..nd {
+                    if ae[i * nd + j] != 0.0 {
+                        a.add(dofs[i] as usize, dofs[j] as usize, ae[i * nd + j]);
+                    }
+                }
+            }
+        }
+        a.into_csr()
+    }
 
     /// D63 diagnostic: the `(GaussLobatto, IntegratedGLL)` ND pencil on hexes.
     ///
@@ -1038,8 +1331,8 @@ mod lor_vector_tests {
     ///
     /// MFEM 4.10 reference (`RT|ND_FECollection(o, 3, GaussLobatto,
     /// IntegratedGLL)`, curl-curl/div-div + mass, no BCs), with MFEM's LOR
-    /// using its own vertex-rule quadrature while fem-rs now uses exact rules
-    /// (`LorCurlCurl`), so `max|A_HO−A_LOR|` differs by the quadrature only:
+    /// using its own vertex-rule quadrature while fem-rs uses exact rules, so
+    /// `max|A_HO−A_LOR|` differs by the quadrature only:
     ///
     /// | case (FECollection order o) | ndof | perm neg | max\|A_HO−A_LOR\| |
     /// |---|---|---|---|
@@ -1119,7 +1412,8 @@ mod lor_vector_tests {
     ///
     /// **(2) The effect.**  Exact-inner pencil (`M⁻¹ = Πᵀ A_LOR⁻¹ Π`, the same
     /// metric as the C++ `$HOME/work/lor_pencil` harness) after the
-    /// [`LorCurlCurl`] fix.  ND3 hex with the LOR-compatible
+    /// curl-curl quadrature fix (D65; D71 later folded the `LorCurlCurl`
+    /// forwarder back into the kernel).  ND3 hex with the LOR-compatible
     /// `(GaussLobatto, IntegratedGLL)` pair: **10 → 11** iterations for
     /// n = 2 → 3 (mesh-independent; MFEM with the same recipe: 23 → 28 for an
     /// exact-rule LOR, 29 → 35 for its vertex-rule LOR).  RT1 hex — whose
