@@ -2381,6 +2381,15 @@ impl FaceGeom {
 /// seam is measured in its unfolded position instead of the folded vertex
 /// chord (`geom_coords_of` resolves the snapshot).  Otherwise the folded vertex
 /// table is used, which is bit-identical to it on every non-periodic mesh.
+///
+/// D59: on a 3-D mesh with **curved** geometry (`geom_order() >= 2`) the face
+/// geometry is the boundary element's own curved mapping instead of the
+/// corner-only bilinear one: the face's high-order geometry nodes (the owner
+/// element's geometry slots that lie on the face, resolved by reference
+/// position exactly like [`face_dofs_h1`]) are interpolated with the
+/// order-`geom_order` face element — MFEM's `GetBdrElementTransformation`,
+/// which transports the *volume* `Nodes` values of the face through the
+/// boundary element of the same order.
 fn boundary_face_geom(
     mesh: &dyn MeshTopology,
     f: u32,
@@ -2408,6 +2417,8 @@ fn boundary_face_geom(
             }
         };
         vec![[p0[0], p0[1], 0.0], [p1[0], p1[1], 0.0]]
+    } else if mesh.geom_order() > 1 {
+        return curved_boundary_face_geom(mesh, f, face_nodes, face_type, dim);
     } else {
         // 3-D: read the corners through the owner element so `geom_coords_of`
         // can resolve a per-element (unfolded) geometry snapshot.
@@ -2440,6 +2451,128 @@ fn boundary_face_geom(
     );
     FaceGeom {
         geo: face_geo_elem(face_type),
+        pts,
+        dim,
+    }
+}
+
+/// D59: [`FaceGeom`] of a 3-D boundary face on a **curved** mesh
+/// (`geom_order() >= 2`).
+///
+/// The face geometry element is the order-`q` trace of the volume geometry
+/// family (`QuadQk(q)` for a hex face, the `H1_TriangleElement` rule resolved
+/// against the volume element for a tet face — the same element
+/// [`ref_elem_face`] uses for the *space*, here applied at the geometry
+/// order), and its control points are the owner element's **geometry nodes**
+/// that lie on the face.  Each face dof is transported into the volume
+/// reference element through the straight-faced corner map and resolved to the
+/// nearest geometry slot by position — the identical mechanism
+/// [`face_dofs_h1`] uses to pair space dofs, so the geometry and the space see
+/// the same boundary transformation.
+fn curved_boundary_face_geom(
+    mesh: &dyn MeshTopology,
+    f: u32,
+    face_nodes: &[u32],
+    face_type: ElementType,
+    dim: usize,
+) -> FaceGeom {
+    use fem_element::lagrange::factory::{HexQk, QuadQk};
+
+    let q = mesh.geom_order() as usize;
+    let owner = face_owner(mesh, face_nodes).unwrap_or_else(|| {
+        panic!("curved_boundary_face_geom: no element contains every node of face {f}")
+    });
+    let elem_type = mesh.element_type(owner);
+
+    // The owner's geometry element: the same factory `set_curvature` used to
+    // lay out the geometry node list.
+    let geom_vol: Box<dyn ReferenceElement> = match elem_type {
+        ElementType::Hex8 => Box::new(HexQk::new(q)),
+        ElementType::Tet4 => Box::new(TetPk::new(q)),
+        other => panic!(
+            "curved_boundary_face_geom: unsupported curved owner element {other:?} (face {f})"
+        ),
+    };
+    let geom_vol_coords = geom_vol.dof_coords();
+    let gn = mesh.geometry_nodes(owner);
+    assert_eq!(
+        gn.len(),
+        geom_vol_coords.len(),
+        "curved_boundary_face_geom: element {owner} has {} geometry nodes but the \
+         order-{q} {} geometry element has {}",
+        gn.len(),
+        match elem_type {
+            ElementType::Hex8 => "HexQk",
+            _ => "TetPk",
+        },
+        geom_vol_coords.len(),
+    );
+
+    // The face's corners as coordinates of the volume reference element, in
+    // the face's corner order (corner dofs sit first, in vertex order).
+    let elem_nodes = mesh.element_nodes(owner);
+    let mut corner_ref: Vec<&[f64]> = Vec::with_capacity(face_nodes.len());
+    for &n in face_nodes {
+        let pos = elem_nodes.iter().position(|&en| en == n).unwrap_or_else(|| {
+            panic!("curved_boundary_face_geom: node {n} of face {f} is not in element {owner}")
+        });
+        corner_ref.push(&geom_vol_coords[pos]);
+    }
+
+    // Face geometry element of the same order — MFEM's boundary element.
+    let (face_geo, face_coords): (Box<dyn ReferenceElement>, Vec<Vec<f64>>) =
+        match face_type {
+            ElementType::Tri3 => {
+                let e = H1TetFacePk::new(q);
+                let c = e.dof_coords();
+                (Box::new(e), c)
+            }
+            ElementType::Quad4 => {
+                let e = QuadQk::new(q);
+                let c = e.dof_coords();
+                (Box::new(e), c)
+            }
+            other => panic!(
+                "curved_boundary_face_geom: unsupported boundary face type {other:?} (face {f})"
+            ),
+        };
+
+    // Control points: transport every face dof position into the volume
+    // reference element through the straight corner map and resolve it to the
+    // nearest geometry slot (distinct slots are >= 1e-2 apart, the map rounds
+    // at <= 1e-15 — the face_dofs_h1 tolerances).
+    let transport = face_geo_elem(face_type);
+    let mut phi = vec![0.0_f64; face_nodes.len()];
+    let mut pts = Vec::with_capacity(face_coords.len());
+    for fc in face_coords.iter() {
+        transport.eval_basis(fc, &mut phi);
+        let mut x = [0.0_f64; 3];
+        for (k, c) in corner_ref.iter().enumerate() {
+            for i in 0..3 {
+                x[i] += phi[k] * (*c.get(i).unwrap_or(&0.0));
+            }
+        }
+        let mut best = 0usize;
+        let mut best_d2 = f64::INFINITY;
+        for (k, c) in geom_vol_coords.iter().enumerate() {
+            let d2: f64 = (0..3).map(|i| (c.get(i).copied().unwrap_or(0.0) - x[i]).powi(2)).sum();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = k;
+            }
+        }
+        assert!(
+            best_d2 < 1e-20,
+            "curved_boundary_face_geom: no geometry dof of element {owner} at {x:?} \
+             (face {f} dof {fc:?}, nearest distance {:.3e})",
+            best_d2.sqrt()
+        );
+        let c = mesh.geom_coords_of(gn[best]);
+        pts.push([c[0], c[1], *c.get(2).unwrap_or(&0.0)]);
+    }
+
+    FaceGeom {
+        geo: face_geo,
         pts,
         dim,
     }

@@ -10,7 +10,7 @@
 //! DOF ordering within each element follows [`fem_element::TriPk`] / [`fem_element::TetPk`].
 
 use std::collections::HashMap;
-use fem_core::types::{DofId, ElemId, NodeId};
+use fem_core::types::{DofId, ElemId, FaceId, NodeId};
 use fem_mesh::topology::MeshTopology;
 use fem_element::ReferenceElement;
 
@@ -81,6 +81,91 @@ impl QuadFaceKey {
         v.sort_unstable();
         QuadFaceKey(v[0], v[1], v[2], v[3])
     }
+}
+
+// ─── D61: periodic-mesh numbering ────────────────────────────────────────────
+
+/// True when `mesh` carries a per-element geometry snapshot whose corner
+/// pairing against the folded connectivity reveals **merged (periodic)
+/// vertices**: some element corner references a different geometry node than
+/// the folded vertex — the signature of `Mesh::make_periodic`, which keeps
+/// the pre-merge table as the per-element geometry (order-1 snapshot or a
+/// high-order geometry built before the merge).
+///
+/// Curved *non-periodic* meshes reuse the mesh vertex ids as geometry corner
+/// ids (`set_curvature`), so they never trigger; their behaviour stays
+/// bit-for-bit unchanged.
+fn is_periodic_merged<M: MeshTopology>(mesh: &M) -> bool {
+    for e in 0..mesh.n_elements() as u32 {
+        let gn = mesh.geometry_nodes(e);
+        let fnodes = mesh.element_nodes(e);
+        for k in 0..fnodes.len() {
+            if gn[k] != fnodes[k] {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Torus-entity signature of one un-merged entity occurrence: the folded
+/// vertex set plus the translation-invariant geometric frame that separates
+/// distinct periodic images sharing that vertex set (D61).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EntitySig {
+    /// Folded vertex pair + unfolded endpoint displacement along the folded
+    /// low→high orientation (quantized).
+    Edge { key: (NodeId, NodeId), delta: [i64; 3] },
+    /// Sorted folded corners + (folded id, corner offset) of the remaining
+    /// corners relative to the lowest folded corner's image.
+    TriFace {
+        key: (NodeId, NodeId, NodeId),
+        offs: [(NodeId, [i64; 3]); 2],
+    },
+    /// As [`EntitySig::TriFace`], for quadrilateral faces.
+    QuadFace {
+        key: (NodeId, NodeId, NodeId, NodeId),
+        offs: [(NodeId, [i64; 3]); 3],
+    },
+}
+
+/// The **un-merged** view of a geometrically periodic mesh: element
+/// connectivity is the element's own pre-merge geometry corner list (from the
+/// order-1 periodic snapshot) and node coordinates are the pre-merge table,
+/// so the plain DOF builders number every geometric entity of the covering
+/// mesh before the periodic quotient ([`DofManager::build_periodic`]) merges
+/// them.
+struct UnfoldedPeriodicMesh<'a, M: MeshTopology> {
+    inner: &'a M,
+}
+
+impl<M: MeshTopology> MeshTopology for UnfoldedPeriodicMesh<'_, M> {
+    fn dim(&self) -> u8 { self.inner.dim() }
+    fn topological_dim(&self) -> u8 { self.inner.topological_dim() }
+    fn n_nodes(&self) -> usize { self.inner.geom_n_nodes() }
+    fn n_elements(&self) -> usize { self.inner.n_elements() }
+    fn n_boundary_faces(&self) -> usize { self.inner.n_boundary_faces() }
+    fn element_nodes(&self, elem: ElemId) -> &[NodeId] {
+        // The element's own pre-merge corners: the geometry snapshot's node
+        // list starts with the corners in element vertex order (vertex DOFs
+        // reuse the mesh vertices, `set_curvature`), so the FE corner slice
+        // is the prefix of the geometry list — also on curved periodic
+        // meshes, whose geometry list continues with the high-order nodes.
+        let npe = self.inner.element_nodes(elem).len();
+        &self.inner.geometry_nodes(elem)[..npe]
+    }
+    fn element_type(&self, elem: ElemId) -> fem_mesh::ElementType { self.inner.element_type(elem) }
+    fn element_tag(&self, elem: ElemId) -> i32 { self.inner.element_tag(elem) }
+    fn node_coords(&self, node: NodeId) -> &[f64] { self.inner.geom_coords_of(node) }
+    fn face_nodes(&self, face: FaceId) -> &[NodeId] { self.inner.face_nodes(face) }
+    fn face_tag(&self, face: FaceId) -> i32 { self.inner.face_tag(face) }
+    fn face_elements(&self, face: FaceId) -> (ElemId, Option<ElemId>) {
+        self.inner.face_elements(face)
+    }
+    fn geom_order(&self) -> u8 { self.inner.geom_order() }
+    fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] { self.inner.geometry_nodes(elem) }
+    fn geom_coords_of(&self, node: NodeId) -> &[f64] { self.inner.geom_coords_of(node) }
+    fn geom_n_nodes(&self) -> usize { self.inner.geom_n_nodes() }
 }
 
 // ─── DofManager ──────────────────────────────────────────────────────────────
@@ -172,16 +257,33 @@ impl DofManager {
     /// rebuilt from each element's own geometry nodes after the fold-based
     /// construction (D56) — see [`DofManager::rebuild_dof_coords_periodic`].
     ///
+    /// Geometrically periodic meshes (order-1 geometry snapshot, i.e.
+    /// `geom_order() == 1 && geom_n_nodes() != n_nodes()`) additionally take
+    /// the D61 numbering path
+    /// ([`DofManager::build_periodic`]): the plain vertex-pair
+    /// [`EdgeKey`]/[`FaceKey`]/[`QuadFaceKey`] dedup under-counts DOFs when a
+    /// periodic direction has fewer than three cells (several torus
+    /// edges/faces share one folded vertex set), so the numbering is built on
+    /// the un-merged connectivity and quotiented by explicit per-entity
+    /// geometric identity.
+    ///
     /// # Panics
     /// Panics if the requested order is unsupported for the mesh type.
     pub fn new<M: MeshTopology>(mesh: &M, order: u8) -> Self {
-        let mut dm = Self::build(mesh, order);
+        let periodic = is_periodic_merged(mesh);
+        let mut dm = if periodic {
+            Self::build_periodic(mesh, order)
+        } else {
+            Self::build(mesh, order)
+        };
         // D56: a periodic geometry snapshot keeps per-element coordinates, so
         // the fold-based table above places seam DOFs at folded chord
         // positions no element can see.  Rebuild per element (MFEM
         // `ProjectCoefficient` semantics: evaluate at each element's own
-        // nodal points, last writer wins for shared DOFs).
-        if mesh.geom_order() == 1 && mesh.geom_n_nodes() != mesh.n_nodes() {
+        // nodal points, last writer wins for shared DOFs).  D62: this also
+        // covers periodic meshes with curved (order >= 2) geometry, whose
+        // coordinates are evaluated through the high-order geometry basis.
+        if periodic {
             dm.rebuild_dof_coords_periodic(mesh);
         }
         dm
@@ -2423,12 +2525,416 @@ impl DofManager {
 
     // ─── D56: periodic per-element geometry ────────────────────────────────────
 
+    /// D61: build the DOF numbering of a **geometrically periodic** mesh.
+    ///
+    /// On a periodic mesh whose connectivity has been vertex-merged, plain
+    /// vertex-pair entity keys are no longer injective: when a periodic
+    /// direction carries fewer than three cells, distinct torus edges/faces
+    /// share one folded vertex set (e.g. on the fully periodic 2×2×2 hex mesh
+    /// every element's corner set is the whole folded vertex table, so all 24
+    /// torus faces collapse onto 6 [`QuadFaceKey`]s — Q2 would count 34 DOFs
+    /// instead of 64).  MFEM avoids the collision the same way on meshes with
+    /// ≥3 cells per direction because its vertex-merged topology happens to
+    /// keep entity sets distinct; below that it cannot build the mesh at all
+    /// (`Mesh::GenerateFaces` rejects the 3-element face), so there is no C++
+    /// count to copy and the torus-entity count is the reference.
+    ///
+    /// The fix mirrors MFEM's design (number DOFs per mesh entity, then merge
+    /// through the periodic identification): run the ordinary builder on an
+    /// **un-merged** view of the mesh ([`UnfoldedPeriodicMesh`] — each
+    /// element's own pre-merge geometry corners, from the order-1 periodic
+    /// snapshot), then quotient the resulting entity DOFs to torus entities.
+    /// Two entity occurrences are the same torus entity iff their folded
+    /// vertex set *and* their translation-invariant geometric frame agree:
+    ///
+    /// - edges: folded vertex pair + the unfolded endpoint displacement taken
+    ///   along the folded low→high orientation.  The displacement separates
+    ///   the two half-period arcs between the same vertex pair that appear at
+    ///   two cells per direction; it is invariant under the periodic
+    ///   translation, so the two covering images of one seam edge unify.
+    /// - faces: sorted folded corner ids + the corner offsets relative to the
+    ///   lowest folded corner's image (ordered by folded id), which fixes the
+    ///   face's phase with respect to the vertex lattice.
+    ///
+    /// Displacements are quantized against the mesh scale, so covering images
+    /// match bit-for-bit after the translation round-trip.
+    ///
+    /// Final DOF ids are assigned to the quotient classes in order of their
+    /// first-touch (un-merged) id, which reproduces the plain builder's
+    /// numbering **bit-for-bit** whenever no key collision exists (≥3 cells
+    /// per direction) — there the quotient only re-joins the covering images
+    /// of seam entities that the folded build merged through the shared key.
+    fn build_periodic<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        let wrapper = UnfoldedPeriodicMesh { inner: mesh };
+        let uf = Self::build(&wrapper, order);
+        let n_nodes = mesh.n_nodes();
+        let dim = uf.dim;
+
+        // Unfolded geometry node → folded vertex id (position-wise corner
+        // pairing between the pre-merge snapshot and the merged connectivity).
+        let n_uf_nodes = wrapper.n_nodes();
+        let mut fold = vec![u32::MAX; n_uf_nodes];
+        for e in 0..mesh.n_elements() as u32 {
+            let gn = mesh.geometry_nodes(e);
+            let fnodes = mesh.element_nodes(e);
+            for (&g, &f) in gn.iter().zip(fnodes.iter()) {
+                fold[g as usize] = f;
+            }
+        }
+
+        // Quantized displacement of two unfolded points (scale-relative, so
+        // the periodic translation round-trip cancels exactly).
+        let mut scale = 1.0_f64;
+        for g in 0..n_uf_nodes as u32 {
+            for &c in wrapper.node_coords(g) {
+                scale = scale.max(c.abs());
+            }
+        }
+        let quant = |v: f64| -> i64 { (v / scale * 1.0e10).round() as i64 };
+        let pt = |g: NodeId| -> [i64; 3] {
+            let c = wrapper.node_coords(g);
+            [
+                quant(c[0]),
+                quant(c[1]),
+                if dim > 2 { quant(c[2]) } else { 0 },
+            ]
+        };
+
+        // One un-merged entity occurrence: its torus signature, its DOFs in
+        // stored order, and (edges) whether the stored order runs against the
+        // folded low→high orientation.  `base` is the physical image of the
+        // reference corner (folded-lowest), used to align multi-DOF members
+        // whose creation orientations differ.  `src` identifies the public
+        // entity map the occurrence was registered in.
+        struct Occ {
+            sig: EntitySig,
+            dofs: Vec<DofId>,
+            flip: bool,
+            base: [f64; 3],
+            src: u8,
+        }
+        const SRC_EDGE_DOF: u8 = 0;
+        const SRC_EDGE_DOF2: u8 = 1;
+        const SRC_EDGE_PK: u8 = 2;
+        const SRC_FACE_PK: u8 = 3;
+        const SRC_QFACE_PK: u8 = 4;
+        let fpt = |g: NodeId| -> [f64; 3] {
+            let c = wrapper.node_coords(g);
+            [c[0], c[1], if dim > 2 { c[2] } else { 0.0 }]
+        };
+
+        let mut occs: Vec<Occ> = Vec::new();
+        let push_edge = |a: NodeId, b: NodeId, dofs: Vec<DofId>, src: u8, occs: &mut Vec<Occ>| {
+            let (fa, fb) = (fold[a as usize], fold[b as usize]);
+            let fkey = EdgeKey::new(fa, fb);
+            // Canonical stored order: along folded low → high.
+            let flip = fa > fb;
+            let delta = if flip {
+                [pt(a)[0] - pt(b)[0], pt(a)[1] - pt(b)[1], pt(a)[2] - pt(b)[2]]
+            } else {
+                [pt(b)[0] - pt(a)[0], pt(b)[1] - pt(a)[1], pt(b)[2] - pt(a)[2]]
+            };
+            // Reference corner: the endpoint folding to the folded-low id
+            // (on a self-loop, both endpoints fold together — use the key's
+            // low endpoint consistently).
+            let base = if fa <= fb { fpt(a) } else { fpt(b) };
+            occs.push(Occ {
+                sig: EntitySig::Edge { key: (fkey.0, fkey.1), delta },
+                dofs,
+                flip,
+                base,
+                src,
+            });
+        };
+        for &EdgeKey(a, b) in uf.edge_dof_map.keys() {
+            let d = uf.edge_dof_map[&EdgeKey(a, b)];
+            push_edge(a, b, vec![d], SRC_EDGE_DOF, &mut occs);
+        }
+        for (&EdgeKey(a, b), dofs) in &uf.edge_dof2_map {
+            push_edge(a, b, dofs.to_vec(), SRC_EDGE_DOF2, &mut occs);
+        }
+        for (&EdgeKey(a, b), dofs) in &uf.edge_pk_map {
+            push_edge(a, b, dofs.clone(), SRC_EDGE_PK, &mut occs);
+        }
+        for (&FaceKey(a, b, c), dofs) in &uf.face_pk_map {
+            let mut corners = [
+                (fold[a as usize], a, pt(a)),
+                (fold[b as usize], b, pt(b)),
+                (fold[c as usize], c, pt(c)),
+            ];
+            corners.sort_by_key(|&(f, _, _)| f);
+            let base = fpt(corners[0].1);
+            let base_q = corners[0].2;
+            let off = |p: [i64; 3]| [p[0] - base_q[0], p[1] - base_q[1], p[2] - base_q[2]];
+            occs.push(Occ {
+                sig: EntitySig::TriFace {
+                    key: (corners[0].0, corners[1].0, corners[2].0),
+                    offs: [
+                        (corners[1].0, off(corners[1].2)),
+                        (corners[2].0, off(corners[2].2)),
+                    ],
+                },
+                dofs: dofs.clone(),
+                flip: false,
+                base,
+                src: SRC_FACE_PK,
+            });
+        }
+        for (&QuadFaceKey(a, b, c, d), dofs) in &uf.quad_face_pk_map {
+            let mut corners = [
+                (fold[a as usize], a, pt(a)),
+                (fold[b as usize], b, pt(b)),
+                (fold[c as usize], c, pt(c)),
+                (fold[d as usize], d, pt(d)),
+            ];
+            corners.sort_by_key(|&(f, _, _)| f);
+            let base = fpt(corners[0].1);
+            let base_q = corners[0].2;
+            let off = |p: [i64; 3]| [p[0] - base_q[0], p[1] - base_q[1], p[2] - base_q[2]];
+            occs.push(Occ {
+                sig: EntitySig::QuadFace {
+                    key: (corners[0].0, corners[1].0, corners[2].0, corners[3].0),
+                    offs: [
+                        (corners[1].0, off(corners[1].2)),
+                        (corners[2].0, off(corners[2].2)),
+                        (corners[3].0, off(corners[3].2)),
+                    ],
+                },
+                dofs: dofs.clone(),
+                flip: false,
+                base,
+                src: SRC_QFACE_PK,
+            });
+        }
+
+        // Group occurrences into torus-entity classes.
+        occs.sort_by(|x, y| x.sig.cmp(&y.sig));
+        let mut i = 0;
+        let mut classes: Vec<Vec<Occ>> = Vec::new();
+        while i < occs.len() {
+            let sig = occs[i].sig.clone();
+            let mut members = Vec::new();
+            while i < occs.len() && occs[i].sig == sig {
+                members.push(std::mem::replace(
+                    &mut occs[i],
+                    Occ {
+                        sig: sig.clone(),
+                        dofs: Vec::new(),
+                        flip: false,
+                        base: [0.0; 3],
+                        src: 0,
+                    },
+                ));
+                i += 1;
+            }
+            classes.push(members);
+        }
+
+        // Canonical member of each class = earliest first-touch (its stored
+        // order is the one the folded build would have created); final ids are
+        // assigned to classes in first-touch order, which reproduces the
+        // plain builder's numbering bit-for-bit when no collision exists.
+        let mut order_key: Vec<(DofId, usize)> = Vec::with_capacity(classes.len());
+        for (ci, members) in classes.iter().enumerate() {
+            let first = members.iter().map(|o| o.dofs[0]).min().unwrap();
+            order_key.push((first, ci));
+        }
+        // Volume-interior DOFs (and any other DOF outside the entity maps)
+        // are element-private singletons; they join the same first-touch
+        // ordering so the global id sequence stays the builder's.
+        let mut relabel = vec![u32::MAX; uf.n_dofs];
+        for g in 0..n_uf_nodes as u32 {
+            if fold[g as usize] != u32::MAX {
+                relabel[g as usize] = fold[g as usize];
+            }
+        }
+        let mut singletons: Vec<DofId> = (n_uf_nodes as DofId..uf.n_dofs as DofId)
+            .filter(|&d| relabel[d as usize] == u32::MAX)
+            .collect();
+        let classified: std::collections::HashSet<DofId> = classes
+            .iter()
+            .flat_map(|ms| ms.iter().flat_map(|o| o.dofs.iter().copied()))
+            .collect();
+        singletons.retain(|&d| !classified.contains(&d));
+        for &d in &singletons {
+            order_key.push((d, usize::MAX));
+        }
+        order_key.sort();
+        // Per-map records of the quotient classes: (folded key, final dofs).
+        let mut rec_edge_dof: Vec<(EdgeKey, DofId)> = Vec::new();
+        let mut rec_edge_dof2: Vec<(EdgeKey, [DofId; 2])> = Vec::new();
+        let mut rec_edge_pk: Vec<(EdgeKey, Vec<DofId>)> = Vec::new();
+        let mut rec_face_pk: Vec<(FaceKey, Vec<DofId>)> = Vec::new();
+        let mut rec_qface_pk: Vec<(QuadFaceKey, Vec<DofId>)> = Vec::new();
+        let mut next = n_nodes as DofId;
+        for (first, ci) in &order_key {
+            if *ci == usize::MAX {
+                relabel[*first as usize] = next;
+                next += 1;
+                continue;
+            }
+            let members = &classes[*ci];
+            // Canonical member: earliest first-touch.  Its (re-oriented) DOF
+            // order defines the class vector — the order the folded build
+            // would have created.
+            let canon = members
+                .iter()
+                .min_by_key(|o| o.dofs[0])
+                .unwrap();
+            let canon_orient = |o: &Occ, v: &[DofId]| -> Vec<DofId> {
+                if o.flip { v.iter().rev().copied().collect() } else { v.to_vec() }
+            };
+            let canon_dofs = canon_orient(canon, &canon.dofs);
+            for (k, &d) in canon_dofs.iter().enumerate() {
+                relabel[d as usize] = next + k as DofId;
+            }
+            for o in members {
+                if std::ptr::eq(o, canon) {
+                    continue;
+                }
+                let member_dofs = canon_orient(o, &o.dofs);
+                assert_eq!(member_dofs.len(), canon_dofs.len(), "class size mismatch");
+                for (k, &d) in member_dofs.iter().enumerate() {
+                    let target = if canon_dofs.len() > 1 {
+                        // Align by physical position: the member is a periodic
+                        // translate of the canonical occurrence, so its DOF k
+                        // sits at the canonical DOF j's position shifted by
+                        // t = base_canon − base_member.  (The builder's own
+                        // stored order for the two covering images can differ
+                        // — e.g. opposite local face templates — so plain
+                        // position-wise union would misalign multi-DOF
+                        // faces.)
+                        let tol = scale * 1.0e-9;
+                        let pos = |e: DofId| -> [f64; 3] {
+                            let c = &uf.dof_coords[e as usize * dim..e as usize * dim + dim];
+                            [c[0], c[1], if dim > 2 { c[2] } else { 0.0 }]
+                        };
+                        let t = [
+                            canon.base[0] - o.base[0],
+                            canon.base[1] - o.base[1],
+                            canon.base[2] - o.base[2],
+                        ];
+                        let canon_pos: Vec<[f64; 3]> =
+                            canon_dofs.iter().map(|&e| pos(e)).collect();
+                        let distinct = canon_pos.iter().all(|&p| {
+                            canon_pos.iter().all(|&q| {
+                                p == q
+                                    || (p[0] - q[0]).abs() > tol
+                                        || (p[1] - q[1]).abs() > tol
+                                        || (p[2] - q[2]).abs() > tol
+                            })
+                        });
+                        if distinct {
+                            let p = pos(d);
+                            canon_pos
+                                .iter()
+                                .position(|&q| {
+                                    (q[0] - (p[0] + t[0])).abs() <= tol
+                                        && (q[1] - (p[1] + t[1])).abs() <= tol
+                                        && (q[2] - (p[2] + t[2])).abs() <= tol
+                                })
+                                .unwrap_or_else(|| panic!(
+                                    "build_periodic: entity DOF at {p:?}+{t:?} not found on the \
+                                     canonical image"
+                                ))
+                        } else {
+                            // DOF positions not distinguishable (builder wrote
+                            // coincident coordinates): keep stored order — the
+                            // same convention as the folded build.
+                            k
+                        }
+                    } else {
+                        k
+                    };
+                    relabel[d as usize] = next + target as DofId;
+                }
+            }
+            // Record the class vector for the public entity map it came from.
+            let final_vec: Vec<DofId> =
+                (0..canon_dofs.len() as DofId).map(|k| next + k).collect();
+            match &members[0].sig {
+                EntitySig::Edge { key, .. } => {
+                    let fkey = EdgeKey::new(key.0, key.1);
+                    match members[0].src {
+                        SRC_EDGE_DOF => rec_edge_dof.push((fkey, final_vec[0])),
+                        SRC_EDGE_DOF2 => {
+                            rec_edge_dof2.push((fkey, [final_vec[0], final_vec[1]]));
+                        }
+                        _ => rec_edge_pk.push((fkey, final_vec)),
+                    }
+                }
+                EntitySig::TriFace { key, .. } => {
+                    rec_face_pk
+                        .push((FaceKey::new(key.0, key.1, key.2), final_vec));
+                }
+                EntitySig::QuadFace { key, .. } => {
+                    rec_qface_pk.push((
+                        QuadFaceKey::new(key.0, key.1, key.2, key.3),
+                        final_vec,
+                    ));
+                }
+            }
+            next += canon_dofs.len() as DofId;
+        }
+
+        // Rewrite the element tables through the quotient.
+        let mut dofs_flat = uf.dofs_flat;
+        for v in dofs_flat.iter_mut() {
+            let r = relabel[*v as usize];
+            assert!(r != u32::MAX, "build_periodic: unlabelled DOF {v}");
+            *v = r;
+        }
+
+        // Public entity maps carry the quotient classes directly: the class
+        // record already holds the folded key and the canonical final vector
+        // (folded low→high for edges — the convention `get_edge_dofs_pk`
+        // stores vectors in).
+        let edge_pk_map: HashMap<EdgeKey, Vec<DofId>> =
+            rec_edge_pk.into_iter().collect();
+        let edge_dof_map: HashMap<EdgeKey, DofId> =
+            rec_edge_dof.into_iter().collect();
+        let edge_dof2_map: HashMap<EdgeKey, [DofId; 2]> =
+            rec_edge_dof2.into_iter().collect();
+        let face_pk_map: HashMap<FaceKey, Vec<DofId>> =
+            rec_face_pk.into_iter().collect();
+        let quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> =
+            rec_qface_pk.into_iter().collect();
+
+        let bubble_dof_start = if uf.bubble_dof_start < uf.n_dofs {
+            relabel[uf.bubble_dof_start as usize] as usize
+        } else {
+            next as usize
+        };
+
+        DofManager {
+            order: uf.order,
+            n_dofs: next as usize,
+            dofs_flat,
+            dofs_per_elem: uf.dofs_per_elem,
+            elem_dof_offsets: uf.elem_dof_offsets,
+            dof_coords: vec![0.0; next as usize * dim],
+            dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map,
+            edge_dof2_map,
+            phys_to_vertex_dof: uf.phys_to_vertex_dof,
+            edge_pk_map,
+            face_pk_map,
+            quad_face_pk_map,
+            bubble_dof_start,
+            n_volume_dofs: uf.n_volume_dofs,
+            elem_orders: uf.elem_orders,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
+        }
+    }
+
     /// Rebuild the DOF coordinate table from each element's **own** geometry
     /// nodes ([`MeshTopology::geometry_nodes`] / [`MeshTopology::geom_coords_of`]).
     ///
-    /// A geometrically periodic mesh carries an order-1 per-element geometry
-    /// snapshot (MFEM `MakePeriodic` materializes the nodal `Nodes` grid
-    /// function *before* merging vertices), so a shared (seam) DOF sits at a
+    /// A geometrically periodic mesh carries a per-element geometry snapshot
+    /// (MFEM `MakePeriodic` materializes the nodal `Nodes` grid function
+    /// *before* merging vertices), so a shared (seam) DOF sits at a
     /// *different* physical point in each of its elements — the folded vertex
     /// table is only one image and the fold-based table built above also
     /// places seam edge/face DOFs at chord midpoints no element can see.
@@ -2437,8 +2943,13 @@ impl DofManager {
     /// element's own transform and letting the last element win for shared
     /// DOFs.  This method produces exactly the coordinate table that a
     /// dof-wise evaluation then reproduces: each element maps its reference
-    /// DOF positions through its own (order-1, hence affine) geometry and
-    /// overwrites the global entries in element order.
+    /// DOF positions through its own geometry and overwrites the global
+    /// entries in element order.
+    ///
+    /// D62: the evaluation runs through the mesh's own **geometry order** —
+    /// affine (order-1) snapshots use the trilinear/Q1 basis over the corner
+    /// snapshot, curved periodic meshes (order >= 2) use the corresponding
+    /// high-order geometry basis over the element's full geometry node list.
     ///
     /// Element slot layouts must match the reference factories the H1
     /// assembler evaluates (QuadQk / HexQk / H1TriPk / TetPk / PrismPk /
@@ -2451,18 +2962,37 @@ impl DofManager {
 
         let dim = self.dim;
         let topo_dim = mesh.topological_dim() as usize;
+        let geom_order = mesh.geom_order() as usize;
         let n_elems = mesh.n_elements();
         for e in 0..n_elems as u32 {
             let p = self.element_order(e) as usize;
             let npe = mesh.element_nodes(e).len();
-            let (ref_elem, q1): (Box<dyn ReferenceElement>, Box<dyn ReferenceElement>) =
+            let (ref_elem, geom_elem): (Box<dyn ReferenceElement>, Box<dyn ReferenceElement>) =
                 match (npe, topo_dim) {
-                    (4, 2) => (Box::new(QuadQk::new(p)), Box::new(QuadQk::new(1))),
-                    (8, _) => (Box::new(HexQk::new(p)), Box::new(HexQk::new(1))),
-                    (3, 2) => (Box::new(H1TriPk::new(p)), Box::new(H1TriPk::new(1))),
-                    (4, _) => (Box::new(TetPk::new(p)), Box::new(TetPk::new(1))),
-                    (6, _) => (Box::new(PrismPk::new(p)), Box::new(PrismPk::new(1))),
-                    (5, _) => (Box::new(PyramidPk::new(p)), Box::new(PyramidPk::new(1))),
+                    (4, 2) => (
+                        Box::new(QuadQk::new(p)),
+                        Box::new(QuadQk::new(geom_order)),
+                    ),
+                    (8, _) => (
+                        Box::new(HexQk::new(p)),
+                        Box::new(HexQk::new(geom_order)),
+                    ),
+                    (3, 2) => (
+                        Box::new(H1TriPk::new(p)),
+                        Box::new(H1TriPk::new(geom_order)),
+                    ),
+                    (4, _) => (
+                        Box::new(TetPk::new(p)),
+                        Box::new(TetPk::new(geom_order)),
+                    ),
+                    (6, _) => (
+                        Box::new(PrismPk::new(p)),
+                        Box::new(PrismPk::new(geom_order)),
+                    ),
+                    (5, _) => (
+                        Box::new(PyramidPk::new(p)),
+                        Box::new(PyramidPk::new(geom_order)),
+                    ),
                     _ => continue,
                 };
             let dofs = self.element_dofs(e).to_vec();
@@ -2475,7 +3005,7 @@ impl DofManager {
             let gnodes = mesh.geometry_nodes(e);
             let mut phi = vec![0.0_f64; gnodes.len()];
             for (slot, rc) in ref_dofs.iter().enumerate() {
-                q1.eval_basis(rc, &mut phi);
+                geom_elem.eval_basis(rc, &mut phi);
                 let mut x = [0.0_f64; 3];
                 for (k, &phik) in phi.iter().enumerate() {
                     if phik == 0.0 {
@@ -2498,6 +3028,69 @@ mod tests {
     use super::*;
     use fem_mesh::Mesh;
 
+    /// D61 pin: on periodic meshes with ≥3 cells per direction (no vertex-set
+    /// collisions) the quotient numbering must reproduce the plain folded
+    /// build bit-for-bit — same `dofs_flat`, same `n_dofs`, same entity maps.
+    fn assert_periodic_matches_folded<M: MeshTopology>(mesh: &M, order: u8) {
+        let dm_new = DofManager::new(mesh, order);
+        let dm_ref = DofManager::build(mesh, order);
+        // Apply the same D56 coordinate rebuild to the reference so both sides
+        // carry per-element seam coordinates.
+        let mut dm_ref = dm_ref;
+        dm_ref.rebuild_dof_coords_periodic(mesh);
+        assert_eq!(dm_new.n_dofs, dm_ref.n_dofs, "order {order}: n_dofs");
+        assert_eq!(dm_new.dofs_flat, dm_ref.dofs_flat, "order {order}: dofs_flat");
+        assert_eq!(dm_new.edge_dof_map, dm_ref.edge_dof_map, "order {order}: edge_dof_map");
+        assert_eq!(dm_new.edge_dof2_map, dm_ref.edge_dof2_map, "order {order}: edge_dof2_map");
+        assert_eq!(dm_new.edge_pk_map, dm_ref.edge_pk_map, "order {order}: edge_pk_map");
+        assert_eq!(dm_new.face_pk_map, dm_ref.face_pk_map, "order {order}: face_pk_map");
+        assert_eq!(
+            dm_new.quad_face_pk_map, dm_ref.quad_face_pk_map,
+            "order {order}: quad_face_pk_map"
+        );
+        assert_eq!(dm_new.dof_coords, dm_ref.dof_coords, "order {order}: dof_coords");
+    }
+
+    #[test]
+    fn d61_periodic_numbering_matches_folded_build_hex() {
+        for n in [3usize, 4] {
+            let base = Mesh::<3>::make_cartesian_3d(
+                n, n, n, fem_mesh::ElementType::Hex8, 1.0, 1.0, 1.0, true,
+            );
+            let mesh = base
+                .make_periodic(
+                    &[
+                        (5, 3, [1.0, 0.0, 0.0]),
+                        (2, 4, [0.0, 1.0, 0.0]),
+                        (1, 6, [0.0, 0.0, 1.0]),
+                    ],
+                    1e-10,
+                )
+                .unwrap();
+            for order in [1u8, 2, 3, 4] {
+                assert_periodic_matches_folded(&mesh, order);
+            }
+        }
+    }
+
+    #[test]
+    fn d61_periodic_numbering_matches_folded_build_2d() {
+        // 4x4 quad strip periodic in both directions.
+        let base = Mesh::<2>::make_cartesian_2d(4, 4, 1.0, 1.0);
+        let mesh = base
+            .make_periodic(&[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])], 1e-10)
+            .unwrap();
+        for order in [1u8, 2, 3, 4] {
+            assert_periodic_matches_folded(&mesh, order);
+        }
+        let tri_base = Mesh::<2>::unit_square_tri(4);
+        let tri_mesh = tri_base
+            .make_periodic(&[(4, 2, [1.0, 0.0]), (1, 3, [0.0, 1.0])], 1e-10)
+            .unwrap();
+        for order in [1u8, 2, 3] {
+            assert_periodic_matches_folded(&tri_mesh, order);
+        }
+    }
 
     #[test]
     fn pk3_matches_build_p3_tri() {
