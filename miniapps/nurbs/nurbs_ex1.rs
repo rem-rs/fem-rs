@@ -21,7 +21,6 @@
 
 use std::f64::consts::LN_2;
 
-use fem_element::nurbs_fe_collection::knot_n_elements;
 use fem_linalg::fem_to_linlvo_csr;
 use fem_solver::{GSSmoother, solve_pcg};
 use fem_space::constraints::form_linear_system;
@@ -68,12 +67,12 @@ fn main() {
     let text = std::fs::read_to_string(&args.mesh).expect("failed to read the NURBS mesh file");
 
     // The mesh's own extension gives `NURBSext->GetNKV()` (the number of orders
-    // the space needs) and `GetNE()` (for the automatic refinement level).
+    // the space needs) and `GetNE()` — the *element* count, which for a
+    // multi-patch mesh is the sum over patches of `prod_d GetNE(kv_p[d])`, not
+    // the product over all knot vectors.
     let mesh_ext = NurbsExtension::from_mesh_str(&text).expect("failed to parse the NURBS mesh");
     let dim = mesh_ext.dim();
-    let n_elems: usize = (0..mesh_ext.n_knot_vectors())
-        .map(|i| knot_n_elements(mesh_ext.knot_vector(i).knot_vector()).unwrap_or(1))
-        .product();
+    let n_elems = mesh_ext.n_elements();
 
     // C++ nurbs_ex1: `order.SetSize(nkv); order = tmp;` — or `-1` for the
     // isoparametric space, which for a NURBS mesh keeps the mesh's own orders.

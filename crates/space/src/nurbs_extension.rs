@@ -76,6 +76,39 @@ const CUBE_FACE_VERT: [[usize; 4]; 6] = [
     [4, 5, 6, 7],
 ];
 
+/// The patch-boundary side of the `j`-th local edge of a quadrilateral, as
+/// `(direction, low)`: `Geometry::Constants<SQUARE>::Edges` is
+/// `(0,1), (1,2), (2,3), (3,0)` on the reference square `(0,0) (1,0) (1,1)
+/// (0,1)`, so edge 0 is the `y = 0` side, edge 1 the `x = 1` side, edge 2 the
+/// `y = 1` side and edge 3 the `x = 0` side.
+fn quad_edge_side(j: usize) -> (usize, bool) {
+    match j {
+        0 => (1, true),
+        1 => (0, false),
+        2 => (1, false),
+        3 => (0, true),
+        _ => unreachable!("a quadrilateral has four edges"),
+    }
+}
+
+/// The patch-boundary side of the `k`-th local face of a hexahedron, as
+/// `(direction, low)`: `Geometry::Constants<CUBE>::FaceVert` is
+/// `(3,2,1,0), (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7), (4,5,6,7)` on the
+/// reference cube with `v0 = (0,0,0), v1 = (1,0,0), v2 = (1,1,0), v3 = (0,1,0),
+/// v4 = (0,0,1), …`, i.e. bottom (`z = 0`), front (`y = 0`), right (`x = 1`),
+/// back (`y = 1`), left (`x = 0`) and top (`z = 1`).
+fn hex_face_side(k: usize) -> (usize, bool) {
+    match k {
+        0 => (2, true),
+        1 => (1, true),
+        2 => (0, false),
+        3 => (1, false),
+        4 => (0, true),
+        5 => (2, false),
+        _ => unreachable!("a hexahedron has six faces"),
+    }
+}
+
 /// MFEM `Geometry::Type` codes (subset used by NURBS meshes).
 const GEOM_POINT: i32 = 0;
 const GEOM_SEGMENT: i32 = 1;
@@ -294,6 +327,10 @@ pub struct NurbsExtension {
     elements: Vec<TopoElement>,
     /// Patch topology boundary elements.
     boundary: Vec<TopoElement>,
+    /// For every entry of `boundary`, the patch-boundary entity it lies on:
+    /// `(patch, direction, low)`, where `low` marks the minimum-parameter side.
+    /// Filled by [`Self::generate_boundary_elements`] (dimensions 2 and 3).
+    bdr_sides: Vec<(usize, usize, bool)>,
     /// Vertices per global edge (MFEM `edge_vertex`, canonicalised min/max).
     edge_vertex: Vec<(usize, usize)>,
     /// Global face vertex cycles (MFEM `Mesh::faces`), first-encounter order.
@@ -456,6 +493,7 @@ impl NurbsExtension {
             edge_to_ukv,
             elements,
             boundary,
+            bdr_sides: Vec::new(),
             edge_vertex,
             faces: Vec::new(),
             el_edges: Vec::new(),
@@ -559,6 +597,7 @@ impl NurbsExtension {
         self.count_bdr_elements();
         self.generate_active_vertices()?;
         self.generate_element_dof_table()?;
+        self.compute_bdr_sides();
         Ok(())
     }
 
@@ -888,6 +927,22 @@ impl NurbsExtension {
             .collect()
     }
 
+    /// The knot-span indices of patch `p`'s elements, one list per direction —
+    /// MFEM's `for (i = 0; i < kv[d]->GetNKS(); i++) if (kv[d]->isElement(i))`
+    /// span loop of `Generate{1,2,3}DElementDofTable`.
+    ///
+    /// These raw indices are what `NURBSExtension::el_to_IJK` stores, so they
+    /// are **not** consecutive when a patch's knot vector repeats an interior
+    /// knot (`pipe-nurbs.mesh`'s direction-2 knot vector is
+    /// `{0, 0, 0, 0.5, 0.5, 1, 1, 1}`, whose two elements sit at indices 0 and 2).
+    pub fn patch_element_spans(&self, p: usize) -> Result<Vec<Vec<usize>>, String> {
+        let kvs = self.patch_knot_vectors(p)?;
+        Ok(kvs
+            .iter()
+            .map(|kv| (0..kv.nks()).filter(|&i| kv.is_element(i)).collect())
+            .collect())
+    }
+
     // ── offsets and counts ────────────────────────────────────────────────────
 
     /// MFEM `NURBSExtension::GenerateOffsets` + `GetPatchOffsets`.
@@ -1167,13 +1222,11 @@ impl NurbsExtension {
             let d = self.dim;
 
             let ord: Vec<usize> = kvs.iter().map(|k| k.order()).collect();
-            let nks: Vec<usize> = kvs.iter().map(|k| k.nks()).collect();
 
             // Nested span loop in MFEM's order: for 3D `(k, j, i)` with the
-            // first direction innermost, for 2D `(j, i)`, for 1D `i`.
-            let ranges: Vec<Vec<usize>> = (0..d)
-                .map(|dd| (0..nks[dd]).filter(|&x| kvs[dd].is_element(x)).collect())
-                .collect();
+            // first direction innermost, for 2D `(j, i)`, for 1D `i`.  The
+            // indices are the *raw* knot-span indices of `NURBSFiniteElement::ijk`.
+            let ranges: Vec<Vec<usize>> = self.patch_element_spans(p)?;
 
             // The span loops mirror MFEM's nesting: 3D is `(k, j, i)` with `i`
             // innermost, 2D is `(j, i)` and 1D is just `i`.
@@ -1462,13 +1515,93 @@ impl NurbsExtension {
         self.boundary.iter().map(|b| b.attr).max().unwrap_or(0)
     }
 
+    /// For every boundary element, the patch-boundary entity it lies on:
+    /// `(patch, direction, low)` with `low` marking the minimum-parameter side.
+    ///
+    /// This is the `[direction, side]` an element's `NURBSFiniteElement` carries
+    /// in MFEM (`NURBSPatchMap::SetBdrPatchVertexMap`'s orientation): a boundary
+    /// element of patch `p` on the `low`/`high` side of direction `d` spans the
+    /// control points `multi[d] == 0` / `multi[d] == NCP_d - 1`, which is exactly
+    /// the information `GetEssentialTrueDofs` needs.  Empty for 1-D meshes (a
+    /// 1-D boundary element is a point and carries no side).
+    pub fn boundary_sides(&self) -> &[(usize, usize, bool)] {
+        &self.bdr_sides
+    }
+
+    /// [`Self::boundary_sides`] from the boundary elements' own edges/faces: a
+    /// boundary element is a mesh edge (2-D) or face (3-D), and the element that
+    /// contains it fixes the local entity index, hence the direction and side.
+    /// This works for boundary elements read from the file *and* for the ones
+    /// [`Self::generate_boundary_elements`] synthesises, exactly as MFEM's
+    /// `NURBSExtension::GenerateBdrElementDofTable` derives the boundary patch
+    /// from the boundary element's own vertices.
+    fn compute_bdr_sides(&mut self) {
+        self.bdr_sides.clear();
+        let d = self.dim;
+        if d == 2 {
+            // Element local edge -> the element that owns it (every mesh edge
+            // reaches at most one element here; interior edges are skipped).
+            let mut owner: Vec<Option<(usize, usize)>> = vec![None; self.edge_vertex.len()];
+            for (p, edges) in self.el_edges.iter().enumerate() {
+                for (j, &e) in edges.iter().enumerate() {
+                    owner[e].get_or_insert((p, j));
+                }
+            }
+            for be in &self.boundary {
+                if be.verts.len() != 2 {
+                    continue;
+                }
+                let e = self.find_edge(be.verts[0], be.verts[1]);
+                if let Some((p, j)) = owner[e] {
+                    let (dir, low) = quad_edge_side(j);
+                    self.bdr_sides.push((p, dir, low));
+                }
+            }
+        } else if d == 3 {
+            let mut key_to_face: Vec<(Vec<usize>, usize)> = self
+                .faces
+                .iter()
+                .enumerate()
+                .map(|(f, vs)| {
+                    let mut k = vs.to_vec();
+                    k.sort_unstable();
+                    (k, f)
+                })
+                .collect();
+            key_to_face.sort_unstable();
+            // Global face -> (element, local face index), first owner wins.
+            let mut owner: Vec<Option<(usize, usize)>> = vec![None; self.faces.len()];
+            for (p, faces) in self.el_faces.iter().enumerate() {
+                for (k, &f) in faces.iter().enumerate() {
+                    owner[f].get_or_insert((p, k));
+                }
+            }
+            for be in &self.boundary {
+                if be.verts.len() != 4 {
+                    continue;
+                }
+                let mut key = be.verts.clone();
+                key.sort_unstable();
+                let Ok(pos) = key_to_face.binary_search_by(|(k, _)| k.as_slice().cmp(&key)) else {
+                    continue;
+                };
+                let f = key_to_face[pos].1;
+                if let Some((p, k)) = owner[f] {
+                    let (dir, low) = hex_face_side(k);
+                    self.bdr_sides.push((p, dir, low));
+                }
+            }
+        }
+    }
+
     /// MFEM `NURBSExtension::GetNTotalDof`.
     pub fn n_total_dofs(&self) -> usize {
         self.n_total_dofs
     }
 
     /// MFEM `NURBSExtension::GetNDof` — the number of finite element unknowns.
-    pub fn n_dofs(&self) -> usize {        self.n_dofs
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
     }
 
     /// MFEM `NURBSExtension::GetNV` — active vertices.
