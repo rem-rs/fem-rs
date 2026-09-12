@@ -84,10 +84,16 @@ impl<C: ScalarCoeff> VectorBilinearIntegrator for CurlCurlIntegrator<C> {
                 | ElementType::Hex8 | ElementType::Hex20
                 | ElementType::Prism6 | ElementType::Prism15
         );
-        if space_order <= 1 {
-            Some(1)
-        } else if tensor {
+        // Tensor elements first: for a Qk ND element the curl of the first-order
+        // (rational, LOR) member is quadratic in each closed direction, so the
+        // `2k` rule is needed even at k = 1 — the MFEM shortcut below (`order 1`
+        // for `space_order <= 1`) is only valid on simplices, where the ND1 curl
+        // is constant.  Using one point there scaled LOR curl-curl blocks by
+        // exactly 3/4 (D65).
+        if tensor {
             Some(2 * space_order)
+        } else if space_order <= 1 {
+            Some(1)
         } else {
             Some(2 * space_order - 2)
         }
