@@ -461,6 +461,167 @@ pub fn knot_span_dparam(knots: &[f64], order: usize, span: usize, u: f64, grad: 
     }
 }
 
+/// MFEM `KnotVector::GetSpan(u)` — the raw knot index `ks` with
+/// `knot(ks) <= u < knot(ks+1)` (binary search in `(Order, NCP)`).
+pub fn knot_get_span(knots: &[f64], order: usize, u: f64) -> usize {
+    let ncp = knots.len() - order - 1;
+    if u == knots[knots.len() - 1] {
+        return ncp - 1;
+    }
+    if u == knots[0] {
+        return order;
+    }
+    debug_assert!(u > knots[0] && u < knots[knots.len() - 1], "Knot location outside of the range of the KnotVector");
+    let mut low = order;
+    let mut high = ncp;
+    let mut mid = (low + high) / 2;
+    while u < knots[mid] || u >= knots[mid + 1] {
+        if u < knots[mid] {
+            high = mid;
+        } else {
+            low = mid;
+        }
+        mid = (low + high) / 2;
+    }
+    mid
+}
+
+/// MFEM `KnotVector::GetGreville(i)` — the average of the `Order` knots
+/// `knot[i+1] .. knot[i+Order]`.
+pub fn knot_greville(knots: &[f64], order: usize, i: usize) -> f64 {
+    let mut sum = 0.0;
+    for j in 1..=order {
+        sum += knots[i + j];
+    }
+    sum / order as f64
+}
+
+/// MFEM `KnotVector::inSpan(u, ni)` — whether `knot(ni) <= u <= knot(ni+1)`.
+pub fn knot_in_span(knots: &[f64], u: f64, ni: usize) -> bool {
+    u >= knots[ni] && u <= knots[ni + 1]
+}
+
+/// MFEM `KnotVector::CalcDnShape(gradn, n, i, xi)` (Piegl & Tiller, "The NURBS
+/// Book", 2nd ed., Algorithm A2.3 p. 72) — the `n`-th derivatives of the
+/// `Order + 1` non-vanishing basis values at the span-local coordinate `xi`,
+/// w.r.t. the span-local reference coordinate (the closing `temp` scaling of
+/// A2.3 converts `d^n N/du^n` into `d^n N/dxi^n`).  `n` must be `>= 1`.
+///
+/// The `j2 + 1` index of the `r <= pk` tail branch reproduces the C `for`
+/// loop's post-condition (`j == j2 + 1` after the loop) that MFEM relies on.
+pub fn knot_span_dn_shape(
+    knots: &[f64],
+    order: usize,
+    span: usize,
+    xi: f64,
+    n: usize,
+    gradn: &mut [f64],
+) {
+    let p = order;
+    let ip = span + p;
+    let u = knot_span_location(knots, order, span, xi);
+
+    // ndu[j][r] holds the denominators for column j, ndu[r][j] the values.
+    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
+    let mut left = vec![0.0; p + 1];
+    let mut right = vec![0.0; p + 1];
+    ndu[0][0] = 1.0;
+    for j in 1..=p {
+        left[j] = u - knots[ip + 1 - j];
+        right[j] = knots[ip + j] - u;
+        let mut saved = 0.0;
+        for r in 0..j {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            let temp = if ndu[j][r] != 0.0 { ndu[r][j - 1] / ndu[j][r] } else { 0.0 };
+            ndu[r][j] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+
+    let mut a = [[0.0_f64; 32]; 2];
+    for r in 0..=p {
+        a[0][0] = 1.0;
+        let mut s1 = 0usize;
+        let mut s2 = 1usize;
+        for k in 1..=n {
+            let mut d = 0.0;
+            let (ri, pk) = (r as isize - k as isize, p as isize - k as isize);
+            if r >= k {
+                a[s2][0] = a[s1][0] / ndu[(pk + 1) as usize][ri as usize];
+                d = a[s2][0] * ndu[ri as usize][pk as usize];
+            }
+            let j1 = if ri >= -1 { 1 } else { -(ri) as usize };
+            let j2 = if (r as isize - 1) <= pk { k - 1 } else { p - r };
+            let mut j = j1;
+            while j <= j2 {
+                a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[(pk + 1) as usize][(ri + j as isize) as usize];
+                d += a[s2][j] * ndu[(ri + j as isize) as usize][pk as usize];
+                j += 1;
+            }
+            if r as isize <= pk {
+                a[s2][k] = -a[s1][k - 1] / ndu[(pk + 1) as usize][r];
+                // `j == j2 + 1` when the loop ran, `j1` otherwise (C loop
+                // post-condition).
+                let jq = if j1 <= j2 { j2 + 1 } else { j1 };
+                d += a[s2][jq] * ndu[(ri + jq as isize) as usize][pk as usize];
+            }
+            gradn[r] = d;
+            std::mem::swap(&mut s1, &mut s2);
+        }
+    }
+
+    // Closing scaling: `temp = p*(knot[ip+1]-knot[ip])` for n = 1, multiplied
+    // by `(p-k)*span` for every further derivative.
+    let span_len = knots[ip + 1] - knots[ip];
+    let mut temp = p as f64 * span_len;
+    for k in 1..n {
+        temp *= (p - k) as f64 * span_len;
+    }
+    for g in gradn.iter_mut() {
+        *g *= temp;
+    }
+}
+
+/// MFEM `KnotVector::GetBotella(i)` — the knot location where the `i`-th shape
+/// function attains its maximum ("Botella point", Botella & Shariff 2003),
+/// found by Newton iteration on `dN_i/du = 0` starting from the Greville
+/// point.  Reverts to the Greville point when the knots repeat.
+pub fn knot_botella(kv: &KnotVector, i: usize) -> f64 {
+    const ITERMAX: usize = 10;
+    const TOL: f64 = 1e-8;
+
+    let knots = kv.as_slice();
+    let order = knot_order(kv).expect("validated knot vector");
+
+    // Get initial guess
+    let mut u = knot_greville(knots, order, i);
+
+    // Check for a repeated knot -- include begin and end
+    if knots[i + 1] == knots[i + order] {
+        return u;
+    }
+
+    let mut grad = vec![0.0_f64; order + 1];
+    let mut hess = vec![0.0_f64; order + 1];
+    for _iter in 0..ITERMAX {
+        let ks = knot_get_span(knots, order, u);
+        let xi = (u - knots[ks]) / (knots[ks + 1] - knots[ks]);
+        let o = order as isize - (ks as isize - i as isize);
+        debug_assert!((0..=order as isize).contains(&o), "GetBotella: shape index out of span");
+
+        knot_span_dshape(knots, order, ks - order, xi, &mut grad);
+        knot_span_dn_shape(knots, order, ks - order, xi, 2, &mut hess);
+
+        u -= (grad[o as usize] / hess[o as usize]) * (knots[ks + 1] - knots[ks]);
+
+        if grad[o as usize].abs() < TOL {
+            break;
+        }
+    }
+    u
+}
+
 /// MFEM `NURBS1DFiniteElement` — rational 1D NURBS element on one knot span.
 ///
 /// The element owns one knot vector, one weight per DOF

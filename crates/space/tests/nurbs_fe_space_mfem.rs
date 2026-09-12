@@ -392,7 +392,8 @@ fn rational_disc_geometry_matches_mfem() {
     assert_eq!(space.n_elements(), 16);
 
     let ref_text = include_str!("data/nurbs_disc_r1_o2_geometry_mfem.txt");
-    let mut current = 0usize;
+    // Assigned by every line before it is read; the `E <e>` block start.
+    let mut current;
     let mut checked = 0usize;
     let mut max_dw = 0.0_f64;
     let mut max_dx = 0.0_f64;
@@ -454,4 +455,157 @@ fn hcurl_component_extensions_reproduce_nurbs_ex3_dof_count() {
     assert_eq!(ext_x.n_dofs(), 16770);
     assert_eq!(ext_y.n_dofs(), 16770);
     assert_eq!(ext_x.n_dofs() + ext_y.n_dofs(), 33540);
+}
+
+// ── `nurbs_ex3` H(curl) space, against the MFEM 4.10 binary ──────────────────
+//
+// The expected values below are a verbatim dump of MFEM 4.10 running the
+// `nurbs_ex3` configuration on `square-nurbs.mesh` with `-o 1` and the default
+// `ref_levels = 7` (16384 elements; `NURBS_HCurlFECollection(1,2)` +
+// `NURBSExtension(mesh->NURBSext, 1)`).  `EDOF` and `ESS` come from
+// `FiniteElementSpace::GetElementDofs` / `GetEssentialTrueDofs(ess_bdr = 1)`,
+// and the matrix invariants from a `SparseMatrix` scan of
+// `BilinearForm::SpMat` after `CurlCurlIntegrator(1)` + `VectorFEMassIntegrator(1)`
+// (sum over stored entries, Frobenius norm, diagonal min/max).
+//
+// `-r 1` (4 elements) scales the same construction down to the smallest
+// multi-span case, `-r 2` (16 elements) exercises a deeper refinement.
+
+/// `(ref_levels, nnz, Σa_ij, ‖A‖_F, min a_ii, max a_ii)` from MFEM 4.10.
+const MFEM_MATRIX_INVARIANTS: [(usize, usize, f64, f64, f64, f64); 2] = [
+    (1, 396, 8.0000000000000089, 20.348798004966131, 1.8444444444444446, 3.7777777777777781),
+    (2, 1272, 31.999999999999972, 132.49137870857382, 5.5166666666666666, 14.444444444444446),
+];
+
+#[test]
+fn hcurl_space_invariants_match_nurbs_ex3() {
+    use fem_space::NurbsHCurlSpace;
+
+    let sp = NurbsHCurlSpace::from_mesh_str(MESH, 7, 1).expect("hcurl space");
+    assert_eq!(sp.n_elements(), 16384);
+    assert_eq!(sp.n_dofs(), 33540); // "Number of finite element unknowns"
+
+    // `GetEssentialTrueDofs(ess_bdr = 1)`: the bottom/top edge DOFs of the
+    // x-component extension (orders [1, 2]) followed by the left/right edge
+    // DOFs of the y-component extension (orders [2, 1]).
+    let ess = sp.essential_dofs();
+    assert_eq!(ess.len(), 516);
+    let expect: Vec<u32> = (0..258)
+        .chain(16770..16774)
+        .chain(17030..17284)
+        .collect();
+    assert_eq!(ess, expect);
+
+    // `GetElementDofs` of the first four spans (element numbering is x-fastest,
+    // 128 x 128 spans).
+    assert_eq!(
+        sp.element_dofs(0),
+        [0, 4, 258, 514, 259, 641, 16770, 16774, 16775, 17030, 17284, 17285]
+    );
+    assert_eq!(
+        sp.element_dofs(3),
+        [6, 7, 516, 517, 643, 644, 16776, 16777, 16778, 17286, 17287, 17288]
+    );
+
+    // `NURBS_HCurl2DFiniteElement::SetOrder`: 2*(p+1)*(p+2) vector DOFs and the
+    // elevated degree `p + 1` (the integrators' `2*GetOrder()` basis).
+    let fe = sp.element_fe(0);
+    assert_eq!(fe.n_dofs(), 12);
+    assert_eq!(fe.order(), 2);
+    assert_eq!(fe.curl_dim(), 1);
+
+    // `VectorFEDomainLFIntegrator(f)` for the ex3 right-hand side.
+    let kap = std::f64::consts::PI;
+    let b = sp.assemble_vector_domain_lf(&|x: &[f64]| {
+        let k2 = 1.0 + kap * kap;
+        vec![k2 * (kap * x[1]).sin(), k2 * (kap * x[0]).sin()]
+    });
+    let bn = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!((bn - 10.847_537_796_693_928).abs() < 1e-13, "|b| = {bn}");
+
+    // The assembled `curl curl + I` system.
+    for &(refs, nnz, sum, fro, dmin, dmax) in &MFEM_MATRIX_INVARIANTS {
+        let sp = NurbsHCurlSpace::from_mesh_str(MESH, refs, 1).expect("hcurl space");
+        let a = sp.assemble_system(1.0, 1.0);
+        let mut got_nnz = 0usize;
+        let mut got_sum = 0.0_f64;
+        let mut got_fro = 0.0_f64;
+        let (mut got_dmin, mut got_dmax) = (f64::MAX, f64::MIN);
+        for i in 0..a.nrows {
+            for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let v = a.values[k];
+                if v != 0.0 {
+                    got_nnz += 1;
+                    got_sum += v;
+                    got_fro += v * v;
+                }
+                if i == a.col_idx[k] as usize {
+                    got_dmin = got_dmin.min(v);
+                    got_dmax = got_dmax.max(v);
+                }
+            }
+        }
+        assert_eq!(got_nnz, nnz, "ref_levels {refs}");
+        // The sparse entries are accumulated span by span, so the floating-point
+        // invariants are compared at round-off level (1 ulp of the largest
+        // diagonal shows up in the extrema).
+        let close = |got: f64, want: f64, what: &str| {
+            assert!(
+                (got - want).abs() <= 1e-14 * want.abs().max(1.0),
+                "ref_levels {refs}: {what} = {got}, MFEM {want}"
+            );
+        };
+        close(got_sum, sum, "Σa_ij");
+        close(got_fro.sqrt(), fro, "‖A‖_F");
+        close(got_dmin, dmin, "min a_ii");
+        close(got_dmax, dmax, "max a_ii");
+    }
+}
+
+/// `GridFunction::ProjectCoefficient` on the `NURBS_HCurl2DFiniteElement`:
+/// every element DOF whose Botella abscissa falls inside the element's span
+/// gets the covariant component `(JᵀE)ₖ` at that point, and DOFs outside the
+/// span stay untouched — so each DOF's value is written by the element that
+/// owns its span (`KnotVector::GetBotella` never leaves the patch).
+///
+/// This pins the *span bookkeeping* (`o` advances for skipped DOFs too, as in
+/// MFEM's `for (int i = 0; i <= orders[0]; i++, o++)`).  The dumped values are
+/// MFEM 4.10's `ProjectCoefficient(E, ProjectType::ELEMENT)` with
+/// `E = (sin(πy), sin(πx))` on the default `nurbs_ex3` mesh; the exact
+/// tangential trace of `E` is zero on every boundary edge, so the essential
+/// values are round-off and only the interior DOFs are pinned here.
+#[test]
+fn hcurl_botella_projection_matches_mfem_element_projection() {
+    use fem_space::NurbsHCurlSpace;
+
+    let sp = NurbsHCurlSpace::from_mesh_str(MESH, 7, 1).expect("hcurl space");
+    let kap = std::f64::consts::PI;
+    let x = sp.project_coefficient(&|x: &[f64]| vec![(kap * x[1]).sin(), (kap * x[0]).sin()]);
+
+    // `x.Norml2()` of MFEM's `ProjectCoefficient(E, ProjectType::ELEMENT)`.
+    let xn = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!((xn - 1.0039004873270438).abs() <= 1e-15, "|x| = {xn}");
+
+    // MFEM's values at the first interior DOFs (index 258 is the first control
+    // point of the x-component's face block, its neighbours follow along x).
+    let expect = [
+        (258usize, 0.00012782602833192797),
+        (259, 0.00028755642922936587),
+        (260, 0.00047906825236100452),
+        (261, 0.00067029150269093667),
+        (262, 0.0008611109944834614),
+    ];
+    for (i, want) in expect {
+        assert!(
+            (x[i] - want).abs() <= 1e-17,
+            "x[{i}] = {:e}, MFEM {:e}",
+            x[i],
+            want
+        );
+    }
+
+    // Every interior DOF is assigned by the element that owns its span; the
+    // tangential trace of `E` vanishes on all four boundary edges, so only the
+    // 516 essential DOFs stay at round-off level.
+    assert_eq!(x.iter().filter(|v| v.abs() > 1e-6).count(), 33024);
 }
