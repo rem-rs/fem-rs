@@ -848,7 +848,8 @@ pub fn transfer_h1_p1_nonmatching_l2_projection_conservative_3d(
 // Prolongation matrix (coarse → fine H¹ for h-refinement)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Build an H¹ prolongation matrix from `coarse` to `fine` (2-D tri).
+/// Build an H¹ prolongation matrix from `coarse` to `fine` (2-D mesh:
+/// `Tri3`/`Quad4`, see D64).
 pub fn build_prolongation_h1(
     coarse: &H1Space<Mesh<2>>,
     fine: &H1Space<Mesh<2>>,
@@ -866,8 +867,10 @@ pub fn build_prolongation_h1(
     for fi in 0..n_fine {
         let x = &fcoords[fi * 2..fi * 2 + 2];
         if let Some(lp) = pl.locate(x, tol) {
+            // D64: `barycentric` holds one weight per *element node* — 3 for a
+            // triangle, 4 bilinear ones for a quadrilateral.
             let ns = cmesh.elem_nodes(lp.elem);
-            for k in 0..3 {
+            for k in 0..lp.barycentric.len() {
                 let w = lp.barycentric[k];
                 if w.abs() > 1e-15 { coo.add(fi, ns[k] as usize, w); }
             }

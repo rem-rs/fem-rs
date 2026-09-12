@@ -2304,9 +2304,12 @@ pub(crate) fn face_geo_elem(face_type: ElementType) -> Box<dyn ReferenceElement>
 /// the corner order of [`MeshTopology::face_nodes`] (the vertex order of
 /// [`ref_elem_face`] and of [`face_geo_elem`]).
 struct FaceGeom {
-    /// Order-1 face geometry element ([`face_geo_elem`]).
+    /// Face geometry element: order 1 ([`face_geo_elem`]) on a straight face,
+    /// order `geom_order` on a curved one (D59/D66).
     geo: Box<dyn ReferenceElement>,
-    /// Physical corner coordinates; length 2 (segment), 3 (triangle) or 4 (quad).
+    /// Physical control-point coordinates; the order-1 count (2 for a segment,
+    /// 3 for a triangle, 4 for a quad) on a straight face, the geometry order's
+    /// dof count on a curved one.
     pts: Vec<[f64; 3]>,
     /// Physical dimension of the embedding space (2 or 3).
     dim: usize,
@@ -2353,11 +2356,15 @@ impl FaceGeom {
         if dim == 2 {
             // Historical *chord* interpolation of the physical point.  It
             // coincides with the interpolated `Σᵏ φᵏ pᵏ` for a straight edge but
-            // rounds differently in the last ulp, so it is kept to leave every
-            // existing 2-D caller bit-identical.
-            let (p0, p1) = (self.pts[0], self.pts[1]);
-            for i in 0..2 {
-                x[i] = p0[i] + (p1[i] - p0[i]) * xi[0];
+            // rounds differently in the last ulp, so it is kept for order-1
+            // geometry to leave every existing 2-D caller bit-identical.  A
+            // curved edge (D66, `SegPk(q >= 2)` geometry) must use the
+            // interpolated point — the chord lies off the curve.
+            if self.geo.order() == 1 {
+                let (p0, p1) = (self.pts[0], self.pts[1]);
+                for i in 0..2 {
+                    x[i] = p0[i] + (p1[i] - p0[i]) * xi[0];
+                }
             }
             let j = (t0[0] * t0[0] + t0[1] * t0[1]).sqrt();
             (j, vec![t0[1] / j, -t0[0] / j], x)
@@ -2390,6 +2397,10 @@ impl FaceGeom {
 /// order-`geom_order` face element — MFEM's `GetBdrElementTransformation`,
 /// which transports the *volume* `Nodes` values of the face through the
 /// boundary element of the same order.
+///
+/// D66: the same rule now applies in 2-D (see [`curved_boundary_edge_geom`]).
+/// Before it, a curved 2-D boundary edge was measured as the affine chord of
+/// its two vertices — the 2-D counterpart of D59.
 fn boundary_face_geom(
     mesh: &dyn MeshTopology,
     f: u32,
@@ -2406,6 +2417,12 @@ fn boundary_face_geom(
         dim == 2 || dim == 3,
         "boundary_face_geom: unsupported embedding dimension {dim}"
     );
+
+    // D66: a curved 2-D mesh must measure its boundary edges through the
+    // boundary element's own order-`geom_order` mapping, not the corner chord.
+    if dim == 2 && mesh.geom_order() > 1 {
+        return curved_boundary_edge_geom(mesh, f, face_nodes, dim);
+    }
 
     let pts = if dim == 2 {
         let (p0, p1) = match mesh.boundary_face_endpoints(f) {
@@ -2573,6 +2590,120 @@ fn curved_boundary_face_geom(
 
     FaceGeom {
         geo: face_geo,
+        pts,
+        dim,
+    }
+}
+
+/// D66: [`FaceGeom`] of a 2-D boundary edge on a **curved** mesh
+/// (`geom_order() >= 2`) — the 2-D counterpart of
+/// [`curved_boundary_face_geom`], and MFEM's `GetBdrElementTransformation` in
+/// 2-D.
+///
+/// The edge geometry is the boundary *element*'s own order-`q` mapping: the
+/// trace of the volume geometry family on the edge, i.e. `SegPk(q)`
+/// (`H1_SegmentElement(q)`), whose control points are the owner element's
+/// geometry nodes that lie on the edge.  Each edge dof is transported into the
+/// volume reference element through the straight corner map and resolved to the
+/// nearest geometry slot by position — the identical mechanism
+/// [`curved_boundary_face_geom`] uses in 3-D, so the geometry and the space see
+/// the same boundary transformation.
+///
+/// Without it the edge was collapsed to the affine chord of its two vertices
+/// ([`MeshTopology::boundary_face_endpoints`]), so `∫ u·n ds` on a curved edge
+/// used the chord length and the chord tangent while the volume assembly used
+/// the curved mapping.
+fn curved_boundary_edge_geom(
+    mesh: &dyn MeshTopology,
+    f: u32,
+    face_nodes: &[u32],
+    dim: usize,
+) -> FaceGeom {
+    use fem_element::lagrange::factory::{QuadQk, SegPk};
+
+    let q = mesh.geom_order() as usize;
+    let owner = face_owner(mesh, face_nodes).unwrap_or_else(|| {
+        panic!("curved_boundary_edge_geom: no element contains every node of edge {f}")
+    });
+    let elem_type = mesh.element_type(owner);
+
+    // The owner's geometry element: the same factory `set_curvature` used to
+    // lay out the geometry node list.
+    let geom_vol: Box<dyn ReferenceElement> = match elem_type {
+        ElementType::Quad4 => Box::new(QuadQk::new(q)),
+        ElementType::Tri3 => Box::new(TriPk::new(q)),
+        other => panic!(
+            "curved_boundary_edge_geom: unsupported curved owner element {other:?} (edge {f})"
+        ),
+    };
+    let geom_vol_coords = geom_vol.dof_coords();
+    let gn = mesh.geometry_nodes(owner);
+    assert_eq!(
+        gn.len(),
+        geom_vol_coords.len(),
+        "curved_boundary_edge_geom: element {owner} has {} geometry nodes but the \
+         order-{q} {} geometry element has {}",
+        gn.len(),
+        match elem_type {
+            ElementType::Quad4 => "QuadQk",
+            _ => "TriPk",
+        },
+        geom_vol_coords.len(),
+    );
+
+    // The edge's corners as coordinates of the volume reference element, in the
+    // edge's corner order (corner dofs sit first, in vertex order).
+    let elem_nodes = mesh.element_nodes(owner);
+    let mut corner_ref: Vec<&[f64]> = Vec::with_capacity(face_nodes.len());
+    for &n in face_nodes {
+        let pos = elem_nodes.iter().position(|&en| en == n).unwrap_or_else(|| {
+            panic!("curved_boundary_edge_geom: node {n} of edge {f} is not in element {owner}")
+        });
+        corner_ref.push(&geom_vol_coords[pos]);
+    }
+
+    // Edge geometry element of the same order — MFEM's boundary element
+    // (`H1_SegmentElement(q)`), on `[0,1]` like `face_geo_elem(Line2)`.
+    let face_geo = SegPk::new(q);
+    let face_coords = face_geo.dof_coords();
+
+    // Control points: transport every edge dof position into the volume
+    // reference element through the straight corner map and resolve it to the
+    // nearest geometry slot (distinct slots are >= 1e-2 apart, the map rounds
+    // at <= 1e-15 — the same tolerances as the 3-D path).
+    let transport = face_geo_elem(ElementType::Line2);
+    let mut phi = vec![0.0_f64; face_nodes.len()];
+    let mut pts = Vec::with_capacity(face_coords.len());
+    for fc in face_coords.iter() {
+        transport.eval_basis(fc, &mut phi);
+        let mut x = [0.0_f64; 2];
+        for (k, c) in corner_ref.iter().enumerate() {
+            x[0] += phi[k] * c[0];
+            x[1] += phi[k] * c.get(1).copied().unwrap_or(0.0);
+        }
+        let mut best = 0usize;
+        let mut best_d2 = f64::INFINITY;
+        for (k, c) in geom_vol_coords.iter().enumerate() {
+            let dx = c[0] - x[0];
+            let dy = c.get(1).copied().unwrap_or(0.0) - x[1];
+            let d2 = dx * dx + dy * dy;
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = k;
+            }
+        }
+        assert!(
+            best_d2 < 1e-20,
+            "curved_boundary_edge_geom: no geometry dof of element {owner} at {x:?} \
+             (edge {f} dof {fc:?}, nearest distance {:.3e})",
+            best_d2.sqrt()
+        );
+        let c = mesh.geom_coords_of(gn[best]);
+        pts.push([c[0], c[1], 0.0]);
+    }
+
+    FaceGeom {
+        geo: Box::new(face_geo),
         pts,
         dim,
     }
