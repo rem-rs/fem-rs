@@ -207,7 +207,25 @@ pub trait NavierDiscretization {
 
     /// `∇×∇×u` at the velocity DOFs, i.e. the C++ `ComputeCurl2D` applied
     /// twice (without the `kin_vis` factor, which the driver applies).
+    /// In 3-D (`navier_tgv`) this is `ComputeCurl3D` applied twice, matching
+    /// the `dim == 3` branch of `NavierSolver::Step`.
     fn curl_curl(&self, u: &[f64]) -> Vec<f64>;
+    /// `ComputeCurl3D(u, cu)` — one application of MFEM's 3-D curl.
+    ///
+    /// Like `ComputeCurl2D` this is **not** a DG weak form but a nodal point
+    /// evaluation: for every element, the curl of the interpolation of `u`
+    /// (`grad = (loc_dataᵀ·dshape)·J⁻¹` evaluated at the element's nodal
+    /// points with the element's *own* per-element periodic geometry) is
+    /// accumulated into the shared DOFs and divided by the zone count
+    /// (`cu(ldof) += vals[j]; zones_per_vdof[ldof]++; … cu /= nz` — the
+    /// serial form of the `GroupCommunicator` reduce/bcast pair).
+    ///
+    /// Only 3-D discretizations implement it; the default aborts, as calling
+    /// it on a 2-D space is a programming error (the C++ class compiles the
+    /// 2-D/3-D choice out of `Step` via `pmesh->Dimension()`).
+    fn compute_curl_3d(&self, _u: &[f64]) -> Vec<f64> {
+        unimplemented!("ComputeCurl3D requires a 3-D discretization");
+    }
     /// `un_next_gf.ProjectBdrCoefficient(coeff, attr)` — overwrite the
     /// velocity Dirichlet DOFs of `out` with the data at time `t` (interior
     /// entries untouched).
@@ -989,6 +1007,16 @@ mod tests {
         // bdf_order = 1 but step >= 1: no branch matches, as in C++ (the
         // coefficients keep their previous value).
         assert_eq!(s3.bd0, 0.0);
+    }
+
+    /// The `ComputeCurl3D` trait surface: 2-D discretizations keep the
+    /// default, which aborts with a message (the C++ class only calls it when
+    /// `pmesh->Dimension() == 3`).
+    #[test]
+    #[should_panic(expected = "ComputeCurl3D requires a 3-D discretization")]
+    fn compute_curl_3d_default_panics() {
+        let disc = ToyDisc::new(2, 1, true);
+        let _ = disc.compute_curl_3d(&[1.0, 0.0]);
     }
 
     /// Gauss-Seidel sweeps reproduce MFEM's in-place forward/backward sweeps.

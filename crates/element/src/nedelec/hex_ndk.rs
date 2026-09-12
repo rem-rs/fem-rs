@@ -55,14 +55,56 @@
 use crate::gll_basis::{gl_nodes, ClosedBasis};
 use crate::reference::VectorReferenceElement;
 
+/// The 1-D open-factor kind of the tensor ND basis — the `ob_type` argument of
+/// MFEM `ND_HexahedronElement(p, cb_type, ob_type)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NdOpenBasis {
+    /// MFEM `BasisType::GaussLegendre` — the `ND_FECollection(p, dim)` default
+    /// (what [`HexNDk::new`] builds).  Open modes are the degree-`p-1`
+    /// Gauss-Legendre point-value Lagrange polynomials anchored at the FE's
+    /// `Nodes` (the dof functionals are point values, `is_nodal = true`).
+    GaussLegendre,
+    /// MFEM `BasisType::IntegratedGLL` — the open half of the
+    /// `(GaussLobatto, IntegratedGLL)` basis pair that MFEM documents for LOR
+    /// discretizations (`fem/lor/lor.hpp`: "the high-order finite element
+    /// space should use ... basis pair (GaussLobatto, IntegratedGLL) for
+    /// Nedelec and Raviart-Thomas elements").  Open modes are the integrated
+    /// (Gerritsma) edge functions `-Σ_{j<=i} c'_j` built from the degree-`p`
+    /// GLL closed basis (`Poly_1D::Basis::EvalIntegrated`, `is_nodal = false`);
+    /// the dof positions are unchanged (the same Gauss-Legendre points).
+    IntegratedGLL,
+}
+
 pub struct HexNDk {
     order: usize,
+    open: NdOpenBasis,
 }
 
 impl HexNDk {
+    /// MFEM `ND_HexahedronElement(p, GaussLobatto, GaussLegendre)` — the
+    /// default nodal element (D32/D36 semantics).
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "HexNDk requires order >= 1");
-        HexNDk { order: p }
+        HexNDk { order: p, open: NdOpenBasis::GaussLegendre }
+    }
+
+    /// MFEM `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)` — the
+    /// LOR-compatible basis pair.  Same dof count/layout and dof positions as
+    /// [`HexNDk::new`]; only the open modes differ.
+    pub fn new_integrated_gll(p: usize) -> Self {
+        assert!(p >= 1, "HexNDk requires order >= 1");
+        HexNDk { order: p, open: NdOpenBasis::IntegratedGLL }
+    }
+
+    /// The `p` open 1-D modes along one axis at `x` (reference `[-1,1]`).
+    fn open_modes(&self, x: f64) -> Vec<f64> {
+        match self.open {
+            NdOpenBasis::GaussLegendre => open_basis(self.order, x).0,
+            NdOpenBasis::IntegratedGLL => {
+                let cb = ClosedBasis::new(self.order);
+                cb.integrated(&cb.eval(x))
+            }
+        }
     }
 }
 
@@ -83,9 +125,9 @@ impl VectorReferenceElement for HexNDk {
         let vy = ClosedBasis::new(p).eval(xi[1]);
         let vz = ClosedBasis::new(p).eval(xi[2]);
         let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
-        let oxs = open_basis(p, xi[0]).0;
-        let oys = open_basis(p, xi[1]).0;
-        let ozs = open_basis(p, xi[2]).0;
+        let oxs = self.open_modes(xi[0]);
+        let oys = self.open_modes(xi[1]);
+        let ozs = self.open_modes(xi[2]);
         values.fill(0.0);
 
         // Edge basis in MFEM `Geometry::Constants<Geometry::CUBE>::Edges`
@@ -221,9 +263,9 @@ impl VectorReferenceElement for HexNDk {
         let vz = ClosedBasis::new(p).eval(z);
         let (cx, cy, cz) = (&vx.c, &vy.c, &vz.c);
         let (dcx, dcy, dcz) = (&vx.dc, &vy.dc, &vz.dc);
-        let oxs = open_basis(p, x).0;
-        let oys = open_basis(p, y).0;
-        let ozs = open_basis(p, z).0;
+        let oxs = self.open_modes(x);
+        let oys = self.open_modes(y);
+        let ozs = self.open_modes(z);
 
         // For a dofs-along-d tensor function o(t_d)·C·D the curl only
         // differentiates the two CLOSED factors (the open direction is the
@@ -395,6 +437,13 @@ impl HexNDk {
     /// `VectorFiniteElement::Project_ND`.
     pub fn dof_tangents(&self) -> Vec<[f64; 3]> {
         self.dof_layout().into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// `(node, reference tangent)` of every local DOF — the element-local
+    /// anchor table behind [`dof_coords`](Self::dof_coords) and
+    /// [`dof_tangents`](Self::dof_tangents) (the two always agree slotwise).
+    pub fn dof_anchors(&self) -> Vec<([f64; 3], [f64; 3])> {
+        self.dof_layout()
     }
 
     /// `(node, reference tangent)` of every local DOF in the element's local
@@ -574,6 +623,9 @@ fn open_basis(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
 
 #[cfg(test)]
 mod mfem_nodal_dump;
+
+#[cfg(test)]
+mod mfem_integrated_dump;
 
 #[cfg(test)]
 mod tests {
@@ -858,6 +910,99 @@ mod tests {
                         m[i][d],
                     );
                 }
+            }
+        }
+    }
+
+    /// Per-DOF match against the MFEM `ND_HexahedronElement(p, GaussLobatto,
+    /// IntegratedGLL)` dump (the LOR-compatible basis pair of MFEM
+    /// `fem/lor/lor.hpp`): for every fem-rs DOF there is exactly one MFEM DOF
+    /// carrying the *same function* up to sign (`V_femrs = V_mfem/2`,
+    /// `curl_femrs = curl_mfem/4` on the unit cube) at both sample points,
+    /// and the match is a bijection.  For `p = 1` the integrated and the
+    /// Gauss-Legendre nodal open bases coincide (both are the constant `1` in
+    /// MFEM's normalisation), so this table also pins the ND1 path.
+    #[test]
+    fn ndk_integrated_gll_matches_mfem_dump() {
+        for k in 1..=3 {
+            let e = HexNDk::new_integrated_gll(k);
+            let n = e.n_dofs();
+            let pts = [[0.137, -0.413, 0.621], [0.71, 0.22, -0.53]];
+            let mut rust: Vec<Vec<[f64; 6]>> = Vec::new();
+            for pt in &pts {
+                let mut v = vec![0.0_f64; n * 3];
+                let mut c = vec![0.0_f64; n * 3];
+                e.eval_basis_vec(pt, &mut v);
+                e.eval_curl(pt, &mut c);
+                rust.push(
+                    (0..n)
+                        .map(|i| {
+                            [
+                                2.0 * v[i * 3],
+                                2.0 * v[i * 3 + 1],
+                                2.0 * v[i * 3 + 2],
+                                4.0 * c[i * 3],
+                                4.0 * c[i * 3 + 1],
+                                4.0 * c[i * 3 + 2],
+                            ]
+                        })
+                        .collect(),
+                );
+            }
+            let mfem: Vec<Vec<[f64; 6]>> =
+                (0..2).map(|q| mfem_integrated_dump::vc(k, q)).collect();
+            let mut seen = vec![usize::MAX; n];
+            for i in 0..n {
+                let mut hits = Vec::new();
+                for (j, row) in mfem[0].iter().enumerate() {
+                    for sgn in [1.0_f64, -1.0] {
+                        let ok = (0..6).all(|d| (rust[0][i][d] - sgn * row[d]).abs() < 1e-12)
+                            && (0..6)
+                                .all(|d| (rust[1][i][d] - sgn * mfem[1][j][d]).abs() < 1e-12);
+                        if ok {
+                            hits.push(j);
+                        }
+                    }
+                }
+                assert_eq!(hits.len(), 1, "k={k}: fem-rs dof {i} matched {hits:?} MFEM dofs");
+                seen[i] = hits[0];
+            }
+            let mut sorted = seen.clone();
+            sorted.sort_unstable();
+            let want: Vec<usize> = (0..n).collect();
+            assert_eq!(sorted, want, "k={k}: the DOF match must be a bijection");
+        }
+    }
+
+    /// The IntegratedGLL open 1-D modes are the Gerritsma edge functions with
+    /// the subcell-integral dual property: `∫_{[ξ_a, ξ_{a+1}]} o_j dx = δ_{a,j}`
+    /// over the degree-`p` GLL subcells (MFEM `Poly_1D::Basis::EvalIntegrated`
+    /// with `scale_integrated = false`), hence unit total integral.
+    #[test]
+    fn integrated_gll_open_modes_unit_subcell_integrals() {
+        for p in 1..=4usize {
+            let nodes = crate::gll_basis::gll_nodes(p);
+            for j in 0..p {
+                let mut total = 0.0;
+                for a in 0..p {
+                    let (xs, ws) = crate::quadrature::gauss_legendre_arbitrary(8);
+                    let mut acc = 0.0;
+                    for (q, &x) in xs.iter().enumerate() {
+                        // Map the [-1,1] rule onto the subcell [nodes[a], nodes[a+1]].
+                        let mid = 0.5 * (nodes[a] + nodes[a + 1]);
+                        let half = 0.5 * (nodes[a + 1] - nodes[a]);
+                        let cb = ClosedBasis::new(p);
+                        let o = cb.integrated(&cb.eval(mid + half * x));
+                        acc += ws[q] * half * o[j];
+                    }
+                    let want = if a == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (acc - want).abs() < 1e-12,
+                        "p={p}: ∫ subcell {a} o_{j} = {acc} (want {want})",
+                    );
+                    total += acc;
+                }
+                assert!((total - 1.0).abs() < 1e-12, "p={p}: ∫ o_{j} = {total}");
             }
         }
     }

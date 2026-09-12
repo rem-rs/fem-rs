@@ -555,6 +555,10 @@ name = "navier_kovasznay_vs"
 path = "../miniapps/fluids/navier_kovasznay_vs.rs"
 
 [[example]]
+name = "navier_tgv"
+path = "../miniapps/fluids/navier_tgv.rs"
+
+[[example]]
 name = "hdiv_darcy"
 path = "../miniapps/hdiv_linear_solver/darcy.rs"
 

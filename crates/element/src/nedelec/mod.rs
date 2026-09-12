@@ -19,7 +19,10 @@
 //! 1:1 port of MFEM `ND_HexahedronElement(p, GaussLobatto, GaussLegendre)` —
 //! the element `ND_FECollection(p, dim)` builds by default — with
 //! Gauss-Legendre open points along each component direction and GLL closed
-//! points across it; see `hex_ndk.rs`.
+//! points across it; see `hex_ndk.rs`.  The LOR-compatible open basis
+//! (`ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)`, the pair MFEM
+//! documents for LOR discretizations) is available as
+//! [`HexNDk::new_integrated_gll`]; see [`NdOpenBasis`].
 //!
 //! ND1 keeps the classic edge line-integral DOF `DOF_i = ∫_{e_i} Φ·t̂ ds`.
 //!
@@ -55,7 +58,7 @@ pub mod tri_nd2;
 pub mod tri_ndk;
 
 pub use hex_nd2::HexND2;
-pub use hex_ndk::HexNDk;
+pub use hex_ndk::{HexNDk, NdOpenBasis};
 pub use prism::{PrismND1, PrismNDk};
 pub use pyramid::{PyraND1, PyraNDk};
 pub use quad_nd2::QuadND2;

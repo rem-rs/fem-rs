@@ -572,29 +572,35 @@ mod lor_vector_tests {
     /// PCG(+) iteration counts must stay (essentially) constant as the mesh
     /// is refined — the defining property of LOR preconditioning.
     ///
-    /// # Why this is still ignored (D40, round 18)
+    /// # Why this is still ignored (D63, round 19 update)
     ///
     /// Round 18 fixed the round-17 root causes in `crates/space/src/lor.rs`:
     /// (1) the LOR→HO permutation signs are now the same-functional relative
     /// orientations (measured on the constant unit field, MFEM
     /// `s1·s2·s3·s4` semantics), and (2) the hex ND/RT *interior* slot tables
-    /// were transposed against the actual `HexNDk`/`HexRTk` layouts.  With
-    /// those fixes the transfer is provably same-functional: the paired
-    /// canonical functionals agree exactly on constant fields (ratio `k` for
-    /// ND, `1` for RT, zero negative products), the energy ratio
-    /// `a_HO(Πu,Πu)/a_LOR(u,u)` is uniform (≈ 2/k²), and exact-inner PCG on
-    /// `A_HO` converges in every configuration that previously stagnated at
-    /// residual ≈ 9e-1.
+    /// were transposed against the actual `HexNDk`/`HexRTk` layouts.
     ///
-    /// What still fails is **h/p-robustness of the perm-congruenced pencil**
-    /// `Πᵀ A_HO Π ≈ c·A_LOR`: exact-inner PCG grows with refinement (ND3
-    /// hex 83 → 363 for n=2 → 4; RT1 hex 4 → 96 → 350), so the counts below
-    /// grow with `n` and the assertions cannot pass.  The MFEM 4.9 harness
-    /// (`$HOME/work/lor_pencil.cpp`, WSL) reproduces this **exactly** for the
-    /// same basis choice and proves it is a basis-level property, not a
-    /// pairing bug:
+    /// Round 19 delivered the element-level basis pair: `HexNDk::
+    /// new_integrated_gll` reproduces MFEM's
+    /// `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)` per DOF
+    /// (p ≤ 3, see the fem-element parity tests).  Assembling A_HO with that
+    /// basis through the validated test-local assembler
+    /// ([`d63_igll_pencil_diagnostics`]) moves the exact-inner PCG counts from
+    /// "no convergence in 500 at n = 2" to ≈29 → ≈79 (n = 2 → 4) — most of
+    /// the gap is gone, but not all.  MFEM 4.9 with the identical recipe gives
+    /// the flat 32 → 33 (`$HOME/work/lor_pencil` harness).  Since the element
+    /// basis is now bit-comparable to MFEM's and the A_HO assembly is
+    /// library-exact (parity 7e-15), the residual h-growth is located in the
+    /// LOR pairing/congruence path (`fem_space::lor`), not in the element
+    /// layer: RT1 hex, whose element (`HexRT1` → `HexRTk`) is *already*
+    /// IntegratedGLL, still shows pencil spread ≈ 6.6e4 and fails exact-inner
+    /// PCG, while MFEM gives 18 → 20.
     ///
-    /// | space, mesh | MFEM (GL, GaussLegendre) | MFEM (GL, IntegratedGLL) | fem-rs |
+    /// Historical round-18 table (fem-rs numbers = n=2→4 exact-inner PCG with
+    /// the GaussLegendre nodal basis; MFEM columns from
+    /// `LORDiscretization` + exact inner CG):
+    ///
+    /// | space, mesh | MFEM (GL, GaussLegendre) | MFEM (GL, IntegratedGLL) | fem-rs (GL) |
     /// |---|---|---|---|
     /// | ND2, 2x1x1 | 31 | 28 | (n.a.) |
     /// | ND2, 2x2x2 | 38 | 29 | — |
@@ -605,23 +611,13 @@ mod lor_vector_tests {
     /// | RT1, 2x2x2 | 26 | 18 | 350* |
     /// | RT1, 4x4x4 | 60 | 20 | >600* |
     ///
-    /// (\* fem-rs numbers are n=2→4 exact-inner PCG; MFEM's numbers come from
-    /// `LORDiscretization` + exact inner CG on the same mesh/coefficient.)
-    ///
-    /// MFEM warns for the (GaussLobatto, GaussLegendre) basis pair — the
-    /// fem-rs `HexNDk` duals since the round-15 D36 rework, i.e. MFEM's
-    /// `ND_FECollection` default — that "the LOR discretization is only
-    /// spectrally equivalent with basis types (Gauss-Lobatto, IntegratedGLL)".
-    /// The table shows that warning is exactly the gap: with IntegratedGLL
-    /// open modes MFEM's own perm transfer is h-robust.
-    ///
     /// # Continuation path
-    /// 1. Element crate: restore IntegratedGLL open modes (or add an
-    ///    IntegratedGLL variant) for `HexNDk`/`QuadNDk` — then this test
-    ///    should pass as-is (the fem-rs perm already matches MFEM's pairing:
-    ///    identical dof counts and negative-count structure on all checked
-    ///    meshes; see `pair_sign` in `fem_space::lor`).
-    /// 2. Alternative without element changes: explicit sparse prolongation
+    /// 1. Fix the remaining pairing/congruence defect in `fem_space::lor` for
+    ///    hex face/interior dofs (the element side is done; the geometric
+    ///    pairing audit in the D63 diagnostic agrees with the edge-block
+    ///    pairing, so audit the face/interior slot tables against MFEM's
+    ///    `ConstructLocalDofPermutation` dump).
+    /// 2. Alternative without space changes: explicit sparse prolongation
     ///    (interpolate each LOR basis function into the HO space) and
     ///    `M⁻¹ = P AMS(A_LOR) Pᵀ` — the H¹-path analogue.
     #[test]
@@ -644,9 +640,11 @@ mod lor_vector_tests {
     }
 
     #[test]
-    // D40 round 18: see the doc comment of lor_nd_pcg_iterations_mesh_independent
-    // — the pairing/sign fix is in, the remaining h-growth is the element-level
-    // basis pair (blocked on IntegratedGLL open modes).
+    // D63 round 19: see the doc comment of lor_nd_pcg_iterations_mesh_independent
+    // — the element-level IntegratedGLL basis is delivered, but RT1 hex (whose
+    // element is already IntegratedGLL) still shows a broken pencil (spread
+    // ≈ 6.6e4, exact-inner PCG fails) where MFEM gives 18 → 20.  The remaining
+    // defect is in the LOR pairing/congruence path (fem_space::lor).
     #[ignore]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
@@ -667,9 +665,13 @@ mod lor_vector_tests {
 
     /// 2-D quad LOR (ND3, RT1): scaling 4x4 vs 8x8 quads.
     #[test]
-    // D40 round 18: see the doc comment of lor_nd_pcg_iterations_mesh_independent
-    // — the pairing/sign fix is in, the remaining h-growth is the element-level
-    // basis pair (blocked on IntegratedGLL open modes).
+    // D63 round 19: additionally blocked at the element level — the 2-D quad
+    // ND/RT elements (`QuadNDk`, `QuadRTk`) are not ports of MFEM's
+    // `ND_QuadrilateralElement`/`RT_QuadrilateralElement` at all (legacy
+    // equispaced Lagrange × hat on [0,1]²), so the
+    // (GaussLobatto, IntegratedGLL) pair is not even available on quads.
+    // Quad ND/RT MFEM alignment is a separate effort that must precede this
+    // test's promotion.
     #[ignore]
     fn lor_quad_pcg_iterations_mesh_independent() {
         let nd_iters: Vec<usize> = [4, 8]
@@ -733,6 +735,183 @@ mod lor_vector_tests {
         // Spectral equivalence: both ratios are O(1).
         assert!(r_max > 0.05 && r_max < 20.0, "lambda_max ratio {r_max}");
         assert!(r_min > 0.05 && r_min < 20.0, "lambda_min ratio {r_min}");
+    }
+
+    /// D63 diagnostic: the `(GaussLobatto, IntegratedGLL)` ND pencil on hexes.
+    ///
+    /// `HexNDk::new_integrated_gll` delivers MFEM's LOR-compatible basis pair
+    /// at the element level (per-DOF dump parity in fem-element), but the
+    /// fem-rs LOR pencil is still not MFEM-equivalent.  This diagnostic
+    /// assembles the HO curl-curl + mass matrix with the IntegratedGLL basis
+    /// through a test-local affine-hex assembler whose library parity is
+    /// asserted on the nodal element (machine precision), then measures
+    /// exact-inner PCG (`M⁻¹ = Πᵀ A_LOR⁻¹ Π`) iteration counts.
+    ///
+    /// Measured (round 19): ND3 hex 28 → 79 iterations for n = 2 → 4, against
+    /// MFEM 4.9's flat 32 → 33 with the same recipe (`$HOME/work/lor_pencil`
+    /// harness: exact-inner CG, `LORDiscretization`, IGLL collection).  With
+    /// the GaussLegendre nodal basis the fem-rs pencil does not converge in
+    /// 500 iterations even at n = 2, so the basis pair removes the bulk of the
+    /// gap; the remaining h-growth is located in the LOR pairing/congruence
+    /// path (`fem_space::lor`), not in the element basis:
+    ///
+    /// - RT1 hex, whose element (`HexRT1` → `HexRTk`) is already IntegratedGLL,
+    ///   shows pencil spread λmax/λmin ≈ 6.6e4 (n = 2) and fails exact-inner
+    ///   PCG, while MFEM gives 18 → 20 — the pairing defect cannot be a basis
+    ///   defect;
+    /// - the geometric pairing audit (paired HO dof anchors vs LOR refined-edge
+    ///   anchors) agrees with `fem_space::lor` wherever the anchor check is
+    ///   decisive (edge-block dofs), so the suspect region is the face/interior
+    ///   slot pairing or the congruence signs.
+    ///
+    /// Run with `cargo test -p fem-assembly --lib d63_igll -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore] // diagnostic, not a gate: prints the pencil metrics
+    fn d63_igll_pencil_diagnostics() {
+        use fem_element::nedelec::HexNDk as HexNdElem;
+        use fem_element::reference::VectorReferenceElement as _;
+
+        struct ExactInner {
+            b: CsrMatrix<f64>,
+            cfg: SolverConfig,
+        }
+        impl fem_solver::Preconditioner for ExactInner {
+            type Vector = DenseVec<f64>;
+            fn apply_precond(&self, x: &DenseVec<f64>, y: &mut DenseVec<f64>) {
+                let rhs = x.as_slice().to_vec();
+                let mut z = vec![0.0_f64; rhs.len()];
+                solve_cg(&self.b, &rhs, &mut z, &self.cfg).expect("inner cg");
+                *y = DenseVec::from_vec(z);
+            }
+        }
+
+        // Library-order parity helper: assembles curl-curl (order 2k for Qk)
+        // plus mass (order 2k+3) for the given element kind.
+        fn assemble_hex_nd(
+            ho: &HCurlSpace<Mesh<3>>,
+            mesh: &Mesh<3>,
+            el: &HexNdElem,
+            mesh_clone: &Mesh<3>,
+        ) -> CsrMatrix<f64> {
+            let _ = mesh_clone;
+            let k = el.order() as usize;
+            let nd = el.n_dofs();
+            let qr_cc = fem_element::quadrature::hex_rule((2 * k) as u8);
+            let qr_m = fem_element::quadrature::hex_rule((2 * k + 3) as u8);
+            let mut a = fem_linalg::CooMatrix::<f64>::new(ho.n_dofs(), ho.n_dofs());
+            let mut v = vec![0.0_f64; nd * 3];
+            let mut c = vec![0.0_f64; nd * 3];
+            for e in 0..mesh.n_elements() as u32 {
+                let verts = mesh.element_nodes(e);
+                let p0 = mesh.node_coords(verts[0]);
+                let b0 = mesh.node_coords(verts[1]);
+                let b1 = mesh.node_coords(verts[3]);
+                let b2 = mesh.node_coords(verts[4]);
+                let mut jac = [[0.0_f64; 3]; 3];
+                for d in 0..3 {
+                    jac[d][0] = 0.5 * (b0[d] - p0[d]);
+                    jac[d][1] = 0.5 * (b1[d] - p0[d]);
+                    jac[d][2] = 0.5 * (b2[d] - p0[d]);
+                }
+                let det = jac[0][0] * jac[1][1] * jac[2][2];
+                let iphi: Vec<f64> = (0..3).map(|d| 1.0 / jac[d][d]).collect();
+                let icurl: Vec<f64> = (0..3).map(|d| jac[d][d] / det).collect();
+                let signs = ho.element_signs(e);
+                let dofs = ho.element_dofs(e);
+                let mut ae = vec![0.0_f64; nd * nd];
+                let mut add_rule = |rule: &fem_element::reference::QuadratureRule,
+                                    curl_term: bool,
+                                    ae: &mut Vec<f64>| {
+                    for (q, xi) in rule.points.iter().enumerate() {
+                        let w = rule.weights[q] * det;
+                        el.eval_basis_vec(xi, &mut v);
+                        el.eval_curl(xi, &mut c);
+                        for i in 0..nd {
+                            let pi: Vec<f64> =
+                                (0..3).map(|d| iphi[d] * v[i * 3 + d]).collect();
+                            let ci: Vec<f64> =
+                                (0..3).map(|d| icurl[d] * c[i * 3 + d]).collect();
+                            for j in 0..nd {
+                                let pj: Vec<f64> =
+                                    (0..3).map(|d| iphi[d] * v[j * 3 + d]).collect();
+                                let cj: Vec<f64> =
+                                    (0..3).map(|d| icurl[d] * c[j * 3 + d]).collect();
+                                let dot = if curl_term {
+                                    ci[0] * cj[0] + ci[1] * cj[1] + ci[2] * cj[2]
+                                } else {
+                                    pi[0] * pj[0] + pi[1] * pj[1] + pi[2] * pj[2]
+                                };
+                                ae[i * nd + j] += w * signs[i] * signs[j] * dot;
+                            }
+                        }
+                    }
+                };
+                add_rule(&qr_cc, true, &mut ae);
+                add_rule(&qr_m, false, &mut ae);
+                for i in 0..nd {
+                    for j in 0..nd {
+                        if ae[i * nd + j] != 0.0 {
+                            a.add(dofs[i] as usize, dofs[j] as usize, ae[i * nd + j]);
+                        }
+                    }
+                }
+            }
+            a.into_csr()
+        }
+
+        // 1. Parity: the test-local assembler reproduces the library's nodal
+        //    A_HO to machine precision (validated round 19: 7.1e-15).
+        {
+            let mesh = hex_mesh(2);
+            let ho = HCurlSpace::new(mesh.clone(), 3);
+            let mine = assemble_hex_nd(&ho, &mesh, &HexNdElem::new(3), &mesh);
+            let lib = assemble_nd(&ho, 1.0, 1.0);
+            let mut dmax = 0.0_f64;
+            for i in 0..mine.nrows {
+                for r in mine.row_ptr[i]..mine.row_ptr[i + 1] {
+                    let j = mine.col_idx[r] as usize;
+                    dmax = dmax.max((mine.values[r] - lib.get(i, j)).abs());
+                }
+            }
+            println!("nodal A_HO: test-local vs library max|diff| = {dmax:.3e}");
+            assert!(dmax < 1e-10, "assembler parity broken: {dmax:.3e}");
+        }
+
+        // 2. IntegratedGLL pencil: exact-inner PCG counts vs MFEM 32 → 33.
+        for &n in &[2usize, 4usize] {
+            let mesh = hex_mesh(n);
+            let ho = HCurlSpace::new(mesh.clone(), 3);
+            let a_ho = assemble_hex_nd(&ho, &mesh, &HexNdElem::new_integrated_gll(3), &mesh);
+            let lor = build_lor_ams_nd_hex(&ho, &a_ho, 1.0, 1.0, Default::default()).expect("b");
+            let inner = ExactInner {
+                b: lor.lor.ho_numbering(&lor.a_lor),
+                cfg: SolverConfig {
+                    rtol: 1e-10,
+                    atol: 1e-14,
+                    max_iter: 2000,
+                    verbose: false,
+                    ..Default::default()
+                },
+            };
+            let nn = a_ho.nrows;
+            let ones = vec![1.0_f64; nn];
+            let mut rhs = vec![0.0_f64; nn];
+            a_ho.spmv(&ones, &mut rhs);
+            let mut x0 = vec![0.0_f64; nn];
+            let pcfg = SolverConfig {
+                rtol: 1e-8,
+                atol: 0.0,
+                max_iter: 800,
+                verbose: false,
+                ..Default::default()
+            };
+            let res = fem_solver::solve_pcg_precond(&a_ho, &rhs, &mut x0, &inner, &pcfg);
+            match res {
+                Ok(r) => println!("ND3 hex IGLL n={n} exact-inner PCG: {} iters", r.iterations),
+                Err(e) => println!("ND3 hex IGLL n={n} exact-inner PCG: FAILED {e}"),
+            }
+        }
     }
 
     /// LOR dof counts match the HO dof counts on several hex meshes.
