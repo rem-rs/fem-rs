@@ -53,6 +53,10 @@ pub mod nonconforming;
 /// `NurbsMesh2D`, etc. remain in `nurbs` but are re-exported from `iga` for
 /// migration convenience.
 pub mod nurbs;
+/// NURBS finite element collections (`NURBSFECollection`,
+/// `NURBS_HDivFECollection`, `NURBS_HCurlFECollection`) and the MFEM
+/// `KnotVector` queries / `DegreeElevate` they rely on.
+pub mod nurbs_fe_collection;
 pub mod nurbs_vector;
 pub mod quadrature;
 pub mod raviart_thomas;
@@ -76,6 +80,12 @@ pub use lagrange::{
 pub use nedelec::{
     HexND2, HexNDk, PrismND1, PrismNDk, PyraND1, PyraNDk, QuadND2, QuadNDk,
     TetND2, TetNDk, TriND2, TriNDk,
+};
+pub use nurbs_fe_collection::{
+    degree_elevate, knot_is_element, knot_n_elements, knot_ncp, knot_nks, knot_order,
+    Nurbs1DFiniteElement, NurbsElement, NurbsFECollection, NurbsFEEntry, NurbsGeometry,
+    NurbsHCurlFECollection, NurbsHDivFECollection, NurbsRefElement, NurbsScalar2D, NurbsScalar3D,
+    VARIABLE_ORDER,
 };
 pub use nonconforming::{Q1RotRef, QuadQ1Rot, QuadQ1RotVec};
 pub use raviart_thomas::{

@@ -8,13 +8,13 @@
 //! Following Buffa, De Falco, Sangalli [2010] and Evans, Hughes [2013]:
 //!
 //! **H(div) 2D** (quad, orders px, py):
-//! - DOFs: `(px+2)*(py+1) + (px+1)*(py+2)`
+//! - DOFs: `(px+2)*(py+1) + (py+1)*(py+2)`
 //! - x-component: `N_i^(px+1)(ξ) * N_j^(py)(η)`  for i=0..px+1, j=0..py
 //! - y-component: `N_i^(px)(ξ) * N_j^(py+1)(η)`  for i=0..px, j=0..py+1
 //! - Piola transform: `v_phys = J * v_ref / weight`
 //!
 //! **H(curl) 2D** (quad, orders px, py):
-//! - DOFs: `(px+1)*(py+2) + (px+2)*(py+1)`
+//! - DOFs: `(px+1)*(py+2) + (py+2)*(py+1)`
 //! - x-component: `N_i^(px)(ξ) * N_j^(py+1)(η)`  for i=0..px, j=0..py+1
 //! - y-component: `N_i^(px+1)(ξ) * N_j^(py)(η)`  for i=0..px+1, j=0..py
 //! - Piola transform: `v_phys = J^{-T} * v_ref`
@@ -26,23 +26,31 @@
 //! **H(curl) 3D** (hex, orders px, py, pz):
 //! - DOFs: `(px+1)*(py+2)*(pz+2) + (px+2)*(py+1)*(pz+2) + (px+2)*(py+2)*(pz+1)`
 //! - Three components, each using degree-elevated knot vectors in two directions
+//!
+//! The 2D DOF formulas mirror MFEM's
+//! `NURBS_HDiv2DFiniteElement::SetOrder` / `NURBS_HCurl2DFiniteElement::SetOrder`
+//! verbatim: both index `py` in the second term where the degree-elevated basis
+//! suggests `px`.  Matching MFEM on anisotropic-order meshes requires the same
+//! arithmetic — see [`crate::nurbs_fe_collection::NurbsElement::n_dofs`].
+//!
+//! # Degree elevation
+//!
+//! The mixed-degree bases are built with MFEM's `KnotVector::DegreeElevate(1)`
+//! ([`crate::nurbs_fe_collection::degree_elevate`]), which preserves the
+//! element (span) count and raises the order by one.  MFEM evaluates both the
+//! base and the elevated basis at the same span index `ijk`
+//! (`NURBSExtension::LoadFE`); the value evaluation here assumes the
+//! multi-span-compatible case only for single-span patches — see
+//! [`crate::nurbs_fe_collection`] and the `nurbs_extension` notes in
+//! `fem-space` for the span-aware follow-up.
 
 use crate::iga::{BsplineBasis, KnotVector};
+use crate::nurbs_fe_collection::{degree_elevate, knot_order};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Helper: degree-elevated BsplineBasis
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/// Determine the polynomial order from a clamped knot vector.
-/// The order equals the multiplicity of the first knot minus 1.
-fn order_from_knots(kv: &KnotVector) -> usize {
-    let knots = kv.as_slice();
-    if knots.is_empty() { return 0; }
-    let first = knots[0];
-    let multiplicity = knots.iter().take_while(|&&k| (k - first).abs() < 1e-12).count();
-    multiplicity.saturating_sub(1)
-}
 
 /// Create a clamped uniform knot vector with `n_elem` spans on [0,1].
 fn clamped_uniform_knots(degree: usize, n_elem: usize) -> KnotVector {
@@ -55,42 +63,16 @@ fn clamped_uniform_knots(degree: usize, n_elem: usize) -> KnotVector {
     KnotVector::new_clamped(knots).expect("valid clamped uniform knots")
 }
 
-/// Elevate the degree of a knot vector by `t`, preserving the geometry.
-fn degree_elevate_knots(kv: &KnotVector, t: usize) -> KnotVector {
-    assert!(t >= 1, "degree_elevate: t must be >= 1");
-    let knots = kv.as_slice();
-
-    // Collect distinct knot values.
-    let mut distinct = Vec::new();
-    for w in knots.windows(2) {
-        if w[1] > w[0] {
-            distinct.push(w[0]);
-        }
-    }
-    if let Some(&last) = knots.last() {
-        distinct.push(last);
-    }
-
-    let first = distinct.first().copied().unwrap_or(0.0);
-    let last = distinct.last().copied().unwrap_or(1.0);
-
-    // Determine original degree from multiplicity of first knot.
-    let orig_degree = order_from_knots(kv);
-
-    // Build elevated knot vector.
-    let mut result = Vec::new();
-    result.extend(std::iter::repeat_n(first, orig_degree + t + 1));
-    for window in distinct.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        for k in 1..=t {
-            result.push(a + (b - a) * (k as f64) / ((t + 1) as f64));
-        }
-        result.push(b);
-    }
-    result.extend(std::iter::repeat_n(last, orig_degree + t));
-
-    KnotVector::new_clamped(result).expect("valid elevated knots")
+/// MFEM `KnotVector::DegreeElevate(1)` **and** the matching degree-elevated
+/// B-spline basis (`NURBS_HDiv*`/`NURBS_HCurl*::SetOrder` call
+/// `kv1[i] = kv[i]->DegreeElevate(1)` and then evaluate on `kv1[i]`).
+///
+/// Returns the elevated knot vector together with the basis built from it.
+fn elevated_basis(kv: &KnotVector) -> Result<(KnotVector, BsplineBasis), String> {
+    let kv1 = degree_elevate(kv, 1)?;
+    let degree = knot_order(&kv1).expect("elevated knot vector is clamped");
+    let basis = BsplineBasis::new(degree, kv1.clone())?;
+    Ok((kv1, basis))
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -132,18 +114,19 @@ impl NurbsHDiv2D {
 
     /// Create from knot vectors.
     pub fn from_knot_vectors(kv_u: KnotVector, kv_v: KnotVector) -> Result<Self, String> {
-        let px = order_from_knots(&kv_u);
-        let py = order_from_knots(&kv_v);
+        let px = knot_order(&kv_u).ok_or_else(|| "NurbsHDiv2D: invalid kv_u".to_string())?;
+        let py = knot_order(&kv_v).ok_or_else(|| "NurbsHDiv2D: invalid kv_v".to_string())?;
 
-        let kv1_u = degree_elevate_knots(&kv_u, 1);
-        let kv1_v = degree_elevate_knots(&kv_v, 1);
+        let (_, basis1_u) = elevated_basis(&kv_u)?;
+        let (_, basis1_v) = elevated_basis(&kv_v)?;
 
         let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
         let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
-        let basis1_u = BsplineBasis::new(px + 1, kv1_u).map_err(|e| format!("basis1_u: {e}"))?;
-        let basis1_v = BsplineBasis::new(py + 1, kv1_v).map_err(|e| format!("basis1_v: {e}"))?;
 
-        let n = (px + 2) * (py + 1) + (px + 1) * (py + 2);
+        // MFEM `NURBS_HDiv2DFiniteElement::SetOrder` (see
+        // `crate::nurbs_fe_collection::NurbsElement::n_dofs` for why the second
+        // term uses `py` rather than `px`).
+        let n = (px + 2) * (py + 1) + (py + 1) * (py + 2);
 
         Ok(Self {
             order_u: px,
@@ -156,9 +139,10 @@ impl NurbsHDiv2D {
         })
     }
 
-    /// Static DOF count for given orders.
+    /// Static DOF count for given orders, matching
+    /// `NURBS_HDiv2DFiniteElement::SetOrder`.
     pub fn n_dofs_static(px: usize, py: usize) -> usize {
-        (px + 2) * (py + 1) + (px + 1) * (py + 2)
+        (px + 2) * (py + 1) + (py + 1) * (py + 2)
     }
 
     /// Evaluate 1D B-spline shape values at parameter u.
@@ -175,7 +159,7 @@ impl NurbsHDiv2D {
 
 impl VectorReferenceElement for NurbsHDiv2D {
     fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order_u.max(self.order_v) as u8 }
+    fn order(&self) -> u8 { (self.order_u.max(self.order_v) + 1) as u8 } // MFEM reports the elevated degree
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
@@ -311,18 +295,18 @@ impl NurbsHCurl2D {
     }
 
     pub fn from_knot_vectors(kv_u: KnotVector, kv_v: KnotVector) -> Result<Self, String> {
-        let px = order_from_knots(&kv_u);
-        let py = order_from_knots(&kv_v);
+        let px = knot_order(&kv_u).ok_or_else(|| "NurbsHCurl2D: invalid kv_u".to_string())?;
+        let py = knot_order(&kv_v).ok_or_else(|| "NurbsHCurl2D: invalid kv_v".to_string())?;
 
-        let kv1_u = degree_elevate_knots(&kv_u, 1);
-        let kv1_v = degree_elevate_knots(&kv_v, 1);
+        let (_, basis1_u) = elevated_basis(&kv_u)?;
+        let (_, basis1_v) = elevated_basis(&kv_v)?;
 
         let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
         let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
-        let basis1_u = BsplineBasis::new(px + 1, kv1_u).map_err(|e| format!("basis1_u: {e}"))?;
-        let basis1_v = BsplineBasis::new(py + 1, kv1_v).map_err(|e| format!("basis1_v: {e}"))?;
 
-        let n = (px + 1) * (py + 2) + (px + 2) * (py + 1);
+        // MFEM `NURBS_HCurl2DFiniteElement::SetOrder` (second term uses `py`,
+        // see `crate::nurbs_fe_collection::NurbsElement::n_dofs`).
+        let n = (px + 1) * (py + 2) + (py + 2) * (py + 1);
 
         Ok(Self {
             order_u: px,
@@ -335,8 +319,10 @@ impl NurbsHCurl2D {
         })
     }
 
+    /// Static DOF count for given orders, matching
+    /// `NURBS_HCurl2DFiniteElement::SetOrder`.
     pub fn n_dofs_static(px: usize, py: usize) -> usize {
-        (px + 1) * (py + 2) + (px + 2) * (py + 1)
+        (px + 1) * (py + 2) + (py + 2) * (py + 1)
     }
 
     fn eval_1d(basis: &BsplineBasis, u: f64) -> Vec<(usize, f64)> {
@@ -350,7 +336,7 @@ impl NurbsHCurl2D {
 
 impl VectorReferenceElement for NurbsHCurl2D {
     fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { self.order_u.max(self.order_v) as u8 }
+    fn order(&self) -> u8 { (self.order_u.max(self.order_v) + 1) as u8 } // MFEM reports the elevated degree
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
@@ -484,20 +470,17 @@ impl NurbsHDiv3D {
     }
 
     pub fn from_knot_vectors(kv_u: KnotVector, kv_v: KnotVector, kv_w: KnotVector) -> Result<Self, String> {
-        let px = order_from_knots(&kv_u);
-        let py = order_from_knots(&kv_v);
-        let pz = order_from_knots(&kv_w);
+        let px = knot_order(&kv_u).ok_or_else(|| "NurbsHDiv3D: invalid kv_u".to_string())?;
+        let py = knot_order(&kv_v).ok_or_else(|| "NurbsHDiv3D: invalid kv_v".to_string())?;
+        let pz = knot_order(&kv_w).ok_or_else(|| "NurbsHDiv3D: invalid kv_w".to_string())?;
 
-        let kv1_u = degree_elevate_knots(&kv_u, 1);
-        let kv1_v = degree_elevate_knots(&kv_v, 1);
-        let kv1_w = degree_elevate_knots(&kv_w, 1);
+        let (_, basis1_u) = elevated_basis(&kv_u)?;
+        let (_, basis1_v) = elevated_basis(&kv_v)?;
+        let (_, basis1_w) = elevated_basis(&kv_w)?;
 
         let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
         let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
         let basis_w = BsplineBasis::new(pz, kv_w).map_err(|e| format!("basis_w: {e}"))?;
-        let basis1_u = BsplineBasis::new(px + 1, kv1_u).map_err(|e| format!("basis1_u: {e}"))?;
-        let basis1_v = BsplineBasis::new(py + 1, kv1_v).map_err(|e| format!("basis1_v: {e}"))?;
-        let basis1_w = BsplineBasis::new(pz + 1, kv1_w).map_err(|e| format!("basis1_w: {e}"))?;
 
         let n = (px + 2) * (py + 1) * (pz + 1)
               + (px + 1) * (py + 2) * (pz + 1)
@@ -522,7 +505,7 @@ impl NurbsHDiv3D {
 
 impl VectorReferenceElement for NurbsHDiv3D {
     fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order_u.max(self.order_v).max(self.order_w) as u8 }
+    fn order(&self) -> u8 { (self.order_u.max(self.order_v).max(self.order_w) + 1) as u8 } // MFEM reports the elevated degree
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
@@ -693,20 +676,17 @@ impl NurbsHCurl3D {
     }
 
     pub fn from_knot_vectors(kv_u: KnotVector, kv_v: KnotVector, kv_w: KnotVector) -> Result<Self, String> {
-        let px = order_from_knots(&kv_u);
-        let py = order_from_knots(&kv_v);
-        let pz = order_from_knots(&kv_w);
+        let px = knot_order(&kv_u).ok_or_else(|| "NurbsHCurl3D: invalid kv_u".to_string())?;
+        let py = knot_order(&kv_v).ok_or_else(|| "NurbsHCurl3D: invalid kv_v".to_string())?;
+        let pz = knot_order(&kv_w).ok_or_else(|| "NurbsHCurl3D: invalid kv_w".to_string())?;
 
-        let kv1_u = degree_elevate_knots(&kv_u, 1);
-        let kv1_v = degree_elevate_knots(&kv_v, 1);
-        let kv1_w = degree_elevate_knots(&kv_w, 1);
+        let (_, basis1_u) = elevated_basis(&kv_u)?;
+        let (_, basis1_v) = elevated_basis(&kv_v)?;
+        let (_, basis1_w) = elevated_basis(&kv_w)?;
 
         let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
         let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
         let basis_w = BsplineBasis::new(pz, kv_w).map_err(|e| format!("basis_w: {e}"))?;
-        let basis1_u = BsplineBasis::new(px + 1, kv1_u).map_err(|e| format!("basis1_u: {e}"))?;
-        let basis1_v = BsplineBasis::new(py + 1, kv1_v).map_err(|e| format!("basis1_v: {e}"))?;
-        let basis1_w = BsplineBasis::new(pz + 1, kv1_w).map_err(|e| format!("basis1_w: {e}"))?;
 
         let n = (px + 1) * (py + 2) * (pz + 2)
               + (px + 2) * (py + 1) * (pz + 2)
@@ -731,7 +711,7 @@ impl NurbsHCurl3D {
 
 impl VectorReferenceElement for NurbsHCurl3D {
     fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { self.order_u.max(self.order_v).max(self.order_w) as u8 }
+    fn order(&self) -> u8 { (self.order_u.max(self.order_v).max(self.order_w) + 1) as u8 } // MFEM reports the elevated degree
     fn n_dofs(&self) -> usize { self.n_dofs }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
@@ -921,6 +901,7 @@ impl VectorReferenceElement for NurbsHCurl3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nurbs_fe_collection::knot_ncp;
 
     #[test]
     fn nurbs_hdiv2d_dof_count() {
@@ -987,11 +968,23 @@ mod tests {
 
     #[test]
     fn degree_elevate_preserves_spans() {
-        let kv = clamped_uniform_knots(2, 1);
-        let kv1 = degree_elevate_knots(&kv, 1);
-        // Elevated knot vector should have degree 3 and more knots.
-        let orig_knots = kv.as_slice();
-        let elev_knots = kv1.as_slice();
-        assert!(elev_knots.len() > orig_knots.len());
+        // MFEM `KnotVector::DegreeElevate(1)`: order and control points each
+        // grow by one, the number of knot spans (elements) does not change.
+        let kv = clamped_uniform_knots(2, 3); // order 2, 3 spans
+        let kv1 = degree_elevate(&kv, 1).expect("elevate");
+        assert_eq!(knot_order(&kv1), Some(3));
+        assert_eq!(knot_ncp(&kv1), Some(knot_ncp(&kv).unwrap() + 1));
+        assert!(kv1.as_slice().len() > kv.as_slice().len());
+
+        // The elevated basis is the one the H(div)/H(curl) elements evaluate on.
+        let (_, b1) = elevated_basis(&kv).expect("elevated basis");
+        assert_eq!(b1.n_basis(), knot_ncp(&kv1).unwrap());
+
+        // Single span: order 1 -> order 2 with three basis functions.
+        let kv = clamped_uniform_knots(1, 1);
+        let kv1 = degree_elevate(&kv, 1).expect("elevate");
+        assert_eq!(kv1.as_slice(), &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let (_, b1) = elevated_basis(&kv).expect("elevated basis");
+        assert_eq!(b1.n_basis(), 3);
     }
 }

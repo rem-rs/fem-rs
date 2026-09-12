@@ -83,6 +83,21 @@ fn main() {
     }
 }
 
+/// `print_marker_line` mirrors MFEM's `Array<int>::Print` (10 values per line,
+/// space separated, newline terminated) so the marker dump is byte-identical.
+fn marker_line(flags: &[i32]) -> String {
+    let mut out = String::new();
+    for (i, f) in flags.iter().enumerate() {
+        out.push_str(&f.to_string());
+        if (i + 1) % 10 == 0 || i + 1 == flags.len() {
+            out.push('\n');
+        } else {
+            out.push(' ');
+        }
+    }
+    out
+}
+
 /// Dimension-independent driver (the 2-D and 3-D paths differ only in the mesh
 /// refinement / mesh writer, which `main` has already dispatched on).
 fn run<M: MeshTopology>(
@@ -106,8 +121,16 @@ fn run<M: MeshTopology>(
     } else {
         boundary_dofs(space.mesh(), space.dof_manager(), bdr_tags)
     };
+    // C++ prints the three marker *arrays* (`per_bdr.Print()`,
+    // `ess_bdr.Print()`, `neu_bdr.Print()`), each of size
+    // `mesh->bdr_attributes.Max()`, rather than the number of essential DOFs.
+    // Here `per_bdr`/`neu_bdr` stay all-zero and `ess_bdr` is all-ones, per
+    // `ess_bdr = 1` above.  `Array<int>::Print` writes 10 values per line.
     println!("Boundary conditions:");
-    println!(" - Essential : {}", ess_dofs.len());
+    let n_attrs = bdr_tags.iter().copied().max().unwrap_or(0).max(0) as usize;
+    print!(" - Periodic  : {}", marker_line(&vec![0; n_attrs]));
+    print!(" - Essential : {}", marker_line(&vec![1; n_attrs]));
+    print!(" - Neumann   : {}", marker_line(&vec![0; n_attrs]));
 
     // C++: `GridFunction x(fespace); x = 0.0;` (homogenousBC = true), then
     // `a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B)` — homogeneous
