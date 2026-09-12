@@ -22,7 +22,18 @@ miniapps/
 ├── electromagnetics/        ← 对应 miniapps/electromagnetics/
 │   ├── lorentz.rs
 │   ├── tesla.rs
-│   └── volta.rs
+│   ├── volta.rs
+│   └── maxwell.rs           ← 全波 Maxwell 偶极子脉冲 (1:1 串行; ND/RT 空间 +
+│                                SIAV 辛积分): H(Curl) 12336 / H(Div) 11520 dof
+│                                与 C++ 相同, 100 步 40 条 Energy(<t>ns) 行 +
+│                                banner + Options dump 与 C++ **逐字节**(主会话
+│                                独立复核: 78 行输出仅差 mesh 路径字符串与
+│                                Maximum Time Step); dtmax 行因 hypre
+│                                Randomize(1234) 种子不可复刻而不同
+│                                (0.141749→0.145761ns, 同 SnapTimeStep 档);
+│                                -vis/-visit/-cs/-abcs/NURBS/2D 为 exit(3);
+│                                joule 仅出判定(需要 MakeRef 视图 + 4 块耦合
+│                                隐式解 + MFEM ODE 族 + 静态凝聚)
 ├── diag-smoothers/          ← 对应 miniapps/diag-smoothers/
 │   └── abs-l1-jacobi.rs     ← Absolute L(1)-Jacobi 光滑子 (1:1 串行版;
 │                                mass/diffusion/maxwell 三类系统, SLI/PCG,
@@ -31,10 +42,15 @@ miniapps/
 │                                2D 与 Kershaw 全对比逐位一致;
 │                                maxwell 3D hex 差 HexNDk 归一化 4×,
 │                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
-├── nurbs/                   ← 对应 miniapps/nurbs/ (6 个已完成)
+├── nurbs/                   ← 对应 miniapps/nurbs/ (4 个 1:1 + 2 个非移植)
 │   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
-│   │                            与 C++ 迭代块逐字节一致）
+│   │                            与 C++ 迭代块逐字节一致; **1D 已支持**:
+│   │                            segment-nurbs.mesh 默认 = 4097 dof / 200 迭代
+│   │                            块 + 非收敛 trailer 与 C++ **逐字节**（主会话
+│   │                            独立复核：迭代块 0 处差异；注：本示例不打印
+│   │                            C++ 的 Options used 横幅，2D 路径同）;
+│   │                            部分属性 ess_bdr = boundary_dofs_marked）
 │   ├── nurbs_ex3.rs         ← 1:1（H(curl): NurbsHCurlSpace 分组件 curl
 │   │                            扩展 + 合并 elem_dof + Piola 装配 +
 │   │                            ProjectCoefficientElementL2 默认投影 =
@@ -45,6 +61,14 @@ miniapps/
 │   │                            10 迭代块逐字节 / ARF 0.128859 / L2
 │   │                            0.0508853 亦 = C++（三档均与 C++ 二进制
 │   │                            逐字节；未处理 remaining: sol.gf/refined.mesh））
+│   └── nurbs_ex5.rs / nurbs_ex24.rs ← **非 C++ 移植**（round 25 判定）:
+│                                C++ 的 ex5 是 NURBS 版 mixed Darcy
+│                                (H(div)×L2)、ex24 是三个 de Rham 变体
+│                                (-p 0/1/2, 3D)；Rust 这两个文件是 H¹ NS /
+│                                mixed-Darcy 草稿，网格与默认值都不同。共同
+│                                阻塞 = **缺 NurbsHDivSpace**（H(div) NURBS
+│                                空间，现只有 NurbsHCurlSpace）⇒ 建议单列
+│                                为该能力项，解锁后两者可一起做
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
@@ -243,15 +267,19 @@ miniapps/
 │                                3**, 重叠网格共轭传热): 已移植双域网格/加密
 │                                (默认档 11 elem + 24 solid; -r1 3 -r2 2 =
 │                                704/384 elem, VDOF 23042/11521, 热 dof 3185
-│                                全部 = C++) 与重叠传递算子 (4 阶解析场
-│                                插值误差 1.7e-13 / 2.27e-13, 未找到集合 =
-│                                流体挖去的 block 几何); 缺口: 无
-│                                OversetFindPointsGSLIB 对位、2D Tri3
-│                                SetCurvature(4) 缺失 (mesh/simplex.rs:848)、
-│                                流体侧 NavierDiscretization 与热
-│                                ConductionOperator(MixedDirectionalDerivative)
-│                                未移植; C++ 参考不可编 (本机所有 MFEM 构型
-│                                MFEM_USE_GSLIB=NO)
+│                                全部 = C++)、重叠传递算子 (4 阶解析场插值
+│                                误差 1.7e-13 / 2.27e-13, 未找到集合 = 流体
+│                                挖去的 block 几何)、**热网格 SetCurvature(4)**
+│                                与**热求解** K = ∫κ∇T∇v + (u·∇T)v（对流项走新
+│                                入库的 MixedDirectionalDerivativeIntegrator,
+│                                求积阶 14 = 4+4+(4−1)·2）：对流恒等式
+│                                max|K_adv·T − M(u·c)·1| = 6.66e-16、essential
+│                                66/3185、热反欧拉 dt=2e-2 PCG(Jacobi) 53 迭代
+│                                收敛、‖T₀‖₂ 2.198207E2 → ‖T₁‖₂ 2.064884E2;
+│                                缺口: 无 OversetFindPointsGSLIB 对位、流体侧
+│                                NavierDiscretization 未移植（对流场用解析替代）、
+│                                耦合轨迹不可核（串行 harness 的 FindPoints 漏点）、
+│                                C++ 参考不可编（本机所有构型 MFEM_USE_GSLIB=NO）
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
