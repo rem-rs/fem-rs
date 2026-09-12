@@ -199,6 +199,13 @@ miniapps/
 │                                3D 周期构造验证可用 (27 torus 节点,
 │                                order 4 = 1728/5184 dof = C++); 解析衰减
 │                                ke=⅛·e^(−6νt) 钉住; ComputeCurl3D 入内核
+├── fluids/navier_bifurcation.rs ← 第 6 个 (navier_bifurcation.cpp 1:1,
+│                                2D 通道分叉 + 粒子追踪): DOF 52866/26433
+│                                = C++, step1 CFL 6.03374E-02 逐位, 粒子
+│                                计数 600 步全一致, CSV 表头逐字节, 收敛区
+│                                100 步中 97 步 CFL 末位一致; 粒子用库内
+│                                crates/mesh/findpts (无裁剪, RNG 逐位复刻);
+│                                裁剪项: GLVis/ParaView/-traj (文档标注)
 └── ...                      ← tools/nodal_transfer.rs 已接入 (kd-tree
                                  投影; C++ 对照 6/7 案例一致, 1 例暴露
                                  tet io round-trip 取向归一化内核缺口)
