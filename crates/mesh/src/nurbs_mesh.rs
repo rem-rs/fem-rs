@@ -73,31 +73,31 @@ impl NurbsKnotVector {
 
     /// MFEM `KnotVector::DegreeElevate(t)`:
     /// Creates a new KnotVector with elevated order by repeating endpoints.
+    ///
+    /// Delegates to [`fem_element::nurbs_fe_collection::degree_elevate`], the
+    /// single implementation of the MFEM routine (shared with the `fem_space`
+    /// NURBS extensions).  That routine recovers `Order` from the knot
+    /// multiplicities (`Order + 1` repeated end knots) and
+    /// `NCP = Size() - Order - 1`, so the stored `order`/`num_cp` must agree
+    /// with the knot sequence (the clamping the NURBS mesh format guarantees);
+    /// the result's `order`/`num_cp` stay the declared `+ t`.
     pub fn degree_elevate(&self, t: i32) -> Self {
         assert!(t >= 0, "degree elevate factor must be non-negative");
+        let kv = fem_element::iga::KnotVector::new_clamped(self.knots.clone())
+            .expect("NurbsKnotVector::degree_elevate: invalid knot vector");
+        let elevated = fem_element::nurbs_fe_collection::degree_elevate(&kv, t as usize)
+            .expect("NurbsKnotVector::degree_elevate: invalid knot vector");
         let new_order = self.order + t;
         let new_ncp = self.num_cp + t;
-        let new_size = (new_ncp + new_order + 1) as usize;
-        let mut new_knots = vec![0.0; new_size];
-
-        // First new_order+1 knots = first knot
-        for i in 0..=new_order as usize {
-            new_knots[i] = self.knots[0];
-        }
-        // Middle knots: shifted by t
-        for i in (new_order as usize + 1)..new_ncp as usize {
-            new_knots[i] = self.knots[i - t as usize];
-        }
-        // Last new_order+1 knots = last knot
-        let last = self.knots[self.knots.len() - 1];
-        for i in 0..=new_order as usize {
-            new_knots[new_ncp as usize + i] = last;
-        }
-
+        debug_assert_eq!(
+            elevated.as_slice().len(),
+            (new_ncp + new_order + 1) as usize,
+            "NurbsKnotVector::degree_elevate: order/num_cp disagree with the knots"
+        );
         Self {
             order: new_order,
             num_cp: new_ncp,
-            knots: new_knots,
+            knots: elevated.as_slice().to_vec(),
         }
     }
 
@@ -521,14 +521,21 @@ mod tests {
 
     #[test]
     fn degree_elevate() {
-        let kv = NurbsKnotVector::new(2, 2, vec![0.0, 0.0, 1.0, 1.0]);
+        // Fully clamped quadratic: order 2, 3 control points,
+        // `Size() = NCP + Order + 1 = 6`.  (The previous fixture
+        // `new(2, 2, [0,0,1,1])` violated that invariant — order 2 needs three
+        // repeated end knots — which the delegated implementation detects
+        // because it recovers `Order` from the knot multiplicities, as
+        // `fem_element::nurbs_fe_collection::degree_elevate` and every other
+        // NURBS code path do.)
+        let kv = NurbsKnotVector::new(2, 3, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
         let elevated = kv.degree_elevate(1);
         assert_eq!(elevated.order(), 3);
-        assert_eq!(elevated.num_cp(), 3);
-        assert_eq!(elevated.len(), 7);
+        assert_eq!(elevated.num_cp(), 4);
+        assert_eq!(elevated.len(), 8);
         // First new_order+1=4 knots = first knot (0), last 4 knots = last knot (1)
-        // Middle loop is empty (new_order+1=4 > new_ncp=3)
-        assert_eq!(elevated.knots, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
+        // Middle loop is empty (new_order+1=4 > new_ncp=4 is false: i in 4..4)
+        assert_eq!(elevated.knots, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]

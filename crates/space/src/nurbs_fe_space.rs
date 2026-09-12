@@ -108,6 +108,109 @@ pub fn nurbs_rule(dim: usize, order: u8) -> Rule {
     Rule { points, weights }
 }
 
+/// The 1-D nodal Lagrange basis through `nodes` evaluated at `x`
+/// (`l_i(x) = Π_{j≠i} (x−x_j)/(x_i−x_j)`), the values MFEM's
+/// `Poly_1D::Basis::Eval` produces for the Gauss-Legendre points.
+fn lagrange_1d(nodes: &[f64], x: f64) -> Vec<f64> {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let mut v = 1.0;
+            for (j, &xj) in nodes.iter().enumerate() {
+                if j != i {
+                    v *= (x - xj) / (xi - xj);
+                }
+            }
+            v
+        })
+        .collect()
+}
+
+/// `CalcShape` of MFEM's `L2_QuadrilateralElement` / `L2_HexahedronElement`
+/// with `BasisType::GaussLegendre`: the tensor product of the 1-D nodal
+/// Lagrange basis [`lagrange_1d`] of the Gauss-Legendre points, in `L2_DOF_MAP`
+/// order (`o = ix + (p+1)*(iy + (p+1)*iz)`, x fastest).
+fn l2_gl_shape(dim: usize, nodes: &[f64], xi: &[f64], out: &mut [f64]) {
+    let np = nodes.len();
+    let lx = lagrange_1d(nodes, xi[0]);
+    let ly = lagrange_1d(nodes, xi[1]);
+    if dim == 2 {
+        for ix in 0..np {
+            for iy in 0..np {
+                out[iy * np + ix] = lx[ix] * ly[iy];
+            }
+        }
+    } else {
+        let lz = lagrange_1d(nodes, xi[2]);
+        for ix in 0..np {
+            for iy in 0..np {
+                for iz in 0..np {
+                    out[iz * np * np + iy * np + ix] = lx[ix] * ly[iy] * lz[iz];
+                }
+            }
+        }
+    }
+}
+
+/// MFEM `LinearSolve(DenseMatrix&, real_t*, TOL)` — `LUFactors::Factor` with
+/// partial pivoting followed by `LUFactors::Solve`, on a row-major `n x n`
+/// matrix.  Returns `false` — leaving `rhs` untouched — when a pivot is
+/// `<= tol`, exactly like MFEM's factorisation.
+fn dense_lu_solve(mat: &mut [f64], n: usize, rhs: &mut [f64], tol: f64) -> bool {
+    let mut piv = vec![0usize; n];
+    for i in 0..n {
+        let mut p = i;
+        let mut amax = mat[i * n + i].abs();
+        for j in i + 1..n {
+            let b = mat[j * n + i].abs();
+            if b > amax {
+                amax = b;
+                p = j;
+            }
+        }
+        piv[i] = p;
+        if p != i {
+            for j in 0..n {
+                mat.swap(i * n + j, p * n + j);
+            }
+        }
+        if mat[i * n + i].abs() <= tol {
+            return false;
+        }
+        let inv = 1.0 / mat[i * n + i];
+        for j in i + 1..n {
+            mat[j * n + i] *= inv;
+        }
+        for k in i + 1..n {
+            let aik = mat[i * n + k];
+            for j in i + 1..n {
+                mat[j * n + k] -= aik * mat[j * n + i];
+            }
+        }
+    }
+    for i in 0..n {
+        if piv[i] != i {
+            rhs.swap(i, piv[i]);
+        }
+    }
+    for i in 0..n {
+        let mut s = rhs[i];
+        for j in 0..i {
+            s -= mat[i * n + j] * rhs[j];
+        }
+        rhs[i] = s;
+    }
+    for i in (0..n).rev() {
+        let mut s = rhs[i];
+        for j in i + 1..n {
+            s -= mat[i * n + j] * rhs[j];
+        }
+        rhs[i] = s / mat[i * n + i];
+    }
+    true
+}
+
 /// The scalar NURBS element of one knot span: MFEM's `NURBS2DFiniteElement` /
 /// `NURBS3DFiniteElement` bound to a patch's knot vectors, one span index
 /// (`NURBSFiniteElement::ijk`) and one weight per local DOF (`LoadFE`).
@@ -971,6 +1074,41 @@ impl NurbsHCurlSpace {
         }
     }
 
+    /// `FiniteElement::CalcPhysVShape` of a span element:
+    /// `NURBS_HCurl*FiniteElement::CalcVShape(Trans, shape)` — the
+    /// reference-space vector basis (`CalcVShape(ip, shape)`) mapped through
+    /// `J⁻¹ = adj(J)/det(J)` (`Trans.InverseJacobian()`), which is the
+    /// components' contravariant/covariant pairing the H(curl) trace uses.
+    /// `ref_shape` is scratch of `n_dofs*dim` entries, `out` receives the
+    /// `n_dofs x dim` physical values (row-major, DOF-major).
+    fn phys_vshape(
+        &self,
+        fe: &HCurlSpanElement,
+        xi: &[f64],
+        geo: &Geometry,
+        ref_shape: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) {
+        let dim = self.dim;
+        let nd = fe.n_dofs();
+        ref_shape.resize(nd * dim, 0.0);
+        out.resize(nd * dim, 0.0);
+        ref_shape.iter_mut().for_each(|v| *v = 0.0);
+        out.iter_mut().for_each(|v| *v = 0.0);
+        fe.eval_basis_vec(xi, ref_shape);
+        let adj = adjugate(&geo.jac, dim);
+        let inv_det = 1.0 / geo.det_j;
+        for i in 0..nd {
+            for c in 0..dim {
+                let mut s = 0.0;
+                for k in 0..dim {
+                    s += ref_shape[i * dim + k] * (adj[k][c] * inv_det);
+                }
+                out[i * dim + c] = s;
+            }
+        }
+    }
+
     /// MFEM `FiniteElementSpace::GetEssentialTrueDofs(ess_bdr = 1)` — the
     /// sorted unique DOF list of every mesh boundary element.
     ///
@@ -1028,14 +1166,205 @@ impl NurbsHCurlSpace {
             .collect()
     }
 
-    /// `GridFunction::ProjectCoefficient(VectorCoefficient)` for the H(curl)
-    /// space — MFEM loops the elements and calls
+    /// `GridFunction::ProjectCoefficient(VectorCoefficient&)` — MFEM's
+    /// **default** dispatch for a NURBS space.
+    ///
+    /// `GridFunction::ProjectCoefficient` routes `ProjectType::DEFAULT` to
+    /// `ProjectCoefficientElementL2(vcoeff)` whenever `fes->GetNURBSext() !=
+    /// NULL` (fem/gridfunc.cpp): the element-local L² projection followed by a
+    /// least-squares fit back onto the NURBS basis, **not** the Botella-point
+    /// interpolation of `ProjectType::ELEMENT`.  This is the call
+    /// `nurbs_ex3.cpp` makes with its bare `x.ProjectCoefficient(E)`.
+    pub fn project_coefficient(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+        self.project_coefficient_element_l2(f)
+    }
+
+    /// `ProjectCoefficientElementL2_(VectorCoefficient&, x, Va)` followed by
+    /// `(*this) /= Va` (`GridFunction::ProjectCoefficientElementL2`) — the
+    /// NURBS branch, i.e. MFEM's default projection for a
+    /// `NURBS_HCurlFECollection` space.
+    ///
+    /// Per element `e` (fem/gridfunc.cpp):
+    ///
+    /// 1. `el` = the span's `NURBS_HCurl2D/3DFiniteElement`, `dof = el.GetDof()`,
+    ///    `dim = el.GetRangeDim()`, `p = el.GetOrder()` — the *elevated* degree
+    ///    `max(orders)+1` reported by `NURBSFiniteElement::SetOrder`, not the
+    ///    span's knot order (`NURBS_HCurlFECollection`'s own order `o` gives
+    ///    `p = o+1`).
+    /// 2. `el2` = `L2_FECollection(p, dim).FiniteElementForGeometry(geom)`, i.e.
+    ///    `L2_QuadrilateralElement(p, GaussLegendre)` /
+    ///    `L2_HexahedronElement(p, GaussLegendre)`: `dof2 = (p+1)^dim` nodal DOFs
+    ///    at the Gauss-Legendre points of `[0,1]^dim`.
+    /// 3. Quadrature `IntRules.Get(geom, 2*p+1)` — `p+1` Gauss points per
+    ///    direction, the same 1-D rule that defines the L2 nodes.  Accumulate
+    ///    the `dim` independent L² projections of the coefficient components
+    ///    (`shape2`), the L² mass matrix (`elmat`: one identical `dof2 x dof2`
+    ///    block per component) and the NURBS weight `elwght[j] += w * ‖vshape_j‖₂`
+    ///    (`DenseMatrix::GetRowl2` of the *physical* vector shape functions —
+    ///    the Buffa–Sangalli–Vázquez partition-of-unity normaliser).
+    /// 4. `LinearSolve(elmat, elvect)`: the component-wise L² projection
+    ///    coefficients in the L2 nodal basis.
+    /// 5. `el2.Project(el, tr, I)`: `I` is `(dim*dof2) x dof` with
+    ///    `I(d*dof2 + k, j) = vshape_j,d(`node `k)` — `NodalFiniteElement::Project`
+    ///    evaluates the NURBS vector shape functions at the L2 nodes (physical
+    ///    space; `L2_FECollection`'s default `VALUE` map type adds no
+    ///    `Trans.Weight()` factor).  The NURBS DOFs are then the least-squares
+    ///    solution of `I x ≈ elvect`, `(IᵀI) x = Iᵀ elvect`
+    ///    (`I.Transpose(); I.Mult(elvect, vec); MultAAt(I, mat)`).
+    /// 6. `elvect *= elwght`, accumulate `elvect` into `x` through the signed
+    ///    `GetElementVDofs` entries and `elwght` into `Va` through their
+    ///    `DecodeDof` component numbers; finally `x /= Va`.
+    ///
+    /// `dof2*dim >= dof` always holds for these elements, so the LSQ system is
+    /// overdetermined — but `IᵀI` inherits the conditioning of the L² pairing
+    /// of the two bases: MFEM itself warns "This project is not stable for
+    /// NURBS VectorFE with order >= 5".
+    pub fn project_coefficient_element_l2(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+        let dim = self.dim;
+        let mut x = vec![0.0_f64; self.n_dofs];
+        let mut va = vec![0.0_f64; self.n_dofs];
+        let mut shape2: Vec<f64> = Vec::new();
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut shape: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let fe = self.element_fe(e);
+            let nd = self.elem_dof[e].len();
+            // `el.GetOrder()` of the *loaded* NURBS element: `max(orders)+1`.
+            let p = fe.order();
+            let dof2 = (p + 1).pow(dim as u32);
+            // `IntRules.Get(el.GetGeomType(), 2*el.GetOrder() + 1)`.
+            let rule = nurbs_rule(dim, (2 * p + 1) as u8);
+            // `Poly_1D::OpenPoints(p, GaussLegendre)` — the L2 element's 1-D
+            // nodal points, i.e. the same Gauss-Legendre rule as the quadrature
+            // above; evaluated once per element.
+            let l2_nodes = gauss_legendre_01(p + 1).0;
+
+            shape2.clear();
+            shape2.resize(dof2, 0.0);
+            ref_shape.clear();
+            ref_shape.resize(nd * dim, 0.0);
+            shape.clear();
+            shape.resize(nd * dim, 0.0);
+
+            let nblk = dof2 * dim;
+            let mut elvect = vec![0.0_f64; nblk];
+            let mut elmat = vec![0.0_f64; nblk * nblk];
+            let mut elwght = vec![0.0_f64; nd];
+            let mut partelmat = vec![0.0_f64; dof2 * dof2];
+
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                // `real_t wght = ip.weight*tr.Weight();`
+                let w = rule.weights[q] * geo.det_j;
+                // `vcoeff.Eval(val, tr, ip); val *= wght;`
+                let val: Vec<f64> = f(&geo.x[..dim]).iter().map(|v| v * w).collect();
+                // `el2.CalcPhysShape` (`VALUE` map type: the plain tensor
+                // Lagrange basis of the Gauss-Legendre nodes).
+                l2_gl_shape(dim, &l2_nodes, xi, &mut shape2);
+                // `el.CalcPhysVShape`.
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut shape);
+
+                for c in 0..dim {
+                    for s in 0..dof2 {
+                        elvect[dof2 * c + s] += val[c] * shape2[s];
+                    }
+                }
+                // `MultVVt(shape2, partelmat); partelmat *= wght;` followed by
+                // `elmat.AddMatrix(partelmat, dof2*k, dof2*k)` per component.
+                for r in 0..dof2 {
+                    for s in 0..dof2 {
+                        partelmat[r * dof2 + s] = shape2[r] * shape2[s] * w;
+                    }
+                }
+                for c in 0..dim {
+                    let off = dof2 * c;
+                    for r in 0..dof2 {
+                        for s in 0..dof2 {
+                            elmat[(off + r) * nblk + off + s] += partelmat[r * dof2 + s];
+                        }
+                    }
+                }
+                // `shape.GetRowl2(shapel2); elwght.Add(wght, shapel2);`
+                for j in 0..nd {
+                    let mut s2 = 0.0;
+                    for c in 0..dim {
+                        s2 += shape[j * dim + c] * shape[j * dim + c];
+                    }
+                    elwght[j] += w * s2.sqrt();
+                }
+            }
+
+            // `LinearSolve(elmat, elvect.GetData())` (default TOL = 1e-9).
+            if !dense_lu_solve(&mut elmat, nblk, &mut elvect, 1e-9) {
+                panic!(
+                    "NurbsHCurlSpace::project_coefficient_element_l2: singular L2 mass matrix"
+                );
+            }
+
+            // `el2.Project(el, tr, I)`, I(d*dof2 + k, j) = vshape_j,d(node k).
+            let mut imat = vec![0.0_f64; nblk * nd];
+            for k in 0..dof2 {
+                let node: Vec<f64> = if dim == 2 {
+                    vec![l2_nodes[k % (p + 1)], l2_nodes[k / (p + 1)]]
+                } else {
+                    vec![
+                        l2_nodes[k % (p + 1)],
+                        l2_nodes[(k / (p + 1)) % (p + 1)],
+                        l2_nodes[k / ((p + 1) * (p + 1))],
+                    ]
+                };
+                let geo = self.base.geometry(e, &node);
+                self.phys_vshape(&fe, &node, &geo, &mut ref_shape, &mut shape);
+                for j in 0..nd {
+                    for c in 0..dim {
+                        imat[(c * dof2 + k) * nd + j] = shape[j * dim + c];
+                    }
+                }
+            }
+
+            // `I.Transpose(); I.Mult(elvect, vec); MultAAt(I, mat);` then
+            // `LinearSolve(mat, vec, 1e-24)`: the LSQ fit of the NURBS DOFs.
+            let mut vec = vec![0.0_f64; nd];
+            let mut mat = vec![0.0_f64; nd * nd];
+            for j in 0..nd {
+                let mut s = 0.0;
+                for r in 0..nblk {
+                    s += imat[r * nd + j] * elvect[r];
+                }
+                vec[j] = s;
+                for j2 in 0..nd {
+                    let mut t = 0.0;
+                    for r in 0..nblk {
+                        t += imat[r * nd + j] * imat[r * nd + j2];
+                    }
+                    mat[j * nd + j2] = t;
+                }
+            }
+            if !dense_lu_solve(&mut mat, nd, &mut vec, 1e-24) {
+                panic!("NurbsHCurlSpace::project_coefficient_element_l2: singular IᵀI");
+            }
+
+            // `elvect = vec; elvect *= elwght;` then `AddElementVector`.
+            for (j, &g) in self.elem_dof[e].iter().enumerate() {
+                x[g] += vec[j] * elwght[j];
+                va[g] += elwght[j];
+            }
+        }
+        for i in 0..self.n_dofs {
+            x[i] /= va[i];
+        }
+        x
+    }
+
+    /// `GridFunction::ProjectCoefficient(VectorCoefficient&, ProjectType::ELEMENT)`
+    /// for the H(curl) space — MFEM loops the elements and calls
     /// `NURBS_HCurl*FiniteElement::Project`, which assigns each local DOF the
     /// component-`c` value of `Jᵀ E(x_phys)` at the DOF's Botella abscissa
     /// (`KnotVector::GetBotella` Newton iteration) when it lies in the
     /// element's span; DOFs outside remain untouched (they are assigned by the
     /// element that owns their span).
-    pub fn project_coefficient(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+    pub fn project_coefficient_element(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
         let dim = self.dim;
         let mut x = vec![0.0_f64; self.n_dofs];
         for e in 0..self.n_elements() {
@@ -1310,21 +1639,8 @@ impl NurbsHCurlSpace {
                 let xi = &rule_m.points[q];
                 let geo = self.base.geometry(e, xi);
                 let w = rule_m.weights[q] * geo.det_j * sigma;
-                // `CalcVShape(Trans, vshape)`: reference basis then `J⁻ᵀ`.
-                curl_ref.clear();
-                curl_ref.resize(nd * dim, 0.0);
-                fe.eval_basis_vec(xi, &mut curl_ref);
-                let adj = adjugate(&geo.jac, dim);
-                let inv_det = 1.0 / geo.det_j;
-                for i in 0..nd {
-                    for c in 0..dim {
-                        let mut s = 0.0;
-                        for k in 0..dim {
-                            s += curl_ref[i * dim + k] * (adj[k][c] * inv_det);
-                        }
-                        vshape[i * dim + c] = s;
-                    }
-                }
+                // `CalcVShape(Trans, vshape)`: reference basis then `J⁻¹`.
+                self.phys_vshape(&fe, xi, &geo, &mut curl_ref, &mut vshape);
                 // `AddMult_a_AAt(w, trial_vshape, elmat)`.
                 for i in 0..nd {
                     for j in 0..nd {

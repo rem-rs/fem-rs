@@ -580,7 +580,7 @@ fn hcurl_botella_projection_matches_mfem_element_projection() {
 
     let sp = NurbsHCurlSpace::from_mesh_str(MESH, 7, 1).expect("hcurl space");
     let kap = std::f64::consts::PI;
-    let x = sp.project_coefficient(&|x: &[f64]| vec![(kap * x[1]).sin(), (kap * x[0]).sin()]);
+    let x = sp.project_coefficient_element(&|x: &[f64]| vec![(kap * x[1]).sin(), (kap * x[0]).sin()]);
 
     // `x.Norml2()` of MFEM's `ProjectCoefficient(E, ProjectType::ELEMENT)`.
     let xn = x.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -608,4 +608,115 @@ fn hcurl_botella_projection_matches_mfem_element_projection() {
     // tangential trace of `E` vanishes on all four boundary edges, so only the
     // 516 essential DOFs stay at round-off level.
     assert_eq!(x.iter().filter(|v| v.abs() > 1e-6).count(), 33024);
+}
+
+#[test]
+fn hcurl_default_projection_matches_mfem_element_l2() {
+    use fem_space::NurbsHCurlSpace;
+
+    let kap = std::f64::consts::PI;
+    let e = |x: &[f64]| vec![(kap * x[1]).sin(), (kap * x[0]).sin()];
+
+    // `-r 1` (4 elements, 24 DOFs): MFEM 4.10's
+    // `GridFunction::ProjectCoefficient(E)` — the NURBS default dispatch to
+    // `ProjectCoefficientElementL2` (an element-local L² projection of `E`
+    // followed by the LSQ fit onto the NURBS basis and the `./= Va`
+    // normalisation), *not* `ProjectType::ELEMENT`'s Botella interpolation
+    // (which gives `6.1e-17` instead of `-1.3e-2` on these DOFs).
+    const MFEM_R1: [f64; 24] = [
+        -0.013035037545896822, -0.013035037545897139, -0.013035037545896263,
+        -0.013035037545896289, -0.013035037545896874, -0.013035037545896275,
+        0.4839862258057443, 0.48398622580574313, 0.48398622580574496,
+        0.48398622580574274, 0.48398622580574435, 0.48398622580574308,
+        -0.013035037545897245, -0.013035037545896787, -0.013035037545896785,
+        -0.01303503754589665, 0.48398622580574441, 0.48398622580574374,
+        0.48398622580574424, 0.48398622580574363, -0.013035037545896704,
+        -0.013035037545896338, 0.48398622580574407, 0.4839862258057433,
+    ];
+    let sp1 = NurbsHCurlSpace::from_mesh_str(MESH, 1, 1).expect("hcurl space");
+    let x1 = sp1.project_coefficient(&e);
+    for (i, &want) in MFEM_R1.iter().enumerate() {
+        // Measured agreement 1.2e-15 absolute (6e-14 relative, dominated by the
+        // Windows/glibc `sin` difference); pinned with a 100x margin.
+        assert!(
+            (x1[i] - want).abs() <= 1e-13,
+            "x[{i}] = {:.17e}, MFEM {:.17e}",
+            x1[i],
+            want
+        );
+    }
+
+    // The default configuration (7 refinements, 16384 elements, 33540 DOFs).
+    let sp7 = NurbsHCurlSpace::from_mesh_str(MESH, 7, 1).expect("hcurl space");
+    let x7 = sp7.project_coefficient(&e);
+
+    // `x.Norml2()` of MFEM's default dispatch (measured 2.9e-14 relative).
+    let xn = x7.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        (xn - 1.00397424765297827).abs() <= 1e-12,
+        "|x| = {xn:.17e}, MFEM 1.00397424765297827e0"
+    );
+
+    // Representative interior DOFs (`GetElementL2`'s LSQ values, O(1e-4..1e-3))
+    // and the largest entry: measured agreement ~2e-14 relative.
+    let expect: [(usize, f64); 5] = [
+        (258, 9.58781313370977246e-05),
+        (259, 2.87578083329920197e-04),
+        (260, 4.79104328035391709e-04),
+        (262, 8.61175839439673962e-04),
+        (8602, 7.81249999999398658e-03),
+    ];
+    for (i, want) in expect {
+        assert!(
+            (x7[i] - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "x[{i}] = {:.17e}, MFEM {:.17e}",
+            x7[i],
+            want
+        );
+    }
+
+    // The *essential* values are the projection's fit of a vanishing tangential
+    // trace: `x` and `Va` are both O(1e-12)/O(1e-3) there, so the quotient
+    // `x/Va ≈ -9.625e-10` loses ~7 digits to cancellation and only agrees with
+    // MFEM to ~1e-9 relative (1e-18 absolute).  The ELEMENT dispatch gives
+    // `~1e-19` here, so the sign and magnitude still separate the two
+    // projections unambiguously — that is what this assertion pins.
+    let ess = sp7.essential_dofs();
+    assert_eq!(ess.len(), 516);
+    let ev: Vec<f64> = ess.iter().map(|&d| x7[d as usize]).collect();
+    let mean = ev.iter().sum::<f64>() / ev.len() as f64;
+    assert!(
+        (mean - (-9.62513678477175043e-10)).abs() <= 1e-7 * 9.62513678477175043e-10,
+        "mean essential value = {mean:.17e}, MFEM -9.62513678477175043e-10"
+    );
+    assert!(ev.iter().all(|v| *v < -9.0e-10 && *v > -1.0e-9), "essential values: {ev:?}");
+
+    // `ProjectType::ELEMENT` (the Botella interpolation) is a *different*
+    // projection: it leaves ~1e-19 on the same DOFs.  Both are reachable, but
+    // `project_coefficient` must be the default (L2) one.
+    let xe = sp7.project_coefficient_element(&e);
+    assert!(xe[0].abs() < 1e-15, "ELEMENT x[0] = {:e}", xe[0]);
+    assert_ne!(x7[0], xe[0]);
+
+    // 3-D path (`cube-nurbs.mesh`, `-r 1`: 8 elements, 144 DOFs, `ledof 54`):
+    // `L2_HexahedronElement(2, GaussLegendre)` has `3^3 = 27` nodes, so
+    // `dim*dof2 = 81 >= 54`.  MFEM 4.10's default dispatch gives
+    // `ESSVAL_DEFAULT[0] = -0.013035037545899991` and, for the 3-component
+    // `E = (sin(πy), sin(πz), sin(πx))`, `||x||_2 = 4.10824849371272016e0`
+    // (measured agreement ~1e-15 relative, same as the 2-D `-r 1` case).
+    const MESH3D: &str = include_str!("../../../data/cube-nurbs.mesh");
+    let sp3 = NurbsHCurlSpace::from_mesh_str(MESH3D, 1, 1).expect("hcurl space 3d");
+    assert_eq!(sp3.n_dofs(), 144);
+    let e3 = |x: &[f64]| vec![(kap * x[1]).sin(), (kap * x[2]).sin(), (kap * x[0]).sin()];
+    let x3 = sp3.project_coefficient(&e3);
+    assert!(
+        (x3[0] - (-0.013035037545899991)).abs() <= 1e-13,
+        "3-D x[0] = {:.17e}, MFEM -0.013035037545899991e0",
+        x3[0]
+    );
+    let n3 = x3.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        (n3 - 4.10824849371272016).abs() <= 1e-12,
+        "3-D |x| = {n3:.17e}, MFEM 4.10824849371272016e0"
+    );
 }

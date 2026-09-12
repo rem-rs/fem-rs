@@ -6,15 +6,19 @@
 //!
 //! The exact solution `E = (sin(kappa y), sin(kappa x))` drives both the
 //! right-hand side `f = (1 + kappa^2) E` (`VectorFEDomainLFIntegrator`) and
-//! the initial/essential data via `x.ProjectCoefficient(E)` — MFEM's
-//! `NURBS_HCurl*FiniteElement::Project` Botella-point interpolation.  All
+//! the initial/essential data via `x.ProjectCoefficient(E)`.  MFEM routes that
+//! bare call to `ProjectCoefficientElementL2` for a NURBS space (an
+//! element-local L² projection of `E` plus an LSQ fit onto the NURBS basis and
+//! a `./= Va` normalisation — *not* the `ProjectType::ELEMENT` Botella-point
+//! interpolation); [`NurbsHCurlSpace::project_coefficient`] reproduces it.  All
 //! boundary attributes are essential (`ess_bdr = 1`), so `FormLinearSystem`
-//! imposes the exact tangential trace and PCG starts from the projected
-//! field.
+//! imposes the tangential trace and PCG starts from the projected field.
 //!
 //! Port notes:
 //! * The solve block (PCG + `GSSmoother`, `rtol 1e-12`, `max_it 500`) and the
-//!   L2-error line are byte-identical to the C++ binary.
+//!   L2-error line are byte-identical to the C++ binary, both for the default
+//!   `-r 7` mesh (166 iterations, ARF 0.918732, `||E_h - E|| = 8.41665e-06`)
+//!   and for `-r 1` (10 iterations, ARF 0.128859, `||E_h - E|| = 0.0508853`).
 //! * Not ported: `refined.mesh` / `sol.gf` (no NURBS mesh writer, see
 //!   `nurbs_ex1`), the GLVis socket and the VisIt data collection.
 //! * `GetCurlExtension` (and hence this example) requires single-patch NURBS
@@ -129,7 +133,9 @@ fn main() {
     // 7. `b->AddDomainIntegrator(new VectorFEDomainLFIntegrator(f));`
     let b = space.assemble_vector_domain_lf(&|x: &[f64]| exact_f(x, kap, dim));
 
-    // 8. `x.ProjectCoefficient(E);` — the projected field provides both the
+    // 8. `x.ProjectCoefficient(E);` — for a NURBS space MFEM dispatches this to
+    //    `ProjectCoefficientElementL2` (L² element projection + LSQ fit + the
+    //    `./= Va` normalisation).  The projected field provides both the
     //    essential (tangential) data and PCG's initial guess.
     let mut x = space.project_coefficient(&|x: &[f64]| exact_e(x, kap, dim));
     // `ess_tdof_list` membership mask (MFEM excludes the interior of `X`).
