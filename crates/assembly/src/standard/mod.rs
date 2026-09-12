@@ -217,7 +217,9 @@ pub use source::DomainSourceIntegrator;
 pub use source::DomainSourceIntegratorCoeff;
 pub use curl_curl::{CurlCurlIntegrator, CurlCurlTensorIntegrator};
 pub use vector_mass::{VectorMassIntegrator, VectorMassTensorIntegrator};
-pub use convection::ConvectionIntegrator;
+pub use convection::{
+    ConvectionIntegrator, MixedDirectionalDerivativeIntegrator, mfem_quad_order,
+};
 pub use vector_diffusion::VectorDiffusionIntegrator;
 pub use vector_h1_mass::VectorH1MassIntegrator;
 pub use vector_convection::VectorConvectionIntegrator;

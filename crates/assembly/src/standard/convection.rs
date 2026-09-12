@@ -1,4 +1,4 @@
-//! Convection bilinear form integrator.
+//! Convection / directional-derivative bilinear form integrators.
 //!
 //! Computes the element contribution to
 //!
@@ -6,10 +6,73 @@
 //! a(u, v) = ∫_Ω (b · ∇u) v dx
 //! ```
 //!
-//! where `b` is a vector-valued convection velocity field.
+//! where `b` is a vector-valued convection velocity field.  Two algebraic
+//! spellings of the same form live here:
+//!
+//! | type | MFEM class | note |
+//! |---|---|---|
+//! | [`ConvectionIntegrator`] | `ConvectionIntegrator` | `u`, `v` both in the assembled space, with a *scalar* coefficient `q` folded into `b = q·V` |
+//! | [`MixedDirectionalDerivativeIntegrator`] | `MixedDirectionalDerivativeIntegrator` | the same form when the advecting field itself is a (vector) finite-element field — MFEM's class for the `u·∇T` term of `navier_cht`'s temperature operator, derived from `MixedScalarVectorIntegrator` |
+//!
+//! Both share one accumulation kernel; they differ only in the quadrature-order
+//! declaration (see [`MixedDirectionalDerivativeIntegrator::integration_order`]).
 
 use crate::postproc::coefficient::{CoeffCtx, VectorCoeff};
 use crate::integrator::{BilinearIntegrator, QpData};
+use fem_mesh::element_type::ElementType;
+
+/// Shared kernel: `K_elem[i,j] += w · φᵢ · (b · ∇φⱼ)` with the row index `i`
+/// running over the *test* functions and `j` over the *trial* functions.
+///
+/// MFEM `ConvectionIntegrator::AssembleElementMatrix`:
+/// ```text
+///   el.CalcDShape(ip, dshape);
+///   CalcAdjugate(Trans.Jacobian(), adjJ);
+///   vec1 = alpha * Q(ip) * ip.weight;   vec2 = adjJ * vec1;
+///   dshape.Mult(vec2, BdFidxT);         AddMultVWt(shape, BdFidxT, elmat);
+/// ```
+/// → `K_ij += ip.weight · φᵢ · (b · adjJᵀ∇φⱼ)`, i.e. the BARE quadrature
+/// weight with the `|det J|` factor carried by the adjugate Jacobian
+/// (`adjJᵀ = det J · J⁻ᵀ`).  `QpData::grad_phys` is `adjJᵀ∇φ` on every
+/// assembler path (affine and isoparametric — see
+/// `accumulate_volume_bilinear_element`), so `QpData::ref_weight` (= the bare
+/// `ip.weight`) is the matching multiplier.  Using `QpData::weight`
+/// (= `ip.weight/|det J|`) here would divide by `|det J|`.
+///
+/// MFEM's `MixedScalarVectorIntegrator::AssembleElementMatrix2` (the base of
+/// `MixedDirectionalDerivativeIntegrator`, with `transpose = true` and
+/// `CalcVShape = CalcPhysDShape`) produces exactly the same sum: `V_test` is
+/// the test shape `ψ_j`, `W_trial` is `V(x_q)·∇φ_i`, and `AddMultVWt` writes
+/// `elmat(j,i) += V_test(j)·W_trial(i)` — same product, same weight
+/// (`w = Trans.Weight()·ip.weight`, with the physical gradient).
+fn accumulate_directional_derivative(
+    velocity: &dyn VectorCoeff,
+    qp: &QpData<'_>,
+    k_elem: &mut [f64],
+) {
+    let n = qp.n_dofs;
+    let d = qp.dim;
+    let ctx = CoeffCtx::from_qp(
+        qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
+        Some(qp.phi), qp.elem_dofs,
+    );
+
+    // Evaluate velocity at this QP.
+    let mut b = [0.0_f64; 3];
+    velocity.eval(&ctx, &mut b[..d]);
+
+    for i in 0..n {
+        let phi_i = qp.phi[i];
+        for j in 0..n {
+            // b · ∇φⱼ
+            let mut b_dot_grad_j = 0.0;
+            for k in 0..d {
+                b_dot_grad_j += b[k] * qp.grad_phys[j * d + k];
+            }
+            k_elem[i * n + j] += qp.ref_weight * phi_i * b_dot_grad_j;
+        }
+    }
+}
 
 /// Bilinear integrator for the convection operator `(b · ∇u) v`.
 ///
@@ -31,40 +94,115 @@ pub struct ConvectionIntegrator<V: VectorCoeff> {
 impl<V: VectorCoeff> BilinearIntegrator for ConvectionIntegrator<V> {
     /// `K_elem[i,j] += w · φᵢ · (b · ∇φⱼ)`
     fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
-        let n = qp.n_dofs;
-        let d = qp.dim;
-        let ctx = CoeffCtx::from_qp(
-            qp.x_phys, qp.dim, qp.elem_id, qp.elem_tag,
-            Some(qp.phi), qp.elem_dofs,
-        );
+        accumulate_directional_derivative(&self.velocity, qp, k_elem);
+    }
+}
 
-        // Evaluate velocity at this QP.
-        let mut b = [0.0_f64; 3];
-        self.velocity.eval(&ctx, &mut b[..d]);
+/// MFEM `MixedDirectionalDerivativeIntegrator`:
+/// `a(u, v) := (V · ∇u, v)` in 2D or 3D, `u` in `H¹` (trial) and `v` in `H¹`
+/// or `L²` (test).
+///
+/// This is the operator that advects a transported scalar by a vector field
+/// that is itself a finite element solution — `u·∇T` in the temperature
+/// equation of MFEM's `miniapps/fluids/navier/navier_cht.cpp`:
+///
+/// ```text
+///   K->AddDomainIntegrator(new MixedDirectionalDerivativeIntegrator(adv_gf_c));
+/// ```
+///
+/// with `adv_gf_c = VectorGridFunctionCoefficient(u_gf)` a `vdim = dim`
+/// `GridFunction`.
+///
+/// # Why this is a `standard/` integrator here
+///
+/// MFEM derives the class from `MixedScalarVectorIntegrator` because that base
+/// carries the `CalcShape` / `CalcVShape` pair it needs to express
+/// "(vector gradient trial) × (scalar test)".  In MFEM the class is also
+/// usable through `AssembleElementMatrix(fe, fe, …)`, which is the only use in
+/// `navier_cht` (trial and test are **the same** scalar `H¹` space).  fem-rs's
+/// single-space `BilinearIntegrator` path gives that case directly, with the
+/// same `QpData` kernel as [`ConvectionIntegrator`]; the rectangular
+/// `mixed::MixedAssembler` path exists for genuine `U ≠ V` couplings
+/// (`HDiv×L²`, `HCurl×H¹`, …), carries no `VectorCoeff` evaluation at all, and
+/// would add nothing here.
+///
+/// # Quadrature order
+///
+/// MFEM: `MixedScalarVectorIntegrator::GetIntegrationOrder` =
+/// `trial_fe.GetOrder() + test_fe.GetOrder() + Trans.OrderW()`
+/// (`bilininteg.hpp:737`) — a *geometry-order dependent* rule, unlike the fixed
+/// rules of `MassIntegrator`/`DiffusionIntegrator`.  `BilinearIntegrator`'s
+/// `integration_order(space_order)` cannot see the geometry order, so this
+/// integrator returns `None` and the rule has to come from the caller's
+/// `quad_order` argument; [`Self::mfem_quad_order`] computes MFEM's exact
+/// value for a given mesh.  For trial = test = `p` on an affine simplex mesh
+/// (`OrderW = 0`) that is simply `2p`.
+pub struct MixedDirectionalDerivativeIntegrator<V: VectorCoeff> {
+    /// The advecting vector field `V` (MFEM's `VectorCoefficient &vq`), whose
+    /// `vdim` must equal the space dimension.
+    pub velocity: V,
+}
 
-        for i in 0..n {
-            let phi_i = qp.phi[i];
-            for j in 0..n {
-                // b · ∇φⱼ
-                let mut b_dot_grad_j = 0.0;
-                for k in 0..d {
-                    b_dot_grad_j += b[k] * qp.grad_phys[j * d + k];
-                }
-                // MFEM `ConvectionIntegrator::AssembleElementMatrix`:
-                //   el.CalcDShape(ip, dshape);
-                //   CalcAdjugate(Trans.Jacobian(), adjJ);
-                //   vec1 = alpha * Q(ip) * ip.weight;   vec2 = adjJ * vec1;
-                //   dshape.Mult(vec2, BdFidxT);         AddMultVWt(shape, BdFidxT, elmat);
-                // → K_ij += ip.weight · φᵢ · (b · adjJᵀ∇φⱼ), i.e. the BARE
-                // quadrature weight with the |det J| factor carried by the
-                // adjugate Jacobian (adjJᵀ = det J · J⁻ᵀ).  `qp.grad_phys` is
-                // adjJᵀ∇φ on every assembler path (affine and isoparametric —
-                // see `accumulate_volume_bilinear_element`), so `ref_weight`
-                // (= ip.weight) is the matching multiplier.  Using
-                // `qp.weight` (= ip.weight/|det J|) here would divide by |det J|.
-                k_elem[i * n + j] += qp.ref_weight * phi_i * b_dot_grad_j;
-            }
+impl<V: VectorCoeff> MixedDirectionalDerivativeIntegrator<V> {
+    /// MFEM's integration order for this integrator:
+    /// `trial_order + test_order + Trans.OrderW()`.
+    ///
+    /// `Trans.OrderW()` is `IsoparametricTransformation::OrderW()`
+    /// (`fem/eltrans.cpp:493`):
+    ///
+    /// | geometry element | `Space()` | `OrderW()` |
+    /// |---|---|---|
+    /// | `TriPk`/`TetPk` (order `g`) | `Pk` | `(g − 1)·dim` |
+    /// | `QuadQk`/`HexQk` (order `g`) | `Qk` | `g·dim − 1` |
+    ///
+    /// so a straight (`g = 1`) triangle/tetrahedron gives `OrderW = 0` and a
+    /// straight quad gives `1`.  `elem_type` selects the row above.
+    pub fn mfem_quad_order(
+        trial_order: u8,
+        test_order: u8,
+        geom_order: u8,
+        elem_type: ElementType,
+    ) -> u8 {
+        mfem_quad_order(trial_order, test_order, geom_order, elem_type)
+    }
+}
+
+/// MFEM `GetIntegrationOrder` of the directional-derivative form:
+/// `trial_order + test_order + Trans.OrderW()` — see
+/// [`MixedDirectionalDerivativeIntegrator`] for the `OrderW` table.
+///
+/// A free function (rather than only a method) so it can be called without
+/// naming the integrator's coefficient type.
+pub fn mfem_quad_order(
+    trial_order: u8,
+    test_order: u8,
+    geom_order: u8,
+    elem_type: ElementType,
+) -> u8 {
+    use ElementType as ET;
+    let dim: u8 = if matches!(elem_type, ET::Tri3 | ET::Quad4) { 2 } else { 3 };
+    let order_w = match elem_type {
+        ET::Tri3 | ET::Tri6 | ET::Tet4 | ET::Tet10 => (geom_order.saturating_sub(1)) * dim,
+        ET::Quad4 | ET::Quad8 | ET::Quad9 | ET::Hex8 | ET::Hex20 | ET::Hex27 => {
+            geom_order * dim - 1
         }
+        // Prisms/pyramids: MFEM's `PrismPk`/`PyramidPk` are `Pk` spaces.
+        _ => (geom_order.saturating_sub(1)) * dim,
+    };
+    trial_order + test_order + order_w
+}
+
+impl<V: VectorCoeff> BilinearIntegrator for MixedDirectionalDerivativeIntegrator<V> {
+    /// `K_elem[i,j] += w · ψᵢ · (V(x_q) · ∇φⱼ)` — the same kernel as
+    /// [`ConvectionIntegrator`]; see [`accumulate_directional_derivative`].
+    fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
+        accumulate_directional_derivative(&self.velocity, qp, k_elem);
+    }
+
+    /// `None`: the rule depends on the geometry order (see
+    /// [`Self::mfem_quad_order`]), which this signature does not carry.
+    fn integration_order(&self, _space_order: u8) -> Option<u8> {
+        None
     }
 }
 

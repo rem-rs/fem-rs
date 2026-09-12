@@ -119,7 +119,16 @@ pub fn geo_ref_elem_from_mesh(
     if g == 1 && !needs_iso { return None; }
     let order = if g > 1 { g } else { 1 };
     let ft = match et {
-        ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
+        ElementType::Tri3 | ElementType::Tri6 => {
+            // Same reasoning as the tetrahedron arm below (D85): the curved
+            // triangle geometry table is an H¹ `nodes` grid function at closed
+            // Gauss-Lobatto points, so it must be read with `H1TriPk`; the
+            // equispaced `TriPk` only coincides with it at `p <= 2`.
+            if g > 1 {
+                return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize)));
+            }
+            FactoryElemType::Tri
+        }
         ElementType::Tet4 | ElementType::Tet10 => {
             // Must match `assembler::geo_ref_elem`: the curved-tet geometry
             // table written by the io layer follows MFEM's

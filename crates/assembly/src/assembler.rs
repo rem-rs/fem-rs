@@ -772,6 +772,19 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
         return Some(Box::new(fem_element::lagrange::factory::H1TetPk::new(g as usize))
                     as Box<dyn ReferenceElement>);
     }
+    // Curved triangles: the same argument (D85).  MFEM's mesh `Nodes` are an H¹
+    // grid function whose parametric positions are the closed Gauss-Lobatto
+    // points, and `Mesh::set_curvature` / the io layer / `Mesh::element_jacobian`
+    // (`crates/mesh/src/simplex.rs`) all store and interpret them with
+    // `H1TriPk`.  The equispaced `factory::TriPk` agrees only at `p <= 2` (where
+    // the closed points are the edge midpoints), so `p >= 3` triangle geometry
+    // used to be misinterpolated here — measured on `navier_cht`'s order-4
+    // thermal mesh as an exact identity failing by 4.4e1
+    // (`max|K_adv·T − M(u·c)·1|`) and a stalling PCG.
+    if matches!(et, ElementType::Tri3 | ElementType::Tri6) && g > 1 {
+        return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize))
+                    as Box<dyn ReferenceElement>);
+    }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
     Some(factory_ref_elem(ft, order))

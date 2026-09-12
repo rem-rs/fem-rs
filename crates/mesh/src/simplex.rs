@@ -843,49 +843,110 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    /// 2-D Tri3 → Tri6 geometry: insert edge midpoints (shared edges deduped,
-    /// direction-aware), matching MFEM `Mesh::SetCurvature(2)` on a straight
-    /// 2-D triangle mesh (H1_FECollection(order=2) nodal interpolation of the
-    /// linear coordinates — midpoints land at edge-midpoint positions).
+    /// 2-D `Tri3` → `TriPk` geometry (any `p >= 2`): MFEM `Mesh::SetCurvature(p)`
+    /// on a 2-D triangle mesh, i.e. the order-`p` `H1_FECollection`
+    /// (`BasisType::GaussLobatto`) nodal interpolation of the current
+    /// (straight, vertex-only) geometry.
+    ///
+    /// # Node layout and ordering
+    ///
+    /// The reference element is [`H1TriPk`] — MFEM's `H1_TriangleElement(p)`:
+    /// vertices `v0 v1 v2`, then the `p-1` Gauss-Lobatto nodes of edge
+    /// `(v0→v1)`, `(v1→v2)`, `(v2→v0)` in that order along the edge, then the
+    /// `(p-1)(p-2)/2` interior nodes, all at GLL points (NOT equispaced — at
+    /// `p >= 3` plain `TriPk` misinterpolates the stored nodes, see
+    /// `Mesh::element_jacobian`).  This is the element the geometry consumers
+    /// (`element_jacobian`, the io layer's `build_h1_geometry`) evaluate the
+    /// table with, so `conn[e]` must list the nodes in exactly that order.
+    ///
+    /// Node positions: a node whose reference barycentric coordinates are
+    /// `(λ0, λ1, λ2)` lands on the affine image `Σ_v λ_v·c_v` because the old
+    /// geometry *is* that linear map (MFEM evaluates the old element
+    /// transformation at the new nodes' reference points).
+    ///
+    /// Shared edge nodes are deduplicated direction-aware: the first element to
+    /// meet an edge creates its `p-1` nodes in its own local edge direction
+    /// (`v[a] → v[b]`, `t` growing with the reference parameter of `v[b]`), and
+    /// an element whose local edge runs the other way consumes them reversed.
+    /// Interior nodes are private to the element.  `p = 2` reproduces the
+    /// historical midpoint construction bit for bit (the `p-1 = 1` case has one
+    /// node per edge, so there is nothing to reverse and `t = 1/2` gives
+    /// `0.5·c_a + 0.5·c_b`, the same rounding as `0.5·(c_a + c_b)`).
     fn set_curvature_tri3_2d(&mut self, p: usize) {
-        debug_assert!(p == 2, "2D Tri3 curvature only supports order 2 (Tri6)");
         use std::collections::HashMap;
+        use fem_element::lagrange::factory::H1TriPk;
+        use fem_element::ReferenceElement;
+        assert!(p >= 1, "set_curvature_tri3_2d: order must be >= 1");
         let n_elems = self.n_elems();
+        let fe = H1TriPk::new(p);
+        let npe_new = fe.n_dofs();
+        let ref_nodes = fe.dof_coords();
+        // Local edges in H1TriPk's counter-clockwise cycle v0→v1→v2→v0.
         const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
-        // Tri6 node order (MFEM H1_FECollection P2 on triangle): v0 v1 v2 e01 e12 e20
-        let npe_new = 6usize;
+        // Reference nodes per edge, and `1 + n_edges·(p-1)` is the first
+        // interior node (H1TriPk's documented layout).
+        let n_edge = p - 1;
 
         let mut geo_conn = vec![0u32; n_elems * npe_new];
         let mut geo_coords = self.coords.clone();
         let mut next_id = self.n_nodes() as NodeId;
 
-        // Edge map: sorted vertex pair → (creator's first vertex, shared node id).
-        let mut edge_map: HashMap<(NodeId, NodeId), (NodeId, NodeId)> = HashMap::new();
+        // Edge map: sorted vertex pair → (creator's local first vertex, the
+        // edge's node ids in the creator's local direction `v[a] → v[b]`).
+        let mut edge_map: HashMap<(NodeId, NodeId), (NodeId, Vec<NodeId>)> = HashMap::new();
 
         for e in 0..n_elems as ElemId {
             let v = self.elem_nodes(e);
             let base = e as usize * npe_new;
-            // Vertex nodes
-            geo_conn[base] = v[0];
-            geo_conn[base + 1] = v[1];
-            geo_conn[base + 2] = v[2];
-            // Edge midpoints: local edge i → global node at base+3+i
-            for (li, &(a, b)) in TRI_EDGES.iter().enumerate() {
-                let key = (v[a].min(v[b]), v[a].max(v[b]));
-                let entry = edge_map.entry(key).or_insert_with(|| {
-                    let ca = self.coords_of(v[a]);
-                    let cb = self.coords_of(v[b]);
-                    let mut x = [0.0; D];
-                    for d in 0..D { x[d] = 0.5 * (ca[d] + cb[d]); }
-                    geo_coords.extend_from_slice(&x);
-                    let id = next_id;
-                    next_id += 1;
-                    (v[a], id)
-                });
-                let (creator_first, mid) = *entry;
-                let same_dir = creator_first == v[a];
-                geo_conn[base + 3 + li] = mid;
-                let _ = same_dir; // Tri6 midpoints are direction-agnostic
+            let c: [[f64; D]; 3] = [self.coords_of(v[0]), self.coords_of(v[1]), self.coords_of(v[2])];
+
+            for (k, xi) in ref_nodes.iter().enumerate() {
+                let lam = [1.0 - xi[0] - xi[1], xi[0], xi[1]];
+                // Vertex node: reuse the mesh vertex (no new geometry node).
+                // The test is `λ ≈ 1` and not `λ > 1/2`: the Gauss-Lobatto nodes
+                // of an edge cluster towards its ends (`λ = 0.93` for the first
+                // p=4 edge node), so a `> 1/2` test would misclassify them as
+                // vertices.
+                if let Some(i) = (0..3).find(|&i| lam[i] > 1.0 - 1e-12) {
+                    geo_conn[base + k] = v[i];
+                    continue;
+                }
+                // Edge node: the barycentric coordinate of the opposite vertex vanishes.
+                if let Some(opp) = (0..3).find(|&i| lam[i].abs() < 1e-12) {
+                    let (a, b) = TRI_EDGES[(opp + 1) % 3];
+                    let ei = (opp + 1) % 3;
+                    let key = (v[a].min(v[b]), v[a].max(v[b]));
+                    let (creator_first, ids) = edge_map.entry(key).or_insert_with(|| {
+                        let mut ids = Vec::with_capacity(n_edge);
+                        for m in 0..n_edge {
+                            let xr = &ref_nodes[3 + ei * n_edge + m];
+                            // `t` is the reference weight of the edge's second
+                            // vertex, so the node walks `c_a → c_b`.
+                            let t = if b == 0 { 1.0 - xr[0] - xr[1] } else { xr[b - 1] };
+                            let mut x = [0.0; D];
+                            for d in 0..D { x[d] = (1.0 - t) * c[a][d] + t * c[b][d]; }
+                            geo_coords.extend_from_slice(&x);
+                            ids.push(next_id);
+                            next_id += 1;
+                        }
+                        (v[a], ids)
+                    });
+                    let m = k - 3 - ei * n_edge;
+                    geo_conn[base + k] = if *creator_first == v[a] {
+                        ids[m]
+                    } else {
+                        ids[n_edge - 1 - m]
+                    };
+                    continue;
+                }
+                // Interior node: private to the element.
+                let mut x = [0.0; D];
+                for d in 0..D {
+                    x[d] = lam[0] * c[0][d] + lam[1] * c[1][d] + lam[2] * c[2][d];
+                }
+                geo_coords.extend_from_slice(&x);
+                geo_conn[base + k] = next_id;
+                next_id += 1;
             }
         }
 
