@@ -34,7 +34,16 @@
 //! scope.  See the module tests for the coverage boundary.
 
 use fem_element::iga::KnotVector;
-use fem_element::nurbs_fe_collection::{knot_n_elements, knot_ncp, knot_order};
+use fem_element::nurbs_fe_collection::{degree_elevate, knot_n_elements, knot_ncp, knot_order};
+
+/// Control-point coordinates of a NURBS mesh (`NurbsExtension::parse_nodes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NurbsNodes {
+    /// Physical (or embedding) dimension of a control point.
+    pub vdim: usize,
+    /// One coordinate vector per control point, in DOF order.
+    pub coords: Vec<Vec<f64>>,
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MFEM element topology tables (C++ `fem/geom.cpp`)
@@ -491,11 +500,8 @@ impl NurbsExtension {
         if ext.boundary.is_empty() {
             ext.generate_boundary_elements();
         }
-        ext.generate_offsets();
-        ext.count_elements();
-        ext.count_bdr_elements();
-        ext.generate_active_vertices()?;
-        ext.generate_element_dof_table()?;
+        ext.rebuild()?;
+        ext.weights = ext.unit_weights();
 
         // ── weights ───────────────────────────────────────────────────────────
         // `NURBSExtension::Load` does `weights.Load(input, GetNDof())`: the
@@ -522,6 +528,190 @@ impl NurbsExtension {
         let text = std::fs::read_to_string(path.as_ref())
             .map_err(|e| format!("NurbsExtension::from_mesh_file: {e}"))?;
         Self::from_mesh_str(&text)
+    }
+
+    // ── derived data (`SetOrdersFromKnotVectors` … `GenerateElementDofTable`) ─
+
+    /// Recompute everything derived from the knot vectors: the per-knot-vector
+    /// orders (`SetOrdersFromKnotVectors` + `SetOrderFromOrders`),
+    /// `GenerateOffsets`, `CountElements` / `CountBdrElements`,
+    /// `GenerateActiveVertices` and `GenerateElementDofTable`.
+    ///
+    /// Called after the knot vectors change ([`Self::with_orders`],
+    /// [`Self::uniform_refinement`]); the patch topology (elements, boundary
+    /// elements, edges, faces) is unaffected by knot insertion and degree
+    /// elevation, exactly as in MFEM's `NURBSUniformRefinement` /
+    /// `NURBSExtension(parent, order)`.
+    fn rebuild(&mut self) -> Result<(), String> {
+        self.orders = self.knot_vectors.iter().map(|k| k.order()).collect();
+        self.order = {
+            let mut o = self.orders.first().copied();
+            for &x in &self.orders[1..] {
+                if Some(x) != o {
+                    o = None;
+                    break;
+                }
+            }
+            o
+        };
+        self.generate_offsets();
+        self.count_elements();
+        self.count_bdr_elements();
+        self.generate_active_vertices()?;
+        self.generate_element_dof_table()?;
+        Ok(())
+    }
+
+    /// Unit weights for every DOF — MFEM's `NURBSExtension(parent, …)`
+    /// constructors do `weights.SetSize(GetNDof()); weights = 1.0;`, so the
+    /// **analysis space** is the polynomial B-spline space even when the mesh
+    /// geometry is rational.
+    fn unit_weights(&self) -> Vec<f64> {
+        vec![1.0; self.n_dofs]
+    }
+
+    /// MFEM `NURBSExtension(NURBSExtension *parent, const Array<int> &newOrders)`
+    /// (and the single-order form used by `nurbs_ex1`/`nurbs_ex3`).
+    ///
+    /// Every knot vector is degree elevated to its target order (unchanged when
+    /// the target is not larger, exactly as MFEM), the DOF numbering and the
+    /// element DOF table are regenerated, and the weights are reset to one.
+    pub fn with_orders(&self, orders: &[usize]) -> Result<Self, String> {
+        if orders.len() != self.knot_vectors.len() {
+            return Err(format!(
+                "NurbsExtension::with_orders: {} orders for {} knot vectors",
+                orders.len(),
+                self.knot_vectors.len()
+            ));
+        }
+        let mut ext = self.clone();
+        for (i, &target) in orders.iter().enumerate() {
+            let current = ext.knot_vectors[i].order();
+            ext.knot_vectors[i] = if target > current {
+                NurbsKnot::new(
+                    degree_elevate(ext.knot_vectors[i].knot_vector(), target - current)?,
+                    target,
+                )?
+            } else {
+                ext.knot_vectors[i].clone()
+            };
+        }
+        ext.rebuild()?;
+        ext.weights = ext.unit_weights();
+        Ok(ext)
+    }
+
+    /// MFEM `Mesh::NURBSUniformRefinement` at the extension level:
+    /// `KnotVector::UniformRefinement(new_knots, rf)` inserts `rf - 1` equally
+    /// spaced knots into every non-empty span of every unique knot vector.
+    ///
+    /// The mesh's *control points* are re-derived by MFEM's
+    /// `NURBSPatch::UniformRefinement`; knot insertion leaves the geometry
+    /// invariant, so [`crate::NurbsFESpace`] keeps the original control net and
+    /// evaluates it over the refined parameter intervals instead.
+    pub fn uniform_refinement(&mut self, rf: usize) -> Result<(), String> {
+        if rf < 2 {
+            return Err(format!(
+                "NurbsExtension::uniform_refinement: refinement factor must be >= 2, got {rf}"
+            ));
+        }
+        for k in self.knot_vectors.iter_mut() {
+            let knots = k.knot_vector().as_slice();
+            // `KnotVector::UniformRefinement`: for every non-empty span
+            // [knot[i], knot[i+1]] insert the values
+            // (1 - m/rf)*knot[i] + (m/rf)*knot[i+1], m = 1..rf, which sorts into
+            // the existing sequence (the inserted values are strictly interior).
+            let mut refined: Vec<f64> = Vec::with_capacity(knots.len() + knots.len() * rf);
+            refined.push(knots[0]);
+            for w in knots.windows(2) {
+                if w[0] != w[1] {
+                    for m in 1..rf {
+                        let t = m as f64 / rf as f64;
+                        refined.push((1.0 - t) * w[0] + t * w[1]);
+                    }
+                }
+                refined.push(w[1]);
+            }
+            *k = NurbsKnot::new(KnotVector::new_clamped(refined)?, k.order())?;
+        }
+        self.rebuild()
+    }
+
+    /// MFEM `NURBSPatchMap::operator()(i, j, k)` with `MapMode::Dof` — the
+    /// global (compacted) DOF index of the patch multi-index `multi` in the
+    /// `(x, y, z)` direction order, `0 <= multi[d] < NCP[d]`.
+    pub fn patch_dof(&self, patch: usize, multi: &[usize]) -> Result<usize, String> {
+        if multi.len() != self.dim {
+            return Err(format!(
+                "NurbsExtension::patch_dof: expected {} indices, got {}",
+                self.dim,
+                multi.len()
+            ));
+        }
+        self.patch_map_mode(patch, multi, MapMode::Dof)
+    }
+
+    /// The control-point coordinates of a NURBS mesh file: the
+    /// `FiniteElementSpace` / `VDim: <n>` / `Ordering: 1` block that MFEM reads
+    /// into the mesh's `Nodes` grid function (the B-spline control net).
+    ///
+    /// `n_dofs` is the expected number of control points (`GetNDof`), so a
+    /// truncated or mismatched block is rejected rather than silently accepted.
+    pub fn parse_nodes(text: &str, n_dofs: usize) -> Result<NurbsNodes, String> {
+        let mut lines = text.lines();
+        let banner = lines.next().unwrap_or("");
+        if !banner.contains("NURBS mesh") {
+            return Err(format!("not an MFEM NURBS mesh file (first line: {banner:?})"));
+        }
+        let mut vdim = None;
+        let mut values: Vec<f64> = Vec::new();
+        let mut in_block = false;
+        for raw in lines {
+            let line = match raw.find('#') {
+                Some(i) => &raw[..i],
+                None => raw,
+            };
+            let trimmed = line.trim();
+            if !in_block {
+                if trimmed == "FiniteElementSpace" {
+                    in_block = true;
+                }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("VDim:") {
+                vdim = Some(
+                    rest.trim()
+                        .parse::<usize>()
+                        .map_err(|_| format!("FiniteElementSpace: bad VDim {rest:?}"))?,
+                );
+                continue;
+            }
+            // Header lines (`FiniteElementCollection: …`, `Ordering: …`) carry
+            // the only non-numeric columns; the coordinate rows are plain
+            // numbers.
+            if trimmed.contains(':') {
+                continue;
+            }
+            for tok in trimmed.split_whitespace() {
+                if let Ok(v) = tok.parse::<f64>() {
+                    values.push(v);
+                }
+            }
+        }
+        let vdim = vdim.ok_or_else(|| "mesh file: no 'VDim:' line".to_string())?;
+        if vdim == 0 {
+            return Err("FiniteElementSpace: VDim must be positive".to_string());
+        }
+        if values.len() != n_dofs * vdim {
+            return Err(format!(
+                "FiniteElementSpace: expected {} control point values ({n_dofs} x vdim {vdim}), \
+                 found {}",
+                n_dofs * vdim,
+                values.len()
+            ));
+        }
+        let coords = values.chunks(vdim).map(|c| c.to_vec()).collect();
+        Ok(NurbsNodes { vdim, coords })
     }
 
     // ── topology construction (`Mesh::FinalizeTopology` / `GenerateFaces`) ────
@@ -1265,14 +1455,20 @@ impl NurbsExtension {
         self.n_bdr_elements
     }
 
+    /// MFEM `mesh->bdr_attributes.Max()` — the largest boundary attribute, i.e.
+    /// the number of entries of the `ess_bdr`/`neu_bdr`/`per_bdr` marker arrays
+    /// (`nurbs_ex1` prints those arrays).
+    pub fn max_bdr_attribute(&self) -> i32 {
+        self.boundary.iter().map(|b| b.attr).max().unwrap_or(0)
+    }
+
     /// MFEM `NURBSExtension::GetNTotalDof`.
     pub fn n_total_dofs(&self) -> usize {
         self.n_total_dofs
     }
 
     /// MFEM `NURBSExtension::GetNDof` — the number of finite element unknowns.
-    pub fn n_dofs(&self) -> usize {
-        self.n_dofs
+    pub fn n_dofs(&self) -> usize {        self.n_dofs
     }
 
     /// MFEM `NURBSExtension::GetNV` — active vertices.

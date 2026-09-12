@@ -25,6 +25,8 @@ pub mod iga;
 pub mod iga_fe_space;
 /// MFEM `NURBSExtension` — NURBS patch topology and global DOF numbering.
 pub mod nurbs_extension;
+/// `NurbsFESpace` — a `FiniteElementSpace` over a `NURBSExtension`.
+pub mod nurbs_fe_space;
 pub mod p_refine;
 pub mod vector_h1;
 pub mod make_refined;
@@ -51,7 +53,8 @@ pub use iga_fe_space::{IgaFESpace1D, IgaFESpace2D, IgaFESpace3D, IgaSinglePatchM
 pub use vector_h1::VectorH1Space;
 pub use constraints::{apply_dirichlet, apply_dirichlet_diag_one, eliminate_dirichlet, expand_from_reduced, apply_hanging_constraints, apply_hanging_face_constraints, recover_hanging_values, recover_hanging_face_values, prolongate_p2_hanging, build_h1_prolongation_matrix, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv, identify_periodic_dof_pairs, apply_periodic};
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
-pub use nurbs_extension::{NurbsExtension, NurbsKnot};
+pub use nurbs_extension::{NurbsExtension, NurbsKnot, NurbsNodes};
+pub use nurbs_fe_space::{nurbs_rule, Geometry, NurbsFESpace, Rule, SpanElement};
 pub use block_fe_space::BlockFESpace;
 pub use dpg_trace::{DpgTraceSpace, FaceInfo};
 pub use make_refined::{make_refined_2d, make_refined_3d};

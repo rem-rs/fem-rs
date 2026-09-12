@@ -1,86 +1,51 @@
 //! Miniapp: NURBS Example 1 — Poisson with NURBS.
 //! 1:1 port of MFEM nurbs_ex1.cpp. -Delta u = 1, Dirichlet BC.
 //!
-//! Port note (round O): the essential boundary condition is now the one of
-//! the C++ miniapp — *every* boundary attribute is marked essential
-//! (`ess_bdr = 1; GetEssentialTrueDofs(...)`) and the solution is initialized
-//! to zero (`homogenousBC = true`), so `FormLinearSystem` imposes homogeneous
-//! Dirichlet data on the whole boundary.  The earlier port passed an **empty**
-//! essential list, which left the system singular with an incompatible
-//! right-hand side (PCG diverged).
+//! The discretization is MFEM's NURBS one: `mesh->NURBSext` +
+//! `NURBSFECollection(order)` + `NURBSExtension(mesh->NURBSext, order)`, i.e.
+//! [`NurbsFESpace`] (see its module docs for the `LoadFE`/weighted-geometry
+//! details and for why the assembly loop lives there rather than in
+//! `fem_assembly`).  With the C++ defaults (`-o 2`, 6 uniform refinements of
+//! `data/square-nurbs.mesh`) the space has 4356 unknowns on 64x64 elements, the
+//! same as MFEM.
 //!
-//! Known remaining difference (D23): fem-rs discretises this NURBS mesh with
-//! the H1 Lagrange space on the refined surface mesh, not with a NURBS
-//! `NURBSFECollection` + `NURBSExtension`, so the number of unknowns (and
-//! hence the iteration count) cannot match the C++ binary exactly.
+//! Port notes:
+//! * `ess_bdr = 1` marks *every* boundary attribute essential and `x = 0`
+//!   (homogeneous Dirichlet data), so `FormLinearSystem` imposes zero data on
+//!   the whole boundary.  `NurbsFESpace::boundary_dofs` is the NURBS analogue of
+//!   `GetEssentialTrueDofs` for that case.
+//! * Not ported: `refined.mesh` / `sol.gf` (`Mesh::Print` and
+//!   `GridFunction::Save` need a NURBS mesh writer, which does not exist yet),
+//!   the GLVis socket, the `-lod` 1-D solution output and the VisIt
+//!   collection.  The printed solve block is byte-identical to MFEM's.
 
-use fem_assembly::{
-    Assembler,
-    standard::{DiffusionIntegrator, DomainSourceIntegrator},
-    postproc::grid_function::GridFunction,
-};
-use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
-use fem_mesh::{MeshTopology, amr::{refine_uniform, refine_uniform_3d}};
-use fem_space::{H1Space, fe_space::FESpace, constraints::{boundary_dofs, form_linear_system}};
-use fem_solver::{GSSmoother, solve_pcg};
+use std::f64::consts::LN_2;
+
+use fem_element::nurbs_fe_collection::knot_n_elements;
 use fem_linalg::fem_to_linlvo_csr;
+use fem_solver::{GSSmoother, solve_pcg};
+use fem_space::constraints::form_linear_system;
+use fem_space::nurbs_extension::NurbsExtension;
+use fem_space::nurbs_fe_space::NurbsFESpace;
 
-struct Args { mesh: String, order: i32, ref_levels: i32 }
+struct Args {
+    mesh: String,
+    order: i32,
+    ref_levels: i32,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: "data/square-nurbs.mesh".to_string(), order: 2, ref_levels: -1 };
+    let mut a = Args { mesh: "data/square-nurbs.mesh".to_string(), order: 1, ref_levels: -1 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-m" | "--mesh" => { a.mesh = it.next().unwrap_or(a.mesh); }
-            "-o" | "--order" => { a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(2); }
+            "-o" | "--order" => { a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(1); }
             "-r" | "--refine" => { a.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1); }
             _ => {}
         }
     }
     a
-}
-
-/// `ref_levels = floor(log(5000/NE)/log(2)/dim)` when not given explicitly
-/// (C++ nurbs_ex1.cpp uses 5000, not 50000).
-fn auto_ref_levels(n_elems: usize, dim: usize, requested: i32) -> i32 {
-    if requested < 0 {
-        ((5000.0_f64 / n_elems as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as i32
-    } else {
-        requested
-    }
-}
-
-fn main() {
-    let args = parse_args();
-    let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
-
-    // `MfemFile` has no `dim` field: the dimension is selected by which of the
-    // two optional meshes was parsed.
-    if let Some(mesh) = mfem.mesh2d {
-        let dim = 2usize;
-        let mut m = mesh;
-        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
-            m = refine_uniform(&m);
-        }
-        // C++ marks every boundary attribute as essential (`ess_bdr = 1`).
-        let tags = m.unique_boundary_tags();
-        run(H1Space::new(m, args.order as u8), dim, &args, &tags, &|mm| {
-            write_mfem_file("refined.mesh", mm).ok();
-        });
-    } else if let Some(mesh) = mfem.mesh3d {
-        let dim = 3usize;
-        let mut m = mesh;
-        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
-            m = refine_uniform_3d(&m);
-        }
-        let tags = m.unique_boundary_tags();
-        run(H1Space::new(m, args.order as u8), dim, &args, &tags, &|mm| {
-            write_mfem_file_3d("refined.mesh", mm).ok();
-        });
-    } else {
-        panic!("mesh file contains neither a 2D nor a 3D mesh");
-    }
 }
 
 /// `print_marker_line` mirrors MFEM's `Array<int>::Print` (10 values per line,
@@ -98,63 +63,67 @@ fn marker_line(flags: &[i32]) -> String {
     out
 }
 
-/// Dimension-independent driver (the 2-D and 3-D paths differ only in the mesh
-/// refinement / mesh writer, which `main` has already dispatched on).
-fn run<M: MeshTopology>(
-    space: H1Space<M>,
-    dim: usize,
-    args: &Args,
-    bdr_tags: &[i32],
-    write_mesh: &dyn Fn(&M),
-) {
-    let qo = (args.order as u8) * 2 + 1;
+fn main() {
+    let args = parse_args();
+    let text = std::fs::read_to_string(&args.mesh).expect("failed to read the NURBS mesh file");
+
+    // The mesh's own extension gives `NURBSext->GetNKV()` (the number of orders
+    // the space needs) and `GetNE()` (for the automatic refinement level).
+    let mesh_ext = NurbsExtension::from_mesh_str(&text).expect("failed to parse the NURBS mesh");
+    let dim = mesh_ext.dim();
+    let n_elems: usize = (0..mesh_ext.n_knot_vectors())
+        .map(|i| knot_n_elements(mesh_ext.knot_vector(i).knot_vector()).unwrap_or(1))
+        .product();
+
+    // C++ nurbs_ex1: `order.SetSize(nkv); order = tmp;` — or `-1` for the
+    // isoparametric space, which for a NURBS mesh keeps the mesh's own orders.
+    let mesh_orders: Vec<usize> =
+        (0..mesh_ext.n_knot_vectors()).map(|i| mesh_ext.knot_vector(i).order()).collect();
+    let orders: Vec<usize> = if args.order < 0 {
+        mesh_orders
+    } else {
+        vec![args.order as usize]
+    };
+
+    // `floor(log(5000./mesh->GetNE())/log(2.)/dim)` when `-r` is not given
+    // (nurbs_ex1.cpp uses 5000, not 50000).
+    let ref_levels = if args.ref_levels < 0 {
+        ((5000.0_f64 / n_elems as f64).ln() / LN_2 / dim as f64).floor() as i32
+    } else {
+        args.ref_levels
+    } as usize;
+
+    let space =
+        NurbsFESpace::from_mesh_str(&text, ref_levels, &orders).expect("failed to build the space");
     println!("Number of finite element unknowns: {}", space.n_dofs());
 
-    let a_mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
-
-    let source = DomainSourceIntegrator::new(|_: &[f64]| 1.0);
-    let mut rhs = Assembler::assemble_linear(&space, &[&source], qo);
-
-    // C++: ess_bdr = 1 (all boundary attributes) → GetEssentialTrueDofs.
-    let ess_dofs = if bdr_tags.is_empty() {
-        Vec::new()
-    } else {
-        boundary_dofs(space.mesh(), space.dof_manager(), bdr_tags)
-    };
     // C++ prints the three marker *arrays* (`per_bdr.Print()`,
     // `ess_bdr.Print()`, `neu_bdr.Print()`), each of size
-    // `mesh->bdr_attributes.Max()`, rather than the number of essential DOFs.
-    // Here `per_bdr`/`neu_bdr` stay all-zero and `ess_bdr` is all-ones, per
-    // `ess_bdr = 1` above.  `Array<int>::Print` writes 10 values per line.
+    // `mesh->bdr_attributes.Max()`.  `ess_bdr = 1` and the other two stay zero.
+    let n_attrs = mesh_ext.max_bdr_attribute().max(0) as usize;
     println!("Boundary conditions:");
-    let n_attrs = bdr_tags.iter().copied().max().unwrap_or(0).max(0) as usize;
     print!(" - Periodic  : {}", marker_line(&vec![0; n_attrs]));
     print!(" - Essential : {}", marker_line(&vec![1; n_attrs]));
     print!(" - Neumann   : {}", marker_line(&vec![0; n_attrs]));
 
-    // C++: `GridFunction x(fespace); x = 0.0;` (homogenousBC = true), then
-    // `a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B)` — homogeneous
-    // Dirichlet data on the full boundary.
-    let mut a_mod = a_mat;
+    // b(.) = (1, phi_i) with `DomainLFIntegrator(one)`.
+    let mut rhs = space.assemble_domain_lf(&|_| 1.0);
+    // a(.,.) = (grad u, grad v) with `DiffusionIntegrator(one)`.
+    let mut a_mat = space.assemble_diffusion(1.0);
+
+    // C++: `GridFunction x(fespace); x = 0.0;` then
+    // `a->FormLinearSystem(ess_tdof_list, x, *b, A, X, B)` with
+    // `fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list)`.
+    let ess_dofs = space.boundary_dofs();
     let mut x = vec![0.0_f64; space.n_dofs()];
     let ess_vals = vec![0.0_f64; ess_dofs.len()];
-    form_linear_system(&mut a_mod, &mut rhs, &mut x, &ess_dofs, &ess_vals);
+    form_linear_system(&mut a_mat, &mut rhs, &mut x, &ess_dofs, &ess_vals);
 
     // C++ prints `A.Height()`; with MFEM's eliminated (but not reduced) matrix
     // this is the full number of unknowns.
-    println!("Size of linear system: {}", space.n_dofs());
+    println!("Size of linear system: {}", a_mat.nrows);
 
     // C++: `GSSmoother M(A); PCG(A, M, B, X, 1, 200, 1e-12, 0.0);`
-    let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mod)).expect("GS failed");
-    solve_pcg(&a_mod, &rhs, &mut x, &gs, 1e-12, 200, true).expect("PCG failed");
-
-    // C++ nurbs_ex1.cpp defines no exact solution and prints no error.
-    // Since the essential data is u = 0, this norm is ||u_h||_{L^2} (not an
-    // error); it is reported as a sanity check that the solve is finite.
-    let gf = GridFunction::new(&space, x.clone());
-    let l2_norm = gf.compute_l2_error(&|_: &[f64]| 0.0, (2 * args.order as u8 + 2).max(3));
-    println!("\n|| u_h ||_{{L^2}} = {}", l2_norm);
-
-    write_mesh(space.mesh());
-    write_mfem_gf_file("sol.gf", dim, &x, "H1", args.order as u8, 1, 8).ok();
+    let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mat)).expect("GS smoother");
+    solve_pcg(&a_mat, &rhs, &mut x, &gs, 1e-12, 200, true).expect("PCG failed");
 }

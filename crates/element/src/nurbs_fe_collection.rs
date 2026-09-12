@@ -37,9 +37,8 @@
 //! * `crate::iga::{KnotVector, BsplineBasis}` — knot-sequence representation.
 
 use crate::iga::KnotVector;
-use crate::nurbs::{NurbsPatch2D, NurbsPatch3D};
 use crate::nurbs_vector::{NurbsHCurl2D, NurbsHCurl3D, NurbsHDiv2D, NurbsHDiv3D};
-use crate::reference::{ReferenceElement, VectorReferenceElement};
+use crate::reference::VectorReferenceElement;
 
 /// MFEM `NURBSFECollection::VariableOrder`.
 pub const VARIABLE_ORDER: i32 = -1;
@@ -415,16 +414,51 @@ impl NurbsRefElement {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /// Convert an [`crate::iga::KnotVector`] (pure knot sequence) to the
-/// degree-aware [`crate::nurbs::KnotVector`] used by the patch elements.
+/// MFEM `KnotVector::GetKnotLocation(xi, i + Order)`: the knot (patch)
+/// parameter of the span-local reference coordinate `xi ∈ [0,1]` on the span
+/// beginning at knot index `span + Order`.
+pub(crate) fn knot_span_location(knots: &[f64], order: usize, span: usize, xi: f64) -> f64 {
+    let ip = span + order;
+    if ip + 1 < knots.len() {
+        xi * knots[ip + 1] + (1.0 - xi) * knots[ip]
+    } else {
+        xi
+    }
+}
+
+/// MFEM `KnotVector::CalcShape(shape, i, xi)` — the `Order + 1` non-vanishing
+/// values at the span-local coordinate `xi`, ordered
+/// `N_{i}, N_{i+1}, ..., N_{i+Order}` in the span enumeration.
+pub fn knot_span_shape(knots: &[f64], order: usize, span: usize, xi: f64, shape: &mut [f64]) {
+    let u = knot_span_location(knots, order, span, xi);
+    span_local_basis(knots, order, span, u, shape);
+}
+
+/// MFEM `KnotVector::CalcDShape(grad, i, xi)` — the span-local first
+/// derivatives w.r.t. `xi` (same ordering as [`knot_span_shape`]).
+pub fn knot_span_dshape(knots: &[f64], order: usize, span: usize, xi: f64, grad: &mut [f64]) {
+    let u = knot_span_location(knots, order, span, xi);
+    span_local_basis_deriv(knots, order, span, u, grad);
+}
+
+/// First derivative of the span-local B-spline values with respect to the knot
+/// **parameter** `u` (not the span-local `xi` of [`knot_span_dshape`], which
+/// differs by the span length).
 ///
-/// The MFEM order of a clamped knot vector is the multiplicity of the first
-/// knot minus one, which is exactly the `degree` field of the legacy type.
-fn to_patch_knot_vector(kv: &KnotVector) -> Result<crate::nurbs::KnotVector, String> {
-    let degree = knot_order(kv).ok_or_else(|| "invalid knot vector".to_string())?;
-    Ok(crate::nurbs::KnotVector {
-        knots: kv.as_slice().to_vec(),
-        degree,
-    })
+/// Uses [`span_local_deriv_raw`], whose value is `dN/du / Order` (MFEM recovers
+/// `dN/dxi` from it by multiplying with `Order * span_length`).
+///
+/// The span-local coordinate `xi` in `[0,1]` maps to a knot parameter inside
+/// `[knots[span+Order], knots[span+Order+1]]`, so this is the entry point for
+/// evaluating a basis on a *sub-interval* of a span — the NURBS geometry path,
+/// where a refined element's parameter interval `[a, b]` lies inside the
+/// original, unrefined span.
+pub fn knot_span_dparam(knots: &[f64], order: usize, span: usize, u: f64, grad: &mut [f64]) {
+    span_local_deriv_raw(knots, order, span, u, grad);
+    let p = order as f64;
+    for g in grad.iter_mut() {
+        *g *= p;
+    }
 }
 
 /// MFEM `NURBS1DFiniteElement` — rational 1D NURBS element on one knot span.
@@ -566,19 +600,27 @@ impl Nurbs1DFiniteElement {
     }
 }
 
-/// MFEM `NURBS2DFiniteElement` on a knot span, as a wrapper around the
-/// patch-parameter [`NurbsPatch2D`].
+/// MFEM `NURBS2DFiniteElement` — rational scalar element on one knot span of a
+/// quadrilateral patch.
 ///
-/// The wrapper owns the two knot vectors and the selected span pair, and maps
-/// the span-local reference coordinates to the patch parameters before
-/// delegating, so its evaluation matches MFEM's per-span element.
+/// Mirrors `NURBSFiniteElement`: the element owns the two (unique) knot
+/// vectors, the span index `ijk` (`SetIJK`, from `el_to_IJK`) and one weight
+/// per *local* DOF (`LoadFE`'s `weights.GetSubVector(dofs, Weights())`).  The
+/// reference coordinate of `calc_shape` / `calc_grad` is span-local
+/// (`xi ∈ [0,1]²` over the selected span), as in MFEM's
+/// `KnotVector::CalcShape(shape, i, xi)`.
+///
+/// The local DOF order is the tensor-product order of
+/// `NURBS2DFiniteElement::CalcShape` (`o = i + (orders[0]+1)*j`), which is the
+/// order `NURBSExtension::Generate2DElementDofTable` lists the element's DOFs
+/// in.
 #[derive(Debug, Clone)]
 pub struct NurbsScalar2D {
-    patch: NurbsPatch2D,
-    kv_u: KnotVector,
-    kv_v: KnotVector,
+    kv: [KnotVector; 2],
     orders: [usize; 2],
     ijk: [usize; 2],
+    /// One weight per local DOF; unit until `SetWeights` (`LoadFE`).
+    weights: Vec<f64>,
 }
 
 impl NurbsScalar2D {
@@ -586,19 +628,11 @@ impl NurbsScalar2D {
     pub fn new(kv_u: KnotVector, kv_v: KnotVector) -> Result<Self, String> {
         let o0 = knot_order(&kv_u).ok_or_else(|| "Nurbs2DFiniteElement: bad kv_u".to_string())?;
         let o1 = knot_order(&kv_v).ok_or_else(|| "Nurbs2DFiniteElement: bad kv_v".to_string())?;
-        let n_u = knot_ncp(&kv_u).expect("validated kv_u");
-        let n_v = knot_ncp(&kv_v).expect("validated kv_v");
-        let patch = NurbsPatch2D::new(
-            to_patch_knot_vector(&kv_u)?,
-            to_patch_knot_vector(&kv_v)?,
-            vec![1.0; n_u * n_v],
-        );
         Ok(Self {
-            patch,
-            kv_u,
-            kv_v,
+            kv: [kv_u, kv_v],
             orders: [o0, o1],
             ijk: [0, 0],
+            weights: vec![1.0; (o0 + 1) * (o1 + 1)],
         })
     }
 
@@ -612,9 +646,27 @@ impl NurbsScalar2D {
         self.ijk
     }
 
+    /// MFEM `NURBSFiniteElement::SetWeights` (`LoadFE`'s `GetSubVector`).
+    pub fn set_weights(&mut self, weights: Vec<f64>) -> Result<(), String> {
+        if weights.len() != self.n_dofs() {
+            return Err(format!(
+                "NurbsScalar2D::set_weights: expected {} weights, got {}",
+                self.n_dofs(),
+                weights.len()
+            ));
+        }
+        self.weights = weights;
+        Ok(())
+    }
+
     /// MFEM `NURBS2DFiniteElement::GetOrder`.
     pub fn order(&self) -> usize {
         self.orders[0].max(self.orders[1])
+    }
+
+    /// Per-direction order.
+    pub fn orders(&self) -> [usize; 2] {
+        self.orders
     }
 
     /// MFEM `NURBS2DFiniteElement::GetDof`.
@@ -622,50 +674,84 @@ impl NurbsScalar2D {
         (self.orders[0] + 1) * (self.orders[1] + 1)
     }
 
-    /// `GetKnotLocation` per direction (`i + Order` span offset).
-    fn location(&self, xi: &[f64]) -> Vec<f64> {
-        [(&self.kv_u, self.ijk[0], self.orders[0]), (&self.kv_v, self.ijk[1], self.orders[1])]
-            .iter()
-            .enumerate()
-            .map(|(d, (kv, span, ord))| {
-                let knots = kv.as_slice();
-                let ip = span + ord;
-                if ip + 1 < knots.len() {
-                    xi[d] * knots[ip + 1] + (1.0 - xi[d]) * knots[ip]
-                } else {
-                    xi[d]
-                }
-            })
-            .collect()
-    }
-
-    /// Rational basis values at the span-local reference point; `values` must
-    /// have length `n_dofs`.
+    /// MFEM `NURBS2DFiniteElement::CalcShape` (rational basis values);
+    /// `values` must have length `n_dofs`.
     pub fn calc_shape(&self, xi: &[f64], values: &mut [f64]) {
         assert_eq!(xi.len(), 2, "NurbsScalar2D::calc_shape needs 2 coordinates");
-        self.patch.eval_basis(&self.location(xi), values);
+        assert_eq!(values.len(), self.n_dofs(), "NurbsScalar2D::calc_shape size");
+        let (ox, oy) = (self.orders[0], self.orders[1]);
+        let mut shape_x = vec![0.0; ox + 1];
+        let mut shape_y = vec![0.0; oy + 1];
+        knot_span_shape(self.kv[0].as_slice(), ox, self.ijk[0], xi[0], &mut shape_x);
+        knot_span_shape(self.kv[1].as_slice(), oy, self.ijk[1], xi[1], &mut shape_y);
+
+        let mut sum = 0.0;
+        let mut o = 0;
+        for j in 0..=oy {
+            let sy = shape_y[j];
+            for i in 0..=ox {
+                let v = shape_x[i] * sy * self.weights[o];
+                values[o] = v;
+                sum += v;
+                o += 1;
+            }
+        }
+        divide_by(values, sum);
     }
 
-    /// Rational basis gradients at the span-local reference point.
+    /// MFEM `NURBS2DFiniteElement::CalcDShape` (gradients w.r.t. the span-local
+    /// reference coordinates); `grads` must have length `2 * n_dofs`, ordered
+    /// `[dR/dx, dR/dy]` per DOF.
     pub fn calc_grad(&self, xi: &[f64], grads: &mut [f64]) {
         assert_eq!(xi.len(), 2, "NurbsScalar2D::calc_grad needs 2 coordinates");
-        self.patch.eval_grad_basis(&self.location(xi), grads);
-    }
-
-    /// The underlying patch element (`ReferenceElement` implementation).
-    pub fn patch(&self) -> &NurbsPatch2D {
-        &self.patch
+        assert_eq!(grads.len(), 2 * self.n_dofs(), "NurbsScalar2D::calc_grad size");
+        let (ox, oy) = (self.orders[0], self.orders[1]);
+        let mut shape_x = vec![0.0; ox + 1];
+        let mut shape_y = vec![0.0; oy + 1];
+        let mut dshape_x = vec![0.0; ox + 1];
+        let mut dshape_y = vec![0.0; oy + 1];
+        knot_span_shape(self.kv[0].as_slice(), ox, self.ijk[0], xi[0], &mut shape_x);
+        knot_span_shape(self.kv[1].as_slice(), oy, self.ijk[1], xi[1], &mut shape_y);
+        knot_span_dshape(self.kv[0].as_slice(), ox, self.ijk[0], xi[0], &mut dshape_x);
+        knot_span_dshape(self.kv[1].as_slice(), oy, self.ijk[1], xi[1], &mut dshape_y);
+        let mut u = vec![0.0; self.n_dofs()];
+        let mut sum = 0.0;
+        let mut dsum = [0.0_f64; 2];
+        let mut o = 0;
+        for j in 0..=oy {
+            let (sy, dsy) = (shape_y[j], dshape_y[j]);
+            for i in 0..=ox {
+                let v = shape_x[i] * sy * self.weights[o];
+                let gx = dshape_x[i] * sy * self.weights[o];
+                let gy = shape_x[i] * dsy * self.weights[o];
+                u[o] = v;
+                sum += v;
+                grads[2 * o] = gx;
+                grads[2 * o + 1] = gy;
+                dsum[0] += gx;
+                dsum[1] += gy;
+                o += 1;
+            }
+        }
+        sum = 1.0 / sum;
+        dsum[0] *= sum * sum;
+        dsum[1] *= sum * sum;
+        for o in 0..self.n_dofs() {
+            grads[2 * o] = grads[2 * o] * sum - u[o] * dsum[0];
+            grads[2 * o + 1] = grads[2 * o + 1] * sum - u[o] * dsum[1];
+        }
     }
 }
 
-/// MFEM `NURBS3DFiniteElement` on a knot span (3D counterpart of
-/// [`NurbsScalar2D`]).
+/// MFEM `NURBS3DFiniteElement` — rational scalar element on one knot span of a
+/// hexahedral patch (3-D counterpart of [`NurbsScalar2D`], same conventions).
 #[derive(Debug, Clone)]
 pub struct NurbsScalar3D {
-    patch: NurbsPatch3D,
     kv: [KnotVector; 3],
     orders: [usize; 3],
     ijk: [usize; 3],
+    /// One weight per local DOF; unit until `SetWeights` (`LoadFE`).
+    weights: Vec<f64>,
 }
 
 impl NurbsScalar3D {
@@ -676,20 +762,11 @@ impl NurbsScalar3D {
             knot_order(&kv_v).ok_or_else(|| "Nurbs3DFiniteElement: bad kv_v".to_string())?,
             knot_order(&kv_w).ok_or_else(|| "Nurbs3DFiniteElement: bad kv_w".to_string())?,
         ];
-        let n_u = knot_ncp(&kv_u).expect("validated kv_u");
-        let n_v = knot_ncp(&kv_v).expect("validated kv_v");
-        let n_w = knot_ncp(&kv_w).expect("validated kv_w");
-        let patch = NurbsPatch3D::new(
-            to_patch_knot_vector(&kv_u)?,
-            to_patch_knot_vector(&kv_v)?,
-            to_patch_knot_vector(&kv_w)?,
-            vec![1.0; n_u * n_v * n_w],
-        );
         Ok(Self {
-            patch,
             kv: [kv_u, kv_v, kv_w],
             orders: o,
             ijk: [0, 0, 0],
+            weights: vec![1.0; (o[0] + 1) * (o[1] + 1) * (o[2] + 1)],
         })
     }
 
@@ -703,9 +780,27 @@ impl NurbsScalar3D {
         self.ijk
     }
 
+    /// MFEM `NURBSFiniteElement::SetWeights` (`LoadFE`'s `GetSubVector`).
+    pub fn set_weights(&mut self, weights: Vec<f64>) -> Result<(), String> {
+        if weights.len() != self.n_dofs() {
+            return Err(format!(
+                "NurbsScalar3D::set_weights: expected {} weights, got {}",
+                self.n_dofs(),
+                weights.len()
+            ));
+        }
+        self.weights = weights;
+        Ok(())
+    }
+
     /// MFEM `NURBS3DFiniteElement::GetOrder`.
     pub fn order(&self) -> usize {
         self.orders[0].max(self.orders[1]).max(self.orders[2])
+    }
+
+    /// Per-direction order.
+    pub fn orders(&self) -> [usize; 3] {
+        self.orders
     }
 
     /// MFEM `NURBS3DFiniteElement::GetDof`.
@@ -713,35 +808,89 @@ impl NurbsScalar3D {
         (self.orders[0] + 1) * (self.orders[1] + 1) * (self.orders[2] + 1)
     }
 
-    fn location(&self, xi: &[f64]) -> Vec<f64> {
-        (0..3)
-            .map(|d| {
-                let knots = self.kv[d].as_slice();
-                let ip = self.ijk[d] + self.orders[d];
-                if ip + 1 < knots.len() {
-                    xi[d] * knots[ip + 1] + (1.0 - xi[d]) * knots[ip]
-                } else {
-                    xi[d]
-                }
-            })
-            .collect()
+    /// Span-local B-spline values/derivatives in the three directions.
+    fn local_1d(&self, xi: &[f64]) -> ([Vec<f64>; 3], [Vec<f64>; 3]) {
+        let mut vals = [Vec::new(), Vec::new(), Vec::new()];
+        let mut ders = [Vec::new(), Vec::new(), Vec::new()];
+        for d in 0..3 {
+            let n = self.orders[d] + 1;
+            vals[d] = vec![0.0; n];
+            ders[d] = vec![0.0; n];
+            knot_span_shape(
+                self.kv[d].as_slice(), self.orders[d], self.ijk[d], xi[d], &mut vals[d]);
+            knot_span_dshape(
+                self.kv[d].as_slice(), self.orders[d], self.ijk[d], xi[d], &mut ders[d]);
+        }
+        (vals, ders)
     }
 
-    /// Rational basis values at the span-local reference point.
+    /// MFEM `NURBS3DFiniteElement::CalcShape` (rational basis values);
+    /// `values` must have length `n_dofs`.
     pub fn calc_shape(&self, xi: &[f64], values: &mut [f64]) {
         assert_eq!(xi.len(), 3, "NurbsScalar3D::calc_shape needs 3 coordinates");
-        self.patch.eval_basis(&self.location(xi), values);
+        assert_eq!(values.len(), self.n_dofs(), "NurbsScalar3D::calc_shape size");
+        let (ox, oy, oz) = (self.orders[0], self.orders[1], self.orders[2]);
+        let (shape, _) = self.local_1d(xi);
+
+        let mut sum = 0.0;
+        let mut o = 0;
+        for k in 0..=oz {
+            let sz = shape[2][k];
+            for j in 0..=oy {
+                let sy_sz = shape[1][j] * sz;
+                for i in 0..=ox {
+                    let v = shape[0][i] * sy_sz * self.weights[o];
+                    values[o] = v;
+                    sum += v;
+                    o += 1;
+                }
+            }
+        }
+        divide_by(values, sum);
     }
 
-    /// Rational basis gradients at the span-local reference point.
+    /// MFEM `NURBS3DFiniteElement::CalcDShape` (gradients w.r.t. the span-local
+    /// reference coordinates); `grads` must have length `3 * n_dofs`, ordered
+    /// `[dR/dx, dR/dy, dR/dz]` per DOF.
     pub fn calc_grad(&self, xi: &[f64], grads: &mut [f64]) {
         assert_eq!(xi.len(), 3, "NurbsScalar3D::calc_grad needs 3 coordinates");
-        self.patch.eval_grad_basis(&self.location(xi), grads);
-    }
+        assert_eq!(grads.len(), 3 * self.n_dofs(), "NurbsScalar3D::calc_grad size");
+        let (ox, oy, oz) = (self.orders[0], self.orders[1], self.orders[2]);
+        let (shape, dshape) = self.local_1d(xi);
 
-    /// The underlying patch element (`ReferenceElement` implementation).
-    pub fn patch(&self) -> &NurbsPatch3D {
-        &self.patch
+        let mut u = vec![0.0; self.n_dofs()];
+        let mut sum = 0.0;
+        let mut dsum = [0.0_f64; 3];
+        let mut o = 0;
+        for k in 0..=oz {
+            let (sz, dsz) = (shape[2][k], dshape[2][k]);
+            for j in 0..=oy {
+                let (sy_sz, dsy_sz, sy_dsz) =
+                    (shape[1][j] * sz, dshape[1][j] * sz, shape[1][j] * dsz);
+                for i in 0..=ox {
+                    let w = self.weights[o];
+                    let v = shape[0][i] * sy_sz * w;
+                    u[o] = v;
+                    sum += v;
+                    grads[3 * o] = dshape[0][i] * sy_sz * w;
+                    grads[3 * o + 1] = shape[0][i] * dsy_sz * w;
+                    grads[3 * o + 2] = shape[0][i] * sy_dsz * w;
+                    dsum[0] += grads[3 * o];
+                    dsum[1] += grads[3 * o + 1];
+                    dsum[2] += grads[3 * o + 2];
+                    o += 1;
+                }
+            }
+        }
+        sum = 1.0 / sum;
+        for d in 0..3 {
+            dsum[d] *= sum * sum;
+        }
+        for o in 0..self.n_dofs() {
+            for d in 0..3 {
+                grads[3 * o + d] = grads[3 * o + d] * sum - u[o] * dsum[d];
+            }
+        }
     }
 }
 
@@ -775,12 +924,19 @@ fn span_local_basis(knots: &[f64], order: usize, i: usize, u: f64, shape: &mut [
     }
 }
 
-/// First parameter derivative of the span-local B-spline values (Piegl &
-/// Tiller A2.3), MFEM `KnotVector::CalcDShape`.
-fn span_local_basis_deriv(knots: &[f64], order: usize, i: usize, u: f64, grad: &mut [f64]) {
+/// MFEM `KnotVector::CalcDShape` *before* its final
+/// `grad *= p*(knot[ip+1] - knot[ip])` scaling.
+///
+/// This is the Piegl & Tiller A2.3 first-derivative combination without the
+/// NURBS book's closing `ders[k][j] *= r` factor (`r = p!/(p-k)!`), so the
+/// result is `dN/du / Order` in the knot parameter `u`: MFEM divides by the
+/// same `Order` through the `p*span` scaling below.  [`span_local_basis_deriv`]
+/// adds that scaling; the NURBS geometry path (`fem-space`) uses this raw form
+/// to differentiate with respect to a *different* reference interval.
+fn span_local_deriv_raw(knots: &[f64], order: usize, i: usize, u: f64, grad: &mut [f64]) {
     let p = order;
     let ip = i + p;
-    // ndu[j][r]
+    // ndu[j][r] holds the denominators for column j, ndu[r][j] the values.
     let mut ndu = vec![vec![0.0; p + 1]; p + 1];
     let mut left = vec![0.0; p + 1];
     let mut right = vec![0.0; p + 1];
@@ -797,27 +953,31 @@ fn span_local_basis_deriv(knots: &[f64], order: usize, i: usize, u: f64, grad: &
         }
         ndu[j][j] = saved;
     }
-    grad[0] = 1.0;
+    let pk = p.wrapping_sub(1);
     for r in 0..=p {
-        let mut s1 = 0;
-        let mut s2 = 1;
-        let mut d = vec![0.0; p + 1];
-        let mut a = vec![vec![0.0; p + 1]; 2];
-        a[0][0] = 1.0;
-        for k in 1..=p {
-            d[k] = if ndu[k][p] != 0.0 { a[s2][0] / ndu[k][p] } else { 0.0 };
-            for j in 1..=k {
-                let denom = ndu[j - 1][p - k];
-                if denom != 0.0 {
-                    let t1 = a[s1][j] / denom;
-                    let t2 = if ndu[j][p] != 0.0 { a[s2][j - 1] / ndu[j][p] } else { 0.0 };
-                    a[s2][j] = d[j] * ndu[j][p] + (k - j) as f64 * (t2 - t1);
-                    d[j - 1] = t1;
-                }
-            }
-            std::mem::swap(&mut s1, &mut s2);
+        let mut d = 0.0;
+        if r >= 1 && p >= 1 {
+            let rk = r - 1;
+            d = if ndu[p][rk] != 0.0 { ndu[rk][pk] / ndu[p][rk] } else { 0.0 };
         }
-        grad[r] = d.get(r).copied().unwrap_or(0.0);
+        if r <= pk && p >= 1 {
+            d -= if ndu[p][r] != 0.0 { ndu[r][pk] / ndu[p][r] } else { 0.0 };
+        }
+        grad[r] = d;
+    }
+}
+
+/// First derivative of the span-local B-spline values with respect to the
+/// span-local reference coordinate `xi` in `[0,1]` (Piegl & Tiller A2.3 as
+/// MFEM implements it in `KnotVector::CalcDShape`, including the closing
+/// `grad *= p*(knot[i+Order+1] - knot[i+Order])` scaling that converts
+/// `dN/du` into `dN/dxi`).
+fn span_local_basis_deriv(knots: &[f64], order: usize, i: usize, u: f64, grad: &mut [f64]) {
+    span_local_deriv_raw(knots, order, i, u, grad);
+    let ip = i + order;
+    let scale = order as f64 * (knots[ip + 1] - knots[ip]);
+    for g in grad.iter_mut() {
+        *g *= scale;
     }
 }
 
@@ -1097,6 +1257,155 @@ mod tests {
         }
     }
 
+    /// Span-local `KnotVector::CalcDShape` values, dumped from MFEM 4.9 for
+    /// `KnotVector kv(2, 4); kv = {0,0,0,0.5,1,1,1};` on element 0 (the span
+    /// `[knot[2], knot[3]] = [0, 0.5]`) at the span-local coordinates
+    /// `xi = 0, 0.25, 0.5, 0.75, 1`.
+    #[test]
+    fn knot_vector_dshape_matches_mfem() {
+        let kv = clamped(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let want = [
+            (0.0, [-2.0, 2.0, 0.0]),
+            (0.25, [-1.5, 1.25, 0.25]),
+            (0.5, [-1.0, 0.5, 0.5]),
+            (0.75, [-0.5, -0.25, 0.75]),
+            (1.0, [0.0, -1.0, 1.0]),
+        ];
+        for (xi, expected) in want {
+            let u = 0.5 * xi; // GetKnotLocation(xi, 0 + 2)
+            let mut dshape = [0.0; 3];
+            span_local_basis_deriv(kv.as_slice(), 2, 0, u, &mut dshape);
+            for o in 0..3 {
+                assert!(
+                    (dshape[o] - expected[o]).abs() < 1e-15,
+                    "xi = {xi}, o = {o}: {} != {}",
+                    dshape[o],
+                    expected[o]
+                );
+            }
+            assert!(dshape.iter().sum::<f64>().abs() < 1e-15);
+        }
+    }
+
+    /// `NURBS2DFiniteElement::CalcShape` / `CalcDShape` on a **multi-span**
+    /// patch: `square-nurbs.mesh` refined once, space order 2, knot vectors
+    /// `{0,0,0,0.5,1,1,1}`, element 0 (`ijk = 0,0`), span-local
+    /// `xi = (0.5, 0.5)`.  Values dumped from MFEM 4.9.
+    #[test]
+    fn nurbs2d_multispan_values_match_mfem() {
+        let kv = clamped(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let mut e = NurbsScalar2D::new(kv.clone(), kv).unwrap();
+        e.set_ijk([0, 0]);
+        assert_eq!(e.n_dofs(), 9);
+
+        let want_sh = [
+            0.0625, 0.15625, 0.03125, 0.15625, 0.390625, 0.078125, 0.03125, 0.078125, 0.015625,
+        ];
+        let mut sh = [0.0; 9];
+        e.calc_shape(&[0.5, 0.5], &mut sh);
+        for i in 0..9 {
+            assert!((sh[i] - want_sh[i]).abs() < 1e-16, "i = {i}: {}", sh[i]);
+        }
+
+        let want_dsh = [
+            -0.25, -0.25, 0.125, -0.625, 0.125, -0.125, -0.625, 0.125, 0.3125, 0.3125, 0.3125,
+            0.0625, -0.125, 0.125, 0.0625, 0.3125, 0.0625, 0.0625,
+        ];
+        let mut dsh = [0.0; 18];
+        e.calc_grad(&[0.5, 0.5], &mut dsh);
+        for i in 0..18 {
+            assert!((dsh[i] - want_dsh[i]).abs() < 1e-16, "i = {i}: {}", dsh[i]);
+        }
+    }
+
+    /// `NURBS3DFiniteElement` on a multi-span patch: `cube-nurbs.mesh` refined
+    /// once, space order 2, knot vectors `{0,0,0,0.5,1,1,1}` in all three
+    /// directions, element 0 (`ijk = 0,0,0`), span-local
+    /// `xi = (0.5, 0.11270166537925831, 0.11270166537925831)`.  Values dumped
+    /// from MFEM 4.9 (the first `IntRules.Get(CUBE, 5)` point of the rule's
+    /// second row).
+    #[test]
+    fn nurbs3d_multispan_values_match_mfem() {
+        let kv = clamped(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let mut e = NurbsScalar3D::new(kv.clone(), kv.clone(), kv).unwrap();
+        e.set_ijk([0, 0, 0]);
+        assert_eq!(e.n_dofs(), 27);
+
+        let xi = [0.5, 0.11270166537925831, 0.11270166537925831];
+        let want_sh = [
+            0.15495966692414834, 0.38739916731037083, 0.077479833462074169, 0.040614916731037079,
+            0.10153729182759269, 0.02030745836551854, 0.0012499999999999998, 0.0031249999999999993,
+            0.0006249999999999999, 0.040614916731037079, 0.10153729182759269, 0.02030745836551854,
+            0.010645166537925832, 0.026612916344814577, 0.0053225832689629158, 0.00032762490344437334,
+            0.0008190622586109333, 0.00016381245172218667, 0.0012499999999999998, 0.0031249999999999993,
+            0.0006249999999999999, 0.00032762490344437334, 0.0008190622586109333, 0.00016381245172218667,
+            1.0083268962915572e-05, 2.5208172407288925e-05, 5.0416344814577859e-06,
+        ];
+        let mut sh = [0.0; 27];
+        e.calc_shape(&xi, &mut sh);
+        for i in 0..27 {
+            assert!(
+                (sh[i] - want_sh[i]).abs() < 1e-15,
+                "shape i = {i}: {} != {}",
+                sh[i],
+                want_sh[i]
+            );
+        }
+
+        let want_dsh = [
+            -0.61983866769659335, -0.34928425057933377, -0.34928425057933371, 0.30991933384829667,
+            -0.87321062644833425, -0.87321062644833414, 0.30991933384829667, -0.17464212528966688,
+            -0.17464212528966686, -0.16245966692414832, 0.32710179221381519, -0.091547375096555625,
+            0.081229833462074158, 0.81775448053453792, -0.22886843774138904, 0.081229833462074158,
+            0.1635508961069076, -0.045773687548277812, -0.0049999999999999992, 0.022182458365518541,
+            -0.0028175416344814572, 0.0024999999999999996, 0.055456145913796349, -0.0070438540862036419,
+            0.0024999999999999996, 0.011091229182759271, -0.0014087708172407286, -0.16245966692414832,
+            -0.091547375096555639, 0.32710179221381519, 0.081229833462074158, -0.2288684377413891,
+            0.81775448053453792, 0.081229833462074158, -0.045773687548277819, 0.1635508961069076,
+            -0.042580666151703327, 0.085733354472426151, 0.085733354472426151, 0.021290333075851663,
+            0.21433338618106534, 0.21433338618106534, 0.021290333075851663, 0.042866677236213076,
+            0.042866677236213076, -0.0013104996137774934, 0.0058140206241294751, 0.0026386042793148973,
+            0.00065524980688874668, 0.014535051560323687, 0.0065965106982872421, 0.00065524980688874668,
+            0.0029070103120647376, 0.0013193021396574486, -0.0049999999999999992, -0.0028175416344814576,
+            0.022182458365518541, 0.0024999999999999996, -0.0070438540862036427, 0.055456145913796349,
+            0.0024999999999999996, -0.0014087708172407288, 0.011091229182759271, -0.0013104996137774934,
+            0.0026386042793148973, 0.0058140206241294751, 0.00065524980688874668, 0.0065965106982872421,
+            0.014535051560323687, 0.00065524980688874668, 0.0013193021396574486, 0.0029070103120647376,
+            -4.0333075851662287e-05, 0.00017893735516656001, 0.00017893735516656001,
+            2.0166537925831144e-05, 0.00044734338791639996, 0.00044734338791639996,
+            2.0166537925831144e-05, 8.9468677583280003e-05, 8.9468677583280003e-05,
+        ];
+        let mut dsh = [0.0; 81];
+        e.calc_grad(&xi, &mut dsh);
+        for i in 0..81 {
+            assert!(
+                (dsh[i] - want_dsh[i]).abs() < 1e-15,
+                "grad i = {i}: {} != {}",
+                dsh[i],
+                want_dsh[i]
+            );
+        }
+    }
+
+    /// Rational weights enter exactly through MFEM's `shape *= weights / sum`.
+    #[test]
+    fn nurbs2d_rational_weights_are_a_partition_of_unity() {
+        let kv = clamped(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        let mut e = NurbsScalar2D::new(kv.clone(), kv).unwrap();
+        assert_eq!(e.set_weights(vec![1.0]).is_err(), true);
+        let mut w = vec![1.0; 9];
+        w[4] = 0.5;
+        w[8] = 2.0;
+        e.set_weights(w).unwrap();
+        let mut sh = [0.0; 9];
+        for q in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            e.set_ijk([0, 0]);
+            e.calc_shape(&[q, 1.0 - q], &mut sh);
+            let sum: f64 = sh.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-13, "sum = {sum}");
+        }
+    }
+
     #[test]
     fn knot_vector_queries_match_mfem() {
         let kv = mesh_kv::unit_linear();
@@ -1324,16 +1633,23 @@ mod tests {
     #[test]
     fn scalar_2d_matches_patch_element_in_parameter_space() {
         // With a single span the span-local and patch-parameter conventions
-        // coincide, so the wrapper must reproduce NurbsPatch2D exactly.
+        // coincide (the span is the whole [0,1] interval and every DOF is
+        // active), so the span-local element must reproduce the patch element.
+        use crate::reference::ReferenceElement;
         let kv = mesh_kv::unit_quadratic();
         let mut e = NurbsScalar2D::new(kv.clone(), kv.clone()).unwrap();
         e.set_ijk([0, 0]);
         assert_eq!(e.order(), 2);
         assert_eq!(e.n_dofs(), 9);
+        let legacy = |k: &KnotVector| crate::nurbs::KnotVector {
+            knots: k.as_slice().to_vec(),
+            degree: knot_order(k).expect("valid knot vector"),
+        };
+        let patch = crate::nurbs::NurbsPatch2D::uniform(legacy(&kv), legacy(&kv));
         let mut got = vec![0.0; 9];
         e.calc_shape(&[0.3, 0.7], &mut got);
         let mut want = vec![0.0; 9];
-        e.patch().eval_basis(&[0.3, 0.7], &mut want);
+        patch.eval_basis(&[0.3, 0.7], &mut want);
         for i in 0..9 {
             assert!((got[i] - want[i]).abs() < 1e-14, "i = {i}");
         }

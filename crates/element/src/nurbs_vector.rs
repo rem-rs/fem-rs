@@ -33,19 +33,28 @@
 //! suggests `px`.  Matching MFEM on anisotropic-order meshes requires the same
 //! arithmetic — see [`crate::nurbs_fe_collection::NurbsElement::n_dofs`].
 //!
-//! # Degree elevation
+//! # Degree elevation and spans
 //!
 //! The mixed-degree bases are built with MFEM's `KnotVector::DegreeElevate(1)`
 //! ([`crate::nurbs_fe_collection::degree_elevate`]), which preserves the
 //! element (span) count and raises the order by one.  MFEM evaluates both the
 //! base and the elevated basis at the same span index `ijk`
-//! (`NURBSExtension::LoadFE`); the value evaluation here assumes the
-//! multi-span-compatible case only for single-span patches — see
-//! [`crate::nurbs_fe_collection`] and the `nurbs_extension` notes in
-//! `fem-space` for the span-aware follow-up.
+//! (`NURBSExtension::LoadFE` sets it from `el_to_IJK`), so every evaluation
+//! here is **span-local**: [`NurbsHDiv2D::set_ijk`] selects the knot span and
+//! the basis values are the `Order + 1` values MFEM's
+//! `KnotVector::CalcShape(shape, i, xi)` returns for that span, at the
+//! span-local reference coordinate `xi ∈ [0,1]^{dim}`.
+//!
+//! `RATIONAL WEIGHTS ARE NOT USED`: MFEM's `NURBS_HDiv*`/`NURBS_HCurl*`
+//! `CalcVShape`/`CalcDivShape`/`CalcCurlShape` evaluate the *non-rational*
+//! B-spline bases (`kv` / `kv1`), unlike the scalar `NURBS2DFiniteElement`
+//! whose `CalcShape` divides by the weighted sum.  LoadFE still stores weights
+//! on the element, but they never enter the vector element's values.
 
-use crate::iga::{BsplineBasis, KnotVector};
-use crate::nurbs_fe_collection::{degree_elevate, knot_order};
+use crate::iga::KnotVector;
+use crate::nurbs_fe_collection::{
+    degree_elevate, knot_order, knot_span_dshape, knot_span_shape,
+};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -63,16 +72,10 @@ fn clamped_uniform_knots(degree: usize, n_elem: usize) -> KnotVector {
     KnotVector::new_clamped(knots).expect("valid clamped uniform knots")
 }
 
-/// MFEM `KnotVector::DegreeElevate(1)` **and** the matching degree-elevated
-/// B-spline basis (`NURBS_HDiv*`/`NURBS_HCurl*::SetOrder` call
-/// `kv1[i] = kv[i]->DegreeElevate(1)` and then evaluate on `kv1[i]`).
-///
-/// Returns the elevated knot vector together with the basis built from it.
-fn elevated_basis(kv: &KnotVector) -> Result<(KnotVector, BsplineBasis), String> {
-    let kv1 = degree_elevate(kv, 1)?;
-    let degree = knot_order(&kv1).expect("elevated knot vector is clamped");
-    let basis = BsplineBasis::new(degree, kv1.clone())?;
-    Ok((kv1, basis))
+/// MFEM `KnotVector::DegreeElevate(1)` the `NURBS_HDiv*`/`NURBS_HCurl*`
+/// elements build in `SetOrder` (`kv1[i] = kv[i]->DegreeElevate(1)`).
+fn elevated_knots(kv: &KnotVector) -> Result<KnotVector, String> {
+    degree_elevate(kv, 1)
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -90,14 +93,12 @@ pub struct NurbsHDiv2D {
     pub order_u: usize,
     /// Order in η direction.
     pub order_v: usize,
-    /// B-spline basis for ξ (order px).
-    basis_u: BsplineBasis,
-    /// B-spline basis for η (order py).
-    basis_v: BsplineBasis,
-    /// Degree-elevated basis for ξ (order px+1).
-    basis1_u: BsplineBasis,
-    /// Degree-elevated basis for η (order py+1).
-    basis1_v: BsplineBasis,
+    /// Base knot vectors (orders `px`, `py`).
+    kv: [KnotVector; 2],
+    /// Degree-elevated knot vectors (orders `px+1`, `py+1`).
+    kv1: [KnotVector; 2],
+    /// Knot span index within the patch (`NURBSFiniteElement::ijk`).
+    ijk: [usize; 2],
     /// Number of DOFs.
     pub n_dofs: usize,
 }
@@ -117,11 +118,8 @@ impl NurbsHDiv2D {
         let px = knot_order(&kv_u).ok_or_else(|| "NurbsHDiv2D: invalid kv_u".to_string())?;
         let py = knot_order(&kv_v).ok_or_else(|| "NurbsHDiv2D: invalid kv_v".to_string())?;
 
-        let (_, basis1_u) = elevated_basis(&kv_u)?;
-        let (_, basis1_v) = elevated_basis(&kv_v)?;
-
-        let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
-        let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
+        let kv1_u = elevated_knots(&kv_u)?;
+        let kv1_v = elevated_knots(&kv_v)?;
 
         // MFEM `NURBS_HDiv2DFiniteElement::SetOrder` (see
         // `crate::nurbs_fe_collection::NurbsElement::n_dofs` for why the second
@@ -131,10 +129,9 @@ impl NurbsHDiv2D {
         Ok(Self {
             order_u: px,
             order_v: py,
-            basis_u,
-            basis_v,
-            basis1_u,
-            basis1_v,
+            kv: [kv_u, kv_v],
+            kv1: [kv1_u, kv1_v],
+            ijk: [0, 0],
             n_dofs: n,
         })
     }
@@ -145,15 +142,38 @@ impl NurbsHDiv2D {
         (px + 2) * (py + 1) + (py + 1) * (py + 2)
     }
 
-    /// Evaluate 1D B-spline shape values at parameter u.
-    /// Returns vector of (global_index, value) pairs.
-    fn eval_1d(basis: &BsplineBasis, u: f64) -> Vec<(usize, f64)> {
-        basis.nonzero_values(u).unwrap_or_default()
+    /// MFEM `NURBSFiniteElement::SetIJK` — select the knot span.
+    pub fn set_ijk(&mut self, ijk: [usize; 2]) {
+        self.ijk = ijk;
     }
 
-    /// Evaluate 1D B-spline derivative values at parameter u.
-    fn eval_1d_deriv(basis: &BsplineBasis, u: f64) -> Vec<(usize, f64)> {
-        basis.nonzero_derivatives(u).unwrap_or_default()
+    /// MFEM `NURBSFiniteElement::GetIJK`.
+    pub fn ijk(&self) -> [usize; 2] {
+        self.ijk
+    }
+
+    /// Per-direction order.
+    fn order_dir(&self, d: usize) -> usize {
+        if d == 0 { self.order_u } else { self.order_v }
+    }
+
+    /// Span-local `KnotVector::CalcShape` in direction `d`; `elevated` selects
+    /// MFEM's `kv1[d]`.
+    fn shape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_shape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
+    }
+
+    /// Span-local `KnotVector::CalcDShape` in direction `d`.
+    fn dshape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_dshape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
     }
 }
 
@@ -167,23 +187,14 @@ impl VectorReferenceElement for NurbsHDiv2D {
         let n = self.n_dofs;
         assert_eq!(values.len(), n * 2);
 
-        // Evaluate 1D basis functions.
-        let shape_x: Vec<(usize, f64)> = Self::eval_1d(&self.basis1_u, xi[0]);
-        let shape_y: Vec<(usize, f64)> = Self::eval_1d(&self.basis_v, xi[1]);
-        let shape_x_orig: Vec<(usize, f64)> = Self::eval_1d(&self.basis_u, xi[0]);
-        let shape_y1: Vec<(usize, f64)> = Self::eval_1d(&self.basis1_v, xi[1]);
+        // MFEM `NURBS_HDiv2DFiniteElement::CalcVShape`.
+        let sx1 = self.shape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
+        let sx = self.shape1d(0, false, xi[0]);
+        let sy1 = self.shape1d(1, true, xi[1]);
 
-        // Build lookup arrays for fast access.
         let px = self.order_u;
         let py = self.order_v;
-        let mut sx1 = vec![0.0_f64; px + 2];
-        for (i, v) in &shape_x { if *i < sx1.len() { sx1[*i] = *v; } }
-        let mut sy = vec![0.0_f64; py + 1];
-        for (i, v) in &shape_y { if *i < sy.len() { sy[*i] = *v; } }
-        let mut sx = vec![0.0_f64; px + 1];
-        for (i, v) in &shape_x_orig { if *i < sx.len() { sx[*i] = *v; } }
-        let mut sy1 = vec![0.0_f64; py + 2];
-        for (i, v) in &shape_y1 { if *i < sy1.len() { sy1[*i] = *v; } }
 
         // First set: x-component = shape1_x(i) * shape_y(j), i=0..px+1, j=0..py
         let mut o = 0;
@@ -215,30 +226,22 @@ impl VectorReferenceElement for NurbsHDiv2D {
         let px = self.order_u;
         let py = self.order_v;
 
-        let shape_y: Vec<(usize, f64)> = Self::eval_1d(&self.basis_v, xi[1]);
-        let dsx1: Vec<(usize, f64)> = Self::eval_1d_deriv(&self.basis1_u, xi[0]);
-        let shape_x: Vec<(usize, f64)> = Self::eval_1d(&self.basis_u, xi[0]);
-        let dsy1: Vec<(usize, f64)> = Self::eval_1d_deriv(&self.basis1_v, xi[1]);
-
-        let mut sy = vec![0.0_f64; py + 1];
-        for (i, v) in &shape_y { if *i < sy.len() { sy[*i] = *v; } }
-        let mut dsx = vec![0.0_f64; px + 2];
-        for (i, v) in &dsx1 { if *i < dsx.len() { dsx[*i] = *v; } }
-        let mut sx = vec![0.0_f64; px + 1];
-        for (i, v) in &shape_x { if *i < sx.len() { sx[*i] = *v; } }
-        let mut dsy = vec![0.0_f64; py + 2];
-        for (i, v) in &dsy1 { if *i < dsy.len() { dsy[*i] = *v; } }
+        // MFEM `NURBS_HDiv2DFiniteElement::CalcDivShape`.
+        let sy = self.shape1d(1, false, xi[1]);
+        let dsx1 = self.dshape1d(0, true, xi[0]);
+        let sx = self.shape1d(0, false, xi[0]);
+        let dsy1 = self.dshape1d(1, true, xi[1]);
 
         let mut o = 0;
         for j in 0..=py {
             let sj = sy[j];
             for i in 0..=px + 1 {
-                div_vals[o] = dsx[i] * sj;
+                div_vals[o] = dsx1[i] * sj;
                 o += 1;
             }
         }
         for j in 0..=py + 1 {
-            let dsj = dsy[j];
+            let dsj = dsy1[j];
             for i in 0..=px {
                 div_vals[o] = sx[i] * dsj;
                 o += 1;
@@ -278,10 +281,12 @@ impl VectorReferenceElement for NurbsHDiv2D {
 pub struct NurbsHCurl2D {
     pub order_u: usize,
     pub order_v: usize,
-    basis_u: BsplineBasis,
-    basis_v: BsplineBasis,
-    basis1_u: BsplineBasis,
-    basis1_v: BsplineBasis,
+    /// Base knot vectors (orders `px`, `py`).
+    kv: [KnotVector; 2],
+    /// Degree-elevated knot vectors (orders `px+1`, `py+1`).
+    kv1: [KnotVector; 2],
+    /// Knot span index within the patch (`NURBSFiniteElement::ijk`).
+    ijk: [usize; 2],
     pub n_dofs: usize,
 }
 
@@ -298,11 +303,8 @@ impl NurbsHCurl2D {
         let px = knot_order(&kv_u).ok_or_else(|| "NurbsHCurl2D: invalid kv_u".to_string())?;
         let py = knot_order(&kv_v).ok_or_else(|| "NurbsHCurl2D: invalid kv_v".to_string())?;
 
-        let (_, basis1_u) = elevated_basis(&kv_u)?;
-        let (_, basis1_v) = elevated_basis(&kv_v)?;
-
-        let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
-        let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
+        let kv1_u = elevated_knots(&kv_u)?;
+        let kv1_v = elevated_knots(&kv_v)?;
 
         // MFEM `NURBS_HCurl2DFiniteElement::SetOrder` (second term uses `py`,
         // see `crate::nurbs_fe_collection::NurbsElement::n_dofs`).
@@ -311,10 +313,9 @@ impl NurbsHCurl2D {
         Ok(Self {
             order_u: px,
             order_v: py,
-            basis_u,
-            basis_v,
-            basis1_u,
-            basis1_v,
+            kv: [kv_u, kv_v],
+            kv1: [kv1_u, kv1_v],
+            ijk: [0, 0],
             n_dofs: n,
         })
     }
@@ -325,12 +326,37 @@ impl NurbsHCurl2D {
         (px + 1) * (py + 2) + (py + 2) * (py + 1)
     }
 
-    fn eval_1d(basis: &BsplineBasis, u: f64) -> Vec<(usize, f64)> {
-        basis.nonzero_values(u).unwrap_or_default()
+    /// MFEM `NURBSFiniteElement::SetIJK` — select the knot span.
+    pub fn set_ijk(&mut self, ijk: [usize; 2]) {
+        self.ijk = ijk;
     }
 
-    fn eval_1d_deriv(basis: &BsplineBasis, u: f64) -> Vec<(usize, f64)> {
-        basis.nonzero_derivatives(u).unwrap_or_default()
+    /// MFEM `NURBSFiniteElement::GetIJK`.
+    pub fn ijk(&self) -> [usize; 2] {
+        self.ijk
+    }
+
+    /// Per-direction order.
+    fn order_dir(&self, d: usize) -> usize {
+        if d == 0 { self.order_u } else { self.order_v }
+    }
+
+    /// Span-local `KnotVector::CalcShape` in direction `d`.
+    fn shape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_shape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
+    }
+
+    /// Span-local `KnotVector::CalcDShape` in direction `d`.
+    fn dshape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_dshape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
     }
 }
 
@@ -344,21 +370,14 @@ impl VectorReferenceElement for NurbsHCurl2D {
         let n = self.n_dofs;
         assert_eq!(values.len(), n * 2);
 
-        let shape_x: Vec<(usize, f64)> = Self::eval_1d(&self.basis_u, xi[0]);
-        let shape_y1: Vec<(usize, f64)> = Self::eval_1d(&self.basis1_v, xi[1]);
-        let shape_x1: Vec<(usize, f64)> = Self::eval_1d(&self.basis1_u, xi[0]);
-        let shape_y: Vec<(usize, f64)> = Self::eval_1d(&self.basis_v, xi[1]);
+        // MFEM `NURBS_HCurl2DFiniteElement::CalcVShape`.
+        let sx = self.shape1d(0, false, xi[0]);
+        let sy1 = self.shape1d(1, true, xi[1]);
+        let sx1 = self.shape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
 
         let px = self.order_u;
         let py = self.order_v;
-        let mut sx = vec![0.0_f64; px + 1];
-        for (i, v) in &shape_x { if *i < sx.len() { sx[*i] = *v; } }
-        let mut sy1 = vec![0.0_f64; py + 2];
-        for (i, v) in &shape_y1 { if *i < sy1.len() { sy1[*i] = *v; } }
-        let mut sx1 = vec![0.0_f64; px + 2];
-        for (i, v) in &shape_x1 { if *i < sx1.len() { sx1[*i] = *v; } }
-        let mut sy = vec![0.0_f64; py + 1];
-        for (i, v) in &shape_y { if *i < sy.len() { sy[*i] = *v; } }
 
         // First set: x-component = shape_x(i) * shape1_y(j), i=0..px, j=0..py+1
         let mut o = 0;
@@ -388,22 +407,14 @@ impl VectorReferenceElement for NurbsHCurl2D {
         let n = self.n_dofs;
         assert_eq!(curl_vals.len(), n);
 
+        // MFEM `NURBS_HCurl2DFiniteElement::CalcCurlShape`.
+        let sx = self.shape1d(0, false, xi[0]);
+        let dsy = self.dshape1d(1, true, xi[1]);
+        let dsx = self.dshape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
+
         let px = self.order_u;
         let py = self.order_v;
-
-        let shape_x: Vec<(usize, f64)> = Self::eval_1d(&self.basis_u, xi[0]);
-        let dsy1: Vec<(usize, f64)> = Self::eval_1d_deriv(&self.basis1_v, xi[1]);
-        let dsx1: Vec<(usize, f64)> = Self::eval_1d_deriv(&self.basis1_u, xi[0]);
-        let shape_y: Vec<(usize, f64)> = Self::eval_1d(&self.basis_v, xi[1]);
-
-        let mut sx = vec![0.0_f64; px + 1];
-        for (i, v) in &shape_x { if *i < sx.len() { sx[*i] = *v; } }
-        let mut dsy = vec![0.0_f64; py + 2];
-        for (i, v) in &dsy1 { if *i < dsy.len() { dsy[*i] = *v; } }
-        let mut dsx = vec![0.0_f64; px + 2];
-        for (i, v) in &dsx1 { if *i < dsx.len() { dsx[*i] = *v; } }
-        let mut sy = vec![0.0_f64; py + 1];
-        for (i, v) in &shape_y { if *i < sy.len() { sy[*i] = *v; } }
 
         let mut o = 0;
         // First set (x-component): curl = -shape_x(i) * dshape1_y(j)
@@ -450,12 +461,12 @@ pub struct NurbsHDiv3D {
     pub order_u: usize,
     pub order_v: usize,
     pub order_w: usize,
-    basis_u: BsplineBasis,
-    basis_v: BsplineBasis,
-    basis_w: BsplineBasis,
-    basis1_u: BsplineBasis,
-    basis1_v: BsplineBasis,
-    basis1_w: BsplineBasis,
+    /// Base knot vectors (orders `px`, `py`, `pz`).
+    kv: [KnotVector; 3],
+    /// Degree-elevated knot vectors (orders `px+1`, `py+1`, `pz+1`).
+    kv1: [KnotVector; 3],
+    /// Knot span index within the patch (`NURBSFiniteElement::ijk`).
+    ijk: [usize; 3],
     pub n_dofs: usize,
 }
 
@@ -474,13 +485,9 @@ impl NurbsHDiv3D {
         let py = knot_order(&kv_v).ok_or_else(|| "NurbsHDiv3D: invalid kv_v".to_string())?;
         let pz = knot_order(&kv_w).ok_or_else(|| "NurbsHDiv3D: invalid kv_w".to_string())?;
 
-        let (_, basis1_u) = elevated_basis(&kv_u)?;
-        let (_, basis1_v) = elevated_basis(&kv_v)?;
-        let (_, basis1_w) = elevated_basis(&kv_w)?;
-
-        let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
-        let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
-        let basis_w = BsplineBasis::new(pz, kv_w).map_err(|e| format!("basis_w: {e}"))?;
+        let kv1_u = elevated_knots(&kv_u)?;
+        let kv1_v = elevated_knots(&kv_v)?;
+        let kv1_w = elevated_knots(&kv_w)?;
 
         let n = (px + 2) * (py + 1) * (pz + 1)
               + (px + 1) * (py + 2) * (pz + 1)
@@ -490,8 +497,9 @@ impl NurbsHDiv3D {
             order_u: px,
             order_v: py,
             order_w: pz,
-            basis_u, basis_v, basis_w,
-            basis1_u, basis1_v, basis1_w,
+            kv: [kv_u, kv_v, kv_w],
+            kv1: [kv1_u, kv1_v, kv1_w],
+            ijk: [0, 0, 0],
             n_dofs: n,
         })
     }
@@ -500,6 +508,43 @@ impl NurbsHDiv3D {
         (px + 2) * (py + 1) * (pz + 1)
             + (px + 1) * (py + 2) * (pz + 1)
             + (px + 1) * (py + 1) * (pz + 2)
+    }
+
+    /// MFEM `NURBSFiniteElement::SetIJK` — select the knot span.
+    pub fn set_ijk(&mut self, ijk: [usize; 3]) {
+        self.ijk = ijk;
+    }
+
+    /// MFEM `NURBSFiniteElement::GetIJK`.
+    pub fn ijk(&self) -> [usize; 3] {
+        self.ijk
+    }
+
+    /// Per-direction order.
+    fn order_dir(&self, d: usize) -> usize {
+        match d {
+            0 => self.order_u,
+            1 => self.order_v,
+            _ => self.order_w,
+        }
+    }
+
+    /// Span-local `KnotVector::CalcShape` in direction `d`.
+    fn shape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_shape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
+    }
+
+    /// Span-local `KnotVector::CalcDShape` in direction `d`.
+    fn dshape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_dshape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
     }
 }
 
@@ -513,24 +558,17 @@ impl VectorReferenceElement for NurbsHDiv3D {
         let n = self.n_dofs;
         assert_eq!(values.len(), n * 3);
 
+        // MFEM `NURBS_HDiv3DFiniteElement::CalcVShape`.
         let px = self.order_u;
         let py = self.order_v;
         let pz = self.order_w;
 
-        // Evaluate 1D basis functions.
-        let sx1: Vec<f64> = self.basis1_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy: Vec<f64> = self.basis_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz: Vec<f64> = self.basis_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-
-        let sx: Vec<f64> = self.basis_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy1: Vec<f64> = self.basis1_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz1: Vec<f64> = self.basis1_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
+        let sx1 = self.shape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
+        let sz = self.shape1d(2, false, xi[2]);
+        let sx = self.shape1d(0, false, xi[0]);
+        let sy1 = self.shape1d(1, true, xi[1]);
+        let sz1 = self.shape1d(2, true, xi[2]);
 
         let mut o = 0;
         // x-component: shape1_x(i) * shape_y(j) * shape_z(k)
@@ -580,23 +618,17 @@ impl VectorReferenceElement for NurbsHDiv3D {
         let n = self.n_dofs;
         assert_eq!(div_vals.len(), n);
 
+        // MFEM `NURBS_HDiv3DFiniteElement::CalcDivShape`.
         let px = self.order_u;
         let py = self.order_v;
         let pz = self.order_w;
 
-        let sy: Vec<f64> = self.basis_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz: Vec<f64> = self.basis_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let dsx1: Vec<f64> = self.basis1_u.nonzero_derivatives(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-
-        let sx: Vec<f64> = self.basis_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let dsy1: Vec<f64> = self.basis1_v.nonzero_derivatives(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let dsz1: Vec<f64> = self.basis1_w.nonzero_derivatives(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
+        let sy = self.shape1d(1, false, xi[1]);
+        let sz = self.shape1d(2, false, xi[2]);
+        let dsx1 = self.dshape1d(0, true, xi[0]);
+        let sx = self.shape1d(0, false, xi[0]);
+        let dsy1 = self.dshape1d(1, true, xi[1]);
+        let dsz1 = self.dshape1d(2, true, xi[2]);
 
         let mut o = 0;
         for k in 0..=pz {
@@ -656,12 +688,12 @@ pub struct NurbsHCurl3D {
     pub order_u: usize,
     pub order_v: usize,
     pub order_w: usize,
-    basis_u: BsplineBasis,
-    basis_v: BsplineBasis,
-    basis_w: BsplineBasis,
-    basis1_u: BsplineBasis,
-    basis1_v: BsplineBasis,
-    basis1_w: BsplineBasis,
+    /// Base knot vectors (orders `px`, `py`, `pz`).
+    kv: [KnotVector; 3],
+    /// Degree-elevated knot vectors (orders `px+1`, `py+1`, `pz+1`).
+    kv1: [KnotVector; 3],
+    /// Knot span index within the patch (`NURBSFiniteElement::ijk`).
+    ijk: [usize; 3],
     pub n_dofs: usize,
 }
 
@@ -680,13 +712,9 @@ impl NurbsHCurl3D {
         let py = knot_order(&kv_v).ok_or_else(|| "NurbsHCurl3D: invalid kv_v".to_string())?;
         let pz = knot_order(&kv_w).ok_or_else(|| "NurbsHCurl3D: invalid kv_w".to_string())?;
 
-        let (_, basis1_u) = elevated_basis(&kv_u)?;
-        let (_, basis1_v) = elevated_basis(&kv_v)?;
-        let (_, basis1_w) = elevated_basis(&kv_w)?;
-
-        let basis_u = BsplineBasis::new(px, kv_u).map_err(|e| format!("basis_u: {e}"))?;
-        let basis_v = BsplineBasis::new(py, kv_v).map_err(|e| format!("basis_v: {e}"))?;
-        let basis_w = BsplineBasis::new(pz, kv_w).map_err(|e| format!("basis_w: {e}"))?;
+        let kv1_u = elevated_knots(&kv_u)?;
+        let kv1_v = elevated_knots(&kv_v)?;
+        let kv1_w = elevated_knots(&kv_w)?;
 
         let n = (px + 1) * (py + 2) * (pz + 2)
               + (px + 2) * (py + 1) * (pz + 2)
@@ -696,8 +724,9 @@ impl NurbsHCurl3D {
             order_u: px,
             order_v: py,
             order_w: pz,
-            basis_u, basis_v, basis_w,
-            basis1_u, basis1_v, basis1_w,
+            kv: [kv_u, kv_v, kv_w],
+            kv1: [kv1_u, kv1_v, kv1_w],
+            ijk: [0, 0, 0],
             n_dofs: n,
         })
     }
@@ -706,6 +735,43 @@ impl NurbsHCurl3D {
         (px + 1) * (py + 2) * (pz + 2)
             + (px + 2) * (py + 1) * (pz + 2)
             + (px + 2) * (py + 2) * (pz + 1)
+    }
+
+    /// MFEM `NURBSFiniteElement::SetIJK` — select the knot span.
+    pub fn set_ijk(&mut self, ijk: [usize; 3]) {
+        self.ijk = ijk;
+    }
+
+    /// MFEM `NURBSFiniteElement::GetIJK`.
+    pub fn ijk(&self) -> [usize; 3] {
+        self.ijk
+    }
+
+    /// Per-direction order.
+    fn order_dir(&self, d: usize) -> usize {
+        match d {
+            0 => self.order_u,
+            1 => self.order_v,
+            _ => self.order_w,
+        }
+    }
+
+    /// Span-local `KnotVector::CalcShape` in direction `d`.
+    fn shape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_shape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
+    }
+
+    /// Span-local `KnotVector::CalcDShape` in direction `d`.
+    fn dshape1d(&self, d: usize, elevated: bool, xi: f64) -> Vec<f64> {
+        let order = self.order_dir(d) + usize::from(elevated);
+        let kv = if elevated { &self.kv1[d] } else { &self.kv[d] };
+        let mut out = vec![0.0; order + 1];
+        knot_span_dshape(kv.as_slice(), order, self.ijk[d], xi, &mut out);
+        out
     }
 }
 
@@ -719,23 +785,17 @@ impl VectorReferenceElement for NurbsHCurl3D {
         let n = self.n_dofs;
         assert_eq!(values.len(), n * 3);
 
+        // MFEM `NURBS_HCurl3DFiniteElement::CalcVShape`.
         let px = self.order_u;
         let py = self.order_v;
         let pz = self.order_w;
 
-        let sx: Vec<f64> = self.basis_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy1: Vec<f64> = self.basis1_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz1: Vec<f64> = self.basis1_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-
-        let sx1: Vec<f64> = self.basis1_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy: Vec<f64> = self.basis_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz: Vec<f64> = self.basis_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
+        let sx = self.shape1d(0, false, xi[0]);
+        let sy1 = self.shape1d(1, true, xi[1]);
+        let sz1 = self.shape1d(2, true, xi[2]);
+        let sx1 = self.shape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
+        let sz = self.shape1d(2, false, xi[2]);
 
         let mut o = 0;
         // x-component: shape_x(i) * shape1_y(j) * shape1_z(k)
@@ -786,84 +846,57 @@ impl VectorReferenceElement for NurbsHCurl3D {
         let n = self.n_dofs;
         assert_eq!(curl_vals.len(), n * 3);
 
+        // MFEM `NURBS_HCurl3DFiniteElement::CalcCurlShape`.
         let px = self.order_u;
         let py = self.order_v;
         let pz = self.order_w;
 
-        // Evaluate all needed basis functions and derivatives.
-        let sx: Vec<f64> = self.basis_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy1: Vec<f64> = self.basis1_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz1: Vec<f64> = self.basis1_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
+        let sx = self.shape1d(0, false, xi[0]);
+        let sy1 = self.shape1d(1, true, xi[1]);
+        let sz1 = self.shape1d(2, true, xi[2]);
+        let sx1 = self.shape1d(0, true, xi[0]);
+        let sy = self.shape1d(1, false, xi[1]);
+        let sz = self.shape1d(2, false, xi[2]);
 
-        let sx1: Vec<f64> = self.basis1_u.nonzero_values(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sy: Vec<f64> = self.basis_v.nonzero_values(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let sz: Vec<f64> = self.basis_w.nonzero_values(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-
-        let dsx: Vec<f64> = self.basis_u.nonzero_derivatives(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let dsy1: Vec<f64> = self.basis1_v.nonzero_derivatives(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let dsz1: Vec<f64> = self.basis1_w.nonzero_derivatives(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-
-        let dsx1: Vec<f64> = self.basis1_u.nonzero_derivatives(xi[0]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; px + 2], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let _dsy: Vec<f64> = self.basis_v.nonzero_derivatives(xi[1]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; py + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
-        let _dsz: Vec<f64> = self.basis_w.nonzero_derivatives(xi[2]).unwrap_or_default()
-            .into_iter().fold(vec![0.0; pz + 1], |mut acc, (i, v)| { if i < acc.len() { acc[i] = v; } acc });
+        let dsx1 = self.dshape1d(0, true, xi[0]);
+        let dsy1 = self.dshape1d(1, true, xi[1]);
+        let dsz1 = self.dshape1d(2, true, xi[2]);
 
         let mut o = 0;
-        // x-component basis: shape_x(i) * shape1_y(j) * shape1_z(k)
-        // curl_x = ∂(shape_x*shape1_y*shape1_z)/∂y - ∂(0)/∂z = shape_x * dshape1_y * shape1_z
-        // curl_y = ∂(0)/∂z - ∂(shape_x*shape1_y*shape1_z)/∂x = -dshape_x * shape1_y * shape1_z
-        // curl_z = ∂(0)/∂x - ∂(0)/∂y = 0
+        // x-component basis v = (shape_x(i)*shape1_y(j)*shape1_z(k), 0, 0):
+        // curl v = (0, ∂v_x/∂z, -∂v_x/∂y).
         for k in 0..=pz + 1 {
             let sk = sz1[k];
+            let dsk = dsz1[k];
             for j in 0..=py + 1 {
-                let dsy1_sk = dsy1[j] * sk;
-                let sy1_sk = sy1[j] * sk;
+                let dsy1_sk1 = dsy1[j] * sk;
+                let sy1_dsk1 = sy1[j] * dsk;
                 for i in 0..=px {
-                    curl_vals[o * 3 + 0] = sx[i] * dsy1_sk;
-                    curl_vals[o * 3 + 1] = -dsx[i] * sy1_sk;
-                    curl_vals[o * 3 + 2] = 0.0;
+                    curl_vals[o * 3 + 0] = 0.0;
+                    curl_vals[o * 3 + 1] = sx[i] * sy1_dsk1;
+                    curl_vals[o * 3 + 2] = -sx[i] * dsy1_sk1;
                     o += 1;
                 }
             }
         }
-        // y-component basis: shape1_x(i) * shape_y(j) * shape1_z(k)
-        // curl_x = ∂(0)/∂y - ∂(shape1_x*shape_y*shape1_z)/∂z = -shape1_x * shape_y * dshape1_z
-        // curl_y = ∂(shape1_x*shape_y*shape1_z)/∂z - ∂(0)/∂x = shape1_x * shape_y * dshape1_z
-        // Wait, let me redo this properly.
-        // For y-component basis v = (0, sx1[i]*sy[j]*sz1[k], 0):
-        // curl_x = ∂v_y/∂z - ∂v_z/∂y = sx1[i]*sy[j]*dsz1[k] - 0
-        // curl_y = ∂v_z/∂x - ∂v_x/∂z = 0 - 0 = 0
-        // curl_z = ∂v_x/∂y - ∂v_y/∂x = 0 - dsx1[i]*sy[j]*sz1[k]
+        // y-component basis v = (0, shape1_x(i)*shape_y(j)*shape1_z(k), 0):
+        // curl v = (-∂v_y/∂z, 0, ∂v_y/∂x).
         for k in 0..=pz + 1 {
             let sk = sz1[k];
             let dsk = dsz1[k];
             for j in 0..=py {
-                let sy_sk = sy[j] * sk;
-                let sy_dsk = sy[j] * dsk;
+                let sy_sk1 = sy[j] * sk;
+                let sy_dsk1 = sy[j] * dsk;
                 for i in 0..=px + 1 {
-                    curl_vals[o * 3 + 0] = sx1[i] * sy_dsk;
+                    curl_vals[o * 3 + 0] = -sx1[i] * sy_dsk1;
                     curl_vals[o * 3 + 1] = 0.0;
-                    curl_vals[o * 3 + 2] = -dsx1[i] * sy_sk;
+                    curl_vals[o * 3 + 2] = dsx1[i] * sy_sk1;
                     o += 1;
                 }
             }
         }
-        // z-component basis: shape1_x(i) * shape1_y(j) * shape_z(k)
-        // For z-component basis v = (0, 0, sx1[i]*sy1[j]*sz[k]):
-        // curl_x = ∂v_z/∂y - ∂v_y/∂z = sx1[i]*dsy1[j]*sz[k] - 0
-        // curl_y = ∂v_x/∂z - ∂v_z/∂x = 0 - dsx1[i]*sy1[j]*sz[k]
-        // curl_z = ∂v_x/∂y - ∂v_y/∂x = 0 - 0 = 0
+        // z-component basis v = (0, 0, shape1_x(i)*shape1_y(j)*shape_z(k)):
+        // curl v = (∂v_z/∂y, -∂v_z/∂x, 0).
         for k in 0..=pz {
             let sk = sz[k];
             for j in 0..=py + 1 {
@@ -966,6 +999,65 @@ mod tests {
         assert!(sum.is_finite());
     }
 
+    /// `NURBS_HDiv2DFiniteElement::CalcVShape` / `CalcDivShape` on a
+    /// **multi-span** patch: `square-nurbs.mesh` refined once, space order 1,
+    /// knot vectors `{0,0,0.5,1,1}`, element 0 (`ijk = 0,0`), span-local
+    /// `xi = (0.5, 0.5)`.  Values dumped from MFEM 4.9.
+    #[test]
+    fn nurbs_hdiv2d_multispan_values_match_mfem() {
+        let kv = KnotVector::new_clamped(vec![0.0, 0.0, 0.5, 1.0, 1.0]).unwrap();
+        let mut e = NurbsHDiv2D::from_knot_vectors(kv.clone(), kv).unwrap();
+        e.set_ijk([0, 0]);
+        assert_eq!(e.n_dofs(), 12);
+
+        let want_vsh = [
+            0.125, 0.0, 0.3125, 0.0, 0.0625, 0.0, 0.125, 0.0, 0.3125, 0.0, 0.0625, 0.0, 0.0,
+            0.125, 0.0, 0.125, 0.0, 0.3125, 0.0, 0.3125, 0.0, 0.0625, 0.0, 0.0625,
+        ];
+        let mut vsh = [0.0; 24];
+        e.eval_basis_vec(&[0.5, 0.5], &mut vsh);
+        for i in 0..24 {
+            assert!((vsh[i] - want_vsh[i]).abs() < 1e-16, "vsh {i}: {}", vsh[i]);
+        }
+
+        let want_div = [-0.5, 0.25, 0.25, -0.5, 0.25, 0.25, -0.5, -0.5, 0.25, 0.25, 0.25, 0.25];
+        let mut div = [0.0; 12];
+        e.eval_div(&[0.5, 0.5], &mut div);
+        for i in 0..12 {
+            assert!((div[i] - want_div[i]).abs() < 1e-16, "div {i}: {}", div[i]);
+        }
+    }
+
+    /// `NURBS_HCurl2DFiniteElement::CalcVShape` / `CalcCurlShape` on the same
+    /// multi-span patch and point as the H(div) test.  Values dumped from
+    /// MFEM 4.9 (`nurbs_ex3`'s space configuration: order 1 on a refined
+    /// `square-nurbs.mesh`).
+    #[test]
+    fn nurbs_hcurl2d_multispan_values_match_mfem() {
+        let kv = KnotVector::new_clamped(vec![0.0, 0.0, 0.5, 1.0, 1.0]).unwrap();
+        let mut e = NurbsHCurl2D::from_knot_vectors(kv.clone(), kv).unwrap();
+        e.set_ijk([0, 0]);
+        assert_eq!(e.n_dofs(), 12);
+
+        let want_vsh = [
+            0.125, 0.0, 0.125, 0.0, 0.3125, 0.0, 0.3125, 0.0, 0.0625, 0.0, 0.0625, 0.0, 0.0,
+            0.125, 0.0, 0.3125, 0.0, 0.0625, 0.0, 0.125, 0.0, 0.3125, 0.0, 0.0625,
+        ];
+        let mut vsh = [0.0; 24];
+        e.eval_basis_vec(&[0.5, 0.5], &mut vsh);
+        for i in 0..24 {
+            assert!((vsh[i] - want_vsh[i]).abs() < 1e-16, "vsh {i}: {}", vsh[i]);
+        }
+
+        let want_curl = [0.5, 0.5, -0.25, -0.25, -0.25, -0.25, -0.5, 0.25, 0.25, -0.5, 0.25, 0.25];
+        let mut curl = [0.0; 12];
+        e.eval_curl(&[0.5, 0.5], &mut curl);
+        for i in 0..12 {
+            assert!((curl[i] - want_curl[i]).abs() < 1e-16, "curl {i}: {}", curl[i]);
+        }
+    }
+
+
     #[test]
     fn degree_elevate_preserves_spans() {
         // MFEM `KnotVector::DegreeElevate(1)`: order and control points each
@@ -977,14 +1069,13 @@ mod tests {
         assert!(kv1.as_slice().len() > kv.as_slice().len());
 
         // The elevated basis is the one the H(div)/H(curl) elements evaluate on.
-        let (_, b1) = elevated_basis(&kv).expect("elevated basis");
-        assert_eq!(b1.n_basis(), knot_ncp(&kv1).unwrap());
+        let b1 = elevated_knots(&kv).expect("elevated knot vector");
+        assert_eq!(knot_order(&b1), Some(3));
 
         // Single span: order 1 -> order 2 with three basis functions.
         let kv = clamped_uniform_knots(1, 1);
         let kv1 = degree_elevate(&kv, 1).expect("elevate");
         assert_eq!(kv1.as_slice(), &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        let (_, b1) = elevated_basis(&kv).expect("elevated basis");
-        assert_eq!(b1.n_basis(), 3);
+        assert_eq!(knot_ncp(&kv1), Some(3));
     }
 }
