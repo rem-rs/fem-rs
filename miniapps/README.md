@@ -55,7 +55,7 @@ miniapps/
 │                                2D 与 Kershaw 全对比逐位一致;
 │                                maxwell 3D hex 差 HexNDk 归一化 4×,
 │                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
-├── nurbs/                   ← 对应 miniapps/nurbs/ (4 个 1:1 + 2 个部分移植/exit 3)
+├── nurbs/                   ← 对应 miniapps/nurbs/ (5 个 1:1 + 1 个部分移植/exit 3)
 │   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
 │   │                            与 C++ 迭代块逐字节一致; **1D 已支持**:
@@ -74,24 +74,24 @@ miniapps/
 │   │                            10 迭代块逐字节 / ARF 0.128859 / L2
 │   │                            0.0508853 亦 = C++（三档均与 C++ 二进制
 │   │                            逐字节；未处理 remaining: sol.gf/refined.mesh））
-│   └── nurbs_ex5.rs / nurbs_ex24.rs ← **部分移植（退出码 3）**: 依赖的
-│                                `NurbsHDivSpace`（H(div) NURBS 空间）已在
-│                                round 26 落地，两个示例重写为「已核对部分
-│                                逐字节 + 未移植部分 exit(3) + 文件头双标注」:
-│                                ex5 默认档 dim(R)=8580/dim(W)=4225/
-│                                dim(R+W)=12805/边界 dof H(div) 260 / H1 256
-│                                与 C++ 逐字节；ex24 `-r 1 -p 0/1/2` 的
+│   ├── nurbs_ex5.rs         ← 1:1 **完整移植**（NURBS 版 mixed Darcy:
+│   │                            H(div)×H¹ + 自然 BC 的边界通量 RHS +
+│   │                            BlockDiagonalPreconditioner(M: DSmoother,
+│   │                            S: GSSmoother on S = B·diag(M)⁻¹Bᵀ) +
+│   │                            MINRES）: 默认档 8580/4225/12805 dof、
+│   │                            边界 dof 260/256、**462 迭代**、
+│   │                            ||r||_B 4.61014e-09、两个误差范数
+│   │                            (8.31927e-08 / 1.1665e-07) 与自编 C++ 4.10
+│   │                            参考**全部一致**（残差序列在 C++ 的 6 位
+│   │                            量化内一致至第 259 迭代，其后 ~4e-6 = 装配
+│   │                            S/GSSmoother 的浮点路径差异）; 唯一偏差:
+│   │                            BdpMinresSolver 不暴露 GetFinalNorm ⇒ 摘要
+│   │                            行只印迭代数
+│   └── nurbs_ex24.rs        ← **部分移植（退出码 3）**: `-r 1 -p 0/1/2` 的
 │                                HCurl144/H127、HCurl144/HDiv108、
-│                                HDiv108/L227 六行逐字节。已补: 带符号
-│                                `bel_dof` 边界 dof 表（round 27，10 项测试
-│                                逐行含符号对照，H1/HCurl/HDiv × 2D/3D ×
-│                                多 patch）。仍缺: **边界单元装配通路**
-│                                （ex5 自然 BC 的 RHS；bel_dof 已就绪）、
-│                                NURBS 跨空间 `MixedVectorGradient/
-│                                CurlIntegrator`（ex24 三档）；块 MINRES 的
-│                                Schur 通路（`SchurMode::Gs` + `GsSmoother`
-│                                + `S=B·diag(M)⁻¹Bᵀ`）已于 round 27 在
-│                                `fem-solver` 落地，**尚未接线到本示例**
+│                                HDiv108/L227 六行与 C++ 逐字节; 缺 NURBS
+│                                跨空间 MixedVectorGradient/CurlIntegrator
+│                                (D98)
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
