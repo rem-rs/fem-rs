@@ -42,7 +42,7 @@ miniapps/
 │                                2D 与 Kershaw 全对比逐位一致;
 │                                maxwell 3D hex 差 HexNDk 归一化 4×,
 │                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
-├── nurbs/                   ← 对应 miniapps/nurbs/ (4 个 1:1 + 2 个非移植)
+├── nurbs/                   ← 对应 miniapps/nurbs/ (4 个 1:1 + 2 个部分移植/exit 3)
 │   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
 │   │                            与 C++ 迭代块逐字节一致; **1D 已支持**:
@@ -61,14 +61,18 @@ miniapps/
 │   │                            10 迭代块逐字节 / ARF 0.128859 / L2
 │   │                            0.0508853 亦 = C++（三档均与 C++ 二进制
 │   │                            逐字节；未处理 remaining: sol.gf/refined.mesh））
-│   └── nurbs_ex5.rs / nurbs_ex24.rs ← **非 C++ 移植**（round 25 判定）:
-│                                C++ 的 ex5 是 NURBS 版 mixed Darcy
-│                                (H(div)×L2)、ex24 是三个 de Rham 变体
-│                                (-p 0/1/2, 3D)；Rust 这两个文件是 H¹ NS /
-│                                mixed-Darcy 草稿，网格与默认值都不同。共同
-│                                阻塞 = **缺 NurbsHDivSpace**（H(div) NURBS
-│                                空间，现只有 NurbsHCurlSpace）⇒ 建议单列
-│                                为该能力项，解锁后两者可一起做
+│   └── nurbs_ex5.rs / nurbs_ex24.rs ← **部分移植（退出码 3）**: 依赖的
+│                                `NurbsHDivSpace`（H(div) NURBS 空间）已在
+│                                round 26 落地，两个示例重写为「已核对部分
+│                                逐字节 + 未移植部分 exit(3) + 文件头双标注」:
+│                                ex5 默认档 dim(R)=8580/dim(W)=4225/
+│                                dim(R+W)=12805/边界 dof H(div) 260 / H1 256
+│                                与 C++ 逐字节；ex24 `-r 1 -p 0/1/2` 的
+│                                HCurl144/H127、HCurl144/HDiv108、
+│                                HDiv108/L227 六行逐字节。缺: 带符号
+│                                `bel_dof`（ex5 自然 BC 的 RHS）、块 MINRES
+│                                的 Schur 通路（ex5 迭代块）、NURBS 跨空间
+│                                `MixedVectorGradient/CurlIntegrator`（ex24）
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
