@@ -322,6 +322,72 @@ mod tests {
         }
     }
 
+    /// D87 companion: the fixed-order Quad Q2 kernel (`[-1,1]²` reference, its
+    /// own 9-node geometry map) must agree with the assembled matrix too — it
+    /// had no identity test before, only finiteness/positivity, so a slot or
+    /// domain mistake in it was invisible.  The integrand matches the
+    /// generic `pa_apply_quad_qk(2)` case, so both are checked against assembly.
+    #[test]
+    fn quad_q2_pa_matches_assembled() {
+        use crate::assembler::Assembler;
+        use crate::standard::DiffusionIntegrator;
+
+        let mut mesh = Mesh::<2>::unit_square_quad(2);
+        mesh.transform(|[x, y]| {
+            [
+                x + 0.2 * x * (1.0 - x) * (0.5 - y),
+                y + 0.2 * y * (1.0 - y) * (0.5 - x),
+            ]
+        });
+        let space = fem_space::H1Space::new(mesh, 2);
+        let mat = Assembler::assemble_bilinear(&space, &[&DiffusionIntegrator { kappa: 1.0 }], 4);
+        let n = space.n_dofs();
+        let ed: Vec<Vec<u32>> = (0..space.mesh().n_elements() as u32)
+            .map(|e| space.element_dofs(e).to_vec())
+            .collect();
+
+        let mut rng: u64 = 42;
+        let x: Vec<f64> = (0..n)
+            .map(|_| {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((rng >> 11) as f64) / ((1u64 << 53) as f64)
+            })
+            .collect();
+        let mut y_ref = vec![0.0; n];
+        mat.spmv(&x, &mut y_ref);
+
+        // NaN-aware: `f64::max` ignores NaN, so a non-finite kernel output
+        // would otherwise slip past a `< 1e-12` comparison.
+        let dev = |y: &[f64]| -> f64 {
+            (0..n)
+                .map(|i| {
+                    let d = (y[i] - y_ref[i]).abs();
+                    if d.is_nan() || !y[i].is_finite() {
+                        f64::INFINITY
+                    } else {
+                        d
+                    }
+                })
+                .fold(0.0, f64::max)
+        };
+
+        let pd = build_quad_q2_pa_data(space.mesh(), &|_| 1.0);
+        let mut y = vec![0.0; n];
+        pa_apply_quad_q2(&pd, &ed, &x, &mut y);
+        let e = dev(&y);
+        assert!(e < 1e-12, "QuadQ2 fixed-order PA vs assembled {e:.2e}");
+
+        let pd_qk = crate::pa::quad_qk::build_quad_qk_pa_data(space.mesh(), &|_| 1.0, 2);
+        let mut y_qk = vec![0.0; n];
+        crate::pa::quad_qk::pa_apply_quad_qk(&pd_qk, &ed, 2, &x, &mut y_qk);
+        let e_qk = dev(&y_qk);
+        assert!(e_qk < 1e-12, "QuadQk(2) PA vs assembled {e_qk:.2e}");
+        let d: f64 = (0..n)
+            .map(|i| (y[i] - y_qk[i]).abs())
+            .fold(0.0, f64::max);
+        assert!(d < 1e-12, "QuadQ2 vs QuadQk(2) PA {d:.2e}");
+    }
+
     #[test]
     fn quad_q2_pa_symmetric() {
         let mesh = Mesh::<2>::unit_square_quad(1); // 1 element

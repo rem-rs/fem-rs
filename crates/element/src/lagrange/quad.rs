@@ -54,6 +54,54 @@ impl ReferenceElement for QuadQ1 {
     }
 }
 
+// ─── Tensor-product layout (element-layer export) ─────────────────────────────
+
+/// `(ascending 1-D nodes, slot → tensor index)` of a tensor-product quad
+/// element — the 2-D mirror of
+/// [`hex_tensor_layout`](crate::lagrange::hex::hex_tensor_layout).
+///
+/// This is the single derivation of "which tensor node `(ix, iy)` does
+/// element-local slot `s` carry" for the quad partial-assembly kernel
+/// (`fem-assembly`'s `pa::quad_layout` / `pa::quad_qk`), so a `QuadQk` /
+/// `QuadQ2` layout change cannot silently desynchronize them from the space
+/// (`DofManager::build_q2_quad` for `p == 2`, `build_pk_quad` for `p >= 3`) or
+/// from the assembled matrix.
+///
+/// [`ReferenceElement::dof_coords`] hands out the element's own 1-D nodes
+/// bit-for-bit, so the distinct values of any axis coordinate *are* those nodes
+/// — the matching below is exact (`dedup`/`position` compare without tolerance).
+///
+/// **Reference domain:** the caller's element defines it.  For the H1 family
+/// used by `pa::quad_qk` (`QuadQk::new(p)`) the nodes are the Gauss-Lobatto
+/// points mapped to `[0,1]` — *not* the `[-1,1]` convention of `QuadQ1`/`QuadQ2`
+/// and of the hex elements.  Nothing here assumes either domain.
+///
+/// Only call this for elements whose DOFs form a **full** tensor grid (QuadQ1,
+/// QuadQ2, QuadQk); the serendipity `QuadP2`/`QuadP3`/`QuadP4` are 4p nodes and
+/// would not fill an `(p+1)²` grid.
+pub fn quad_tensor_layout(elem: &dyn ReferenceElement) -> (Vec<f64>, Vec<[usize; 2]>) {
+    let coords: Vec<[f64; 2]> = elem
+        .dof_coords()
+        .into_iter()
+        .map(|c| [c[0], c[1]])
+        .collect();
+    let mut nodes: Vec<f64> = coords.iter().map(|c| c[0]).collect();
+    nodes.sort_by(|a, b| a.partial_cmp(b).expect("quad node coordinate is finite"));
+    nodes.dedup();
+    let slots = coords
+        .iter()
+        .map(|c| {
+            let axis = |v: f64| {
+                nodes.iter().position(|&n| n == v).unwrap_or_else(|| {
+                    panic!("quad slot coordinate {v} is not one of the 1-D nodes {nodes:?}")
+                })
+            };
+            [axis(c[0]), axis(c[1])]
+        })
+        .collect();
+    (nodes, slots)
+}
+
 // ─── Q2 ───────────────────────────────────────────────────────────────────────
 
 /// Biquadratic serendipity — 9-node Lagrange element on the reference quad `[-1,1]²`.
@@ -877,5 +925,70 @@ mod tests {
                 assert!((phi[j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12);
             }
         }
+    }
+
+    // ── Tensor-product layout export ──────────────────────────────────────
+
+    /// Round-trip pin: rebuilding the slot coordinates from
+    /// `(axis_nodes, slot_tensor)` must reproduce `dof_coords()` **bit for
+    /// bit**, and the element must fill a full `(p+1)²` tensor grid.
+    fn check_layout(elem: &dyn ReferenceElement) {
+        let coords = elem.dof_coords();
+        let (nodes, slots) = quad_tensor_layout(elem);
+        assert_eq!(slots.len(), coords.len(), "{}: slot count", elem.order());
+        for (slot, t) in slots.iter().enumerate() {
+            for d in 0..2 {
+                assert_eq!(
+                    nodes[t[d]],
+                    coords[slot][d],
+                    "{}: slot {slot} axis {d} must round-trip bit-exactly",
+                    elem.order()
+                );
+            }
+        }
+        let n1d = nodes.len();
+        assert_eq!(
+            n1d * n1d,
+            coords.len(),
+            "{}: quad element must be a full tensor grid",
+            elem.order()
+        );
+    }
+
+    #[test]
+    fn quad_layout_round_trips_element_layer() {
+        check_layout(&QuadQ1);
+        check_layout(&QuadQ2);
+        for p in 1..=5 {
+            check_layout(&crate::lagrange::factory::QuadQk::new(p));
+        }
+    }
+
+    /// The 1-D nodes `quad_tensor_layout` reports for `QuadQk::new(p)` are the
+    /// Gauss-Lobatto points **mapped to `[0,1]`** (MFEM `H1_FECollection`,
+    /// `BasisType::GaussLobatto`) — the round-21 convention this crate keeps for
+    /// quad, and NOT `QuadQ1`/`QuadQ2`'s `[-1,1]`.
+    #[test]
+    fn quad_qk_layout_nodes_are_gauss_lobatto_01() {
+        use crate::lagrange::factory::QuadQk;
+        for p in 1..=5 {
+            let (nodes, _) = quad_tensor_layout(&QuadQk::new(p));
+            let (gll, _) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+            assert_eq!(nodes.len(), gll.len(), "p={p}: node count");
+            for (i, (got, want)) in nodes.iter().zip(gll.iter()).enumerate() {
+                assert_eq!(
+                    *got,
+                    0.5 * (want + 1.0),
+                    "p={p}: 1-D node {i} must be GLL mapped to [0,1]"
+                );
+            }
+            assert_eq!(nodes[0], 0.0, "p={p}: left node");
+            assert_eq!(nodes[p], 1.0, "p={p}: right node");
+        }
+        // … and the older `[-1,1]`-domain elements really are a different
+        // convention, not a synonym.
+        let (q1_nodes, q1_slots) = quad_tensor_layout(&QuadQ1);
+        assert_eq!(q1_nodes, vec![-1.0, 1.0]);
+        assert_eq!(q1_slots, vec![[0, 0], [1, 0], [1, 1], [0, 1]]);
     }
 }

@@ -12,6 +12,7 @@
 mod hex_q1;
 mod quad_q1;
 mod hex_layout;
+mod quad_layout;
 mod tensor_1d;
 mod q2;
 mod q3;

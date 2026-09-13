@@ -1231,6 +1231,43 @@ where
     coo.into_csr()
 }
 
+/// Transpose of [`assemble_hcurl_hdiv_weak_curl`]: the same integral, but with
+/// the **H(curl) test rows** and the H(div) trial columns.
+///
+/// `B[i,j] = ∫ ν · w_j · curl(ψ_i) dx` with `i` over `nd_space` DOFs and `j`
+/// over `rt_space` DOFs, i.e. exactly MFEM's
+/// `ParMixedBilinearForm(HDivFESpace_, HCurlFESpace_)` +
+/// `MixedVectorWeakCurlIntegrator` (maxwell's `WeakCurlMuInv_`, whose rows are
+/// H(curl) true DOFs).
+///
+/// The reason this is a separate entry point rather than a call to
+/// [`CsrMatrix::transpose`] at the call site is the **parallel** assembly: the
+/// parallel operator must own its H(curl) rows
+/// (`fem_parallel::ParMixedAssembler::assemble_hdiv_hcurl_curl_with_coeff`).
+/// Transposing the *already row-truncated* H(div)-row matrix produces rows for
+/// every local (owned **and ghost**) H(curl) DOF whose ghost rows only carry
+/// this rank's element contributions — correct for one rank, silently wrong for
+/// several.  Assembling the local matrix in this orientation first lets the
+/// parallel wrapper permute by the H(curl) partition and drop ghost rows, which
+/// is the standard ghost-row elimination.
+///
+/// `(nd_space, rt_space)` are in the same order as
+/// [`assemble_hcurl_hdiv_weak_curl`] so the two are drop-in alternatives.
+pub fn assemble_hdiv_hcurl_weak_curl<
+    M: fem_mesh::topology::MeshTopology + Clone + 'static,
+    C: ScalarCoeff,
+>(
+    nd_space: &HCurlSpace<M>,
+    rt_space: &HDivSpace<M>,
+    quad_order: u8,
+    nu: C,
+) -> CsrMatrix<f64>
+where
+    M: fem_mesh::topology::MeshTopology,
+{
+    assemble_hcurl_hdiv_weak_curl(nd_space, rt_space, quad_order, nu).transpose()
+}
+
 /// Constant P0 reference element: 1 DOF, constant basis = 1.0, zero gradient.
 struct P0;
 

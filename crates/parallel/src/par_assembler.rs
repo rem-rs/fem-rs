@@ -227,101 +227,124 @@ impl ParAssembler {
             local_mat
         };
 
-        let n_owned = dof_part.n_owned_dofs;
-        let comm = par_space.comm();
-        let rank = comm.rank();
-        let n_ranks = comm.size() as i32;
-        let n_local = dof_part.n_total_dofs();
-
-        // 1. Owned rows → diag/offd; ghost rows → collect for exchange.
-        let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
-        let mut offd_coo = CooMatrix::<f64>::new(n_owned, n_local.saturating_sub(n_owned));
-        // (owner rank, global row id, (global col id, value) entries)
-        let mut ghost_rows: Vec<(i32, u32, Vec<(u32, f64)>)> = Vec::new();
-        for row in 0..n_local {
-            if row < n_owned {
-                for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
-                    let col = permuted_mat.col_idx[k] as usize;
-                    let val = permuted_mat.values[k];
-                    if val == 0.0 { continue; }
-                    if col < n_owned {
-                        diag_coo.add(row, col, val);
-                    } else {
-                        offd_coo.add(row, col - n_owned, val);
-                    }
-                }
-            } else {
-                let owner = dof_part.dof_owner(row as u32);
-                let global_row = dof_part.global_dof(row as u32);
-                let mut entries: Vec<(u32, f64)> = Vec::new();
-                for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
-                    let val = permuted_mat.values[k];
-                    if val != 0.0 {
-                        entries.push((dof_part.global_dof(permuted_mat.col_idx[k]), val));
-                    }
-                }
-                if !entries.is_empty() {
-                    ghost_rows.push((owner, global_row, entries));
-                }
-            }
-        }
-
-        // 2. Alltoall the ghost rows to their owners.
-        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
-        for r in 0..n_ranks {
-            if r == rank { continue; }
-            let mut bytes = Vec::new();
-            for (owner, grow, entries) in &ghost_rows {
-                if *owner != r { continue; }
-                bytes.extend_from_slice(&grow.to_le_bytes());
-                bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-                for (c, v) in entries {
-                    bytes.extend_from_slice(&c.to_le_bytes());
-                    bytes.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-            sends.push((r, bytes));
-        }
-        let incoming = comm.alltoallv_bytes(&sends);
-        for (_, bytes) in incoming {
-            let mut i = 0usize;
-            while i + 8 <= bytes.len() {
-                let grow = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
-                let ne = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
-                i += 8;
-                let mut entries = Vec::with_capacity(ne);
-                for _ in 0..ne {
-                    let c = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
-                    let v = f64::from_le_bytes(bytes[i + 4..i + 12].try_into().unwrap());
-                    i += 12;
-                    entries.push((c, v));
-                }
-                let Some(local_row) = dof_part.local_dof(grow) else { continue; };
-                let local_row = local_row as usize;
-                debug_assert!(local_row < n_owned, "ghost-row exchange must target an owned row");
-                for (gc, v) in entries {
-                    let Some(local_col) = dof_part.local_dof(gc) else { continue; };
-                    let local_col = local_col as usize;
-                    if local_col < n_owned {
-                        diag_coo.add(local_row, local_col, v);
-                    } else {
-                        offd_coo.add(local_row, local_col - n_owned, v);
-                    }
-                }
-            }
-        }
-
-        let diag = diag_coo.into_csr();
-        let offd = offd_coo.into_csr();
-        ParCsrMatrix::from_blocks(
-            diag,
-            offd,
-            n_owned,
-            n_local.saturating_sub(n_owned),
-            par_space.dof_ghost_exchange_arc(),
-            comm.clone(),
-        )
+        finalize_boundary_matrix(par_space, &permuted_mat)
     }
+}
+
+/// Turn a permuted local boundary matrix (DofManager order → `[owned|ghost]`
+/// order, sign corrections already applied) into a `ParCsrMatrix`.
+///
+/// Owned rows go straight into the `diag`/`offd` blocks; each **ghost row** is
+/// sent to the rank that owns it and *added* to that rank's row, so every owned
+/// DOF ends up with its complete boundary contribution.  This is what makes
+/// boundary assembly different from volume assembly: a boundary face's DOFs can
+/// be owned by other ranks (`ParCsrMatrix::from_local_matrix` alone would drop
+/// those rows), whereas volume assembly covers owned rows through the
+/// ghost-element overlap.
+///
+/// Space-agnostic (only the DOF partition and the ghost exchange are used), so
+/// the scalar H¹ path ([`ParAssembler::assemble_boundary_bilinear`]) and the
+/// vector H(curl)/H(div) path
+/// (`crate::ParVectorAssembler::assemble_boundary_bilinear`) share it.
+pub(crate) fn finalize_boundary_matrix<S: FESpace>(
+    par_space: &ParallelFESpace<S>,
+    permuted_mat: &CsrMatrix<f64>,
+) -> ParCsrMatrix {
+    let dof_part = par_space.dof_partition();
+    let n_owned = dof_part.n_owned_dofs;
+    let comm = par_space.comm();
+    let rank = comm.rank();
+    let n_ranks = comm.size() as i32;
+    let n_local = dof_part.n_total_dofs();
+
+    // 1. Owned rows → diag/offd; ghost rows → collect for exchange.
+    let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
+    let mut offd_coo = CooMatrix::<f64>::new(n_owned, n_local.saturating_sub(n_owned));
+    // (owner rank, global row id, (global col id, value) entries)
+    let mut ghost_rows: Vec<(i32, u32, Vec<(u32, f64)>)> = Vec::new();
+    for row in 0..n_local {
+        if row < n_owned {
+            for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
+                let col = permuted_mat.col_idx[k] as usize;
+                let val = permuted_mat.values[k];
+                if val == 0.0 { continue; }
+                if col < n_owned {
+                    diag_coo.add(row, col, val);
+                } else {
+                    offd_coo.add(row, col - n_owned, val);
+                }
+            }
+        } else {
+            let owner = dof_part.dof_owner(row as u32);
+            let global_row = dof_part.global_dof(row as u32);
+            let mut entries: Vec<(u32, f64)> = Vec::new();
+            for k in permuted_mat.row_ptr[row]..permuted_mat.row_ptr[row + 1] {
+                let val = permuted_mat.values[k];
+                if val != 0.0 {
+                    entries.push((dof_part.global_dof(permuted_mat.col_idx[k]), val));
+                }
+            }
+            if !entries.is_empty() {
+                ghost_rows.push((owner, global_row, entries));
+            }
+        }
+    }
+
+    // 2. Alltoall the ghost rows to their owners.
+    let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
+    for r in 0..n_ranks {
+        if r == rank { continue; }
+        let mut bytes = Vec::new();
+        for (owner, grow, entries) in &ghost_rows {
+            if *owner != r { continue; }
+            bytes.extend_from_slice(&grow.to_le_bytes());
+            bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (c, v) in entries {
+                bytes.extend_from_slice(&c.to_le_bytes());
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        sends.push((r, bytes));
+    }
+    let incoming = comm.alltoallv_bytes(&sends);
+    for (_, bytes) in incoming {
+        let mut i = 0usize;
+        while i + 8 <= bytes.len() {
+            let grow = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+            let ne = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+            i += 8;
+            let mut entries = Vec::with_capacity(ne);
+            for _ in 0..ne {
+                let c = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+                let v = f64::from_le_bytes(bytes[i + 4..i + 12].try_into().unwrap());
+                i += 12;
+                entries.push((c, v));
+            }
+            let Some(local_row) = dof_part.local_dof(grow) else { continue; };
+            let local_row = local_row as usize;
+            debug_assert!(local_row < n_owned, "ghost-row exchange must target an owned row");
+            for (gc, v) in entries {
+                let Some(local_col) = dof_part.local_dof(gc) else { continue; };
+                let local_col = local_col as usize;
+                if local_col < n_owned {
+                    diag_coo.add(local_row, local_col, v);
+                } else {
+                    offd_coo.add(local_row, local_col - n_owned, v);
+                }
+            }
+        }
+    }
+
+    let diag = diag_coo.into_csr();
+    let offd = offd_coo.into_csr();
+    ParCsrMatrix::from_blocks(
+        diag,
+        offd,
+        n_owned,
+        n_local.saturating_sub(n_owned),
+        par_space.dof_ghost_exchange_arc(),
+        comm.clone(),
+    )
 }
 
 /// Permute a CSR matrix from DofManager ordering to partition [owned|ghost] ordering.

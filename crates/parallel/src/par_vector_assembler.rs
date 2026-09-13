@@ -5,9 +5,13 @@
 //! DOF rows receive the full assembled contributions without any inter-rank exchange.
 
 use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;
 use fem_assembly::vector_assembler::VectorAssembler;
 use fem_assembly::vector_integrator::{VectorBilinearIntegrator, VectorLinearIntegrator};
+use fem_assembly::boundary::vector_boundary::{
+    VectorBoundaryAssembler, VectorBoundaryBilinearIntegrator,
+};
 
 use crate::par_csr::ParCsrMatrix;
 use crate::par_space::ParallelFESpace;
@@ -79,6 +83,126 @@ impl ParVectorAssembler {
             par_space.comm().clone(),
         )
     }
+
+    /// Parallel **boundary** bilinear assembly for vector spaces
+    /// (H(curl) / H(div)): `∫_Γ γ (n×u)·(n×v) dS` and friends.
+    ///
+    /// Mirrors MFEM's `ParBilinearForm(HCurlFESpace_)->AddBoundaryIntegrator(
+    /// integ, marker)` + `ParallelAssemble()` — maxwell's
+    /// `hCurlLosses_`/`M1Losses_` (the `-abcs` / conductive-loss path).
+    ///
+    /// Unlike the volume path ([`Self::assemble_bilinear`]), a boundary face's
+    /// DOFs can be owned by another rank, so the ghost rows of the locally
+    /// assembled boundary matrix are exchanged to their owners and added there
+    /// ([`crate::par_assembler::finalize_boundary_matrix`], shared with the
+    /// scalar `ParAssembler::assemble_boundary_bilinear`) — every owned row of
+    /// the result carries its complete boundary contribution.
+    ///
+    /// Returns a `ParCsrMatrix` over the **same** DOF partition as
+    /// [`Self::assemble_bilinear`], so the two can be summed with
+    /// [`Self::add_boundary_bilinear`] / [`Self::add_bilinear`].
+    pub fn assemble_boundary_bilinear<S>(
+        par_space: &ParallelFESpace<S>,
+        integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+        tags: &[i32],
+        quad_order: u8,
+    ) -> ParCsrMatrix
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        Self::boundary_bilinear_impl(par_space, integrators, tags, quad_order, 1.0)
+    }
+
+    /// `a += factor · (vector boundary bilinear form)` on an already-assembled
+    /// `ParCsrMatrix`.
+    ///
+    /// MFEM `ParBilinearForm::AddBoundaryIntegrator` + a later
+    /// `FormSystemMatrix(…, A1[dt])` accumulates the boundary operator into an
+    /// existing matrix; this is the same operation for a time-stepped family
+    /// such as maxwell's `A1[dt] = M1(ε) + 0.5·dt·L` with
+    /// `L = M1(σ) + M1(η⁻¹)|_ABC`:
+    ///
+    /// ```ignore
+    /// let mut a1 = ParVectorAssembler::assemble_bilinear(&nd, &[&mass_eps], qo);
+    /// ParVectorAssembler::add_bilinear(&mut a1, &nd, &[&mass_sigma], qo, 0.5 * dt);
+    /// ParVectorAssembler::add_boundary_bilinear(
+    ///     &mut a1, &nd, &[&TangentialMassIntegrator { gamma: eta_inv }], &abc_tags, qo, 0.5 * dt);
+    /// ```
+    pub fn add_boundary_bilinear<S>(
+        a: &mut ParCsrMatrix,
+        par_space: &ParallelFESpace<S>,
+        integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+        tags: &[i32],
+        quad_order: u8,
+        factor: f64,
+    ) where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let delta = Self::boundary_bilinear_impl(par_space, integrators, tags, quad_order, factor);
+        add_blocks_into(a, &delta);
+    }
+
+    /// `a += factor · (vector volume bilinear form)` on an already-assembled
+    /// `ParCsrMatrix` (the domain half of the same `A1[dt]` family; see
+    /// [`Self::add_boundary_bilinear`]).
+    pub fn add_bilinear<S: FESpace>(
+        a: &mut ParCsrMatrix,
+        par_space: &ParallelFESpace<S>,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+        factor: f64,
+    ) {
+        let local_mat = VectorAssembler::assemble_bilinear(
+            par_space.local_space(), integrators, quad_order,
+        );
+        let dof_part = par_space.dof_partition();
+        let permuted = permute_csr_scaled(&local_mat, dof_part, factor);
+        let delta = ParCsrMatrix::from_local_matrix(
+            &permuted,
+            dof_part.n_owned_dofs,
+            par_space.dof_ghost_exchange_arc(),
+            par_space.comm().clone(),
+        );
+        add_blocks_into(a, &delta);
+    }
+
+    /// Shared body of [`Self::assemble_boundary_bilinear`] /
+    /// [`Self::add_boundary_bilinear`].
+    fn boundary_bilinear_impl<S>(
+        par_space: &ParallelFESpace<S>,
+        integrators: &[&dyn VectorBoundaryBilinearIntegrator],
+        tags: &[i32],
+        quad_order: u8,
+        factor: f64,
+    ) -> ParCsrMatrix
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let local_mat = VectorBoundaryAssembler::assemble_boundary_bilinear(
+            par_space.local_space(),
+            integrators,
+            tags,
+            quad_order,
+        );
+        let dof_part = par_space.dof_partition();
+        let permuted = permute_csr_scaled(&local_mat, dof_part, factor);
+        crate::par_assembler::finalize_boundary_matrix(par_space, &permuted)
+    }
+}
+
+/// `a += b` on the `diag`/`offd` blocks.
+///
+/// `CsrMatrix::axpby` builds the **union** of the two sparsity patterns, so the
+/// result is the sum of the two operators regardless of which entries each
+/// assembly produced (a boundary matrix only touches boundary DOFs).
+fn add_blocks_into(a: &mut ParCsrMatrix, b: &ParCsrMatrix) {
+    let d = a.diag_block_mut();
+    *d = d.axpby(1.0, b.diag_block(), 1.0);
+    let o = a.offd_block_mut();
+    *o = o.axpby(1.0, b.offd_block(), 1.0);
 }
 
 /// Permute a CSR matrix from local space ordering to partition [owned|ghost] ordering.
@@ -87,6 +211,17 @@ impl ParVectorAssembler {
 /// stored in [`DofPartition::sign_corrections`] so that the matrix is
 /// expressed in the globally consistent edge-orientation basis.
 fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> {
+    permute_csr_scaled(mat, dof_part, 1.0)
+}
+
+/// [`permute_csr`] with an overall factor applied to every entry — used by the
+/// `add_bilinear` / `add_boundary_bilinear` accumulation paths so the factor
+/// never has to be applied to a `ParCsrMatrix` (which has no `scale`).
+fn permute_csr_scaled(
+    mat: &CsrMatrix<f64>,
+    dof_part: &DofPartition,
+    factor: f64,
+) -> CsrMatrix<f64> {
     let n = dof_part.n_total_dofs();
     let mut coo = CooMatrix::<f64>::new(n, n);
 
@@ -97,7 +232,7 @@ fn permute_csr(mat: &CsrMatrix<f64>, dof_part: &DofPartition) -> CsrMatrix<f64> 
             let col = mat.col_idx[k] as usize;
             let new_col = dof_part.permute_dof(col as u32) as usize;
             let d_col = dof_part.sign_correction(col as u32);
-            let val = mat.values[k] * d_row * d_col;
+            let val = mat.values[k] * d_row * d_col * factor;
             if val != 0.0 {
                 coo.add(new_row, new_col, val);
             }
@@ -129,8 +264,196 @@ mod tests {
     use crate::par_partition::partition_mesh;
     use crate::par_space::ParallelFESpace;
     use fem_assembly::standard::{CurlCurlIntegrator, VectorMassIntegrator};
+    use fem_assembly::{TangentialMassIntegrator, VectorAssembler, VectorBoundaryAssembler};
     use fem_mesh::Mesh;
     use fem_space::HCurlSpace;
+
+    /// B2 / D88: the vector **boundary** assembly + append path must reproduce
+    /// the serial family `A1 = M1(ε) + 0.5·dt·(M1(σ) + M1(η⁻¹)|_ABC)` — the
+    /// matrix family maxwell's `-abcs` / conductive-loss branch needs.
+    ///
+    /// The parallel matrix is compared against the serial one **through the DOF
+    /// partition** (`m_par[permute(d)][permute(c)] == m_ser[d][c]·s(d)·s(c)`),
+    /// which is exactly the basis change `permute_csr_scaled` performs; at one
+    /// rank the local mesh is the whole mesh, so this is a value-level identity
+    /// for every entry of the accumulated family.
+    #[test]
+    fn vector_boundary_append_matches_serial_family_one_rank() {
+        const DT: f64 = 0.25;
+        const EPS: f64 = 1.0;
+        const SIGMA: f64 = 0.1;
+        const ETA_INV: f64 = 0.5;
+        const ABC_TAG: i32 = 2; // right edge (unit_square_* convention)
+
+        let mesh = Mesh::<2>::unit_square_tri(4);
+        let mesh_ser = mesh.clone();
+
+        // Serial reference in DofManager order.
+        let ser_space = HCurlSpace::new(mesh_ser, 1);
+        let n = ser_space.n_dofs();
+        let ser = VectorAssembler::assemble_bilinear(
+            &ser_space,
+            &[&VectorMassIntegrator { alpha: EPS }],
+            3,
+        )
+        .axpby(
+            1.0,
+            &VectorAssembler::assemble_bilinear(
+                &ser_space,
+                &[&VectorMassIntegrator { alpha: SIGMA }],
+                3,
+            ),
+            0.5 * DT,
+        )
+        .axpby(
+            1.0,
+            &VectorBoundaryAssembler::assemble_boundary_bilinear(
+                &ser_space,
+                &[&TangentialMassIntegrator { gamma: ETA_INV }],
+                &[ABC_TAG],
+                3,
+            ),
+            0.5 * DT,
+        );
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(1));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let local_space = HCurlSpace::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new_for_edge_space(
+                local_space, &pmesh, comm.clone(),
+            );
+
+            // A1[dt] = M1(ε); + 0.5·dt·M1(σ); + 0.5·dt·M1(η⁻¹)|_Γ
+            let mut a1 = ParVectorAssembler::assemble_bilinear(
+                &par_space,
+                &[&VectorMassIntegrator { alpha: EPS }],
+                3,
+            );
+            ParVectorAssembler::add_bilinear(
+                &mut a1,
+                &par_space,
+                &[&VectorMassIntegrator { alpha: SIGMA }],
+                3,
+                0.5 * DT,
+            );
+            ParVectorAssembler::add_boundary_bilinear(
+                &mut a1,
+                &par_space,
+                &[&TangentialMassIntegrator { gamma: ETA_INV }],
+                &[ABC_TAG],
+                3,
+                0.5 * DT,
+            );
+
+            // The boundary piece must be non-empty, otherwise the test would
+            // pass on the volume path alone.
+            let bnd = ParVectorAssembler::assemble_boundary_bilinear(
+                &par_space,
+                &[&TangentialMassIntegrator { gamma: ETA_INV }],
+                &[ABC_TAG],
+                3,
+            );
+            assert!(bnd.diag_block().nnz() > 0, "boundary matrix is empty");
+
+            let local = a1.to_local_matrix();
+            let part = par_space.dof_partition();
+            let n_local = par_space.local_space().n_dofs();
+            assert_eq!(n_local, n, "1 rank: local space is the whole space");
+
+            let mut max_dev = 0.0_f64;
+            for d in 0..n_local as u32 {
+                let p = part.permute_dof(d) as usize;
+                let sd = part.sign_correction(d);
+                for c in 0..n_local as u32 {
+                    let q = part.permute_dof(c) as usize;
+                    let want = ser.get(d as usize, c as usize) * sd * part.sign_correction(c);
+                    let got = local.get(p, q);
+                    let dev = (want - got).abs();
+                    if dev.is_nan() || !got.is_finite() {
+                        max_dev = f64::INFINITY;
+                    } else {
+                        max_dev = max_dev.max(dev);
+                    }
+                }
+            }
+            assert!(
+                max_dev < 1e-12,
+                "rank {}: A1[dt] family (serial vs parallel add path) max dev {max_dev:.3e}",
+                comm.rank()
+            );
+        });
+    }
+
+    /// The append semantics themselves, at 2 and 4 ranks: `a += factor·B` must
+    /// leave `a`'s own entries untouched and add exactly `factor·B` — where `B`
+    /// comes from the independent (fresh) boundary assembly.  This exercises the
+    /// ghost-row exchange into owners at every rank count, which is the part of
+    /// the boundary path that only exists in parallel.
+    #[test]
+    fn vector_boundary_append_is_exact_at_multiple_ranks() {
+        const DT: f64 = 0.25;
+        const ABC_TAG: i32 = 3; // top edge
+        let mesh = Mesh::<2>::unit_square_tri(4);
+
+        for n_ranks in [2usize, 4] {
+            let mesh = mesh.clone();
+            ThreadLauncher::new(WorkerConfig::new(n_ranks)).launch(move |comm| {
+                let pmesh = partition_mesh(&mesh, &comm);
+                let local_space = HCurlSpace::new(pmesh.local_mesh().clone(), 1);
+                let par_space = ParallelFESpace::new_for_edge_space(
+                    local_space, &pmesh, comm.clone(),
+                );
+
+                let base = ParVectorAssembler::assemble_bilinear(
+                    &par_space,
+                    &[&VectorMassIntegrator { alpha: 1.0 }],
+                    3,
+                );
+                let bnd = ParVectorAssembler::assemble_boundary_bilinear(
+                    &par_space,
+                    &[&TangentialMassIntegrator { gamma: 0.5 }],
+                    &[ABC_TAG],
+                    3,
+                );
+
+                let mut acc = base.clone_vec();
+                ParVectorAssembler::add_boundary_bilinear(
+                    &mut acc,
+                    &par_space,
+                    &[&TangentialMassIntegrator { gamma: 0.5 }],
+                    &[ABC_TAG],
+                    3,
+                    0.5 * DT,
+                );
+
+                let m_base = base.to_local_matrix();
+                let m_bnd = bnd.to_local_matrix();
+                let m_acc = acc.to_local_matrix();
+                let nr = m_acc.nrows;
+                let nc = m_acc.ncols;
+                let mut max_dev = 0.0_f64;
+                for r in 0..nr {
+                    for c in 0..nc {
+                        let want = m_base.get(r, c) + 0.5 * DT * m_bnd.get(r, c);
+                        let got = m_acc.get(r, c);
+                        let dev = (want - got).abs();
+                        if dev.is_nan() || !got.is_finite() {
+                            max_dev = f64::INFINITY;
+                        } else {
+                            max_dev = max_dev.max(dev);
+                        }
+                    }
+                }
+                assert!(
+                    max_dev < 1e-12,
+                    "rank {} of {}: a += factor·B max dev {max_dev:.3e}",
+                    comm.rank(),
+                    comm.size()
+                );
+            });
+        }
+    }
 
     #[test]
     fn par_vector_assembly_hcurl_diagonal_positive() {
