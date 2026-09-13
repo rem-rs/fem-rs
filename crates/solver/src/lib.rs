@@ -129,6 +129,9 @@ pub mod eigen;
 pub mod events;
 pub mod geometric_mg;
 pub mod lor;
+/// Parallel (distributed) LOR: the PCG driver over a `fem-parallel` layout
+/// (MFEM `miniapps/solvers/plor_solvers.cpp`, `ParLORDiscretization`).
+pub mod par_lor;
 pub mod multiphysics;
 pub mod multirate;
 /// Transient incompressible Navier–Stokes split-scheme solver
@@ -228,6 +231,7 @@ pub use lor::{
     build_lor_operator, solve_gmres_lor, solve_gmres_lor_amg, solve_pcg_lor, solve_pcg_lor_amg,
     solve_vcycle_geom_mg, AmgConfig, GeomMGHierarchy, GeomMGPrecond, LorAmgPrecond, LorPrecond,
 };
+pub use par_lor::{solve_pcg_par_lor, ParOperator, ParPrecond};
 pub use ode::{
     Bdf2, Bdf2State, ComplexCrankNicolson, ForwardEuler, ImexArk3, ImexDirkRk3, ImexEuler,
     ImexExpImplEuler, ImexOperator, ImexRk2_222, ImexRk2_232, ImexRk3, ImexSsp2, ImexTimeStepper,
