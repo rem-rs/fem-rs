@@ -561,15 +561,25 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 1024];
-            let n = stream.read(&mut buf).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = stream;
+            // Read the whole command line: a single `read` may return a partial
+            // buffer, and any byte left in the receive queue turns the `close`
+            // below into a RST instead of a FIN.
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut cmd = String::new();
+            reader.read_line(&mut cmd).unwrap();
             // Echo back to simulate GLVis response
             let response = b"GLVis v4.7\n\n";
             stream.write_all(response).unwrap();
+            stream.flush().unwrap();
             // Check the command was received
-            let cmd = String::from_utf8_lossy(&buf[..n]);
             assert!(cmd.contains("autoscale"), "expected autoscale command");
+            // Hold the socket open until the client hangs up.  Closing while the
+            // peer is still reading surfaces as `ConnectionReset` (WSAECONNRESET)
+            // on Windows loopback — measured 1 failure in 20 runs before this.
+            let mut drain = [0u8; 64];
+            let _ = reader.read(&mut drain);
         });
         let mut vis = GlVisSocket::connect("127.0.0.1", port).unwrap();
         vis.send_command("autoscale").unwrap();
@@ -577,6 +587,8 @@ mod tests {
         assert_eq!(resp, "GLVis v4.7");
         let all = vis.recv_response().unwrap();
         assert!(all.is_empty());
+        // Close our side first so the server's drain read sees EOF and returns.
+        drop(vis);
         server.join().unwrap();
     }
 
