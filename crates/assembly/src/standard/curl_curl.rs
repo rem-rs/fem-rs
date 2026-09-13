@@ -141,6 +141,33 @@ pub struct CurlCurlTensorIntegrator<C: MatrixCoeff> {
     pub mu: C,
 }
 
+impl<C: MatrixCoeff> CurlCurlTensorIntegrator<C> {
+    /// Construct from a matrix coefficient.
+    ///
+    /// MFEM: `new CurlCurlIntegrator(MatrixCoefficient &mcoeff)`.
+    pub fn new(mu: C) -> Self {
+        CurlCurlTensorIntegrator { mu }
+    }
+}
+
+/// **MFEM-compatible name** for the matrix-coefficient overload of MFEM's
+/// `CurlCurlIntegrator`, i.e. the anisotropic curl-curl operator
+/// `a(u, v) = ∫ (M ∇×u) · (∇×v) dx` with a `dim × dim` tensor `M`.
+///
+/// Alias of [`CurlCurlTensorIntegrator`] (the math lives there); the isotropic
+/// scalar form stays [`CurlCurlIntegrator`] (`CurlCurlIntegrator { mu }`).
+///
+/// ```rust,ignore
+/// use fem_assembly::coefficient::ConstantMatrixCoefficient;
+/// use fem_assembly::standard::AnisotropicCurlCurlIntegrator;
+///
+/// // MFEM: MatrixConstantCoefficient muinv(muMat);
+/// //       a.AddDomainIntegrator(new CurlCurlIntegrator(muinv));
+/// let mu = ConstantMatrixCoefficient::diag(&[1.0, 1.0]);
+/// let integ = AnisotropicCurlCurlIntegrator::new(mu);
+/// ```
+pub type AnisotropicCurlCurlIntegrator<C> = CurlCurlTensorIntegrator<C>;
+
 impl<C: MatrixCoeff> VectorBilinearIntegrator for CurlCurlTensorIntegrator<C> {
     fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {
         let n   = qp.n_dofs;

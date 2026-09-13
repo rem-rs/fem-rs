@@ -149,10 +149,31 @@ pub trait VectorCoeff: Send + Sync {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /// A matrix-valued coefficient: returns a `dim × dim` matrix in row-major order.
+///
+/// MFEM equivalent: `MatrixCoefficient` (with `MatrixConstantCoefficient`,
+/// `MatrixFunctionCoefficient` and `MatrixArrayCoefficient` as the built-in
+/// implementations — see the [`MatrixConstantCoefficient`] /
+/// [`MatrixFunctionCoefficient`] aliases and [`MatrixArrayCoefficient`]).
+///
+/// Integrators that consume a `MatrixCoeff` are the anisotropic counterparts of
+/// their scalar versions:
+///
+/// | scalar integrator | matrix (tensor) integrator |
+/// |---|---|
+/// | `VectorMassIntegrator { alpha }` | `VectorFEMassIntegrator { alpha }` (`VectorMassTensorIntegrator`) |
+/// | `DiffusionIntegrator { kappa }` | `AnisotropicDiffusionIntegrator { sigma }` (`TensorDiffusionIntegrator`) |
+/// | `CurlCurlIntegrator { mu }` | `AnisotropicCurlCurlIntegrator { mu }` (`CurlCurlTensorIntegrator`) |
 pub trait MatrixCoeff: Send + Sync {
     /// Evaluate into `out` (length ≥ `ctx.dim * ctx.dim`, row-major).
     fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]);
 }
+
+// NOTE: unlike `ScalarCoeff`, `f64` is deliberately **not** a `MatrixCoeff`.
+// A blanket `impl MatrixCoeff for f64` would make `x.eval(...)` ambiguous
+// (E0034) in every file that imports both traits and calls it on an `f64`,
+// including the `pro-*` crates that build against this one.  Use
+// `ScalarMatrixCoeff(c)` — or `VectorMassIntegrator { alpha: c }` — for the
+// isotropic (scalar-coefficient) case.
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Complex coefficient traits (2x real channels)
@@ -628,12 +649,48 @@ impl<F: Fn(&[f64], &mut [f64]) + Send + Sync> VectorCoeff for FnVectorCoeff<F> {
 
 /// Constant matrix coefficient (row-major, `dim × dim`).
 ///
+/// MFEM equivalent: `MatrixConstantCoefficient(DenseMatrix)`.  Note the storage
+/// convention difference: fem-rs stores the entries **row-major** in a flat
+/// `Vec` (MFEM's `DenseMatrix` is column-major), which only matters for
+/// non-symmetric tensors.
+///
 /// # Example
 /// ```rust,ignore
 /// // 2×2 anisotropic diffusion tensor
 /// let D = ConstantMatrixCoeff(vec![10.0, 0.0, 0.0, 1.0]);
+/// // or, equivalently:
+/// let D = ConstantMatrixCoeff::diag(&[10.0, 1.0]);
 /// ```
 pub struct ConstantMatrixCoeff(pub Vec<f64>);
+
+impl ConstantMatrixCoeff {
+    /// Diagonal matrix `diag(d[0], …, d[n-1])` (row-major, `n × n`).
+    ///
+    /// MFEM: `DenseMatrix mat(n); mat = 0.0; mat(i,i) = d[i];`
+    pub fn diag(d: &[f64]) -> Self {
+        let n = d.len();
+        let mut m = vec![0.0; n * n];
+        for (i, &v) in d.iter().enumerate() {
+            m[i * n + i] = v;
+        }
+        ConstantMatrixCoeff(m)
+    }
+
+    /// Isotropic tensor `c · I` of dimension `dim`.
+    pub fn isotropic(dim: usize, c: f64) -> Self {
+        ConstantMatrixCoeff::diag(&vec![c; dim])
+    }
+
+    /// The `dim × dim` identity matrix.
+    pub fn identity(dim: usize) -> Self {
+        ConstantMatrixCoeff::isotropic(dim, 1.0)
+    }
+
+    /// Raw row-major entries (length `dim²`).
+    pub fn as_slice(&self) -> &[f64] {
+        &self.0
+    }
+}
 
 impl MatrixCoeff for ConstantMatrixCoeff {
     #[inline]
@@ -642,16 +699,117 @@ impl MatrixCoeff for ConstantMatrixCoeff {
     }
 }
 
+/// MFEM-compatible name for [`ConstantMatrixCoeff`] (`MatrixConstantCoefficient`).
+///
+/// ```rust,ignore
+/// use fem_assembly::coefficient::MatrixConstantCoefficient;
+/// // diag(1, 2) on a 2-D mesh:
+/// let sigma = MatrixConstantCoefficient::diag(&[1.0, 2.0]);
+/// ```
+pub type MatrixConstantCoefficient = ConstantMatrixCoeff;
+
 /// Matrix coefficient from a closure `Fn(&[f64], &mut [f64])`.
 ///
 /// The closure receives `(x_phys, out)` and must fill `out[0..dim*dim]`
-/// in row-major order.
+/// in row-major order.  MFEM equivalent: `MatrixFunctionCoefficient`
+/// (`std::function<void(const Vector&, DenseMatrix&)>`).
 pub struct FnMatrixCoeff<F>(pub F);
 
 impl<F: Fn(&[f64], &mut [f64]) + Send + Sync> MatrixCoeff for FnMatrixCoeff<F> {
     #[inline]
     fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
         (self.0)(ctx.x, out);
+    }
+}
+
+/// MFEM-compatible name for [`FnMatrixCoeff`] (`MatrixFunctionCoefficient`).
+///
+/// ```rust,ignore
+/// use fem_assembly::coefficient::MatrixFunctionCoefficient;
+/// // ε_r(x) = diag(1 + x, 2)
+/// let eps = MatrixFunctionCoefficient::new(|x: &[f64], out: &mut [f64]| {
+///     out[0] = 1.0 + x[0]; out[1] = 0.0; out[2] = 0.0; out[3] = 2.0;
+/// });
+/// ```
+pub type MatrixFunctionCoefficient<F> = FnMatrixCoeff<F>;
+
+impl<F: Fn(&[f64], &mut [f64]) + Send + Sync> FnMatrixCoeff<F> {
+    /// Wrap a closure as a spatially-varying matrix coefficient.
+    pub fn new(f: F) -> Self {
+        FnMatrixCoeff(f)
+    }
+}
+
+/// Per-entry scalar matrix coefficient of dimension `dim × dim`.
+///
+/// MFEM equivalent: `MatrixArrayCoefficient` — each matrix entry `(i, j)` is an
+/// independent [`ScalarCoeff`] (`Coefficient* Coeff[i*width+j]` + `Set(i,j,c)`).
+/// Entries default to the zero coefficient, matching MFEM's `MatrixArrayCoefficient(dim)`.
+///
+/// # Example
+/// ```rust,ignore
+/// use fem_assembly::coefficient::{FnCoeff, MatrixArrayCoefficient};
+/// // [[1+x, 0], [0, 100]]
+/// let sigma = MatrixArrayCoefficient::new(2)
+///     .set(0, 0, FnCoeff(|x: &[f64]| 1.0 + x[0]))
+///     .set(1, 1, 100.0_f64);
+/// ```
+pub struct MatrixArrayCoefficient {
+    dim: usize,
+    coeffs: Vec<Box<dyn ScalarCoeff>>,
+}
+
+impl MatrixArrayCoefficient {
+    /// Create a `dim × dim` matrix coefficient with every entry zero.
+    pub fn new(dim: usize) -> Self {
+        MatrixArrayCoefficient {
+            dim,
+            coeffs: (0..dim * dim).map(|_| Box::new(0.0_f64) as Box<dyn ScalarCoeff>).collect(),
+        }
+    }
+
+    /// Dimension `dim` of the (square) matrix.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Set entry `(i, j)` (builder form of MFEM's `MatrixArrayCoefficient::Set`).
+    ///
+    /// # Panics
+    /// Panics if `i >= dim` or `j >= dim`.
+    pub fn set(mut self, i: usize, j: usize, c: impl ScalarCoeff + 'static) -> Self {
+        self.set_in_place(i, j, c);
+        self
+    }
+
+    /// Set entry `(i, j)` in place.
+    ///
+    /// # Panics
+    /// Panics if `i >= dim` or `j >= dim`.
+    pub fn set_in_place(&mut self, i: usize, j: usize, c: impl ScalarCoeff + 'static) {
+        assert!(i < self.dim && j < self.dim, "MatrixArrayCoefficient: ({i}, {j}) out of range for dim {}", self.dim);
+        self.coeffs[i * self.dim + j] = Box::new(c);
+    }
+
+    /// Borrow entry `(i, j)` (MFEM's `GetCoeff`).
+    ///
+    /// # Panics
+    /// Panics if `i >= dim` or `j >= dim`.
+    pub fn get(&self, i: usize, j: usize) -> &dyn ScalarCoeff {
+        assert!(i < self.dim && j < self.dim, "MatrixArrayCoefficient: ({i}, {j}) out of range for dim {}", self.dim);
+        self.coeffs[i * self.dim + j].as_ref()
+    }
+}
+
+impl MatrixCoeff for MatrixArrayCoefficient {
+    #[inline]
+    fn eval(&self, ctx: &CoeffCtx<'_>, out: &mut [f64]) {
+        let d = self.dim;
+        for i in 0..d {
+            for j in 0..d {
+                out[i * d + j] = self.coeffs[i * d + j].eval(ctx);
+            }
+        }
     }
 }
 

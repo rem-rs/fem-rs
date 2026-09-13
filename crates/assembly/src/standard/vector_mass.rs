@@ -9,7 +9,7 @@
 //!
 //! where `u` and `v` are vector-valued basis functions.
 
-use crate::postproc::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff};
+use crate::postproc::coefficient::{CoeffCtx, MatrixCoeff, ScalarCoeff, ScalarMatrixCoeff};
 use crate::vector_integrator::{VectorBilinearIntegrator, VectorQpData};
 
 // ─── Isotropic ───────────────────────────────────────────────────────────────
@@ -91,6 +91,50 @@ pub struct VectorMassTensorIntegrator<C: MatrixCoeff> {
     /// Matrix mass coefficient (dim×dim, row-major).
     pub alpha: C,
 }
+
+impl<C: MatrixCoeff> VectorMassTensorIntegrator<C> {
+    /// Construct from a matrix coefficient.
+    ///
+    /// MFEM: `new VectorFEMassIntegrator(MatrixCoefficient &mq)`.
+    pub fn new(alpha: C) -> Self {
+        VectorMassTensorIntegrator { alpha }
+    }
+}
+
+impl VectorMassTensorIntegrator<ScalarMatrixCoeff<f64>> {
+    /// The unweighted (`σ = I`) vector mass operator.
+    ///
+    /// MFEM: `new VectorFEMassIntegrator()` (null coefficient → 1.0).  Also
+    /// reachable as `VectorFEMassIntegrator::identity()`.
+    pub fn identity() -> Self {
+        VectorMassTensorIntegrator { alpha: ScalarMatrixCoeff(1.0) }
+    }
+}
+
+/// **MFEM-compatible name**: `VectorFEMassIntegrator` = the general
+/// `(σ u, v)` vector mass integrator for H(curl) / H(div) spaces, where `σ` is
+/// a matrix (tensor) coefficient or — through [`ScalarMatrixCoeff`] — a scalar
+/// one.
+///
+/// Alias of [`VectorMassTensorIntegrator`] (the math lives there):
+///
+/// ```rust,ignore
+/// use fem_assembly::coefficient::{ConstantMatrixCoefficient, ScalarMatrixCoeff};
+/// use fem_assembly::standard::VectorFEMassIntegrator;
+///
+/// // MFEM: MatrixConstantCoefficient sigma(sigmaMat);
+/// //       a.AddDomainIntegrator(new VectorFEMassIntegrator(sigma));
+/// let sigma = ConstantMatrixCoefficient::diag(&[2.0, 1.0]);
+/// let integ = VectorFEMassIntegrator::new(sigma);
+///
+/// // Scalar coefficient (MFEM VectorFEMassIntegrator(Coefficient&)) → α·I:
+/// let integ = VectorFEMassIntegrator { alpha: ScalarMatrixCoeff(2.0) };
+///
+/// // No coefficient (σ = I):
+/// let integ = VectorFEMassIntegrator::identity();
+/// ```
+pub type VectorFEMassIntegrator<C = ScalarMatrixCoeff<f64>> =
+    VectorMassTensorIntegrator<C>;
 
 impl<C: MatrixCoeff> VectorBilinearIntegrator for VectorMassTensorIntegrator<C> {
     fn add_to_element_matrix(&self, qp: &VectorQpData<'_>, k_elem: &mut [f64]) {

@@ -20,6 +20,34 @@ pub struct TensorDiffusionIntegrator<M: MatrixCoeff = crate::postproc::coefficie
     pub sigma: M,
 }
 
+impl<M: MatrixCoeff> TensorDiffusionIntegrator<M> {
+    /// Construct from a matrix coefficient.
+    ///
+    /// MFEM: `new DiffusionIntegrator(MatrixCoefficient &mcoeff)`.
+    pub fn new(sigma: M) -> Self {
+        TensorDiffusionIntegrator { sigma }
+    }
+}
+
+/// **MFEM-compatible name** for the matrix-coefficient overload of MFEM's
+/// `DiffusionIntegrator`, i.e. the anisotropic diffusion operator
+/// `a(u, v) = ∫ (σ ∇u) · ∇v dx` with a `dim × dim` tensor `σ`.
+///
+/// Alias of [`TensorDiffusionIntegrator`] (the math lives there); the isotropic
+/// scalar form stays [`crate::standard::DiffusionIntegrator`] (`DiffusionIntegrator { kappa }`).
+///
+/// ```rust,ignore
+/// use fem_assembly::coefficient::ConstantMatrixCoefficient;
+/// use fem_assembly::standard::AnisotropicDiffusionIntegrator;
+///
+/// // MFEM: MatrixConstantCoefficient sigma(sigmaMat);
+/// //       a.AddDomainIntegrator(new DiffusionIntegrator(sigma));
+/// let sigma = ConstantMatrixCoefficient::diag(&[10.0, 1.0]);
+/// let integ = AnisotropicDiffusionIntegrator::new(sigma);
+/// ```
+pub type AnisotropicDiffusionIntegrator<M = crate::postproc::coefficient::ConstantMatrixCoeff> =
+    TensorDiffusionIntegrator<M>;
+
 impl<M: MatrixCoeff> BilinearIntegrator for TensorDiffusionIntegrator<M> {
     fn add_to_element_matrix(&self, qp: &QpData<'_>, k_elem: &mut [f64]) {
         let n = qp.n_dofs;

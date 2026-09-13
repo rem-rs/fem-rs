@@ -209,14 +209,16 @@ pub mod hyperelastic_nl;
 pub mod elasticity_component;
 
 pub use diffusion::DiffusionIntegrator;
-pub use tensor_diffusion::TensorDiffusionIntegrator;
+pub use tensor_diffusion::{TensorDiffusionIntegrator, AnisotropicDiffusionIntegrator};
 pub use elasticity::ElasticityIntegrator;
 pub use mass::MassIntegrator;
 pub use neumann::NeumannIntegrator;
 pub use source::DomainSourceIntegrator;
 pub use source::DomainSourceIntegratorCoeff;
-pub use curl_curl::{CurlCurlIntegrator, CurlCurlTensorIntegrator};
-pub use vector_mass::{VectorMassIntegrator, VectorMassTensorIntegrator};
+pub use curl_curl::{CurlCurlIntegrator, CurlCurlTensorIntegrator, AnisotropicCurlCurlIntegrator};
+pub use vector_mass::{
+    VectorMassIntegrator, VectorMassTensorIntegrator, VectorFEMassIntegrator,
+};
 pub use convection::{
     ConvectionIntegrator, MixedDirectionalDerivativeIntegrator, mfem_quad_order,
 };
