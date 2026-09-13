@@ -12,6 +12,7 @@
 //! |--------------|------------|------------|-------|
 //! | `gradient`   | H1 (P1)    | H(curl) ND1| 1     |
 //! | `gradient`   | H1 (P2)    | H(curl) ND2| 2     |
+//! | `gradient`   | H1 (P2)    | H(curl) ND2 (3-D hex) | 2 |
 //! | `curl_2d`    | H(curl) ND1| L2 (P0)   | 1     |
 //! | `curl_2d`    | H(curl) ND2| L2 (P1)   | 2     |
 //! | `curl_2d`    | H(curl) ND2| L2 (P2)   | 2     |
@@ -39,8 +40,8 @@ use std::collections::HashSet;
 
 use fem_mesh::ElementType;
 use fem_element::{
-    quadrature::gauss_legendre_01, ReferenceElement, TetND2, TetRT1, TriNDk, TriND2, TriRT1,
-    TriRT2, VectorReferenceElement,
+    quadrature::gauss_legendre_01, HexNDk, HexQ2, ReferenceElement, TetND2, TetRT1, TriNDk,
+    TriND2, TriRT1, TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -77,6 +78,29 @@ pub enum DiscreteOpError {
     /// The space orders are incompatible with each other.
     #[error("{op}: incompatible space orders — H1 order {h1_order} requires H(curl) order {h1_order}, got {hcurl_order}")]
     IncompatibleOrders { op: &'static str, h1_order: u8, hcurl_order: u8 },
+
+    /// The mesh dimension is supported but its cell type is not.
+    #[error("{op}: unsupported cell type {cell}")]
+    UnsupportedCellType { op: &'static str, cell: &'static str },
+}
+
+/// Short name of a cell type, for [`DiscreteOpError::UnsupportedCellType`].
+fn element_type_name(t: ElementType) -> &'static str {
+    match t {
+        ElementType::Tri3 => "Tri3",
+        ElementType::Tri6 => "Tri6",
+        ElementType::Quad4 => "Quad4",
+        ElementType::Quad8 => "Quad8",
+        ElementType::Quad9 => "Quad9",
+        ElementType::Tet4 => "Tet4",
+        ElementType::Tet10 => "Tet10",
+        ElementType::Hex8 => "Hex8",
+        ElementType::Hex20 => "Hex20",
+        ElementType::Prism6 => "Prism6",
+        ElementType::Prism15 => "Prism15",
+        ElementType::Pyramid5 => "Pyramid5",
+        _ => "unknown",
+    }
 }
 
 /// Local RT2 Vandermonde and P2-sampled divergences for the RT2→P2 reconstruction on an
@@ -204,7 +228,14 @@ impl DiscreteLinearOperator {
         }
         // h1_order == 2
         match hcurl_order {
-            2 => Self::gradient_p2_nd2(h1_space, hcurl_space),
+            2 => match h1_space.mesh().dim() {
+                2 => Self::gradient_p2_nd2(h1_space, hcurl_space),
+                3 => Self::gradient_p2_nd2_hex3d(h1_space, hcurl_space),
+                dim => Err(DiscreteOpError::UnsupportedDimension {
+                    op: "gradient (P2→ND2)",
+                    dim,
+                }),
+            },
             o => Err(DiscreteOpError::UnsupportedHCurlOrder { op: "gradient", order: o }),
         }
     }
@@ -368,6 +399,112 @@ impl DiscreteLinearOperator {
                     let val = sign * g_ref[i_local * n_p2_local + j_local];
                     if val.abs() > 1e-15 {
                         coo.add(g_nd2 as usize, global_p2 as usize, val);
+                    }
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    // ── Order-2 numerical gradient (P2 → ND2, 3-D hexahedra) ────────────────
+
+    /// Build `G: H1(P2) → H(curl) ND2` on a 3-D hexahedral mesh.
+    ///
+    /// MFEM's `ParDiscreteLinearOperator(&HGradFESpace, &HCurlFESpace)` +
+    /// `GradientInterpolator` (joule/volta/tesla), i.e. the discrete gradient
+    /// of the de Rham complex: the DOF vector of `G p` collects the H(curl)
+    /// functionals applied to `∇p`.
+    ///
+    /// Every ND2 hexahedron DOF is the point-value functional
+    /// `σ_s(Φ) = Φ(ξ_s)·τ_s` with `(ξ_s, τ_s) = (HexNDk::dof_coords[s],
+    /// HexNDk::dof_tangents[s])` — `ξ_s ∈ [-1,1]³` on the reference cube and
+    /// `τ_s = 2·e_a` the *unnormalized* reference tangent of component `a`
+    /// (see `HCurlSpace::interpolate_vector`).  Hence
+    ///
+    /// ```text
+    ///   G[nd_s, p2_j] = σ_s(∇φ_j) = ∇_ref φ_j(ξ_s) · τ_s
+    /// ```
+    ///
+    /// with **no** Jacobian factor: the covariant pullback pairs the physical
+    /// gradient with the physical tangent as
+    /// `(J⁻ᵀ∇_ref φ) · (J τ) = ∇_ref φ · τ`.  Like the 2-D `P2→ND2` path the
+    /// whole local matrix is therefore evaluated once on the reference
+    /// element.
+    ///
+    /// The element-local slot order is [`HexNDk`]'s (12 edges × 2, 6 quad
+    /// faces × 4, 6 interior), which is also `HCurlSpace`'s; the per-element
+    /// scatter applies the space's own `element_dofs` / `element_signs`
+    /// (edge-reversal sign, quad-face orientation sign) so that adjacent
+    /// elements agree exactly and first-writer-wins is valid.
+    fn gradient_p2_nd2_hex3d<M: MeshTopology>(
+        h1_space: &H1Space<M>,
+        hcurl_space: &HCurlSpace<M>,
+    ) -> Result<CsrMatrix<f64>, DiscreteOpError> {
+        let mesh = h1_space.mesh();
+        const N_P2_LOCAL: usize = 27;
+
+        // ND2 is only implemented for hexahedra (MFEM's `ND_HexahedronElement(2)`).
+        match mesh.element_type(0) {
+            ElementType::Hex8 | ElementType::Hex20 => {}
+            other => {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "gradient (P2→ND2)",
+                    cell: element_type_name(other),
+                })
+            }
+        }
+
+        let nd = HexNDk::new(2);
+        let coords = nd.dof_coords();
+        let tangents = nd.dof_tangents();
+        let n_slots = coords.len();
+        if n_slots != nd.n_dofs() {
+            return Err(DiscreteOpError::UnsupportedCellType {
+                op: "gradient (P2→ND2)",
+                cell: "HexNDk::dof_coords length mismatch",
+            });
+        }
+
+        let p2 = HexQ2;
+        let mut g_ref = vec![0.0_f64; n_slots * N_P2_LOCAL];
+        {
+            let mut grads = vec![0.0_f64; N_P2_LOCAL * 3];
+            for (s, (xi, tau)) in coords.iter().zip(tangents.iter()).enumerate() {
+                let xi3 = [xi[0], xi[1], xi[2]];
+                p2.eval_grad_basis(&xi3, &mut grads);
+                for j in 0..N_P2_LOCAL {
+                    g_ref[s * N_P2_LOCAL + j] = grads[j * 3] * tau[0]
+                        + grads[j * 3 + 1] * tau[1]
+                        + grads[j * 3 + 2] * tau[2];
+                }
+            }
+        }
+
+        let n_nd = hcurl_space.n_dofs();
+        let n_p2 = h1_space.n_dofs();
+        let mut coo = CooMatrix::<f64>::new(n_nd, n_p2);
+        let mut visited = HashSet::with_capacity(n_nd);
+
+        for e in mesh.elem_iter() {
+            let h1_dofs = h1_space.element_dofs(e);
+            let nd_dofs = hcurl_space.element_dofs(e);
+            let nd_signs = hcurl_space.element_signs(e);
+            if nd_dofs.len() != n_slots || h1_dofs.len() != N_P2_LOCAL {
+                return Err(DiscreteOpError::UnsupportedCellType {
+                    op: "gradient (P2→ND2)",
+                    cell: "element DOF count is not HexND2(54) × HexQ2(27)",
+                });
+            }
+            for (s_local, &g_nd) in nd_dofs.iter().enumerate() {
+                if !visited.insert(g_nd as usize) {
+                    continue;
+                }
+                let sign = nd_signs[s_local];
+                for (j_local, &global_p2) in h1_dofs.iter().enumerate() {
+                    let val = sign * g_ref[s_local * N_P2_LOCAL + j_local];
+                    if val.abs() > 1e-15 {
+                        coo.add(g_nd as usize, global_p2 as usize, val);
                     }
                 }
             }

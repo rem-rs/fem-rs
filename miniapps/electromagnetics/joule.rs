@@ -51,20 +51,53 @@
 //! banner with status 3 and a message):
 //! * `MagneticDiffusionEOperator`'s four coupled solves (the a0/a1/a2/m1/m2/m3
 //!   systems, `HyprePCG` + `HypreBoomerAMG`/`HypreAMS`/`HypreADS`).  fem-rs has
-//!   PCG + diagonal (and the SIAV/ODE family from D89/D90), but no AMG/AMS/ADS,
-//!   and the C++ **stdout itself is not reproducible** past this point: hypre
-//!   prints its `BoomerAMG SETUP PARAMETERS:` block and its operator tables
-//!   unconditionally, so a byte comparison of a full joule run is impossible
-//!   for any non-hypre implementation.  The comparable region is exactly the
-//!   banner + options + skin depths + dof counts implemented below;
-//! * the `Mult` path (joule_solver.cpp:162-375) and `GetJouleHeating`'s L2
-//!   projection of `sigma |E|^2` (joule_solver.cpp:805-815), which needs a
-//!   `GridFunctionCoefficient`-valued projection (the coefficient reads
-//!   `E_gf.GetVectorValue(T, ip)`);
-//! * the H1→H(curl) discrete gradient `grad` (`ParDiscreteLinearOperator` +
-//!   `GradientInterpolator`, joule_solver.cpp:787-796) — fem-rs has the
-//!   H(curl)→H(div) discrete curl (`ParDiscreteLinearOperator::curl_3d`) but no
-//!   H¹→H(curl) gradient;
+//!   PCG + AMG (`fem_parallel::par_amg`, AMS via `ParAmsPrecond`) and the
+//!   SIAV/ODE family (D89/D90), so the solvers are no longer the blocker; the
+//!   blockers are the two discrete operators and the projection listed below.
+//!   Note also that the C++ **stdout itself is not reproducible** past the dof
+//!   banner: hypre prints its `BoomerAMG SETUP PARAMETERS:` block and its
+//!   operator tables unconditionally (`-hl 0` does not silence them), so a byte
+//!   comparison of a full joule run is impossible for any non-hypre
+//!   implementation.  The comparable region is exactly the banner + options +
+//!   skin depths + dof counts implemented below (C++ lines 1-106 for the
+//!   reference run below), after which the C++ emits ~66 lines of hypre
+//!   diagnostics and only then joule's own
+//!   `step      1,	t =  0.500,	dot(E, J) = 1.78064984` /
+//!   `step      2,	t =  1.000,	dot(E, J) = 5.12554673` (lines 107-108).  Those
+//!   two lines are the honest end-to-end target for this miniapp: `dot(E, J)`
+//!   is `ElectricLosses = m1->ParInnerProduct(E_gf, E_gf) = ∫ σ E·E`, and — see
+//!   below — it depends **only** on the electromagnetic half of the operator
+//!   (`P → grad P → weakCurlᵀB → M1 + dt·S1 solve → E ← E − grad P`), never on
+//!   `W`, `F` or `T`;
+//! * the H¹→H(curl) discrete gradient `grad` (`ParDiscreteLinearOperator` +
+//!   `GradientInterpolator`, joule_solver.cpp:787-796): **landed in D110** —
+//!   `DiscreteLinearOperator::gradient` now covers `H¹(P2) → ND2` on 3-D
+//!   hexahedra (`crates/assembly/src/discrete_op.rs`, tests
+//!   `crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs`).  It is *not*
+//!   wired below yet because of the next two bullets;
+//! * the H(curl)→H(div) **discrete curl at order 2 on hexahedra**.
+//!   `DiscreteLinearOperator::curl_3d(ND2 → RT1)` is tetrahedron-only: on a hex
+//!   mesh it panics with "tet face must have an interpolation anchor"
+//!   (`crates/assembly/src/discrete_op.rs`), and joule's `curl->Mult(E, dB)`
+//!   (joule_solver.cpp:585) needs exactly that operator.  The lowest-order pair
+//!   `(ND1 → RT0)` *is* topological and does cover hexes, so this is an
+//!   order-2 gap, not a hex gap;
+//! * `GetJouleHeating`'s L2 projection of `σ|E|²` (joule_solver.cpp:805-815):
+//!   it is a `GridFunctionCoefficient`-valued projection, i.e. the integrand
+//!   reads `E_gf.GetVectorValue(T, ip)`, so it must be assembled
+//!   element-by-element with the H(curl) basis pushed through the element map.
+//!   `fem_assembly::postproc::project_coefficient` takes a *physical point*
+//!   closure and `GridFunction::evaluate_vector_at_element` builds its element
+//!   Jacobian through `simplex_jacobian`, which for `Hex8` is the constant
+//!   corner-based (affine) Jacobian — wrong for the trilinear/curved hexes of
+//!   `cylinder-hex.mesh`.  Needs a trilinear-map-aware entry point;
+//! * the parallel Nédélec `ND2` / `RT1` DOF partition at ≥ 2 ranks: building
+//!   the four spaces in this file on `cylinder-hex.mesh` already prints
+//!   `Warning: exchange_ghost_interior_ids: rank N requested interior DOF
+//!   (elem=E, idx=I) not found, using sentinel GID` for the face/interior DOFs
+//!   of ghost elements (and `GhostExchange::from_partition` panics on a smaller
+//!   hex mesh).  This is pre-existing and independent of the gradient (D110);
+//!   it is why the multi-rank form of the D110 parallel test is `#[ignore]`d;
 //! * `-sc 1` static condensation (`ParBilinearForm::EnableStaticCondensation`),
 //!   `-amr 1` (`GeneralRefinement` + `Rebalance`), `-debug 1`
 //!   (`hypre_ParCSRMatrixPrint`), `-gfprint 1`, `-vis`, `-visit` (no
@@ -656,11 +689,29 @@ fn main() {
         // ── Not ported: the operator + time loop ────────────────────────────
         if rank == 0 {
             eprintln!(
-                "mfem_miniapp_joule: MagneticDiffusionEOperator (the four coupled solves\n\
-                 a0/a1/a2/m1/m2/m3 with HyprePCG + BoomerAMG/AMS/ADS) is not ported yet —\n\
-                 fem-rs has no AMG/AMS/ADS, and hypre prints its own stdout, so a full-run\n\
-                 byte comparison is impossible for any non-hypre implementation.  The run\n\
-                 stops after the dof banner (verified byte-exact against the C++ binary).\n\
+                "mfem_miniapp_joule: MagneticDiffusionEOperator is not wired yet.  The run\n\
+                 stops after the dof banner (byte-exact against the C++ binary, status 3).\n\
+                 Remaining gaps, in dependency order:\n\
+                 1. DiscreteLinearOperator::curl_3d(ND2 -> RT1) is tetrahedron-only; on a hex\n\
+                 mesh it panics ('tet face must have an interpolation anchor'), and joule's\n\
+                 curl->Mult(E, dB) needs it.  (The order-1 pair ND1->RT0 does cover hexes.)\n\
+                 2. GetJouleHeating (L2 projection of sigma |E|^2) needs a trilinear-map-aware\n\
+                 element-wise projection: postproc::project_coefficient takes a physical-point\n\
+                 closure, and GridFunction::evaluate_vector_at_element uses the affine\n\
+                 simplex_jacobian, which is wrong for the trilinear hexes of this mesh.\n\
+                 3. >=2 ranks: the parallel ND2/RT1 DOF partition does not resolve the\n\
+                 face/interior DOFs of ghost elements (exchange_ghost_interior_ids sentinel\n\
+                 GIDs, see the warnings on stderr).\n\
+                 CLOSED by D110: the H1(P2) -> ND2 discrete gradient (3-D hexahedra) now\n\
+                 exists -- DiscreteLinearOperator::gradient, tests\n\
+                 crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs.\n\
+                 Note the C++ stdout past this point is hypre's own (BoomerAMG SETUP\n\
+                 PARAMETERS + operator tables, emitted even with -hl 0), so only the dof\n\
+                 banner is byte-comparable; the end-to-end target is the C++ run's last two\n\
+                 lines, 'step 1/2, t = 0.5/1.0, dot(E, J) = 1.78064984 / 5.12554673', and\n\
+                 dot(E, J) = ElectricLosses = integral sigma E.E depends only on the EM half\n\
+                 of the operator (P, grad P, weakCurl^T B, M1 + dt S1 solve, E <- E - grad P)\n\
+                 -- never on W, F or T.\n\
                  Ported and checked here: banner, options dump, skin depths, the four FE\n\
                  spaces with their orders, the five GlobalTrueVSize lines, the six-field\n\
                  BlockVector layout with its make_ref views, the four material maps.\n\
