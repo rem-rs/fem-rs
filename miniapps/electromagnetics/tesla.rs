@@ -1,21 +1,51 @@
 //!
-//! Solves the magnetostatic problem `Curl(1/mu Curl A) = J + Curl(mu0/mu M)`
-//! (3-D) on an H(curl) finite element space, with an AMR loop.
+//! Tesla miniapp — magnetostatics `Curl(1/mu Curl A) = J + Curl(mu0/mu M)` (3-D).
 //!
-//! Ported so far: driver + three parallel FE spaces + Assemble + Solve
-//! (Dirichlet BCs, PCG+AMS, B/H recovery).
+//! ## ⚠ Declared gap — no input produces a solution (round 31, D139)
 //!
-//! Usage:
-//!   cargo run --release --example mfem_miniapp_tesla -- -m data/beam-tet.mesh -maxit 1 -ranks 1 -ubbc "0 0 1"
-//!   cargo run --release --example mfem_miniapp_tesla -- -m data/beam-tet.mesh -maxit 1 -ranks 1 -ms "0 0 0 0.2 0.4 10"
+//! `main` prints the list below and exits with status **3**.  It used to accept
+//! the whole C++ option set and then **ignore** it: this file is a stub that
+//! runs on a hard-coded `Mesh::<3>::unit_cube_tet(2)` and reports
+//!
+//! ```text
+//! Running solver ... PCG Iterations = 0
+//! Solution computed.
+//! |A| = 0.000000e0, |B| = 0.000000e0
+//! ```
+//!
+//! i.e. a **zero solution** with exit code 0 (measured 2026-09-13 with
+//! `miniapp_tesla -m data/beam-tet.mesh -maxit 1 -ubbc "0 0 1"`).
+//!
+//! Arguments accepted-but-ignored (the "pretend to accept, silently drop" path
+//! the round-31 discipline forbids): `-m/--mesh` (`let _mesh_file`),
+//! `-maxit` (`let _maxit`), `-vbcs`, `-vbcv`; the mesh is never read.
+//! **Evidence**: `miniapp_tesla -m data/beam-tet.mesh` and the no-argument run
+//! both report the same `H1 27 / H(curl) 98 / H(div) 120 / L2 48` DOF counts,
+//! i.e. the hard-coded unit cube.
+//!
+//! What a real port needs (MFEM `miniapps/electromagnetics/tesla.cpp` +
+//! `tesla_solver.cpp`):
+//! * the mesh from `-m` and the `-rs`/`-rp` refinement chain;
+//! * `-maxit` AMR loop with `ParBilinearForm::Update` + ZZ error estimation;
+//! * the `-ms`/`-ha`/`-cr` magnetization/current sources wired into the RHS
+//!   (the coefficient helpers exist below but are not used by `run`);
+//! * `-ubbc` Dirichlet data (currently the only honoured option) and the
+//!   `-vbcs`/`-vbcv` boundary tags;
+//! * a solve that actually produces a non-zero `A` (the RHS assembly is empty
+//!   for every supported option combination).
+//!
+//! The scaffolding below (spaces, `TeslaSolver`, the coefficient closures) is
+//! kept for that port; [`not_ported`] is the only path that executes.
+//!
+//! Usage (the C++ option set; this file refuses all of it):
+//!   miniapp_tesla -m data/beam-tet.mesh -maxit 1 -ubbc "0 0 1"
+//!   miniapp_tesla -m data/beam-tet.mesh -maxit 1 -ms "0 0 0 0.2 0.4 10"
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use fem_assembly::postproc::coefficient::FnCoeff;
 use fem_assembly::standard::{CurlCurlIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator};
 use fem_assembly::coefficient::FnVectorCoeff;
-use fem_mesh::topology::MeshTopology;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
 use fem_parallel::par_discrete_operator::ParDiscreteLinearOperator;
@@ -31,7 +61,12 @@ fn parse_f64_vec(args: &[String], flag: &str) -> Option<Vec<f64>> {
     let mut out = Vec::new();
     for tok in args[i + 1..].iter().take_while(|s| !s.starts_with('-')) {
         for piece in tok.split_whitespace() {
-            out.push(piece.parse().expect("bad float arg"));
+            out.push(piece.parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_tesla: bad float '{piece}' for {flag} — exiting with status 3"
+                );
+                std::process::exit(3)
+            }));
         }
     }
     Some(out)
@@ -44,7 +79,15 @@ fn parse_u32_vec(args: &[String], flag: &str) -> Option<Vec<u32>> {
 fn parse_u32(args: &[String], flag: &str, default: u32) -> u32 {
     args.iter()
         .position(|a| a == flag)
-        .map(|i| args[i + 1].parse().expect("bad int arg"))
+        .map(|i| {
+            args[i + 1].parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_tesla: bad integer '{}' for {flag} — exiting with status 3",
+                    args[i + 1]
+                );
+                std::process::exit(3)
+            })
+        })
         .unwrap_or(default)
 }
 
@@ -139,9 +182,9 @@ impl TeslaSolver {
         let mu_inv_coeff3 = FnCoeff(&|x: &[f64]| self.mu_inv_mode.value(x));
         let curl_mu_inv_curl = ParVectorAssembler::assemble_bilinear(
             &self.nd, &[&CurlCurlIntegrator { mu: mu_inv_coeff1 }], qo);
-        let h_div_hcurl_mu_inv = ParMixedAssembler::assemble_hcurl_hdiv_mass(
+        let _h_div_hcurl_mu_inv = ParMixedAssembler::assemble_hcurl_hdiv_mass(
             &self.nd, &self.rt, qo, mu_inv_coeff2);
-        let h_curl_mass = ParVectorAssembler::assemble_bilinear(
+        let _h_curl_mass = ParVectorAssembler::assemble_bilinear(
             &self.nd, &[&VectorMassIntegrator { alpha: mu_inv_coeff3 }], qo);
 
         let curl = ParDiscreteLinearOperator::curl_3d(&self.nd, &self.rt);
@@ -307,7 +350,32 @@ fn current_ring_fn(cr: &[f64]) -> impl Fn(&[f64]) -> Vec<f64> + Send + Sync + '_
     }
 }
 
+/// D139: prints the gap list and terminates with the project's "honest partial
+/// delivery" status.  Deliberately not `-> !` so the scaffolding in `main`
+/// stays type-checked while this guard is the only path that runs.
+fn not_ported() {
+    eprintln!(
+        "miniapp_tesla: NOT PORTED — declared gap D139; no input is solved and no option except \
+         -ubbc is honoured.\n\
+         \x20 Measured before this guard: `Running solver ... PCG Iterations = 0` / \
+         `|A| = 0.000000e0, |B| = 0.000000e0` with exit code 0,\n\
+         \x20 and `-m data/beam-tet.mesh` produced the same DOF counts as the built-in unit cube \
+         (H1 27 / H(curl) 98 / H(div) 120 / L2 48).\n\
+         Missing pieces (MFEM tesla.cpp / tesla_solver.cpp):\n\
+         \x20 * read the mesh from -m and refine it (-rs/-rp);\n\
+         \x20 * the -maxit AMR loop (ParBilinearForm::Update + ZZ error estimator);\n\
+         \x20 * wire -ms/-ha/-cr sources into the RHS (helpers exist below, unused by run());\n\
+         \x20 * -vbcs/-vbcv boundary tags;\n\
+         \x20 * a non-zero RHS assembly so the solve is not identically zero.\n\
+         The scaffolding is kept for that port. Exiting with status 3."
+    );
+    std::process::exit(3);
+}
+
 fn main() {
+    // D139: declared gap — refuse before parsing anything, so no option is
+    // silently accepted and then dropped.
+    not_ported();
     let args: Vec<String> = std::env::args().collect();
 
     let _mesh_file = if has(&args, "-m") {

@@ -1,16 +1,43 @@
 //!
-//! Lorentz miniapp: charged particle tracking in E/B fields using Boris algorithm.
+//! Lorentz miniapp — charged particle tracking in E/B fields (Boris push).
 //!
-//! WIP#3: Interpolate E/B fields from mesh-based GridFunctions onto particles
-//! using FindPoints (BVH + Newton) + barycentric interpolation.
+//! ## ⚠ Declared gap — CLI is not the C++ miniapp's (round 31, D139)
 //!
-//! Usage:
-//!   # Constant E field (WIP#2 mode)
-//!   cargo run --release --example mfem_miniapp_lorentz -- -npt 10 -nt 100 -dt 0.01 -ex 0 -ey 0 -ez 1
-//!   # Mesh-based E field: linear function E=(y, -x, 0) on a tet mesh
-//!   cargo run --release --example mfem_miniapp_lorentz -- -npt 10 -nt 100 -dt 0.01 -emesh data/beam-tet.mesh -efield "y -x 0"
-//!   # Mesh-based B field: uniform B=(0, 0, 1) on a hex mesh
-//!   cargo run --release --example mfem_miniapp_lorentz -- -npt 10 -nt 100 -dt 0.01 -bmesh data/beam-hex.mesh -bfield "0 0 1"
+//! MFEM `miniapps/electromagnetics/lorentz.cpp` takes its fields from **VisIt
+//! DataCollections** written by the Volta/Tesla miniapps; its options are
+//!
+//! ```text
+//!   -er/--e-root-file  -ef/--e-field-name  -ec/--e-cycle  -epdc/-epdr
+//!   -br/--b-root-file  -bf/--b-field-name  -bc/--b-cycle  -bpdc/-bpdr
+//!   -rdf/--redist-interval  -rdm/--redistribution-mesh  -o/--ordering
+//!   -npt/--num-particles  -m/--mass  -q/--charge
+//!   -xmin/-xmax  -pmin/-pmax  -dt/--time-step  -nt/--num-timesteps
+//!   -vis/-no-vis  -vt/--vis-tail-size  -vf/--vis-interval  -d/--device
+//! ```
+//!
+//! (note `-m` is the particle **mass** there, not a mesh).  This file instead
+//! grew a dev CLI of its own (`-ex/-ey/-ez`, `-bx/-by/-bz`, `-emesh`/`-efield`,
+//! `-bmesh`/`-bfield`, `-unitcube-e`/`-unitcube-b`, plus `-npt/-nt/-dt`) that
+//! has **no counterpart** in the C++, and it used to answer the real C++
+//! options by *ignoring* them and pushing particles in a constant field with
+//! exit code 0 — measured 2026-09-13:
+//! `miniapp_lorentz -er Volta-AMR-Parallel -br Tesla-AMR-Parallel -npt 20 -nt 5`
+//! → `rc=0`, `E = (0, 0, 1), B = (0, 0, 0) [constant]`.
+//!
+//! No run of this file is comparable with the C++ miniapp, so `main` prints this
+//! gap list and exits with status **3** for every input.
+//!
+//! What a real port needs: the VisIt DataCollection reader for the **parallel**
+//! format (`fem_io::data_collection_load` exists but is not wired here), the
+//! `-er/-ef/-ec` and `-br/-bf/-bc` field selection, the particle bounding boxes
+//! (`-xmin/-xmax`, `-pmin/-pmax`), `-m`/`-q`, the `-rdf`/`-rdm` redistribution
+//! and the `find_and_interpolate_3d` evaluation of the collection's *grid
+//! function* (the WIP path below interpolates a node vector built from an
+//! expression string instead).  The Boris pusher and `ParticleSet` scaffolding
+//! is kept for that port.
+//!
+//! C++ reference: MFEM 4.10 `miniapps/electromagnetics/lorentz.cpp` (its sample
+//! runs produce the Volta/Tesla collections first).
 
 use fem_mesh::particle::ParticleSet;
 use fem_parallel::launcher::native::ThreadLauncher;
@@ -21,20 +48,36 @@ fn parse_f64_vec(args: &[String], flag: &str) -> Option<Vec<f64>> {
     let mut out = Vec::new();
     for tok in args[i + 1..].iter().take_while(|s| !s.starts_with('-')) {
         for piece in tok.split_whitespace() {
-            out.push(piece.parse().expect("bad float arg"));
+            out.push(piece.parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_lorentz: bad float '{piece}' for {flag} — exiting with status 3"
+                );
+                std::process::exit(3)
+            }));
         }
     }
     Some(out)
 }
 
 fn parse_f64(args: &[String], flag: &str, default: f64) -> f64 {
-    parse_f64_vec(args, flag).map(|v| v[0]).unwrap_or(default)
+    // `first()` instead of `v[0]`: `-flag` with no value used to panic here.
+    parse_f64_vec(args, flag)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(default)
 }
 
 fn parse_u32(args: &[String], flag: &str, default: u32) -> u32 {
     args.iter()
         .position(|a| a == flag)
-        .map(|i| args[i + 1].parse().expect("bad int arg"))
+        .map(|i| {
+            args[i + 1].parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_lorentz: bad integer '{}' for {flag} — exiting with status 3",
+                    args[i + 1]
+                );
+                std::process::exit(3)
+            })
+        })
         .unwrap_or(default)
 }
 
@@ -44,7 +87,14 @@ fn parse_u32(args: &[String], flag: &str, default: u32) -> u32 {
 /// Each component is a simple expression: constant, x, y, z, -x, -y, -z.
 fn build_field_from_expr(mesh: &fem_mesh::Mesh<3>, expr: &str) -> Vec<f64> {
     let parts: Vec<&str> = expr.split_whitespace().collect();
-    assert!(parts.len() == 3, "field expression needs 3 components, got {:?}", parts);
+    if parts.len() != 3 {
+        // Malformed expression is reported, not panicked on (round 31).
+        eprintln!(
+            "miniapp_lorentz: field expression needs 3 components, got {parts:?} — exiting with \
+             status 3"
+        );
+        std::process::exit(3);
+    }
     let nn = mesh.n_nodes();
     let mut field = vec![0.0; nn * 3];
     for n in 0..nn {
@@ -65,7 +115,33 @@ fn build_field_from_expr(mesh: &fem_mesh::Mesh<3>, expr: &str) -> Vec<f64> {
     field
 }
 
+/// D139: prints the gap list and terminates with the project's "honest partial
+/// delivery" status.  Deliberately not `-> !` so the Boris/`ParticleSet`
+/// scaffolding in `main` stays type-checked while this guard is the only path
+/// that executes.
+fn not_ported() {
+    eprintln!(
+        "miniapp_lorentz: NOT PORTED — declared gap D139; the C++ miniapp reads its E/B fields \
+         from VisIt DataCollections\n\
+         \x20 (-er/-ef/-ec, -br/-bf/-bc) produced by the Volta/Tesla miniapps, while this file's \
+         CLI (-ex/-emesh/-efield, ...)\n\
+         \x20 has no counterpart in the C++ and its constant-field runs are not comparable, so no \
+         input is accepted.\n\
+         Missing pieces: parallel VisIt DataCollection reading (fem_io::data_collection_load is \
+         not wired here), the field-name/cycle\n\
+         \x20 selection, the -xmin/-xmax/-pmin/-pmax/-m/-q particle initialization, the \
+         -rdf/-rdm redistribution, and the\n\
+         \x20 FindPoints evaluation of a collection grid function. The Boris pusher below is kept \
+         for that port.\n\
+         C++ reference: MFEM 4.10 miniapps/electromagnetics/lorentz.cpp. Exiting with status 3."
+    );
+    std::process::exit(3);
+}
+
 fn main() {
+    // D139: declared gap — the C++ option set cannot be honoured, and running
+    // the dev constant-field path for it would be a silent substitution.
+    not_ported();
     let args: Vec<String> = std::env::args().collect();
 
     let npt = parse_u32(&args, "-npt", 100);

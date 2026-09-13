@@ -23,10 +23,29 @@
 //! - common `RT_ParFESpace(p)` builds `RT_FECollection(p-1)` → RT0 at order 1;
 //! - `L2_ParFESpace(order-1)` → P0.
 //!
+//! ## Declared gaps (round 31, D139) — each refusal exits with status 3
+//!
+//! * **`--ranks > 1`**: the multi-rank path aborts inside the parallel
+//!   assembly — the underlying CSR assertion at
+//!   `crates/parallel/src/launcher/native.rs:154` forwards
+//!   `assertion 'left == right' failed: left 24, right 48` with `-m
+//!   data/beam-tet.mesh -maxit 1 -dbcs 1 -dbcv 0 --ranks 2` (measured).  Only
+//!   `--ranks 1` runs; `--ranks` therefore defaults to **1** (the C++ default is
+//!   the MPI world size) and larger values are refused instead of panicking.
+//! * **AMR (`-maxit > 1`)**: needs MFEM's 3-D RT L2ZZ ZZErrorEstimator; run with
+//!   `-maxit 1`.  (The C++ default `-maxit 100` is therefore refused here — the
+//!   no-argument run exits 3 with this message.)
+//! * **`-nbcs`** (surface charge `n.bdr_attr_is_ess`) and **`-vp`**
+//!   (polarization source) are not ported.
+//! * non-3-D input, or an unreadable mesh file.
+//!
+//! All unported paths used `exit(1)`, which is not this project's
+//! "honest partial delivery" code; they now use **3**.
+//!
 //! Usage:
-//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -dbcv 0
-//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -cs "0.0 0.0 0.0 0.2 1.0e-11"
-//!   cargo run --release --example mfem_miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 --ranks 2
+//!   cargo run --release --example miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -dbcv 0
+//!   cargo run --release --example miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 -cs "0.0 0.0 0.0 0.2 1.0e-11"
+//!   cargo run --release --example miniapp_volta -- -m data/beam-tet.mesh -maxit 1 -dbcs 1 --ranks 1
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +54,7 @@ use fem_assembly::mixed::HDivL2DivIntegrator;
 use fem_assembly::postproc::coefficient::FnCoeff;
 use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator, VectorMassIntegrator};
 use fem_parallel::launcher::native::ThreadLauncher;
-use fem_parallel::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
+use fem_parallel::par_amg::{ParAmgConfig, SmootherType};
 use fem_parallel::par_discrete_operator::ParDiscreteLinearOperator;
 use fem_parallel::par_mesh::ParallelMesh;
 use fem_parallel::par_partition::partition_mesh;
@@ -53,7 +72,13 @@ fn parse_f64_vec(args: &[String], flag: &str) -> Option<Vec<f64>> {
     let mut out = Vec::new();
     for tok in args[i + 1..].iter().take_while(|s| !s.starts_with('-')) {
         for piece in tok.split_whitespace() {
-            out.push(piece.parse().expect("bad float arg"));
+            // Malformed CLI input is reported, not panicked on (round 31).
+            out.push(piece.parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_volta: bad float '{piece}' for {flag} — exiting with status 3"
+                );
+                std::process::exit(3)
+            }));
         }
     }
     Some(out)
@@ -66,7 +91,15 @@ fn parse_u32_vec(args: &[String], flag: &str) -> Option<Vec<u32>> {
 fn parse_u32(args: &[String], flag: &str, default: u32) -> u32 {
     args.iter()
         .position(|a| a == flag)
-        .map(|i| args[i + 1].parse().expect("bad int arg"))
+        .map(|i| {
+            args[i + 1].parse().unwrap_or_else(|_| {
+                eprintln!(
+                    "miniapp_volta: bad integer '{}' for {flag} — exiting with status 3",
+                    args[i + 1]
+                );
+                std::process::exit(3)
+            })
+        })
         .unwrap_or(default)
 }
 
@@ -175,7 +208,7 @@ impl VoltaSolver {
             &nd, &rt, qo, FnCoeff(self.eps_mode.as_fn()));
 
         // rhod_ (H1 linear form): volumetric charge (`-cs`) + point charges.
-        let mut rhod = if self.cs.is_empty() && self.pcs.is_empty() {
+        let rhod = if self.cs.is_empty() && self.pcs.is_empty() {
             ParVector::zeros(&h1)
         } else {
             let cs = self.cs.clone();
@@ -242,7 +275,9 @@ impl VoltaSolver {
         }
 
         // Parallel PCG + BoomerAMG (C++: HyprePCG tol 1e-12, maxit 500, print 2).
-        let amg_cfg = ParAmgConfig {
+        // The AMG config is kept but unused: `par_solve_pcg_amg` stalls on this
+        // 3-D tet H1 problem (see the note at the solve below).
+        let _amg_cfg = ParAmgConfig {
             smoother: SmootherType::SymmetricGaussSeidel,
             ..Default::default()
         };
@@ -320,7 +355,10 @@ fn main() {
     let order = parse_u32(&args, "-o", 1) as u8;
     let serial_ref = parse_u32(&args, "-rs", 0);
     let maxit = parse_u32(&args, "-maxit", 100);
-    let n_workers = parse_u32(&args, "--ranks", 2) as usize;
+    // The C++ default is the MPI world size; here the multi-rank path aborts in
+    // the parallel assembly (see the gap list in the file header), so 1 is the
+    // default and anything larger is refused below.
+    let n_workers = parse_u32(&args, "--ranks", 1) as usize;
 
     let dbcs = parse_u32_vec(&args, "-dbcs").unwrap_or_default();
     let dbcv = parse_f64_vec(&args, "-dbcv").unwrap_or_default();
@@ -333,24 +371,53 @@ fn main() {
     let vp = parse_f64_vec(&args, "-vp").unwrap_or_default();
     let nbcs = parse_u32_vec(&args, "-nbcs").unwrap_or_default();
 
+    // Declared gaps (D139): every refusal uses the project's honest-partial-
+    // delivery status 3 (these used to exit 1).
+    if n_workers > 1 {
+        eprintln!(
+            "miniapp_volta: --ranks {n_workers} is not supported (only --ranks 1): the multi-rank \
+             path aborts inside the parallel assembly\n\
+             \x20 (assertion `left == right` failed: left 24, right 48 via \
+             crates/parallel/src/launcher/native.rs:154). Run with --ranks 1."
+        );
+        std::process::exit(3);
+    }
     if !vp.is_empty() {
-        eprintln!("mfem_miniapp_volta: -vp (polarization source) is not ported yet");
-        std::process::exit(1);
+        eprintln!(
+            "miniapp_volta: -vp (polarization source) is not ported yet — declared gap, exiting \
+             with status 3"
+        );
+        std::process::exit(3);
     }
     if !nbcs.is_empty() {
-        eprintln!("mfem_miniapp_volta: -nbcs (surface charge) is not ported yet");
-        std::process::exit(1);
+        eprintln!(
+            "miniapp_volta: -nbcs (surface charge: n.bdr_attr_is_ess) is not ported yet — declared \
+             gap, exiting with status 3"
+        );
+        std::process::exit(3);
     }
     if maxit > 1 {
-        eprintln!("mfem_miniapp_volta: AMR (-maxit > 1) needs the 3-D RT L2ZZ estimator, not ported yet; run with -maxit 1");
-        std::process::exit(1);
+        eprintln!(
+            "miniapp_volta: AMR (-maxit > 1) needs the 3-D RT L2ZZ estimator, not ported yet; run \
+             with -maxit 1 — declared gap, exiting with status 3"
+        );
+        std::process::exit(3);
     }
 
     let mfem = fem_io::mfem::read_mfem_file(&mesh_file)
-        .unwrap_or_else(|e| { eprintln!("failed to read mesh {mesh_file}: {e}"); std::process::exit(1); });
+        .unwrap_or_else(|e| {
+            eprintln!("miniapp_volta: failed to read mesh {mesh_file}: {e} — exiting with status 3");
+            std::process::exit(3)
+        });
     let mut mesh0 = match mfem.mesh3d {
         Some(m) => m,
-        None => { eprintln!("volta needs a 3-D volume mesh: {mesh_file}"); std::process::exit(1); }
+        None => {
+            eprintln!(
+                "miniapp_volta: needs a 3-D volume mesh, '{mesh_file}' is not one — exiting with \
+                 status 3"
+            );
+            std::process::exit(3)
+        }
     };
     // tet meshes: MFEM Mesh(,1,1) refine flag only marks for refinement — no
     // subdivision; -rs refines explicitly.
