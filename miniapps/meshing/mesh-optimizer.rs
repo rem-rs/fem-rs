@@ -34,8 +34,11 @@
 //!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 2 -tid 1 -ni 200 -bnd -qt 1 -qo 8 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m jagged.mesh -o 2 -mid 22 -tid 1 -ni 50 -li 50 -qo 4 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m icf.mesh -o 1 -mid 1 -tid 1 -lc 0.02 -nor -no-vis
-//!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 94 -tid 5 -ni 50 -qo 4 -nor -no-vis
-//!   cargo run --release --example mesh_optimizer -- -m stretched2D.mesh -rs 1 -o 2 -mid 2 -tid 1 -ni 50 -qo 5 -nor -vl 1 -alc 1.0 -no-vis
+//!   cargo run --release --example mesh_optimizer -- -m data/square01.mesh -o 2 -rs 2 -mid 2 -tid 5 -ni 50 -qo 4 -nor -no-vis
+//!     (the C++ samples use `-mid 94`, whose metric is not in the id list above)
+//!   cargo run --release --example mesh_optimizer -- -m data/square01.mesh -o 2 -rs 1 -mid 2 -tid 1 -ni 50 -qo 5 -nor -vl 1 -alc 1.0 -no-vis
+//!     (the C++ sample mesh `stretched2D.mesh` is not part of this repo's
+//!     `data/` set)
 
 use fem_assembly::tmop_form::{
     count_wrong_orientations, curved_mesh_positions, linear_mesh_positions, metric_from_id_2d,

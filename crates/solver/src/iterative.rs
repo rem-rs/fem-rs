@@ -46,8 +46,78 @@ pub fn fmt_g(x: f64) -> String {
     }
 }
 
-// ─── Macro-generated iterative solvers ──────────────────────────────────────
+/// Trailer gates of MFEM's `CGSolver::Mult` (`linalg/solvers.cpp`), mapped from
+/// the fem-rs print scale onto `IterativeSolver::PrintLevel`'s flags
+/// (`IterativeSolver::FromLegacyPrintLevel`):
+///
+/// | fem-rs `PrintLevel`    | MFEM legacy | warnings | iterations | summary |
+/// |------------------------|-------------|----------|------------|---------|
+/// | `Silent`               | -1          | no       | no         | no      |
+/// | `Summary`              | 2           | yes      | no         | yes     |
+/// | `Iterations` / `Debug` | 1           | yes      | yes        | no      |
+///
+/// The trailer itself is:
+/// ```text
+/// PCG: Number of iterations: <final_iter>      if summary || (warnings && !converged)
+/// Average reduction factor = <arf>             if summary || iterations
+/// PCG: No convergence!                         if warnings && !converged
+/// ```
+#[derive(Clone, Copy)]
+struct CgTrailerGates {
+    warnings: bool,
+    iterations: bool,
+    summary: bool,
+}
 
+impl CgTrailerGates {
+    fn from_config(cfg: &SolverConfig) -> Self {
+        match cfg.effective_print_level() {
+            PrintLevel::Silent => Self { warnings: false, iterations: false, summary: false },
+            PrintLevel::Summary => Self { warnings: true, iterations: false, summary: true },
+            PrintLevel::Iterations | PrintLevel::Debug => {
+                Self { warnings: true, iterations: true, summary: false }
+            }
+        }
+    }
+
+    /// `print_options.warnings && !converged` — the non-convergence report.
+    fn report_warning(&self, converged: bool) -> bool {
+        self.warnings && !converged
+    }
+
+    /// The trailer lines (C++ order) for a run that stopped after `final_iter`
+    /// iterations with `(B r, r) = betanom` (`nom0` at the start).
+    fn trailer_lines(
+        &self,
+        final_iter: usize,
+        nom0: f64,
+        betanom: f64,
+        converged: bool,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        if self.summary || self.report_warning(converged) {
+            lines.push(format!("PCG: Number of iterations: {final_iter}"));
+        }
+        if self.summary || self.iterations {
+            // MFEM: pow(betanom/nom0, 0.5/final_iter)
+            let arf = (betanom / nom0).powf(0.5 / final_iter as f64);
+            lines.push(format!("Average reduction factor = {}", fmt_g(arf)));
+        }
+        if self.report_warning(converged) {
+            lines.push("PCG: No convergence!".to_string());
+        }
+        lines
+    }
+
+    /// Print [`Self::trailer_lines`] to stdout, like `mfem::out`.
+    fn print_trailer(&self, final_iter: usize, nom0: f64, betanom: f64, converged: bool) {
+        for line in self.trailer_lines(final_iter, nom0, betanom, converged) {
+            println!("{line}");
+        }
+    }
+}
+
+// ─── Macro-generated iterative solvers ──────────────────────────────────────
 solve_iterative_simple!(
     solve_cg,
     ConjugateGradient<T>,
@@ -140,12 +210,9 @@ pub fn solve_pcg_gssmoother(
             println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
         }
         if betanom <= r0 || iter >= cfg.max_iter {
-            let res = into_result_from_cg(n, iter, nom0, betanom, betanom <= r0);
-            if cfg.verbose {
-                // MFEM: average reduction factor = (betanom/nom0)^(0.5/final_iter)
-                let avg = (betanom / nom0).powf(0.5 / iter as f64);
-                println!("Average reduction factor = {}", fmt_g(avg));
-            }
+            let converged = betanom <= r0;
+            let res = into_result_from_cg(n, iter, nom0, betanom, converged);
+            CgTrailerGates::from_config(cfg).print_trailer(iter, nom0, betanom, converged);
             return Ok(res);
         }
         let beta = betanom / nom;
@@ -223,11 +290,9 @@ pub fn solve_pcg_dsmoother(
             println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
         }
         if betanom <= r0 || iter >= cfg.max_iter {
-            let res = into_result_from_cg(n, iter, nom0, betanom, betanom <= r0);
-            if cfg.verbose {
-                let avg = (betanom / nom0).powf(0.5 / iter as f64);
-                println!("Average reduction factor = {}", fmt_g(avg));
-            }
+            let converged = betanom <= r0;
+            let res = into_result_from_cg(n, iter, nom0, betanom, converged);
+            CgTrailerGates::from_config(cfg).print_trailer(iter, nom0, betanom, converged);
             return Ok(res);
         }
         let beta = betanom / nom;
@@ -664,7 +729,8 @@ where
     p.copy_from_slice(&z);
 
     let mut rz = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
-    let print_iter = cfg.effective_print_level() >= PrintLevel::Iterations;
+    let gates = CgTrailerGates::from_config(cfg);
+    let print_iter = gates.iterations;
     // MFEM CGSolver convergence test: nom = (B r, r) = (z, r); converged when
     // nom <= max(rtol^2 * nom0, atol^2)  (cg.cpp).  Using |z| (as before)
     // mis-stops the iteration whenever |P r| and (P r, r) differ, which broke
@@ -676,10 +742,10 @@ where
     if print_iter {
         println!("   Iteration : {:>3}  (B r, r) = {}", 0, fmt_g(rz));
     }
-    if nom <= tol_sq {
-        if print_iter {
-            println!("Average reduction factor = {:.6}", 1.0);
-        }
+        if nom <= tol_sq {
+            if print_iter {
+                println!("Average reduction factor = {}", fmt_g(1.0));
+            }
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
@@ -719,7 +785,7 @@ where
         if nom <= tol_sq {
             if print_iter {
                 let avg = (nom / nom0).powf(0.5 / (iter + 1) as f64);
-                println!("Average reduction factor = {:.6}", avg);
+                println!("Average reduction factor = {}", fmt_g(avg));
             }
             return Ok(SolveResult {
                 converged: true,
@@ -735,6 +801,8 @@ where
         rz = rz_new;
     }
 
+    // MFEM CGSolver::Mult trailer for a run that stopped at `max_iter`.
+    gates.print_trailer(cfg.max_iter, nom0, nom, false);
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
         residual: nom,
@@ -1176,6 +1244,13 @@ where
     }
 
     x.copy_from_slice(lx.as_slice());
+    // MFEM CGSolver::Mult trailer for a level-1 run that stopped at `max_iter`:
+    // the iteration count and the non-convergence warning join the
+    // (already printed) average reduction factor.
+    if verbose {
+        CgTrailerGates { warnings: true, iterations: true, summary: false }
+            .print_trailer(max_iter, gamma0, gamma, false);
+    }
     Err(SolverError::ConvergenceFailed {
         max_iter,
         residual: gamma.sqrt(),
@@ -2036,5 +2111,119 @@ pub fn solve_minres_precond(
             max_iter: cfg.max_iter,
             residual: eta.abs(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GSSmoother;
+
+    fn cfg(verbose: bool, print_level: PrintLevel) -> SolverConfig {
+        SolverConfig { rtol: 1e-12, max_iter: 200, verbose, print_level, ..Default::default() }
+    }
+
+    /// MFEM `CGSolver::Mult` at print_level 1 with `max_iter` reached: the
+    /// iteration count, the average reduction factor and the warning line.
+    #[test]
+    fn trailer_non_converged_level1() {
+        let g = CgTrailerGates::from_config(&cfg(true, PrintLevel::Silent));
+        let lines = g.trailer_lines(200, 1.0, 4.09789e-10, false);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "PCG: Number of iterations: 200");
+        assert_eq!(
+            lines[1],
+            format!(
+                "Average reduction factor = {}",
+                fmt_g(4.09789e-10f64.powf(0.5 / 200.0))
+            )
+        );
+        assert_eq!(lines[2], "PCG: No convergence!");
+    }
+
+    /// A converged level-1 run prints only the average reduction factor.
+    #[test]
+    fn trailer_converged_level1() {
+        let g = CgTrailerGates::from_config(&cfg(true, PrintLevel::Silent));
+        let lines = g.trailer_lines(28, 1.0, 2.5e-30, true);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Average reduction factor = "));
+    }
+
+    /// print_level 2 (`summary`) always prints the count and the factor.
+    #[test]
+    fn trailer_summary() {
+        let g = CgTrailerGates::from_config(&cfg(false, PrintLevel::Summary));
+        assert_eq!(
+            g.trailer_lines(2, 1.0, 1.0, true),
+            vec!["PCG: Number of iterations: 2", "Average reduction factor = 1"]
+        );
+        assert_eq!(
+            g.trailer_lines(5, 1.0, 1.0, false),
+            vec![
+                "PCG: Number of iterations: 5",
+                "Average reduction factor = 1",
+                "PCG: No convergence!"
+            ]
+        );
+    }
+
+    /// print_level -1 (`silent`) is completely quiet.
+    #[test]
+    fn trailer_silent() {
+        let g = CgTrailerGates::from_config(&cfg(false, PrintLevel::Silent));
+        assert!(g.trailer_lines(3, 1.0, 2.0, false).is_empty());
+    }
+
+    /// 1-D Poisson (tridiagonal, all Dirichlet) — the smallest system that
+    /// exercises the `solve_pcg` trailer path end to end: `max_iter = 3` stops
+    /// early, a large `max_iter` converges.
+    fn tridiag_poisson(n: usize) -> (FemCsr<f64>, Vec<f64>, Vec<f64>) {
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut values = Vec::new();
+        row_ptr.push(0);
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push((i - 1) as u32);
+                values.push(-1.0);
+            }
+            col_idx.push(i as u32);
+            values.push(2.0);
+            if i + 1 < n {
+                col_idx.push((i + 1) as u32);
+                values.push(-1.0);
+            }
+            row_ptr.push(col_idx.len());
+        }
+        let a = FemCsr { nrows: n, ncols: n, row_ptr, col_idx, values };
+        (a, vec![1.0; n], vec![0.0; n])
+    }
+
+    #[test]
+    fn solve_pcg_stops_at_max_iter() {
+        let (a, b, mut x) = tridiag_poisson(32);
+        let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a)).expect("GSSmoother");
+        let err = solve_pcg(&a, &b, &mut x, &gs, 1e-300, 3, false)
+            .expect_err("3 iterations must not reach rtol=1e-300");
+        match err {
+            SolverError::ConvergenceFailed { max_iter, residual } => {
+                assert_eq!(max_iter, 3);
+                assert!(residual.is_finite() && residual > 0.0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn solve_pcg_converges_and_trailer_is_arf_only() {
+        let (a, b, mut x) = tridiag_poisson(32);
+        let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a)).expect("GSSmoother");
+        let res = solve_pcg(&a, &b, &mut x, &gs, 1e-12, 200, false).expect("converges");
+        assert!(res.converged);
+        assert!(res.iterations > 0 && res.iterations <= 200);
+        // A converged level-1 run gets no count/warning lines.
+        let g = CgTrailerGates::from_config(&cfg(true, PrintLevel::Silent));
+        assert_eq!(g.trailer_lines(res.iterations, 1.0, res.final_residual.powi(2), true).len(), 1);
     }
 }
