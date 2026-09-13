@@ -230,6 +230,13 @@ pub use ode::{
     ImexExpImplEuler, ImexOperator, ImexRk2_222, ImexRk2_232, ImexRk3, ImexSsp2, ImexTimeStepper,
     ImplicitEuler, ImplicitTimeStepper, Rk3Ssp, Rk4, Sdirk2, TimeStepper,
 };
+// The MFEM `ODESolver` class family (`linalg/ode.*`): its distinguishing feature
+// is the stateful `TimeDependentOperator::ImplicitSolve` contract that the
+// electromagnetics miniapps (joule, maxwell) drive.
+pub use ode::mfem_ode::{
+    BackwardEulerSolver, DenseOperator, ImplicitMidpointSolver, LinearOp, OdeSolver, Sdirk23Gamma,
+    Sdirk23Solver, Sdirk33Solver, Sdirk34Solver, SiaState, SiavSolver, TimeDependentOperator,
+};
 pub use p_multigrid::{
     build_pmg_hierarchy_1d_laplacian, fmg_solve, solve_vcycle_pmg, PmgHierarchy, PmgPrecond,
 };

@@ -46,6 +46,40 @@ impl BlockVector {
         BlockVector { data: vec![0.0; total], offsets }
     }
 
+    /// Build a block vector from explicit block offsets.
+    ///
+    /// Equivalent to MFEM's `BlockVector(const Array<int> &offsets)` — the
+    /// joule/maxwell miniapps use it to lay out several FE spaces in one
+    /// contiguous buffer (`Array<int> true_offset(7)` in `joule.cpp`):
+    /// block `i` then occupies `offsets[i] .. offsets[i + 1]`.
+    ///
+    /// `offsets` must start at zero and be non-decreasing.  The block sizes
+    /// implied by the offsets normally come from
+    /// [`BlockFESpace`](fem_space::BlockFESpace)::`global_dof_offset`, but the
+    /// coupling is deliberately left to the caller (this crate is a level
+    /// below the FE spaces).
+    pub fn from_offsets(offsets: &[usize]) -> Self {
+        assert!(
+            !offsets.is_empty(),
+            "BlockVector::from_offsets: need at least one offset (got an empty slice)"
+        );
+        assert_eq!(
+            offsets[0], 0,
+            "BlockVector::from_offsets: offsets[0] must be 0, got {}", offsets[0]
+        );
+        for (i, w) in offsets.windows(2).enumerate() {
+            assert!(
+                w[1] >= w[0],
+                "BlockVector::from_offsets: offsets must be non-decreasing \
+                 (offsets[{}] = {} > offsets[{}] = {})", i, w[0], i + 1, w[1]
+            );
+        }
+        BlockVector {
+            data: vec![0.0; *offsets.last().unwrap()],
+            offsets: offsets.to_vec(),
+        }
+    }
+
     /// Number of blocks.
     pub fn n_blocks(&self) -> usize { self.offsets.len() - 1 }
 
@@ -77,6 +111,45 @@ impl BlockVector {
     /// Size (number of DOFs) of block `i`.
     pub fn block_size(&self, i: usize) -> usize {
         self.offsets[i + 1] - self.offsets[i]
+    }
+
+    /// Immutable views of every block at once.
+    ///
+    /// The returned slices alias the block vector's storage (zero copy); the
+    /// set of views is the whole buffer, so they are disjoint by construction.
+    pub fn views(&self) -> Vec<&[f64]> {
+        self.offsets
+            .windows(2)
+            .map(|w| &self.data[w[0]..w[1]])
+            .collect()
+    }
+
+    /// Mutable views of every block at once — the multi-field counterpart of
+    /// [`BlockVector::block_mut`].
+    ///
+    /// This is the Rust equivalent of the MFEM pattern in `joule.cpp`, where
+    /// six `GridFunction`s are attached to one `BlockVector` (`MakeRef`) and
+    /// written through simultaneously:
+    /// ```text
+    /// T_gf.MakeRef(&L2FESpace,    F, true_offset[0]);
+    /// F_gf.MakeRef(&HDivFESpace,  F, true_offset[1]);
+    /// ...
+    /// ```
+    /// Rather than handing out raw pointers (as MFEM's `MakeRef` does), the
+    /// borrow checker is satisfied by splitting the single `&mut self` into
+    /// `n_blocks()` disjoint `&mut [f64]` views — no aliasing, no `unsafe`.
+    /// Writes through a view are visible in the underlying vector, and blocks
+    /// are independent of one another.
+    pub fn views_mut(&mut self) -> Vec<&mut [f64]> {
+        let offsets = self.offsets.clone();
+        let mut rest: &mut [f64] = &mut self.data;
+        let mut out = Vec::with_capacity(offsets.len() - 1);
+        for w in offsets.windows(2) {
+            let (head, tail) = rest.split_at_mut(w[1] - w[0]);
+            out.push(head);
+            rest = tail;
+        }
+        out
     }
 }
 
@@ -251,5 +324,78 @@ mod tests {
         assert_eq!(bv.offset(1), 4);
         assert_eq!(bv.block_size(0), 4);
         assert_eq!(bv.block_size(1), 6);
+    }
+
+    #[test]
+    fn from_offsets_matches_sizes() {
+        // MFEM's `BlockVector(Array<int>&)`: offsets {0, 3, 5, 5} == sizes {3, 2, 0}.
+        let from_off = BlockVector::from_offsets(&[0, 3, 5, 5]);
+        let from_sizes = BlockVector::new(vec![3, 2, 0]);
+        assert_eq!(from_off.len(), from_sizes.len());
+        assert_eq!(from_off.n_blocks(), from_sizes.n_blocks());
+        for i in 0..from_sizes.n_blocks() {
+            assert_eq!(from_off.offset(i), from_sizes.offset(i));
+            assert_eq!(from_off.block_size(i), from_sizes.block_size(i));
+        }
+        assert_eq!(from_off.as_slice(), from_sizes.as_slice());
+    }
+
+    #[test]
+    fn views_mut_write_through_and_disjoint() {
+        let mut bv = BlockVector::new(vec![2, 3, 1]);
+
+        // Write every block through its view only.
+        {
+            let mut views = bv.views_mut();
+            assert_eq!(views.len(), 3);
+            views[0].copy_from_slice(&[1.0, 2.0]);
+            views[1].copy_from_slice(&[3.0, 4.0, 5.0]);
+            views[2].copy_from_slice(&[6.0]);
+        }
+
+        // The writes are visible in the original vector ...
+        assert_eq!(bv.as_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(bv.block(0), &[1.0, 2.0]);
+        assert_eq!(bv.block(1), &[3.0, 4.0, 5.0]);
+        assert_eq!(bv.block(2), &[6.0]);
+
+        // ... and bit-for-bit identical to a per-block copy of the same data.
+        let mut copy = BlockVector::new(vec![2, 3, 1]);
+        copy.block_mut(0).copy_from_slice(&[1.0, 2.0]);
+        copy.block_mut(1).copy_from_slice(&[3.0, 4.0, 5.0]);
+        copy.block_mut(2).copy_from_slice(&[6.0]);
+        for (a, b) in bv.as_slice().iter().zip(copy.as_slice().iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+
+        // Mutating block 1 must not disturb the other blocks.
+        let before = (bv.block(0).to_vec(), bv.block(2).to_vec());
+        for (k, v) in bv.views_mut()[1].iter_mut().enumerate() {
+            *v = 100.0 + k as f64;
+        }
+        assert_eq!(bv.block(1), &[100.0, 101.0, 102.0]);
+        assert_eq!(bv.block(0), before.0.as_slice());
+        assert_eq!(bv.block(2), before.1.as_slice());
+    }
+
+    #[test]
+    fn views_and_views_mut_partition_the_buffer() {
+        let mut bv = BlockVector::new(vec![4, 0, 2]);
+        let sizes: Vec<usize> = (0..bv.n_blocks()).map(|i| bv.block_size(i)).collect();
+        {
+            let imm: Vec<&[f64]> = bv.views();
+            assert_eq!(imm.len(), 3);
+            assert_eq!(imm.iter().map(|v| v.len()).sum::<usize>(), bv.len());
+            assert!(imm[1].is_empty());
+        }
+
+        let mut off = 0usize;
+        for (i, v) in bv.views_mut().iter_mut().enumerate() {
+            assert_eq!(v.len(), sizes[i]);
+            v.fill(i as f64);
+            off += v.len();
+        }
+        assert_eq!(off, bv.len());
+        assert_eq!(bv.as_slice(), &[0.0, 0.0, 0.0, 0.0, 2.0, 2.0]);
     }
 }

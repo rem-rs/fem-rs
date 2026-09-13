@@ -12,7 +12,9 @@
 //!
 //! with `E` in H(curl) (Nedelec edge elements) and `B` in H(div)
 //! (Raviart-Thomas face elements), advanced by the symplectic integrator
-//! `SIAVSolver` (`linalg/ode.cpp`, orders 1–4, tables copied verbatim).
+//! `SIAVSolver` (`linalg/ode.cpp`, orders 1–4) — taken from the library
+//! (`fem_solver::SiavSolver`, D90) rather than from a local copy, with the
+//! `maxwell` rank-local vectors supplied through `SiaState`.
 //!
 //! ## Port boundary (what is 1:1 and what is not)
 //!
@@ -103,7 +105,7 @@ use fem_parallel::{
     Comm, ParCsrMatrix, ParMixedAssembler, ParVector, ParVectorAssembler, ParallelFESpace,
     WorkerConfig,
 };
-use fem_solver::SolverConfig;
+use fem_solver::{SolverConfig, SiavSolver, SiaState, TimeDependentOperator};
 use fem_space::constraints::boundary_dofs_hcurl;
 use fem_space::{HCurlSpace, HDivSpace};
 
@@ -474,41 +476,73 @@ fn snap_time_step(tmax: f64, dtmax: f64, dt: &mut f64) -> i32 {
 }
 
 // ─── Symplectic integrator (`linalg/ode.cpp`: SIASolver / SIAVSolver) ───────
+//
+// The tables and the stage sequence now live in the library
+// (`fem_solver::mfem_ode::SiavSolver` — a 1:1 port of `SIAVSolver::Step`) and
+// are shared with `joule`.  What stays here is the rank-local wiring that MFEM
+// expresses with raw pointers (`SIASolver::Init(Operator&, TimeDependentOperator&)`):
+//
+// * [`SiaRankVector`] — `SiaState` for a `ParVector`, i.e. ghost-inclusive
+//   values plus the `update_ghosts()` MFEM spells out after each `Add`;
+// * [`MaxwellF`] — the `F_` side, which is the `MaxwellSolver` operator
+//   (`Type::EXPLICIT` in `maxwell.cpp`: `main` never passes `Type::IMPLICIT`).
 
-/// Variable-order (1–4) symplectic integration algorithm.  `a_`/`b_` are the
-/// C++ tables verbatim.
-struct Siav {
-    a: Vec<f64>,
-    b: Vec<f64>,
+/// `SiaState` for a rank-local `ParVector`.
+struct SiaRankVector<'a>(&'a mut ParVector);
+
+impl SiaState for SiaRankVector<'_> {
+    fn len(&self) -> usize { self.0.as_slice().len() }
+    fn slice(&self) -> &[f64] { self.0.as_slice() }
+    fn slice_mut(&mut self) -> &mut [f64] { self.0.as_slice_mut() }
+    /// `ParVector::update_ghosts()` — the C++ `Run` loop's explicit halo
+    /// exchange after each accumulation.
+    fn sync(&mut self) { self.0.update_ghosts(); }
 }
 
-impl Siav {
-    fn new(order: u32) -> Self {
-        let (a, b) = match order {
-            1 => (vec![1.0], vec![1.0]),
-            2 => (vec![0.5, 0.5], vec![0.0, 1.0]),
-            3 => (
-                vec![2.0 / 3.0, -2.0 / 3.0, 1.0],
-                vec![7.0 / 24.0, 0.75, -1.0 / 24.0],
-            ),
-            4 => {
-                let c = 2.0_f64.powf(1.0 / 3.0);
-                let a0 = (2.0 + c + 1.0 / c) / 6.0;
-                let a1 = (1.0 - c - 1.0 / c) / 6.0;
-                (
-                    vec![a0, a1, a1, a0],
-                    vec![
-                        0.0,
-                        1.0 / (2.0 - c),
-                        1.0 / (1.0 - c * c),
-                        1.0 / (2.0 - c),
-                    ],
-                )
-            }
-            _ => panic!("Unsupported order in SIAVSolver"),
-        };
-        Siav { a, b }
+/// `F_` of the SIAV system: the `MaxwellSolver` operator.
+///
+/// `MaxwellSolver` is `Type::EXPLICIT` (`maxwell.cpp` builds it without a
+/// `Type::IMPLICIT` argument), so `SIAVSolver::Step` calls `Mult`.  For the
+/// lossless operator `Mult` and `ImplicitSolve(0, ·)` are the same map — the
+/// matrix does not depend on `dt` — which is what `Maxwell::implicit_solve`
+/// computes with `dt = 0`.
+struct MaxwellF<'a> {
+    m: &'a Maxwell,
+    t: f64,
+}
+
+impl MaxwellF<'_> {
+    /// One `Maxwell::implicit_solve` with the given stage time and step, with
+    /// the rank-local vectors copied in and out of the solver's scratch (MFEM
+    /// passes the `HypreParVector`s straight through).
+    ///
+    /// Note the **two different spaces**: `MaxwellSolver::Mult` maps the H(div)
+    /// `B` field to the H(curl) `dE/dt` (`q` is a rank-local `ParVector` of the
+    /// RT space and `dp_` one of the ND space — MFEM hides this behind raw
+    /// `Vector`s, `ParVector` checks the length).
+    fn solve(&self, dt: f64, x: &[f64], out: &mut [f64]) {
+        let mut xv = ParVector::zeros(&self.m.rt);
+        let n_in = x.len().min(xv.as_slice().len());
+        xv.as_slice_mut()[..n_in].copy_from_slice(&x[..n_in]);
+        let mut ov = ParVector::zeros(&self.m.nd);
+        self.m.implicit_solve(self.t, dt, &mut xv, &mut ov);
+        let n_out = out.len().min(ov.as_slice().len());
+        out[..n_out].copy_from_slice(&ov.as_slice()[..n_out]);
     }
+}
+
+impl TimeDependentOperator for MaxwellF<'_> {
+    fn size(&self) -> usize { self.m.nd.dof_partition().n_owned_dofs }
+
+    fn set_time(&mut self, t: f64) { self.t = t; }
+
+    fn mult(&self, x: &[f64], out: &mut [f64]) { self.solve(0.0, x, out); }
+
+    fn implicit_solve(&mut self, dt: f64, x: &[f64], out: &mut [f64]) {
+        self.solve(dt, x, out);
+    }
+
+    fn is_explicit(&self) -> bool { true }
 }
 
 // ─── MaxwellSolver (maxwell_solver.cpp) ────────────────────────────────────
@@ -961,7 +995,7 @@ fn main() {
         }
 
         // SIAVSolver siaSolver(tOrder); siaSolver.Init(NegCurl, Maxwell).
-        let siav = Siav::new(order);
+        let siav = SiavSolver::new(order as usize);
         let mut t = ti_s;
         let mut it = 1_i64;
         let mut cur = ParVector::zeros(&maxwell.nd);
@@ -986,43 +1020,31 @@ fn main() {
 }
 
 impl Maxwell {
-    /// One `SIAVSolver::Step`: the explicit (`F_->Mult`) and implicit
-    /// (`F_->ImplicitSolve(b_i dt, ..)`) branches coincide here because the
-    /// lossless operator's matrix does not depend on `dt`.
-    #[allow(clippy::too_many_arguments)] // mirrors the C++ signature
+    /// One `SIAVSolver::Step(q = B, p = E)` — the library implementation of
+    /// `linalg/ode.cpp:1151` (D90), wired to this miniapp's rank-local vectors:
+    /// `P_` is `NegCurl` (`dq = -Curl E`), `F_` is [`MaxwellF`], and `dp`/`dq`
+    /// are the scratch vectors `SIASolver::Init` sizes (`cur`, `db`).
     fn solve_step(
         &self,
         b: &mut ParVector,
         e: &mut ParVector,
         cur: &mut ParVector,
         db: &mut ParVector,
-        siav: &Siav,
+        siav: &SiavSolver,
         t: &mut f64,
         dt: f64,
     ) {
-        for i in 0..siav.b.len() {
-            if siav.b[i] != 0.0 {
-                // F_->SetTime(t); F_->Mult(q, dp_) — the explicit branch:
-                // ImplicitSolve(0.0, B, dEdt) for the lossless operator.
-                self.implicit_solve(*t, 0.0, b, cur);
-                let c = siav.b[i] * dt;
-                for (p, k) in e.as_slice_mut().iter_mut().zip(cur.as_slice().iter()) {
-                    *p += c * k;
-                }
-                e.update_ghosts();
-            }
-            // P_->Mult(p, dq_): dq = -Curl E; q += a_i dt dq.
-            let n_rows = self.neg_curl.nrows;
-            self.neg_curl
-                .spmv(e.as_slice(), &mut db.as_slice_mut()[..n_rows]);
-            db.update_ghosts();
-            let c = siav.a[i] * dt;
-            for (p, k) in b.as_slice_mut().iter_mut().zip(db.as_slice().iter()) {
-                *p += c * k;
-            }
-            b.update_ghosts();
-            // `t += a_[i] * dt` (inside the stage loop; the a_ table sums to 1).
-            *t += siav.a[i] * dt;
-        }
+        let n_rows = self.neg_curl.nrows;
+        let mut f = MaxwellF { m: self, t: *t };
+        siav.step(
+            &mut f,
+            |x: &[f64], y: &mut [f64]| self.neg_curl.spmv(x, &mut y[..n_rows]),
+            &mut SiaRankVector(b),
+            &mut SiaRankVector(e),
+            &mut SiaRankVector(cur),
+            &mut SiaRankVector(db),
+            t,
+            dt,
+        );
     }
 }

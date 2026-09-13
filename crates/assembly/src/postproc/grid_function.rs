@@ -282,14 +282,79 @@ fn transform_grads(
     }
 }
 
+// ─── GridFunction storage ──────────────────────────────────────────────────
+
+/// Where a [`GridFunction`]'s DOF coefficients live.
+///
+/// This mirrors MFEM's `Vector` + `Vector::MakeRef` split: a grid function
+/// either **owns** its coefficient vector ([`DofStorage::Owned`], the result
+/// of `GridFunction(MakeRef) == NULL`) or **references** external storage
+/// ([`DofStorage::Borrowed`], `GridFunction::MakeRef`).
+pub enum DofStorage<'a> {
+    /// Owns the coefficient vector.
+    Owned(Vec<f64>),
+    /// Borrows a slice of an external buffer (zero copy).  MFEM reaches the
+    /// same state through `Vector::NewDataAndSize` / `UseDevice`.
+    Borrowed(&'a mut [f64]),
+}
+
+impl DofStorage<'_> {
+    /// DOF coefficients as a slice.
+    pub fn as_slice(&self) -> &[f64] {
+        match self {
+            DofStorage::Owned(v) => v,
+            DofStorage::Borrowed(s) => s,
+        }
+    }
+
+    /// DOF coefficients as a mutable slice.
+    pub fn as_mut_slice(&mut self) -> &mut [f64] {
+        match self {
+            DofStorage::Owned(v) => v,
+            DofStorage::Borrowed(s) => s,
+        }
+    }
+
+    /// Number of DOF coefficients held.
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Whether the coefficients are empty.
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    /// `true` for [`DofStorage::Borrowed`] — the `MakeRef` state.
+    pub fn is_borrowed(&self) -> bool {
+        matches!(self, DofStorage::Borrowed(_))
+    }
+}
+
+impl std::ops::Index<usize> for DofStorage<'_> {
+    type Output = f64;
+    fn index(&self, i: usize) -> &f64 {
+        &self.as_slice()[i]
+    }
+}
+
+impl std::ops::IndexMut<usize> for DofStorage<'_> {
+    fn index_mut(&mut self, i: usize) -> &mut f64 {
+        &mut self.as_mut_slice()[i]
+    }
+}
+
 // ─── GridFunction ──────────────────────────────────────────────────────────
 
 /// A finite element grid function: a DOF coefficient vector paired with its space.
 ///
 /// Provides field evaluation and post-processing (error norms, gradient recovery).
+///
+/// The coefficients are either owned or borrowed from an external buffer; see
+/// [`GridFunction::new`] and [`GridFunction::make_ref`].
 pub struct GridFunction<'a, S: FESpace> {
     space: &'a S,
-    dofs: Vec<f64>,
+    dofs: DofStorage<'a>,
 }
 
 /// Compute the L² projection of a scalar coefficient onto the FE space.
@@ -465,8 +530,14 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     }
 
     /// In-place L² projection: replace DOFs with projected values.
+    ///
+    /// Writes **through** the existing storage, so the result lands in the
+    /// owning buffer for a `MakeRef` grid function (MFEM's
+    /// `GridFunction::ProjectCoefficient` behaves the same way: it does not
+    /// reallocate).
     pub fn project_coefficient(&mut self, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) {
-        self.dofs = project_coefficient(self.space, coeff, quad_order);
+        let projected = project_coefficient(self.space, coeff, quad_order);
+        self.dofs.as_mut_slice().copy_from_slice(&projected);
     }
 
     /// Project a scalar coefficient onto the boundary DOFs flagged by
@@ -501,17 +572,50 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             dofs.len(),
             space.n_dofs(),
         );
-        GridFunction { space, dofs }
+        GridFunction { space, dofs: DofStorage::Owned(dofs) }
+    }
+
+    /// Attach this grid function to external DOF storage instead of owning it —
+    /// the equivalent of MFEM's
+    /// `GridFunction::MakeRef(FiniteElementSpace *f, Vector &v, int v_offset)`.
+    ///
+    /// `data` is a **view into the owning buffer** (`&v[v_offset .. v_offset +
+    /// f->GetVSize()]` in C++); it is neither copied nor reallocated, so every
+    /// write through `dofs_mut()` — or through any of the assembly/evaluation
+    /// routines — lands in the original buffer at the same offset.  The borrow
+    /// checker enforces what MFEM leaves as documentation: the aliasing set is
+    /// obtained with [`BlockVector::views_mut`](fem_linalg::BlockVector::views_mut),
+    /// which hands out disjoint slices of one `BlockVector`, so multi-field
+    /// layouts (joule's six fields, maxwell's `(B, E)`) are aliasing-free.
+    ///
+    /// # Panics
+    /// Panics if `data.len() != space.n_dofs()` (MFEM asserts
+    /// `v.Size() >= v_offset + f->GetVSize()`).
+    pub fn make_ref(space: &'a S, data: &'a mut [f64]) -> Self {
+        assert_eq!(
+            data.len(),
+            space.n_dofs(),
+            "GridFunction::make_ref: view length {} != space n_dofs {}",
+            data.len(),
+            space.n_dofs(),
+        );
+        GridFunction { space, dofs: DofStorage::Borrowed(data) }
+    }
+
+    /// `true` if the DOF coefficients are borrowed from an external buffer
+    /// (the `MakeRef` state) rather than owned by this grid function.
+    pub fn is_ref(&self) -> bool {
+        self.dofs.is_borrowed()
     }
 
     /// Read-only access to the DOF coefficient vector.
     pub fn dofs(&self) -> &[f64] {
-        &self.dofs
+        self.dofs.as_slice()
     }
 
     /// Mutable access to the DOF coefficient vector.
     pub fn dofs_mut(&mut self) -> &mut [f64] {
-        &mut self.dofs
+        self.dofs.as_mut_slice()
     }
 
     /// Reference to the underlying finite element space.
@@ -711,7 +815,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let uloc = if blocks.is_empty() {
             None
         } else {
-            Some(element_local_dofs_canonical(self.space, elem, &self.dofs))
+            Some(element_local_dofs_canonical(self.space, elem, self.dofs.as_slice()))
         };
         let nodes = mesh.element_nodes(elem);
         let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
@@ -758,7 +862,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let uloc = if blocks.is_empty() {
             None
         } else {
-            Some(element_local_dofs_canonical(self.space, elem, &self.dofs))
+            Some(element_local_dofs_canonical(self.space, elem, self.dofs.as_slice()))
         };
         let nodes = mesh.element_nodes(elem);
         let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
