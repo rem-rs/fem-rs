@@ -595,3 +595,15 @@ path = "mfem_pex0_parallel_poisson.rs"
 [[example]]
 name = "gslib_findpts"
 path = "../miniapps/gslib/findpts.rs"
+
+[[example]]
+name = "gslib_field_diff"
+path = "../miniapps/gslib/field-diff.rs"
+
+[[example]]
+name = "gslib_field_interp"
+path = "../miniapps/gslib/field-interp.rs"
+
+[[example]]
+name = "gslib_schwarz_ex1"
+path = "../miniapps/gslib/schwarz_ex1.rs"
