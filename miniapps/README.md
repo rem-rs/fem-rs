@@ -41,12 +41,23 @@ miniapps/
 │                                6456/2443) / true_offset + 6 场 BlockVector +
 │                                六个 make_ref 视图 / 四个材料映射 / 三个 BC
 │                                掩码 —— 与自编 C++ 4.10 参考**逐行一致**
-│                                (主会话独立复核); 缺口: H¹ 并行分区 dof 数
-│                                (364 vs 2443) 与 DofPartition panic、H¹→
-│                                H(curl) 离散梯度、GetJouleHeating、求解器栈
-│                                (无 AMG/AMS/ADS)、.gen(netCDF) 读取; C++ 在
-│                                dof 横幅后立刻进入 hypre 自己的输出 ⇒ 之后
-│                                无法逐字节
+│                                (主会话独立复核); C++ 在 dof 横幅后立刻进入
+│                                hypre 自己的输出 ⇒ 之后无法逐字节
+│                                **round 29 推进**：H¹(P2)→ND2 的 3-D hex 离散
+│                                梯度已打通（`discrete_op.rs`，两条独立证据：
+│                                与 `HCurlSpace::interpolate_vector(∇p)` 逐位一致、
+│                                `M1·G == ∫v·∇φ` 弱梯度恒等式 ≤1e-11；也是
+│                                joule_solver.cpp:283 注释里的等价路径）。
+│                                **仍缺（= 新发现的硬阻塞）**：① `curl_3d`
+│                                (ND2→RT1) 只有 tet 版，hex 上 panic（joule 的
+│                                `curl→Mult(E,dB)` 正需要它）；② `GetJouleHeating`
+│                                的 L² 投影缺"三线性感知"的逐元入口（现有
+│                                `evaluate_vector_at_element` 对 Hex8 只做仿射
+│                                Jacobian）；③ ≥2 rank 的并行 ND2/RT1 ghost
+│                                面/内部 dof 分区缺陷（`ghost.rs:178` panic）；
+│                                另有求解器栈（无 AMG/AMS/ADS）与 `.gen`
+│                                (netCDF) 读取。端到端目标 = 末两行
+│                                `dot(E, J)`（只依赖电磁半块）
 ├── diag-smoothers/          ← 对应 miniapps/diag-smoothers/
 │   └── abs-l1-jacobi.rs     ← Absolute L(1)-Jacobi 光滑子 (1:1 串行版;
 │                                mass/diffusion/maxwell 三类系统, SLI/PCG,
@@ -87,11 +98,20 @@ miniapps/
 │   │                            S/GSSmoother 的浮点路径差异）; 唯一偏差:
 │   │                            BdpMinresSolver 不暴露 GetFinalNorm ⇒ 摘要
 │   │                            行只印迭代数
-│   └── nurbs_ex24.rs        ← **部分移植（退出码 3）**: `-r 1 -p 0/1/2` 的
-│                                HCurl144/H127、HCurl144/HDiv108、
-│                                HDiv108/L227 六行与 C++ 逐字节; 缺 NURBS
-│                                跨空间 MixedVectorGradient/CurlIntegrator
-│                                (D98)
+│   └── nurbs_ex24.rs        ← **1:1 完整移植（round 29）**: `-r 1 -p 0/1/2`
+│                                三档的 dof 横幅 + 两条 L² 误差行（0.0224956/
+│                                0.0039157、0.488496/0.51453、0.00271413/
+│                                0.00260626）与**全新编译**的 C++ 4.10 参考
+│                                **逐字节一致**（主会话独立复核，C++ 侧
+│                                `$HOME/work/nurbs_ex24_ser/nex24`）；round 29
+│                                补齐 NURBS 跨空间 `MixedVectorGradient`/
+│                                `MixedVectorCurl`（D98 结案）+ `-p 2` 的标量
+│                                单元 L² 投影。**唯一非逐字节处**：PCG 迭代块
+│                                （`(B r,r)` 到 ~1e-11 后分叉；真因 = MFEM 对
+│                                **插结后**控制网求几何、fem-rs 对**原**控制网在
+│                                细化参数区间求几何，同一映射差 ~1 ulp/entry）
+│                                仍缺 `refined.mesh`/`sol.gf` + GLVis（步骤
+│                                12–13），`-nn` 仍 exit(3)
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
@@ -181,9 +201,27 @@ miniapps/
 │                                dof checksum 逐位; 根因=linlvo AMG
 │                                默认 V-cycle 非对称, 换 RS+SGS 对齐
 │                                hypre 配置)
-├── solvers/plor_solvers.rs  ← LOR 求解器 miniapp (H1 空间串行
-│                                版本; PCG + LOR-AMG 预条件; 2D
-│                                inline-quad.mesh 默认)
+├── solvers/plor_solvers.rs  ← LOR 求解器 miniapp（**round 29：并行 H¹ 腿
+│                                打通**，1:1 对齐 `plor_solvers.cpp`）: `-m`
+│                                `-rs -rp -o -fe -no-vis` + `--ranks/-np N`，
+│                                LOR→HO 置换 Π + **真** LOR 矩阵（在
+│                                `make_refined_2d` 细网格上重新装 P1，而非
+│                                `ΠᵀA_HOΠ` 的置换）、MFEM `FormLinearSystem`
+│                                默认 `copy_interior=0` 初值、LOR 预条件的
+│                                `EliminateRowColDiag(diag 1)` 消元；
+│                                `crates/solver/src/par_lor.rs`（trait 驱动 +
+│                                **实测真残差**停机/重启）。数字（`star.mesh
+│                                -o 3 -rs 1 -rp 1`）: np=1/2/4 → 48/69/74 迭代、
+│                                真残差 6.3e-13、L2 **2.502523e-5 与 np 无关**
+│                                且 = C++ 的 2.50252e-05、`GlobalTrueVSize`
+│                                3001 = C++；`inline-quad -o 2 -rs 0 -rp 0`
+│                                L2 1.930630e-3 vs C++ 1.93092e-3。**诚实非可比**:
+│                                迭代数（内层 AMG 不同——fem-parallel 聚合式 vs
+│                                hypre BoomerAMG，且我们随 np 增长 48→74）、L2
+│                                末位（求积规则）、PA vs 全装配。**阻塞腿**:
+│                                ND/RT 需**分布式** AMS/ADS（linger 只有串行版，
+│                                估 1–2 周），L²/DG 需并行面积分器（~1 周）⇒
+│                                `-fe n|r|l` 显式拒绝并给出原因
 ├── adjoint/                 ← 对应 miniapps/adjoint/
 │   ├── adjoint_cvodes_roberts.rs ← Robertson 伴随敏感性 (自研
 │   │                              Nordsieck BDF 对位 CVODES 语义,
