@@ -35,6 +35,16 @@
 //! identical), partitioned, and each rank assembles on its local mesh (owned +
 //! ghost overlap), permutes to the [owned | ghost] DOF layout and integrates
 //! the errors over owned elements only (allreduce for the global error).
+//!
+//! ## Dimensions and refusal policy (round 31, D137)
+//!
+//! The default mesh is `data/beam-hex.mesh`, the same 3-D default as C++
+//! `ex24p`, and all three problem types run through the 3-D path.  2-D meshes
+//! are supported for problems 0 (grad) and 2 (div) — the same restriction the
+//! C++ has, whose `-p 1` branch is 3-D only — but the refusal is now an explicit
+//! message + exit status 3 instead of `panic!("Problem 1 (curl) requires a 3D
+//! mesh")`, and a file with neither a 2-D nor a 3-D mesh is reported instead of
+//! `expect("no 2D mesh in file")`.
 
 #![allow(non_snake_case)]
 
@@ -433,14 +443,34 @@ fn solve_div<M: MeshTopology + Clone + 'static>(
 
 fn main() {
     let args = parse_args();
-    assert!(args.prob <= 2, "problem type must be 0, 1 or 2");
-    assert!(
-        args.order == 1,
-        "pex24: only order 1 is supported (NDk/RTk hex face/edge DOF partitioning \
-         for higher orders is not yet implemented)"
-    );
+    // CLI validation: used to be `assert!` (panic, rc 101); a bad problem type
+    // or a higher order is a *declared gap*, not a crash (D137 clean-up).
+    if args.prob > 2 {
+        eprintln!(
+            "mfem_pex24_parallel_discrete_ops: -p {} is invalid (0 = grad, 1 = curl, 2 = div) — \
+             exiting with status 3",
+            args.prob
+        );
+        std::process::exit(3);
+    }
+    if args.order != 1 {
+        eprintln!(
+            "mfem_pex24_parallel_discrete_ops: -o {} is not ported — only order 1 is supported \
+             (NDk/RTk hex face/edge DOF partitioning for higher orders is not implemented) — \
+             exiting with status 3",
+            args.order
+        );
+        std::process::exit(3);
+    }
 
-    let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
+    let mfem = read_mfem_file(&args.mesh_file).unwrap_or_else(|e| {
+        eprintln!(
+            "mfem_pex24_parallel_discrete_ops: cannot read mesh file '{}': {e} — exiting with \
+             status 3",
+            args.mesh_file
+        );
+        std::process::exit(3)
+    });
     // C++ ex24p: ref_levels targets ≤1000 elements, then 1 parallel refine.
     // fem-rs merges the parallel refine into the serial one (par_uniform_refine
     // is 2-D only) — the global topology is identical.
@@ -467,8 +497,7 @@ fn main() {
                 _ => solve_div(&par_mesh, args.order, &comm),
             }
         });
-    } else {
-        let mut m2 = mfem.mesh2d.expect("no 2D mesh in file");
+    } else if let Some(mut m2) = mfem.mesh2d {
         let l = ref_levels(m2.n_elements(), 2);
         for _ in 0..l + 1 {
             m2 = fem_mesh::refine_uniform(&m2);
@@ -479,9 +508,31 @@ fn main() {
             let par_mesh = partition_mesh(&m2, &comm);
             match args.prob {
                 0 => solve_grad(&par_mesh, args.order, &comm),
-                1 => panic!("Problem 1 (curl) requires a 3D mesh"),
+                1 => {
+                    // C++ ex24p: problem 1 (curl) exists only in 3-D — the
+                    // H(curl)→H(div) pairing needs the 3-D de Rham complex.
+                    // Refuse with a defined status instead of panicking (D137).
+                    eprintln!(
+                        "mfem_pex24_parallel_discrete_ops: problem 1 (curl) requires a 3-D mesh; \
+                         the input '{}' is 2-D.\n\
+                         \x20 C++ ex24p's -p 1 branch is 3-D only (its default mesh is \
+                         data/beam-hex.mesh);\n\
+                         \x20 use -p 0 or -p 2 for 2-D meshes. Exiting with status 3.",
+                        args.mesh_file
+                    );
+                    std::process::exit(3)
+                }
                 _ => solve_div(&par_mesh, args.order, &comm),
             }
         });
+    } else {
+        // Neither a 2-D nor a 3-D mesh in the file (e.g. a 1-D or surface mesh).
+        eprintln!(
+            "mfem_pex24_parallel_discrete_ops: mesh file '{}' contains neither a 2-D nor a 3-D \
+             mesh (the discrete-operator projections are implemented for dim = 2 and dim = 3 \
+             only) — exiting with status 3",
+            args.mesh_file
+        );
+        std::process::exit(3)
     }
 }

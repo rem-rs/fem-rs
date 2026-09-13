@@ -4,6 +4,21 @@
 //! Writes rust_dofpos.txt / rust_A.txt / rust_b.txt / rust_elim_A.txt /
 //! rust_elim_B.txt / rust_elim_X0.txt / rust_x.txt / rust_soldofs.txt /
 //! rust_elmat_0.txt in the current directory.
+//!
+//! ## ⚠ Declared gap — writes nothing, exits 3 (round 31, D128)
+//!
+//! This helper exists to feed the serial-ex31 comparison harness intermediate
+//! quantities (`rust_*.txt`) that the C++ `ex31_nd_dump` side reads back.  The
+//! port it belongs to is not done (D128 — the full gap list lives in
+//! `examples/mfem_ex31_anisotropic_maxwell.rs`), so it **cannot produce a single
+//! dump**.  It used to answer every legal input with
+//! `eprintln!("… not supported - skipping")` + `exit(0)`, which made the
+//! harness believe the dumps existed.
+//!
+//! For a *dump* helper whose producer is missing the honest treatment is to
+//! refuse loudly: the harness compares file contents, so a missing file must
+//! abort the comparison instead of "matching nothing".  Hence gap list +
+//! `exit(3)`; the scaffolding below stays for the D127 follow-up.
 
 use std::f64::consts::{PI, SQRT_2};
 use std::fs::File;
@@ -15,7 +30,7 @@ use fem_assembly::coefficient::ConstantMatrixCoeff;
 use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
 use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
 use fem_element::{VectorReferenceElement, ReferenceElement,
-    nedelec::{TriNDk, QuadNDk}, lagrange::{TriP1, QuadQk}};
+    lagrange::QuadQk};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
@@ -81,11 +96,14 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
 }
 
 fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
-    match et {
-        ElementType::Tri3 => { eprintln!("TriNDk cast not supported - skipping"); std::process::exit(0); },
-        ElementType::Quad4 => { eprintln!("QuadNDk cast not supported - skipping"); std::process::exit(0); },
-        _ => panic!("unsupported element type {et:?}"),
-    }
+    // D128 declared gap: the dump helper's producer does not exist, so this
+    // dispatcher cannot answer for any element type.  `main` refuses first;
+    // this keeps the refusal honest (status 3, never 0) if that changes.
+    eprintln!(
+        "mfem_ex31_dump: element {et:?} is not ported (D128 — see this file's header); exiting \
+         with status 3"
+    );
+    std::process::exit(3)
 }
 
 fn dump_vec(path: &str, v: &[f64]) {
@@ -106,7 +124,26 @@ fn dump_csr(path: &str, n: usize, row_ptr: &[usize], col_idx: &[u32], values: &[
     }
 }
 
+/// D128: prints the gap list and terminates with the project's "honest partial
+/// delivery" status.  Not `-> !` on purpose: `main`'s scaffolding below stays
+/// type-checked while this guard is the only path that runs.
+fn not_ported() {
+    eprintln!(
+        "mfem_ex31_dump: NOT PORTED — declared gap D128: the serial ex31 port this helper dumps \
+         for does not exist, so no rust_*.txt is written.\n\
+         Missing library pieces: `MatrixCoefficient` (D127) and the matrix-coefficient entry \
+         points of VectorFEMassIntegrator / VectorMassTensorIntegrator /\n\
+         project_bdr_coefficient_tangent_2d — full list in \
+         examples/mfem_ex31_anisotropic_maxwell.rs.\n\
+         Use examples/mfem_pex31_restricted_hcurl.rs for the same problem's working path."
+    );
+    std::process::exit(3);
+}
+
 fn main() {
+    // D128: declared gap — refuse instead of writing zero files and reporting
+    // success.
+    not_ported();
     let mut mesh_arg: Option<String> = None;
     let mut ref_levels = 2usize;
     let mut order = 1u8;
@@ -192,7 +229,7 @@ fn main() {
         let mut cc = vec![0.0_f64; n_ld * n_ld];
         let mut curl = vec![0.0_f64; n_ld];
         for (qi, xi) in q.points.iter().enumerate() {
-            let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let (_, _jit00, _jit01, _jit10, _jit11, det) = jac_fn(&mesh, e, nodes, xi);
             let w = q.weights[qi] * det;
             rnd.eval_curl(xi, &mut curl);
             for i in 0..n_ld { for j in 0..n_ld {
@@ -236,7 +273,7 @@ fn main() {
         // coupling: SYZ * Ey * Ez
         let mut cp = vec![0.0_f64; n_ld * n_lh1];
         for (qi, xi) in q.points.iter().enumerate() {
-            let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let (_, _jit00, _jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
             let w = q.weights[qi] * det * SYZ;
             rnd.eval_basis_vec(xi, &mut np);
             rh1.eval_basis(xi, &mut hp);
@@ -289,7 +326,7 @@ fn main() {
         let mut hp = vec![0.0; n_lh1];
         let mut em = vec![0.0_f64; n_ld * n_lh1];
         for (qi, xi) in q.points.iter().enumerate() {
-            let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let (_, _jit00, _jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
             let w = q.weights[qi] * det * SYZ;
             rnd.eval_basis_vec(xi, &mut np);
             rh1.eval_basis(xi, &mut hp);

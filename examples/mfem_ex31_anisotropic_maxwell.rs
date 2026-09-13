@@ -6,10 +6,42 @@
 //!
 //! ## Usage
 //! ```bash
-//! cargo run --example mfem_ex31_anisotropic_maxwell -- -m data/beam-tri.mesh -o 1 -r 1
+//! cargo run --example mfem_ex31_anisotropic_maxwell -- -m data/inline-quad.mesh -o 1 -r 1
 //! ```
+//!
+//! ## ⚠ Declared gap — no input solves anything (round 31, D128)
+//!
+//! [`not_ported`] prints this list and exits with status **3** (the project's
+//! "honest partial delivery" code).  Before round 31 the guard lived inside
+//! `setup_element_ref` and used `eprintln!("… not supported - skipping")` +
+//! `std::process::exit(0)`, i.e. every legal run reported **success** without
+//! ever assembling a system (round 30 audit finding D128).
+//!
+//! Missing library pieces (the reasons the 1:1 port cannot be finished here):
+//! * `MatrixCoefficient` is absent from `fem_assembly::coefficient` — the trait
+//!   only appears in a doc comment there (D127, being ported in parallel this
+//!   round).  MFEM's ex31 builds Σ and the `CurlCurlIntegrator`'s `mu` from
+//!   `MatrixConstantCoefficient`/`MatrixFunctionCoefficient`; without the trait
+//!   the coefficient has to be hard-wired as the constant
+//!   `ConstantMatrixCoeff`, which only represents this example's constant Σ by
+//!   accident of the test case.
+//! * the matching matrix-coefficient entry points of
+//!   `VectorFEMassIntegrator` / `VectorMassTensorIntegrator` and of the boundary
+//!   projection (`project_bdr_coefficient_tangent_2d`) accept a constant tensor
+//!   only.
+//!
+//! Verified C++ targets (MFEM 4.10, `$HOME/mfem410_ser`) once D127 lands:
+//! `./ex31 -m data/inline-quad.mesh -no-vis` →
+//! `|| E_h - E ||_{H(Curl)} = 0.181455`.
+//!
+//! The working sibling of this example is
+//! `examples/mfem_pex31_restricted_hcurl.rs`: it solves **this same problem**
+//! (same Σ, same exact solution, same PEC data) with the current API and is the
+//! template for the real port.
+//!
+//! The body below is the incomplete scaffolding kept for that port; the
+//! [`not_ported`] guard in `main` is the only path that executes.
 
-#![allow(unused_variables, unused_mut)]
 use std::f64::consts::{PI, SQRT_2};
 
 use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
@@ -19,7 +51,7 @@ use fem_assembly::coefficient::ConstantMatrixCoeff;
 use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
 use fem_core::types::DofId;
 use fem_element::{VectorReferenceElement, ReferenceElement,
-    nedelec::{TriNDk, QuadNDk}, lagrange::{TriP1, QuadQk}};
+    lagrange::QuadQk};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
@@ -118,16 +150,47 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
 }
 
 fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
-    match et {
-        ElementType::Tri3 => { eprintln!("TriNDk cast not supported - skipping"); std::process::exit(0); },
-        ElementType::Quad4 => { eprintln!("QuadNDk cast not supported - skipping"); std::process::exit(0); },
-        _ => panic!("unsupported element type {et:?}"),
-    }
+    // D128 declared gap: no element type has a local reference dispatcher, so
+    // this example cannot assemble anything.  `main` refuses before reaching
+    // here; this arm keeps the refusal honest (status 3) if the guard is ever
+    // moved.  It used to `exit(0)` (`"… not supported - skipping"`), which the
+    // harness read as success.
+    eprintln!(
+        "mfem_ex31_anisotropic_maxwell: element {et:?} is not ported (D128 — see the gap list \
+         in this file's header); exiting with status 3"
+    );
+    std::process::exit(3)
 }
 
 // ─── Main ───────────────────────────────────────────────────────────
 
+/// D128: prints the gap list and terminates with the project's "honest partial
+/// delivery" status.
+///
+/// Deliberately **not** `-> !`: `main`'s scaffolding below stays type-checked
+/// (no `unreachable_code` noise) while this guard remains the only path that
+/// executes.
+fn not_ported() {
+    eprintln!(
+        "mfem_ex31_anisotropic_maxwell: NOT PORTED — declared gap D128, no input is solved.\n\
+         Missing library pieces:\n\
+         \x20 * fem_assembly::coefficient has no `MatrixCoefficient` trait (D127): MFEM ex31 builds\n\
+         \x20   Sigma and the CurlCurlIntegrator's mu from MatrixConstantCoefficient /\n\
+         \x20   MatrixFunctionCoefficient; here they are hard-wired as the constant ConstantMatrixCoeff.\n\
+         \x20 * the matrix-coefficient entry points of VectorFEMassIntegrator /\n\
+         \x20   VectorMassTensorIntegrator and of project_bdr_coefficient_tangent_2d take a\n\
+         \x20   constant tensor only.\n\
+         Working reference for the same problem (same Sigma, exact solution and PEC data):\n\
+         \x20 examples/mfem_pex31_restricted_hcurl.rs\n\
+         Verified C++ target (MFEM 4.10): ./ex31 -m data/inline-quad.mesh -no-vis\n\
+         \x20 -> || E_h - E ||_{{H(Curl)}} = 0.181455"
+    );
+    std::process::exit(3);
+}
+
 fn main() {
+    // D128: declared gap — refuse before any partial work.
+    not_ported();
     let args = parse_args();
     let kappa = args.freq * PI;
 
@@ -198,7 +261,7 @@ fn main() {
         let mut hp = vec![0.0; n_lh1];
         let mut em = vec![0.0_f64; n_ld * n_lh1];
         for (qi, xi) in q.points.iter().enumerate() {
-            let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let (_, _jit00, _jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
             let w = q.weights[qi] * det * SYZ;
             rnd.eval_basis_vec(xi, &mut np);
             rh1.eval_basis(xi, &mut hp);

@@ -1,16 +1,26 @@
-//! # Parallel Example 32 — Maxwell eigenvalue problem  (1:1 with MFEM ex32p)
+//! # Parallel Example 32 — Maxwell eigenvalue problem  (partial port of MFEM ex32p)
+//!
+//! ## Status (round 31, D137): 3-D only — the C++ default mesh is **2-D**
+//!
+//! C++ `ex32p` default: `../data/inline-quad.mesh` (2-D), solved with the
+//! **restricted** H(curl) space `ND_R2D_FECollection` (in-plane Nédélec +
+//! out-of-plane H¹ z-component) and `HypreAME` + `HypreAMS`.  This port only
+//! has the plain **3-D** `ND_FECollection` path, so a 2-D input — including
+//! the default — is refused with an explicit message and exit status 3
+//! instead of solving a different problem.
+//!
+//! Ported path (1:1 with the C++ 3-D branch): `-m data/fichera.mesh`.
 //!
 //! ## Usage
 //! ```text
 //! cargo run --example mfem_pex32_maxwell_eigenvalue -- -m data/fichera.mesh --ranks 2
 //! ```
 
-use fem_examples::maxwell::{assemble_hcurl_eigen_system_from_marker, solve_hcurl_eigen_preconditioned_amg};
+use fem_examples::maxwell::assemble_hcurl_eigen_system_from_marker;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, refine_uniform_3d};
+use fem_mesh::refine_uniform_3d;
 use fem_space::{H1Space, HCurlSpace, fe_space::FESpace};
 use fem_parallel::launcher::{native::ThreadLauncher, WorkerConfig};
-use fem_solver::eigen::LobpcgConfig;
 
 fn main() {
     let args = parse_args();
@@ -22,8 +32,44 @@ fn main() {
 fn run_pex32(comm: fem_parallel::comm::Comm, args: &Args) {
     let rank = comm.rank();
 
-    let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
-    let mut serial_mesh = mfem.mesh3d.expect("3D mesh required");
+    let mfem = read_mfem_file(&args.mesh_file).unwrap_or_else(|e| {
+        eprintln!(
+            "mfem_pex32_maxwell_eigenvalue: cannot read mesh file '{}': {e} — exiting with \
+             status 3",
+            args.mesh_file
+        );
+        std::process::exit(3)
+    });
+    // D137: never assume the dimension — the C++ default is a 2-D mesh.
+    let mut serial_mesh = if let Some(m3) = mfem.mesh3d {
+        m3
+    } else if mfem.mesh2d.is_some() {
+        if rank == 0 {
+            eprintln!(
+                "mfem_pex32_maxwell_eigenvalue: 2-D mesh '{}' is not ported (D137 — the port only \
+                 implements the plain 3-D ND path).\n\
+                 \x20 C++ ex32p's default mesh is data/inline-quad.mesh (2-D) and it solves it with \
+                 the *restricted* H(curl) space\n\
+                 \x20 ND_R2D_FECollection (in-plane Nedelec + out-of-plane H1) and HypreAME, which \
+                 this port does not implement;\n\
+                 \x20 solving the same mesh as a plain 2-D ND problem would not be comparable to \
+                 C++.\n\
+                 \x20 Pass a 3-D mesh for the ported path (e.g. -m data/fichera.mesh), or use the \
+                 C++ ex32p for the 2-D default.",
+                args.mesh_file
+            );
+        }
+        std::process::exit(3)
+    } else {
+        if rank == 0 {
+            eprintln!(
+                "mfem_pex32_maxwell_eigenvalue: mesh file '{}' contains neither a 2-D nor a 3-D \
+                 mesh — exiting with status 3",
+                args.mesh_file
+            );
+        }
+        std::process::exit(3)
+    };
     for _ in 0..args.ser_ref_levels { serial_mesh = refine_uniform_3d(&serial_mesh); }
 
     // Strategy: rank 0 builds the full serial system and solves serially

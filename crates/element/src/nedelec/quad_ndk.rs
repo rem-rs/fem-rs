@@ -322,4 +322,33 @@ mod tests {
             assert!(ti.abs() > 0.5, "DOF {i} edge {ei}: self-tang={ti}");
         }
     }
+
+    /// Round 31 (D137b) regression: `QuadNDk::new(1)` is MFEM's
+    /// `ND_QuadrilateralElement(1)` — **4** edge DOFs, dim 2 — so
+    /// `eval_basis_vec` legitimately writes all 8 slots (`values[6]`,
+    /// `values[7]` are the top/left edges of the Whitney 1-form).  Callers
+    /// that size their scratch buffer from `TriNDk`'s `n_dofs() == 3` get a
+    /// 6-long slice and panic here; this test pins the 8-slot contract and
+    /// the Whitney-form values so the element side can never be blamed for a
+    /// caller-side under-allocation.
+    #[test]
+    fn whitney_1form_needs_n_dofs_times_dim_slots() {
+        let e = QuadNDk::new(1);
+        assert_eq!(e.n_dofs(), 4);
+        assert_eq!(e.dim(), 2);
+        let mut v = vec![0.0_f64; e.n_dofs() * e.dim() as usize];
+        e.eval_basis_vec(&[0.0, 0.0], &mut v);
+        // Φ₀=(1−y, 0), Φ₁=(0, x), Φ₂=(−y, 0), Φ₃=(0, x−1) at (0,0):
+        assert_eq!(v, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        // Every DOF is tangent to its own edge with unit magnitude at the
+        // edge midpoint (MFEM's ND1 edge-interpolation property).
+        for (i, cd) in e.dof_coords().iter().enumerate() {
+            e.eval_basis_vec(cd, &mut v);
+            let tan = if i % 2 == 0 { v[i * 2] } else { v[i * 2 + 1] };
+            assert!(
+                (tan.abs() - 1.0).abs() < 1e-14,
+                "DOF {i}: self tangential component = {tan}"
+            );
+        }
+    }
 }

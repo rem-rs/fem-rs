@@ -196,18 +196,37 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
     (inv, j[(1,1)] * inv, -j[(1,0)] * inv, -j[(0,1)] * inv, j[(0,0)] * inv, det.abs())
 }
 
-fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
+/// Local reference elements of the `[z | nd]` combined space for one element.
+///
+/// Returns `(n_nd_ldofs, nd_ref, h1_ref, n_h1_ldofs, jacobian)`.
+///
+/// `n_nd_ldofs` **must** come from `nd_ref.n_dofs()`: the Whitney 1-form of
+/// `QuadNDk::new(1)` fills `2 · n_dofs() = 8` slots (4 edge DOFs × 2
+/// components), while `TriNDk::new(1)` fills 6 (3 × 2).  A hard-coded 3 here
+/// (the pre-round-31 typo for `Quad4`) under-sizes every `n_ld * 2` scratch
+/// buffer and trips `QuadNDk::eval_basis_vec`'s `values[6]` write.
+fn setup_element_ref(et: ElementType, order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
+    // Only order 1 is wired up (see the `order != 1` guard in `main`).
+    assert_eq!(order, 1, "setup_element_ref only implements order 1");
     match et {
         ElementType::Tri3 => {
             // Leak to get 'static lifetime (acceptable for singleton reference elements)
             let nd: &'static TriNDk = Box::leak(Box::new(TriNDk::new(1)));
-            (3, nd as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn)
+            (nd.n_dofs(), nd as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn)
         },
         ElementType::Quad4 => {
             let nd: &'static QuadNDk = Box::leak(Box::new(QuadNDk::new(1)));
-            (3, nd as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn)
+            (nd.n_dofs(), nd as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn)
         },
-        _ => panic!("unsupported element type {et:?}"),
+        _ => {
+            // Not a panic: an unsupported element type (e.g. a curved Tri6 /
+            // Quad9 mesh) is a declared gap of this port.
+            eprintln!(
+                "mfem_pex31_restricted_hcurl: unsupported element type {et:?} (only Tri3 and \
+                 Quad4 are implemented) — exiting with status 3"
+            );
+            std::process::exit(3)
+        }
     }
 }
 
@@ -466,6 +485,19 @@ fn edges_for_elem(et: ElementType) -> &'static [(usize, usize)] {
 
 fn main() {
     let args = parse_args();
+    // Honest gap (round 31): the local reference elements used by
+    // `setup_element_ref` are the order-1 ones (`TriNDk::new(1)` / `QuadNDk::new(1)`
+    // with `TriP1` / `QuadQk::new(1)`).  Until the order-p port exists, `-o 2`
+    // would assemble an order-1 local basis into an order-2 space (silently
+    // wrong answers), so refuse it explicitly instead of degrading.
+    if args.order != 1 {
+        eprintln!(
+            "mfem_pex31_restricted_hcurl: -o {} (order-p restricted H(curl)) is not ported; \
+             only the order-1 local basis exists (C++ ex31p supports any order). Re-run with -o 1.",
+            args.order
+        );
+        std::process::exit(3);
+    }
     ThreadLauncher::new(WorkerConfig::new(args.ranks)).launch(move |comm| {
         let rank = comm.rank();
         let is_root = rank == 0;
@@ -478,8 +510,33 @@ fn main() {
         }
 
         // 1. Serial mesh, refined (rs + rp) times before partitioning.
-        let mfem = read_mfem_file(&args.mesh_file).expect("failed to read MFEM mesh");
-        let mesh0: Mesh<2> = mfem.mesh2d.expect("restricted H(curl) is 2-D only");
+        let mfem = match read_mfem_file(&args.mesh_file) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "mfem_pex31_restricted_hcurl: cannot read mesh file '{}': {e} — exiting with \
+                     status 3",
+                    args.mesh_file
+                );
+                std::process::exit(3)
+            }
+        };
+        // D137 family: never assume the dimension.  This port is the 2-D
+        // restricted H(curl) path (ND_R2D_FECollection); the C++ also has a 3-D
+        // branch this port does not implement, so a 3-D input is refused
+        // instead of panicking (it used to be `expect("... 2-D only")`).
+        let mesh0: Mesh<2> = match mfem.mesh2d {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "mfem_pex31_restricted_hcurl: mesh '{}' is not 2-D and this port implements \
+                     only the 2-D restricted H(curl) path (C++ ex31p's 3-D ND path is not \
+                     ported) — exiting with status 3",
+                    args.mesh_file
+                );
+                std::process::exit(3)
+            }
+        };
         let mut full_mesh = mesh0;
         for _ in 0..args.ser_ref_levels + args.par_ref_levels {
             full_mesh = refine_uniform(&full_mesh);
@@ -873,4 +930,39 @@ fn physical_checksums(
         nd_ck += (id as f64 + 1.0) * x.as_slice()[n_z_owned + p];
     }
     (comm.allreduce_sum_f64(z_ck), comm.allreduce_sum_f64(nd_ck))
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    /// Regression (round 31, D137b): `setup_element_ref` hard-coded `3` as the
+    /// local ND dof count for `Quad4` while `QuadNDk::new(1).n_dofs() == 4`.
+    /// Every `n_ld * 2` / `n_ld * n_lh1` scratch buffer in
+    /// `assemble_combined_local` / `compute_hcurl_error` was therefore 6 long,
+    /// and `QuadNDk::eval_basis_vec`'s Whitney 1-form (4 edge DOFs × 2
+    /// components = 8 values) panicked at `values[6]`.
+    ///
+    /// Run with:
+    /// `cargo test --release --example mfem_pex31_restricted_hcurl`
+    #[test]
+    fn element_ref_dof_counts_match_reference_elements() {
+        for et in [ElementType::Tri3, ElementType::Quad4] {
+            let (n_ld, rnd, _rh1, _n_lh1, _jac) = setup_element_ref(et, 1);
+            assert_eq!(n_ld, rnd.n_dofs(), "{et:?}: n_ld must be n_dofs()");
+            // The documented buffer contract: len == n_dofs() * dim() for the
+            // vector basis, n_dofs() for the 2-D scalar curl.
+            let mut np = vec![0.0_f64; n_ld * rnd.dim() as usize];
+            let mut cn = vec![0.0_f64; n_ld];
+            for xi in [[0.3, 0.2], [0.5, 0.5], [0.8, 0.9]] {
+                rnd.eval_basis_vec(&xi, &mut np);
+                rnd.eval_curl(&xi, &mut cn);
+            }
+            assert!(np.iter().all(|v| v.is_finite()));
+            assert!(cn.iter().all(|v| v.is_finite()));
+        }
+        // MFEM `ND_QuadrilateralElement(1)`: one DOF per edge ⇒ 4 (not 3).
+        assert_eq!(setup_element_ref(ElementType::Quad4, 1).0, 4);
+        assert_eq!(setup_element_ref(ElementType::Tri3, 1).0, 3);
+    }
 }

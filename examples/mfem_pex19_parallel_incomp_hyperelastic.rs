@@ -4,11 +4,22 @@
 //! Quasi-static incompressible neo-Hookean hyperelasticity (mixed u/p).
 //! Strategy: rank 0 runs the full serial example, broadcasts result.
 //!
+//! ## Scope (round 31, D137): **2-D only**
+//!
+//! C++ `ex19p`'s default mesh is `../data/beam-tet.mesh` — a **3-D** mesh, and
+//! its hyperelasticity form is dimension-generic.  This port implements only
+//! the 2-D branch (`dim = 2`, `Mesh<2>`), so a 3-D input (including the C++
+//! default) is refused with an explicit message and status 3.  It used to abort
+//! via `expect("2D mesh")`, i.e. a panic (exit 101) with no explanation.
+//!
+//! Ported path: a 2-D mesh, e.g. `-m data/beam-tri.mesh`, which is directly
+//! comparable with C++ `ex19p -m data/beam-tri.mesh`.
+//!
 //! Usage:
 //! ```text
-//! cargo run --release --example mfem_pex19_parallel_incomp_hyperelastic
+//! cargo run --release --example mfem_pex19_parallel_incomp_hyperelastic -- -m data/beam-tri.mesh
 //! cargo run --release --example mfem_pex19_parallel_incomp_hyperelastic -- --ranks 4
-//! */
+//! ```
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{refine_uniform, MeshTopology};
@@ -77,8 +88,29 @@ fn main() {
         let rank = comm.rank();
 
         let (n_total, residual, status) = if rank == 0 {
-            let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
-            let mut mesh = mfem.mesh2d.expect("2D mesh");
+            let mfem = read_mfem_file(&args.mesh).unwrap_or_else(|e| {
+                eprintln!(
+                    "mfem_pex19_parallel_incomp_hyperelastic: cannot read mesh file '{}': {e} — \
+                     exiting with status 3",
+                    args.mesh
+                );
+                std::process::exit(3)
+            });
+            // D137: never assume the dimension — the C++ default is 3-D.
+            let mut mesh = match mfem.mesh2d {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "mfem_pex19_parallel_incomp_hyperelastic: mesh '{}' is not 2-D and this \
+                         port implements only the 2-D branch (dim = 2).\n\
+                         \x20 C++ ex19p's default mesh is data/beam-tet.mesh (3-D); for the ported \
+                         path pass a 2-D mesh, e.g. -m data/beam-tri.mesh,\n\
+                         \x20 or use the C++ ex19p for the 3-D default. Exiting with status 3.",
+                        args.mesh
+                    );
+                    std::process::exit(3)
+                }
+            };
             for _ in 0..args.refine { mesh = refine_uniform(&mesh); }
             
             let dim = 2usize;
@@ -134,6 +166,18 @@ fn main() {
     println!("Residual: {:.5e}", res);
     println!("{}", status);
     println!("=== Done ===");
+    // Round 31 (D137 clean-up): a non-converged Newton solve must not report
+    // success.  The 2-D branch stalls at r/r0 = 1.0 on every fixture tried
+    // (`-m data/beam-tri.mesh -r 1`), so the honest outcome is a non-zero exit
+    // with the reason instead of the previous exit code 0.
+    if status != "Newton converged" {
+        eprintln!(
+            "mfem_pex19_parallel_incomp_hyperelastic: {status} (residual {res:.5e}) — the 2-D \
+             mixed-hyperelasticity Newton iteration does not reduce the residual; exiting with \
+             status 3"
+        );
+        std::process::exit(3);
+    }
 }
 
 fn mfem_ex19_solve(
@@ -216,7 +260,7 @@ fn mfem_ex19_solve(
         let k_cfg_inner = k_cfg.clone();
         let nu_inner = nu;
         let np_inner = np;
-        let precond = move |r: &[f64], z: &mut [f64]| {
+        let _precond = move |r: &[f64], z: &mut [f64]| {
             let mut zp = vec![0.0_f64; np_inner];
             let _ = solve_pcg_gssmoother(&mp, &r[nu_inner..], &mut zp, &s_cfg_inner);
             for i in 0..np_inner { z[nu_inner + i] = gamma * zp[i]; }
