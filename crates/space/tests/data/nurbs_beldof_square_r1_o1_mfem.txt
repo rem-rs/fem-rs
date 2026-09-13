@@ -1,0 +1,41 @@
+MESH dim=2 order=1 ref=1 ne=4 nbe=8 nv=9 n_attrs=1
+A 1 1 1 1 1 1 1 1
+BEFACE 0 fn=0 geom=1 v 0 4
+BEFACE 1 fn=4 geom=1 v 4 1
+BEFACE 2 fn=8 geom=1 v 5 3
+BEFACE 3 fn=11 geom=1 v 2 5
+BEFACE 4 fn=3 geom=1 v 6 0
+BEFACE 5 fn=9 geom=1 v 3 6
+BEFACE 6 fn=5 geom=1 v 1 7
+BEFACE 7 fn=10 geom=1 v 7 2
+H1 ndofs=9 vsize=9 vdim=1 n_total=9
+BEL_H1 0 n=2 0 4
+BEL_H1 1 n=2 4 1
+BEL_H1 2 n=2 3 5
+BEL_H1 3 n=2 5 2
+BEL_H1 4 n=2 0 6
+BEL_H1 5 n=2 6 3
+BEL_H1 6 n=2 1 7
+BEL_H1 7 n=2 7 2
+HDIV ndofs=24 vsize=24 vdim=1
+BEL_HDIV 0 n=2 -13 -17
+BEL_HDIV 1 n=2 -17 -14
+BEL_HDIV 2 n=2 15 17
+BEL_HDIV 3 n=2 17 14
+BEL_HDIV 4 n=2 -1 -9
+BEL_HDIV 5 n=2 -9 -4
+BEL_HDIV 6 n=2 1 9
+BEL_HDIV 7 n=2 9 2
+ELDIV 0 n=12 0 4 5 8 10 11 12 16 18 22 19 23
+ELDIV 1 n=12 4 5 1 10 11 9 16 13 22 20 23 21
+ELDIV 2 n=12 8 10 11 3 7 6 18 22 19 23 15 17
+ELDIV 3 n=12 10 11 9 7 6 2 22 20 23 21 17 14
+HCURL ndofs=24 vsize=24 vdim=1
+BEL_HCURL 0 n=2 0 4
+BEL_HCURL 1 n=2 4 1
+BEL_HCURL 2 n=2 3 5
+BEL_HCURL 3 n=2 5 2
+BEL_HCURL 4 n=2 12 20
+BEL_HCURL 5 n=2 20 15
+BEL_HCURL 6 n=2 13 21
+BEL_HCURL 7 n=2 21 14

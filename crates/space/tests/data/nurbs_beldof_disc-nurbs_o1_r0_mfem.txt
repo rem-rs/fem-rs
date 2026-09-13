@@ -1,0 +1,11 @@
+MESH dim=2 order=1 ref=0 ne=5 nbe=4 nv=8 n_attrs=1
+A 1 1 1 1
+BEFACE 0 fn=4 geom=1 v 0 1
+BEFACE 1 fn=10 geom=1 v 2 3
+BEFACE 2 fn=7 geom=1 v 1 2
+BEFACE 3 fn=11 geom=1 v 3 0
+H1 ndofs=25 vsize=25 vdim=1 n_total=25
+BEL_H1 0 n=3 0 8 1
+BEL_H1 1 n=3 3 11 2
+BEL_H1 2 n=3 1 12 2
+BEL_H1 3 n=3 0 15 3

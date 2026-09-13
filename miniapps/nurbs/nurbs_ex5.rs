@@ -22,17 +22,22 @@
 //! | `dim(R+W)` | `12805` |
 //! | `R_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H(div): 260` |
 //! | `W_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H1: 256` |
+//! | `NURBSExtension::GetBdrElementDofTable` (D96) | the signed `bel_dof` rows of all three modes (`BdrDofMode::H1/HDiv/HCurl`), byte-identical to C++ — `NurbsHDivSpace::boundary_dof_table` |
 //!
 //! **Not ported** (each is a hard blocker for the solve block, so the example
 //! stops with `exit(3)` *before* printing anything it cannot reproduce):
 //!
-//! * `VectorFEBoundaryFluxLFIntegrator` — the natural-BC term
-//!   `fform->AddBoundaryIntegrator(new VectorFEBoundaryFluxLFIntegrator(...))`.
-//!   MFEM integrates it with the *boundary element's* own `NURBS1D/2D` shape
-//!   functions and `NURBSExtension::GenerateBdrElementDofTable`'s signed
-//!   `bel_dof` rows (the H(div) mode flips the sign of the low-side rows); this
-//!   port does not yet build that table, so the load vector's boundary part is
-//!   missing.
+//! * `LinearForm::Assemble` for `fform` — its `VectorFEDomainLFIntegrator` part
+//!   *and* the `VectorFEBoundaryFluxLFIntegrator` natural-BC term
+//!   `∫_Γ (v·n) g ds`.  The signed boundary DOF table that term needs now exists
+//!   (D96: `Mode::H_DIV` negates every low-side boundary entity's DOFs, and
+//!   `Vector::AddElementVector` reads a negative row entry as a subtraction);
+//!   what is still missing is the *boundary element* assembly path — the
+//!   boundary FE of `fes->GetBE(i)` (a `NURBS1D/2DFiniteElement` bound to the
+//!   analysis extension's boundary knot vector and span index, quadrature
+//!   `oa*order + ob = 2*order`) and the rational geometry of the *refined*
+//!   boundary patch, `mesh->GetBdrElementTransformation(i)` (the boundary
+//!   analogue of `NurbsFESpace::geometry`).
 //! * The block MINRES solve: `Blocksolvers`/`BlockDiagonalPreconditioner` with
 //!   `DSmoother(M)` and `GSSmoother(B diag(M)⁻¹ Bᵀ)`.  `fem-solver` has
 //!   `MinresSolver` and `BlockDiagonalPrecond`, but not the
@@ -127,9 +132,11 @@ fn main() {
     // 7.-11. `fform` (with `VectorFEBoundaryFluxLFIntegrator`), `gform`, the
     // Darcy `BlockOperator` and the MINRES solve.
     eprintln!(
-        "nurbs_ex5: stages 7-11 are not ported (VectorFEBoundaryFluxLFIntegrator's signed \
-         NURBS bel_dof table and the DSmoother/GSSmoother block preconditioner are missing \
-         from fem-rs); see the module docs. Run MFEM's nurbs_ex5 for stages 7-11."
+        "nurbs_ex5: stages 7-11 are not ported (the boundary-element assembly path that \
+         `VectorFEBoundaryFluxLFIntegrator` needs — the boundary FE and the refined boundary \
+         patch geometry — and the DSmoother/GSSmoother block preconditioner; the signed \
+         bel_dof table itself is available as `NurbsHDivSpace::boundary_dof_table`); see the \
+         module docs. Run MFEM's nurbs_ex5 for stages 7-11."
     );
     std::process::exit(3);
 }

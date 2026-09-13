@@ -69,7 +69,28 @@ use fem_element::quadrature::gauss_legendre_01;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
-use crate::nurbs_extension::NurbsExtension;
+use crate::nurbs_extension::{BdrDofMode, NurbsExtension};
+
+/// MFEM `Table(const Table &t1, const Table &t2, int offset)` /
+/// `Table(t1, t2, o2, t3, o3)` — the merge `FiniteElementSpace::UpdateNURBS`
+/// uses for the element *and* boundary DOF tables of a vector NURBS space:
+/// component `c`'s entries are shifted by its DOF offset, and a negative entry
+/// (MFEM's `-1 - dof` sign encoding) is shifted by `-offset`, which keeps the
+/// encoding (`-1 - (dof + offset)`) intact.
+fn merge_component_tables(parts: &[(usize, Vec<Vec<i64>>)]) -> Vec<Vec<i64>> {
+    let n_rows = parts[0].1.len();
+    let mut out = Vec::with_capacity(n_rows);
+    for b in 0..n_rows {
+        let mut row = Vec::new();
+        for (off, table) in parts {
+            for &e in &table[b] {
+                row.push(if e < 0 { e - *off as i64 } else { e + *off as i64 });
+            }
+        }
+        out.push(row);
+    }
+    out
+}
 
 /// A quadrature rule on `[0,1]^dim` with MFEM's tensor ordering (the first
 /// direction varies fastest, so the summation order matches MFEM's).
@@ -460,6 +481,14 @@ impl NurbsFESpace {
         &self.ext
     }
 
+    /// MFEM `FiniteElementSpace::GetBdrElementDofs` for this scalar space —
+    /// `NURBSext->GetBdrElementDofTable()` (`Mode::H_1`), one row per mesh
+    /// boundary element, in MFEM's signed encoding (see
+    /// [`crate::nurbs_extension::unsign_dof`]).
+    pub fn boundary_dof_table(&self) -> Vec<Vec<i64>> {
+        self.ext.boundary_dof_table(BdrDofMode::H1)
+    }
+
     /// The refined mesh extension (the `mesh->NURBSext` after
     /// `Mesh::UniformRefinement`; its knot vectors carry the *geometry* orders).
     pub fn mesh_extension(&self) -> &NurbsExtension {
@@ -748,11 +777,12 @@ impl NurbsFESpace {
         let mut mark = vec![false; self.n_dofs()];
         // A patch-boundary entity can be shared by several boundary elements
         // (one per knot span along it); each `(side, attribute)` is marked once.
-        let mut sides: Vec<(usize, usize, bool, i32)> = self.ext.boundary_sides().to_vec();
+        let mut sides = self.ext.boundary_sides().to_vec();
         sides.sort_unstable();
         sides.dedup();
 
-        for &(patch, dir, low, attr) in &sides {
+        for side in &sides {
+            let (patch, dir, low, attr) = (side.patch, side.dir, side.low, side.attr);
             // `bdr_attr_is_ess[attr-1]`, with attribute 0 (unnumbered) never
             // marked — MFEM's `bdr_attr_is_ess` is indexed the same way.
             if attr < 1 || !ess_bdr.get((attr - 1) as usize).copied().unwrap_or(false) {
@@ -1152,6 +1182,19 @@ impl NurbsHCurlSpace {
         self.base.extension()
     }
 
+    /// `FiniteElementSpace::GetBdrElementDofs` for this H(curl) space — the
+    /// `Mode::H_CURL` boundary DOF table of every `VNURBSext[d]`, merged with
+    /// the component offsets (all signs `+`, see
+    /// [`NurbsExtension::boundary_dof_table`]).
+    pub fn boundary_dof_table(&self) -> Vec<Vec<i64>> {
+        let parts: Vec<(usize, Vec<Vec<i64>>)> = (0..self.dim)
+            .map(|c| {
+                (self.comp_offsets[c], self.curl_ext[c].boundary_dof_table(BdrDofMode::HCurl))
+            })
+            .collect();
+        merge_component_tables(&parts)
+    }
+
     /// The element's vector FE with `SetIJK` applied (`NURBSExtension::LoadFE`).
     pub fn element_fe(&self, e: usize) -> HCurlSpanElement {
         let ext = self.base.extension();
@@ -1233,11 +1276,12 @@ impl NurbsHCurlSpace {
 
         // One entry per boundary element; a side is shared by all spans along
         // it, so de-duplicate first (`activeBdrElem` enumeration order).
-        let mut sides: Vec<(usize, usize, bool, i32)> = ext.boundary_sides().to_vec();
+        let mut sides = ext.boundary_sides().to_vec();
         sides.sort_unstable();
         sides.dedup();
 
-        for &(patch, dir, low, _attr) in &sides {
+        for side in &sides {
+            let (patch, dir, low) = (side.patch, side.dir, side.low);
             for c in 0..dim {
                 // H_CURL `Generate{2,3}DBdrElementDofTable`: dofs exist iff the
                 // entity's tangential knot-vector order differs from
@@ -2074,6 +2118,22 @@ impl NurbsHDivSpace {
         &self.div_ext[d]
     }
 
+    /// `FiniteElementSpace::GetBdrElementDofs` for this H(div) space — the
+    /// `Mode::H_DIV` boundary DOF table of every `VNURBSext[d]`, merged with the
+    /// component offsets exactly like the element table
+    /// (`bdr_elem_dof = Table(*t0, *t1, offset1, ...)`).  Rows are MFEM's signed
+    /// encoding: a negative entry `e` denotes DOF `-1 - e` with the opposite
+    /// sign, which is `Vector::AddElementVector`'s convention and what makes the
+    /// natural boundary condition of `nurbs_ex5` come out right.
+    pub fn boundary_dof_table(&self) -> Vec<Vec<i64>> {
+        let parts: Vec<(usize, Vec<Vec<i64>>)> = (0..self.dim)
+            .map(|c| {
+                (self.comp_offsets[c], self.div_ext[c].boundary_dof_table(BdrDofMode::HDiv))
+            })
+            .collect();
+        merge_component_tables(&parts)
+    }
+
     /// The element's vector FE with `SetIJK` applied (`NURBSExtension::LoadFE`).
     pub fn element_fe(&self, e: usize) -> HDivSpanElement {
         let ext = self.base.extension();
@@ -2155,11 +2215,12 @@ impl NurbsHDivSpace {
 
         // One entry per boundary element; a side is shared by all spans along
         // it, so de-duplicate first (`activeBdrElem` enumeration order).
-        let mut sides: Vec<(usize, usize, bool, i32)> = ext.boundary_sides().to_vec();
+        let mut sides = ext.boundary_sides().to_vec();
         sides.sort_unstable();
         sides.dedup();
 
-        for &(patch, dir, low, _attr) in &sides {
+        for side in &sides {
+            let (patch, dir, low) = (side.patch, side.dir, side.low);
             for c in 0..dim {
                 // `Mode::H_DIV`: `add_dofs` survives only for the component
                 // whose raised direction is the entity's normal direction.

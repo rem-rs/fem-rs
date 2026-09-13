@@ -1,0 +1,22 @@
+MESH dim=2 order=1 ref=0 ne=1 nbe=4 nv=4 n_attrs=1
+A 1 1 1 1
+BEFACE 0 fn=0 geom=1 v 0 1
+BEFACE 1 fn=2 geom=1 v 2 3
+BEFACE 2 fn=3 geom=1 v 3 0
+BEFACE 3 fn=1 geom=1 v 1 2
+H1 ndofs=4 vsize=4 vdim=1 n_total=4
+BEL_H1 0 n=2 0 1
+BEL_H1 1 n=2 3 2
+BEL_H1 2 n=2 0 3
+BEL_H1 3 n=2 1 2
+HDIV ndofs=12 vsize=12 vdim=1
+BEL_HDIV 0 n=2 -7 -8
+BEL_HDIV 1 n=2 9 8
+BEL_HDIV 2 n=2 -1 -4
+BEL_HDIV 3 n=2 1 2
+ELDIV 0 n=12 0 4 1 3 5 2 6 7 10 11 9 8
+HCURL ndofs=12 vsize=12 vdim=1
+BEL_HCURL 0 n=2 0 1
+BEL_HCURL 1 n=2 3 2
+BEL_HCURL 2 n=2 6 9
+BEL_HCURL 3 n=2 7 8
