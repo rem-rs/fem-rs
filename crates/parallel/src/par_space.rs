@@ -35,11 +35,15 @@ where
     /// Build a parallel FE space from a local space and parallel mesh.
     ///
     /// The DOF partition is derived from the mesh partition (P1: DOFs = nodes).
-    /// H(curl) spaces always use the edge-based partition
+    /// H1 order ≥ 2 uses the space's own [`DofManager`] so edge/face DOFs are
+    /// partitioned too ([`DofPartition::from_dof_manager`]); the mesh-node
+    /// partition would only cover the vertices (cylinder-hex Q2: 364 instead of
+    /// 2443 DOFs).  H(curl) spaces always use the edge-based partition
     /// ([`DofPartition::from_edge_space`]); H(div) uses the edge partition in
     /// 2-D (RT dofs live on edges) and the face partition in 3-D
-    /// ([`DofPartition::from_face_space`]).  For other P2+ spaces, use
-    /// [`new_with_dof_manager`](Self::new_with_dof_manager).
+    /// ([`DofPartition::from_face_space`]).  For P2+ spaces with a `DofManager`
+    /// in hand, [`new_with_dof_manager`](Self::new_with_dof_manager) is
+    /// equivalent and explicit.
     pub fn new<M: MeshTopology>(
         local_space: S,
         par_mesh: &ParallelMesh<M>,
@@ -69,7 +73,25 @@ where
                     .expect("SpaceType::L2 requires fem_space::L2Space");
                 DofPartition::from_l2_space(l2, par_mesh.partition(), &comm)
             }
-            _ => DofPartition::from_mesh_partition(par_mesh.partition(), &comm),
+            // H¹ (and the other node-based spaces: H¹ orders, the
+            // non-conforming `CrSpace` and the IGA spaces).  Order 1 has one
+            // DOF per node, so the node partition is exact; from order 2 on,
+            // edge/face/interior DOFs must come from the `DofManager` (only
+            // `H1Space` exposes one — `new_with_dof_manager` is the entry point
+            // for the other families).
+            _ => match local_space.order() {
+                0 | 1 => DofPartition::from_mesh_partition(par_mesh.partition(), &comm),
+                _ => match (&local_space as &dyn std::any::Any)
+                    .downcast_ref::<fem_space::H1Space<M>>()
+                {
+                    Some(h1) => DofPartition::from_dof_manager(
+                        h1.dof_manager(),
+                        par_mesh.partition(),
+                        &comm,
+                    ),
+                    None => DofPartition::from_mesh_partition(par_mesh.partition(), &comm),
+                },
+            },
         };
         Self::finish(local_space, dof_partition, &comm)
     }

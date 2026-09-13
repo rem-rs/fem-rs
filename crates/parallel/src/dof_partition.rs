@@ -41,6 +41,191 @@ struct FaceDofInfo {
     owner: Rank,
 }
 
+/// Metadata for one face DOF of a 3-D H¹ space: the interior node(s) of a
+/// shared triangular or quadrilateral face, stored by the `DofManager` in
+/// [`DofManager::face_pk_map`] / [`DofManager::quad_face_pk_map`].
+struct H1FaceDofInfo {
+    local_dof_id: u32,
+    /// Sorted global ids of the face's vertices (a triangle pads the 4th slot
+    /// with `u32::MAX`): a shared face has the same key on every rank.
+    face_key: [u32; 4],
+    /// Cross-rank-consistent position of the DOF within its face, see
+    /// [`face_dof_positions`].
+    pos: u32,
+    owner: Rank,
+}
+
+// ── 3-D H¹ face-DOF ordering ────────────────────────────────────────────────
+
+/// Cross-rank-consistent position of every DOF of one shared face.
+///
+/// The `DofManager` stores a face's DOFs in the **first-touch element's**
+/// reference-slot order, which depends on the rank-local node numbering and is
+/// therefore not a cross-rank property.  The ghost exchange key must instead be
+/// derived from the DOF itself: project it onto the frame spanned by the face
+/// edges leaving the face vertex with the smallest global id and order by the
+/// projected parameters `(t_u, t_v)`, which is a pure function of the physical
+/// coordinates + global ids.  (`(t_u, t_v)` is exact for parallelogram faces
+/// and monotone otherwise — the same approximation the P3+ edge keys make.)
+///
+/// `face_local` are the face's local vertex ids (any order) and `dofs` its DOFs
+/// in `DofManager` order; the result gives the position of `dofs[i]` in the
+/// face.  Single-DOF faces (Q2 hex, P3 tet) trivially map to 0.
+fn face_dof_positions(
+    dof_manager: &DofManager,
+    global_node: &dyn Fn(u32) -> u32,
+    face_local: &[u32],
+    dofs: &[u32],
+) -> Vec<u32> {
+    if dofs.len() == 1 {
+        return vec![0];
+    }
+    let coords: Vec<[f64; 3]> = face_local
+        .iter()
+        .map(|&v| {
+            let c = dof_manager.dof_coord(v);
+            [c[0], c[1], c[2]]
+        })
+        .collect();
+    let global: Vec<u32> = face_local.iter().map(|&v| global_node(v)).collect();
+
+    // Origin: smallest global vertex id; legs: the two face neighbours of the
+    // origin (a quadrilateral's opposite corner is recovered geometrically
+    // because its key is sorted), ordered by global id.
+    let o = (0..global.len()).min_by_key(|&i| global[i]).unwrap();
+    let legs: Vec<usize> = if global.len() == 4 {
+        let opp = quad_opposite_index(&coords, o);
+        (0..4).filter(|&i| i != o && i != opp).collect()
+    } else {
+        (0..global.len()).filter(|&i| i != o).collect()
+    };
+    let (mut ui, mut vi) = (legs[0], legs[1]);
+    if global[ui] > global[vi] {
+        std::mem::swap(&mut ui, &mut vi);
+    }
+
+    let (c0, cu, cv) = (coords[o], coords[ui], coords[vi]);
+    let eu = [cu[0] - c0[0], cu[1] - c0[1], cu[2] - c0[2]];
+    let ev = [cv[0] - c0[0], cv[1] - c0[1], cv[2] - c0[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (aa, ab, bb) = (dot(eu, eu), dot(eu, ev), dot(ev, ev));
+    let det = aa * bb - ab * ab;
+
+    let mut keyed: Vec<(f64, f64, u32)> = dofs
+        .iter()
+        .map(|&d| {
+            let c = dof_manager.dof_coord(d);
+            let w = [c[0] - c0[0], c[1] - c0[1], c[2] - c0[2]];
+            let (du, dv) = (dot(eu, w), dot(ev, w));
+            if det.abs() > f64::MIN_POSITIVE {
+                (
+                    (bb * du - ab * dv) / det,
+                    (aa * dv - ab * du) / det,
+                    d,
+                )
+            } else {
+                // Degenerate (collinear) frame: fall back to the distance from
+                // the origin, still a pure function of the DOF's position.
+                (dot(w, w).sqrt(), 0.0, d)
+            }
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut pos = vec![0u32; dofs.len()];
+    for (k, &(_, _, d)) in keyed.iter().enumerate() {
+        let i = dofs.iter().position(|&x| x == d).expect(
+            "face_dof_positions: sorted DOF set differs from the input set",
+        );
+        pos[i] = k as u32;
+    }
+    pos
+}
+
+/// Index (into `coords`) of the corner opposite `o` in a quadrilateral.
+///
+/// The caller's four corners come from the `DofManager`'s face key, which is
+/// **sorted** — the cyclic order is lost — so the opposite corner is found
+/// geometrically: in a convex quad exactly one candidate `d` has its diagonal
+/// `o–d` crossing the segment joining the other two corners.  Strongly warped
+/// or degenerate faces (no crossing detected) fall back to the farthest corner;
+/// that is also a pure function of the coordinates, so all ranks still agree.
+fn quad_opposite_index(coords: &[[f64; 3]], o: usize) -> usize {
+    let others: Vec<usize> = (0..4).filter(|&i| i != o).collect();
+    let n = quad_plane_normal(coords);
+    let n2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    if n2 > 0.0 {
+        for &d in &others {
+            let rest: Vec<usize> = others.iter().copied().filter(|&i| i != d).collect();
+            if segments_cross(coords, o, d, rest[0], rest[1], n) {
+                return d;
+            }
+        }
+    }
+    let dist2 = |i: usize| -> f64 {
+        let a = coords[i];
+        let b = coords[o];
+        (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
+    };
+    *others
+        .iter()
+        .max_by(|&&i, &&j| dist2(i).partial_cmp(&dist2(j)).unwrap())
+        .unwrap()
+}
+
+/// Plane normal of a quadrilateral, taken from its most robust (largest-area)
+/// vertex triple.  Only the direction matters, and every rank applies the same
+/// rule to the same coordinates.
+fn quad_plane_normal(c: &[[f64; 3]]) -> [f64; 3] {
+    const TRIPLES: [(usize, usize, usize); 4] = [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)];
+    let mut best = [0.0; 3];
+    let mut best_norm2 = 0.0;
+    for (i, j, k) in TRIPLES {
+        let u = [c[j][0] - c[i][0], c[j][1] - c[i][1], c[j][2] - c[i][2]];
+        let v = [c[k][0] - c[i][0], c[k][1] - c[i][1], c[k][2] - c[i][2]];
+        let m = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let norm2 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+        if norm2 > best_norm2 {
+            best_norm2 = norm2;
+            best = m;
+        }
+    }
+    best
+}
+
+/// `true` when the segments `(i, j)` and `(p, q)` properly cross, tested with
+/// the plane normal `n` (both comparisons flip together when `n` is negated).
+fn segments_cross(
+    c: &[[f64; 3]],
+    i: usize,
+    j: usize,
+    p: usize,
+    q: usize,
+    n: [f64; 3],
+) -> bool {
+    let sub = |a: usize, b: usize| [c[a][0] - c[b][0], c[a][1] - c[b][1], c[a][2] - c[b][2]];
+    let side = |a: usize, b: usize, x: usize| -> f64 {
+        let u = sub(b, a);
+        let v = sub(x, a);
+        let m = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        m[0] * n[0] + m[1] * n[1] + m[2] * n[2]
+    };
+    (side(i, j, p) > 0.0) != (side(i, j, q) > 0.0)
+        && (side(p, q, i) > 0.0) != (side(p, q, j) > 0.0)
+}
+
 // ── DofPartition ────────────────────────────────────────────────────────────
 
 /// DOF-level partition descriptor for one MPI rank.
@@ -390,17 +575,82 @@ impl DofPartition {
         let n_owned_edges = owned_edges.len();
         let n_ghost_edges = ghost_edges.len();
 
+        // ── Face DOFs (3-D only) ────────────────────────────────────────────
+        // The interior node(s) of a *shared* triangular/quadrilateral face live
+        // in `face_pk_map` / `quad_face_pk_map`.  They are owned by the face,
+        // not by an element: classifying them as element-interior DOFs (the
+        // pre-round-28 behaviour) multiplies each of them by the number of
+        // incident elements — cylinder-hex Q2 has 858 quad-face DOFs, counted
+        // 6 per element = 1764, giving 364 + 969 + 1764 = 3097 ≠ 2443 = the
+        // `DofManager`/MFEM DOF count.
+        //
+        // Ownership rule (MFEM `GroupTopology`): the owning rank of a shared
+        // entity is the smallest rank in its vertex group, i.e.
+        // `owner(face) = min(owner(v) for v in face)` — the same rule the edge
+        // DOFs above use, and by construction the owner rank holds the face
+        // (its local mesh carries every element touching an owned vertex).
+        let mut owned_faces: Vec<H1FaceDofInfo> = Vec::new();
+        let mut ghost_faces: Vec<H1FaceDofInfo> = Vec::new();
+        // (face local vertices, face DOFs) — kept for the interior filter below.
+        let mut face_entries: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        if dof_manager.dim == 3 {
+            for (k, ds) in &dof_manager.quad_face_pk_map {
+                face_entries.push((vec![k.0, k.1, k.2, k.3], ds.clone()));
+            }
+            for (k, ds) in &dof_manager.face_pk_map {
+                face_entries.push((vec![k.0, k.1, k.2], ds.clone()));
+            }
+            let global_node = |v: u32| partition.global_node(v);
+            for (verts, dofs) in &face_entries {
+                let mut sorted_g: Vec<u32> =
+                    verts.iter().map(|&v| global_node(v)).collect();
+                sorted_g.sort_unstable();
+                let mut face_key = [u32::MAX; 4];
+                face_key[..sorted_g.len()].copy_from_slice(&sorted_g);
+                let owner = verts
+                    .iter()
+                    .map(|&v| partition.node_owner(v))
+                    .min()
+                    .expect("from_dof_manager: empty face vertex list");
+                let pos = face_dof_positions(
+                    dof_manager, &global_node, verts, dofs,
+                );
+                for (i, &d) in dofs.iter().enumerate() {
+                    let info = H1FaceDofInfo {
+                        local_dof_id: d,
+                        face_key,
+                        pos: pos[i],
+                        owner,
+                    };
+                    if owner == local_rank {
+                        owned_faces.push(info);
+                    } else {
+                        ghost_faces.push(info);
+                    }
+                }
+            }
+        }
+        // Deterministic ordering by (sorted global vertex key, in-face position).
+        owned_faces.sort_by_key(|f| (f.face_key, f.pos));
+        ghost_faces.sort_by_key(|f| (f.face_key, f.pos));
+
+        let n_owned_faces = owned_faces.len();
+        let n_ghost_faces = ghost_faces.len();
+
         // ── Element-interior DOFs (P2 quad: 1 center; P3 quad: (p-1)²
-        //    bubble DOFs) ───────────────────────────────────────────────────
+        //    bubble DOFs; 3-D: the element-private volume DOFs) ───────────────
         // Interior DOFs are those in `element_dofs` that are neither vertices
-        // (id < n_vertex_dofs) nor edge DOFs.  P2 triangles have none.
+        // (id < n_vertex_dofs), nor edge DOFs, nor shared-face DOFs.  P2
+        // triangles have none.
         // Ownership = the element's owner; the global id =
-        // n_global_vertices + n_global_edges + global_elem_id ·
-        // interior_dofs_per + k (unique on every rank holding the element,
-        // no exchange needed).
+        // n_global_vertices + n_global_edges + n_global_faces +
+        // global_elem_id · interior_dofs_per + k (unique on every rank holding
+        // the element, no exchange needed).
         // Edge DOF ids from the same map that `edge_dofs_of` was read from.
         let edge_dof_set: std::collections::HashSet<u32> =
             edge_dofs_of.iter().flat_map(|(_, ds)| ds.iter().copied()).collect();
+        let face_dof_set: std::collections::HashSet<u32> =
+            face_entries.iter().flat_map(|(_, ds)| ds.iter().copied()).collect();
         let n_total_vertices_loc = dof_manager.n_vertex_dofs as u32;
         let mut owned_interior: Vec<(Vec<u32>, u32)> = Vec::new(); // (dm dofs, local elem)
         let mut ghost_interior: Vec<(Vec<u32>, u32, Rank)> = Vec::new();
@@ -410,7 +660,11 @@ impl DofPartition {
             let interior: Vec<u32> = dof_manager
                 .element_dofs(e as u32)
                 .iter()
-                .filter(|&&d| d >= n_total_vertices_loc && !edge_dof_set.contains(&d))
+                .filter(|&&d| {
+                    d >= n_total_vertices_loc
+                        && !edge_dof_set.contains(&d)
+                        && !face_dof_set.contains(&d)
+                })
                 .copied()
                 .collect();
             if interior.is_empty() {
@@ -443,14 +697,19 @@ impl DofPartition {
         let n_owned_interior = owned_interior.len() * interior_dofs_per;
         let n_ghost_interior = ghost_interior.len() * interior_dofs_per;
 
-        let n_owned = n_owned_vertices + n_owned_edges + n_owned_interior;
-        let n_ghost = n_ghost_vertices + n_ghost_edges + n_ghost_interior;
+        let n_owned = n_owned_vertices + n_owned_edges + n_owned_faces + n_owned_interior;
+        let n_ghost = n_ghost_vertices + n_ghost_edges + n_ghost_faces + n_ghost_interior;
 
         // ── Compute global offsets ──────────────────────────────────────────
         let global_dof_offset = exclusive_scan_i64(comm, n_owned as i64) as usize;
         let total_global_vertices = comm.allreduce_sum_i64(n_owned_vertices as i64) as u32;
         let edge_offset = exclusive_scan_i64(comm, n_owned_edges as i64) as u32;
         let n_global_edges = comm.allreduce_sum_i64(n_owned_edges as i64) as u32;
+        let face_offset = exclusive_scan_i64(comm, n_owned_faces as i64) as u32;
+        let n_global_faces = comm.allreduce_sum_i64(n_owned_faces as i64) as u32;
+        // MFEM's H¹ numbering: vertices, then edges, then faces, then interior.
+        let face_base = total_global_vertices + n_global_edges;
+        let interior_base = face_base + n_global_faces;
 
         // ── Build owned DOF arrays ──────────────────────────────────────────
         let total = n_owned + n_ghost;
@@ -477,16 +736,32 @@ impl DofPartition {
             );
         }
 
+        // Owned faces: global ID = n_global_vertices + n_global_edges +
+        // face_offset + i (positions within the face break ties).
+        let mut owned_face_global_map: HashMap<([u32; 4], u32), u32> = HashMap::new();
+        for (i, f) in owned_faces.iter().enumerate() {
+            let gid = face_base + face_offset + i as u32;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
+            // (face key, in-face position) must identify the DOF: a collision
+            // would alias two DOFs to one global id (and the ghost exchange
+            // would hand the same id to both).
+            assert!(
+                owned_face_global_map.insert((f.face_key, f.pos), gid).is_none(),
+                "from_dof_manager: duplicate owned face DOF key {:?} pos {} \
+                 (face-DOF positions are not unique)",
+                f.face_key,
+                f.pos
+            );
+        }
+
         // Owned element-interior DOFs: global ID = n_global_vertices +
-        // n_global_edges + global_elem_id · interior_dofs_per + k (element
-        // order is the canonical interior numbering).
+        // n_global_edges + n_global_faces + global_elem_id · interior_dofs_per
+        // + k (element order is the canonical interior numbering).
         for (bubble, le) in &owned_interior {
             let ge = partition.global_elem(*le);
             for (k, &d) in bubble.iter().enumerate() {
-                let gid = total_global_vertices
-                    + n_global_edges
-                    + ge * interior_dofs_per as u32
-                    + k as u32;
+                let gid = interior_base + ge * interior_dofs_per as u32 + k as u32;
                 global_dof_ids.push(gid);
                 dof_owner_vec.push(local_rank);
                 let _ = d;
@@ -519,15 +794,24 @@ impl DofPartition {
             dof_owner_vec.push(edge.owner);
         }
 
+        // Ghost faces: the owning rank resolves the key to its global id.
+        let ghost_face_requests: Vec<(Rank, [u32; 4], u32)> = ghost_faces
+            .iter()
+            .map(|f| (f.owner, f.face_key, f.pos))
+            .collect();
+        let ghost_face_gids =
+            exchange_ghost_face_keys(&ghost_face_requests, &owned_face_global_map, comm);
+        for (i, f) in ghost_faces.iter().enumerate() {
+            global_dof_ids.push(ghost_face_gids[i]);
+            dof_owner_vec.push(f.owner);
+        }
+
         // Ghost element-interior DOFs (same gid formula as owned — element
         // global ids are shared, so no exchange needed).
         for (bubble, le, owner) in &ghost_interior {
             let ge = partition.global_elem(*le);
             for (k, &d) in bubble.iter().enumerate() {
-                let gid = total_global_vertices
-                    + n_global_edges
-                    + ge * interior_dofs_per as u32
-                    + k as u32;
+                let gid = interior_base + ge * interior_dofs_per as u32 + k as u32;
                 global_dof_ids.push(gid);
                 dof_owner_vec.push(*owner);
                 let _ = d;
@@ -538,10 +822,11 @@ impl DofPartition {
         // ── Build dm_to_partition permutation ───────────────────────────────
         // Maps DofManager's local DOF ID → partition's local DOF ID.
         // Partition layout:
-        //   [owned_vertices | owned_edges | owned_interior |
-        //    ghost_vertices | ghost_edges | ghost_interior]
+        //   [owned_vertices | owned_edges | owned_faces | owned_interior |
+        //    ghost_vertices | ghost_edges | ghost_faces | ghost_interior]
         // DofManager layout:
-        //   [all_local_vertices | all_edges_in_enum_order | interior_in_elem_order]
+        //   [all_local_vertices | all_edges_in_enum_order |
+        //    faces_in_enum_order | interior_in_elem_order]
         let n_dm_dofs = dof_manager.n_dofs;
         let mut dm_to_partition = vec![0u32; n_dm_dofs];
 
@@ -563,12 +848,24 @@ impl DofPartition {
             dm_to_partition[edge.local_dof_id as usize] =
                 (n_owned + n_ghost_vertices + i) as u32;
         }
-        // Element-interior DOFs: partition owned segment after edges, ghost
-        // segment after ghost edges.
+        // Owned faces follow the owned edges; ghost faces the ghost edges.
+        for (i, f) in owned_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] =
+                (n_owned_vertices + n_owned_edges + i) as u32;
+        }
+        for (i, f) in ghost_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] =
+                (n_owned + n_ghost_vertices + n_ghost_edges + i) as u32;
+        }
+        // Element-interior DOFs: partition owned segment after faces, ghost
+        // segment after ghost faces.
         for (i, (bubble, _)) in owned_interior.iter().enumerate() {
             for (k, &d) in bubble.iter().enumerate() {
-                dm_to_partition[d as usize] =
-                    (n_owned_vertices + n_owned_edges + i * interior_dofs_per + k) as u32;
+                dm_to_partition[d as usize] = (n_owned_vertices
+                    + n_owned_edges
+                    + n_owned_faces
+                    + i * interior_dofs_per
+                    + k) as u32;
             }
         }
         for (i, (bubble, _, _)) in ghost_interior.iter().enumerate() {
@@ -576,6 +873,7 @@ impl DofPartition {
                 dm_to_partition[d as usize] = (n_owned
                     + n_ghost_vertices
                     + n_ghost_edges
+                    + n_ghost_faces
                     + i * interior_dofs_per
                     + k) as u32;
             }
@@ -1295,12 +1593,15 @@ impl DofPartition {
         let mut global_dof_ids = Vec::with_capacity(total);
         let mut dof_owner_vec = Vec::with_capacity(total);
 
-        let mut owned_face_global_map: HashMap<(u32, u32, u32, u32), u32> = HashMap::new();
+        let mut owned_face_global_map: HashMap<([u32; 3], u32), u32> = HashMap::new();
         for (i, f) in owned_faces.iter().enumerate() {
             let gid = global_dof_offset as u32 + i as u32;
             global_dof_ids.push(gid);
             dof_owner_vec.push(local_rank);
-            owned_face_global_map.insert((f.face_key.0, f.face_key.1, f.face_key.2, f.pos), gid);
+            owned_face_global_map.insert(
+                ([f.face_key.0, f.face_key.1, f.face_key.2], f.pos),
+                gid,
+            );
         }
 
         let owned_interior_offset = global_dof_offset + owned_faces.len();
@@ -1312,7 +1613,12 @@ impl DofPartition {
             owned_interior_map.insert((elem_gid, dof_idx), gid);
         }
 
-        let ghost_face_gids = exchange_ghost_face_ids(&ghost_faces, &owned_face_global_map, comm);
+        let ghost_face_requests: Vec<(Rank, [u32; 3], u32)> = ghost_faces
+            .iter()
+            .map(|f| (f.owner, [f.face_key.0, f.face_key.1, f.face_key.2], f.pos))
+            .collect();
+        let ghost_face_gids =
+            exchange_ghost_face_keys(&ghost_face_requests, &owned_face_global_map, comm);
         for (i, f) in ghost_faces.iter().enumerate() {
             global_dof_ids.push(ghost_face_gids[i]);
             dof_owner_vec.push(f.owner);
@@ -1537,41 +1843,37 @@ fn exchange_ghost_edge_ids(
 
 /// Exchange global DOF IDs for ghost face DOFs via alltoallv.
 ///
-/// Each rank sends its ghost faces (identified by the 3-vertex face key and
-/// the position within the face) to the owner rank, which looks up the global
-/// DOF ID and replies.
-fn exchange_ghost_face_ids(
-    ghost_faces: &[FaceDofInfo],
-    owned_face_global_map: &HashMap<(u32, u32, u32, u32), u32>,
+/// `ghost` holds one `(owner, face key, position-within-face)` request per ghost
+/// face DOF; the key is the face's sorted global vertex ids — `NK = 3` for a
+/// triangular face (H(div) RTk), `NK = 4` for a quadrilateral one (H¹ Qk) — so
+/// the owner can look the DOF up in `owned` and reply with its global id.
+/// The wire format is `NK + 1` little-endian u32 words per request.
+fn exchange_ghost_face_keys<const NK: usize>(
+    ghost: &[(Rank, [u32; NK], u32)],
+    owned: &HashMap<([u32; NK], u32), u32>,
     comm: &Comm,
 ) -> Vec<u32> {
-    if comm.size() <= 1 || ghost_faces.is_empty() {
+    if comm.size() <= 1 || ghost.is_empty() {
         return Vec::new();
     }
 
-    let mut requests_by_owner: HashMap<Rank, Vec<(usize, u32, u32, u32, u32)>> = HashMap::new();
-    for (i, f) in ghost_faces.iter().enumerate() {
-        requests_by_owner.entry(f.owner).or_default().push((
-            i,
-            f.face_key.0,
-            f.face_key.1,
-            f.face_key.2,
-            f.pos,
-        ));
+    let mut requests_by_owner: HashMap<Rank, Vec<(usize, [u32; NK], u32)>> = HashMap::new();
+    for (i, &(owner, key, pos)) in ghost.iter().enumerate() {
+        requests_by_owner.entry(owner).or_default().push((i, key, pos));
     }
 
-    // Phase 1: send face requests (3-vertex key + pos) to owners.
+    // Phase 1: send face requests (vertex key + pos) to the owners.
     let sends: Vec<(Rank, Vec<u8>)> = requests_by_owner
         .iter()
         .map(|(&owner, entries)| {
             let bytes: Vec<u8> = entries
                 .iter()
-                .flat_map(|&(_, a, b, c, p)| {
-                    let mut buf = [0u8; 16];
-                    buf[..4].copy_from_slice(&a.to_le_bytes());
-                    buf[4..8].copy_from_slice(&b.to_le_bytes());
-                    buf[8..12].copy_from_slice(&c.to_le_bytes());
-                    buf[12..].copy_from_slice(&p.to_le_bytes());
+                .flat_map(|&(_, key, pos)| {
+                    let mut buf = vec![0u8; 4 * (NK + 1)];
+                    for (w, &v) in key.iter().enumerate() {
+                        buf[4 * w..4 * w + 4].copy_from_slice(&v.to_le_bytes());
+                    }
+                    buf[4 * NK..].copy_from_slice(&pos.to_le_bytes());
                     buf
                 })
                 .collect();
@@ -1585,23 +1887,26 @@ fn exchange_ghost_face_ids(
     let replies: Vec<(Rank, Vec<u8>)> = received
         .iter()
         .map(|(requester, bytes)| {
-            debug_assert_eq!(bytes.len() % 16, 0);
+            debug_assert_eq!(bytes.len() % (4 * (NK + 1)), 0);
             let reply_bytes: Vec<u8> = bytes
-                .chunks_exact(16)
+                .chunks_exact(4 * (NK + 1))
                 .flat_map(|chunk| {
-                    let a = u32::from_le_bytes(chunk[..4].try_into().unwrap());
-                    let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
-                    let c = u32::from_le_bytes(chunk[8..12].try_into().unwrap());
-                    let p = u32::from_le_bytes(chunk[12..].try_into().unwrap());
-                    let gid = owned_face_global_map
-                        .get(&(a, b, c, p))
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "exchange_ghost_face_ids: rank {} requested face ({a},{b},{c}) \
-                                 pos {p} but this rank does not own it",
-                                requester
-                            )
-                        });
+                    let mut key = [0u32; NK];
+                    for (w, slot) in key.iter_mut().enumerate() {
+                        *slot = u32::from_le_bytes(
+                            chunk[4 * w..4 * w + 4].try_into().unwrap(),
+                        );
+                    }
+                    let pos = u32::from_le_bytes(
+                        chunk[4 * NK..4 * NK + 4].try_into().unwrap(),
+                    );
+                    let gid = owned.get(&(key, pos)).unwrap_or_else(|| {
+                        panic!(
+                            "exchange_ghost_face_keys: rank {} requested face {key:?} \
+                             pos {pos} but this rank does not own it",
+                            requester
+                        )
+                    });
                     gid.to_le_bytes()
                 })
                 .collect();
@@ -1611,8 +1916,8 @@ fn exchange_ghost_face_ids(
 
     let reply_received = comm.alltoallv_bytes(&replies);
 
-    // Phase 3: decode replies into the original ghost-face order.
-    let mut result = vec![0u32; ghost_faces.len()];
+    // Phase 3: decode replies into the ghost-face order.
+    let mut result = vec![0u32; ghost.len()];
     for (responder, bytes) in &reply_received {
         let gids: Vec<u32> = bytes
             .chunks_exact(4)
@@ -1620,7 +1925,7 @@ fn exchange_ghost_face_ids(
             .collect();
         let request_indices = &requests_by_owner[responder];
         assert_eq!(gids.len(), request_indices.len());
-        for (j, &(orig_idx, _, _, _, _)) in request_indices.iter().enumerate() {
+        for (j, &(orig_idx, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
         }
     }
