@@ -12,15 +12,28 @@
 //! - `-s1 <file.gf>` (read a user grid function) exits 3: only the projected
 //!   source of the default run is ported.
 //!
-//! **Known gap (round 31, not silent):** the default run's four console lines
-//! are identical to the C++, but the written `interpolated.gf` only matches
-//! MFEM **for the first 20 of its 169 DOFs** (from DOF 20 on, 144/169 values
-//! differ, max |Δ| = 3.4e-1, and the two value multisets differ by 4.7e-2 — so
-//! it is neither a pure permutation nor round-off).  The source projection,
-//! target point generation and the FindPoints lookups are exercised; the
-//! element→DOF write-back of the interpolated values is the open part
-//! (candidate causes: the H¹ P3 (triangle) DOF numbering/ordering vs MFEM's,
-//! or the shared edge/interior DOF assignment order).
+//! **D146 (fixed in round 32):** the default run's four console lines were
+//! already identical to the C++, but the written `interpolated.gf` only matched
+//! MFEM for the first 25 of its 169 DOFs.  Root cause: the target evaluation
+//! points were taken from `ref_elem(Tri, p)` — the *equispaced* `TriPk` of the
+//! DG/L2 family — while MFEM's `tar_fes->GetFE(i)->GetNodes()` is the **H¹**
+//! element (`H1_FECollection`, `BasisType::GaussLobatto`).  For `p >= 3` those
+//! differ (1/3, 2/3 vs GLL 0.27639, 0.72361), so the source field was sampled at
+//! the wrong points.  Fixed by routing every H¹ element lookup through
+//! [`h1_ref_elem`] (`H1TriPk` for triangles; `QuadQk` is already GLL).  On an
+//! identical target mesh the file is now **bit-identical** to MFEM 4.10
+//! (`diff` of the two `interpolated.gf`, both for `-nc 1` and `-nc 2`, `-gfo` 0
+//! and 1).
+//!
+//! Remaining divergence of the *default* command (`-m2 data/inline-tri.mesh`):
+//! `fem-io` reads MFEM's INLINE `type = tri` mesh through
+//! `Mesh::unit_square_tri`, whose quad split (n0,n1,n3)+(n1,n2,n3), i.e. the
+//! **anti-diagonal**, differs from MFEM's `Make2D` tri split
+//! `(v0,v2,v3)+(v0,v1,v2)` (main diagonal) — so the target P3 node set itself is
+//! different and the two files cannot agree.  Evidence + the exact replacement
+//! recipe are in the round-32 report (`crates/io/src/mfem.rs` is out of this
+//! miniapp's scope).  With the same mesh written out explicitly the two miniapps
+//! agree bit-for-bit.
 //!
 //! Sample runs:
 //!   cargo run --release --example gslib_field_interp -- -no-vis
@@ -30,6 +43,8 @@ use std::io::Write;
 use std::path::Path;
 
 use fem_element::lagrange::factory::{ref_elem, ElemType};
+use fem_element::lagrange::H1TriPk;
+use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::findpts::GslibFindPoints;
 use fem_mesh::Mesh;
@@ -156,6 +171,21 @@ fn factory_elem(et: ElementType) -> ElemType {
     }
 }
 
+/// The reference element of the **H¹** space (`MFEM H1_FECollection`,
+/// `BasisType::GaussLobatto`) — i.e. what `tar_fes->GetFE(i)->GetNodes()` is.
+///
+/// `ref_elem(Tri, p)` returns the *equispaced* `TriPk` of the DG/L2 family; it
+/// coincides with MFEM's `H1_TriangleElement` only for `p <= 2` (D146).  For
+/// `p >= 3` the H¹ element is `H1TriPk` (Gauss-Lobatto nodes), so the target
+/// evaluation points and the source interpolation must both go through here.
+/// Tensor elements (`QuadQk`) are already GLL-based, so the fallback is exact.
+fn h1_ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => Box::new(H1TriPk::new(order as usize)),
+        _ => ref_elem(factory_elem(et), order),
+    }
+}
+
 /// Canonical (gslib `[0,1]`) → factory convention (findpts.rs helper).
 fn canonical_to_factory(et: ElementType, xi: &[f64]) -> Vec<f64> {
     match et {
@@ -209,7 +239,7 @@ impl<'a> H1Field<'a> {
         let mut vals = vec![0.0_f64; ncomp];
         for e in 0..mesh.n_elems() as u32 {
             let et = mesh.element_type_at(e);
-            let fe = ref_elem(factory_elem(et), order);
+            let fe = h1_ref_elem(et, order);
             let edofs = dm.element_dofs(e);
             for (k, xi) in fe.dof_coords().iter().enumerate() {
                 let (_j, _det, x) = mesh.element_jacobian(e, xi);
@@ -226,7 +256,7 @@ impl<'a> H1Field<'a> {
     /// Evaluate component `comp` at `(elem, xi)` (`xi` canonical `[0,1]`).
     fn eval(&self, comp: usize, elem: u32, xi: &[f64]) -> f64 {
         let et = self.mesh.element_type_at(elem);
-        let fe = ref_elem(factory_elem(et), self.order);
+        let fe = h1_ref_elem(et, self.order);
         let n_local = fe.n_dofs();
         let fxi = canonical_to_factory(et, xi);
         let mut phi = vec![0.0_f64; n_local];
@@ -274,6 +304,19 @@ fn main() {
     }
     if o.src_gf_ordering > 1 {
         unsupported("--gfo must be 0 (byNodes) or 1 (byVDim)");
+    }
+    if o.src_gf_ordering == 1 && o.src_ncomp != 2 {
+        // The C++ write-back reads `interp_vals(i*nsp*dim + d + j*dim)` where
+        // `dim` is the *mesh* dimension (2) while `interp_vals` has
+        // `nodes_cnt*tar_ncomp` entries: with `ncomp != dim` the last index is
+        // `(NE-1)*nsp*dim + (nsp-1)*dim + ncomp-1 > nodes_cnt*ncomp-1`, i.e. the
+        // reference implementation reads past the end of the vector (MFEM quirk
+        // in `field-interp.cpp:334`), so the output is not reproducible.
+        unsupported(
+            "--gfo 1 with -nc != 2: the C++ index formula uses the mesh dimension (2) \
+             as the component stride, so it reads `interp_vals` out of bounds unless \
+             ncomp == dim; only -nc 2 is reproducible",
+        );
     }
     if o.src_fieldtype != 0 {
         unsupported(
@@ -338,11 +381,11 @@ fn run(mesh_1: &Mesh<2>, mesh_2: &Mesh<2>, o: &Options) {
     // Target evaluation points: the *target FE nodes* (`fe->GetNodes()` mapped
     // through the element transformation), NE × nsp points, byNODES ordering.
     let ne = mesh_2.n_elems();
-    let nsp = ref_elem(factory_elem(mesh_2.element_type_at(0)), tar_order).n_dofs();
+    let nsp = h1_ref_elem(mesh_2.element_type_at(0), tar_order).n_dofs();
     let mut pts: Vec<[f64; 2]> = Vec::with_capacity(ne * nsp);
     for e in 0..ne as u32 {
         let et = mesh_2.element_type_at(e);
-        let fe = ref_elem(factory_elem(et), tar_order);
+        let fe = h1_ref_elem(et, tar_order);
         for xi in fe.dof_coords().iter() {
             let (_j, _det, x) = mesh_2.element_jacobian(e, xi);
             pts.push([x[0], x[1]]);
@@ -371,7 +414,9 @@ fn run(mesh_1: &Mesh<2>, mesh_2: &Mesh<2>, o: &Options) {
     // Project onto the target space.  For `fieldtype == 0` with the mesh order
     // different from the GF order, the C++ assigns the element-node values to
     // the element vdofs (`SetSubVector`), i.e. per element and node index.
-    let mut tar_dofs = vec![0.0_f64; tar_dm.n_dofs];
+    // `func_target` has `ndofs * vdim` entries (byNODES: component `c` of DOF
+    // `d` at `c*ndofs + d`).
+    let mut tar_dofs = vec![0.0_f64; tar_dm.n_dofs * tar_ncomp];
     let mut elem_dof_vals = vec![0.0_f64; nsp * tar_ncomp];
     for e in 0..ne as u32 {
         let edofs = tar_dm.element_dofs(e);
@@ -394,7 +439,8 @@ fn run(mesh_1: &Mesh<2>, mesh_2: &Mesh<2>, o: &Options) {
     }
 
     // Output the target mesh with the interpolated solution (MFEM
-    // `GridFunction::Save`, precision 8).
+    // `GridFunction::Save`: `fes->Save(os)` header, then `Vector::Print(os, w)`
+    // with `w = 1` for byNODES and `w = fes->GetVDim()` for byVDIM).
     let f = std::fs::File::create("interpolated.gf").expect("cannot create interpolated.gf");
     let mut w = std::io::BufWriter::new(f);
     writeln!(w, "FiniteElementSpace").unwrap();
@@ -402,8 +448,23 @@ fn run(mesh_1: &Mesh<2>, mesh_2: &Mesh<2>, o: &Options) {
     writeln!(w, "VDim: {tar_ncomp}").unwrap();
     writeln!(w, "Ordering: {}", o.src_gf_ordering).unwrap();
     writeln!(w).unwrap();
-    for v in tar_dofs.iter() {
-        writeln!(w, "{}", fmt_g(*v, 8)).unwrap();
+    // `tar_dofs` is stored byNODES; the written vector is in the space's
+    // ordering, so byVDIM interleaves the components of each DOF.
+    let out_vals: Vec<f64> = if o.src_gf_ordering == 0 {
+        tar_dofs.clone()
+    } else {
+        (0..tar_dm.n_dofs)
+            .flat_map(|d| (0..tar_ncomp).map(move |c| c * tar_dm.n_dofs + d))
+            .map(|k| tar_dofs[k])
+            .collect()
+    };
+    let width = if o.src_gf_ordering == 0 { 1 } else { tar_ncomp };
+    for (i, v) in out_vals.iter().enumerate() {
+        if i + 1 == out_vals.len() || (i + 1) % width == 0 {
+            writeln!(w, "{}", fmt_g(*v, 8)).unwrap();
+        } else {
+            write!(w, "{} ", fmt_g(*v, 8)).unwrap();
+        }
     }
     w.flush().unwrap();
 }

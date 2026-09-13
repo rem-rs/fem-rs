@@ -29,7 +29,19 @@
 //!
 //! The 0/1 code split uses MFEM's `Geometry::CheckPoint(geom, ip, -1e-12)`
 //! rule: a found point is "inside" only if it is at least [`STRICT_TOL`]
-//! inside the reference domain, otherwise it is "on border".
+//! inside the reference domain, otherwise it is "on border".  A border point
+//! farther than `bdr_tol` (squared distance) from the mesh is demoted to
+//! "not found" — the MFEM sequence `code = BORDER; if dist2 > bdr_tol → code =
+//! NOT_FOUND`.
+//!
+//! Candidate selection: [`Bvh::locate_candidates`] returns the elements whose
+//! (curved-geometry-padded) AABB contains the point; the first
+//! `max_candidates` are tried with the multi-start Newton solve.  When the cap
+//! truncates the list *and* none of the tried candidates resolves the point,
+//! the remainder is scanned as well (D147): on curved meshes the padded boxes
+//! of many elements overlap one point, so the containing element can sit past
+//! the cap.  Points the bounded search already resolved keep their result, so
+//! the fallback changes no previously-found point.
 //!
 //! [`HexQk`]: fem_element::lagrange::factory::HexQk
 
@@ -286,26 +298,17 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
         // sits on the border (code 1); among equals keep the smallest
         // residual.
         for &e in candidates.iter().take(n_cand) {
-            let Some((xi, dist2)) = self.newton(e, p) else {
-                continue;
-            };
-            if !best.dist2.is_finite() {
-                best.dist2 = dist2;
-                best.elem = e;
-                best.xi = xi;
-                continue;
-            }
-            let inside_new = self.strictly_inside(self.mesh.element_type_at(e), &xi);
-            let inside_best = self.strictly_inside(self.mesh.element_type_at(best.elem), &best.xi);
-            let better = if inside_new != inside_best {
-                inside_new
-            } else {
-                dist2 < best.dist2
-            };
-            if better {
-                best.dist2 = dist2;
-                best.elem = e;
-                best.xi = xi;
+            self.consider(e, p, &mut best);
+        }
+        // The cap truncated the candidate set and the bounded search resolved
+        // *nothing*: on curved meshes the padded element AABBs of many
+        // elements overlap a single point (D147 — 26+ candidates for one point
+        // of `field-diff`'s grid), so the containing element can sit past the
+        // cap.  Scan the remainder; points the bounded search already resolved
+        // keep the historical result unchanged.
+        if !best.dist2.is_finite() && candidates.len() > n_cand {
+            for &e in candidates.iter().skip(n_cand) {
+                self.consider(e, p, &mut best);
             }
         }
 
@@ -323,6 +326,34 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
             }
         }
         best
+    }
+
+    /// Merge the Newton result for element `e` into `best` (the selection rule
+    /// of MFEM's border/inside classification: a strictly inside containment
+    /// wins over a border one, otherwise the smallest residual wins).
+    fn consider(&self, e: ElemId, p: &[f64; D], best: &mut GslibPoint<D>) {
+        let Some((xi, dist2)) = self.newton(e, p) else {
+            return;
+        };
+        if !best.dist2.is_finite() {
+            best.dist2 = dist2;
+            best.elem = e;
+            best.xi = xi;
+            return;
+        }
+        let inside_new = self.strictly_inside(self.mesh.element_type_at(e), &xi);
+        let inside_best =
+            self.strictly_inside(self.mesh.element_type_at(best.elem), &best.xi);
+        let better = if inside_new != inside_best {
+            inside_new
+        } else {
+            dist2 < best.dist2
+        };
+        if better {
+            best.dist2 = dist2;
+            best.elem = e;
+            best.xi = xi;
+        }
     }
 
     /// Newton iteration on the isoparametric map of element `e`.
