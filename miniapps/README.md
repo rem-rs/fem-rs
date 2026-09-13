@@ -32,10 +32,35 @@ miniapps/
 │                                L2ProjectionGridTransfer 而本文件无参时静默按 pointwise
 │                                跑; `-h1/-l2/-t/-w/-ea/-d` 未实现 ⇒ `panic!` 而非
 │                                `exit(3)`; HO/R(HO)/LOR 质量与 C++ 逐位一致)
-├── electromagnetics/        ← 对应 miniapps/electromagnetics/
-│   ├── lorentz.rs
-│   ├── tesla.rs
-│   ├── volta.rs
+├── electromagnetics/        ← 对应 miniapps/electromagnetics/（**round 31 D139 处置 3 件**）
+│   ├── lorentz.rs           ← ⚠️ **round 31 声明式缺口 (exit(3))**：C++ 是 VisIt
+│   │                            DataCollection 接口 (`-er/-ef/-ec/-epdc/-epdr/-br/-bf/
+│   │                            -bc/-bpdc/-bpdr/-rdf/-rdm/-o/-npt/-m/-q/-xmin/-xmax/
+│   │                            -pmin/-pmax/-dt/-nt/-vis/-vt/-vf/-d`)，本文件自造
+│   │                            `-ex/-emesh/-efield` CLI 且曾**静默忽略 C++ 选项后 rc=0**
+│   │                            （实测 `-er Volta-AMR-Parallel -br Tesla-AMR-Parallel
+│   │                            -npt 20 -nt 5` → rc=0、`E=(0,0,1), B=(0,0,0) [constant]`）
+│   │                            ⇒ 现任何输入 `exit(3)` + 缺口清单，文件头换成真实 C++
+│   │                            选项表 + 偏离说明；缺并行 VisIt DC 读取 / GF 求值 /
+│   │                            `-rdf` 重分配（`fem_io::data_collection_load` 存在但未接线）
+│   ├── tesla.rs             ← ⚠️ **round 31 声明式缺口 (exit(3))**：stub + 假参数 ——
+│   │                            mesh 恒为内置 `unit_cube_tet(2)`、`-m`/`-maxit` 被
+│   │                            `let _…` 丢弃、`|A|=|B|=0` 且 `PCG Iterations = 0` 却 rc=0。
+│   │                            证据（round 31 实测）：`-m data/beam-tet.mesh -maxit 1
+│   │                            -ubbc "0 0 1"` 与无参运行的 dof 计数**完全相同**
+│   │                            (H1 27 / H(curl) 98 / H(div) 120 / L2 48)
+│   │                            ⇒ 现 `not_ported()` 在 main 第一行、不解析任何参数、
+│   │                            `exit(3)` + 缺口清单
+│   ├── volta.rs             ← 1:1 到单次解 (`-maxit 1`)：4 空间 + Assemble + Solve +
+│   │                            Total charge。**round 31 D139**：`--ranks` 默认
+│   │                            **2 → 1**（`>1` 因并行装配 `assert(24≠48)` 原为 panic，
+│   │                            现打印根因 + `exit(3)`）；`-vp`/`-nbcs`/AMR(`-maxit>1`)/
+│   │                            非 3-D/读文件失败全部 `exit(1)` → **`exit(3)`**。
+│   │                            ⚠️ **审计更正**：round 30 记的"hex 全 panic / NURBS 默认
+│   │                            网格挂死 >120 s"在当前源码 `--ranks 1 -maxit 1` 下
+│   │                            **不复现**（实测 hex / ball-nurbs 均 rc=0 正常跑完）
+│   │                            —— 疑似审计跑的是 **8/28 的陈旧 `mfem_miniapp_volta.exe`**
+│   │                            （旧注册名；现注册名是 `miniapp_volta`）
 │   └── maxwell.rs           ← 全波 Maxwell 偶极子脉冲 (1:1 串行; ND/RT 空间 +
 │                                SIAV 辛积分): H(Curl) 12336 / H(Div) 11520 dof
 │                                与 C++ 相同, 100 步 40 条 Energy(<t>ns) 行 +
@@ -84,9 +109,16 @@ miniapps/
 │                                **2 个名不副实待整改**（见下 solenoidal/printfunc）+
 │                                **9 个缺失**：ex1p/ex10/ex10p/ex11p/curveint/mesh_info/
 │                                patch_ex1/surface/naca_cmesh；共同地基 = 并行 NURBS、
-│                                `Nurbs*Space` 实现 `FESpace`（+vdim）、`patches` 变体读写 +
-│                                NURBSPatch 控制网编辑、NURBS 网格 writer。⚠️ `-pm/-ps/-p`
-│                                **静默忽略**（实测加不加输出完全相同））
+│                                `Nurbs*Space` 实现 `FESpace`（+vdim）、NURBSPatch 控制网编辑、
+│                                v1.1 `spacing` 段、多补丁 `knotvectors` → 逐补丁 `NurbsFile`。
+│                                ⚠️ `-pm/-ps/-p` **静默忽略**（实测加不加输出完全相同））
+│                                ✅ **round 31 起共同地基已部分落地（D143）**：
+│                                `fem_io::nurbs_mesh::{read,write}_nurbs_mesh_doc` —— NURBS 网格
+│                                **writer** + **`patches` 变体读写**；11 个 v1.0 夹具 read→write
+│                                token 级零差异，8 个与 MFEM 自身 `Mesh::Save(out,16)` **逐字节
+│                                相同**（`square-disc-nurbs-patch.mesh` 的 5 个 patch 经 MFEM
+│                                归一化输出 145 行逐字节相同）。**仍未解锁 ex10/ex11p/surface**：
+│                                还缺并行 NURBS 与 `Nurbs*Space` 实现 `FESpace`
 │   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
 │   │                            与 C++ 迭代块逐字节一致; **1D 已支持**:
@@ -145,24 +177,71 @@ miniapps/
 │                                **40/48 行不同**（C++ 6 位有效数字 vs Rust
 │                                round-trip）；改用库里已有的
 │                                `fem_solver::fmt_g` 即逐字节（D131）
-├── meshing/                 ← 对应 miniapps/meshing/（**round 30 审计**：22 个可执行中
-│                                5 个 a/b 类（mesh-optimizer 良态档与 C++ **逐位一致**、
-│                                hpref/phpref/ref321/fit-node-position）+ 10 个缺失 +
-│                                **11 个 (e) 类**，其中 7 个产出 MFEM 与本仓**都读不回来**
-│                                ⇒ 根因 = `write_mfem` 边界面回落硬编码 3 节点/TRIANGLE，见 D126）
-│   ├── shaper.rs            ← ⚠️ 曾标"(1:1) MATERIAL 界面 AMR"，**实测证伪**：quad
-│   │                            分支走 `refine_uniform`（整网格均匀细化、忽略 marked
-│   │                            集合）16→64→…→65536 vs C++ 的 16→52→64 NC 网格；
-│   │                            材料属性 `attr(i)` 从未写回 ⇒ 待真修（D132）
-│   ├── extruder.rs          ← ⚠️ 曾标"(1:1)"，**实测证伪**：只支持 2D quad/tri，
-│   │                            `-trans`/`-ny`/`-wy` 静默忽略；边界段写成 3 节点
-│   │                            TRIANGLE（应 SQUARE）⇒ MFEM abort（D126/D132）
-│   ├── twist.rs / klein-bottle.rs / toroid.rs / trimmer.rs / reflector.rs
-│   │                        ← ⚠️ 均无裁剪标注但实测偏离（twist 的曲率被 `&& false`
-│   │                            短路、toroid 把 prism 写成 hex、reflector 产出 7 对
-│   │                            重复元素、trimmer 边界 34 vs 36）⇒ D126/D132
+├── meshing/                 ← 对应 miniapps/meshing/（**round 30 审计 → round 31 D126/D132 处置**：
+│                                22 个可执行中 5 个 a/b 类 + 10 个缺失；round 30 判为 (e) 类的 7 件已
+│                                逐件处置。根因（**D126**）= `write_mfem` 边界面回落硬编码 3 节点/
+│                                TRIANGLE，**外加整个 writer 用 1-based 顶点索引**（MFEM 4.10 的
+│                                `PrintElementWithoutAttr`/`ReadElementWithoutAttr` 两端都直读
+│                                **0-based**，`data/` 全部官方网格含顶点 0）⇒ 修前 MFEM 读本仓
+│                                任何 `.mesh` 都 `Invalid mesh topology`/堆崩。已修：面类型按
+│                                `face_type_at` 推导 + writer 全面 0-based + reader 0/1-based 判据
+│                                加固 + **写前一致性自检**（坏网格返回 `FemError`、不落空文件））
+│   ├── shaper.rs            ← ⚠️ **仍开（D132 残留，本路未授权）**：曾标"(1:1) MATERIAL 界面
+│   │                            AMR"，实测证伪：quad 分支走 `refine_uniform`（整网格均匀细化、
+│   │                            忽略 marked 集合）16→64→…→65536 vs C++ 的 16→52→64 NC 网格；
+│   │                            材料属性 `attr(i)` 从未写回
+│   ├── extruder.rs          ← ✅ **round 31 修复**：`-m data/inline-quad.mesh` → NE=16 NBE=48
+│   │                            NV=50、边界段全为 `1 3 <4 节点>`（与 C++ 相同）、探针
+│   │                            `NE=16 NBE=48 NV=50 dim=3 sdim=3 nodes=0` **与 C++ 完全相同**、
+│   │                            `mesh-explorer` kappa 4/4 全等。`-trans`/1-D 输入/混合 2-D 输入
+│   │                            ⇒ exit(3)+缺口清单（缺曲面 nodes 写出 / `Mesh::Extrude1D`）
+│   │                            **仍存偏差（未授权改 `crates/mesh/src/extrusion.rs`，见 D144）**：
+│   │                            ① `elem_tags_3d.push(0)` 应 `mesh.elem_tags[e]` ⇒ MFEM 警告
+│   │                            `Non-positive attributes`；② 边界面属性 1/2/3 vs C++ 的
+│   │                            源属性 1..nba 与底/顶 `nba+elem attr`；③ 顶点编号层优先
+│   │                            `j*nv+i` vs C++ 点优先 `i*nvz+j`
+│   ├── toroid.rs            ← ✅ **round 31 修复**：① `elem_type` 未随 `-e` 同步（把 6 节点
+│   │                            prism 按 Hex8 写出 ⇒ round 30 看到的"6 个 CUBE + 空 boundary"）
+│   │                            ② 本地复刻 `FinalizeTopology`/`GenerateBoundaryElements`
+│   │                            ③ prism 的 `RemoveInternalBoundaries`（`local_face_verts` 无
+│   │                            Prism6 分支 ⇒ 原函数对楔形网格不删任何面）④ face_type/
+│   │                            face_types/face_offsets 同步 ⑤ 输出名按 C++
+│   │                            `toroid-{wedge,hex}-o*-s*[-r*].mesh` ⇒ `-o 1` → NE=8 NBE=24
+│   │                            NV=24，与 C++ `toroid -o 1` **拓扑逐字节相同**、坐标差 <5e-9
+│   │                            （C++ 只存 8 位有效数字）。`-o > 1`（含默认 `-o 3`，C++ 产物带
+│   │                            `H1_3D_P3` 的 `nodes`）⇒ exit(3)+缺口清单
+│   ├── reflector.rs         ← ✅ **round 31 修复**：① 重复元素（原来"就地反射 elem 0..ne-1
+│   │                            再 append 同样副本" ⇒ 14 元素 = 7 对完全相同）改为"保留原始 +
+│   │                            追加反射副本" ② 面内边界面按 C++ 跳过 ③ 反射四边形
+│   │                            `rv[0]↔rv[2]` ④ 反射单元按参考立方体奇对称重排（消掉 MFEM
+│   │                            `Elements with wrong orientation`）⑤ `minLength` 复刻 C++ 的
+│   │                            `GetEdgeVertices(i), i<GetNE()` 怪癖 ⇒ `-m data/fichera.mesh
+│   │                            -o '1 0 0' -n '1 0 0'` → NE=14 NBE=40 NV=43，单元/边界面
+│   │                            多重集与 C++ **全等**。**NURBS 默认输入**（C++ 默认
+│   │                            `data/pipe-nurbs.mesh`，走 `ReflectNURBSMesh`，产物头是
+│   │                            `MFEM NURBS mesh v1.0`）⇒ exit(3)+缺口清单，**明确不降级成
+│   │                            普通 `MFEM mesh v1.0`**（缺 NURBS 输出 + patch 反射；地基 =
+│   │                            `fem_io::nurbs_mesh`，见 D143）
+│   ├── twist.rs             ← ⚠️ **round 31 降级 exit(3)**（原 `if per_mesh && false` 静默
+│   │                            短路 SetCurvature）：C++ 所有文档档都满足 `order>1 || dg || pm`
+│   │                            ⇒ 产物带（L2）`nodes` 段，本仓无 nodes writer。**已 port**：
+│   │                            `-o 1 -no-pm` → NE=3 NBE=14 NV=16，与 C++ 同命令 **拓扑逐字节
+│   │                            相同**；顺带修了 v2v 顶层置换与 `-e 6`（prism）的 panic
+│   ├── polar-nc.rs          ← ⚠️ **round 31 降级 exit(3)**：C++ 产物是 `MFEM NC mesh v1.0`
+│   │                            + `vertex_parents`（真 NC）+ `SetCurvature(2)` 曲面 nodes +
+│   │                            `-sfc`（`GridSfcOrdering2D`，该 miniapp 的存在理由）；本仓
+│   │                            writer 只写 conforming `MFEM mesh v1.0`（旧实现写出的文件
+│   │                            MFEM 判 `Invalid mesh topology`）⇒ 缺口清单 5 条；
+│   │                            Options dump 与 C++ **逐行一致**
+│   ├── mobius-strip.rs      ← ⚠️ **round 31 降级 exit(3)**：C++ 是 **`dimension 2` +
+│   │ `klein-bottle.rs`         `Space dimension 3`**（曲面嵌 3-D）+ 非连续高阶 `nodes`
+│   │                            （默认 nodes=1；klein 默认 NBE=0）—— **不是 `dimension 3`**；
+│   │                            本仓 `Mesh<D>` 把坐标维钉死在拓扑维且无 nodes writer ⇒
+│   │                            exit(3)+缺口清单，Options dump 与 C++ **逐行一致**
+│   ├── trimmer.rs           ← ⚠️ **仍开**：C++ 默认输入 `data/beam-tet.vtk`（注意是 `.vtk`）
+│   │                            **本仓 `data/` 不存在** ⇒ 无法对拍；round 30 记的
+│   │                            "边界元素 34 vs 36"需先补该输入才能复现
 │   ├── mesh-explorer.rs / mesh-quality.rs
-│   ├── polar-nc.rs          ← 极坐标 NC 网格
 │   ├── ref321.rs            ← 3:1 各向异性细化 (1:1, order 1:
 │   │                            unknowns 与 C++ r=1..100 全对齐,
 │   │                            H1 连续性 ~0)
@@ -189,8 +268,8 @@ miniapps/
 ├── autodiff/                ← 对应 miniapps/autodiff/ (seq_example;
 │   └── autodiff_example.rs     pLaplacian 能量 Newton; 依赖
 │                                fem_assembly::ad 双数 AD)
-├── gslib/                   ← 对应 miniapps/gslib/（**round 30 审计：实质 1/7**）
-│   └── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
+├── gslib/                   ← 对应 miniapps/gslib/（**round 30 审计 1/7 → round 31 实质 4/7**）
+│   ├── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
 │                                BVH + 等参元 Newton, code 0/1/2 与
 │                                dist² 语义对齐; glibc rand 逐位复现
 │                                随机点; 13 个数值用例 counts 与 C++
@@ -210,6 +289,51 @@ miniapps/
 │                                `pfindpts`/`schwarz_ex1p`/`particles_redist`
 │                                需并行 locator 与 `ParticleSet::Redistribute`
 │                                （后者全仓 0 命中）⇒ D134
+│   ├── schwarz_ex1.rs       ← ✅ **round 31 新增**：重叠网格 Schwarz 迭代解
+│   │                            Poisson (1:1; **95 次迭代日志与 C++ 4.10 逐位相同**，
+│   │                            其中 90 行逐字符、5 行末位 1 ulp)。移植中必须对齐的三个
+│   │                            C++ 细节：① `FormLinearSystem` 会**清零非 essential 项**
+│   │                            （Krylov 初值 = 只有 BC）；② 循环内 `Interpolate` 用的是
+│   │                            main 里由 interior 列表构造的 `bnd1/bnd2` ⇒ 需对
+│   │                            48/32 个 interior 点**重新定位**；③ not-found 点取
+│   │                            `default_interp_value = 0`。
+│   │                            ⚠️ **分派路径坑（务必先读）**：C++ `schwarz_ex1.cpp:176-186`
+│   │                            用 `strcmp(mesh_file_1, "../../data/square-disc.mesh")` 判定
+│   │                            —— **只有两个 `-m` 路径字符串逐字等于硬编码默认串时才把
+│   │                            `inline-quad.mesh` 按 0.5 缩放到 [0.25,0.75]²**。用
+│   │                            **绝对路径**跑 C++ 就不会 rescale ⇒ 子域 2 包住 disc ⇒
+│   │                            **重叠退化、1~2 步假收敛到 3.4e-16**（实测 2 vs 95 次迭代）。
+│   │                            本 port 以 `DEFAULT_MESH_1/2`（`schwarz_ex1.rs:95-96`）为条件
+│   │                            复刻该语义（`:308-313`），故**与 C++ 显式路径档的行为不同**，
+│   │                            已写入文件头 doc。
+│   │                            附带库层发现：`fem_solver::solve_pcg` 的 `rtol` 作用在
+│   │                            **(B r, r) 平方量**上（等价范数意义 1e-6），而 MFEM 判据是
+│   │                            `sqrt((B r, r))`；改用 `solve_pcg_precond`(linlvo CG) 后逐位对齐
+│   ├── field-diff.rs        ← ✅ **round 31 新增**：两网格两场插值对比 (1:1;
+│   │                            **`Vol diff` 与 C++ 4.10 逐位相同 1.73608**；
+│   │                            `Avg diff` 0.0960922 vs 0.0949062 (+1.2%)；
+│   │                            `Max diff` 2.58236 vs 1.43502 —— 差异已定位量化：
+│   │                            finder1 [9604 inside, 396 border, 0 not-found] vs
+│   │                            finder2 [9599, 396, 5]，**那 5 个近边界点贡献了
+│   │                            12.690817 的差和**（点序 4374/4377/4379/4481/4582，
+│   │                            其中 4481 的 `v2 = 0` 因 locator 报 code 2）⇒ 不是装配/
+│   │                            插值错误，而是 `crates/mesh/src/findpts` 对 0.05% 边际点的
+│   │                            border/newton 分类待收口）
+│   └── field-interp.rs      ← ✅ **round 31 新增**：源网格场插值到目标网格
+│                                (控制台 **4 行与 C++ 逐字相同**；⚠️ 该 miniapp 本身
+│                                **没有任何误差行**，全源码只有那 4 行 + 写文件；
+│                                `interpolated.gf` 写回**仅前 20/169 DOF 对齐**，
+│                                从 DOF 20 起值不同且多重集也不同（max|Δ| = 3.4e-1）
+│                                ⇒ H1 P3 三角形 DOF 编号/写回次序 WIP，**已写入文件头 doc
+│                                而非静默**）
+│                                ⚠️ **仍缺 3 件**：`pfindpts`/`schwarz_ex1p`/
+│                                `particles_redist` 需并行 locator 与
+│                                `ParticleSet::Redistribute`（`grep Redistribute crates/` = 0）
+│                                ⚠️ 夹具 `triple-pt-{1,2}.{mesh,gf}` **不入库**（`data/*.mesh`
+│                                被 gitignore）；`field-diff` 带回落：路径不存在时找
+│                                `$MFEM_SRC/miniapps/gslib/<basename>`（AGENTS.md 约定变量）
+│                                ⇒ `MFEM_SRC=/path/to/mfem cargo run --release --example
+│                                gslib_field_diff -- -no-vis` 默认档即可跑
 ├── spde/                    ← 对应 miniapps/spde/
 │   └── generate_random_field.rs ← Matérn 高斯随机场 SPDE (串行 1:1;
 │                                WhiteGaussianNoiseDomainLFIntegrator 真
@@ -230,7 +354,9 @@ miniapps/
 │                                (IntegrateBC) 与非齐次 Dirichlet 裁
 │                                剪 exit 3; GLVis 不支持; C++ 为并行
 │                                -only miniapp, 全场数值对照不可行
-│                                (mfem49 串行), 对照走分段 C++ harness)
+│                                (⚠️ 该对照原在 **mfem49 = MFEM 4.9** 树上做 ⇒ **待用
+│                                4.10 重核**；本轮只标记未改结论), 对照走分段
+│                                C++ harness)
 ├── multidomain/             ← 对应 miniapps/multidomain/ (H1 版串行
 │   ├── multidomain.rs          裁剪; ParSubMesh→extract_submesh、
 │   ├── multidomain_nd.rs       TransferMap→界面 dof 坐标匹配; 结构量
@@ -259,6 +385,14 @@ miniapps/
 │                                dof checksum 逐位; 根因=linlvo AMG
 │                                默认 V-cycle 非对称, 换 RS+SGS 对齐
 │                                hypre 配置)
+├── solvers/lor_solvers.rs   ← ⚠️ **round 31 D140 降格为声明式桩 (exit(3))**：
+│                                **不是** `lor_solvers.cpp` 的 port —— 装好 M 又**显式丢弃**
+│                                (`_mass`)、只解 K、不 import 任何 LOR/AMG、`-fe` 非 h 曾
+│                                `exit(1)`、旧代码打印 `LOR solvers complete` 且 **rc=0**
+│                                ⇒ 现 `not_ported()` 在 main 第一行、`exit(3)` + 缺口清单并
+│                                **指向 `solvers/plor_solvers.rs`**（同源 1:1 实现，用那个）。
+│                                未删文件之理由：`examples/Cargo.toml` 有注册 + 本 README 引用，
+│                                且 Cargo.toml 归主会话独占
 ├── solvers/plor_solvers.rs  ← LOR 求解器 miniapp（**round 29：并行 H¹ 腿
 │                                打通**，1:1 对齐 `plor_solvers.cpp`）: `-m`
 │                                `-rs -rp -o -fe -no-vis` + `--ranks/-np N`，
@@ -475,6 +609,9 @@ miniapps/
 | `ref321.cpp` | `meshing/ref321.rs` |
 | `get-values.cpp` | `tools/get_values.rs` |
 | `findpts.cpp` | `gslib/findpts.rs` |
+| `field-diff.cpp` | `gslib/field-diff.rs` |
+| `field-interp.cpp` | `gslib/field-interp.rs` |
+| `schwarz_ex1.cpp` | `gslib/schwarz_ex1.rs` |
 | `generate_random_field.cpp` | `spde/generate_random_field.rs` |
 
 ## 运行

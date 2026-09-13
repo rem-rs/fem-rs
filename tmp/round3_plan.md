@@ -861,7 +861,240 @@
 - **本轮 (e) 类合计 30 个**（`nurbs` 2 / `meshing` 11 / `tools+gslib+toys` 11 / `electromagnetics` 3 + `lor_solvers` 桩 1 / examples 2（`ex31` 家族））—— 这是本轮最重要的产出面：**缺文件看得见，名不副实看不见**。
 - **dpg 组的历史隐患确认已清**：6 个 `dpg_*.rs` **全部**已是真 UW-DPG（import `DpgWeakForm`/`ComplexDPGWeakForm`/骨架空间/图范数），实跑数字落在 C++ 位上（`dpg_maxwell_3d` 156 dof/1.723e0、`dpg_acoustics_3d` 95 dof/1.212e0、`dpg_poisson_2d` 12 dof/23 it、`dpg_maxwell_2d` 1.381e0、`dpg_acoustics_2d` 1.222e0）；**并行 DPG 0/4**（`pdiffusion/pacoustics/pmaxwell/pconvection-diffusion` 无对位；`crates/parallel/src/par_dpg_trace.rs` 在树上且被 `pex8` 消费，可作起点）与 `convection-diffusion` 0/1（共同上游 = D127 的 `MatrixCoefficient` 全缺）。
 
-## 第二十一轮新债务
+## 第三十一轮（round 31）：四路并行 —— D126 修复 / 纪律止血 / MatrixCoefficient + gslib / NURBS writer
+
+> 路线：round 30 审计的结论是"**能力远未补齐，且问题分布与文档宣称严重不符**，优先修 **名不副实**（(e) 类）
+> 而不是缺文件"。本轮按此四路推进，主会话负责集成与**抽查代理数字**。
+
+### 0. 四路交付（全部已由主会话独立复核）
+
+| 路 | 债务 | 交付 | 复核结论 |
+|---|---|---|---|
+| **A** `crates/io` + `miniapps/meshing/` | D126、D132 | `write_mfem` 双根因修复 + 写前自检；`toroid`/`reflector`/`extruder` **真修**，`twist`/`polar-nc`/`mobius-strip`/`klein-bottle` 转诚实 `exit(3)` | MFEM 4.10 探针实测读回 `NE/NBE/NV/dim/sdim/nodes` 与 C++ 全等；主会话独立复现 |
+| **B** 纪律止血批 | D128、D137、D137b、D138、D139、D140 | `ex31` 家族 exit(3)、`pex19/24/32` 维度地雷、`volta`/`tesla`/`lorentz`、`lor_solvers` 降格；**D138 真修**（非仅降级） | D138 改动经主会话审阅；`volta` 的 round 30 结论被证伪（**陈旧二进制**） |
+| **C** 补能力 | D127、D134 | `MatrixCoefficient` **MFEM 名映射** + 通用 `VectorFEMassIntegrator`/各向异性别名；`gslib` **1/7 → 4/7** | 恒等锚点逐位（α=1/2 时 0 项不同）；`schwarz_ex1` 95 迭代与 C++ 4.10 逐位一致 |
+| **D** 大件 | D143（新） | **NURBS 网格 writer + `patches` 变体读写** | 11/11 夹具 token 级零差异；8 个与 `Mesh::Save(out,16)` **逐字节相同** |
+
+### 1. D126：`write_mfem` 有**两个**根因（第二个是 round 30 审计也没看见的）
+
+1. （审计已指出）boundary 段在 `face_offsets == None` 时硬编码 `(fi*3, 3)` + `nv==3 ? 2 : 3`（TRIANGLE）。
+2. （**A 路侦察新发现，更致命**）**整个 writer 用 1-based 顶点索引**，而 MFEM 4.10 的
+   `Mesh::PrintElementWithoutAttr`（`mesh/mesh.cpp:5020`）与 `ReadElementWithoutAttr` 两端都**直读 0-based**
+   （`os << v[j]` / `input >> v[i]`，都不 ±1），`data/` 下每个官方网格都含顶点 `0`（`star.mesh`:
+   `1 3 0 11 26 14`）。⇒ **不修索引，即使面类型修对了，MFEM 仍读不回本仓任何 `.mesh`**
+   （实测修索引前：堆崩 `malloc.c:2599 sysmalloc assertion failed`；或
+   `Invalid mesh topology. Interior quadrilateral face found connecting elements 0, 7 and 7`）。
+
+**修法**：面类型按 `face_type_at(f)` 推导 `nv`/geom code（2-D 的 `face_conn.len()/2` 亦改为 `n_faces()`）；
+writer 全面 **0-based**；reader 的 0/1-based 判据加固（原"出现 0 ⇒ 0-based"只在文件用到顶点 0 时成立，
+改为 `any(v==0) || max_idx+1 == n_vert`，判定点后移到读到 `n_vert` 之后）；**写前一致性自检**
+（元素侧 `elem_types`/`elem_offsets`/`conn.len()` 三者互相吻合；面侧 `face_types`/`face_tags`/`face_offsets`
+与 `n_faces()` 一致、逐面节点数与 `face_conn.len()` 吻合，溢出时报"面号/期望节点数/剩余长度"）；
+`write_mfem_file*` 在 `File::create` **之前**校验 ⇒ 被拒的网格**不留空文件**。
+
+**验收（主会话独立复现）**：
+```bash
+cargo run --release --example mesh_toroid -- -o 1 -no-vis   # Wrote toroid-wedge-o1-s0.mesh (8 elements, 24 boundary faces, 24 nodes)
+wsl -e bash -lc '$HOME/work/r31_meshread <跑出的 mesh>'
+# NE=8 NBE=24 NV=24 dim=3 sdim=3 nodes=0      ← 与 C++ 4.10 同命令产物完全相同
+```
+另：`extruder -m data/inline-quad.mesh` → `NE=16 NBE=48 NV=50`、边界段全为 `1 3 <4 节点>`
+（C++ 原文如 `1 3 0 2 3 1`），`mesh-explorer` kappa 4/4 全等；`reflector -m data/fichera.mesh`
+产物单元/边界面**多重集**与 C++ 全等。新增 `crates/io/tests/round31_mesh_roundtrip.rs`（11 测试，
+含 3 个负例断言 `Err` + 缓冲区 0 字节 + 文件不存在）。
+**连带收益**：`mfem_ex1` 的 `refined.mesh`、`mfem_ex9` 的 `ex9.mesh` 现在 MFEM 也可读。
+
+### 2. 七个 meshing miniapp 的裁决（D132）
+
+| 件 | 裁决 | 关键证据 |
+|---|---|---|
+| `toroid` | ✅ 真修 | `-o 1` 与 C++ **拓扑逐字节相同**；根因含 `elem_type` 未随 `-e` 同步（= 审计看到的"6 个 CUBE"）、空 boundary、prism 的 `RemoveInternalBoundaries` 缺分支、面表未同步 |
+| `reflector` | ✅ 真修 | 重复元素对（14 = 7 对）改为"原始 + 副本"；`-m fichera.mesh` 档与 C++ 多重集全等。**NURBS 默认输入 ⇒ exit(3)**（见下） |
+| `extruder` | ✅ 真修 | 面类型 = writer 修复后自动正确；探针四项与 C++ 全等 |
+| `twist` | ⚠️ exit(3) | 原 `if per_mesh && false` 静默短路 SetCurvature；C++ 所有文档档都带（L2）`nodes`。**保留 `-o 1 -no-pm`** 档（与 C++ 拓扑逐字节相同） |
+| `polar-nc` | ⚠️ exit(3) | C++ 产物是 `MFEM NC mesh v1.0` + `vertex_parents` + `-sfc`；旧实现写出的文件 MFEM 判 `Invalid mesh topology` |
+| `mobius-strip` / `klein-bottle` | ⚠️ exit(3) | C++ 是 **`dimension 2` + `Space dimension 3`** + 曲面 `nodes`，**不是 `dimension 3`**；本仓 `Mesh<D>` 把坐标维钉死在拓扑维 |
+| `shaper` / `trimmer` | **仍开** | `shaper` 本轮未授权；`trimmer` 的 C++ 默认输入 `data/beam-tet.vtk`（`.vtk`！）本仓**不存在** ⇒ 无法对拍 |
+
+**一处重要的跨路修正**：`reflector` 的 C++ **默认输入是 NURBS 网格**（`-m ../../data/pipe-nurbs.mesh`，
+`ReflectNURBSMesh`），产物头是 **`MFEM NURBS mesh v1.0`** —— round 30 审计完全没提这点。
+A 路按纪律 **exit(3) + 缺口清单**（**明确不降级成普通 `MFEM mesh v1.0`**），并指出 D143 的 NURBS writer
+正是这条路的下一步地基。
+
+### 3. D138：**真修**（不是把 panic 换成降级）
+
+`crates/assembly/src/assembler.rs` 的 `curved_boundary_edge_geom`。真根因比"用 `assert!` 而非降级"更深：
+- `set_curvature` 用 **Gauss-Lobatto** 族（`set_curvature_quad4`→`QuadQk`、`set_curvature_tri3_2d`→`H1TriPk`），
+  而本函数用 **equispaced** 的 `SegPk(q)` 做边界元、`TriPk(q)` 找槽位 ⇒ q≥3 时传输点 `2/3` 距最近槽位
+  `0.7236067977` **5.694e-2**；q=2 时 GLL = equispaced 所以 d66 一直绿、`pex27`（`set_curvature(3)`）必炸。
+
+**修法**：① 边界几何元改 `ref_elem_face(ElementType::Line2, q)` = 体积元的**迹**（q≥3 → `H1SegPk`）；
+② `Tri3` 体积几何元 `TriPk` → `H1TriPk`；③ 断言 → `CURVED_EDGE_SLOT_TOL2 = 1e-12` + **弦降级** +
+`CHORD_FALLBACKS: AtomicUsize`（降级**可观测**）。
+**关键**：`pex27` 默认档实测 **0 次降级** ⇒ 族对齐后槽位本就命中，**降级路径未被用来掩盖问题**。
+验收：`d66_curved_boundary_edge` 4/4 绿；`pex27` 默认档 rc=0（此前 4 线程同时 panic）。
+
+### 4. D137b：**归属更正**（round 30 的 file:line 对、归因错）
+
+round 30 记"`crates/element/src/nedelec/quad_ndk.rs:97` 元素层真 bug"。实际：
+**元素层无罪** —— `QuadNDk::new(1)` 是 MFEM `ND_QuadrilateralElement(1)`（`n_dofs=4`、`dim=2`），
+Whitney 1-form 合法写满 `2·4 = 8` 槽（`values[6]`/`values[7]` 是 top/left 边）。
+真因在**示例侧少分配**：`examples/mfem_pex31_restricted_hcurl.rs` 的 `setup_element_ref` 在 `Quad4` 分支
+把局部 ND dof 数**硬编码成 3**（本应 `nd.n_dofs()` = 4）⇒ 调用方 `vec![0.0; n_ld*2]` 得 **len 6** ⇒
+`index out of bounds: the len is 6 but the index is 6`。`len==6` 恰等于 `TriNDk(1)` 的 3×2，
+所以 `Tri3` 分支从不报错 —— 只有 `Quad4`（默认 `inline-quad.mesh`）炸。
+引入记录：`git log -L 199,212:…` → **`1ca42ae`** 的 `4 → 3` 笔误。
+**修法**：两分支改用 `nd.n_dofs()`；元素层只**加测试**钉住 8 槽契约（`whitney_1form_needs_n_dofs_times_dim_slots`），
+**元素数学一行未改**。
+验收：默认档 rc=0、unknowns **3201**、`‖E_h−E‖_{H(Curl)}` = **0.0907163** =
+C++ `ex31p` np1（**4.10**，`$HOME/mfem410_mpi`）；`-o≠1` 改 exit(3)。
+
+### 5. D127：措辞更正 + 交付
+
+⚠️ **"`MatrixCoefficient` 全缺"不准确**：`git show HEAD:crates/assembly/src/postproc/coefficient.rs` 实测
+HEAD 就已有 `pub trait MatrixCoeff`(:152)、`ConstantMatrixCoeff`(:636)、`FnMatrixCoeff`(:649)、
+`ScalarMatrixCoeff`(:662)、`PwMatrixCoeff`(:687)、`PmlTensorCoeff`(:339)，以及
+`VectorMassTensorIntegrator`/`TensorDiffusionIntegrator`/`CurlCurlTensorIntegrator`（ex25/ex29/ex31 在用）。
+`grep MatrixCoefficient` = 0 只证明**MFEM 字面名**缺席。
+⇒ 正确表述：缺的是**MFEM 名映射与通用入口**，不是张量系数能力。
+
+**本轮补上**：`MatrixConstantCoefficient`/`MatrixFunctionCoefficient`/`MatrixArrayCoefficient`、
+通用 `VectorFEMassIntegrator`、`AnisotropicDiffusionIntegrator`/`AnisotropicCurlCurlIntegrator` 别名
+（全部走**类型别名 + 新增**，零破坏）。
+**刻意的两处不做**：① **不加 `impl MatrixCoeff for f64`** —— 会让 `f64` 同时满足两个 trait，
+pro 层同文件同时 import 时 `x.eval()` 直接 **E0034**；标量张量用 `ScalarMatrixCoeff(c)`。
+② 不给 tensor 积分器加 `integration_order`（会改变 ex25/pex25/ex31 既有装配数值）。
+**验收**：`σ = αI` 时与既有 `VectorMassIntegrator{alpha}` **α=1/2 逐位 0 项不同**、α=3.7 时 ≤2 ulp；
+各向异性 `diag(1,2)` 与手工逐分量装配 0 项不同；`AnisotropicDiffusion(αI)`/`AnisotropicCurlCurl(μI)`
+与标量版 **max|d| = 0**；C++ 探针（4.10，quad 4×4、`ND_FECollection(1,2)`、自动阶 3）：
+trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数² 多重集**逐项相等**。
+**重要副产物**：fem-rs 的 quad/HCurl 边 DOF 编号与 MFEM 不同 ⇒ 矩阵是**对称置换**，
+**索引型泛函（如 `xᵀAx` 按索引）不可直接对拍**，ex31 移植必须用置换不变量或几何型泛函。
+
+### 6. D134：`gslib` **1/7 → 4/7**
+
+新增 `field-diff.rs`/`field-interp.rs`/`schwarz_ex1.rs`（均 1:1 移植 4.10 源码、已注册）。
+- `schwarz_ex1`：**95 次迭代日志与 C++ 4.10 逐位相同**（90 行逐字符 + 5 行末位 1 ulp）。
+- `field-diff`：**`Vol diff` 逐位相同 1.73608**；`Avg diff` +1.2%；`Max diff` 2.58236 vs 1.43502
+  —— 差异**已定位量化**到 finder 的 5/10000 个近边界点（code 2 分类），不是装配/插值错误。
+- `field-interp`：控制台 **4 行与 C++ 逐字相同**；`interpolated.gf` 写回**仅前 20/169 DOF 对齐**（WIP，已写进文件头）。
+
+⚠️ **两个必须记住的坑**：
+1. **`schwarz_ex1.cpp:176-186` 用 `strcmp` 判定"是否默认输入"** —— 只有两个 `-m` 路径串**逐字等于硬编码
+   默认串**时才把 `inline-quad.mesh` 按 0.5 缩放到 `[0.25,0.75]²`。**用绝对路径跑 C++ 就不 rescale**
+   ⇒ 子域 2 包住 disc ⇒ **重叠退化、1~2 步假收敛到 3.4e-16**（主会话实测：绝对路径 2 次 vs 默认 95 次）。
+   ⇒ 这是既有方法论 15「**对照必须钉住 C++ 的分派路径**」的又一实例。
+2. `field-diff.cpp:28` 的**注释**写 `-p 200`，**代码默认是 `-p 100`**。
+3. `field-interp` **本身没有任何误差行**（全源码只有 4 行 console 输出 + 写文件）。
+4. 夹具 `triple-pt-{1,2}.{mesh,gf}` **不入库**（`data/*.mesh` 被 gitignore）；`field-diff` 带
+   `$MFEM_SRC` 回落，故 `MFEM_SRC=<mfem> cargo run --release --example gslib_field_diff -- -no-vis` 可跑。
+
+### 7. D143（新增并完成）：NURBS 网格 writer + `patches` 变体读写
+
+`crates/io/src/nurbs_mesh.rs` 新增**无损文档模型** `NurbsMeshDoc` + `read_nurbs_mesh_doc{,_file,_str}` +
+`write_nurbs_mesh_doc{,_with_precision,_file}`（默认精度 16 = MFEM `Mesh::Save` 默认）。
+自实现 C++ `%.*g` 等价的 `format_g`（Rust 无 `%g`）。
+- **11/11** `data/*nurbs*.mesh`（v1.0）read→write **token 级零差异**（0 处 content 差异；
+  `respelled`/`trivia` 两类差异逐条解释：夹具自身**混精度**、空行/注释）。
+- **8 个**夹具与 MFEM 自身 `Mesh::Save(out, 16)` **逐字节 IDENTICAL**；仅 3 个不同且**均非 writer 缺陷**：
+  `cube-nurbs`（MFEM 读取时 `CheckBdrElementOrientation` 就地改写第 7 个边界面朝向）、
+  `pipe-nurbs`（原文件 `boundary 0`，MFEM `CountBdrElements` **生成** 16 个边界面）、
+  `ball-nurbs`（MFEM `Print` 丢弃文件注释块，本 port 刻意保留）。
+  ⚠️ **验收判据的选择很关键**：主会话实测 **MFEM 自己的 `Mesh::Save(…,16)` 都复现不了 9/11 个夹具原文**
+  ⇒ "与夹具原文逐字节相同"**本就不是可行判据**（夹具是手工/混精度产物），
+  正解是"token 级零差异 + 与 `Mesh::Save` 对拍"。
+- `square-disc-nurbs-patch.mesh`：`patches` **5 块**（= `elements` 行数 = MFEM `GetNP()`）读+写，
+  经 MFEM 归一化输出 **145 行逐字节 IDENTICAL**。
+- 主会话独立复核：自写探针复现 **11/11** 的 `dim/NE/NBE/NP/NKV/NV/order` 表
+  （`mesh/nurbs.hpp:936` `GetNP() = patchTopo->GetNE()`）；3 处差异的成因逐条核实成立；
+  该路**零改动** `crates/mesh`/`crates/element`/`crates/space`（pro 层 IGA 面零风险）。
+- **仍缺**：v1.1 `spacing` 段（3 个夹具，现为带行号的明确错误需移植 `SpacingFunction` 体系）、
+  多补丁 `knotvectors` → 逐补丁 `NurbsFile`（需 `NURBS_PatchMap`；`read_nurbs_mesh` 保留旧的宽松
+  截断行为以零破坏，但已有 `n_patches()`/`is_single_patch_representable()` 可检出、`to_nurbs_file()` 明确拒绝）、
+  1-D `NurbsFile` 变体缺失、周期 BC（`nurbs_ex1 -pm/-ps/-p`，需 `NCNURBSExtension`）。
+
+### 8. 四条**方法论**层面的发现（比单点修复更重要）
+
+1. ⚠️ **round 30 审计有"假阳性生成器"：它跑的是陈旧二进制。**
+   审计方法写的是"把两侧的**可执行文件**列全"。实测该枚举被严重污染：
+   `target/release/examples/*.exe` = **436** 个，而 `examples/Cargo.toml` 的 `[[example]]` = **165** 个，
+   **名字与任何当前 target 都不匹配的有 147 个**（改名遗留如 `mfem_miniapp_volta`，以及历轮随手编的
+   调试探针 `dbg27_tmp`/`check137`/`debug_idrs*`/`debug_kcycle`/`coo_test`…）。
+   **实例**：round 30 记 `volta`"hex 全 panic / NURBS 挂死 >120 s" —— 实测当前源码
+   `--ranks 1 -maxit 1` 下 hex / ball-nurbs 均 rc=0 正常跑完；审计跑的是 **8/28 的
+   `mfem_miniapp_volta.exe`**（旧注册名，现注册名 `miniapp_volta`）。
+   ⇒ **纪律（新增，与方法论 18 同源而方向相反）**：18 是"改完要确认二进制**真的重建了**"；
+   本条是"**审计时也要确认读到的二进制是当前 target 构建的**"。审计一律以
+   `cargo run --release --example <name>` 为准，不要枚举 `target/release/examples/*.exe`。
+   **尚未用新二进制复核（本轮范围外，待办）**：D129（`tools/` 6 件）、D130（`toys/` 3 件）、
+   D131（`nurbs/` 2 件）。
+2. ⚠️ **陈旧生成物会被误当权威**：两例都发生在同一轮 —— 我自己用 `~/mfem49`（**4.9**）当 GSLIB 参考
+   （真实原因：4.10 的两个树 `MFEM_USE_GSLIB` 都被注释掉，见下条）；A 路读 `/mnt/c/Users/lilu/works/mfem/
+   config/_config.hpp` 报 `"4.9"` 就判定该仓是 4.9 —— 而那是 **`.gitignore:39` 忽略的过期构建产物**。
+   该仓真实版本：`git describe --tags` → **v4.10**、HEAD = `Merge … mfem-4.10-dev`、
+   `makefile:13 MFEM_VERSION = 41000`。⇒ **判定版本要读源码自身的权威标记，不要读生成物**。
+3. ✅ **4.10 + GSLIB 参考树已建成并固化**：`$HOME/mfem410_gslib`
+   （`MFEM_VERSION_STRING "4.10"` + `#define MFEM_USE_GSLIB`）。
+   **配方（含两个坑）**：`GSLIB_DIR` 必须是 `$HOME/gslib/build`（不是 `$HOME/gslib` —— 否则
+   `fem/gslib.cpp:75: fatal error: gslib.h: No such file or directory`）；
+   且 Mimosa hook 会拦 Bash 命令里**出现字面量** `config/_config.hpp` 的命令（用 `grep -rn MFEM_USE_GSLIB config/` 绕开）。
+   **4.10 复采与 4.9 逐位一致**（三个 gslib miniapp 默认档）。
+   ⇒ **D102 的口径要改**：它记"唯一带 GSLIB 的 C++ 参考是 `mo49`"——`mo49` 是 **4.9** 的 mesh-optimizer，
+   用 4.9 二进制去判定 4.10 语义的 `-ae 1`（其 `exit 134` 因此"不可复现"）**至少有版本错配这一层**。
+   今后 GSLIB 相关对照**一律用 `$HOME/mfem410_gslib`**；本轮不展开 D102，只固化参考树与口径。
+4. ⚠️ **"文档当断言审"又收获两条过期条目**（方法 6 复用）：plan 的 **D70⑤**（`crates/mesh/src/nurbs_mesh.rs`
+   的 `degree_elevate` 是"中点插结"重复实现）**早已不成立** —— 实测 `:84-104` 已委派
+   `fem_element::nurbs_fe_collection::degree_elevate` 并有 `debug_assert_eq!` 钉住。应勾掉。
+
+### 第三十一轮新债务
+
+- **D144（P2）`crates/mesh/src/extrusion.rs` 三处偏差**（A 路侦察发现，未授权改）：
+  ① `elem_tags_3d.push(0)` **硬编码 0**（应 `mesh.elem_tags[e]`）⇒ MFEM 报
+  `Non-positive attributes in the domain!`（C++ 是 1）；② 边界面属性 本仓 底=1/顶=2/侧=3，
+  C++ = 侧沿用源属性 `1..nba`、底/顶 = `nba + elem attr`（`Mesh::Extrude2D`）；
+  ③ 顶点编号 本仓层优先 `j*nv+i`，C++ 点优先 `i*nvz+j`（网格同构、`NE/NBE/NV` 全同，仅行内容不同）。
+  三处都是一行级小修；修完 `extruder` 的 Options 属性集即与 C++ 全等。
+- **D145（P2）`hpref` 的 `-m <file>` 路径必然 panic**：`miniapps/meshing/hpref.rs:108`
+  `const INITIAL_ROOT_STATES: [u8; 4]` + `:408 states = INITIAL_ROOT_STATES.to_vec()`（**恒为 4**），
+  而 `:406 orders = vec![order; mesh.n_elems()]` 按真实网格定尺寸 ⇒ **hpref 隐含假设初始网格恰有 4 个元素**
+  （自动生成的 2×2 默认档满足，任何 `-m` 输入不满足）⇒ 一旦元素数 > 4 即
+  `states[p0]` 越界（`hpref.rs:174` `index out of bounds: the len is 4 but the index is 4`）。
+  **实测**：`-n 2/3/10/20/100`（默认网格）**全部 rc=0**；`-m data/inline-quad.mesh -n 3` 起 rc=101。
+  `hpref.rs` 自 `b6b6acf` 未改动 ⇒ **预存缺陷，非本轮回归**（round 30 审计因跑陈旧二进制未发现）。
+  修法：`states` 按 `mesh.n_elems()` 尺寸、逐元素派生 root state，而不是硬编码常量。
+- **D146（P2）`field-interp` 的 `interpolated.gf` 写回**：169 个 DOF 中仅前 20 与 MFEM 相同，
+  `max|Δ| = 3.4e-1` 且**值的多重集也不同**（4.7e-2）⇒ 既非纯置换也非舍入。
+  源投影/取点/FindPoints 均已跑通 ⇒ 嫌疑在**元素→DOF 写回**（H1 P3 三角形 DOF 编号/排序或
+  共享边/内部 DOF 赋值次序）。1:1 化后可解锁 `field-interp` 的完整验收。
+- **D147（P3）`field-diff` 的 5 个近边界点分类**：finder1 `[9604 inside, 396 border, 0 not-found]`
+  vs finder2 `[9599, 396, 5]`；那 5 点（点序 4374/4377/4379/4481/4582）**贡献 12.690817 的差和**，
+  `Max diff` 即出自其中之一（4481 的 `v2 = 0` 因 locator 报 code 2）。
+  ⇒ 收口 `crates/mesh/src/findpts` 对 0.05% 边际点的 border/newton 判定（对齐 gslib）。
+- **D148（P2）`fem_solver::solve_pcg` 的 `rtol` 作用在平方量上**：`tol = rtol*γ0` 中的 γ0 是
+  `(B r, r)`，等价于**范数意义 1e-6**，而 MFEM 的判据是 `sqrt((B r, r))`。
+  `schwarz_ex1` 移植中改用已存在的 `solve_pcg_precond`(linlvo CG) 后逐位对齐（95 行）。
+  ⇒ 应把 `solve_pcg` 的判据改成范数式（影响面广，需专项）。**⚠️ 与既有备忘呼应**：方法论 14
+  已记"linger 的 PCG 停机判据是预条件能量"，本条是同一陷阱在**本仓自有 PCG** 上的实例。
+- **D149（P3）文档更正（本轮已就地修正，留痕）**：① plan **D70⑤** 过期（见上）；② plan **D137b** 归因错
+  （元素层无罪，示例侧少分配）；③ plan **D127** "MatrixCoefficient 全缺"措辞不准确（`MatrixCoeff` 族已在）；
+  ④ `miniapps/README.md` 的 **`spde/generate_random_field.rs`** 条目里写着"（**mfem49** 串行）"，
+  即该件的对照是在 **4.9** 树上做的 ⇒ **待用 4.10 重核**（`spde` 在 MFEM 是并行-only miniapp，
+  重核需 `$HOME/mfem410_mpi` 或串行 harness；本轮**只标记、未改结论**，因为没有复现就没有发言权）；
+  ⑤ **round 30 审计结论凡来自 `target/release/examples/*.exe` 的需用「cargo 当前 target + 全新构建」重测**
+  （D129/D130/D131 待办）。
+- **D150（P3）`gslib` 夹具不入库的策略留痕**：`field-diff` 依赖 `$MFEM_SRC/miniapps/gslib/triple-pt-*`；
+  若将来 CI 无 `MFEM_SRC`，该示例默认档会退化为报错。可选：把 4 个夹具 `git add -f` 进 `crates/io/tests/data/`
+  并把回落改为"先在 `data/` 找、再回落 `$MFEM_SRC`"。**本轮按"不入库"落地**（避免仓库体积与夹具漂移）。
+
+### 本轮统计
+- 承诺的"诚实部分交付"约定码统一为 **`exit(3)`**（不是 1、不是 0）。B 路给出了**逐文件逐出口码对照表**
+  （法：凡"合法命令 + 合法输入"能触发的 panic/静默成功一律真修或 exit(3)；保留的是内部不变量、
+  运行期数值/环境故障、以及 `not_ported()` 之后的不可达 scaffolding）。
+- `cargo build --release --examples --keep-going`：A 路在被 gslib 注册短暂阻塞期间用"其余 326 个 target
+  全建 → **0 error**（14m16s）"作替代证据；C 路在文件补齐后实测该聚合命令 **Finished（0 error）**。
+- **未启动**：D141（并行 DPG）、D92 周期 BC、D142（p 粗化层）、`mg-abs-l1-jacobi` —— 均按"做不完不强做"处理。
+
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
