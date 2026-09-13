@@ -2891,9 +2891,37 @@ fn invert_3x3(m: &[f64; 9]) -> [f64; 9] {
 /// element (e.g. `HexQk` on `[-1,1]^3`) as MFEM's `[0,1]^d` convention.
 /// TMOP math (det(Jpr), target scaling, min-det thresholds) assumes the MFEM
 /// unit reference element.
+///
+/// The wrapper is a **consistent** `[0,1]^d` view: `dof_coords`, `quadrature`
+/// *and* the evaluation inputs all live in the unit frame, which is what
+/// `TmopForm`'s quadrature points, its `0.5`-centred probes and the target
+/// transfers produce.  Points are mapped `η = 2ξ − 1` into the inner frame and
+/// the derivatives are rescaled back (`×2` for the gradient, `×4` for the
+/// Hessian); the quadrature weights carry the inverse `2^{-d}` factor.
+///
+/// ⚠️ Up to round 29 the evaluation inputs were **not** mapped — `eval_basis`/
+/// `eval_grad_basis`/`eval_hessian` forwarded `ξ ∈ [0,1]^d` unchanged to an
+/// inner element living on `[-1,1]^d`, so every 3-D hex/prism TMOP form
+/// sampled half of the element at the wrong points and extrapolated the other
+/// half (the 2-D quad elements are unaffected: `QuadQk` already lives on
+/// `[0,1]^2` and is never wrapped).  Found while verifying D112: `mesh_optimizer
+/// -m data/fichera-q3.mesh -o 3 -mid 302` reported min det(J) = 0.226362 while
+/// MFEM's `Transformation::Weight()` on the same quadrature set gives
+/// 0.20436050603093464; with the mapping in place the two agree to 2.8e-16.
 struct UnitDomainElem {
     inner: Box<dyn ReferenceElement>,
     dim: usize,
+}
+
+/// Map a `[0,1]^d` evaluation point into the wrapped element's `[-1,1]^d`
+/// frame (`η = 2ξ − 1`, one factor 2 per direction).
+#[inline]
+fn unit_to_inner(xi: &[f64], dim: usize) -> [f64; 3] {
+    let mut eta = [0.0f64; 3];
+    for d in 0..dim {
+        eta[d] = 2.0 * xi[d] - 1.0;
+    }
+    eta
 }
 
 impl ReferenceElement for UnitDomainElem {
@@ -2907,17 +2935,21 @@ impl ReferenceElement for UnitDomainElem {
         self.inner.n_dofs()
     }
     fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
-        self.inner.eval_basis(xi, values);
+        let eta = unit_to_inner(xi, self.dim as usize);
+        self.inner.eval_basis(&eta[..self.dim as usize], values);
     }
     fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
-        self.inner.eval_grad_basis(xi, grads);
+        let eta = unit_to_inner(xi, self.dim as usize);
+        self.inner
+            .eval_grad_basis(&eta[..self.dim as usize], grads);
         // dφ/dξ_unit = 2 · dφ/dη for ξ = (η+1)/2.
         for g in grads.iter_mut() {
             *g *= 2.0;
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        self.inner.eval_hessian(xi, hess);
+        let eta = unit_to_inner(xi, self.dim as usize);
+        self.inner.eval_hessian(&eta[..self.dim as usize], hess);
         for h in hess.iter_mut() {
             *h *= 4.0;
         }
@@ -4229,6 +4261,58 @@ pub fn count_wrong_orientations(topo: &dyn MeshTopology) -> usize {
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
+
+    /// `UnitDomainElem` must be a **consistent** `[0,1]^d` view of the element
+    /// it wraps.  Its `dof_coords`/`quadrature` report the unit frame, so its
+    /// evaluation inputs must be unit-frame as well — forwarding them unmapped
+    /// put every 3-D hex TMOP form's quadrature points on the wrong reference
+    /// points (half of the element mis-sampled, half extrapolated).
+    /// Symptom before the fix: `mesh_optimizer -m data/fichera-q3.mesh -o 3
+    /// -mid 302` reported min det(J) = 0.226362 where MFEM gives
+    /// 0.20436050603093464 (measured on the identical quadrature set).
+    #[test]
+    fn unit_domain_wrapper_maps_evaluation_points() {
+        // Elements that already live on [0,1]^d are never wrapped.
+        for p in 1..=4usize {
+            let q = fem_element::lagrange::factory::QuadQk::new(p);
+            assert!(
+                el_domain_is_unit(&q),
+                "QuadQk(p={p}) lives on [0,1]^2 and must not need the wrapper"
+            );
+        }
+        let hex = fem_element::lagrange::factory::HexQk::new(3);
+        assert!(!el_domain_is_unit(&hex), "HexQk lives on [-1,1]^3");
+        let wrap = UnitDomainElem {
+            inner: Box::new(fem_element::lagrange::factory::HexQk::new(3)),
+            dim: 3,
+        };
+        assert!(el_domain_is_unit(&wrap));
+
+        // The wrapped element answers for the *unit* frame: ξ_unit = 0.5 is the
+        // element centre (η = 0), ξ_unit = 0.25/0.75 are η = -0.5/0.5, and the
+        // gradient carries the ξ = (η+1)/2 chain factor 2.
+        let n = hex.n_dofs();
+        let mut a = vec![0.0f64; n];
+        let mut b = vec![0.0f64; n];
+        let mut ga = vec![0.0f64; n * 3];
+        let mut gb = vec![0.0f64; n * 3];
+        for (unit, inner) in [
+            ([0.5, 0.5, 0.5], [0.0, 0.0, 0.0]),
+            ([0.25, 0.5, 0.75], [-0.5, 0.0, 0.5]),
+            ([0.0, 1.0, 0.25], [-1.0, 1.0, -0.5]),
+        ] {
+            wrap.eval_basis(&unit, &mut a);
+            hex.eval_basis(&inner, &mut b);
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-14, "basis {unit:?}: {x} vs {y}");
+            }
+            wrap.eval_grad_basis(&unit, &mut ga);
+            hex.eval_grad_basis(&inner, &mut gb);
+            for (x, y) in ga.iter().zip(gb.iter()) {
+                assert!((x - 2.0 * y).abs() < 1e-13, "grad {unit:?}: {x} vs 2·{y}");
+            }
+        }
+    }
 
     /// Straight hex mesh with P2 curvature: TMOP min det must be the exact
     /// linear value (1/8 for the unit cube split into 8 hexes).
