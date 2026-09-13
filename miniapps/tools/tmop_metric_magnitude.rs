@@ -8,10 +8,14 @@
 //!
 //! Metric-zoo gap (round 32 measurement): the C++ switch accepts
 //! `{1,2,7,9,14,50,55,56,58,77,85,98}` (2-D), `{301,302,303,304,315,316,321,322,323,360}`
-//! (3-D) and the A-metrics `{11,36,107}`; `fem_mesh::tmop` implements all of
-//! them **except `85`, `98`, `322`, `11`, `36`, `107`** (6 of 25 ids).  Those
-//! ids print `Unknown metric_id: <id>` and exit with code 3, the same code
-//! MFEM's `default:` branch returns for an id it does not know.
+//! (3-D) and the A-metrics `{11,36,107}` — 25 ids in all, i.e. the `case` labels
+//! of `tmop-metric-magnitude.cpp` that are not commented out (the file keeps
+//! `// case 211:`-style lines for metrics MFEM itself has disabled).  `fem_mesh::tmop`
+//! implements all of them **except `85`, `98`, `322`, `11`, `36`, `107`** (6 of 25 ids).
+//! Those ids print `Unknown metric_id: <id>` and exit with code 3 — the same output and
+//! code MFEM's `default:` branch returns — plus a stderr note naming the real gap.  Ids
+//! the C++ switch does not accept at all (e.g. `999`, `211`) get the same stdout line and
+//! code, with a note saying they are unknown to the C++ program too.
 
 use fem_mesh::tmop::{
     TmopQualityMetric,
@@ -169,7 +173,7 @@ fn main() {
             // `TMOP_Metric_098`, `TMOP_AMetric_011/036/107`) but have no
             // `fem_mesh::tmop` implementation — same exit code as MFEM's
             // unknown-id branch, plus an explicit gap note on stderr.
-            _ => unknown_metric(metric_id, "2-D"),
+            _ => unknown_metric(metric_id),
         };
 
         let w = metric.eval_w(&j_arr);
@@ -193,7 +197,7 @@ fn main() {
             323 => Box::new(TmopMetric323),
             360 => Box::new(TmopMetric360),
             // 322 is in the C++ switch but not implemented in `fem_mesh::tmop`.
-            _ => unknown_metric(metric_id, "3-D"),
+            _ => unknown_metric(metric_id),
         };
 
         let w = metric.eval_w(&j_arr);
@@ -205,15 +209,37 @@ fn main() {
     println!("  skew perturbation factor:   {}", fmt_g(perturb_s));
 }
 
+/// Metric ids the C++ switch accepts — its `case` labels that are not
+/// commented out (`grep -E "^ *case [0-9]+:" tmop-metric-magnitude.cpp` → 25).
+const CPP_IDS: &[i32] = &[
+    1, 2, 7, 9, 11, 14, 36, 50, 55, 56, 58, 77, 85, 98, 107,
+    301, 302, 303, 304, 315, 316, 321, 322, 323, 360,
+];
+
+/// The subset of [`CPP_IDS`] with no `fem_mesh::tmop` implementation.
+const MISSING_IDS: &[i32] = &[85, 98, 322, 11, 36, 107];
+
 /// C++ `default:` branch of the metric switch (`cout << "Unknown metric_id: "
 /// << metric_id << endl; return 3;`).
-fn unknown_metric(metric_id: i32, dim: &str) -> ! {
+///
+/// The stdout line is the C++ one in both cases, but an id the C++ *does*
+/// accept must not be reported as unknown to it: `211`/`252`/`311`/`352` are
+/// commented out in the C++ switch and are genuinely unknown there, while
+/// [`MISSING_IDS`] are accepted by C++ and missing only here.
+fn unknown_metric(metric_id: i32) -> ! {
     println!("Unknown metric_id: {metric_id}");
-    eprintln!(
-        "tmop-metric-magnitude (Rust port): the C++ program accepts {dim} metric id \
-         {metric_id}, but `fem_mesh::tmop` has no implementation for it. Missing ids \
-         overall (present in C++ miniapps/tools/tmop-metric-magnitude.cpp, absent in \
-         fem-rs): 85, 98, 322 (T-metrics) and 11, 36, 107 (A-metrics). Exit 3."
-    );
+    if CPP_IDS.contains(&metric_id) {
+        eprintln!(
+            "tmop-metric-magnitude (Rust port): the C++ switch accepts metric id {metric_id}, \
+             but `fem_mesh::tmop` has no implementation for it. Ids in that state: \
+             {MISSING_IDS:?} (85, 98, 322 are T-metrics; 11, 36, 107 are A-metrics). Exit 3."
+        );
+    } else {
+        eprintln!(
+            "tmop-metric-magnitude (Rust port): metric id {metric_id} is unknown to the C++ \
+             switch as well, so this reproduces its `Unknown metric_id` line and its `return 3` \
+             exactly; nothing further is emitted. Exit 3."
+        );
+    }
     std::process::exit(3);
 }
