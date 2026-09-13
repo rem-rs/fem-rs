@@ -64,7 +64,7 @@ use fem_element::nurbs_fe_collection::{
     degree_elevate, knot_botella, knot_in_span, knot_order, knot_span_dparam, knot_span_shape,
     Nurbs1DFiniteElement, NurbsScalar2D, NurbsScalar3D,
 };
-use fem_element::nurbs_vector::{NurbsHCurl2D, NurbsHCurl3D};
+use fem_element::nurbs_vector::{NurbsHCurl2D, NurbsHCurl3D, NurbsHDiv2D, NurbsHDiv3D};
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -484,6 +484,51 @@ impl NurbsFESpace {
     /// Per-knot-vector orders of the analysis space.
     pub fn orders(&self) -> &[usize] {
         &self.orders
+    }
+
+    /// The geometry (mesh) order of the single-patch refinement — the scalar
+    /// knot-vector order of the patch's first direction
+    /// (`ElementTransformation::OrderW() = mesh_order * dim - 1`).
+    pub fn mesh_order(&self) -> usize {
+        let kvs = self.mesh_ext.patch_knot_vectors(0).expect("geometry patch");
+        knot_order(kvs[0].knot_vector()).expect("validated knot vector")
+    }
+
+    /// `ComputeLpNorm(2., Coefficient, mesh, irs)`: `√(Σ_e Σ_q w_q W_q f(x_q)²)`
+    /// — the exact scalar function's `L²` norm over the NURBS mesh, using the
+    /// same refined-span geometry as the error norms.
+    pub fn compute_exact_l2_norm(&self, f: &dyn Fn(&[f64]) -> f64, order_quad: u8) -> f64 {
+        let dim = self.dim;
+        let rule = nurbs_rule(dim, order_quad);
+        let mut norm2 = 0.0_f64;
+        for e in 0..self.n_elements() {
+            for q in 0..rule.points.len() {
+                let geo = self.geometry(e, &rule.points[q]);
+                let v = f(&geo.x[..dim]);
+                norm2 += rule.weights[q] * geo.det_j * v * v;
+            }
+        }
+        norm2.sqrt()
+    }
+
+    /// `ComputeLpNorm(2., VectorCoefficient, mesh, irs)` — the vector version
+    /// of [`Self::compute_exact_l2_norm`].
+    pub fn compute_exact_l2_norm_vec(
+        &self,
+        f: &dyn Fn(&[f64]) -> Vec<f64>,
+        order_quad: u8,
+    ) -> f64 {
+        let dim = self.dim;
+        let rule = nurbs_rule(dim, order_quad);
+        let mut norm2 = 0.0_f64;
+        for e in 0..self.n_elements() {
+            for q in 0..rule.points.len() {
+                let geo = self.geometry(e, &rule.points[q]);
+                let v = f(&geo.x[..dim]);
+                norm2 += rule.weights[q] * geo.det_j * v.iter().map(|c| c * c).sum::<f64>();
+            }
+        }
+        norm2.sqrt()
     }
 
     /// `NURBSExtension::GetElementDofTable`.
@@ -1820,5 +1865,624 @@ impl NurbsHCurlSpace {
             error += elem_error.abs();
         }
         error.sqrt()
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NurbsHDivSpace — the vector NURBS space of `NURBS_HDivFECollection`
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// The H(div) NURBS element of one knot span: MFEM's
+/// `NURBS_HDiv2DFiniteElement` / `NURBS_HDiv3DFiniteElement` bound to the
+/// analysis space's knot vectors with `SetIJK` (`NURBSExtension::LoadFE`).
+#[derive(Debug, Clone)]
+pub enum HDivSpanElement {
+    /// MFEM `NURBS_HDiv2DFiniteElement`.
+    Two(NurbsHDiv2D),
+    /// MFEM `NURBS_HDiv3DFiniteElement`.
+    Three(NurbsHDiv3D),
+}
+
+impl HDivSpanElement {
+    /// `FiniteElement::GetDof` (the number of *vector* basis functions).
+    ///
+    /// Note MFEM's own `NURBS_HDiv2DFiniteElement::SetOrder` computes
+    /// `dof = (o0+2)*(o1+1) + (o1+1)*(o1+2)` — the second block uses `o1` twice.
+    /// That agrees with the space's merged table
+    /// `(o0+2)*(o1+1) + (o0+1)*(o1+2)` only when `o0 == o1` (a uniform order,
+    /// which is what both miniapps build), and the Rust element mirrors MFEM
+    /// verbatim either way.
+    pub fn n_dofs(&self) -> usize {
+        match self {
+            HDivSpanElement::Two(fe) => VectorReferenceElement::n_dofs(fe),
+            HDivSpanElement::Three(fe) => VectorReferenceElement::n_dofs(fe),
+        }
+    }
+
+    /// `FiniteElement::GetOrder` — `max(orders) + 1`, the *elevated* degree
+    /// MFEM's `SetOrder` reports.
+    pub fn order(&self) -> usize {
+        match self {
+            HDivSpanElement::Two(fe) => VectorReferenceElement::order(fe) as usize,
+            HDivSpanElement::Three(fe) => VectorReferenceElement::order(fe) as usize,
+        }
+    }
+
+    /// `FiniteElement::GetDim`.
+    pub fn dim(&self) -> usize {
+        match self {
+            HDivSpanElement::Two(_) => 2,
+            HDivSpanElement::Three(_) => 3,
+        }
+    }
+
+    /// `CalcVShape(ip, shape)` — the *reference-space* vector basis, `n_dofs`
+    /// rows of `dim` components each (row-major, DOF-major).
+    pub fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
+        match self {
+            HDivSpanElement::Two(fe) => fe.eval_basis_vec(xi, values),
+            HDivSpanElement::Three(fe) => fe.eval_basis_vec(xi, values),
+        }
+    }
+
+    /// `CalcDivShape(ip, divshape)` — the reference-space divergence,
+    /// `n_dofs` values.
+    pub fn eval_div(&self, xi: &[f64], values: &mut [f64]) {
+        match self {
+            HDivSpanElement::Two(fe) => fe.eval_div(xi, values),
+            HDivSpanElement::Three(fe) => fe.eval_div(xi, values),
+        }
+    }
+}
+
+/// A vector-valued H(div) NURBS finite element space — the
+/// `NURBS_HDivFECollection` path of MFEM's `nurbs_ex5` / `nurbs_ex24`.
+///
+/// MFEM builds it (`FiniteElementSpace::UpdateNURBS`) as
+/// `VNURBSext[d] = NURBSext->GetDivExtension(d)` for every component `d`:
+/// `GetDivExtension(component)` *raises* the component's own knot-vector order
+/// by one (`newOrders[component] += 1`) and leaves the others alone, so the
+/// extension's element DOF table carries only that component's basis.  As for
+/// H(curl) the space's DOFs are the concatenation
+/// `ndofs = Σ_d VNURBSext[d]->GetNDof()` and the per-element table is the
+/// offset-merged `Table(*t0, *t1, offset1, …)`, component-major — exactly the
+/// DOF order of `CalcVShape`.
+///
+/// `GetDivExtension` only works for single-patch meshes (MFEM raises an error
+/// for `GetNP() > 1`), which this port enforces as well.
+#[derive(Debug, Clone)]
+pub struct NurbsHDivSpace {
+    /// The analysis space (order-`p` `NurbsFESpace`): geometry evaluation,
+    /// span indices and element numbering; also the scalar space MFEM's
+    /// `nurbs_ex5` uses for the pressure (`NURBSFECollection(order)`).
+    base: NurbsFESpace,
+    /// `VNURBSext[d]` — the per-component divergence extensions.
+    div_ext: Vec<NurbsExtension>,
+    /// Cumulative DOF offsets; component `d`'s global DOFs are
+    /// `comp_offsets[d] + <local dof>`.
+    comp_offsets: Vec<usize>,
+    /// The merged element DOF table (`elem_dof`).
+    elem_dof: Vec<Vec<usize>>,
+    dim: usize,
+    n_dofs: usize,
+}
+
+impl NurbsHDivSpace {
+    /// Build the space `nurbs_ex5`/`nurbs_ex24` construct: read the NURBS
+    /// mesh, apply `ref_levels` uniform refinements, then
+    /// `NURBSExtension(mesh->NURBSext, order)` and the `dim` divergence
+    /// extensions `GetDivExtension(d)`.
+    pub fn from_mesh_str(text: &str, ref_levels: usize, order: usize) -> Result<Self, String> {
+        let base = NurbsFESpace::from_mesh_str(text, ref_levels, &[order])?;
+        let dim = base.dim();
+        if dim < 2 {
+            return Err(format!("NurbsHDivSpace: dimension {dim} is not supported (2 or 3)"));
+        }
+        let ext = base.extension();
+
+        // `NURBSExtension::GetDivExtension`: single patch only.
+        if ext.n_patches() != 1 {
+            return Err(format!(
+                "NurbsHDivSpace: GetDivExtension only works for single patch NURBS meshes \
+                 (this one has {} patches)",
+                ext.n_patches()
+            ));
+        }
+
+        // MFEM `GetDivExtension(component)`: `newOrders = GetOrders();
+        // newOrders[component] += 1;`.
+        let n_kv = ext.n_knot_vectors();
+        let aorders: Vec<usize> = (0..n_kv).map(|i| ext.knot_vector(i).order()).collect();
+        let mut div_ext = Vec::with_capacity(dim);
+        for c in 0..dim {
+            let mut targets = aorders.clone();
+            targets[c] += 1;
+            div_ext.push(ext.with_orders(&targets)?);
+        }
+
+        let mut comp_offsets = vec![0usize; dim + 1];
+        for c in 0..dim {
+            comp_offsets[c + 1] = comp_offsets[c] + div_ext[c].n_dofs();
+        }
+        let n_dofs = comp_offsets[dim];
+
+        // `FiniteElementSpace::UpdateNURBS`: merge the component tables with
+        // one offset per component (`Table(*t0, *t1, offset1, ...)`).  All
+        // extensions share the (order-independent) span enumeration, so the
+        // rows merge element by element.
+        let n_elem = ext.n_elements();
+        let mut elem_dof = Vec::with_capacity(n_elem);
+        for e in 0..n_elem {
+            let mut row = Vec::new();
+            for c in 0..dim {
+                let r = div_ext[c].element_dofs(e);
+                row.extend(r.iter().map(|&g| comp_offsets[c] + g));
+            }
+            elem_dof.push(row);
+        }
+
+        Ok(Self { base, div_ext, comp_offsets, elem_dof, dim, n_dofs })
+    }
+
+    /// Read a NURBS mesh file and build the space (see [`Self::from_mesh_str`]).
+    pub fn from_mesh_file(
+        path: impl AsRef<std::path::Path>,
+        ref_levels: usize,
+        order: usize,
+    ) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| format!("NurbsHDivSpace::from_mesh_file: {e}"))?;
+        Self::from_mesh_str(&text, ref_levels, order)
+    }
+
+    /// `FiniteElementSpace::GetTrueVSize` — the merged DOF count
+    /// ("Number of HDiv finite element unknowns" / `dim(R)`).
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
+
+    /// `FiniteElementSpace::GetNE`.
+    pub fn n_elements(&self) -> usize {
+        self.base.n_elements()
+    }
+
+    /// Mesh dimension (2 or 3).
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// The merged element DOF table (`GetElementDofTable`), `n_elements` rows
+    /// of globally numbered DOFs (component-major).
+    pub fn element_dofs(&self, e: usize) -> &[usize] {
+        &self.elem_dof[e]
+    }
+
+    /// The analysis extension (MFEM `FiniteElementSpace::GetNURBSext`).
+    pub fn extension(&self) -> &NurbsExtension {
+        self.base.extension()
+    }
+
+    /// The scalar NURBS space that shares this mesh, extension and element
+    /// numbering — MFEM's `W_space` in `nurbs_ex5`
+    /// (`NURBSFECollection(order)` on the stolen `NURBSext`).
+    pub fn scalar_space(&self) -> &NurbsFESpace {
+        &self.base
+    }
+
+    /// Component `d`'s divergence extension (`VNURBSext[d]`).
+    pub fn component_extension(&self, d: usize) -> &NurbsExtension {
+        &self.div_ext[d]
+    }
+
+    /// The element's vector FE with `SetIJK` applied (`NURBSExtension::LoadFE`).
+    pub fn element_fe(&self, e: usize) -> HDivSpanElement {
+        let ext = self.base.extension();
+        let patch = ext.element_patch(e);
+        let kvs = ext.patch_knot_vectors(patch).expect("element patch");
+        let ijk = ext.element_ijk(e);
+        match self.dim {
+            2 => {
+                let mut fe = NurbsHDiv2D::from_knot_vectors(
+                    kvs[0].knot_vector().clone(),
+                    kvs[1].knot_vector().clone(),
+                )
+                .expect("NurbsHDiv2D::from_knot_vectors");
+                fe.set_ijk([ijk[0], ijk[1]]);
+                HDivSpanElement::Two(fe)
+            }
+            _ => {
+                let mut fe = NurbsHDiv3D::from_knot_vectors(
+                    kvs[0].knot_vector().clone(),
+                    kvs[1].knot_vector().clone(),
+                    kvs[2].knot_vector().clone(),
+                )
+                .expect("NurbsHDiv3D::from_knot_vectors");
+                fe.set_ijk(ijk);
+                HDivSpanElement::Three(fe)
+            }
+        }
+    }
+
+    /// `NURBS_HDiv*FiniteElement::CalcVShape(Trans, shape)` — the reference
+    /// vector basis mapped by the **contravariant Piola** transformation
+    /// `J / det(J)` (`shape(i,c) = Σ_k ref(i,k) J(c,k) / Weight()`), the
+    /// H(div) counterpart of the H(curl) `J⁻¹ = adj(J)/det(J)`.
+    fn phys_vshape(
+        &self,
+        fe: &HDivSpanElement,
+        xi: &[f64],
+        geo: &Geometry,
+        ref_shape: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) {
+        let dim = self.dim;
+        let nd = fe.n_dofs();
+        ref_shape.resize(nd * dim, 0.0);
+        out.resize(nd * dim, 0.0);
+        ref_shape.iter_mut().for_each(|v| *v = 0.0);
+        out.iter_mut().for_each(|v| *v = 0.0);
+        fe.eval_basis_vec(xi, ref_shape);
+        let inv_det = 1.0 / geo.det_j;
+        for i in 0..nd {
+            for c in 0..dim {
+                let mut s = 0.0;
+                for k in 0..dim {
+                    s += ref_shape[i * dim + k] * geo.jac[c][k];
+                }
+                out[i * dim + c] = s * inv_det;
+            }
+        }
+    }
+
+    /// MFEM `FiniteElementSpace::GetEssentialTrueDofs(ess_bdr)` for the
+    /// H(div) NURBS space.
+    ///
+    /// `Generate{2,3}DBdrElementDofTable` in `Mode::H_DIV` keeps a component
+    /// `c`'s DOFs on a boundary entity exactly when the *tangential*
+    /// knot-vector order of that entity still differs from the extension's
+    /// maximal order: `GetDivExtension(c)` raised only direction `c`, so for
+    /// the uniform analysis order `p` that is precisely "direction `c` is the
+    /// entity's **normal** direction" — a 2-D edge only carries the DOF block
+    /// of the component normal to it, a 3-D face only the block of the
+    /// component normal to it (the two tangential blocks are dropped because
+    /// `ord0 != ord1`).  The remaining DOFs are all control points of the
+    /// boundary entity, so the essential set is the union over the mesh
+    /// boundary sides — then `MarkerToList` sorts and de-duplicates.
+    pub fn essential_dofs(&self) -> Vec<u32> {
+        let dim = self.dim;
+        let ext = self.base.extension();
+        let mut mark = vec![false; self.n_dofs];
+
+        // One entry per boundary element; a side is shared by all spans along
+        // it, so de-duplicate first (`activeBdrElem` enumeration order).
+        let mut sides: Vec<(usize, usize, bool, i32)> = ext.boundary_sides().to_vec();
+        sides.sort_unstable();
+        sides.dedup();
+
+        for &(patch, dir, low, _attr) in &sides {
+            for c in 0..dim {
+                // `Mode::H_DIV`: `add_dofs` survives only for the component
+                // whose raised direction is the entity's normal direction.
+                if c != dir {
+                    continue;
+                }
+                let cext = &self.div_ext[c];
+                let kvs = cext.patch_knot_vectors(patch).expect("element patch");
+                let ncp: Vec<usize> = kvs.iter().map(|k| k.ncp()).collect();
+                let fixed = if low { 0 } else { ncp[dir] - 1 };
+                let ranges: Vec<Vec<usize>> = (0..dim)
+                    .map(|d| if d == dir { vec![fixed] } else { (0..ncp[d]).collect() })
+                    .collect();
+                let total: usize = ranges.iter().map(|v| v.len()).product();
+                for n in 0..total {
+                    let mut rest = n;
+                    let mut multi = vec![0usize; dim];
+                    for (d, r) in ranges.iter().enumerate() {
+                        multi[d] = r[rest % r.len()];
+                        rest /= r.len();
+                    }
+                    let g = cext.patch_dof(patch, &multi).expect("patch dof");
+                    mark[self.comp_offsets[c] + g] = true;
+                }
+            }
+        }
+        (0..self.n_dofs)
+            .filter(|&d| mark[d])
+            .map(|d| d as u32)
+            .collect()
+    }
+
+    /// `BilinearForm::Assemble` + `Finalize` of the vector mass matrix
+    /// `∫ alpha u·v dΩ` (`VectorFEMassIntegrator(alpha)`, quadrature order
+    /// `Trans.OrderW() + 2*GetOrder()`).
+    pub fn assemble_mass(&self, alpha: f64) -> CsrMatrix<f64> {
+        let dim = self.dim;
+        let n = self.n_dofs;
+        let mut coo = CooMatrix::new(n, n);
+        coo.reserve(n * 16);
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut vsh: Vec<f64> = Vec::new();
+        let order_w = self.base.mesh_order() * dim - 1;
+        for e in 0..self.n_elements() {
+            let nd = self.elem_dof[e].len();
+            let fe = self.element_fe(e);
+            let rule = nurbs_rule(dim, (order_w + 2 * fe.order()) as u8);
+            let mut elmat = vec![0.0_f64; nd * nd];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                // `CalcVShape(Trans)`: `J/W`; `w = ip.weight * Trans.Weight()`.
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut vsh);
+                let w = rule.weights[q] * geo.det_j;
+                for i in 0..nd {
+                    for j in 0..nd {
+                        let mut s = 0.0;
+                        for c in 0..dim {
+                            s += vsh[i * dim + c] * vsh[j * dim + c];
+                        }
+                        elmat[i * nd + j] += w * alpha * s;
+                    }
+                }
+            }
+            coo.add_element_matrix(&self.elem_dof[e], &elmat);
+        }
+        coo.into_csr()
+    }
+
+    /// `LinearForm::Assemble` of `(f, v)` (`VectorFEDomainLFIntegrator`,
+    /// quadrature order `2*GetOrder()`).
+    pub fn assemble_vector_domain_lf(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+        let dim = self.dim;
+        let mut rhs = vec![0.0_f64; self.n_dofs];
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut vsh: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let nd = self.elem_dof[e].len();
+            let fe = self.element_fe(e);
+            let rule = nurbs_rule(dim, (2 * fe.order()) as u8);
+            let mut elvec = vec![0.0_f64; nd];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut vsh);
+                let fv = f(&geo.x[..dim]);
+                let w = rule.weights[q] * geo.det_j;
+                for o in 0..nd {
+                    let mut s = 0.0;
+                    for c in 0..dim {
+                        s += vsh[o * dim + c] * fv[c];
+                    }
+                    elvec[o] += w * s;
+                }
+            }
+            for (o, &g) in self.elem_dof[e].iter().enumerate() {
+                rhs[g] += elvec[o];
+            }
+        }
+        rhs
+    }
+
+    /// `MixedBilinearForm(R_space, q_space).Assemble() + Finalize()` with
+    /// `VectorFEDivergenceIntegrator` — MFEM's `B` of `nurbs_ex5`, i.e.
+    /// `B(q_i, u_j) = Σ_q ip.weight * q_i(ξ_q) * div_ref(u_j)(ξ_q)`.
+    ///
+    /// Note the integrator uses the **reference** `CalcDivShape(ip)` and the
+    /// test FE's `CalcPhysShape`, and multiplies only by `ip.weight` — no
+    /// `Trans.Weight()` factor (MFEM's `VectorFEDivergenceIntegrator::
+    /// AssembleElementMatrix2`, quadrature order `trial.order + test.order - 1`).
+    /// This port reproduces that verbatim; it is what makes the C++ binary's
+    /// iteration block reproducible.
+    ///
+    /// The returned matrix has `q_space.n_dofs()` rows and `self.n_dofs()`
+    /// columns (the `MixedBilinearForm(trial_fes, test_fes)` orientation).
+    pub fn assemble_mixed_divergence(&self, q_space: &NurbsFESpace) -> CsrMatrix<f64> {
+        let dim = self.dim;
+        let mut coo = CooMatrix::new(q_space.n_dofs(), self.n_dofs);
+        coo.reserve(self.n_dofs() * 16);
+        assert_eq!(q_space.n_elements(), self.n_elements(), "mixed form: element counts");
+        for e in 0..self.n_elements() {
+            let fe = self.element_fe(e);
+            let nd_trial = self.elem_dof[e].len();
+            let nd_test = q_space.element_dofs(e).len();
+            let test_fe = q_space.element_fe(e);
+            let order = fe.order() + test_fe.order() - 1;
+            let rule = nurbs_rule(dim, order as u8);
+            let mut elmat = vec![0.0_f64; nd_test * nd_trial];
+            let mut div_ref = vec![0.0_f64; nd_trial];
+            let mut shape = vec![0.0_f64; nd_test];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                fe.eval_div(xi, &mut div_ref);
+                test_fe.shape(xi, &mut shape);
+                let w = rule.weights[q];
+                for i in 0..nd_test {
+                    for j in 0..nd_trial {
+                        elmat[i * nd_trial + j] += w * shape[i] * div_ref[j];
+                    }
+                }
+            }
+            let test_dofs: Vec<usize> = q_space.element_dofs(e).to_vec();
+            for i in 0..nd_test {
+                for j in 0..nd_trial {
+                    coo.add(test_dofs[i], self.elem_dof[e][j], elmat[i * nd_trial + j]);
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
+    /// `GridFunction::ProjectCoefficient(VectorCoefficient&)` — MFEM's
+    /// **default** dispatch for a NURBS space, `ProjectCoefficientElementL2`.
+    pub fn project_coefficient(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+        self.project_coefficient_element_l2(f)
+    }
+
+    /// `GridFunction::ProjectCoefficientElementL2_(VectorCoefficient&, x, Va)`
+    /// followed by `(*this) /= Va` (`GridFunction::ProjectCoefficientElementL2`)
+    /// — the NURBS branch, MFEM's default projection for a
+    /// `NURBS_HDivFECollection` space (`nurbs_ex24`, `ProjectType::DEFAULT`).
+    ///
+    /// Structurally identical to [`NurbsHCurlSpace::project_coefficient_element_l2`]
+    /// (see that method for the five steps), with the H(div)
+    /// `CalcPhysVShape` (`J/W`) in place of the H(curl) one.
+    pub fn project_coefficient_element_l2(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vec<f64> {
+        let dim = self.dim;
+        let mut x = vec![0.0_f64; self.n_dofs];
+        let mut va = vec![0.0_f64; self.n_dofs];
+        let mut shape2: Vec<f64> = Vec::new();
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut shape: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let fe = self.element_fe(e);
+            let nd = self.elem_dof[e].len();
+            let p = fe.order();
+            let dof2 = (p + 1).pow(dim as u32);
+            let rule = nurbs_rule(dim, (2 * p + 1) as u8);
+            let l2_nodes = gauss_legendre_01(p + 1).0;
+
+            shape2.clear();
+            shape2.resize(dof2, 0.0);
+            ref_shape.clear();
+            ref_shape.resize(nd * dim, 0.0);
+            shape.clear();
+            shape.resize(nd * dim, 0.0);
+
+            let nblk = dof2 * dim;
+            let mut elvect = vec![0.0_f64; nblk];
+            let mut elmat = vec![0.0_f64; nblk * nblk];
+            let mut elwght = vec![0.0_f64; nd];
+            let mut partelmat = vec![0.0_f64; dof2 * dof2];
+
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                let w = rule.weights[q] * geo.det_j;
+                let val: Vec<f64> = f(&geo.x[..dim]).iter().map(|v| v * w).collect();
+                l2_gl_shape(dim, &l2_nodes, xi, &mut shape2);
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut shape);
+
+                for c in 0..dim {
+                    for s in 0..dof2 {
+                        elvect[dof2 * c + s] += val[c] * shape2[s];
+                    }
+                }
+                for r in 0..dof2 {
+                    for s in 0..dof2 {
+                        partelmat[r * dof2 + s] = shape2[r] * shape2[s] * w;
+                    }
+                }
+                for c in 0..dim {
+                    let off = dof2 * c;
+                    for r in 0..dof2 {
+                        for s in 0..dof2 {
+                            elmat[(off + r) * nblk + off + s] += partelmat[r * dof2 + s];
+                        }
+                    }
+                }
+                for j in 0..nd {
+                    let mut s2 = 0.0;
+                    for c in 0..dim {
+                        s2 += shape[j * dim + c] * shape[j * dim + c];
+                    }
+                    elwght[j] += w * s2.sqrt();
+                }
+            }
+
+            if !dense_lu_solve(&mut elmat, nblk, &mut elvect, 1e-9) {
+                panic!("NurbsHDivSpace::project_coefficient_element_l2: singular L2 mass matrix");
+            }
+
+            // `el2.Project(el, tr, I)`, I(d*dof2 + k, j) = vshape_j,d(node k).
+            let mut imat = vec![0.0_f64; nblk * nd];
+            for k in 0..dof2 {
+                let node: Vec<f64> = if dim == 2 {
+                    vec![l2_nodes[k % (p + 1)], l2_nodes[k / (p + 1)]]
+                } else {
+                    vec![
+                        l2_nodes[k % (p + 1)],
+                        l2_nodes[(k / (p + 1)) % (p + 1)],
+                        l2_nodes[k / ((p + 1) * (p + 1))],
+                    ]
+                };
+                let geo = self.base.geometry(e, &node);
+                self.phys_vshape(&fe, &node, &geo, &mut ref_shape, &mut shape);
+                for j in 0..nd {
+                    for c in 0..dim {
+                        imat[(c * dof2 + k) * nd + j] = shape[j * dim + c];
+                    }
+                }
+            }
+
+            let mut vec = vec![0.0_f64; nd];
+            let mut mat = vec![0.0_f64; nd * nd];
+            for j in 0..nd {
+                let mut s = 0.0;
+                for r in 0..nblk {
+                    s += imat[r * nd + j] * elvect[r];
+                }
+                vec[j] = s;
+                for j2 in 0..nd {
+                    let mut t = 0.0;
+                    for r in 0..nblk {
+                        t += imat[r * nd + j] * imat[r * nd + j2];
+                    }
+                    mat[j * nd + j2] = t;
+                }
+            }
+            if !dense_lu_solve(&mut mat, nd, &mut vec, 1e-24) {
+                panic!("NurbsHDivSpace::project_coefficient_element_l2: singular IᵀI");
+            }
+
+            for (j, &g) in self.elem_dof[e].iter().enumerate() {
+                x[g] += vec[j] * elwght[j];
+                va[g] += elwght[j];
+            }
+        }
+        for i in 0..self.n_dofs {
+            x[i] /= va[i];
+        }
+        x
+    }
+
+    /// `GridFunction::ComputeL2Error(VectorCoefficient, irs)` — per element,
+    /// quadrature order `2*GetOrder() + 3`, the vector values are
+    /// `CalcVShape(Trans)ᵀ x_el` and each point contributes
+    /// `ip.weight * Weight() * ‖u_h − u‖²`.
+    pub fn compute_l2_error(&self, x: &[f64], f: &dyn Fn(&[f64]) -> Vec<f64>) -> f64 {
+        let dim = self.dim;
+        let mut error = 0.0_f64;
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut vsh: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let nd = self.elem_dof[e].len();
+            let fe = self.element_fe(e);
+            let rule = nurbs_rule(dim, (2 * fe.order() + 3) as u8);
+            let mut elem_error = 0.0_f64;
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut vsh);
+                let fv = f(&geo.x[..dim]);
+                let mut n2 = 0.0_f64;
+                for c in 0..dim {
+                    let mut val_c = 0.0_f64;
+                    for o in 0..nd {
+                        val_c += vsh[o * dim + c] * x[self.elem_dof[e][o]];
+                    }
+                    let d = val_c - fv[c];
+                    n2 += d * d;
+                }
+                elem_error += rule.weights[q] * geo.det_j * n2;
+            }
+            error += elem_error.abs();
+        }
+        error.sqrt()
+    }
+
+    /// `ComputeLpNorm(2., VectorCoefficient, mesh, irs)` — the *exact*
+    /// function's `L²` norm over the mesh, with the same element geometry and
+    /// the quadrature order the caller passes (`order_quad`).
+    pub fn compute_exact_l2_norm(&self, f: &dyn Fn(&[f64]) -> Vec<f64>, order_quad: u8) -> f64 {
+        self.base.compute_exact_l2_norm_vec(f, order_quad)
     }
 }

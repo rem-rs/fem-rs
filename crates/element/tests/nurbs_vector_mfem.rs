@@ -288,3 +288,92 @@ fn reference_knot_vectors_are_the_dumped_ones() {
         assert_eq!(seen.len(), blocks.len(), "each element has a distinct span index");
     }
 }
+
+/// `NURBSFiniteElement::SetOrder`'s DOF counts and reported order for *unequal*
+/// per-direction orders — the state `GetDivExtension(component)` /
+/// `GetCurlExtension(component)` put the elements in (`newOrders[component] +=
+/// 1` / `newOrders[c] += 1; newOrders[component] -= 1` leave the two directions
+/// different whenever the analysis patch is not a square).
+///
+/// MFEM's own `NURBS_HDiv2DFiniteElement::SetOrder` computes
+/// `dof = (o0 + 2)*(o1 + 1) + (o1 + 1)*(o1 + 2)` — the second block repeats the
+/// *η* order — and `NURBS_HCurl2DFiniteElement::SetOrder` its transposed
+/// counterpart `(o0 + 1)*(o1 + 2) + (o1 + 2)*(o1 + 1)`.  Neither agrees with
+/// the space's merged `Table` (`(o0+2)*(o1+1) + (o0+1)*(o1+2)`) unless the
+/// orders are equal, which is why both miniapps build a uniform-order space
+/// (`NURBS_HDivFECollection(order, dim)` on `-o p`).  This test pins the
+/// element-side formulas so the quirk is documented rather than "fixed".
+#[test]
+fn unequal_order_dof_counts_match_mfem_setorder() {
+    let kv3 = KnotVector::new_clamped(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]).expect("kv");
+    let kv2 = KnotVector::new_clamped(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]).expect("kv");
+    let kv1 = multispan_kv();
+
+    // Orders (3, 1) and (1, 3).
+    let a = NurbsHDiv2D::from_knot_vectors(kv3.clone(), kv1.clone()).expect("hdiv 2d");
+    assert_eq!((a.order(), a.n_dofs()), (4, (3 + 2) * (1 + 1) + (1 + 1) * (1 + 2)));
+    let b = NurbsHDiv2D::from_knot_vectors(kv1.clone(), kv3.clone()).expect("hdiv 2d");
+    assert_eq!((b.order(), b.n_dofs()), (4, (1 + 2) * (3 + 1) + (3 + 1) * (3 + 2)));
+    assert_eq!(NurbsHDiv2D::n_dofs_static(3, 1), a.n_dofs());
+    assert_eq!(NurbsHDiv2D::n_dofs_static(1, 3), b.n_dofs());
+
+    // H(curl) uses the transposed pair: `(o0+1)*(o1+2) + (o1+2)*(o1+1)`.
+    let c = NurbsHCurl2D::from_knot_vectors(kv3.clone(), kv1.clone()).expect("hcurl 2d");
+    assert_eq!((c.order(), c.n_dofs()), (4, (3 + 1) * (1 + 2) + (1 + 2) * (1 + 1)));
+    let d = NurbsHCurl2D::from_knot_vectors(kv1.clone(), kv3.clone()).expect("hcurl 2d");
+    assert_eq!((d.order(), d.n_dofs()), (4, (1 + 1) * (3 + 2) + (3 + 2) * (3 + 1)));
+    assert_eq!(NurbsHCurl2D::n_dofs_static(3, 1), c.n_dofs());
+    assert_eq!(NurbsHCurl2D::n_dofs_static(1, 3), d.n_dofs());
+
+    // 3-D: `(o0+2)(o1+1)(o2+1) + (o0+1)(o1+2)(o2+1) + (o0+1)(o1+1)(o2+2)`,
+    // with the mid block using `(o1 + 1)` and the third `(o2 + 1)` verbatim.
+    let e = NurbsHDiv3D::from_knot_vectors(kv3.clone(), kv1.clone(), kv1.clone()).expect("3d");
+    assert_eq!(
+        (e.order(), e.n_dofs()),
+        (4, (3 + 2) * 2 * 2 + (3 + 1) * 3 * 2 + (3 + 1) * 2 * 3)
+    );
+    assert_eq!(NurbsHDiv3D::n_dofs_static(3, 1, 1), e.n_dofs());
+    let f = NurbsHDiv3D::from_knot_vectors(kv1.clone(), kv3.clone(), kv2.clone()).expect("3d");
+    assert_eq!(
+        (f.order(), f.n_dofs()),
+        (4, (1 + 2) * 4 * 3 + (1 + 1) * 5 * 3 + (1 + 1) * 4 * 4)
+    );
+    assert_eq!(NurbsHDiv3D::n_dofs_static(1, 3, 2), f.n_dofs());
+
+    // Every direction's basis is a partition of unity on the reference square
+    // for the *uniform*-order element (the only configuration whose two blocks
+    // fit `GetDof` — see below).
+    let e = NurbsHDiv2D::from_knot_vectors(
+        KnotVector::new_clamped(vec![0.0, 0.0, 0.5, 1.0, 1.0]).expect("kv"),
+        KnotVector::new_clamped(vec![0.0, 0.0, 0.5, 1.0, 1.0]).expect("kv"),
+    )
+    .expect("hdiv 2d");
+    assert_eq!((e.order_u, e.order_v, e.n_dofs()), (1, 1, 12));
+    for &xi in &[[0.0, 0.0], [0.3, 0.7], [1.0, 1.0]] {
+        let mut v = vec![0.0; e.n_dofs() * 2];
+        VectorReferenceElement::eval_basis_vec(&e, &xi, &mut v);
+        let sx: f64 = (0..e.n_dofs()).map(|i| v[i * 2]).sum();
+        let sy: f64 = (0..e.n_dofs()).map(|i| v[i * 2 + 1]).sum();
+        assert!((sx - 1.0).abs() < 1e-14, "x-partition of unity: {sx}");
+        assert!((sy - 1.0).abs() < 1e-14, "y-partition of unity: {sy}");
+    }
+
+    // **The unequal-order element is internally inconsistent — in MFEM itself.**
+    // `SetOrder`'s `dof` is `(o0+2)*(o1+1) + (o1+1)*(o1+2)`, but `CalcVShape`
+    // enumerates `(o0+2)*(o1+1)` x-block rows followed by `(o1+2)*(o0+1)`
+    // y-block rows; the two agree only when `o0 == o1`.  For `(3, 1)` the
+    // enumeration needs 22 rows while `GetDof` reports `a.n_dofs()` = 16, so
+    // MFEM's own `DenseMatrix shape(dof, dim)` would be overrun by 6 rows — the
+    // Rust element *panics* instead (it asserts `values.len() == n_dofs*dim`).
+    // This is why `GetDivExtension` on a patch whose direction orders differ
+    // cannot be assembled and both miniapps build a uniform-order space.
+    let (o0, o1) = (3usize, 1usize);
+    assert_eq!((o0 + 2) * (o1 + 1) + (o1 + 2) * (o0 + 1), 22);
+    assert_ne!((o0 + 2) * (o1 + 1) + (o1 + 2) * (o0 + 1), a.n_dofs());
+    let mut small = vec![0.0; a.n_dofs() * 2];
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        VectorReferenceElement::eval_basis_vec(&a, &[0.5, 0.5], &mut small);
+    }))
+    .is_err();
+    assert!(panicked, "the (3, 1) element must not silently overrun `values`");
+}

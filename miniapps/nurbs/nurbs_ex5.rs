@@ -1,116 +1,135 @@
-//! Miniapp: NURBS Example 5 — Navier-Stokes with NURBS.
-//! 1:1 port of MFEM nurbs_ex5.cpp.
+//! Miniapp: MFEM `nurbs_ex5` — mixed Darcy with NURBS H(div).
 //!
-//! Port note (round K): this file used the removed
-//! `CsrMatrix::apply_dirichlet_bc(&[], &b)` / `fem_linalg::recover_dirichlet_solution`
-//! pair (an **empty** essential-DOF set) and `ConvectionIntegrator::new(&u, dim)`,
-//! neither of which exists in the current API.  The Picard loop, the source
-//! term (zero), the viscosity `nu = 0.01`, the solver tolerances and the
-//! printed lines are unchanged.  The convective velocity is supplied as a
-//! `ConstantVectorCoeff` because fem-rs has no `VectorCoeff` backed by a DOF
-//! vector (see the round report); the frozen velocity it represents is exactly
-//! the (all-zero) iterate this loop starts from and never leaves, since the
-//! source is zero and no essential DOFs are imposed.
+//! **Status: partially ported (round 26).**  This file is *not* a complete 1:1
+//! port of `miniapps/nurbs/nurbs_ex5.cpp`; the stages listed below are, and
+//! everything from the right-hand side onwards exits with status 3 rather than
+//! printing numbers this port cannot produce.
+//!
+//! What MFEM's example does (`k u + grad p = f`, `-div u = g`, natural BC
+//! `-p = <given pressure>`; `R_space` = `NURBS_HDivFECollection(order, dim)` on
+//! `NURBSExtension(mesh->NURBSext, order)`, `W_space` = `NURBSFECollection(order)`
+//! on the *stolen* extension, `BlockOperator` + block-diagonal preconditioner
+//! with `DSmoother(M)` and `GSSmoother(B·diag(M)⁻¹·Bᵀ)`, MINRES
+//! `rtol = atol = 1e-10`, `max_iter = 10000`).
+//!
+//! Ported 1:1 (verified against the C++ binary, MFEM 4.10):
+//!
+//! | stage | `square-nurbs.mesh -o 1` (default `-r 6`) |
+//! |---|---|
+//! | mesh read + `ref_levels = floor(log(10000./NE)/log(2.)/dim)` | 6 levels, 4096 elements |
+//! | `NURBS_HDivFECollection` + `NURBSExtension` construction | `dim(R) = 8580` |
+//! | `W_space = NURBSFECollection(order)` | `dim(W) = 4225` |
+//! | `dim(R+W)` | `12805` |
+//! | `R_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H(div): 260` |
+//! | `W_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H1: 256` |
+//!
+//! **Not ported** (each is a hard blocker for the solve block, so the example
+//! stops with `exit(3)` *before* printing anything it cannot reproduce):
+//!
+//! * `VectorFEBoundaryFluxLFIntegrator` — the natural-BC term
+//!   `fform->AddBoundaryIntegrator(new VectorFEBoundaryFluxLFIntegrator(...))`.
+//!   MFEM integrates it with the *boundary element's* own `NURBS1D/2D` shape
+//!   functions and `NURBSExtension::GenerateBdrElementDofTable`'s signed
+//!   `bel_dof` rows (the H(div) mode flips the sign of the low-side rows); this
+//!   port does not yet build that table, so the load vector's boundary part is
+//!   missing.
+//! * The block MINRES solve: `Blocksolvers`/`BlockDiagonalPreconditioner` with
+//!   `DSmoother(M)` and `GSSmoother(B diag(M)⁻¹ Bᵀ)`.  `fem-solver` has
+//!   `MinresSolver` and `BlockDiagonalPrecond`, but not the
+//!   `DSmoother`-backed Schur complement `S = B·diag(M)⁻¹·Bᵀ` this example
+//!   needs, so the iteration log (462 iterations for the default grid) cannot
+//!   be reproduced.
+//! * `VisItDataCollection` / `ParaViewDataCollection` (no writer in fem-rs) and
+//!   the `ex5.mesh` / `sol_u.gf` / `sol_p.gf` NURBS outputs (no NURBS mesh
+//!   writer — see `nurbs_ex1`).
+//!
+//! `nurbs_ex5.cpp`'s own `pa` branch is dead code there (`pa = false;` is
+//! assigned right after the collection is chosen), so partial assembly is not
+//! part of the 1:1 configuration.
 
-use fem_assembly::{
-    Assembler,
-    standard::{ConvectionIntegrator, DiffusionIntegrator, DomainSourceIntegrator},
-    postproc::coefficient::ConstantVectorCoeff,
-};
-use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
-use fem_mesh::{MeshTopology, amr::{refine_uniform, refine_uniform_3d}};
-use fem_space::{H1Space, fe_space::FESpace, constraints::form_linear_system};
-use fem_solver::{GSSmoother, solve_pcg};
-use fem_linalg::fem_to_linlvo_csr;
+use fem_space::nurbs_fe_space::{NurbsFESpace, NurbsHDivSpace};
 
-struct Args { mesh: String, order: i32, ref_levels: i32 }
+struct Args {
+    mesh: String,
+    order: usize,
+    ref_levels: i64,
+}
 
 fn parse_args() -> Args {
-    let mut a = Args { mesh: "data/square-nurbs.mesh".to_string(), order: 2, ref_levels: -1 };
+    let mut a = Args { mesh: "data/square-nurbs.mesh".to_string(), order: 1, ref_levels: -1 };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-m" | "--mesh" => { a.mesh = it.next().unwrap_or(a.mesh); }
-            "-o" | "--order" => { a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(2); }
-            "-r" | "--refine" => { a.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1); }
+            "-m" | "--mesh" => a.mesh = it.next().unwrap_or_else(|| a.mesh.clone()),
+            "-o" | "--order" => {
+                a.order = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            "-r" | "--refine" => {
+                a.ref_levels = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+            }
             _ => {}
         }
     }
     a
 }
 
-/// `ref_levels = floor(log(50000/NE)/log(2)/dim)` when not given explicitly.
-fn auto_ref_levels(n_elems: usize, dim: usize, requested: i32) -> i32 {
-    if requested < 0 {
-        ((50000.0_f64 / n_elems as f64).ln() / 2.0_f64.ln() / dim as f64).floor() as i32
-    } else {
-        requested
-    }
-}
-
 fn main() {
     let args = parse_args();
-    let mfem = read_mfem_file(&args.mesh).expect("failed to read mesh");
+    let text = std::fs::read_to_string(&args.mesh).expect("failed to read the NURBS mesh file");
 
-    // `MfemFile` has no `dim` field: the dimension is selected by which of the
-    // two optional meshes was parsed.
-    if let Some(mesh) = mfem.mesh2d {
-        let dim = 2usize;
-        let mut m = mesh;
-        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
-            m = refine_uniform(&m);
-        }
-        run(H1Space::new(m, args.order as u8), dim, &args, &|mm| {
-            write_mfem_file("refined.mesh", mm).ok();
-        });
-    } else if let Some(mesh) = mfem.mesh3d {
-        let dim = 3usize;
-        let mut m = mesh;
-        for _ in 0..auto_ref_levels(m.n_elems(), dim, args.ref_levels) {
-            m = refine_uniform_3d(&m);
-        }
-        run(H1Space::new(m, args.order as u8), dim, &args, &|mm| {
-            write_mfem_file_3d("refined.mesh", mm).ok();
-        });
+    // 3. `Mesh *mesh = new Mesh(mesh_file, 1, 1); int dim = mesh->Dimension();`
+    let geo = fem_space::NurbsExtension::from_mesh_str(&text).expect("NURBS mesh");
+    let dim = geo.dim();
+    let n_elems = geo.n_elements();
+
+    // 4. `ref_levels = (int)floor(log(10000./mesh->GetNE())/log(2.)/dim)` when
+    //    `-r` is not given, then that many `mesh->UniformRefinement()`.
+    let ref_levels = if args.ref_levels < 0 {
+        ((10000.0_f64 / n_elems as f64).ln() / std::f64::consts::LN_2 / dim as f64).floor() as i64
     } else {
-        panic!("mesh file contains neither a 2D nor a 3D mesh");
+        args.ref_levels
+    } as usize;
+
+    // 5. `hdiv_coll = new NURBS_HDivFECollection(order, dim);
+    //     l2_coll = new NURBSFECollection(order);
+    //     NURBSext = new NURBSExtension(mesh->NURBSext, order);
+    //     mfem::out << "Create NURBS fec and ext" << std::endl;`
+    println!("Create NURBS fec and ext");
+    // `W_space = new FiniteElementSpace(mesh, NURBSext, l2_coll)` then
+    // `R_space = new FiniteElementSpace(mesh, W_space->StealNURBSext(),
+    //  hdiv_coll)` — both spaces share the one analysis extension, so the
+    // scalar space is `NurbsHDivSpace::scalar_space`.
+    let r_space = NurbsHDivSpace::from_mesh_str(&text, ref_levels, args.order)
+        .expect("H(div) NURBS space");
+    let w_space: &NurbsFESpace = r_space.scalar_space();
+
+    // 6. `block_offsets[1] = R_space->GetVSize(); block_offsets[2] =
+    //     W_space->GetVSize();` and the banner.
+    let n_u = r_space.n_dofs();
+    let n_p = w_space.n_dofs();
+    println!("***********************************************************");
+    println!("dim(R) = {n_u}");
+    println!("dim(W) = {n_p}");
+    println!("dim(R+W) = {}", n_u + n_p);
+    println!("***********************************************************");
+
+    // `ess_bdr = 1` -> `GetEssentialTrueDofs(ess_bdr, ess_tdof_list)` for both
+    // spaces (MFEM computes and prints them, then discards both lists — no
+    // boundary condition is eliminated in this example).
+    if geo.max_bdr_attribute() > 0 {
+        println!("Number boundary dofs in H(div): {}", r_space.essential_dofs().len());
+        println!("Number boundary dofs in H1: {}", w_space.boundary_dofs().len());
+    } else {
+        println!("Number boundary dofs in H(div): 0");
+        println!("Number boundary dofs in H1: 0");
     }
-}
 
-/// Dimension-independent driver (the 2-D and 3-D paths differ only in the mesh
-/// refinement / mesh writer, which `main` has already dispatched on).
-fn run<M: MeshTopology>(space: H1Space<M>, dim: usize, args: &Args, write_mesh: &dyn Fn(&M)) {
-    let qo = (args.order as u8) * 2 + 1;
-    let nu = 0.01;
-    println!("Number of finite element unknowns: {}", space.n_dofs());
-
-    let mut u = vec![0.0_f64; space.n_dofs()];
-    for iter in 0..10 {
-        // Picard linearisation: the convective velocity is frozen at the
-        // previous iterate (zero here — see the module-level port note).
-        let a_mat = Assembler::assemble_bilinear(&space, &[
-            &DiffusionIntegrator { kappa: nu },
-            &ConvectionIntegrator { velocity: ConstantVectorCoeff(vec![0.0; dim]) },
-        ], qo);
-
-        let source = DomainSourceIntegrator::new(|_: &[f64]| 0.0);
-        let mut rhs = Assembler::assemble_linear(&space, &[&source], qo);
-
-        // MFEM `FormLinearSystem(ess_tdof_list, x, b, A, X, B)` — with the
-        // empty essential list this file has always used, it is a no-op.
-        let mut a_mod = a_mat;
-        let mut x = vec![0.0_f64; u.len()];
-        form_linear_system(&mut a_mod, &mut rhs, &mut x, &[], &[]);
-
-        let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mod)).expect("GS failed");
-        solve_pcg(&a_mod, &rhs, &mut x, &gs, 1e-10, 1000, true).expect("PCG failed");
-
-        u = x;
-        println!("Picard iteration {} done", iter);
-    }
-
-    println!("Solution computed");
-
-    write_mesh(space.mesh());
-    write_mfem_gf_file("sol.gf", dim, &u, "H1", args.order as u8, 1, 8).ok();
+    // 7.-11. `fform` (with `VectorFEBoundaryFluxLFIntegrator`), `gform`, the
+    // Darcy `BlockOperator` and the MINRES solve.
+    eprintln!(
+        "nurbs_ex5: stages 7-11 are not ported (VectorFEBoundaryFluxLFIntegrator's signed \
+         NURBS bel_dof table and the DSmoother/GSSmoother block preconditioner are missing \
+         from fem-rs); see the module docs. Run MFEM's nurbs_ex5 for stages 7-11."
+    );
+    std::process::exit(3);
 }

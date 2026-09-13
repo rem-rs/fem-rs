@@ -55,7 +55,8 @@ pub use constraints::{apply_dirichlet, apply_dirichlet_diag_one, eliminate_diric
 pub use iga::{IgaBoundary2D, IgaBoundary3D, IgaSpace1D, IgaSpace2D, IgaSpace3D};
 pub use nurbs_extension::{NurbsExtension, NurbsKnot, NurbsNodes};
 pub use nurbs_fe_space::{
-    nurbs_rule, Geometry, HCurlSpanElement, NurbsFESpace, NurbsHCurlSpace, Rule, SpanElement,
+    nurbs_rule, Geometry, HCurlSpanElement, HDivSpanElement, NurbsFESpace, NurbsHCurlSpace,
+    NurbsHDivSpace, Rule, SpanElement,
 };
 pub use block_fe_space::BlockFESpace;
 pub use dpg_trace::{DpgTraceSpace, FaceInfo};

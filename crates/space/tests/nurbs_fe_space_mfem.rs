@@ -896,3 +896,205 @@ fn partial_essential_attributes_split_the_boundary_dofs() {
     assert_eq!(s2.boundary_dofs_marked(&vec![true; nb]), all);
 }
 
+
+// ── `NurbsHDivSpace` — `NURBS_HDivFECollection`, MFEM 4.10 ───────────────────
+//
+// Ground truth: a C++ probe constructing
+// `FiniteElementSpace(mesh, new NURBSExtension(mesh->NURBSext, order),
+//  new NURBS_HDivFECollection(order, dim))` after `r` uniform refinements and
+// dumping `GetNDofs`/`GetNE`/`GetNBE`, every `GetElementDofs` row,
+// `GetEssentialTrueDofs(ess_bdr = 1)` (and per attribute) and the invariants of
+// `BilinearForm(VectorFEMassIntegrator(1)).SpMat()`.
+//
+// `square-nurbs.mesh`/`cube-nurbs.mesh` refine 1 → 4 (2-D) and 1 → 8 (3-D)
+// elements per level, so `-r 6` is exactly `nurbs_ex5`'s default grid
+// (`floor(log(10000/1)/log(2)/2) = 6`, 4096 elements, `dim(R) = 8580`).
+
+/// `(ref_levels, ndofs, nelem, nbdr, mass nnz, Σa_ij, ‖A‖_F, min a_ii, max a_ii)`.
+const MFEM_HDIV_SQ_O1: [(usize, usize, usize, usize, usize, f64, f64, f64, f64); 3] = [
+    (1, 24, 4, 8, 196, 8.0000000000000036, 0.82521976122787288, 0.066666666666666666, 0.22222222222222221),
+    (2, 60, 16, 16, 624, 32.000000000000064, 2.0917238445777939, 0.066666666666666666, 0.3666666666666667),
+    (6, 8580, 4096, 256, 125064, 8191.999999999277, 39.878581150372604, 0.066666666666666665, 0.36666666666666667),
+];
+
+#[test]
+fn hdiv_space_dof_tables_match_mfem_2d() {
+    use fem_space::NurbsHDivSpace;
+
+    for &(refs, ndofs, ne, nbe, nnz, sum, fro, dmin, dmax) in &MFEM_HDIV_SQ_O1 {
+        let sp = NurbsHDivSpace::from_mesh_str(MESH, refs, 1).expect("hdiv space");
+        assert_eq!(sp.n_dofs(), ndofs, "ref_levels {refs}");
+        assert_eq!(sp.n_elements(), ne, "ref_levels {refs}");
+        assert_eq!(sp.extension().n_bdr_elements(), nbe, "ref_levels {refs}");
+
+        // `GetDivExtension(d)`: order p+1 in direction d only, and the merged
+        // `ndofs = Σ_d VNURBSext[d]->GetNDof()`.
+        for d in 0..2 {
+            let ext = sp.component_extension(d);
+            let mut want = [1usize, 1];
+            want[d] += 1;
+            assert_eq!(ext.orders(), want, "ref_levels {refs}, component {d}");
+            assert_eq!(ext.n_dofs(), ndofs / 2);
+        }
+
+        let a = sp.assemble_mass(1.0);
+        // MFEM's `BilinearForm::Finalize()` runs `SparseMatrix::Finalize(
+        // skip_zeros = 1)`, so it drops entries that vanish *exactly*; the Rust
+        // CSR keeps their cancellation noise instead (the two components' basis
+        // functions have disjoint support in their own coordinate, so the
+        // cross-block products cancel only in exact arithmetic).  That noise
+        // runs down to `1e-24`, twelve orders below the diagonal scale, so the
+        // structural count below applies the same round-off floor.
+        let mut got_nnz = 0usize;
+        let mut got_sum = 0.0_f64;
+        let mut got_fro = 0.0_f64;
+        let (mut got_dmin, mut got_dmax) = (f64::MAX, f64::MIN);
+        for i in 0..a.nrows {
+            for k in a.row_ptr[i]..a.row_ptr[i + 1] {
+                let v = a.values[k];
+                if v.abs() > 1e-12 {
+                    got_nnz += 1;
+                    got_sum += v;
+                    got_fro += v * v;
+                }
+                if i == a.col_idx[k] as usize {
+                    got_dmin = got_dmin.min(v);
+                    got_dmax = got_dmax.max(v);
+                }
+            }
+        }
+        assert_eq!(got_nnz, nnz, "ref_levels {refs}: nnz");
+        let close = |got: f64, want: f64, what: &str| {
+            assert!(
+                (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+                "ref_levels {refs}: {what} = {got}, MFEM {want}"
+            );
+        };
+        close(got_sum, sum, "Σa_ij");
+        close(got_fro.sqrt(), fro, "‖A‖_F");
+        close(got_dmin, dmin, "min a_ii");
+        close(got_dmax, dmax, "max a_ii");
+    }
+}
+
+#[test]
+fn hdiv_space_element_dofs_and_essential_match_mfem_2d() {
+    use fem_space::NurbsHDivSpace;
+
+    let sp = NurbsHDivSpace::from_mesh_str(MESH, 1, 1).expect("hdiv space");
+    assert_eq!(sp.element_dofs(0), [0, 4, 5, 8, 10, 11, 12, 16, 18, 22, 19, 23]);
+    assert_eq!(sp.element_dofs(1), [4, 5, 1, 10, 11, 9, 16, 13, 22, 20, 23, 21]);
+    // `NURBS_HDiv2DFiniteElement::SetOrder`: the elevated degree p + 1.
+    let fe = sp.element_fe(0);
+    assert_eq!(fe.n_dofs(), 12);
+    assert_eq!(fe.order(), 2);
+    let ess = sp.essential_dofs();
+    assert_eq!(ess, [0, 1, 2, 3, 8, 9, 12, 13, 14, 15, 16, 17]);
+
+    let sp2 = NurbsHDivSpace::from_mesh_str(MESH, 2, 1).expect("hdiv space");
+    assert_eq!(sp2.element_dofs(0), [0, 4, 5, 12, 18, 19, 30, 34, 40, 48, 41, 51]);
+    assert_eq!(
+        sp2.essential_dofs(),
+        [0, 1, 2, 3, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+    );
+
+    // `nurbs_ex5`'s default grid.
+    let sp6 = NurbsHDivSpace::from_mesh_str(MESH, 6, 1).expect("hdiv space");
+    assert_eq!(sp6.element_dofs(0), [0, 4, 5, 132, 258, 259, 4290, 4294, 4420, 4548, 4421, 4611]);
+    assert_eq!(sp6.element_dofs(2), [5, 6, 7, 259, 260, 261, 4295, 4296, 4549, 4550, 4612, 4613]);
+    let ess6 = sp6.essential_dofs();
+    assert_eq!(ess6.len(), 260);
+    assert_eq!(&ess6[..4], &[0, 1, 2, 3]);
+    assert_eq!(&ess6[4..8], &[132, 133, 134, 135]);
+}
+
+#[test]
+fn hdiv_space_dof_tables_match_mfem_3d_and_order2() {
+    use fem_space::NurbsHDivSpace;
+
+    const MESH3D: &str = include_str!("../../../data/cube-nurbs.mesh");
+    let sp = NurbsHDivSpace::from_mesh_str(MESH3D, 1, 1).expect("hdiv space 3d");
+    assert_eq!(sp.n_dofs(), 108);
+    assert_eq!(sp.n_elements(), 8);
+    for d in 0..3 {
+        let ext = sp.component_extension(d);
+        let mut want = [1usize, 1, 1];
+        want[d] += 1;
+        assert_eq!(ext.orders(), want, "component {d}");
+        assert_eq!(ext.n_dofs(), 36);
+    }
+    assert_eq!(
+        sp.element_dofs(0),
+        [0, 8, 9, 16, 24, 25, 20, 26, 27, 31, 34, 35, 36, 44, 48, 61, 49, 60, 56, 62, 67, 70, 66,
+         71, 72, 80, 84, 96, 88, 97, 103, 106, 89, 98, 104, 107]
+    );
+    assert_eq!(sp.element_fe(0).n_dofs(), 36);
+    assert_eq!(
+        sp.essential_dofs(),
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 28, 31, 36, 37, 38, 39, 40,
+            41, 42, 43, 44, 45, 46, 47, 56, 57, 58, 59, 62, 65, 72, 73, 74, 75, 76, 77, 78, 79,
+            80, 81, 82, 83, 84, 85, 86, 87, 96, 105
+        ]
+    );
+
+    // `-o 2` (the order both miniapps' sample runs use): the two component
+    // extensions use the orders `[3, 2]` and `[2, 3]`.
+    let sp2 = NurbsHDivSpace::from_mesh_str(MESH, 1, 2).expect("hdiv space o2");
+    assert_eq!(sp2.n_dofs(), 40);
+    assert_eq!(
+        sp2.element_dofs(0),
+        [0, 4, 5, 6, 10, 14, 15, 16, 11, 17, 18, 19, 20, 24, 25, 28, 34, 35, 29, 36, 37, 30, 38,
+         39]
+    );
+    assert_eq!(sp2.element_fe(0).n_dofs(), 24);
+    assert_eq!(sp2.element_fe(0).order(), 3);
+    assert_eq!(
+        sp2.essential_dofs(),
+        [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25, 26, 27]
+    );
+}
+
+/// The `(J/det J)` Piola map of `NURBS_HDiv*FiniteElement::CalcVShape(Trans)`
+/// is pinned end-to-end by the mass-matrix invariants above (a wrong map moves
+/// Σa_ij, ‖A‖_F and both diagonal extrema), and `nurbs_ex5`'s mixed operator
+/// `B = bVarf->SpMat()` (`VectorFEDivergenceIntegrator`) by the values below —
+/// which in turn pins the reference `CalcDivShape` and the `NurbsFESpace`
+/// element pairing of the two spaces.
+#[test]
+fn hdiv_mixed_divergence_matches_mfem_2d() {
+    use fem_space::{NurbsFESpace, NurbsHDivSpace};
+
+    // `(ref_levels, height, width, Σ B, ‖B‖_F)` from MFEM 4.10's
+    // `MixedBilinearForm(R_space, W_space)` + `VectorFEDivergenceIntegrator`,
+    // `square-nurbs.mesh -o 1` (the `B` of `nurbs_ex5`, before `B *= -1.`).
+    // `Σ B = 0` up to round-off because the divergence of every H(div) basis
+    // function has vanishing mean.
+    const MFEM_B: [(usize, usize, usize, f64, f64); 2] = [
+        (1, 9, 24, -2.7061686225238191e-16, 1.7141387356157236),
+        (6, 4225, 8580, 6.424027976237312e-14, 48.053981990913748),
+    ];
+    for &(refs, height, width, sum, fro) in &MFEM_B {
+        let sp = NurbsHDivSpace::from_mesh_str(MESH, refs, 1).expect("hdiv space");
+        let w = NurbsFESpace::from_mesh_str(MESH, refs, &[1]).expect("scalar space");
+        let b = sp.assemble_mixed_divergence(&w);
+        assert_eq!((b.nrows, b.ncols), (height, width), "ref_levels {refs}");
+        let mut got_sum = 0.0_f64;
+        let mut got_fro = 0.0_f64;
+        for i in 0..b.nrows {
+            for k in b.row_ptr[i]..b.row_ptr[i + 1] {
+                got_sum += b.values[k];
+                got_fro += b.values[k] * b.values[k];
+            }
+        }
+        assert!(
+            (got_sum - sum).abs() <= 1e-13 * fro.max(1.0),
+            "ref_levels {refs}: Σ B = {got_sum:.17e}, MFEM {sum:.17e}"
+        );
+        assert!(
+            (got_fro.sqrt() - fro).abs() <= 1e-13 * fro,
+            "ref_levels {refs}: ‖B‖_F = {:.17e}, MFEM {fro:.17e}",
+            got_fro.sqrt()
+        );
+    }
+}

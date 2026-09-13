@@ -1671,6 +1671,19 @@ impl NurbsExtension {
     pub fn element_ijk(&self, e: usize) -> [usize; 3] {
         self.el_to_ijk[e]
     }
+
+    /// The mesh-element vertex list of element `e` (MFEM
+    /// `Mesh::GetElementVertices`), used to orient a boundary element against
+    /// the volume element that owns it.
+    pub fn element_vertices(&self, e: usize) -> &[usize] {
+        &self.elements[e].verts
+    }
+
+    /// The mesh-boundary-element vertex list of boundary element `b` (MFEM
+    /// `Mesh::GetBdrElementVertices`).
+    pub fn boundary_vertices(&self, b: usize) -> &[usize] {
+        &self.boundary[b].verts
+    }
 }
 
 #[cfg(test)]
