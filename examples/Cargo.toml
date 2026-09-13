@@ -591,3 +591,7 @@ path = "../miniapps/hdiv_linear_solver/grad_div.rs"
 [[example]]
 name = "mfem_pex0_parallel_poisson"
 path = "mfem_pex0_parallel_poisson.rs"
+
+[[example]]
+name = "gslib_findpts"
+path = "../miniapps/gslib/findpts.rs"

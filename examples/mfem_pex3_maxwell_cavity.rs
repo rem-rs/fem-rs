@@ -85,26 +85,36 @@ fn main() {
     // 1:1 default: star.mesh + 4 uniform refinements (2 serial ref_levels +
     // 2 parallel refinements equivalent; done serially before partitioning).
     // `--n N` keeps the unit-square triangle self-test path.
+    //
+    // ⚠️ Documented deviation from C++: MFEM `ex3p`'s default mesh is the
+    // **3-D** `beam-tet.mesh` (ex3p.cpp:70) and its solver path is
+    // dimension-generic.  This port is `Mesh<2>`-typed, so it uses MFEM's
+    // *serial* ex3 default (`star.mesh`) rather than reading a 3-D mesh as 2-D
+    // (`beam-tet` has no `mesh2d`, which used to panic on the default run).
+    // Comparisons with the C++ must pass the same 2-D `-m <mesh>` on both sides.
     let base_mesh: Mesh<2> = if let Some(ref path) = mesh_file {
         read_mfem_file(path).expect("failed to read MFEM mesh")
             .mesh2d.expect("MFEM mesh must be 2D")
     } else if n != 16 {
         Mesh::<2>::unit_square_tri(n)
     } else {
-        let mfem = read_mfem_file("data/beam-tet.mesh")
-            .expect("failed to read data/beam-tet.mesh");
-        let m = mfem.mesh2d.expect("star.mesh must be 2-D");
-        let mut m = m;
-        for _ in 0..4 {
+        let mfem = read_mfem_file("data/star.mesh")
+            .expect("failed to read data/star.mesh");
+        mfem.mesh2d.expect("data/star.mesh must be 2-D")
+    };
+    // MFEM `ex3p` refines `ref_levels` times serially and then
+    // `par_ref_levels = 2` more after partitioning; since this port assembles
+    // on the rank-local refined mesh the two stages are folded into one serial
+    // pass, which gives the same final mesh.  The `--n` self-test keeps its own
+    // refinement count.
+    let total_ref_levels = if n != 16 { ref_levels } else { ref_levels + 2 };
+    let mesh = Arc::new({
+        let mut m = base_mesh;
+        for _ in 0..total_ref_levels {
             m = refine_uniform(&m);
         }
         m
-    };
-    let mesh = Arc::new(if ref_levels > 0 && n != 16 {
-        let mut m = base_mesh;
-        for _ in 0..ref_levels { m = refine_uniform(&m); }
-        m
-    } else { base_mesh });
+    });
 
     let kappa = freq * PI;
     let quad_order = order as u8 * 2 + 2;
