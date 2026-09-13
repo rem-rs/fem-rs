@@ -4354,10 +4354,10 @@ pub fn refine_nonconforming_hex(
     let mut body_center_map: HashMap<ElemId, NodeId>         = HashMap::new();
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
-    // Curved (order-2) hex geometry: new vertices must take the *exact* parent
+    // Curved (order-p, p >= 2) hex geometry: new vertices must take the
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
-    let geo = super::curved_hex::HexQ2Geometry::new(mesh);
+    let geo = super::curved_hex::HexQkGeometry::new(mesh);
 
     for &e in marked {
         let ns = mesh.elem_nodes(e);
@@ -7262,12 +7262,17 @@ pub fn refine_hex8_uniform(
     let mut mm: HashMap<(NodeId,NodeId),NodeId> = HashMap::new();
     let mut fcm: HashMap<[NodeId;4],NodeId> = HashMap::new();
     let mut bcm: HashMap<ElemId,NodeId> = HashMap::new();
-    // Curved (order-2) hex geometry: new vertices must take the *exact* parent
+    // Curved (order-p, p >= 2) hex geometry: new vertices must take the
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
-    let geo = super::curved_hex::HexQ2Geometry::new(mesh);
+    let geo = super::curved_hex::HexQkGeometry::new(mesh);
     let mut nc = mesh.coords.clone(); let mut nn = mesh.n_nodes() as NodeId;
-    for &e in &marked_set {
+    // Iterate in element order, not over `marked_set`: the new node ids are
+    // handed out in creation order, so a `HashSet` walk made the refined node
+    // *numbering* (and hence `GeometryData::conn`) vary from run to run.
+    // `refine_nonconforming_hex` already loops over `0..n_elems`.
+    for e in 0..n_elems as ElemId {
+        if !marked_set.contains(&e) { continue; }
         let ns = mesh.elem_nodes(e);
         for (li, &(a,b)) in local_edges_hex().iter().enumerate() {
             let k=edge_key(ns[a],ns[b]);

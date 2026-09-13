@@ -367,6 +367,41 @@ fn det(j: &[[f64; 3]; 3], dim: usize) -> f64 {
     }
 }
 
+/// `FiniteElement::CalcPhysDShape` (`fem/fe/fe_base.cpp`) of a scalar NURBS
+/// span element: the reference gradient (`dim` entries per DOF, DOF-major)
+/// mapped through `Trans.InverseJacobian()`, i.e.
+/// `dshape(i,k) = Σ_j ref(i,j) · J⁻¹(j,k)` with `J⁻¹ = adj(J)/det(J)`.
+///
+/// This is `MixedVectorGradientIntegrator::CalcTrialShape` for an H¹ trial
+/// space (`trial_fe.CalcPhysDShape(Trans, shape)`), the missing cross-space
+/// form of `nurbs_ex24 -p 0`.
+fn phys_dshape(
+    fe: &SpanElement,
+    xi: &[f64],
+    geo: &Geometry,
+    dim: usize,
+    ref_grad: &mut Vec<f64>,
+    out: &mut Vec<f64>,
+) {
+    let nd = fe.n_dofs();
+    ref_grad.clear();
+    ref_grad.resize(nd * dim, 0.0);
+    out.clear();
+    out.resize(nd * dim, 0.0);
+    fe.grad(xi, ref_grad);
+    let adj = adjugate(&geo.jac, dim);
+    let inv_det = 1.0 / geo.det_j;
+    for i in 0..nd {
+        for k in 0..dim {
+            let mut s = 0.0;
+            for j in 0..dim {
+                s += ref_grad[i * dim + j] * (adj[j][k] * inv_det);
+            }
+            out[i * dim + k] = s;
+        }
+    }
+}
+
 /// The local multi-index (first direction fastest) of the `o`-th tensor-product
 /// entry of a span element: `o = i + n0*(j + n1*k)`.
 fn multi_index(o: usize, lens: &[usize], d: usize) -> usize {
@@ -1012,6 +1047,75 @@ impl NurbsFESpace {
         coo.into_csr()
     }
 
+    /// `MixedBilinearForm(trial_fes, test_fes).Assemble() + Finalize()` with
+    /// `MixedVectorGradientIntegrator(one)` — `nurbs_ex24 -p 0`'s `a_mixed`,
+    /// i.e. `(grad p, v)` for `p ∈ H¹` tested against `v ∈ H(curl)`.
+    ///
+    /// MFEM's `MixedVectorIntegrator::AssembleElementMatrix2`
+    /// (`fem/bilininteg.cpp`) per quadrature point:
+    ///
+    /// ```text
+    ///   CalcTestShape  = test_fe.CalcVShape(Trans, ·)        [H(curl) `J⁻¹`]
+    ///   CalcTrialShape = trial_fe.CalcPhysDShape(Trans, ·)   [H¹ `J⁻¹`]
+    ///   w = Trans.Weight() * ip.weight
+    ///   elmat(i,j) += w · Σ_m test_shape(i,m) · trial_shape(j,m)
+    /// ```
+    ///
+    /// with the quadrature order `trial_fe.GetOrder() + test_fe.GetOrder() +
+    /// Trans.OrderW()`.  Note that — unlike
+    /// [`NurbsHDivSpace::assemble_mixed_divergence`], whose
+    /// `VectorFEDivergenceIntegrator` multiplies by `ip.weight` alone — this
+    /// integrator **does** carry `Trans.Weight()`.
+    ///
+    /// The returned matrix has `test.n_dofs()` rows and `self.n_dofs()`
+    /// columns (the `MixedBilinearForm(trial_fes, test_fes)` orientation).
+    pub fn assemble_mixed_gradient(&self, test: &NurbsHCurlSpace) -> CsrMatrix<f64> {
+        let dim = self.dim;
+        assert_eq!(test.n_elements(), self.n_elements(), "mixed form: element counts");
+        let mut coo = CooMatrix::new(test.n_dofs(), self.n_dofs());
+        coo.reserve(self.n_dofs() * 16);
+        let order_w = self.mesh_order() * dim - 1;
+        let mut ref_grad: Vec<f64> = Vec::new();
+        let mut trial_shape: Vec<f64> = Vec::new();
+        let mut ref_vshape: Vec<f64> = Vec::new();
+        let mut test_shape: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let trial_fe = self.element_fe(e);
+            let test_fe = test.element_fe(e);
+            let nd_trial = self.element_dofs(e).len();
+            let nd_test = test.element_dofs(e).len();
+            let order = (trial_fe.order() + test_fe.order() + order_w) as u8;
+            let rule = nurbs_rule(dim, order);
+            let mut elmat = vec![0.0_f64; nd_test * nd_trial];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.geometry(e, xi);
+                let w = geo.det_j * rule.weights[q];
+                phys_dshape(&trial_fe, xi, &geo, dim, &mut ref_grad, &mut trial_shape);
+                test.phys_vshape(&test_fe, xi, &geo, &mut ref_vshape, &mut test_shape);
+                for i in 0..nd_test {
+                    for j in 0..nd_trial {
+                        let mut s = 0.0;
+                        for m in 0..dim {
+                            s += test_shape[i * dim + m] * trial_shape[j * dim + m];
+                        }
+                        elmat[i * nd_trial + j] += w * s;
+                    }
+                }
+            }
+            for i in 0..nd_test {
+                for j in 0..nd_trial {
+                    coo.add(
+                        test.element_dofs(e)[i],
+                        self.element_dofs(e)[j],
+                        elmat[i * nd_trial + j],
+                    );
+                }
+            }
+        }
+        coo.into_csr()
+    }
+
     /// `GridFunction::ComputeL2Error(Coefficient, irs)` for the scalar NURBS
     /// space — per element, `u_h = Σ_j shape_j x_el` and each quadrature point
     /// contributes `ip.weight * Weight() * (u_h − u)²`.  `order_quad` is the
@@ -1046,6 +1150,101 @@ impl NurbsFESpace {
             error += elem_error.abs();
         }
         error.sqrt()
+    }
+
+    /// `ProjectCoefficientElementL2_(Coefficient&, x, Va)` followed by
+    /// `(*this) /= Va` (`GridFunction::ProjectCoefficientElementL2`) — the
+    /// NURBS branch of MFEM's **default** projection for a scalar NURBS space
+    /// (`nurbs_ex24 -p 2`'s `exact_proj.ProjectCoefficient(divgradp_coef)`,
+    /// whose `ProjectType::DEFAULT` routes to `ELEMENTL2` for NURBS).
+    ///
+    /// Per element (fem/gridfunc.cpp):
+    ///
+    /// 1. `el` = the span's `NURBS2D/3DFiniteElement`, `p = el.GetOrder()`
+    ///    (`(p+1)^dim` DOFs); `el2` = `L2_FECollection(p, dim)`'s element for
+    ///    the same geometry — the same DOF count, with one DOF per
+    ///    Gauss-Legendre node of `[0,1]^dim`.
+    /// 2. `IntRules.Get(geom, 2*p+1)` (`p+1` Gauss points per direction).
+    ///    Accumulate `elvect += w·val·shape2`, `elwght += w·shape` and the L²
+    ///    mass `elmat += w·shape2⊗shape2` (all `w = ip.weight·Weight()`).
+    /// 3. `LinearSolve(elmat, elvect, 1e-12)`.
+    /// 4. `el2.Project(el, tr, I)` — `NodalFiniteElement::Project` evaluating
+    ///    the NURBS shape functions at the L2 nodes — then
+    ///    `LinearSolve(I, elvect, 1e-32)` (here `I` is square).
+    /// 5. `elvect *= elwght`, scatter through the element DOFs, finally
+    ///    `x /= Va`.
+    pub fn project_coefficient_element_l2(&self, f: &dyn Fn(&[f64]) -> f64) -> Vec<f64> {
+        let dim = self.dim;
+        let mut x = vec![0.0_f64; self.n_dofs()];
+        let mut va = vec![0.0_f64; self.n_dofs()];
+        let mut shape: Vec<f64> = Vec::new();
+        let mut shape2: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let fe = self.element_fe(e);
+            let nd = self.element_n_dofs(e);
+            let p = fe.order();
+            let rule = nurbs_rule(dim, (2 * p + 1) as u8);
+            let l2_nodes = gauss_legendre_01(p + 1).0;
+
+            shape.clear();
+            shape.resize(nd, 0.0);
+            shape2.clear();
+            shape2.resize(nd, 0.0);
+
+            let mut elvect = vec![0.0_f64; nd];
+            let mut elwght = vec![0.0_f64; nd];
+            let mut elmat = vec![0.0_f64; nd * nd];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.geometry(e, xi);
+                let w = rule.weights[q] * geo.det_j;
+                let val = f(&geo.x[..dim]);
+                fe.shape(xi, &mut shape);
+                l2_gl_shape(dim, &l2_nodes, xi, &mut shape2);
+                let wv = w * val;
+                for s in 0..nd {
+                    elvect[s] += wv * shape2[s];
+                    elwght[s] += w * shape[s];
+                    for r in 0..nd {
+                        elmat[r * nd + s] += w * shape2[r] * shape2[s];
+                    }
+                }
+            }
+
+            if !dense_lu_solve(&mut elmat, nd, &mut elvect, 1e-12) {
+                panic!("NurbsFESpace::project_coefficient_element_l2: singular L2 mass matrix");
+            }
+
+            // `el2.Project(el, tr, I)`: I(k,j) = shape_j(node_k).
+            let mut imat = vec![0.0_f64; nd * nd];
+            for k in 0..nd {
+                let node: Vec<f64> = if dim == 2 {
+                    vec![l2_nodes[k % (p + 1)], l2_nodes[k / (p + 1)]]
+                } else {
+                    vec![
+                        l2_nodes[k % (p + 1)],
+                        l2_nodes[(k / (p + 1)) % (p + 1)],
+                        l2_nodes[k / ((p + 1) * (p + 1))],
+                    ]
+                };
+                fe.shape(&node, &mut shape);
+                for j in 0..nd {
+                    imat[k * nd + j] = shape[j];
+                }
+            }
+            if !dense_lu_solve(&mut imat, nd, &mut elvect, 1e-32) {
+                panic!("NurbsFESpace::project_coefficient_element_l2: singular I matrix");
+            }
+
+            for (j, &g) in self.element_dofs(e).iter().enumerate() {
+                x[g] += elvect[j] * elwght[j];
+                va[g] += elwght[j];
+            }
+        }
+        for i in 0..self.n_dofs() {
+            x[i] /= va[i];
+        }
+        x
     }
 
     /// `LinearForm::Assemble` for `b(v) = ∫ f(x) v`
@@ -1397,16 +1596,58 @@ impl NurbsHCurlSpace {
         fe.eval_basis_vec(xi, ref_shape);
         let adj = adjugate(&geo.jac, dim);
         let inv_det = 1.0 / geo.det_j;
-        for i in 0..nd {
-            for c in 0..dim {
-                let mut s = 0.0;
-                for k in 0..dim {
-                    s += ref_shape[i * dim + k] * (adj[k][c] * inv_det);
+            for i in 0..nd {
+                for c in 0..dim {
+                    let mut s = 0.0;
+                    for k in 0..dim {
+                        s += ref_shape[i * dim + k] * (adj[k][c] * inv_det);
+                    }
+                    out[i * dim + c] = s;
                 }
-                out[i * dim + c] = s;
+            }
+        }
+
+    /// `FiniteElement::CalcPhysCurlShape` (`fem/fe/fe_base.cpp`) of a span
+    /// element — `MixedVectorCurlIntegrator`'s `CalcTrialShape`
+    /// (`trial_fe.CalcPhysCurlShape(Trans, shape)`).
+    ///
+    /// 2-D scales the reference curl by `1/Weight()`
+    /// (`NURBS_HCurl2DFiniteElement`'s range dimension is 1); 3-D first maps
+    /// it through `MultABt(vshape, Trans.Jacobian(), curl_shape)` —
+    /// `curl(i,c) = Σ_k ref(i,k) · J(c,k)` — and then multiplies by
+    /// `1/Weight()`.
+    fn phys_curl_shape(
+        &self,
+        fe: &HCurlSpanElement,
+        xi: &[f64],
+        geo: &Geometry,
+        ref_curl: &mut Vec<f64>,
+        out: &mut Vec<f64>,
+    ) {
+        let dim = self.dim;
+        let dimc = fe.curl_dim();
+        let nd = fe.n_dofs();
+        ref_curl.clear();
+        ref_curl.resize(nd * dimc, 0.0);
+        out.clear();
+        out.resize(nd * dimc, 0.0);
+        fe.eval_curl(xi, ref_curl);
+        let inv_det = 1.0 / geo.det_j;
+        for i in 0..nd {
+            for c in 0..dimc {
+                out[i * dimc + c] = if dim == 2 {
+                    ref_curl[i] * inv_det
+                } else {
+                    let mut s = 0.0;
+                    for k in 0..dim {
+                        s += ref_curl[i * dimc + k] * geo.jac[c][k];
+                    }
+                    s * inv_det
+                };
             }
         }
     }
+
 
     /// MFEM `FiniteElementSpace::GetEssentialTrueDofs(ess_bdr = 1)` — the
     /// sorted unique DOF list of every mesh boundary element.
@@ -1901,25 +2142,7 @@ impl NurbsHCurlSpace {
                 let xi = &rule_cc.points[q];
                 let geo = self.base.geometry(e, xi);
                 let w = rule_cc.weights[q] * geo.det_j * muinv;
-                curl_ref.clear();
-                curl_ref.resize(nd * dimc, 0.0);
-                fe.eval_curl(xi, &mut curl_ref);
-                // `CalcPhysCurlShape`: 2D scales the reference curl by
-                // `1/Weight()`; 3D maps it through `MultABt(., J, .)` first.
-                for i in 0..nd {
-                    for c in 0..dimc {
-                        let v = if dim == 2 {
-                            curl_ref[i] * (1.0 / geo.det_j)
-                        } else {
-                            let mut s = 0.0;
-                            for k in 0..dim {
-                                s += curl_ref[i * dimc + k] * geo.jac[c][k];
-                            }
-                            s * (1.0 / geo.det_j)
-                        };
-                        curl_phys[i * dimc + c] = v;
-                    }
-                }
+                self.phys_curl_shape(&fe, xi, &geo, &mut curl_ref, &mut curl_phys);
                 // `AddMult_a_AAt(w, curlshape_dFt, elmat)`.
                 for i in 0..nd {
                     for j in 0..nd {
@@ -1959,6 +2182,107 @@ impl NurbsHCurlSpace {
                 k_elem[i] = k_cc[i] + k_m[i];
             }
             coo.add_element_matrix(&self.elem_dof[e], &k_elem);
+        }
+        coo.into_csr()
+    }
+
+    /// `BilinearForm::Assemble` + `Finalize` of the vector mass matrix
+    /// `∫ alpha u·v dΩ` (`VectorFEMassIntegrator(alpha)`, quadrature order
+    /// `Trans.OrderW() + 2*GetOrder()`, `w = ip.weight * Trans.Weight()`).
+    ///
+    /// This is the `a` of `nurbs_ex24 -p 0` (`VectorFEMassIntegrator(one)` on
+    /// the H(curl) *test* space); it is the H(curl) twin of
+    /// [`NurbsHDivSpace::assemble_mass`].
+    pub fn assemble_mass(&self, alpha: f64) -> CsrMatrix<f64> {
+        let dim = self.dim;
+        let n = self.n_dofs;
+        let mut coo = CooMatrix::new(n, n);
+        coo.reserve(n * 16);
+        let mut ref_shape: Vec<f64> = Vec::new();
+        let mut vsh: Vec<f64> = Vec::new();
+        let order_w = self.base.mesh_order() * dim - 1;
+        for e in 0..self.n_elements() {
+            let nd = self.elem_dof[e].len();
+            let fe = self.element_fe(e);
+            let rule = nurbs_rule(dim, (order_w + 2 * fe.order()) as u8);
+            let mut elmat = vec![0.0_f64; nd * nd];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                self.phys_vshape(&fe, xi, &geo, &mut ref_shape, &mut vsh);
+                let w = rule.weights[q] * geo.det_j;
+                for i in 0..nd {
+                    for j in 0..nd {
+                        let mut s = 0.0;
+                        for c in 0..dim {
+                            s += vsh[i * dim + c] * vsh[j * dim + c];
+                        }
+                        elmat[i * nd + j] += w * alpha * s;
+                    }
+                }
+            }
+            coo.add_element_matrix(&self.elem_dof[e], &elmat);
+        }
+        coo.into_csr()
+    }
+
+    /// `MixedBilinearForm(trial_fes, test_fes).Assemble() + Finalize()` with
+    /// `MixedVectorCurlIntegrator(one)` — `nurbs_ex24 -p 1`'s `a_mixed`, i.e.
+    /// `(curl v, w)` for `v ∈ H(curl)` tested against `w ∈ H(div)` (3-D only).
+    ///
+    /// Same `MixedVectorIntegrator::AssembleElementMatrix2` loop as
+    /// [`NurbsFESpace::assemble_mixed_gradient`] with
+    /// `CalcTrialShape = trial_fe.CalcPhysCurlShape(Trans, ·)` and
+    /// `CalcTestShape = test_fe.CalcVShape(Trans, ·)` (the H(div) `J/Weight`
+    /// Piola map), quadrature order `trial.GetOrder() + test.GetOrder() +
+    /// Trans.OrderW()`.
+    ///
+    /// The returned matrix has `test.n_dofs()` rows and `self.n_dofs()`
+    /// columns (the `MixedBilinearForm(trial_fes, test_fes)` orientation).
+    pub fn assemble_mixed_curl(&self, test: &NurbsHDivSpace) -> CsrMatrix<f64> {
+        let dim = self.dim;
+        assert_eq!(dim, 3, "MixedVectorCurlIntegrator is only defined in 3D");
+        assert_eq!(test.n_elements(), self.n_elements(), "mixed form: element counts");
+        let mut coo = CooMatrix::new(test.n_dofs(), self.n_dofs);
+        coo.reserve(self.n_dofs * 16);
+        let order_w = self.base.mesh_order() * dim - 1;
+        let mut ref_curl: Vec<f64> = Vec::new();
+        let mut trial_shape: Vec<f64> = Vec::new();
+        let mut ref_vshape: Vec<f64> = Vec::new();
+        let mut test_shape: Vec<f64> = Vec::new();
+        for e in 0..self.n_elements() {
+            let trial_fe = self.element_fe(e);
+            let test_fe = test.element_fe(e);
+            let nd_trial = self.elem_dof[e].len();
+            let nd_test = test.element_dofs(e).len();
+            let order = (trial_fe.order() + test_fe.order() + order_w) as u8;
+            let rule = nurbs_rule(dim, order);
+            let mut elmat = vec![0.0_f64; nd_test * nd_trial];
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.base.geometry(e, xi);
+                let w = geo.det_j * rule.weights[q];
+                self.phys_curl_shape(&trial_fe, xi, &geo, &mut ref_curl, &mut trial_shape);
+                test.phys_vshape(&test_fe, xi, &geo, &mut ref_vshape, &mut test_shape);
+                for i in 0..nd_test {
+                    for j in 0..nd_trial {
+                        let mut s = 0.0;
+                        for m in 0..dim {
+                            s += test_shape[i * dim + m] * trial_shape[j * dim + m];
+                        }
+                        elmat[i * nd_trial + j] += w * s;
+                    }
+                }
+            }
+            for i in 0..nd_test {
+                for j in 0..nd_trial {
+                    coo.add(
+                        test.element_dofs(e)[i],
+                        self.elem_dof[e][j],
+                        elmat[i * nd_trial + j],
+                    );
+                }
+            }
         }
         coo.into_csr()
     }

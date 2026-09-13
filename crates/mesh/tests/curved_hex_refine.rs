@@ -226,7 +226,7 @@ fn ref_samples() -> Vec<[f64; 3]> {
 /// has exactly one coarse-vertex corner, whose local index *is* the child
 /// index, and its body-center corner is a node shared by exactly the 8
 /// children of one parent whose vertex set is the children's corner set.
-fn check_child_geometry_reproduces_parent(parent: &Mesh<3>, fine: &Mesh<3>) {
+fn check_child_geometry_reproduces_parent(parent: &Mesh<3>, fine: &Mesh<3>, tol: f64) {
     let n_coarse = parent.n_nodes() as u32;
     let mut groups: std::collections::HashMap<u32, Vec<(usize, u32)>> =
         std::collections::HashMap::new();
@@ -273,10 +273,10 @@ fn check_child_geometry_reproduces_parent(parent: &Mesh<3>, fine: &Mesh<3>) {
         }
     }
     assert!(
-        max_dev <= 1e-15,
-        "refined Q2 geometry deviates from the parent field by {max_dev:e}"
+        max_dev <= tol,
+        "refined Qk geometry deviates from the parent field by {max_dev:e} (tol {tol:e})"
     );
-    eprintln!("D111: child geometry reproduces the parent Q2 field, max |Δ| = {max_dev:e}");
+    eprintln!("child geometry reproduces the parent Qk field, max |Δ| = {max_dev:e}");
 }
 
 #[test]
@@ -284,11 +284,11 @@ fn d111_refined_curved_hex_geometry_reproduces_parent_field() {
     let parent = load_parent();
     let all: Vec<u32> = (0..parent.n_elems() as u32).collect();
     let (fine, _, _) = refine_hex8_uniform(&parent, &all);
-    check_child_geometry_reproduces_parent(&parent, &fine);
+    check_child_geometry_reproduces_parent(&parent, &fine, 1e-15);
     // Second level: the fine mesh is itself a valid order-2 parent now.
     let all2: Vec<u32> = (0..fine.n_elems() as u32).collect();
     let (fine2, _, _) = refine_hex8_uniform(&fine, &all2);
-    check_child_geometry_reproduces_parent(&fine, &fine2);
+    check_child_geometry_reproduces_parent(&fine, &fine2, 1e-15);
 }
 
 #[test]
@@ -337,5 +337,225 @@ fn d111_affine_q2_cube_refines_to_exact_trilinear_children() {
             "level {level}: min det(J) = {min_det:e}, expected {expected_min_det:e}"
         );
         assert!(max_dev <= 1e-15, "level {level}: geometry is not trilinear (Δ = {max_dev:e})");
+    }
+}
+
+// ─── D113: order-p (p >= 2) hex geometry transfer ───────────────────────────
+//
+// Before D113 `amr::curved_hex` only transported geometry when the parent was
+// *exactly* order 2 with 27 dofs per hex; every higher-order mesh fell back to
+// straight averaging and the refined mesh silently dropped to `geom_order 1`
+// (`cube.mesh -o 3 -rs 1`).  The generalization drives the dof layout from
+// `HexQk::new(p).dof_coords()` and evaluates the parent field, so the order is
+// preserved for any p.
+//
+// Reference: serial MFEM 4.10.  The probe reads `data/cube.mesh`,
+// `SetCurvature(p)`, optionally applies a smooth `Transform` (the `c*`
+// fixtures), writes the resulting order-p mesh, refines it `refs` times and
+// dumps the refined `nodes` grid function **per element, dof by dof, in the
+// geometry FE's local dof order**, followed by the refined mesh's `vertices`:
+//
+// ```text
+// wsl g++ -std=c++17 -O2 -I$HOME/mfem410_ser tmp/d113_ref.cpp \
+//     $HOME/mfem410_ser/libmfem.a -o d113
+// wsl ./d113 data/cube.mesh 3 1 cube_o3_mesh.txt cube_o3_r1_cpp.txt 0 0
+// wsl ./d113 data/cube.mesh 3 2 cube_o3_mesh.txt cube_o3_r2_cpp.txt 0 64
+// ```
+//
+// (the parent mesh is written before the refinement, and the fixtures are
+// `.txt` because `.gitignore` covers `*.mesh`).  For `refs = 2` the dump
+// covers only the first 64 of the `NE = 512` elements; the child index of
+// element `e` is `e % 8`, so those 64 cover all eight octants.
+
+/// MFEM reference: `(ne, order, dof, node coords per element dof, vertices)`.
+struct GeometryRef {
+    ne: usize,
+    order: usize,
+    dof: usize,
+    ndofs: usize,
+    /// Number of elements actually dumped (`<= ne`; the `refs = 2` fixtures
+    /// carry the first 64 of 512 elements, which cover all eight octants).
+    dumped: usize,
+    nodes: Vec<[f64; 3]>,
+    verts: Vec<[f64; 3]>,
+}
+
+fn load_geometry_ref(path: &str) -> GeometryRef {
+    let text = std::fs::read_to_string(path).expect("read geometry reference");
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.next().expect("header").split_whitespace().collect();
+    assert_eq!(head[0], "NE", "reference header");
+    let ne: usize = head[1].parse().unwrap();
+    let order: usize = head[3].parse().unwrap();
+    let dof: usize = head[5].parse().unwrap();
+    let ndofs: usize = head[7].parse().unwrap();
+    let dumped: usize = head[9].parse().unwrap();
+    let mut nodes = Vec::with_capacity(dumped * dof);
+    for _ in 0..dumped * dof {
+        let v: Vec<f64> = lines
+            .next()
+            .expect("node row")
+            .split_whitespace()
+            .map(|t| t.parse().unwrap())
+            .collect();
+        nodes.push([v[0], v[1], v[2]]);
+    }
+    let vhead: Vec<&str> = lines.next().expect("VERTS header").split_whitespace().collect();
+    assert_eq!(vhead[0], "VERTS");
+    let nv: usize = vhead[1].parse().unwrap();
+    let mut verts = Vec::with_capacity(nv);
+    for _ in 0..nv {
+        let v: Vec<f64> = lines
+            .next()
+            .expect("vertex row")
+            .split_whitespace()
+            .map(|t| t.parse().unwrap())
+            .collect();
+        verts.push([v[0], v[1], v[2]]);
+    }
+    GeometryRef { ne, order, dof, ndofs, dumped, nodes, verts }
+}
+
+/// Refine `parent` `refs` times and compare every refined element's geometry
+/// dofs — and every refined vertex — against the MFEM dump.
+///
+/// Returns `(bit-exact node count, max |Δ|)`.
+fn compare_geometry_with_ref(parent_path: &str, refs: usize, dump_path: &str) -> (usize, f64) {
+    let f = read_mfem_file(parent_path).expect("read parent");
+    let mut m: Mesh<3> = f.mesh3d.expect("3d parent");
+    let reference = load_geometry_ref(dump_path);
+    assert_eq!(m.geom_order() as usize, reference.order, "parent geometry order");
+
+    for _ in 0..refs {
+        m = refine_uniform_3d(&m);
+    }
+
+    let g = m.geometry.as_ref().expect("refined mesh must carry geometry");
+    assert_eq!(g.order as usize, reference.order, "geom_order must survive refinement");
+    assert_eq!(g.nodes_per_elem, reference.dof, "(p+1)^3 geometry dofs per element");
+    assert_eq!(g.conn.len(), m.n_elems() as usize * reference.dof);
+    // MFEM's own `nodes` space has exactly this many dofs: the edge/face
+    // sharing keys reproduce its first-touch numbering one for one.
+    assert_eq!(g.n_nodes, reference.ndofs, "geometry node count");
+    assert_eq!(m.n_elems() as usize, reference.ne, "refined element count");
+
+    let mut exact = 0usize;
+    let mut max_diff = 0.0_f64;
+    let ne = reference.dumped.min(m.n_elems() as usize);
+    for e in 0..ne {
+        for k in 0..reference.dof {
+            let d = g.conn[e * reference.dof + k] as usize;
+            let got = [g.coords[3 * d], g.coords[3 * d + 1], g.coords[3 * d + 2]];
+            let want = reference.nodes[e * reference.dof + k];
+            let mut dmax = 0.0_f64;
+            for c in 0..3 {
+                dmax = dmax.max((got[c] - want[c]).abs());
+            }
+            assert!(
+                dmax <= 1e-14,
+                "element {e} dof {k}: {got:?} != MFEM {want:?} (Δ = {dmax:e})"
+            );
+            if dmax == 0.0 { exact += 1; }
+            max_diff = max_diff.max(dmax);
+        }
+    }
+    assert_eq!(m.n_nodes() as usize, reference.verts.len(), "refined vertex count");
+    // The fine *vertex numbering* is fem-rs's own (`refine_nonconforming_hex`
+    // hands out new node ids in kernel order, MFEM in its own vertex order),
+    // so match every refined vertex to some still-unmatched reference vertex
+    // instead of comparing by index.
+    let mut used = vec![false; reference.verts.len()];
+    for v in 0..reference.verts.len() {
+        let got = m.coords_of(v as u32);
+        let mut best = f64::INFINITY;
+        let mut hit = None;
+        for (k, (&u, want)) in used.iter().zip(reference.verts.iter()).enumerate() {
+            if u { continue; }
+            let d = (got[0] - want[0]).abs().max((got[1] - want[1]).abs()).max((got[2] - want[2]).abs());
+            if d < best { best = d; hit = Some(k); }
+        }
+        assert!(best <= 1e-14, "vertex {v} = {got:?}: no unmatched MFEM vertex within 1e-14");
+        used[hit.expect("unused reference vertex")] = true;
+        if best == 0.0 { exact += 1; }
+        max_diff = max_diff.max(best);
+    }
+    (exact, max_diff)
+}
+
+const D113_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+
+#[test]
+fn d113_order3_geometry_matches_mfem_dump() {
+    for (refs, dump) in [(1usize, "cube_o3_r1_cpp.txt"), (2, "cube_o3_r2_cpp.txt")] {
+        let parent = format!("{D113_DATA}/cube_o3_mesh.txt");
+        let (exact, max_diff) =
+            compare_geometry_with_ref(&parent, refs, &format!("{D113_DATA}/{dump}"));
+        eprintln!("cube.mesh -o 3 -rs {refs}: max |Δ| = {max_diff:e}, exact coordinates {exact}");
+    }
+}
+
+#[test]
+fn d113_order4_geometry_matches_mfem_dump() {
+    for (refs, dump) in [(1usize, "cube_o4_r1_cpp.txt"), (2, "cube_o4_r2_cpp.txt")] {
+        let parent = format!("{D113_DATA}/cube_o4_mesh.txt");
+        let (exact, max_diff) =
+            compare_geometry_with_ref(&parent, refs, &format!("{D113_DATA}/{dump}"));
+        eprintln!("cube.mesh -o 4 -rs {refs}: max |Δ| = {max_diff:e}, exact coordinates {exact}");
+    }
+}
+
+#[test]
+fn d113_order3_curved_geometry_matches_mfem_dump() {
+    // A genuinely non-affine order-3 parent (the probe's smooth `Transform`),
+    // so the transfer cannot be satisfied by a trilinear fallback.
+    let parent = format!("{D113_DATA}/cube_o3c_mesh.txt");
+    let (exact, max_diff) =
+        compare_geometry_with_ref(&parent, 1, &format!("{D113_DATA}/cube_o3c_r1_cpp.txt"));
+    let f = read_mfem_file(&parent).expect("read parent");
+    let m: Mesh<3> = f.mesh3d.expect("3d");
+    eprintln!("curved cube.mesh -o 3: max |Δ| = {max_diff:e}, exact coordinates {exact}");
+    assert!(m.geometry.is_some());
+}
+
+/// `check_child_geometry_reproduces_parent` for an arbitrary order: refine the
+/// order-`p` parent twice and require every child's geometry to reproduce the
+/// parent field (a degree-`p` field restricted to a half-cell is still degree
+/// `p`, so this is exact) with `min det J > 0` at every level.
+fn check_qk_refinement_reproduces_parent(parent: &Mesh<3>, levels: usize) {
+    let p = parent.geom_order();
+    assert!(p >= 2, "curved parent expected");
+    let mut levels = levels;
+    let mut cur = parent.clone();
+    while levels > 0 {
+        let all: Vec<u32> = (0..cur.n_elems() as u32).collect();
+        let fine = refine_uniform_3d(&cur);
+        assert_eq!(fine.n_elems(), 8 * cur.n_elems(), "8 children per hex");
+        let g = fine.geometry.as_ref().expect("geometry must survive refinement");
+        assert_eq!(g.order, p, "geom_order {p} must survive refinement (got {})", g.order);
+        assert_eq!(g.nodes_per_elem, (p as usize + 1).pow(3));
+        check_child_geometry_reproduces_parent(&cur, &fine, 1e-14);
+        let mut min_det = f64::INFINITY;
+        for e in 0..fine.n_elems() {
+            for xi in &ref_samples() {
+                let (_, det, _) = fine.element_jacobian(e as u32, xi);
+                min_det = min_det.min(det);
+            }
+        }
+        assert!(min_det > 0.0, "level: min det(J) = {min_det:e} (refined mesh is inverted)");
+        cur = fine;
+        levels -= 1;
+        let _ = all;
+    }
+}
+
+#[test]
+fn d113_qk3_and_qk4_children_reproduce_the_parent_field() {
+    for name in ["cube_o3_mesh.txt", "cube_o3c_mesh.txt", "cube_o4_mesh.txt"] {
+        let path = format!("{D113_DATA}/{name}");
+        let f = read_mfem_file(&path).expect("read parent");
+        let m: Mesh<3> = f.mesh3d.expect("3d");
+        assert!(m.geometry.is_some(), "{name}: parent must carry curved geometry");
+        check_qk_refinement_reproduces_parent(&m, 2);
+        eprintln!("{name}: 2 levels of Q{}-geometry refinement reproduce the parent field", m.geom_order());
     }
 }
