@@ -8,10 +8,18 @@
 //! (C++ default `samples=11`).
 //!
 //! Usage:
-//!   cargo run --release --example mfem_mini_nurbs_printfunc
-//!   cargo run --release --example mfem_mini_nurbs_printfunc -- -no-vis
+//!   cargo run --release --example mini_nurbs_printfunc
+//!   cargo run --release --example mini_nurbs_printfunc -- -no-vis
+//!
+//! Formatting note: every number is printed through `fem_solver::fmt_g`
+//! (C `printf("%g")`, 6 significant digits), which is what `std::cout <<` with
+//! its default `precision(6)` produces in the C++ miniapp.  Before round 32
+//! this file printed Rust's shortest round-trip representation, so 28 of the
+//! 48 output lines differed textually (`0.005` vs `0.005000000000000001`)
+//! even though the values themselves were already equal.
 
 use fem_element::nurbs::KnotVector;
+use fem_solver::fmt_g;
 
 fn main() {
     // Dummy -vis/-no-vis option like the C++ miniapp (GLVis not used here).
@@ -23,7 +31,8 @@ fn main() {
 
     // C++ kv.Print(cout): "<order> <ncp> <knots...>".
     println!("Printing knotvector:");
-    println!("{} {} {}", kv.degree, kv.n_basis(), format_knots(&knots));
+    let knots_txt: Vec<String> = knots.iter().map(|k| fmt_g(*k)).collect();
+    println!("{} {} {}", kv.degree, kv.n_basis(), knots_txt.join(" "));
 
     // C++ kv.GetElements() — count the non-empty spans (only needed so
     // PrintFunctions knows the element structure; n_spans counts them).
@@ -56,9 +65,9 @@ fn main() {
             // bit-identical to the C++ output.
             let xi = xi_local * b + (1.0 - xi_local) * a;
             let (n, d1, d2) = kv.basis_funs_and_ders2(span, xi);
-            print!("{xi}\t");
+            print!("{}\t", fmt_g(xi));
             for d in 0..=p {
-                print!("\t{}", n[d]);
+                print!("\t{}", fmt_g(n[d]));
             }
             // MFEM's `KnotVector::CalcDShape` / `CalcD2Shape` return derivatives
             // with respect to the *element reference* coordinate ξ ∈ [0,1]
@@ -67,28 +76,12 @@ fn main() {
             // knot parameter u, so convert back with the factors `h` and `h²`
             // to print exactly what the C++ miniapp prints.
             for d in 0..=p {
-                print!("\t{}", d1[d] * h);
+                print!("\t{}", fmt_g(d1[d] * h));
             }
             for d in 0..=p {
-                print!("\t{}", d2[d] * h * h);
+                print!("\t{}", fmt_g(d2[d] * h * h));
             }
             println!();
         }
     }
-}
-
-fn format_knots(knots: &[f64]) -> String {
-    knots
-        .iter()
-        .map(|k| {
-            // C++ cout default formatting: shortest round-trip of the value
-            // (0.25 → "0.25", integers → "0"/"1").
-            if k.fract() == 0.0 {
-                format!("{}", *k as i64)
-            } else {
-                format!("{}", k)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }

@@ -1,6 +1,17 @@
 //! TMOP metric magnitude — 1:1 port of MFEM miniapps/tools/tmop-metric-magnitude.cpp
 //!
-//! Tracks how TMOP metrics change under geometric perturbations.
+//! Tracks how TMOP metrics change under geometric perturbations.  The C++
+//! program evaluates `metric->EvalW(J)` for the perturbed Jacobian `J` and
+//! prints `Magnitude of metric <id>: <value>` followed by the three
+//! perturbation factors; this port reproduces that line exactly (6 significant
+//! digits, `fem_solver::fmt_g`).
+//!
+//! Metric-zoo gap (round 32 measurement): the C++ switch accepts
+//! `{1,2,7,9,14,50,55,56,58,77,85,98}` (2-D), `{301,302,303,304,315,316,321,322,323,360}`
+//! (3-D) and the A-metrics `{11,36,107}`; `fem_mesh::tmop` implements all of
+//! them **except `85`, `98`, `322`, `11`, `36`, `107`** (6 of 25 ids).  Those
+//! ids print `Unknown metric_id: <id>` and exit with code 3, the same code
+//! MFEM's `default:` branch returns for an id it does not know.
 
 use fem_mesh::tmop::{
     TmopQualityMetric,
@@ -10,6 +21,7 @@ use fem_mesh::tmop::{
     TmopMetric301, TmopMetric302, TmopMetric303, TmopMetric304,
     TmopMetric315, TmopMetric316, TmopMetric321, TmopMetric323, TmopMetric360,
 };
+use fem_solver::fmt_g;
 
 use std::f64::consts::PI;
 
@@ -130,12 +142,13 @@ fn main() {
         i += 1;
     }
 
-    assert!(perturb_v > 0.0 && perturb_ar > 0.0 && perturb_s >= 1.0, "Invalid input");
+    if !(perturb_v > 0.0 && perturb_ar > 0.0 && perturb_s >= 1.0) {
+        // C++: MFEM_VERIFY(perturb_v > 0.0 && perturb_ar > 0.0 && perturb_s >= 1.0, "Invalid input")
+        eprintln!("MFEM_VERIFY failed: Invalid input");
+        std::process::exit(3);
+    }
 
     let dim = if metric_id < 300 { 2 } else { 3 };
-
-    // Setup metric and compute
-    println!("Magnitude of metric {}", metric_id);
 
     if dim == 2 {
         let j = form_2d_jac(perturb_v, perturb_ar, perturb_s);
@@ -152,11 +165,15 @@ fn main() {
             56 => Box::new(TmopMetric056),
             58 => Box::new(TmopMetric058),
             77 => Box::new(TmopMetric077),
-            _ => panic!("Unknown 2D metric_id: {}", metric_id),
+            // 85 / 98 / 11 / 36 / 107 exist in C++ (`TMOP_Metric_085`,
+            // `TMOP_Metric_098`, `TMOP_AMetric_011/036/107`) but have no
+            // `fem_mesh::tmop` implementation — same exit code as MFEM's
+            // unknown-id branch, plus an explicit gap note on stderr.
+            _ => unknown_metric(metric_id, "2-D"),
         };
 
         let w = metric.eval_w(&j_arr);
-        println!("  {:.6}", w);
+        println!("Magnitude of metric {metric_id}: {}", fmt_g(w));
     } else {
         let j = form_3d_jac(perturb_v, perturb_ar, perturb_s);
         let j_arr = [
@@ -175,14 +192,28 @@ fn main() {
             321 => Box::new(TmopMetric321),
             323 => Box::new(TmopMetric323),
             360 => Box::new(TmopMetric360),
-            _ => panic!("Unknown 3D metric_id: {}", metric_id),
+            // 322 is in the C++ switch but not implemented in `fem_mesh::tmop`.
+            _ => unknown_metric(metric_id, "3-D"),
         };
 
         let w = metric.eval_w(&j_arr);
-        println!("  {:.6}", w);
+        println!("Magnitude of metric {metric_id}: {}", fmt_g(w));
     }
 
-    println!("  volume perturbation factor: {}", perturb_v);
-    println!("  aspect ratio pert factor:   {}", perturb_ar);
-    println!("  skew perturbation factor:   {}", perturb_s);
+    println!("  volume perturbation factor: {}", fmt_g(perturb_v));
+    println!("  aspect ratio pert factor:   {}", fmt_g(perturb_ar));
+    println!("  skew perturbation factor:   {}", fmt_g(perturb_s));
+}
+
+/// C++ `default:` branch of the metric switch (`cout << "Unknown metric_id: "
+/// << metric_id << endl; return 3;`).
+fn unknown_metric(metric_id: i32, dim: &str) -> ! {
+    println!("Unknown metric_id: {metric_id}");
+    eprintln!(
+        "tmop-metric-magnitude (Rust port): the C++ program accepts {dim} metric id \
+         {metric_id}, but `fem_mesh::tmop` has no implementation for it. Missing ids \
+         overall (present in C++ miniapps/tools/tmop-metric-magnitude.cpp, absent in \
+         fem-rs): 85, 98, 322 (T-metrics) and 11, 36, 107 (A-metrics). Exit 3."
+    );
+    std::process::exit(3);
 }

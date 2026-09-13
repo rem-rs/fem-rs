@@ -1,6 +1,23 @@
 //! # Mondrian Miniapp — Convert an Image to an AMR Mesh
 //!
-//! 1:1 port of MFEM `miniapps/toys/mondrian.cpp`.
+//! Port of MFEM `miniapps/toys/mondrian.cpp` (serial, no GLVis socket).
+//!
+//! Round 32 findings (D130), measured against the C++ binary compiled from
+//! MFEM 4.10 (`mondrian -i australia.pgm -m inline-quad.mesh -no-vis`):
+//!
+//! * **Fixed**: the port used a fixed `for iter in 0..10` loop and refined
+//!   every element 4× per iteration — the run produced a 16,777,216-element,
+//!   **1.11 GB** `mondrian.mesh`.  C++ breaks when `(iter+1) % 3 == 0` on the
+//!   `-no-vis` path, i.e. after three iterations and 145 elements (6827 B).
+//!   The loop and the printed lines (`"Iteration N: mesh has X elements. "`,
+//!   trailing space included) now match iteration 1 exactly (16 elements).
+//! * **Gap (exit 3)**: C++ `Mesh::GeneralRefinement(refs, -1, nclimit)` refines
+//!   only the marked quads, nonconformingly (hanging nodes, `nclimit` = 1);
+//!   `fem_mesh::amr` only implements (NC) local refinement for `Tri3`, so quad
+//!   meshes fall back to `refine_uniform`.  Element counts therefore diverge
+//!   from iteration 2 on (C++: 16, 52, 145; fem-rs: 16, 64, 256).
+//! * `-vis` opens no socket (C++ prompts `Continue shaping? --> ` every 3rd
+//!   iteration; the prompt is kept, EOF answers `break`).
 
 use std::fs;
 
@@ -254,6 +271,9 @@ fn main() {
     let mut sd: usize = 2;
     let mut ncolors: u16 = 3;
     let mut aniso: bool = false;
+    let mut nclimit: i32 = 1;
+    let mut visualization: bool = true;
+    let mut visport: i32 = 19916;
 
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
@@ -261,6 +281,8 @@ fn main() {
             "-m" | "--mesh" => {
                 if let Some(v) = it.next() { mesh_file = v.clone(); }
             }
+            // C++ registers `-i` for both `--img` and `--iso`; the first
+            // registration wins, i.e. `-i <file>` selects the image.
             "-i" | "--img" => {
                 if let Some(v) = it.next() { img_file = v.clone(); }
             }
@@ -274,12 +296,32 @@ fn main() {
                     if let Ok(val) = v.parse() { ncolors = val; }
                 }
             }
+            "-ncl" | "--nc-limit" => {
+                if let Some(v) = it.next() {
+                    if let Ok(val) = v.parse() { nclimit = val; }
+                }
+            }
             "-a" | "--aniso" => aniso = true,
-            "-ncl" | "--nc-limit" => { let _ = it.next(); }
-            "-no-vis" | "--no-visualization" => {}
+            "--iso" => aniso = false,
+            "-vis" | "--visualization" => visualization = true,
+            "-no-vis" | "--no-visualization" => visualization = false,
+            "-p" | "--send-port" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { visport = val; } }
+            }
             _ => {}
         }
     }
+
+    // C++ `args.PrintOptions(cout)`.
+    println!("Options used:");
+    println!("   --mesh {mesh_file}");
+    println!("   --img {img_file}");
+    println!("   --sub-divisions {sd}");
+    println!("   --nc-limit {nclimit}");
+    println!("   --num-colors {ncolors}");
+    println!("   --{}", if aniso { "aniso" } else { "iso" });
+    println!("   --{}", if visualization { "visualization" } else { "no-visualization" });
+    println!("   --send-port {visport}");
 
     let pgm = match PgmImage::load(&img_file) {
         Ok(img) => img,
@@ -307,7 +349,10 @@ fn main() {
 
     let nc = 256u16 / ncolors;
 
-    for iter in 0..10 {
+    // C++ `for (int iter = 0; 1; iter++)`: print the element count, break every
+    // 3rd iteration on the `-no-vis` path, then refine the marked elements.
+    let mut iter = 0usize;
+    loop {
         let ne = mesh.n_elems();
         if ne == 0 { break; }
 
@@ -339,13 +384,47 @@ fn main() {
             }
         }
 
-        println!("Iteration {}: mesh has {} elements.", iter + 1, ne);
+        // C++ `cout << "Iteration " << iter+1 << ": mesh has " << NE
+        //      << " elements. \n";` (note the trailing space).
+        println!("Iteration {}: mesh has {} elements. ", iter + 1, ne);
+
+        if (iter + 1) % 3 == 0 {
+            if !visualization {
+                break;
+            }
+            print!("Continue shaping? --> ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut yn = String::new();
+            if std::io::stdin().read_line(&mut yn).is_err() || yn.is_empty() {
+                // EOF on a closed stdin: break (the C++ `cin >> yn` failure
+                // would otherwise keep refining forever).
+                break;
+            }
+            let yn = yn.trim();
+            if yn == "n" || yn == "q" {
+                break;
+            }
+        }
 
         if marked.is_empty() { break; }
 
         mesh = refine_marked(&mesh, &marked);
+        iter += 1;
     }
 
     write_mfem_file("mondrian.mesh", &mesh).expect("write mesh");
     println!("Wrote mondrian.mesh ({} elements).", mesh.n_elems());
+
+    // Honest partial delivery: C++ `GeneralRefinement(refs, -1, nclimit)`
+    // refines the marked quads nonconformingly; fem-rs falls back to a uniform
+    // refinement, so the element counts diverge.
+    eprintln!(
+        "mondrian (Rust port): partial delivery, exit 3. C++ uses \
+         `Mesh::GeneralRefinement(refs, -1, {nclimit})` (nonconforming refinement of the marked \
+         quads only); `fem_mesh::amr` implements conforming/NC refinement for `Tri3` only, so \
+         quad meshes fall back to `refine_uniform` (fem-rs: 16, 64, 256 vs C++ -no-vis: 16, 52, \
+         145 / 6827 B mondrian.mesh), and `-vis` opens no GLVis socket."
+    );
+    std::process::exit(3);
 }

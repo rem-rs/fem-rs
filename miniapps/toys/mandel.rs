@@ -1,9 +1,30 @@
 //! # Mandel Miniapp — Fractal Visualization with AMR
 //!
-//! 1:1 port of MFEM `miniapps/toys/mandel.cpp`.
+//! Port of MFEM `miniapps/toys/mandel.cpp` (serial, no GLVis socket).
 //!
 //! Specialized version of the Shaper miniapp for the Mandelbrot set.
-//! Light-hearted example of AMR (no GLVis in this port — outputs mesh only).
+//! Light-hearted example of AMR (no GLVis: the socket is not opened).
+//!
+//! Round 32 findings (D130), all measured with fresh binaries against the C++
+//! binary compiled from MFEM 4.10:
+//!
+//! * **Fixed**: the port used a fixed `for iter in 0..5` loop, so it refined
+//!   five times and wrote a 1,048,576-element `mandel.mesh` (59.6 MB).  C++
+//!   breaks when `(iter+1) % 4 == 0` on the `-no-vis` path (after printing
+//!   iteration 4), i.e. it stops at 16,006 elements (926,121 B).  The loop and
+//!   the printed lines (`"Iteration N: mesh has X elements. "`, trailing space
+//!   included) now match: iteration 1 agrees exactly (1024 elements).
+//! * **Gap (exit 3)**: C++ performs `Mesh::GeneralRefinement(refs, -1, nclimit)`
+//!   — nonconforming refinement of the *marked* elements only (with hanging
+//!   nodes, `nclimit` = 1).  `fem_mesh::amr` only implements conforming/NC
+//!   refinement for `Tri3` (`closure_refine*` assert `Tri3`), so for quad meshes
+//!   this port falls back to `refine_uniform` (refines every element, ×4).
+//!   Consequence: from iteration 2 on the element counts differ
+//!   (C++ 2254/5884/16006 vs fem-rs 4096/16384/65536).  The mesh is still
+//!   written and the example exits with code 3 to mark the partial delivery.
+//! * `-vis` opens no socket; C++ would prompt `Continue shaping? --> ` at every
+//!   4th iteration — the prompt is kept (EOF answers `break` to avoid the C++
+//!   infinite refine loop on a closed stdin).
 
 use fem_io::mfem::write_mfem_file;
 use fem_mesh::topology::MeshTopology;
@@ -145,6 +166,8 @@ fn main() {
     let mut sd: usize = 2;
     let mut nclimit: i32 = 1;
     let mut aniso: bool = false;
+    let mut visualization: bool = true;
+    let mut visport: i32 = 19916;
 
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
@@ -164,10 +187,23 @@ fn main() {
             }
             "-a" | "--aniso" => aniso = true,
             "-i" | "--iso" => aniso = false,
-            "-no-vis" | "--no-visualization" => {}
+            "-vis" | "--visualization" => visualization = true,
+            "-no-vis" | "--no-visualization" => visualization = false,
+            "-p" | "--send-port" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { visport = val; } }
+            }
             _ => {}
         }
     }
+
+    // C++ `args.PrintOptions(cout)`.
+    println!("Options used:");
+    println!("   --mesh {mesh_file}");
+    println!("   --sub-divisions {sd}");
+    println!("   --nc-limit {nclimit}");
+    println!("   --{}", if aniso { "aniso" } else { "iso" });
+    println!("   --{}", if visualization { "visualization" } else { "no-visualization" });
+    println!("   --send-port {visport}");
 
     let mut mesh = match read_mesh(&mesh_file) {
         Ok(m) => m,
@@ -196,7 +232,10 @@ fn main() {
         mesh = fem_mesh::amr::refine_uniform(&mesh);
     }
 
-    for iter in 0..5 {
+    // C++ `for (int iter = 0; 1; iter++)`: print the element count, break every
+    // 4th iteration on the `-no-vis` path, then refine the marked elements.
+    let mut iter = 0usize;
+    loop {
         let ne = mesh.n_elems();
         if ne == 0 { break; }
 
@@ -228,13 +267,51 @@ fn main() {
             }
         }
 
-        println!("Iteration {}: mesh has {} elements.", iter + 1, ne);
+        // C++ `cout << "Iteration " << iter+1 << ": mesh has " << NE
+        //      << " elements. \n";` (note the trailing space).
+        println!("Iteration {}: mesh has {} elements. ", iter + 1, ne);
+
+        // C++: `if ((iter+1) % 4 == 0) { if (!visualization) break;
+        //      cout << "Continue shaping? --> "; cin >> yn;
+        //      if (yn == 'n' || yn == 'q') break; }`
+        if (iter + 1) % 4 == 0 {
+            if !visualization {
+                break;
+            }
+            print!("Continue shaping? --> ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut yn = String::new();
+            if std::io::stdin().read_line(&mut yn).is_err() || yn.is_empty() {
+                // EOF on a closed stdin: break instead of C++'s (uninitialized
+                // `yn`) fall-through, which would keep refining forever.
+                break;
+            }
+            let yn = yn.trim();
+            if yn == "n" || yn == "q" {
+                break;
+            }
+        }
 
         if marked.is_empty() { break; }
 
         mesh = refine_marked(&mesh, &marked);
+        iter += 1;
     }
 
     write_mfem_file("mandel.mesh", &mesh).expect("write mesh");
     println!("Wrote mandel.mesh ({} elements).", mesh.n_elems());
+
+    // Honest partial delivery: the marked-only nonconforming refinement of
+    // `Mesh::GeneralRefinement(refs, -1, nclimit)` has no quad implementation in
+    // `fem_mesh::amr`, so the element counts diverge from the C++ run.
+    eprintln!(
+        "mandel (Rust port): partial delivery, exit 3. C++ uses \
+         `Mesh::GeneralRefinement(refs, -1, {nclimit})` (nonconforming refinement of the marked \
+         quads only); `fem_mesh::amr` implements conforming/NC refinement for `Tri3` only, so \
+         quad meshes fall back to `refine_uniform`. Element counts therefore diverge from \
+         iteration 2 on (C++ -no-vis: 1024, 2254, 5884, 16006 / 926121 B mandel.mesh; \
+         fem-rs: 1024, 4096, 16384, 65536), and `-vis` opens no GLVis socket."
+    );
+    std::process::exit(3);
 }
