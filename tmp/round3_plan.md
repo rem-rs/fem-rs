@@ -779,6 +779,88 @@
 - **D125（P3）并行 LOR 的 ND/RT/L² 腿**：ND/RT 需**分布式** AMS/ADS（`vendor/linger/src/precond/{ams,ads}.rs` 只有串行版、`parallel_dist` 只有 `DistCsrMatrix`）⇒ 估 1–2 周或走 hypre FFI；L²/DG 需并行面积分器 ⇒ ~1 周。`-fe n|r|l` 现显式拒绝。另一项磨光活：把 rank-local 聚合 AMG 换成跨 rank 粗化以关掉 np 增长（48→74 vs C++ 25→27），~1 周。
 - 备忘：① `stash@{0}`（ex4-ads-preconditioner）仍在，待用户决定；② WSL 本轮一度整体掉线（连 `wsl --shutdown` 都超时，约 20 分钟后自行恢复）——C++ 参考比对期间需留意；③ 主会话新增工具：MFEM 4.10 serial `mesh-optimizer` 参考 `$HOME/work/mo410`、D112 ground-truth 探针 `tmp/d112_ref_main.cpp`（带 `fix_orientation` 参数与 `MIN_DET_GLL6`）；④ 派单时的授权清单要写**真实存在**的路径（本轮给 ④ 写了不存在的 `crates/solver/src/lor_factory.rs`，真身在 `crates/assembly/src/lor_factory.rs`，代理正确识别并只读未改）。
 
+## 第三十轮（round 30）：miniapps / 串并示例 **能力覆盖审计**（只读 + 2 处即时修复）
+
+> 目标：**按代码事实**确认「MFEM 的 miniapps 与串／并示例所涉及的功能能力，fem-rs 是否已补齐」。方法：先把两侧的**可执行文件**（而不是文件数）列全，再逐个判 5 类——**(a)** 真 1:1（有 C++ 对照数字）**(b)** 诚实部分交付（`exit(3)`+缺口清单双标注）**(c)** 缺失（需哪些能力、在 `crates/` 是否已有、工作量）**(d)** 有意排除（理由今天是否仍成立）**(e)** **名不副实/静默裁剪**（自称 1:1 却不同，或裁剪了没有 `exit(3)`/缺口清单）。
+
+### 0. 口径与总量
+- MFEM 4.10：串行示例 **37**（ex0–ex10/14–31/33/34/36–41）、并行示例 **40**（ex0p–ex41p 去掉无 23p）、miniapp 可执行 **~150**（24 个子目录）。
+- fem-rs：`examples/*.rs` **86**、`miniapps/**/*.rs` **85**、`examples/Cargo.toml` 注册 **162**（本轮新增 1，见 §4）。
+- **示例层（77 个）全部有对位文件且全部注册**（脚本逐个核对 `name`/`path`）；**miniapp 层缺 60+ 个可执行**，但缺口的分布极不均匀（见 §2）。
+
+### 1. examples（37 串行 + 40 并行）
+- **脚本核对**：37 串行 + 40 并行**逐个存在且注册**（精确匹配 `path = "<basename>"`），无一缺失。`cargo build --release --examples --keep-going` **0 错误**。
+- **实跑冒烟（默认参数）**：串行 **36/37 rc=0**，唯一 rc=124 是 `mfem_ex15_dynamic_amr`（默认 20 轮自适应，150 s 超时；单独长跑通过、迭代 1 已解 42821 未知数）。并行 **32/40 rc=0**；8 个非零：`pex1`/`pex15`/`pex30` 为 **150 s 超时**（都在求解中，属长跑）、**`pex3`（本轮已修，见 §4）**、**`pex19` panic**（`expect("2D mesh")`，C++ 默认 `beam-tet` 是 3-D）、**`pex27` panic**（内核 `curved_boundary_edge_geom` 的 `assert!`）、**`pex31` panic**（`crates/element/src/nedelec/quad_ndk.rs:97` **index out of bounds: len 6 index 6** ⇒ `QuadNDk` 的某个阶分支写超出数组 ⇒ 内核 bug）、**`pex32` panic**（`expect("3D mesh required")` 而 C++ `ex32p` 默认 `inline-quad.mesh` **是 2-D** ⇒ 反向维度地雷）。
+- **`mfem_pex3_maxwell_cavity` 默认必 panic（rc=101）——本轮已修**：`examples/mfem_pex3_maxwell_cavity.rs:94` 读 `data/beam-tet.mesh`（**3-D**）却取 `.mesh2d` ⇒ 恒 `None` ⇒ panic；且 `ref_levels > 0 && n != 16` 的组合使 `-m` 档**从不细化**。而 MFEM `ex3p` 的默认网格就是 `beam-tet.mesh`（ex3p.cpp:70，维度通用），本 port 是 `Mesh<2>` 专用 ⇒ 真正缺的是**三维路径**，本轮按"用 MFEM 串行 ex3 的默认 `star.mesh` + 把 ex3p 的 `par_ref_levels=2` 折进串行 2 级（共 4 级）"落地，并在文件头写清 deviation。**C++ 对照（`mpirun -np 1`，同网格）**：`Number of finite element unknowns: 10400` vs fem-rs `dofs=10400`；`||E_h-E||_L2 = 0.0270053` vs **2.70053055689122e-2**（6 位有效一致）；迭代数 17（AMS/hypre）vs 102（本仓无 AMS）属已记录的求解器栈差异。
+- **`mfem_ex31_anisotropic_maxwell.rs`（+`mfem_ex31_dump.rs`）是静默桩（(e) 类，最严重）**：`setup_element_ref` 对 `Tri3`/`Quad4` 都 `eprintln!(…"not supported - skipping"); std::process::exit(0)`（:122-123 / dump :85-86），其他类型 `panic!` ⇒ **任何合法输入都不求解、且返回 0**（harness 会当成功）。C++ 同命令有解：`ex31 -m inline-quad.mesh` → `||E_h-E||_{H(Curl)} = 0.181455`。**根因是库级能力缺口**：C++ 用 `MatrixConstantCoefficient sigma(sigmaMat)` + `VectorFEMassIntegrator(sigma)`（各向异性向量质量），而 **`MatrixCoefficient` 在整个 `crates/` 出现 0 次**（见 §3-③）。
+- 其余示例级缺口（均已实跑核对，属 (b)/(c) 而非静默）：`mfem_ex2_elasticity.rs:148` 的 `-sc` 只警告"not yet implemented — skipping"，但**内核 `crates/assembly/src/static_cond.rs` 已存在** ⇒ 示例侧未接线（便宜）；`mfem_ex14_dg_poisson.rs:125`（+pex14:61）在 `-e>0` 时 `panic!`——C++ 有 `DGDiffusionBR2Integrator`（ex14.cpp:154-158）⇒ 缺积分器；`mfem_ex29_curved_poisson.rs:35` 的 `-r>0` 只警告"surface refinement not supported"（C++ 的用法示例正是 `ex29 -r 2`）；`mfem_ex10_hyperelastic_dyn.rs:666` 对未实现的 `-s` **静默换用 SDIRK2**（默认档已实跑核对 = C++：EE 0.006418/0.0064185、KE 0.024482/0.0244818）；`mfem_ex18` 的 problem ∉{1,2,3} panic 与 C++ 一致（faithful）；`examples/mfem_ex4_darcy_simple.rs` 是**未注册、无引用**的死文件（头部自述 "SIMPLIFIED VERSION"）。
+- 68 行 `exit(0)`/`skipping` 类关键字扫描：除 `-h/--help` 处理器（合法）外，**只有 ex31 家族**是真静默桩。
+
+### 2. miniapps 逐目录裁决（4 个只读审计代理 + 主会话；**只读，未改任何文件**）
+
+| 目录（可执行数） | (a) 真 1:1 | (b) 诚实部分 | (c) 缺失 | (d) 有意排除 | **(e) 名不副实/静默裁剪** |
+|---|---|---|---|---|---|
+| `nurbs` (15) | 4（ex1/ex3/ex5/ex24） | 0 | 9（ex1p/ex10/ex10p/ex11p/curveint/mesh_info/patch_ex1/surface/naca_cmesh） | 0 | **2**（`nurbs_solenoidal`、`nurbs_printfunc`） |
+| `meshing` (22)+`mtop`(1)+`plasma`(1)+`performance`(2) | 5（mesh-optimizer/hpref/phpref/ref321/fit-node-position） | 0 | 10（pref321/pminimal-surface/minimal-surface/pmesh-optimizer/mesh-bounding-boxes/pmesh-fitting/mtop/plasma-pic/perf-ex1/perf-ex1p） | 0 | **11**（mesh-explorer、mesh-quality、mobius-strip、klein-bottle、extruder、twist、toroid、shaper、reflector、trimmer、polar-nc） |
+| `dpg`(8)+`electromagnetics`(5)+`solvers`(4)+`hdiv-linear-solver`(2)+`diag-smoothers`(2) = 21 | **9**（dpg 6/6 全是真 UW-DPG：poisson_2d/acoustics_2d/acoustics_3d/maxwell_2d/maxwell_3d/helmholtz_1d；plor_solvers、lor_elast、abs-l1-jacobi） | 6（maxwell、joule、block_solvers、hdiv darcy、hdiv grad_div；各自有 `exit(3)`+缺口清单/文件头偏离说明） | 6（dpg 4 个并行 `p*`、dpg `convection-diffusion`、`mg-abs-l1-jacobi`） | 0 | **3**（`volta`、`tesla`、`lorentz`）+ 1 桩件（`lor_solvers`） |
+| `tools`(11)+`gslib`(7)+`toys`(8) | 3（toys/automata、toys/life、autodiff/seq_example；`seq_test` 以 lib 单测落地） | 4（display-basis、nodal-transfer、lor-transfer、shifted×3 另计） | 12（convert-dc 的 visit→visit 子集、pfindpts、field-interp、field-diff、schwarz_ex1、schwarz_ex1p、particles_redist、plor-transfer、contact、…） | 5（tribol/parelag/lsf_integral/autodiff-par/toys-snake+spiral） | **11**（compare-dc、load-dc、get-values、gridfunction-bounds、tmop-check-metric、tmop-metric-magnitude、**gslib/findpts（未注册）**、lissajous、mandel、mondrian、lor-transfer） |
+| `fluids` (11)（主会话） | 8（navier ×8；schrodinger_flow 1:1 串行） | 1（navier_cht：`EXIT_PARTIAL=3` + 完整 GAPS 清单） | 1（**pschrodinger_flow** 并行 ISF，**任何文档都没提**） | 0 | 0 |
+| `shifted`(4)/`adjoint`(2)/`dfem`(1)/`hooke`(1)/`multidomain`(3)/`spde`(1)/`autodiff` | 上表/前轮已覆盖，未逐项重审 | — | — | — | — |
+
+**（e）类里的"硬证据"例子**（全部由代理实跑）：
+- `meshing/reflector.rs`：第一段循环**就地改写** elem 0..ne-1 为反射顶点，第二段再 append 同样的副本 ⇒ 14 个元素 = **7 对完全重复**；MFEM 读它 abort。
+- `meshing/toroid.rs`：默认档 **6 个 CUBE**（C++ 8 个 PRISM/geom 6），连接取自楔形、boundary 段为空 ⇒ MFEM abort。
+- `meshing/shaper.rs`：头部与 README:116 写"(1:1) MATERIAL 界面 AMR"，quad 分支实为 `refine_uniform`（**整网格均匀细化**，忽略 marked 集合）：16→64→…→65536 vs C++ 16→52→64 的 NC 网格；且材料属性 `attr(i)` 从未写回。
+- `meshing/twist.rs:166`：`if per_mesh && false { mesh.set_curvature(order); }` —— **曲率被显式短路**，无 `exit(3)`、无缺口清单。
+- `tools/gridfunction_bounds.rs:116-118`：两列打印**同一数值**（`mn,mn / mx,mx`），C++ 第二列是真递归收紧界。
+- `tools/tmop_check_metric.rs`：与 C++ 是**两个不同程序**（C++ 是 `-mid N` 单 metric 体检：1000 次随机 T 逐槽 `EvalW` vs `EvalWMatrixForm`、`dF/ddF` 收敛阶；Rust 是固定 21 项自检），且 `-mid` 被静默忽略。
+- `toys/lissajous.rs:132`：写出的 GF 是 `vec![0.0; len]`（源码注释自承 placeholder）⇒ **gf 全 0**，且不写 `.mesh`。
+- `toys/mandel.rs` / `mondrian.rs`：C++ `-no-vis` 分别在 `(iter+1)%4==0`、`%3==0` 处 break，Rust 固定跑 5 / 10 次 ⇒ 末态元素数 **1048576 vs 65536**、`mondrian.mesh` 133 MB。
+- `nurbs/nurbs_solenoidal.rs`：实测 dim(R)=**33024/16384**（= C++ 的 `-nn` 档）而 C++ 默认 NURBS 档 = 8580/4225；缺 `Create NURBS fec and ext` 横幅、缺 `‖div u_h−div u_ex‖` 行（**`compute_div_error` 在整个 `crates/` 是 0 命中**）；L² 9.5586e-05 vs C++ 2.08242e-05；算了 `m_gs/s_gs` 却从不使用（块预条件被丢弃）；头注释仍写 "1:1 port"，README 无条目。
+- `nurbs/nurbs_printfunc.rs`：C++ vs Rust **40/48 行不同**（C++ 6 位有效数字 vs Rust round-trip），数值本身早已核过 ⇒ 修法 = 用库里已有的 `fem_solver::fmt_g`（`crates/solver/src/iterative.rs:19`）；README 无条目。
+
+### 3. 四处系统性根因（比单点纪律问题重要）
+0. **并行示例的"维度地雷"**（主会话扫描 77 个示例的 `mesh2d.expect`/`mesh3d.expect` × C++ 默认网格维度）：**3 个并行示例在默认参数下必然 panic 或行为不符** —— `pex3`（C++ 默认 `beam-tet.mesh` 3-D，port 是 `Mesh<2>`）、`pex19`（同，`beam-tet`）、`pex24`（同，`beam-hex`）。`pex3` 本轮已修（§4）；`pex19` 实测 `expect("2D mesh")` panic（`mfem_pex19_parallel_incomp_hyperelastic.rs:81`）、`pex27` 另有内核级 assert（见下条）。**修法**：要么补三维路径，要么按纪律改成 `exit(3)` + 明确文案（当前是"panic 或静默偏离"）。
+0b. **`curved_boundary_edge_geom` 用 `assert!` 而非降级**（`crates/assembly/src/assembler.rs:2708`）：当边界边的几何 dof 不落在查询参考点上（最近距离 5.7e-2）就 panic —— `pex27`（默认档，periodic seam 网格）实测两条线程同时 panic。这是 D66 实现路径的鲁棒性缺陷（不是新引入），且**内核对输入网格的容忍度不足**：应降级（退化为弦/直线边）或返回明确错误。
+1. **`write_mfem` 的边界段在 `face_offsets` 缺失时硬编码"3 节点/面 + TRIANGLE 码"**（`crates/io/src/mfem.rs:600-640`：`(fi*3, 3usize)` 与 `if nv == 3 {2} else {3}`）⇒ 凡**手工构造 `Mesh{..}` 字面量**的 miniapp（都不填 `face_offsets`）写出的网格，边界段被写成三角形：实测 `extruder`（96 个 3 节点面，应 SQUARE）、`twist`（14 个三角，含重复下标）、`toroid`（楔形按 hex 写出）、`mobius-strip`/`klein-bottle`（写成 `dimension 3` + 平铺 vertices，C++ 是 `dimension 2` + 曲面 `nodes`）、`polar-nc`（非 NC、无 nodes ⇒ MFEM 报 `Invalid mesh topology`）——**MFEM 与 fem-rs 自己都读不回来**。修法：按元素几何类型推导边界面节点数/geom code，并加一致性自检。
+2. **NURBS 有两条并行路径**：`Nurbs*Space`（miniapp 在用，装配内嵌，**不实现 `FESpace`**）vs `IgaFESpace*`（实现 `FESpace`，只有 iga 消费方）。⇒ 库里 `Assembler`/`NonlinearForm` 栈**消费不了 NURBS**，`nurbs_ex10`/`ex11p`/`surface` 因此不能落在既有算子上。另有**两套 KnotVector 实现**（`fem_mesh::nurbs_mesh` 带 demko/botella/interpolant 但零消费者；`fem_element::iga/nurbs_fe_collection` 在用）。
+3. **`MatrixCoefficient` 全缺**（`grep -rn MatrixCoefficient crates/` = **0**）：MFEM 用它做各向异性/张量系数。受影响面：**9 个示例**（ex25/ex25p/ex29/ex29p/ex31/ex31p/ex32p/ex40/ex40p）+ **8 个 miniapp 文件**（dpg/{convection-diffusion,maxwell,pmaxwell,pacoustics}.cpp、dpg/util/pml.hpp、meshing/mesh-optimizer.hpp、spde/spde_solver.{hpp,cpp}）⇒ 这些 port 要么绕写、要么成桩（ex31）。相关：`GridFunction::GetValues`（批量，MFEM gridfunc.hpp:238/292）、逐分量 `GetBounds`、`RegisterQField` 也缺。
+
+### 4. 本轮即时修复（2 处，均已验证）
+- **`mfem_pex3_maxwell_cavity`**：改默认网格为 `data/star.mesh` + 把 ex3p 的 `par_ref_levels=2` 折进串行细化（共 4 级），文件头写清与 C++ 的 deviation。**验证**：默认档从 **panic** 变为 `dofs=10400 / ||E_h-E||_L2 = 2.70053055689122e-2 / 102 iters`，与 C++ `mpirun -np 1` 的 `10400 / 0.0270053` 一致（迭代数差异属已知求解器栈差别）。
+- **`gslib/findpts.rs` 注册**：该文件 **859 行**、自述 1:1（含 glibc `rand()` 逐位复刻），但**从未进 `examples/Cargo.toml`** ⇒ README 的三条命令全部 `no example target named gslib_findpts`。本轮加 3 行注册后三条命令全部跑通：`rt-2d-q3 -o 8` → max interp error **1.110223024625157e-15**、`inline-quad -pr` → **6.661338147750939e-16**、`inline-hex -random 1 -npt 4` → **1.77635683940025e-15**（found 全部命中、not-found 0）。
+
+### 5. 更正与状态调整（诚实）
+- **D102（TMOP `-ae 1`）措辞下调**：Rust 路径在（`-mid 94 -tid 5 -nor -ae 1` → 6.3909e-01），但**今天唯一带 GSLIB 的 C++ 参考 `mo49` 在 `-ae 1` 下 `exit 134`（core dumped）**（主会话独立复现：`-ae 0` 正常给 6.3499e-01、`-ae 1` 在 Device/Memory 之后直接 abort）⇒ 两侧对照**当前不可复现**，从"已结"改为"代码已落地、对照待复现（provisional）"。
+- **D110（`-nor` 0/0 打印差）** 本轮复现（`-mid 2` 档 5.8881e-16 vs 5.3052e-16），仍开。
+- **D86（`OversetFindPointsGSLIB`）** 仍开且实测确认 `grep -rn Overset crates/` = 0；**D104** 部分仍开（`RegisterQField` 无；`data_collection_load.rs` 的两个 `load_example23_*` 路径指向不存在的 `crates/output/` ⇒ **静默 SKIP 仍在**）；**D117–D119/D113 剩余/D114** 全部仍开（其中 `mesh_explorer -m extruder.mesh` 今天也打在 `amr/amr_inner.rs:1525`，与 D114 同一行）。
+- **`miniapps/README.md` 的"双标注"在多处不成立**（本轮已按证伪结果就地修正，见 §6）：`nurbs` 段写"5 个 1:1"而正文只有 4 条（printfunc/solenoidal 无条目）；`meshing` 段对 shaper/extruder 明写 "(1:1)" 已被证伪；`toys` 的排除理由只在 plan 里、README 没有；`tools/get-values` 的"与 C++ 输出逐位一致"无可复现命令（实测 C++ 官方样例 Example5 是 2-D，而 `data_collection_load.rs:101` 硬编码 `mesh3d` ⇒ exit 1）。
+
+### 第三十轮新债务
+
+- **D126（P1）`write_mfem` 边界面节点数/geom code 回落错误**：`crates/io/src/mfem.rs:600-640` 在 `face_offsets` 缺失时硬编码 3 节点 + TRIANGLE ⇒ 7 个生成型 miniapp（extruder/twist/toroid/mobius-strip/klein-bottle/reflector/polar-nc）产出**MFEM 与本仓都读不回来**的文件。修法 = 按面几何推导 + 写前一致性自检；验收 = `mesh-explorer -m rust_<name>.mesh` 不再 abort 且 `kappa_min/max` 与 C++ 同档一致。
+- **D127（P1）`MatrixCoefficient`（张量系数）全缺**：`crates/` 0 命中 ⇒ 9 个示例（ex25/ex25p/ex29/ex29p/ex31/ex31p/ex32p/ex40/ex40p）+ 8 个 miniapp 文件涉及的各向异性/张量系数路径要么绕写要么成桩。含 `MatrixConstantCoefficient`/`MatrixFunctionCoefficient`/`MatrixArrayCoefficient` 与 `VectorFEMassIntegrator`/`DiffusionIntegrator`/`CurlCurlIntegrator` 的矩阵系数重载。
+- **D128（P2）`mfem_ex31_anisotropic_maxwell`（+`_dump`）是静默桩**：任何合法输入 `exit(0)` 且不求解（C++ 给 0.181455）⇒ 要么落地 D127 后真移植，要么立刻改 `exit(3)` + 缺口清单 + README 双标注。
+- **D129（P2）`tools/` 的 (e) 类**：`compare-dc`（`HashMap` 顺序、分隔线宽度、多余尾行）、`get-values`（DC 加载硬编码 3-D ⇒ C++ 官方 2-D 样例全失败；`-o` 被吞）、`gridfunction-bounds`（两列同一值；`-nb/-ref/-bt/-rd/-rt` 全忽略）、`tmop-check-metric`/`tmop-metric-magnitude`（与 C++ 是两个程序；metric zoo 仅 **22/49** id，未知 id 应 `exit 3` 而非 panic）、`load-dc`（输出为自创格式，README 仍标 1:1）。**廉价修法**：能对齐的（顺序/格式）直接改，改不了的转 `exit(3)` + 缺口清单。
+- **D130（P2）`toys/` 的 (e) 类**：`lissajous` 写出全 0 GF 且不写 mesh ⇒ 真移植或 `exit(3)`；`mandel`/`mondrian` 迭代次数与 C++ 不符（末态元素数差 16×）⇒ 按 C++ 的 break 条件修；`rubik` 的排除理由（"无 GLVis 无意义"）与代码事实不符（是 stdin 交互）⇒ 改理由。
+- **D131（P2）`nurbs/` 的 (e) 类**：`nurbs_solenoidal` 名不副实（实为 `-nn` 档 + 缺 `compute_div_error` + 块预条件算了不用）⇒ 重写或 `exit(3)`；`nurbs_printfunc` 改用 `fmt_g` 即逐字节；README 的"5 个 1:1"改对。
+- **D132（P2）`meshing/` 的功能性错误**（不只是标注）：`reflector` 重复元素对、`toroid` 把 prism 写成 hex、`shaper` 用均匀细化冒充界面 AMR（+ 材料属性丢失）、`twist` 曲率被 `&& false` 短路、`polar-nc` 缺 `-sfc`（该 miniapp 的存在理由）且输出非 NC、`trimmer` 边界元素 34 vs 36 且 kappa 不一致。
+- **D133（P3）examples 的小缺口**：`ex2 -sc` 示例侧未接线（内核 `static_cond.rs` 已在）、`ex14 -e>0` 缺 `DGDiffusionBR2Integrator`、`ex29 -r>0` 曲面细化缺、`ex10` 非默认 `-s` 静默换 SDIRK2、`pschrodinger_flow`（并行 ISF）缺且无记录、`examples/mfem_ex4_darcy_simple.rs` 死文件（未注册无引用）。
+- **D134（P2）`gslib/` 实质 0/7 → 本轮 1/7**：`findpts` 已注册可用（§4）；**`field-interp`/`field-diff`/`schwarz_ex1` 三件在 MFEM 的 `makefile:24` 属 `SEQ_MINIAPPS`（串行可跑）且只依赖已有的 `GslibFindPoints`** ⇒ 可直接做；`pfindpts`/`schwarz_ex1p`/`particles_redist` 需并行 locator 与 `ParticleSet::Redistribute`（`grep Redistribute crates/` = 0）。
+- **D135（P2）其余能力缺口**（按性价比）：TMOP metric zoo **22/49**（缺 2D {80,85,90,98,107,126}、3D {313,322,328,332,333,334,347} 等）与 `-hr`/`-hmid`（hr-adaptivity）全无；`MeshFitting`（`meshing/minimal-surface`+`pminimal-surface`+`pmesh-fitting` 三件的共同前置）在 `crates/` 一行没有；并行 TMOP（`pmesh-optimizer`）、并行 p 细化（`pref321`）、3:1 各向异性并行细化（`pref321`/`phpref` 的 `-proj`/`-dim 3` 现在 `panic!` 101 非 `exit(3)`）、`MTOP`、`plasma/pic`、`performance/ex1(+p)` 均缺；`GridFunction::GetValues`（批量）/逐分量 `GetBounds`/`RegisterQField` 缺。
+- **D137（P2）并行示例的"维度地雷"（4 个）**：`pex19`（C++ 默认 `beam-tet` 3-D vs `Mesh<2>` port，实测 `expect("2D mesh")` panic 于 :81）、`pex24`（C++ 默认 `beam-hex` 3-D）、`pex32`（**反向**：port `expect("3D mesh required")` 而 C++ `ex32p` 默认 `inline-quad.mesh` 是 2-D）、已修的 `pex3`。修法：补对应维度路径，或按纪律 `exit(3)` + 文案（现在一律是 panic）。
+- **D138（P1）`curved_boundary_edge_geom` 用 `assert!` 而非降级**（`crates/assembly/src/assembler.rs:2708`）：边界边几何 dof 不落在查询参考点即 panic（`pex27` 默认档双线程同挂，最近距离 5.7e-2）⇒ 应降级为弦/直线边或返回错误，不该 panic。
+- **D137b（P1）`QuadNDk` 某阶分支数组越界**（`crates/element/src/nedelec/quad_ndk.rs:97`）：`mfem_pex31_restricted_hcurl` 默认档实测 `index out of bounds: the len is 6 but the index is 6`（代码在该分支写 `values[6]`/`values[7]` 而缓冲区只有 6 项）⇒ 元素层真 bug，需最小复现（哪个阶/哪条分支）+ 修 + 加测试。
+- **D139（P1）`electromagnetics` 三个名不副实件**：`volta`（默认 `--ranks 2` panic `csr.rs:192` 24≠48、hex 全 panic、NURBS 默认网格挂死 >120 s、未移植项 `exit(1)` 非 3）、`tesla`（`-m` 解析后丢弃、`-maxit` 忽略、PCG 0 迭代/零解）、`lorentz`（CLI 与 C++ `-er/-ef/-br/-bf` VisitDC 接口无关）⇒ 至少先转 `exit(3)` + 缺口清单 + README 双标注。
+- **D140（P2）`solvers/lor_solvers.rs` 是 112 行桩件却被注册**：装好质量阵后**显式丢弃**（`lor_solvers.rs:72-82`）、不 import 任何 LOR/AMG、`-fe n` 用 `exit(1)`、无缺口清单 ⇒ 与真 1:1 的 `plor_solvers.rs` 功能重叠 ⇒ 建议删除或降格为明确 `exit(3)` 声明，并补 README 的 `block_solvers`/`lor_solvers`/`hdiv_linear_solver` 条目（现全缺）。
+- **D141（P2）并行 DPG（0/4）+ dpg 对流（0/1）**：需 `ParDpgWeakForm`/`ParComplexDPGWeakForm`（骨架空间分布化 + 跨 rank trace 静态凝聚；`crates/parallel/src/par_dpg_trace.rs` 可作起点）；对流腿另需 D127 的 `MatrixCoefficient` 与图范数里的 `β·∇` 项。
+- **D142（P3）`mg-abs-l1-jacobi` 的 p 粗化层**：`crates/solver/src/p_multigrid.rs` 的 `PmgHierarchy` 目前只有 1-D Laplacian 玩具 builder（`build_pmg_hierarchy_1d_laplacian:238`）；需 `ParFESpaceHierarchy` 式 FE 空间层级（`-rs/-rp` 网格层 + p 层 + 中间层 abs-L(1)-Jacobi），3–5 天。附带：`|A|` 对角与 L(p,q) 只在 miniapp 里（`abs-l1-jacobi.rs:150,287`），未下沉 `crates/`。
+- **D136（P3）`hpref` 的 PCG 历史从第 0 步就与 C++ 不同**（0.00442905 vs 0.00441429、ARF 0.701048 vs 0.699773，unknowns/h/p/最大阶全同）⇒ 变阶 dof 布局/消元路径有别，需专项；`ref321` 缺 C++ 的 5 行 PCG 迭代 + ARF。
+- **D143（P3）文档陈旧/缺条**：见上。
+- **审计覆盖说明**：四路只读审计代理**全部回报**（`nurbs` 15 件 / `meshing+mtop+plasma+performance` 26 件 / `tools+gslib+toys+外部类` 30 件 / `dpg+electromagnetics+solvers+hdiv+diag-smoothers` 21 件），加主会话的 examples（77 件）与 fluids（11 件）⇒ **共 180 个可执行/示例逐个判定**。
+- **本轮 (e) 类合计 30 个**（`nurbs` 2 / `meshing` 11 / `tools+gslib+toys` 11 / `electromagnetics` 3 + `lor_solvers` 桩 1 / examples 2（`ex31` 家族））—— 这是本轮最重要的产出面：**缺文件看得见，名不副实看不见**。
+- **dpg 组的历史隐患确认已清**：6 个 `dpg_*.rs` **全部**已是真 UW-DPG（import `DpgWeakForm`/`ComplexDPGWeakForm`/骨架空间/图范数），实跑数字落在 C++ 位上（`dpg_maxwell_3d` 156 dof/1.723e0、`dpg_acoustics_3d` 95 dof/1.212e0、`dpg_poisson_2d` 12 dof/23 it、`dpg_maxwell_2d` 1.381e0、`dpg_acoustics_2d` 1.222e0）；**并行 DPG 0/4**（`pdiffusion/pacoustics/pmaxwell/pconvection-diffusion` 无对位；`crates/parallel/src/par_dpg_trace.rs` 在树上且被 `pex8` 消费，可作起点）与 `convection-diffusion` 0/1（共同上游 = D127 的 `MatrixCoefficient` 全缺）。
+
 ## 第二十一轮新债务
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。

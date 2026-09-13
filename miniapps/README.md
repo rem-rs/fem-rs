@@ -6,19 +6,32 @@
 
 ```
 miniapps/
-├── tools/                   ← 对应 miniapps/tools/
-│   ├── tmop_check_metric.rs
-│   ├── tmop_metric_magnitude.rs
-│   ├── gridfunction_bounds.rs
-│   ├── load-dc.rs             ← VisIt DC 加载 (1:1)
-│   ├── compare-dc.rs          ← DC 比对 (1:1)
-│   ├── display_basis.rs       ← 基函数展示 (无 GLVis; H1/ND/RT/L2,
+├── tools/                   ← 对应 miniapps/tools/（**round 30 审计**：11 个可执行里只有
+│                                display-basis/nodal-transfer 属 (b) 类；其余多为
+│                                **(e) 类名不副实**，证据见下与 D129）
+│   ├── tmop_check_metric.rs   ← ⚠️ **不是 C++ 同名程序的移植**：C++ 是 `-mid N`
+│   │                            单 metric 体检（1000 次随机 T 逐槽 EvalW vs
+│   │                            EvalWMatrixForm + dF/ddF 收敛阶），本文件是固定 21 项
+│   │                            自检且**静默忽略 `-mid`**（D129）
+│   ├── tmop_metric_magnitude.rs ← ⚠️ metric zoo 仅 **22/49** id（缺 85/98/322 等），
+│   │                            未知 id `panic!` 而非 C++ 的 `return 3`；输出格式也不同（D129）
+│   ├── gridfunction_bounds.rs ← ⚠️ 两列打印**同一数值**（C++ 第二列是真递归收紧界），
+│   │                            `-nb/-ref/-bt/-rd/-rt` 全忽略（D129）
+│   ├── load-dc.rs             ← ⚠️ C++ 该程序可观察行为只有 GLVis 套接字；本文件
+│   │                            自创 6 行输出（含硬编码 `3 (assumed)`）⇒ 已按审计改标注（D129）
+│   ├── compare-dc.rs          ← ⚠️ 字段遍历用 `HashMap`（C++ `std::map` 字典序 ⇒
+│   │                            顺序逐次不同）、分隔线宽度与多余尾行亦不同（D129）
+│   ├── display_basis.rs       ← (b) 基函数展示 (无 GLVis; H1/ND/RT/L2,
 │   │                            vsize 与 C++ 逐位一致, 32/34 组合;
-│   │                            hex L2 ≥P2 为 fem-rs 缺口)
-│   ├── get_values.rs          ← DC 场采样 (依赖 find_points;
-│   │                            与 C++ 输出逐位一致)
-│   └── lor_transfer.rs        ← LOR 传输 (简化 H1+pointwise 版;
-│                                HO/R(HO)/LOR 质量与 C++ 逐位一致)
+│   │                            hex L2 ≥P2 为 fem-rs 缺口; C++ `-no-vis` 只打 4 行 header)
+│   ├── get_values.rs          ← ⚠️ **实测失败**：`-r Example23 -p "0 0 0.5"` →
+│   │                            `MissingMesh`（`data_collection_load.rs:101` 硬编码
+│   │                            `mesh3d`，而 C++ 官方样例 Example5 是 2-D），`-o` 被吞
+│   │                            ⇒ 原"与 C++ 输出逐位一致"无可复现命令（D88/D129）
+│   └── lor_transfer.rs        ← (b) LOR 传输 (简化 H1+pointwise 版; C++ 默认走
+│                                L2ProjectionGridTransfer 而本文件无参时静默按 pointwise
+│                                跑; `-h1/-l2/-t/-w/-ea/-d` 未实现 ⇒ `panic!` 而非
+│                                `exit(3)`; HO/R(HO)/LOR 质量与 C++ 逐位一致)
 ├── electromagnetics/        ← 对应 miniapps/electromagnetics/
 │   ├── lorentz.rs
 │   ├── tesla.rs
@@ -66,7 +79,14 @@ miniapps/
 │                                2D 与 Kershaw 全对比逐位一致;
 │                                maxwell 3D hex 差 HexNDk 归一化 4×,
 │                                C++ PARTIAL/NONE 的矩阵免费 AbsMult 为缺口)
-├── nurbs/                   ← 对应 miniapps/nurbs/ (5 个 1:1 + 1 个部分移植/exit 3)
+├── nurbs/                   ← 对应 miniapps/nurbs/（**round 30 审计**：15 个可执行中
+│                                **4 个真 1:1**（ex1/ex3/ex5/ex24，均有 C++ 对照数字）+
+│                                **2 个名不副实待整改**（见下 solenoidal/printfunc）+
+│                                **9 个缺失**：ex1p/ex10/ex10p/ex11p/curveint/mesh_info/
+│                                patch_ex1/surface/naca_cmesh；共同地基 = 并行 NURBS、
+│                                `Nurbs*Space` 实现 `FESpace`（+vdim）、`patches` 变体读写 +
+│                                NURBSPatch 控制网编辑、NURBS 网格 writer。⚠️ `-pm/-ps/-p`
+│                                **静默忽略**（实测加不加输出完全相同））
 │   ├── nurbs_ex1.rs         ← 1:1（H¹ 标量; NurbsFESpace 真 NURBS 空间,
 │   │                            4356 dof / ARF 0.588878, 11 配置 9 网格
 │   │                            与 C++ 迭代块逐字节一致; **1D 已支持**:
@@ -112,10 +132,35 @@ miniapps/
 │                                细化参数区间求几何，同一映射差 ~1 ulp/entry）
 │                                仍缺 `refined.mesh`/`sol.gf` + GLVis（步骤
 │                                12–13），`-nn` 仍 exit(3)
-├── meshing/                 ← 对应 miniapps/meshing/
-│   ├── shaper.rs            ← 材料界面 AMR (1:1)
-│   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
+│   ├── nurbs_solenoidal.rs  ← ⚠️ **名不副实（round 30 审计，(e) 类）**：自称
+│   │                            "1:1 port" 但实测走的是 C++ 的 **`-nn`（普通 FE）**
+│   │                            档：dim(R)=33024/16384（C++ 默认 NURBS 档 =
+│   │                            8580/4225）、缺 `Create NURBS fec and ext` 横幅、
+│   │                            缺 `‖div u_h−div u_ex‖` 行（`compute_div_error`
+│   │                            在整个 `crates/` 是 0 命中）、L² 9.5586e-05 vs
+│   │                            C++ 2.08242e-05、算了 `m_gs/s_gs` 却从不使用
+│   │                            ⇒ 重写或 `exit(3)`+缺口清单（D131）
+│   └── nurbs_printfunc.rs   ← ⚠️ **格式未达标（round 30 审计，(e) 类）**：数值
+│                                早已核过（≤1.1e-15），但 C++ vs Rust
+│                                **40/48 行不同**（C++ 6 位有效数字 vs Rust
+│                                round-trip）；改用库里已有的
+│                                `fem_solver::fmt_g` 即逐字节（D131）
+├── meshing/                 ← 对应 miniapps/meshing/（**round 30 审计**：22 个可执行中
+│                                5 个 a/b 类（mesh-optimizer 良态档与 C++ **逐位一致**、
+│                                hpref/phpref/ref321/fit-node-position）+ 10 个缺失 +
+│                                **11 个 (e) 类**，其中 7 个产出 MFEM 与本仓**都读不回来**
+│                                ⇒ 根因 = `write_mfem` 边界面回落硬编码 3 节点/TRIANGLE，见 D126）
+│   ├── shaper.rs            ← ⚠️ 曾标"(1:1) MATERIAL 界面 AMR"，**实测证伪**：quad
+│   │                            分支走 `refine_uniform`（整网格均匀细化、忽略 marked
+│   │                            集合）16→64→…→65536 vs C++ 的 16→52→64 NC 网格；
+│   │                            材料属性 `attr(i)` 从未写回 ⇒ 待真修（D132）
+│   ├── extruder.rs          ← ⚠️ 曾标"(1:1)"，**实测证伪**：只支持 2D quad/tri，
+│   │                            `-trans`/`-ny`/`-wy` 静默忽略；边界段写成 3 节点
+│   │                            TRIANGLE（应 SQUARE）⇒ MFEM abort（D126/D132）
 │   ├── twist.rs / klein-bottle.rs / toroid.rs / trimmer.rs / reflector.rs
+│   │                        ← ⚠️ 均无裁剪标注但实测偏离（twist 的曲率被 `&& false`
+│   │                            短路、toroid 把 prism 写成 hex、reflector 产出 7 对
+│   │                            重复元素、trimmer 边界 34 vs 36）⇒ D126/D132
 │   ├── mesh-explorer.rs / mesh-quality.rs
 │   ├── polar-nc.rs          ← 极坐标 NC 网格
 │   ├── ref321.rs            ← 3:1 各向异性细化 (1:1, order 1:
@@ -144,7 +189,7 @@ miniapps/
 ├── autodiff/                ← 对应 miniapps/autodiff/ (seq_example;
 │   └── autodiff_example.rs     pLaplacian 能量 Newton; 依赖
 │                                fem_assembly::ad 双数 AD)
-├── gslib/                   ← 对应 miniapps/gslib/
+├── gslib/                   ← 对应 miniapps/gslib/（**round 30 审计：实质 1/7**）
 │   └── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
 │                                BVH + 等参元 Newton, code 0/1/2 与
 │                                dist² 语义对齐; glibc rand 逐位复现
@@ -152,6 +197,19 @@ miniapps/
 │                                全对齐, max_err ~1e-15; -surf/-mpr/
 │                                -hr/-ft 2/3 及 NC/mixed/pyramid
 │                                网格裁剪 exit 3)
+│                                ⚠️ **round 30 修复**：本文件此前**从未在
+│                                `examples/Cargo.toml` 注册**（859 行、依赖齐备），
+│                                导致 README 下面三条命令全部报
+│                                `no example target named gslib_findpts`；已加
+│                                注册，三条命令现跑通：max interp error
+│                                **1.11e-15 / 6.66e-16 / 1.78e-15**（found 全中、
+│                                not-found 0）
+│                                **仍缺 6 件**：`field-interp`/`field-diff`/
+│                                `schwarz_ex1` 属 MFEM `SEQ_MINIAPPS`（串行可跑）
+│                                且只依赖已有 `GslibFindPoints` ⇒ 可直接做；
+│                                `pfindpts`/`schwarz_ex1p`/`particles_redist`
+│                                需并行 locator 与 `ParticleSet::Redistribute`
+│                                （后者全仓 0 命中）⇒ D134
 ├── spde/                    ← 对应 miniapps/spde/
 │   └── generate_random_field.rs ← Matérn 高斯随机场 SPDE (串行 1:1;
 │                                WhiteGaussianNoiseDomainLFIntegrator 真
