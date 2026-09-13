@@ -296,6 +296,9 @@ path = "../miniapps/electromagnetics/lorentz.rs"
 name = "miniapp_maxwell"
 path = "../miniapps/electromagnetics/maxwell.rs"
 [[example]]
+name = "miniapp_joule"
+path = "../miniapps/electromagnetics/joule.rs"
+[[example]]
 name = "mfem_ex15_dump_p1_it3"
 path = "mfem_ex15_dump_p1_it3.rs"
 [[example]]

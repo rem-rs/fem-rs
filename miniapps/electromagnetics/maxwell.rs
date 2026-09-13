@@ -62,11 +62,34 @@
 //!   own 1e-3 `ptol`, not a porting error).  Both land in the same
 //!   `SnapTimeStep` bucket, so `Number of Time Steps` / `Time Step Size` and
 //!   every subsequent number are unaffected;
-//! * `weakCurlMuInv_ = ParMixedBilinearForm(HDiv, HCurl)` has H(curl) rows;
-//!   fem-rs's H(div)×H(curl) mixed curl assembly keeps H(div) rows, so the
-//!   operator is applied as its transpose, which is exact for one rank
-//!   (all dofs owned).  A multi-rank run would need an "owned test-rows"
-//!   variant of `ParMixedAssembler` (documented in the report).
+//! * the discrete curl `-Curl` (`ParDiscreteLinearOperator::curl_3d`) is still
+//!   assembled with H(div) rows and applied transposed in the power iteration
+//!   (`maximum_time_step`, where `curl_t = self.neg_curl.transpose()` maps
+//!   H(div) → H(curl)); unlike `weakCurlMuInv_` that matrix is used only for
+//!   the `dtMax` power method, and the transpose only needs the *rows* of the
+//!   H(curl) space there.  `weakCurlMuInv_` itself used to be built the same
+//!   way and now uses D88's owned-H(curl)-row assembly (below).
+//!
+//! ## D99: `weakCurlMuInv_` via the owned-H(curl)-row assembler
+//!
+//! `MaxwellSolver` builds `weakCurlMuInv_` as
+//! `ParMixedBilinearForm(HDiv, HCurl)` + `MixedVectorWeakCurlIntegrator`, i.e.
+//! an operator whose **rows are H(curl) true DOFs** and whose columns are
+//! H(div) DOFs.  Earlier rounds assembled the H(div)-row matrix and applied
+//! `.transpose()` at the call site.  That is exact when one rank owns every
+//! DOF, but for several ranks the H(div)-row path has already truncated its
+//! rows to the owned H(div) DOFs, so its transpose exposes a row for every
+//! *local* H(curl) DOF — ghost rows carrying only this rank's element
+//! contributions.  The call site now uses
+//! `ParMixedAssembler::assemble_hdiv_hcurl_curl_with_coeff` (D88), which
+//! assembles the local matrix in the H(curl)-row orientation, permutes by the
+//! **H(curl)** partition and keeps only the owned H(curl) rows.  For one rank
+//! the two are bit-for-bit the same matrix: the serial kernel
+//! `assemble_hdiv_hcurl_weak_curl` is literally
+//! `assemble_hcurl_hdiv_weak_curl(...).transpose()`, and at one rank the
+//! permutation is the identity and there are no ghost rows.  At 2 ranks the
+//! shape changes (H(curl) owned rows instead of all-local H(curl) rows) and
+//! the ghost rows are gone; see the report for the multi-rank numbers.
 //!
 //! ## Verification (serial, `--ranks 1`)
 //!
@@ -80,7 +103,9 @@
 //! * the whole stdout (banner, `Options used:` dump, ctor progress lines, dof
 //!   counts, `Number of Time Steps: 100`, `Time Step Size: 0.1ns`, and all 40
 //!   `Energy(<t>ns):  <e>J` lines of the 100-step run) is **byte-identical**
-//!   apart from the mesh path string and the `Maximum Time Step` line above;
+//!   apart from the mesh path string and the `Maximum Time Step` line above.
+//!   After the D99 swap the run is byte-identical to the pre-D99 run as well
+//!   (`diff` of the two `--ranks 1` logs is empty);
 //! * the E/B split of the energy agrees too: the first-step invariants
 //!   `J^T M1^-1 J = 3.193661332363493e8` and `|M1^-1 J| = 2.942452391632176e10`
 //!   are equal to the last digit against an independent C++ probe built from
@@ -558,8 +583,9 @@ struct Maxwell {
     m1: ParCsrMatrix,
     /// `M2MuInv_` — H(div) mass with `1/mu`.
     m2: ParCsrMatrix,
-    /// `WeakCurlMuInv_` applied as assembled: maps H(div) dofs to H(curl)
-    /// dofs (the transpose of fem-rs's H(div)-row mixed curl matrix).
+    /// `WeakCurlMuInv_` — H(div) dofs → H(curl) dofs, assembled directly in
+    /// the H(curl)-row orientation (`ParMixedAssembler::
+    /// assemble_hdiv_hcurl_curl_with_coeff`, D88).
     weak_curl: fem_linalg::CsrMatrix<f64>,
     /// `NegCurl_` — the discrete curl, negated: H(curl) → H(div).
     neg_curl: fem_linalg::CsrMatrix<f64>,
@@ -649,16 +675,18 @@ impl Maxwell {
 
         log("Creating Weak Curl Operator");
         // MFEM's WeakCurlMuInv_ is `ParMixedBilinearForm(HDiv, HCurl)` i.e.
-        // rows = H(curl) true dofs.  fem-rs's mixed curl assembly keeps the
-        // H(div) rows, so we apply its transpose (identical entries, swapped
-        // indices — exact for one rank, see the header note).
-        let weak_curl_a = ParMixedAssembler::assemble_hcurl_hdiv_curl_with_coeff(
+        // rows = H(curl) true dofs.  D88's owned-H(curl)-row entry point
+        // assembles the local matrix in that orientation, permutes it with the
+        // H(curl) partition as the row partition and keeps only the owned
+        // H(curl) rows — so no `.transpose()` at the call site (that would
+        // transpose the already row-truncated H(div)-row matrix and expose
+        // rows for every local H(curl) DOF, ghosts included).
+        let weak_curl = ParMixedAssembler::assemble_hdiv_hcurl_curl_with_coeff(
             &nd,
             &rt,
             quad_order,
             FnCoeff(&mu_inv_c),
         );
-        let weak_curl = weak_curl_a.transpose();
 
         log("Creating discrete curl operator");
         let mut neg_curl = ParDiscreteLinearOperator::curl_3d(&nd, &rt);
