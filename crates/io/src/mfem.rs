@@ -737,20 +737,58 @@ fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemRe
 /// every connectivity entry by one, which made MFEM either abort with
 /// `Invalid mesh topology` or overrun its vertex array.
 ///
-/// For 3D meshes containing tetrahedra, the mesh is cloned and normalized
-/// with `mark_tet_mesh_for_refinement` before writing, so that programmatically
-/// created meshes round-trip with the same canonical tet orientation that
-/// `read_mfem` produces (longest edge = (v0,v1)).
+/// **High-order geometry**: when the mesh carries a curved geometry table
+/// (`Mesh::geom_order() > 1`, set by `Mesh::set_curvature`) the file gets an
+/// MFEM `nodes` section and — exactly as `Mesh::Printer` does — the `vertices`
+/// section holds only the vertex count, with the *space dimension* moving into
+/// the section's `VDim` line (`mesh/mesh_readers.cpp:105-110`).  The continuous
+/// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra and tetrahedra and
+/// the discontinuous (`L2_T1_<dim>D_P<p>`) one for hexahedra and quads; any
+/// other combination is refused with an error instead of silently writing a
+/// straight-sided mesh.  See [`NodesSpace`] and [`write_mfem_nodes`].
+///
+/// For 3D meshes containing tetrahedra *without* high-order geometry, the mesh
+/// is cloned and normalized with `mark_tet_mesh_for_refinement` before writing,
+/// so that programmatically created meshes round-trip with the same canonical
+/// tet orientation that `read_mfem` produces (longest edge = (v0,v1)).  A mesh
+/// that writes a `nodes` section keeps its own vertex order (the normalization
+/// permutes element vertex lists and does not carry the geometry table).
 pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
+    write_mfem_nodes(writer, mesh_d, mesh_3d, NodesSpace::Continuous)
+}
+
+/// [`write_mfem`] with an explicit continuity for the high-order `nodes`
+/// section (MFEM `Mesh::SetCurvature`'s `discont` argument).
+pub fn write_mfem_nodes<W: Write>(
+    writer: &mut W,
+    mesh_d: &Mesh<2>,
+    mesh_3d: Option<&Mesh<3>>,
+    space: NodesSpace,
+) -> FemResult<()> {
     // D126: never write a mesh whose element/face tables contradict each other.
     // This runs before a single byte is emitted so a failure cannot leave a
     // half-written (or silently corrupt) `.mesh` behind.
     validate_mesh_for_write(mesh_d, mesh_3d)?;
+    // The `nodes` payload is resolved before anything is emitted: a mesh whose
+    // high-order geometry has no faithful MFEM numbering must fail *without*
+    // leaving a file behind that silently drops the curvature.
+    let nodes: Option<(u8, usize, Vec<f64>)> = if let Some(m3) = mesh_3d {
+        nodes_dof_values(m3, space)?
+    } else {
+        nodes_dof_values(mesh_d, space)?
+    };
     // D2: tet io round-trip orientation normalization.
     // read_mfem applies mark_tet_mesh_for_refinement (MarkTetMeshForRefinement)
     // on read to canonicalize tet vertex order.  write_mfem must apply the
     // same normalization so meshes created programmatically round-trip.
-    let needs_normalization = mesh_3d.map_or(false, has_tet4);
+    //
+    // The normalization only permutes each element's *vertex list*; a curved
+    // mesh's geometry table is keyed by reference slot and is not carried
+    // through it, so a mesh that writes a `nodes` section keeps its own vertex
+    // order (the file is then self-consistent, and `read_mfem`'s geometry
+    // table — which is built from the file's own element order — comes back
+    // unchanged).
+    let needs_normalization = nodes.is_none() && mesh_3d.map_or(false, has_tet4);
     let tet_normalized: Option<Mesh<3>> = if needs_normalization {
         let mut clone = (*mesh_3d.unwrap()).clone();
         fem_mesh::mark_tet_mesh_for_refinement(&mut clone);
@@ -842,14 +880,301 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
     }
 
     // Vertices section
-    writeln!(writer, "\nvertices\n{n_nodes}\n{dim}")?;
-    for i in 0..n_nodes {
-        for d in 0..dim {
-            write!(writer, " {}", coords[i * dim + d])?;
+    //
+    // MFEM writes the vertex *coordinates* only for a straight-sided mesh; a
+    // mesh with a `nodes` grid function emits `vertices / <n>` followed by the
+    // `nodes` section instead (`Mesh::Printer`), because the geometry is then
+    // fully described by the node dof values and even the space dimension is
+    // carried by the section's `VDim` (`mesh/mesh_readers.cpp:105-110`).
+    writeln!(writer, "\nvertices\n{n_nodes}")?;
+    if let Some((order, n_dofs, values)) = nodes.as_ref() {
+        // `dim` is both the topological and the space dimension here:
+        // `nodes_dof_values` rejects a mesh whose topological dimension differs
+        // from the stored coordinate dimension (a `dim < spaceDim` surface).
+        write_nodes_section(writer, space, *order, dim, *n_dofs, values)?;
+    } else {
+        // Straight-sided: `<space dim>` then one coordinate row per vertex, as
+        // before (the `nodes` section replaces this whole block).
+        writeln!(writer, "{dim}")?;
+        for i in 0..n_nodes {
+            for d in 0..dim {
+                write!(writer, " {}", coords[i * dim + d])?;
+            }
+            writeln!(writer)?;
+        }
+    }
+    Ok(())
+}
+
+// ─── High-order `nodes` section (writer) ─────────────────────────────────────
+
+/// Continuity of the high-order `nodes` grid function a written `.mesh` file
+/// declares in its `FiniteElementSpace` header — MFEM `Mesh::SetCurvature`'s
+/// `discont` argument (`mesh/mesh.cpp:7211`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NodesSpace {
+    /// `SetCurvature(order, false, …)`: the node dofs are a `H1_FECollection`
+    /// space (`H1_<dim>D_P<p>`), one dof per mesh vertex / edge / face /
+    /// element interior.
+    #[default]
+    Continuous,
+    /// `SetCurvature(order, true, …)`: the node dofs are an `L2_FECollection`
+    /// with Gauss-Lobatto points (`L2_T1_<dim>D_P<p>`), `(p+1)^dim` private
+    /// dofs per element.
+    Discontinuous,
+}
+
+/// The `nodes` section header and payload, exactly as MFEM's
+/// `GridFunction::Save` (`fem/gridfunc.cpp:4305`) writes them for
+/// `Ordering: 1` (`byVDIM`):
+///
+/// ```text
+/// nodes
+/// FiniteElementSpace
+/// FiniteElementCollection: <fec>
+/// VDim: <space dim>
+/// Ordering: 1
+/// <blank>
+/// <x y [z]> of dof 0
+/// <x y [z]> of dof 1
+/// …
+/// ```
+///
+/// `values[d * sdim + c]` is component `c` of dof `d`.  `dim` is the mesh's
+/// *topological* dimension (the `P<dim>D` of the collection name) while `sdim`
+/// is the space dimension (`VDim`); the two agree for every mesh this writer
+/// accepts, because `fem_mesh::Mesh<D>` stores `D` coordinate components.
+fn write_nodes_section<W: Write>(
+    writer: &mut W,
+    space: NodesSpace,
+    order: u8,
+    dim: usize,
+    n_dofs: usize,
+    values: &[f64],
+) -> FemResult<()> {
+    // `H1_%dD_P%d` (`H1_FECollection`'s constructor, `fem/fe_coll.cpp:1760`) or
+    // `L2_T1_%dD_P%d` (`L2_FECollection` with `Quadrature1D` type 1 = the
+    // Gauss-Lobatto points `Mesh::SetCurvature` selects).
+    let family = match space {
+        NodesSpace::Continuous => "H1",
+        NodesSpace::Discontinuous => "L2_T1",
+    };
+    let sdim = values.len() / n_dofs;
+    writeln!(
+        writer,
+        "\nnodes\nFiniteElementSpace\nFiniteElementCollection: {family}_{dim}D_P{order}\n\
+         VDim: {sdim}\nOrdering: 1\n"
+    )?;
+    // `GridFunction::Save` calls `Vector::Print(os, fes->GetVDim())` for a
+    // byVDIM space: values separated by a single space, one newline after every
+    // `VDim` values, and one final newline (`linalg/vector.cpp:870`).
+    for d in 0..n_dofs {
+        for c in 0..sdim {
+            if c > 0 {
+                write!(writer, " ")?;
+            }
+            write!(writer, "{}", values[d * sdim + c])?;
         }
         writeln!(writer)?;
     }
     Ok(())
+}
+
+/// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus
+/// the element order and the dof count.
+///
+/// Returns `Ok(None)` for a straight-sided mesh (`geom_order() == 1`), which
+/// MFEM stores as a plain `vertices` coordinate block.
+///
+/// **The numbering is MFEM's, not fem-rs's.**  For a continuous space the
+/// per-slot maps are the ones the reader uses ([`hex_slot_map`] for D41,
+/// [`tet_slot_map`] for D43) — this direction is their exact inverse, and it
+/// is available because both element families place their dofs on the *same*
+/// nodal lattice as MFEM's `H1_HexahedronElement` / `H1_TetrahedronElement`,
+/// so a value read at one slot can be handed to the matching dof unchanged.
+/// For a discontinuous space the dof of slot `d` of element `e` is simply
+/// `e * npe + d`, with `d` indexing MFEM's `L2FECollection` element ordering
+/// (the lexicographic tensor order), which is a permutation of the mesh's own
+/// slot order.
+fn nodes_dof_values<const D: usize>(
+    mesh: &Mesh<D>,
+    space: NodesSpace,
+) -> FemResult<Option<(u8, usize, Vec<f64>)>> {
+    let order = mesh.geom_order();
+    if order <= 1 {
+        return Ok(None);
+    }
+    let dim = mesh.topological_dim() as usize;
+    if dim != D {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: `nodes` section for a {dim}-dimensional mesh in {D}-D space \
+             (spaceDim > dim) is not supported"
+        )));
+    }
+    let sdim = D;
+    let geo = mesh.geometry.as_ref().ok_or_else(|| {
+        FemError::Mesh(
+            "write_mfem: mesh reports geometric order > 1 but carries no geometry table".into(),
+        )
+    })?;
+    let n_elems = mesh.n_elements();
+    let npe = geo.nodes_per_elem;
+    if npe == 0 || geo.conn.len() != n_elems * npe || geo.n_nodes == 0 {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: geometry table is inconsistent with the mesh ({} elements, \
+             {npe} nodes per element, {} connectivity entries, {} nodes)",
+            n_elems,
+            geo.conn.len(),
+            geo.n_nodes
+        )));
+    }
+    let et = mesh.element_type_at(0);
+    for e in 1..n_elems as u32 {
+        if mesh.element_type_at(e) != et {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: a `nodes` section needs a uniform element type, but the mesh \
+                 mixes {et:?} and {:?}",
+                mesh.element_type_at(e)
+            )));
+        }
+    }
+    let src = |slot: usize| -> &[f64] {
+        let n = geo.conn[slot] as usize;
+        &geo.coords[n * sdim..n * sdim + sdim]
+    };
+    match space {
+        NodesSpace::Continuous => {
+            let (slots, n_dofs): (Vec<NodeId>, usize) = match et {
+                ElementType::Hex8 => {
+                    let (slots, n_dofs) = hex_slot_map(mesh, order as usize).map_err(|e| match e {
+                        HexSlotErr::NotHex => FemError::Mesh(
+                            "write_mfem: no MFEM H1 `nodes` numbering for this mesh".into(),
+                        ),
+                        HexSlotErr::Unsupported(why) => FemError::Mesh(format!(
+                            "write_mfem: cannot write the hexahedral `nodes` section: {why}"
+                        )),
+                    })?;
+                    (slots, n_dofs)
+                }
+                ElementType::Tet4 => {
+                    // Only the slot -> dof map is needed here; the extra
+                    // physical keys the reader keeps for MFEM's `refine = 1`
+                    // renumbering are not part of the file's numbering.
+                    let (slots, _, n_dofs) = tet_slot_map(mesh, order as usize).map_err(|why| {
+                        FemError::Mesh(format!(
+                            "write_mfem: cannot write the tetrahedral `nodes` section: {why}"
+                        ))
+                    })?;
+                    (slots, n_dofs)
+                }
+                other => {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: no MFEM-faithful continuous `nodes` numbering for \
+                         {other:?} (only Hex8 and Tet4 are implemented); no `nodes` section \
+                         was written"
+                    )))
+                }
+            };
+            let mut values = vec![0.0f64; n_dofs * sdim];
+            let mut filled = vec![false; n_dofs];
+            for e in 0..n_elems {
+                for s in 0..npe {
+                    let g = slots[e * npe + s] as usize;
+                    let v = src(e * npe + s);
+                    if filled[g] {
+                        // A dof shared by several elements must describe one
+                        // physical point; a disagreement means the mesh's
+                        // geometry is not actually continuous.
+                        if (0..sdim).any(|c| !approx_eq(values[g * sdim + c], v[c])) {
+                            return Err(FemError::Mesh(format!(
+                                "write_mfem: geometry dof {g} is shared by two elements with \
+                                 different coordinates — the mesh geometry is not continuous"
+                            )));
+                        }
+                    } else {
+                        values[g * sdim..g * sdim + sdim].copy_from_slice(v);
+                        filled[g] = true;
+                    }
+                }
+            }
+            if let Some(g) = filled.iter().position(|f| !*f) {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: no element claims the continuous `nodes` dof {g}"
+                )));
+            }
+            Ok(Some((order, n_dofs, values)))
+        }
+        NodesSpace::Discontinuous => {
+            // MFEM's `L2_FECollection(p, dim, 1)` element enumeration, given as
+            // a permutation of the mesh's own geometry slot order (both are the
+            // same nodal lattice, so the slots are matched by their reference
+            // coordinates).
+            let perm: Vec<usize> = match et {
+                ElementType::Hex8 => lex_slot_permutation(
+                    &fem_element::lagrange::factory::HexQk::new(order as usize).dof_coords(),
+                    &fem_element::lagrange::factory::HexQk::new_lex(order as usize).dof_coords(),
+                ),
+                ElementType::Quad4 => lex_slot_permutation(
+                    &fem_element::lagrange::factory::QuadQk::new(order as usize).dof_coords(),
+                    &fem_element::lagrange::factory::QuadQk::new_lex(order as usize).dof_coords(),
+                ),
+                other => {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: no MFEM-faithful discontinuous `nodes` numbering for \
+                         {other:?} (only Hex8 and Quad4 are implemented); no `nodes` section \
+                         was written"
+                    )))
+                }
+            }
+            .ok_or_else(|| {
+                FemError::Mesh(
+                    "write_mfem: the mesh's geometry slots are not on the element's own node \
+                     lattice, so they cannot be re-ordered into MFEM's L2 numbering"
+                        .into(),
+                )
+            })?;
+            let n_dofs = n_elems * npe;
+            let mut values = vec![0.0f64; n_dofs * sdim];
+            for e in 0..n_elems {
+                for (d, &s) in perm.iter().enumerate() {
+                    values[(e * npe + d) * sdim..(e * npe + d + 1) * sdim]
+                        .copy_from_slice(src(e * npe + s));
+                }
+            }
+            Ok(Some((order, n_dofs, values)))
+        }
+    }
+}
+
+/// Permutation taking `mesh_slots` (the order the mesh's geometry element
+/// enumerates its nodes) to `target_slots` (the order MFEM's element uses for
+/// the same lattice), matched by reference coordinate.  `None` when the two are
+/// not the same set of points (then no faithful re-ordering exists).
+fn lex_slot_permutation(mesh_slots: &[Vec<f64>], target_slots: &[Vec<f64>]) -> Option<Vec<usize>> {
+    if mesh_slots.len() != target_slots.len() {
+        return None;
+    }
+    let same = |a: &[f64], b: &[f64]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12)
+    };
+    let mut perm = Vec::with_capacity(target_slots.len());
+    let mut used = vec![false; mesh_slots.len()];
+    for t in target_slots {
+        let found = mesh_slots
+            .iter()
+            .enumerate()
+            .position(|(i, m)| !used[i] && same(m, t))?;
+        used[found] = true;
+        perm.push(found);
+    }
+    Some(perm)
+}
+
+/// Relative comparison for two dof coordinates that must describe the same
+/// physical point (bit-exact agreement is not required: the two elements
+/// compute the shared node through different parametrisations).
+fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * (1.0 + a.abs().max(b.abs()))
 }
 
 /// Returns `true` if the 3D mesh contains any Tet4 elements (uniform or mixed).
@@ -895,19 +1220,40 @@ fn write_boundary_section<W: Write, const D: usize>(
 /// The mesh is validated (D126) *before* the file is created, so a rejected
 /// mesh leaves no empty file behind.
 pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &Mesh<2>) -> FemResult<()> {
-    validate_mesh_for_write(mesh_d, None)?;
-    let mut file = std::fs::File::create(path)?;
-    write_mfem(&mut file, mesh_d, None)
+    write_mfem_bytes_to(path, &mut |w: &mut Vec<u8>| write_mfem(w, mesh_d, None))
 }
 
 /// Write a 3D mesh to MFEM `.mesh` file on disk.
 ///
-/// The mesh is validated (D126) *before* the file is created, so a rejected
-/// mesh leaves no empty file behind.
+/// The file is only created once the whole payload has been produced (the mesh
+/// tables are validated by D126 and a high-order `nodes` section must have a
+/// faithful MFEM numbering), so a rejected mesh leaves no empty file behind.
 pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &Mesh<3>) -> FemResult<()> {
-    validate_mesh_for_write(&Mesh::<2>::unit_square_tri(2), Some(mesh))?;
+    write_mfem_file_3d_nodes(path, mesh, NodesSpace::Continuous)
+}
+
+/// [`write_mfem_file_3d`] with an explicit continuity for the `nodes` section.
+pub fn write_mfem_file_3d_nodes(
+    path: impl AsRef<std::path::Path>,
+    mesh: &Mesh<3>,
+    space: NodesSpace,
+) -> FemResult<()> {
+    write_mfem_bytes_to(path, &mut |w: &mut Vec<u8>| {
+        write_mfem_nodes(w, &Mesh::<2>::unit_square_tri(2), Some(mesh), space)
+    })
+}
+
+/// Render a mesh into a buffer and only then create `path`, so a failure to
+/// serialize leaves no partially written file behind.
+fn write_mfem_bytes_to(
+    path: impl AsRef<std::path::Path>,
+    render: &mut dyn FnMut(&mut Vec<u8>) -> FemResult<()>,
+) -> FemResult<()> {
+    let mut buf: Vec<u8> = Vec::new();
+    render(&mut buf)?;
     let mut file = std::fs::File::create(path)?;
-    write_mfem(&mut file, &Mesh::<2>::unit_square_tri(2), Some(mesh))
+    file.write_all(&buf)?;
+    Ok(())
 }
 
 /// Write a 2D mesh with custom vertex coordinates (e.g. displaced nodes).
@@ -1058,24 +1404,40 @@ enum HexGeom {
     Built(GeometryData),
 }
 
-/// D41: reproduce MFEM's H1 `nodes` numbering for an all-Hex8 mesh and return
-/// the geometry table in the reference element's ([`HexQk`]) slot order.
+/// Failure of the D41 hexahedral `nodes` map.  `NotHex` (the mesh has no
+/// hexahedra at all) is a *routing* answer — the caller falls back to the
+/// simplex paths — while `Unsupported` means the mesh is hexahedral but its
+/// `nodes` numbering cannot be reproduced faithfully.
+enum HexSlotErr {
+    NotHex,
+    Unsupported(&'static str),
+}
+
+impl HexSlotErr {
+    /// Shorthand for the `Unsupported` variant as a function result.
+    fn unsupported(why: &'static str) -> Result<(Vec<NodeId>, usize), HexSlotErr> {
+        Err(HexSlotErr::Unsupported(why))
+    }
+}
+
+/// D41: MFEM's H1 `nodes` numbering for an all-Hex8 mesh, as the map
+/// `conn[e * npe + s] = <file dof of reference slot s of element e>` plus the
+/// total number of geometry dofs.  Slots are in the reference element's
+/// ([`HexQk`]) order.
 ///
-/// `raw` is the `nodes` dof vector as stored in the file (`ordering` 0 =
-/// byNODES, 1 = byVDIM).  Returns [`HexGeom::NotHex`] for meshes that are not
-/// uniformly hexahedral so the caller can fall back to the simplex path.
-fn build_h1_hex_geometry<M: MeshTopology>(
+/// This is the single source of truth for the hexahedral numbering: the reader
+/// uses it to place a file's dof values into the geometry table, and the
+/// writer uses it to emit a mesh's geometry at the dofs MFEM expects (the two
+/// directions differ only in which side supplies the values).
+fn hex_slot_map<M: MeshTopology>(
     mesh: &M,
-    order: u8,
-    raw: &[f64],
-    ordering: usize,
-) -> HexGeom {
-    let p = order as usize;
+    p: usize,
+) -> Result<(Vec<NodeId>, usize), HexSlotErr> {
     let e = p - 1; // dofs per edge (and per face row/column)
     let n_elems = mesh.n_elements();
     let n_vert = mesh.n_nodes();
     if n_elems == 0 || n_vert == 0 {
-        return HexGeom::NotHex;
+        return Err(HexSlotErr::NotHex);
     }
     let mut n_hex = 0usize;
     for el in 0..n_elems as u32 {
@@ -1084,13 +1446,13 @@ fn build_h1_hex_geometry<M: MeshTopology>(
         }
     }
     if n_hex == 0 {
-        return HexGeom::NotHex; // pure simplex/other mesh: not our business
+        return Err(HexSlotErr::NotHex); // pure simplex/other mesh: not our business
     }
     if n_hex != n_elems {
         // A mixed mesh containing hexahedra: the `nodes` dof blocks are sized
         // per element geometry, so neither this mapper nor the uniform
         // DofManager fallback can describe it.
-        return HexGeom::Unsupported("mixed-element mesh containing hexahedra");
+        return HexSlotErr::unsupported("mixed-element mesh containing hexahedra");
     }
 
     // Mesh edges/faces in MFEM's enumeration (element traversal, then local
@@ -1124,21 +1486,6 @@ fn build_h1_hex_geometry<M: MeshTopology>(
     let n_faces = face_ids.len();
 
     let n_dofs = n_vert + n_edges * e + n_faces * e * e + n_elems * e * e * e;
-    if raw.len() < 3 * n_dofs {
-        return HexGeom::Unsupported("nodes section too short for the H1 hex space");
-    }
-    let mut coords = vec![0.0f64; n_dofs * 3];
-    match ordering {
-        0 => {
-            for c in 0..3 {
-                for g in 0..n_dofs {
-                    coords[g * 3 + c] = raw[c * n_dofs + g];
-                }
-            }
-        }
-        1 => coords.copy_from_slice(&raw[..3 * n_dofs]),
-        _ => return HexGeom::Unsupported("unknown nodes ordering"),
-    }
 
     // Local-edge lookup: (varying axis, side of the two fixed axes) -> edge id.
     let mut edge_lut: HashMap<(usize, usize, usize), usize> = HashMap::new();
@@ -1146,7 +1493,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
         let (ca, cb) = (HEX_CORNERS[la], HEX_CORNERS[lb]);
         let av = match (0..3).find(|&d| ca[d] != cb[d]) {
             Some(d) => d,
-            None => return HexGeom::Unsupported("degenerate HEX_EDGES table"),
+            None => return HexSlotErr::unsupported("degenerate HEX_EDGES table"),
         };
         let bnd: Vec<usize> = (0..3).filter(|&d| d != av).collect();
         edge_lut.insert((av, ca[bnd[0]], ca[bnd[1]]), k);
@@ -1156,14 +1503,14 @@ fn build_h1_hex_geometry<M: MeshTopology>(
     let ref_coords = ref_elem.dof_coords();
     let npe = ref_coords.len();
     if npe != 8 + 12 * e + 6 * e * e + e * e * e {
-        return HexGeom::Unsupported("reference hex element is not the H1 order-p tensor basis");
+        return HexSlotErr::unsupported("reference hex element is not the H1 order-p tensor basis");
     }
     // The 1-D GLL nodes of the reference basis: the tensor index of a slot is
     // the position of its coordinate in this table (`HexQk` builds its 1-D
     // basis from the same function, so the values match bit-for-bit).
     let gll = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
     if gll.len() != p + 1 {
-        return HexGeom::Unsupported("unexpected Gauss-Lobatto node count");
+        return HexSlotErr::unsupported("unexpected Gauss-Lobatto node count");
     }
 
     let edge_base = n_vert;
@@ -1179,7 +1526,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                 let k = match gll.iter().position(|&x| (x - c[d]).abs() < 1e-12) {
                     Some(k) => k,
                     None => {
-                        return HexGeom::Unsupported("reference slot is not on the GLL tensor grid")
+                        return HexSlotErr::unsupported("reference slot is not on the GLL tensor grid")
                     }
                 };
                 idx[d] = k;
@@ -1196,7 +1543,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     let side = [idx[0] / p, idx[1] / p, idx[2] / p];
                     match (0..8).find(|&k| HEX_CORNERS[k] == side) {
                         Some(lv) => n8[lv] as usize,
-                        None => return HexGeom::Unsupported("bad vertex slot"),
+                        None => return HexSlotErr::unsupported("bad vertex slot"),
                     }
                 }
                 // Edge slot: shared, canonical direction = ascending vertex id.
@@ -1204,12 +1551,12 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     let bnd: Vec<usize> = (0..3).filter(|&d| on_bnd[d]).collect();
                     let av = match (0..3).find(|&d| !on_bnd[d]) {
                         Some(d) => d,
-                        None => return HexGeom::Unsupported("bad edge slot"),
+                        None => return HexSlotErr::unsupported("bad edge slot"),
                     };
                     let key = (av, idx[bnd[0]] / p, idx[bnd[1]] / p);
                     let k = match edge_lut.get(&key) {
                         Some(&k) => k,
-                        None => return HexGeom::Unsupported("unmatched edge slot"),
+                        None => return HexSlotErr::unsupported("unmatched edge slot"),
                     };
                     let [la, lb] = HEX_EDGES[k];
                     let t_local = if HEX_CORNERS[la][av] == 0 {
@@ -1221,7 +1568,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     let ekey = if a < b { [a, b] } else { [b, a] };
                     let ei = match edge_ids.get(&ekey) {
                         Some(&ei) => ei as usize,
-                        None => return HexGeom::Unsupported("unmatched mesh edge"),
+                        None => return HexSlotErr::unsupported("unmatched mesh edge"),
                     };
                     let t = if a < b { t_local } else { e - 1 - t_local };
                     edge_base + ei * e + t
@@ -1231,12 +1578,12 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                 1 => {
                     let ax = match (0..3).find(|&d| on_bnd[d]) {
                         Some(d) => d,
-                        None => return HexGeom::Unsupported("bad face slot"),
+                        None => return HexSlotErr::unsupported("bad face slot"),
                     };
                     let side = idx[ax] / p;
                     let f = match (0..6).find(|&f| HEX_FACES[f].iter().all(|&v| HEX_CORNERS[v][ax] == side)) {
                         Some(f) => f,
-                        None => return HexGeom::Unsupported("unmatched local face"),
+                        None => return HexSlotErr::unsupported("unmatched local face"),
                     };
                     let [l0, l1, _, l3] = HEX_FACES[f];
                     // In-face indices (from the local vertex `l0`).
@@ -1244,14 +1591,14 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     for (s, &lk) in [l1, l3].iter().enumerate() {
                         let d = match (0..3).find(|&d| HEX_CORNERS[l0][d] != HEX_CORNERS[lk][d]) {
                             Some(d) => d,
-                            None => return HexGeom::Unsupported("degenerate face slot"),
+                            None => return HexSlotErr::unsupported("degenerate face slot"),
                         };
                         if d == ax {
-                            return HexGeom::Unsupported("degenerate face slot");
+                            return HexSlotErr::unsupported("degenerate face slot");
                         }
                         in_face[s] = if HEX_CORNERS[l0][d] == 0 { idx[d] } else { p - idx[d] };
                         if in_face[s] == 0 || in_face[s] >= p {
-                            return HexGeom::Unsupported("face slot on a face edge");
+                            return HexSlotErr::unsupported("face slot on a face edge");
                         }
                     }
                     let mut fkey = [0u32; 4];
@@ -1261,7 +1608,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     fkey.sort_unstable();
                     let fi = match face_ids.get(&fkey) {
                         Some(&fi) => fi as usize,
-                        None => return HexGeom::Unsupported("unmatched mesh face"),
+                        None => return HexSlotErr::unsupported("unmatched mesh face"),
                     };
                     // Map the local face parameterisation onto the canonical
                     // one (corner matching: at most a rotation/reflection).
@@ -1269,15 +1616,15 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     let corner_of = |v: u32| (0..4).find(|&i| cv[i] == v);
                     let p0 = match corner_of(n8[l0]) {
                         Some(i) => i,
-                        None => return HexGeom::Unsupported("face corner mismatch"),
+                        None => return HexSlotErr::unsupported("face corner mismatch"),
                     };
                     let pu = match corner_of(n8[l1]) {
                         Some(i) => i,
-                        None => return HexGeom::Unsupported("face corner mismatch"),
+                        None => return HexSlotErr::unsupported("face corner mismatch"),
                     };
                     let pv = match corner_of(n8[l3]) {
                         Some(i) => i,
-                        None => return HexGeom::Unsupported("face corner mismatch"),
+                        None => return HexSlotErr::unsupported("face corner mismatch"),
                     };
                     let du = [
                         QUAD_CORNERS[pu][0] - QUAD_CORNERS[p0][0],
@@ -1294,7 +1641,7 @@ fn build_h1_hex_geometry<M: MeshTopology>(
                     let v = QUAD_CORNERS[p0][1] * p as i32 + in_face[0] as i32 * du[1]
                         + in_face[1] as i32 * dv[1];
                     if u <= 0 || u >= p as i32 || v <= 0 || v >= p as i32 {
-                        return HexGeom::Unsupported("face slot outside the canonical face");
+                        return HexSlotErr::unsupported("face slot outside the canonical face");
                     }
                     let o = (u - 1) as usize + (v - 1) as usize * e;
                     face_base + fi * e * e + o
@@ -1310,10 +1657,46 @@ fn build_h1_hex_geometry<M: MeshTopology>(
             conn.push(g as NodeId);
         }
         if interior_seen != e * e * e {
-            return HexGeom::Unsupported("unexpected interior slot count");
+            return HexSlotErr::unsupported("unexpected interior slot count");
         }
     }
 
+    Ok((conn, n_dofs))
+}
+
+/// D41: reproduce MFEM's H1 `nodes` numbering for an all-Hex8 mesh and return
+/// the geometry table in the reference element's ([`HexQk`]) slot order.
+///
+/// `raw` is the `nodes` dof vector as stored in the file (`ordering` 0 =
+/// byNODES, 1 = byVDIM).  Returns [`HexGeom::NotHex`] for meshes that are not
+/// uniformly hexahedral so the caller can fall back to the simplex path.
+fn build_h1_hex_geometry<M: MeshTopology>(
+    mesh: &M,
+    order: u8,
+    raw: &[f64],
+    ordering: usize,
+) -> HexGeom {
+    let (conn, n_dofs) = match hex_slot_map(mesh, order as usize) {
+        Ok(v) => v,
+        Err(HexSlotErr::NotHex) => return HexGeom::NotHex,
+        Err(HexSlotErr::Unsupported(why)) => return HexGeom::Unsupported(why),
+    };
+    if raw.len() < 3 * n_dofs {
+        return HexGeom::Unsupported("nodes section too short for the H1 hex space");
+    }
+    let mut coords = vec![0.0f64; n_dofs * 3];
+    match ordering {
+        0 => {
+            for c in 0..3 {
+                for g in 0..n_dofs {
+                    coords[g * 3 + c] = raw[c * n_dofs + g];
+                }
+            }
+        }
+        1 => coords.copy_from_slice(&raw[..3 * n_dofs]),
+        _ => return HexGeom::Unsupported("unknown nodes ordering"),
+    }
+    let npe = conn.len() / mesh.n_elements();
     HexGeom::Built(GeometryData {
         order,
         conn,

@@ -68,15 +68,17 @@ fn verify(cond: bool, what: &str) {
 fn gap_exit() -> ! {
     eprintln!(
         "polar-nc (Rust port): the C++ miniapp writes a non-conforming mesh in MFEM's \
-`MFEM NC mesh v1.0` format (with a `vertex_parents` section) and, by default, a curved `nodes` \
-section; `fem_io::mfem::write_mfem` emits the conforming `MFEM mesh v1.0` format with `vertices` \
-only, so there is no faithful output to produce (and writing a conforming file in its place would \
-be rejected by MFEM with `Invalid mesh topology`).\n\
+`MFEM NC mesh v1.0` format (with a `vertex_parents` section) and a curved `nodes` section; \
+`fem_io::mfem` has no NC-format writer, so there is no faithful output to produce (and writing a \
+conforming `MFEM mesh v1.0` file in its place would be rejected by MFEM with `Invalid mesh \
+topology`).  The `nodes` half is no longer the blocker: round 32 added the `nodes`-section writer \
+(`fem_io::mfem::write_mfem_file_3d_nodes`).\n\
 Gap list (exit 3): [1] `MFEM NC mesh v1.0` writer (`rank attr geom ref_type nodes/children` \
 records); [2] `vertex_parents` emission for `Mesh::AddVertexParents` hanging nodes; [3] \
 `NCMesh::GridSfcOrdering2D` for `-sfc` (the miniapp's raison d'être) and `Mesh::ReorderElements`; \
-[4] curved `nodes` section with the per-element polar parameter map + `-a <aspect>`; [5] 3-D \
-generation (`-d 3`: prisms + tetrahedra)."
+[4] `Mesh::set_curvature` on a non-conforming mesh (the C++ calls `SetCurvature(2)`) and the \
+per-element polar parameter map with `-a <aspect>`; [5] 3-D generation (`-d 3`: prisms + \
+tetrahedra, whose H1 prism numbering is missing there too)."
     );
     std::process::exit(3);
 }

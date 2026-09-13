@@ -418,3 +418,102 @@ fn min_det_on_the_miniapp_sample_matches_mfem() {
         eprintln!("{label}: min det J (6-point GLL sample) = {min_det:.17e} (MFEM {mfem_min:.17e})");
     }
 }
+
+/// MFEM 4.10 `min_det_j`-sample ground truth for the curved P3 **tetrahedral**
+/// fixture `data/escher-p3.mesh`, measured with `tmp/d112_ref_main.cpp`
+/// (rebuilt and re-run for round 32; the sample is the 6-point Gauss-Lobatto
+/// tensor product on the unit reference domain — `GLL1D n=6 first=0 last=1`):
+///
+/// ```text
+/// MIN_DET_GLL6 -648.1629336797721
+/// ELEM_MIN_GLL6   0 -84.905915257104965
+/// ELEM_MIN_GLL6   3 -538.04942207626721
+/// ```
+const MFEM_ESCHER_P3_MIN_DET_GLL6: f64 = -648.1629336797721;
+const MFEM_ESCHER_P3_ELEM0_MIN_DET_GLL6: f64 = -84.905915257104965;
+const MFEM_ESCHER_P3_ELEM3_MIN_DET_GLL6: f64 = -538.04942207626721;
+
+/// The tetrahedral **reference-element family** regression: a curved P3 tet
+/// mesh must be evaluated with the Gauss-Lobatto family on *every* path.
+///
+/// `escher-p3.mesh` is read through the D112 legacy path (its `nodes` FEC is
+/// the equispaced legacy `Cubic`), which re-interpolates the stored values into
+/// the same *polynomial* on the Gauss-Lobatto lattice — so `det J` at any
+/// reference point is unchanged and must reproduce MFEM's numbers above,
+/// provided the geometry element is Gauss-Lobatto (`H1TetPk`).
+///
+/// Two paths are evaluated and cross-checked on the same mesh and the same
+/// sample:
+///  * [`jac_det`] with `H1TetPk` — the family `crates/assembly`'s
+///    `geo_ref_elem` uses for curved tets (`assembler.rs:772-778`);
+///  * `Mesh::element_jacobian` — the mesh-side evaluation path, whose
+///    equispaced `factory::TetPk` arm made it *differ* from the first path
+///    (and from MFEM) at `p >= 3` until round 32.
+#[test]
+fn curved_tet_min_det_matches_mfem_and_both_geometry_paths_agree() {
+    use fem_element::quadrature::gauss_lobatto_arbitrary;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/escher-p3.mesh");
+    let file = read_mfem_file(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let mesh = file.mesh3d.as_ref().expect("3D mesh");
+    assert_eq!(mesh.element_type_at(0), ElementType::Tet4);
+    let p = mesh.geom_order() as usize;
+    assert!(p >= 3, "fixture must be a p >= 3 curved tet mesh, got {p}");
+
+    let (fe, _center, _map, scale) = geo_elem(ElementType::Tet4, p);
+    let (g6, _) = gauss_lobatto_arbitrary(6);
+    // `gauss_lobatto_arbitrary` returns points on `[-1,1]`; MFEM's
+    // `QuadratureFunctions1D::GaussLobatto(6)` (the `min_det_j` sample) is on
+    // the unit reference domain.
+    let g6: Vec<f64> = g6.iter().map(|&v| 0.5 * (v + 1.0)).collect();
+
+    let mut min_helper = f64::INFINITY;
+    let mut min_mesh = f64::INFINITY;
+    let mut per_elem = vec![f64::INFINITY; mesh.n_elems()];
+    let mut worst_path_diff = 0.0f64;
+    for e in 0..mesh.n_elems() as u32 {
+        for &z in &g6 {
+            for &y in &g6 {
+                for &x in &g6 {
+                    let xi = [x, y, z];
+                    let d_helper = jac_det(mesh, e, &*fe, &xi) * scale;
+                    let (_, d_mesh, _) = mesh.element_jacobian(e, &xi);
+                    let d_mesh = d_mesh * scale;
+                    // The two paths must agree: the mesh path used to build its
+                    // geometry element from the equispaced `TetPk`, which
+                    // reinterprets the Gauss-Lobatto-sampled table values as if
+                    // they sat on the equispaced lattice.
+                    worst_path_diff = worst_path_diff.max((d_helper - d_mesh).abs());
+                    min_helper = min_helper.min(d_helper);
+                    min_mesh = min_mesh.min(d_mesh);
+                    let slot = &mut per_elem[e as usize];
+                    *slot = slot.min(d_helper);
+                }
+            }
+        }
+    }
+    assert!(
+        worst_path_diff <= 1e-9,
+        "element_jacobian and the H1TetPk geometry path disagree (worst |Δ det J| = \
+         {worst_path_diff:.3e}); the mesh path must use the Gauss-Lobatto family"
+    );
+    for (label, got, want) in [
+        ("min", min_helper, MFEM_ESCHER_P3_MIN_DET_GLL6),
+        ("element 0", per_elem[0], MFEM_ESCHER_P3_ELEM0_MIN_DET_GLL6),
+        ("element 3", per_elem[3], MFEM_ESCHER_P3_ELEM3_MIN_DET_GLL6),
+    ] {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs(),
+            "{label}: min det J over the 6-point GLL sample = {got:.17e}, MFEM gives {want:.17e}"
+        );
+    }
+    assert!(
+        (min_mesh - MFEM_ESCHER_P3_MIN_DET_GLL6).abs()
+            <= 1e-12 * MFEM_ESCHER_P3_MIN_DET_GLL6.abs(),
+        "element_jacobian min = {min_mesh:.17e}, MFEM gives {MFEM_ESCHER_P3_MIN_DET_GLL6:.17e}"
+    );
+    eprintln!(
+        "escher-p3 (curved P3 tet): min det J = {min_helper:.17e} (MFEM \
+         {MFEM_ESCHER_P3_MIN_DET_GLL6:.17e}), worst |Δ| between the H1TetPk and \
+         element_jacobian paths = {worst_path_diff:.3e}"
+    );
+}

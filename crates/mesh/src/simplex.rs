@@ -271,18 +271,35 @@ impl<const D: usize> Mesh<D> {
         let geo_order = self.geom_order() as usize;
         // Geometry reference element for isoparametric Jacobians.
         //
+        // The table's contract is the **closed Gauss-Lobatto** family: MFEM's
+        // `Mesh::SetCurvature` builds the `nodes` grid function with
+        // `H1_FECollection(order, Dim, BasisType::GaussLobatto)`
+        // (`mesh/mesh.cpp` 7211-7230), the D43 reader builds tet geometry from
+        // `H1TetPk::slot_labels`, and `Mesh::set_curvature_tet4` places its
+        // nodes on `H1TetPk`'s lattice.
+        //
         // Triangles: MFEM's H1 triangular element (H1_TriangleElement) places
         // its boundary DOFs at Poly1D (Gauss-Lobatto) parameters, NOT at the
         // equispaced positions of the plain Pk triangle — so curved-triangle
         // geometry read from an MFEM `nodes` section must be interpolated
         // with `H1TriPk` to reproduce the same curved shape (plain `TriPk`
         // misinterpolates between the stored node values).
+        //
+        // Tetrahedra: the same argument (`H1_TetrahedronElement`).  The
+        // equispaced `factory::TetPk` agrees with `H1TetPk` only up to `p = 2`
+        // (there the closed Gauss-Lobatto points *are* the edge midpoints), so
+        // from `p = 3` on using it silently evaluates a different polynomial:
+        // measured here on a curved P3 tet as a 7.1e-2 error at the first edge
+        // node — see `tests::tet_geometry_family_tests`.
         let factory: Box<dyn fem_element::ReferenceElement> = match et {
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
                 Box::new(QuadQk::new(geo_order.max(1)))
             }
             ElementType::Tri3 | ElementType::Tri6 if geo_order >= 2 => {
                 Box::new(fem_element::lagrange::factory::H1TriPk::new(geo_order))
+            }
+            ElementType::Tet4 | ElementType::Tet10 if geo_order >= 2 => {
+                Box::new(fem_element::lagrange::factory::H1TetPk::new(geo_order))
             }
             _ => factory_ref_elem(match et {
                 ElementType::Tri3 | ElementType::Tri6 => FactoryElemType::Tri,
@@ -581,10 +598,17 @@ impl<const D: usize> Mesh<D> {
 
     /// Tet4 → TetPk geometry: barycentric interpolation of GLL nodal positions.
     fn set_curvature_tet4(&mut self, p: usize) {
-        use fem_element::lagrange::TetPk;
+        // The geometry slots must be in the same order as the element
+        // `element_jacobian` evaluates with — for tetrahedra that is
+        // `H1TetPk` (MFEM's `H1_TetrahedronElement`, closed Gauss-Lobatto
+        // nodes), *not* the equispaced `TetPk`.  The two agree up to `p = 2`
+        // and differ from `p = 3` on, where using `TetPk` here would label the
+        // stored nodes with the wrong reference points and silently assemble a
+        // different isoparametric map.
+        use fem_element::lagrange::factory::H1TetPk;
         use fem_element::ReferenceElement;
         let n_elems = self.n_elems();
-        let tet = TetPk::new(p);
+        let tet = H1TetPk::new(p);
         let npe_new = tet.n_dofs();
         let dof_ref = tet.dof_coords();
         let mut geom_conn = Vec::with_capacity(n_elems * npe_new);
@@ -4337,5 +4361,128 @@ mod serde_tests {
         assert_eq!(m.n_elems(), m2.n_elems());
         assert_eq!(m.coords, m2.coords);
         assert_eq!(m.conn, m2.conn);
+    }
+}
+
+// ─── Reference-element family consistency for curved tetrahedra ──────────────
+//
+// Kept in its own default-compiled module: `mod tests` above closes before this
+// point, and `mod serde_tests` is gated behind the `serialize` feature.
+#[cfg(test)]
+mod tet_geometry_family_tests {
+    use super::*;
+
+    //
+    // A `GeometryData` table stores its nodes in the order *and* with the
+    // semantics of the mesh's geometry element.  For MFEM-compatible curved
+    // meshes that family is the closed **Gauss-Lobatto** one: MFEM's
+    // `Mesh::SetCurvature` builds its `nodes` grid function with
+    // `H1_FECollection(order, Dim, BasisType::GaussLobatto)` (`mesh/mesh.cpp`
+    // 7211-7230), and `crates/element`'s `H1TetPk` is fem-rs's copy of MFEM's
+    // `H1_TetrahedronElement` (D43/D49).  The reader's D43 path and
+    // `Mesh::set_curvature_tet4` both use `H1TetPk`, so **every consumer that
+    // evaluates a curved tet mesh's geometry must use the same family**; the
+    // equispaced `TetPk`/`TetP2`/`TetP3` agree with it only up to `p = 2`
+    // (there the closed Gauss-Lobatto points are the edge midpoints), which is
+    // why a mismatch stayed invisible until `p >= 3`.
+    //
+    // `crates/assembly`'s `geo_ref_elem` already picks `H1TetPk`
+    // (`crates/assembly/src/assembler.rs:772-778`); the test below pins the
+    // mesh-side path `Mesh::element_jacobian` to the same family.
+
+    /// A genuinely curved all-tetrahedron, order-3 mesh: every geometry node is
+    /// displaced (vertices included), so no family can reproduce the stored
+    /// table by accident.
+    fn curved_tet_p3() -> Mesh<3> {
+        let mut m = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        m.set_curvature(3);
+        let geo = m.geometry.as_mut().expect("geometry");
+        for i in 0..geo.n_nodes {
+            let (x, y, z) = (geo.coords[i * 3], geo.coords[i * 3 + 1], geo.coords[i * 3 + 2]);
+            geo.coords[i * 3] += 0.02 * y * z;
+            geo.coords[i * 3 + 1] -= 0.03 * x * z;
+            geo.coords[i * 3 + 2] += 0.04 * x * y;
+        }
+        m
+    }
+
+    #[test]
+    fn tet_geometry_reference_elements_coincide_only_up_to_p2() {
+        use fem_element::lagrange::factory::H1TetPk;
+        use fem_element::lagrange::TetPk;
+        use fem_element::ReferenceElement;
+        // Justifies the `geo_order >= 2` threshold used by `element_jacobian`
+        // (and by its triangle arm): at `p = 2` the equispaced `TetPk` and the
+        // Gauss-Lobatto `H1TetPk` are the *same lattice in the same order*, so
+        // routing either way gives the same map.
+        let (a2, b2) = (TetPk::new(2).dof_coords(), H1TetPk::new(2).dof_coords());
+        assert_eq!(a2.len(), b2.len());
+        for (s, (x, y)) in a2.iter().zip(&b2).enumerate() {
+            for d in 0..3 {
+                assert!(
+                    (x[d] - y[d]).abs() < 1e-15,
+                    "p = 2 slot {s}: TetPk {x:?} vs H1TetPk {y:?}"
+                );
+            }
+        }
+        // From `p = 3` on they differ (GLL is `0.2764…`, equispaced `1/3`), so
+        // the families are NOT interchangeable and the threshold cannot be
+        // relaxed below 3 without a real change of basis.
+        let (a3, b3) = (TetPk::new(3).dof_coords(), H1TetPk::new(3).dof_coords());
+        assert_eq!(a3.len(), b3.len());
+        assert!(
+            a3.iter()
+                .zip(&b3)
+                .any(|(x, y)| (0..3).any(|d| (x[d] - y[d]).abs() > 1e-3)),
+            "p = 3: the two families must differ"
+        );
+    }
+
+    #[test]
+    fn element_jacobian_evaluates_curved_tet_geometry_in_the_tables_own_family() {
+        // Evaluating the geometry at a slot's **own** reference position must
+        // return that slot's stored coordinate.  That identity is a property of
+        // the *table* plus the element used to read it, so it fails as soon as
+        // `element_jacobian` builds its geometry element from another family
+        // (the equispaced `TetPk`) — the cheapest detector for a family split.
+        use fem_element::lagrange::factory::H1TetPk;
+        use fem_element::ReferenceElement;
+        let m = curved_tet_p3();
+        let p = m.geom_order() as usize;
+        let ref_coords = H1TetPk::new(p).dof_coords();
+        for e in 0..m.n_elems() as u32 {
+            let nodes = m.geometry_nodes(e);
+            assert_eq!(nodes.len(), ref_coords.len());
+            for (s, xi) in ref_coords.iter().enumerate() {
+                let (_, _, xp) = m.element_jacobian(e, xi);
+                let want = m.geom_coords_of(nodes[s]);
+                for d in 0..3 {
+                    assert!(
+                        (xp[d] - want[d]).abs() < 1e-10,
+                        "element {e} slot {s}: element_jacobian at {xi:?} gives {xp:?}, \
+                         the table stores {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn curved_tet_p3_element_jacobian_is_the_linear_map_for_a_straight_mesh() {
+        // Control: on a straight-sided mesh the curved geometry reproduces the
+        // affine map, so `element_jacobian` must agree with the P1 Jacobian
+        // regardless of family — this is what made the p = 2 case blind to the
+        // split and what keeps this test meaningful if the threshold moves.
+        let mut m = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let (j_lin, det_lin, xp_lin) = m.element_jacobian(0, &[0.2, 0.3, 0.1]);
+        m.set_curvature(3);
+        let (j_cur, det_cur, xp_cur) = m.element_jacobian(0, &[0.2, 0.3, 0.1]);
+        for i in 0..3 {
+            for d in 0..3 {
+                assert!((j_cur[(i, d)] - j_lin[(i, d)]).abs() < 1e-12);
+            }
+            assert!((xp_cur[i] - xp_lin[i]).abs() < 1e-12);
+        }
+        assert!((det_cur - det_lin).abs() < 1e-12);
     }
 }

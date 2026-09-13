@@ -12,13 +12,16 @@
 //! Port notes (vs C++), scope of this port:
 //!
 //! * The C++ default is an **ord-3 curved mesh**: `SetCurvature(3, true, 3,
-//!   Ordering::byVDIM)` after the stitch, so its file carries an `H1_3D_P3`
-//!   `nodes` section.  `fem_io::mfem::write_mfem` emits `dimension` /
-//!   `elements` / `boundary` / `vertices` only — there is no `nodes` writer in
-//!   fem-rs — so a curved toroid cannot be reproduced and **`-o` > 1 exits with
-//!   code 3** (the honest-partial convention; see `require_linear`).
-//!   Everything with `order == 1` (linear) runs and is compared against the
-//!   C++ `-o 1` output.
+//!   Ordering::byVDIM)` is applied to the *linear* stack before
+//!   `Mesh::Transform(trans)` and again (`dg_mesh` = false → `H1_3D_P3`) after
+//!   the stitch, so its file carries an `H1_3D_P3` `nodes` section (MFEM
+//!   `nodes=1`).  The `nodes`-section writer itself landed in round 32
+//!   (`fem_io::mfem::write_mfem_file_3d_nodes`), but it implements the H1
+//!   numbering of hexahedra and tetrahedra only — the **wedge (prism)**
+//!   numbering this miniapp needs is still missing, so every `-o` > 1 run
+//!   (including the default) still **exits with code 3** (see
+//!   `require_supported_order`).  `-o 1` (linear) runs fully and is compared
+//!   against the C++ `-o 1` output.
 //! * `Mesh::FinalizeTopology()` is reproduced locally by `generate_boundary`:
 //!   MFEM's default `generate_bdr = true` synthesizes the boundary elements
 //!   from the element faces, while fem-rs's `Mesh::finalize_topology` only
@@ -229,17 +232,27 @@ fn print_options(
     println!("   --send-port 19916");
 }
 
-/// fem-rs gap guard: the C++ mesh for `order > 1` carries an H1 `nodes`
-/// section, which fem-rs cannot write.
-fn require_linear(order: u8) {
+/// fem-rs gap guard: the C++ mesh for `order > 1` carries an `H1_3D_P3`
+/// `nodes` section on **prisms**, whose MFEM numbering is not implemented yet.
+///
+/// The `nodes`-section *writer* landed in round 32 (`fem_io::mfem::NodesSpace`
+/// / `write_mfem_file_3d_nodes`) and covers the continuous H1 spaces of
+/// hexahedra and tetrahedra plus the discontinuous (L2) spaces of hexahedra and
+/// quads.  What is missing here is specific to this miniapp's element type.
+fn require_supported_order(order: u8) {
     if order > 1 {
         eprintln!(
-            "toroid (Rust port): a curved mesh (order {order} > 1) requires MFEM's high-order \
-`nodes` section; `fem_io::mfem::write_mfem` writes `vertices` only, so the output would be a \
-linear mesh.\n\
-Gap list (exit 3): [1] `nodes`-section writer for H1 hexahedron/prism geometry (the C++ file is \
-`H1_3D_P3`, `Ordering: 1`) — every `-o` > 1 run (including the default) is affected.  Use `-o 1` \
-for the linear toroid, which is fully ported."
+            "toroid (Rust port): a curved mesh (order {order} > 1) requires the `nodes` section \
+of MFEM's H1 wedge (prism) numbering; fem-rs's `nodes` writer implements H1 hexahedra and \
+tetrahedra only, so the output would be a linear prism mesh and not the C++ file.\n\
+Gap list (exit 3): [1] MFEM `H1_WedgeElement` node table + `H1_FECollection` DOF layout for \
+prisms: the vertex / 9-edge / 2-triangle / 3-quadrilateral / interior blocks with \
+`TriDofOrd`/`QuadDofOrd` orientation, plus the evaluation of the mesh's own \
+(`PrismPk`, equispaced-node) geometry at those Gauss-Lobatto positions — the prism geometry of \
+`Mesh::set_curvature_prism6` is itself inconsistent with `PrismPk`'s slot order \
+(`set_curvature_prism6` enumerates slots as `(iz, ir, is)` while `PrismPk` uses \
+layer-then-triangle order), so a curved prism mesh assembles with the wrong geometry today.  \
+Use `-o 1` for the linear toroid, which is fully ported."
         );
         std::process::exit(3);
     }
@@ -304,7 +317,7 @@ fn main() {
     let theta0 = theta0_deg * PI / 180.0;
 
     // Everything from here on needs the high-order `nodes` section in the file.
-    require_linear(order);
+    require_supported_order(order);
 
     // Define an empty mesh and add vertices for a stack of elements.
     let mut mesh: Mesh<3> = Mesh::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 0.0, 0.0, 0.0, false);

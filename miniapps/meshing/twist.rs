@@ -11,36 +11,29 @@
 //!
 //! Port notes (vs C++), scope of this port:
 //!
-//! * **Every documented run of the C++ miniapp needs the high-order `nodes`
-//!   section and exits here with code 3.**  MFEM's own comment says why: "MFEM's
-//!   strategy is to use a discontinuous vector field to define the mesh
-//!   coordinates on a topologically periodic mesh".  The C++ calls
-//!   `SetCurvature(order, dg_mesh || per_mesh, 3, Ordering::byVDIM)` whenever
-//!   `order > 1 || dg_mesh || per_mesh`, and the resulting file carries a
-//!   (discontinuous, for `-pm`/`-dm`) `nodes` section; the default is `-o 3 -pm`
-//!   (`nodes=1`).  `fem_io::mfem::write_mfem` writes `dimension` / `elements` /
-//!   `boundary` / `vertices` only — there is no `nodes` writer in fem-rs — so
-//!   the previous version's `if per_mesh && false { mesh.set_curvature(order); }`
-//!   short-circuit (which silently produced a linear file under the curved
-//!   file's name) is replaced by an explicit exit(3) with the gap list below.
-//! * What *is* ported: the linear, non-periodic path
-//!   `twist -o <order <= 1> -no-pm` — the C++ then skips `SetCurvature`
-//!   entirely, applies `Transform(trans)` to the linear mesh and writes a
-//!   plain `MFEM mesh v1.0` file.  It is compared 1:1 against the C++ output
-//!   (`twist -o 1 -no-pm` -> `NE=3 NBE=14 NV=16`, `nodes=0`).
-//! * The `-e 6` (wedge) case additionally needs `Mesh::MakeCartesian3D` with
-//!   `Element::WEDGE`, which `fem_rs::Mesh::make_cartesian_3d` does not
-//!   implement (it panics for anything but Hex8/Tet4) -> exit(3).
-//! * The periodic stitching block (`v2v` identification +
-//!   `RemoveUnusedVertices` + `RemoveInternalBoundaries`) is only reachable
-//!   through `per_mesh`, which always needs the `nodes` section, so it is not
-//!   carried in this file; `twist -pm` exits before reaching it.
+//! * **The default run (`twist -o 3 -pm`) is ported and its output is
+//!   topology-identical with, and numerically equal to, the C++ artifact**
+//!   (`nodes=1`, `L2_T1_3D_P3`, `VDim: 3`, `Ordering: 1`; the dof values agree
+//!   to MFEM's 8-digit print precision, 3.2e-08 relative).  The high-order
+//!   discontinuous node field is what gives the topologically periodic mesh its
+//!   twisted geometry, so it is essential: `SetCurvature(order, true, 3,
+//!   Ordering::byVDIM)` → `Transform(trans)` → the periodic stitch → the
+//!   `nodes` section of `fem_io::mfem`.
+//! * Runs that need an order-1 discontinuous space
+//!   (`SetCurvature(1, discont, 3, byVDIM)` → `L2_T1_3D_P1`) **exit with code
+//!   3**: `Mesh::set_curvature(1)` resets a mesh to linear geometry instead of
+//!   building that space.
+//! * `-e 6` (wedge) needs `Mesh::MakeCartesian3D(1, 1, nz, Element::WEDGE, ...)`,
+//!   which `fem_rs::Mesh::make_cartesian_3d` does not implement → exit(3).
+//! * `-e 4` (tetrahedra) runs, and takes the continuous branch when `-no-pm` is
+//!   given (`Mesh::set_curvature` + the H1 `nodes` writer), or the
+//!   discontinuous one with `-pm`/`-dm`.
 //! * `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
 //!
 //! The output file name follows the C++ rule
 //! `twist-{tet,wedge,hex}-o<order>-s<nt>[-r<ref>][-p|-d|-c].mesh`.
 
-use fem_io::mfem::write_mfem_file_3d;
+use fem_io::mfem::{write_mfem_file_3d_nodes, NodesSpace};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::Mesh;
 
@@ -148,20 +141,14 @@ fn main() {
     }
 
     // The C++ promotes the mesh to a high-order (discontinuous for -pm/-dm)
-    // nodal space in any of these cases; the resulting file has a `nodes`
-    // section that fem-rs cannot write.
-    if order > 1 || dg_mesh || per_mesh {
+    // nodal space before transforming it.
+    let discont = dg_mesh || per_mesh;
+    if discont && order <= 1 {
         eprintln!(
-            "twist (Rust port): this run needs MFEM's high-order `nodes` section \
-(`SetCurvature(order, dg_mesh || per_mesh, 3, Ordering::byVDIM)`), which \
-`fem_io::mfem::write_mfem` cannot write — it emits `dimension`/`elements`/`boundary`/`vertices` \
-only.  MFEM uses that (discontinuous) nodal field precisely to give the topologically periodic \
-mesh its twisted geometry, so a linear file is not an acceptable substitute.\n\
-Gap list (exit 3): [1] `nodes`-section writer for H1/L2 hexahedron-tetrahedron-prism geometry \
-(the C++ default `-o 3 -pm` file is `nodes=1`); [2] `Mesh::SetCurvature(order, discont, sdim, \
-ordering)` on the stitched mesh; [3] the periodic stitch itself (`v2v` identification + \
-`RemoveUnusedVertices` + `RemoveInternalBoundaries`) is only meaningful together with [1]-[2].\n\
-What runs: `twist -o 1 -no-pm` (the C++ then skips SetCurvature and writes a plain linear mesh)."
+            "twist (Rust port): `SetCurvature(1, discont, 3, byVDIM)` needs an order-1 \
+discontinuous (`L2_T1_3D_P1`) node space; `Mesh::set_curvature(1)` resets the mesh to linear \
+geometry instead of building that space.\n\
+Gap list (exit 3): [1] an order-1 `L2` node space in `Mesh::set_curvature`."
         );
         std::process::exit(3);
     }
@@ -177,6 +164,29 @@ Gap list (exit 3): [1] prism support in `Mesh::make_cartesian_3d` (`AddHexAsWedg
 
     let mut mesh: Mesh<3> = Mesh::make_cartesian_3d(1, 1, nz, el_type, a, b, c, false);
 
+    // The `nodes` writer (round 32) numbers the discontinuous space per element
+    // in MFEM's own lexicographic order for hexahedra and quads only; a
+    // discontinuous tetrahedral node field would need `L2_TetrahedronElement`'s
+    // ordering before it could be written faithfully.
+    if discont && order > 1 && el_type == ElementType::Tet4 {
+        eprintln!(
+            "twist (Rust port): a discontinuous (`L2_T1_3D_P{order}`) node field on tetrahedra \
+needs MFEM's `L2_TetrahedronElement` node enumeration; `fem_io::mfem` implements the \
+discontinuous numbering for hexahedra and quads only.\n\
+Gap list (exit 3): [1] `L2` node ordering for Tet4 (`-e 4` with `-pm`/`-dm`); the continuous \
+`-e 4 -no-pm` path (`H1_3D_P{order}`) is ported."
+        );
+        std::process::exit(3);
+    }
+
+    // MFEM `Mesh::SetCurvature(order_, dg_mesh || per_mesh, 3, Ordering::byVDIM)`:
+    // a discontinuous (element-wise) node field holding the *linear* geometry,
+    // which is what keeps the twisted mesh geometrically consistent across the
+    // identified top/bottom vertices.
+    if order > 1 {
+        mesh.set_curvature(order);
+    }
+
     if nt != 0 {
         let nt_c = nt as f64;
         let c_c = c;
@@ -191,6 +201,31 @@ Gap list (exit 3): [1] prism support in `Mesh::make_cartesian_3d` (`AddHexAsWedg
                 z,
             ]
         });
+    }
+
+    // MFEM `while (per_mesh) { … }`: identify the top layer of vertices with
+    // the bottom one, then drop the boundary faces that became interior.
+    if per_mesh {
+        let nnode = 4usize; // the C++ hard-codes the hexahedron vertex count here
+        let noff = if nt >= 0 { 0 } else { nnode as i32 * (1 - nt / nnode as i32) };
+        let nv = mesh.n_nodes();
+        let mut v2v = vec![0i32; nv];
+        for (i, e) in v2v.iter_mut().enumerate().take(nv - nnode) {
+            *e = i as i32;
+        }
+        // `switch ((noff + nt_) % nnode)`.
+        let map: [usize; 4] = match (noff + nt) % nnode as i32 {
+            0 => [0, 1, 2, 3],
+            1 => [2, 0, 3, 1],
+            2 => [3, 2, 1, 0],
+            _ => [1, 3, 0, 2],
+        };
+        for (i, m) in map.iter().enumerate() {
+            v2v[nv - nnode + i] = *m as i32;
+        }
+        mesh.renumber_vertices(&v2v);
+        mesh.remove_unused_vertices();
+        mesh.remove_internal_boundaries();
     }
 
     for _ in 0..ser_ref_levels {
@@ -217,7 +252,15 @@ Gap list (exit 3): [1] prism support in `Mesh::make_cartesian_3d` (`AddHexAsWedg
     });
     name.push_str(".mesh");
 
-    write_mfem_file_3d(&name, &mesh).expect("write mesh");
+    // C++ `Mesh::Print` writes the mesh as it stands: a curved/periodic mesh
+    // carries a discontinuous (`L2_T1_3D_P<order>`) `nodes` section, a plain
+    // one only the vertex block.
+    let space = if discont && order > 1 {
+        NodesSpace::Discontinuous
+    } else {
+        NodesSpace::Continuous
+    };
+    write_mfem_file_3d_nodes(&name, &mesh, space).expect("write mesh");
     println!(
         "Wrote {name} ({} elements, {} boundary faces, {} nodes).",
         mesh.n_elems(),

@@ -15,11 +15,12 @@
 //! * The 2-D path (triangles → prisms, quads → hexahedra, `-nz`/`-hz`) is
 //!   fully ported and its output is byte-comparable with the C++ up to the
 //!   node-ordering convention of `fem_mesh::extrusion`.
-//! * `-trans` applies `Mesh::Transform(trans2D/trans3D)` **after**
-//!   `SetCurvature(order, false, dim, Ordering::byVDIM)`, i.e. the C++ file
-//!   carries a high-order `nodes` section.  `fem_io::mfem::write_mfem` has no
-//!   `nodes` writer, so `-trans` **exits with code 3** instead of writing a
-//!   linear mesh under the same name.
+//! * `-trans` transforms the mesh *after* MFEM has given it a high-order
+//!   `nodes` field (`SetCurvature(order, false, dim, Ordering::byVDIM)` — MFEM's
+//!   `Mesh::Extrude2D` already inherits the input's nodal space), so the C++
+//!   file carries `nodes`.  fem-rs's `nodes` writer (round 32) covers H1
+//!   hexahedra, but `fem_mesh::extrusion` drops the input curvature, so `-trans`
+//!   **exits with code 3** instead of writing a linear mesh under the same name.
 //! * `-ny`/`-wy` need `Mesh::Extrude1D` (1-D → 2-D), which fem-rs does not
 //!   have; a 1-D input mesh **exits with code 3** (the C++ autoselects
 //!   `ny = 1, nz = 0` for `dim == 1` and extrudes in y).
@@ -145,12 +146,15 @@ fn main() {
 
     if trans {
         gap_exit(
-            "`-trans` applies Mesh::Transform *after* SetCurvature(order, false, 3, \
-Ordering::byVDIM), so the C++ output carries a high-order `nodes` section; \
-`fem_io::mfem::write_mfem` writes `vertices` only.",
-            "[1] `nodes`-section writer for H1 tetrahedron/hexahedron/prism geometry; \
-[2] `Mesh::SetCurvature(order, discont, sdim, ordering)` on the extruded mesh; \
-[3] `trans2D`/`trans3D` coordinate transformations.",
+            "`-trans` needs the extruded (3-D) mesh to carry the *input* mesh's high-order \
+`nodes` field through the extrusion and then be transformed (`Mesh::Extrude2D` inherits the \
+input's nodal space in MFEM; the C++ sample `-m data/square-disc-p2.mesh -nz 16 -hz 2 -trans` \
+writes `H1_3D_P2`).  `fem_mesh::extrusion::extrude_quad4_to_hex8` / `extrude_tri3_to_prisms` \
+build a *linear* 3-D mesh, so the curvature is dropped before the `nodes` writer (which since \
+round 32 does cover H1 hexahedra) could see it.",
+            "[1] `fem_mesh::extrusion` must carry the input's high-order geometry through \
+(`Mesh::Extrude2D`'s nodal-space inheritance); [2] `trans2D`/`trans3D` coordinate \
+transformations; [3] H1 prism numbering for the `Tri3` input path.",
         );
     }
 

@@ -7,35 +7,41 @@
 //! (`SetCurvature(order, true, 3, Ordering::byVDIM)`), optionally identifies the
 //! two ends of the strip (with a half twist for `-c 2`), applies the Mobius
 //! transformation to the nodal coordinates, and writes the result.  The file
-//! therefore has `dimension 2`, `Space dimension 3` and a `nodes` section
-//! (`nodes=1` for the default `-o 3 -c 2`).
+//! therefore has `dimension 2`, a 3-component `nodes` grid function and
+//! `nodes=1` for the default `-o 3 -c 2`.
 //!
 //! Sample runs (C++): `mobius-strip`, `mobius-strip -o 4`,
 //! `mobius-strip -c 0 -t 1.5 -nx 20`.
 //!
-//! **This run always exits with code 3**: fem-rs has no `dimension < spaceDim`
-//! (surface-in-3-D) mesh type and no `nodes` writer, and every documented run
-//! needs both.  There is no faithful sub-path to preserve.
+//! **This run always exits with code 3.**  The `nodes`-section writer landed in
+//! round 32 (`fem_io::mfem::write_mfem_file_3d_nodes`, `NodesSpace`), but only
+//! for 3-D hexahedra/tetrahedra (H1) and hexahedra/quads (L2): a 2-D *quad*
+//! element still has no MFEM-faithful node numbering, in either continuity.
 //!
 //! Gap list (exit 3):
-//! 1. **`nodes`-section writer** for a *discontinuous* high-order 2-D-in-3-D
-//!    nodal space — `fem_io::mfem::write_mfem` writes `dimension` / `elements`
-//!    / `boundary` / `vertices` only.  The C++ output is `dimension 2` with a
-//!    3-component `nodes` grid function (default `L2_2D_P3`, `VDim: 3`).
-//! 2. **A `Mesh<2>` with 3-D coordinates** (MFEM `spaceDim = 3`, a surface
-//!    embedded in 3-D): `fem_mesh::Mesh<D>` fixes the coordinate dimension to
-//!    the topological one, so a 2-D mesh with 3 coordinate components cannot be
-//!    represented (nor written).
-//! 3. `Mesh::SetCurvature(order, discont = true, sdim = 3, Ordering::byVDIM)`
-//!    and the `-o` order option that selects the nodal space.
-//! 4. `Mesh::RemoveInternalBoundaries` on the identified end faces (1-D face
-//!    table, `-c 1`/`-c 2`).
+//! 1. **2-D `Quad4` node numbering** in the writer: the vertex / 4-edge /
+//!    element-interior blocks of `H1_2D_P<p>` (with `SegDofOrd` edge
+//!    orientation) and the per-element lexicographic order of
+//!    `L2_T1_2D_P<p>`.  `fem_element` already provides the node lattices
+//!    (`QuadQk::new` / `QuadQk::new_lex`), so this is the writer-side analogue
+//!    of the hexahedral map that round 32 added.
+//! 2. **`dimension 2` with `VDim: 3`** — note that this is *not* blocked by
+//!    `fem_mesh::Mesh<D>`: `Mesh<3>` with `Quad4` elements already reports
+//!    `topological_dim() == 2` while storing 3 coordinate components, which is
+//!    exactly MFEM's `spaceDim = 3, Dim = 2` surface representation.  What is
+//!    missing is (a) the writer taking the `dimension` line from
+//!    `topological_dim()` instead of `D`, and (b) node values with 3
+//!    components from a 2-D element.
+//! 3. `Mesh::SetCurvature(order, discont = true, sdim = 3, Ordering::byVDIM)`:
+//!    `Mesh::set_curvature` does not take a `space_dim` argument, so a 2-D
+//!    mesh's geometry nodes cannot be given 3 components.
+//! 4. `Mesh::RemoveInternalBoundaries` over the 1-D (`SEGMENT`) face table for
+//!    the `-c 1`/`-c 2` end identification.
 //!
 //! The previous version of this port wrote a hand-rolled file with
 //! `dimension 3` and flattened 2-D vertices (a `Mesh<3>` with Quad4 elements),
-//! which is not the C++ mesh at all (and MFEM needs the boundary elements to be
-//! `SEGMENT` for the C++ file's `dimension 2`).  That path is removed rather
-//! than kept.
+//! which is not the C++ mesh at all (a surface in 3-D needs `dimension 2` with
+//! `SEGMENT` boundary elements).  That path is removed rather than kept.
 //!
 //! `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
 
@@ -104,14 +110,17 @@ fn main() {
     print_options(&out_file, nx, ny, order, close_strip, dg_mesh, num_twists);
 
     eprintln!(
-        "mobius-strip (Rust port): the C++ miniapp writes a `dimension 2`, `Space dimension 3` \
-surface mesh with a discontinuous high-order `nodes` section (`SetCurvature(order, true, 3, \
-Ordering::byVDIM)`, default `nodes=1`); `fem_io::mfem::write_mfem` writes `vertices` only and \
-`fem_mesh::Mesh<D>` has no `dimension < spaceDim` coordinate type, so no faithful `{out_file}` \
-can be produced (a flattened `dimension 3` file is not the C++ mesh).\n\
-Gap list (exit 3): [1] `nodes`-section writer for L2 high-order nodal geometry (VDim = spaceDim); \
-[2] a 2-D topology / 3-D coordinate mesh type (`Mesh::SetSpaceDim`); [3] \
-`Mesh::SetCurvature(order, discont, sdim, ordering)` incl. `-o`; [4] 1-D \
+        "mobius-strip (Rust port): the C++ miniapp writes a `dimension 2` surface mesh with a \
+3-component (`VDim: 3`) high-order `nodes` section (`SetCurvature(order, true, 3, \
+Ordering::byVDIM)`, default `nodes=1`).  fem-rs's `nodes` writer (round 32) covers 3-D Hex8/Tet4 \
+(H1) and Hex8/Quad4 (L2) only, so no faithful `{out_file}` can be produced (a flattened \
+`dimension 3` file is not the C++ mesh).\n\
+Gap list (exit 3): [1] 2-D `Quad4` node numbering in `fem_io::mfem` — `H1_2D_P<p>` (vertices / 4 \
+`SegDofOrd`-oriented edges / element interior) and the per-element lexicographic \
+`L2_T1_2D_P<p>`; [2] `dimension` written from `Mesh::topological_dim()` plus 3-component node \
+values for a 2-D element (a `Mesh<3>` holding Quad4 elements already reports topological dim 2, \
+so the coordinate representation exists — the numbering is the blocker, not `Mesh<D>`); [3] \
+`Mesh::set_curvature` with an explicit `space_dim`; [4] 1-D `SEGMENT` \
 `RemoveInternalBoundaries` for the `-c 1`/`-c 2` end identification."
     );
     std::process::exit(3);
