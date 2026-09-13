@@ -1189,7 +1189,7 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 1. **`tmop_metric_magnitude` 的一处不诚实措辞（已修）**：对 C++ 也不认的 id（`999`、注释行里的 `211`），
    旧文案写"the C++ program accepts {dim} metric id …"，即**谎称 C++ 接受它**。现按实测的 `CPP_IDS` 分流：
    C++ 接受但 fem-rs 未实现 → 说明真实缺口；C++ 同样不认 → 明确注明"两边都不认，本行只是复刻其输出与出口码"。
-2. **`crates/io/src/glvis.rs` 的预存 flaky 测试（D158）**：`glvis::tests::glvis_bidirectional_local_loopback`
+2. **`crates/io/src/glvis.rs` 的预存 flaky 测试（**D163**）**：`glvis::tests::glvis_bidirectional_local_loopback`
    独立跑 **1/20 失败**（批跑 2/5），panic 原文 `Os { code: 10054, kind: ConnectionReset }`
    —— 测试的 server stub 在客户端仍读时 `close`，且单次 `read` 可能只取到命令的一部分，**留下未读字节的 close 在
    Windows 回环上变成 RST**。修法：stub 按整行读命令（`BufReader::read_line`）并**一直持有套接字到对端挂断**
@@ -1224,8 +1224,30 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **D157（P2）H1 tet 场空间是否与 MFEM 的 GLL 对齐**（`ref_elem_vol_h1` 的 tet 臂 + `crates/space/src/dof_manager.rs`），
   需 `space`+`assembly`+`element` 协同；**含** `dof_manager.rs:2985` `rebuild_dof_coords_periodic` 的"周期 + 曲面(p≥3) + tet"
   几何求值同族分裂。
-- **D158（P3，本轮已修，留痕）** `crates/io/src/glvis.rs` 的 `glvis_bidirectional_local_loopback` 预存 flaky
-  （Windows 回环 RST；1/20 独立失败）。修法见 §5.2；留痕是为了别再把它当"本轮新引入的回归"重新归因。
+- **D158（P1，T4）** `get-values` 的 **3-D ND/RT 分量与 C++ 不符**（hex `0.0553179 -0.000119956 0.0588506` vs
+  C++ `-0.694191 -1.26972 0.378937`；tet 连 L2 压力也不同）⇒ **crates 侧 3-D H(div)/H(curl) 的 dof 序/求值缺口**，
+  miniapp 无法绕过（同一 miniapp 的 2-D 档已逐字节相同）。
+- **D159（P1，T4）** `GetElementBounds(…, ref)` 与 `EstimateFunctionMinimum/Maximum`（`gridfunction_bounds`
+  的第二列 / C++ 的 PLBound 递归收紧界）在 fem-rs **无实现** ⇒ 该 miniapp 只能 `exit(3)`；
+  且 C++ 是 `ParMesh` 程序（本地 `MFEM_USE_MPI = NO` 编不出来、**拿不到参考数字**）⇒ 要复核得先用
+  `$HOME/mfem410_mpi` 建一个 4.10+MPI 参考二进制。
+- **D160（P1，T4）** `fem_mesh::amr` 缺**四边形非结构细化**：`closure_refine*` 硬断言 `Tri3`，而 C++
+  `Mesh::GeneralRefinement(refs, -1, nclimit)` 支持"只细化被标记的四边形 + 允许悬挂节点" ⇒
+  `mandel`/`mondrian` 的计数自第 2 次迭代起分叉（C++ 2254/5884/16006 vs fem-rs 4096/16384/65536），两件因此 `exit(3)`。
+  （修前更糟：固定循环导致 59.6 MB / 1.11 GB 的产物。）
+- **D161（P2，T4）** `GridFunction::ComputeDivError` 在 `crates/` **0 命中** ⇒ `nurbs_solenoidal` 的
+  `‖div u_h − div u_ex‖` 行只能打 unavailable（`crates/assembly/src/hdiv_error.rs` 有近似设施但无该 API）。
+- **D162（P2，T4）** `crates/io/src/data_collection_load.rs:101` 的 `load_visit_mesh` **硬编码 `mesh3d`**
+  （`mfem.mesh3d.ok_or(MissingMesh)?`）⇒ 任何 2-D 采集走该 API 都失败；`load_visit_collection`（返回 `mesh_txt`）
+  没有这个限制，T4 已在 miniapp 侧绕过，但**库层仍应枚举化为 `Mesh2d/Mesh3d`**；并把 `read_visit_root`
+  只填 `Vec::new()` 的语义写进文档注释（它**不含字段数据**，取数据必须用 `load_visit_collection`）——
+  这正是 `compare-dc` 早期把所有范数打成 `-0` 的根因。
+- **D163（P3，本轮已修，留痕）** `crates/io/src/glvis.rs` 的 `glvis_bidirectional_local_loopback` 预存 flaky
+  （Windows 回环 RST；独立 1/20 失败、批跑 2/5）。修法见 §5.2；留痕是为了别再把它当"本轮新引入的回归"重新归因。
+  ⚠️ **编号说明**：T4 路代理自己在 fem-pro 里提交的 HANDOVER（`7d56b80`）把 T4 的 5 条缺口编成 **D158–D162**，
+  而本文件同一时刻把 glvis flake 写成 D158 ⇒ **收尾时统一为**：D158–D162 = T4 的 5 条缺口（如上），
+  glvis flake 改 **D163**。**D1–D163 全局唯一**，以本节为准。
+  （`7d989ce` 的提交信息与 `9906141` 之后同批文档里出现的 "D158" 指 glvis flake ⇒ **按本节读作 D163**。）
 
 ### 本轮统计
 - 十 crate `--lib`（收尾实测，含 glvis 修复后）：amg 23 / **assembly 665**（+8 ign）/ element 498 / **io 132** /
