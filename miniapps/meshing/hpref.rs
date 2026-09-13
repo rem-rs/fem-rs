@@ -102,10 +102,68 @@ const QUAD_HILBERT_CHILD_STATE: [[u8; 4]; 8] = [
     [5, 4, 4, 1], [4, 5, 5, 0], [7, 6, 6, 3], [6, 7, 7, 2],
 ];
 
-/// Hilbert states of the 4 roots of `MakeCartesian2D(2, 2, QUADRILATERAL,
-/// true)` (MFEM assigns them while laying out the initial Hilbert curve; the
-/// values match the NCMesh `root_state` of the equivalent C++ run).
-const INITIAL_ROOT_STATES: [u8; 4] = [0, 1, 1, 4];
+/// MFEM `NCMesh::InitRootState` (`mesh/ncmesh.cpp:2654`): Hilbert-curve state of
+/// every **root (coarse) element**, needed to order the children of an
+/// h-refinement along the same space-filling curve MFEM walks.
+///
+/// The C++ walks the root element sequence, tracking the *entry node* (0 for
+/// the first element, otherwise the node the previous element exited through),
+/// and picks the orientation whose exit node is shared with the next element:
+///
+/// ```text
+/// int v_in = FindNodeExt(el, entry_node, false);   if (v_in < 0) v_in = 0;
+/// int state = Dim*v_in;
+/// for (int j = 0; j < Dim; j++)
+///    if (shared[node_order[nch*(state + j) + nch-1]]) { state += j; break; }
+/// root_state[i] = state;
+/// entry_node = RetrieveNode(el, node_order[nch*state + nch-1]);
+/// ```
+///
+/// `node_order` is `quad_hilbert_child_order`; only `Geometry::SQUARE` roots get
+/// a non-zero state (`default: return;` leaves every state 0 — also the case
+/// for mixed meshes, cf. MFEM's `TODO: mixed meshes`).
+///
+/// Ground truth (C++ probe over MFEM 4.10's own `NCMesh::root_state`, printed
+/// through the `root_state` section of `Mesh::Print` on the NC mesh):
+/// default `MakeCartesian2D(2,2,QUADRILATERAL,true)` → `[0,1,1,4]`,
+/// `data/inline-quad.mesh` → `[1,0,0,5,0,1,1,4,0,1,1,4,5,4,4,0]`,
+/// `data/star.mesh` → `[0,2,0,2,0,0,0,5,3,2,2,0,0,5,3,2,2,0,0,4]`.
+fn initial_root_states(mesh: &Mesh<2>) -> Vec<u8> {
+    let n = mesh.n_elems();
+    if mesh.elem_type != ElementType::Quad4 {
+        // MFEM's `switch (elements[0].Geom())` has `default: return;` — every
+        // state stays zero for non-square roots.
+        return vec![0u8; n];
+    }
+    let mut states = vec![0u8; n];
+    let mut entry_node: Option<u32> = None;
+    for i in 0..n {
+        let el = mesh.elem_nodes(i as u32);
+        // v_in: local index of the entry node in this element (0 if absent).
+        let v_in = match entry_node {
+            Some(node) => el.iter().position(|&v| v == node).unwrap_or(0),
+            None => 0,
+        };
+        // Nodes this element shares with the next one, as local indices.
+        let next = if i + 1 < n { Some(mesh.elem_nodes(i as u32 + 1)) } else { None };
+        let mut shared = [false; 4];
+        if let Some(next) = next {
+            for (k, &v) in el.iter().enumerate() {
+                shared[k] = next.contains(&v);
+            }
+        }
+        let mut state = 2 * v_in;
+        for j in 0..2 {
+            if shared[QUAD_HILBERT_CHILD_ORDER[state + j][3]] {
+                state += j;
+                break;
+            }
+        }
+        states[i] = state as u8;
+        entry_node = Some(el[QUAD_HILBERT_CHILD_ORDER[state][3]]);
+    }
+    states
+}
 
 /// `mesh.GeneralRefinement([Refinement(elem)])` for quads: isotropic (XY)
 /// midpoint split creating 4 children that replace the parent in MFEM's leaf
@@ -333,6 +391,73 @@ fn check_h1_continuity(
     error_max
 }
 
+// ─── hp-refinement loop ───────────────────────────────────────────────────────
+
+/// The state left by MFEM's step 5 hp-refinement loop.
+struct HpRefinement {
+    mesh: Mesh<2>,
+    orders: Vec<u8>,
+    num_h: usize,
+    num_p: usize,
+}
+
+/// MFEM `hpref.cpp` step 5: `num_iter` iterations, each choosing an element and
+/// an h- or p-refinement type from the `DetRand` sequence.  Split out of `main`
+/// so the `-m <file>` path (whose `states` must be derived per element) is
+/// covered by a test.
+fn run_hp_refinement(
+    mut mesh: Mesh<2>,
+    mut orders: Vec<u8>,
+    initial_states: Vec<u8>,
+    num_iter: usize,
+    only_pref: bool,
+    deterministic: bool,
+) -> HpRefinement {
+    let mut states = initial_states;
+    let mut num_h = 0usize;
+    let mut num_p = 0usize;
+    let mut seed = 0i32;
+
+    for iter in 0..num_iter {
+        let r1 = if deterministic { det_rand(&mut seed) } else {
+            // -not-det: use the wall clock as entropy (not MFEM's rand()).
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as i32
+        };
+        let r2 = if deterministic { det_rand(&mut seed) } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as i32
+        };
+        let elem = (r1 as usize) % mesh.n_elems();
+        let hp = if only_pref { 1 } else { (r2 as usize) % 2 };
+
+        println!(
+            "hp-refinement iteration {iter}: {}-refinement",
+            if hp == 1 { "p" } else { "h" }
+        );
+
+        if hp == 1 {
+            // p-ref: refs.Append(pRefinement(elem, 1)); fespace.PRefineAndUpdate(refs);
+            orders[elem] += 1;
+            num_p += 1;
+        } else {
+            // h-ref: mesh.GeneralRefinement(refs); fespace.Update(false);
+            let (new_mesh, new_orders, new_states) =
+                h_refine_with_orders(&mesh, &orders, &states, elem as u32);
+            mesh = new_mesh;
+            orders = new_orders;
+            states = new_states;
+            num_h += 1;
+        }
+    }
+
+    HpRefinement { mesh, orders, num_h, num_p }
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -379,7 +504,7 @@ fn main() {
     }
 
     // 3. Construct or load a coarse mesh.
-    let mut mesh: Mesh<2> = if !mesh_file.is_empty() {
+    let mesh: Mesh<2> = if !mesh_file.is_empty() {
         match fem_io::mfem::read_mfem_file(&mesh_file) {
             Ok(m) => m.mesh2d.expect("mesh_hpref: no 2D mesh found in file"),
             Err(e) => panic!("mesh_hpref: cannot read mesh '{mesh_file}': {e}"),
@@ -403,51 +528,18 @@ fn main() {
     //    The loop only needs the per-element order array (MFEM rebuilds the
     //    space every iteration, but nothing consumes it until the solve), so
     //    the space is constructed once after the loop.
-    let mut orders = vec![order as u8; mesh.n_elems()];
-    // Hilbert-SFC state per element (MFEM NCMesh root states).
-    let mut states = INITIAL_ROOT_STATES.to_vec();
+    let orders = vec![order as u8; mesh.n_elems()];
+    // Hilbert-SFC state per element, one per coarse element (MFEM NCMesh
+    // `root_state`): derived from the mesh, never a fixed-size constant — a
+    // `-m <file>` mesh has as many root states as it has elements.
+    let states = initial_root_states(&mesh);
 
     // 5. Iteratively perform h- and p-refinements (MFEM DetRand sequence).
-    let mut num_h = 0usize;
-    let mut num_p = 0usize;
-    let mut seed = 0i32;
-
-    for iter in 0..num_iter {
-        let r1 = if deterministic { det_rand(&mut seed) } else {
-            // -not-det: use the wall clock as entropy (not MFEM's rand()).
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos() as i32
-        };
-        let r2 = if deterministic { det_rand(&mut seed) } else {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos() as i32
-        };
-        let elem = (r1 as usize) % mesh.n_elems();
-        let hp = if only_pref { 1 } else { (r2 as usize) % 2 };
-
-        println!(
-            "hp-refinement iteration {iter}: {}-refinement",
-            if hp == 1 { "p" } else { "h" }
-        );
-
-        if hp == 1 {
-            // p-ref: refs.Append(pRefinement(elem, 1)); fespace.PRefineAndUpdate(refs);
-            orders[elem] += 1;
-            num_p += 1;
-        } else {
-            // h-ref: mesh.GeneralRefinement(refs); fespace.Update(false);
-            let (new_mesh, new_orders, new_states) =
-                h_refine_with_orders(&mesh, &orders, &states, elem as u32);
-            mesh = new_mesh;
-            orders = new_orders;
-            states = new_states;
-            num_h += 1;
-        }
-    }
+    let refined = run_hp_refinement(mesh, orders, states, num_iter, only_pref, deterministic);
+    let mesh = refined.mesh;
+    let orders = refined.orders;
+    let num_h = refined.num_h;
+    let num_p = refined.num_p;
 
     // Define the variable-order space and its hp constraints (MFEM's final
     // fespace state after the loop).
@@ -531,4 +623,89 @@ fn main() {
     )
     .map_err(|e| eprintln!("warning: could not write order.gf: {e}"));
     println!("Saved refined.mesh and order.gf");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locate a file in the repository `data/` directory: relative to the cwd
+    /// when the test runs from the repository root, otherwise relative to the
+    /// package manifest (`examples/`).
+    fn data_path(name: &str) -> String {
+        let cands = [
+            format!("data/{name}"),
+            format!("{}/../data/{name}", env!("CARGO_MANIFEST_DIR")),
+            format!("{}/../../data/{name}", env!("CARGO_MANIFEST_DIR")),
+        ];
+        cands
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .cloned()
+            .unwrap_or_else(|| panic!("cannot locate data/{name}; tried {cands:?}"))
+    }
+
+    fn read_2d(path: &str) -> Mesh<2> {
+        fem_io::mfem::read_mfem_file(path)
+            .unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+            .mesh2d
+            .unwrap_or_else(|| panic!("{path} is not a 2-D mesh"))
+    }
+
+    /// `NCMesh::InitRootState` ground truth, read off MFEM 4.10's own
+    /// `root_state` (probe: `EnsureNCMesh()` + `Mesh::Print`, whose NC output
+    /// carries the `root_state` section).
+    #[test]
+    fn root_states_match_mfem() {
+        assert_eq!(
+            initial_root_states(&Mesh::<2>::make_cartesian_2d_sfc(2, 2, 1.0, 1.0)),
+            vec![0, 1, 1, 4]
+        );
+        assert_eq!(
+            initial_root_states(&read_2d(&data_path("inline-quad.mesh"))),
+            vec![1, 0, 0, 5, 0, 1, 1, 4, 0, 1, 1, 4, 5, 4, 4, 0]
+        );
+        assert_eq!(
+            initial_root_states(&read_2d(&data_path("star.mesh"))),
+            vec![0, 2, 0, 2, 0, 0, 0, 5, 3, 2, 2, 0, 0, 5, 3, 2, 2, 0, 0, 4]
+        );
+    }
+
+    /// D145 regression: the `-m <file>` path used to seed `states` from a
+    /// 4-entry constant, so any h-refinement on a mesh with more than 4
+    /// elements panicked in `states[p0]` (`index out of bounds: the len is 4`).
+    /// Both files below drive an h-refinement within the first 3 iterations of
+    /// the deterministic `DetRand` sequence.
+    #[test]
+    fn m_mesh_file_path_runs_without_panic() {
+        for (name, n_iter) in [("inline-quad.mesh", 3usize), ("star.mesh", 3)] {
+            let path = data_path(name);
+            let mesh = read_2d(&path);
+            let n_elems = mesh.n_elems();
+            assert!(n_elems > 4, "{name} must have more than 4 elements");
+            let states = initial_root_states(&mesh);
+            assert_eq!(states.len(), n_elems);
+            let refined =
+                run_hp_refinement(mesh, vec![1u8; n_elems], states, n_iter, false, true);
+            assert!(
+                refined.mesh.n_elems() >= n_elems,
+                "{name}: {} elements after {n_iter} iterations",
+                refined.mesh.n_elems()
+            );
+            assert_eq!(refined.orders.len(), refined.mesh.n_elems());
+        }
+    }
+
+    /// The default (auto-generated) mesh must keep its historical root states —
+    /// the `-m` fix must not perturb the default `hpref` run.
+    #[test]
+    fn default_mesh_root_states_unchanged() {
+        let mesh = Mesh::<2>::make_cartesian_2d_sfc(2, 2, 1.0, 1.0);
+        let orders = vec![1u8; mesh.n_elems()];
+        let states = initial_root_states(&mesh);
+        assert_eq!(states, vec![0, 1, 1, 4]);
+        let refined = run_hp_refinement(mesh, orders, states, 10, false, true);
+        // 6 h-refinements + 4 p-refinements (the C++ `-n 10` default run).
+        assert_eq!((refined.num_h, refined.num_p), (6, 4));
+    }
 }

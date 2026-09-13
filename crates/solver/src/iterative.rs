@@ -1150,11 +1150,30 @@ where
 
 /// Preconditioned conjugate gradient with energy-norm convergence.
 ///
-/// Convergence criterion: `(M⁻¹r_k, r_k) < rtol · (M⁻¹r₀, r₀)`.
-/// This checks the **preconditioned residual energy norm** — the natural
-/// convergence metric for PCG — rather than the true residual `‖r‖`.
+/// Convergence criterion: `(M⁻¹r_k, r_k) <= rtol · (M⁻¹r₀, r₀)`, i.e. MFEM's
+/// **legacy** `PCG()` helper, which every MFEM example/miniapp uses:
 ///
-/// Prints per-iteration history when `verbose` is true.
+/// ```text
+/// void PCG(const Operator &A, Solver &B, const Vector &b, Vector &x,
+///          int print_iter, int max_num_iter, real_t RTOLERANCE, real_t ATOLERANCE)
+/// {  ...  pcg.SetRelTol(sqrt(RTOLERANCE));  pcg.SetAbsTol(sqrt(ATOLERANCE)); ... }
+/// ```
+/// (`linalg/solvers.cpp:1067-1080`).  The helper takes the **square root** of
+/// the tolerances it is handed, and `CGSolver::Mult` then tests
+/// `betanom <= max(nom*rel_tol*rel_tol, abs_tol*abs_tol)` (`solvers.cpp:919`),
+/// so `PCG(…, RTOL, …)` stops at `(B r, r) <= RTOL · (B r0, r0)` — exactly this
+/// function's criterion.  Passing `1e-12` here therefore mirrors
+/// `PCG(*A, M, B, X, 1, 200, 1e-12, 0.0)`, **not** `CGSolver::SetRelTol(1e-12)`
+/// (which is six orders of magnitude stricter and is what
+/// [`solve_pcg_precond`] / [`solve_pcg_gssmoother`] implement).
+///
+/// Verified against MFEM 4.10: `mfem_ex1_poisson`'s whole 112-line
+/// `(B r, r)` log is byte-identical to C++ `examples/ex1.cpp` with this
+/// criterion, and diverges (194 vs 111 iterations) if `rtol` is squared here.
+///
+/// Prints per-iteration history when `verbose` is true; the printed values are
+/// the squared quantity, exactly as MFEM prints them (`solvers.cpp:900`,
+/// `:973`).
 // MFEM: CGSolver with preconditioner
 pub fn solve_pcg<P>(
     a: &FemCsr<f64>,
@@ -1195,6 +1214,15 @@ where
         });
     }
 
+    // D148 correction: this is MFEM's **legacy** `PCG()` helper semantics.
+    // `PCG(A, B, b, x, print, max, RTOL, ATOL)` (linalg/solvers.cpp:1067) does
+    // `SetRelTol(sqrt(RTOL))` before calling `CGSolver::Mult`, whose own test is
+    // `betanom <= nom*rel_tol*rel_tol` (`:919`) — so the effective criterion of
+    // the helper is `(B r, r) <= RTOL * (B r0, r0)`, which is exactly this line.
+    // Every fem-rs caller passes the same literal an MFEM example/miniapp passes
+    // to the legacy helper (e.g. 1e-12), so this must stay un-squared to remain
+    // a 1:1 translation.  (The *modern* API counterpart — `SetRelTol(1e-12)`
+    // directly on CGSolver — is what `solve_pcg_precond` implements.)
     let tol = rtol * gamma0;
     let mut p = z.clone(); // p₀ = z₀
     let mut gamma = gamma0;
