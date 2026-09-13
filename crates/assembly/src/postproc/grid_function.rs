@@ -656,6 +656,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         // For order 1 (linear), the extrema are at vertices — nodal values are exact.
         // For higher-order, we subdivide each element and evaluate at subdivision points.
         let subdivisions = if order <= 1 { 1 } else { order as usize };
+        let dim = mesh.topological_dim() as usize;
 
         for e in 0..n_elems as u32 {
             let elem_type = mesh.element_type(e);
@@ -674,6 +675,25 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                 ElementType::Quad4 | ElementType::Quad9 => {
                     vec![vec![-1.0, -1.0], vec![1.0, -1.0], vec![1.0, 1.0], vec![-1.0, 1.0]]
                 }
+                // 3-D families: take the reference vertices from the element's own
+                // layout, whose first `n` entries are the vertices (the DOF order is
+                // vertex-first: vertices → edges → faces → interior).  This respects
+                // each family's reference domain without a per-type table — and the
+                // table is exactly what went wrong in D107, where the `_ => vec![]`
+                // arm left a 3-D element with no vertex samples and the subdivision
+                // fallback then fed a two-component point to `HexQk`.
+                ElementType::Tet4 | ElementType::Tet10
+                | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+                | ElementType::Prism6 | ElementType::Prism15
+                | ElementType::Pyramid5 => {
+                    let n_verts = match elem_type {
+                        ElementType::Tet4 | ElementType::Tet10 => 4,
+                        ElementType::Prism6 | ElementType::Prism15 => 6,
+                        ElementType::Pyramid5 => 5,
+                        _ => 8,
+                    };
+                    ref_elem.dof_coords().into_iter().take(n_verts).collect()
+                }
                 _ => vec![],
             };
 
@@ -691,27 +711,61 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             // Evaluate at subdivision points within the element
             for si in 0..subdivisions {
                 for sj in 0..subdivisions {
-                    let xi = match elem_type {
-                        ElementType::Tri3 | ElementType::Tri6 => {
-                            // Barycentric subdivision for triangles
-                            let a = si as f64 / subdivisions as f64;
-                            let b = sj as f64 / subdivisions as f64;
-                            let c = 1.0 - a - b;
-                            if c < 0.0 { continue; }
-                            // Convert barycentric to reference coords
-                            vec![b, c]
-                        }
-                        ElementType::Quad4 | ElementType::Quad9 => {
-                            // Tensor-product subdivision for quads
-                            let x = -1.0 + 2.0 * (si as f64 + 0.5) / subdivisions as f64;
-                            let y = -1.0 + 2.0 * (sj as f64 + 0.5) / subdivisions as f64;
-                            vec![x, y]
-                        }
-                        _ => {
-                            // Default: evaluate at centroid
-                            vec![1.0 / 3.0, 1.0 / 3.0]
-                        }
-                    };
+                    // A third index is only needed in 3-D; in 2-D it stays at 0.
+                    for sk in 0..if dim == 3 { subdivisions } else { 1 } {
+                        let xi = match elem_type {
+                            ElementType::Tri3 | ElementType::Tri6 => {
+                                // Barycentric subdivision for triangles
+                                let a = si as f64 / subdivisions as f64;
+                                let b = sj as f64 / subdivisions as f64;
+                                let c = 1.0 - a - b;
+                                if c < 0.0 { continue; }
+                                // Convert barycentric to reference coords
+                                vec![b, c]
+                            }
+                            ElementType::Quad4 | ElementType::Quad9 => {
+                                // Tensor-product subdivision for quads
+                                let x = -1.0 + 2.0 * (si as f64 + 0.5) / subdivisions as f64;
+                                let y = -1.0 + 2.0 * (sj as f64 + 0.5) / subdivisions as f64;
+                                vec![x, y]
+                            }
+                            ElementType::Tet4 | ElementType::Tet10 => {
+                                // Barycentric lattice on the unit tetrahedron
+                                let a = si as f64 / subdivisions as f64;
+                                let b = sj as f64 / subdivisions as f64;
+                                let c = sk as f64 / subdivisions as f64;
+                                if a + b + c > 1.0 { continue; }
+                                vec![a, b, c]
+                            }
+                            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+                                // Tensor-product subdivision on [-1,1]^3
+                                let x = -1.0 + 2.0 * (si as f64 + 0.5) / subdivisions as f64;
+                                let y = -1.0 + 2.0 * (sj as f64 + 0.5) / subdivisions as f64;
+                                let z = -1.0 + 2.0 * (sk as f64 + 0.5) / subdivisions as f64;
+                                vec![x, y, z]
+                            }
+                            ElementType::Prism6 | ElementType::Prism15 => {
+                                // Unit triangle in-plane x [0,1] along the axis, which
+                                // is the first coordinate in `PrismPk::dof_coords`.
+                                let a = si as f64 / subdivisions as f64;
+                                let b = sj as f64 / subdivisions as f64;
+                                if a + b > 1.0 { continue; }
+                                vec![(sk as f64 + 0.5) / subdivisions as f64, a, b]
+                            }
+                            ElementType::Pyramid5 => {
+                                // Unit-square base shrinking linearly to the apex at z = 1
+                                let z = (sk as f64 + 0.5) / subdivisions as f64;
+                                let x = (si as f64 + 0.5) / subdivisions as f64 * (1.0 - z);
+                                let y = (sj as f64 + 0.5) / subdivisions as f64 * (1.0 - z);
+                                vec![x, y, z]
+                            }
+                            _ => {
+                                // Unknown type: sample the reference centroid, with the
+                                // element's own dimension (a two-component point must
+                                // never reach a 3-D element — that was D107).
+                                vec![1.0 / 3.0; dim]
+                            }
+                        };
 
                     // Evaluate basis at subdivision point
                     let mut phi = vec![0.0; n_ldofs];
@@ -725,6 +779,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
 
                     if val < global_min { global_min = val; }
                     if val > global_max { global_max = val; }
+                    }
                 }
             }
         }
@@ -2097,6 +2152,47 @@ mod tests {
         assert!(u_min <= 0.01, "min = {u_min}, should be near 0");
         assert!(u_max >= 1.99, "max = {u_max}, should be near 2");
         assert!(u_min <= u_max, "min should be <= max");
+    }
+
+    /// D107: `get_bounds` was 2-D only — a 3-D element got no vertex samples
+    /// (the `_` arm of the vertex table yielded nothing) and the subdivision
+    /// fallback then handed a two-component point to `HexQk`, panicking at
+    /// `lag1d.val(xi[2])`.  The 3-D arms must return the exact bounds for a
+    /// linear field (vertices are sampled) and bracket a quadratic one.
+    #[test]
+    fn get_bounds_3d_hex_and_tet() {
+        // Hex8-P1 on the unit cube: f = x + y + z has min 0 at (0,0,0) and max 3.
+        let mesh = Mesh::<3>::unit_cube_hex(2);
+        let space = H1Space::new(mesh, 1);
+        let f = |x: &[f64]| x[0] + x[1] + x[2];
+        let gf = GridFunction::new(&space, space.interpolate(&f).into_vec());
+        let (u_min, u_max) = gf.get_bounds();
+        assert!((u_min - 0.0).abs() < 1e-10, "hex P1 min = {u_min}, expected 0.0");
+        assert!((u_max - 3.0).abs() < 1e-10, "hex P1 max = {u_max}, expected 3.0");
+
+        // Hex8-P2: f = x² + y² + z² has min 0 at the origin and max 3 at the far corner.
+        let space = H1Space::new(Mesh::<3>::unit_cube_hex(2), 2);
+        let g = |x: &[f64]| x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+        let gf = GridFunction::from_projection(&space, &g, 4);
+        let (u_min, u_max) = gf.get_bounds();
+        assert!(u_min <= 0.01, "hex P2 min = {u_min}, should be near 0");
+        assert!(u_max >= 2.99, "hex P2 max = {u_max}, should be near 3");
+        assert!(u_min <= u_max, "hex P2 min should be <= max");
+
+        // Tet4-P1 on the unit tetrahedron: f = x + y + z, min 0, max 1.
+        let mesh_tet = Mesh::<3>::unit_cube_tet(1);
+        let space_tet = H1Space::new(mesh_tet, 1);
+        let gf_tet = GridFunction::new(&space_tet, space_tet.interpolate(&f).into_vec());
+        let (t_min, t_max) = gf_tet.get_bounds();
+        assert!(t_min <= 1e-10, "tet P1 min = {t_min}, expected 0.0");
+        assert!(t_max >= 1.0 - 1e-10, "tet P1 max = {t_max}, expected roughly 1");
+
+        // Tet4-P2 must not panic and must still bracket the field.
+        let space_tet2 = H1Space::new(Mesh::<3>::unit_cube_tet(1), 2);
+        let gf_tet2 = GridFunction::from_projection(&space_tet2, &g, 4);
+        let (t2_min, t2_max) = gf_tet2.get_bounds();
+        assert!(t2_min <= t2_max, "tet P2 min {t2_min} > max {t2_max}");
+        assert!(t2_min <= 0.05 && t2_max >= 0.9, "tet P2 bounds [{t2_min}, {t2_max}] too tight");
     }
 
     use super::project_grid_function;

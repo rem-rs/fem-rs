@@ -96,7 +96,6 @@ use std::sync::Arc;
 use fem_assembly::postproc::coefficient::{CoeffCtx, PWConstCoeff, ScalarCoeff};
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_mesh::topology::MeshTopology;
-use fem_space::fe_space::FESpace;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{ParallelFESpace, WorkerConfig};
@@ -541,15 +540,13 @@ fn main() {
             comm.clone(),
         );
         let h1 = {
-            // `ParallelFESpace::new_with_dof_manager` (the P2-capable H¹
-            // constructor used by `examples/mfem_ex1`/`pex16`/`pex27`) panics
-            // for this mesh: `DofPartition::from_dof_manager` classifies 2908
-            // partition DOFs while the `DofManager` has 2443 (see the report).
-            // `ParallelFESpace::new`'s generic `from_mesh_partition` fallback
-            // partitions by mesh *nodes* only, so for order ≥ 2 its
-            // `n_global_dofs()` is the P1 node count (364) — the FE space
-            // itself is correct (2443 DOFs at order 2), which is what the
-            // banner below uses.
+            // D109 fixed the two defects this constructor used to work around:
+            // `DofPartition::from_dof_manager` used to classify the six face DOFs
+            // of every Q2 hex as element-interior DOFs (3097 instead of 2443), and
+            // `ParallelFESpace::new`'s H¹ arm used to fall back to a node-only P1
+            // partition (364 at order 2).  Both now give MFEM's 2443, verified
+            // against `mpirun` on this mesh, so the plain constructor is used and
+            // `n_global_dofs()` is the true `GlobalTrueVSize`.
             ParallelFESpace::new(
                 H1Space::new(local_mesh.clone(), opts.order as u8),
                 &par_mesh,
@@ -560,16 +557,7 @@ fn main() {
         // joule.cpp:451-463 — `GlobalTrueVSize()` per space.  Note the C++
         // prints the *H(div)* true size twice (temperature flux and magnetic
         // field share the RT space).
-        //
-        // The L²/H(curl)/H(div) partitions are exact, so
-        // `n_global_dofs()` is MFEM's `GlobalTrueVSize`.  For H¹ the parallel
-        // partition is P1-only (see the constructor note above), so the FE
-        // space's own `n_dofs()` is used — at one rank MFEM's
-        // `GlobalTrueVSize == GetVSize == n_dofs`.  The value printed must be
-        // the C++ `2443`.  `h1_partition_dofs` records the discrepant
-        // partition count for the report.
-        let h1_true = h1.local_space().n_dofs();
-        let h1_partition_dofs = h1.n_global_dofs();
+        let h1_true = h1.n_global_dofs();
         if rank == 0 {
             println!("Number of Temperature Flux unknowns:  {}", rt.n_global_dofs());
             println!("Number of Temperature unknowns:       {}", l2.n_global_dofs());
@@ -678,7 +666,7 @@ fn main() {
                  BlockVector layout with its make_ref views, the four material maps.\n\
                  Requested: -o {} -s {} -tf {} -dt {} n_bdr={n_bdr}\n\
                  local block sizes [L2,RT,H1,ND] = [{},{},{},{}]  block_len={}\n\
-                 H1 true dofs = {h1_true} (parallel partition reports {h1_partition_dofs})\n\
+                 H1 true dofs = {h1_true}\n\
                  ess_bdr={ess_bdr:?} thermal_ess_bdr={thermal_ess_bdr:?} poisson_ess_bdr={poisson_ess_bdr:?}",
                 opts.order,
                 opts.ode_solver_type,

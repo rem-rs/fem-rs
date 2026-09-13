@@ -62,13 +62,17 @@
 //!   own 1e-3 `ptol`, not a porting error).  Both land in the same
 //!   `SnapTimeStep` bucket, so `Number of Time Steps` / `Time Step Size` and
 //!   every subsequent number are unaffected;
-//! * the discrete curl `-Curl` (`ParDiscreteLinearOperator::curl_3d`) is still
-//!   assembled with H(div) rows and applied transposed in the power iteration
-//!   (`maximum_time_step`, where `curl_t = self.neg_curl.transpose()` maps
-//!   H(div) → H(curl)); unlike `weakCurlMuInv_` that matrix is used only for
-//!   the `dtMax` power method, and the transpose only needs the *rows* of the
-//!   H(curl) space there.  `weakCurlMuInv_` itself used to be built the same
-//!   way and now uses D88's owned-H(curl)-row assembly (below).
+//! * the discrete curl `-Curl` (`ParDiscreteLinearOperator::curl_3d`) is
+//!   assembled with H(div) rows in the forward direction and applied
+//!   transposed in the power iteration (`maximum_time_step`), where the D108
+//!   entry point `ParDiscreteLinearOperator::curl_3d_transpose` supplies the
+//!   H(div) → H(curl) operator with **owned H(curl) rows and all local
+//!   (owned + ghost) H(div) columns**.  `.transpose()` at the call site is only
+//!   valid for one rank: in parallel it transposes an already ghost-row
+//!   truncated H(div)-row matrix, so its columns are the owned H(div) DOFs
+//!   only — fewer than the local H(div) vector's length, which `CsrMatrix::spmv`
+//!   rejects outright.  `weakCurlMuInv_` used to be built the same way and now
+//!   uses D88's owned-H(curl)-row assembly (below).
 //!
 //! ## D99: `weakCurlMuInv_` via the owned-H(curl)-row assembler
 //!
@@ -90,6 +94,27 @@
 //! permutation is the identity and there are no ghost rows.  At 2 ranks the
 //! shape changes (H(curl) owned rows instead of all-local H(curl) rows) and
 //! the ghost rows are gone; see the report for the multi-rank numbers.
+//!
+//! ## D108: `-Curlᵀ` in the power iteration (multi-rank)
+//!
+//! `GetMaximumTimeStep` applies `NegCurl_->MultTranspose(HD_, RHS_)`, i.e. the
+//! curl transpose with **H(curl) rows**.  `.transpose()` of the H(div)-row
+//! `neg_curl` cannot express that in parallel — see the intro above; at 2 ranks
+//! its columns are the 5632/5888 owned H(div) DOFs while `hd` has 11520
+//! (owned + ghost) entries, so `CsrMatrix::spmv` aborted with
+//! `left: 11520 / right: 5888`.  The call site now uses
+//! `ParDiscreteLinearOperator::curl_3d_transpose` (owned H(curl) rows × all
+//! local H(div) columns) and feeds it a ghost-synced `hd`; `v1` is ghost-synced
+//! before it becomes the next sweep's `v0`, since the forward `neg_curl`
+//! product reads the H(curl) halo the same way.
+//!
+//! Two rank result (`--ranks 2`, both sides the command above with `-tf 1.5`):
+//! `Maximum Time Step 0.144179 ns` vs C++ `mpirun -np 2` `0.141055 ns` (the
+//! power-iteration seed again; less than the 2.8 % one-rank gap), `Number of Time
+//! Steps 25`, `Time Step Size 0.06 ns`, and all six `Energy(<t>ns)` lines agree
+//! with C++ to five significant digits (e.g. `7.02217e-12` and `3.56195e-11`
+//! identical, `9.21475e-12` vs `9.21518e-12`).  The one-rank output is
+//! byte-identical to the pre-D108 log, so nothing above changed.
 //!
 //! ## Verification (serial, `--ranks 1`)
 //!
@@ -765,7 +790,16 @@ impl Maxwell {
         let mut hd = ParVector::zeros(&self.rt);
         let mut rhs = ParVector::zeros(&self.nd);
         let n_rt_rows = self.neg_curl.nrows;
-        let curl_t = self.neg_curl.transpose();
+        // `NegCurl_->MultTranspose(HD_, RHS_)` in the *owned H(curl) row*
+        // orientation (D108).  Transposing the H(div)-row `neg_curl` at the
+        // call site would keep only this rank's owned H(div) DOFs as columns,
+        // which cannot even consume `hd` (length = owned + ghost).  The entries
+        // carry the same negation as `neg_curl` — without it the power method
+        // estimates `-λ_max` and `2.0/lambda.sqrt()` is NaN.
+        let mut curl_t = ParDiscreteLinearOperator::curl_3d_transpose(&self.nd, &self.rt);
+        for v in curl_t.values.iter_mut() {
+            *v = -*v;
+        }
 
         // `setupSolver(0, 0.0)` — creates A1[0] and the PCG/(Jacobi) solver.
         let mut a1 = self.m1.clone_vec();
@@ -791,11 +825,20 @@ impl Maxwell {
             self.neg_curl
                 .spmv(v0.as_slice(), &mut u0.as_slice_mut()[..n_rt_rows]);
             self.m2.spmv(&mut u0, &mut hd);
+            // `curl_t` (like `neg_curl`) sums over the *local* (owned + ghost)
+            // DOFs of its column space, so the halo of `hd` must be current —
+            // without this the power iteration drops every ghost H(div)
+            // contribution at 2+ ranks (no-op at one rank, where there are no
+            // ghost DOFs).
+            hd.update_ghosts();
             let n_nd_rows = curl_t.nrows;
             curl_t.spmv(hd.as_slice(), &mut rhs.as_slice_mut()[..n_nd_rows]);
 
             par_solve_pcg_jacobi(&a1, &rhs, &mut v1, &cfg)
                 .unwrap_or_else(|e| panic!("maxwell: power-method solve failed: {e}"));
+            // `v1` becomes `v0` for the next sweep, whose `neg_curl` product
+            // reads the ghost columns of the H(curl) vector (same reason).
+            v1.update_ghosts();
 
             let lambda = v0.global_dot(&v1);
             let dt1 = 2.0 / lambda.sqrt();
@@ -1006,12 +1049,13 @@ fn main() {
         let mut e = ParVector::zeros(&maxwell.nd);
         let mut b = ParVector::zeros(&maxwell.rt);
 
+        // C++ `real_t energy = Maxwell.GetEnergy();` runs on **every** rank
+        // (only the `cout` is `Mpi::Root()`-gated).  `energy()` is collective
+        // here (`ParVector::global_dot`), so computing it inside the rank-0
+        // branch would leave rank 1 waiting in a later collective.
+        let e0 = maxwell.energy(&mut e, &mut b);
         if comm.rank() == 0 {
-            println!(
-                "Energy({}ns):  {}J",
-                g6(opts_rank.ti),
-                g6(maxwell.energy(&mut e, &mut b))
-            );
+            println!("Energy({}ns):  {}J", g6(opts_rank.ti), g6(e0));
             println!("Maximum Time Step:     {}ns", g6(maxwell.dt_max / T_SCALE));
         }
 
@@ -1035,12 +1079,10 @@ fn main() {
             while t < t_stop {
                 maxwell.solve_step(&mut b, &mut e, &mut cur, &mut db, &siav, &mut t, dt);
             }
+            // Same as above: every rank computes the energy, rank 0 prints.
+            let energy = maxwell.energy(&mut e, &mut b);
             if comm.rank() == 0 {
-                println!(
-                    "Energy({}ns):  {}J",
-                    g6(t / T_SCALE),
-                    g6(maxwell.energy(&mut e, &mut b))
-                );
+                println!("Energy({}ns):  {}J", g6(t / T_SCALE), g6(energy));
             }
             it += 1;
         }

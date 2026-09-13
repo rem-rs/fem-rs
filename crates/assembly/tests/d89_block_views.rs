@@ -172,10 +172,12 @@ fn make_ref_views_write_through_to_the_block_vector() {
     // NOTE: the projected field is *not* used as a value check here.  On
     // `H1Space<Mesh<3>>` (Hex8, order 2) `project_coefficient` of the linear
     // field `2x + 3y + 5z` returns point values in [5, 10] for 26 of the 27
-    // DOFs, but the first DOF comes back as 6.3e-15 — reproducibly, and
-    // identically for an owning grid function, so it is a pre-existing
-    // Hex8-P2 basis issue and not a property of the view.  (`get_bounds()` on
-    // the same space panics in `crates/element/src/lagrange/factory.rs`.)
+    // DOFs, while the first DOF comes back as 6.3e-15 because its exact value
+    // is zero and 6.3e-15 is the projection's absolute accuracy — the basis is
+    // a Kronecker delta at every DOF slot (pinned by
+    // `hex_q2_basis_is_kronecker_at_dof_coords`), so this is a relative-error
+    // artifact, not a defect.  (`get_bounds()` on the same space used to panic
+    // for lack of 3-D arms; that was D107 and is fixed.)
     let p_now = &flat[off[2]..off[3]];
     assert_ne!(p_now, want[2].as_slice());
 
