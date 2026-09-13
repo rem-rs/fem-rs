@@ -29,7 +29,7 @@
 //! `NurbsFESpace` = 27, `NurbsHCurlSpace` = 144 and `NurbsHDivSpace` = 108 DOFs).
 //!
 //! **Not ported**: steps 6-11, i.e. `GridFunction::ProjectCoefficient(coeff,
-//! ProjectType::DEFAULT)` on the *trial* space followed by
+//! `ProjectType::DEFAULT)` on the *trial* space followed by
 //! `MixedBilinearForm::SpMat().Mult` with `MixedVectorGradientIntegrator` /
 //! `MixedVectorCurlIntegrator` / `VectorFEDivergenceIntegrator` between two
 //! *different* NURBS spaces, the `MassIntegrator`/`VectorFEMassIntegrator`
@@ -42,6 +42,9 @@
 //! pipeline is not, so all three variants stop at the same place.  MFEM's
 //! iteration logs (`(B r, r)` per step and `Average reduction factor`) and the
 //! two error lines per variant are therefore not reproducible here.
+//! (Round 28 added `NurbsHDivSpace::assemble_vector_boundary_flux`, the D106
+//! boundary-element assembly path — `nurbs_ex24` itself has no boundary form,
+//! so it does not advance this file.)
 //!
 //! Also not ported: `refined.mesh` / `sol.gf` (no NURBS mesh writer, see
 //! `nurbs_ex1`) and the GLVis socket.

@@ -1747,6 +1747,46 @@ impl NurbsExtension {
         }
     }
 
+    /// The boundary FE's own reference directions of the boundary element with
+    /// local knot spans `spans` (one entry per reference direction, in the
+    /// boundary element's own order) on the patch-boundary entity `bp`, as
+    /// `(patch direction, signed span index)`.
+    ///
+    /// This is the `SetIJK(bel_to_IJK.GetRow(i))` half of
+    /// `NURBSExtension::LoadBE`: MFEM's `NURBSPatchMap::SetBdrPatchDofMap` maps
+    /// the boundary element's own edges through `KnotVec(edge, oedge, &okv)`
+    /// and `Generate{2,3}DBdrElementDofTable` stores
+    /// `bel_to_IJK(j) = (okv_j >= 0) ? i_j : FlipIndexSign(i_j)` — the *signed*
+    /// span index the boundary `NURBSFiniteElement` runs
+    /// `KnotVector::CalcShape(shape, i, xi)` on.  A negative `i` mirrors the
+    /// reference coordinate (`1 - xi`) and selects the same knot span
+    /// (`ip = -1 - i + Order`), which is what makes the boundary element's
+    /// parameterization follow its own vertex cycle.
+    ///
+    /// Only meaningful for a single-patch mesh, where a knot-vector index
+    /// determines its patch direction (the H(div)/H(curl) NURBS spaces are
+    /// single-patch only anyway).
+    pub fn bdr_element_span(&self, bp: usize, spans: &[usize]) -> Vec<(usize, i64)> {
+        let bv = self.bdr_element_vertices(bp);
+        let dir_kvs =
+            self.patch_direction_kv(self.bdr_sides[bp].patch).expect("patch knot vectors");
+        (0..spans.len())
+            .map(|j| {
+                let v0 = bv[j];
+                let v1 = bv[(j + 1) % bv.len()];
+                let e = self.find_edge(v0, v1);
+                let dir = dir_kvs
+                    .iter()
+                    .position(|&k| k == self.knot_ind(e))
+                    .expect("boundary knot vector is a patch direction");
+                let oedge = if v0 < v1 { 1 } else { -1 };
+                let okv = self.knot_sign(e) * oedge;
+                let i = spans[j] as i64;
+                (dir, if okv >= 0 { i } else { -1 - i })
+            })
+            .collect()
+    }
+
     /// MFEM `Generate1DBdrElementDofTable`: one DOF per boundary point, no
     /// mode-dependent filtering or sign.
     fn bdr_dof_table_1d(&self) -> Vec<Vec<i64>> {

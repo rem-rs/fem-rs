@@ -69,7 +69,7 @@ use fem_element::quadrature::gauss_legendre_01;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 
-use crate::nurbs_extension::{BdrDofMode, NurbsExtension};
+use crate::nurbs_extension::{BdrDofMode, NurbsExtension, unsign_dof};
 
 /// MFEM `Table(const Table &t1, const Table &t2, int offset)` /
 /// `Table(t1, t2, o2, t3, o3)` — the merge `FiniteElementSpace::UpdateNURBS`
@@ -375,6 +375,20 @@ fn multi_index(o: usize, lens: &[usize], d: usize) -> usize {
         idx /= n;
     }
     idx % lens[d]
+}
+
+/// Split MFEM's *signed* `NURBSFiniteElement::ijk` entry (a knot-span index,
+/// `FlipIndexSign(i) = -1 - i` when the boundary element runs against its
+/// patch's direction) into the knot span to evaluate and the reference
+/// coordinate to evaluate it at: `KnotVector::CalcShape(shape, i, xi)` uses the
+/// span `ip = (i >= 0) ? i : -1 - i` (plus the order) with the coordinate
+/// `(i >= 0) ? xi : 1 - xi`.
+pub fn split_signed_span(signed: i64, xi: f64) -> (usize, f64) {
+    if signed >= 0 {
+        (signed as usize, xi)
+    } else {
+        ((-1 - signed) as usize, 1.0 - xi)
+    }
 }
 
 /// A NURBS finite element space (`FiniteElementSpace` + `NURBSExtension`).
@@ -740,6 +754,105 @@ impl NurbsFESpace {
         self.ext.element_dofs(e).iter().map(|&d| d as u32).collect()
     }
 
+    /// `mesh->GetBdrElementTransformation(i)` of a NURBS mesh at one boundary
+    /// quadrature point: the physical point of the **rational** geometry on the
+    /// patch boundary side `(patch, dir, low)`.
+    ///
+    /// MFEM builds that transformation from the mesh's `Nodes` grid function —
+    /// `Nodes->FESpace()->GetBE(i)` (the mesh-order `NURBS1D/2D` boundary
+    /// element of the *refined* mesh extension) with the point matrix
+    /// `nodes(UnsignIndex(vdofs[n*k+j]))` (the refined net's boundary control
+    /// points) — so it evaluates the boundary curve of the refined patch.  Knot
+    /// insertion in the tangential direction leaves that curve unchanged, hence
+    /// this port evaluates the **original** patch's boundary side over the
+    /// refined span's parameter interval, exactly as [`Self::geometry`] does for
+    /// a volume element, and fixes the normal direction at the patch boundary
+    /// parameter (the first / last active original span, at its low / high end).
+    ///
+    /// `tang` holds one `(patch direction, signed span index, reference
+    /// coordinate)` per *boundary* reference direction, in the boundary
+    /// element's own order (see
+    /// [`NurbsExtension::bdr_element_span`](crate::nurbs_extension::NurbsExtension::bdr_element_span)
+    /// for the signed span, which mirrors the reference coordinate exactly as
+    /// MFEM's `KnotVector::CalcShape(shape, i, xi)` does).
+    pub fn bdr_geometry(
+        &self,
+        patch: usize,
+        dir: usize,
+        low: bool,
+        tang: &[(usize, i64, f64)],
+    ) -> [f64; 3] {
+        let dim = self.dim;
+        let geo_kv = self.geo.patch_knot_vectors(patch).expect("geometry patch");
+        let ref_kv = self.mesh_ext.patch_knot_vectors(patch).expect("refined patch");
+        let ref_spans = self.mesh_ext.patch_element_spans(patch).expect("refined spans");
+        let geo_spans = self.geo.patch_element_spans(patch).expect("geometry spans");
+
+        // Per direction: the original knot span and the span-local coordinate.
+        let mut span = [0usize; 3];
+        let mut xi = [0.0_f64; 3];
+        for &(d, signed, x) in tang {
+            let order = geo_kv[d].order();
+            let (s, xs) = split_signed_span(signed, x);
+            let refined = ref_kv[d].knot_vector().as_slice();
+            let a = refined[s + order];
+            let b = refined[s + order + 1];
+            let u = a + xs * (b - a);
+            // The refined span's ordinal reduces to the original span's ordinal
+            // (uniform refinement splits every span in `2^ref_levels`), the same
+            // correspondence `ijk_to_element` uses.
+            let ordinal = ref_spans[d]
+                .iter()
+                .position(|&v| v == s)
+                .expect("refined span is an element of the refined knot vector");
+            let old = geo_spans[d][ordinal >> self.ref_levels];
+            let knots = geo_kv[d].knot_vector().as_slice();
+            let ga = knots[old + order];
+            let gb = knots[old + order + 1];
+            span[d] = old;
+            xi[d] = (u - ga) / (gb - ga);
+        }
+        span[dir] = if low {
+            geo_spans[dir][0]
+        } else {
+            *geo_spans[dir].last().expect("a patch direction has knot spans")
+        };
+        xi[dir] = if low { 0.0 } else { 1.0 };
+
+        // The original (geometry) basis in every direction.
+        let mut n1d: Vec<Vec<f64>> = Vec::with_capacity(dim);
+        for d in 0..dim {
+            let order = geo_kv[d].order();
+            let mut n = vec![0.0; order + 1];
+            knot_span_shape(geo_kv[d].knot_vector().as_slice(), order, span[d], xi[d], &mut n);
+            n1d.push(n);
+        }
+
+        let lens: Vec<usize> = n1d.iter().map(|n| n.len()).collect();
+        let n_local: usize = lens.iter().product();
+        let mut num = [0.0_f64; 3];
+        let mut den = 0.0_f64;
+        for o in 0..n_local {
+            let mut b = 1.0;
+            let mut midx = [0usize; 3];
+            for d in 0..dim {
+                let i = multi_index(o, &lens, d);
+                b *= n1d[d][i];
+                midx[d] = span[d] + i;
+            }
+            let g = self.geo.patch_dof(patch, &midx[..dim]).expect("geometry patch dof");
+            let w = self.geo.weights()[g] * b;
+            den += w;
+            for d in 0..dim {
+                num[d] += w * self.geo_coords[g][d];
+            }
+        }
+        for d in 0..dim {
+            num[d] /= den;
+        }
+        num
+    }
+
     /// MFEM `FiniteElementSpace::GetEssentialTrueDofs(ess_bdr = 1)`.
     ///
     /// A clamped NURBS patch's boundary is exactly the set of control points
@@ -897,6 +1010,42 @@ impl NurbsFESpace {
             coo.add_element_matrix(self.ext.element_dofs(e), &k_elem);
         }
         coo.into_csr()
+    }
+
+    /// `GridFunction::ComputeL2Error(Coefficient, irs)` for the scalar NURBS
+    /// space — per element, `u_h = Σ_j shape_j x_el` and each quadrature point
+    /// contributes `ip.weight * Weight() * (u_h − u)²`.  `order_quad` is the
+    /// caller's `irs` rule order (`nurbs_ex5`'s `max(2, 2*order+1)`).
+    pub fn compute_l2_error(
+        &self,
+        x: &[f64],
+        f: &dyn Fn(&[f64]) -> f64,
+        order_quad: u8,
+    ) -> f64 {
+        let dim = self.dim;
+        let mut error = 0.0_f64;
+        let mut shape = Vec::new();
+        for e in 0..self.n_elements() {
+            let nd = self.element_dofs(e).len();
+            let fe = self.element_fe(e);
+            let rule = nurbs_rule(dim, order_quad);
+            shape.clear();
+            shape.resize(nd, 0.0);
+            let mut elem_error = 0.0_f64;
+            for q in 0..rule.points.len() {
+                let xi = &rule.points[q];
+                let geo = self.geometry(e, xi);
+                fe.shape(xi, &mut shape);
+                let mut uh = 0.0_f64;
+                for (o, &g) in self.ext.element_dofs(e).iter().enumerate() {
+                    uh += shape[o] * x[g];
+                }
+                let d = uh - f(&geo.x[..dim]);
+                elem_error += rule.weights[q] * geo.det_j * d * d;
+            }
+            error += elem_error.abs();
+        }
+        error.sqrt()
     }
 
     /// `LinearForm::Assemble` for `b(v) = ∫ f(x) v`
@@ -2323,6 +2472,131 @@ impl NurbsHDivSpace {
         rhs
     }
 
+    /// `LinearForm::Assemble` of `nurbs_ex5`'s natural-boundary term
+    /// `∫_Γ g (v·n) ds` (`VectorFEBoundaryFluxLFIntegrator`), on the boundary
+    /// elements of the H(div) NURBS space.
+    ///
+    /// MFEM's integrator (`fem/lininteg.cpp`) evaluates the *boundary* FE
+    /// `fes->GetBE(i)` — for `NURBS_HDivFECollection` a `NURBS1DFiniteElement`
+    /// in 2-D and a `NURBS2DFiniteElement` in 3-D, i.e. the *scalar* NURBS
+    /// element of the analysis extension, whose weights are `1` — on
+    /// `mesh->GetBdrElementTransformation(i)` with the default
+    /// `oa = 2, ob = 0`, so
+    ///
+    /// ```text
+    ///   elvect_j += ip.weight · g(x_q) · shape_j(ξ_q),   intorder = 2·GetOrder()
+    /// ```
+    ///
+    /// with no `Trans.Weight()` and no explicit normal: the normal component and
+    /// the surface measure live in the DOF row's signs, which
+    /// [`Self::boundary_dof_table`] produces (`Mode::H_DIV` negates the low side
+    /// of each patch direction) and `Vector::AddElementVector` applies as
+    /// "`j < 0` ⇒ subtract `elvect[-1-j]`".  The signed weight vector is
+    /// therefore uniform `±1` per row and cancels in the rational
+    /// normalization, which is why the shape below is the plain B-spline basis.
+    pub fn assemble_vector_boundary_flux(&self, g: &dyn Fn(&[f64]) -> f64) -> Vec<f64> {
+        let dim = self.dim;
+        let ext = self.base.extension();
+        let rows = self.boundary_dof_table();
+        let elements = self.boundary_element_spans();
+        assert_eq!(elements.len(), rows.len(), "boundary element count vs bel_dof rows");
+        let mut rhs = vec![0.0_f64; self.n_dofs];
+        for (i, &(bp, ref spans)) in elements.iter().enumerate() {
+            let side = ext.boundary_sides()[bp];
+            let kvs = ext.bdr_patch_knot_vectors(bp);
+            let order: Vec<usize> = kvs.iter().map(|k| k.order()).collect();
+            assert!(
+                order.iter().all(|&o| o == order[0]),
+                "NurbsHDivSpace: a boundary patch with unequal knot-vector orders has no \
+                 H(div) boundary DOFs (MFEM's `add_dofs` test)"
+            );
+            let local = ext.bdr_element_span(bp, spans);
+            // `IntRules.Get(SEGMENT/SQUARE, oa*GetOrder() + ob)` with the
+            // coefficient constructor's `oa = 2, ob = 0`.
+            let rule = nurbs_rule(dim - 1, (2 * order[0]) as u8);
+            let dof_shape: Vec<usize> = order.iter().map(|o| o + 1).collect();
+            let nd: usize = dof_shape.iter().product();
+            let row = &rows[i];
+            assert_eq!(row.len(), nd, "boundary FE dofs vs bel_dof row");
+            let mut elvec = vec![0.0_f64; nd];
+            for q in 0..rule.points.len() {
+                let xiq = &rule.points[q];
+                // The `Order_j + 1` non-vanishing span-local basis values of
+                // each boundary reference direction, evaluated at the signed
+                // span's own coordinate.
+                let mut n1d: Vec<Vec<f64>> = Vec::with_capacity(order.len());
+                for (j, &(_, signed)) in local.iter().enumerate() {
+                    let (s, xs) = split_signed_span(signed, xiq[j]);
+                    let mut nb = vec![0.0; order[j] + 1];
+                    knot_span_shape(kvs[j].knot_vector().as_slice(), order[j], s, xs, &mut nb);
+                    n1d.push(nb);
+                }
+                let mut shape = vec![0.0_f64; nd];
+                for (o, v) in shape.iter_mut().enumerate() {
+                    let mut p = 1.0;
+                    for (j, nb) in n1d.iter().enumerate() {
+                        p *= nb[multi_index(o, &dof_shape, j)];
+                    }
+                    *v = p;
+                }
+                let tang: Vec<(usize, i64, f64)> = local
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &(d, signed))| (d, signed, xiq[j]))
+                    .collect();
+                let x = self.base.bdr_geometry(side.patch, side.dir, side.low, &tang);
+                let w = rule.weights[q] * g(&x[..dim]);
+                for (o, &s) in shape.iter().enumerate() {
+                    elvec[o] += w * s;
+                }
+            }
+            for (o, &dof) in row.iter().enumerate() {
+                let (d, s) = unsign_dof(dof);
+                rhs[d] += s as f64 * elvec[o];
+            }
+        }
+        rhs
+    }
+
+    /// MFEM's `NURBSExtension` boundary-element enumeration for the H(div)
+    /// space: one `(patch boundary entity, knot spans)` pair per mesh boundary
+    /// element, in the order `Generate{2,3}DBdrElementDofTable` builds the
+    /// `bel_dof` rows (`Generate3DBdrElementDofTable` runs the *second* local
+    /// direction outer), with one knot-span index per boundary reference
+    /// direction.
+    pub fn boundary_element_spans(&self) -> Vec<(usize, Vec<usize>)> {
+        let ext = self.base.extension();
+        let n_loc = self.dim - 1;
+        let mut out = Vec::new();
+        for bp in 0..ext.n_bdr_patches() {
+            let kvs = ext.bdr_patch_knot_vectors(bp);
+            let spans0: Vec<usize> =
+                (0..kvs[0].nks()).filter(|&i| kvs[0].is_element(i)).collect();
+            let spans1: Vec<usize> = if n_loc == 2 {
+                (0..kvs[1].nks()).filter(|&j| kvs[1].is_element(j)).collect()
+            } else {
+                vec![0]
+            };
+            for &s1 in &spans1 {
+                for &s0 in &spans0 {
+                    out.push((bp, if n_loc == 2 { vec![s0, s1] } else { vec![s0] }));
+                }
+            }
+        }
+        out
+    }
+
+    /// The descriptor of the `i`-th mesh boundary element that
+    /// [`Self::assemble_vector_boundary_flux`] uses: `(patch, normal direction,
+    /// low side, (patch direction, signed span index) per boundary reference
+    /// direction)`.
+    pub fn boundary_element(&self, i: usize) -> (usize, usize, bool, Vec<(usize, i64)>) {
+        let ext = self.base.extension();
+        let (bp, spans) = &self.boundary_element_spans()[i];
+        let side = ext.boundary_sides()[*bp];
+        (side.patch, side.dir, side.low, ext.bdr_element_span(*bp, spans))
+    }
+
     /// `MixedBilinearForm(R_space, q_space).Assemble() + Finalize()` with
     /// `VectorFEDivergenceIntegrator` — MFEM's `B` of `nurbs_ex5`, i.e.
     /// `B(q_i, u_j) = Σ_q ip.weight * q_i(ξ_q) * div_ref(u_j)(ξ_q)`.
@@ -2506,10 +2780,19 @@ impl NurbsHDivSpace {
     }
 
     /// `GridFunction::ComputeL2Error(VectorCoefficient, irs)` — per element,
-    /// quadrature order `2*GetOrder() + 3`, the vector values are
-    /// `CalcVShape(Trans)ᵀ x_el` and each point contributes
-    /// `ip.weight * Weight() * ‖u_h − u‖²`.
-    pub fn compute_l2_error(&self, x: &[f64], f: &dyn Fn(&[f64]) -> Vec<f64>) -> f64 {
+    /// the vector values are `CalcVShape(Trans)ᵀ x_el` and each point
+    /// contributes `ip.weight * Weight() * ‖u_h − u‖²`.
+    ///
+    /// `order_quad` is MFEM's `IntRules.Get(Geometry::SQUARE/CUBE, order_quad)`
+    /// order — `nurbs_ex5` passes `max(2, 2*order+1)` explicitly (it fills the
+    /// whole `irs[]` array), which is not the `2*GetOrder() + 3` that
+    /// `ComputeL2Error(VectorCoefficient)` uses when `irs == NULL`.
+    pub fn compute_l2_error(
+        &self,
+        x: &[f64],
+        f: &dyn Fn(&[f64]) -> Vec<f64>,
+        order_quad: u8,
+    ) -> f64 {
         let dim = self.dim;
         let mut error = 0.0_f64;
         let mut ref_shape: Vec<f64> = Vec::new();
@@ -2517,7 +2800,7 @@ impl NurbsHDivSpace {
         for e in 0..self.n_elements() {
             let nd = self.elem_dof[e].len();
             let fe = self.element_fe(e);
-            let rule = nurbs_rule(dim, (2 * fe.order() + 3) as u8);
+            let rule = nurbs_rule(dim, order_quad);
             let mut elem_error = 0.0_f64;
             for q in 0..rule.points.len() {
                 let xi = &rule.points[q];

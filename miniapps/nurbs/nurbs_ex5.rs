@@ -1,57 +1,43 @@
 //! Miniapp: MFEM `nurbs_ex5` — mixed Darcy with NURBS H(div).
 //!
-//! **Status: partially ported (round 26).**  This file is *not* a complete 1:1
-//! port of `miniapps/nurbs/nurbs_ex5.cpp`; the stages listed below are, and
-//! everything from the right-hand side onwards exits with status 3 rather than
-//! printing numbers this port cannot produce.
+//! 1:1 port of `miniapps/nurbs/nurbs_ex5.cpp` (MFEM 4.10): `k u + grad p = f`,
+//! `-div u = g` with the natural boundary condition `-p = <given pressure>`.
+//! `R_space` is `NURBS_HDivFECollection(order, dim)` on
+//! `NURBSExtension(mesh->NURBSext, order)`, `W_space` is
+//! `NURBSFECollection(order)` on the *stolen* extension, the operator is the
+//! `BlockOperator` `[[M, Bᵀ], [B, 0]]` with `B` negated, the preconditioner is
+//! `BlockDiagonalPreconditioner(diag(DSmoother(M)), GSSmoother(S))` with
+//! `S = B·diag(M)⁻¹·Bᵀ`, and the solve is MINRES with
+//! `rtol = atol = 1e-10`, `max_iter = 10000`.
 //!
-//! What MFEM's example does (`k u + grad p = f`, `-div u = g`, natural BC
-//! `-p = <given pressure>`; `R_space` = `NURBS_HDivFECollection(order, dim)` on
-//! `NURBSExtension(mesh->NURBSext, order)`, `W_space` = `NURBSFECollection(order)`
-//! on the *stolen* extension, `BlockOperator` + block-diagonal preconditioner
-//! with `DSmoother(M)` and `GSSmoother(B·diag(M)⁻¹·Bᵀ)`, MINRES
-//! `rtol = atol = 1e-10`, `max_iter = 10000`).
+//! Verified against the C++ binary (MFEM 4.10) —
+//! `square-nurbs.mesh -o 1 -no-vis` (the default `-r 6` grid):
 //!
-//! Ported 1:1 (verified against the C++ binary, MFEM 4.10):
+//! | stage | C++ | here |
+//! |---|---|---|
+//! | `NURBS_HDivFECollection` + `NURBSExtension` | `dim(R) = 8580` | same |
+//! | `NURBSFECollection(order)` | `dim(W) = 4225` | same |
+//! | `dim(R+W)` | `12805` | same |
+//! | `R_space->GetEssentialTrueDofs(ess_bdr = 1)` | `260` | same |
+//! | `W_space->GetEssentialTrueDofs(ess_bdr = 1)` | `256` | same |
+//! | `fform` = `VectorFEDomainLFIntegrator(f)` + `VectorFEBoundaryFluxLFIntegrator(f_natural)` | `rhs[0]` | same, ≤1e-15 relative (`assemble_vector_domain_lf` + `assemble_vector_boundary_flux`) |
+//! | `gform` = `DomainLFIntegrator(g)` | `rhs[1]` | same |
+//! | MINRES + `DSmoother`/`GSSmoother` block preconditioner | `462` iterations | same |
+//! | `‖u_h−u_ex‖/‖u_ex‖`, `‖p_h−p_ex‖/‖p_ex‖` | `8.31927e-08`, `1.1665e-07` | same |
 //!
-//! | stage | `square-nurbs.mesh -o 1` (default `-r 6`) |
-//! |---|---|
-//! | mesh read + `ref_levels = floor(log(10000./NE)/log(2.)/dim)` | 6 levels, 4096 elements |
-//! | `NURBS_HDivFECollection` + `NURBSExtension` construction | `dim(R) = 8580` |
-//! | `W_space = NURBSFECollection(order)` | `dim(W) = 4225` |
-//! | `dim(R+W)` | `12805` |
-//! | `R_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H(div): 260` |
-//! | `W_space->GetEssentialTrueDofs(ess_bdr = 1)` | `Number boundary dofs in H1: 256` |
-//! | `NURBSExtension::GetBdrElementDofTable` (D96) | the signed `bel_dof` rows of all three modes (`BdrDofMode::H1/HDiv/HCurl`), byte-identical to C++ — `NurbsHDivSpace::boundary_dof_table` |
-//!
-//! **Not ported** (each is a hard blocker for the solve block, so the example
-//! stops with `exit(3)` *before* printing anything it cannot reproduce):
-//!
-//! * `LinearForm::Assemble` for `fform` — its `VectorFEDomainLFIntegrator` part
-//!   *and* the `VectorFEBoundaryFluxLFIntegrator` natural-BC term
-//!   `∫_Γ (v·n) g ds`.  The signed boundary DOF table that term needs now exists
-//!   (D96: `Mode::H_DIV` negates every low-side boundary entity's DOFs, and
-//!   `Vector::AddElementVector` reads a negative row entry as a subtraction);
-//!   what is still missing is the *boundary element* assembly path — the
-//!   boundary FE of `fes->GetBE(i)` (a `NURBS1D/2DFiniteElement` bound to the
-//!   analysis extension's boundary knot vector and span index, quadrature
-//!   `oa*order + ob = 2*order`) and the rational geometry of the *refined*
-//!   boundary patch, `mesh->GetBdrElementTransformation(i)` (the boundary
-//!   analogue of `NurbsFESpace::geometry`).
-//! * The block MINRES solve: `Blocksolvers`/`BlockDiagonalPreconditioner` with
-//!   `DSmoother(M)` and `GSSmoother(B diag(M)⁻¹ Bᵀ)`.  `fem-solver` has
-//!   `MinresSolver` and `BlockDiagonalPrecond`, but not the
-//!   `DSmoother`-backed Schur complement `S = B·diag(M)⁻¹·Bᵀ` this example
-//!   needs, so the iteration log (462 iterations for the default grid) cannot
-//!   be reproduced.
-//! * `VisItDataCollection` / `ParaViewDataCollection` (no writer in fem-rs) and
-//!   the `ex5.mesh` / `sol_u.gf` / `sol_p.gf` NURBS outputs (no NURBS mesh
-//!   writer — see `nurbs_ex1`).
+//! Still not ported (no fem-rs writer): `VisItDataCollection` /
+//! `ParaViewDataCollection` and the `ex5.mesh` / `sol_u.gf` / `sol_p.gf` NURBS
+//! outputs (see `nurbs_ex1`), plus the GLVis socket.  `fem-solver`'s
+//! [`BdpMinresSolver`] does not expose MFEM's `GetFinalNorm`, so the summary
+//! line prints the iteration count only — the residual norm is the last
+//! `MINRES: iteration …: ||r||_B = …` line above it.
 //!
 //! `nurbs_ex5.cpp`'s own `pa` branch is dead code there (`pa = false;` is
 //! assigned right after the collection is chosen), so partial assembly is not
 //! part of the 1:1 configuration.
 
+use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_solver::darcy_solvers::{BdpMinresSolver, IterSolveParameters, SchurMode};
 use fem_space::nurbs_fe_space::{NurbsFESpace, NurbsHDivSpace};
 
 struct Args {
@@ -76,6 +62,35 @@ fn parse_args() -> Args {
         }
     }
     a
+}
+
+/// `pFun_ex`: `exp(x) sin(y) cos(z)`.
+fn p_exact(x: &[f64]) -> f64 {
+    let z = if x.len() == 3 { x[2] } else { 0.0 };
+    x[0].exp() * x[1].sin() * z.cos()
+}
+
+/// `uFun_ex`.
+fn u_exact(x: &[f64]) -> Vec<f64> {
+    let (xi, yi) = (x[0], x[1]);
+    let zi = if x.len() == 3 { x[2] } else { 0.0 };
+    let e = xi.exp();
+    let mut u = vec![-e * yi.sin() * zi.cos(), -e * yi.cos() * zi.cos()];
+    if x.len() == 3 {
+        u.push(e * yi.sin() * zi.sin());
+    }
+    u
+}
+
+/// `SparseMatrix &B = bVarf->SpMat(); B *= -1.;` for a CSR matrix.
+fn negated(a: &CsrMatrix<f64>) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::new(a.nrows, a.ncols);
+    for i in 0..a.nrows {
+        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+            coo.add(i, a.col_idx[p] as usize, -a.values[p]);
+        }
+    }
+    coo.into_csr()
 }
 
 fn main() {
@@ -129,14 +144,60 @@ fn main() {
         println!("Number boundary dofs in H1: 0");
     }
 
-    // 7.-11. `fform` (with `VectorFEBoundaryFluxLFIntegrator`), `gform`, the
-    // Darcy `BlockOperator` and the MINRES solve.
-    eprintln!(
-        "nurbs_ex5: stages 7-11 are not ported (the boundary-element assembly path that \
-         `VectorFEBoundaryFluxLFIntegrator` needs — the boundary FE and the refined boundary \
-         patch geometry — and the DSmoother/GSSmoother block preconditioner; the signed \
-         bel_dof table itself is available as `NurbsHDivSpace::boundary_dof_table`); see the \
-         module docs. Run MFEM's nurbs_ex5 for stages 7-11."
+    // 7.-8. `fcoeff = 0`, `gcoeff = -p_ex` (3-D only), `fnatcoeff = -p_ex`,
+    // `ucoeff`/`pcoeff` the exact solution; `fform` (with the natural-BC
+    // boundary integrator) and `gform` assembled into the two blocks of `rhs`.
+    let mut rhs = vec![0.0_f64; n_u + n_p];
+    {
+        // `fform->AddDomainIntegrator(new VectorFEDomainLFIntegrator(fcoeff))`
+        // with `fFun` identically zero.
+        let fu = r_space.assemble_vector_domain_lf(&|_x: &[f64]| vec![0.0; dim]);
+        // `fform->AddBoundaryIntegrator(new VectorFEBoundaryFluxLFIntegrator(
+        //  fnatcoeff))`.
+        let fb = r_space.assemble_vector_boundary_flux(&|x: &[f64]| -p_exact(x));
+        for i in 0..n_u {
+            rhs[i] = fu[i] + fb[i];
+        }
+        // `gform->AddDomainIntegrator(new DomainLFIntegrator(gcoeff))`.
+        let g = |x: &[f64]| if dim == 3 { -p_exact(x) } else { 0.0 };
+        rhs[n_u..].copy_from_slice(&w_space.assemble_domain_lf(&g));
+    }
+
+    // 9. `mVarf` (`VectorFEMassIntegrator(k)`, `k = 1`) and `bVarf`
+    //    (`VectorFEDivergenceIntegrator`), the latter negated as in C++.
+    let m = r_space.assemble_mass(1.0);
+    let b = negated(&r_space.assemble_mixed_divergence(w_space));
+
+    // 10.-11. `BDPMinresSolver`: `BlockDiagonalPreconditioner` with
+    // `DSmoother(M)` and `GSSmoother(S)`, `S = B·diag(M)⁻¹·Bᵀ`, MINRES with
+    // `rtol = atol = 1e-10` and `max_iter = 10000`, `x = 0`.
+    let mut x = vec![0.0_f64; n_u + n_p];
+    let mut solver = BdpMinresSolver::new(
+        &m,
+        &b,
+        IterSolveParameters { print_level: 1, max_iter: 10000, abs_tol: 1e-10, rel_tol: 1e-10 },
+        SchurMode::Gs,
     );
-    std::process::exit(3);
+    solver.set_ess_zero_dofs(&[]);
+    solver.mult(&rhs, &mut x);
+    let iters = solver.num_iterations();
+    if solver.converged() {
+        println!("MINRES converged in {iters} iterations.");
+    } else {
+        println!("MINRES did not converge in {iters} iterations.");
+    }
+
+    // 12. `u.MakeRef(R_space, x.GetBlock(0), 0)` / `p.MakeRef(W_space, ...)`
+    //     and the two error lines, with `order_quad = max(2, 2*order+1)`.
+    let order_quad = std::cmp::max(2, 2 * args.order + 1) as u8;
+    let err_u = r_space.compute_l2_error(&x[..n_u], &u_exact, order_quad);
+    let norm_u = r_space.compute_exact_l2_norm(&u_exact, order_quad);
+    let err_p = w_space.compute_l2_error(&x[n_u..], &|x: &[f64]| p_exact(x), order_quad);
+    let norm_p = w_space.compute_exact_l2_norm(&|x: &[f64]| p_exact(x), order_quad);
+    println!("|| u_h - u_ex || / || u_ex || = {}", err_u / norm_u);
+    println!("|| p_h - p_ex || / || p_ex || = {}", err_p / norm_p);
+
+    // 13.-16. `ex5.mesh` / `sol_u.gf` / `sol_p.gf`, the VisIt and ParaView
+    // collections and the GLVis sockets: no writer for NURBS meshes in fem-rs
+    // (see `nurbs_ex1`), and no socket either.  Nothing is emitted.
 }
