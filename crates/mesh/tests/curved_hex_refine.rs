@@ -166,3 +166,176 @@ fn partial_refinement_keeps_straight_neighbors_consistent() {
     // The 12 edges of element 0 are split → hanging midpoints.
     assert!(!constraints.is_empty());
 }
+
+// ─── D111: the refined Q2 geometry must be the parent's Q2 field ────────────
+//
+// Regression pins for defect D111: `refine_uniform_3d` on any order-2 hex mesh
+// used to scramble the *interior* fine geometry dofs (MFEM `Geometry::
+// Constants<CUBE>` vertex order was confused with the bitwise
+// `(v&1, (v>>1)&1, (v>>2)&1)` encoding, both in the reference-point table of
+// `q2_eval` and in the child-octant origin of `build_refined_hex_geometry`).
+// The child geometry then no longer reproduced the parent's field:
+// `data/cube.mesh -o 2 -rs 1` (an *affine* Q2 mesh!) had min det(J) = −1.32
+// instead of +1.953125e-3, which is what `mesh-optimizer` reported as
+// "The input mesh is inverted!".  The fine vertex coordinates were always
+// correct (they are exact geometry-dof picks), which is why the corner-only
+// checks above passed while the interior dofs were wrong.
+
+/// MFEM `Geometry::Constants<CUBE>` vertex order, `[0,1]³`.
+const MFEM_HEX_VERTS: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
+];
+
+/// Local index of the parent's body-center vertex inside child `k` (see the
+/// child table in `refine_nonconforming_hex`).
+const CHILD_BC_LOCAL: [usize; 8] = [6, 7, 4, 5, 2, 3, 0, 1];
+
+/// Sample points inside the reference hex (`[-1,1]³`): the 27 Q2 dof points
+/// plus the 8 sub-octant centers.
+fn ref_samples() -> Vec<[f64; 3]> {
+    let mut v = Vec::new();
+    for k in -1..=1 {
+        for j in -1..=1 {
+            for i in -1..=1 {
+                v.push([i as f64, j as f64, k as f64]);
+            }
+        }
+    }
+    for k in [-0.5, 0.5] {
+        for j in [-0.5, 0.5] {
+            for i in [-0.5, 0.5] {
+                v.push([i, j, k]);
+            }
+        }
+    }
+    v
+}
+
+/// Every refined child's Q2 geometry must reproduce the parent element's own
+/// Q2 field on the child's reference domain (a degree-2 field restricted to a
+/// half-cell is still degree 2, so this is exact, not an approximation).
+///
+/// The child→parent correspondence is recovered from the mesh alone: a child
+/// has exactly one coarse-vertex corner, whose local index *is* the child
+/// index, and its body-center corner is a node shared by exactly the 8
+/// children of one parent whose vertex set is the children's corner set.
+fn check_child_geometry_reproduces_parent(parent: &Mesh<3>, fine: &Mesh<3>) {
+    let n_coarse = parent.n_nodes() as u32;
+    let mut groups: std::collections::HashMap<u32, Vec<(usize, u32)>> =
+        std::collections::HashMap::new();
+    for fe in 0..fine.n_elems() as u32 {
+        let vs = fine.elem_nodes(fe);
+        let own: Vec<usize> = (0..8).filter(|&k| vs[k] < n_coarse).collect();
+        assert_eq!(own.len(), 1, "child {fe} must have exactly one parent-vertex corner");
+        let child = own[0];
+        groups.entry(vs[CHILD_BC_LOCAL[child]]).or_default().push((child, fe));
+    }
+    assert_eq!(groups.len(), parent.n_elems(), "one child group per parent");
+
+    let samples = ref_samples();
+    let mut max_dev = 0.0_f64;
+    for (_bc, kids) in &groups {
+        assert_eq!(kids.len(), 8, "8 children per parent");
+        // The children's own corners are the parent's 8 vertices.
+        let mut corners: Vec<u32> = kids
+            .iter()
+            .map(|&(child, fe)| fine.elem_nodes(fe)[child])
+            .collect();
+        corners.sort_unstable();
+        let pe = (0..parent.n_elems() as u32)
+            .find(|&p| {
+                let mut pv = parent.elem_nodes(p).to_vec();
+                pv.sort_unstable();
+                pv == corners
+            })
+            .expect("parent element with this vertex set");
+        for &(child, fe) in kids {
+            let c = MFEM_HEX_VERTS[child];
+            for xi in &samples {
+                let parent_xi = [
+                    c[0] - 0.5 + 0.5 * xi[0],
+                    c[1] - 0.5 + 0.5 * xi[1],
+                    c[2] - 0.5 + 0.5 * xi[2],
+                ];
+                let (_, _, x_child) = fine.element_jacobian(fe, xi);
+                let (_, _, x_parent) = parent.element_jacobian(pe, &parent_xi);
+                for d in 0..3 {
+                    max_dev = max_dev.max((x_child[d] - x_parent[d]).abs());
+                }
+            }
+        }
+    }
+    assert!(
+        max_dev <= 1e-15,
+        "refined Q2 geometry deviates from the parent field by {max_dev:e}"
+    );
+    eprintln!("D111: child geometry reproduces the parent Q2 field, max |Δ| = {max_dev:e}");
+}
+
+#[test]
+fn d111_refined_curved_hex_geometry_reproduces_parent_field() {
+    let parent = load_parent();
+    let all: Vec<u32> = (0..parent.n_elems() as u32).collect();
+    let (fine, _, _) = refine_hex8_uniform(&parent, &all);
+    check_child_geometry_reproduces_parent(&parent, &fine);
+    // Second level: the fine mesh is itself a valid order-2 parent now.
+    let all2: Vec<u32> = (0..fine.n_elems() as u32).collect();
+    let (fine2, _, _) = refine_hex8_uniform(&fine, &all2);
+    check_child_geometry_reproduces_parent(&fine, &fine2);
+}
+
+#[test]
+fn d111_affine_q2_cube_refines_to_exact_trilinear_children() {
+    // `data/cube.mesh` is an affine 8-hex Q2 mesh of the unit cube: every
+    // refined child's geometry must be *exactly* the trilinear (here affine)
+    // map of its 8 vertices, and min det(J) must be > 0 at every level.
+    let cube = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/cube.mesh");
+    let f = read_mfem_file(cube).expect("read cube.mesh");
+    let mut m: Mesh<3> = f.mesh3d.expect("3d");
+    assert_eq!(m.geom_order(), 2);
+    let samples = ref_samples();
+    for (level, expected_min_det) in [(1usize, 1.953125e-3_f64), (2, 2.44140625e-4)] {
+        m = refine_uniform_3d(&m);
+        let mut min_det = f64::INFINITY;
+        let mut max_dev = 0.0_f64;
+        for e in 0..m.n_elems() as u32 {
+            let vs: Vec<[f64; 3]> = m.elem_nodes(e).iter().map(|&n| m.coords_of(n)).collect();
+            for xi in &samples {
+                let (_, det, xp) = m.element_jacobian(e, xi);
+                min_det = min_det.min(det);
+                // trilinear map of the 8 vertices in MFEM order on [-1,1]³
+                let mut want = [0.0_f64; 3];
+                for k in 0..8 {
+                    let r = [
+                        2.0 * MFEM_HEX_VERTS[k][0] - 1.0,
+                        2.0 * MFEM_HEX_VERTS[k][1] - 1.0,
+                        2.0 * MFEM_HEX_VERTS[k][2] - 1.0,
+                    ];
+                    let w = 0.125
+                        * (1.0 + r[0] * xi[0])
+                        * (1.0 + r[1] * xi[1])
+                        * (1.0 + r[2] * xi[2]);
+                    for d in 0..3 {
+                        want[d] += w * vs[k][d];
+                    }
+                }
+                for d in 0..3 {
+                    max_dev = max_dev.max((xp[d] - want[d]).abs());
+                }
+            }
+        }
+        assert!(min_det > 0.0, "level {level}: min det(J) = {min_det:e} (mesh inverted)");
+        assert!(
+            (min_det - expected_min_det).abs() < 1e-15,
+            "level {level}: min det(J) = {min_det:e}, expected {expected_min_det:e}"
+        );
+        assert!(max_dev <= 1e-15, "level {level}: geometry is not trilinear (Δ = {max_dev:e})");
+    }
+}

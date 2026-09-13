@@ -53,6 +53,29 @@ const GEO_FACES: [[usize; 4]; 6] = [
 ];
 const HEX_Q2_DPE: usize = 27;
 
+/// Reference coordinates ([0,1]³) of the 8 vertices of a Hex8 in **MFEM
+/// `Geometry::Constants<CUBE>` order**: `0=(0,0,0) 1=(1,0,0) 2=(1,1,0)
+/// 3=(0,1,0) 4=(0,0,1) 5=(1,0,1) 6=(1,1,1) 7=(0,1,1)`.
+///
+/// This is the order `HexQ2::dof_coords` (crates/element) and
+/// `local_faces_hex` used as "bottom = 0,1,2,3 at z=0". It is **not** the
+/// bitwise `(v&1, (v>>1)&1, (v>>2)&1)` encoding: that one silently exchanges
+/// vertices 2↔3 and 6↔7 (an x-mirror of the y=1 half). Getting this table
+/// wrong scrambles the reference points of dofs 8..26 in `q2_eval` *and* the
+/// child-octant origin below, so a refined order-2 hex mesh stops
+/// reproducing its parent geometry (D111: `data/cube.mesh -o 2 -rs 1` had
+/// min det(J) = −1.32 instead of +0.00195).
+const MFEM_HEX_VERTS: [[f64; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
+];
+
 /// Geometry-position index (8..20) of the mid-edge dof of the local hex edge
 /// `(a, b)` (vertex-index pair, order-insensitive).
 fn geo_edge_pos(a: usize, b: usize) -> usize {
@@ -78,9 +101,19 @@ fn geo_face_pos(q: &[usize; 4]) -> usize {
 }
 
 /// Reference coordinates ([0,1]³) of geometry dof position `p`.
+///
+/// **D111**: the vertex table is MFEM's `Geometry::Constants<CUBE>` order —
+/// `0=(0,0,0) 1=(1,0,0) 2=(1,1,0) 3=(0,1,0) 4=(0,0,1) 5=(1,0,1) 6=(1,1,1)
+/// 7=(0,1,1)` — as spelled out by `HexQ2::dof_coords` (crates/element) and
+/// `local_faces_hex` (bottom = 0,1,2,3 at z=0). It is *not* the bitwise
+/// `(v&1, (v>>1)&1, (v>>2)&1)` encoding: that one silently exchanges
+/// vertices 2↔3 and 6↔7 (an x-mirror of the y=1 half), which mis-assigns
+/// the reference points of edge/face/body dofs 8..26 and makes `q2_eval`
+/// evaluate a *permuted* Q2 field — the refined child geometry then no
+/// longer reproduces the parent's (even affine!) geometry and its Jacobian
+/// can fold.
 fn geo_pos_ref(p: usize) -> [f64; 3] {
-    let vert_ref =
-        |v: usize| [(v & 1) as f64, ((v >> 1) & 1) as f64, ((v >> 2) & 1) as f64];
+    let vert_ref = |v: usize| MFEM_HEX_VERTS[v];
     match p {
         0..8 => vert_ref(p),
         8..20 => {
@@ -256,17 +289,16 @@ pub(crate) fn build_refined_hex_geometry(
     for (fe, &(pe, child)) in fine_parent.iter().enumerate() {
         let ns = fine.elem_nodes(fe as ElemId);
         // Fine-ref → parent-ref affine map: parent = origin + scale * fine.
+        // `child` is the *MFEM hex corner index* of the child's own corner
+        // (see the child table in `refine_nonconforming_hex`), so its octant
+        // origin is `0.5 * MFEM_HEX_VERTS[child]` (D111: the bitwise
+        // `((child>>k)&1)` encoding picks the wrong octant for corners
+        // 2,3,6,7 and corrupts every dof evaluated from that child).
         let (origin, scale) = if child == IDENTITY {
             ([0.0_f64; 3], 1.0_f64)
         } else {
-            (
-                [
-                    ((child & 1) != 0) as u8 as f64 * 0.5,
-                    ((child >> 1) & 1) as u8 as f64 * 0.5,
-                    ((child >> 2) & 1) as u8 as f64 * 0.5,
-                ],
-                0.5,
-            )
+            let v = MFEM_HEX_VERTS[child as usize];
+            ([0.5 * v[0], 0.5 * v[1], 0.5 * v[2]], 0.5)
         };
         let field = pq.parent_field(pe);
         let to_parent = |fine_ref: [f64; 3]| {
