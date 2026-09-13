@@ -1,8 +1,14 @@
 //! Symplectic integrators for Hamiltonian systems.
 //!
-//! The [`SIAVSolver`] implements a variable-order symplectic integrator
-//! (orders 1–4) using the coefficients from MFEM's `SIAV` (Symplectic
-//! Integration Algorithm V) scheme.
+//! The [`HamiltonianSiavSolver`] (`(q, p)`-tuple form of MFEM's `SIAVSolver`)
+//! implements a variable-order symplectic integrator (orders 1–4) using the
+//! coefficients from MFEM's `SIAV` (Symplectic Integration Algorithm V) scheme.
+//!
+//! The Euler-vector form of the same tableau (MFEM `TimeDependentOperator`
+//! `F_`/`P_`, including the implicit branch) lives in
+//! [`super::mfem_ode::SiavSolver`]; the two are the explicit-`F_` special case
+//! of each other.  The distinct names avoid the one-letter case-only
+//! near-collision of the crate-root re-exports.
 //!
 //! These schemes preserve the phase-space volume of Hamiltonian systems,
 //! giving excellent long-term energy conservation.
@@ -24,14 +30,14 @@ use super::traits::HamiltonianSystem;
 ///     if b[i] ≠ 0:  p += b[i] · dt · (-∂H/∂q)
 ///     q += a[i] · dt · (∂H/∂p)
 /// ```
-pub struct SIAVSolver {
+pub struct HamiltonianSiavSolver {
     order: usize,
     a: Vec<f64>,
     b: Vec<f64>,
 }
 
-impl SIAVSolver {
-    /// Create a new `SIAVSolver` of the given order (1–4).
+impl HamiltonianSiavSolver {
+    /// Create a new `HamiltonianSiavSolver` of the given order (1–4).
     pub fn new(order: usize) -> Self {
         let (a, b) = match order {
             1 => (vec![1.0], vec![1.0]),
@@ -54,7 +60,7 @@ impl SIAVSolver {
                     ],
                 )
             }
-            o => panic!("SIAVSolver::new: unsupported order {o} (must be 1–4)"),
+            o => panic!("HamiltonianSiavSolver::new: unsupported order {o} (must be 1–4)"),
         };
         Self { order, a, b }
     }
@@ -103,7 +109,7 @@ impl SIAVSolver {
 /// 4th-order Yoshida symplectic integrator (a special composition of three
 /// leapfrog steps).  Coefficients from Yoshida (1990).
 ///
-/// This is a fixed-order alternative to [`SIAVSolver`] when 4th-order
+/// This is a fixed-order alternative to [`HamiltonianSiavSolver`] when 4th-order
 /// accuracy is desired without the overhead of the variable-order dispatch.
 pub struct Yoshida4;
 
@@ -226,7 +232,7 @@ mod tests {
     #[test]
     fn siav_order1_energy_conservation() {
         let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = SIAVSolver::new(1);
+        let solver = HamiltonianSiavSolver::new(1);
         let mut q = vec![0.0_f64];
         let mut p = vec![1.0_f64];
         let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
@@ -246,7 +252,7 @@ mod tests {
     #[test]
     fn siav_order2_energy_conservation() {
         let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = SIAVSolver::new(2);
+        let solver = HamiltonianSiavSolver::new(2);
         let mut q = vec![0.0_f64];
         let mut p = vec![1.0_f64];
         let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
@@ -266,7 +272,7 @@ mod tests {
     #[test]
     fn siav_order4_energy_conservation() {
         let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = SIAVSolver::new(4);
+        let solver = HamiltonianSiavSolver::new(4);
         let mut q = vec![0.0_f64];
         let mut p = vec![1.0_f64];
         let e0 = harmonic_energy(q[0], p[0], 1.0, 1.0);
@@ -287,7 +293,7 @@ mod tests {
     fn siav_oscillator_period() {
         // Harmonic oscillator with m=1, k=1 has period 2π.
         let sys = HarmonicOscillator { m: 1.0, k: 1.0 };
-        let solver = SIAVSolver::new(4);
+        let solver = HamiltonianSiavSolver::new(4);
         let mut q = vec![1.0_f64];
         let mut p = vec![0.0_f64];
         let dt = 0.01;
@@ -309,14 +315,14 @@ mod tests {
 
     #[test]
     fn siav_coefficients_order1() {
-        let solver = SIAVSolver::new(1);
+        let solver = HamiltonianSiavSolver::new(1);
         assert_eq!(solver.a, vec![1.0]);
         assert_eq!(solver.b, vec![1.0]);
     }
 
     #[test]
     fn siav_coefficients_order2() {
-        let solver = SIAVSolver::new(2);
+        let solver = HamiltonianSiavSolver::new(2);
         assert_eq!(solver.a, vec![0.5, 0.5]);
         assert_eq!(solver.b, vec![0.0, 1.0]);
     }
@@ -324,7 +330,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unsupported order")]
     fn siav_invalid_order_panics() {
-        SIAVSolver::new(5);
+        HamiltonianSiavSolver::new(5);
     }
 
     #[test]

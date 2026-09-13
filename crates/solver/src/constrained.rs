@@ -24,6 +24,7 @@
 use fem_linalg::{CsrMatrix, SolveResult, SolverConfig, SolverError};
 
 use crate::block::BlockSystem;
+use crate::smoother::{gauss_seidel_back, gauss_seidel_forw};
 
 /// Solve a constrained saddle-point system the way MFEM's
 /// `SchurConstrainedSolver(A, C, GSSmoother(A))` does (ex28).
@@ -255,49 +256,8 @@ fn apply_block_pc(gs_a: &CsrMatrix<f64>, n_u: usize, x: &[f64], y: &mut [f64]) {
 
 /// MFEM `GSSmoother(type = 0, iterations = 1)`: forward then backward sweep.
 fn gs_symmetric(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
-    gs_forward(a, x, y);
-    gs_backward(a, x, y);
-}
-
-/// MFEM `SparseMatrix::Gauss_Seidel_forw`: yᵢ = (xᵢ − Σ_{c≠i} Aᵢc y_c)/Aᵢᵢ,
-/// i ascending; **all** off-diagonal entries of the row are summed using the
-/// current y values (forward GS, `y` doubles as initial guess).
-fn gs_forward(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
-    let n = a.nrows;
-    for i in 0..n {
-        let mut sum = 0.0;
-        let mut diag = 0.0;
-        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
-            let c = a.col_idx[p] as usize;
-            if c == i {
-                diag = a.values[p];
-            } else {
-                sum += a.values[p] * y[c];
-            }
-        }
-        y[i] = (x[i] - sum) / diag;
-    }
-}
-
-/// MFEM `SparseMatrix::Gauss_Seidel_back`: same as forward but i descending.
-/// The Finalized path scans columns in **descending** index order
-/// (`for (j = Ip[i+1]-1; j >= Ip[i]; j--)`), matching MFEM's CSR back-sweep.
-fn gs_backward(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
-    let n = a.nrows;
-    for i in (0..n).rev() {
-        let mut sum = 0.0;
-        let mut diag = 0.0;
-        let end = a.row_ptr[i + 1];
-        for p in (a.row_ptr[i]..end).rev() {
-            let c = a.col_idx[p] as usize;
-            if c == i {
-                diag = a.values[p];
-            } else {
-                sum += a.values[p] * y[c];
-            }
-        }
-        y[i] = (x[i] - sum) / diag;
-    }
+    gauss_seidel_forw(a, x, y);
+    gauss_seidel_back(a, x, y);
 }
 
 // ─── MFEM GMRES helpers ──────────────────────────────────────────────────────

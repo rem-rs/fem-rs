@@ -1,4 +1,5 @@
-//! Diagonal stationary smoothers (MFEM `DSmoother`).
+//! Diagonal and Gauss-Seidel stationary smoothers (MFEM `DSmoother`,
+//! `GSSmoother`).
 //!
 //! Ported from MFEM `linalg/sparsesmoothers.hpp/.cpp`:
 //! - type 0 (`Jacobi`): `D = diag(A)`.
@@ -10,6 +11,10 @@
 //! exactly MFEM's `SparcSmoother::Mult` loop. This is the inner "linear
 //! solver" of mesh-optimizer's `-ls 0` and the l1 preconditioner of `-ls 4`,
 //! and the smoother family required by the diag-smoothers miniapps.
+//!
+//! [`GsSmoother`] is the Gauss-Seidel counterpart (`GSSmoother`) — the
+//! approximate inverse used for the Schur block of the block-diagonal Darcy
+//! preconditioner (ex5 / `nurbs_ex5`: `GSSmoother(S)`, `S = B·diag(M)⁻¹·Bᵀ`).
 
 use fem_linalg::CsrMatrix;
 
@@ -129,10 +134,290 @@ pub fn solve_l1_jacobi(a: &CsrMatrix<f64>, b: &[f64], x: &mut [f64], iters: usiz
     s.mult(a, b, x);
 }
 
+// ─── Gauss-Seidel smoother ───────────────────────────────────────────────────
+
+/// MFEM `GSSmoother::GSType` (`linalg/sparsesmoothers.hpp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GsType {
+    /// Forward sweep, then backward (`GSSmoother::SYMMETRIC`).
+    Symmetric,
+    /// Forward-only sweep — the `L⁻¹` factor (`GSSmoother::FORWARD`).
+    Forward,
+    /// Backward-only sweep — the `U⁻¹` factor (`GSSmoother::BACKWARD`).
+    Backward,
+}
+
+/// MFEM `SparseMatrix::Gauss_Seidel_forw` — the finalized (CSR) path of
+/// `linalg/sparsemat.cpp`.
+///
+/// Rows ascend, and within a row the nonzeros are scanned in **ascending**
+/// column order; `y[i] = (x[i] − Σ_{c≠i} A_ic y_c)/A_ii` uses the *current*
+/// `y`, so rows already visited contribute updated values (forward GS).
+/// Duplicating MFEM, a zero or missing diagonal aborts (MFEM `mfem_error`)
+/// unless `x[i] == sum`.
+pub fn gauss_seidel_forw(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+    assert_eq!(a.nrows, a.ncols, "Gauss_Seidel_forw: matrix must be square");
+    assert!(x.len() >= a.nrows, "Gauss_Seidel_forw: x too short");
+    assert_eq!(a.nrows, y.len(), "Gauss_Seidel_forw: y must match the matrix");
+    for i in 0..a.nrows {
+        let mut sum = 0.0;
+        let mut has_diag = false;
+        let mut diag = 0.0;
+        for p in a.row_ptr[i]..a.row_ptr[i + 1] {
+            let c = a.col_idx[p] as usize;
+            if c == i {
+                has_diag = true;
+                diag = a.values[p];
+            } else {
+                sum += a.values[p] * y[c];
+            }
+        }
+        if has_diag && diag != 0.0 {
+            y[i] = (x[i] - sum) / diag;
+        } else if x[i] == sum {
+            y[i] = sum;
+        } else {
+            panic!("Gauss_Seidel_forw: zero or missing diagonal at row {i}");
+        }
+    }
+}
+
+/// MFEM `SparseMatrix::Gauss_Seidel_back` — the finalized (CSR) path.
+///
+/// Same recurrence as [`gauss_seidel_forw`], but rows descend and within a row
+/// the nonzeros are scanned in **descending** column order (MFEM's
+/// `for (j = Ip[i+1]-1; j >= Ip[i]; j--)`), which fixes the floating-point
+/// summation order.
+pub fn gauss_seidel_back(a: &CsrMatrix<f64>, x: &[f64], y: &mut [f64]) {
+    assert_eq!(a.nrows, a.ncols, "Gauss_Seidel_back: matrix must be square");
+    assert!(x.len() >= a.nrows, "Gauss_Seidel_back: x too short");
+    assert_eq!(a.nrows, y.len(), "Gauss_Seidel_back: y must match the matrix");
+    for i in (0..a.nrows).rev() {
+        let mut sum = 0.0;
+        let mut has_diag = false;
+        let mut diag = 0.0;
+        for p in (a.row_ptr[i]..a.row_ptr[i + 1]).rev() {
+            let c = a.col_idx[p] as usize;
+            if c == i {
+                has_diag = true;
+                diag = a.values[p];
+            } else {
+                sum += a.values[p] * y[c];
+            }
+        }
+        if has_diag && diag != 0.0 {
+            y[i] = (x[i] - sum) / diag;
+        } else if x[i] == sum {
+            y[i] = sum;
+        } else {
+            panic!("Gauss_Seidel_back: zero or missing diagonal at row {i}");
+        }
+    }
+}
+
+/// Gauss-Seidel smoother of a sparse matrix (MFEM `GSSmoother`).
+///
+/// 1:1 port of `GSSmoother::Mult` (`linalg/sparsesmoothers.cpp`):
+/// ```text
+///   if (!iterative_mode) y = 0;
+///   for (i = 0; i < iterations; i++) {
+///      if (type != BACKWARD) oper->Gauss_Seidel_forw(x, y);
+///      if (type != FORWARD)  oper->Gauss_Seidel_back(x, y);
+///   }
+/// ```
+/// With the default `Symmetric` type and one iteration this is `y =
+/// (UᵀD⁻¹... )` i.e. the symmetric Gauss-Seidel approximate inverse, the
+/// `invS` of ex5 / `nurbs_ex5` / `nurbs_solenoidal`.
+#[derive(Debug, Clone)]
+pub struct GsSmoother {
+    a: CsrMatrix<f64>,
+    kind: GsType,
+    iterations: usize,
+    /// MFEM `Solver::iterative_mode` (default `false`, i.e. `y` is zeroed).
+    pub iterative_mode: bool,
+}
+
+impl GsSmoother {
+    /// MFEM `GSSmoother(const SparseMatrix &a, GSType t = SYMMETRIC, int it = 1)`.
+    pub fn new(a: &CsrMatrix<f64>, kind: GsType, iterations: usize) -> Self {
+        assert!(iterations >= 1, "GSSmoother: iterations must be >= 1");
+        Self {
+            a: a.clone(),
+            kind,
+            iterations,
+            iterative_mode: false,
+        }
+    }
+
+    /// The underlying matrix (MFEM `SparseSmoother::oper`).
+    pub fn operator(&self) -> &CsrMatrix<f64> {
+        &self.a
+    }
+
+    /// MFEM `GSSmoother::Mult`.
+    pub fn mult(&self, x: &[f64], y: &mut [f64]) {
+        if !self.iterative_mode {
+            y.fill(0.0);
+        }
+        for _ in 0..self.iterations {
+            if self.kind != GsType::Backward {
+                gauss_seidel_forw(&self.a, x, y);
+            }
+            if self.kind != GsType::Forward {
+                gauss_seidel_back(&self.a, x, y);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fem_linalg::CooMatrix;
+
+    /// The SPD matrix of the MFEM reference probe
+    /// (`tmp/d97/probe_d97.cpp`): `[4 -1 0 0; -1 4 -1 0; 0 -1 4 -1; 0 0 -1 3]`.
+    fn small_spd() -> CsrMatrix<f64> {
+        let mut coo = CooMatrix::<f64>::new(4, 4);
+        for (i, j, v) in [
+            (0, 0, 4.0),
+            (0, 1, -1.0),
+            (1, 0, -1.0),
+            (1, 1, 4.0),
+            (1, 2, -1.0),
+            (2, 1, -1.0),
+            (2, 2, 4.0),
+            (2, 3, -1.0),
+            (3, 2, -1.0),
+            (3, 3, 3.0),
+        ] {
+            coo.add(i, j, v);
+        }
+        coo.into_csr()
+    }
+
+    /// MFEM 4.10 `GSSmoother` / `DSmoother` reference values, printed by the
+    /// C++ probe on the matrix above with `b = (1, 2, 3, 4)` and
+    /// `iterative_mode = false` (`x` from 0):
+    /// ```text
+    /// DSMOOTHER      0.25 0.5 0.75 1.3333333333333333
+    /// GS_SYMMETRIC   0.47176106770833331 0.88704427083333326
+    ///                1.2981770833333333 1.6302083333333333
+    /// GS_FORWARD     0.25 0.5625 0.890625 1.6302083333333333
+    /// GS_BACKWARD    0.44270833333333331 0.77083333333333326
+    ///                1.0833333333333333 1.3333333333333333
+    /// GS_SYMMETRIC_2 0.49417583147684735 0.9767033259073894
+    ///                1.4350522359212241 1.7977244059244792
+    /// ```
+    #[test]
+    fn gs_smoother_matches_mfem_reference() {
+        let a = small_spd();
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let check = |tag: &str, got: &[f64], want: &[f64]| {
+            for (k, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-15 * w.abs().max(1.0),
+                    "{tag}[{k}]: got {g:.17e}, MFEM {w:.17e}"
+                );
+            }
+        };
+
+        let mut ds = DiagonalSmoother::new(SmootherType::Jacobi, 1.0, 1);
+        ds.setup(&a);
+        let mut x = vec![0.0; 4];
+        ds.mult(&a, &b, &mut x);
+        check(
+            "DSmoother",
+            &x,
+            &[0.25, 0.5, 0.75, 1.3333333333333333],
+        );
+
+        let mut x = vec![0.0; 4];
+        GsSmoother::new(&a, GsType::Symmetric, 1).mult(&b, &mut x);
+        check(
+            "GS_SYMMETRIC",
+            &x,
+            &[
+                0.47176106770833331,
+                0.88704427083333326,
+                1.2981770833333333,
+                1.6302083333333333,
+            ],
+        );
+
+        let mut x = vec![0.0; 4];
+        GsSmoother::new(&a, GsType::Forward, 1).mult(&b, &mut x);
+        check(
+            "GS_FORWARD",
+            &x,
+            &[0.25, 0.5625, 0.890625, 1.6302083333333333],
+        );
+
+        let mut x = vec![0.0; 4];
+        GsSmoother::new(&a, GsType::Backward, 1).mult(&b, &mut x);
+        check(
+            "GS_BACKWARD",
+            &x,
+            &[
+                0.44270833333333331,
+                0.77083333333333326,
+                1.0833333333333333,
+                1.3333333333333333,
+            ],
+        );
+
+        let mut x = vec![0.0; 4];
+        GsSmoother::new(&a, GsType::Symmetric, 2).mult(&b, &mut x);
+        check(
+            "GS_SYMMETRIC_2",
+            &x,
+            &[
+                0.49417583147684735,
+                0.9767033259073894,
+                1.4350522359212241,
+                1.7977244059244792,
+            ],
+        );
+    }
+
+    /// `iterative_mode = false` (the MFEM `Solver` default) zeroes the output
+    /// before sweeping, so the incoming `y` is ignored; `iterative_mode = true`
+    /// keeps it as the initial guess.
+    #[test]
+    fn gs_smoother_iterative_mode() {
+        let a = small_spd();
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let mut s = GsSmoother::new(&a, GsType::Symmetric, 1);
+
+        let mut y0 = vec![7.0; 4];
+        s.mult(&b, &mut y0);
+        let mut y1 = vec![0.0; 4];
+        s.mult(&b, &mut y1);
+        assert_eq!(y0, y1, "non-iterative mode must ignore the incoming y");
+
+        s.iterative_mode = true;
+        let mut y2 = vec![0.0; 4];
+        s.mult(&b, &mut y2);
+        let mut y3 = vec![7.0; 4];
+        s.mult(&b, &mut y3);
+        assert_ne!(y2, y3, "iterative mode must use y as the initial guess");
+        // gauss_seidel_forw with x = b and y = 7·1: y_i = (b_i − 7·Σ_{c≠i} A_ic)/A_ii
+        let mut y4 = vec![7.0; 4];
+        gauss_seidel_forw(&a, &b, &mut y4);
+        assert_eq!(y4[0], (1.0 - 7.0 * -1.0) / 4.0);
+    }
+
+    /// Both sweeps must abort (MFEM `mfem_error`) on a zero/missing diagonal.
+    #[test]
+    #[should_panic(expected = "zero or missing diagonal")]
+    fn gauss_seidel_zero_diagonal_panics() {
+        let mut coo = CooMatrix::<f64>::new(2, 2);
+        coo.add(0, 1, 1.0);
+        coo.add(1, 1, 1.0);
+        let a = coo.into_csr();
+        let mut y = vec![0.0; 2];
+        gauss_seidel_forw(&a, &[1.0, 1.0], &mut y);
+    }
 
     fn diffusion_1d(n: usize) -> CsrMatrix<f64> {
         // -u'' on [0,1], Dirichlet eliminated rows kept (diag 1).

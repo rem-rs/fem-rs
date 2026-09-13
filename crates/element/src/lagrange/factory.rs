@@ -2693,6 +2693,44 @@ mod tests {
         assert!(PERM_P2.iter().copied().ne(0..27usize));
     }
 
+    /// D100 pin: `HexQk::eval_basis` and `HexQk::dof_coords` are both derived
+    /// from `dof_index`, so slot `k`'s basis function must be the Kronecker
+    /// delta at `dof_coords()[k]` — for **every** slot, including slot 0 (the
+    /// reference corner `(-1,-1,-1)`).  This is the element-side half of the
+    /// "Hex8-P2 first basis function" investigation: the anomaly reported in
+    /// round 26 (`2x+3y+5z` projected on `H1Space<Mesh<3>>` Hex8-P2 returning
+    /// `6.3e-15` at dof 0 instead of an exact `0`) is **not** a coordinate or
+    /// basis defect — the L² projection of any P2-representable function is
+    /// accurate to ~1e-13 *absolute* at all 27 dofs, and dof 0's error merely
+    /// looks large because its exact value is zero.
+    #[test]
+    fn hex_q2_basis_is_kronecker_at_dof_coords() {
+        let e = HexQk::new(2);
+        let coords = e.dof_coords();
+        assert_eq!(coords.len(), 27);
+        assert_eq!(coords[0], vec![-1.0, -1.0, -1.0], "slot 0 = reference corner");
+        // The legacy p=2 slot order (`LEGACY_P2_SLOTS`) must still cover all 27
+        // tensor nodes exactly once.
+        let mut nodes: Vec<[i32; 3]> = coords
+            .iter()
+            .map(|c| [c[0] as i32, c[1] as i32, c[2] as i32])
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        assert_eq!(nodes.len(), 27, "p=2 slots must be a bijection");
+        for (k, x) in coords.iter().enumerate() {
+            let mut phi = vec![0.0_f64; 27];
+            e.eval_basis(x, &mut phi);
+            for (j, &v) in phi.iter().enumerate() {
+                let want = if j == k { 1.0 } else { 0.0 };
+                assert!(
+                    (v - want).abs() < 1e-14,
+                    "slot {k} at node {x:?}: phi[{j}] = {v} (want {want})"
+                );
+            }
+        }
+    }
+
     fn check_pou(elem: &dyn ReferenceElement) {
         let order = elem.order() as usize;
         let rule = elem.quadrature((2 * order as u8 + 2).min(15));

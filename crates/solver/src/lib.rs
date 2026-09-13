@@ -148,7 +148,10 @@ pub mod smoother;
 /// MFEM stationary linear iteration (SLI) + CG with exact print formats.
 pub mod sli;
 
-pub use smoother::{solve_l1_jacobi, DiagonalSmoother, SmootherType};
+pub use smoother::{
+    gauss_seidel_back, gauss_seidel_forw, solve_l1_jacobi, DiagonalSmoother, GsSmoother, GsType,
+    SmootherType,
+};
 pub use sli::{solve_cg_mfem, solve_sli, IterResult, SliOptions};
 
 

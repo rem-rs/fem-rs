@@ -39,7 +39,7 @@ pub use imex::{
 };
 pub use implicit::{Bdf2, Bdf2State, CrankNicolson, ImplicitEuler, Sdirk2};
 pub use structural::{Newmark, NewmarkState, GeneralizedAlpha, GeneralizedAlphaState};
-pub use symplectic::{SIAVSolver, Yoshida4};
+pub use symplectic::{HamiltonianSiavSolver, Yoshida4};
 pub use mfem_ode::{
     compute_slope_from_state, BackwardEulerSolver, DenseOperator, ImplicitMidpointSolver,
     LinearOp, OdeSolver, Sdirk23Gamma, Sdirk23Solver, Sdirk33Solver, Sdirk34Solver, SiaState,

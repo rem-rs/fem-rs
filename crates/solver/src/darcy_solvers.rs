@@ -6,9 +6,11 @@
 //!   including the SPD-preconditioned path and the `||r||_B` print format,
 //! * [`BdpMinresSolver`] — MFEM `blocksolvers::BDPMinresSolver`: block-diagonal
 //!   preconditioned MINRES for the Darcy saddle system
-//!   `[[M, Bᵀ], [B, 0]]` with `diag(M)⁻¹` and an approximate inverse of the
-//!   Schur complement `S = B·diag(M)⁻¹·Bᵀ` (C++ uses hypre `BoomerAMG`; the
-//!   serial port offers AMG via `fem-amg`, an exact dense inverse, or Jacobi).
+//!   `[[M, Bᵀ], [B, 0]]` with `DSmoother(M)` on the velocity block and an
+//!   approximate inverse of the Schur complement `S = B·diag(M)⁻¹·Bᵀ` (C++
+//!   uses hypre `BoomerAMG`; the serial port offers AMG via `fem-amg`, an
+//!   exact dense inverse, `diag(S)⁻¹`, or the assembled `GSSmoother` used by
+//!   ex5 / `nurbs_ex5` — see [`SchurMode::Gs`]).
 //!
 //! Not ported (parallel-only): `HypreParMatrix` machinery, `SetEssZeroDofs`
 //! MPI bookkeeping is kept as a plain dof list.
@@ -19,6 +21,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::amg::{AmgSolver, boomeramg_config};
+use crate::smoother::{GsSmoother, GsType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 
 /// MFEM `blocksolvers::IterSolveParameters`.
@@ -214,8 +217,8 @@ pub fn mfem_minres(
 /// keeps AMG as the default, using the hypre-default-aligned
 /// [`boomeramg_config`] preset (Ruge–Stüben coarsening + symmetric
 /// Gauss–Seidel smoothing), and adds an exact dense inverse (used for 1:1
-/// iteration-count comparisons against a serial C++ harness) and a weak Jacobi
-/// fallback.
+/// iteration-count comparisons against a serial C++ harness), a weak Jacobi
+/// fallback, and the assembled `GSSmoother` of ex5 / `nurbs_ex5`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchurMode {
     /// AMG V-cycle on `S` with the hypre BoomerAMG-default-aligned
@@ -225,30 +228,73 @@ pub enum SchurMode {
     Dense,
     /// `diag(S)⁻¹`.
     Diag,
+    /// Symmetric `GSSmoother(S)` (MFEM default `type = SYMMETRIC`,
+    /// `iterations = 1`, `iterative_mode = false`) — the `invS` of the serial
+    /// Darcy examples (`examples/ex5.cpp`, `miniapps/nurbs/nurbs_ex5.cpp`,
+    /// `miniapps/nurbs/nurbs_solenoidal.cpp`).
+    Gs,
 }
 
 enum SchurApprox {
     Amg(AmgSolver<f64>),
     Dense { lu: Vec<f64>, piv: Vec<usize>, n: usize },
     Diag(Vec<f64>),
+    Gs(GsSmoother),
 }
 
 /// Serial port of MFEM `blocksolvers::BDPMinresSolver`.
 ///
 /// Solves the assembled Darcy saddle system `[[M, Bᵀ], [B, 0]]` with MINRES
-/// preconditioned by `diag(diag(M)⁻¹, S⁻¹)`, `S = B·diag(M)⁻¹·Bᵀ`.
+/// preconditioned by `diag(DSmoother(M), S⁻¹)`, `S = B·diag(M)⁻¹·Bᵀ`.
+/// (`DSmoother(M)` with MFEM's default arguments and `iterative_mode = false`
+/// is the diagonal scaling `y = D⁻¹x` of `SparseMatrix::DiagScale`; the same
+/// block-diagonal preconditioner that `examples/ex5.cpp` assembles by hand
+/// with `BlockDiagonalPreconditioner`.)
 pub struct BdpMinresSolver {
     n_u: usize,
     n: usize,
     m: CsrMatrix<f64>,
     b: CsrMatrix<f64>,
     bt: CsrMatrix<f64>,
-    inv_diag_m: Vec<f64>,
+    /// `diag(M)` (MFEM `M.GetDiag(Md)`, `DSmoother(M)`'s `D`).
+    m_diag: Vec<f64>,
     schur: SchurApprox,
     ess_zero_dofs: Vec<usize>,
     param: IterSolveParameters,
     last_iters: AtomicUsize,
     last_converged: AtomicBool,
+}
+
+/// Schur complement approximation `S = B·diag(M)⁻¹·Bᵀ` (the `S` of
+/// `examples/ex5.cpp` / `miniapps/nurbs/nurbs_ex5.cpp` /
+/// `miniapps/nurbs/nurbs_solenoidal.cpp`).
+///
+/// MFEM assembles it as
+/// ```text
+///   MinvBt = Transpose(B);
+///   for (i) MinvBt->ScaleRow(i, 1./Md(i));   // Md = diag(M)
+///   S = Mult(B, *MinvBt);
+/// ```
+/// A 1:1 float-level transcription (row scaling by the precomputed reciprocal,
+/// then sparse matrix–matrix product), so a caller that hand-builds MFEM's
+/// `BlockDiagonalPreconditioner` gets the same `S` that [`BdpMinresSolver`]
+/// uses internally.
+pub fn schur_complement_bmb_diag(b: &CsrMatrix<f64>, m_diag: &[f64]) -> CsrMatrix<f64> {
+    assert_eq!(
+        b.ncols,
+        m_diag.len(),
+        "schur_complement_bmb_diag: B must be (n_p × n_u) with |m_diag| = n_u"
+    );
+    let bt = b.transpose();
+    let mut minv_bt_coo = CooMatrix::<f64>::new(b.ncols, b.nrows);
+    for i in 0..b.ncols {
+        let inv = 1.0 / m_diag[i];
+        for p in bt.row_ptr[i]..bt.row_ptr[i + 1] {
+            let j = bt.col_idx[p] as usize;
+            minv_bt_coo.add(i, j, bt.values[p] * inv);
+        }
+    }
+    b.multiply(&minv_bt_coo.into_csr())
 }
 
 impl BdpMinresSolver {
@@ -260,15 +306,19 @@ impl BdpMinresSolver {
         let n_p = b.nrows;
 
         // S = B · diag(M)⁻¹ · Bᵀ  (hypre: InvScaleRows on Bᵀ, ParMult, ScaleRows)
+        let m_diag: Vec<f64> = (0..n_u)
+            .map(|i| {
+                let d = m.get(i, i);
+                assert!(
+                    d != 0.0,
+                    "BDPMinresSolver: zero diagonal in M at row {i} \
+                     (MFEM DSmoother: zero diagonal in DiagScale)"
+                );
+                d
+            })
+            .collect();
+        let s = schur_complement_bmb_diag(b, &m_diag);
         let bt = b.transpose();
-        let mut minv_bt_coo = CooMatrix::<f64>::new(n_u, n_p);
-        for i in 0..n_u {
-            for p in bt.row_ptr[i]..bt.row_ptr[i + 1] {
-                let j = bt.col_idx[p] as usize;
-                minv_bt_coo.add(i, j, bt.values[p] / m.get(i, i));
-            }
-        }
-        let s = b.multiply(&minv_bt_coo.into_csr());
 
         let schur = match schur_mode {
             SchurMode::Amg => {
@@ -301,7 +351,20 @@ impl BdpMinresSolver {
                     .collect();
                 SchurApprox::Diag(d)
             }
+            SchurMode::Gs => SchurApprox::Gs(GsSmoother::new(&s, GsType::Symmetric, 1)),
         };
+
+        let m_diag: Vec<f64> = (0..n_u)
+            .map(|i| {
+                let d = m.get(i, i);
+                assert!(
+                    d != 0.0,
+                    "BDPMinresSolver: zero diagonal in M at row {i} \
+                     (MFEM DSmoother: zero diagonal in DiagScale)"
+                );
+                d
+            })
+            .collect();
 
         Self {
             n_u,
@@ -309,7 +372,7 @@ impl BdpMinresSolver {
             m: m.clone(),
             b: b.clone(),
             bt,
-            inv_diag_m: (0..n_u).map(|i| 1.0 / m.get(i, i)).collect(),
+            m_diag,
             schur,
             ess_zero_dofs: Vec::new(),
             param,
@@ -369,9 +432,10 @@ impl BdpMinresSolver {
     }
 
     fn apply_prec(&self, v: &[f64], w: &mut [f64]) {
-        // diag(diag(M)⁻¹, S⁻¹) · v
+        // diag(DSmoother(M), S⁻¹) · v — MFEM `SparseMatrix::DiagScale` order
+        // `x[i] = scale * b[i] / diag` (scale = 1 ⇒ `b[i] / diag`).
         for i in 0..self.n_u {
-            w[i] = self.inv_diag_m[i] * v[i];
+            w[i] = v[i] / self.m_diag[i];
         }
         let vp = &v[self.n_u..];
         let wp = &mut w[self.n_u..];
@@ -389,6 +453,7 @@ impl BdpMinresSolver {
                     *wi = vi * di;
                 }
             }
+            SchurApprox::Gs(gs) => gs.mult(vp, wp),
         }
     }
 }
@@ -600,6 +665,202 @@ mod tests {
                 solver.num_iterations()
             );
 
+            mesh = refine_uniform(&mesh);
+        }
+    }
+
+    // ─── D97: DSmoother(M) + GSSmoother(B·diag(M)⁻¹·Bᵀ) ─────────────────────
+
+    /// Assemble the RT0×P0 Darcy saddle `[[M, Bᵀ], [B, 0]]` on a quad mesh
+    /// (`B` sign-flipped like `examples/ex5.cpp`'s `B *= -1.`).
+    fn darcy_quad_system(mesh: &fem_mesh::Mesh<2>) -> (CsrMatrix<f64>, CsrMatrix<f64>) {
+        use fem_assembly::mixed::{assemble_hdiv_l2_mixed, HDivL2DivIntegrator};
+        use fem_assembly::standard::VectorMassIntegrator;
+        use fem_assembly::VectorAssembler;
+        use fem_space::{HDivSpace, L2Space};
+
+        let u_sp = HDivSpace::new(mesh.clone(), 0);
+        let p_sp = L2Space::new(mesh.clone(), 0);
+        let qo = 2u8;
+        let m = VectorAssembler::assemble_bilinear(
+            &u_sp,
+            &[&VectorMassIntegrator { alpha: 1.0 }],
+            qo,
+        );
+        let mut b = assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], qo);
+        for v in &mut b.values {
+            *v *= -1.0;
+        }
+        (m, b)
+    }
+
+    /// *True* residual `||rhs − A x||₂` of the flat saddle operator
+    /// `A = [[M, Bᵀ], [B, 0]]` — MINRES stops on the preconditioned estimate
+    /// `||r||_B`, which is **not** this quantity.
+    fn saddle_true_residual(
+        m: &CsrMatrix<f64>,
+        b: &CsrMatrix<f64>,
+        rhs: &[f64],
+        x: &[f64],
+    ) -> f64 {
+        let nu = m.nrows;
+        let mut r = vec![0.0; rhs.len()];
+        m.spmv(&x[..nu], &mut r[..nu]);
+        let mut t = vec![0.0; nu];
+        b.transpose().spmv(&x[nu..], &mut t);
+        for i in 0..nu {
+            r[i] += t[i];
+        }
+        b.spmv(&x[..nu], &mut r[nu..]);
+        rhs.iter()
+            .zip(&r)
+            .map(|(a, c)| (a - c).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// The ex5 / `nurbs_ex5` preconditioner pattern: block-diagonal MINRES with
+    /// `P = diag(DSmoother(M), GSSmoother(S))` and `S = B·diag(M)⁻¹·Bᵀ`,
+    /// `rtol = atol = 1e-10` (D97).
+    ///
+    /// C++ reference (`tmp/d97/probe_d97.cpp`, MFEM 4.10, same problem on
+    /// `MakeCartesian2D(4,4,QUADRILATERAL,true)`): 32 iterations,
+    /// `||r||_B = 2.2699196541930222e-10`, true residual `4.0635e-10`.  Feeding
+    /// the C++ **dumped** `M`/`B` into `BdpMinresSolver` reproduces that run
+    /// exactly (32 iterations, `max|Δx| = 1.6e-15`, residual sequence identical
+    /// at the 6 digits C++ prints); the fem-rs-assembled system is the same
+    /// matrix up to a dof permutation (`unit_square_quad` numbers the edges
+    /// differently from MFEM's space-filling-curve ordering — the |v| multisets
+    /// agree to 2.2e-16), and the order-dependent GS path then takes 30
+    /// iterations.  Hence the count pinned below is fem-rs's own 30, not C++'s
+    /// 32.
+    #[test]
+    fn bdp_gs_schur_ex5_pattern() {
+        use fem_mesh::Mesh;
+
+        let mesh = Mesh::<2>::unit_square_quad(4);
+        let (m, b) = darcy_quad_system(&mesh);
+        assert_eq!(m.nrows, 40);
+        assert_eq!(b.nrows, 16);
+        let n = m.nrows + b.nrows;
+        let rhs = vec![1.0_f64; n];
+
+        let param = IterSolveParameters {
+            print_level: 0,
+            max_iter: 10_000,
+            abs_tol: 1e-10,
+            rel_tol: 1e-10,
+        };
+        let solver = BdpMinresSolver::new(&m, &b, param.clone(), SchurMode::Gs);
+        let mut x = vec![0.0; n];
+        solver.mult(&rhs, &mut x);
+        assert!(solver.converged(), "BDP+GS did not converge");
+        assert_eq!(
+            solver.num_iterations(),
+            30,
+            "iteration count changed (C++ on the permuted system: 32)"
+        );
+        let tr = saddle_true_residual(&m, &b, &rhs, &x);
+        assert!(
+            tr <= 1e-8,
+            "true residual {tr:.3e} too large (MINRES stops on ||r||_B, not on this)"
+        );
+
+        // Independent solution check: rhs = A·x_ex ⇒ x = x_ex exactly.
+        // (The saddle operator is non-singular: M is SPD and B has full row
+        // rank, so MINRES must recover the manufactured solution.)
+        let nu = m.nrows;
+        let x_ex = vec![1.0_f64; n];
+        let mut rhs2 = vec![0.0_f64; n];
+        m.spmv(&x_ex[..nu], &mut rhs2[..nu]);
+        let mut t = vec![0.0; nu];
+        b.transpose().spmv(&x_ex[nu..], &mut t);
+        for i in 0..nu {
+            rhs2[i] += t[i];
+        }
+        b.spmv(&x_ex[..nu], &mut rhs2[nu..]);
+
+        let solver2 = BdpMinresSolver::new(&m, &b, param, SchurMode::Gs);
+        let mut x2 = vec![0.0; n];
+        solver2.mult(&rhs2, &mut x2);
+        assert!(solver2.converged(), "manufactured-solution solve did not converge");
+        let err = x2
+            .iter()
+            .zip(&x_ex)
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(err <= 1e-8, "max|x − x_ex| = {err:.3e}");
+    }
+
+    /// `S = B·diag(M)⁻¹·Bᵀ` as assembled by the public helper equals the dense
+    /// reference product (the helper is the `S = Mult(B, MinvBt)` line of
+    /// ex5 / `nurbs_ex5`).
+    #[test]
+    fn schur_complement_matches_dense_product() {
+        use fem_mesh::Mesh;
+
+        let mesh = Mesh::<2>::unit_square_quad(2);
+        let (m, b) = darcy_quad_system(&mesh);
+        let nu = m.nrows;
+        let np = b.nrows;
+        let md: Vec<f64> = (0..nu).map(|i| m.get(i, i)).collect();
+        let s = schur_complement_bmb_diag(&b, &md);
+
+        let mut worst = 0.0_f64;
+        for p in 0..np {
+            for q in 0..np {
+                let mut acc = 0.0;
+                for i in 0..nu {
+                    acc += b.get(p, i) * b.get(q, i) / md[i];
+                }
+                worst = worst.max((s.get(p, q) - acc).abs());
+            }
+        }
+        assert!(worst < 1e-15, "S differs from B·diag(M)⁻¹·Bᵀ by {worst:.3e}");
+        assert!(s.nrows == np && s.ncols == np);
+    }
+
+    /// Refinement bound for the GS-Schur path (D97): the plain symmetric
+    /// `GSSmoother(S)` is *not* h-independent (unlike the BoomerAMG preset of
+    /// `SchurMode::Amg`), so the count grows with the mesh — pin a range and
+    /// the true residual at each of 4×4 → 8×8 → 16×16.
+    #[test]
+    fn bdp_gs_schur_refinement_bound() {
+        use fem_mesh::{refine_uniform, Mesh};
+
+        let mut mesh = Mesh::<2>::unit_square_quad(4);
+        // (n_p, iteration bound) per level; measured 30 / 57 / 96.
+        for (expected_np, iter_bound, res_bound) in
+            [(16usize, 40usize, 1e-8_f64), (64, 80, 1e-7), (256, 140, 1e-7)]
+        {
+            let (m, b) = darcy_quad_system(&mesh);
+            assert_eq!(b.nrows, expected_np);
+            let nu = m.nrows;
+            let n = nu + expected_np;
+            let rhs = vec![1.0_f64; n];
+            let param = IterSolveParameters {
+                print_level: 0,
+                max_iter: 10_000,
+                abs_tol: 1e-10,
+                rel_tol: 1e-10,
+            };
+            let solver = BdpMinresSolver::new(&m, &b, param, SchurMode::Gs);
+            let mut x = vec![0.0; n];
+            solver.mult(&rhs, &mut x);
+            assert!(
+                solver.converged(),
+                "BDP+GS did not converge at n_p = {expected_np}"
+            );
+            assert!(
+                solver.num_iterations() <= iter_bound,
+                "BDP+GS too slow at n_p = {expected_np}: {} iterations",
+                solver.num_iterations()
+            );
+            let tr = saddle_true_residual(&m, &b, &rhs, &x);
+            assert!(
+                tr <= res_bound,
+                "true residual at n_p = {expected_np}: {tr:.3e} > {res_bound:.1e}"
+            );
             mesh = refine_uniform(&mesh);
         }
     }
