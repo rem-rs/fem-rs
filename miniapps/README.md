@@ -32,8 +32,21 @@ miniapps/
 │                                Randomize(1234) 种子不可复刻而不同
 │                                (0.141749→0.145761ns, 同 SnapTimeStep 档);
 │                                -vis/-visit/-cs/-abcs/NURBS/2D 为 exit(3);
-│                                joule 仅出判定(需要 MakeRef 视图 + 4 块耦合
-│                                隐式解 + MFEM ODE 族 + 静态凝聚)
+│                                SIAV 已于 round 26 下沉到 fem_solver)
+│   └── joule.rs             ← 第 5 件 (joule.cpp **部分交付, 退出码 3**,
+│                                涡流-热耦合): 1:1 到 dof 横幅 —— banner /
+│                                完整 Options dump(含 C++ 的 -p 注册两次) /
+│                                两条 skin depth (0.551329, 0.126157) / 四个
+│                                空间及阶 / 五行 unknowns (6456/2016/6882/
+│                                6456/2443) / true_offset + 6 场 BlockVector +
+│                                六个 make_ref 视图 / 四个材料映射 / 三个 BC
+│                                掩码 —— 与自编 C++ 4.10 参考**逐行一致**
+│                                (主会话独立复核); 缺口: H¹ 并行分区 dof 数
+│                                (364 vs 2443) 与 DofPartition panic、H¹→
+│                                H(curl) 离散梯度、GetJouleHeating、求解器栈
+│                                (无 AMG/AMS/ADS)、.gen(netCDF) 读取; C++ 在
+│                                dof 横幅后立刻进入 hypre 自己的输出 ⇒ 之后
+│                                无法逐字节
 ├── diag-smoothers/          ← 对应 miniapps/diag-smoothers/
 │   └── abs-l1-jacobi.rs     ← Absolute L(1)-Jacobi 光滑子 (1:1 串行版;
 │                                mass/diffusion/maxwell 三类系统, SLI/PCG,
@@ -69,10 +82,16 @@ miniapps/
 │                                dim(R+W)=12805/边界 dof H(div) 260 / H1 256
 │                                与 C++ 逐字节；ex24 `-r 1 -p 0/1/2` 的
 │                                HCurl144/H127、HCurl144/HDiv108、
-│                                HDiv108/L227 六行逐字节。缺: 带符号
-│                                `bel_dof`（ex5 自然 BC 的 RHS）、块 MINRES
-│                                的 Schur 通路（ex5 迭代块）、NURBS 跨空间
-│                                `MixedVectorGradient/CurlIntegrator`（ex24）
+│                                HDiv108/L227 六行逐字节。已补: 带符号
+│                                `bel_dof` 边界 dof 表（round 27，10 项测试
+│                                逐行含符号对照，H1/HCurl/HDiv × 2D/3D ×
+│                                多 patch）。仍缺: **边界单元装配通路**
+│                                （ex5 自然 BC 的 RHS；bel_dof 已就绪）、
+│                                NURBS 跨空间 `MixedVectorGradient/
+│                                CurlIntegrator`（ex24 三档）；块 MINRES 的
+│                                Schur 通路（`SchurMode::Gs` + `GsSmoother`
+│                                + `S=B·diag(M)⁻¹Bᵀ`）已于 round 27 在
+│                                `fem-solver` 落地，**尚未接线到本示例**
 ├── meshing/                 ← 对应 miniapps/meshing/
 │   ├── shaper.rs            ← 材料界面 AMR (1:1)
 │   ├── extruder.rs          ← 2D→3D 拉伸 (1:1)
