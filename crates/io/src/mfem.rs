@@ -117,22 +117,12 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         uniform_type = if elem_types.iter().all(|&t| t == first) { Some(first) } else { None };
     }
 
-    // Detect 0-based vs 1-based vertex indexing
-    // MFEM spec says 1-based, but some files (star.mesh) use 0-based.
-    let is_zero_based = elem_raw_conn.iter().flatten().any(|&v| v == 0);
-
-    // Convert to 0-based (subtract 1 if file is 1-based, leave as-is if 0-based)
-    let fix_idx = |v: usize| -> u32 {
-        if is_zero_based { v as u32 } else { (v - 1) as u32 }
-    };
-    let elem_conn: Vec<Vec<u32>> = elem_raw_conn.iter()
-        .map(|row| row.iter().map(|&v| fix_idx(v)).collect())
-        .collect();
-
+    // Vertex indices are read raw here; the 0-based / 1-based decision needs
+    // `n_vert` (see below), so the conversion happens once it is known.
     read_line(&mut r)?;  // "boundary"
     let n_bdr = read_uint(&mut r)?;
     let mut bdr_types: Vec<ElementType> = Vec::with_capacity(n_bdr);
-    let mut face_conn: Vec<Vec<u32>> = Vec::with_capacity(n_bdr);
+    let mut face_raw: Vec<Vec<usize>> = Vec::with_capacity(n_bdr);
     let mut face_tags: Vec<i32> = Vec::with_capacity(n_bdr);
     for _ in 0..n_bdr {
         let vals = read_uint_line(&mut r)?;
@@ -146,7 +136,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         }
         bdr_types.push(et);
         face_tags.push(attr as i32);
-        face_conn.push(vals[2..].iter().map(|&v| fix_idx(v)).collect());
+        face_raw.push(vals[2..].to_vec());
     }
 
     {
@@ -158,6 +148,42 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         } // else already "vertices"
     }
     let n_vert = read_uint(&mut r)?;
+
+    // Detect 0-based vs 1-based vertex indexing.
+    //
+    // MFEM's own `Mesh::PrintElement` / `Mesh::ReadElementWithoutAttr` pass the
+    // vertex ids through verbatim, so MFEM files are 0-based (every file in
+    // `data/` contains a vertex `0`).  Older / foreign converters wrote
+    // 1-based files instead, which is what the format note claims.  Decide by:
+    //   * any index == 0                → 0-based (unambiguous);
+    //   * max index + 1 == n_vert       → 0-based (the file addresses exactly
+    //     the vertices it declares, which a 1-based file never does);
+    //   * otherwise                     → 1-based (the historical default).
+    let max_idx = elem_raw_conn
+        .iter()
+        .chain(face_raw.iter())
+        .flatten()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let has_zero = elem_raw_conn
+        .iter()
+        .chain(face_raw.iter())
+        .flatten()
+        .any(|&v| v == 0);
+    let is_zero_based = has_zero || max_idx + 1 == n_vert;
+
+    // Convert to 0-based (subtract 1 if the file is 1-based, leave as-is if 0-based)
+    let fix_idx = |v: usize| -> u32 {
+        if is_zero_based { v as u32 } else { (v - 1) as u32 }
+    };
+    let elem_conn: Vec<Vec<u32>> = elem_raw_conn.iter()
+        .map(|row| row.iter().map(|&v| fix_idx(v)).collect())
+        .collect();
+    let face_conn: Vec<Vec<u32>> = face_raw.iter()
+        .map(|row| row.iter().map(|&v| fix_idx(v)).collect())
+        .collect();
+
     let mut coords: Vec<f64> = Vec::new();
     // Per-element high-order geometry (MFEM `nodes` section).  For L2
     // (discontinuous) node spaces each element owns `nodes_per_elem`
@@ -514,16 +540,212 @@ pub fn read_mfem_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemFile> 
     read_mfem(std::fs::File::open(path)?)
 }
 
+/// D126: self-check the element tables of a mesh that is about to be written.
+///
+/// The writer derives the number of volume elements and each element's node
+/// count from `elem_type` / `elem_types` and then indexes `conn` with that
+/// stride.  A mesh whose tables disagree with `conn` (e.g. `elem_type = Hex8`
+/// while `conn` holds 6-node wedges — the `toroid` miniapp bug) used to be
+/// written out as a *different, larger* set of elements read from the same
+/// buffer, producing a file that neither MFEM nor `read_mfem` could read back.
+/// Fail with the offending element instead.
+fn check_element_tables<const D: usize>(mesh: &Mesh<D>) -> FemResult<()> {
+    let n_conn = mesh.conn.len();
+    if let Some(ref types) = mesh.elem_types {
+        let n_elems = types.len();
+        let offsets = mesh.elem_offsets.as_ref().ok_or_else(|| {
+            FemError::Mesh(
+                "write_mfem: elem_types is set but elem_offsets is None, so a mixed-element \
+                 connectivity cannot be located".to_string(),
+            )
+        })?;
+        if offsets.len() != n_elems + 1 {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: elem_types has {n_elems} entries but elem_offsets has {} entries \
+                 (expected {})",
+                offsets.len(),
+                n_elems + 1
+            )));
+        }
+        for e in 0..n_elems {
+            let et = types[e];
+            let npe = et.nodes_per_element();
+            if npe == 0 {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: element {e} of {n_elems} has element type {et:?} with 0 nodes \
+                     per element"
+                )));
+            }
+            let got = offsets[e + 1] - offsets[e];
+            if got != npe {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: element {e} of {n_elems} has element type {et:?} ({npe} nodes) \
+                     but elem_offsets gives {got} nodes"
+                )));
+            }
+        }
+        if offsets[n_elems] != n_conn {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: elem_offsets ends at {} but conn has {n_conn} entries",
+                offsets[n_elems]
+            )));
+        }
+        return Ok(());
+    }
+
+    let npe = mesh.elem_type.nodes_per_element();
+    if npe == 0 {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: element type {:?} has 0 nodes per element",
+            mesh.elem_type
+        )));
+    }
+    if let Some(ref offsets) = mesh.elem_offsets {
+        let n_elems = offsets.len() - 1;
+        if offsets[n_elems] != n_conn {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: elem_offsets ends at {} but conn has {n_conn} entries",
+                offsets[n_elems]
+            )));
+        }
+        return Ok(());
+    }
+    if n_conn % npe != 0 {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: element type {:?} needs {npe} nodes per element, but conn has {n_conn} \
+             entries — this is not a whole number of elements",
+            mesh.elem_type
+        )));
+    }
+    Ok(())
+}
+
+/// D126: per-face node count of a mesh's boundary section, or a `FemError`
+/// naming the first face whose declared geometry does not fit the data.
+///
+/// The MFEM boundary records carry the face's *geometric* element type, so the
+/// node count of a face must come from `Mesh::face_type_at` — never from a
+/// hard-coded "3 nodes ⇒ TRIANGLE" guess, which turned quadrilateral faces into
+/// truncated triangles (and re-read as a different mesh).  Both the per-face
+/// stride and the total `face_conn` length are verified, so a mesh that would
+/// write a corrupt file fails loudly instead.
+fn check_boundary_tables<const D: usize>(mesh: &Mesh<D>) -> FemResult<Vec<usize>> {
+    let n_faces = mesh.n_faces();
+    if let Some(ref ft) = mesh.face_types {
+        if ft.len() != n_faces {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: face_types has {} entries but the mesh has {n_faces} boundary faces",
+                ft.len()
+            )));
+        }
+    }
+    if !mesh.face_tags.is_empty() && mesh.face_tags.len() != n_faces {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: face_tags has {} entries but the mesh has {n_faces} boundary faces",
+            mesh.face_tags.len()
+        )));
+    }
+    if let Some(ref fo) = mesh.face_offsets {
+        if fo.len() != n_faces + 1 {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: face_offsets has {} entries but the mesh has {n_faces} boundary \
+                 faces (expected {})",
+                fo.len(),
+                n_faces + 1
+            )));
+        }
+    }
+
+    let mut counts = Vec::with_capacity(n_faces);
+    let mut total = 0usize;
+    for f in 0..n_faces {
+        let et = mesh.face_type_at(f as u32);
+        let nv = et.nodes_per_element();
+        if nv == 0 {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: boundary face {f} of {n_faces} has element type {et:?} with 0 nodes \
+                 per element"
+            )));
+        }
+        if let Some(ref fo) = mesh.face_offsets {
+            let got = fo[f + 1] - fo[f];
+            if got != nv {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: boundary face {f} of {n_faces} has element type {et:?} ({nv} \
+                     nodes) but face_offsets gives {got} nodes"
+                )));
+            }
+        } else if let Some(ref ft) = mesh.face_types {
+            // Per-face types without an offsets table: the implicit
+            // `f * face_type.nodes_per_element()` stride is only correct when
+            // every face really has the uniform `face_type`.
+            if ft[f] != mesh.face_type {
+                return Err(FemError::Mesh(format!(
+                    "write_mfem: boundary face {f} of {n_faces} has element type {:?} but \
+                     face_offsets is None (the mesh's uniform face_type is {:?}), so the face's \
+                     nodes cannot be located",
+                    ft[f], mesh.face_type
+                )));
+            }
+        }
+        let remaining = mesh.face_conn.len().saturating_sub(total);
+        if nv > remaining {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: boundary face {f} of {n_faces} needs {nv} nodes (element type \
+                 {et:?}) but only {remaining} of the {} face_conn entries remain",
+                mesh.face_conn.len()
+            )));
+        }
+        total += nv;
+        counts.push(nv);
+    }
+    if total != mesh.face_conn.len() {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: the {n_faces} boundary face types account for {total} nodes but \
+             face_conn has {} entries",
+            mesh.face_conn.len()
+        )));
+    }
+    Ok(counts)
+}
+
+/// D126: validate both the element and the boundary tables of the mesh that is
+/// about to be written.  Called by [`write_mfem`] (before it emits anything)
+/// and by the `write_mfem_file*` helpers (before they create the file, so a
+/// rejected mesh leaves no empty file behind).
+fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
+    if let Some(m3) = mesh_3d {
+        check_element_tables(m3)?;
+        check_boundary_tables(m3)?;
+    } else {
+        check_element_tables(mesh_d)?;
+        check_boundary_tables(mesh_d)?;
+    }
+    Ok(())
+}
+
 /// Write a `Mesh` to MFEM `.mesh` v1.0 format.
 ///
 /// Supports 2D and 3D meshes with uniform or mixed element types.
-/// Uses 1-based node indexing (MFEM convention).
+///
+/// **Node indexing is 0-based** (D126): MFEM's `Mesh::PrintElement` writes
+/// `v[j]` verbatim and `Mesh::ReadElementWithoutAttr` reads it verbatim
+/// (`mesh/mesh.cpp`), so the vertex indices in a `.mesh` file are straight
+/// indices into the `vertices` array — every file under `data/` (e.g.
+/// `star.mesh`: `1 3 0 11 26 14`) uses vertex `0`.  Writing 1-based indices
+/// (the previous behaviour here, following the format note "1-based") shifted
+/// every connectivity entry by one, which made MFEM either abort with
+/// `Invalid mesh topology` or overrun its vertex array.
 ///
 /// For 3D meshes containing tetrahedra, the mesh is cloned and normalized
 /// with `mark_tet_mesh_for_refinement` before writing, so that programmatically
 /// created meshes round-trip with the same canonical tet orientation that
 /// `read_mfem` produces (longest edge = (v0,v1)).
 pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemResult<()> {
+    // D126: never write a mesh whose element/face tables contradict each other.
+    // This runs before a single byte is emitted so a failure cannot leave a
+    // half-written (or silently corrupt) `.mesh` behind.
+    validate_mesh_for_write(mesh_d, mesh_3d)?;
     // D2: tet io round-trip orientation normalization.
     // read_mfem applies mark_tet_mesh_for_refinement (MarkTetMeshForRefinement)
     // on read to canonicalize tet vertex order.  write_mfem must apply the
@@ -542,13 +764,12 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
         Some(n) => Some(n),
         None => mesh_3d,
     };
-    let (dim, coords, conn, elem_tags, elem_type, face_conn, face_tags, elem_types_opt)
+    let (dim, coords, conn, elem_tags, elem_type, elem_types_opt)
         = if let Some(m3) = mesh_3d {
-            (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type,
-             &m3.face_conn, &m3.face_tags, &m3.elem_types)
+            (3, &m3.coords, &m3.conn, &m3.elem_tags, &m3.elem_type, &m3.elem_types)
         } else {
             (2, &mesh_d.coords, &mesh_d.conn, &mesh_d.elem_tags, &mesh_d.elem_type,
-             &mesh_d.face_conn, &mesh_d.face_tags, &mesh_d.elem_types)
+             &mesh_d.elem_types)
         };
     let n_nodes = coords.len() / dim;
     let n_elems = if dim == 3 {
@@ -558,8 +779,15 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
     } else {
         conn.len() / elem_type.nodes_per_element()
     };
-    let n_face_elem = if dim == 3 { mesh_3d.map_or(0, |m| m.n_faces()) }
-        else { face_conn.len() / 2 };
+    // D126: the number of boundary faces and each face's node count come from
+    // the mesh's own face tables (`face_type_at`), validated up front by
+    // `validate_mesh_for_write`.  The per-face counts are returned by the
+    // check, so the write loop below cannot walk off the connectivity.
+    let face_nv: Vec<usize> = if let Some(m3) = mesh_3d {
+        check_boundary_tables(m3)?
+    } else {
+        check_boundary_tables(mesh_d)?
+    };
 
     writeln!(writer, "MFEM mesh v1.0\n")?;
     writeln!(writer, "dimension\n{dim}\n")?;
@@ -583,7 +811,7 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
             let offset = offsets.map(|offs| offs[ei]).unwrap_or(ei * npe);
             write!(writer, "{} {code}", elem_tags[ei])?;
             for j in 0..npe_local {
-                write!(writer, " {}", conn[offset + j] + 1)?;
+                write!(writer, " {}", conn[offset + j])?;
             }
             writeln!(writer)?;
         }
@@ -597,32 +825,20 @@ pub fn write_mfem<W: Write>(writer: &mut W, mesh_d: &Mesh<2>, mesh_3d: Option<&M
             let tag = if !elem_tags.is_empty() { elem_tags[ei] } else { 1 };
             write!(writer, "{tag} {code}")?;
             for j in 0..npe {
-                write!(writer, " {}", conn[offset + j] + 1)?;
+                write!(writer, " {}", conn[offset + j])?;
             }
             writeln!(writer)?;
         }
     }
 
     // Boundary section
-    writeln!(writer, "\nboundary\n{n_face_elem}")?;
-    for fi in 0..n_face_elem as u32 {
-        let (offset, nvf, btype) = if let Some(ref m3) = mesh_3d {
-            let (off, nv) = if let Some(ref fo) = m3.face_offsets {
-                (fo[fi as usize], fo[fi as usize + 1] - fo[fi as usize])
-            } else {
-                (fi as usize * 3, 3usize)
-            };
-            let code = if nv == 3 { 2u32 } else { 3u32 }; // 2=Triangle, 3=Quad
-            (off, nv, code)
-        } else {
-            (fi as usize * 2, 2usize, 1u32)
-        };
-        let tag = if !face_tags.is_empty() { face_tags[fi as usize] } else { 1 };
-        write!(writer, "{tag} {btype}")?;
-        for j in 0..nvf {
-            write!(writer, " {}", face_conn[offset + j] + 1)?;
-        }
-        writeln!(writer)?;
+    //
+    // Each record is `<attr> <mfem geometry code> <n1> ... <nn>`, with the code
+    // and the node count taken from the face's own geometric type (D126).
+    if let Some(m3) = mesh_3d {
+        write_boundary_section(writer, m3, &face_nv)?;
+    } else {
+        write_boundary_section(writer, mesh_d, &face_nv)?;
     }
 
     // Vertices section
@@ -645,14 +861,51 @@ fn has_tet4(mesh: &Mesh<3>) -> bool {
     }
 }
 
+/// Write the `.mesh` `boundary` section for a 2-D or 3-D mesh.
+///
+/// `face_nv[f]` is the validated node count of face `f` (from
+/// [`check_boundary_tables`]); `face_conn` is walked with those counts, so the
+/// records can never overlap or overrun.  The MFEM geometry code comes from the
+/// face's own type via [`elem_type_to_mfem_code`].
+fn write_boundary_section<W: Write, const D: usize>(
+    writer: &mut W,
+    mesh: &Mesh<D>,
+    face_nv: &[usize],
+) -> FemResult<()> {
+    writeln!(writer, "\nboundary\n{}", face_nv.len())?;
+    let mut off = 0usize;
+    for (fi, &nvf) in face_nv.iter().enumerate() {
+        let et = mesh.face_type_at(fi as u32);
+        let code = elem_type_to_mfem_code(et).ok_or_else(|| {
+            FemError::Mesh(format!("write_mfem: unsupported boundary face type {et:?}"))
+        })?;
+        let tag = if !mesh.face_tags.is_empty() { mesh.face_tags[fi] } else { 1 };
+        write!(writer, "{tag} {code}")?;
+        for j in 0..nvf {
+            write!(writer, " {}", mesh.face_conn[off + j])?;
+        }
+        writeln!(writer)?;
+        off += nvf;
+    }
+    Ok(())
+}
+
 /// Write a mesh to MFEM `.mesh` file on disk.
+///
+/// The mesh is validated (D126) *before* the file is created, so a rejected
+/// mesh leaves no empty file behind.
 pub fn write_mfem_file(path: impl AsRef<std::path::Path>, mesh_d: &Mesh<2>) -> FemResult<()> {
+    validate_mesh_for_write(mesh_d, None)?;
     let mut file = std::fs::File::create(path)?;
     write_mfem(&mut file, mesh_d, None)
 }
 
 /// Write a 3D mesh to MFEM `.mesh` file on disk.
+///
+/// The mesh is validated (D126) *before* the file is created, so a rejected
+/// mesh leaves no empty file behind.
 pub fn write_mfem_file_3d(path: impl AsRef<std::path::Path>, mesh: &Mesh<3>) -> FemResult<()> {
+    validate_mesh_for_write(&Mesh::<2>::unit_square_tri(2), Some(mesh))?;
     let mut file = std::fs::File::create(path)?;
     write_mfem(&mut file, &Mesh::<2>::unit_square_tri(2), Some(mesh))
 }

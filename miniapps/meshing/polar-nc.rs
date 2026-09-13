@@ -1,195 +1,134 @@
 //! # Polar NC Miniapp — Generate Polar Non-Conforming Meshes
 //!
-//! Simplified port of MFEM `miniapps/meshing/polar-nc.cpp`.
-//! Generates a circular sector mesh with mixed triangles and quads.
+//! Partial port of MFEM `miniapps/meshing/polar-nc.cpp` (MFEM 4.10), serial.
+//!
+//! The C++ miniapp generates a circular sector mesh of quads and triangles of
+//! similar sizes, non-conforming **by design** (hanging nodes introduced with
+//! `Mesh::AddVertexParents`), optionally curvilinear, and orders the elements
+//! along a space-filling curve with `NCMesh::GridSfcOrdering2D` (`-sfc`, the
+//! raison d'être of the miniapp).  The result is written to `polar-nc.mesh`.
+//!
+//! Sample runs (C++): `polar-nc --radius 1 --nsteps 10`, `polar-nc --aspect 2`,
+//! `polar-nc --dim 3 --order 4`.
+//!
+//! **This run always exits with code 3**: the C++ output file is a genuinely
+//! different format that fem-rs cannot emit.  Every documented run is affected,
+//! so there is no faithful sub-path to preserve.
+//!
+//! Gap list (exit 3):
+//! 1. **`MFEM NC mesh v1.0` writer.**  The C++ file header is
+//!    `MFEM NC mesh v1.0` and its `elements`/`boundary` sections carry
+//!    `rank attr geom ref_type nodes/children` records — the non-conforming
+//!    format, not the `MFEM mesh v1.0` conforming one
+//!    (`fem_io::mfem::write_mfem` writes the conforming format only).  The
+//!    `-sfc` element ordering is applied through
+//!    `NCMesh::GridSfcOrdering2D` before the mesh is written, so it too
+//!    presumes the NC format.
+//! 2. **`vertex_parents` section** — the hanging-node parents recorded by
+//!    `Mesh::AddVertexParents` (the C++ file has one; without it MFEM cannot
+//!    reconstruct the non-conforming topology and aborts with
+//!    `Invalid mesh topology`).
+//! 3. **Curved `nodes` section** — the default `-o 2` calls `SetCurvature(2)`
+//!    and then overwrites the nodal values from the per-element polar
+//!    parameters (`(r, alpha)` mapped through each element's
+//!    `IntegrationRule`), plus `-d 3` (prisms/tetrahedra) and `-a <aspect>`.
+//! 4. 3-D generation (`Make3D`: prisms + tetrahedra).
+//!
+//! The previous version of this port generated a *conforming-looking* 2-D mesh
+//! (hanging vertices added as plain vertices, no `vertex_parents`, no node
+//! curvature) and wrote it as `MFEM mesh v1.0`, which MFEM rejects with
+//! `Invalid mesh topology`; it also ignored `-sfc`, `-d`, `-a` and `-o`
+//! silently.  That path is removed rather than kept: it could not produce a
+//! readable mesh.
+//!
+//! `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
 
-use fem_io::mfem::write_mfem_file;
-use fem_mesh::{Mesh, element_type::ElementType};
+/// The C++ miniapp's `args.PrintOptions(cout)` dump (MFEM `OptionsParser`).
+fn print_options(dim: i32, radius: f64, nsteps: usize, aspect: f64, angle: f64, order: usize, sfc: bool) {
+    println!("Options used:");
+    println!("   --dim {dim}");
+    println!("   --radius {radius}");
+    println!("   --nsteps {nsteps}");
+    println!("   --aspect {aspect}");
+    println!("   --phi {angle}");
+    println!("   --order {order}");
+    println!("   --{}", if sfc { "sfc" } else { "no-sfc" });
+    println!("   --no-visualization");
+    println!("   --send-port 19916");
+}
 
-fn make_2d(nsteps: usize, rstep: f64, phi: f64, aspect: f64, order: usize) -> Mesh<2> {
-    let mut coords: Vec<f64> = Vec::new();
-    let mut conn: Vec<u32> = Vec::new();
-    let mut elem_tags: Vec<i32> = Vec::new();
-    let mut elem_types: Vec<ElementType> = Vec::new();
-    let mut elem_offsets: Vec<usize> = vec![0];
-    let mut face_conn: Vec<u32> = Vec::new();
-    let mut face_tags: Vec<i32> = Vec::new();
-
-    let mut n = 1usize;
-    while phi * rstep / 2.0 / n as f64 * aspect > rstep {
-        n += 1;
+/// MFEM `MFEM_VERIFY` — the C++ aborts on a failed verification.
+fn verify(cond: bool, what: &str) {
+    if !cond {
+        eprintln!("Verification failed: ({what}) is false");
+        std::process::exit(1);
     }
+}
 
-    let mut r = rstep;
-    // Origin vertex
-    coords.extend_from_slice(&[0.0, 0.0]); // vertex 0
-
-    // First ring vertices
-    for i in 0..=n {
-        let alpha = phi * i as f64 / n as f64;
-        coords.extend_from_slice(&[r * alpha.cos(), r * alpha.sin()]);
-    }
-
-    // Create triangles around the origin
-    for i in 0..n {
-        conn.push(0);
-        conn.push(1 + i as u32);
-        conn.push(1 + i as u32 + 1);
-        elem_tags.push(1);
-        elem_types.push(ElementType::Tri3);
-        elem_offsets.push(conn.len());
-    }
-
-    // Bottom boundary segment
-    face_conn.push(0);
-    face_conn.push(1);
-    face_tags.push(1);
-    // Top boundary segment
-    face_conn.push(n as u32 + 1);
-    face_conn.push(0);
-    face_tags.push(2);
-
-    for k in 1..nsteps {
-        let prev_first = 1u32;
-        let prev_n = n;
-        let prev_r = r;
-        r += rstep;
-
-        if phi * (r + prev_r) / 2.0 / n as f64 * aspect < rstep * 2.0f64.sqrt() {
-            // Same number of elements - add quads
-            let new_first = (coords.len() / 2) as u32;
-            for i in 0..=n {
-                let alpha = phi * i as f64 / n as f64;
-                coords.extend_from_slice(&[r * alpha.cos(), r * alpha.sin()]);
-            }
-
-            // Bottom boundary
-            face_conn.push(prev_first);
-            face_conn.push(new_first);
-            face_tags.push(1);
-
-            for i in 0..n {
-                conn.push(prev_first + i as u32);
-                conn.push(new_first + i as u32);
-                conn.push(new_first + i as u32 + 1);
-                conn.push(prev_first + i as u32 + 1);
-                elem_tags.push(1);
-                elem_types.push(ElementType::Quad4);
-                elem_offsets.push(conn.len());
-            }
-
-            // Top boundary
-            face_conn.push(new_first + n as u32);
-            face_conn.push(prev_first + n as u32);
-            face_tags.push(2);
-        } else {
-            // Double the number of elements
-            n *= 2;
-
-            // Hanging vertices at prev_r
-            let hang_start = (coords.len() / 2) as u32;
-            for i in 0..prev_n {
-                let alpha = phi * (2 * i + 1) as f64 / n as f64;
-                coords.extend_from_slice(&[prev_r * alpha.cos(), prev_r * alpha.sin()]);
-            }
-
-            // New vertices at r
-            let new_first = (coords.len() / 2) as u32;
-            for i in 0..n {
-                let alpha = phi * (2 * i + 1) as f64 / n as f64;
-                coords.extend_from_slice(&[r * alpha.cos(), r * alpha.sin()]);
-            }
-
-            // Bottom boundary
-            face_conn.push(prev_first);
-            face_conn.push(new_first);
-            face_tags.push(1);
-
-            for i in 0..prev_n {
-                let a = prev_first + i as u32;
-                let b = new_first + 2 * i as u32;
-                let c = hang_start + i as u32;
-                let d = new_first + 2 * i as u32 + 1;
-                let e = prev_first + i as u32 + 1;
-                let f = new_first + 2 * i as u32 + 2;
-
-                conn.push(a); conn.push(b); conn.push(d); conn.push(c);
-                elem_tags.push(1);
-                elem_types.push(ElementType::Quad4);
-                elem_offsets.push(conn.len());
-
-                conn.push(c); conn.push(d); conn.push(f); conn.push(e);
-                elem_tags.push(1);
-                elem_types.push(ElementType::Quad4);
-                elem_offsets.push(conn.len());
-            }
-
-            // Top boundary
-            face_conn.push(new_first + n as u32 - 1);
-            face_conn.push(prev_first + prev_n as u32 - 1);
-            face_tags.push(2);
-        }
-    }
-
-    // Outer boundary
-    let outer_first = (coords.len() / 2) as u32 - n as u32 - 1;
-    for i in 0..n {
-        face_conn.push(outer_first + i as u32);
-        face_conn.push(outer_first + i as u32 + 1);
-        face_tags.push(3);
-    }
-
-    let mut mesh = Mesh::<2> {
-        coords,
-        conn,
-        elem_tags,
-        elem_type: ElementType::Tri3,
-        face_conn,
-        face_tags,
-        face_type: ElementType::Line2,
-        elem_types: Some(elem_types),
-        elem_offsets: Some(elem_offsets),
-        face_types: None,
-        face_offsets: None,
-        face_to_elem: None,
-        edge_conn: vec![],
-        edge_to_elem: vec![],
-        geometry: None,
-        nc_vertex_view: None,
-        vertex_parents: vec![],
-    };
-
-    if order > 1 {
-        mesh.set_curvature(order as u8);
-    }
-
-    mesh
+fn gap_exit() -> ! {
+    eprintln!(
+        "polar-nc (Rust port): the C++ miniapp writes a non-conforming mesh in MFEM's \
+`MFEM NC mesh v1.0` format (with a `vertex_parents` section) and, by default, a curved `nodes` \
+section; `fem_io::mfem::write_mfem` emits the conforming `MFEM mesh v1.0` format with `vertices` \
+only, so there is no faithful output to produce (and writing a conforming file in its place would \
+be rejected by MFEM with `Invalid mesh topology`).\n\
+Gap list (exit 3): [1] `MFEM NC mesh v1.0` writer (`rank attr geom ref_type nodes/children` \
+records); [2] `vertex_parents` emission for `Mesh::AddVertexParents` hanging nodes; [3] \
+`NCMesh::GridSfcOrdering2D` for `-sfc` (the miniapp's raison d'être) and `Mesh::ReorderElements`; \
+[4] curved `nodes` section with the per-element polar parameter map + `-a <aspect>`; [5] 3-D \
+generation (`-d 3`: prisms + tetrahedra)."
+    );
+    std::process::exit(3);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut nsteps = 10usize;
+    let mut dim = 2i32;
     let mut radius = 1.0f64;
+    let mut nsteps = 10usize;
     let mut angle = 90.0f64;
+    let mut aspect = 1.0f64;
     let mut order = 2usize;
+    let mut sfc = true;
 
     let mut it = args.iter().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-r" | "--radius" => { if let Some(v) = it.next() { radius = v.parse().unwrap_or(1.0); } }
-            "-n" | "--nsteps" => { if let Some(v) = it.next() { nsteps = v.parse().unwrap_or(10); } }
-            "-o" | "--order" => { if let Some(v) = it.next() { order = v.parse().unwrap_or(2); } }
-            "-phi" | "--phi" => { if let Some(v) = it.next() { angle = v.parse().unwrap_or(90.0); } }
-            "-no-vis" | "--no-visualization" => {}
+            "-d" | "--dim" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { dim = val; } }
+            }
+            "-r" | "--radius" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { radius = val; } }
+            }
+            "-n" | "--nsteps" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { nsteps = val; } }
+            }
+            "-a" | "--aspect" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { aspect = val; } }
+            }
+            "-phi" | "--phi" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { angle = val; } }
+            }
+            "-o" | "--order" => {
+                if let Some(v) = it.next() { if let Ok(val) = v.parse() { order = val; } }
+            }
+            "-sfc" | "--sfc" => sfc = true,
+            "-no-sfc" | "--no-sfc" => sfc = false,
+            "-vis" | "--visualization" | "-no-vis" | "--no-visualization" => {}
             _ => {}
         }
     }
+    print_options(dim, radius, nsteps, aspect, angle, order, sfc);
 
-    let phi = angle * std::f64::consts::PI / 180.0;
-    let rstep = radius / nsteps as f64;
+    // "validate options" (C++ MFEM_VERIFY)
+    verify(radius > 0.0, "radius > 0");
+    verify(aspect > 0.0, "aspect > 0");
+    verify(dim >= 2 && dim <= 3, "dim >= 2 && dim <= 3");
+    verify(angle > 0.0 && angle < 360.0, "angle > 0 && angle < 360");
+    verify(nsteps > 0, "nsteps > 0");
 
-    let mesh = make_2d(nsteps, rstep, phi, 1.0, order);
-    write_mfem_file("polar-nc.mesh", &mesh).expect("write mesh");
-    println!("Wrote polar-nc.mesh ({} elements, {} nodes).", mesh.n_elems(), mesh.n_nodes());
+    // `phi = angle * PI / 180` is only needed by the 2-D/3-D generators, which
+    // live behind the unsupported NC output (see the gap list above).
+    gap_exit();
 }
