@@ -25,6 +25,8 @@ use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearInte
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 #[cfg(feature = "parallel")]
 use std::sync::OnceLock;
 
@@ -2608,19 +2610,114 @@ fn curved_boundary_face_geom(
     }
 }
 
+/// Square of the tolerance used to decide whether a transported edge-DOF
+/// position *is* a geometry DOF of the owner element (§ D138).
+///
+/// The geometry slots are ≥ 1·10⁻² apart and a consistent transport (same node
+/// distribution in the boundary and volume geometry elements) rounds at
+/// ≤ 1·10⁻¹⁵, so 1·10⁻¹² sits far from both: it accepts every exact match and
+/// rejects every "nearest slot is a different node" case.
+const CURVED_EDGE_SLOT_TOL2: f64 = 1e-12;
+
+/// Number of boundary-edge DOFs degraded to the straight chord by
+/// [`curved_boundary_edge_geom`] (§ D138).  Process-global because the
+/// function is a free function called from worker threads.
+static CHORD_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Transport one boundary-edge reference point `s` into the volume reference
+/// element through the **straight corner map** of `corner_ref` (the reference
+/// coordinates of the edge's corners, in the edge's own corner order).
+///
+/// `phi` is caller-owned scratch (the `Line2` weights), reused across the edge's
+/// DOFs.
+fn transport_ref_point(corner_ref: &[&[f64]], s: &[f64], phi: &mut [f64]) -> [f64; 2] {
+    let transport = face_geo_elem(ElementType::Line2);
+    transport.eval_basis(s, phi);
+    let mut x = [0.0_f64; 2];
+    for (k, c) in corner_ref.iter().enumerate() {
+        x[0] += phi[k] * c[0];
+        x[1] += phi[k] * c.get(1).copied().unwrap_or(0.0);
+    }
+    x
+}
+
+/// Squared distance from `x` to the nearest geometry slot.  The *distance* is
+/// what the D138 diagnostic reports; the decision uses [`nearest_geom_slot`].
+fn nearest_geom_slot_d2(dof_coords: &[Vec<f64>], x: &[f64; 2]) -> f64 {
+    dof_coords
+        .iter()
+        .map(|c| {
+            let dx = c[0] - x[0];
+            let dy = c.get(1).copied().unwrap_or(0.0) - x[1];
+            dx * dx + dy * dy
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Index of the geometry DOF of the owner element sitting at the transported
+/// reference position `x`, or `None` when the nearest slot is farther than
+/// `tol2` (§ D138).
+fn nearest_geom_slot(dof_coords: &[Vec<f64>], x: &[f64; 2], tol2: f64) -> Option<usize> {
+    let mut best = 0usize;
+    let mut best_d2 = f64::INFINITY;
+    for (k, c) in dof_coords.iter().enumerate() {
+        let dx = c[0] - x[0];
+        let dy = c.get(1).copied().unwrap_or(0.0) - x[1];
+        let d2 = dx * dx + dy * dy;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best = k;
+        }
+    }
+    (best_d2 <= tol2).then_some(best)
+}
+
+/// Physical point on the **straight chord** of a boundary edge at edge
+/// reference coordinate `s` — the corner map of [`transport_ref_point`]
+/// evaluated with the edge's vertex coordinates instead of the volume
+/// element's reference corners.  This is the D138 degrade target: the point is
+/// on the true boundary segment (its chord), never off it.
+fn chord_point(mesh: &dyn MeshTopology, face_nodes: &[u32], s: f64) -> [f64; 3] {
+    let transport = face_geo_elem(ElementType::Line2);
+    let mut phi = vec![0.0_f64; face_nodes.len()];
+    transport.eval_basis(&[s], &mut phi);
+    let mut p = [0.0_f64; 3];
+    for (k, &n) in face_nodes.iter().enumerate() {
+        let c = mesh.node_coords(n);
+        p[0] += phi[k] * c[0];
+        p[1] += phi[k] * c.get(1).copied().unwrap_or(0.0);
+    }
+    p
+}
+
 /// D66: [`FaceGeom`] of a 2-D boundary edge on a **curved** mesh
 /// (`geom_order() >= 2`) — the 2-D counterpart of
 /// [`curved_boundary_face_geom`], and MFEM's `GetBdrElementTransformation` in
 /// 2-D.
 ///
 /// The edge geometry is the boundary *element*'s own order-`q` mapping: the
-/// trace of the volume geometry family on the edge, i.e. `SegPk(q)`
-/// (`H1_SegmentElement(q)`), whose control points are the owner element's
+/// trace of the volume geometry family on the edge, i.e. `H1_SegmentElement(q)`
+/// ([`ref_elem_face`], whose q ≥ 3 form is [`H1SegPk`] — vertices plus the
+/// closed Gauss-Lobatto points), whose control points are the owner element's
 /// geometry nodes that lie on the edge.  Each edge dof is transported into the
 /// volume reference element through the straight corner map and resolved to the
 /// nearest geometry slot by position — the identical mechanism
 /// [`curved_boundary_face_geom`] uses in 3-D, so the geometry and the space see
 /// the same boundary transformation.
+///
+/// When no slot matches within [`CURVED_EDGE_SLOT_TOL2`] — the boundary
+/// element's node distribution disagrees with the volume geometry element's,
+/// which is what the equispaced `SegPk`/`TriPk` pair used to cause at q ≥ 3 —
+/// that DOF **degrades to the straight chord** of the edge's two vertices (no
+/// curvature correction) with a one-shot `eprintln!` (§ D138).  The returned
+/// geometry is then either the true curved edge or its chord, both genuine
+/// representations of the same boundary segment; the call never panics for
+/// this reason.
+///
+/// Without it the edge was collapsed to the affine chord of its two vertices
+/// ([`MeshTopology::boundary_face_endpoints`]), so `∫ u·n ds` on a curved edge
+/// used the chord length and the chord tangent while the volume assembly used
+/// the curved mapping.
 ///
 /// Without it the edge was collapsed to the affine chord of its two vertices
 /// ([`MeshTopology::boundary_face_endpoints`]), so `∫ u·n ds` on a curved edge
@@ -2632,7 +2729,22 @@ fn curved_boundary_edge_geom(
     face_nodes: &[u32],
     dim: usize,
 ) -> FaceGeom {
-    use fem_element::lagrange::factory::{QuadQk, SegPk};
+    curved_boundary_edge_geom_with_tol(mesh, f, face_nodes, dim, CURVED_EDGE_SLOT_TOL2)
+}
+
+/// [`curved_boundary_edge_geom`] with the geometry-slot match tolerance
+/// exposed.  Production calls use [`CURVED_EDGE_SLOT_TOL2`]; the tests pass a
+/// negative value to force the chord fallback on every edge DOF (the
+/// consistent element pair below matches every slot exactly, so the fallback
+/// branch is otherwise unreachable — which is the point of the fix).
+fn curved_boundary_edge_geom_with_tol(
+    mesh: &dyn MeshTopology,
+    f: u32,
+    face_nodes: &[u32],
+    dim: usize,
+    slot_tol2: f64,
+) -> FaceGeom {
+    use fem_element::lagrange::factory::QuadQk;
 
     let q = mesh.geom_order() as usize;
     let owner = face_owner(mesh, face_nodes).unwrap_or_else(|| {
@@ -2640,11 +2752,15 @@ fn curved_boundary_edge_geom(
     });
     let elem_type = mesh.element_type(owner);
 
-    // The owner's geometry element: the same factory `set_curvature` used to
-    // lay out the geometry node list.
+    // The owner's geometry element: the **same** one `Mesh::set_curvature` (and
+    // `Mesh::element_jacobian`, see [`geo_ref_elem`], D85) used to lay out the
+    // geometry node list, so `geom_vol_coords[k]` really is the reference
+    // position of `geometry_nodes(owner)[k]`.  Triangles are interpreted with
+    // `H1TriPk` (Gauss-Lobatto, MFEM's H1 layout) — the equispaced `TriPk`
+    // agrees only up to q = 2 and was the D138 mismatch.
     let geom_vol: Box<dyn ReferenceElement> = match elem_type {
         ElementType::Quad4 => Box::new(QuadQk::new(q)),
-        ElementType::Tri3 => Box::new(TriPk::new(q)),
+        ElementType::Tri3 => Box::new(fem_element::lagrange::H1TriPk::new(q)),
         other => panic!(
             "curved_boundary_edge_geom: unsupported curved owner element {other:?} (edge {f})"
         ),
@@ -2659,7 +2775,7 @@ fn curved_boundary_edge_geom(
         gn.len(),
         match elem_type {
             ElementType::Quad4 => "QuadQk",
-            _ => "TriPk",
+            _ => "H1TriPk",
         },
         geom_vol_coords.len(),
     );
@@ -2676,47 +2792,52 @@ fn curved_boundary_edge_geom(
     }
 
     // Edge geometry element of the same order — MFEM's boundary element
-    // (`H1_SegmentElement(q)`), on `[0,1]` like `face_geo_elem(Line2)`.
-    let face_geo = SegPk::new(q);
+    // (`H1_SegmentElement(q)`): the **trace of the volume geometry element** on
+    // the edge, taken from [`ref_elem_face`] so it carries the same node
+    // positions (vertices → the closed Gauss-Lobatto points).  Using the
+    // equispaced `SegPk` here made the transported edge dof positions below
+    // land *between* the volume element's geometry slots at q >= 3 (D138).
+    let face_geo = ref_elem_face(ElementType::Line2, q as u8);
     let face_coords = face_geo.dof_coords();
 
     // Control points: transport every edge dof position into the volume
     // reference element through the straight corner map and resolve it to the
-    // nearest geometry slot (distinct slots are >= 1e-2 apart, the map rounds
-    // at <= 1e-15 — the same tolerances as the 3-D path).
-    let transport = face_geo_elem(ElementType::Line2);
+    // nearest geometry slot.  A consistent element pair (the volume geometry
+    // element and its own boundary trace, both Gauss-Lobatto at q >= 3) lands
+    // on the exact float slot, so the lookup succeeds bit-for-bit; anything
+    // else degrades to the chord below (§ D138).
     let mut phi = vec![0.0_f64; face_nodes.len()];
     let mut pts = Vec::with_capacity(face_coords.len());
     for fc in face_coords.iter() {
-        transport.eval_basis(fc, &mut phi);
-        let mut x = [0.0_f64; 2];
-        for (k, c) in corner_ref.iter().enumerate() {
-            x[0] += phi[k] * c[0];
-            x[1] += phi[k] * c.get(1).copied().unwrap_or(0.0);
+        let x = transport_ref_point(&corner_ref, fc, &mut phi);
+        if let Some(best) = nearest_geom_slot(&geom_vol_coords, &x, slot_tol2) {
+            let c = mesh.geom_coords_of(gn[best]);
+            pts.push([c[0], c[1], 0.0]);
+            continue;
         }
-        let mut best = 0usize;
-        let mut best_d2 = f64::INFINITY;
-        for (k, c) in geom_vol_coords.iter().enumerate() {
-            let dx = c[0] - x[0];
-            let dy = c.get(1).copied().unwrap_or(0.0) - x[1];
-            let d2 = dx * dx + dy * dy;
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best = k;
-            }
+        // D138 degrade: the transport landed on no geometry slot — the edge
+        // element's node distribution is not the one the volume geometry
+        // element used.  Fall back to the straight chord for this DOF: the
+        // same corner map evaluated with the edge's *vertex coordinates*
+        // (physical frame), so the DOF still sits on the true boundary edge
+        // (its chord) instead of aborting the whole run.
+        let n_done = CHORD_FALLBACKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if n_done == 1 || n_done % 10000 == 0 {
+            let best_d2 = nearest_geom_slot_d2(&geom_vol_coords, &x);
+            eprintln!(
+                "fem-assembly: curved_boundary_edge_geom: no geometry dof of element {owner} \
+                 at {x:?} (edge {f}, dof {fc:?}, nearest distance {:.3e}, tolerance {:.1e}) — \
+                 using the straight chord for this dof; the degree-{q} boundary geometry is not \
+                 representable with this element pair ({n_done} such dofs so far)",
+                best_d2.sqrt(),
+                slot_tol2.abs().sqrt(),
+            );
         }
-        assert!(
-            best_d2 < 1e-20,
-            "curved_boundary_edge_geom: no geometry dof of element {owner} at {x:?} \
-             (edge {f} dof {fc:?}, nearest distance {:.3e})",
-            best_d2.sqrt()
-        );
-        let c = mesh.geom_coords_of(gn[best]);
-        pts.push([c[0], c[1], 0.0]);
+        pts.push(chord_point(mesh, face_nodes, fc[0]));
     }
 
     FaceGeom {
-        geo: Box::new(face_geo),
+        geo: face_geo,
         pts,
         dim,
     }
@@ -3908,6 +4029,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `∫_Γ 1 ds` over boundary tag 1 of a 2-D mesh, through a P1 H¹ space
+    /// (face DOFs = the edge's two vertex nodes).
+    fn boundary_length_2d(mesh: &Mesh<2>) -> f64 {
+        let space = H1Space::new(mesh.clone(), 1);
+        let face_dofs = |f: u32| mesh.face_nodes(f).to_vec();
+        Assembler::assemble_boundary_linear(
+            space.n_dofs(),
+            mesh,
+            &face_dofs,
+            1,
+            &[&crate::standard::NeumannIntegrator::new(|_x: &[f64], _n: &[f64]| 1.0)],
+            &[1],
+            16,
+        )
+        .iter()
+        .sum()
+    }
+
+    /// D138 (root cause): the boundary edge of an order-3 curved-geometry quad
+    /// mesh must be mapped with the **volume element's own trace element**
+    /// (`ref_elem_face(Line2, 3)` → [`H1SegPk`], closed Gauss-Lobatto nodes),
+    /// not with the equispaced `SegPk(3)`.  `SegPk`'s `1/3, 2/3` positions,
+    /// transported into the volume reference element, land `5.694e-2` away from
+    /// every `QuadQk(3)` geometry slot — the old `assert!(best_d2 < 1e-20)`
+    /// aborted every rank of `mfem_pex27_parallel_robin_bc`.
+    ///
+    /// On this *flat* fixture the curved trace and the chord agree, so the
+    /// value alone does not discriminate; the test pins (a) the trace node
+    /// positions, (b) that no chord fallback is needed, and (c) that the
+    /// boundary measure is exact instead of an abort.
+    #[test]
+    fn d138_q3_edge_geometry_uses_the_volume_trace_nodes() {
+        let _serial = D138_CTR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
+        mesh.set_curvature(3);
+        assert_eq!(mesh.geom_order(), 3);
+
+        let coords = ref_elem_face(ElementType::Line2, 3).dof_coords();
+        assert_eq!(coords.len(), 4);
+        assert!((coords[0][0] - 0.0).abs() < 1e-15, "v0 at {:?}", coords[0]);
+        assert!((coords[1][0] - 1.0).abs() < 1e-15, "v1 at {:?}", coords[1]);
+        let gll = fem_element::quadrature::gauss_lobatto_arbitrary(4).0;
+        for i in 0..2 {
+            let want = 0.5 * (gll[i + 1] + 1.0);
+            assert!(
+                (coords[2 + i][0] - want).abs() < 1e-12,
+                "interior node {i} at {:?}, expected Gauss-Lobatto {want}",
+                coords[2 + i]
+            );
+            // and *not* the equispaced point (that was the bug)
+            assert!((coords[2 + i][0] - (i as f64 + 1.0) / 3.0).abs() > 1e-3);
+        }
+
+        let before = CHORD_FALLBACKS.load(Ordering::Relaxed);
+        let length = boundary_length_2d(&mesh);
+        assert_eq!(
+            CHORD_FALLBACKS.load(Ordering::Relaxed),
+            before,
+            "a consistent q = 3 trace must not need the chord fallback"
+        );
+        assert!((length - 1.0).abs() < 1e-14, "boundary length {length}");
+    }
+
+    /// D138 (degrade): when a transported edge DOF genuinely matches no
+    /// geometry slot, the call must fall back to the straight chord and report
+    /// it instead of panicking.
+    ///
+    /// Serializes the tests that observe or perturb the process-global
+    /// [`CHORD_FALLBACKS`] counter.  `d138_chord_fallback_instead_of_panic`
+    /// deliberately forces fallbacks, so without this lock its concurrent
+    /// increments make `d138_q3_edge_geometry_uses_the_volume_trace_nodes`'s
+    /// "a consistent trace must not fall back" equality non-deterministic
+    /// under `cargo test`'s parallel harness.
+    static D138_CTR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The consistent element pair of the fix above matches every slot exactly,
+    /// so the branch is unreachable from a consistent mesh — the tolerance is
+    /// therefore injected (`curved_boundary_edge_geom_with_tol`) and a negative
+    /// value forces the fallback on every edge DOF.  The assertions check the
+    /// *geometry* of the degrade: the corner DOFs stay the shared vertices and
+    /// every control point lies on the chord, i.e. the result is always a
+    /// genuine representation of the same boundary segment.
+    #[test]
+    fn d138_chord_fallback_instead_of_panic() {
+        let _serial = D138_CTR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = Mesh::<2>::make_cartesian_2d(1, 1, 1.0, 1.0);
+        mesh.set_curvature(3);
+        let nodes: Vec<u32> = mesh.element_nodes(0).to_vec();
+        let (n0, n1) = (nodes[0], nodes[1]);
+
+        let before = CHORD_FALLBACKS.load(Ordering::Relaxed);
+        let g = curved_boundary_edge_geom_with_tol(&mesh, 0, &[n0, n1], 2, -1.0);
+        let after = CHORD_FALLBACKS.load(Ordering::Relaxed);
+        assert!(
+            after >= before + 2,
+            "the forced-tolerance fixture must degrade the interior DOFs \
+             (before {before}, after {after})"
+        );
+
+        assert_eq!(g.pts.len(), 4, "q = 3 edge geometry has 4 control points");
+        let p0 = mesh.node_coords(n0);
+        let p1 = mesh.node_coords(n1);
+        // The two corner DOFs stay the shared vertices; the degraded interior
+        // DOFs must lie on the chord between them — no point outside the
+        // boundary segment.
+        assert!(
+            (g.pts[0][0] - p0[0]).abs() < 1e-12
+                && (g.pts[0][1] - p0[1]).abs() < 1e-12
+                && (g.pts[1][0] - p1[0]).abs() < 1e-12
+                && (g.pts[1][1] - p1[1]).abs() < 1e-12,
+            "corner DOFs moved: {:?} / {:?} for vertices {p0:?} / {p1:?}",
+            g.pts[0],
+            g.pts[1]
+        );
+        let d = [p1[0] - p0[0], p1[1] - p0[1]];
+        for p in g.pts.iter() {
+            let q = [p[0] - p0[0], p[1] - p0[1]];
+            let cross = d[0] * q[1] - d[1] * q[0];
+            let scale = d[0].hypot(d[1]) * q[0].hypot(q[1]).max(1e-30);
+            assert!(
+                cross.abs() / scale < 1e-12,
+                "fallback point {p:?} is off the chord ({p0:?} → {p1:?})"
+            );
+            let t = (q[0] * d[0] + q[1] * d[1]) / (d[0] * d[0] + d[1] * d[1]);
+            assert!((-1e-12..=1.0 + 1e-12).contains(&t), "point {p:?} at t = {t}");
+        }
+    }
+
+    /// D138 decision: the slot lookup accepts an exact slot and rejects the
+    /// historical mismatch.  `(2/3, 1)` is exactly the transported position the
+    /// equispaced `SegPk(3)` produced for a `QuadQk(3)` owner; the nearest
+    /// Gauss-Lobatto slot is `0.7236...`, `5.694e-2` away — the distance the
+    /// pex27 abort reported.
+    #[test]
+    fn d138_slot_lookup_rejects_the_equispaced_position() {
+        let coords = fem_element::lagrange::factory::QuadQk::new(3).dof_coords();
+        let gll_interior = 0.5 * (fem_element::quadrature::gauss_lobatto_arbitrary(4).0[1] + 1.0);
+        let exact = [gll_interior, 1.0];
+        let found = nearest_geom_slot(&coords, &exact, CURVED_EDGE_SLOT_TOL2)
+            .expect("the Gauss-Lobatto point must resolve to a geometry slot");
+        assert!(nearest_geom_slot_d2(&coords, &exact) < CURVED_EDGE_SLOT_TOL2);
+        assert!(
+            (coords[found][0] - exact[0]).abs() < 1e-14
+                && (coords[found][1] - exact[1]).abs() < 1e-14,
+            "resolved slot {found} = {:?}, expected {exact:?}",
+            coords[found]
+        );
+        let equispaced = [2.0 / 3.0, 1.0];
+        assert_eq!(nearest_geom_slot(&coords, &equispaced, CURVED_EDGE_SLOT_TOL2), None);
+        let d = nearest_geom_slot_d2(&coords, &equispaced).sqrt();
+        assert!(
+            (d - 5.694e-2).abs() < 5e-5,
+            "equispaced-to-Gauss-Lobatto distance {d:.3e}, expected ~5.694e-2 (D138)"
+        );
     }
 
 }
