@@ -7,15 +7,17 @@
 //! Port notes (vs C++), scope of this port:
 //! - Serial, full (LEGACY) assembly, quad (2D) and hex (3D) meshes with a
 //!   Gauss-Lobatto Qk nodal geometry space.
-//! - Metric ids: 2D {1,2,7,9,14,22,50,55,56,58,77}; 3D {301,302,303,304,315,
+//! - Metric ids: 2D {1,2,7,9,14,22,50,55,56,58,77,94}; 3D {301,302,303,304,315,
 //!   316,318,321,323,360}. Other ids known to the C++ miniapp are rejected
 //!   with an explicit "not available in the Rust port" message.
 //! - Target ids 1/2/3 (analytic ideal-shape) and the discrete-adaptivity ids
 //!   5 (discrete size), 6 (size + aspect ratio, 2D), 7 (aspect ratio, 3D) and
 //!   8 (size + orientation, 2D), with the `UpdateTargetSpecification` field
 //!   remap onto the moving mesh through `AdvectorCG` (`-ae 0`) or
-//!   `InterpolatorFP` (`-ae 1`; experimental: the findpoints kernel is a Newton-inversion
-//!   replacement for FindPointsGSLIB, see `TmopRemapEvaluator`). Target id 4
+//!   `InterpolatorFP` (`-ae 1`; the findpoints kernel is a Newton-inversion
+//!   replacement for FindPointsGSLIB, see `TmopRemapEvaluator`; query points
+//!   that leave the initial mesh get `FindPointsGSLIB::default_interp_value`
+//!   0.0, as in the C++). Target id 4
 //!   (analytic adaptivity) and the hr-adaptivity ids 9-11 are not ported.
 //! - Limiting (`-lc`, `TMOP_QuadraticLimiter`, uniform distance), adaptive
 //!   limiting (`-alc`, two `adapt_lim_fun`/`adapt_lim_fun2` fields on the
@@ -34,8 +36,8 @@
 //!   cargo run --release --example mesh_optimizer -- -m square01.mesh -o 2 -rs 2 -mid 2 -tid 1 -ni 200 -bnd -qt 1 -qo 8 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m jagged.mesh -o 2 -mid 22 -tid 1 -ni 50 -li 50 -qo 4 -no-vis
 //!   cargo run --release --example mesh_optimizer -- -m icf.mesh -o 1 -mid 1 -tid 1 -lc 0.02 -nor -no-vis
-//!   cargo run --release --example mesh_optimizer -- -m data/square01.mesh -o 2 -rs 2 -mid 2 -tid 5 -ni 50 -qo 4 -nor -no-vis
-//!     (the C++ samples use `-mid 94`, whose metric is not in the id list above)
+//!   cargo run --release --example mesh_optimizer -- -m data/square01.mesh -o 2 -rs 2 -mid 94 -tid 5 -ni 50 -qo 4 -nor -no-vis
+//!     (`-mid 94` = `mu_2 + 1.5 mu_56`, the metric the C++ samples use)
 //!   cargo run --release --example mesh_optimizer -- -m data/square01.mesh -o 2 -rs 1 -mid 2 -tid 1 -ni 50 -qo 5 -nor -vl 1 -alc 1.0 -no-vis
 //!     (the C++ sample mesh `stretched2D.mesh` is not part of this repo's
 //!     `data/` set)
@@ -379,9 +381,11 @@ fn run<M: MeshTopology>(mesh: M, order: u8, dim: usize, a: &Args) {
     }
 
     // Indicator space for the discrete targets and adaptive limiting (MFEM
-    // ind_fec/ind_fes: order 1 for target ids 5-8, the mesh order otherwise).
+    // `ind_fec_order = (target_id >= 5 && target_id <= 8 && !fdscheme) ?
+    // 1 : mesh_poly_deg`).
     let n_scalar = dm.n_dofs;
-    let ind_fec_order: u8 = if (5..=8).contains(&a.target_id) { 1 } else { order };
+    let ind_fec_order: u8 =
+        if (5..=8).contains(&a.target_id) && !a.fdscheme { 1 } else { order };
     let dm_ind = DofManager::new(mesh, ind_fec_order);
     let n_ind = dm_ind.n_dofs;
     let ind_element_dofs: std::rc::Rc<Vec<Vec<usize>>> = std::rc::Rc::new(

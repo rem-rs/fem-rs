@@ -599,6 +599,89 @@ impl TmopQualityMetric for TmopMetric058 {
     }
 }
 
+/// TMOP_Metric_094: balanced 2D shape+size combo, `mu_2 + 1.5 mu_56`
+/// (MFEM `TMOP_Metric_094 : public TMOP_Combo_QualityMetric`, `tmop.hpp`).
+///
+/// The C++ constructor is `AddQualityMetric(new TMOP_Metric_002, 1.0)` +
+/// `AddQualityMetric(new TMOP_Metric_056, 1.5)`, and the combo's `EvalW` /
+/// `EvalP` / `AssembleH` are the weighted sums of the parts
+/// (`TMOP_Combo_QualityMetric::*`, `tmop.cpp`). `SetTargetJacobian` broadcasts
+/// to both parts, which for these two stateless metrics is a no-op here since
+/// the callers apply the target Jacobian to `Jpt` before calling.
+///
+/// Note the driver-level `-bec` (``TMOP_Combo_QualityMetric::
+/// ComputeBalancedWeights``) is *not* applied by default, so the weights stay
+/// `(1.0, 1.5)` (`miniapps/meshing/mesh-optimizer.cpp`: `bal_expl_combo =
+/// false`).
+#[derive(Debug, Clone, Copy)]
+pub struct TmopMetric094 {
+    /// `sh_metric` (weight 1.0).
+    sh: TmopMetric002,
+    /// `sz_metric` (weight 1.5).
+    sz: TmopMetric056,
+}
+
+impl Default for TmopMetric094 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TmopMetric094 {
+    /// MFEM `TMOP_Metric_094::TMOP_Metric_094`: `mu_2 + lambda mu_56` with
+    /// `lambda = 1.5` ("1 <= lambda <= 2 should produce best asymptotic
+    /// balance").
+    pub const SZ_WEIGHT: f64 = 1.5;
+    /// Weight of `mu_2` (`AddQualityMetric(sh_metric, 1.0)`).
+    pub const SH_WEIGHT: f64 = 1.0;
+
+    pub fn new() -> Self {
+        Self {
+            sh: TmopMetric002,
+            sz: TmopMetric056,
+        }
+    }
+}
+
+impl TmopQualityMetric for TmopMetric094 {
+    fn eval_w(&self, jpt: &[[f64; 2]; 2]) -> f64 {
+        Self::SH_WEIGHT * self.sh.eval_w(jpt) + Self::SZ_WEIGHT * self.sz.eval_w(jpt)
+    }
+
+    fn eval_w_matrix_form(&self, jpt: &[[f64; 2]; 2]) -> f64 {
+        Self::SH_WEIGHT * self.sh.eval_w_matrix_form(jpt)
+            + Self::SZ_WEIGHT * self.sz.eval_w_matrix_form(jpt)
+    }
+
+    fn eval_p(&self, jpt: &[[f64; 2]; 2], p: &mut [[f64; 2]; 2]) {
+        let mut pt = [[0.0_f64; 2]; 2];
+        self.sh.eval_p(jpt, &mut pt);
+        for r in 0..2 {
+            for c in 0..2 {
+                p[r][c] = Self::SH_WEIGHT * pt[r][c];
+            }
+        }
+        self.sz.eval_p(jpt, &mut pt);
+        for r in 0..2 {
+            for c in 0..2 {
+                p[r][c] += Self::SZ_WEIGHT * pt[r][c];
+            }
+        }
+    }
+
+    fn assemble_h(&self, jpt: &[[f64; 2]; 2], ds: &[[f64; 2]], weight: f64, a: &mut [f64]) {
+        // C++ combo: `AssembleH(Jpt, DS, weight*wt, At); A += At;` — both parts
+        // accumulate into the same matrix in fem-rs, so the weights fold into
+        // the single `weight` argument.
+        self.sh.assemble_h(jpt, ds, weight * Self::SH_WEIGHT, a);
+        self.sz.assemble_h(jpt, ds, weight * Self::SZ_WEIGHT, a);
+    }
+
+    fn id(&self) -> i32 {
+        94
+    }
+}
+
 /// TMOP_Metric_077: W = 0.5 (det(J)² + 1/det(J)²) - 1 (2D barrier size, polyconvex)
 #[derive(Debug, Clone, Copy)]
 pub struct TmopMetric077;

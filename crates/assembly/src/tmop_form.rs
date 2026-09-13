@@ -38,7 +38,8 @@ use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, SolverConfig};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::tmop::metrics::{
     TmopMetric001, TmopMetric002, TmopMetric007, TmopMetric009, TmopMetric014, TmopMetric022,
-    TmopMetric050, TmopMetric055, TmopMetric056, TmopMetric058, TmopMetric077, TmopMetric301,
+    TmopMetric050, TmopMetric055, TmopMetric056, TmopMetric058, TmopMetric077, TmopMetric094,
+    TmopMetric301,
     TmopMetric302, TmopMetric303, TmopMetric304, TmopMetric315, TmopMetric316, TmopMetric318,
     TmopMetric321, TmopMetric323, TmopMetric360, TmopQualityMetric, TmopQualityMetric3D,
 };
@@ -180,6 +181,7 @@ pub fn metric_from_id_2d(id: i32, min_det: &SharedMinDet) -> Option<TmopMetric> 
         56 => TmopMetric::D2(Box::new(TmopMetric056)),
         58 => TmopMetric::D2(Box::new(TmopMetric058)),
         77 => TmopMetric::D2(Box::new(TmopMetric077)),
+        94 => TmopMetric::D2(Box::new(TmopMetric094::new())),
         _ => return None,
     };
     Some(m)
@@ -461,6 +463,12 @@ pub fn count_elements_per_dof(topo: &dyn MeshTopology, dm: &DofManager) -> Vec<f
 
 // ─── Field remap evaluators (fem/tmop_tools.cpp) ─────────────────────────────
 
+/// `FindPointsGSLIB::default_interp_value` (`fem/gslib.hpp`, default 0.0): the
+/// value written for query points the finder does not locate. Consumed by
+/// `InterpolatorFP` (C++ `InterpolatorFP::ComputeAtNewPosition` →
+/// `finder->Interpolate`).
+const DEFAULT_INTERP_VALUE: f64 = 0.0;
+
 /// The evaluator kind used to remap discrete fields onto the moving mesh
 /// (mesh-optimizer `-ae`): `AdvectorCG` (0, the default) or `InterpolatorFP`
 /// (1, MFEM_USE_GSLIB path).
@@ -485,9 +493,11 @@ struct RemapSpaceElem {
 /// remaps a packed byNODES multi-component field from the initial mesh
 /// positions (`nodes0`) to new mesh positions.
 ///
-/// Like the C++ evaluators, the state is *incremental*: after every
+/// Like C++ `AdvectorCG`, the advection state is *incremental*: after every
 /// `compute_at_new_position` the internal `nodes0`/`field0` are updated, so
 /// consecutive remaps transport the field through the increment only.
+/// `InterpolatorFP` keeps `nodes0`/`field0` at the initial state (see
+/// `compute_at_new_position`).
 pub struct TmopRemapEvaluator {
     kind: TmopRemapKind,
     dim: usize,
@@ -644,10 +654,18 @@ impl TmopRemapEvaluator {
                 self.interpolator(new_mesh_nodes, new_field);
             }
         }
-        // Without this, the next remap would start from the initial mesh, i.e.,
-        // every consecutive remap would be more expensive (C++ comment).
-        self.field0.copy_from_slice(new_field);
-        self.nodes0.copy_from_slice(new_mesh_nodes);
+        // C++ `AdvectorCG::ComputeAtNewPosition` updates nodes0/field0 so that
+        // the next remap starts from the previous state ("Without this, the next
+        // remap would start from the initial field/mesh, i.e., every consecutive
+        // remap would be more expensive" -- `tmop_tools.cpp`).
+        // `InterpolatorFP::ComputeAtNewPosition` does NOT: its `field0_gf` and
+        // the GSLIB finder are pinned to the geometry passed to
+        // `SetInitialField`, so every extrapolation interpolates the *initial*
+        // field on the *initial* mesh.
+        if self.kind == TmopRemapKind::AdvectorCG {
+            self.field0.copy_from_slice(new_field);
+            self.nodes0.copy_from_slice(new_mesh_nodes);
+        }
     }
 
     /// Minimum MFEM `Mesh::GetElementSize(i)` over the mesh at `nodes`
@@ -924,11 +942,20 @@ impl TmopRemapEvaluator {
         };
         // FindPointsGSLIB equivalent: locate the element containing each query
         // point on the initial (nodes0) geometry by Newton inversion, then
-        // interpolate the initial field there.
+        // interpolate the initial field there. Points that are not found get
+        // `FindPointsGSLIB::default_interp_value` (0.0, `gslib.cpp`), which is
+        // what MFEM's `InterpolatorFP` writes for query points that fall outside
+        // the finder's mesh. (C++ additionally accepts points up to
+        // `bdr_tol = 1e-8` squared distance outside the curvilinear boundary and
+        // hashes them via the `rel_bbox_el = 0.1` expanded AABB; fem-rs decides
+        // "not found" from the element's reference domain, so only points that
+        // leave the initial domain by more than a rounding error are zeroed.)
         for (i, p) in queries.iter().enumerate() {
-            let (e, xi) = self
-                .find_point(p)
-                .unwrap_or_else(|| panic!("InterpolatorFP: point {:?} not found", p));
+            let found = self.find_point(p);
+            for c in 0..self.ncomp {
+                new_field[c * self.n_field + i] = DEFAULT_INTERP_VALUE;
+            }
+            let Some((e, xi)) = found else { continue };
             let fel = &self.elems_field[e];
             let mut sh = vec![0.0_f64; fel.dofs.len()];
             fel.re.eval_basis(&xi, &mut sh);
@@ -944,16 +971,16 @@ impl TmopRemapEvaluator {
 
     /// FindPointsGSLIB replacement: Newton inversion of the isoparametric map
     /// of every candidate element (bounding-box prefilter). Returns the
-    /// element index and reference coordinates. Query points outside the
-    /// initial mesh (possible when the optimized mesh bulges past its initial
-    /// bounding box) are extrapolated from the best-converged candidate.
+    /// element index and reference coordinates *only* when the query point lies
+    /// in that element's reference domain; `None` means "not found" (C++
+    /// `FindPointsGSLIB` then writes `default_interp_value`, see
+    /// [`interpolator`](Self::interpolator)).
     fn find_point(&self, p: &[f64]) -> Option<(usize, Vec<f64>)> {
         let dim = self.dim;
         let tol = 1.0e-10;
-        let mut best: Option<(f64, usize, Vec<f64>)> = None;
-        // First pass with the bounding-box prefilter; query points outside the
-        // initial mesh bounding box (optimized mesh bulging past its starting
-        // shape) retry the full element list and are extrapolated.
+        // First pass with the bounding-box prefilter; points outside every
+        // element box (the optimized mesh bulging past its initial shape) retry
+        // the full element list.
         for use_boxes in [true, false] {
             'elements: for (e, nel) in self.elems_nodal.iter().enumerate() {
                 if use_boxes {
@@ -963,8 +990,6 @@ impl TmopRemapEvaluator {
                             continue 'elements;
                         }
                     }
-                } else if best.is_some() {
-                    break;
                 }
                 let nd = nel.dofs.len();
                 let mut xi: Vec<f64> = vec![0.5; dim];
@@ -982,21 +1007,26 @@ impl TmopRemapEvaluator {
                     }
                     let res = f[..dim].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
                     if res < 1.0e-12 {
-                        let inside = xi.iter().enumerate().all(|(d, v)| {
-                            let lo = if nel.re.dof_coords()[0][d] < -0.25 { -1.0 } else { 0.0 };
-                            let hi = lo + 2.0;
-                            *v >= lo - tol && *v <= hi + tol
-                        });
+                        // Accept only if the converged reference coordinates
+                        // are inside the element's own reference domain. The
+                        // Newton map is invertible but not injective in
+                        // physical-visibility terms: a point one element-size
+                        // outside a [0,1]^d element still has an exact
+                        // pre-image (e.g. xi = 2), and accepting it silently
+                        // extrapolates the field by whole element widths.
+                        let dc = nel.re.dof_coords();
+                        let mut lo = [0.0_f64; 3];
+                        let mut hi = [0.0_f64; 3];
+                        for d in 0..dim {
+                            lo[d] = dc.iter().map(|c| c[d]).fold(f64::INFINITY, f64::min);
+                            hi[d] = dc.iter().map(|c| c[d]).fold(f64::NEG_INFINITY, f64::max);
+                        }
+                        let inside = (0..dim)
+                            .all(|d| xi[d] >= lo[d] - tol && xi[d] <= hi[d] + tol);
                         if inside {
                             return Some((e, xi));
                         }
-                        if best.as_ref().map_or(true, |(r, _, _)| res < *r) {
-                            best = Some((res, e, xi.clone()));
-                        }
                         continue 'elements;
-                    }
-                    if best.as_ref().map_or(true, |(r, _, _)| res < *r) {
-                        best = Some((res, e, xi.clone()));
                     }
                     nel.re.eval_grad_basis(&xi, &mut dsh);
                     let mut jpr = [[0.0_f64; 3]; 3];
@@ -1023,11 +1053,8 @@ impl TmopRemapEvaluator {
                     }
                 }
             }
-            if best.is_some() {
-                break;
-            }
         }
-        best.map(|(_, e, xi)| (e, xi))
+        None
     }
 }
 
@@ -5088,7 +5115,10 @@ mod tests {
     }
 
     /// `InterpolatorFP` (findpoints equivalent): direct interpolation of the
-    /// initial linear field at the new node positions.
+    /// initial linear field at the new node positions. Query points that leave
+    /// the initial mesh are "not found" and get
+    /// `FindPointsGSLIB::default_interp_value` (0.0) -- the shifted 2x2 mesh
+    /// puts the dofs on the low edge and the high column outside the domain.
     #[test]
     fn interpolator_fp_linear_field() {
         let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
@@ -5124,12 +5154,69 @@ mod tests {
         ev.compute_at_new_position(&new_nodes, &mut nf);
         for d in 0..n1 {
             let c = dm1.dof_coord(d as u32);
-            let want = 2.0 * (c[0] + 0.03) - 3.0 * (c[1] - 0.02) + 1.0;
+            let (px, py) = (c[0] + 0.03, c[1] - 0.02);
+            // Inside the unit square (with room to spare): the linear field is
+            // reproduced at the new position.
+            let want = if px > 0.0 && px < 1.0 && py > 0.0 && py < 1.0 {
+                2.0 * px - 3.0 * py + 1.0
+            } else {
+                0.0
+            };
             assert!(
                 (nf[d] - want).abs() < 1e-11,
-                "dof {d}: {} vs {want}",
+                "dof {d} at ({px},{py}): {} vs {want}",
                 nf[d]
             );
+        }
+    }
+
+    /// `InterpolatorFP` identity remap: `ComputeAtNewPosition(x0)` (the
+    /// `ProcessNewState(x = 0)` solver start) must reproduce the initial field
+    /// bit-for-bit. In C++ the GSLIB finder is set up on the initial geometry
+    /// and `field0_gf` lives on it, so querying the *initial* node positions
+    /// returns the initial dof values exactly. This holds for both the
+    /// same-FE-space path (field order == mesh order) and the
+    /// `GetNodePositions` path (mixed orders, the mesh-optimizer tid-5 case:
+    /// mesh order 2, indicator order 1).
+    #[test]
+    fn interpolator_fp_identity_remap() {
+        for field_order in [1u8, 2u8] {
+            let mesh: Mesh<2> = Mesh::make_cartesian_2d(2, 2, 1.0, 1.0);
+            let order = 2u8;
+            let dm = DofManager::new(&mesh, order);
+            let dm1 = DofManager::new(&mesh, field_order);
+            let topo: &dyn MeshTopology = &mesh;
+            let x0 = linear_mesh_positions(topo, &dm, order, 2);
+            let n1 = dm1.n_dofs;
+            // A nonlinear (but FE-representable) size field like ConstructSizeGF.
+            let field: Vec<f64> = (0..n1)
+                .map(|d| {
+                    let c = dm1.dof_coord(d as u32);
+                    0.1 + 0.9 * (std::f64::consts::PI * c[0]).sin()
+                        * (std::f64::consts::PI * c[1]).sin()
+                })
+                .collect();
+
+            let mut ev = TmopRemapEvaluator::new(
+                TmopRemapKind::InterpolatorFP,
+                topo,
+                &dm,
+                order,
+                &dm1,
+                field_order,
+                0.5,
+            );
+            ev.set_initial_field(&x0, &field);
+            let mut nf = vec![f64::NAN; n1];
+            ev.compute_at_new_position(&x0, &mut nf);
+            for d in 0..n1 {
+                assert!(
+                    (nf[d] - field[d]).abs() < 1e-12,
+                    "field order {field_order}: dof {d}: {} vs {}",
+                    nf[d],
+                    field[d]
+                );
+            }
         }
     }
 
