@@ -6,28 +6,68 @@
 
 ```
 miniapps/
-├── tools/                   ← 对应 miniapps/tools/（**round 30 审计**：11 个可执行里只有
-│                                display-basis/nodal-transfer 属 (b) 类；其余多为
-│                                **(e) 类名不副实**，证据见下与 D129）
-│   ├── tmop_check_metric.rs   ← ⚠️ **不是 C++ 同名程序的移植**：C++ 是 `-mid N`
-│   │                            单 metric 体检（1000 次随机 T 逐槽 EvalW vs
-│   │                            EvalWMatrixForm + dF/ddF 收敛阶），本文件是固定 21 项
-│   │                            自检且**静默忽略 `-mid`**（D129）
-│   ├── tmop_metric_magnitude.rs ← ⚠️ metric zoo 仅 **22/49** id（缺 85/98/322 等），
-│   │                            未知 id `panic!` 而非 C++ 的 `return 3`；输出格式也不同（D129）
-│   ├── gridfunction_bounds.rs ← ⚠️ 两列打印**同一数值**（C++ 第二列是真递归收紧界），
-│   │                            `-nb/-ref/-bt/-rd/-rt` 全忽略（D129）
-│   ├── load-dc.rs             ← ⚠️ C++ 该程序可观察行为只有 GLVis 套接字；本文件
-│   │                            自创 6 行输出（含硬编码 `3 (assumed)`）⇒ 已按审计改标注（D129）
-│   ├── compare-dc.rs          ← ⚠️ 字段遍历用 `HashMap`（C++ `std::map` 字典序 ⇒
-│   │                            顺序逐次不同）、分隔线宽度与多余尾行亦不同（D129）
+├── tools/                   ← 对应 miniapps/tools/（**round 30 审计 → round 32 全部重测处置**：
+│                                30 轮的 (e) 类结论都是枚举 `target/release/examples/*.exe` 得到的
+│                                （陈旧二进制污染）⇒ 32 轮用 `cargo run --release --example`
+│                                在 MFEM 4.10 下逐件重测（11/11 二进制新鲜性已核），四件做到与
+│                                C++ **逐字节相同**，其余改为 `exit(3)` + 缺口清单）
+│   ├── compare-dc.rs          ← ✅ **round 32：与 C++ 逐字节相同**（27 行 `diff` 无输出）。
+│   │                            修前是三重缺陷：字段遍历用 `HashMap`（C++ `std::map` 字典序，
+│   │                            顺序逐次不同）、分隔线 15 个短横（C++ `setw(15+2*len)` 里塞
+│   │                            字面量 `" = "` ⇒ `15+2*len-3` 个）、多打一行 `Compare complete.`；
+│   │                            **还漏了一条功能性失败**：`read_visit_root` 填的
+│   │                            `DcField::values` 是空 vec ⇒ 所有范数打印成 `-0`
+│   │                            （C++ 是 `|pressure_0| = 114.455`）。现用
+│   │                            `load_visit_collection`（真读 `*.000000` 切片）+ `BTreeMap` +
+│   │                            正确的分隔线 + `fmt_g` 6 位有效数字
+│   ├── get_values.rs          ← ✅ **round 32：官方 2-D 样例与 C++ 逐字节相同**
+│   │                            （`-r Example5 -p "0.5 0.5 0.1 0.1" -fn pressure` →
+│   │                            `0.790403`/`0.110318`；`-o <file>` 写文件路径也已核对）。
+│   │                            修前：`data_collection_load.rs:101` 硬编码 `mesh3d` ⇒ 2-D 集合
+│   │                            直接 `MissingMesh`/exit 1（而 C++ 官方样例 Example5 就是 2-D），
+│   │                            且 `-o` 被 `let _ = …` 吞掉。现按 `read_mfem` 分派 `Mesh<2>`/
+│   │                            `Mesh<3>`，实现 `-o`（banner 留 stdout、legend+数据进文件）。
+│   │                            ⚠️ **仍缺**：3-D 集合的 **ND/RT 分量**与 C++ 不符
+│   │                            （hex `velocity` `0.0553179 …` vs C++ `-0.694191 …`；tet 连
+│   │                            pressure 也不同）⇒ 这是 fem-rs 3-D H(div)/H(curl) 求值的
+│   │                            库侧缺口，非 miniapp 问题
+│   ├── load-dc.rs             ← ✅ **round 32：两种档都逐字节相同**（C++ 该程序 stdout 只有
+│   │                            `Options used:` banner + `fields: [ pressure, velocity ]`；
+│   │                            打开可视化而无 GLVis 服务时打 `Connection to localhost:19916
+│   │                            failed.` 并 rc=1 —— 两档均已实测对齐）。修前自创 6 行
+│   │                            （`Collection Name:`/`Space Dimension: 3 (assumed)`/`Field
+│   │                            details:`/`Load complete.`）C++ 从不打印
+│   ├── tmop_check_metric.rs   ← ⚠️ **round 32：改写为 C++ 的 `-mid N` 接口 + 声明式 exit(3)**。
+│   │                            id zoo 已按 C++ 源码**实测枚举**（`grep -E "^ *case [0-9]+:"` =
+│   │                            40 个 **未注释** case；`211/252/311/352` 在 MFEM 源码里是
+│   │                            `// case …` 注释行，**不算**）；未知 id 打印 C++ 原文
+│   │                            `Unknown metric_id: <id>` 并 `exit(3)`（C++ `default:` 就是
+│   │                            `return 3`，已实测 rc=3）。**仍缺**：C++ 走 mesh/FE 空间的
+│   │                            `TMOP_Integrator` + **解析** `AssembleElementVector/Grad` 求
+│   │                            EvalP/AssembleH 收敛阶，而 `fem_mesh::tmop` 只有简化元素能量 +
+│   │                            有限差分梯度/Hessian ⇒ 21/40 id 可算但无真值，故不跑检查、
+│   │                            打印缺口清单后 `exit(3)`（旧的固定 21 项自检是**另一个程序**，
+│   │                            且 2-D 恒报 `0/0`）
+│   ├── tmop_metric_magnitude.rs ← ⚠️ **round 32：id zoo 与出口码对齐 C++，声明式 exit(3)**。
+│   │                            C++ 未注释 case 实测 **25 个**；`fem_mesh::tmop` 缺其中
+│   │                            `85/98/322`（T-metric）与 `11/36/107`（A-metric）⇒ 这些 id
+│   │                            打 C++ 原文 `Unknown metric_id` + rc 3，并在 stderr 说明
+│   │                            "C++ 接受它、只是 fem-rs 没实现"；而 C++ 也不认的 id
+│   │                            （`999`、注释行里的 `211`）则明确注明"C++ 同样不认"。
+│   │                            输出行改用 `fem_solver::fmt_g`（C++ 6 位有效数字）
+│   ├── gridfunction_bounds.rs ← ⚠️ **round 32：改 `exit(3)` + 缺口清单**（旧版两列打印同一个
+│   │                            数值）。C++ 该程序是 **MPI-only**（`Mpi::Init`/`ParMesh`/
+│   │                            `ParGridFunction`/`MPI_Allreduce`，已 grep 源码确认）⇒ 串行
+│   │                            MFEM 编不出来、**无参考数字可测**，以下按源码读出：缺
+│   │                            `EstimateFunctionMinimum/Maximum`（第二列 `-rd/-rt`）、缺真
+│   │                            `GetElementBounds(…, ref)`（fem-rs 的 `get_element_bounds()`
+│   │                            按 `order` 细分且忽略 `ref`）、`-bt`/`-l2`（`H1Space::new`
+│   │                            无 basis type）、`-visit`、GLVis。现完整解析 CLI、打印全部
+│   │                            选项值（不再静默忽略）、`-nb n>1` 真做 `n^dim` 暴力搜索
 │   ├── display_basis.rs       ← (b) 基函数展示 (无 GLVis; H1/ND/RT/L2,
 │   │                            vsize 与 C++ 逐位一致, 32/34 组合;
 │   │                            hex L2 ≥P2 为 fem-rs 缺口; C++ `-no-vis` 只打 4 行 header)
-│   ├── get_values.rs          ← ⚠️ **实测失败**：`-r Example23 -p "0 0 0.5"` →
-│   │                            `MissingMesh`（`data_collection_load.rs:101` 硬编码
-│   │                            `mesh3d`，而 C++ 官方样例 Example5 是 2-D），`-o` 被吞
-│   │                            ⇒ 原"与 C++ 输出逐位一致"无可复现命令（D88/D129）
+│   ├── get_values.rs          ← （round 32 处置见上；旧结论"实测失败"已作废）
 │   └── lor_transfer.rs        ← (b) LOR 传输 (简化 H1+pointwise 版; C++ 默认走
 │                                L2ProjectionGridTransfer 而本文件无参时静默按 pointwise
 │                                跑; `-h1/-l2/-t/-w/-ea/-d` 未实现 ⇒ `panic!` 而非
@@ -164,19 +204,27 @@ miniapps/
 │                                细化参数区间求几何，同一映射差 ~1 ulp/entry）
 │                                仍缺 `refined.mesh`/`sol.gf` + GLVis（步骤
 │                                12–13），`-nn` 仍 exit(3)
-│   ├── nurbs_solenoidal.rs  ← ⚠️ **名不副实（round 30 审计，(e) 类）**：自称
-│   │                            "1:1 port" 但实测走的是 C++ 的 **`-nn`（普通 FE）**
-│   │                            档：dim(R)=33024/16384（C++ 默认 NURBS 档 =
-│   │                            8580/4225）、缺 `Create NURBS fec and ext` 横幅、
-│   │                            缺 `‖div u_h−div u_ex‖` 行（`compute_div_error`
-│   │                            在整个 `crates/` 是 0 命中）、L² 9.5586e-05 vs
-│   │                            C++ 2.08242e-05、算了 `m_gs/s_gs` 却从不使用
-│   │                            ⇒ 重写或 `exit(3)`+缺口清单（D131）
-│   └── nurbs_printfunc.rs   ← ⚠️ **格式未达标（round 30 审计，(e) 类）**：数值
-│                                早已核过（≤1.1e-15），但 C++ vs Rust
-│                                **40/48 行不同**（C++ 6 位有效数字 vs Rust
-│                                round-trip）；改用库里已有的
-│                                `fem_solver::fmt_g` 即逐字节（D131）
+│   ├── nurbs_solenoidal.rs  ← ⚠️ **round 32：头注释不再自称 "1:1 port"，改为声明式
+│   │                            `exit(3)` + 缺口清单**（C++ 4.10 实测参考：
+│   │                            NURBS 默认档 dim(R)=8580/dim(W)=4225、MINRES 335 次、
+│   │                            `‖u_h−u_ex‖=2.08242e-05`、`‖div‖=1.4113e-13`；`-nn` 档
+│   │                            33024/16384、440 次、2.08198e-05、3.55911e-13）。五条缺口：
+│   │                            ① 默认 NURBS 档需要 `NURBS_HDivFECollection`/
+│   │                            `NURBSExtension`/`NURBSFECollection`，fem-rs 没有实现
+│   │                            `FESpace` 的 NURBS 空间（D143）⇒ **exit(3)**；② `-nn`
+│   │                            档虽能解，但右端用 `M·I(u_ex)` 而非 C++ 的
+│   │                            `VectorFEDomainLFIntegrator`（L² 9.55855e-05 vs 2.08198e-05）；
+│   │                            ③ `GridFunction::ComputeDivError` 在 `crates/` 0 命中 ⇒ 该行
+│   │                            以显式 `unavailable` 标记而非省掉；④ `GS(M)/GS(S)` 装配了
+│   │                            但 `MinresSolver::solve` 不收预条件子 ⇒ 迭代数与 C++ 不同；
+│   │                            ⑤ `-vis`/`-d`/VisIt/ParaView 输出缺失。已复刻：CLI、
+│   │                            banner（含 `****` 框）、`-df/-p` 分派、`ref_levels` 公式、
+│   │                            MINRES 容差与 `exsol.mesh`/`sol_u.gf`/`sol_p.gf` 输出
+│   └── nurbs_printfunc.rs   ← ✅ **round 32：48 行与 C++ 逐字节相同**（`diff` 无输出）。
+│                                数值本来就对（≤1.1e-15），差异纯粹是格式：C++ `std::cout`
+│                                默认 `precision(6)`，本文件此前用 Rust 最短往返表示 ⇒
+│                                48 行里 28 行文本不同（`0.005` vs `0.005000000000000001`）；
+│                                改用库里已有的 `fem_solver::fmt_g` 即逐字节（D131）
 ├── meshing/                 ← 对应 miniapps/meshing/（**round 30 审计 → round 31 D126/D132 处置**：
 │                                22 个可执行中 5 个 a/b 类 + 10 个缺失；round 30 判为 (e) 类的 7 件已
 │                                逐件处置。根因（**D126**）= `write_mfem` 边界面回落硬编码 3 节点/
@@ -268,7 +316,10 @@ miniapps/
 ├── autodiff/                ← 对应 miniapps/autodiff/ (seq_example;
 │   └── autodiff_example.rs     pLaplacian 能量 Newton; 依赖
 │                                fem_assembly::ad 双数 AD)
-├── gslib/                   ← 对应 miniapps/gslib/（**round 30 审计 1/7 → round 31 实质 4/7**）
+├── gslib/                   ← 对应 miniapps/gslib/（**round 30 审计 1/7 → round 31 实质 4/7
+│                                → round 32 四个串行件全部与 C++ 4.10 对齐**：findpts 数值
+│                                1e-15、schwarz_ex1 逐位、field-diff 三行逐位、field-interp
+│                                同一目标网格下 `interpolated.gf` 逐字节）
 │   ├── findpts.rs           ← FindPointsGSLIB 找点/插值 (纯 Rust:
 │                                BVH + 等参元 Newton, code 0/1/2 与
 │                                dist² 语义对齐; glibc rand 逐位复现
@@ -309,23 +360,29 @@ miniapps/
 │   │                            附带库层发现：`fem_solver::solve_pcg` 的 `rtol` 作用在
 │   │                            **(B r, r) 平方量**上（等价范数意义 1e-6），而 MFEM 判据是
 │   │                            `sqrt((B r, r))`；改用 `solve_pcg_precond`(linlvo CG) 后逐位对齐
-│   ├── field-diff.rs        ← ✅ **round 31 新增**：两网格两场插值对比 (1:1;
-│   │                            **`Vol diff` 与 C++ 4.10 逐位相同 1.73608**；
-│   │                            `Avg diff` 0.0960922 vs 0.0949062 (+1.2%)；
-│   │                            `Max diff` 2.58236 vs 1.43502 —— 差异已定位量化：
-│   │                            finder1 [9604 inside, 396 border, 0 not-found] vs
-│   │                            finder2 [9599, 396, 5]，**那 5 个近边界点贡献了
-│   │                            12.690817 的差和**（点序 4374/4377/4379/4481/4582，
-│   │                            其中 4481 的 `v2 = 0` 因 locator 报 code 2）⇒ 不是装配/
-│   │                            插值错误，而是 `crates/mesh/src/findpts` 对 0.05% 边际点的
-│   │                            border/newton 分类待收口）
-│   └── field-interp.rs      ← ✅ **round 31 新增**：源网格场插值到目标网格
-│                                (控制台 **4 行与 C++ 逐字相同**；⚠️ 该 miniapp 本身
-│                                **没有任何误差行**，全源码只有那 4 行 + 写文件；
-│                                `interpolated.gf` 写回**仅前 20/169 DOF 对齐**，
-│                                从 DOF 20 起值不同且多重集也不同（max|Δ| = 3.4e-1）
-│                                ⇒ H1 P3 三角形 DOF 编号/写回次序 WIP，**已写入文件头 doc
-│                                而非静默**）
+│   ├── field-diff.rs        ← ✅ **round 32：三行结果与 C++ 4.10 完全相同**（本会话独立复核：
+│   │                            重编 C++ 参考后 `Max diff: 1.43502` / `Avg diff: 0.0949062` /
+│   │                            `Vol diff: 1.73608` 两侧逐位一致）。round 31 的差异
+│   │                            （`Avg` 0.0960922 vs 0.0949062、`Max` 2.58236 vs 1.43502）
+│   │                            根因 = findpts 的候选上限：曲面网格上按几何 padding 放大的
+│   │                            元素 AABB 大量重叠（单点可达 **26+ 个候选**），真正包含该点
+│   │                            的元素排在上限之后 ⇒ 现改为"上限被截断且**有界搜索什么都没
+│   │                            找到**时补扫剩余候选"，已定位点的结果不变（故 round 31 已对
+│   │                            的 `Vol diff` 保持）
+│   └── field-interp.rs      ← ✅ **round 32：同一目标网格下 `interpolated.gf` 与 C++ 4.10
+│                                `**逐字节相同**（双侧 SHA256 同为 `9f39ae2e…`，216 行；
+│                                本会话用显式 `-m2 data/star.mesh` 在两侧实测）。D146 根因 =
+│                                目标求值点取自 `ref_elem(Tri, p)`（DG/L2 族的**等距**
+│                                `TriPk`），而 C++ 的 `tar_fes->GetFE(i)->GetNodes()` 是
+│                                **H¹ 族**（`H1_FECollection` + `GaussLobatto`）—— p≥3 时两族
+│                                不同（1/3,2/3 vs GLL 0.27639,0.72361）⇒ 源场采样点错位。
+│                                现所有 H¹ 元素查表走 `h1_ref_elem`（三角形 → `H1TriPk`；
+│                                `QuadQk` 本就是 GLL）。**默认档仍不同**：`-m2
+│                                data/inline-tri.mesh` 经 `fem-io` 的 INLINE `type=tri` 分支，
+│                                其 quad 切分方向与 MFEM `Make2D` 相反（**D154**）⇒ 目标 P3
+│                                节点集合本身不同，修 D154 前不可能一致（文件头已写明证据与
+│                                替换方案）。`--gfo 1` 且 `-nc != 2` 按 C++ `field-interp.cpp:334`
+│                                的越界索引行为显式拒绝（不静默复刻越界）
 │                                ⚠️ **仍缺 3 件**：`pfindpts`/`schwarz_ex1p`/
 │                                `particles_redist` 需并行 locator 与
 │                                `ParticleSet::Redistribute`（`grep Redistribute crates/` = 0）
@@ -421,7 +478,34 @@ miniapps/
 │   │                              y(4e7)/G/dGdp 1e-4~1e-7 量化一致)
 │   └── adjoint_advection_diffusion.rs ← 串行子集; -fd 1 自洽
 │                                  (伴随 vs 有限差分 5.8e-7/1.2e-7)
-├── toys/                    ← 对应 miniapps/toys/ (5 个已完成)
+├── toys/                    ← 对应 miniapps/toys/ (5 件齐全：automata / life /
+│                                lissajous / mandel / mondrian；**round 32 重测了后三件**)
+│   ├── mandel.rs            ← ⚠️ **round 32 部分修正 + `exit(3)`**：修前是固定 `for iter in
+│   │                            0..5` ⇒ 细化 5 次、写出 **59.6 MB / 1,048,576 单元** 的
+│   │                            `mandel.mesh`。C++ 在 `-no-vis` 下 `(iter+1)%4==0` 就 break
+│   │                            （实测迭代 1024/2254/5884/16006、`mandel.mesh` 926,121 B）。
+│   │                            现循环与打印行（含 `"elements. \n"` 的**尾随空格**）已对齐，
+│   │                            **迭代 1（1024）与 C++ 完全相同**；但 C++ 用的是
+│   │                            `Mesh::GeneralRefinement(refs,-1,nclimit)`（只细化被标记的
+│   │                            四边形、非协调），而 `fem_mesh::amr` 只对 `Tri3` 有
+│   │                            (NC) 局部细化 ⇒ 四边形退回 `refine_uniform`，迭代 2 起
+│   │                            单元数分叉（fem-rs 4096/16384/65536）⇒ 仍写网格但
+│   │                            `exit(3)`（`-vis` 不建套接字；C++ 的 `Continue shaping? -->`
+│   │                            提示保留，stdin EOF 时 break 以免无限细化）
+│   ├── mondrian.rs          ← ⚠️ **round 32 部分修正 + `exit(3)`**：修前固定 `for iter in
+│   │                            0..10` 且每轮全单元 ×4 ⇒ 产出 **1.11 GB / 16,777,216 单元**
+│   │                            的 `mondrian.mesh`。C++ `-no-vis` 在 `(iter+1)%3==0` break
+│   │                            （实测 16/52/145、`mondrian.mesh` 6827 B）。现迭代 1（16）
+│   │                            与打印行完全对齐；迭代 2 起因同一 `GeneralRefinement` 缺口
+│   │                            分叉（fem-rs 64/256）⇒ `exit(3)`
+│   └── lissajous.rs         ← ⚠️ **round 32：改 `exit(3)` + 缺口语明**（旧版静默写两个
+│                                **全 0** 的假文件 `lissajous-v.gf`/`lissajous-h.gf` 与自造
+│                                `Vertical curve sample at …` 行）。C++ 该程序要建
+│                                **2-D 面嵌在 3-D**（`MakeCartesian2D` + `SetCurvature(order,
+│                                true, 3, byVDIM)` + `Transform`），实测写出 `lissajous.mesh`
+│                                29,968 B 与 `lissajous.gf` 4,829 B（H¹ 场 `u = x[2]`）；
+│                                `fem_mesh::Mesh<D>` 的 `sdim == dim`（无嵌入面网格）⇒
+│                                网格与场都造不出、写不出，现在不产出任何文件
 ├── dpg/                     ← 对应 miniapps/dpg/ (真 ultraweak DPG:
 │   ├── dpg_poisson_2d.rs       ComplexDPGWeakForm 复块内核 + 骨架
 │   ├── dpg_acoustics_2d.rs     空间/Hermitian 复 Cholesky;

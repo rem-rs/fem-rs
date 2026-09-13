@@ -1094,6 +1094,149 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
   全建 → **0 error**（14m16s）"作替代证据；C 路在文件补齐后实测该聚合命令 **Finished（0 error）**。
 - **未启动**：D141（并行 DPG）、D92 周期 BC、D142（p 粗化层）、`mg-abs-l1-jacobi` —— 均按"做不完不强做"处理。
 
+## 第三十二轮（round 32）：四路并行 —— `nodes` writer / extrude+hpref / gslib 收口 / tools·toys·nurbs 重测
+
+### 0. 四路交付与本会话的形状
+| 路 | 提交 | 内容 |
+|---|---|---|
+| T1 | `9370e49` | 高阶 **`nodes` 段 writer** 落地 + **D116 几何侧闭环**（tet 族分裂） |
+| T3 | `a5bf540` | **D144**（`extrusion.rs` 四处 + 楔侧面三角形→四边形）、**D145**（hpref root states）、**D148 撤销** |
+| T4 | `f642c21` | `tools/`6 + `toys/`3 + `nurbs/`2 共 **11 件**用新二进制重测后逐件处置（4 件做到逐字节） |
+| T2 | 本轮收尾提交 | gslib 收口：**D146**（H¹ GLL vs 等距族）、**D147**（候选上限）双双真修 |
+
+⚠️ **本轮的一条纪律事实（务必记录）**：T4 路由**代理自己**在 21:52 落了 `f642c21`（author `unknown <nobody@nowhere.com>`），
+而 HANDOVER §0 的快照写的是"T2/T4 在工作树未提交"。⇒ **收尾时不能只信 HANDOVER 的状态表，必须 `git log`/`git status` 现场重看**；
+代理禁 commit 的约定**挡不住仍在后台跑完的代理**。
+
+### 1. T1 路：`nodes` 段 writer + D116 几何侧闭环
+- **格式取自 4.10 源码而非推测**：有 `nodes` 段时**顶点坐标块整块省略、也没有空间维那一行**
+  （`mesh/mesh.cpp:12464`）；段头为 `nodes`→`FiniteElementSpace`→`FiniteElementCollection:`→`VDim:`→`Ordering:`
+  （`fem/gridfunc.cpp:4305`、`fem/fespace.cpp:4409`、`linalg/vector.cpp:870`、`linalg/ordering.hpp:12-25` 的
+  0=byNODES/1=byVDIM）；FEC 名按 `mesh/mesh.cpp:7211-7230`（连续 `H1_<dim>D_P<n>`；非连续 **`L2_T1_<dim>D_P<n>`，注意 `_T1_` 中缀**）。
+- **覆盖 H1 hex/tet + L2 hex/quad**；**2-D quad/tri 与 prism 编号仍缺（D151）**⇒ `toroid` 默认档、`mobius-strip`、
+  `klein-bottle` 仍 `exit(3)`；**`twist` 默认档真修**（`L2_T1_3D_P3`；与 C++ 拓扑逐字节相同，nodes 段相对差 3.2e-08
+  = C++ 8 位打印精度，`r31_save` 自存是不动点 4.3e-16）。
+- **D116 几何侧闭环**：`set_curvature_tet4` 等距→GLL；`Mesh::element_jacobian` **补 tet 臂**
+  （`Tet4|Tet10 if geo_order>=2 => H1TetPk`；阈值由测试证明 p=2 两族逐点逐序重合、p≥3 分开）。
+  验收测试 `crates/io/tests/legacy_fec_nodes.rs::curved_tet_min_det_matches_mfem_and_both_geometry_paths_agree`：
+  **两条几何路径逐位相同（worst |Δ| = 0）**，min det = `-6.48162933679758794e2` vs MFEM `-6.48162933679772095e2`
+  （相对差 2.1e-14）。真值 `MIN_DET_GLL6 = -648.1629336797721` 由 T1 与主会话**各自独立重编探针**复核（三方一致）。
+- **有意不改**：`ref_elem_vol_h1` 的 `(Tet4,o>=3) => TetPk` 是**场空间**口径（与 `crates/space/src/dof_manager.rs`
+  的等距设计一致，`assembler.rs:3045/:3100` 有两处 1e-20 一致性断言守着）⇒ 记 **D157**，需 `space`+`assembly`+`element` 协同。
+- **诚实范围声明**：`twist -e 4` 那条验证**不经过** `element_jacobian`/装配（走构造 + io writer）；后者由新交叉测试覆盖。
+
+### 2. T3 路：D144/D145 修复 + **D148 定性错误并撤销（本轮最贵的一课）**
+- **D144 修复 + 一条未记录的更严重缺陷**：`extrusion.rs` 四处（元素属性取源 / 边界属性 侧=源属性 `1..nba`、
+  底顶=`nba+attr` / 点优先 `i*nvz+j` / 元素优先 `for e{for layer}`）+ **Tri3→Prism6 侧面从三角形改回四边形** ——
+  旧产物让 MFEM `STable3D` **直接 abort**（`general/stable3d.cpp:112` 面 `{0,4,5}`）⇒ **旧 `extruder.mesh` 根本不可读**。
+  验收：`r32_probe` 两侧逐字段相同（`NE=16 NBE=48 NV=50`；`bdr_attr=1:4 2:4 3:4 4:4 5:32`；`nonpositive=0`）。
+- **D145 修复**：`INITIAL_ROOT_STATES:[u8;4]` 删除，改 `initial_root_states()` 实现 MFEM `NCMesh::InitRootState`
+  （`ncmesh.cpp:2654`，仅 SQUARE 根非零）；`-m` 三档 rc=0；**默认档 stdout/`order.gf` 逐位不变**；测试期望值
+  **取自 MFEM 4.10 自己的 `root_state` 段**。
+- **⚠️ D148 定性错误并撤销**：现状 `tol = rtol*γ0` **正是** MFEM 旧式便捷函数 `PCG()` 的语义 ——
+  `solvers.cpp:1076` 先 `SetRelTol(sqrt(RTOLERANCE))`，而 `CGSolver::SetRelTol`（`solvers.cpp:919`）那一层才是
+  范数尺度的严格档。⇒ 只加注释固化两套 API 的分工与 `文件:行`，**行为不变**。
+  **本会话独立复核（重编 MFEM 4.10 C++ ex1 后对拍）**：
+  ```
+  Rust（现状）  : 111 次迭代，末值 1.10523e-15，ARF 0.882852
+  C++ 4.10 ex1 : 111 次迭代，末值 1.10523e-15，ARF 0.882852
+  diff(112 行 (B r, r) + ARF) → 空；两侧 sha256 同为 d2bb318f1523db6236d7ab09d921d70a4e5eb3dd2a871215a932059e413dcaa1
+  按 D148 改 rtol²  : 194 次迭代（且所有 crate 测试仍全绿 ⇒ "测试全绿 ≠ 保真"）
+  ```
+
+### 3. T2 路：gslib 收口（D146/D147 **双双真修**，不是 WIP）
+- **D146 根因（族分裂，与 D112/D116 同族）**：目标求值点取自 `ref_elem(Tri, p)` —— DG/L2 族的**等距** `TriPk`；
+  而 C++ 的 `tar_fes->GetFE(i)->GetNodes()` 是 **H¹ 族**（`H1_FECollection` + `GaussLobatto`）。p≥3 时两族不同
+  （1/3,2/3 vs GLL 0.27639,0.72361）⇒ 源场在错点采样。修法 = 所有 H¹ 元素查表走 `h1_ref_elem`
+  （三角形 → `H1TriPk`；`QuadQk` 本就是 GLL）。
+  **主会话独立复核**：同一**显式**目标网格（`-m2 data/star.mesh`）下两侧 `interpolated.gf`
+  **逐字节相同**（216 行，sha256 同为 `9f39ae2e8cfd18a45b22163781582d166e67632a23377d6599023f286c84d2da`）。
+  **默认档仍不同**，且已定位到 **D154**（INLINE `type=tri` 的 quad 切分方向与 MFEM `Make2D` 相反 ⇒ 目标 P3 节点集合不同），
+  已在文件头写明证据与替换方案。
+- **D147 根因（比 round 31 的推测更具体）**：曲面网格上按几何 padding 放大的元素 AABB 大量重叠（单点可达 26+ 个候选），
+  真正包含该点的元素**排在上限之后** ⇒ 现在"上限被截断且**有界搜索什么都没找到**时补扫剩余候选"，
+  已定位点的结果不变（故 round 31 已对的 `Vol diff` 保持）。
+  **主会话独立复核（重编 C++ gslib 参考）**：两侧 `Max diff: 1.43502` / `Avg diff: 0.0949062` / `Vol diff: 1.73608`
+  完全一致（round 31 是 `2.58236` / `0.0960922`）。
+
+### 4. T4 路：tools/toys/nurbs **11 件**用新二进制重测（提交 `f642c21`）
+口径修正：round 30 的 (e) 类结论都是**枚举 `target/release/examples/*.exe`** 得到的（陈旧二进制污染），
+本轮一律 `cargo run --release --example`。**4 件做到与 C++ 逐字节相同**（主会话均已独立复核）：
+
+| 件 | 主会话复核结果 |
+|---|---|
+| `compare-dc` | 27 行 `diff` **无输出**（含 `\|pressure_0\| = 114.455`、28/30 个短横、无尾行） |
+| `get-values` | 官方 2-D 样例逐字节（`0.5 0.5` → `0.790403`、`0.1 0.1` → `0.110318`）；`-o` 已实现 |
+| `load-dc` | `-no-vis` 与 `-vis` 两档 `diff` **均无输出**（含 `Connection to localhost:19916 failed.` + rc=1） |
+| `nurbs_printfunc` | 48 行 `diff` **无输出**（纯格式问题：Rust 最短往返 → `fmt_g` 6 位有效数字） |
+
+其余 7 件改为**声明式 `exit(3)` + 缺口清单**（均已实测出口码）：
+- `gridfunction_bounds`：C++ 该程序是 **MPI-only**（源码实读 `Mpi::Init`/`ParMesh`/`ParGridFunction`/`MPI_Allreduce`）
+  ⇒ 串行 MFEM 编不出来、无参考数字；缺 `EstimateFunctionMinimum/Maximum`、真 `GetElementBounds(…,ref)`、`-bt/-l2/-visit`。
+- `tmop_check_metric`：C++ 未注释 case **实测 40 个**（`211/252/311/352` 是源码里的 `// case …` 注释行）；
+  未知 id 打印 C++ 原文并 `exit(3)`（C++ `default: … return 3`，实测 rc=3）；缺 mesh/FE 空间的**解析** `AssembleElementVector/Grad`。
+- `tmop_metric_magnitude`：C++ 未注释 case **实测 25 个**；`fem_mesh::tmop` 缺 `85/98/322`（T）+ `11/36/107`（A）。
+- `mandel`/`mondrian`：**迭代 1 与 C++ 相同**（1024 / 16，含 `"elements. \n"` 尾随空格），
+  但 C++ 用 `Mesh::GeneralRefinement(refs,-1,nclimit)`（只细化被标记四边形、非协调），
+  `fem_mesh::amr` 只对 `Tri3` 有 (NC) 局部细化 ⇒ 迭代 2 起分叉（mandel 4096/16384/65536 vs C++ 2254/5884/16006；
+  mondrian 64/256 vs 52/145）。修前更糟：固定循环导致 59.6 MB / **1.11 GB** 的网格产物。
+- `lissajous`：C++ 是 **2-D 面嵌 3-D**（实测写出 29,968 B 网格 + 4,829 B 场），`Mesh<D>` 的 `sdim == dim` ⇒ 造不出；
+  旧版静默写两个**全 0** 的假文件，现不产出任何文件。
+- `nurbs_solenoidal`：头注释不再自称 1:1 port；C++ 参考数字已实测（NURBS 8580/4225/335 次/2.08242e-05/1.4113e-13；
+  `-nn` 33024/16384/440 次/2.08198e-05/3.55911e-13）；缺口 5 条（默认 NURBS 档需 `NURBS_*FECollection`/`NURBSExtension` 等）。
+
+### 5. 主会话在收尾时另外发现并处理的两件事
+1. **`tmop_metric_magnitude` 的一处不诚实措辞（已修）**：对 C++ 也不认的 id（`999`、注释行里的 `211`），
+   旧文案写"the C++ program accepts {dim} metric id …"，即**谎称 C++ 接受它**。现按实测的 `CPP_IDS` 分流：
+   C++ 接受但 fem-rs 未实现 → 说明真实缺口；C++ 同样不认 → 明确注明"两边都不认，本行只是复刻其输出与出口码"。
+2. **`crates/io/src/glvis.rs` 的预存 flaky 测试（D158）**：`glvis::tests::glvis_bidirectional_local_loopback`
+   独立跑 **1/20 失败**（批跑 2/5），panic 原文 `Os { code: 10054, kind: ConnectionReset }`
+   —— 测试的 server stub 在客户端仍读时 `close`，且单次 `read` 可能只取到命令的一部分，**留下未读字节的 close 在
+   Windows 回环上变成 RST**。修法：stub 按整行读命令（`BufReader::read_line`）并**一直持有套接字到对端挂断**
+   （读完再 `drop(vis)` 才 `join`）。修后 **0/100 失败**。
+
+### 6. 方法论收获（补进 §二）
+- **"grep `case N:` 必须排除注释行"**：MFEM 把未启用的 metric 写成 `// case 211:`；用 `grep -cE "case [0-9]+:"`
+  会多数 4 个 ⇒ 我据此差点把 T4 的 id 清单误判为"漏了 211/252/311/352"。
+  **正解** = `grep -E "^ *case [0-9]+:" | sed 's/^ *case \([0-9]*\):.*/\1/'`（25 / 40 个）。
+- **"测试全绿 ≠ 保真"** 的第 2 个实例（D148）：改判据到 `rtol²` 后所有 crate 测试全绿，示例却与 C++ 分道扬镳（111→194 次）。
+- **WSL 的 `/tmp` 是 tmpfs，调用间会清空** ⇒ 参考 C++ 二进制一律编到 `$HOME/work/<dir>`。
+  （本会话踩过：中途一批参考二进制消失，只能重编。）
+- **"代理已交付" 要看 `git log`**：仍在后台跑完的代理会自己 commit（见 §0 的 `f642c21`）。
+
+### 第三十二轮新债务
+- **D151（P1）`nodes` writer 缺 2-D quad/tri 与 prism 的 MFEM 编号** ⇒ 一件解锁 `toroid` 默认档 + `mobius-strip`
+  + `klein-bottle`（+ `reflector` 的 NURBS 输出路径）。prism 需 `H1_WedgeElement` node 表 + `TriDofOrd`/`QuadDofOrd`
+  定向 + 在 GLL 点用 `PrismPk` 基重插值；2-D 需 `H1_2D_P<p>` + `L2_T1_2D_P<p>`。
+- **D152（P1）`set_curvature_prism6` 的槽序 `(iz,ir,is)` 与 `PrismPk` 的 layer-then-triangle 序不一致**
+  （`crates/mesh/src/simplex.rs:658`）⇒ 今天任何 p≥2 的**曲面 prism** 网格都用错的等参映射装配（与 D116 同族）。
+- **D153（P2）`read_mfem` 的 L2 路径把 per-element 几何按文件的 MFEM L2 序存进 `GeometryData.conn`**，
+  而 `element_jacobian` 按 `HexQk`/`QuadQk` 的 H1 槽序求值 ⇒ **L2 曲面读→写往返尚不正确**（H1 hex/tet 已位精确）。
+  修法 = 把硬编码 `perm` 泛化为 `lex_slot_permutation(factory_slots, mfem_l2_slots)`（P1 quad 的 `[0,1,3,2]` 是特例）。
+- **D154（P2）`MFEM INLINE mesh` 的 `type=tri` 分支与 MFEM 不同构**（`crates/io/src/mfem.rs:2457` 直接
+  `unit_square_tri(n)`，而 quad/hex 分支有 `hilbert_sfc_2d`/`grid_sfc_ordering_3d`）⇒ `inline-tri.mesh` 元素顺序不同
+  （C++ `elem 0 = {0,6,5}` vs 本仓 `{0,1,5}`）；**任何 tri 源网格的 1:1 比对（含 `extruder -m data/inline-tri.mesh`、
+  `field-interp` 默认档）在修此条前不可能逐行对齐**。
+- **D155（P3）`write_mfem` 文本与 MFEM `Mesh::Print` 不同**（不发 `# MFEM Geometry Types …` 注释头、顶点行多一个前导空格）
+  ⇒ 文件级逐字节验收不可能达成。
+- **D156（P3）`hpref` 打印格式**（`H1 continuity error` 全精度 vs C++ 6 位有效数字；PCG 日志前多一空行；
+  缺 `Options used:`/`Device configuration:`）。
+- **D157（P2）H1 tet 场空间是否与 MFEM 的 GLL 对齐**（`ref_elem_vol_h1` 的 tet 臂 + `crates/space/src/dof_manager.rs`），
+  需 `space`+`assembly`+`element` 协同；**含** `dof_manager.rs:2985` `rebuild_dof_coords_periodic` 的"周期 + 曲面(p≥3) + tet"
+  几何求值同族分裂。
+- **D158（P3，本轮已修，留痕）** `crates/io/src/glvis.rs` 的 `glvis_bidirectional_local_loopback` 预存 flaky
+  （Windows 回环 RST；1/20 独立失败）。修法见 §5.2；留痕是为了别再把它当"本轮新引入的回归"重新归因。
+
+### 本轮统计
+- 十 crate `--lib`（收尾实测，含 glvis 修复后）：amg 23 / **assembly 665**（+8 ign）/ element 498 / **io 132** /
+  linalg 66 / linalg-gpu 13(+2 ign) / **mesh 301** / parallel 232 / solver 264 / space 286；
+  `tests/**` 集成层：solver 4 个 suite + assembly 8 个 + mesh 3 个 + space 4 个 + io 7 个 = 全绿，
+  唯一失败 = **预存的** `poisson_solve::poisson_nc_amr_convergence`（`got 7.9085e-2`，与 round 22/23/30/31/32 **逐位相同** ⇒ 非本轮引入）。
+- `cargo build --release --examples --keep-going`：**0 error**（首轮 24m39s；警告仅来自 `vendor/linger` 与
+  10 个**未被本轮触碰**的既有示例）；pro 层 `cargo check -p pro-bench-tests -p pro-cad`：**0 error**。
+- 本会话对 T1/T2/T3/T4 的**独立复核总数**：ex1 逐字节 1 件 + gslib 2 件 + `interpolated.gf` 逐字节 1 件 +
+  T4 逐字节 4 件 + T4 数值/出口码 6 件（mandel/mondrian/lissajous/nurbs_solenoidal/get-values 3-D 缺口/tmop rc）。
+
 
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
