@@ -164,8 +164,12 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // independent geometry nodes — this is how geometrically periodic meshes
     // (e.g. `periodic-square.mesh`) encode per-element geometry.
     let mut geometry: Option<GeometryData> = None;
-    // H1-continuous `nodes` section payload: (nodal order, values, ordering).
-    let mut h1_nodes: Option<(u8, Vec<f64>, usize)> = None;
+    // H1-continuous `nodes` section payload: (nodal order, values, ordering,
+    // legacy closed-uniform node family — see `parse_nodal_fec`).
+    let mut h1_nodes: Option<(u8, Vec<f64>, usize, bool)> = None;
+    // `VDim` of the `nodes` section (D112b): the component stride.  Defaults to
+    // the mesh dimension, which is what a conforming `nodes` section has.
+    let mut nodes_vdim: usize = dim;
 
     // Check if next line is "nodes" (MFEM v1.2 curved mesh format),
     // a dimension number (standard format), or a NURBS keyword (skip).
@@ -243,7 +247,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         let _fes = read_line(&mut r)?;         // "FiniteElementSpace"
         let fec_line = read_line(&mut r)?;     // "FiniteElementCollection: ..."
         let vdim_line = read_line(&mut r)?;     // "VDim: N"
-        let _nodes_vdim: usize = vdim_line.split_whitespace().last()
+        nodes_vdim = vdim_line.split_whitespace().last()
             .and_then(|s| s.parse().ok()).unwrap_or(dim);
         let ordering_line = read_line(&mut r)?; // "Ordering: ..."
 
@@ -259,12 +263,26 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         let nodes_ordering: usize = ordering_line.split(':').nth(1)
             .and_then(|s| s.trim().parse().ok()).unwrap_or(0);
         let is_l2_nodes = fec_name.starts_with("L2_");
+        // `nodes_vdim` is the number of *components* per DOF, `dim` the
+        // topological dimension of the mesh.  A conforming `nodes` section has
+        // `VDim == dim`; `VDim > dim` means a mesh with `spaceDim > dim` (a
+        // surface embedded in 3-D, MFEM's `Mesh::SetSpaceDim` case), which the
+        // geometry path here cannot represent — see the warning below (D112b).
+        if nodes_vdim != dim {
+            eprintln!(
+                "warning (D112b): `nodes` section has VDim={nodes_vdim} but the mesh is {dim}-dimensional; \
+                 a `dim < spaceDim` (surface) mesh is not supported — the geometry is read with only its \
+                 first {dim} components and its measure is the {dim}-dimensional one"
+            );
+        }
         if !is_l2_nodes {
             // Continuous (H1) geometry: remember the nodal order so the
             // high-order GeometryData can be attached once the mesh topology
-            // is built (the DOF numbering needs it).
-            if let Some(p) = parse_nodal_fec_order(&fec_name) {
-                h1_nodes = Some((p, raw.clone(), nodes_ordering));
+            // is built (the DOF numbering needs it), plus whether the
+            // collection is one of MFEM's legacy closed-uniform families
+            // (D112) — those store values at the equispaced nodes.
+            if let Some(fec) = parse_nodal_fec(&fec_name) {
+                h1_nodes = Some((fec.order, raw.clone(), nodes_ordering, fec.closed_uniform));
             }
         }
         if is_l2_nodes && n_elem > 0 && raw.len() >= n_elem * dim {
@@ -338,7 +356,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                     n_nodes: n_elem * npe,
                 });
             }
-        } else if raw.len() >= n_vert * dim {
+        } else if raw.len() >= n_vert * nodes_vdim {
             // Continuous (H1) geometry: vertex `i` is dof `i` of the `nodes`
             // grid function (MFEM `Mesh::Loader` → `SetVerticesFromNodes`).
             // The dof values are stored with the section's ordering:
@@ -348,8 +366,13 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             // behavior) scrambles the vertex coordinates of curved meshes
             // (e.g. `cube.mesh`: vertex 0 became (0, 0.5, 1) instead of the
             // origin, which then corrupts refinement midpoints).
+            //
+            // The component *stride* is `VDim`, not the mesh dimension: a
+            // `dim < spaceDim` mesh stores `VDim = spaceDim` components per DOF
+            // (see the D112b warning above), and using `dim` here crossed the
+            // components of the whole vertex table.
             if nodes_ordering == 0 {
-                let ndof = raw.len() / dim;
+                let ndof = raw.len() / nodes_vdim;
                 coords.clear();
                 coords.resize(n_vert * dim, 0.0);
                 for v in 0..n_vert {
@@ -361,7 +384,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                 coords.clear();
                 coords.reserve(n_vert * dim);
                 for i in 0..n_vert {
-                    coords.extend_from_slice(&raw[i * dim..i * dim + dim]);
+                    coords.extend_from_slice(&raw[i * nodes_vdim..i * nodes_vdim + dim]);
                 }
             }
         }
@@ -431,10 +454,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         };
         let mut mesh = mesh;
         if mesh.geometry.is_none() {
-            if let Some((p, raw, ord)) = &h1_nodes {
-                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim, None);
+            if let Some((p, raw, ord, _)) = &h1_nodes {
+                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim, nodes_vdim, None);
             }
         }
+        repair_legacy_geometry(&mut mesh, &h1_nodes);
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
         let mut mesh = Mesh {
@@ -467,17 +491,19 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         // order is exactly the file's) and re-attaching the file's node values
         // to the same physical slots afterwards.
         let tet_file_slots: Option<TetFileSlots> = match &h1_nodes {
-            Some((p, _, _)) if mesh.geometry.is_none() => {
+            Some((p, _, _, _)) if mesh.geometry.is_none() => {
                 tet_slot_map(&mesh, *p as usize).ok().map(|(conn, keys, _)| TetFileSlots { conn, keys })
             }
             _ => None,
         };
         fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
         if mesh.geometry.is_none() {
-            if let Some((p, raw, ord)) = &h1_nodes {
-                mesh.geometry = build_h1_geometry(&mesh, *p, raw, *ord, dim, tet_file_slots.as_ref());
+            if let Some((p, raw, ord, _)) = &h1_nodes {
+                mesh.geometry =
+                    build_h1_geometry(&mesh, *p, raw, *ord, dim, nodes_vdim, tet_file_slots.as_ref());
             }
         }
+        repair_legacy_geometry(&mut mesh, &h1_nodes);
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }
 }
@@ -675,6 +701,49 @@ fn parse_nodal_fec_order(fec: &str) -> Option<u8> {
     }
     None
 }
+
+/// The polynomial order of a nodal `FiniteElementCollection` name together with
+/// its DOF *node family* (D112).
+struct NodalFec {
+    order: u8,
+    /// `true` for MFEM's legacy fixed-order collections (`Linear`,
+    /// `Quadratic`/`QuadraticPos`, `Cubic`), whose DOFs sit at the
+    /// **closed-uniform** (equispaced) points instead of the closed
+    /// Gauss-Lobatto points `H1_FECollection` uses.
+    closed_uniform: bool,
+}
+
+/// Classify the `FiniteElementCollection` name of a `nodes` section (D112).
+///
+/// MFEM's legacy collections are named by their order alone (`Linear`,
+/// `Quadratic`, `Cubic` — `fem/fe_coll.hpp`), while a modern collection carries
+/// the family and the dimension (`H1_2D_P3`, `L2_3D_P2`, …).  The legacy
+/// family is exactly the one whose 1-D DOF nodes are `BasisType::ClosedUniform`
+/// (`Lagrange1DFiniteElement`, `BiCubic2DFiniteElement`, `Cubic2DFiniteElement`,
+/// `Cubic3DFiniteElement`, `LagrangeHexFiniteElement` all place their DOFs at
+/// `i/degree`), so the distinction decides whether the stored values may be
+/// handed to the Gauss-Lobatto-based geometry elements unchanged.
+///
+/// The *discontinuous* collections never describe a mesh's `nodes` grid
+/// function and are excluded so that a stray `LinearDiscont2D` cannot be
+/// mistaken for `Linear`.
+fn parse_nodal_fec(fec: &str) -> Option<NodalFec> {
+    let f = fec.trim();
+    let legacy = if f.starts_with("LinearDiscont") || f.starts_with("QuadraticDiscont") {
+        None
+    } else if f.starts_with("Linear") || f.starts_with("Quadratic") || f.starts_with("Cubic") {
+        // `Linear`/`LinearF` → 1, `Quadratic`/`QuadraticPos` → 2, `Cubic` → 3
+        // (the same prefixes the order parser accepts).
+        Some(parse_nodal_fec_order(f)?)
+    } else {
+        None
+    };
+    match legacy {
+        Some(order) => Some(NodalFec { order, closed_uniform: true }),
+        None => parse_nodal_fec_order(f).map(|order| NodalFec { order, closed_uniform: false }),
+    }
+}
+
 
 // ─── D41: MFEM-faithful H1 hexahedron geometry ───────────────────────────────
 //
@@ -1393,6 +1462,7 @@ fn build_h1_geometry<M: MeshTopology>(
     raw: &[f64],
     ordering: usize,
     dim: usize,
+    vdim: usize,
     tet_file_slots: Option<&TetFileSlots>,
 ) -> Option<GeometryData> {
     if order < 2 {
@@ -1442,7 +1512,10 @@ fn build_h1_geometry<M: MeshTopology>(
     }
     let dm = DofManager::new(mesh, order);
     let n_dofs = dm.n_dofs;
-    if raw.len() < dim * n_dofs {
+    // Component stride = `VDim` (`build_h1_geometry`'s caller checked that the
+    // section is readable); for a `dim < spaceDim` surface mesh only the first
+    // `dim` components are kept (D112b).
+    if raw.len() < vdim * n_dofs {
         return None;
     }
     let mut dof_coords = vec![0.0f64; n_dofs * dim];
@@ -1457,7 +1530,10 @@ fn build_h1_geometry<M: MeshTopology>(
         }
         1 => {
             // byVDIM: [x y (z)] per dof.
-            dof_coords.copy_from_slice(&raw[..dim * n_dofs]);
+            for d in 0..n_dofs {
+                dof_coords[d * dim..(d + 1) * dim]
+                    .copy_from_slice(&raw[d * vdim..d * vdim + dim]);
+            }
         }
         _ => return None,
     }
@@ -1466,7 +1542,16 @@ fn build_h1_geometry<M: MeshTopology>(
     for e in 0..mesh.n_elements() {
         let dofs = dm.element_dofs(e as u32);
         if dofs.len() != npe {
-            return None; // mixed mesh: not supported by GeometryData layout
+            // D41/D112c: a mixed mesh has no single `nodes_per_elem`, so the
+            // flat geometry layout cannot describe it.  Refuse loudly rather
+            // than keep a table whose element rows are misaligned.
+            eprintln!(
+                "warning (D112c): refusing to build high-order geometry for a mixed mesh \
+                 (element {} has {} geometry DOFs, element 0 has {npe}); the mesh is read as \
+                 straight-sided (geometric order 1)",
+                e, dofs.len()
+            );
+            return None;
         }
         conn.extend(dofs.iter().copied());
     }
@@ -1477,6 +1562,189 @@ fn build_h1_geometry<M: MeshTopology>(
         coords: dof_coords,
         n_nodes: n_dofs,
     })
+}
+
+// ─── D112: legacy (`closed-uniform`) `nodes` sections ────────────────────────
+//
+// MFEM's legacy finite element collections — `Linear`, `Quadratic` and `Cubic`
+// (`fem/fe_coll.hpp`) — are built from fixed-order elements whose DOFs sit at
+// the **closed-uniform** points:
+//
+//   * `Lagrange1DFiniteElement(degree)` (`fem/fe/fe_fixed_order.cpp`) places
+//     DOF `0` at `0`, DOF `1` at `1` and DOF `i+1` at `i/degree`;
+//   * `LagrangeHexFiniteElement` is its tensor product, driven by a
+//     hand-written `I`/`J`/`K` tensor-index table (vertices, edges and faces
+//     sit at `i/degree`; the *interior* block of that table is not the
+//     `H1_HexahedronElement` enumeration — see
+//     `fem_element::lagrange::legacy`);
+//   * `BiCubic2DFiniteElement`, `Cubic2DFiniteElement` and
+//     `Cubic3DFiniteElement` place their edge/face/interior DOFs on the
+//     equispaced lattice (`1/3`, `2/3`, …).
+//
+// `H1_FECollection` instead uses `BasisType::GaussLobatto`, i.e. the closed
+// Gauss-Lobatto points (`0`, `(1−1/√5)/2`, `(1+1/√5)/2`, `1` at `p = 3`).  Both
+// families therefore describe the *same* polynomial space with the *same* DOF
+// layout — `CubicFECollection::DofForGeometry` returns exactly the `H1` counts
+// (`SEGMENT 2`, `SQUARE 4`, `CUBE 8`, `TRIANGLE 1`, `TETRAHEDRON 0`) and its
+// `DofOrderForOrientation` tables are the `H1` ones (`sq_ind[8][4]` is
+// `QuadDofOrd[8][4]`, `{0,1}`/`{1,0}` is `SegDofOrd`) — but they disagree on
+// **where the DOFs are**, so a geometry table built for the Gauss-Lobatto
+// element reads the stored values as belonging to different physical points.
+//
+// `p <= 2` cannot show the difference: the closed-uniform and closed
+// Gauss-Lobatto points coincide (`{0,1}` and `{0,½,1}`), which is why only the
+// `p = 3` legacy meshes (`fichera-q3`, `star-q3`, `escher-p3`,
+// `square-disc-p3`, …) were mis-read.  Before D112 the loader simply dropped
+// the family and every such mesh came back with a scrambled (even inverted)
+// isoparametric map and no warning at all.
+//
+// The repair is a re-interpolation, not a re-numbering: `conn` is already
+// MFEM's (the numbering depends only on `DofForGeometry` +
+// `DofOrderForOrientation`, which agree), so only the *node values* move.  For
+// each element the stored values `c_j` are the nodal values of the legacy
+// polynomial `L(ξ) = Σ_j c_j ψ_j(ξ)` at the closed-uniform nodes; tabulating
+// `L` at the Gauss-Lobatto nodes `ξ_i` of the same slot gives
+//
+//     v_i = L(ξ_i) = Σ_j B[i][j]·c_j,   B[i][j] = ψ_j(ξ_i),
+//
+// and `Σ_i L(ξ_i)·φ^GLL_i ≡ L` (both sides are the same polynomial: the
+// Gauss-Lobatto basis is nodal at `ξ_i`).  The conversion is therefore exact —
+// a purely algebraic change of basis — and `GeometryData` keeps its
+// "Gauss-Lobatto semantics" contract, so `assembler::geo_ref_elem` and
+// `vector_assembler::geo_ref_elem_from_mesh` need no change (method A).
+
+/// The (Gauss-Lobatto, closed-uniform) reference element pair for a geometric
+/// element type at order `p`, or `None` for element types the legacy
+/// collections do not carry a `nodes` section for.
+fn legacy_element_pair(
+    et: ElementType,
+    p: usize,
+) -> Option<(Box<dyn fem_element::ReferenceElement>, Box<dyn fem_element::ReferenceElement>)> {
+    use fem_element::lagrange::factory::{HexQk, QuadQk, H1TetPk};
+    use fem_element::lagrange::legacy::LegacyHexQ3;
+    use fem_element::lagrange::H1TriPk;
+    match et {
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => Some((
+            Box::new(QuadQk::new(p)),
+            Box::new(QuadQk::new_closed_uniform(p)),
+        )),
+        // The hexahedron is the one geometry whose legacy element is not "the
+        // H1 slot layout with equispaced nodes": `LagrangeHexFiniteElement`'s
+        // hand-written table permutes the interior block (see
+        // `fem_element::lagrange::legacy`), so it is reproduced verbatim.
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 if p == 3 => Some((
+            Box::new(HexQk::new(p)),
+            Box::new(LegacyHexQ3::new()),
+        )),
+        ElementType::Tri3 | ElementType::Tri6 => Some((
+            Box::new(H1TriPk::new(p)),
+            Box::new(H1TriPk::new_closed_uniform(p)),
+        )),
+        ElementType::Tet4 | ElementType::Tet10 => Some((
+            Box::new(H1TetPk::new(p)),
+            Box::new(H1TetPk::new_closed_uniform(p)),
+        )),
+        _ => None,
+    }
+}
+
+/// `B[i][j] = ψ_j(ξ_i)`: the closed-uniform basis of the legacy element
+/// evaluated at the Gauss-Lobatto nodes `ξ_i` of the element fem-rs actually
+/// uses ([`legacy_element_pair`]'s first item).  Empty if the two elements do
+/// not have the same DOF count.
+fn legacy_change_of_basis(
+    gll: &dyn fem_element::ReferenceElement,
+    legacy: &dyn fem_element::ReferenceElement,
+) -> Vec<f64> {
+    let n = gll.n_dofs();
+    if legacy.n_dofs() != n {
+        return Vec::new();
+    }
+    let coords = gll.dof_coords();
+    let mut b = vec![0.0_f64; n * n];
+    for i in 0..n {
+        legacy.eval_basis(&coords[i], &mut b[i * n..(i + 1) * n]);
+    }
+    b
+}
+
+/// D112: re-interpolate a `nodes` geometry table written with a legacy
+/// (closed-uniform) collection onto the Gauss-Lobatto nodes the rest of the
+/// library assumes.  See the block comment above for why this is exact.
+///
+/// Only the node *values* change; `conn`, `nodes_per_elem`, `order` and
+/// `n_nodes` stay as they are.  Node values are shared between the elements
+/// that meet at a mesh entity, and the legacy polynomial's trace on a shared
+/// edge/face is the same from either side (as it must be for the file's
+/// conforming H1 geometry), so the first element that reaches a node fixes its
+/// value.
+fn rewrite_legacy_nodes<M: MeshTopology>(
+    mesh: &M,
+    geom: &mut GeometryData,
+    dim: usize,
+) {
+    let p = geom.order as usize;
+    if p < 3 || geom.n_nodes == 0 || geom.nodes_per_elem == 0 || mesh.n_elements() == 0 {
+        return; // p <= 2: closed-uniform and Gauss-Lobatto nodes coincide
+    }
+    type Pair = (
+        Box<dyn fem_element::ReferenceElement>,
+        Box<dyn fem_element::ReferenceElement>,
+        Vec<f64>,
+    );
+    let npe = geom.nodes_per_elem;
+    let mut cache: HashMap<ElementType, Option<Pair>> = HashMap::new();
+    let mut rewritten = vec![0.0_f64; geom.coords.len()];
+    let mut assigned = vec![false; geom.n_nodes];
+    for e in 0..mesh.n_elements() {
+        let et = mesh.element_type(e as u32);
+        let entry = cache.entry(et).or_insert_with(|| {
+            legacy_element_pair(et, p).map(|(gll, legacy)| {
+                let b = legacy_change_of_basis(&*gll, &*legacy);
+                (gll, legacy, b)
+            })
+        });
+        let Some((_, _, b)) = entry else { continue };
+        if b.len() != npe * npe {
+            continue; // element type the legacy pair does not describe
+        }
+        let slots = &geom.conn[e * npe..(e + 1) * npe];
+        for i in 0..npe {
+            let node = slots[i] as usize;
+            if assigned[node] {
+                continue;
+            }
+            for d in 0..dim {
+                let mut acc = 0.0;
+                for j in 0..npe {
+                    acc += b[i * npe + j] * geom.coords[slots[j] as usize * dim + d];
+                }
+                rewritten[node * dim + d] = acc;
+            }
+            assigned[node] = true;
+        }
+    }
+    for n in 0..geom.n_nodes {
+        if assigned[n] {
+            geom.coords[n * dim..(n + 1) * dim]
+                .copy_from_slice(&rewritten[n * dim..(n + 1) * dim]);
+        }
+    }
+}
+
+/// D112: apply [`rewrite_legacy_nodes`] to a freshly built geometry table when
+/// the `nodes` section came from a legacy (closed-uniform) collection.
+fn repair_legacy_geometry<const D: usize>(
+    mesh: &mut Mesh<D>,
+    h1_nodes: &Option<(u8, Vec<f64>, usize, bool)>,
+) {
+    if !matches!(h1_nodes, Some((_, _, _, true))) {
+        return;
+    }
+    if let Some(mut g) = mesh.geometry.take() {
+        rewrite_legacy_nodes(mesh, &mut g, D);
+        mesh.geometry = Some(g);
+    }
 }
 
 fn read_line(r: &mut impl BufRead) -> FemResult<String> {

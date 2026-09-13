@@ -2,6 +2,7 @@
 
 pub mod factory;
 pub mod hex;
+pub mod legacy;
 pub mod prism;
 pub mod pyramid;
 pub mod quad;

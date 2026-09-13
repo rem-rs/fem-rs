@@ -469,11 +469,34 @@ fn dlag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
 
 impl H1TriPk {
     pub fn new(p: usize) -> Self {
-        assert!(p >= 1, "H1TriPk: order must be >= 1");
+        assert!(p >= 1, "order must be >= 1");
         // GLL closed points on [-1,1], mapped to [0,1] (MFEM poly1d::ClosedPoints).
         let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
         let gll: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        Self::with_closed_points(p, gll)
+    }
 
+    /// The **closed-uniform** (`BasisType::ClosedUniform`) twin of
+    /// [`H1TriPk::new`]: same MFEM slot order (vertices → edges → interior,
+    /// edge 2 counted from its `v2` end, interior at the `w`-normalised
+    /// barycentric nodes), but the 1-D points are the *equispaced* `i/p`.
+    ///
+    /// This is MFEM's legacy `Quadratic`/`Cubic` `Quadratic2DFiniteElement` /
+    /// `Cubic2DFiniteElement` node placement.  `fem-io` uses it (D112) to
+    /// reinterpret an MFEM `nodes` grid function written with a *legacy*
+    /// `FiniteElementCollection` name (`Linear`/`Quadratic`/`Cubic`).
+    pub fn new_closed_uniform(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let cp: Vec<f64> = (0..=p).map(|i| i as f64 / p as f64).collect();
+        Self::with_closed_points(p, cp)
+    }
+
+    /// Build the element for an arbitrary increasing set of `p+1` 1-D nodes on
+    /// `[0,1]`.  The nodes of the triangle are the MFEM `H1_TriangleElement`
+    /// placement of `cp` (see the struct docs) and the basis is the unique
+    /// nodal Lagrange basis there, so the choice of `cp` only moves the DOF
+    /// positions — the slot semantics never change.
+    fn with_closed_points(p: usize, gll: Vec<f64>) -> Self {
         let mut nodes: Vec<[f64; 2]> = Vec::with_capacity((p + 1) * (p + 2) / 2);
         nodes.push([gll[0], gll[0]]);
         nodes.push([gll[p], gll[0]]);
@@ -758,7 +781,17 @@ fn h1_tet_pk_build(p: usize) -> H1TetPkInner {
     // Closed Gauss-Lobatto points on [0,1] (MFEM `poly1d.ClosedPoints(p)`).
     let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
     let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+    h1_tet_pk_build_with_points(p, &cp)
+}
 
+/// Build the `H1_TetrahedronElement(p)`-slot element for an arbitrary
+/// increasing set of `p+1` 1-D nodes `cp` on `[0,1]`.
+///
+/// The node *placement* (which barycentric label each slot carries) never
+/// depends on `cp`, so this is the shared body of [`H1TetPk::new`] (MFEM's
+/// closed Gauss-Lobatto points) and [`H1TetPk::new_closed_uniform`] (the
+/// equispaced `i/p` of the legacy `CubicFECollection`).
+fn h1_tet_pk_build_with_points(p: usize, cp: &[f64]) -> H1TetPkInner {
     let labels = h1_tet_slot_labels(p);
     let mut nodes: Vec<[f64; 3]> = labels
         .iter()
@@ -830,6 +863,23 @@ impl H1TetPk {
             m.entry(p).or_insert_with(|| Arc::new(h1_tet_pk_build(p))).clone()
         };
         Self { inner }
+    }
+
+    /// The **closed-uniform** (`BasisType::ClosedUniform`) twin of
+    /// [`H1TetPk::new`]: same MFEM slot order (see [`h1_tet_slot_labels`]), but
+    /// the 1-D points are the *equispaced* `i/p`, so the tetrahedron's DOFs sit
+    /// on the integer barycentric lattice.
+    ///
+    /// This is MFEM's legacy `Quadratic`/`Cubic` `Quadratic3DFiniteElement` /
+    /// `Cubic3DFiniteElement` node placement.  `fem-io` uses it (D112) to
+    /// reinterpret an MFEM `nodes` grid function written with a *legacy*
+    /// `FiniteElementCollection` name (`Linear`/`Quadratic`/`Cubic`).
+    pub fn new_closed_uniform(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let cp: Vec<f64> = (0..=p).map(|i| i as f64 / p as f64).collect();
+        Self {
+            inner: std::sync::Arc::new(h1_tet_pk_build_with_points(p, &cp)),
+        }
     }
 
     /// MFEM's `H1_TetrahedronElement(p)` node enumeration — see
@@ -1419,6 +1469,11 @@ pub struct QuadQk {
     /// `true` = lexicographic tensor-product order `ix + iy*(p+1)` (x fastest),
     /// which is what MFEM's `DG_FECollection`/`L2_FECollection` use.
     lex: bool,
+    /// `true` for [`QuadQk::new_closed_uniform`], whose 1-D nodes live on
+    /// `[0,1]` (the element's own reference frame) rather than on `[-1,1]`
+    /// (`gll01` is then already the node set).  Only `eval_hessian` needs to
+    /// know: it is the one path that evaluates `lag1d` at `2x−1`.
+    uniform: bool,
 }
 
 impl QuadQk {
@@ -1431,6 +1486,30 @@ impl QuadQk {
             lag1d,
             gll01,
             lex: false,
+            uniform: false,
+        }
+    }
+
+    /// The **closed-uniform** (`BasisType::ClosedUniform`) twin of
+    /// [`QuadQk::new`]: the same H1 slot order on `[0,1]²`, but the 1-D DOF
+    /// nodes are the *equispaced* points `i/p` instead of the Gauss-Lobatto
+    /// points.
+    ///
+    /// This is MFEM's legacy `Quadratic`/`Cubic` `BiQuadratic2DFiniteElement` /
+    /// `BiCubic2DFiniteElement` node placement.  `fem-io` uses it (D112) to
+    /// reinterpret an MFEM `nodes` grid function written with a *legacy*
+    /// `FiniteElementCollection` name (`Linear`/`Quadratic`/`Cubic`) and to
+    /// re-interpolate it onto the Gauss-Lobatto nodes the rest of the library
+    /// assumes.
+    pub fn new_closed_uniform(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let nodes: Vec<f64> = (0..=p).map(|i| i as f64 / p as f64).collect();
+        Self {
+            order: p,
+            lag1d: Lagrange1D::from_nodes(nodes.clone()),
+            gll01: nodes,
+            lex: false,
+            uniform: true,
         }
     }
 
@@ -1690,12 +1769,17 @@ impl ReferenceElement for QuadQk {
         }
     }
     fn eval_hessian(&self, xi: &[f64], hess: &mut [f64]) {
-        // Map xi from [0,1] to [-1,1]; chain rule: d²/dx² = 4 · d²/dξ²
-        let x = self.to_std(xi[0]);
-        let y = self.to_std(xi[1]);
+        // `lag1d` holds the 1-D nodes in the Gauss-Lobatto `[-1,1]` frame for
+        // `QuadQk::new` (map xi from `[0,1]`, chain rule d²/dx² = 4·d²/dξ²) and
+        // in the element's own `[0,1]` frame for
+        // [`QuadQk::new_closed_uniform`] (no map, factor 1).
+        let (x, y, fac) = if self.uniform {
+            (xi[0], xi[1], 1.0)
+        } else {
+            (self.to_std(xi[0]), self.to_std(xi[1]), self.hess_factor())
+        };
         let (lx, dlx, hlx) = self.lag1d.val_d_h(x);
         let (ly, dly, hly) = self.lag1d.val_d_h(y);
-        let fac = self.hess_factor();
         let p = self.order;
         for iy in 0..=p {
             for ix in 0..=p {
