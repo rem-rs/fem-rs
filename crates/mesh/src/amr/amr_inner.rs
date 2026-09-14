@@ -1086,14 +1086,23 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
     let mut new_coords = vec![0.0_f64; n_new_verts * dim];
     new_coords[..n_orig_verts * dim].copy_from_slice(&mesh.coords);
 
-    // Edge midpoint coordinates (folded vertices: average of the two vertex
-    // coordinates — MFEM's edge transformation, which uses `vertices`).
-    for (ei, &(a, b)) in edge_list.iter().enumerate() {
-        let vi = n_orig_verts + ei;
-        let ca = &mesh.coords[a as usize * dim..(a as usize + 1) * dim];
-        let cb = &mesh.coords[b as usize * dim..(b as usize + 1) * dim];
-        new_coords[vi * dim]     = (ca[0] + cb[0]) * 0.5;
-        new_coords[vi * dim + 1] = (ca[1] + cb[1]) * 0.5;
+    // Curved (order-p, p >= 2) quad geometry: new vertices must take the
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_quad).
+    // For an order-2 parent the edge midpoint *is* a parent geometry dof, so
+    // the evaluation reads it back exactly.
+    let qg = super::curved_quad::QuadQkGeometry::new(mesh);
+    // Edge midpoint coordinates for a straight-sided (or order-1 geometry)
+    // mesh: the average of the two vertex coordinates — MFEM's edge
+    // transformation, which uses `vertices`.
+    if qg.is_none() {
+        for (ei, &(a, b)) in edge_list.iter().enumerate() {
+            let vi = n_orig_verts + ei;
+            let ca = &mesh.coords[a as usize * dim..(a as usize + 1) * dim];
+            let cb = &mesh.coords[b as usize * dim..(b as usize + 1) * dim];
+            new_coords[vi * dim] = (ca[0] + cb[0]) * 0.5;
+            new_coords[vi * dim + 1] = (ca[1] + cb[1]) * 0.5;
+        }
     }
 
     // Per-element geometry propagation (if the parent mesh carries one).
@@ -1118,6 +1127,10 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
 
     let mut child_conn = Vec::with_capacity(n_elems * 4 * npe);
     let mut new_tags = Vec::with_capacity(n_elems * 4);
+    // Fine edges whose curved midpoint coordinate has been written (first
+    // touch wins, matching MFEM's `mark` rule) — only used when `qg` is Some.
+    let mut curved_edges: std::collections::HashSet<(NodeId, NodeId)> =
+        std::collections::HashSet::new();
 
     for e in 0..n_elems {
         let base = e * npe;
@@ -1132,19 +1145,44 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         // Parent element's own geometry nodes (g[i] corresponds to v[i]).
         let g = parent_geom.as_ref().map(|pg| pg[e]);
 
-        // Center coordinate: from the parent element's own geometry (MFEM
-        // evaluates the element transformation at the center).  Falls back to
-        // the folded-vertex average when no per-element geometry exists.
+        // Center coordinate: for order-p >= 2 geometry the parent field
+        // evaluated at the reference center (an exact dof pick for p = 2);
+        // otherwise the average of the four corner geometry dofs, falling back
+        // to the folded-vertex average when no per-element geometry exists.
         let cidx = center_idx as usize;
-        for d in 0..dim {
-            let mut s = 0.0;
-            for gi in 0..4 {
-                s += match &g {
-                    Some(pg) => pg[gi][d],
-                    None => mesh.coords[v[gi] as usize * dim + d],
-                };
+        match &qg {
+            Some(q) => {
+                let [x, y] = q.center_pick(e as ElemId);
+                new_coords[cidx * dim] = x;
+                new_coords[cidx * dim + 1] = y;
             }
-            new_coords[cidx * dim + d] = s / 4.0;
+            None => {
+                for d in 0..dim {
+                    let mut s = 0.0;
+                    for gi in 0..4 {
+                        s += match &g {
+                            Some(pg) => pg[gi][d],
+                            None => mesh.coords[v[gi] as usize * dim + d],
+                        };
+                    }
+                    new_coords[cidx * dim + d] = s / 4.0;
+                }
+            }
+        }
+
+        // Curved order-p >= 2 geometry: the fine edge midpoints are the parent
+        // field evaluated at the edge midpoints (an exact dof read for p = 2).
+        if let Some(q) = &qg {
+            for li in 0..4 {
+                let (a, b) = QUAD_EDGES[li];
+                let key = (v[a].min(v[b]), v[a].max(v[b]));
+                if curved_edges.insert(key) {
+                    let vi = n_orig_verts + edge_set[&key];
+                    let [x, y] = q.edge_pick(e as ElemId, li);
+                    new_coords[vi * dim] = x;
+                    new_coords[vi * dim + 1] = y;
+                }
+            }
         }
 
         // Global edge-midpoint indices for local edges 0..3
@@ -1164,35 +1202,39 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         // 3 (upper-left):  e[3],  center, e[2], v[3]
         child_conn.extend_from_slice(&[e_mid[3], center_idx, e_mid[2], v[3]]);
 
-        // Child geometry (per-element independent nodes), when the parent has
-        // geometry.  The child nodes follow the same H1 vertex ordering as
-        // `child_conn` (v0=LL, v1=LR, v2=UR, v3=UL); parent geometry nodes are
-        // already in that order (the reader normalised the L2 lexicographic
-        // order to H1).  H1 edges: bottom=(0,1), right=(1,2), top=(2,3),
-        // left=(3,0).
+        // Child geometry (per-element independent nodes), for order-1 parents
+        // only (order-p >= 2 geometry is transferred by
+        // `curved_quad::build_refined_quad_geometry` with shared dofs, exactly
+        // MFEM's `nodes` update).  The child nodes follow the same H1 vertex
+        // ordering as `child_conn` (v0=LL, v1=LR, v2=UR, v3=UL); parent
+        // geometry nodes are already in that order (the reader normalised the
+        // L2 lexicographic order to H1).  H1 edges: bottom=(0,1),
+        // right=(1,2), top=(2,3), left=(3,0).
         if let Some(pg) = &g {
-            let em = [
-                avg2(&pg[0], &pg[1]), // bottom edge midpoint
-                avg2(&pg[1], &pg[2]), // right edge midpoint
-                avg2(&pg[2], &pg[3]), // top edge midpoint
-                avg2(&pg[3], &pg[0]), // left edge midpoint
-            ];
-            // MFEM RefinementMatrix column order is the L2-lex DOF order
-            // ((0,0),(1,0),(0,1),(1,1)) — H1 pg order is (0,0),(1,0),(1,1),(0,1),
-            // so the last two swap.  The 0.25-weighted column sums differ by
-            // 1 ulp depending on order (bit-identical target verified).
-            let cc = avg4(&pg[0], &pg[1], &pg[3], &pg[2]);
-            let children: [[[f64; 2]; 4]; 4] = [
-                [pg[0], em[0], cc, em[3]], // LL: v0, bottom-mid, center, left-mid
-                [em[0], pg[1], em[1], cc], // LR: bottom-mid, v1, right-mid, center
-                [cc, em[1], pg[2], em[2]], // UR: center, right-mid, v2, top-mid
-                [em[3], cc, em[2], pg[3]], // UL: left-mid, center, top-mid, v3
-            ];
-            for c in children {
-                for node in c {
-                    child_geom_conn.push((child_geom_coords.len() / dim) as NodeId);
-                    child_geom_coords.push(node[0]);
-                    child_geom_coords.push(node[1]);
+            if qg.is_none() {
+                let em = [
+                    avg2(&pg[0], &pg[1]), // bottom edge midpoint
+                    avg2(&pg[1], &pg[2]), // right edge midpoint
+                    avg2(&pg[2], &pg[3]), // top edge midpoint
+                    avg2(&pg[3], &pg[0]), // left edge midpoint
+                ];
+                // MFEM RefinementMatrix column order is the L2-lex DOF order
+                // ((0,0),(1,0),(0,1),(1,1)) — H1 pg order is (0,0),(1,0),(1,1),(0,1),
+                // so the last two swap.  The 0.25-weighted column sums differ by
+                // 1 ulp depending on order (bit-identical target verified).
+                let cc = avg4(&pg[0], &pg[1], &pg[3], &pg[2]);
+                let children: [[[f64; 2]; 4]; 4] = [
+                    [pg[0], em[0], cc, em[3]], // LL: v0, bottom-mid, center, left-mid
+                    [em[0], pg[1], em[1], cc], // LR: bottom-mid, v1, right-mid, center
+                    [cc, em[1], pg[2], em[2]], // UR: center, right-mid, v2, top-mid
+                    [em[3], cc, em[2], pg[3]], // UL: left-mid, center, top-mid, v3
+                ];
+                for c in children {
+                    for node in c {
+                        child_geom_conn.push((child_geom_coords.len() / dim) as NodeId);
+                        child_geom_coords.push(node[0]);
+                        child_geom_coords.push(node[1]);
+                    }
                 }
             }
         }
@@ -1218,7 +1260,7 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         new_face_tags.push(tag);
     }
 
-    Mesh {
+    let mut new_mesh = Mesh {
         coords: new_coords,
         conn: child_conn,
         elem_tags: new_tags,
@@ -1234,7 +1276,13 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
         edge_conn: vec![],
         edge_to_elem: vec![],
         nc_vertex_view: None,
-        geometry: parent_geom.map(|_| {
+        geometry: None,
+        vertex_parents: vec![],
+    };
+    if qg.is_some() {
+        new_mesh.geometry = super::curved_quad::build_refined_quad_geometry(mesh, &new_mesh);
+    } else {
+        new_mesh.geometry = parent_geom.map(|_| {
             let n_geom = child_geom_coords.len() / dim;
             GeometryData {
                 order: 1,
@@ -1243,9 +1291,9 @@ fn refine_uniform_quad4(mesh: &Mesh<2>) -> Mesh<2> {
                 coords: child_geom_coords,
                 n_nodes: n_geom,
             }
-        }),
-    vertex_parents: vec![],
+        });
     }
+    new_mesh
 }
 
 /// Average of two 2-D points.
@@ -1284,6 +1332,15 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
             m
         }
         ElementType::Hex20 | ElementType::Hex27 => {
+            // Documented gap (D166 follow-up): fem-rs refines Hex20/Hex27 by
+            // keeping the first 8 corner nodes and re-running the Hex8 path,
+            // so the children are Hex8 and any high-order `nodes` geometry is
+            // dropped (`geometry: None` below).  MFEM instead splits a Hex27
+            // into eight Hex27 children with interpolated mid-edge/face/center
+            // nodes.  No code path currently produces a curved Hex20/Hex27
+            // mesh (the MFEM reader stores curved hexahedra as Hex8 + `nodes`),
+            // so nothing consumes the dropped table today; revisit if a
+            // generator starts emitting quadratic+ hexahedra.
             let n_elems = mesh.n_elems();
             let npe = mesh.elem_type.nodes_per_element();
             let mut hex8_conn = Vec::with_capacity(n_elems * 8);
@@ -4300,6 +4357,67 @@ pub(crate) fn hex_face_key(ns: [NodeId; 4]) -> [NodeId; 4] {
     k
 }
 
+/// MFEM `UniformRefinement3D_base`'s new-vertex id assignment for a pure-hex
+/// mesh (`mesh/mesh.cpp:10531`): the fine `vertices` array is laid out as
+///
+/// ```text
+///   0 .. NV-1                  unchanged coarse vertices
+///   NV .. NV+NE-1              midpoint of global edge E   (`oedge + E`)
+///   NV+NE .. NV+NE+NF-1        center of global quad face F (`oface + F`)
+///   NV+NE+NF .. NV+NE+NF+NC-1  body center of hex C         (`oelem + C`)
+/// ```
+///
+/// The global edge / face ids come from `GetElementToEdgeTable` /
+/// `GetElementToFaceTable`: both are **first-touch** over the elements in
+/// order, each element's local entities in `Geometry::Constants<CUBE>` order
+/// (`Constants::Edges` / `Constants::FaceVert`; `mesh/mesh.cpp:8526`,
+/// `Mesh::GenerateFaces`).  `local_edges_hex` already enumerates in that
+/// order; `local_faces_hex` does not (its z=1 face comes second while MFEM's
+/// comes last), so the face pass walks MFEM's sequence below.  The child
+/// hexahedra reference the new vertices through these ids, and MFEM's
+/// `Mesh::UniformRefinement` ends with `UpdateNodes` → `SetVerticesFromNodes`,
+/// which overwrites the *values* (the averaged coordinates) with the refined
+/// `nodes` dofs but keeps this numbering — so a refined curved mesh written to
+/// a file carries these ids in its `vertices`/`elements`/`boundary` sections.
+struct MfemHexRefineIds {
+    edge: HashMap<(NodeId, NodeId), u32>,
+    face: HashMap<[NodeId; 4], u32>,
+    oedge: u32,
+    oface: u32,
+    oelem: u32,
+}
+
+impl MfemHexRefineIds {
+    /// First-touch global edge / face numbering of `mesh` (every element is a
+    /// hexahedron), with the `oedge`/`oface`/`oelem` bases of the refinement.
+    fn build(mesh: &Mesh<3>) -> Self {
+        // MFEM `Constants<CUBE>::FaceVert` as a sequence of local faces —
+        // z0, y0, x1, y1, x0, z1 — expressed as indices into
+        // `local_faces_hex` (z0, z1, y0, y1, x0, x1).
+        const MFEM_FACE_SEQ: [usize; 6] = [0, 2, 5, 3, 4, 1];
+        let mut edge: HashMap<(NodeId, NodeId), u32> = HashMap::new();
+        let mut face: HashMap<[NodeId; 4], u32> = HashMap::new();
+        for e in 0..mesh.n_elems() as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for (a, b) in local_edges_hex() {
+                let k = edge_key(ns[a], ns[b]);
+                let next = edge.len() as u32;
+                edge.entry(k).or_insert(next);
+            }
+            for &fi in &MFEM_FACE_SEQ {
+                let f = local_faces_hex()[fi];
+                let k = hex_face_key([ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]]);
+                let next = face.len() as u32;
+                face.entry(k).or_insert(next);
+            }
+        }
+        let oedge = mesh.n_nodes() as u32;
+        let oface = oedge + edge.len() as u32;
+        let oelem = oface + face.len() as u32;
+        MfemHexRefineIds { edge, face, oedge, oface, oelem }
+    }
+}
+
 /// Non-conforming (hanging-node) refinement for a 3-D Hex8 mesh.
 ///
 /// Each marked Hex8 is split into **8 child Hex8s** by:
@@ -4358,6 +4476,24 @@ pub fn refine_nonconforming_hex(
     // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
     // SetVerticesFromNodes), not straight averages (see amr::curved_hex).
     let geo = super::curved_hex::HexQkGeometry::new(mesh);
+    // MFEM's canonical new-vertex numbering (`oedge + E` / `oface + F` /
+    // `oelem + C`, see `MfemHexRefineIds`).  Reproduced where a written file
+    // pins it down — a *curved* mesh under *uniform* refinement keeps its
+    // `nodes` table, so the refined file carries these ids in every section.
+    // Straight-sided meshes keep the historical first-touch numbering (the
+    // straight-refinement regression outputs pin it), and partial refinement
+    // would leave holes in the dense id space, so neither switches.
+    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+        Some(MfemHexRefineIds::build(mesh))
+    } else {
+        None
+    };
+    if let Some(ids) = &mfem_ids {
+        // Dense id space: every coarse edge/face/hex gains exactly one vertex
+        // (all elements are marked), so grow the coordinate array to its final
+        // length up front; the allocation below fills every slot.
+        new_coords.resize((ids.oelem as usize + n_elems) * 3, 0.0);
+    }
 
     for &e in marked {
         let ns = mesh.elem_nodes(e);
@@ -4374,8 +4510,18 @@ pub fn refine_nonconforming_hex(
                         [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1]), 0.5 * (xa[2] + xb[2])]
                     }
                 };
-                new_coords.extend_from_slice(&xyz);
-                let id = next_node; next_node += 1; id
+                match &mfem_ids {
+                    // MFEM `AverageVertices(vv, 2, oedge + e[ei])`.
+                    Some(ids) => {
+                        let id = ids.oedge + ids.edge[&key];
+                        new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                        id
+                    }
+                    None => {
+                        new_coords.extend_from_slice(&xyz);
+                        let id = next_node; next_node += 1; id
+                    }
+                }
             });
         }
 
@@ -4395,8 +4541,18 @@ pub fn refine_nonconforming_hex(
                         [x / 4.0, y / 4.0, z / 4.0]
                     }
                 };
-                new_coords.extend_from_slice(&xyz);
-                let id = next_node; next_node += 1; id
+                match &mfem_ids {
+                    // MFEM `AverageVertices(vv, 4, oface + qf[fi])`.
+                    Some(ids) => {
+                        let id = ids.oface + ids.face[&fkey];
+                        new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                        id
+                    }
+                    None => {
+                        new_coords.extend_from_slice(&xyz);
+                        let id = next_node; next_node += 1; id
+                    }
+                }
             });
         }
 
@@ -4413,9 +4569,25 @@ pub fn refine_nonconforming_hex(
                     [x / 8.0, y / 8.0, z / 8.0]
                 }
             };
-            new_coords.extend_from_slice(&xyz);
-            let id = next_node; next_node += 1; id
+            match &mfem_ids {
+                // MFEM `AverageVertices(v, 8, oelem + he)` (he = e: pure hex).
+                Some(ids) => {
+                    let id = ids.oelem + e;
+                    new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                    id
+                }
+                None => {
+                    new_coords.extend_from_slice(&xyz);
+                    let id = next_node; next_node += 1; id
+                }
+            }
         });
+    }
+    if let Some(ids) = &mfem_ids {
+        // The canonical ids filled every slot; keep `next_node` consistent for
+        // the (in uniform refinement unreachable) inline boundary face center.
+        next_node = ids.oelem + n_elems as NodeId;
+        debug_assert_eq!(next_node as usize, new_coords.len() / 3);
     }
 
     // ── 3. Build new element connectivity ────────────────────────────────────

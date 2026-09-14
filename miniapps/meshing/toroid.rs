@@ -23,21 +23,22 @@
 //!   For hexahedra this reproduces MFEM's file exactly (fem-rs's `HexQk`
 //!   geometry element and MFEM's `H1_HexahedronElement` share the closed
 //!   Gauss-Lobatto lattice, so the re-interpolation below is exact).  For
-//!   **wedges** it does not, and the difference is *not* a numbering bug: MFEM's
-//!   `H1_WedgeElement` places its nodes on the Gauss-Lobatto points
+//!   **wedges** the same used to be a real gap: MFEM's `H1_WedgeElement` places
+//!   its nodes on the Gauss-Lobatto points
 //!   (`0.276393202250021` / `0.723606797749979` at `p = 3`) while fem-rs's prism
-//!   geometry element `PrismPk` is equispaced (`1/3` / `2/3`) — the same family
-//!   split the project hit for tetrahedra (D49/D152).  The writer
-//!   (`fem_io::mfem::prism_nodes_dof_values`) re-evaluates the mesh's own
-//!   `PrismPk` geometry at MFEM's nodes, so the file describes exactly the mesh
-//!   fem-rs assembles with, in MFEM's numbering — but it is a *different*
-//!   order-3 interpolant of the same torus map than C++'s:
-//!   measured on the default element, `|fem-rs − C++| = 7.2e-5` at `p = 3`
-//!   (`5.3e-6` at `p = 4`, `0` at `p = 2`, where the two lattices coincide).
-//!   Closing that gap needs the core prism geometry element to move to
-//!   Gauss-Lobatto (the way `H1TetPk` did for tets); until then the wedge
-//!   output is a valid MFEM order-3 torus mesh, but not a byte-for-byte match
-//!   of the C++ file.
+//!   geometry element `PrismPk` was equispaced (`1/3` / `2/3`) — the same family
+//!   split the project hit for tetrahedra (D49/D152), measured at
+//!   `|fem-rs − C++| = 7.2e-5` at `p = 3`.
+//!   **Round 34 closed it (D164)**: `PrismPk` now uses the Gauss-Lobatto lattice
+//!   (`H1_TriangleElement × H1_SegmentElement`, `fem/fe/fe_h1.cpp:863`), so the
+//!   writer's re-interpolation is the identity polynomial and the default
+//!   `-o 3` wedge file matches a full-precision C++ reference to
+//!   **8.1e-15** (`2.7e-16` at `p = 2`, `6.3e-14` at `p = 4`; hexahedra
+//!   unchanged at `2.8e-16`).  The torus volume matches C++ (0.326483).
+//!   What deliberately did **not** move is the slot *order*: `PrismPk` stays
+//!   layer-major while MFEM's *element* dofs are entity-ordered — the field-side
+//!   entity order lives in `H1PrismPk` (`crates/element/src/lagrange/prism.rs`,
+//!   D168), and the io writer pairs the mesh table with layer-major `PrismPk`.
 //! * `Mesh::FinalizeTopology()` is reproduced locally by `generate_boundary`:
 //!   MFEM's default `generate_bdr = true` synthesizes the boundary elements
 //!   from the element faces, while fem-rs's `Mesh::finalize_topology` only
@@ -53,10 +54,13 @@
 //!   exits with code 3 (see `require_supported_combination`).  For a *linear*
 //!   mesh `-dm` is a no-op in the C++ miniapp as well (both `SetCurvature`
 //!   calls are guarded by `order_ > 1`).
-//! * `-rs > 0` together with `-o > 1` exits with code 3: fem-rs's
-//!   `refine_uniform_3d` drops the geometry table (`geometry: None`), so the
-//!   refined mesh would be written linear-sided while the C++ mesh refines its
-//!   curvature together with the mesh.
+//! * `-rs > 0` together with `-o > 1` is ported for **hexahedra**: the
+//!   refinement (`fem_mesh::amr::refine_uniform_3d` → `refine_nonconforming_hex`
+//!   + `amr::curved_hex`) interpolates the order-`p` `nodes` table onto every
+//!   child, exactly MFEM's `UniformRefinement` → `UpdateNodes`, so the refined
+//!   mesh stays curved.  For **wedges** the refinement still drops the geometry
+//!   table, so `-e 0 -rs > 0 -o > 1` exits with code 3 (see
+//!   `require_supported_combination`).
 //! * `-vis`/`-p` are parsed and ignored (no GLVis socket).
 //!
 //! The output file name follows the C++ rule
@@ -304,8 +308,8 @@ fn apply_transform(mesh: &mut Mesh<3>, f: &impl Fn(&[f64; 3]) -> [f64; 3]) {
 }
 
 /// fem-rs gap guard: the combinations of the C++ miniapp this port cannot
-/// reproduce yet.  Everything else (any `-o`, both element types, `-dm` for
-/// hexahedra) is written in MFEM's own `nodes` numbering.
+/// reproduce yet.  Everything else (any `-o`, both element types, `-dm` and
+/// `-rs > 0` for hexahedra) is written in MFEM's own `nodes` numbering.
 ///
 /// Gap list (exit 3):
 ///
@@ -315,10 +319,10 @@ fn apply_transform(mesh: &mut Mesh<3>, f: &impl Fn(&[f64; 3]) -> [f64; 3]) {
 ///   `fem_io::mfem`'s writer — it implements the L2 numbering of hexahedra,
 ///   quadrilaterals and triangles only, and refuses anything else rather than
 ///   emit a scrambled section.
-/// * `-rs > 0 -o >1`: `fem_mesh::amr::refine_uniform_3d` returns a mesh with
-///   `geometry: None`, so a uniformly refined curved mesh would be written
-///   straight-sided.  MFEM's `UniformRefinement` refines the curvature
-///   together with the mesh.
+/// * `-e 0 -rs >0 -o >1`: `fem_mesh::amr::refine_prism6_uniform` returns a mesh
+///   with `geometry: None`, so a uniformly refined curved wedge mesh would be
+///   written straight-sided.  MFEM's `UniformRefinement` refines the curvature
+///   together with the mesh.  (Hexahedra refine their curvature: `-e 1` runs.)
 fn require_supported_combination(
     order: u8,
     dg_mesh: bool,
@@ -338,15 +342,24 @@ which is ported."
         );
         std::process::exit(3);
     }
-    if ser_ref_levels > 0 && order > 1 {
+    // Hexahedra: curved uniform refinement is ported (`fem_mesh::amr`'s
+    // `refine_nonconforming_hex` + `amr::curved_hex` interpolate the order-`p`
+    // HexQk `nodes` table onto every child, exactly MFEM's
+    // `UniformRefinement` → `UpdateNodes`), so `-e 1 -rs > 0 -o > 1` runs.
+    // Wedges: `refine_prism6_uniform` rebuilds the mesh with
+    // `Mesh::uniform(...)` (no `geometry` table), so a refined curved wedge
+    // mesh would come out straight-sided.
+    if ser_ref_levels > 0 && order > 1 && el_type == ElementType::Prism6 {
         eprintln!(
             "toroid (Rust port): `-rs {ser_ref_levels}` together with `-o {order}` is not \
-ported: fem-rs's `refine_uniform_3d` (crates/mesh/src/amr) drops the high-order geometry table \
-(`geometry: None`), so the refined mesh would be written straight-sided while MFEM's \
-`UniformRefinement` refines the curved nodes along with the mesh.\n\
-Gap list (exit 3): [1] curved uniform refinement in `crates/mesh/src/amr` (the geometry table \
-has to be interpolated onto the child elements, and the refined boundary tables rebuilt).  Use \
-`-rs 0` for a curved mesh, or `-o 1` for the refined linear one."
+ported for wedges (`-e 0`): fem-rs's `refine_prism6_uniform` (crates/mesh/src/amr) rebuilds the \
+refined mesh without the high-order geometry table (`geometry: None`), so the refined mesh would \
+be written straight-sided while MFEM's `UniformRefinement` refines the curved nodes along with \
+the mesh.  (The hexahedral path `-e 1` is ported.)\n\
+Gap list (exit 3): [1] curved uniform refinement for prisms in `crates/mesh/src/amr` (the \
+`PrismPk` geometry table has to be interpolated onto the child elements, and the refined \
+boundary tables rebuilt).  Use `-rs 0` for a curved wedge mesh, `-o 1` for the refined linear \
+one, or `-e 1` for the hexahedral stack, which supports `-rs > 0 -o > 1`."
         );
         std::process::exit(3);
     }
@@ -515,16 +528,8 @@ fn main() {
         mesh.n_faces(),
         mesh.n_nodes()
     );
-    // The wedge node *values* are the same torus map interpolated on a
-    // different lattice than MFEM's (see the module docs): say so, so the file
-    // is not mistaken for a byte-for-byte copy of the C++ one.
-    if el_type == ElementType::Prism6 && order > 2 {
-        eprintln!(
-            "note: wedge order {order} > 2 — fem-rs's prism geometry element (`PrismPk`) is \
-equispaced while MFEM's `H1_WedgeElement` is Gauss-Lobatto, so the `nodes` values are this \
-mesh's own geometry sampled at MFEM's nodes (measured |Δ| vs the C++ file: 7.2e-5 for the \
-defaults, up to ~4e-4 for large elements; `-o 2` and every hexahedral run match exactly).  \
-Topology, numbering and the section structure are MFEM's."
-        );
-    }
+    // The wedge node *values* were historically the same torus map interpolated
+    // on a different lattice than MFEM's (see the module docs): that caveat is
+    // gone since round 34 (D164 — `PrismPk` is Gauss-Lobatto now), so the
+    // high-order wedge file is faithful and nothing needs disclaiming.
 }
