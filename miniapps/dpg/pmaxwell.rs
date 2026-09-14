@@ -19,11 +19,13 @@
 //!
 //! # Gap list (what fem-rs is missing)
 //!
-//! 1. **No parallel complex DPG.** MFEM uses `ParComplexDPGWeakForm`
-//!    (`util/pcomplexweakform.hpp`). fem-rs has the serial
-//!    `ComplexDPGWeakForm` (exercised by `miniapps/dpg/dpg_maxwell_2d.rs` /
-//!    `dpg_maxwell_3d.rs`) and the real-valued `ParDpgWeakForm`
-//!    ([`fem_parallel::par_dpg_weakform`]), but not the combination.
+//! 1. **The complex parallel SOLVE is now in** (round 35, `pacoustics`):
+//!    `ParComplexDPGWeakForm` forms the complex `Pᴴ A P` / `Pᴴ b` and the
+//!    statically condensed system, and
+//!    [`fem_parallel::par_complex_solver::par_solve_complex_pcg`] +
+//!    [`fem_parallel::par_complex_solver::ComplexBlockDiagGs`] solve it — the
+//!    MFEM `ComplexBlockDiagonalPreconditioner` + `CGSolver` counterpart.
+//!    What is still Maxwell-specific:
 //! 2. **ND-trace parallel numbering.** `ParDpgWeakForm` does not number
 //!    `ND_Trace_FECollection` blocks (the 3-D `Ê, Ĥ` and the 2-D `Ê` need
 //!    edge-shared H(curl) traces with MFEM's orientation signs); the code
@@ -42,6 +44,8 @@
 //!
 //! * `pdiffusion` — verified 1:1 against the C++ MPI reference for `-np 1` and
 //!   `-np 2` (dofs, L2 error, DPG residual).
+//! * `pacoustics` — verified 1:1 against the C++ MPI reference (`-np 1`/`-np 2`
+//!   defaults, `-sref 1`, `-sc`, `-prob 1`; dofs, L2 error, DPG residual).
 //! * Serial complex DPG: `dpg_maxwell_2d`, `dpg_maxwell_3d`.
 //!
 //! Usage:
@@ -51,10 +55,12 @@
 use std::process::exit;
 
 const GAPS: &[&str] = &[
-    "no parallel COMPLEX DPG: MFEM uses ParComplexDPGWeakForm \
-     (miniapps/dpg/util/pcomplexweakform.{hpp,cpp}); fem-rs has the serial \
-     ComplexDPGWeakForm and the real ParDpgWeakForm, but no complex parallel \
-     trace numbering / real-doubled P^T A P / complex essential-DOF elimination",
+    "the complex parallel DPG solve machinery landed (round 35: \
+     fem_parallel::par_complex_dpg_weakform P^H A P + static condensation, \
+     fem_parallel::par_complex_solver par_solve_complex_pcg + ComplexBlockDiagGs, \
+     verified by pacoustics); still Maxwell-specific: the ND-trace numbering, the \
+     3-D H1-trace numbering, the PML coefficients and the spatially varying \
+     matrix coefficients below",
     "ND-trace (H(curl) skeleton) parallel numbering is missing: ParDpgWeakForm \
      numbers 2-D H1-trace and face-discontinuous trace blocks only; the 3-D E-hat/H-hat \
      and the 2-D E-hat are ND_Trace_FECollection blocks with MFEM edge-orientation \

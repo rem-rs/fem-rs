@@ -129,6 +129,7 @@ pub mod par_dpg_trace;
 pub mod par_dpg_weakform;
 pub mod par_dpg_numbering;
 pub mod par_complex_dpg_weakform;
+pub mod par_complex_solver;
 pub mod par_mesh;
 pub mod par_mixed_assembler;
 pub mod par_ras;
@@ -190,6 +191,7 @@ pub use par_ras::{
 };
 pub use par_partition::{partition_mesh, partition_mesh_replicated, partition_mesh_streaming};
 pub use par_solver::{par_solve_cg, par_solve_gmres_block_diag, par_solve_gmres_jacobi, par_solve_pcg_jacobi, par_solve_pcg_precond, par_solve_minres, ParIlu0Precond};
+pub use par_complex_solver::{par_solve_complex_pcg, ComplexBlockDiagGs};
 pub use par_space::ParallelFESpace;
 pub use par_vector::ParVector;
 pub use par_vector::ParComplexVector;

@@ -19,11 +19,13 @@
 //! * 2-D trace numbering (H1 + face-discontinuous) and the complex
 //!   `Pᴴ A P`/`Pᴴ b` split: implemented (the 3-D H1/ND trace numbering
 //!   panics with a clear message, same as the real form).
-//! * Static condensation: forwarded to the serial form for assembly, but
-//!   [`Self::form_linear_system`] requires the **uncondensed** system (the
-//!   C++ `pacoustics` default) — the condensed parallel path is not wired.
+//! * Static condensation: both the uncondensed and the statically condensed
+//!   parallel systems are wired ([`Self::form_linear_system`] /
+//!   [`Self::recover_fem_solution`], mirrored on the real
+//!   [`ParDpgWeakForm`](crate::par_dpg_weakform::ParDpgWeakForm)).
 //! * `-pref`/`-pmg`/`Update()`: not implemented (same gaps as the real form).
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use fem_assembly::complex_dpg_weakform::ComplexDPGWeakForm;
@@ -322,8 +324,8 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
 
     // ── linear system ───────────────────────────────────────────────────────
 
-    /// `FormLinearSystem(ess_tdof_list, x, A, X, B)` for the **uncondensed**
-    /// system (the `pacoustics` default).
+    /// `FormLinearSystem(ess_tdof_list, x, A, X, B)` — the uncondensed system
+    /// (the `pacoustics` default) **and** the statically condensed one.
     ///
     /// * `ess_global` — absolute global DOF ids of the essential (Dirichlet)
     ///   DOFs.
@@ -334,7 +336,10 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
     /// The elimination follows MFEM's `ParComplexDPGWeakForm`: the essential
     /// columns of the rank-local matrix are eliminated *before* `Pᴴ A P`, a
     /// unit (real) diagonal is placed on the essential rows with the
-    /// prescribed complex value on the RHS.
+    /// prescribed complex value on the RHS.  Under static condensation the
+    /// rank-local form hands back its Schur complement over the exposed
+    /// (trace) blocks, whose layout matches the condensed numbering built by
+    /// [`Self::assemble`].
     ///
     /// Returns the formed system, the initial guess `X` (owned part of `Pᴴ x`,
     /// as a full local complex vector) and the full serial-layout prescribed
@@ -346,12 +351,6 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         x_local_i: &[f64],
     ) -> (ParComplexDpgSystem, Vec<f64>, Vec<f64>) {
         assert!(self.built, "assemble() must run before form_linear_system()");
-        assert!(
-            !self.condensed,
-            "ParComplexDPGWeakForm::form_linear_system: the statically condensed parallel \
-             system is not wired yet — run with static condensation disabled (the C++ \
-             pacoustics default)"
-        );
         let ess_set: std::collections::BTreeSet<u32> = ess_global.iter().copied().collect();
         let mut ess_local: Vec<usize> = Vec::new();
         for blk in &self.blocks {
@@ -494,13 +493,22 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
     /// `RecoverFEMSolution(X, x)`: lift the global owned solution back to the
     /// rank-local (ghost-filled) trial vector in the blocked `[re | im]`
     /// layout the serial [`ComplexDPGWeakForm`] uses for post-processing.
+    /// Under static condensation the serial form back-solves the private
+    /// (volume-block) DOFs element-wise.
     pub fn recover_fem_solution(&self, x_owned: &[f64]) -> Vec<f64> {
         assert!(self.built, "assemble() must run before recover_fem_solution()");
         let n_compact = self.n_owned + self.n_ghost;
         let half = n_compact;
         let mut data = vec![0.0_f64; 2 * half];
+        // `x_owned` is the stacked owned solution `[re(n_owned); im(n_owned)]`.
         let nr = self.n_owned.min(x_owned.len());
         data[..nr].copy_from_slice(&x_owned[..nr]);
+        if x_owned.len() > self.n_owned {
+            let ni = self
+                .n_owned
+                .min(x_owned.len() - self.n_owned);
+            data[half..half + ni].copy_from_slice(&x_owned[self.n_owned..self.n_owned + ni]);
+        }
         if self.n_ghost > 0 {
             self.ghost_exchange.forward(&self.comm, &mut data[..half]);
             self.ghost_exchange.forward(&self.comm, &mut data[half..]);
@@ -514,7 +522,151 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
                 u[n_target + s] = data[half + p as usize];
             }
         }
-        u
+        // The serial form unstacks `[re | im]` and (condensed case) back-solves
+        // the volume blocks.
+        let (out_r, out_i) = self.local.recover_fem_solution(&u);
+        let mut out = out_r;
+        out.extend_from_slice(&out_i);
+        out
+    }
+
+    /// Local boundary-face DOFs of trial block `b` with their physical
+    /// points: `(absolute global dof, point)` — mirror of
+    /// [`crate::par_dpg_weakform::ParDpgWeakForm::trace_boundary_dofs`].
+    ///
+    /// A face is a *global* boundary face iff it has exactly one adjacent
+    /// element, so every rank holding it sees it as a boundary face — the
+    /// sets computed here are consistent across ranks without any exchange.
+    pub fn trace_boundary_dofs(&self, b: usize) -> Vec<(u32, Vec<f64>)> {
+        let bi = self
+            .blocks
+            .iter()
+            .position(|blk| blk.trial == b)
+            .expect("trace_boundary_dofs: block not in the system");
+        let blk = &self.blocks[bi];
+        let sk = self.local.skeleton(b);
+        let mut out = Vec::new();
+        for f in 0..sk.n_faces() {
+            if !sk.is_boundary_face(f) {
+                continue;
+            }
+            for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
+                if d >= blk.size || blk.gof[d] == INACTIVE {
+                    continue;
+                }
+                out.push((
+                    blk.global_base as u32 + blk.gof[d],
+                    self.local.face_dof_point(&sk, f, k),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Write prescribed values into the rank-local vector for every essential
+    /// DOF present locally, using `value(point)` — mirror of
+    /// [`crate::par_dpg_weakform::ParDpgWeakForm::fill_essential_values`].
+    ///
+    /// `pairs` must be the globally merged `(global dof, point)` list of
+    /// [`Self::trace_boundary_dofs`].  `x_local` is in the **full** serial
+    /// trial layout.
+    pub fn fill_essential_values(
+        &self,
+        x_local_r: &mut [f64],
+        x_local_i: &mut [f64],
+        pairs: &[(u32, Vec<f64>)],
+        value: &dyn Fn(&[f64]) -> (f64, f64),
+    ) {
+        let mut by_id: HashMap<u32, (f64, f64)> = HashMap::new();
+        for (g, p) in pairs {
+            by_id.entry(*g).or_insert_with(|| value(p));
+        }
+        for blk in &self.blocks {
+            for d in 0..blk.size {
+                if blk.gof[d] == INACTIVE {
+                    continue;
+                }
+                let g = blk.global_base as u32 + blk.gof[d];
+                if let Some(&(vr, vi)) = by_id.get(&g) {
+                    let t = blk.full_base + d;
+                    if t < x_local_r.len() {
+                        x_local_r[t] = vr;
+                        x_local_i[t] = vi;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Merge `(global dof, point)` pairs across all ranks (lowest rank wins) —
+    /// mirror of [`crate::par_dpg_weakform::ParDpgWeakForm::merge_dof_points`].
+    pub fn merge_dof_points(&self, pairs: &[(u32, Vec<f64>)]) -> Vec<(u32, Vec<f64>)> {
+        let mut map: BTreeMap<u32, Vec<f64>> = BTreeMap::new();
+        for (g, p) in pairs {
+            map.entry(*g).or_insert_with(|| p.clone());
+        }
+        if self.comm.size() > 1 {
+            let mut payload = Vec::with_capacity(pairs.len() * 12);
+            for (g, p) in pairs {
+                payload.extend_from_slice(&g.to_le_bytes());
+                payload.extend_from_slice(&(p.len() as u32).to_le_bytes());
+                for &v in p {
+                    payload.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            let sends: Vec<(Rank, Vec<u8>)> = (0..self.comm.size() as i32)
+                .map(|r| (r, payload.clone()))
+                .collect();
+            let mut incoming = self.comm.alltoallv_bytes(&sends);
+            incoming.sort_by_key(|(src, _)| *src);
+            for (_src, bytes) in &incoming {
+                let mut pos = 0usize;
+                while pos + 8 <= bytes.len() {
+                    let g = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+                    let n = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+                    pos += 8;
+                    let mut p = Vec::with_capacity(n);
+                    for i in 0..n {
+                        p.push(f64::from_le_bytes(
+                            bytes[pos + 8 * i..pos + 8 * i + 8].try_into().unwrap(),
+                        ));
+                    }
+                    pos += 8 * n;
+                    map.entry(g).or_insert(p);
+                }
+            }
+        }
+        map.into_iter().collect()
+    }
+
+    /// Global `‖residual‖₂` over the **owned** elements (MFEM recomputes
+    /// `sqrt(Σ_local res²)` across ranks) — mirror of
+    /// [`crate::par_dpg_weakform::ParDpgWeakForm::global_residual_norm`].
+    ///
+    /// `x_full` is the blocked `[re | im]` local trial vector produced by
+    /// [`Self::recover_fem_solution`].
+    pub fn global_residual_norm(&self, x_full: &[f64]) -> f64 {
+        let n = x_full.len() / 2;
+        let res = self.local.compute_residual(&x_full[..n], &x_full[n..]);
+        let rank = self.comm.rank();
+        let mut acc = 0.0_f64;
+        for (e, r) in res.iter().enumerate() {
+            if self.partition.elem_owner[e] == rank {
+                acc += r * r;
+            }
+        }
+        self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
+    }
+
+    /// Absolute global ids of the owned compact rows.
+    pub fn owned_global_ids(&self) -> &[u32] {
+        &self.owned_global
+    }
+
+    /// Absolute global ids of the ghost compact rows (following the owned
+    /// rows in the compact layout).
+    pub fn ghost_global_ids(&self) -> &[u32] {
+        &self.ghost_global
     }
 }
 
@@ -747,5 +899,360 @@ mod tests {
         });
         let msg = out.lock().unwrap().clone();
         assert!(msg.is_some(), "rank 0 must report: {:?}", msg);
+    }
+
+    /// Regression (r35): the **formed parallel complex system** at one rank
+    /// must equal the serial `ComplexDPGWeakForm` system entry-by-entry
+    /// (complex `Pᴴ A P` degenerates to the identity permutation at `-np 1`),
+    /// with essential elimination applied on both sides.  This mirrors the
+    /// real form's `two_rank_system_matches_serial_full_mesh`, which caught
+    /// the dropped off-diagonal block of `Pᵀ A P`.
+    #[test]
+    fn complex_np1_formed_system_matches_serial() {
+        let full = Arc::new(Mesh::<2>::unit_square_quad(4));
+        let out = Arc::new(std::sync::Mutex::new(None::<String>));
+        let out2 = Arc::clone(&out);
+        let ma = Arc::clone(&full);
+        ThreadLauncher::new(WorkerConfig::new(1)).launch(move |comm| {
+            // Serial reference (full mesh, same block table as
+            // `build_acoustics`, on the serial complex weak form).
+            let mut ser = ComplexDPGWeakForm::new((*ma).clone());
+            ser.set_quad_order((2 * 2 as usize).min(255) as u8);
+            ser.set_face_quad_order(2 + 1 - 1);
+            ser.store_matrices(true);
+            let ps_ser = ser.add_trial_scalar_space(0);
+            let us_ser = ser.add_trial_vector_space(0, 2);
+            let hatp_ser = ser.add_trial_trace_space_h1(1);
+            let hatu_ser = ser.add_trial_trace_space(0);
+            let q_ser = ser.add_test_space(VolKind::Scalar, 2);
+            let v_ser = ser.add_test_space(VolKind::HDiv, 2 - 1);
+            ser.add_trial_integrator(None, Some(Box::new(DpgMassIntegrator { q: OMEGA })), ps_ser, q_ser);
+            ser.add_trial_integrator(Some(Box::new(DpgTGradientIntegrator { q: -1.0 })), None, us_ser, q_ser);
+            ser.add_trial_integrator(Some(Box::new(DpgMixedScalarWeakGradientIntegrator { q: 1.0 })), None, ps_ser, v_ser);
+            ser.add_trial_integrator(None, Some(Box::new(DpgTVectorFEMassIntegrator { q: OMEGA })), us_ser, v_ser);
+            ser.add_trace_integrator(Some(Box::new(DpgNormalTraceIntegrator)), None, hatp_ser, v_ser);
+            ser.add_trace_integrator(Some(Box::new(DpgTraceIntegrator)), None, hatu_ser, q_ser);
+            ser.add_test_integrator(Some(Box::new(DpgDiffusionIntegrator { q: 1.0 })), None, q_ser, q_ser);
+            ser.add_test_integrator(Some(Box::new(DpgMassIntegrator { q: 1.0 })), None, q_ser, q_ser);
+            ser.add_test_integrator(Some(Box::new(DpgDivDivIntegrator { q: 1.0 })), None, v_ser, v_ser);
+            ser.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, v_ser, v_ser);
+            ser.add_test_integrator(
+                None,
+                Some(Box::new(DpgMixedVectorGradientIntegrator {
+                    q: vec![vec![-OMEGA, 0.0], vec![0.0, -OMEGA]],
+                })),
+                v_ser,
+                q_ser,
+            );
+            ser.add_test_integrator(
+                None,
+                Some(Box::new(DpgMixedVectorWeakDivergenceIntegrator {
+                    q: vec![vec![-OMEGA, 0.0], vec![0.0, -OMEGA]],
+                })),
+                q_ser,
+                v_ser,
+            );
+            ser.add_test_integrator(
+                Some(Box::new(DpgVectorFEMassIntegrator { q: OMEGA * OMEGA })),
+                None,
+                v_ser,
+                v_ser,
+            );
+            ser.add_test_integrator(
+                None,
+                Some(Box::new(DpgVectorFEDivergenceIntegrator { q: -OMEGA })),
+                q_ser,
+                v_ser,
+            );
+            ser.add_test_integrator(
+                None,
+                Some(Box::new(DpgMixedScalarWeakGradientIntegrator { q: -OMEGA })),
+                v_ser,
+                q_ser,
+            );
+            ser.add_test_integrator(
+                Some(Box::new(DpgMassIntegrator { q: OMEGA * OMEGA })),
+                None,
+                q_ser,
+                q_ser,
+            );
+            ser.assemble();
+            let sk = ser.skeleton(hatp_ser);
+            let base = ser.trial_offsets()[hatp_ser];
+            let mut ess: Vec<usize> = Vec::new();
+            for f in 0..sk.n_faces() {
+                if !sk.is_boundary_face(f) {
+                    continue;
+                }
+                for &d in sk.face_dof_list(f) {
+                    ess.push(base + d);
+                }
+            }
+            ess.sort_unstable();
+            ess.dedup();
+            let n_ser = ser.size();
+            // Nonzero plane-wave prescribed values (ω = 2π, β = ω/√2).
+            let beta = (2.0 * std::f64::consts::PI) / 2.0f64.sqrt();
+            let mut x_ser_r = vec![0.0_f64; n_ser];
+            let mut x_ser_i = vec![0.0_f64; n_ser];
+            let coords = |n: u32| ser.mesh().node_coords(n).to_vec();
+            for f in 0..sk.n_faces() {
+                if !sk.is_boundary_face(f) {
+                    continue;
+                }
+                let nodes = sk.face_nodes(f).to_vec();
+                for (k, &d) in sk.face_dof_list(f).iter().enumerate() {
+                    // linear 2-point interpolation, order-1 H1 trace
+                    let s = k as f64 / 1.0;
+                    let c0 = coords(nodes[0]);
+                    let c1 = coords(nodes[nodes.len() - 1]);
+                    let pt = [
+                        (1.0 - s) * c0[0] + s * c1[0],
+                        (1.0 - s) * c0[1] + s * c1[1],
+                    ];
+                    x_ser_r[base + d] = (beta * (pt[0] + pt[1])).cos();
+                    x_ser_i[base + d] = (beta * (pt[0] + pt[1])).sin();
+                }
+            }
+            let (ser_sys, ser_xs, ser_b) =
+                ser.form_linear_system(&ess, &x_ser_r, &x_ser_i);
+            let ser_r = &ser_sys.mat_r;
+            let ser_i = &ser_sys.mat_i;
+            let mut ser_lookup = std::collections::HashMap::<(usize, usize), (f64, f64)>::new();
+            for r in 0..ser_r.nrows {
+                for p in ser_r.row_ptr[r]..ser_r.row_ptr[r + 1] {
+                    ser_lookup.insert((r, ser_r.col_idx[p] as usize), (ser_r.values[p], 0.0));
+                }
+                for p in ser_i.row_ptr[r]..ser_i.row_ptr[r + 1] {
+                    ser_lookup
+                        .entry((r, ser_i.col_idx[p] as usize))
+                        .and_modify(|e| e.1 = ser_i.values[p])
+                        .or_insert((0.0, ser_i.values[p]));
+                }
+            }
+
+            // Parallel system at one rank.
+            let par_mesh = partition_mesh_identity(&ma, &comm);
+            let mut a = ParComplexDPGWeakForm::new(
+                par_mesh.local_mesh().clone(),
+                par_mesh.partition().clone(),
+                comm.clone(),
+            );
+            let blocks_ix = build_acoustics(&mut a);
+            a.assemble();
+            let pairs = a.trace_boundary_dofs(blocks_ix[2]);
+            let merged = a.merge_dof_points(&pairs);
+            let ess_g: Vec<u32> = merged.iter().map(|(g, _)| *g).collect();
+            let n_local = a.local().size();
+            let mut xr = vec![0.0_f64; n_local];
+            let mut xi = vec![0.0_f64; n_local];
+            a.fill_essential_values(&mut xr, &mut xi, &merged, &|pt: &[f64]| {
+                let s = beta * (pt[0] + pt[1]);
+                (s.cos(), s.sin())
+            });
+            let (sys, x0, _xf) = a.form_linear_system(&ess_g, &xr, &xi);
+
+            // Compare: parallel compact (owned) rows vs serial rows, using the
+            // absolute global ids to match rows/columns.
+            let og: Vec<u32> = a.owned_global_ids().to_vec();
+            let gg: Vec<u32> = a.ghost_global_ids().to_vec();
+            // `global dof -> serial layout index` from the numbering blocks
+            // (at one rank the local dof layout equals the serial layout).
+            let mut g2s = std::collections::HashMap::<u32, usize>::new();
+            for blk in &a.blocks {
+                for d in 0..blk.size {
+                    if blk.gof[d] != INACTIVE {
+                        g2s.insert(blk.global_base as u32 + blk.gof[d], blk.full_base + d);
+                    }
+                }
+            }
+            let diag = sys.a.diag_block();
+            let offd = sys.a.offd_block();
+            let (mut ncmp, mut maxabs) = (0usize, 0.0_f64);
+            for r in 0..sys.n_owned {
+                let sr = g2s[&og[r]];
+                let mut mine = std::collections::HashMap::<usize, (f64, f64)>::new();
+                for p in diag.row_ptr[r]..diag.row_ptr[r + 1] {
+                    let sc = g2s[&og[diag.col_idx[p] as usize]];
+                    let e = mine.entry(sc).or_insert((0.0, 0.0));
+                    e.0 += diag.re_vals[p];
+                    e.1 += diag.im_vals[p];
+                }
+                for p in offd.row_ptr[r]..offd.row_ptr[r + 1] {
+                    let sc = g2s[&gg[offd.col_idx[p] as usize]];
+                    let e = mine.entry(sc).or_insert((0.0, 0.0));
+                    e.0 += offd.re_vals[p];
+                    e.1 += offd.im_vals[p];
+                }
+                let mut cols: Vec<usize> = mine.keys().copied().collect();
+                for p in ser_r.row_ptr[sr]..ser_r.row_ptr[sr + 1] {
+                    cols.push(ser_r.col_idx[p] as usize);
+                }
+                for p in ser_i.row_ptr[sr]..ser_i.row_ptr[sr + 1] {
+                    cols.push(ser_i.col_idx[p] as usize);
+                }
+                cols.sort_unstable();
+                cols.dedup();
+                for sc in cols {
+                    let (vr, vi) = ser_lookup.get(&(sr, sc)).copied().unwrap_or((0.0, 0.0));
+                    let (mr, mi) = mine.get(&sc).copied().unwrap_or((0.0, 0.0));
+                    let d = (vr - mr).abs().max((vi - mi).abs());
+                    if d > maxabs {
+                        maxabs = d;
+                    }
+                    ncmp += 1;
+                }
+            }
+            // RHS comparison.
+            let mut bmax = 0.0_f64;
+            for r in 0..sys.n_owned {
+                let sr = g2s[&og[r]];
+                bmax = bmax
+                    .max((sys.b.re.as_slice()[r] - ser_b[sr]).abs())
+                    .max((sys.b.im.as_slice()[r] - ser_b[n_ser + sr]).abs());
+            }
+            // Initial-guess comparison.
+            let mut x0max = 0.0_f64;
+            let half0 = x0.len() / 2;
+            for r in 0..sys.n_owned {
+                let sr = g2s[&og[r]];
+                x0max = x0max
+                    .max((x0[r] - ser_xs[sr]).abs())
+                    .max((x0[half0 + r] - ser_xs[n_ser + sr]).abs());
+            }
+            // Solve both systems and compare the solutions: serial via the
+            // real doubled operator + plain CG (the `dpg_acoustics_2d` path),
+            // parallel via the complex PCG.
+            let big = ser_sys.to_real_block_csr();
+            let mut xs_ser = ser_xs.clone();
+            let cfg = fem_solver::SolverConfig {
+                rtol: 1e-12,
+                max_iter: 10000,
+                ..fem_solver::SolverConfig::default()
+            };
+            let ser_res = fem_solver::solve_pcg_operator_precond(
+                big.nrows,
+                |x, y| big.spmv(x, y),
+                &ser_b,
+                &mut xs_ser,
+                |_r, z| z.copy_from_slice(_r),
+                &cfg,
+            )
+            .expect("serial CG");
+            let exchange = a.ghost_exchange_arc();
+            let half = x0.len() / 2;
+            let mut xv = crate::par_vector::ParComplexVector {
+                re: crate::par_vector::ParVector::from_local_raw(
+                    x0[..half].to_vec(),
+                    sys.n_owned,
+                    exchange.clone(),
+                    comm.clone(),
+                ),
+                im: crate::par_vector::ParVector::from_local_raw(
+                    x0[half..].to_vec(),
+                    sys.n_owned,
+                    exchange,
+                    comm.clone(),
+                ),
+            };
+            let par_res = crate::par_complex_solver::par_solve_complex_pcg(
+                &sys.a,
+                &sys.b,
+                &mut xv,
+                &|r, ri, z, zi| {
+                    z.copy_from_slice(r);
+                    zi.copy_from_slice(ri);
+                },
+                &cfg,
+            )
+            .expect("parallel complex CG");
+            let mut smax = 0.0_f64;
+            for r in 0..sys.n_owned {
+                let sr = g2s[&og[r]];
+                smax = smax
+                    .max((xv.re.as_slice()[r] - xs_ser[sr]).abs())
+                    .max((xv.im.as_slice()[r] - xs_ser[n_ser + sr]).abs());
+            }
+            // Recover + DPG residual (C++ reference prints 1.374e+00 for this
+            // configuration).
+            let n_own = sys.n_owned;
+            let mut x_owned = vec![0.0_f64; 2 * n_own];
+            x_owned[..n_own].copy_from_slice(&xv.re.as_slice()[..n_own]);
+            x_owned[n_own..].copy_from_slice(&xv.im.as_slice()[..n_own]);
+            let x_full = a.recover_fem_solution(&x_owned);
+            let residual = a.global_residual_norm(&x_full);
+            // Recovered vector vs the serial solution (identity at np1).
+            let mut rmax = 0.0_f64;
+            for s in 0..n_ser {
+                rmax = rmax
+                    .max((x_full[s] - xs_ser[s]).abs())
+                    .max((x_full[n_ser + s] - xs_ser[n_ser + s]).abs());
+            }
+            // Independent L2 error of the p block evaluated from the **serial**
+            // solution (C++ reference prints 8.008e-01 for this configuration).
+            let mesh_ser = ser.mesh();
+            let base_p = ser.trial_offsets()[ps_ser];
+            let et = mesh_ser.element_type(0);
+            let (qpts, qwts) = fem_assembly::dpg::dpg_basis::vol_quadrature(et, 3);
+            let simp = matches!(et, fem_mesh::ElementType::Tri3);
+            let n_el = mesh_ser.n_elements() as u32;
+            let mut l2p = 0.0_f64;
+            for e in 0..n_el {
+                let ph = xs_ser[base_p + e as usize];
+                let pi_ = xs_ser[n_ser + base_p + e as usize];
+                for (qi, xi) in qpts.iter().enumerate() {
+                    let (det, xp) = if simp {
+                        let tr = fem_mesh::ElementTransformation::from_simplex_nodes(
+                            mesh_ser,
+                            mesh_ser.element_nodes(e),
+                        );
+                        (tr.det_j().abs(), tr.map_to_physical(xi))
+                    } else {
+                        let geo = fem_assembly::vector_assembler::geo_ref_elem_from_mesh(
+                            mesh_ser, e,
+                        )
+                        .expect("geo");
+                        let gnodes = mesh_ser.geometry_nodes(e).to_vec();
+                        let (_j, det, xp) = fem_assembly::vector_assembler::isoparametric_jacobian(
+                            mesh_ser, &gnodes, geo.as_ref(), xi, 2,
+                        );
+                        (det.abs(), xp)
+                    };
+                    let s = beta * (xp[0] + xp[1]);
+                    l2p += qwts[qi]
+                        * det
+                        * ((ph - s.cos()).powi(2) + (pi_ - s.sin()).powi(2));
+                }
+            }
+            *out2.lock().unwrap() = Some(format!(
+                "entries={ncmp} maxabs={maxabs:.3e} bmax={bmax:.3e} x0max={x0max:.3e} \
+                 smax={smax:.3e} (ser {} it, par {} it) residual={residual:.6e} l2p={:.6e} \
+                 rmax={rmax:.3e}",
+                ser_res.iterations,
+                par_res.iterations,
+                l2p.sqrt()
+            ));
+            assert!(ncmp > 0, "no entries compared");
+            assert!(
+                maxabs < 1e-11,
+                "np1 P^H A P differs from the serial system (maxabs={maxabs:.3e})"
+            );
+            assert!(bmax < 1e-11, "np1 P^H b differs from the serial b (bmax={bmax:.3e})");
+            assert!(x0max < 1e-14, "np1 initial guess differs (x0max={x0max:.3e})");
+            assert!(
+                smax < 1e-8,
+                "np1 solution differs between serial CG and parallel complex CG (smax={smax:.3e})"
+            );
+            // Recovered (ghost-lifted) vector vs the serial solution — pins the
+            // complex `recover_fem_solution`, which dropped the owned imaginary
+            // segment before the r35 fix (prob-0 L2 came out 1.171 instead of
+            // 8.008e-01).
+            assert!(rmax < 1e-10, "np1 recovered solution differs (rmax={rmax:.3e})");
+        });
+        let msg = out.lock().unwrap().clone();
+        if let Some(ref m) = msg {
+            println!("complex_np1_formed_system_matches_serial: {m}");
+        }
+        assert!(msg.is_some(), "rank 0 must report: {msg:?}");
     }
 }
