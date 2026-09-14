@@ -1266,6 +1266,174 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - 本会话对 T1/T2/T3/T4 的**独立复核总数**：ex1 逐字节 1 件 + gslib 2 件 + `interpolated.gf` 逐字节 1 件 +
   T4 逐字节 4 件 + T4 数值/出口码 6 件（mandel/mondrian/lissajous/nurbs_solenoidal/get-values 3-D 缺口/tmop rc）。
 
+## 第三十三轮（round 33）：四路 + 一次补派 —— io 层三合一 / prism 曲率 / NURBS 周期 BC / 并行 DPG
+
+### 0. 本轮形状
+四路按**文件区域**划界（派单前把 D151 与 D153/D154 合并，因为三者同在 `crates/io/src/mfem.rs`）：
+
+| 路 | 内容 | 结果 |
+|---|---|---|
+| ① | **io 层**：D151（2-D 部分）+ D153 + D154 | ⏳ 代理**跑完但未回报**（静默超时）⇒ 主会话自行复核（见 §1） |
+| ①b | **补派**：D151 剩余（prism 编号 + 三个 meshing miniapp 文案/解锁） | ✅ prism writer + **`toroid` 解锁**（见 §2） |
+| ② | **D152** `set_curvature_prism6` 槽序 | ✅ 真修 + 5 项测试 + C++ 探针（见 §3） |
+| ③ | **D92** NURBS 周期 BC | ✅ `-pm/-ps/-p` 实现并与 C++ 逐字节（见 §4） |
+| ④ | **D141** 并行 DPG | ✅ `pdiffusion` 真修（10 配置），其余 3 件 `exit(3)`（见 §5） |
+
+⚠️ **教训（本轮最贵）**：① 路代理把**已验证的工作留在树上却没有任何回报**（"Subagent was inactive for 600000ms"）。
+`git status` 里 7 个改动 + 3 个新测试文件都在，但**没有报告就没有可核对的数字** ⇒ 主会话只能自己把它的三件活全部重测一遍
+（好在都能跑通）。**派单时写明"早报、勤报，静默超时比诚实的部分报告更糟"**（①b 路照此办了，中途发过 interim）。
+⇒ 方法论 6 的延伸：**不只看 `git log`，也要看"代理有没有回报"；无回报的交付一律当作未交付，自己验。**
+
+### 1. ① 路（io 层三合一，主会话逐项复核）
+- **D154（P2）✅ 真修并端到端验证**：`MFEM INLINE mesh` 的 `type=tri` 分支改为与 MFEM `Mesh::Make2D` 同构
+  （主对角线切分 `(v0,v2,v3)+(v0,v1,v2)`，行主序元素编号；`mesh/mesh_readers.cpp:1355` → `Mesh::Make2D`）。
+  **主会话独立复核**：`gslib_field_interp` 的**默认档**（`-m2 data/inline-tri.mesh`，正是走 INLINE 路径的那一档）
+  现在与 C++ 4.10 **逐字节相同**（174 行、sha256 两侧同为 `94ef88c04003f80863df140c1cfa610fea5f0521d7f65c38d9617b764b709130`）。
+  round 32 时该档差 217 行 ⇒ 这是 D154 关闭的直接证据（也顺带把 `field-interp` 从"仅显式网格档 1:1"提升为**默认档 1:1**）。
+- **D153（P2）✅ 修**：`read_mfem` 的 L2 `nodes` 读取按 `lex_slot_permutation(factory_slots, mfem_l2_slots)` 的**逆**
+  把文件值排进 mesh 自身槽序（旧代码硬编码 `[0,1,3,2]` 只对 P1 四边形偶然成立）。测试 `crates/io/tests/l2_curved_nodes.rs`。
+- **D151 的 2-D 一半 ✅**：writer 现支持 **H1 `Quad4`/`Tri3`**（MFEM 编号 `H1_2D_P<p>`：顶点→边→内部）与
+  **L2 `Quad4`**（`L2_T1_2D_P<p>`，逐元字典序），实现落在 `quad2d_slot_map`/`mfem_l2_slots`；
+  测试 `crates/io/tests/nodes_2d_writer.rs`。**prism 当时仍被明确拒绝**（错误文案列出已实现族）。
+- 新增测试文件：`inline_mesh.rs`（2 项）、`l2_curved_nodes.rs`（4 项）、`nodes_2d_writer.rs`。
+
+### 2. ①b 路（D151 剩余：prism 编号 + toroid 解锁）
+- **prism `nodes` 编号 ✅**：`prism_h1_slots` **逐行复刻** MFEM `H1_WedgeElement` 的构造
+  （`fem/fe/fe_h1.cpp:863`：`(t_Nodes[t_dof[i]].x, .y, s_Nodes[s_dof[i]].x)`），含底/顶三角形面的
+  `l = j - p + ((2p-1-i)i)/2` **内部置换**（与 `FaceVert` 转置相抵）、边上的 `SegDofOrd`、
+  三角形面的 `TriDofOrd`、四边形面的 canonical 角点匹配、以及**累积式**面块偏移（`fespace.cpp:2874`/`FindFaceDof`，混合 tri/quad 面时必须累积）。
+- **GLL vs 等距的第二个实例（prism 版）**：文件是 GLL 节点值，而 fem-rs 的几何元素 `PrismPk` 是**等距**的
+  ⇒ writer 按 `B[i][s] = φ_s^{PrismPk}(ξ_i^{GLL})` **重插值**后再写（p≤2 两族点集相同 ⇒ 纯置换；p≥3 才分叉）。
+- **验证**：新夹具 `crates/io/tests/data/flatprism-p{2,3,4}-m{0,1}.mesh`（MFEM 4.10 自己产出）+ 新测试
+  `crates/io/tests/prism_nodes_writer.rs` **整文件对拍**（p=2/3/4 × 两种顶点排布，含旋转元素以覆盖 `TriDofOrd`/`QuadDofOrd`/边反向），
+  一致到 **1e-14**。
+- **⭐ `mesh_toroid` 解锁（`exit 0`）**，**主会话独立复核**：
+  ```
+  cargo run --release --example mesh_toroid -- -o 3 -no-vis  → rc=0，写出 toroid-wedge-o3-s0.mesh (14128 B)
+  r31_meshread : NE=8 NBE=24 NV=24 dim=3 sdim=3 nodes=1        （两侧同）
+  r32_probe    : FEC=H1_3D_P3 order=3 vdim=3 ndofs=240 order_type=1 nonpositive=0
+  r31_save→r32_cmp : TOPOLOGY-IDENTICAL, nodes-dofs=720, max-rel-diff=4.44e-16（不动点）
+  ```
+  **诚实的代价（已写入文件头 + stderr + README）**：默认 `-o 3` 的楔形档与 C++ 相差 **7.2e-5**
+  （= `PrismPk` 等距 vs `H1_WedgeElement` GLL 的族分裂；代理先预测 7.217e-5、后实测 7.214e-5）。
+  **`-o 2`（1.4e-8）与全部六面体档（4.7e-8）是精确的**（= C++ 8 位打印噪声）。⇒ 拓扑/编号/段结构是 MFEM 的，
+  **节点值是"同一映射在 MFEM 节点上的插值"**，不是 1:1。toroid 仍在两处 `exit(3)`：
+  `-e 0 -dm -o>1`（缺 `L2_WedgeElement` 编号）与 `-rs>0 -o>1`（`refine_uniform_3d` 丢几何表）。
+- `mobius-strip`/`klein-bottle` **仍 `exit(3)`，但文案已更正**（旧文案说缺 2-D 四边形编号 —— 那已经实现了）：
+  现在准确列出 [1] writer 拒绝 `topological_dim() != D`（C++ 要写 `dimension 2` + `VDim: 3` 的**曲面** nodes 段）、
+  [2] fem-rs 没有"2-D 面嵌 3-D"的建网格路径（`Mesh<D>` 把坐标数与拓扑维绑定；代理实测 `set_curvature` 加 `space_dim` 并非必要）、
+  [3] 这两个 miniapp 的**主体未移植**（现文件只解析选项）。
+- ⚠️ **夹具纪律提醒**：`.gitignore:50` 是 `*.mesh`，新夹具必须 `git add -f`（本轮 `prism_nodes_writer.rs` 的 6 个夹具就是这样入库的）。
+
+### 3. ② 路（D152）
+- **`set_curvature_prism6` 的真问题比"槽序不一致"更严重**：它枚举的参考三元组是 `(η, ζ, ξ_extrusion)` 在 `[-1,1]³` 上，
+  而 `PrismPk`/`prism_rule`/`element_jacobian`/`CurvedMesh`/`dof_manager` 都用 `(ξ_extrusion, η, ζ)` 的
+  `[0,1]×单位三角形`；且把 `[-1,1]` 的数喂给 `λ = (1−r−s, r, s)` 的重心式 ⇒ **节点被外插到单元外**。
+  实测改前（新测试 `crates/mesh/tests/d152_prism_curvature.rs`）：
+  `p=2 max|Δx| = 1.354e0, max|ΔJ| = 3.979e0`；`n_geom_nodes = 146 vs 114`（48/48 顶点槽重复）。
+  改后：`max|Δx| ≤ 1.11e-15`、`max|ΔJ| ≤ 2.94e-15`、0 重复顶点槽；5 项测试覆盖 p=2/3/4 × 两个网格
+  （含共享四边形面的两棱柱）。
+- **C++ 交叉核对**（探针 `tmp/d152_prism_probe.cpp`，主会话独立重跑）：MFEM `MakeCartesian3D(1,1,1,WEDGE)`+`SetCurvature(p)`
+  的 p=2 布局是**实体序**（顶点 → 边 → 面），p=3 边界节点在 GLL `0.276393202250021/0.723606797749979`
+  ⇒ **MFEM 侧不是 `PrismPk` 的顺序**，所以"曲面 prism 的 MFEM 文件 I/O"仍非 1:1（→ D164）。
+- 代理**拒绝**改 `crates/element`（越权），并留了一条**冻结顺序**的测试：若将来把 `PrismPk` 改成 MFEM 实体序，
+  该测试会**大声失败**强迫 `set_curvature_prism6` 跟着动。
+- ⚠️ **同族追加发现（→ D168）**：`crates/space/src/dof_manager.rs:2017-2035` 假设棱柱体 dof 是
+  `PrismPk::dof_coords()` 的**最后** `volume_dofs_per` 项 —— 在 layer-major 序下不成立（p=4 时体槽是 27-29/42-44/57-59）。
+
+### 4. ③ 路（D92 NURBS 周期 BC）
+- **`-pm`/`-ps`/`-p` 已实现**（此前被 `_ => {}` 静默丢弃）。C++ 语义：`-pm` = master 边界属性列表、
+  `-ps` = slave 列表，两者喂给空间 `NURBSExtension::ConnectBoundaries`；`-p/--per <file>` 从文件读两列表
+  （首个 token 是数量，然后那么多 master 再那么多 slave）；**`-p` 在 MFEM 的线性扫描里被 `--send-port` 遮蔽**（已照抄）。
+  网格几何不动，与 C++ 一致。
+- 新增 `connect_boundaries`（`NURBS_Extension::ConnectBoundaries{,1D,2D,3D}`）含 `d_to_d` 压缩 + 重跑 `GenerateElementDofTable`、
+  `BdrSegDofMap`/`BdrQuadDofMap`（`NURBSPatchMap::SetBdrPatchDofMap` 的 DOF 模式）、`NurbsFESpace::with_periodic`。
+  **关键坑**：`d_to_d` 必须按 `n_total_dofs`（MFEM `NumOfDofs = GetNTotalDof()`）而不是 `n_dofs` —— 1-D 档才能抓到。
+- **主会话独立复核（重编 C++ 4.10 `nurbs_ex1` 后对拍）**：两个档的
+  `Number of finite element unknowns … Average reduction factor` **整块逐字节相同**：
+  ```
+  beam-hex-nurbs -pm 1 -ps 2 : 5184 unknowns，ARF 0.200293，18 行 → diff 空，sha256 同为 4dc00d3d…
+  pipe-nurbs-2d -o 2 -r 1 -pm 1 -ps 3 : 13 unknowns，ARF 0.0173099，14 行 → diff 空，sha256 同为 43133b35…
+  ```
+  （代理另有 20+ 配置的矩阵，含 `-p <file>`、`-o 2/-o 3`、`-r 1/2/3`、`rho/beam-quad` 等，均逐字节。）
+- 同批把该 miniapp 的**选项层**对齐 MFEM：`-n/--neu`、`ess_bdr/neu_bdr/per_bdr` 修正环、
+  完整 `OptionsParser` 行为（未知选项 / `-h` / 重复 / 缺参 / 格式错 → MFEM 原文 + Usage + `exit(1)`）、
+  `MFEM_VERIFY` 的 `Bdr N not found` 原文 + `exit(134)`。
+- **仍缺（代理逐条给出证据，均在别的文件里 → D169/D170）**：① 奇异/退化系统的 CG trailer 与 MFEM 不同
+  （`B==0` 时缺 `Iteration : 0 (B r, r) = 0` 行、缺 "operator is not positive definite" 诊断）⇒ 1-D 周期档与
+  `pipe-2d -p <both pairs>` 在第 3 步后分叉（**空间与消元后的矩阵/RHS 本身是 17 位精度匹配的**，已用夹具钉住）；
+  ② `generate_boundary_elements`/`max_bdr_attribute` 对 `pipe-nurbs.mesh` 给出 4 个边界属性而 MFEM 是 1；
+  ③ `square-disc-nurbs-patch.mesh` 仍无法解析（`NURBSBSPatch`，**D143 残留**）。
+- 新夹具 `crates/space/tests/data/nurbs_periodic_mfem.txt`（MFEM 4.10 的 NDOF/ELDOFSUM/GetBdrElementDofTable/
+  GetEssentialTrueDofs + 消元后系统的 `%.17g` 值）+ 测试 `crates/space/tests/nurbs_periodic.rs`（6 项）。
+
+### 5. ④ 路（D141 并行 DPG）
+- 新增内核件 `crates/parallel/src/par_dpg_weakform.rs`（`ParDpgWeakForm`，1467 行）+ `crates/parallel/src/lib.rs:129` 导出；
+  含**分布式迹编号**（全局面 id、**面主 = 持该面的最小 rank**、H1 迹角点 = 网格顶点 dof）、
+  块延拓 `PᵀAP` + 一次覆盖所有块的 `GhostExchange`、**全局 id** 上的 essential 消元、
+  静态凝聚（分离的 trial 索引基 + `n_global_trial_dofs()` 让 `-sc` 的 `Dofs` 仍等于 MFEM 的 `Σ GlobalTrueDofSize`）、
+  带 ghost 填充的解恢复、跨 rank 合并的边界 dof 点。
+- **`pdiffusion` 真修（主会话独立复核）**：重编 C++ MPI 参考（`$HOME/mfem410_mpi`，注意 DPG 需要
+  `util/{weakform,blockstaticcond,pweakform,preconditioners}.cpp` + `common/{fem,mesh}_extras.cpp` + `dist_solver.cpp`，
+  **只在 `$M/miniapps/dpg` 里跑**，否则相对默认网格路径读不到）后逐配置对拍：
+
+  | 配置 | C++（我实测） | fem-rs |
+  |---|---|---|
+  | `-prob 0 -sref 0` | 113 / 1.021e+00 / 9.951e-01 | **同**（PCG 81 vs 29） |
+  | `-prob 0 -sref 1` | 417 / 5.149e-01 / 5.115e-01 | **同**（PCG 168 vs 31） |
+  | `-prob 1 -sref 0` | 27 / 4.755e-01 / 5.539e-01 | **同**（PCG 17 vs 16） |
+
+  ⇒ `Dofs`/`L2 Error`/`Residual` 三列逐位一致；**PCG 迭代数不复刻**（代理已如实声明：C++ 自己也与分区有关，
+  且 fem-rs 对角块用的是"对称 GS on owned part"而非 Hypre 的 `GSSmoother`）。
+- 三个**诚实 `exit(3)` + 缺口清单**（主会话实测 rc=3）：`pconvection-diffusion`（缺带系数的 DPG 积分器 +
+  `setup_test_norm_coeffs`）、`pacoustics`/`pmaxwell`（缺 `ParComplexDPGWeakForm`；3-D H1-trace 与 ND-trace 的
+  并行编号目前 `panic!` 并给明确信息，而不是猜）。
+- 新增 3 项单测（`fem-parallel --lib` 232 → **235**），含一条**改前必失败**的证据：
+  回退那一行修复后 `two_rank_system_matches_serial_full_mesh` 报 `2-rank P^T A P differs…`、
+  `pdiffusion --ranks 2 -sref 0` 打印 `L2 = 1.779e+00`（应为 1.021e+00）。
+- ⚠️ **从这条路上挖出的内核静默缺陷（→ D167）**：`ParCsrMatrix::from_local_matrix` 用 `local.nrows - n_owned`
+  推 ghost 列数 ⇒ **非方阵的局部矩阵会整块丢掉 off-diagonal 块**（无报错）。代理在 `par_dpg_weakform.rs:684` 加了注释绕过。
+- ⚠️ 代理的诚实声明：fem-rs 的 `--ranks` 走 `ThreadLauncher` 的**进程内通道**（本仓惯例，如 `mfem_pex8_parallel_dpg`），
+  故这只验证**分布式算法**（对标真 MPI 输出），**不是**多地址空间行为（未启用 rsmpi）。
+
+### 6. 第三十三轮新债务
+- **D164（P1）prism 几何基族分裂**：`PrismPk` 是**等距**节点而 MFEM `H1_WedgeElement` 是 **GLL** ⇒
+  p≥3 的曲面棱柱一切"fem-rs 几何 ↔ MFEM 文件/装配"的对照都带 `O(h⁴)` 残差（默认 `toroid -o 3` = **7.2e-5**，
+  大单元可到 ~4e-4）。**`nodes` writer 侧已经正确**（它按 `PrismPk` 在 GLL 点重插值），
+  缺的是**核心棱柱几何元素本身**要像 `H1TetPk`（D49）那样给 tet 做过的、把 `PrismPk` 换成 GLL 版
+  （`crates/element`/`crates/assembly`/`crates/mesh` 协同，与 D116/D152/D157 同族）。
+- **D165（P2）`L2_WedgeElement` 编号缺失** ⇒ `toroid -e 0 -dm -o>1` 只能 `exit(3)`
+  （六面体 L2 档 `-e 1 -dm` 已精确）。
+- **D166（P2）`refine_uniform_3d` 丢几何表**：`crates/mesh/src/amr/amr_inner.rs:1303` 的 `geometry: None`
+  ⇒ 细化后的曲面网格会被写成**直边**的 ⇒ `toroid -rs>0 -o>1` 只能 `exit(3)`。
+- **D167（P1）`ParCsrMatrix::from_local_matrix` 的 ghost 列数推导**（`crates/parallel/src/par_csr.rs`）：
+  `local.nrows - n_owned` 对非方阵局部矩阵会**静默丢掉整块 off-diagonal**（并行 DPG 途中挖出，已局部绕过）。
+  影响面可能超出 DPG，需专项核查。
+- **D168（P2）`dof_manager.rs:2017-2035` 假设棱柱体 dof 在 `PrismPk::dof_coords()` 尾部** ⇒ layer-major 序下不成立
+  （p=4：体槽 27-29/42-44/57-59）；代理另测出**棱柱 H1 场空间槽布局与 `PrismPk` 在 p≥2 就不一致**
+  （p=2 有 15/18 槽不同、worst 1.0e0）⇒ 棱柱高阶刚度/质量阵受影响（与 D157 的 tet 场空间同族）。
+- **D169（P3）奇异系统的 CG trailer 与 MFEM 不同**：`B==0` 时缺 `Iteration : 0 (B r, r) = 0` 行、
+  缺 "operator is not positive definite" 诊断 ⇒ 1-D 周期 `nurbs_ex1` 与 `pipe-2d -p` 档第 3 步后分叉。
+- **D170（P3）`nurbs_extension.rs::generate_boundary_elements`/`max_bdr_attribute`**：`pipe-nurbs.mesh`
+  （boundary 0 ⇒ MFEM 生成边界单元）给出 4 个边界属性而 MFEM 是 1（只影响打印的 marker 数组长度）。
+- **D171（P1）`mobius-strip`/`klein-bottle` 仍不可解锁**：需要 [1] writer 支持 `dim < spaceDim`
+  （`dimension 2` + `VDim: 3` 的曲面 nodes 段；现在 `nodes_dof_values` 直接拒绝 `topological_dim() != D`）、
+  [2] "2-D 面嵌 3-D"的建网格路径、[3] 这两个 miniapp 的**主体**（端/侧识别、`RemoveInternalBoundaries` 的 1-D SEGMENT 表、
+  逐元 `(p+1)²` 节点 `Transform`）—— 现文件只有 ~110 行选项解析。
+- **D172（P2）并行 DPG 剩余 3/4**：`ParComplexDPGWeakForm`（pacoustics/pmaxwell）、
+  **3-D H1-trace 与 ND-trace 的并行编号**（现为带明确信息的 `panic!`）、并行 AMR/`PRefinementMultigrid`、
+  带系数的 DPG 积分器 + `setup_test_norm_coeffs`（pconvection-diffusion）。
+- **D143 残留不变**：`square-disc-nurbs-patch.mesh`（`NURBSBSPatch`）仍无法解析。
+
+### 本轮统计
+- 十 crate `--lib`：见下方"本轮基线"（含 `fem-parallel` 232 → 235、`fem-io` 新增 3 个 test 文件）。
+- **主会话独立复核**（全部由本会话自己重跑，不是转述代理数字）：`gslib_field_interp` 默认档逐字节 1 件、
+  `nurbs_ex1` 周期档逐字节 2 件（sha256 对拍）、`pdiffusion` 三配置 vs C++ MPI 1 件、
+  `toroid` 解锁 1 件（r31_meshread/r32_probe/r31_save→r32_cmp）、D152 的 C++ 探针重跑 1 件、
+  外加 ② 的 5 项测试与 ① 的 3 个测试文件实跑。
+- **未启动/未完成**：mobius/klein 解锁（D171）、并行 DPG 3/4（D172）、prism GLL 几何（D164）。
+
+
 
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。

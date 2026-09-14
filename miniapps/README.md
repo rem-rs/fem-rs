@@ -170,6 +170,30 @@ miniapps/
 │   │                            独立复核：迭代块 0 处差异；注：本示例不打印
 │   │                            C++ 的 Options used 横幅，2D 路径同）;
 │   │                            部分属性 ess_bdr = boundary_dofs_marked）
+│   │                            ✅ **round 33（D92）：`-pm/-ps/-p` 已实现**
+│   │                            （旧版这三个旗标被 `_ => {}` 静默丢弃）。语义与 C++
+│   │                            一致：`-pm` = master 边界属性列表、`-ps` = slave 列表，
+│   │                            一起喂给 `NURBSExtension::ConnectBoundaries`；
+│   │                            `-p <file>` 从文件读两列表（首 token 是数量）；
+│   │                            `-p` 在 MFEM 的线性扫描里被 `--send-port` 遮蔽（照抄）。
+│   │                            内核新增 `connect_boundaries`（1D/2D/3D 三版 + `d_to_d`
+│   │                            压缩 + 重跑 `GenerateElementDofTable`）、
+│   │                            `BdrSegDofMap`/`BdrQuadDofMap`、`NurbsFESpace::with_periodic`。
+│   │                            主会话独立复核（重编 C++ 4.10 对拍）：
+│   │                            `beam-hex-nurbs -pm 1 -ps 2` 5184 unknowns / ARF 0.200293
+│   │                            （18 行整块逐字节，sha256 同）、
+│   │                            `pipe-nurbs-2d -o 2 -r 1 -pm 1 -ps 3` 13 / ARF 0.0173099
+│   │                            （14 行逐字节）；代理另有 20+ 配置矩阵。同批把选项层对齐
+│   │                            MFEM（`-n/--neu`、`ess/neu/per_bdr` 修正环、完整
+│   │                            `OptionsParser` 行为、`MFEM_VERIFY` 原文 + `exit(134)`）。
+│   │                            **仍缺**：① 奇异系统（`ESS n=0`）的 CG trailer 与 MFEM 不同
+│   │                            （缺 `Iteration : 0` 行与 indefinite 诊断）⇒ 1-D 周期档与
+│   │                            `pipe-2d -p <both pairs>` 第 3 步后分叉（**空间与消元后的
+│   │                            矩阵/RHS 已 17 位精度钉住**，夹具
+│   │                            `crates/space/tests/data/nurbs_periodic_mfem.txt`）；②
+│   │                            `generate_boundary_elements` 对 `pipe-nurbs.mesh` 给 4 个边界属性
+│   │                            而 MFEM 是 1（D169/D170）；③ `square-disc-nurbs-patch.mesh`
+│   │                            仍无法解析（D143 残留）
 │   ├── nurbs_ex3.rs         ← 1:1（H(curl): NurbsHCurlSpace 分组件 curl
 │   │                            扩展 + 合并 elem_dof + Piola 装配 +
 │   │                            ProjectCoefficientElementL2 默认投影 =
@@ -259,8 +283,30 @@ miniapps/
 │   │                            face_types/face_offsets 同步 ⑤ 输出名按 C++
 │   │                            `toroid-{wedge,hex}-o*-s*[-r*].mesh` ⇒ `-o 1` → NE=8 NBE=24
 │   │                            NV=24，与 C++ `toroid -o 1` **拓扑逐字节相同**、坐标差 <5e-9
-│   │                            （C++ 只存 8 位有效数字）。`-o > 1`（含默认 `-o 3`，C++ 产物带
-│   │                            `H1_3D_P3` 的 `nodes`）⇒ exit(3)+缺口清单
+│   │                            （C++ 只存 8 位有效数字）。**round 33：`-o > 1` 默认档已解锁**
+│   │                            （见下）
+│   │                            ✅ **round 33（D151）：默认 `-o 3` → `exit 0`**，写出
+│   │                            `toroid-wedge-o3-s0.mesh`。内核新增 prism 的 `nodes` 编号
+│   │                            （`prism_h1_slots` 逐行复刻 `fem/fe/fe_h1.cpp:863` 的
+│   │                            `H1_WedgeElement`：`t_dof`/`s_dof` 表、底/顶三角形面的内部置换、
+│   │                            `SegDofOrd`/`TriDofOrd`/canonical 四边形面、**累积式**面块偏移）。
+│   │                            主会话独立复核：`r31_meshread` 两侧
+│   │                            `NE=8 NBE=24 NV=24 dim=3 sdim=3 nodes=1`；`r32_probe`
+│   │                            `FEC=H1_3D_P3 order=3 vdim=3 ndofs=240 nonpositive=0`；
+│   │                            `r31_save`→`r32_cmp` **TOPOLOGY-IDENTICAL**、
+│   │                            nodes-dofs=720、max-rel-diff **4.44e-16**（不动点）。
+│   │                            ⚠️ **诚实的代价**：默认 `-o 3` 的楔形档节点值与 C++ 相差
+│   │                            **7.2e-5** —— fem-rs 的几何元素 `PrismPk` 是**等距**而 MFEM
+│   │                            `H1_WedgeElement` 是 **GLL**（p≤2 两族点集相同、p≥3 分叉），
+│   │                            所以 writer 写的是"**本网格自己的几何在 MFEM 节点上的重插值**"。
+│   │                            拓扑/编号/段结构是 MFEM 的，但**不是 1:1 的节点值**；该事实写在
+│   │                            模块 doc + 每次运行的 stderr 上。**`-o 2`（1.4e-8）与全部六面体档
+│   │                            （4.7e-8）是精确的**（= C++ 8 位打印噪声）。仍 `exit(3)` 的两处：
+│   │                            `-e 0 -dm -o>1`（缺 `L2_WedgeElement` 编号，D165）与
+│   │                            `-rs>0 -o>1`（`refine_uniform_3d` 丢几何表，D166）。
+│   │                            prism 编号本身用新夹具
+│   │                            `crates/io/tests/data/flatprism-p{2,3,4}-m{0,1}.mesh`（MFEM 4.10
+│   │                            自己产出）整文件对拍到 **1e-14**
 │   ├── reflector.rs         ← ✅ **round 31 修复**：① 重复元素（原来"就地反射 elem 0..ne-1
 │   │                            再 append 同样副本" ⇒ 14 元素 = 7 对完全相同）改为"保留原始 +
 │   │                            追加反射副本" ② 面内边界面按 C++ 跳过 ③ 反射四边形
@@ -284,11 +330,18 @@ miniapps/
 │   │                            writer 只写 conforming `MFEM mesh v1.0`（旧实现写出的文件
 │   │                            MFEM 判 `Invalid mesh topology`）⇒ 缺口清单 5 条；
 │   │                            Options dump 与 C++ **逐行一致**
-│   ├── mobius-strip.rs      ← ⚠️ **round 31 降级 exit(3)**：C++ 是 **`dimension 2` +
-│   │ `klein-bottle.rs`         `Space dimension 3`**（曲面嵌 3-D）+ 非连续高阶 `nodes`
-│   │                            （默认 nodes=1；klein 默认 NBE=0）—— **不是 `dimension 3`**；
-│   │                            本仓 `Mesh<D>` 把坐标维钉死在拓扑维且无 nodes writer ⇒
-│   │                            exit(3)+缺口清单，Options dump 与 C++ **逐行一致**
+│   ├── mobius-strip.rs      ← ⚠️ **仍 exit(3)，round 33 已把文案更正为当前事实**：
+│   │ ── klein-bottle.rs        C++ 是 **`dimension 2` + `Space dimension 3`**（曲面嵌 3-D）+
+│   │                            （默认 nodes=1；klein 默认 NBE=0 且是非连续 nodes）—— **不是
+│   │                            `dimension 3`**。三条准确缺口：[1] `crates/io` 的 `nodes_dof_values`
+│   │                            拒绝 `topological_dim() != D`，`dimension` 行也按 `D` 写 ⇒
+│   │                            C++ 那种"2-D 拓扑 + 3 分量 nodes"**没有写出路径**；[2] fem-rs
+│   │                            没有"2-D 面嵌 3-D"的建网格路径（`Mesh<D>` 把坐标数与拓扑维绑定；
+│   │                            round 33 实测**不需要**给 `set_curvature` 加 `space_dim`）；
+│   │                            [3] 这两个 miniapp 的**主体未移植**（现文件只有 ~110 行选项解析；
+│   │                            缺端/侧识别、`RemoveInternalBoundaries` 的 1-D SEGMENT 表、
+│   │                            逐元 `(p+1)²` 节点 `Transform`）⇒ D171。Options dump 与 C++
+│   │                            **逐行一致**（旧文案说"缺 2-D 四边形编号"—— 那已在 round 33 实现）
 │   ├── trimmer.rs           ← ⚠️ **仍开**：C++ 默认输入 `data/beam-tet.vtk`（注意是 `.vtk`）
 │   │                            **本仓 `data/` 不存在** ⇒ 无法对拍；round 30 记的
 │   │                            "边界元素 34 vs 36"需先补该输入才能复现
@@ -539,6 +592,36 @@ miniapps/
 │                                结案 (round 14: rate −2.97/−2.99 vs
 │                                −3.00, 误差 0.2%); helmholtz_1d 真 1D
 │                                UW-DPG (O(h) 收敛 u/σ, k=0/5 稳定)
+│   ── **round 33（D141）：并行 DPG 从 0/4 到 1/4**（新 `[[example]]`：
+│      `pdiffusion`/`pacoustics`/`pmaxwell`/`pconvection_diffusion`）
+│   ├── pdiffusion.rs        ← ✅ **真修**：内核新增 `crates/parallel/src/par_dpg_weakform.rs`
+│   │                            （`ParDpgWeakForm`，含分布式迹编号 —— 全局面 id、
+│   │                            **面主 = 持该面的最小 rank**、H1 迹角点 = 网格顶点 dof；
+│   │                            块延拓 `PᵀAP` + 一次覆盖所有块的 `GhostExchange`；
+│   │                            **全局 id** 上的 essential 消元；静态凝聚用**分离的 trial 索引基**
+│   │                            + `n_global_trial_dofs()` 让 `-sc` 的 `Dofs` 仍等于 MFEM 的
+│   │                            `Σ GlobalTrueDofSize`；带 ghost 填充的解恢复）。
+│   │                            主会话独立复核（重编 C++ MPI 参考后逐配置对拍）：
+│   │                            `-prob 0 -sref 0` = 113 / 1.021e+00 / 9.951e-01、
+│   │                            `-prob 0 -sref 1` = 417 / 5.149e-01 / 5.115e-01、
+│   │                            `-prob 1 -sref 0` = 27 / 4.755e-01 / 5.539e-01 ——
+│   │                            **`Dofs`/`L2 Error`/`Residual` 三列全部逐位一致**；
+│   │                            **PCG 迭代数不复刻**（C++ 自己也不是分区无关；且 fem-rs 对角块用
+│   │                            对称 GS on owned part 而非 Hypre 的 `GSSmoother`）。
+│   │                            新增 3 项单测（`fem-parallel --lib` 232 → 235），含
+│   │                            "改前必失败"证据（回退那一行后 `pdiffusion --ranks 2 -sref 0`
+│   │                            打印 `L2 = 1.779e+00`，应为 1.021e+00）
+│   ├── pacoustics.rs        ← ⚠️ **诚实 exit(3) + 缺口清单**（缺 `ParComplexDPGWeakForm`）
+│   ├── pmaxwell.rs          ← ⚠️ **诚实 exit(3) + 缺口清单**（同上；PML 档还需空间变化的
+│   │                            **矩阵**系数）
+│   └── pconvection_diffusion.rs ← ⚠️ **诚实 exit(3) + 缺口清单**（缺带系数的 DPG 积分器 +
+│                                `setup_test_norm_coeffs`）
+│      ⚠️ **顺带挖出的内核静默缺陷（D167）**：`ParCsrMatrix::from_local_matrix` 用
+│      `local.nrows - n_owned` 推 ghost 列数 ⇒ **非方阵局部矩阵会整块丢掉 off-diagonal**
+│      （无任何报错）；已在 `par_dpg_weakform.rs:684` 加注释绕过，库层待修。
+│      ⚠️ 代理的诚实声明：fem-rs 的 `--ranks` 走 `ThreadLauncher` **进程内通道**（本仓惯例，
+│      如 `mfem_pex8_parallel_dpg`）⇒ 这只对标**分布式算法**（对 C++ 真 MPI 输出），
+│      **不是**多地址空间行为（未启用 rsmpi）
 ├── fluids/schrodinger_flow.rs ← 不可压 Schrödinger 流 (ISF) 串行 1:1:
 │                                CN 复 GMRES + 逐 DOF 归一化 + gauge 投影
 │                                (OrthoSolver); leapfrog/jet 对照 C++
