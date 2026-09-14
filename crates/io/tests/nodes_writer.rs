@@ -25,9 +25,7 @@
 //!    implemented (prisms, 2-D elements) are *refused* instead of being written
 //!    as a wrong mesh, and the refusal happens before the file is created.
 
-use fem_io::mfem::{
-    read_mfem, read_mfem_file, write_mfem_file_3d_nodes, write_mfem_nodes, NodesSpace,
-};
+use fem_io::mfem::{read_mfem, read_mfem_file, write_mfem_nodes, NodesSpace};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::Mesh;
 
@@ -375,11 +373,13 @@ fn curved_mesh_without_boundary_faces_writes_an_empty_boundary_section() {
 #[test]
 fn unsupported_element_families_are_refused_without_writing_a_file() {
     // Round 33 (D151) added the continuous prism (wedge) and 2-D
-    // quadrilateral numberings, so the families that still have no
-    // MFEM-faithful numbering here are the *discontinuous* prisms
-    // (`L2_T1_3D_P<p>`, the `toroid -dm` case) and the 2-D triangles.  The
-    // writer must refuse them rather than emit a mesh whose curvature is
-    // silently wrong — and it must refuse before the output file exists.
+    // quadrilateral numberings, and round 35 (D165) added the *discontinuous*
+    // prism one (`L2_T1_3D_P<p>`, the `toroid -dm` case — MFEM's
+    // `L2_WedgeElement`, pinned by `prism_l2_nodes_writer.rs`).  The only
+    // family left without an MFEM-faithful numbering here is the 2-D
+    // triangle.  The writer must refuse it rather than emit a mesh whose
+    // curvature is silently wrong — and it must refuse before the output file
+    // exists.
 
     // Prism (3-D): `data/inline-wedge.mesh` is a single wedge, and
     // `set_curvature_prism6` gives it an order-3 geometry table.
@@ -400,15 +400,16 @@ fn unsupported_element_families_are_refused_without_writing_a_file() {
     )
     .expect("prism continuous nodes are written since D151");
     assert!(String::from_utf8(sink).unwrap().contains("H1_3D_P3"));
-    // ... the discontinuous `L2_T1_3D_P<p>` one is not.
-    let err = write_mfem_nodes(
-        &mut Vec::<u8>::new(),
+    // ... and so is the discontinuous `L2_T1_3D_P<p>` one since D165.
+    let mut sink: Vec<u8> = Vec::new();
+    write_mfem_nodes(
+        &mut sink,
         &Mesh::<2>::unit_square_tri(2),
         Some(&prism),
         NodesSpace::Discontinuous,
     )
-    .expect_err("prism discontinuous nodes must be refused");
-    assert!(format!("{err}").contains("Prism6"), "{err}");
+    .expect("prism discontinuous nodes are written since D165");
+    assert!(String::from_utf8(sink).unwrap().contains("L2_T1_3D_P3"));
 
     // 2-D triangle.
     let mut tri = Mesh::<2>::make_cartesian_2d_tri(1, 1, 1.0, 1.0);

@@ -952,7 +952,8 @@ pub enum NodesSpace {
     Continuous,
     /// `SetCurvature(order, true, …)`: the node dofs are an `L2_FECollection`
     /// with Gauss-Lobatto points (`L2_T1_<dim>D_P<p>`), `(p+1)^dim` private
-    /// dofs per element.
+    /// dofs per element for the tensor families (`(p+1)²(p+2)/2` for the
+    /// wedge).
     Discontinuous,
 }
 
@@ -1026,7 +1027,8 @@ fn write_nodes_section<W: Write>(
 /// so a value read at one slot can be handed to the matching dof unchanged.
 /// For a discontinuous space the dof of slot `d` of element `e` is simply
 /// `e * npe + d`, with `d` indexing MFEM's `L2FECollection` element ordering
-/// (the lexicographic tensor order), which is a permutation of the mesh's own
+/// (the lexicographic tensor order for the tensor families, the layer ×
+/// L2-triangle order for the wedge), which is a permutation of the mesh's own
 /// slot order.
 fn nodes_dof_values<const D: usize>(
     mesh: &Mesh<D>,
@@ -1198,8 +1200,8 @@ fn nodes_dof_values<const D: usize>(
                 _ => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful discontinuous `nodes` numbering for \
-                         {et:?} (only Hex8, Quad4 and Tri3 are implemented); no `nodes` \
-                         section was written"
+                         {et:?} (only Hex8, Quad4, Tri3 and Prism6 are implemented); no \
+                         `nodes` section was written"
                     )))
                 }
             };
@@ -1241,6 +1243,7 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
         ElementType::Quad4 => QuadQk::new(p).dof_coords(),
         ElementType::Hex8 => HexQk::new(p).dof_coords(),
         ElementType::Tri3 => fem_element::lagrange::H1TriPk::new(p).dof_coords(),
+        ElementType::Prism6 => fem_element::lagrange::PrismPk::new(p).dof_coords(),
         _ => return None,
     })
 }
@@ -1258,8 +1261,20 @@ fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
 ///   `for (j = 0..p) for (i = 0..p-j)` over the `w`-normalised Gauss-Lobatto
 ///   barycentric points `(op[i]/w, op[j]/w)`, `w = op[i]+op[j]+op[p-i-j]` —
 ///   the *same point set* as `H1TriPk`, in a different order;
-/// * every other family (tets, prisms, pyramids) is left out: its L2 ordering
-///   has not been verified against MFEM here.
+/// * `L2_WedgeElement` (`fe_l2.cpp:839`) composes `L2_TriangleElement ×
+///   L2_SegmentElement`: its `t_dof`/`s_dof` fill loop leaves
+///   `t_dof[m] = m mod T`, `s_dof[m] = m / T` (`T = (p+1)(p+2)/2` — the
+///   inner `for (j) for (i<=j)` double loop only counts to `T`, and `l`
+///   increments alongside `m`), so node `m = k·T + l` sits at
+///   `(t_Nodes[l].x, t_Nodes[l].y, s_Nodes[k].x)`: **layer-major** over the
+///   closed Gauss-Lobatto points of the segment, with the *triangle's own L2
+///   order* inside every layer (verified against MFEM 4.10's
+///   `L2_WedgeElement(p).GetNodes()` and its `flatprism_l2` `-dm` files).
+///   The point set coincides with `PrismPk`'s GLL lattice (both build on
+///   `Poly_1D`'s `BasisType::GaussLobatto` closed points — classical
+///   Gauss-Lobatto-Legendre, `p = 3`: `{0, 0.276393…, 0.723607…, 1}`).
+/// * every other family (tets, pyramids) is left out: its L2 ordering has not
+///   been verified against MFEM here.
 fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
     use fem_element::lagrange::factory::{HexQk, QuadQk};
     if p == 0 {
@@ -1279,6 +1294,27 @@ fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
                 for i in 0..=(p - j) {
                     let w = gll[i] + gll[j] + gll[p - i - j];
                     slots.push(vec![gll[i] / w, gll[j] / w]);
+                }
+            }
+            slots
+        }
+        ElementType::Prism6 => {
+            // `L2_WedgeElement`: node `k·T + l` = layer `gll[k]` of the
+            // segment × triangle node `l` (`L2_TriangleElement` order), in
+            // `PrismPk`'s `[z, x, y]` reference convention.
+            let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+                .0
+                .iter()
+                .map(|&x| 0.5 * (x + 1.0))
+                .collect();
+            let tri = (p + 1) * (p + 2) / 2;
+            let mut slots = Vec::with_capacity((p + 1) * tri);
+            for k in 0..=p {
+                for j in 0..=p {
+                    for i in 0..=(p - j) {
+                        let w = gll[i] + gll[j] + gll[p - i - j];
+                        slots.push(vec![gll[k], gll[i] / w, gll[j] / w]);
+                    }
                 }
             }
             slots
