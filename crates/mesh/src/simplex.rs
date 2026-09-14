@@ -654,65 +654,87 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    /// Prism6 → geometry: barycentric interpolation.
+    /// Prism6 → `PrismPk` geometry: the geometry node in slot `d` sits at
+    /// `PrismPk::new(p).dof_coords()[d]`.
+    ///
+    /// The slot order and the reference domain must be the ones
+    /// [`element_jacobian`](Self::element_jacobian) (and
+    /// `crates/assembly`'s `geo_ref_elem`, and `curved::CurvedMesh`) evaluates
+    /// the stored table with, i.e. `PrismPk`'s: `xi = (ξ, η, ζ)` with the
+    /// **extrusion `ξ` first** (`ξ = k/p`, layer-major) and, inside a layer,
+    /// the unit triangle `(η, ζ)` in `TriPk` node order (3 vertices, the
+    /// `ζ = 0` edge, the hypotenuse, the `η = 0` edge, then the interior).
+    ///
+    /// The previous implementation enumerated `(ζ_tri, η_tri, ξ_extrusion)`
+    /// triples on `[−1, 1]³` and fed them to a barycentric formula expecting
+    /// `[0, 1]²`, so `p ≥ 2` prisms got a table that no consumer could read
+    /// (D152): slot 0 of a unit prism ended up at `(−1, −1, 0)`, and the
+    /// vertex slots matched no reference point at all, duplicating every
+    /// vertex.  The nodes are now generated from `PrismPk`'s own lattice, so
+    /// they cannot drift from the element that evaluates them again.
+    ///
+    /// The six vertex slots reuse the mesh's own vertices (local order: bottom
+    /// triangle 0-1-2 at `ξ = 0`, top triangle 3-4-5 at `ξ = 1`); every other
+    /// slot gets a new node interpolated from the *linear* prism map, which
+    /// callers (`snap_to_sphere`, the io layer, the elevators) then move onto
+    /// the true surface.
+    ///
+    /// Note (D152 residual): `PrismPk`'s slot order is *not* MFEM's
+    /// `H1_WedgeElement` layout — MFEM writes a curved prism's `nodes` in
+    /// entity order (`[v0…v5, bottom edges, top edges, vertical edges,
+    /// triangles, quads, interior]`) on Gauss-Lobatto points, `PrismPk` uses
+    /// layer-major order on equispaced points (the two lattices differ from
+    /// `p = 3`).  Reading/writing MFEM curved prisms therefore still needs the
+    /// io-side permutation + re-evaluation (D119/D151), and the prism H1
+    /// space's own DOF layout has to be reconciled with `PrismPk`
+    /// (`crates/space`).  This table is defined by the element that evaluates
+    /// it, so its order follows `PrismPk`
+    /// (`tests/d152_prism_curvature.rs::prism_pk_slot_order_is_frozen`).
     fn set_curvature_prism6(&mut self, p: usize) {
+        use fem_element::lagrange::PrismPk;
+        use fem_element::ReferenceElement;
+
         let n_elems = self.n_elems();
-        let npe_new = (p+1) * (p+1) * (p+2) / 2;
-        let mut geom_conn = vec![0u32; n_elems * npe_new];
+        let high = PrismPk::new(p);
+        let npe_new = high.n_dofs();
+        let dof_ref = high.dof_coords();
+        let linear = PrismPk::new(1);
+
+        let mut geom_conn = Vec::with_capacity(n_elems * npe_new);
         let mut geom_coords = self.coords.clone();
         let mut next_id = self.n_nodes() as NodeId;
 
-        // Generate prism DOF reference positions.
-        let seg: Vec<f64> = (0..=p).map(|i| -1.0 + 2.0 * i as f64 / p as f64).collect();
-        let mut dof_ref = Vec::with_capacity(npe_new);
-        for iz in 0..=p {
-            for ir in 0..=p {
-                for is in 0..=(p - ir) {
-                    dof_ref.push([seg[ir], seg[is], seg[iz]]);
-                }
-            }
-        }
-
-        for e in 0..n_elems {
-            let verts = self.elem_nodes(e as ElemId);
-            let base = e * npe_new;
+        // Which local vertex (if any) a reference point is: the order-1 shape
+        // function of a prism vertex equals 1 exactly there.  Reading it off
+        // the linear element avoids hard-coding the reference domain here.
+        let mut phi6 = vec![0.0_f64; 6];
+        for e in 0..n_elems as ElemId {
+            let verts = self.elem_nodes(e);
+            let c: Vec<[f64; 3]> = (0..6)
+                .map(|k| {
+                    let x = self.node_coords(verts[k]);
+                    [x[0], x[1], x[2]]
+                })
+                .collect();
             for d in 0..npe_new {
                 let rc = &dof_ref[d];
-                let mut is_vert = None;
-                for v in 0..6usize {
-                    let ref_pos = match v {
-                        0 => [0.0, 0.0, -1.0], 1 => [1.0, 0.0, -1.0], 2 => [0.0, 1.0, -1.0],
-                        3 => [0.0, 0.0, 1.0], 4 => [1.0, 0.0, 1.0], 5 => [0.0, 1.0, 1.0],
-                        _ => unreachable!(),
-                    };
-                    if (rc[0]-ref_pos[0]).abs() < 1e-12 && (rc[1]-ref_pos[1]).abs() < 1e-12
-                        && (rc[2]-ref_pos[2]).abs() < 1e-12 {
-                        is_vert = Some(v); break;
-                    }
+                linear.eval_basis(rc, &mut phi6);
+                if let Some(v) = phi6.iter().position(|&phik| (phik - 1.0).abs() < 1e-12) {
+                    geom_conn.push(verts[v]);
+                    continue;
                 }
-                if let Some(v) = is_vert {
-                    geom_conn[base + d] = verts[v];
-                } else {
-                    let r = rc[0];
-                    let s = rc[1];
-                    let t = (rc[2] + 1.0) / 2.0;
-                    let phi0 = 1.0 - r - s;
-                    let phi1 = r;
-                    let phi2 = s;
-                    let (x0, x1, x2, x3, x4, x5) = (
-                        self.node_coords(verts[0]), self.node_coords(verts[1]),
-                        self.node_coords(verts[2]), self.node_coords(verts[3]),
-                        self.node_coords(verts[4]), self.node_coords(verts[5]));
-                    let mut x = [0.0_f64; 3];
-                    for dd in 0..3 {
-                        let bottom = phi0*x0[dd] + phi1*x1[dd] + phi2*x2[dd];
-                        let top = phi0*x3[dd] + phi1*x4[dd] + phi2*x5[dd];
-                        x[dd] = (1.0 - t) * bottom + t * top;
-                    }
-                    geom_conn[base + d] = next_id;
-                    geom_coords.extend_from_slice(&x);
-                    next_id += 1;
+                // `rc = (ξ, η, ζ)`: ξ the extrusion, `(η, ζ)` the triangle.
+                let (r, s, t) = (rc[0], rc[1], rc[2]);
+                let l0 = 1.0 - s - t;
+                let mut x = [0.0_f64; 3];
+                for dd in 0..3 {
+                    let bottom = l0 * c[0][dd] + s * c[1][dd] + t * c[2][dd];
+                    let top = l0 * c[3][dd] + s * c[4][dd] + t * c[5][dd];
+                    x[dd] = (1.0 - r) * bottom + r * top;
                 }
+                geom_conn.push(next_id);
+                geom_coords.extend_from_slice(&x);
+                next_id += 1;
             }
         }
 
