@@ -17,6 +17,7 @@ pub mod element_type;
 pub mod kdtree;
 pub mod point_locator;
 pub mod simplex;
+pub mod surface_embed;
 pub mod submesh;
 pub mod par_submesh;
 pub mod topology;

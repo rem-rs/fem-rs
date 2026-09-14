@@ -829,6 +829,17 @@ pub fn write_mfem_nodes<W: Write>(
             (2, &mesh_d.coords, &mesh_d.conn, &mesh_d.elem_tags, &mesh_d.elem_type,
              &mesh_d.elem_types)
         };
+    // The `dimension` line is the *topological* dimension (MFEM's `Dim`), not
+    // the coordinate count: a surface mesh is a `Mesh<3>` of `Quad4` elements
+    // (`topological_dim() == 2`) whose `nodes` section carries the space
+    // dimension separately in `VDim` (`Mesh::Printer` writes `Dim = 2` and
+    // `spaceDim` only through the section).  For every volume mesh
+    // `topological_dim() == dim`, so nothing changes there.
+    let topo = if let Some(m3) = mesh_3d {
+        m3.topological_dim() as usize
+    } else {
+        mesh_d.topological_dim() as usize
+    };
     let n_nodes = coords.len() / dim;
     let n_elems = if dim == 3 {
         mesh_3d.map_or(conn.len() / elem_type.nodes_per_element(), |m| m.n_elems())
@@ -848,7 +859,7 @@ pub fn write_mfem_nodes<W: Write>(
     };
 
     writeln!(writer, "MFEM mesh v1.0\n")?;
-    writeln!(writer, "dimension\n{dim}\n")?;
+    writeln!(writer, "dimension\n{topo}\n")?;
 
     // Elements section
     writeln!(writer, "elements\n{n_elems}")?;
@@ -908,10 +919,11 @@ pub fn write_mfem_nodes<W: Write>(
     // carried by the section's `VDim` (`mesh/mesh_readers.cpp:105-110`).
     writeln!(writer, "\nvertices\n{n_nodes}")?;
     if let Some((order, n_dofs, values)) = nodes.as_ref() {
-        // `dim` is both the topological and the space dimension here:
-        // `nodes_dof_values` rejects a mesh whose topological dimension differs
-        // from the stored coordinate dimension (a `dim < spaceDim` surface).
-        write_nodes_section(writer, space, *order, dim, *n_dofs, values)?;
+        // The section's collection name counts the *topological* dimension
+        // (`H1_2D_P3` for a surface, even though the values carry 3
+        // components); `VDim` below carries the space dimension.  The
+        // straight-sided branch stays keyed by the coordinate count `dim`.
+        write_nodes_section(writer, space, *order, topo, *n_dofs, values)?;
     } else {
         // Straight-sided: `<space dim>` then one coordinate row per vertex, as
         // before (the `nodes` section replaces this whole block).
@@ -1025,11 +1037,23 @@ fn nodes_dof_values<const D: usize>(
         return Ok(None);
     }
     let dim = mesh.topological_dim() as usize;
+    let et = mesh.element_type_at(0);
     if dim != D {
-        return Err(FemError::Mesh(format!(
-            "write_mfem: `nodes` section for a {dim}-dimensional mesh in {D}-D space \
-             (spaceDim > dim) is not supported"
-        )));
+        // The one faithful surface representation (`Mesh::MakeCartesian2D` +
+        // `SetCurvature(order, …, 3, Ordering::byVDIM)`, as in the
+        // mobius-strip / klein-bottle miniapps): a dimension-2 mesh whose
+        // elements are the intrinsically 2-D `Quad4`, stored in 3-D
+        // coordinates.  The 2-D `Quad4` numbering below is element-local, so
+        // it applies unchanged; only the node values then carry `D = 3`
+        // components (`VDim: 3`).  Everything else (a "2-D hex", a 1-D
+        // element in 2-D, …) has no faithful MFEM numbering here and stays
+        // refused rather than silently mis-numbered.
+        if !(D == 3 && dim == 2 && et == ElementType::Quad4) {
+            return Err(FemError::Mesh(format!(
+                "write_mfem: `nodes` section for a {dim}-dimensional mesh in {D}-D space \
+                 (spaceDim > dim) is not supported"
+            )));
+        }
     }
     let sdim = D;
     let geo = mesh.geometry.as_ref().ok_or_else(|| {
@@ -1048,7 +1072,6 @@ fn nodes_dof_values<const D: usize>(
             geo.n_nodes
         )));
     }
-    let et = mesh.element_type_at(0);
     for e in 1..n_elems as u32 {
         if mesh.element_type_at(e) != et {
             return Err(FemError::Mesh(format!(
@@ -1098,9 +1121,11 @@ fn nodes_dof_values<const D: usize>(
                     })?;
                     (slots, n_dofs)
                 }
-                // D151: the prism table is not a pure permutation of the
-                // mesh's geometry slots (Gauss-Lobatto vs equispaced nodes),
-                // so it evaluates the mesh's geometry itself.
+                // D151: the prism table pairs MFEM's entity-ordered H1 wedge
+                // slots with the mesh's layer-major `PrismPk` slots, so it goes
+                // through the interpolation matrix instead of a direct
+                // permutation (round 34, D164: the two lattices are both GLL,
+                // so the matrix is the identity on nodes).
                 ElementType::Prism6 => {
                     let (n_dofs, v) = prism_nodes_dof_values(mesh, geo, order as usize, sdim)?;
                     return Ok(Some((order, n_dofs, v)));
@@ -1115,6 +1140,20 @@ fn nodes_dof_values<const D: usize>(
             };
             let mut values = vec![0.0f64; n_dofs * sdim];
             let mut filled = vec![false; n_dofs];
+            // MFEM's `SetNodalFESpace` fills a continuous `nodes` section via
+            // `GridFunction::ProjectCoefficient`, which processes the elements
+            // **in order** and writes each element's dof values wholesale — a
+            // shared dof keeps the *last* element's value.  For a volume mesh
+            // the geometry is continuous, so every writer agrees and the
+            // conflict check below is a genuine consistency guard.  For the
+            // `Dim = 2, spaceDim = 3` surface path, though, disagreement is
+            // MFEM's own semantic: the miniapps identify vertices *after*
+            // `SetCurvature`, so the seam elements still carry their
+            // pre-identification samples and `ProjectCoefficient` resolves the
+            // shared edge/vertex dofs last-writer-wins (measured on the MFEM
+            // 4.10 mobius-strip / klein-bottle outputs).  Reproducing that
+            // requires the overwrite, not the error.
+            let strict_continuity = dim == D;
             for e in 0..n_elems {
                 for s in 0..npe {
                     let g = slots[e * npe + s] as usize;
@@ -1123,12 +1162,15 @@ fn nodes_dof_values<const D: usize>(
                         // A dof shared by several elements must describe one
                         // physical point; a disagreement means the mesh's
                         // geometry is not actually continuous.
-                        if (0..sdim).any(|c| !approx_eq(values[g * sdim + c], v[c])) {
+                        if strict_continuity
+                            && (0..sdim).any(|c| !approx_eq(values[g * sdim + c], v[c]))
+                        {
                             return Err(FemError::Mesh(format!(
                                 "write_mfem: geometry dof {g} is shared by two elements with \
                                  different coordinates — the mesh geometry is not continuous"
                             )));
                         }
+                        values[g * sdim..g * sdim + sdim].copy_from_slice(v);
                     } else {
                         values[g * sdim..g * sdim + sdim].copy_from_slice(v);
                         filled[g] = true;
@@ -1929,23 +1971,27 @@ fn quad2d_slot_map<M: MeshTopology>(
 //
 // MFEM's `H1_WedgeElement` (`fem/fe/fe_h1.cpp:863`) is `H1_TriangleElement ×
 // H1_SegmentElement`, i.e. its nodes sit on the **closed Gauss-Lobatto**
-// points of both factors, while fem-rs's prism geometry element `PrismPk`
-// (`crates/element/src/lagrange/prism.rs`) is a tensor product of the
-// *equispaced* triangle and segment bases.  The two lattices coincide for
-// `p ≤ 2` (`{0, ½, 1}` is both the equispaced and the Gauss-Lobatto node set)
-// and diverge from `p = 3` (`0.276393202250021` / `0.723606797749979` vs
-// `1/3` / `2/3`) — the same *family split* this project already hit for
-// tetrahedra (D49/D112/D152) and triangles (D138).
+// points of both factors.  fem-rs's prism geometry element `PrismPk`
+// (`crates/element/src/lagrange/prism.rs`) used to be a tensor product of the
+// *equispaced* triangle and segment bases — the same *family split* this
+// project had already hit for tetrahedra (D49/D112/D152) and triangles (D138),
+// measured as `|fem-rs − C++| = 7.2e-5` on the default `toroid -o 3` wedge.
+// **Round 34 (D164) moved `PrismPk` to the Gauss-Lobatto lattice** (GLL
+// triangle factor ⊗ GLL segment factor, layer-major slot order kept), so the
+// two lattices now coincide for every `p` — historically they only agreed at
+// `p ≤ 2` and diverged from `p = 3` (`0.276393202250021` /
+// `0.723606797749979` vs `1/3` / `2/3`).
 //
 // The file's `nodes` section is read by MFEM as `H1_WedgeElement` nodal values,
 // so dof `g` must carry the *physical position of the mesh's own geometry map*
-// at the GLL point `ξ_g` of that dof.  fem-rs's geometry table stores the map
-// in the `PrismPk` basis (its own equispaced nodes), so the writer builds the
+// at the GLL point `ξ_g` of that dof.  The writer still goes through the
 // interpolation matrix
 //
 //     B[i][s] = φ_s^{PrismPk}(ξ_i),      ξ_i = the GLL point of H1 dof `i`
 //
-// once per order and evaluates `x_e(ξ_i) = Σ_s B[i][s]·X_s` per element.  The
+// built once per order — which is now the identity map on GLL nodes (it was a
+// genuine equispaced→GLL re-interpolation before round 34) — and evaluates
+// `x_e(ξ_i) = Σ_s B[i][s]·X_s` per element.  The
 // result is *the mesh's own geometry function*, sampled at MFEM's nodes: the
 // `nodes` section then describes the same curved mesh fem-rs assembles with,
 // and the read-back file MFEM produces is a fixed point of this writer.
@@ -2267,8 +2313,10 @@ fn prism_nodes_dof_values<M: MeshTopology>(
     let n_face_dofs = acc;
     let n_dofs = n_vert + n_edges * e_per_edge + n_face_dofs + n_elems * nb;
 
-    // `B[i][s] = φ_s^{PrismPk}(ξ_i)`: the mesh's own (equispaced-lattice)
-    // geometry element evaluated at the GLL points of MFEM's H1 wedge.
+    // `B[i][s] = φ_s^{PrismPk}(ξ_i)`: the mesh's own geometry element
+    // (Gauss-Lobatto lattice since D164, round 34) evaluated at the GLL points
+    // of MFEM's H1 wedge — the identity on nodes, kept as a matrix so the
+    // pairing stays explicit.
     if geo.nodes_per_elem != npe || geo.conn.len() != n_elems * npe {
         return Err(FemError::Mesh(format!(
             "write_mfem: the prism geometry table has {} nodes per element, the H1 \
@@ -2563,10 +2611,10 @@ enum TetGeom {
 ///
 /// **Keep the two in step:** `geo_ref_elem` (`crates/assembly/src/assembler.rs`)
 /// builds the matching geometry element for the transform, and
-/// `vector_assembler::geo_ref_elem_from_mesh` still returns the *equispaced*
-/// `factory::TetPk` for tetrahedra — that copy must be switched to `H1TetPk`
-/// as well, otherwise a curved tet mesh (`geom_order ≥ 3`) is transformed with
-/// a different slot order than this table was built in.
+/// `vector_assembler::geo_ref_elem_from_mesh` returns the same families for the
+/// vector-assembly path — tet → `H1TetPk` (GLL, D49), prism → `PrismPk`
+/// (Gauss-Lobatto since round 34's D164) — so a curved mesh is transformed with
+/// the same slot order this table was built in.
 fn build_h1_tet_geometry<M: MeshTopology>(
     mesh: &M,
     order: u8,

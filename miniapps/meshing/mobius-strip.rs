@@ -1,57 +1,58 @@
 //! # Mobius Strip Miniapp — Generate Mobius Strip Surface Meshes
 //!
-//! Partial port of MFEM `miniapps/meshing/mobius-strip.cpp` (MFEM 4.10).
+//! 1:1 port of MFEM `miniapps/meshing/mobius-strip.cpp` (MFEM 4.10), serial.
 //!
 //! The C++ miniapp builds a 2-D Cartesian quad mesh in `[0, 2*pi] x [0, 2]`,
-//! promotes it to a **discontinuous** high-order nodal space **in 3-D**
-//! (`SetCurvature(order, true, 3, Ordering::byVDIM)`), optionally identifies the
-//! two ends of the strip (with a half twist for `-c 2`), applies the Mobius
-//! transformation to the nodal coordinates, and writes the result.  The file
-//! therefore has `dimension 2`, a 3-component `nodes` grid function and
-//! `nodes=1` for the default `-o 3 -c 2`.
+//! promotes it to a high-order nodal space **in 3-D**
+//! (`SetCurvature(order, true, 3, Ordering::byVDIM)`), optionally identifies
+//! the two ends of the strip (with a half twist for `-c 2`), applies the
+//! Mobius transformation to the nodal coordinates and writes the result.  The
+//! file has `dimension 2`, a 3-component (`VDim: 3`) high-order `nodes`
+//! section (`H1_2D_P<p>`, or `L2_T1_2D_P<p>` with `-dm`) and `nodes=1`.
 //!
 //! Sample runs (C++): `mobius-strip`, `mobius-strip -o 4`,
-//! `mobius-strip -c 0 -t 1.5 -nx 20`.
+//! `mobius-strip -c 1 -t 1`, `mobius-strip -c 0 -t 0.75`.
 //!
-//! **This run always exits with code 3.**
+//! Port notes (vs C++), scope of this port:
 //!
-//! Round 33 (D151) landed the 2-D `Quad4` node numbering in the writer
-//! (`fem_io::mfem::quad2d_slot_map` for `H1_2D_P<p>`, `mfem_l2_slots` for
-//! `L2_T1_2D_P<p>`), so the *flat* 2-D case of this file is writable now — but
-//! the C++ mesh here is a **surface**: `dimension 2` with a 3-component
-//! (`VDim: 3`) high-order `nodes` section, and that is still refused.
-//!
-//! Gap list (exit 3) — accurate as of round 33:
-//! 1. **`dimension 2` with `VDim: 3`**: `fem_io::mfem::nodes_dof_values`
-//!    rejects a mesh whose `topological_dim()` differs from its coordinate
-//!    dimension (`write_mfem: `nodes` section for a 2-dimensional mesh in 3-D
-//!    space (spaceDim > dim) is not supported`), and `write_mfem_nodes` takes
-//!    the `dimension` line from the mesh's `D`.  Needed: the `dimension` line
-//!    from `Mesh::topological_dim()` while the node values keep their 3
-//!    components (a `Mesh<3>` holding `Quad4` elements already reports
-//!    `topological_dim() == 2` with 3 coordinate components, which *is* MFEM's
-//!    `Dim = 2, spaceDim = 3` surface representation; the 2-D
-//!    `quad2d_slot_map`/`mfem_l2_slots` numbering then applies as-is).
-//! 2. **Building the surface mesh**: `Mesh<D>` binds the coordinate count to
-//!    the topological dimension and `Mesh::set_curvature(order)` has no
-//!    `space_dim` argument, so the C++ `mesh.SetCurvature(order, true, 3,
-//!    Ordering::byVDIM)` on a `Mesh::MakeCartesian2D` mesh (which promotes the
-//!    vertices to 3 components, `mesh/mesh.cpp:7211`) has no fem-rs
-//!    counterpart.
-//! 3. The miniapp body itself is not ported: the C++ identifies the two ends
-//!    of the strip (`v2v`, with a half twist for `-c 2`), calls
-//!    `RemoveUnusedVertices` + `RemoveInternalBoundaries` (which for this
-//!    `dimension 2` mesh works on the 1-D `SEGMENT` face table), applies
-//!    `mobius_trans` to the *nodal* coordinates (`mesh.Transform`, i.e. all
-//!    `(p+1)²` nodes per element, not just the vertices) and writes with
-//!    `precision(8)`.
-//!
-//! The previous version of this port wrote a hand-rolled file with
-//! `dimension 3` and flattened 2-D vertices (a `Mesh<3>` with Quad4 elements),
-//! which is not the C++ mesh at all (a surface in 3-D needs `dimension 2` with
-//! `SEGMENT` boundary elements).  That path is removed rather than kept.
-//!
-//! `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
+//! * The full body is ported, in the C++ order of operations:
+//!   `Mesh::MakeCartesian2D(…, QUADRILATERAL, 1, 2π, 2)` is
+//!   `fem_mesh::surface_embed::cartesian2d_quad_surface_in_3d` (MFEM vertex
+//!   numbering, SFC element order, boundary segment order);
+//!   `SetCurvature(order, true, 3, Ordering::byVDIM)` is
+//!   `Mesh::set_curvature` (Gauss-Lobatto `Quad4` lattice in 3-D) — **before**
+//!   the identification, like the C++, so the node values keep the
+//!   pre-identification samples through `RemoveUnusedVertices` (MFEM
+//!   renumbers the dof slots only) and the final continuous projection
+//!   resolves the seam dofs last-writer-wins (`ProjectCoefficient` in
+//!   element order; the `nodes` writer reproduces this for the surface path);
+//!   the `v2v` end identification + `RemoveUnusedVertices` +
+//!   `RemoveInternalBoundaries` (1-D `SEGMENT` face table) is
+//!   `surface_embed::identify_vertices_and_clean`; and
+//!   `mesh.Transform(mobius_trans)` is `Mesh::transform` over the vertex and
+//!   geometry coordinates.
+//! * The default run (`-o 3 -c 2 -cm`) reproduces the C++ `mobius-strip.mesh`
+//!   (16 quads, 24 vertices, 16 boundary segments with attributes 1/3,
+//!   `H1_2D_P3`, `VDim: 3`) numerically (≤ MFEM print noise).
+//! * `-vis`/`-p` are parsed and printed but no GLVis socket is opened.
+
+use fem_io::mfem::{write_mfem_file_3d_nodes, NodesSpace};
+use fem_mesh::surface_embed::{
+    cartesian2d_quad_surface_in_3d, identify_vertices_and_clean, zero_small_node_values,
+};
+use fem_mesh::Mesh;
+
+const TWO_PI: f64 = std::f64::consts::TAU;
+
+/// C++ `mobius_trans` (`num_twists` is a process global there).
+fn mobius_trans(x: [f64; 3], num_twists: f64) -> [f64; 3] {
+    let a = 1.0 + 0.5 * (x[1] - 1.0) * (num_twists * x[0]).cos();
+    [
+        a * x[0].cos(),
+        a * x[0].sin(),
+        0.5 * (x[1] - 1.0) * (num_twists * x[0]).sin(),
+    ]
+}
 
 /// The C++ miniapp's `args.PrintOptions(cout)` dump (MFEM `OptionsParser`).
 fn print_options(
@@ -117,20 +118,42 @@ fn main() {
     }
     print_options(&out_file, nx, ny, order, close_strip, dg_mesh, num_twists);
 
-    eprintln!(
-        "mobius-strip (Rust port): the C++ miniapp writes a `dimension 2` surface mesh with a \
-3-component (`VDim: 3`) high-order `nodes` section (`SetCurvature(order, true, 3, \
-Ordering::byVDIM)`, default `nodes=1`).  The writer's 2-D `Quad4` numbering (H1 and L2) landed \
-in round 33 (D151), so what is left is the *surface* part, not the 2-D numbering: no faithful \
-`{out_file}` can be produced for a `dim 2 / spaceDim 3` mesh (a flattened `dimension 3` file is \
-not the C++ mesh).\n\
-Gap list (exit 3): [1] `fem_io::mfem` refuses `topological_dim() != D` (`nodes_dof_values`) and \
-writes the `dimension` line from `D` — it must take it from `Mesh::topological_dim()` while the \
-node values keep their 3 components; [2] there is no fem-rs way to build a 2-D surface mesh in \
-3-D (`Mesh<D>` ties the coordinate count to the topological dimension and `Mesh::set_curvature` \
-has no `space_dim`); [3] the miniapp body (end identification with the `-c 2` flip, \
-`RemoveInternalBoundaries` over the 1-D `SEGMENT` face table, `mesh.Transform` on all nodal \
-coordinates) is not ported."
-    );
-    std::process::exit(3);
+    // Mesh::MakeCartesian2D(nx, ny, Element::QUADRILATERAL, 1, 2*M_PI, 2.0)
+    // as a dimension-2 surface in 3-D.
+    let mut mesh: Mesh<3> = cartesian2d_quad_surface_in_3d(nx, ny, TWO_PI, 2.0);
+
+    // Mesh::SetCurvature(order, true, 3, Ordering::byVDIM) — **before** the
+    // identification, exactly like the C++: the node values then carry each
+    // element's pre-identification Gauss-Lobatto samples through the vertex
+    // removal (`RemoveUnusedVertices` only renumbers the slots), and the
+    // final continuous projection resolves the seam dofs last-writer-wins.
+    // Promoting after the identification would resample the merged geometry
+    // and produce a measurably different field.
+    mesh.set_curvature(order);
+
+    if close_strip != 0 {
+        let mut v2v: Vec<i32> = (0..mesh.n_nodes() as i32).collect();
+        // identify vertices on vertical lines (with a flip)
+        let npx = nx + 1;
+        for j in 0..=ny {
+            let v_old = nx + j * npx;
+            let v_new = (if close_strip == 1 { j } else { ny - j }) * npx;
+            v2v[v_old] = v_new as i32;
+        }
+        // v2v renumbering of elements and boundary elements, then
+        // RemoveUnusedVertices() + RemoveInternalBoundaries().
+        identify_vertices_and_clean(&mut mesh, &v2v);
+    }
+
+    // mesh.Transform(mobius_trans): every nodal coordinate (the (p+1)²
+    // geometry nodes per element, not just the vertices).
+    mesh.transform(|x| mobius_trans(x, num_twists));
+
+    // if (!dg_mesh) mesh.SetCurvature(order, false, 3, Ordering::byVDIM);
+    let space = if dg_mesh { NodesSpace::Discontinuous } else { NodesSpace::Continuous };
+
+    // for (i = 0; i < nodes.Size(); i++) if (|nodes(i)| < 1e-12) nodes(i) = 0;
+    zero_small_node_values(&mut mesh);
+
+    write_mfem_file_3d_nodes(&out_file, &mesh, space).expect("write mesh");
 }
