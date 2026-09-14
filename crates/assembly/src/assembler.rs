@@ -317,8 +317,11 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         (ElementType::Hex8, 0) => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on hexes
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Hex8, o) => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
+        // MFEM `H1_FECollection(p, 3)`'s wedge element: Gauss-Lobatto nodes in
+        // MFEM's entity slot order (D168) — the same layout `fem_space`'s
+        // `DofManager::build_prism_h1` numbers `element_dofs` in.
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
-            Box::new(PrismPk::new(order as usize))
+            Box::new(fem_element::lagrange::H1PrismPk::new(order as usize))
         }
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
             Box::new(PyramidPk::new(order as usize))

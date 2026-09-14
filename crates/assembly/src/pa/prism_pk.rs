@@ -13,23 +13,66 @@
 //! 2. `y = S₁ · t + M₁ · w` (matrix-multiply across layers)
 
 use crate::pa::types::PaData;
-use fem_element::lagrange::{PrismPk, TriPk};
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 
-// ─── 1D Lagrange matrices (equispaced nodes on [0,1]) ─────────────────────
+// ─── 1D Lagrange matrices (Gauss-Lobatto nodes on [0,1]) ──────────────────
+
+/// The closed Gauss-Lobatto points on `[0,1]` — the 1-D factor of
+/// `PrismPk`/MFEM `H1_WedgeElement` (D164).
+fn gll_closed_points(p: usize) -> Vec<f64> {
+    let (g, _w) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
+    g.iter().map(|&x| 0.5 * (x + 1.0)).collect()
+}
+
+/// All 1-D Lagrange basis values on `nodes` at `x` (nodes are distinct).
+fn lag1d_all(nodes: &[f64], x: f64) -> Vec<f64> {
+    let n = nodes.len();
+    let mut out = vec![0.0_f64; n];
+    for (i, v) in out.iter_mut().enumerate() {
+        let mut acc = 1.0;
+        for (m, xm) in nodes.iter().enumerate() {
+            if m != i {
+                acc *= (x - xm) / (nodes[i] - xm);
+            }
+        }
+        *v = acc;
+    }
+    out
+}
+
+/// All 1-D Lagrange basis derivatives on `nodes` at `x`.
+fn dlag1d_all(nodes: &[f64], x: f64) -> Vec<f64> {
+    let n = nodes.len();
+    let mut out = vec![0.0_f64; n];
+    for (i, v) in out.iter_mut().enumerate() {
+        let mut acc = 0.0;
+        for (j, xj) in nodes.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let mut term = 1.0 / (nodes[i] - xj);
+            for (m, xm) in nodes.iter().enumerate() {
+                if m != i && m != j {
+                    term *= (x - xm) / (nodes[i] - xm);
+                }
+            }
+            acc += term;
+        }
+        *v = acc;
+    }
+    out
+}
 
 /// 1D Lagrange stiffness matrix: `S₁[i][j] = ∫₀¹ ℓ'_i(x)·ℓ'_j(x) dx`.
 fn build_1d_stiffness(p: usize) -> Vec<Vec<f64>> {
     let n = p + 1;
     // Exact integration of quadratic products of degree p-1 polynomials
-    // Using equispaced nodes and exact integration
-    let ref_elem = fem_element::lagrange::SegPk::new(p);
+    let cp = gll_closed_points(p);
     let (qpts, qwts) = gauss_legendre_1d(2 * p + 1);
     let mut s = vec![vec![0.0; n]; n];
     for (&qp, &qw) in qpts.iter().zip(qwts.iter()) {
-        let mut dvals = vec![0.0; n];
-        ref_elem.eval_grad_basis(&[qp], &mut dvals);
+        let dvals = dlag1d_all(&cp, qp);
         for i in 0..n {
             for j in 0..n {
                 s[i][j] += dvals[i] * dvals[j] * qw;
@@ -42,12 +85,11 @@ fn build_1d_stiffness(p: usize) -> Vec<Vec<f64>> {
 /// 1D Lagrange mass matrix: `M₁[i][j] = ∫₀¹ ℓ_i(x)·ℓ_j(x) dx`.
 fn build_1d_mass(p: usize) -> Vec<Vec<f64>> {
     let n = p + 1;
+    let cp = gll_closed_points(p);
     let (qpts, qwts) = gauss_legendre_1d(2 * p + 1);
-    let ref_elem = fem_element::lagrange::SegPk::new(p);
     let mut m = vec![vec![0.0; n]; n];
     for (&qp, &qw) in qpts.iter().zip(qwts.iter()) {
-        let mut vals = vec![0.0; n];
-        ref_elem.eval_basis(&[qp], &mut vals);
+        let vals = lag1d_all(&cp, qp);
         for i in 0..n {
             for j in 0..n {
                 m[i][j] += vals[i] * vals[j] * qw;
@@ -61,13 +103,13 @@ fn build_1d_mass(p: usize) -> Vec<Vec<f64>> {
 
 /// Triangle stiffness matrix: `S₂[i][j] = ∫ ∇φ_i·∇φ_j dη dζ`.
 fn build_tri_stiffness(p: usize) -> Vec<Vec<f64>> {
-    let tri = TriPk::new(p);
+    let tri = fem_element::lagrange::H1TriPk::new(p);
     let n_tri = tri.n_dofs();
     let rule = tri.quadrature((2 * p + 2).min(15) as u8);
     let mut s = vec![vec![0.0; n_tri]; n_tri];
     for pt_idx in 0..rule.points.len() {
         let pt = &rule.points[pt_idx];
-        let w = rule.weights[pt_idx] * 0.5; // scale to unit triangle area
+        let w = rule.weights[pt_idx]; // tri_rule integrates the unit triangle (Σw = 1/2)
         let mut grads = vec![0.0; n_tri * 2];
         tri.eval_grad_basis(pt, &mut grads);
         for i in 0..n_tri {
@@ -83,13 +125,13 @@ fn build_tri_stiffness(p: usize) -> Vec<Vec<f64>> {
 
 /// Triangle mass matrix: `M₂[i][j] = ∫ φ_i·φ_j dη dζ`.
 fn build_tri_mass(p: usize) -> Vec<Vec<f64>> {
-    let tri = TriPk::new(p);
+    let tri = fem_element::lagrange::H1TriPk::new(p);
     let n_tri = tri.n_dofs();
     let rule = tri.quadrature((2 * p + 2).min(15) as u8);
     let mut m = vec![vec![0.0; n_tri]; n_tri];
     for pt_idx in 0..rule.points.len() {
         let pt = &rule.points[pt_idx];
-        let w = rule.weights[pt_idx] * 0.5;
+        let w = rule.weights[pt_idx];
         let mut vals = vec![0.0; n_tri];
         tri.eval_basis(pt, &mut vals);
         for i in 0..n_tri {
@@ -179,7 +221,7 @@ pub fn build_prism_pk_pa_data<M: MeshTopology>(
 ) -> PaData {
     let n_elems = mesh.n_elements();
     let nq_1d = p + 1; // quadrature points in the extrusion direction
-    let tri_ref = TriPk::new(p);
+    let tri_ref = fem_element::lagrange::H1TriPk::new(p);
     let tri_rule = tri_ref.quadrature((2 * p + 1).min(15) as u8);
     let nq_tri = tri_rule.points.len(); // triangle quadrature points from rule
     let n_geom = 11; // J⁻ᵀ (9) + |detJ| (1) + κ (1) = 11 values per QP
@@ -249,6 +291,12 @@ pub fn build_prism_pk_pa_data<M: MeshTopology>(
 /// `y += A·x` where `A = S₁⊗M₂ + M₁⊗S₂`, O(p⁴) complexity.
 /// For affine prisms with unit Jacobian, the geometry correction factor
 /// is extracted from the first quadrature point.
+///
+/// `elem_dofs` are the *space's* element dofs, which since D168 follow MFEM's
+/// `H1_WedgeElement` entity order, while the Kronecker factors act in
+/// [`PrismPk`]'s layer-major order — the application permutes through
+/// [`H1PrismPk`]'s slot table (`slot m of the H1 wedge = layer slot
+/// `perm[m]` of `PrismPk`).
 pub fn pa_apply_prism_pk(
     pd: &PaData,
     elem_dofs: &[Vec<u32>],
@@ -266,18 +314,24 @@ pub fn pa_apply_prism_pk(
     let s2 = build_tri_stiffness(p);
     let m2 = build_tri_mass(p);
 
+    // entity slot ↔ layer slot permutation (`H1PrismPk` = `PrismPk` permuted).
+    let perm = fem_element::lagrange::H1PrismPk::new(p).layer_perm().to_vec();
+    let mut inv = vec![0usize; n_loc];
+    for (m, &ls) in perm.iter().enumerate() {
+        inv[ls] = m;
+    }
+
     for e in 0..pd.n_elems {
         let dofs = &elem_dofs[e];
         if dofs.len() < n_loc { continue; }
 
-        // Load element solution as [n_tri × np1] matrix (row = tri DOF, col = layer)
+        // Load element solution as [n_tri × np1] matrix (row = tri DOF, col =
+        // layer), reading dofs through the entity→layer permutation.
         let mut ue = vec![vec![0.0; np1]; n_tri];
         for layer in 0..np1 {
             for tri_dof in 0..n_tri {
-                let idx = layer * n_tri + tri_dof;
-                if idx < dofs.len() {
-                    ue[tri_dof][layer] = x[dofs[idx] as usize];
-                }
+                let ls = layer * n_tri + tri_dof;
+                ue[tri_dof][layer] = x[dofs[inv[ls]] as usize];
             }
         }
 
@@ -302,17 +356,16 @@ pub fn pa_apply_prism_pk(
             }
         }
 
-        // Combine: ye = S₁·t + M₁·w (across layers), then scale by geometry
+        // Combine: ye = S₁·t + M₁·w (across layers), then scale by geometry,
+        // scattering back through the permutation.
         for layer in 0..np1 {
             for i in 0..n_tri {
                 let mut val = 0.0;
                 for l in 0..np1 {
                     val += s1[layer][l] * t[l][i] + m1[layer][l] * w[l][i];
                 }
-                let idx = layer * n_tri + i;
-                if idx < dofs.len() {
-                    y[dofs[idx] as usize] += val * kappa * det_j;
-                }
+                let ls = layer * n_tri + i;
+                y[dofs[inv[ls]] as usize] += val * kappa * det_j;
             }
         }
     }
@@ -405,11 +458,13 @@ mod tests {
         // PA apply
         let pd = build_prism_pk_pa_data(&mesh, &|_| 1.0, p);
         let mut elem_dofs: Vec<Vec<u32>> = Vec::new();
-        for e in 0..mesh.n_elems() {
+        for e in 0..mesh.n_elems() as u32 {
             elem_dofs.push(space.element_dofs(e as u32).to_vec());
         }
 
-        let x = vec![1.0_f64; n];
+        // Non-constant field: a constant x makes A·x ≈ 0 on both sides, which
+        // cannot catch a wrong entity↔layer permutation (D168).
+        let x: Vec<f64> = (0..n).map(|i| 1.0 + 0.125 * (i % 7) as f64).collect();
         let mut y_pa = vec![0.0_f64; n];
         pa_apply_prism_pk(&pd, &elem_dofs, p, &x, &mut y_pa);
 
@@ -421,10 +476,11 @@ mod tests {
             .fold(0.0_f64, f64::max);
         let pa_nrm: f64 = y_pa.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
 
-        // Absolute error should be near machine epsilon for Kronecker PA
-        // (geometry correction not yet implemented for non-identity Jacobian)
-        assert!(max_err < 1e-12 || max_err / pa_nrm.max(1e-15) < 0.5,
-            "Prism P2 PA vs assembled max abs err = {:.3e} (pa_nrm={:.3e})",
-            max_err, pa_nrm);
+        // Exact quadrature on both sides (affine unit-Jacobian prism): the PA
+        // Kronecker apply must reproduce the assembled diffusion to roundoff.
+        assert!(
+            max_err < 1e-10,
+            "Prism P{p} PA vs assembled max abs err = {max_err:.3e} (pa_nrm={pa_nrm:.3e})"
+        );
     }
 }

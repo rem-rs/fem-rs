@@ -298,7 +298,7 @@ impl DofManager {
                     if mesh.n_elements() > 0 {
                         let npe = mesh.element_nodes(0).len();
                         match npe {
-                            6 => Self::build_p2_prism(mesh),
+                            6 => Self::build_prism_h1(mesh, 2),
                             5 => Self::build_p2_pyramid(mesh),
                             8 => Self::build_q2_hex(mesh),
                             _ => Self::build_pk(mesh, 2),
@@ -318,7 +318,7 @@ impl DofManager {
             3 => {
                 if topo_dim == 3 && mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
-                    if npe == 6 { return Self::build_p3_prism(mesh); }
+                    if npe == 6 { return Self::build_prism_h1(mesh, 3); }
                     if npe == 5 { return Self::build_p3_pyramid(mesh); }
                 }
                 // Quad Q3 / Hex Q3 via general pk path
@@ -335,7 +335,7 @@ impl DofManager {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
                     if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
-                    if npe == 6 && topo_dim == 3 { return Self::build_prism_pk(mesh, order); }
+                    if npe == 6 && topo_dim == 3 { return Self::build_prism_h1(mesh, order); }
                     if npe == 5 && topo_dim == 3 { return Self::build_pyramid_pk(mesh, order); }
                 }
                 Self::build_pk(mesh, order)
@@ -1217,61 +1217,226 @@ impl DofManager {
         }
     }
 
-    fn build_p2_prism<M: MeshTopology>(mesh: &M) -> Self {
+    // ─── H1 Prism (MFEM `H1_WedgeElement` layout, any order) ─────────────────
+
+    /// H¹ DOF manager for triangular prism meshes, any order `p ≥ 1`.
+    ///
+    /// The per-element slot layout is MFEM `H1_WedgeElement(p)`'s — the same
+    /// table [`fem_element::lagrange::H1PrismPk`] evaluates, so the assembler's
+    /// reference element pairs slot-for-slot with `element_dofs` (D168 ground
+    /// truth, probe `tmp/a34_prism_h1_probe.cpp`): 6 vertices, the 9 edge
+    /// blocks ([`PRISM_EDGES`] order, dof `j` at the `j`-th Gauss-Lobatto
+    /// point from the edge's *first* vertex, MFEM `SegDofOrd`), the bottom/top
+    /// triangular faces (each face's dof list is oriented by the
+    /// first-encountering element's triangle order, MFEM `TriDofOrd`), the 3
+    /// quadrilateral side faces (dof list in the first-encountering element's
+    /// parameterisation, MFEM `QuadDofOrd`), then the element-private interior.
+    ///
+    /// The old per-order builders (`build_p2_prism`, `build_p3_prism`, the
+    /// layer-major `build_prism_pk`) are replaced by this one: p2 wrote its
+    /// tri-face dofs into edge slot 14 and left slots 16/17 as dof 0, p3 used
+    /// `PrismPk`'s layer order (not MFEM's), and p ≥ 4 mis-sliced
+    /// `PrismPk::dof_coords()` for the interior coordinates.
+    fn build_prism_h1<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        use fem_element::lagrange::{h1_prism_slots, H1PrismPk, H1PrismSlot, PRISM_EDGES};
+
+        let p = order as usize;
+        assert!(p >= 1, "build_prism_h1: order must be >= 1");
+        assert_eq!(
+            mesh.topological_dim() as usize,
+            3,
+            "build_prism_h1 requires 3-D elements"
+        );
+        let dim = 3usize;
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
-        let dim = mesh.dim() as usize;
-        assert_eq!(mesh.topological_dim() as usize, 3, "build_p2_prism requires 3-D elements");
+        let slots = h1_prism_slots(p);
+        let dofs_per_elem = slots.len();
+        let ne = p - 1;
+        let nt = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+        let nq = ne * ne;
 
-        let dofs_per_elem = 18;
-        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
-        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        // `H1_TriangleElement`'s interior slot labels: barycentric exponents
+        // `(λ0, λ1, λ2)` (λ1 ∝ x, λ2 ∝ y), running (j-outer, i-inner) — the
+        // same order the face slots of `H1PrismPk` enumerate.
+        let tri_labels: Vec<[usize; 3]> = (1..p)
+            .flat_map(|j| (1..(p - j)).map(move |i| [p - i - j, i, j]))
+            .collect();
+        debug_assert_eq!(tri_labels.len(), nt);
+        // MFEM's *bottom* face dof permutation (`fe_h1.cpp:930`: its `FaceVert`
+        // list is `(0, 2, 1)`, reversed winding, so the k-th bottom-face dof
+        // sits at the triangle interior index
+        // `l = j - p + ((2p-1-i)·i)/2` with `(i, j)` the k-th (j-outer,
+        // i-inner) pair — `H1PrismPk`'s `TriFace(0, k)` slot position is
+        // `H1TriPk` node `3p + l`, i.e. label `tri_labels[l]`).
+        let bottom_label_of_k: Vec<[usize; 3]> = (1..p)
+            .flat_map(|j| {
+                let tri_labels = &tri_labels;
+                (1..(p - j)).map(move |i| {
+                    let l = (j as i64 - p as i64 + (((2 * p - 1 - i) * i) / 2) as i64) as usize;
+                    tri_labels[l]
+                })
+            })
+            .collect();
+        debug_assert_eq!(bottom_label_of_k.len(), nt);
+
+        let mut edge_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+        // Face entities keep the dof list *and* the first-encountering vertex
+        // order that defines the list's orientation.
+        let mut tri_map: HashMap<FaceKey, (Vec<DofId>, [NodeId; 3])> = HashMap::new();
+        let mut quad_map: HashMap<QuadFaceKey, (Vec<DofId>, [NodeId; 4])> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            assert!(ns.len() >= 6, "build_p2_prism requires 6-node prisms");
-            let (n0,n1,n2,n3,n4,n5) = (ns[0],ns[1],ns[2],ns[3],ns[4],ns[5]);
+            assert!(ns.len() >= 6, "build_prism_h1 requires 6-node prisms");
+            let n6 = [ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]];
             let base = e as usize * dofs_per_elem;
 
-            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
-            dofs_flat[base+3]=n3; dofs_flat[base+4]=n4; dofs_flat[base+5]=n5;
-
-            let edges = [(n0,n1),(n1,n2),(n0,n2),(n3,n4),(n4,n5),(n3,n5),(n0,n3),(n1,n4),(n2,n5)];
-            for (k, &(a,b)) in edges.iter().enumerate() {
-                let key = EdgeKey::new(a,b);
-                let dof = *edge_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
-                dofs_flat[base+6+k]=dof;
-            }
-
-            for (k, &(a,b,c)) in [(n0,n1,n2),(n3,n4,n5)].iter().enumerate() {
-                let key = FaceKey::new(a,b,c);
-                let dof = *face_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
-                dofs_flat[base+14+k]=dof;
+            for (s, slot) in slots.iter().enumerate() {
+                let dof = match *slot {
+                    H1PrismSlot::Vertex(v) => n6[v],
+                    H1PrismSlot::Edge(kk, j) => {
+                        let (la, lb) = (n6[PRISM_EDGES[kk][0]], n6[PRISM_EDGES[kk][1]]);
+                        let key = EdgeKey::new(la, lb);
+                        let list = edge_map.entry(key).or_insert_with(|| {
+                            (0..ne).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+                        });
+                        // `j` counts from the local first vertex; the map is
+                        // canonical (ascending vertex id).
+                        if la == key.0 { list[j] } else { list[ne - 1 - j] }
+                    }
+                    H1PrismSlot::TriFace(f, k) => {
+                        let (a, b, c) =
+                            if f == 0 { (n6[0], n6[1], n6[2]) } else { (n6[3], n6[4], n6[5]) };
+                        let key = FaceKey::new(a, b, c);
+                            let (list, canon) = {
+                                let entry = tri_map.entry(key).or_insert_with(|| {
+                                    let list: Vec<DofId> =
+                                        (0..nt).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
+                                    (list, [a, b, c])
+                                });
+                                (entry.0.clone(), entry.1)
+                            };
+                        // Rotate slot `k`'s barycentric label from the local
+                        // triangle orientation into the canonical one and look
+                        // up the canonical index (MFEM `TriDofOrd`; the bottom
+                        // face carries MFEM's own (0,2,1) permutation first).
+                        let local = if f == 0 { bottom_label_of_k[k] } else { tri_labels[k] };
+                        let local_verts = [a, b, c];
+                        let canon_label = [
+                            local[local_verts.iter().position(|&v| v == canon[0]).unwrap_or(0)],
+                            local[local_verts.iter().position(|&v| v == canon[1]).unwrap_or(0)],
+                            local[local_verts.iter().position(|&v| v == canon[2]).unwrap_or(0)],
+                        ];
+                        let ci = tri_labels
+                            .iter()
+                            .position(|l| *l == canon_label)
+                            .unwrap_or_else(|| {
+                                panic!("build_prism_h1: tri dof label {canon_label:?} not in table")
+                            });
+                        list[ci]
+                    }
+                    H1PrismSlot::QuadFace(f, i, j) => {
+                        // Local side faces `(0,1,4,3) (1,2,5,4) (2,0,3,5)`.
+                        let (l0, l1, l2, l3) = match f {
+                            2 => (n6[0], n6[1], n6[4], n6[3]),
+                            3 => (n6[1], n6[2], n6[5], n6[4]),
+                            _ => (n6[2], n6[0], n6[3], n6[5]),
+                        };
+                        let key = QuadFaceKey::new(l0, l1, l2, l3);
+                        let (list, stored) = {
+                            let entry = quad_map.entry(key).or_insert_with(|| {
+                                let list: Vec<DofId> =
+                                    (0..nq).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
+                                (list, [l0, l1, l2, l3])
+                            });
+                            (entry.0.clone(), entry.1)
+                        };
+                        // Canonical in-face (u, v) of the local in-face (i, j):
+                        // transport the local corner directions through the
+                        // stored cycle (MFEM `QuadDofOrd`).
+                        let grid = [[0usize, 0], [1, 0], [1, 1], [0, 1]];
+                        let corner = |v: NodeId| -> usize {
+                            stored.iter().position(|&s| s == v).unwrap_or(0)
+                        };
+                        let (c0, cu, cv) = (corner(l0), corner(l1), corner(l3));
+                        let du = [
+                            grid[cu][0] as i64 - grid[c0][0] as i64,
+                            grid[cu][1] as i64 - grid[c0][1] as i64,
+                        ];
+                        let dv = [
+                            grid[cv][0] as i64 - grid[c0][0] as i64,
+                            grid[cv][1] as i64 - grid[c0][1] as i64,
+                        ];
+                        let pf = p as i64;
+                        let u = grid[c0][0] as i64 * pf + i as i64 * du[0] + j as i64 * dv[0];
+                        let v = grid[c0][1] as i64 * pf + i as i64 * du[1] + j as i64 * dv[1];
+                        debug_assert!(
+                            u > 0 && u < pf && v > 0 && v < pf,
+                            "build_prism_h1: quad in-face indices ({u}, {v}) out of range"
+                        );
+                        list[(u as usize - 1) + (v as usize - 1) * ne]
+                    }
+                    H1PrismSlot::Interior(_) => {
+                        let d = next_dof;
+                        next_dof += 1;
+                        d
+                    }
+                };
+                dofs_flat[base + s] = dof;
             }
         }
 
         let n_dofs = next_dof as usize;
+
+        // DOF coordinates: the linear prism map at `H1PrismPk`'s (Gauss-Lobatto)
+        // reference points — the layout and the lattice move together, so the
+        // volume dofs need no special case.
+        let ref_coords = H1PrismPk::new(p).dof_coords();
+        debug_assert_eq!(ref_coords.len(), dofs_per_elem);
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];
-        for n in 0..n_nodes as u32 { let c=mesh.node_coords(n); let b=n as usize*dim; dof_coords[b..b+dim].copy_from_slice(c); }
-        for (&EdgeKey(a,b),&dof_id) in &edge_map {
-            let ca=mesh.node_coords(a); let cb=mesh.node_coords(b);
-            let b=dof_id as usize*dim; for d in 0..dim { dof_coords[b+d]=0.5*(ca[d]+cb[d]); }
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            let b = n as usize * dim;
+            dof_coords[b..b + dim].copy_from_slice(c);
         }
-        for (&FaceKey(a,b,c),&dof_id) in &face_map {
-            let off=dof_id as usize*dim; for d in 0..dim { dof_coords[off+d]=(mesh.node_coords(a)[d]+mesh.node_coords(b)[d]+mesh.node_coords(c)[d])/3.0; }
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let c: [[f64; 3]; 6] =
+                std::array::from_fn(|k| {
+                    let x = mesh.node_coords(ns[k]);
+                    [x[0], x[1], x[2]]
+                });
+            let base = e as usize * dofs_per_elem;
+            for (s, rc) in ref_coords.iter().enumerate() {
+                let did = dofs_flat[base + s] as usize;
+                let b = did * dim;
+                let (xi, eta, zeta) = (rc[0], rc[1], rc[2]);
+                let lam0 = 1.0 - eta - zeta;
+                for d in 0..dim {
+                    let bottom = lam0 * c[0][d] + eta * c[1][d] + zeta * c[2][d];
+                    let top = lam0 * c[3][d] + eta * c[4][d] + zeta * c[5][d];
+                    dof_coords[b + d] = (1.0 - xi) * bottom + xi * top;
+                }
+            }
         }
 
         DofManager {
-            order:2, n_dofs, dofs_flat, dofs_per_elem,
-            elem_dof_offsets:None, dof_coords, dim,
-            n_vertex_dofs:n_nodes,
-            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(), phys_to_vertex_dof:HashMap::new(), 
-            edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
-            quad_face_pk_map:HashMap::new(),
-            bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
-            edge_variants:HashMap::new(), face_variants:HashMap::new(),
+            order, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(),
+            phys_to_vertex_dof: HashMap::new(),
+            edge_pk_map: edge_map,
+            face_pk_map: tri_map.into_iter().map(|(k, (d, _))| (k, d)).collect(),
+            quad_face_pk_map: quad_map.into_iter().map(|(k, (d, _))| (k, d)).collect(),
+            bubble_dof_start: n_dofs,
+            n_volume_dofs: nt * ne,
+            elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
         }
     }
 
@@ -1332,100 +1497,6 @@ impl DofManager {
             bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
             edge_variants:HashMap::new(), face_variants:HashMap::new(),
         }
-    }
-
-    // ─── P3 (3-D Prism6) — 40 DOFs per element ────────────────────────────────
-
-    fn build_p3_prism<M: MeshTopology>(mesh: &M) -> Self {
-        let dim=3usize; let n_nodes=mesh.n_nodes(); let n_elems=mesh.n_elements();
-        let dofs_per_elem=40;
-        let mut edge2_map:HashMap<EdgeKey,[DofId;2]>=HashMap::new();
-        let mut face_map:HashMap<FaceKey,DofId>=HashMap::new();
-        let mut qface_map:HashMap<QuadFaceKey,Vec<DofId>>=HashMap::new();
-        let mut next_dof=n_nodes as DofId;
-        let mut dofs_flat=vec![0u32;n_elems*dofs_per_elem];
-
-        for e in 0..n_elems as u32 {
-            let ns=mesh.element_nodes(e);
-            let (n0,n1,n2,n3,n4,n5)=(ns[0],ns[1],ns[2],ns[3],ns[4],ns[5]);
-            let base=e as usize*40;
-
-            // Layer 0 (bottom): TriP3 DOFs 0..9
-            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
-            for (k,&(a,b)) in [(n0,n1),(n1,n2),(n0,n2)].iter().enumerate() {
-                let key=EdgeKey::new(a,b);
-                let pair = *edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
-                let (d0,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
-                dofs_flat[base+3+2*k]=d0; dofs_flat[base+4+2*k]=d1;
-            }
-            let fk=FaceKey::new(n0,n1,n2);
-            dofs_flat[base+9] = *face_map.entry(fk).or_insert_with(||{let d=next_dof;next_dof+=1;d});
-
-            // Layer 1 (ξ=1/3): DOFs 10..19
-            for (k,&(a,b)) in [(n0,n3),(n1,n4),(n2,n5)].iter().enumerate() {
-                let key=EdgeKey::new(a,b);
-                let pair = *edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
-                let (d0,_)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
-                dofs_flat[base+10+k]=d0;
-            }
-            for (k,&(a,b,c,d)) in [(n0,n1,n4,n3),(n1,n2,n5,n4),(n2,n0,n3,n5)].iter().enumerate() {
-                let qk=QuadFaceKey::new(a,b,c,d);
-                let dofs=qface_map.entry(qk).or_insert_with(||{(0..4).map(|_|{let d=next_dof;next_dof+=1;d}).collect()});
-                dofs_flat[base+13+k]=dofs[0];
-            }
-            dofs_flat[base+19]=next_dof; next_dof+=1;
-
-            // Layer 2 (ξ=2/3): DOFs 20..29
-            for (k,&(a,b)) in [(n0,n3),(n1,n4),(n2,n5)].iter().enumerate() {
-                let key=EdgeKey::new(a,b);
-                let pair=*edge2_map.get(&key).unwrap();
-                let (_,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
-                dofs_flat[base+20+k]=d1;
-            }
-            for (k,&(a,b,c,d)) in [(n0,n1,n4,n3),(n1,n2,n5,n4),(n2,n0,n3,n5)].iter().enumerate() {
-                let qk=QuadFaceKey::new(a,b,c,d);
-                let dofs=qface_map.get(&qk).unwrap();
-                dofs_flat[base+23+k]=dofs[2];
-            }
-            dofs_flat[base+29]=next_dof; next_dof+=1;
-
-            // Layer 3 (top): DOFs 30..39
-            dofs_flat[base+30]=n3; dofs_flat[base+31]=n4; dofs_flat[base+32]=n5;
-            for (k,&(a,b)) in [(n3,n4),(n4,n5),(n3,n5)].iter().enumerate() {
-                let key=EdgeKey::new(a,b);
-                let pair=*edge2_map.entry(key).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
-                let (d0,d1)=if a==key.0{(pair[0],pair[1])}else{(pair[1],pair[0])};
-                dofs_flat[base+33+2*k]=d0; dofs_flat[base+34+2*k]=d1;
-            }
-            let fk2=FaceKey::new(n3,n4,n5);
-            dofs_flat[base+39] = *face_map.entry(fk2).or_insert_with(||{let d=next_dof;next_dof+=1;d});
-        }
-
-        let n_dofs=next_dof as usize;
-        let mut dof_coords=vec![0.0_f64;n_dofs*dim];
-        for n in 0..n_nodes as u32{let c=mesh.node_coords(n);let b=n as usize*dim;dof_coords[b..b+dim].copy_from_slice(c);}
-        for(&EdgeKey(a,b),&[d0,d1])in&edge2_map{let ca=mesh.node_coords(a);let cb=mesh.node_coords(b);
-            let b0=d0 as usize*dim;let b1=d1 as usize*dim;for d in 0..dim{dof_coords[b0+d]=(2.0*ca[d]+cb[d])/3.0;dof_coords[b1+d]=(ca[d]+2.0*cb[d])/3.0;}}
-        for(&FaceKey(a,b,c),&dof_id)in&face_map{let off=dof_id as usize*dim;for d in 0..dim{dof_coords[off+d]=(mesh.node_coords(a)[d]+mesh.node_coords(b)[d]+mesh.node_coords(c)[d])/3.0;}}
-        for(key,dofs)in&qface_map{let n4=[key.0,key.1,key.2,key.3];let c4=[0,1,2,3].map(|i|mesh.node_coords(n4[i]));
-            for ix in 0..2{for iy in 0..2{let dof_id=dofs[iy*2+ix];let b=dof_id as usize*dim;
-                let tx=(ix+1)as f64/3.0;let ty=(iy+1)as f64/3.0;
-                for d in 0..dim{dof_coords[b+d]=(1.0-tx)*(1.0-ty)*c4[0][d]+tx*(1.0-ty)*c4[1][d]+tx*ty*c4[2][d]+(1.0-tx)*ty*c4[3][d];}}}
-        }
-        for e in 0..n_elems as u32{let ns=mesh.element_nodes(e);let base=e as usize*40;
-            let c5=[0,1,2,3,4,5].map(|i|mesh.node_coords(ns[i]));
-            for vi in 0..2{let dof_id=dofs_flat[base+19+10*vi]as usize;let xi=(vi+1)as f64/3.0;let b=dof_id*dim;
-                for d in 0..dim{let bottom=(c5[0][d]+c5[1][d]+c5[2][d])/3.0;let top=(c5[3][d]+c5[4][d]+c5[5][d])/3.0;
-                    dof_coords[b+d]=(1.0-xi)*bottom+xi*top;}}}
-
-        DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
-            elem_dof_offsets:None,dof_coords,dim,
-            n_vertex_dofs:n_nodes,
-            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
-            edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
-            quad_face_pk_map:qface_map,
-            bubble_dof_start:n_dofs,n_volume_dofs:2,elem_orders:None,
-            edge_variants:HashMap::new(),face_variants:HashMap::new(),}
     }
 
     // ─── P3 (3-D Pyramid5) — 30 DOFs per element ──────────────────────────────
@@ -1862,198 +1933,6 @@ impl DofManager {
             face_variants: HashMap::new(),
         }
     }
-    // ─── Pk for Prism (triangular prism) ──────────────────────────────────────
-
-    /// General-order Lagrange DOF manager for triangular prism meshes.
-    ///
-    /// DOF ordering per element: 6 vertices → 9 edges → 2 tri faces → 3 quad faces → volume.
-    fn build_prism_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
-        let p = order as usize;
-        assert!(p >= 1, "build_prism_pk: order must be >= 1");
-        let dim = 3usize;
-        let n_nodes = mesh.n_nodes();
-        let n_elems = mesh.n_elements();
-        let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
-        let tri_face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
-        let quad_face_dofs_per = if p >= 2 { (p - 1) * (p - 1) } else { 0 };
-        let n_verts = 6;
-        let n_edges = 9;
-        let n_tri_faces = 2;
-        let n_quad_faces = 3;
-        let surface_dofs = n_verts + n_edges * edge_dofs_per
-            + n_tri_faces * tri_face_dofs_per
-            + n_quad_faces * quad_face_dofs_per;
-        let total_ref = (p + 1) * (p + 1) * (p + 2) / 2;
-        let volume_dofs_per = total_ref.saturating_sub(surface_dofs);
-        let dofs_per_elem = surface_dofs + volume_dofs_per;
-
-        let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
-        let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
-        let mut quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
-        let mut next_dof = n_nodes as DofId;
-        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
-
-        // Vertex + edge + tri face DOFs
-        for e in 0..n_elems as u32 {
-            let ns = mesh.element_nodes(e);
-            assert!(ns.len() >= 6);
-            let base = e as usize * dofs_per_elem;
-
-            dofs_flat[base..base + 6].copy_from_slice(&ns[..6]);
-            let mut off = 6;
-
-            if p >= 2 {
-                let edges: [(usize, usize); 9] = [
-                    (0, 1), (1, 2), (2, 0),
-                    (3, 4), (4, 5), (5, 3),
-                    (0, 3), (1, 4), (2, 5),
-                ];
-                for &(la, lb) in &edges {
-                    let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
-                    for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                    off += edge_dofs_per;
-                }
-            }
-            if p >= 3 {
-                for &(la, lb, lc) in &[(0, 1, 2), (3, 4, 5)] {
-                    let fd = get_face_dofs_pk(ns[la], ns[lb], ns[lc], &mut next_dof, &mut face_pk_map, tri_face_dofs_per);
-                    for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                    off += tri_face_dofs_per;
-                }
-            }
-            if p >= 2 {
-                let quad_faces: [(usize, usize, usize, usize); 3] = [
-                    (0, 1, 4, 3), (1, 2, 5, 4), (2, 0, 3, 5),
-                ];
-                let qf_start = off;
-                for &(la, lb, lc, ld) in &quad_faces {
-                    let key = QuadFaceKey::new(ns[la], ns[lb], ns[lc], ns[ld]);
-                    let fd = quad_face_pk_map.entry(key).or_insert_with(|| {
-                        (0..quad_face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
-                    });
-                    for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                    off += quad_face_dofs_per;
-                }
-                let _ = qf_start; // quad face region marker
-            }
-            for _ in 0..volume_dofs_per {
-                dofs_flat[base + off] = next_dof;
-                next_dof += 1;
-                off += 1;
-            }
-        }
-
-        let n_dofs = next_dof as usize;
-
-        // DOF coordinates
-        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
-        for n in 0..n_nodes as u32 {
-            let c = mesh.node_coords(n);
-            let b = n as usize * dim;
-            dof_coords[b..b + dim].copy_from_slice(c);
-        }
-        // Edges
-        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
-            let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
-            for (k, &did) in dofs.iter().enumerate() {
-                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
-                let base = did as usize * dim;
-                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
-            }
-        }
-        // Tri faces
-        if p >= 3 {
-            let mut face_nodes: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                for &(a, b, c) in &[(ns[0], ns[1], ns[2]), (ns[3], ns[4], ns[5])] {
-                    face_nodes.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
-                }
-            }
-            for (key, dofs) in &face_pk_map {
-                let [a, b, c] = face_nodes[key];
-                let ca = mesh.node_coords(a); let cb = mesh.node_coords(b); let cc = mesh.node_coords(c);
-                for (k, &did) in dofs.iter().enumerate() {
-                    let base = did as usize * dim;
-                    let t = (k + 1) as f64 / (dofs.len() + 1) as f64;
-                    for d in 0..dim {
-                        dof_coords[base + d] = (1.0 - t) * ca[d] + t * (cb[d] + cc[d]) / 2.0;
-                    }
-                }
-            }
-        }
-        // Quad faces: bilinear interpolation
-        if quad_face_dofs_per > 0 {
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                let quad_verts: [[&[f64]; 4]; 3] = [
-                    [mesh.node_coords(ns[0]), mesh.node_coords(ns[1]), mesh.node_coords(ns[4]), mesh.node_coords(ns[3])],
-                    [mesh.node_coords(ns[1]), mesh.node_coords(ns[2]), mesh.node_coords(ns[5]), mesh.node_coords(ns[4])],
-                    [mesh.node_coords(ns[2]), mesh.node_coords(ns[0]), mesh.node_coords(ns[3]), mesh.node_coords(ns[5])],
-                ];
-                for _qf in 0..3 {
-                    for row in 0..(p - 1) {
-                        let xi = (row + 1) as f64 / p as f64;
-                        for col in 0..(p - 1) {
-                            let eta = (col + 1) as f64 / p as f64;
-                            let elem_base = e as usize * dofs_per_elem;
-                            let qf_idx = _qf;
-                            let local_offset = 6 + 9 * edge_dofs_per + 2 * tri_face_dofs_per
-                                + qf_idx * quad_face_dofs_per + row * (p - 1) + col;
-                            let did = dofs_flat[elem_base + local_offset] as usize;
-                            let dbase = did * dim;
-                            let v = &quad_verts[qf_idx];
-                            for d in 0..dim {
-                                dof_coords[dbase + d] = (1.0 - xi) * (1.0 - eta) * v[0][d]
-                                    + xi * (1.0 - eta) * v[1][d]
-                                    + xi * eta * v[2][d]
-                                    + (1.0 - xi) * eta * v[3][d];
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Volume: use PrismPk ref element for accurate coordinates
-        if volume_dofs_per > 0 {
-            let factory = fem_element::lagrange::PrismPk::new(p);
-            let ref_coords = factory.dof_coords();
-            let vol_start = n_nodes + edge_pk_map.len() * edge_dofs_per
-                + face_pk_map.len() * tri_face_dofs_per
-                + quad_face_pk_map.len() * quad_face_dofs_per;
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                let c = [
-                    mesh.node_coords(ns[0]), mesh.node_coords(ns[1]), mesh.node_coords(ns[2]),
-                    mesh.node_coords(ns[3]), mesh.node_coords(ns[4]), mesh.node_coords(ns[5]),
-                ];
-                for k in 0..volume_dofs_per {
-                    let did = vol_start + e as usize * volume_dofs_per + k;
-                    let ri = surface_dofs + k;
-                    let rc = &ref_coords[ri];
-                    let xi = rc[0]; let eta = rc[1]; let zeta = rc[2];
-                    let lam0 = 1.0 - eta - zeta;
-                    let dbase = did * dim;
-                    for d in 0..dim {
-                        let bottom = lam0 * c[0][d] + eta * c[1][d] + zeta * c[2][d];
-                        let top = lam0 * c[3][d] + eta * c[4][d] + zeta * c[5][d];
-                        dof_coords[dbase + d] = (1.0 - xi) * bottom + xi * top;
-                    }
-                }
-            }
-        }
-
-        DofManager {
-            order, n_dofs, dofs_flat, dofs_per_elem,
-            elem_dof_offsets: None, dof_coords, dim,
-            n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
-            face_pk_map, quad_face_pk_map,
-            bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
-            edge_variants: HashMap::new(),
-            face_variants: HashMap::new(),
-        }
-    }
 
     // ─── Pk for Pyramid ─────────────────────────────────────────────────────
 
@@ -2248,7 +2127,7 @@ impl DofManager {
         // Prism/pyramid dispatch for general order
         if topo_dim == 3 && mesh.n_elements() > 0 {
             let npe = mesh.element_nodes(0).len();
-            if npe == 6 { return Self::build_prism_pk(mesh, order); }
+            if npe == 6 { return Self::build_prism_h1(mesh, order); }
             if npe == 5 { return Self::build_pyramid_pk(mesh, order); }
         }
         let n_nodes = mesh.n_nodes();
@@ -3449,11 +3328,14 @@ mod tests {
         let m=make_prism_mesh(); let dm=DofManager::new(&m,3);
         assert_eq!(dm.dofs_per_elem,40);
         assert!(dm.n_dofs>DofManager::new(&m,2).n_dofs);
-        // Vertices first in each layer
+        // MFEM `H1_WedgeElement` slot order: slots 0-5 are the six vertices
+        // (bottom triangle 0-2, then top triangle 3-5) — probe
+        // `tmp/a34_prism_h1_probe.cpp`, p=3 elem 0 (D168 ground truth; the
+        // layer-major layout this test previously pinned put the top vertices
+        // at slots 30-32, which is `PrismPk`'s order, not MFEM's).
         for e in 0..m.n_elements() as u32{
             let d=dm.element_dofs(e); let n=m.element_nodes(e);
-            assert_eq!(d[0],n[0]); assert_eq!(d[1],n[1]); assert_eq!(d[2],n[2]);
-            assert_eq!(d[30],n[3]); assert_eq!(d[31],n[4]); assert_eq!(d[32],n[5]);
+            assert_eq!(&d[..6],&n[..6]);
         }
     }
 
@@ -3464,6 +3346,76 @@ mod tests {
         assert!(dm.n_dofs>DofManager::new(&m,3).n_dofs);
         for e in 0..m.n_elements() as u32{
             assert_eq!(&dm.element_dofs(e)[..6],m.element_nodes(e));
+        }
+    }
+
+    /// The prism H¹ slot layout must match MFEM's `H1_WedgeElement` slot by
+    /// slot: slot `s`'s dof sits at the linear prism map's image of
+    /// `H1PrismPk::dof_coords()[s]` — including the Gauss-Lobatto points from
+    /// p = 3 and the rotated-`QuadDofOrd`/`TriDofOrd` orientation handling on
+    /// the last (rotated) element (D168; probe
+    /// `tmp/a34_prism_h1_probe.cpp`, whose p = 2/3/4 tables this reproduces).
+    #[test]
+    fn prism_h1_slots_match_mfem_wedge_element() {
+        use fem_element::lagrange::{h1_prism_slots, H1PrismPk};
+        use fem_element::ReferenceElement;
+
+        // The probe's wedge stack (nphi = 3), last element's vertex list
+        // rotated like the probe's mode 1.
+        let coords = vec![
+            0.,0.,0., 1.,0.,0., 0.,1.,0.,
+            0.,0.,1., 1.,0.,1., 0.,1.,1.,
+            0.,0.,2., 1.,0.,2., 0.,1.,2.,
+            0.,0.,3., 1.,0.,3., 0.,1.,3.,
+        ];
+        let conn = vec![0,1,2,3,4,5, 3,4,5,6,7,8, 7,8,6,10,11,9];
+        let m = Mesh::<3>::uniform(
+            coords, conn, vec![1,1,1],
+            fem_mesh::ElementType::Prism6, vec![], vec![], fem_mesh::ElementType::Tri3,
+        );
+
+        for p in 1..=4u8 {
+            let dm = DofManager::new(&m, p);
+            let fe = H1PrismPk::new(p as usize);
+            let rc = fe.dof_coords();
+            assert_eq!(rc.len(), h1_prism_slots(p as usize).len());
+            let npe = (p as usize + 1) * (p as usize + 1) * (p as usize + 2) / 2;
+            assert_eq!(dm.dofs_per_elem, npe, "p={p}: dofs per element");
+            for e in 0..m.n_elements() as u32 {
+                let dofs = dm.element_dofs(e);
+                let ns = m.element_nodes(e);
+                let c: [[f64; 3]; 6] =
+                    std::array::from_fn(|k| {
+                        let x = m.coords_of(ns[k]);
+                        [x[0], x[1], x[2]]
+                    });
+                for (s, r) in rc.iter().enumerate() {
+                    // The linear prism map at slot s's reference point.
+                    let (xi, eta, zeta) = (r[0], r[1], r[2]);
+                    let lam0 = 1.0 - eta - zeta;
+                    let mut want = [0.0_f64; 3];
+                    for d in 0..3 {
+                        let bottom = lam0 * c[0][d] + eta * c[1][d] + zeta * c[2][d];
+                        let top = lam0 * c[3][d] + eta * c[4][d] + zeta * c[5][d];
+                        want[d] = (1.0 - xi) * bottom + xi * top;
+                    }
+                    let got = dm.dof_coord(dofs[s]);
+                    let delta: f64 =
+                        (0..3).map(|d| (got[d] - want[d]).abs()).fold(0.0, f64::max);
+                    assert!(
+                        delta < 1e-12,
+                        "p={p} elem {e} slot {s}: dof {} at {got:?}, want {want:?} (|Δ|={delta:.3e})",
+                        dofs[s]
+                    );
+                }
+                // Vertex slots must be the mesh's own vertices (MFEM's first
+                // six dofs) and distinct slots must be distinct dofs.
+                assert_eq!(&dofs[..6], &ns[..6], "p={p} elem {e}: vertex slots");
+                let mut sorted = dofs.to_vec();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted.len(), dofs.len(), "p={p} elem {e}: duplicate dofs in slot list");
+            }
         }
     }
 

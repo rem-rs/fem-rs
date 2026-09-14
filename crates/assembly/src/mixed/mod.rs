@@ -1322,7 +1322,7 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// order-6 discretization returned `Err` (recorded as kernel gap D46① in the
 /// round-15 navier hand-over).
 pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
-    use fem_element::lagrange::{HexQk, H1TriPk, PrismPk, PyramidPk};
+    use fem_element::lagrange::{HexQk, H1PrismPk, H1TriPk, PyramidPk};
 
     if order > REF_ELEM_VOL_MAX_ORDER {
         return Err(format!(
@@ -1355,9 +1355,12 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Hex20, 1) => Box::new(HexSerendipityPk::new(1)),
         (ElementType::Hex20, 2) => Box::new(HexSerendipityPk::new(2)),
         (ElementType::Hex20, 3) => Box::new(HexSerendipityPk::new(3)),
-        (ElementType::Prism6 | ElementType::Prism15, 1) => Box::new(PrismPk::new(1)),
-        (ElementType::Prism6 | ElementType::Prism15, 2) => Box::new(PrismPk::new(2)),
-        (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(PrismPk::new(3)),
+        // MFEM `H1_FECollection`'s wedge element (Gauss-Lobatto, entity slot
+        // order — D168), matching `assembler::ref_elem_vol_h1` and
+        // `fem_space`'s prism DOF numbering.
+        (ElementType::Prism6 | ElementType::Prism15, 1) => Box::new(H1PrismPk::new(1)),
+        (ElementType::Prism6 | ElementType::Prism15, 2) => Box::new(H1PrismPk::new(2)),
+        (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(H1PrismPk::new(3)),
         // ── Order-generic path (matches `assembler::ref_elem_vol_h1`) ───────
         (ElementType::Tri3 | ElementType::Tri6, o) => Box::new(H1TriPk::new(o as usize)),
         (ElementType::Tet4 | ElementType::Tet10, o) => Box::new(TetPk::new(o as usize)),
@@ -1368,7 +1371,7 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Hex8, o) => Box::new(HexQk::new(o as usize)),
         (ElementType::Hex20, o) => Box::new(HexSerendipityPk::new(o as usize)),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
-            Box::new(PrismPk::new(o as usize))
+            Box::new(H1PrismPk::new(o as usize))
         }
         (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
             Box::new(PyramidPk::new(o as usize))

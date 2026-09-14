@@ -16,7 +16,7 @@ pub use factory::{
     QuadL2GL, QuadPosQk, QuadQk, SegPk, TetPk, TriPk, VecFamily,
 };
 pub use hex::{HexQ1, HexQ2, HexQ3};
-pub use prism::PrismPk;
+pub use prism::{h1_prism_slots, H1PrismPk, H1PrismSlot, PrismPk, PRISM_EDGES};
 pub use pyramid::PyramidPk;
 pub use quad::{QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
 pub use seg::{SegP1, SegP2, SegP3, SegP4, SegP5, SegP6};

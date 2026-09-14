@@ -661,17 +661,20 @@ impl<const D: usize> Mesh<D> {
     /// [`element_jacobian`](Self::element_jacobian) (and
     /// `crates/assembly`'s `geo_ref_elem`, and `curved::CurvedMesh`) evaluates
     /// the stored table with, i.e. `PrismPk`'s: `xi = (ξ, η, ζ)` with the
-    /// **extrusion `ξ` first** (`ξ = k/p`, layer-major) and, inside a layer,
-    /// the unit triangle `(η, ζ)` in `TriPk` node order (3 vertices, the
-    /// `ζ = 0` edge, the hypotenuse, the `η = 0` edge, then the interior).
+    /// **extrusion `ξ` first** (`ξ = cp[k]`, layer-major, `cp` the closed
+    /// Gauss-Lobatto points) and, inside a layer, the unit triangle `(η, ζ)` in
+    /// `H1TriPk` node order (3 vertices, the `ζ = 0` edge, the hypotenuse, the
+    /// `η = 0` edge, then the interior).
     ///
     /// The previous implementation enumerated `(ζ_tri, η_tri, ξ_extrusion)`
     /// triples on `[−1, 1]³` and fed them to a barycentric formula expecting
     /// `[0, 1]²`, so `p ≥ 2` prisms got a table that no consumer could read
-    /// (D152): slot 0 of a unit prism ended up at `(−1, −1, 0)`, and the
-    /// vertex slots matched no reference point at all, duplicating every
-    /// vertex.  The nodes are now generated from `PrismPk`'s own lattice, so
-    /// they cannot drift from the element that evaluates them again.
+    /// (D152).  The nodes are now generated from `PrismPk`'s own lattice, so
+    /// they cannot drift from the element that evaluates them again — and
+    /// since D164 that lattice is MFEM `H1_WedgeElement`'s **Gauss-Lobatto**
+    /// placement (`H1_TriangleElement × H1_SegmentElement`, both GLL), which
+    /// makes the curved-prism geometry MFEM's own order-`p` interpolant (the
+    /// toroid wedge file went from 1.1e-4 to 8e-15 max rel diff vs MFEM 4.10).
     ///
     /// The six vertex slots reuse the mesh's own vertices (local order: bottom
     /// triangle 0-1-2 at `ξ = 0`, top triangle 3-4-5 at `ξ = 1`); every other
@@ -679,16 +682,17 @@ impl<const D: usize> Mesh<D> {
     /// callers (`snap_to_sphere`, the io layer, the elevators) then move onto
     /// the true surface.
     ///
-    /// Note (D152 residual): `PrismPk`'s slot order is *not* MFEM's
-    /// `H1_WedgeElement` layout — MFEM writes a curved prism's `nodes` in
-    /// entity order (`[v0…v5, bottom edges, top edges, vertical edges,
-    /// triangles, quads, interior]`) on Gauss-Lobatto points, `PrismPk` uses
-    /// layer-major order on equispaced points (the two lattices differ from
-    /// `p = 3`).  Reading/writing MFEM curved prisms therefore still needs the
-    /// io-side permutation + re-evaluation (D119/D151), and the prism H1
-    /// space's own DOF layout has to be reconciled with `PrismPk`
-    /// (`crates/space`).  This table is defined by the element that evaluates
-    /// it, so its order follows `PrismPk`
+    /// Note (D168 residual): `PrismPk`'s slot order is *not* MFEM's
+    /// `H1_WedgeElement` *layout* — MFEM orders the (identical) lattice by
+    /// entity (`[v0…v5, bottom edges, top edges, vertical edges,
+    /// triangles, quads, interior]`), `PrismPk` keeps layer-major order.  The
+    /// io layer's `nodes` writer bridges the layout with MFEM's entity tables
+    /// (D151) and its interpolation is the identity on the shared lattice, so
+    /// curved-prism `nodes` files match MFEM byte-for-byte at MFEM's own
+    /// printed precision.  The prism H1 *field* space's own DOF layout still
+    /// has to be reconciled with `PrismPk` (`crates/space`, D168).  This table
+    /// is defined by the element that evaluates it, so its order follows
+    /// `PrismPk`
     /// (`tests/d152_prism_curvature.rs::prism_pk_slot_order_is_frozen`).
     fn set_curvature_prism6(&mut self, p: usize) {
         use fem_element::lagrange::PrismPk;

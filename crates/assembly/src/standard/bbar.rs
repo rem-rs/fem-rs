@@ -47,7 +47,7 @@
 use nalgebra::DMatrix;
 use fem_core::types::ElemId;
 use fem_element::{
-    QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
+    ReferenceElement, PyramidPk,
     lagrange::{SegP1, TetP1, TetP2, TriP1, QuadQ1, HexQ1},
 };
 use fem_element::lagrange::factory::{TriPk, TetPk};
@@ -74,7 +74,7 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Quad4, _) => Box::new(fem_element::lagrange::factory::QuadQk::new(order as usize)),
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>
-            Box::new(PrismPk::new(order as usize)),
+            Box::new(fem_element::lagrange::H1PrismPk::new(order as usize)),
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) =>
             Box::new(PyramidPk::new(order as usize)),
         _ => panic!("bbar::ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),

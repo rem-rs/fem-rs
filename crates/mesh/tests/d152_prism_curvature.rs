@@ -158,13 +158,20 @@ fn prism_pk_basis_is_nodal_at_its_dof_coords() {
 /// triangles, the 3 quadrilaterals and the interior — i.e.
 /// `[v0 v1 v2 v3 v4 v5 | e01 e12 e20 e34 e45 e53 e03 e14 e25 | q01 q12 q20]`,
 /// which is exactly the layout `crates/space/src/dof_manager.rs`'s prism
-/// builders emit.  `PrismPk` instead orders its (identical) p = 2 lattice as
+/// builders emit.  Since D164 `PrismPk` places its lattice on MFEM's
+/// **Gauss-Lobatto** points (`H1_TriangleElement × H1_SegmentElement`), but
+/// keeps the layer-major slot order
 /// `[v0 v1 v2 e01 e12 e20 | v3 v4 v5 e34 e45 e53 | e03 e14 e25 | q01 q12 q20]`,
-/// so slots 3..12 hold different entities on the two sides: the io layer's
-/// MFEM `nodes` permutation (D151) is still missing, and so is the agreement
-/// between the prism H1 space and `PrismPk`.  If `PrismPk`'s order is ever
-/// changed to the entity order (D119/D151), this test fails and
-/// `set_curvature_prism6` must be changed with it.
+/// so slots 3..12 still hold different entities on the two sides: the io
+/// layer's `nodes` writer bridges that layout difference with MFEM's entity
+/// tables (D151), and the prism H1 field space↔`PrismPk` agreement (D168) is
+/// separate.  If `PrismPk`'s order is ever changed to the entity order, this
+/// test fails and `set_curvature_prism6` must be changed with it.
+///
+/// (The pinned values are the p = 2 lattice, where the closed Gauss-Lobatto
+/// points coincide with the equispaced ones — `{0, ½, 1}` — so this table was
+/// also correct before the D164 lattice move; from `p = 3` on the points are
+/// `0.276393202250021` / `0.723606797749979`, not `1/3` / `2/3`.)
 #[test]
 fn prism_pk_slot_order_is_frozen() {
     let p = 2usize;

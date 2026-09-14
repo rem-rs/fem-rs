@@ -433,7 +433,7 @@ pub struct H1TriPk {
 }
 
 /// Evaluate the 1-D Lagrange basis on `nodes` at `x`.
-fn lag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
+pub(crate) fn lag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
     let n = nodes.len();
     for i in 0..n {
         let mut v = 1.0;
@@ -447,7 +447,7 @@ fn lag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
 }
 
 /// Evaluate the 1-D Lagrange basis derivatives on `nodes` at `x`.
-fn dlag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
+pub(crate) fn dlag1d_on(nodes: &[f64], x: f64, out: &mut [f64]) {
     let n = nodes.len();
     for i in 0..n {
         let mut s = 0.0;
