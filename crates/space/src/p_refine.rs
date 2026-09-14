@@ -35,9 +35,20 @@
 //!   meshes — this powers the hp-refinement loop.
 //! * 3D tets/hexes: conforming variable-order (min-rule) on edges and faces.
 //!   NC 3D is not supported (recorded limitation).
+//! * 3D prisms (wedges): conforming variable-order on edges, triangular and
+//!   quadrilateral faces, and interiors, in MFEM `H1_WedgeElement`'s entity
+//!   order (the layout MFEM's variable-order `GetElementDofs`
+//!   (`fem/fespace.cpp:3428`) produces — MFEM-verified by probe
+//!   `tmp/d174_prism_p_probe.cpp`, which dumps `GetElementDofs` rows and the
+//!   mixed-order conforming interpolation of a variable-order H1 space on an
+//!   `EnsureNCMesh` wedge mesh).  The element rows pair with
+//!   [`fem_element::lagrange::H1PrismPk`]'s slot order up to the space-level
+//!   face orientation convention (see `build_variable_order_dof_manager`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use fem_core::types::{DofId, NodeId};
+use fem_element::lagrange::{H1TriPk, PRISM_EDGES};
+use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::topology::MeshTopology;
 use crate::dof_manager::{DofManager, EdgeKey, FaceKey};
@@ -125,10 +136,10 @@ fn interior_positions_1d(p: u8, gll: bool) -> Vec<f64> {
 }
 
 /// Whether the H1 basis on elements with `ns_len` vertices uses Gauss-Lobatto
-/// node sets (`true` for 2D tri/quad and 3D hex) or equispaced (3D tet via
-/// `TetPk`).
+/// node sets (`true` for 2D tri/quad and 3D hex/prism — `H1TriPk`/`QuadQk`/
+/// `HexQk`/`H1PrismPk`) or equispaced (3D tet via `TetPk`).
 fn elem_uses_gll(dim: usize, ns_len: usize) -> bool {
-    dim == 2 || ns_len == 8
+    dim == 2 || ns_len == 6 || ns_len == 8
 }
 
 /// Extract the local-orientation edges of a 2D triangle: (0,1), (1,2), (2,0)
@@ -154,6 +165,11 @@ fn elem_local_edges(dim: usize, ns: &[NodeId]) -> Vec<(NodeId, NodeId)> {
         } else {
             tri_edges(ns)
         }
+    } else if ns.len() == 6 {
+        // Prism: the 9 edges in MFEM `Geometry::Constants<PRISM>::Edges`
+        // order (bottom tri 0-2, top tri 3-5, verticals 6-8) — the
+        // `H1PrismPk` edge-block order.
+        PRISM_EDGES.iter().map(|e| (ns[e[0]], ns[e[1]])).collect()
     } else if ns.len() == 8 {
         // Hex: 12 edges in HexQk order.
         vec![
@@ -176,6 +192,23 @@ fn tet_faces(ns: &[NodeId]) -> Vec<(NodeId, NodeId, NodeId)> {
     ]
 }
 
+/// Triangular faces of a prism in MFEM `H1_WedgeElement` face order
+/// (face 0 = bottom, face 1 = top).
+fn prism_tri_faces(ns: &[NodeId]) -> Vec<(NodeId, NodeId, NodeId)> {
+    vec![(ns[0], ns[1], ns[2]), (ns[3], ns[4], ns[5])]
+}
+
+/// Quadrilateral side faces of a prism in the `H1_WedgeElement` face order
+/// (faces 2..4): `(0,1,4,3) (1,2,5,4) (2,0,3,5)` in the element's local
+/// parameterisation (MFEM `Geometry::Constants<PRISM>::Faces`).
+fn prism_quad_faces(ns: &[NodeId]) -> Vec<[NodeId; 4]> {
+    vec![
+        [ns[0], ns[1], ns[4], ns[3]],
+        [ns[1], ns[2], ns[5], ns[4]],
+        [ns[2], ns[0], ns[3], ns[5]],
+    ]
+}
+
 /// Extract the 4-node faces of a hexahedron (ordered for factory HexQk).
 fn hex_quad_faces(ns: &[NodeId]) -> Vec<[NodeId; 4]> {
     vec![
@@ -186,6 +219,27 @@ fn hex_quad_faces(ns: &[NodeId]) -> Vec<[NodeId; 4]> {
         [ns[0], ns[3], ns[7], ns[4]],  // left (x=0)
         [ns[1], ns[5], ns[6], ns[2]],  // right (x=1)
     ]
+}
+
+/// Cyclically canonical orientation of a quadrilateral face.
+///
+/// Two elements sharing a quad face list it with opposite cycles, so any
+/// orientation-dependent key (e.g. the sorted *first three* of the local
+/// ordered list) would split the face into per-side DOF sets.  This picks the
+/// lexicographically smallest `(f0, f1, f3)` over all 8 rotations of the
+/// cycle and its reverse — a pure function of the vertex set, so both sides
+/// of a shared face agree.
+fn canon_quad_face(f: [NodeId; 4]) -> [NodeId; 4] {
+    let mut best = f;
+    for start in [&f, &[f[0], f[3], f[2], f[1]]] {
+        for r in 0..4 {
+            let rot = [start[r], start[(r + 1) % 4], start[(r + 2) % 4], start[(r + 3) % 4]];
+            if (rot[0], rot[1], rot[3]) < (best[0], best[1], best[3]) {
+                best = rot;
+            }
+        }
+    }
+    best
 }
 
 /// Rising-factorial basis L_n(t) = Π_{a=0}^{n-1} (t-a)/(n-a), with L₀=1.
@@ -279,11 +333,14 @@ fn n_face_dofs_3d(ns_len: usize, p: u8) -> usize {
 
 /// Volume-interior DOFs of a 3D element.
 /// Tet: (p-1)(p-2)(p-3)/6 (p≥4)
+/// Prism: (p-1)·(p-1)(p-2)/2 (p≥3)
 /// Hex: (p-1)³ (p≥2)
 fn n_volume_dofs_3d(ns_len: usize, p: u8) -> usize {
     let p = p as usize;
     if ns_len == 4 {
         if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 }
+    } else if ns_len == 6 {
+        if p >= 3 { (p - 1) * (p - 1) * (p - 2) / 2 } else { 0 }
     } else if ns_len == 8 {
         if p >= 2 { (p - 1).pow(3) } else { 0 }
     } else {
@@ -335,6 +392,19 @@ fn collect_face_variants<M: MeshTopology>(
         let ns = mesh.element_nodes(e);
         if ns.len() == 8 {
             for face4 in hex_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
+                entry.0.insert(p);
+            }
+        } else if ns.len() == 6 {
+            for (a, b, c) in prism_tri_faces(ns) {
+                let key = FaceKey::new(a, b, c);
+                let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 3));
+                entry.0.insert(p);
+            }
+            for face4 in prism_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let entry = sets.entry(key).or_insert_with(|| (BTreeSet::new(), 4));
                 entry.0.insert(p);
@@ -361,6 +431,16 @@ fn collect_face_variants<M: MeshTopology>(
 /// references the variant matching its own order.  Use
 /// [`detect_p_constraints`] to obtain the mixed-order (and, in 2D, hanging
 /// edge) constraints.
+///
+/// Supported element geometries: 2D tri/quad, 3D tet/prism/hex (prisms in
+/// MFEM `H1_WedgeElement`'s entity order — the layout MFEM's variable-order
+/// `FiniteElementSpace::GetElementDofs` produces, probe
+/// `tmp/d174_prism_p_probe.cpp`).  The per-entity DOF lists use canonical
+/// (first-encountering element) face orientation, MFEM's space-level
+/// `var_face_dofs` convention: a consumer pairing element rows with a
+/// reference element slot-for-slot must apply the face orientation
+/// (`TriDofOrd`/`QuadDofOrd`) for elements whose local face order differs
+/// from the canonical one — the same convention as the tet/hex paths here.
 ///
 /// # Panics
 /// Panics if `elem_orders.len() != mesh.n_elements()`, any order is 0, or the
@@ -467,6 +547,12 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
     for e in 0..n_elems as u32 {
         let p_e = elem_orders[e as usize];
         let ns = mesh.element_nodes(e);
+        assert!(
+            (dim == 2 && matches!(ns.len(), 3 | 4))
+                || (dim == 3 && matches!(ns.len(), 4 | 6 | 8)),
+            "build_variable_order_dof_manager: unsupported element geometry \
+             (dim {dim}, {} corner nodes)", ns.len()
+        );
         for &n in ns.iter() {
             dofs_flat.push(n);
         }
@@ -489,6 +575,25 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         if dim == 3 {
             if ns.len() == 8 {
                 for face4 in hex_quad_faces(ns) {
+                    let face4 = canon_quad_face(face4);
+                    let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                    if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
+                        dofs_flat.extend_from_slice(dofs);
+                    }
+                }
+            } else if ns.len() == 6 {
+                // MFEM `H1_WedgeElement` face order: bottom tri, top tri,
+                // then the three side quads (each block in the canonical
+                // face-variant order — see the fn doc for the orientation
+                // convention).
+                for (a, b, c) in prism_tri_faces(ns) {
+                    let key = FaceKey::new(a, b, c);
+                    if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
+                        dofs_flat.extend_from_slice(dofs);
+                    }
+                }
+                for face4 in prism_quad_faces(ns) {
+                    let face4 = canon_quad_face(face4);
                     let key = FaceKey::new(face4[0], face4[1], face4[2]);
                     if let Some((_, dofs)) = face_variants[&key].iter().find(|(p, _)| *p == p_e) {
                         dofs_flat.extend_from_slice(dofs);
@@ -547,8 +652,9 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         }
     }
 
-    // 3D face DOF coordinates: bilinear (hex quad faces) or barycentric (tet
-    // tri faces) interpolation at the variant's node positions.
+    // 3D face DOF coordinates: bilinear (hex/prism quad faces), equispaced
+    // barycentric (tet tri faces) or GLL barycentric (prism tri faces)
+    // interpolation at the variant's node positions.
     if dim == 3 {
         // Face-local node lists per face key (from the first element seen).
         let mut face_nodes4: HashMap<FaceKey, [NodeId; 4]> = HashMap::new();
@@ -557,6 +663,16 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
             let ns = mesh.element_nodes(e);
             if ns.len() == 8 {
                 for face4 in hex_quad_faces(ns) {
+                    let face4 = canon_quad_face(face4);
+                    face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
+                        .or_insert(face4);
+                }
+            } else if ns.len() == 6 {
+                for (a, b, c) in prism_tri_faces(ns) {
+                    face_nodes3.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+                }
+                for face4 in prism_quad_faces(ns) {
+                    let face4 = canon_quad_face(face4);
                     face_nodes4.entry(FaceKey::new(face4[0], face4[1], face4[2]))
                         .or_insert(face4);
                 }
@@ -566,6 +682,10 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                 }
             }
         }
+        // Prism tri faces place their dofs at the `H1TriPk` Gauss-Lobatto
+        // nodes (MFEM `H1_WedgeElement`); tet tri faces at the equispaced
+        // `TetPk` positions.
+        let prism = n_elems > 0 && mesh.element_nodes(0).len() == 6;
         let gll_all = gll_positions_01(p_max);
         for (key, variants) in &face_variants {
             for &(p, ref dofs) in variants {
@@ -590,22 +710,29 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                     }
                     let _ = &gll_all;
                 } else if let Some(&n3) = face_nodes3.get(key) {
-                    // Tri face: equispaced barycentric (TetPk convention).
+                    // Tri face: barycentric interpolation, dof list in the
+                    // `H1TriPk`/TriPk running (j outer, i inner) order.
                     let pq = p as usize;
                     let c: Vec<[f64; 3]> = (0..3).map(|i| {
                         let c = mesh.node_coords(n3[i]); [c[0], c[1], c[2]]
                     }).collect();
-                    let mut idx = 0usize;
-                    for j in 1..=pq.saturating_sub(2) {
-                        for i in 1..=pq - 1 - j {
-                            if idx >= dofs.len() { break; }
-                            let (r, s) = (i as f64 / pq as f64, j as f64 / pq as f64);
-                            let lam0 = 1.0 - r - s;
-                            let base = dofs[idx] as usize * dim;
-                            for d in 0..3 {
-                                dof_coords[base + d] = lam0 * c[0][d] + r * c[1][d] + s * c[2][d];
-                            }
-                            idx += 1;
+                    // Reference (λ1, λ2) of the running-order interior nodes.
+                    let tri_pos: Vec<[f64; 2]> = if prism {
+                        // GLL: `H1TriPk`'s interior block, same running order.
+                        H1TriPk::new(pq).dof_coords()[3 * pq..3 * pq + dofs.len()]
+                            .iter().map(|rc| [rc[0], rc[1]]).collect()
+                    } else {
+                        // Equispaced (TetPk convention).
+                        (1..=pq.saturating_sub(2))
+                            .flat_map(|j| (1..=pq - 1 - j).map(move |i| [i as f64 / pq as f64, j as f64 / pq as f64]))
+                            .collect()
+                    };
+                    for (k, &dof) in dofs.iter().enumerate() {
+                        let (r, s) = (tri_pos[k][0], tri_pos[k][1]);
+                        let lam0 = 1.0 - r - s;
+                        let base = dof as usize * dim;
+                        for d in 0..3 {
+                            dof_coords[base + d] = lam0 * c[0][d] + r * c[1][d] + s * c[2][d];
                         }
                     }
                 }
@@ -615,6 +742,8 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
 
     // Bubble/Volume DOF coordinates (element-private: walk the tail of each
     // element's DOF list).
+    // `H1TriPk` interior reference (λ1, λ2) per order (prism interiors).
+    let mut prism_tri_int: HashMap<u8, Vec<[f64; 2]>> = HashMap::new();
     for e in 0..n_elems as u32 {        let p_e = elem_orders[e as usize];
         let ns = mesh.element_nodes(e);
         let n_vol = if dim == 2 {
@@ -673,6 +802,34 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                         + rck[0] * mesh.node_coords(ns[1])[d]
                         + rck[1] * mesh.node_coords(ns[2])[d]
                         + rck[2] * mesh.node_coords(ns[3])[d];
+                }
+            }
+        } else if dim == 3 && ns.len() == 6 {
+            // Prism interior: MFEM `H1_WedgeElement` interior order — layer
+            // kk = 1..p-1 outer (Gauss-Lobatto ξ), triangle interior in the
+            // `H1TriPk` running (j outer, i inner) order within a layer.
+            let pq = p_e as usize;
+            let tri_int = prism_tri_int.entry(p_e).or_insert_with(|| {
+                H1TriPk::new(pq).dof_coords()[3 * pq..3 * pq + n_vol / (pq - 1)]
+                    .iter().map(|rc| [rc[0], rc[1]]).collect()
+            });
+            let (g, _) = fem_element::quadrature::gauss_lobatto_arbitrary(pq + 1);
+            let c: [[f64; 3]; 6] = std::array::from_fn(|k| {
+                let x = mesh.node_coords(ns[k]); [x[0], x[1], x[2]]
+            });
+            let mut idx = 0usize;
+            for &xi in &g[1..pq] {
+                let t = 0.5 * (xi + 1.0); // [-1,1] → [0,1]
+                for rc in tri_int.iter() {
+                    let (r, s) = (rc[0], rc[1]);
+                    let lam0 = 1.0 - r - s;
+                    let base = bubble_dofs[idx] as usize * dim;
+                    for d in 0..3 {
+                        let bottom = lam0 * c[0][d] + r * c[1][d] + s * c[2][d];
+                        let top = lam0 * c[3][d] + r * c[4][d] + s * c[5][d];
+                        dof_coords[base + d] = (1.0 - t) * bottom + t * top;
+                    }
+                    idx += 1;
                 }
             }
         } else if dim == 3 && ns.len() == 8 {
@@ -1031,76 +1188,214 @@ pub fn detect_p_constraints<M: MeshTopology>(
     constraints
 }
 
+/// One quad-face min-rule constraint: dof `dof` (the `j`-th dof of the
+/// order-`q` variant of quad face `face4`, `(iy outer, ix inner)` layout)
+/// interpolates the order-`p0` GLL trace over the face closure — vertices,
+/// oriented edge runs, face-interior dofs of the order-`p0` variant `dofs0`
+/// (empty when `p0 < 2`, where the grid has no interior nodes).
+fn quad_face_variant_constraint(
+    dm: &DofManager,
+    face4: [NodeId; 4],
+    master: (u8, &[DofId]),
+    q: u8,
+    dof: DofId,
+    j: usize,
+    constraints: &mut Vec<PRefineConstraint>,
+) {
+    let (p0, dofs0) = master;
+    let pos_q = interior_positions_1d(q, true);
+    let n1 = pos_q.len(); // (q-1)
+    // Layout: iy outer, ix inner (HexQk face convention).
+    let iy = j / n1;
+    let ix = j % n1;
+    // Tensor-product weights over the p0 grid:
+    // parents = vertices, 4 edges, face-interior dofs of p0.
+    let (r, s) = (pos_q[ix], pos_q[iy]);
+    let wx = lagrange_weights_at(&gll_positions_01(p0), r);
+    let wy = lagrange_weights_at(&gll_positions_01(p0), s);
+    let mut parents: Vec<(DofId, f64)> = Vec::new();
+    // Grid walk over the (p0+1)² nodes: map (a, b) to
+    // vertex / edge / face-interior DOFs.
+    for (b, &wyb) in wy.iter().enumerate() {
+        for (a, &wxa) in wx.iter().enumerate() {
+            let w = wxa * wyb;
+            if w.abs() < 1e-15 { continue; }
+            let pe = p0 as usize;
+            let dof = if a == 0 && b == 0 {
+                face4[0] as DofId
+            } else if a == pe && b == 0 {
+                face4[1] as DofId
+            } else if a == pe && b == pe {
+                face4[2] as DofId
+            } else if a == 0 && b == pe {
+                face4[3] as DofId
+            } else if b == 0 {
+                // Bottom edge (v0→v1), ascending from v0.
+                dofs_edge(dm, EdgeKey::new(face4[0], face4[1]), p0, face4[0], a - 1)
+            } else if a == pe {
+                // Right edge (v1→v2), ascending from v1.
+                dofs_edge(dm, EdgeKey::new(face4[1], face4[2]), p0, face4[1], b - 1)
+            } else if b == pe {
+                // Top edge: runs v3→v2; node (a, p0) sits
+                // a-1 interior steps from the v3 end.
+                dofs_edge(dm, EdgeKey::new(face4[2], face4[3]), p0, face4[3], a - 1)
+            } else if a == 0 {
+                // Left edge: runs v0→v3; node (0, b) sits
+                // b-1 interior steps from the v0 end.
+                dofs_edge(dm, EdgeKey::new(face4[0], face4[3]), p0, face4[0], b - 1)
+            } else {
+                // Face interior: (iy-1)*(p0-1) + (ix-1).
+                let fi = (b - 1) * (pe - 1) + (a - 1);
+                dofs0[fi]
+            };
+            parents.push((dof, w));
+        }
+    }
+    constraints.push(PRefineConstraint { constrained: dof, parents });
+}
+
 /// 3D face variant min-rule constraints: every higher-order face variant
 /// interpolates the lowest-order variant's face trace (tet faces: equispaced
-/// barycentric; hex faces: GLL tensor product).
+/// barycentric; hex and prism quad faces: GLL tensor product; prism tri
+/// faces: GLL barycentric via `H1TriPk`).
+///
+/// Prism faces follow MFEM's `VariableOrderMinimumRule` exactly: the master
+/// variant is the face's lowest **adjacent element order** (MFEM
+/// `var_face_orders` keeps zero-dof low-order variants, so e.g. a p2/p3 tri
+/// face is master'd by the empty p2 variant whose closure is the three
+/// vertices plus the p2 edge dofs — MFEM-verified, probe
+/// `tmp/d174_prism_p_probe.cpp`).  The legacy tet/hex paths master at the
+/// lowest *stored* variant (see the new-findings notes in D174).
 fn detect_face_variant_constraints<M: MeshTopology>(
     dm: &DofManager,
     mesh: &M,
     constraints: &mut Vec<PRefineConstraint>,
 ) {
     let n_elems = mesh.n_elements();
-    // Face keys of tet faces and hex faces.
+
+    // Canonical face orientation (first-encountering element, matching the
+    // builder's coordinate walk) + lowest adjacent order per face key.
+    let mut face_canon3: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
+    let mut face_canon4: HashMap<FaceKey, [NodeId; 4]> = HashMap::new();
+    let mut face_low: HashMap<FaceKey, u8> = HashMap::new();
     for e in 0..n_elems as u32 {
         let ns = mesh.element_nodes(e);
-        if ns.len() == 8 {
+        let p = dm.element_order(e);
+        if ns.len() == 6 {
+            for (a, b, c) in prism_tri_faces(ns) {
+                let key = FaceKey::new(a, b, c);
+                face_canon3.entry(key).or_insert([a, b, c]);
+                face_low.entry(key)
+                    .and_modify(|v| { if p < *v { *v = p; } })
+                    .or_insert(p);
+            }
+            for face4 in prism_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                face_canon4.entry(key).or_insert(face4);
+                face_low.entry(key)
+                    .and_modify(|v| { if p < *v { *v = p; } })
+                    .or_insert(p);
+            }
+        }
+    }
+
+    // Master-basis weights per (p_low, q) prism tri face pair: entry j is the
+    // order-`p_low` GLL triangle basis (`H1TriPk`, slot order) evaluated at
+    // the order-`q` variant's j-th interior node.
+    let mut tri_w_cache: HashMap<(u8, u8), Vec<Vec<f64>>> = HashMap::new();
+
+    // Face keys of prism, tet and hex faces.
+    for e in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(e);
+        if ns.len() == 6 {
+            for (a, b, c) in prism_tri_faces(ns) {
+                let key = FaceKey::new(a, b, c);
+                let Some(variants) = dm.face_variants.get(&key) else { continue };
+                // MFEM stores zero-dof low-order variants (`MakeDofTable`),
+                // so a face whose lowest adjacent order contributes no
+                // interior dofs still carries several variants and its
+                // higher variants must be constrained to that order's
+                // closure.  Skip faces holding no stored dof (single low
+                // order with a zero-dof variant) or none above `p_low`.
+                let Some(first_order) = variants.first().map(|(q, _)| *q) else { continue };
+                let p_low = face_low.get(&key).copied().unwrap_or(first_order);
+                if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
+                let canon = face_canon3.get(&key).copied().unwrap_or([a, b, c]);
+                // Master closure in `H1TriPk` slot order: [v0 v1 v2 |
+                // edge (v0,v1) from v0 | edge (v1,v2) from v1 |
+                // edge (v0,v2) from v2 | p_low face-interior dofs].
+                let mut parent_dofs: Vec<DofId> = Vec::new();
+                parent_dofs.extend_from_slice(&canon);
+                if p_low >= 2 {
+                    for (va, vb) in
+                        [(canon[0], canon[1]), (canon[1], canon[2]), (canon[2], canon[0])]
+                    {
+                        for k in 0..(p_low as usize - 1) {
+                            parent_dofs
+                                .push(dofs_edge(dm, EdgeKey::new(va, vb), p_low, va, k));
+                        }
+                    }
+                }
+                if let Some((_, dofs0)) = variants.iter().find(|(p, _)| *p == p_low) {
+                    parent_dofs.extend_from_slice(dofs0);
+                }
+                for (q, dofs_q) in variants {
+                    if *q <= p_low { continue; }
+                    let ws = tri_w_cache.entry((p_low, *q)).or_insert_with(|| {
+                        let master = H1TriPk::new(p_low as usize);
+                        let slave_pos = H1TriPk::new(*q as usize).dof_coords();
+                        let base = 3 * *q as usize;
+                        (0..dofs_q.len())
+                            .map(|j| {
+                                let pos = &slave_pos[base + j];
+                                let mut w = vec![0.0_f64; master.n_dofs()];
+                                master.eval_basis(&[pos[0], pos[1]], &mut w);
+                                w
+                            })
+                            .collect()
+                    });
+                    for (j, &dof) in dofs_q.iter().enumerate() {
+                        let parents: Vec<(DofId, f64)> = parent_dofs.iter()
+                            .zip(ws[j].iter())
+                            .filter(|&(_, &w)| w.abs() > 1e-15)
+                            .map(|(&d, &w)| (d, w))
+                            .collect();
+                        constraints.push(PRefineConstraint { constrained: dof, parents });
+                    }
+                }
+            }
+            for face4 in prism_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                let Some(variants) = dm.face_variants.get(&key) else { continue };
+                let Some(first_order) = variants.first().map(|(q, _)| *q) else { continue };
+                let p_low = face_low.get(&key).copied().unwrap_or(first_order);
+                if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
+                let canon4 = face_canon4.get(&key).copied().unwrap_or(face4);
+                let dofs0 = variants.iter().find(|(p, _)| *p == p_low)
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
+                for (q, dofs_q) in variants {
+                    if *q <= p_low { continue; }
+                    for (j, &dof) in dofs_q.iter().enumerate() {
+                        quad_face_variant_constraint(
+                            dm, canon4, (p_low, &dofs0), *q, dof, j, constraints);
+                    }
+                }
+            }
+        } else if ns.len() == 8 {
             for face4 in hex_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
                 if variants.len() <= 1 { continue; }
                 let (p0, dofs0) = &variants[0];
 
                 for (q, dofs_q) in variants.iter().skip(1) {
-                    let pos_q = interior_positions_1d(*q, true);
-                    let n1 = pos_q.len(); // (q-1)
                     for (j, &dof) in dofs_q.iter().enumerate() {
-                        // Layout: iy outer, ix inner (HexQk face convention).
-                        let iy = j / n1;
-                        let ix = j % n1;
-                        // Tensor-product weights over the p0 grid:
-                        // parents = vertices, 4 edges, face-interior dofs of p0.
-                        let (r, s) = (pos_q[ix], pos_q[iy]);
-                        let wx = lagrange_weights_at(&gll_positions_01(*p0), r);
-                        let wy = lagrange_weights_at(&gll_positions_01(*p0), s);
-                        let mut parents: Vec<(DofId, f64)> = Vec::new();
-                        // Grid walk over the (p0+1)² nodes: map (a, b) to
-                        // vertex / edge / face-interior DOFs.
-                        for (b, &wyb) in wy.iter().enumerate() {
-                            for (a, &wxa) in wx.iter().enumerate() {
-                                let w = wxa * wyb;
-                                if w.abs() < 1e-15 { continue; }
-                                let pe = *p0 as usize;
-                                let dof = if a == 0 && b == 0 {
-                                    face4[0] as DofId
-                                } else if a == pe && b == 0 {
-                                    face4[1] as DofId
-                                } else if a == pe && b == pe {
-                                    face4[2] as DofId
-                                } else if a == 0 && b == pe {
-                                    face4[3] as DofId
-                                } else if b == 0 {
-                                    // Bottom edge (v0→v1), ascending from v0.
-                                    dofs_edge(dm, EdgeKey::new(face4[0], face4[1]), *p0, face4[0], a - 1)
-                                } else if a == pe {
-                                    // Right edge (v1→v2), ascending from v1.
-                                    dofs_edge(dm, EdgeKey::new(face4[1], face4[2]), *p0, face4[1], b - 1)
-                                } else if b == pe {
-                                    // Top edge: runs v3→v2; node (a, p0) sits
-                                    // a-1 interior steps from the v3 end.
-                                    dofs_edge(dm, EdgeKey::new(face4[2], face4[3]), *p0, face4[3], a - 1)
-                                } else if a == 0 {
-                                    // Left edge: runs v0→v3; node (0, b) sits
-                                    // b-1 interior steps from the v0 end.
-                                    dofs_edge(dm, EdgeKey::new(face4[0], face4[3]), *p0, face4[0], b - 1)
-                                } else {
-                                    // Face interior: (iy-1)*(p0-1) + (ix-1).
-                                    let fi = (b - 1) * (pe - 1) + (a - 1);
-                                    dofs0[fi]
-                                };
-                                parents.push((dof, w));
-                            }
-                        }
-                        constraints.push(PRefineConstraint { constrained: dof, parents });
+                        quad_face_variant_constraint(
+                            dm, face4, (*p0, dofs0), *q, dof, j, constraints);
                     }
                 }
             }
