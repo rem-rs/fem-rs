@@ -26,14 +26,17 @@
 //!
 //! # Gap list (what fem-rs is missing)
 //!
-//! 1. **No parallel complex DPG.** MFEM uses `ParComplexDPGWeakForm`
-//!    (`util/pcomplexweakform.hpp`). fem-rs has the serial
-//!    `ComplexDPGWeakForm` (`crates/assembly/src/complex_dpg_weakform.rs`,
-//!    exercised by `miniapps/dpg/dpg_acoustics_2d.rs` /
-//!    `dpg_acoustics_3d.rs`) and the real-valued `ParDpgWeakForm`
-//!    ([`fem_parallel::par_dpg_weakform`]), but **not** the combination: the
-//!    complex parallel trace numbering, the real-doubled `Pᵀ A P` and the
-//!    complex essential-DOF elimination are missing.
+//! 1. **No parallel complex DPG *solve*.**  Since D172 the parallel complex
+//!    weak form exists — `fem_parallel::par_complex_dpg_weakform`
+//!    (`ParComplexDPGWeakForm`): the 2-D complex trace numbering, the complex
+//!    `Pᴴ A P` split and the complex essential-DOF elimination are in, and the
+//!    distributed numbering reproduces the C++ `Dofs` column (113 at
+//!    `-np 1`/`-np 2` defaults; pinned by
+//!    `par_complex_dpg_weakform::tests`).  Still missing: the parallel
+//!    complex iterative solve (MFEM uses `ComplexBlockDiagonalPreconditioner`
+//!    + `ComplexPCG` from `util/preconditioners.cpp`) and the statically
+//!    condensed parallel system, so no L2/residual/iteration numbers yet.
+//!    (Also still 3-D: the H1-trace numbering panics like the real form.)
 //! 2. **3-D H1-trace parallel numbering.** `ParDpgWeakForm` numbers 2-D
 //!    `H1_Trace_FECollection` vertex DOFs (the shared skeleton vertices) and
 //!    face-discontinuous trace DOFs; the 3-D H1 trace additionally has DOFs on
@@ -50,6 +53,9 @@
 //! * `pdiffusion` — verified 1:1 against the C++ MPI reference for `-np 1` and
 //!   `-np 2` (dofs, L2 error, DPG residual).
 //! * Serial complex DPG: `dpg_acoustics_2d`, `dpg_acoustics_3d`.
+//! * `ParComplexDPGWeakForm` (`fem_parallel::par_complex_dpg_weakform`) —
+//!   parallel complex trace numbering + `Pᴴ A P` split; distributed dofs
+//!   match the C++ `Dofs` column (113) at `-np 1`/`-np 2` defaults.
 //!
 //! Usage:
 //!   cargo run --release --example pacoustics -- --ranks 2
@@ -58,10 +64,12 @@
 use std::process::exit;
 
 const GAPS: &[&str] = &[
-    "no parallel COMPLEX DPG: MFEM uses ParComplexDPGWeakForm \
-     (miniapps/dpg/util/pcomplexweakform.{hpp,cpp}); fem-rs has the serial \
-     ComplexDPGWeakForm and the real ParDpgWeakForm, but no complex parallel \
-     trace numbering / real-doubled P^T A P / complex essential-DOF elimination",
+    "no parallel COMPLEX DPG SOLVE: the complex trace numbering, P^T A P split \
+     and essential-DOF elimination landed (fem_parallel::par_complex_dpg_weakform, \
+     Dofs column pinned against the C++ reference), but the parallel complex \
+     iterative solver (ComplexBlockDiagonalPreconditioner + ComplexPCG, \
+     util/preconditioners.cpp) and the statically condensed parallel system \
+     are not ported, so no L2/residual/iteration numbers can be printed",
     "3-D H1-trace parallel numbering is missing: the 3-D H1 trace has DOFs on the \
      skeleton EDGES (shared by every incident face) as well as on face interiors, \
      while ParDpgWeakForm numbers only 2-D H1-trace (shared vertices) and \

@@ -30,7 +30,7 @@ use fem_assembly::postproc::l2_zz_rt1::{
     rt1_hanging_constraints, solve_rt1_projection,
 };
 use fem_core::ElemId;
-use fem_mesh::{Mesh, topology::MeshTopology};
+use fem_mesh::Mesh;
 use fem_space::H1Space;
 use fem_space::fe_space::FESpace;
 

@@ -127,6 +127,8 @@ pub mod par_assembler;
 pub mod par_csr;
 pub mod par_dpg_trace;
 pub mod par_dpg_weakform;
+pub mod par_dpg_numbering;
+pub mod par_complex_dpg_weakform;
 pub mod par_mesh;
 pub mod par_mixed_assembler;
 pub mod par_ras;

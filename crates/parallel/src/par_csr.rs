@@ -51,11 +51,11 @@ impl ParCsrMatrix {
         ParCsrMatrix { diag, offd, n_owned, n_ghost, dof_ghost_exchange, comm }
     }
 
-    /// Build from a local matrix (n_local x n_local where n_local = n_owned + n_ghost).
+    /// Build from a **square** local matrix (`n_local × n_local`,
+    /// `n_local = n_owned + n_ghost`).
     ///
     /// Discards ghost rows (they are handled by the owning rank).  Splits
-    /// columns into `diag` (col < n_owned) and `offd` (col >= n_owned,
-    /// remapped to 0-based ghost index).
+    /// columns into cross-rank `offd` and everything else into `diag`.
     ///
     /// `dof_part` is used to identify which ghost columns are actually cross-rank
     /// (owned by other ranks) vs local ghost-element DOFs owned by this rank.
@@ -69,7 +69,6 @@ impl ParCsrMatrix {
         comm: Comm,
     ) -> Self {
         let n_local = local.nrows;
-        let n_ghost = n_local.saturating_sub(n_owned);
 
         // Build a set of cross-rank ghost local IDs for fast lookup.
         let cross_rank_ghosts: std::collections::HashSet<usize> = dof_part
@@ -117,19 +116,29 @@ impl ParCsrMatrix {
         ParCsrMatrix { diag, offd, n_owned, n_ghost: n_cross_rank, dof_ghost_exchange, comm }
     }
 
-    /// Build from a local matrix (n_local x n_local where n_local = n_owned + n_ghost).
+    /// Build from a rank-local matrix whose columns span
+    /// `[owned | ghost]` (`n_owned + n_ghost` columns).
     ///
-    /// Discards ghost rows (they are handled by the owning rank).  Splits
-    /// columns into `diag` (col < n_owned) and `offd` (col >= n_owned,
-    /// remapped to 0-based ghost index).
+    /// Only the first `n_owned` rows are stored; rows beyond that (ghost rows)
+    /// are discarded — they are handled by the owning rank.  Columns are split
+    /// into `diag` (col < n_owned) and `offd` (col >= n_owned, remapped to a
+    /// 0-based ghost index).  The ghost-column count is derived from
+    /// `local.ncols - n_owned`, so **rectangular** rank-local matrices
+    /// (`n_owned` rows × `n_owned + n_ghost` columns, e.g. an assembled
+    /// prolongator) keep their off-diagonal block; a square
+    /// `n_local × n_local` input with ghost rows left zero is equally valid.
     pub fn from_local_matrix(
         local: &CsrMatrix<f64>,
         n_owned: usize,
         dof_ghost_exchange: Arc<GhostExchange>,
         comm: Comm,
     ) -> Self {
-        let n_local = local.nrows;
-        let n_ghost = n_local.saturating_sub(n_owned);
+        assert!(
+            local.nrows >= n_owned,
+            "from_local_matrix: local matrix has {} rows < {n_owned} owned dofs",
+            local.nrows
+        );
+        let n_ghost = local.ncols.saturating_sub(n_owned);
 
         let mut diag_coo = CooMatrix::<f64>::new(n_owned, n_owned);
 
@@ -667,7 +676,7 @@ impl ParCsrMatrix {
         // ── Zero offd columns of boundary DOFs owned by other ranks ──
         if self.n_ghost > 0 && !ghost_boundary_cols.is_empty() {
             let offd = &mut self.offd;
-            let mut cols: std::collections::HashSet<usize> =
+            let cols: std::collections::HashSet<usize> =
                 ghost_boundary_cols.iter().copied().collect();
             for i in 0..n_owned {
                 for p in offd.row_ptr[i]..offd.row_ptr[i + 1] {
@@ -734,6 +743,72 @@ mod tests {
 
             assert_eq!(par_mat.n_owned, 2);
             assert_eq!(par_mat.n_ghost, 2);
+        });
+    }
+
+    #[test]
+    fn par_csr_from_local_rectangular_keeps_ghost_block() {
+        // Regression (D167): `from_local_matrix` derived the ghost-column
+        // count from `local.nrows - n_owned`, which is only correct for a
+        // square local matrix.  A rectangular rank-local operator (e.g. an
+        // assembled prolongator: owned rows × [owned | ghost] columns) lost
+        // its whole off-diagonal block silently.  The count must come from
+        // `local.ncols - n_owned`.
+        let mesh = Mesh::<2>::unit_square_tri(4);
+
+        let launcher = ThreadLauncher::new(WorkerConfig::new(2));
+        launcher.launch(move |comm| {
+            let pmesh = partition_mesh(&mesh, &comm);
+            let local_space = H1Space::new(pmesh.local_mesh().clone(), 1);
+            let par_space = ParallelFESpace::new(local_space, &pmesh, comm.clone());
+
+            let n_owned = par_space.dof_partition().n_owned_dofs;
+            let n_local = par_space.n_local_dofs();
+            assert!(
+                n_local > n_owned,
+                "rank {}: test needs cross-rank ghost dofs (n_owned={n_owned}, n_local={n_local})",
+                comm.rank()
+            );
+
+            // Rectangular rank-local operator: owned rows only, columns
+            // spanning [owned | ghost].  Distinct entries so nothing cancels.
+            let mut coo = CooMatrix::<f64>::new(n_owned, n_local);
+            for i in 0..n_owned {
+                for j in 0..n_local {
+                    coo.add(i, j, 100.0 + 10.0 * i as f64 + j as f64);
+                }
+            }
+            let rect = coo.into_csr();
+            assert_eq!(rect.nrows, n_owned);
+            assert_eq!(rect.ncols, n_local);
+
+            let par_mat = ParCsrMatrix::from_local_matrix(
+                &rect,
+                n_owned,
+                par_space.dof_ghost_exchange_arc(),
+                comm.clone(),
+            );
+
+            assert_eq!(par_mat.n_owned(), n_owned);
+            assert_eq!(
+                par_mat.n_ghost(),
+                n_local - n_owned,
+                "rank {}: ghost-column count must derive from local.ncols, not local.nrows",
+                comm.rank()
+            );
+            assert_eq!(par_mat.diag_block().ncols, n_owned);
+            let offd = par_mat.offd_block();
+            assert_eq!(offd.nrows, n_owned);
+            assert_eq!(offd.ncols, n_local - n_owned);
+            // Spot-check the ghost block survived with the right column map
+            // (offd column c holds local column n_owned + c).
+            let expect = 100.0 + n_owned as f64;
+            assert!(
+                (offd.get(0, 0) - expect).abs() < 1e-12,
+                "rank {}: offd(0,0) lost or mismapped: {} (expected {expect})",
+                comm.rank(),
+                offd.get(0, 0)
+            );
         });
     }
 

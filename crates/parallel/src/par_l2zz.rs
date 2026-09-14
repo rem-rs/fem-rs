@@ -28,18 +28,14 @@
 //! left to the underlying `HDivSpace` (identical to the serial path, which is
 //! validated against C++ on star.mesh through `it2`).
 
-use std::sync::Arc;
-
-use fem_core::Rank;
 use fem_element::raviart_thomas::QuadRTk;
 use fem_element::VectorReferenceElement;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::Mesh;
 use fem_solver::SolverConfig;
-use fem_space::{FESpace, HDivSpace};
+use fem_space::HDivSpace;
 
 use crate::comm::Comm;
-use crate::dof_partition::DofPartition;
 use crate::par_amg::{ParAmgConfig, SmootherType, par_solve_pcg_amg};
 use crate::par_assembler::{permute_csr, permute_vec};
 use crate::par_csr::ParCsrMatrix;
@@ -199,7 +195,6 @@ pub fn l2_zz_estimator_parallel(
     //  consistent across ranks.
     let mut slave_deps: Vec<(u32, f64, u32)> = Vec::new(); // (slave, coef, master)
     let mut edge_of_dof: Vec<(u32, u32)> = vec![(u32::MAX, u32::MAX); n_rt_dofs];
-    let partition = par_mesh.partition();
     {
         // RT0 edge dof → endpoint node ids (local), via first element.
         for e in 0..n_local_elems as fem_core::ElemId {
@@ -326,8 +321,8 @@ pub fn l2_zz_estimator_parallel(
         slave_deps.sort_by_key(|x| (x.0, x.2));
         slave_deps.dedup();
     }
-    let mut permuted_a = permute_csr(&local_a, dp);
-    let mut permuted_b = permute_vec(&b, dp);
+    let permuted_a = permute_csr(&local_a, dp);
+    let permuted_b = permute_vec(&b, dp);
     let mut a_mat = ParCsrMatrix::from_local_matrix(
         &permuted_a,
         n_owned_dofs,
@@ -384,7 +379,7 @@ pub fn l2_zz_estimator_parallel(
         verbose: false,
         ..SolverConfig::default()
     };
-    let res = par_solve_pcg_amg(&a_mat, &rhs, &mut x, &amg_cfg, &cfg)
+    par_solve_pcg_amg(&a_mat, &rhs, &mut x, &amg_cfg, &cfg)
         .expect("parallel RT0 L2 projection solve failed");
     x.update_ghosts();
 

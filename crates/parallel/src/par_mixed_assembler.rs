@@ -9,7 +9,7 @@ use fem_space::fe_space::FESpace;
 use fem_assembly::mixed::{
     MixedAssembler, MixedBilinearIntegrator, HDivL2Integrator, assemble_hdiv_l2_mixed,
     assemble_hcurl_h1_gradient, assemble_hcurl_hdiv_weak_curl,
-    assemble_hcurl_h1_weak_div, HCurlH1WeakDiv, HCurlH1WeakDivIntegrator,
+    assemble_hcurl_h1_weak_div, HCurlH1WeakDiv,
 };
 
 use crate::dof_partition::DofPartition;

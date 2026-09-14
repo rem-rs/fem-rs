@@ -412,7 +412,7 @@ fn rebuild_partition_nc(
     // unknowns 380 vs np1 386, marked 3 vs 50).
     let local_max_gid = partition.global_node_ids.iter().copied().max().unwrap_or(0);
     let global_max_gid = if comm.size() > 1 {
-        let mut payload = local_max_gid.to_le_bytes().to_vec();
+        let payload = local_max_gid.to_le_bytes().to_vec();
         let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
             .map(|r| (r, payload.clone()))
             .collect();

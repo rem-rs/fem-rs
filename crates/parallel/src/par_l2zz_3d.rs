@@ -1,4 +1,4 @@
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::ElementType;
 use fem_space::{FESpace, HDivSpace, L2Space};
@@ -215,13 +215,13 @@ where
     let permuted_a = permute_csr(&local_a, smooth_dp);
     let permuted_b = permute_vec(&b_local, smooth_dp);
 
-    let mut a_mat = ParCsrMatrix::from_local_matrix(
+    let a_mat = ParCsrMatrix::from_local_matrix(
         &permuted_a,
         n_smooth_owned,
         smooth_flux_par.dof_ghost_exchange_arc(),
         comm.clone(),
     );
-    let mut rhs = ParVector::from_local_raw(
+    let rhs = ParVector::from_local_raw(
         permuted_b,
         n_smooth_owned,
         smooth_flux_par.dof_ghost_exchange_arc(),
