@@ -537,6 +537,22 @@ name = "dpg_maxwell_3d"
 path = "../miniapps/dpg/dpg_maxwell_3d.rs"
 
 [[example]]
+name = "pdiffusion"
+path = "../miniapps/dpg/pdiffusion.rs"
+
+[[example]]
+name = "pacoustics"
+path = "../miniapps/dpg/pacoustics.rs"
+
+[[example]]
+name = "pmaxwell"
+path = "../miniapps/dpg/pmaxwell.rs"
+
+[[example]]
+name = "pconvection_diffusion"
+path = "../miniapps/dpg/pconvection_diffusion.rs"
+
+[[example]]
 name = "block_solvers"
 path = "../miniapps/solvers/block_solvers.rs"
 
