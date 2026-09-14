@@ -25,7 +25,9 @@
 //!    implemented (prisms, 2-D elements) are *refused* instead of being written
 //!    as a wrong mesh, and the refusal happens before the file is created.
 
-use fem_io::mfem::{read_mfem, write_mfem_file_3d_nodes, write_mfem_nodes, NodesSpace};
+use fem_io::mfem::{
+    read_mfem, read_mfem_file, write_mfem_file_3d_nodes, write_mfem_nodes, NodesSpace,
+};
 use fem_mesh::element_type::ElementType;
 use fem_mesh::Mesh;
 
@@ -372,22 +374,55 @@ fn curved_mesh_without_boundary_faces_writes_an_empty_boundary_section() {
 
 #[test]
 fn unsupported_element_families_are_refused_without_writing_a_file() {
-    // 2-D elements (and prisms — the `toroid` miniapp) have no MFEM-faithful
-    // continuous numbering here yet; the writer must refuse rather than emit a
-    // mesh whose curvature is silently wrong — and it must refuse before the
-    // output file exists.
-    let mut quad = Mesh::<2>::unit_square_quad(1);
-    quad.set_curvature(3);
-    let err = write_mfem_nodes(&mut Vec::<u8>::new(), &quad, None, NodesSpace::Continuous)
-        .expect_err("2-D continuous nodes must be refused");
-    assert!(format!("{err}").contains("Quad4"), "{err}");
+    // Round 33 (D151) added the continuous prism (wedge) and 2-D
+    // quadrilateral numberings, so the families that still have no
+    // MFEM-faithful numbering here are the *discontinuous* prisms
+    // (`L2_T1_3D_P<p>`, the `toroid -dm` case) and the 2-D triangles.  The
+    // writer must refuse them rather than emit a mesh whose curvature is
+    // silently wrong — and it must refuse before the output file exists.
+
+    // Prism (3-D): `data/inline-wedge.mesh` is a single wedge, and
+    // `set_curvature_prism6` gives it an order-3 geometry table.
+    let file = read_mfem_file(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/inline-wedge.mesh"
+    ))
+    .expect("reading data/inline-wedge.mesh");
+    let mut prism = file.mesh3d.expect("inline-wedge.mesh is 3-D");
+    prism.set_curvature(3);
+    // D151: the *continuous* `H1_3D_P<p>` wedge numbering is implemented ...
+    let mut sink: Vec<u8> = Vec::new();
+    write_mfem_nodes(
+        &mut sink,
+        &Mesh::<2>::unit_square_tri(2),
+        Some(&prism),
+        NodesSpace::Continuous,
+    )
+    .expect("prism continuous nodes are written since D151");
+    assert!(String::from_utf8(sink).unwrap().contains("H1_3D_P3"));
+    // ... the discontinuous `L2_T1_3D_P<p>` one is not.
+    let err = write_mfem_nodes(
+        &mut Vec::<u8>::new(),
+        &Mesh::<2>::unit_square_tri(2),
+        Some(&prism),
+        NodesSpace::Discontinuous,
+    )
+    .expect_err("prism discontinuous nodes must be refused");
+    assert!(format!("{err}").contains("Prism6"), "{err}");
+
+    // 2-D triangle.
+    let mut tri = Mesh::<2>::make_cartesian_2d_tri(1, 1, 1.0, 1.0);
+    tri.set_curvature(3);
+    let err = write_mfem_nodes(&mut Vec::<u8>::new(), &tri, None, NodesSpace::Continuous)
+        .expect_err("2-D triangle continuous nodes must be refused");
+    assert!(format!("{err}").contains("Tri3"), "{err}");
 
     // `write_mfem_file` must not create the file on failure.
-    let path = std::env::temp_dir().join("fem_rs_t32_refused_quad.mesh");
+    let path = std::env::temp_dir().join("fem_rs_t32_refused_tri.mesh");
     let _ = std::fs::remove_file(&path);
-    let err = fem_io::mfem::write_mfem_file(&path, &quad)
+    let err = fem_io::mfem::write_mfem_file(&path, &tri)
         .expect_err("2-D continuous nodes must be refused when writing to disk");
-    assert!(format!("{err}").contains("Quad4"));
+    assert!(format!("{err}").contains("Tri3"));
     assert!(!path.exists(), "a refused mesh must not leave a file behind");
 }
 

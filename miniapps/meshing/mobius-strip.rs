@@ -13,30 +13,38 @@
 //! Sample runs (C++): `mobius-strip`, `mobius-strip -o 4`,
 //! `mobius-strip -c 0 -t 1.5 -nx 20`.
 //!
-//! **This run always exits with code 3.**  The `nodes`-section writer landed in
-//! round 32 (`fem_io::mfem::write_mfem_file_3d_nodes`, `NodesSpace`), but only
-//! for 3-D hexahedra/tetrahedra (H1) and hexahedra/quads (L2): a 2-D *quad*
-//! element still has no MFEM-faithful node numbering, in either continuity.
+//! **This run always exits with code 3.**
 //!
-//! Gap list (exit 3):
-//! 1. **2-D `Quad4` node numbering** in the writer: the vertex / 4-edge /
-//!    element-interior blocks of `H1_2D_P<p>` (with `SegDofOrd` edge
-//!    orientation) and the per-element lexicographic order of
-//!    `L2_T1_2D_P<p>`.  `fem_element` already provides the node lattices
-//!    (`QuadQk::new` / `QuadQk::new_lex`), so this is the writer-side analogue
-//!    of the hexahedral map that round 32 added.
-//! 2. **`dimension 2` with `VDim: 3`** — note that this is *not* blocked by
-//!    `fem_mesh::Mesh<D>`: `Mesh<3>` with `Quad4` elements already reports
-//!    `topological_dim() == 2` while storing 3 coordinate components, which is
-//!    exactly MFEM's `spaceDim = 3, Dim = 2` surface representation.  What is
-//!    missing is (a) the writer taking the `dimension` line from
-//!    `topological_dim()` instead of `D`, and (b) node values with 3
-//!    components from a 2-D element.
-//! 3. `Mesh::SetCurvature(order, discont = true, sdim = 3, Ordering::byVDIM)`:
-//!    `Mesh::set_curvature` does not take a `space_dim` argument, so a 2-D
-//!    mesh's geometry nodes cannot be given 3 components.
-//! 4. `Mesh::RemoveInternalBoundaries` over the 1-D (`SEGMENT`) face table for
-//!    the `-c 1`/`-c 2` end identification.
+//! Round 33 (D151) landed the 2-D `Quad4` node numbering in the writer
+//! (`fem_io::mfem::quad2d_slot_map` for `H1_2D_P<p>`, `mfem_l2_slots` for
+//! `L2_T1_2D_P<p>`), so the *flat* 2-D case of this file is writable now — but
+//! the C++ mesh here is a **surface**: `dimension 2` with a 3-component
+//! (`VDim: 3`) high-order `nodes` section, and that is still refused.
+//!
+//! Gap list (exit 3) — accurate as of round 33:
+//! 1. **`dimension 2` with `VDim: 3`**: `fem_io::mfem::nodes_dof_values`
+//!    rejects a mesh whose `topological_dim()` differs from its coordinate
+//!    dimension (`write_mfem: `nodes` section for a 2-dimensional mesh in 3-D
+//!    space (spaceDim > dim) is not supported`), and `write_mfem_nodes` takes
+//!    the `dimension` line from the mesh's `D`.  Needed: the `dimension` line
+//!    from `Mesh::topological_dim()` while the node values keep their 3
+//!    components (a `Mesh<3>` holding `Quad4` elements already reports
+//!    `topological_dim() == 2` with 3 coordinate components, which *is* MFEM's
+//!    `Dim = 2, spaceDim = 3` surface representation; the 2-D
+//!    `quad2d_slot_map`/`mfem_l2_slots` numbering then applies as-is).
+//! 2. **Building the surface mesh**: `Mesh<D>` binds the coordinate count to
+//!    the topological dimension and `Mesh::set_curvature(order)` has no
+//!    `space_dim` argument, so the C++ `mesh.SetCurvature(order, true, 3,
+//!    Ordering::byVDIM)` on a `Mesh::MakeCartesian2D` mesh (which promotes the
+//!    vertices to 3 components, `mesh/mesh.cpp:7211`) has no fem-rs
+//!    counterpart.
+//! 3. The miniapp body itself is not ported: the C++ identifies the two ends
+//!    of the strip (`v2v`, with a half twist for `-c 2`), calls
+//!    `RemoveUnusedVertices` + `RemoveInternalBoundaries` (which for this
+//!    `dimension 2` mesh works on the 1-D `SEGMENT` face table), applies
+//!    `mobius_trans` to the *nodal* coordinates (`mesh.Transform`, i.e. all
+//!    `(p+1)²` nodes per element, not just the vertices) and writes with
+//!    `precision(8)`.
 //!
 //! The previous version of this port wrote a hand-rolled file with
 //! `dimension 3` and flattened 2-D vertices (a `Mesh<3>` with Quad4 elements),
@@ -112,16 +120,17 @@ fn main() {
     eprintln!(
         "mobius-strip (Rust port): the C++ miniapp writes a `dimension 2` surface mesh with a \
 3-component (`VDim: 3`) high-order `nodes` section (`SetCurvature(order, true, 3, \
-Ordering::byVDIM)`, default `nodes=1`).  fem-rs's `nodes` writer (round 32) covers 3-D Hex8/Tet4 \
-(H1) and Hex8/Quad4 (L2) only, so no faithful `{out_file}` can be produced (a flattened \
-`dimension 3` file is not the C++ mesh).\n\
-Gap list (exit 3): [1] 2-D `Quad4` node numbering in `fem_io::mfem` — `H1_2D_P<p>` (vertices / 4 \
-`SegDofOrd`-oriented edges / element interior) and the per-element lexicographic \
-`L2_T1_2D_P<p>`; [2] `dimension` written from `Mesh::topological_dim()` plus 3-component node \
-values for a 2-D element (a `Mesh<3>` holding Quad4 elements already reports topological dim 2, \
-so the coordinate representation exists — the numbering is the blocker, not `Mesh<D>`); [3] \
-`Mesh::set_curvature` with an explicit `space_dim`; [4] 1-D `SEGMENT` \
-`RemoveInternalBoundaries` for the `-c 1`/`-c 2` end identification."
+Ordering::byVDIM)`, default `nodes=1`).  The writer's 2-D `Quad4` numbering (H1 and L2) landed \
+in round 33 (D151), so what is left is the *surface* part, not the 2-D numbering: no faithful \
+`{out_file}` can be produced for a `dim 2 / spaceDim 3` mesh (a flattened `dimension 3` file is \
+not the C++ mesh).\n\
+Gap list (exit 3): [1] `fem_io::mfem` refuses `topological_dim() != D` (`nodes_dof_values`) and \
+writes the `dimension` line from `D` — it must take it from `Mesh::topological_dim()` while the \
+node values keep their 3 components; [2] there is no fem-rs way to build a 2-D surface mesh in \
+3-D (`Mesh<D>` ties the coordinate count to the topological dimension and `Mesh::set_curvature` \
+has no `space_dim`); [3] the miniapp body (end identification with the `-c 2` flip, \
+`RemoveInternalBoundaries` over the 1-D `SEGMENT` face table, `mesh.Transform` on all nodal \
+coordinates) is not ported."
     );
     std::process::exit(3);
 }

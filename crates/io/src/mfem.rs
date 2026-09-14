@@ -321,6 +321,41 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             // done purely by (periodically identified) vertex indices.
             let npe = raw.len() / (n_elem * dim);
             if npe >= 2 && raw.len() % (n_elem * dim) == 0 {
+                // `L2_T1_<dim>D_P<p>`: the polynomial order and the DOF lattice
+                // come from the collection's name (D153 — the order used to be
+                // hard-coded to 1, which made every P>1 L2 mesh a geometry with
+                // `order = 1` but `(p+1)^dim` nodes per element).
+                let l2_order = parse_nodal_fec(&fec_name).map(|f| f.order as usize).unwrap_or(1);
+                let et0 = elem_types[0];
+                // The file stores the values in MFEM's L2 element order, while
+                // `GeometryData` must be in the slot order of the *mesh's* own
+                // reference element (the one the assembler evaluates the
+                // geometry with).  `perm[i]` is therefore the file's L2 index
+                // of reference slot `i` — the inverse of the writer's
+                // `lex_slot_permutation(factory, mfem_l2)` (`nodes_dof_values`).
+                let perm: Vec<usize> = match (
+                    l2_geometry_slots(et0, l2_order),
+                    mfem_l2_slots(et0, l2_order),
+                ) {
+                    (Some(factory), Some(mfem)) => {
+                        lex_slot_permutation(&mfem, &factory).unwrap_or_else(|| {
+                            eprintln!(
+                                "warning (D153): the {fec_name} `nodes` section of this mesh does \
+                                 not sit on the {et0:?} P{l2_order} node lattice — the geometry is \
+                                 read with the file's own DOF order, which is likely scrambled"
+                            );
+                            (0..npe).collect()
+                        })
+                    }
+                    _ => {
+                        eprintln!(
+                            "warning (D153): no verified `{fec_name}` slot mapping for {et0:?} \
+                             P{l2_order}; the geometry is read with the file's own DOF order, \
+                             which is only correct when the two orderings coincide"
+                        );
+                        (0..npe).collect()
+                    }
+                };
                 // 1) Folded vertex coordinates: for each vertex, take the
                 //    position it has in the first element that references it.
                 //    This mirrors MFEM's `Mesh::vertices` array (used only by
@@ -332,18 +367,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                         for k in 0..elem_conn[e].len() {
                             if elem_conn[e][k] as usize == v {
                                 // `k` is the vertex index in the element's
-                                // connectivity (H1 order); the nodes section
-                                // stores them in lexicographic (L2) order, so
-                                // map k -> lex index (P1: swap 2<->3).
-                                let kl = if npe == 4 && dim == 2 {
-                                    match k {
-                                        2 => 3,
-                                        3 => 2,
-                                        _ => k,
-                                    }
-                                } else {
-                                    k
-                                };
+                                // connectivity, which is also its reference
+                                // slot (the vertices come first in every
+                                // element family), so the file's L2 index of
+                                // that vertex is `perm[k]`.
+                                let kl = perm[k];
                                 for c in 0..dim {
                                     coords[v * dim + c] = raw[(e * npe + kl) * dim + c];
                                 }
@@ -352,19 +380,10 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                         }
                     }
                 }
-                // 2) Per-element geometry table (non-shared nodes).  The node
-                //    order matches the element connectivity (H1 vertex order:
-                //    LL, LR, UR, UL), which is what the QuadQk assembly basis
-                //    and the mesh topology expect.  The MFEM `nodes` section
-                //    stores them in lexicographic (L2) order, so for P1 quad
-                //    we swap the last two entries.
+                // 2) Per-element geometry table (non-shared nodes), in the
+                //    mesh reference element's own slot order.
                 let mut geo_conn: Vec<u32> = Vec::with_capacity(n_elem * npe);
                 let mut geo_coords: Vec<f64> = Vec::with_capacity(n_elem * npe * dim);
-                let perm: Vec<usize> = if npe == 4 && dim == 2 {
-                    vec![0, 1, 3, 2]
-                } else {
-                    (0..npe).collect()
-                };
                 for e in 0..n_elem {
                     for i in 0..npe {
                         geo_conn.push((e * npe + i) as u32);
@@ -375,7 +394,7 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
                     }
                 }
                 geometry = Some(GeometryData {
-                    order: 1,
+                    order: l2_order as u8,
                     conn: geo_conn,
                     nodes_per_elem: npe,
                     coords: geo_coords,
@@ -742,9 +761,10 @@ fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemRe
 /// MFEM `nodes` section and — exactly as `Mesh::Printer` does — the `vertices`
 /// section holds only the vertex count, with the *space dimension* moving into
 /// the section's `VDim` line (`mesh/mesh_readers.cpp:105-110`).  The continuous
-/// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra and tetrahedra and
-/// the discontinuous (`L2_T1_<dim>D_P<p>`) one for hexahedra and quads; any
-/// other combination is refused with an error instead of silently writing a
+/// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra, tetrahedra,
+/// prisms (wedges) and 2-D quadrilaterals and the discontinuous
+/// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads and triangles; any other
+/// combination is refused with an error instead of silently writing a
 /// straight-sided mesh.  See [`NodesSpace`] and [`write_mfem_nodes`].
 ///
 /// For 3D meshes containing tetrahedra *without* high-order geometry, the mesh
@@ -1067,11 +1087,29 @@ fn nodes_dof_values<const D: usize>(
                     })?;
                     (slots, n_dofs)
                 }
+                ElementType::Quad4 => {
+                    let (slots, n_dofs) = quad2d_slot_map(mesh, order as usize).map_err(|e| match e {
+                        HexSlotErr::NotHex => FemError::Mesh(
+                            "write_mfem: no MFEM H1 `nodes` numbering for this mesh".into(),
+                        ),
+                        HexSlotErr::Unsupported(why) => FemError::Mesh(format!(
+                            "write_mfem: cannot write the 2-D quadrilateral `nodes` section: {why}"
+                        )),
+                    })?;
+                    (slots, n_dofs)
+                }
+                // D151: the prism table is not a pure permutation of the
+                // mesh's geometry slots (Gauss-Lobatto vs equispaced nodes),
+                // so it evaluates the mesh's geometry itself.
+                ElementType::Prism6 => {
+                    let (n_dofs, v) = prism_nodes_dof_values(mesh, geo, order as usize, sdim)?;
+                    return Ok(Some((order, n_dofs, v)));
+                }
                 other => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful continuous `nodes` numbering for \
-                         {other:?} (only Hex8 and Tet4 are implemented); no `nodes` section \
-                         was written"
+                         {other:?} (only Hex8, Tet4, Prism6 and Quad4 are implemented); no `nodes` \
+                         section was written"
                     )))
                 }
             };
@@ -1109,24 +1147,21 @@ fn nodes_dof_values<const D: usize>(
             // a permutation of the mesh's own geometry slot order (both are the
             // same nodal lattice, so the slots are matched by their reference
             // coordinates).
-            let perm: Vec<usize> = match et {
-                ElementType::Hex8 => lex_slot_permutation(
-                    &fem_element::lagrange::factory::HexQk::new(order as usize).dof_coords(),
-                    &fem_element::lagrange::factory::HexQk::new_lex(order as usize).dof_coords(),
-                ),
-                ElementType::Quad4 => lex_slot_permutation(
-                    &fem_element::lagrange::factory::QuadQk::new(order as usize).dof_coords(),
-                    &fem_element::lagrange::factory::QuadQk::new_lex(order as usize).dof_coords(),
-                ),
-                other => {
+            let (factory, mfem) = (
+                l2_geometry_slots(et, order as usize),
+                mfem_l2_slots(et, order as usize),
+            );
+            let (factory, mfem) = match (factory, mfem) {
+                (Some(f), Some(m)) => (f, m),
+                _ => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful discontinuous `nodes` numbering for \
-                         {other:?} (only Hex8 and Quad4 are implemented); no `nodes` section \
-                         was written"
+                         {et:?} (only Hex8, Quad4 and Tri3 are implemented); no `nodes` \
+                         section was written"
                     )))
                 }
-            }
-            .ok_or_else(|| {
+            };
+            let perm: Vec<usize> = lex_slot_permutation(&factory, &mfem).ok_or_else(|| {
                 FemError::Mesh(
                     "write_mfem: the mesh's geometry slots are not on the element's own node \
                      lattice, so they cannot be re-ordered into MFEM's L2 numbering"
@@ -1144,6 +1179,70 @@ fn nodes_dof_values<const D: usize>(
             Ok(Some((order, n_dofs, values)))
         }
     }
+}
+
+/// The reference-element DOF coordinates a mesh's own geometry table is stored
+/// in, for the element families whose L2 (`nodes`) numbering this module knows
+/// — the element the assembler uses to evaluate the geometry
+/// (`element_jacobian` / `CurvedMesh` both go through the `lagrange::factory`
+/// element of the mesh's type and geometric order).
+///
+/// All of them place their DOFs on the **closed Gauss-Lobatto** points:
+/// `QuadQk`/`HexQk` tensor GLL, `H1TriPk` the `w`-normalised barycentric GLL
+/// nodes of `H1_TriangleElement`.
+fn l2_geometry_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
+    use fem_element::lagrange::factory::{HexQk, QuadQk};
+    if p == 0 {
+        return None;
+    }
+    Some(match et {
+        ElementType::Quad4 => QuadQk::new(p).dof_coords(),
+        ElementType::Hex8 => HexQk::new(p).dof_coords(),
+        ElementType::Tri3 => fem_element::lagrange::H1TriPk::new(p).dof_coords(),
+        _ => return None,
+    })
+}
+
+/// MFEM's `L2_T1_<dim>D_P<p>` node reference coordinates **in the element's own
+/// DOF order** (`fem/fe/fe_l2.cpp`):
+///
+/// * `L2_QuadrilateralElement` / `L2_HexahedronElement` are
+///   `NodalTensorFiniteElement`s with `L2_DOF_MAP`, which leaves `dof_map`
+///   empty — so the nodes are simply lexicographic (`ix` fastest,
+///   `ix + iy·(p+1) + iz·(p+1)²`), exactly what [`QuadQk::new_lex`] /
+///   [`HexQk::new_lex`] enumerate (already pinned against MFEM's own
+///   `L2_T1_3D_P3` output by `crates/io/tests/nodes_writer.rs`);
+/// * `L2_TriangleElement` enumerates its `(p+1)(p+2)/2` nodes as
+///   `for (j = 0..p) for (i = 0..p-j)` over the `w`-normalised Gauss-Lobatto
+///   barycentric points `(op[i]/w, op[j]/w)`, `w = op[i]+op[j]+op[p-i-j]` —
+///   the *same point set* as `H1TriPk`, in a different order;
+/// * every other family (tets, prisms, pyramids) is left out: its L2 ordering
+///   has not been verified against MFEM here.
+fn mfem_l2_slots(et: ElementType, p: usize) -> Option<Vec<Vec<f64>>> {
+    use fem_element::lagrange::factory::{HexQk, QuadQk};
+    if p == 0 {
+        return None;
+    }
+    Some(match et {
+        ElementType::Quad4 => QuadQk::new_lex(p).dof_coords(),
+        ElementType::Hex8 => HexQk::new_lex(p).dof_coords(),
+        ElementType::Tri3 => {
+            let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+                .0
+                .iter()
+                .map(|&x| 0.5 * (x + 1.0))
+                .collect();
+            let mut slots = Vec::with_capacity((p + 1) * (p + 2) / 2);
+            for j in 0..=p {
+                for i in 0..=(p - j) {
+                    let w = gll[i] + gll[j] + gll[p - i - j];
+                    slots.push(vec![gll[i] / w, gll[j] / w]);
+                }
+            }
+            slots
+        }
+        _ => return None,
+    })
 }
 
 /// Permutation taking `mesh_slots` (the order the mesh's geometry element
@@ -1662,6 +1761,661 @@ fn hex_slot_map<M: MeshTopology>(
     }
 
     Ok((conn, n_dofs))
+}
+
+// ─── D151: MFEM's H1 `nodes` numbering for 2-D quadrilateral meshes ─────────
+
+/// MFEM `Constants<Geometry::SQUARE>::Edges` (`fem/geom.cpp:960`): local edge
+/// `k` runs from local vertex `EDGES[k][0]` to `EDGES[k][1]`.
+const QUAD_EDGES: [[usize; 2]; 4] = [[0, 1], [1, 2], [2, 3], [3, 0]];
+/// The four corners of the reference square in `QuadQk`'s (and MFEM's
+/// `Geometry::SQUARE`) vertex order.
+const QUAD_VERT_CORNERS: [[usize; 2]; 4] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/// D151: MFEM's H1 `nodes` numbering for an all-Quad4 **2-D** mesh, as the map
+/// `conn[e * npe + s] = <file dof of reference slot s of element e>` plus the
+/// total number of geometry dofs — the 2-D analogue of [`hex_slot_map`], with
+/// the same slot (that is, `QuadQk`) order.
+///
+/// MFEM's numbering (`FiniteElementSpace::GetElementDofs`,
+/// `fem/fespace.cpp`; entity enumeration from `Mesh::FinalizeTopology`):
+///
+/// ```text
+///   vertex v            -> dof v
+///   mesh edge E, slot t -> dof NV + E*(p-1) + t
+///   element e, slot o   -> dof NV + NE*(p-1) + e*(p-1)^2 + o
+/// ```
+///
+/// where the interior slot `o = (i-1) + (j-1)*(p-1)` follows
+/// `H1_QuadrilateralElement`'s `dof_map` (`i` fastest) and an edge's slot `t`
+/// counts from the edge end with the **smaller mesh vertex id**
+/// (`SegDofOrd[0]` is the identity and `Mesh::GetElementEdges` orders the edge's
+/// vertices by ascending id).
+fn quad2d_slot_map<M: MeshTopology>(
+    mesh: &M,
+    p: usize,
+) -> Result<(Vec<NodeId>, usize), HexSlotErr> {
+    let e = p - 1; // dofs per edge, and per interior row/column
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if n_elems == 0 || n_vert == 0 {
+        return Err(HexSlotErr::NotHex);
+    }
+    let mut n_quad = 0usize;
+    for el in 0..n_elems as u32 {
+        if mesh.element_nodes(el).len() == 4 {
+            n_quad += 1;
+        }
+    }
+    if n_quad == 0 {
+        return Err(HexSlotErr::NotHex);
+    }
+    if n_quad != n_elems {
+        return HexSlotErr::unsupported("mixed-element mesh containing quadrilaterals");
+    }
+
+    // Mesh edges in MFEM's enumeration (element traversal, local edge order,
+    // first encounter wins).
+    let mut elems: Vec<[u32; 4]> = Vec::with_capacity(n_elems);
+    let mut edge_ids: HashMap<[u32; 2], u32> = HashMap::new();
+    for el in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(el);
+        let mut n4 = [0u32; 4];
+        n4.copy_from_slice(ns);
+        for &[la, lb] in QUAD_EDGES.iter() {
+            let (a, b) = (n4[la], n4[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len() as u32;
+            edge_ids.entry(key).or_insert(next);
+        }
+        elems.push(n4);
+    }
+    let n_edges = edge_ids.len();
+    let n_dofs = n_vert + n_edges * e + n_elems * e * e;
+
+    let ref_elem = fem_element::lagrange::factory::QuadQk::new(p);
+    let ref_coords = ref_elem.dof_coords();
+    let npe = ref_coords.len();
+    if npe != 4 + 4 * e + e * e {
+        return HexSlotErr::unsupported("reference quad element is not the H1 order-p tensor basis");
+    }
+    // `QuadQk`'s 1-D basis lives on `[0,1]` (`Lagrange1D` mapped by
+    // `0.5*(x+1)`), so the tensor index of a slot is the position of its
+    // coordinate in the `[0,1]` Gauss-Lobatto table.
+    let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+    if gll.len() != p + 1 {
+        return HexSlotErr::unsupported("unexpected Gauss-Lobatto node count");
+    }
+
+    let edge_base = n_vert;
+    let interior_base = edge_base + n_edges * e;
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * npe);
+    for (el, n4) in elems.iter().enumerate() {
+        let mut interior_seen = 0usize;
+        for c in ref_coords.iter() {
+            let mut idx = [0usize; 2];
+            for d in 0..2 {
+                let k = match gll.iter().position(|&x| (x - c[d]).abs() < 1e-12) {
+                    Some(k) => k,
+                    None => {
+                        return HexSlotErr::unsupported("reference slot is not on the GLL tensor grid")
+                    }
+                };
+                idx[d] = k;
+            }
+            let on_bnd = [idx[0] == 0 || idx[0] == p, idx[1] == 0 || idx[1] == p];
+            let nb = on_bnd.iter().filter(|&&b| b).count();
+            let g: usize = match nb {
+                // Vertex slot: the file stores vertex `v` as dof `v`.
+                2 => {
+                    let side = [idx[0] / p, idx[1] / p];
+                    match (0..4).find(|&k| QUAD_VERT_CORNERS[k] == side) {
+                        Some(lv) => n4[lv] as usize,
+                        None => return HexSlotErr::unsupported("bad vertex slot"),
+                    }
+                }
+                // Edge slot: shared; its slot counts from the edge end with the
+                // smaller mesh vertex id.
+                1 => {
+                    // The varying axis (1 for the x = 0 / x = 1 edges, 0 for the
+                    // y = 0 / y = 1 ones) and the local edge whose side it is.
+                    let (av, k) = if on_bnd[0] {
+                        (1usize, if idx[0] == 0 { 3 } else { 1 })
+                    } else {
+                        (0usize, if idx[1] == 0 { 0 } else { 2 })
+                    };
+                    if idx[av] == 0 || idx[av] == p {
+                        return HexSlotErr::unsupported("edge slot at a corner");
+                    }
+                    let [la, lb] = QUAD_EDGES[k];
+                    // `t_local` counts from `la` (the edge's first vertex).
+                    let t_local = if QUAD_VERT_CORNERS[la][av] == 0 {
+                        idx[av] - 1
+                    } else {
+                        p - 1 - idx[av]
+                    };
+                    let (a, b) = (n4[la], n4[lb]);
+                    let ekey = if a < b { [a, b] } else { [b, a] };
+                    let ei = match edge_ids.get(&ekey) {
+                        Some(&ei) => ei as usize,
+                        None => return HexSlotErr::unsupported("unmatched mesh edge"),
+                    };
+                    let t = if a < b { t_local } else { e - 1 - t_local };
+                    edge_base + ei * e + t
+                }
+                // Interior slot: private to the element, `(i-1) + (j-1)*(p-1)`.
+                _ => {
+                    let o = (idx[0] - 1) + (idx[1] - 1) * e;
+                    debug_assert_eq!(o, interior_seen);
+                    interior_seen += 1;
+                    interior_base + el * e * e + o
+                }
+            };
+            conn.push(g as NodeId);
+        }
+        if interior_seen != e * e {
+            return HexSlotErr::unsupported("unexpected interior slot count");
+        }
+    }
+
+    Ok((conn, n_dofs))
+}
+
+// ─── D151: MFEM's H1 `nodes` numbering for prism (wedge) meshes ──────────────
+//
+// MFEM's `H1_WedgeElement` (`fem/fe/fe_h1.cpp:863`) is `H1_TriangleElement ×
+// H1_SegmentElement`, i.e. its nodes sit on the **closed Gauss-Lobatto**
+// points of both factors, while fem-rs's prism geometry element `PrismPk`
+// (`crates/element/src/lagrange/prism.rs`) is a tensor product of the
+// *equispaced* triangle and segment bases.  The two lattices coincide for
+// `p ≤ 2` (`{0, ½, 1}` is both the equispaced and the Gauss-Lobatto node set)
+// and diverge from `p = 3` (`0.276393202250021` / `0.723606797749979` vs
+// `1/3` / `2/3`) — the same *family split* this project already hit for
+// tetrahedra (D49/D112/D152) and triangles (D138).
+//
+// The file's `nodes` section is read by MFEM as `H1_WedgeElement` nodal values,
+// so dof `g` must carry the *physical position of the mesh's own geometry map*
+// at the GLL point `ξ_g` of that dof.  fem-rs's geometry table stores the map
+// in the `PrismPk` basis (its own equispaced nodes), so the writer builds the
+// interpolation matrix
+//
+//     B[i][s] = φ_s^{PrismPk}(ξ_i),      ξ_i = the GLL point of H1 dof `i`
+//
+// once per order and evaluates `x_e(ξ_i) = Σ_s B[i][s]·X_s` per element.  The
+// result is *the mesh's own geometry function*, sampled at MFEM's nodes: the
+// `nodes` section then describes the same curved mesh fem-rs assembles with,
+// and the read-back file MFEM produces is a fixed point of this writer.
+//
+// (For a *straight-sided* mesh the two lattices describe the same polynomial —
+// the affine prism map — so the written nodes match MFEM's own file
+// bit-for-bit; `crates/io/tests/prism_nodes_writer.rs` pins that against a
+// mesh file produced by MFEM 4.10's `SetCurvature`.)
+
+/// MFEM `Geometry::Constants<Geometry::PRISM>::Edges` (`fem/geom.cpp:1052`):
+/// local edge `k` runs from local vertex `EDGES[k][0]` to `EDGES[k][1]`.
+const PRISM_EDGES: [[usize; 2]; 9] = [
+    [0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 3], [1, 4], [2, 5],
+];
+/// MFEM `Geometry::Constants<Geometry::PRISM>::FaceVert` (`fem/geom.cpp:1061`):
+/// local faces 0/1 are the bottom/top triangles, 2..4 the quadrilateral sides.
+/// Every quadrilateral entry is a valid square parameterisation
+/// (`FaceVert[f][2] = FaceVert[f][1] + FaceVert[f][3] - FaceVert[f][0]` in
+/// reference coordinates), so `QUAD_CORNERS` describes the stored face too.
+const PRISM_FACES: [[usize; 4]; 5] = [
+    [0, 2, 1, usize::MAX], [3, 4, 5, usize::MAX], [0, 1, 4, 3], [1, 2, 5, 4],
+    [2, 0, 3, 5],
+];
+/// The six prism vertices in `Geometry::PRISM`'s order, expressed in
+/// `PrismPk`'s reference convention `(extrusion, triangle x, triangle y)` —
+/// `PrismPk`'s extrusion is his *first* coordinate while MFEM's is `z`.
+const PRISM_VERT_PK: [[f64; 3]; 6] = [
+    [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
+    [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0],
+];
+
+/// Where a local dof of MFEM's `H1_WedgeElement` lives, in terms of the
+/// element's own local vertices (and hence of the mesh's global entities).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrismSlotEntity {
+    /// Local vertex (`0..6`); the file stores vertex `v` as dof `v`.
+    Vertex(usize),
+    /// Local edge (`PRISM_EDGES` index) and the 0-based position counted from
+    /// the edge's first vertex.
+    Edge(usize, usize),
+    /// Local triangular face (0 = bottom, 1 = top) and the local dof index
+    /// within the face's block, in MFEM's own enumeration.
+    TriFace(usize, usize),
+    /// Local quadrilateral face (2..5) and the 1-based in-face Gauss-Lobatto
+    /// indices `(a, b)`: `a` along `FaceVert[0] → FaceVert[1]`, `b` along
+    /// `FaceVert[0] → FaceVert[3]`.
+    QuadFace(usize, usize, usize),
+    /// Element-interior dof, in MFEM's local enumeration order.
+    Interior(usize),
+}
+
+/// One local dof of `H1_WedgeElement`: its reference point in `PrismPk`'s
+/// convention (the points `PrismPk::eval_basis` is evaluated at) and the
+/// entity it belongs to.
+struct PrismSlot {
+    xi: [f64; 3],
+    entity: PrismSlotEntity,
+}
+
+/// MFEM's `H1_WedgeElement` node table (`fem/fe/fe_h1.cpp:863`), reproduced
+/// slot by slot.
+///
+/// The constructor does not build the node positions from the entity structure
+/// directly: it keeps two index tables `t_dof`/`s_dof` into the nodes of
+/// `H1_TriangleElement` and `H1_SegmentElement` and takes
+/// `(t_Nodes[t_dof[i]].x, .y, s_Nodes[s_dof[i]].x)` as dof `i`'s position.  The
+/// three tables are reproduced verbatim below (including the triangular-face
+/// index arithmetic, which is *not* the plain running index), so this slot
+/// table cannot silently drift from what MFEM reads back.
+fn prism_h1_slots(p: usize) -> Result<Vec<PrismSlot>, &'static str> {
+    if p < 1 {
+        return Err("order < 1");
+    }
+    // `Poly_1D::ClosedPoints(p)`: the closed Gauss-Lobatto nodes on `[0, 1]`,
+    // ascending.  This is what `H1_TriangleElement` / `H1_SegmentElement`
+    // place their nodes on, and it agrees with fem-rs's
+    // `gauss_lobatto_arbitrary` after the `[-1, 1] → [0, 1]` map.
+    let cp: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+    if cp.len() != p + 1 {
+        return Err("unexpected Gauss-Lobatto node count");
+    }
+    // `H1_TriangleElement`'s `Nodes` (`fem/fe/fe_h1.cpp:451`): vertices, the
+    // three edges, then the interior at the `w`-normalised points
+    // `(cp[i]/w, cp[j]/w)`, `w = cp[i]+cp[j]+cp[p-i-j]`.
+    let mut tri: Vec<[f64; 2]> = Vec::with_capacity((p + 1) * (p + 2) / 2);
+    tri.push([cp[0], cp[0]]);
+    tri.push([cp[p], cp[0]]);
+    tri.push([cp[0], cp[p]]);
+    for i in 1..p {
+        tri.push([cp[i], cp[0]]);
+    }
+    for i in 1..p {
+        tri.push([cp[p - i], cp[i]]);
+    }
+    for i in 1..p {
+        tri.push([cp[0], cp[p - i]]);
+    }
+    for j in 1..p {
+        for i in 1..(p - j) {
+            let w = cp[i] + cp[j] + cp[p - i - j];
+            tri.push([cp[i] / w, cp[j] / w]);
+        }
+    }
+    // `H1_SegmentElement`'s `Nodes`: `(cp[0], cp[p], cp[1], …, cp[p-1])`.
+    let mut seg: Vec<f64> = Vec::with_capacity(p + 1);
+    seg.push(cp[0]);
+    seg.push(cp[p]);
+    for i in 1..p {
+        seg.push(cp[i]);
+    }
+
+    let ne = p - 1; // dofs per edge (and per face row/column)
+    let nt = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }; // dofs per triangle
+    let nq = ne * ne; // dofs per quad face
+    let nb = nt * ne; // interior dofs (MFEM `H1_dof[PRISM] = TriDof*pm1`)
+    let n_dofs = 6 + 9 * ne + 2 * nt + 3 * nq + nb;
+    if n_dofs != (p + 1) * (p + 1) * (p + 2) / 2 {
+        return Err("the H1 wedge reference element is not the order-p basis");
+    }
+
+    let mut out: Vec<PrismSlot> = Vec::with_capacity(n_dofs);
+    // ── Vertices: `t_dof = (0,1,2,0,1,2)`, `s_dof = (0,0,0,1,1,1)`.
+    for (v, &(t, s)) in [(0usize, 0usize), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
+        .iter()
+        .enumerate()
+    {
+        out.push(PrismSlot {
+            xi: [seg[s], tri[t][0], tri[t][1]],
+            entity: PrismSlotEntity::Vertex(v),
+        });
+    }
+    // ── Edges: `for i in 1..p, for kk in 0..9`, index `5 + kk*ne + i`.
+    for i in 1..p {
+        for kk in 0..9 {
+            let (t, s) = if kk < 6 { (2 + (kk % 3) * ne + i, kk / 3) } else { (kk - 6, i + 1) };
+            out.push(PrismSlot {
+                xi: [seg[s], tri[t][0], tri[t][1]],
+                entity: PrismSlotEntity::Edge(kk, i - 1),
+            });
+        }
+    }
+    // ── Triangular faces: the bottom (local face 0) is `t_dof = 3p + l` with
+    // `l = j - p + ((2p-1-i)·i)/2`, the top (local face 1) uses the running
+    // index.  (The bottom face's `l` permutes the block relative to the top's
+    // — MFEM is self-consistent because the two faces' `FaceVert` orders are
+    // transposed the same way; see the `TriDofOrd` handling below.)
+    let mut k = 0usize;
+    for j in 1..p {
+        for i in 1..(p - j) {
+            let l = j as i64 - p as i64 + (((2 * p - 1 - i) * i) / 2) as i64;
+            if l < 0 || l as usize >= nt {
+                return Err("bad triangular-face dof index");
+            }
+            out.push(PrismSlot {
+                xi: [seg[0], tri[3 * p + l as usize][0], tri[3 * p + l as usize][1]],
+                entity: PrismSlotEntity::TriFace(0, k),
+            });
+            out.push(PrismSlot {
+                xi: [seg[1], tri[3 * p + k][0], tri[3 * p + k][1]],
+                entity: PrismSlotEntity::TriFace(1, k),
+            });
+            k += 1;
+        }
+    }
+    if k != nt {
+        return Err("unexpected triangular-face dof count");
+    }
+    // ── Quadrilateral faces: `t_dof = 2 + f*ne + i` (the triangle's edge `f`
+    // node at GLL parameter `cp[i]`), `s_dof = 1 + j` (the layer `cp[j]`),
+    // index `6 + 9ne + 2nt + f*nq + k`, `k = (j-1)*ne + (i-1)`.
+    for f in 0..3 {
+        for j in 1..p {
+            for i in 1..p {
+                out.push(PrismSlot {
+                    xi: [seg[1 + j], tri[2 + f * ne + i][0], tri[2 + f * ne + i][1]],
+                    entity: PrismSlotEntity::QuadFace(2 + f, i, j),
+                });
+            }
+        }
+    }
+    // ── Interior: layer `k` (1..p-1), the triangle interior in the same order
+    // as the bottom face (`l` reset per layer), index `elem*nb + m`.
+    let mut m = 0usize;
+    for kk in 1..p {
+        let mut l = 0usize;
+        for j in 1..p {
+            // The layer's triangle interior, in the bottom face's `l` order.
+            for _ in 1..(p - j) {
+                out.push(PrismSlot {
+                    xi: [seg[1 + kk], tri[3 * p + l][0], tri[3 * p + l][1]],
+                    entity: PrismSlotEntity::Interior(m),
+                });
+                l += 1;
+                m += 1;
+            }
+        }
+    }
+    if out.len() != n_dofs || m != nb {
+        return Err("unexpected interior dof count");
+    }
+    Ok(out)
+}
+
+/// The canonical in-face Gauss-Lobatto index `(u, v)` (1-based, as they index
+/// `QuadDofOrd`) of the slot at local in-face indices `(a, b)` (1-based from
+/// the local face's vertex `l0` towards `l1` and `l3`), measured in the
+/// **stored** face's parameterisation — the first encountering element's
+/// `FaceVert` order (`Mesh::GenerateFaces` →
+/// `AddQuadFaceElement(j, ef[j], i, v[fv[0]], …)`).
+fn quad_face_canonical_slot(
+    stored: &[u32; 4],
+    l0: u32,
+    l1: u32,
+    l3: u32,
+    in_face: [usize; 2],
+    p: usize,
+) -> Option<usize> {
+    let e = p - 1;
+    let corner_of = |v: u32| (0..4).find(|&i| stored[i] == v);
+    let p0 = corner_of(l0)?;
+    let pu = corner_of(l1)?;
+    let pv = corner_of(l3)?;
+    let du = [
+        QUAD_CORNERS[pu][0] - QUAD_CORNERS[p0][0],
+        QUAD_CORNERS[pu][1] - QUAD_CORNERS[p0][1],
+    ];
+    let dv = [
+        QUAD_CORNERS[pv][0] - QUAD_CORNERS[p0][0],
+        QUAD_CORNERS[pv][1] - QUAD_CORNERS[p0][1],
+    ];
+    let u = QUAD_CORNERS[p0][0] * p as i32 + in_face[0] as i32 * du[0] + in_face[1] as i32 * dv[0];
+    let v = QUAD_CORNERS[p0][1] * p as i32 + in_face[0] as i32 * du[1] + in_face[1] as i32 * dv[1];
+    if u <= 0 || u >= p as i32 || v <= 0 || v >= p as i32 {
+        return None;
+    }
+    Some((u - 1) as usize + (v - 1) as usize * e)
+}
+
+/// D151: the `nodes` dof values of an all-`Prism6` mesh, in MFEM's H1 wedge
+/// numbering.  Returns `(n_dofs, values)` with `values[d * sdim + c]`.
+///
+/// Unlike the hexahedral/tetrahedral tables (which permute the mesh's geometry
+/// slots into MFEM's numbering), the prism table has to *re-evaluate* the
+/// mesh's geometry: `PrismPk`'s nodes and the GLL nodes of `H1_WedgeElement`
+/// are different points (see the module note above), so a value read at one
+/// lattice cannot be handed over unchanged.
+fn prism_nodes_dof_values<M: MeshTopology>(
+    mesh: &M,
+    geo: &GeometryData,
+    p: usize,
+    sdim: usize,
+) -> FemResult<(usize, Vec<f64>)> {
+    let slots = prism_h1_slots(p)
+        .map_err(|why| FemError::Mesh(format!("write_mfem: bad prism `nodes` table: {why}")))?;
+    let npe = slots.len();
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    let e_per_edge = p - 1;
+    let nf_tri = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+    let nf_quad = e_per_edge * e_per_edge;
+    let nb = nf_tri * e_per_edge;
+
+    // MFEM's mesh tables: edges and faces are numbered by element traversal,
+    // then the element's local entity order, first encounter wins
+    // (`Mesh::FinalizeTopology`), and the stored face parameterisation is the
+    // first encountering element's `FaceVert` order.
+    let mut elems: Vec<[u32; 6]> = Vec::with_capacity(n_elems);
+    let mut edge_ids: HashMap<[u32; 2], usize> = HashMap::new();
+    let mut face_ids: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut face_verts: Vec<[u32; 4]> = Vec::new();
+    let mut face_dofs: Vec<usize> = Vec::new();
+    for el in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(el);
+        if ns.len() != 6 {
+            return Err(FemError::Mesh(
+                "write_mfem: the prism `nodes` table needs a uniform all-Prism6 mesh".into(),
+            ));
+        }
+        let n6 = [ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]];
+        for &[la, lb] in PRISM_EDGES.iter() {
+            let (a, b) = (n6[la], n6[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len();
+            edge_ids.entry(key).or_insert(next);
+        }
+        for (f, fv) in PRISM_FACES.iter().enumerate() {
+            let mut key: Vec<u32> = fv
+                .iter()
+                .filter(|&&v| v != usize::MAX)
+                .map(|&v| n6[v])
+                .collect();
+            key.sort_unstable();
+            let next = face_ids.len();
+            face_ids.entry(key).or_insert_with(|| {
+                let mut verts = [u32::MAX; 4];
+                for (i, &v) in fv.iter().enumerate() {
+                    if v != usize::MAX {
+                        verts[i] = n6[v];
+                    }
+                }
+                face_verts.push(verts);
+                face_dofs.push(if f < 2 { nf_tri } else { nf_quad });
+                next
+            });
+        }
+        elems.push(n6);
+    }
+    let n_edges = edge_ids.len();
+    let mut face_base: Vec<usize> = Vec::with_capacity(face_dofs.len());
+    let mut acc = 0usize;
+    for &d in &face_dofs {
+        face_base.push(acc);
+        acc += d;
+    }
+    let n_face_dofs = acc;
+    let n_dofs = n_vert + n_edges * e_per_edge + n_face_dofs + n_elems * nb;
+
+    // `B[i][s] = φ_s^{PrismPk}(ξ_i)`: the mesh's own (equispaced-lattice)
+    // geometry element evaluated at the GLL points of MFEM's H1 wedge.
+    if geo.nodes_per_elem != npe || geo.conn.len() != n_elems * npe {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: the prism geometry table has {} nodes per element, the H1 \
+             wedge needs {npe}",
+            geo.nodes_per_elem
+        )));
+    }
+    let prism = fem_element::lagrange::PrismPk::new(p);
+    if prism.n_dofs() != npe {
+        return Err(FemError::Mesh(
+            "write_mfem: `PrismPk` and the H1 wedge do not describe the same order".into(),
+        ));
+    }
+    let mut basis = vec![0.0f64; npe];
+    let mut interp = vec![0.0f64; npe * npe];
+    for (i, slot) in slots.iter().enumerate() {
+        prism.eval_basis(&slot.xi, &mut basis);
+        interp[i * npe..(i + 1) * npe].copy_from_slice(&basis);
+    }
+
+    let mut values = vec![0.0f64; n_dofs * sdim];
+    let mut filled = vec![false; n_dofs];
+    for (el, n6) in elems.iter().enumerate() {
+        let base = n_vert + n_edges * e_per_edge + n_face_dofs + el * nb;
+        for (i, slot) in slots.iter().enumerate() {
+            let g: usize = match slot.entity {
+                PrismSlotEntity::Vertex(v) => n6[v] as usize,
+                PrismSlotEntity::Edge(k, j) => {
+                    let [la, lb] = PRISM_EDGES[k];
+                    let (a, b) = (n6[la], n6[lb]);
+                    let key = if a < b { [a, b] } else { [b, a] };
+                    let ei = match edge_ids.get(&key) {
+                        Some(&ei) => ei,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: unmatched prism edge".into(),
+                            ))
+                        }
+                    };
+                    // `Mesh::GetElementEdges` orients the edge by ascending
+                    // vertex id and `H1_FECollection`'s `SegDofOrd[1][j] =
+                    // p-2-j`, so a reversed edge reverses the slot positions.
+                    let t = if a < b { j } else { e_per_edge - 1 - j };
+                    n_vert + ei * e_per_edge + t
+                }
+                PrismSlotEntity::TriFace(f, k) => {
+                    let fv = PRISM_FACES[f];
+                    let test = [n6[fv[0]], n6[fv[1]], n6[fv[2]]];
+                    let mut key = test.to_vec();
+                    key.sort_unstable();
+                    let fi = match face_ids.get(&key) {
+                        Some(&fi) => fi,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: unmatched prism triangular face".into(),
+                            ))
+                        }
+                    };
+                    let stored = [
+                        face_verts[fi][0],
+                        face_verts[fi][1],
+                        face_verts[fi][2],
+                    ];
+                    let orient = match tri_orientation(&stored, &test) {
+                        Some(o) => o,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: prism face corner mismatch".into(),
+                            ))
+                        }
+                    };
+                    let off = match tri_dof_ord(p, orient, k) {
+                        Some(o) => o,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: unmatched prism face dof ordering".into(),
+                            ))
+                        }
+                    };
+                    n_vert + n_edges * e_per_edge + face_base[fi] + off
+                }
+                PrismSlotEntity::QuadFace(f, a, b) => {
+                    let fv = PRISM_FACES[f];
+                    let mut key = vec![n6[fv[0]], n6[fv[1]], n6[fv[2]], n6[fv[3]]];
+                    key.sort_unstable();
+                    let fi = match face_ids.get(&key) {
+                        Some(&fi) => fi,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: unmatched prism quadrilateral face".into(),
+                            ))
+                        }
+                    };
+                    let off = match quad_face_canonical_slot(
+                        &face_verts[fi],
+                        n6[fv[0]],
+                        n6[fv[1]],
+                        n6[fv[3]],
+                        [a, b],
+                        p,
+                    ) {
+                        Some(o) => o,
+                        None => {
+                            return Err(FemError::Mesh(
+                                "write_mfem: prism quad face slot outside the stored face".into(),
+                            ))
+                        }
+                    };
+                    n_vert + n_edges * e_per_edge + face_base[fi] + off
+                }
+                PrismSlotEntity::Interior(m) => base + m,
+            };
+            if g >= n_dofs {
+                return Err(FemError::Mesh(
+                    "write_mfem: prism `nodes` dof index out of range".into(),
+                ));
+            }
+            // The value at MFEM's GLL node: the mesh's own geometry map there.
+            let mut v = [0.0f64; 3];
+            for s in 0..npe {
+                let w = interp[i * npe + s];
+                if w != 0.0 {
+                    let c = geo.conn[el * npe + s] as usize;
+                    for d in 0..sdim {
+                        v[d] += w * geo.coords[c * sdim + d];
+                    }
+                }
+            }
+            if filled[g] {
+                if (0..sdim).any(|d| !approx_eq(values[g * sdim + d], v[d])) {
+                    return Err(FemError::Mesh(format!(
+                        "write_mfem: prism geometry dof {g} is shared by two elements with \
+                         different coordinates — the mesh geometry is not continuous"
+                    )));
+                }
+            } else {
+                values[g * sdim..g * sdim + sdim].copy_from_slice(&v[..sdim]);
+                filled[g] = true;
+            }
+        }
+    }
+    if let Some(g) = filled.iter().position(|f| !*f) {
+        return Err(FemError::Mesh(format!(
+            "write_mfem: no element claims the prism `nodes` dof {g}"
+        )));
+    }
+    Ok((n_dofs, values))
 }
 
 /// D41: reproduce MFEM's H1 `nodes` numbering for an all-Hex8 mesh and return
@@ -2477,16 +3231,79 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
 
     match elem_type_str.as_str() {
         "tri" => {
-            // unit_square_tri(n) creates an n×n quad grid split into triangles on [0,1]².
-            // For INLINE with nx×ny elements, we use n=max(nx,ny) and scale.
-            let n = nx.max(ny);
-            let mut mesh = Mesh::<2>::unit_square_tri(n);
-            let scale_x = sx / n as f64 * nx as f64;
-            let scale_y = sy / n as f64 * ny as f64;
-            for c in mesh.coords.chunks_mut(2) {
-                c[0] *= scale_x;
-                c[1] *= scale_y;
+            // MFEM `ReadInlineMesh` → `Make2D(nx, ny, TRIANGLE, sx, sy, true,
+            // true)`, and `Make2D`'s *triangle* branch is **not** the quad one:
+            // it ignores `sfc_ordering` entirely (only the quadrilateral branch
+            // calls `NCMesh::GridSfcOrdering2D`) and numbers the elements
+            // row-major, splitting each cell of the structured grid along its
+            // main diagonal (v0,v2):
+            //   elem[2k]   = { i + j*m,   i+1 + (j+1)*m,  i + (j+1)*m   }  (v0,v2,v3)
+            //   elem[2k+1] = { i + j*m,   i+1 + j*m,      i+1 + (j+1)*m }  (v0,v1,v2)
+            // with `m = nx+1`.  The previous `Mesh::unit_square_tri(max(nx,ny))`
+            // split every cell along the *anti*-diagonal and disregarded the
+            // nx != ny case, so both the element order and each element's local
+            // vertex order differed from MFEM (`data/inline-tri.mesh`: MFEM
+            // elem 0 = {0,6,5}, unit_square_tri gave {0,1,5}).  The target P3
+            // node set of `gslib_field_interp` depends on it, so the written
+            // `interpolated.gf` differed from the C++ miniapp.
+            let nxu = nx as u32;
+            let nyu = ny as u32;
+            let m = nxu + 1;
+            let nxv = nx + 1;
+            let nyv = ny + 1;
+            let mut coords = Vec::with_capacity(nxv * nyv * 2);
+            for j in 0..nyv {
+                for i in 0..nxv {
+                    coords.push(i as f64 / nx as f64 * sx);
+                    coords.push(j as f64 / ny as f64 * sy);
+                }
             }
+            let id = |x: u32, y: u32| y * m + x;
+            let mut conn = Vec::with_capacity(2 * nx * ny * 3);
+            let mut elem_tags = Vec::with_capacity(2 * nx * ny);
+            for j in 0..nyu {
+                for i in 0..nxu {
+                    conn.extend([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
+                    elem_tags.push(1);
+                    conn.extend([id(i, j), id(i + 1, j), id(i + 1, j + 1)]);
+                    elem_tags.push(1);
+                }
+            }
+            // Boundary segments — the same `Make2D` layout as the quad branch
+            // (the tri branch has the identical bdr code): bottom attr 1, top
+            // attr 3, left attr 4, right attr 2, with `m = (nx+1)*ny` for the
+            // top/bottom rows and `m = nx+1` for the left/right columns.
+            let mut face_conn = Vec::with_capacity(2 * (nx + ny) * 2);
+            let mut face_tags = Vec::with_capacity(2 * (nx + ny));
+            for i in 0..nxu {
+                face_conn.extend([id(i, 0), id(i + 1, 0)]);
+                face_tags.push(1);
+            }
+            let m_top = (nxu + 1) * nyu;
+            for i in 0..nxu {
+                face_conn.extend([m_top + i + 1, m_top + i]);
+                face_tags.push(3);
+            }
+            for j in 0..nyu {
+                face_conn.extend([(j + 1) * m, j * m]);
+                face_tags.push(4);
+            }
+            for j in 0..nyu {
+                face_conn.extend([j * m + nxu, (j + 1) * m + nxu]);
+                face_tags.push(2);
+            }
+            let mut mesh = Mesh::uniform(
+                coords, conn, elem_tags, ElementType::Tri3,
+                face_conn, face_tags, ElementType::Line2,
+            );
+            // `Mesh(mesh_file, 1, 1)` finalizes a 2-D triangle mesh through
+            // `FinalizeTriMesh(..., refine = 1, ...)` →
+            // `MarkTriMeshForRefinement()` (`mesh/mesh.cpp:2588`): every
+            // triangle is rotated so that its longest edge is (v0,v1).  That
+            // permutes each element's *local* vertex order (and with it the H1
+            // dof numbering of any space built on the mesh), so it is part of
+            // being 1:1 with MFEM and is applied here too.
+            fem_mesh::amr::mark_tri_mesh_for_refinement(&mut mesh);
             Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
         }
         "quad" => {
