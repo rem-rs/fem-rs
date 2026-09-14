@@ -49,18 +49,22 @@
 //!   by `remove_internal_boundaries`: `crates/mesh`'s own helper has no
 //!   `Prism6` arm (`local_face_verts`), so the two stitched end triangles would
 //!   survive as boundary elements (26 instead of 24 for the default `-nphi 8`).
-//! * `-dm` (discontinuous mesh nodes) is only ported for hexahedra: the
-//!   writer has no `L2_T1_3D_P<p>` wedge numbering yet, so `-e 0 -dm -o >1`
-//!   exits with code 3 (see `require_supported_combination`).  For a *linear*
+//! * `-dm` (discontinuous mesh nodes) is ported for wedges since round 35
+//!   (D165): `fem_io::mfem` implements MFEM's `L2_WedgeElement` numbering
+//!   (`fe_l2.cpp:839` — layer-major over the closed Gauss-Lobatto points, with
+//!   `L2_TriangleElement`'s order inside every layer; a pure permutation of
+//!   `PrismPk`'s slots), so `-e 0 -dm -o > 1` writes the same
+//!   `L2_T1_3D_P<p>` `nodes` section as the C++ miniapp.  For a *linear*
 //!   mesh `-dm` is a no-op in the C++ miniapp as well (both `SetCurvature`
 //!   calls are guarded by `order_ > 1`).
-//! * `-rs > 0` together with `-o > 1` is ported for **hexahedra**: the
-//!   refinement (`fem_mesh::amr::refine_uniform_3d` → `refine_nonconforming_hex`
-//!   + `amr::curved_hex`) interpolates the order-`p` `nodes` table onto every
+//! * `-rs > 0` together with `-o > 1` is ported for **hexahedra and wedges**:
+//!   the refinement (`fem_mesh::amr::refine_uniform_3d` →
+//!   `refine_nonconforming_hex` + `amr::curved_hex`, or `refine_prism6_uniform`
+//!   + `amr::curved_prism`) interpolates the order-`p` `nodes` table onto every
 //!   child, exactly MFEM's `UniformRefinement` → `UpdateNodes`, so the refined
-//!   mesh stays curved.  For **wedges** the refinement still drops the geometry
-//!   table, so `-e 0 -rs > 0 -o > 1` exits with code 3 (see
-//!   `require_supported_combination`).
+//!   mesh stays curved (round 35: the wedge path also reproduces MFEM's child
+//!   order, canonical new-vertex ids and boundary rebuild under the
+//!   curved+uniform gate).
 //! * `-vis`/`-p` are parsed and ignored (no GLVis socket).
 //!
 //! The output file name follows the C++ rule
@@ -308,61 +312,30 @@ fn apply_transform(mesh: &mut Mesh<3>, f: &impl Fn(&[f64; 3]) -> [f64; 3]) {
 }
 
 /// fem-rs gap guard: the combinations of the C++ miniapp this port cannot
-/// reproduce yet.  Everything else (any `-o`, both element types, `-dm` and
-/// `-rs > 0` for hexahedra) is written in MFEM's own `nodes` numbering.
+/// reproduce yet.  Everything else (any `-o`, both element types, `-dm`, and
+/// `-rs > 0` for hexahedra and wedges) is written in MFEM's own `nodes`
+/// numbering.
 ///
-/// Gap list (exit 3):
-///
-/// * `-e 0 -dm -o >1`: MFEM writes an `L2_T1_3D_P<p>` `nodes` section for the
-///   discontinuous wedge space, whose node enumeration (`L2_WedgeElement`'s
-///   `L2_DOF_MAP` tensor order) has no counterpart in
-///   `fem_io::mfem`'s writer — it implements the L2 numbering of hexahedra,
-///   quadrilaterals and triangles only, and refuses anything else rather than
-///   emit a scrambled section.
-/// * `-e 0 -rs >0 -o >1`: `fem_mesh::amr::refine_prism6_uniform` returns a mesh
-///   with `geometry: None`, so a uniformly refined curved wedge mesh would be
-///   written straight-sided.  MFEM's `UniformRefinement` refines the curvature
-///   together with the mesh.  (Hexahedra refine their curvature: `-e 1` runs.)
+/// (`-e 0 -rs >0 -o >1` used to be on this list; round 35 ported curved wedge
+/// uniform refinement — `fem_mesh::amr::refine_prism6_uniform` +
+/// `amr::curved_prism` interpolate the order-`p` `PrismPk` `nodes` table onto
+/// every child with MFEM's child order, canonical vertex ids and boundary
+/// rebuild, exactly MFEM's `UniformRefinement` → `UpdateNodes`.  `-e 0 -dm
+/// -o >1` was ported by round 35 (D165): MFEM's `L2_WedgeElement` numbering in
+/// `fem_io::mfem` — layer-major over the closed Gauss-Lobatto points with
+/// `L2_TriangleElement`'s order inside every layer, `fe_l2.cpp:839` — which is
+/// a pure permutation of `PrismPk`'s slots.  Nothing remains on the gap list.)
 fn require_supported_combination(
-    order: u8,
-    dg_mesh: bool,
-    el_type: ElementType,
-    ser_ref_levels: usize,
+    _order: u8,
+    _dg_mesh: bool,
+    _el_type: ElementType,
+    _ser_ref_levels: usize,
 ) {
-    if dg_mesh && order > 1 && el_type == ElementType::Prism6 {
-        eprintln!(
-            "toroid (Rust port): `-dm` (discontinuous mesh nodes) on wedges needs MFEM's \
-`L2_T1_3D_P{order}` wedge numbering (`L2_WedgeElement`), which `fem_io::mfem` does not \
-implement (it covers the L2 spaces of hexahedra, quadrilaterals and triangles).\n\
-Gap list (exit 3): [1] `L2_WedgeElement`'s node lattice/order (`fem/fe/fe_l2.cpp`) plus its \
-`(p+1)(p+1)(p+2)/2` per-element private dofs, and the same equispaced-vs-Gauss-Lobatto \
-re-evaluation `prism_nodes_dof_values` does for the continuous space.  Use `-cm` (the default) \
-for the continuous `H1_3D_P{order}` wedge nodes, or `-e 1 -dm` for the hexahedral L2 space, \
-which is ported."
-        );
-        std::process::exit(3);
-    }
-    // Hexahedra: curved uniform refinement is ported (`fem_mesh::amr`'s
-    // `refine_nonconforming_hex` + `amr::curved_hex` interpolate the order-`p`
-    // HexQk `nodes` table onto every child, exactly MFEM's
-    // `UniformRefinement` → `UpdateNodes`), so `-e 1 -rs > 0 -o > 1` runs.
-    // Wedges: `refine_prism6_uniform` rebuilds the mesh with
-    // `Mesh::uniform(...)` (no `geometry` table), so a refined curved wedge
-    // mesh would come out straight-sided.
-    if ser_ref_levels > 0 && order > 1 && el_type == ElementType::Prism6 {
-        eprintln!(
-            "toroid (Rust port): `-rs {ser_ref_levels}` together with `-o {order}` is not \
-ported for wedges (`-e 0`): fem-rs's `refine_prism6_uniform` (crates/mesh/src/amr) rebuilds the \
-refined mesh without the high-order geometry table (`geometry: None`), so the refined mesh would \
-be written straight-sided while MFEM's `UniformRefinement` refines the curved nodes along with \
-the mesh.  (The hexahedral path `-e 1` is ported.)\n\
-Gap list (exit 3): [1] curved uniform refinement for prisms in `crates/mesh/src/amr` (the \
-`PrismPk` geometry table has to be interpolated onto the child elements, and the refined \
-boundary tables rebuilt).  Use `-rs 0` for a curved wedge mesh, `-o 1` for the refined linear \
-one, or `-e 1` for the hexahedral stack, which supports `-rs > 0 -o > 1`."
-        );
-        std::process::exit(3);
-    }
+    // Every C++ miniapp combination is written in MFEM's own numbering now:
+    // hexahedra (`amr::curved_hex`, round 34) and wedges (`amr::curved_prism`,
+    // round 35) both refine their curvature under `-rs > 0 -o > 1`, and the
+    // discontinuous `-dm` paths are ported as well.  The guard stays as the
+    // single place to re-introduce a gate if a gap ever reappears.
 }
 
 fn main() {

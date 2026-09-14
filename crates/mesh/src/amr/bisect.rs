@@ -55,6 +55,14 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     let elems_to_refine: std::collections::HashSet<ElemId> = marked_set.clone();
     // (longest-edge neighbour propagation removed to match MFEM GeneralRefinement)
 
+    // Curved (order-p, p >= 2) triangle geometry: new vertices must take the
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_tri).
+    // The new-vertex *ids* already match MFEM's el_to_edge first-touch order
+    // for straight meshes, so — unlike the wedge path — no canonical-id gate
+    // is needed; only the values switch to geometry-dof picks.
+    let geo = super::curved_tri::TriPkGeometry::new(mesh);
+
     // ── 2. Collect new midpoint nodes ─────────────────────────────────────────
     // MFEM UniformRefinement2D_base creates edge midpoints in element ×
     // local-edge traversal order (deterministic).  Iterating a HashSet here
@@ -74,13 +82,18 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
         let ns = mesh.elem_nodes(e);
         // For Tri3 bisection: bisect longest edge only (newest-vertex bisection).
         // For simplicity here, bisect all 3 edges (red refinement).
-        for &(a, b) in &local_edges_tri() {
+        for (li, &(a, b)) in local_edges_tri().iter().enumerate() {
             let key = edge_key(ns[a], ns[b]);
             midpoint_map.entry(key).or_insert_with(|| {
-                let xa = mesh.coords_of(ns[a]);
-                let xb = mesh.coords_of(ns[b]);
-                new_coords.push(0.5 * (xa[0] + xb[0]));
-                new_coords.push(0.5 * (xa[1] + xb[1]));
+                let xy = match &geo {
+                    Some(g) => g.edge_pick(e, li),
+                    None => {
+                        let xa = mesh.coords_of(ns[a]);
+                        let xb = mesh.coords_of(ns[b]);
+                        [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1])]
+                    }
+                };
+                new_coords.extend_from_slice(&xy);
                 let id = next_node;
                 next_node += 1;
                 id
@@ -91,12 +104,19 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
     // ── 3. Build new element connectivity ─────────────────────────────────────
     let mut new_conn: Vec<NodeId>  = Vec::new();
     let mut new_tags: Vec<i32>     = Vec::new();
+    // Fine element → (parent element, child matrix index) map for the refined
+    // high-order geometry (super::curved_tri::IDENTITY = copied element).  The
+    // child emission order below is already MFEM's
+    // (`UniformRefinement2D_base`: corner 0, center, corner 1, corner 2), so
+    // the output position *is* the matrix index.
+    let mut fine_parent = Vec::<(ElemId, u8)>::with_capacity(n_elems * 4);
 
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
         let tag = mesh.elem_tags[e as usize];
 
         if elems_to_refine.contains(&e) {
+            fine_parent.extend((0..4u8).map(|ch| (e, ch)));
             // Red refinement: split Tri3 into 4 children.
             //   Original nodes: n0, n1, n2
             //   Midpoints:      m01, m12, m02
@@ -117,6 +137,7 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
             // Unchanged element — copy as-is.
             for k in 0..npe { new_conn.push(ns[k]); }
             new_tags.push(tag);
+            fine_parent.push((e, super::curved_tri::IDENTITY));
         }
     }
 
@@ -143,10 +164,15 @@ pub fn refine_marked(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
         }
     }
 
-    Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Tri3,
         new_face_conn, new_face_tags, ElementType::Line2,
-    )
+    );
+    if geo.is_some() {
+        new_mesh.geometry =
+            super::curved_tri::build_refined_tri_geometry(mesh, &new_mesh, &fine_parent);
+    }
+    new_mesh
 }
 
 /// Refinement provenance for one red-refinement level.

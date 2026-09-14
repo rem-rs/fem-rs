@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use fem_core::{FaceId, NodeId, ElemId};
-use crate::{element_type::ElementType, simplex::{GeometryData, Mesh}, rebuild_boundary::rebuild_3d_boundary};
+use crate::{element_type::ElementType, simplex::{GeometryData, Mesh}, rebuild_boundary::{rebuild_3d_boundary, BoundaryRebuildMaps}};
 use crate::cad::{ProjectionConfig, project_boundary_to_cad};
 
 use super::bisect::{edge_key, local_edges_tri, refine_marked};
@@ -1322,6 +1322,12 @@ pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     if mesh.elem_types.is_some() {
         return refine_mixed_3d(mesh);
     }
+    // Topological maps of the prism refinement, needed by the boundary rebuild
+    // below when the mesh is curved (see the match tail).
+    let mut prism_maps: Option<(
+        HashMap<(NodeId, NodeId), NodeId>,
+        HashMap<[NodeId; 4], NodeId>,
+    )> = None;
     let mut result = match mesh.elem_type {
         ElementType::Tet4 | ElementType::Tet10 => {
             let (m, _, _) = refine_nonconforming_3d(mesh, &all, None);
@@ -1365,7 +1371,8 @@ vertex_parents: vec![],
             m
         }
         ElementType::Prism6 => {
-            let (m, _, _) = refine_prism6_uniform(mesh, &all);
+            let (m, _, mid, qfc) = refine_prism6_uniform(mesh, &all);
+            prism_maps = Some((mid, qfc));
             m
         }
         ElementType::Pyramid5 => {
@@ -1382,10 +1389,25 @@ vertex_parents: vec![],
         // meshes and *wrong* for curved ones (new vertex coordinates are the
         // exact geometry-dof picks, not recomputable averages).
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {}
-        // Tet/Prism/Pyramid meshes have linear vertex coordinates (only the
-        // Hex8 kernels carry curved geometry), so the coordinate-keyed
+        // Tet/Pyramid meshes have linear vertex coordinates (only the Hex8 and
+        // Prism6 kernels carry curved geometry), so the coordinate-keyed
         // rebuild is exact.
-        _ => rebuild_3d_boundary(&mut result, mesh, None),
+        //
+        // Prism6: a *curved* mesh's new vertices are geometry-dof picks — no
+        // coordinate lookup can find them — so the refinement's own topological
+        // maps resolve the child boundary faces instead.  Straight-sided prism
+        // meshes keep the historical coordinate-keyed path bit for bit.
+        _ => {
+            let taken = prism_maps.take();
+            let maps = if mesh.geometry.is_some() {
+                taken.as_ref().map(|(mid, qfc)| {
+                    BoundaryRebuildMaps { midpoints: mid, quad_face_centers: qfc }
+                })
+            } else {
+                None
+            };
+            rebuild_3d_boundary(&mut result, mesh, maps);
+        }
     }
     result
 }
@@ -4863,6 +4885,76 @@ fn straight_face_center(mesh: &Mesh<3>, fns: [NodeId; 4]) -> [f64; 3] {
 
 // ─── Prism6 uniform refinement ──────────────────────────────────────────────
 
+/// MFEM `UniformRefinement3D_base`'s new-vertex id assignment for a pure-wedge
+/// mesh (`mesh/mesh.cpp`, `case Element::WEDGE`): the fine `vertices` array is
+/// laid out as
+///
+/// ```text
+///   0 .. NV-1                    unchanged coarse vertices
+///   NV .. NV+NE-1                midpoint of global edge E   (`oedge + E`)
+///   NV+NE .. NV+NE+NQF-1         center of global quad face F (`oface + qf`)
+/// ```
+///
+/// — a wedge refinement creates **no** triangular-face centers and **no** body
+/// centers.  The global edge ids come from `GetElementToEdgeTable` (first-touch
+/// over the elements in order, each element's edges in
+/// `Geometry::Constants<PRISM>::Edges` order — `local_edges_prism()` enumerates
+/// exactly that sequence); the quad-face ranks are MFEM's `f2qf` — faces are
+/// numbered first-touch per element in `Constants<PRISM>::FaceVert` order
+/// (triangles create no vertex but do occupy face ids) and the quad faces are
+/// ranked in that face-id order, which is the same order
+/// `local_faces_prism_quad()` first-touches them in.  The child wedges
+/// reference the new vertices through these ids, and MFEM's
+/// `Mesh::UniformRefinement` ends with `UpdateNodes` → `SetVerticesFromNodes`,
+/// which overwrites the *values* (the averaged coordinates) with the refined
+/// `nodes` dofs but keeps this numbering — so a refined curved mesh written to
+/// a file carries these ids in its `vertices`/`elements`/`boundary` sections.
+struct MfemPrismRefineIds {
+    edge: HashMap<(NodeId, NodeId), u32>,
+    quad_face: HashMap<[NodeId; 4], u32>,
+    oedge: u32,
+    oface: u32,
+}
+
+impl MfemPrismRefineIds {
+    /// First-touch global edge numbering and `f2qf` quad-face ranks of `mesh`
+    /// (every element is a wedge), with the `oedge`/`oface` bases.
+    fn build(mesh: &Mesh<3>) -> Self {
+        let mut edge: HashMap<(NodeId, NodeId), u32> = HashMap::new();
+        let mut quad_face: HashMap<[NodeId; 4], u32> = HashMap::new();
+        for e in 0..mesh.n_elems() as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for (a, b) in local_edges_prism() {
+                let k = edge_key(ns[a], ns[b]);
+                let next = edge.len() as u32;
+                edge.entry(k).or_insert(next);
+            }
+            for face in local_faces_prism_quad() {
+                let k = quad_face_key([ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]]);
+                let next = quad_face.len() as u32;
+                quad_face.entry(k).or_insert(next);
+            }
+        }
+        let oedge = mesh.n_nodes() as u32;
+        let oface = oedge + edge.len() as u32;
+        MfemPrismRefineIds { edge, quad_face, oedge, oface }
+    }
+
+    /// Fine vertex count of the uniform wedge refinement:
+    /// `NV + NE + NQF` (`vertices.SetSize(oelem + hex_counter)` with
+    /// `hex_counter = 0` for a pure-wedge mesh).
+    fn total_vertices(&self) -> usize {
+        (self.oface + self.quad_face.len() as u32) as usize
+    }
+}
+
+/// The historical fem-rs wedge child emission order (corner 0, corner 1,
+/// corner 2, center, corner 3, corner 4, corner 5, center) expressed as MFEM
+/// `pri_children` matrix indices (corner 0, center, corner 1, corner 2, corner
+/// 3, center, corner 4, corner 5) — used to label the children of a *partially*
+/// refined curved mesh, whose geometry needs each child's true embedding.
+const HISTORICAL_CHILD_TO_MFEM: [u8; 8] = [0, 2, 3, 1, 4, 6, 7, 5];
+
 /// Uniform refinement for Prism6 → 8 child Prism6.
 ///
 /// Each prism is split into 8 by:
@@ -4873,17 +4965,34 @@ fn straight_face_center(mesh: &Mesh<3>, fns: [NodeId; 4]) -> [f64; 3] {
 /// The 8 children consist of a bottom layer (children 0-3, below mid-height)
 /// and a top layer (children 4-7, above mid-height), each with one child per
 /// sub-triangle of the triangular faces plus one central child.
+///
+/// When the mesh carries curved (order-`p ≥ 2`) geometry **and** every element
+/// is refined, the refinement reproduces MFEM exactly: the new vertices take
+/// geometry-dof values (`amr::curved_prism`), the children are emitted in
+/// MFEM's `UniformRefinement3D_base` wedge order with MFEM's canonical
+/// new-vertex ids (`MfemPrismRefineIds`), and the refined mesh keeps a
+/// refined `nodes` geometry table.  Straight-sided (or partially refined)
+/// meshes keep the historical first-touch ids and child order.
+///
+/// # Returns
+/// `(new_mesh, edge_constraints, edge_midpoint_map, quad_face_center_map)`.
+#[allow(clippy::type_complexity)]
 pub fn refine_prism6_uniform(
     mesh: &Mesh<3>,
     marked: &[ElemId],
-) -> (Mesh<3>, Vec<HangingNodeConstraint>, HashMap<(NodeId, NodeId), NodeId>) {
+) -> (
+    Mesh<3>,
+    Vec<HangingNodeConstraint>,
+    HashMap<(NodeId, NodeId), NodeId>,
+    HashMap<[NodeId; 4], NodeId>,
+) {
     assert!(
         mesh.elem_type == ElementType::Prism6,
         "refine_prism6_uniform: only Prism6 meshes are supported"
     );
 
     if marked.is_empty() {
-        return (mesh.clone(), Vec::new(), HashMap::new());
+        return (mesh.clone(), Vec::new(), HashMap::new(), HashMap::new());
     }
 
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
@@ -4905,71 +5014,150 @@ pub fn refine_prism6_uniform(
     let mut body_center_map: HashMap<ElemId, NodeId> = HashMap::new();
     let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
+    // Curved (order-p, p >= 2) wedge geometry: new vertices must take the
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_prism).
+    let geo = super::curved_prism::PrismPkGeometry::new(mesh);
+    // MFEM's canonical new-vertex numbering for a wedge mesh: a pure-prism
+    // refinement creates **no** triangular face centers and **no** body
+    // centers, and lays the fine vertices out as
+    //
+    //   0 .. NV-1                    unchanged coarse vertices
+    //   NV .. NV+NE-1                midpoint of global edge E   (`oedge + E`)
+    //   NV+NE .. NV+NE+NQF-1         center of global quad face F (`oface + qf`)
+    //
+    // with the global edge ids first-touch per element in
+    // `local_edges_prism()` order and the quad-face ranks (MFEM's `f2qf`)
+    // following the global face ids (`GetElementToFaceTable`, first-touch per
+    // element in `Geometry::Constants<PRISM>::FaceVert` order, quads only).
+    // Reproduced where a written file pins it down — a *curved* mesh under
+    // *uniform* refinement keeps its `nodes` table, so the refined file
+    // carries these ids in every section.  Straight-sided meshes keep the
+    // historical first-touch numbering (the straight-refinement regression
+    // outputs pin it), and partial refinement would leave holes in the dense
+    // id space, so neither switches.
+    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+        Some(MfemPrismRefineIds::build(mesh))
+    } else {
+        None
+    };
+    if let Some(ids) = &mfem_ids {
+        // Dense id space: every coarse edge / quad face gains exactly one
+        // vertex (all elements are marked, and the wedge split creates no
+        // other vertices), so grow the coordinate array to its final length
+        // up front; the allocation below fills every slot.
+        new_coords.resize(ids.total_vertices() * 3, 0.0);
+    }
 
     for &e in marked {
         let ns = mesh.elem_nodes(e);
 
         // 9 edge midpoints
-        for &(a, b) in &local_edges_prism() {
+        for (li, &(a, b)) in local_edges_prism().iter().enumerate() {
             let key = edge_key(ns[a], ns[b]);
             midpoint_map.entry(key).or_insert_with(|| {
-                let xa = mesh.coords_of(ns[a]);
-                let xb = mesh.coords_of(ns[b]);
-                new_coords.push(0.5 * (xa[0] + xb[0]));
-                new_coords.push(0.5 * (xa[1] + xb[1]));
-                new_coords.push(0.5 * (xa[2] + xb[2]));
-                let id = next_node; next_node += 1; id
+                let xyz = match &geo {
+                    Some(g) => g.edge_pick(e, li),
+                    None => {
+                        let xa = mesh.coords_of(ns[a]);
+                        let xb = mesh.coords_of(ns[b]);
+                        [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1]), 0.5 * (xa[2] + xb[2])]
+                    }
+                };
+                match &mfem_ids {
+                    // MFEM `AverageVertices(vv, 2, oedge + e[ei])`.
+                    Some(ids) => {
+                        let id = ids.oedge + ids.edge[&key];
+                        new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                        id
+                    }
+                    None => {
+                        new_coords.extend_from_slice(&xyz);
+                        let id = next_node; next_node += 1; id
+                    }
+                }
             });
         }
 
-        // 2 triangular face centers (centroids)
-        for (a, b, c) in local_faces_prism_tri() {
-            let key = face_key_3d(ns[a], ns[b], ns[c]);
-            tri_face_center_map.entry(key).or_insert_with(|| {
-                let ca = mesh.coords_of(ns[a]);
-                let cb = mesh.coords_of(ns[b]);
-                let cc = mesh.coords_of(ns[c]);
-                new_coords.push((ca[0] + cb[0] + cc[0]) / 3.0);
-                new_coords.push((ca[1] + cb[1] + cc[1]) / 3.0);
-                new_coords.push((ca[2] + cb[2] + cc[2]) / 3.0);
-                let id = next_node; next_node += 1; id
-            });
+        // 2 triangular face centers (centroids) — the wedge split's children
+        // never reference them, so under MFEM's numbering (curved + uniform)
+        // no such vertex exists at all.
+        if mfem_ids.is_none() {
+            for (a, b, c) in local_faces_prism_tri() {
+                let key = face_key_3d(ns[a], ns[b], ns[c]);
+                tri_face_center_map.entry(key).or_insert_with(|| {
+                    let xyz = match &geo {
+                        Some(g) => g.tri_face_pick(e, if a == 0 { 0 } else { 1 }),
+                        None => {
+                            let ca = mesh.coords_of(ns[a]);
+                            let cb = mesh.coords_of(ns[b]);
+                            let cc = mesh.coords_of(ns[c]);
+                            [(ca[0] + cb[0] + cc[0]) / 3.0,
+                             (ca[1] + cb[1] + cc[1]) / 3.0,
+                             (ca[2] + cb[2] + cc[2]) / 3.0]
+                        }
+                    };
+                    new_coords.extend_from_slice(&xyz);
+                    let id = next_node; next_node += 1; id
+                });
+            }
         }
 
         // 3 quadrilateral face centers (diagonal crossing = centroid of 4 vertices)
-        for face in local_faces_prism_quad() {
+        for (fi, face) in local_faces_prism_quad().iter().enumerate() {
             let fns = [ns[face[0]], ns[face[1]], ns[face[2]], ns[face[3]]];
             let fkey = quad_face_key(fns);
             quad_face_center_map.entry(fkey).or_insert_with(|| {
-                let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
-                for &fn_ in &fns {
-                    let c = mesh.coords_of(fn_);
-                    x += c[0]; y += c[1]; z += c[2];
+                let xyz = match &geo {
+                    Some(g) => g.quad_face_pick(e, fi),
+                    None => {
+                        let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+                        for &fn_ in &fns {
+                            let c = mesh.coords_of(fn_);
+                            x += c[0]; y += c[1]; z += c[2];
+                        }
+                        [x / 4.0, y / 4.0, z / 4.0]
+                    }
+                };
+                match &mfem_ids {
+                    // MFEM `AverageVertices(vv, 4, oface + f2qf[f[fi]])`.
+                    Some(ids) => {
+                        let id = ids.oface + ids.quad_face[&fkey];
+                        new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                        id
+                    }
+                    None => {
+                        new_coords.extend_from_slice(&xyz);
+                        let id = next_node; next_node += 1; id
+                    }
                 }
-                new_coords.push(x / 4.0); new_coords.push(y / 4.0); new_coords.push(z / 4.0);
-                let id = next_node; next_node += 1; id
             });
         }
 
-        // Body centroid
-        body_center_map.entry(e).or_insert_with(|| {
-            let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
-            for k in 0..6 {
-                let c = mesh.coords_of(ns[k]);
-                x += c[0]; y += c[1]; z += c[2];
-            }
-            new_coords.push(x / 6.0); new_coords.push(y / 6.0); new_coords.push(z / 6.0);
-            let id = next_node; next_node += 1; id
-        });
+        // Body centroid — likewise unused by the wedge split; MFEM's uniform
+        // wedge refinement creates no body vertices.
+        if mfem_ids.is_none() {
+            body_center_map.entry(e).or_insert_with(|| {
+                let xyz = match &geo {
+                    Some(g) => g.body_pick(e),
+                    None => {
+                        let (mut x, mut y, mut z) = (0.0_f64, 0.0_f64, 0.0_f64);
+                        for k in 0..6 {
+                            let c = mesh.coords_of(ns[k]);
+                            x += c[0]; y += c[1]; z += c[2];
+                        }
+                        [x / 6.0, y / 6.0, z / 6.0]
+                    }
+                };
+                new_coords.extend_from_slice(&xyz);
+                let id = next_node; next_node += 1; id
+            });
+        }
     }
 
     // ── 3. Helper closures ────────────────────────────────────────────────────
     let get_em = |a: usize, b: usize, ns: &[NodeId]| -> NodeId {
         *midpoint_map.get(&edge_key(ns[a], ns[b])).expect("edge midpoint missing")
-    };
-    let get_tfc = |(a, b, c): (usize, usize, usize), ns: &[NodeId]| -> NodeId {
-        let key = face_key_3d(ns[a], ns[b], ns[c]);
-        *tri_face_center_map.get(&key).expect("tri face center missing")
     };
     let get_qfc = |face_idx: usize, ns: &[NodeId]| -> NodeId {
         let face = local_faces_prism_quad()[face_idx];
@@ -4980,23 +5168,29 @@ pub fn refine_prism6_uniform(
 
     // ── 4. Build new element connectivity (8 child prisms) ────────────────────
     // Each child is a Prism6: bottom tri (3 nodes CCW) + top tri (3 nodes CCW).
-    //   Child 0 (bottom corner 0):  bot=(n0, m01, m02), top=(m03, qfc0, qfc2)
-    //   Child 1 (bottom corner 1):  bot=(m01, n1, m12), top=(qfc0, m14, qfc1)
-    //   Child 2 (bottom corner 2):  bot=(m02, m12, n2), top=(qfc2, qfc1, m25)
-    //   Child 3 (bottom center):    bot=(m01, m12, m02), top=(qfc0, qfc1, qfc2)
-    //   Child 4 (top corner 3):     bot=(m03, qfc0, qfc2), top=(n3, m34, m35)
-    //   Child 5 (top corner 4):     bot=(qfc0, m14, qfc1), top=(m34, n4, m45)
-    //   Child 6 (top corner 5):     bot=(qfc2, qfc1, m25), top=(m35, m45, n5)
-    //   Child 7 (top center):       bot=(qfc0, qfc1, qfc2), top=(m34, m45, m35)
+    //
+    // The historical fem-rs order (children 0-2 bottom corners, 3 bottom
+    // center, 4-6 top corners, 7 top center) is kept for straight-sided
+    // meshes.  Where a curved mesh is refined *uniformly* the refined file
+    // carries MFEM's own child order — corner 0, center, corner 1, corner 2
+    // per layer, the center children with cyclically rotated node order —
+    // because MFEM's `UniformRefinement3D_base` emits its `new Wedge(...)`
+    // children in that sequence and the fine element order pins both the
+    // `elements` section and the `nodes` update's first-touch dof ownership
+    // (`amr::curved_prism`'s builder walks `fine_parent` in exactly this
+    // order).
     let mut new_conn: Vec<NodeId> = Vec::new();
     let mut new_tags: Vec<i32>    = Vec::new();
+    // Fine element → (parent element, child matrix index) map for the refined
+    // high-order geometry (super::curved_prism::IDENTITY = copied element).
+    let mut fine_parent = Vec::<(ElemId, u8)>::with_capacity(n_elems * 8);
 
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
         let tag = mesh.elem_tags[e as usize];
 
         if marked_set.contains(&e) {
-            // Shorthand: edge midpoints
+            // Shorthand: edge midpoints (MFEM's `e[0..9]`)
             let m01 = get_em(0, 1, ns);
             let m12 = get_em(1, 2, ns);
             let m02 = get_em(0, 2, ns);
@@ -5008,38 +5202,63 @@ pub fn refine_prism6_uniform(
             let m25 = get_em(2, 5, ns);
 
             // Face centers
-            let _tfc_bot = get_tfc((0, 1, 2), ns);  // bottom tri (unused in uniform-all, needed for NC)
-            let _tfc_top = get_tfc((3, 4, 5), ns);  // top tri
-            let qfc0 = get_qfc(0, ns);  // quad (0,1,4,3)
-            let qfc1 = get_qfc(1, ns);  // quad (1,2,5,4)
-            let qfc2 = get_qfc(2, ns);  // quad (0,2,5,3)
+            let qfc0 = get_qfc(0, ns);  // quad (0,1,4,3) — MFEM FaceVert[2]
+            let qfc1 = get_qfc(1, ns);  // quad (1,2,5,4) — MFEM FaceVert[3]
+            let qfc2 = get_qfc(2, ns);  // quad (0,2,5,3) — MFEM FaceVert[4]
 
-            // Child 0: bottom corner 0
-            new_conn.extend_from_slice(&[ns[0], m01, m02,  m03, qfc0, qfc2]); new_tags.push(tag);
+            if mfem_ids.is_some() {
+                // MFEM `UniformRefinement3D_base`, `case Element::WEDGE`:
+                // children in emission order, center children with MFEM's
+                // cyclic rotations.
+                for ch in 0..8u8 {
+                    fine_parent.push((e, ch));
+                }
+                // child 0: corner at vertex 0, lower half
+                new_conn.extend_from_slice(&[ns[0], m01, m02,  m03, qfc0, qfc2]); new_tags.push(tag);
+                // child 1: bottom center, lower half
+                new_conn.extend_from_slice(&[m12, m02, m01,  qfc1, qfc2, qfc0]); new_tags.push(tag);
+                // child 2: corner at vertex 1, lower half
+                new_conn.extend_from_slice(&[m01, ns[1], m12,  qfc0, m14, qfc1]); new_tags.push(tag);
+                // child 3: corner at vertex 2, lower half
+                new_conn.extend_from_slice(&[m02, m12, ns[2],  qfc2, qfc1, m25]); new_tags.push(tag);
+                // child 4: corner at vertex 3, upper half
+                new_conn.extend_from_slice(&[m03, qfc0, qfc2,  ns[3], m34, m35]); new_tags.push(tag);
+                // child 5: center, upper half
+                new_conn.extend_from_slice(&[qfc1, qfc2, qfc0,  m45, m35, m34]); new_tags.push(tag);
+                // child 6: corner at vertex 4, upper half
+                new_conn.extend_from_slice(&[qfc0, m14, qfc1,  m34, ns[4], m45]); new_tags.push(tag);
+                // child 7: corner at vertex 5, upper half
+                new_conn.extend_from_slice(&[qfc2, qfc1, m25,  m35, m45, ns[5]]); new_tags.push(tag);
+            } else {
+                fine_parent.extend((0..8u8).map(|ch| (e, HISTORICAL_CHILD_TO_MFEM[ch as usize])));
+                // Child 0: bottom corner 0
+                new_conn.extend_from_slice(&[ns[0], m01, m02,  m03, qfc0, qfc2]); new_tags.push(tag);
 
-            // Child 1: bottom corner 1
-            new_conn.extend_from_slice(&[m01, ns[1], m12,  qfc0, m14, qfc1]); new_tags.push(tag);
+                // Child 1: bottom corner 1
+                new_conn.extend_from_slice(&[m01, ns[1], m12,  qfc0, m14, qfc1]); new_tags.push(tag);
 
-            // Child 2: bottom corner 2
-            new_conn.extend_from_slice(&[m02, m12, ns[2],  qfc2, qfc1, m25]); new_tags.push(tag);
+                // Child 2: bottom corner 2
+                new_conn.extend_from_slice(&[m02, m12, ns[2],  qfc2, qfc1, m25]); new_tags.push(tag);
 
-            // Child 3: bottom center
-            new_conn.extend_from_slice(&[m01, m12, m02,  qfc0, qfc1, qfc2]); new_tags.push(tag);
+                // Child 3: bottom center
+                new_conn.extend_from_slice(&[m01, m12, m02,  qfc0, qfc1, qfc2]); new_tags.push(tag);
 
-            // Child 4: top corner 3
-            new_conn.extend_from_slice(&[m03, qfc0, qfc2,  ns[3], m34, m35]); new_tags.push(tag);
+                // Child 4: top corner 3
+                new_conn.extend_from_slice(&[m03, qfc0, qfc2,  ns[3], m34, m35]); new_tags.push(tag);
 
-            // Child 5: top corner 4
-            new_conn.extend_from_slice(&[qfc0, m14, qfc1,  m34, ns[4], m45]); new_tags.push(tag);
+                // Child 5: top corner 4
+                new_conn.extend_from_slice(&[qfc0, m14, qfc1,  m34, ns[4], m45]); new_tags.push(tag);
 
-            // Child 6: top corner 5
-            new_conn.extend_from_slice(&[qfc2, qfc1, m25,  m35, m45, ns[5]]); new_tags.push(tag);
+                // Child 6: top corner 5
+                new_conn.extend_from_slice(&[qfc2, qfc1, m25,  m35, m45, ns[5]]); new_tags.push(tag);
 
-            // Child 7: top center
-            new_conn.extend_from_slice(&[qfc0, qfc1, qfc2,  m34, m45, m35]); new_tags.push(tag);
+                // Child 7: top center
+                new_conn.extend_from_slice(&[qfc0, qfc1, qfc2,  m34, m45, m35]); new_tags.push(tag);
+            }
         } else {
             for k in 0..6 { new_conn.push(ns[k]); }
             new_tags.push(tag);
+            fine_parent.push((e, super::curved_prism::IDENTITY));
         }
     }
 
@@ -5077,10 +5296,19 @@ pub fn refine_prism6_uniform(
                 let m_ca = midpoint_map.get(&edge_key(c, a)).copied();
 
                 if let (Some(mab), Some(mbc), Some(mca)) = (m_ab, m_bc, m_ca) {
-                    new_face_conn.extend_from_slice(&[a, mab, mca]); new_face_tags.push(tag);
-                    new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
-                    new_face_conn.extend_from_slice(&[mca, mbc, c]); new_face_tags.push(tag);
-                    new_face_conn.extend_from_slice(&[mab, mbc, mca]); new_face_tags.push(tag);
+                    if mfem_ids.is_some() {
+                        // MFEM `UniformRefinement3D_base` new_boundary: corner
+                        // 0, center, corner 1, corner 2.
+                        new_face_conn.extend_from_slice(&[a, mab, mca]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mbc, mca, mab]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mca, mbc, c]); new_face_tags.push(tag);
+                    } else {
+                        new_face_conn.extend_from_slice(&[a, mab, mca]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mca, mbc, c]); new_face_tags.push(tag);
+                        new_face_conn.extend_from_slice(&[mab, mbc, mca]); new_face_tags.push(tag);
+                    }
                 } else {
                     new_face_conn.extend_from_slice(&[a, b, c]);
                     new_face_tags.push(tag);
@@ -5116,11 +5344,15 @@ pub fn refine_prism6_uniform(
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords, new_conn, new_tags, ElementType::Prism6,
         new_face_conn, new_face_tags, mesh.face_type,
     );
-    (new_mesh, constraints, midpoint_map)
+    if geo.is_some() {
+        new_mesh.geometry =
+            super::curved_prism::build_refined_prism_geometry(mesh, &new_mesh, &fine_parent);
+    }
+    (new_mesh, constraints, midpoint_map, quad_face_center_map)
 }
 
 // ─── Prism6 non-conforming AMR ────────────────────────────────────────────────
@@ -8286,7 +8518,7 @@ vertex_parents: vec![],
         assert!((vol_orig - 0.5).abs() < 1e-14, "original volume={}", vol_orig);
 
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
-        let (fine, constraints, _) = refine_prism6_uniform(&mesh, &all);
+        let (fine, constraints, _, _) = refine_prism6_uniform(&mesh, &all);
 
         assert_eq!(fine.n_elems(), 8, "1 prism → 8 children");
         assert_eq!(constraints.is_empty(), true, "uniform refine: no hanging nodes");
