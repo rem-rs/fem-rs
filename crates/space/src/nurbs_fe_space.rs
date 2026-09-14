@@ -530,6 +530,20 @@ impl NurbsFESpace {
         &self.ext
     }
 
+    /// MFEM `NURBSExtension::ConnectBoundaries(master, slave)` on the *analysis*
+    /// extension — `nurbs_ex1`'s `-pm`/`-ps` periodic boundary conditions.
+    ///
+    /// `master`/`slave` are mesh boundary attributes; the dofs of the two
+    /// boundary patches are identified, so the space's DOF count drops by the
+    /// number of paired control points.  The geometry is untouched, exactly as
+    /// in MFEM, where `mesh->NURBSext` keeps its own DOF numbering and the
+    /// space's extension carries the merged one.
+    pub fn with_periodic(&self, master: &[i32], slave: &[i32]) -> Result<Self, String> {
+        let mut s = self.clone();
+        s.ext.connect_boundaries(master, slave)?;
+        Ok(s)
+    }
+
     /// MFEM `FiniteElementSpace::GetBdrElementDofs` for this scalar space —
     /// `NURBSext->GetBdrElementDofTable()` (`Mode::H_1`), one row per mesh
     /// boundary element, in MFEM's signed encoding (see
@@ -952,7 +966,7 @@ impl NurbsFESpace {
                     multi[d] = o[rest % o.len()];
                     rest /= o.len();
                 }
-                let g = self.ext.patch_dof(patch, &multi).expect("patch dof");
+                let g = self.ext.dof_map(self.ext.patch_dof(patch, &multi).expect("patch dof"));
                 mark[g] = true;
             }
         }

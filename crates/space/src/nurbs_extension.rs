@@ -381,6 +381,10 @@ pub struct NurbsExtension {
     e_mesh_offsets: Vec<usize>,
     f_mesh_offsets: Vec<usize>,
     p_mesh_offsets: Vec<usize>,
+    /// Periodic-BC DOF map (MFEM `d_to_d`), empty while the extension has no
+    /// connected boundaries; see [`Self::dof_map`] and
+    /// [`Self::connect_boundaries`].
+    d_to_d: Vec<usize>,
 }
 
 /// Which FE space a boundary DOF table is generated for — MFEM
@@ -435,6 +439,114 @@ enum MapMode {
     Vertex,
     /// `NURBSPatchMap::SetPatchDofMap` — space offsets, `NCP - 2` interior.
     Dof,
+}
+
+/// `NURBSPatchMap::SetBdrPatchDofMap` for a 2-D patch, whose boundary patch is a
+/// single segment: the state its `operator()(i)` consumes.
+///
+/// `edgeMaster` is empty for a conforming extension (`NURBSExtension::
+/// IsMasterEdge` returns false), so `EC` always takes the `edges[0] + …` offset
+/// path; [`NurbsExtension::bdr_seg_dof`] is `operator()(i)` under that
+/// assumption.
+struct BdrSegDofMap<'a> {
+    /// `dir`-endpoint control points of the boundary segment.
+    verts: [usize; 2],
+    /// `e_spaceOffsets[edges[0]]`.
+    p_offset: usize,
+    /// `p2g.nx()` = `I + 1` = `GetNCP() - 1`.
+    nx: isize,
+    /// `I` = `GetNCP() - 2`.
+    i_cap: isize,
+    /// `KnotVec(edges[0], oedge[0])`.
+    kv: &'a NurbsKnot,
+    /// `KnotSign(edge) * oedge[0]`.
+    okv: i32,
+    /// `cor[0]` of `Mesh::GetBdrElementEdges`.
+    oedge: i32,
+}
+
+/// `NURBSPatchMap::SetBdrPatchDofMap` for a 3-D patch, whose boundary patch is a
+/// quadrilateral: the state its `operator()(i, j)` consumes.
+///
+/// As for [`BdrSegDofMap`], `edgeMaster`/`faceMaster` are empty for a conforming
+/// extension, so `EC`/`FC` take the offset path and `FCP` the `pOffset` one;
+/// [`BdrQuadDofMap::dof`] implements exactly that.
+struct BdrQuadDofMap<'a> {
+    /// `v_spaceOffsets` of the boundary element's four vertices.
+    verts: [usize; 4],
+    /// `e_spaceOffsets` of the boundary element's four local edges.
+    edges: [usize; 4],
+    /// `cor[j]` of `Mesh::GetBdrElementEdges`.
+    oedge: [i32; 4],
+    /// `p2g.nx()`/`p2g.ny()` = `I + 1`/`J + 1` = `GetNCP() - 1` per direction.
+    nx: isize,
+    ny: isize,
+    /// `I`/`J` = `GetNCP() - 2` per direction.
+    i_cap: isize,
+    j_cap: isize,
+    /// `KnotVec(edges[0/1], oedge[0/1])`.
+    kvs: [&'a NurbsKnot; 2],
+    /// `KnotSign(edges[0/1]) * oedge[0/1]`.
+    okv: [i32; 2],
+    /// `Mesh::GetBdrElementFace`'s `o` — the boundary element's orientation
+    /// w.r.t. the face it lies on (`Mesh::GetQuadOrientation`).
+    opatch: i32,
+    /// `f_spaceOffsets[face]`.
+    p_offset: usize,
+}
+
+impl BdrQuadDofMap<'_> {
+    /// `NURBSPatchMap::operator()(i, j)`, i.e. the global DOF of boundary-patch
+    /// multi-index `(i, j)` with `0 <= i <= nx` and `0 <= j <= ny` (the extreme
+    /// values address the boundary patch's vertices).
+    fn dof(&self, i: usize, j: usize) -> usize {
+        let f = |n: isize, big_n: isize| -> usize {
+            if n < 0 {
+                0
+            } else if n >= big_n {
+                2
+            } else {
+                1
+            }
+        };
+        let or1d = |n: isize, big_n: isize, or: i32| -> usize {
+            if or > 0 {
+                n as usize
+            } else {
+                (big_n - 1 - n) as usize
+            }
+        };
+        let or2d = |m: isize, n: isize, big_m: isize, big_n: isize, or: i32| -> usize {
+            let (m, big_m, n, big_n) =
+                (m as usize, big_m as usize, n as usize, big_n as usize);
+            match or {
+                0 => m + n * big_m,
+                1 => n + m * big_n,
+                2 => n + (big_m - 1 - m) * big_n,
+                3 => (big_m - 1 - m) + n * big_m,
+                4 => (big_m - 1 - m) + (big_n - 1 - n) * big_m,
+                5 => (big_n - 1 - n) + (big_m - 1 - m) * big_n,
+                6 => (big_n - 1 - n) + m * big_n,
+                _ => m + (big_n - 1 - n) * big_m,
+            }
+        };
+        let ec = |e: usize, m: isize, big_n: isize, s: i32| -> usize {
+            self.edges[e] + or1d(m, big_n, s * self.oedge[e])
+        };
+        let i1 = i as isize - 1;
+        let j1 = j as isize - 1;
+        match 3 * f(j1, self.j_cap) + f(i1, self.i_cap) {
+            0 => self.verts[0],
+            1 => ec(0, i1, self.i_cap, 1),
+            2 => self.verts[1],
+            3 => ec(3, j1, self.j_cap, -1),
+            4 => self.p_offset + or2d(i1, j1, self.i_cap, self.j_cap, self.opatch),
+            5 => ec(1, j1, self.j_cap, 1),
+            6 => self.verts[3],
+            7 => ec(2, i1, self.i_cap, -1),
+            _ => self.verts[2],
+        }
+    }
 }
 
 impl NurbsExtension {
@@ -563,6 +675,7 @@ impl NurbsExtension {
             e_mesh_offsets: Vec::new(),
             f_mesh_offsets: Vec::new(),
             p_mesh_offsets: Vec::new(),
+            d_to_d: Vec::new(),
         };
 
         // `SetOrdersFromKnotVectors` + `SetOrderFromOrders`.
@@ -1300,7 +1413,7 @@ impl NurbsExtension {
                         let mut c = vec![0usize; d];
                         loop {
                             let multi: Vec<usize> = (0..d).map(|dd| idx[dd] + c[dd]).collect();
-                            let g = self.patch_map_mode(p, &multi, MapMode::Dof)?;
+                            let g = self.dof_map(self.patch_map_mode(p, &multi, MapMode::Dof)?);
                             active[g] = true;
                             dofs.push(g);
                             // Increment the innermost (first-direction) counter.
@@ -1799,7 +1912,7 @@ impl NurbsExtension {
                     // `DofMap(p2g[0])`: `operator()(0)` is `verts[0]`, i.e. the
                     // patch vertex the boundary point coincides with.
                     let _ = p;
-                    row.push(self.v_space_offsets[v] as i64);
+                    row.push(self.dof_map(self.v_space_offsets[v]) as i64);
                     break;
                 }
             }
@@ -1814,29 +1927,23 @@ impl NurbsExtension {
         let max_order = *self.orders.iter().max().expect("orders");
         for bp in 0..self.boundary.len() {
             let side = &self.bdr_sides[bp];
-            let bv = self.bdr_element_vertices(bp);
-            let edge = self.find_edge(bv[0], bv[1]);
-            let ukv = self.knot_ind(edge);
-            let kv = &self.knot_vectors[ukv];
-            // `KnotVec(edge, oedge, &okv)` with `oedge = cor[0]`.
-            let oedge = if bv[0] < bv[1] { 1 } else { -1 };
-            let okv = self.knot_sign(edge) * oedge;
-            let nx = kv.ncp() as isize - 1;
-            let ord = kv.order();
+            let m = self.bdr_seg_dof_map(bp);
+            let (nx, ord) = (m.nx, m.kv.order());
             let (add_dofs, s) = match mode {
                 BdrDofMode::H1 => (true, 1),
                 BdrDofMode::HDiv => (ord != max_order, if side.low { -1 } else { 1 }),
                 BdrDofMode::HCurl => (ord != max_order, 1),
             };
-            for i in 0..kv.nks() {
-                if !kv.is_element(i) {
+            for i in 0..m.kv.nks() {
+                if !m.kv.is_element(i) {
                     continue;
                 }
                 let mut row = Vec::new();
                 if add_dofs {
                     for ii in 0..=ord {
-                        let j = if okv >= 0 { i + ii } else { (nx - i as isize - ii as isize) as usize };
-                        let g = self.bdr_patch_dof_1d(bp, edge, oedge, kv, j);
+                        let j =
+                            if m.okv >= 0 { i + ii } else { (nx - i as isize - ii as isize) as usize };
+                        let g = self.dof_map(self.bdr_seg_dof(&m, j));
                         row.push(if s < 0 { -1 - g as i64 } else { g as i64 });
                     }
                 }
@@ -1846,20 +1953,30 @@ impl NurbsExtension {
         rows
     }
 
-    /// `NURBSPatchMap::SetBdrPatchDofMap` + `operator()(i)` for a 2-D patch
-    /// (the boundary patch is 1-D).
-    fn bdr_patch_dof_1d(
-        &self,
-        bp: usize,
-        edge: usize,
-        oedge: i32,
-        kv: &NurbsKnot,
-        j: usize,
-    ) -> usize {
+    /// `NURBSPatchMap::SetBdrPatchDofMap(bp, …)` for a 2-D patch, whose boundary
+    /// patch is a single segment read with `operator()(i)` (`BdrSegDofMap::dof`).
+    fn bdr_seg_dof_map(&self, bp: usize) -> BdrSegDofMap<'_> {
         let bv = self.bdr_element_vertices(bp);
-        let verts = [self.v_space_offsets[bv[0]], self.v_space_offsets[bv[1]]];
-        let p_offset = self.e_space_offsets[edge];
-        let i_cap = kv.ncp() as isize - 2;
+        debug_assert_eq!(bv.len(), 2, "a 2-D boundary element is a segment");
+        let edge = self.find_edge(bv[0], bv[1]);
+        // `KnotVec(edge, oedge, &okv)` with `oedge = cor[0]`.
+        let oedge = if bv[0] < bv[1] { 1 } else { -1 };
+        let kv = &self.knot_vectors[self.knot_ind(edge)];
+        BdrSegDofMap {
+            verts: [self.v_space_offsets[bv[0]], self.v_space_offsets[bv[1]]],
+            p_offset: self.e_space_offsets[edge],
+            nx: kv.ncp() as isize - 1,
+            i_cap: kv.ncp() as isize - 2,
+            kv,
+            okv: self.knot_sign(edge) * oedge,
+            oedge,
+        }
+    }
+
+    /// `NURBSPatchMap::operator()(i)` for a boundary *segment* whose patch map
+    /// was set up by `SetBdrPatchDofMap` (`edgeMaster` is empty for a conforming
+    /// extension, so the offset path is always taken).
+    fn bdr_seg_dof(&self, m: &BdrSegDofMap<'_>, j: usize) -> usize {
         let i1 = j as isize - 1;
         let f = |n: isize, big_n: isize| -> usize {
             if n < 0 {
@@ -1870,13 +1987,13 @@ impl NurbsExtension {
                 1
             }
         };
-        match f(i1, i_cap) {
-            0 => verts[0],
+        match f(i1, m.i_cap) {
+            0 => m.verts[0],
             1 => {
-                let or = if oedge > 0 { i1 } else { i_cap - 1 - i1 };
-                p_offset + or as usize
+                let or = if m.oedge > 0 { i1 } else { m.i_cap - 1 - i1 };
+                m.p_offset + or as usize
             }
-            _ => verts[1],
+            _ => m.verts[1],
         }
     }
 
@@ -1885,60 +2002,43 @@ impl NurbsExtension {
         let mut rows: Vec<Vec<i64>> = Vec::new();
         for bp in 0..self.boundary.len() {
             let side = &self.bdr_sides[bp];
-            let bv = self.bdr_element_vertices(bp);
-            let face = self.find_face(&bv).expect("boundary element face");
-            let opatch = Self::quad_orientation(&self.faces[face], &[bv[0], bv[1], bv[2], bv[3]]);
-            // `Mesh::GetBdrElementEdges`: the boundary element's own local edges
-            // and their `cor` orientations.
-            let bdr_edges: Vec<usize> =
-                (0..4).map(|j| self.find_edge(bv[j], bv[(j + 1) % 4])).collect();
-            let oedge: Vec<i32> =
-                (0..4).map(|j| if bv[j] < bv[(j + 1) % 4] { 1 } else { -1 }).collect();
-            // `KnotVec(edge, oedge, &okv)` for the first two edges.
-            let kvs: Vec<&NurbsKnot> = (0..2)
-                .map(|j| &self.knot_vectors[self.knot_ind(bdr_edges[j])])
-                .collect();
-            let okv: Vec<i32> =
-                (0..2).map(|j| self.knot_sign(bdr_edges[j]) * oedge[j]).collect();
-            let ord0 = kvs[0].order();
-            let ord1 = kvs[1].order();
+            let m = self.bdr_quad_dof_map(bp);
+            let (ord0, ord1) = (m.kvs[0].order(), m.kvs[1].order());
             // `add_dofs` is false when the entity's two knot vectors have
             // different orders (`H_DIV`) resp. the same one (`H_CURL`).
-            let same_order = ord0 == ord1;
             let add_dofs = match mode {
                 BdrDofMode::H1 => true,
-                BdrDofMode::HDiv => same_order,
-                BdrDofMode::HCurl => !same_order,
+                BdrDofMode::HDiv => ord0 == ord1,
+                BdrDofMode::HCurl => ord0 != ord1,
             };
             let s = match mode {
                 BdrDofMode::HDiv if side.low => -1,
                 _ => 1,
             };
-            let nxs = kvs[0].ncp() as isize - 1;
-            let nys = kvs[1].ncp() as isize - 1;
-            for j in 0..kvs[1].nks() {
-                if !kvs[1].is_element(j) {
+            let (nxs, nys) = (m.nx, m.ny);
+            for j in 0..m.kvs[1].nks() {
+                if !m.kvs[1].is_element(j) {
                     continue;
                 }
-                for i in 0..kvs[0].nks() {
-                    if !kvs[0].is_element(i) {
+                for i in 0..m.kvs[0].nks() {
+                    if !m.kvs[0].is_element(i) {
                         continue;
                     }
                     let mut row = Vec::new();
                     if add_dofs {
                         for jj in 0..=ord1 {
-                            let jj_ = if okv[1] >= 0 {
+                            let jj_ = if m.okv[1] >= 0 {
                                 j + jj
                             } else {
                                 (nys - j as isize - jj as isize) as usize
                             };
                             for ii in 0..=ord0 {
-                                let ii_ = if okv[0] >= 0 {
+                                let ii_ = if m.okv[0] >= 0 {
                                     i + ii
                                 } else {
                                     (nxs - i as isize - ii as isize) as usize
                                 };
-                                let g = self.bdr_patch_dof_2d(&bv, &bdr_edges, &oedge, opatch, &kvs, ii_, jj_);
+                                let g = self.dof_map(m.dof(ii_, jj_));
                                 row.push(if s < 0 { -1 - g as i64 } else { g as i64 });
                             }
                         }
@@ -1950,78 +2050,242 @@ impl NurbsExtension {
         rows
     }
 
-    /// `NURBSPatchMap::SetBdrPatchDofMap` + `operator()(i, j)` for a 3-D patch
-    /// (the boundary patch is a quadrilateral).  `edgeMaster`/`faceMaster` are
-    /// empty for a conforming extension, so `EC`/`FC` take the offset path and
-    /// `FCP` the `pOffset` one.
-    #[allow(clippy::too_many_arguments)] // mirrors MFEM's patch-map state
-    fn bdr_patch_dof_2d(
-        &self,
-        bv: &[usize],
-        bdr_edges: &[usize],
-        oedge: &[i32],
-        opatch: i32,
-        kvs: &[&NurbsKnot],
-        i: usize,
-        j: usize,
-    ) -> usize {
-        let verts: Vec<usize> = bv.iter().map(|&v| self.v_space_offsets[v]).collect();
-        let edges: Vec<usize> = bdr_edges.iter().map(|&e| self.e_space_offsets[e]).collect();
-        let face = self.find_face(bv).expect("boundary element face");
-        let p_offset = self.f_space_offsets[face];
-        let i_cap = kvs[0].ncp() as isize - 2;
-        let j_cap = kvs[1].ncp() as isize - 2;
-
-        let f = |n: isize, big_n: isize| -> usize {
-            if n < 0 {
-                0
-            } else if n >= big_n {
-                2
-            } else {
-                1
-            }
-        };
-        let or1d = |n: isize, big_n: isize, or: i32| -> usize {
-            if or > 0 {
-                n as usize
-            } else {
-                (big_n - 1 - n) as usize
-            }
-        };
-        let or2d = |m: isize, n: isize, big_m: isize, big_n: isize, or: i32| -> usize {
-            let (m, big_m, n, big_n) = (m as usize, big_m as usize, n as usize, big_n as usize);
-            match or {
-                0 => m + n * big_m,
-                1 => n + m * big_n,
-                2 => n + (big_m - 1 - m) * big_n,
-                3 => (big_m - 1 - m) + n * big_m,
-                4 => (big_m - 1 - m) + (big_n - 1 - n) * big_m,
-                5 => (big_n - 1 - n) + (big_m - 1 - m) * big_n,
-                6 => (big_n - 1 - n) + m * big_n,
-                _ => m + (big_n - 1 - n) * big_m,
-            }
-        };
-        let ec = |e: usize, m: isize, big_n: isize, s: i32| -> usize {
-            edges[e] + or1d(m, big_n, s * oedge[e])
-        };
-        let i1 = i as isize - 1;
-        let j1 = j as isize - 1;
-        match 3 * f(j1, j_cap) + f(i1, i_cap) {
-            0 => verts[0],
-            1 => ec(0, i1, i_cap, 1),
-            2 => verts[1],
-            3 => ec(3, j1, j_cap, -1),
-            4 => p_offset + or2d(i1, j1, i_cap, j_cap, opatch),
-            5 => ec(1, j1, j_cap, 1),
-            6 => verts[3],
-            7 => ec(2, i1, i_cap, -1),
-            _ => verts[2],
+    /// `NURBSPatchMap::SetBdrPatchDofMap(bp, …)` for a 3-D patch, whose boundary
+    /// patch is a quadrilateral read with `operator()(i, j)`.
+    ///
+    /// `edgeMaster`/`faceMaster` are empty for a conforming extension —
+    /// `NURBSExtension::IsMasterEdge` returns false — so `EC`/`FC` take the
+    /// offset path and `FCP` the `pOffset` one; `BdrQuadDofMap::dof` implements
+    /// exactly that.
+    fn bdr_quad_dof_map(&self, bp: usize) -> BdrQuadDofMap<'_> {
+        let bv = self.bdr_element_vertices(bp);
+        debug_assert_eq!(bv.len(), 4, "a 3-D boundary element is a quadrilateral");
+        let face = self.find_face(&bv).expect("boundary element face");
+        let opatch = Self::quad_orientation(&self.faces[face], &[bv[0], bv[1], bv[2], bv[3]]);
+        // `Mesh::GetBdrElementEdges`: the boundary element's own local edges and
+        // their `cor` orientations.
+        let bdr_edges = [0usize, 1, 2, 3].map(|j| self.find_edge(bv[j], bv[(j + 1) % 4]));
+        let oedge: [i32; 4] = [0, 1, 2, 3].map(|j| if bv[j] < bv[(j + 1) % 4] { 1 } else { -1 });
+        // `KnotVec(edges[j], oedge[j], &okv[j])`, `j = 0, 1`.
+        let kvs = [0usize, 1].map(|j| &self.knot_vectors[self.knot_ind(bdr_edges[j])]);
+        let okv = [0usize, 1].map(|j| self.knot_sign(bdr_edges[j]) * oedge[j]);
+        let verts = [0usize, 1, 2, 3].map(|j| self.v_space_offsets[bv[j]]);
+        let edges = [0usize, 1, 2, 3].map(|j| self.e_space_offsets[bdr_edges[j]]);
+        BdrQuadDofMap {
+            verts,
+            edges,
+            oedge,
+            // `p2g.nx()/ny()` are `I + 1` = `GetNCP() - 1`.
+            nx: kvs[0].ncp() as isize - 1,
+            ny: kvs[1].ncp() as isize - 1,
+            i_cap: kvs[0].ncp() as isize - 2,
+            j_cap: kvs[1].ncp() as isize - 2,
+            kvs,
+            okv,
+            opatch,
+            p_offset: self.f_space_offsets[face],
         }
+    }
+
+    /// MFEM `NURBSExtension::ConnectBoundaries(Array<int>&, Array<int>&)` — the
+    /// `-pm`/`-ps` periodic boundary conditions of `nurbs_ex1`.
+    ///
+    /// Every pair `(master[i], slave[i])` names two *mesh boundary attributes*
+    /// whose boundary patches are identified DOF by DOF, so that the space
+    /// becomes periodic across them.  The pairing is resolved through
+    /// `patchTopo->GetBdrAttribute` exactly as MFEM does — including that the
+    /// **last** boundary element carrying the attribute wins, and that an
+    /// attribute with no boundary element aborts (`Bdr N not found`).
+    ///
+    /// MFEM's compaction is mirrored literally: `d_to_d` values are resolved in
+    /// increasing order of the *target* index, so the surviving DOFs keep their
+    /// relative order, and the element/boundary DOF tables are regenerated with
+    /// [`Self::dof_map`] in force.  `weights` keeps its pre-merge length, as in
+    /// MFEM (`LoadFE` indexes it by the merged DOFs, which are `<=` the old
+    /// count).
+    pub fn connect_boundaries(
+        &mut self,
+        master: &[i32],
+        slave: &[i32],
+    ) -> Result<(), String> {
+        if master.len() != slave.len() {
+            return Err(
+                "NURBSExtension::ConnectBoundaries() boundary lists not of equal size"
+                    .to_string(),
+            );
+        }
+        if master.is_empty() {
+            return Ok(());
+        }
+
+        // Initialize d_to_d.  It is indexed by the **un-compacted** DOF numbering
+        // of `NURBSPatchMap` — MFEM sizes it by `NumOfDofs`, which is
+        // `GetNTotalDof()` at this point in the constructor, not by the active
+        // count `GetNDof()`.
+        let mut d_to_d: Vec<usize> = (0..self.n_total_dofs).collect();
+
+        for i in 0..master.len() {
+            let (mut bnd0, mut bnd1) = (None, None);
+            for b in 0..self.boundary.len() {
+                if master[i] == self.boundary[b].attr {
+                    bnd0 = Some(b);
+                }
+                if slave[i] == self.boundary[b].attr {
+                    bnd1 = Some(b);
+                }
+            }
+            let bnd0 = bnd0.ok_or_else(|| "Bdr 0 not found".to_string())?;
+            let bnd1 = bnd1.ok_or_else(|| "Bdr 1 not found".to_string())?;
+
+            match self.dim {
+                1 => self.connect_boundaries_1d(&mut d_to_d, bnd0, bnd1),
+                2 => self.connect_boundaries_2d(&mut d_to_d, bnd0, bnd1)?,
+                _ => self.connect_boundaries_3d(&mut d_to_d, bnd0, bnd1)?,
+            }
+        }
+
+        // Clean d_to_d: compact the target indices in increasing order.
+        let mut tmp = vec![0i32; d_to_d.len() + 1];
+        for &d in d_to_d.iter() {
+            tmp[d] = 1;
+        }
+        let mut cnt = 0usize;
+        for t in tmp.iter_mut() {
+            if *t == 1 {
+                *t = cnt as i32;
+                cnt += 1;
+            }
+        }
+        for d in d_to_d.iter_mut() {
+            *d = tmp[*d] as usize;
+        }
+
+        self.d_to_d = d_to_d;
+        // Finalize: `GenerateElementDofTable()` + `GenerateBdrElementDofTable()`;
+        // the latter is evaluated on demand by `boundary_dof_table`, which now
+        // routes through `dof_map`.
+        self.generate_element_dof_table()?;
+        Ok(())
+    }
+
+    /// MFEM `NURBSExtension::ConnectBoundaries1D`: the two boundary points
+    /// coincide with one control point each (`NURBSPatchMap::operator()(0)` is
+    /// `verts[0]`, the `I = 0` vertex case).
+    fn connect_boundaries_1d(&self, d_to_d: &mut [usize], bnd0: usize, bnd1: usize) {
+        let p0 = self.v_space_offsets[self.boundary[bnd0].verts[0]];
+        let p1 = self.v_space_offsets[self.boundary[bnd1].verts[0]];
+        d_to_d[p0] = d_to_d[p1];
+    }
+
+    /// MFEM `NURBSExtension::ConnectBoundaries2D`: walk the boundary segment's
+    /// knot spans and pair the control points, honouring each boundary patch's
+    /// own orientation (`okv`).
+    ///
+    /// `nx` is `p2g0.nx()` and MFEM uses it for **both** maps (it is `I + 1`,
+    /// with `I` from the first map only) — mirrored here.
+    fn connect_boundaries_2d(
+        &self,
+        d_to_d: &mut [usize],
+        bnd0: usize,
+        bnd1: usize,
+    ) -> Result<(), String> {
+        let s0 = self.bdr_seg_dof_map(bnd0);
+        let s1 = self.bdr_seg_dof_map(bnd1);
+        let nx = s0.nx;
+
+        for i in 0..s0.kv.nks() {
+            if !s0.kv.is_element(i) {
+                continue;
+            }
+            if !s1.kv.is_element(i) {
+                return Err("isElement does not match".to_string());
+            }
+            for ii in 0..=s0.kv.order() {
+                let ii0 = if s0.okv >= 0 { i + ii } else { (nx - i as isize - ii as isize) as usize };
+                let ii1 = if s1.okv >= 0 { i + ii } else { (nx - i as isize - ii as isize) as usize };
+                let a = self.bdr_seg_dof(&s0, ii0);
+                let b = self.bdr_seg_dof(&s1, ii1);
+                d_to_d[a] = d_to_d[b];
+            }
+        }
+        Ok(())
+    }
+
+    /// MFEM `NURBSExtension::ConnectBoundaries3D`: the two boundary
+    /// quadrilaterals are paired span by span in both directions, again through
+    /// each map's own orientation; `nx`/`ny` come from the first map.
+    fn connect_boundaries_3d(
+        &self,
+        d_to_d: &mut [usize],
+        bnd0: usize,
+        bnd1: usize,
+    ) -> Result<(), String> {
+        let m0 = self.bdr_quad_dof_map(bnd0);
+        let m1 = self.bdr_quad_dof_map(bnd1);
+        let (nx, ny) = (m0.nx, m0.ny);
+
+        for j in 0..m0.kvs[1].nks() {
+            if !m0.kvs[1].is_element(j) {
+                continue;
+            }
+            if !m1.kvs[1].is_element(j) {
+                return Err("isElement does not match #1".to_string());
+            }
+            for i in 0..m0.kvs[0].nks() {
+                if !m0.kvs[0].is_element(i) {
+                    continue;
+                }
+                if !m1.kvs[0].is_element(i) {
+                    return Err("isElement does not match #0".to_string());
+                }
+                for jj in 0..=m0.kvs[1].order() {
+                    let jj0 =
+                        if m0.okv[1] >= 0 { j + jj } else { (ny - j as isize - jj as isize) as usize };
+                    let jj1 =
+                        if m1.okv[1] >= 0 { j + jj } else { (ny - j as isize - jj as isize) as usize };
+                    for ii in 0..=m0.kvs[0].order() {
+                        let ii0 = if m0.okv[0] >= 0 {
+                            i + ii
+                        } else {
+                            (nx - i as isize - ii as isize) as usize
+                        };
+                        let ii1 = if m1.okv[0] >= 0 {
+                            i + ii
+                        } else {
+                            (nx - i as isize - ii as isize) as usize
+                        };
+                        let a = m0.dof(ii0, jj0);
+                        let b = m1.dof(ii1, jj1);
+                        d_to_d[a] = d_to_d[b];
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// MFEM `NURBSExtension::GetNTotalDof`.
     pub fn n_total_dofs(&self) -> usize {
         self.n_total_dofs
+    }
+
+    /// MFEM `NURBSExtension::DofMap` — the *un-compacted* DOF index that
+    /// `NURBSPatchMap::operator()` returns, mapped onto the merged numbering of
+    /// [`Self::connect_boundaries`].  While no boundary has been connected this
+    /// is the identity (MFEM: `d_to_d.Size() == 0`), so every caller that walks
+    /// `NURBSPatchMap::operator()` in MFEM — the element DOF table, the boundary
+    /// DOF tables and `GetEssentialTrueDofs` — has to route through here.
+    ///
+    /// `dof` must come from [`Self::patch_dof`] / the boundary-patch maps; an
+    /// index of the *compacted* table (e.g. an entry of
+    /// [`Self::element_dof_table`]) is already in the final numbering and must
+    /// not be mapped again.
+    pub fn dof_map(&self, dof: usize) -> usize {
+        if self.d_to_d.is_empty() {
+            dof
+        } else {
+            self.d_to_d[dof]
+        }
     }
 
     /// MFEM `NURBSExtension::GetNDof` — the number of finite element unknowns.
