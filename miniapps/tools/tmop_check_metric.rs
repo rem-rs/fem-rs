@@ -80,7 +80,13 @@ fn main() {
             "-i" | "--iterations" => {
                 if let Some(v) = it.next() { if let Ok(val) = v.parse() { convergence_iter = val; } }
             }
-            _ => {}
+            // C++ `args.ParseCheck()`: OptionsParser rejects anything it does not
+            // know (`Unrecognized option: <opt>` + usage + exit 1) rather than
+            // ignoring it — measured rc=1 on the C++ binary for `-bogus`.
+            other => {
+                eprintln!("Unrecognized option: {other}");
+                std::process::exit(1);
+            }
         }
     }
 

@@ -141,7 +141,14 @@ fn main() {
                     perturb_s = args[i].parse().expect("Invalid perturb_s");
                 }
             }
-            _ => {}
+            // C++ `args.ParseCheck()`: OptionsParser rejects anything it does not
+            // know (`Unrecognized option: <opt>` + usage + exit 1) instead of
+            // ignoring it — measured rc=1 for both `-bogus` and the wrong short
+            // name `-pfa` (the aspect-ratio flag is `-par`).
+            other => {
+                eprintln!("Unrecognized option: {other}");
+                std::process::exit(1);
+            }
         }
         i += 1;
     }
