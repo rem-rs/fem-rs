@@ -1102,7 +1102,8 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 | T1 | `9370e49` | 高阶 **`nodes` 段 writer** 落地 + **D116 几何侧闭环**（tet 族分裂） |
 | T3 | `a5bf540` | **D144**（`extrusion.rs` 四处 + 楔侧面三角形→四边形）、**D145**（hpref root states）、**D148 撤销** |
 | T4 | `f642c21` | `tools/`6 + `toys/`3 + `nurbs/`2 共 **11 件**用新二进制重测后逐件处置（4 件做到逐字节） |
-| T2 | 本轮收尾提交 | gslib 收口：**D146**（H¹ GLL vs 等距族）、**D147**（候选上限）双双真修 |
+| T2 | `854da9c` | gslib 收口：**D146**（H¹ GLL vs 等距族）、**D147**（候选上限）双双真修 |
+| 收尾 | `7d989ce` `9906141` `d7d13c8` `b7310f7` `f9b6c95` | glvis flake 修复（D163）、tmop 文案更正、README+plan 文档、债务重编号、tmop 未知选项拒绝 |
 
 ⚠️ **本轮的一条纪律事实（务必记录）**：T4 路由**代理自己**在 21:52 落了 `f642c21`（author `unknown <nobody@nowhere.com>`），
 而 HANDOVER §0 的快照写的是"T2/T4 在工作树未提交"。⇒ **收尾时不能只信 HANDOVER 的状态表，必须 `git log`/`git status` 现场重看**；
@@ -1194,6 +1195,12 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
    —— 测试的 server stub 在客户端仍读时 `close`，且单次 `read` 可能只取到命令的一部分，**留下未读字节的 close 在
    Windows 回环上变成 RST**。修法：stub 按整行读命令（`BufReader::read_line`）并**一直持有套接字到对端挂断**
    （读完再 `drop(vis)` 才 `join`）。修后 **0/100 失败**。
+3. **两个 tmop 工具静默忽略未知命令行选项（已修，`f9b6c95`）**：参数匹配的兜底臂是 `_ => {}`，于是
+   `-pfa 2`（真名是 `-par`）会被悄悄丢掉、按默认档跑完。C++ `OptionsParser::ParseCheck` 是
+   `Unrecognized option: <opt>` + usage + **exit 1**（已实测 `-bogus`/`-pfa` 均 rc=1）⇒ 现两件都改成同样行为。
+   **顺带核对**：两件的选项名与 C++ `AddOption`（`tmop-metric-magnitude.cpp:44-49`、`tmop-check-metric.cpp:38-43`）
+   本来就一致，只有兜底行为不同。这个缺口是**抽查数字时**发现的
+   （`-pfa 2` 在 Rust 打印 `Magnitude … 0` 而 C++ 直接拒绝运行）。
 
 ### 6. 方法论收获（补进 §二）
 - **"grep `case N:` 必须排除注释行"**：MFEM 把未启用的 metric 写成 `// case 211:`；用 `grep -cE "case [0-9]+:"`

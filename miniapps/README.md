@@ -47,14 +47,17 @@ miniapps/
 │   │                            EvalP/AssembleH 收敛阶，而 `fem_mesh::tmop` 只有简化元素能量 +
 │   │                            有限差分梯度/Hessian ⇒ 21/40 id 可算但无真值，故不跑检查、
 │   │                            打印缺口清单后 `exit(3)`（旧的固定 21 项自检是**另一个程序**，
-│   │                            且 2-D 恒报 `0/0`）
+│   │                            且 2-D 恒报 `0/0`）。**未知命令行选项**已按 C++ `OptionsParser`
+│   │                            的 `Unrecognized option: <opt>` + **exit 1** 处理（旧版 `_ => {}`
+│   │                            会静默丢掉，例如把 `-par` 误写 `-pfa` 会按默认档跑完）
 │   ├── tmop_metric_magnitude.rs ← ⚠️ **round 32：id zoo 与出口码对齐 C++，声明式 exit(3)**。
 │   │                            C++ 未注释 case 实测 **25 个**；`fem_mesh::tmop` 缺其中
 │   │                            `85/98/322`（T-metric）与 `11/36/107`（A-metric）⇒ 这些 id
 │   │                            打 C++ 原文 `Unknown metric_id` + rc 3，并在 stderr 说明
 │   │                            "C++ 接受它、只是 fem-rs 没实现"；而 C++ 也不认的 id
 │   │                            （`999`、注释行里的 `211`）则明确注明"C++ 同样不认"。
-│   │                            输出行改用 `fem_solver::fmt_g`（C++ 6 位有效数字）
+│   │                            输出行改用 `fem_solver::fmt_g`（C++ 6 位有效数字）；**未知命令行
+│   │                            选项**同样按 `OptionsParser` 打 `Unrecognized option:` + exit 1
 │   ├── gridfunction_bounds.rs ← ⚠️ **round 32：改 `exit(3)` + 缺口清单**（旧版两列打印同一个
 │   │                            数值）。C++ 该程序是 **MPI-only**（`Mpi::Init`/`ParMesh`/
 │   │                            `ParGridFunction`/`MPI_Allreduce`，已 grep 源码确认）⇒ 串行
