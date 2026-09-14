@@ -1511,6 +1511,61 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **主会话亲验**（不是转述）：toroid wedge o3 = **8.12e-15** vs 17 位 C++ 参考、hex rs1 = **4.61e-08**（与入库夹具双对拍）、mobius = **4.64e-08** / klein = **4.79e-08**（TOPOLOGY-IDENTICAL + r31_meshread/r32_probe 双侧同）、pacoustics rc=3、pdiffusion 数字未被重构破坏（resume 代理 6/6 + round-33 数字一致）。
 - pro 层 `cargo check -p pro-bench-tests -p pro-cad -p pro-iga`：**0 错误**。
 
+## 第三十五轮（round 35）：四路并行 —— 复数并行 DPG 求解 / 细化保几何 wedge+tri / L2 wedge 编号 / p-refine 棱柱
+
+### 0. 本轮形状
+**四路全部交付了完整报告**（round 33/34 连续丢报告后，"预期报告丢失、证据留 tmp/ + interim 勤报"的派单模板生效了：4 路共发了 6 条 interim + 4 份 final）。
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D172 后半**：复数并行 DPG **求解** ⇒ `pacoustics` 转正 | ✅ **表格式逐位对拍 C++ MPI**（7 配置） |
+| ② | **D173**：细化保几何 —— wedge + tri（tet/mixed 诚实留待） | ✅ wedge **门解除** + tri 精确；tet/mixed-3d 未动（→ 保持 D173 开放） |
+| ③ | **D165**：`L2_WedgeElement` 不连续 `nodes` 编号 | ✅ **toroid `-e 0 -dm` 门解除**，与 C++ 对拍通过 |
+| ④ | **D174**：p-refine 棱柱表 | ✅ **前提被证伪并重写**（见 §4）——棱柱原来自动落进 tet 分支 |
+
+### 1. ① 路：`pacoustics` 转正（D172 推进到 **2/4**）
+- 新 `crates/parallel/src/par_complex_solver.rs`（337 行）：`ComplexBlockDiagGs`（复块对称 GS）+ `par_solve_complex_pcg`（并行复 Hermitian PCG）；`par_complex_dpg_weakform.rs` 补齐静态凝聚端到端 + 解恢复 + 残差归并。
+- **主会话亲验（默认档，对照代理留档的 C++ MPI 日志）**：
+  ```
+  C++   : 0 | 113 | 2.0 π | 8.008e-01 | 0.00 | 1.374e+00 | 0.00 | 23 it   (np2)
+  fem-rs: 0 | 113 | 2.0 π | 8.008e-01 | 0.00 | 1.374e+00 | 0.00 | 36 it   (--ranks 2)
+  ```
+  **Dofs/L2/Residual 全部逐位一致**（PCG 迭代数不复刻，已声明：fem-rs 用自研复块 sym-GS + rtol 1e-12 vs MFEM 的 Hypre `ComplexPreconditioner` + rtol 1e-6；C++ 自身也分区相关 18 vs 23）。其余 6 配置（`-sref 1`/`-sc`/`-sc -sref 1`/`-prob 1` np1+np2）代理对拍全逐位，含 `-prob 1` 未打印的 p/u 误差拆分（仪器化 C++ 复跑对到 7 位）。
+- **顺带修掉一个 round-34 潜伏 bug**：`recover_fem_solution` **从不拷贝 owned 虚部段**（复数解恢复后虚部恒 0；单这一条就使 L2 1.171 vs 8.008e-01）——直到真正跑复数求解才现形，已被新 np1 测试的断言钉死。
+- 另一发现：非多项式载荷必须用 C++ 的逐积分器规则（`DomainLFIntegrator` = `2*test_order+0`），Gaussian beam RHS 用错规则时 p/u 误差漂 5.3e-5。
+- `pmaxwell` 仍 `exit(3)`（缺口清单已刷新：ND-trace/3-D H1-trace 编号、PML、空间变矩阵系数）；`pacoustics -prob ≥ 2`（PML/scatter/GSLIB）仍 `exit(3)`（主会话实测 rc=3）。
+
+### 2. ② 路：wedge + tri 细化保几何（D173 部分关闭）
+- **wedge**：新 `curved_prism.rs`（~560 行：`PrismPkGeometry` 父场求值 + MFEM `pri_children` 子映射含旋转中心子 + `(x,y,z)→(z,x,y)` 置换 + 规范键共享细边/三形面/四边形面 dof）+ `MfemPrismRefineIds`（MFEM 顶点预分配，oedge+E / oface+f2qf）+ MFEM 子元序与边界面序。**兼容两种表序**（`set_curvature` layer-major 与 reader 实体序，经 `H1PrismPk::layer_perm` 探测）。
+  **主会话亲验**：`mesh_toroid -e 0 -rs 1 -o 3` = **TOPOLOGY-IDENTICAL、4.64683e-08**（rs2 = 4.83e-08、o2 = 3.41e-08、o4 = 4.83e-08 代理自验）；round-34 的 hex 基线 4.61e-08 不变。**toroid 的最后一个 `-rs` 门解除**。
+- **tri**：新 `curved_tri.rs` + `bisect.rs` 几何拾取；对 C++ 探针（`square-disc-p2.mesh` 细化一次）：616/616 单元 + 96/96 边界面**连接逐字节相同**，1328 个 nodes dof **max |Δ| = 5.55e-17**。
+- **诚实边界**：`refine_mixed_3d`/`refine_nonconforming_3d`（tet）未动；2-D mixed **不可达**（本仓无法构造曲面混合 2-D 网格，已在文档注明）。
+- **新发现（→D176–D179，见债务节）**：wedge reader 的多单元全局 dof 编号发散、2-D 三形 `nodes` writer 缺失、`mark_tri` 旋转与曲面几何表去同步、直网格 wedge `-rs 1 -o 1` 本就不是 MFEM 拓扑同构（预存，留证据）。
+
+### 3. ③ 路：`L2_WedgeElement` 编号（D165 关闭）
+- **关键发现（打印 `Poly_1D` 点表实证，非对称性推断）**：`SetCurvature(order, true, …)` 传入的 `btype=1 = GaussLobatto`（`L2_T1` 名字里的 **`T1` 就是 btype 1**）⇒ 不连续 wedge `nodes` 的点**也是 GLL**（p=3: `{0, 0.276393…, 0.723607…, 1}`），**不是等距** ⇒ 与连续路径一样是**纯置换**，无需插值矩阵。填充序 `fe_l2.cpp:839`：`m = k·T + l`（层 k × `L2_TriangleElement` 序 l）。
+- **主会话亲验**：`mesh_toroid -e 0 -dm -o 3` = `FEC=L2_T1_3D_P3 vdim=3 ndofs=320`（= 8·(p+1)²(p+2)/2），vs C++ 产物 **TOPOLOGY-IDENTICAL、3.87e-08**；6 个新夹具 `flatprism_l2-p{2,3,4}-m{0,1}.mesh`（MFEM 4.10 产出）。**toroid 全部四条门现在都开着**（`-e 0/1 × -dm/-rs`）。
+
+### 4. ④ 路：D174 的前提被证伪，实测后重写（D174 关闭）
+- **调查结论**：`p_refine.rs` **从来没有棱柱表**——`build_variable_order_dof_manager` 的 3-D 分支按 `ns.len() == 8`（hex）二分，6 节点楔形**静默落进 tet 分支**（伪造 6 条边、4 个三形面、**0 个内部 dof**、等距边点、无楔-楔共享边键）⇒ 无 panic、无测试覆盖、round-34 的备注是"应该做"而非"做错了序"。
+- **MFEM 侧事实**（探针实证）：变阶空间要求 NC 网格；`NCMesh` 支持棱柱树；`GetElementDofs` 的变阶行正是 `H1PrismPk` 实体序（顶点→边→面→内部）；但 `PRefinementSupported()`（`fespace.cpp:4343`）对非纯 SQUARE/CUBE 返回 **false** ⇒ **MFEM 自己做不了楔形 hp 端到端对照**——本轮以探针行值（p=4 布局含底面 (0,2,1) 置换、混阶约束权重 `(0.3236068, 0.8, −0.1236068)` 与三形面闭合 `−1/9 ×3, +4/9 ×3`，全部从探针行转写）+ 恒等式测试钉住，8 项新测试全部在旧代码上失败/panic。
+- **顺带修掉一个真缺陷**：`FaceKey` 对**有序四边形面只排前三个节点** ⇒ 两单元共享面时方向相反的环得到不同键 ⇒ **每侧各自成套的面变体 dof（空间不连续）**——hex 路径同样受影响，唯一 hex 变阶测试网格是单 hex 所以没暴露；`canon_quad_face`（循环规范键）在全部 6 处调用点落地。
+- **留档发现（→D176）**：遗留 tet/hex 路径的混阶面约束与 MFEM 不同（MFEM 在**最低相邻阶**处取 master 即使该变体 0 内部 dof——`MakeDofTable fespace.cpp:3289` 存空变体；fem-rs 在最低**已存**变体取 master）⇒ 新棱柱分支 MFEM-exact，tet/hex 未动（测试绿）。
+
+### 第三十五轮新债务
+- **D176（P2）tet/hex 混阶面约束与 MFEM 发散**：MFEM 在最低**相邻**阶取 master（0 内部 dof 的变体也存表并约束），fem-rs 在最低**已存**变体取 master ⇒ 低阶界面上那些 dof 在 fem-rs 是自由的。棱柱分支已 MFEM-exact（本轮），tet/hex 待对齐（需 `MakeDofTable fespace.cpp:3289` + 探针行 72–76 语义）；另：变阶行的面变体存规范朝向、无逐元 `TriDofOrd`/`QuadDofOrd` 再定向（与既有 tet/hex 同款简化，已在 builder doc 注明）。
+- **D177（P2）wedge reader 的多单元全局 dof 编号**：`DofManager::build_prism_h1` 逐元 first-touch，与 MFEM 的按实体文件编号在多棱柱网格上发散 ⇒ 读回曲面 wedge `nodes` 时非顶点几何 dof 被打乱（单元素恰好重合，故夹具全绿）；reader 是 D41"未验证"领域。
+- **D178（P3）2-D 三形 `nodes` writer 缺失**（writer 只收 Hex8/Tet4/Prism6/Quad4）⇒ 曲面 tri 网格无法带曲率写出（本轮 tri 细化对拍只能在测试内走 MFEM 编号游走）。
+- **D179（P3）`mark_tri_mesh_for_refinement` 的旋转置换 conn 但不置换几何表槽** ⇒ 读回的曲面 tri 网格被去同步（旋转本身与 MFEM `MarkEdge` 逐位一致 0/154；修在 mark 侧）。
+- **D180（P3）直网格 wedge `-e 0 -rs 1 -o 1` 本就不是 MFEM 拓扑同构**（elem 0 slot 4 CONN-MISMATCH；历史子元序 + 16 个未引用顶点被 writer 丢弃）——预存，按"直网格逐位不变"纪律保留，证据 `tmp/r35b/`。
+- **关闭**：~~D165~~（③ 路）、~~D174~~（④ 路，前提证伪后真修）、**D173 的 wedge+tri 部分**（tet/mixed-3d 残余留在 D173）、**D172 推进到 2/4**（pdiffusion + pacoustics 转正；pmaxwell/pconvection-diffusion 残余）。
+- 沿用开放：D157（tet 场空间 GLL）、D158–D162、D169/D170、D143 残留。
+
+### 本轮统计
+- **测试增长**：`fem-parallel` 238 → **241**（复数 PCG/块-GS/np1 系统对拍）；`fem-space` 新增 `p_refine_prism.rs`（8 项，旧代码上全失败）；`fem-io` 新增 `prism_l2_nodes_writer.rs`（3 项）；`fem-mesh` 新增 `toroid_wedge_curved_refine.rs` + `tri_curved_refine.rs`。全部实跑确认。
+- **主会话亲验**（不是转述）：pacoustics 默认档表行逐位（仅 PCG 数不同，已声明）、wedge rs1 = **4.64683e-08** TOPOLOGY-IDENTICAL、`-dm -o 3` = **3.87e-08** 且 `L2_T1_3D_P3`、pacoustics `-prob 2` 与 pmaxwell rc=3。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 665+8ign / element 500 / io 132 / linalg 66 / linalg-gpu 13+2ign / mesh 305 / **parallel 241** / solver 264 / space 287）；集成层 25 套 ok + 预存 D73（`7.9085e-2` 逐位）；examples **0 错误（9m57s）**；pro 层 **0 错误**。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。

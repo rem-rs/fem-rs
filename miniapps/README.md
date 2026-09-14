@@ -305,11 +305,13 @@ miniapps/
 │   │                            layer-major**（MFEM 的实体序由场空间侧新元素 `H1PrismPk`
 │   │                            承担，D168；dof_manager 的 p=2 prism 布局顺带修复——旧
 │   │                            `build_p2_prism` 把三形面 dof 覆写到边槽、16/17 槽别名到顶点 0）。
-│   │                            仍 `exit(3)` 的两处：`-e 0 -dm -o>1`（缺 `L2_WedgeElement`
-│   │                            编号，D165）与 `-e 0 -rs>0 -o>1`（prism 细化几何，D173；
-│   │                            **hex 的 `-e 1 -rs>0 -o>1` 已由 round 34 D166 解锁**：
-│   │                            `MfemHexRefineIds` 复刻 MFEM 的 `[边|面|体]` 预分配顶点编号，
-│   │                            rs1 = TOPOLOGY-IDENTICAL、4.61e-08）。
+│   │                            **round 35：toroid 全部门已开**——`-e 0 -dm -o>1` 由 D165
+│   │                            解锁（关键发现：`L2_T1` 的 **T1 = BasisType::GaussLobatto**，
+│   │                            不连续 wedge 点**也是 GLL 而非等距** ⇒ 纯置换；`-dm -o 3` =
+│   │                            `L2_T1_3D_P3`、TOPOLOGY-IDENTICAL、**3.87e-08**）；wedge 的
+│   │                            `-e 0 -rs>0 -o>1` 由 D173 解锁（`curved_prism.rs` +
+│   │                            `MfemPrismRefineIds`，rs1 = TOPOLOGY-IDENTICAL、**4.65e-08**，
+│   │                            rs2 4.83e-08；tri 细化也精确到 5.55e-17）。
 │   │                            prism 编号本身用新夹具
 │   │                            `crates/io/tests/data/flatprism-p{2,3,4}-m{0,1}.mesh`（MFEM 4.10
 │   │                            自己产出）整文件对拍到 **1e-14**
@@ -623,14 +625,22 @@ miniapps/
 │   │                            新增 3 项单测（`fem-parallel --lib` 232 → 235），含
 │   │                            "改前必失败"证据（回退那一行后 `pdiffusion --ranks 2 -sref 0`
 │   │                            打印 `L2 = 1.779e+00`，应为 1.021e+00）
-│   ├── pacoustics.rs        ← ⚠️ **诚实 exit(3) + 缺口清单**（round 34 D172 推进：复数
-│   │                            并行 DPG 的**迹编号/`PᴴAP` 分块/全局 id 消元**已落地
-│   │                            （`par_complex_dpg_weakform.rs`，C++ 参考的 `Dofs` 列已被
-│   │                            钉住）；仍缺**复数并行求解器**（ComplexBlockDiagonal-
-│   │                            Preconditioner + ComplexPCG）与静态凝聚并行系统 ⇒
-│   │                            "拒绝打印收敛表：错误的 L2/迭代数绝不能当成功报"）
-│   ├── pmaxwell.rs          ← ⚠️ **诚实 exit(3) + 缺口清单**（缺复数求解器 + 3-D H1-trace/
-│   │                            ND-trace 并行编号；PML 档还需空间变化的**矩阵**系数）
+│   ├── pacoustics.rs        ← ✅ **round 35（D172 后半）：转正，`exit 0`**。主会话亲验
+│   │                            （默认档 vs C++ MPI 参考日志）：
+│   │                            `0 | 113 | 2.0 π | 8.008e-01 | 1.374e+00` —— **Dofs/L2/Residual
+│   │                            逐位一致**（仅 PCG 迭代数 36 vs 23：fem-rs 自研复块 sym-GS +
+│   │                            rtol 1e-12 vs MFEM Hypre `ComplexPreconditioner` + rtol 1e-6，
+│   │                            C++ 自身也分区相关）。代理对拍 7 配置（`-sref 1`/`-sc`/`-sc -sref 1`/
+│   │                            `-prob 1` np1+np2）全逐位，含 `-prob 1` 未打印的 p/u 误差拆分
+│   │                            （仪器化 C++ 对到 7 位）。内核新增
+│   │                            `par_complex_solver.rs`（复块对称 GS + 并行复 Hermitian PCG）
+│   │                            + 静态凝聚端到端/解恢复/残差归并；**顺带修掉 round-34 潜伏 bug**
+│   │                            （`recover_fem_solution` 从不拷贝 owned 虚部段 ⇒ 复数解恢复后
+│   │                            虚部恒 0，L2 1.171 vs 8.008e-01；已被新 np1 测试钉死）。
+│   │                            仍 `exit(3)`：`-prob ≥ 2`（PML/scatter/GSLIB 点源）、3-D 网格、
+│   │                            `-pref > 0`、`-pmg`
+│   ├── pmaxwell.rs          ← ⚠️ **诚实 exit(3) + 缺口清单**（round 35 刷新：求解机器已就绪，
+│   │                            仍缺 ND-trace/3-D H1-trace 并行编号 + PML + 空间变**矩阵**系数）
 │   └── pconvection_diffusion.rs ← ⚠️ **诚实 exit(3) + 缺口清单**（缺带系数的 DPG 积分器 +
 │                                `setup_test_norm_coeffs`）
 │      ✅ **round 34（D167）：库层已修**——`from_local_matrix` 的 ghost 列数改从
