@@ -64,9 +64,11 @@
 //! * `-prob >= 2` (PML): the `CartesianPML` stretched-map coefficients and
 //!   the restricted/PML integrator set are not ported; `prob 3-5` also need
 //!   the `meshes/scatter.mesh` / GSLIB point-source machinery.  Exits 3.
-//! * 3-D meshes (`inline-hex.mesh`): the parallel 3-D H1-trace numbering
-//!   (skeleton **edge** DOFs shared by every incident face) is not
-//!   implemented.  Exits 3.
+//! * 3-D meshes (`inline-hex.mesh`): the 3-D parallel trace numbering (H1
+//!   trace with skeleton **edge** dofs shared by every incident face, and the
+//!   ND trace) exists since round 37 (`fem_parallel::par_dpg_numbering`,
+//!   verified via `pmaxwell`); what is missing here is only the 3-D acoustics
+//!   block table wiring in this miniapp.  Exits 3.
 //! * `-pref > 0` (parallel AMR + `Update()`): same gap as `pdiffusion` (the
 //!   marked-refinement repartitioning breaks the identity node numbering the
 //!   DPG trace numbering requires).  Exits 3.
@@ -763,11 +765,10 @@ fn main() {
         Some(m) => m,
         None => {
             eprintln!(
-                "pacoustics: GAP — 3-D H1-trace parallel numbering is missing.  The 3-D H1 \
-                 trace has DOFs on the skeleton EDGES (shared by every incident face) as \
-                 well as on face interiors, while the parallel numbering implements the 2-D \
-                 H1 trace (shared vertices) and face-discontinuous traces only \
-                 (crates/parallel/src/par_dpg_numbering.rs panics for the 3-D combination)."
+                "pacoustics: GAP — the 3-D acoustics block table (F ∈ H¹ on hexes, \
+                 ω²-scale factors) is not wired here.  The 3-D parallel trace numbering \
+                 itself (H1 trace with edge-shared dofs, ND trace) landed in round 37 \
+                 (`fem_parallel::par_dpg_numbering`, verified by `pmaxwell -prob 1`)."
             );
             exit(3);
         }

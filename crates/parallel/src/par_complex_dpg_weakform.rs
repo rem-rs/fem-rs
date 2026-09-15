@@ -14,11 +14,12 @@
 //! `[[A_r, −A_i], [A_i, A_r]]` is available for real-only solvers through
 //! [`ComplexDpgSystem::to_real_block_csr`] on the serial side.
 //!
-//! # Status (D172, partial)
+//! # Status (D172)
 //!
-//! * 2-D trace numbering (H1 + face-discontinuous) and the complex
-//!   `Pᴴ A P`/`Pᴴ b` split: implemented (the 3-D H1/ND trace numbering
-//!   panics with a clear message, same as the real form).
+//! * Trace numbering: 2-D H1 + face-discontinuous, 3-D H1 (shared mesh edges)
+//!   and 3-D ND (`ND_Trace_FECollection`, edge-shared H(curl) traces with the
+//!   MFEM orientation semantics) — all implemented in
+//!   [`crate::par_dpg_numbering`]; the complex `Pᴴ A P`/`Pᴴ b` split on top.
 //! * Static condensation: both the uncondensed and the statically condensed
 //!   parallel systems are wired ([`Self::form_linear_system`] /
 //!   [`Self::recover_fem_solution`], mirrored on the real
@@ -509,10 +510,13 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
                 .min(x_owned.len() - self.n_owned);
             data[half..half + ni].copy_from_slice(&x_owned[self.n_owned..self.n_owned + ni]);
         }
-        if self.n_ghost > 0 {
-            self.ghost_exchange.forward(&self.comm, &mut data[..half]);
-            self.ghost_exchange.forward(&self.comm, &mut data[half..]);
-        }
+        // The exchange must run on EVERY rank (not only those holding
+        // ghosts): the channel sets are symmetric after `build_numbering`,
+        // and a rank holding no ghosts may still have to *serve* another
+        // rank's requests (the condensed 3-D system: the lowest rank owns
+        // every shared trace dof).  Trivial on one rank (empty channels).
+        self.ghost_exchange.forward(&self.comm, &mut data[..half]);
+        self.ghost_exchange.forward(&self.comm, &mut data[half..]);
         let n_target = self.sys_global.len();
         let mut u = vec![0.0_f64; 2 * n_target];
         for s in 0..n_target {
@@ -558,6 +562,51 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
                     blk.global_base as u32 + blk.gof[d],
                     self.local.face_dof_point(&sk, f, k),
                 ));
+            }
+        }
+        out
+    }
+
+    /// Boundary-face DOFs of trial block `b` as
+    /// `(absolute global dof, full serial trial index)` — covers the scalar
+    /// trace families ([`SkeletonSpace`]) **and** the 3-D ND trace
+    /// ([`TraceSpace`]).  The index form lets callers project vector /
+    /// tangential boundary data themselves (MFEM
+    /// `ProjectBdrCoefficientTangent` / `…Normal` need the face Jacobian at
+    /// each DOF node, not just the point).
+    pub fn trace_boundary_dofs_ix(&self, b: usize) -> Vec<(u32, usize)> {
+        let bi = self
+            .blocks
+            .iter()
+            .position(|blk| blk.trial == b)
+            .expect("trace_boundary_dofs_ix: block not in the system");
+        let blk = &self.blocks[bi];
+        let mut out = Vec::new();
+        if matches!(self.kinds[b], DpgBlockKind::FaceNd) {
+            let tr = self.local.nd_trace(b);
+            for f in 0..tr.n_faces() {
+                if !tr.is_boundary_face(f) {
+                    continue;
+                }
+                for &d in tr.face_dof_list(f) {
+                    if d >= blk.size || blk.gof[d] == INACTIVE {
+                        continue;
+                    }
+                    out.push((blk.global_base as u32 + blk.gof[d], blk.full_base + d));
+                }
+            }
+        } else {
+            let sk = self.local.skeleton(b);
+            for f in 0..sk.n_faces() {
+                if !sk.is_boundary_face(f) {
+                    continue;
+                }
+                for &d in sk.face_dof_list(f) {
+                    if d >= blk.size || blk.gof[d] == INACTIVE {
+                        continue;
+                    }
+                    out.push((blk.global_base as u32 + blk.gof[d], blk.full_base + d));
+                }
             }
         }
         out
@@ -658,6 +707,59 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
     }
 
+    /// Sign-correct variant of [`Self::global_residual_norm`] for systems
+    /// with orientation-signful trace blocks (the 3-D `ND_Trace_FECollection`).
+    ///
+    /// MFEM's `ComplexDPGWeakForm::ComputeResidual` stores the **raw**
+    /// (unfolded) whitened element blocks and applies the trace dof signs
+    /// once, when gathering the element coefficients
+    /// (`GetSubVector` over the sign-encoded vdofs).  The fem-rs serial form
+    /// stores the sign-folded columns instead (which is what makes the plain
+    /// global scatter equal MFEM's `AddSubMatrix` result), so the residual
+    /// must multiply them with the **unsigned** global coefficients — the
+    /// serial `compute_residual` sigma-decodes first and double-applies the
+    /// signs.  With all +1 signs (scalar 2-D traces, volume blocks) both
+    /// variants agree; with ND traces the serial variant is wrong
+    /// (assembly-side debt **D195** — this method is the parallel-side
+    /// workaround until that is fixed in `crates/assembly`).
+    pub fn global_residual_norm_unfolded(&self, x_full: &[f64]) -> f64 {
+        let n = x_full.len() / 2;
+        let (xr, xi) = (&x_full[..n], &x_full[n..]);
+        let rank = self.comm.rank();
+        let nblocks = self.local.n_trial_blocks();
+        let mut acc = 0.0_f64;
+        for e in 0..self.local.mesh().n_elements() {
+            if self.partition.elem_owner[e] != rank {
+                continue;
+            }
+            let (ybr, ybi, fr, fi, n_tr) = self.local.element_stored(e);
+            // Element coefficients in the GLOBAL (unsigned) basis — the
+            // stored blocks are sign-folded already.
+            let mut ur = vec![0.0_f64; n_tr];
+            let mut ui = vec![0.0_f64; n_tr];
+            let mut off = 0usize;
+            for b in 0..nblocks {
+                let vd = self.local.trial_element_vdofs(b, e as u32);
+                for (li, &g) in vd.iter().enumerate() {
+                    ur[off + li] = xr[g];
+                    ui[off + li] = xi[g];
+                }
+                off += vd.len();
+            }
+            let rows = ybr.len() / n_tr;
+            for k in 0..rows {
+                let mut sr = -fr[k];
+                let mut si = -fi[k];
+                for j in 0..n_tr {
+                    sr += ybr[k * n_tr + j] * ur[j] - ybi[k * n_tr + j] * ui[j];
+                    si += ybr[k * n_tr + j] * ui[j] + ybi[k * n_tr + j] * ur[j];
+                }
+                acc += sr * sr + si * si;
+            }
+        }
+        self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
+    }
+
     /// Absolute global ids of the owned compact rows.
     pub fn owned_global_ids(&self) -> &[u32] {
         &self.owned_global
@@ -688,6 +790,14 @@ impl<M: MeshTopology + Clone + 'static> crate::par_dpg_numbering::DpgNumberingLo
     fn with_skeleton<R>(&self, tb: usize, f: impl FnOnce(&fem_assembly::dpg::dpg_basis::SkeletonSpace<M>) -> R) -> R {
         let sk = ComplexDPGWeakForm::skeleton(self, tb);
         f(&sk)
+    }
+    fn with_nd_trace<R>(
+        &self,
+        tb: usize,
+        f: impl FnOnce(&fem_assembly::dpg::dpg_basis::TraceSpace<M>) -> R,
+    ) -> R {
+        let tr = ComplexDPGWeakForm::nd_trace(self, tb);
+        f(&tr)
     }
     fn numbering_mesh(&self) -> &M {
         ComplexDPGWeakForm::mesh(self)
@@ -868,6 +978,143 @@ mod tests {
         });
         let msg = out.lock().unwrap().clone();
         assert!(msg.is_some(), "rank 0 must report");
+    }
+
+    /// C++ `mpirun -np {1,2} pmaxwell -m inline-hex.mesh -no-vis -pref 0
+    /// -prob 0` (MFEM 4.10, `inline-hex.mesh` = 4×4×4 hexes, order 1) prints
+    /// `Dofs = 984` with per-space true sizes E=192, H=192, Ê=300, Ĥ=300
+    /// (ND trace(1): 1 dof per each of the 300 mesh edges).
+    #[test]
+    fn complex_maxwell_nd_trace_numbering_np2_matches_cpp_reference() {
+        // 2×2×2 hex grid (the `dpg_maxwell_3d` `hex2.mesh` reference): E=24,
+        // H=24, Ê=Ĥ = 1 dof × 54 mesh edges, total 156 — the C++ Dofs column
+        // of `pmaxwell -m hex2.mesh -o 1 -do 0`.
+        use fem_assembly::dpg::dpg_integrators::{
+            DpgCurl3dPairingIntegrator, DpgTVectorFEMassIntegrator, DpgTangentTraceIntegrator3D,
+        };
+        let full = Arc::new(Mesh::<3>::unit_cube_hex(2));
+        let out = Arc::new(std::sync::Mutex::new(None::<String>));
+        let out2 = Arc::clone(&out);
+        let ma = Arc::clone(&full);
+        ThreadLauncher::new(WorkerConfig::new(2)).launch(move |comm| {
+            let rank = comm.rank();
+            let par_mesh = partition_mesh_identity(&ma, &comm);
+            let mut a = ParComplexDPGWeakForm::new(
+                par_mesh.local_mesh().clone(),
+                par_mesh.partition().clone(),
+                comm.clone(),
+            );
+            a.set_quad_order(4);
+            a.store_matrices(true);
+            let es = a.add_trial_vector_space(0, 3);
+            let hs = a.add_trial_vector_space(0, 3);
+            let hate = a.add_trial_trace_space_nd(1);
+            let hath = a.add_trial_trace_space_nd(1);
+            let g = a.add_test_space(VolKind::HCurl, 1);
+            a.add_trial_integrator(
+                None,
+                Some(Box::new(DpgTVectorFEMassIntegrator { q: 1.0 })),
+                es,
+                g,
+            );
+            a.add_trial_integrator(
+                Some(Box::new(DpgCurl3dPairingIntegrator { q: 1.0 })),
+                None,
+                hs,
+                g,
+            );
+            a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator3D)), None, hath, g);
+            a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, g, g);
+            a.assemble();
+
+            // Rank-invariant global counts — the C++ reference numbers.
+            assert_eq!(
+                a.n_global_trial(),
+                &[24, 24, 54, 54],
+                "rank {rank}: per-block global trial dofs must match the C++ pmaxwell"
+            );
+            assert_eq!(a.n_global_trial_dofs(), 156, "rank {rank}: total dofs");
+            let owned_sum = allreduce_sum_u64(&comm, a.n_owned_dofs() as u64) as usize;
+            assert_eq!(owned_sum, 156, "rank {rank}: owned dofs must sum to the total");
+
+            // Essential BCs over the Ê ND trace (edge-shared dofs included):
+            // the parallel boundary walk must reproduce the serial one's size
+            // and the formed multi-rank system must keep cross-rank couplings.
+            let pairs = a.trace_boundary_dofs_ix(hate);
+            let ess_g: Vec<u32> = pairs.iter().map(|(g, _)| *g).collect();
+            // Global count of the boundary dofs: owned ids are disjoint
+            // across ranks, so summing the owned intersections counts each
+            // global dof exactly once (48 = the boundary edges of the 2×2×2
+            // grid = 54 total edges − 6 fully interior ones).
+            let ess_set: std::collections::BTreeSet<u32> = ess_g.iter().copied().collect();
+            let local_ess = a.owned_global_ids().iter().filter(|g| ess_set.contains(g)).count();
+            let ess_sum = allreduce_sum_u64(&comm, local_ess as u64) as usize;
+            assert_eq!(ess_sum, 48, "rank {rank}: global boundary ND dofs");
+            let nlocal = a.local().size();
+            let zero_x = vec![0.0_f64; nlocal];
+            let (sys, _x0, _xf) = a.form_linear_system(&ess_g, &zero_x, &zero_x);
+            let offd_nnz = sys.a.offd_block().re_vals.len();
+            let total_offd = allreduce_sum_u64(&comm, offd_nnz as u64) as usize;
+            assert!(total_offd > 0, "rank {rank}: cross-rank ghost couplings");
+            if rank == 0 {
+                *out2.lock().unwrap() = Some(format!(
+                    "nd-trace np2 ok: globals {:?}, owned {} ghosts {}",
+                    a.n_global_trial(),
+                    a.n_owned_dofs(),
+                    a.n_ghost_dofs()
+                ));
+            }
+        });
+        let msg = out.lock().unwrap().clone();
+        assert!(msg.is_some(), "rank 0 must report: {msg:?}");
+    }
+
+    /// 3-D H1-trace parallel numbering (MFEM `H1_Trace_FECollection(p, 3)` on
+    /// the 2×2×2 hex grid): `p = 1` → 27 vertex dofs; `p = 2` → 27 vertices +
+    /// 1 dof × 54 edges + 1 face-interior dof × 36 faces = 117 — the MFEM
+    /// `GlobalTrueVSize` layout (vertices, then edges, then face interiors).
+    #[test]
+    fn complex_h1_trace_3d_numbering_np2() {
+        use fem_assembly::dpg::dpg_integrators::DpgMassIntegrator;
+        let full = Arc::new(Mesh::<3>::unit_cube_hex(2));
+        let out = Arc::new(std::sync::Mutex::new(None::<String>));
+        let out2 = Arc::clone(&out);
+        let ma = Arc::clone(&full);
+        ThreadLauncher::new(WorkerConfig::new(2)).launch(move |comm| {
+            let rank = comm.rank();
+            let par_mesh = partition_mesh_identity(&ma, &comm);
+            let mut a = ParComplexDPGWeakForm::new(
+                par_mesh.local_mesh().clone(),
+                par_mesh.partition().clone(),
+                comm.clone(),
+            );
+            a.set_quad_order(4);
+            let ps = a.add_trial_scalar_space(0);
+            let hatp1 = a.add_trial_trace_space_h1(1);
+            let hatp2 = a.add_trial_trace_space_h1(2);
+            let _ = hatp1;
+            let q = a.add_test_space(VolKind::Scalar, 2);
+            a.add_trial_integrator(None, Some(Box::new(DpgMassIntegrator { q: 1.0 })), ps, q);
+            a.add_test_integrator(Some(Box::new(DpgMassIntegrator { q: 1.0 })), None, q, q);
+            a.assemble();
+            assert_eq!(
+                a.n_global_trial(),
+                &[8, 27, 117],
+                "rank {rank}: 3-D H1-trace global dofs (MFEM entity layout)"
+            );
+            let owned_sum = allreduce_sum_u64(&comm, a.n_owned_dofs() as u64) as usize;
+            assert_eq!(owned_sum, 152, "rank {rank}: owned dofs must sum to the total");
+            if rank == 0 {
+                *out2.lock().unwrap() = Some(format!(
+                    "h1-trace 3d np2 ok: globals {:?}, owned {} ghosts {}",
+                    a.n_global_trial(),
+                    a.n_owned_dofs(),
+                    a.n_ghost_dofs()
+                ));
+            }
+        });
+        let msg = out.lock().unwrap().clone();
+        assert!(msg.is_some(), "rank 0 must report: {msg:?}");
     }
 
     #[test]

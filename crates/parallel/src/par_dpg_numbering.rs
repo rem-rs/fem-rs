@@ -2,10 +2,10 @@
 //! DPG weak forms.
 //!
 //! The numbering is defined on the **DOF graph** only — block kinds, skeleton
-//! face tables, mesh partition — and is therefore shared verbatim by
+//! face/edge tables, mesh partition — and is therefore shared verbatim by
 //! [`ParDpgWeakForm`](crate::par_dpg_weakform::ParDpgWeakForm) (real) and
 //! [`ParComplexDPGWeakForm`](crate::par_complex_dpg_weakform::ParComplexDPGWeakForm)
-//! (complex): the trace numbering, global face/node ids, owners and the
+//! (complex): the trace numbering, global face/edge/node ids, owners and the
 //! compact `[owned | ghost]` layout are identical, only the assembled values
 //! differ.
 //!
@@ -14,26 +14,40 @@
 //! * **Broken volume blocks** (`u`, `σ`): one DOF block per element, so a
 //!   local DOF is owned by the rank owning its element and its global id is
 //!   `global_elem * dofs_per_elem + k`.
-//! * **Face-discontinuous trace blocks** (`σ̂`, `f̂`, …): a global face id
-//!   comes from the sorted union of all ranks' face keys (the sorted tuple of
-//!   *global* node ids); each face carries `dofs_per_face` consecutive DOFs.
-//!   The face owner is the **lowest rank that holds the face**, which
-//!   guarantees the owner can assemble the complete face row and knows the
-//!   geometry of every one of its face DOFs.
-//! * **Vertex-continuous H1-trace blocks** (`û`, `p̂`, 2-D only): the corner
-//!   DOFs are the mesh vertex DOFs (global id = global node id, owner = node
-//!   owner — the node-ghost layer guarantees that the owner holds every
-//!   element incident to the node); the `p − 1` face-interior DOFs are
-//!   numbered per face like a discontinuous block.
+//! * **Face-discontinuous trace blocks** (`σ̂`, `f̂`, the 2-D `Ê` RT-trace): a
+//!   global face id comes from the sorted union of all ranks' face keys (the
+//!   sorted tuple of *global* node ids); each face carries `dofs_per_face`
+//!   consecutive DOFs.  The face owner is the **lowest rank that holds the
+//!   face**, which guarantees the owner can assemble the complete face row
+//!   and knows the geometry of every one of its face DOFs.
+//! * **Vertex-continuous H1-trace blocks** (`û`, `p̂`): the corner DOFs are
+//!   the mesh vertex DOFs (global id = global node id, owner = node owner —
+//!   the node-ghost layer guarantees that the owner holds every element
+//!   incident to the node).  2-D: the `p − 1` face-interior DOFs are numbered
+//!   per face like a discontinuous block.  3-D: additionally `p − 1` DOFs per
+//!   mesh **edge** (shared by every skeleton face meeting at the edge, global
+//!   id from the global edge table) and `(p−1)²` / `(p−2)(p−1)/2`
+//!   face-interior DOFs per quad/tri face (MFEM `H1_Trace_FECollection(p,3)`).
+//! * **ND trace blocks** (`Ê`, `Ĥ` of the 3-D Maxwell system, MFEM
+//!   `ND_Trace_FECollection(p,3)` = `ND_FECollection(p,2)` on the skeleton):
+//!   `p` DOFs per mesh edge (the edge DOFs run along the canonical
+//!   `(min node, max node)` edge direction, exactly the serial
+//!   [`TraceSpace`] id semantics, so the MFEM edge-orientation signs folded
+//!   into the assembled element blocks stay consistent across ranks) and
+//!   `p(p−1)` / `2p(p−1)` face-interior DOFs per tri/quad face (global id
+//!   from an exact per-global-face interior prefix over the exchanged face
+//!   keys).  The owner of an edge DOF is the lowest rank holding the edge.
 //!
 //! Requires the identity node partition
 //! ([`partition_mesh_identity`](crate::par_partition::partition_mesh_identity)):
-//! the serial face tables derive their canonical direction from the local node
-//! ids, so local node ids must equal global ones.
+//! the serial face/edge tables derive their canonical direction from the
+//! local node ids, so local node ids must equal global ones.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use fem_assembly::dpg::dpg_basis::SkeletonSpace;
+use fem_assembly::dpg::dpg_basis::{
+    mfem_local_edges, nd_face_interior_dofs, SkeletonSpace, TraceSpace,
+};
 use fem_assembly::dpg_weakform::DpgWeakForm;
 use fem_core::Rank;
 use fem_mesh::topology::MeshTopology;
@@ -56,7 +70,8 @@ pub enum DpgBlockKind {
     },
     /// Face-discontinuous trace block (MFEM `RT_Trace_FECollection` family).
     FaceDiscontinuous,
-    /// Vertex-continuous H1-trace block (MFEM `H1_Trace_FECollection`), 2-D.
+    /// Vertex-continuous H1-trace block (MFEM `H1_Trace_FECollection`) — 2-D
+    /// (shared vertices) or 3-D (shared vertices + shared mesh edges).
     FaceContinuous,
     /// 3-D ND trace block (MFEM `ND_Trace_FECollection`).
     FaceNd,
@@ -127,6 +142,8 @@ pub(crate) trait DpgNumberingLocal<M: MeshTopology + Clone + 'static> {
     /// out a stored reference; the complex one rebuilds the skeleton on
     /// demand (cheap), so the numbering only borrows it.
     fn with_skeleton<R>(&self, tb: usize, f: impl FnOnce(&SkeletonSpace<M>) -> R) -> R;
+    /// Run `f` on the ND (vector H(curl)) trace space of trace block `tb`.
+    fn with_nd_trace<R>(&self, tb: usize, f: impl FnOnce(&TraceSpace<M>) -> R) -> R;
     fn numbering_mesh(&self) -> &M;
     fn trial_element_vdofs(&self, tb: usize, e: u32) -> Vec<usize>;
 }
@@ -147,6 +164,9 @@ impl<M: MeshTopology + Clone + 'static> DpgNumberingLocal<M> for DpgWeakForm<M> 
     fn with_skeleton<R>(&self, tb: usize, f: impl FnOnce(&SkeletonSpace<M>) -> R) -> R {
         f(DpgWeakForm::skeleton(self, tb))
     }
+    fn with_nd_trace<R>(&self, tb: usize, f: impl FnOnce(&TraceSpace<M>) -> R) -> R {
+        f(DpgWeakForm::nd_trace(self, tb))
+    }
     fn numbering_mesh(&self) -> &M {
         DpgWeakForm::mesh(self)
     }
@@ -155,7 +175,9 @@ impl<M: MeshTopology + Clone + 'static> DpgNumberingLocal<M> for DpgWeakForm<M> 
     }
 }
 
-/// Global face numbering + face owners + global node count.
+/// Global face numbering + face owners + global node count, plus (when any
+/// trace block needs edge-shared DOFs — ND trace or 3-D H1 trace) the global
+/// edge numbering.
 pub(crate) struct FaceNumbering {
     /// `local face -> global face id`.
     pub face_gid: Vec<u32>,
@@ -163,6 +185,15 @@ pub(crate) struct FaceNumbering {
     pub face_owner: Vec<Rank>,
     pub n_global_faces: usize,
     pub n_global_nodes: usize,
+    /// The sorted global face keys (identical on every rank) — lets each rank
+    /// rebuild the exact per-global-face-interior prefix bases without further
+    /// communication (a key's length tells quad (4 nodes) from tri (3)).
+    pub global_keys: Vec<Vec<u32>>,
+    /// `local edge -> global edge id` (empty unless edges are numbered).
+    pub edge_gid: Vec<u32>,
+    /// `local edge -> owner rank` (lowest rank holding the edge).
+    pub edge_owner: Vec<Rank>,
+    pub n_global_edges: usize,
 }
 
 impl FaceNumbering {
@@ -172,6 +203,10 @@ impl FaceNumbering {
             face_owner: Vec::new(),
             n_global_faces: 0,
             n_global_nodes: 0,
+            global_keys: Vec::new(),
+            edge_gid: Vec::new(),
+            edge_owner: Vec::new(),
+            n_global_edges: 0,
         }
     }
 }
@@ -187,6 +222,22 @@ fn max_dofs_per_face<M: MeshTopology + Clone + 'static, L: DpgNumberingLocal<M>>
             .max()
             .unwrap_or(0)
     })
+}
+
+/// Per-global-face interior-DOF prefix bases for a trace family:
+/// `out[g] = Σ interior counts of the global faces with id `< g``.  Every
+/// rank holds the complete global face key list (exchanged by
+/// `build_face_numbering`), so all ranks compute the identical table — this
+/// is what makes the face-interior numbering exact (no stride) even for
+/// mixed quad/tri skeletons.
+fn global_interior_prefix(global_keys: &[Vec<u32>], interior: impl Fn(bool) -> usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(global_keys.len() + 1);
+    out.push(0u32);
+    for k in global_keys {
+        let last = out[out.len() - 1];
+        out.push(last + interior(k.len() == 4) as u32);
+    }
+    out
 }
 
 /// Build the full distributed numbering for the assembled local weak form.
@@ -218,7 +269,15 @@ where
         ((0..n_trial).collect(), offsets[..n_trial].to_vec())
     };
 
-    let faces = build_face_numbering(local, kinds, partition, comm, rank, &sys_trials);
+    let dim = local.numbering_mesh().dim();
+    // Edge-shared trace DOFs (ND trace, 3-D H1 trace) need the global edge
+    // table in addition to the face table.
+    let needs_edges = (0..n_trial).any(|b| match kinds[b] {
+        DpgBlockKind::FaceNd => true,
+        DpgBlockKind::FaceContinuous => dim == 3,
+        _ => false,
+    });
+    let faces = build_face_numbering(local, kinds, partition, comm, rank, &sys_trials, needs_edges);
 
     // Number **all** trial blocks: the volume blocks that static condensation
     // eliminates still contribute to the reported global trial DOF count (MFEM
@@ -313,8 +372,11 @@ where
     }
 }
 
-/// Global face numbering: the sorted union of all ranks' face keys (sorted
-/// tuples of *global* node ids); the owner is the lowest holder rank.
+/// Global face (and optionally edge) numbering: the sorted union of all
+/// ranks' entity keys (sorted tuples of *global* node ids); the owner is the
+/// lowest holder rank.  The face table is read off the first trace block —
+/// any trace family enumerates the same mesh faces.
+#[allow(clippy::too_many_arguments)]
 fn build_face_numbering<M, L>(
     local: &L,
     kinds: &[DpgBlockKind],
@@ -322,6 +384,7 @@ fn build_face_numbering<M, L>(
     comm: &Comm,
     rank: Rank,
     sys_trials: &[usize],
+    needs_edges: bool,
 ) -> FaceNumbering
 where
     M: MeshTopology + Clone + 'static,
@@ -332,19 +395,38 @@ where
         Some(tb) => tb,
         None => return FaceNumbering::empty(),
     };
-    let n_faces = local.with_skeleton(tb, |sk| sk.n_faces());
+    let first_is_nd = matches!(kinds[tb], DpgBlockKind::FaceNd);
 
     // Local face keys: sorted *global* node ids.
-    let mut local_keys: Vec<Vec<u32>> = Vec::with_capacity(n_faces);
-    for f in 0..n_faces {
-        let mut key: Vec<u32> = local
-            .with_skeleton(tb, |sk| sk.face_nodes(f).to_vec())
-            .iter()
-            .map(|&n| partition.global_node(n))
-            .collect();
-        key.sort_unstable();
-        local_keys.push(key);
-    }
+    let local_keys: Vec<Vec<u32>> = if first_is_nd {
+        local.with_nd_trace(tb, |tr| {
+            let mut keys = Vec::with_capacity(tr.n_faces());
+            for f in 0..tr.n_faces() {
+                let mut key: Vec<u32> = tr
+                    .face_nodes(f)
+                    .iter()
+                    .map(|&n| partition.global_node(n))
+                    .collect();
+                key.sort_unstable();
+                keys.push(key);
+            }
+            keys
+        })
+    } else {
+        local.with_skeleton(tb, |sk| {
+            let mut keys = Vec::with_capacity(sk.n_faces());
+            for f in 0..sk.n_faces() {
+                let mut key: Vec<u32> = sk
+                    .face_nodes(f)
+                    .iter()
+                    .map(|&n| partition.global_node(n))
+                    .collect();
+                key.sort_unstable();
+                keys.push(key);
+            }
+            keys
+        })
+    };
 
     // Exchange the key lists: the merged map carries both the global key
     // set (global face ids) and the lowest holder rank (face owner).
@@ -383,12 +465,89 @@ where
         .unwrap_or(0);
     let n_global_nodes = (allreduce_max_u32(comm, max_local_gid) as usize) + 1;
 
+    let (edge_gid, edge_owner, n_global_edges) = if needs_edges {
+        build_edge_numbering(local, partition, comm, rank)
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
+
     FaceNumbering {
         face_gid,
         face_owner,
         n_global_faces: global_keys.len(),
         n_global_nodes,
+        global_keys,
+        edge_gid,
+        edge_owner,
+        n_global_edges,
     }
+}
+
+/// Global edge numbering for edge-shared trace DOFs (ND trace / 3-D H1
+/// trace): local edge ids follow the serial trace spaces' enumeration
+/// (first-seen over `(element, local edge)` with the sorted `(min, max)`
+/// node key — [`TraceSpace`] and `SkeletonSpace` both enumerate exactly this
+/// way, so serial edge DOF `e * edof + j` below refers to `local_keys[e]`);
+/// the global ids come from the sorted union of all ranks' keys.
+fn build_edge_numbering<M, L>(
+    local: &L,
+    partition: &MeshPartition,
+    comm: &Comm,
+    rank: Rank,
+) -> (Vec<u32>, Vec<Rank>, usize)
+where
+    M: MeshTopology + Clone + 'static,
+    L: DpgNumberingLocal<M>,
+{
+    let mesh = local.numbering_mesh();
+    let mut local_keys: Vec<[u32; 2]> = Vec::new();
+    let mut seen: BTreeSet<[u32; 2]> = BTreeSet::new();
+    for e in 0..mesh.n_elements() as u32 {
+        let et = mesh.element_type(e);
+        let en = mesh.element_nodes(e);
+        for ev in mfem_local_edges(et) {
+            let a = partition.global_node(en[ev[0]]);
+            let b = partition.global_node(en[ev[1]]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            if seen.insert(key) {
+                local_keys.push(key);
+            }
+        }
+    }
+
+    let mut key_owner: BTreeMap<[u32; 2], Rank> = BTreeMap::new();
+    for k in &local_keys {
+        key_owner.entry(*k).or_insert(rank);
+    }
+    if comm.size() > 1 {
+        let mut payload = Vec::with_capacity(local_keys.len() * 8);
+        for k in &local_keys {
+            payload.extend_from_slice(&k[0].to_le_bytes());
+            payload.extend_from_slice(&k[1].to_le_bytes());
+        }
+        let sends: Vec<(Rank, Vec<u8>)> = (0..comm.size() as i32)
+            .map(|r| (r, payload.clone()))
+            .collect();
+        let mut incoming = comm.alltoallv_bytes(&sends);
+        incoming.sort_by_key(|(src, _)| *src);
+        for (src, bytes) in &incoming {
+            for chunk in bytes.chunks_exact(8) {
+                let a = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                let b = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                key_owner
+                    .entry([a, b])
+                    .and_modify(|o| *o = (*o).min(*src))
+                    .or_insert(*src);
+            }
+        }
+    }
+    let mut key_to_gid: HashMap<[u32; 2], u32> = HashMap::new();
+    for (i, k) in key_owner.keys().enumerate() {
+        key_to_gid.insert(*k, i as u32);
+    }
+    let edge_gid: Vec<u32> = local_keys.iter().map(|k| key_to_gid[k]).collect();
+    let edge_owner: Vec<Rank> = local_keys.iter().map(|k| key_owner[k]).collect();
+    (edge_gid, edge_owner, key_owner.len())
 }
 
 /// Number the DOFs of trial block `tb` → `(gof, owner, n_global)`.
@@ -437,32 +596,63 @@ where
             (gof, owner, n_global_elems * npde_max)
         }
         DpgBlockKind::FaceNd => {
-            panic!(
-                "ParDpgWeakForm: 3-D ND trace blocks are not numbered in parallel yet \
-                 (fem-rs gap D141)"
-            );
+            local.with_nd_trace(tb, |tr| {
+                // MFEM `ND_Trace_FECollection(p, dim)` = `ND(p, dim−1)` on the
+                // skeleton: `p` DOFs per mesh edge (the serial
+                // [`TraceSpace`] ids run along the canonical
+                // `(min node, max node)` edge direction, so the MFEM
+                // edge-orientation signs folded into the assembled element
+                // blocks stay consistent across ranks) and `p(p−1)` /
+                // `2p(p−1)` face-interior DOFs per triangle / quadrilateral.
+                let p = tr.order() as usize;
+                let n_edof = p;
+                let n_local_edges = tr.n_edges();
+                let edge_region = n_local_edges * n_edof;
+                // Exact per-global-face interior prefix (no stride): every
+                // rank holds the full global face key list, so all ranks
+                // compute the same table without further communication.
+                let int_pref = global_interior_prefix(&faces.global_keys, |is_quad| {
+                    nd_face_interior_dofs(p, is_quad)
+                });
+                let g_int_base = (faces.n_global_edges * n_edof) as u32;
+                let mut serial_int_base = vec![0u32; tr.n_faces()];
+                let mut acc = edge_region as u32;
+                for f in 0..tr.n_faces() {
+                    serial_int_base[f] = acc;
+                    acc += tr.face_interior_dofs(f) as u32;
+                }
+                for f in 0..tr.n_faces() {
+                    let gid = faces.face_gid[f] as usize;
+                    let fowner = faces.face_owner[f];
+                    let sib = serial_int_base[f];
+                    for &d in tr.face_dof_list(f) {
+                        if d >= size {
+                            continue;
+                        }
+                        if d < edge_region {
+                            let e = d / n_edof;
+                            gof[d] = faces.edge_gid[e] * n_edof as u32 + (d % n_edof) as u32;
+                            owner[d] = faces.edge_owner[e];
+                        } else {
+                            gof[d] = g_int_base + int_pref[gid] + (d as u32 - sib);
+                            owner[d] = fowner;
+                        }
+                    }
+                }
+                let n_global = g_int_base as usize + int_pref[int_pref.len() - 1] as usize;
+                (gof, owner, n_global)
+            })
         }
-        DpgBlockKind::FaceDiscontinuous | DpgBlockKind::FaceContinuous => {
-            let continuous = matches!(kinds[tb], DpgBlockKind::FaceContinuous);
+        DpgBlockKind::FaceDiscontinuous => {
             local.with_skeleton(tb, |sk| {
-                assert_eq!(
-                    sk.is_continuous(),
-                    continuous,
+                assert!(
+                    !sk.is_continuous(),
                     "ParDpgWeakForm: skeleton continuity does not match the recorded block kind"
                 );
-                if continuous && sk.dim() != 2 {
-                    panic!(
-                        "ParDpgWeakForm: H1-trace parallel numbering is implemented for 2-D \
-                         only (fem-rs gap D141)"
-                    );
-                }
                 // Uniform per-face DOF count (asserted locally, max-reduced so
                 // that every rank uses the same stride).
                 let dpf_local = max_dofs_per_face(local, tb) as u32;
                 let dpf_stride = allreduce_max_u32(comm, dpf_local) as usize;
-                let p = sk.order() as usize;
-                let interior = if continuous { p.saturating_sub(1) } else { dpf_stride };
-                let vbase = if continuous { faces.n_global_nodes } else { 0 };
                 for f in 0..sk.n_faces() {
                     let fgid = faces.face_gid[f] as usize;
                     let fowner = faces.face_owner[f];
@@ -473,24 +663,113 @@ where
                         dpf, dpf_stride,
                         "ParDpgWeakForm: non-uniform per-face DOF count on the skeleton"
                     );
-                    let nodes = sk.face_nodes(f);
                     for (k, &d) in list.iter().enumerate() {
                         if d >= size {
                             continue;
                         }
-                        if continuous && (k == 0 || k == dpf - 1) {
-                            let node = nodes[if k == 0 { 0 } else { nodes.len() - 1 }];
-                            gof[d] = partition.global_node(node);
-                            owner[d] = partition.node_owner(node);
-                        } else {
-                            let slot = if continuous { k - 1 } else { k };
-                            gof[d] = (vbase + fgid * interior + slot) as u32;
-                            owner[d] = fowner;
-                        }
+                        gof[d] = (fgid * dpf_stride + k) as u32;
+                        owner[d] = fowner;
                     }
                 }
-                let n_global = vbase + faces.n_global_faces * interior;
+                let n_global = faces.n_global_faces * dpf_stride;
                 (gof, owner, n_global)
+            })
+        }
+        DpgBlockKind::FaceContinuous => {
+            local.with_skeleton(tb, |sk| {
+                assert!(
+                    sk.is_continuous(),
+                    "ParDpgWeakForm: skeleton continuity does not match the recorded block kind"
+                );
+                let p = sk.order() as usize;
+                if sk.dim() == 2 {
+                    // 2-D H1 trace: the corner DOFs are the mesh vertex DOFs
+                    // (global id = global node id, owner = node owner); the
+                    // `p − 1` face-interior DOFs are numbered per face.
+                    let interior = p.saturating_sub(1);
+                    let vbase = faces.n_global_nodes;
+                    for f in 0..sk.n_faces() {
+                        let fgid = faces.face_gid[f] as usize;
+                        let fowner = faces.face_owner[f];
+                        let dpf = sk.dofs_per_face(f);
+                        let list = sk.face_dof_list(f);
+                        assert_eq!(list.len(), dpf, "skeleton face DOF list length mismatch");
+                        let nodes = sk.face_nodes(f);
+                        for (k, &d) in list.iter().enumerate() {
+                            if d >= size {
+                                continue;
+                            }
+                            if k == 0 || k == dpf - 1 {
+                                let node = nodes[if k == 0 { 0 } else { nodes.len() - 1 }];
+                                gof[d] = partition.global_node(node);
+                                owner[d] = partition.node_owner(node);
+                            } else {
+                                gof[d] = (vbase + fgid * interior + (k - 1)) as u32;
+                                owner[d] = fowner;
+                            }
+                        }
+                    }
+                    let n_global = vbase + faces.n_global_faces * interior;
+                    (gof, owner, n_global)
+                } else {
+                    // 3-D H1 trace (MFEM `H1_Trace_FECollection(p, 3)`): one
+                    // DOF per mesh vertex, `p − 1` per mesh edge (shared by
+                    // every skeleton face meeting at the edge), `(p−1)²` /
+                    // `(p−2)(p−1)/2` face-interior DOFs per quad/tri face.
+                    // The serial `SkeletonSpace::new_h1` ids mirror MFEM's
+                    // entity layout: vertex ids, then
+                    // `n_nodes + e*(p−1) + m`, then face interiors face by
+                    // face — the global numbering mirrors that over the
+                    // global node / edge / face tables.
+                    let n_edof = p.saturating_sub(1);
+                    let n_nodes = sk.mesh().n_nodes();
+                    let n_local_edges = faces.edge_gid.len();
+                    let interior_of = |is_quad: bool| {
+                        let q = p.saturating_sub(1);
+                        if is_quad {
+                            q * q
+                        } else {
+                            q * p.saturating_sub(2) / 2
+                        }
+                    };
+                    let int_pref = global_interior_prefix(&faces.global_keys, interior_of);
+                    let g_ebase = faces.n_global_nodes as u32;
+                    let g_fbase = g_ebase + (faces.n_global_edges * n_edof) as u32;
+                    let mut serial_int_base = vec![0u32; sk.n_faces()];
+                    let mut acc = (n_nodes + n_local_edges * n_edof) as u32;
+                    for f in 0..sk.n_faces() {
+                        serial_int_base[f] = acc;
+                        acc += interior_of(sk.is_quad_face(f)) as u32;
+                    }
+                    for f in 0..sk.n_faces() {
+                        let gid = faces.face_gid[f] as usize;
+                        let fowner = faces.face_owner[f];
+                        let sib = serial_int_base[f];
+                        for &d in sk.face_dof_list(f) {
+                            if d >= size {
+                                continue;
+                            }
+                            if d < n_nodes {
+                                // vertex dof (id = local node id under the
+                                // identity node numbering)
+                                let node = d as u32;
+                                gof[d] = partition.global_node(node);
+                                owner[d] = partition.node_owner(node);
+                            } else if d < n_nodes + n_local_edges * n_edof {
+                                let e = (d - n_nodes) / n_edof;
+                                let slot = (d - n_nodes) % n_edof;
+                                gof[d] =
+                                    g_ebase + faces.edge_gid[e] * n_edof as u32 + slot as u32;
+                                owner[d] = faces.edge_owner[e];
+                            } else {
+                                gof[d] = g_fbase + int_pref[gid] + (d as u32 - sib);
+                                owner[d] = fowner;
+                            }
+                        }
+                    }
+                    let n_global = g_fbase as usize + int_pref[int_pref.len() - 1] as usize;
+                    (gof, owner, n_global)
+                }
             })
         }
     }
@@ -561,12 +840,18 @@ pub(crate) fn allreduce_sum_u64(comm: &Comm, v: u64) -> u64 {
 /// Build the ghost exchange over the compact DOF vector: each rank requests
 /// the global ids of its ghost slots from their owners, and the owners answer
 /// with their own compact owned ids.
+///
+/// The exchange is **collective** — a rank with no ghosts must still take
+/// part, because it may have to *serve* other ranks' requests (the condensed
+/// 3-D system is the extreme case: the lowest rank owns every shared trace
+/// dof, holds no ghost itself, and would otherwise leave the requesting rank
+/// deadlocked).
 fn build_ghost_exchange(
     comm: &Comm,
     owned_global: &[u32],
     ghosts: &[(u32, Rank)],
 ) -> GhostExchange {
-    if comm.size() <= 1 || ghosts.is_empty() {
+    if comm.size() <= 1 {
         return GhostExchange::from_trivial();
     }
     let mut requests: BTreeMap<Rank, Vec<u32>> = BTreeMap::new();
