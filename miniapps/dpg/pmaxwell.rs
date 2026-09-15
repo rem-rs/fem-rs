@@ -23,30 +23,33 @@
 //! Problem cases: `-prob 0` (plane wave `E = e^{iω(x+y)}e_x`, exact known —
 //! prints the L2 Error columns; default mesh `data/inline-quad.mesh`),
 //! `-prob 1` (Fichera "microwave oven", `meshes/fichera-waveguide.mesh`,
-//! `ω = 5`, no exact solution — the residual-only table of the C++ miniapp).
-//! The trace numbering for both families (RT/H1 traces 2-D, ND traces +
-//! edge-shared H(curl) skeleton DOFs 3-D) lives in
-//! `fem_parallel::par_dpg_numbering`.
+//! `ω = 5`, no exact solution — the residual-only table of the C++ miniapp),
+//! `-prob 2` (`pml_general`: Cartesian PML absorption over the default 2-D
+//! mesh with the Gaussian `source_function` load — the two-stack
+//! attribute-restricted block table of the C++ miniapp, built on the
+//! `CartesianPML` port in `miniapps/dpg/util/pml.rs` and the spatially
+//! varying coefficient integrators of
+//! `fem_assembly::dpg::dpg_integrators`).  The trace numbering for all
+//! families (RT/H1 traces 2-D, ND traces + edge-shared H(curl) skeleton DOFs
+//! 3-D) lives in `fem_parallel::par_dpg_numbering`.
 //!
 //! # Verified against the C++ MPI reference
 //!
 //! Built from `$HOME/mfem410_mpi` (`pmaxwell.cpp + dpg/util/*.cpp +
 //! ../common/*.cpp` against `libmfem.a -lHYPRE`) and run under
-//! `mpirun -np {1,2} … -no-vis` (evidence: `tmp/d172_pmaxwell_report.md`).
-//! `Dofs`, `L2 Error` and the DPG `Residual` match the fem-rs run to all
-//! printed digits; as in `pacoustics`, the PCG iteration count is not
-//! reproduced (MFEM builds `HypreAMS`/`Jacobi` per block of the real part,
-//! fem-rs uses its own complex block symmetric Gauss–Seidel, and fem-rs
-//! converges at rtol `1e-12` vs the C++ `1e-6` so the printed digits pin).
+//! `mpirun -np {1,2} … -no-vis` (evidence: `tmp/d172_pmaxwell_report.md`,
+//! `tmp/d211_pml_report.md` for `-prob 2`).  `Dofs` and the DPG `Residual`
+//! match the fem-rs run to all printed digits; as in `pacoustics`, the PCG
+//! iteration count is not reproduced (MFEM builds `HypreAMS`/`Jacobi` per
+//! block of the real part, fem-rs uses its own complex block symmetric
+//! Gauss–Seidel, and fem-rs converges at rtol `1e-12` vs the C++ `1e-6` so
+//! the printed digits pin).
 //!
 //! # Known gaps (exit code 3)
 //!
-//! * `-prob 2/3/4` (PML): the `CartesianPML` stretched-map coefficients
-//!   (`util/pml.{hpp,cpp}`: `PmlCoefficient`, `PmlMatrixCoefficient`,
-//!   `RestrictedCoefficient` / `MatrixRestrictedCoefficient`) are not ported —
-//!   they are *spatially varying* matrix coefficients, which the
-//!   `Dpg*Integrator` family only accepts as constants.  `-prob 3/4`
-//!   additionally need `meshes/scatter.mesh` + GSLIB point sources.  Exits 3.
+//! * `-prob 3/4` (PML scattering / boundary point source): need
+//!   `meshes/scatter.mesh` + GSLIB point sources (`py`/`DeltaCoefficient`).
+//!   `-prob 2` (the PML case needing neither) is ported.  Exits 3.
 //! * `-pmg` (PRefinementMultigrid): no p-prolongation for DPG blocks.  Exits 3.
 //! * `-pref > 0` (parallel AMR + `ParComplexDPGWeakForm::Update`): the marked
 //!   refinement repartitions with compact node ids, breaking the identity
@@ -58,6 +61,9 @@
 //!   cargo run --release --example pmaxwell -- --ranks 2 -prob 1 -pref 0
 //!   cargo run --release --example pmaxwell -- --ranks 2 -sref 1 -sc
 
+#[path = "util/pml.rs"]
+mod pml;
+
 use std::collections::HashMap;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
@@ -67,12 +73,16 @@ use fem_assembly::dpg::dpg_basis::{
     vol_quadrature, VolKind,
 };
 use fem_assembly::dpg::dpg_integrators::{
-    DpgCurl2dNDIntegrator, DpgCurl2dNDTrialIntegrator, DpgCurl2dPairingIntegrator,
-    DpgCurl3dPairingIntegrator, DpgCurlCurlIntegrator, DpgDiffusionIntegrator, DpgMassIntegrator,
-    DpgMixedVectorCurlIntegrator, DpgMixedVectorGradientIntegrator,
-    DpgMixedVectorWeakCurlIntegrator, DpgMixedVectorWeakDivergenceIntegrator,
+    DpgCurl2dNDIntegrator, DpgCurl2dNDSpatialIntegrator, DpgCurl2dNDTrialIntegrator,
+    DpgCurl2dNDTrialSpatialIntegrator, DpgCurl2dPairingIntegrator, DpgCurl3dPairingIntegrator,
+    DpgCurlCurlIntegrator, DpgDiffusionIntegrator, DpgMassIntegrator, DpgMassSpatialIntegrator,
+    DpgMixedVectorCurlIntegrator, DpgMixedVectorCurlSpatialIntegrator,
+    DpgMixedVectorGradientIntegrator, DpgMixedVectorGradientSpatialIntegrator,
+    DpgMixedVectorWeakCurlIntegrator, DpgMixedVectorWeakCurlSpatialIntegrator,
+    DpgMixedVectorWeakDivergenceIntegrator, DpgMixedVectorWeakDivergenceSpatialIntegrator,
     DpgTangentTraceIntegrator2D, DpgTangentTraceIntegrator3D, DpgTraceIntegrator,
-    DpgTVectorFEMassIntegrator, DpgVectorFEDomainLFIntegrator, DpgVectorFEMassIntegrator,
+    DpgTVectorFEMassIntegrator, DpgTVectorFEMassSpatialIntegrator, DpgVectorFEDomainLFIntegrator,
+    DpgVectorFEMassIntegrator, DpgVectorFEMassSpatialIntegrator,
 };
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::{refine_uniform, refine_uniform_3d, ElementType, Mesh};
@@ -84,9 +94,15 @@ use fem_parallel::par_vector::{ParComplexVector, ParVector};
 use fem_parallel::WorkerConfig;
 use fem_solver::SolverConfig;
 
+use pml::{
+    const_matrix, const_scalar, matrix_right_product_2d, matrix_right_product_2d_t, pml_matrix,
+    pml_scalar, product, restricted_matrix, restricted_scalar, scalar_matrix_product, CartesianPML,
+    PmlRegion,
+};
+
 const PI: f64 = std::f64::consts::PI;
 
-/// Problem case — C++ `enum prob_type` (the PML cases are not ported).
+/// Problem case — C++ `enum prob_type`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Prob {
     /// `plane_wave`: exact `E = e^{iω(x+y)} e_x` (2-D) / `e^{iω(x+y+z)} e_x`
@@ -95,6 +111,10 @@ enum Prob {
     /// `fichera_oven`: `E = (sin πy, 0, 0)` on the waveguide lid `z = 3`,
     /// homogeneous elsewhere; no exact solution (residual-only table).
     FicheraOven,
+    /// `pml_general`: Cartesian PML absorption (length 0.25 per direction)
+    /// around the default mesh, general load `source_function` on `(J, G)`;
+    /// no exact solution (residual-only table).
+    PmlGeneral,
 }
 
 impl Prob {
@@ -102,6 +122,7 @@ impl Prob {
         match self {
             Prob::PlaneWave => "plane_wave",
             Prob::FicheraOven => "fichera_oven",
+            Prob::PmlGeneral => "pml_general",
         }
     }
 }
@@ -239,6 +260,14 @@ fn solve_level_2d(
 ) -> LevelResult {
     let p = order;
     let test_order = order + delta_order;
+    // CartesianPML over the current (global) level mesh — C++
+    // `Array2D<real_t> length(dim, 2); length = 0.25; new CartesianPML(...)`.
+    let pml = (prob == Prob::PmlGeneral).then(|| {
+        let mut p = CartesianPML::new(mesh, [[0.25; 2]; 2]);
+        p.set_omega(omega);
+        p.set_epsilon_and_mu(epsilon, mu);
+        Arc::new(p)
+    });
     let result = Arc::new(Mutex::new(None::<LevelResult>));
     let result_slot = Arc::clone(&result);
     let mesh_arc = Arc::new(mesh.clone());
@@ -250,6 +279,7 @@ fn solve_level_2d(
         let par_mesh = partition_mesh_identity(&mesh_arc, &comm);
         let local_mesh = par_mesh.local_mesh().clone();
         let partition = par_mesh.partition().clone();
+        let pml = pml.clone();
 
         let mut a = ParComplexDPGWeakForm::new(local_mesh.clone(), partition, comm.clone());
         // Volume rule `2·test_order` matches the C++ `VectorFEDomainLFIntegrator`
@@ -279,13 +309,6 @@ fn solve_level_2d(
             es,
             f,
         );
-        // −iωε (E, G).
-        a.add_trial_integrator(
-            None,
-            Some(Box::new(DpgTVectorFEMassIntegrator { q: -epsilon * omega })),
-            es,
-            g,
-        );
         // (H, ∇×G).
         a.add_trial_integrator(
             Some(Box::new(DpgCurl2dNDIntegrator { q: 1.0 })),
@@ -295,84 +318,109 @@ fn solve_level_2d(
         );
         // <n×Ĥ, G> — TangentTraceIntegrator.
         a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator2D)), None, hath, g);
-        // iωμ (H, F).
-        a.add_trial_integrator(None, Some(Box::new(DpgMassIntegrator { q: mu * omega })), hs, f);
         // <n×Ê, F> — TraceIntegrator.
         a.add_trace_integrator(Some(Box::new(DpgTraceIntegrator)), None, hate, f);
 
-        // Adjoint graph norm (test integrators, C++ 2-D branch).
+        // Adjoint graph norm backbone (coefficient-free, C++ 535-539 / 586-591).
         a.add_test_integrator(Some(Box::new(DpgCurlCurlIntegrator { q: 1.0 })), None, g, g);
         a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, g, g);
         a.add_test_integrator(Some(Box::new(DpgDiffusionIntegrator { q: 1.0 })), None, f, f);
         a.add_test_integrator(Some(Box::new(DpgMassIntegrator { q: 1.0 })), None, f, f);
-        a.add_test_integrator(
-            Some(Box::new(DpgMassIntegrator { q: mu * mu * omega * omega })),
-            None,
-            f,
-            f,
-        );
-        // −iωμ (F, ∇×δG) → G[G, F].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgCurl2dNDIntegrator { q: -mu * omega })),
-            g,
-            f,
-        );
-        // −iωε (A∇F, δG), A = [[0,1],[−1,0]] → G[G, F].
-        let negepsrot = vec![vec![0.0, -epsilon * omega], vec![epsilon * omega, 0.0]];
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorGradientIntegrator { q: negepsrot })),
-            g,
-            f,
-        );
-        // iωμ (F, ∇×G) → G[F, G].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgCurl2dNDTrialIntegrator { q: mu * omega })),
-            f,
-            g,
-        );
-        // iωε (G, A∇δF) → G[F, G] (transpose of the MVG block — the
-        // weak-divergence form reproduces it exactly; `dpg_maxwell_2d`).
-        let epsrot_t = vec![vec![0.0, -epsilon * omega], vec![epsilon * omega, 0.0]];
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorWeakDivergenceIntegrator { q: epsrot_t })),
-            f,
-            g,
-        );
-        // ε²ω² (G, δG).
-        a.add_test_integrator(
-            Some(Box::new(DpgVectorFEMassIntegrator {
-                q: epsilon * epsilon * omega * omega,
-            })),
-            None,
-            g,
-            g,
-        );
 
-        // RHS (J, G) — the plane-wave manufactured current.
-        if prob == Prob::PlaneWave {
-            let ex_re = Exact2D { omega, mu, epsilon };
-            let ex_im = ex_re;
-            a.add_domain_lf_integrator(
-                Some(Box::new(DpgVectorFEDomainLFIntegrator {
-                    f: move |x: &[f64], out: &mut [f64]| {
-                        let jr = ex_re.j(x);
-                        out[0] = jr[0].0;
-                        out[1] = jr[1].0;
-                    },
-                })),
-                Some(Box::new(DpgVectorFEDomainLFIntegrator {
-                    f: move |x: &[f64], out: &mut [f64]| {
-                        let ji = ex_im.j(x);
-                        out[0] = ji[0].1;
-                        out[1] = ji[1].1;
-                    },
-                })),
-                g,
-            );
+        // Coefficient-carrying blocks: constant coefficients (`-prob 0`) or
+        // the attribute-restricted two-stack PML wiring (`-prob 2`).
+        match &pml {
+            None => {
+                // −iωε (E, G).
+                a.add_trial_integrator(
+                    None,
+                    Some(Box::new(DpgTVectorFEMassIntegrator { q: -epsilon * omega })),
+                    es,
+                    g,
+                );
+                // iωμ (H, F).
+                a.add_trial_integrator(
+                    None,
+                    Some(Box::new(DpgMassIntegrator { q: mu * omega })),
+                    hs,
+                    f,
+                );
+                // μ²ω² (F, δF).
+                a.add_test_integrator(
+                    Some(Box::new(DpgMassIntegrator { q: mu * mu * omega * omega })),
+                    None,
+                    f,
+                    f,
+                );
+                // −iωμ (F, ∇×δG) → G[G, F].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgCurl2dNDIntegrator { q: -mu * omega })),
+                    g,
+                    f,
+                );
+                // −iωε (A∇F, δG), A = [[0,1],[−1,0]] → G[G, F].
+                let negepsrot = vec![vec![0.0, -epsilon * omega], vec![epsilon * omega, 0.0]];
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorGradientIntegrator { q: negepsrot })),
+                    g,
+                    f,
+                );
+                // iωμ (F, ∇×G) → G[F, G].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgCurl2dNDTrialIntegrator { q: mu * omega })),
+                    f,
+                    g,
+                );
+                // iωε (G, A∇δF) → G[F, G] (transpose of the MVG block — the
+                // weak-divergence form reproduces it exactly; `dpg_maxwell_2d`).
+                let epsrot_t = vec![vec![0.0, -epsilon * omega], vec![epsilon * omega, 0.0]];
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorWeakDivergenceIntegrator { q: epsrot_t })),
+                    f,
+                    g,
+                );
+                // ε²ω² (G, δG).
+                a.add_test_integrator(
+                    Some(Box::new(DpgVectorFEMassIntegrator {
+                        q: epsilon * epsilon * omega * omega,
+                    })),
+                    None,
+                    g,
+                    g,
+                );
+
+                // RHS (J, G) — the plane-wave manufactured current.
+                if prob == Prob::PlaneWave {
+                    let ex_re = Exact2D { omega, mu, epsilon };
+                    let ex_im = ex_re;
+                    a.add_domain_lf_integrator(
+                        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+                            f: move |x: &[f64], out: &mut [f64]| {
+                                let jr = ex_re.j(x);
+                                out[0] = jr[0].0;
+                                out[1] = jr[1].0;
+                            },
+                        })),
+                        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+                            f: move |x: &[f64], out: &mut [f64]| {
+                                let ji = ex_im.j(x);
+                                out[0] = ji[0].1;
+                                out[1] = ji[1].1;
+                            },
+                        })),
+                        g,
+                    );
+                }
+            }
+            Some(pml) => {
+                assemble_pml_blocks_2d(
+                    &mut a, pml, &local_mesh, es, hs, f, g, omega, mu, epsilon, p - 1, test_order,
+                );
+            }
         }
 
         if static_cond {
@@ -384,13 +432,15 @@ fn solve_level_2d(
         // `hatE_fes->GetEssentialTrueDofs(ess_bdr=1, …)` +
         // `ProjectBdrCoefficientNormal(hatEex)`; the RT-trace dof is the
         // unscaled normal flux in the canonical (min, max) edge direction).
+        // PML problems (`-prob 2`) project no data — C++ `if (prob != 2)`
+        // skips the projection and the homogeneous values stay zero.
         let ex = Exact2D { omega, mu, epsilon };
         let pairs = a.trace_boundary_dofs_ix(hate);
         let sk = a.local().skeleton(hate);
         let hat_base = a.local().trial_offsets()[hate];
         let mut values: HashMap<usize, (f64, f64)> = HashMap::new();
         for face in 0..sk.n_faces() {
-            if !sk.is_boundary_face(face) {
+            if !sk.is_boundary_face(face) || prob != Prob::PlaneWave {
                 continue;
             }
             let nodes = sk.face_nodes(face).clone();
@@ -496,6 +546,358 @@ fn solve_level_2d(
     out
 }
 
+/// `-prob 2` coefficient blocks (2-D): the C++ `pmaxwell.cpp` restricted
+/// coefficient definitions (lines 422-515) and the PML block-table additions
+/// (lines 619-729), organized as a non-PML-attribute stack plus a
+/// PML-attribute stack — on every element exactly one of the two evaluates
+/// nonzero (`RestrictedCoefficient` semantics), so their sum equals the C++
+/// assembly element-for-element.
+#[allow(clippy::too_many_arguments)]
+fn assemble_pml_blocks_2d(
+    a: &mut ParComplexDPGWeakForm<Mesh<2>>,
+    pml: &Arc<CartesianPML<2>>,
+    local_mesh: &Mesh<2>,
+    es: usize,
+    hs: usize,
+    f: usize,
+    g: usize,
+    omega: f64,
+    mu: f64,
+    epsilon: f64,
+    trial_order: u8,
+    test_order: u8,
+) {
+    // MFEM per-integrator default rules: every entry on the order-`(p−1)`
+    // L2 trial blocks (E, H) assembles at rule order `(p−1) + test_order`
+    // (`TransposeIntegrator(VectorFEMassIntegrator)` /
+    // `MixedScalarMassIntegrator` / `MixedCurlIntegrator` fallbacks), below
+    // the global `2·test_order` rule.  With the PML the block coefficients
+    // are non-polynomial stretched maps, so the lower rule is visible.
+    let trial_rule = ((trial_order as u16 + test_order as u16).min(255)) as u8;
+    a.set_trial_quad_order(es, trial_rule);
+    a.set_trial_quad_order(hs, trial_rule);
+    // Per-element in-PML flags — C++ `pml->SetAttributes(&pmesh, &attr, &attrPML)`.
+    let flags: Arc<Vec<bool>> = Arc::new(pml.mark_elements(local_mesh));
+    let (non, pmr) = (PmlRegion::NonPml, PmlRegion::Pml);
+    let id2 = |c: f64| vec![vec![c, 0.0], vec![0.0, c]];
+    // C++ 398-404 — the ω/μ/ε constant products.
+    let eps_om = epsilon * omega;
+    let mu_om = mu * omega;
+    let eps2_om2 = epsilon * epsilon * omega * omega;
+    let mu2_om2 = mu * mu * omega * omega;
+    // C++ 406-411 — `rot_mat = [0 1; −1 0]`.
+    let rot: [[f64; 2]; 2] = [[0.0, 1.0], [-1.0, 0.0]];
+
+    // ── trial integrators ──
+    // −iωε (E, G): non-PML stack (C++ 524-526, `negepsomeg_cf` restricted)
+    // + PML stack (C++ 619-624, β = detJ·(JᵀJ)⁻¹ real/imag parts).
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id2(-eps_om)), non, flags.clone()),
+        })),
+        es,
+        g,
+    );
+    a.add_trial_integrator(
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                    eps_om,
+                    pml_matrix(|p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                    -eps_om,
+                    pml_matrix(|p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        es,
+        g,
+    );
+    // iωμ (α⁻¹H, F): non-PML stack (C++ 580-581, `MixedScalarMass(muomeg_cf)`)
+    // + PML stack (C++ 676-679, −ωμ·detJᵢ / ωμ·detJᵣ).
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgMassSpatialIntegrator {
+            q: restricted_scalar(const_scalar(mu_om), non, flags.clone()),
+        })),
+        hs,
+        f,
+    );
+    a.add_trial_integrator(
+        Some(Box::new(DpgMassSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    -mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_i(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMassSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_r(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        hs,
+        f,
+    );
+
+    // ── test (graph norm) integrators ──
+    // μ²ω² (F, δF): non-PML stack (C++ 593-594) + PML stack (C++ 682-683,
+    // μ²ω²·|detJ|²).
+    a.add_test_integrator(
+        Some(Box::new(DpgMassSpatialIntegrator {
+            q: restricted_scalar(const_scalar(mu2_om2), non, flags.clone()),
+        })),
+        None,
+        f,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMassSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    mu2_om2,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.abs_det_j_2(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        None,
+        f,
+        f,
+    );
+    // −iωμ (F, ∇×δG) → G[G, F]: non-PML stack (C++ 596-598) + PML stack
+    // (C++ 686-689).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgCurl2dNDSpatialIntegrator {
+            q: restricted_scalar(const_scalar(-mu_om), non, flags.clone()),
+        })),
+        g,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgCurl2dNDSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    -mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_i(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgCurl2dNDSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    -mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_r(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        g,
+        f,
+    );
+    // −iωε (A∇F, δG) → G[G, F]: non-PML stack (C++ 600-601, `negepsrot_cf`)
+    // + PML stack (C++ 692-695, ωε·βᵢₘ·rot / −ωε·βᵣₑ·rot).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorGradientSpatialIntegrator {
+            q: restricted_matrix(
+                const_matrix(vec![vec![0.0, -eps_om], vec![eps_om, 0.0]]),
+                non,
+                flags.clone(),
+            ),
+        })),
+        g,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorGradientSpatialIntegrator {
+            q: restricted_matrix(
+                matrix_right_product_2d(
+                    scalar_matrix_product(
+                        eps_om,
+                        pml_matrix(
+                            |p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_i(x, o),
+                            pml.clone(),
+                        ),
+                    ),
+                    rot,
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorGradientSpatialIntegrator {
+            q: restricted_matrix(
+                matrix_right_product_2d(
+                    scalar_matrix_product(
+                        -eps_om,
+                        pml_matrix(
+                            |p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_r(x, o),
+                            pml.clone(),
+                        ),
+                    ),
+                    rot,
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        g,
+        f,
+    );
+    // iωμ (∇×G, δF) → G[F, G]: non-PML stack (C++ 603-604) + PML stack
+    // (C++ 698-700).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgCurl2dNDTrialSpatialIntegrator {
+            q: restricted_scalar(const_scalar(mu_om), non, flags.clone()),
+        })),
+        f,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgCurl2dNDTrialSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    -mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_i(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgCurl2dNDTrialSpatialIntegrator {
+            q: restricted_scalar(
+                product(
+                    mu_om,
+                    pml_scalar(|p: &CartesianPML<2>, x| p.det_j_r(x), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        f,
+        g,
+    );
+    // iωε (G, A∇δF) → G[F, G]: non-PML stack (C++ 606-609, transposed
+    // `epsrot_cf`) + PML stack (C++ 703-708, transposed rot products).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorWeakDivergenceSpatialIntegrator {
+            q: restricted_matrix(
+                const_matrix(vec![vec![0.0, -eps_om], vec![eps_om, 0.0]]),
+                non,
+                flags.clone(),
+            ),
+        })),
+        f,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorWeakDivergenceSpatialIntegrator {
+            q: restricted_matrix(
+                matrix_right_product_2d_t(
+                    scalar_matrix_product(
+                        eps_om,
+                        pml_matrix(
+                            |p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_i(x, o),
+                            pml.clone(),
+                        ),
+                    ),
+                    rot,
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorWeakDivergenceSpatialIntegrator {
+            q: restricted_matrix(
+                matrix_right_product_2d_t(
+                    scalar_matrix_product(
+                        -eps_om,
+                        pml_matrix(
+                            |p: &CartesianPML<2>, x, o| p.det_j_jt_j_inv_r(x, o),
+                            pml.clone(),
+                        ),
+                    ),
+                    rot,
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        f,
+        g,
+    );
+    // ε²ω² (G, δG): non-PML stack (C++ 610-612) + PML stack (C++ 709-712,
+    // ε²ω²·|β|²).
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id2(eps2_om2)), non, flags.clone()),
+        })),
+        None,
+        g,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                    eps2_om2,
+                    pml_matrix(
+                        |p: &CartesianPML<2>, x, o| p.abs_det_j_jt_j_inv_2(x, o),
+                        pml.clone(),
+                    ),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        None,
+        g,
+        g,
+    );
+
+    // RHS (J, G) — C++ 725-729: `VectorFEDomainLFIntegrator(f_source)` on the
+    // real part only (`source_function`: Gaussian at (½, ½), n = 5ω√(εμ)/π).
+    let src = move |x: &[f64], out: &mut [f64]| {
+        let mut r = 0.0_f64;
+        for v in x {
+            r += (v - 0.5).powi(2);
+        }
+        let n = 5.0 * omega * (epsilon * mu).sqrt() / PI;
+        let coeff = n * n / PI;
+        let alpha = -n * n * r;
+        let f0 = -omega * coeff * alpha.exp() / omega;
+        out[0] = f0;
+        out[1] = 0.0;
+    };
+    a.add_domain_lf_integrator(Some(Box::new(DpgVectorFEDomainLFIntegrator { f: src })), None, g);
+}
+
 // ── 3-D solve ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -512,6 +914,14 @@ fn solve_level_3d(
 ) -> LevelResult {
     let p = order;
     let test_order = order + delta_order;
+    // CartesianPML over the current (global) level mesh — C++
+    // `Array2D<real_t> length(dim, 2); length = 0.25; new CartesianPML(...)`.
+    let pml = (prob == Prob::PmlGeneral).then(|| {
+        let mut p = CartesianPML::new(mesh, [[0.25; 2]; 3]);
+        p.set_omega(omega);
+        p.set_epsilon_and_mu(epsilon, mu);
+        Arc::new(p)
+    });
     let result = Arc::new(Mutex::new(None::<LevelResult>));
     let result_slot = Arc::clone(&result);
     let mesh_arc = Arc::new(mesh.clone());
@@ -521,6 +931,7 @@ fn solve_level_3d(
         let par_mesh = partition_mesh_identity(&mesh_arc, &comm);
         let local_mesh = par_mesh.local_mesh().clone();
         let partition = par_mesh.partition().clone();
+        let pml = pml.clone();
 
         let mut a = ParComplexDPGWeakForm::new(local_mesh.clone(), partition, comm.clone());
         a.set_quad_order((2 * test_order as usize).min(255) as u8);
@@ -544,13 +955,6 @@ fn solve_level_3d(
             es,
             f,
         );
-        // −iωε (E, G).
-        a.add_trial_integrator(
-            None,
-            Some(Box::new(DpgTVectorFEMassIntegrator { q: -epsilon * omega })),
-            es,
-            g,
-        );
         // (H, ∇×G).
         a.add_trial_integrator(
             Some(Box::new(DpgCurl3dPairingIntegrator { q: 1.0 })),
@@ -560,86 +964,106 @@ fn solve_level_3d(
         );
         // <n×Ĥ, G> — TangentTraceIntegrator.
         a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator3D)), None, hath, g);
-        // iωμ (H, F).
-        a.add_trial_integrator(
-            None,
-            Some(Box::new(DpgTVectorFEMassIntegrator { q: mu * omega })),
-            hs,
-            f,
-        );
         // <n×Ê, F> — TangentTraceIntegrator.
         a.add_trace_integrator(Some(Box::new(DpgTangentTraceIntegrator3D)), None, hate, f);
 
-        // Adjoint graph norm (test integrators, C++ 3-D branch).
+        // Adjoint graph norm backbone (coefficient-free, C++ 535-539 / 552-557).
         a.add_test_integrator(Some(Box::new(DpgCurlCurlIntegrator { q: 1.0 })), None, g, g);
         a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, g, g);
         a.add_test_integrator(Some(Box::new(DpgCurlCurlIntegrator { q: 1.0 })), None, f, f);
         a.add_test_integrator(Some(Box::new(DpgVectorFEMassIntegrator { q: 1.0 })), None, f, f);
-        a.add_test_integrator(
-            Some(Box::new(DpgVectorFEMassIntegrator { q: mu * mu * omega * omega })),
-            None,
-            f,
-            f,
-        );
-        // −iωμ (F, ∇×δG) → G[G, F].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: -mu * omega })),
-            g,
-            f,
-        );
-        // −iωε (∇×F, δG) → G[G, F].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorCurlIntegrator { q: -epsilon * omega })),
-            g,
-            f,
-        );
-        // iωμ (∇×G, δF) → G[F, G].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorCurlIntegrator { q: mu * omega })),
-            f,
-            g,
-        );
-        // iωε (G, ∇×δF) → G[F, G].
-        a.add_test_integrator(
-            None,
-            Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: epsilon * omega })),
-            f,
-            g,
-        );
-        // ε²ω² (G, δG).
-        a.add_test_integrator(
-            Some(Box::new(DpgVectorFEMassIntegrator {
-                q: epsilon * epsilon * omega * omega,
-            })),
-            None,
-            g,
-            g,
-        );
 
-        // RHS (J, G) — plane-wave manufactured current (3-D exact problems).
-        if prob == Prob::PlaneWave {
-            let ex_re = Exact3D { omega, mu, epsilon };
-            let ex_im = ex_re;
-            a.add_domain_lf_integrator(
-                Some(Box::new(DpgVectorFEDomainLFIntegrator {
-                    f: move |x: &[f64], out: &mut [f64]| {
-                        for (o, v) in out.iter_mut().zip(ex_re.j(x).iter()) {
-                            *o = v.0;
-                        }
-                    },
-                })),
-                Some(Box::new(DpgVectorFEDomainLFIntegrator {
-                    f: move |x: &[f64], out: &mut [f64]| {
-                        for (o, v) in out.iter_mut().zip(ex_im.j(x).iter()) {
-                            *o = v.1;
-                        }
-                    },
-                })),
-                g,
-            );
+        // Coefficient-carrying blocks: constant coefficients (`-prob 0/1`) or
+        // the attribute-restricted two-stack PML wiring (`-prob 2`).
+        match &pml {
+            None => {
+                // −iωε (E, G).
+                a.add_trial_integrator(
+                    None,
+                    Some(Box::new(DpgTVectorFEMassIntegrator { q: -epsilon * omega })),
+                    es,
+                    g,
+                );
+                // iωμ (H, F).
+                a.add_trial_integrator(
+                    None,
+                    Some(Box::new(DpgTVectorFEMassIntegrator { q: mu * omega })),
+                    hs,
+                    f,
+                );
+                // μ²ω² (F, δF).
+                a.add_test_integrator(
+                    Some(Box::new(DpgVectorFEMassIntegrator { q: mu * mu * omega * omega })),
+                    None,
+                    f,
+                    f,
+                );
+                // −iωμ (F, ∇×δG) → G[G, F].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: -mu * omega })),
+                    g,
+                    f,
+                );
+                // −iωε (∇×F, δG) → G[G, F].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorCurlIntegrator { q: -epsilon * omega })),
+                    g,
+                    f,
+                );
+                // iωμ (∇×G, δF) → G[F, G].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorCurlIntegrator { q: mu * omega })),
+                    f,
+                    g,
+                );
+                // iωε (G, ∇×δF) → G[F, G].
+                a.add_test_integrator(
+                    None,
+                    Some(Box::new(DpgMixedVectorWeakCurlIntegrator { q: epsilon * omega })),
+                    f,
+                    g,
+                );
+                // ε²ω² (G, δG).
+                a.add_test_integrator(
+                    Some(Box::new(DpgVectorFEMassIntegrator {
+                        q: epsilon * epsilon * omega * omega,
+                    })),
+                    None,
+                    g,
+                    g,
+                );
+
+                // RHS (J, G) — plane-wave manufactured current (3-D exact problems).
+                if prob == Prob::PlaneWave {
+                    let ex_re = Exact3D { omega, mu, epsilon };
+                    let ex_im = ex_re;
+                    a.add_domain_lf_integrator(
+                        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+                            f: move |x: &[f64], out: &mut [f64]| {
+                                for (o, v) in out.iter_mut().zip(ex_re.j(x).iter()) {
+                                    *o = v.0;
+                                }
+                            },
+                        })),
+                        Some(Box::new(DpgVectorFEDomainLFIntegrator {
+                            f: move |x: &[f64], out: &mut [f64]| {
+                                for (o, v) in out.iter_mut().zip(ex_im.j(x).iter()) {
+                                    *o = v.1;
+                                }
+                            },
+                        })),
+                        g,
+                    );
+                }
+            }
+            Some(pml) => {
+                assemble_pml_blocks_3d(
+                    &mut a, pml, &local_mesh, es, hs, f, g, omega, mu, epsilon, p - 1, test_order,
+                );
+            }
         }
 
         if static_cond {
@@ -650,43 +1074,50 @@ fn solve_level_3d(
         // Essential BCs: Ê tangential projection on every boundary face (C++
         // `ProjectBdrCoefficientTangent(hatEex)`, MFEM
         // `VectorFiniteElement::Project_ND`: `dof_k = E(x_k)·(J tk_k)` with
-        // the MFEM edge-orientation signs).
+        // the MFEM edge-orientation signs).  PML problems (`-prob 2`) project
+        // no data — C++ `if (prob != 2)` skips the projection and the
+        // homogeneous values stay zero.
         let pairs = a.trace_boundary_dofs_ix(hate);
         let tr = a.local().nd_trace(hate);
         let hat_base = a.local().trial_offsets()[hate];
         let p_us = p as usize;
         let mut values: HashMap<usize, (f64, f64)> = HashMap::new();
-        for face in 0..tr.n_faces() {
-            if !tr.is_boundary_face(face) {
-                continue;
-            }
-            let is_quad = tr.is_quad_face(face);
-            let nodes = nd_face_dof_nodes(p_us, is_quad);
-            let tks = nd_face_dof_tangents(p_us, is_quad);
-            let dof_list = tr.face_dof_list(face).to_vec();
-            let signed = tr.face_signed_dofs(face).to_vec();
-            for (j, &dof) in dof_list.iter().enumerate() {
-                let param = &nodes[j];
-                let xk = face_point_3d(&tr, face, param);
-                let jac = face_jacobian_3d(&tr, face, param);
-                let tk = tks[j];
-                let jt: Vec<f64> = (0..3)
-                    .map(|d| jac[0][d] * tk[0] + jac[1][d] * tk[1])
-                    .collect();
-                let (er, ei) = match prob {
-                    Prob::FicheraOven => e_fichera(&xk),
-                    Prob::PlaneWave => {
-                        let ec = Exact3D { omega, mu, epsilon }.e(&xk);
-                        (ec[0].0, ec[0].1)
-                    }
-                };
-                let mut vr = er * jt[0];
-                let mut vi = ei * jt[0];
-                if signed[j] < 0 {
-                    vr = -vr;
-                    vi = -vi;
+        if prob != Prob::PmlGeneral {
+            for face in 0..tr.n_faces() {
+                if !tr.is_boundary_face(face) {
+                    continue;
                 }
-                values.insert(hat_base + dof, (vr, vi));
+                let is_quad = tr.is_quad_face(face);
+                let nodes = nd_face_dof_nodes(p_us, is_quad);
+                let tks = nd_face_dof_tangents(p_us, is_quad);
+                let dof_list = tr.face_dof_list(face).to_vec();
+                let signed = tr.face_signed_dofs(face).to_vec();
+                for (j, &dof) in dof_list.iter().enumerate() {
+                    let param = &nodes[j];
+                    let xk = face_point_3d(&tr, face, param);
+                    let jac = face_jacobian_3d(&tr, face, param);
+                    let tk = tks[j];
+                    let jt: Vec<f64> = (0..3)
+                        .map(|d| jac[0][d] * tk[0] + jac[1][d] * tk[1])
+                        .collect();
+                    let (er, ei) = match prob {
+                        Prob::FicheraOven => e_fichera(&xk),
+                        Prob::PlaneWave => {
+                            let ec = Exact3D { omega, mu, epsilon }.e(&xk);
+                            (ec[0].0, ec[0].1)
+                        }
+                        Prob::PmlGeneral => {
+                            unreachable!("PML problems project no trace data")
+                        }
+                    };
+                    let mut vr = er * jt[0];
+                    let mut vi = ei * jt[0];
+                    if signed[j] < 0 {
+                        vr = -vr;
+                        vi = -vi;
+                    }
+                    values.insert(hat_base + dof, (vr, vi));
+                }
             }
         }
 
@@ -766,6 +1197,319 @@ fn solve_level_3d(
         .take()
         .expect("rank 0 did not publish the pmaxwell result");
     out
+}
+
+/// `-prob 2` coefficient blocks (3-D): the C++ `pmaxwell.cpp` restricted
+/// coefficients (lines 422-515) and the 3-D PML block-table additions
+/// (lines 625-669 + `source_function` RHS) as a non-PML-attribute stack plus
+/// a PML-attribute stack (exactly one evaluates nonzero per element).
+#[allow(clippy::too_many_arguments)]
+fn assemble_pml_blocks_3d(
+    a: &mut ParComplexDPGWeakForm<Mesh<3>>,
+    pml: &Arc<CartesianPML<3>>,
+    local_mesh: &Mesh<3>,
+    es: usize,
+    hs: usize,
+    f: usize,
+    g: usize,
+    omega: f64,
+    mu: f64,
+    epsilon: f64,
+    trial_order: u8,
+    test_order: u8,
+) {
+    // MFEM per-integrator default rules on the order-`(p−1)` E/H blocks —
+    // same rationale as the 2-D branch.
+    let trial_rule = ((trial_order as u16 + test_order as u16).min(255)) as u8;
+        a.set_trial_quad_order(es, trial_rule);
+        a.set_trial_quad_order(hs, trial_rule);
+    let flags: Arc<Vec<bool>> = Arc::new(pml.mark_elements(local_mesh));
+    let (non, pmr) = (PmlRegion::NonPml, PmlRegion::Pml);
+    let id3 = |c: f64| vec![vec![c, 0.0, 0.0], vec![0.0, c, 0.0], vec![0.0, 0.0, c]];
+    let eps_om = epsilon * omega;
+    let mu_om = mu * omega;
+    let eps2_om2 = epsilon * epsilon * omega * omega;
+    let mu2_om2 = mu * mu * omega * omega;
+
+    // ── trial integrators ──
+    // −iωε (E, G): non-PML stack (C++ 524-526) + PML stack (C++ 619-624).
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(-eps_om)), non, flags.clone()),
+        })),
+        es,
+        g,
+    );
+    a.add_trial_integrator(
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        es,
+        g,
+    );
+    // iωμ (α⁻¹H, F): non-PML stack (C++ 544-546) + PML stack (C++ 630-635,
+    // −ωμ·αᵢₘ / ωμ·αᵣₑ — the same `detJ_Jt_J_inv` matrices in 3-D).
+    a.add_trial_integrator(
+        None,
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(mu_om)), non, flags.clone()),
+        })),
+        hs,
+        f,
+    );
+    a.add_trial_integrator(
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgTVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        hs,
+        f,
+    );
+
+    // ── test (graph norm) integrators ──
+    // μ²ω² (F, δF): non-PML stack (C++ 558-560) + PML stack (C++ 637-640,
+    // μ²ω²·|α|²).
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(mu2_om2)), non, flags.clone()),
+        })),
+        None,
+        f,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    mu2_om2,
+                    pml_matrix(
+                        |p: &CartesianPML<3>, x, o| p.abs_det_j_jt_j_inv_2(x, o),
+                        pml.clone(),
+                    ),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        None,
+        f,
+        f,
+    );
+    // −iωμ (F, ∇×δG) → G[G, F]: non-PML stack (C++ 562-563) + PML stack
+    // (C++ 644-647, −ωμ·αᵢₘ / −ωμ·αᵣₑ).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(-mu_om)), non, flags.clone()),
+        })),
+        g,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        g,
+        f,
+    );
+    // −iωε (∇×F, δG) → G[G, F]: non-PML stack (C++ 565-566) + PML stack
+    // (C++ 650-653, ωε·βᵢₘ / −ωε·βᵣₑ).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(-eps_om)), non, flags.clone()),
+        })),
+        g,
+        f,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        g,
+        f,
+    );
+    // iωμ (∇×G, δF) → G[F, G]: non-PML stack (C++ 568-569) + PML stack
+    // (C++ 656-659, −ωμ·αᵢₘ / ωμ·αᵣₑ).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(mu_om)), non, flags.clone()),
+        })),
+        f,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    -mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    mu_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        f,
+        g,
+    );
+    // iωε (G, ∇×δF) → G[F, G]: non-PML stack (C++ 571-572) + PML stack
+    // (C++ 662-665, ωε·βᵢₘ / ωε·βᵣₑ).
+    a.add_test_integrator(
+        None,
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(eps_om)), non, flags.clone()),
+        })),
+        f,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_i(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        Some(Box::new(DpgMixedVectorWeakCurlSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    eps_om,
+                    pml_matrix(|p: &CartesianPML<3>, x, o| p.det_j_jt_j_inv_r(x, o), pml.clone()),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        f,
+        g,
+    );
+    // ε²ω² (G, δG): non-PML stack (C++ 574-575) + PML stack (C++ 666-669,
+    // ε²ω²·|β|²).
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(const_matrix(id3(eps2_om2)), non, flags.clone()),
+        })),
+        None,
+        g,
+        g,
+    );
+    a.add_test_integrator(
+        Some(Box::new(DpgVectorFEMassSpatialIntegrator {
+            q: restricted_matrix(
+                scalar_matrix_product(
+                                    eps2_om2,
+                    pml_matrix(
+                        |p: &CartesianPML<3>, x, o| p.abs_det_j_jt_j_inv_2(x, o),
+                        pml.clone(),
+                    ),
+                ),
+                pmr,
+                flags.clone(),
+            ),
+        })),
+        None,
+        g,
+        g,
+    );
+
+    // RHS (J, G) — C++ 725-729: `VectorFEDomainLFIntegrator(f_source)`, real
+    // part only (same Gaussian `source_function` in 3-D).
+    let src = move |x: &[f64], out: &mut [f64]| {
+        let mut r = 0.0_f64;
+        for v in x {
+            r += (v - 0.5).powi(2);
+        }
+        let n = 5.0 * omega * (epsilon * mu).sqrt() / PI;
+        let coeff = n * n / PI;
+        let alpha = -n * n * r;
+        let f0 = -omega * coeff * alpha.exp() / omega;
+        out[0] = f0;
+        out[1] = 0.0;
+        out[2] = 0.0;
+    };
+    a.add_domain_lf_integrator(Some(Box::new(DpgVectorFEDomainLFIntegrator { f: src })), None, g);
 }
 
 // ── L2 errors ────────────────────────────────────────────────────────────────
@@ -972,18 +1716,18 @@ fn main() {
             rnum = omega / (2.0 * PI);
             Prob::FicheraOven
         }
+        2 => {
+            omega = 2.0 * PI * rnum;
+            Prob::PmlGeneral
+        }
         _ => {
             eprintln!(
                 "pmaxwell: GAP — `-prob {iprob}` ({}) is not ported to fem-rs.  The C++ \
-                 miniapp assembles the CartesianPML stretched-map coefficients \
-                 (`miniapps/dpg/util/pml.cpp`: PmlCoefficient / PmlMatrixCoefficient, \
-                 α = |J|⁻¹ JᵀJ, β = |J| J⁻¹J⁻ᵀ, restricted to the PML region with \
-                 RestrictedCoefficient / MatrixRestrictedCoefficient).  These are \
-                 SPATIALLY VARYING (matrix) coefficients, which the Dpg*Integrator \
-                 family only accepts as constants, and the CartesianPML attribute \
-                 marking has no fem-rs counterpart either; `-prob 3/4` additionally \
-                 need meshes/scatter.mesh + GSLIB point sources.  Ported today: \
-                 `-prob 0` (plane wave, 2-D and 3-D) and `-prob 1` (fichera oven).",
+                 miniapp runs it on `meshes/scatter.mesh` with a GSLIB point source \
+                 (`py`/`DeltaCoefficient` in the common miniapp machinery); fem-rs has \
+                 neither the scatter mesh nor the GSLIB point-source reader.  Ported \
+                 today: `-prob 0` (plane wave, 2-D and 3-D), `-prob 1` (fichera oven) \
+                 and `-prob 2` (pml_general, CartesianPML).",
                 names[iprob]
             );
             exit(3);

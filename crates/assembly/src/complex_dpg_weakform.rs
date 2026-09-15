@@ -19,6 +19,8 @@
 //! (the `BlockOperator` built in MFEM's `acoustics.cpp` / `maxwell.cpp`),
 //! suitable for real PCG solvers.
 
+use std::collections::HashMap;
+
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -59,6 +61,10 @@ pub struct ComplexDPGWeakForm<M: MeshTopology + Clone + 'static> {
     trace_integs_i: Vec<(usize, usize, Box<dyn DpgTraceBilinear2>)>,
     quad_order: u8,
     face_quad_order: u8,
+    /// Per-trial-block volume quadrature order overrides (MFEM sizes every
+    /// integrator's rule from the two spaces it couples, so different trial
+    /// blocks run at different orders; [`Self::set_trial_quad_order`]).
+    trial_quad_orders: HashMap<usize, u8>,
 
     assembled: bool,
     /// (exposed, private) trial block ids when condensation is enabled.
@@ -268,6 +274,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             trace_integs_r: Vec::new(),
             trace_integs_i: Vec::new(),
             quad_order: 6,
+            trial_quad_orders: HashMap::new(),
             face_quad_order: 4,
             assembled: false,
             cond: None,
@@ -289,6 +296,22 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     /// Set the volume quadrature order (default 6).
     pub fn set_quad_order(&mut self, order: u8) {
         self.quad_order = order;
+    }
+
+    /// Override the volume quadrature order of one **trial** block (MFEM
+    /// per-integrator default rules: each bilinear integrator sizes its rule
+    /// from the two spaces it couples — e.g. `trial.GetOrder() +
+    /// test.GetOrder() + Trans.OrderW()` — so trial blocks whose trial side
+    /// is a low-order L2 space assemble at a *lower* order than the global
+    /// test-Gram rule).  The override applies only to the trial-integrator
+    /// assembly of that block; the test Gram and every non-overridden block
+    /// keep the global rule, and blocks without an override are assembled
+    /// exactly as before (bit-identical default behavior).
+    ///
+    /// `pmaxwell -prob 2` uses this for the order-`p−1` E/H L2 blocks, whose
+    /// C++ rules are `(p−1) + test_order`.
+    pub fn set_trial_quad_order(&mut self, trial_block: usize, order: u8) {
+        self.trial_quad_orders.insert(trial_block, order);
     }
 
     /// Set the face (trace) quadrature order — the rule used by the trace
@@ -645,6 +668,13 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
         let q_order = self.quad_order.max(2 * max_test_order);
         let (qpts, qwts) = vol_quadrature(et, q_order);
         let n_qp = qpts.len();
+        // Per-trial-block overridden rules (empty unless
+        // `set_trial_quad_order` was called — zero impact by default).
+        let ov_rules: HashMap<usize, (Vec<Vec<f64>>, Vec<f64>)> = self
+            .trial_quad_orders
+            .iter()
+            .map(|(&b, &o)| (b, vol_quadrature(et, o)))
+            .collect();
         let face_rule_tri = if dim == 3 {
             Some(crate::dpg::dpg_basis::face_quadrature(3, false, self.face_quad_order))
         } else {
@@ -762,6 +792,53 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 }
             }
 
+            // Override-rule basis tables (only when `set_trial_quad_order`
+            // overrides exist): trial and test blocks evaluated at the
+            // overridden block's own quadrature.
+            let mut ov_qp_trial: HashMap<usize, Vec<VolVals>> = HashMap::new();
+            let mut ov_qp_test: HashMap<usize, Vec<Vec<VolVals>>> = HashMap::new();
+            for (b, (bpts, _)) in &ov_rules {
+                let (kind, order) = match &self.trial_kinds[*b] {
+                    TrialKind::Volume { kind, order, .. } => (kind, order),
+                    _ => continue,
+                };
+                ov_qp_trial.insert(
+                    *b,
+                    bpts
+                        .iter()
+                        .map(|xi| {
+                            let (jac, det, _) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, xi, dim,
+                            );
+                            let jit = inv_transpose(&jac, dim);
+                            let mut v = VolVals::default();
+                            eval_vol_space(*kind, *order, et, dim, &jac, det, &jit, xi, None, &mut v);
+                            v
+                        })
+                        .collect(),
+                );
+                ov_qp_test.insert(
+                    *b,
+                    (0..self.test_kinds.len())
+                        .map(|tb| {
+                            let (k, o) = &self.test_kinds[tb];
+                            bpts
+                                .iter()
+                                .map(|xi| {
+                                    let (jac, det, _) = element_geo_at(
+                                        &mesh, simplex.as_ref(), geo, &geo_nodes, xi, dim,
+                                    );
+                                    let jit = inv_transpose(&jac, dim);
+                                    let mut v = VolVals::default();
+                                    eval_vol_space(*k, *o, et, dim, &jac, det, &jit, xi, None, &mut v);
+                                    v
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                );
+            }
+
             let mut tr_offs = vec![0usize];
             for b in 0..nblocks {
                 let n = match &self.trial_kinds[b] {
@@ -859,13 +936,34 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                         let nr = test_sizes[tb];
                         let nc = tr_offs[*tbb + 1] - tr_offs[*tbb];
                         let mut be = vec![0.0_f64; nr * nc];
-                        for q in 0..n_qp {
-                            let (_jac, det, xp) = element_geo_at(
-                                &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
-                            );
-                            let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
-                            let tv = qp_trial[*tbb].as_ref().unwrap()[q].clone();
-                            integ.assemble2(&ctx, &tv, &qp_test[tb][q], &mut be);
+                        match (
+                            ov_rules.get(tbb),
+                            ov_qp_trial.get(tbb),
+                            ov_qp_test.get(tbb),
+                        ) {
+                            (Some((bpts, bwts)), Some(tvs), Some(tsts)) => {
+                                // Overridden trial-block rule (MFEM
+                                // per-integrator default).
+                                for q in 0..bpts.len() {
+                                    let (_jac, det, xp) = element_geo_at(
+                                        &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
+                                    );
+                                    let ctx =
+                                        VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                                    integ.assemble2(&ctx, &tvs[q], &tsts[tb][q], &mut be);
+                                }
+                            }
+                            _ => {
+                                for q in 0..n_qp {
+                                    let (_jac, det, xp) = element_geo_at(
+                                        &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
+                                    );
+                                    let ctx =
+                                        VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                                    let tv = qp_trial[*tbb].as_ref().unwrap()[q].clone();
+                                    integ.assemble2(&ctx, &tv, &qp_test[tb][q], &mut be);
+                                }
+                            }
                         }
                         let (r0, c0) = (test_offsets[tb], tr_offs[*tbb]);
                         for i in 0..nr {

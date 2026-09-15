@@ -126,6 +126,12 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
         self.local.set_quad_order(order);
     }
 
+    /// Per-trial-block volume quadrature order override — see
+    /// [`ComplexDPGWeakForm::set_trial_quad_order`].
+    pub fn set_trial_quad_order(&mut self, trial_block: usize, order: u8) {
+        self.local.set_trial_quad_order(trial_block, order);
+    }
+
     /// Face quadrature order — see [`ComplexDPGWeakForm::set_face_quad_order`].
     pub fn set_face_quad_order(&mut self, order: u8) {
         self.local.set_face_quad_order(order);

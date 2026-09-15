@@ -510,6 +510,284 @@ impl DpgBilinear2 for DpgCurlCurlIntegrator {
     }
 }
 
+// ─── Spatially varying coefficient integrators ───────────────────────────────
+//
+// MFEM's `BilinearFormIntegrator(Coefficient&)` / `(MatrixCoefficient&)`
+// constructors accept *spatially varying* coefficients (`Eval` at the
+// transformed quadrature point), which the constant-`q` structs above cannot
+// express.  The PML stretched-map blocks of `pmaxwell -prob 2` need exactly
+// that (`miniapps/dpg/util/pml.hpp`: `PmlCoefficient`,
+// `PmlMatrixCoefficient`, `RestrictedCoefficient`,
+// `MatrixRestrictedCoefficient`).  The structs below mirror their constant
+// twins summation-for-summation — only the coefficient is evaluated per
+// element/quadrature point through the [`VolCtx`] (which carries the physical
+// point and the element index, so the caller can gate by element attribute).
+// The constant-family structs are intentionally left untouched.
+
+/// Object-safe spatially varying scalar coefficient: evaluated once per
+/// quadrature point with the assembly context (MFEM
+/// `Coefficient::Eval(ElementTransformation&, const IntegrationPoint&)`).
+pub type DpgSpatialScalar = Box<dyn Fn(&VolCtx) -> f64 + Send + Sync>;
+
+/// Object-safe spatially varying matrix coefficient: writes the row-major
+/// `dim × dim` matrix into the output slice at every quadrature point (MFEM
+/// `MatrixCoefficient::Eval(DenseMatrix&, ElementTransformation&, …)`).
+pub type DpgSpatialMatrix = Box<dyn Fn(&VolCtx, &mut [f64]) + Send + Sync>;
+
+/// `(q(x) u, v)` — MFEM `MassIntegrator(q)` / `MixedScalarMassIntegrator(q)`
+/// with a spatially varying scalar `Coefficient` (PML: `MassIntegrator`
+/// `μ²ω²·|detJ|²(x)` on (F,F), `MixedScalarMassIntegrator` `ωμ·detJᵣ` etc. on
+/// (H,F)).
+pub struct DpgMassSpatialIntegrator {
+    /// Spatial coefficient `q(x)`.
+    pub q: DpgSpatialScalar,
+}
+
+impl DpgBilinear2 for DpgMassSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let qv = (self.q)(ctx);
+        let nt = test.n_expanded;
+        let nc = trial.n_expanded;
+        for i in 0..nt {
+            for j in 0..nc {
+                m[i * nc + j] += ctx.w * qv * test.phi[i] * trial.phi[j];
+            }
+        }
+    }
+}
+
+/// `(Q(x) u, τ)` with the trial vector-L2 expanded — MFEM
+/// `TransposeIntegrator(VectorFEMassIntegrator(Q))` with a spatially varying
+/// `MatrixCoefficient` (PML: `(E,G)` / 3-D `(H,F)` blocks with the
+/// `detJ_Jt_J_inv` stretched matrices).  Entry:
+/// `B[τ_k, u_{c,j}] += w Σ_d Q[c][d] (τ_k)_c u_{d,j}`; a scalar multiple of
+/// the identity reduces to the constant [`DpgTVectorFEMassIntegrator`].
+pub struct DpgTVectorFEMassSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgTVectorFEMassSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..d * d]);
+        let nt = test.n_scalar; // HDiv/HCurl dofs
+        let nsc = trial.n_scalar;
+        let nc = trial.n_expanded;
+        for k in 0..nt {
+            for c in 0..d {
+                let tv = test.phi[k * d + c];
+                for j in 0..nsc {
+                    let mut s = 0.0;
+                    for dq in 0..d {
+                        s += qm[c * d + dq] * tv * trial.phi[dq * nsc + j];
+                    }
+                    m[k * nc + c * nsc + j] += ctx.w * s;
+                }
+            }
+        }
+    }
+}
+
+/// `(Q(x) u, v)` on genuine vector-DOF sides — MFEM
+/// `VectorFEMassIntegrator(Q)` with a spatially varying `MatrixCoefficient`
+/// (PML: (G,G) `ε²ω²·|β|²(x)` and 3-D (F,F) `μ²ω²·|α|²(x)` graph-norm blocks).
+/// Entry: `B[v_i, u_j] += w Σ_{c,d} Q[c][d] u_{d,j} (v_i)_c`.
+pub struct DpgVectorFEMassSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgVectorFEMassSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..d * d]);
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..d {
+                    let tv = test.phi[i * d + c];
+                    for dq in 0..d {
+                        s += qm[c * d + dq] * tv * trial.phi[j * d + dq];
+                    }
+                }
+                m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
+/// 2-D pairing `(q(x) H, ∇×G)` — spatial-coefficient twin of
+/// [`DpgCurl2dNDIntegrator`] (MFEM
+/// `TransposeIntegrator(MixedCurlIntegrator(q))`, PML: `−ωμ·detJ_{r/i}(x)`).
+pub struct DpgCurl2dNDSpatialIntegrator {
+    /// Spatial coefficient `q(x)`.
+    pub q: DpgSpatialScalar,
+}
+
+impl DpgBilinear2 for DpgCurl2dNDSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let qv = (self.q)(ctx);
+        let nt = test.n_scalar;
+        let nc = trial.n_expanded;
+        for i in 0..nt {
+            for j in 0..nc {
+                m[i * nc + j] += ctx.w * qv * trial.phi[j] * test.curl[i];
+            }
+        }
+    }
+}
+
+/// 2-D pairing `(q(x) ∇×G, F)` — spatial-coefficient twin of
+/// [`DpgCurl2dNDTrialIntegrator`] (MFEM `MixedCurlIntegrator(q)` used
+/// directly, PML: `ωμ·detJᵣ(x)` etc.).
+pub struct DpgCurl2dNDTrialSpatialIntegrator {
+    /// Spatial coefficient `q(x)`.
+    pub q: DpgSpatialScalar,
+}
+
+impl DpgBilinear2 for DpgCurl2dNDTrialSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let qv = (self.q)(ctx);
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                m[i * nc + j] += ctx.w * qv * test.phi[i] * trial.curl[j];
+            }
+        }
+    }
+}
+
+/// `(Q(x) ∇u, v)` — spatial-coefficient twin of
+/// [`DpgMixedVectorGradientIntegrator`] (MFEM
+/// `MixedVectorGradientIntegrator(Q)`, PML: `rot`-multiplied stretched
+/// matrices).  Entry: `B[v_i, u_j] += w Σ_{c,d} Q(x)[c][d] (v_i)_c ∂u_j/∂x_d`.
+pub struct DpgMixedVectorGradientSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgMixedVectorGradientSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..d * d]);
+        let nt = test.n_scalar;
+        let nc = trial.n_expanded;
+        // Trial gradient stride: grad is [n_expanded × dim].
+        let stride = trial.grad.len() / trial.n_expanded.max(1);
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..d {
+                    let tv = test.phi[i * d + c];
+                    for dq in 0..d {
+                        s += qm[c * d + dq] * tv * trial.grad[j * stride + dq];
+                    }
+                }
+                m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
+/// `-(Q(x) v, ∇u)` — spatial-coefficient twin of
+/// [`DpgMixedVectorWeakDivergenceIntegrator`] (MFEM
+/// `TransposeIntegrator(MixedVectorGradientIntegrator(Q))` pairing, PML:
+/// transposed `rot`-multiplied stretched matrices).  Entry:
+/// `B[u_i, v_j] -= w Σ_{c,d} Q(x)[d][c] (v_j)_c ∂u_i/∂x_d`.
+pub struct DpgMixedVectorWeakDivergenceSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgMixedVectorWeakDivergenceSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let d = ctx.dim;
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..d * d]);
+        let nt = test.n_expanded;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..d {
+                    for dq in 0..d {
+                        s += qm[dq * d + c] * trial.phi[j * d + c] * test.grad[i * d + dq];
+                    }
+                }
+                m[i * nc + j] -= ctx.w * s;
+            }
+        }
+    }
+}
+
+/// `(∇×v, Q(x) u)`… — MFEM `MixedVectorCurlIntegrator(Q)` (3-D) with a
+/// spatially varying `MatrixCoefficient` (`MixedVectorIntegrator` MQ kernel:
+/// `elmat += w·test_shape·Q·trial_shapeᵀ`; PML: `ωε·β_im(x)` etc.).
+/// Trial H(curl), test vector FE (H(div)/H(curl)):
+/// `B[v_i, u_j] += w Σ_{c,d} Q[c][d] (v_i)_c (∇×u_j)_d`.
+pub struct DpgMixedVectorCurlSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgMixedVectorCurlSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..9]);
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..3 {
+                    let tv = test.phi[i * 3 + c];
+                    for d in 0..3 {
+                        s += qm[c * 3 + d] * tv * trial.curl[j * 3 + d];
+                    }
+                }
+                m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
+/// `(v, Q(x)·∇×u)` — MFEM `MixedVectorWeakCurlIntegrator(Q)` (3-D) with a
+/// spatially varying `MatrixCoefficient` (`MixedVectorIntegrator` MQ kernel;
+/// PML: `−ωμ·α_im(x)` etc.).  Trial vector FE, test H(curl):
+/// `B[v_i, u_j] += w Σ_{c,d} Q[c][d] (∇×v_i)_c (u_j)_d`.
+pub struct DpgMixedVectorWeakCurlSpatialIntegrator {
+    /// Spatial coefficient matrix `Q(x)` (row-major `dim × dim`).
+    pub q: DpgSpatialMatrix,
+}
+
+impl DpgBilinear2 for DpgMixedVectorWeakCurlSpatialIntegrator {
+    fn assemble2(&self, ctx: &VolCtx, trial: &VolVals, test: &VolVals, m: &mut [f64]) {
+        let mut qm = [0.0_f64; 9];
+        (self.q)(ctx, &mut qm[..9]);
+        let nt = test.n_scalar;
+        let nc = trial.n_scalar;
+        for i in 0..nt {
+            for j in 0..nc {
+                let mut s = 0.0;
+                for c in 0..3 {
+                    let tv = test.curl[i * 3 + c];
+                    for d in 0..3 {
+                        s += qm[c * 3 + d] * tv * trial.phi[j * 3 + d];
+                    }
+                }
+                m[i * nc + j] += ctx.w * s;
+            }
+        }
+    }
+}
+
 // ─── Face (trace) bilinear integrators ───────────────────────────────────────
 
 /// A DPG trace-face integrator assembling `M[test, face-trial]`.
@@ -710,6 +988,110 @@ mod tests {
         let mut m = vec![0.0; 4];
         DpgMixedScalarWeakGradientIntegrator { q: 1.0 }.assemble2(&ctx, &r, &t, &mut m);
         assert!((m[0] + 3.0).abs() < 1e-14, "weak gradient must be negative");
+    }
+
+    /// Spatial variants must reduce to their constant twins when the spatial
+    /// coefficient returns the same constant (or `c·I` for matrix forms):
+    /// the PML gating in `pmaxwell -prob 2` relies on the constant branch
+    /// reproducing the plain integrator exactly.
+    #[test]
+    fn spatial_integrators_reduce_to_constant_twins() {
+        let ctx = VolCtx { w: 1.7, x: vec![0.3, 0.6], dim: 2, elem: 4 };
+        let k = 2.3_f64;
+        let scalar = move |_c: &VolCtx| k;
+        // Mass spatial vs Mass constant.
+        let t = vals(2, 1, 0.7);
+        let r = vals(3, 1, 1.1);
+        let mut m1 = vec![0.0; 6];
+        let mut m2 = vec![0.0; 6];
+        DpgMassIntegrator { q: k }.assemble2(&ctx, &r, &t, &mut m1);
+        DpgMassSpatialIntegrator { q: Box::new(scalar) }.assemble2(&ctx, &r, &t, &mut m2);
+        assert_eq!(m1, m2);
+        // 2-D curl pairings.
+        let mut t2 = vals(2, 1, 0.5);
+        t2.curl = vec![0.4, -0.9];
+        let r2 = vals(3, 1, 1.3);
+        let mut m1 = vec![0.0; 6];
+        let mut m2 = vec![0.0; 6];
+        DpgCurl2dNDIntegrator { q: k }.assemble2(&ctx, &r2, &t2, &mut m1);
+        DpgCurl2dNDSpatialIntegrator { q: Box::new(scalar) }.assemble2(&ctx, &r2, &t2, &mut m2);
+        assert_eq!(m1, m2);
+        let mut m1 = vec![0.0; 6];
+        let mut m2 = vec![0.0; 6];
+        DpgCurl2dNDTrialIntegrator { q: k }.assemble2(&ctx, &t2, &r2, &mut m1);
+        DpgCurl2dNDTrialSpatialIntegrator { q: Box::new(scalar) }.assemble2(&ctx, &t2, &r2, &mut m2);
+        assert_eq!(m1, m2);
+        // TVectorFEMass spatial with `k·I` vs constant `k`: 3-D layout.
+        let ctx3 = VolCtx { w: 0.9, x: vec![0.1, 0.2, 0.3], dim: 3, elem: 1 };
+        let mut t3 = vals(6, 3, 0.0);
+        t3.n_scalar = 2;
+        t3.n_expanded = 6;
+        t3.phi = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let mut r3 = vals(9, 1, 0.8);
+        r3.n_scalar = 3;
+        r3.n_expanded = 9;
+        let mut m1 = vec![0.0; 2 * 9];
+        let mut m2 = vec![0.0; 2 * 9];
+        DpgTVectorFEMassIntegrator { q: k }.assemble2(&ctx3, &r3, &t3, &mut m1);
+        let id = move |_c: &VolCtx, out: &mut [f64]| {
+            out[..9].copy_from_slice(&[
+                k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k,
+            ]);
+        };
+        DpgTVectorFEMassSpatialIntegrator { q: Box::new(id) }.assemble2(&ctx3, &r3, &t3, &mut m2);
+        for (a, b) in m1.iter().zip(&m2) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // MixedVectorGradient spatial with a constant matrix vs constant.
+        let qm = vec![vec![0.4, -0.2], vec![1.1, 0.7]];
+        let qmc = qm.clone();
+        let mat = move |_c: &VolCtx, out: &mut [f64]| {
+            out[..4].copy_from_slice(&[qmc[0][0], qmc[0][1], qmc[1][0], qmc[1][1]]);
+        };
+        let mut t2g = vals(4, 2, 0.6);
+        t2g.n_scalar = 2;
+        t2g.n_expanded = 4;
+        let mut r2g = vals(2, 1, 0.9);
+        r2g.grad = vec![0.2, -0.3, 0.5, 0.1];
+        let mut m1 = vec![0.0; 4];
+        let mut m2 = vec![0.0; 4];
+        DpgMixedVectorGradientIntegrator { q: qm.clone() }.assemble2(&ctx, &r2g, &t2g, &mut m1);
+        DpgMixedVectorGradientSpatialIntegrator { q: Box::new(mat) }
+            .assemble2(&ctx, &r2g, &t2g, &mut m2);
+        assert_eq!(m1, m2);
+        // WeakDivergence spatial with the transposed matrix vs constant.
+        let qmt: Vec<Vec<f64>> = vec![vec![qm[0][0], qm[1][0]], vec![qm[0][1], qm[1][1]]];
+        let qmtc = qmt.clone();
+        let matt = move |_c: &VolCtx, out: &mut [f64]| {
+            out[..4].copy_from_slice(&[qmtc[0][0], qmtc[0][1], qmtc[1][0], qmtc[1][1]]);
+        };
+        let mut m1 = vec![0.0; 4];
+        let mut m2 = vec![0.0; 4];
+        DpgMixedVectorWeakDivergenceIntegrator { q: qmt }.assemble2(&ctx, &t2g, &r2g, &mut m1);
+        DpgMixedVectorWeakDivergenceSpatialIntegrator { q: Box::new(matt) }
+            .assemble2(&ctx, &t2g, &r2g, &mut m2);
+        assert_eq!(m1, m2);
+        // VectorFEMass spatial with `k·I` (3-D genuine vector dofs).
+        let mut tv3 = vals(12, 3, 0.5);
+        tv3.n_scalar = 4;
+        tv3.n_expanded = 12;
+        let mut rv3 = vals(6, 3, 0.0);
+        rv3.n_scalar = 2;
+        rv3.n_expanded = 6;
+        rv3.phi = vec![0.3, -0.1, 0.7, 0.2, 0.9, -0.4];
+        let mut m1 = vec![0.0; 4 * 2];
+        let mut m2 = vec![0.0; 4 * 2];
+        DpgVectorFEMassIntegrator { q: k }.assemble2(&ctx3, &rv3, &tv3, &mut m1);
+        DpgVectorFEMassSpatialIntegrator { q: Box::new(id) }.assemble2(&ctx3, &rv3, &tv3, &mut m2);
+        for (a, b) in m1.iter().zip(&m2) {
+            assert!((a - b).abs() < 1e-14, "{a} vs {b}");
+        }
+        // Element-index gating: a closure returning 0 on `elem == 4` must
+        // zero the block (the RestrictedCoefficient semantics of -prob 2).
+        let gated = move |c: &VolCtx| if c.elem == 4 { 0.0 } else { k };
+        let mut m3 = vec![0.0; 6];
+        DpgMassSpatialIntegrator { q: Box::new(gated) }.assemble2(&ctx, &r, &t, &mut m3);
+        assert!(m3.iter().all(|&v| v == 0.0));
     }
 
     /// `TransposeIntegrator(MixedCurlIntegrator)` layout: the test side is a
