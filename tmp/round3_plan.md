@@ -1675,6 +1675,56 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：两个代理为排除自身改动使用了 `git stash`（push+pop 往返干净）——**stash 纪律下轮派单时要写得更显眼**。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 667+8ign / element 500 / io 132 / linalg 66 / linalg-gpu 13+2ign / mesh 306 / **parallel 243** / solver 264 / space 287）；集成层 26 套 ok + 预存 D73（`7.9085e-2` 逐位）+ 存量 D193 两项（HEAD 同样失败）；examples **0 错误（10m57s）**；pro 层 **0 错误**。
 
+## 第三十八轮（round 38）：四路并行 —— D185+D186 postproc/physics tri GLL / D190+D187 wedge 收尾+曲面三角 / D195 ND 迹残差 / D199+D200 PrintLevel+trailer
+
+### 0. 本轮形状
+**四路全部交付完整报告；主会话逐路亲验。round-36 存量 D193 在本轮被 ① 路顺手关闭。**
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D185+D186** postproc 四文件 + physics/nonlinear tri p≥3 等距臂 → `H1TriPk` | ✅ **关闭**（+ 顺手修 **D201/D193**：`tests/poisson.rs::l2_error_3d` 的 tet p3 评估器——**17/17 首次全绿**） |
+| ② | **D190+D187** io wedge 文案/夹具 + `set_curvature_tri3` 3-D 曲面三角 GLL | ✅ **关闭**（改前 vs C++ p3 worst **6.180e-1** → 改后 **0.0 逐位**；连带影响 = 零失败零期望改动——旧实现全仓无调用者） |
+| ③ | **D195** serial `compute_residual` ND 迹双折号 | ✅ **关闭**（修后 serial 残差 **4.706293799742669 = C++ np1 真值逐字**；三条 pmaxwell/pacoustics 头条复跑逐位不变） |
+| ④ | **D199+D200** PrintLevel level 0/3 档 + MINRES/GMRES/BiCGSTAB trailer | ✅ **关闭**（CG level 0/3 七例**逐字节含数值全等**；三求解器行模板/setw/分支门控逐字节，数值尾串代数等价属合法差） |
+
+### 1. ① 路：D185/D186 关闭 + D193/D201 顺手清账
+- `postproc/{postprocess,flux_recovery,error_estimate,grid_function}.rs` 的 tri p=3（grid_function 另含 order-generic 臂，服务曲面三角几何读入 `geo_elem`）与 `physics/{nonlinear,nonlinear_hyperelasticity}.rs` 的 tri p=3 位移参考元 → `H1TriPk`；p≤2 臂不动（逐位重合）。
+- **数字**（`tmp/d185_d186_{before,after}_run.txt`）：postprocess H1 误差 p3 改前发散平台（3.09e0→3.29e0）→ 改后 **rate 2.94/3.00**；zz 估计器改前**负收敛** → 2.57/2.84（nodal 与 mfem 两路 12 位一致互证）；grid_function 弯 tri g4 p4 改前 rate≈0.86 → **5.06**；nonlinear MMS p3 O(1) 平台 → **3.99/4.07**；hyperelasticity p3 patch worst 1.28e-3 → **1.73e-17**。
+- **D193/D201**：`tests/poisson.rs::l2_error_3d` 的 p=3 评估器也是等距 `TetP3`（D157 评估器侧遗留）→ `H1TetPk::new(3)`；pristine 复现 tet p3 L2=5.486e-2/rate 0.98，修后 **poisson 17/17 首次全绿**（round-36 起的存量失败清零）。
+- 分类：p≤2 等距臂合法保留；目录外 `ref_elem_vol_l2`（L2/DG 等距口径）未动。
+- 测试：`d185_d186_tri_postproc_h1_ref_elem.rs`（10）。新债 **D202**：postproc 三局部表 + physics 两表无 tri/tet o≥4 臂（fail-fast panic，低危）。
+
+### 2. ② 路：D190+D187 关闭——曲面三角几何终对齐
+- **D187**：`simplex.rs` 旧 3-D `set_curvature_tri3`（等距 `TriPk` + 单位球投影）删除，2-D 版升为 D 泛型唯一实现（`H1TriPk` GLL + 方向感知边去重 + 纯仿射 placement）。C++ 真值（MFEM 4.10 ex7 正八面体，`tmp/d187/octa_probe.cpp`）：改前 p2 **2.071e-1** / p3 **6.180e-1**（GLL 弦点 vs 等距+球投影） / p4 **7.760e-1** → 改后 **p2/p3/p4 全部 0.0 逐位**。**连带影响 = 零失败零期望改动**（改前旧实现全仓无调用者——曲面 tri 网格从未走过它）。
+- **相邻发现（既有 D112b 实证）**：io 读 `dimension 2 + VDim: 3` 曲面 nodes 按 D112b 截 z 分量——`octa_p3.mesh` 实测**槽编号与 MFEM 一致**（x,y worst 5.6e-17），缺口仅截断。
+- **D190**：`build_h1_geometry` 的 D41 警告改分型路由（all-prism 静默——D177 已验证；仅金字塔/混合仍警告，文案指向 `d177_prism_h1_mfem_numbering.rs`）；`wedge_curved2.mesh` 入库（`$HOME/work/d177/` 原件 md5 一致；实测 27 dofs/19 非顶点）+ 往返测试逐 (element,slot) 位级对 MFEM `GetElementDofs` 真值表。
+- 测试：`d187_tri3_surface_curvature.rs`（4，真值夹具 `tests/d187/octa_p{2,3,4}_slots.txt`）+ `d190_wedge_curved_nodes_roundtrip.rs`（2）；`fem-mesh` 379 全绿 / `fem-io` 220 全绿，零期望值改动。新债 **D206**（注释级，主会话已顺手修）：bbar.rs 两处旧名 `set_curvature_tri3_2d`。
+
+### 3. ③ 路：D195 关闭——ND 迹残差与 C++ 逐字对齐
+- **语义对照**（`tmp/d195_nd_trace_residual.md`）：C++ 存**未折号**稠密块，符号在 gather（`GetSubVector` 带符号 vdofs）施加一次，全局系统由 `AddSubMatrix` 折 σ_row·σ_col；fem-rs 装配期折号进列（= AddSubMatrix 的正确对偶）但 `compute_residual` gather 又 sigma-decode ⇒ `D·D` 抵消成 `L⁻¹B̃·x`，凡 D 非平凡（3-D ND 迹）皆错。
+- **修法**：`complex_dpg_weakform.rs:1610` gather 改无符号（结合律下与 C++ 逐位同一路径）；存储/系统装配不动；`element_dof_signs` 保留为 pub API 供反向验证测试。
+- **修后**：serial twin 残差 = **4.706293799742669**（C++ `mpirun -np 1` 真值逐字；修前同 harness 1.646e+01）；回归测试 `d195_nd_trace_residual.rs`（984 dofs + 全精度钉扎 + 修前公式 > 2× 修后）。
+- **并行简化**：`global_residual_norm` 接管行级平方累加，`global_residual_norm_unfolded` 退役为别名；**三条头条复跑逐位不变**（主会话亲验前两条）：pmaxwell `-prob 1` np2 = 166/6.780e-17/29、`-prob 0 -m inline-hex` np2 = 984/1.313e+00/4.706e+00/59、pacoustics 113/8.008e-01/1.374e+00（另 pdiffusion 113/1.021e+00/9.951e-01 亦不变）。
+- **stretch D172 4/4 PML 未动代码**，诊断 + 缺口清单 = 新债 **D211**（`tmp/d211_pml_gap.md`：积分器 API 级缺口——`Dpg*Integrator` 仅收常数，需空间变标量/矩阵系数入口 ×≥4 积分器 + CartesianPML 移植 + ~20 系数组合子；`-prob 2` 优先，`-prob 3/4` 因 scatter.mesh+GSLIB 排后）。
+
+### 4. ④ 路：D199+D200 关闭——打印面与 MFEM 完整对齐
+- **D199**：`PrintLevel` 枚举**追加变体**（非插位——`bpcg.rs:106` 用派生 `Ord` 的 `>=` 比较，追加保证既有档位序数值不变）：`WarningsOnly`（level 0）与 `FirstAndLast`（level 3，首尾迭代 + `" ..."` 省略 + ARF 门），对照 MFEM `FromLegacyPrintLevel`（solvers.cpp:119）。`CgTrailerGates` 接档。**struct 未加字段**（pro 层无风险）。
+- **D200**：MINRES（iter-0/in-loop/loop-end 三段 + `Number of iterations` `setw(3)` + `MINRES: No convergence!`）、GMRES（`Pass/Iteration` 行 + `Restarting...` + finish 门）、BiCGSTAB（iter-0 在容差判定前、两段式行、breakdown trailer，拼写 `BiCGStab` 逐字符）从零对齐；GCR 无 MFEM 对应物（4.10 grep=0）保持静默。
+- **对照**：CG level 0/3 七例**逐字节含数值全等**；三求解器行模板/`setw`/分支顺序逐字节断言全绿，数值尾串代数等价（Givens 算术不同，例 1.61243e-15 vs 1.59221e-15）——合法差，算法无关值（初始残差等）仍逐字节全等。
+- 测试：`d200_mfem_print.rs`（56：25 child + 31 parent）；**d169 17/17 无恙**；`fem-solver --lib` 266、`fem-linalg` 全绿。新债 **D215**（GCR 无 MFEM 对应物）、**D216**（`bpcg.rs` 的 `>=` 未区分新变体，调用方全传 Silent）、**D217**（三求解器数值尾串非逐位 + GMRES restart 边界怪癖刻意保留）、**D218**（linlvo `VerboseLevel` 无 0/3 档，包装族降级 Silent）。
+
+### 第三十八轮新债务
+- **D202（P3）** postproc 三局部表 + physics 两表无 tri/tet o≥4 臂（fail-fast panic；GridFunction 高阶场路径不受影响）——① 路发现。
+- **D211（P2）D172 4/4 PML 缺口清单**（`tmp/d211_pml_gap.md`：积分器空间变系数 API + CartesianPML + 系数组合子 + `-prob 2` 优先的开工顺序）——③ 路。
+- **D215（P3）GCR 无 MFEM 对应物**（4.10 无 GCRSolver；保持静默）、**D216（P3）`bpcg.rs:106` 的 `Ord` `>=` 档位比较未区分新变体**（现调用方全传 Silent，潜在）、**D217（P3）MINRES/GMRES/BiCGSTAB 数值尾串非逐位**（代数等价；逐字节数值对拍需按 MFEM 算术重写内核）+ GMRES restart 边界 final_iter 怪癖刻意保留、**D218（P3）linlvo `VerboseLevel` 无 level 0/3**（包装族降级 Silent）——④ 路。
+- **关闭**：~~D185~~+~~D186~~（①）、~~D190~~+~~D187~~（②）、~~D195~~（③）、~~D199~~+~~D200~~（④）、**D193/D201**（① 顺手修，poisson 17/17）、**D206**（② 提出，主会话两行注释修补）。
+- 沿用开放：D172 4/4（= D211）、D202/D215–D218、D158–D162、D179/D180、D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：`fem-assembly` + `d185_d186`（10）+ `d195`（1）；`fem-mesh` + `d187`（4，含真值夹具）；`fem-io` + `d190`（2）+ 夹具 `wedge_curved2.mesh`；`fem-solver` + `d200_mfem_print`（56）。poisson 17/17（D193 修复）。全部实跑确认。
+- **主会话亲验**（不是转述）：五套新测试实跑绿；pmaxwell 两条头条现场复现逐位；D206 注释修补。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 667+8ign / element 500 / io 132 / **linalg 66** / linalg-gpu 13+2ign / **mesh 306** / parallel 243 / **solver 266** / space 287）；集成层 109 套 ok + 仅预存 D73（`7.9085e-2` 逐位；**D193 已修复不再出现**）；examples 0 错误（**12m05s**）；pro 层 0 错误。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。

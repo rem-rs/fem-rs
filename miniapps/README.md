@@ -662,11 +662,13 @@ miniapps/
 │   │                            不复刻：HypreAMS/Jacobi + rtol 1e-6 vs 复块 GS +
 │   │                            rtol 1e-12，pacoustics 先例）。
 │   │                            仍 `exit(3)`：`-prob 2/3/4`（PML：空间变**矩阵**系数
-│   │                            在 assembly，D172 4/4 残余）、`-pmg`、AMR；另记
-│   │                            **D195**：serial `ComplexDPGWeakForm::compute_residual`
-│   │                            对 ND 迹双重施加定向符号（本轮并行侧以
-│   │                            `global_residual_norm_unfolded` 等价绕过，assembly 侧
-│   │                            修正留下轮）
+│   │                            在 assembly，D172 4/4 残余 = **D211** 缺口清单，
+│   │                            `tmp/d211_pml_gap.md`）、`-pmg`、AMR。
+│   │                            **round 38（D195）**：serial
+│   │                            `ComplexDPGWeakForm::compute_residual` 的 ND 迹
+│   │                            双折号已修（MFEM 语义 = 存未折号块 + 取时一次；
+│   │                            修后 serial 残差 4.706293799742669 = C++ np1
+│   │                            逐字），并行侧绕过退役，三条头条复跑逐位不变
 │   └── pconvection_diffusion.rs ← ⚠️ **诚实 exit(3) + 缺口清单**（缺带系数的 DPG 积分器 +
 │                                `setup_test_norm_coeffs`）
 │      ✅ **round 34（D167）：库层已修**——`from_local_matrix` 的 ghost 列数改从
