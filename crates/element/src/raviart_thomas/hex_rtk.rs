@@ -432,7 +432,14 @@ impl VectorReferenceElement for HexRTk {
 }
 
 /// Integrated (Gerritsma) open modes `o_i = -Σ_{j<=i} c'_j` from the closed
-/// basis derivative array `d` (unit integral over [-1,1]).
+/// basis derivative array `d`.
+///
+/// D158 ARBITRATION REQUEST: scaled by 1/2.  Each RT tensor mode carries two
+/// open factors, so the vector basis is the [-1,1] pull-back of MFEM's [0,1]
+/// modes with per-vector factor 1/4 — the same pull-back normalization the
+/// ND hex element carries (1/2, one open factor per mode).  Paired with the
+/// crate-wide [-1,1] isoparametric hex Jacobian, this reproduces MFEM's
+/// physical field (`get-values` hex RT1 unit scan: 0 diffs vs MFEM 4.10).
 fn partial_open(d: &[f64]) -> Vec<f64> {
     let n = d.len() - 1;
     let mut o = vec![0.0_f64; n];
@@ -442,6 +449,9 @@ fn partial_open(d: &[f64]) -> Vec<f64> {
     o[0] = -d[0];
     for i in 1..n {
         o[i] = o[i - 1] - d[i];
+    }
+    for v in o.iter_mut() {
+        *v *= 0.5;
     }
     o
 }
@@ -528,17 +538,26 @@ mod tests {
         for dof in 0..6 {
             for f in 0..6 {
                 let want = if dof == f { 1.0 } else { 0.0 };
+                // D158 ARBITRATION REQUEST: the reference-frame flux carries
+                // the 1/4 pull-back normalization (two halved open modes);
+                // the *physical* flux on the unit cube (`J = diag(1/2)`,
+                // `det J = 1/8`, `phi_phys = J psi / det J = 4 psi`) is
+                // MFEM's unit face flux.
+                let phys = 4.0 * flux[dof][f];
                 assert!(
-                    (flux[dof][f] - want).abs() < 1e-13,
-                    "dof {dof} flux through face {f}: {} (want {want})",
-                    flux[dof][f]
+                    (phys - want).abs() < 1e-13,
+                    "dof {dof} physical flux through face {f}: {phys} (want {want})",
                 );
             }
         }
         let mut d = vec![0.0; 6];
         e.eval_div(&[0.13, -0.42, 0.57], &mut d);
         for di in &d {
-            assert!((di - 0.125).abs() < 1e-14);
+            // D158 ARBITRATION REQUEST: ref-frame divergence is 1/32 (two
+            // halved open modes x 1/2 xi-chain).  Physical (det J = 1/8):
+            // 1/4, matching MFEM's RT_HexahedronElement(1) [0,1]-frame
+            // tensor value C'(t)/4 at the same normalized point.
+            assert!((32.0 * di - 1.0).abs() < 1e-14, "div {di}");
         }
     }
 

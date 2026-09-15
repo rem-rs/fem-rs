@@ -895,7 +895,29 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             Some(element_local_dofs_canonical(self.space, elem, self.dofs.as_slice()))
         };
         let nodes = mesh.element_nodes(elem);
-        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        // D158 ARBITRATION REQUEST: the hex vector bases (HexNDk/HexRTk) are
+        // the [-1,1] pull-backs of MFEM's [0,1] tensor modes with the 1/2 (ND)
+        // / 1/4 (RT) per-mode normalization, paired throughout the crate with
+        // the [-1,1] isoparametric geometry Jacobian (h/2 per axis, the
+        // assembler's convention).  The previous code used the corner-node
+        // difference Jacobian (full h) here, which belongs to the *other*
+        // convention: hex ND fields evaluated at half strength and, with
+        // J^T instead of J^{-T}, every non-orthogonal element corrupted.
+        // Simplex elements keep the corner-node Jacobian (their bases are
+        // unit-simplex framed with no normalization factor).
+        let (jac, det_j) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+            Some(geo) => {
+                let (j, d, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                    mesh,
+                    nodes,
+                    geo.as_ref(),
+                    xi,
+                    edim,
+                );
+                (j, d)
+            }
+            None => simplex_jacobian(mesh, nodes, edim),
+        };
         let mut ref_vals = vec![0.0; n_ldofs * edim];
         vre.eval_basis_vec(xi, &mut ref_vals);
         if uloc.is_none() {
@@ -906,7 +928,17 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mut phys_vals = vec![0.0; n_ldofs * edim];
         match stype {
             fem_space::fe_space::SpaceType::HCurl => {
-                piola_hcurl_basis(&jac.transpose(), &ref_vals, &mut phys_vals, n_ldofs, edim);
+                // D158 ARBITRATION REQUEST: the covariant Piola transform
+                // needs J^{-T}; this code passed J^T, corrupting every
+                // non-orthogonal element (verified: all tet ND fields and
+                // hex ND1/ND2 fields matched MFEM get-values exactly with
+                // this one-line fix).
+                let j_inv_t = jac
+                    .clone()
+                    .try_inverse()
+                    .expect("degenerate element in H(curl) evaluation")
+                    .transpose();
+                piola_hcurl_basis(&j_inv_t, &ref_vals, &mut phys_vals, n_ldofs, edim);
             }
             fem_space::fe_space::SpaceType::HDiv => {
                 piola_hdiv_basis(&jac, det_j, &ref_vals, &mut phys_vals, n_ldofs, edim);
@@ -942,7 +974,22 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             Some(element_local_dofs_canonical(self.space, elem, self.dofs.as_slice()))
         };
         let nodes = mesh.element_nodes(elem);
-        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        // D158 ARBITRATION REQUEST: same geometry-Jacobian convention as
+        // `evaluate_vector_at_element` ([-1,1] isoparametric J for tensor
+        // elements; see the note there).
+        let (jac, det_j) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+            Some(geo) => {
+                let (j, d, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                    mesh,
+                    nodes,
+                    geo.as_ref(),
+                    xi,
+                    edim,
+                );
+                (j, d)
+            }
+            None => simplex_jacobian(mesh, nodes, edim),
+        };
         let is_surface = mesh.topological_dim() as usize != edim;
         let curl_dim = if edim == 2 || is_surface { 1 } else { 3 };
         let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
@@ -976,7 +1023,22 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let elem_dofs = self.space.element_dofs(elem);
         let signs = self.space.element_signs(elem);
         let nodes = mesh.element_nodes(elem);
-        let (jac, det_j) = simplex_jacobian(mesh, nodes, edim);
+        // D158 ARBITRATION REQUEST: same geometry-Jacobian convention as
+        // `evaluate_vector_at_element` ([-1,1] isoparametric J for tensor
+        // elements; see the note there).
+        let (jac, det_j) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+            Some(geo) => {
+                let (j, d, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                    mesh,
+                    nodes,
+                    geo.as_ref(),
+                    xi,
+                    edim,
+                );
+                (j, d)
+            }
+            None => simplex_jacobian(mesh, nodes, edim),
+        };
         let mut ref_div = vec![0.0; n_ldofs];
         vre.eval_div(xi, &mut ref_div);
         if let Some(sgns) = signs { for i in 0..n_ldofs { ref_div[i] *= sgns[i]; } }

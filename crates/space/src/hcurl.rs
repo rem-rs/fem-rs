@@ -202,12 +202,6 @@ fn hex8_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 8] {
 }
 
 /// Physical point and tangent of every local DOF of one hex NDk face block.
-///
-/// `coords`/`tangents` are the element's full local DOF layout
-/// ([`HexNDk::dof_coords`] / [`HexNDk::dof_tangents`], the reference-frame
-/// point-value functionals `σ(Φ) = Φ(ξ)·t̂`); the face `lf` block occupies
-/// `12k + 2k(k-1)·lf ..` and its tangents are pushed through the element map
-/// (`t_phys = J(ξ)·t̂`, MFEM `Project_ND`'s `v(x)·(J tk)`).
 fn hex_face_slots(
     verts: &[[f64; 3]; 8],
     k: usize,
@@ -491,6 +485,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let k = order as usize;
         let dofs_per_edge = k;
         let n_elem = mesh.n_elements();
+        let first_cell_type = mesh.element_type(0);
 
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
@@ -498,13 +493,177 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let mut elem_face_blocks: Vec<Vec<FaceDofBlock>> = Vec::with_capacity(n_elem);
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor> = HashMap::new();
+
+        // D158: MFEM's global numbering is **entity-major** — all edge DOFs
+        // (mesh-edge index order = first-encounter order), then all face DOFs
+        // (first-encounter face order), then the element-interior DOFs (in
+        // element order).  The previous single pass assigned ids while walking
+        // the elements, interleaving each element's faces/interiors right
+        // after its edges, so coefficient vectors exchanged through VisIt DC
+        // files were read with the wrong global ids.  Passes 1/2 enumerate
+        // the entities; pass 3 fills the per-element slot tables.
+        //
+        // Pass 1: edges.
         let mut next_dof: DofId = 0;
+        for e in 0..n_elem as u32 {
+            let cell_type = mesh.element_type(e);
+            let verts = mesh.element_nodes(e);
+            let local_edges: &[(usize, usize)] = match cell_type {
+                ElementType::Tri3 | ElementType::Tri6 => {
+                    if k >= 2 {
+                        &TRI_EDGES_MFEM
+                    } else {
+                        &TRI_EDGES_ND1
+                    }
+                }
+                ElementType::Quad4 | ElementType::Quad8 => &QUAD_EDGES,
+                ElementType::Tet4 | ElementType::Tet10 => &TET_EDGES,
+                ElementType::Hex8 | ElementType::Hex20 => &HEX_EDGES,
+                ElementType::Prism6 => &PRISM_EDGES,
+                ElementType::Pyramid5 => &PYRAMID_EDGES,
+                _ => panic!("HCurlSpace: unsupported element type {cell_type:?}"),
+            };
+            for &(li, lj) in local_edges {
+                let (gi, gj) = (verts[li], verts[lj]);
+                let key = EdgeKey::new(gi, gj);
+                if let std::collections::hash_map::Entry::Vacant(vac) = edge_to_dof.entry(key) {
+                    vac.insert(next_dof);
+                    next_dof += dofs_per_edge as DofId;
+                }
+            }
+        }
+        let n_edge_dofs: DofId = next_dof;
+
+        // Pass 2: faces (NDk, k >= 2, 3-D).  Register every unique face and
+        // fix its canonical anchor from the face-creating element.
+        let mut face_creators: std::collections::HashSet<(u32, usize)> =
+            std::collections::HashSet::new();
+        if k >= 2 && dim == 3 {
+            let ndf = k * (k - 1);
+            let (hex_coords, hex_tks) = {
+                let hnd = HexNDk::new(k);
+                (hnd.dof_coords(), hnd.dof_tangents())
+            };
+            for e in 0..n_elem as u32 {
+                let cell_type = mesh.element_type(e);
+                let verts = mesh.element_nodes(e);
+                match cell_type {
+                    ElementType::Tet4 | ElementType::Tet10 => {
+                        let nfp = k * (k - 1) / 2; // points per face
+                        let nfd = 2 * nfp; // dofs per face
+                        for (f, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            if face_to_dof.contains_key(&key) {
+                                continue;
+                            }
+                            face_to_dof.insert(key, next_dof);
+                            next_dof += nfd as DofId;
+                            face_creators.insert((e, f));
+                            let (pts, tans) = tet_face_slots(&mesh, verts, k, f);
+                            face_anchor.insert(
+                                key,
+                                TetFaceAnchor { pts: pts.clone(), tans: tans.clone() },
+                            );
+                        }
+                    }
+                    ElementType::Hex8 | ElementType::Hex20 => {
+                        let ndf_quad = 2 * k * (k - 1);
+                        let verts8 = hex8_verts(&mesh, e);
+                        for (lf, &(la, lb, lc, ld)) in HEX_QUAD_FACES.iter().enumerate() {
+                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                            if quad_face_to_dof.contains_key(&key) {
+                                continue;
+                            }
+                            quad_face_to_dof.insert(key, next_dof);
+                            next_dof += ndf_quad as DofId;
+                            face_creators.insert((e, lf));
+                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &hex_coords, &hex_tks);
+                            quad_face_anchor.insert(
+                                key,
+                                QuadFaceAnchor { nodes: xs, tangents: ts },
+                            );
+                        }
+                    }
+                    ElementType::Prism6 => {
+                        for (f, &(la, lb, lc)) in PRISM_TRI_FACES.iter().enumerate() {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            if face_to_dof.contains_key(&key) {
+                                continue;
+                            }
+                            face_to_dof.insert(key, next_dof);
+                            next_dof += ndf as DofId;
+                            face_creators.insert((e, f));
+                        }
+                        let ndf_quad = 2 * k * (k - 1);
+                        for (f, &(la, lb, lc, ld)) in PRISM_QUAD_FACES.iter().enumerate() {
+                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                            if quad_face_to_dof.contains_key(&key) {
+                                continue;
+                            }
+                            quad_face_to_dof.insert(key, next_dof);
+                            next_dof += ndf_quad as DofId;
+                            face_creators.insert((e, 100 + f));
+                        }
+                    }
+                    ElementType::Pyramid5 => {
+                        for (f, &(la, lb, lc)) in PYRAMID_TRI_FACES.iter().enumerate() {
+                            let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
+                            if face_to_dof.contains_key(&key) {
+                                continue;
+                            }
+                            face_to_dof.insert(key, next_dof);
+                            next_dof += ndf as DofId;
+                            face_creators.insert((e, f));
+                        }
+                        let ndf_quad = 2 * k * (k - 1);
+                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
+                        let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                        if !quad_face_to_dof.contains_key(&key) {
+                            quad_face_to_dof.insert(key, next_dof);
+                            next_dof += ndf_quad as DofId;
+                            face_creators.insert((e, 100));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let n_face_dofs: DofId = next_dof - n_edge_dofs;
+        let interior_base: DofId = n_edge_dofs + n_face_dofs;
+
+        // Total interior count for the final `n_dofs`.
+        let total_interior: u32 = (0..n_elem as u32)
+            .map(|e| {
+                let cell_type = mesh.element_type(e);
+                match (dim, cell_type) {
+                    (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => (k * (k - 1)) as u32,
+                    (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => {
+                        (2 * k * (k - 1)) as u32
+                    }
+                    (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => {
+                        (k * (k - 1) * (k - 2) / 2) as u32
+                    }
+                    (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => {
+                        (3 * k * (k - 1) * (k - 1)) as u32
+                    }
+                    (3, ElementType::Prism6) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                    (3, ElementType::Pyramid5) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                    _ => 0,
+                }
+            })
+            .sum();
+        let n_dofs_total: DofId = interior_base + total_interior as DofId;
+
+        // Pass 3: per-element slot tables.
         let mut dofs_flat = Vec::new();
         let mut signs_flat = Vec::new();
         let mut elem_offsets = Vec::with_capacity(n_elem + 1);
         elem_offsets.push(0);
-        let first_cell_type = mesh.element_type(0);
-
+        let (hex_coords, hex_tks) = {
+            let hnd = HexNDk::new(k);
+            (hnd.dof_coords(), hnd.dof_tangents())
+        };
+        let mut interior_cursor: DofId = interior_base;
         for e in 0..n_elem as u32 {
             let cell_type = mesh.element_type(e);
             let verts = mesh.element_nodes(e);
@@ -542,12 +701,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 let aligned = gi < gj;
                 let sign = if aligned { 1.0 } else { -1.0 };
                 let nd = dofs_per_edge as usize;
-                let first_dof = *edge_to_dof.entry(key).or_insert_with(|| {
-                    let d = next_dof; next_dof += nd as u32; d
-                });
+                let first_dof = edge_to_dof[&key];
                 for m in 0..nd {
                     let slot = if aligned { m } else { nd - 1 - m };
-                    dofs_flat.push(first_dof + slot as u32);
+                    dofs_flat.push(first_dof + slot as DofId);
                     signs_flat.push(sign);
                 }
             }
@@ -569,17 +726,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         let fbase = 6 * k; // local slot of the first face dof
                         for (f, &(la, lb, lc)) in TET_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += nfd as u32; d
-                            });
-                            // Physical DOF points and the two tangents per
-                            // point, from the element's own TetNDk layout.
+                            let first_dof = face_to_dof[&key];
                             let (pts, tans) = tet_face_slots(&mesh, verts, k, f);
-                            if !face_anchor.contains_key(&key) {
-                                face_anchor.insert(
-                                    key,
-                                    TetFaceAnchor { pts: pts.clone(), tans: tans.clone() },
-                                );
+                            if face_creators.contains(&(e, f)) {
                                 for i in 0..nfp {
                                     elem_blocks.push(FaceDofBlock {
                                         slot: fbase + f * nfd + 2 * i,
@@ -619,88 +768,63 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     }
                     ElementType::Hex8 | ElementType::Hex20 => {
                         let ndf_quad = 2 * k * (k - 1);
-                        // Element-local point-value/tangent layout of the face
-                        // blocks (HexNDk), computed once for this order.
-                        let (coords, tks) = if ndf_quad > 0 {
-                            let hnd = HexNDk::new(k);
-                            (hnd.dof_coords(), hnd.dof_tangents())
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
                         let verts8 = hex8_verts(&mesh, e);
                         for (lf, &(la, lb, lc, ld)) in HEX_QUAD_FACES.iter().enumerate() {
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &coords, &tks);
-                            match quad_face_anchor.get(&key) {
-                                None => {
-                                    let first_dof = next_dof;
-                                    next_dof += ndf_quad as u32;
-                                    quad_face_to_dof.insert(key, first_dof);
-                                    quad_face_anchor.insert(
-                                        key,
-                                        QuadFaceAnchor { nodes: xs, tangents: ts },
-                                    );
-                                    for m in 0..ndf_quad {
-                                        dofs_flat.push(first_dof + m as u32);
-                                        signs_flat.push(1.0);
-                                    }
+                            let first_dof = quad_face_to_dof[&key];
+                            let (xs, ts) = hex_face_slots(&verts8, k, lf, &hex_coords, &hex_tks);
+                            if face_creators.contains(&(e, lf)) {
+                                for m in 0..ndf_quad {
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(1.0);
                                 }
-                                Some(anchor) => {
-                                    // MFEM `DofOrderForOrientation`: the shared
-                                    // face's DOFs are the canonical
-                                    // (creating-element) list, re-indexed by the
-                                    // orientation of this element's local face
-                                    // cycle with the sign of the covariant
-                                    // tangent alignment.
-                                    let first_dof = quad_face_to_dof[&key];
-                                    for n in 0..ndf_quad {
-                                        let (m, s) = match_face_dof(
-                                            &anchor.nodes,
-                                            &anchor.tangents,
-                                            xs[n],
-                                            ts[n],
-                                        );
-                                        dofs_flat.push(first_dof + m as u32);
-                                        signs_flat.push(s);
-                                    }
+                            } else {
+                                // MFEM `DofOrderForOrientation`: the shared
+                                // face's DOFs are the canonical
+                                // (creating-element) list, re-indexed by the
+                                // orientation of this element's local face
+                                // cycle with the sign of the covariant
+                                // tangent alignment.
+                                let anchor = &quad_face_anchor[&key];
+                                for n in 0..ndf_quad {
+                                    let (m, s) = match_face_dof(
+                                        &anchor.nodes,
+                                        &anchor.tangents,
+                                        xs[n],
+                                        ts[n],
+                                    );
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(s);
                                 }
                             }
                         }
                     }
                     ElementType::Prism6 => {
                         // Tri face DOFs
-                        for &(la, lb, lc) in &PRISM_TRI_FACES {
+                        for &(la, lb, lc) in PRISM_TRI_FACES.iter() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += ndf as u32; d
-                            });
-                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                            let first_dof = face_to_dof[&key];
+                            for m in 0..ndf { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
                         }
                         // Quad face DOFs
                         let ndf_quad = 2 * k * (k - 1);
-                        for &(la, lb, lc, ld) in &PRISM_QUAD_FACES {
+                        for &(la, lb, lc, ld) in PRISM_QUAD_FACES.iter() {
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                            let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += ndf_quad as u32; d
-                            });
-                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                            let first_dof = quad_face_to_dof[&key];
+                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
                         }
                     }
                     ElementType::Pyramid5 => {
-                        for &(la, lb, lc) in &PYRAMID_TRI_FACES {
+                        for &(la, lb, lc) in PYRAMID_TRI_FACES.iter() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
-                            let first_dof = *face_to_dof.entry(key).or_insert_with(|| {
-                                let d = next_dof; next_dof += ndf as u32; d
-                            });
-                            for m in 0..ndf { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                            let first_dof = face_to_dof[&key];
+                            for m in 0..ndf { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
                         }
-                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
                         let ndf_quad = 2 * k * (k - 1);
+                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
                         let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                        let first_dof = *quad_face_to_dof.entry(key).or_insert_with(|| {
-                            let d = next_dof; next_dof += ndf_quad as u32; d
-                        });
-                        for m in 0..ndf_quad { dofs_flat.push(first_dof + m as u32); signs_flat.push(1.0); }
+                        let first_dof = quad_face_to_dof[&key];
+                        for m in 0..ndf_quad { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
                     }
                     _ => {}
                 }
@@ -710,15 +834,19 @@ impl<M: MeshTopology> HCurlSpace<M> {
             let interior_count: u32 = match (dim, cell_type) {
                 (2, ElementType::Tri3 | ElementType::Tri6) if k >= 2 => (k * (k - 1)) as u32,
                 (2, ElementType::Quad4 | ElementType::Quad8) if k >= 2 => (2 * k * (k - 1)) as u32,
-                (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => (k * (k - 1) * (k - 2) / 2) as u32,
-                (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => (3 * k * (k - 1) * (k - 1)) as u32,
+                (3, ElementType::Tet4 | ElementType::Tet10) if k >= 3 => {
+                    (k * (k - 1) * (k - 2) / 2) as u32
+                }
+                (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => {
+                    (3 * k * (k - 1) * (k - 1)) as u32
+                }
                 (3, ElementType::Prism6) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
                 (3, ElementType::Pyramid5) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
                 _ => 0,
             };
             for _ in 0..interior_count {
-                dofs_flat.push(next_dof);
-                next_dof += 1;
+                dofs_flat.push(interior_cursor);
+                interior_cursor += 1;
                 signs_flat.push(1.0);
             }
 
@@ -726,10 +854,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
             elem_face_blocks.push(elem_blocks);
         }
 
+        debug_assert_eq!(interior_cursor, n_dofs_total);
         HCurlSpace {
             mesh,
             order,
-            n_dofs: next_dof as usize,
+            n_dofs: n_dofs_total as usize,
             dofs_flat,
             signs_flat,
             elem_offsets,

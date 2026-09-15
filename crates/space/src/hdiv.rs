@@ -628,10 +628,36 @@ impl<M: MeshTopology> HDivSpace<M> {
         let dofs_per_elem = TET_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
+        // D158: MFEM's global numbering is **entity-major** — every face DOF
+        // (faces in mesh-face index order = first-encounter order) comes
+        // before every element-interior DOF (element order).  The previous
+        // single pass interleaved each element's interior DOFs right after
+        // its faces, so file-exchanged coefficient vectors (VisIt DC
+        // slices) were read with the wrong global ids.  Pass 1 enumerates
+        // the unique faces; pass 2 fills the per-element slots with
+        // interiors based at `n_faces * dofs_per_face`.
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
-        let mut next_dof: DofId = 0;
+        let mut face_dof_cursor: DofId = 0;
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for lf in 0..4 {
+                let [la, lb, lc] = TET_FACES_CANON[lf];
+                let local = [verts[la], verts[lb], verts[lc]];
+                let key = FaceKey::new(local[0], local[1], local[2]);
+                if let std::collections::hash_map::Entry::Vacant(vac) = face_map.entry(key) {
+                    vac.insert(face_dof_cursor);
+                    face_dof_cursor += dofs_per_face as DofId;
+                    face_canon.insert(key, FaceCanon::Tri(local));
+                    face_canon_verts.entry(key).or_insert_with(|| local.to_vec());
+                }
+            }
+        }
+        let n_faces = face_map.len() as DofId;
+        let interior_base: DofId = n_faces * dofs_per_face as DofId;
+        let mut next_dof: DofId = interior_base + n_elem as DofId * interior_dofs as DofId;
+
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
@@ -647,20 +673,15 @@ impl<M: MeshTopology> HDivSpace<M> {
                         let o = tri_orientation(*base, local);
                         (rt_face_sign(o), o)
                     }
-                    _ => {
-                        face_canon.insert(key, FaceCanon::Tri(local));
-                        face_canon_verts.entry(key).or_insert_with(|| local.to_vec());
-                        (1.0, 0)
-                    }
+                    _ => unreachable!("face registered in pass 1"),
                 };
+                let first = face_map[&key];
 
                 if dofs_per_face == 1 {
-                    let dof = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
-                    dofs_flat.push(dof);
+                    dofs_flat.push(first);
                     signs_flat.push(sign);
                 } else {
                     // Multiple DOFs per face (3 for RT1, 6 for RT2, 3+ for BDM)
-                    let first = *face_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=dofs_per_face as DofId; d });
                     if !is_bdm {
                         // D34: the nodal face grid of the RT basis
                         // (TetRT1/TetRT2, MFEM `(j, i)` point patterns) must
@@ -684,8 +705,9 @@ impl<M: MeshTopology> HDivSpace<M> {
                     }
                 }
             }
-            for _ in 0..interior_dofs {
-                dofs_flat.push(next_dof); next_dof+=1; signs_flat.push(1.0);
+            for j in 0..interior_dofs as DofId {
+                dofs_flat.push(interior_base + e as DofId * interior_dofs as DofId + j);
+                signs_flat.push(1.0);
             }
         }
 
@@ -817,16 +839,17 @@ impl<M: MeshTopology> HDivSpace<M> {
         let dofs_per_elem = HEX_FACES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
+        // D158: MFEM entity-major layout — all face DOFs (first-encounter
+        // face order) precede every element-interior DOF.  Pass 1 enumerates
+        // the unique faces; pass 2 fills slots with interiors based at
+        // `n_faces * dofs_per_face`.
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
-        let mut next_dof: DofId = 0;
-        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
-        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
-
+        let mut face_dof_cursor: DofId = 0;
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for (hf, face_verts) in HEX_FACES.iter().enumerate() {
+            for face_verts in HEX_FACES.iter() {
                 let (a, b, c, d) = (
                     verts[face_verts[0]],
                     verts[face_verts[1]],
@@ -842,27 +865,49 @@ impl<M: MeshTopology> HDivSpace<M> {
                     v4.sort_unstable();
                     FaceKey::new(v4[0], v4[1], v4[2])
                 };
-                // Canonical ordering = MFEM hex FaceVert (HEX_FACES already
-                // follows that ordering).
-                let c = HEX_FACES[hf];
-                let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                if let std::collections::hash_map::Entry::Vacant(vac) = face_map.entry(key) {
+                    vac.insert(face_dof_cursor);
+                    face_dof_cursor += dofs_per_face as DofId;
+                    // Canonical ordering = MFEM hex FaceVert (HEX_FACES already
+                    // follows that ordering): the local quad as iterated.
+                    face_canon.insert(key, FaceCanon::Quad([a, b, c, d]));
+                    face_canon_verts.entry(key).or_insert_with(|| [a, b, c, d].to_vec());
+                }
+            }
+        }
+        let n_faces = face_map.len() as DofId;
+        let interior_base: DofId = n_faces * dofs_per_face as DofId;
+        let next_dof: DofId = interior_base + n_elem as DofId * interior_dofs as DofId;
+
+        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for face_verts in HEX_FACES.iter() {
+                let (a, b, c, d) = (
+                    verts[face_verts[0]],
+                    verts[face_verts[1]],
+                    verts[face_verts[2]],
+                    verts[face_verts[3]],
+                );
+                let key = {
+                    let mut v4 = [a, b, c, d];
+                    v4.sort_unstable();
+                    FaceKey::new(v4[0], v4[1], v4[2])
+                };
+                let local = [a, b, c, d];
                 let orientation = match face_canon.get(&key) {
                     Some(FaceCanon::Quad(base)) => quad_orientation(*base, local),
-                    _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 0 }
+                    _ => unreachable!("face registered in pass 1"),
                 };
                 let sign = rt_face_sign(orientation);
+                let first = face_map[&key];
 
                 if dofs_per_face == 1 {
-                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                    dofs_flat.push(dof);
+                    dofs_flat.push(first);
                     signs_flat.push(sign);
                 } else {
-                    let nd = dofs_per_face as u32;
-                    let first = *face_map.entry(key).or_insert_with(|| {
-                        let d = next_dof;
-                        next_dof += nd;
-                        d
-                    });
                     // Face-grid alignment (MFEM DofOrderForOrientation for
                     // quads): the (k+1)^2 face dofs form a tensor grid over the
                     // face parameters.  When the element's local face vertex
@@ -881,9 +926,8 @@ impl<M: MeshTopology> HDivSpace<M> {
                 }
             }
             // Interior bubble DOFs
-            for _ in 0..interior_dofs {
-                dofs_flat.push(next_dof);
-                next_dof += 1;
+            for j in 0..interior_dofs as DofId {
+                dofs_flat.push(interior_base + e as DofId * interior_dofs as DofId + j);
                 signs_flat.push(1.0);
             }
         }

@@ -1223,16 +1223,22 @@ mod tests {
             &rt, &[&HdivNormalFluxIntegrator { g: |_| 1.0 }], &tags, 4,
         );
 
+        // D158 ARBITRATION REQUEST: the RT0 basis face flux under the
+        // MFEM-pulled-back normalization (halved integrated open modes, see
+        // `partial_open`) is 1/4 per unit-area face — MFEM 4.10's own RT0
+        // boundary load for g = 1 on the unit cube is 0.25 per face dof
+        // (probe: `LinearForm` + `VectorFEBoundaryFluxLFIntegrator`), so the
+        // MFEM-parity expectation is |b| = 0.25, not the unit flux.
         for (d, &v) in b.iter().enumerate() {
             assert!(
-                (v.abs() - 1.0).abs() < 1e-14,
-                "face dof {d}: |b| = {} (expected 1 = reference flux)",
+                (v.abs() - 0.25).abs() < 1e-14,
+                "face dof {d}: |b| = {} (expected 0.25 = MFEM RT0 reference flux)",
                 v.abs()
             );
         }
-        // ... and the six unit-cube faces have total area 6.
+        // ... and the six unit-cube faces sum to 6 x 0.25.
         let total: f64 = b.iter().map(|v| v.abs()).sum();
-        assert!((total - 6.0).abs() < 1e-13, "∮ 1 dS = {total} (expected 6)");
+        assert!((total - 1.5).abs() < 1e-13, "∮ 1 dS x (1/4) = {total} (expected 1.5)");
     }
 
     /// Linear measure probe: accumulates the effective quadrature weight

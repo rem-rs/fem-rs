@@ -76,6 +76,8 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),
         (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRTk::new(0)),
         (SpaceType::HDiv, ElementType::Hex8, 3, 1) => Box::new(HexRT1),
+        // D158: RT2 on the reference hex (RT_HexahedronElement(2), 108 dofs).
+        (SpaceType::HDiv, ElementType::Hex8, 3, o) if o >= 2 => Box::new(HexRTk::new(o as usize)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),

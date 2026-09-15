@@ -43,6 +43,8 @@ use std::path::Path;
 use fem_assembly::postproc::grid_function::GridFunction;
 use fem_io::data_collection_load::load_visit_collection;
 use fem_io::mfem::read_mfem;
+use fem_mesh::element_type::ElementType;
+use fem_mesh::topology::MeshTopology as D158MeshTopology;
 use fem_mesh::transformation::find_points;
 use fem_mesh::Mesh;
 use fem_solver::fmt_g;
@@ -245,6 +247,22 @@ fn run<const D: usize>(
     let nfound = elem_ids.iter().filter(|&&e| e >= 0).count();
     println!("Found {nfound} points.");
 
+    // D158: fem-rs `find_points` inverts the straight geometry map in the
+    // unit-box convention ([0,1]^dim for quad/hex), while every hexahedral
+    // basis — H1 `HexQk`, L2 `HexL2GL`, and the vector `HexNDk`/`HexRTk` —
+    // is defined on MFEM's reference cube [-1,1]^3 (MFEM `Geometry::CUBE`).
+    // MFEM's own FindPoints reports integration points in that [-1,1]
+    // convention, so convert before handing `xi` to the element evaluators.
+    // (2-D quads stay on [0,1]^2: fem-rs' quad bases are unit-square based.)
+    // The proper home for this is `find_points` itself (D224).
+    let to_ref_domain = |et: ElementType, xi: &[f64]| -> Vec<f64> {
+        if matches!(et, ElementType::Hex8 | ElementType::Hex20) {
+            xi.iter().map(|&t| 2.0 * t - 1.0).collect()
+        } else {
+            xi.to_vec()
+        }
+    };
+
     // Everything below goes to `-o <file>` when given (C++
     // `mfem::out.SetStream(ofs)`), otherwise to stdout.
     let mut buf = String::new();
@@ -285,6 +303,7 @@ fn run<const D: usize>(
                 continue;
             }
             let xi = &ips[e_idx];
+            let xi = &to_ref_domain(D158MeshTopology::element_type(&mesh, elem_u), xi);
             // `GridFunction<S>` is generic over the space type, so the four
             // evaluation paths are expanded per arm.
             macro_rules! eval_into_buf {
