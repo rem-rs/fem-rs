@@ -5,8 +5,9 @@
 //! 1. **`p = 2` is bit-identical to the pre-generalisation implementation.**
 //!    The two FNV-1a checksums below cover the whole `GeometryData`
 //!    (`order`, `nodes_per_elem`, `n_nodes`, the connectivity, and the
-//!    coordinates' bit patterns) and were captured *before*
-//!    `set_curvature_tri3_2d` was generalised; the old code built the edge
+//!    coordinates' bit patterns) and were captured *before* the 2-D
+//!    implementation (since D187 the shared `set_curvature_tri3`) was
+//!    generalised; the old code built the edge
 //!    midpoints as `0.5·(c_a + c_b)` in first-encounter edge order, which is
 //!    exactly what `t = 1/2` in the general path reproduces.
 //! 2. **The curved geometry is the right one.**  For `p = 3, 4` every

@@ -3092,12 +3092,18 @@ fn tet_slot_map<M: MeshTopology>(
 /// the per-element geometry tables are the element DOF lists (H1 topological
 /// order, matching the `QuadQk::new(p)`/`HexQk::new(p)` assembly bases).
 ///
-/// D41: the H1 DOF numbering of the file is *MFEM's*, not fem-rs's.  For
-/// hexahedra the two differ (HexQk orders its edge/face blocks differently)
-/// and the difference is silent on load, so 3D hex meshes are routed through
-/// [`build_h1_hex_geometry`], which reproduces MFEM's numbering exactly.  If
-/// that fails the mesh is left without high-order geometry *and* a warning is
-/// printed — never a silently scrambled mapping (see `D41` notes below).
+/// D41: the H1 DOF numbering of the file is *MFEM's*, not fem-rs's.  The
+/// faithful routes by element type:
+/// - hexahedra → [`build_h1_hex_geometry`] (D41; the `DofManager` slot order
+///   differs and the difference is silent on load);
+/// - tetrahedra → [`build_h1_tet_geometry`] (D43);
+/// - prisms (wedges) → the generic `DofManager` arm, whose
+///   `build_prism_h1` reproduces MFEM's entity-ordered numbering since D177
+///   (pinned for orders 2-4 in `crates/space/tests/
+///   d177_prism_h1_mfem_numbering.rs`, round-tripped on a curved 2-prism
+///   mesh by `tests/d190_wedge_curved_nodes_roundtrip.rs`);
+/// - anything else (pyramids, mixes): fem-rs's own numbering, *with* a
+///   warning — never a silently scrambled mapping (see `D41` notes below).
 fn build_h1_geometry<M: MeshTopology>(
     mesh: &M,
     order: u8,
@@ -3128,11 +3134,31 @@ fn build_h1_geometry<M: MeshTopology>(
                         return None;
                     }
                     TetGeom::NotTet => {
-                        eprintln!(
-                            "warning (D41): high-order `nodes` geometry on a 3D mesh without \
-                             hexahedra is read with fem-rs's own H1 numbering, which is not \
-                             verified against MFEM for this element type"
-                        );
+                        // D190: of the remaining 3-D types, the prism (wedge)
+                        // numbering IS MFEM's — `DofManager::build_prism_h1`
+                        // reproduces `GetElementDofs` entity-for-entity since
+                        // D177 (pinned for orders 2-4 in
+                        // `crates/space/tests/d177_prism_h1_mfem_numbering.rs`
+                        // and round-tripped on a curved 2-prism mesh by
+                        // `tests/d190_wedge_curved_nodes_roundtrip.rs`), so an
+                        // all-prism mesh reads faithfully and stays silent.
+                        // Pyramids and prism/pyramid mixes still route through
+                        // fem-rs's own numbering without an MFEM comparison —
+                        // those keep the warning.
+                        let has_unverified = (0..mesh.n_elements() as u32).any(|e| {
+                            !matches!(
+                                mesh.element_type(e),
+                                ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
+                            )
+                        });
+                        if has_unverified {
+                            eprintln!(
+                                "warning (D41): high-order `nodes` geometry on a 3-D mesh of \
+                                 pyramids (or a prism/pyramid mix) is read with fem-rs's own H1 \
+                                 numbering, which is not verified against MFEM for these element \
+                                 types (hexahedra, tetrahedra and prisms are verified)"
+                            );
+                        }
                     }
                 }
             }

@@ -356,11 +356,12 @@ impl<const D: usize> Mesh<D> {
         let p = order as usize;
 
         if self.elem_type == ElementType::Tri3 {
-            if D == 2 {
-                self.set_curvature_tri3_2d(p);
-            } else {
-                self.set_curvature_tri3(p);
-            }
+            // MFEM's `SetCurvature` builds `H1_FECollection(order, Dim,
+            // GaussLobatto)` — the same `H1_TriangleElement` lattice whether
+            // the triangle mesh lives in 2-D or on a 3-D surface (Dim = 2,
+            // spaceDim = 3, e.g. the ex7 octahedron), so both dimensions share
+            // one implementation (D187).
+            self.set_curvature_tri3(p);
             return;
         }
         if self.elem_type == ElementType::Quad4 {
@@ -893,10 +894,12 @@ impl<const D: usize> Mesh<D> {
         });
     }
 
-    /// 2-D `Tri3` → `TriPk` geometry (any `p >= 2`): MFEM `Mesh::SetCurvature(p)`
-    /// on a 2-D triangle mesh, i.e. the order-`p` `H1_FECollection`
+    /// `Tri3` → MFEM `SetCurvature(p)` geometry (any `p >= 2`, both a 2-D
+    /// triangle mesh and a 3-D triangular **surface** — Dim = 2, spaceDim = 3,
+    /// e.g. the ex7 octahedron): the order-`p` `H1_FECollection`
     /// (`BasisType::GaussLobatto`) nodal interpolation of the current
-    /// (straight, vertex-only) geometry.
+    /// (straight, vertex-only) geometry.  MFEM's collection depends on `Dim`
+    /// only, so one implementation serves both dimensions (D187).
     ///
     /// # Node layout and ordering
     ///
@@ -912,7 +915,12 @@ impl<const D: usize> Mesh<D> {
     /// Node positions: a node whose reference barycentric coordinates are
     /// `(λ0, λ1, λ2)` lands on the affine image `Σ_v λ_v·c_v` because the old
     /// geometry *is* that linear map (MFEM evaluates the old element
-    /// transformation at the new nodes' reference points).
+    /// transformation at the new nodes' reference points).  No projection of
+    /// any kind — the pre-D187 3-D variant snapped every new node onto the
+    /// unit sphere, which neither MFEM nor `snap_to_sphere` (the explicit
+    /// post-step) does; on the octahedron it displaced edge nodes by up to
+    /// `2.1e-1` at `p = 2`, `7.8e-1` at `p = 4`
+    /// (`tests/d187_tri3_surface_curvature.rs`).
     ///
     /// Shared edge nodes are deduplicated direction-aware: the first element to
     /// meet an edge creates its `p-1` nodes in its own local edge direction
@@ -922,11 +930,11 @@ impl<const D: usize> Mesh<D> {
     /// historical midpoint construction bit for bit (the `p-1 = 1` case has one
     /// node per edge, so there is nothing to reverse and `t = 1/2` gives
     /// `0.5·c_a + 0.5·c_b`, the same rounding as `0.5·(c_a + c_b)`).
-    fn set_curvature_tri3_2d(&mut self, p: usize) {
+    fn set_curvature_tri3(&mut self, p: usize) {
         use std::collections::HashMap;
         use fem_element::lagrange::factory::H1TriPk;
         use fem_element::ReferenceElement;
-        assert!(p >= 1, "set_curvature_tri3_2d: order must be >= 1");
+        assert!(p >= 1, "set_curvature_tri3: order must be >= 1");
         let n_elems = self.n_elems();
         let fe = H1TriPk::new(p);
         let npe_new = fe.n_dofs();
@@ -997,50 +1005,6 @@ impl<const D: usize> Mesh<D> {
                 geo_coords.extend_from_slice(&x);
                 geo_conn[base + k] = next_id;
                 next_id += 1;
-            }
-        }
-
-        self.geometry = Some(GeometryData {
-            order: p as u8,
-            conn: geo_conn,
-            nodes_per_elem: npe_new,
-            coords: geo_coords,
-            n_nodes: next_id as usize,
-        });
-    }
-
-    fn set_curvature_tri3(&mut self, p: usize) {        use fem_element::lagrange::TriPk;
-        use fem_element::ReferenceElement;
-        let n_elems = self.n_elems();
-        let npe_new = (p + 1) * (p + 2) / 2;
-
-        let tri_pk = TriPk::new(p);
-        let dof_coords = tri_pk.dof_coords();
-
-        let mut geo_conn = Vec::with_capacity(n_elems * npe_new);
-        let mut geo_coords = self.coords.clone();
-        let mut next_id = self.n_nodes() as NodeId;
-
-        for e in 0..n_elems as NodeId {
-            let v = self.elem_nodes(e);
-            let (x0, x1, x2) = (self.node_coords(v[0]), self.node_coords(v[1]), self.node_coords(v[2]));
-            for d in 0..npe_new {
-                let xi = &dof_coords[d];
-                let is_v0 = xi[0].abs() < 1e-12 && xi[1].abs() < 1e-12;
-                let is_v1 = (xi[0]-1.0).abs() < 1e-12;
-                let is_v2 = xi[0].abs() < 1e-12 && (xi[1]-1.0).abs() < 1e-12;
-                if is_v0 { geo_conn.push(v[0]); }
-                else if is_v1 { geo_conn.push(v[1]); }
-                else if is_v2 { geo_conn.push(v[2]); }
-                else {
-                    let x = x0[0]*(1.0-xi[0]-xi[1]) + x1[0]*xi[0] + x2[0]*xi[1];
-                    let y = x0[1]*(1.0-xi[0]-xi[1]) + x1[1]*xi[0] + x2[1]*xi[1];
-                    let z = x0[2]*(1.0-xi[0]-xi[1]) + x1[2]*xi[0] + x2[2]*xi[1];
-                    let inv = 1.0 / (x*x + y*y + z*z).sqrt();
-                    geo_conn.push(next_id);
-                    geo_coords.push(x*inv); geo_coords.push(y*inv); geo_coords.push(z*inv);
-                    next_id += 1;
-                }
             }
         }
 

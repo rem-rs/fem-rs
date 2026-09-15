@@ -119,8 +119,9 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     if matches!(et, ElementType::Tet4 | ElementType::Tet10) && g > 1 {
         return Some(Box::new(fem_element::lagrange::H1TetPk::new(g as usize)));
     }
-    // Curved triangles: `set_curvature_tri3_2d` lays the geometry nodes on
-    // `H1TriPk`'s Gauss-Lobatto lattice (D178), so the equispaced factory
+    // Curved triangles: `set_curvature_tri3` lays the geometry nodes on
+    // `H1TriPk`'s Gauss-Lobatto lattice (D178, unified across dimensions by
+    // D187), so the equispaced factory
     // element would misread them from p = 3 on (D181, same-family).
     if matches!(et, ElementType::Tri3 | ElementType::Tri6) && g > 1 {
         return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize)));
@@ -953,7 +954,7 @@ mod tests {
     }
 
     /// D181 (geometry side): curved tri geometry nodes are laid out by
-    /// `set_curvature_tri3_2d` on `H1TriPk`'s Gauss-Lobatto lattice (D178), so
+    /// `set_curvature_tri3` on `H1TriPk`'s Gauss-Lobatto lattice (D178, D187), so
     /// `geo_ref_elem` must read them with `H1TriPk` — same reasoning as the
     /// tet arm above it (D157).
     #[test]
