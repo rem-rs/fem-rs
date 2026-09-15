@@ -19,9 +19,18 @@ use crate::macros::check_dims;
 pub fn fmt_g(x: f64) -> String {
     const P: i32 = 6;
     if x == 0.0 {
-        return "0".to_string();
+        // C's %g prints the signed zero (`printf("%g", -0.0)` gives "-0"),
+        // and so does MFEM's `operator<<`.
+        return if x.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
     }
     if !x.is_finite() {
+        // C's %g spells the non-finites lowercase: "inf"/"-inf" and
+        // "nan"/"-nan" (the NaN sign bit set by an invalid operation is
+        // platform-dependent — glibc's sqrt(negative) sets it, so MFEM prints
+        // "-nan" there, while MSVC/Rust typically produce a clear sign bit).
+        if x.is_nan() {
+            return if x.is_sign_negative() { "-nan".to_string() } else { "nan".to_string() };
+        }
         return format!("{x}");
     }
     // Round to P significant digits; read back the decimal exponent.
@@ -62,6 +71,15 @@ pub fn fmt_g(x: f64) -> String {
 /// Average reduction factor = <arf>             if summary || iterations
 /// PCG: No convergence!                         if warnings && !converged
 /// ```
+/// Besides the trailer, the gates drive the MFEM body branches: the
+/// iteration-0/iteration-i lines (`print_options.iterations`), the indefinite
+/// preconditioner warning (`print_options.warnings`, solvers.cpp:908/:974) and
+/// the indefinite operator warning (`print_options.warnings` and a nonzero
+/// search direction, solvers.cpp:937/:1016).  Early stops at iteration 0
+/// (`nom < 0`, `nom <= r0`, `(Ad, d) == 0`) return WITHOUT the trailer.
+///
+/// MFEM legacy print levels 0 and 3 (`first_and_last`) have no fem-rs
+/// `PrintLevel` counterpart — see debt D199.
 #[derive(Clone, Copy)]
 struct CgTrailerGates {
     warnings: bool,
@@ -83,6 +101,28 @@ impl CgTrailerGates {
     /// `print_options.warnings && !converged` — the non-convergence report.
     fn report_warning(&self, converged: bool) -> bool {
         self.warnings && !converged
+    }
+
+    /// MFEM `solvers.cpp:908/:974` — the indefinite-preconditioner diagnostic
+    /// (gate: `print_options.warnings`).
+    fn warn_precond_indefinite(&self, nom: f64) {
+        if self.warnings {
+            println!(
+                "PCG: The preconditioner is not positive definite. (Br, r) = {}",
+                fmt_g(nom)
+            );
+        }
+    }
+
+    /// MFEM `solvers.cpp:937/:1016` — the indefinite-operator diagnostic.
+    /// Printed only when the search direction is nonzero (`Dot(d, d) > 0`).
+    fn warn_operator_indefinite(&self, den: f64, direction_nonzero: bool) {
+        if direction_nonzero && self.warnings {
+            println!(
+                "PCG: The operator is not positive definite. (Ad, d) = {}",
+                fmt_g(den)
+            );
+        }
     }
 
     /// The trailer lines (C++ order) for a run that stopped after `final_iter`
@@ -134,13 +174,18 @@ solve_precond_simple!(
 /// PCG with symmetric Gauss-Seidel (MFEM GSSmoother) preconditioner.
 ///
 /// Bit-for-bit port of MFEM's `CGSolver::Mult` + `GSSmoother`:
-/// - `GSSmoother` runs one full forward+backward GS sweep, but its `Mult`
-///   keeps `iterative_mode` — the sweep starts from the *previous* value of
-///   the `z` vector (which, in `CGSolver::Mult`, holds the last `A·d` product
-///   before the preconditioner is re-applied).  This is NOT the analytic
-///   SSOR factorization, so iteration counts only match when the same
-///   warm-start sweep is reproduced.
+/// - `GSSmoother` runs one full forward+backward GS sweep.  A plain
+///   `GSSmoother M(A)` has `iterative_mode = false` (the `Solver` default,
+///   `linalg/operator.hpp:864` — only `IterativeSolver` subclasses pass
+///   `true`), so `Mult` zeroes its output before every sweep; the sweep here
+///   always starts from zero as well.  It is NOT the analytic SSOR
+///   factorization, so iteration counts only match when the same
+///   zero-start sweep is reproduced.
 /// - Convergence test: `nom = (z, r) <= max(rtol²·nom0, atol²)`.
+/// - Print/diagnostic branches are MFEM 1:1 (see `CgTrailerGates`):
+///   the iteration-0 line prints even for `nom == 0`, and the indefinite
+///   preconditioner/operator diagnostics warn and stop/continue exactly like
+///   `linalg/solvers.cpp:898-1049`.
 pub fn solve_pcg_gssmoother(
     a: &FemCsr<f64>,
     b: &[f64],
@@ -175,26 +220,54 @@ pub fn solve_pcg_gssmoother(
     let mut nom = dot(&d, &r);
     let nom0 = nom;
     let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
+    let gates = CgTrailerGates::from_config(cfg);
 
-    let mut iter = 0usize;
-    if cfg.verbose {
+    // MFEM solvers.cpp:898-902 — the iteration-0 line prints for every initial
+    // nom, including nom == 0 (singular consistent system: `(B r, r) = 0`).
+    if gates.iterations {
         println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
     }
+    // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
+    // warn, `converged = false`, `final_norm = nom` (the RAW value, no sqrt),
+    // and an immediate return BEFORE the trailer.
+    if nom < 0.0 {
+        gates.warn_precond_indefinite(nom);
+        return Ok(SolveResult { converged: false, iterations: 0, final_residual: nom });
+    }
     if nom <= r0 {
-        return Ok(into_result_from_cg(n, iter, nom0, nom, true));
+        // MFEM solvers.cpp:919-928 — converged at iteration 0: early return,
+        // no trailer (no average reduction factor).
+        return Ok(into_result_from_cg(n, 0, nom0, nom, true));
     }
 
-    loop {
-        // z = A·d  (reuse the z buffer: this is the warm-start value the GS
-        // sweep below will start from, exactly like MFEM's CGSolver)
-        for i in 0..n {
-            let mut s = 0.0;
-            for k in row_ptr[i]..row_ptr[i + 1] {
-                s += val[k] * d[col[k] as usize];
-            }
-            z[i] = s;
+    // MFEM solvers.cpp:930-949 — `z = A·d` and the first `(Ad, d)` check live
+    // BEFORE the loop.  The loop fission keeps the arithmetic sequence
+    // bit-for-bit identical to the previous single-entry-loop version.
+    for i in 0..n {
+        let mut s = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            s += val[k] * d[col[k] as usize];
         }
-        let den = dot(&z, &d);
+        z[i] = s;
+    }
+    let mut den = dot(&z, &d);
+    if den <= 0.0 {
+        gates.warn_operator_indefinite(den, dot(&d, &d) > 0.0);
+        if den == 0.0 {
+            // MFEM solvers.cpp:940-948: converged = false, final_iter = 0,
+            // final_norm = sqrt(nom), return before the trailer.
+            return Ok(SolveResult {
+                converged: false,
+                iterations: 0,
+                final_residual: nom.sqrt(),
+            });
+        }
+    }
+
+    let mut converged = false;
+    let mut betanom;
+    let mut iter = 0usize;
+    loop {
         let alpha = nom / den;
         for i in 0..n {
             x[i] += alpha * d[i];
@@ -204,23 +277,55 @@ pub fn solve_pcg_gssmoother(
         // output to zero because iterative_mode = false).
         z.fill(0.0);
         gs_sweep(row_ptr, col, val, &r, &mut z);
-        let betanom = dot(&z, &r);
+        betanom = dot(&z, &r);
         iter += 1;
-        if cfg.verbose {
+        // MFEM solvers.cpp:970-980 — indefinite preconditioner inside the
+        // loop, checked (and warned about) BEFORE the iteration line is
+        // printed; breaks with converged = false into the trailer.
+        if betanom < 0.0 {
+            gates.warn_precond_indefinite(betanom);
+            break;
+        }
+        if gates.iterations {
             println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
         }
-        if betanom <= r0 || iter >= cfg.max_iter {
-            let converged = betanom <= r0;
-            let res = into_result_from_cg(n, iter, nom0, betanom, converged);
-            CgTrailerGates::from_config(cfg).print_trailer(iter, nom0, betanom, converged);
-            return Ok(res);
+        if betanom <= r0 {
+            converged = true;
+            break;
+        }
+        if iter >= cfg.max_iter {
+            break;
         }
         let beta = betanom / nom;
         for i in 0..n {
             d[i] = z[i] + beta * d[i];
         }
+        // z = A·d; den = (d, z) — MFEM solvers.cpp:1009-1024.
+        for i in 0..n {
+            let mut s = 0.0;
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                s += val[k] * d[col[k] as usize];
+            }
+            z[i] = s;
+        }
+        den = dot(&d, &z);
+        if den <= 0.0 {
+            gates.warn_operator_indefinite(den, dot(&d, &d) > 0.0);
+            if den == 0.0 {
+                // MFEM solvers.cpp:1019-1023: final_iter is `i` AFTER `++i` —
+                // the index of the pass that can never start — and converged
+                // stays false (falls through to the trailer below).
+                iter += 1;
+                break;
+            }
+        }
         nom = betanom;
     }
+
+    // MFEM solvers.cpp:1027-1045 (trailer) and :1047 (final_norm = sqrt of the
+    // last (B r, r); NaN when the loop broke on a negative betanom).
+    gates.print_trailer(iter, nom0, betanom, converged);
+    Ok(SolveResult { converged, iterations: iter, final_residual: betanom.sqrt() })
 }
 
 /// PCG with diagonal (Jacobi) preconditioner — MFEM `DSmoother` in its
@@ -256,25 +361,47 @@ pub fn solve_pcg_dsmoother(
     let mut nom = dot(&d, &r);
     let nom0 = nom;
     let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
+    let gates = CgTrailerGates::from_config(cfg);
 
-    let mut iter = 0usize;
-    if cfg.verbose {
+    // MFEM solvers.cpp:898-902 — see solve_pcg_gssmoother.
+    if gates.iterations {
         println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
     }
+    // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0
+    // (final_norm is the RAW nom; no trailer).
+    if nom < 0.0 {
+        gates.warn_precond_indefinite(nom);
+        return Ok(SolveResult { converged: false, iterations: 0, final_residual: nom });
+    }
     if nom <= r0 {
-        return Ok(into_result_from_cg(n, iter, nom0, nom, true));
+        // MFEM solvers.cpp:919-928 — converged at iteration 0, no trailer.
+        return Ok(into_result_from_cg(n, 0, nom0, nom, true));
     }
 
-    loop {
-        // z = A·d
-        for i in 0..n {
-            let mut s = 0.0;
-            for k in row_ptr[i]..row_ptr[i + 1] {
-                s += val[k] * d[col[k] as usize];
-            }
-            z[i] = s;
+    // MFEM solvers.cpp:930-949 — pre-loop z = A·d and (Ad, d) check.
+    for i in 0..n {
+        let mut s = 0.0;
+        for k in row_ptr[i]..row_ptr[i + 1] {
+            s += val[k] * d[col[k] as usize];
         }
-        let den = dot(&z, &d);
+        z[i] = s;
+    }
+    let mut den = dot(&z, &d);
+    if den <= 0.0 {
+        gates.warn_operator_indefinite(den, dot(&d, &d) > 0.0);
+        if den == 0.0 {
+            return Ok(SolveResult {
+                converged: false,
+                iterations: 0,
+                final_residual: nom.sqrt(),
+            });
+        }
+    }
+
+    let mut converged = false;
+    let mut betanom;
+    let mut iter = 0usize;
+    loop {
         let alpha = nom / den;
         for i in 0..n {
             x[i] += alpha * d[i];
@@ -284,23 +411,49 @@ pub fn solve_pcg_dsmoother(
         for i in 0..n {
             z[i] = r[i] / diag(row_ptr, col, val, i);
         }
-        let betanom = dot(&z, &r);
+        betanom = dot(&z, &r);
         iter += 1;
-        if cfg.verbose {
+        // MFEM solvers.cpp:970-980 — see solve_pcg_gssmoother.
+        if betanom < 0.0 {
+            gates.warn_precond_indefinite(betanom);
+            break;
+        }
+        if gates.iterations {
             println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(betanom));
         }
-        if betanom <= r0 || iter >= cfg.max_iter {
-            let converged = betanom <= r0;
-            let res = into_result_from_cg(n, iter, nom0, betanom, converged);
-            CgTrailerGates::from_config(cfg).print_trailer(iter, nom0, betanom, converged);
-            return Ok(res);
+        if betanom <= r0 {
+            converged = true;
+            break;
+        }
+        if iter >= cfg.max_iter {
+            break;
         }
         let beta = betanom / nom;
         for i in 0..n {
             d[i] = z[i] + beta * d[i];
         }
+        // z = A·d; den = (d, z) — MFEM solvers.cpp:1009-1024.
+        for i in 0..n {
+            let mut s = 0.0;
+            for k in row_ptr[i]..row_ptr[i + 1] {
+                s += val[k] * d[col[k] as usize];
+            }
+            z[i] = s;
+        }
+        den = dot(&d, &z);
+        if den <= 0.0 {
+            gates.warn_operator_indefinite(den, dot(&d, &d) > 0.0);
+            if den == 0.0 {
+                iter += 1; // MFEM's final_iter = i after `++i` (the never-run pass)
+                break;
+            }
+        }
         nom = betanom;
     }
+
+    // MFEM solvers.cpp:1027-1045 + :1047 — see solve_pcg_gssmoother.
+    gates.print_trailer(iter, nom0, betanom, converged);
+    Ok(SolveResult { converged, iterations: iter, final_residual: betanom.sqrt() })
 }
 
 /// One full symmetric Gauss-Seidel sweep `z <- GS(r)` with the incoming `z`
@@ -739,13 +892,21 @@ where
     let nom0 = rz.max(1e-32);
     let mut nom = rz;
     let tol_sq = (cfg.atol * cfg.atol).max(cfg.rtol * cfg.rtol * nom0);
+    // MFEM solvers.cpp:898-902 — the iteration-0 line prints for every initial
+    // nom, including nom == 0 (singular consistent system).
     if print_iter {
         println!("   Iteration : {:>3}  (B r, r) = {}", 0, fmt_g(rz));
     }
-        if nom <= tol_sq {
-            if print_iter {
-                println!("Average reduction factor = {}", fmt_g(1.0));
-            }
+    // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
+    // warn, converged = false, final_norm = nom (RAW value, no sqrt), immediate
+    // return before the trailer.
+    if rz < 0.0 {
+        gates.warn_precond_indefinite(rz);
+        return Ok(SolveResult { converged: false, iterations: 0, final_residual: rz });
+    }
+    if nom <= tol_sq {
+        // MFEM solvers.cpp:919-928 — converged at iteration 0: early return,
+        // no trailer (in particular no average reduction factor).
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
@@ -753,17 +914,26 @@ where
         });
     }
 
-    for iter in 0..cfg.max_iter {
-        apply(&p, &mut ap);
-
-        let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
-        if p_ap.abs() < 1e-32 {
-            return Err(SolverError::Linlvo(
-                "PCG operator breakdown: p^T A p is near zero".to_string(),
-            ));
+    // MFEM solvers.cpp:930-949 — pre-loop `ap = A·p` and (Ap, p) check.  This
+    // replaces the former `p_ap.abs() < 1e-32` breakdown error: MFEM warns and
+    // *continues* for den < 0 and stops (converged = false) only for den == 0.
+    apply(&p, &mut ap);
+    let mut den: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+    if den <= 0.0 {
+        gates.warn_operator_indefinite(den, p.iter().map(|v| v * v).sum::<f64>() > 0.0);
+        if den == 0.0 {
+            return Ok(SolveResult {
+                converged: false,
+                iterations: 0,
+                final_residual: nom.sqrt(),
+            });
         }
+    }
 
-        let alpha = rz / p_ap;
+    let mut converged = false;
+    let mut final_iter = cfg.max_iter;
+    for iter in 0..cfg.max_iter {
+        let alpha = rz / den;
         for i in 0..n {
             x[i] += alpha * p[i];
             r[i] -= alpha * ap[i];
@@ -774,6 +944,14 @@ where
         let rz_new = r.iter().zip(z.iter()).map(|(ri, zi)| ri * zi).sum::<f64>();
         nom = rz_new;
 
+        // MFEM solvers.cpp:970-980 — indefinite preconditioner inside the
+        // loop, checked BEFORE the iteration line; breaks into the trailer.
+        if rz_new < 0.0 {
+            gates.warn_precond_indefinite(rz_new);
+            final_iter = iter + 1;
+            break;
+        }
+
         if print_iter {
             println!(
                 "   Iteration : {:>3}  (B r, r) = {}",
@@ -783,15 +961,9 @@ where
         }
 
         if nom <= tol_sq {
-            if print_iter {
-                let avg = (nom / nom0).powf(0.5 / (iter + 1) as f64);
-                println!("Average reduction factor = {}", fmt_g(avg));
-            }
-            return Ok(SolveResult {
-                converged: true,
-                iterations: iter + 1,
-                final_residual: nom.sqrt(),
-            });
+            converged = true;
+            final_iter = iter + 1;
+            break;
         }
 
         let beta = rz_new / rz;
@@ -799,14 +971,36 @@ where
             p[i] = z[i] + beta * p[i];
         }
         rz = rz_new;
+
+        // MFEM solvers.cpp:1009-1024 — ap = A·p and the (Ap, p) check for the
+        // NEXT pass happen at the bottom; den == 0 breaks with final_iter =
+        // iter + 2 (MFEM's `i` after `++i`: the pass that never starts).
+        apply(&p, &mut ap);
+        den = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
+        if den <= 0.0 {
+            gates.warn_operator_indefinite(den, p.iter().map(|v| v * v).sum::<f64>() > 0.0);
+            if den == 0.0 {
+                final_iter = iter + 2;
+                break;
+            }
+        }
     }
 
-    // MFEM CGSolver::Mult trailer for a run that stopped at `max_iter`.
-    gates.print_trailer(cfg.max_iter, nom0, nom, false);
-    Err(SolverError::ConvergenceFailed {
-        max_iter: cfg.max_iter,
-        residual: nom,
-    })
+    // MFEM CGSolver::Mult trailer (solvers.cpp:1027-1045) and final_norm =
+    // sqrt of the last (B r, r) (:1047).
+    gates.print_trailer(final_iter, nom0, nom, converged);
+    if converged {
+        Ok(SolveResult {
+            converged: true,
+            iterations: final_iter,
+            final_residual: nom.sqrt(),
+        })
+    } else {
+        Err(SolverError::ConvergenceFailed {
+            max_iter: final_iter,
+            residual: nom.sqrt(),
+        })
+    }
 }
 
 // ─── GMRES operator ────────────────────────────────────────────────────────
@@ -1206,7 +1400,31 @@ where
     precond.apply_precond(&r, &mut z);
 
     let gamma0 = r.dot(&z); // (B r₀, r₀)
+
+    // MFEM solvers.cpp:898-902 — the iteration-0 line prints for every initial
+    // nom, including nom == 0 (singular consistent system: `(B r, r) = 0`).
+    // It used to be swallowed by the early return below (D169).
+    if verbose {
+        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(gamma0));
+    }
+
+    // Legacy-helper level 1 when verbose (iterations + warnings, no summary);
+    // verbose = false stays completely silent.
+    let gates = CgTrailerGates { warnings: verbose, iterations: verbose, summary: false };
+
+    // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
+    // warn, converged = false, final_norm = nom (the RAW value, no sqrt),
+    // immediate return BEFORE the trailer.
+    if gamma0 < 0.0 {
+        gates.warn_precond_indefinite(gamma0);
+        return Ok(SolveResult { converged: false, iterations: 0, final_residual: gamma0 });
+    }
     if gamma0 == 0.0 {
+        // MFEM solvers.cpp:919-928 — `nom <= r0` with nom == 0 (r0 >= 0):
+        // converged at iteration 0, early return, NO trailer.  (The `== 0.0`
+        // gate is the untouched round-32 convergence criterion; MFEM's full
+        // test `nom <= max(nom*rel_tol², abs_tol²)` reduces to it for
+        // rtol < 1, atol = 0.)
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
@@ -1228,39 +1446,57 @@ where
     let mut gamma = gamma0;
     let mut w = DenseVec::zeros(n);
 
-    if verbose {
-        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(gamma0));
+    // MFEM solvers.cpp:930-949 — `w = A·p` and the first `(Ap, p)` check live
+    // BEFORE the loop (loop fission; arithmetic sequence unchanged).  den == 0
+    // stops with converged = false, final_iter = 0 and no trailer; den < 0
+    // only warns and continues.
+    la.apply(&p, &mut w);
+    let mut den = p.dot(&w);
+    if den <= 0.0 {
+        gates.warn_operator_indefinite(den, p.dot(&p) > 0.0);
+        if den == 0.0 {
+            x.copy_from_slice(lx.as_slice());
+            return Ok(SolveResult {
+                converged: false,
+                iterations: 0,
+                final_residual: gamma0.sqrt(),
+            });
+        }
     }
 
+    let mut converged = false;
+    let mut final_iter = max_iter;
+    let mut betanom = gamma0; // last computed (B r, r) — the trailer's value
     for iter in 1..=max_iter {
-        // w = A·p
-        la.apply(&p, &mut w);
-
-        let alpha = gamma / p.dot(&w);
+        let alpha = gamma / den;
         lx.axpy(alpha, &p); // x ← x + α·p
         r.axpy(-alpha, &w); // r ← r − α·w
 
         precond.apply_precond(&r, &mut z); // z = M⁻¹·r
 
         let gamma_new = r.dot(&z); // (B r_{k+1}, r_{k+1})
+        betanom = gamma_new;
+
+        // MFEM solvers.cpp:970-980 — indefinite preconditioner inside the
+        // loop, checked BEFORE the iteration line; breaks into the trailer.
+        if gamma_new < 0.0 {
+            gates.warn_precond_indefinite(gamma_new);
+            final_iter = iter;
+            break;
+        }
 
         if verbose {
             println!("   Iteration : {:3}  (B r, r) = {}", iter, fmt_g(gamma_new));
         }
 
         if gamma_new < tol {
-            x.copy_from_slice(lx.as_slice());
-            let final_residual = gamma_new.sqrt();
-            if verbose {
-                // MFEM: pow(betanom/nom0, 0.5/final_iter)
-                let avg = (gamma_new / gamma0).powf(0.5 / iter as f64);
-                println!("Average reduction factor = {}", fmt_g(avg));
-            }
-            return Ok(SolveResult {
-                converged: true,
-                iterations: iter,
-                final_residual,
-            });
+            converged = true;
+            final_iter = iter;
+            break;
+        }
+
+        if iter == max_iter {
+            break; // MFEM `++i > max_iter`
         }
 
         let beta = gamma_new / gamma;
@@ -1268,21 +1504,36 @@ where
         p.scale(beta);
         p.axpy(1.0, &z);
 
+        // MFEM solvers.cpp:1009-1024 — `w = A·p` and the `(Ap, p)` check for
+        // the NEXT pass at the bottom of the body; `nom = betanom` follows it.
+        la.apply(&p, &mut w);
+        den = p.dot(&w);
+        if den <= 0.0 {
+            gates.warn_operator_indefinite(den, p.dot(&p) > 0.0);
+            if den == 0.0 {
+                final_iter = iter + 1; // MFEM's `i` after `++i` (never-run pass)
+                break;
+            }
+        }
         gamma = gamma_new;
     }
 
     x.copy_from_slice(lx.as_slice());
-    // MFEM CGSolver::Mult trailer for a level-1 run that stopped at `max_iter`:
-    // the iteration count and the non-convergence warning join the
-    // (already printed) average reduction factor.
-    if verbose {
-        CgTrailerGates { warnings: true, iterations: true, summary: false }
-            .print_trailer(max_iter, gamma0, gamma, false);
+    // MFEM solvers.cpp:1027-1045 — trailer (count / ARF / no-convergence by
+    // gate), then :1047 final_norm = sqrt of the last (B r, r).
+    gates.print_trailer(final_iter, gamma0, betanom, converged);
+    if converged {
+        Ok(SolveResult {
+            converged: true,
+            iterations: final_iter,
+            final_residual: betanom.sqrt(),
+        })
+    } else {
+        Err(SolverError::ConvergenceFailed {
+            max_iter: final_iter,
+            residual: betanom.sqrt(),
+        })
     }
-    Err(SolverError::ConvergenceFailed {
-        max_iter,
-        residual: gamma.sqrt(),
-    })
 }
 
 /// Preconditioned CG with a user-supplied preconditioner.
