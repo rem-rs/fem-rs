@@ -1617,6 +1617,64 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **全量回归（收尾实测）**：见下方基线行。
 - **本轮两个"改前全绿但错"的定量案例**：MMS tet p3 收敛率 0.97（帮助函数与空间表族分裂）→ O(h⁴)；`eigenvalues2s` 自 round-32 起在 Householder 分支塌缩特征值（直网格夹具从不进该分支）。
 
+## 第三十七轮（round 37）：四路并行 —— D181 tri GLL / D182+D177 棱柱编号 / D172 pmaxwell 转正 / D169 CG trailer
+
+### 0. 本轮形状
+**四路全部交付完整报告（round 33 以来首次无静默丢失），主会话逐路亲验头条数字。**
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D181** `mixed`/`bbar` tri p≥3 等距 `TriPk` → `H1TriPk` | ✅ **关闭**（p3 改前 6/10 槽不符 worst 3.90e-1、MMS 不收敛 → 改后 O(h⁴)；p≤2 逐位不变） |
+| ② | **D182** 周期棱柱场臂坐标 + **D177/D184** wedge 全局编号诊断与修复 | ✅ **关闭**（改前 p2 15/18 槽错、偏差至 1.0e0 → 改后逐位；全局编号与 MFEM p2/p3 逐 id 一致） |
+| ③ | **D172 推进到 3/4**：pmaxwell ND-trace / 3-D H1-trace 并行编号 | ✅ `-prob 0`（2-D+3-D）与 `-prob 1` **转正**，C++ MPI 对拍逐位（PML 半截留 4/4） |
+| ④ | **D169** 奇异/退化系统 CG trailer | ✅ **关闭**（MFEM 4.10 `solvers.cpp` 全部分支枚举补齐，17 测试逐字节） |
+
+### 1. ① 路：D181 关闭——族分裂 Saga 的 tri 扫尾
+- `mixed::ref_elem_vol` tri p3、`bbar::ref_elem_vol` tri p3/p4：等距 `TriPk` → `H1TriPk`（D157 tet 臂同型修法）；**顺带修同类缺陷**：`bbar::geo_ref_elem` 新增 tri g>1 → `H1TriPk` 臂（`set_curvature_tri3_2d` 的 D178 GLL 几何点原本被等距误读，g≥3 错读；与同函数 D157 tet 臂、`vector_assembler::geo_ref_elem_from_mesh` D85 tri 臂对齐）。
+- **数字**（`tmp/d181_tri_evidence.md`）：槽对比 p1/p2 全等（坐标逐位、基函数差 1 ulp），**p3 6/10 槽不符 worst 3.902735e-1**（|ψ差| 6.98e-1）、p4 9/15 worst 5.773e-1（对照 D157 tet 615/975、8.75e-1）；MMS 质量投影 p3 改前 **0.985→21.27→1.93（不收敛）** → 改后 **rates 4.088/4.092（O(h⁴)）**，p4 rate 4.873（O(h⁵)）；**p≤2 端到端逐位不变**（三重断言钉死）。
+- `TriPk::new` 全量分类：DG/DPG/HDG/WG（broken/L2 空间）、`ref_elem_vol_l2`、p≤2 处均合法保留。
+- 测试：`crates/assembly/tests/d181_tri_h1_ref_elem.rs`（6）+ `standard::bbar` lib 测试（2，lib 663 单跑口径）。
+
+### 2. ② 路：D182 + D177/D184 关闭——棱柱编号异类终结
+- **D182**：`rebuild_dof_coords_periodic` 棱柱**场**臂 `PrismPk` → `H1PrismPk`；**几何臂保持 `PrismPk`**（`set_curvature_prism6` 几何表冻结 layer-major 序——与 tet 情形"两侧同换"不同，该不对称性已在注释写明）；失配 `continue` → `assert_eq!` 硬断言。改前 p2 **15/18 槽错（偏差 5.0e-1～1.0e0，顶点槽被写上边中点坐标）**、p3 36/40；改后 p2..4 affine+curved **逐位 0**。
+- **D177/D184**：诊断补送（`tmp/d177_wedge_diagnosis.md` + C++ 探针 `tmp/d177/d177_probe.cpp` 编于 `$HOME/work/d177/`，真值 dump 入库 `crates/space/tests/data/d177_wedge{111,211}_mfem_dofs.txt`）。**修法 = `build_prism_h1` 全局 id 改 MFEM 实体相位序**（顶点+边 | 面 | 内部三相分配）——依据：`build_pk`(tri)/`build_pk_quad`/`build_pk_hex`/`build_tet_h1` 早已相位序，**棱柱是最后异类**；io 的 wedge writer 已独立复刻同序 ⇒ space 对齐后 reader 自动痊愈。修后与 MFEM **p2/p3 逐元逐槽逐 id 一致**（2/4 棱柱网格）。
+- 连带：`fem-space --lib` 287 全绿、`--tests` 408 全绿（含 d56/d61 周期、p_refine_prism）；指定六个 io 套件全绿（`fem-io` 全量 220），无断言弱化。
+
+### 3. ③ 路：D172 推进到 3/4——pmaxwell `-prob 0/1` 转正
+- `par_dpg_numbering.rs`：**ND-trace 并行编号**（每 mesh 边 p dof、边共享 + MFEM 规范方向符号；面 interior 用交换后全局面键做精确前缀，混合 quad/tri 亦精确）+ **3-D H1-trace 编号**（顶点=全局节点、边共享、面 interior）+ 全局边表 `build_edge_numbering`（与 serial `TraceSpace` first-seen 一致）；`DpgNumberingLocal::with_nd_trace`。
+- **顺带修掉零-ghost 死锁**：condensed 3-D 中最低 rank 拥有全部共享迹 dof，`build_ghost_exchange` 在本 rank 零 ghost 时早退 ⇒ 请求方永久等待（现象：`-prob 1 -sc` 双 rank 挂死）；改 collectives 恒参与。
+- `miniapps/dpg/pmaxwell.rs` 完整移植（pacoustics 求解骨架 + C++ 块表 1:1）；pacoustics 的 3-D exit 文案重定性（编号已在，缺的是其 3-D 声学块表接线）。
+- **主会话亲验对拍**（C++ MPI 4.10，`$HOME/work/d172pmax`）：3-D `-prob 1` np1/np2/`-sc` 三配置 **166 / 6.780e-17 / 15/15/7 逐位**；`-pref 1` 1020 / 7.092e-01（Rate 60.95 亦同）；3-D `-prob 0`（inline-hex，ND-trace）**984 / L2 1.313e+00 / 残差 4.706e+00**；2-D `-prob 0` 113 / 8.819e-01 / 1.779e+00。仅 PCG 迭代数不复刻（HypreAMS/Jacobi + rtol 1e-6 vs 复块 GS + rtol 1e-12，pacoustics 先例）。
+- **顺带发现 D195**：serial `ComplexDPGWeakForm::compute_residual` 对 ND 迹**双重施加定向符号**（单 rank ND 残差 16.34 vs C++ 4.706e+00；2-D 标量迹不受影响）；本轮并行侧以 `global_residual_norm_unfolded` 等价绕过，assembly 侧修正留下轮。
+- `data/fichera-waveguide.mesh` 自 MFEM `miniapps/dpg/meshes/` 复制入库（`git add -f`）；新测试 `complex_maxwell_nd_trace_numbering_np2_matches_cpp_reference`（[24,24,54,54]=C++ 156 dofs）+ `complex_h1_trace_3d_numbering_np2`（[8,27,117]）。
+
+### 4. ④ 路：D169 关闭——CG 打印/诊断分支 1:1
+- MFEM 4.10 `linalg/solvers.cpp:869-1050`（注意 4.10 在 `linalg/` 非 `fem/`）`CGSolver::Mult` 分支枚举与处置（`tmp/d169_cg_trailer.md`）：首行打印移到所有早退**之前**（`B==0`/`nom==0` 单行 `(B r, r) = 0` 无 trailer——D169 主诉，1-D 周期 `nurbs_ex1` 档）、不定预条件@iter0（`final_norm` 原值无 sqrt）与@in-loop（警告先于该趟打印、该行不打）、`(Ad,d)<0` 警告后继续 / `==0` 停 final_iter=0、den==0 `final_iter = i` **怪癖保留**（++i 后未执行的那趟，probe 实证 1 趟报 2）、`solve_pcg_operator_precond` iter0 收敛删多余 ARF、Err residual 改 `sqrt(betanom)`；`fmt_g` 对齐 C `%g`（`-0`/小写 `nan`）。
+- **收敛判据一字未动**（round-32 两套 PCG API 纪律）：`tol=rtol*gamma0`、`gamma_new<tol`、`gamma0==0` 门、`nom0.max(1e-32)`/`<=tol_sq` 全保持。
+- 真值 = C++ 探针 stdout（`tmp/d169/`），17 个新测试子进程重执行逐字节断言；**case8 圣杯**：MFEM tridiag n=32 + GSSmoother 全 18 行日志（16 趟 + ARF=0.409621）被 Rust 逐字节复现——正常路径零变化。唯一平台差：glibc `-nan` vs Windows `nan`（pow 负底置符号位），测试只断后缀并注明。
+- 仅 `iterative.rs` 一个源文件（+353/−102）。
+
+### 第三十七轮新债务
+- **D185（P2）postproc 的 tri p≥3 场评估臂仍等距**：postprocess/flux_recovery/grid_function/error_estimate 四文件；**`grid_function.rs:59` order-generic tri 臂全阶等距**（连 p≥4 都错，与 tet 臂不对称）——① 路发现。
+- **D186（P2）physics/nonlinear.rs:929、nonlinear_hyperelasticity.rs:1020 tri p=3 位移参考元等距**（tet 臂 D157 已修，tri 遗留）——① 路发现。
+- **D187（P3）`crates/mesh/src/simplex.rs:1012 set_curvature_tri3`（3-D 曲面三角）仍等距布点**（与 D=2 版 H1TriPk 及 MFEM 不一致）——① 路发现。
+- **D188（P3）`H1TriPk` monomial-Vandermonde 高阶条件数**（nodal 残差 p=8≈1.4e-10、p=10≈1.7e-6）——① 路发现。
+- **D190（P3）io 侧 wedge 收尾**：`build_h1_geometry` 的 D41 wedge 警告文案已过期（D177 后编号已验证）；建议入库 `$HOME/work/d177/wedge_curved2.mesh`（MFEM 生成，73 个非顶点几何 dof）做多棱柱曲面 `nodes` 往返夹具——② 路发现。
+- **D191（P3）周期金字塔臂无任何 MFEM 对照/测试覆盖**（`set_curvature_pyramid5` 与 `rebuild` 臂自洽于 `PyramidPk`，槽序 vs MFEM `H1_PyramidElement` 未验证）——② 路发现。
+- **D192（P3）`d56_periodic_dof_coords.rs` 的 tet replica 仍用等距 `TetPk`**（D157 后陈旧，当前无 tet 用例故不炸）——② 路发现。
+- **D195（P2）serial `ComplexDPGWeakForm::compute_residual` 对 ND 迹双重施加定向符号**（存储块已折号，gather 又 sigma-decode；MFEM 存未折号块 + GetSubVector 施加一次）——③ 路发现，本轮并行侧绕过。
+- **D199（P3）`PrintLevel`（fem_linalg）缺 level 3（first_and_last）与 level 0（warnings-only）档** ⇒ CG 首尾 `" ..."` 行、first_and_last ARF 门不可表达——④ 路发现。
+- **D200（P3）iterative.rs 手写 MINRES/GMRES/BiCGSTAB/GCR 完全无 MFEM 型 trailer**（`MINRES: iteration …`/`GMRES: Number of iterations:`/`Restarting...`/`No convergence!`），探针复用方案见 `tmp/d199_d200_debt_proposals.md`——④ 路发现。
+- **D193（P2，主会话）`crates/assembly/tests/poisson.rs` 的 `poisson_tet_p3_l2_error`/`poisson_tet_p3_convergence_rate` 存量失败**：`git worktree` 干净 HEAD（69e7f9b）复测同样失败（TetP3 rate 0.98 < 3.5）——round-36 ① 修 mms 帮助函数的同类族分裂症状在该集成测试未覆盖（round-36 集成清单不含 assembly poisson.rs）；修法参照 ①：测试侧帮助函数对齐 H1TetPk。
+- **关闭**：~~D181~~（①）、~~D182~~+~~D177~~/~~D184~~（②）、~~D169~~（④）、**D172 推进到 3/4**（③；4/4 = PML 空间变矩阵系数，在 assembly）。
+- 沿用开放：D172 4/4、D179/D180、D185–D188/D190–D192/D195/D199/D200、D158–D162、D143 残留、D73、及更早遗留（见 §五）。
+
+### 本轮统计
+- **测试增长**：`fem-assembly` lib 661→**663**（bbar 2 项）+ `d181_tri_h1_ref_elem.rs`（6）；`fem-space` 新增 `d182_periodic_prism_coords.rs`（2）+ `d177_prism_h1_mfem_numbering.rs`（3）+ 入库 MFEM dump 真值 2 份；`fem-parallel` lib 241→**243**（ND-trace/3-D H1-trace np2 编号对拍）；`fem-solver` 新增 `d169_cg_trailer.rs`（17）。全部实跑确认。
+- **主会话亲验**（不是转述）：四路新套件实跑绿；pmaxwell `-prob 1` np2 = 166/6.780e-17/29 与 `-prob 0 -m inline-hex` = 984/1.313e+00/4.706e+00/59 现场复现；`poisson_tet_p3_*` 用干净 HEAD worktree 复测定性为存量（D193）；stash 栈核对 = 仅 round-17 已知 `stash@{0}`，两路代理的 push+pop 无残留。
+- **流程注记**：两个代理为排除自身改动使用了 `git stash`（push+pop 往返干净）——**stash 纪律下轮派单时要写得更显眼**。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 667+8ign / element 500 / io 132 / linalg 66 / linalg-gpu 13+2ign / mesh 306 / **parallel 243** / solver 264 / space 287）；集成层 26 套 ok + 预存 D73（`7.9085e-2` 逐位）+ 存量 D193 两项（HEAD 同样失败）；examples **0 错误（10m57s）**；pro 层 **0 错误**。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。

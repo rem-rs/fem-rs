@@ -643,10 +643,30 @@ miniapps/
 │   │                            + 静态凝聚端到端/解恢复/残差归并；**顺带修掉 round-34 潜伏 bug**
 │   │                            （`recover_fem_solution` 从不拷贝 owned 虚部段 ⇒ 复数解恢复后
 │   │                            虚部恒 0，L2 1.171 vs 8.008e-01；已被新 np1 测试钉死）。
-│   │                            仍 `exit(3)`：`-prob ≥ 2`（PML/scatter/GSLIB 点源）、3-D 网格、
-│   │                            `-pref > 0`、`-pmg`
-│   ├── pmaxwell.rs          ← ⚠️ **诚实 exit(3) + 缺口清单**（round 35 刷新：求解机器已就绪，
-│   │                            仍缺 ND-trace/3-D H1-trace 并行编号 + PML + 空间变**矩阵**系数）
+│   │                            仍 `exit(3)`：`-prob ≥ 2`（PML/scatter/GSLIB 点源）、3-D 网格
+│   │                            （round 37 重定性：3-D 并行迹编号已随 pmaxwell 落地，
+│   │                            缺的只是本 miniapp 的 3-D 声学块表接线）、`-pref > 0`、`-pmg`
+│   ├── pmaxwell.rs          ← ✅ **round 37（D172 3/4）：`-prob 0`（2-D RT/H1-trace +
+│   │                            3-D ND-trace）与 `-prob 1`（fichera oven）转正**。
+│   │                            内核新增 `par_dpg_numbering.rs` 的 ND-trace 并行编号
+│   │                            （每边 p dof、边共享 + MFEM 规范方向符号；面 interior 用
+│   │                            交换后全局面键精确前缀，混合 quad/tri 亦精确）与 3-D
+│   │                            H1-trace 编号；**顺带修掉零-ghost 死锁**（condensed 3-D 中
+│   │                            最低 rank 拥有全部共享迹 dof，`build_ghost_exchange` 在
+│   │                            本 rank 零 ghost 时早退 ⇒ 请求方永久等待；`-prob 1 -sc`
+│   │                            双 rank 挂死现象）。主会话亲验对拍 C++ MPI 4.10：
+│   │                            3-D `-prob 1` np1/np2/`-sc` 三配置 **166 dofs /
+│   │                            6.780e-17 / PCG 15/15/7 逐位**；refine 后 1020 /
+│   │                            7.092e-01；3-D `-prob 0`（inline-hex，ND-trace）
+│   │                            984 / L2 1.313e+00 / 残差 4.706e+00 逐位（仅 PCG 迭代数
+│   │                            不复刻：HypreAMS/Jacobi + rtol 1e-6 vs 复块 GS +
+│   │                            rtol 1e-12，pacoustics 先例）。
+│   │                            仍 `exit(3)`：`-prob 2/3/4`（PML：空间变**矩阵**系数
+│   │                            在 assembly，D172 4/4 残余）、`-pmg`、AMR；另记
+│   │                            **D195**：serial `ComplexDPGWeakForm::compute_residual`
+│   │                            对 ND 迹双重施加定向符号（本轮并行侧以
+│   │                            `global_residual_norm_unfolded` 等价绕过，assembly 侧
+│   │                            修正留下轮）
 │   └── pconvection_diffusion.rs ← ⚠️ **诚实 exit(3) + 缺口清单**（缺带系数的 DPG 积分器 +
 │                                `setup_test_norm_coeffs`）
 │      ✅ **round 34（D167）：库层已修**——`from_local_matrix` 的 ghost 列数改从
