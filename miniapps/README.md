@@ -312,6 +312,12 @@ miniapps/
 │   │                            `-e 0 -rs>0 -o>1` 由 D173 解锁（`curved_prism.rs` +
 │   │                            `MfemPrismRefineIds`，rs1 = TOPOLOGY-IDENTICAL、**4.65e-08**，
 │   │                            rs2 4.83e-08；tri 细化也精确到 5.55e-17）。
+│   │                            **round 36（D178）：2-D 三形 `nodes` writer 补齐**——缺口
+│   │                            实为**连续 H1 tri**（L2 tri 早在）；点表实证 `H1_TriangleElement`
+│   │                            与 `L2_T1` 同为闭 GLL 格（= `H1TriPk`）⇒ 两者皆纯置换；
+│   │                            `tri2d_slot_map` + 12 个 17 位精度夹具
+│   │                            `crates/io/tests/data/tri2d_*.mesh` 整文件对拍。曲面 tri
+│   │                            网格自此可带曲率写出。
 │   │                            prism 编号本身用新夹具
 │   │                            `crates/io/tests/data/flatprism-p{2,3,4}-m{0,1}.mesh`（MFEM 4.10
 │   │                            自己产出）整文件对拍到 **1e-14**

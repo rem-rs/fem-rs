@@ -1566,6 +1566,57 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **主会话亲验**（不是转述）：pacoustics 默认档表行逐位（仅 PCG 数不同，已声明）、wedge rs1 = **4.64683e-08** TOPOLOGY-IDENTICAL、`-dm -o 3` = **3.87e-08** 且 `L2_T1_3D_P3`、pacoustics `-prob 2` 与 pmaxwell rc=3。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 665+8ign / element 500 / io 132 / linalg 66 / linalg-gpu 13+2ign / mesh 305 / **parallel 241** / solver 264 / space 287）；集成层 25 套 ok + 预存 D73（`7.9085e-2` 逐位）；examples **0 错误（9m57s）**；pro 层 **0 错误**。
 
+## 第三十六轮（round 36）：四路并行 —— D157 tet 场空间 GLL 终局 / D176 面约束 / D173 tet 细化 / D178 tri writer
+
+### 0. 本轮形状
+**①②③ 交付完整报告；④ 最终报告再次静默丢失**（但其 interim + 全部工作在树上，主会话按"无回报=自验"逐项核过）。**族分裂 Saga（D112/D116/D138/D146/D164/D168/D157）至此全部关闭。**
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D157** tet H1 **场空间** GLL/MFEM 实体序 | ✅ **关闭**（改前 615/975 槽不符、worst 8.75e-1 → 后 0 失败、worst 1.11e-16；p=2 逐位不变） |
+| ② | **D176** tet/hex 混阶面约束对齐 MFEM"最低**相邻**阶 + 存空变体" | ✅ **关闭**（hex/tet 探针证实与棱柱同语义；8 项测试 5/8 改前失败）+ **顺带修一个真缺陷**（tet 面约束坐标系反射，q≥4） |
+| ③ | **D173 残余** tet 细化保几何（mixed-3d 不可达） | ✅ tet **关闭**（escher-p2 逐 dof **2.3e-16**、escher-p3 映射级 **7.3e-15**——MFEM 留 legacy Cubic 族属合法族差）+ **顺带修一个内核 bug**（`eigenvalues2s` copysign 参数序） |
+| ④ | **D178** 2-D tri `nodes` writer（+ D177 诊断） | ✅ **关闭**（缺口其实是**连续 H1 tri writer**——L2 tri 早在；`tri2d_slot_map` 落地 + 12 夹具；D177 诊断另计） |
+
+### 1. ① 路：D157 关闭——族分裂 Saga 终章
+- **MFEM 实体序实测**（`tmp/a36_tet_h1_probe.cpp` + dump）：顶点 → 6 边（自边的首个局部顶点枚举）→ 4 面（`TET_FACES` 序 `{1,2,3},{0,3,2},{0,1,3},{0,2,1}`，按面自身顶点序的 `H1_TriangleElement` (j 外 i 内)）→ 内部 `(k,j,i)`，GLL 点 + 共享面反向时的 `TriDofOrd` 搬运（p=4 探针可见 dof 32,34,33 vs 32,33,34）。**既有 `H1TetPk`（D49）槽序本就正确——元素侧零改动**。
+- **改前 fem-rs**：615/975 槽不符（p≥3 边在 1/3,2/3；面块按 factory 序 `(0,1,2),(0,1,3),(0,2,3),(1,2,3)`、无定向搬运；面坐标是非格点启发式）；**改后 0 失败、worst 1.11e-16**；**p=2 逐位不变**（183/183 行 dump diff 全同 + 测试断言）。
+- 改动面：`dof_manager.rs` 新 `build_tet_h1`（等距 tet 臂删除，`build_pk` 变 2-D-only）+ `rebuild_dof_coords_periodic` tet 臂（场+几何都走 `H1TetPk`）；`assembler.rs` 的 `ref_elem_vol_h1` tet 臂、`H1TetFacePk`（执行了 D49 留的"等 D49 修好后改一行"注释）、**`curved_boundary_face_geom` tet 臂（round-32 遗留：曲面 tet 边界面 geom_order≥3 本会触发 1e-20 断言）**、`volume_dof_reference_coords`；`mixed`/`bbar`/`postproc`×4/`partial`/`physics`×2。
+- **1e-20 断言的真相**（读后记录）：它们钉的是"面几何↔体几何"与"场 `element_dofs`↔`ref_elem_vol_for_space`"的**槽位一致**——两侧同步移动后照常通过，正是设计用途。
+- **重推的测试（全部带 MFEM 证据）**：`ref_elem_face_3d`（k/p→GLL，对照 a36 探针 + D50 dump）、`boundary_assembly_3d`（tet 面 p=1..6 从"记录差距"变"**断言等于 MFEM**"）、`mms_verification::elasticity_3d_p3` + `helmholtz_3d_tet_p3`（帮助函数此前用固定等距 `TetP3` 积分载荷/误差、与空间表分裂 ⇒ 收敛率掉到 0.97；对齐后 **O(h⁴) 恢复**——又一次"测试全绿 ≠ 保真"的定量版）。新永久测试 `d157_tet_h1_mfem_layout.rs`（3 项）+ 入库 dump。
+- **① 路新发现（→D181/D182）**：(a) `mixed::ref_elem_vol` 与 `bbar::ref_elem_vol` 的 **tri** p=3/p=4 仍在等距 `TriPk` 上构造（tri 场是 `H1TriPk`）——同族缺陷 tri 版；(b) `rebuild_dof_coords_periodic` 的**棱柱场**臂仍拿 layer-major `PrismPk` 当场参考元（与 `build_prism_h1` 的 `H1PrismPk` 序不匹配，长度不同时被 `continue` 掩护）。
+
+### 2. ② 路：D176 关闭 + 一个坐标系真缺陷
+- 探针（`tmp/d176_hextet_p_probe.cpp`，6 例）证实 hex/tet 与 round-35 棱柱**同语义**：`MakeDofTable`（`fespace.cpp:3289`）按相邻阶位存变体（空变体也存）、`VariableOrderMinimumRule`（`:1094`）在变体 0 取 master、`AddDependencies`（`:915`）首约束优先。六组实测行：tet [3,2] = −1/9×3 + 4/9×3、tet [4,3] = 10 父、hex [2,3] 面中权 0.64、hex [4,3] = 16 父、hex [2,1] = 4×0.25（空 p1 变体）等。
+- 修复：`p_refine.rs` 的 hex/tet master 选择改"最低相邻阶"（空变体 ⇒ `dofs0=[]`）+ tet 面规范朝向（两侧出同行）。**8 项新测试（`p_refine_hextet.rs`）5/8 改前失败**，含多单元用例（6-tet 立方、双 hex 并排——封掉"单 hex 测试盲区"）。
+- **顺带修真缺陷（改前预存）**：tet 面约束把 master 基在 `(i/q, j/q)` 求值，而 builder/`TetPk` 把槽 (i,j) 放在 `(λ_v0,λ_v1) = (1−i/q−j/q, i/q)` ⇒ **q≥4 的行被反射**（q=3 的重心点把它掩盖了）。已修 + 闭合式 5 父行测试钉住。
+
+### 3. ③ 路：D173-tet 关闭 + 一个自 round-32 潜伏的内核 bug
+- 新 `curved_tet.rs`（`TetPkGeometry` 视图 + MFEM 16 张 `tet_children` 嵌入矩阵 + 规范键共享细边/面 dof）+ `MfemTetRefineIds`（`oedge + e2v[E]`，DSTable 行序——**与 hex/prism 的 first-touch 不同**）+ MFEM 子元/边界面序（仅在带几何时启用，直网格逐位不变）+ 曲面 rt 改用 (0.25,0.25,0.25) 处的等参 Jacobian。
+- **主会话实跑新测试通过**；代理对拍：escher-p2 = TOPOLOGY-IDENTICAL + 逐 dof **2.3e-16**（665 dofs，344 位精确）；escher-p3 = TOPOLOGY-IDENTICAL + **映射级 7.3e-15**（8 阶求积下全 336 单元；p3 dof 值合法地不同——MFEM 细化 legacy `Cubic` 闭均匀族，fem-rs 以 GLL 重表同一分片多项式；`r32_cmp` 的 `max-rel-diff=1.99942` 是工具在比较**声明 Ordering 不同**的两份文件的假象，已注明）。
+- **⚠️ 内核 bug（round-32 起潜伏，已修）**：`crates/mesh/src/mfem_kernels.rs::eigenvalues2s` 把 Rust `f64::copysign(self, sign)` 的参数序当 C++ `copysign(sign, self)` 用 ⇒ 凡 `CalcSingularvalue<3>` 走 Householder 分支（`|R/Q^1.5| > 0.9`）时 2×2 特征值塌缩成均值 ⇒ σ1/σ2 错 ⇒ **曲面 tet 的 rt 选择错**（escher-p3 单元 17 选 rt=2 而 MFEM 是 0）。直网格夹具从不进该分支所以从未暴露。一行修复 + 回归测试（真值 = MFEM 自家内核，经 `sv_probe` 取得）。**该文件在 ③ 路严格授权清单（`amr/**`）之外——主会话追认**（1 行、有回归测试、真值可复现）。
+- mixed-3d：不可达（io reader 拒绝混合 `nodes`、`set_curvature` 拒绝混合网格 ⇒ 无曲面混合 3-D 生产者），已在 `amr_inner.rs:1686` 留准确说明。
+
+### 4. ④ 路：D178 关闭（最终报告丢失，主会话自验）
+- **缺口重新定性**：不是 L2 tri（round-33 已有，`l2_tri3_roundtrip` 等 6 项测试绿），而是**连续 H1 tri writer**（`mfem.rs:1135` 的拒绝清单只有 Hex8/Tet4/Prism6/Quad4）。
+- 点表实证：`H1_TriangleElement` 与 `L2_TriangleElement(GaussLobatto)` 都是**同一闭 GLL w-归一格**（= fem-rs `H1TriPk`）⇒ H1 与 L2 tri 都是**纯置换、无插值矩阵**。Gotcha：`L2_TriangleElement` 的**默认** btype 是 GaussLegendre/开点——`L2_T1` FEC 是显式传 GaussLobatto 的。
+- `tri2d_slot_map` 落地（`quad2d_slot_map` 旁）+ `nodes_dof_values` Continuous 的 Tri3 臂；模型手工核对（顶点 \| 首遇边、槽从较小顶点号端 \| 内部成块）与 MFEM p2/p3 文件一致。**12 个 17 位精度夹具** `tri2d_{0,1}_p{2,3,4}_{g21,g32}.mesh` 入库；`nodes_2d_writer` 4 项测试实跑通过。
+- **D177 诊断**：④ 的诊断文档未随报告送达（tmp 中未见 wedge 命名文件）——**该项留 open**，待下一轮补诊断（其归属 = `crates/space/src/dof_manager.rs` 的 `build_prism_h1` 全局编号）。
+
+### 第三十六轮新债务
+- **D181（P2）`mixed::ref_elem_vol` / `bbar::ref_elem_vol` 的 tri p≥3 仍在等距 `TriPk`**（tri 场是 `H1TriPk`）——D157 的 tri 版（① 路发现，证据同其探针链）。
+- **D182（P2）`rebuild_dof_coords_periodic` 的棱柱**场**臂**用 layer-major `PrismPk` 当场参考元，与 `build_prism_h1` 的 `H1PrismPk` 序不匹配（周期 + 曲面棱柱场景；长度不同被 `continue` 掩护）——D157 的棱柱版。
+- **D183（P3）全局 dof id 排序的项目级约定**：MFEM 全局 dof 按**实体索引**排序（`fespace.cpp`），fem-rs 保持逐元 first-touch——本轮后**槽位布局与实体身份已对齐**，全局 id 顺序仍是自有约定（影响任何"MFEM 文件 dof-id 逐行对拍"类验收）。
+- **D184（P3）D177 诊断文档**未随 ④ 路报告送达——wedge reader 编号发散的诊断需重做（归属 `build_prism_h1` 全局编号，`crates/space/src/dof_manager.rs`）。
+- **关闭**：~~D157~~（① 路——**族分裂 Saga 全关**）、~~D176~~（② 路，含 tet 面坐标系反射真缺陷）、~~D173 的 tet 部分~~（③ 路；mixed-3d 记为不可达）、~~D178~~（④ 路，H1 tri writer）。
+- 沿用开放：**D177**（诊断重做）、**D172 残余**（pmaxwell、pconvection-diffusion）、D179/D180、D165~D175 中已关闭者外的遗留（D169/D170/D143 残留/D158–D162）。
+
+### 本轮统计
+- **测试增长**：`fem-space` 新增 `d157_tet_h1_mfem_layout.rs`（3）+ `p_refine_hextet.rs`（8，5/8 改前失败）；`fem-mesh` 新增 `curved_tet_refine.rs`（3）+ `mfem_kernels` 回归（1）；`fem-io` `nodes_2d_writer` 增 H1 tri 整文件对拍（4 项实跑）。全部实跑确认。
+- **主会话亲验**：四个新套件实跑绿；`eigenvalues2s` 修复 diff 与 MFEM `copysign(w, zeta)` 语义逐字核对；`fem-space` 编译干净；④ 的 12 夹具与测试在树上实跑通过。
+- **全量回归（收尾实测）**：见下方基线行。
+- **本轮两个"改前全绿但错"的定量案例**：MMS tet p3 收敛率 0.97（帮助函数与空间表族分裂）→ O(h⁴)；`eigenvalues2s` 自 round-32 起在 Householder 分支塌缩特征值（直网格夹具从不进该分支）。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
