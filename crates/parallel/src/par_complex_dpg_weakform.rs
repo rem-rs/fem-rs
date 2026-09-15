@@ -689,40 +689,21 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
     }
 
     /// Global `‖residual‖₂` over the **owned** elements (MFEM recomputes
-    /// `sqrt(Σ_local res²)` across ranks) — mirror of
+    /// `sqrt(Σ_local res²)` across ranks, `pmaxwell.cpp:902-912`) — mirror of
     /// [`crate::par_dpg_weakform::ParDpgWeakForm::global_residual_norm`].
+    ///
+    /// Since the D195 fix the serial
+    /// [`fem_assembly::ComplexDPGWeakForm::compute_residual`] gathers the
+    /// element coefficients **unsigned** over the sign-folded stored columns,
+    /// `(L⁻¹B̃D)·x = L⁻¹B̃·(D·x)`, which is exactly MFEM's
+    /// `ComplexDPGWeakForm::ComputeResidual` value; the row-level square
+    /// accumulation below (no per-element `sqrt` round-trip) is bit-identical
+    /// to the round-37 `global_residual_norm_unfolded` workaround for every
+    /// configuration.
     ///
     /// `x_full` is the blocked `[re | im]` local trial vector produced by
     /// [`Self::recover_fem_solution`].
     pub fn global_residual_norm(&self, x_full: &[f64]) -> f64 {
-        let n = x_full.len() / 2;
-        let res = self.local.compute_residual(&x_full[..n], &x_full[n..]);
-        let rank = self.comm.rank();
-        let mut acc = 0.0_f64;
-        for (e, r) in res.iter().enumerate() {
-            if self.partition.elem_owner[e] == rank {
-                acc += r * r;
-            }
-        }
-        self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
-    }
-
-    /// Sign-correct variant of [`Self::global_residual_norm`] for systems
-    /// with orientation-signful trace blocks (the 3-D `ND_Trace_FECollection`).
-    ///
-    /// MFEM's `ComplexDPGWeakForm::ComputeResidual` stores the **raw**
-    /// (unfolded) whitened element blocks and applies the trace dof signs
-    /// once, when gathering the element coefficients
-    /// (`GetSubVector` over the sign-encoded vdofs).  The fem-rs serial form
-    /// stores the sign-folded columns instead (which is what makes the plain
-    /// global scatter equal MFEM's `AddSubMatrix` result), so the residual
-    /// must multiply them with the **unsigned** global coefficients — the
-    /// serial `compute_residual` sigma-decodes first and double-applies the
-    /// signs.  With all +1 signs (scalar 2-D traces, volume blocks) both
-    /// variants agree; with ND traces the serial variant is wrong
-    /// (assembly-side debt **D195** — this method is the parallel-side
-    /// workaround until that is fixed in `crates/assembly`).
-    pub fn global_residual_norm_unfolded(&self, x_full: &[f64]) -> f64 {
         let n = x_full.len() / 2;
         let (xr, xi) = (&x_full[..n], &x_full[n..]);
         let rank = self.comm.rank();
@@ -734,7 +715,8 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
             }
             let (ybr, ybi, fr, fi, n_tr) = self.local.element_stored(e);
             // Element coefficients in the GLOBAL (unsigned) basis — the
-            // stored blocks are sign-folded already.
+            // stored blocks are sign-folded already (D195: the orientation
+            // signs are applied exactly once, in the storage).
             let mut ur = vec![0.0_f64; n_tr];
             let mut ui = vec![0.0_f64; n_tr];
             let mut off = 0usize;
@@ -758,6 +740,16 @@ impl<M: MeshTopology + Clone + 'static> ParComplexDPGWeakForm<M> {
             }
         }
         self.comm.allreduce_sum_f64(acc).max(0.0).sqrt()
+    }
+
+    /// Retired D195 workaround, kept as an alias of
+    /// [`Self::global_residual_norm`] (which `miniapps/dpg/pmaxwell.rs`
+    /// still names): the serial `compute_residual` now applies the trace
+    /// orientation signs exactly once — through the sign-folded stored
+    /// columns with an unsigned gather — so this method no longer needs its
+    /// own unfolding math.  Bit-identical to the pre-simplification bypass.
+    pub fn global_residual_norm_unfolded(&self, x_full: &[f64]) -> f64 {
+        self.global_residual_norm(x_full)
     }
 
     /// Absolute global ids of the owned compact rows.

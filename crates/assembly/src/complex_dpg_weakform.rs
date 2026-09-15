@@ -1583,6 +1583,24 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     }
 
     /// `ComputeResidual(x)` for a complex trial vector `(x_r, x_i)`.
+    ///
+    /// Numerically identical to MFEM `ComplexDPGWeakForm::ComputeResidual`
+    /// (`complexweakform.cpp:919`): MFEM stores the **unfolded** whitened
+    /// element blocks `L⁻¹B̃` (the dense `Bmat[iel]`, columns in the
+    /// canonical face-element order) and applies the trace-dof orientation
+    /// signs exactly once, at gather time, through `GetSubVector` over the
+    /// sign-encoded vdofs (`complexweakform.cpp:1001`), i.e. it evaluates
+    /// `‖L⁻¹B̃·(D·x) − L⁻¹f‖` per element.  The fem-rs `assemble` folds the
+    /// same signs into the element columns instead — the stored blocks are
+    /// `L⁻¹B̃·D`, which is precisely what makes the plain unsigned global
+    /// scatter equal MFEM's sign-folding `SparseMatrix::AddSubMatrix` — so
+    /// the identical quantity here is `(L⁻¹B̃·D)·x = L⁻¹B̃·(D·x)`: the
+    /// gather below takes the **unsigned** global coefficients (same
+    /// global-value convention as [`Self::recover_fem_solution`]).  Folding
+    /// `D` on both sides (the pre-D195 behaviour) would cancel the signs and
+    /// return `L⁻¹B̃·x`, wrong wherever the orientation signs are
+    /// non-trivial (3-D ND traces; see
+    /// `tests/d195_nd_trace_residual.rs`).
     pub fn compute_residual(&self, x_r: &[f64], x_i: &[f64]) -> Vec<f64> {
         assert!(self.store_matrices);
         let mut out = Vec::with_capacity(self.stored.len());
@@ -1592,12 +1610,12 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             let mut off = 0usize;
             for b in 0..self.trial_kinds.len() {
                 let vd = self.trial_element_vdofs(b, e as u32);
-                // local coefficients: sigma-decode the global values for the
-                // trace blocks (the stored B is the raw element matrix).
-                let signs = self.element_dof_signs(b, e as u32);
+                // Unsigned gather: the stored block columns already carry the
+                // trace-dof signs (D195 — the sign must be applied once, in
+                // the storage, not again at gather time).
                 for (li, &g) in vd.iter().enumerate() {
-                    ur[off + li] = signs[li] * x_r[g];
-                    ui[off + li] = signs[li] * x_i[g];
+                    ur[off + li] = x_r[g];
+                    ui[off + li] = x_i[g];
                 }
                 off += vd.len();
             }
