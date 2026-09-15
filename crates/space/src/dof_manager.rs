@@ -1241,6 +1241,16 @@ impl DofManager {
     /// tri-face dofs into edge slot 14 and left slots 16/17 as dof 0, p3 used
     /// `PrismPk`'s layer order (not MFEM's), and p ≥ 4 mis-sliced
     /// `PrismPk::dof_coords()` for the interior coordinates.
+    ///
+    /// The **global** dof ids follow MFEM's entity layout (D177, ground truth
+    /// `tmp/d177/d177_probe.cpp`, regression
+    /// `tests/d177_prism_h1_mfem_numbering.rs`): vertices, then every edge dof
+    /// (edge-table order), then every face dof (face-table order, tri and
+    /// quad interleaved), then the interiors (element order) — allocation is
+    /// phased exactly like `build_tet_h1` / `build_pk_hex` / `build_pk_quad`,
+    /// so curved `nodes` files read back through the generic
+    /// `DofManager`-numbered arm of `crates/io`'s `build_h1_geometry` land on
+    /// the right physical dofs for multi-element meshes too.
     fn build_prism_h1<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         use fem_element::lagrange::{h1_prism_slots, H1PrismPk, H1PrismSlot, PRISM_EDGES};
 
@@ -1292,15 +1302,29 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
+        // D177: the *global* dof numbering follows MFEM's entity layout —
+        // vertices, then every edge dof (edge-table order, contiguous blocks),
+        // then every face dof (face-table order, triangular and quadrilateral
+        // faces interleaved in one numbering), then the element-private
+        // interiors (element order).  The old single-pass first-touch loop
+        // interleaved later elements' edge dofs with earlier elements'
+        // face/interior dofs, which agreed with MFEM only on single-element
+        // meshes and scrambled the non-vertex dofs of every curved `nodes`
+        // read-back (and any other consumer comparing against MFEM's tables).
+        // The allocation is therefore phased exactly like `build_tet_h1`
+        // (D157), `build_pk_hex` and `build_pk_quad`.
+        //
+        // Phase 1: vertices and edges, element-major, slot order within one
+        // element (the element's `PRISM_EDGES` walk is MFEM's edge-table
+        // discovery order, so first touch reproduces the edge indices).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 6, "build_prism_h1 requires 6-node prisms");
             let n6 = [ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]];
             let base = e as usize * dofs_per_elem;
-
             for (s, slot) in slots.iter().enumerate() {
-                let dof = match *slot {
-                    H1PrismSlot::Vertex(v) => n6[v],
+                match *slot {
+                    H1PrismSlot::Vertex(v) => dofs_flat[base + s] = n6[v],
                     H1PrismSlot::Edge(kk, j) => {
                         let (la, lb) = (n6[PRISM_EDGES[kk][0]], n6[PRISM_EDGES[kk][1]]);
                         let key = EdgeKey::new(la, lb);
@@ -1309,20 +1333,37 @@ impl DofManager {
                         });
                         // `j` counts from the local first vertex; the map is
                         // canonical (ascending vertex id).
-                        if la == key.0 { list[j] } else { list[ne - 1 - j] }
+                        dofs_flat[base + s] =
+                            if la == key.0 { list[j] } else { list[ne - 1 - j] };
                     }
+                    _ => {}
+                }
+            }
+        }
+        // Phase 2: face DOFs, after ALL edge DOFs.  Within one element the
+        // slot walk is [bottom tri, top tri, quad0, quad1, quad2] — MFEM's
+        // `Geometry::PRISM` face order — so first-touch allocation from the
+        // shared counter interleaves triangular and quadrilateral face blocks
+        // exactly as MFEM's face table does.  Each face's list keeps the
+        // first-encountering vertex order that defines its orientation.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let n6 = [ns[0], ns[1], ns[2], ns[3], ns[4], ns[5]];
+            let base = e as usize * dofs_per_elem;
+            for (s, slot) in slots.iter().enumerate() {
+                match *slot {
                     H1PrismSlot::TriFace(f, k) => {
                         let (a, b, c) =
                             if f == 0 { (n6[0], n6[1], n6[2]) } else { (n6[3], n6[4], n6[5]) };
                         let key = FaceKey::new(a, b, c);
-                            let (list, canon) = {
-                                let entry = tri_map.entry(key).or_insert_with(|| {
-                                    let list: Vec<DofId> =
-                                        (0..nt).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
-                                    (list, [a, b, c])
-                                });
-                                (entry.0.clone(), entry.1)
-                            };
+                        let (list, canon) = {
+                            let entry = tri_map.entry(key).or_insert_with(|| {
+                                let list: Vec<DofId> =
+                                    (0..nt).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
+                                (list, [a, b, c])
+                            });
+                            (entry.0.clone(), entry.1)
+                        };
                         // Rotate slot `k`'s barycentric label from the local
                         // triangle orientation into the canonical one and look
                         // up the canonical index (MFEM `TriDofOrd`; the bottom
@@ -1340,7 +1381,7 @@ impl DofManager {
                             .unwrap_or_else(|| {
                                 panic!("build_prism_h1: tri dof label {canon_label:?} not in table")
                             });
-                        list[ci]
+                        dofs_flat[base + s] = list[ci];
                     }
                     H1PrismSlot::QuadFace(f, i, j) => {
                         // Local side faces `(0,1,4,3) (1,2,5,4) (2,0,3,5)`.
@@ -1381,15 +1422,20 @@ impl DofManager {
                             u > 0 && u < pf && v > 0 && v < pf,
                             "build_prism_h1: quad in-face indices ({u}, {v}) out of range"
                         );
-                        list[(u as usize - 1) + (v as usize - 1) * ne]
+                        dofs_flat[base + s] = list[(u as usize - 1) + (v as usize - 1) * ne];
                     }
-                    H1PrismSlot::Interior(_) => {
-                        let d = next_dof;
-                        next_dof += 1;
-                        d
-                    }
-                };
-                dofs_flat[base + s] = dof;
+                    _ => {}
+                }
+            }
+        }
+        // Phase 3: element-private interior DOFs, after ALL face DOFs.
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
+            for (s, slot) in slots.iter().enumerate() {
+                if matches!(slot, H1PrismSlot::Interior(_)) {
+                    dofs_flat[base + s] = next_dof;
+                    next_dof += 1;
+                }
             }
         }
 
@@ -2958,14 +3004,22 @@ impl DofManager {
     /// snapshot, curved periodic meshes (order >= 2) use the corresponding
     /// high-order geometry basis over the element's full geometry node list.
     ///
-    /// Element slot layouts must match the reference factories the H1
-    /// assembler evaluates (QuadQk / HexQk / H1TriPk / TetPk / PrismPk /
-    /// PyramidPk); an element whose builder layout does not line up with its
-    /// factory (slot-count mismatch) is skipped and keeps its fold-based
-    /// coordinates.
+    /// Element slot layouts must match the reference elements the H1
+    /// assembler evaluates: the *field* element per shape is QuadQk / HexQk /
+    /// H1TriPk / H1TetPk / H1PrismPk / PyramidPk (the builders
+    /// `build_q2_quad`/`build_pk_quad`, `build_q2_hex`/`build_pk_hex`,
+    /// `build_pk` (tri), `build_tet_h1`, `build_prism_h1`,
+    /// `build_p2_pyramid`/`build_p3_pyramid`/`build_pyramid_pk`).  The
+    /// *geometry* element follows whatever order
+    /// `Mesh::set_curvature_*` writes its table in: QuadQk / HexQk / H1TriPk /
+    /// H1TetPk for quad/hex/tri/tet, but **layer-major `PrismPk`** for prisms
+    /// (frozen by `crates/mesh/tests/d152_prism_curvature.rs`) and `PyramidPk`
+    /// for pyramids.  A slot-count mismatch against these factories is a hard
+    /// error (D182): silently keeping fold-based coordinates is exactly the
+    /// failure mode the count check used to hide.
     fn rebuild_dof_coords_periodic<M: MeshTopology>(&mut self, mesh: &M) {
         use fem_element::lagrange::factory::{HexQk, H1TetPk, QuadQk};
-        use fem_element::lagrange::{H1TriPk, PrismPk, PyramidPk};
+        use fem_element::lagrange::{H1PrismPk, H1TriPk, PrismPk, PyramidPk};
 
         let dim = self.dim;
         let topo_dim = mesh.topological_dim() as usize;
@@ -2997,8 +3051,16 @@ impl DofManager {
                         Box::new(H1TetPk::new(p)),
                         Box::new(H1TetPk::new(geom_order)),
                     ),
+                    // D182: the prism *field* slots follow `H1PrismPk`
+                    // (MFEM's entity order — the layout `build_prism_h1`
+                    // numbers `element_dofs` in), while the *geometry* table
+                    // stays layer-major `PrismPk`
+                    // (`set_curvature_prism6`'s frozen contract, D152).  The
+                    // two share the Gauss-Lobatto lattice and the dof count,
+                    // so a wrong field element here passes every count check
+                    // and silently permutes the coordinates.
                     (6, _) => (
-                        Box::new(PrismPk::new(p)),
+                        Box::new(H1PrismPk::new(p)),
                         Box::new(PrismPk::new(geom_order)),
                     ),
                     (5, _) => (
@@ -3009,11 +3071,21 @@ impl DofManager {
                 };
             let dofs = self.element_dofs(e).to_vec();
             let ref_dofs = ref_elem.dof_coords();
-            if dofs.len() != ref_dofs.len() {
-                // Slot layout not factory-aligned (e.g. a hand-rolled P2/P3
-                // prism/pyramid builder): leave the fold-based coordinates.
-                continue;
-            }
+            // D182 hardening: a slot-count mismatch means the field reference
+            // element above no longer matches the builder that produced
+            // `element_dofs`.  This used to `continue` (keep fold-based
+            // coordinates) — which is precisely how the prism arm's *order*
+            // mismatch (same count, wrong permutation) stayed invisible.  Any
+            // future family split must fail loudly here instead.
+            assert_eq!(
+                dofs.len(),
+                ref_dofs.len(),
+                "rebuild_dof_coords_periodic: element {e} (npe {npe}, order {p}) has {} \
+                 dofs but the field reference element for this shape has {} — \
+                 the builder and the periodic-rebuild field element diverged",
+                dofs.len(),
+                ref_dofs.len(),
+            );
             let gnodes = mesh.geometry_nodes(e);
             let mut phi = vec![0.0_f64; gnodes.len()];
             for (slot, rc) in ref_dofs.iter().enumerate() {
