@@ -762,9 +762,9 @@ fn validate_mesh_for_write(mesh_d: &Mesh<2>, mesh_3d: Option<&Mesh<3>>) -> FemRe
 /// section holds only the vertex count, with the *space dimension* moving into
 /// the section's `VDim` line (`mesh/mesh_readers.cpp:105-110`).  The continuous
 /// (`H1_<dim>D_P<p>`) numbering is implemented for hexahedra, tetrahedra,
-/// prisms (wedges) and 2-D quadrilaterals and the discontinuous
-/// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads and triangles; any other
-/// combination is refused with an error instead of silently writing a
+/// prisms (wedges), 2-D quadrilaterals and 2-D triangles and the discontinuous
+/// (`L2_T1_<dim>D_P<p>`) one for hexahedra, quads, triangles and prisms; any
+/// other combination is refused with an error instead of silently writing a
 /// straight-sided mesh.  See [`NodesSpace`] and [`write_mfem_nodes`].
 ///
 /// For 3D meshes containing tetrahedra *without* high-order geometry, the mesh
@@ -1021,7 +1021,8 @@ fn write_nodes_section<W: Write>(
 ///
 /// **The numbering is MFEM's, not fem-rs's.**  For a continuous space the
 /// per-slot maps are the ones the reader uses ([`hex_slot_map`] for D41,
-/// [`tet_slot_map`] for D43) — this direction is their exact inverse, and it
+/// [`tet_slot_map`] for D43, [`quad2d_slot_map`] / [`tri2d_slot_map`] for the
+/// 2-D families) — this direction is their exact inverse, and it
 /// is available because both element families place their dofs on the *same*
 /// nodal lattice as MFEM's `H1_HexahedronElement` / `H1_TetrahedronElement`,
 /// so a value read at one slot can be handed to the matching dof unchanged.
@@ -1132,11 +1133,27 @@ fn nodes_dof_values<const D: usize>(
                     let (n_dofs, v) = prism_nodes_dof_values(mesh, geo, order as usize, sdim)?;
                     return Ok(Some((order, n_dofs, v)));
                 }
+                // D178: the 2-D triangle analogue of `quad2d_slot_map` —
+                // `H1TriPk` and MFEM's `H1_TriangleElement` place their dofs
+                // on the same Gauss-Lobatto lattice in the same slot order
+                // (probe-verified point-for-point), so this is a pure
+                // renumbering.
+                ElementType::Tri3 => {
+                    let (slots, n_dofs) = tri2d_slot_map(mesh, order as usize).map_err(|e| match e {
+                        HexSlotErr::NotHex => FemError::Mesh(
+                            "write_mfem: no MFEM H1 `nodes` numbering for this mesh".into(),
+                        ),
+                        HexSlotErr::Unsupported(why) => FemError::Mesh(format!(
+                            "write_mfem: cannot write the 2-D triangular `nodes` section: {why}"
+                        )),
+                    })?;
+                    (slots, n_dofs)
+                }
                 other => {
                     return Err(FemError::Mesh(format!(
                         "write_mfem: no MFEM-faithful continuous `nodes` numbering for \
-                         {other:?} (only Hex8, Tet4, Prism6 and Quad4 are implemented); no `nodes` \
-                         section was written"
+                         {other:?} (only Hex8, Tet4, Prism6, Quad4 and Tri3 are implemented); \
+                         no `nodes` section was written"
                     )))
                 }
             };
@@ -1996,6 +2013,157 @@ fn quad2d_slot_map<M: MeshTopology>(
             conn.push(g as NodeId);
         }
         if interior_seen != e * e {
+            return HexSlotErr::unsupported("unexpected interior slot count");
+        }
+    }
+
+    Ok((conn, n_dofs))
+}
+
+/// D178: MFEM's H1 `nodes` numbering for an all-`Tri3` **2-D** mesh, as the map
+/// `conn[e * npe + s] = <file dof of reference slot s of element e>` plus the
+/// total number of geometry dofs — the triangle analogue of [`quad2d_slot_map`],
+/// with the same slot (that is, `H1TriPk`) order.
+///
+/// MFEM's numbering (`FiniteElementSpace::GetElementDofs`, `fem/fespace.cpp`;
+/// entity enumeration from `Mesh::FinalizeTopology`; node positions from
+/// `H1_TriangleElement`, `fem/fe/fe_h1.cpp:451`; verified against MFEM 4.10's
+/// own `H1_2D_P2/P3/P4` output for `MakeCartesian2D` triangle grids, probe
+/// `tmp/r36/tri2d_nodes.cpp`):
+///
+/// ```text
+///   vertex v            -> dof v
+///   mesh edge E, slot t -> dof NV + E*(p-1) + t
+///   element e, slot o   -> dof NV + NE*(p-1) + e*(p-1)(p-2)/2 + o
+/// ```
+///
+/// The local edge order is `(0,1) (1,2) (2,0)` and an edge's slot `t` counts
+/// from the edge end with the **smaller mesh vertex id** — the same rule the
+/// quadrilateral map pins down (`SegDofOrd[0]` is the identity and the edge
+/// table stores `(min, max)`; measured on the p = 3 fixture, where e.g. the
+/// top-edge dofs count from the *left* end because the left vertex id is
+/// smaller).  The interior slot `o` follows `H1_TriangleElement`'s interior
+/// enumeration (`j`-outer, `i`-inner over the `w`-normalised barycentric
+/// Gauss-Lobatto points), which is exactly `H1TriPk`'s interior block order,
+/// so the interior slots are simply counted per element.
+fn tri2d_slot_map<M: MeshTopology>(mesh: &M, p: usize) -> Result<(Vec<NodeId>, usize), HexSlotErr> {
+    /// MFEM `Geometry::Constants<Geometry::TRIANGLE>::Edges`: local edge `k`
+    /// runs from vertex `TRI_EDGES[k][0]` to vertex `TRI_EDGES[k][1]`.
+    const TRI_EDGES: [[usize; 2]; 3] = [[0, 1], [1, 2], [2, 0]];
+    let e = p - 1; // dofs per edge
+    let n_int = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+    let n_elems = mesh.n_elements();
+    let n_vert = mesh.n_nodes();
+    if p < 2 || n_elems == 0 || n_vert == 0 {
+        return Err(HexSlotErr::NotHex); // order 1 needs no numbering
+    }
+    let mut n_tri = 0usize;
+    for el in 0..n_elems as u32 {
+        if mesh.element_nodes(el).len() == 3 {
+            n_tri += 1;
+        }
+    }
+    if n_tri == 0 {
+        return Err(HexSlotErr::NotHex);
+    }
+    if n_tri != n_elems {
+        return HexSlotErr::unsupported("mixed-element mesh containing triangles");
+    }
+
+    // Mesh edges in MFEM's enumeration (element traversal, local edge order,
+    // first encounter wins).
+    let mut elems: Vec<[u32; 3]> = Vec::with_capacity(n_elems);
+    let mut edge_ids: HashMap<[u32; 2], u32> = HashMap::new();
+    for el in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(el);
+        let mut n3 = [0u32; 3];
+        n3.copy_from_slice(ns);
+        for &[la, lb] in TRI_EDGES.iter() {
+            let (a, b) = (n3[la], n3[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len() as u32;
+            edge_ids.entry(key).or_insert(next);
+        }
+        elems.push(n3);
+    }
+    let n_edges = edge_ids.len();
+    let n_dofs = n_vert + n_edges * e + n_elems * n_int;
+
+    // `H1TriPk`'s slots follow MFEM `H1_TriangleElement`'s own dof order
+    // (vertices -> edges (0→1, 1→2, 2→0) -> interior) on the *same* closed
+    // Gauss-Lobatto lattice (probe: MFEM's `GetNodes()` and `H1TriPk`'s
+    // `dof_coords()` agree point-for-point for p = 2..4), so the slot's
+    // reference coordinates identify its entity and its along-edge position.
+    let ref_coords = fem_element::lagrange::H1TriPk::new(p).dof_coords();
+    let npe = ref_coords.len();
+    if npe != 3 + 3 * e + n_int {
+        return HexSlotErr::unsupported("reference tri element is not the H1 order-p basis");
+    }
+    // `H1TriPk`'s 1-D points live on `[0,1]` (`Lagrange1D` mapped by `0.5*(x+1)`),
+    // the same closed Gauss-Lobatto table MFEM's `Poly_1D::ClosedPoints` uses.
+    let gll: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect();
+    if gll.len() != p + 1 {
+        return HexSlotErr::unsupported("unexpected Gauss-Lobatto node count");
+    }
+    let tol = 1e-12;
+    let gll_index = |x: f64| -> Option<usize> { gll.iter().position(|&g| (g - x).abs() < tol) };
+
+    let edge_base = n_vert;
+    let interior_base = edge_base + n_edges * e;
+    // `along` is the edge parameter in [0,1] counted from the local first
+    // vertex; its Gauss-Lobatto index minus one is the local edge slot.  The
+    // global slot counts from the edge end with the smaller mesh vertex id.
+    let edge_dof = |n3: &[u32; 3], la: usize, lb: usize, along: f64| -> Result<usize, ()> {
+        let k = gll_index(along).ok_or(())?;
+        let t_local = k - 1;
+        let (a, b) = (n3[la], n3[lb]);
+        let key = if a < b { [a, b] } else { [b, a] };
+        let ei = *edge_ids.get(&key).ok_or(())?;
+        let t = if a < b { t_local } else { e - 1 - t_local };
+        Ok(edge_base + ei as usize * e + t)
+    };
+    let bad_slot = || {
+        HexSlotErr::Unsupported("reference slot is not on the Gauss-Lobatto lattice")
+    };
+    let mut conn: Vec<NodeId> = Vec::with_capacity(n_elems * npe);
+    for (el, n3) in elems.iter().enumerate() {
+        let mut interior_seen = 0usize;
+        for c in ref_coords.iter() {
+            let (x, y) = (c[0], c[1]);
+            let at_lo = |v: f64| v.abs() < tol;
+            let at_hi = |v: f64| (v - 1.0).abs() < tol;
+            let g: usize = if at_lo(x) && at_lo(y) {
+                // Vertex slot: the file stores vertex `v` as dof `v`.
+                n3[0] as usize
+            } else if at_hi(x) && at_lo(y) {
+                n3[1] as usize
+            } else if at_lo(x) && at_hi(y) {
+                n3[2] as usize
+            } else if at_lo(y) {
+                // Edge 0 (v0→v1): the parameter counts from v0.
+                edge_dof(n3, 0, 1, x).map_err(|()| bad_slot())?
+            } else if at_hi(x + y) {
+                // Edge 1 (v1→v2): `x + y == 1`, the parameter counts from v1.
+                edge_dof(n3, 1, 2, y).map_err(|()| bad_slot())?
+            } else if at_lo(x) {
+                // Edge 2 (v2→v0): the parameter counts from v2, i.e. `1 - y`.
+                edge_dof(n3, 2, 0, 1.0 - y).map_err(|()| bad_slot())?
+            } else {
+                // Interior slot: private to the element.  `H1TriPk` enumerates
+                // its interior block in `H1_TriangleElement`'s own
+                // `j`-outer/`i`-inner order, so the running count *is* the
+                // interior slot `o`.
+                let o = interior_seen;
+                interior_seen += 1;
+                interior_base + el * n_int + o
+            };
+            conn.push(g as NodeId);
+        }
+        if interior_seen != n_int {
             return HexSlotErr::unsupported("unexpected interior slot count");
         }
     }

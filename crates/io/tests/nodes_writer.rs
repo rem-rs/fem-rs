@@ -373,13 +373,12 @@ fn curved_mesh_without_boundary_faces_writes_an_empty_boundary_section() {
 #[test]
 fn unsupported_element_families_are_refused_without_writing_a_file() {
     // Round 33 (D151) added the continuous prism (wedge) and 2-D
-    // quadrilateral numberings, and round 35 (D165) added the *discontinuous*
-    // prism one (`L2_T1_3D_P<p>`, the `toroid -dm` case — MFEM's
-    // `L2_WedgeElement`, pinned by `prism_l2_nodes_writer.rs`).  The only
-    // family left without an MFEM-faithful numbering here is the 2-D
-    // triangle.  The writer must refuse it rather than emit a mesh whose
-    // curvature is silently wrong — and it must refuse before the output file
-    // exists.
+    // quadrilateral numberings, round 35 (D165) the *discontinuous* prism one
+    // (`L2_T1_3D_P<p>`, the `toroid -dm` case — MFEM's `L2_WedgeElement`,
+    // pinned by `prism_l2_nodes_writer.rs`), and round 36 (D178) the 2-D
+    // triangle — continuous `H1_2D_P<p>` and (already since round 33)
+    // discontinuous `L2_T1_2D_P<p>` — pinned whole-file by
+    // `nodes_2d_writer.rs`.
 
     // Prism (3-D): `data/inline-wedge.mesh` is a single wedge, and
     // `set_curvature_prism6` gives it an order-3 geometry table.
@@ -411,19 +410,36 @@ fn unsupported_element_families_are_refused_without_writing_a_file() {
     .expect("prism discontinuous nodes are written since D165");
     assert!(String::from_utf8(sink).unwrap().contains("L2_T1_3D_P3"));
 
-    // 2-D triangle.
+    // 2-D triangle: written since D178, not refused any more.
     let mut tri = Mesh::<2>::make_cartesian_2d_tri(1, 1, 1.0, 1.0);
     tri.set_curvature(3);
-    let err = write_mfem_nodes(&mut Vec::<u8>::new(), &tri, None, NodesSpace::Continuous)
-        .expect_err("2-D triangle continuous nodes must be refused");
-    assert!(format!("{err}").contains("Tri3"), "{err}");
+    let mut sink: Vec<u8> = Vec::new();
+    write_mfem_nodes(&mut sink, &tri, None, NodesSpace::Continuous)
+        .expect("2-D triangle continuous nodes are written since D178");
+    assert!(String::from_utf8(sink).unwrap().contains("H1_2D_P3"));
+
+    // Still refused: the *discontinuous* tetrahedral `nodes` section — MFEM's
+    // `L2_T1_TETRAHEDRON` node ordering has not been reproduced here.  The
+    // writer must refuse rather than emit a mesh whose curvature is silently
+    // dropped — and it must refuse before the output file exists.
+    let mut tet =
+        Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+    tet.set_curvature(3);
+    let err = write_mfem_nodes(
+        &mut Vec::<u8>::new(),
+        &Mesh::<2>::unit_square_tri(2),
+        Some(&tet),
+        NodesSpace::Discontinuous,
+    )
+    .expect_err("tetrahedral discontinuous nodes must be refused");
+    assert!(format!("{err}").contains("Tet4"), "{err}");
 
     // `write_mfem_file` must not create the file on failure.
-    let path = std::env::temp_dir().join("fem_rs_t32_refused_tri.mesh");
+    let path = std::env::temp_dir().join("fem_rs_t32_refused_tet.mesh");
     let _ = std::fs::remove_file(&path);
-    let err = fem_io::mfem::write_mfem_file(&path, &tri)
-        .expect_err("2-D continuous nodes must be refused when writing to disk");
-    assert!(format!("{err}").contains("Tri3"));
+    let err = fem_io::mfem::write_mfem_file_3d_nodes(&path, &tet, NodesSpace::Discontinuous)
+        .expect_err("tetrahedral discontinuous nodes must be refused when writing to disk");
+    assert!(format!("{err}").contains("Tet4"));
     assert!(!path.exists(), "a refused mesh must not leave a file behind");
 }
 
