@@ -16,7 +16,7 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::{TriPk, TetPk}, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
+use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
 use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
 use fem_element::nedelec::{QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1306,7 +1306,7 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// (Gauss-Lobatto nodes, DOFs ordered vertices → edges → interior):
 /// `QuadQk`/`HexQk` for tensor elements, `H1TriPk` for triangles,
 /// `QuadSerendipityPk`/`HexSerendipityPk` for serendipity elements,
-/// `TetPk`/`PrismPk`/`PyramidPk` for the rest.
+/// `H1TetPk`/`H1PrismPk`/`PyramidPk` for the rest.
 ///
 /// D31 stage A (GLL alignment): the hex entries at orders 2/3 were the last
 /// third ordering — `HexQ2`/`HexQ3` are now slot-identical to
@@ -1342,7 +1342,13 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
         (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),
-        (ElementType::Tet4 | ElementType::Tet10, 3) => Box::new(TetPk::new(3)),
+        // D157: MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity slot
+        // order), matching `assembler::ref_elem_vol_h1` and `fem_space`'s tet
+        // DOF numbering — the equispaced `factory::TetPk` disagrees with both
+        // from p = 3 on.
+        (ElementType::Tet4 | ElementType::Tet10, 3) => {
+            Box::new(fem_element::lagrange::H1TetPk::new(3))
+        }
         (ElementType::Quad4, 1) => Box::new(QuadQk::new(1)),
         (ElementType::Quad4, 2) => Box::new(QuadQk::new(2)),
         (ElementType::Quad4, 3) => Box::new(QuadQk::new(3)),
@@ -1363,7 +1369,9 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Prism6 | ElementType::Prism15, 3) => Box::new(H1PrismPk::new(3)),
         // ── Order-generic path (matches `assembler::ref_elem_vol_h1`) ───────
         (ElementType::Tri3 | ElementType::Tri6, o) => Box::new(H1TriPk::new(o as usize)),
-        (ElementType::Tet4 | ElementType::Tet10, o) => Box::new(TetPk::new(o as usize)),
+        (ElementType::Tet4 | ElementType::Tet10, o) => {
+            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
+        }
         (ElementType::Quad4, o) => Box::new(QuadQk::new(o as usize)),
         (ElementType::Quad8 | ElementType::Quad9, o) => {
             Box::new(QuadSerendipityPk::new(o as usize))

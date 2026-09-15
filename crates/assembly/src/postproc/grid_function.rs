@@ -7,7 +7,7 @@
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TriP1};
-use fem_element::lagrange::factory::{TriPk, TetPk};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::quadrature::quad_rule_01;
 use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, QuadratureRule, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
@@ -42,12 +42,19 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // D157: this table pairs with the **mesh geometry table** (the
+        // callers below evaluate it against `mesh.geometry_nodes`), and
+        // `set_curvature_tet4` lays that table out on `H1TetPk`'s
+        // Gauss-Lobatto lattice in MFEM's entity slot order — the equispaced
+        // `factory::TetPk` disagrees with it from p = 3 on.  (Space-aware
+        // evaluation goes through `ref_elem_vol_for_space` above, which picks
+        // the same element via the assembler dispatch.)
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         // Hex8/HexQk: Gauss-Lobatto nodes on [0,1]^3 (same family as QuadQk).
         (ElementType::Hex8, o) => {
             Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
         }
-        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o.max(1) as usize)),
+        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::H1TetPk::new(o.max(1) as usize)),
         (ElementType::Tri3 | ElementType::Tri6, o) => {
             Box::new(fem_element::lagrange::TriPk::new(o.max(1) as usize))
         }

@@ -278,11 +278,13 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
 /// H1 solution reference element: MFEM `H1_FECollection` semantics
 /// (`BasisType::GaussLobatto`).
 ///
-/// Simplex elements of order ≥ 3 use [`H1TriPk`] (Gauss-Lobatto nodes) —
-/// the fixed-order `TriPk`/`TriP3`/`TriP4` are *equispaced*, which matches
-/// MFEM only at p ≤ 2 (the p=2 edge midpoints coincide with the GLL points).
-/// Note this differs from the DG/L2 paths, which keep the equispaced
-/// [`TriPk`] (see [`ref_elem_vol_l2`]).
+/// Simplex elements of order ≥ 3 use [`H1TriPk`] / [`H1TetPk`] (MFEM
+/// Gauss-Lobatto nodes in MFEM's entity slot order, the latter since D157) —
+/// the fixed-order `TriPk`/`TetPk` are *equispaced*, which matches MFEM only
+/// at p ≤ 2 (the p=2 edge midpoints coincide with the GLL points).  The tet
+/// arms pair with `fem_space`'s `DofManager::build_tet_h1` numbering; the tri
+/// arms with the GLL triangle numbering.  Note this differs from the DG/L2
+/// paths, which keep the equispaced elements (see [`ref_elem_vol_l2`]).
 pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
@@ -299,8 +301,12 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         }
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
-        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
+        // D157: orders ≥ 3 use [`H1TetPk`] — MFEM `H1_TetrahedronElement`
+        // (closed Gauss-Lobatto nodes, entity slot order), matching the H1
+        // dof numbering `fem_space`'s `DofManager::build_tet_h1` produces.
+        // The equispaced `factory::TetPk` agrees only at p ≤ 2.
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
+        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::H1TetPk::new(o as usize)),
         (ElementType::Quad4, 0) => Box::new(P0 { dim: 2 }),
         // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
         // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
@@ -441,8 +447,8 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
     }
 }
 
-/// MFEM `H1_TriangleElement(p)` **DOF order** over the reference tetrahedron
-/// element's face **nodes** — the boundary element of a tetrahedral mesh.
+/// MFEM `H1_TriangleElement(p)` — the **trace** of the volume H¹ tetrahedron
+/// element on the face `z = 0` of the reference tetrahedron.
 ///
 /// MFEM's boundary element for a tetrahedron face is `H1_TriangleElement(p)`,
 /// a 2-D element whose DOF order is `[v0, v1, v2, edge0…, edge1…, edge2…,
@@ -450,24 +456,18 @@ fn ref_elem_face(face_elem_type: ElementType, order: u8) -> Box<dyn ReferenceEle
 /// towards `v0`.  Its DOFs are the *same mesh entities* as the volume
 /// element's face DOFs, so the two must agree to yield a basis that is the
 /// trace of the space's basis — and they do in MFEM because both elements put
-/// their nodes at the same parametric positions.
+/// their nodes at the same (closed Gauss-Lobatto) parametric positions.
 ///
-/// In fem-rs they do **not** in general: the H¹ tetrahedron basis the
-/// assembler uses ([`fem_element::lagrange::factory::TetPk`]) is *equispaced*
-/// while `H1_TriangleElement`'s nodes are the closed Gauss-Lobatto points
-/// (D49).  At `p = 3` the face edge nodes are at `1/3, 2/3` versus
-/// `0.2764, 0.7236`; using the Gauss-Lobatto element here would make the face
-/// basis functions *different functions* from the volume basis restricted to
-/// the face, so the boundary integral would be distributed onto the wrong DOFs
-/// (the D46② failure mode, measured as a per-DOF error of ~0.1 with the sum
-/// still exact).  This element therefore takes the `H1_TriangleElement` node
-/// *rule* and evaluates it with the closed points `cp[k] = k/p`, i.e. the
-/// volume element's own edge distribution, and then resolves every node
-/// against the volume element by evaluation (`H1TetFacePk::new`).
-///
-/// If D49 is ever fixed on the space side (H¹ tetrahedra switched to
-/// Gauss-Lobatto nodes) this element must be switched to the Gauss-Lobatto
-/// points with it — one line, next to the volume element it mirrors.
+/// In fem-rs they did **not** before D157: the H¹ tetrahedron basis the
+/// assembler used was *equispaced* ([`fem_element::lagrange::factory::TetPk`])
+/// while `H1_TriangleElement`'s nodes are the closed Gauss-Lobatto points, so
+/// this element had to evaluate the Gauss-Lobatto node *rule* with the closed
+/// points `cp[k] = k/p` to stay the volume element's trace.  Since D157 the
+/// volume element is [`H1TetPk`] — MFEM's own Gauss-Lobatto tetrahedron — and
+/// this element simply restricts it: the nodes are `H1TetPk`'s Gauss-Lobatto
+/// lattice points on `z = 0`, each resolved against the volume element by
+/// evaluation, which makes the face basis MFEM's `H1_TriangleElement` in slot
+/// order and the volume basis's trace by construction.
 struct H1TetFacePk {
     order: usize,
     /// The volume element whose face restriction this element is.
@@ -486,29 +486,18 @@ impl H1TetFacePk {
     fn new(p: usize) -> Self {
         assert!(p >= 1, "H1TetFacePk: order must be >= 1");
         // The volume element whose face restriction this element is.
-        let vol: Box<dyn ReferenceElement> =
-            Box::new(fem_element::lagrange::factory::TetPk::new(p));
-        let pf = p as f64;
-        let cp = |k: usize| k as f64 / pf;
+        let vol: Box<dyn ReferenceElement> = Box::new(fem_element::lagrange::H1TetPk::new(p));
 
-        // `H1_TriangleElement`'s node rule (see the type docs) with the
-        // volume element's edge distribution.
-        let mut nodes: Vec<[f64; 2]> = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-        for i in 1..p {
-            nodes.push([cp(i), 0.0]);
-        }
-        for i in 1..p {
-            nodes.push([cp(p - i), cp(i)]);
-        }
-        for i in 1..p {
-            nodes.push([0.0, cp(p - i)]);
-        }
-        for j in 1..p {
-            for i in 1..(p - j) {
-                let w = cp(i) + cp(j) + cp(p - i - j);
-                nodes.push([cp(i) / w, cp(j) / w]);
-            }
-        }
+        // `H1_TriangleElement`'s node table — order *and* Gauss-Lobatto
+        // positions.  `H1TriPk` is exactly MFEM's boundary element (its DOF
+        // order is `[v0, v1, v2, edge v0→v1, edge v1→v2, edge v2→v0,
+        // interior…]`, nodes at the closed Gauss-Lobatto points), so its
+        // coordinates are the face dof positions directly.
+        let mut nodes: Vec<[f64; 2]> = fem_element::lagrange::H1TriPk::new(p)
+            .dof_coords()
+            .into_iter()
+            .map(|c| [c[0], c[1]])
+            .collect();
 
         // Resolve every node against the volume element.  The volume basis is
         // nodal at its own face nodes, so the DOF there is the unique slot
@@ -2520,10 +2509,12 @@ fn curved_boundary_face_geom(
     let elem_type = mesh.element_type(owner);
 
     // The owner's geometry element: the same factory `set_curvature` used to
-    // lay out the geometry node list.
+    // lay out the geometry node list.  Tetrahedra: `set_curvature_tet4` places
+    // its nodes on `H1TetPk`'s Gauss-Lobatto lattice (D49/D157), so the
+    // equispaced `factory::TetPk` would misread the node values from p = 3 on.
     let geom_vol: Box<dyn ReferenceElement> = match elem_type {
         ElementType::Hex8 => Box::new(HexQk::new(q)),
-        ElementType::Tet4 => Box::new(TetPk::new(q)),
+        ElementType::Tet4 => Box::new(fem_element::lagrange::H1TetPk::new(q)),
         other => panic!(
             "curved_boundary_face_geom: unsupported curved owner element {other:?} (face {f})"
         ),
@@ -2538,7 +2529,7 @@ fn curved_boundary_face_geom(
         gn.len(),
         match elem_type {
             ElementType::Hex8 => "HexQk",
-            _ => "TetPk",
+            _ => "H1TetPk",
         },
         geom_vol_coords.len(),
     );
@@ -2850,20 +2841,19 @@ fn curved_boundary_edge_geom_with_tol(
 /// `space.element_dofs`**.
 ///
 /// Normally this is just [`ref_elem_vol_for_space`]'s `dof_coords`, but
-/// tetrahedra need one correction: the H¹ space's local tet DOF order comes
-/// from `fem_space::DofManager`, which documents it as matching
-/// `fem_element::lagrange::factory::TetPk`, and the fixed-order
-/// `fem_element::lagrange::TetP2` publishes a `dof_coords` list **longer** than
-/// its own `n_dofs` (20 coordinates for a 10-DOF element, with the edge DOFs at
-/// 1/3 and 2/3 instead of the midpoints).  That list cannot locate a DOF, so
-/// tets are always read from the factory element instead.
+/// tetrahedra need one correction: `fem_element::lagrange::TetP2` publishes a
+/// `dof_coords` list **longer** than its own `n_dofs` (20 coordinates for a
+/// 10-DOF element, with the edge DOFs at 1/3 and 2/3 instead of the
+/// midpoints).  That list cannot locate a DOF, so tets are always read from
+/// the factory element — `H1TetPk` (D157), whose slots are exactly the H¹
+/// space's `element_dofs` order.
 fn volume_dof_reference_coords<S: FESpace>(
     space: &S,
     elem_type: ElementType,
     order: u8,
 ) -> Vec<Vec<f64>> {
     if matches!(elem_type, ElementType::Tet4 | ElementType::Tet10) {
-        return fem_element::lagrange::factory::TetPk::new(order as usize).dof_coords();
+        return fem_element::lagrange::H1TetPk::new(order as usize).dof_coords();
     }
     ref_elem_vol_for_space(space, elem_type, order).dof_coords()
 }
@@ -3776,18 +3766,22 @@ mod tests {
 
         // Triangle face: MFEM's `H1_TriangleElement` DOF order
         // [v0, v1, v2, edge0…, edge1…, edge2…, interior…] over the *tet*
-        // volume element's face nodes.  The tet H¹ basis is equispaced
-        // (`factory::TetPk`), so the trace nodes are at `k/p` (see
-        // [`H1TetFacePk`]) — the DOF *order* is what must match MFEM, and the
-        // nodal property below pins that the elements are the volume
-        // element's traces.
+        // volume element's face nodes.  Since D157 the tet H¹ basis is MFEM's
+        // own Gauss-Lobatto `H1_TetrahedronElement` ([`H1TetPk`]), so the
+        // trace nodes sit at the closed Gauss-Lobatto points — MFEM-verified
+        // by the round-36 probe `tmp/a36_tet_h1_probe.cpp` (slot-for-slot
+        // `GetElementDofs`/`GetNodes` match, p = 2..4) and by the D50 harness
+        // dump (`boundary_assembly_3d_matches_mfem_reference` below, whose
+        // tet faces now agree at every order).
         for p in 1..=6usize {
             let face = ref_elem_face(ElementType::Tri3, p as u8);
-            let vol = fem_element::lagrange::factory::TetPk::new(p);
+            let vol = fem_element::lagrange::H1TetPk::new(p);
             let fcoords = face.dof_coords();
             assert_eq!(fcoords.len(), (p + 1) * (p + 2) / 2, "p = {p}");
             let vol_coords = vol.dof_coords();
-            let pp = p as f64;
+            // Closed Gauss-Lobatto points on [0,1] (MFEM `ClosedPoints(p)`).
+            let (g, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
+            let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
             let close = |a: &[f64], b: [f64; 2]| {
                 (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12
             };
@@ -3797,26 +3791,25 @@ mod tests {
             assert!(close(&fcoords[2], [0.0, 1.0]));
             // Edge blocks, in MFEM's order and directions.
             for i in 1..p {
-                assert!(close(&fcoords[3 + i - 1], [i as f64 / pp, 0.0]), "p {p} e0 {i}");
+                assert!(close(&fcoords[3 + i - 1], [cp[i], 0.0]), "p {p} e0 {i}");
             }
             for i in 1..p {
                 assert!(
-                    close(&fcoords[3 + (p - 1) + i - 1], [(p - i) as f64 / pp, i as f64 / pp]),
+                    close(&fcoords[3 + (p - 1) + i - 1], [cp[p - i], cp[i]]),
                     "p {p} e1 {i}"
                 );
             }
             for i in 1..p {
-                assert!(
-                    close(&fcoords[3 + 2 * (p - 1) + i - 1], [0.0, (p - i) as f64 / pp]),
-                    "p {p} e2 {i}"
-                );
+                assert!(close(&fcoords[3 + 2 * (p - 1) + i - 1], [0.0, cp[p - i]]), "p {p} e2 {i}");
             }
-            // Interior, `(j, i)` nested with i fastest.
+            // Interior, `(j, i)` nested with i fastest (MFEM's triangle
+            // normalisation `cp[i]/w, cp[j]/w`, `w = cp[i]+cp[j]+cp[p-i-j]`).
             let mut at = 3 + 3 * (p - 1);
             for j in 1..p {
                 for i in 1..(p - j) {
+                    let w = cp[i] + cp[j] + cp[p - i - j];
                     assert!(
-                        close(&fcoords[at], [i as f64 / pp, j as f64 / pp]),
+                        close(&fcoords[at], [cp[i] / w, cp[j] / w]),
                         "p {p} interior {i},{j}"
                     );
                     at += 1;
@@ -3867,13 +3860,11 @@ mod tests {
     /// * every entry `k` of the local vector.
     ///
     /// Hexahedron faces agree to round-off at every order.  Tetrahedron faces
-    /// agree only for `p ≤ 2`: at `p ≥ 3` MFEM's `H1_TriangleElement` places
-    /// the face nodes at the closed Gauss-Lobatto points while the fem-rs H¹
-    /// tetrahedron basis (`factory::TetPk`) is *equispaced*, so the two
-    /// assemblers integrate genuinely different basis functions (D49 — see
-    /// [`H1TetFacePk`]).  For those orders the test asserts the face node
-    /// positions are exactly the equispaced trace of the volume element (which
-    /// documents the gap) and reports the value difference.
+    /// agreed only for `p ≤ 2` while the fem-rs H¹ tetrahedron basis was
+    /// *equispaced* (D49); since D157 the tet field is MFEM's Gauss-Lobatto
+    /// `H1_TetrahedronElement` ([`H1TetPk`]) and the boundary element is its
+    /// trace ([`H1TetFacePk`]), so tetrahedron faces now agree at **every**
+    /// order and the comparison below is asserted for all of them.
     #[test]
     fn boundary_assembly_3d_matches_mfem_reference() {
         use crate::postproc::coefficient::FnVectorCoeff;
@@ -3928,7 +3919,11 @@ mod tests {
         for case in &cases {
             let etype = if case.tet { ElementType::Tet4 } else { ElementType::Hex8 };
             let label = format!("{etype:?} p={}", case.p);
-            let agrees = !case.tet || case.p <= 2;
+            // D157: every case agrees now — the tet field moved to MFEM's
+            // Gauss-Lobatto `H1_TetrahedronElement` and the boundary element
+            // (`H1TetFacePk`) is its trace, so the per-DOF node positions and
+            // the assembled values match MFEM at all orders.
+            let agrees = true;
             let mesh = Mesh::<3>::make_cartesian_3d(1, 1, 1, etype, 1.0, 1.0, 1.0, false);
             let space = H1Space::new(mesh, case.p);
             let fdofs = face_dofs_h1(&space);
@@ -3964,12 +3959,10 @@ mod tests {
                 {
                     let dp = (c[0] - w[0]).abs().max((c[1] - w[1]).abs());
                     max_pos = max_pos.max(dp);
-                    if agrees {
-                        assert!(
-                            dp < 1e-15,
-                            "{label}: face {f} DOF {k} node {c:?} != MFEM's {w:?}"
-                        );
-                    }
+                    assert!(
+                        dp < 1e-15,
+                        "{label}: face {f} DOF {k} node {c:?} != MFEM's {w:?}"
+                    );
                 }
 
                 // The local face vector: a single-face accumulation read back at
@@ -3987,50 +3980,18 @@ mod tests {
                 for (k, &g) in d.iter().enumerate() {
                     let dv = (local[g as usize] - want.vals[k]).abs();
                     max_val = max_val.max(dv);
-                    if agrees {
-                        assert!(
-                            dv < 1e-12,
-                            "{label}: face {f} DOF {k}: ∫(e_x·n)φ_k = {} but MFEM has {} \
-                             (|Δ| = {dv:.3e})",
-                            local[g as usize],
-                            want.vals[k]
-                        );
-                    }
+                    assert!(
+                        dv < 1e-12,
+                        "{label}: face {f} DOF {k}: ∫(e_x·n)φ_k = {} but MFEM has {} \
+                         (|Δ| = {dv:.3e})",
+                        local[g as usize],
+                        want.vals[k]
+                    );
                 }
             }
             eprintln!(
-                "{label}: max |Δ node| = {max_pos:.3e}, max |Δ value| = {max_val:.3e}{}",
-                if agrees {
-                    ""
-                } else {
-                    "   (D49: MFEM's Gauss-Lobatto face nodes vs fem-rs's equispaced tet basis)"
-                }
+                "{label}: max |Δ node| = {max_pos:.3e}, max |Δ value| = {max_val:.3e}"
             );
-
-            if !agrees {
-                // The face nodes are the *equispaced* trace of the volume
-                // element — `k/p` along each face edge — while MFEM's are the
-                // closed Gauss-Lobatto points, and the two differ visibly.
-                let pp = case.p as f64;
-                for i in 1..case.p as usize {
-                    let c = &face_elt.dof_coords()[3 + i - 1];
-                    assert!(
-                        (c[0] - i as f64 / pp).abs() < 1e-12 && c[1].abs() < 1e-12,
-                        "p = {}: face edge node {i} at {c:?}, expected {}/{}",
-                        case.p,
-                        i,
-                        case.p
-                    );
-                }
-                let gll =
-                    fem_element::quadrature::gauss_lobatto_arbitrary(case.p as usize + 1).0;
-                let mfem_node = 0.5 * (gll[1] + 1.0);
-                assert!(
-                    (mfem_node - 1.0 / pp).abs() > 1e-3,
-                    "p = {}: Gauss-Lobatto and equispaced edge nodes should differ here",
-                    case.p
-                );
-            }
         }
     }
 

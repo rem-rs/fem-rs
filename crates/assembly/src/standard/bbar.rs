@@ -50,7 +50,7 @@ use fem_element::{
     ReferenceElement, PyramidPk,
     lagrange::{SegP1, TetP1, TetP2, TriP1, QuadQ1, HexQ1},
 };
-use fem_element::lagrange::factory::{TriPk, TetPk};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::CooMatrix;
 use fem_linalg::CsrMatrix;
@@ -70,7 +70,10 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // D157: MFEM `H1_TetrahedronElement` — matches the H¹ tet dof
+        // numbering (`DofManager::build_tet_h1` / `ref_elem_vol_h1`); the
+        // equispaced `factory::TetPk` only agreed at p ≤ 2.
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         (ElementType::Quad4, _) => Box::new(fem_element::lagrange::factory::QuadQk::new(order as usize)),
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>
@@ -103,6 +106,12 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
         | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
         | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !is_quad_hex { return None; }
+    // Curved tets: `set_curvature_tet4` lays the geometry nodes on `H1TetPk`'s
+    // Gauss-Lobatto lattice (D49/D157) — same reasoning as
+    // `assembler::geo_ref_elem`.
+    if matches!(et, ElementType::Tet4 | ElementType::Tet10) && g > 1 {
+        return Some(Box::new(fem_element::lagrange::H1TetPk::new(g as usize)));
+    }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
     Some(factory_ref_elem(ft, order))

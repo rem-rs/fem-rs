@@ -7,7 +7,11 @@
 //! - Triangles: (p+1)(p+2)/2 DOFs per element
 //! - Tetrahedra: (p+1)(p+2)(p+3)/6 DOFs per element
 //!
-//! DOF ordering within each element follows [`fem_element::TriPk`] / [`fem_element::TetPk`].
+//! DOF ordering within each element follows MFEM's `H1_FECollection` entity
+//! layout: triangles via [`fem_element::TriPk`]-convention edges with
+//! Gauss-Lobatto coordinates (`H1TriPk`), tetrahedra via
+//! [`DofManager::build_tet_h1`] (MFEM `H1_TetrahedronElement`, D157), prisms
+//! via [`DofManager::build_prism_h1`].
 
 use std::collections::HashMap;
 use fem_core::types::{DofId, ElemId, FaceId, NodeId};
@@ -2117,47 +2121,45 @@ impl DofManager {
     // ─── Pk (arbitrary order) ─────────────────────────────────────────────────
     //
     // Builds a general-order Lagrange DOF manager for 2D triangle and 3D tetrahedron
-    // meshes. The DOF ordering per element matches TriPk / TetPk from the factory.
+    // meshes. The DOF ordering per element matches TriPk (triangles) and — since
+    // D157 — MFEM's `H1_TetrahedronElement` (tets, via [`DofManager::build_tet_h1`]).
     // For prism/pyramid, dispatches to specialized builders.
 
     fn build_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
         let topo_dim = mesh.topological_dim() as usize;
         let p = order as usize;
-        // Prism/pyramid dispatch for general order
+        // Prism/pyramid/tet dispatch for general order
         if topo_dim == 3 && mesh.n_elements() > 0 {
             let npe = mesh.element_nodes(0).len();
             if npe == 6 { return Self::build_prism_h1(mesh, order); }
             if npe == 5 { return Self::build_pyramid_pk(mesh, order); }
+            if npe == 4 { return Self::build_tet_h1(mesh, order); }
         }
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
 
         assert!(p >= 1, "build_pk: order must be >= 1");
-        assert!(topo_dim == 2 || topo_dim == 3, "build_pk: only 2D and 3D elements supported");
+        assert!(
+            topo_dim == 2,
+            "build_pk: only 2-D triangles remain (3-D meshes dispatch to \
+             build_prism_h1/build_pyramid_pk/build_tet_h1)"
+        );
 
         // Entity DOF counts
         let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
-        let face_dofs_per = if topo_dim == 3 && p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
-        let volume_dofs_per = if topo_dim == 2 && p >= 3 {
-            (p - 1) * (p - 2) / 2
-        } else if topo_dim == 3 && p >= 4 {
-            (p - 1) * (p - 2) * (p - 3) / 6
-        } else { 0 };
+        let volume_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
 
-        let dofs_per_elem = if topo_dim == 2 {
-            (p + 1) * (p + 2) / 2
-        } else {
-            (p + 1) * (p + 2) * (p + 3) / 6
-        };
+        let dofs_per_elem = (p + 1) * (p + 2) / 2;
 
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
-        let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
+        // 2-D triangles have no (3-D) face entities; the field stays empty.
+        let face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
         let quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
-        if topo_dim == 2 {
+        {
             // ── 2-D triangles ────────────────────────────────────────────────
             // Local edge definitions matching TriPk:
             //   edge(0→1), edge(1→2), edge(0→2)
@@ -2203,67 +2205,6 @@ impl DofManager {
                     }
                 }
             }
-        } else {
-            // ── 3-D tetrahedra ──────────────────────────────────────────────
-            // Local edge definitions matching TetPk:
-            //   edge(0→1), edge(0→2), edge(0→3), edge(1→2), edge(1→3), edge(2→3)
-            // Local face definitions: (0,1,2), (0,1,3), (0,2,3), (1,2,3)
-            // Two-phase assignment (MFEM FiniteElementSpace::Construct): all
-            // vertex+edge DOFs, then all face DOFs, then all volume DOFs.
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                assert!(ns.len() >= 4, "build_pk 3D requires >= 4-noded elements");
-                let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
-                let base = e as usize * dofs_per_elem;
-
-                // Vertices (DOFs 0-3)
-                dofs_flat[base]     = n0;
-                dofs_flat[base + 1] = n1;
-                dofs_flat[base + 2] = n2;
-                dofs_flat[base + 3] = n3;
-
-                // 6 edges
-                if p >= 2 {
-                    let edges = [(n0, n1), (n0, n2), (n0, n3), (n1, n2), (n1, n3), (n2, n3)];
-                    let mut off = 4;
-                    for &(a, b) in &edges {
-                        let edge_dofs = get_edge_dofs_pk(a, b, &mut next_dof, &mut edge_pk_map, edge_dofs_per);
-                        for (k, &dof) in edge_dofs.iter().enumerate() {
-                            dofs_flat[base + off + k] = dof;
-                        }
-                        off += edge_dofs_per;
-                    }
-                }
-            }
-            // Phase 2: 4 face DOF groups (p >= 3), after ALL edge DOFs.
-            if p >= 3 {
-                for e in 0..n_elems as u32 {
-                    let ns = mesh.element_nodes(e);
-                    let (n0, n1, n2, n3) = (ns[0], ns[1], ns[2], ns[3]);
-                    let base = e as usize * dofs_per_elem;
-                    let faces = [(n0, n1, n2), (n0, n1, n3), (n0, n2, n3), (n1, n2, n3)];
-                    let mut off = 4 + 6 * edge_dofs_per;
-                    for &(a, b, c) in &faces {
-                        let face_dofs = get_face_dofs_pk(a, b, c, &mut next_dof, &mut face_pk_map, face_dofs_per);
-                        for (k, &dof) in face_dofs.iter().enumerate() {
-                            dofs_flat[base + off + k] = dof;
-                        }
-                        off += face_dofs_per;
-                    }
-                }
-            }
-            // Phase 3: volume interior DOFs (p >= 4), after ALL face DOFs.
-            if volume_dofs_per > 0 {
-                for e in 0..n_elems as u32 {
-                    let base = e as usize * dofs_per_elem;
-                    let mut off = 4 + 6 * edge_dofs_per + 4 * face_dofs_per;
-                    for _ in 0..volume_dofs_per {
-                        dofs_flat[base + off] = next_dof;
-                        next_dof += 1;
-                        off += 1;
-                    }
-                }
-            }
         }
 
         let n_dofs = next_dof as usize;
@@ -2282,10 +2223,8 @@ impl DofManager {
         // 2-D (triangles): the H1 assembly basis is H1TriPk (MFEM
         // GaussLobatto closed points), so DOF k sits at fraction gll[k+1]
         // from canonical-a to canonical-b (identical to equispaced for p<=2).
-        // 3-D (tets): the assembly basis is equispaced TetPk → fraction
-        // (k+1)/p.
         {
-            let gll_01: Vec<f64> = if topo_dim == 2 && p >= 3 {
+            let gll_01: Vec<f64> = if p >= 3 {
                 let (g, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
                 g.iter().map(|&x| 0.5 * (x + 1.0)).collect()
             } else {
@@ -2304,49 +2243,12 @@ impl DofManager {
             }
         }
 
-        // 3D face DOF coordinates: barycentric interpolation from 3 face vertices.
-        if topo_dim == 3 && !face_pk_map.is_empty() {
-            // Build face→node mapping from element connectivity.
-            let mut face_nodes_map: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                for &(a, b, c) in &[(ns[0],ns[1],ns[2]),(ns[0],ns[1],ns[3]),(ns[0],ns[2],ns[3]),(ns[1],ns[2],ns[3])] {
-                    face_nodes_map.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
-                }
-            }
-            for (key, dofs) in &face_pk_map {
-                let nodes = face_nodes_map[key];
-                let ca = mesh.node_coords(nodes[0]);
-                let cb = mesh.node_coords(nodes[1]);
-                let cc = mesh.node_coords(nodes[2]);
-                let n_face_dofs = dofs.len();
-                for (k, &dof_id) in dofs.iter().enumerate() {
-                    let base = dof_id as usize * dim;
-                    if n_face_dofs == 1 {
-                        for d in 0..3 {
-                            dof_coords[base + d] = (ca[d] + cb[d] + cc[d]) / 3.0;
-                        }
-                    } else {
-                        // Distribute DOFs along the face using barycentric-like spacing.
-                        let t = (k + 1) as f64 / (n_face_dofs + 1) as f64;
-                        for d in 0..3 {
-                            dof_coords[base + d] = (1.0 - t) * ca[d] + t * (cb[d] + cc[d]) / 2.0;
-                        }
-                    }
-                }
-            }
-        }
-
         // Volume/bubble DOF coordinates: use the H1 assembly reference element
-        // for accuracy (2-D triangles: H1TriPk Gauss-Lobatto nodes; 3-D tets:
-        // equispaced TetPk), matching the basis the assembler evaluates.
+        // for accuracy — 2-D triangles: H1TriPk Gauss-Lobatto nodes — matching
+        // the basis the assembler evaluates.
         if volume_dofs_per > 0 {
-            let ref_coords: Vec<Vec<f64>> = if topo_dim == 2 {
-                fem_element::lagrange::H1TriPk::new(order as usize).dof_coords()
-            } else {
-                use fem_element::lagrange::factory::TetPk;
-                TetPk::new(order as usize).dof_coords()
-            };
+            let ref_coords: Vec<Vec<f64>> =
+                fem_element::lagrange::H1TriPk::new(order as usize).dof_coords();
             // Volume DOFs in the reference element are the LAST volume_dofs_per entries.
             let vol_factory_start = dofs_per_elem - volume_dofs_per;
             let vol_start = n_nodes + edge_pk_map.len() * edge_dofs_per;
@@ -2356,28 +2258,19 @@ impl DofManager {
                 let c0 = mesh.node_coords(ns[0]);
                 let c1 = mesh.node_coords(ns[1]);
                 let c2 = mesh.node_coords(ns[2]);
-                let c3 = if dim >= 3 { mesh.node_coords(ns[3]) } else { &[] };
                 for k in 0..volume_dofs_per {
                     let dof_id = vol_start + e as usize * volume_dofs_per + k;
                     let base = dof_id * dim;
                     let rc = &ref_coords[vol_factory_start + k];
-                    if topo_dim == 2 {
-                        let lam0 = 1.0 - rc[0] - rc[1];
-                        for d in 0..dim {
-                            dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d] + rc[1] * c2[d];
-                        }
-                    } else {
-                        let lam0 = 1.0 - rc[0] - rc[1] - rc[2];
-                        for d in 0..dim {
-                            dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d]
-                                + rc[1] * c2[d] + rc[2] * c3[d];
-                        }
+                    let lam0 = 1.0 - rc[0] - rc[1];
+                    for d in 0..dim {
+                        dof_coords[base + d] = lam0 * c0[d] + rc[0] * c1[d] + rc[1] * c2[d];
                     }
                 }
             }
         }
 
-        let bubble_dof_start = n_nodes + edge_pk_map.len() * edge_dofs_per + face_pk_map.len() * face_dofs_per;
+        let bubble_dof_start = n_nodes + edge_pk_map.len() * edge_dofs_per;
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
@@ -2389,6 +2282,241 @@ impl DofManager {
             quad_face_pk_map,
             bubble_dof_start,
             n_volume_dofs: volume_dofs_per,
+            elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
+        }
+    }
+
+    /// D157: the tetrahedron H¹ DOF numbering of MFEM `H1_FECollection(p, 3)`
+    /// — `H1_TetrahedronElement`: the closed **Gauss-Lobatto** node lattice in
+    /// MFEM's **entity slot order**.
+    ///
+    /// Replaces the historical equispaced `factory::TetPk`-convention tet
+    /// builder inside [`DofManager::build_pk`].  The two coincide at `p ≤ 2`
+    /// (the closed GLL points of `p = 2` are the edge midpoints) and diverge
+    /// from `p = 3` (edge/face nodes at `0.2764…, 0.7236…` vs `1/3, 2/3`).
+    /// The old builder additionally enumerated the four face blocks in the
+    /// factory's face order `(0,1,2) (0,1,3) (0,2,3) (1,2,3)` and ignored the
+    /// face orientation of the neighbouring element; MFEM orders the blocks
+    /// `TET_FACES = {1,2,3} {0,3,2} {0,1,3} {0,2,1}`, enumerates each block in
+    /// `H1_TriangleElement`'s interior order over the face's own vertex order,
+    /// and transports shared-face DOFs through `TriDofOrd` — all of which the
+    /// barycentric label rotation below reproduces.
+    ///
+    /// Within one element the slots run `vertices (4) → edges (6·(p−1)) →
+    /// faces (4·(p−1)(p−2)/2) → interior ((p−1)(p−2)(p−3)/6)` — exactly the
+    /// order of [`fem_element::lagrange::factory::h1_tet_slot_labels`],
+    /// verified slot-for-slot against MFEM 4.10 (`tmp/a36_tet_h1_probe.cpp`:
+    /// `MakeCartesian3D(2,1,1)` / a 2-tet stack with an orientation-reversed
+    /// shared face / a single tet, `p = 2..4`).  Global DOF ids keep this
+    /// crate's two-phase creation order (all vertex+edge DOFs element-major,
+    /// then all face DOFs, then the element-private interior DOFs) — the same
+    /// convention the old builder and the triangle builder use.
+    fn build_tet_h1<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        use fem_element::lagrange::factory::{h1_tet_slot_labels, H1TetPk};
+
+        /// MFEM `Tetrahedron::edges` — the element-local edge list and, with
+        /// it, the enumeration order of the edge DOF blocks.
+        const TET_EDGES: [(usize, usize); 6] =
+            [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+        /// MFEM `TET_FACES`: face `f` omits local vertex `f`; the triple is
+        /// the face's own vertex order (one slot label per face dof is
+        /// `tri_labels[(i, j)]` over exactly this order).
+        const TET_FACE_VERTS: [[usize; 3]; 4] = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+
+        let p = order as usize;
+        assert!(p >= 1, "build_tet_h1: order must be >= 1");
+        assert_eq!(
+            mesh.topological_dim() as usize,
+            3,
+            "build_tet_h1 requires 3-D elements"
+        );
+        assert_eq!(mesh.dim() as usize, 3, "build_tet_h1 requires a 3-D mesh");
+        let dim = 3usize;
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+
+        // MFEM's entity slot labels: barycentric exponents `(λ1,λ2,λ3,λ4)`,
+        // `λi` the weight of local vertex `i−1`.
+        let labels = h1_tet_slot_labels(p);
+        let dofs_per_elem = labels.len();
+        let ne = p - 1;
+        let nt = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
+        let nb = if p >= 4 { (p - 1) * (p - 2) * (p - 3) / 6 } else { 0 };
+
+        // `H1_TriangleElement`'s interior slot labels `(λ0,λ1,λ2)` —
+        // (j-outer, i-inner) — the in-face enumeration of every tet face
+        // block, and the index basis of the canonical face DOF lists.
+        let tri_labels: Vec<[usize; 3]> = (1..p)
+            .flat_map(|j| (1..(p - j)).map(move |i| [p - i - j, i, j]))
+            .collect();
+        debug_assert_eq!(tri_labels.len(), nt);
+
+        // One classified slot per element slot.
+        enum Slot {
+            Vertex(usize),
+            Edge { e: usize, k: usize },
+            Face { f: usize, i: usize, j: usize },
+            Interior,
+        }
+        let mut slots: Vec<Slot> = Vec::with_capacity(dofs_per_elem);
+        for label in &labels {
+            let l = [label[0], label[1], label[2], label[3]];
+            slots.push(match l.iter().filter(|&&v| v == 0).count() {
+                3 => Slot::Vertex(l.iter().position(|&v| v != 0).unwrap()),
+                2 => {
+                    // The two nonzero entries, ascending local index (a, b):
+                    // the label runs (p−k, k) from a to b, so k = l[b] and the
+                    // in-edge position is k−1.
+                    let nz: Vec<usize> = (0..4).filter(|&i| l[i] != 0).collect();
+                    let (a, b) = (nz[0], nz[1]);
+                    let e = TET_EDGES
+                        .iter()
+                        .position(|&(x, y)| x == a && y == b)
+                        .expect("build_tet_h1: edge label not in TET_EDGES");
+                    Slot::Edge { e, k: l[b] - 1 }
+                }
+                1 => {
+                    let f = l.iter().position(|&v| v == 0).unwrap();
+                    let fv = TET_FACE_VERTS[f];
+                    Slot::Face { f, i: l[fv[1]], j: l[fv[2]] }
+                }
+                _ => Slot::Interior,
+            });
+        }
+
+        let mut edge_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+        // Face entities keep the dof list *and* the first-encountering vertex
+        // order that defines the list's orientation (the prism builder's
+        // convention).
+        let mut face_map: HashMap<FaceKey, (Vec<DofId>, [NodeId; 3])> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
+
+        // Phase 1: vertices and edges, element-major, slot order within one
+        // element — the same creation order the old builder (and MFEM's
+        // vertex/edge phase) used.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            assert!(ns.len() >= 4, "build_tet_h1 requires 4-noded elements");
+            let n4 = [ns[0], ns[1], ns[2], ns[3]];
+            let base = e as usize * dofs_per_elem;
+            for (s, slot) in slots.iter().enumerate() {
+                match slot {
+                    Slot::Vertex(v) => dofs_flat[base + s] = n4[*v],
+                    Slot::Edge { e: ei, k } => {
+                        let (la, lb) = (n4[TET_EDGES[*ei].0], n4[TET_EDGES[*ei].1]);
+                        let key = EdgeKey::new(la, lb);
+                        let list = edge_map.entry(key).or_insert_with(|| {
+                            (0..ne).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+                        });
+                        // `k` counts from the local first vertex; the map is
+                        // canonical (ascending vertex id).
+                        dofs_flat[base + s] =
+                            if la == key.0 { list[*k] } else { list[ne - 1 - *k] };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Phase 2: face DOFs, after ALL edge DOFs.  The face list is created
+        // once per canonical face, indexed by `tri_labels` over the first
+        // encounter's vertex order; each element's slot label is rotated from
+        // the local face orientation into that canonical one (MFEM
+        // `TriDofOrd`).
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let n4 = [ns[0], ns[1], ns[2], ns[3]];
+            let base = e as usize * dofs_per_elem;
+            for (s, slot) in slots.iter().enumerate() {
+                if let Slot::Face { f, i, j } = *slot {
+                    let fv = TET_FACE_VERTS[f];
+                    let (a, b, c) = (n4[fv[0]], n4[fv[1]], n4[fv[2]]);
+                    let key = FaceKey::new(a, b, c);
+                    let (list, canon) = {
+                        let entry = face_map.entry(key).or_insert_with(|| {
+                            let list: Vec<DofId> =
+                                (0..nt).map(|_| { let d = next_dof; next_dof += 1; d }).collect();
+                            (list, [a, b, c])
+                        });
+                        (entry.0.clone(), entry.1)
+                    };
+                    let local = [p - i - j, i, j];
+                    let local_verts = [a, b, c];
+                    let canon_label = [
+                        local[local_verts.iter().position(|&v| v == canon[0]).unwrap_or(0)],
+                        local[local_verts.iter().position(|&v| v == canon[1]).unwrap_or(0)],
+                        local[local_verts.iter().position(|&v| v == canon[2]).unwrap_or(0)],
+                    ];
+                    let ci = tri_labels
+                        .iter()
+                        .position(|l| *l == canon_label)
+                        .unwrap_or_else(|| {
+                            panic!("build_tet_h1: face dof label {canon_label:?} not in table")
+                        });
+                    dofs_flat[base + s] = list[ci];
+                }
+            }
+        }
+        // Phase 3: element-private interior DOFs, after ALL face DOFs.
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
+            for (s, slot) in slots.iter().enumerate() {
+                if matches!(slot, Slot::Interior) {
+                    dofs_flat[base + s] = next_dof;
+                    next_dof += 1;
+                }
+            }
+        }
+
+        let n_dofs = next_dof as usize;
+
+        // DOF coordinates: the linear tet map at `H1TetPk`'s (Gauss-Lobatto)
+        // reference points — the layout and the lattice move together, so the
+        // edge/face/interior dofs need no special case (the prism builder's
+        // rule).  Vertex DOFs keep the mesh table bit-for-bit.
+        let ref_coords = H1TetPk::new(p).dof_coords();
+        debug_assert_eq!(ref_coords.len(), dofs_per_elem);
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            let b = n as usize * dim;
+            dof_coords[b..b + dim].copy_from_slice(c);
+        }
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let c: [[f64; 3]; 4] = std::array::from_fn(|k| {
+                let x = mesh.node_coords(ns[k]);
+                [x[0], x[1], x[2]]
+            });
+            let base = e as usize * dofs_per_elem;
+            for (s, rc) in ref_coords.iter().enumerate() {
+                let did = dofs_flat[base + s] as usize;
+                if did < n_nodes {
+                    continue; // vertices already exact from the table
+                }
+                let b = did * dim;
+                let (x, y, z) = (rc[0], rc[1], rc[2]);
+                let lam0 = 1.0 - x - y - z;
+                for d in 0..dim {
+                    dof_coords[b + d] = lam0 * c[0][d] + x * c[1][d] + y * c[2][d] + z * c[3][d];
+                }
+            }
+        }
+
+        let bubble_dof_start = n_nodes + edge_map.len() * ne + face_map.len() * nt;
+        DofManager {
+            order, n_dofs, dofs_flat, dofs_per_elem,
+            elem_dof_offsets: None, dof_coords, dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map: HashMap::new(),
+            edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(),
+            edge_pk_map: edge_map,
+            face_pk_map: face_map.into_iter().map(|(k, (d, _))| (k, d)).collect(),
+            quad_face_pk_map: HashMap::new(),
+            bubble_dof_start,
+            n_volume_dofs: nb,
             elem_orders: None,
             edge_variants: HashMap::new(),
             face_variants: HashMap::new(),
@@ -2836,7 +2964,7 @@ impl DofManager {
     /// factory (slot-count mismatch) is skipped and keeps its fold-based
     /// coordinates.
     fn rebuild_dof_coords_periodic<M: MeshTopology>(&mut self, mesh: &M) {
-        use fem_element::lagrange::factory::{HexQk, QuadQk, TetPk};
+        use fem_element::lagrange::factory::{HexQk, H1TetPk, QuadQk};
         use fem_element::lagrange::{H1TriPk, PrismPk, PyramidPk};
 
         let dim = self.dim;
@@ -2860,9 +2988,14 @@ impl DofManager {
                         Box::new(H1TriPk::new(p)),
                         Box::new(H1TriPk::new(geom_order)),
                     ),
+                    // D157: the tet *field* slots follow `H1TetPk` (MFEM
+                    // entity order, Gauss-Lobatto lattice) and
+                    // `set_curvature_tet4` lays the geometry table out in the
+                    // same slots — the equispaced `factory::TetPk` disagrees
+                    // with both from p = 3 on.
                     (4, _) => (
-                        Box::new(TetPk::new(p)),
-                        Box::new(TetPk::new(geom_order)),
+                        Box::new(H1TetPk::new(p)),
+                        Box::new(H1TetPk::new(geom_order)),
                     ),
                     (6, _) => (
                         Box::new(PrismPk::new(p)),

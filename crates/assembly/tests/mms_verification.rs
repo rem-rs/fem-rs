@@ -151,7 +151,12 @@ fn f_elasticity_3d(x: &[f64]) -> [f64; 3] {
 }
 
 fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
-    use fem_element::lagrange::{TetP1, TetP2, TetP3};
+    // D157: at p >= 3 the space's basis is MFEM `H1_TetrahedronElement`
+    // (`H1TetPk`), not the fixed-order equispaced `TetP3` — the load vector
+    // and the L2 error below must integrate against the basis the dof table
+    // actually holds (MFEM-verified: probe tmp/a36_tet_h1_probe.cpp).
+    use fem_element::lagrange::{TetP1, TetP2};
+    use fem_element::lagrange::H1TetPk;
     let mesh = Mesh::<3>::unit_cube_tet(n);
     let space = VectorH1Space::new(mesh.clone(), order, 3);
     let n_scalar = space.n_scalar_dofs();
@@ -160,10 +165,10 @@ fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     let mut mat = Assembler::assemble_bilinear(&space, &[&elast], 2 * order + 1);
 
     let mut rhs = vec![0.0; space.n_dofs()];
-    let ref_elem: &dyn ReferenceElement = match order {
-        1 => &TetP1,
-        2 => &TetP2,
-        _ => &TetP3,
+    let ref_elem: Box<dyn ReferenceElement> = match order {
+        1 => Box::new(TetP1),
+        2 => Box::new(TetP2),
+        _ => Box::new(H1TetPk::new(order as usize)),
     };
     let quad = ref_elem.quadrature(2 * order + 1);
     let n_ldofs = ref_elem.n_dofs();
@@ -207,10 +212,10 @@ fn solve_elasticity_3d(n: usize, order: u8) -> f64 {
     let uh = dense_solve(&mat, &rhs);
 
     // L閾?error
-    let ref_elem_q: &dyn ReferenceElement = match order {
-        1 => &TetP1,
-        2 => &TetP2,
-        _ => &TetP3,
+    let ref_elem_q: Box<dyn ReferenceElement> = match order {
+        1 => Box::new(TetP1),
+        2 => Box::new(TetP2),
+        _ => Box::new(H1TetPk::new(order as usize)),
     };
     let quad_q = ref_elem_q.quadrature(2 * order + 2);
     let mut err_sq = 0.0;
@@ -2203,9 +2208,16 @@ fn f_h3d(x: &[f64]) -> f64 {
 }
 
 fn l2_err_tet(uh: &[f64], space: &H1Space<Mesh<3>>) -> f64 {
-    use fem_element::lagrange::{TetP1, TetP2, TetP3};
+    // D157: p >= 3 evaluates the MFEM `H1_TetrahedronElement` basis the space
+    // holds, not the fixed-order equispaced `TetP3`.
+    use fem_element::lagrange::{TetP1, TetP2};
+    use fem_element::lagrange::H1TetPk;
     let mesh = space.mesh(); let o = space.order();
-    let re: &dyn ReferenceElement = match o { 1 => &TetP1, 2 => &TetP2, _ => &TetP3 };
+    let re: Box<dyn ReferenceElement> = match o {
+        1 => Box::new(TetP1),
+        2 => Box::new(TetP2),
+        _ => Box::new(H1TetPk::new(o as usize)),
+    };
     let n = re.n_dofs(); let q = re.quadrature(2 * o + 2);
     let mut phi = vec![0.0; n]; let mut es = 0.0_f64;
     for e in mesh.elem_iter() {

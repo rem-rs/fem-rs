@@ -58,7 +58,7 @@ pub trait FluxRecovery {
 
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TriP1};
-    use fem_element::lagrange::factory::{TriPk, TetPk};
+    use fem_element::lagrange::factory::TriPk;
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
@@ -67,7 +67,10 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // D157: evaluated against `space.element_dofs` / `fe_order`, whose tet
+        // slots are MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order)
+        // since the field moved off the equispaced lattice.
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }

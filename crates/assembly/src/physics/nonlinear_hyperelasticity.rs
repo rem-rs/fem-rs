@@ -35,7 +35,7 @@ use nalgebra::linalg::SVD;
 use fem_element::{
     ReferenceElement,
     lagrange::{TriP1, TetP1, TetP2},
-    lagrange::factory::{TriPk, TetPk},
+    lagrange::factory::TriPk,
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -1020,7 +1020,9 @@ fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         (ElementType::Tri3, 3) => Box::new(TriPk::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // D157: the element pairs with the H¹ space's tet dof order —
+        // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order).
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         // Quadrilateral elements (straight-sided or curved via isoparametric mapping)
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),

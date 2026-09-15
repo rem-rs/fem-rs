@@ -4,7 +4,7 @@
 use nalgebra::DMatrix;
 
 use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TriP1};
-use fem_element::lagrange::factory::{TriPk, TetPk};
+use fem_element::lagrange::factory::TriPk;
 use fem_element::ReferenceElement;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
@@ -26,7 +26,10 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        // D157: evaluated against `space.element_dofs`, whose tet slots are
+        // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order) since the
+        // field moved off the equispaced lattice.
+        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
