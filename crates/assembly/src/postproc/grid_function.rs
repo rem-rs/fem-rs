@@ -32,7 +32,13 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
+        // D185: evaluated against `space.element_dofs` / the geometry-node
+        // table, whose tri slots are MFEM `H1_TriangleElement` (Gauss-Lobatto,
+        // entity order) from p = 3 on — the equispaced `factory::TriPk`
+        // agrees with it only at p ≤ 2.
+        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
+            Box::new(fem_element::lagrange::H1TriPk::new(3))
+        }
         // Quad4: order 0 (L² P0) is the constant element; orders 1+ use
         // QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the
         // assembler's reference element (assembler.rs::ref_elem_vol).  The
@@ -55,8 +61,17 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
             Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
         }
         (ElementType::Tet4, o) => Box::new(fem_element::lagrange::H1TetPk::new(o.max(1) as usize)),
+        // D185: like the Tet4 arm above, GLL at every order — the order-
+        // generic tri arm serves the **high-order geometry** readers in
+        // `compute_l2_error_owned`/`compute_h1_error_owned`
+        // (`geo_elem = ref_elem_vol(elem_type, g_order)` against
+        // `mesh.geometry_nodes`), and `set_curvature_tri3` lays those nodes
+        // out on `H1TriPk`'s Gauss-Lobatto lattice (D178; the 3-D surface
+        // variant shares the same lattice since D187), so the equispaced
+        // `factory::TriPk` misreads them from order 3 on.  p ≤ 2 is
+        // bit-identical either way.
         (ElementType::Tri3 | ElementType::Tri6, o) => {
-            Box::new(fem_element::lagrange::TriPk::new(o.max(1) as usize))
+            Box::new(fem_element::lagrange::H1TriPk::new(o.max(1) as usize))
         }
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
             Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))

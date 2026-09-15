@@ -434,7 +434,7 @@ fn patch_test_linear_p1() {
 
 // ─── 3D TetP1 / TetP2 Poisson tests ─────────────────────────────────────────
 
-use fem_element::lagrange::{TetP1, TetP2, TetP3};
+use fem_element::lagrange::{TetP1, TetP2};
 
 /// 3-D exact solution: u(x,y,z) = sin(πx) sin(πy) sin(πz),
 /// forcing: f = 3π² u.
@@ -450,7 +450,13 @@ fn l2_error_3d<M: MeshTopology>(uh: &[f64], space: &H1Space<M>, order: u8) -> f6
     let ref_elem: Box<dyn ReferenceElement> = match order {
         1 => Box::new(TetP1),
         2 => Box::new(TetP2),
-        3 => Box::new(TetP3),
+        // D157 follow-up (D201): since the tet H¹ dof table moved to MFEM
+        // `H1_TetrahedronElement` ([`H1TetPk`], Gauss-Lobatto, entity order),
+        // the evaluator must use the same element at p = 3 — the equispaced
+        // `TetP3` slots are *different functions* from p = 3 on (worst
+        // |ψ−φ| ≈ 8.8e-1, cf. tmp/d157 evidence), which measured a correct
+        // p = 3 solution at L2 error 5.5e-2 (rate 0.98).
+        3 => Box::new(fem_element::lagrange::H1TetPk::new(3)),
         _ => panic!("unsupported order"),
     };
     let mesh = space.mesh();

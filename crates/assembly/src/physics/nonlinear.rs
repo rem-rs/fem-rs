@@ -926,7 +926,11 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
         (ElementType::Tri3, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) => Box::new(TriPk::new(3)),
+        // D186: the displacement dof table is the H¹ space's — MFEM
+        // `H1_TriangleElement` (Gauss-Lobatto, entity order) from p = 3 on;
+        // the equispaced `factory::TriPk` agrees only at p ≤ 2 (tet twin
+        // fixed by D157).
+        (ElementType::Tri3, 3) => Box::new(fem_element::lagrange::H1TriPk::new(3)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         // D157: the element pairs with the H¹ space's tet dof order —

@@ -21,7 +21,13 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     match (elem_type, order) {
         (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
         (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
+        // D185: evaluated against `space.element_dofs` (and its dof coords,
+        // in `zz_estimator_nodal`), whose tri slots are MFEM
+        // `H1_TriangleElement` (Gauss-Lobatto, entity order) from p = 3 on —
+        // the equispaced `factory::TriPk` agrees with it only at p ≤ 2.
+        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
+            Box::new(fem_element::lagrange::H1TriPk::new(3))
+        }
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
         (ElementType::Tet4, 1) => Box::new(TetP1),
