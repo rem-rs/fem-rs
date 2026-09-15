@@ -65,9 +65,16 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriP1), // P0 handled elsewhere
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
+        // p = 2 stays on the equispaced `TriPk`: the two lattices coincide at
+        // p ≤ 2 (all six dof points identical, verified bit-for-bit in
+        // `d181_tri_h1_ref_elem.rs`).
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
-        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
+        // D181: MFEM `H1_TriangleElement` (Gauss-Lobatto, entity slot order) —
+        // matches the H¹ tri dof numbering (`DofManager::build_pk` /
+        // `assembler::ref_elem_vol_h1`); the equispaced `factory::TriPk` only
+        // agreed at p ≤ 2 (6/10 slots off at p = 3, 9/15 at p = 4).
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(fem_element::lagrange::H1TriPk::new(3)),
+        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(fem_element::lagrange::H1TriPk::new(4)),
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         // D157: MFEM `H1_TetrahedronElement` — matches the H¹ tet dof
@@ -111,6 +118,12 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     // `assembler::geo_ref_elem`.
     if matches!(et, ElementType::Tet4 | ElementType::Tet10) && g > 1 {
         return Some(Box::new(fem_element::lagrange::H1TetPk::new(g as usize)));
+    }
+    // Curved triangles: `set_curvature_tri3_2d` lays the geometry nodes on
+    // `H1TriPk`'s Gauss-Lobatto lattice (D178), so the equispaced factory
+    // element would misread them from p = 3 on (D181, same-family).
+    if matches!(et, ElementType::Tri3 | ElementType::Tri6) && g > 1 {
+        return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize)));
     }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
@@ -903,5 +916,61 @@ mod tests {
         // Just ensure BBar assembles without error in parallel build
         assert!(k_bbar.nrows > 0);
         assert!(k_std.nrows > 0);
+    }
+
+    /// D181: the tri arms pair with the H¹ tri space's `H1TriPk` (MFEM
+    /// `H1_TriangleElement`) from p = 3 on — the equispaced `factory::TriPk`
+    /// disagrees with it in 6/10 slots at p = 3 and 9/15 at p = 4.  p ≤ 2
+    /// stays on `TriPk`, which coincides with `H1TriPk` bit-for-bit there
+    /// (pinned below so the "old callers keep bit-identical numbers" contract
+    /// is explicit).
+    #[test]
+    fn d181_bbar_tri_ref_elem_matches_h1tripk() {
+        let coords_bit_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.len() == y.len()
+                        && x.iter().zip(y.iter()).all(|(u, v)| u.to_bits() == v.to_bits())
+                })
+        };
+        for p in 1..=4usize {
+            let e = ref_elem_vol(ElementType::Tri3, p as u8);
+            let g = fem_element::lagrange::H1TriPk::new(p);
+            assert!(
+                coords_bit_eq(&e.dof_coords(), &g.dof_coords()),
+                "p={p}: bbar tri ref elem must equal H1TriPk"
+            );
+        }
+        // p ≤ 2 pin: the arms are unchanged (bit-identical to the equispaced
+        // element that has always served these orders).
+        for p in [1usize, 2usize] {
+            let e = ref_elem_vol(ElementType::Tri6, p as u8);
+            assert!(coords_bit_eq(
+                &e.dof_coords(),
+                &TriPk::new(p).dof_coords()
+            ));
+        }
+    }
+
+    /// D181 (geometry side): curved tri geometry nodes are laid out by
+    /// `set_curvature_tri3_2d` on `H1TriPk`'s Gauss-Lobatto lattice (D178), so
+    /// `geo_ref_elem` must read them with `H1TriPk` — same reasoning as the
+    /// tet arm above it (D157).
+    #[test]
+    fn d181_bbar_curved_tri_geom_elem_is_h1tripk() {
+        let mut mesh = Mesh::<2>::unit_square_tri(1);
+        mesh.set_curvature(3);
+        let geo = geo_ref_elem(&mesh, 0).expect("curved tri must yield a geometry element");
+        let g = fem_element::lagrange::H1TriPk::new(3);
+        assert_eq!(geo.n_dofs(), g.n_dofs());
+        assert_eq!(mesh.geometry_nodes(0).len(), g.n_dofs());
+        let coords_bit_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.len() == y.len()
+                        && x.iter().zip(y.iter()).all(|(u, v)| u.to_bits() == v.to_bits())
+                })
+        };
+        assert!(coords_bit_eq(&geo.dof_coords(), &g.dof_coords()));
     }
 }

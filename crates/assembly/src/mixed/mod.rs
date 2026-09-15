@@ -1300,7 +1300,10 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// [`MixedAssembler::assemble_bilinear`]).
 ///
 /// The low orders keep the historical fixed-order elements, so existing
-/// callers keep bit-identical results.  Orders ≥ 4 are delegated to the
+/// callers keep bit-identical results — except the tri order-3 entry, which
+/// moved to `H1TriPk` under D181 (the equispaced `TriPk` agreed with the tri
+/// H¹ space's `H1TriPk` table only at p ≤ 2, exactly like the tet entry that
+/// D157 already moved).  Orders ≥ 4 are delegated to the
 /// order-generic elements of [`fem_element::lagrange`] — the same table as
 /// `assembler::ref_elem_vol_h1`, i.e. MFEM `H1_FECollection` semantics
 /// (Gauss-Lobatto nodes, DOFs ordered vertices → edges → interior):
@@ -1338,8 +1341,16 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Hex8 | ElementType::Hex20, 0) => Box::new(P0),
         // ── Historical fixed-order entries (bit-identical for old callers) ──
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
+        // p = 2 stays on the equispaced `TriPk`: the two lattices coincide at
+        // p ≤ 2 (all six dof points identical, verified bit-for-bit in
+        // `d181_tri_h1_ref_elem.rs`), so old callers keep bit-identical
+        // numbers.
         (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
+        // D181: MFEM `H1_TriangleElement` (Gauss-Lobatto, entity slot order),
+        // matching `assembler::ref_elem_vol_h1` and `fem_space`'s tri DOF
+        // numbering — the equispaced `factory::TriPk` disagrees with both from
+        // p = 3 on (6/10 slots at p = 3, worst position delta 3.90e-1).
+        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(H1TriPk::new(3)),
         (ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetP1),
         (ElementType::Tet4 | ElementType::Tet10, 2) => Box::new(TetP2),
         // D157: MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity slot
