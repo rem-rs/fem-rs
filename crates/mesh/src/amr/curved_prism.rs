@@ -428,8 +428,11 @@ pub(crate) fn build_refined_prism_geometry(
     debug_assert_eq!(fine.n_elems(), fine_parent.len());
 
     // Gauss-Lobatto points on [0,1] — the 1-D lattice the classification is
-    // expressed in (same points `PrismPk` places its layers/edges on).
+    // expressed in (same points `PrismPk` places its layers/edges on); only
+    // the debug ground check below needs them.
+    #[cfg(debug_assertions)]
     let (g, _w) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
+    #[cfg(debug_assertions)]
     let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
 
     // The child's dof positions in its own reference wedge (`PrismPk`

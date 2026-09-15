@@ -1389,9 +1389,21 @@ vertex_parents: vec![],
         // meshes and *wrong* for curved ones (new vertex coordinates are the
         // exact geometry-dof picks, not recomputable averages).
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {}
-        // Tet/Pyramid meshes have linear vertex coordinates (only the Hex8 and
-        // Prism6 kernels carry curved geometry), so the coordinate-keyed
-        // rebuild is exact.
+        // Tet4/Tet10: `refine_nonconforming_3d` rebuilt the boundary faces
+        // itself (topologically, from its own midpoint map — in MFEM's
+        // `new_boundary` order wherever the curved-uniform gate switched it
+        // on).  A curved mesh must not run the coordinate-keyed rebuild again
+        // (its new vertices carry geometry-pick coordinates no average can
+        // reproduce); a straight-sided mesh keeps the historical second pass
+        // whose MFEM-template output the straight regression outputs pin.
+        ElementType::Tet4 | ElementType::Tet10 => {
+            if mesh.geometry.is_none() {
+                rebuild_3d_boundary(&mut result, mesh, None);
+            }
+        }
+        // Pyramid meshes have linear vertex coordinates (only the Hex8,
+        // Prism6 and Tet4 kernels carry curved geometry), so the
+        // coordinate-keyed rebuild is exact.
         //
         // Prism6: a *curved* mesh's new vertices are geometry-dof picks — no
         // coordinate lookup can find them — so the refinement's own topological
@@ -1428,6 +1440,16 @@ pub fn tet_select_rt_debug(mesh: &Mesh<3>, ns: &[NodeId]) -> usize {
         j[t][1] = v2[t] - v0[t];
         j[t][2] = v3[t] - v0[t];
     }
+    tet_select_rt_from_j(&j)
+}
+
+/// The `rt_algo = 1` best-aspect-ratio refinement-type selection over a
+/// ready-made element Jacobian `J[t][s]` (physical axis `t`, reference axis
+/// `s`) at the reference-tet center — the form MFEM's
+/// `UniformRefinement3D_base` tet branch consumes, so a *curved* mesh feeds
+/// the isoparametric (nodes-based) Jacobian and a straight one the
+/// vertex-difference Jacobian.
+fn tet_select_rt_from_j(j: &[[f64; 3]; 3]) -> usize {
     // Em: cols 0-2 = 0.5*J, cols 3-5 = 0.5*(J_i + J_j).
     let mut em = [[0.0_f64; 6]; 3];
     for t in 0..3 {
@@ -1683,6 +1705,15 @@ fn mark_edge_tri(n: &mut [u32; 3], len: impl Fn(u32, u32) -> usize) {
 ///
 /// All element types contribute to and use the same edge midpoint map,
 /// ensuring conforming interfaces between different element types.
+///
+/// Refinement of a **mixed** 3-D mesh never sees curved geometry today: no
+/// code path can build a curved mixed Tet4/Hex8/Prism6 mesh (`set_curvature`
+/// refuses mixed meshes; the reader reads mixed meshes straight-sided —
+/// io D112c — because no single `nodes` numbering describes a mixed mesh), so
+/// `refine_mixed_3d` keeps its `geometry: None` (unreachable for curved
+/// parents), matching `refine_uniform_2d_mixed`.  The curved tet kernel
+/// (`refine_nonconforming_3d_internal`) is the pure-tet analogue of this
+/// function and does carry geometry.
 fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let n_elems = mesh.n_elems();
     let mut coords = mesh.coords.clone();
@@ -2227,6 +2258,77 @@ pub(crate) fn local_faces_prism_quad() -> [[usize; 4]; 3] {
     ]
 }
 
+/// MFEM `UniformRefinement3D_base`'s new-vertex id assignment for a pure-tet
+/// mesh (`mesh/mesh.cpp`, `case Element::TETRAHEDRON`): the fine `vertices`
+/// array is laid out as
+///
+/// ```text
+///   0 .. NV-1        unchanged coarse vertices
+///   NV .. NV+NE-1    midpoint of global edge E   (`oedge + e2v[E]`)
+/// ```
+///
+/// — a tet refinement creates **no** face centers and **no** body centers.
+/// Unlike the hex/wedge splits, the global edge ids are *not* the first-touch
+/// ids of `GetElementToEdgeTable`: `UniformRefinement3D_base` re-maps them
+/// through `e2v`, built by walking the `GetVertexToVertexTable` rows (each row
+/// `i` holds the edges from vertex `i` to a larger vertex) and sorting every
+/// row by its end-vertex id, so the midpoint of the edge `(i, j)`, `i < j`,
+/// lands at `oedge +` the edge's rank in the lexicographic `(i, j)` order.
+/// (Both id tables number their edges by the same element × local-edge
+/// first-touch, so the `e2v` map is defined on the ids the refinement's
+/// midpoint map carries.)
+///
+/// The child tetrahedra reference the new vertices through these ids, and
+/// MFEM's `Mesh::UniformRefinement` ends with `UpdateNodes` →
+/// `SetVerticesFromNodes`, which overwrites the *values* (the averaged
+/// coordinates) with the refined `nodes` dofs but keeps this numbering — so a
+/// refined curved mesh written to a file carries these ids in its
+/// `vertices`/`elements`/`boundary` sections.
+struct MfemTetRefineIds {
+    /// First-touch global edge id → refined vertex id (`oedge + e2v[E]`).
+    mid: HashMap<(NodeId, NodeId), NodeId>,
+    /// Dense fine vertex count: `NV + NE` (every mesh edge gains one vertex).
+    total_vertices: usize,
+}
+
+impl MfemTetRefineIds {
+    fn build(mesh: &Mesh<3>) -> Self {
+        // First-touch global edge ids: element × local-edge order (MFEM's
+        // `GetVertexToVertexTable` / `GetElementToEdgeTable` numbering).
+        let mut index: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+        let mut seq: Vec<(NodeId, NodeId)> = Vec::new();
+        for e in 0..mesh.n_elems() as ElemId {
+            let ns = mesh.elem_nodes(e);
+            for (a, b) in local_edges_tet() {
+                let k = edge_key(ns[a], ns[b]);
+                if index.insert(k, seq.len()).is_none() {
+                    seq.push(k);
+                }
+            }
+        }
+        // `J_v2v`: per row (the edge's smaller vertex), then `std::sort` by
+        // end-vertex id; `e2v[E]` = the edge's position in the walk.  Each
+        // end-vertex id appears once per row, so the sort is deterministic.
+        let mut rows: Vec<Vec<(NodeId, usize)>> = vec![Vec::new(); mesh.n_nodes()];
+        for (eid, &(i, j)) in seq.iter().enumerate() {
+            rows[i as usize].push((j, eid));
+        }
+        let oedge = mesh.n_nodes() as u32;
+        let mut mid = HashMap::with_capacity(seq.len());
+        let mut pos = 0usize;
+        for row in &mut rows {
+            row.sort_unstable_by_key(|&(j, _)| j);
+            for (_, eid) in row.iter() {
+                let k = seq[*eid];
+                mid.insert(k, oedge as NodeId + pos as NodeId);
+                pos += 1;
+            }
+        }
+        debug_assert_eq!(mid.len(), seq.len());
+        MfemTetRefineIds { mid, total_vertices: mesh.n_nodes() + seq.len() }
+    }
+}
+
 /// Perform non-conforming red refinement on a 3-D Tet4 mesh.
 ///
 /// Refines only marked elements; unrefined neighbors create hanging face constraints.
@@ -2274,6 +2376,31 @@ fn refine_nonconforming_3d_internal(
     let marked_set: std::collections::HashSet<ElemId> = marked.iter().copied().collect();
     let n_elems = mesh.n_elems();
 
+    // Curved (order-p, p >= 2) tet geometry: new vertices must take the
+    // geometry-dof values (MFEM UniformRefinement → UpdateNodes →
+    // SetVerticesFromNodes), not straight averages (see amr::curved_tet).
+    let geo = super::curved_tet::TetPkGeometry::new(mesh);
+    // MFEM's canonical new-vertex numbering (`oedge + e2v[E]`, see
+    // `MfemTetRefineIds`).  Reproduced where a written file pins it down — a
+    // *curved* mesh under *uniform* refinement keeps its `nodes` table, so the
+    // refined file carries these ids in every section.  Straight-sided meshes
+    // keep the historical first-touch numbering (the straight-refinement
+    // regression outputs pin it), and partial refinement would leave holes in
+    // the dense id space, so neither switches.
+    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+        Some(MfemTetRefineIds::build(mesh))
+    } else {
+        None
+    };
+    let mut new_coords: Vec<f64> = mesh.coords.clone();
+    if let Some(ids) = &mfem_ids {
+        // Dense id space: every coarse edge gains exactly one vertex (all
+        // elements are marked, and the tet split creates no other vertices),
+        // so grow the coordinate array to its final length up front; the
+        // allocation below fills every slot.
+        new_coords.resize(ids.total_vertices * 3, 0.0);
+    }
+
     // ── 1. Build face → adjacent element list (for Tet4, each element has 4 faces) ──
     let mut face_elems: HashMap<(NodeId, NodeId, NodeId), Vec<ElemId>> = HashMap::new();
 
@@ -2288,27 +2415,40 @@ fn refine_nonconforming_3d_internal(
     }
     // ── 2. Create midpoint nodes for marked elements ───────────────────────────
     let mut edge_midpoint_map: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();
-    let mut new_coords: Vec<f64> = mesh.coords.clone();
     let mut next_node = mesh.n_nodes() as NodeId;
 
     for &e in marked {
         let ns = mesh.elem_nodes(e);
 
         // Create edge midpoints
-        for (i, j) in local_edges_tet() {
-            let key = edge_key(ns[i], ns[j]);
+        for (li, (i, j)) in local_edges_tet().iter().enumerate() {
+            let key = edge_key(ns[*i], ns[*j]);
             edge_midpoint_map.entry(key).or_insert_with(|| {
                 if let Some(prev) = active_midpoints.and_then(|m| m.get(&key)) {
                     *prev
                 } else {
-                    let xa = mesh.coords_of(ns[i]);
-                    let xb = mesh.coords_of(ns[j]);
-                    new_coords.push(0.5 * (xa[0] + xb[0]));
-                    new_coords.push(0.5 * (xa[1] + xb[1]));
-                    new_coords.push(0.5 * (xa[2] + xb[2]));
-                    let id = next_node;
-                    next_node += 1;
-                    id
+                    let xyz = match &geo {
+                        Some(g) => g.edge_pick(e, li),
+                        None => {
+                            let xa = mesh.coords_of(ns[*i]);
+                            let xb = mesh.coords_of(ns[*j]);
+                            [0.5 * (xa[0] + xb[0]), 0.5 * (xa[1] + xb[1]), 0.5 * (xa[2] + xb[2])]
+                        }
+                    };
+                    match &mfem_ids {
+                        // MFEM `AverageVertices(vv, 2, oedge + e2v[e[ei]])`.
+                        Some(ids) => {
+                            let id = ids.mid[&key];
+                            new_coords[3 * id as usize..3 * id as usize + 3].copy_from_slice(&xyz);
+                            id
+                        }
+                        None => {
+                            new_coords.extend_from_slice(&xyz);
+                            let id = next_node;
+                            next_node += 1;
+                            id
+                        }
+                    }
                 }
             });
         }
@@ -2317,6 +2457,12 @@ fn refine_nonconforming_3d_internal(
     // ── 3. Build new element connectivity ─────────────────────────────────────
     let mut new_conn: Vec<NodeId> = Vec::new();
     let mut new_tags: Vec<i32> = Vec::new();
+    // Fine element → (parent element, embedding matrix) map for the refined
+    // high-order geometry (super::curved_tet::IDENTITY = copied element).  The
+    // historical fem-rs child order — corner 0..3, then the four interior
+    // children of type `rt` — *is* MFEM's emission order, so the matrix
+    // indices are `0..4` and `4·(rt+1)+k` regardless of the id gate.
+    let mut fine_parent = Vec::<(ElemId, u8)>::with_capacity(n_elems * 8);
 
     for e in 0..n_elems as ElemId {
         let ns = mesh.elem_nodes(e);
@@ -2333,19 +2479,52 @@ fn refine_nonconforming_3d_internal(
             let m13 = *edge_midpoint_map.get(&edge_key(n1, n3)).unwrap();
             let m23 = *edge_midpoint_map.get(&edge_key(n2, n3)).unwrap();
 
-            // 4 corner tets.
-            new_conn.extend_from_slice(&[n0, m01, m02, m03]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[n1, m01, m12, m13]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[n2, m02, m12, m23]); new_tags.push(tag);
-            new_conn.extend_from_slice(&[n3, m03, m13, m23]); new_tags.push(tag);
+            // 4 corner tets (MFEM embedding matrices 0..4).
+            fine_parent.extend((0..4u8).map(|k| (e, k)));
+            if geo.is_some() {
+                // MFEM `UniformRefinement3D_base`: the coarse vertex sits at
+                // the child's *own* reference vertex (slot 0 of child 1..3
+                // holds the child's first edge midpoint), which makes every
+                // child positively oriented.  The historical fem-rs order
+                // below is a mirrored copy of the same children (vertex first
+                // — a 0↔1 transposition), kept for straight-sided meshes
+                // whose regression outputs pin it; a curved mesh must emit
+                // MFEM's order because the refined geometry's per-child
+                // evaluation (`build_refined_tet_geometry`'s `child_map`)
+                // reads the children in MFEM's slot semantics.
+                new_conn.extend_from_slice(&[n0, m01, m02, m03]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m01, n1, m12, m13]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m02, m12, n2, m23]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[m03, m13, m23, n3]); new_tags.push(tag);
+            } else {
+                new_conn.extend_from_slice(&[n0, m01, m02, m03]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[n1, m01, m12, m13]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[n2, m02, m12, m23]); new_tags.push(tag);
+                new_conn.extend_from_slice(&[n3, m03, m13, m23]); new_tags.push(tag);
+            }
 
             // 4 tets splitting the central octahedron.  MFEM
             // UniformRefinement3D_base (mesh.cpp) chooses the octahedron
             // diagonal by the best-aspect-ratio refinement type `rt`
-            // (rt_algo = 1); the fixed split used here previously produced a
-            // different refinement pattern than MFEM for tets whose longest
-            // edge is not (v0,v1) on the octahedron.
-            let rt = tet_select_rt_debug(mesh, &[n0, n1, n2, n3]);
+            // (rt_algo = 1) evaluated at the *element transformation's*
+            // Jacobian at the reference-tet center (0.25, 0.25, 0.25) — for a
+            // curved mesh that is the nodes-based isoparametric Jacobian, not
+            // the straight one spanned by the vertices
+            // (`tet_select_rt_debug`).
+            let rt = match &geo {
+                Some(_) => {
+                    let (j, _, _) =
+                        mesh.element_jacobian(e, &crate::amr::curved_tet::TET_CENTER);
+                    let j: [[f64; 3]; 3] = [
+                        [j[(0, 0)], j[(0, 1)], j[(0, 2)]],
+                        [j[(1, 0)], j[(1, 1)], j[(1, 2)]],
+                        [j[(2, 0)], j[(2, 1)], j[(2, 2)]],
+                    ];
+                    tet_select_rt_from_j(&j)
+                }
+                None => tet_select_rt_debug(mesh, &[n0, n1, n2, n3]),
+            };
+            fine_parent.extend((0..4u8).map(|k| (e, 4 * (rt as u8 + 1) + k)));
             let e = [m01, m02, m03, m12, m13, m23];
             let mv: [[usize; 4]; 4] = match rt {
                 0 => [[0, 5, 1, 2], [0, 5, 2, 4], [0, 5, 4, 3], [0, 5, 3, 1]],
@@ -2363,6 +2542,7 @@ fn refine_nonconforming_3d_internal(
                 new_conn.push(ns[k]);
             }
             new_tags.push(tag);
+            fine_parent.push((e, super::curved_tet::IDENTITY));
         }
     }
 
@@ -2484,21 +2664,31 @@ fn refine_nonconforming_3d_internal(
         let mac = edge_midpoint_map.get(&edge_key(a, c)).copied();
 
         if let (Some(mab), Some(mbc), Some(mac)) = (mab, mbc, mac) {
-            new_face_conn.extend_from_slice(&[a, mab, mac]);
-            new_face_tags.push(tag);
-            new_face_conn.extend_from_slice(&[b, mbc, mab]);
-            new_face_tags.push(tag);
-            new_face_conn.extend_from_slice(&[c, mac, mbc]);
-            new_face_tags.push(tag);
-            new_face_conn.extend_from_slice(&[mab, mbc, mac]);
-            new_face_tags.push(tag);
+            if geo.is_some() {
+                // MFEM `UniformRefinement3D_base` new_boundary: corner 0,
+                // center, corner 1, corner 2 (the center child with MFEM's
+                // rotated node order).
+                new_face_conn.extend_from_slice(&[a, mab, mac]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mbc, mac, mab]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mab, b, mbc]); new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mac, mbc, c]); new_face_tags.push(tag);
+            } else {
+                new_face_conn.extend_from_slice(&[a, mab, mac]);
+                new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[b, mbc, mab]);
+                new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[c, mac, mbc]);
+                new_face_tags.push(tag);
+                new_face_conn.extend_from_slice(&[mab, mbc, mac]);
+                new_face_tags.push(tag);
+            }
         } else {
             new_face_conn.extend_from_slice(&[a, b, c]);
             new_face_tags.push(tag);
         }
     }
 
-    let new_mesh = Mesh::uniform(
+    let mut new_mesh = Mesh::uniform(
         new_coords,
         new_conn,
         new_tags,
@@ -2507,6 +2697,10 @@ fn refine_nonconforming_3d_internal(
         new_face_tags,
         ElementType::Tri3,
     );
+    if geo.is_some() {
+        new_mesh.geometry =
+            super::curved_tet::build_refined_tet_geometry(mesh, &new_mesh, &fine_parent);
+    }
 
     (
         new_mesh,

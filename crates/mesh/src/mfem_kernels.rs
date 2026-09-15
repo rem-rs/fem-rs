@@ -27,14 +27,23 @@ fn get_scaling_factor(d_max: f64) -> f64 {
 
 /// `internal::Eigenvalues2S` (kernels.hpp): one Jacobi rotation on the 2×2
 /// symmetric block [[d1, d12], [d12, d2]].
+///
+/// Round 36 (D173 follow-up): `t` used to be computed as
+/// `d12 * zeta.copysign(w)` — Rust's `f64::copysign(self, sign)` takes the
+/// sign from the *second* argument, so this evaluated to `|zeta|` with the
+/// sign of `w` instead of MFEM's `copysign(w, zeta)` (`w` with the sign of
+/// `zeta`).  Whenever the reduction fell through to the Householder path
+/// (`|R/Q^{3/2}| > 0.9` — never the case for the straight-mesh fixtures, but
+/// routine for curved tets, e.g. escher-p3 element 17) that wrong `t`
+/// collapsed the two eigenvalues to `(d1+d2)/2` and returned a wrong σ₁/σ₂.
 fn eigenvalues2s(d12: &mut f64, d1: &mut f64, d2: &mut f64) {
     let sqrt_1_eps = (1.0 / f64::EPSILON).sqrt();
     if *d12 != 0.0 {
         let zeta = (*d2 - *d1) / (2.0 * *d12);
         let t = if zeta.abs() < sqrt_1_eps {
-            *d12 * zeta.copysign(1.0 / (zeta.abs() + (1.0 + zeta * zeta).sqrt()))
+            *d12 * (1.0 / (zeta.abs() + (1.0 + zeta * zeta).sqrt())).copysign(zeta)
         } else {
-            *d12 * zeta.copysign(0.5 / zeta.abs())
+            *d12 * (0.5 / zeta.abs()).copysign(zeta)
         };
         *d1 -= t;
         *d2 += t;
@@ -709,5 +718,29 @@ mod tests {
         assert!(kappas[1] > kappas[0], "rt1 kappa {:.17e} should exceed rt0 {:.17e}", kappas[1], kappas[0]);
         assert!((kappas[0] - 2.0).abs() < 1e-14);
         assert!((kappas[2] - 2.0).abs() < 1e-14);
+    }
+
+    /// Round 36 (D173 follow-up): the `Eigenvalues2S` `copysign` swap.  This
+    /// matrix is the second rt=2 aspect-ratio candidate of curved
+    /// `escher-p3.mesh` element 17 — its `R/Q^{3/2} = -0.981` drives the
+    /// kernel down the Householder path, where the wrong `t` collapsed σ₁/σ₂
+    /// to 0.3532/0.3532 and flipped the refinement type.  Ground truth is
+    /// MFEM 4.10 `kernels::CalcSingularvalue<3>` itself
+    /// (`tmp/round36_tet/sv_probe.cpp`, %.17g output).
+    #[test]
+    fn eigenvalues2s_householder_path_matches_mfem() {
+        let data: [f64; 9] = [
+            -0.3392643406249993, 0.06452509374999961, 0.23340675796874988,
+            0.24979770980695998, 0.08220654130224525, 0.5486591752987372,
+            0.1867362305139845, 0.633268070118553, 0.6680215766655045,
+        ];
+        let want = [1.0847167785400411, 0.40494489688436308, 0.29238165683872447];
+        for (i, &w) in want.iter().enumerate() {
+            let got = calc_singularvalue_3(&data, i);
+            assert!(
+                (got - w).abs() <= 1e-14 * w.abs().max(1.0),
+                "sigma{i}: got {got:.17e}, want {w:.17e}"
+            );
+        }
     }
 }

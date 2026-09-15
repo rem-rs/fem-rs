@@ -6,6 +6,7 @@ mod bisect;
 mod curved_hex;
 mod curved_prism;
 mod curved_quad;
+mod curved_tet;
 mod curved_tri;
 mod p_refine;
 mod refine_2d;
