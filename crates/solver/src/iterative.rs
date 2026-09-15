@@ -57,45 +57,70 @@ pub fn fmt_g(x: f64) -> String {
 
 /// Trailer gates of MFEM's `CGSolver::Mult` (`linalg/solvers.cpp`), mapped from
 /// the fem-rs print scale onto `IterativeSolver::PrintLevel`'s flags
-/// (`IterativeSolver::FromLegacyPrintLevel`):
+/// (`IterativeSolver::FromLegacyPrintLevel`, `linalg/solvers.cpp:119`):
 ///
-/// | fem-rs `PrintLevel`    | MFEM legacy | warnings | iterations | summary |
-/// |------------------------|-------------|----------|------------|---------|
-/// | `Silent`               | -1          | no       | no         | no      |
-/// | `Summary`              | 2           | yes      | no         | yes     |
-/// | `Iterations` / `Debug` | 1           | yes      | yes        | no      |
+/// | fem-rs `PrintLevel`  | MFEM legacy | warnings | iterations | summary | first_and_last |
+/// |----------------------|-------------|----------|------------|---------|----------------|
+/// | `Silent`             | -1          | no       | no         | no      | no             |
+/// | `WarningsOnly`       | 0           | yes      | no         | no      | no             |
+/// | `Iterations` / `Debug` | 1         | yes      | yes        | no      | no             |
+/// | `Summary`            | 2           | yes      | no         | yes     | no             |
+/// | `FirstAndLast`       | 3           | yes      | no         | no      | yes            |
 ///
-/// The trailer itself is:
+/// The trailer itself is (shared by all MFEM 4.10 `IterativeSolver`s):
 /// ```text
 /// PCG: Number of iterations: <final_iter>      if summary || (warnings && !converged)
-/// Average reduction factor = <arf>             if summary || iterations
+/// Average reduction factor = <arf>             if summary || iterations || first_and_last
 /// PCG: No convergence!                         if warnings && !converged
 /// ```
 /// Besides the trailer, the gates drive the MFEM body branches: the
-/// iteration-0/iteration-i lines (`print_options.iterations`), the indefinite
-/// preconditioner warning (`print_options.warnings`, solvers.cpp:908/:974) and
-/// the indefinite operator warning (`print_options.warnings` and a nonzero
-/// search direction, solvers.cpp:937/:1016).  Early stops at iteration 0
-/// (`nom < 0`, `nom <= r0`, `(Ad, d) == 0`) return WITHOUT the trailer.
-///
-/// MFEM legacy print levels 0 and 3 (`first_and_last`) have no fem-rs
-/// `PrintLevel` counterpart — see debt D199.
+/// iteration-0/iteration-i lines (`print_options.iterations`, or
+/// `iterations || first_and_last` for the iteration-0 line which then carries a
+/// `" ..."` suffix), the final `first_and_last && !iterations` iteration line
+/// before the trailer, the indefinite preconditioner warning
+/// (`print_options.warnings`, solvers.cpp:908/:974) and the indefinite operator
+/// warning (`print_options.warnings` and a nonzero search direction,
+/// solvers.cpp:937/:1016).  Early stops at iteration 0 (`nom < 0`,
+/// `nom <= r0`, `(Ad, d) == 0`) return WITHOUT the trailer.
 #[derive(Clone, Copy)]
 struct CgTrailerGates {
     warnings: bool,
     iterations: bool,
     summary: bool,
+    first_and_last: bool,
 }
 
 impl CgTrailerGates {
     fn from_config(cfg: &SolverConfig) -> Self {
         match cfg.effective_print_level() {
-            PrintLevel::Silent => Self { warnings: false, iterations: false, summary: false },
-            PrintLevel::Summary => Self { warnings: true, iterations: false, summary: true },
+            PrintLevel::Silent => {
+                Self { warnings: false, iterations: false, summary: false, first_and_last: false }
+            }
+            PrintLevel::WarningsOnly => {
+                Self { warnings: true, iterations: false, summary: false, first_and_last: false }
+            }
+            PrintLevel::Summary => {
+                Self { warnings: true, iterations: false, summary: true, first_and_last: false }
+            }
             PrintLevel::Iterations | PrintLevel::Debug => {
-                Self { warnings: true, iterations: true, summary: false }
+                Self { warnings: true, iterations: true, summary: false, first_and_last: false }
+            }
+            PrintLevel::FirstAndLast => {
+                Self { warnings: true, iterations: false, summary: false, first_and_last: true }
             }
         }
+    }
+
+    /// `print_options.iterations || print_options.first_and_last` — the gate of
+    /// the iteration-0 line (solvers.cpp:897/:1910/:1230).
+    fn first_line(&self) -> bool {
+        self.iterations || self.first_and_last
+    }
+
+    /// The iteration-0 line suffix: MFEM appends `" ..."` when the run is in
+    /// first_and_last mode (solvers.cpp:900/:1913/:1233).
+    fn first_line_suffix(&self) -> &'static str {
+        if self.first_and_last { " ..." } else { "" }
     }
 
     /// `print_options.warnings && !converged` — the non-convergence report.
@@ -138,7 +163,7 @@ impl CgTrailerGates {
         if self.summary || self.report_warning(converged) {
             lines.push(format!("PCG: Number of iterations: {final_iter}"));
         }
-        if self.summary || self.iterations {
+        if self.summary || self.iterations || self.first_and_last {
             // MFEM: pow(betanom/nom0, 0.5/final_iter)
             let arf = (betanom / nom0).powf(0.5 / final_iter as f64);
             lines.push(format!("Average reduction factor = {}", fmt_g(arf)));
@@ -153,6 +178,17 @@ impl CgTrailerGates {
     fn print_trailer(&self, final_iter: usize, nom0: f64, betanom: f64, converged: bool) {
         for line in self.trailer_lines(final_iter, nom0, betanom, converged) {
             println!("{line}");
+        }
+    }
+
+    /// MFEM `solvers.cpp:1028-1031` — the `first_and_last` closing iteration
+    /// line, printed after the loop (and only there — the iteration-0 early
+    /// returns leave before it) when the per-iteration history is OFF:
+    /// `if (first_and_last && !iterations) out << "   Iteration : "
+    /// << setw(3) << final_iter << "  (B r, r) = " << betanom`.
+    fn print_first_and_last_final(&self, final_iter: usize, betanom: f64) {
+        if self.first_and_last && !self.iterations {
+            println!("   Iteration : {:3}  (B r, r) = {}", final_iter, fmt_g(betanom));
         }
     }
 }
@@ -222,10 +258,12 @@ pub fn solve_pcg_gssmoother(
     let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
     let gates = CgTrailerGates::from_config(cfg);
 
-    // MFEM solvers.cpp:898-902 — the iteration-0 line prints for every initial
-    // nom, including nom == 0 (singular consistent system: `(B r, r) = 0`).
-    if gates.iterations {
-        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
+    // MFEM solvers.cpp:897-902 — the iteration-0 line prints for every initial
+    // nom, including nom == 0 (singular consistent system: `(B r, r) = 0`);
+    // first_and_last (level 3) prints it too, with a trailing `" ..."` and
+    // suppresses the per-iteration history below.
+    if gates.first_line() {
+        println!("   Iteration : {:3}  (B r, r) = {}{}", 0, fmt_g(nom), gates.first_line_suffix());
     }
     // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
     // warn, `converged = false`, `final_norm = nom` (the RAW value, no sqrt),
@@ -324,6 +362,7 @@ pub fn solve_pcg_gssmoother(
 
     // MFEM solvers.cpp:1027-1045 (trailer) and :1047 (final_norm = sqrt of the
     // last (B r, r); NaN when the loop broke on a negative betanom).
+    gates.print_first_and_last_final(iter, betanom);
     gates.print_trailer(iter, nom0, betanom, converged);
     Ok(SolveResult { converged, iterations: iter, final_residual: betanom.sqrt() })
 }
@@ -363,9 +402,10 @@ pub fn solve_pcg_dsmoother(
     let r0 = (nom * cfg.rtol * cfg.rtol).max(cfg.atol * cfg.atol);
     let gates = CgTrailerGates::from_config(cfg);
 
-    // MFEM solvers.cpp:898-902 — see solve_pcg_gssmoother.
-    if gates.iterations {
-        println!("   Iteration : {:3}  (B r, r) = {}", 0, fmt_g(nom));
+    // MFEM solvers.cpp:897-902 — see solve_pcg_gssmoother (level-3 `" ..."`
+    // suffix and suppressed history included).
+    if gates.first_line() {
+        println!("   Iteration : {:3}  (B r, r) = {}{}", 0, fmt_g(nom), gates.first_line_suffix());
     }
     // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0
     // (final_norm is the RAW nom; no trailer).
@@ -452,6 +492,7 @@ pub fn solve_pcg_dsmoother(
     }
 
     // MFEM solvers.cpp:1027-1045 + :1047 — see solve_pcg_gssmoother.
+    gates.print_first_and_last_final(iter, betanom);
     gates.print_trailer(iter, nom0, betanom, converged);
     Ok(SolveResult { converged, iterations: iter, final_residual: betanom.sqrt() })
 }
@@ -892,10 +933,10 @@ where
     let nom0 = rz.max(1e-32);
     let mut nom = rz;
     let tol_sq = (cfg.atol * cfg.atol).max(cfg.rtol * cfg.rtol * nom0);
-    // MFEM solvers.cpp:898-902 — the iteration-0 line prints for every initial
-    // nom, including nom == 0 (singular consistent system).
-    if print_iter {
-        println!("   Iteration : {:>3}  (B r, r) = {}", 0, fmt_g(rz));
+    // MFEM solvers.cpp:897-902 — see solve_pcg_gssmoother (level-3 `" ..."`
+    // suffix and suppressed history included).
+    if gates.first_line() {
+        println!("   Iteration : {:>3}  (B r, r) = {}{}", 0, fmt_g(rz), gates.first_line_suffix());
     }
     // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
     // warn, converged = false, final_norm = nom (RAW value, no sqrt), immediate
@@ -988,6 +1029,7 @@ where
 
     // MFEM CGSolver::Mult trailer (solvers.cpp:1027-1045) and final_norm =
     // sqrt of the last (B r, r) (:1047).
+    gates.print_first_and_last_final(final_iter, nom);
     gates.print_trailer(final_iter, nom0, nom, converged);
     if converged {
         Ok(SolveResult {
@@ -1043,6 +1085,9 @@ where
     let n = nrows;
     let mut iter_total = 0usize;
 
+    // MFEM `GMRESSolver::Mult` print gates (linalg/solvers.cpp:1140-1361).
+    let gates = CgTrailerGates::from_config(cfg);
+
     let mut ax = vec![0.0; n];
     apply(x, &mut ax);
     let mut r = vec![0.0; n];
@@ -1054,6 +1099,17 @@ where
     let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
     let mut res_norm = norm(&r);
     if res_norm <= tol {
+        // MFEM solvers.cpp:1203-1209 — converged before pass 1: `j = 0; goto
+        // finish`.  The finish line (`(iterations && converged) ||
+        // first_and_last`, :1349-1354) prints `Pass : (0-1)/m+1 = 1`
+        // (C++ truncating division) `Iteration : 0`; the count (:1355-1358)
+        // only under summary.
+        if gates.first_line() {
+            println!("   Pass : {:2}   Iteration : {:3}  ||B r|| = {}", 1, 0, fmt_g(res_norm));
+        }
+        if gates.summary {
+            println!("GMRES: Number of iterations: {}", 0);
+        }
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
@@ -1064,11 +1120,39 @@ where
     while iter_total < cfg.max_iter {
         let beta = norm(&r);
         if beta <= tol {
+            // MFEM solvers.cpp:1339-1346 — the post-restart convergence:
+            // `final_iter = j` with j ONE PAST the completed pass (the inner
+            // for already incremented it), pass index `(j-1)/m+1`.  The print
+            // reproduces those exact bytes; `SolveResult` keeps `iter_total`
+            // (iteration logic untouched — debt D217).
+            if gates.first_line() {
+                println!(
+                    "   Pass : {:2}   Iteration : {:3}  ||B r|| = {}",
+                    iter_total / restart + 1,
+                    iter_total + 1,
+                    fmt_g(beta)
+                );
+            }
+            if gates.summary {
+                println!("GMRES: Number of iterations: {}", iter_total + 1);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter_total,
                 final_residual: beta,
             });
+        }
+
+        // MFEM solvers.cpp:1229-1235 — the pass-1 / iteration-0 line, printed
+        // only before the FIRST pass (`" ..."` suffix in first_and_last mode).
+        if iter_total == 0 && gates.first_line() {
+            println!(
+                "   Pass : {:2}   Iteration : {:3}  ||B r|| = {}{}",
+                1,
+                0,
+                fmt_g(beta),
+                gates.first_line_suffix()
+            );
         }
 
         let mut v = vec![0.0; (restart + 1) * n];
@@ -1142,10 +1226,28 @@ where
                 converged = true;
                 break;
             }
+            // MFEM solvers.cpp:1315-1320 — the in-loop line (iterations only;
+            // a converged pass jumps to finish instead of printing here).
+            // Pass index `(j-1)/m+1` with j = the current global iteration.
+            if gates.iterations {
+                println!(
+                    "   Pass : {:2}   Iteration : {:3}  ||B r|| = {}",
+                    (iter_total - 1) / restart + 1,
+                    iter_total,
+                    fmt_g(res_norm)
+                );
+            }
         }
 
         if inner_done == 0 {
             break;
+        }
+
+        // MFEM solvers.cpp:1325-1328 — `Restarting...` (iterations gate and
+        // another pass allowed) prints BEFORE the iterate update; a pass that
+        // converged jumps to `finish` instead and never prints it.
+        if !converged && gates.iterations && iter_total < cfg.max_iter {
+            println!("Restarting...");
         }
 
         // Back-substitution: solve upper-triangular H(0..m,0..m) * y = g(0..m)
@@ -1172,6 +1274,20 @@ where
         }
 
         if converged {
+            // MFEM solvers.cpp:1298-1307 — in-loop convergence, `goto finish`
+            // with j == iter_total (the finish line thus repeats this
+            // iteration's values, whose in-loop line was skipped).
+            if gates.first_line() {
+                println!(
+                    "   Pass : {:2}   Iteration : {:3}  ||B r|| = {}",
+                    (iter_total - 1) / restart + 1,
+                    iter_total,
+                    fmt_g(res_norm)
+                );
+            }
+            if gates.summary {
+                println!("GMRES: Number of iterations: {}", iter_total);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter_total,
@@ -1186,6 +1302,25 @@ where
         res_norm = norm(&r);
     }
 
+    // MFEM solvers.cpp:1345-1361 — exhaustion: `final_norm = beta` (the true
+    // residual recomputed above), `final_iter = max_iter`, converged = false.
+    // The finish line (first_and_last only) uses j one past the last pass
+    // (`(j-1)/m+1` = `iter_total/restart + 1`); the count gate reduces to
+    // `summary || warnings` and the warning fires.
+    if gates.first_and_last {
+        println!(
+            "   Pass : {:2}   Iteration : {:3}  ||B r|| = {}",
+            iter_total / restart + 1,
+            iter_total,
+            fmt_g(res_norm)
+        );
+    }
+    if gates.summary || gates.warnings {
+        println!("GMRES: Number of iterations: {}", iter_total);
+    }
+    if gates.warnings {
+        println!("GMRES: No convergence!");
+    }
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
         residual: res_norm,
@@ -1243,6 +1378,14 @@ where
     let norm_b = norm(b);
     let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
     let mut res_norm = norm(&r);
+    // MFEM `BiCGSTABSolver::Mult` print gates (linalg/solvers.cpp:1606-1823).
+    let gates = CgTrailerGates::from_config(cfg);
+    // MFEM solvers.cpp:1634-1638 — the iteration-0 line prints BEFORE the
+    // tolerance test (`" ..."` suffix in first_and_last mode); an immediate
+    // convergence then returns with NO trailer at all (:1643-1653).
+    if gates.first_line() {
+        println!("   Iteration : {:3}   ||r|| = {}{}", 0, fmt_g(res_norm), gates.first_line_suffix());
+    }
     if res_norm <= tol {
         return Ok(SolveResult {
             converged: true,
@@ -1258,6 +1401,17 @@ where
     for iter in 0..cfg.max_iter {
         let rho_new = dot(&r_hat, &r);
         if rho_new.abs() < 1e-32 {
+            // MFEM solvers.cpp:1663-1683 — the `rho_1 == 0` breakdown: one
+            // closing `||r||` line, then the trailer and `No convergence!`.
+            if gates.first_line() {
+                println!("   Iteration : {:3}   ||r|| = {}", iter + 1, fmt_g(res_norm));
+            }
+            if gates.summary || gates.warnings {
+                println!("BiCGStab: Number of iterations: {}", iter + 1);
+            }
+            if gates.warnings {
+                println!("BiCGStab: No convergence!");
+            }
             return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: rho is near zero".to_string(),
             ));
@@ -1295,11 +1449,25 @@ where
             for i in 0..n {
                 x[i] += alpha * p[i];
             }
+            // MFEM solvers.cpp:1695-1717 — the `||s||` convergence line
+            // (iterations || first_and_last) plus the count (summary only,
+            // since converged).
+            if gates.first_line() {
+                println!("   Iteration : {:3}   ||s|| = {}", iter + 1, fmt_g(s_norm));
+            }
+            if gates.summary {
+                println!("BiCGStab: Number of iterations: {}", iter + 1);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter + 1,
                 final_residual: s_norm,
             });
+        }
+        // MFEM solvers.cpp:1719-1723 — first half of the iteration line
+        // (iterations only, NO newline yet; the `||r||` half completes it).
+        if gates.iterations {
+            print!("   Iteration : {:3}   ||s|| = {}", iter + 1, fmt_g(s_norm));
         }
 
         apply(&s, &mut t);
@@ -1312,6 +1480,19 @@ where
 
         omega = dot(&t, &s) / tt;
         if omega.abs() < 1e-32 {
+            // MFEM checks `omega == 0` AFTER the update and the `||r||` print
+            // (solvers.cpp:1769-1790, where r == s and resid == ||s||); the
+            // guard here runs before the update (iteration logic untouched),
+            // so the trailer reports ||s|| — MFEM's post-update resid.
+            if gates.first_and_last && !gates.iterations {
+                println!("   Iteration : {:3}   ||r|| = {}", iter + 1, fmt_g(s_norm));
+            }
+            if gates.summary || gates.warnings {
+                println!("BiCGStab: Number of iterations: {}", iter + 1);
+            }
+            if gates.warnings {
+                println!("BiCGStab: No convergence!");
+            }
             return Err(SolverError::Linlvo(
                 "BiCGSTAB operator breakdown: omega is near zero".to_string(),
             ));
@@ -1323,7 +1504,20 @@ where
         }
 
         res_norm = norm(&r);
+        // MFEM solvers.cpp:1741-1744 — second half of the iteration line.
+        if gates.iterations {
+            println!("   ||r|| = {}", fmt_g(res_norm));
+        }
         if res_norm <= tol {
+            // MFEM solvers.cpp:1745-1757 — converged on the updated r: the
+            // closing `||r||` line prints only in first_and_last mode, and
+            // the count only under summary.
+            if gates.first_and_last && !gates.iterations {
+                println!("   Iteration : {:3}   ||r|| = {}", iter + 1, fmt_g(res_norm));
+            }
+            if gates.summary {
+                println!("BiCGStab: Number of iterations: {}", iter + 1);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter + 1,
@@ -1334,6 +1528,17 @@ where
         rho_old = rho_new;
     }
 
+    // MFEM solvers.cpp:1811-1830 — max_iter exhaustion: the closing `||r||`
+    // line (first_and_last only), the count, and the warning.
+    if gates.first_and_last && !gates.iterations {
+        println!("   Iteration : {:3}   ||r|| = {}", cfg.max_iter, fmt_g(res_norm));
+    }
+    if gates.summary || gates.warnings {
+        println!("BiCGStab: Number of iterations: {}", cfg.max_iter);
+    }
+    if gates.warnings {
+        println!("BiCGStab: No convergence!");
+    }
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
         residual: res_norm,
@@ -1409,8 +1614,11 @@ where
     }
 
     // Legacy-helper level 1 when verbose (iterations + warnings, no summary);
-    // verbose = false stays completely silent.
-    let gates = CgTrailerGates { warnings: verbose, iterations: verbose, summary: false };
+    // verbose = false stays completely silent.  first_and_last is unreachable
+    // here: MFEM's `PCG()` helper passes a legacy print int (examples use 0/1)
+    // to `SetPrintLevel`, which can never produce level 3.
+    let gates =
+        CgTrailerGates { warnings: verbose, iterations: verbose, summary: false, first_and_last: false };
 
     // MFEM solvers.cpp:904-918 — indefinite preconditioner at iteration 0:
     // warn, converged = false, final_norm = nom (the RAW value, no sqrt),
@@ -1827,15 +2035,38 @@ where
         r[i] = b[i] - ax[i];
     }
 
+    // MFEM `MINRESSolver::Mult` print gates (linalg/solvers.cpp:1855-2037).
+    let gates = CgTrailerGates::from_config(cfg);
+
     let norm_b = norm(b);
     let tol = cfg.atol.max(cfg.rtol * norm_b.max(1e-32));
     let mut res_norm = norm(&r);
     if res_norm <= tol {
+        // MFEM solvers.cpp:1907-1910 — `eta <= norm_goal` jumps to loop_end
+        // with it = 0 BEFORE the iteration-0 line; loop_end (:1990-1996) then
+        // prints exactly one final line (no per-iteration history).
+        if gates.first_line() {
+            println!("MINRES: iteration {:3}: ||r||_B = {}", 0, fmt_g(res_norm));
+        }
+        if gates.summary {
+            println!("MINRES: Number of iterations: {:3}", 0);
+        }
         return Ok(SolveResult {
             converged: true,
             iterations: 0,
             final_residual: res_norm,
         });
+    }
+
+    // MFEM solvers.cpp:1910-1915 — the iteration-0 line (`" ..."` suffix in
+    // first_and_last mode) precedes the loop.
+    if gates.first_line() {
+        println!(
+            "MINRES: iteration {:3}: ||r||_B = {}{}",
+            0,
+            fmt_g(res_norm),
+            gates.first_line_suffix()
+        );
     }
 
     // ── Lanczos vectors (contiguous: v[iter * n + i]) ──────────────────
@@ -1939,11 +2170,26 @@ where
                     x[i] += y[j] * vj[i];
                 }
             }
+            // MFEM solvers.cpp:1990-1996 — loop_end final line (this
+            // iteration's in-loop line was skipped by the convergence test,
+            // :1977-1980), then the summary count (:1998-2001).
+            if gates.first_line() {
+                println!("MINRES: iteration {:3}: ||r||_B = {}", iter, fmt_g(res_norm));
+            }
+            if gates.summary {
+                println!("MINRES: Number of iterations: {:3}", iter);
+            }
             return Ok(SolveResult {
                 converged: true,
                 iterations: iter,
                 final_residual: res_norm,
             });
+        }
+
+        // MFEM solvers.cpp:1983-1986 — the in-loop iteration line prints only
+        // when the pass did NOT converge (iterations gate, never first_and_last).
+        if gates.iterations {
+            println!("MINRES: iteration {:3}: ||r||_B = {}", iter, fmt_g(res_norm));
         }
 
         // ── Commit the current iterate on non-convergence ────────────────
@@ -1983,6 +2229,19 @@ where
         sn_old = snk;
     }
 
+    // MFEM solvers.cpp:1987-1988 — `converged = false; it--` after the loop,
+    // then loop_end (:1990-1996): the final line REPEATS the max_iter row.
+    // Trailer (:1998-2001 count gate `summary || (!converged && warnings)`,
+    // :2030-2033 `MINRES: No convergence!`).
+    if gates.first_line() {
+        println!("MINRES: iteration {:3}: ||r||_B = {}", cfg.max_iter, fmt_g(res_norm));
+    }
+    if gates.summary || gates.warnings {
+        println!("MINRES: Number of iterations: {:3}", cfg.max_iter);
+    }
+    if gates.warnings {
+        println!("MINRES: No convergence!");
+    }
     Err(SolverError::ConvergenceFailed {
         max_iter: cfg.max_iter,
         residual: res_norm,
@@ -2296,6 +2555,9 @@ pub fn solve_minres_precond(
     let mut eta = (dot(&u1, &v1)).sqrt();
     let norm_goal = cfg.atol.max(cfg.rtol * eta);
 
+    // MFEM `MINRESSolver::Mult` print gates (linalg/solvers.cpp:1855-2037).
+    let gates = CgTrailerGates::from_config(cfg);
+
     let mut gamma0 = 1.0_f64;
     let mut gamma1 = 1.0_f64;
     let mut sigma0 = 0.0_f64;
@@ -2306,6 +2568,17 @@ pub fn solve_minres_precond(
     let mut converged = eta <= norm_goal;
 
     if !converged {
+        // MFEM solvers.cpp:1910-1915 — the iteration-0 line (`" ..."` suffix
+        // in first_and_last mode); skipped when eta <= norm_goal already
+        // (that path jumps straight to loop_end below).
+        if gates.first_line() {
+            println!(
+                "MINRES: iteration {:3}: ||r||_B = {}{}",
+                0,
+                fmt_g(eta),
+                gates.first_line_suffix()
+            );
+        }
         for it_ in 1..=cfg.max_iter {
             it = it_;
             // v1 /= beta; u1 /= beta
@@ -2371,12 +2644,33 @@ pub fn solve_minres_precond(
                 break;
             }
 
+            // MFEM solvers.cpp:1983-1986 — in-loop line, iterations only
+            // (this pass converged → the loop_end line covers it).
+            if gates.iterations {
+                println!("MINRES: iteration {:3}: ||r||_B = {}", it_, fmt_g(eta.abs()));
+            }
+
             // Swap(u1, q)  → u1 now holds the latest M⁻¹v0 (= q)
             std::mem::swap(&mut u1, &mut q);
             // Swap(v0, v1); Swap(w0, w1)
             std::mem::swap(&mut v0, &mut v1);
             std::mem::swap(&mut w0, &mut w1);
         }
+    }
+
+    // MFEM loop_end (solvers.cpp:1989-1996): on exhaustion `it--` re-points to
+    // max_iter and the final line repeats that row; on convergence it carries
+    // the converging pass (whose in-loop line was skipped).  Then the trailer:
+    // count gate `summary || (!converged && warnings)` (:1998-2001) and
+    // `MINRES: No convergence!` (:2030-2033).
+    if gates.first_line() {
+        println!("MINRES: iteration {:3}: ||r||_B = {}", it, fmt_g(eta.abs()));
+    }
+    if gates.summary || (!converged && gates.warnings) {
+        println!("MINRES: Number of iterations: {:3}", it);
+    }
+    if !converged && gates.warnings {
+        println!("MINRES: No convergence!");
     }
 
     if converged {
@@ -2452,6 +2746,60 @@ mod tests {
     fn trailer_silent() {
         let g = CgTrailerGates::from_config(&cfg(false, PrintLevel::Silent));
         assert!(g.trailer_lines(3, 1.0, 2.0, false).is_empty());
+    }
+
+    /// D199 — MFEM legacy level 0 (`WarningsOnly`): warnings without any
+    /// iteration lines; the trailer keeps the count/`No convergence!` rows but
+    /// never an ARF.
+    #[test]
+    fn gates_warnings_only() {
+        let g = CgTrailerGates::from_config(&SolverConfig {
+            rtol: 1e-12,
+            max_iter: 200,
+            verbose: false,
+            print_level: PrintLevel::WarningsOnly,
+            ..Default::default()
+        });
+        assert!(g.warnings && !g.iterations && !g.summary && !g.first_and_last);
+        assert!(!g.first_line());
+        assert_eq!(g.first_line_suffix(), "");
+        // Non-converged: count + No convergence!, no ARF.
+        assert_eq!(
+            g.trailer_lines(7, 1.0, 0.5, false),
+            vec!["PCG: Number of iterations: 7", "PCG: No convergence!"]
+        );
+        // Converged: nothing at all.
+        assert!(g.trailer_lines(7, 1.0, 0.5, true).is_empty());
+    }
+
+    /// D199 — MFEM legacy level 3 (`FirstAndLast`): no per-iteration history,
+    /// the `" ..."` suffix, the closing final line, and an ARF-gated trailer.
+    #[test]
+    fn gates_first_and_last() {
+        let g = CgTrailerGates::from_config(&SolverConfig {
+            rtol: 1e-12,
+            max_iter: 200,
+            verbose: false,
+            print_level: PrintLevel::FirstAndLast,
+            ..Default::default()
+        });
+        assert!(g.warnings && !g.iterations && !g.summary && g.first_and_last);
+        assert!(g.first_line());
+        assert_eq!(g.first_line_suffix(), " ...");
+        // Converged: ARF only (no count).
+        assert_eq!(
+            g.trailer_lines(4, 8.0, 0.0, true),
+            vec!["Average reduction factor = 0"]
+        );
+        // Non-converged: count + ARF + No convergence!.
+        assert_eq!(
+            g.trailer_lines(2, 8.0, 12.0, false),
+            vec![
+                "PCG: Number of iterations: 2",
+                &format!("Average reduction factor = {}", fmt_g((12.0f64 / 8.0).powf(0.25))),
+                "PCG: No convergence!"
+            ]
+        );
     }
 
     /// 1-D Poisson (tridiagonal, all Dirichlet) — the smallest system that

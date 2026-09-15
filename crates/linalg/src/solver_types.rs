@@ -33,13 +33,38 @@ impl From<linlvo::SolverError> for SolverError {
     }
 }
 
-/// Verbosity level.
+/// Verbosity level — the MFEM 4.10 `IterativeSolver` legacy print scale
+/// (`linalg/solvers.hpp` `PrintLevel` + `FromLegacyPrintLevel`,
+/// `linalg/solvers.cpp:119`):
+///
+/// | variant        | MFEM level | errors | warnings | iterations | summary | first_and_last |
+/// |----------------|------------|--------|----------|------------|---------|----------------|
+/// | `Silent`       | -1         | no     | no       | no         | no      | no             |
+/// | `Summary`      | 2          | yes    | yes      | no         | yes     | no             |
+/// | `Iterations`   | 1          | yes    | yes      | yes        | no      | no             |
+/// | `Debug`        | 1          | yes    | yes      | yes        | no      | no             |
+/// | `WarningsOnly` | 0          | yes    | yes      | no         | no      | no             |
+/// | `FirstAndLast` | 3          | yes    | yes      | no         | no      | yes            |
+///
+/// **Ordering caveat:** the derive order must stay `Silent, Summary,
+/// Iterations, Debug, …` because legacy consumers compare with `>=`
+/// (`fem-solver`'s `bpcg.rs`); the level-0/level-3 variants are therefore
+/// appended after `Debug` even though their MFEM level integers (0 and 3) do
+/// not follow the derive order.  `Debug` is a fem-rs extension of MFEM's
+/// level 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum PrintLevel {
     #[default] Silent,
     Summary,
     Iterations,
     Debug,
+    /// MFEM legacy level 0 (`PrintLevel().Errors().Warnings()`): warnings and
+    /// errors only — NO iteration lines and no summary.
+    WarningsOnly,
+    /// MFEM legacy level 3 (`PrintLevel().Errors().Warnings().FirstAndLast()`):
+    /// the first iteration line (with a `" ..."` suffix) and the final
+    /// iteration line instead of the per-iteration history, plus the ARF line.
+    FirstAndLast,
 }
 
 /// Convergence parameters.
@@ -61,7 +86,14 @@ impl Default for SolverConfig {
 impl SolverConfig {
     pub fn to_linlvo(&self) -> linlvo::SolverParams {
         let level = match self.effective_print_level() {
-            PrintLevel::Silent => linlvo::VerboseLevel::Silent,
+            // linlvo's `VerboseLevel` cannot express the MFEM level-0
+            // (warnings-only) and level-3 (first_and_last) scales; those levels
+            // are realised by fem-solver's hand-rolled MFEM-faithful trailers
+            // (crates/solver/src/iterative.rs), so the linlvo-backed wrappers
+            // degrade both to `Silent` (debt D218).
+            PrintLevel::Silent | PrintLevel::WarningsOnly | PrintLevel::FirstAndLast => {
+                linlvo::VerboseLevel::Silent
+            }
             PrintLevel::Summary => linlvo::VerboseLevel::Summary,
             _ => linlvo::VerboseLevel::Iterations,
         };
