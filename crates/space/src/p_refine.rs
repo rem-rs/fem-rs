@@ -1259,13 +1259,13 @@ fn quad_face_variant_constraint(
 /// barycentric; hex and prism quad faces: GLL tensor product; prism tri
 /// faces: GLL barycentric via `H1TriPk`).
 ///
-/// Prism faces follow MFEM's `VariableOrderMinimumRule` exactly: the master
-/// variant is the face's lowest **adjacent element order** (MFEM
-/// `var_face_orders` keeps zero-dof low-order variants, so e.g. a p2/p3 tri
-/// face is master'd by the empty p2 variant whose closure is the three
-/// vertices plus the p2 edge dofs — MFEM-verified, probe
-/// `tmp/d174_prism_p_probe.cpp`).  The legacy tet/hex paths master at the
-/// lowest *stored* variant (see the new-findings notes in D174).
+/// All geometries follow MFEM's `VariableOrderMinimumRule` exactly: the
+/// master variant is the face's lowest **adjacent element order** (MFEM
+/// `MakeDofTable` keeps zero-dof low-order variants, so e.g. a p2/p3 tri
+/// face or a p1/p2 quad face is master'd by the empty low variant whose
+/// closure is the face vertices plus the low-order edge dofs —
+/// MFEM-verified for prisms by probe `tmp/d174_prism_p_probe.cpp` and for
+/// hexes/tets by probe `tmp/d176_hextet_p_probe.cpp`).
 fn detect_face_variant_constraints<M: MeshTopology>(
     dm: &DofManager,
     mesh: &M,
@@ -1281,7 +1281,15 @@ fn detect_face_variant_constraints<M: MeshTopology>(
     for e in 0..n_elems as u32 {
         let ns = mesh.element_nodes(e);
         let p = dm.element_order(e);
-        if ns.len() == 6 {
+        if ns.len() == 8 {
+            for face4 in hex_quad_faces(ns) {
+                let face4 = canon_quad_face(face4);
+                let key = FaceKey::new(face4[0], face4[1], face4[2]);
+                face_low.entry(key)
+                    .and_modify(|v| { if p < *v { *v = p; } })
+                    .or_insert(p);
+            }
+        } else if ns.len() == 6 {
             for (a, b, c) in prism_tri_faces(ns) {
                 let key = FaceKey::new(a, b, c);
                 face_canon3.entry(key).or_insert([a, b, c]);
@@ -1293,6 +1301,14 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 face_canon4.entry(key).or_insert(face4);
+                face_low.entry(key)
+                    .and_modify(|v| { if p < *v { *v = p; } })
+                    .or_insert(p);
+            }
+        } else {
+            for (a, b, c) in tet_faces(ns) {
+                let key = FaceKey::new(a, b, c);
+                face_canon3.entry(key).or_insert([a, b, c]);
                 face_low.entry(key)
                     .and_modify(|v| { if p < *v { *v = p; } })
                     .or_insert(p);
@@ -1389,47 +1405,75 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                 let face4 = canon_quad_face(face4);
                 let key = FaceKey::new(face4[0], face4[1], face4[2]);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
-                if variants.len() <= 1 { continue; }
-                let (p0, dofs0) = &variants[0];
-
-                for (q, dofs_q) in variants.iter().skip(1) {
+                // MFEM stores zero-dof low-order variants (`MakeDofTable`),
+                // so the master is the lowest ADJACENT element order even
+                // when that order's face variant holds no interior dofs
+                // (a p1 quad face): the higher variants interpolate the low
+                // order's closure — 4 vertices only (probe
+                // `tmp/d176_hextet_p_probe.cpp`, hex [2,1] row
+                // `constrained 29 <- 4 × 0.25`).
+                let Some(first_order) = variants.first().map(|(q, _)| *q) else { continue };
+                let p_low = face_low.get(&key).copied().unwrap_or(first_order);
+                if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
+                let dofs0 = variants.iter().find(|(p, _)| *p == p_low)
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
+                for (q, dofs_q) in variants {
+                    if *q <= p_low { continue; }
                     for (j, &dof) in dofs_q.iter().enumerate() {
                         quad_face_variant_constraint(
-                            dm, face4, (*p0, dofs0), *q, dof, j, constraints);
+                            dm, face4, (p_low, &dofs0), *q, dof, j, constraints);
                     }
                 }
             }
         } else if ns.len() == 4 {
-            // Tet: triangular face constraints (equispaced).
+            // Tet: triangular face constraints (equispaced TetPk trace),
+            // mastered at the lowest ADJACENT order like MFEM: a p2 tri
+            // face stores no interior dof but still masters (probe
+            // `tmp/d176_hextet_p_probe.cpp`, tet [3,2] rows
+            // `constrained 40/41`: −1/9 on the 3 face vertices, +4/9 on the
+            // 3 p2 edge dofs).
             for (v0, v1, v2) in tet_faces(ns) {
                 let key = FaceKey::new(v0, v1, v2);
                 let Some(variants) = dm.face_variants.get(&key) else { continue };
-                if variants.len() <= 1 { continue; }
-                let (p0, dofs0) = &variants[0];
-
-                for (q, dofs_q) in variants.iter().skip(1) {
-                    if dofs_q.is_empty() { continue; }
+                let Some(first_order) = variants.first().map(|(q, _)| *q) else { continue };
+                let p_low = face_low.get(&key).copied().unwrap_or(first_order);
+                if variants.iter().all(|(q, _)| *q <= p_low) { continue; }
+                let canon3 = face_canon3.get(&key).copied().unwrap_or([v0, v1, v2]);
+                let (cv0, cv1, cv2) = (canon3[0], canon3[1], canon3[2]);
+                let dofs0 = variants.iter().find(|(p, _)| *p == p_low)
+                    .map(|(_, d)| d.clone())
+                    .unwrap_or_default();
+                for (q, dofs_q) in variants {
+                    if *q <= p_low || dofs_q.is_empty() { continue; }
                     let pq = *q as usize;
-                    // Positions of the higher variant's face DOFs in the
-                    // factory layout: (j outer, i inner), i + j ≤ q - 1.
+                    // Positions of the higher variant's face DOFs, matching
+                    // the builder's face-block placement (and the `TetPk`
+                    // factory): slot (i, j) sits at barycentrics
+                    // (λ_v0, λ_v1, λ_v2) = (1−i/q−j/q, i/q, j/q); store the
+                    // (λ_v0, λ_v1) pair for the master-basis evaluation.
                     let mut pos: Vec<(f64, f64)> = Vec::new();
                     for j in 1..=pq.saturating_sub(2) {
                         for i in 1..=pq - 1 - j {
-                            pos.push((i as f64 / pq as f64, j as f64 / pq as f64));
+                            pos.push((
+                                (pq - i - j) as f64 / pq as f64,
+                                i as f64 / pq as f64,
+                            ));
                         }
                     }
-                    for (k, &dof) in dofs_q.iter().enumerate() {
-                        let (r, s) = pos[k];
-                        let weights = lagrange_weights_tri(r, s, *p0);
-                        // Parent DOFs in TriPk factory order: vertices v0, v1,
-                        // v2; edge (v0,v1) near v0; edge (v1,v2) near v1;
-                        // edge (v2,v0) near v2; then p0 face DOFs.
-                        let mut parent_dofs: Vec<DofId> = Vec::new();
-                        parent_dofs.push(v0); parent_dofs.push(v1); parent_dofs.push(v2);
-                        for (a, b) in [(v0, v1), (v1, v2), (v2, v0)] {
+                    // Parent DOFs (canonical face orientation, matching the
+                    // builder's face coordinates) in TriPk factory order:
+                    // vertices v0, v1, v2; edge (v0,v1) near v0; edge
+                    // (v1,v2) near v1; edge (v2,v0) near v2; then the p_low
+                    // face-interior dofs (empty when p_low < 3).
+                    let mut parent_dofs: Vec<DofId> = vec![cv0, cv1, cv2];
+                    if p_low >= 2 {
+                        for (a, b) in [(cv0, cv1), (cv1, cv2), (cv2, cv0)] {
                             let ekey = EdgeKey::new(a, b);
                             if let Some(evars) = dm.edge_variants.get(&ekey) {
-                                if let Some((_, edofs)) = evars.iter().find(|(p, _)| *p == *p0) {
+                                if let Some((_, edofs)) =
+                                    evars.iter().find(|(p, _)| *p == p_low)
+                                {
                                     // Orient: stored canonical; want near `a`.
                                     if a == ekey.0 {
                                         parent_dofs.extend_from_slice(edofs);
@@ -1439,7 +1483,11 @@ fn detect_face_variant_constraints<M: MeshTopology>(
                                 }
                             }
                         }
-                        parent_dofs.extend_from_slice(dofs0);
+                    }
+                    parent_dofs.extend_from_slice(&dofs0);
+                    for (k, &dof) in dofs_q.iter().enumerate() {
+                        let (r, s) = pos[k];
+                        let weights = lagrange_weights_tri(r, s, p_low);
                         let parents: Vec<(DofId, f64)> = parent_dofs.iter()
                             .zip(weights.iter())
                             .filter(|&(_, &w)| w.abs() > 1e-16)
