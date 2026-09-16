@@ -23,7 +23,7 @@ pub use amr_inner::{
 };
 pub use bisect::*;
 pub use p_refine::*;
-pub use refine_2d::{closure_refine, closure_refine_default};
+pub use refine_2d::{closure_refine, closure_refine_default, general_refinement_quad};
 pub use make_conforming::make_conforming_tri;
 pub use schedule::*;
 

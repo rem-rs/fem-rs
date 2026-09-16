@@ -6,25 +6,30 @@
 //! Light-hearted example of AMR (no GLVis: the socket is not opened).
 //!
 //! Round 32 findings (D130), all measured with fresh binaries against the C++
-//! binary compiled from MFEM 4.10:
+//! binary compiled from MFEM 4.10; round 39 (D160) closed the refinement gap:
 //!
-//! * **Fixed**: the port used a fixed `for iter in 0..5` loop, so it refined
-//!   five times and wrote a 1,048,576-element `mandel.mesh` (59.6 MB).  C++
-//!   breaks when `(iter+1) % 4 == 0` on the `-no-vis` path (after printing
+//! * **Fixed (round 32)**: the port used a fixed `for iter in 0..5` loop, so it
+//!   refined five times and wrote a 1,048,576-element `mandel.mesh` (59.6 MB).
+//!   C++ breaks when `(iter+1) % 4 == 0` on the `-no-vis` path (after printing
 //!   iteration 4), i.e. it stops at 16,006 elements (926,121 B).  The loop and
 //!   the printed lines (`"Iteration N: mesh has X elements. "`, trailing space
-//!   included) now match: iteration 1 agrees exactly (1024 elements).
-//! * **Gap (exit 3)**: C++ performs `Mesh::GeneralRefinement(refs, -1, nclimit)`
-//!   — nonconforming refinement of the *marked* elements only (with hanging
-//!   nodes, `nclimit` = 1).  `fem_mesh::amr` only implements conforming/NC
-//!   refinement for `Tri3` (`closure_refine*` assert `Tri3`), so for quad meshes
-//!   this port falls back to `refine_uniform` (refines every element, ×4).
-//!   Consequence: from iteration 2 on the element counts differ
-//!   (C++ 2254/5884/16006 vs fem-rs 4096/16384/65536).  The mesh is still
-//!   written and the example exits with code 3 to mark the partial delivery.
-//! * `-vis` opens no socket; C++ would prompt `Continue shaping? --> ` at every
-//!   4th iteration — the prompt is kept (EOF answers `break` to avoid the C++
-//!   infinite refine loop on a closed stdin).
+//!   included) now match.
+//! * **Fixed (round 39, D160)**: C++ performs
+//!   `Mesh::GeneralRefinement(refs, -1, nclimit)` — nonconforming refinement of
+//!   the *marked* elements only (hanging nodes, `nclimit` = 1).  The port used
+//!   to fall back to `refine_uniform` for quad meshes (counts 4096/16384/65536
+//!   vs C++ 2254/5884/16006); it now calls
+//!   `fem_mesh::amr::general_refinement_quad` (NCMesh 2-D iso splits +
+//!   `LimitNCLevel` propagation), and the iteration counts match C++
+//!   (`1024, 2254, 5884, 16006`).
+//! * **Gap (exit 3)**: `-a` (aniso) still refines the marked quads iso — the
+//!   marked *sets* are identical in both modes (the material-variation test
+//!   does not depend on `aniso`), but C++ X/Y-bisects them, so `-a` counts
+//!   diverge from iteration 2 on (C++ `-a -no-vis`: 1024, 2166, 5364, 13978).
+//!   Also `-vis` opens no GLVis socket (C++ would prompt `Continue shaping?
+//!   --> ` at every 4th iteration — the prompt is kept, EOF answers `break`),
+//!   and the mesh writer has MFEM-format deltas (D155).
+//! * Tri3 meshes keep the conforming `closure_refine` path (green bisection).
 
 use fem_io::mfem::write_mfem_file;
 use fem_mesh::topology::MeshTopology;
@@ -94,6 +99,43 @@ fn build_sample_grid(dim: usize, sd: usize) -> Vec<Vec<f64>> {
     points
 }
 
+/// MFEM `GlobGeometryRefiner.Refine(Geometry::SQUARE, sd, 1)` → `RefPts`
+/// (fem/geom.cpp): the (sd+1)² nodal points of the **[-1,1]²** reference
+/// square (`ip.x = cp[i], ip.y = cp[j]` — x fastest), not the [0,1] grid the
+/// simplex path uses.
+fn build_sample_grid_square(sd: usize) -> Vec<Vec<f64>> {
+    let mut points = Vec::with_capacity((sd + 1) * (sd + 1));
+    for jj in 0..=sd {
+        for ii in 0..=sd {
+            points.push(vec![
+                2.0 * ii as f64 / sd as f64 - 1.0,
+                2.0 * jj as f64 / sd as f64 - 1.0,
+            ]);
+        }
+    }
+    points
+}
+
+/// MFEM `ElementTransformation::Transform` for a Quad4 (bilinear
+/// `IsoparametricTransformation`, straight-sided quads).
+fn transform_quad(mesh: &Mesh<2>, e: u32, u: f64, v: f64) -> [f64; 2] {
+    let ns = mesh.elem_nodes(e);
+    // MFEM SQUARE node order: v0(-1,-1), v1(1,-1), v2(1,1), v3(-1,1).
+    let n = [
+        (1.0 - u) * (1.0 - v) * 0.25,
+        (1.0 + u) * (1.0 - v) * 0.25,
+        (1.0 + u) * (1.0 + v) * 0.25,
+        (1.0 - u) * (1.0 + v) * 0.25,
+    ];
+    let (mut x, mut y) = (0.0f64, 0.0f64);
+    for (k, &node) in ns.iter().enumerate() {
+        let c = mesh.coords_of(node);
+        x += n[k] * c[0];
+        y += n[k] * c[1];
+    }
+    [x, y]
+}
+
 fn compute_aniso_type(mats: &[i32], dim: usize, sd: usize, n_samples: usize) -> u32 {
     let s = sd + 1;
     let tol = (n_samples / 10) as i32;
@@ -139,8 +181,8 @@ fn read_mesh(path: &str) -> Result<Mesh<2>, String> {
     m.mesh2d.ok_or_else(|| "Expected 2D mesh".to_string())
 }
 
-fn refine_marked(mesh: &Mesh<2>, marked: &[(u32, u32)]) -> Mesh<2> {
-    use fem_mesh::amr::{refine_uniform, closure_refine_default};
+fn refine_marked(mesh: &Mesh<2>, marked: &[(u32, u32)], nclimit: i32) -> Mesh<2> {
+    use fem_mesh::amr::{closure_refine_default, general_refinement_quad};
 
     if marked.is_empty() {
         return mesh.clone();
@@ -152,8 +194,16 @@ fn refine_marked(mesh: &Mesh<2>, marked: &[(u32, u32)]) -> Mesh<2> {
             closure_refine_default(mesh, &ids, None)
         }
         ElementType::Quad4 => {
-            let _ = marked;
-            refine_uniform(mesh)
+            // C++ `Mesh::GeneralRefinement(refs, -1, nclimit)`: nonconforming
+            // refinement of the marked quads (iso splits; `nc_limit <= 0`
+            // disables the LimitNCLevel propagation, exactly as in MFEM).
+            // NOTE: the refinement *types* (aniso `-a` X/Y bisections) are not
+            // consumed yet — the marked sets are mode-independent, but `-a`
+            // runs therefore diverge from C++ (see the exit-3 note below).
+            let ids: Vec<u32> = marked.iter().map(|&(e, _)| e).collect();
+            let nc_limit = if nclimit > 0 { nclimit as u32 } else { 0 };
+            let (m, _constraints) = general_refinement_quad(mesh, &ids, nc_limit, None);
+            m
         }
         _ => mesh.clone(),
     }
@@ -239,7 +289,15 @@ fn main() {
         let ne = mesh.n_elems();
         if ne == 0 { break; }
 
-        let sample_points = build_sample_grid(dim, sd);
+        // Quad4 meshes sample the [-1,1]² square reference points through the
+        // bilinear quad transformation (MFEM `RefinedGeometry`/`Transform`);
+        // simplex meshes keep the affine `ElementTransformation` path.
+        let is_quad = mesh.element_type(0) == ElementType::Quad4;
+        let sample_points = if is_quad {
+            build_sample_grid_square(sd)
+        } else {
+            build_sample_grid(dim, sd)
+        };
         let n_samples = sample_points.len();
         let mut marked = Vec::new();
 
@@ -249,8 +307,13 @@ fn main() {
             let mut mats = vec![0i32; n_samples];
 
             for (j, sp) in sample_points.iter().enumerate() {
-                let tr = ElementTransformation::from_simplex(&mesh, e);
-                let pt = tr.map_to_physical(sp);
+                let pt: Vec<f64> = if is_quad {
+                    let [x, y] = transform_quad(&mesh, e, sp[0], sp[1]);
+                    vec![x, y]
+                } else {
+                    let tr = ElementTransformation::from_simplex(&mesh, e);
+                    tr.map_to_physical(sp)
+                };
                 let m = material(&pt, &pmin, &pmax);
                 mats[j] = m;
                 matsum += m as i64;
@@ -295,23 +358,23 @@ fn main() {
 
         if marked.is_empty() { break; }
 
-        mesh = refine_marked(&mesh, &marked);
+        mesh = refine_marked(&mesh, &marked, nclimit);
         iter += 1;
     }
 
     write_mfem_file("mandel.mesh", &mesh).expect("write mesh");
     println!("Wrote mandel.mesh ({} elements).", mesh.n_elems());
 
-    // Honest partial delivery: the marked-only nonconforming refinement of
-    // `Mesh::GeneralRefinement(refs, -1, nclimit)` has no quad implementation in
-    // `fem_mesh::amr`, so the element counts diverge from the C++ run.
+    // Honest partial delivery: the default (iso) `GeneralRefinement` path now
+    // matches C++, but `-a` (aniso X/Y bisections of the marked quads) is not
+    // consumed by the quad arm yet, `-vis` opens no GLVis socket, and the mesh
+    // writer has MFEM-format deltas (D155).
     eprintln!(
-        "mandel (Rust port): partial delivery, exit 3. C++ uses \
-         `Mesh::GeneralRefinement(refs, -1, {nclimit})` (nonconforming refinement of the marked \
-         quads only); `fem_mesh::amr` implements conforming/NC refinement for `Tri3` only, so \
-         quad meshes fall back to `refine_uniform`. Element counts therefore diverge from \
-         iteration 2 on (C++ -no-vis: 1024, 2254, 5884, 16006 / 926121 B mandel.mesh; \
-         fem-rs: 1024, 4096, 16384, 65536), and `-vis` opens no GLVis socket."
+        "mandel (Rust port): partial delivery, exit 3. Iso refinement matches C++ \
+         (`Mesh::GeneralRefinement(refs, -1, {nclimit})`: 1024, 2254, 5884, 16006); \
+         remaining gaps: `-a` aniso X/Y bisection types are refined iso instead \
+         (C++ -a -no-vis: 1024, 2166, 5364, 13978), `-vis` opens no GLVis socket, \
+         and the MFEM mesh writer differs from `Mesh::Print` (D155)."
     );
     std::process::exit(3);
 }

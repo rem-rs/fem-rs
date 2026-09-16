@@ -148,7 +148,7 @@ pub fn general_refinement_2d(
     let mut next_node = mesh.n_nodes() as NodeId;
     let mut splits: Vec<EdgeSplit> = Vec::new();
 
-    let mut get_or_create = |key: (NodeId, NodeId),
+    let get_or_create = |key: (NodeId, NodeId),
                              from: NodeId,
                              to: NodeId,
                              s: f64,

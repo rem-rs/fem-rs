@@ -263,32 +263,114 @@ pub fn local_refinement(mesh: &Mesh<2>, marked: &[ElemId]) -> Mesh<2> {
 }
 
 /// Repeatedly refine marked Tri3 elements and their neighbours until no hanging
-/// edges remain (conforming mesh closure).
+/// edges remain (conforming mesh closure), or run the nonconforming (hanging
+/// nodes) quad refinement for Quad4 meshes.
 ///
-/// Mirrors MFEM `Mesh::LocalRefinement` (used by `GeneralRefinement` in ex21):
-/// 1. RED-refine every marked element (4 children);
-/// 2. GREEN-bisect hanging neighbours (element-wise closure loop) until the
-///    mesh is conforming.
+/// * Tri3: mirrors MFEM `Mesh::LocalRefinement` (the conforming
+///   `GeneralRefinement` path used by ex21): 1. RED-refine every marked
+///   element (4 children); 2. GREEN-bisect hanging neighbours (element-wise
+///   closure loop) until the mesh is conforming.
+/// * Quad4: mirrors MFEM `Mesh::NonconformingRefinement` (the nonconforming
+///   `GeneralRefinement(refs, -1, nclimit)` path of the toys mandel/mondrian,
+///   whose `-ncl` default is 1): refine only the marked elements, allowing
+///   hanging nodes, then propagate to neighbours that violate `nc_limit = 1`
+///   (see [`general_refinement_quad`]).  The hanging-node constraints of the
+///   result are available from `general_refinement_quad`/`detect_hanging_quad`
+///   (this stateless entry point drops them, like MFEM drops them for meshes
+///   without a space).
 pub fn closure_refine(
     mesh: &Mesh<2>,
     marked: &[ElemId],
     _max_iter: usize,
     project_boundary: Option<&ProjectionConfig>,
 ) -> Mesh<2> {
-    assert!(
-        mesh.elem_type == ElementType::Tri3,
-        "closure_refine: only Tri3 meshes are supported"
-    );
-
     // MFEM's green closure loop converges by itself (each bisection removes a
     // hanging edge); `max_iter` is kept only for API compatibility.
-    let current = local_refinement(mesh, marked);
+    match mesh.elem_type {
+        ElementType::Tri3 => {
+            let current = local_refinement(mesh, marked);
+            if let Some(config) = project_boundary {
+                project_boundary_to_cad(&current, config, 2)
+            } else {
+                current
+            }
+        }
+        ElementType::Quad4 => {
+            // `nc_limit = 1` = the toys' `-ncl 1` default; MFEM's API default
+            // is 0 (no limit) — pass it explicitly via `general_refinement_quad`.
+            general_refinement_quad(mesh, marked, 1, project_boundary).0
+        }
+        _ => panic!(
+            "closure_refine: unsupported element type {:?} (Tri3/Quad4 only)",
+            mesh.elem_type
+        ),
+    }
+}
+
+/// MFEM `Mesh::GeneralRefinement(refs, nonconforming=-1, nc_limit)` for Quad4
+/// meshes (D160): the nonconforming path `Mesh::NonconformingRefinement`
+/// (mesh.cpp ~11330), i.e. NCMesh 2-D refinement with hanging nodes.
+///
+/// MFEM semantics reproduced here (all splits are iso — MFEM `ref_type`
+/// masked with `0x3` gives `XY` for squares, ncmesh.cpp ~1814):
+/// 1. Refine every marked element in place into the 4 children
+///    `[n0,m01,c,m30], [m01,n1,m12,c], [c,m12,n2,m23], [m30,c,m23,n3]`
+///    (`refine_nonconforming_quad`, midpoint nodes reused across batches like
+///    MFEM's `GetMidEdgeNode` hash).  No neighbour is forced.
+/// 2. If `nc_limit > 0`, loop MFEM `NCMesh::LimitNCLevel`: refine every leaf
+///    whose edge split level exceeds `nc_limit` (`limit_nc_level_quad`,
+///    geometric `EdgeSplitLevel`/`GetLimitRefinements` semantics) until a full
+///    pass finds nothing — this is what forces coarse neighbours of
+///    twice-refined regions and reproduces MFEM's element counts.
+///
+/// Returns the refined mesh plus the P1 hanging-node constraints of the final
+/// mesh (see `detect_hanging_quad`); the Tri3 `closure_refine` path always
+/// returns a conforming mesh, the Quad4 path does not — consumers that build a
+/// constrained space must consume these (the toys only write meshes and drop
+/// them).
+pub fn general_refinement_quad(
+    mesh: &Mesh<2>,
+    marked: &[ElemId],
+    nc_limit: u32,
+    project_boundary: Option<&ProjectionConfig>,
+) -> (Mesh<2>, Vec<super::amr_inner::HangingNodeConstraint>) {
+    use super::amr_inner::{limit_nc_level_quad, refine_nonconforming_quad};
+
+    assert!(
+        mesh.elem_type == ElementType::Quad4,
+        "general_refinement_quad: only Quad4 meshes are supported"
+    );
+
+    if marked.is_empty() {
+        // MFEM `NonconformingRefinement`: empty refinements → `last_operation
+        // = NONE`, mesh unchanged.
+        let m = match project_boundary {
+            Some(config) => project_boundary_to_cad(mesh, config, 2),
+            None => mesh.clone(),
+        };
+        return (m, Vec::new());
+    }
+
+    // 1. `ncmesh->Refine(refinements)` — split the marked elements only.
+    let (mut current, mut constraints) = refine_nonconforming_quad(mesh, marked, None);
+    // 2. `if (nc_limit > 0) ncmesh->LimitNCLevel(nc_limit)` — fixpoint loop.
+    //    Each `refine_nonconforming_quad` call re-detects the full hanging set
+    //    of the refined mesh, so the last batch's constraints describe the
+    //    final mesh.
+    if nc_limit > 0 {
+        loop {
+            let extra = limit_nc_level_quad(&current, nc_limit);
+            if extra.is_empty() { break; }
+            let (m, c) = refine_nonconforming_quad(&current, &extra, None);
+            current = m;
+            constraints = c;
+        }
+    }
 
     if let Some(config) = project_boundary {
-        project_boundary_to_cad(&current, config, 2)
-    } else {
-        current
+        current = project_boundary_to_cad(&current, config, 2);
     }
+    (current, constraints)
 }
 
 /// Convenience overload with a default iteration limit (20).
