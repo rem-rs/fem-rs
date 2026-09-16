@@ -102,9 +102,25 @@ where
     let rtol = cfg.rtol;
     let atol = cfg.atol;
     let max_iter = cfg.max_iter;
-    let level = cfg.effective_print_level();
-    let show_each = level >= PrintLevel::Iterations;
-    let show_summary = level >= PrintLevel::Summary;
+    // D216: explicit level→flags map (MFEM `IterativeSolver::FromLegacyPrintLevel`,
+    // `linalg/solvers.cpp:119`, consumed through `print_options` by
+    // `BPCGSolver::Mult`, `miniapps/solvers/bramble_pasciak.cpp:256-389`).
+    // The derived `Ord` scale cannot express the legacy levels — `WarningsOnly`
+    // (0) and `FirstAndLast` (3) sort *after* `Iterations`, so the old
+    // `level >= PrintLevel::Iterations` test wrongly handed both the
+    // per-iteration history and the summary.  Legacy semantics:
+    // -1: nothing; 0: warnings only; 1: + iteration lines; 2: + summary;
+    // 3: warnings + first/last iteration lines (no summary flag).
+    // Same table as `iterative.rs::CgTrailerGates` (kept local: that type is
+    // module-private and its diagnostic texts are PCG-specific; here they are
+    // the BPCG ones).
+    let (warnings, iterations, summary, first_and_last) = match cfg.effective_print_level() {
+        PrintLevel::Silent => (false, false, false, false),
+        PrintLevel::WarningsOnly => (true, false, false, false),
+        PrintLevel::Summary => (true, false, true, false),
+        PrintLevel::Iterations | PrintLevel::Debug => (true, true, false, false),
+        PrintLevel::FirstAndLast => (true, false, false, true),
+    };
 
     let mut r = vec![0.0; n];
     let mut p = vec![0.0; n];
@@ -129,13 +145,22 @@ where
     // delta = (t, r_red) − (r_bar, r) = (P r, r)
     let mut delta = dot(&t, &r_red) - dot(&r_bar, &r);
     let mut delta0 = delta;
-    if show_each {
-        println!("   Iteration : {:3}  (P r, r) = {}", 0, fmt_g(delta));
+    // MFEM bramble_pasciak.cpp:256 — gate `iterations || first_and_last`;
+    // the first_and_last run tags the line with a trailing " ...".
+    if iterations || first_and_last {
+        println!(
+            "   Iteration : {:3}  (P r, r) = {}{}",
+            0,
+            fmt_g(delta),
+            if first_and_last { " ..." } else { "" }
+        );
     }
     if delta < 0.0 {
-        // P not positive definite — MFEM: converged = false, final_iter = 0.
-        if show_summary {
-            eprintln!(
+        // P not positive definite — MFEM: converged = false, final_iter = 0,
+        // warning on `print_options.warnings` (bramble_pasciak.cpp:264-271),
+        // then return WITHOUT the trailer.
+        if warnings {
+            println!(
                 "BPCG: The preconditioner is not positive definite. (Pr, r) = {}",
                 fmt_g(delta)
             );
@@ -156,14 +181,24 @@ where
 
     apply_n(&g, &mut g_red); // g_red = N·g
     let mut gamma = dot(&g, &g_red) - dot(&g, &p); // gamma = (Ap, p)
-    if gamma == 0.0 {
-        // MFEM: converged = false, final_iter = 0 (nothing advanced yet).
-        return Err(SolverError::ConvergenceFailed {
-            max_iter: 0,
-            residual: delta.sqrt(),
-        });
+    if gamma <= 0.0 {
+        // MFEM bramble_pasciak.cpp:289-295: the operator-not-PD warning fires
+        // before the breakdown check, gated by a nonzero search direction.
+        if dot(&r_bar, &r_bar) > 0.0 && warnings {
+            println!(
+                "BPCG: The operator is not positive definite. (Ar, r) = {}",
+                fmt_g(gamma)
+            );
+        }
+        if gamma == 0.0 {
+            // MFEM: converged = false, final_iter = 0 (nothing advanced yet).
+            return Err(SolverError::ConvergenceFailed {
+                max_iter: 0,
+                residual: delta.sqrt(),
+            });
+        }
+        // gamma < 0 (and != 0): MFEM warned above and keeps iterating.
     }
-    // gamma < 0 (and != 0): MFEM prints a warning but keeps iterating.
 
     let mut converged = false;
     let mut final_iter = max_iter;
@@ -181,8 +216,8 @@ where
         delta = dot(&t, &r_red) - dot(&r_bar, &r);
 
         if delta < 0.0 {
-            if show_summary {
-                eprintln!(
+            if warnings {
+                println!(
                     "BPCG: The preconditioner is not positive definite. (Pr, r) = {}",
                     fmt_g(delta)
                 );
@@ -191,8 +226,11 @@ where
             final_iter = i;
             break;
         }
-        if show_each {
-            println!("   Iteration : {:3}  (P r, r) = {}", i, fmt_g(delta));
+        // MFEM bramble_pasciak.cpp:331 — the per-iteration history is gated by
+        // `print_options.iterations` ALONE (level 1); first_and_last runs
+        // print only the closing line after the loop.
+        if iterations {
+            println!("   Iteration : {:3}  (Pr, r) = {}", i, fmt_g(delta));
         }
         if delta <= del0 {
             converged = true;
@@ -214,27 +252,37 @@ where
         apply_n(&g, &mut g_red);
         gamma = dot(&g, &g_red) - dot(&g, &p); // gamma = (Ap, p)
         if gamma <= 0.0 {
+            // MFEM bramble_pasciak.cpp:358-368: warn (nonzero direction) and
+            // keep iterating; break only on the exact gamma == 0 breakdown.
+            if dot(&r_bar, &r_bar) > 0.0 && warnings {
+                println!(
+                    "BPCG: The operator is not positive definite. (Ar, r) = {}",
+                    fmt_g(gamma)
+                );
+            }
             if gamma == 0.0 {
                 converged = false;
                 final_iter = i;
                 break;
             }
-            // gamma < 0: MFEM warns and keeps iterating (negative alpha).
-            if show_summary && dot(&r_bar, &r_bar) > 0.0 {
-                eprintln!(
-                    "BPCG: The operator is not positive definite. (Ar, r) = {}",
-                    fmt_g(gamma)
-                );
-            }
         }
     }
 
-    if show_summary {
-        if !converged && show_each {
-            println!("BPCG: Number of iterations: {}", final_iter);
-        }
-        let arf = (gamma / delta0).abs().powf(0.5 / final_iter.max(1) as f64);
+    // MFEM trailer (bramble_pasciak.cpp:372-389).
+    if first_and_last && !iterations {
+        println!("   Iteration : {:3}  (Pr, r) = {}", final_iter, fmt_g(delta));
+    }
+    if summary || (warnings && !converged) {
+        println!("BPCG: Number of iterations: {}", final_iter);
+    }
+    if summary || iterations || first_and_last {
+        // MFEM: arf = pow(gamma/delta0, 0.5/final_iter) — raw, like the C++
+        // (a not-PD run can make it NaN; fmt_g spells that like %g).
+        let arf = (gamma / delta0).powf(0.5 / final_iter as f64);
         println!("Average reduction factor = {}", fmt_g(arf));
+    }
+    if warnings && !converged {
+        println!("BPCG: No convergence!");
     }
 
     if !converged {

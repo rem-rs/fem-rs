@@ -936,6 +936,17 @@ fn ref_elem(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
         // D157: the element pairs with the H¹ space's tet dof order —
         // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order).
         (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
+        // D202: orders >= 4 stay on the same H¹ Gauss-Lobatto slots as the
+        // order-3 arms — MFEM `H1_TriangleElement`/`H1_TetrahedronElement`
+        // (entity order) at every p; the assembler's space dispatch
+        // (`assembler.rs::ref_elem_vol_h1`) makes the same choice, and the
+        // D202 unit test below pins slot equality with it.
+        (ElementType::Tri3, o) if o >= 4 => {
+            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
+        }
+        (ElementType::Tet4, o) if o >= 4 => {
+            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
+        }
         _ => panic!("nonlinear ref_elem: unsupported ({et:?}, {order})"),
     }
 }
@@ -1434,6 +1445,52 @@ mod tests {
                         "Jacobian check at ({i},{j}): fd={fd:.3e} an={an:.3e} err={err:.3e}");
                 }
             }
+        }
+    }
+}
+
+// ─── D202: high-order tri/tet table arms ────────────────────────────────────
+#[cfg(test)]
+mod d202_high_order_tables {
+    //! The displacement table must hand back, at every order, the element whose
+    //! slots pair with the H¹ space's DOF numbering — i.e. the assembler's
+    //! space dispatch choice (`ref_elem_vol_for_space`'s H1 branch,
+    //! `assembler.rs::ref_elem_vol_h1`).  Before D202, orders >= 4 fell into
+    //! the fail-fast panic arm.
+
+    use super::ref_elem;
+    use crate::assembler::ref_elem_vol_h1;
+    use fem_element::ReferenceElement;
+    use fem_mesh::element_type::ElementType;
+
+    #[test]
+    fn tri_tet_o4_to_o6_match_space_slots() {
+        for o in 4..=6u8 {
+            let local = ref_elem(ElementType::Tri3, o);
+            let space = ref_elem_vol_h1(ElementType::Tri3, o);
+            assert_eq!(local.n_dofs(), space.n_dofs(), "tri n_dofs at order {o}");
+            assert_eq!(
+                local.dof_coords(),
+                space.dof_coords(),
+                "tri dof_coords at order {o}"
+            );
+            let mut phi = vec![0.0; local.n_dofs()];
+            local.eval_basis(&[0.3, 0.2], &mut phi);
+            let sum: f64 = phi.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-10, "tri partition of unity at order {o}: {sum}");
+
+            let local = ref_elem(ElementType::Tet4, o);
+            let space = ref_elem_vol_h1(ElementType::Tet4, o);
+            assert_eq!(local.n_dofs(), space.n_dofs(), "tet n_dofs at order {o}");
+            assert_eq!(
+                local.dof_coords(),
+                space.dof_coords(),
+                "tet dof_coords at order {o}"
+            );
+            let mut phi = vec![0.0; local.n_dofs()];
+            local.eval_basis(&[0.25, 0.3, 0.2], &mut phi);
+            let sum: f64 = phi.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-10, "tet partition of unity at order {o}: {sum}");
         }
     }
 }

@@ -1,4 +1,5 @@
-//! L² error computation for H(div) / H(curl) vector fields and scalar fields.
+//! L² error computation for H(div) / H(curl) vector fields and scalar fields,
+//! plus the H(div) divergence error (D161).
 //!
 //! 1:1 with MFEM (`fem/gridfunc.cpp`):
 //!
@@ -393,6 +394,141 @@ pub fn compute_hdiv_l2_error_owned<S: FESpace>(
     exact: &dyn Fn(&[f64]) -> Vec<f64>,
 ) -> f64 {
     compute_hdiv_l2_error(space, u, exact)
+}
+
+// ─── H(div) divergence error (MFEM GridFunction::ComputeDivError) ──────────
+
+fn div_error_impl<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact_div: &dyn Fn(&[f64]) -> f64,
+    quad_order: u8,
+    include: Option<&dyn Fn(u32) -> bool>,
+) -> f64 {
+    let space_type = space.space_type();
+    assert!(
+        space_type == SpaceType::HDiv,
+        "div_error_impl: expected an H(div) space, got {space_type:?}; MFEM's \
+         ComputeDivError needs FiniteElement::CalcDivShape, which only the \
+         Raviart-Thomas (H(div)) elements implement (ND elements abort there)"
+    );
+
+    let mesh = space.mesh();
+    let dim = mesh.topological_dim() as usize;
+    let n_elems = mesh.n_elements() as u32;
+
+    let mut err2 = 0.0_f64;
+    for e in 0..n_elems {
+        if !included(include, e) {
+            continue;
+        }
+        let elem_type = mesh.element_type(e);
+        let order = space.element_order(e);
+        let vre = crate::vector_assembler::vec_ref_elem(space_type, elem_type, dim, order);
+        let n_ldofs = vre.n_dofs();
+        let elem_dofs = space.element_dofs(e);
+        debug_assert_eq!(elem_dofs.len(), n_ldofs, "element DOF count mismatch");
+        let signs = space.element_signs(e);
+        let quad = vre.quadrature(quad_order);
+        let mut ref_div = vec![0.0_f64; n_ldofs];
+        let mut phys_div = vec![0.0_f64; n_ldofs];
+
+        // MFEM accumulates per element and adds `fabs(elem_error)` (the
+        // negative-quadrature-weights guard, fem/gridfunc.cpp:3648).
+        let mut elem_error = 0.0_f64;
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (_jac, det_j, xp) = jacobian_and_point(mesh, e, xi, dim);
+            let w = quad.weights[qi] * det_j.abs();
+
+            // div u_h(x) = Σ_i s_i·u_i · div φ̂_i(ξ) / det J — MFEM
+            // `GridFunction::GetDivergence`'s RT branch, `(dofs·divshape) /
+            // Weight` (fem/gridfunc.cpp:1441-1444; Weight = |det J| = det J
+            // for the oriented elements the assembler builds).
+            vre.eval_div(xi, &mut ref_div);
+            crate::vector_assembler::piola_hdiv_div(det_j, &ref_div, &mut phys_div, n_ldofs);
+            let mut duh = 0.0_f64;
+            for i in 0..n_ldofs {
+                let s = match signs {
+                    Some(sg) => sg.get(i).copied().unwrap_or(1.0),
+                    None => 1.0,
+                };
+                duh += u[elem_dofs[i] as usize] * s * phys_div[i];
+            }
+
+            let a = duh - exact_div(&xp);
+            elem_error += w * a * a;
+        }
+        err2 += elem_error.abs();
+    }
+    err2.max(0.0).sqrt()
+}
+
+/// Divergence error `‖div u_h − div u_ex‖_{L²}` of an H(div) field over **all
+/// local elements** — 1:1 with MFEM `GridFunction::ComputeDivError(exdiv)`
+/// (`fem/gridfunc.cpp:3618`): default rule `2·fe->GetOrder() + 3` (with the
+/// RT `GetOrder() == p+1` convention, see [`default_quad_order`]), pointwise
+/// integrand `(GetDivergence(Tr) − exdiv(Tr))²`, per-element accumulation
+/// with the `fabs` guard, `sqrt` at the end.
+///
+/// H(div) only: MFEM's `GetDivergence` reaches `FiniteElement::CalcDivShape`,
+/// which the Nédélec elements do not implement (panics here for non-H(div)
+/// vector spaces, like MFEM's `MFEM_ABORT`).
+pub fn compute_div_error<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact_div: &dyn Fn(&[f64]) -> f64,
+) -> f64 {
+    div_error_impl(space, u, exact_div, default_quad_order(space), None)
+}
+
+/// [`compute_div_error`] with an explicit quadrature order (same role as the
+/// `irs` argument of `GridFunction::ComputeDivError`).
+pub fn compute_div_error_order<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact_div: &dyn Fn(&[f64]) -> f64,
+    quad_order: u8,
+) -> f64 {
+    div_error_impl(space, u, exact_div, quad_order, None)
+}
+
+/// [`compute_div_error`] restricted to the elements for which `include(e)`
+/// holds (parallel owned-element filtering; see
+/// [`compute_hdiv_l2_error_filtered`]).
+pub fn compute_div_error_filtered<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact_div: &dyn Fn(&[f64]) -> f64,
+    include: Option<&dyn Fn(u32) -> bool>,
+) -> f64 {
+    div_error_impl(space, u, exact_div, default_quad_order(space), include)
+}
+
+/// [`compute_div_error_filtered`] with an explicit quadrature order.
+pub fn compute_div_error_filtered_order<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact_div: &dyn Fn(&[f64]) -> f64,
+    quad_order: u8,
+    include: Option<&dyn Fn(u32) -> bool>,
+) -> f64 {
+    div_error_impl(space, u, exact_div, quad_order, include)
+}
+
+/// Full H(div) norm error `sqrt(‖u_h − u_ex‖²_{L²} + ‖div u_h − div u_ex‖²_{L²})`
+/// — 1:1 with MFEM `GridFunction::ComputeHDivError(exsol, exdiv)`
+/// (`fem/gridfunc.cpp:3809`): the L² part from
+/// [`compute_hdiv_l2_error`], the divergence part from
+/// [`compute_div_error`], combined in quadrature.
+pub fn compute_hdiv_full_error<S: FESpace>(
+    space: &S,
+    u: &[f64],
+    exact: &dyn Fn(&[f64]) -> Vec<f64>,
+    exact_div: &dyn Fn(&[f64]) -> f64,
+) -> f64 {
+    let l2 = compute_hdiv_l2_error(space, u, exact);
+    let div = compute_div_error(space, u, exact_div);
+    (l2 * l2 + div * div).sqrt()
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -831,5 +967,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── D161: divergence error ─────────────────────────────────────────────
+
+    /// Exact divergence of the D161 cross-check field U below:
+    /// `div U = (1 + 3y + 2xy²) + (−1 + x − 4x²y)`.
+    const DIV_U: fn(&[f64]) -> f64 =
+        |x| (1.0 + 3.0 * x[1] + 2.0 * x[0] * x[1] * x[1]) + (-1.0 + x[0] - 4.0 * x[0] * x[0] * x[1]);
+
+    /// MFEM cross-check (WSL MFEM 4.10, harness
+    /// `tmp/d161/probe_div_error.cpp`, output
+    /// `tmp/d161/d161_div_err_cpp.txt`).
+    ///
+    /// Same setup as [`mfem_cross_check_quad_rt_l2_error`]: both sides build
+    /// the exact L² projection of the polynomial field
+    /// `U = (1 + x + 2y + 3xy + x²y², −2 + x − y + xy − 2x²y²)` on the same
+    /// space, then evaluate `GridFunction::ComputeDivError(divU)` with the
+    /// default rule `2*fe->GetOrder()+3` (RT: `2(p+1)+3` — exact for these
+    /// integrands, so the numbers are quadrature-independent).  The C++
+    /// `div_norm` row is `ComputeDivError(divU)` of the zero field, i.e.
+    /// `‖div U‖_{L²}` (analytic value `sqrt(31/9) = 1.8559214542766739…`).
+    #[test]
+    fn mfem_cross_check_quad_rt_div_error() {
+        const U: fn(&[f64]) -> Vec<f64> = |x| {
+            let (xi, yi) = (x[0], x[1]);
+            let t = xi * xi * yi * yi;
+            vec![
+                1.0 + xi + 2.0 * yi + 3.0 * xi * yi + t,
+                -2.0 + xi - yi + xi * yi - 2.0 * t,
+            ]
+        };
+
+        // (nref, RT order, DOFs, MFEM div_err, MFEM div_norm)
+        for (nref, order, ndofs, mfem_div_err, mfem_div_norm) in [
+            (0usize, 0u8, 40usize, 2.288_705_473_199_983_41e-1, 1.855_921_454_276_673_99),
+            (0, 1, 144, 1.202_813_060_811_759_59e-2, 1.855_921_454_276_673_32),
+            (2, 0, 544, 5.765_550_851_273_332_22e-2, 1.855_921_454_276_674_88),
+        ] {
+            let mut mesh = Mesh::<2>::unit_square_quad(4);
+            for _ in 0..nref {
+                mesh = fem_mesh::refine_uniform(&mesh);
+            }
+            let space = HDivSpace::new(mesh, order);
+            assert_eq!(space.n_dofs(), ndofs, "RT{order} nref={nref} DOF count");
+
+            // Exact L2 projection (quad order 4 = 3×3 GL is exact here).
+            let q = 4u8;
+            let m = vector_mass(&space, q);
+            let b = VectorAssembler::assemble_linear(&space, &[&VectorRhs(U)], q);
+            let uh = dense_solve(&m, &b);
+
+            let div_err = compute_div_error(&space, &uh, &DIV_U);
+            let div_norm = compute_div_error(&space, &vec![0.0; ndofs], &DIV_U);
+
+            assert!(
+                (div_err - mfem_div_err).abs() < 1e-10,
+                "RT{order} nref={nref}: div_err {div_err:.17e} vs MFEM {mfem_div_err:.17e}"
+            );
+            assert!(
+                (div_norm - mfem_div_norm).abs() < 1e-10,
+                "RT{order} nref={nref}: div_norm {div_norm:.17e} vs MFEM {mfem_div_norm:.17e}"
+            );
+        }
+    }
+
+    /// `(x, 2y)` is in quad RT0 and has `div = 3` — the projection is exact, so
+    /// the divergence error against the *nonzero* `div U = 3` must vanish.
+    /// (Exercises the exact-divergence evaluation, not just the zero field.)
+    #[test]
+    fn hdiv_quad_linear_field_div_error_is_zero() {
+        const U: fn(&[f64]) -> Vec<f64> = |x| vec![x[0], 2.0 * x[1]];
+        const DIV_U: fn(&[f64]) -> f64 = |_| 3.0;
+
+        for order in [0u8, 1u8] {
+            let mesh = Mesh::<2>::unit_square_quad(4);
+            let space = HDivSpace::new(mesh, order);
+            let q = 4u8;
+            let m = vector_mass(&space, q);
+            let b = VectorAssembler::assemble_linear(&space, &[&VectorRhs(U)], q);
+            let uh = dense_solve(&m, &b);
+            let err = compute_div_error(&space, &uh, &DIV_U);
+            assert!(
+                err < 1e-12,
+                "quad RT{order}: linear field div error = {err:.3e}, expected 0"
+            );
+        }
+    }
+
+    /// Solenoidal-flavoured zero case: the constant field `(1, 0)` is in RT0
+    /// (tri and quad) and is divergence-free, so `‖div u_h‖ = 0`.
+    #[test]
+    fn hdiv_rt0_constant_field_div_error_is_zero() {
+        const U: fn(&[f64]) -> Vec<f64> = |_| vec![1.0, 0.0];
+
+        let mesh_q = Mesh::<2>::unit_square_quad(4);
+        let mesh_t = Mesh::<2>::unit_square_tri(4);
+        for (mesh, label) in [(mesh_q, "quad"), (mesh_t, "tri")] {
+            let space = HDivSpace::new(mesh, 0);
+            let q = 4u8;
+            let m = vector_mass(&space, q);
+            let b = VectorAssembler::assemble_linear(&space, &[&VectorRhs(U)], q);
+            let uh = dense_solve(&m, &b);
+            let err = compute_div_error(&space, &uh, &|_| 0.0);
+            assert!(
+                err < 1e-12,
+                "{label} RT0: constant field div error = {err:.3e}, expected 0"
+            );
+        }
+    }
+
+    /// The div error of a nonzero field must be positive (sanity: the
+    /// reconstruction actually diverges), and the filtered/order variants must
+    /// agree with the plain call.
+    #[test]
+    fn div_error_variants_agree_and_are_positive() {
+        let mesh = Mesh::<2>::unit_square_quad(4);
+        let space = HDivSpace::new(mesh, 1);
+        let q = default_quad_order(&space);
+        let u = pseudo_random(space.n_dofs(), 0.71);
+        let exact_div = |x: &[f64]| x[0] + x[1];
+
+        let plain = compute_div_error(&space, &u, &exact_div);
+        assert!(plain > 1e-3, "expected a non-trivial div error, got {plain:.6e}");
+
+        let filtered = compute_div_error_filtered(&space, &u, &exact_div, None);
+        let ordered = compute_div_error_filtered_order(&space, &u, &exact_div, q, None);
+        assert!((plain - filtered).abs() < 1e-15, "filtered(None) differs");
+        assert!((plain - ordered).abs() < 1e-15, "explicit-order differs");
+    }
+
+    /// The composite H(div) norm equals `sqrt(L2² + div²)` of the parts, and a
+    /// projection-exact field gives zero (MFEM `ComputeHDivError`).
+    #[test]
+    fn hdiv_full_error_composition() {
+        const U: fn(&[f64]) -> Vec<f64> = |x| vec![1.0 + 2.0 * x[0], -3.0 + 2.0 * x[1]];
+        const DIV_U: fn(&[f64]) -> f64 = |_| 4.0; // d/dx(1+2x) + d/dy(−3+2y) = 2 + 2
+
+        let mesh = Mesh::<2>::unit_square_quad(4);
+        let space = HDivSpace::new(mesh, 0);
+        let q = 4u8;
+
+        let m = vector_mass(&space, q);
+        let b = VectorAssembler::assemble_linear(&space, &[&VectorRhs(U)], q);
+        let uh = dense_solve(&m, &b);
+
+        let full = compute_hdiv_full_error(&space, &uh, &U, &DIV_U);
+        let l2 = compute_hdiv_l2_error(&space, &uh, &U);
+        let dv = compute_div_error(&space, &uh, &DIV_U);
+        let composed = (l2 * l2 + dv * dv).sqrt();
+        assert!(
+            (full - composed).abs() < 1e-14,
+            "full {full:.17e} vs composed {composed:.17e}"
+        );
+        assert!(full < 1e-12, "projection-exact field: full H(div) error {full:.3e}");
     }
 }
