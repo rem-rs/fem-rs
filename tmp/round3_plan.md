@@ -1838,6 +1838,53 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：④ 的仲裁件沿 round-39 先例"发 interim 后继续施工"——路径本身被 round-39 追认过，但"停手等报告"的纪律仍应遵守；本轮因（a）默认路径逐位不变、（b）3-D 逐位达成、（c）单 hex 块矩阵 diff 证据链完整而追认。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 678**+8ign / element 500 / io 132 / **linalg 69** / linalg-gpu 13+2ign / **mesh 306** / parallel 243 / **solver 266** / space 287）；集成层 **116 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**5m53s**）；pro 层 0 错误。
 
+## 第四十一轮（round 41）：四路并行（中断续作）—— D236 RT 变体 / D242+D179 / D159+D162 / D241+D243+D244
+
+### 0. 本轮形状
+**派单两度被环境中断**（4 路并发两次均断），改单发/双发续作成功。**前次孤儿在途改动经四路独立盘点后全部保留续作**（①"已基本完成且全部正确，零重写"；②"质量成立，核验续作"；③ 修 3 处问题；④ 修 4 处缺陷）——"盘点-不盲信-重验"模式首次实战。
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D236（P1）**RT 默认 open 基 nodal-GL 变体 | ✅ **关闭**（MFEM 探针 768 行逐字节；槽对照 0/576；RT 端到端残差 = 转录精度；LOR 双圣杯绿） |
+| ② | **D242+D179**get_gradient 几何 J + mark_tri 几何表 | ✅ **关闭**（hex/quad/tet/tri 梯度 ≤1.2e-14、C++ 20 点对拍 2.22e-15；曲面 tri 写读 token 级一致） |
+| ③ | **D159+D162**gridfunction_bounds 转正 + Visit 枚举化 | ✅ **关闭**（vs C++ MPI np1 **20/20 行逐位**；compare-dc Example5/Example23 逐字节） |
+| ④ | **D241+D243+D244**locate/findpts 三项 | ✅ **关闭**（缓存 25–129×、逐位不变；高阶族定位 vs MFEM 机器精度——**顺带揪出单项式偏导漏乘真 bug**） |
+
+### 1. ① 路：D236 关闭——`HexRtOpen{GaussLegendre, IntegratedGLL}` 变体分派
+- 架构镜像 `HexNDk` 先例但默认相反：`HexRTk::new` 保持 IntegratedGLL（**LOR 栈按它标定**，MFEM `lor.cpp:317 CheckBasisType` 强制此对），`new_gauss_legendre` = MFEM `RT_FECollection` 默认（`fe_coll.hpp:457–458` 实证）。缩放账本：GL 变体 `V/4`、`div/8`（物理场与 MFEM 逐点相等）；IGLL `V/16`、`div/32`（D227-era 帧债，仅 LOR 内部自洽）。dof_map 两变体逐项相同（round-40 已证）。
+- **数字**：WSL 重编 `probe_rt_gl.cpp` 输出 768 行与存档 dump **逐字节**；awk 逐槽对照 **0/576 failing**；4 个元素测试（含翻转逐槽 1e-12、RT0 两变体恒比 4、GL 真物理面通量=±1）；端到端 RT1 108 token max|diff|=**4.758e-7**（=round-40 存档 6 位转录精度，即清零）、RT2 324 token 通过；LOR 圣杯 `lor_rt_pcg`/`lor_nd_pcg` 双绿；pmaxwell **984/1.313e+00/4.706e+00 逐位**（主会话亲验）。
+- 单纯形 RT 无 ob_type、quad 已分变体——**hex 是唯一欠账，已补齐**。新债 **D245（P2，assembly 仲裁）**：`vec_ref_elem` hex H(div) 臂翻转到 `new_gauss_legendre`（工具层 RT get-values 随即逐位）+ `lor_factory` RT 腿钉回 IGLL（否则圣杯静默失效）+ `postprocess.rs:50` 同步。
+
+### 2. ② 路：D242+D179 关闭
+- **D242**：`evaluate_gradient_at_element` 几何 J 改等参臂（`geo_ref_elem_from_mesh`+`isoparametric_jacobian`，高阶几何走 `geom_coords_of`；仿射单纯形回落角差分；表面网格原度量）。改前重测：hex P1 **2.500e0**/hex P2 **1.350e0**/扭曲 hex 2.693e0/扭曲 quad 7.950e-1 → 修后 **≤1.2e-14**；C++ `GetGradient` 探针（五套网格 = 解析梯度 ±1 ulp，字节一致存档）20 点对拍 **2.220e-15**。测试 `d242_gradient_geometry.rs`（6）。
+- **D179**：mark 旋转 conn 后按 H1 整数重心格标签同步置换几何表槽（`tri_geo_slot_perm`；槽枚举对照 `fe_h1.cpp:451`、旋转方向对照 `triangle.cpp:53`）。改前 12/12 槽错位（line94 0 vs 0.25）→ 修后曲面 tri 整文件 write vs MFEM Save **token 级一致**、读回偏差 ≤2.03e-14。C++ 夹具重生成逐字节。测试 `d179_mark_tri_geometry.rs`（3）+ 4 个 MFEM 夹具入库。
+- 新债 **D250（P2，仲裁）**：`error_estimate.rs` 与 H1/W1/L1 误差臂同病（仿射场 `compute_h1_error`=8.718e0 实测）。
+
+### 3. ③ 路：D159+D162 关闭——`gridfunction_bounds` 转正
+- **D159**：C++ MPI 参考重建重跑逐字节复核（`$HOME/work/d255`）；对照 `fem/bounds.cpp` 全文件逐行移植（`min_ncp_gll_x` 表、`proj=true` 投影、GL 内点、BTreeMap multiset 叶集、`-nb` 的 `numeric_limits::min()` 初值、setw(20) 表格式）；**20/20 场景逐行逐位**（triple-pt-1×3、f_quad2..5、f_hex2..4 × default/-nb 10/-ref 5/-nb 1 NaN 角）+ 新增无参默认路径对拍。serial=GeneratePartitioning(1) 恒等 np1（pdiffusion 先例）。`exit(3)` 收窄至 `-bt`/`-l2`/`-visit`/vdim>1/1-D/非张量；`-vis` 改文档化 no-op（C++ 无 socket 时静默丢表格照打）。
+- **D162**：`load_visit_mesh` 枚举化 `VisitMesh::Mesh2d/Mesh3d`（1-D ⇒ MissingMesh）；修掉在途版引入的 2 个 unused-import 警告；**3-D 测试原先静默 SKIP**（依赖不存在的 Example23）→ tempfile 自足化。compare-dc Example5/Example23 逐字节（`|pressure_0|=6.03246`、`|solution_0|=7.14143`）。fem-io 19 套件全 ok。测试 `d255_example5_fixture.rs`（2）。
+- 新债 **D255**（plbound 晋升 assembly/postproc，仲裁）、**D256** `-bt`、**D257** `-l2`、**D258** `-visit`/vdim>1/1-D、**D259** nb>5 GL Newton ulp 级对齐。
+
+### 4. ④ 路：D241+D243+D244 关闭——locate/findpts 三项
+- **D241**：定位路由 + 双 BVH 按网格地址惰性缓存；**三层失效协议**（crate 内 13 个 mutator 自动失效 / 外部直改 pub 字段自宣布——与 MFEM"改后重新 Setup"同契约 / O(1) 指纹安全网）+ 256 项上限 + 补 `add_vertex_parents` 失效缺口。计时：release 100×100 网格 1e4 次定位 **128.9×**（47.6s→0.37s）、48×48 **25.8×**；结果与原路径**逐位相等**。
+- **D243**：Quad8/Quad9 真等参（节点序 = MFEM H1 order-2）、Prism15/18 `col_of=[3,1,2]`（旧 length-only 匹配还吞 2-D Tri6）、坐标走 `geom_coords_of`（平网格逐位等价）。
+- **D244**：Quad8/Hex20/Prism15（非完全二次元——`incomplete.rs` 是正经族实现非废稿）接入 isoparametric 搜索；**MFEM 对拍揪出真 bug**：`eval_basis_with_grad` 单项式偏导**漏乘其余坐标幂**（值对梯度错；直边网格 J 充当定斜率故旧测试全绿，曲线网格暴露）——修复 + 中心差分常驻测试锁定。对拍 48 点：Quad8 ≤1.67e-16 / Hex20 ≤4.44e-15 / Prism15 ≤8.88e-16（warp 取 serendipity 空间使两侧映射恒等）。Pyramid5 仍回退 legacy（route 单测锁定）。
+- mandel/mondrian 端到端逐位不变（主会话亲验 mandel）。新债 **D262（P3）** VTK 序曲线 Hex20/Prism15 reader 规范化、**D263（P3）** 缓存地址+指纹键控的同址同指纹理论误命中（契约已文档化）。
+
+### 第四十一轮新债务
+- **D245（P2，assembly 仲裁）**：`vec_ref_elem` hex H(div) 臂 → `new_gauss_legendre` + `lor_factory` RT 腿钉回 IGLL + `postprocess.rs:50` 同步——① 路。
+- **D250（P2，仲裁）**：`error_estimate.rs` 与 H1/W1/L1 误差臂同 D242 病（实测仿射场 h1_error 8.718e0）——② 路。
+- **D255（P3，仲裁）** `mod plbound` 晋升 `crates/assembly/src/postproc/plbound.rs`；**D256** `-bt` 投影；**D257** `-l2`；**D258** `-visit`/vdim>1/1-D；**D259** nb>5 GL Newton ulp 对齐——③ 路。
+- **D262（P3）** VTK 序曲线 Hex20/Prism15 reader 规范化；**D263（P3）** 定位缓存地址+指纹键控理论误命中——④ 路。
+- **关闭**：~~D236~~、~~D242~~、~~D179~~、~~D159~~、~~D162~~、~~D241~~、~~D243~~、~~D244~~。
+- 沿用开放：D245/D250/D255–D259/D262/D263、D226/D227/D228、D220、D234/D235、D159 已关闭但 D162 残余（visit 1-D）并入 D258、D179/D180 中 D180 仍开、D191/D192/D188、D170、D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：`fem-element` lib 500→**504**（D236 元素测试 4）；`fem-io` lib 132→**134**（D162 loader 测试）+ `d236_rt_get_values_nodal_gl`（4）+ `d255_example5_fixture`（2）；`fem-mesh` lib 306→**312** + `d242_gradient_geometry`（6）+ `d179_mark_tri_geometry`（3）+ `d260_high_order_families`（3）+ `d260_locator_cache`（12+1ign）+ 4 个 MFEM 夹具。全部实跑确认。
+- **主会话亲验**（不是转述）：八套件实跑绿（d236/d255/d158/d242/d179/d260×2/d224/d230/d246）；pmaxwell 984/1.313e+00/4.706e+00、mandel 2254/5884/16006、`lor_rt_pcg` 三抽查复现。
+- **流程注记**：① **派单两度 4 路并发被打断**（环境原因），改单发/双发后全部成功——**代理并发上限在本环境表现为 1–2 路稳定**，下轮派单直接按 ≤2 路一批。② **孤儿改动可救**：四路前次在途工作经独立盘点全部保留（④ 修 4 处、③ 修 3 处、①② 零纠错）——"盘点-不盲信-重验"是中断恢复的正解；`incomplete.rs` 字面名差点误判为废稿。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 678+8ign / **element 504** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **122 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**6m13s**）；pro 层 0 错误。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。

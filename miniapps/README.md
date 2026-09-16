@@ -58,15 +58,16 @@ miniapps/
 │   │                            （`999`、注释行里的 `211`）则明确注明"C++ 同样不认"。
 │   │                            输出行改用 `fem_solver::fmt_g`（C++ 6 位有效数字）；**未知命令行
 │   │                            选项**同样按 `OptionsParser` 打 `Unrecognized option:` + exit 1
-│   ├── gridfunction_bounds.rs ← ⚠️ **round 32：改 `exit(3)` + 缺口清单**（旧版两列打印同一个
-│   │                            数值）。C++ 该程序是 **MPI-only**（`Mpi::Init`/`ParMesh`/
-│   │                            `ParGridFunction`/`MPI_Allreduce`，已 grep 源码确认）⇒ 串行
-│   │                            MFEM 编不出来、**无参考数字可测**，以下按源码读出：缺
-│   │                            `EstimateFunctionMinimum/Maximum`（第二列 `-rd/-rt`）、缺真
-│   │                            `GetElementBounds(…, ref)`（fem-rs 的 `get_element_bounds()`
-│   │                            按 `order` 细分且忽略 `ref`）、`-bt`/`-l2`（`H1Space::new`
-│   │                            无 basis type）、`-visit`、GLVis。现完整解析 CLI、打印全部
-│   │                            选项值（不再静默忽略）、`-nb n>1` 真做 `n^dim` 暴力搜索
+│   ├── gridfunction_bounds.rs ← ✅ **round 41（D159）：转正**——`GetElementBounds(…, ref)`
+│   │                            与 `EstimateFunctionMinimum/Maximum` 按 `fem/bounds.cpp`
+│   │                            全文件逐行移植（`min_ncp_gll_x` 表、`proj=true` 线性投影、
+│   │                            GL 内点、`-nb` 的 `numeric_limits::min()` 初值）；vs C++ MPI
+│   │                            4.10 np1（serial=GeneratePartitioning(1) 恒等）**20/20 场景
+│   │                            逐行逐位**（triple-pt-1 / f_quad2-5 / f_hex2-4 ×
+│   │                            default/-nb 10/-ref 5/-nb 1）。`exit(3)` 收窄至
+│   │                            `-bt`/`-l2`/`-visit`/vdim>1/1-D/非张量（=D256–D258）；
+│   │                            `-vis` 为文档化 no-op。完整 CLI 解析与 `-nb n^dim`
+│   │                            暴力搜索自 round 32 沿用
 │   ├── display_basis.rs       ← (b) 基函数展示 (无 GLVis; H1/ND/RT/L2,
 │   │                            vsize 与 C++ 逐位一致, 32/34 组合;
 │   │                            hex L2 ≥P2 为 fem-rs 缺口; C++ `-no-vis` 只打 4 行 header)
