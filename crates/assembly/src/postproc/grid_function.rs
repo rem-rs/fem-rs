@@ -836,9 +836,25 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     /// Evaluate the physical gradient ∇u_h at reference point `xi` on element `elem`.
     ///
     /// Returns a vector of length `dim` containing `[∂u/∂x, ∂u/∂y, ...]`.
+    ///
+    /// D242: the geometric Jacobian is the **isoparametric (element-wise)
+    /// one at `xi`** — MFEM's `GridFunction::GetGradient(T, grad)`
+    /// (`fem/gridfunc.cpp:1575`) computes
+    /// `grad = T.InverseJacobian()ᵀ · dshapeᵀ lval`, so the inverse Jacobian
+    /// and the reference `dshape` live on the *same* reference domain.  The
+    /// previous corner-difference `simplex_jacobian` is exact for affine
+    /// simplices only: on hexes it is the [0,1]³→physical map (full `h` per
+    /// axis) while the HexQk/HexL2GL bases live on [-1,1]³ (`h/2` per axis),
+    /// so every hex gradient came out at half strength (the scalar twin of
+    /// the D158 vector bug), and warped quads/hexes have a Jacobian that is
+    /// not constant at all.  Same arm as the vector paths
+    /// (`evaluate_vector_at_element` & co., round 39/40):
+    /// `geo_ref_elem_from_mesh` + `isoparametric_jacobian` through the
+    /// geometry table, corner-difference fallback for affine simplices.
     pub fn evaluate_gradient_at_element(&self, elem: u32, xi: &[f64]) -> Vec<f64> {
         let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
+        let is_volume = mesh.dim() as usize == dim;
         let order = self.space.order();
         let elem_type = mesh.element_type(elem);
         let ref_elem = ref_elem_vol_for_space(self.space, elem_type, order);
@@ -847,8 +863,27 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let elem_dofs = self.space.element_dofs(elem);
         let nodes = mesh.element_nodes(elem);
 
-        // Jacobian and its inverse-transpose.
-        let (jac, _det_j) = simplex_jacobian(mesh, nodes, dim);
+        // Jacobian and its inverse-transpose.  High-order geometry reads the
+        // geometry table (`geometry_nodes`/`geom_coords_of`); surface meshes
+        // keep the historical `simplex_jacobian` metric treatment.
+        let geo_nodes = if mesh.geom_order() > 1 {
+            mesh.geometry_nodes(elem)
+        } else {
+            nodes
+        };
+        let (jac, _det_j) = if is_volume {
+            match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+                Some(geo) => {
+                    let (j, _d, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                        mesh, geo_nodes, geo.as_ref(), xi, dim,
+                    );
+                    (j, _d)
+                }
+                None => simplex_jacobian(mesh, geo_nodes, dim),
+            }
+        } else {
+            simplex_jacobian(mesh, geo_nodes, dim)
+        };
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
         // Reference gradients.

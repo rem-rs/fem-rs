@@ -811,9 +811,24 @@ pub fn refine_uniform(mesh: &Mesh<2>) -> Mesh<2> {
 /// rotated local ordering (see `refine_uniform_2d_mixed`).
 ///
 /// Quad4 elements are left untouched (MFEM only rotates triangles).
+///
+/// D179: when the mesh carries high-order geometry
+/// ([`GeometryData`]), the rotation is followed — as in MFEM's
+/// `Mesh::Finalize(refine = 1)` → `DoNodeReorder` (`mesh/mesh.cpp:3255`) — by
+/// permuting that element's geometry-table slots into the rotated local
+/// frame: MFEM moves every `nodes` grid-function value to the slot the
+/// rotated element-local dof ordering assigns it; here the slots are the
+/// explicit [`GeometryData::conn`] entries.  Vertex slots and the edge-dof
+/// blocks follow the (orientation-preserving) cyclic relabeling; interior
+/// slots follow the H1 dof lattice under the same relabeling, so the
+/// permutation is a single per-element scatter that depends only on the
+/// geometry order and the shift.
 pub fn mark_tri_mesh_for_refinement(mesh: &mut Mesh<2>) {
     const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
     let n_elems = mesh.n_elems();
+    // D179: `perm[shift]` maps each new geometry slot to the old slot whose
+    // dof it receives, computed once from the H1TriPk dof lattice.
+    let mut perms: [Option<Vec<usize>>; 3] = [None, None, None];
     for e in 0..n_elems as ElemId {
         if mesh.element_type_at(e) != ElementType::Tri3 {
             continue;
@@ -854,7 +869,70 @@ pub fn mark_tri_mesh_for_refinement(mesh: &mut Mesh<2>) {
             _ => { mesh.conn[start] = c; mesh.conn[start + 1] = a; mesh.conn[start + 2] = b; }
         }
         debug_assert!(end <= mesh.conn.len());
+        // D179: permute the geometry table slots with the same rotation.
+        if let Some(ref mut geo) = mesh.geometry {
+            let npe = geo.nodes_per_elem;
+            let order = geo.order as usize;
+            if npe != (order + 1) * (order + 2) / 2 || geo.conn.len() < (e as usize + 1) * npe {
+                continue; // not a triangle geometry table in H1TriPk slot order
+            }
+            let perm = perms[shift].get_or_insert_with(|| tri_geo_slot_perm(order, shift));
+            let base = e as usize * npe;
+            let rotated: Vec<NodeId> = perm.iter().map(|&o| geo.conn[base + o]).collect();
+            geo.conn[base..base + npe].copy_from_slice(&rotated);
+        }
     }
+}
+
+/// D179: geometry-slot permutation of an order-`p` H1 triangle under the
+/// longest-edge rotation, `perm[shift][new_slot] = old_slot`.
+///
+/// The element's dof slots sit on the integer barycentric lattice
+/// `(i, j)` (barycentric `(p−i−j, i, j)/p`) in MFEM `H1_TriangleElement`'s
+/// enumeration — vertices, then the edge blocks (edge 0 counted from `v0`,
+/// edge 1 from `v1`, edge 2 from `v2`), then the interior in `j`-outer
+/// `i`-inner order.  The enumeration is independent of the 1-D point family
+/// (GLL or equispaced), so the permutation works from these integer labels —
+/// not from `H1TriPk::dof_coords`, whose GLL abscissas for `p ≥ 4` are not
+/// lattice rationals.
+///
+/// Relabeling the local vertices `[v0,v1,v2] →
+/// [v_shift, v_{shift+1}, v_{shift+2}]` (indices mod 3) maps barycentric
+/// coordinates by `λ_old[j] = λ_new[(j − shift) mod 3]`, i.e. in lattice
+/// coordinates a new slot `(i, j)` receives the dof that sat at
+///   * shift 1: `(p−i−j, i)`
+///   * shift 2: `(j, p−i−j)`
+/// of the old frame (vertices and edge blocks follow the orientation-
+/// preserving relabeling; interior slots permute through the same rule).
+fn tri_geo_slot_perm(order: usize, shift: usize) -> Vec<usize> {
+    let p = order as i64;
+    // Integer lattice label `(i, j)` of every H1 slot, in slot order.
+    let mut lat = vec![(0, 0), (p, 0), (0, p)];
+    for i in 1..p as i64 {
+        lat.push((i, 0)); // edge 0 (v0→v1)
+    }
+    for i in 1..p as i64 {
+        lat.push((p - i, i)); // edge 1 (v1→v2)
+    }
+    for i in 1..p as i64 {
+        lat.push((0, p - i)); // edge 2 (v2→v0)
+    }
+    for j in 1..p as i64 {
+        for i in 1..(p - j) {
+            lat.push((i, j)); // interior, j outer / i inner
+        }
+    }
+    let mut index = HashMap::new();
+    for (s, &k) in lat.iter().enumerate() {
+        index.insert(k, s);
+    }
+    debug_assert_eq!(index.len(), lat.len());
+    lat.iter()
+        .map(|&(i, j)| {
+            let old = if shift == 1 { (p - i - j, i) } else { (j, p - i - j) };
+            index[&old]
+        })
+        .collect()
 }
 
 /// Uniform refinement of a mixed Tri3 + Quad4 2-D mesh, matching MFEM's
