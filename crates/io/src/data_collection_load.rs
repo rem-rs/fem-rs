@@ -8,10 +8,9 @@
 //! (the helper functions `mesh_from_slice` / `gfs_from_slice` are already
 //! available as `read_mesh_slice` / `read_gf_slice` in the same file).
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::data_collection::{DcField, read_visit_root, read_mesh_slice, read_gf_slice};
+use crate::data_collection::{read_visit_root, read_mesh_slice, read_gf_slice};
 
 /// Errors that can occur while loading a VisIt data collection.
 #[derive(Debug)]
@@ -91,24 +90,60 @@ pub fn load_visit_collection(
     Ok((cycle, mesh_txt, fields))
 }
 
-/// Convenience: build a `Mesh<3>` directly from a root file.
+/// Dimension-tagged mesh loaded from a VisIt data collection (D162).
 ///
-/// This is a thin wrapper around `load_visit_collection` + `fem_io::mfem::read_mfem`.
-pub fn load_visit_mesh(root_path: &Path) -> Result<(usize, fem_mesh::Mesh<3>), DcLoadError> {
+/// `VisItDataCollection::Load()` in C++ returns a `Mesh*` whose dimension is
+/// whatever the saved `mesh.<rank>` slice carries; the loader must not assume
+/// a topological dimension. This enum restores that dimension-neutrality for
+/// the strongly-typed `Mesh<D>` in fem-rs: dispatch on the parsed MFEM mesh
+/// (2-D sections populate `MfemFile::mesh2d`, 3-D sections
+/// `MfemFile::mesh3d`) instead of hard-coding one arm.
+#[derive(Debug, Clone)]
+pub enum VisitMesh {
+    /// A 2-D mesh slice (`MfemFile::mesh2d`).
+    Mesh2d(fem_mesh::Mesh<2>),
+    /// A 3-D mesh slice (`MfemFile::mesh3d`).
+    Mesh3d(fem_mesh::Mesh<3>),
+}
+
+impl VisitMesh {
+    /// Number of elements, regardless of dimension.
+    pub fn n_elems(&self) -> usize {
+        match self {
+            VisitMesh::Mesh2d(m) => m.n_elems(),
+            VisitMesh::Mesh3d(m) => m.n_elems(),
+        }
+    }
+}
+
+/// Load a VisIt data collection from its root file and build the `Mesh`.
+///
+/// The mesh dimension is detected from the slice itself: a 2-D mesh yields
+/// [`VisitMesh::Mesh2d`], a 3-D mesh [`VisitMesh::Mesh3d`] (a 1-D slice has
+/// no `Mesh<D>` representation in fem-rs and errors with
+/// [`DcLoadError::MissingMesh`]).
+///
+/// Returns `(cycle, mesh)`.  See [`load_visit_collection`] for the root-file
+/// layout and the metadata-only semantics of `read_visit_root`.
+pub fn load_visit_mesh(root_path: &Path) -> Result<(usize, VisitMesh), DcLoadError> {
     let (cycle, mesh_txt, _fields) = load_visit_collection(root_path)?;
     let mfem = crate::mfem::read_mfem(mesh_txt.as_bytes())
         .map_err(|e| DcLoadError::Json(format!("mesh parse error: {e}")))?;
-    let mesh = mfem.mesh3d.ok_or(DcLoadError::MissingMesh)?;
+    let mesh = match mfem.mesh2d {
+        Some(m) => VisitMesh::Mesh2d(m),
+        None => VisitMesh::Mesh3d(mfem.mesh3d.ok_or(DcLoadError::MissingMesh)?),
+    };
     Ok((cycle, mesh))
 }
 
-/// Convenience: build a `Mesh<3>` + all field data from a root file.
+/// Load a VisIt data collection and return the `Mesh` + all field data.
 ///
-/// This loads the mesh and returns the raw field data (name, basis, vdim, values)
-/// alongside it. The caller can construct `GridFunction` objects from the field data.
+/// This loads the mesh (dimension-tagged, see [`VisitMesh`]) and returns the
+/// raw field data `(name, basis, vdim, values)` alongside it. The caller can
+/// construct `GridFunction` objects from the field data.
 pub fn load_visit_collection_with_mesh(
     root_path: &Path,
-) -> Result<(usize, fem_mesh::Mesh<3>, Vec<(String, String, u32, Vec<f64>)>), DcLoadError> {
+) -> Result<(usize, VisitMesh, Vec<(String, String, u32, Vec<f64>)>), DcLoadError> {
     let (cycle, _mesh_txt, fields) = load_visit_collection(root_path)?;
     let (_cycle2, mesh) = load_visit_mesh(root_path)?;
     Ok((cycle, mesh, fields))
@@ -117,6 +152,8 @@ pub fn load_visit_collection_with_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_collection::{DcField, VisItCollection};
+    use std::path::PathBuf;
 
     /// Test: parse the existing Example23 sample root file.
     #[test]
@@ -134,7 +171,7 @@ mod tests {
         assert!(!fields.is_empty(), "should have at least one field");
     }
 
-    /// Test: load_visit_mesh returns a valid Mesh<3>
+    /// Test: load_visit_mesh returns `VisitMesh::Mesh3d` for a 3-D slice.
     #[test]
     fn load_example23_mesh() {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
@@ -146,6 +183,152 @@ mod tests {
         }
         let (cycle, mesh) = load_visit_mesh(&root).expect("load mesh failed");
         assert_eq!(cycle, 0);
+        assert!(matches!(mesh, VisitMesh::Mesh3d(_)), "Example23 is a 3-D slice");
         assert!(mesh.n_elems() > 0, "mesh should have elements");
+    }
+
+    /// One-quad 2-D MFEM mesh slice (v1.0 text, with a boundary element).
+    const QUAD_MESH_TXT: &str = concat!(
+        "MFEM mesh v1.0\n",
+        "\n",
+        "dimension\n",
+        "2\n",
+        "\n",
+        "elements\n",
+        "1\n",
+        "1 3 0 1 2 3\n",
+        "\n",
+        "boundary\n",
+        "4\n",
+        "1 1 0 1\n",
+        "1 1 1 2\n",
+        "1 1 2 3\n",
+        "1 1 3 0\n",
+        "\n",
+        "vertices\n",
+        "4\n",
+        "2\n",
+        "0 0\n",
+        "1 0\n",
+        "1 1\n",
+        "0 1\n",
+    );
+
+    /// Test (D162): a **2-D** VisIt collection round-trips through
+    /// `load_visit_mesh` as `VisitMesh::Mesh2d` — the pre-D162 loader
+    /// hard-coded `mfem.mesh3d` and failed on every 2-D collection.
+    #[test]
+    fn load_visit_mesh_2d_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut dc = VisItCollection::new("D255Quad");
+        dc.set_prefix_path(dir.path().to_str().unwrap());
+        dc.set_cycle(0);
+        dc.spatial_dim = 2;
+        dc.topo_dim = 2;
+        dc.register_field(DcField::nodes(
+            "u",
+            "H1_2D_P1",
+            1,
+            1,
+            vec![1.0, 2.0, 3.0, 4.0],
+        ));
+        dc.save(0, QUAD_MESH_TXT).expect("save failed");
+
+        let root = dir.path().join("D255Quad_000000.mfem_root");
+        let (cycle, mesh, fields) =
+            load_visit_collection_with_mesh(&root).expect("load failed");
+        assert_eq!(cycle, 0);
+        assert!(matches!(mesh, VisitMesh::Mesh2d(_)), "2-D slice must yield Mesh2d");
+        assert_eq!(mesh.n_elems(), 1);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "u");
+        assert_eq!(fields[0].3, vec![1.0, 2.0, 3.0, 4.0], "field DOFs must round-trip");
+
+        let (cycle2, mesh2) = load_visit_mesh(&root).expect("load mesh failed");
+        assert_eq!(cycle2, 0);
+        assert!(matches!(mesh2, VisitMesh::Mesh2d(_)));
+    }
+
+    /// One-hex 3-D MFEM mesh slice (v1.0 text, with boundary quads).
+    const HEX_MESH_TXT: &str = concat!(
+        "MFEM mesh v1.0\n",
+        "\n",
+        "dimension\n",
+        "3\n",
+        "\n",
+        "elements\n",
+        "1\n",
+        "1 5 0 1 2 3 4 5 6 7\n",
+        "\n",
+        "boundary\n",
+        "6\n",
+        "1 3 0 1 2 3\n",
+        "1 3 1 5 6 2\n",
+        "1 3 0 4 5 1\n",
+        "1 3 3 7 6 2\n",
+        "1 3 0 4 7 3\n",
+        "1 3 4 5 6 7\n",
+        "\n",
+        "vertices\n",
+        "8\n",
+        "3\n",
+        "0 0 0\n",
+        "1 0 0\n",
+        "1 1 0\n",
+        "0 1 0\n",
+        "0 0 1\n",
+        "1 0 1\n",
+        "1 1 1\n",
+        "0 1 1\n",
+    );
+
+    /// Test (D162): a 3-D collection still loads — `VisitMesh::Mesh3d`, and
+    /// the parsed 3-D mesh equals the `mesh3d` arm the old hard-coded loader
+    /// returned (same element/node counts).  Built from a self-made hex
+    /// collection so the test runs without the repo's (optional) Example23
+    /// fixture.
+    #[test]
+    fn load_visit_mesh_3d_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut dc = VisItCollection::new("D255Hex");
+        dc.set_prefix_path(dir.path().to_str().unwrap());
+        dc.set_cycle(0);
+        dc.spatial_dim = 3;
+        dc.topo_dim = 3;
+        dc.register_field(DcField::nodes(
+            "u",
+            "H1_3D_P1",
+            1,
+            1,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        ));
+        dc.save(0, HEX_MESH_TXT).expect("save failed");
+
+        let root = dir.path().join("D255Hex_000000.mfem_root");
+        let (cycle, mesh, fields) =
+            load_visit_collection_with_mesh(&root).expect("load failed");
+        assert_eq!(cycle, 0);
+        let VisitMesh::Mesh3d(m3) = mesh else {
+            panic!("expected Mesh3d");
+        };
+        assert_eq!(m3.n_elems(), 1);
+        assert_eq!(fields[0].3.len(), 8, "field DOFs must round-trip");
+
+        // Same result as parsing the slice directly (the pre-D162 loader's
+        // `mfem.mesh3d` arm).
+        let mfem =
+            crate::mfem::read_mfem(HEX_MESH_TXT.as_bytes()).expect("direct read failed");
+        let direct = mfem.mesh3d.expect("direct 3-D mesh");
+        assert_eq!(m3.n_elems(), direct.n_elems());
+        assert_eq!(m3.element_nvertices(), direct.element_nvertices());
+
+        // Optional: the repo's Example23 sample, when present, is also 3-D.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let root = PathBuf::from(&manifest_dir)
+            .join("../output/Example23_000000.mfem_root");
+        if root.exists() {
+            let (_cycle, mesh) = load_visit_mesh(&root).expect("load failed");
+            assert!(matches!(mesh, VisitMesh::Mesh3d(_)), "Example23 is a 3-D slice");
+        }
     }
 }

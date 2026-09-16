@@ -462,6 +462,16 @@ fn gf_text(f: &DcField) -> String {
 }
 
 /// Parse a `.mfem_root` JSON file and extract field metadata.
+///
+/// **Semantics (D162):** this function reads *metadata only* — the `cycle`,
+/// the domain count, and each field's name/basis/order/lod/vdim tags. Every
+/// returned `DcField` carries `values: Vec::new()`: the `.mfem_root` file
+/// contains no numeric field data (MFEM keeps the DOFs in the separate
+/// `<cycle>/<field>.%06d` slice files), so this function never fills
+/// `values`. Callers that need the DOF data must read the slices themselves
+/// (`read_gf_slice`), as `load_visit_collection` does — feeding the fields
+/// returned here straight into a comparison prints empty/`-0` values (the
+/// round-32 `compare-dc` root cause).
 pub fn read_visit_root(root_path: &Path) -> std::io::Result<(usize, usize, Vec<DcField>)> {
     let content = fs::read_to_string(root_path)?;
     let content = content.trim();
