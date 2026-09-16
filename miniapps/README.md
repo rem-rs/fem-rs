@@ -661,10 +661,15 @@ miniapps/
 │   │                            984 / L2 1.313e+00 / 残差 4.706e+00 逐位（仅 PCG 迭代数
 │   │                            不复刻：HypreAMS/Jacobi + rtol 1e-6 vs 复块 GS +
 │   │                            rtol 1e-12，pacoustics 先例）。
-│   │                            仍 `exit(3)`：`-prob 2/3/4`（PML：空间变**矩阵**系数
-│   │                            在 assembly，D172 4/4 残余 = **D211** 缺口清单，
-│   │                            `tmp/d211_pml_gap.md`）、`-pmg`、AMR。
-│   │                            **round 38（D195）**：serial
+│   │                            仍 `exit(3)`：`-prob 3/4`（scatter.mesh +
+│   │                            GSLIB 点源）、`-pmg`、AMR。
+│   │                            **round 39（D211 = D172 4/4 全关）**：`-prob 2`
+│   │                            转正——`CartesianPML` 移植（`util/pml.rs`）+
+│   │                            9 个 Dpg 空间变系数积分器 + 逐 trial 块求积规则
+│   │                            （`set_trial_quad_order`，默认路径逐位不变）；
+│   │                            2-D 对拍 np1/np2/sc 逐位（113/1.132e+00、
+│   │                            417/1.090e+00）；3-D 已接线但残差 3% 差 =
+│   │                            **D219**。round 38（D195）：serial
 │   │                            `ComplexDPGWeakForm::compute_residual` 的 ND 迹
 │   │                            双折号已修（MFEM 语义 = 存未折号块 + 取时一次；
 │   │                            修后 serial 残差 4.706293799742669 = C++ np1
