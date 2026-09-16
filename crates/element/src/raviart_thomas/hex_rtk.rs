@@ -23,7 +23,11 @@
 //!   used by the vector assembler is geometrically consistent across
 //!   neighbouring hexes;
 //! - three interior blocks of `k(k+1)^2` dofs (x/y/z components, closed
-//!   interior index `1..=k` innermost per MFEM's loop order).
+//!   interior index `1..=k` innermost per MFEM's loop order), with MFEM's
+//!   reference orientation flips baked in (D225): interior dofs whose closed
+//!   block index is `<= k/2` carry a negative sign (MFEM
+//!   `dof_map = -1 - dof_map`), i.e. for `RT2` the first interior closed
+//!   index of every component flips.
 //!
 //! Each face-block function carries the sign of its outward normal
 //! (`s = -1` on the −x/−y/−z faces, `+1` on +x/+y/+z) so that the nominal
@@ -154,12 +158,15 @@ impl VectorReferenceElement for HexRTk {
         debug_assert_eq!(off, 6 * m * m);
 
         // Interior blocks (k >= 1), MFEM loop order (closed-interior index
-        // innermost): x: c_i(x)·o_j(y)·o_l(z), i = 1..=k.
+        // innermost): x: c_i(x)·o_j(y)·o_l(z), i = 1..=k.  D225: MFEM's
+        // reference orientation flips (`dof_map = -1 - dof_map` for the
+        // closed block index `<= k/2`) are baked in.
         if k >= 1 {
             for l in 0..m {
                 for j in 0..m {
                     for i in 1..=k {
-                        values[off * 3] = cx[i] * oy[j] * oz[l];
+                        let s = if i <= k / 2 { -1.0 } else { 1.0 };
+                        values[off * 3] = s * cx[i] * oy[j] * oz[l];
                         off += 1;
                     }
                 }
@@ -167,17 +174,19 @@ impl VectorReferenceElement for HexRTk {
             // y: o_i(x)·c_j(y)·o_l(z), j = 1..=k.
             for l in 0..m {
                 for j in 1..=k {
+                    let s = if j <= k / 2 { -1.0 } else { 1.0 };
                     for i in 0..m {
-                        values[off * 3 + 1] = ox[i] * cy[j] * oz[l];
+                        values[off * 3 + 1] = s * ox[i] * cy[j] * oz[l];
                         off += 1;
                     }
                 }
             }
             // z: o_i(x)·o_j(y)·c_l(z), l = 1..=k.
             for l in 1..=k {
+                let s = if l <= k / 2 { -1.0 } else { 1.0 };
                 for j in 0..m {
                     for i in 0..m {
-                        values[off * 3 + 2] = ox[i] * oy[j] * cz[l];
+                        values[off * 3 + 2] = s * ox[i] * oy[j] * cz[l];
                         off += 1;
                     }
                 }
@@ -234,23 +243,26 @@ impl VectorReferenceElement for HexRTk {
             for l in 0..m {
                 for j in 0..m {
                     for i in 1..=k {
-                        div_vals[off] = dcx[i] * oy[j] * oz[l];
+                        let s = if i <= k / 2 { -1.0 } else { 1.0 };
+                        div_vals[off] = s * dcx[i] * oy[j] * oz[l];
                         off += 1;
                     }
                 }
             }
             for l in 0..m {
                 for j in 1..=k {
+                    let s = if j <= k / 2 { -1.0 } else { 1.0 };
                     for i in 0..m {
-                        div_vals[off] = ox[i] * dcy[j] * oz[l];
+                        div_vals[off] = s * ox[i] * dcy[j] * oz[l];
                         off += 1;
                     }
                 }
             }
             for l in 1..=k {
+                let s = if l <= k / 2 { -1.0 } else { 1.0 };
                 for j in 0..m {
                     for i in 0..m {
-                        div_vals[off] = ox[i] * oy[j] * dcz[l];
+                        div_vals[off] = s * ox[i] * oy[j] * dcz[l];
                         off += 1;
                     }
                 }
@@ -323,35 +335,38 @@ impl VectorReferenceElement for HexRTk {
             }
         }
         if k >= 1 {
-            // x-comp interior: Phi = (c_i(x)·o_j(y)·o_l(z), 0, 0)
-            //   curl = (0, c_i·o_j·o'_l, -c_i·o'_j·o_l)
+            // x-comp interior: Phi = s·(c_i(x)·o_j(y)·o_l(z), 0, 0)
+            //   curl = s·(0, c_i·o_j·o'_l, -c_i·o'_j·o_l)
             for l in 0..m {
                 for j in 0..m {
                     for i in 1..=k {
-                        curl_vals[off * 3 + 1] = cx[i] * oy[j] * doz[l];
-                        curl_vals[off * 3 + 2] = -cx[i] * doy[j] * oz[l];
+                        let s = if i <= k / 2 { -1.0 } else { 1.0 };
+                        curl_vals[off * 3 + 1] = s * cx[i] * oy[j] * doz[l];
+                        curl_vals[off * 3 + 2] = -s * cx[i] * doy[j] * oz[l];
                         off += 1;
                     }
                 }
             }
-            // y-comp interior: Phi = (0, o_i(x)·c_j(y)·o_l(z), 0)
-            //   curl = (-o_i·c_j·o'_l, 0, o'_i·c_j·o_l)
+            // y-comp interior: Phi = s·(0, o_i(x)·c_j(y)·o_l(z), 0)
+            //   curl = s·(-o_i·c_j·o'_l, 0, o'_i·c_j·o_l)
             for l in 0..m {
                 for j in 1..=k {
+                    let s = if j <= k / 2 { -1.0 } else { 1.0 };
                     for i in 0..m {
-                        curl_vals[off * 3] = -ox[i] * cy[j] * doz[l];
-                        curl_vals[off * 3 + 2] = dox[i] * cy[j] * oz[l];
+                        curl_vals[off * 3] = -s * ox[i] * cy[j] * doz[l];
+                        curl_vals[off * 3 + 2] = s * dox[i] * cy[j] * oz[l];
                         off += 1;
                     }
                 }
             }
-            // z-comp interior: Phi = (0, 0, o_i(x)·o_j(y)·c_l(z))
-            //   curl = (o_i·o'_j·c_l, -o'_i·o_j·c_l, 0)
+            // z-comp interior: Phi = s·(0, 0, o_i(x)·o_j(y)·c_l(z))
+            //   curl = s·(o_i·o'_j·c_l, -o'_i·o_j·c_l, 0)
             for l in 1..=k {
+                let s = if l <= k / 2 { -1.0 } else { 1.0 };
                 for j in 0..m {
                     for i in 0..m {
-                        curl_vals[off * 3] = ox[i] * doy[j] * cz[l];
-                        curl_vals[off * 3 + 1] = -dox[i] * oy[j] * cz[l];
+                        curl_vals[off * 3] = s * ox[i] * doy[j] * cz[l];
+                        curl_vals[off * 3 + 1] = -s * dox[i] * oy[j] * cz[l];
                         off += 1;
                     }
                 }

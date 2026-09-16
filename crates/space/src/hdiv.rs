@@ -1950,25 +1950,43 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
                 }
             }
             if k >= 1 {
+                // D225: `HexRTk` bakes MFEM's reference orientation flips into
+                // the interior basis (closed index <= k/2 is negative), so the
+                // dual flux samples flip their normal with them.
                 let cp = gauss_lobatto_arbitrary(k + 2).0;
                 for l in 0..m {
                     for j in 0..m {
                         for i in 1..=k {
-                            rows.push(InterpRow { xi: [cp[i], gl[j], gl[l]], nk: axis(0) });
+                            let s = if i <= k / 2 { -1.0 } else { 1.0 };
+                            let mut nk = axis(0);
+                            for d in 0..3 {
+                                nk[d] *= s;
+                            }
+                            rows.push(InterpRow { xi: [cp[i], gl[j], gl[l]], nk });
                         }
                     }
                 }
                 for l in 0..m {
                     for j in 1..=k {
+                        let s = if j <= k / 2 { -1.0 } else { 1.0 };
                         for i in 0..m {
-                            rows.push(InterpRow { xi: [gl[i], cp[j], gl[l]], nk: axis(1) });
+                            let mut nk = axis(1);
+                            for d in 0..3 {
+                                nk[d] *= s;
+                            }
+                            rows.push(InterpRow { xi: [gl[i], cp[j], gl[l]], nk });
                         }
                     }
                 }
                 for l in 1..=k {
+                    let s = if l <= k / 2 { -1.0 } else { 1.0 };
                     for j in 0..m {
                         for i in 0..m {
-                            rows.push(InterpRow { xi: [gl[i], gl[j], cp[l]], nk: axis(2) });
+                            let mut nk = axis(2);
+                            for d in 0..3 {
+                                nk[d] *= s;
+                            }
+                            rows.push(InterpRow { xi: [gl[i], gl[j], cp[l]], nk });
                         }
                     }
                 }

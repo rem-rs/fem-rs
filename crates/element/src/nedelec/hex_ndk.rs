@@ -36,21 +36,21 @@
 //!     x-dofs: o(x)·c(y)·c(z)   y-dofs: c(x)·o(y)·c(z)   z-dofs: c(x)·c(y)·o(z)
 //! ```
 //!
-//! Local DOF order (matches `HCurlSpace`'s element-DOF layout):
-//! - `12k` edge dofs in `HCurlSpace::HEX_EDGES` order (MFEM
-//!   `Geometry::CUBE::Edges`), `k` open modes per edge along the local edge
-//!   direction,
-//! - `6·2k(k-1)` face dofs in `HCurlSpace::HEX_QUAD_FACES` order
-//!   (z−, z+, y−, y+, x−, x+); each face holds a first-tangent block then a
-//!   second-tangent block of `k(k-1)` modes (interior closed index outer,
-//!   open index inner),
-//! - `3k(k-1)^2` interior dofs (x-, y-, z-blocks; closed indices interior,
-//!   open index innermost).
+//! Local DOF order — D225: the exact MFEM `dof_map` enumeration (see
+//! [`nd_slot_table`]):
+//! - `12k` edge dofs in MFEM `Geometry::CUBE::Edges` order (==
+//!   `HCurlSpace::HEX_EDGES`), `k` open modes per edge along the local edge
+//!   direction, all positive;
+//! - `6·2k(k-1)` face dofs in MFEM `CUBE::FaceVert` order (z−, y−, x+,
+//!   y+, x−, z+), each face a first-tangent block then a second-tangent
+//!   block with MFEM's intra-face reversals and its `-1-(o++)` negative
+//!   orientation signs on the z− y-block, the y+ x-block and the x− y-block;
+//! - `3k(k-1)^2` interior dofs (x-, y-, z-blocks, MFEM loop order, positive).
 //!
-//! Cross-element orientation is *not* baked into the basis (fem-rs orders the
-//! face dofs in the element-local frame and `HCurlSpace` applies the
-//! orientation encoding); per-dof *magnitudes* therefore match MFEM exactly
-//! and MFEM's negatively-oriented dofs differ only by that sign.
+//! The reference orientation signs are baked into the basis exactly as in
+//! MFEM (`shape(idx,·) = s·tensor`); the flipped slots' dual tangents
+//! (`dof_tangents`) flip with them, and `HCurlSpace`'s geometric orientation
+//! encoding composes on top.
 
 use crate::gll_basis::{gl_nodes, ClosedBasis};
 use crate::reference::VectorReferenceElement;
@@ -78,6 +78,170 @@ pub enum NdOpenBasis {
 pub struct HexNDk {
     order: usize,
     open: NdOpenBasis,
+    /// The MFEM `dof_map` slot table (see [`nd_slot_table`]), precomputed so
+    /// the hot evaluation paths never allocate.
+    slots: Vec<NdSlot>,
+}
+
+/// One element-local DOF of the MFEM dof_map: `(block, i, j, k, flip)` —
+/// `block` is the component direction (0/1/2 = x/y/z), `(i, j, k)` the tensor
+/// indices (the block's own index is the open factor along `block`, the other
+/// two are closed GLL indices), and `flip` is MFEM's `-1-(o++)` reference
+/// orientation sign (`dof2tk` negative tangent).
+type NdSlot = (u8, usize, usize, usize, bool);
+
+/// The dof enumeration of MFEM `ND_HexahedronElement::ND_HexahedronElement`
+/// (`fem/fe/fe_nd.cpp`), i.e. the slot order `CalcVShape` writes.
+///
+/// Edges in `Geometry::Constants<CUBE>::Edges` order (all positive), then the
+/// six faces in `CUBE::FaceVert` order — bottom z−, front y−, right x+,
+/// back y+, left x−, top z+ — each as a first-tangent block then a
+/// second-tangent block, then the three interior blocks.
+///
+/// Per face (the faces whose local frame is a reflection of the increasing-
+/// axis frame enumerate one index in reverse, and three blocks carry the
+/// negative `-1-(o++)` sign):
+/// - bottom z−: x-block closed-y descending, +; y-block open-y descending
+///   outer / closed-x inner, all **negative**;
+/// - front y−: x-block closed-z ascending, +; z-block open-z ascending, +;
+/// - right x+: y-block closed-z ascending, +; z-block open-z ascending, +;
+/// - back y+: x-block closed-z ascending / open-x descending inner, all
+///   **negative**; z-block open-z ascending / closed-x descending inner, +;
+/// - left x−: y-block closed-z ascending / open-y descending inner, all
+///   **negative**; z-block open-z ascending / closed-y descending inner, +;
+/// - top z+: x-block closed-y ascending, +; y-block open-y ascending, +.
+///
+/// Interiors: x-block (k,z outer, j,y middle, i,x-open inner); y-block
+/// (k,z outer, j,y-open middle, i,x inner); z-block (k,z-open outer,
+/// j,y middle, i,x inner) — all positive.
+fn nd_slot_table(p: usize) -> Vec<NdSlot> {
+    let mut t: Vec<NdSlot> = Vec::with_capacity(3 * p * (p + 1) * (p + 1));
+    // edges (0,1),(1,2),(3,2),(0,3),(4,5),(5,6),(7,6),(4,7),(0,4),(1,5),(2,6),(3,7)
+    for i in 0..p {
+        t.push((0, i, 0, 0, false));
+    }
+    for j in 0..p {
+        t.push((1, p, j, 0, false));
+    }
+    for i in 0..p {
+        t.push((0, i, p, 0, false));
+    }
+    for j in 0..p {
+        t.push((1, 0, j, 0, false));
+    }
+    for i in 0..p {
+        t.push((0, i, 0, p, false));
+    }
+    for j in 0..p {
+        t.push((1, p, j, p, false));
+    }
+    for i in 0..p {
+        t.push((0, i, p, p, false));
+    }
+    for j in 0..p {
+        t.push((1, 0, j, p, false));
+    }
+    for k in 0..p {
+        t.push((2, 0, 0, k, false));
+    }
+    for k in 0..p {
+        t.push((2, p, 0, k, false));
+    }
+    for k in 0..p {
+        t.push((2, p, p, k, false));
+    }
+    for k in 0..p {
+        t.push((2, 0, p, k, false));
+    }
+    // bottom (3,2,1,0) z=-1
+    for j in (1..p).rev() {
+        for i in 0..p {
+            t.push((0, i, j, 0, false));
+        }
+    }
+    for j in (0..p).rev() {
+        for i in 1..p {
+            t.push((1, i, j, 0, true));
+        }
+    }
+    // front (0,1,5,4) y=-1
+    for k in 1..p {
+        for i in 0..p {
+            t.push((0, i, 0, k, false));
+        }
+    }
+    for k in 0..p {
+        for i in 1..p {
+            t.push((2, i, 0, k, false));
+        }
+    }
+    // right (1,2,6,5) x=+1
+    for k in 1..p {
+        for j in 0..p {
+            t.push((1, p, j, k, false));
+        }
+    }
+    for k in 0..p {
+        for j in 1..p {
+            t.push((2, p, j, k, false));
+        }
+    }
+    // back (2,3,7,6) y=+1
+    for k in 1..p {
+        for i in (0..p).rev() {
+            t.push((0, i, p, k, true));
+        }
+    }
+    for k in 0..p {
+        for i in (1..p).rev() {
+            t.push((2, i, p, k, false));
+        }
+    }
+    // left (3,0,4,7) x=-1
+    for k in 1..p {
+        for j in (0..p).rev() {
+            t.push((1, 0, j, k, true));
+        }
+    }
+    for k in 0..p {
+        for j in (1..p).rev() {
+            t.push((2, 0, j, k, false));
+        }
+    }
+    // top (4,5,6,7) z=+1
+    for j in 1..p {
+        for i in 0..p {
+            t.push((0, i, j, p, false));
+        }
+    }
+    for j in 0..p {
+        for i in 1..p {
+            t.push((1, i, j, p, false));
+        }
+    }
+    // interior
+    for k in 1..p {
+        for j in 1..p {
+            for i in 0..p {
+                t.push((0, i, j, k, false));
+            }
+        }
+    }
+    for k in 1..p {
+        for j in 0..p {
+            for i in 1..p {
+                t.push((1, i, j, k, false));
+            }
+        }
+    }
+    for k in 0..p {
+        for j in 1..p {
+            for i in 1..p {
+                t.push((2, i, j, k, false));
+            }
+        }
+    }
+    t
 }
 
 impl HexNDk {
@@ -85,7 +249,7 @@ impl HexNDk {
     /// default nodal element (D32/D36 semantics).
     pub fn new(p: usize) -> Self {
         assert!(p >= 1, "HexNDk requires order >= 1");
-        HexNDk { order: p, open: NdOpenBasis::GaussLegendre }
+        HexNDk { order: p, open: NdOpenBasis::GaussLegendre, slots: nd_slot_table(p) }
     }
 
     /// MFEM `ND_HexahedronElement(p, GaussLobatto, IntegratedGLL)` — the
@@ -93,7 +257,11 @@ impl HexNDk {
     /// [`HexNDk::new`]; only the open modes differ.
     pub fn new_integrated_gll(p: usize) -> Self {
         assert!(p >= 1, "HexNDk requires order >= 1");
-        HexNDk { order: p, open: NdOpenBasis::IntegratedGLL }
+        HexNDk {
+            order: p,
+            open: NdOpenBasis::IntegratedGLL,
+            slots: nd_slot_table(p),
+        }
     }
 
     /// The `p` open 1-D modes along one axis at `x` (reference `[-1,1]`).
@@ -130,126 +298,16 @@ impl VectorReferenceElement for HexNDk {
         let ozs = self.open_modes(xi[2]);
         values.fill(0.0);
 
-        // Edge basis in MFEM `Geometry::Constants<Geometry::CUBE>::Edges`
-        // order (matches HCurlSpace::HEX_EDGES):
-        //   e0 (0,1) x y=-1 z=-1; e1 (1,2) y x=+1 z=-1; e2 (3,2) x y=+1 z=-1;
-        //   e3 (0,3) y x=-1 z=-1; e4 (4,5) x y=-1 z=+1; e5 (5,6) y x=+1 z=+1;
-        //   e6 (7,6) x y=+1 z=+1; e7 (4,7) y x=-1 z=+1;
-        //   e8..e11 z-edges (0,4),(1,5),(2,6),(3,7) = (x,y) (-1,-1),(1,-1),(1,1),(-1,1).
-        // For each edge the mode index `j` (0..p) runs the open 1-D modes
-        // along the local edge direction (v0 -> v1).
-        // Endpoint closed-mode indices: c_0 on the -1 side, c_p on the +1
-        // side (== the linear hats only when p = 1).
-        let e0 = |s: f64| if s < 0.0 { 0usize } else { p };
-        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
-        for (ei, &(y0, z0)) in x_edges.iter().enumerate() {
-            let hy = cy[e0(y0)];
-            let hz = cz[e0(z0)];
-            let e = [0usize, 2, 4, 6][ei];
-            for j in 0..p {
-                values[(e * p + j) * 3] = oxs[j] * hy * hz;
-            }
-        }
-        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
-        for (ei, &(x0, z0)) in y_edges.iter().enumerate() {
-            let hx = cx[e0(x0)];
-            let hz = cz[e0(z0)];
-            let e = [1usize, 3, 5, 7][ei];
-            for j in 0..p {
-                values[(e * p + j) * 3 + 1] = oys[j] * hx * hz;
-            }
-        }
-        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
-        for (ei, &(x0, y0)) in z_edges.iter().enumerate() {
-            let hx = cx[e0(x0)];
-            let hy = cy[e0(y0)];
-            let e = 8 + ei;
-            for j in 0..p {
-                values[(e * p + j) * 3 + 2] = ozs[j] * hx * hy;
-            }
-        }
-
-        // Face + interior bubbles (k >= 2).
-        if p >= 2 {
-            let mut off = 12 * p;
-            // Faces z=-1 / z=+1: x-tangent block o_j(x)·c_i(y)·hat, then
-            //                     y-tangent block o_j(y)·c_i(x)·hat.
-            for &zs in &[-1.0, 1.0] {
-                let hz = cz[e0(zs)];
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3] = oxs[j] * cy[i] * hz;
-                        off += 1;
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 1] = oys[j] * cx[i] * hz;
-                        off += 1;
-                    }
-                }
-            }
-            // Faces y=-1 / y=+1: x-tangent block o_j(x)·hat·c_i(z), then
-            //                     z-tangent block o_j(z)·c_i(x)·hat.
-            for &ys in &[-1.0, 1.0] {
-                let hy = cy[e0(ys)];
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3] = oxs[j] * hy * cz[i];
-                        off += 1;
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 2] = ozs[j] * cx[i] * hy;
-                        off += 1;
-                    }
-                }
-            }
-            // Faces x=-1 / x=+1: y-tangent block o_j(y)·c_i(z)·hat, then
-            //                     z-tangent block o_j(z)·c_i(y)·hat.
-            for &xs in &[-1.0, 1.0] {
-                let hx = cx[e0(xs)];
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 1] = oys[j] * cz[i] * hx;
-                        off += 1;
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 2] = ozs[j] * cy[i] * hx;
-                        off += 1;
-                    }
-                }
-            }
-
-            // Interior: 3k(k-1)^2 curl-conforming bubbles, vanishing traces on
-            // all faces (both closed factors are interior GLL modes).
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3] = oxs[j] * cy[i] * cz[l];
-                        off += 1;
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 1] = oys[j] * cx[i] * cz[l];
-                        off += 1;
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        values[off * 3 + 2] = ozs[j] * cx[i] * cy[l];
-                        off += 1;
-                    }
-                }
-            }
+        // D225: slot order = MFEM `dof_map` enumeration (`nd_slot_table`);
+        // `flip` is MFEM's `-1-(o++)` reference orientation sign.
+        for (slot, &(block, i, j, k, flip)) in self.slots.iter().enumerate() {
+            let s = if flip { -1.0 } else { 1.0 };
+            let v = match block {
+                0 => s * oxs[i] * cy[j] * cz[k],
+                1 => s * cx[i] * oys[j] * cz[k],
+                _ => s * cx[i] * cy[j] * ozs[k],
+            };
+            values[slot * 3 + block as usize] = v;
         }
     }
 
@@ -270,142 +328,30 @@ impl VectorReferenceElement for HexNDk {
         // For a dofs-along-d tensor function o(t_d)·C·D the curl only
         // differentiates the two CLOSED factors (the open direction is the
         // component direction itself):
-        //   x: curl = (0, o·C·D', -o·C'·D)
-        //   y: curl = (-C·o·D', 0, C'·o·D)
-        //   z: curl = (C·D'·o, -C'·D·o, 0)
-
-        // Edge curls in MFEM CUBE edge order (matches eval_basis_vec).
-        let e0 = |s: f64| if s < 0.0 { 0usize } else { p };
-        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
-        for (ei, &(y0, z0)) in x_edges.iter().enumerate() {
-            let hy = cy[e0(y0)];
-            let hz = cz[e0(z0)];
-            let dhy = dcy[e0(y0)];
-            let dhz = dcz[e0(z0)];
-            let e = [0usize, 2, 4, 6][ei];
-            for j in 0..p {
-                let d = e * p + j;
-                curl_vals[d * 3 + 1] = oxs[j] * hy * dhz;
-                curl_vals[d * 3 + 2] = -oxs[j] * dhy * hz;
-            }
-        }
-        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
-        for (ei, &(x0, z0)) in y_edges.iter().enumerate() {
-            let hx = cx[e0(x0)];
-            let hz = cz[e0(z0)];
-            let dhx = dcx[e0(x0)];
-            let dhz = dcz[e0(z0)];
-            let e = [1usize, 3, 5, 7][ei];
-            for j in 0..p {
-                let d = e * p + j;
-                curl_vals[d * 3] = -oys[j] * hx * dhz;
-                curl_vals[d * 3 + 2] = oys[j] * dhx * hz;
-            }
-        }
-        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
-        for (ei, &(x0, y0)) in z_edges.iter().enumerate() {
-            let hx = cx[e0(x0)];
-            let hy = cy[e0(y0)];
-            let dhx = dcx[e0(x0)];
-            let dhy = dcy[e0(y0)];
-            let e = 8 + ei;
-            for j in 0..p {
-                let d = e * p + j;
-                curl_vals[d * 3] = ozs[j] * hx * dhy;
-                curl_vals[d * 3 + 1] = -ozs[j] * dhx * hy;
-            }
-        }
-
-        // Face curls (k >= 2); index order mirrors eval_basis_vec.
-        if p >= 2 {
-            let mut off = 12 * p;
-            for &zs in &[-1.0, 1.0] {
-                let hz = cz[e0(zs)];
-                let dhz = dcz[e0(zs)];
-                // x-tangent: Phi = (o_j·c_i·hz, 0, 0)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3 + 1] = oxs[j] * cy[i] * dhz;
-                        curl_vals[off * 3 + 2] = -oxs[j] * dcy[i] * hz;
-                        off += 1;
-                    }
+        //   x: curl = s·(0, o·C·D', -o·C'·D)
+        //   y: curl = s·(-C·o·D', 0, C'·o·D)
+        //   z: curl = s·(C·D'·o, -C'·D·o, 0)
+        // D225: slot order/signs from `nd_slot_table` (MFEM dof_map).
+        for (slot, &(block, i, j, k, flip)) in self.slots.iter().enumerate() {
+            let s = if flip { -1.0 } else { 1.0 };
+            let (c0, c1, c2) = match block {
+                0 => (s * oxs[i] * cy[j] * dcz[k], s * oxs[i] * dcy[j] * cz[k], 0.0),
+                1 => (s * cx[i] * oys[j] * dcz[k], 0.0, s * dcx[i] * oys[j] * cz[k]),
+                _ => (0.0, s * cx[i] * dcy[j] * ozs[k], s * dcx[i] * cy[j] * ozs[k]),
+            };
+            let d = slot * 3;
+            match block {
+                0 => {
+                    curl_vals[d + 1] = c0;
+                    curl_vals[d + 2] = -c1;
                 }
-                // y-tangent: Phi = (0, o_j(y)·c_i(x)·hz, 0)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = -oys[j] * cx[i] * dhz;
-                        curl_vals[off * 3 + 2] = dcx[i] * oys[j] * hz;
-                        off += 1;
-                    }
+                1 => {
+                    curl_vals[d] = -c0;
+                    curl_vals[d + 2] = c2;
                 }
-            }
-            for &ys in &[-1.0, 1.0] {
-                let hy = cy[e0(ys)];
-                let dhy = dcy[e0(ys)];
-                // x-tangent: Phi = (o_j·hy·c_i, 0, 0)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3 + 1] = oxs[j] * hy * dcz[i];
-                        curl_vals[off * 3 + 2] = -oxs[j] * dhy * cz[i];
-                        off += 1;
-                    }
-                }
-                // z-tangent: Phi = (0, 0, o_j·c_i·hy)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = cx[i] * dhy * ozs[j];
-                        curl_vals[off * 3 + 1] = -dcx[i] * hy * ozs[j];
-                        off += 1;
-                    }
-                }
-            }
-            for &xs in &[-1.0, 1.0] {
-                let hx = cx[e0(xs)];
-                let dhx = dcx[e0(xs)];
-                // y-tangent: Phi = (0, o_j·c_i(z)·hx, 0)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = -hx * dcz[i] * oys[j];
-                        curl_vals[off * 3 + 2] = dhx * cz[i] * oys[j];
-                        off += 1;
-                    }
-                }
-                // z-tangent: Phi = (0, 0, o_j·c_i·hx)
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = hx * dcy[i] * ozs[j];
-                        curl_vals[off * 3 + 1] = -dhx * cy[i] * ozs[j];
-                        off += 1;
-                    }
-                }
-            }
-
-            // Interior curls (k >= 2); index order mirrors eval_basis_vec.
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3 + 1] = oxs[j] * cy[i] * dcz[l];
-                        curl_vals[off * 3 + 2] = -oxs[j] * dcy[i] * cz[l];
-                        off += 1;
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = -cx[i] * oys[j] * dcz[l];
-                        curl_vals[off * 3 + 2] = dcx[i] * oys[j] * cz[l];
-                        off += 1;
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        curl_vals[off * 3] = cx[i] * dcy[l] * ozs[j];
-                        curl_vals[off * 3 + 1] = -dcx[i] * cy[l] * ozs[j];
-                        off += 1;
-                    }
+                _ => {
+                    curl_vals[d] = c1;
+                    curl_vals[d + 1] = -c2;
                 }
             }
         }
@@ -448,106 +394,28 @@ impl HexNDk {
 
     /// `(node, reference tangent)` of every local DOF in the element's local
     /// order — the single source of truth behind [`dof_coords`](Self::dof_coords)
-    /// and [`dof_tangents`](Self::dof_tangents), mirroring the tensor blocks
-    /// of `eval_basis_vec` exactly (node = the open factor's Gauss-Legendre
-    /// point along the *component* direction, GLL points across it).
+    /// and [`dof_tangents`](Self::dof_tangents), driven by the MFEM dof_map
+    /// slot table (node = the open factor's Gauss-Legendre point along the
+    /// *component* direction, GLL points across it; the tangent carries the
+    /// sign of negatively oriented slots, MFEM `dof2tk`).
     fn dof_layout(&self) -> Vec<([f64; 3], [f64; 3])> {
         let p = self.order;
         let gl = gl_nodes(p);
         let gll = crate::gll_basis::gll_nodes(p);
-        let n = self.n_dofs();
-        let tx = [2.0, 0.0, 0.0];
-        let ty = [0.0, 2.0, 0.0];
-        let tz = [0.0, 0.0, 2.0];
-        let mut c: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(n);
-        // Edge DOFs in MFEM CUBE edge order e0..e11 (matching `eval_basis_vec`
-        // and `HCurlSpace::HEX_EDGES`).  Each edge carries p open modes
-        // anchored at the Gauss-Legendre points (MFEM's ND dof positions).
-        let x_edges = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]; // (y,z)
-        let y_edges = [(1.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,z)
-        let z_edges = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]; // (x,y)
-        for ei in 0..4 {
-            let (y0, z0) = x_edges[ei];
-            for j in 0..p {
-                c.push(([gl[j], y0, z0], tx));
-            }
-            let (x0, z0) = y_edges[ei];
-            for j in 0..p {
-                c.push(([x0, gl[j], z0], ty));
-            }
-        }
-        for &(x0, y0) in &z_edges {
-            for j in 0..p {
-                c.push(([x0, y0, gl[j]], tz));
-            }
-        }
-        if p >= 2 {
-            // Face DOFs: (p-1) interior closed anchors x p open anchors, two
-            // tangent blocks per face, HEX_QUAD_FACES order (z-, z+, y-, y+,
-            // x-, x+).  Matches the eval_basis_vec blocks.
-            for &zs in &[-1.0, 1.0] {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gl[j], gll[i], zs], tx));
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gll[i], gl[j], zs], ty));
-                    }
-                }
-            }
-            for &ys in &[-1.0, 1.0] {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gl[j], ys, gll[i]], tx));
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gll[i], ys, gl[j]], tz));
-                    }
-                }
-            }
-            for &xs in &[-1.0, 1.0] {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([xs, gl[j], gll[i]], ty));
-                    }
-                }
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([xs, gll[i], gl[j]], tz));
-                    }
-                }
-            }
-            // Interior DOFs: 3 components, mirroring eval_basis_vec blocks.
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gl[j], gll[i], gll[l]], tx));
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gll[i], gl[j], gll[l]], ty));
-                    }
-                }
-            }
-            for l in 1..p {
-                for i in 1..p {
-                    for j in 0..p {
-                        c.push(([gll[i], gll[l], gl[j]], tz));
-                    }
-                }
-            }
-        }
-        while c.len() < n {
-            c.push(([0.0; 3], [0.0; 3]));
-        }
-        c
+        self.slots
+            .iter()
+            .map(|&(block, i, j, k, flip)| {
+                let s = if flip { -2.0 } else { 2.0 };
+                let node = match block {
+                    0 => [gl[i], gll[j], gll[k]],
+                    1 => [gll[i], gl[j], gll[k]],
+                    _ => [gll[i], gll[j], gl[k]],
+                };
+                let mut tau = [0.0_f64; 3];
+                tau[block as usize] = s;
+                (node, tau)
+            })
+            .collect()
     }
 }
 

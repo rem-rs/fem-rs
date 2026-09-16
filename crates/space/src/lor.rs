@@ -408,13 +408,14 @@ fn build_nd_perm_3d(
     let xl_one = xl_one.as_slice();
 
     /// HCurl face-block index for the macro face fixed on axis `axis_fixed`
-    /// at plane 0 (`false`) or k (`true`).  Block order: bottom z−, top z+,
-    /// front y−, back y+, left x−, right x+.
+    /// at plane 0 (`false`) or k (`true`).  D225: `HexNDk` face blocks follow
+    /// MFEM `CUBE::FaceVert` order: bottom z−, front y−, right x+, back y+,
+    /// left x−, top z+.
     fn macro_face_idx(axis_fixed: usize, plane_high: bool) -> usize {
         match (axis_fixed, plane_high) {
-            (0, false) => 4, (0, true) => 5,
-            (1, false) => 2, (1, true) => 3,
-            (2, false) => 0, (2, true) => 1,
+            (0, false) => 4, (0, true) => 2,
+            (1, false) => 1, (1, true) => 3,
+            (2, false) => 0, (2, true) => 5,
             _ => unreachable!(),
         }
     }
@@ -480,46 +481,82 @@ fn build_nd_perm_3d(
                             } else {
                                 macro_face_idx(d2, i2 == k)
                             };
-                            let key = macro_face_key(verts, HCURL_TO_FACEVERT[face_hcurl]);
+                            let key = macro_face_key(verts, face_hcurl);
                             let owner = face_owner[&key];
                             if owner != eh {
                                 continue;
                             }
-                            // Flat index within the face block.  Each block
-                            // holds two tangent groups of k(k-1): group dof
-                            // (i-cross-power, j-free-lag) at group*k(k-1) +
-                            // i*k + j.  On z-faces the groups are (x, y); on
-                            // y-faces (x, z); on x-faces (y, z) — and the
-                            // x-face groups are transposed (power on the free
-                            // axis, lag on the cross).
+                            // Flat index within the face block (D225: the
+                            // block is the FaceVert-indexed `HexNDk` face
+                            // block; each holds a first-tangent group of
+                            // k(k-1) then a second-tangent group, with MFEM's
+                            // intra-face reversals — see `nd_slot_table`):
+                            // - z− : x-group (k−1−iy)·k + a, y-group
+                            //   (k−1−a)·(k−1) + (ix−1);
+                            // - z+ : x-group (iy−1)·k + a, y-group
+                            //   a·(k−1) + (ix−1);
+                            // - y− : x-group (iz−1)·k + a, z-group
+                            //   a·(k−1) + (ix−1);
+                            // - y+ : x-group (iz−1)·k + (k−1−a), z-group
+                            //   a·(k−1) + (k−1−ix);
+                            // - x+ : y-group (iz−1)·k + a, z-group
+                            //   a·(k−1) + (iy−1);
+                            // - x− : y-group (iz−1)·k + (k−1−a), z-group
+                            //   a·(k−1) + (k−1−iy).
+                            let g = k * (k - 1);
+                            let (lo, hi) = if i1 == 0 || i1 == k {
+                                (i1 == k, i2)
+                            } else {
+                                (i2 == k, i1)
+                            };
                             let blk = face_hcurl * n_face_blk;
-                            let flat = match (axis, bnd1, i1, i2) {
-                                (0, false, b, _) => (b - 1) * k + a,
-                                (0, true, _, c) => (c - 1) * k + a,
-                                (1, false, b, _) => k * (k - 1) + (b - 1) * k + a,
-                                (1, true, _, c) => (c - 1) * k + a,
-                                (2, false, b, _) => k * (k - 1) + (b - 1) * k + a,
-                                (2, true, _, c) => k * (k - 1) + (c - 1) * k + a,
+                            let flat = match (axis, bnd1, lo) {
+                                // axis 0, face fixed in z (bnd1 == false):
+                                // lo = (i2 == k)
+                                (0, false, false) => (k - 1 - i1) * k + a,
+                                (0, false, true) => (i1 - 1) * k + a,
+                                // axis 0, face fixed in y (bnd1 == true):
+                                // lo = (i1 == k); x-tangent group (offset 0)
+                                (0, true, false) => (i2 - 1) * k + a,
+                                (0, true, true) => (i2 - 1) * k + (k - 1 - a),
+                                // axis 1, face fixed in x (bnd1 == true):
+                                // lo = (i1 == k); y-tangent group (offset 0)
+                                (1, true, false) => (i2 - 1) * k + (k - 1 - a),
+                                (1, true, true) => (i2 - 1) * k + a,
+                                // axis 1, face fixed in z (bnd1 == false):
+                                // lo = (i2 == k); z-tangent group (offset g)
+                                (1, false, false) => g + (k - 1 - a) * (k - 1) + (i1 - 1),
+                                (1, false, true) => g + a * (k - 1) + (i1 - 1),
+                                // axis 2, face fixed in x (bnd1 == true):
+                                // lo = (i1 == k); z-tangent group (offset g)
+                                (2, true, false) => g + a * (k - 1) + (k - 1 - i2),
+                                (2, true, true) => g + a * (k - 1) + (i2 - 1),
+                                // axis 2, face fixed in y (bnd1 == false):
+                                // lo = (i2 == k); z-tangent group (offset g)
+                                (2, false, false) => g + a * (k - 1) + (i1 - 1),
+                                (2, false, true) => g + a * (k - 1) + (k - 1 - i1),
                                 _ => unreachable!("edge axis is 0, 1 or 2"),
                             };
                             n_edge_dofs + blk + flat
                         } else {
-                            // Element-interior lattice edge.  HexNDk interior
-                            // block order: for each component the two closed
-                            // cross factors run (second-cross outer,
-                            // first-cross inner), the open interval innermost
-                            // (see `HexNDk::eval_basis_vec`).
+                            // Element-interior lattice edge.  D225: `HexNDk`
+                            // interior block order follows MFEM's dof_map:
+                            // x-block (kz outer, ky middle, open-x inner),
+                            // y-block (kz outer, open-y middle, kx inner),
+                            // z-block (open-z outer, ky middle, kx inner).
                             let flat = match axis {
-                                0 => ((i2 - 1) * (k - 1) + (i1 - 1)) * k + a,
+                                0 => (i2 - 1) * (k - 1) * k + (i1 - 1) * k + a,
                                 1 => {
                                     k * (k - 1) * (k - 1)
-                                        + ((i2 - 1) * (k - 1) + (i1 - 1)) * k
-                                        + a
+                                        + (i2 - 1) * k * (k - 1)
+                                        + a * (k - 1)
+                                        + (i1 - 1)
                                 }
                                 _ => {
                                     2 * k * (k - 1) * (k - 1)
-                                        + ((i2 - 1) * (k - 1) + (i1 - 1)) * k
-                                        + a
+                                        + a * (k - 1) * (k - 1)
+                                        + (i2 - 1) * (k - 1)
+                                        + (i1 - 1)
                                 }
                             };
                             int_base + flat
@@ -574,10 +611,6 @@ fn macro_edge_key(verts: &[u32], axis: usize, i1: usize, i2: usize) -> EdgeKey {
     };
     EdgeKey::new(corner(0), corner(1))
 }
-
-/// `HCurlSpace` face-block index (`HEX_QUAD_FACES`: bottom z−, top z+,
-/// front y−, back y+, left x−, right x+) -> MFEM `HEX_FACES` (FaceVert) index.
-const HCURL_TO_FACEVERT: [usize; 6] = [0, 5, 1, 3, 4, 2];
 
 /// Sorted 4-vertex key of the macro face with `HEX_FACES` (FaceVert) index
 /// `face`.

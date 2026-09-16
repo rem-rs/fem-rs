@@ -201,6 +201,16 @@ fn hex8_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 8] {
     v
 }
 
+/// `HEX_QUAD_FACES` index (z−, z+, y−, y+, x−, x+) → the element's face-block
+/// index (D225: `HexNDk` face blocks follow MFEM `CUBE::FaceVert`, i.e.
+/// z−, y−, x+, y+, x−, z+).
+const HEX_QUAD_FACE_TO_ND_BLOCK: [usize; 6] = [0, 5, 1, 3, 4, 2];
+
+/// Inverse of [`HEX_QUAD_FACE_TO_ND_BLOCK`]: element face-block index →
+/// `HEX_QUAD_FACES` entry, so the element-slot table can be filled in block
+/// order.
+const HEX_ND_BLOCK_TO_QUAD_FACE: [usize; 6] = [0, 2, 5, 3, 4, 1];
+
 /// Physical point and tangent of every local DOF of one hex NDk face block.
 fn hex_face_slots(
     verts: &[[f64; 3]; 8],
@@ -210,7 +220,7 @@ fn hex_face_slots(
     tangents: &[[f64; 3]],
 ) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     let ndf = 2 * k * (k - 1);
-    let off = 12 * k + ndf * lf;
+    let off = 12 * k + ndf * HEX_QUAD_FACE_TO_ND_BLOCK[lf];
     let mut xs = Vec::with_capacity(ndf);
     let mut ts = Vec::with_capacity(ndf);
     for n in 0..ndf {
@@ -569,7 +579,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     ElementType::Hex8 | ElementType::Hex20 => {
                         let ndf_quad = 2 * k * (k - 1);
                         let verts8 = hex8_verts(&mesh, e);
-                        for (lf, &(la, lb, lc, ld)) in HEX_QUAD_FACES.iter().enumerate() {
+                        // D225: register in MFEM `FaceVert` block order so the
+                        // global face-dof ranges follow MFEM's numbering.
+                        for (block, &lf) in HEX_ND_BLOCK_TO_QUAD_FACE.iter().enumerate() {
+                            let (la, lb, lc, ld) = HEX_QUAD_FACES[lf];
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             if quad_face_to_dof.contains_key(&key) {
                                 continue;
@@ -769,7 +782,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     ElementType::Hex8 | ElementType::Hex20 => {
                         let ndf_quad = 2 * k * (k - 1);
                         let verts8 = hex8_verts(&mesh, e);
-                        for (lf, &(la, lb, lc, ld)) in HEX_QUAD_FACES.iter().enumerate() {
+                        // D225: the element's face slots are grouped in MFEM
+                        // `FaceVert` block order (`HEX_QUAD_FACE_TO_ND_BLOCK`
+                        // maps this loop's block index to the `HEX_QUAD_FACES`
+                        // entry), so the slot table is filled in block order.
+                        for (block, &lf) in HEX_ND_BLOCK_TO_QUAD_FACE.iter().enumerate() {
+                            let (la, lb, lc, ld) = HEX_QUAD_FACES[lf];
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             let first_dof = quad_face_to_dof[&key];
                             let (xs, ts) = hex_face_slots(&verts8, k, lf, &hex_coords, &hex_tks);
