@@ -4,29 +4,34 @@
 //!
 //! Round 32 findings (D130), measured against the C++ binary compiled from
 //! MFEM 4.10 (`mondrian -i australia.pgm -m inline-quad.mesh -no-vis`);
-//! round 39 (D160) closed the refinement gap:
+//! round 39 (D160) closed the refinement gap; round 40 (D229/D231) closed the
+//! aniso and NC-writer gaps:
 //!
 //! * **Fixed (round 32)**: the port used a fixed `for iter in 0..10` loop and
 //!   refined every element 4× per iteration — the run produced a
 //!   16,777,216-element, **1.11 GB** `mondrian.mesh`.  C++ breaks when
-//!   `(iter+1) % 3 == 0` on the `-no-vis` path, i.e. after three iterations and
-//!   145 elements (6827 B).  The loop and the printed lines
-//!   (`"Iteration N: mesh has X elements. "`, trailing space included) match.
+//!   `(iter+1) % 3 == 0` on the `-no-vis` path, i.e. after three iterations.
+//!   The loop and the printed lines (`"Iteration N: mesh has X elements. "`,
+//!   trailing space included) match.
 //! * **Fixed (round 39, D160)**: C++ `Mesh::GeneralRefinement(refs, -1,
 //!   nclimit)` refines only the marked quads, nonconformingly (hanging nodes,
 //!   `nclimit` = 1).  The port used to fall back to `refine_uniform` (counts
-//!   64/256 vs C++ 52/145); it now calls
-//!   `fem_mesh::amr::general_refinement_quad` (NCMesh 2-D iso splits +
-//!   `LimitNCLevel` propagation) and the counts match C++ (`16, 52, 145`).
-//! * **Gap (exit 3)**: `-a` (aniso) still refines the marked quads iso (the
-//!   marked sets are mode-independent; C++ `-a -no-vis` counts: 16, 48, 123 —
-//!   measured), `-vis` opens no GLVis socket (the `Continue shaping? --> `
-//!   prompt is kept, EOF answers `break`), and the mesh writer has
-//!   MFEM-format deltas (D155).
+//!   64/256 vs C++ 52/145).  Iteration counts match C++ (`16, 52, 145`).
+//! * **Fixed (round 40, D229)**: `-a` (aniso) refines the marked quads with
+//!   their X/Y/XY types (`NcQuadTree`, the MFEM `NCMesh` 2-D replica) —
+//!   C++ `-a -no-vis` counts `16, 48, 123` are reproduced.
+//! * **Fixed (round 40, D231/D232)**: quad runs write the **MFEM NC mesh
+//!   v1.0** format (`NCMesh::Print`: tree `elements`, `boundary`,
+//!   `vertex_parents`, `root_state`, `coordinates`) with the material-average
+//!   leaf attributes — byte-identical to C++ `Mesh::Save`.
+//! * **Gap (exit 3)**: `-vis` opens no GLVis socket (the
+//!   `Continue shaping? --> ` prompt is kept, EOF answers `break`).  Tri3
+//!   meshes keep the conforming `closure_refine` path and the legacy writer.
 
 use std::fs;
 
 use fem_io::mfem::write_mfem_file;
+use fem_mesh::amr::nc_quad_tree::NcQuadTree;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::ElementTransformation;
 use fem_mesh::{Mesh, element_type::ElementType};
@@ -285,32 +290,13 @@ fn read_mesh(path: &str) -> Result<Mesh<2>, String> {
     m.mesh2d.ok_or_else(|| "Expected 2D mesh".to_string())
 }
 
-fn refine_marked(mesh: &Mesh<2>, marked: &[(u32, u32)], nclimit: i32) -> Mesh<2> {
-    use fem_mesh::amr::{closure_refine_default, general_refinement_quad};
+/// Tri3 refinement path: conforming red-green `closure_refine` (MFEM
+/// `GeneralRefinement` → `LocalRefinement` for simplices).
+fn refine_marked_tri(mesh: &Mesh<2>, marked: &[(u32, u32)]) -> Mesh<2> {
+    use fem_mesh::amr::closure_refine_default;
 
-    if marked.is_empty() {
-        return mesh.clone();
-    }
-
-    match mesh.element_type(0) {
-        ElementType::Tri3 => {
-            let ids: Vec<u32> = marked.iter().map(|&(e, _)| e).collect();
-            closure_refine_default(mesh, &ids, None)
-        }
-        ElementType::Quad4 => {
-            // C++ `Mesh::GeneralRefinement(refs, -1, nclimit)`: nonconforming
-            // refinement of the marked quads (iso splits; `nc_limit <= 0`
-            // disables the LimitNCLevel propagation, exactly as in MFEM).
-            // NOTE: the refinement *types* (aniso `-a` X/Y bisections) are not
-            // consumed yet — the marked sets are mode-independent, but `-a`
-            // runs therefore diverge from C++ (see the exit-3 note below).
-            let ids: Vec<u32> = marked.iter().map(|&(e, _)| e).collect();
-            let nc_limit = if nclimit > 0 { nclimit as u32 } else { 0 };
-            let (m, _constraints) = general_refinement_quad(mesh, &ids, nc_limit, None);
-            m
-        }
-        _ => mesh.clone(),
-    }
+    let ids: Vec<u32> = marked.iter().map(|&(e, _)| e).collect();
+    closure_refine_default(mesh, &ids, None)
 }
 
 fn main() {
@@ -399,10 +385,32 @@ fn main() {
 
     let nc = 256u16 / ncolors;
 
+    // Quad4 meshes refine through the `NcQuadTree` (MFEM `NCMesh` 2-D
+    // replica): exact X/Y/XY splits with ref_type, directional
+    // `LimitNCLevel`, and the "MFEM NC mesh v1.0" writer (D229/D231).
+    let mut tree = if mesh.element_type(0) == ElementType::Quad4 {
+        Some(NcQuadTree::from_mesh(&mesh))
+    } else {
+        None
+    };
+    // C++ `attr` GridFunction: attr(e) = round(matsum/npts) per iteration,
+    // applied to the mesh with `Mesh::SetAttribute` before saving (D232).
+    let mut leaf_attr: Vec<i32> = mesh.elem_tags.clone();
+    let nc_limit = if nclimit > 0 { nclimit as u32 } else { 0 };
+
     // C++ `for (int iter = 0; 1; iter++)`: print the element count, break every
     // 3rd iteration on the `-no-vis` path, then refine the marked elements.
     let mut iter = 0usize;
     loop {
+        if let Some(t) = &tree {
+            mesh = t.extract_mesh();
+            // C++ `attr.Update()` prolongates the attribute GridFunction to
+            // the new leaves; every leaf is reassigned in the marking pass
+            // below, so the fill value is irrelevant.
+            if leaf_attr.len() < mesh.n_elems() {
+                leaf_attr.resize(mesh.n_elems(), 0);
+            }
+        }
         let ne = mesh.n_elems();
         if ne == 0 { break; }
 
@@ -439,6 +447,12 @@ fn main() {
                 }
             }
 
+            // C++ `attr(e) = round(matsum/ir.GetNPoints())` — every element,
+            // marked or not.
+            if is_quad {
+                leaf_attr[e as usize] = (matsum as f64 / n_samples as f64).round() as i32;
+            }
+
             if refine {
                 let rtype = if aniso {
                     compute_aniso_type(&mats, dim, sd, n_samples)
@@ -472,23 +486,44 @@ fn main() {
 
         if marked.is_empty() { break; }
 
-        mesh = refine_marked(&mesh, &marked, nclimit);
+        // C++ `mesh.GeneralRefinement(refs, -1, nclimit)`.
+        if let Some(t) = &mut tree {
+            let refs: Vec<(usize, u8)> =
+                marked.iter().map(|&(e, rt)| (e as usize, rt as u8)).collect();
+            t.general_refinement(&refs, nc_limit);
+        } else {
+            mesh = refine_marked_tri(&mesh, &marked);
+        }
         iter += 1;
     }
 
-    write_mfem_file("mondrian.mesh", &mesh).expect("write mesh");
+    // C++ `mesh.SetAttribute(i, attr(i)); mesh.SetAttributes();` before
+    // saving, then `Mesh::Save` — for NC meshes `Mesh::Printer` delegates to
+    // `NCMesh::Print` ("MFEM NC mesh v1.0").
+    if let Some(t) = &mut tree {
+        for (i, &a) in leaf_attr.iter().enumerate() {
+            t.set_leaf_attribute(i, a);
+        }
+        std::fs::write("mondrian.mesh", t.print_mfem_nc_v10()).expect("write mesh");
+    } else {
+        write_mfem_file("mondrian.mesh", &mesh).expect("write mesh");
+    }
     println!("Wrote mondrian.mesh ({} elements).", mesh.n_elems());
 
-    // Honest partial delivery: the default (iso) `GeneralRefinement` path now
-    // matches C++, but `-a` (aniso X/Y bisections of the marked quads) is not
-    // consumed by the quad arm yet, `-vis` opens no GLVis socket, and the mesh
-    // writer has MFEM-format deltas (D155).
-    eprintln!(
-        "mondrian (Rust port): partial delivery, exit 3. Iso refinement matches C++ \
-         (`Mesh::GeneralRefinement(refs, -1, {nclimit})`: 16, 52, 145 / 6827 B mondrian.mesh); \
-         remaining gaps: `-a` aniso X/Y bisection types are refined iso instead \
-         (C++ -a -no-vis: 16, 48, 123), `-vis` opens no GLVis socket, \
-         and the MFEM mesh writer differs from `Mesh::Print` (D155)."
-    );
+    // Honest partial delivery: on quads, iso and aniso refinement plus the
+    // NC v1.0 writer now match C++ byte for byte; `-vis` still opens no
+    // GLVis socket.  Tri3 meshes keep the conforming path and legacy writer.
+    let note = if tree.is_some() {
+        format!(
+            "Refinement matches C++ (`Mesh::GeneralRefinement(refs, -1, {nclimit})`; \
+             iso: 16, 52, 145 — aniso `-a`: 16, 48, 123) and mondrian.mesh is \
+             written in the MFEM NC mesh v1.0 format (byte-identical to \
+             `Mesh::Save`)"
+        )
+    } else {
+        "Tri3 mesh: conforming `closure_refine` path and legacy MFEM writer".to_string()
+    };
+    eprintln!("mondrian (Rust port): partial delivery, exit 3. {note}; \
+               remaining gap: `-vis` opens no GLVis socket.");
     std::process::exit(3);
 }

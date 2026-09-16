@@ -8,6 +8,7 @@ mod curved_prism;
 mod curved_quad;
 mod curved_tet;
 mod curved_tri;
+pub mod nc_quad_tree;
 mod p_refine;
 mod refine_2d;
 mod make_conforming;
@@ -23,7 +24,10 @@ pub use amr_inner::{
 };
 pub use bisect::*;
 pub use p_refine::*;
-pub use refine_2d::{closure_refine, closure_refine_default, general_refinement_quad};
+pub use refine_2d::{
+    closure_refine, closure_refine_default, general_refinement_quad,
+    general_refinement_quad_aniso,
+};
 pub use make_conforming::make_conforming_tri;
 pub use schedule::*;
 

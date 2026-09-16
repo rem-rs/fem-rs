@@ -4510,6 +4510,61 @@ pub fn limit_nc_level_quad(mesh: &Mesh<2>, nc_limit: u32) -> Vec<ElemId> {
     out
 }
 
+/// Directional version of [`limit_nc_level_quad`] — MFEM
+/// `NCMesh::GetLimitRefinements` (ncmesh.cpp:6060) with the SQUARE
+/// `CountSplits` (ncmesh.cpp:6044): `splits[0] = max(elevel[0], elevel[2])`
+/// over the horizontal edges, `splits[1] = max(elevel[1], elevel[3])` over
+/// the vertical edges.  Each direction exceeding `nc_limit` contributes its
+/// bit (1 = X split, 2 = Y split); while the mesh is still isotropic
+/// (`iso = true`, MFEM `NCMesh::Iso`) the type is forced to 7, which the
+/// SQUARE branch of `RefineElement` treats as the iso XY split
+/// (`ref_type &= 0x3`).
+///
+/// Returns `(element, ref_type)` pairs (ref_type ∈ {1, 2, 3, 7}) to be
+/// refined in a separate batch, like MFEM's `LimitNCLevel` loop.
+pub fn limit_nc_level_quad_aniso(
+    mesh: &Mesh<2>,
+    nc_limit: u32,
+    iso: bool,
+) -> Vec<(ElemId, u8)> {
+    let n_nodes = mesh.n_nodes();
+    let coords: Vec<[f64; 2]> =
+        (0..n_nodes).map(|n| mesh.coords_of(n as NodeId)).collect();
+    let mut pos: HashMap<(i64, i64), NodeId> = HashMap::new();
+    for (n, c) in coords.iter().enumerate() {
+        let q = ((c[0] * 1e10).round() as i64, (c[1] * 1e10).round() as i64);
+        pos.entry(q).or_insert(n as NodeId);
+    }
+    let mut memo: HashMap<(NodeId, NodeId), u32> = HashMap::new();
+    let mut out = Vec::new();
+    // MFEM HasVertex(): a midpoint counts only while it is an element corner.
+    let mut is_vertex: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for e in 0..mesh.n_elems() as ElemId {
+        for &n in mesh.elem_nodes(e) { is_vertex.insert(n); }
+    }
+    for e in 0..mesh.n_elems() as ElemId {
+        let ns = mesh.elem_nodes(e);
+        // SQUARE local edges: 0 = (n0,n1), 1 = (n1,n2), 2 = (n2,n3),
+        // 3 = (n3,n0); splits[0] over the horizontal pair (0, 2),
+        // splits[1] over the vertical pair (1, 3).
+        let s0 = edge_split_level_geo(ns[0], ns[1], &coords, &pos, &is_vertex, &mut memo)
+            .max(edge_split_level_geo(ns[2], ns[3], &coords, &pos, &is_vertex, &mut memo));
+        let s1 = edge_split_level_geo(ns[1], ns[2], &coords, &pos, &is_vertex, &mut memo)
+            .max(edge_split_level_geo(ns[3], ns[0], &coords, &pos, &is_vertex, &mut memo));
+        let mut ref_type = 0u8;
+        if s0 > nc_limit { ref_type |= 1; }
+        if s1 > nc_limit { ref_type |= 2; }
+        if ref_type != 0 {
+            if iso {
+                // iso meshes should only be modified by iso refinements
+                ref_type = 7;
+            }
+            out.push((e, ref_type));
+        }
+    }
+    out
+}
+
 /// Propagate refinement to neighbors when nc_limit would be violated (Quad4).
 ///
 /// Uses the geometric edge-split level (MFEM `GetLimitRefinements` semantics):
@@ -6063,7 +6118,9 @@ pub fn refine_nonconforming_quad_aniso(
         }};
     }
 
-    for (&e, &dir) in &marked_map {
+    for &(e, dir) in marked {
+        // MFEM `Refine` processes the batch in array order; midpoint nodes
+        // are created in that order (GetId hashing).
         let ns = mesh.elem_nodes(e);
         match dir {
             QuadRefineDir::X => {
@@ -6072,9 +6129,11 @@ pub fn refine_nonconforming_quad_aniso(
                 ensure_midpoint!(quad_edge_key(ns[3], ns[2]));
             }
             QuadRefineDir::Y => {
-                // Vertical cut: midpoints of left (n0,n3) and right (n1,n2)
-                ensure_midpoint!(quad_edge_key(ns[0], ns[3]));
+                // Vertical cut: midpoints of right (n1,n2) then left (n0,n3) —
+                // MFEM `RefineElement` Y order (mid12 = GetId(no[1],no[2])
+                // first, mid30 = GetId(no[3],no[0]) second, ncmesh.cpp:1836).
                 ensure_midpoint!(quad_edge_key(ns[1], ns[2]));
+                ensure_midpoint!(quad_edge_key(ns[0], ns[3]));
             }
             QuadRefineDir::Both => {
                 for &(a, b) in &local_edges_quad() {

@@ -373,6 +373,96 @@ pub fn general_refinement_quad(
     (current, constraints)
 }
 
+/// Anisotropic variant of [`general_refinement_quad`] — MFEM
+/// `Mesh::GeneralRefinement(refs, -1, nc_limit)` with per-element
+/// `Refinement::ref_type` (D229): each marked quad is X-bisected
+/// (`ref_type & 0x3 == 1`, midpoints of the horizontal edges), Y-bisected
+/// (2) or iso-split (3; 7 is masked to 3 for squares, ncmesh.cpp:1818), and
+/// `LimitNCLevel` propagates **directionally** through
+/// [`limit_nc_level_quad_aniso`] (MFEM `NCMesh::Iso` semantics: while only
+/// iso refinements have been applied the limit forces iso splits; the first
+/// X/Y split clears the flag and later limit refinements use the directional
+/// bits).
+///
+/// `iso_in` is the caller's current `Iso` state (`true` for a mesh that has
+/// never seen an anisotropic refinement); the returned bool is the state
+/// after this call — pass it back on the next batch.
+///
+/// Returns `(mesh, iso_out, P1 hanging-node constraints)`.
+pub fn general_refinement_quad_aniso(
+    mesh: &Mesh<2>,
+    marked: &[(ElemId, u8)],
+    nc_limit: u32,
+    iso_in: bool,
+    project_boundary: Option<&ProjectionConfig>,
+) -> (Mesh<2>, bool, Vec<super::amr_inner::HangingNodeConstraint>) {
+    use super::amr_inner::{limit_nc_level_quad_aniso, refine_nonconforming_quad_aniso};
+    use super::amr_inner::QuadRefineDir;
+
+    assert!(
+        mesh.elem_type == ElementType::Quad4,
+        "general_refinement_quad_aniso: only Quad4 meshes are supported"
+    );
+
+    let to_dirs = |refs: &[(ElemId, u8)]| {
+        refs.iter()
+            .map(|&(e, rt)| {
+                let dir = match rt & 0x3 {
+                    1 => QuadRefineDir::X,
+                    2 => QuadRefineDir::Y,
+                    _ => QuadRefineDir::Both, // 3 (or 7 masked to 3): iso split
+                };
+                (e, dir)
+            })
+            .collect::<Vec<_>>()
+    };
+    // `if (ref_type != Refinement::XY) { Iso = false; }` (ncmesh.cpp:1882):
+    // an X or Y split anywhere clears the iso flag.
+    let mut iso = iso_in;
+    for &(_, rt) in marked {
+        let masked = rt & 0x3;
+        if masked != 0 && masked != 0x3 {
+            iso = false;
+        }
+    }
+
+    if marked.is_empty() {
+        let m = match project_boundary {
+            Some(config) => project_boundary_to_cad(mesh, config, 2),
+            None => mesh.clone(),
+        };
+        return (m, iso, Vec::new());
+    }
+
+    // 1. `ncmesh->Refine(refinements)` — split the marked elements per their
+    //    ref_type (no neighbour is forced; hanging nodes are legal in 2-D).
+    let (mut current, mut constraints) =
+        refine_nonconforming_quad_aniso(mesh, &to_dirs(marked), None);
+    // 2. `if (nc_limit > 0) ncmesh->LimitNCLevel(nc_limit)` — directional
+    //    fixpoint loop; X/Y limit splits also clear `Iso` (they go through
+    //    `RefineElement` too).
+    if nc_limit > 0 {
+        loop {
+            let extra = limit_nc_level_quad_aniso(&current, nc_limit, iso);
+            if extra.is_empty() { break; }
+            for &(_, rt) in &extra {
+                let masked = rt & 0x3;
+                if masked != 0 && masked != 0x3 {
+                    iso = false;
+                }
+            }
+            let (m, c) = refine_nonconforming_quad_aniso(&current, &to_dirs(&extra), None);
+            current = m;
+            constraints = c;
+        }
+    }
+
+    if let Some(config) = project_boundary {
+        current = project_boundary_to_cad(&current, config, 2);
+    }
+    (current, iso, constraints)
+}
+
 /// Convenience overload with a default iteration limit (20).
 pub fn closure_refine_default(
     mesh: &Mesh<2>,
