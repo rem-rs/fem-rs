@@ -31,7 +31,8 @@
 //! pair MFEM documents (`fem/lor/lor.hpp`, `RT_QuadrilateralElement(k,
 //! GaussLobatto, IntegratedGLL)`) is [`QuadRTk::new_integrated_gll`]: same DOF
 //! count/layout/node positions, integrated Gerritsma open modes.  It is the
-//! 2-D analogue of [`HexRTk`](super::HexRTk) (which is IGLL-only).
+//! 2-D analogue of the hex D236 split ([`HexRTk::new`] stays IntegratedGLL
+//! for the LOR stack; [`HexRTk::new_gauss_legendre`] is the MFEM default).
 
 use crate::quadrature::quad_rule_01;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
