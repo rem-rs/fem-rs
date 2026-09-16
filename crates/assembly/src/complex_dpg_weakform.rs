@@ -65,6 +65,10 @@ pub struct ComplexDPGWeakForm<M: MeshTopology + Clone + 'static> {
     /// integrator's rule from the two spaces it couples, so different trial
     /// blocks run at different orders; [`Self::set_trial_quad_order`]).
     trial_quad_orders: HashMap<usize, u8>,
+    /// Per-test-block volume quadrature order overrides keyed `(row, col)` —
+    /// the test-Gram twin of [`Self::trial_quad_orders`]
+    /// ([`Self::set_test_quad_order`]).
+    test_quad_orders: HashMap<(usize, usize), u8>,
 
     assembled: bool,
     /// (exposed, private) trial block ids when condensation is enabled.
@@ -275,6 +279,7 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             trace_integs_i: Vec::new(),
             quad_order: 6,
             trial_quad_orders: HashMap::new(),
+            test_quad_orders: HashMap::new(),
             face_quad_order: 4,
             assembled: false,
             cond: None,
@@ -312,6 +317,24 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
     /// C++ rules are `(p−1) + test_order`.
     pub fn set_trial_quad_order(&mut self, trial_block: usize, order: u8) {
         self.trial_quad_orders.insert(trial_block, order);
+    }
+
+    /// Override the volume quadrature order of one **test** block `(row,
+    /// col)` — the test-Gram twin of [`Self::set_trial_quad_order`].  MFEM
+    /// sizes every test integrator's rule the same way it sizes trial rules
+    /// (`trial.GetOrder() + test.GetOrder() + Trans.OrderW()`), and for
+    /// hexahedra `OrderW() = geo_order·dim − 1 = 2` (geometry order 1,
+    /// `IsoparametricTransformation::OrderW` Qk branch), so the 3-D PML
+    /// graph-norm blocks (`VectorFEMassIntegrator` /
+    /// `MixedVectorCurlIntegrator` / `MixedVectorWeakCurlIntegrator`
+    /// coupling the order-`q` F/G spaces) run at `2q + 2` — one Gauss level
+    /// above the global `2·test_order` gram rule.  The override applies only
+    /// to the test-integrator assembly of that `(row, col)` pair; the linear
+    /// forms, the trial blocks and every non-overridden pair keep the global
+    /// rule, and pairs without an override are assembled exactly as before
+    /// (bit-identical default behavior).
+    pub fn set_test_quad_order(&mut self, row_block: usize, col_block: usize, order: u8) {
+        self.test_quad_orders.insert((row_block, col_block), order);
     }
 
     /// Set the face (trace) quadrature order — the rule used by the trace
@@ -675,6 +698,13 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
             .iter()
             .map(|(&b, &o)| (b, vol_quadrature(et, o)))
             .collect();
+        // Per-test-block overridden rules (empty unless `set_test_quad_order`
+        // was called — zero impact by default).
+        let ov_test_rules: HashMap<(usize, usize), (Vec<Vec<f64>>, Vec<f64>)> = self
+            .test_quad_orders
+            .iter()
+            .map(|(&(r, c), &o)| ((r, c), vol_quadrature(et, o)))
+            .collect();
         let face_rule_tri = if dim == 3 {
             Some(crate::dpg::dpg_basis::face_quadrature(3, false, self.face_quad_order))
         } else {
@@ -839,6 +869,36 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 );
             }
 
+            // Test-block override basis tables (`set_test_quad_order`): for
+            // each overridden (row, col) pair, both test blocks evaluated at
+            // the pair's own rule.
+            let mut ov_qp_test_pair: HashMap<
+                (usize, usize),
+                (Vec<Vec<f64>>, Vec<f64>, HashMap<usize, Vec<VolVals>>),
+            > = HashMap::new();
+            for ((row, col), (bpts, bwts)) in &ov_test_rules {
+                let mut tables: HashMap<usize, Vec<VolVals>> = HashMap::new();
+                for tb in [*row, *col] {
+                    let (k, odr) = &self.test_kinds[tb];
+                    tables.insert(
+                        tb,
+                        bpts
+                            .iter()
+                            .map(|xi| {
+                                let (jac, det, _) = element_geo_at(
+                                    &mesh, simplex.as_ref(), geo, &geo_nodes, xi, dim,
+                                );
+                                let jit = inv_transpose(&jac, dim);
+                                let mut v = VolVals::default();
+                                eval_vol_space(*k, *odr, et, dim, &jac, det, &jit, xi, None, &mut v);
+                                v
+                            })
+                            .collect(),
+                    );
+                }
+                ov_qp_test_pair.insert((*row, *col), (bpts.clone(), bwts.clone(), tables));
+            }
+
             let mut tr_offs = vec![0usize];
             for b in 0..nblocks {
                 let n = match &self.trial_kinds[b] {
@@ -896,12 +956,27 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 let nr = test_sizes[*row];
                 let nc = test_sizes[*col];
                 let mut ge = vec![0.0_f64; nr * nc];
-                for q in 0..n_qp {
-                    let (_jac, det, xp) = element_geo_at(
-                        &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
-                    );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
-                    integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
+                match ov_qp_test_pair.get(&(*row, *col)) {
+                    Some((bpts, bwts, tables)) => {
+                        // Overridden test-block rule (MFEM per-integrator
+                        // default): both sides evaluated at the pair's rule.
+                        for q in 0..bpts.len() {
+                            let (_jac, det, xp) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
+                            );
+                            let ctx = VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                            integ.assemble2(&ctx, &tables[col][q], &tables[row][q], &mut ge);
+                        }
+                    }
+                    _ => {
+                        for q in 0..n_qp {
+                            let (_jac, det, xp) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
+                            );
+                            let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                            integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
+                        }
+                    }
                 }
                 let (r0, c0) = (test_offsets[*row], test_offsets[*col]);
                 for i in 0..nr {
@@ -914,12 +989,25 @@ impl<M: MeshTopology + Clone + 'static> ComplexDPGWeakForm<M> {
                 let nr = test_sizes[*row];
                 let nc = test_sizes[*col];
                 let mut ge = vec![0.0_f64; nr * nc];
-                for q in 0..n_qp {
-                    let (_jac, det, xp) = element_geo_at(
-                        &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
-                    );
-                    let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
-                    integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
+                match ov_qp_test_pair.get(&(*row, *col)) {
+                    Some((bpts, bwts, tables)) => {
+                        for q in 0..bpts.len() {
+                            let (_jac, det, xp) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, &bpts[q], dim,
+                            );
+                            let ctx = VolCtx { w: bwts[q] * det.abs(), x: xp, dim, elem: e };
+                            integ.assemble2(&ctx, &tables[col][q], &tables[row][q], &mut ge);
+                        }
+                    }
+                    _ => {
+                        for q in 0..n_qp {
+                            let (_jac, det, xp) = element_geo_at(
+                                &mesh, simplex.as_ref(), geo, &geo_nodes, &qpts[q], dim,
+                            );
+                            let ctx = VolCtx { w: qwts[q] * det.abs(), x: xp, dim, elem: e };
+                            integ.assemble2(&ctx, &qp_test[*col][q], &qp_test[*row][q], &mut ge);
+                        }
+                    }
                 }
                 let (r0, c0) = (test_offsets[*row], test_offsets[*col]);
                 for i in 0..nr {

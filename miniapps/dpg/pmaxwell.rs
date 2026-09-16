@@ -1218,11 +1218,25 @@ fn assemble_pml_blocks_3d(
     trial_order: u8,
     test_order: u8,
 ) {
-    // MFEM per-integrator default rules on the order-`(p−1)` E/H blocks —
-    // same rationale as the 2-D branch.
-    let trial_rule = ((trial_order as u16 + test_order as u16).min(255)) as u8;
-        a.set_trial_quad_order(es, trial_rule);
-        a.set_trial_quad_order(hs, trial_rule);
+    // MFEM per-integrator default rules.  In 3-D the affine hex map adds
+    // `Trans.OrderW() = geo_order·dim − 1 = 2` (MFEM
+    // `IsoparametricTransformation::OrderW`, Qk branch) to every default
+    // rule: the order-`(p−1)` E/H trial blocks run at `(p−1) + q + 2` and the
+    // PML test (graph-norm / curl-MQ) blocks coupling the order-`q` F/G
+    // spaces run at `2q + 2` — one Gauss level above the global `2q` gram
+    // rule (`CurlCurlIntegrator` uses `2q`, the linear form `2q`; both stay
+    // on the global rule).  The 2-D branch keeps the 2-D formulas, where
+    // `OrderW() = 1` lands on the same Gauss points as `2·test_order`.
+    // Evidence: `tmp/d219/` single-hex per-block fro² diff vs MFEM (D219).
+    let order_w = 2_u16; // hex, geometry order 1, dim 3
+    let trial_rule = ((trial_order as u16 + test_order as u16 + order_w).min(255)) as u8;
+    let test_rule = ((2 * test_order as u16 + order_w).min(255)) as u8;
+    a.set_trial_quad_order(es, trial_rule);
+    a.set_trial_quad_order(hs, trial_rule);
+    a.set_test_quad_order(f, f, test_rule);
+    a.set_test_quad_order(f, g, test_rule);
+    a.set_test_quad_order(g, f, test_rule);
+    a.set_test_quad_order(g, g, test_rule);
     let flags: Arc<Vec<bool>> = Arc::new(pml.mark_elements(local_mesh));
     let (non, pmr) = (PmlRegion::NonPml, PmlRegion::Pml);
     let id3 = |c: f64| vec![vec![c, 0.0, 0.0], vec![0.0, c, 0.0], vec![0.0, 0.0, c]];
