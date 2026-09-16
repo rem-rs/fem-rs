@@ -668,8 +668,16 @@ miniapps/
 │   │                            9 个 Dpg 空间变系数积分器 + 逐 trial 块求积规则
 │   │                            （`set_trial_quad_order`，默认路径逐位不变）；
 │   │                            2-D 对拍 np1/np2/sc 逐位（113/1.132e+00、
-│   │                            417/1.090e+00）；3-D 已接线但残差 3% 差 =
-│   │                            **D219**。round 38（D195）：serial
+│   │                            417/1.090e+00）。
+│   │                            **round 40（D219 关闭）**：3-D `-prob 2` 转正——
+│   │                            根因 = 3-D 积分规则漏 MFEM `Trans.OrderW()`
+│   │                            （hex = geo·dim−1 = 2；2-D 时 OrderW=1 恰落同
+│   │                            Gauss 点数，纯巧合）⇒ `set_test_quad_order`
+│   │                            逐 (row,col) 测试块规则（round 39 trial 版的
+│   │                            对称仲裁件，默认路径逐位不变）；
+│   │                            **984 / 5.891e-01 == C++ 逐位**（`-sref 1`
+│   │                            6960/5.406e-01 亦同）。
+│   │                            round 38（D195）：serial
 │   │                            `ComplexDPGWeakForm::compute_residual` 的 ND 迹
 │   │                            双折号已修（MFEM 语义 = 存未折号块 + 取时一次；
 │   │                            修后 serial 残差 4.706293799742669 = C++ np1
