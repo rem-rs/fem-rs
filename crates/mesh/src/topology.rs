@@ -170,6 +170,28 @@ pub trait MeshTopology: Send + Sync {
     }
 
     /// Locate a physical point in the mesh. Returns None if outside.
+    ///
+    /// D224 output convention: the returned reference coordinates live in the
+    /// fem_element **factory reference domain** of the located element — the
+    /// same domain the solution bases (`HexQk`, `QuadQk`, `TriPk`, `TetPk`,
+    /// `PrismPk`, …) and therefore `GridFunction::evaluate_*_at_element` and
+    /// [`crate::transformation::find_points`] consume:
+    ///
+    /// - Tri/Tet: barycentric unit simplex,
+    /// - Quad: `[0, 1]^2`,
+    /// - Hex: `[-1, 1]^3`,
+    /// - Prism: `[0, 1]` axial first, then triangle coordinates.
+    ///
+    /// (MFEM's own `Mesh::FindPoints` reports `[0, 1]^d` for every geometry —
+    /// `FindPointsGSLIB::MapRefPosAndElemIndices` maps the gslib `[-1, 1]`
+    /// output to `[0, 1]`; fem-rs translates once at this boundary instead of
+    /// at every evaluation consumer.  The MFEM-canonical `[0, 1]` convention
+    /// remains available through [`crate::findpts::GslibFindPoints`].)
+    ///
+    /// 3-D all-simplex meshes keep the legacy affine-simplex search
+    /// (bit-identical to pre-D224); 2-D meshes did not have a working legacy
+    /// path to preserve — the pre-D224 implementation always located the
+    /// origin there — so they use the isoparametric search.
     fn locate(&self, _x: &[f64], _tol: f64) -> Option<(u32, Vec<f64>)> { None }
 
     /// Clone the mesh into a boxed trait object.

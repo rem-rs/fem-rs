@@ -3460,9 +3460,52 @@ impl<const D: usize> MeshTopology for Mesh<D> {
     fn locate(&self, x: &[f64], tol: f64) -> Option<(u32, Vec<f64>)> {
         let dim = self.dim() as usize;
         if x.len() < dim { return None; }
+        let p: Vec<f64> = (0..dim).map(|i| x[i]).collect();
+
+        // D224 routing by element family and dimension:
+        // - 3-D all-simplex meshes keep the historical affine-simplex search
+        //   (bit-identical results — the working tet path);
+        // - every other mesh whose elements the isoparametric search supports
+        //   (2-D tri/quad — the legacy path was broken there, see below — and
+        //   any mesh containing tensor/prism elements) uses `GslibFindPoints`
+        //   with the factory-domain translation at the exit;
+        // - families the isoparametric search does not support (higher-order
+        //   serendipity etc.) fall back to the legacy path.
+        //
+        // Why 2-D simplex meshes must NOT keep the legacy path: the legacy
+        // call goes through `p.try_into().unwrap_or([0.0; 3])`, whose target
+        // type is `[f64; 3]` — with `D = 2` the conversion *always* fails and
+        // the search located the origin, i.e. the pre-D224 `locate` on any
+        // 2-D mesh returned `(element 0, [0, 0])` for every query point.
+        let mut all_simplex = true;
+        let mut all_isoparametric = true;
+        for e in 0..self.n_elements() as u32 {
+            let et = self.element_type(e);
+            all_simplex &= crate::findpts::is_simplex(et);
+            all_isoparametric &= crate::findpts::gslib_supported(et);
+        }
+        if !(D == 3 && all_simplex) && all_isoparametric {
+            let mut finder = crate::findpts::GslibFindPoints::new(self);
+            finder.newt_tol = tol;
+            let mut pt = [0.0_f64; D];
+            pt.copy_from_slice(&p[..dim]);
+            let g = finder.find_point(&pt);
+            if g.code == crate::findpts::CODE_NOT_FOUND {
+                return None;
+            }
+            // D224 convention: report the reference coordinates in the
+            // fem_element **factory domain** of the located element (the same
+            // domain the solution bases and `GridFunction::evaluate_*` consume):
+            // hex `[-1, 1]^3`, quad `[0, 1]^2`, prism axial-first, simplices
+            // barycentric.  `GslibFindPoints` works in the MFEM-canonical
+            // `[0, 1]^D`, so translate once at this boundary.
+            let et = self.element_type(g.elem);
+            let (fxi, _) = crate::findpts::to_factory_coords(et, &g.xi);
+            return Some((g.elem, fxi));
+        }
+
         let finder = crate::findpts::FindPoints::new(self);
         let opts = crate::findpts::FindPointsOptions { tol, ..Default::default() };
-        let p: Vec<f64> = (0..dim).map(|i| x[i]).collect();
         finder.locate(&p.try_into().unwrap_or([0.0; 3]), &opts).map(|lp| (lp.elem, lp.xi.to_vec()))
     }
 

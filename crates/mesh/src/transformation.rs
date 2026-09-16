@@ -14,6 +14,17 @@ use crate::topology::MeshTopology;
 ///
 /// For a simplex with vertex coordinates `x0, x1, ..., x_dim`,
 /// `J[:,k] = x_{k+1} - x_0` and `x(ξ) = x0 + J ξ`.
+///
+/// D230: a 2-D four-node element (Quad4) builds the **true bilinear**
+/// isoparametric map (MFEM `IsoparametricTransformation` with
+/// `Geometry::SQUARE`, vertices `(0,0),(1,0),(1,1),(0,1)`):
+/// `x(s,t) = Σ φ_k(s,t) v_k` with
+/// `φ = [(1-s)(1-t), s(1-t), st, (1-s)t]`.  For a quad the constant-J
+/// accessors ([`jacobian`](Self::jacobian), [`det_j`](Self::det_j),
+/// [`jacobian_inv_t`](Self::jacobian_inv_t)) keep reporting the first-order
+/// linearization at the reference origin `(0, 0)` (which is exactly the
+/// first-3-node affine Jacobian); the exact point-dependent map is
+/// [`map_to_physical`](Self::map_to_physical).
 #[derive(Debug, Clone)]
 pub struct ElementTransformation {
     dim: usize,
@@ -21,6 +32,9 @@ pub struct ElementTransformation {
     jacobian: DMatrix<f64>,
     det_j: f64,
     jacobian_inv_t: DMatrix<f64>,
+    /// Quad4 bilinear corner coordinates `[[x,y]; 4]` when this
+    /// transformation was built from a 2-D four-node element.
+    quad_nodes: Option<[[f64; 2]; 4]>,
 }
 
 impl ElementTransformation {
@@ -32,8 +46,10 @@ impl ElementTransformation {
 
     /// Build a simplex transformation from a node slice.
     ///
-    /// Uses the first `dim + 1` nodes as simplex vertices.  Coordinates come
-    /// from the vertex table (`node_coords`); callers that need per-element
+    /// Uses the first `dim + 1` nodes as simplex vertices — except in 2-D
+    /// with exactly four nodes (Quad4), which builds the true bilinear
+    /// isoparametric map (see the struct docs).  Coordinates come from the
+    /// vertex table (`node_coords`); callers that need per-element
     /// geometry (curved / geometrically periodic meshes) should resolve the
     /// geometry node ids themselves via [`MeshTopology::geometry_nodes`] /
     /// [`MeshTopology::geom_coords_of`] (see [`element_jacobian_at`], and the
@@ -71,12 +87,40 @@ impl ElementTransformation {
             .expect("ElementTransformation: degenerate simplex element")
             .transpose();
 
+        // D230: Quad4 (2-D, 4 nodes) carries its true bilinear geometry;
+        // higher-order 2-D elements (Quad8/Quad9) would need the isoparametric
+        // QuadQk geometry and are NOT handled here (the affine fallback below
+        // is only a linearization — use the isoparametric paths for those).
+        let quad_nodes = if dim == 2 && geo_nodes.len() == 4 {
+            Some([
+                {
+                    let c = mesh.node_coords(geo_nodes[0]);
+                    [c[0], c[1]]
+                },
+                {
+                    let c = mesh.node_coords(geo_nodes[1]);
+                    [c[0], c[1]]
+                },
+                {
+                    let c = mesh.node_coords(geo_nodes[2]);
+                    [c[0], c[1]]
+                },
+                {
+                    let c = mesh.node_coords(geo_nodes[3]);
+                    [c[0], c[1]]
+                },
+            ])
+        } else {
+            None
+        };
+
         Self {
             dim,
             x0,
             jacobian: jac,
             det_j,
             jacobian_inv_t,
+            quad_nodes,
         }
     }
 
@@ -101,12 +145,27 @@ impl ElementTransformation {
     }
 
     /// Reference-to-physical map for affine simplex elements.
+    ///
+    /// For a Quad4 transformation this is the **bilinear** isoparametric map
+    /// on the `[0, 1]^2` reference square (D230); the reference coordinates of
+    /// the four corners are `(0,0),(1,0),(1,1),(0,1)` — MFEM
+    /// `Geometry::SQUARE`.
     pub fn map_to_physical(&self, xi: &[f64]) -> Vec<f64> {
         assert_eq!(
             xi.len(),
             self.dim,
             "ElementTransformation::map_to_physical: xi dimension mismatch"
         );
+        if let Some(v) = &self.quad_nodes {
+            let (s, t) = (xi[0], xi[1]);
+            let phi = [(1.0 - s) * (1.0 - t), s * (1.0 - t), s * t, (1.0 - s) * t];
+            let mut xp = [0.0_f64; 2];
+            for (k, &w) in phi.iter().enumerate() {
+                xp[0] += w * v[k][0];
+                xp[1] += w * v[k][1];
+            }
+            return xp.to_vec();
+        }
         let mut xp = self.x0.clone();
         for i in 0..self.dim {
             for k in 0..self.dim {
@@ -243,6 +302,17 @@ mod tests {
 /// element id `-1` and zero reference coordinates.
 ///
 /// Returns `(elem_ids, ref_coords)` with `elem_ids.len() == npts`.
+///
+/// D224 output convention: `ref_coords[i]` is expressed in the fem_element
+/// **factory reference domain** of the located element — the same domain the
+/// solution bases (`HexQk`, `QuadQk`, `TriPk`, `TetPk`) and therefore
+/// `GridFunction::evaluate_*_at_element` consume:
+/// - Tri/Tet: barycentric unit simplex,
+/// - Quad4: `[0, 1]^2`,
+/// - Hex8: `[-1, 1]^3` (the Newton inversion runs in the MFEM-canonical
+///   `[0, 1]^3` — MFEM's `FindPointsGSLIB::MapRefPosAndElemIndices` maps the
+///   raw gslib `[-1, 1]` output to `[0, 1]` — and the coordinates are
+///   translated once at this exit).
 ///
 /// Note: MFEM uses a BVH-accelerated search with the same semantics for
 /// straight meshes; the found elements and reference coordinates agree.
@@ -465,6 +535,16 @@ pub fn find_points<M: MeshTopology + ?Sized>(
         }
         match found {
             Some((e, xi)) => {
+                // D224: translate the Newton result from the MFEM-canonical
+                // `[0, 1]^dim` to the factory domain of the element's bases
+                // (hex: `[-1, 1]^3`); quad/simplex coordinates are already in
+                // their factory domain.
+                let et = mesh.element_type(e);
+                let xi = if matches!(et, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
+                    xi.iter().map(|&t| 2.0 * t - 1.0).collect()
+                } else {
+                    xi
+                };
                 elem_ids.push(e as i64);
                 ref_coords.push(xi);
             }
@@ -560,8 +640,14 @@ mod find_points_tests {
         assert_eq!(ids[0], 0);
         assert_eq!(ids[1], 0);
         assert_eq!(ids[2], -1);
-        assert!((xis[0][0] - 0.3).abs() < 1e-10);
-        assert!((xis[1][2] - 0.5).abs() < 1e-10);
+        // D224: hex reference coordinates come back in the factory domain
+        // [-1, 1]^3 (physical 0.3 → factory 2*0.3-1 = -0.4, etc.).
+        assert!((xis[0][0] - (2.0 * 0.3 - 1.0)).abs() < 1e-10);
+        assert!((xis[0][1] - (2.0 * 0.2 - 1.0)).abs() < 1e-10);
+        assert!((xis[0][2] - (2.0 * 0.9 - 1.0)).abs() < 1e-10);
+        assert!((xis[1][0] - 0.0).abs() < 1e-10);
+        assert!((xis[1][1] - 0.0).abs() < 1e-10);
+        assert!((xis[1][2] - 0.0).abs() < 1e-10);
     }
 
     #[test]

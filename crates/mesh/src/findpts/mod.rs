@@ -19,3 +19,6 @@ pub use gslib::{
     GslibFindPoints, GslibPoint, CODE_BORDER, CODE_INSIDE, CODE_NOT_FOUND,
     DEFAULT_BDR_TOL, DEFAULT_NEWT_TOL, STRICT_TOL,
 };
+
+// D224 routing helpers for `MeshTopology::locate` (crate-internal).
+pub(crate) use gslib::{gslib_supported, is_simplex, to_factory_coords};

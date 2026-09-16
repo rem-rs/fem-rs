@@ -93,8 +93,14 @@ impl<const D: usize> Default for GslibPoint<D> {
 }
 
 /// Element families with simplex (barycentric) reference domains.
-fn is_simplex(et: ElementType) -> bool {
+pub(crate) fn is_simplex(et: ElementType) -> bool {
     matches!(et, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
+}
+
+/// Whether the isoparametric Newton search supports `et` (see [`is_supported`]
+/// callers in [`super::find_points`] routing / `MeshTopology::locate`).
+pub(crate) fn gslib_supported(et: ElementType) -> bool {
+    is_supported(et)
 }
 
 /// Serial FindPointsGSLIB-equivalent locator over a general [`Mesh`].
@@ -171,7 +177,10 @@ fn factory_in_range(et: ElementType, fxi: &[f64], t: f64) -> bool {
 /// Map canonical `[0, 1]^D` coordinates to the family's factory convention,
 /// returning `(factory_xi, jacobian_scale)` where `jacobian_scale` is the
 /// factor `d(factory_xi) / d(canonical_xi)` per axis (diagonal map).
-fn to_factory_coords<const D: usize>(et: ElementType, xi: &[f64; D]) -> (Vec<f64>, [f64; D]) {
+pub(crate) fn to_factory_coords<const D: usize>(
+    et: ElementType,
+    xi: &[f64; D],
+) -> (Vec<f64>, [f64; D]) {
     match et {
         ElementType::Hex8 | ElementType::Hex27 => {
             let f: Vec<f64> = xi.iter().map(|&v| 2.0 * v - 1.0).collect();
