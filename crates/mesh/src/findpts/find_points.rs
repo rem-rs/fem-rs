@@ -59,13 +59,24 @@ impl Default for FindPointsOptions {
 /// Holds a pre-built BVH for efficient spatial queries.
 pub struct FindPoints<'a, const D: usize> {
     mesh: &'a Mesh<D>,
-    bvh: Bvh<D>,
+    bvh: std::sync::Arc<Bvh<D>>,
 }
 
 impl<'a, const D: usize> FindPoints<'a, D> {
     /// Build a new FindPoints query struct from a mesh.
     pub fn new(mesh: &'a Mesh<D>) -> Self {
-        let bvh = Bvh::new(mesh);
+        let bvh = std::sync::Arc::new(Bvh::new(mesh));
+        Self { mesh, bvh }
+    }
+
+    /// Build the query struct from a pre-built vertex BVH
+    /// ([`MeshTopology::locate`] cache path, D241).
+    ///
+    /// [`MeshTopology::locate`]: crate::topology::MeshTopology::locate
+    pub(crate) fn with_bvh(
+        mesh: &'a Mesh<D>,
+        bvh: std::sync::Arc<Bvh<D>>,
+    ) -> Self {
         Self { mesh, bvh }
     }
 

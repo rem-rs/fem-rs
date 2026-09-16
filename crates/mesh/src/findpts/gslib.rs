@@ -106,7 +106,7 @@ pub(crate) fn gslib_supported(et: ElementType) -> bool {
 /// Serial FindPointsGSLIB-equivalent locator over a general [`Mesh`].
 pub struct GslibFindPoints<'a, const D: usize> {
     mesh: &'a Mesh<D>,
-    bvh: Bvh<D>,
+    bvh: std::sync::Arc<Bvh<D>>,
     /// Newton convergence tolerance (physical residual).
     pub newt_tol: f64,
     /// Squared-distance tolerance for border-found points (MFEM `bdr_tol`).
@@ -122,9 +122,17 @@ pub struct GslibFindPoints<'a, const D: usize> {
 /// Element families supported by the isoparametric Newton search.
 ///
 /// Each entry has a matching `fem_element` Lagrange factory element whose DOF
-/// count equals the element's node count at the mesh geometry order.
+/// count equals the element's node count at the mesh geometry order — except
+/// the incomplete quadratic families ([`Quad8`], [`Hex20`], [`Prism15`],
+/// D244), which are evaluated by their own serendipity node tables via
+/// [`super::incomplete`].
+///
+/// [`Quad8`]: crate::element_type::ElementType::Quad8
+/// [`Hex20`]: crate::element_type::ElementType::Hex20
+/// [`Prism15`]: crate::element_type::ElementType::Prism15
 fn is_supported(et: ElementType) -> bool {
     is_simplex(et)
+        || super::incomplete::family_of(et).is_some()
         || matches!(
             et,
             ElementType::Quad4
@@ -161,13 +169,13 @@ fn factory_in_range(et: ElementType, fxi: &[f64], t: f64) -> bool {
             }
             sum <= 1.0 + t
         }
-        ElementType::Prism6 | ElementType::Prism18 => {
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
             // PrismPk: xi[0] axial, (xi[1], xi[2]) triangle coordinates.
             let (s, x, y) = (fxi[0], fxi[1], fxi[2]);
             s >= -t && x >= -t && y >= -t && x + y <= 1.0 + t
         }
-        ElementType::Hex8 | ElementType::Hex27 => {
-            // HexQk evaluates on [-1, 1]^3.
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            // HexQk / Hex20 serendipity evaluate on [-1, 1]^3.
             fxi.iter().all(|&v| v >= -1.0 - t && v <= 1.0 + t)
         }
         _ => fxi.iter().all(|&v| v >= -t && v <= 1.0 + t),
@@ -182,7 +190,7 @@ pub(crate) fn to_factory_coords<const D: usize>(
     xi: &[f64; D],
 ) -> (Vec<f64>, [f64; D]) {
     match et {
-        ElementType::Hex8 | ElementType::Hex27 => {
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             let f: Vec<f64> = xi.iter().map(|&v| 2.0 * v - 1.0).collect();
             let scale = [2.0; D];
             (f, scale)
@@ -195,7 +203,7 @@ pub(crate) fn to_factory_coords<const D: usize>(
 /// canonical `[0, 1]^D`.
 fn from_factory_coords<const D: usize>(et: ElementType, fxi: &[f64]) -> [f64; D] {
     match et {
-        ElementType::Hex8 | ElementType::Hex27 => {
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             std::array::from_fn(|d| 0.5 * (fxi[d] + 1.0))
         }
         _ => std::array::from_fn(|d| fxi[d]),
@@ -212,7 +220,19 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
                 "GslibFindPoints: unsupported element type {et:?}"
             );
         }
-        let bvh = Bvh::new_with_aabbs(mesh, Self::geometry_aabbs(mesh));
+        let bvh = std::sync::Arc::new(Bvh::new_with_aabbs(
+            mesh,
+            Self::geometry_aabbs(mesh),
+        ));
+        Self::with_bvh(mesh, bvh)
+    }
+
+    /// Build the locator from a pre-built geometry BVH
+    /// ([`MeshTopology::locate`] cache path, D241; support of every element
+    /// family is the caller's — the route decision's — responsibility).
+    ///
+    /// [`MeshTopology::locate`]: crate::topology::MeshTopology::locate
+    pub(crate) fn with_bvh(mesh: &'a Mesh<D>, bvh: std::sync::Arc<Bvh<D>>) -> Self {
         Self {
             mesh,
             bvh,
@@ -231,7 +251,7 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
     /// element with rigorous Lobatto polynomial bounds; the node hull is the
     /// practical equivalent since the GLL interpolation of the geometry is
     /// exact between nodes) plus a small safety margin.
-    fn geometry_aabbs(mesh: &Mesh<D>) -> Vec<super::bvh::Aabb<D>> {
+    pub(crate) fn geometry_aabbs(mesh: &Mesh<D>) -> Vec<super::bvh::Aabb<D>> {
         let g = mesh.geometry.as_ref();
         let npe: usize = match g {
             Some(g) => g.nodes_per_elem,
@@ -387,7 +407,10 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
         let x0 = self.mesh.coords_of(ns[0]);
         let mut jac0 = nalgebra::DMatrix::<f64>::zeros(D, D);
         // Corner offsets per family (canonical): axis k direction.
-        let ax: [usize; D] = if et == ElementType::Prism6 || et == ElementType::Prism18 {
+        let ax: [usize; D] = if et == ElementType::Prism6
+            || et == ElementType::Prism15
+            || et == ElementType::Prism18
+        {
             // Connectivity [b0 b1 b2 t0 t1 t2]: tri axes at nodes 1, 2,
             // axial axis at node 3.  Canonical coords [axial, tx, ty].
             let mut a = [0usize; D];
@@ -418,11 +441,29 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
         // high-order geometry node (Gauss-Lobatto point).  From within the
         // node's cell the Newton map is well-behaved even on curved elements.
         {
-            let geo_order = self.mesh.geom_order().max(1);
-            let fe = fem_element::lagrange::factory::ref_elem(et.to_elem_type(), geo_order);
-            let rc = fe.dof_coords();
-            let npe = fe.n_dofs();
             let g = self.mesh.geometry.as_ref();
+            // D244: incomplete quadratic families have no factory element
+            // with matching DOF layout — their node reference positions are
+            // the family table (reader/Gmsh connectivity order).
+            let (npe, rc): (usize, Vec<[f64; D]>) =
+                if let Some(f) = super::incomplete::family_of(et) {
+                    let table = (0..f.n)
+                        .map(|k| std::array::from_fn(|d| f.nodes[k][d]))
+                        .collect();
+                    (f.n, table)
+                } else {
+                    let geo_order = self.mesh.geom_order().max(1);
+                    let fe = fem_element::lagrange::factory::ref_elem(
+                        et.to_elem_type(),
+                        geo_order,
+                    );
+                    let table = fe
+                        .dof_coords()
+                        .into_iter()
+                        .map(|c| std::array::from_fn(|d| c[d]))
+                        .collect();
+                    (fe.n_dofs(), table)
+                };
             let conn: Vec<u32> = match g {
                 Some(g) => g.conn[e as usize * npe..(e as usize + 1) * npe].to_vec(),
                 None => ns.to_vec(),
@@ -467,7 +508,7 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
         for start in &starts {
             let mut xi = *start;
             let mut converged = false;
-            for _ in 0..self.max_iter {
+            for _iteration in 0..self.max_iter {
                 let (j, _det, xmap) = self.isoparametric(e, et, &xi);
                 let mut r = [0.0_f64; D];
                 let mut r2 = 0.0;
@@ -566,6 +607,33 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
         xi: &[f64; D],
     ) -> (nalgebra::DMatrix<f64>, f64, Vec<f64>) {
         let (fxi, scale) = to_factory_coords(et, xi);
+        // D244: incomplete quadratic families (Quad8/Hex20/Prism15) are
+        // evaluated on their own serendipity node tables (raw reader-order
+        // connectivity); the fem_element factory has no matching element.
+        if let Some(f) = super::incomplete::family_of(et) {
+            let coords: Vec<[f64; D]> = self
+                .mesh
+                .elem_nodes(e)
+                .iter()
+                .map(|&n| self.mesh.coords_of(n))
+                .collect();
+            let mut fx = [0.0_f64; D];
+            fx.copy_from_slice(&fxi[..D]);
+            let (jac, _det, x) = super::incomplete::eval_map::<D>(&f, &coords, &fx);
+            // Chain rule: dx/dxi_canonical = dx/dxi_factory * dxi_factory/dxi.
+            let mut jc = nalgebra::DMatrix::<f64>::zeros(D, D);
+            for k in 0..D {
+                for i in 0..D {
+                    jc[(i, k)] = jac[i * 3 + k] * scale[k];
+                }
+            }
+            let det = if D == 2 {
+                jc[(0, 0)] * jc[(1, 1)] - jc[(0, 1)] * jc[(1, 0)]
+            } else {
+                jc.determinant()
+            };
+            return (jc, det, x.to_vec());
+        }
         let (j, _det, x) = self.mesh.element_jacobian(e, &fxi);
         // Chain rule: dx/dxi_canonical = dx/dxi_factory * dxi_factory/dxi.
         let mut jc: nalgebra::DMatrix<f64> = j.clone();
@@ -595,7 +663,10 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
                 sum += v;
             }
             sum <= 1.0 - t
-        } else if et == ElementType::Prism6 || et == ElementType::Prism18 {
+        } else if et == ElementType::Prism6
+            || et == ElementType::Prism15
+            || et == ElementType::Prism18
+        {
             let (s, x, y) = (xi[0], xi[1], xi[2]);
             s >= t && x >= t && y >= t && x + y <= 1.0 - t
         } else {

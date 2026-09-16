@@ -239,6 +239,21 @@ impl<const D: usize> Mesh<D> {
         self.geometry.as_ref().map_or(1, |g| g.order)
     }
 
+    /// Drop the cached locator state for this mesh (D241 invalidation
+    /// protocol, see `findpts::locator_cache`).
+    ///
+    /// The in-crate in-place mutators (`translate`, `scale`, `transform`,
+    /// `rotate_*`, `snap_to_sphere`, `set_curvature`, `add_vertex_*`,
+    /// `add_triangle/quad/wedge/hex`, `renumber_vertices`,
+    /// `remove_unused_vertices`, `remove_internal_boundaries`,
+    /// `element_vertices_mut`, …) call this automatically.  Code that mutates
+    /// the pub `coords`/`conn`/`elem_types`/`geometry` fields directly must
+    /// call it explicitly after the edit — the same contract MFEM states for
+    /// `FindPointsGSLIB::Setup` after mesh changes.
+    pub fn invalidate_locators(&self) {
+        crate::findpts::locator_cache::invalidate(std::ptr::from_ref(self) as usize);
+    }
+
     /// Number of geometry nodes (0 if no high-order geometry).
     pub fn n_geom_nodes(&self) -> usize {
         self.geometry.as_ref().map_or(0, |g| g.n_nodes)
@@ -269,6 +284,38 @@ impl<const D: usize> Mesh<D> {
         };
 
         let geo_order = self.geom_order() as usize;
+
+        // D244: the incomplete quadratic families (Quad8 / Hex20 / Prism15)
+        // have no fem_element factory element with a matching DOF layout —
+        // evaluating a tensor element at the raw reader connectivity would
+        // either index out of bounds (order-1 factory, 8/15/20 nodes) or
+        // silently misplace the nodes.  Their geometry is the classical
+        // serendipity interpolant on the element's own node table (Gmsh
+        // connectivity order; see `findpts::incomplete`).  A per-element
+        // high-order geometry table never carries these families in fem-rs.
+        if let Some(f) = crate::findpts::incomplete::family_of(et) {
+            if nodes.len() == f.n {
+                let coords: Vec<[f64; D]> = nodes
+                    .iter()
+                    .map(|&n| {
+                        let c = self.geom_coords_of(n);
+                        std::array::from_fn(|d| c[d])
+                    })
+                    .collect();
+                let mut fxi = [0.0_f64; D];
+                fxi.copy_from_slice(&xi[..D]);
+                let (j, det, x) =
+                    crate::findpts::incomplete::eval_map::<D>(&f, &coords, &fxi);
+                let mut jac = nalgebra::DMatrix::<f64>::zeros(D, D);
+                for i in 0..D {
+                    for k in 0..D {
+                        jac[(i, k)] = j[i * 3 + k];
+                    }
+                }
+                return (jac, det, x.to_vec());
+            }
+        }
+
         // Geometry reference element for isoparametric Jacobians.
         //
         // The table's contract is the **closed Gauss-Lobatto** family: MFEM's
@@ -349,6 +396,7 @@ impl<const D: usize> Mesh<D> {
     /// Supports `Quad4` (D=2 or D=3) and `Tri3` (D=3) element types.
     /// `order = 0` or `1` resets to linear geometry.
     pub fn set_curvature(&mut self, order: u8) {
+        self.invalidate_locators(); // D241: geometry table changes
         if order <= 1 {
             self.geometry = None;
             return;
@@ -1026,6 +1074,7 @@ impl<const D: usize> Mesh<D> {
     /// If high-order geometry is present (via [`set_curvature`](Self::set_curvature)),
     /// both vertex and geometry-node coordinates are transformed.
     pub fn transform(&mut self, mut f: impl FnMut([f64; D]) -> [f64; D]) {
+        self.invalidate_locators(); // D241: covers translate/scale/rotate_* too
         // Transform vertex coordinates
         for n in 0..self.n_nodes() {
             let out = f(self.coords_of(n as NodeId));
@@ -2986,6 +3035,7 @@ impl<const D: usize> Mesh<D> {
     where
         [(); D]: ,
     {
+        self.invalidate_locators(); // D241: geometry coords change
         assert_eq!(D, 3, "snap_to_sphere requires D = 3");
         for i in 0..self.n_nodes() {
             let base = i * 3;
@@ -3015,6 +3065,7 @@ impl<const D: usize> Mesh<D> {
     }
 
     pub fn add_vertex_3d(&mut self, x: f64, y: f64, z: f64) -> NodeId {
+        self.invalidate_locators(); // D241: coords grow
         assert_eq!(D, 3, "add_vertex_3d requires D = 3");
         let id = self.n_nodes() as NodeId;
         self.coords.push(x); self.coords.push(y); self.coords.push(z);
@@ -3023,6 +3074,7 @@ impl<const D: usize> Mesh<D> {
 
     /// Add a 2D vertex (asserts D == 2).
     pub fn add_vertex_2d(&mut self, x: f64, y: f64) -> NodeId {
+        self.invalidate_locators(); // D241: coords grow
         assert_eq!(D, 2, "add_vertex_2d requires D = 2");
         let id = self.n_nodes() as NodeId;
         self.coords.push(x); self.coords.push(y);
@@ -3031,6 +3083,7 @@ impl<const D: usize> Mesh<D> {
 
     /// Add a triangle element (asserts D == 2).
     pub fn add_triangle(&mut self, v: &[NodeId; 3], attr: i32) -> ElemId {
+        self.invalidate_locators(); // D241: conn grows
         assert_eq!(D, 2, "add_triangle requires D = 2");
         let id = self.n_elems() as ElemId;
         for &vi in v { self.conn.push(vi); }
@@ -3040,6 +3093,7 @@ impl<const D: usize> Mesh<D> {
 
     /// Add a quadrilateral element (asserts D == 2).
     pub fn add_quad(&mut self, v: &[NodeId; 4], attr: i32) -> ElemId {
+        self.invalidate_locators(); // D241: conn grows
         assert_eq!(D, 2, "add_quad requires D = 2");
         let id = self.n_elems() as ElemId;
         for &vi in v { self.conn.push(vi); }
@@ -3050,6 +3104,7 @@ impl<const D: usize> Mesh<D> {
     /// Record a hanging vertex relationship: vertex `i` is the midpoint of `p1` and `p2`.
     /// Mirrors MFEM `Mesh::AddVertexParents(i, p1, p2)`.
     pub fn add_vertex_parents(&mut self, i: NodeId, p1: NodeId, p2: NodeId) {
+        self.invalidate_locators(); // D241: rewrites vertex i's coordinates
         self.vertex_parents.push((i, p1, p2));
         let off_i = i as usize * D;
         let off_p1 = p1 as usize * D;
@@ -3072,6 +3127,7 @@ impl<const D: usize> Mesh<D> {
     }
 
     pub fn add_wedge(&mut self, v: &[NodeId; 6], attr: i32) -> ElemId {
+        self.invalidate_locators(); // D241: conn grows
         assert_eq!(D, 3, "add_wedge requires D = 3");
         let id = self.n_elems() as ElemId;
         for &vi in v { self.conn.push(vi); }
@@ -3080,6 +3136,7 @@ impl<const D: usize> Mesh<D> {
     }
 
     pub fn add_hex(&mut self, v: &[NodeId; 8], attr: i32) -> ElemId {
+        self.invalidate_locators(); // D241: conn grows
         assert_eq!(D, 3, "add_hex requires D = 3");
         let id = self.n_elems() as ElemId;
         for &vi in v { self.conn.push(vi); }
@@ -3088,11 +3145,13 @@ impl<const D: usize> Mesh<D> {
     }
 
     pub fn renumber_vertices(&mut self, v2v: &[i32]) {
+        self.invalidate_locators(); // D241: conn permuted
         for v in self.conn.iter_mut() { *v = v2v[*v as usize] as u32; }
         for v in self.face_conn.iter_mut() { *v = v2v[*v as usize] as u32; }
     }
 
     pub fn remove_unused_vertices(&mut self) {
+        self.invalidate_locators(); // D241: coords/conn rebuilt
         let nv = self.n_nodes();
         let mut used = vec![false; nv];
         for &v in &self.conn { used[v as usize] = true; }
@@ -3114,6 +3173,7 @@ impl<const D: usize> Mesh<D> {
     }
 
     pub fn remove_internal_boundaries(&mut self) {
+        self.invalidate_locators(); // D241: face tables rebuilt
         let mut face_count = std::collections::HashMap::<Vec<u32>, u32>::new();
         let local_faces = local_face_verts(D, self.elem_type);
         let nf = self.n_faces();
@@ -3190,6 +3250,7 @@ impl<const D: usize> Mesh<D> {
 
     /// Get mutable element vertices slice.
     pub fn element_vertices_mut(&mut self, e: ElemId) -> &mut [NodeId] {
+        self.invalidate_locators(); // D241: caller may rewrite the connectivity
         let npe = self.elem_type.nodes_per_element();
         let off = e as usize * npe;
         &mut self.conn[off..off + npe]
@@ -3351,7 +3412,8 @@ impl<const D: usize> MeshTopology for Mesh<D> {
             if n < geo.n_nodes {
                 let off = n * D;
                 if off + D <= geo.coords.len() {
-                    return &geo.coords[off..off + D];                }
+                    return &geo.coords[off..off + D];
+                }
             }
         }
         self.node_coords(node)
@@ -3460,7 +3522,8 @@ impl<const D: usize> MeshTopology for Mesh<D> {
     fn locate(&self, x: &[f64], tol: f64) -> Option<(u32, Vec<f64>)> {
         let dim = self.dim() as usize;
         if x.len() < dim { return None; }
-        let p: Vec<f64> = (0..dim).map(|i| x[i]).collect();
+        let mut pt = [0.0_f64; D];
+        pt.copy_from_slice(&x[..dim]);
 
         // D224 routing by element family and dimension:
         // - 3-D all-simplex meshes keep the historical affine-simplex search
@@ -3477,36 +3540,46 @@ impl<const D: usize> MeshTopology for Mesh<D> {
         // type is `[f64; 3]` — with `D = 2` the conversion *always* fails and
         // the search located the origin, i.e. the pre-D224 `locate` on any
         // 2-D mesh returned `(element 0, [0, 0])` for every query point.
-        let mut all_simplex = true;
-        let mut all_isoparametric = true;
-        for e in 0..self.n_elements() as u32 {
-            let et = self.element_type(e);
-            all_simplex &= crate::findpts::is_simplex(et);
-            all_isoparametric &= crate::findpts::gslib_supported(et);
-        }
-        if !(D == 3 && all_simplex) && all_isoparametric {
-            let mut finder = crate::findpts::GslibFindPoints::new(self);
-            finder.newt_tol = tol;
-            let mut pt = [0.0_f64; D];
-            pt.copy_from_slice(&p[..dim]);
-            let g = finder.find_point(&pt);
-            if g.code == crate::findpts::CODE_NOT_FOUND {
-                return None;
+        //
+        // D241: the route decision and the BVH construction are cached per
+        // mesh (see `findpts::locator_cache` for the invalidation protocol);
+        // only the point queries run per call.
+        let cached = crate::findpts::locator_cache::get_or_init(self);
+        match cached.route {
+            crate::findpts::locator_cache::LocateRoute::Gslib => {
+                let mut finder = crate::findpts::GslibFindPoints::with_bvh(
+                    self,
+                    cached.gslib_bvh(self),
+                );
+                finder.newt_tol = tol;
+                let g = finder.find_point(&pt);
+                if g.code == crate::findpts::CODE_NOT_FOUND {
+                    return None;
+                }
+                // D224 convention: report the reference coordinates in the
+                // fem_element **factory domain** of the located element (the
+                // same domain the solution bases and `GridFunction::evaluate_*`
+                // consume): hex `[-1, 1]^3`, quad `[0, 1]^2`, prism axial-first,
+                // simplices barycentric.  `GslibFindPoints` works in the
+                // MFEM-canonical `[0, 1]^D`, so translate once at this boundary.
+                let et = self.element_type_at(g.elem);
+                let (fxi, _) = crate::findpts::to_factory_coords(et, &g.xi);
+                return Some((g.elem, fxi));
             }
-            // D224 convention: report the reference coordinates in the
-            // fem_element **factory domain** of the located element (the same
-            // domain the solution bases and `GridFunction::evaluate_*` consume):
-            // hex `[-1, 1]^3`, quad `[0, 1]^2`, prism axial-first, simplices
-            // barycentric.  `GslibFindPoints` works in the MFEM-canonical
-            // `[0, 1]^D`, so translate once at this boundary.
-            let et = self.element_type(g.elem);
-            let (fxi, _) = crate::findpts::to_factory_coords(et, &g.xi);
-            return Some((g.elem, fxi));
+            crate::findpts::locator_cache::LocateRoute::Legacy => {
+                let finder = crate::findpts::FindPoints::with_bvh(
+                    self,
+                    cached.legacy_bvh(self),
+                );
+                let opts = crate::findpts::FindPointsOptions {
+                    tol,
+                    ..Default::default()
+                };
+                return finder
+                    .locate(&pt, &opts)
+                    .map(|lp| (lp.elem, lp.xi.to_vec()));
+            }
         }
-
-        let finder = crate::findpts::FindPoints::new(self);
-        let opts = crate::findpts::FindPointsOptions { tol, ..Default::default() };
-        finder.locate(&p.try_into().unwrap_or([0.0; 3]), &opts).map(|lp| (lp.elem, lp.xi.to_vec()))
     }
 
     fn clone_mesh(&self) -> Box<dyn MeshTopology + Send + Sync> {

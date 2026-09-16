@@ -12,6 +12,8 @@
 pub mod bvh;
 pub mod find_points;
 pub mod gslib;
+pub mod incomplete;
+pub mod locator_cache;
 pub mod newton;
 
 pub use find_points::{FindPoints, FindPointsOptions, LocatedPoint};
@@ -21,4 +23,4 @@ pub use gslib::{
 };
 
 // D224 routing helpers for `MeshTopology::locate` (crate-internal).
-pub(crate) use gslib::{gslib_supported, is_simplex, to_factory_coords};
+pub(crate) use gslib::to_factory_coords;

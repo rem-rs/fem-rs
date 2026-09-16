@@ -25,6 +25,14 @@ use crate::topology::MeshTopology;
 /// linearization at the reference origin `(0, 0)` (which is exactly the
 /// first-3-node affine Jacobian); the exact point-dependent map is
 /// [`map_to_physical`](Self::map_to_physical).
+///
+/// D243: 2-D eight/nine-node quadrilaterals (Quad8 serendipity, Quad9
+/// tensor-Q2) build their **true isoparametric** maps the same way.  The node
+/// order is the reader (Gmsh/VTK) connectivity order: corners `(0,0),(1,0),
+/// (1,1),(0,1)`, then the four edge nodes on edges `(0,1),(1,2),(2,3),(3,0)`
+/// at their reference midpoints, then for Quad9 the center node `(1/2, 1/2)`
+/// (this equals the MFEM `H1(QUAD)` order-2 / `QuadQk(2)` DOF order).  As for
+/// Quad4, the constant-J accessors remain the origin linearization.
 #[derive(Debug, Clone)]
 pub struct ElementTransformation {
     dim: usize,
@@ -35,6 +43,10 @@ pub struct ElementTransformation {
     /// Quad4 bilinear corner coordinates `[[x,y]; 4]` when this
     /// transformation was built from a 2-D four-node element.
     quad_nodes: Option<[[f64; 2]; 4]>,
+    /// D243: Quad8/Quad9 geometry node coordinates in connectivity order
+    /// (8 = serendipity, 9 = tensor Q2), when built from a 2-D element with
+    /// that many nodes.
+    quad_iso_nodes: Option<Vec<[f64; 2]>>,
 }
 
 impl ElementTransformation {
@@ -48,12 +60,12 @@ impl ElementTransformation {
     ///
     /// Uses the first `dim + 1` nodes as simplex vertices — except in 2-D
     /// with exactly four nodes (Quad4), which builds the true bilinear
-    /// isoparametric map (see the struct docs).  Coordinates come from the
-    /// vertex table (`node_coords`); callers that need per-element
-    /// geometry (curved / geometrically periodic meshes) should resolve the
-    /// geometry node ids themselves via [`MeshTopology::geometry_nodes`] /
-    /// [`MeshTopology::geom_coords_of`] (see [`element_jacobian_at`], and the
-    /// isoparametric assembly paths, which do exactly that).
+    /// isoparametric map, and in 2-D with eight/nine nodes (Quad8/Quad9),
+    /// which build the true high-order isoparametric maps (see the struct
+    /// docs).  Coordinates come from [`MeshTopology::geom_coords_of`] — the
+    /// per-element geometry table when the mesh carries one, else the vertex
+    /// table — so passing [`MeshTopology::geometry_nodes`] (high-order
+    /// geometry connectivity) resolves the curved geometry correctly.
     pub fn from_simplex_nodes<M: MeshTopology>(mesh: &M, geo_nodes: &[u32]) -> Self {
         let dim = mesh.dim() as usize;
         assert!(
@@ -61,7 +73,8 @@ impl ElementTransformation {
             "ElementTransformation::from_simplex_nodes: need at least dim+1 nodes"
         );
 
-        let x0 = mesh.node_coords(geo_nodes[0]).to_vec();
+        let coord = |n: u32| -> Vec<f64> { mesh.geom_coords_of(n).to_vec() };
+        let x0 = coord(geo_nodes[0]);
         let mut jac = DMatrix::<f64>::zeros(dim, dim);
         // Column order must match the reference-element axes of the SOLUTION
         // basis.  For Tet4/Hex8 the node order is the axis order, but for
@@ -69,12 +82,25 @@ impl ElementTransformation {
         // ξ2 = tri zeta) with vertices [0,1,2,3,4,5] =
         // (0,0,0),(0,1,0),(0,0,1),(1,0,0),(1,1,0),(1,0,1) — so ∂x/∂ξ0 comes
         // from vertex 3, ∂x/∂ξ1 from vertex 1, ∂x/∂ξ2 from vertex 2.
-        let col_of: Vec<usize> = match geo_nodes.len() {
-            6 => vec![3, 1, 2], // Prism6: (ξ0, ξ1, ξ2) = (layer, tri-eta, tri-zeta)
+        //
+        // D243: the same vertex layout holds for Prism15/18 connectivity
+        // (readers store the six corners first), so the branch is keyed on
+        // (dimension, node count) — the previous length-only match also
+        // caught the 2-D Tri6 (6 nodes) and silently built
+        // `J[:,0] = x3 - x0` from an edge-midpoint node.
+        //
+        // NOTE: this table is for *corner-ordered* connectivity lists.  The
+        // layered high-order geometry lists built by `Mesh::set_curvature`
+        // for prisms (`PrismPk`: layer-by-layer) are NOT corner-ordered; the
+        // affine transform is not the right tool for those (use the
+        // isoparametric `element_jacobian_at`, which evaluates the full
+        // PrismPk basis).
+        let col_of: Vec<usize> = match (dim, geo_nodes.len()) {
+            (3, 6) | (3, 15) | (3, 18) => vec![3, 1, 2], // Prism6/15/18
             _ => (0..dim).map(|i| i + 1).collect(),
         };
         for col in 0..dim {
-            let xc = mesh.node_coords(geo_nodes[col_of[col]]);
+            let xc = mesh.geom_coords_of(geo_nodes[col_of[col]]);
             for row in 0..dim {
                 jac[(row, col)] = xc[row] - x0[row];
             }
@@ -87,31 +113,30 @@ impl ElementTransformation {
             .expect("ElementTransformation: degenerate simplex element")
             .transpose();
 
-        // D230: Quad4 (2-D, 4 nodes) carries its true bilinear geometry;
-        // higher-order 2-D elements (Quad8/Quad9) would need the isoparametric
-        // QuadQk geometry and are NOT handled here (the affine fallback below
-        // is only a linearization — use the isoparametric paths for those).
-        let quad_nodes = if dim == 2 && geo_nodes.len() == 4 {
-            Some([
-                {
-                    let c = mesh.node_coords(geo_nodes[0]);
-                    [c[0], c[1]]
-                },
-                {
-                    let c = mesh.node_coords(geo_nodes[1]);
-                    [c[0], c[1]]
-                },
-                {
-                    let c = mesh.node_coords(geo_nodes[2]);
-                    [c[0], c[1]]
-                },
-                {
-                    let c = mesh.node_coords(geo_nodes[3]);
-                    [c[0], c[1]]
-                },
-            ])
+        // D230: Quad4 (2-D, 4 nodes) carries its true bilinear geometry.
+        // D243: Quad8/Quad9 (2-D, 8/9 nodes) carry their true serendipity /
+        // tensor-Q2 geometry; 3-D and simplex elements keep the affine map.
+        let coord2 = |n: u32| -> [f64; 2] {
+            let c = mesh.geom_coords_of(n);
+            [c[0], c[1]]
+        };
+        let (quad_nodes, quad_iso_nodes) = if dim == 2 && geo_nodes.len() == 4 {
+            (
+                Some([
+                    coord2(geo_nodes[0]),
+                    coord2(geo_nodes[1]),
+                    coord2(geo_nodes[2]),
+                    coord2(geo_nodes[3]),
+                ]),
+                None,
+            )
+        } else if dim == 2 && (geo_nodes.len() == 8 || geo_nodes.len() == 9) {
+            (
+                None,
+                Some(geo_nodes.iter().map(|&n| coord2(n)).collect()),
+            )
         } else {
-            None
+            (None, None)
         };
 
         Self {
@@ -121,6 +146,7 @@ impl ElementTransformation {
             det_j,
             jacobian_inv_t,
             quad_nodes,
+            quad_iso_nodes,
         }
     }
 
@@ -150,6 +176,10 @@ impl ElementTransformation {
     /// on the `[0, 1]^2` reference square (D230); the reference coordinates of
     /// the four corners are `(0,0),(1,0),(1,1),(0,1)` — MFEM
     /// `Geometry::SQUARE`.
+    ///
+    /// D243: for Quad8/Quad9 transformations this is the true serendipity /
+    /// tensor-Q2 isoparametric map on `[0, 1]^2` (node order: corners CCW,
+    /// then edge nodes on `(0,1),(1,2),(2,3),(3,0)`, then the Quad9 center).
     pub fn map_to_physical(&self, xi: &[f64]) -> Vec<f64> {
         assert_eq!(
             xi.len(),
@@ -166,6 +196,9 @@ impl ElementTransformation {
             }
             return xp.to_vec();
         }
+        if let Some(v) = &self.quad_iso_nodes {
+            return Self::map_quad_iso(v, xi[0], xi[1]);
+        }
         let mut xp = self.x0.clone();
         for i in 0..self.dim {
             for k in 0..self.dim {
@@ -173,6 +206,62 @@ impl ElementTransformation {
             }
         }
         xp
+    }
+
+    /// Isoparametric quad map at `(s, t)` for 8-node (serendipity) or 9-node
+    /// (tensor Q2) geometry in reader connectivity order (D243).
+    ///
+    /// The interpolation is nodal (Kronecker delta at the reference node
+    /// positions), so `map_quad_iso(nodes, ref_k) == nodes[k]`.
+    fn map_quad_iso(nodes: &[[f64; 2]], s: f64, t: f64) -> Vec<f64> {
+        let mut xp = [0.0_f64; 2];
+        match nodes.len() {
+            // Quad8 serendipity on [0,1]^2 with a = 2s-1, b = 2t-1.
+            8 => {
+                let (a, b) = (2.0 * s - 1.0, 2.0 * t - 1.0);
+                let phi = [
+                    // corners
+                    0.25 * (1.0 - a) * (1.0 - b) * (-1.0 - a - b),
+                    0.25 * (1.0 + a) * (1.0 - b) * (-1.0 + a - b),
+                    0.25 * (1.0 + a) * (1.0 + b) * (-1.0 + a + b),
+                    0.25 * (1.0 - a) * (1.0 + b) * (-1.0 - a + b),
+                    // edges (0,1), (1,2), (2,3), (3,0)
+                    0.5 * (1.0 - a * a) * (1.0 - b),
+                    0.5 * (1.0 + a) * (1.0 - b * b),
+                    0.5 * (1.0 - a * a) * (1.0 + b),
+                    0.5 * (1.0 - a) * (1.0 - b * b),
+                ];
+                for (k, &w) in phi.iter().enumerate() {
+                    xp[0] += w * nodes[k][0];
+                    xp[1] += w * nodes[k][1];
+                }
+            }
+            // Quad9 tensor Q2 on [0,1]^2: 1-D nodal quadratic (0, 1/2, 1).
+            9 => {
+                let q = |u: f64| [1.0 - 3.0 * u + 2.0 * u * u, 4.0 * u * (1.0 - u), 2.0 * u * u - u];
+                let qs = q(s);
+                let qt = q(t);
+                // (i, j) = tensor index along (s, t); connectivity order.
+                let idx = [
+                    [0, 0],
+                    [2, 0],
+                    [2, 2],
+                    [0, 2],
+                    [1, 0],
+                    [2, 1],
+                    [1, 2],
+                    [0, 1],
+                    [1, 1],
+                ];
+                for (k, [i, j]) in idx.iter().enumerate() {
+                    let w = qs[*i] * qt[*j];
+                    xp[0] += w * nodes[k][0];
+                    xp[1] += w * nodes[k][1];
+                }
+            }
+            other => unreachable!("map_quad_iso: unexpected node count {other}"),
+        }
+        xp.to_vec()
     }
 }
 
