@@ -1885,7 +1885,7 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：① **派单两度 4 路并发被打断**（环境原因），改单发/双发后全部成功——**代理并发上限在本环境表现为 1–2 路稳定**，下轮派单直接按 ≤2 路一批。② **孤儿改动可救**：四路前次在途工作经独立盘点全部保留（④ 修 4 处、③ 修 3 处、①② 零纠错）——"盘点-不盲信-重验"是中断恢复的正解；`incomplete.rs` 字面名差点误判为废稿。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 678+8ign / **element 504** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **122 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**6m13s**）；pro 层 0 错误。
 
-## 第四十二轮（round 42）：两路一批（①② 先行）—— D245+D250 assembly 仲裁双件 / D226+D227+D228 hex ND 残余三件套
+## 第四十二轮（round 42）：两批四路 —— ①② D245+D250 / D226+D227+D228，③④ D255–D259 / 杂项打包
 
 ### 0. 本轮形状
 按 round-41 实证改 **≤2 路一批**派单，①② 先行（③④ 留下批）。**主会话完成一次关键仲裁：RT0 边界载荷 0.25-vs-1.0 矛盾**——两代探针当面对质，round-39 的 0.25 实为 **RT1 误读**（`RT_FECollection(1,3)`），真 RT0 = 1。
@@ -1916,11 +1916,27 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **关闭**：~~D245~~、~~D250~~、~~D226~~（E2 实证关闭 + 根因移交 D269）、~~D227~~（约定地图）、~~D228~~（文档化）。
 - 沿用开放：D264/D265/D266/D269/D270、D245 残余无、D251–D254 未用、D256–D259、D262/D263、D180/D191/D192/D188/D170/D220/D234/D235、D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
 
-### 本轮统计
-- **测试增长**：`fem-element` lib 504→**506**（TriL2GL/TetL2GL 2）；`fem-assembly` lib 675→**675+1**（pin 测试 + d250 9 项，0 红含仲裁补丁）；io + `d269_findpoints_element_choice`（2）。全部实跑确认。
-- **主会话亲验**（不是转述）：**RT0 载荷两代探针亲自当面对质**（round-39 = RT1 误读、round-42 = 真 RT0 b=1），仲裁补丁亲自应用后 **fem-assembly lib 675/675**；pro 层 0 错误；集成层见下。
+### 3. ② 路（第二批）：D255–D259 关闭——`gridfunction_bounds` 完全体
+- **D255**：`mod plbound` 晋升 `crates/assembly/src/postproc/plbound.rs`（新；API 面 = `PLBound`/`BoundsBasis`/`BoundsSpace`/`get_element_bounds[_in]`/`estimate_function_[minimum|maximum][_in]`/`project_h1_to_l2`/`h1_tensor_nodes`/`mfem_gauss_*_01`）；miniapp 逐位不变。
+- **D256**：`-bt 1` = 同序 GLL nodal 插值（恒等矩阵、双 `fec name:` 行）**stdout 逐字节**；`-bt 0` = C++ 自身 `MFEM_VERIFY` 失败 **rc=1** 文案逐行一致；`-bt 2` 文档化 = D276。**D257**：`-l2` 单独 = `pfunc_proj=&pfunc`（与默认一致）转正；`-l2 -bt 0/1` 组合全 IDENTICAL。**D258**：`-visit` 全转正（`VisItCollection` + miniapp 组装 pmesh，**含曲面 triple-pt-1 逐字节**）；vdim>1 按列分量（**C++ 上游缺陷已存证**：递归列把 d 当 vdim 用 ⇒ `DofsToVDofs(-1)` 负下标）；1-D = C++ rc=0 而 fem-rs 缺 `Mesh<1>`（D277）。**D259**：GL/GLL 节点在 **[0,1] 直接 Newton** 的逐行位级端口（`xi=((1-z)+dz)/2` 防坏 round-off），位级 pin（GL np=6/10、GLL np=6 与 %.17g dump 逐位）；f_quad5/f_hex4（ncp=12）IDENTICAL。
+- **对拍矩阵 `tmp/d274/replay_matrix.txt`：33/33 IDENTICAL**（含 round-41 全部 19+1 组）。fem-assembly lib 685。新债 **D274（P2，io 仲裁）**write_mfem 顶点行前导空格/曲面 nodes Ordering/Display vs %.6g（本轮 miniapp 后处理规避）；**D275**（P3）fem-element `gauss_lobatto_arbitrary` p≥6 ulp 对齐；**D276** `-bt 2` 正基；**D277（P4）** 1-D `Mesh<1>`；**D278（P4）** L2→L2 换基投影/`-bt≥3`。
+
+### 4. ④ 路（第二批）：D180/D192/D170/D188 四件
+- **D180（选择修复）**：`refine_prism6_uniform` 的 MFEM 编号门从"curved 且 uniform"放宽为"**uniform**"（直网格不再走历史臂：无 tri-face/body centers、`oedge+edge`/`oface+qf` 块布局、子元序含 center 旋转）；partial 保留历史臂。修后 C++ 对照：elements+boundary **逐字节**、vertices 96=96 坐标 max **4.9e-9**（C++ `precision(8)` 打印量子）。round-35"writer 丢弃顶点"说法过时（实为 NV=112 vs 96）。测试 `toroid_wedge_straight_refine.rs`（全断言）+ 夹具 `toroid_wedge_o1{,_r1}.mesh`。
+- **D192**：d56 tet replica `TetPk`→`H1TetPk` + 新增 tet 周期用例 p=1..3（门验证：换回等距即 FAIL）。
+- **D170（主会话仲裁落地）**：根因 = `generate_boundary_elements` 写 `attr: el.attr`，而 MFEM `GenerateBoundaryElements` 复制默认属性 1 的面元素（探针：pipe-nurbs NBE=24 全 attr 1、`bdr_attributes={1}`）——**四处 `attr: el.attr` → `attr: 1`**（1-D 双臂/2-D/3-D）+ nurbs_ex1.rs 注释更新。fem-space 全 nurbs 套件绿、`mini_nurbs_ex1 -pm 1 -ps 2` exit 0。
+- **D188（修复，非"MFEM 同病"）**：MFEM `Poly_1D::CalcBasis` **就是 `CalcChebyshev`**（fe_base.hpp 注释直证）——`H1TriPk` 三处从单项式 Vandermonde 换 **Chebyshev 张量**（镜像 `H1TetPk`）：残差 p=8 1.8e-9→**4.2e-15**、p=10 2.6e-6→6.7e-15、p=12 1.4e-3→**4.1e-14**（与 MFEM 同量级）。
+- mandel/mondrian 端到端不变；fem-mesh lib+tests 433、fem-space 409、fem-io 233（④ 实测）。新债无（writer 打印精度差 = MFEM miniapp 自选 precision(8)，非缺陷）。
+
+### 本轮统计（第一批 ①②）
+- **测试增长**：`fem-element` lib 504→**506**（TriL2GL/TetL2GL 2）；`fem-assembly` lib +`lor_rt_hex_ho_pinned_to_igll`（pin）+ `d250_error_geometry`（9）；io + `d269_findpoints_element_choice`（2）。全部实跑确认。
+- **主会话亲验**（不是转述）：**RT0 载荷两代探针亲自当面对质**（round-39 = RT1 误读、round-42 = 真 RT0 b=1），仲裁补丁亲自应用后 **fem-assembly lib 675/675**；pro 层 0 错误。
 - **流程注记**：**round-39 的 0.25 误读在本轮被两代探针对质揭穿**——"探针也会撒谎（建错了对象）"；同族教训第三、四次现形（质心盲视 → RT1 误标）。两路共享树上并发，红测归因均用"回退→复跑"实验完成。
-- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 679**+8ign / **element 506** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **124 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**4m51s**）；pro 层 0 错误。
+
+### 本轮统计（第二批 ③④）
+- **测试增长**：`fem-assembly` lib 679→**685**（plbound 晋升 + 测试）；`fem-space` tests + tet 周期用例；`fem-mesh` + `toroid_wedge_straight_refine` + 2 夹具；miniapp pins 5。
+- **主会话亲验**（不是转述）：**D170 仲裁亲自落地**（四处 attr + 注释；fem-space 全 nurbs 套件实跑绿 + nurbs_ex1 exit 0）；fem-assembly lib 685、fem-space lib 287 实跑绿；pro 层 0 错误。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 685**+8ign / **element 506** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **125 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**11m34s**）；pro 层 0 错误。
 
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
