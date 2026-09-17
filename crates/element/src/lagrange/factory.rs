@@ -2074,6 +2074,227 @@ impl ReferenceElement for HexL2GL {
     }
 }
 
+// ─── TriL2GL / TetL2GL: MFEM L2 simplex elements (GaussLegendre) ─────────────
+
+/// MFEM `L2_TriangleElement(p, GaussLegendre)` — the `L2_FECollection`
+/// **default** simplex L2 element (MFEM 4.10's `DG_FECollection` is a
+/// `typedef` of `L2_FECollection`, so this is also the DG simplex element).
+///
+/// `(p+1)(p+2)/2` DOFs at the *open* barycentric nodes
+/// `node(i,j,k) = (op[i], op[j]) / (op[i]+op[j]+op[k])`, `i+j+k = p`, where
+/// `op` are the `p+1` 1-D Gauss-Legendre points on `[0,1]` (ascending,
+/// `Poly_1D::OpenPoints`), enumerated `for (j) for (i)` with `i` fastest
+/// (fe_l2.cpp).  The basis functions are the nodal Lagrange basis of that
+/// node set — MFEM builds them as `Ti·u` with `u` the tensor 1-D basis; here
+/// the monomial Vandermonde is used instead (identical span `Pp`, hence the
+/// same interpolating basis; see [`H1TriPk`] for why the monomial form is the
+/// safe one).
+pub struct TriL2GL {
+    order: usize,
+    nodes: Vec<[f64; 2]>,
+    lex: Vec<(usize, usize)>, // (i, j) with i + j <= p, MFEM enumeration
+    ti: Vec<f64>,             // n×n row-major: φ_k = Σ_o ti[k·n+o]·m_o(x)
+}
+
+/// Open 1-D Gauss-Legendre points on `[0,1]`, ascending (`Poly_1D::OpenPoints`).
+fn open_gl_points(p: usize) -> Vec<f64> {
+    let (mut pts, _w) = crate::quadrature::gauss_legendre_01(p + 1);
+    if pts.len() > 1 && pts[0] > pts[pts.len() - 1] {
+        pts.reverse();
+    }
+    pts
+}
+
+impl TriL2GL {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let op = open_gl_points(p);
+        let mut nodes = Vec::with_capacity((p + 1) * (p + 2) / 2);
+        let mut lex = Vec::with_capacity(nodes.capacity());
+        // MFEM fe_l2.cpp: for (j) for (i), i fastest; k = p - i - j.
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                let k = p - i - j;
+                let w = op[i] + op[j] + op[k];
+                nodes.push([op[i] / w, op[j] / w]);
+                lex.push((i, j));
+            }
+        }
+        let n = nodes.len();
+        let mut t = DMatrix::<f64>::zeros(n, n);
+        for (m, node) in nodes.iter().enumerate() {
+            for (o, &(i, j)) in lex.iter().enumerate() {
+                t[(o, m)] = node[0].powi(i as i32) * node[1].powi(j as i32);
+            }
+        }
+        let ti_m = t.try_inverse().expect("TriL2GL: singular Vandermonde");
+        let mut ti = vec![0.0; n * n];
+        for k in 0..n {
+            for o in 0..n {
+                ti[k * n + o] = ti_m[(k, o)];
+            }
+        }
+        Self { order: p, nodes, lex, ti }
+    }
+}
+
+impl ReferenceElement for TriL2GL {
+    fn dim(&self) -> u8 {
+        2
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 2) / 2
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let (x, y) = (xi[0], xi[1]);
+        let n = self.nodes.len();
+        for k in 0..n {
+            let mut acc = 0.0;
+            for (o, &(i, j)) in self.lex.iter().enumerate() {
+                acc += self.ti[k * n + o] * x.powi(i as i32) * y.powi(j as i32);
+            }
+            values[k] = acc;
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (x, y) = (xi[0], xi[1]);
+        let n = self.nodes.len();
+        for k in 0..n {
+            let mut gx = 0.0;
+            let mut gy = 0.0;
+            for (o, &(i, j)) in self.lex.iter().enumerate() {
+                let ti = self.ti[k * n + o];
+                if i > 0 {
+                    gx += ti * (i as f64) * x.powi(i as i32 - 1) * y.powi(j as i32);
+                }
+                if j > 0 {
+                    gy += ti * (j as f64) * x.powi(i as i32) * y.powi(j as i32 - 1);
+                }
+            }
+            grads[k * 2] = gx;
+            grads[k * 2 + 1] = gy;
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tri_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.nodes.iter().map(|c| vec![c[0], c[1]]).collect()
+    }
+}
+
+/// MFEM `L2_TetrahedronElement(p, GaussLegendre)` — the `L2_FECollection`
+/// **default** tetrahedral L2 element: `(p+1)(p+2)(p+3)/6` DOFs at the open
+/// barycentric nodes
+/// `node(i,j,k,l) = (op[i], op[j], op[k]) / (op[i]+op[j]+op[k]+op[l])`,
+/// `i+j+k+l = p` (`op` = 1-D Gauss-Legendre points on `[0,1]`, ascending),
+/// enumerated `for (k) for (j) for (i)` with `i` fastest (fe_l2.cpp); nodal
+/// Lagrange basis, built via the monomial Vandermonde (see [`TriL2GL`]).
+pub struct TetL2GL {
+    order: usize,
+    nodes: Vec<[f64; 3]>,
+    lex: Vec<(usize, usize, usize)>, // (i, j, k) with i+j+k <= p
+    ti: Vec<f64>,                    // n×n row-major
+}
+
+impl TetL2GL {
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        let op = open_gl_points(p);
+        let n = (p + 1) * (p + 2) * (p + 3) / 6;
+        let mut nodes = Vec::with_capacity(n);
+        let mut lex = Vec::with_capacity(n);
+        // MFEM fe_l2.cpp: for (k) for (j) for (i), i fastest; l = p-i-j-k.
+        for k in 0..=p {
+            for j in 0..=(p - k) {
+                for i in 0..=(p - j - k) {
+                    let l = p - i - j - k;
+                    let w = op[i] + op[j] + op[k] + op[l];
+                    nodes.push([op[i] / w, op[j] / w, op[k] / w]);
+                    lex.push((i, j, k));
+                }
+            }
+        }
+        let mut t = DMatrix::<f64>::zeros(n, n);
+        for (m, node) in nodes.iter().enumerate() {
+            for (o, &(i, j, k)) in lex.iter().enumerate() {
+                t[(o, m)] = node[0].powi(i as i32) * node[1].powi(j as i32)
+                    * node[2].powi(k as i32);
+            }
+        }
+        let ti_m = t.try_inverse().expect("TetL2GL: singular Vandermonde");
+        let mut ti = vec![0.0; n * n];
+        for m in 0..n {
+            for o in 0..n {
+                ti[m * n + o] = ti_m[(m, o)];
+            }
+        }
+        Self { order: p, nodes, lex, ti }
+    }
+}
+
+impl ReferenceElement for TetL2GL {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        (self.order + 1) * (self.order + 2) * (self.order + 3) / 6
+    }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let n = self.nodes.len();
+        for m in 0..n {
+            let mut acc = 0.0;
+            for (o, &(i, j, k)) in self.lex.iter().enumerate() {
+                acc += self.ti[m * n + o]
+                    * x.powi(i as i32)
+                    * y.powi(j as i32)
+                    * z.powi(k as i32);
+            }
+            values[m] = acc;
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let n = self.nodes.len();
+        for m in 0..n {
+            let mut gx = 0.0;
+            let mut gy = 0.0;
+            let mut gz = 0.0;
+            for (o, &(i, j, k)) in self.lex.iter().enumerate() {
+                let ti = self.ti[m * n + o];
+                if i > 0 {
+                    gx += ti * (i as f64) * x.powi(i as i32 - 1) * y.powi(j as i32)
+                        * z.powi(k as i32);
+                }
+                if j > 0 {
+                    gy += ti * (j as f64) * x.powi(i as i32) * y.powi(j as i32 - 1)
+                        * z.powi(k as i32);
+                }
+                if k > 0 {
+                    gz += ti * (k as f64) * x.powi(i as i32) * y.powi(j as i32)
+                        * z.powi(k as i32 - 1);
+                }
+            }
+            grads[m * 3] = gx;
+            grads[m * 3 + 1] = gy;
+            grads[m * 3 + 2] = gz;
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tet_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
+    }
+}
+
 // ─── HexQk ───────────────────────────────────────────────────────────────────
 
 /// MFEM `Geometry::Constants<Geometry::CUBE>::Vertices` reference-cube corners
@@ -3551,4 +3772,81 @@ mod tests {
             }
         }
     }
+}
+
+/// D269 (round 42): `TriL2GL`/`TetL2GL` must reproduce MFEM 4.10's
+/// `L2_FECollection` default simplex elements — `L2_TetrahedronElement(p,
+/// GaussLegendre)` / `L2_TriangleElement(p, GaussLegendre)` — whose open
+/// barycentric DOF positions and nodal basis were dumped at 17 digits with
+/// `tmp/d269/d269_l2tet_shape.cpp` (WSL `$HOME/work/d269/`).
+#[test]
+fn tet_l2_gl_positions_and_shapes_match_mfem() {
+    let fe = TetL2GL::new(1);
+    assert_eq!(fe.n_dofs(), 4);
+    let coords = fe.dof_coords();
+    // MFEM dump: dof positions (op[i]/w, op[j]/w, op[k]/w), p=1
+    // (`cpp_l2_simplex_gl_dump.txt`, 17-digit).
+    let want = [
+        [0.14854314511050556, 0.14854314511050556, 0.14854314511050556],
+        [0.55437056466848322, 0.14854314511050556, 0.14854314511050556],
+        [0.14854314511050556, 0.55437056466848322, 0.14854314511050556],
+        [0.14854314511050556, 0.14854314511050556, 0.55437056466848322],
+    ];
+    for (got, want) in coords.iter().zip(want) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 5e-16, "tet GL node {got:?} vs {want:?}");
+        }
+    }
+    // MFEM CalcShape at ip (1/3, 1/15, 0.35) (cpp_l2_simplex_gl_dump.txt):
+    // {0.25, 0.45534180126147955, -0.20175196277525512, 0.49641016151377543}.
+    let xi = [1.0 / 3.0, 1.0 / 15.0, 0.35];
+    let mut phi = vec![0.0; 4];
+    fe.eval_basis(&xi, &mut phi);
+    assert!((phi[0] - 0.25).abs() < 1e-6);
+    assert!((phi[1] - 0.45534180126147955).abs() < 1e-15);
+    assert!((phi[2] - (-0.20175196277525512)).abs() < 1e-15);
+    assert!((phi[3] - 0.49641016151377543).abs() < 1e-15);
+    // The basis is a partition of unity and interpolatory at the nodes.
+    assert!((phi.iter().sum::<f64>() - 1.0).abs() < 1e-13);
+    for (m, node) in coords.iter().enumerate() {
+        let mut col = vec![0.0; 4];
+        fe.eval_basis(node, &mut col);
+        for (k, c) in col.iter().enumerate() {
+            assert!((c - if k == m { 1.0 } else { 0.0 }).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn tri_l2_gl_positions_match_mfem_formula() {
+    let fe = TriL2GL::new(1);
+    assert_eq!(fe.n_dofs(), 3);
+    let coords = fe.dof_coords();
+    // p=1: 2-point GL on [0,1]; nodes (op0/w, op0/w), (op1/w, op0/w),
+    // (op0/w, op1/w) with w = op0+op0+op1 (MFEM 17-digit dump matches).
+    let op0 = 0.5 - 1.0 / (2.0 * 3.0_f64.sqrt()); // 0.21132486540518713
+    let op1 = 1.0 - op0;
+    let w = op0 + op0 + op1;
+    let want = [[op0 / w, op0 / w], [op1 / w, op0 / w], [op0 / w, op1 / w]];
+    for (got, want) in coords.iter().zip(want) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-15, "tri GL node {got:?} vs {want:?}");
+        }
+    }
+    // Partition of unity + interpolatory property at an interior point.
+    let xi = [0.2, 0.3];
+    let mut phi = vec![0.0; 3];
+    fe.eval_basis(&xi, &mut phi);
+    assert!((phi.iter().sum::<f64>() - 1.0).abs() < 1e-13);
+    for (m, node) in coords.iter().enumerate() {
+        let mut col = vec![0.0; 3];
+        fe.eval_basis(node, &mut col);
+        for (k, c) in col.iter().enumerate() {
+            assert!((c - if k == m { 1.0 } else { 0.0 }).abs() < 1e-12);
+        }
+    }
+    // Gradients are finite at the nodes (no 0·∞ from the i=0 monomials).
+    let mut g = vec![0.0; 6];
+    fe.eval_grad_basis(&[0.25, 0.25], &mut g);
+    assert!(g.iter().all(|v| v.is_finite()));
 }

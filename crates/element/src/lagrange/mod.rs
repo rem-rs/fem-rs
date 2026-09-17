@@ -13,7 +13,7 @@ pub mod tri;
 pub use factory::{
     ref_elem, vec_ref_elem, ElemType, H1TetPk, H1TriPk, HexL2GL, HexQk, LagrangeHex, LagrangePrism,
     LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron, LagrangeTriangle,
-    QuadL2GL, QuadPosQk, QuadQk, SegPk, TetPk, TriPk, VecFamily,
+    QuadL2GL, QuadPosQk, QuadQk, SegPk, TetL2GL, TetPk, TriL2GL, TriPk, VecFamily,
 };
 pub use hex::{HexQ1, HexQ2, HexQ3};
 pub use prism::{h1_prism_slots, H1PrismPk, H1PrismSlot, PrismPk, PRISM_EDGES};
