@@ -45,6 +45,21 @@
 //! (evidence: `tmp/d158/` tet probe points (0.7, 0.6, 0.25) on `y = 0.6` and
 //! (0.5, 0.5, 0.5) on `x = 0.5` — fem-rs picks tets 10/24, MFEM 20/34; see
 //! `crates/io/tests/d269_findpoints_element_choice.rs`).
+//!
+//! # D270 — optional alignment with MFEM's no-GSLIB rule (closed, documented)
+//!
+//! Round-44 cost assessment: implementing "nearest element center first +
+//! vertex-neighbour fallback" would have to land in
+//! `transformation::find_points` (the get-values path) — outside the
+//! `findpts` module — and `MeshTopology` has no vertex→elements table yet
+//! (it would need to be built, O(NE·npe)).  Flipping the rule also
+//! invalidates the pinned shared-face choices in
+//! `crates/io/tests/d269_findpoints_element_choice.rs` and the
+//! `d224_locator_domain` assertions.  Since the discrepancy only affects
+//! tie-breaks among elements that all contain the point (interior points
+//! agree; D228 convention neutralizes the rest), alignment stays an optional
+//! future item; see `tmp/d319/EVIDENCE.md` §D270 and
+//! `tmp/d228_findpoints_ambiguity.md`.
 
 pub mod bvh;
 pub mod find_points;

@@ -24,6 +24,24 @@
 //! Tri/Tet: `TriPk`/`TetPk`; Quad/Hex L2: Gauss-Legendre nodal (`QuadL2GL`…);
 //! RT: `TriRTk`/`QuadRTk`/`TetRTk`/`HexRTk`; ND: `TriNDk`/`QuadNDk`/`TetNDk`/
 //! `HexNDk`.
+//!
+//! **D284 (closed by characterization — nodal-family deviation is intended):**
+//! MFEM's DPG test spaces are `H1_FECollection` (default
+//! `BasisType::GaussLobatto`) + `RT_FECollection` (miniapps/dpg
+//! `diffusion.cpp:167-168`, `convection-diffusion.cpp:190-191`,
+//! `acoustics.cpp:191-192`), i.e. on simplices the scalar test basis uses
+//! `ClosedPoints(p, GaussLobatto)` GL-nodal points (fe_h1.cpp:455), *not*
+//! equispaced `TriPk`/`TetPk` and *not* open GL (`TriL2GL`).  Both are
+//! Lagrange bases of the same Pₚ space, so the broken test space span — and
+//! hence the DPG solution — is identical; only the basis representation of
+//! the element-local Gram/B matrices differs (O(roundoff), conditioning
+//! differs at high order only).  Within this module the family is a single
+//! source (`scalar_ref_elem`), the local dof slots are module-internal
+//! (broken space, no space-crate dof interface), and the enrichment bases in
+//! dpg_elasticity/dpg_stokes/dpg_maxwell/dpg_3d/dpg_framework use the same
+//! `TriPk`/`TetPk` family — internally self-consistent.  Digit-level parity
+//! with MFEM DPG miniapps would additionally require the H1 GL-closed
+//! simplex nodal family + H1 dof layout; that is deliberately not done here.
 
 use fem_element::{
     ReferenceElement, VectorReferenceElement,

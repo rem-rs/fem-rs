@@ -111,6 +111,17 @@ impl ElementType {
 
     /// Map GMSH element type integer to `ElementType`.
     ///
+    /// Codes follow the Gmsh .msh file format specification (node counts in
+    /// parentheses): 1 line (2), 2 tri (3), 3 quad (4), 4 tet (4), 5 hex (8),
+    /// 6 prism (6), 7 pyramid (5), 8 line2 (3), 9 tri2 (6), 10 quad2 (9),
+    /// 11 tet2 (10), 12 hex2 (27), 13 prism2 (18), 15 point (1), 16 quad
+    /// serendipity (8), 17 hex serendipity (20), 18 prism (15), 19 pyramid
+    /// (13).  MFEM 4.10 (`mesh/gmsh.cpp` `GmshReader::types`) accepts the
+    /// complete order-2 codes 10/11/12/13 but rejects the serendipity codes
+    /// 16/17/18/19; fem-rs has native Quad8/Prism15 shapes, so 16 and 18 are
+    /// mapped to them (D297: code 16 was previously mislabeled Prism15 and
+    /// code 18 was missing).
+    ///
     /// Returns `None` for unsupported or unknown type codes.
     pub fn from_gmsh_type(code: i32) -> Option<Self> {
         match code {
@@ -123,12 +134,15 @@ impl ElementType {
              7 => Some(Self::Pyramid5),
              8 => Some(Self::Line3),
              9 => Some(Self::Tri6),
+            10 => Some(Self::Quad9),
             11 => Some(Self::Tet10),
+            12 => Some(Self::Hex27),
+            13 => Some(Self::Prism18),
             15 => Some(Self::Point1),
-            16 => Some(Self::Prism15),
-             17 => Some(Self::Hex20),
-             12 => Some(Self::Hex27),
-             19 => Some(Self::Pyramid13),
+            16 => Some(Self::Quad8),
+            17 => Some(Self::Hex20),
+            18 => Some(Self::Prism15),
+            19 => Some(Self::Pyramid13),
             _  => None,
         }
     }
@@ -169,5 +183,30 @@ mod tests {
         assert_eq!(ElementType::from_gmsh_type(2), Some(ElementType::Tri3));
         assert_eq!(ElementType::from_gmsh_type(4), Some(ElementType::Tet4));
         assert_eq!(ElementType::from_gmsh_type(99), None);
+    }
+
+    #[test]
+    fn gmsh_second_order_codes() {
+        // D297: Gmsh type codes for second-order elements.  Code 16 is the
+        // 8-node serendipity quadrangle (was mislabeled Prism15), code 18 is
+        // the 15-node prism (was missing); 10/13 are the complete order-2
+        // quad/prism (also were missing).
+        assert_eq!(ElementType::from_gmsh_type(16), Some(ElementType::Quad8));
+        assert_eq!(ElementType::from_gmsh_type(18), Some(ElementType::Prism15));
+        assert_eq!(ElementType::from_gmsh_type(10), Some(ElementType::Quad9));
+        assert_eq!(ElementType::from_gmsh_type(13), Some(ElementType::Prism18));
+        // node-count consistency for every mapped code
+        for (code, expect_npe) in [
+            (1, 2), (2, 3), (3, 4), (4, 4), (5, 8), (6, 6), (7, 5), (8, 3),
+            (9, 6), (10, 9), (11, 10), (12, 27), (13, 18), (15, 1), (16, 8),
+            (17, 20), (18, 15), (19, 13),
+        ] {
+            let t = ElementType::from_gmsh_type(code).expect("mapped");
+            assert_eq!(
+                t.nodes_per_element(),
+                expect_npe,
+                "gmsh code {code} -> {t:?}"
+            );
+        }
     }
 }
