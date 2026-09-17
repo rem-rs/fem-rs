@@ -35,7 +35,16 @@ use fem_mesh::{element_type::ElementType, simplex::Mesh};
 /// VTK cell type code for a given [`ElementType`].
 ///
 /// Reference: VTK File Formats guide, Figure 2 (Linear Cell Types) and
-/// Figure 3 (Non-Linear Cell Types).
+/// Figure 3 (Non-Linear Cell Types), i.e. `vtkCellType.h`.  Where MFEM has
+/// an entry the two agree (`mesh/vtk.cpp:26-30`,
+/// `VTKGeometry::QuadraticMap`: SQUARE → BIQUADRATIC_SQUARE = 28,
+/// TETRAHEDRON → QUADRATIC_TETRAHEDRON = 24, CUBE → TRIQUADRATIC_CUBE = 29,
+/// PRISM → BIQUADRATIC_QUADRATIC_PRISM = 32, PYRAMID → QUADRATIC_PYRAMID =
+/// 27); the incomplete quadratic families MFEM's VTK machinery does not
+/// carry use their spec ids `VTK_QUADRATIC_HEXAHEDRON = 25` (Hex20) and
+/// `VTK_QUADRATIC_WEDGE = 26` (Prism15).  D298: 24/23 are *not* those ids —
+/// they are the 10-node quadratic tetra and the 8-node quadratic quad, which
+/// this same match maps Tet10/Quad8 to.
 /// <https://vtk.org/wp-content/uploads/2015/04/file-formats.pdf>
 fn vtk_cell_type(et: ElementType) -> u8 {
     match et {
@@ -465,11 +474,43 @@ mod tests {
     fn xml_is_parseable_ascii() {
         let mesh = Mesh::<2>::unit_square_tri(3);
         let w    = VtkWriter::new(&mesh);
-        let mut buf = Vec::<u8>::new();
+        let mut buf = Vec::new();
         w.write(&mut buf).unwrap();
         // Verify valid UTF-8 and basic XML structure.
         let xml = String::from_utf8(buf).expect("output must be UTF-8");
         assert!(xml.starts_with("<?xml"));
         assert!(xml.ends_with("</VTKFile>\n"));
+    }
+
+    /// D298: the cell-type map is the VTK spec table (`vtkCellType.h`), and
+    /// where MFEM's `VTKGeometry::QuadraticMap` has an entry (`mesh/vtk.cpp:
+    /// 26-30`) the two agree.  24/23 are the quadratic *tetra/quad* ids —
+    /// they must never collide with Hex20/Prism15.
+    #[test]
+    fn cell_types_are_the_vtk_spec_ids() {
+        use fem_mesh::element_type::ElementType as ET;
+        let want: &[(ET, u8)] = &[
+            (ET::Point1, 1),
+            (ET::Line2, 3),
+            (ET::Line3, 21),
+            (ET::Tri3, 5),
+            (ET::Tri6, 22),
+            (ET::Quad4, 9),
+            (ET::Quad8, 23),
+            (ET::Quad9, 28),
+            (ET::Tet4, 10),
+            (ET::Tet10, 24),
+            (ET::Hex8, 12),
+            (ET::Hex20, 25),
+            (ET::Hex27, 29),
+            (ET::Prism6, 13),
+            (ET::Prism15, 26),
+            (ET::Prism18, 32),
+            (ET::Pyramid5, 14),
+            (ET::Pyramid13, 27),
+        ];
+        for (et, id) in want {
+            assert_eq!(vtk_cell_type(*et), *id, "{et:?}");
+        }
     }
 }

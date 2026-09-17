@@ -28,7 +28,7 @@
      15
     </DataArray>
     <DataArray type="UInt8" Name="types" format="ascii">
-     23
+     26
     </DataArray>
    </Cells>
   </Piece>

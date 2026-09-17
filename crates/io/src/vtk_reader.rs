@@ -144,17 +144,17 @@ fn vtk_to_elem(vtk_type: u8, npe: usize) -> Option<ElementType> {
         (12, 8) => ElementType::Hex8,
         (13, 6) => ElementType::Prism6,
         (14, 5) => ElementType::Pyramid5,
-        // VTK_QUADRATIC_HEXAHEDRON (spec type 24) / VTK_QUADRATIC_WEDGE
-        // (spec type 23).  The malformed aliases (12/20, 13/15 from legacy
-        // linear type ids and 25/26 from this crate's own writers) are kept
-        // so files written by `vtk_legacy` / `vtk` round-trip; the node
-        // count decides unambiguously.
-        (12,20) => ElementType::Hex20,
+        // VTK spec quadratic ids (`vtkCellType.h`; MFEM's own
+        // `VTKGeometry::QuadraticMap` maps tetra → QUADRATIC_TETRAHEDRON = 24
+        // and prism → BIQUADRATIC_QUADRATIC_PRISM = 32, i.e. 24/23 are *not*
+        // the hex20/prism15 ids): `VTK_QUADRATIC_HEXAHEDRON = 25` carries the
+        // 20-node rows this crate's `VtkWriter` writes, and
+        // `VTK_QUADRATIC_WEDGE = 26` the 15-node ones.  (The round-43 reader
+        // additionally accepted the writer-variant aliases (12,20)/(13,15)
+        // and mis-labelled (24,20)/(23,15) as "spec"; D298 gave the legacy
+        // writer the spec ids and removed those entries.)
         (25,20) => ElementType::Hex20,
-        (24,20) => ElementType::Hex20,
-        (13,15) => ElementType::Prism15,
         (26,15) => ElementType::Prism15,
-        (23,15) => ElementType::Prism15,
         (14,13) => ElementType::Pyramid13,
         _ => return None,
     })

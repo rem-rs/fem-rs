@@ -543,7 +543,24 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             }
             _ => None,
         };
-        fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
+        // MFEM `Mesh::Loader` marks the mesh for refinement only through the
+        // `meshgen & 1` simplex bit (`mesh/mesh.cpp:3111`, bitmask derived at
+        // `mesh/mesh.cpp:5052-5098`: TETRAHEDRON/TRIANGLE/SEGMENT/POINT set
+        // bit 1, HEXAHEDRON/QUADRILATERAL bit 2, WEDGE bit 4, PYRAMID bit 8).
+        // A tet-free 3-D mesh is therefore *never* marked — its boundary
+        // triangles keep the file's vertex order (the C++ re-save of
+        // `wedge_curved2.mesh` equals the fixture byte for byte).  Marking
+        // unconditionally here rotated every wedge mesh's end-cap triangles;
+        // D295's `Mesh::Save` byte acceptance caught it.
+        if (0..mesh.n_elements() as u32).any(|e| {
+            matches!(
+                mesh.element_type(e),
+                fem_mesh::element_type::ElementType::Tet4
+                    | fem_mesh::element_type::ElementType::Tet10
+            )
+        }) {
+            fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
+        }
         if mesh.geometry.is_none() {
             if let Some((p, raw, ord, _)) = &h1_nodes {
                 mesh.geometry =
@@ -861,7 +878,29 @@ pub fn write_mfem_nodes<W: Write>(
     };
 
     writeln!(writer, "MFEM mesh v1.0\n")?;
-    writeln!(writer, "dimension\n{topo}\n")?;
+    // `Mesh::Printer` always prefixes the serial conforming format with the
+    // geometry-type comment block (`mesh/mesh.cpp:12521-12531`), whatever the
+    // element mix — the block is a fixed 12-line constant, not a summary of
+    // the mesh's own types.  D294: emitted here so a written `.mesh` is
+    // byte-identical to C++ `Mesh::Save` (the consumers that splice a
+    // parallel header around this body — `tools/gridfunction_bounds.rs` —
+    // pass the block through instead of adding their own).
+    write!(
+        writer,
+        "#\n# MFEM Geometry Types (see fem/geom.hpp):\n#\n\
+         # POINT       = 0\n\
+         # SEGMENT     = 1\n\
+         # TRIANGLE    = 2\n\
+         # SQUARE      = 3\n\
+         # TETRAHEDRON = 4\n\
+         # CUBE        = 5\n\
+         # PRISM       = 6\n\
+         # PYRAMID     = 7\n\
+         #\n"
+    )?;
+    // `Mesh::Printer` writes `"\ndimension\n" << Dim` — the blank line after
+    // the geometry block belongs to this write (`mesh/mesh.cpp:12533`).
+    writeln!(writer, "\ndimension\n{topo}\n")?;
 
     // Elements section
     writeln!(writer, "elements\n{n_elems}")?;
@@ -2259,13 +2298,6 @@ const PRISM_FACES: [[usize; 4]; 5] = [
     [0, 2, 1, usize::MAX], [3, 4, 5, usize::MAX], [0, 1, 4, 3], [1, 2, 5, 4],
     [2, 0, 3, 5],
 ];
-/// The six prism vertices in `Geometry::PRISM`'s order, expressed in
-/// `PrismPk`'s reference convention `(extrusion, triangle x, triangle y)` —
-/// `PrismPk`'s extrusion is his *first* coordinate while MFEM's is `z`.
-const PRISM_VERT_PK: [[f64; 3]; 6] = [
-    [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
-    [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0],
-];
 
 /// Where a local dof of MFEM's `H1_WedgeElement` lives, in terms of the
 /// element's own local vertices (and hence of the mesh's global entities).
@@ -3141,7 +3173,11 @@ fn tet_slot_map<M: MeshTopology>(
 ///   `build_prism_h1` reproduces MFEM's entity-ordered numbering since D177
 ///   (pinned for orders 2-4 in `crates/space/tests/
 ///   d177_prism_h1_mfem_numbering.rs`, round-tripped on a curved 2-prism
-///   mesh by `tests/d190_wedge_curved_nodes_roundtrip.rs`);
+///   mesh by `tests/d190_wedge_curved_nodes_roundtrip.rs`); D295 re-lays the
+///   all-`Prism6` rows from MFEM's entity slot order into `PrismPk`'s
+///   layer-major order via `H1PrismPk::layer_perm`, because the geometry
+///   table every in-memory consumer evaluates is contracted to `PrismPk`'s
+///   slot order (the dof *ids* stay MFEM's file numbering);
 /// - anything else (pyramids, mixes): fem-rs's own numbering, *with* a
 ///   warning — never a silently scrambled mapping (see `D41` notes below).
 fn build_h1_geometry<M: MeshTopology>(
@@ -3247,6 +3283,31 @@ fn build_h1_geometry<M: MeshTopology>(
     }
     let mut conn: Vec<NodeId> = Vec::new();
     let npe = dm.element_dofs(0).len();
+    // D295: an all-`Prism6` mesh's `DofManager` rows are numbered in MFEM's
+    // entity slot order (`build_prism_h1` → `H1PrismPk`), but the
+    // geometry-table contract every in-memory consumer evaluates the table
+    // with is `PrismPk`'s **layer-major** order (`Mesh::set_curvature`'s
+    // prism path, frozen by `crates/mesh/tests/d152_prism_curvature.rs`;
+    // `element_jacobian`, `crates/assembly`'s `geo_ref_elem`,
+    // `curved::CurvedMesh`, AMR's `curved_prism` and fem-io's own
+    // `prism_nodes_dof_values` all evaluate `PrismPk` over these rows).
+    // Storing the H1 slot order here made read → write mutually exclusive
+    // with the programmatic path (the writer's shared-dof consistency check
+    // rejected every curved wedge read from a file).  `H1PrismPk::layer_perm`
+    // is the published slot correspondence (`perm[m]` = the layer slot of H1
+    // slot `m`, same dof), so the row is re-laid out under the file's own dof
+    // ids — the numbering stays MFEM's, only the row order follows the
+    // reference element, exactly like the hex/tet tables above.
+    let prism_perm: Option<Vec<usize>> =
+        if dim == 3
+            && (0..mesh.n_elements() as u32).all(|e| mesh.element_type(e) == ElementType::Prism6)
+        {
+            Some(fem_element::lagrange::H1PrismPk::new(order as usize)
+                .layer_perm()
+                .to_vec())
+        } else {
+            None
+        };
     for e in 0..mesh.n_elements() {
         let dofs = dm.element_dofs(e as u32);
         if dofs.len() != npe {
@@ -3261,7 +3322,16 @@ fn build_h1_geometry<M: MeshTopology>(
             );
             return None;
         }
-        conn.extend(dofs.iter().copied());
+        if let Some(perm) = &prism_perm {
+            debug_assert_eq!(perm.len(), dofs.len(), "prism slot permutation size");
+            let mut row = vec![0 as NodeId; dofs.len()];
+            for (m, &g) in dofs.iter().enumerate() {
+                row[perm[m]] = g;
+            }
+            conn.extend(row);
+        } else {
+            conn.extend(dofs.iter().copied());
+        }
     }
     Some(GeometryData {
         order,

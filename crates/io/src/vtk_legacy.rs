@@ -117,7 +117,16 @@ fn element_nodes<const D: usize>(mesh: &Mesh<D>, e: u32) -> &[fem_core::NodeId] 
     }
 }
 
-/// `VTKGeometry::Map` — MFEM geometry to linear VTK cell type.
+/// `VTKGeometry::Map` — MFEM geometry to linear VTK cell type
+/// (`mesh/vtk.cpp:21`: POINT, SEGMENT, TRIANGLE, SQUARE, TETRAHEDRON, CUBE,
+/// PRISM, PYRAMID = 1/3/5/9/10/12/13/14).  MFEM's `Mesh::PrintVTK` writes
+/// this map only from the *corner* vertices; this writer emits an element's
+/// full connectivity, so the incomplete quadratic families MFEM does not
+/// support (Hex20 / Prism15) go out with their VTK-spec quadratic ids
+/// (`VTK_QUADRATIC_HEXAHEDRON = 25`, `VTK_QUADRATIC_WEDGE = 26`) instead of
+/// the linear ids — a linear id with 20/15-node rows is not a VTK cell
+/// (D298; the ids were 12/13 before, and `vtk_reader` accepted the
+/// malformed alias).
 fn vtk_cell_type(et: ElementType) -> FemResult<i32> {
     Ok(match et {
         ElementType::Point1 => 1,
@@ -125,8 +134,10 @@ fn vtk_cell_type(et: ElementType) -> FemResult<i32> {
         ElementType::Tri3 | ElementType::Tri6 => 5,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => 9,
         ElementType::Tet4 | ElementType::Tet10 => 10,
-        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 12,
-        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 13,
+        ElementType::Hex8 | ElementType::Hex27 => 12,
+        ElementType::Hex20 => 25,
+        ElementType::Prism6 | ElementType::Prism18 => 13,
+        ElementType::Prism15 => 26,
         ElementType::Pyramid5 | ElementType::Pyramid13 => 14,
         other => {
             return Err(vtk_err(format!(
@@ -265,6 +276,22 @@ LOOKUP_TABLE default\n\
         assert_eq!(cpp_float(1234567.0), "1.23457e+06");
         assert_eq!(cpp_float(0.000012345), "1.2345e-05");
         assert_eq!(cpp_float(1500.0), "1500");
+    }
+
+    /// D298: the writer emits an element's *full* connectivity, so the
+    /// incomplete quadratic families must be labelled with their VTK-spec
+    /// quadratic ids (25/26), not the linear hex/wedge ids (12/13) — a
+    /// 20-node row under a linear id is not a VTK cell.  MFEM-supported
+    /// families keep the `VTKGeometry::Map` linear ids (`Mesh::PrintVTK`
+    /// parity, `mesh/vtk.cpp:21`).
+    #[test]
+    fn incomplete_families_use_their_spec_quadratic_ids() {
+        assert_eq!(vtk_cell_type(ElementType::Hex20).unwrap(), 25);
+        assert_eq!(vtk_cell_type(ElementType::Prism15).unwrap(), 26);
+        assert_eq!(vtk_cell_type(ElementType::Hex8).unwrap(), 12);
+        assert_eq!(vtk_cell_type(ElementType::Hex27).unwrap(), 12);
+        assert_eq!(vtk_cell_type(ElementType::Prism6).unwrap(), 13);
+        assert_eq!(vtk_cell_type(ElementType::Prism18).unwrap(), 13);
     }
 
     /// One-off cross-check vs MFEM 4.10 dumps of the stock beam meshes

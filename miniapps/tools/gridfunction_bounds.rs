@@ -162,21 +162,17 @@ enum Target {
 /// around the serial `Mesh::Print` body — the `-visit` `pmesh.<rank>` slice
 /// (no shared entities at np 1; the 3-D variant carries
 /// `total_shared_faces`).
+///
+/// D294: `write_mfem` emits `Mesh::Printer`'s geometry-type comment block
+/// itself, so this splice only swaps the version header and passes the block
+/// through (re-adding it here produced a doubled block).
 fn parallel_mesh_text(serial: Vec<u8>, dim: usize) -> String {
     let mut text = String::from_utf8(serial).expect("mesh text is UTF-8");
     debug_assert!(text.starts_with("MFEM mesh v1.0\n"));
     // The v1.2 header is followed by the geometry-type comment block
-    // (`Mesh::Printer`), identical for dim 2 and 3.
-    const COMMENTS: &str = concat!(
-        "#\n# MFEM Geometry Types (see fem/geom.hpp):\n#\n# POINT       = 0\n",
-        "# SEGMENT     = 1\n# TRIANGLE    = 2\n# SQUARE      = 3\n",
-        "# TETRAHEDRON = 4\n# CUBE        = 5\n# PRISM       = 6\n",
-        "# PYRAMID     = 7\n#\n\n"
-    );
-    text.replace_range(
-        .."MFEM mesh v1.0\n\n".len(),
-        &format!("MFEM mesh v1.2\n\n{COMMENTS}"),
-    );
+    // (`Mesh::Printer`), identical for dim 2 and 3 — which the serial body
+    // already carries (fem-io's `write_mfem`, D294).
+    text.replace_range(.."MFEM mesh v1.0\n\n".len(), "MFEM mesh v1.2\n\n");
     // `write_mfem` prefixes each straight-sided vertex row with one space
     // (`write!(… " {}", coord)`); MFEM's `Mesh::Print` starts the row at the
     // first coordinate.  Strip the leading space from every line after the

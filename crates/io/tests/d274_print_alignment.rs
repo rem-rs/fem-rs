@@ -3,7 +3,7 @@
 //! Three C++ behaviours, each pinned byte-for-byte against the round-31
 //! probe `tmp/round31_spot_save.cpp` (`Mesh mesh(in); mesh.Save(out, 16)`,
 //! WSL `$HOME/work/r31_save`), whose products live in
-//! `tests/data/d274_cpp_save/`:
+//! `tests/data/d314_cpp_save/`:
 //!
 //! 1. straight-sided vertex rows start at the first coordinate
 //!    (`Mesh::Printer`, `mesh/mesh.cpp:12544` — `os << vertices[i](0)` first),
@@ -18,13 +18,11 @@
 //!    C++ re-save of the `Ordering: 1` toroid fixture still says
 //!    `Ordering: 1`.
 //!
-//! The reference files are the probe's own re-saves of the input fixtures
-//! with the geometry comment block removed (`#\n# MFEM Geometry Types …
-//! # PYRAMID     = 7\n#\n\n`): `Mesh::Printer` always emits that block while
-//! `write_mfem` does not yet — the `tools` miniapps splice their own copy
-//! around the fem-io body, so adding it here would duplicate it there
-//! (declared deviation, tracked as D294).  Every byte after the block must
-//! match.
+//! D294 closed the last gap: `write_mfem` now emits `Mesh::Printer`'s
+//! geometry-type comment block itself (`mesh/mesh.cpp:12521-12531`), so the
+//! comparison against C++ `Save` is byte-for-byte over the whole file —
+//! block included (the round-43 pins had to strip the block from the
+//! references; the old stripped copies were removed with this change).
 //!
 //! The formatting fixed point is pinned too: write → read → write is
 //! byte-stable.  That is the same fixed point C++'s own 16-digit save
@@ -44,13 +42,13 @@ use fem_mesh::simplex::Mesh;
 const CASES: &[(&str, &str, u8, bool)] = &[
     // Straight-sided wedge torus: exercises the vertex-row format (leading
     // space removal + %.16g).
-    ("toroid_wedge_o1_r1.mesh", "cpp_o1r1.mesh", 3, true),
+    ("toroid_wedge_o1_r1.mesh", "cpp_toroid_wedge_o1_r1.mesh", 3, true),
     // Curved hex cube: hex `nodes` numbering at %.16g.
     ("curved_hex_p3.mesh", "cpp_curved_hex_p3.mesh", 3, false),
     // 2-D triangles, H1_2D_P2/P3/P4 (the fixtures whose bit-exact round trip
     // the old Display writer guaranteed and %.16g cannot — C++ truncates
     // `0.16666666666666666` to `0.1666666666666667` exactly the same way).
-    ("tri2d_0_p2_g32.mesh", "cpp_tri2d_g32.mesh", 2, false),
+    ("tri2d_0_p2_g32.mesh", "cpp_tri2d_0_p2_g32.mesh", 2, false),
     ("tri2d_0_p3_g32.mesh", "cpp_tri2d_0_p3_g32.mesh", 2, false),
     ("tri2d_0_p4_g32.mesh", "cpp_tri2d_0_p4_g32.mesh", 2, false),
 ];
@@ -74,7 +72,7 @@ fn reference_path(name: &str) -> PathBuf {
         env!("CARGO_MANIFEST_DIR"),
         "tests",
         "data",
-        "d274_cpp_save",
+        "d314_cpp_save",
     ]
     .iter()
     .collect::<PathBuf>()
@@ -101,7 +99,7 @@ fn write_case(mesh2d: &Mesh<2>, mesh3d: Option<&Mesh<3>>) -> String {
 }
 
 /// The written text must equal MFEM's own re-save of the same fixture, byte
-/// for byte, modulo the declared geometry-comment-block deviation.
+/// for byte, geometry comment block included (D294).
 #[test]
 fn write_matches_cpp_save_byte_for_byte() {
     for (fixture, reference, dim, mesh_data) in CASES {
