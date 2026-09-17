@@ -1261,13 +1261,18 @@ impl NurbsExtension {
             1 => {
                 // A 1D mesh gets one POINT at each end of the single element.
                 for el in &self.elements {
+                    // D170: MFEM's GenerateBoundaryElements duplicates the
+                    // face elements, whose default attribute is 1 (`Element`
+                    // ctor) — the parent patch attribute is NOT inherited
+                    // (tmp/d170/d170_probe.cpp: pipe-nurbs.mesh, boundary 0
+                    // => NBE=24, bdr_attributes={1}).
                     self.boundary.push(TopoElement {
-                        attr: el.attr,
+                        attr: 1,
                         geom: GEOM_POINT,
                         verts: vec![el.verts[0]],
                     });
                     self.boundary.push(TopoElement {
-                        attr: el.attr,
+                        attr: 1,
                         geom: GEOM_POINT,
                         verts: vec![el.verts[1]],
                     });
@@ -1283,8 +1288,10 @@ impl NurbsExtension {
                 for (p, el) in self.elements.iter().enumerate() {
                     for (j, &[a, b]) in SQUARE_EDGES.iter().enumerate() {
                         if count[self.el_edges[p][j]] == 1 {
+                            // D170: generated boundary elements carry MFEM's
+                            // default attribute 1, not the patch attribute.
                             self.boundary.push(TopoElement {
-                                attr: el.attr,
+                                attr: 1,
                                 geom: GEOM_SEGMENT,
                                 verts: vec![el.verts[a], el.verts[b]],
                             });
@@ -1315,7 +1322,10 @@ impl NurbsExtension {
                             .expect("face must exist");
                         if count[f] == 1 {
                             self.boundary.push(TopoElement {
-                                attr: el.attr,
+                                // D170: MFEM's generated boundary elements
+                                // carry the default attribute 1, not the
+                                // patch attribute (tmp/d170/d170_probe.cpp).
+                                attr: 1,
                                 geom: GEOM_SQUARE,
                                 verts: tuple.to_vec(),
                             });

@@ -68,10 +68,9 @@
 //!   for those configurations do match MFEM — pinned at 17 digits in
 //!   `crates/space/tests/data/nurbs_periodic_mfem.txt`.
 //! * `pipe-nurbs.mesh` has `boundary 0`, so MFEM *generates* the boundary
-//!   elements and ends up with one boundary attribute while
-//!   `NurbsExtension::max_bdr_attribute` reports four; only the length of the
-//!   printed marker arrays differs (`crates/space/src/nurbs_extension.rs`,
-//!   `generate_boundary_elements` / `compute_bdr_sides`).
+//!   elements; since D170 both sides carry the single default boundary
+//!   attribute 1 (`NurbsExtension::generate_boundary_elements` no longer
+//!   inherits the patch attribute).
 //! * `beam-quad-nurbs-sf.mesh` produces a different (pre-existing, unrelated)
 //!   iteration block, and `square-disc-nurbs-patch.mesh` cannot be parsed at
 //!   all (the `patches` mesh-file variant is unimplemented).
