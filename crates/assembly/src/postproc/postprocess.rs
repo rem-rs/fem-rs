@@ -5,8 +5,12 @@ use nalgebra::DMatrix;
 
 use fem_element::lagrange::{TetP1, TetP2, TriP1};
 use fem_element::lagrange::factory::{TriPk, TetPk};
-use fem_element::nedelec::{TetND2, TriND2, TriNDk, TetNDk};
-use fem_element::raviart_thomas::{TetRT1, TriRT1, TriRT2, TriRTk, TetRTk};
+use fem_element::nedelec::{
+    HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk,
+};
+use fem_element::raviart_thomas::{
+    HexRTk, PrismRTk, QuadRT1, QuadRTk, TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk,
+};
 use fem_element::reference::VectorReferenceElement;
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
@@ -47,20 +51,73 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
     }
 }
 
-fn vec_ref_elem(space_type: SpaceType, dim: usize, order: u8) -> Box<dyn VectorReferenceElement> {
-    match (space_type, dim, order) {
-        (SpaceType::HCurl, 2, 1) => Box::new(TriNDk::new(1)),
-        (SpaceType::HCurl, 2, 2) => Box::new(TriND2),
-        (SpaceType::HCurl, 2, o) if o >= 3 => Box::new(fem_element::nedelec::TriNDk::new(o as usize)),
-        (SpaceType::HCurl, 3, 1) => Box::new(TetNDk::new(1)),
-        (SpaceType::HCurl, 3, 2) => Box::new(TetND2),
-        (SpaceType::HCurl, 3, o) if o >= 3 => Box::new(fem_element::nedelec::TetNDk::new(o as usize)),
-        (SpaceType::HDiv, 2, 0) => Box::new(TriRTk::new(0)),
-        (SpaceType::HDiv, 2, 1) => Box::new(TriRT1),
-        (SpaceType::HDiv, 2, 2) => Box::new(TriRT2),
-        (SpaceType::HDiv, 3, 0) => Box::new(TetRTk::new(0)),
-        (SpaceType::HDiv, 3, 1) => Box::new(TetRT1),
-        _ => panic!("vec_ref_elem: unsupported (space_type={space_type:?}, dim={dim}, order={order})"),
+/// Element-level copy of `vector_assembler::vec_ref_elem` for the element-wise
+/// postprocessing kernels (curl / divergence at the centroid).
+///
+/// D245 sync: the hex H(div) arm selects the MFEM-default GaussLegendre
+/// nodal-open variant (`HexRTk::new_gauss_legendre`, `RT_FECollection(p, 3)`)
+/// exactly like the assembler dispatcher, so every consumer of
+/// [`compute_element_divergence`] sees the same physical basis the assembly
+/// used.  (The LOR stack keeps the IntegratedGLL pair via `lor_factory`.)
+fn vec_ref_elem(
+    space_type: SpaceType,
+    elem_type: ElementType,
+    dim: usize,
+    order: u8,
+) -> Box<dyn VectorReferenceElement> {
+    match (space_type, elem_type, dim, order) {
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, o) if o >= 3 => {
+            Box::new(TriNDk::new(o as usize))
+        }
+        // 2-D surface elements embedded in 3-D: same 2-D Nédélec basis.
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 1) => Box::new(TriNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, 2) => Box::new(TriND2),
+        (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 3, o) if o >= 3 => {
+            Box::new(TriNDk::new(o as usize))
+        }
+        (SpaceType::HCurl, ElementType::Quad4, 2, 1) => Box::new(QuadNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Quad4, 2, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad4, 2, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        (SpaceType::HCurl, ElementType::Quad4, 3, 1) => Box::new(QuadNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Quad4, 3, 2) => Box::new(QuadND2),
+        (SpaceType::HCurl, ElementType::Quad4, 3, o) if o >= 3 => Box::new(QuadNDk::new(o as usize)),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetND2),
+        (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => {
+            Box::new(TetNDk::new(o as usize))
+        }
+        (SpaceType::HCurl, ElementType::Hex8, 3, 1) => Box::new(HexNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Hex8, 3, 2) => Box::new(HexNDk::new(2)),
+        (SpaceType::HCurl, ElementType::Hex8, 3, o) if o >= 3 => Box::new(HexNDk::new(o as usize)),
+        (SpaceType::HDiv, ElementType::Quad4, 2, 0) => Box::new(QuadRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Quad4, 2, 1) => Box::new(QuadRT1),
+        (SpaceType::HDiv, ElementType::Quad4, 2, o) if o >= 2 => {
+            Box::new(fem_element::raviart_thomas::QuadRTk::new(o as usize))
+        }
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriRT1),
+        (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),
+        // D245: MFEM-default GaussLegendre nodal-open RT on hexes (assembly
+        // parity); the IntegratedGLL LOR pair is pinned in `lor_factory`.
+        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRTk::new_gauss_legendre(0)),
+        (SpaceType::HDiv, ElementType::Hex8, 3, 1) => Box::new(HexRTk::new_gauss_legendre(1)),
+        (SpaceType::HDiv, ElementType::Hex8, 3, o) if o >= 2 => {
+            Box::new(HexRTk::new_gauss_legendre(o as usize))
+        }
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),
+        (SpaceType::HDiv, ElementType::Prism6, 3, 0) => Box::new(PrismRTk::new(0)),
+        (SpaceType::HDiv, ElementType::Prism6, 3, 1) => Box::new(PrismRTk::new(1)),
+        (SpaceType::HCurl, ElementType::Prism6, 3, 1) => Box::new(PrismND1),
+        (SpaceType::HCurl, ElementType::Prism6, 3, o) if o >= 2 => {
+            Box::new(PrismNDk::new(o as usize))
+        }
+        _ => panic!(
+            "vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"
+        ),
     }
 }
 
@@ -316,8 +373,6 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
     let dim = mesh.dim() as usize;
     let stype = space.space_type();
 
-    let ref_elem = vec_ref_elem(stype, dim, space.order());
-    let n_ldofs = ref_elem.n_dofs();
     let curl_dim = if dim == 2 { 1 } else { 3 };
 
     let mut result = Vec::with_capacity(mesh.n_elements());
@@ -325,10 +380,15 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
     // Centroid in reference coordinates.
     let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
 
-    let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
-    let mut phys_curl = vec![0.0; n_ldofs * curl_dim];
-
     for e in mesh.elem_iter() {
+        // D245: dispatch per element so mixed meshes pick the right basis
+        // (and hex H(div) no longer mis-dispatches onto the tet element).
+        let ref_elem = vec_ref_elem(stype, mesh.element_type(e), dim, space.order());
+        let n_ldofs = ref_elem.n_dofs();
+
+        let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
+        let mut phys_curl = vec![0.0; n_ldofs * curl_dim];
+
         let elem_dofs = space.element_dofs(e);
         let signs = space.element_signs(e);
         // D58 canonical reconstruction: with face blocks (tet NDk, k ≥ 2) the
@@ -406,17 +466,18 @@ pub fn compute_element_divergence<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<f6
     let dim = mesh.dim() as usize;
     let stype = space.space_type();
 
-    let ref_elem = vec_ref_elem(stype, dim, space.order());
-    let n_ldofs = ref_elem.n_dofs();
-
     let mut result = Vec::with_capacity(mesh.n_elements());
 
     let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
 
-    let mut ref_div = vec![0.0; n_ldofs];
-    let mut phys_div = vec![0.0; n_ldofs];
-
     for e in mesh.elem_iter() {
+        // D245: dispatch per element (see compute_element_curl).
+        let ref_elem = vec_ref_elem(stype, mesh.element_type(e), dim, space.order());
+        let n_ldofs = ref_elem.n_dofs();
+
+        let mut ref_div = vec![0.0; n_ldofs];
+        let mut phys_div = vec![0.0; n_ldofs];
+
         let elem_dofs = space.element_dofs(e);
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);

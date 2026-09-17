@@ -58,11 +58,21 @@ fn is_simplex(elem_type: ElementType) -> bool {
 
 /// Geometric-mapping Jacobian at reference point `xi` on element `e`.
 ///
-/// **Simplex** (Tri3, Tri6, Tet4): P1 mapping â constant Jacobian from nodes 0..dim.
-/// **Quad** (Quad4): Q1 bilinear mapping â correct bilinear Jacobian at (Î¾,Î·).
+/// **Simplex** (Tri3, Tri6, Tet4): P1 mapping â constant Jacobian from nodes 0..dim
+/// (exact; the unit-simplex frame of every basis/quadrature in this file).
+/// **Tensor** (Quad4, Hex8): the **isoparametric** geometry Jacobian at `xi`
+/// (D250 â the `geom_jacobian` twin of the D242 grid-function fix).  The
+/// previous corner-difference fallback was the [0,1]Â³âphysical map while the
+/// hex quadratures/bases here are [-1,1]Â³-framed (â 8Ã |det J| and
+/// half-strength gradients on hexes), and warped geometries have a
+/// non-constant Jacobian.  Quads evaluate the `QuadQk` [0,1]Â² geometry at
+/// `t = (Î¾+1)/2` and rescale (`J_[-1,1] = J_[0,1]/2`, det by 2^dim â the
+/// straight-quad analytic arm below stays bit-identical); hexes evaluate the
+/// `HexQk` [-1,1]Â³ geometry directly.  Curved (geom_order > 1) geometries read
+/// the geometry-node table through `geo_ref_elem_from_mesh`.
 ///
 /// Returns `(J, det J)` where J is the `dim Ã dim` Jacobian matrix.
-fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (DMatrix<f64>, f64) {
+fn geom_jacobian<M: MeshTopology>(mesh: &M, elem: u32, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (DMatrix<f64>, f64) {
     if is_simplex(elem_type) {
         // Simplex: P1 mapping, Jacobian = [x1-x0, x2-x0, â¦] (constant)
         let x0 = mesh.node_coords(nodes[0]);
@@ -75,8 +85,8 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usiz
         }
         let det = j.determinant();
         (j, det)
-    } else if dim == 2 && nodes.len() >= 4 {
-        // Quad: Q1 bilinear mapping at (Î¾, Î·)
+    } else if dim == 2 && nodes.len() >= 4 && mesh.geom_order() <= 1 {
+        // Quad: Q1 bilinear mapping at (Î¾, Î·) on the [-1,1]² frame
         let (e, n) = (xi[0], xi[1]);
         let c = |i: usize| mesh.node_coords(nodes[i]);
         let j00 = 0.25 * (-(1.0 - n) * c(0)[0] + (1.0 - n) * c(1)[0] + (1.0 + n) * c(2)[0] - (1.0 + n) * c(3)[0]);
@@ -86,6 +96,47 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usiz
         let det = j00 * j11 - j01 * j10;
         let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
         (jac, det)
+    } else if matches!(
+        elem_type,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
+            | ElementType::Hex8 | ElementType::Hex20
+    ) {
+        // D250: isoparametric geometry (see the doc above).
+        if let Some(geo) = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+            let geo_nodes = if mesh.geom_order() > 1 {
+                mesh.geometry_nodes(elem)
+            } else {
+                nodes
+            };
+            match dim {
+                2 => {
+                    let t = [0.5 * (xi[0] + 1.0), 0.5 * (xi[1] + 1.0)];
+                    let (j, det, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                        mesh, geo_nodes, geo.as_ref(), &t, 2,
+                    );
+                    // Î¾ = 2t â 1 â âx/âÎ¾ = âx/ât Â· dt/dÎ¾ = J_[0,1] / 2.
+                    (j * 0.5, det * 0.25)
+                }
+                3 => {
+                    let (j, det, _xp) = crate::vector_assembler::isoparametric_jacobian(
+                        mesh, geo_nodes, geo.as_ref(), xi, 3,
+                    );
+                    (j, det)
+                }
+                _ => (DMatrix::zeros(dim, dim), 0.0),
+            }
+        } else {
+            // Fallback: simplex-like (nodes 0..dim)
+            let x0 = mesh.node_coords(nodes[0]);
+            let mut j = DMatrix::<f64>::zeros(dim, dim);
+            for col in 0..dim.min(nodes.len().saturating_sub(1)) {
+                let xc = mesh.node_coords(nodes[col + 1]);
+                for row in 0..dim {
+                    j[(row, col)] = xc[row] - x0[row];
+                }
+            }
+            (j.clone(), j.determinant())
+        }
     } else {
         // Fallback: simplex-like (nodes 0..dim)
         let x0 = mesh.node_coords(nodes[0]);
@@ -131,7 +182,7 @@ fn eval_grad_at<M: MeshTopology>(
     let elem_dofs = space.element_dofs(elem);
     let nodes = mesh.element_nodes(elem);
 
-    let (jac, _det) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+    let (jac, _det) = geom_jacobian(mesh, elem, nodes, xi, dim, elem_type);
     let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
     let mut grad_ref = vec![0.0; n_ldofs * dim];
@@ -317,7 +368,7 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         for k in 0..npe {
             // Reference coordinates of flux node k (a vertex).
             let xi = ref_vertex_coords(d, npe, k);
-            let (jac, _det_j) = geom_jacobian(m, nodes, &xi, d, elem_type);
+            let (jac, _det_j) = geom_jacobian(m, e, nodes, &xi, d, elem_type);
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
             let mut grad_ref = vec![0.0; n_ldofs * d];
@@ -420,9 +471,12 @@ fn ref_vertex_coords(d: usize, npe: usize, k: usize) -> Vec<f64> {
         (3, 4, 2) => { xi[1] = 1.0; }
         (3, 4, 3) => { xi[2] = 1.0; }
         (3, 8, kk) => {
-            xi[0] = if kk & 1 != 0 { 1.0 } else { -1.0 };
-            xi[1] = if kk & 2 != 0 { 1.0 } else { -1.0 };
-            xi[2] = if kk & 4 != 0 { 1.0 } else { -1.0 };
+            // MFEM `CUBE::Vertices` ring order (matches the hex conn; see
+            // the vertex_shapes hex arm note — the previous Morton mapping
+            // swapped slots 2↔3 and 6↔7).
+            xi[0] = if matches!(kk % 4, 1 | 2) { 1.0 } else { -1.0 };
+            xi[1] = if matches!(kk % 4, 2 | 3) { 1.0 } else { -1.0 };
+            xi[2] = if kk >= 4 { 1.0 } else { -1.0 };
         }
         _ => {}
     }
@@ -481,7 +535,7 @@ where
         let mut grad_phys = vec![0.0; n_ldofs * d];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
             let w_abs_det = quad.weights[q] * det_j.abs();
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
@@ -557,7 +611,7 @@ where
         let mut e2 = 0.0;
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
             let w_abs_det = quad.weights[q] * det_j.abs();
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
@@ -661,7 +715,7 @@ where
         let mut grad_phys = vec![0.0; n_ldofs * d];
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
             let w_abs_det = quad.weights[q] * det_j.abs();
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
@@ -739,7 +793,7 @@ where
         let mut err_sq = 0.0;
 
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j) = geom_jacobian(mref, nodes, xi, d, elem_type);
+            let (jac, det_j) = geom_jacobian(mref, e, nodes, xi, d, elem_type);
             let w_abs_det = quad.weights[q] * det_j.abs();
             let j_inv_t = jac.try_inverse().unwrap_or_default().transpose();
 
@@ -907,7 +961,7 @@ where
         let mut eng: f64 = 0.0;
         let mut phi = vec![0.0; n_ldofs];
         for (q, xi) in quad.points.iter().enumerate() {
-            let (jac, det_j) = geom_jacobian(m, nodes, xi, d, elem_type);
+            let (jac, det_j) = geom_jacobian(m, e, nodes, xi, d, elem_type);
             let w_det = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
             // pointflux(k) = Î£_j f[j,k]Â·Ï_j(xi)
@@ -1422,10 +1476,15 @@ fn vertex_shapes(_elem_type: ElementType, xi: &[f64], npe: usize) -> Vec<f64> {
             s[3] = xi[2];
         }
         8 => {
+            // MFEM `CUBE::Vertices` **ring** order — the fem-rs hex conn
+            // order: slots 0..4 ring the z=−1 face CCW from (−,−), slots
+            // 4..8 the z=+1 face.  (The previous k&1/k&2/k&4 Morton bit
+            // mapping swapped slots 2↔3 and 6↔7 against the actual conn,
+            // scrambling every hex sampling through `phys_point` — D250.)
             for (k, v) in s.iter_mut().enumerate() {
-                let sx = if k & 1 != 0 { xi[0] } else { -xi[0] };
-                let sy = if k & 2 != 0 { xi[1] } else { -xi[1] };
-                let sz = if k & 4 != 0 { xi[2] } else { -xi[2] };
+                let sx = if matches!(k % 4, 1 | 2) { xi[0] } else { -xi[0] };
+                let sy = if matches!(k % 4, 2 | 3) { xi[1] } else { -xi[1] };
+                let sz = if k >= 4 { xi[2] } else { -xi[2] };
                 *v = 0.125 * (1.0 + sx) * (1.0 + sy) * (1.0 + sz);
             }
         }
@@ -1514,7 +1573,7 @@ where
         let (points, weights) = geom_rule(elem_type, 2 * order + 3);
         let nodes = m.element_nodes(e);
         for (q, xi) in points.iter().enumerate() {
-            let (_, det) = geom_jacobian(m, nodes, xi, d, elem_type);
+            let (_, det) = geom_jacobian(m, e, nodes, xi, d, elem_type);
             let x = phys_point(m, nodes, xi, d, elem_type);
             let uh = gf.evaluate_at_element(e, xi);
             let mut diff = (uh - exact(&x)).abs();
@@ -1638,7 +1697,7 @@ where
     let _ = flux_order;
     let mut err = 0.0_f64;
     for (q, xi) in points.iter().enumerate() {
-        let (_, det) = geom_jacobian(m, nodes, xi, d, elem_type);
+        let (_, det) = geom_jacobian(m, e, nodes, xi, d, elem_type);
         let x = phys_point(m, nodes, xi, d, elem_type);
         let grad = gf.evaluate_gradient_at_element(e, xi);
         let ex = exgrad(&x);
@@ -1766,7 +1825,7 @@ where
             let (points, _w) = geom_rule(et, flux_order);
             let nodes = m.element_nodes(ielem);
             for xi in &points {
-                let (_, det) = geom_jacobian(m, nodes, xi, d, et);
+                let (_, det) = geom_jacobian(m, ielem, nodes, xi, d, et);
                 let x = phys_point(m, nodes, xi, d, et);
                 let fl = gf.evaluate_gradient_at_element(ielem, xi);
                 let pvec = tensor_product_legendre(d, patch_order, &x, &xmin, &xmax, angle, &midpoint);
@@ -1902,7 +1961,7 @@ where
         let mut energy = 0.0_f64;
         let mut d_xyz = vec![0.0_f64; d];
         for (q, xi) in points.iter().enumerate() {
-            let (jac, det) = geom_jacobian(m, nodes, xi, d, et);
+            let (jac, det) = geom_jacobian(m, e, nodes, xi, d, et);
             let flux = gf.evaluate_gradient_at_element(e, xi);
             // Recovered flux interpolated from the nodal values.
             let shapes = vertex_shapes(et, xi, npe);

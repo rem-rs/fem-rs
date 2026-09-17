@@ -675,12 +675,103 @@ mod lor_vector_tests {
         VectorAssembler::assemble_bilinear(space, &[&cc, &m], 4)
     }
 
-    /// Assemble `div_div·(∇·u,∇·v) + mass·(u,v)` for an H(div) space.
+    /// Assemble `div_div·(∇·u,∇·v) + mass·(u,v)` for an H(div) space through
+    /// the library dispatcher.
+    ///
+    /// D245: post-flip this is the **GaussLegendre** open basis
+    /// (`vector_assembler::vec_ref_elem` selects `HexRTk::new_gauss_legendre`
+    /// for hex H(div), MFEM's `RT_FECollection(p, 3)` default).  MFEM's
+    /// `CheckBasisType` (`fem/lor/lor.cpp:317`) only pairs
+    /// `(GaussLobatto, IntegratedGLL)` collections with its LOR transfer, so
+    /// the HO matrix handed to [`build_lor_ads_rt_hex`] must NOT come from
+    /// here — the LOR tests assemble with [`assemble_hex_rt_variant`] and the
+    /// explicit `HexRTk::new` (IntegratedGLL) element.  This entry survives as
+    /// the A/B arm of the pin test `lor_rt_hex_ho_pinned_to_igll`.
     fn assemble_rt(space: &HDivSpace<Mesh<3>>, div_div: f64, mass: f64) -> CsrMatrix<f64> {
         let dd = GradDivIntegrator { kappa: div_div };
         let m = VectorMassIntegrator { alpha: mass };
         VectorAssembler::assemble_bilinear(space, &[&dd, &m], 4)
     }
+
+    /// Test-local affine-hex H(div) assembler for an *arbitrary* `HexRTk`
+    /// basis variant: `div_div·(∇·u,∇·v) + mass·(u,v)` with the library's
+    /// quadrature split (GradDiv on the assembler's default order-4 rule,
+    /// `VectorMassIntegrator` on its own `2·order+3` rule) and the affine
+    /// `[-1,1]³` hex Jacobian — the same recipe the D63 ND diagnostic uses for
+    /// H(curl) ([`assemble_hex_nd_variant`]).
+    fn assemble_hex_rt_variant(
+            ho: &HDivSpace<Mesh<3>>,
+            mesh: &Mesh<3>,
+            el: &fem_element::raviart_thomas::HexRTk,
+        ) -> CsrMatrix<f64> {
+            use fem_element::reference::VectorReferenceElement as _;
+            let nd = el.n_dofs();
+            let qr_dd = fem_element::quadrature::hex_rule(4);
+            let qr_m = fem_element::quadrature::hex_rule(2 * ho.order() + 3);
+            let mut a = fem_linalg::CooMatrix::<f64>::new(ho.n_dofs(), ho.n_dofs());
+            let mut v = vec![0.0_f64; nd * 3];
+            let mut d = vec![0.0_f64; nd];
+            for e in 0..mesh.n_elements() as u32 {
+                let verts = mesh.element_nodes(e);
+                let p0 = mesh.node_coords(verts[0]);
+                let b0 = mesh.node_coords(verts[1]);
+                let b1 = mesh.node_coords(verts[3]);
+                let b2 = mesh.node_coords(verts[4]);
+                let mut jac = [[0.0_f64; 3]; 3];
+                for r in 0..3 {
+                    jac[r][0] = 0.5 * (b0[r] - p0[r]);
+                    jac[r][1] = 0.5 * (b1[r] - p0[r]);
+                    jac[r][2] = 0.5 * (b2[r] - p0[r]);
+                }
+                let det = jac[0][0] * jac[1][1] * jac[2][2];
+                let signs = ho.element_signs(e);
+                let dofs = ho.element_dofs(e);
+                let mut ae = vec![0.0_f64; nd * nd];
+                let mut add_rule = |rule: &fem_element::reference::QuadratureRule,
+                                    div_term: bool,
+                                    ae: &mut Vec<f64>| {
+                    for (q, xi) in rule.points.iter().enumerate() {
+                        let w = rule.weights[q] * det;
+                        el.eval_basis_vec(xi, &mut v);
+                        el.eval_div(xi, &mut d);
+                        // Contravariant Piola: φ_phys = J·φ_ref/det,
+                        // div_phys = div_ref/det.
+                        let image = |i: usize| -> (f64, f64, f64) {
+                            let (v0, v1, v2) = (v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+                            (
+                                (jac[0][0] * v0 + jac[0][1] * v1 + jac[0][2] * v2) / det,
+                                (jac[1][0] * v0 + jac[1][1] * v1 + jac[1][2] * v2) / det,
+                                (jac[2][0] * v0 + jac[2][1] * v1 + jac[2][2] * v2) / det,
+                            )
+                        };
+                        for i in 0..nd {
+                            let (bix, biy, biz, di) = {
+                                let (x, y, z) = image(i);
+                                (x, y, z, d[i] / det)
+                            };
+                            for j in 0..nd {
+                                let (bjx, bjy, bjz, dj) = {
+                                    let (x, y, z) = image(j);
+                                    (x, y, z, d[j] / det)
+                                };
+                                let dot = if div_term { di * dj } else { bix * bjx + biy * bjy + biz * bjz };
+                                ae[i * nd + j] += w * signs[i] * signs[j] * dot;
+                            }
+                        }
+                    }
+                };
+                add_rule(&qr_dd, true, &mut ae);
+                add_rule(&qr_m, false, &mut ae);
+                for i in 0..nd {
+                    for j in 0..nd {
+                        if ae[i * nd + j] != 0.0 {
+                            a.add(dofs[i] as usize, dofs[j] as usize, ae[i * nd + j]);
+                        }
+                    }
+                }
+            }
+            a.into_csr()
+        }
 
     fn hex_mesh(n: usize) -> Mesh<3> {
         Mesh::<3>::make_cartesian_3d(n, n, n, ElementType::Hex8, 1.0, 1.0, 1.0, false)
@@ -793,10 +884,39 @@ mod lor_vector_tests {
     fn lor_rt_hex_matrices_symmetric() {
         let mesh = hex_mesh(2);
         let ho = HDivSpace::new(mesh.clone(), 1);
-        let a_ho = assemble_rt(&ho, 1.0, 1.0);
+        let a_ho = assemble_hex_rt_variant(&ho, &mesh, &fem_element::raviart_thomas::HexRTk::new(1));
         assert!(is_symmetric(&a_ho), "HO RT matrix must be symmetric");
         let lor = build_lor_ads_rt_hex(&ho, &a_ho, 1.0, 1.0, Default::default()).expect("build");
         assert!(is_symmetric(&lor.a_lor), "LOR matrix must be symmetric");
+    }
+
+    /// D245 pin: the LOR-RT HO matrix leg is assembled with the explicit
+    /// **IntegratedGLL** `HexRTk::new` element, not the library dispatcher's
+    /// MFEM-default GaussLegendre variant (`vec_ref_elem` post-D245).  The two
+    /// bases share the dof map but differ per dof, so the same recipe on the
+    /// same mesh must produce *different* matrices — if this ever becomes an
+    /// equality the pin has silently rotted back to the dispatcher.
+    #[test]
+    fn lor_rt_hex_ho_pinned_to_igll() {
+        let mesh = hex_mesh(2);
+        let ho = HDivSpace::new(mesh.clone(), 1);
+        let a_igll = assemble_hex_rt_variant(&ho, &mesh, &fem_element::raviart_thomas::HexRTk::new(1));
+        // (a) The library dispatcher (GaussLegendre post-D245) must NOT
+        //     coincide with the IGLL leg.
+        let a_lib = assemble_rt(&ho, 1.0, 1.0);
+        let d_igll_lib = max_abs_diff(&a_igll, &a_lib);
+        println!("max|A_IGLL − A_library(GL)| = {d_igll_lib:.6e}");
+        assert!(
+            d_igll_lib > 1.0,
+            "IGLL pin lost: library dispatcher output matches the IGLL leg (diff {d_igll_lib:.3e})"
+        );
+        // (b) The explicit-element GL assembly differs from the IGLL one by
+        //     the same margin (the variant split is real at the element level).
+        let a_gl_el = assemble_hex_rt_variant(&ho, &mesh, &fem_element::raviart_thomas::HexRTk::new_gauss_legendre(1));
+        let d_igll_gl = max_abs_diff(&a_igll, &a_gl_el);
+        println!("max|A_IGLL − A_GL(element)| = {d_igll_gl:.6e}");
+        assert!(d_igll_gl > 1.0, "GL/IGLL element split lost (diff {d_igll_gl:.3e})");
+        assert!(is_symmetric(&a_igll), "IGLL HO RT matrix must be symmetric");
     }
 
     /// PCG(+) iteration counts must stay (essentially) constant as the mesh
@@ -893,14 +1013,23 @@ mod lor_vector_tests {
     /// for a Jacobi-preconditioned FGMres on the same systems — the LOR
     /// transfer removes the mesh dependence; what is left is the auxiliary
     /// space solver, not the prolongation.
+    ///
+    /// D245: the HO matrix is assembled through [`assemble_hex_rt_variant`]
+    /// with the explicit `HexRTk::new` (IntegratedGLL) element — the library
+    /// dispatcher now selects the GaussLegendre nodal-open variant for hex
+    /// H(div), which is *not* LOR-compatible (`fem/lor/lor.cpp:317`).
     #[test]
     fn lor_rt_pcg_iterations_mesh_independent() {
         let iters: Vec<(usize, usize)> = [2, 4]
             .iter()
             .map(|&n| {
                 let mesh = hex_mesh(n);
-                let ho = HDivSpace::new(mesh, 1);
-                let a_ho = assemble_rt(&ho, 1.0, 1.0);
+                let ho = HDivSpace::new(mesh.clone(), 1);
+                let a_ho = assemble_hex_rt_variant(
+                    &ho,
+                    &mesh,
+                    &fem_element::raviart_thomas::HexRTk::new(1),
+                );
                 let lor = build_lor_ads_rt_hex(&ho, &a_ho, 1.0, 1.0, Default::default()).expect("build");
                 (n, pcg_iters(&a_ho, &lor))
             })
@@ -1587,7 +1716,12 @@ mod lor_vector_tests {
         for &n in &[2usize, 3] {
             let mesh = hex_mesh(n);
             let ho = HDivSpace::new(mesh.clone(), 1);
-            let a_ho = assemble_rt(&ho, 1.0, 1.0);
+            // D245: explicit IntegratedGLL leg (the dispatcher is GL now).
+            let a_ho = assemble_hex_rt_variant(
+                &ho,
+                &mesh,
+                &fem_element::raviart_thomas::HexRTk::new(1),
+            );
             let lor = build_lor_ads_rt_hex(&ho, &a_ho, 1.0, 1.0, Default::default())
                 .expect("LOR RT build");
             let perm = lor.lor.perm();
@@ -1714,7 +1848,12 @@ mod lor_vector_tests {
             );
 
             let rt_ho = HDivSpace::new(mesh.clone(), 1);
-            let a_rt = assemble_rt(&rt_ho, 1.0, 1.0);
+            // D245: explicit IntegratedGLL leg (the dispatcher is GL now).
+            let a_rt = assemble_hex_rt_variant(
+                &rt_ho,
+                &mesh,
+                &fem_element::raviart_thomas::HexRTk::new(1),
+            );
             let rt = build_lor_ads_rt_hex(&rt_ho, &a_rt, 1.0, 1.0, Default::default())
                 .expect("LOR RT");
             println!(

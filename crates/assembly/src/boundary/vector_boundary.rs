@@ -1223,22 +1223,26 @@ mod tests {
             &rt, &[&HdivNormalFluxIntegrator { g: |_| 1.0 }], &tags, 4,
         );
 
-        // D158 ARBITRATION REQUEST: the RT0 basis face flux under the
-        // MFEM-pulled-back normalization (halved integrated open modes, see
-        // `partial_open`) is 1/4 per unit-area face — MFEM 4.10's own RT0
-        // boundary load for g = 1 on the unit cube is 0.25 per face dof
-        // (probe: `LinearForm` + `VectorFEBoundaryFluxLFIntegrator`), so the
-        // MFEM-parity expectation is |b| = 0.25, not the unit flux.
+        // D245 (main-session arbitration): post-flip the hex H(div) space uses
+        // MFEM's *default* `RT_FECollection(0, 3)` nodal-open (GaussLegendre)
+        // variant, whose face dofs are the true physical fluxes — MFEM 4.10
+        // probe (`tmp/d264/rt0_boundary_flux_probe.cpp`, `LinearForm` +
+        // `VectorFEBoundaryFluxLFIntegrator`, g = 1, unit cube): every
+        // `b[i] = 1` exactly.  The D227-era 0.25 expectation came from a
+        // probe that actually built `RT_FECollection(1, 3)` (RT1): its 18
+        // face values are 0.25 — re-run side by side in
+        // `$HOME/work/d264arbit/` (round 42); the pre-D245 IGLL-frame space
+        // happened to reproduce that RT1 number.
         for (d, &v) in b.iter().enumerate() {
             assert!(
-                (v.abs() - 0.25).abs() < 1e-14,
-                "face dof {d}: |b| = {} (expected 0.25 = MFEM RT0 reference flux)",
+                (v.abs() - 1.0).abs() < 1e-14,
+                "face dof {d}: |b| = {} (expected 1 = MFEM RT0 unit face flux)",
                 v.abs()
             );
         }
-        // ... and the six unit-cube faces sum to 6 x 0.25.
+        // ... and the six unit-cube faces sum to 6 x 1.
         let total: f64 = b.iter().map(|v| v.abs()).sum();
-        assert!((total - 1.5).abs() < 1e-13, "∮ 1 dS x (1/4) = {total} (expected 1.5)");
+        assert!((total - 6.0).abs() < 1e-13, "∮ 1 dS = {total} (expected 6)");
     }
 
     /// Linear measure probe: accumulates the effective quadrature weight

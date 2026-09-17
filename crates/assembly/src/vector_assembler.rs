@@ -19,7 +19,7 @@ use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::{HexQ1, QuadQ1};
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_element::nedelec::{HexND2, HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
-use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRT1, HexRTk, QuadRT1, TriRTk, TetRTk, PrismRTk};
+use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRTk, QuadRT1, TriRTk, TetRTk, PrismRTk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -74,10 +74,21 @@ pub(crate) fn vec_ref_elem(
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 0) => Box::new(TriRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriRT1),
         (SpaceType::HDiv, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriRT2),
-        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRTk::new(0)),
-        (SpaceType::HDiv, ElementType::Hex8, 3, 1) => Box::new(HexRT1),
+        // D245: the hex H(div) arm selects MFEM's *default* `RT_FECollection`
+        // nodal-open variant `ob_type = GaussLegendre`
+        // (`RT_HexahedronElement(p, GaussLobatto, GaussLegendre)`,
+        // `fem/fe_coll.hpp:453`) — the get-values/DC/projected-field parity
+        // basis (D236 §4: 0 residual vs the MFEM transcriptions).  The LOR
+        // stack keeps the `(GaussLobatto, IntegratedGLL)` pair: MFEM
+        // `fem/lor/lor.cpp:317` (`CheckBasisType`) requires it, so the LOR
+        // assemblers pin `HexRTk::new` (IntegratedGLL) explicitly — see
+        // `lor_factory.rs`.
+        (SpaceType::HDiv, ElementType::Hex8, 3, 0) => Box::new(HexRTk::new_gauss_legendre(0)),
+        (SpaceType::HDiv, ElementType::Hex8, 3, 1) => Box::new(HexRTk::new_gauss_legendre(1)),
         // D158: RT2 on the reference hex (RT_HexahedronElement(2), 108 dofs).
-        (SpaceType::HDiv, ElementType::Hex8, 3, o) if o >= 2 => Box::new(HexRTk::new(o as usize)),
+        (SpaceType::HDiv, ElementType::Hex8, 3, o) if o >= 2 => {
+            Box::new(HexRTk::new_gauss_legendre(o as usize))
+        }
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),

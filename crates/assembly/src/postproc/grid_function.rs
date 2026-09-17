@@ -1157,6 +1157,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
+        let is_volume = mesh.dim() as usize == dim;
 
         let mut err = 0.0;
         for e in mesh.elem_iter() {
@@ -1166,18 +1167,44 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
+
+            // D250: isoparametric geometry on volume elements (same arm as
+            // `evaluate_gradient_at_element`); corner-difference fallback for
+            // affine simplices (exact there) and for surface meshes (their
+            // historical treatment is untouched).
+            let geo = if is_volume {
+                crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+            } else {
+                None
+            };
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let x0 = mesh.node_coords(nodes[0]);
             let mut phi = vec![0.0; n_ldofs];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                let (w, xp) = match geo.as_ref() {
+                    Some(ge) => {
+                        let geo_nds = if mesh.geom_order() > 1 {
+                            mesh.geometry_nodes(e)
+                        } else {
+                            nodes
+                        };
+                        let (_j, det, xp) = crate::vector_assembler::isoparametric_jacobian(
+                            mesh, geo_nds, ge.as_ref(), xi, dim,
+                        );
+                        (quad.weights[q] * det.abs(), xp)
+                    }
+                    None => {
+                        let w = quad.weights[q] * det_j.abs();
+                        let xp = phys_coords(x0, &jac, xi, dim);
+                        (w, xp)
+                    }
+                };
                 ref_elem.eval_basis(xi, &mut phi);
                 let mut uh = 0.0;
                 for i in 0..n_ldofs {
                     uh += self.dofs[elem_dofs[i] as usize] * phi[i];
                 }
-                let xp = phys_coords(x0, &jac, xi, dim);
                 let ue = exact(&xp);
                 err += w * (uh - ue).abs();
             }
@@ -1350,7 +1377,11 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             }
         }
 
-        err2.sqrt()
+        // Negative-weight rules (e.g. `tet_rule(8)`) can dip the sum of
+        // near-zero contributions below zero — clamp like MFEM's
+        // ComputeL2Error note before the sqrt (D250 rider; the rule table
+        // itself is tracked in tmp/d264 evidence).
+        err2.max(0.0).sqrt()
     }
 
     /// Compute the L¹ error norm.
@@ -1383,6 +1414,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
+        let is_volume = mesh.dim() as usize == dim;
 
         let mut err2 = 0.0;
 
@@ -1396,18 +1428,31 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
 
-            // High-order geometry path (curved bodies and surfaces).
             let g_order = mesh.geom_order();
-            let use_ho_geo = g_order > 1;
-            let geo_elem = if use_ho_geo {
+
+            // D250: volume geometry goes through the isoparametric path
+            // (`geo_ref_elem_from_mesh` + `isoparametric_jacobian`, the D242
+            // arm): the corner-difference `simplex_jacobian` is the [0,1]^d
+            // map while the hex bases and their quadrature live on [-1,1]^d
+            // (half-strength gradients, sample points outside the element),
+            // and warped quad/hex Jacobians are not constant.  Curved
+            // *surfaces* keep the metric treatment below; curved volumes are
+            // served by the geometry table through `geo_ref_elem_from_mesh`.
+            let use_ho_geo_surface = g_order > 1 && !is_volume;
+            let geo_elem = if use_ho_geo_surface {
                 Some(ref_elem_vol(elem_type, g_order))
             } else {
                 None
             };
-            let geo_nodes = if use_ho_geo {
+            let geo_nodes = if use_ho_geo_surface {
                 mesh.geometry_nodes(e)
             } else {
                 nodes
+            };
+            let geo_vol = if is_volume {
+                crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+            } else {
+                None
             };
 
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
@@ -1418,15 +1463,28 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let mut grad_phys = vec![0.0; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let (w, j_inv_t, xp) = if use_ho_geo {
-                    // Curved volume/surface: Jacobian from the geometry
-                    // element (same [0,1]^d reference domain as QuadQk).
+                let (w, j_inv_t, xp) = if use_ho_geo_surface {
+                    // Curved surface: metric from the geometry element.
                     let ge = geo_elem.as_ref().unwrap();
                     let (jac_g, det_g, xp) =
                         iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
                     let jm = DMatrix::from_fn(dim, dim, |i, d| jac_g[i + d * dim]);
                     let jit = jm.try_inverse().expect("invertible geometry Jacobian").transpose();
                     (quad.weights[q] * det_g.abs(), jit, xp)
+                } else if let Some(ge) = geo_vol.as_ref() {
+                    let geo_nds = if g_order > 1 {
+                        mesh.geometry_nodes(e)
+                    } else {
+                        nodes
+                    };
+                    let (j_iso, det_iso, xp_iso) = crate::vector_assembler::isoparametric_jacobian(
+                        mesh, geo_nds, ge.as_ref(), xi, dim,
+                    );
+                    let jit = j_iso
+                        .try_inverse()
+                        .expect("invertible geometry Jacobian")
+                        .transpose();
+                    (quad.weights[q] * det_iso.abs(), jit, xp_iso)
                 } else {
                     let w = quad.weights[q] * det_j.abs();
                     let xp = phys_coords(x0, &jac, xi, dim);
@@ -1456,7 +1514,10 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             }
         }
 
-        err2.sqrt()
+        // Quadrature rules with negative weights (e.g. `tet_rule(8)`) can make
+        // the accumulated sum of near-zero contributions dip below zero — the
+        // MFEM `ComputeH1Error` note applies: clamp before the sqrt.
+        err2.max(0.0).sqrt()
     }
 
     /// Compute the full H¹ norm error: `‖u_h − u_exact‖_{H¹}`.
@@ -1482,6 +1543,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         let mesh = self.space.mesh();
         let dim = mesh.topological_dim() as usize;
         let order = self.space.order();
+        let is_volume = mesh.dim() as usize == dim;
 
         let mut err = 0.0;
         for e in mesh.elem_iter() {
@@ -1491,6 +1553,19 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let quad = ref_elem.quadrature(quad_order);
             let elem_dofs = self.space.element_dofs(e);
             let nodes = mesh.element_nodes(e);
+
+            // D250: isoparametric volume geometry (see compute_l1_error).
+            let geo = if is_volume {
+                crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+            } else {
+                None
+            };
+            let g_order = mesh.geom_order();
+            let geo_nodes = if g_order > 1 {
+                mesh.geometry_nodes(e)
+            } else {
+                nodes
+            };
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let j_inv_t = jac.clone().try_inverse().unwrap().transpose();
             let x0 = mesh.node_coords(nodes[0]);
@@ -1498,7 +1573,24 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
             let mut grad_phys = vec![0.0; n_ldofs * dim];
 
             for (q, xi) in quad.points.iter().enumerate() {
-                let w = quad.weights[q] * det_j.abs();
+                let (w, j_inv_t, xp) = match geo.as_ref() {
+                    Some(ge) => {
+                        let (j_iso, det_iso, xp_iso) =
+                            crate::vector_assembler::isoparametric_jacobian(
+                                mesh, geo_nodes, ge.as_ref(), xi, dim,
+                            );
+                        let jit = j_iso
+                            .try_inverse()
+                            .expect("invertible geometry Jacobian")
+                            .transpose();
+                        (quad.weights[q] * det_iso.abs(), jit, xp_iso)
+                    }
+                    None => {
+                        let w = quad.weights[q] * det_j.abs();
+                        let xp = phys_coords(x0, &jac, xi, dim);
+                        (w, j_inv_t.clone(), xp)
+                    }
+                };
                 ref_elem.eval_grad_basis(xi, &mut grad_ref);
                 transform_grads(&j_inv_t, &grad_ref, &mut grad_phys, n_ldofs, dim);
 
@@ -1507,7 +1599,6 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let c = self.dofs[elem_dofs[i] as usize];
                     for d in 0..dim { grad_uh[d] += c * grad_phys[i * dim + d]; }
                 }
-                let xp = phys_coords(x0, &jac, xi, dim);
                 let ge = exact_grad(&xp);
 
                 let mut diff_norm = 0.0;
