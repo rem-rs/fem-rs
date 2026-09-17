@@ -588,8 +588,24 @@ pub fn gauss_legendre_01_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
 
 /// Gauss-Lobatto-Legendre points and weights on `[-1, 1]` for arbitrary `n` points (n >= 2).
 ///
-/// Uses the eigenvalue approach: the interior points are roots of P'_{n-1}(x).
-/// Includes the endpoints ±1. Exact for polynomials up to degree 2n-3.
+/// `n <= 5` serves the hard-coded analytic table ([`gauss_lobatto_1d`]).  For
+/// `n >= 6` the points are MFEM's: a 1:1 port of
+/// `QuadratureFunctions1D::GaussLobatto` (`fem/intrules.cpp:708`, the same
+/// routine `Poly_1D::GetPoints` reaches through
+/// `QuadratureFunctions1D::GivePolyPoints` for the `GaussLobatto` basis
+/// nodes).  MFEM Newton-iterates the interior zeros of `P'_{np-1}` on the
+/// `[-1,1]` variable (initial guess `x_i = sin(π(i/(np-1) − 0.5))`, residual
+/// `(x·P_{np-1} − P_{np-2})/(np·P_{np-1})`, `|dx| < 1e-16` with one extra
+/// pass to re-evaluate `P_{np-1}` at the converged point) and stores the
+/// `[0,1]` image `z_i = ((1 + x_i) − dx)/2`; the points returned here are
+/// that stored node mapped back by `x = 2·z − 1`, and the weights are twice
+/// the stored `[0,1]` weights (`w = 1/(np·(np−1)·P_{np-1}(x_i)²)`, so the
+/// `[-1,1]` weights sum to 2 — exactly MFEM's comment formula, computed as
+/// the bit-exact doubling of the stored value).  The `n <= 5` table entries
+/// equal the same iteration to the last bit (pinned in
+/// `tests/d275_gll_mfem_ulp.rs`); the n ≥ 6 path replaced a generic Newton
+/// scheme whose Chebyshev start and residual form drifted from MFEM's by
+/// ~1 ulp (D275).
 pub fn gauss_lobatto_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     if n < 2 {
         panic!("gauss_lobatto_arbitrary: n must be >= 2");
@@ -597,87 +613,83 @@ pub fn gauss_lobatto_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     if n <= 5 {
         return gauss_lobatto_1d(n);
     }
+    let (x01, w01) = gauss_lobatto_01_newton_mfem(n);
+    let pts = x01.iter().map(|z| 2.0 * z - 1.0).collect();
+    // `2 * w` is exact in binary floating point, so this stays bit-tied to
+    // the `[0,1]` rule MFEM stores.
+    let wts = w01.iter().map(|w| 2.0 * w).collect();
+    (pts, wts)
+}
 
-    let n_f = n as f64;
-    let n_int = n - 2; // number of interior points
+/// MFEM's `QuadratureFunctions1D::GaussLobatto(np)` verbatim (`fem/intrules.cpp:708`):
+/// the `np`-point Gauss-Lobatto rule on `[0,1]`, endpoints `0`/`1` with
+/// weight `1/(np·(np−1))`, interior points from the Newton iteration on the
+/// `[-1,1]` variable described in [`gauss_lobatto_arbitrary`], stored as
+/// `z_i = ((1 + x_i) − dx)/2` at the `|dx| < 1e-16` step (one more pass
+/// re-evaluates `P_{np-1}` at the converged point for the weight).
+///
+/// This is the same port as `fem_assembly::postproc::plbound`'s
+/// `mfem_gauss_lobatto_01` (D259); it lives here too because `fem-element`
+/// cannot depend on `fem-assembly`.
+fn gauss_lobatto_01_newton_mfem(np: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut x = vec![0.0_f64; np];
+    let mut w = vec![0.0_f64; np];
+    x[0] = 0.0;
+    x[np - 1] = 1.0;
+    let w_end = 1.0 / (np * (np - 1)) as f64;
+    w[0] = w_end;
+    w[np - 1] = w_end;
 
-    // Interior points are roots of P'_{n-1}(x)
-    // We find them by Newton's method on d/dx[P_{n-1}(x)]
-    let mut pts = vec![0.0f64; n];
-    pts[0] = -1.0;
-    pts[n - 1] = 1.0;
-    let mut wts = vec![0.0f64; n];
-
-    // Initial guesses for interior points: Chebyshev-like distribution
-    for i in 0..n_int {
-        let i_f = i as f64;
-        pts[i + 1] = -(std::f64::consts::PI * (i_f + 1.0) / (n_f - 1.0)).cos();
-    }
-
-    // Newton iteration on P'_{n-1}(x)
-    let tol = 1e-15;
-    let max_iter = 100;
-    let nm1 = n - 1;
-    for _ in 0..max_iter {
-        let mut converged = true;
-        for i in 0..n_int {
-            let x = pts[i + 1];
-            // P_{n-1}(x) and its derivative
-            let (pn, pn1) = legendre_poly(nm1, x);
-            // Second derivative: P''_{n-1}(x) = n/(1-x²) * (x*P'_{n-1}(x) - P_{n-2}(x))
-            // But we can use: P''_{n-1}(x) = (2x*P'_{n-1}(x) - n*(n-1)*P_{n-1}(x)) / (1-x²) ... hmm
-            // Simpler: use the recurrence for derivatives
-            // d/dx[P_{n-1}(x)] = (n-1)/(1-x²) * (P_{n-2}(x) - x*P_{n-1}(x))
-            let dpn = if (1.0 - x * x).abs() < 1e-30 {
-                0.5 * (nm1) as f64 * (nm1 as f64 + 1.0)
-            } else {
-                (nm1 as f64) / (1.0 - x * x) * (pn1 - x * pn)
-            };
-            // Newton: we want roots of P'_{n-1}, so we need the derivative of P'_{n-1}
-            // d/dx[P'_{n-1}(x)] = P''_{n-1}(x)
-            // Using recurrence: P''_n(x) = n/(1-x²) * (x*P'_n(x) - P'_{n-1}(x)) ... hmm
-            // Better: use the fact that (1-x²)P''_n - 2xP'_n + n(n+1)P_n = 0
-            // So P''_n = (2xP'_n - n(n+1)P_n) / (1-x²)
-            let nm1_f = nm1 as f64;
-            let ddpn = if (1.0 - x * x).abs() < 1e-30 {
-                // At endpoints, limit is complex; skip (we don't iterate there)
-                0.0
-            } else {
-                (2.0 * x * dpn - nm1_f * (nm1_f + 1.0) * pn) / (1.0 - x * x)
-            };
-            if ddpn.abs() < 1e-30 {
-                continue;
+    for i in 1..=(np - 1) / 2 {
+        let mut x_i = (std::f64::consts::PI * ((i as f64) / ((np - 1) as f64) - 0.5)).sin();
+        let mut z_i = 0.0_f64;
+        let p_l_final;
+        let mut done = false;
+        let mut iter = 0_i32;
+        loop {
+            let mut p_lm1 = 1.0_f64;
+            let mut p_l = x_i;
+            for l in 1..(np - 1) {
+                let p_lp1 =
+                    ((2 * l + 1) as f64 * x_i * p_l - l as f64 * p_lm1) / (l + 1) as f64;
+                p_lm1 = p_l;
+                p_l = p_lp1;
             }
-            let dx = -dpn / ddpn;
-            pts[i + 1] += dx;
-            if dx.abs() > tol {
-                converged = false;
+            if done {
+                p_l_final = p_l;
+                break;
             }
+            let dx = (x_i * p_l - p_lm1) / (np as f64 * p_l);
+            if dx.abs() < 1e-16 {
+                done = true;
+                z_i = ((1.0 + x_i) - dx) / 2.0;
+            }
+            // MFEM_VERIFY(iter < 8, ...): the iteration must converge fast.
+            assert!(iter < 8, "GaussLobatto Newton did not converge (np {np})");
+            iter += 1;
+            x_i -= dx;
         }
-        if converged {
-            break;
-        }
+        // MFEM's single chained expression `1.0/(np*(np-1)*p_l*p_l)`: the
+        // int product promotes once, then every multiply rounds — splitting
+        // it as `1/(np*(np-1))/p²` rounds differently (1 ulp at np=7).
+        let wt = 1.0 / ((np * (np - 1)) as f64 * p_l_final * p_l_final);
+        x[i] = z_i;
+        w[i] = wt;
+        x[np - 1 - i] = 1.0 - z_i;
+        w[np - 1 - i] = wt;
     }
-
-    // Weights for Lobatto: w_i = 2 / (n*(n-1) * [P_{n-1}(x_i)]²)
-    for i in 0..n {
-        let x = pts[i];
-        let pn = legendre_poly(nm1, x).0;
-        wts[i] = 2.0 / (n_f * (n_f - 1.0) * pn * pn);
-    }
-
-    // Sort by point location
-    let mut pairs: Vec<(f64, f64)> = pts.into_iter().zip(wts).collect();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let (pts_sorted, wts_sorted): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
-
-    (pts_sorted, wts_sorted)
+    (x, w)
 }
 
 /// Gauss-Lobatto rule on `[0, 1]` with arbitrary `n` points (n >= 2).
 ///
-/// Weights sum to 1. Points include the endpoints 0 and 1.
+/// Weights sum to 1. Points include the endpoints 0 and 1.  For `n >= 6`
+/// this is MFEM's stored rule itself (bit-for-bit, see
+/// [`gauss_lobatto_arbitrary`]); `n <= 5` maps the analytic table.
 pub fn gauss_lobatto_01_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n >= 6 {
+        return gauss_lobatto_01_newton_mfem(n);
+    }
     let (xs, ws) = gauss_lobatto_arbitrary(n);
     let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
     let wts = ws.iter().map(|w| 0.5 * w).collect();
@@ -1499,11 +1511,16 @@ pub fn stroud_tri_rule() -> QuadratureRule {
 ///
 /// Weights sum to 1/6 (volume of reference tet).
 ///
-/// Supported polynomial degrees:
+/// Supported polynomial degrees (MFEM 4.10 `IntegrationRules::
+/// TetrahedronIntegrationRule` parity):
 /// - order ≤ 1: 1-point centroid
 /// - order ≤ 2: 4-point rule (exact degree 2)
-/// - order ≤ 5: 10-point Grundmann-Moller rule, s=2 (exact degree 5)
-/// - order > 5: 20-point Grundmann-Moller rule, s=3 (exact degree 7)
+/// - order 3-10: Witherden-Vincent symmetric positive-weight rules
+///   (exact degree = order; 8/16/24/35/46/59/81 points)
+/// - order > 10: Grundmann-Moller fallback (exact degree `2·⌈order/2⌉+1`;
+///   **has negative weights** — MFEM tabulates positive rules up to order 20
+///   (WV 11-13 + Chuluunbaatar et al. 14-20), which are not transcribed here
+///   yet; tracked as D290)
 pub fn tet_rule(order: u8) -> QuadratureRule {
     if order <= 1 {
         // 1-point centroid (exact degree 1)
@@ -1519,11 +1536,12 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
             points: vec![vec![a, a, a], vec![b, a, a], vec![a, b, a], vec![a, a, b]],
             weights: vec![1.0 / 24.0; 4],
         }
-    } else if order <= 7 {
+    } else if order <= 10 {
         // Witherden-Vincent rules (MFEM 4.10, positive weights, interior points)
         wv_tet_rule(order)
     } else {
-        // Fallback: Grundmann-Moller for higher orders
+        // Fallback: Grundmann-Moller for higher orders (negative weights, as
+        // MFEM's own `default:` fallback beyond its tabulated rules).
         let s = (order as u32).div_ceil(2);
         grundmann_moller_simplex(3, s)
     }
@@ -1531,10 +1549,10 @@ pub fn tet_rule(order: u8) -> QuadratureRule {
 
 /// Witherden-Vincent symmetric positive-weight rules for the reference tetrahedron.
 ///
-/// Source: MFEM 4.10 `IntegrationRules::TetrahedronIntegrationRule`, orders 3-7.
-/// Reference: F.D. Witherden, P.E. Vincent, "On the identification of symmetric
-/// quadrature rules for finite element methods", Computers & Mathematics with
-/// Applications, 69(10):1232-1241, 2015.
+/// Source: MFEM 4.10 `IntegrationRules::TetrahedronIntegrationRule`, orders 3-10
+/// (orbit data from PyFR, CC-BY 4.0).  Reference: F.D. Witherden, P.E. Vincent,
+/// "On the identification of symmetric quadrature rules for finite element
+/// methods", Computers & Mathematics with Applications, 69(10):1232-1241, 2015.
 ///
 /// All weights are positive and all points are interior.
 fn wv_tet_rule(order: u8) -> QuadratureRule {
@@ -1681,6 +1699,109 @@ fn wv_tet_params(order: u8) -> (Option<f64>, Vec<(f64, f64)>, Vec<(f64, f64)>, V
                     2.12654725414832546093e-02,
                     8.10830241098548620826e-01,
                     1.35179513831722359664e-03,
+                ),
+            ];
+            (centroid, s31, s22, s211)
+        }
+        // Order 8: 46-point rule (4×S31 + 1×S22 + 2×S211) — MFEM 4.10
+        // intrules.cpp case 8, literals verbatim.
+        8 => {
+            let s31 = vec![
+                (1.07952724962210866444e-01, 4.40444181806813866292e-03),
+                (1.85109487782586568105e-01, 8.67195792728975463348e-03),
+                (4.23165436847673381848e-02, 1.25420935892336655841e-03),
+                (3.14181709124039088010e-01, 6.96063047615581593358e-03),
+            ];
+            let s22 = vec![(
+                4.35591328583830206256e-01,
+                6.04682171021813687217e-03,
+            )];
+            let s211 = vec![
+                (
+                    2.14339301271305737728e-02,
+                    7.17464063426308307214e-01,
+                    1.19281714847407210867e-03,
+                ),
+                (
+                    2.04139333876029116510e-01,
+                    5.83797378302144398532e-01,
+                    2.57558102516005586052e-03,
+                ),
+            ];
+            (None, s31, s22, s211)
+        }
+        // Order 9: 59-point rule (S4 + 4×S31 + 1×S22 + 3×S211) — MFEM 4.10
+        // intrules.cpp case 9, literals verbatim.
+        9 => {
+            let centroid = Some(9.66842481874670943431e-03);
+            let s31 = vec![
+                (6.19817086544571793638e-10, 1.07198802932093984424e-05),
+                (1.60774535395261597426e-01, 3.86222307707090968185e-03),
+                (3.22276521821420969260e-01, 4.92715205590488116577e-03),
+                (4.51089183454135844720e-02, 1.34399666326936377374e-03),
+            ];
+            let s22 = vec![(
+                3.87703453995623947836e-01,
+                6.35568001728374458448e-03,
+            )];
+            let s211 = vec![
+                (
+                    4.58871448752459276665e-01,
+                    7.97025232620401369310e-02,
+                    1.39740369971642539558e-03,
+                ),
+                (
+                    3.37758706853386048152e-02,
+                    7.18350326442074527122e-01,
+                    1.70575989212422133613e-03,
+                ),
+                (
+                    1.83641369809927956780e-01,
+                    5.98301349801968918030e-01,
+                    3.42081932799802312939e-03,
+                ),
+            ];
+            (centroid, s31, s22, s211)
+        }
+        // Order 10: 81-point rule (S4 + 2×S31 + 6×S211) — MFEM 4.10
+        // intrules.cpp case 10, literals verbatim.
+        10 => {
+            let centroid = Some(7.89996225933678984654e-03);
+            let s31 = vec![
+                (3.12250068695188676138e-01, 4.48950999871145037950e-03),
+                (1.14309653857346149586e-01, 1.64485995279889710662e-03),
+            ];
+            let s22 = vec![];
+            let s211 = vec![
+                (
+                    4.10430739218965501269e-01,
+                    1.65486025619611065718e-01,
+                    1.89898020336587186781e-03,
+                ),
+                (
+                    6.13800882479076381770e-03,
+                    9.42988767345204870196e-01,
+                    6.03240573898756009806e-05,
+                ),
+                (
+                    1.21050181145589408338e-01,
+                    4.77190379904280370660e-01,
+                    4.28995533007601147213e-03,
+                ),
+                (
+                    3.27794682164426753879e-02,
+                    5.94256269480006982242e-01,
+                    1.68931194662596552945e-03,
+                ),
+                (
+                    3.24852815648231096901e-02,
+                    8.01177284658344368573e-01,
+                    1.09602454617265063913e-03,
+                ),
+                (
+                    1.74979342183939068356e-01,
+                    6.28071845475365986289e-01,
+                    2.15117263314366490706e-03,
                 ),
             ];
             (centroid, s31, s22, s211)
@@ -2242,9 +2363,9 @@ mod tests {
 
     #[test]
     fn tet_wv_weights_sum_to_sixth_all_orders() {
-        // Witherden-Vincent rules (orders 1-7) must sum to 1/6 (tet volume)
+        // Witherden-Vincent rules (orders 1-10) must sum to 1/6 (tet volume)
         // and all weights must be strictly positive.
-        for order in 1u8..=7 {
+        for order in 1u8..=10 {
             let r = tet_rule(order);
             assert!(
                 (weight_sum(&r) - 1.0 / 6.0).abs() < 1e-12,
@@ -2262,6 +2383,7 @@ mod tests {
         // Verify point counts match MFEM 4.10 WV rules.
         let expected: Vec<(u8, usize)> = vec![
             (1, 1), (2, 4), (3, 8), (4, 14), (5, 14), (6, 24), (7, 35),
+            (8, 46), (9, 59), (10, 81),
         ];
         for (order, expected_n) in expected {
             let r = tet_rule(order);
@@ -2270,6 +2392,42 @@ mod tests {
                 "order={order}: expected {} points, got {}",
                 expected_n, r.points.len()
             );
+        }
+    }
+
+    /// D264: the order 8/9/10 WV tables must integrate every monomial of
+    /// total degree ≤ order exactly over the reference tet
+    /// (∫_T x^a y^b z^c = a!·b!·c! / (a+b+c+3)!).
+    #[test]
+    fn tet_wv_orders_8_to_10_exact_to_degree() {
+        let exact = |a: u32, b: u32, c: u32| -> f64 {
+            let f = |n: u32| (1..=n).map(|k| k as f64).product::<f64>().max(1.0);
+            f(a) * f(b) * f(c) / f(a + b + c + 3)
+        };
+        for order in [8u8, 9, 10] {
+            let r = tet_rule(order);
+            for a in 0..=order as u32 {
+                for b in 0..=(order as u32 - a) {
+                    for c in 0..=(order as u32 - a - b) {
+                        let num: f64 = r
+                            .points
+                            .iter()
+                            .zip(r.weights.iter())
+                            .map(|(p, &w)| {
+                                w * p[0].powi(a as i32)
+                                    * p[1].powi(b as i32)
+                                    * p[2].powi(c as i32)
+                            })
+                            .sum();
+                        let ex = exact(a, b, c);
+                        let scale = ex.max(1.0);
+                        assert!(
+                            (num - ex).abs() <= 1e-12 * scale,
+                            "order={order}: ∫x^{a}y^{b}z^{c} = {num:.17e}, exact {ex:.17e}"
+                        );
+                    }
+                }
+            }
         }
     }
 
