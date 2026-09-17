@@ -1938,6 +1938,61 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **主会话亲验**（不是转述）：**D170 仲裁亲自落地**（四处 attr + 注释；fem-space 全 nurbs 套件实跑绿 + nurbs_ex1 exit 0）；fem-assembly lib 685、fem-space lib 287 实跑绿；pro 层 0 错误。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 685**+8ign / **element 506** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **125 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**11m34s**）；pro 层 0 错误。
 
+## 第四十三轮（round 43）：两批四路 —— ①② D269 L2 GL 接线 / D264+D265，③④ D274+D275+D262 / D191+D276+D278
+
+### 0. 本轮形状
+**网络恢复，round 39–42 的 22+4 个欠账提交全部补推成功**（fem-rs `a94f9f1..2462ece`、fem-pro `0c03682..c34b178`）。本轮两批四路全部交付。
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D269（P1）**tet/tri L2 GL 接线 | ✅ **关闭**（8 消费方全同步、接线基线 7 红→0 红、tet 探针 0.79344 逐位；**新发现 navier_stokes 把 DG 表用于 H1**） |
+| ② | **D264+D265**tet 求积表审计 + postprocess hex 臂 | ✅ **关闭**（结局 (a)：表错已换 MFEM WV 同款，281 点位级一致；hex 5 内核 panic→精确命中） |
+| ③ | **D274+D275+D262**write_mfem 对齐 / GLL ulp / VTK 曲线 reader | ✅ **关闭**（**MFEM 文件真值精度 = 16 位**；GLL 63 组逐位；VTK 槽坐标逐位） |
+| ④ | **D191+D276+D278(+D277 诊断)**金字塔对照 / -bt 2 / L2→L2 | ✅ **关闭**（Bergot entity 序修复 + **P1 槽↔顶点错配新修**；Fuentes 默认族缺口 = D299；L2→L2 6/6 逐字节；-bt 2 精确文档化） |
+
+### 1. ① 路：D269 关闭——L2 GL 接线落地
+- 补丁零漂移照搬：`ref_elem_vol_l2` Tri3/Tet4 GL 臂（order 0 保持 P0）+ `ref_elem_vol_for_space` GLL 回退臂 + `l2.rs::build_simplex` 的 `basis` 参数生效。
+- **p≤2 分界探针定界**：`fe_coll.hpp:384` 缺省 GaussLegendre 对所有 p；`fe_l2.cpp` 无顶点特判——**p≥1 一律 GL 开式节点，仅 p=0（形心）重合**。
+- **8 消费方**：discrete_op 列点（curl_2d_nd2_p2 max err 0.674→绿）、dg_base（dgmass diag 2.883e-2→绿，含 MFEM C++ harness P1 对表）、face_restriction（CheckFESpace 对齐 MFEM 同文：GL-basis simplex 无面 dof → panic；测试改 GLL + 新增 GL 拒绝）、extrapolator（K_vol[0,0]=−0.3497 vs −1/6→绿）、dpg sinv+trace_jump（PCG 200 耗尽→61 it 收敛，顺带删死函数）、**navier_stokes（新发现）**：4 处把 DG 表用于 H1 空间（旧表 p≤2 恰同构而侥幸绿）→ 换 `ref_elem_vol_h1`（max_diff 7.011e-1→绿）。
+- **验收**：tet 探针 0.79344 逐位（tools_get_values 整行与 C++ 一致）；fem-assembly 682/0、fem-space 287/0、compare-dc Example5/Example23 逐字节；pmaxwell/pacoustics 头条不变（主会话亲验）。新债 **D284**（P3）`dpg_basis::scalar_ref_elem` 族差（内部自洽）、**D285**（P3）`trace_jump` Quad order-2 臂域不一致（无测试覆盖）。
+
+### 2. ② 路：D264+D265 关闭
+- **D264（结局 (a)，表错已换）**：根因 = `tet_rule` order>7 落 **Grundmann-Moller fallback**（交错变号必然负权）；MFEM 4.10 对 order 0–20 全备正权表（WV 0–13）。`wv_tet_params` 补 order 8/9/10（`intrules.cpp` 字面量逐位转录）、分派边界 7→10。对照：改前 70 点 min −9.786e-2 / 126 点 −1.165e-1 → 改后 46/59/81 点全正，C++ 逐点对照 **281 行 max_abs_diff = 0**。clamp 保留（order ≥11 仍 GM）。新债 **D290**（P3）tet order 11–20 仍 GM。
+- **D265**：`ref_elem_vol` 补 Hex8 臂（消 3 函数 panic）+ `is_iso_elem`/`iso_jacobian`（D242/D250 口径）五函数 quad/hex 改等参、hex 质心改原点、recover 体积改 ∫|det J|。改前 hex 5 内核全 panic → `d265_hex_postproc.rs` 6/6 精确命中（TOL 1e-12）。
+- **顺带发现 D289（P2，仲裁）**：`hdiv.rs::fill_dual_matrix` 的 IGLL 对偶语义与 D245 后 GL 形状归一化不一致（div 恰 4×；求解器自消、外部 dofs 后处理会错）——hdiv.rs 非本路授权，待仲裁。
+- 回归：fem-assembly 682/682（含 patch_tests 60/60）、fem-element 507。
+
+### 3. ③ 路：D274+D275+D262 关闭
+- **D274**：**MFEM 文件写出的真值精度是 16 位**（`Mesh::Save(fname, precision=16)`；任务书的 %.6g 是 visit/ofstream 默认路径）——顶点行去前导空格、nodes 行 %.16g+ZeroSubnormal、曲面 Ordering 实证**保持 1**（4.10 SetCurvature 默认 + Printer 原样往返）。新增 `d274_print_alignment.rs`：5 夹具 read→write vs `r31_save` 重存**逐字节** + write→read→write 不动点；两处旧"自存不动点"测试按 C++ 真值裁决放宽（tol 0→5e-16，16 位保存本就有损）。
+- **D275**：`gauss_lobatto_arbitrary` n≥6 换 `QuadratureFunctions1D::GaussLobatto` 1:1 移植——**过程中修掉一个 ulp 级移植差**（权必须用 MFEM 单链式 `1/(np(np−1)p_l²)`，np=7 差 1 ulp）；np=6..12 节点+权 63 组**逐位**；n≤5 解析表保留（差 ≤1 ulp 已记录）。
+- **D262**：VTK reader 补规格类型 id（24/23 + 别名 25/26、12/13）与 VTK→规范序置换表（hex `[8,11,16,9,...]`、prism，后者经 MFEM `vtk_quadratic_wedge[18]` 独立解码佐证）；C++ 生成曲线 .vtu 夹具 + 逐点 dump——**每个规范槽坐标与 C++ 逐位相等**。
+- 新债 **D294**（write_mfem 缺 geometry 注释块，需与 miniapp 协同）、**D295（既有）曲面 prism read→write 断链**（读侧 MFEM 槽序 vs 写侧 PrismPk 序互斥，三夹具写回必炸）、**D296**（plbound GLL 权 np≥7 1 ulp，fem-element 侧本轮已修）、**D297**（`from_gmsh_type` 16=Quad8 非 Prism15）、**D298**（VTK writer 类型号待同步）。
+
+### 4. ④ 路：D191+D276+D278 关闭（D277 诊断）
+- **D191（结局 c）**：MFEM 4.10 默认金字塔 = **Fuentes 族**（`ScalarPyramid::DefaultType=1`，dof p(p²+3)+1）——fem-rs `PyramidPk` 是 **Bergot 族**（dof 数不同，家族级缺口 = 新债 **D299（P2）**，含 assembly `ref_elem_vol_h1` 对 Pyramid5 层序基×entity 序错排的既有病）。本轮修 Bergot 档：`build_pyramid_pk` 重写为 MFEM entity 序（新槽表；**删除**层序 `build_p2/p3_pyramid`——修前 p3 三角面/内部坐标从未写=0.0、p≥4 内部坐标错位）、**新发现并修复 P1 槽↔顶点错配**（`P1_SLOT_VERTEX=[0,1,3,2,4]`，修前 p2 边 (1,2) 中点 dof 被放到底面中心）、`rebuild_dof_coords_periodic` 金字塔臂同修（层序表当 field 槽表，同 D182 病）。新测试 `d191_pyramid_h1_mfem_layout.rs`（4：p2 逐位、p2–p5 布点、边块方向 pin、双棱锥共享 dof）。
+- **D278**：L2→L2 换基投影 = 逐元素 nodal 插值（GL/GLL [0,1] 源基、lex 布局）——`project_l2_to_l2` 落地，6/6 组合**归一化后逐字节**（hex L2 夹具经 C++ -visit projected-function 生成）。
+- **D276**：精确文档化 + 保留 exit(3)——C++ 6 组合全 rc=0（`H1Pos_`/`L2_T2_`），移植面 = `fe_pos.cpp`（≈2600 行 Bernstein）+ `SetupBernsteinBasisMat`+LU + `min_ncp_pos_x` 表，全部写入 `tmp/d299/EVIDENCE-d276-d278.md`（含移植顺序）。
+- **D277（stretch）**：1-D 全流程 C++ rc=0、fem-rs `read_mfem_file` dim=1 拒绝；缺件清单写入诊断。
+
+### 第四十三轮新债务
+- **D284（P3）** `dpg_basis::scalar_ref_elem` tri/tet 族与 MFEM DPG GL 节点不同族（内部自洽）——① 路。
+- **D285（P3）** `trace_jump` Quad order-2 臂域不一致（无测试覆盖）——① 路。
+- **D289（P2，仲裁）** `hdiv.rs::fill_dual_matrix` IGLL 对偶语义 vs D245 后 GL 归一化（div 4×；外部 dofs 后处理会错）——② 路。
+- **D290（P3）** tet order 11–20 求积仍 GM（MFEM 有正权表）——② 路。
+- **D294（P3）** write_mfem 缺 geometry 注释块（需与 gridfunction_bounds 协同）——③ 路。
+- **D295（P2，既有）** 曲面 prism read→write 断链（读 MFEM 序 vs 写 PrismPk 序互斥）——③ 路。
+- **D296（P3）** plbound GLL 权 np≥7 1 ulp（fem-element 侧已修）——③ 路。
+- **D297（P3）** `from_gmsh_type` 16→Quad8 非 Prism15；**D298（P3）** VTK writer 类型号——③ 路。
+- **D299（P2）** 金字塔 Bergot p≥3 位置/基函数差 + **Fuentes 默认族全缺** + assembly `ref_elem_vol_h1` Pyramid5 层序×entity 错排（既有）——④ 路。
+- **关闭**：~~D269~~、~~D264~~、~~D265~~、~~D274~~、~~D275~~、~~D262~~、~~D191~~、~~D276~~（文档化）、~~D278~~。
+- 沿用开放：D284/D285/D289/D290/D294–D298/D299、D270/D263、D277（诊断）、D220/D234/D235/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：`fem-assembly` lib 685→**686**（含 d264/d265/d269 相关）；`fem-element` lib 506→**507** + `d264_tet_wv_dump`/`d275_gll_mfem_ulp`；fem-io + `d262_vtk_incomplete_order`/`d274_print_alignment` + 2 个 .vtu 夹具 + dump；`fem-space` + `d191_pyramid_h1_mfem_layout`（4）。全部实跑确认。
+- **主会话亲验**（不是转述）：九套件实跑绿；pmaxwell 984/1.313e+00/4.706e+00、mandel 16006、`lor_nd_pcg` 三抽查复现；pro 层 0 错误。
+- **欠账清零**：round 39–42 的 22+4 个提交全部补推成功（网络恢复）。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 686**+8ign / **element 507** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **130 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**3m23s**，首次尝试因 **C: 盘 100% 满**（LLVM no space on device）失败——清 `target/debug`（28G）与 tmp 三个早期 `*_build` 残留后释放 109G 重跑通过）；pro 层 0 错误。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
