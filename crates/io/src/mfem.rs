@@ -19,6 +19,8 @@ use fem_mesh::{
 };
 use fem_space::dof_manager::DofManager;
 
+use crate::data_collection::format_g;
+
 fn mfem_elem_type(code: u32) -> Option<ElementType> {
     Some(match code {
         1 => ElementType::Line2,
@@ -925,12 +927,18 @@ pub fn write_mfem_nodes<W: Write>(
         // straight-sided branch stays keyed by the coordinate count `dim`.
         write_nodes_section(writer, space, *order, topo, *n_dofs, values)?;
     } else {
-        // Straight-sided: `<space dim>` then one coordinate row per vertex, as
-        // before (the `nodes` section replaces this whole block).
+        // Straight-sided: `<space dim>` then one coordinate row per vertex —
+        // `Mesh::Printer` (`mesh/mesh.cpp:12544`): `os << vertices[i](0)`
+        // first (no leading blank), the remaining components each prefixed by
+        // `' '`, values rendered at the stream precision (`Mesh::Save`'s
+        // default, `mesh/mesh.hpp:2616`: `precision = 16`).
         writeln!(writer, "{dim}")?;
         for i in 0..n_nodes {
             for d in 0..dim {
-                write!(writer, " {}", coords[i * dim + d])?;
+                if d > 0 {
+                    write!(writer, " ")?;
+                }
+                write!(writer, "{}", format_g(coords[i * dim + d], MFEM_SAVE_PRECISION))?;
             }
             writeln!(writer)?;
         }
@@ -958,8 +966,11 @@ pub enum NodesSpace {
 }
 
 /// The `nodes` section header and payload, exactly as MFEM's
-/// `GridFunction::Save` (`fem/gridfunc.cpp:4305`) writes them for
-/// `Ordering: 1` (`byVDIM`):
+/// `Mesh::Printer` (`mesh/mesh.cpp:12551`) + `GridFunction::Save`
+/// (`fem/gridfunc.cpp:4305`) write them for the ordering the nodal space
+/// carries.  MFEM 4.10's `Mesh::SetCurvature` defaults to `ordering = 1`
+/// (`byVDIM`, `mesh/mesh.hpp:2439`), and `Printer` round-trips whatever the
+/// read file declared, so the writer emits `Ordering: 1`:
 ///
 /// ```text
 /// nodes
@@ -972,6 +983,15 @@ pub enum NodesSpace {
 /// <x y [z]> of dof 1
 /// …
 /// ```
+///
+/// Values go through `Vector::Print` (`linalg/vector.cpp:870`): each one is
+/// `ZeroSubnormal`-flushed and printed with a single separating space, one
+/// newline after every `VDim` values, one final newline, at the stream
+/// precision — `Mesh::Save`'s default `precision = 16`
+/// (`mesh/mesh.hpp:2616`).  (A mesh read back from an `Ordering: 0` file is
+/// re-emitted as `Ordering: 1`: the reader normalises the geometry table to
+/// slots and the file's ordering bit is not carried in memory — the same
+/// normalisation `Mesh::SetCurvature` applies on the C++ side.)
 ///
 /// `values[d * sdim + c]` is component `c` of dof `d`.  `dim` is the mesh's
 /// *topological* dimension (the `P<dim>D` of the collection name) while `sdim`
@@ -999,18 +1019,38 @@ fn write_nodes_section<W: Write>(
          VDim: {sdim}\nOrdering: 1\n"
     )?;
     // `GridFunction::Save` calls `Vector::Print(os, fes->GetVDim())` for a
-    // byVDIM space: values separated by a single space, one newline after every
-    // `VDim` values, and one final newline (`linalg/vector.cpp:870`).
+    // byVDIM space: `ZeroSubnormal`-flushed values separated by a single
+    // space, one newline after every `VDim` values, and one final newline
+    // (`linalg/vector.cpp:870`), printed at the stream precision
+    // (`Mesh::Save` default: 16 significant digits).
     for d in 0..n_dofs {
         for c in 0..sdim {
             if c > 0 {
                 write!(writer, " ")?;
             }
-            write!(writer, "{}", values[d * sdim + c])?;
+            let v = zero_subnormal(values[d * sdim + c]);
+            write!(writer, "{}", format_g(v, MFEM_SAVE_PRECISION))?;
         }
         writeln!(writer)?;
     }
     Ok(())
+}
+
+/// `Mesh::Save`'s default stream precision (`mesh/mesh.hpp:2616`:
+/// `virtual void Save(const std::string &fname, int precision = 16)`).
+/// `Mesh::Print(os)` itself inherits the *caller's* precision — MFEM harnesses
+/// that print at `os.precision(17)` produce one more digit round-trip; the
+/// file-writer default that `Mesh::Save`/`r31_save` exercise is 16.
+const MFEM_SAVE_PRECISION: usize = 16;
+
+/// MFEM `Vector::Print`'s `ZeroSubnormal` (`linalg/vector.cpp:857`): a
+/// subnormal magnitude (either sign) is flushed to `+0.0` before printing.
+fn zero_subnormal(s: f64) -> f64 {
+    if s.abs() < f64::MIN_POSITIVE {
+        0.0
+    } else {
+        s
+    }
 }
 
 /// The `nodes` dof values of `mesh`, laid out for [`write_nodes_section`], plus

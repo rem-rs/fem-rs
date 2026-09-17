@@ -346,7 +346,7 @@ fn number(v: f64) -> String {
 
 /// C's `printf("%.{prec}g", v)` (glibc: `%.*g` with trailing zeros stripped,
 /// scientific when the decimal exponent is `< -4` or `>= prec`).
-fn format_g(v: f64, prec: usize) -> String {
+pub(crate) fn format_g(v: f64, prec: usize) -> String {
     if v.is_nan() {
         return "nan".to_string();
     }

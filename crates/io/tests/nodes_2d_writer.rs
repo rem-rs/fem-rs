@@ -255,10 +255,20 @@ fn tri3_nodes_whole_file_matches_mfem_reference() {
 }
 
 /// MFEM's own `H1_2D_P<p>` triangle file must round-trip through the reader
-/// and the writer bit-exactly: the reader attaches the file's dof values
-/// through the entity-wise numbering (2-D triangles take the `DofManager`
-/// entity-blocked path) and the writer re-numbers them through
-/// `tri2d_slot_map`, so the composition must be the identity permutation.
+/// and the writer with the numbering composition the identity permutation:
+/// the reader attaches the file's dof values through the entity-wise
+/// numbering (2-D triangles take the `DofManager` entity-blocked path) and
+/// the writer re-numbers them through `tri2d_slot_map`, so apart from the
+/// value *rendering* the text matches MFEM's re-save of the same file.
+///
+/// The comparison tolerance is one rounding quantum at the writer's stream
+/// precision (`Mesh::Save`'s default `precision = 16`, D274), not 0: the
+/// fixtures carry 17 digits (`0.16666666666666666`) and MFEM's own
+/// `Mesh::Save(out, 16)` re-save of them truncates to 16
+/// (`0.1666666666666667` — `$HOME/work/r31_save` on
+/// `tri2d_0_p2_g32.mesh`, 40 changed lines, `tmp/d294/`), exactly like the
+/// Rust writer now does.  A mis-numbered dof would still move the value by
+/// O(1), four orders of magnitude above the tolerance.
 #[test]
 fn h1_tri3_fixture_round_trips_through_the_reader() {
     for order in [2u8, 3, 4] {
@@ -277,7 +287,7 @@ fn h1_tri3_fixture_round_trips_through_the_reader() {
                 .expect("2-D mesh");
             assert_eq!(mesh.geom_order(), order, "{label}: wrong geometric order");
             let back = write_space(&mesh, NodesSpace::Continuous);
-            compare_mesh(&back, &fixture, 0.0, &label);
+            compare_mesh(&back, &fixture, 5e-16, &label);
         }
     }
 }

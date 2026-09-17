@@ -308,15 +308,18 @@ fn prism_l2_fixture_round_trips_through_the_reader() {
             &mesh,
             &format!("d165_roundtrip_{}_{}.mesh", case.order, case.mode),
         );
-        // The round trip must close *exactly*: `compare_mesh` with `tol = 0`
-        // parses every token as f64 and demands bit equality, which absorbs
-        // the print-formatting difference (MFEM prints its fixtures with 17
-        // significant digits, Rust's float Display is shortest-round-trip)
-        // while still catching any 1-ulp drift through the permutation.  The
-        // boundary triangles are put in cyclic-canonical form first
+        // The round trip must close to one rounding quantum at the writer's
+        // stream precision: `compare_mesh` with `tol = 5e-16` (1 ulp at
+        // `Mesh::Save`'s 16 significant digits, D274) still catches any
+        // mis-numbering through the permutation, while tolerating that MFEM
+        // prints its fixtures with 17 digits (`0.27639320225002106`) and both
+        // writers now re-print at 16 (`0.2763932022500211`) — MFEM's own
+        // `Mesh::Save(out, 16)` re-save of these very fixtures truncates the
+        // same way (`$HOME/work/r31_save`, `tmp/d294/`).  The boundary
+        // triangles are put in cyclic-canonical form first
         // (`canonical_boundary` above — `read_mfem`'s faithful
         // `MarkTetMeshForRefinement` re-rotation).
         let canon = |text: &str| canonical_boundary(&tokens(text)).join("\n");
-        compare_mesh(&canon(&back), &canon(&fixture), 0.0, &label);
+        compare_mesh(&canon(&back), &canon(&fixture), 5e-16, &label);
     }
 }

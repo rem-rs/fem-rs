@@ -64,7 +64,30 @@ fn parse_vtu(xml: &str) -> FemResult<VtuData> {
         let vtk_type = types[e];
         let et = vtk_to_elem(vtk_type, npe)
             .ok_or_else(|| FemError::Mesh(format!("VTU: unsupported cell type {vtk_type} with {npe} nodes")))?;
-        let nodes: Vec<u32> = conn[ci..off].iter().map(|&n| n as u32).collect();
+        let mut nodes: Vec<u32> = conn[ci..off].iter().map(|&n| n as u32).collect();
+        // D262: VTK walks the incomplete-quadratic edge nodes in its own
+        // order; the locator's serendipity node tables expect the canonical
+        // (Gmsh) order, so curved Hex20/Prism15 geometry would be scrambled
+        // (straight-sided elements are order-independent and unchanged).
+        match et {
+            ElementType::Hex20 => {
+                debug_assert_eq!(nodes.len(), HEX20_VTK_TO_CANONICAL.len());
+                let permuted: Vec<u32> = HEX20_VTK_TO_CANONICAL
+                    .iter()
+                    .map(|&s| nodes[s])
+                    .collect();
+                nodes = permuted;
+            }
+            ElementType::Prism15 => {
+                debug_assert_eq!(nodes.len(), PRISM15_VTK_TO_CANONICAL.len());
+                let permuted: Vec<u32> = PRISM15_VTK_TO_CANONICAL
+                    .iter()
+                    .map(|&s| nodes[s])
+                    .collect();
+                nodes = permuted;
+            }
+            _ => {}
+        }
         elem_conn.push(nodes);
         elem_types.push(et);
         ci = off;
@@ -119,14 +142,55 @@ fn vtk_to_elem(vtk_type: u8, npe: usize) -> Option<ElementType> {
         (10, 4) => ElementType::Tet4,
         (10,10) => ElementType::Tet10,
         (12, 8) => ElementType::Hex8,
-        (12,20) => ElementType::Hex20,
         (13, 6) => ElementType::Prism6,
-        (13,15) => ElementType::Prism15,
         (14, 5) => ElementType::Pyramid5,
+        // VTK_QUADRATIC_HEXAHEDRON (spec type 24) / VTK_QUADRATIC_WEDGE
+        // (spec type 23).  The malformed aliases (12/20, 13/15 from legacy
+        // linear type ids and 25/26 from this crate's own writers) are kept
+        // so files written by `vtk_legacy` / `vtk` round-trip; the node
+        // count decides unambiguously.
+        (12,20) => ElementType::Hex20,
+        (25,20) => ElementType::Hex20,
+        (24,20) => ElementType::Hex20,
+        (13,15) => ElementType::Prism15,
+        (26,15) => ElementType::Prism15,
+        (23,15) => ElementType::Prism15,
         (14,13) => ElementType::Pyramid13,
         _ => return None,
     })
 }
+
+/// VTK `QUADRATIC_HEXAHEDRON` slot `k` → this crate's canonical (Gmsh-order,
+/// `findpts::incomplete`) slot.  VTK lists the 8 corners (identical order),
+/// then the 12 edge nodes walking the bottom perimeter `(0,1),(1,2),(2,3),
+/// (3,0)`, the top perimeter `(4,5),(5,6),(6,7),(7,4)` and finally the
+/// verticals `(0,4),(1,5),(2,6),(3,7)`; the canonical order is the Gmsh
+/// Hex20 one `(0,1),(0,3),(0,4),(1,2),(1,5),(2,3),(2,6),(3,7),(4,5),(4,7),
+/// (5,6),(6,7)` (`HEX20_GMSH_EDGES` in `fem_mesh::findpts::incomplete`,
+/// whose node tables evaluate the family from this order).  Straight-sided
+/// elements map identically under both orders (every edge correction term
+/// vanishes), curved ones do not — D262.
+const HEX20_VTK_TO_CANONICAL: [usize; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, // corners
+    8, 11, 16, 9, // edges (0,1) (0,3) (0,4) (1,2)
+    17, 10, 18, 19, //      (1,5) (2,3) (2,6) (3,7)
+    12, 15, 13, 14, //      (4,5) (4,7) (5,6) (6,7)
+];
+
+/// VTK `QUADRATIC_WEDGE` slot `k` → canonical (Gmsh-order) slot.  VTK lists
+/// the 6 corners (identical order), then the edge nodes bottom
+/// `(0,1),(1,2),(2,0)`, top `(3,4),(4,5),(5,3)`, verticals `(0,3),(1,4),
+/// (2,5)`; the canonical order is the Gmsh Prism15 one `(0,1),(1,2),(0,3),
+/// (2,0),(1,4),(2,5),(3,4),(4,5),(5,3)` (`PRISM15_GMSH_EDGES`).  The VTK
+/// edge layout is the one MFEM's `vtk_quadratic_wedge[18]` table decodes to
+/// (`{0,2,1, 3,5,4, 8,7,6, 11,10,9, 12,14,13, 17,16,15}` against MFEM's
+/// `Geometry::PRISM` edges) — D262.
+const PRISM15_VTK_TO_CANONICAL: [usize; 15] = [
+    0, 1, 2, 3, 4, 5, // corners
+    6, 7, 12, // bottom (0,1) (1,2), vertical (0,3)
+    8, 13, 14, // bottom (2,0), verticals (1,4) (2,5)
+    9, 10, 11, // top (3,4) (4,5) (5,3)
+];
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
