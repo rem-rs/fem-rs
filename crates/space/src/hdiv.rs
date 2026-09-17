@@ -1412,7 +1412,25 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
-                    fill_dual_matrix(&rows, &HexRTk::new(order as usize), &mut w);
+                    // D289: the dual matrix must be built from the SAME basis
+                    // the assembly/get-values stack pairs these dofs with —
+                    // `vec_ref_elem`'s MFEM-default nodal GaussLegendre variant
+                    // (`RT_HexahedronElement(p, GaussLobatto, GaussLegendre)`),
+                    // not the LOR-pinned IntegratedGLL variant.  The nodal-GL
+                    // basis is exactly point-dual to the Gauss sample rows
+                    // (`W = (1/4) I` for k = 0,1,2 — MFEM's nodal `Project_RT`
+                    // property), so the solve returns the MFEM dof values
+                    // themselves (`nk·adj(J)·u` at the dof nodes).  With the
+                    // IntegratedGLL dual (`W = I/16` at k = 0, generally dense
+                    // above) the stored values were `W^{-1} d` — 4x MFEM at
+                    // RT0 and basis-inconsistent at RTk — which corrupted every
+                    // GL-framed consumer (`interpolate_vector` ->
+                    // `evaluate_vector_at_element` round-trips, DC-file dofs,
+                    // postprocess).  The LOR permutation builder only reads
+                    // constant-field *signs* (`lor.rs::pair_sign`), which are
+                    // basis-independent; the LOR assemblers pin IntegratedGLL
+                    // explicitly and never consume these values.
+                    fill_dual_matrix(&rows, &HexRTk::new_gauss_legendre(order as usize), &mut w);
                 }
                 ElementType::Prism6 => {
                     let p0 = self.mesh.node_coords(nodes[0]);

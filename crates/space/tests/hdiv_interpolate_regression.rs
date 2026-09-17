@@ -307,7 +307,11 @@ fn reconstruction_l2_error_3d(
                 1 => Box::new(TetRT1),
                 _ => Box::new(TetRT2),
             },
-            ElementType::Hex8 => Box::new(HexRTk::new(space.order() as usize)),
+            // D289: mirror `vec_ref_elem`'s MFEM-default nodal GaussLegendre
+            // hex variant (the basis the stored dofs live in).
+            ElementType::Hex8 => {
+                Box::new(HexRTk::new_gauss_legendre(space.order() as usize))
+            }
             other => panic!("3-D reconstruction: unsupported {other:?}"),
         };
         let q = ref_elem.quadrature(quad_order);

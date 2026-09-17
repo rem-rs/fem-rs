@@ -9,10 +9,9 @@
 //! MFEM equivalence: `TraceJumpIntegrator` in ex8.cpp, used with
 //! `MixedBilinearForm(xhat_space, test_space)`.
 
-use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement,
-    lagrange::{QuadL2GL, TriL2GL, QuadQ1, QuadQ2},
+    lagrange::{QuadL2GL, TriL2GL},
     quadrature::seg_rule_arbitrary,
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -49,28 +48,26 @@ fn eval_lagrange_1d(p: usize, xi: f64, phi: &mut [f64]) {
 
 // ─── Reference element helpers ───────────────────────────────────────────────
 
-fn ref_elem_for_space(
-    elem_type: ElementType,
-    order: u8,
-) -> (Box<dyn ReferenceElement>, usize, bool) {
-    // `ref01` = whether the reference element lives on the [0,1]ⁿ domain
-    // (MFEM L2/Gauss-Legendre elements) vs the [-1,1]ⁿ domain (legacy
-    // QuadQk).  The face parameterisation must match.
+fn ref_elem_for_space(elem_type: ElementType, order: u8) -> (Box<dyn ReferenceElement>, usize) {
     match (elem_type, order) {
         // D269: the L2 test space's dof slots are the MFEM open barycentric
         // GL nodes (`TriL2GL`, the `L2_FECollection` default) — Bhat must
         // evaluate the same basis the space numbers its dofs in, exactly like
         // the quad GL precedent below (round 40).
-        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriL2GL::new(1)) as Box<dyn ReferenceElement>, 3, true),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriL2GL::new(2)) as Box<dyn ReferenceElement>, 6, true),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriL2GL::new(3)) as Box<dyn ReferenceElement>, 10, true),
-        // L2 P1 on quads uses Gauss-Legendre nodal basis (MFEM
-        // L2_FECollection default BasisType::GaussLegendre) on [0,1]² — NOT
-        // the equally-spaced QuadQ1.  Using QuadQ1 here made Bhat
-        // inconsistent with the test space used by B0 (0.0156 vs MFEM 0.683
-        // on ex8).
-        (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4, true),
-        (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9, false),
+        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriL2GL::new(1)) as Box<dyn ReferenceElement>, 3),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriL2GL::new(2)) as Box<dyn ReferenceElement>, 6),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriL2GL::new(3)) as Box<dyn ReferenceElement>, 10),
+        // L2 on quads uses the Gauss-Legendre nodal basis (MFEM
+        // L2_FECollection default BasisType::GaussLegendre) on [0,1]² for
+        // every order — NOT the equally-spaced [-1,1]² QuadQ1/QuadQ2.  Using
+        // QuadQ1 here made Bhat inconsistent with the test space used by B0
+        // (0.0156 vs MFEM 0.683 on ex8, fixed round 40); D285: order 2 had
+        // the same defect via `QuadQ2` (`dpg_basis::scalar_ref_elem` and
+        // `sinv` both pair quad P2 with `QuadL2GL::new(2)`, and MFEM's
+        // TraceJumpIntegrator evaluates `CalcPhysShape` of the [0,1]² GL
+        // basis) while every Bhat row feeds QuadL2GL-numbered dof slots.
+        (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4),
+        (ElementType::Quad4, 2) => (Box::new(QuadL2GL::new(2)) as Box<dyn ReferenceElement>, 9),
         _ => panic!("assemble_bhat ref_elem: unsupported ({elem_type:?}, order={order})"),
     }
 }
@@ -86,20 +83,8 @@ fn edge_xi_tri(lf: usize, xi: f64) -> (f64, f64) {
     }
 }
 
-/// Map face parameter `xi ∈ [0,1]` and local face index to reference-element
-/// coordinates `(ξ, η)` for a quad (reference domain [-1,1]² for QuadQ1).
-fn edge_xi_quad(lf: usize, xi: f64) -> (f64, f64) {
-    match lf {
-        0 => (2.0 * xi - 1.0, -1.0),
-        1 => (1.0, 2.0 * xi - 1.0),
-        2 => (1.0 - 2.0 * xi, 1.0),
-        3 => (-1.0, 1.0 - 2.0 * xi),
-        _ => (0.0, 0.0),
-    }
-}
-
 /// Face parameterisation for reference elements on the [0,1]² domain
-/// (e.g. L2 Gauss-Legendre elements, matching MFEM's reference domain).
+/// (L2 Gauss-Legendre elements, matching MFEM's reference domain).
 fn edge_xi_quad_01(lf: usize, xi: f64) -> (f64, f64) {
     match lf {
         0 => (xi, 0.0),
@@ -131,10 +116,9 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
     trace_space: &DpgTraceSpace<M>,
     quad_order: u8,
 ) -> CsrMatrix<f64> {
-    let dim = 2; // 2D only for now
     let elem_type = test_space.mesh().element_type(0);
     let test_order = test_space.order();
-    let (ref_elem, nt, ref01) = ref_elem_for_space(elem_type, test_order);
+    let (ref_elem, nt) = ref_elem_for_space(elem_type, test_order);
     let dpf = trace_space.dofs_per_face();
     let is_tri = matches!(elem_type, ElementType::Tri3 | ElementType::Tri6);
 
@@ -166,7 +150,7 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
                 for (xr, &wr) in eq.points.iter().zip(eq.weights.iter()) {
                     let xi = xr[0];
                     let w = wr * face_sign; // RT_Trace map_type=INTEGRAL: no physical Weight (MFEM TraceJumpIntegrator only multiplies for VALUE map types)
-                    let (rx, ry) = if is_tri { edge_xi_tri(*local_face, xi) } else if ref01 { edge_xi_quad_01(*local_face, xi) } else { edge_xi_quad(*local_face, xi) };
+                    let (rx, ry) = if is_tri { edge_xi_tri(*local_face, xi) } else { edge_xi_quad_01(*local_face, xi) };
                     ref_elem.eval_basis(&[rx, ry], &mut phi);
                     eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
 
@@ -191,7 +175,7 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
                     eval_lagrange_1d(dpf - 1, xi, &mut trace_phi);
 
                     // Left element (+ sign, outward normal)
-                    let (rxl, ryl) = if npe_l == 3 { edge_xi_tri(*local_l, xi) } else if ref01 { edge_xi_quad_01(*local_l, xi) } else { edge_xi_quad(*local_l, xi) };
+                    let (rxl, ryl) = if npe_l == 3 { edge_xi_tri(*local_l, xi) } else { edge_xi_quad_01(*local_l, xi) };
                     ref_elem.eval_basis(&[rxl, ryl], &mut phi);
                     for i in 0..nt {
                         let gi = dl[i];
@@ -201,7 +185,7 @@ pub fn assemble_bhat<M: MeshTopology + Clone>(
                     }
 
                     // Right element (- sign, inward normal → trace jump convention)
-                    let (rxr, ryr) = if npe_r == 3 { edge_xi_tri(*local_r, 1.0 - xi) } else if ref01 { edge_xi_quad_01(*local_r, 1.0 - xi) } else { edge_xi_quad(*local_r, 1.0 - xi) };
+                    let (rxr, ryr) = if npe_r == 3 { edge_xi_tri(*local_r, 1.0 - xi) } else { edge_xi_quad_01(*local_r, 1.0 - xi) };
                     ref_elem.eval_basis(&[rxr, ryr], &mut phi);
                     for i in 0..nt {
                         let gi = dr[i];
@@ -324,5 +308,106 @@ mod tests {
         // (boundary test DOFs may or may not, depending on mesh)
         let total_dofs: usize = row_counts.iter().sum();
         assert!(total_dofs > 0);
+    }
+
+    // ── D285: the quad order-2 arm must evaluate the same [0,1]² Gauss-
+    // Legendre nodal basis the L² space numbers its dofs in (previously the
+    // [-1,1]² equally-spaced `QuadQ2`, inconsistent with B0/sinv) ──────────
+
+    fn bhat_get(b: &CsrMatrix<f64>, r: usize, c: usize) -> f64 {
+        for k in b.row_ptr[r]..b.row_ptr[r + 1] {
+            if b.col_idx[k] as usize == c {
+                return b.values[k];
+            }
+        }
+        0.0
+    }
+
+    /// Independent reference Bhat on the single unit quad: face maps, trace
+    /// parameterisation and orientation signs written out per edge (canonical
+    /// vertex order bottom (0,1), right (1,2), top (2,3), left (3,0)), with a
+    /// direct Gauss rule over the `QuadL2GL` P2 basis.
+    fn reference_bhat_quad_p2_p1trace() -> Vec<Vec<f64>> {
+        use fem_element::lagrange::QuadL2GL;
+        use fem_element::quadrature::seg_rule_arbitrary;
+
+        let fe = QuadL2GL::new(2);
+        let n = fe.n_dofs();
+        let ir = seg_rule_arbitrary(7);
+
+        // (local_face, x = a*t + b, y = c*t + d, sign) along the element-side
+        // face parameter t ∈ [0,1]; the sign is +1 when the element-local
+        // face direction ascends in vertex id (`unit_square_quad(1)` numbers
+        // the top edge (v2,v3) = (3,2), descending → −1):
+        const FACES: [(usize, [f64; 4], f64); 4] = [
+            // bottom (v0,v1) = (0,1) = (t, 0), ascending → +
+            (0, [1.0, 0.0, 0.0, 0.0], 1.0),
+            // right (v1,v2) = (1,3) = (1, t), ascending → +
+            (1, [0.0, 1.0, 1.0, 0.0], 1.0),
+            // top (v2,v3) = (3,2) = (1-t, 1), descending → −1
+            (2, [-1.0, 1.0, 0.0, 1.0], -1.0),
+            // left (v3,v0) = (2,0) = (0, 1-t), descending → −1
+            (3, [0.0, 0.0, -1.0, 1.0], -1.0),
+        ];
+
+        let mut out = vec![vec![0.0_f64; 8]; n];
+        for &(lf, lin, sign) in &FACES {
+            let col0 = lf * 2; // 2 trace dofs per face, faces in table order
+            for (pt, &w) in ir.points.iter().zip(ir.weights.iter()) {
+                let t = pt[0];
+                let x = lin[0] * t + lin[1];
+                let y = lin[2] * t + lin[3];
+                let mut phi = vec![0.0; n];
+                fe.eval_basis(&[x, y], &mut phi);
+                // trace P1 along the element-side parameter t
+                let l0 = 1.0 - t;
+                let l1 = t;
+                for i in 0..n {
+                    out[i][col0] += sign * w * phi[i] * l0;
+                    out[i][col0 + 1] += sign * w * phi[i] * l1;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bhat_quad_p2_matches_reference_gl_integration() {
+        let mesh = Mesh::<2>::unit_square_quad(1);
+        let l2 = L2Space::new(mesh.clone(), 2);
+        let trace = DpgTraceSpace::new(mesh, 1); // P1 trace: 2 dofs per face
+        let bhat = assemble_bhat(&l2, &trace, 6);
+        assert_eq!(bhat.nrows, 9);
+        assert_eq!(bhat.ncols, 8);
+
+        let want = reference_bhat_quad_p2_p1trace();
+        for i in 0..9usize {
+            for j in 0..8usize {
+                let got = bhat_get(&bhat, i, j);
+                assert!(
+                    (got - want[i][j]).abs() <= 1e-13 * (1.0 + want[i][j].abs()),
+                    "bhat[{i}][{j}] = {got:.17e} vs reference {:.17e}",
+                    want[i][j]
+                );
+            }
+        }
+    }
+
+    /// Detectability pin: the pre-D285 `QuadQ2` arm zeroed the centre-slot row
+    /// on the bottom edge (its centre function vanishes at η = −1), while the
+    /// correct `QuadL2GL` centre basis does not.
+    #[test]
+    fn bhat_quad_p2_centre_row_on_bottom_edge_is_nonzero() {
+        let mesh = Mesh::<2>::unit_square_quad(1);
+        let l2 = L2Space::new(mesh.clone(), 2);
+        let trace = DpgTraceSpace::new(mesh, 1);
+        let bhat = assemble_bhat(&l2, &trace, 6);
+        // centre test slot (4), bottom-edge first trace dof (column 0)
+        let v = bhat_get(&bhat, 4, 0);
+        assert!(
+            v.abs() > 1e-8,
+            "centre-slot coupling on the bottom edge vanished ({v:e}) — \
+             the L2 basis drifted off QuadL2GL again"
+        );
     }
 }
