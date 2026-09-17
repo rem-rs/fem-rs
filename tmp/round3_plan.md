@@ -1885,6 +1885,43 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：① **派单两度 4 路并发被打断**（环境原因），改单发/双发后全部成功——**代理并发上限在本环境表现为 1–2 路稳定**，下轮派单直接按 ≤2 路一批。② **孤儿改动可救**：四路前次在途工作经独立盘点全部保留（④ 修 4 处、③ 修 3 处、①② 零纠错）——"盘点-不盲信-重验"是中断恢复的正解；`incomplete.rs` 字面名差点误判为废稿。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / assembly 678+8ign / **element 504** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **122 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**6m13s**）；pro 层 0 错误。
 
+## 第四十二轮（round 42）：两路一批（①② 先行）—— D245+D250 assembly 仲裁双件 / D226+D227+D228 hex ND 残余三件套
+
+### 0. 本轮形状
+按 round-41 实证改 **≤2 路一批**派单，①② 先行（③④ 留下批）。**主会话完成一次关键仲裁：RT0 边界载荷 0.25-vs-1.0 矛盾**——两代探针当面对质，round-39 的 0.25 实为 **RT1 误读**（`RT_FECollection(1,3)`），真 RT0 = 1。
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D245+D250**（assembly 仲裁双件）RT GL 变体接线 + 误差臂等参几何 | ✅ **关闭**（LOR 双圣杯绿 + hex RT LOR 钉回 IGLL 有 pin 测试；h1 8.718e0→5.04e-15；C++ 四项逐项命中） |
+| ② | **D226+D227+D228**hex ND 残余三件套 | ✅ **关闭**（D226 根因新定性：tet/tri L2 默认基 = GL 开式重心节点；D227 约定地图定性关闭；D228 文档化关闭） |
+
+### 1. ① 路：D245+D250 关闭
+- **D245**：`vec_ref_elem` hex H(div) 三臂翻 `HexRTk::new_gauss_legendre`；`lor_factory` 4 个 hex RT 调用点（含圣杯）**钉回 IntegratedGLL**（`lor.cpp:317 CheckBasisType`）+ 新增 pin 测试 `lor_rt_hex_ho_pinned_to_igll`（两数同为 3.948148e0 同时证明 helper 配方与库分发一致）；`postprocess.rs` 第二副本补 `elem_type` 并镜像主表（修前 hex H(div) 误用 tet 基）。`HexRTk::new` 全量 12 处分类完毕（翻 GL 2 / 钉 IGLL 4 / 不动 6，含新债 D266 的 dpg_basis）。圣杯：`lor_rt_pcg` **40→64**（门内）、`lor_nd_pcg` **22→32** 不动；RT 端到端 4.758e-7/4.443e-7（转录精度）；pmaxwell **984/1.313e+00/4.706e+00 逐位**。
+- **D250**：`compute_h1/w1/l1_error` 与 `error_estimate.rs` 11 处调用点改等参几何（D242 口径）；**顺带修预存 bug**：`vertex_shapes`/`ref_vertex_coords` hex **Morton→MFEM CUBE 环序**错误（slot 2↔3、6↔7）。改前 hex 仿射 h1 **8.717798e0**（与 D242 证据逐位复现）→ 后 **5.04e-15**；w1 40.0→4.39e-15、l1 14.90→3.42e-16；C++ 四项逐项命中（h1semi 逐位、lp 估计器 1 ulp）。测试 `d250_error_geometry.rs`（9）。
+- **主会话仲裁（RT0 载荷）**：`hdiv_boundary_flux_hex_quad_faces_analytic` 期望 0.25→**1.0**。两代探针当面对质（`$HOME/work/d264arbit/`）：round-39 探针实为 `RT_FECollection(1,3)`（**RT1**，18 个面值 0.25）被误读作"RT0=0.25"；真 RT0（order 0）六面 **b[i]=1 精确**（物理：∫φ·n = 面积 = 1）。**D227 期对 hex_rtk 的 ×0.5 由此误读促成——现内部帧自洽且被其他证据（pmaxwell 逐位、DC 转录精度）独立支撑，不回退；误读记录在案**。
+- 新债：**D264** `tet_rule(8..10)` 负权重（文档称正权重 Witherden-Vincent，min −9.8e-2；本轮 sqrt 前 clamp 防爆）；**D265** postprocess.rs hex 缺口（标量无 Hex8 臂 panic、curl/div 基同步后几何仍角差分）；**D266** dpg_basis.rs:125 hex RT 腿仍 IGLL 需对照 DPG test 口径。
+
+### 2. ② 路：D226+D227+D228 关闭
+- **D226（根因新定性，round-39 记录被证伪）**：MFEM `L2_FECollection(1,3)` 缺省基 = **GaussLegendre 开式重心节点**（节点 ≈(0.1485,…)，非顶点；`fe_l2.cpp:695`）——fem-rs 的 tet/tri L2 顶点重心 P1 与 MFEM 值差（探针 0.79344 vs 0.7267572）；round-39 "tunit_L2 全绿"是**形心盲视**（任何 P1 在形心槽值 1/4，同 D225 陷阱）。落地 `TriL2GL`/`TetL2GL`（同 H1TriPk 机理）+ 2 测试 vs 17 位 dump（≤1e-15）；**接线 = 新债 D269（P1，仲裁件）**：`assembler.rs` `ref_elem_vol_l2` + `build_simplex` 补丁已打包（`tmp/d269/arbitration_*.patch`），接线牵动 8 个消费方（discrete_op×3 列点硬编码、dgmassinv/dg_base、face_restriction、extrapolator、dpg）。另证 `DG_FECollection` 是 `L2_FECollection` typedef。
+- **D227**：约定地图 `tmp/d227_convention_map.md`（9 类站点归属），审计无未配对双重记账——**定性关闭**（如未来迁移，#1+#2+#6+#7 必须同提交整组）。
+- **D228**：文档化关闭——`findpts/mod.rs` 模块文档记四条定位路径 tie-break（MFEM 无 GSLIB = 最近元素中心→顶点邻元，`mesh.cpp:14316` 确定性；fem-rs first-hit 各自确定但互不相同）；可选对齐 = **D270（P3）**。
+- 回归：fem-element **506**（+2）、fem-space 287、fem-mesh 全绿、fem-assembly 674→（① 路落地后 675）、LOR 双圣杯绿、pmaxwell 不变。
+
+### 第四十二轮新债务
+- **D264（P3）** `tet_rule(8..10)` 负权重 vs 文档矛盾（已 clamp 防爆，规则表待对照 MFEM 审计）——① 路。
+- **D265（P3）** postprocess.rs hex 缺口（标量 `ref_elem_vol` 无 Hex8 臂；curl/div 几何仍角差分 det 8×）——① 路。
+- **D266（P3）** `dpg_basis.rs:125` hex RT 腿仍 IGLL，需对照 MFEM DPG test 空间口径——① 路。
+- **D269（P1，仲裁件）** tet/tri L2 GL 接线：`ref_elem_vol_l2` + `build_simplex` 补丁已打包 + 8 消费方同步清单（round-39 "p byte-identical" 记录证伪；形心盲视陷阱第三次现形）——② 路。
+- **D270（P3）** 定位器 tie-break 可选对齐 MFEM 最近元素中心规则——② 路。
+- **关闭**：~~D245~~、~~D250~~、~~D226~~（E2 实证关闭 + 根因移交 D269）、~~D227~~（约定地图）、~~D228~~（文档化）。
+- 沿用开放：D264/D265/D266/D269/D270、D245 残余无、D251–D254 未用、D256–D259、D262/D263、D180/D191/D192/D188/D170/D220/D234/D235、D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：`fem-element` lib 504→**506**（TriL2GL/TetL2GL 2）；`fem-assembly` lib 675→**675+1**（pin 测试 + d250 9 项，0 红含仲裁补丁）；io + `d269_findpoints_element_choice`（2）。全部实跑确认。
+- **主会话亲验**（不是转述）：**RT0 载荷两代探针亲自当面对质**（round-39 = RT1 误读、round-42 = 真 RT0 b=1），仲裁补丁亲自应用后 **fem-assembly lib 675/675**；pro 层 0 错误；集成层见下。
+- **流程注记**：**round-39 的 0.25 误读在本轮被两代探针对质揭穿**——"探针也会撒谎（建错了对象）"；同族教训第三、四次现形（质心盲视 → RT1 误标）。两路共享树上并发，红测归因均用"回退→复跑"实验完成。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 679**+8ign / **element 506** / **io 134** / linalg 69 / linalg-gpu 13+2ign / **mesh 312** / parallel 243 / solver 266 / space 287）；集成层 **124 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**4m51s**）；pro 层 0 错误。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
