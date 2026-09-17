@@ -21,22 +21,26 @@ fn corner_coords<M: MeshTopology>(mesh: &M, e: u32, k: usize) -> [f64; 2] {
 /// Scalar L² (discontinuous) finite element space.
 ///
 /// DOF layout follows MFEM's `L2_FECollection(o, dim)` (default
-/// `BasisType::GaussLegendre`) / `DG_FECollection` (`GaussLobatto`):
+/// `BasisType::GaussLegendre`; MFEM 4.10's `DG_FECollection` is a `typedef`
+/// of `L2_FECollection`, so it shares that default):
 /// - **P0** (`order = 0`): one DOF per element (piecewise constant).
-/// - **P1** on Tri3/Tet4: one DOF per element corner node (MFEM's L2 simplex
-///   elements are nodal on the closed element), no inter-element sharing.
 /// - **Tensor elements (Quad/Hex), any order ≥ 1**: `(order+1)^dim` DOFs per
 ///   element at the *interior* Gauss-Legendre tensor nodes
 ///   ([`L2Basis::GaussLegendre`], MFEM `L2_FECollection` default) or at the
-///   GLL tensor nodes ([`L2Basis::GaussLobatto`], MFEM `DG_FECollection`),
+///   GLL tensor nodes ([`L2Basis::GaussLobatto`]),
 ///   both in **lexicographic** (`L2_DOF_MAP`) order — x fastest.  Quad DOF
 ///   nodes live on `[0,1]²` ([`QuadL2GL`]/[`QuadQk::new_lex`]); hex DOF nodes
 ///   on `[-1,1]³` ([`HexL2GL`]/[`HexQk::new_lex`]), matching the fem-rs hex
 ///   reference-domain convention.
-/// - **P2/P3 on Tri3/Tet4**: discontinuous quadratic/cubic DOFs
-///   (Tri: 6/10, Tet: 10/20), as in MFEM's L2 simplex elements.
-/// - **Order ≥ 4 on Tri3/Tet4**: [`TriPk`]/[`TetPk`] (equispaced, MFEM
-///   L2-simplex nodal ordering), mapped affinely to each cell.
+/// - **Simplex elements (Tri/Tet), any order ≥ 1** ([`L2Basis::GaussLegendre`],
+///   the default): the same DOF count as the nodal Pk layout but at MFEM's
+///   *open Gauss-Legendre barycentric* nodes ([`TriL2GL`]/[`TetL2GL`]),
+///   affinely mapped to each cell — every MFEM-written DC field
+///   (`basis = "L2_3D_P1"`, …) is expressed in this basis.
+///   With [`L2Basis::GaussLobatto`] the DOFs use the corner/equispaced nodal
+///   layout (MFEM's legacy closed DG placement): P1 corners, P2
+///   vertices+edge midpoints (Tri: 6/10, Tet: 10/20), P3 nodal, order ≥ 4
+///   via [`TriPk`]/[`TetPk`].
 ///
 /// DOFs are numbered element-by-element (each element owns
 /// `dofs_per_elem = (order+1)^dim` consecutive global DOFs).
@@ -45,6 +49,8 @@ fn corner_coords<M: MeshTopology>(mesh: &M, e: u32, k: usize) -> [f64; 2] {
 /// [`QuadQk::new_lex`]: fem_element::lagrange::factory::QuadQk::new_lex
 /// [`HexL2GL`]: fem_element::lagrange::HexL2GL
 /// [`HexQk::new_lex`]: fem_element::lagrange::factory::HexQk::new_lex
+/// [`TriL2GL`]: fem_element::lagrange::TriL2GL
+/// [`TetL2GL`]: fem_element::lagrange::TetL2GL
 /// [`TriPk`]: fem_element::lagrange::factory::TriPk
 /// [`TetPk`]: fem_element::lagrange::factory::TetPk
 /// [`TriP3`]: fem_element::TriP3
@@ -135,32 +141,40 @@ impl<M: MeshTopology> L2Space<M> {
 
     /// Simplex (Tri3/Tet4) L² space for order ≥ 1.
     ///
+    /// With [`L2Basis::GaussLegendre`] (the default) the DOFs sit at MFEM's
+    /// `L2_TriangleElement`/`L2_TetrahedronElement` **open Gauss-Legendre
+    /// barycentric nodes** ([`TriL2GL`]/[`TetL2GL`]), affinely mapped to each
+    /// cell — this is the basis every MFEM-written DC field
+    /// (`basis = "L2_3D_P1"` etc.) is expressed in.
+    /// With [`L2Basis::GaussLobatto`] the DOFs use the corner/equispaced nodal
+    /// layout (MFEM's legacy closed DG placement).
+    ///
     /// `ref_p3` are the reference P3 nodes ([`TriP3`]/[`TetP3`]) and
     /// `p2_dofs`/`p1_npe` the DOF bookkeeping for the P1/P2 hand-coded layouts.
-    /// Orders ≥ 4 use the equispaced [`TriPk`]/[`TetPk`] nodal ordering (MFEM's
-    /// L2 simplex elements are equispaced nodal with the H1 DOF order), mapped
-    /// affinely to each cell.
     ///
+    /// [`TriL2GL`]: fem_element::lagrange::TriL2GL
+    /// [`TetL2GL`]: fem_element::lagrange::TetL2GL
     /// [`TriPk`]: fem_element::lagrange::factory::TriPk
     /// [`TetPk`]: fem_element::lagrange::factory::TetPk
     fn build_simplex(
         mesh: M,
         order: u8,
-        _basis: L2Basis, // simplex L2 dofs are equispaced/corner nodes for both bases
+        basis: L2Basis,
         ref_p3: &[Vec<f64>],
         p1_npe: usize,
         p2_dofs: usize,
     ) -> Self {
         let dim = mesh.dim() as usize;
         let n_elems = mesh.n_elements();
+        let gl = basis == L2Basis::GaussLegendre;
 
         let dofs_per_elem = match order {
             1 => p1_npe,
             2 => p2_dofs,
             3 => ref_p3.len(),
             _ => {
-                // Order >= 4: equispaced nodal Pk layout (vertices → edges →
-                // faces → interior), matching MFEM's L2 simplex elements.
+                // Order >= 4: nodal Pk layout (vertices → edges → faces →
+                // interior), matching MFEM's L2 simplex DOF count.
                 if dim == 2 {
                     (order as usize + 1) * (order as usize + 2) / 2
                 } else {
@@ -174,18 +188,47 @@ impl<M: MeshTopology> L2Space<M> {
         let elem_dofs: Vec<DofId> = (0..n_dofs as DofId).collect();
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];
 
-        // Reference node coordinates for orders ≥ 3 (affine map per cell).
-        let ref_coords: Vec<Vec<f64>> = match order {
-            3 => ref_p3.to_vec(),
-            o if o >= 4 => {
-                if dim == 2 {
-                    fem_element::lagrange::factory::TriPk::new(o as usize).dof_coords()
-                } else {
-                    fem_element::lagrange::factory::TetPk::new(o as usize).dof_coords()
+        // Reference node coordinates (affine map per cell).
+        let ref_coords: Vec<Vec<f64>> = if gl {
+            match dim {
+                2 => fem_element::lagrange::TriL2GL::new(order as usize).dof_coords(),
+                _ => fem_element::lagrange::TetL2GL::new(order as usize).dof_coords(),
+            }
+        } else {
+            match order {
+                3 => ref_p3.to_vec(),
+                o if o >= 4 => {
+                    if dim == 2 {
+                        fem_element::lagrange::factory::TriPk::new(o as usize).dof_coords()
+                    } else {
+                        fem_element::lagrange::factory::TetPk::new(o as usize).dof_coords()
+                    }
+                }
+                _ => Vec::new(),
+            }
+        };
+
+        // GaussLegendre: affine map of the open GL nodes for every order ≥ 1
+        // (same slot count as the nodal layouts).
+        if gl {
+            for e in 0..n_elems as u32 {
+                let nodes = mesh.element_nodes(e);
+                let base_dof = e as usize * dofs_per_elem;
+                for (i, rc) in ref_coords.iter().enumerate() {
+                    let base = (base_dof + i) * dim;
+                    let p0 = mesh.node_coords(nodes[0]);
+                    for d in 0..dim {
+                        let mut v = p0[d];
+                        for (dd, &r) in rc.iter().enumerate() {
+                            let pd = mesh.node_coords(nodes[dd + 1])[d];
+                            v += r * (pd - p0[d]);
+                        }
+                        dof_coords[base + d] = v;
+                    }
                 }
             }
-            _ => Vec::new(),
-        };
+            return L2Space { mesh, order, basis, elem_dofs, dofs_per_elem, n_dofs, dof_coords };
+        }
 
         for e in 0..n_elems as u32 {
             let nodes = mesh.element_nodes(e);
@@ -248,7 +291,7 @@ impl<M: MeshTopology> L2Space<M> {
             }
         }
 
-        L2Space { mesh, order, basis: _basis, elem_dofs, dofs_per_elem, n_dofs, dof_coords }
+        L2Space { mesh, order, basis, elem_dofs, dofs_per_elem, n_dofs, dof_coords }
     }
 
     /// Tensor-product (Quad4/Hex8) L² space for order ≥ 1: `(order+1)^dim`

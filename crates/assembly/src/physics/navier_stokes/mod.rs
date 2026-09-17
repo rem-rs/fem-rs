@@ -36,7 +36,7 @@ pub fn assemble_convection_matrix<M: MeshTopology + Clone>(
 
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let ref_elem = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
+        let ref_elem = crate::assembler::ref_elem_vol_h1(elem_type, vel_space.order());
         let n_ldofs = ref_elem.n_dofs();
         let n_vec = n_ldofs * mesh.dim() as usize;
         let quad = ref_elem.quadrature(quad_order);
@@ -103,8 +103,8 @@ pub fn assemble_divergence_matrix<M: MeshTopology + Clone>(
 
     for e in pres_mesh.elem_iter() {
         let elem_type = pres_mesh.element_type(e);
-        let ref_v = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
-        let ref_p = crate::dg::dg_advection::ref_elem_vol(elem_type, 1);
+        let ref_v = crate::assembler::ref_elem_vol_h1(elem_type, vel_space.order());
+        let ref_p = crate::assembler::ref_elem_vol_h1(elem_type, 1);
         let n_v = ref_v.n_dofs();
         let n_p = ref_p.n_dofs();
         let quad = ref_v.quadrature(quad_order);
@@ -176,7 +176,7 @@ pub fn assemble_ale_convection_matrix<M: MeshTopology + Clone>(
 
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let ref_elem = crate::dg::dg_advection::ref_elem_vol(elem_type, vel_space.order());
+        let ref_elem = crate::assembler::ref_elem_vol_h1(elem_type, vel_space.order());
         let n_ldofs = ref_elem.n_dofs();
         let n_vec = n_ldofs * dim;
         let quad = ref_elem.quadrature(quad_order);

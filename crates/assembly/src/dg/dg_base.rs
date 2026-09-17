@@ -14,11 +14,10 @@ use fem_element::{
     lagrange::{
         SegP1, SegP2, SegP3,
         TriP1,
-        TetP1, TetP2,
-        QuadQ1, QuadQ2, QuadQk,
+        TetL2GL, TriL2GL,
+        QuadQk,
         factory::QuadL2GL,
     },
-    lagrange::factory::{TriPk, TetPk},
 };
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 
@@ -29,20 +28,27 @@ use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 /// Return the volume reference element for a given element type and polynomial
 /// order.  Supports triangles (Tri3), quadrilaterals (Quad4), and tetrahedra
 /// (Tet4) up to order 3, with dynamic-order QuadQk for Quad4 at order > 2.
+///
+/// All arms use the `L2_FECollection` **default `GaussLegendre`** nodal
+/// placement (MFEM 4.10's `DG_FECollection` is a typedef of `L2_FECollection`):
+/// open GL tensor nodes on Quad4 ([`QuadL2GL`], round-40 precedent) and open
+/// barycentric GL nodes on Tri3/Tet4 ([`TriL2GL`]/[`TetL2GL`], D269).
 // MFEM: FECollection::FiniteElementForGeometry
 pub fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) => Box::new(TriPk::new(3)),
+        // D269: simplex DG volume elements use the MFEM open barycentric GL
+        // nodes (same precedent as the Quad4 arm, round 40).
+        (ElementType::Tri3, 1) => Box::new(TriL2GL::new(1)),
+        (ElementType::Tri3, 2) => Box::new(TriL2GL::new(2)),
+        (ElementType::Tri3, 3) => Box::new(TriL2GL::new(3)),
         // Quad4 in the DG/L2 path uses the Gauss-Legendre tensor basis
         // (MFEM L2_FECollection / DG_FECollection default), on [0,1]².
         (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
         (ElementType::Quad4, 2) => Box::new(QuadL2GL::new(2)),
         (ElementType::Quad4, 3) => Box::new(QuadL2GL::new(3)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
+        (ElementType::Tet4, 1) => Box::new(TetL2GL::new(1)),
+        (ElementType::Tet4, 2) => Box::new(TetL2GL::new(2)),
+        (ElementType::Tet4, 3) => Box::new(TetL2GL::new(3)),
         _ => panic!("ref_elem_vol: unsupported ({et:?}, order={order})"),
     }
 }

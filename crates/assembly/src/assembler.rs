@@ -219,10 +219,11 @@ impl ReferenceElement for BiLinearGeo2D {
 // ─── Reference element factory ───────────────────────────────────────────────
 
 /// Return the solution reference element matching `elem_type` and polynomial
-/// `order` for an **L2/DG** space: tensor elements (Quad/Hex) use MFEM's
-/// lexicographic `L2_DOF_MAP` order with the `L2_FECollection` default
-/// Gauss-Legendre nodes, all other element types keep the H1 topological
-/// ordering (which MFEM's L2 spaces on simplices also use).
+/// `order` for an **L2/DG** space with the `L2_FECollection` default
+/// `GaussLegendre` basis: tensor elements (Quad/Hex) use MFEM's lexicographic
+/// `L2_DOF_MAP` order with interior Gauss-Legendre nodes, simplex elements
+/// (Tri/Tet) use MFEM's open barycentric GL nodes (`L2_TriangleElement` /
+/// `L2_TetrahedronElement`, D269).
 pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Quad4 => match order {
@@ -240,6 +241,20 @@ pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceEl
             // and the isoparametric Jacobian stay on a common domain.
             o => Box::new(fem_element::lagrange::HexL2GL::new(o as usize)),
         },
+        ElementType::Tri3 => match order {
+            // order 0 keeps the simplex P0 element (tri rule; the shared `P0`
+            // here would carry the square rule and double the mass).
+            0 => Box::new(P0Tri),
+            // MFEM L2_TriangleElement(o, GaussLegendre): open barycentric GL
+            // nodes on the unit simplex, nodal Lagrange basis (D269).
+            o => Box::new(fem_element::lagrange::TriL2GL::new(o as usize)),
+        },
+        ElementType::Tet4 => match order {
+            0 => Box::new(P0Tet),
+            // MFEM L2_TetrahedronElement(o, GaussLegendre): open barycentric
+            // GL nodes on the unit tetrahedron (D269).
+            o => Box::new(fem_element::lagrange::TetL2GL::new(o as usize)),
+        },
         _ => ref_elem_vol(elem_type, order),
     }
 }
@@ -253,14 +268,14 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     order: u8,
 ) -> Box<dyn ReferenceElement> {
     if space.space_type() == SpaceType::L2 {
-        // MFEM `DG_FECollection`/`L2_FECollection(btype)` with GaussLobatto
-        // uses GLL nodes with lexicographic DOFs (`L2_DOF_MAP`) on tensor
-        // elements — `QuadQk::new_lex`/`HexQk::new_lex`, NOT the GL-noded
+        // MFEM `L2_FECollection(btype)` with GaussLobatto uses GLL nodes with
+        // lexicographic DOFs (`L2_DOF_MAP`) on tensor elements —
+        // `QuadQk::new_lex`/`HexQk::new_lex`, NOT the GL-noded
         // `QuadL2GL`/`HexL2GL` (which match only `L2_FECollection`'s default
         // `GaussLegendre`).  Using the wrong basis silently changes every
         // element matrix (ex41 regression: M/S/K off by ~6×, IMEX diverged).
-        let gll_lex = space.l2_basis() == Some(L2Basis::GaussLobatto)
-            && matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
+        let gll = space.l2_basis() == Some(L2Basis::GaussLobatto);
+        let gll_lex = gll && matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
         if gll_lex && order >= 1 {
             return match elem_type {
                 ElementType::Quad4 => Box::new(
@@ -268,6 +283,10 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
                 ),
                 _ => Box::new(fem_element::lagrange::factory::HexQk::new_lex(order as usize)),
             };
+        }
+        if gll && order >= 1 && matches!(elem_type, ElementType::Tri3 | ElementType::Tet4) {
+            // The closed DG simplex placement (corner/equispaced nodal dofs).
+            return ref_elem_vol(elem_type, order);
         }
         ref_elem_vol_l2(elem_type, order)
     } else {

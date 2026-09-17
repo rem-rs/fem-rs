@@ -12,8 +12,7 @@ use std::marker::PhantomData;
 
 use fem_element::{
     ReferenceElement,
-    lagrange::{QuadL2GL, TriP1, QuadQ2},
-    lagrange::factory::TriPk,
+    lagrange::{QuadL2GL, TriL2GL},
     quadrature::{tri_rule, quad_rule_01},
 };
 use fem_linalg::CsrMatrix;
@@ -39,18 +38,6 @@ pub struct SinvBuilder<M: MeshTopology> {
 }
 
 // ─── Reference element + quadrature helpers ──────────────────────────────────
-
-#[allow(dead_code)]
-fn ref_elem(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
-        (ElementType::Quad4, 1) => Box::new(QuadL2GL::new(1)),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        _ => panic!("SinvBuilder ref_elem: unsupported ({elem_type:?}, order={order})"),
-    }
-}
 
 fn quad_order(elem_type: ElementType, order: u8) -> u8 {
     // Sufficiently accurate quadrature for (mass + stiffness) of order `order`.
@@ -158,12 +145,18 @@ impl<M: MeshTopology> SinvBuilder<M> {
         let is_tri = matches!(et, ElementType::Tri3 | ElementType::Tri6);
         let qo = if qorder > 0 { qorder } else { quad_order(et, order) };
 
+        // D269: the reference element must be the test space's *actual* basis —
+        // the `L2_FECollection` default GaussLegendre placement, i.e. open
+        // barycentric GL nodes on Tri3 (`TriL2GL`, matching the space's dof
+        // slots) and interior GL tensor nodes on Quad4 (`QuadL2GL`, round-40
+        // precedent).  Otherwise these blocks are not the inverse of the
+        // test-space Gram matrix in the space's dof basis.
         let (ref_elem, nt) = match (et, order) {
-            (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3usize),
-            (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriPk::new(2)) as Box<dyn ReferenceElement>, 6),
-            (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriPk::new(3)) as Box<dyn ReferenceElement>, 10),
+            (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriL2GL::new(1)) as Box<dyn ReferenceElement>, 3usize),
+            (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriL2GL::new(2)) as Box<dyn ReferenceElement>, 6),
+            (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriL2GL::new(3)) as Box<dyn ReferenceElement>, 10),
             (ElementType::Quad4, 1) => (Box::new(QuadL2GL::new(1)) as Box<dyn ReferenceElement>, 4),
-            (ElementType::Quad4, 2) => (Box::new(QuadQ2) as Box<dyn ReferenceElement>, 9),
+            (ElementType::Quad4, 2) => (Box::new(QuadL2GL::new(2)) as Box<dyn ReferenceElement>, 9),
             _ => panic!("SinvBuilder: unsupported ({et:?}, order={order})"),
         };
         let qr = match et {

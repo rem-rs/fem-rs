@@ -21,11 +21,12 @@
 //! Deviations (documented scope):
 //! - 2-D (Tri3/Quad4) meshes; 3-D face transforms (`PermuteFace3D`) are not
 //!   ported yet.
-//! - L2 bases: nodal simplices (any order supported by `L2Space`) and
-//!   Gauss-Lobatto tensor quads.  Gauss-Legendre tensor quads have **no DOFs
-//!   on the face** — MFEM's `CheckFESpace` rejects them (`Only Gauss-Lobatto
-//!   and Bernstein basis are supported in L2FaceRestriction`) and so does
-//!   this port.
+//! - L2 bases: Gauss-Lobatto spaces only, tensor quads and simplices alike.
+//!   The `L2_FECollection` default `GaussLegendre` basis has **no DOFs on the
+//!   face** (tensor-interior nodes; simplex open barycentric GL nodes,
+//!   D269) — MFEM's `CheckFESpace` rejects it (`Only Gauss-Lobatto and
+//!   Bernstein basis are supported in L2FaceRestriction`) and so does this
+//!   port.
 //! - All supported L2 bases have positive DOF orientations, so `Mult` and
 //!   `AbsMult` coincide in MFEM; a single `mult` is provided.
 //! - `ConformingFaceRestriction` is provided for P1 H¹ spaces (DOFs numbered
@@ -205,17 +206,23 @@ impl<'a, M: MeshTopology> L2FaceRestriction<'a, M> {
     /// Build the face restriction (MFEM
     /// `L2FaceRestriction(fes, ordering, type, m)`).
     ///
-    /// Panics for Gauss-Legendre tensor quad spaces (no face DOFs), matching
-    /// MFEM `CheckFESpace`.
+    /// Panics for Gauss-Legendre bases (no face DOFs), matching MFEM
+    /// `CheckFESpace`: tensor-quad GL DOFs are strictly interior, and the
+    /// simplex DOFs at MFEM's *open* barycentric GL nodes (the
+    /// `L2_FECollection` default, D269) are strictly interior as well.
     pub fn new(space: &'a L2Space<M>, face_type: FaceType, m: L2FaceValues) -> Self {
         // MFEM CheckFESpace: only Gauss-Lobatto / Positive bases put DOFs on
-        // the trace.  Gauss-Legendre quad DOFs are strictly interior.
-        if space.mesh().element_type(0) == ElementType::Quad4
-            && space.l2_basis() != Some(fem_space::L2Basis::GaussLobatto)
-        {
+        // the trace.  Gauss-Legendre quad DOFs are strictly interior, and so
+        // are the simplex DOFs at the default open barycentric GL nodes
+        // (D269).
+        let et = space.mesh().element_type(0);
+        let faceless_gl_basis = matches!(et, ElementType::Quad4 | ElementType::Tri3)
+            && space.l2_basis() != Some(fem_space::L2Basis::GaussLobatto);
+        if faceless_gl_basis {
             panic!(
                 "L2FaceRestriction: Only Gauss-Lobatto and Bernstein basis are \
-                 supported for tensor elements (MFEM CheckFESpace)"
+                 supported (MFEM CheckFESpace); the Gauss-Legendre default \
+                 places all DOFs strictly inside the element (D269)"
             );
         }
         let (interior, boundary) = build_face_list(space.mesh());
@@ -527,10 +534,15 @@ mod tests {
     }
 
     /// Test cases: (mesh, order, L2 basis, label).
+    ///
+    /// The simplex entries use [`L2Basis::GaussLobatto`]: only bases with DOFs
+    /// on the closed element (dofs on the face) support the face-DOF
+    /// extraction — MFEM `CheckFESpace` rejects the rest (the default GL
+    /// simplex DOFs sit at interior open barycentric nodes, D269).
     fn test_spaces() -> Vec<(Mesh<2>, u8, L2Basis, &'static str)> {
         vec![
-            (Mesh::<2>::unit_square_tri(3), 1, L2Basis::GaussLegendre, "tri P1"),
-            (Mesh::<2>::unit_square_tri(3), 2, L2Basis::GaussLegendre, "tri P2"),
+            (Mesh::<2>::unit_square_tri(3), 1, L2Basis::GaussLobatto, "tri P1 GLL"),
+            (Mesh::<2>::unit_square_tri(3), 2, L2Basis::GaussLobatto, "tri P2 GLL"),
             (
                 Mesh::<2>::make_cartesian_2d(2, 3, 1.0, 2.0),
                 2,
@@ -588,6 +600,17 @@ mod tests {
     fn l2fr_rejects_gauss_legendre_quad_basis() {
         let mesh = Mesh::<2>::make_cartesian_2d(2, 2, 1.0, 1.0);
         let space = L2Space::new_with_basis(mesh, 2, L2Basis::GaussLegendre);
+        let _ = L2FaceRestriction::new(&space, FaceType::Interior, L2FaceValues::DoubleValued);
+    }
+
+    /// The default-basis (GaussLegendre) simplex L2 spaces are rejected too:
+    /// their DOFs sit at MFEM's open barycentric GL nodes, strictly inside the
+    /// element — no DOFs on any face (D269, MFEM CheckFESpace parity).
+    #[test]
+    #[should_panic(expected = "Only Gauss-Lobatto")]
+    fn l2fr_rejects_gauss_legendre_simplex_basis() {
+        let mesh = Mesh::<2>::unit_square_tri(2);
+        let space = L2Space::new(mesh, 1); // default = GaussLegendre (D269)
         let _ = L2FaceRestriction::new(&space, FaceType::Interior, L2FaceValues::DoubleValued);
     }
 
@@ -728,7 +751,9 @@ mod tests {
     fn l2fr_boundary_faces() {
         let mesh = Mesh::<2>::unit_square_tri(3);
         let n_bdr = mesh.n_boundary_faces();
-        let space = L2Space::new(mesh.clone(), 1);
+        // Gauss-Lobatto simplex L2: the DOF-on-the-face basis MFEM's
+        // CheckFESpace admits (the GL default has no face DOFs, D269).
+        let space = L2Space::new_with_basis(mesh.clone(), 1, L2Basis::GaussLobatto);
         let fr =
             L2FaceRestriction::new(&space, FaceType::Boundary, L2FaceValues::DoubleValued);
         assert_eq!(fr.num_faces(), n_bdr);
@@ -750,7 +775,7 @@ mod tests {
     #[test]
     fn l2fr_single_valued_layout() {
         let mesh = Mesh::<2>::unit_square_tri(3);
-        let space = L2Space::new(mesh, 2);
+        let space = L2Space::new_with_basis(mesh, 2, L2Basis::GaussLobatto);
         let fr_d = L2FaceRestriction::new(
             &space, FaceType::Interior, L2FaceValues::DoubleValued);
         let fr_s = L2FaceRestriction::new(

@@ -953,7 +953,7 @@ mod tests {
     use super::*;
     use crate::postproc::grid_function::GridFunction;
     use fem_mesh::Mesh;
-    use fem_space::H1Space;
+    use fem_space::{H1Space, L2Basis};
 
     /// Planar-interface transport: the assembled operator must not blow up and
     /// must transport the known field stably for a few steps.
@@ -1109,6 +1109,11 @@ mod tests {
         // Single-element structural check: on tri1 = (0,0),(1,0),(1,1) with
         // n = (−1,0), K_ij = ∫ φ_i ∂λ_j/∂x gives the exact entries
         // (−|T|/3, +|T|/3, 0) per row.
+        //
+        // The hand-derived entries below are for the *vertex* (barycentric)
+        // P1 basis — the GaussLobatto simplex L2 layout.  The steady-state
+        // part above already covers the default GaussLegendre basis exactly
+        // (K u + M·(n·∇u) ≡ 0 for u = x in any P1 basis, D269).
         {
             let mesh1 = Mesh::<2>::unit_square_tri(1);
             let h1 = H1Space::new(mesh1.clone(), 1);
@@ -1117,7 +1122,7 @@ mod tests {
                 space: &h1,
                 dofs: (0..2 * n1).map(|i| if i < n1 { -1.0 } else { 0.0 }).collect(),
             };
-            let l2s = L2Space::new(mesh1.clone(), 1);
+            let l2s = L2Space::new_with_basis(mesh1.clone(), 1, L2Basis::GaussLobatto);
             let mut coo1 = CooMatrix::<f64>::new(l2s.n_dofs(), l2s.n_dofs());
             assemble_convection_volume(&mesh1, &l2s, &l1, 2, &mut coo1);
             let kv1 = coo1.into_csr();

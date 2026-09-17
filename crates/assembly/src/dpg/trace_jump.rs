@@ -12,8 +12,7 @@
 use fem_core::types::DofId;
 use fem_element::{
     ReferenceElement,
-    lagrange::{QuadL2GL, TriP1, QuadQ1, QuadQ2},
-    lagrange::factory::TriPk,
+    lagrange::{QuadL2GL, TriL2GL, QuadQ1, QuadQ2},
     quadrature::seg_rule_arbitrary,
 };
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -58,9 +57,13 @@ fn ref_elem_for_space(
     // (MFEM L2/Gauss-Legendre elements) vs the [-1,1]ⁿ domain (legacy
     // QuadQk).  The face parameterisation must match.
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriP1) as Box<dyn ReferenceElement>, 3, true),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriPk::new(2)) as Box<dyn ReferenceElement>, 6, true),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriPk::new(3)) as Box<dyn ReferenceElement>, 10, true),
+        // D269: the L2 test space's dof slots are the MFEM open barycentric
+        // GL nodes (`TriL2GL`, the `L2_FECollection` default) — Bhat must
+        // evaluate the same basis the space numbers its dofs in, exactly like
+        // the quad GL precedent below (round 40).
+        (ElementType::Tri3 | ElementType::Tri6, 1) => (Box::new(TriL2GL::new(1)) as Box<dyn ReferenceElement>, 3, true),
+        (ElementType::Tri3 | ElementType::Tri6, 2) => (Box::new(TriL2GL::new(2)) as Box<dyn ReferenceElement>, 6, true),
+        (ElementType::Tri3 | ElementType::Tri6, 3) => (Box::new(TriL2GL::new(3)) as Box<dyn ReferenceElement>, 10, true),
         // L2 P1 on quads uses Gauss-Legendre nodal basis (MFEM
         // L2_FECollection default BasisType::GaussLegendre) on [0,1]² — NOT
         // the equally-spaced QuadQ1.  Using QuadQ1 here made Bhat

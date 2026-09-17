@@ -118,15 +118,13 @@ fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
     j11: f64,
     det_j: f64,
     signs: &[f64],
+    sample_pts: &[[f64; 2]],
 ) -> (Vec<f64>, Vec<f64>) {
     const N_RT2: usize = 15;
-    const N_L2: usize = 6;
     let n_rt2 = N_RT2;
-    let n_l2_local = N_L2;
+    let n_l2_local = sample_pts.len();
 
     let x0 = mesh.node_coords(nodes[0]);
-    let x1 = mesh.node_coords(nodes[1]);
-    let x2 = mesh.node_coords(nodes[2]);
 
     let mut dmat = vec![0.0_f64; n_rt2 * n_rt2];
     let mut ymat = vec![0.0_f64; n_l2_local * n_rt2];
@@ -149,17 +147,11 @@ fn rt2_triangle_dmat_ymat_div_p2<M: MeshTopology>(
             dmat[s * n_rt2 + k] = signs[s] * (upx * nx + upy * ny);
         }
 
-        let sample_pts = [
-            [x0[0], x0[1]],
-            [x1[0], x1[1]],
-            [x2[0], x2[1]],
-            [0.5 * (x0[0] + x1[0]), 0.5 * (x0[1] + x1[1])],
-            [0.5 * (x1[0] + x2[0]), 0.5 * (x1[1] + x2[1])],
-            [0.5 * (x0[0] + x2[0]), 0.5 * (x0[1] + x2[1])],
-        ];
-        for p in 0..n_l2_local {
-            let yp0 = sample_pts[p][0] - x0[0];
-            let yp1 = sample_pts[p][1] - x0[1];
+        // D269: `sample_pts` are the L2 space's DOF nodes (physical), passed
+        // by the caller — never hardcoded vertices/midpoints.
+        for (p, sp) in sample_pts.iter().enumerate() {
+            let yp0 = sp[0] - x0[0];
+            let yp1 = sp[1] - x0[1];
             let inv_det = 1.0 / det_j;
             let xi0 = inv_det * (j11 * yp0 - j01 * yp1);
             let xi1 = inv_det * (-j10 * yp0 + j00 * yp1);
@@ -528,7 +520,9 @@ impl DiscreteLinearOperator {
     ///
     /// ## Order 2 — ND2 -> P1/P2 (point-value DOFs)
     ///
-    /// L2(P1) is discontinuous nodal. For each element vertex `xi_k`,
+    /// L2(P1/P2) is discontinuous nodal. For each L2 DOF node `xi_k` (the
+    /// space's `dof_coords` — MFEM's open barycentric GL nodes for the
+    /// default basis, D269),
     ///
     /// ```text
     ///   C[p1_dof_k, nd2_dof_j] = sign_j * curl_ref_j(xi_k) / det_j
@@ -695,6 +689,19 @@ impl DiscreteLinearOperator {
             let j00 = x1[0] - x0[0]; let j10 = x1[1] - x0[1];
             let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
 
+            // D269: the L2 dof functionals are point evaluations at the
+            // space's DOF nodes — MFEM's open barycentric GL nodes for the
+            // default `L2Basis::GaussLegendre`, the corner nodes for
+            // GaussLobatto — read from the space, never hardcoded vertices.
+            let dcs = l2_space.dof_coords();
+            let sample_pts: Vec<[f64; 2]> = l2_dofs
+                .iter()
+                .map(|&g| {
+                    let b = g as usize * 2;
+                    [dcs[b], dcs[b + 1]]
+                })
+                .collect();
+
             // D (8x8): ND2 DOFs of spanning fields. Y (3x8): nodal curls.
             let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
             let mut ymat = vec![0.0_f64; 3 * n_nd2];
@@ -737,10 +744,9 @@ impl DiscreteLinearOperator {
                     dmat[i * n_nd2 + k] = dof_k[i];
                 }
 
-                // P1 nodal curls at element vertices.
-                for p in 0..3 {
-                    let xp = mesh.node_coords(nodes[p]);
-                    ymat[p * n_nd2 + k] = eval_curl(k, xp[0], xp[1]);
+                // P1 nodal curls at the L2 DOF nodes (D269).
+                for (p, sp) in sample_pts.iter().enumerate() {
+                    ymat[p * n_nd2 + k] = eval_curl(k, sp[0], sp[1]);
                 }
             }
 
@@ -834,6 +840,18 @@ impl DiscreteLinearOperator {
             let j01 = x2[0] - x0[0];
             let j11 = x2[1] - x0[1];
 
+            // D269: L2 point evaluations at the space's DOF nodes (open
+            // barycentric GL nodes for the default basis) — see
+            // `curl_2d_nd2_p1`.
+            let dcs = l2_space.dof_coords();
+            let sample_pts: Vec<[f64; 2]> = l2_dofs
+                .iter()
+                .map(|&g| {
+                    let b = g as usize * 2;
+                    [dcs[b], dcs[b + 1]]
+                })
+                .collect();
+
             let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
             let mut ymat = vec![0.0_f64; 6 * n_nd2];
 
@@ -871,17 +889,9 @@ impl DiscreteLinearOperator {
                     dmat[i * n_nd2 + k] = dof_k[i];
                 }
 
-                // P2 nodal curls: vertices and edge midpoints.
-                let sample_pts = [
-                    [x0[0], x0[1]],
-                    [x1[0], x1[1]],
-                    [x2[0], x2[1]],
-                    [0.5 * (x0[0] + x1[0]), 0.5 * (x0[1] + x1[1])],
-                    [0.5 * (x1[0] + x2[0]), 0.5 * (x1[1] + x2[1])],
-                    [0.5 * (x0[0] + x2[0]), 0.5 * (x0[1] + x2[1])],
-                ];
-                for p in 0..6 {
-                    ymat[p * n_nd2 + k] = eval_curl(k, sample_pts[p][0], sample_pts[p][1]);
+                // P2 nodal curls at the L2 DOF nodes (D269).
+                for (p, sp) in sample_pts.iter().enumerate() {
+                    ymat[p * n_nd2 + k] = eval_curl(k, sp[0], sp[1]);
                 }
             }
 
@@ -1128,6 +1138,18 @@ impl DiscreteLinearOperator {
                 let j01 = x2[0] - x0[0]; let j11 = x2[1] - x0[1];
                 let signs = hdiv_space.element_signs(e);
 
+                // D269: L2 point evaluations at the space's DOF nodes — MFEM
+                // open barycentric GL nodes for the default basis, the
+                // corner/equispaced layout for GaussLobatto.
+                let dcs = l2_space.dof_coords();
+                let sample_pts: Vec<[f64; 2]> = l2_dofs
+                    .iter()
+                    .map(|&g| {
+                        let b = g as usize * 2;
+                        [dcs[b], dcs[b + 1]]
+                    })
+                    .collect();
+
                 let mut dmat = vec![0.0_f64; n_rt1 * n_rt1];
                 let n_l2_local = l2_dofs.len(); // 3 (P1) or 6 (P2)
                 let mut ymat = vec![0.0_f64; n_l2_local * n_rt1];
@@ -1143,16 +1165,8 @@ impl DiscreteLinearOperator {
                         let ny = -j01 * nk[0] + j00 * nk[1];
                         dmat[s * n_rt1 + k] = signs[s] * (fx * nx + fy * ny);
                     }
-                    let sample_pts = [
-                        [x0[0], x0[1]],
-                        [x1[0], x1[1]],
-                        [x2[0], x2[1]],
-                        [0.5 * (x0[0] + x1[0]), 0.5 * (x0[1] + x1[1])],
-                        [0.5 * (x1[0] + x2[0]), 0.5 * (x1[1] + x2[1])],
-                        [0.5 * (x0[0] + x2[0]), 0.5 * (x0[1] + x2[1])],
-                    ];
-                    for p in 0..n_l2_local {
-                        ymat[p * n_rt1 + k] = eval_div(k, sample_pts[p][0], sample_pts[p][1]);
+                    for (p, sp) in sample_pts.iter().enumerate() {
+                        ymat[p * n_rt1 + k] = eval_div(k, sp[0], sp[1]);
                     }
                 }
 
@@ -1237,6 +1251,18 @@ impl DiscreteLinearOperator {
                 let n_l2_local = l2_dofs.len();
                 let mut ymat = vec![0.0_f64; n_l2_local * n_rt1];
 
+                // D269: L2 point evaluations at the space's DOF nodes (open
+                // barycentric GL nodes for the default basis), not hardcoded
+                // vertices/edge midpoints.
+                let dcs = l2_space.dof_coords();
+                let sample_pts: Vec<[f64; 3]> = l2_dofs
+                    .iter()
+                    .map(|&g| {
+                        let b = g as usize * 3;
+                        [dcs[b], dcs[b + 1], dcs[b + 2]]
+                    })
+                    .collect();
+
                 let x0 = mesh.node_coords(nodes[0]);
                 let x1 = mesh.node_coords(nodes[1]);
                 let x2 = mesh.node_coords(nodes[2]);
@@ -1280,21 +1306,9 @@ impl DiscreteLinearOperator {
                         }
                         dmat[s * n_rt1 + k] = signs[s] * val;
                     }
-                    let sample_pts = [
-                        [x0[0], x0[1], x0[2]],
-                        [x1[0], x1[1], x1[2]],
-                        [x2[0], x2[1], x2[2]],
-                        [x3[0], x3[1], x3[2]],
-                        [0.5 * (x0[0] + x1[0]), 0.5 * (x0[1] + x1[1]), 0.5 * (x0[2] + x1[2])],
-                        [0.5 * (x1[0] + x2[0]), 0.5 * (x1[1] + x2[1]), 0.5 * (x1[2] + x2[2])],
-                        [0.5 * (x2[0] + x0[0]), 0.5 * (x2[1] + x0[1]), 0.5 * (x2[2] + x0[2])],
-                        [0.5 * (x0[0] + x3[0]), 0.5 * (x0[1] + x3[1]), 0.5 * (x0[2] + x3[2])],
-                        [0.5 * (x1[0] + x3[0]), 0.5 * (x1[1] + x3[1]), 0.5 * (x1[2] + x3[2])],
-                        [0.5 * (x2[0] + x3[0]), 0.5 * (x2[1] + x3[1]), 0.5 * (x2[2] + x3[2])],
-                    ];
-                    for p in 0..n_l2_local {
+                    for (p, sp) in sample_pts.iter().enumerate() {
                         ymat[p * n_rt1 + k] =
-                            eval_div(k, sample_pts[p][0], sample_pts[p][1], sample_pts[p][2]);
+                            eval_div(k, sp[0], sp[1], sp[2]);
                     }
                 }
 
@@ -1372,8 +1386,20 @@ impl DiscreteLinearOperator {
 
             let signs = hdiv_space.element_signs(e);
 
-            let (dmat, ymat) =
-                rt2_triangle_dmat_ymat_div_p2(mesh, nodes, j00, j01, j10, j11, det_j, signs);
+            // D269: L2 point evaluations at the space's DOF nodes (open
+            // barycentric GL nodes for the default basis).
+            let dcs = l2_space.dof_coords();
+            let sample_pts: Vec<[f64; 2]> = l2_dofs
+                .iter()
+                .map(|&g| {
+                    let b = g as usize * 2;
+                    [dcs[b], dcs[b + 1]]
+                })
+                .collect();
+
+            let (dmat, ymat) = rt2_triangle_dmat_ymat_div_p2(
+                mesh, nodes, j00, j01, j10, j11, det_j, signs, &sample_pts,
+            );
 
             let mut dt = vec![0.0_f64; n_rt2 * n_rt2];
             for i in 0..n_rt2 {
