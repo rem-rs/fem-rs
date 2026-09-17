@@ -158,6 +158,15 @@ pub fn geo_ref_elem_from_mesh(
         }
         ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
         ElementType::Prism6 | ElementType::Prism15 => FactoryElemType::Prism,
+        ElementType::Pyramid5 if g <= 1 => {
+            // D304: straight pyramids need the rational collapsed P1 in MFEM
+            // vertex order — the layer-order factory element paired with
+            // mesh-order vertices twists the Jacobian (see
+            // `assembler::geo_ref_elem`).  Curved pyramids keep the
+            // layer-order factory element (their geometry table is written
+            // in layer-slot order by `set_curvature_pyramid5`).
+            return Some(Box::new(crate::assembler::GeoPyrP1::new()));
+        }
         _ => return None,
     };
     Some(factory_ref_elem(ft, order))

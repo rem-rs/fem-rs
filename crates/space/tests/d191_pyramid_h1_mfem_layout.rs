@@ -1,9 +1,9 @@
 //! D191 — pyramid H1 field slots vs MFEM 4.10 ground truth.
 //!
 //! Ground truth: MFEM 4.10 `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)`
-//! (the Bergot pyramid — the family fem-rs' `PyramidPk` implements; MFEM's
-//! *default* `pyr_type=1` Fuentes pyramid has 15/37/77 dofs at p=2/3/4 and is
-//! a documented family gap, see `tmp/d191/EVIDENCE.md`).
+//! (the Bergot pyramid — the family fem-rs numbers pyramid H¹ spaces with;
+//! MFEM's *default* `pyr_type=1` Fuentes pyramid has 15/37/77 dofs at p=2/3/4
+//! and is a documented family gap, see `tmp/d191/EVIDENCE.md`).
 //!
 //! The probe `tmp/d191/pyr_h1_probe.cpp` (dumps
 //! `$HOME/work/d299/probe_p{2,3,4,5}.txt`) projected the XYZ coefficient
@@ -13,17 +13,19 @@
 //! straight unit pyramid the linear map is the identity, so the projected
 //! positions ARE the reference positions of the slots.
 //!
-//! MFEM's reference lattice uses 1-D Gauss–Lobatto points (and barycentric
-//! combinations of them on tri faces / interior), while fem-rs' `PyramidPk`
-//! uses the equispaced collapsed lattice — the two agree in *arrangement*
-//! (same slot → entity/lattice-index map, provably identical at p ≤ 2 where
-//! the GLL points of degree ≤ 2 coincide with the equispaced ones) but not in
-//! position for p ≥ 3.  The tests below therefore pin
+//! MFEM's reference lattice uses 1-D Gauss–Lobatto points (barycentric
+//! combinations of them on tri faces / interior); D299 moved the slot
+//! *coordinates* from the equispaced collapsed lattice `(i/p, j/p, k/p)` to
+//! those GLL-barycentric positions (`H1PyramidPk::dof_coords`, the element
+//! the assembler now pairs with these slots).  The tests below pin
 //!
-//! 1. p = 2: full position parity with the MFEM dump (both lattices coincide);
+//! 1. p = 2: full position parity with the MFEM dump (the GLL points of
+//!    degree 2 coincide with the equispaced ones);
 //! 2. p = 2..5: the slot→lattice-index arrangement against an independent
 //!    reimplementation of the MFEM-encoded layout, and the slot positions
-//!    against the linear-pyramid image `(i/p, j/p, k/p)`;
+//!    against an independent implementation of MFEM's GLL-barycentric node
+//!    placement (exact for every p — the equispaced `(i/p, j/p, k/p)` at
+//!    p = 2 is a special case);
 //! 3. the MFEM edge directions for blocks 2/3 (`(3,2)`, `(0,3)`);
 //! 4. dof sharing (same global ids) on a 2-pyramid mesh sharing edges and a
 //!    slanted face.
@@ -103,6 +105,108 @@ fn mfem_slot_grid(p: usize) -> Vec<[usize; 3]> {
     s
 }
 
+/// Closed Gauss–Lobatto points on `[0,1]`: endpoints plus the roots of
+/// `P'_p` (Newton on the Legendre recurrence, independent of `fem-element`).
+fn gll_closed(p: usize) -> Vec<f64> {
+    const PIF: f64 = std::f64::consts::PI;
+    // Legendre P_n(x) and P'_n(x) on [-1,1] (three-term recurrence, and
+    // `(x²−1)P'_n = n(x P_n − P_{n−1})` for the derivative).
+    fn pleg(n: usize, x: f64) -> (f64, f64) {
+        if n == 0 {
+            return (1.0, 0.0);
+        }
+        if n == 1 {
+            return (x, 1.0);
+        }
+        let (mut p0, mut p1) = (1.0_f64, x);
+        for k in 1..n {
+            let t = ((2 * k + 1) as f64 * x * p1 - k as f64 * p0) / (k + 1) as f64;
+            p0 = p1;
+            p1 = t;
+        }
+        let d = n as f64 * (x * p1 - p0) / (x * x - 1.0);
+        (p1, d)
+    }
+    let mut pts = vec![0.0; p + 1];
+    pts[p] = 1.0;
+    let pf = p as f64;
+    for i in 1..p {
+        // Chebyshev-like interior guess; Newton on P'_p (second derivative
+        // via `P''_n = (2x P'_n − n(n+1) P_n)/(x²−1)`).
+        let mut x = (PIF * (i as f64 + 0.5) / (pf + 0.5)).cos();
+        let (mut f, mut df) = {
+            let (pn, dpn) = pleg(p, x);
+            (dpn, (2.0 * x * dpn - pf * (pf + 1.0) * pn) / (1.0 - x * x))
+        };
+        for _ in 0..100 {
+            let step = f / df;
+            x -= step;
+            if step.abs() < 1e-16 {
+                break;
+            }
+            let (pn, dpn) = pleg(p, x);
+            f = dpn;
+            df = (2.0 * x * dpn - pf * (pf + 1.0) * pn) / (1.0 - x * x);
+        }
+        pts[i] = 0.5 * (x + 1.0);
+    }
+    // The interior roots were found right-to-left; MFEM's `cp` increases.
+    pts[1..p].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    pts
+}
+
+/// Independent implementation of MFEM `H1_BergotPyramidElement`'s
+/// GLL-barycentric node placement for a collapsed-lattice label
+/// (`fe/fe_h1.cpp` constructor — mirrors the probe's XYZ projection on the
+/// straight unit pyramid; must stay in sync with the probe dumps, not with
+/// `H1PyramidPk`).
+fn mfem_slot_position(p: usize, l: [usize; 3]) -> [f64; 3] {
+    let cp = gll_closed(p);
+    let [i, j, k] = l;
+    if k == 0 {
+        return [cp[i], cp[j], cp[0]];
+    }
+    if (i, j, k) == (0, 0, p) {
+        return [cp[0], cp[0], cp[p]];
+    }
+    if i == 0 && j == 0 {
+        return [cp[0], cp[0], cp[k]];
+    }
+    if j == 0 && i + k == p {
+        return [cp[i], cp[0], cp[k]];
+    }
+    if i == j && i + k == p {
+        return [cp[i], cp[j], cp[k]];
+    }
+    if i == 0 && j + k == p {
+        return [cp[0], cp[j], cp[k]];
+    }
+    if j == 0 {
+        let w = cp[i] + cp[k] + cp[p - i - k];
+        return [cp[i] / w, cp[0], cp[k] / w];
+    }
+    if i == p - k {
+        let w = cp[j] + cp[k] + cp[p - j - k];
+        return [1.0 - cp[k] / w, cp[j] / w, cp[k] / w];
+    }
+    if j == p - k {
+        let w = cp[i] + cp[k] + cp[p - i - k];
+        return [cp[i] / w, 1.0 - cp[k] / w, cp[k] / w];
+    }
+    if i == 0 {
+        let w = cp[j] + cp[k] + cp[p - j - k];
+        return [cp[0], cp[j] / w, cp[k] / w];
+    }
+    let wjk = cp[j] + cp[k] + cp[p - j - k];
+    let wik = cp[i] + cp[k] + cp[p - i - k];
+    let w = wik * wjk * cp[p - k];
+    [
+        cp[i] * (cp[j] + cp[p - j - k]) / w,
+        cp[j] * (cp[i] + cp[p - i - k]) / w,
+        cp[k] * cp[p - k] / w,
+    ]
+}
+
 /// D191 pin 1: at p = 2 the fem-rs and MFEM lattices coincide pointwise, so
 /// the slot positions must match the probe dump bit-for-bit-pattern
 /// (`probe_p2.txt`, `== bergot p=2`, 14 slots).
@@ -140,10 +244,10 @@ fn d191_p2_positions_match_mfem_probe() {
     }
 }
 
-/// D191 pin 2: for p = 2..5 the slot arrangement (which lattice index each
-/// element-dof slot carries) matches the MFEM-encoded table, and each slot's
-/// coordinate equals the linear-pyramid image of `(i/p, j/p, k/p)` — on the
-/// unit pyramid exactly that point.
+/// D191 pin 2 (D299-updated): for p = 2..5 the slot arrangement (which
+/// lattice index each element-dof slot carries) matches the MFEM-encoded
+/// table, and each slot's coordinate equals MFEM's GLL-barycentric reference
+/// position for that label — on the unit pyramid exactly that point.
 #[test]
 fn d191_slot_arrangement_and_positions_p2_to_p5() {
     for p in 2..=5usize {
@@ -163,12 +267,13 @@ fn d191_slot_arrangement_and_positions_p2_to_p5() {
         assert_eq!(seen.len(), n_expected, "p{p}: duplicate dofs on element");
         for (s, g) in grid.iter().enumerate() {
             let d = dofs[s] as usize;
+            let want = mfem_slot_position(p, *g);
             for k in 0..3 {
-                let want = g[k] as f64 / p as f64;
                 assert!(
-                    (dm.dof_coords[d * 3 + k] - want).abs() < 1e-13,
-                    "p{p} slot {s} (grid {g:?}): got {}, want {want}",
+                    (dm.dof_coords[d * 3 + k] - want[k]).abs() < 1e-13,
+                    "p{p} slot {s} (grid {g:?}): got {}, want {}",
                     dm.dof_coords[d * 3 + k],
+                    want[k],
                 );
             }
         }

@@ -47,7 +47,7 @@
 use nalgebra::DMatrix;
 use fem_core::types::ElemId;
 use fem_element::{
-    ReferenceElement, PyramidPk,
+    ReferenceElement,
     lagrange::{SegP1, TetP1, TetP2, TriP1, QuadQ1, HexQ1},
 };
 use fem_element::lagrange::factory::TriPk;
@@ -58,6 +58,7 @@ use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshT
 use fem_space::fe_space::FESpace;
 
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
+use crate::assembler::GeoPyrP1;
 
 // ─── Reference element factory (re-exported from assembler) ─────────────────
 
@@ -85,8 +86,11 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>
             Box::new(fem_element::lagrange::H1PrismPk::new(order as usize)),
+        // D299: MFEM's Bergot pyramid (`pyr_type=0`), entity slot order at
+        // the GLL-barycentric nodes — matches the H¹ pyramid dof numbering
+        // (`DofManager::build_pyramid_pk` / `ref_elem_vol_h1`).
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) =>
-            Box::new(PyramidPk::new(order as usize)),
+            Box::new(fem_element::lagrange::H1PyramidPk::new(order as usize)),
         _ => panic!("bbar::ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -125,6 +129,12 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     // element would misread them from p = 3 on (D181, same-family).
     if matches!(et, ElementType::Tri3 | ElementType::Tri6) && g > 1 {
         return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize)));
+    }
+    // D304: straight pyramids need the rational collapsed P1 in MFEM vertex
+    // order — see `assembler::geo_ref_elem` (the layer-order factory element
+    // paired with mesh-order vertices twists the Jacobian).
+    if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) && g <= 1 {
+        return Some(Box::new(GeoPyrP1::new()));
     }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);

@@ -1309,7 +1309,7 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// (Gauss-Lobatto nodes, DOFs ordered vertices → edges → interior):
 /// `QuadQk`/`HexQk` for tensor elements, `H1TriPk` for triangles,
 /// `QuadSerendipityPk`/`HexSerendipityPk` for serendipity elements,
-/// `H1TetPk`/`H1PrismPk`/`PyramidPk` for the rest.
+/// `H1TetPk`/`H1PrismPk`/`H1PyramidPk` for the rest.
 ///
 /// D31 stage A (GLL alignment): the hex entries at orders 2/3 were the last
 /// third ordering — `HexQ2`/`HexQ3` are now slot-identical to
@@ -1325,7 +1325,7 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// order-6 discretization returned `Err` (recorded as kernel gap D46① in the
 /// round-15 navier hand-over).
 pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
-    use fem_element::lagrange::{HexQk, H1PrismPk, H1TriPk, PyramidPk};
+    use fem_element::lagrange::{HexQk, H1PrismPk, H1TriPk};
 
     if order > REF_ELEM_VOL_MAX_ORDER {
         return Err(format!(
@@ -1392,8 +1392,13 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
             Box::new(H1PrismPk::new(o as usize))
         }
+        // D299: MFEM's Bergot pyramid (`pyr_type=0`), entity slot order at
+        // the GLL-barycentric nodes — the same table as
+        // `assembler::ref_elem_vol_h1` and `fem_space`'s `build_pyramid_pk`
+        // (the layer-order equispaced `PyramidPk` disagreed with the H¹
+        // space's dof numbering from p = 2 on).
         (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
-            Box::new(PyramidPk::new(o as usize))
+            Box::new(fem_element::lagrange::H1PyramidPk::new(o as usize))
         }
         _ => return Err(format!("ref_elem_vol: unsupported ({elem_type:?}, order={order})")),
     })

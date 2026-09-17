@@ -70,8 +70,8 @@ pub use crouzeix_raviart::{
     cr2_tri_grad, CrTet1, CrTet2, CrTri1, CrTri2, CrouzeixRaviart1, CrouzeixRaviartVec1,
 };
 pub use lagrange::{
-    ref_elem, vec_ref_elem, ElemType, H1TriPk, HexL2GL, HexQ1, HexQ2, HexQ3, HexQk, LagrangeHex,
-    LagrangePrism, LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron,
+    ref_elem, vec_ref_elem, ElemType, H1PyramidPk, H1TriPk, HexL2GL, HexQ1, HexQ2, HexQ3, HexQk,
+    LagrangeHex, LagrangePrism, LagrangePyramid, LagrangeQuad, LagrangeSegment, LagrangeTetrahedron,
     LagrangeTriangle, PrismPk, PyramidPk, QuadL2GL, QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2,
     QuadQ3, QuadQ4, QuadQk, SegP1, SegP2, SegP3, SegP4, SegP5, SegP6, SegPk, TetP1, TetP2, TetP3,
     TetP4, TetP5, TetP6, TetPk, TriP1, TriP10, TriP2, TriP3, TriP4, TriP5, TriP6, TriP7, TriP8,

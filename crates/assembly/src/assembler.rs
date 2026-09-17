@@ -348,8 +348,16 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
             Box::new(fem_element::lagrange::H1PrismPk::new(order as usize))
         }
+        // D299: MFEM's Bergot pyramid (`pyr_type=0`) in **entity** slot order
+        // at the GLL-barycentric nodes — the element `H1_FECollection(p, 3,
+        // GaussLobatto)` puts on pyramid cells, matching `fem_space`'s
+        // `build_pyramid_pk` numbering.  The equispaced layer-order
+        // `PyramidPk` that used to sit here (a) paired different functions
+        // with the entity-ordered `dofs_flat` from p = 2 on (layer-order
+        // basis × entity-order dofs) and (b) sits on the wrong lattice from
+        // p = 3 on.
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
-            Box::new(PyramidPk::new(order as usize))
+            Box::new(fem_element::lagrange::H1PyramidPk::new(order as usize))
         }
         _ => panic!(
             "ref_elem_vol_h1: unsupported combination (element_type={elem_type:?}, order={order}). \
@@ -752,6 +760,19 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
         | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
         | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !is_quad_hex { return None; } // affine P1 simplex
+    // Straight pyramids: the geometry element must be the *rational*
+    // collapsed P1 (what MFEM's `LinearPyramidFiniteElement` computes) in
+    // **MFEM vertex order** — a flat mesh's `geometry_nodes` lists vertices
+    // in mesh order, and `PyramidPk(1)`'s layer slots 2/3 carry local
+    // vertices 3/2, so the raw factory element paired with that list twisted
+    // every straight-pyramid Jacobian (D304: unit-cell measure 1.69e-1
+    // instead of 1/3).  `GeoPyrP1` permutes the basis rows back into vertex
+    // order.  Curved pyramids keep the layer-order factory element: their
+    // geometry DOFs are *written* in layer-slot order by
+    // `Mesh::set_curvature_pyramid5` (the frozen D191 contract).
+    if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) && g <= 1 {
+        return Some(Box::new(GeoPyrP1 { layer: PyramidPk::new(1) }));
+    }
     match et {
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
             return if g <= 1 {
@@ -801,6 +822,49 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
     Some(factory_ref_elem(ft, order))
+}
+
+/// Straight-pyramid geometry element: [`PyramidPk`]'s rational collapsed P1
+/// basis permuted into **MFEM vertex order** — see [`geo_ref_elem`], which
+/// returns this for every non-curved pyramid.
+pub(crate) struct GeoPyrP1 {
+    layer: PyramidPk,
+}
+
+impl GeoPyrP1 {
+    pub(crate) fn new() -> Self {
+        Self { layer: PyramidPk::new(1) }
+    }
+}
+
+/// `PyramidPk(1)`'s layer slot k holds the shape function of local vertex
+/// `P1_SLOT_VERTEX[k]` (D191) — entity slot s holds layer slot
+/// `P1_SLOT_VERTEX[s]`.
+const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
+
+impl ReferenceElement for GeoPyrP1 {
+    fn dim(&self) -> u8 { 3 }
+    fn order(&self) -> u8 { 1 }
+    fn n_dofs(&self) -> usize { 5 }
+    fn eval_basis(&self, xi: &[f64], v: &mut [f64]) {
+        let mut tmp = [0.0_f64; 5];
+        self.layer.eval_basis(xi, &mut tmp);
+        for (s, &l) in PYR_P1_SLOT_VERTEX.iter().enumerate() {
+            v[s] = tmp[l];
+        }
+    }
+    fn eval_grad_basis(&self, xi: &[f64], g: &mut [f64]) {
+        let mut tmp = [0.0_f64; 15];
+        self.layer.eval_grad_basis(xi, &mut tmp);
+        for (s, &l) in PYR_P1_SLOT_VERTEX.iter().enumerate() {
+            g[s * 3..s * 3 + 3].copy_from_slice(&tmp[l * 3..l * 3 + 3]);
+        }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule { self.layer.quadrature(order) }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        let c = self.layer.dof_coords();
+        PYR_P1_SLOT_VERTEX.iter().map(|&l| c[l].clone()).collect()
+    }
 }
 
 /// Whether this element type has a constant (affine) Jacobian.

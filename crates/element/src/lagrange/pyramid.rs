@@ -55,11 +55,14 @@ fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
 
 /// Pyramid basis type selection (MFEM 4.10).
 ///
-/// - `Bergot`: Bernardi-Boggs-Fluery type basis (default in MFEM)
-/// - `Fuentes`: Fuentes-Keith-Demkowicz type basis (exact sequence)
+/// - `Bergot`: Bernardi-Boggs-Fluery type basis (MFEM `pyr_type=0`)
+/// - `Fuentes`: Fuentes-Keith-Demkowicz type basis (exact sequence; MFEM's
+///   **default**, `ScalarPyramid::DefaultType = 1`)
 ///
-/// Currently only `Bergot` is fully implemented; `Fuentes` falls back to
-/// Bergot with a warning.
+/// Only `Bergot` is implemented (via [`H1PyramidPk`], the GLL-noded entity
+/// order element, and [`PyramidPk`], the equispaced layer-order one);
+/// `Fuentes` — MFEM's actual default, with `p(p²+3)+1` DOFs — falls back to
+/// Bergot with a warning (D305).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PyramidBasisType {
     /// Bernardi-Boggs-Fluery type (collapsed coordinates, equispaced nodes).
@@ -77,6 +80,425 @@ pub struct PyramidPk {
     order: usize,
     layer_offset: Vec<usize>,
     basis_type: PyramidBasisType,
+}
+
+/// Integer collapsed-lattice labels `(i, j, k)` of MFEM
+/// `H1_BergotPyramidElement(p)`'s DOF slots in **entity order** (D191/D299):
+/// the layout `FiniteElementSpace::GetElementDofs` returns on a pyramid.
+///
+/// `0 ≤ k ≤ p` is the layer, `i, j ≥ 0` with `i + j ≤ p − k` the in-layer
+/// collapsed indices along `v0→v1` / `v0→v3`.  The slot order is
+///
+/// * slots 0–4: vertices `(0,0,0) (p,0,0) (p,p,0) (0,p,0) (0,0,p)`;
+/// * 8 edge blocks in MFEM's PYRAMID edge-table order and direction
+///   `(0,1) (1,2) (3,2) (0,3) (0,4) (1,4) (2,4) (3,4)` (blocks 2/3 run
+///   `v3→v2` and `v0→v3`);
+/// * quad base-face block in the H1(quad) interior order (`j` outer, `i`
+///   fastest);
+/// * 4 tri side-face blocks in face order `(0,1,4) (1,2,4) (2,3,4) (3,0,4)`,
+///   each in the H1(tri) interior order of that face;
+/// * interior block: `k` outer, then `j`, `i` fastest.
+///
+/// Dumped from MFEM 4.10 `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)`
+/// (probe `tmp/d191/pyr_h1_probe.cpp`).
+pub fn h1_pyramid_slot_labels(p: usize) -> Vec<[usize; 3]> {
+    let mut slots: Vec<[usize; 3]> = Vec::with_capacity((p + 1) * (p + 2) * (2 * p + 3) / 6);
+    slots.push([0, 0, 0]);
+    slots.push([p, 0, 0]);
+    slots.push([p, p, 0]);
+    slots.push([0, p, 0]);
+    slots.push([0, 0, p]);
+    if p >= 2 {
+        let corners = [[0, 0, 0], [p, 0, 0], [p, p, 0], [0, p, 0], [0, 0, p]];
+        let edge_pairs = [[0usize, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4]];
+        for &[a, b] in &edge_pairs {
+            let (ea, eb) = (corners[a], corners[b]);
+            for q in 1..p {
+                let pt = [0usize, 1, 2].map(|d| {
+                    // Signed lerp: the apex edges decrease a coordinate.
+                    let e = (ea[d] as isize) * (p - q) as isize
+                        + (eb[d] as isize) * q as isize;
+                    (e / p as isize) as usize
+                });
+                slots.push(pt);
+            }
+        }
+        // Quad base face: j (v0→v3) outer, i (v0→v1) fastest.
+        for j in 1..p {
+            for i in 1..p {
+                slots.push([i, j, 0]);
+            }
+        }
+    }
+    if p >= 3 {
+        // Tri face (0,1,4): rows parallel to the base edge (z/k outer).
+        for k in 1..=p - 2 {
+            for i in 1..=p - 1 - k {
+                slots.push([i, 0, k]);
+            }
+        }
+        // Tri face (1,2,4).
+        for k in 1..=p - 2 {
+            for j in 1..=p - 1 - k {
+                slots.push([p - k, j, k]);
+            }
+        }
+        // Tri face (2,3,4): columns across the base edge.
+        for i in 1..=p - 2 {
+            for k in 1..=p - 1 - i {
+                slots.push([i, p - k, k]);
+            }
+        }
+        // Tri face (3,0,4).
+        for j in 1..=p - 2 {
+            for k in 1..=p - 1 - j {
+                slots.push([0, j, k]);
+            }
+        }
+        // Interior: k (layer) outer, j outer, i fastest.
+        for k in 1..=p - 2 {
+            for j in 1..=p - 1 - k {
+                for i in 1..=p - 1 - k {
+                    slots.push([i, j, k]);
+                }
+            }
+        }
+    }
+    slots
+}
+
+/// Reference position of the collapsed-lattice label `l = (i, j, k)` in MFEM
+/// `H1_BergotPyramidElement(p)`: the **GLL-barycentric** node placement
+/// (`fe/fe_h1.cpp`, `H1_BergotPyramidElement::H1_BergotPyramidElement`).
+///
+/// Base-layer nodes sit at the 1-D closed Gauss–Lobatto points `cp` on
+/// `[0,1]`; tri-face and interior nodes are the barycentric combinations of
+/// the `cp` values that MFEM's constructor computes.  The formulas below are
+/// 1:1 ports of that constructor (each face keeps MFEM's own expression, so
+/// the floating-point results match the C++ element bit for bit).
+fn h1_pyramid_node_position(p: usize, cp: &[f64], l: [usize; 3]) -> [f64; 3] {
+    let [i, j, k] = l;
+    if k == 0 {
+        // Base plane: vertices, base edges and the quad face all sit at
+        // plain tensor `cp` values (cp[0] = 0 exactly).
+        return [cp[i], cp[j], cp[0]];
+    }
+    if (i, j, k) == (0, 0, p) {
+        return [cp[0], cp[0], cp[p]]; // apex
+    }
+    // Apex edges (checked before the tri faces: e.g. an edge (2,4) label
+    // also satisfies the tri-face conditions).
+    if i == 0 && j == 0 {
+        return [cp[0], cp[0], cp[k]]; // (0,4)
+    }
+    if j == 0 && i + k == p {
+        return [cp[i], cp[0], cp[k]]; // (1,4)
+    }
+    if i == j && i + k == p {
+        return [cp[i], cp[j], cp[k]]; // (2,4)
+    }
+    if i == 0 && j + k == p {
+        return [cp[0], cp[j], cp[k]]; // (3,4)
+    }
+    // Triangular side faces (MFEM's `w`-normalised barycentric placement).
+    if j == 0 {
+        // (0,1,4)
+        let w = cp[i] + cp[k] + cp[p - i - k];
+        return [cp[i] / w, cp[0], cp[k] / w];
+    }
+    if i == p - k {
+        // (1,2,4)
+        let w = cp[j] + cp[k] + cp[p - j - k];
+        return [1.0 - cp[k] / w, cp[j] / w, cp[k] / w];
+    }
+    if j == p - k {
+        // (2,3,4)
+        let w = cp[i] + cp[k] + cp[p - i - k];
+        return [cp[i] / w, 1.0 - cp[k] / w, cp[k] / w];
+    }
+    if i == 0 {
+        // (3,0,4)
+        let w = cp[j] + cp[k] + cp[p - j - k];
+        return [cp[0], cp[j] / w, cp[k] / w];
+    }
+    // Interior: MFEM's double-barycentric placement.
+    let wjk = cp[j] + cp[k] + cp[p - j - k];
+    let wik = cp[i] + cp[k] + cp[p - i - k];
+    let w = wik * wjk * cp[p - k];
+    [
+        cp[i] * (cp[j] + cp[p - j - k]) / w,
+        cp[j] * (cp[i] + cp[p - i - k]) / w,
+        cp[k] * cp[p - k] / w,
+    ]
+}
+
+/// Shifted Legendre polynomials `P̃_n(x) = P_n(2x−1)` on `[0,1]` and their
+/// `x`-derivatives (MFEM `Poly_1D::CalcLegendre` verbatim).
+fn calc_legendre_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0; p + 1];
+    let mut d = vec![0.0; p + 1];
+    let z;
+    u[0] = 1.0;
+    d[0] = 0.0;
+    if p == 0 {
+        return (u, d);
+    }
+    u[1] = 2.0 * x - 1.0;
+    z = u[1];
+    d[1] = 2.0;
+    for n in 1..p {
+        u[n + 1] = ((2 * n + 1) as f64 * z * u[n] - n as f64 * u[n - 1]) / (n + 1) as f64;
+        d[n + 1] = (4 * n + 2) as f64 * u[n] + d[n - 1];
+    }
+    (u, d)
+}
+
+/// Shifted Jacobi polynomials `P_n^{(α,0)}(2x−t)` (MFEM
+/// `FuentesPyramid::CalcScaledJacobi` with both value and `x`-derivative;
+/// the `t`-derivative is not needed by `H1_BergotPyramidElement`).
+fn calc_scaled_jacobi_dx(p: usize, alpha: f64, x: f64, t: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut u = vec![0.0; p + 1];
+    let mut dudx = vec![0.0; p + 1];
+    u[0] = 1.0;
+    dudx[0] = 0.0;
+    if p >= 1 {
+        u[1] = (2.0 + alpha) * x - t;
+        dudx[1] = 2.0 + alpha;
+    }
+    for i in 2..=p {
+        let a = 2.0 * i as f64 * (alpha + i as f64) * (2.0 * i as f64 + alpha - 2.0);
+        let b = 2.0 * i as f64 + alpha - 1.0;
+        let c = (2.0 * i as f64 + alpha) * (2.0 * i as f64 + alpha - 2.0);
+        let d = 2.0 * (alpha + i as f64 - 1.0) * (i - 1) as f64 * (2.0 * i as f64 + alpha);
+        u[i] = (b * (c * (2.0 * x - t) + alpha * alpha * t) * u[i - 1] - d * t * t * u[i - 2]) / a;
+        dudx[i] = (b * ((c * (2.0 * x - t) + alpha * alpha * t) * dudx[i - 1]
+                        + 2.0 * c * u[i - 1])
+                   - d * t * t * dudx[i - 2]) / a;
+    }
+    (u, dudx)
+}
+
+/// Bergot raw expansion index list: `(i, j, k)` with `k ≤ p − max(i, j)`, in
+/// MFEM's enumeration order (`i` outer, `j`, `k`).
+fn bergot_lex(p: usize) -> Vec<(usize, usize, usize)> {
+    let mut lex = Vec::with_capacity((p + 1) * (p + 2) * (2 * p + 3) / 6);
+    for i in 0..=p {
+        for j in 0..=p {
+            let maxij = i.max(j);
+            for k in 0..=p - maxij {
+                lex.push((i, j, k));
+            }
+        }
+    }
+    lex
+}
+
+/// MFEM `H1_BergotPyramidElement(p)` clone on the reference pyramid
+/// `(0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1)` — `(p+1)(p+2)(2p+3)/6` DOFs in
+/// MFEM's **entity** slot order ([`h1_pyramid_slot_labels`]) at the
+/// **GLL-barycentric** node positions ([`h1_pyramid_node_position`]).
+///
+/// Basis: the nodal basis on those nodes, built exactly like MFEM builds it —
+/// the raw collapsed expansion
+///
+/// ```text
+/// u_o = L_i(r) · L_j(s) · P_k^{(2(max(i,j)+1),0)}(z) · (1−z)^max(i,j)
+///       r = x/(1−z), s = y/(1−z), o = (i, j, k) in `bergot_lex` order
+/// ```
+///
+/// (`L` shifted Legendre, `P` shifted Jacobi) is evaluated at every node to
+/// form the Vandermonde `T(o, m)`, and `T⁻¹` maps `u` to the shape functions
+/// (MFEM's `Ti.Factor(T)` / `Ti.Mult(u, shape)`).  At the apex
+/// (`|z−1| < 1e-8`) the analytic limits of `u` / `∂u` are used, as in MFEM's
+/// `CalcShape`/`CalcDShape`.
+///
+/// This is MFEM's `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` pyramid —
+/// the family fem-rs numbers pyramid H¹ spaces with (D191).  It differs from
+/// the equispaced [`PyramidPk`] (same slot arrangement) from p = 3 on, where
+/// the GLL-barycentric nodes leave the equispaced lattice; and from MFEM's
+/// *default* Fuentes pyramid (`pyr_type=1`, `p(p²+3)+1` DOFs), which fem-rs
+/// does not implement yet (D305).
+pub struct H1PyramidPk {
+    inner: std::sync::Arc<H1PyramidPkInner>,
+}
+
+struct H1PyramidPkInner {
+    order: usize,
+    /// Slot reference positions in entity order (GLL-barycentric).
+    nodes: Vec<[f64; 3]>,
+    lex: Vec<(usize, usize, usize)>,
+    /// `φ_m = Σ_o ti[m·n + o] · u_o(x)` — row-major `T⁻¹`.
+    ti: Vec<f64>,
+}
+
+impl H1PyramidPk {
+    /// Build (or fetch from the per-order cache) the element.
+    pub fn new(p: usize) -> Self {
+        assert!(p >= 1, "order must be >= 1");
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static CACHE: OnceLock<Mutex<HashMap<usize, Arc<H1PyramidPkInner>>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let inner = {
+            let mut m = cache.lock().expect("H1PyramidPk cache poisoned");
+            m.entry(p).or_insert_with(|| Arc::new(h1_pyramid_pk_build(p))).clone()
+        };
+        Self { inner }
+    }
+
+    /// MFEM's `H1_BergotPyramidElement(p)` slot table — see
+    /// [`h1_pyramid_slot_labels`].
+    pub fn slot_labels(p: usize) -> Vec<[usize; 3]> {
+        h1_pyramid_slot_labels(p)
+    }
+}
+
+fn h1_pyramid_pk_build(p: usize) -> H1PyramidPkInner {
+    // Closed Gauss–Lobatto points on [0,1] (MFEM `poly1d.ClosedPoints(p,
+    // GaussLobatto)` — the `btype` MFEM's `H1_BergotPyramidElement` uses).
+    let (g, _w) = crate::quadrature::gauss_lobatto_arbitrary(p + 1);
+    let cp: Vec<f64> = g.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+    let labels = h1_pyramid_slot_labels(p);
+    let nodes: Vec<[f64; 3]> = labels
+        .iter()
+        .map(|&l| h1_pyramid_node_position(p, &cp, l))
+        .collect();
+    let lex = bergot_lex(p);
+    let n = nodes.len();
+    debug_assert_eq!(lex.len(), n);
+    let mut t = nalgebra::DMatrix::<f64>::zeros(n, n);
+    let apex_tol = 1e-8_f64;
+    for (m, node) in nodes.iter().enumerate() {
+        let (x, y, z) = (node[0], node[1], node[2]);
+        let (u, _du) = bergot_raw(p, &lex, x, y, z, apex_tol);
+        for (o, _) in lex.iter().enumerate() {
+            t[(o, m)] = u[o];
+        }
+    }
+    let ti_m = t.try_inverse().expect("H1PyramidPk: singular Vandermonde matrix");
+    let mut ti = vec![0.0; n * n];
+    for m in 0..n {
+        for o in 0..n {
+            ti[m * n + o] = ti_m[(m, o)];
+        }
+    }
+    H1PyramidPkInner { order: p, nodes, lex, ti }
+}
+
+/// Evaluate MFEM's Bergot raw expansion `u` (and optionally its gradients,
+/// when `du` is `Some`) at `(x, y, z)`, including the apex-limit paths of
+/// `H1_BergotPyramidElement::CalcShape`/`CalcDShape`.
+fn bergot_raw(
+    p: usize,
+    lex: &[(usize, usize, usize)],
+    x: f64,
+    y: f64,
+    z: f64,
+    apex_tol: f64,
+) -> (Vec<f64>, Option<Vec<f64>>) {
+    let n = lex.len();
+    let mut u = vec![0.0; n];
+    let mut du = Some(vec![0.0; n * 3]);
+    if (z - 1.0).abs() < apex_tol {
+        // Apex limits along the centre line (MFEM's precomputed polynomials).
+        for (o, &(i, j, k)) in lex.iter().enumerate() {
+            let k = k as f64;
+            if i == 0 && j == 0 {
+                u[o] = ((k + 3.0) * k + 2.0) / 2.0;
+                du.as_mut().unwrap()[o * 3 + 2] =
+                    (((k + 6.0) * k + 11.0) * k + 6.0) * k / 6.0;
+            } else if i == 1 && j == 0 {
+                du.as_mut().unwrap()[o * 3] =
+                    ((((k + 10.0) * k + 35.0) * k + 50.0) * k + 24.0) / 24.0;
+            } else if i == 0 && j == 1 {
+                du.as_mut().unwrap()[o * 3 + 1] =
+                    ((((k + 10.0) * k + 35.0) * k + 50.0) * k + 24.0) / 24.0;
+            }
+        }
+        return (u, du);
+    }
+    let r = if z < 1.0 { x / (1.0 - z) } else { 0.0 };
+    let s = if z < 1.0 { y / (1.0 - z) } else { 0.0 };
+    let (lx, dlx) = calc_legendre_d(p, r);
+    let (ly, dly) = calc_legendre_d(p, s);
+    // The z-Jacobi factor only depends on m = max(i, j): precompute per m.
+    let mut js: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(p + 1);
+    for m in 0..=p {
+        js.push(calc_scaled_jacobi_dx(p - m, 2.0 * (m as f64 + 1.0), z, 1.0));
+    }
+    let one_minus_z = 1.0 - z;
+    for (o, &(i, j, k)) in lex.iter().enumerate() {
+        let m = i.max(j);
+        let (jz, djz) = &js[m];
+        let omz_m = one_minus_z.powi(m as i32);
+        u[o] = lx[i] * ly[j] * jz[k] * omz_m;
+        if let Some(du) = du.as_mut() {
+            let omz_m1 = one_minus_z.powi(m as i32 - 1);
+            let omz_m2 = one_minus_z.powi(m as i32 - 2);
+            du[o * 3] = dlx[i] * ly[j] * jz[k] * omz_m1;
+            du[o * 3 + 1] = lx[i] * dly[j] * jz[k] * omz_m1;
+            du[o * 3 + 2] = lx[i] * ly[j] * djz[k] * omz_m
+                + (x * dlx[i] * ly[j] + y * lx[i] * dly[j]) * jz[k] * omz_m2
+                - if m > 0 {
+                    m as f64 * lx[i] * ly[j] * jz[k] * omz_m1
+                } else {
+                    0.0
+                };
+        }
+    }
+    (u, du)
+}
+
+impl ReferenceElement for H1PyramidPk {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.inner.order as u8
+    }
+    fn n_dofs(&self) -> usize {
+        self.inner.nodes.len()
+    }
+
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let n = self.inner.nodes.len();
+        let (u, _) = bergot_raw(self.inner.order, &self.inner.lex, x, y, z, 1e-8);
+        for m in 0..n {
+            let mut acc = 0.0;
+            for o in 0..n {
+                acc += self.inner.ti[m * n + o] * u[o];
+            }
+            values[m] = acc;
+        }
+    }
+
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let (x, y, z) = (xi[0], xi[1], xi[2]);
+        let n = self.inner.nodes.len();
+        let (_, du) = bergot_raw(self.inner.order, &self.inner.lex, x, y, z, 1e-8);
+        let du = du.expect("bergot_raw always returns gradients");
+        for m in 0..n {
+            let (mut gx, mut gy, mut gz) = (0.0, 0.0, 0.0);
+            for o in 0..n {
+                let c = self.inner.ti[m * n + o];
+                gx += c * du[o * 3];
+                gy += c * du[o * 3 + 1];
+                gz += c * du[o * 3 + 2];
+            }
+            grads[m * 3] = gx;
+            grads[m * 3 + 1] = gy;
+            grads[m * 3 + 2] = gz;
+        }
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        pyramid_rule(order)
+    }
+
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.inner.nodes.iter().map(|c| vec![c[0], c[1], c[2]]).collect()
+    }
 }
 
 impl PyramidPk {
@@ -407,5 +829,190 @@ mod tests {
         assert_eq!(elem.basis_type, PyramidBasisType::Fuentes);
         // Fuentes falls back to Bergot for now (same DOFs)
         assert_eq!(elem.n_dofs(), 14);
+    }
+
+    // ── H1PyramidPk (MFEM H1_BergotPyramidElement) ──────────────────────────
+
+    fn h1_pyr_check_pou(elem: &H1PyramidPk) {
+        let order = elem.order();
+        let rule = elem.quadrature((2 * order + 2).min(15));
+        let mut phi = vec![0.0_f64; elem.n_dofs()];
+        for pt in &rule.points {
+            elem.eval_basis(pt, &mut phi);
+            let s: f64 = phi.iter().sum();
+            assert!((s - 1.0).abs() < 1e-10, "POU failed at {:?}: sum={s}", pt);
+        }
+    }
+
+    /// MFEM's Bergot node placement at p = 3: probe-encoded GLL-barycentric
+    /// positions (`tmp/d191/probe_p3.txt`, `== bergot p=3`, `enode` table).
+    #[test]
+    fn h1_pyramid_pk_p3_positions_match_mfem_probe() {
+        let elem = H1PyramidPk::new(3);
+        let coords = elem.dof_coords();
+        let want: &[[f64; 3]] = &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.27639320225002106, 0.0, 0.0],
+            [0.72360679774997894, 0.0, 0.0],
+            [1.0, 0.27639320225002106, 0.0],
+            [1.0, 0.72360679774997894, 0.0],
+            [0.27639320225002106, 1.0, 0.0],
+            [0.72360679774997894, 1.0, 0.0],
+            [0.0, 0.27639320225002106, 0.0],
+            [0.0, 0.72360679774997894, 0.0],
+            [0.0, 0.0, 0.27639320225002106],
+            [0.0, 0.0, 0.72360679774997894],
+            [0.72360679774997894, 0.0, 0.27639320225002106],
+            [0.27639320225002106, 0.0, 0.72360679774997894],
+            [0.72360679774997894, 0.72360679774997894, 0.27639320225002106],
+            [0.27639320225002106, 0.27639320225002106, 0.72360679774997894],
+            [0.0, 0.72360679774997894, 0.27639320225002106],
+            [0.0, 0.27639320225002106, 0.72360679774997894],
+            [0.27639320225002106, 0.27639320225002106, 0.0],
+            [0.72360679774997894, 0.27639320225002106, 0.0],
+            [0.27639320225002106, 0.72360679774997894, 0.0],
+            [0.72360679774997894, 0.72360679774997894, 0.0],
+            [0.33333333333333331, 0.0, 0.33333333333333331],
+            [0.66666666666666674, 0.33333333333333331, 0.33333333333333331],
+            [0.33333333333333331, 0.66666666666666674, 0.33333333333333331],
+            [0.0, 0.33333333333333331, 0.33333333333333331],
+            [0.30710355805557898, 0.30710355805557898, 0.40200377652776603],
+        ];
+        assert_eq!(coords.len(), want.len());
+        for (m, w) in want.iter().enumerate() {
+            for d in 0..3 {
+                assert!(
+                    (coords[m][d] - w[d]).abs() < 1e-15,
+                    "p3 node {m} axis {d}: got {}, want {}",
+                    coords[m][d],
+                    w[d],
+                );
+            }
+        }
+        // The MFEM slot table must reproduce the probe's entity blocks: the
+        // p = 3 tri-face slots 25..29 hold dofs 25..29 (identity here), and
+        // the edge-2 block runs v3→v2 (slot 9 carries the cp[1] node).
+        let labels = H1PyramidPk::slot_labels(3);
+        assert_eq!(labels[9], [1, 3, 0]);
+        assert_eq!(labels[10], [2, 3, 0]);
+        assert_eq!(labels[21], [1, 1, 0]);
+        assert_eq!(labels[25], [1, 0, 1]);
+        assert_eq!(labels[29], [1, 1, 1]);
+    }
+
+    /// Counts `(p+1)(p+2)(2p+3)/6` and slot-table size agree, p = 1..10.
+    #[test]
+    fn h1_pyramid_pk_counts() {
+        for p in 1..=10usize {
+            let n = (p + 1) * (p + 2) * (2 * p + 3) / 6;
+            assert_eq!(H1PyramidPk::new(p).n_dofs(), n, "p={p}");
+            assert_eq!(h1_pyramid_slot_labels(p).len(), n, "p={p}");
+            assert_eq!(bergot_lex(p).len(), n, "p={p}");
+        }
+    }
+
+    /// Nodal property φ_m(node_l) = δ_ml — the construction is a Vandermonde
+    /// inverse over MFEM's Legendre–Jacobi raw expansion, so conditioning is
+    /// the same fact MFEM lives with (measured: ≤ 4e-11 residual through
+    /// p = 8; p = 9/10 degrade like MFEM's own LU would).
+    #[test]
+    fn h1_pyramid_pk_nodal_interp() {
+        for p in 1..=8usize {
+            let elem = H1PyramidPk::new(p);
+            let coords = elem.dof_coords();
+            let n = elem.n_dofs();
+            let mut phi = vec![0.0_f64; n];
+            let tol = if p <= 4 { 1e-12 } else { 1e-9 };
+            for (l, node) in coords.iter().enumerate() {
+                elem.eval_basis(node, &mut phi);
+                for (m, v) in phi.iter().enumerate() {
+                    let target = if l == m { 1.0 } else { 0.0 };
+                    assert!(
+                        (v - target).abs() < tol,
+                        "p={p}: nodal property failed at node {l}, basis {m}: {v}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Partition of unity and constant-annihilating gradients on the pyramid
+    /// interior (p = 1..4).
+    #[test]
+    fn h1_pyramid_pk_pou_and_grad_sum() {
+        for p in 1..=4usize {
+            let elem = H1PyramidPk::new(p);
+            h1_pyr_check_pou(&elem);
+            let order = elem.order();
+            let rule = elem.quadrature((2 * order + 2).min(15));
+            let n = elem.n_dofs();
+            let mut g = vec![0.0_f64; n * 3];
+            for pt in &rule.points {
+                if (pt[2] - 1.0).abs() < 1e-8 {
+                    continue; // apex limit: gradients are one-sided there
+                }
+                elem.eval_grad_basis(pt, &mut g);
+                for d in 0..3 {
+                    let s: f64 = (0..n).map(|i| g[i * 3 + d]).sum();
+                    assert!(s.abs() < 1e-9, "p={p} grad sum d={d} = {s} at {pt:?}");
+                }
+            }
+        }
+    }
+
+    /// Apex evaluation returns the apex-vertex indicator (slot 4) — computed
+    /// through MFEM's limit path, so this also validates `T⁻¹ u_limit`.
+    #[test]
+    fn h1_pyramid_pk_apex_eval() {
+        for p in 1..=6usize {
+            let elem = H1PyramidPk::new(p);
+            let n = elem.n_dofs();
+            let mut phi = vec![0.0_f64; n];
+            elem.eval_basis(&[0.25, 0.25, 1.0], &mut phi);
+            for (m, v) in phi.iter().enumerate() {
+                let target = if m == 4 { 1.0 } else { 0.0 };
+                assert!(
+                    (v - target).abs() < 1e-10,
+                    "p={p}: apex phi[{m}] = {v} (want {target})"
+                );
+            }
+        }
+    }
+
+    /// Gradient finite-difference check on the interior (the chain-rule
+    /// differentiation of the collapsed expansion).
+    #[test]
+    fn h1_pyramid_pk_gradient_fd() {
+        let h = 1e-7;
+        for p in 2..=4usize {
+            let elem = H1PyramidPk::new(p);
+            let n = elem.n_dofs();
+            let (mut vc, mut vx, mut vy, mut vz, mut grads) =
+                (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n * 3]);
+            // Stay clear of the singular faces (z ≤ 0.8 keeps r, s ≤ 1).
+            for &(x, y, z) in [(0.2, 0.3, 0.15), (0.4, 0.1, 0.25)].iter() {
+                elem.eval_basis(&[x, y, z], &mut vc);
+                elem.eval_basis(&[x + h, y, z], &mut vx);
+                elem.eval_basis(&[x, y + h, z], &mut vy);
+                elem.eval_basis(&[x, y, z + h], &mut vz);
+                elem.eval_grad_basis(&[x, y, z], &mut grads);
+                for i in 0..n {
+                    let fd_x = (vx[i] - vc[i]) / h;
+                    let fd_y = (vy[i] - vc[i]) / h;
+                    let fd_z = (vz[i] - vc[i]) / h;
+                    assert!(
+                        (grads[i * 3] - fd_x).abs() < 1e-4
+                            && (grads[i * 3 + 1] - fd_y).abs() < 1e-4
+                            && (grads[i * 3 + 2] - fd_z).abs() < 1e-4,
+                        "p={p} ({x},{y},{z}) i={i}: fd=({fd_x},{fd_y},{fd_z}) an=({},{},{})",
+                        grads[i * 3], grads[i * 3 + 1], grads[i * 3 + 2],
+                    );
+                }
+            }
+        }
     }
 }

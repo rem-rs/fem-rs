@@ -1845,13 +1845,14 @@ impl DofManager {
     /// Reference-grid indices `(i, j, k)` of every H1 pyramid field slot in
     /// **MFEM's entity order** (D191).
     ///
-    /// The pyramid field lattice is the collapsed grid whose physical
-    /// reference position for lattice node `(i, j, k)` is `(i/p, j/p, k/p)`
-    /// (the same points `PyramidPk::dof_coords` enumerates layer-major).  The
-    /// slot ORDER reproduced here was dumped from MFEM 4.10
+    /// The slot ORDER was dumped from MFEM 4.10
     /// `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` on a single straight
     /// unit pyramid (probe `tmp/d191/pyr_h1_probe.cpp`, dumps
-    /// `$HOME/work/d299/probe_p{2..5}.txt`):
+    /// `$HOME/work/d299/probe_p{2..5}.txt`).  The table itself lives in the
+    /// element crate ([`fem_element::lagrange::h1_pyramid_slot_labels`]) — the
+    /// same table [`fem_element::lagrange::H1PyramidPk`] (the Bergot element
+    /// the assembler pairs with these slots, D299) is built from — so the
+    /// space numbering and the reference element share one source of truth:
     ///
     /// * slots 0–4: vertices `(0,0,0) (p,0,0) (p,p,0) (0,p,0) (0,0,p)`;
     /// * 8 edge blocks in MFEM's PYRAMID edge-table order and direction
@@ -1860,81 +1861,21 @@ impl DofManager {
     /// * quad base-face block in the H1(quad) interior order: `j` (along
     ///   `v0→v3`) outer, `i` (along `v0→v1`) fastest;
     /// * 4 tri side-face blocks in MFEM face order `(0,1,4) (1,2,4) (2,3,4)
-    ///   (3,0,4)`, each in the H1(tri) interior order of that face — rows
-    ///   parallel to the base edge for `(0,1,4)/(1,2,4)`, columns across the
-    ///   base edge for `(2,3,4)/(3,0,4)`;
+    ///   (3,0,4)`, each in the H1(tri) interior order of that face;
     /// * interior block: `k` (layer) outer, then `j`, `i` fastest.
     fn pyramid_entity_slot_grid(p: usize) -> Vec<[usize; 3]> {
-        let mut slots: Vec<[usize; 3]> = Vec::with_capacity((p + 1) * (p + 2) * (2 * p + 3) / 6);
-        slots.push([0, 0, 0]);
-        slots.push([p, 0, 0]);
-        slots.push([p, p, 0]);
-        slots.push([0, p, 0]);
-        slots.push([0, 0, p]);
-        if p >= 2 {
-            let corners = [[0, 0, 0], [p, 0, 0], [p, p, 0], [0, p, 0], [0, 0, p]];
-            let edge_pairs = [[0usize, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4]];
-            for &[a, b] in &edge_pairs {
-                let (ea, eb) = (corners[a], corners[b]);
-                for q in 1..p {
-                    let pt = [0usize, 1, 2].map(|d| {
-                        // Signed lerp: the apex edges decrease a coordinate.
-                        let e = (ea[d] as isize) * (p - q) as isize
-                            + (eb[d] as isize) * q as isize;
-                        (e / p as isize) as usize
-                    });
-                    slots.push(pt);
-                }
-            }
-            // Quad base face: j (v0→v3) outer, i (v0→v1) fastest.
-            for j in 1..p {
-                for i in 1..p {
-                    slots.push([i, j, 0]);
-                }
-            }
-        }
-        if p >= 3 {
-            for k in 1..=p - 2 {
-                for i in 1..=p - 1 - k {
-                    slots.push([i, 0, k]);
-                }
-            }
-            for k in 1..=p - 2 {
-                for j in 1..=p - 1 - k {
-                    slots.push([p - k, j, k]);
-                }
-            }
-            for i in 1..=p - 2 {
-                for k in 1..=p - 1 - i {
-                    slots.push([i, p - k, k]);
-                }
-            }
-            for j in 1..=p - 2 {
-                for k in 1..=p - 1 - j {
-                    slots.push([0, j, k]);
-                }
-            }
-            // Interior: k (layer) outer, j outer, i fastest.
-            for k in 1..=p - 2 {
-                for j in 1..=p - 1 - k {
-                    for i in 1..=p - 1 - k {
-                        slots.push([i, j, k]);
-                    }
-                }
-            }
-        }
-        slots
+        fem_element::lagrange::h1_pyramid_slot_labels(p)
     }
 
-    /// General-order Lagrange DOF manager for pyramid meshes (D191).
+    /// General-order Lagrange DOF manager for pyramid meshes (D191/D299).
     ///
     /// DOF ordering per element follows MFEM's entity order — see
     /// [`Self::pyramid_entity_slot_grid`] for the slot layout dumped from
     /// MFEM 4.10.  DOF coordinates are evaluated through the *linear*
-    /// pyramid transformation at each slot's reference position
-    /// `(i/p, j/p, k/p)` (MFEM `SetCurvature`/`ProjectCoefficient`
-    /// semantics), so curved-seam rebuilds and coordinates agree for
-    /// arbitrary (non-unit) pyramids.
+    /// pyramid transformation at each slot's MFEM Bergot reference position
+    /// (`H1PyramidPk`'s GLL-barycentric node placement; MFEM
+    /// `SetCurvature`/`ProjectCoefficient` semantics), so curved-seam
+    /// rebuilds and coordinates agree for arbitrary (non-unit) pyramids.
     fn build_pyramid_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
         use fem_element::lagrange::pyramid::PyramidPk;
         use fem_element::ReferenceElement;
@@ -2019,8 +1960,12 @@ impl DofManager {
         }
 
         // Coordinates: every non-vertex slot sits at the linear-pyramid image
-        // of its reference position (i/p, j/p, k/p) — the exact analogue of
-        // MFEM's `SetCurvature` XYZ projection.
+        // of its MFEM Bergot reference position — the GLL-barycentric node
+        // placement of `H1_BergotPyramidElement` (D299; at p ≤ 2 the GLL
+        // points coincide with the equispaced lattice).  This is the exact
+        // analogue of MFEM's `SetCurvature`/XYZ projection, and it reuses the
+        // element's own `dof_coords` so the slot positions can never drift
+        // from the basis the assembler evaluates.
         let n_dofs = next_dof as usize;
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];
         for n in 0..n_nodes as u32 {
@@ -2029,6 +1974,8 @@ impl DofManager {
             dof_coords[b..b + dim].copy_from_slice(c);
         }
         let linear = PyramidPk::new(1);
+        let slot_positions = fem_element::lagrange::H1PyramidPk::new(p).dof_coords();
+        debug_assert_eq!(slot_positions.len(), slots.len());
         let mut phi = vec![0.0_f64; 5];
         // D191: `PyramidPk::eval_basis` slots are layer-ordered — the P1
         // element's slot 2/3 carry local vertices 3/2 (see the matching
@@ -2037,16 +1984,12 @@ impl DofManager {
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             let base = e as usize * dofs_per_elem;
-            for (s, g) in slots.iter().enumerate() {
+            for (s, _g) in slots.iter().enumerate() {
                 if s < 5 {
                     continue;
                 }
-                let theta = [
-                    g[0] as f64 / p as f64,
-                    g[1] as f64 / p as f64,
-                    g[2] as f64 / p as f64,
-                ];
-                linear.eval_basis(&theta, &mut phi);
+                let theta = &slot_positions[s];
+                linear.eval_basis(theta, &mut phi);
                 let mut x = [0.0_f64; 3];
                 for (k, &phik) in phi.iter().enumerate() {
                     if phik == 0.0 {
