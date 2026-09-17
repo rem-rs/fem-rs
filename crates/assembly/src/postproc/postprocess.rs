@@ -47,8 +47,59 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Tet4, o) if o >= 4 => {
             Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
         }
+        // D265: hex scalar arm — same element as the `GridFunction` table
+        // (`postproc/grid_function.rs::ref_elem_vol`): `HexQk` Gauss-Lobatto
+        // slots on `[-1,1]³` in MFEM `H1_HexahedronElement` order, pairing
+        // with the H¹ space's `element_dofs` layout.
+        (ElementType::Hex8, o) => {
+            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
+        }
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
+}
+
+/// Reference-frame evaluation point of the element centroid.
+///
+/// Simplex (and prism) bases evaluate at `(1/(d+1), …)` in their `[0,1]^d`
+/// frames; the hex bases (`HexNDk`/`HexRTk`/`HexQk`) live on `[-1,1]³`, whose
+/// center is the origin.  Quad bases live on `[0,1]²` — same `1/(d+1)` rule
+/// as the simplices.
+fn ref_centroid(elem_type: ElementType, dim: usize) -> Vec<f64> {
+    if elem_type == ElementType::Hex8 {
+        vec![0.0; 3]
+    } else {
+        vec![1.0 / (dim as f64 + 1.0); dim]
+    }
+}
+
+/// D265: whether the element must go through the isoparametric geometry
+/// instead of the corner-difference simplex transform.  Straight (and curved)
+/// Quad4/Hex8 elements: their bases live on `[0,1]²`/`[-1,1]³`, a corner
+/// difference is only exact for parallelepipeds, and the hex corner triple
+/// (nodes 0,1,2) is even coplanar — the simplex transform degenerates.  Same
+/// recipe as the assembler and the D242/D250 error arms:
+/// `geo_ref_elem_from_mesh` + `isoparametric_jacobian`.
+fn is_iso_elem(elem_type: ElementType, dim: usize) -> bool {
+    match elem_type {
+        ElementType::Quad4 => dim == 2,
+        ElementType::Hex8 => dim == 3,
+        _ => false,
+    }
+}
+
+/// Isoparametric Jacobian `(J, det J, x_phys)` at reference point `xi`,
+/// built from the mesh's geometry element/table (handles `geom_order > 1`
+/// through `mesh.geometry_nodes`).
+fn iso_jacobian<M: MeshTopology>(
+    mesh: &M,
+    e: u32,
+    xi: &[f64],
+    dim: usize,
+) -> (DMatrix<f64>, f64, Vec<f64>) {
+    let ge = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+        .expect("D265: missing geometry reference element for quad/hex postprocessing");
+    let geo_nds = mesh.geometry_nodes(e);
+    crate::vector_assembler::isoparametric_jacobian(mesh, geo_nds, ge.as_ref(), xi, dim)
 }
 
 /// Element-level copy of `vector_assembler::vec_ref_elem` for the element-wise
@@ -170,11 +221,21 @@ pub fn compute_element_gradients<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec
         let elem_dofs = space.element_dofs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (jac, _det_j) = simplex_jacobian(mesh, nodes);
+        // D265: quad/hex elements go through the isoparametric geometry
+        // (corner-difference transform is wrong there); simplices keep the
+        // affine path bit-identical.
+        let (jac, _det_j) = if is_iso_elem(elem_type, dim) {
+            let xi = ref_centroid(elem_type, dim);
+            let (j, d, _xp) = iso_jacobian(mesh, e, &xi, dim);
+            (j, d)
+        } else {
+            simplex_jacobian(mesh, nodes)
+        };
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
-        // Evaluate at centroid: (1/3, 1/3) for tri, (1/4, 1/4, 1/4) for tet.
-        let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
+        // Evaluate at centroid: (1/3, 1/3) for tri, (1/4, 1/4, 1/4) for tet,
+        // the origin for hex ([-1,1]³ frame).
+        let xi: Vec<f64> = ref_centroid(elem_type, dim);
 
         let mut grad_ref = vec![0.0; n_ldofs * dim];
         let mut grad_phys = vec![0.0; n_ldofs * dim];
@@ -232,11 +293,21 @@ pub fn compute_h1_error<S: FESpace>(
         let nodes = mesh.element_nodes(e);
 
         // ── Jacobian for this element ────────────────────────────────────
-        let (jac, det_j) = simplex_jacobian(mesh, nodes);
-        let j_inv_t = jac
-            .try_inverse()
-            .expect("degenerate element in compute_h1_error")
-            .transpose();
+        // D265: quad/hex geometry is isoparametric per quadrature point
+        // (element-level affine machinery unused); simplices keep the affine
+        // path bit-identical.
+        let use_iso = is_iso_elem(elem_type, dim);
+        let (jac, det_j) = if use_iso {
+            (None, 0.0_f64)
+        } else {
+            let (j, d) = simplex_jacobian(mesh, nodes);
+            (Some(j), d)
+        };
+        let j_inv_t = jac.as_ref().and_then(|j| {
+            j.clone()
+                .try_inverse()
+                .map(|inv| inv.transpose())
+        });
 
         // Cache vertex coordinates for physical-point mapping.
         // For a 2-D simplex: x = x0 + J * xi (J built from x1-x0, x2-x0).
@@ -254,15 +325,29 @@ pub fn compute_h1_error<S: FESpace>(
         let mut grad_phys = vec![0.0_f64; n_ldofs * dim];
 
         for (qi, xi) in quad.points.iter().enumerate() {
-            let w = quad.weights[qi] * det_j.abs();
-
-            // Reference → physical coordinates.
-            let mut x_phys: Vec<f64> = x0.clone();
-            for k in 0..dim {
-                for d in 0..dim {
-                    x_phys[d] += jac_cols[k][d] * xi[k];
+            // Reference → physical coordinates and quadrature weight.
+            // D265: hex/quad use the isoparametric map (the quadrature and
+            // the geometry share the element's reference frame, so `xi` is
+            // used directly); simplices keep the affine x0 + J·xi map.
+            let (w, x_phys, j_inv_t) = if use_iso {
+                let (j_iso, det_iso, xp_iso) = iso_jacobian(mesh, e, xi, dim);
+                let jt = j_iso
+                    .try_inverse()
+                    .expect("degenerate element in compute_h1_error")
+                    .transpose();
+                (quad.weights[qi] * det_iso.abs(), xp_iso, jt)
+            } else {
+                let mut xp: Vec<f64> = x0.clone();
+                for k in 0..dim {
+                    for d in 0..dim {
+                        xp[d] += jac_cols[k][d] * xi[k];
+                    }
                 }
-            }
+                let jt = j_inv_t
+                    .clone()
+                    .expect("simplex arm must carry an affine Jacobian");
+                (quad.weights[qi] * det_j.abs(), xp, jt)
+            };
 
             // Basis gradients in reference space, then transform to physical.
             ref_elem.eval_grad_basis(xi, &mut grad_ref);
@@ -377,13 +462,11 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
 
     let mut result = Vec::with_capacity(mesh.n_elements());
 
-    // Centroid in reference coordinates.
-    let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
-
     for e in mesh.elem_iter() {
         // D245: dispatch per element so mixed meshes pick the right basis
         // (and hex H(div) no longer mis-dispatches onto the tet element).
-        let ref_elem = vec_ref_elem(stype, mesh.element_type(e), dim, space.order());
+        let elem_type = mesh.element_type(e);
+        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
         let n_ldofs = ref_elem.n_dofs();
 
         let mut ref_curl = vec![0.0; n_ldofs * curl_dim];
@@ -404,7 +487,15 @@ pub fn compute_element_curl<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f64>
         };
         let nodes = mesh.element_nodes(e);
 
-        let (jac, det_j) = simplex_jacobian(mesh, nodes);
+        // D265: quad/hex elements evaluate through the isoparametric
+        // geometry; the centroid sits at the hex frame origin ([-1,1]³).
+        let xi = ref_centroid(elem_type, dim);
+        let (jac, det_j) = if is_iso_elem(elem_type, dim) {
+            let (j, d, _xp) = iso_jacobian(mesh, e, &xi, dim);
+            (j, d)
+        } else {
+            simplex_jacobian(mesh, nodes)
+        };
 
         ref_elem.eval_curl(&xi, &mut ref_curl);
 
@@ -468,11 +559,10 @@ pub fn compute_element_divergence<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<f6
 
     let mut result = Vec::with_capacity(mesh.n_elements());
 
-    let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
-
     for e in mesh.elem_iter() {
         // D245: dispatch per element (see compute_element_curl).
-        let ref_elem = vec_ref_elem(stype, mesh.element_type(e), dim, space.order());
+        let elem_type = mesh.element_type(e);
+        let ref_elem = vec_ref_elem(stype, elem_type, dim, space.order());
         let n_ldofs = ref_elem.n_dofs();
 
         let mut ref_div = vec![0.0; n_ldofs];
@@ -482,7 +572,15 @@ pub fn compute_element_divergence<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<f6
         let signs = space.element_signs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (_jac, det_j) = simplex_jacobian(mesh, nodes);
+        // D265: quad/hex elements evaluate through the isoparametric
+        // geometry; the centroid sits at the hex frame origin ([-1,1]³).
+        let xi = ref_centroid(elem_type, dim);
+        let (_jac, det_j) = if is_iso_elem(elem_type, dim) {
+            let (j, d, _xp) = iso_jacobian(mesh, e, &xi, dim);
+            (j, d)
+        } else {
+            simplex_jacobian(mesh, nodes)
+        };
 
         ref_elem.eval_div(&xi, &mut ref_div);
 
@@ -537,18 +635,38 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
         let elem_dofs = space.element_dofs(e);
         let nodes = mesh.element_nodes(e);
 
-        let (jac, det_j) = simplex_jacobian(mesh, nodes);
+        // D265: hexes evaluate through the isoparametric geometry.
+        let use_iso = is_iso_elem(elem_type, dim);
+        let xi = ref_centroid(elem_type, dim);
+        let (jac, det_j) = if use_iso {
+            let (j, d, _xp) = iso_jacobian(mesh, e, &xi, dim);
+            (j, d)
+        } else {
+            simplex_jacobian(mesh, nodes)
+        };
         let j_inv_t = jac.try_inverse().expect("degenerate element").transpose();
 
-        // Element area/volume (for a simplex: |det_j| / d!)
-        let elem_area = det_j.abs() / match dim {
-            2 => 2.0,
-            3 => 6.0,
-            _ => 1.0,
+        // Element area/volume: for a simplex |det_j| / d!; for a hex the
+        // integral of |det J| over the [-1,1]³ frame (the corner-difference
+        // determinant has no simplex meaning there).
+        let elem_area = if use_iso {
+            let vol_order = (2 * mesh.geom_order().max(1)).max(2);
+            let gq = ref_elem.quadrature(vol_order);
+            let mut vol = 0.0_f64;
+            for (gx, gw) in gq.points.iter().zip(gq.weights.iter()) {
+                let (_jg, dg, _xp) = iso_jacobian(mesh, e, gx, dim);
+                vol += gw * dg.abs();
+            }
+            vol
+        } else {
+            det_j.abs() / match dim {
+                2 => 2.0,
+                3 => 6.0,
+                _ => 1.0,
+            }
         };
 
         // Gradient at centroid.
-        let xi: Vec<f64> = vec![1.0 / (dim as f64 + 1.0); dim];
         let mut grad_ref = vec![0.0; n_ldofs * dim];
         let mut grad_phys = vec![0.0; n_ldofs * dim];
         ref_elem.eval_grad_basis(&xi, &mut grad_ref);
@@ -562,8 +680,10 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
             }
         }
 
-        // Distribute to element vertices (first dim+1 nodes are vertices).
-        let n_verts = dim + 1;
+        // Distribute to element vertices: simplices use the first dim+1
+        // nodes; hexes all 8 corners (MFEM `CUBE::Vertices` order — the
+        // first 8 slots of the element node list).
+        let n_verts = if elem_type == ElementType::Hex8 { 8 } else { dim + 1 };
         for v in 0..n_verts {
             let node = nodes[v] as usize;
             area_accum[node] += elem_area;
