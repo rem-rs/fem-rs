@@ -834,6 +834,111 @@ pub fn project_h1_to_l2<S: FESpace>(
     Ok(out)
 }
 
+// ── Projection (GridFunction::ProjectGridFunction, discontinuous source) ─────
+
+/// L2 → L2 change-of-basis projection (`-l2 -bt 0/1` on a discontinuous
+/// source, the D278 tier of `gridfunction-bounds`).
+///
+/// Same nodal-interpolation semantics as [`project_h1_to_l2`] — per element
+/// `I(k,j) = src.CalcShape(target_node_k)[j]` with `|I| < 1e-12 → 0` — but
+/// the *source* is a tensor L2 field whose nodes are the MFEM 1-D rule
+/// points of `src_basis` on [0,1] and whose element layout is already
+/// lexicographic (identity dof map), so the interpolation row for a target
+/// node is the plain tensor product of the evaluated 1-D shapes.
+pub fn project_l2_to_l2<S: FESpace>(
+    l2: &GridFunction<'_, S>,
+    order: usize,
+    src_basis: BoundsBasis,
+    dst_basis: BoundsBasis,
+) -> Result<Vec<f64>, String> {
+    let mesh = l2.space().mesh();
+    let nel = mesh.n_elements();
+    if nel == 0 {
+        return Err("ProjectGridFunction: mesh has no elements".to_string());
+    }
+    let etype = mesh.element_type(0);
+    for e in 1..nel as u32 {
+        if mesh.element_type(e) != etype {
+            return Err(format!(
+                "ProjectGridFunction: mixed element types are not supported (C++ aborts on \
+                 non-TensorBasis elements); first mismatch at element {e}"
+            ));
+        }
+    }
+    let dim = mesh.topological_dim() as usize;
+    if dim < 2 {
+        return Err("ProjectGridFunction: 1-D meshes are not supported (D277)".to_string());
+    }
+    let nb = order + 1;
+    let rule = |b: BoundsBasis| match b {
+        BoundsBasis::GaussLegendre => mfem_gauss_legendre_01(nb),
+        BoundsBasis::GaussLobatto => mfem_gauss_lobatto_01(nb),
+    };
+    let (src_nodes, _) = rule(src_basis);
+    let (dst_nodes, _) = rule(dst_basis);
+    let src_b = BaryLagrange1D::from_nodes(src_nodes);
+    // shape1d[t][j] = src shape j evaluated at target 1-D position t.
+    let shape1d: Vec<Vec<f64>> = dst_nodes
+        .iter()
+        .map(|&t| {
+            let (v, _) = src_b.eval(t);
+            v
+        })
+        .collect();
+
+    let nb2 = nb * nb;
+    let nb_dim = nb.pow(dim as u32);
+    let mut out = vec![0.0_f64; nel as usize * nb_dim];
+    for e in 0..nel as u32 {
+        let elem_dofs = l2.space().element_dofs(e);
+        let src: Vec<f64> = elem_dofs.iter().map(|&d| l2.dofs()[d as usize]).collect();
+        let mut dest = vec![0.0_f64; nb_dim];
+        match dim {
+            2 => {
+                for (iy, shape_y) in shape1d.iter().enumerate() {
+                    for (ix, shape_x) in shape1d.iter().enumerate() {
+                        let mut acc = 0.0_f64;
+                        for (jy, &sy) in shape_y.iter().enumerate() {
+                            for (jx, &sx) in shape_x.iter().enumerate() {
+                                let i_kj = sx * sy;
+                                if i_kj.abs() < 1e-12 {
+                                    continue;
+                                }
+                                acc += i_kj * src[jx + jy * nb];
+                            }
+                        }
+                        dest[ix + iy * nb] = acc;
+                    }
+                }
+            }
+            _ => {
+                for (iz, shape_z) in shape1d.iter().enumerate() {
+                    for (iy, shape_y) in shape1d.iter().enumerate() {
+                        for (ix, shape_x) in shape1d.iter().enumerate() {
+                            let mut acc = 0.0_f64;
+                            for (jz, &sz) in shape_z.iter().enumerate() {
+                                for (jy, &sy) in shape_y.iter().enumerate() {
+                                    for (jx, &sx) in shape_x.iter().enumerate() {
+                                        let i_kj = sx * sy * sz;
+                                        if i_kj.abs() < 1e-12 {
+                                            continue;
+                                        }
+                                        acc += i_kj * src[jx + jy * nb + jz * nb2];
+                                    }
+                                }
+                            }
+                            dest[ix + iy * nb + iz * nb2] = acc;
+                        }
+                    }
+                }
+            }
+        }
+        let base = e as usize * dest.len();
+        out[base..base + dest.len()].copy_from_slice(&dest);
+    }
+    Ok(out)
+}
+
 // ── GetElementBounds (gridfunc.cpp) ──────────────────────────────────────────
 
 /// `PLBound GridFunction::GetElementBounds(lower, upper, ref_factor, vdim)`

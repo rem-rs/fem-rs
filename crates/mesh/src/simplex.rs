@@ -276,11 +276,23 @@ impl<const D: usize> Mesh<D> {
         use fem_element::lagrange::factory::{ElemType as FactoryElemType, QuadQk, ref_elem as factory_ref_elem};
         let dim = D;
         let et = self.element_type_at(e);
+        // D191: the pyramid factory element (`PyramidPk`) orders its slots
+        // layer-major, so its P1 slot 2/3 sit at reference (0,1,0)/(1,1,0)
+        // while the mesh corner order (MFEM) puts corner 2 at (1,1,0).
+        // Gathering the *corner* list in slot order keeps the linear
+        // geometry consistent with the basis slots (and with the curved
+        // path, whose geometry table is already written slot-ordered).
+        const PYRAMID_P1_SLOT_CORNER: [usize; 5] = [0, 1, 3, 2, 4];
         let nodes: Vec<u32> = if let Some(ref g) = self.geometry {
             let e = e as usize;
             g.conn[e * g.nodes_per_elem..(e + 1) * g.nodes_per_elem].to_vec()
         } else {
-            self.element_nodes(e).to_vec()
+            let ns = self.element_nodes(e).to_vec();
+            if et == ElementType::Pyramid5 && ns.len() == 5 {
+                PYRAMID_P1_SLOT_CORNER.iter().map(|&k| ns[k]).collect()
+            } else {
+                ns
+            }
         };
 
         let geo_order = self.geom_order() as usize;
@@ -452,6 +464,13 @@ impl<const D: usize> Mesh<D> {
         let mut next_id = self.n_nodes() as NodeId;
 
         let mut phi = vec![0.0_f64; 5];
+        // D191: `PyramidPk::eval_basis` slots are layer-ordered — the P1
+        // element's slot 2/3 carry the vertices (0,1,0)/(1,1,0), i.e. local
+        // vertices 3/2, not 2/3.  Blending `phi[k]` against `verts[k]`
+        // silently swapped those two corners for every non-symmetric sample
+        // point (e.g. the (1,2) edge dof of order 2 landed at the base
+        // centre).
+        const P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
         for e in 0..n_elems {
             let verts = self.elem_nodes(e as ElemId);
             for d in 0..npe_new {
@@ -461,7 +480,7 @@ impl<const D: usize> Mesh<D> {
                 for (k, &phik) in phi.iter().enumerate() {
                     if (phik - 1.0).abs() < 1e-12 {
                         // Nodal DOF: reuse the existing mesh vertex.
-                        geom_conn.push(verts[k]);
+                        geom_conn.push(verts[P1_SLOT_VERTEX[k]]);
                         on_vertex = true;
                         break;
                     }
@@ -472,7 +491,7 @@ impl<const D: usize> Mesh<D> {
                         if phik == 0.0 {
                             continue;
                         }
-                        let xk = self.node_coords(verts[k]);
+                        let xk = self.node_coords(verts[P1_SLOT_VERTEX[k]]);
                         for dd in 0..3 {
                             x[dd] += phik * xk[dd];
                         }
@@ -3899,11 +3918,16 @@ mod tests {
         // Straight-sided single pyramid: set_curvature(2) must reproduce the
         // exact linear mapping (the high-order geometry nodes lie on the
         // straight edges/faces of the original pyramid).
+        //
+        // D191: the corner order is MFEM's PYRAMID convention —
+        // v2=(1,1,0), v3=(0,1,0) — matching what the mfem reader passes
+        // through.  (`PyramidPk`'s layer slots 2/3 sit at (0,1,0)/(1,1,0),
+        // so `set_curvature_pyramid5` maps them through P1_SLOT_VERTEX.)
         let coords: Vec<f64> = vec![
             0.0, 0.0, 0.0, // v0 base
             1.0, 0.0, 0.0, // v1
-            0.0, 1.0, 0.0, // v2
-            1.0, 1.0, 0.0, // v3
+            1.0, 1.0, 0.0, // v2 (MFEM V2)
+            0.0, 1.0, 0.0, // v3 (MFEM V3)
             0.0, 0.0, 1.0, // v4 apex
         ];
         let conn: Vec<u32> = vec![0, 1, 2, 3, 4];

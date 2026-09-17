@@ -47,20 +47,6 @@ fn get_edge_dofs_pk(
     if a == key.0 { dofs.clone() } else { let mut r = dofs.clone(); r.reverse(); r }
 }
 
-/// Get or create `n_dofs` face DOFs for a canonical triangular face.
-fn get_face_dofs_pk(
-    a: NodeId, b: NodeId, c: NodeId,
-    next: &mut DofId,
-    map: &mut HashMap<FaceKey, Vec<DofId>>,
-    n_dofs: usize,
-) -> Vec<DofId> {
-    let key = FaceKey::new(a, b, c);
-    let dofs = map.entry(key).or_insert_with(|| {
-        (0..n_dofs).map(|_| { let d = *next; *next += 1; d }).collect()
-    });
-    dofs.clone()
-}
-
 // ─── FaceKey ─────────────────────────────────────────────────────────────────
 
 /// A canonical (sorted) triangular face key for deduplication.
@@ -303,7 +289,8 @@ impl DofManager {
                         let npe = mesh.element_nodes(0).len();
                         match npe {
                             6 => Self::build_prism_h1(mesh, 2),
-                            5 => Self::build_p2_pyramid(mesh),
+                            // D191: unified MFEM entity-order pyramid builder.
+                            5 => Self::build_pyramid_pk(mesh, 2),
                             8 => Self::build_q2_hex(mesh),
                             _ => Self::build_pk(mesh, 2),
                         }
@@ -323,7 +310,8 @@ impl DofManager {
                 if topo_dim == 3 && mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 6 { return Self::build_prism_h1(mesh, 3); }
-                    if npe == 5 { return Self::build_p3_pyramid(mesh); }
+                    // D191: unified MFEM entity-order pyramid builder.
+                    if npe == 5 { return Self::build_pyramid_pk(mesh, 3); }
                 }
                 // Quad Q3 / Hex Q3 via general pk path
                 if mesh.n_elements() > 0 {
@@ -1490,138 +1478,6 @@ impl DofManager {
         }
     }
 
-    // ─── P2 (3-D Pyramid5) ─────────────────────────────────────────────────────
-
-    fn build_p2_pyramid<M: MeshTopology>(mesh: &M) -> Self {
-        let n_nodes = mesh.n_nodes();
-        let n_elems = mesh.n_elements();
-        let dim = mesh.dim() as usize;
-        assert_eq!(mesh.topological_dim() as usize, 3, "build_p2_pyramid requires 3-D elements");
-
-        let dofs_per_elem = 14;
-        let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
-        let mut next_dof = n_nodes as DofId;
-        let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
-
-        for e in 0..n_elems as u32 {
-            let ns = mesh.element_nodes(e);
-            assert!(ns.len() >= 5, "build_p2_pyramid requires 5-node pyramids");
-            let (n0,n1,n2,n3,n4)=(ns[0],ns[1],ns[2],ns[3],ns[4]);
-            let base = e as usize * dofs_per_elem;
-
-            dofs_flat[base]=n0; dofs_flat[base+1]=n1; dofs_flat[base+2]=n2;
-            dofs_flat[base+3]=n3; dofs_flat[base+4]=n4;
-
-            let edges = [(n0,n1),(n1,n2),(n2,n3),(n3,n0),(n0,n4),(n1,n4),(n2,n4),(n3,n4)];
-            for (k, &(a,b)) in edges.iter().enumerate() {
-                let key = EdgeKey::new(a,b);
-                let dof = *edge_map.entry(key).or_insert_with(||{let d=next_dof;next_dof+=1;d});
-                dofs_flat[base+5+k]=dof;
-            }
-            dofs_flat[base+13]=next_dof; next_dof+=1;
-        }
-
-        let n_dofs = next_dof as usize;
-        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
-        for n in 0..n_nodes as u32 { let c=mesh.node_coords(n); let b=n as usize*dim; dof_coords[b..b+dim].copy_from_slice(c); }
-        for (&EdgeKey(a,b),&dof_id) in &edge_map {
-            let ca=mesh.node_coords(a); let cb=mesh.node_coords(b);
-            let b=dof_id as usize*dim; for d in 0..dim { dof_coords[b+d]=0.5*(ca[d]+cb[d]); }
-        }
-        for e in 0..n_elems as u32 {
-            let ns=mesh.element_nodes(e);
-            let quad_centroid_dof=e as usize*dofs_per_elem+13;
-            let dof_id=dofs_flat[quad_centroid_dof] as usize;
-            let b=dof_id*dim; for d in 0..dim {
-                dof_coords[b+d]=ns[..4].iter().map(|&n|mesh.node_coords(n)[d]).sum::<f64>()/4.0;
-            }
-        }
-
-        DofManager {
-            order:2, n_dofs, dofs_flat, dofs_per_elem,
-            elem_dof_offsets:None, dof_coords, dim,
-            n_vertex_dofs:n_nodes,
-            edge_dof_map:edge_map, edge_dof2_map:HashMap::new(), phys_to_vertex_dof:HashMap::new(), 
-            edge_pk_map:HashMap::new(), face_pk_map:HashMap::new(),
-            quad_face_pk_map:HashMap::new(),
-            bubble_dof_start:n_dofs, n_volume_dofs:0, elem_orders:None,
-            edge_variants:HashMap::new(), face_variants:HashMap::new(),
-        }
-    }
-
-    // ─── P3 (3-D Pyramid5) — 30 DOFs per element ──────────────────────────────
-
-    fn build_p3_pyramid<M: MeshTopology>(mesh: &M) -> Self {
-        let dim=3usize; let n_nodes=mesh.n_nodes(); let n_elems=mesh.n_elements();
-        let dofs_per_elem=30;
-        let mut edge2_map:HashMap<EdgeKey,[DofId;2]>=HashMap::new();
-        let mut qface_map:HashMap<QuadFaceKey,Vec<DofId>>=HashMap::new();
-        let mut next_dof=n_nodes as DofId;
-        let mut dofs_flat=vec![0u32;n_elems*dofs_per_elem];
-
-        for e in 0..n_elems as u32 {
-            let ns=mesh.element_nodes(e);
-            let (n0,n1,n2,n3,n4)=(ns[0],ns[1],ns[2],ns[3],ns[4]);
-            let base=e as usize*dofs_per_elem;
-
-            // Use PyramidPk ref element coordinates to map each DOF position
-            let pyr_ref=fem_element::lagrange::PyramidPk::new(3);
-            let rc=pyr_ref.dof_coords();
-
-            for ref_i in 0..30 {
-                let x=rc[ref_i][0];let y=rc[ref_i][1];let z=rc[ref_i][2];
-                let eps=1e-12;
-                let on_z0=z.abs()<eps;let on_z1=(z-1.0).abs()<eps;
-                let on_x0=x.abs()<eps;let on_x1=(x-1.0+z).abs()<eps;
-                let on_y0=y.abs()<eps;let on_y1=(y-1.0+z).abs()<eps;
-                let nb=[on_z0,on_z1,on_x0,on_x1,on_y0,on_y1].iter().filter(|&&b|b).count();
-
-                dofs_flat[base+ref_i] = if nb>=3&&on_z1{n4}
-                else if nb>=3{match(on_x0,on_y0){(true,true)=>n0,(false,true)=>n1,(false,false)=>n2,_=>n3}}
-                else if nb==2&&on_z0{
-                    let ek=if on_x0{EdgeKey::new(n3,n0)}else if on_x1{EdgeKey::new(n1,n2)}
-                           else if on_y0{EdgeKey::new(n0,n1)}else{EdgeKey::new(n2,n3)};
-                    let p2=*edge2_map.entry(ek).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
-                    let local=(x*3.0).round()as usize;
-                    if local==0{p2[0]}else{p2[1]}
-                }else if nb==2{
-                    let ek=EdgeKey::new(n4,if on_x0&&on_y0{n0}else if on_x1&&on_y0{n1}else if on_x1&&on_y1{n2}else{n3});
-                    let p2=*edge2_map.entry(ek).or_insert_with(||{let d0=next_dof;next_dof+=1;let d1=next_dof;next_dof+=1;[d0,d1]});
-                    let local=(z*3.0).round()as usize;
-                    if local==0{p2[0]}else{p2[1]}
-                }else if nb==1&&on_z0{
-                    let qk=QuadFaceKey::new(n0,n1,n2,n3);
-                    let dofs=qface_map.entry(qk).or_insert_with(||{(0..4).map(|_|{let d=next_dof;next_dof+=1;d}).collect()});
-                    let ix=((x*3.0).round()as usize).saturating_sub(1);
-                    let iy=((y*3.0).round()as usize).saturating_sub(1);
-                    dofs[iy.min(1)*2+ix.min(1)]
-                }else{
-                    let d=next_dof;next_dof+=1;d
-                };
-            }
-        }
-
-        let n_dofs=next_dof as usize;
-        let mut dof_coords=vec![0.0_f64;n_dofs*dim];
-        for n in 0..n_nodes as u32{let c=mesh.node_coords(n);let b=n as usize*dim;dof_coords[b..b+dim].copy_from_slice(c);}
-        for(&EdgeKey(a,b),&[d0,d1])in&edge2_map{let ca=mesh.node_coords(a);let cb=mesh.node_coords(b);
-            let b0=d0 as usize*dim;let b1=d1 as usize*dim;for d in 0..dim{dof_coords[b0+d]=(2.0*ca[d]+cb[d])/3.0;dof_coords[b1+d]=(ca[d]+2.0*cb[d])/3.0;}}
-        for(key,dofs)in&qface_map{let n4=[key.0,key.1,key.2,key.3];let c4=[0,1,2,3].map(|i|mesh.node_coords(n4[i]));
-            for ix in 0..2{for iy in 0..2{let dof_id=dofs[iy*2+ix];let b=dof_id as usize*dim;
-                let tx=(ix+1)as f64/3.0;let ty=(iy+1)as f64/3.0;
-                for d in 0..dim{dof_coords[b+d]=(1.0-tx)*(1.0-ty)*c4[0][d]+tx*(1.0-ty)*c4[1][d]+tx*ty*c4[2][d]+(1.0-tx)*ty*c4[3][d];}}}
-        }
-
-        DofManager{order:3,n_dofs,dofs_flat,dofs_per_elem,
-            elem_dof_offsets:None,dof_coords,dim,
-            n_vertex_dofs:n_nodes,
-            edge_dof_map:HashMap::new(),edge_dof2_map:edge2_map, phys_to_vertex_dof:HashMap::new(), 
-            edge_pk_map:HashMap::new(),face_pk_map:HashMap::new(),
-            quad_face_pk_map:qface_map,
-            bubble_dof_start:n_dofs,n_volume_dofs:0,elem_orders:None,
-            edge_variants:HashMap::new(),face_variants:HashMap::new(),}
-    }
-
     // ─── Pk for 2-D Quad (tensor-product Qk) ──────────────────────────────────
     //
     // DOF ordering per element (matching QuadQk):
@@ -1986,10 +1842,103 @@ impl DofManager {
 
     // ─── Pk for Pyramid ─────────────────────────────────────────────────────
 
-    /// General-order Lagrange DOF manager for pyramid meshes.
+    /// Reference-grid indices `(i, j, k)` of every H1 pyramid field slot in
+    /// **MFEM's entity order** (D191).
     ///
-    /// DOF ordering per element: 5 vertices → 8 edges → 1 quad base → 4 tri sides → volume.
+    /// The pyramid field lattice is the collapsed grid whose physical
+    /// reference position for lattice node `(i, j, k)` is `(i/p, j/p, k/p)`
+    /// (the same points `PyramidPk::dof_coords` enumerates layer-major).  The
+    /// slot ORDER reproduced here was dumped from MFEM 4.10
+    /// `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` on a single straight
+    /// unit pyramid (probe `tmp/d191/pyr_h1_probe.cpp`, dumps
+    /// `$HOME/work/d299/probe_p{2..5}.txt`):
+    ///
+    /// * slots 0–4: vertices `(0,0,0) (p,0,0) (p,p,0) (0,p,0) (0,0,p)`;
+    /// * 8 edge blocks in MFEM's PYRAMID edge-table order and direction
+    ///   `(0,1) (1,2) (3,2) (0,3) (0,4) (1,4) (2,4) (3,4)` — note blocks 2/3
+    ///   run `v3→v2` and `v0→v3`, **not** `(2,3)/(3,0)`;
+    /// * quad base-face block in the H1(quad) interior order: `j` (along
+    ///   `v0→v3`) outer, `i` (along `v0→v1`) fastest;
+    /// * 4 tri side-face blocks in MFEM face order `(0,1,4) (1,2,4) (2,3,4)
+    ///   (3,0,4)`, each in the H1(tri) interior order of that face — rows
+    ///   parallel to the base edge for `(0,1,4)/(1,2,4)`, columns across the
+    ///   base edge for `(2,3,4)/(3,0,4)`;
+    /// * interior block: `k` (layer) outer, then `j`, `i` fastest.
+    fn pyramid_entity_slot_grid(p: usize) -> Vec<[usize; 3]> {
+        let mut slots: Vec<[usize; 3]> = Vec::with_capacity((p + 1) * (p + 2) * (2 * p + 3) / 6);
+        slots.push([0, 0, 0]);
+        slots.push([p, 0, 0]);
+        slots.push([p, p, 0]);
+        slots.push([0, p, 0]);
+        slots.push([0, 0, p]);
+        if p >= 2 {
+            let corners = [[0, 0, 0], [p, 0, 0], [p, p, 0], [0, p, 0], [0, 0, p]];
+            let edge_pairs = [[0usize, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4]];
+            for &[a, b] in &edge_pairs {
+                let (ea, eb) = (corners[a], corners[b]);
+                for q in 1..p {
+                    let pt = [0usize, 1, 2].map(|d| {
+                        // Signed lerp: the apex edges decrease a coordinate.
+                        let e = (ea[d] as isize) * (p - q) as isize
+                            + (eb[d] as isize) * q as isize;
+                        (e / p as isize) as usize
+                    });
+                    slots.push(pt);
+                }
+            }
+            // Quad base face: j (v0→v3) outer, i (v0→v1) fastest.
+            for j in 1..p {
+                for i in 1..p {
+                    slots.push([i, j, 0]);
+                }
+            }
+        }
+        if p >= 3 {
+            for k in 1..=p - 2 {
+                for i in 1..=p - 1 - k {
+                    slots.push([i, 0, k]);
+                }
+            }
+            for k in 1..=p - 2 {
+                for j in 1..=p - 1 - k {
+                    slots.push([p - k, j, k]);
+                }
+            }
+            for i in 1..=p - 2 {
+                for k in 1..=p - 1 - i {
+                    slots.push([i, p - k, k]);
+                }
+            }
+            for j in 1..=p - 2 {
+                for k in 1..=p - 1 - j {
+                    slots.push([0, j, k]);
+                }
+            }
+            // Interior: k (layer) outer, j outer, i fastest.
+            for k in 1..=p - 2 {
+                for j in 1..=p - 1 - k {
+                    for i in 1..=p - 1 - k {
+                        slots.push([i, j, k]);
+                    }
+                }
+            }
+        }
+        slots
+    }
+
+    /// General-order Lagrange DOF manager for pyramid meshes (D191).
+    ///
+    /// DOF ordering per element follows MFEM's entity order — see
+    /// [`Self::pyramid_entity_slot_grid`] for the slot layout dumped from
+    /// MFEM 4.10.  DOF coordinates are evaluated through the *linear*
+    /// pyramid transformation at each slot's reference position
+    /// `(i/p, j/p, k/p)` (MFEM `SetCurvature`/`ProjectCoefficient`
+    /// semantics), so curved-seam rebuilds and coordinates agree for
+    /// arbitrary (non-unit) pyramids.
     fn build_pyramid_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        use fem_element::lagrange::pyramid::PyramidPk;
+        use fem_element::ReferenceElement;
+
         let p = order as usize;
         assert!(p >= 1, "build_pyramid_pk: order must be >= 1");
         let dim = 3usize;
@@ -1998,16 +1947,16 @@ impl DofManager {
         let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
         let quad_face_dofs_per = if p >= 2 { (p - 1) * (p - 1) } else { 0 };
         let tri_face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
-        let n_verts = 5;
-        let n_edges = 8;
-        let n_quad_faces = 1;
-        let n_tri_faces = 4;
-        let surface_dofs = n_verts + n_edges * edge_dofs_per
-            + n_quad_faces * quad_face_dofs_per
-            + n_tri_faces * tri_face_dofs_per;
-        let total_ref = (p + 1) * (p + 2) * (2 * p + 3) / 6;
-        let volume_dofs_per = total_ref.saturating_sub(surface_dofs);
-        let dofs_per_elem = surface_dofs + volume_dofs_per;
+        let volume_dofs_per = if p >= 3 { (p - 2) * (p - 1) * (2 * p - 3) / 6 } else { 0 };
+        let dofs_per_elem = 5 + 8 * edge_dofs_per + quad_face_dofs_per + 4 * tri_face_dofs_per
+            + volume_dofs_per;
+        let slots = Self::pyramid_entity_slot_grid(p);
+        assert_eq!(slots.len(), dofs_per_elem, "pyramid slot table size");
+
+        // Slot ranges (entity blocks) inside one element's dof span.
+        let edge_block = 5usize..5 + 8 * edge_dofs_per;
+        let quad_block = edge_block.end..edge_block.end + quad_face_dofs_per;
+        let tri_block = quad_block.end..quad_block.end + 4 * tri_face_dofs_per;
 
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
         let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
@@ -2015,47 +1964,63 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
+        // MFEM PYRAMID edge table: local pairs in block order and direction.
+        let edge_pairs = [[0usize, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4]];
+        // Local tri faces in MFEM face order.
+        let tri_faces = [[0usize, 1], [1, 2], [2, 3], [3, 0]];
+
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 5);
             let base = e as usize * dofs_per_elem;
 
-            dofs_flat[base..base + 5].copy_from_slice(&ns[..5]);
-            let mut off = 5;
-
-            if p >= 2 {
-                let edges: [(usize, usize); 8] = [
-                    (0, 1), (1, 2), (2, 3), (3, 0),
-                    (0, 4), (1, 4), (2, 4), (3, 4),
-                ];
-                for &(la, lb) in &edges {
-                    let ed = get_edge_dofs_pk(ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per);
-                    for (k, &d) in ed.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                    off += edge_dofs_per;
-                }
+            for s in 0..5 {
+                dofs_flat[base + s] = ns[s];
             }
             if p >= 2 {
+                for (b, &[la, lb]) in edge_pairs.iter().enumerate() {
+                    let ed = get_edge_dofs_pk(
+                        ns[la], ns[lb], &mut next_dof, &mut edge_pk_map, edge_dofs_per,
+                    );
+                    let off = edge_block.start + b * edge_dofs_per;
+                    for (k, &d) in ed.iter().enumerate() {
+                        dofs_flat[base + off + k] = d;
+                    }
+                }
                 let key = QuadFaceKey::new(ns[0], ns[1], ns[2], ns[3]);
+                // Allocate the shared vector in slot order (y-outer, x-fast).
                 let fd = quad_face_pk_map.entry(key).or_insert_with(|| {
-                    (0..quad_face_dofs_per).map(|_| { let d = next_dof; next_dof += 1; d }).collect()
+                    (0..quad_face_dofs_per)
+                        .map(|_| { let d = next_dof; next_dof += 1; d })
+                        .collect()
                 });
-                for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                off += quad_face_dofs_per;
+                for (k, &d) in fd.iter().enumerate() {
+                    dofs_flat[base + quad_block.start + k] = d;
+                }
             }
             if p >= 3 {
-                for &(la, lb, lc) in &[(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)] {
-                    let fd = get_face_dofs_pk(ns[la], ns[lb], ns[lc], &mut next_dof, &mut face_pk_map, tri_face_dofs_per);
-                    for (k, &d) in fd.iter().enumerate() { dofs_flat[base + off + k] = d; }
-                    off += tri_face_dofs_per;
+                for (b, &[la, lb]) in tri_faces.iter().enumerate() {
+                    let key = FaceKey::new(ns[la], ns[lb], ns[4]);
+                    let fd = face_pk_map.entry(key).or_insert_with(|| {
+                        (0..tri_face_dofs_per)
+                            .map(|_| { let d = next_dof; next_dof += 1; d })
+                            .collect()
+                    });
+                    let off = tri_block.start + b * tri_face_dofs_per;
+                    for (k, &d) in fd.iter().enumerate() {
+                        dofs_flat[base + off + k] = d;
+                    }
                 }
-            }
-            for _ in 0..volume_dofs_per {
-                dofs_flat[base + off] = next_dof;
-                next_dof += 1;
-                off += 1;
+                for k in 0..volume_dofs_per {
+                    dofs_flat[base + tri_block.end + k] = next_dof;
+                    next_dof += 1;
+                }
             }
         }
 
+        // Coordinates: every non-vertex slot sits at the linear-pyramid image
+        // of its reference position (i/p, j/p, k/p) — the exact analogue of
+        // MFEM's `SetCurvature` XYZ projection.
         let n_dofs = next_dof as usize;
         let mut dof_coords = vec![0.0_f64; n_dofs * dim];
         for n in 0..n_nodes as u32 {
@@ -2063,100 +2028,55 @@ impl DofManager {
             let b = n as usize * dim;
             dof_coords[b..b + dim].copy_from_slice(c);
         }
-        for (&EdgeKey(a, b), dofs) in &edge_pk_map {
-            let ca = mesh.node_coords(a); let cb = mesh.node_coords(b);
-            for (k, &did) in dofs.iter().enumerate() {
-                let t = (k + 1) as f64 / (edge_dofs_per + 1) as f64;
-                let base = did as usize * dim;
-                for d in 0..dim { dof_coords[base + d] = (1.0 - t) * ca[d] + t * cb[d]; }
-            }
-        }
-        // Tri faces
-        if p >= 3 {
-            let mut face_nodes: HashMap<FaceKey, [NodeId; 3]> = HashMap::new();
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                for &(a, b, c) in &[(ns[0],ns[1],ns[4]),(ns[1],ns[2],ns[4]),(ns[2],ns[3],ns[4]),(ns[3],ns[0],ns[4])] {
-                    face_nodes.entry(FaceKey::new(a, b, c)).or_insert([a, b, c]);
+        let linear = PyramidPk::new(1);
+        let mut phi = vec![0.0_f64; 5];
+        // D191: `PyramidPk::eval_basis` slots are layer-ordered — the P1
+        // element's slot 2/3 carry local vertices 3/2 (see the matching
+        // `P1_SLOT_VERTEX` in `Mesh::set_curvature_pyramid5`).
+        const P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let base = e as usize * dofs_per_elem;
+            for (s, g) in slots.iter().enumerate() {
+                if s < 5 {
+                    continue;
                 }
-            }
-            for (key, dofs) in &face_pk_map {
-                let [a, b, c] = face_nodes[key];
-                let ca = mesh.node_coords(a); let cb = mesh.node_coords(b); let cc = mesh.node_coords(c);
-                for (k, &did) in dofs.iter().enumerate() {
-                    let base = did as usize * dim;
-                    let t = (k + 1) as f64 / (dofs.len() + 1) as f64;
-                    for d in 0..dim {
-                        dof_coords[base + d] = (1.0 - t) * ca[d] + t * (cb[d] + cc[d]) / 2.0;
-                    }
-                }
-            }
-        }
-        // Quad base face: bilinear
-        if quad_face_dofs_per > 0 {
-            let _qfb = n_nodes + edge_pk_map.len() * edge_dofs_per;
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                let v = [mesh.node_coords(ns[0]), mesh.node_coords(ns[1]), mesh.node_coords(ns[2]), mesh.node_coords(ns[3])];
-                for row in 0..(p - 1) {
-                    let xi = (row + 1) as f64 / p as f64;
-                    for col in 0..(p - 1) {
-                        let eta = (col + 1) as f64 / p as f64;
-                        let local_off = 5 + 8 * edge_dofs_per + row * (p - 1) + col;
-                        let elem_base = e as usize * dofs_per_elem;
-                        let did = dofs_flat[elem_base + local_off] as usize;
-                        let dbase = did * dim;
-                        for d in 0..dim {
-                            dof_coords[dbase + d] = (1.0 - xi) * (1.0 - eta) * v[0][d]
-                                + xi * (1.0 - eta) * v[1][d]
-                                + xi * eta * v[2][d]
-                                + (1.0 - xi) * eta * v[3][d];
-                        }
-                    }
-                }
-            }
-        }
-        // Volume: use PyramidPk ref element
-        if volume_dofs_per > 0 {
-            let factory = fem_element::lagrange::PyramidPk::new(p);
-            let ref_coords = factory.dof_coords();
-            let vol_start = n_nodes + edge_pk_map.len() * edge_dofs_per
-                + quad_face_pk_map.len() * quad_face_dofs_per
-                + face_pk_map.len() * tri_face_dofs_per;
-            for e in 0..n_elems as u32 {
-                let ns = mesh.element_nodes(e);
-                let c = [
-                    mesh.node_coords(ns[0]), mesh.node_coords(ns[1]),
-                    mesh.node_coords(ns[2]), mesh.node_coords(ns[3]),
-                    mesh.node_coords(ns[4]),
+                let theta = [
+                    g[0] as f64 / p as f64,
+                    g[1] as f64 / p as f64,
+                    g[2] as f64 / p as f64,
                 ];
-                for k in 0..volume_dofs_per {
-                    let did = vol_start + e as usize * volume_dofs_per + k;
-                    let ri = surface_dofs + k;
-                    let rc = &ref_coords[ri];
-                    let (rx, ry, rz) = (rc[0], rc[1], rc[2]);
-                    let dbase = did * dim;
-                    if (rz - 1.0).abs() < 1e-14 {
-                        dof_coords[dbase..dbase + dim].copy_from_slice(c[4]);
-                    } else {
-                        let iz = 1.0 - rz;
-                        let u = rx / iz;
-                        let v = ry / iz;
-                        for d in 0..dim {
-                            let qx = (1.0 - u) * (1.0 - v) * c[0][d] + u * (1.0 - v) * c[1][d]
-                                + u * v * c[2][d] + (1.0 - u) * v * c[3][d];
-                            dof_coords[dbase + d] = iz * qx + rz * c[4][d];
-                        }
+                linear.eval_basis(&theta, &mut phi);
+                let mut x = [0.0_f64; 3];
+                for (k, &phik) in phi.iter().enumerate() {
+                    if phik == 0.0 {
+                        continue;
+                    }
+                    let xk = mesh.node_coords(ns[P1_SLOT_VERTEX[k]]);
+                    for d in 0..dim {
+                        x[d] += phik * xk[d];
                     }
                 }
+                let did = dofs_flat[base + s] as usize;
+                dof_coords[did * dim..did * dim + dim].copy_from_slice(&x[..dim]);
             }
         }
+
+        // `boundary_face_dofs` (assembly/constraints.rs) reads the single
+        // mid-edge dof of order-2 spaces from `edge_dof_map`; mirror the
+        // (one-entry) edge vectors there.  Orders >= 3 read `edge_pk_map`.
+        let edge_dof_map = if p == 2 {
+            edge_pk_map.iter().map(|(k, v)| (*k, v[0])).collect()
+        } else {
+            HashMap::new()
+        };
 
         DofManager {
             order, n_dofs, dofs_flat, dofs_per_elem,
             elem_dof_offsets: None, dof_coords, dim,
             n_vertex_dofs: n_nodes,
-            edge_dof_map: HashMap::new(), edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(), edge_pk_map,
+            edge_dof_map, edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(),
+            edge_pk_map,
             face_pk_map, quad_face_pk_map,
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
             edge_variants: HashMap::new(),
@@ -3006,10 +2926,10 @@ impl DofManager {
     ///
     /// Element slot layouts must match the reference elements the H1
     /// assembler evaluates: the *field* element per shape is QuadQk / HexQk /
-    /// H1TriPk / H1TetPk / H1PrismPk / PyramidPk (the builders
-    /// `build_q2_quad`/`build_pk_quad`, `build_q2_hex`/`build_pk_hex`,
-    /// `build_pk` (tri), `build_tet_h1`, `build_prism_h1`,
-    /// `build_p2_pyramid`/`build_p3_pyramid`/`build_pyramid_pk`).  The
+    /// H1TriPk / H1TetPk / H1PrismPk, and for pyramids the MFEM entity-order
+    /// slot table [`Self::pyramid_entity_slot_grid`] (D191 — `PyramidPk`'s
+    /// own `dof_coords` are layer-major and would silently permute the field
+    /// slots).  The
     /// *geometry* element follows whatever order
     /// `Mesh::set_curvature_*` writes its table in: QuadQk / HexQk / H1TriPk /
     /// H1TetPk for quad/hex/tri/tet, but **layer-major `PrismPk`** for prisms
@@ -3028,18 +2948,20 @@ impl DofManager {
         for e in 0..n_elems as u32 {
             let p = self.element_order(e) as usize;
             let npe = mesh.element_nodes(e).len();
-            let (ref_elem, geom_elem): (Box<dyn ReferenceElement>, Box<dyn ReferenceElement>) =
+            // Field-slot reference positions in builder slot order; the
+            // geometry element is evaluated at those positions.
+            let (ref_dofs, geom_elem): (Vec<[f64; 3]>, Box<dyn ReferenceElement>) =
                 match (npe, topo_dim) {
                     (4, 2) => (
-                        Box::new(QuadQk::new(p)),
+                        QuadQk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(QuadQk::new(geom_order)),
                     ),
                     (8, _) => (
-                        Box::new(HexQk::new(p)),
+                        HexQk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(HexQk::new(geom_order)),
                     ),
                     (3, 2) => (
-                        Box::new(H1TriPk::new(p)),
+                        H1TriPk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(H1TriPk::new(geom_order)),
                     ),
                     // D157: the tet *field* slots follow `H1TetPk` (MFEM
@@ -3048,7 +2970,7 @@ impl DofManager {
                     // same slots — the equispaced `factory::TetPk` disagrees
                     // with both from p = 3 on.
                     (4, _) => (
-                        Box::new(H1TetPk::new(p)),
+                        H1TetPk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(H1TetPk::new(geom_order)),
                     ),
                     // D182: the prism *field* slots follow `H1PrismPk`
@@ -3060,17 +2982,30 @@ impl DofManager {
                     // so a wrong field element here passes every count check
                     // and silently permutes the coordinates.
                     (6, _) => (
-                        Box::new(H1PrismPk::new(p)),
+                        H1PrismPk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(PrismPk::new(geom_order)),
                     ),
+                    // D191: the pyramid *field* slots follow the MFEM
+                    // entity-order slot table (the layout `build_pyramid_pk`
+                    // numbers `element_dofs` in), while the *geometry* table
+                    // stays layer-major `PyramidPk`
+                    // (`set_curvature_pyramid5`'s frozen contract).
                     (5, _) => (
-                        Box::new(PyramidPk::new(p)),
+                        Self::pyramid_entity_slot_grid(p)
+                            .iter()
+                            .map(|g| {
+                                [
+                                    g[0] as f64 / p as f64,
+                                    g[1] as f64 / p as f64,
+                                    g[2] as f64 / p as f64,
+                                ]
+                            })
+                            .collect(),
                         Box::new(PyramidPk::new(geom_order)),
                     ),
                     _ => continue,
                 };
             let dofs = self.element_dofs(e).to_vec();
-            let ref_dofs = ref_elem.dof_coords();
             // D182 hardening: a slot-count mismatch means the field reference
             // element above no longer matches the builder that produced
             // `element_dofs`.  This used to `continue` (keep fold-based
@@ -3696,3 +3631,4 @@ mod tests {
         }
     }
 }
+

@@ -46,6 +46,10 @@
 //!   interpolation ([`plbound::project_h1_to_l2`]), and GL/GLL-noded PLBounds
 //!   (D257); grid functions whose file names an `L2_*` collection are read
 //!   directly too;
+//! * `-l2 -bt 0/1` from a discontinuous source (D278): L2 → L2 change of
+//!   basis ([`plbound::project_l2_to_l2`]) — `L2_*` (GL) and `L2_T1_*` (GLL)
+//!   sources project onto either target basis; byte-verified against the C++
+//!   runs in `tmp/d299/`;
 //! * `-visit` (D258): a VisIt data collection
 //!   `jacobian-determinant-bounds_000000` in `PARALLEL_FORMAT` layout
 //!   (`pmesh.<rank>` + fields + `.mfem_root`), byte-matched against the C++
@@ -67,17 +71,31 @@
 //! Remaining gaps (each fails up front, before any output C++ would print
 //! differently):
 //!
-//! * `-bt 2` (positive/`H1Pos_`/`L2_T2_` bases + the Bernstein PLBound
-//!   machinery): no fem-rs positive basis — exit 3.  (`-bt 0` with a
-//!   continuous space fails in C++ itself, `MFEM_VERIFY(b_type > 0)`; the
-//!   port prints the same `mfem_error` text and exits 1 like the C++
-//!   `MPI_ABORT` errorcode.  Other `-bt` values, e.g. serendipity, are a
-//!   documented gap — exit 3.)
+//! * `-bt 2` (positive bases, D276): the C++ run (rc = 0) re-fits the field
+//!   in a Bernstein/positive basis — `H1_FECollection(order, dim, Positive)`
+//!   (`H1Pos_..`) or `L2_FECollection(order, dim, 2)` (`L2_T2_..`) — and the
+//!   PLBound switches to the Bernstein machinery: `ClosedUniform` control
+//!   points (`nodes`), a second GLL point set (`nodes_int`) for the linear
+//!   fit, `SetupBernsteinBasisMat` (Bernstein shapes through
+//!   `L2_SegmentElement::GetLexicographicOrdering`, LU-factored) at both,
+//!   the `min_ncp_pos_x` control-point tables (`fem/bounds.hpp`), and the
+//!   Bernstein branches of the control-point/recursive evaluation
+//!   (`fem/bounds.cpp` L325–430, L525+).  A port therefore needs a
+//!   positive/Bernstein basis in `fem-element` first (nothing of
+//!   `fe_pos.cpp` exists in fem-rs) plus the projection onto a
+//!   *non-interpolatory* basis — exit 3.  C++ ground truth (rc = 0, all
+//!   `fec name: H1Pos_..`/`L2_T2_..`) is archived in `tmp/d299/`
+//!   (`cpp_bt2_*.txt`: f_quad2 H1/L2/nb10/ref5, f_hex2, f_quad5).
+//!   (`-bt 0` with a continuous space fails in C++ itself,
+//!   `MFEM_VERIFY(b_type > 0)`; the port prints the same `mfem_error` text
+//!   and exits 1 like the C++ `MPI_ABORT` errorcode.  Other `-bt` values,
+//!   e.g. serendipity, are a documented gap — exit 3.)
 //! * 1-D meshes: C++ supports dim 1; fem-rs' `read_mfem_file` rejects
 //!   `dim = 1` up front (`dim=1 unsupported`, exit 1) — a `Mesh<1>` core type
 //!   is the missing piece (D258 remaining gap).
-//! * Projection *from* an already-discontinuous source (L2 `-bt` to another
-//!   L2 basis) — exit 3 (the fixtures are all H1-sourced).
+//! * `-bt` from a discontinuous source onto a *continuous* target
+//!   (L2 → H1) — exit 3 (D278 remaining gap; the L2 → L2 change of basis is
+//!   ported above).
 //!
 //! ### Known upstream quirk: `vdim > 1` recursion column
 //!
@@ -286,7 +304,9 @@ fn main() {
         eprintln!(
             "gridfunction-bounds (Rust port): `-bt 2` (positive/Bernstein bases \
              `H1Pos_`/`L2_T2_` via FiniteElementCollection + ProjectGridFunction, plus the \
-             Bernstein PLBound machinery) has no fem-rs equivalent yet (D256 remaining gap)."
+             Bernstein PLBound machinery: ClosedUniform control points, SetupBernsteinBasisMat \
+             + LU, min_ncp_pos_x) has no fem-rs equivalent yet (D276; C++ ground truth archived \
+             in tmp/d299/cpp_bt2_*.txt)."
         );
         std::process::exit(3);
     }
@@ -382,13 +402,13 @@ fn run<const DIM: usize>(
             _ => BoundsBasis::GaussLobatto,
         })
     };
-    // Projection *from* a discontinuous source is a documented gap (only the
-    // H1-sourced fixtures exercise -bt; the C++ interpolation matrix would be
-    // assembled from the L2 source elements).
-    if b_type >= 0 && source != SourceSpace::H1 {
+    // Projection *from* a discontinuous source onto another L2 basis is the
+    // D278 tier (`project_l2_to_l2`); the continuous target from a
+    // discontinuous source (L2 → H1) stays a documented gap.
+    if b_type >= 0 && source != SourceSpace::H1 && !matches!(target, Target::L2(_)) {
         eprintln!(
             "gridfunction-bounds (Rust port): `-bt` projection from the discontinuous source \
-             `{fec}` is not ported (D257 remaining gap)."
+             `{fec}` onto a continuous space is not ported (D278 remaining gap)."
         );
         std::process::exit(3);
     }
@@ -578,7 +598,36 @@ fn run<const DIM: usize>(
                 bounds_core!(gf);
             }
         }
-        _ => unreachable!("projection from a discontinuous source exited earlier"),
+        // L2 → H1 (`-bt 1` on a discontinuous source, continuous target):
+        // documented gap (exited earlier).
+        (SourceSpace::L2GaussLegendre | SourceSpace::L2GaussLobatto, Target::H1Gll) => {
+            unreachable!("projection from a discontinuous source exited earlier")
+        }
+        // D278: discontinuous source projected onto another L2 basis
+        // (`-l2 -bt 0/1` with an `L2_*`/`L2_T1_*` solution file).
+        (s, Target::L2(basis)) => {
+            let src_basis = match s {
+                SourceSpace::L2GaussLegendre => BoundsBasis::GaussLegendre,
+                SourceSpace::L2GaussLobatto => BoundsBasis::GaussLobatto,
+                SourceSpace::H1 => unreachable!("H1 source handled above"),
+            };
+            let l2src = source_l2.as_ref().unwrap();
+            check_count(l2src.n_dofs());
+            let l2dst = target_l2.as_ref().unwrap();
+            for d in 0..vdim {
+                let gf_src = GridFunction::new(l2src, slice(d, l2src.n_dofs(), &dofs));
+                let projected = plbound::project_l2_to_l2(&gf_src, order, src_basis, basis)
+                    .unwrap_or_else(|e| {
+                        eprintln!("gridfunction-bounds (Rust port): {e}");
+                        std::process::exit(3);
+                    });
+                if let Some(all) = projected_all.as_mut() {
+                    all.extend_from_slice(&projected);
+                }
+                let gf = GridFunction::new(l2dst, projected);
+                bounds_core!(gf);
+            }
+        }
     }
 
     // The output table (`cout << left << setw(20) << ...`).
