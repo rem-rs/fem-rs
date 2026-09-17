@@ -1486,7 +1486,12 @@ vertex_parents: vec![],
         // Prism6: a *curved* mesh's new vertices are geometry-dof picks — no
         // coordinate lookup can find them — so the refinement's own topological
         // maps resolve the child boundary faces instead.  Straight-sided prism
-        // meshes keep the historical coordinate-keyed path bit for bit.
+        // meshes keep the coordinate-keyed path: on a linear mesh every
+        // midpoint/quad-face-center has a unique averaged position, so the
+        // lookup resolves to the same ids MFEM's numbering assigns (D180) —
+        // and synthetic boundary tables that split the prisms' quads into
+        // triangle *diagonals* only resolve this way (those edges are not in
+        // the maps).
         _ => {
             let taken = prism_maps.take();
             let maps = if mesh.geometry.is_some() {
@@ -5279,7 +5284,9 @@ impl MfemPrismRefineIds {
 /// corner 2, center, corner 3, corner 4, corner 5, center) expressed as MFEM
 /// `pri_children` matrix indices (corner 0, center, corner 1, corner 2, corner
 /// 3, center, corner 4, corner 5) — used to label the children of a *partially*
-/// refined curved mesh, whose geometry needs each child's true embedding.
+/// refined mesh (straight or curved), whose geometry needs each child's true
+/// embedding.  Uniform refinement emits the children in MFEM's own order, so
+/// the identity map applies there.
 const HISTORICAL_CHILD_TO_MFEM: [u8; 8] = [0, 2, 3, 1, 4, 6, 7, 5];
 
 /// Uniform refinement for Prism6 → 8 child Prism6.
@@ -5293,13 +5300,15 @@ const HISTORICAL_CHILD_TO_MFEM: [u8; 8] = [0, 2, 3, 1, 4, 6, 7, 5];
 /// and a top layer (children 4-7, above mid-height), each with one child per
 /// sub-triangle of the triangular faces plus one central child.
 ///
-/// When the mesh carries curved (order-`p ≥ 2`) geometry **and** every element
-/// is refined, the refinement reproduces MFEM exactly: the new vertices take
-/// geometry-dof values (`amr::curved_prism`), the children are emitted in
-/// MFEM's `UniformRefinement3D_base` wedge order with MFEM's canonical
-/// new-vertex ids (`MfemPrismRefineIds`), and the refined mesh keeps a
-/// refined `nodes` geometry table.  Straight-sided (or partially refined)
-/// meshes keep the historical first-touch ids and child order.
+/// When **every** element is refined (uniform refinement), the refinement
+/// reproduces MFEM exactly — straight-sided and curved meshes alike (D180):
+/// no tri-face centers / body centers are created, the children are emitted
+/// in MFEM's `UniformRefinement3D_base` wedge order with MFEM's canonical
+/// new-vertex ids (`MfemPrismRefineIds`), and a curved mesh additionally keeps
+/// a refined `nodes` geometry table with the new vertices at geometry-dof
+/// values (`amr::curved_prism`).  *Partially* refined meshes keep the
+/// historical first-touch ids and child order (MFEM's dense id space would
+/// carry holes).
 ///
 /// # Returns
 /// `(new_mesh, edge_constraints, edge_midpoint_map, quad_face_center_map)`.
@@ -5357,13 +5366,15 @@ pub fn refine_prism6_uniform(
     // `local_edges_prism()` order and the quad-face ranks (MFEM's `f2qf`)
     // following the global face ids (`GetElementToFaceTable`, first-touch per
     // element in `Geometry::Constants<PRISM>::FaceVert` order, quads only).
-    // Reproduced where a written file pins it down — a *curved* mesh under
-    // *uniform* refinement keeps its `nodes` table, so the refined file
-    // carries these ids in every section.  Straight-sided meshes keep the
-    // historical first-touch numbering (the straight-refinement regression
-    // outputs pin it), and partial refinement would leave holes in the dense
-    // id space, so neither switches.
-    let mfem_ids = if geo.is_some() && marked_set.len() == n_elems {
+    //
+    // D180 (round 42): this numbering applies to **uniform** refinement of
+    // straight-sided meshes too — `UniformRefinement3D_base` builds the same
+    // dense `oedge/oface` id space regardless of curvature, and the historical
+    // fem-rs arm's unused tri-face centers / body centers made a refined
+    // straight toroid carry 112 vertices where MFEM writes 96.  Only *partial*
+    // refinement keeps the historical first-touch numbering: leaving most
+    // elements unrefined would punch holes in the dense id space.
+    let mfem_ids = if marked_set.len() == n_elems {
         Some(MfemPrismRefineIds::build(mesh))
     } else {
         None
@@ -5496,16 +5507,15 @@ pub fn refine_prism6_uniform(
     // ── 4. Build new element connectivity (8 child prisms) ────────────────────
     // Each child is a Prism6: bottom tri (3 nodes CCW) + top tri (3 nodes CCW).
     //
-    // The historical fem-rs order (children 0-2 bottom corners, 3 bottom
-    // center, 4-6 top corners, 7 top center) is kept for straight-sided
-    // meshes.  Where a curved mesh is refined *uniformly* the refined file
-    // carries MFEM's own child order — corner 0, center, corner 1, corner 2
-    // per layer, the center children with cyclically rotated node order —
-    // because MFEM's `UniformRefinement3D_base` emits its `new Wedge(...)`
-    // children in that sequence and the fine element order pins both the
-    // `elements` section and the `nodes` update's first-touch dof ownership
-    // (`amr::curved_prism`'s builder walks `fine_parent` in exactly this
-    // order).
+    // Uniform refinement (every element marked) uses MFEM's own child order —
+    // corner 0, center, corner 1, corner 2 per layer, the center children with
+    // cyclically rotated node order — because MFEM's
+    // `UniformRefinement3D_base` emits its `new Wedge(...)` children in that
+    // sequence and the fine element order pins both the `elements` section and
+    // the `nodes` update's first-touch dof ownership (`amr::curved_prism`'s
+    // builder walks `fine_parent` in exactly this order).  Partial refinement
+    // of a straight mesh keeps the historical fem-rs order (children 0-2
+    // bottom corners, 3 bottom center, 4-6 top corners, 7 top center).
     let mut new_conn: Vec<NodeId> = Vec::new();
     let mut new_tags: Vec<i32>    = Vec::new();
     // Fine element → (parent element, child matrix index) map for the refined

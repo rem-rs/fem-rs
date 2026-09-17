@@ -10,7 +10,7 @@
 //! tests replicate that reference projection and require `interpolate` to agree.
 
 use fem_element::lagrange::factory::{HexQk, QuadQk};
-use fem_element::lagrange::{H1TriPk, TetPk};
+use fem_element::lagrange::{H1TetPk, H1TriPk};
 use fem_element::ReferenceElement;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
@@ -51,8 +51,11 @@ fn project_coefficient_replica<M: MeshTopology>(
                     Box::new(H1TriPk::new(geom_order)),
                 ),
                 fem_mesh::ElementType::Tet4 => (
-                    Box::new(TetPk::new(p)),
-                    Box::new(TetPk::new(geom_order)),
+                    // D192/D157: the tet *field* slots follow `H1TetPk` (MFEM
+                    // Gauss-Lobatto placement) since D157; the historical
+                    // equispaced `factory::TetPk` disagrees slot-for-slot.
+                    Box::new(H1TetPk::new(p)),
+                    Box::new(H1TetPk::new(geom_order)),
                 ),
                 t => panic!("replica: unsupported element type {t:?} order {p}"),
             };
@@ -150,6 +153,38 @@ fn h1_interpolate_matches_per_element_projection_on_periodic_tri_mesh() {
         assert!(
             max_diff < 1e-12,
             "tri order {order}: interpolate vs per-element projection max |diff| = {max_diff:.3e}"
+        );
+    }
+}
+
+/// Tetrahedra, periodic in x: the D192 gate.  The replica's tet arm must use
+/// the D157 `H1TetPk` convention (the one `DofManager::build_tet_h1` and
+/// `Mesh::set_curvature_tet4` both follow); a tet periodic case did not exist
+/// before, so the stale equispaced-`TetPk` replica arm was never exercised.
+#[test]
+fn h1_interpolate_matches_per_element_projection_on_periodic_tet_mesh() {
+    // unit_cube_tet boundary tags: 5 = x = 0, 6 = x = 1.
+    let base = Mesh::<3>::unit_cube_tet(1);
+    let mesh = base
+        .make_periodic(&[(5, 6, [1.0, 0.0, 0.0])], 1e-10)
+        .unwrap();
+    assert_eq!(mesh.element_type(0), fem_mesh::ElementType::Tet4);
+    for order in [1u8, 2, 3] {
+        let space = H1Space::new(mesh.clone(), order);
+        let f = |x: &[f64]| {
+            (2.0 * std::f64::consts::PI * x[0]).sin()
+                * (3.0 * x[1] + 1.0).cos()
+                * x[2]
+        };
+        let v = space.interpolate(&f);
+        let replica = project_coefficient_replica(&mesh, space.dof_manager(), &f);
+        let mut max_diff = 0.0_f64;
+        for (a, b) in v.as_slice().iter().zip(replica.iter()) {
+            max_diff = max_diff.max((a - b).abs());
+        }
+        assert!(
+            max_diff < 1e-12,
+            "tet order {order}: interpolate vs per-element projection max |diff| = {max_diff:.3e}"
         );
     }
 }

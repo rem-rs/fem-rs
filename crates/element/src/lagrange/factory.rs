@@ -420,10 +420,12 @@ impl ReferenceElement for TriPk {
 ///   j = 1..p-1, i = 1..p-1-j
 ///
 /// where `cp` are the `p+1` GLL closed points on `[0,1]`.  The basis is the
-/// Vandermonde inverse of the lexicographic product basis
-/// `s_o(ξ) = L_i(ξ0)·L_j(ξ1)·L_k(1−ξ0−ξ1)` (o = `idx(i,j)`, k = p−i−j, `L` =
-/// 1-D GLL Lagrange polynomials), exactly as MFEM computes it, so the DOFs
-/// are nodal values at `nodes`.
+/// Vandermonde inverse of the lexicographic hierarchical Chebyshev tensor
+/// basis `s_o(ξ) = T_i(2ξ0−1)·T_j(2ξ1−1)·T_k(2(1−ξ0−ξ1)−1)` (o = `idx(i,j)`,
+/// k = p−i−j; MFEM `Poly_1D::CalcBasis`, which is `CalcChebyshev`), exactly as
+/// MFEM computes it, so the DOFs are nodal values at `nodes` at every order
+/// (D188: the earlier monomial Vandermonde degraded as `p^{2p}` and lost the
+/// nodal property from p≈8 on; the Chebyshev build stays at machine precision).
 pub struct H1TriPk {
     order: usize,
     nodes: Vec<[f64; 2]>,
@@ -529,18 +531,28 @@ impl H1TriPk {
         }
         debug_assert_eq!(lex.len(), nodes.len());
 
-        // Vandermonde on the *monomial* basis m_o = x^i·y^j (i+j <= p, lex
-        // order).  Using the 1-D GLL tensor product lx·ly·ll here produced
-        // basis functions of degree 3p (not p): interpolation at the nodes
-        // held, but the partition of unity failed away from the nodes
-        // (Σφ ≈ 0.78 at [0.2,0.3] for p=3), corrupting every H1 assembly
-        // of order >= 3 (P3 Poisson L2 error ~0.5).
+        // Vandermonde on the hierarchical Chebyshev tensor basis
+        // `s_o = T_i(2x−1)·T_j(2y−1)·T_{p−i−j}(2(1−x−y)−1)` (o = `idx(i,j)`,
+        // MFEM `Poly_1D::CalcBasis`, which **is** `CalcChebyshev` —
+        // fem/fe/fe_base.hpp: `CalcBasis(p, x, u) { CalcChebyshev(p, x, u); }`).
+        // Each factor is exactly degree `i`/`j`/`p−i−j`, so every tensor term
+        // is total degree `p` and the inverse gives the nodal Lagrange basis
+        // with full precision at every order (D188: the previous *monomial*
+        // Vandermonde lost the nodal property at high order — residual
+        // ≈ 1.8e-9 at p=8, 2.6e-6 at p=10, 1.4e-3 at p=12 — where MFEM stays
+        // at ≈ 1e-15; the Chebyshev build matches MFEM bit-for-bit in scale).
+        // (A pre-D188 attempt used the 1-D GLL *Lagrange* tensor here: those
+        // `L_i` pass through all p+1 points, so they are degree-p, not degree-i,
+        // and the raw tensor terms have degree 3p — the Vandermonde was fine
+        // but the doc confusion is why the monomials replaced it.)
         let n = nodes.len();
         let mut t = DMatrix::<f64>::zeros(n, n);
         for (k, node) in nodes.iter().enumerate() {
+            let sx = cheb_1d(p, node[0]);
+            let sy = cheb_1d(p, node[1]);
+            let sl = cheb_1d(p, 1.0 - node[0] - node[1]);
             for (o, &(i, j)) in lex.iter().enumerate() {
-                // monomial x^i y^j evaluated at node k
-                t[(o, k)] = node[0].powi(i as i32) * node[1].powi(j as i32);
+                t[(o, k)] = sx[i] * sy[j] * sl[p - i - j];
             }
         }
         let ti_m = t
@@ -571,18 +583,14 @@ impl ReferenceElement for H1TriPk {
         let p = self.order;
         let n = self.nodes.len();
         let (x, y) = (xi[0], xi[1]);
-        // Monomial basis m_o = x^i·y^j (i+j <= p), matching the Vandermonde
-        // used in `new`.  (The old 1-D GLL tensor product produced degree-3p
-        // functions that failed the partition of unity.)
+        // Hierarchical Chebyshev tensor basis matching the Vandermonde built
+        // in `with_closed_points` (MFEM `Poly_1D::CalcBasis` = `CalcChebyshev`).
         let mut s = vec![0.0; n];
-        let mut xp = vec![1.0; p + 1];
-        let mut yp = vec![1.0; p + 1];
-        for i in 1..=p {
-            xp[i] = xp[i - 1] * x;
-            yp[i] = yp[i - 1] * y;
-        }
+        let sx = cheb_1d(p, x);
+        let sy = cheb_1d(p, y);
+        let sl = cheb_1d(p, 1.0 - x - y);
         for (o, &(i, j)) in self.lex.iter().enumerate() {
-            s[o] = xp[i] * yp[j];
+            s[o] = sx[i] * sy[j] * sl[p - i - j];
         }
         for k in 0..n {
             let mut acc = 0.0;
@@ -597,20 +605,18 @@ impl ReferenceElement for H1TriPk {
         let p = self.order;
         let n = self.nodes.len();
         let (x, y) = (xi[0], xi[1]);
-        // Derivatives of the monomial basis: ∂m/∂x = i·x^{i-1}·y^j,
-        // ∂m/∂y = j·x^i·y^{j-1}.
-        let mut xp = vec![1.0; p + 1];
-        let mut yp = vec![1.0; p + 1];
-        for i in 1..=p {
-            xp[i] = xp[i - 1] * x;
-            yp[i] = yp[i - 1] * y;
-        }
+        // Derivatives of the Chebyshev tensor basis s_o = T_i(x)·T_j(y)·T_l(λ),
+        // λ = 1−x−y, l = p−i−j (`cheb_1d_d` differentiates w.r.t. its scalar):
+        // ∂s/∂x = T'_i(x)·T_j(y)·T_l(λ) − T_i(x)·T_j(y)·T'_l(λ), and the same
+        // for y — MFEM `H1_TriangleElement::CalcDShape`'s `-dshape_l` chain rule.
+        let (sx, dsx) = cheb_1d_d(p, x);
+        let (sy, dsy) = cheb_1d_d(p, y);
+        let (sl, dsl) = cheb_1d_d(p, 1.0 - x - y);
         let mut ds = vec![0.0; n * 2];
         for (o, &(i, j)) in self.lex.iter().enumerate() {
-            let dx = if i > 0 { (i as f64) * xp[i - 1] * yp[j] } else { 0.0 };
-            let dy = if j > 0 { (j as f64) * xp[i] * yp[j - 1] } else { 0.0 };
-            ds[o * 2] = dx;
-            ds[o * 2 + 1] = dy;
+            let l = p - i - j;
+            ds[o * 2] = dsx[i] * sy[j] * sl[l] - sx[i] * sy[j] * dsl[l];
+            ds[o * 2 + 1] = sx[i] * dsy[j] * sl[l] - sx[i] * sy[j] * dsl[l];
         }
         for k in 0..n {
             let mut gx = 0.0;
