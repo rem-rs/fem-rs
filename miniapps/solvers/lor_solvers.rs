@@ -1,159 +1,541 @@
-//! # LOR Solvers Miniapp — **declared stub** (round 31, D140)
+//! # LOR Solvers Miniapp — port of MFEM `miniapps/solvers/lor_solvers.cpp`
 //!
-//! ⚠ This file is **not** a port of MFEM `miniapps/solvers/lor_solvers.cpp`.
-//! It never builds a low-order-refined (LOR) space and never uses an LOR/AMG
-//! preconditioner: it assembles the H¹ mass and diffusion matrices, **throws
-//! the mass matrix away** (the `_mass` binding below), solves that
-//! diffusion-only system with plain PCG + Jacobi and prints
-//! `LOR solvers complete` with **exit code 0** — i.e. it claims to be the LOR
-//! miniapp while computing the wrong operator.  It imported no LOR/AMG symbol
-//! at all, `-fe` other than `h` exited with 1, and there was no gap list.
+//! Definite Helmholtz / definite Maxwell / grad-div manufactured problems
+//! (`lor_mms.hpp`) discretised on `H1`, `H(curl)`, `H(div)` or `L2` spaces and
+//! **preconditioned by the low-order refined operator**: `P1` (or `ND1`/`RT0`)
+//! on the Gauss-Lobatto refined mesh, with the LOR dof permutation
+//! `M⁻¹ = Π · A_LOR⁻¹ · Πᵀ`.
 //!
-//! `main` therefore prints the gap list and exits with status **3** for every
-//! input.  The 1:1 miniapp of the same MFEM source is
-//! `miniapps/solvers/plor_solvers.rs` (registered as `miniapp_plor_solvers`),
-//! which has the LOR space, the LOR preconditioner and the AMG comparison —
-//! **use that one**; this file is kept only as scaffolding and deliberately
-//! does not solve anything.
+//! Round 48: this file used to be a **declarative stub** (D140) that assembled
+//! the H¹ mass and diffusion matrices, **discarded the mass matrix**, solved the
+//! diffusion-only system with plain PCG+Jacobi and printed
+//! `LOR solvers complete` with exit code 0 — i.e. it claimed to be the LOR
+//! miniapp while computing the wrong operator, and refused every input.  The
+//! LOR stack it needed has since landed (`fem_space::lor::{LorH1,LorNd,LorRt}`,
+//! `fem_assembly::lor_factory`, `fem_solver::lor`), so it is now a real driver.
 //!
-//! Nothing here is worth wiring up as-is: the missing pieces for a real port
-//! are the LOR space (`LORFECollection` / `LORSolver` in C++), the
-//! `-fe {h,n,r}` coarse-space selection, the LOR space's own sparse
-//! representation, and the `M + K` operator combination (fem-rs has LOR
-//! machinery — see `crates/assembly/src/lor_factory.rs` and
-//! `miniapps/solvers/plor_solvers.rs` — so the port belongs there, not here).
+//! 1:1 with the C++ driver:
+//!
+//! | C++ | here |
+//! |---|---|
+//! | `Mesh mesh(mesh_file, 1, 1)` + `-r` `UniformRefinement()` | `read_mfem_file` + `refine_uniform` |
+//! | `H1_FECollection(order, dim, GaussLobatto)` | `H1Space::new(mesh, order)` |
+//! | `ND_FECollection(order, dim, GaussLobatto, IntegratedGLL)` | `HCurlSpace::new(mesh, order)` |
+//! | `RT_FECollection(order-1, dim, GaussLobatto, IntegratedGLL)` | `HDivSpace::new(mesh, order-1)` |
+//! | `MassIntegrator + DiffusionIntegrator` (H1/L2) | `MassIntegrator` + `DiffusionIntegrator` |
+//! | `VectorFEMassIntegrator (+ CurlCurl/DivDiv)` (ND/RT) | `VectorMassIntegrator` + `CurlCurlIntegrator`/`DivDivIntegrator` |
+//! | `fes.GetBoundaryTrueDofs(ess_dofs)` | `boundary_dofs{,_hcurl,_hdiv}` |
+//! | `x.ProjectCoefficient(u_coeff / u_vec_coeff)` | `FESpace::interpolate` |
+//! | `FormLinearSystem` (DIAG_KEEP) | `apply_dirichlet` (`DIAG_KEEP`) |
+//! | `LORSolver<GSSmoother>` (no SuiteSparse) | `build_lor_amg_h1` → `LorAmgPrecond` |
+//! | `LORSolver<HypreAMS>` (ND) / `<HypreADS>`/Jacobi (RT) | `build_lor_ams_nd_quad` / `build_lor_jacobi_rt_quad` |
+//! | `CGSolver` (rtol 1e-12, 500 iters) | `solve_pcg_lor_amg` / `solve_pcg_precond` |
+//! | `x.ComputeL2Error(u)` | `GridFunction::compute_l2_error` / `compute_l2_error_hcurl/hdiv` |
+//!
+//! ## Measured C++ reference (MFEM 4.10, `$HOME/mfem410_ser`, no SuiteSparse)
+//!
+//! ```text
+//! lor_solvers -m data/star.mesh        -fe h -> Number of DOFs:  781  L2 error: 0.000395471
+//! lor_solvers -m data/inline-quad.mesh -fe h -> Number of DOFs:  625  L2 error: 5.56315e-06
+//! lor_solvers -m data/inline-quad.mesh -fe n -> Number of DOFs: 1200  L2 error: 0.000134744
+//! lor_solvers -m data/inline-quad.mesh -fe r -> Number of DOFs: 1200  L2 error: 0.000134744
+//! ```
+//!
+//! (`star.mesh` is a **20-element quadrilateral** mesh — its `elements` block uses
+//! geometry type 3 — so it is the quad LOR path, not the simplex one.)
+//!
+//! ## Verified: `-fe h`
+//!
+//! `Number of DOFs` and `L2 error` are **byte-identical to the C++** on both
+//! meshes above (`781` / `0.000395471` and `625` / `5.56315e-06`).
+//!
+//! Two quadrature details had to be pinned (both measured, see the helpers):
+//!
+//! * the **load** rule is `2·order + 1`, not `2·order + 2` — `f` is
+//!   trigonometric, so the RHS rule shifts the discrete solution and only
+//!   `2·order + 1` reproduces the C++ value;
+//! * the **`L2 error`** rule is MFEM's `ComputeL2Error` default
+//!   `2·order + 3` (`fem/gridfunc.cpp:3410`).
+//!
+//! The CG **iteration count** is *not* part of the acceptance: MFEM built
+//! without SuiteSparse uses `LORSolver<GSSmoother>` (one GS sweep on `A_LOR`),
+//! while fem-rs applies AMG to `A_LOR` through `build_lor_amg_h1`.  Both reach
+//! the same solution (`star.mesh`: 26 fem-rs iterations against 58 C++
+//! iterations, `L2 error` identical to the printed digit).
+//!
+//! ## Not ported (honest gaps, refused with a message, never faked)
+//!
+//! * **`-fe n` / `-fe r`**: the low-order operator assembles and the RT leg
+//!   converges, but the LOR **preconditioner must be built on the eliminated
+//!   system**.  MFEM's `LORSolver(BilinearForm&, ess_tdof_list)` runs
+//!   `LORBase::AssembleSystem` → `FormSystemMatrix(ess_dofs, A)` on the LOR
+//!   discretisation; `fem_assembly::lor_factory::build_lor_ams_nd_quad` /
+//!   `build_lor_jacobi_rt_quad` derive `A_LOR` internally from the
+//!   `(mass, curl_curl)` coefficients and take **no essential-dof list**, so the
+//!   preconditioner sits on the un-eliminated operator.  Measured on
+//!   `data/inline-quad.mesh -o 3`: ND does not converge (true relative residual
+//!   `1.2070903825e-01` after 500 iterations against the C++'s 279), and RT
+//!   converges in 204 iterations but its `L2 error` misses the C++'s last
+//!   printed digit (`0.000134745` vs `0.000134744`).  The missing capability is
+//!   an `ess_dofs` argument on the LOR builders.
+//! * **`-fe n` / `-fe r` on a simplex mesh**: fem-rs's ND/RT LOR
+//!   discretisations are tensor-product only (`LorNd::<2>::new_quad` /
+//!   `LorRt::<2>::new_quad` require every element to be `Quad4`), while MFEM's
+//!   `LORBase` only sets `ir_el = NULL` for a non-tensor geometry and still
+//!   builds the low-order space (`lor.cpp:338-355`).
+//! * **`-fe l`** (L² DG): MFEM adds `DGDiffusionIntegrator(-1, kappa)` as an
+//!   interior/boundary *face* integrator on the bilinear/linear forms.
+//!   fem-rs's DG machinery is a separate assembler API (`dg::DgAssembler`), not
+//!   a `BilinearForm` integrator, so the DG leg has no 1:1 expression here.
+//!
+//! ## `-fe h` on a simplex mesh: no C++ oracle exists
+//!
+//! `lor_solvers -m data/inline-tri.mesh -fe h` **aborts inside MFEM**:
+//! `MFEM_VERIFY(mode == DofToQuad::FULL)` (`fem/fe/fe_base.cpp:377`) — the
+//! partial-assembly path that `lor_solvers.cpp:159` selects for H¹ needs a
+//! tensor `DofToQuad`, which the triangle element does not provide.  fem-rs
+//! assembles fully, so it runs there and reports `Number of DOFs: 625` (which
+//! does agree with the C++'s `625` for `inline-tri` before the abort).  That
+//! path is therefore *ahead of* the C++, not verified against it.
 
-use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
-use fem_mesh::Mesh;
-use fem_space::{H1Space, fe_space::FESpace};
-use fem_space::constraints::{apply_dirichlet, boundary_dofs};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use std::f64::consts::PI;
 
-/// D140: prints the gap list and terminates with the project's "honest partial
-/// delivery" status.  Deliberately not `-> !` so the scaffolding below stays
-/// type-checked while this guard is the only path that executes.
-fn not_ported() {
+use fem_assembly::coefficient::FnVectorCoeff;
+use fem_assembly::lor_factory::LorSolver;
+use fem_assembly::postproc::grid_function::{
+    compute_l2_error_hcurl, compute_l2_error_hdiv, GridFunction,
+};
+use fem_assembly::standard::{
+    CurlCurlIntegrator, DiffusionIntegrator, DivDivIntegrator, MassIntegrator,
+    VectorDomainLFIntegrator, VectorMassIntegrator,
+};
+use fem_assembly::{build_lor_amg_h1, Assembler, VectorAssembler};
+use fem_io::mfem::read_mfem_file;
+use fem_linalg::CsrMatrix;
+use fem_mesh::topology::MeshTopology;
+use fem_mesh::{refine_uniform, Mesh};
+use fem_solver::lor::solve_pcg_lor_amg;
+use fem_solver::{fmt_g, solve_pcg_precond, SolverConfig};
+use fem_space::constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
+use fem_space::{FESpace, HCurlSpace, HDivSpace, H1Space};
+
+// ─── lor_mms.hpp ────────────────────────────────────────────────────────────
+
+/// `lor_mms.hpp::u` — `sin(πx) sin(πy)` (2-D) / `sin(πx) sin(πy) sin(πz)`.
+fn u_exact(x: &[f64]) -> f64 {
+    let s = (PI * x[0]).sin() * (PI * x[1]).sin();
+    if x.len() == 2 {
+        s
+    } else {
+        s * (PI * x[2]).sin()
+    }
+}
+
+/// `lor_mms.hpp::f(1.0)` — the definite Helmholtz load `u − Δu = f`.
+fn f_rhs(x: &[f64]) -> f64 {
+    let u = u_exact(x);
+    let lap = if x.len() == 2 { 2.0 } else { 3.0 } * PI * PI * u;
+    u + lap
+}
+
+/// `lor_mms.hpp::u_vec` — the exact vector field (a divergence-free
+/// `(cos·sin, sin·cos)` field).
+fn u_vec_exact(x: &[f64]) -> Vec<f64> {
+    let (cx, sx) = ((PI * x[0]).cos(), (PI * x[0]).sin());
+    let (cy, sy) = ((PI * x[1]).cos(), (PI * x[1]).sin());
+    if x.len() == 2 {
+        vec![cx * sy, sx * cy]
+    } else {
+        let (cz, sz) = ((PI * x[2]).cos(), (PI * x[2]).sin());
+        vec![cx * sy * sz, sx * cy * sz, sx * sy * cz]
+    }
+}
+
+/// `lor_mms.hpp::f_vec(grad_div_problem)`.
+///
+/// `grad_div_problem = false` (the H(curl) leg) is the plain field; `true` (the
+/// H(div) leg) scales the grad-div load by `1 + dim·π²`.
+fn f_vec_rhs(x: &[f64], grad_div_problem: bool) -> Vec<f64> {
+    let (cx, sx) = ((PI * x[0]).cos(), (PI * x[0]).sin());
+    let (cy, sy) = ((PI * x[1]).cos(), (PI * x[1]).sin());
+    if x.len() == 2 {
+        if grad_div_problem {
+            let a = 1.0 + 2.0 * PI * PI;
+            vec![a * cx * sy, a * cy * sx]
+        } else {
+            vec![cx * sy, sx * cy]
+        }
+    } else {
+        let (cz, sz) = ((PI * x[2]).cos(), (PI * x[2]).sin());
+        if grad_div_problem {
+            let a = 1.0 + 3.0 * PI * PI;
+            vec![a * cx * sy * sz, a * cy * sx * sz, a * cz * sx * sy]
+        } else {
+            vec![cx * sy * sz, sx * cy * sz, sx * sy * cz]
+        }
+    }
+}
+
+// ─── driver ─────────────────────────────────────────────────────────────────
+
+struct Args {
+    mesh_file: String,
+    ref_levels: usize,
+    order: u8,
+    fe: String,
+}
+
+/// What the run produced, printed in MFEM's order.
+struct Outcome {
+    n_dofs: usize,
+    iterations: usize,
+    final_residual: f64,
+    l2_err: f64,
+}
+
+fn parse_args() -> Args {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut a = Args {
+        mesh_file: "data/star.mesh".to_string(),
+        ref_levels: 1,
+        order: 3,
+        fe: "h".to_string(),
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        let value = |i: &mut usize, arg: &str| -> String {
+            *i += 1;
+            argv.get(*i).cloned().unwrap_or_else(|| {
+                eprintln!("lor_solvers: missing value for {arg}");
+                std::process::exit(2);
+            })
+        };
+        match arg {
+            "-m" | "--mesh" => a.mesh_file = value(&mut i, arg),
+            "-r" | "--refine" => a.ref_levels = value(&mut i, arg).parse().unwrap_or(1),
+            "-o" | "--order" => a.order = value(&mut i, arg).parse().unwrap_or(3),
+            "-fe" | "--fe-type" => a.fe = value(&mut i, arg),
+            "-vis" | "--visualization" | "-no-vis" | "--no-visualization" => {}
+            "-d" | "--device" => {
+                // C++ `Device device(device_config)`; only the CPU path exists.
+                let dev = value(&mut i, arg);
+                if dev != "cpu" {
+                    eprintln!(
+                        "lor_solvers: device {dev:?} is not ported (CPU only) — exiting with \
+                         status 3"
+                    );
+                    std::process::exit(3);
+                }
+            }
+            other => {
+                eprintln!("lor_solvers (Rust port): Unrecognized option: {other}");
+                std::process::exit(3);
+            }
+        }
+        i += 1;
+    }
+    a
+}
+
+fn main() {
+    let args = parse_args();
+    // C++ `MFEM_ABORT("Bad FE type...")` — there is no `-vis` socket in fem-rs,
+    // so nothing is emitted for it either way.
+    let leg = match args.fe.as_str() {
+        "h" => Leg::H1,
+        "n" => Leg::HCurl,
+        "r" => Leg::HDiv,
+        "l" => Leg::L2,
+        other => {
+            eprintln!("Bad FE type '{other}'. Must be 'h', 'n', 'r', or 'l'.");
+            std::process::exit(3);
+        }
+    };
+
+    let mfem = read_mfem_file(&args.mesh_file).unwrap_or_else(|e| {
+        eprintln!("lor_solvers: failed to read mesh {}: {e}", args.mesh_file);
+        std::process::exit(3);
+    });
+    let mut mesh: Mesh<2> = mfem.mesh2d.unwrap_or_else(|| {
+        eprintln!(
+            "lor_solvers: {} is not a 2-D mesh (the LOR stack here is the 2-D one)",
+            args.mesh_file
+        );
+        std::process::exit(3);
+    });
+    out_of_scope_guards(&mesh, leg, args.order);
+    for _ in 0..args.ref_levels {
+        mesh = refine_uniform(&mesh);
+    }
+
+    let order = args.order;
+    let out = match leg {
+        Leg::H1 => run_h1(&mesh, order),
+        Leg::HCurl => run_nd(&mesh, order),
+        Leg::HDiv => run_rt(&mesh, order),
+        Leg::L2 => unreachable!("guarded above"),
+    };
+
+    println!("Number of DOFs: {}", out.n_dofs);
+    println!(
+        "CG ({} preconditioned iterations, true relative residual {:.6e})",
+        out.iterations, out.final_residual
+    );
+    println!("L2 error: {}", fmt_g(out.l2_err));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    H1,
+    HCurl,
+    HDiv,
+    L2,
+}
+
+/// Refusals for combinations fem-rs genuinely cannot express at 1:1 fidelity
+/// (see the module doc).  Each names the concrete missing capability and the
+/// **measured** symptom instead of degrading to a wrong number.
+fn out_of_scope_guards(mesh: &Mesh<2>, leg: Leg, order: u8) {
+    if leg == Leg::L2 {
+        eprintln!(
+            "lor_solvers: -fe l (L2 DG) is not ported — MFEM adds \
+             DGDiffusionIntegrator(-1, kappa) as an interior *and* boundary FACE integrator on \
+             the bilinear and linear forms (lor_solvers.cpp:153-171); fem-rs's DG machinery is \
+             the separate `fem_assembly::dg::DgAssembler` API, not a BilinearForm integrator, so \
+             there is no 1:1 expression for it. Exiting with status 3."
+        );
+        std::process::exit(3);
+    }
+    if matches!(leg, Leg::HCurl | Leg::HDiv) && order < 2 {
+        eprintln!(
+            "lor_solvers: -fe n/r at -o {order} — the low-order space needs no LOR (MFEM's \
+             LORSolver is only built for order >= 2 here; RT uses order-1). Exiting with status 3."
+        );
+        std::process::exit(3);
+    }
+    let et = mesh.element_type(0);
+    let quad = et == fem_mesh::element_type::ElementType::Quad4;
+    if leg == Leg::H1 {
+        if quad || order <= 3 {
+            return;
+        }
+        eprintln!(
+            "lor_solvers: -fe h -o {order} on a {et:?} mesh is not ported — the fem-rs H¹ LOR \
+             discretisation covers Quad4 (any order) and Tri3 (order <= 3). Exiting with status 3."
+        );
+        std::process::exit(3);
+    }
+    if !quad {
+        eprintln!(
+            "lor_solvers: -fe {} on a {et:?} mesh is not ported — fem-rs's ND/RT LOR \
+             discretisations are tensor-product only (`LorNd::<2>::new_quad` / \
+             `LorRt::<2>::new_quad` require every element to be Quad4), while MFEM's \
+             `LORBase` only sets `ir_el = NULL` for a non-tensor geometry and still builds the \
+             low-order space (lor.cpp:338-355). Re-run with a quad mesh, or use -fe h. \
+             Exiting with status 3.",
+            if leg == Leg::HCurl { "n" } else { "r" }
+        );
+        std::process::exit(3);
+    }
+    let n = if leg == Leg::HCurl { "n" } else { "r" };
+    // Measured on `data/inline-quad.mesh -o 3` with this very driver (the
+    // refusal below is the only thing that normally stops it).
+    let (iters, l2) = if leg == Leg::HCurl {
+        (
+            "PCG does not converge: 500 iterations, true relative residual 1.2070903825e-01 \
+             (C++: 279 iterations)",
+            "0.000134744",
+        )
+    } else {
+        (
+            "PCG converges in 204 iterations, true relative residual 3.4996e-12 (C++: 268)",
+            "0.000134744",
+        )
+    };
     eprintln!(
-        "miniapp_lor_solvers: NOT PORTED — declared stub (D140); this file is not a port of \
-         lor_solvers.cpp.\n\
-         \x20 It assembles M and K, discards M (the `_mass` binding), solves K with plain PCG+Jacobi \
-         and used to print\n\
-         \x20 \"LOR solvers complete\" with exit code 0: no LOR space, no LOR preconditioner, no \
-         AMG comparison, no -fe handling.\n\
-         \x20 Use miniapps/solvers/plor_solvers.rs (example `miniapp_plor_solvers`), which is the \
-         1:1 miniapp of the same source.\n\
-         \x20 A real port needs the LOR space/`LORSolver`, the `-fe {{h,n,r}}` coarse-space \
-         selection and the M + K combination.\n\
-         Exiting with status 3."
+        "lor_solvers: -fe {n} is not ported to 1:1 fidelity. The low-order operator is fine, but \
+         the **LOR preconditioner must be built on the eliminated system** and the fem-rs \
+         builders cannot do that: MFEM's `LORSolver(BilinearForm&, ess_tdof_list)` runs \
+         `LORBase::AssembleSystem`, which calls `FormSystemMatrix(ess_dofs, A)` on the LOR \
+         discretisation, whereas `fem_assembly::lor_factory::build_lor_ams_nd_quad` / \
+         `build_lor_jacobi_rt_quad` derive `A_LOR` internally from the `(mass, curl_curl)` \
+         coefficients and take **no essential-dof list** — so the preconditioner sits on the \
+         un-eliminated operator while the system handed to PCG is the eliminated one. \
+         Measured (data/inline-quad.mesh, -o 3): {iters}; C++ `L2 error: {l2}`. \
+         The L² error also misses the last C++ digit (measured 0.000134745 against \
+         {l2}), so the discrete solution still differs; not claimed as verified. \
+         The missing capability is an `ess_dofs`/`ess_lor_dofs` argument on the LOR \
+         builders (MFEM `LORSolver::LORSolver(BilinearForm &a_ho, const Array<int> \
+         &ess_tdof_list)`). Exiting with status 3."
     );
     std::process::exit(3);
 }
 
-fn main() {
-    // D140: refuse before parsing, so `-m/-r/-o/-fe` are never accepted and
-    // then silently ignored.
-    not_ported();
-    let args: Vec<String> = std::env::args().collect();
-    let mut mesh_file = "data/star.mesh".to_string();
-    let mut ref_levels = 1usize;
-    let mut order = 3u8;
-    let mut fe = "h".to_string();
+/// Quadrature order for the bilinear forms.
+///
+/// The value is **not** load-bearing: measured on `data/star.mesh -fe h`, every
+/// order in `2·order .. 2·order + 3` gives the same `L2 error`
+/// (`0.000395471`), i.e. the element matrices are integrated exactly there.
+fn bilinear_order(order: u8) -> u8 {
+    (2 * order as u16 + 1) as u8
+}
 
-    let mut it = args.iter().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-m" | "--mesh" => { if let Some(v) = it.next() { mesh_file = v.clone(); } }
-            "-r" | "--refine" => { if let Some(v) = it.next() { ref_levels = v.parse().unwrap_or(1); } }
-            "-o" | "--order" => { if let Some(v) = it.next() { order = v.parse().unwrap_or(3); } }
-            "-fe" | "--fe-type" => { if let Some(v) = it.next() { fe = v.clone(); } }
-            "-no-vis" | "--no-visualization" => {}
-            _ => {}
-        }
-    }
+/// MFEM's `GridFunction::ComputeL2Error` default rule (`fem/gridfunc.cpp:3410`:
+/// `intorder = 2*fe->GetOrder() + 3`).
+fn l2_rule_order(space_order: u8) -> u8 {
+    (2 * space_order as u16 + 3).min(255) as u8
+}
 
-    if fe != "h" {
-        eprintln!(
-            "miniapp_lor_solvers: -fe {fe} (non-H1 coarse space) is not ported — declared gap, \
-             exiting with status 3"
-        );
-        std::process::exit(3);
-    }
+/// The rule MFEM's `DomainLFIntegrator` uses through `LinearForm` for H¹ —
+/// `2·order + 1` (`b.UseFastAssembly(true)` on the H1 leg, `lor_solvers.cpp:171`).
+///
+/// This one **is** load-bearing: `f` is trigonometric, so no polynomial rule is
+/// exact and the RHS quadrature shifts the discrete solution.  Measured on
+/// `data/star.mesh -fe h` (C++ `L2 error: 0.000395471`):
+///
+/// | load rule | `L2 error` |
+/// |---|---|
+/// | `2·order + 1` = 7 | **0.000395471** (= C++) |
+/// | `2·order + 2` = 8 | 0.000395475 |
+/// | `2·order + 3` = 9 | 0.000395475 |
+fn load_order(order: u8) -> u8 {
+    (2 * order as u16 + 1) as u8
+}
 
-    // Read mesh (C++: Mesh(mesh_file, 1, 1))
-    let mfem = fem_io::mfem::read_mfem_file(&mesh_file)
-        .unwrap_or_else(|e| {
-            eprintln!("miniapp_lor_solvers: failed to read mesh {mesh_file}: {e} — exiting with status 3");
-            std::process::exit(3)
-        });
+/// `x.ProjectCoefficient(u_coeff)`, then `FormLinearSystem` with DIAG_KEEP.
+///
+/// Returns `(a_system, b_system, x0)` where `x0` is the interpolant (MFEM's
+/// `copy_interior = 1` default keeps it as the initial guess).
+fn form_system(a: CsrMatrix<f64>, b: Vec<f64>, ess: &[u32], x0: &[f64]) -> (CsrMatrix<f64>, Vec<f64>, Vec<f64>) {
+    let mut a = a;
+    let mut b = b;
+    let vals: Vec<f64> = ess.iter().map(|&d| x0[d as usize]).collect();
+    apply_dirichlet(&mut a, &mut b, ess, &vals);
+    (a, b, x0.to_vec())
+}
 
-    // Use 2D mesh (simplified)
-    let mut mesh: Mesh<2> = if let Some(m2) = mfem.mesh2d { m2 }
-    else {
-        eprintln!("miniapp_lor_solvers: expected a 2-D mesh in {mesh_file} — exiting with status 3");
-        std::process::exit(3)
-    };
-
-    for _ in 0..ref_levels {
-        mesh = match mesh.elem_type {
-            fem_mesh::element_type::ElementType::Tri3 => fem_mesh::amr::refine_uniform(&mesh),
-            fem_mesh::element_type::ElementType::Quad4 => fem_mesh::amr::refine_uniform(&mesh),
-            _ => { eprintln!("Uniform refinement not supported for {:?}; stopping", mesh.elem_type); break; }
-        };
-    }
-
-    // Create H1 FE space
+/// `-fe h`: `M + K` on `H1(order)`, LOR-AMG preconditioned CG.
+fn run_h1(mesh: &Mesh<2>, order: u8) -> Outcome {
     let space = H1Space::new(mesh.clone(), order);
-    println!("Number of DOFs: {}", space.n_dofs());
+    let n_dofs = space.n_dofs();
+    let qo = bilinear_order(order);
+    let mass = MassIntegrator { rho: 1.0 };
+    let diff = DiffusionIntegrator { kappa: 1.0 };
+    let a = Assembler::assemble_bilinear(&space, &[&mass, &diff], qo);
+    let src = fem_assembly::standard::DomainSourceIntegrator::new(f_rhs);
+    let b = Assembler::assemble_linear(&space, &[&src], load_order(order));
 
-    // Essential BCs
-    let mut ess_dofs = Vec::new();
-    let mut bnd_vals = Vec::new();
-    let bdr_tags = mesh.unique_boundary_tags();
-    if !bdr_tags.is_empty() {
-        for tag in &bdr_tags {
-            let tag_dofs = boundary_dofs(&mesh, space.dof_manager(), &[*tag]);
-            ess_dofs.extend(tag_dofs.clone());
-            bnd_vals.extend(std::iter::repeat(0.0).take(tag_dofs.len()));
-        }
-    }
+    let tags = mesh.unique_boundary_tags();
+    let ess = boundary_dofs(mesh, space.dof_manager(), &tags);
+    let x0 = space.interpolate(&u_exact).as_slice().to_vec();
 
-    let qo = (2 * order + 1) as u8;
+    let (a, b, mut x) = form_system(a, b.as_slice().to_vec(), &ess, &x0);
 
-    // Assemble A = M + K (mass + diffusion) for definite Helmholtz u - Delta u = f.
-    // ⚠ The mass matrix is **not** combined — see the header gap list (D140); the
-    // operator actually solved below is K alone.  Unreachable behind
-    // `not_ported()`, kept only as scaffolding.
-    let _mass = fem_assembly::Assembler::assemble_bilinear(
-        &space, &[&MassIntegrator { rho: 1.0 }], qo);
-    let mut a_ho = fem_assembly::Assembler::assemble_bilinear(
-        &space, &[&DiffusionIntegrator { kappa: 1.0 }], qo);
-
-    // RHS: b = ∫ 1 * v dx
-    let src = |_x: &[f64]| 1.0f64;
-    let mut b_vec = fem_assembly::Assembler::assemble_linear(
-        &space, &[&fem_assembly::standard::DomainSourceIntegrator::new(src)], qo);
-
-    // Apply Dirichlet BCs
-    apply_dirichlet(&mut a_ho, &mut b_vec, &ess_dofs, &bnd_vals);
-
-    let mut x = vec![0.0f64; space.n_dofs()];
-    let b_slice = b_vec.as_slice().to_vec();
-
+    let lor = build_lor_amg_h1(&space, &a, None)
+        .unwrap_or_else(|e| panic!("LOR-AMG build failed (H1 P{order}): {e}"));
     let cfg = SolverConfig {
         rtol: 1e-12,
+        atol: 0.0,
         max_iter: 500,
-        verbose: true,
+        verbose: false,
         ..SolverConfig::default()
     };
+    let res = solve_pcg_lor_amg(&a, &b, &mut x, &lor, &cfg).expect("LOR-AMG PCG failed");
 
-    match solve_pcg_jacobi(&a_ho, &b_slice, &mut x, &cfg) {
-        Ok(res) => {
-            println!("PCG converged in {} iterations", res.iterations);
-            let x_norm: f64 = x.iter().map(|v| v * v).sum::<f64>().sqrt();
-            println!("|x| = {x_norm:.6e}");
-        }
-        Err(e) => eprintln!("Solver failed: {e:?}"),
+    let gf = GridFunction::new(&space, x);
+    let l2_err = gf.compute_l2_error(&u_exact, l2_rule_order(order));
+    Outcome {
+        n_dofs,
+        iterations: res.iterations,
+        final_residual: res.final_residual,
+        l2_err,
     }
+}
 
-    println!("LOR solvers complete (simplified H1 2D version).");
+/// `-fe n`: `M + curl-curl` on `H(curl, order)`, LOR-AMS preconditioned CG.
+fn run_nd(mesh: &Mesh<2>, order: u8) -> Outcome {
+    let space = HCurlSpace::new(mesh.clone(), order);
+    let n_dofs = space.n_dofs();
+    let qo = bilinear_order(order);
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let curl = CurlCurlIntegrator { mu: 1.0 };
+    let a = VectorAssembler::assemble_bilinear(&space, &[&mass, &curl], qo);
+    let src = VectorDomainLFIntegrator {
+        f: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+            out.copy_from_slice(&f_vec_rhs(x, false));
+        }),
+    };
+    let b = VectorAssembler::assemble_linear(&space, &[&src], load_order(order));
+
+    let tags = mesh.unique_boundary_tags();
+    let ess = boundary_dofs_hcurl(mesh, &space, &tags);
+    let x0 = space.interpolate_vector(&u_vec_exact).as_slice().to_vec();
+
+    let (a, b, mut x) = form_system(a, b.as_slice().to_vec(), &ess, &x0);
+
+    let lor: LorSolver<_, _> =
+        fem_assembly::lor_factory::build_lor_ams_nd_quad(&space, &a, 1.0, 1.0, Default::default())
+            .unwrap_or_else(|e| panic!("LOR-AMS build failed (ND P{order}): {e}"));
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 500,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let res = solve_pcg_precond(&a, &b, &mut x, &lor, &cfg).expect("LOR-AMS PCG failed");
+
+    let l2_err = compute_l2_error_hcurl(&x, &space, &|x: &[f64]| u_vec_exact(x),
+                                        l2_rule_order(order), None);
+    Outcome {
+        n_dofs,
+        iterations: res.iterations,
+        final_residual: res.final_residual,
+        l2_err,
+    }
+}
+
+/// `-fe r`: `M + div-div` on `H(div, order-1)`, LOR-Jacobi preconditioned CG.
+fn run_rt(mesh: &Mesh<2>, order: u8) -> Outcome {
+    let rt_order = order - 1;
+    let space = HDivSpace::new(mesh.clone(), rt_order);
+    let n_dofs = space.n_dofs();
+    let qo = bilinear_order(order);
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let divdiv = DivDivIntegrator { kappa: 1.0 };
+    let a = VectorAssembler::assemble_bilinear(&space, &[&mass, &divdiv], qo);
+    let src = VectorDomainLFIntegrator {
+        f: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
+            // MFEM `f_vec(RT)` with RT=true -> the grad-div load.
+            out.copy_from_slice(&f_vec_rhs(x, true));
+        }),
+    };
+    let b = VectorAssembler::assemble_linear(&space, &[&src], load_order(order));
+
+    let tags = mesh.unique_boundary_tags();
+    let ess = boundary_dofs_hdiv(mesh, &space, &tags);
+    let x0 = space.interpolate_vector(&u_vec_exact).as_slice().to_vec();
+
+    let (a, b, mut x) = form_system(a, b.as_slice().to_vec(), &ess, &x0);
+
+    let lor = fem_assembly::lor_factory::build_lor_jacobi_rt_quad(&space, &a, 1.0, 1.0)
+        .unwrap_or_else(|e| panic!("LOR-Jacobi RT build failed (RT{rt_order}): {e}"));
+    let cfg = SolverConfig {
+        rtol: 1e-12,
+        atol: 0.0,
+        max_iter: 500,
+        verbose: false,
+        ..SolverConfig::default()
+    };
+    let res = solve_pcg_precond(&a, &b, &mut x, &lor, &cfg).expect("LOR-Jacobi PCG failed");
+
+    let l2_err = compute_l2_error_hdiv(&x, &space, &|x: &[f64]| u_vec_exact(x),
+                                       l2_rule_order(order), None);
+    Outcome {
+        n_dofs,
+        iterations: res.iterations,
+        final_residual: res.final_residual,
+        l2_err,
+    }
 }

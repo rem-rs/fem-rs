@@ -520,14 +520,41 @@ miniapps/
 │                                dof checksum 逐位; 根因=linlvo AMG
 │                                默认 V-cycle 非对称, 换 RS+SGS 对齐
 │                                hypre 配置)
-├── solvers/lor_solvers.rs   ← ⚠️ **round 31 D140 降格为声明式桩 (exit(3))**：
-│                                **不是** `lor_solvers.cpp` 的 port —— 装好 M 又**显式丢弃**
-│                                (`_mass`)、只解 K、不 import 任何 LOR/AMG、`-fe` 非 h 曾
-│                                `exit(1)`、旧代码打印 `LOR solvers complete` 且 **rc=0**
-│                                ⇒ 现 `not_ported()` 在 main 第一行、`exit(3)` + 缺口清单并
-│                                **指向 `solvers/plor_solvers.rs`**（同源 1:1 实现，用那个）。
-│                                未删文件之理由：`examples/Cargo.toml` 有注册 + 本 README 引用，
-│                                且 Cargo.toml 归主会话独占
+├── solvers/lor_solvers.rs   ← ✅ **round 48：D140 关闭 —— 从声明式桩变成真 1:1 driver**。
+│                                `-fe h`（默认档 `data/star.mesh`、`-o 3`）的
+│                                `Number of DOFs` / `L2 error` **与 C++ 逐字节相同**：
+│                                `781 / 0.000395471`（star.mesh，20 个**四边形**元素，
+│                                `elements` 段几何码 3）、`625 / 5.56315e-06`（inline-quad）、
+│                                `289 / 0.000245071`（inline-quad `-o 2`）。走
+│                                `build_lor_amg_h1` → `LorAmgPrecond` → `solve_pcg_lor_amg`。
+│                                ⭐ **两个"测出来的"求积细节**（都会动到打印值）：
+│                                ① **载荷**规则是 `2·order+1`（**不是** `2·order+2`）——
+│                                `f` 是三角函数，RHS 求积改变离散解，实测
+│                                `2p+1 → 0.000395471`（= C++）、`2p+2/2p+3 → 0.000395475`；
+│                                ② `L2 error` 规则是 MFEM `ComputeL2Error` 默认的
+│                                `2·order+3`（`fem/gridfunc.cpp:3410`）。**双线性型**规则
+│                                不敏感（6..9 同值，矩阵被精确积分）。
+│                                ⚠️ CG **迭代数不算验收**：C++ 无 SuiteSparse 时是
+│                                `LORSolver<GSSmoother>`（LOR 矩阵上一次 GS），fem-rs 是
+│                                LOR 上的 AMG ⇒ star.mesh 26 次 vs C++ 58 次，**解与
+│                                L2 误差相同**。
+│                                ⚠️ **`-fe n`/`-fe r` 明确拒绝并联入债务**（D367）：LOR
+│                                预条件子必须建在**消元后**的算子上，而
+│                                `build_lor_ams_nd_quad`/`build_lor_jacobi_rt_quad` 从
+│                                `(mass, curl_curl)` 系数**内部**推导 `A_LOR`、**不收
+│                                essential-dof 表**（MFEM 的 `LORSolver(a, ess_tdofs)` 会
+│                                跑 `LORBase::AssembleSystem → FormSystemMatrix(ess)`）。
+│                                实测：ND **不收敛**（500 次后真残差 `1.2070903825e-01`，
+│                                C++ 279 次），RT 收敛（204 次）但 L2 差 C++ 末位
+│                                （`0.000134745` vs `0.000134744`）⇒ 不声称对拍。
+│                                `-fe l`（DG 面项）与"单形网格上的 `-fe n/r`"（fem-rs 的
+│                                ND/RT LOR 只支持张量元）同样拒绝并给出理由。
+│                                ⚠️ **另记**：`lor_solvers -m data/inline-tri.mesh -fe h`
+│                                在 **C++ 侧自己 abort**（`MFEM_VERIFY(mode == DofToQuad::FULL)`，
+│                                `fem/fe/fe_base.cpp:377` —— `SetAssemblyLevel(PARTIAL)` 对
+│                                三角形缺张量 `DofToQuad`）⇒ 该组合**没有 C++ oracle**；
+│                                fem-rs 全组装可跑（`625` dof，与 C++ abort 前打印的一致），
+│                                属"超前于 C++"而非"已对拍"。
 ├── solvers/plor_solvers.rs  ← LOR 求解器 miniapp（**round 29：并行 H¹ 腿
 │                                打通**，1:1 对齐 `plor_solvers.cpp`）: `-m`
 │                                `-rs -rp -o -fe -no-vis` + `--ranks/-np N`，
@@ -780,6 +807,32 @@ miniapps/
 ```
 
 ## 本轮新增核心库能力 (fem-rs crates)
+
+### round 48（二）— `miniapps/solvers/lor_solvers.rs`：D140 关闭，桩 → 真 1:1 driver
+
+- **背景**：该文件自 round 31 起是**声明式桩**——装好 H¹ 质量阵又**显式丢弃**、只解刚度阵、
+  不 import 任何 LOR 符号、任何输入 `exit(3)`。它需要的 LOR 栈此后**全部落地**
+  （`fem_space::lor::{LorH1,LorNd,LorRt}`、`fem_assembly::lor_factory`、
+  `fem_solver::lor`），所以本轮把它写成真 driver。
+- **交付**：`-fe h` 的 `Number of DOFs` / `L2 error` 与 MFEM 4.10 **逐字节相同**：
+
+  | 运行 | C++ | fem-rs |
+  |---|---|---|
+  | `-m data/star.mesh -fe h` | `781` / `0.000395471` | `781` / `0.000395471` |
+  | `-m data/inline-quad.mesh -fe h` | `625` / `5.56315e-06` | `625` / `5.56315e-06` |
+  | `-m data/inline-quad.mesh -fe h -o 2` | `289` / `0.000245071` | `289` / `0.000245071` |
+
+  （`star.mesh` 是 **20 个四边形**元素的网格——`elements` 段几何码 3——不是三角形网格；
+  之前的记载把它当三角形是错的。）
+- **两个"测出来的"求积事实**（都写进代码注释与测试文档）：① **载荷规则 `2·order+1`**
+  （`2·order+2` 会给出 `0.000395475`，差在打印的第 6 位）；② `L2 error` 用 MFEM
+  `ComputeL2Error` 的默认 `2·order+3`（`fem/gridfunc.cpp:3410`）。双线性型规则不敏感。
+- **明确拒绝**（给实测数字，不降级、不伪造）：`-fe n`/`-fe r`（LOR 预条件子必须建在消元后的
+  算子上，而 `build_lor_ams_nd_quad`/`build_lor_jacobi_rt_quad` **不收 essential-dof 表**
+  ⇒ ND 真残差停在 `1.2070903825e-01`、RT 的 L2 差 C++ 末位）、`-fe l`（DG 面项不是
+  `BilinearForm` 积分器）、单形网格上的 `-fe n/r`（fem-rs 的 ND/RT LOR 只支持张量元）。
+- **发现的 C++ 自身边界**：`inline-tri.mesh -fe h` 在 C++ 侧 `MFEM_VERIFY` abort
+  （PA 对三角形缺张量 `DofToQuad`，`fem/fe/fe_base.cpp:377`）⇒ 该组合无 oracle。
 
 ### round 48 — D353 及其同类静默零（3-D 单元上的 L² 度量）
 

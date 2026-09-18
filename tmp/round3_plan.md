@@ -2315,7 +2315,83 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
   `project_coefficient`（现 `:273`）**已经是节点插值**（`test_coeff(dm.dof_coord(d))`），
   不是 D345 的 L² 质量解 ⇒ **无需改动**，D358 可从开放清单划掉。
 
-### 第四十八轮新债务
+### 第四十八轮（round 48）第二件：D140 关闭 —— `miniapps/solvers/lor_solvers.rs` 从桩变真 1:1
+
+用户指令："**提交后，扫描 mfem 的 miniapp 和串并行示例，根据真实的代码情况补全 fem-rs 缺失的能力**"。
+做法：派 4 路只读侦察（H(div) 鞍点族 / NURBS 族 / meshing+smoother 族 / 声明式桩族），**每路要求
+"不读文档只读代码、缺席结论必须附自己跑过的 grep"**。结论：示例/风格覆盖已完备（ex0–41 串行、
+pex0–41 并行 **文件级无缺**），缺的是**桩的保真度**；而 6 个声明式桩的缺口清单**多数已过期**。
+
+- **修的就是最干净的那个**：`miniapps/solvers/lor_solvers.rs`（D140）自 round 31 起是桩——
+  装好 M 又**显式丢弃**、只解 K、不 import 任何 LOR 符号、任何输入 `exit(3)`。它列的缺口
+  （"LOR space/LORSolver、`-fe {h,n,r}`、M+K 组合"）**全部已落地**（`fem_space::lor::{LorH1,
+  LorNd,LorRt}`、`fem_assembly::lor_factory::{build_lor_amg_h1,...}`、`fem_solver::lor::
+  {LorAmgPrecond,solve_pcg_lor_amg}`）⇒ 缺的只是 driver。
+- **交付与验收（主会话亲跑两侧）**：`-fe h` 的 `Number of DOFs` 与 `L2 error` 与 MFEM 4.10
+  **逐字节相同**（C++ 侧 `$HOME/work/d367/lor_solvers_cpp`，从
+  `$HOME/mfem410_ser/miniapps/solvers` 目录跑）：
+
+  | 运行 | C++ | fem-rs |
+  |---|---|---|
+  | `-m data/star.mesh -fe h`（默认档） | `781` / `0.000395471` | `781` / `0.000395471` |
+  | `-m data/inline-quad.mesh -fe h` | `625` / `5.56315e-06` | `625` / `5.56315e-06` |
+  | `-m data/inline-quad.mesh -fe h -o 2` | `289` / `0.000245071` | `289` / `0.000245071` |
+
+- **⭐ 纠正一条历轮误述**：`data/star.mesh` 的 `elements` 段几何码是 **3（SQUARE）**，
+  即 **20 个四边形元素**，**不是三角形网格**。历轮文档若按三角形推断过 LOR 路径/自由度，
+  结论需重核。（本条是派单里"只读代码"要求直接换来的：`element_type(0)` 实测为 Quad4 才去查
+  mesh 文件。）由此也修掉了本轮自己的一处错误推断——H1 的 LOR 在 star.mesh 上走的是 **Quad4 任意阶**
+  路径，`-o 4/-o 5` 合法（实测 `1361`/`2101` dof）。
+- **两个"测出来的"求积事实**（写进代码注释）：
+  ① **载荷**规则是 `2·order+1`，**不是** plor 用的 `2·order+2`；`f` 是三角函数 ⇒ RHS 求积改变
+  离散解。实测 star.mesh `-fe h`：`2p+1 → 0.000395471`（= C++）、`2p+2/2p+3 → 0.000395475`。
+  ② `L2 error` 规则 = MFEM `ComputeL2Error` 默认 `2·order+3`（`fem/gridfunc.cpp:3410`）。
+  **双线性型**规则不敏感（6..9 同值 ⇒ 矩阵被精确积分），所以"末位差"的杠杆是**载荷**，不是矩阵。
+- **CG 迭代数不算验收**（已在文件头写明）：C++ 无 SuiteSparse ⇒ `LORSolver<GSSmoother>`
+  （LOR 矩阵一次 GS），fem-rs 是 LOR 上的 AMG；star.mesh **26 vs 58** 次而**解与 L2 误差相同**。
+- **明确拒绝（带实测数字，不降级）**：`-fe n`/`-fe r`/`-fe l` + 单形网格上的 `-fe n/r`。
+- **另发现 C++ 自身边界**：`lor_solvers -m data/inline-tri.mesh -fe h` 在 **C++ 侧 abort**
+  （`MFEM_VERIFY(mode == DofToQuad::FULL)`，`fem/fe/fe_base.cpp:377`）——`lor_solvers.cpp:159`
+  对 H¹ 选 `SetAssemblyLevel(PARTIAL)`，三角形元素没有张量 `DofToQuad`。⇒ 该组合**无 C++ oracle**；
+  fem-rs 全组装可跑（`625` dof，与 C++ abort 前的 `625` 相同）⇒ 记"超前于 C++"，**不声称对拍**。
+
+### 第四十八轮（round 48）侦察结论：其余簇（未开工，按价值排序）
+
+四路只读侦察的具体结论（**这是下一轮派单的直接输入**）：
+
+1. **`-fe n`/`-fe r` 的 LOR 预条件子**（≤4 处消费方）：`lor_factory` 的
+   `build_lor_ams_nd_quad` / `build_lor_jacobi_rt_quad` 需增加 **essential-dof 表**参数，
+   LOR 矩阵按 `perm` 反查 HO essential 集后 `eliminate_essential_bc_diag_symmetric`，
+   并同步处理 AMS 的梯度辅助算子。对应 MFEM `LORSolver::LORSolver(BilinearForm &a_ho,
+   const Array<int> &ess_tdof_list)` + `LORBase::AssembleSystem`。**这是本轮实测出的最具体缺口。**
+2. **`BramblePasciakSolver` + `DarcySolver` trait**（H(div) 鞍点族）：`bramble_pasciak.rs` 现只有
+   `element_q_scaling`（`ConstructMassPreconditioner` 的标量部分）+ `bpcg.rs::solve_bpcg`，
+   **没有 solver 类型**；`block-solvers.cpp` 的 5 个求解器只缺 `bp-pcg`（`block_solvers.rs:279`
+   `exit(2)`）。另需"由调用方给的单元矩阵组装全局 Q"的入口（MFEM `ComputeElementMatrices` +
+   `AssembleElementMatrix(i, Q_i, 1)`），fem-rs 的 `Assembler` 只收积分器列表。
+3. **`mesh-bounding-boxes`**（唯一缺的串/并行 meshing miniapp 里最干净的）：**不依赖 GSLIB**
+   （已 grep 确认）；缺 `GridFunction::GetElementBounds` 的 **vdim** 支持
+   （`plbound.rs:964` 现硬报 `vdim != 1 not supported`）、`GetBounds`、`GetElementDofValues`、
+   `Mesh::GetJacobianDeterminantGF`。全部有 C++ oracle（miniapp 直接打印 lower/upper）。
+4. **NURBS 族**（6 个 miniapp 无对位）：`nurbs_mesh_info`/`curveint`/`patch_ex1`/`surface`/
+   `naca_cmesh`/`ex10`。根因是**没有 `NURBSPatch` 对象层**（`NurbsPatch2D/3D` 只是参考元素；
+   `NurbsPatch2DData/3DData` 是数据但无 `new/operator()/DegreeElevate(dir,t)/KnotInsert(dir,kv)/Print`），
+   且 `KnotVector` 分裂成 4 个类型（`element::iga::KnotVector`、`element::nurbs::KnotVector`、
+   `mesh::NurbsKnotVector`、`space::NurbsKnot`），其中**功能最全的 `mesh::NurbsKnotVector` 是孤儿
+   （零消费方）**。`NurbsExtension` 还显式拒绝 `patches` 变体（`nurbs_extension.rs:557`）。
+5. **`mg-abs-l1-jacobi`**（diag-smoothers 第二个）：缺 `ParFiniteElementSpaceHierarchy`
+   对位的"由空间层级生成 multigrid 层级"（`geometric_mg.rs:808` 现要求预建 level + prolongation），
+   以及 `AbsMult` 驱动的层光滑子。`abs-l1-jacobi.rs` 是真 port 可作模板。
+6. **`esla`/`pref321`/`minimal-surface`/`pmesh-*`/`lsf_integral`**：分别需要 3-D 各向异性 NC
+   细化 + `AnisotropicConflict`、`QuadratureInterpolator`/`GeometricFactors`/`ElementRestriction`、
+   并行面邻 DOF 交换；**`lsf_integral` 建议明确 out-of-scope**（它是 external Blitz+Algoim 的
+   薄包装，`MFEM_USE_ALGOIM` 门控）。
+7. **声明式桩族其余 5 个的过期情况**（供下一轮）：`ex31`+`ex31_dump`（D128）——`MatrixCoeff` 与
+   矩阵系数版 `VectorMassTensorIntegrator` **都已存在**，缺口清单**已过期**，真残差只有"order 1
+   的受限 ND 分派器"（可照抄 `mfem_pex31_restricted_hcurl.rs:208`）；`tesla`（D139）——网格/加密/
+   分区/PCL-AMG 全可用，真缺 H(curl) ZZ 估计子 + 阈值加密 + rebalance + `SurfaceCurrent`；
+   `lorentz`（D139）——Boris/`find_and_interpolate_3d` 全可用，真缺并行 DC 读取 + 粒子重分布；
+   `mesh-optimizer`——16 个选项门 + 指标动物园缺口（`-qt 3` 只差 `TmopQuadType::ClosedUniform`）。
 
 - **D364（P2）`ref_elem_vol` 同名表仍有 4 份**（`grid_function.rs`、`error_estimate.rs`、
   `flux_recovery.rs`、`assembler.rs`），臂与**参考域约定**各不相同（如 `QuadQ1` 在
@@ -2329,11 +2405,32 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **D366（P3）**`flux_recovery::compute_flux_energy` 的 `fe_order` 由
   `flux_diff.len()/dim` 反推，表仍是白名单 + `_ => 1` 兜底；pyramid/高阶
   未列全（hex/prism 已补）⇒ 与 D365 同批。
+- **D367（P1）LOR 预条件子不收 essential-dof 表**（本轮 `lor_solvers` 实测出的最具体缺口）：
+  `fem_assembly::lor_factory::build_lor_ams_nd_quad` / `build_lor_jacobi_rt_quad`（以及
+  `build_lor_ams_nd_hex` / `build_lor_ads_rt_hex`）从 `(mass, curl_curl)` 系数**内部**推导
+  `A_LOR`，没有参数可传 essential-dof 集；而 MFEM 的 `LORSolver(BilinearForm&, ess_tdof_list)`
+  走 `LORBase::AssembleSystem` → `FormSystemMatrix(ess_dofs, A)`，**预条件子建在消元后的算子
+  上**。后果（实测 `data/inline-quad.mesh -o 3`）：ND 腿 PCG **不收敛**（500 次后真残差
+  `1.2070903825e-01`，C++ 279 次）；RT 腿收敛（204 次）但 `L2 error` 差 C++ 末位
+  （`0.000134745` vs `0.000134744`）⇒ `lor_solvers -fe n/r` 现为**明确拒绝**。
+  修法：builder 增加 `ess_ho_dofs: &[u32]` 参数，用 `perm` 反查 LOR 侧 essential 集，
+  对 `A_LOR` 做 `eliminate_essential_bc_diag_symmetric`，并同步处理 AMS 梯度辅助算子
+  （G 的相应列）；验证 = `lor_solvers -fe n/r` 的 `L2 error` 与 C++ 逐字节。
+- **D368（P2）ND/RT 的 HO 基对与 L2 规则对照未钉**：`HCurlSpace::new(mesh, order)` /
+  `HDivSpace::new(mesh, order-1)` 是否等于 MFEM `ND_FECollection(order, dim, GaussLobatto,
+  IntegratedGLL)` / `RT_FECollection(order-1, dim, GaussLobatto, IntegratedGLL)` **未逐位核实**
+  （D333 在 hex RT 上发现过同族分歧）。这与 D367 独立：即使预条件子修好，HO 基对不一致
+  仍会让 `L2 error` 差末位（RT 腿当前症状）。
+- **D369（P3）`-qt 3` = ClosedUniform 求积族**：`TmopQuadType`（`tmop_form.rs:1236`）只有
+  `GaussLobatto`/`GaussLegendre`，缺 `IntRulesCU`；`mesh-optimizer -qt 3` 因此 `exit(3)`。
+  ClosedUniform **节点**已存在（`factory.rs:481/874/1499`）⇒ 约 30 行，是 `mesh-optimizer`
+  16 个选项门里最便宜的一个。
 - **关闭**：~~D353~~（P1，含 C++ 对拍）；~~D358~~（**文档修正、无代码改动**：
   `miniapps/tools/nodal_transfer.rs:273` 的局部 `project_coefficient` 实测**已经是
   节点插值**（`test_coeff(dm.dof_coord(d))`），不是 D345 的 L² 质量解 ⇒ 该项原本就
-  不存在，round 47 ④ 路的记载有误）。
-- 沿用开放：**D352/D354**（r47 的 space 两项）、D355–D357、D359–D363、D364/D365/D366、
+  不存在，round 47 ④ 路的记载有误）；~~D140~~（`lor_solvers` 桩 → 真 1:1 driver，
+  `-fe h` 三组配置与 C++ 逐字节；`-fe n/r/l` 转为**带实测数字的明确拒绝** ⇒ 残差归 D367/D368）。
+- 沿用开放：**D352/D354**（r47 的 space 两项）、D355–D357、D359–D363、D364–D369、
   D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
 
 ### 本轮统计
