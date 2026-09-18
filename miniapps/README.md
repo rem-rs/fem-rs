@@ -781,6 +781,42 @@ miniapps/
 
 ## 本轮新增核心库能力 (fem-rs crates)
 
+### round 48 — D353 及其同类静默零（3-D 单元上的 L² 度量）
+
+- **D353（P1，已修）**：`fem_assembly::postproc::grid_function::compute_coeff_l2_norm`
+  对 **所有 3-D 等参单元恒返回 `0.0`**（`coeff=1, q=6`：Quad4 `1.0` ✓、Tet4
+  `sqrt(1/6)` ✓、**Hex8 / Prism6 / Pyramid5 全 `0.0`**）。根因：该文件私有的
+  `element_jacobian` 把 Hex8/Prism6/Pyramid5 列进 `needs_iso`，却对每个非 quad
+  类型都建 `ref_elem_vol(ElementType::Quad4, 1)` —— **给 3-D 单元配 2-D 基**，
+  `J` 第三列恒为 0 ⇒ `det J ≡ 0`。现改为**委派 `fem_mesh::transformation::
+  element_jacobian_at`**（mesh crate 的几何 Jacobian 单一真源），几何元素即单元
+  自身的类型，并顺带拿到曲面几何表 / 金字塔 `PYR_P1_SLOT_VERTEX` 槽置换 / 曲面
+  棱锥的 order-`g` 元素。
+- **C++ 对拍**（`tmp/d353_probe.cpp`，MFEM 4.10 `ComputeLpNorm(2.0, coeff, mesh, irs)`，
+  `irs[geom] = IntRules.Get(geom, 6)`）：hex8 `1.0` / prism6 `sqrt(1/2)` /
+  pyramid5 `sqrt(1/3)`；`coeff = x²` 时 `‖x²‖₂ = (∫x⁴)^{1/2}` 分别
+  `sqrt(1/5)`、`sqrt(1/30)`、`sqrt(1/35)`，另加 2×3×4 缩放 hex（`sqrt(24)`）；
+  两侧相对差 < 1e-14。测试 `crates/assembly/tests/d340_pyramid_l2_assembly.rs`
+  的 `coeff_l2_norm_on_3d_iso_cells` / `coeff_l2_norm_first_n_on_3d_iso_cells` /
+  `coeff_l2_norm_matches_the_cpp_compute_lp_norm_oracle`（3 项，原 canary 已转真断言）。
+- **同类静默零普查 ⇒ 第二处**：`postproc/flux_recovery.rs::geom_jacobian` 对未特判的
+  类型一律走"顶点差"回退，而 **hex 的 `nodes[1..4]` 是两条基边 + 基对角线** ⇒ 三列
+  线性相关 ⇒ `det J ≡ 0`；`compute_element_flux` 的 `try_inverse().unwrap_or_default()`
+  因此返回**恒零通量**，`compute_flux_energy` 则按 0 加权。此前不可达是因为同一文件
+  的 `ref_elem_vol` 直接**拒绝 Hex8**（panic）——即 3-D hex 上根本没有入口。现：
+  ① `ref_elem_vol` 增加 `Hex8/Hex20` 臂（`HexQk`，与几何同一元素、同一参考域）；
+  ② `geom_jacobian` 增加 Hex 等参臂（曲面读几何表）；
+  ③ `fe_order` 推断表补 hex p=2/3（原先 `_ => 1` 在 p≥2 会拿 8 个 dof 的基去配
+  27/64 dof 的通量向量）。测试
+  `crates/assembly/tests/d353_sibling_silent_zeros.rs`（4）：仿射场 `u = x+2y+3z`
+  的恢复通量逐 dof 等于精确梯度；常差通量的能量等于闭式 `κ|v|²|K|`；
+  **端到端** `zz_estimator_mfem_nc`（`amr_refiner::ThresholdRefiner` 真正调用的入口）
+  在 hex 与 prism 网格上可跑、对仿射场 `total_error < 1e-12`、**且对 P1 不可表示的场
+  `sin(x)·y + z²` 每个单元指示子严格为正**（防止"恒零估计子"也能通过）。
+  ⇒ 新增能力：**3-D hex / prism 的系数感知 ZZ 通量恢复与误差估计**
+  （`ThresholdRefiner` 现在可以在 3-D 上跑；此前 panic）。
+  **留白**：Pyramid5 仍无 `ref_elem_vol` 臂（记 D365）。
+
 - `fem_assembly::dist_solver` — MFEM `fem/dist_solver.*` 1:1 距离场
   支撑库 (3924 行)：Heat/Normalization/p-Laplace 距离求解器、
   PDEFilter (ScreenedPoisson/PUMPLaplacian)、Extrapolator

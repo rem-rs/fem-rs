@@ -242,6 +242,18 @@ fn iso_jacobian_geom<M: MeshTopology>(
 ///
 /// Returns `(jacobian_matrix, determinant, physical_coords)`.
 /// For surface meshes, the determinant is the area element.
+///
+/// The isoparametric branch delegates to
+/// [`fem_mesh::transformation::element_jacobian_at`], the mesh crate's single
+/// source of truth for geometry Jacobians.  D353: this function used to build
+/// the geometry element as `ref_elem_vol(Quad4, 1)` for **every** non-quad
+/// type — a 2-D basis for a 3-D cell — so the third column of `J` stayed zero,
+/// `det J ≡ 0`, and `compute_coeff_l2_norm` returned `0.0` for every Hex8 /
+/// Prism6 / Pyramid5 mesh (Quad4 and the simplex branch were correct).  The
+/// delegated helper also picks the geometry table of a curved cell, applies
+/// the pyramid's `PYR_P1_SLOT_VERTEX` slot permutation, and evaluates a curved
+/// pyramid with its own order-`g` element — the P1 basis over corner vertices
+/// is not its geometry.
 fn element_jacobian<M: MeshTopology>(
     mesh: &M,
     elem: u32,
@@ -257,36 +269,9 @@ fn element_jacobian<M: MeshTopology>(
         | ElementType::Pyramid5);
 
     if needs_iso {
-        // Isoparametric mapping via geometry reference element.
-        // Quad geometry lives on [0,1]^2 (QuadQk, matching MFEM's [0,1]^2
-        // reference square); the solution basis also lives on [0,1]^2 for
-        // all orders (QuadQk), so the Jacobian is sampled at matching points.
-        let geo: Box<dyn ReferenceElement> = match elem_type {
-            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
-                use fem_element::lagrange::factory::QuadQk;
-                Box::new(QuadQk::new(mesh.geom_order().max(1) as usize))
-            }
-            _ => ref_elem_vol(ElementType::Quad4, 1) as Box<dyn ReferenceElement>,
-        };
-        let n_geo = geo.n_dofs();
-        let mut grad_geo = vec![0.0_f64; n_geo * dim];
-        let mut phi_geo = vec![0.0_f64; n_geo];
-        geo.eval_grad_basis(xi, &mut grad_geo);
-        geo.eval_basis(xi, &mut phi_geo);
-
-        let mut j = DMatrix::<f64>::zeros(dim, dim);
-        let mut xp = vec![0.0_f64; dim];
-        for k in 0..n_geo {
-            let xk = mesh.node_coords(nodes[k]);
-            for i in 0..dim {
-                xp[i] += phi_geo[k] * xk[i];
-                for d in 0..dim {
-                    j[(i, d)] += xk[i] * grad_geo[k * dim + d];
-                }
-            }
-        }
-        let det = j.determinant();
-        (j, det, xp)
+        let (jac, xp) = fem_mesh::transformation::element_jacobian_at(mesh, elem, xi, dim);
+        let det = jac.determinant();
+        (jac, det, xp)
     } else {
         let (jac, det) = simplex_jacobian(mesh, nodes, dim);
         // For simplex elements, physical coords = x0 + J * xi

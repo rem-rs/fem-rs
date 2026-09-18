@@ -2228,6 +2228,123 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：① **代理报告的债务号会撞车**——② 路把 hex RT `dof_coords` 的族缺陷也写成"D348"，主会话在提交前重编号为 **D351**（方法论 25 再次生效，派单时必须给号段）。② **代理会用 shell 写文件绕过扫描**——③ 路自己申报了两处 `sed -i` + 一次 `cp`（含一次回滚），主会话逐条审计了 `git diff`：`pyramid.rs` 是文档重写、`dof_manager.rs` 删的是 4 张已无用的 `const` 表、`d335` 测试删的是无用 import，**均属正当改动**；但规则本身仍被违反，已在派单模板里重申"Write/Edit only"。③ **"代理数字亲验"再中**：④ 声称的 `-o 1/2/3` 逐字节，主会话自己两侧跑过后确认无误，且**额外发现 `-o 4` 第三行仍差末位**（代理未报）⇒ 记 D362。
 - **全量回归（收尾实测）**：见下节。
 
+## 第四十八轮（round 48）：D353 及其同类静默零 —— 3-D 单元上的 L² 度量与 ZZ 通量恢复
+
+本轮由用户指令"**根据 mfem 的 miniapp 和串并行示例，补全 fem-rs 缺失的能力**"驱动：
+从 miniapp/示例侧反查核心库缺口。第一件就是 round 47 自己钉住却未修的 **D353（P1）**。
+
+### 1. D353 关闭 —— `compute_coeff_l2_norm` 的 3-D 等参单元恒零
+
+- **缺陷**：`crates/assembly/src/postproc/grid_function.rs::element_jacobian` 把
+  Hex8/Hex20/Prism6/Prism15/Pyramid5 列进 `needs_iso`，几何元素却对每个非 quad
+  类型都建成 `ref_elem_vol(ElementType::Quad4, 1)` —— **2-D 基配 3-D 单元**，
+  `J` 第三列恒 0 ⇒ `det J ≡ 0` ⇒ `compute_coeff_l2_norm` /
+  `compute_coeff_l2_norm_first_n` 在 Hex8/Prism6/Pyramid5 上**恒返回 `0.0`**。
+  实测（单位网格，`coeff = 1`，`q = 6`）：Quad4 `9.9999999999999978e-1` ✓、
+  Tet4 `4.0824829046386302e-1` ✓（= `sqrt(1/6)`）、Hex8/Prism6/Pyramid5 **全 `0.0`**。
+  Hex8/Prism6 是**既有零**，round 47 只是把金字塔从 panic 变成了同样的静默零。
+- **修法（迁移而非复制）**：该分支改为**委派 `fem_mesh::transformation::element_jacobian_at`**
+  ——mesh crate 的几何 Jacobian 单一真源。它按单元自身类型与 `geom_order` 取几何元素、
+  对曲面单元读几何节点表、对直棱锥施加 `PYR_P1_SLOT_VERTEX` 槽置换、对曲面棱锥用
+  order-`g` 元素。**净删** 24 行重复的几何分派（`ref_elem_vol(Quad4,1)` 回退臂整体消失）。
+- **C++ 对拍**（新探针 `tmp/d353_probe.cpp`；`wsl: g++ -std=c++17 -O2 -I$HOME/mfem410_ser
+  tmp/d353_probe.cpp $HOME/mfem410_ser/libmfem.a -o $HOME/work/d353/d353_probe`）：
+  MFEM 4.10 `ComputeLpNorm(2.0, coeff, mesh, irs)`（`fem/coefficient.cpp:1751`
+  `LpNormLoop`），`irs[geom] = IntRules.Get(geom, 6)`：
+
+  | fixture | C++ `n1`（coeff=1） | C++ `n2`（coeff=x²，= `(∫x⁴)^{1/2}`） |
+  |---|---|---|
+  | quad4（[0,1]²） | `0.99999999999999978` | `0.44721359549995787` = `sqrt(1/5)` |
+  | hex8（[0,1]³） | `0.99999999999999944` | `0.44721359549995787` = `sqrt(1/5)` |
+  | prism6（单位直角棱柱） | `0.70710678118654757` | `0.18257418583505539` = `sqrt(1/30)` |
+  | pyramid5（底 (0,0)-(1,1)、顶 (0,0,1)） | `0.57735026918962584` | `0.16903085094570333` = `sqrt(1/35)` |
+  | hex8 缩放 2×3×4 | `4.8989794855663531` = `sqrt(24)` | `8.7635609200826554` |
+
+  `coeff = 1` 钉几何映射（`n1²` = 单元测度）、`coeff = x²` 钉求积点；
+  两侧相对差 **< 1e-14**（棱锥两条路径的参考域因此被证明一致）。**顺带核实**了
+  `ComputeLpNorm(2.0, f)` 返回 `(∫|f|²)^{1/2}`（先前误读为 `∫f²`，实测 `sqrt(1/5)`
+  才对得上），——这一点写进测试文档，避免后续再踩。
+- **测试**：原 canary `coeff_l2_norm_on_3d_iso_cells_is_zero_open_debt`（断言 `== 0.0`）
+  按它自己的说明**转为真断言**：`coeff_l2_norm_on_3d_iso_cells`（`1.0` / `sqrt(1/2)` /
+  `sqrt(1/3)`）、`coeff_l2_norm_first_n_on_3d_iso_cells`（并行入口同源）、
+  `coeff_l2_norm_matches_the_cpp_compute_lp_norm_oracle`（上表逐值，1e-14）。
+
+### 2. 同类静默零普查 —— 第二处：`flux_recovery::geom_jacobian` 的 hex 奇异 J
+
+- **缺陷**：`crates/assembly/src/postproc/flux_recovery.rs::geom_jacobian` 对未特判的
+  类型一律走"顶点差"回退（`nodes[0..dim]`）。**hex 的 `nodes[1] / nodes[2] / nodes[3]`
+  是两条基边 + 基对角线** ⇒ 三列线性相关 ⇒ `det J ≡ 0`。两个消费方因此全零：
+  `compute_element_flux` 的 `jac.try_inverse().unwrap_or_default()` ⇒ **恒零通量**；
+  `compute_flux_energy` 的 `w = quad.weights[q] * det_j.abs()` ⇒ **按 0 加权**。
+  **此前不可达**：同一文件的 `ref_elem_vol` 直接**拒绝 Hex8**（`panic!
+  "ref_elem_vol: unsupported (element_type=Hex8, order=1)"`）⇒ 3-D hex 上连入口都没有。
+- **修法**（三处，都在 `flux_recovery.rs`）：
+  1. `ref_elem_vol` 增加 `(Hex8|Hex20, o) => HexQk::new(o)` 与
+     `(Prism6|Prism15, o) => PrismPk::new(o)` ——与几何同一元素、同一参考域
+     （`HexQk::dof_coords()` / `PrismPk::dof_coords()` 也就是通量采样集）；
+  2. `geom_jacobian` 增加 Hex 与 Prism 等参臂（曲面走 `mesh.geometry_nodes`），并把
+     `element` 参数补进签名以取几何表；旧回退臂保留给其余类型并加注它是 D353 同类；
+  3. `fe_order` 推断表补 `(Hex8|Hex20, 8|27|64)` 与 `(Prism6|Prism15, 6|18|40)`。
+     **原先 `_ => 1` 在 p≥2 会拿 8 个 dof 的基去配 27/64 dof 的通量向量**。
+- **oracle（闭式，无需 C++）**：`u = x + 2y + 3z` 在 H¹(P1) 中**精确**（仿射 ⇒
+  梯度为常量），故 `compute_element_flux` 在每个通量 dof 上必须等于 `(1,2,3)`；
+  常差通量 `v = (1,2,3)` 的能量必须等于 `κ·|v|²·|K|`（2×1×1 盒的子单元与单位棱柱各
+  `|K| = 0.5`，`κ = 2` ⇒ `28.0`）；**端到端** `zz_estimator_mfem_nc`（`ThresholdRefiner`
+  真正调用的入口）对仿射场必须 `total_error < 1e-12`。新测试
+  `crates/assembly/tests/d353_sibling_silent_zeros.rs`（4）。
+  ⚠️ **两个"测试本身会骗人"的陷阱（本轮实测踩到并写进测试注释）**：
+  ① **单元素网格上 ZZ 估计子恒为 0**（P1 场的恢复通量就等于该单元自身的通量，差恒零）
+  ⇒ 网格必须 ≥2 单元（故用 `stacked_prisms()` 而非 `unit_prism()`）；
+  ② **z 向堆叠的两棱柱对 z-无关场（如 `sin(x)·y`）通量完全相同** ⇒ 差同样恒零
+  ⇒ 场必须跨单元变化（用 `sin(x)·y + z²`）。
+  两条都会让"恒零估计子"看起来通过 ⇒ 故**另加非退化测试**（P1 不可表示的场上每个
+  单元指示子严格为正）。
+- **新增能力**：**3-D hex / prism 的系数感知 ZZ 通量恢复**。`amr_refiner::ThresholdRefiner`
+  （`zz_estimator_mfem_nc` + `FluxRecovery`）此前在 hex 上 panic，现在 hex 与 prism
+  都可跑。**留白（如实）**：Pyramid5 仍无 `ref_elem_vol` 臂 ⇒ 仍 panic（转 D365），
+  故 `zz_estimator_mfem_nc` 现只在 tri/quad/tet/hex/prism 上可用。
+
+### 3. 其余普查结论（未改，记录事实）
+
+- `postproc/error_estimate.rs::geom_jacobian`：**D250 已修**，hex 走等参臂（`[-1,1]³` 框、
+  2-D 走 `t = (ξ+1)/2` 后 `/2` 缩放），与 `flux_recovery` 的旧回退**不是**同一份代码 ⇒ 本轮无改动。
+- `vector_assembler.rs::geo_ref_elem_from_mesh`：按单元类型分派（含 D304/D306/D347
+  的 pyramid 臂）⇒ 无此缺陷。
+- `qspace.rs::int_rule_for_geometry` = `geom.ref_elem(1).quadrature(order)` ⇒ 按几何分派，正确。
+- **D358 已自然消解**（文档修正，非代码改动）：`miniapps/tools/nodal_transfer.rs` 的局部
+  `project_coefficient`（现 `:273`）**已经是节点插值**（`test_coeff(dm.dof_coord(d))`），
+  不是 D345 的 L² 质量解 ⇒ **无需改动**，D358 可从开放清单划掉。
+
+### 第四十八轮新债务
+
+- **D364（P2）`ref_elem_vol` 同名表仍有 4 份**（`grid_function.rs`、`error_estimate.rs`、
+  `flux_recovery.rs`、`assembler.rs`），臂与**参考域约定**各不相同（如 `QuadQ1` 在
+  `[-1,1]²`、`QuadQk` 在 `[0,1]²`），D353 的根因正是"某一份表的回退臂与消费方框不一致"。
+  合并（D346/D350 模式，迁到 `fem_space` 单一真源）需**逐消费方核对框**，不是纯机械替换 ⇒
+  单独排一轮。**这是防止 D353 复发的根本手段。**
+- **D365（P3）**`flux_recovery` 的 **Pyramid5** 仍无 `ref_elem_vol` 臂 ⇒
+  3-D 棱锥的 ZZ 误差估计仍不可用（hex/prism 本轮已补；棱锥因直棱锥几何用
+  `GeoPyrP1`（mesh 顶点序）而 H¹ 解基用 Fuentes 层序，两套槽约定需先裁定，
+  不是加一行臂的事 ⇒ 与 D364 同批处理更省）。
+- **D366（P3）**`flux_recovery::compute_flux_energy` 的 `fe_order` 由
+  `flux_diff.len()/dim` 反推，表仍是白名单 + `_ => 1` 兜底；pyramid/高阶
+  未列全（hex/prism 已补）⇒ 与 D365 同批。
+- **关闭**：~~D353~~（P1，含 C++ 对拍）；~~D358~~（**文档修正、无代码改动**：
+  `miniapps/tools/nodal_transfer.rs:273` 的局部 `project_coefficient` 实测**已经是
+  节点插值**（`test_coeff(dm.dof_coord(d))`），不是 D345 的 L² 质量解 ⇒ 该项原本就
+  不存在，round 47 ④ 路的记载有误）。
+- 沿用开放：**D352/D354**（r47 的 space 两项）、D355–D357、D359–D363、D364/D365/D366、
+  D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+
+- **测试**：`crates/assembly/tests/d340_pyramid_l2_assembly.rs` 11 → 13
+  （canary 转 3 项真断言，净 +2）；新增 `crates/assembly/tests/d353_sibling_silent_zeros.rs`（4）。
+- **C++ 真值管线**：新探针 `tmp/d353_probe.cpp` + 二进制 `wsl $HOME/work/d353/d353_probe`
+  （五组 fixture × orders 2..6 全表）。
+- **无行为回归**：`cargo test -p fem-assembly --lib` **684 passed / 0 failed / 8 ignored**
+  （少 crate 批跑口径，见 §方法论 15）；`--tests` 见 HANDOVER 收尾节。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。

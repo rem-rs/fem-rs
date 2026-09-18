@@ -24,7 +24,9 @@
 //! test uses for `DGMassInverse`.
 
 use fem_assembly::assembler::ref_elem_vol_l2;
-use fem_assembly::postproc::grid_function::compute_coeff_l2_norm;
+use fem_assembly::postproc::grid_function::{
+    compute_coeff_l2_norm, compute_coeff_l2_norm_first_n,
+};
 use fem_assembly::standard::MassIntegrator;
 use fem_assembly::vector_assembler::{geo_ref_elem_from_mesh, isoparametric_jacobian};
 use fem_assembly::{Assembler, GridFunction};
@@ -621,40 +623,37 @@ fn curved_pyramid_l2_error_of_a_linear_field_is_exact_from_p2() {
     }
 }
 
-// ─── a documented, NOT-fixed defect found while doing the above ─────────────
+// ─── D353: the 3-D isoparametric cells now integrate ────────────────────────
 
-/// **Canary for an open debt** (recorded in
-/// `tmp/d325/ARBITRATION_REQUEST.md` §"FOURTH FINDING", not fixed here).
+/// **D353 regression** (found as the "FOURTH FINDING" of
+/// `tmp/d325/ARBITRATION_REQUEST.md`, fixed in round 48).
 ///
-/// `fem_assembly::postproc::grid_function::compute_coeff_l2_norm` returns
-/// **`0.0` for every 3-D isoparametric cell** — Hex8, Prism6 and Pyramid5 —
-/// while Quad4 and Tet4 are correct.  Cause: its per-element geometry helper
-/// `element_jacobian` (`postproc/grid_function.rs:245`) lists those types in
-/// `needs_iso` and then builds the geometry element as
-/// `ref_elem_vol(ElementType::Quad4, 1)` for every non-quad type
-/// (`grid_function.rs:264-270`) — a **2-D** basis for a 3-D cell, so the third
-/// column of `J` stays 0, `det J ≡ 0` and the norm collapses to zero.
+/// `fem_assembly::postproc::grid_function::compute_coeff_l2_norm` used to
+/// return **`0.0` for every 3-D isoparametric cell** — Hex8, Prism6 and
+/// Pyramid5 — while Quad4 and Tet4 were correct.  Cause: its per-element
+/// geometry helper `element_jacobian` (`postproc/grid_function.rs`) listed
+/// those types in `needs_iso` and then built the geometry element as
+/// `ref_elem_vol(ElementType::Quad4, 1)` for every non-quad type — a **2-D**
+/// basis for a 3-D cell, so the third column of `J` stayed 0, `det J ≡ 0` and
+/// the norm collapsed to zero.
 ///
-/// Measured (unit mesh of each type, `coeff = 1`, `quad_order = 6`):
+/// The helper now delegates to `fem_mesh::transformation::element_jacobian_at`
+/// (the mesh crate's single source of truth for geometry Jacobians), so the
+/// geometry element is the element's own type and the norm is the true cell
+/// measure.  Measured (unit mesh of each type, `coeff = 1`, `quad_order = 6`):
 ///
 /// | element | value | expected |
 /// |---|---|---|
 /// | Quad4 | 9.9999999999999978e-1 | 1 |
 /// | Tet4 | 4.0824829046386302e-1 | `sqrt(1/6)` |
-/// | Hex8 | **0.0** | 1 |
-/// | Prism6 | **0.0** | `sqrt(1/2)` |
-/// | Pyramid5 | **0.0** | `sqrt(1/3)` |
+/// | Hex8 | 1 | 1 |
+/// | Prism6 | 7.0710678118654757e-1 | `sqrt(1/2)` |
+/// | Pyramid5 | 5.7735026918962584e-1 | `sqrt(1/3)` |
 ///
-/// The pyramid row is the one this round touched indirectly: before the
-/// pyramid arm in the file-local `ref_elem_vol`, this function **panicked**
-/// (`ref_elem_vol: unsupported (element_type=Pyramid5, order=1)`) — the arm
-/// turned that into the same silent zero Hex8/Prism6 already had.  The
-/// underlying defect is the geometry element above, not the pyramid arm.
-///
-/// When the helper is fixed, the `0.0` expectations below must be replaced by
-/// the true values — that is the point of pinning them.
+/// Everything except the pyramid is a *pre-existing* zero, not a round-47
+/// regression — that is why the canary pinned the `0.0` values before.
 #[test]
-fn coeff_l2_norm_on_3d_iso_cells_is_zero_open_debt() {
+fn coeff_l2_norm_on_3d_iso_cells() {
     let one = |_: &[f64]| 1.0;
     let q = 6;
     let quad = Mesh::<2>::unit_square_quad(1);
@@ -693,10 +692,112 @@ fn coeff_l2_norm_on_3d_iso_cells_is_zero_open_debt() {
         ("pyramid5", unit_pyramid(), (1.0 / 3.0f64).sqrt()),
     ] {
         let got = compute_coeff_l2_norm(&mesh, &one, q);
-        assert_eq!(
-            got, 0.0,
-            "{name}: pinning the open debt — expected 0.0 here, true value {want}; \
-             see coeff_l2_norm_on_3d_iso_cells_is_zero_open_debt"
+        assert!(
+            (got - want).abs() < 1e-12,
+            "{name}: D353 regression — got {got} for the unit cell, expected the \
+             exact cell measure {want}"
         );
     }
+}
+
+/// The same cell measures through the `ComputeLpNorm(2.0, coeff, mesh)`
+/// entry point that reports over the *first n* elements (the parallel
+/// partition entry point) — both call the same helper, so both were zero.
+#[test]
+fn coeff_l2_norm_first_n_on_3d_iso_cells() {
+    let one = |_: &[f64]| 1.0;
+    let q = 6;
+    for (name, mesh, want) in [
+        ("hex8", Mesh::<3>::unit_cube_hex(1), 1.0),
+        ("pyramid5", unit_pyramid(), (1.0 / 3.0f64).sqrt()),
+    ] {
+        let n = mesh.n_elements() as usize;
+        let got = compute_coeff_l2_norm_first_n(&mesh, &one, q, n);
+        assert!(
+            (got - want).abs() < 1e-12,
+            "{name}: D353 regression in compute_coeff_l2_norm_first_n — got {got}, \
+             expected {want}"
+        );
+    }
+}
+
+/// **D353 against the C++ oracle.**  MFEM 4.10's
+/// `ComputeLpNorm(2.0, coeff, mesh, irs)` (`fem/coefficient.cpp:1751`
+/// `LpNormLoop`) on the same four fixtures plus a scaled hex, with
+/// `irs[geom] = IntRules.Get(geom, 6)`.
+///
+/// The probe is `tmp/d353_probe.cpp` (kept in fem-pro); the printed values
+/// below are its output, reproduced verbatim:
+///
+/// ```text
+/// quad4    order=6 npoints=16 box=[0,1]x[0,1]       n1=0.99999999999999978 n2=0.44721359549995787
+/// hex8     order=6 npoints=64 box=[0,1]x[0,1]x[0,1] n1=0.99999999999999944 n2=0.44721359549995787
+/// prism6   order=6 npoints=48 box=[0,1]x[0,1]x[0,1] n1=0.70710678118654757 n2=0.18257418583505539
+/// pyramid5 order=6 npoints=64 box=[0,1]x[0,1]x[0,1] n1=0.57735026918962584 n2=0.16903085094570333
+/// hex8_scaled order=6                                n1=4.8989794855663531  n2=8.7635609200826554
+/// ```
+///
+/// `coeff = 1` checks the geometry map (`n1²` is the cell measure);
+/// `coeff = x²` checks the quadrature points as well, because
+/// `ComputeLpNorm(2.0, f)` returns `(∫|f|²)^{1/2}`, i.e. `(∫x⁴)^{1/2}` —
+/// `sqrt(1/5)` on the unit quad/hex, `sqrt(1/30)` on the prism and
+/// `sqrt(1/35)` on this pyramid.  The scaled `2×3×4` hex pins a non-unit map
+/// (`n1 = sqrt(24)`).
+///
+/// Tolerances are `1e-14` relative rather than bit-exact: the two sides
+/// traverse the same rule only if fem-rs's per-element rule table matches
+/// MFEM's `IntRules` entry for entry, which is a separate (already
+/// calibrated) concern; what this test pins is the *integral*.
+#[test]
+fn coeff_l2_norm_matches_the_cpp_compute_lp_norm_oracle() {
+    let one = |_: &[f64]| 1.0;
+    let xsquared = |x: &[f64]| x[0] * x[0];
+    let q = 6;
+
+    let prism6 = Mesh::<3>::uniform(
+        vec![0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1., 1., 0., 1., 0., 1., 1.],
+        vec![0, 1, 2, 3, 4, 5],
+        vec![1],
+        ElementType::Prism6,
+        vec![],
+        vec![],
+        ElementType::Tri3,
+    );
+    let scaled_hex = Mesh::<3>::make_cartesian_3d(
+        1, 1, 1, ElementType::Hex8, 2.0, 3.0, 4.0, false,
+    );
+
+    // (name, mesh, n1 oracle, n2 oracle) — C++ output above.
+    let cases: Vec<(&str, Mesh<3>, f64, f64)> = vec![
+        ("hex8", Mesh::<3>::unit_cube_hex(1), 0.99999999999999944, 0.44721359549995787),
+        ("prism6", prism6, 0.70710678118654757, 0.18257418583505539),
+        ("pyramid5", unit_pyramid(), 0.57735026918962584, 0.16903085094570333),
+        ("hex8_scaled", scaled_hex, 4.8989794855663531, 8.7635609200826554),
+    ];
+    for (name, mesh, want1, want2) in cases {
+        let got1 = compute_coeff_l2_norm(&mesh, &one, q);
+        let got2 = compute_coeff_l2_norm(&mesh, &xsquared, q);
+        let rel = |got: f64, want: f64| ((got - want) / want).abs();
+        assert!(
+            rel(got1, want1) < 1e-14,
+            "{name}: |1|_L2 = {got1}, C++ {want1}"
+        );
+        assert!(
+            rel(got2, want2) < 1e-14,
+            "{name}: |x²|_L2 = {got2}, C++ {want2}"
+        );
+    }
+
+    // The 2-D Quad4 fixture lives on the same rule table path.
+    let quad = Mesh::<2>::unit_square_quad(1);
+    let got1 = compute_coeff_l2_norm(&quad, &one, q);
+    let got2 = compute_coeff_l2_norm(&quad, &xsquared, q);
+    assert!(
+        ((got1 - 0.99999999999999978) / 0.99999999999999978).abs() < 1e-14,
+        "quad4: |1|_L2 = {got1}, C++ 0.99999999999999978"
+    );
+    assert!(
+        ((got2 - 0.44721359549995787) / 0.44721359549995787).abs() < 1e-14,
+        "quad4: |x²|_L2 = {got2}, C++ 0.44721359549995787"
+    );
 }

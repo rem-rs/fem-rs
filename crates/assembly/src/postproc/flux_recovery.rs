@@ -71,6 +71,19 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         }
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
+        // D353 sweep: hexes were refused here, so the 3-D hex ZZ estimator had
+        // no entry point at all.  HexQk is the frame `geom_jacobian`'s hex arm
+        // evaluates the geometry in, and the frame `HexQk::dof_coords()` (the
+        // usual flux sample set) is expressed in — one element, one frame.
+        (ElementType::Hex8 | ElementType::Hex20, o) => {
+            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
+        }
+        // Same reasoning as the hex arm above, for the wedge: `PrismPk` is what
+        // `geo_ref_elem_from_mesh` returns for a prism and what the geometry arm
+        // of `geom_jacobian` evaluates, so basis and geometry share one frame.
+        (ElementType::Prism6 | ElementType::Prism15, o) => {
+            Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))
+        }
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         // D157: evaluated against `space.element_dofs` / `fe_order`, whose tet
@@ -96,7 +109,34 @@ fn is_simplex(elem_type: ElementType) -> bool {
     matches!(elem_type, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
 }
 
-fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (nalgebra::DMatrix<f64>, f64) {
+/// Geometric-mapping Jacobian at reference point `xi` on `element`.
+///
+/// - **Simplex** (Tri3/Tri6/Tet4/Tet10): the P1 mapping, i.e. the constant
+///   Jacobian built from `nodes[0..dim]`.
+/// - **Quad4** (`dim == 2`): the analytic bilinear map on `[-1,1]²` — the frame
+///   the `QuadQ1` basis in [`ref_elem_vol`] is evaluated in.
+/// - **Hex8/Hex20**: the isoparametric `HexQk` geometry, i.e. the *same*
+///   element family the solution basis uses, so the basis and the geometry
+///   share one reference frame.
+/// - **Anything else**: the P1 corner-difference map.
+///
+/// D353 sweep.  The last arm used to be the only one for 3-D non-simplex
+/// cells, and it is **singular on a hex**: `nodes[1]`, `nodes[2]`, `nodes[3]`
+/// are the two base edges plus the base *diagonal*, so the three columns of
+/// `J` are linearly dependent and `det J == 0`.  Both consumers then collapsed
+/// to zero — `compute_element_flux`'s `jac.try_inverse().unwrap_or_default()`
+/// produced an identically zero flux, and `compute_flux_energy` weighed every
+/// quadrature point by `0`.  That is the same "silent zero" class as D353
+/// itself (`grid_function::element_jacobian`); `ref_elem_vol` refused Hex8
+/// outright, so no test had reached it before.
+fn geom_jacobian<M: MeshTopology>(
+    mesh: &M,
+    element: u32,
+    nodes: &[u32],
+    xi: &[f64],
+    dim: usize,
+    elem_type: ElementType,
+) -> (nalgebra::DMatrix<f64>, f64) {
     use nalgebra::DMatrix;
     if is_simplex(elem_type) {
         let x0 = mesh.node_coords(nodes[0]);
@@ -116,6 +156,31 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, nodes: &[u32], xi: &[f64], dim: usiz
         let det = j00 * j11 - j01 * j10;
         let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
         (jac, det)
+    } else if matches!(elem_type, ElementType::Hex8 | ElementType::Hex20) {
+        // A curved hex reads its own geometry table; a straight one the
+        // vertex connectivity.  `HexQk` is the element `ref_elem_vol(Hex8, o)`
+        // returns, so `xi` means the same thing for basis and geometry.
+        let geo = fem_element::lagrange::HexQk::new(mesh.geom_order().max(1) as usize);
+        let geo_nodes: &[u32] = if mesh.geom_order() > 1 {
+            mesh.geometry_nodes(element)
+        } else {
+            nodes
+        };
+        let (j, det, _xp) =
+            crate::vector_assembler::isoparametric_jacobian(mesh, geo_nodes, &geo, xi, 3);
+        (j, det)
+    } else if matches!(elem_type, ElementType::Prism6 | ElementType::Prism15) {
+        // Wedge: `PrismPk` is both the solution basis ([`ref_elem_vol`]) and
+        // the geometry `geo_ref_elem_from_mesh` selects.
+        let geo = fem_element::lagrange::PrismPk::new(mesh.geom_order().max(1) as usize);
+        let geo_nodes: &[u32] = if mesh.geom_order() > 1 {
+            mesh.geometry_nodes(element)
+        } else {
+            nodes
+        };
+        let (j, det, _xp) =
+            crate::vector_assembler::isoparametric_jacobian(mesh, geo_nodes, &geo, xi, 3);
+        (j, det)
     } else {
         let x0 = mesh.node_coords(nodes[0]);
         let mut j = DMatrix::<f64>::zeros(dim, dim);
@@ -172,7 +237,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
                 }
                 vec[j] = s;
             }
-            let (jac, _) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+            let (jac, _) = geom_jacobian(mesh, element, nodes, xi, dim, elem_type);
             let j_inv = jac.try_inverse().unwrap_or_default();
             for d in 0..dim {
                 let mut s = 0.0;
@@ -206,6 +271,15 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
             (ElementType::Tri3, 10) | (ElementType::Tri6, 10) => 3,
             (ElementType::Quad4, 4) => 1,
             (ElementType::Quad4, 9) => 2,
+            // D353 sweep: the `_ => 1` fallback happened to be right for the
+            // hex only at p = 1 (HexQk(1) has 8 DOFs); at p >= 2 the estimator
+            // would read an 8-DOF basis against a 27- (or 64-) DOF flux vector.
+            (ElementType::Hex8 | ElementType::Hex20, 8) => 1,
+            (ElementType::Hex8 | ElementType::Hex20, 27) => 2,
+            (ElementType::Hex8 | ElementType::Hex20, 64) => 3,
+            (ElementType::Prism6 | ElementType::Prism15, 6) => 1,
+            (ElementType::Prism6 | ElementType::Prism15, 18) => 2,
+            (ElementType::Prism6 | ElementType::Prism15, 40) => 3,
             (ElementType::Tet4, 4) => 1,
             (ElementType::Tet4, 10) => 2,
             (ElementType::Tet4, 20) => 3,
@@ -228,7 +302,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let mut pointflux = vec![0.0; dim];
         let mut energy = 0.0;
         for (q, xi) in quad.points.iter().enumerate() {
-            let (_, det_j) = geom_jacobian(mesh, nodes, xi, dim, elem_type);
+            let (_, det_j) = geom_jacobian(mesh, element, nodes, xi, dim, elem_type);
             let w = quad.weights[q] * det_j.abs();
             ref_elem.eval_basis(xi, &mut phi);
             for d in 0..dim {
