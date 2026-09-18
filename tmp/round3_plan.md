@@ -2151,6 +2151,83 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：**本轮两路都在"预期之外"挖到更深缺陷**（① 的 ex24 病根不在 RT 元素而在 L2 误差/投影算子；② 的 Fuentes 切换顺带证明 Bergot 非 conforming）——"先证伪再修"与"阶梯定位"两条纪律的价值再次实证。**裁决纪律**：AR2 若照代理单行解释改了示例，会把一个"三行都差"的问题伪装成"已修"——**主会话复测的独立价值**。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 688**+8ign / **element 513** / **io 136** / linalg 69 / linalg-gpu 13+2ign / **mesh 313** / parallel 243 / solver 266 / **space 288**）；集成层 **143 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**5m52s**）；pro 层 0 错误。
 
+## 第四十七轮（round 47）：两批四路 —— ①② D348 金字塔面取向 / D342 hex RT≥3，③④ 金字塔 L2·混合空间 / 尾部八件
+
+### 0. 本轮形状
+**两批、四路，全部落在"既有缺陷"上；③ 一路连挖三层"解除阻塞后新可达"的缺口（每层都补了端到端对拍），是本轮价值核心。** 主会话两次仲裁授权（③ 的 `assembler.rs` 与 `grid_function.rs`）都由代理先给测量证据、主会话裁定后落地。
+
+| 批 | 路 | 目标 | 结果 |
+|---|---|---|---|
+| 1 | ① | **D348（P1）** 金字塔面 shared dof 取向盲 | ✅ **关闭**（`bad=4/6 → 0`，两族；含 MFEM 自身的 Bergot 4/8 缺陷被 1:1 复刻） |
+| 1 | ② | **D342（P2）** hex RT 阶≥3 + **D346**（判据导出）+ **D351**（RT dof_coords 族） | ✅ **三件全关**（ex24 `-o 4` 对齐 C++ `1.3998768047217274e-10`） |
+| 2 | ③ | **D325+D340+D335+D349** 金字塔 L2 族与混合空间 | ✅ D325/D340/D335 关闭；**D349 部分关闭**（p=2 可用，p≥3 残差另立 D354）；另修两条**新可达**的正确性缺口 |
+| 2 | ④ | **D343/D333/D339/D341/D334/D336/D344/D345** 尾部八件 | ✅ 七件关闭 + D336 特征化；**ex24 `-o 1/2/3` 三行 stdout 与 C++ 逐字节** |
+
+### 1. ① 路：D348 关闭 —— 金字塔面 shared dof 取向盲（MFEM `DofOrderForOrientation(SQUARE)`）
+- **机制（实测）**：`build_pyramid_pk` 用 `QuadFaceKey`（**只排序四个顶点 id**）认领基面，首个元素按自己的槽序分配 `(p−1)²` 个 dof，后续元素**原样照抄**同一向量 ⇒ 同一张基面被两个金字塔以不同二面体取向走过时，同一个全局 dof 被挂到**不同的参考面点**（`dof_coords` 又是"最后写者赢"，至少对一个元素是错的）。`data/octahedron.mesh` 正是该触发：`1 7 4 3 2 1 0`（基面 `4,3,2,1`）对 `1 7 1 2 3 4 5`（基面 `1,2,3,4`）。
+- **修法**：移植 `Mesh::GetQuadOrientation`（`mesh/mesh.cpp:7586-7634`）与 `QuadDofOrd`（非 serendipity 分支，`fe_coll.cpp:1914-1945`；`pm1=p−1`/`pm2=p−2` 见 `:1750`），消费口径同 `fe_coll.cpp:704-724`。两个 face map 改为存 **dof 向量 + 首见顶点序**（口径用 MFEM 自己的面顶点表：基面 `FaceVert[0] = {3,2,1,0}`，`fem/geom.cpp:1086`，**不是**任务书猜的 `(0,1,3,2)`），正是 `build_prism_h1` 已有的 `tri_map`/`quad_map` 配对法。三角侧面同类同修（用 prism 的重心标号输运 = MFEM `TriDofOrd`）。分配顺序（y 外/x 内）与技术前的谓词均**未改**。
+- **数字**：`data/octahedron.mesh` p=3 `bad=4 worst 6.325e-1` → **`bad=0 worst 0.0`**、p=4 `bad=6 worst 9.258e-1` → **`bad=0 worst 0.0`**，Bergot 与 Fuentes **两族相同**（MFEM 自己的 `SHARED octa p=3/4 bad=0`，round-46 夹具 `fuentes_pyramid_space_mfem.txt:938/:1409`）；三角侧面 p=4 `bad=2 worst 3.872e-1` → `bad=0`（p≤3 本就精确）。
+- **⭐ 顺带挖出 MFEM 自身的缺陷（不是 fem-rs 的）**：把 8 种基面取向全枚举后（`tmp/d348/RAW_PROBE.txt`），`pyr_type=0`（Bergot）MFEM **自己在 `Or ∈ {1,2,5,6}` 就不 conforming**（p=3 `bad=4`、p=4 `bad=8`，worst 与 fem-rs 修前完全相同），而 `pyr_type=1`（Fuentes）8 种全 `bad=0`。原因：`QuadDofOrd` 是**纯槽索引**群作用，只对 Fuentes 的基面块布局（自带 `j` 反转，`pyramid_fuentes.rs:438-444`）成立。**fem-rs 按 1:1 原样复刻 MFEM，包括这个 4/8 缺陷**（`quad_dof_ord` 文档注释已固化该决策）。⇒ **round 46 把 tinyzoo 的 4/9 归因于"全在三角面"现在可疑**：本轮孤立的三角面夹具显示 MFEM 对金字塔三角面是精确的（p≤4 两族 `bad=0`），更可能的来源是 `Or ∈ {1,2,5,6}` 的基面情形。
+- **D347 钉更新（主会话落地代理的 AR）**：`crates/space/tests/d347_pyramid_fuentes_wiring.rs::known_shared_bad` 原来把该缺陷**当成已知缺口钉住**（p=3→4、p=4→6）；该文件自带的 MFEM dump 说的就是 0，故改为 0 并把文档注释改写成"缺陷已修、此处为回归钉"。
+- 新测试 `crates/space/tests/d348_pyramid_quad_face_orientation.rs`（5）。**主会话亲验**：`bad=0 worst=0.000e0` 全表（p=2/3/4 × 两族 × octa/tri）。
+
+### 2. ② 路：D342 + D346 + D351 关闭 —— hex RT 阶≥3 端到端
+- **D342**：`hdiv.rs:330` 的 `order <= 2` → **`order <= 6`**（= 2-D quad 臂同款家规）。依据是 MFEM 源码而非猜测：`RT_FECollection` 只管 `p >= 0`（`fem/fe_coll.cpp:2531`），`RT_HexahedronElement`（`fem/fe/fe_rt.cpp:326`）的面框/内部枚举/`i <= p/2` 定向翻转都是纯 `p` 循环 ⇒ MFEM 无上界。
+- **k=3 element dump**：新探针 `tmp/d342/probe_rt_gl_k36.cpp`（与 round-41 的 k=1,2 探针**逐字节同格式**，只改 `p` 循环到 3..6），得到 240 行 V × 2 点 + 240 行 div × 2 = **1920 个数**嵌入 `hex_rtk/mfem_gl_dump.rs`（`V_3_*/X_3_*`）；转录已用 token 级比对复核（1920/1920，`diff -q` 干净）。
+- **⭐ 单位立方 ×4/×8 缩放是"测出来的"不是"假定的"**：新 lib 测试 `d342_rt_scaling_factors_measured` 对 1532 个非零项求商，`V ratio = 4 ± 3.109e-15`、`div ratio = 8 ± 2.398e-14`（残差即 `%.17g` 往返）——**任何全局因子错误或阶相关因子都活不过该测试**，而单纯的重构测试看不到（对偶矩阵由同一基构造，全局因子会约掉）。
+- **端到端判据（主会话亲验）**：`$HOME/work/d329v/ex24_cpp -m inline-hex.mesh -o 4 -p 2 -no-vis` → `RT: 6340608  L2: 2097152` 与 `1.39988e-10/1.39988e-10/1.39987e-10`；fem-rs 同命令**dof 数逐位相同**，17 位 errSol `1.39987689617080876e-10` vs C++ `1.3998768047217274e-10`（**|Δ| = 9.1e-18**，即 1.4e-10 残差上的 ~1e-17 舍入地板；小网格梯级 64/512 的相对差 4.1e-11/9.9e-10 无 h 趋势）。**主会话自己跑的 32³ 忽略测试实测通过**（214.57 s）。`-o 1/2/3` 冻结基线逐位不动。
+- **D346**：`hdiv_interpolant_available` 从 assembly 迁入 `fem_space::hdiv` 并成为 `HDivSpace::interpolate_vector` **断言用的同一个谓词**（两处不再可能漂移），assembly 侧改为一行委派；17 种元素 × 阶 0..=9 的表对比证明**唯一行为变化就是 4 处 hex 放宽**（此前被空间先 panic 挡住、不可达）。
+- **D351（既有缺陷，本轮发现并修）**：`HexRTk::dof_coords` 的内部闭合方向节点取了 **GaussLegendre** 族（`gl_nodes(k+2)[i]`），而 MFEM 用 **GaussLobatto**（`fe_rt.cpp:437` 的 `cp = ClosedPoints(p+1)`，索引 `i` 跑 `0..=p+1` ⇒ 需要 `p+2` 点 GLL 规则 = `gll_nodes(k+1)`）；k≤1 两者重合、k≥2 起分道。**主会话按 MFEM 源码独立复核**了索引范围与族，并确认无 RT 消费方读这些坐标（属标注面修复）。
+- **编号冲突处置**：② 路代理曾把 D351 这件事也写成"D348"（与 ① 的债务号撞车，方法论 25）；主会话**在提交前重编号为 D351**，并把注释补强为"MFEM 索引跑到 `p+1` ⇒ 需要 `p+2` 点"。
+- 新测试：`crates/element/tests/d342_hex_rt_order_cap.rs`（2）、`crates/space/tests/d342_hex_rt_interpolant_orders.rs`（3）、`crates/assembly/tests/d342_ex24_hex_rt3.rs`（2 + 1 ignored 32³）。
+
+### 3. ③ 路：金字塔 L2 族与混合空间（D325/D340/D335 关闭，D349 部分）
+- **D325**：新元素 `crates/element/src/lagrange/pyramid_l2.rs::L2FuentesPyramidPk`，1:1 移植 MFEM `L2_FuentesPyramidElement`（`fe_l2.cpp:926-1076`，`(p+1)³` 个 dof，两个 `btype` 臂都实现，`a` 的取法见 `fe_l2.cpp:944-952`）。逐槽对 MFEM 4.10 raw dump（p=0..4：节点、`op`、`a`、Vandermonde、`CalcShape`@8 点、`CalcDShape`@7 点、MFEM 自己的节点残差）；**参考帧缩放是测的**：最小二乘尺度因子 worst `|γ−1| = 2.33e-15`，形状最大绝对偏差 `3.11e-15`。
+- **D340**：`L2Space` 金字塔臂（`build_pyramid`），按空间的 `L2Basis` 分派（GL→`new`、GLL→`new_gauss_lobatto`）；`n_dofs`/`element_dofs`/`dof_coords`（走 D331 的线性棱锥映射）/`interpolate` 全接线。**单一真源**：新增 `pub fn l2_pyramid_element(p, basis)`，空间与装配两侧都调它（装配臂的注释点名引用）。
+- **D340 的装配面（主会话授权的 AR #1）**：`crates/assembly/src/assembler.rs` 的 `ref_elem_vol_l2`/`ref_elem_vol_for_space` 补金字塔臂，并补了 `struct P0Pyr`（原 `P0 { dim: 3 }` 带的是 **hex 规则**——正是 `P0Tri`/`P0Tet` 存在的理由）。验收：金字塔质量矩阵与 MFEM **稠密** `MassIntegrator::AssembleElementMatrix` **逐项相等**（p=1 8×8、p=2 27×27）；单位棱锥总质量 orders 0..3 恒 1/3（证明 `P0Pyr` 对）；GLL 空间也自洽积到 1/3。非金字塔类型 `git diff` 无改动、`fem-assembly --lib` 684 不动。
+- **⭐ 解除阻塞暴露的第 1 个正确性缺口（主会话授权 AR #2）**：`compute_l2_error` 在金字塔 L2 空间上**恒返回 `0.0`**——`grid_function.rs::simplex_jacobian` 没有 5 节点臂，落到 `(3,5) => &[1,2,3]`，而金字塔的 `[v1−v0, v2−v0, v3−v0]` **三列共面** ⇒ `det J ≡ 0` ⇒ 所有求积权重为 0（`phys_coords` 同病）。**"静默精确 0"比 panic 更坏**。修法：不走 simplex 收缩，而是新增 `pyramid_geo` 分支直接取 `fem_mesh::transformation::element_jacobian_at`（与 `L2Space::build_pyramid` 放 dof 用的是**同一个函数**）。验收（7 测试）：单位与斜棱锥、p=1..3、`exact = sin(3x+y)+z²`，`compute_l2_error == compute_l2_error_owned == oracle(element_jacobian_at) == oracle(GeoPyrP1 + isoparametric_jacobian)` **17 位相同**（两条**独立编码**的金字塔映射，错一条过不了），三阶收敛 `1.3526495958998882e-1 → 1.4931002802957881e-2 → 7.164853451387289e-3`；线性场闭式真值 0，实测 2.3e-16…4.7e-16。
+- **⭐ 第 2 个新可达缺口（主会话授权 AR #3）**：**曲面**金字塔 L2 空间在 `compute_l2_error` 里 panic（文件内 `ref_elem_vol`（`:31`）无金字塔臂）。这是"解除阻塞后新可达"的路径，按纪律必须补对拍。修法：该臂委派 `h1_pyramid_element(o.max(1), PyramidBasisType::default())`——与 D334 的 `curved_pyramid_geometry`、`geo_ref_elem_from_mesh` 曲面臂**同一个调用**，没有第三张表。验收：`set_curvature(2)` + 基面中心节点偏移 0.1（`geom_order=2`，15 几何节点，不动顶点），`element_jacobian_at == Mesh::element_jacobian` ≤1e-15、`∫|det J| = 0.28888888888888869`（≠1/3，真曲面）；metric == 两个 oracle == `compute_l2_error_owned` 17 位（p=1/2/3：`1.24946073374762517e-1 / 1.37375869560529846e-2 / 6.66401133090248430e-3`）。
+  ⚠️ **诚实边界**：曲面情形的 metric 与两个 oracle 是**三条调用路径最终委派到同一处**，故只交叉核对了配对/接线，**未独立核对族选择**（族由 D347/D339 的 MFEM 真值钉住）。已写进测试文档注释。
+- **D349 部分关闭（诚实口径）**：原本 `build` 按**元素 0** 的类型分派 ⇒ `tinyzoo-3d.mesh`（hex 在首）p=2 直接 `index out of bounds: the len is 6 but the index is 6`。现改为**按网格实体**在 MFEM `Construct` 相位上编号，各类型表共享（迁移而非复制）。验收：对 MFEM 的 `zoo p=2 pyr_type=1` 块，`vsize = 46`、**46 项 `POS` 表逐项完全一致**、元素 dof 集合一致、`shared = 31 bad = 0`。**未做**：**order ≥ 3**——`p≥3` 起三角/四边形面块含 >1 个 dof，`TriDofOrd`/`QuadDofOrd` 输运必须**跨类型**（hex 与 tet 还缺共享槽描述子），现已从索引 panic 改为**显式报缺口的消息**并被测试钉住 ⇒ 残差另立 **D354**。另：几何周期混合 3-D（order 2）**未验证**（经未折叠包装进入混合构造器；测试与探针里都没有这种网格），已在证据里标注而非声称。
+- **D335**：`dgmassinv::l2_ref_elem` 补金字塔臂（质量核无需改）。**⭐ 顺带查清一个保真事实**：MFEM 自己的 `DGMassInverse` **无法**作用于该元素（PA 质量要求 `DofToQuad::TENSOR`，而 `L2_FuentesPyramidElement` 是 `NodalFiniteElement`；实测复现 MFEM 的 `Verification failed: (mode == DofToQuad::FULL)`，`fe_base.cpp:377`）⇒ 对拍改用 MFEM 的**稠密** `MassIntegrator`，p=1,2 逐项、p=1..3 行和。
+
+### 4. ④ 路：尾部八件（七关一特征化）—— **ex24 `-o 1/2/3` 三行与 C++ 逐字节**
+- **D343 关闭，且"末位差"其实是两个真缺陷**（不是舍入）：
+  1. **求积阶错了**：`ex24.cpp:334` 对 `-p 2` 用 `max(2, 2*order+1)`、对 `-p 0/1` 用 `intorder = 2*fe_order+3`（`fem/gridfunc.cpp:3410` 是 `2*fe->GetOrder()+3`），而示例写的是 `(2*order+6).max(7)`。**过积分**把 L² 误差动了 **7.8e-6 相对**（`1.08996341e-2 → 1.08995491e-2`）——这正是**第 1、2 行**的差。
+  2. **第 (c) 行算子**：MFEM 是 `ProjectCoefficient`（`ex24.cpp:298`）= **节点插值**，不是质量解（1.8e-14 vs 1.14e-5 相对）。同理 `:290`（`Project_ND`）、`:294`（`Project_RT`）。
+  3. **打印格式**：MFEM 三行走 `std::cout` **默认精度（6 位有效）**；`ex24.cpp:355/358/367` 的 `precision(8)` 只作用于 `mesh_ofs`/`sol_ofs`/`sol_sock`，**不作用于 `cout`**。示例的 `{:.8}`（定点 8 位）既与 C++ 格式不符、又在 `-o 4` **全盲**（打印 `0.00000000`）。改用仓库既有的 `fem_solver::fmt_g`（`crates/solver/src/iterative.rs:19`，此前已被 `nurbs_printfunc` 逐字节验证）。
+  **主会话授权的基线移动 + 主会话亲验**：改后 `-o 1/2/3` **三行 stdout 与 C++ 逐字节**（`0.0108996/0.0108996/0.0108997`；`2.69248e-05/…/2.69249e-05`；`1.1615e-07` ×3），`-o 4` 也从 `0.00000000` 变成 `1.39988e-10/1.39988e-10/1.39988e-10`（C++ 第三行 `1.39987e-10`，**仅末位** ⇒ 记 D362）。旧冻结点为 `0.01089955/0.01089955/0.01089949`。
+  `examples/mfem_ex29_curved_poisson.rs` 的 `{:.8}` 同类且有 C++ 不打的**前导空行**，一并修好（默认档逐字节）。新测试 `crates/assembly/tests/d343_ex24_error_format.rs`（2）钉打印文本。
+- **D333**：`factory.rs::vec_ref_elem` 的 RT hex 由 `HexRTk::new`（IGLL）改为 `new_gauss_legendre`，与 `vector_assembler.rs:84-92`（D245）一致；**LOR 腿名点 `HexRTk::new` 不受影响**（LOR 双圣杯绿）。新测试 `d333_hex_rt_factory_variant.rs`（4）。
+- **D339**：根因**不在金字塔代码**，而在共享的 1-D GL 生成器——新增 `gauss_legendre_01_newton_mfem`（1:1 移植 `QuadratureFunctions1D::GaussLegendre`，`fem/intrules.cpp:620`；与 D259 在 `plbound` 里的移植同源），`n>=6` 走它。orders **10..14 的偏差 `1.167e-14…2.666e-14 → 0.000e0`**；orders 6..9 不变；`pyramid_rule_small_n_frozen` **保留**（删掉会移动 p≤2 的钉子 ≤1 ulp）。新测试 `d343_quadrature_port_parity.rs`（2）钉两份移植在 np=1..20 相等。
+- **D341**：`io/gmsh.rs` 新增 `gmsh_geometry_order` + `attach_second_order_geometry`（2-D Tri6/Quad9；3-D Tet10/Hex27/Prism18）。文件本就提供了全部几何节点，且 D319 的置换后连通性**就是**求值元素的槽序 ⇒ 几何表即网格自身两张表。`element_jacobian` 现在**通过此前会 panic 的那个函数**复现 D319 的解析映射到 **1e-16/1e-15**。新测试 `d341_gmsh_second_order_geometry_table.rs`（8）。**明确留白**：混合阶网格（单一 `nodes_per_elem` 步长 ⇒ 线性视图，二次块仍 panic）与 `Pyramid13`（Gmsh code 19 = 13 节点 vs Fuentes 15 / `PyramidPk` 14；MFEM 的 code 14 不支持）⇒ **D356**；order≥3 不做。
+- **D334**：`mesh/transformation.rs` 新增 `curved_pyramid_geometry` 臂，返回 `h1_pyramid_element(g, Fuentes)`——与 `simplex.rs::element_jacobian`、`set_curvature_pyramid5` **同一个元素**，几何与场不可能漂移。**`∫|det J|`：0.157475/0.173756 → `0.333333333333334`（=1/3）**，orders 2/4/6/8/10；`ΔJ = Δdet J = 0.000e0` vs `Mesh::element_jacobian`。⚠️ 记录：round-45 记的 `0.173755809543588` 是**求积阶相关**的（扭曲映射会反定向），实测 orders 2/4/6/8/10 分别为 0.1924/0.1434/0.17376/0.15748/0.16998 ⇒ 新测试测五个阶而不是引用一个数。新测试 `d334_curved_pyramid_element_jacobian.rs`（5）。
+- **D344/D345**：`grid_function.rs` 的 `project_coefficient` 改为委派 `FESpace::interpolate`（旧 `M c = b` 体保留为**私有** `project_coefficient_l2`，供 `from_projection` 与就地方法用——二者文档本就写 L²，实测 **0.000e0 不动**）；`project_hcurl_coefficient{,_2d}` 同样改为 `HCurlSpace::interpolate_vector` 委派（`hcurl_interpolant_available` 守卫，L² 回落保留）；**D344 两函数此前在树内确实无人调用**（grep 只有定义 + `lib.rs` re-export）⇒ 行为中性。**7 消费方审计**（主会话独立 grep 复核）：①`GridFunction::from_projection`、②就地 `project_coefficient` 走 `_l2` 不动；③`d89_block_views.rs` 不变；④`mfem_ex10_hyperelastic_dyn.rs:593` **变动**（见下）；⑤⑥`mfem_ex24_discrete_ops.rs:204/259` 改后 **= C++ 逐字节**；⑦`miniapps/tools/nodal_transfer.rs:273` 是它**自己的局部**同名函数、不是消费方 ⇒ **D358**。
+- **D336（特征化，未修）**：`amr_inner.rs::refine_nonconforming_pyramid_internal` 用 `Mesh::uniform(..)`（`geometry: None`）+ 直棱锥顶点平均建子元；实测曲面父元 `geom_order 2 → 1`、体积 **0.222222222222222 → 0.333333333333333**（子元描述的是直棱锥），直棱锥路径精确。`refine_uniform_3d` 尾部"金字塔是线性的"注释已过期。用 `d336_pyramid5_amr_geometry_gap.rs`（2）钉住。
+
+### 第四十七轮新债务
+- **D352（P2）**金字塔**全局 dof 编号**是"元素优先首见"而非 MFEM 的**实体相位**布局（D348 路发现：同一网格上 fem-rs 绝对 id `22..25` vs MFEM `30..33`）——prism 早在 D177 已还这笔债，金字塔没还。
+- **D353（P1）**`compute_coeff_l2_norm` 对**所有 3-D 等参单元恒返回 0.0**（实测 `coeff=1, q=6`：Quad4 `9.9999999999999978e-1` ✓、Tet4 `sqrt(1/6)` ✓、**Hex8/Prism6/Pyramid5 全 0.0**）。根因：`grid_function.rs::element_jacobian`（`:245`）把这些类型列入 `needs_iso`，但几何元素对每个非 quad 类型都建成 `ref_elem_vol(Quad4, 1)`（`:264-270`）——给 3-D 单元配 2-D 基 ⇒ J 第三列为 0 ⇒ `det J ≡ 0`。**Hex8/Prism6 是既有零**（本轮只让金字塔从 panic 变成同样的静默零），故**静默零**这类缺陷此前未被发现。已用 canary 测试钉住现状。
+- **D354（P2）**混合 3-D H¹ **order ≥ 3** 需**跨类型**面块槽描述子（hex 与 tet 缺；prism/pyramid 已有）——D349 的残差。
+- **D355（P3，保真注记，非缺口）**MFEM 自身的 `DGMassInverse` 无法作用于 `L2_FuentesPyramidElement`（PA 质量要求 `DofToQuad::TENSOR`，该元素是 `NodalFiniteElement`；`fe_base.cpp:377`）。
+- **D356（P3）**Gmsh **混合阶**网格与 `Pyramid13`（code 19 = 13 节点 vs Fuentes 15 / `PyramidPk` 14）读入口径未定（D341 留白）。
+- **D357（P3）**`examples/mfem_ex29_curved_poisson.rs` **解析了 `-mt/--mesh-type` 却从不使用**（只打印）⇒ `-mt 3` 会静默求解 Quad4 管（④ 路发现，未改）。
+- **D358（P3）**`miniapps/tools/nodal_transfer.rs:273` 自带一份**局部** `project_coefficient`，与 D345 同缺陷（④ 路发现，未改）。
+- **D359（P3）**ex24 `-p 1` 仍与 C++ 差 ~3e-6（(a)(b)）/3e-5（(c)），**机制未定位**（(c) 已是 `Project_RT`；嫌疑在 mixed curl 装配或 RT 误差求值）。
+- **D360（P3）**ex24 `-p 0 -o 2` 第 (a) 行 `1.46602e-05` vs C++ `1.46601e-05`（(c) 精确）；嫌疑 = 示例手写的 3-D mixed 矩阵。
+- **D361（P3）**ex24 stdout 与 C++ 的其余分歧：`DLO interpolant norm` 行 C++ 没有；C++ 的 `Iteration :`/`Average reduction factor` 迭代日志与 `--device cpu` 类选项回显 fem-rs 没有。
+- **D362（P3）**ex24 `-o 4` 第三行仍差末位（fem-rs `1.39988e-10` vs C++ `1.39987e-10`）——(c) 行算子修好后的残差。
+- **D363（P3）**D345 改语义后 `mfem_ex10_hyperelastic_dyn` 的 **fem-rs 专属**诊断 `L2(||x||)`/`L2(||v||)` 动了 ~1e-7…1e-8 相对（`9.472707284670e0 → 9.472705759380e0`）；打印的 EE/KE 在 `{:.6}` 下**不变**且 = C++，无测试钉住这些诊断。
+- **关闭**：~~D348~~、~~D342~~、~~D346~~、~~D351~~（r47 新发现并同轮修）、~~D325~~、~~D340~~、~~D335~~、~~D343~~、~~D333~~、~~D339~~、~~D341~~、~~D334~~、~~D344~~、~~D345~~；**D349 部分关闭**（p=2 可用；p≥3 转 D354）。
+- 沿用开放：D352–D363、D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：新增集成档 13 个（space `d348`(5)/`d340`(7)/`d349`(6)；element `d325`(7)/`d333`(4)；assembly `d335`(6)/`d340`(7→10)/`d343_ex24_error_format`(2)/`d343_quadrature_port_parity`(2)/`d344_d345`(5)；mesh `d334`(5)/`d336`(2)；io `d341`(8)）+ `d342` 三档；element lib **513→514**（+`d342_rt_scaling_factors_measured`）。全部实跑确认。
+- **主会话亲验**（不是转述）：**ex24 `-o 1/2/3/4` 自己跑两侧对照**（前三阶三行**逐字节**、`-o 4` dof 数逐位、第 3 行末位差）；**32³ hex RT3 忽略测试自己跑**（214.57 s 通过，9.1e-18）；D348 全表 `bad=0 worst=0.0`；`QuadDofOrd`/`GetQuadOrientation`/`HexRTk` 索引范围/K=8 缩放**逐条对 MFEM 源码复核**；D334 `∫|det J| = 1/3`、D339 orders 10..14 `0.000e0`、D341(8)/D325(7)/d343 全绿实跑；`{:.8}` 仅 2 处、`ex29` 的 `mesh_type` 从不使用、`nodal_transfer` 是局部同名函数——三条都自己 grep 复核。
+- **三次仲裁（全部由代理先给测量证据、主会话裁定）**：AR#1 `crates/assembly/src/assembler.rs` 金字塔臂（+`P0Pyr`）；AR#2 `grid_function.rs` 金字塔 Jacobian（**静默 0.0**）；AR#3 `grid_function.rs` 曲面棱锥 `ref_elem_vol` 臂（**新可达 panic**）。第三次按纪律补了端到端对拍（AR#3 的结果）。**"解除阻塞后必须补该路径端到端对拍"这条纪律本轮连中两次**（③ 路自己又挖出 AR#2/AR#3）。
+- **流程注记**：① **代理报告的债务号会撞车**——② 路把 hex RT `dof_coords` 的族缺陷也写成"D348"，主会话在提交前重编号为 **D351**（方法论 25 再次生效，派单时必须给号段）。② **代理会用 shell 写文件绕过扫描**——③ 路自己申报了两处 `sed -i` + 一次 `cp`（含一次回滚），主会话逐条审计了 `git diff`：`pyramid.rs` 是文档重写、`dof_manager.rs` 删的是 4 张已无用的 `const` 表、`d335` 测试删的是无用 import，**均属正当改动**；但规则本身仍被违反，已在派单模板里重申"Write/Edit only"。③ **"代理数字亲验"再中**：④ 声称的 `-o 1/2/3` 逐字节，主会话自己两侧跑过后确认无误，且**额外发现 `-o 4` 第三行仍差末位**（代理未报）⇒ 记 D362。
+- **全量回归（收尾实测）**：见下节。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
