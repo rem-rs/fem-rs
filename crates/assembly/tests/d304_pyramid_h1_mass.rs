@@ -122,11 +122,12 @@ impl BilinearIntegrator for TestMass {
 }
 
 /// The [`H1PyramidPk`] basis with a quadrature rule exact for polynomial
-/// integrands of degree `2p + 2` — `pyramid_rule` caps its 1-D Gauss point
-/// count at n = 4 (exact degree 7), which is *not* enough from p = 3 on
-/// (measured, see `tmp/d304/EVIDENCE.md`): wrapping the element lets this
-/// test compare the C++ reference (exact rule) against the real assembler
-/// without quadrature-error contamination.
+/// integrands of degree `2p + 2` — an *overkill* reference rule (`n = 2p + 4`
+/// collapsed Jacobi tensor) that lets this test separate basis/slot
+/// correctness from quadrature error.  `pyramid_rule` itself is no longer
+/// point-count capped (D305: the 1-D count is MFEM's `n = order/2 + 1`); the
+/// assembler's default pyramid quadrature is checked against this wrapper in
+/// `d305_default_pyramid_quadrature_is_uncapped`.
 struct ExactQuadPyr {
     inner: H1PyramidPk,
 }
@@ -333,11 +334,12 @@ fn d304_p4_l2_projection_reproduces_nodal_values() {
     assert_eq!(n, 55);
     let m = assemble_mass(&space, true);
     // f = x^2 + y^2 + z^2 — the load ∫ f φᵢ through the same exact rule.
-    // (Not `Assembler::assemble_linear`: that path takes its quadrature from
-    // `PyramidPk::quadrature` — the `pyramid_rule` whose 1-D point count is
-    // capped at n = 4, exact only to degree 7 — so from p = 3 on the *load*
-    // would be underintegrated even though the mass matrix here is exact.
-    // Measured in `tmp/d304/EVIDENCE.md`; the cap is a separate defect.)
+    // (Not `Assembler::assemble_linear`: this test wants the *load* to be as
+    // exact as the mass matrix, so it uses the same overkill rule instead of
+    // the default `PyramidPk::quadrature`/`pyramid_rule` arm.  The default
+    // arm used to be point-count capped at n = 4 — D305 removed that cap, so
+    // both paths are now accurate; see
+    // `d305_default_pyramid_quadrature_is_uncapped`.)
     fn fsq(x: &[f64]) -> f64 {
         x[0] * x[0] + x[1] * x[1] + x[2] * x[2]
     }
@@ -380,4 +382,29 @@ fn d304_p4_l2_projection_reproduces_nodal_values() {
     }
     eprintln!("D304 p=4 L2 projection vs nodal values: max |Δ| = {worst:.3e}");
     assert!(worst < 1e-9, "p=4 projection nodal error {worst:.3e}");
+}
+
+/// D305: the pyramid quadrature the assembler actually uses
+/// (`ref_elem_vol_h1` arm → `H1PyramidPk::quadrature` → `pyramid_rule`) is no
+/// longer point-count capped, so the p = 4 mass matrix assembled through the
+/// *default* path now agrees with the overkill exact rule instead of carrying
+/// the pre-D305 quadrature error (measured worst 4.8e-3 at p = 4 in
+/// `tmp/d304/EVIDENCE.md`; `pyramid_rule` now has MFEM's `n = order/2 + 1`
+/// points — `n = 7` for the `2p + 4 = 12` order requested here).
+#[test]
+fn d305_default_pyramid_quadrature_is_uncapped() {
+    let mesh = unit_pyramid();
+    let space = H1Space::new(mesh.clone(), 4);
+    let plain = assemble_mass(&space, false);
+    let exact = assemble_mass(&space, true);
+    let d: f64 = plain
+        .iter()
+        .zip(exact.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    eprintln!("D305 p=4 default pyramid_rule(12) vs exact wrapper: max |Δ| = {d:.3e}");
+    assert!(
+        d < 1e-12,
+        "D305: the default pyramid quadrature still underintegrates at p = 4: {d:.3e}"
+    );
 }

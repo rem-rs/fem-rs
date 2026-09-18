@@ -53,33 +53,87 @@ fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
     d * sum
 }
 
-/// Pyramid basis type selection (MFEM 4.10).
+/// Pyramid basis family selection (MFEM `ScalarPyramid::DefaultType`, i.e.
+/// `H1_FECollection`'s `pyr_type` argument, `fem/fe/fe_pyramid.hpp:23`).
 ///
-/// - `Bergot`: Bernardi-Boggs-Fluery type basis (MFEM `pyr_type=0`)
-/// - `Fuentes`: Fuentes-Keith-Demkowicz type basis (exact sequence; MFEM's
-///   **default**, `ScalarPyramid::DefaultType = 1`)
-///
-/// Only `Bergot` is implemented (via [`H1PyramidPk`], the GLL-noded entity
-/// order element, and [`PyramidPk`], the equispaced layer-order one);
-/// `Fuentes` — MFEM's actual default, with `p(p²+3)+1` DOFs — falls back to
-/// Bergot with a warning (D305).
+/// * `Bergot` (`pyr_type = 0`) — [`H1PyramidPk`], `(p+1)(p+2)(2p+3)/6` DOFs.
+/// * `Fuentes` (`pyr_type = 1`) — [`super::pyramid_fuentes::H1FuentesPyramidPk`],
+///   `p(p²+3)+1` DOFs.  This is MFEM's **default**; fem-rs's *layers* are
+///   Bergot-family everywhere (D191/D299), which is why [`Default`] is
+///   `Bergot` here — the wiring that switches the default is D324.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PyramidBasisType {
-    /// Bernardi-Boggs-Fluery type (collapsed coordinates, equispaced nodes).
+    /// Bernardi-Boggs-Fluery type (collapsed coordinates, GLL-barycentric
+    /// nodes) — [`H1PyramidPk`]; MFEM's `pyr_type = 0`.
     #[default]
     Bergot,
-    /// Fuentes-Keith-Demkowicz type (orientation-embedded high-order).
+    /// Fuentes-Keith-Demkowicz type (exact sequence) —
+    /// [`super::pyramid_fuentes::H1FuentesPyramidPk`]; MFEM's `pyr_type = 1`
+    /// and `ScalarPyramid::DefaultType`.
     Fuentes,
+}
+
+/// The pyramid H¹ reference element of the given family and order — the two
+/// arms of MFEM's `pyr_type` switch (`fe_coll.cpp:1976-1985`).
+///
+/// The space/assembly layers still hard-code the Bergot arm of this (see
+/// `fem_assembly::assembler::ref_elem_vol_h1` and
+/// `fem_space::dof_manager::DofManager::build_pyramid_pk`); threading
+/// `pyr_type` through them is D324.
+pub fn h1_pyramid_element(p: usize, basis: PyramidBasisType) -> Box<dyn ReferenceElement> {
+    match basis {
+        PyramidBasisType::Bergot => Box::new(H1PyramidPk::new(p)),
+        PyramidBasisType::Fuentes => {
+            Box::new(super::pyramid_fuentes::H1FuentesPyramidPk::new(p))
+        }
+    }
 }
 
 /// Arbitrary-order Lagrange element on the reference pyramid.
 ///
 /// DOF ordering: layer-by-layer from base (k=0) to apex (k=p).
 /// Within each layer, row-major ordering over the (p-k+1)×(p-k+1) grid.
+///
+/// This is the legacy *equispaced collapsed-lattice* element, not one of
+/// MFEM's two families: it agrees with [`H1PyramidPk`] (Bergot, the family the
+/// H¹ space path uses) only up to `p = 2`, and with neither family beyond.  It
+/// is still the DG/L2 pyramid element of `ref_elem_vol*`.
+///
+/// # D306 — L2 pyramid family gap (documented, **not** fixed)
+///
+/// MFEM picks its L2 pyramid element with the same `ScalarPyramid::DefaultType`
+/// switch as the H1 one (`fem/fe/fe_pyramid.hpp:23`), and the default family is
+/// *Fuentes*.  Neither MFEM arm is this element:
+///
+/// | element | nodes | DOFs (p = 1, 2, 3) |
+/// |---|---|---|
+/// | MFEM default `L2_FuentesPyramidElement(p, btype)` (`fe_l2.cpp:927`, `FunctionSpace::Uk`) | `(op[i]·(1 − a·op[k]), op[j]·(1 − a·op[k]), a·op[k])` with `op = Poly_1D::OpenPoints(p, btype)` and `a = 1` for an open btype (the `L2_FECollection` default `GaussLegendre`, `fe_coll.hpp:384`) / `a =` the largest `GaussLegendre` node for a closed one | `(p+1)³`: 8, 27, 64 |
+/// | MFEM alternative `L2_BergotPyramidElement(p, btype)` (`fe_l2.cpp:1078`, `FunctionSpace::Pk`) | Fuentes-style barycentric lattice `(op[i]·(op[j] + op[p−j−k])/w, op[j]·(op[i] + op[p−i−k])/w, op[k]·op[p−k]/w)`, `w = wik·wjk·op[p−k]`, apex limit `w < apex_tol` → `(0, 0, 1)` | `(p+1)(p+2)(2p+3)/6` — **this element's count**: 5, 14, 30 |
+/// | this element | equispaced **closed** layer lattice `(i/p, j/p, k/p)` | `(p+1)(p+2)(2p+3)/6`: 5, 14, 30 |
+///
+/// Consequences (measured facts, no divergence in DOF counts by accident):
+/// `fem_assembly::assembler::ref_elem_vol_l2` routes `Pyramid5` to *this*
+/// element (`ref_elem_vol`'s pyramid arm), so on a pyramid cell the L2 DOF
+/// count already differs from MFEM's default (`(p+1)³` vs
+/// `(p+1)(p+2)(2p+3)/6`), and against the Bergot-L2 alternative the *nodes*
+/// differ (open-point barycentric lattice vs equispaced closed lattice), which
+/// changes the nodal values of every interpolant/projector.  In addition
+/// `fem_space::L2Space::new_with_basis` rejects `Pyramid5` outright
+/// (`crates/space/src/l2.rs`, "*L2Space currently supports Tri3/Quad4 (2D) and
+/// Tet4/Hex8 (3D)*"), so fem-rs has no L2 pyramid **space**: the element is
+/// reachable only through the assembly-time `ref_elem_vol*` lookups.
+///
+/// Porting surface for D340 (both MFEM arms share it): the Fuentes pyramid
+/// helpers `mu0/mu1` (`fe_pyramid.cpp`), `Poly_1D::CalcHomogenizedScaLegendre`
+/// (`fe_base.cpp`), the `OpenPoints`/`ClosedPoints` 1-D tables, a Vandermonde
+/// inverse (`DenseMatrix T; Ti.Factor(T)`, 1:1 with [`H1PyramidPk`]'s pattern),
+/// plus — for the Fuentes arm — the `(p+1)³` DOF numbering
+/// (`o = k(p+1)² + j(p+1) + i`) and L2-space layer support.  MFEM notes in
+/// `fe_l2.cpp:940` that the Fuentes-L2 basis is *not independent* on closed
+/// interpolation points for `p ≥ 1`, so closed requests are forced open in `z`.
 pub struct PyramidPk {
     order: usize,
     layer_offset: Vec<usize>,
-    basis_type: PyramidBasisType,
 }
 
 /// Integer collapsed-lattice labels `(i, j, k)` of MFEM
@@ -234,7 +288,10 @@ fn h1_pyramid_node_position(p: usize, cp: &[f64], l: [usize; 3]) -> [f64; 3] {
 
 /// Shifted Legendre polynomials `P̃_n(x) = P_n(2x−1)` on `[0,1]` and their
 /// `x`-derivatives (MFEM `Poly_1D::CalcLegendre` verbatim).
-fn calc_legendre_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+///
+/// Shared with the Fuentes family ([`super::pyramid_fuentes`]), which feeds it
+/// through `CalcScaledLegendre`.
+pub(crate) fn calc_legendre_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
     let mut u = vec![0.0; p + 1];
     let mut d = vec![0.0; p + 1];
     let z;
@@ -253,17 +310,29 @@ fn calc_legendre_d(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
     (u, d)
 }
 
-/// Shifted Jacobi polynomials `P_n^{(α,0)}(2x−t)` (MFEM
-/// `FuentesPyramid::CalcScaledJacobi` with both value and `x`-derivative;
-/// the `t`-derivative is not needed by `H1_BergotPyramidElement`).
-fn calc_scaled_jacobi_dx(p: usize, alpha: f64, x: f64, t: f64) -> (Vec<f64>, Vec<f64>) {
+/// Shifted Jacobi polynomials `P_n^{(α,0)}(2x−t)` with their `x`- and
+/// `t`-derivatives (MFEM `FuentesPyramid::CalcScaledJacobi`, `fe_pyramid.cpp:613`).
+///
+/// `H1_BergotPyramidElement` only needs the first two outputs (it evaluates at
+/// `t = 1`); the Fuentes pyramid ([`super::pyramid_fuentes`]) needs `dudt` as
+/// well, so the single implementation lives here and the Bergot path drops the
+/// third output.
+pub(crate) fn calc_scaled_jacobi(
+    p: usize,
+    alpha: f64,
+    x: f64,
+    t: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut u = vec![0.0; p + 1];
     let mut dudx = vec![0.0; p + 1];
+    let mut dudt = vec![0.0; p + 1];
     u[0] = 1.0;
     dudx[0] = 0.0;
+    dudt[0] = 0.0;
     if p >= 1 {
         u[1] = (2.0 + alpha) * x - t;
         dudx[1] = 2.0 + alpha;
+        dudt[1] = -1.0;
     }
     for i in 2..=p {
         let a = 2.0 * i as f64 * (alpha + i as f64) * (2.0 * i as f64 + alpha - 2.0);
@@ -274,8 +343,11 @@ fn calc_scaled_jacobi_dx(p: usize, alpha: f64, x: f64, t: f64) -> (Vec<f64>, Vec
         dudx[i] = (b * ((c * (2.0 * x - t) + alpha * alpha * t) * dudx[i - 1]
                         + 2.0 * c * u[i - 1])
                    - d * t * t * dudx[i - 2]) / a;
+        dudt[i] = (b * ((c * (2.0 * x - t) + alpha * alpha * t) * dudt[i - 1]
+                        + (alpha * alpha - c) * u[i - 1])
+                   - d * t * t * dudt[i - 2] - 2.0 * d * t * u[i - 2]) / a;
     }
-    (u, dudx)
+    (u, dudx, dudt)
 }
 
 /// Bergot raw expansion index list: `(i, j, k)` with `k ≤ p − max(i, j)`, in
@@ -316,8 +388,9 @@ fn bergot_lex(p: usize) -> Vec<(usize, usize, usize)> {
 /// the family fem-rs numbers pyramid H¹ spaces with (D191).  It differs from
 /// the equispaced [`PyramidPk`] (same slot arrangement) from p = 3 on, where
 /// the GLL-barycentric nodes leave the equispaced lattice; and from MFEM's
-/// *default* Fuentes pyramid (`pyr_type=1`, `p(p²+3)+1` DOFs), which fem-rs
-/// does not implement yet (D305).
+/// *default* Fuentes pyramid (`pyr_type=1`, `p(p²+3)+1` DOFs,
+/// [`super::pyramid_fuentes::H1FuentesPyramidPk`]; making it fem-rs's default
+/// is D324).
 pub struct H1PyramidPk {
     inner: std::sync::Arc<H1PyramidPkInner>,
 }
@@ -424,7 +497,8 @@ fn bergot_raw(
     // The z-Jacobi factor only depends on m = max(i, j): precompute per m.
     let mut js: Vec<(Vec<f64>, Vec<f64>)> = Vec::with_capacity(p + 1);
     for m in 0..=p {
-        js.push(calc_scaled_jacobi_dx(p - m, 2.0 * (m as f64 + 1.0), z, 1.0));
+        let (u_m, du_m, _du_dt) = calc_scaled_jacobi(p - m, 2.0 * (m as f64 + 1.0), z, 1.0);
+        js.push((u_m, du_m));
     }
     let one_minus_z = 1.0 - z;
     for (o, &(i, j, k)) in lex.iter().enumerate() {
@@ -503,10 +577,6 @@ impl ReferenceElement for H1PyramidPk {
 
 impl PyramidPk {
     pub fn new(p: usize) -> Self {
-        Self::with_basis_type(p, PyramidBasisType::default())
-    }
-
-    pub fn with_basis_type(p: usize, basis_type: PyramidBasisType) -> Self {
         assert!(p >= 1, "order must be ≥ 1");
         let mut layer_offset = Vec::with_capacity(p + 2);
         let mut off = 0usize;
@@ -519,7 +589,6 @@ impl PyramidPk {
         Self {
             order: p,
             layer_offset,
-            basis_type,
         }
     }
 
@@ -816,19 +885,21 @@ mod tests {
     }
 
     #[test]
-    fn pyramid_basis_type_default() {
-        let elem = PyramidPk::new(2);
-        assert_eq!(elem.basis_type, PyramidBasisType::Bergot);
-        assert_eq!(elem.order(), 2);
-        assert_eq!(elem.n_dofs(), 14);
-    }
-
-    #[test]
-    fn pyramid_basis_type_fuentes() {
-        let elem = PyramidPk::with_basis_type(2, PyramidBasisType::Fuentes);
-        assert_eq!(elem.basis_type, PyramidBasisType::Fuentes);
-        // Fuentes falls back to Bergot for now (same DOFs)
-        assert_eq!(elem.n_dofs(), 14);
+    fn pyramid_basis_type_family_map() {
+        // The two arms of MFEM's `pyr_type` switch (`fe_coll.cpp:1976`).
+        assert_eq!(PyramidBasisType::default(), PyramidBasisType::Bergot);
+        assert_eq!(
+            h1_pyramid_element(2, PyramidBasisType::Bergot).n_dofs(),
+            14, // (p+1)(p+2)(2p+3)/6
+        );
+        assert_eq!(
+            h1_pyramid_element(2, PyramidBasisType::Fuentes).n_dofs(),
+            15, // p(p²+3)+1
+        );
+        assert_eq!(
+            h1_pyramid_element(4, PyramidBasisType::Fuentes).n_dofs(),
+            77
+        );
     }
 
     // ── H1PyramidPk (MFEM H1_BergotPyramidElement) ──────────────────────────
