@@ -5,6 +5,7 @@ pub mod hex;
 pub mod legacy;
 pub mod prism;
 pub mod pyramid;
+pub mod pyramid_fuentes;
 pub mod quad;
 pub mod seg;
 pub mod tet;
@@ -17,7 +18,10 @@ pub use factory::{
 };
 pub use hex::{HexQ1, HexQ2, HexQ3};
 pub use prism::{h1_prism_slots, H1PrismPk, H1PrismSlot, PrismPk, PRISM_EDGES};
-pub use pyramid::{h1_pyramid_slot_labels, H1PyramidPk, PyramidPk};
+pub use pyramid::{
+    h1_pyramid_element, h1_pyramid_slot_labels, H1PyramidPk, PyramidBasisType, PyramidPk,
+};
+pub use pyramid_fuentes::{fuentes_pyramid_n_dofs, h1_fuentes_pyramid_nodes, H1FuentesPyramidPk};
 pub use quad::{QuadP1, QuadP2, QuadP3, QuadP4, QuadQ1, QuadQ2, QuadQ3, QuadQ4};
 pub use seg::{SegP1, SegP2, SegP3, SegP4, SegP5, SegP6};
 pub use tet::{TetP1, TetP2, TetP3, TetP4, TetP5, TetP6};
