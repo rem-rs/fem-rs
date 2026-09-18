@@ -8,7 +8,70 @@
 use fem_core::{ElemId, NodeId};
 use nalgebra::DMatrix;
 
+use crate::element_type::ElementType;
 use crate::topology::MeshTopology;
+
+/// `PyramidPk(1)`'s layer slot `k` carries the shape function of the mesh
+/// (MFEM) vertex `PYR_P1_SLOT_VERTEX[k]`: the pyramid base is enumerated
+/// `(0,0,0), (1,0,0), (0,1,0), (1,1,0)` in `PyramidPk` layer order but
+/// `(0,0,0), (1,0,0), (1,1,0), (0,1,0)` in MFEM vertex order (D191 — the same
+/// table `Mesh::set_curvature_pyramid5` and `DofManager::build_pyramid_pk`
+/// use).
+const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
+
+/// Geometry node list of a **straight** pyramid in `PyramidPk(1)` *layer-slot*
+/// order, or `None` for every other element (D331).
+///
+/// Both node tables this module reads are in MFEM **vertex** order: a straight
+/// mesh's connectivity, and the order-1 geometry snapshot
+/// `Mesh::make_periodic` keeps (a copy of the pre-merge connectivity).  The
+/// linear-pyramid reference element `ElementType::ref_elem(1)` returns,
+/// however, is the *layer-ordered* `PyramidPk(1)`, whose slots 2/3 carry the
+/// shape functions of vertices 3/2.  Evaluating it against the vertex-ordered
+/// list therefore swapped the two base corners of every straight pyramid and
+/// twisted its Jacobian (unit pyramid: `∫|det J| = 0.173755809543588` instead
+/// of `1/3`, and `x(v2) = v3`).  Permuting the table into layer slots is the
+/// `GeoPyrP1` convention the assembler has used since D304
+/// (`assembly::assembler::geo_ref_elem`, `vector_assembler`,
+/// `standard/bbar`).
+///
+/// Curved pyramids (`geom_order > 1`) keep their layer-order geometry table —
+/// `Mesh::set_curvature_pyramid5`'s frozen contract (D191) — so they must
+/// *not* be permuted here; they also need the order-`geom_order` basis, which
+/// this P1 helper does not provide (see `tmp/d334/EVIDENCE.md`, D334).
+fn straight_pyramid_layer_nodes(
+    et: ElementType,
+    geom_order: u8,
+    nodes: &[NodeId],
+) -> Option<[NodeId; 5]> {
+    if geom_order > 1 || !matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) {
+        return None;
+    }
+    if nodes.len() < PYR_P1_SLOT_VERTEX.len() {
+        return None;
+    }
+    let mut layer = [nodes[0]; PYR_P1_SLOT_VERTEX.len()];
+    for (slot, &vertex) in PYR_P1_SLOT_VERTEX.iter().enumerate() {
+        layer[slot] = nodes[vertex];
+    }
+    Some(layer)
+}
+
+/// The node table to interpolate the geometry with: the element's own table
+/// when it is P1-sized (geometrically periodic meshes — see [`geometry_jacobian`]),
+/// else the plain vertex connectivity.
+fn raw_geometry_nodes<'a, M: MeshTopology + ?Sized>(
+    mesh: &'a M,
+    elem: u32,
+    npe: usize,
+) -> &'a [NodeId] {
+    let gnodes = mesh.geometry_nodes(elem);
+    if gnodes.len() == npe {
+        gnodes
+    } else {
+        mesh.element_nodes(elem)
+    }
+}
 
 /// Affine element transformation for simplex geometries.
 ///
@@ -277,6 +340,10 @@ impl ElementTransformation {
 ///
 /// Supports all element types: Tri3, Quad4, Tet4, Hex8, Prism6, etc.
 ///
+/// D331: straight pyramids are the one element family whose linear reference
+/// element is not paired with the vertex-ordered geometry table — see
+/// [`straight_pyramid_layer_nodes`].
+///
 /// # Panics
 /// Panics if the element's geometry Jacobian is singular.
 pub fn geometry_jacobian(
@@ -290,8 +357,11 @@ pub fn geometry_jacobian(
     // Per-element geometry only when it is a P1-sized table (geometrically
     // periodic meshes); high-order curved geometry keeps the previous
     // vertex-table behavior here (the isoparametric paths handle curvature).
-    let gnodes = mesh.geometry_nodes(elem);
-    let nodes: &[NodeId] = if gnodes.len() == n_pe { gnodes } else { mesh.element_nodes(elem) };
+    let raw = raw_geometry_nodes(mesh, elem, n_pe);
+    // D331: straight pyramids pair the layer-ordered `PyramidPk(1)` geometry
+    // basis with a vertex-ordered node table — permute it into layer slots.
+    let layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
+    let nodes: &[NodeId] = layer.as_ref().map_or(raw, |t| &t[..]);
     let n_ldofs = nodes.len();
     let re_geom = et.ref_elem(1);
     let mut grad = vec![0.0_f64; n_ldofs * dim];
@@ -331,6 +401,12 @@ pub fn xform_grads(ji: &DMatrix<f64>, gr: &[f64], gp: &mut [f64], n: usize, dim:
 ///
 /// Supported element types: Tri3, Quad4, Tet4, Hex8, Prism6.
 ///
+/// D331: straight pyramids are the one element family whose linear reference
+/// element is not paired with the vertex-ordered geometry table — see
+/// [`straight_pyramid_layer_nodes`].  (Curved pyramids, `geom_order > 1`, keep
+/// their layer-order geometry table and are *not* handled here — this function
+/// always interpolates with the P1 reference element.)
+///
 /// MFEM: `ElementTransformation::Jacobian()` + `ElementTransformation::Transform()`
 pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     mesh: &M,
@@ -348,8 +424,11 @@ pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     // Per-element geometry only when it is a P1-sized table (geometrically
     // periodic meshes); high-order curved geometry keeps the previous
     // vertex-table behavior here (the isoparametric paths handle curvature).
-    let gnodes = mesh.geometry_nodes(elem);
-    let nodes: &[NodeId] = if gnodes.len() == npe { gnodes } else { mesh.element_nodes(elem) };
+    let raw = raw_geometry_nodes(mesh, elem, npe);
+    // D331: straight pyramids pair the layer-ordered `PyramidPk(1)` geometry
+    // basis with a vertex-ordered node table — permute it into layer slots.
+    let layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
+    let nodes: &[NodeId] = layer.as_ref().map_or(raw, |t| &t[..]);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
     let mut xp = vec![0.0_f64; dim];
     for k in 0..npe {

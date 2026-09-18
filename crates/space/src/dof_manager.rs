@@ -75,6 +75,19 @@ impl QuadFaceKey {
 
 // ─── D61: periodic-mesh numbering ────────────────────────────────────────────
 
+/// `PyramidPk(1)`'s layer slot `k` carries the shape function of mesh (MFEM)
+/// vertex `PYR_P1_SLOT_VERTEX[k]` (D191): the pyramid base is enumerated
+/// `(0,0,0), (1,0,0), (0,1,0), (1,1,0)` in `PyramidPk` layer order but
+/// `(0,0,0), (1,0,0), (1,1,0), (0,1,0)` in MFEM vertex order.
+///
+/// The single copy used by this module: `build_pyramid_pk` reads it to place
+/// the field slots and `rebuild_dof_coords_periodic` to permute a straight
+/// pyramid's vertex-ordered geometry table into layer slots (D331/D332).  The
+/// same frozen table lives in `Mesh::set_curvature_pyramid5`
+/// (`crates/mesh/src/simplex.rs`), `fem_mesh::transformation` (D331) and
+/// `crates/assembly/src/assembler.rs` (`GeoPyrP1`, D304).
+const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
+
 /// True when `mesh` carries a per-element geometry snapshot whose corner
 /// pairing against the folded connectivity reveals **merged (periodic)
 /// vertices**: some element corner references a different geometry node than
@@ -1978,9 +1991,9 @@ impl DofManager {
         debug_assert_eq!(slot_positions.len(), slots.len());
         let mut phi = vec![0.0_f64; 5];
         // D191: `PyramidPk::eval_basis` slots are layer-ordered — the P1
-        // element's slot 2/3 carry local vertices 3/2 (see the matching
-        // `P1_SLOT_VERTEX` in `Mesh::set_curvature_pyramid5`).
-        const P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
+        // element's slot 2/3 carry local vertices 3/2 (see the module-level
+        // `PYR_P1_SLOT_VERTEX`, the same table as
+        // `Mesh::set_curvature_pyramid5`).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             let base = e as usize * dofs_per_elem;
@@ -1995,7 +2008,7 @@ impl DofManager {
                     if phik == 0.0 {
                         continue;
                     }
-                    let xk = mesh.node_coords(ns[P1_SLOT_VERTEX[k]]);
+                    let xk = mesh.node_coords(ns[PYR_P1_SLOT_VERTEX[k]]);
                     for d in 0..dim {
                         x[d] += phik * xk[d];
                     }
@@ -2869,20 +2882,24 @@ impl DofManager {
     ///
     /// Element slot layouts must match the reference elements the H1
     /// assembler evaluates: the *field* element per shape is QuadQk / HexQk /
-    /// H1TriPk / H1TetPk / H1PrismPk, and for pyramids the MFEM entity-order
-    /// slot table [`Self::pyramid_entity_slot_grid`] (D191 — `PyramidPk`'s
-    /// own `dof_coords` are layer-major and would silently permute the field
-    /// slots).  The
+    /// H1TriPk / H1TetPk / H1PrismPk / H1PyramidPk (the Bergot pyramid at its
+    /// Gauss–Lobatto barycentric positions — D299; the equispaced label grid
+    /// `(i, j, k)/p` used to be substituted here and drifts from `p = 3` on,
+    /// D332).  The
     /// *geometry* element follows whatever order
     /// `Mesh::set_curvature_*` writes its table in: QuadQk / HexQk / H1TriPk /
     /// H1TetPk for quad/hex/tri/tet, but **layer-major `PrismPk`** for prisms
     /// (frozen by `crates/mesh/tests/d152_prism_curvature.rs`) and `PyramidPk`
-    /// for pyramids.  A slot-count mismatch against these factories is a hard
-    /// error (D182): silently keeping fold-based coordinates is exactly the
-    /// failure mode the count check used to hide.
+    /// for pyramids — where a *straight* pyramid's table is the mesh's
+    /// vertex-ordered one and is permuted into layer slots with
+    /// [`PYR_P1_SLOT_VERTEX`] (D331).  A slot-count mismatch against these
+    /// factories is a hard error (D182), and the pyramid vertex slots are
+    /// additionally checked against their own geometry corner (D332):
+    /// silently keeping fold-based coordinates, or permuting the slots, is
+    /// exactly the failure mode a count check alone cannot see.
     fn rebuild_dof_coords_periodic<M: MeshTopology>(&mut self, mesh: &M) {
         use fem_element::lagrange::factory::{HexQk, H1TetPk, QuadQk};
-        use fem_element::lagrange::{H1PrismPk, H1TriPk, PrismPk, PyramidPk};
+        use fem_element::lagrange::{H1PrismPk, H1PyramidPk, H1TriPk, PrismPk, PyramidPk};
 
         let dim = self.dim;
         let topo_dim = mesh.topological_dim() as usize;
@@ -2928,21 +2945,23 @@ impl DofManager {
                         H1PrismPk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(PrismPk::new(geom_order)),
                     ),
-                    // D191: the pyramid *field* slots follow the MFEM
+                    // D191/D332: the pyramid *field* slots follow the MFEM
                     // entity-order slot table (the layout `build_pyramid_pk`
-                    // numbers `element_dofs` in), while the *geometry* table
-                    // stays layer-major `PyramidPk`
-                    // (`set_curvature_pyramid5`'s frozen contract).
+                    // numbers `element_dofs` in) at the Bergot
+                    // GLL-barycentric positions `H1PyramidPk::dof_coords()`,
+                    // while the *geometry* table stays layer-major
+                    // `PyramidPk` (`set_curvature_pyramid5`'s frozen
+                    // contract).  The field slots used to be built from the
+                    // integer label grid `(i, j, k)/p` instead: that lattice
+                    // coincides with the Gauss-Lobatto one at p ≤ 2 and drifts
+                    // from p = 3 on (max 0.068670 at p = 3, 0.199682 at
+                    // p = 4) — with the same dof count, so the length guard
+                    // below could not see it.
                     (5, _) => (
-                        Self::pyramid_entity_slot_grid(p)
+                        H1PyramidPk::new(p)
+                            .dof_coords()
                             .iter()
-                            .map(|g| {
-                                [
-                                    g[0] as f64 / p as f64,
-                                    g[1] as f64 / p as f64,
-                                    g[2] as f64 / p as f64,
-                                ]
-                            })
+                            .map(|c| [c[0], c[1], c[2]])
                             .collect(),
                         Box::new(PyramidPk::new(geom_order)),
                     ),
@@ -2965,6 +2984,18 @@ impl DofManager {
                 ref_dofs.len(),
             );
             let gnodes = mesh.geometry_nodes(e);
+            // D331/D332: a *straight* pyramid's geometry table is in MFEM
+            // **vertex** order — it is the mesh connectivity, or the order-1
+            // pre-merge snapshot `Mesh::make_periodic` keeps — while
+            // `PyramidPk`'s slots are layer-ordered: permute the table into
+            // layer slots exactly like `build_pyramid_pk` does.  Curved
+            // pyramids (`geom_order > 1`) write their table in layer-slot
+            // order already (`set_curvature_pyramid5`) and must not be
+            // permuted.
+            let straight_pyramid = npe == 5 && geom_order <= 1;
+            let gnode = |k: usize| -> NodeId {
+                if straight_pyramid { gnodes[PYR_P1_SLOT_VERTEX[k]] } else { gnodes[k] }
+            };
             let mut phi = vec![0.0_f64; gnodes.len()];
             for (slot, rc) in ref_dofs.iter().enumerate() {
                 geom_elem.eval_basis(rc, &mut phi);
@@ -2973,9 +3004,28 @@ impl DofManager {
                     if phik == 0.0 {
                         continue;
                     }
-                    let ck = mesh.geom_coords_of(gnodes[k]);
+                    let ck = mesh.geom_coords_of(gnode(k));
                     for d in 0..dim {
                         x[d] += phik * ck[d];
+                    }
+                }
+                // D332 hardening (coordinate consistency): on a straight
+                // pyramid the five vertex slots are the only field slots that
+                // sit exactly on a geometry node, and each must land on the
+                // element's *own* corner.  A swap between the field slot table
+                // and the geometry slot table passes every count check and
+                // silently moves the coordinate to the other base corner —
+                // the D182 prism failure mode, and the straight-pyramid twist
+                // D331 fixed.
+                if straight_pyramid && slot < 5 {
+                    let want = mesh.geom_coords_of(gnodes[slot]);
+                    for d in 0..dim {
+                        assert!(
+                            (x[d] - want[d]).abs() <= 1e-12 * (1.0 + want[d].abs()),
+                            "rebuild_dof_coords_periodic: element {e} (order {p}) vertex slot \
+                             {slot} landed on {x:?} instead of its own corner {want:?} — the \
+                             pyramid field slot table and the geometry slot table disagree",
+                        );
                     }
                 }
                 let did = dofs[slot] as usize;
