@@ -2656,18 +2656,92 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 
 // ─── Pyramid ───────────────────────────────────────────────────────────────────
 
-/// Quadrature rule on the reference pyramid using the Duffy transform.
+/// Quadrature rule on the reference pyramid, 1:1 with MFEM 4.10
+/// `IntegrationRules::PyramidIntegrationRule` (`fem/intrules.cpp:2460`).
 ///
 /// Reference pyramid: vertices (0,0,0),(1,0,0),(1,1,0),(0,1,0),(0,0,1).
-/// Domain: x ∈ [0, 1-z], y ∈ [0, 1-z], z ∈ [0,1].
-/// Volume = 1/3.
+/// Domain: x ∈ [0, 1-z], y ∈ [0, 1-z], z ∈ [0,1].  Volume = 1/3.
 ///
-/// Uses tensor-product Gauss rule on the unit cube [0,1]³, mapped via
-/// Duffy transform: (x,y,z) = (r(1-t), s(1-t), t) with Jacobian (1-t)².
-/// Weights sum to 1/3.
+/// MFEM takes the **cube** rule of `order` — the tensor product of the 1-D
+/// Gauss-Legendre rule with `n = (order|1)/2 + 1 = order/2 + 1` points
+/// (`GetSegmentRealOrder`, `intrules.hpp:463`) — and maps it through the Duffy
+/// transform `(x,y,z) = (r(1-t), s(1-t), t)` with Jacobian `(1-t)²`.  Point `q`
+/// of the tensor is `iz·n² + iy·n + ix` (**x varies fastest**, z slowest —
+/// MFEM's `IntegrationRule(irx,iry,irz)` nesting, `intrules.cpp:68`) and its
+/// weight is `((wx·wy)·wz)·(1-t)²`.
+///
+/// D305: the 1-D count used to be `clamp(2, 4)`, which under-integrated every
+/// request above order 7 (`n = 4` is exact only to degree 7).  MFEM has **no
+/// cap**: `IntRules.Get(Geometry::PYRAMID, order)` has
+/// `1, 1, 8, 8, 27, 27, 64, 64, 125, 125, 216, …` points for
+/// `order = 0, 1, 2, …, 10` (dump: `tmp/d339/pyr_rule_mfem_d305.txt`).
+///
+/// Orders 0/1 reproduce MFEM's `npts == 1` special case: a single point can
+/// not integrate the quadratic factor `(1-t)²`, so MFEM hand-tunes
+/// `(3/8, 3/8, 1/4)` with weight `1/3`, which integrates `1, x, y, z` exactly
+/// (`∫ x dV = 1/8 = (1/3)·(3/8)`); this deviates from the tensor rule by
+/// design.
+///
+/// The 1-D rule is [`gauss_legendre_01`] (`n ≤ 5`: MFEM's `[0,1]` table,
+/// bit-identical) / [`gauss_legendre_01_arbitrary`] (`n ≥ 6`) — the same
+/// source [`seg_rule`] uses.
+///
+/// Orders 2..5 (`n ≤ 3`) are **bit-frozen** at the historical
+/// `[-1,1]`-mapped values: those are exactly the quadrature orders of the
+/// p ≤ 2 assembly paths, whose results are pinned
+/// (`d304_pyramid_h1_mass`, `d191_pyramid_h1_mfem_layout`).  MFEM's table
+/// values for `n ≤ 3` differ from the frozen ones by ≤ 1 ulp; D339 in
+/// `tmp/d339/EVIDENCE.md` records the ulp counts and the unification recipe
+/// (delete [`pyramid_rule_small_n_frozen`]).  Every order ≥ 6 (i.e. p ≥ 3)
+/// is MFEM's rule, bit-identical to C++ for `n ≤ 5`.
 pub fn pyramid_rule(order: u8) -> QuadratureRule {
-    // Minimum n=2 to integrate the quadratic Jacobian (1-t)² correctly.
-    let n = ((order as usize + 2) / 2).clamp(2, 4);
+    let n = order as usize / 2 + 1;
+    if n == 1 {
+        // MFEM `PyramidIntegrationRule` npts == 1 special case.
+        return QuadratureRule {
+            points: vec![vec![0.375, 0.375, 0.25]],
+            weights: vec![1.0 / 3.0],
+        };
+    }
+    if n <= 3 {
+        return pyramid_rule_small_n_frozen(n);
+    }
+    let (xs, ws) = if n <= 5 {
+        gauss_legendre_01(n)
+    } else {
+        gauss_legendre_01_arbitrary(n)
+    };
+    let mut pts = Vec::with_capacity(n * n * n);
+    let mut wts = Vec::with_capacity(n * n * n);
+    // MFEM's tensor nesting: `iz` slowest, `ix` fastest.
+    for (zk, wz) in xs.iter().zip(ws.iter()) {
+        let t = *zk;
+        let omt = 1.0 - t;
+        let jac = omt * omt;
+        for (yj, wy) in xs.iter().zip(ws.iter()) {
+            for (xi, wx) in xs.iter().zip(ws.iter()) {
+                pts.push(vec![xi * omt, yj * omt, t]);
+                // `((wx·wy)·wz)·jac` — MFEM's operation order.
+                wts.push(wx * wy * wz * jac);
+            }
+        }
+    }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
+}
+
+/// Pre-D305 small-`n` pyramid rule (`n = 2, 3`, i.e. orders 2..5), kept
+/// verbatim so that the p ≤ 2 assembly results stay bit-identical.
+///
+/// This is the historical `[-1,1]` Gauss-Legendre table mapped by
+/// `r = 0.5·(ξ+1)` (instead of MFEM's `[0,1]` table), point order
+/// `ix·n² + iy·n + ik` (z fastest) and weight `wi·wj·wk·0.125·(1-t)²`.
+/// The 1-ulp/1-order deviations from MFEM are recorded in D339; unifying must
+/// delete this function and let the orders ≤ 5 requests fall through to the
+/// MFEM branch of [`pyramid_rule`].
+fn pyramid_rule_small_n_frozen(n: usize) -> QuadratureRule {
     let (xs, ws) = gauss_legendre_1d(n);
     let mut pts = Vec::with_capacity(n * n * n);
     let mut wts = Vec::with_capacity(n * n * n);

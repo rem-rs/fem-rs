@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 
 use fem_core::{FemError, FemResult, NodeId};
+use fem_element::lagrange::{H1PrismSlot, PRISM_EDGES};
 use fem_element::ReferenceElement;
 use fem_mesh::{
     element_type::ElementType,
@@ -2284,11 +2285,6 @@ fn tri2d_slot_map<M: MeshTopology>(mesh: &M, p: usize) -> Result<(Vec<NodeId>, u
 // bit-for-bit; `crates/io/tests/prism_nodes_writer.rs` pins that against a
 // mesh file produced by MFEM 4.10's `SetCurvature`.)
 
-/// MFEM `Geometry::Constants<Geometry::PRISM>::Edges` (`fem/geom.cpp:1052`):
-/// local edge `k` runs from local vertex `EDGES[k][0]` to `EDGES[k][1]`.
-const PRISM_EDGES: [[usize; 2]; 9] = [
-    [0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 3], [1, 4], [2, 5],
-];
 /// MFEM `Geometry::Constants<Geometry::PRISM>::FaceVert` (`fem/geom.cpp:1061`):
 /// local faces 0/1 are the bottom/top triangles, 2..4 the quadrilateral sides.
 /// Every quadrilateral entry is a valid square parameterisation
@@ -2299,181 +2295,50 @@ const PRISM_FACES: [[usize; 4]; 5] = [
     [2, 0, 3, 5],
 ];
 
-/// Where a local dof of MFEM's `H1_WedgeElement` lives, in terms of the
-/// element's own local vertices (and hence of the mesh's global entities).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrismSlotEntity {
-    /// Local vertex (`0..6`); the file stores vertex `v` as dof `v`.
-    Vertex(usize),
-    /// Local edge (`PRISM_EDGES` index) and the 0-based position counted from
-    /// the edge's first vertex.
-    Edge(usize, usize),
-    /// Local triangular face (0 = bottom, 1 = top) and the local dof index
-    /// within the face's block, in MFEM's own enumeration.
-    TriFace(usize, usize),
-    /// Local quadrilateral face (2..5) and the 1-based in-face Gauss-Lobatto
-    /// indices `(a, b)`: `a` along `FaceVert[0] → FaceVert[1]`, `b` along
-    /// `FaceVert[0] → FaceVert[3]`.
-    QuadFace(usize, usize, usize),
-    /// Element-interior dof, in MFEM's local enumeration order.
-    Interior(usize),
-}
-
 /// One local dof of `H1_WedgeElement`: its reference point in `PrismPk`'s
 /// convention (the points `PrismPk::eval_basis` is evaluated at) and the
 /// entity it belongs to.
+///
+/// The entity is the element crate's [`H1PrismSlot`] — the single source of
+/// truth for MFEM's `H1_WedgeElement` node table (D168/D191 ground truth,
+/// `fem/fe/fe_h1.cpp:863`).  D315 removed this file's second copy of that
+/// table (`PrismSlotEntity` + a local `t_dof`/`s_dof` reconstruction): the
+/// writers now consume `H1PrismPk`'s slot labels *and* node positions, so the
+/// io tables can no longer drift from the ones the solvers number spaces with.
 struct PrismSlot {
     xi: [f64; 3],
-    entity: PrismSlotEntity,
+    entity: H1PrismSlot,
 }
 
-/// MFEM's `H1_WedgeElement` node table (`fem/fe/fe_h1.cpp:863`), reproduced
-/// slot by slot.
+/// MFEM's `H1_WedgeElement` node table (`fem/fe/fe_h1.cpp:863`) as
+/// [`H1PrismPk`]: entity label per slot plus the slot's node position, in slot
+/// order.
 ///
 /// The constructor does not build the node positions from the entity structure
 /// directly: it keeps two index tables `t_dof`/`s_dof` into the nodes of
 /// `H1_TriangleElement` and `H1_SegmentElement` and takes
 /// `(t_Nodes[t_dof[i]].x, .y, s_Nodes[s_dof[i]].x)` as dof `i`'s position.  The
-/// three tables are reproduced verbatim below (including the triangular-face
-/// index arithmetic, which is *not* the plain running index), so this slot
-/// table cannot silently drift from what MFEM reads back.
+/// element crate reproduces those tables verbatim (including the triangular-
+/// face index arithmetic, which is *not* the plain running index) and pins
+/// them against MFEM (`crates/element/tests`); this function only pairs them
+/// with the node positions [`H1PrismPk::dof_coords`] reports, so the io and
+/// element sides cannot silently disagree.
 fn prism_h1_slots(p: usize) -> Result<Vec<PrismSlot>, &'static str> {
     if p < 1 {
         return Err("order < 1");
     }
-    // `Poly_1D::ClosedPoints(p)`: the closed Gauss-Lobatto nodes on `[0, 1]`,
-    // ascending.  This is what `H1_TriangleElement` / `H1_SegmentElement`
-    // place their nodes on, and it agrees with fem-rs's
-    // `gauss_lobatto_arbitrary` after the `[-1, 1] → [0, 1]` map.
-    let cp: Vec<f64> = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
-        .0
-        .iter()
-        .map(|&x| 0.5 * (x + 1.0))
-        .collect();
-    if cp.len() != p + 1 {
-        return Err("unexpected Gauss-Lobatto node count");
+    let labels = fem_element::lagrange::H1PrismPk::slot_labels(p);
+    let coords = fem_element::lagrange::H1PrismPk::new(p).dof_coords();
+    if labels.len() != coords.len() {
+        return Err("the H1 wedge slot labels and node positions disagree");
     }
-    // `H1_TriangleElement`'s `Nodes` (`fem/fe/fe_h1.cpp:451`): vertices, the
-    // three edges, then the interior at the `w`-normalised points
-    // `(cp[i]/w, cp[j]/w)`, `w = cp[i]+cp[j]+cp[p-i-j]`.
-    let mut tri: Vec<[f64; 2]> = Vec::with_capacity((p + 1) * (p + 2) / 2);
-    tri.push([cp[0], cp[0]]);
-    tri.push([cp[p], cp[0]]);
-    tri.push([cp[0], cp[p]]);
-    for i in 1..p {
-        tri.push([cp[i], cp[0]]);
-    }
-    for i in 1..p {
-        tri.push([cp[p - i], cp[i]]);
-    }
-    for i in 1..p {
-        tri.push([cp[0], cp[p - i]]);
-    }
-    for j in 1..p {
-        for i in 1..(p - j) {
-            let w = cp[i] + cp[j] + cp[p - i - j];
-            tri.push([cp[i] / w, cp[j] / w]);
-        }
-    }
-    // `H1_SegmentElement`'s `Nodes`: `(cp[0], cp[p], cp[1], …, cp[p-1])`.
-    let mut seg: Vec<f64> = Vec::with_capacity(p + 1);
-    seg.push(cp[0]);
-    seg.push(cp[p]);
-    for i in 1..p {
-        seg.push(cp[i]);
-    }
-
-    let ne = p - 1; // dofs per edge (and per face row/column)
-    let nt = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 }; // dofs per triangle
-    let nq = ne * ne; // dofs per quad face
-    let nb = nt * ne; // interior dofs (MFEM `H1_dof[PRISM] = TriDof*pm1`)
-    let n_dofs = 6 + 9 * ne + 2 * nt + 3 * nq + nb;
-    if n_dofs != (p + 1) * (p + 1) * (p + 2) / 2 {
-        return Err("the H1 wedge reference element is not the order-p basis");
-    }
-
-    let mut out: Vec<PrismSlot> = Vec::with_capacity(n_dofs);
-    // ── Vertices: `t_dof = (0,1,2,0,1,2)`, `s_dof = (0,0,0,1,1,1)`.
-    for (v, &(t, s)) in [(0usize, 0usize), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
-        .iter()
-        .enumerate()
-    {
-        out.push(PrismSlot {
-            xi: [seg[s], tri[t][0], tri[t][1]],
-            entity: PrismSlotEntity::Vertex(v),
-        });
-    }
-    // ── Edges: `for i in 1..p, for kk in 0..9`, index `5 + kk*ne + i`.
-    for i in 1..p {
-        for kk in 0..9 {
-            let (t, s) = if kk < 6 { (2 + (kk % 3) * ne + i, kk / 3) } else { (kk - 6, i + 1) };
-            out.push(PrismSlot {
-                xi: [seg[s], tri[t][0], tri[t][1]],
-                entity: PrismSlotEntity::Edge(kk, i - 1),
-            });
-        }
-    }
-    // ── Triangular faces: the bottom (local face 0) is `t_dof = 3p + l` with
-    // `l = j - p + ((2p-1-i)·i)/2`, the top (local face 1) uses the running
-    // index.  (The bottom face's `l` permutes the block relative to the top's
-    // — MFEM is self-consistent because the two faces' `FaceVert` orders are
-    // transposed the same way; see the `TriDofOrd` handling below.)
-    let mut k = 0usize;
-    for j in 1..p {
-        for i in 1..(p - j) {
-            let l = j as i64 - p as i64 + (((2 * p - 1 - i) * i) / 2) as i64;
-            if l < 0 || l as usize >= nt {
-                return Err("bad triangular-face dof index");
-            }
-            out.push(PrismSlot {
-                xi: [seg[0], tri[3 * p + l as usize][0], tri[3 * p + l as usize][1]],
-                entity: PrismSlotEntity::TriFace(0, k),
-            });
-            out.push(PrismSlot {
-                xi: [seg[1], tri[3 * p + k][0], tri[3 * p + k][1]],
-                entity: PrismSlotEntity::TriFace(1, k),
-            });
-            k += 1;
-        }
-    }
-    if k != nt {
-        return Err("unexpected triangular-face dof count");
-    }
-    // ── Quadrilateral faces: `t_dof = 2 + f*ne + i` (the triangle's edge `f`
-    // node at GLL parameter `cp[i]`), `s_dof = 1 + j` (the layer `cp[j]`),
-    // index `6 + 9ne + 2nt + f*nq + k`, `k = (j-1)*ne + (i-1)`.
-    for f in 0..3 {
-        for j in 1..p {
-            for i in 1..p {
-                out.push(PrismSlot {
-                    xi: [seg[1 + j], tri[2 + f * ne + i][0], tri[2 + f * ne + i][1]],
-                    entity: PrismSlotEntity::QuadFace(2 + f, i, j),
-                });
-            }
-        }
-    }
-    // ── Interior: layer `k` (1..p-1), the triangle interior in the same order
-    // as the bottom face (`l` reset per layer), index `elem*nb + m`.
-    let mut m = 0usize;
-    for kk in 1..p {
-        let mut l = 0usize;
-        for j in 1..p {
-            // The layer's triangle interior, in the bottom face's `l` order.
-            for _ in 1..(p - j) {
-                out.push(PrismSlot {
-                    xi: [seg[1 + kk], tri[3 * p + l][0], tri[3 * p + l][1]],
-                    entity: PrismSlotEntity::Interior(m),
-                });
-                l += 1;
-                m += 1;
-            }
-        }
-    }
-    if out.len() != n_dofs || m != nb {
-        return Err("unexpected interior dof count");
-    }
-    Ok(out)
+    Ok(labels
+        .into_iter()
+        .zip(coords)
+        .map(|(entity, c)| PrismSlot { xi: [c[0], c[1], c[2]], entity })
+        .collect())
 }
+
 
 /// The canonical in-face Gauss-Lobatto index `(u, v)` (1-based, as they index
 /// `QuadDofOrd`) of the slot at local in-face indices `(a, b)` (1-based from
@@ -2619,8 +2484,8 @@ fn prism_nodes_dof_values<M: MeshTopology>(
         let base = n_vert + n_edges * e_per_edge + n_face_dofs + el * nb;
         for (i, slot) in slots.iter().enumerate() {
             let g: usize = match slot.entity {
-                PrismSlotEntity::Vertex(v) => n6[v] as usize,
-                PrismSlotEntity::Edge(k, j) => {
+                H1PrismSlot::Vertex(v) => n6[v] as usize,
+                H1PrismSlot::Edge(k, j) => {
                     let [la, lb] = PRISM_EDGES[k];
                     let (a, b) = (n6[la], n6[lb]);
                     let key = if a < b { [a, b] } else { [b, a] };
@@ -2638,7 +2503,7 @@ fn prism_nodes_dof_values<M: MeshTopology>(
                     let t = if a < b { j } else { e_per_edge - 1 - j };
                     n_vert + ei * e_per_edge + t
                 }
-                PrismSlotEntity::TriFace(f, k) => {
+                H1PrismSlot::TriFace(f, k) => {
                     let fv = PRISM_FACES[f];
                     let test = [n6[fv[0]], n6[fv[1]], n6[fv[2]]];
                     let mut key = test.to_vec();
@@ -2674,7 +2539,7 @@ fn prism_nodes_dof_values<M: MeshTopology>(
                     };
                     n_vert + n_edges * e_per_edge + face_base[fi] + off
                 }
-                PrismSlotEntity::QuadFace(f, a, b) => {
+                H1PrismSlot::QuadFace(f, a, b) => {
                     let fv = PRISM_FACES[f];
                     let mut key = vec![n6[fv[0]], n6[fv[1]], n6[fv[2]], n6[fv[3]]];
                     key.sort_unstable();
@@ -2703,7 +2568,7 @@ fn prism_nodes_dof_values<M: MeshTopology>(
                     };
                     n_vert + n_edges * e_per_edge + face_base[fi] + off
                 }
-                PrismSlotEntity::Interior(m) => base + m,
+                H1PrismSlot::Interior(m) => base + m,
             };
             if g >= n_dofs {
                 return Err(FemError::Mesh(

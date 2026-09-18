@@ -167,6 +167,81 @@ struct ElemBlock {
     conn: Vec<u32>,
 }
 
+// ─── Gmsh node order → fem-rs connectivity order (D319) ─────────────────────
+
+/// `Gmsh type 11 (Tet10) → fem-rs H1 tet order`: `H1TetPk`'s edge blocks run
+/// `(0,1) (0,2) (0,3) (1,2) (1,3) (2,3)`, Gmsh's file order runs
+/// `(0,1) (1,2) (2,0) (3,0) (3,2) (3,1)`.
+const GMSH_PERM_TET10: [u8; 10] = [0, 1, 2, 3, 4, 6, 7, 5, 9, 8];
+
+/// `Gmsh type 12 (Hex27) → fem-rs hex order` (`HexQk`'s `dof_coords` lattice:
+/// bottom perimeter, verticals, top perimeter, faces, center).  Gmsh's edge
+/// order is `(0,1) (0,3) (0,4) (1,2) (1,5) (2,3) (2,6) (3,7) (4,5) (4,7)
+/// (5,6) (6,7)` (the same order `findpts::incomplete` documents for Hex20).
+const GMSH_PERM_HEX27: [u8; 27] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 12, 14, 15, 10, 9, 11, 18, 17, 8, 13, 19, 16, 22, 23, 21, 24, 20, 25,
+    26,
+];
+
+/// `Gmsh type 13 (Prism18) → fem-rs prism order` ([`fem_element::lagrange::PrismPk`]'s
+/// layer-major lattice; Gmsh stores vertices → edges → faces → interior).
+const GMSH_PERM_PRISM18: [u8; 18] =
+    [0, 1, 2, 6, 9, 7, 8, 10, 11, 15, 17, 16, 3, 4, 5, 12, 14, 13];
+
+/// Node permutation (in *file* order) that puts an element's node list into the
+/// order fem-rs evaluates it.
+///
+/// MFEM's `GmshReader` does the same thing for its own ordering
+/// (`GetNodeMap`, `mesh/gmsh.cpp:681`, applied as `nodes[i] = el_nodes[map[i]]`
+/// at `mesh/gmsh.cpp:843`).  fem-rs evaluates a read mesh's element
+/// connectivity directly with its factory elements (`Mesh::element_jacobian`,
+/// `findpts::locate`), so a Gmsh file whose node order differs from that
+/// element's order would otherwise be read scrambled.
+///
+/// `None` means "the file order already is fem-rs's order":
+/// * `Line3` (`8`), `Tri6` (`9`), `Quad9` (`10`): vertices → edges (same edge
+///   order) → interior, identical in Gmsh and fem-rs;
+/// * the incomplete serendipity families `Quad8` (`16`), `Hex20` (`17`),
+///   `Prism15` (`18`): fem-rs *defines* those on the Gmsh node order
+///   (`crates/mesh/src/findpts/incomplete.rs`, D244);
+/// * `Pyramid13` (`19`) and every type fem-rs does not map: no canonical order
+///   exists (see `tmp/d339/EVIDENCE.md` — MFEM's type `14` is a 14-node
+///   pyramid that fem-rs does not accept at all).
+///
+/// The tables are `perm[m] = file node index of fem-rs row m`, derived by
+/// matching reference positions between MFEM's `GetNodeMap` output (which
+/// fixes each file node's position via the `GlobGeometryRefiner` lattice) and
+/// the factory element's `dof_coords()`; the probe, dump and derivation are in
+/// `tmp/d339/EVIDENCE.md`.  Only order 2 is covered: from order 3 on, MFEM's
+/// refiner interior nodes are equispaced while fem-rs's simplex/tensor
+/// elements use Gauss-Lobatto points, so the tables need a per-type lattice
+/// derivation (new debt D341).
+fn gmsh_node_permutation(etype: ElementType) -> Option<&'static [u8]> {
+    match etype {
+        ElementType::Tet10 => Some(&GMSH_PERM_TET10),
+        ElementType::Hex27 => Some(&GMSH_PERM_HEX27),
+        ElementType::Prism18 => Some(&GMSH_PERM_PRISM18),
+        _ => None,
+    }
+}
+
+/// Apply [`gmsh_node_permutation`] to one block's flat connectivity.
+fn permute_gmsh_conn(etype: ElementType, conn: Vec<u32>, npe: usize) -> Vec<u32> {
+    let perm = match gmsh_node_permutation(etype) {
+        Some(p) => p,
+        None => return conn,
+    };
+    debug_assert_eq!(perm.len(), npe, "permutation length vs nodes per element");
+    let mut out = Vec::with_capacity(conn.len());
+    for row in conn.chunks(npe) {
+        for &m in perm {
+            out.push(row[m as usize]);
+        }
+    }
+    out
+}
+
+
 impl MshParser {
     fn new() -> Self {
         Self {
@@ -427,6 +502,7 @@ impl MshParser {
             }
 
             let dim = edim as usize;
+            let conn = permute_gmsh_conn(etype, conn, npe);
             self.elem_by_dim[dim].push(ElemBlock { etype, phys_tag: etag, conn });
         }
         skip_to(r, "$EndElements")
@@ -483,6 +559,7 @@ impl MshParser {
             }
 
             let dim = edim as usize;
+            let conn = permute_gmsh_conn(etype, conn, npe);
             self.elem_by_dim[dim].push(ElemBlock { etype, phys_tag: etag, conn });
         }
         skip_to(r, "$EndElements")
@@ -528,6 +605,7 @@ impl MshParser {
                     .ok_or_else(|| mesh_err(&format!("v2: node tag {node_tag} not found")))?;
                 conn.push(node_id as u32);
             }
+            let conn = permute_gmsh_conn(etype, conn, npe);
             self.elem_by_dim[dim].push(ElemBlock { etype, phys_tag, conn });
         }
         skip_to(r, "$EndElements")

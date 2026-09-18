@@ -19,8 +19,20 @@
 //! back through `fem_io`: the D41 wedge reader numbers its dofs per element
 //! first-touch, which (unlike MFEM's entity-wise numbering) diverges from the
 //! file's numbering on multi-element wedge meshes, so a read-back curved wedge
-//! parent carries scrambled non-vertex geometry dofs (pre-existing io gap,
-//! reported separately; the miniapp never reads).
+//! parent used to carry scrambled non-vertex geometry dofs.
+//!
+//! **That gap is closed** (round 44 ③/④, D295–D314): the reader now bridges the
+//! file's dof rows into `PrismPk`'s layer-major geometry-table order — the
+//! layout every in-memory consumer evaluates (`geo_ref_elem`,
+//! `element_jacobian`, `curved_prism`, `prism_nodes_dof_values`) — and the
+//! writer re-emits MFEM's own bytes
+//! (`crates/io/tests/d190_wedge_curved_nodes_roundtrip.rs` pins
+//! `curved_prism_write_matches_cpp_save_byte_for_byte`, including on the
+//! `toroid_wedge_o3` fixtures used here).  The construction below stays
+//! in-process for the miniapp-level comparison, and
+//! `read_back_parent_matches_in_process_parent` (bottom of this file) asserts
+//! the read-back parent is equivalent to it — so the in-process path is a
+//! convenience, not a workaround.
 //!
 //! What this pins (the two halves of MFEM's `Mesh::UniformRefinement` on a
 //! curved wedge mesh):
@@ -56,7 +68,7 @@ use std::f64::consts::PI;
 
 use fem_io::mfem::{write_mfem_file_3d_nodes, NodesSpace};
 use fem_mesh::element_type::ElementType;
-use fem_mesh::{refine_uniform_3d, Mesh};
+use fem_mesh::{refine_uniform_3d, Mesh, MeshTopology};
 
 const CPP_REFINED: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/toroid_wedge_o3_r1.mesh");
@@ -424,4 +436,86 @@ fn d173_parent_fixture_is_the_cpp_rs0_file() {
     let want = parse_mesh(CPP_PARENT);
     assert_eq!(want.fec, "H1_3D_P3");
     assert_eq!(want.elems.len(), 8);
+}
+
+/// D314: the read-back curved wedge parent must carry the **same geometry** as
+/// the in-process `mesh_toroid` construction.
+///
+/// The module doc above used to record the opposite ("read-back curved wedge
+/// parent carries scrambled non-vertex geometry dofs"); D295 bridged the
+/// reader's rows into `PrismPk`'s layer-major order.  This asserts it on the
+/// fixture: per element and slot, the geometry node coordinates of
+/// `read_mfem_file(toroid_wedge_o3.mesh)` and of `build_parent()` agree to the
+/// fixture's 8-digit print precision, and re-writing the read-back mesh
+/// reproduces the same `nodes`/`elements`/`boundary` sections.
+#[test]
+fn d314_read_back_parent_matches_in_process_parent() {
+    let built = build_parent();
+    let readback = fem_io::mfem::read_mfem_file(CPP_PARENT)
+        .expect("read toroid_wedge_o3.mesh")
+        .mesh3d
+        .expect("3-D mesh");
+
+    assert_eq!(readback.n_elems(), built.n_elems(), "element count");
+    assert_eq!(readback.geom_order(), built.geom_order(), "geometry order");
+    let (gb, gr) = (
+        built.geometry.as_ref().expect("in-process parent carries geometry"),
+        readback.geometry.as_ref().expect("read-back parent carries geometry"),
+    );
+    assert_eq!(gr.order, gb.order);
+    assert_eq!(gr.nodes_per_elem, gb.nodes_per_elem, "nodes per element");
+    assert_eq!(gr.conn.len(), gb.conn.len(), "geometry table length");
+
+    // Per element and per slot (the layer-major table order every consumer
+    // evaluates): the two parents must describe the same geometry.  A
+    // scrambled read-back table (the pre-D295 defect) fails here even though
+    // both meshes hold the same set of node values.
+    let npe = gb.nodes_per_elem;
+    let mut worst = 0.0_f64;
+    let mut worst_at = (0usize, 0usize, 0usize);
+    for e in 0..built.n_elems() as usize {
+        for k in 0..npe {
+            let xb = built.geom_coords_of(gb.conn[e * npe + k]);
+            let xr = readback.geom_coords_of(gr.conn[e * npe + k]);
+            for d in 0..3 {
+                let diff = (xb[d] - xr[d]).abs();
+                if diff > worst {
+                    worst = diff;
+                    worst_at = (e, k, d);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "D314 read-back vs in-process parent geometry: max |Δ| = {worst:.3e} \
+         (element {}, slot {}, component {})",
+        worst_at.0, worst_at.1, worst_at.2
+    );
+    assert!(worst <= TOL, "geometry node mismatch {worst:e} > {TOL:e}");
+
+    // Round-trip the read-back mesh and compare with the C++ `-rs 0` file: the
+    // read-back parent must be as faithful as the in-process one.
+    let want = parse_mesh(CPP_PARENT);
+    let out_path = std::env::temp_dir().join("d314_toroid_wedge_parent_readback.mesh");
+    write_mfem_file_3d_nodes(out_path.to_str().expect("temp path"), &readback, NodesSpace::Continuous)
+        .expect("write read-back parent");
+    let got = parse_mesh(out_path.to_str().expect("temp path"));
+    let _ = std::fs::remove_file(&out_path);
+    assert_eq!(got.elems.len(), want.elems.len(), "element count");
+    assert_eq!(got.bdr.len(), want.bdr.len(), "boundary element count");
+    assert_eq!(got.fec, want.fec, "nodes FE collection");
+    assert_eq!(got.nodes.len(), want.nodes.len(), "nodes payload length");
+    for (e, (gtype, conn)) in want.elems.iter().enumerate() {
+        assert_eq!(*gtype, got.elems[e].0, "element {e}: geometry type");
+        assert_eq!(got.elems[e].1, *conn, "element {e}: connectivity");
+    }
+    for (f, (gtype, conn)) in want.bdr.iter().enumerate() {
+        assert_eq!(*gtype, got.bdr[f].0, "boundary {f}: geometry type");
+        assert_eq!(got.bdr[f].1, *conn, "boundary {f}: connectivity");
+    }
+    let mut max_dn = 0.0_f64;
+    for (v, &w) in got.nodes.iter().zip(want.nodes.iter()) {
+        max_dn = max_dn.max((v - w).abs());
+    }
+    assert!(max_dn <= TOL, "read-back parent nodes deviate by {max_dn:e} (tol {TOL:e})");
 }
