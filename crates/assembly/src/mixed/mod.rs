@@ -1422,8 +1422,16 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         }
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetRT1),
-        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRTk::new(0)),
-        (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRT1),
+        // D329 (main-session arbitration): the H(div) space's dofs are the
+        // MFEM-default nodal-GaussLegendre ones (D245/D289), so the mixed
+        // approximation must reconstruct on the same basis — the IGLL pair
+        // divided the projected error by 4 relative to MFEM (ex24 hex:
+        // 0.32044270 vs the C++ 0.0108996).
+        (SpaceType::HDiv, ElementType::Hex8, 0) => Box::new(HexRTk::new_gauss_legendre(0)),
+        (SpaceType::HDiv, ElementType::Hex8, 1) => Box::new(HexRTk::new_gauss_legendre(1)),
+        (SpaceType::HDiv, ElementType::Hex8, o) if o >= 2 => {
+            Box::new(HexRTk::new_gauss_legendre(o as usize))
+        }
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tet4 | ElementType::Tet10, 1) => Box::new(TetNDk::new(1)),
         (SpaceType::HCurl, ElementType::Quad4, 1) => Box::new(QuadNDk::new(1)),
@@ -1434,8 +1442,12 @@ pub fn ref_elem_vec(elem_type: ElementType, order: u8, space: SpaceType) -> Resu
         (SpaceType::HCurl, ElementType::Hex8, 2) => Box::new(HexNDk::new(2)),
         (SpaceType::HCurl, ElementType::Hex20, 1) => Box::new(HexNDk::new(1)),
         (SpaceType::HCurl, ElementType::Hex20, 2) => Box::new(HexNDk::new(2)),
-        (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRTk::new(0)),
-        (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRT1),
+        // D329: same reasoning as the Hex8 arms above.
+        (SpaceType::HDiv, ElementType::Hex20, 0) => Box::new(HexRTk::new_gauss_legendre(0)),
+        (SpaceType::HDiv, ElementType::Hex20, 1) => Box::new(HexRTk::new_gauss_legendre(1)),
+        (SpaceType::HDiv, ElementType::Hex20, o) if o >= 2 => {
+            Box::new(HexRTk::new_gauss_legendre(o as usize))
+        }
         (SpaceType::HDiv, ElementType::Prism6, 0) => Box::new(PrismRTk::new(0)),
         (SpaceType::HDiv, ElementType::Prism6, 1) => Box::new(PrismRTk::new(1)),
         (SpaceType::HCurl, ElementType::Prism6, 1) => Box::new(PrismND1),

@@ -1064,7 +1064,12 @@ fn l2_error_hdiv_3d(mesh: &Mesh<3>, space: &HDivSpace<Mesh<3>>,
     for e in 0..mesh.n_elements() as u32 {
         let et = mesh.element_type(e);
         let re: &dyn VectorReferenceElement = match et {
-            fem_mesh::element_type::ElementType::Hex8 => &HexRTk::new(0),
+            // D330 (main-session arbitration): the H(div) dofs are the
+            // MFEM-default nodal-GL ones (D245/D289) — reconstructing them
+            // with the IGLL pair gave an L2 error of 0.75 instead of 6e-16.
+            fem_mesh::element_type::ElementType::Hex8 => {
+                &HexRTk::new_gauss_legendre(0)
+            }
             _ => &TetRTk::new(0),
         };
         let nld = re.n_dofs();
