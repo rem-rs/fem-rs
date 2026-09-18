@@ -141,10 +141,15 @@ fn grad_lam5() -> [f64; 3] {
 
 // ─── mu / nu (fe_pyramid.hpp:173-226, fe_pyramid.cpp:186-231) ───────────────
 
-fn mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
+/// MFEM `FuentesPyramid::mu0(z, xy, ab)` (`fe_pyramid.hpp:188`).
+///
+/// `pub(crate)` since D325: the L2 Fuentes pyramid interpolates its raw
+/// expansion through the same `mu` blocks (MFEM `fe_l2.cpp:996-1000`).
+pub(crate) fn mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
     1.0 - xy[ab - 1] / (1.0 - z)
 }
-fn mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
+/// MFEM `FuentesPyramid::mu1(z, xy, ab)` (`fe_pyramid.hpp:190`).
+pub(crate) fn mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
     xy[ab - 1] / (1.0 - z)
 }
 fn grad_mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
@@ -157,10 +162,13 @@ fn grad_mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
     d[ab - 1] = 1.0 / (1.0 - z);
     d
 }
-fn mu0_z(z: f64) -> f64 {
+/// MFEM `FuentesPyramid::mu0(z)` (`fe_pyramid.hpp:159`) — `pub(crate)` for
+/// the L2 Fuentes pyramid (D325), same as [`mu0_xy`].
+pub(crate) fn mu0_z(z: f64) -> f64 {
     1.0 - z
 }
-fn mu1_z(z: f64) -> f64 {
+/// MFEM `FuentesPyramid::mu1(z)` (`fe_pyramid.hpp:160`).
+pub(crate) fn mu1_z(z: f64) -> f64 {
     z
 }
 const GRAD_MU0_Z: [f64; 3] = [0.0, 0.0, -1.0];
@@ -193,7 +201,12 @@ const GRAD_NU2: [f64; 3] = [0.0, 0.0, 1.0];
 /// MFEM `FuentesPyramid::CalcScaledLegendre(p, x, t, u, dudx, dudt)`
 /// (`fe_pyramid.cpp:313`): `u[i] = P̃_i(x/t)·t^i` with `P̃_i` the shifted
 /// Legendre polynomial on `[0,1]`, plus `∂/∂x` and `∂/∂t`.
-fn calc_scaled_legendre(p: usize, x: f64, t: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+///
+/// `pub(crate)` since D325: the L2 Fuentes pyramid reaches the value-only
+/// `CalcHomogenizedScaLegendre(p, s0, s1, u)` =
+/// `CalcScaledLegendre(p, s1, s0 + s1, u)` through this function
+/// (`fe_pyramid.cpp:447`).
+pub(crate) fn calc_scaled_legendre(p: usize, x: f64, t: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     if t > 0.0 {
         let (mut u, mut dudx) = calc_legendre_d(p, x / t);
         dudx[0] = 0.0;

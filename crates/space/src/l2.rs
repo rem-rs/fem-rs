@@ -92,6 +92,28 @@ fn tensor_dofs_per_elem(order: u8, dim: usize) -> usize {
     (order as usize + 1).pow(dim as u32)
 }
 
+/// The L² reference element of a **pyramid** cell — MFEM `L2_FECollection`'s
+/// `L2_FuentesPyramidElement(p, btype)` (`fe_coll.cpp:2340-2351`,
+/// `pyr_type = ScalarPyramid::DefaultType = 1`), selected from the space's own
+/// [`L2Basis`] exactly as MFEM selects it from `btype`.
+///
+/// This is the **single source of truth** for the element: both
+/// [`L2Space::build_pyramid`] (which numbers the space's DOFs from its node
+/// table) and the assembler's L² dispatch
+/// (`fem_assembly::assembler::ref_elem_vol_l2` /
+/// `ref_elem_vol_for_space`) call it, so the numbering the space built and the
+/// element the assembler evaluates can never disagree (D340).
+pub fn l2_pyramid_element(p: usize, basis: L2Basis) -> Box<dyn ReferenceElement> {
+    match basis {
+        L2Basis::GaussLegendre => {
+            Box::new(fem_element::lagrange::L2FuentesPyramidPk::new(p))
+        }
+        L2Basis::GaussLobatto => {
+            Box::new(fem_element::lagrange::L2FuentesPyramidPk::new_gauss_lobatto(p))
+        }
+    }
+}
+
 impl<M: MeshTopology> L2Space<M> {
     /// Build the L² space of given order over `mesh`.
     ///
@@ -133,10 +155,69 @@ impl<M: MeshTopology> L2Space<M> {
             (3, 4) => Self::build_simplex(mesh, order, basis, &TetP3.dof_coords(), 4, 10),
             (2, 4) => Self::build_tensor(mesh, order, basis, 2),
             (3, 8) => Self::build_tensor(mesh, order, basis, 3),
+            // D340: 5-node (Pyramid5) cells — MFEM `L2_FECollection`'s pyramid
+            // arm (`fe_coll.cpp:2340-2351`), `L2_FuentesPyramidElement`.
+            (3, 5) => Self::build_pyramid(mesh, order, basis),
             _ => panic!(
-                "L2Space currently supports Tri3/Quad4 (2D) and Tet4/Hex8 (3D), got dim={dim}, npe={npe0}"
+                "L2Space currently supports Tri3/Quad4 (2D) and Tet4/Hex8/Pyramid5 (3D), got dim={dim}, npe={npe0}"
             ),
         }
+    }
+
+    /// Pyramid (Pyramid5) L² space for order ≥ 1 — D340.
+    ///
+    /// MFEM's `L2_FECollection(p, 3, btype, map_type, pyr_type)` puts
+    /// `L2_FuentesPyramidElement(p, btype)` on PYRAMID cells for its default
+    /// `pyr_type = ScalarPyramid::DefaultType = 1` (`fe_coll.cpp:2340-2351`,
+    /// `fe_pyramid.hpp:23`), with `(p+1)³` DOFs — **not** the
+    /// `(p+1)(p+2)(2p+3)/6` of either Bergot arm, and not the legacy
+    /// equispaced [`PyramidPk`] the `ref_elem_vol` fallback used to route
+    /// pyramids to.
+    ///
+    /// Basis dispatch follows [`L2Basis`]: `GaussLegendre` (the
+    /// `L2_FECollection` default) is
+    /// [`L2FuentesPyramidPk::new`](fem_element::lagrange::L2FuentesPyramidPk::new)
+    /// (open GL in every direction), `GaussLobatto` is
+    /// [`L2FuentesPyramidPk::new_gauss_lobatto`](fem_element::lagrange::L2FuentesPyramidPk::new_gauss_lobatto)
+    /// (`L2_FECollection(p, 3, BasisType::GaussLobatto)`, whose `z` layers are
+    /// still forced open by MFEM's collapse factor `a`).
+    ///
+    /// DOF numbering is MFEM's tensor order `o = k(p+1)² + j(p+1) + i`
+    /// (`L2_DOF_MAP`), the same order the reference element's own node table
+    /// is in, and every DOF is element-local (no sharing) as in every other
+    /// L² arm.
+    ///
+    /// The reference node positions are mapped to physical space through the
+    /// **linear pyramid geometry map** — the `PyramidPk(1)`/collapsed-coordinate
+    /// map the assembler uses for a straight pyramid
+    /// ([`element_jacobian_at`](fem_mesh::transformation::element_jacobian_at),
+    /// including the D331 layer-slot permutation).  Curved pyramids
+    /// (`geom_order > 1`) fall back to that same P1 map (D334's known
+    /// limitation for pyramid geometry, unchanged here).
+    fn build_pyramid(mesh: M, order: u8, basis: L2Basis) -> Self {
+        let dim = mesh.dim() as usize;
+        let n_elems = mesh.n_elements();
+        let p = order as usize;
+
+        let re = l2_pyramid_element(p, basis);
+        let dofs_per_elem = re.n_dofs();
+        let ref_coords = re.dof_coords();
+        debug_assert_eq!(dofs_per_elem, (p + 1) * (p + 1) * (p + 1));
+
+        let n_dofs = n_elems * dofs_per_elem;
+        let elem_dofs: Vec<DofId> = (0..n_dofs as DofId).collect();
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+
+        for e in 0..n_elems as u32 {
+            let base_dof = e as usize * dofs_per_elem;
+            for (k, rc) in ref_coords.iter().enumerate() {
+                let (_, x) = fem_mesh::transformation::element_jacobian_at(&mesh, e, rc, dim);
+                let base = (base_dof + k) * dim;
+                dof_coords[base..base + dim].copy_from_slice(&x[..dim]);
+            }
+        }
+
+        L2Space { mesh, order, basis, elem_dofs, dofs_per_elem, n_dofs, dof_coords }
     }
 
     /// Simplex (Tri3/Tet4) L² space for order ≥ 1.

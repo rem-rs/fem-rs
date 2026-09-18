@@ -44,7 +44,9 @@
 
 use crate::dg::dg_base::ref_elem_vol;
 use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
-use fem_element::{lagrange::QuadL2GL, lagrange::factory::QuadQk, ReferenceElement};
+use fem_element::{
+    lagrange::L2FuentesPyramidPk, lagrange::QuadL2GL, lagrange::factory::QuadQk, ReferenceElement,
+};
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::{element_type::ElementType, transformation::element_jacobian_at};
 use fem_space::fe_space::{FESpace, SpaceType};
@@ -310,6 +312,22 @@ impl<'a, S: FESpace, C: ScalarCoeff> DGMassInverse<'a, S, C> {
 /// GLL-noded lexicographic `QuadQk::new_lex`, everything else falls back to
 /// the DG assembler's dispatch (`dg_base::ref_elem_vol`; GL-noded
 /// `QuadL2GL` for Quad4).
+///
+/// D335: pyramids are dispatched here too, to MFEM's
+/// `L2_FuentesPyramidElement` (`L2_FECollection`'s default `pyr_type = 1`,
+/// `(p+1)³` DOFs) chosen from the space's own basis.  This one arm is what
+/// makes `DGMassInverse` reachable on a pyramid mesh: the fallback
+/// `dg_base::ref_elem_vol` *panics* on `Pyramid5` (`dg_base.rs:52`), and
+/// before D340 the `L2Space` construction inside `DGMassInverse::new` panicked
+/// even earlier.
+///
+/// MFEM itself cannot run its `DGMassInverse` on this element: the PA mass
+/// path requests a `DofToQuad::TENSOR` map and `L2_FuentesPyramidElement` is a
+/// `NodalFiniteElement`, so MFEM aborts with
+/// `Verification failed: (mode == DofToQuad::FULL)` (`fe_base.cpp:377`;
+/// reproduced by `tmp/d325/d335_dginv_probe2.cpp`).  fem-rs's dense-block port
+/// has no such restriction — the same, already-documented deviation as for the
+/// simplex L² bases (see the module header).
 pub(crate) fn l2_ref_elem(
     et: ElementType,
     order: u8,
@@ -320,6 +338,12 @@ pub(crate) fn l2_ref_elem(
             Box::new(QuadQk::new_lex(order as usize))
         }
         (ElementType::Quad4, _) => Box::new(QuadL2GL::new(order as usize)),
+        (ElementType::Pyramid5 | ElementType::Pyramid13, Some(L2Basis::GaussLobatto)) => {
+            Box::new(L2FuentesPyramidPk::new_gauss_lobatto(order as usize))
+        }
+        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
+            Box::new(L2FuentesPyramidPk::new(order as usize))
+        }
         _ => ref_elem_vol(et, order),
     }
 }

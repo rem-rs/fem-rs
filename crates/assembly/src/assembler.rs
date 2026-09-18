@@ -132,6 +132,33 @@ impl ReferenceElement for P0Tet {
     }
 }
 
+/// Constant (P0) element on the standard **pyramid** reference domain
+/// (volume 1/3) — the D340 pyramid counterpart of [`P0Tri`]/[`P0Tet`].
+///
+/// The generic [`P0`] with `dim: 3` uses the hex `[-1,1]³` Gauss rule (weight
+/// sum 8) and evaluates the geometry at cube points, which on a pyramid are
+/// both outside its domain and summed against the wrong weight; `pyramid_rule`
+/// has weight sum 1/3 (MFEM `IntRules.Get(Geometry::PYRAMID, order)`), matching
+/// the reference pyramid's measure — the same defect class as [`P0Tet`] and
+/// [`P0Tri`].
+struct P0Pyr;
+
+impl ReferenceElement for P0Pyr {
+    fn dim(&self) -> u8 { 3 }
+    fn order(&self) -> u8 { 0 }
+    fn n_dofs(&self) -> usize { 1 }
+    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
+    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
+        for x in g.iter_mut() { *x = 0.0; }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        fem_element::quadrature::pyramid_rule(order)
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        vec![vec![0.0; 3]]
+    }
+}
+
 /// Constant (P0) element on the standard triangle reference domain
 /// (area 1/2): the generic [`P0`] with `dim: 2` uses the square `[0,1]²`
 /// Gauss rule (weight sum 1), which doubles every standard assembly
@@ -223,7 +250,8 @@ impl ReferenceElement for BiLinearGeo2D {
 /// `GaussLegendre` basis: tensor elements (Quad/Hex) use MFEM's lexicographic
 /// `L2_DOF_MAP` order with interior Gauss-Legendre nodes, simplex elements
 /// (Tri/Tet) use MFEM's open barycentric GL nodes (`L2_TriangleElement` /
-/// `L2_TetrahedronElement`, D269).
+/// `L2_TetrahedronElement`, D269), and pyramid cells use MFEM's
+/// `L2_FuentesPyramidElement` (D340).
 pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Quad4 => match order {
@@ -254,6 +282,25 @@ pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceEl
             // MFEM L2_TetrahedronElement(o, GaussLegendre): open barycentric
             // GL nodes on the unit tetrahedron (D269).
             o => Box::new(fem_element::lagrange::TetL2GL::new(o as usize)),
+        },
+        // D340: MFEM `L2_FECollection`'s pyramid arm — `pyr_type =
+        // ScalarPyramid::DefaultType = 1` (`fe_coll.cpp:2340-2351`) puts
+        // `L2_FuentesPyramidElement(o, btype)` on PYRAMID cells, `(p+1)³` DOFs.
+        // The element comes from `fem_space::l2::l2_pyramid_element` — the very
+        // function `L2Space::build_pyramid` numbers the space's DOFs from, so
+        // the two cannot disagree (this arm previously fell through to
+        // `ref_elem_vol`, the legacy equispaced `PyramidPk` with
+        // `(p+1)(p+2)(2p+3)/6` DOFs, and every assembly on an L2 pyramid space
+        // panicked on the count mismatch).  `order == 0` needs the pyramid P0:
+        // the shared `P0 { dim: 3 }` carries the *hex* rule, whose points and
+        // weight sum are wrong for a pyramid (same defect class as
+        // [`P0Tri`]/[`P0Tet`]).
+        ElementType::Pyramid5 | ElementType::Pyramid13 => match order {
+            0 => Box::new(P0Pyr),
+            o => fem_space::l2::l2_pyramid_element(
+                o as usize,
+                fem_space::L2Basis::GaussLegendre,
+            ),
         },
         _ => ref_elem_vol(elem_type, order),
     }
@@ -287,6 +334,16 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
         if gll && order >= 1 && matches!(elem_type, ElementType::Tri3 | ElementType::Tet4) {
             // The closed DG simplex placement (corner/equispaced nodal dofs).
             return ref_elem_vol(elem_type, order);
+        }
+        // D340: an L2 pyramid space with the GaussLobatto basis —
+        // `L2_FECollection(p, 3, BasisType::GaussLobatto)`'s arm, which is
+        // `L2_FuentesPyramidElement(p, GaussLobatto)` (a *different* node table
+        // from the GaussLegendre default).  Dispatched on the space's basis
+        // through the same single-source-of-truth function
+        // `L2Space::build_pyramid` uses.
+        if gll && order >= 1 && matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13)
+        {
+            return fem_space::l2::l2_pyramid_element(order as usize, L2Basis::GaussLobatto);
         }
         ref_elem_vol_l2(elem_type, order)
     } else {

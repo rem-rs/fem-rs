@@ -123,20 +123,20 @@ pub fn h1_pyramid_element(p: usize, basis: PyramidBasisType) -> Box<dyn Referenc
 /// count already differs from MFEM's default (`(p+1)³` vs
 /// `(p+1)(p+2)(2p+3)/6`), and against the Bergot-L2 alternative the *nodes*
 /// differ (open-point barycentric lattice vs equispaced closed lattice), which
-/// changes the nodal values of every interpolant/projector.  In addition
-/// `fem_space::L2Space::new_with_basis` rejects `Pyramid5` outright
-/// (`crates/space/src/l2.rs`, "*L2Space currently supports Tri3/Quad4 (2D) and
-/// Tet4/Hex8 (3D)*"), so fem-rs has no L2 pyramid **space**: the element is
-/// reachable only through the assembly-time `ref_elem_vol*` lookups.
+/// changes the nodal values of every interpolant/projector.
 ///
-/// Porting surface for D340 (both MFEM arms share it): the Fuentes pyramid
-/// helpers `mu0/mu1` (`fe_pyramid.cpp`), `Poly_1D::CalcHomogenizedScaLegendre`
-/// (`fe_base.cpp`), the `OpenPoints`/`ClosedPoints` 1-D tables, a Vandermonde
-/// inverse (`DenseMatrix T; Ti.Factor(T)`, 1:1 with [`H1PyramidPk`]'s pattern),
-/// plus — for the Fuentes arm — the `(p+1)³` DOF numbering
-/// (`o = k(p+1)² + j(p+1) + i`) and L2-space layer support.  MFEM notes in
-/// `fe_l2.cpp:940` that the Fuentes-L2 basis is *not independent* on closed
-/// interpolation points for `p ≥ 1`, so closed requests are forced open in `z`.
+/// **D325/D340 status (round 47).**  MFEM's default L2 pyramid element is now
+/// ported as [`super::pyramid_l2::L2FuentesPyramidPk`]
+/// (`L2_FuentesPyramidElement`, `(p+1)³` DOFs, both `btype` arms), and
+/// `fem_space::L2Space` has a pyramid arm using it for `n_dofs`,
+/// `dof_coords`, `element_dofs` and `interpolate`; `DGMassInverse` reaches it
+/// as well (`assembly::dgmassinv::l2_ref_elem`).  What still routes a pyramid
+/// cell to *this* element is the **assembly-time** `ref_elem_vol_l2` lookup
+/// (`crates/assembly/src/assembler.rs`), so `Assembler::assemble_bilinear` and
+/// `GridFunction::compute_l2_error` on an L2 pyramid space panic on the DOF
+/// count mismatch (`index out of bounds: the len is 5 but the index is 5`).
+/// That file is outside the D325/D340 route's authorization; the exact change
+/// is written up in `tmp/d325/ARBITRATION_REQUEST.md`.
 pub struct PyramidPk {
     order: usize,
     layer_offset: Vec<usize>,

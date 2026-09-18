@@ -89,6 +89,101 @@ impl QuadFaceKey {
 /// `crates/assembly/src/assembler.rs` (`GeoPyrP1`, D304).
 const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
 
+// ─── D349: mixed-3-D entity tables ───────────────────────────────────────────
+
+/// `HexQk`'s own edge enumeration (vertex-index pairs) — the element-local DOF
+/// **position** order of the hex's 12 edge slots (aligned with the `HexQk`
+/// reference basis, cf. the tmop_form positional tests).  A permutation of
+/// [`HEX_MFEM_EDGES`] in groups of four.
+const HEX_QK_EDGES: [(usize, usize); 12] = [
+    (1, 5), (2, 6), (3, 7), (0, 4), (0, 3), (1, 2),
+    (5, 6), (4, 7), (0, 1), (3, 2), (7, 6), (4, 5),
+];
+
+/// `HexQk`'s face enumeration (vertex-index quads), face order
+/// xmin, xmax, ymin, ymax, zmin, zmax — the hex's 6 face slots.
+const HEX_QK_FACES: [[usize; 4]; 6] = [
+    [0, 3, 7, 4], [1, 2, 6, 5], [0, 1, 5, 4],
+    [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],
+];
+
+/// MFEM `Geometry::Constants<Geometry::CUBE>::Edges` (`fem/geom.cpp:1020`) —
+/// the order in which `FiniteElementSpace::Construct` first-touches the hex's
+/// edges, i.e. the order the global edge DOF ids are assigned in.
+const HEX_MFEM_EDGES: [(usize, usize); 12] = [
+    (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
+    (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
+];
+
+/// MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` (`fem/geom.cpp:1032`).
+const HEX_MFEM_FACES: [[usize; 4]; 6] = [
+    [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
+    [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
+];
+
+/// MFEM `Geometry::Constants<Geometry::PRISM>::FaceVert` (`fem/geom.cpp:1061`):
+/// two triangles (wound `(0, 2, 1)` and `(3, 4, 5)` — the bottom reversed) then
+/// three quadrilaterals.  The trailing entries of the triangular rows are
+/// padded with the last index; only the first 3/4 entries are meaningful.
+const PRISM_MFEM_FACES: [[usize; 4]; 5] = [
+    [0, 2, 1, 1], [3, 4, 5, 5], [0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5],
+];
+
+/// MFEM `Geometry::Constants<Geometry::PYRAMID>::Edges` (`fem/geom.cpp:1076`).
+const PYRAMID_MFEM_EDGES: [(usize, usize); 8] =
+    [(0, 1), (1, 2), (3, 2), (0, 3), (0, 4), (1, 4), (2, 4), (3, 4)];
+
+/// MFEM `Geometry::Constants<Geometry::PYRAMID>::FaceVert` (`fem/geom.cpp:1086`):
+/// the base square (reversed, `(3, 2, 1, 0)`) then the four triangles.
+const PYRAMID_MFEM_FACES: [[usize; 4]; 5] = [
+    [3, 2, 1, 0], [0, 1, 4, 4], [1, 2, 4, 4], [2, 3, 4, 4], [3, 0, 4, 4],
+];
+
+/// MFEM `Geometry::Constants<Geometry::TETRAHEDRON>::Edges` (`fem/geom.cpp:978`)
+/// — also the tet's DOF-block order in `H1_TetrahedronElement`.
+const TET_MFEM_EDGES: [(usize, usize); 6] =
+    [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+
+/// Element-local DOF slot of the mixed 3-D builder (D349): which entity the
+/// slot belongs to, in that element's own local vertex indices.
+///
+/// At order 2 — the only order the builder implements — no triangular face
+/// carries a DOF, so there is no triangular-face variant: a triangle's
+/// interior is empty in every MFEM H¹ triangle-backed element
+/// (`H1_TriangleElement`, and the triangular faces of the wedge/pyramid/tet).
+enum MixedSlot {
+    /// Local vertex index — the DOF is the mesh node itself.
+    Vertex(usize),
+    /// Local edge, MFEM edge-table vertex pair.
+    Edge(usize, usize),
+    /// Local quadrilateral face, MFEM `FaceVert` vertices.
+    QuadFace([usize; 4]),
+    /// Element-private interior DOF.
+    Interior,
+}
+
+/// [`get_edge_dofs_pk`] restricted to one DOF per edge (order 2).///
+/// The mixed 3-D builder (D349) numbers its entities by canonical key only:
+/// at `p = 2` every edge block holds exactly one DOF, so the edge's direction
+/// carries no information.  Used in place of `get_edge_dofs_pk` so the
+/// allocation order (element-major over MFEM's edge-table order) is visible at
+/// the call site.
+fn get_edge_dof2(
+    a: NodeId,
+    b: NodeId,
+    next: &mut DofId,
+    map: &mut HashMap<EdgeKey, Vec<DofId>>,
+) -> DofId {
+    let key = EdgeKey::new(a, b);
+    map.entry(key)
+        .or_insert_with(|| {
+            let d = *next;
+            *next += 1;
+            vec![d]
+        })[0]
+}
+
+
 // ─── D348: face-orientation transport ────────────────────────────────────────
 
 /// MFEM `Mesh::GetQuadOrientation(base, test)` (`mesh/mesh.cpp:7586-7634`): the
@@ -313,6 +408,11 @@ impl DofManager {
     /// - 2-D triangular meshes (`Tri3`) with `order = 2` or `order = 3`.
     /// - 3-D tetrahedral meshes (`Tet4`) with `order = 2` or `order = 3`.
     /// - Any order `>= 4` on simplicial meshes via the general `build_pk` path.
+    /// - **Mixed 3-D meshes** (hex + prism + pyramid + tet in one mesh) with
+    ///   `order = 2` — [`DofManager::build_mixed_3d`] (D349).  Higher orders on
+    ///   a mixed 3-D mesh are an explicit, documented gap: the single-type
+    ///   builders below are selected from *element 0's* node count and cannot
+    ///   be reused for a mesh of several geometries.
     ///
     /// On meshes with per-element geometry (geometrically periodic meshes,
     /// see [`MeshTopology::geometry_nodes`]) the DOF coordinate table is
@@ -370,6 +470,14 @@ impl DofManager {
 
     fn build<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
         let topo_dim = mesh.topological_dim() as usize;
+        // D349: a mesh that mixes 3-D element geometries cannot be built by any
+        // of the single-type builders below — they are selected from *element
+        // 0's* node count and would then index every element with that type's
+        // tables.  Order 1 is already handled (`build_p1` is vertex-only);
+        // order 2 has its own entity-numbering builder.
+        if topo_dim == 3 && Self::is_mixed_3d(mesh) && order >= 2 {
+            return Self::build_mixed_3d(mesh, order, pyr);
+        }
         match order {
             1 => Self::build_p1(mesh),
             2 => {
@@ -1158,16 +1266,10 @@ impl DofManager {
         // HexQk edge enumeration (vertex-index pairs), see HexQk::node_to_dof.
         // This is the element-local dof POSITION order (aligned with the
         // HexQk reference basis, cf. the tmop_form positional tests).
-        const EDGES: [(usize, usize); 12] = [
-            (1, 5), (2, 6), (3, 7), (0, 4), (0, 3), (1, 2),
-            (5, 6), (4, 7), (0, 1), (3, 2), (7, 6), (4, 5),
-        ];
+        const EDGES: [(usize, usize); 12] = HEX_QK_EDGES;
         // HexQk face enumeration (vertex-index quads), face order:
         // xmin, xmax, ymin, ymax, zmin, zmax.
-        const FACES: [[usize; 4]; 6] = [
-            [0, 3, 7, 4], [1, 2, 6, 5], [0, 1, 5, 4],
-            [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],
-        ];
+        const FACES: [[usize; 4]; 6] = HEX_QK_FACES;
         // MFEM's local hex topology (Geometry::Constants<Geometry::CUBE>):
         // Edges[12] and FaceVert[6].  Global dof ids follow MFEM
         // FiniteElementSpace::Construct — vertices, then ALL edge dofs, then
@@ -1177,14 +1279,8 @@ impl DofManager {
         // (interleaving faces/volumes with edges of later elements) misnumbers
         // them vs MFEM, which breaks reading MFEM `nodes` grid functions
         // (mesh-optimizer cube.mesh: det(J) -17.4 instead of 0.125).
-        const MFEM_EDGES: [(usize, usize); 12] = [
-            (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
-            (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
-        ];
-        const MFEM_FACES: [[usize; 4]; 6] = [
-            [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
-            [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
-        ];
+        const MFEM_EDGES: [(usize, usize); 12] = HEX_MFEM_EDGES;
+        const MFEM_FACES: [[usize; 4]; 6] = HEX_MFEM_FACES;
 
         // Phase 1: vertex + edge dofs (all edges before any face/volume dof).
         for e in 0..n_elems as u32 {
@@ -2680,6 +2776,337 @@ impl DofManager {
     /// numbering **bit-for-bit** whenever no key collision exists (≥3 cells
     /// per direction) — there the quotient only re-joins the covering images
     /// of seam entities that the folded build merged through the shared key.
+    // ─── D349: mixed 3-D meshes ──────────────────────────────────────────────
+
+    /// Whether the mesh mixes 3-D element geometries (D349) — e.g. the
+    /// hex + prism + pyramid + tet of `data/tinyzoo-3d.mesh`.
+    fn is_mixed_3d<M: MeshTopology>(mesh: &M) -> bool {
+        if mesh.topological_dim() != 3 || mesh.n_elements() == 0 {
+            return false;
+        }
+        let first = mesh.element_type(0);
+        (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first)
+    }
+
+    /// Mixed 3-D H¹ builder for **order 2** (D349).
+    ///
+    /// Before this function, an arbitrary-order `DofManager` on a mixed 3-D
+    /// mesh was dispatched on **element 0's** node count
+    /// ([`DofManager::build`]) and therefore ran the wrong type's builder over
+    /// the whole mesh: for `tinyzoo-3d.mesh` (element 0 is a hex) `p = 2` went
+    /// to [`DofManager::build_q2_hex`], whose 8-node indexing panics on the
+    /// prism with `index out of bounds: the len is 6 but the index is 6`.  Only
+    /// `p = 1` worked, through the vertex-only [`DofManager::build_p1`].
+    ///
+    /// This builder numbers the DOFs by **mesh entity**, so the same entity
+    /// reached from two different element types gets the same global ids.  The
+    /// global order follows MFEM's `FiniteElementSpace::Construct` phases —
+    /// vertices (the node ids), then *all* edge DOFs (element-major, each
+    /// element's edges in MFEM's `Geometry::Constants<…>::Edges` order), then
+    /// *all* face DOFs (element-major, each element's faces in `FaceVert`
+    /// order, triangular and quadrilateral faces in one stream), then the
+    /// element-private interiors in element order.  Verified against MFEM
+    /// 4.10's own numbering of `tinyzoo-3d.mesh` (`tmp/d347/space.txt`, the
+    /// `SPACE zoo p=2 pyr_type=1 vsize=46` block, plus its `POS` table) — the
+    /// per-type slot layouts themselves are the ones the single-type builders
+    /// above use, so a hex's or a pyramid's DOFs keep their existing meaning.
+    ///
+    /// **Scope (D349, honest gap):** order 2 only, and only the four linear
+    /// 3-D topologies (Hex8, Prism6, Pyramid5, Tet4).  At `p = 2` every
+    /// entity block holds at most one DOF, so no intra-entity orientation
+    /// transport is needed; from `p = 3` on the triangular-face barycentric
+    /// labels and the quadrilateral-face `TriDofOrd`/`QuadDofOrd` permutation
+    /// would have to be transported *between* element types, which is the
+    /// remaining work (`panic!` below states the gap explicitly rather than
+    /// running a wrong numbering).
+    fn build_mixed_3d<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
+        use fem_element::ReferenceElement;
+
+        assert!(
+            order == 2,
+            "DofManager: a mixed 3-D mesh is supported at order 1 (vertex DOFs, \
+             DofManager::build_p1) and order 2 (D349) only; order {order} is not \
+             implemented — see tmp/d325/EVIDENCE.md"
+        );
+        let p = order as usize;
+        let dim = 3usize;
+        let n_nodes = mesh.n_nodes();
+        let n_elems = mesh.n_elements();
+
+        // Per-element descriptor: the entity tables (MFEM's own order, used
+        // for the global allocation) and the element-local slot list (the
+        // single-type builder's slot order, so the assembler keeps pairing the
+        // same basis with the same slot).
+        struct Desc {
+            n_interior: usize,
+            slots: Vec<MixedSlot>,
+        }
+        let quad = |v: &[usize]| -> [usize; 4] { [v[0], v[1], v[2], v[3]] };
+        let desc = |e: u32| -> Desc {
+            let ns = mesh.element_nodes(e);
+            match ns.len() {
+                // Hex8: HexQk's positional slot order (edge block then face
+                // block), MFEM's tables for the allocation.
+                8 => Desc {
+                    n_interior: 1,
+                    slots: (0..8)
+                        .map(MixedSlot::Vertex)
+                        .chain(HEX_QK_EDGES.iter().map(|&(a, b)| MixedSlot::Edge(a, b)))
+                        .chain(HEX_QK_FACES.iter().map(|f| MixedSlot::QuadFace(*f)))
+                        .chain(std::iter::once(MixedSlot::Interior))
+                        .collect(),
+                },
+                // Prism6: `H1_WedgeElement`'s entity order; the two triangular
+                // faces hold no DOF at p = 2, and the three quadrilateral faces
+                // are prism faces 2, 3, 4.
+                6 => Desc {
+                    n_interior: 0,
+                    slots: (0..6)
+                        .map(MixedSlot::Vertex)
+                        .chain(
+                            fem_element::lagrange::PRISM_EDGES
+                                .iter()
+                                .map(|&[a, b]| MixedSlot::Edge(a, b)),
+                        )
+                        .chain((2..5).map(|f| MixedSlot::QuadFace(quad(&PRISM_MFEM_FACES[f]))))
+                        .collect(),
+                },
+                // Pyramid5: `H1_[Fuentes|Bergot]PyramidElement`'s entity order
+                // — vertices, 8 edges, the base quad, 4 triangles (no p = 2
+                // DOF), interior (1 for Fuentes, 0 for Bergot).
+                5 => {
+                    let edge_dofs = p - 1;
+                    let quad_dofs = (p - 1) * (p - 1);
+                    let tri_dofs = (p - 1) * (p - 2) / 2;
+                    let total = fem_element::lagrange::h1_pyramid_element(p, pyr).n_dofs();
+                    let n_interior = total - (5 + 8 * edge_dofs + quad_dofs + 4 * tri_dofs);
+                    Desc {
+                        n_interior,
+                        slots: (0..5)
+                            .map(MixedSlot::Vertex)
+                            .chain(
+                                PYRAMID_MFEM_EDGES
+                                    .iter()
+                                    .map(|&(a, b)| MixedSlot::Edge(a, b)),
+                            )
+                            .chain(std::iter::once(MixedSlot::QuadFace(quad(
+                                &PYRAMID_MFEM_FACES[0],
+                            ))))
+                            .chain((0..n_interior).map(|_| MixedSlot::Interior))
+                            .collect(),
+                    }
+                }
+                // Tet4: `H1_TetrahedronElement`'s entity order; the four
+                // triangular faces hold no DOF at p = 2.
+                4 => Desc {
+                    n_interior: 0,
+                    slots: (0..4)
+                        .map(MixedSlot::Vertex)
+                        .chain(TET_MFEM_EDGES.iter().map(|&(a, b)| MixedSlot::Edge(a, b)))
+                        .collect(),
+                },
+                other => panic!(
+                    "DofManager: mixed 3-D meshes support the four linear \
+                     topologies (4/5/6/8 nodes); element {e} has {other} nodes"
+                ),
+            }
+        };
+        let descs: Vec<Desc> = (0..n_elems as u32).map(desc).collect();
+
+        let mut edge_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
+        let mut quad_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
+        let mut next_dof = n_nodes as DofId;
+
+        // Phase A — every edge DOF, element-major in MFEM's edge-table order.
+        //
+        // No triangular-face DOF is allocated anywhere: at `p = 2` a triangle's
+        // interior is empty in every one of MFEM's H¹ triangle-backed elements
+        // (`H1_TriangleElement`, the prism's two `H1_WedgeElement` faces, the
+        // pyramid's and the tet's side faces), so the two phases below are the
+        // whole of the entity numbering.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            match ns.len() {
+                8 => for &(a, b) in HEX_MFEM_EDGES.iter() {
+                    get_edge_dof2(ns[a], ns[b], &mut next_dof, &mut edge_map);
+                },
+                6 => for &[a, b] in fem_element::lagrange::PRISM_EDGES.iter() {
+                    get_edge_dof2(ns[a], ns[b], &mut next_dof, &mut edge_map);
+                },
+                5 => for &(a, b) in PYRAMID_MFEM_EDGES.iter() {
+                    get_edge_dof2(ns[a], ns[b], &mut next_dof, &mut edge_map);
+                },
+                4 => for &(a, b) in TET_MFEM_EDGES.iter() {
+                    get_edge_dof2(ns[a], ns[b], &mut next_dof, &mut edge_map);
+                },
+                _ => unreachable!(),
+            }
+        }
+        // Phase B — every quadrilateral-face DOF, element-major in MFEM's
+        // `FaceVert` order (a prism's two triangular faces are skipped: they
+        // hold no `p = 2` DOF, so the stream is unaffected by their presence).
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            match ns.len() {
+                8 => {
+                    for f in &HEX_MFEM_FACES {
+                        quad_map
+                            .entry(QuadFaceKey::new(ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]))
+                            .or_insert_with(|| { let d = next_dof; next_dof += 1; vec![d] });
+                    }
+                }
+                6 => {
+                    for f in PRISM_MFEM_FACES.iter().skip(2) {
+                        quad_map
+                            .entry(QuadFaceKey::new(ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]))
+                            .or_insert_with(|| { let d = next_dof; next_dof += 1; vec![d] });
+                    }
+                }
+                5 => {
+                    let f = &PYRAMID_MFEM_FACES[0];
+                    quad_map
+                        .entry(QuadFaceKey::new(ns[f[0]], ns[f[1]], ns[f[2]], ns[f[3]]))
+                        .or_insert_with(|| { let d = next_dof; next_dof += 1; vec![d] });
+                }
+                4 => {}
+                _ => unreachable!(),
+            }
+        }
+        // Phase C — the element-private interiors, in element order.
+        let mut interior_start = Vec::with_capacity(n_elems + 1);
+        for d in descs.iter() {
+            interior_start.push(next_dof);
+            next_dof += d.n_interior as DofId;
+        }
+        interior_start.push(next_dof);
+        let n_dofs = next_dof as usize;
+
+        // Phase D — fill each element's slot list.
+        let mut elem_dof_offsets = Vec::with_capacity(n_elems + 1);
+        let mut dofs_flat: Vec<DofId> = Vec::with_capacity(n_nodes + n_dofs);
+        elem_dof_offsets.push(0);
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let d = &descs[e as usize];
+            let mut interior_k = 0usize;
+            for slot in &d.slots {
+                let id = match slot {
+                    MixedSlot::Vertex(v) => ns[*v],
+                    MixedSlot::Edge(a, b) => edge_map[&EdgeKey::new(ns[*a], ns[*b])][0],
+                    MixedSlot::QuadFace(v) => {
+                        quad_map[&QuadFaceKey::new(ns[v[0]], ns[v[1]], ns[v[2]], ns[v[3]])][0]
+                    }
+                    MixedSlot::Interior => {
+                        let k = interior_k;
+                        interior_k += 1;
+                        interior_start[e as usize] + k as DofId
+                    }
+                };
+                dofs_flat.push(id);
+            }
+            elem_dof_offsets.push(dofs_flat.len());
+        }
+
+        // Phase E — coordinates.  At p = 2 every non-vertex slot sits at the
+        // centroid of its entity (a vertex, an edge midpoint, a face centre),
+        // except the pyramid's interior node, which is the family's own
+        // reference position mapped through the linear pyramid (the same
+        // convention `build_pyramid_pk` uses).
+        let mut dof_coords = vec![0.0_f64; n_dofs * dim];
+        for n in 0..n_nodes as u32 {
+            let c = mesh.node_coords(n);
+            dof_coords[n as usize * dim..n as usize * dim + dim].copy_from_slice(c);
+        }
+        let centroid = |ids: &[NodeId], out: &mut [f64]| {
+            for v in out.iter_mut() {
+                *v = 0.0;
+            }
+            for &n in ids {
+                let c = mesh.node_coords(n);
+                for d in 0..dim {
+                    out[d] += c[d] / ids.len() as f64;
+                }
+            }
+        };
+        let mut buf = [0.0_f64; 3];
+        for (&key, dofs) in edge_map.iter() {
+            centroid(&[key.0, key.1], &mut buf);
+            dof_coords[dofs[0] as usize * dim..dofs[0] as usize * dim + dim]
+                .copy_from_slice(&buf);
+        }
+        for (&key, dofs) in quad_map.iter() {
+            centroid(&[key.0, key.1, key.2, key.3], &mut buf);
+            dof_coords[dofs[0] as usize * dim..dofs[0] as usize * dim + dim]
+                .copy_from_slice(&buf);
+        }
+        // Interiors: only pyramids have a non-centroid position (the Fuentes
+        // interior node / the Bergot stump node).
+        let pyramid_ref = if n_elems > 0 { Some(fem_element::lagrange::h1_pyramid_element(p, pyr)) } else { None };
+        let linear = fem_element::lagrange::pyramid::PyramidPk::new(1);
+        let mut phi = vec![0.0_f64; 5];
+        for e in 0..n_elems as u32 {
+            let d = &descs[e as usize];
+            if d.n_interior == 0 {
+                continue;
+            }
+            let ns = mesh.element_nodes(e);
+            for k in 0..d.n_interior {
+                let id = (interior_start[e as usize] + k as DofId) as usize;
+                match ns.len() {
+                    // Hex: the trilinear centre is the vertex centroid.
+                    8 => centroid(ns, &mut buf),
+                    // Pyramid: the family's own reference interior node through
+                    // the linear pyramid map (PyramidPk(1) layer slots).
+                    5 => {
+                        let re = pyramid_ref.as_ref().expect("pyramid reference element");
+                        let theta = &re.dof_coords()[5 + 8 * (p - 1) + (p - 1) * (p - 1) + k];
+                        linear.eval_basis(theta, &mut phi);
+                        buf = [0.0; 3];
+                        for (kk, &phik) in phi.iter().enumerate() {
+                            if phik == 0.0 {
+                                continue;
+                            }
+                            let xk = mesh.node_coords(ns[PYR_P1_SLOT_VERTEX[kk]]);
+                            for dd in 0..dim {
+                                buf[dd] += phik * xk[dd];
+                            }
+                        }
+                    }
+                    _ => unreachable!("mixed builder: interiors on a {}-node element", ns.len()),
+                }
+                dof_coords[id * dim..id * dim + dim].copy_from_slice(&buf);
+            }
+        }
+
+        // `boundary_face_dofs` (assembly/constraints.rs) reads the single
+        // mid-edge DOF of an order-2 space from `edge_dof_map` — mirror the
+        // one-entry edge vectors, exactly as `build_pyramid_pk` does.
+        let edge_dof_map: HashMap<EdgeKey, DofId> =
+            edge_map.iter().map(|(k, v)| (*k, v[0])).collect();
+
+        DofManager {
+            order,
+            n_dofs,
+            dofs_flat,
+            dofs_per_elem: 0,
+            elem_dof_offsets: Some(elem_dof_offsets),
+            dof_coords,
+            dim,
+            n_vertex_dofs: n_nodes,
+            edge_dof_map,
+            edge_dof2_map: HashMap::new(),
+            phys_to_vertex_dof: HashMap::new(),
+            edge_pk_map: edge_map,
+            face_pk_map: HashMap::new(),
+            quad_face_pk_map: HashMap::new(),
+            bubble_dof_start: n_nodes,
+            n_volume_dofs: 0,
+            elem_orders: None,
+            edge_variants: HashMap::new(),
+            face_variants: HashMap::new(),
+        }
+    }
+
     fn build_periodic<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
         let wrapper = UnfoldedPeriodicMesh { inner: mesh };
         let uf = Self::build(&wrapper, order, pyr);

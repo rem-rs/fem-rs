@@ -76,6 +76,27 @@ pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn Referen
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
             Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))
         }
+        // D334: the **curved**-pyramid geometry element (this table is only
+        // reached for high-order geometry, `g_order > 1` — straight pyramids
+        // take their own branch in `compute_l2_error_owned`).  It delegates to
+        // `fem_element::lagrange::h1_pyramid_element(g, PyramidBasisType::
+        // default())` — the one source of truth for the pyramid geometry
+        // element, the *same* call `crates/mesh/src/transformation.rs::
+        // curved_pyramid_geometry` (the D334 arm of `element_jacobian_at`) and
+        // `vector_assembler::geo_ref_elem_from_mesh`'s curved-pyramid arm make.
+        // It is the **Fuentes** family (`ScalarPyramid::DefaultType = 1`,
+        // `fe_pyramid.hpp:23`) because that is what
+        // `Mesh::set_curvature_pyramid5` writes the geometry table in (D347)
+        // and what `Mesh::element_jacobian` reads it with — one table, one
+        // family, no third hand-rolled pyramid map.  Before this arm the
+        // curved case panicked here: `ref_elem_vol: unsupported
+        // (element_type=Pyramid5, order=2)`.
+        (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
+            fem_element::lagrange::h1_pyramid_element(
+                o.max(1) as usize,
+                fem_element::lagrange::PyramidBasisType::default(),
+            )
+        }
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -379,14 +400,42 @@ pub struct GridFunction<'a, S: FESpace> {
     dofs: DofStorage<'a>,
 }
 
-/// Compute the L² projection of a scalar coefficient onto the FE space.
+/// Project a scalar coefficient onto the FE space — MFEM's
+/// `GridFunction::ProjectCoefficient`.
 ///
-/// Solves `M c = b` where `M` is the mass matrix and
-/// `b_i = ∫_{Ω} φ_i(x) f(x) dx`.
+/// MFEM's call is the **nodal interpolant** (`FiniteElement::Project` for a
+/// nodal space: `dof_i = f(x_i)` at the element's DOF nodes), *not* an L²
+/// projection.  fem-rs used to solve `M c = b` here while the consumers and the
+/// name assumed MFEM's operator (D345: `examples/mfem_ex24_discrete_ops.rs
+/// -p 0` was 3e-4 relative off C++ because the H¹ trial field was projected
+/// instead of interpolated; `examples/mfem_ex10_hyperelastic_dyn.rs` even
+/// documented the L² solve as "matching MFEM's ProjectCoefficient").
 ///
-/// # Returns
-/// The DOF coefficient vector `c` of length `space.n_dofs()`.
+/// Delegates to [`FESpace::interpolate`], the space's own definition of the
+/// interpolant (for a nodal space: evaluation at the space's DOF coordinates,
+/// which is exactly MFEM's `ProjectCoefficient`).  The L² projection that used
+/// to live here survives as [`project_coefficient_l2`] for the callers whose
+/// documented semantics *are* L²
+/// ([`GridFunction::from_projection`] / [`GridFunction::project_coefficient`]).
+///
+/// `quad_order` is unused by the interpolant (it is quadrature free) and is kept
+/// for signature compatibility with [`project_coefficient_l2`].
 pub fn project_coefficient<S: FESpace>(
+    space: &S,
+    coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
+    _quad_order: u8,
+) -> Vec<f64> {
+    space.interpolate(coeff).into_vec()
+}
+
+/// The `M c = b` L² projection `M` = mass matrix, `b_i = ∫ φ_i f dx`.
+///
+/// This is the operator [`project_coefficient`] used to be; it is kept (as a
+/// private helper) because [`GridFunction::from_projection`] and
+/// [`GridFunction::project_coefficient`] document L² semantics and their
+/// consumers are pinned on it.  Use [`project_coefficient`] for MFEM's
+/// `ProjectCoefficient`.
+fn project_coefficient_l2<S: FESpace>(
     space: &S,
     coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync),
     quad_order: u8,
@@ -547,7 +596,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     /// `b_i = ∫ φ_i f dx`. Unlike `interpolate` (which evaluates `f` at
     /// nodal points), this produces the optimal L² approximation.
     pub fn from_projection(space: &'a S, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) -> Self {
-        let dofs = project_coefficient(space, coeff, quad_order);
+        let dofs = project_coefficient_l2(space, coeff, quad_order);
         GridFunction::new(space, dofs)
     }
 
@@ -558,7 +607,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
     /// `GridFunction::ProjectCoefficient` behaves the same way: it does not
     /// reallocate).
     pub fn project_coefficient(&mut self, coeff: &(dyn Fn(&[f64]) -> f64 + Send + Sync), quad_order: u8) {
-        let projected = project_coefficient(self.space, coeff, quad_order);
+        let projected = project_coefficient_l2(self.space, coeff, quad_order);
         self.dofs.as_mut_slice().copy_from_slice(&projected);
     }
 
@@ -1276,6 +1325,29 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                 None
             };
 
+            // D340: a straight pyramid is not a simplex, and the affine
+            // `simplex_jacobian` contraction below cannot serve it — the
+            // `(3, 5)` arm of its axis-node table takes the `_ => &[1, 2, 3]`
+            // fallback, so `J = [v1 − v0, v2 − v0, v3 − v0]` is built from
+            // three *base* edges, which are coplanar for every pyramid; hence
+            // `det J ≡ 0`, every quadrature weight was 0 and
+            // `compute_l2_error` returned exactly `0.0` for every field
+            // (`phys_coords` was wrong for the same reason).  Straight pyramid
+            // cells therefore take their own branch, through the very map
+            // `L2Space::build_pyramid` places the space's DOFs with
+            // (`fem_mesh::transformation::element_jacobian_at`, D331's
+            // layer-slot permutation included) — so the error metric and the
+            // interpolation share one geometry source and cannot disagree.
+            // Curved pyramids (`geom_order > 1`) keep the `use_ho_geo` branch
+            // they had; see `tmp/d325/ARBITRATION_REQUEST.md` for the
+            // measured state of that path.
+            let pyramid_geo = matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13)
+                && g_order <= 1
+                && !is_surface;
+
+            // (Unused for `use_iso_vol` cells and for the straight pyramids
+            // above, whose per-point geometry comes from their own branch —
+            // exactly as the Quad4/Hex8 isoparametric path already ignores it.)
             let (jac, det_j) = simplex_jacobian(mesh, nodes, dim);
             let x0 = mesh.node_coords(nodes[0]);
 
@@ -1354,6 +1426,16 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     let (jac, det_j, xp) =
                         iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
                     (quad.weights[q] * det_j.abs(), xp)
+                } else if pyramid_geo {
+                    // D340: straight pyramid — the linear (rational collapsed)
+                    // pyramid map, from the same helper `L2Space::build_pyramid`
+                    // places this space's DOFs with.  `simplex_jacobian` and
+                    // `phys_coords` are deliberately *not* used here: they are
+                    // the simplex/tensor contraction and are singular for a
+                    // pyramid (see the note where `pyramid_geo` is defined).
+                    let (j, xp) =
+                        fem_mesh::transformation::element_jacobian_at(mesh, e, xi, dim);
+                    (quad.weights[q] * j.determinant().abs(), xp)
                 } else if is_surface {
                     let w = quad.weights[q] * det_j.abs();
                     let xp = surface_phys_coords(x0, &e1_3d, &e2_3d, xi);
@@ -1856,52 +1938,117 @@ pub fn project_bdr_coefficient_tangent_2d(
     }
 }
 
-// ─── HCurl L² projection ───────────────────────────────────────────────────
+// ─── HCurl projection ──────────────────────────────────────────────────────
 
-/// Project a vector function onto H(curl) via the mass-matrix solve
-/// `M · u = b`, where `b_i = ∫ f(x) · φ_i(x) dx`.
+/// Does `fem_space::HCurlSpace::interpolate_vector` — the crate's MFEM
+/// `Project_ND` engine (the point-value/dual interpolant: edge DOFs
+/// `Φ(y_j)·τ` at the Gauss-Legendre edge nodes, face/interior DOFs at the
+/// element's `FE::Nodes` points) — cover this element/order pair for a mesh of
+/// dimension `dim`?
 ///
-/// Equivalent to MFEM's `GridFunction::ProjectCoefficient` for ND spaces.
-/// The coefficient closure `f` receives `(x_phys, out)` and fills `out[0..dim]`.
+/// Mirrors the support asserted inside that engine (`HCurlSpace::new` accepts
+/// Tri3/Tri6, Quad4/Quad8, Tet4/Tet10, Hex8/Hex20, and ND1 on the edge-based
+/// prism/pyramid families; the NDk face/interior blocks only exist for
+/// Tri/Quad in 2-D and Tet/Hex in 3-D).  Deliberately conservative: anything
+/// not listed keeps the historical L² projection, so a space the engine cannot
+/// serve degrades instead of panicking.
+fn hcurl_interpolant_available(et: ElementType, dim: usize, order: u8) -> bool {
+    match (dim, et) {
+        (2, ElementType::Tri3 | ElementType::Tri6) => true,
+        (2, ElementType::Quad4 | ElementType::Quad8) => true,
+        (3, ElementType::Tet4 | ElementType::Tet10) => true,
+        (3, ElementType::Hex8 | ElementType::Hex20) => true,
+        // ND1 is edge-only, so the prism/pyramid families are served at order 1.
+        (3, ElementType::Prism6 | ElementType::Pyramid5) => order == 1,
+        _ => false,
+    }
+}
+
+/// The `M·u = b` L² projection shared by the two public helpers below; kept for
+/// element/order pairs without an `interpolate_vector` engine (see
+/// [`hcurl_interpolant_available`]).
+fn project_hcurl_l2<M: MeshTopology>(
+    nd_space: &HCurlSpace<M>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+    dim: usize,
+    what: &str,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(nd_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(nd_space, &[&src], quad_order);
+    let mut u = vec![0.0; nd_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).unwrap_or_else(|e| panic!("HCurl {what} L² projection CG solve: {e}"));
+    let _ = dim;
+    u
+}
+
+/// Project a vector function onto H(curl) for a 3-D mesh — the fem-rs mirror of
+/// MFEM's `GridFunction::ProjectCoefficient` on an ND space.
+///
+/// That MFEM call is **`Project_ND`**: the nodal/dual *interpolant* whose DOFs
+/// are the point-value functionals `Φ(y_i)·τ_i` at the element's DOF nodes, not
+/// an L² projection.  The helper used to solve `M u = b` while its doc claimed
+/// `ProjectCoefficient` (D344); it now delegates to
+/// [`HCurlSpace::interpolate_vector`], the same engine the library's H(curl)
+/// interpolation paths use.  Element/order pairs outside that engine keep the
+/// L² projection.
+///
+/// `quad_order` is unused by the interpolant (quadrature free) and is kept for
+/// signature compatibility with the fallback path.
 pub fn project_hcurl_coefficient(
     nd_space: &HCurlSpace<fem_mesh::Mesh<3>>,
     coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
     quad_order: u8,
 ) -> Vec<f64> {
-    use crate::vector_assembler::VectorAssembler;
-    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
-    use crate::coefficient::FnVectorCoeff;
-    use fem_solver::{solve_cg, SolverConfig};
+    use fem_space::fe_space::FESpace;
+    use fem_mesh::topology::MeshTopology;
 
-    let mass = VectorMassIntegrator { alpha: 1.0 };
-    let m = VectorAssembler::assemble_bilinear(nd_space, &[&mass], quad_order);
-    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
-    let rhs = VectorAssembler::assemble_linear(nd_space, &[&src], quad_order);
-    let mut u = vec![0.0; nd_space.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
-    solve_cg(&m, &rhs, &mut u, &cfg).expect("HCurl L² projection CG solve");
-    u
+    let mesh = nd_space.mesh();
+    let order = nd_space.order();
+    let interpolable = (0..mesh.n_elements() as u32)
+        .all(|e| hcurl_interpolant_available(mesh.element_type(e), 3, order));
+    if interpolable {
+        let f = |x: &[f64]| {
+            let mut v = vec![0.0; 3];
+            coeff(x, &mut v);
+            v
+        };
+        return nd_space.interpolate_vector(&f).into_vec();
+    }
+    project_hcurl_l2(nd_space, coeff, quad_order, 3, "3-D")
 }
 
-/// 2-D variant: project a vector function onto H(curl) for a 2-D mesh.
+/// 2-D variant of [`project_hcurl_coefficient`] — MFEM's `Project_ND` for a
+/// 2-D mesh (D344).
 pub fn project_hcurl_coefficient_2d(
     nd_space: &HCurlSpace<fem_mesh::Mesh<2>>,
     coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
     quad_order: u8,
 ) -> Vec<f64> {
-    use crate::vector_assembler::VectorAssembler;
-    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
-    use crate::coefficient::FnVectorCoeff;
-    use fem_solver::{solve_cg, SolverConfig};
+    use fem_space::fe_space::FESpace;
+    use fem_mesh::topology::MeshTopology;
 
-    let mass = VectorMassIntegrator { alpha: 1.0 };
-    let m = VectorAssembler::assemble_bilinear(nd_space, &[&mass], quad_order);
-    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
-    let rhs = VectorAssembler::assemble_linear(nd_space, &[&src], quad_order);
-    let mut u = vec![0.0; nd_space.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
-    solve_cg(&m, &rhs, &mut u, &cfg).expect("HCurl 2-D L² projection CG solve");
-    u
+    let mesh = nd_space.mesh();
+    let order = nd_space.order();
+    let interpolable = (0..mesh.n_elements() as u32)
+        .all(|e| hcurl_interpolant_available(mesh.element_type(e), 2, order));
+    if interpolable {
+        let f = |x: &[f64]| {
+            let mut v = vec![0.0; 2];
+            coeff(x, &mut v);
+            v
+        };
+        return nd_space.interpolate_vector(&f).into_vec();
+    }
+    project_hcurl_l2(nd_space, coeff, quad_order, 2, "2-D")
 }
 
 /// Does `fem_space::HDivSpace::interpolate_vector` — the crate's verified
