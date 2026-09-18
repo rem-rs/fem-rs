@@ -327,9 +327,19 @@ impl<M: MeshTopology> HDivSpace<M> {
                 order <= 2,
                 "HDivSpace: Tet RT supports orders 0, 1, and 2"
             ),
+            // D342: MFEM 4.10 imposes NO order bound on the hex RT element
+            // (`RT_FECollection`'s ctor only verifies `p >= 0`,
+            // `fem/fe_coll.cpp:2531`, and `RT_HexahedronElement`
+            // (`fem/fe/fe_rt.cpp:326`) is generic in `p`: the face frames, the
+            // interior enumeration and the `i <= p/2` orientation flips are all
+            // plain `p`-loops).  The bound here is the same conservative house
+            // limit as the 2-D quad arm (0..=6), because `HexRTk` and the
+            // `HDivSpace` hex machinery are likewise order-generic (verified
+            // against an MFEM RT3 dump at `hex_rtk/mfem_gl_dump.rs` + the
+            // order-generic D342 tests).
             (3, ElementType::Hex8) => assert!(
-                order <= 2,
-                "HDivSpace: Hex RT supports orders 0, 1, and 2"
+                order <= 6,
+                "HDivSpace: Hex RT supports orders 0..=6 (HexRTk)"
             ),
             (3, ElementType::Prism6) => assert!(
                 order <= 1,
@@ -1265,8 +1275,9 @@ impl<M: MeshTopology> HDivSpace<M> {
 /// coincide with MFEM `Project_RT` (up to fem-rs' unnormalised-normal scaling).
 ///
 /// Supported by this engine: RT0/RT1/RT2 on triangles, RTk on quads,
-/// RT0/RT1/RT2 on tets, RT0..2 on hexes, RT0 on prisms.  BDM and pyramids are
-/// served by the legacy path.
+/// RT0/RT1/RT2 on tets, RT0..6 on hexes (D342), RT0 on prisms.  BDM and
+/// pyramids are served by the legacy path.  The authoritative table is
+/// [`hdiv_interpolant_available`].
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         // Combinations whose dof values must keep the historical
@@ -1289,16 +1300,11 @@ impl<M: MeshTopology> HDivSpace<M> {
         for e in 0..self.mesh.n_elements() as u32 {
             let et = self.mesh.element_type(e);
             let order = self.order;
-            let supported = matches!(
-                (et, order),
-                (ElementType::Tri3 | ElementType::Tri6, 0..=2)
-                    | (ElementType::Quad4, 0..=6)
-                    | (ElementType::Tet4 | ElementType::Tet10, 0..=2)
-                    | (ElementType::Hex8, 0..=2)
-                    | (ElementType::Prism6, 0)
-            );
+            // D346: the support table lives in `hdiv_interpolant_available`
+            // (shared with the assembly-side fallback switch) instead of a
+            // private `matches!` here — same condition, one definition.
             assert!(
-                supported,
+                hdiv_interpolant_available(et, order),
                 "HDivSpace::interpolate_vector: RT order {order} on {et:?} is not supported \
                  (prism RTk with k>=1 and BDM are unsupported)"
             );
@@ -1866,6 +1872,40 @@ impl<M: MeshTopology> HDivSpace<M> {
 }
 
 // ─── Interpolation dual tables (D28) ────────────────────────────────────────
+
+/// Does [`HDivSpace::interpolate_vector`] — the crate's verified MFEM
+/// `Project_RT` engine (D289) — cover this element/order pair?
+///
+/// D346: this is the *single* source of truth for the engine's support table.
+/// It used to live in `fem_assembly::postproc::grid_function` (as
+/// `hdiv_interpolant_available`) next to a second, hand-maintained copy of the
+/// same list, and it is exactly the condition
+/// [`interpolate_vector`](HDivSpace::interpolate_vector) asserts on — the
+/// function is called by that assert, so the two cannot drift any more.
+///
+/// The predicate is deliberately conservative: the assembly-side caller
+/// (`project_hdiv_coefficient_2d/3d`) uses it to pick between the interpolant
+/// and its historical L²-projection fallback, so a pair the engine cannot serve
+/// degrades instead of panicking.  Keep it *no looser* than the space's own
+/// construction caps (`validate_order`): accepting a pair here that
+/// `HDivSpace::new` rejects would only move the panic.
+///
+/// D342: hex RT is `0..=6` on both sides now (MFEM 4.10 has no order bound on
+/// `RT_HexahedronElement`, and `HexRTk`/`interp_rows`/`fill_dual_matrix` are
+/// order-generic; the nodal-GL dual matrix stays diagonal at every order).
+pub fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => order <= 2,
+        ElementType::Quad4 => order <= 6,
+        ElementType::Tet4 | ElementType::Tet10 => order <= 2,
+        // D342: was `order <= 2`.
+        ElementType::Hex8 => order <= 6,
+        ElementType::Prism6 => order == 0,
+        // Prism RT1 / pyramid RTk(≤1) construct a space but are served, if at
+        // all, by the legacy canonical-moment engine — keep the L² path.
+        _ => false,
+    }
+}
 
 /// One reference-space interpolation functional: a pointwise flux sample
 /// `v_hat(xi) · nk` at reference point `xi` with reference normal `nk`

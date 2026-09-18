@@ -60,7 +60,7 @@
 //! Within each face block the two free (open) indices run (i outer, j inner);
 //! the closed factor is anchored at the face's endpoint GLL node.
 
-use crate::gll_basis::{gl_nodes, ClosedBasis};
+use crate::gll_basis::{gl_nodes, gll_nodes, ClosedBasis};
 use crate::nedelec::hex_ndk::open_basis;
 use crate::reference::VectorReferenceElement;
 
@@ -505,7 +505,23 @@ impl VectorReferenceElement for HexRTk {
         // Interior DOFs (k >= 1), mirroring the eval blocks: the closed mode
         // in one direction sits at the interior GLL nodes, the two open modes
         // at the Gauss-Legendre (open) points.
-        let glc = gl_nodes(m + 1);
+        //
+        // D351 (pre-existing, found while working D342): the closed-direction
+        // node must come from the *GaussLobatto* family of the `k+2`-point rule
+        // — MFEM `RT_HexahedronElement`'s
+        // `Nodes.IntPoint(idx).Set3(cp[i], op[j], op[k])` with
+        // `cp = poly1d.ClosedPoints(p + 1, cb_type)` (`fem/fe/fe_rt.cpp:437`),
+        // where `i` runs `0..=p+1` (`fe_rt.cpp:431-434`, one entry per slot of
+        // the `p+2`-wide closed axis) so `cp` must supply `p+2` points
+        // — because that is the node the closed GLL basis `ClosedBasis::new(k+1)`
+        // is nodal at (and the node `HDivSpace::interp_rows` samples).  The
+        // old code took the GaussLegendre node (`gl_nodes(k+2)[i]`) instead,
+        // which is a *different* point for every k >= 2 while coinciding at
+        // k <= 1; sibling elements do it the MFEM way (`HexNDk::dof_layout`
+        // `gll_nodes`, `QuadRTk::dof_coords` `gll_nodes(k + 2)`).  No RT
+        // assembly path reads these coordinates (the interpolation engine and
+        // the space use their own tables), so this is a labelling fix.
+        let glc = gll_nodes(m);
         for l in 0..m {
             for j in 0..m {
                 for i in 1..=k {
@@ -571,11 +587,19 @@ mod tests {
         assert_eq!(HexRTk::new(0).n_dofs(), 6);
         assert_eq!(HexRTk::new(1).n_dofs(), 36);
         assert_eq!(HexRTk::new(2).n_dofs(), 108);
+        // D342: `3(p+1)^2(p+2)` — MFEM `RT_HexahedronElement`'s
+        // `3*(p+1)*(p+1)*(p+2)` ctor argument, orders 3..=6 (the range the
+        // space cap now allows).
+        assert_eq!(HexRTk::new(3).n_dofs(), 240);
+        assert_eq!(HexRTk::new(4).n_dofs(), 450);
+        assert_eq!(HexRTk::new(5).n_dofs(), 756);
+        assert_eq!(HexRTk::new(6).n_dofs(), 1176);
     }
 
     #[test]
     fn finite() {
-        for k in 0..=2 {
+        // D342: every order the space cap allows, both open-basis variants.
+        for k in 0..=6 {
             let e = HexRTk::new(k);
             let n = e.n_dofs();
             let mut v = vec![0.0; n * 3];
@@ -670,7 +694,11 @@ mod tests {
     /// Divergence consistency: analytic div vs central finite difference.
     #[test]
     fn div_matches_finite_difference() {
-        for k in 0..=2 {
+        // D342: the order-generic derivative chains are also exercised above
+        // the old hex cap (k = 3..=6) — the `interior` blocks grow as `k(k+1)^2`
+        // per component, so the closed-index flip rule `i <= k/2` and the
+        // interior enumeration are covered at both parities.
+        for k in 0..=6 {
             let e = HexRTk::new(k);
             let n = e.n_dofs();
             let eps = 1e-6;
@@ -711,7 +739,9 @@ mod tests {
     /// Curl consistency: analytic curl vs central finite difference.
     #[test]
     fn curl_matches_finite_difference() {
-        for k in 0..=2 {
+        // D342: extended to the full newly-allowed order range (see
+        // `div_matches_finite_difference`).
+        for k in 0..=6 {
             let e = HexRTk::new(k);
             let n = e.n_dofs();
             let eps = 1e-6;
@@ -770,11 +800,18 @@ mod tests {
     /// unit cube `V_femrs·4 = V_mfem` and `div_femrs·8 = div_mfem` (two
     /// `[-1,1]`-pulled-back open factors of scale 1/2 per tensor mode; the
     /// divergence adds the `d/dξ = ½ d/dt` chain on the closed factor).
+    ///
+    /// D342 extends the loop to `k = 3` (the first order the space cap used to
+    /// reject); the table was regenerated with the identical probe/points and
+    /// is verified by the same per-slot comparison, so the `×4`/`×8`
+    /// normalisation is confirmed at the newly-enabled order too (a wrong
+    /// constant factor cannot survive a *value* comparison — see
+    /// [`d342_rt_scaling_factors_measured`] for the measured ratios).
     #[test]
     fn rt_gl_matches_mfem_nodal_dump() {
         // MFEM unit-cube sample points -> fem-rs reference `2t - 1`.
         let pts = [[0.65_f64, 0.7, 0.75], [0.36, 0.71, 0.44]];
-        for k in 1..=2usize {
+        for k in 1..=3usize {
             let e = HexRTk::new_gauss_legendre(k);
             let n = e.n_dofs();
             let mut v = vec![0.0_f64; n * 3];
@@ -802,6 +839,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// D342: the unit-cube scaling constants `V_femrs·4 = V_mfem` and
+    /// `div_femrs·8 = div_mfem` are *measured* ratios, not assumed ones — for
+    /// every slot/component whose fem-rs value is not negligible the quotient
+    /// must be exactly 4 (resp. 8) to 1e-12 relative.  This is the independent
+    /// check that the D236 convention carries over unchanged to the newly
+    /// enabled order: any order-dependent or wrong global factor (1, 2, 16)
+    /// would show up as a different quotient, while a *reconstruction* test
+    /// alone could not see it (the dual matrix is built from the same basis,
+    /// so a global factor cancels).
+    #[test]
+    fn d342_rt_scaling_factors_measured() {
+        let pts = [[0.65_f64, 0.7, 0.75], [0.36, 0.71, 0.44]];
+        let mut worst_v: f64 = 0.0;
+        let mut worst_x: f64 = 0.0;
+        let mut n_cmp = 0usize;
+        for k in 1..=3usize {
+            let e = HexRTk::new_gauss_legendre(k);
+            let n = e.n_dofs();
+            let mut v = vec![0.0_f64; n * 3];
+            let mut d = vec![0.0_f64; n];
+            for (q, t) in pts.iter().enumerate() {
+                let xi = [2.0 * t[0] - 1.0, 2.0 * t[1] - 1.0, 2.0 * t[2] - 1.0];
+                e.eval_basis_vec(&xi, &mut v);
+                e.eval_div(&xi, &mut d);
+                for (i, row) in mfem_gl_dump::v(k, q).iter().enumerate() {
+                    for c in 0..3 {
+                        let rust = v[i * 3 + c];
+                        if rust.abs() < 1e-9 {
+                            continue;
+                        }
+                        worst_v = worst_v.max((row[c] / rust - 4.0).abs() / 4.0);
+                        n_cmp += 1;
+                    }
+                }
+                for (i, want) in mfem_gl_dump::div(k, q).iter().enumerate() {
+                    if d[i].abs() < 1e-9 {
+                        continue;
+                    }
+                    worst_x = worst_x.max((want / d[i] - 8.0).abs() / 8.0);
+                    n_cmp += 1;
+                }
+            }
+        }
+        // Ratio deviations are limited only by the `%.17g` round-trip of the
+        // dump (~1e-16); the count is printed so the sample cannot silently
+        // thin out.
+        println!(
+            "D342 measured unit-cube scaling: V ratio = 4 +- {worst_v:.3e}, \
+             div ratio = 8 +- {worst_x:.3e} over {n_cmp} entries"
+        );
+        assert!(n_cmp > 1000, "sample too thin: {n_cmp} entries");
+        assert!(worst_v < 1e-12, "V_mfem/V_femrs deviates from 4 by {worst_v}");
+        assert!(worst_x < 1e-12, "div_mfem/div_femrs deviates from 8 by {worst_x}");
     }
 
     /// At order 0 both open-basis variants span the same MFEM tensor functions
@@ -903,7 +995,8 @@ mod tests {
     /// IntegratedGLL ones).
     #[test]
     fn rt_gl_div_curl_match_finite_difference() {
-        for k in 0..=2usize {
+        // D342: extended to the full newly-allowed order range.
+        for k in 0..=6usize {
             let e = HexRTk::new_gauss_legendre(k);
             let n = e.n_dofs();
             let eps = 1e-6;

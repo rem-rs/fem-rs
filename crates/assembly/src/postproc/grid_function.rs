@@ -1907,22 +1907,19 @@ pub fn project_hcurl_coefficient_2d(
 /// Does `fem_space::HDivSpace::interpolate_vector` — the crate's verified
 /// MFEM `Project_RT` engine (D289) — cover this element/order pair?
 ///
-/// Mirrors the support list asserted inside that engine; keep the two in sync
-/// (D342).  The predicate is deliberately conservative: anything not listed
-/// falls back to the historical L²-projection path below, so a space the
-/// engine cannot serve degrades instead of panicking.
+/// D346: the table moved into the space crate
+/// ([`fem_space::hdiv::hdiv_interpolant_available`]) and is the *same*
+/// predicate the engine asserts on, so the two can no longer drift.  Behaviour
+/// is unchanged for every pair the space can build today: the space-side cap
+/// (`HDivSpace::validate_order`) and this table answer identically — the only
+/// widening is D342's hex `order <= 2` -> `order <= 6`, and those orders used
+/// to panic in `HDivSpace::new` before any caller could reach this predicate.
+///
+/// The predicate stays deliberately conservative: anything not listed falls
+/// back to the historical L²-projection path below, so a space the engine
+/// cannot serve degrades instead of panicking.
 fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
-    match et {
-        // [`fem_space::HDivSpace::interpolate_vector`]'s `supported` list.
-        ElementType::Tri3 | ElementType::Tri6 => order <= 2,
-        ElementType::Quad4 => order <= 6,
-        ElementType::Tet4 | ElementType::Tet10 => order <= 2,
-        ElementType::Hex8 => order <= 2,
-        ElementType::Prism6 => order == 0,
-        // Prism RT1 / pyramid RTk(≤1) construct a space but are served, if at
-        // all, by the legacy canonical-moment engine — keep the L² path.
-        _ => false,
-    }
+    fem_space::hdiv::hdiv_interpolant_available(et, order)
 }
 
 /// The `M·u = b` L² projection shared by the two public helpers below; kept
