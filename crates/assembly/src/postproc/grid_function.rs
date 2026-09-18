@@ -1904,51 +1904,116 @@ pub fn project_hcurl_coefficient_2d(
     u
 }
 
-/// Project a vector function onto H(div) for a 2-D mesh.
+/// Does `fem_space::HDivSpace::interpolate_vector` — the crate's verified
+/// MFEM `Project_RT` engine (D289) — cover this element/order pair?
 ///
-/// Computes the L² projection by solving `M · u = b` where `M` is the
-/// H(div) mass matrix and `b_i = ∫ f(x) · φ_i(x) dx`.
+/// Mirrors the support list asserted inside that engine; keep the two in sync
+/// (D342).  The predicate is deliberately conservative: anything not listed
+/// falls back to the historical L²-projection path below, so a space the
+/// engine cannot serve degrades instead of panicking.
+fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
+    match et {
+        // [`fem_space::HDivSpace::interpolate_vector`]'s `supported` list.
+        ElementType::Tri3 | ElementType::Tri6 => order <= 2,
+        ElementType::Quad4 => order <= 6,
+        ElementType::Tet4 | ElementType::Tet10 => order <= 2,
+        ElementType::Hex8 => order <= 2,
+        ElementType::Prism6 => order == 0,
+        // Prism RT1 / pyramid RTk(≤1) construct a space but are served, if at
+        // all, by the legacy canonical-moment engine — keep the L² path.
+        _ => false,
+    }
+}
+
+/// The `M·u = b` L² projection shared by the two public helpers below; kept
+/// only for element/order pairs without an `interpolate_vector` engine (see
+/// [`hdiv_interpolant_available`]).
+fn project_hdiv_l2<M: MeshTopology>(
+    rt_space: &HDivSpace<M>,
+    coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
+    quad_order: u8,
+    what: &str,
+) -> Vec<f64> {
+    use crate::vector_assembler::VectorAssembler;
+    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
+    use crate::coefficient::FnVectorCoeff;
+    use fem_solver::{solve_cg, SolverConfig};
+
+    let mass = VectorMassIntegrator { alpha: 1.0 };
+    let m = VectorAssembler::assemble_bilinear(rt_space, &[&mass], quad_order);
+    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
+    let rhs = VectorAssembler::assemble_linear(rt_space, &[&src], quad_order);
+    let mut u = vec![0.0; rt_space.n_dofs()];
+    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
+    solve_cg(&m, &rhs, &mut u, &cfg).unwrap_or_else(|e| panic!("HDiv {what} L² projection CG solve: {e}"));
+    u
+}
+
+/// Project a vector function onto H(div) for a 2-D mesh — the fem-rs mirror of
+/// MFEM's `GridFunction::ProjectCoefficient` on an RT space.
 ///
-/// Equivalent to MFEM's `GridFunction::ProjectCoefficient` for RT spaces.
+/// That MFEM call is **`Project_RT`** for the default (`GaussLobatto`,
+/// `GaussLegendre`) `RT_FECollection`: the nodal/dual *interpolant*
+/// `dof_i = nk_i·adj(J)·u(x_i)`, whose dofs are point values at the element's
+/// dof nodes — *not* an L² projection.  The distinction matters wherever the
+/// projected field is differentiated: only the interpolant satisfies MFEM's
+/// commuting diagram `div ∘ I = P_L2 ∘ div`, which is what makes ex24's mixed
+/// solve land on its exact-projection leg (C++ `errSol == errProj`).  The L²
+/// projection differs by `O(h^{k+2})` in the dofs and the divergence amplifies
+/// that (D337: ex24 hex `-p 2 -o 2` errSol 1.7e-3 / `-o 3` 2.4e-2 relative
+/// above C++ even after the L²-error basis fix).
+///
+/// Delegates to [`HDivSpace::interpolate_vector`] (D289-verified
+/// `Project_RT`); combinations outside that engine keep the L² projection.
+/// `quad_order` is unused by the interpolant (quadrature free) and is kept for
+/// signature compatibility with the fallback path.
 pub fn project_hdiv_coefficient_2d(
     rt_space: &HDivSpace<fem_mesh::Mesh<2>>,
     coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
     quad_order: u8,
 ) -> Vec<f64> {
-    use crate::vector_assembler::VectorAssembler;
-    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
-    use crate::coefficient::FnVectorCoeff;
-    use fem_solver::{solve_cg, SolverConfig};
+    use fem_space::fe_space::FESpace;
+    use fem_mesh::topology::MeshTopology;
 
-    let mass = VectorMassIntegrator { alpha: 1.0 };
-    let m = VectorAssembler::assemble_bilinear(rt_space, &[&mass], quad_order);
-    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
-    let rhs = VectorAssembler::assemble_linear(rt_space, &[&src], quad_order);
-    let mut u = vec![0.0; rt_space.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
-    solve_cg(&m, &rhs, &mut u, &cfg).expect("HDiv 2-D L² projection CG solve");
-    u
+    let mesh = rt_space.mesh();
+    let order = rt_space.order();
+    let interpolable = (0..mesh.n_elements() as u32)
+        .all(|e| hdiv_interpolant_available(mesh.element_type(e), order));
+    if interpolable {
+        let f = |x: &[f64]| {
+            let mut v = vec![0.0; 2];
+            coeff(x, &mut v);
+            v
+        };
+        return rt_space.interpolate_vector(&f).into_vec();
+    }
+    project_hdiv_l2(rt_space, coeff, quad_order, "2-D")
 }
 
-/// Project a vector function onto H(div) for a 3-D mesh.
+/// Project a vector function onto H(div) for a 3-D mesh — see
+/// [`project_hdiv_coefficient_2d`] for why this is MFEM's `Project_RT`
+/// interpolant and not an L² projection (D337).
 pub fn project_hdiv_coefficient_3d(
     rt_space: &HDivSpace<fem_mesh::Mesh<3>>,
     coeff: &(dyn Fn(&[f64], &mut [f64]) + Send + Sync),
     quad_order: u8,
 ) -> Vec<f64> {
-    use crate::vector_assembler::VectorAssembler;
-    use crate::standard::{VectorMassIntegrator, VectorDomainLFIntegrator};
-    use crate::coefficient::FnVectorCoeff;
-    use fem_solver::{solve_cg, SolverConfig};
+    use fem_space::fe_space::FESpace;
+    use fem_mesh::topology::MeshTopology;
 
-    let mass = VectorMassIntegrator { alpha: 1.0 };
-    let m = VectorAssembler::assemble_bilinear(rt_space, &[&mass], quad_order);
-    let src = VectorDomainLFIntegrator { f: FnVectorCoeff(coeff) };
-    let rhs = VectorAssembler::assemble_linear(rt_space, &[&src], quad_order);
-    let mut u = vec![0.0; rt_space.n_dofs()];
-    let cfg = SolverConfig { rtol: 1e-12, atol: 1e-30, max_iter: 5000, verbose: false, ..Default::default() };
-    solve_cg(&m, &rhs, &mut u, &cfg).expect("HDiv 3-D L² projection CG solve");
-    u
+    let mesh = rt_space.mesh();
+    let order = rt_space.order();
+    let interpolable = (0..mesh.n_elements() as u32)
+        .all(|e| hdiv_interpolant_available(mesh.element_type(e), order));
+    if interpolable {
+        let f = |x: &[f64]| {
+            let mut v = vec![0.0; 3];
+            coeff(x, &mut v);
+            v
+        };
+        return rt_space.interpolate_vector(&f).into_vec();
+    }
+    project_hdiv_l2(rt_space, coeff, quad_order, "3-D")
 }
 
 /// Compute the L² norm of a vector field given its DOF values and the mass matrix.
@@ -2169,13 +2234,21 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
             | ElementType::Pyramid5);
         let geo_elem = if use_iso { crate::geo_ref_elem_from_mesh(mesh, e) } else { None };
 
-        let (quad, n_ldofs, use_lagrange) = if order == 0 {
+        let (quad, n_ldofs, use_lagrange, l2_re) = if order == 0 {
             // P0: use HDiv reference element's quadrature
             let vre = vec_ref_elem(VecFamily::RaviartThomas, et.to_elem_type(), 0);
-            (vre.quadrature(quad_order), 1usize, false)
+            (vre.quadrature(quad_order), 1usize, false, None)
         } else {
-            let re = et.ref_elem(order);
-            (re.quadrature(quad_order), re.n_dofs(), true)
+            // D337: evaluate with the SAME reference element the assembly used
+            // (`ref_elem_vol_for_space`), not the H1 topological element
+            // `et.ref_elem(order)`.  For a default (GaussLegendre) L² space on
+            // hexes/quads that is `HexL2GL`/`QuadL2GL` — lexicographic DOFs at
+            // Gauss-Legendre nodes — whereas `et.ref_elem` returns the
+            // Gauss-Lobatto `HexQk`/`QuadQk` in topological order, so every
+            // order ≥ 1 reported a bogus error (D337: exact-polynomial probe
+            // 4.3e-1 instead of 1e-15; ex24 `-p 2 -o 3` 0.01662 vs C++ 1.16e-7).
+            let re = ref_elem_vol_for_space(l2_space, et, order);
+            (re.quadrature(quad_order), re.n_dofs(), true, Some(re))
         };
 
         let elem_dofs: Vec<usize> = l2_space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -2194,7 +2267,7 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
             let uh = if order == 0 {
                 dofs[elem_dofs[0]]  // P0: single constant per element
             } else {
-                let re = et.ref_elem(order);
+                let re = l2_re.as_ref().expect("order > 0 has a reference element");
                 re.eval_basis(xi, &mut phi_buf);
                 let mut val = 0.0;
                 for i in 0..n_ldofs {
