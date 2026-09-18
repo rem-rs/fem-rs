@@ -1,9 +1,13 @@
 //! D191 — pyramid H1 field slots vs MFEM 4.10 ground truth.
 //!
 //! Ground truth: MFEM 4.10 `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)`
-//! (the Bergot pyramid — the family fem-rs numbers pyramid H¹ spaces with;
-//! MFEM's *default* `pyr_type=1` Fuentes pyramid has 15/37/77 dofs at p=2/3/4
-//! and is a documented family gap, see `tmp/d191/EVIDENCE.md`).
+//! (the Bergot pyramid — the family fem-rs numbered pyramid H¹ spaces with
+//! before D347; **MFEM's default is `pyr_type=1`** (Fuentes, 15/37/77 dofs at
+//! p=2/3/4), which fem-rs now defaults to as well — see
+//! `d347_pyramid_fuentes_wiring.rs` for the Fuentes space layout against the
+//! same C++ probe run with `pyr_type=1`.  Every expectation in *this* file is
+//! the `pyr_type=0` dump and is requested explicitly through
+//! [`PyramidBasisType::Bergot`].
 //!
 //! The probe `tmp/d191/pyr_h1_probe.cpp` (dumps
 //! `$HOME/work/d299/probe_p{2,3,4,5}.txt`) projected the XYZ coefficient
@@ -30,8 +34,22 @@
 //! 4. dof sharing (same global ids) on a 2-pyramid mesh sharing edges and a
 //!    slanted face.
 
+use fem_element::lagrange::PyramidBasisType;
 use fem_mesh::{ElementType, Mesh};
 use fem_space::DofManager;
+
+/// The family every expectation in this file was dumped for: MFEM
+/// `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)`.
+///
+/// Since D347 the *default* pyramid family is Fuentes (`pyr_type=1`, MFEM's
+/// `ScalarPyramid::DefaultType`), so the Bergot layout pinned here is obtained
+/// through the explicit opt-out — the numbers below keep their own C++
+/// ground truth (`$HOME/work/d299/probe_p{2..5}.txt`) and are unchanged.
+const BERGOT: PyramidBasisType = PyramidBasisType::Bergot;
+
+fn bergot_dm<M: fem_mesh::topology::MeshTopology>(mesh: &M, order: u8) -> DofManager {
+    DofManager::new_with_pyramid_basis(mesh, order, BERGOT)
+}
 
 fn unit_pyramid() -> Mesh<3> {
     Mesh::<3>::uniform(
@@ -213,7 +231,7 @@ fn mfem_slot_position(p: usize, l: [usize; 3]) -> [f64; 3] {
 #[test]
 fn d191_p2_positions_match_mfem_probe() {
     let mesh = unit_pyramid();
-    let dm = DofManager::new(&mesh, 2);
+    let dm = bergot_dm(&mesh, 2);
     assert_eq!(dm.n_dofs, 14);
     let expected: Vec<[f64; 3]> = vec![
         [0.0, 0.0, 0.0],
@@ -252,7 +270,7 @@ fn d191_p2_positions_match_mfem_probe() {
 fn d191_slot_arrangement_and_positions_p2_to_p5() {
     for p in 2..=5usize {
         let mesh = unit_pyramid();
-        let dm = DofManager::new(&mesh, p as u8);
+        let dm = bergot_dm(&mesh, p as u8);
         let n_expected = (p + 1) * (p + 2) * (2 * p + 3) / 6;
         assert_eq!(dm.element_dofs(0).len(), n_expected, "p{p} dofs_per_elem");
         assert_eq!(dm.n_dofs, n_expected, "p{p} n_dofs");
@@ -286,7 +304,7 @@ fn d191_slot_arrangement_and_positions_p2_to_p5() {
 fn d191_edge_block_directions_match_mfem() {
     for p in 3..=5usize {
         let mesh = unit_pyramid();
-        let dm = DofManager::new(&mesh, p as u8);
+        let dm = bergot_dm(&mesh, p as u8);
         let dofs = dm.element_dofs(0);
         let edp = p - 1;
         // Block 2 occupies slots 5 + 2*edp .. +edp (edge (3,2), the base
@@ -334,7 +352,7 @@ fn d191_two_pyramids_share_face_and_edge_dofs() {
     );
     assert_eq!(mesh.n_nodes(), 7);
     for p in [2u8, 3, 4] {
-        let dm = DofManager::new(&mesh, p);
+        let dm = bergot_dm(&mesh, p);
         let edp = (p as usize).saturating_sub(1).max(1);
         let tdp = if p >= 3 { (p as usize - 1) * (p as usize - 2) / 2 } else { 0 };
         let qdp = if p >= 2 { (p as usize - 1) * (p as usize - 1) } else { 0 };

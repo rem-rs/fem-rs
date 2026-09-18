@@ -553,7 +553,9 @@ where
         let order_c = col_space.order();
         let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HCurl).unwrap();
         let n_c = ref_c.n_dofs();
-        let ref_r = ref_elem_vol(elem_type, row_space.order()).unwrap();
+        let ref_r = ref_elem_vol_with_pyramid_basis(
+            elem_type, row_space.order(), row_space.pyramid_basis(),
+        ).unwrap();
         let n_r = ref_r.n_dofs();
         let quad = ref_r.quadrature(quad_order);
 
@@ -628,7 +630,9 @@ where
         let order_c = col_space.order();
         let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HCurl).unwrap();
         let n_c = ref_c.n_dofs();
-        let ref_r = ref_elem_vol(elem_type, row_space.order()).unwrap();
+        let ref_r = ref_elem_vol_with_pyramid_basis(
+            elem_type, row_space.order(), row_space.pyramid_basis(),
+        ).unwrap();
         let n_r = ref_r.n_dofs();
         let quad = ref_r.quadrature(quad_order);
 
@@ -891,7 +895,9 @@ where
         let elem_type = mesh.element_type(e);
         let order_r = row_space.order();
         let order_c = col_space.order();
-        let ref_r = ref_elem_vol(elem_type, order_r).unwrap();
+        let ref_r = ref_elem_vol_with_pyramid_basis(
+            elem_type, order_r, row_space.pyramid_basis(),
+        ).unwrap();
         let n_r = ref_r.n_dofs();
         let ref_c = ref_elem_vec(elem_type, order_c, SpaceType::HDiv).unwrap();
         let n_c = ref_c.n_dofs();
@@ -1325,6 +1331,22 @@ pub const REF_ELEM_VOL_MAX_ORDER: u8 = 10;
 /// order-6 discretization returned `Err` (recorded as kernel gap D46① in the
 /// round-15 navier hand-over).
 pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn ReferenceElement>, String> {
+    ref_elem_vol_with_pyramid_basis(
+        elem_type,
+        order,
+        fem_element::lagrange::PyramidBasisType::default(),
+    )
+}
+
+/// [`ref_elem_vol`] with an explicit pyramid basis family (MFEM
+/// `H1_FECollection`'s `pyr_type`, D347).  A caller that holds the H¹ space
+/// must pass `space.pyramid_basis()` so an explicit `Bergot` space is honoured;
+/// only pyramid cells at order ≥ 2 are affected.
+pub fn ref_elem_vol_with_pyramid_basis(
+    elem_type: ElementType,
+    order: u8,
+    pyr_type: fem_element::lagrange::PyramidBasisType,
+) -> Result<Box<dyn ReferenceElement>, String> {
     use fem_element::lagrange::{HexQk, H1PrismPk, H1TriPk};
 
     if order > REF_ELEM_VOL_MAX_ORDER {
@@ -1392,13 +1414,14 @@ pub fn ref_elem_vol(elem_type: ElementType, order: u8) -> Result<Box<dyn Referen
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
             Box::new(H1PrismPk::new(o as usize))
         }
-        // D299: MFEM's Bergot pyramid (`pyr_type=0`), entity slot order at
-        // the GLL-barycentric nodes — the same table as
-        // `assembler::ref_elem_vol_h1` and `fem_space`'s `build_pyramid_pk`
-        // (the layer-order equispaced `PyramidPk` disagreed with the H¹
-        // space's dof numbering from p = 2 on).
+        // D299/D347: the pyramid element of the *chosen* family
+        // (`PyramidBasisType::default()` = Fuentes = MFEM's
+        // `ScalarPyramid::DefaultType`), entity slot order — the same table as
+        // `assembler::ref_elem_vol_h1_with_pyramid_basis` and `fem_space`'s
+        // `build_pyramid_pk` (the layer-order equispaced `PyramidPk` disagreed
+        // with the H¹ space's dof numbering from p = 2 on).
         (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
-            Box::new(fem_element::lagrange::H1PyramidPk::new(o as usize))
+            fem_element::lagrange::h1_pyramid_element(o as usize, pyr_type)
         }
         _ => return Err(format!("ref_elem_vol: unsupported ({elem_type:?}, order={order})")),
     })
@@ -1504,7 +1527,9 @@ fn accumulate_mixed_volume_element<SR, SC>(
     // L2/DG row spaces use the Gauss-Legendre nodal basis on [0,1]²
     // (ref_elem_vol_l2 → QuadL2GL); H1 keeps the topological QuadQk.
     let ref_r = ref_elem_vol_for_space(row_space, elem_type, order_r);
-    let ref_c = ref_elem_vol(elem_type, order_c).unwrap();
+    let ref_c = ref_elem_vol_with_pyramid_basis(
+        elem_type, order_c, col_space.pyramid_basis(),
+    ).unwrap();
     let n_r = ref_r.n_dofs();
     let n_c = ref_c.n_dofs();
 

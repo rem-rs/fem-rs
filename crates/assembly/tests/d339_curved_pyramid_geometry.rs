@@ -97,15 +97,40 @@ fn d306_curved_pyramid_geometry_element_is_isoparametric() {
         .expect("curved pyramid must have a geometry element (D306)");
     assert_eq!(geo.order(), 2);
     assert_eq!(geo.dim(), 3);
-    // PyramidPk(2): layers 1 + 4 + 9.
-    assert_eq!(geo.n_dofs(), 14);
+    // D347: `Mesh::set_curvature` writes MFEM `SetCurvature`'s default family
+    // for pyramids — the **Fuentes** pyramid (`pyr_type =
+    // ScalarPyramid::DefaultType = 1`), `p(p²+3)+1 = 15` nodes at p = 2 (the
+    // pre-D347 layer-order `PyramidPk(2)` table had 14).
+    assert_eq!(geo.n_dofs(), 15);
     assert_eq!(geo.n_dofs(), mesh.geometry_nodes(0).len());
 
-    // Nodal identity: the isoparametric map reproduces every geometry node at
-    // its own reference coordinate (fails if the layer-order table were paired
-    // with a vertex-ordered basis, the D304/d331 defect class).
-    let nodes = mesh.geometry_nodes(0);
+    // MFEM 4.10 ground truth for the table itself: `tmp/d347/probe.cpp` run as
+    // `./probe B <mfem>/data` prints `SetCurvature(2, false, -1, byNODES, 1)`
+    // on the same unit pyramid as `GGEOM 0 ndof=15 | <reference positions>`
+    // (dump `crates/space/tests/data/fuentes_pyramid_geometry_mfem.txt`,
+    // `GEOM unit g=2 pyr_type=1`); these are exactly its 15 entries.
+    let cpp: [[f64; 3]; 15] = [
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
+        [0.5, 0.0, 0.0], [1.0, 0.5, 0.0], [0.5, 1.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5],
+        [0.5, 0.0, 0.5], [0.5, 0.5, 0.5], [0.0, 0.5, 0.5],
+        [0.5, 0.5, 0.0],      // base-quad centre
+        [0.25, 0.25, 0.5],    // Fuentes interior bubble node
+    ];
     let coords = geo.dof_coords();
+    for (s, want) in cpp.iter().enumerate() {
+        for d in 0..3 {
+            assert!(
+                (coords[s][d] - want[d]).abs() < 1e-15,
+                "geometry slot {s}: {:?} != MFEM {want:?}",
+                coords[s],
+            );
+        }
+    }
+
+    // Nodal identity: the isoparametric map reproduces every geometry node at
+    // its own reference coordinate (fails if the table were paired with a
+    // different family's basis, the D304/d331 defect class).
+    let nodes = mesh.geometry_nodes(0);
     let n = geo.n_dofs();
     let mut phi = vec![0.0_f64; n];
     let mut worst = 0.0_f64;
@@ -152,11 +177,14 @@ fn d306_curved_pyramid_map_follows_high_order_nodes() {
     let geo = geo_ref_elem_from_mesh(&mesh, 0).expect("curved pyramid geometry element");
     let base_v = 1.0 / 3.0;
 
-    // Displace an interior base node (layer k = 0 puts 9 nodes on the base
-    // quad; slot 4 is its centre) straight up by 0.1 — a pure second-order
-    // feature: no vertex moves, the P1 map is unchanged.
+    // Displace the base-quad centre — slot 13 of the Fuentes table, the
+    // `(p−1)²` face block's single p = 2 entry (in the pre-D347 layer-order
+    // `PyramidPk(2)` table the same point sat at slot 4's neighbourhood, which
+    // is now the apex and *reuses* the mesh vertex, so displacing it would be
+    // a no-op) — straight up by 0.1: a pure second-order feature, no vertex
+    // moves, the P1 map is unchanged.
     let nodes = mesh.geometry_nodes(0).to_vec();
-    let moved = nodes[4];
+    let moved = nodes[13];
     let before = mesh.geom_coords_of(moved).to_vec();
     {
         let g = mesh.geometry.as_mut().expect("curvature created a geometry table");

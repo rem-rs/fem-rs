@@ -9,8 +9,8 @@
 //!
 //! The fix has two halves, both 1:1 ports of MFEM 4.10's
 //! `H1_BergotPyramidElement` (`fem/fe/fe_h1.cpp`, the `pyr_type=0` pyramid
-//! that `H1_FECollection(p, 3, GaussLobatto)` puts on pyramid cells — the
-//! family fem-rs numbers pyramid H¹ spaces with):
+//! that `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` puts on pyramid
+//! cells):
 //!
 //! 1. `fem_element::H1PyramidPk` — the Bergot element in entity slot order at
 //!    the GLL-barycentric nodes (part (b): p ≥ 3 positions leave the
@@ -26,13 +26,29 @@
 //! (slot → internal dof resolved by node-position matching).  On the unit
 //! pyramid fem-rs' global numbering equals the slot order, so the assembled
 //! mass matrix must equal the dump entry for entry.
+//!
+//! D347 note: the dumps are `pyr_type=0`, and since D347 fem-rs's *default*
+//! pyramid family is Fuentes (`pyr_type=1`, `ScalarPyramid::DefaultType`) —
+//! so every space here is built through the explicit
+//! [`PyramidBasisType::Bergot`] opt-out ([`bergot_space`]).  The numbers are
+//! unchanged; only the family is now named.  The Fuentes counterparts
+//! (`pyr_type=1`) are pinned in `d347_pyramid_fuentes_wiring.rs`.
 
 use fem_assembly::{Assembler, BilinearIntegrator, QpData};
 use fem_element::quadrature::gauss_jacobi;
-use fem_element::{H1PyramidPk, QuadratureRule, ReferenceElement};
+use fem_element::{H1PyramidPk, PyramidBasisType, QuadratureRule, ReferenceElement};
 use fem_mesh::{element_type::ElementType, Mesh};
 use fem_space::{FESpace, H1Space};
 use nalgebra::{DMatrix, DVector};
+
+/// The family every embedded C++ dump and every expectation in this file was
+/// produced with.
+const BERGOT: PyramidBasisType = PyramidBasisType::Bergot;
+
+/// `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` on `mesh`.
+fn bergot_space(mesh: Mesh<3>, order: u8) -> H1Space<Mesh<3>> {
+    H1Space::with_pyramid_basis(mesh, order, BERGOT)
+}
 
 
 const CPP_MASS_P2: &str = r#"
@@ -244,7 +260,7 @@ fn compare_entrywise(rs: &[f64], cpp: &[f64], n: usize, tag: &str) {
 #[test]
 fn d304_p2_mass_matches_mfem_entrywise() {
     let mesh = unit_pyramid();
-    let space = H1Space::new(mesh.clone(), 2);
+    let space = bergot_space(mesh.clone(), 2);
     assert_eq!(space.n_dofs(), 14);
     let (n, cpp) = parse_probe(CPP_MASS_P2);
     let rs = assemble_mass(&space, true);
@@ -260,7 +276,7 @@ fn d304_p2_mass_matches_mfem_entrywise() {
 #[test]
 fn d304_p3_mass_matches_mfem_entrywise() {
     let mesh = unit_pyramid();
-    let space = H1Space::new(mesh.clone(), 3);
+    let space = bergot_space(mesh.clone(), 3);
     assert_eq!(space.n_dofs(), 30);
     let (n, cpp) = parse_probe(CPP_MASS_P3);
     // (i) Element-level matrix, bypassing the assembler, permuted by the
@@ -311,7 +327,7 @@ fn d304_p3_mass_matches_mfem_entrywise() {
 #[test]
 fn d304_default_p2_path_matches_exact_wrapper() {
     let mesh = unit_pyramid();
-    let space = H1Space::new(mesh.clone(), 2);
+    let space = bergot_space(mesh.clone(), 2);
     let plain = assemble_mass(&space, false);
     let exact = assemble_mass(&space, true);
     let d: f64 = plain.iter().zip(exact.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
@@ -329,7 +345,7 @@ fn d304_default_p2_path_matches_exact_wrapper() {
 #[test]
 fn d304_p4_l2_projection_reproduces_nodal_values() {
     let mesh = unit_pyramid();
-    let space = H1Space::new(mesh.clone(), 4);
+    let space = bergot_space(mesh.clone(), 4);
     let n = space.n_dofs();
     assert_eq!(n, 55);
     let m = assemble_mass(&space, true);
@@ -394,7 +410,7 @@ fn d304_p4_l2_projection_reproduces_nodal_values() {
 #[test]
 fn d305_default_pyramid_quadrature_is_uncapped() {
     let mesh = unit_pyramid();
-    let space = H1Space::new(mesh.clone(), 4);
+    let space = bergot_space(mesh.clone(), 4);
     let plain = assemble_mass(&space, false);
     let exact = assemble_mass(&space, true);
     let d: f64 = plain

@@ -710,13 +710,34 @@ fn curved_face_type_3d(et: ElementType) -> ElementType {
     }
 }
 
+/// Geometric reference element of a curved 3-D mesh of type `et` at order `g`
+/// — the element that reads the per-element geometry table
+/// (`CurvedMesh::geom_conn` / `nodes_per_elem`).
+///
+/// For pyramids this is the **Fuentes** element (`pyr_type = 1`,
+/// `ScalarPyramid::DefaultType`), the family `Mesh::set_curvature` and the
+/// D347 geometry writers lay the table out in (`H1_FuentesPyramidElement`'s own
+/// node order, `p(p²+3)+1` nodes), not the layer-order equispaced
+/// `PyramidPk` — see `simplex::set_curvature_pyramid5`.
+fn curved_geometry_ref_elem_3d(
+    et: ElementType,
+    g: u8,
+) -> Box<dyn fem_element::ReferenceElement> {
+    if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) {
+        return fem_element::lagrange::h1_pyramid_element(
+            g.max(1) as usize,
+            fem_element::lagrange::PyramidBasisType::default(),
+        );
+    }
+    fem_element::lagrange::factory::ref_elem(mesh_elem_type_to_factory_type(et), g)
+}
+
 /// Uniformly refine a curved 3-D mesh of any element type (Tet, Hex, Prism, Pyramid).
 ///
 /// Extracts the linear sub-mesh, refines it uniformly, then re-interpolates the
 /// high-order geometry onto the refined mesh.  Supports arbitrary geometric order `p`.
 pub fn refine_curved_3d_general(curved: &CurvedMesh<3>) -> CurvedMesh<3> {
-    let factory_type = mesh_elem_type_to_factory_type(curved.elem_type);
-    let geo = fem_element::lagrange::factory::ref_elem(factory_type, curved.geom_order);
+    let geo = curved_geometry_ref_elem_3d(curved.elem_type, curved.geom_order);
     let npe = geo.n_dofs();
     let nc = n_corners_3d(curved.elem_type);
     let le = linear_elem_type_3d(curved.elem_type);

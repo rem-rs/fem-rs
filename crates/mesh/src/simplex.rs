@@ -351,6 +351,17 @@ impl<const D: usize> Mesh<D> {
         // measured here on a curved P3 tet as a 7.1e-2 error at the first edge
         // node — see `tests::tet_geometry_family_tests`.
         let factory: Box<dyn fem_element::ReferenceElement> = match et {
+            // D347: a curved pyramid's table holds the **Fuentes** node order
+            // (`set_curvature_pyramid5`, MFEM `SetCurvature`'s default
+            // `pyr_type=1`); the layer-order equispaced `PyramidPk` that used
+            // to be selected here reads the same numbers as a different set of
+            // reference points from p = 2 on.
+            ElementType::Pyramid5 | ElementType::Pyramid13 if geo_order >= 2 => {
+                fem_element::lagrange::h1_pyramid_element(
+                    geo_order,
+                    fem_element::lagrange::PyramidBasisType::default(),
+                )
+            }
             ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => {
                 Box::new(QuadQk::new(geo_order.max(1)))
             }
@@ -441,20 +452,31 @@ impl<const D: usize> Mesh<D> {
         panic!("set_curvature: unsupported element type {:?} for D={}", self.elem_type, D);
     }
 
-    /// Pyramid5 → PyramidPk geometry: linear-pyramid interpolation of the
-    /// high-order DOF positions.
+    /// Pyramid5 → Fuentes-pyramid geometry: linear-pyramid interpolation of
+    /// the high-order DOF positions.
     ///
-    /// Consistent with `element_jacobian`, which evaluates the same
-    /// `PyramidPk` basis at the stored geometry nodes: the order-`p` DOF
-    /// coordinates are mapped through the *linear* pyramid shape functions of
-    /// the 5 vertices (base 0-3, apex 4).  Vertex DOFs land exactly on the
-    /// mesh vertices since the order-1 DOFs are nodal.
+    /// MFEM's `Mesh::SetCurvature(order, ...)` builds its `nodes` grid function
+    /// from `H1_FECollection(order, Dim, BasisType::GaussLobatto, pyr_type)`
+    /// with `pyr_type` defaulting to `ScalarPyramid::DefaultType = 1`
+    /// (`mesh/mesh.cpp:7211-7230`, `fe_pyramid.hpp:23`) — the **Fuentes**
+    /// pyramid.  Since D347 the table follows that family: `p(p²+3)+1` nodes in
+    /// `H1_FuentesPyramidElement`'s own order, read back by the Fuentes element
+    /// in `element_jacobian` / `geo_ref_elem` (the pre-D347 table was the
+    /// layer-order equispaced `PyramidPk(p)`, a family MFEM does not have).
+    ///
+    /// The DOF coordinates are mapped through the *linear* pyramid shape
+    /// functions of the 5 vertices (base 0-3, apex 4).  Vertex DOFs land
+    /// exactly on the mesh vertices since the order-1 DOFs are nodal.
     fn set_curvature_pyramid5(&mut self, p: usize) {
         use fem_element::lagrange::pyramid::PyramidPk;
         use fem_element::ReferenceElement;
 
         let n_elems = self.n_elems();
-        let high = PyramidPk::new(p);
+        // D347: the geometry family is MFEM's `SetCurvature` default (Fuentes).
+        let high = fem_element::lagrange::h1_pyramid_element(
+            p,
+            fem_element::lagrange::PyramidBasisType::default(),
+        );
         let npe_new = high.n_dofs();
         let dof_ref = high.dof_coords();
         let linear = PyramidPk::new(1);
@@ -469,7 +491,9 @@ impl<const D: usize> Mesh<D> {
         // vertices 3/2, not 2/3.  Blending `phi[k]` against `verts[k]`
         // silently swapped those two corners for every non-symmetric sample
         // point (e.g. the (1,2) edge dof of order 2 landed at the base
-        // centre).
+        // centre).  The `dof_ref` positions themselves are the *geometry
+        // family's* node table (Fuentes since D347); at order 1 all three
+        // families coincide (the 5 vertices).
         const P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
         for e in 0..n_elems {
             let verts = self.elem_nodes(e as ElemId);
@@ -3956,11 +3980,17 @@ mod tests {
         m.set_curvature(2);
         let g = m.geometry.as_ref().expect("geometry missing");
         assert_eq!(g.order, 2);
-        assert_eq!(g.nodes_per_elem, 14); // (p+1)(p+2)(2p+3)/6 for p=2
-        assert_eq!(g.n_nodes, 5 + 9);
-        // The five vertex DOFs (layer k=0 corners and the apex) reuse the
+        // D347: `Mesh::set_curvature` writes MFEM `SetCurvature`'s default
+        // family — the Fuentes pyramid, `pyr_type = ScalarPyramid::DefaultType
+        // = 1` — so the table has `p(p²+3)+1 = 15` nodes at p = 2 (the
+        // pre-D347 layer-order `PyramidPk` table had 14; MFEM's own
+        // `SetCurvature(2)` dumps 15, `tmp/d347/geom.txt` `GEOM unit g=2
+        // pyr_type=1`).
+        assert_eq!(g.nodes_per_elem, 15); // p(p²+3)+1 for p=2
+        assert_eq!(g.n_nodes, 5 + 10);
+        // The five vertex DOFs (the corner slots and the apex) reuse the
         // original mesh vertices; their stored positions must equal them.
-        for d in 0..14usize {
+        for d in 0..15usize {
             let node = g.conn[d] as usize;
             if node < 5 {
                 for dd in 0..3 {

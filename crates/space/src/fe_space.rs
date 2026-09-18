@@ -116,4 +116,18 @@ pub trait FESpace: Send + Sync {
     fn l2_basis(&self) -> Option<crate::L2Basis> {
         None
     }
+
+    /// Pyramid H¹ basis family of this space — MFEM `H1_FECollection`'s
+    /// `pyr_type` (`fem/fe/fe_coll.hpp:302`).  The assembler uses this to pick
+    /// the pyramid reference element and its numbering
+    /// ([`fem_assembly::assembler`] / `ref_elem_vol_h1`), and
+    /// `Mesh::set_curvature` the geometry table.
+    ///
+    /// The default is [`fem_element::lagrange::PyramidBasisType::default`] =
+    /// **Fuentes** (`ScalarPyramid::DefaultType`), so any space that does not
+    /// override this reports MFEM's default family; only pyramid cells at
+    /// order ≥ 2 are affected (D347).
+    fn pyramid_basis(&self) -> fem_element::lagrange::PyramidBasisType {
+        fem_element::lagrange::PyramidBasisType::default()
+    }
 }

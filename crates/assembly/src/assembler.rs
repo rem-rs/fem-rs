@@ -290,7 +290,10 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
         }
         ref_elem_vol_l2(elem_type, order)
     } else {
-        ref_elem_vol_h1(elem_type, order)
+        // D347: the pyramid family follows the *space* (MFEM `H1_FECollection`'s
+        // `pyr_type`), so the reference element and the DOF numbering the space
+        // built (`DofManager::new_with_pyramid_basis`) can never disagree.
+        ref_elem_vol_h1_with_pyramid_basis(elem_type, order, space.pyramid_basis())
     }
 }
 
@@ -304,7 +307,26 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
 /// arms pair with `fem_space`'s `DofManager::build_tet_h1` numbering; the tri
 /// arms with the GLL triangle numbering.  Note this differs from the DG/L2
 /// paths, which keep the equispaced elements (see [`ref_elem_vol_l2`]).
+///
+/// The pyramid arm uses the *default* family (Fuentes); a caller that holds
+/// the space must use [`ref_elem_vol_h1_with_pyramid_basis`] (or
+/// [`ref_elem_vol_for_space`]) so an explicit `Bergot` space is honoured.
 pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    ref_elem_vol_h1_with_pyramid_basis(
+        elem_type,
+        order,
+        fem_element::lagrange::PyramidBasisType::default(),
+    )
+}
+
+/// [`ref_elem_vol_h1`] with an explicit pyramid basis family — MFEM
+/// `H1_FECollection(p, dim, btype, pyr_type)`'s `pyr_type` switch
+/// (`fe_coll.cpp:1976-1985`).  Only pyramid cells at order ≥ 2 depend on it.
+pub(crate) fn ref_elem_vol_h1_with_pyramid_basis(
+    elem_type: ElementType,
+    order: u8,
+    pyr_type: fem_element::lagrange::PyramidBasisType,
+) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
@@ -348,16 +370,17 @@ pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn Refe
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
             Box::new(fem_element::lagrange::H1PrismPk::new(order as usize))
         }
-        // D299: MFEM's Bergot pyramid (`pyr_type=0`) in **entity** slot order
-        // at the GLL-barycentric nodes — the element `H1_FECollection(p, 3,
-        // GaussLobatto)` puts on pyramid cells, matching `fem_space`'s
-        // `build_pyramid_pk` numbering.  The equispaced layer-order
-        // `PyramidPk` that used to sit here (a) paired different functions
-        // with the entity-ordered `dofs_flat` from p = 2 on (layer-order
-        // basis × entity-order dofs) and (b) sits on the wrong lattice from
-        // p = 3 on.
+        // D299/D347: the pyramid element of the *chosen* family
+        // (`PyramidBasisType::default()` = Fuentes = MFEM's
+        // `ScalarPyramid::DefaultType`) in MFEM's entity slot order — the
+        // element `H1_FECollection(p, 3, GaussLobatto)` puts on pyramid cells,
+        // matching `fem_space`'s `build_pyramid_pk` numbering.  The equispaced
+        // layer-order `PyramidPk` that used to sit here (a) paired different
+        // functions with the entity-ordered `dofs_flat` from p = 2 on
+        // (layer-order basis × entity-order dofs) and (b) sits on the wrong
+        // lattice from p = 3 on.
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
-            Box::new(fem_element::lagrange::H1PyramidPk::new(order as usize))
+            fem_element::lagrange::h1_pyramid_element(order as usize, pyr_type)
         }
         _ => panic!(
             "ref_elem_vol_h1: unsupported combination (element_type={elem_type:?}, order={order}). \
@@ -818,6 +841,18 @@ pub(crate) fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn Re
     if matches!(et, ElementType::Tri3 | ElementType::Tri6) && g > 1 {
         return Some(Box::new(fem_element::lagrange::H1TriPk::new(g as usize))
                     as Box<dyn ReferenceElement>);
+    }
+    // Curved pyramids: since D347 the geometry table holds the **Fuentes**
+    // pyramid's node order (`pyr_type = ScalarPyramid::DefaultType = 1`, MFEM
+    // `Mesh::SetCurvature`'s default) — `Mesh::set_curvature_pyramid5` writes
+    // it and `Mesh::element_jacobian` reads it, so the layer-order equispaced
+    // `PyramidPk` (which reads the same numbers at different reference points
+    // from g = 2 on) must not be used here.
+    if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) && g > 1 {
+        return Some(fem_element::lagrange::h1_pyramid_element(
+            g as usize,
+            fem_element::lagrange::PyramidBasisType::default(),
+        ) as Box<dyn ReferenceElement>);
     }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);

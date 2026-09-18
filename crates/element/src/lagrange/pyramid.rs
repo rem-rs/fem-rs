@@ -56,30 +56,35 @@ fn lagrange_1d_deriv(i: usize, degree: usize, xi: f64) -> f64 {
 /// Pyramid basis family selection (MFEM `ScalarPyramid::DefaultType`, i.e.
 /// `H1_FECollection`'s `pyr_type` argument, `fem/fe/fe_pyramid.hpp:23`).
 ///
-/// * `Bergot` (`pyr_type = 0`) — [`H1PyramidPk`], `(p+1)(p+2)(2p+3)/6` DOFs.
 /// * `Fuentes` (`pyr_type = 1`) — [`super::pyramid_fuentes::H1FuentesPyramidPk`],
-///   `p(p²+3)+1` DOFs.  This is MFEM's **default**; fem-rs's *layers* are
-///   Bergot-family everywhere (D191/D299), which is why [`Default`] is
-///   `Bergot` here — the wiring that switches the default is D324.
+///   `p(p²+3)+1` DOFs.  This is MFEM's **default** (`ScalarPyramid::DefaultType
+///   = 1`), and therefore fem-rs's default too (D347): `H1Space::new`,
+///   `DofManager::new`, `ref_elem_vol_h1` and `Mesh::set_curvature` all select
+///   this family unless the caller asks for [`Bergot`](Self::Bergot).
+/// * `Bergot` (`pyr_type = 0`) — [`H1PyramidPk`], `(p+1)(p+2)(2p+3)/6` DOFs.
+///   Preserved as an explicit, fully supported opt-out
+///   (`space::H1Space::with_pyramid_basis`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PyramidBasisType {
     /// Bernardi-Boggs-Fluery type (collapsed coordinates, GLL-barycentric
-    /// nodes) — [`H1PyramidPk`]; MFEM's `pyr_type = 0`.
-    #[default]
+    /// nodes) — [`H1PyramidPk`]; MFEM's `pyr_type = 0`.  Only conforming with
+    /// MFEM's H¹ tetrahedron/wedge on the pyramid's triangular faces up to
+    /// `p = 2` (from `p = 3` the tri-face lattice differs, measured in D347).
     Bergot,
     /// Fuentes-Keith-Demkowicz type (exact sequence) —
     /// [`super::pyramid_fuentes::H1FuentesPyramidPk`]; MFEM's `pyr_type = 1`
     /// and `ScalarPyramid::DefaultType`.
+    #[default]
     Fuentes,
 }
 
 /// The pyramid H¹ reference element of the given family and order — the two
 /// arms of MFEM's `pyr_type` switch (`fe_coll.cpp:1976-1985`).
 ///
-/// The space/assembly layers still hard-code the Bergot arm of this (see
-/// `fem_assembly::assembler::ref_elem_vol_h1` and
-/// `fem_space::dof_manager::DofManager::build_pyramid_pk`); threading
-/// `pyr_type` through them is D324.
+/// `PyramidBasisType::default()` (Fuentes) is what every "default" path in
+/// fem-rs uses since D347: `fem_assembly::assembler::ref_elem_vol_h1` (via
+/// `FESpace::pyramid_basis`) and
+/// `fem_space::dof_manager::DofManager::build_pyramid_pk`.
 pub fn h1_pyramid_element(p: usize, basis: PyramidBasisType) -> Box<dyn ReferenceElement> {
     match basis {
         PyramidBasisType::Bergot => Box::new(H1PyramidPk::new(p)),
@@ -95,9 +100,10 @@ pub fn h1_pyramid_element(p: usize, basis: PyramidBasisType) -> Box<dyn Referenc
 /// Within each layer, row-major ordering over the (p-k+1)×(p-k+1) grid.
 ///
 /// This is the legacy *equispaced collapsed-lattice* element, not one of
-/// MFEM's two families: it agrees with [`H1PyramidPk`] (Bergot, the family the
-/// H¹ space path uses) only up to `p = 2`, and with neither family beyond.  It
-/// is still the DG/L2 pyramid element of `ref_elem_vol*`.
+/// MFEM's two families: it agrees with [`H1PyramidPk`] (Bergot) only up to
+/// `p = 2`, and with neither family beyond.  It is still the DG/L2 pyramid
+/// element of `ref_elem_vol*` (the H¹ path uses
+/// [`h1_pyramid_element`]) — the L2 default is Fuentes in MFEM (D325).
 ///
 /// # D306 — L2 pyramid family gap (documented, **not** fixed)
 ///
@@ -385,12 +391,14 @@ fn bergot_lex(p: usize) -> Vec<(usize, usize, usize)> {
 /// `CalcShape`/`CalcDShape`.
 ///
 /// This is MFEM's `H1_FECollection(p, 3, GaussLobatto, pyr_type=0)` pyramid —
-/// the family fem-rs numbers pyramid H¹ spaces with (D191).  It differs from
-/// the equispaced [`PyramidPk`] (same slot arrangement) from p = 3 on, where
-/// the GLL-barycentric nodes leave the equispaced lattice; and from MFEM's
-/// *default* Fuentes pyramid (`pyr_type=1`, `p(p²+3)+1` DOFs,
-/// [`super::pyramid_fuentes::H1FuentesPyramidPk`]; making it fem-rs's default
-/// is D324).
+/// available in fem-rs through the explicit
+/// [`PyramidBasisType::Bergot`] opt-out (`H1Space::with_pyramid_basis`,
+/// `Mesh::set_curvature_with_pyramid_basis`); since D347 the *default* is
+/// Fuentes.  It differs from the equispaced [`PyramidPk`] (same slot
+/// arrangement) from p = 3 on, where the GLL-barycentric nodes leave the
+/// equispaced lattice; and from MFEM's *default* Fuentes pyramid
+/// (`pyr_type=1`, `p(p²+3)+1` DOFs,
+/// [`super::pyramid_fuentes::H1FuentesPyramidPk`]).
 pub struct H1PyramidPk {
     inner: std::sync::Arc<H1PyramidPkInner>,
 }
@@ -886,8 +894,9 @@ mod tests {
 
     #[test]
     fn pyramid_basis_type_family_map() {
-        // The two arms of MFEM's `pyr_type` switch (`fe_coll.cpp:1976`).
-        assert_eq!(PyramidBasisType::default(), PyramidBasisType::Bergot);
+        // The two arms of MFEM's `pyr_type` switch (`fe_coll.cpp:1976`), with
+        // `Default` = Fuentes = `ScalarPyramid::DefaultType` (D347).
+        assert_eq!(PyramidBasisType::default(), PyramidBasisType::Fuentes);
         assert_eq!(
             h1_pyramid_element(2, PyramidBasisType::Bergot).n_dofs(),
             14, // (p+1)(p+2)(2p+3)/6
@@ -899,6 +908,11 @@ mod tests {
         assert_eq!(
             h1_pyramid_element(4, PyramidBasisType::Fuentes).n_dofs(),
             77
+        );
+        // The default arm is the Fuentes element.
+        assert_eq!(
+            h1_pyramid_element(3, PyramidBasisType::default()).n_dofs(),
+            37
         );
     }
 

@@ -166,17 +166,21 @@ pub fn geo_ref_elem_from_mesh(
             return Some(Box::new(crate::assembler::GeoPyrP1::new()));
         }
         ElementType::Pyramid5 | ElementType::Pyramid13 => {
-            // D306: curved pyramids (`geom_order > 1`) take the *layer-order*
-            // `PyramidPk(g)`, exactly as `assembler::geo_ref_elem` and
-            // `Mesh::element_jacobian` do: `Mesh::set_curvature_pyramid5`
-            // writes the geometry DOFs in layer-slot order (the frozen D191
-            // contract).  Before this arm existed the function fell through to
-            // the `_ => return None` below, so every consumer treated a curved
-            // pyramid as an affine P1 element — `qspace::
-            // map_element_quadrature_points` panicked
-            // ("unsupported element Pyramid5") and the DPG / error-estimator /
-            // qspace paths silently used a non-isoparametric geometry.
-            return Some(Box::new(fem_element::lagrange::PyramidPk::new(g as usize)));
+            // D306/D347: curved pyramids (`geom_order > 1`) take the geometry
+            // element of the family the table is written in — since D347 the
+            // **Fuentes** pyramid (MFEM `Mesh::SetCurvature`'s default
+            // `pyr_type = ScalarPyramid::DefaultType = 1`), exactly as
+            // `assembler::geo_ref_elem`, `Mesh::element_jacobian` and
+            // `Mesh::set_curvature_pyramid5` do.  Before the D306 arm existed
+            // the function fell through to the `_ => return None` below, so
+            // every consumer treated a curved pyramid as an affine P1 element —
+            // `qspace::map_element_quadrature_points` panicked ("unsupported
+            // element Pyramid5") and the DPG / error-estimator / qspace paths
+            // silently used a non-isoparametric geometry.
+            return Some(fem_element::lagrange::h1_pyramid_element(
+                g as usize,
+                fem_element::lagrange::PyramidBasisType::default(),
+            ));
         }
         _ => return None,
     };

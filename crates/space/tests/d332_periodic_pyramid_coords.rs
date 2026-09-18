@@ -28,12 +28,18 @@
 //! so the per-element replica — not a global equality with the reference
 //! lattice — is the well-posed criterion there.
 
-use fem_element::lagrange::pyramid::{H1PyramidPk, PyramidPk};
+use fem_element::lagrange::pyramid::{H1PyramidPk, PyramidBasisType, PyramidPk};
 use fem_element::ReferenceElement;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
 use fem_space::dof_manager::DofManager;
+
+/// The family this file's oracle is written for — the Bergot pyramid at its
+/// GLL-barycentric slots (`H1PyramidPk`).  Since D347 the *default* family is
+/// Fuentes (MFEM's `ScalarPyramid::DefaultType`), so the Bergot layout pinned
+/// here is requested explicitly; the expectations are unchanged.
+const BERGOT: PyramidBasisType = PyramidBasisType::Bergot;
 
 /// `PyramidPk(1)`'s layer slot `k` carries the shape function of mesh vertex
 /// `P1_SLOT_VERTEX[k]` (D191).
@@ -181,7 +187,7 @@ fn coordinate_max_diff(mesh: &Mesh<3>, dm: &DofManager) -> (f64, u32) {
 fn replica_of_the_unit_pyramid_is_the_h1_pyramid_pk_lattice() {
     let mesh = unit_pyramid();
     for p in 2..=4usize {
-        let dm = DofManager::new(&mesh, p as u8);
+        let dm = DofManager::new_with_pyramid_basis(&mesh, p as u8, BERGOT);
         let dofs = dm.element_dofs(0).to_vec();
         let want = H1PyramidPk::new(p).dof_coords();
         let replica = coordinate_replica(&mesh, &dm);
@@ -206,7 +212,7 @@ fn periodic_pyramid_dof_coords_follow_h1_pyramid_pk_slots() {
     let mesh = periodic_cube_pyramids();
     assert_eq!(mesh.n_elements(), 6, "mesh sanity: 6 pyramids");
     for order in [2u8, 3, 4] {
-        let dm = DofManager::new(&mesh, order);
+        let dm = DofManager::new_with_pyramid_basis(&mesh, order, BERGOT);
         let (worst, worst_dof) = coordinate_max_diff(&mesh, &dm);
         assert!(
             worst <= 1e-13,
@@ -226,7 +232,7 @@ fn h1_interpolate_matches_projection_on_periodic_pyramid_mesh() {
     use fem_space::H1Space;
     let mesh = periodic_cube_pyramids();
     for order in [2u8, 3] {
-        let space = H1Space::new(mesh.clone(), order);
+        let space = H1Space::with_pyramid_basis(mesh.clone(), order, BERGOT);
         let f = |x: &[f64]| (2.0 * std::f64::consts::PI * x[0]).sin() * x[1] + 0.5 * x[2];
         let v = space.interpolate(&f);
         let expected_coords = coordinate_replica(&mesh, space.dof_manager());

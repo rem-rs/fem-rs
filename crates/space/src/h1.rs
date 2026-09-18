@@ -7,6 +7,8 @@ use fem_mesh::topology::MeshTopology;
 use crate::dof_manager::DofManager;
 use crate::fe_space::{FESpace, SpaceType};
 use crate::p_refine::{self, PRefineConstraint, build_variable_order_dof_manager, smooth_order_field};
+use fem_element::lagrange::PyramidBasisType;
+
 /// Scalar H¹ finite element space using continuous Lagrange basis functions.
 ///
 /// Supports both uniform order (all elements same p) and variable order
@@ -18,6 +20,11 @@ pub struct H1Space<M: MeshTopology> {
     dm:     DofManager,
     order:  u8,
     elem_orders: Option<Vec<u8>>,
+    /// Pyramid basis family — MFEM `H1_FECollection`'s `pyr_type`
+    /// (`fem/fe/fe_coll.hpp:302`).  Fuentes by default
+    /// (`ScalarPyramid::DefaultType`); only pyramid cells at order ≥ 2 are
+    /// affected.  See [`H1Space::with_pyramid_basis`] (D347).
+    pyramid_basis: PyramidBasisType,
 }
 
 impl<M: MeshTopology + Clone> Clone for H1Space<M> {
@@ -27,6 +34,7 @@ impl<M: MeshTopology + Clone> Clone for H1Space<M> {
             dm: self.dm.clone(),
             order: self.order,
             elem_orders: self.elem_orders.clone(),
+            pyramid_basis: self.pyramid_basis,
         }
     }
 }
@@ -34,9 +42,24 @@ impl<M: MeshTopology + Clone> Clone for H1Space<M> {
 impl<M: MeshTopology> H1Space<M> {
     /// Construct a new H¹ space of the given uniform polynomial order on `mesh`.
     pub fn new(mesh: M, order: u8) -> Self {
-        let dm = DofManager::new(&mesh, order);
-        H1Space { mesh, dm, order, elem_orders: None }
+        Self::with_pyramid_basis(mesh, order, PyramidBasisType::default())
     }
+
+    /// [`H1Space::new`] with an explicit pyramid basis family — MFEM
+    /// `H1_FECollection(p, dim, btype, pyr_type)`.
+    ///
+    /// [`PyramidBasisType::default`] is **Fuentes** (`pyr_type = 1`,
+    /// `ScalarPyramid::DefaultType`), so `with_pyramid_basis(mesh, p,
+    /// PyramidBasisType::default())` is exactly MFEM's default collection.
+    /// [`PyramidBasisType::Bergot`] (`pyr_type = 0`) reproduces the pre-D347
+    /// fem-rs pyramid numbering and element.
+    pub fn with_pyramid_basis(mesh: M, order: u8, basis: PyramidBasisType) -> Self {
+        let dm = DofManager::new_with_pyramid_basis(&mesh, order, basis);
+        H1Space { mesh, dm, order, elem_orders: None, pyramid_basis: basis }
+    }
+
+    /// The pyramid basis family this space was built with.
+    pub fn pyramid_basis(&self) -> PyramidBasisType { self.pyramid_basis }
 
     /// Construct a variable-order H¹ space with per-element polynomial orders.
     pub fn new_variable(mesh: M, elem_orders: Vec<u8>) -> Self {
@@ -46,6 +69,7 @@ impl<M: MeshTopology> H1Space<M> {
             mesh, dm,
             order: max_order,
             elem_orders: Some(elem_orders),
+            pyramid_basis: PyramidBasisType::default(),
         }
     }
 
@@ -83,7 +107,10 @@ impl<M: MeshTopology> H1Space<M> {
         let mut new_orders = orders;
         for &e in elem_ids { if new_order > new_orders[e as usize] { new_orders[e as usize] = new_order; } }
         let max_order = new_orders.iter().max().copied().unwrap_or(self.order);
-        (H1Space { mesh: self.mesh.clone(), dm: new_dm, order: max_order, elem_orders: Some(new_orders) }, constraints)
+        (H1Space {
+            mesh: self.mesh.clone(), dm: new_dm, order: max_order,
+            elem_orders: Some(new_orders), pyramid_basis: self.pyramid_basis,
+        }, constraints)
     }
 
     /// Decrease polynomial order of specified elements (p-derefinement).
@@ -97,7 +124,10 @@ impl<M: MeshTopology> H1Space<M> {
         let mut new_orders = orders;
         for &e in elem_ids { if new_order < new_orders[e as usize] { new_orders[e as usize] = new_order; } }
         let max_order = new_orders.iter().max().copied().unwrap_or(self.order);
-        (H1Space { mesh: self.mesh.clone(), dm: new_dm, order: max_order, elem_orders: Some(new_orders) }, constraints)
+        (H1Space {
+            mesh: self.mesh.clone(), dm: new_dm, order: max_order,
+            elem_orders: Some(new_orders), pyramid_basis: self.pyramid_basis,
+        }, constraints)
     }
 
     /// MFEM `FiniteElementSpace::PRefineAndUpdate(refs)` equivalent: apply
@@ -134,6 +164,7 @@ impl<M: MeshTopology> H1Space<M> {
             dm,
             order: max_order,
             elem_orders: Some(orders.to_vec()),
+            pyramid_basis: self.pyramid_basis,
         }, constraints)
     }
 
@@ -186,6 +217,11 @@ impl<M: MeshTopology> FESpace for H1Space<M> {
             .map(|orders| orders[elem as usize])
             .unwrap_or(self.order)
     }
+
+    /// Pyramid basis family of this space (MFEM `H1_FECollection`'s
+    /// `pyr_type`); the assembler picks its pyramid reference element with it
+    /// (D347).
+    fn pyramid_basis(&self) -> PyramidBasisType { self.pyramid_basis }
 }
 
 

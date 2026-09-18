@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use fem_core::types::{DofId, ElemId, FaceId, NodeId};
 use fem_mesh::topology::MeshTopology;
+use fem_element::lagrange::PyramidBasisType;
 use fem_element::ReferenceElement;
 
 // ─── EdgeKey ─────────────────────────────────────────────────────────────────
@@ -273,11 +274,28 @@ impl DofManager {
     /// # Panics
     /// Panics if the requested order is unsupported for the mesh type.
     pub fn new<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+        Self::new_with_pyramid_basis(mesh, order, PyramidBasisType::default())
+    }
+
+    /// [`DofManager::new`] with an explicit pyramid basis family — MFEM
+    /// `H1_FECollection`'s `pyr_type` (`fe_coll.hpp:302`), D347.
+    ///
+    /// [`PyramidBasisType::default`] is **Fuentes** (`ScalarPyramid::
+    /// DefaultType = 1`), which is what every plain constructor here selects;
+    /// [`PyramidBasisType::Bergot`] is the pre-D347 fem-rs numbering and stays
+    /// fully supported.  The family only affects pyramid elements at order
+    /// ≥ 2 (per-element DOF count and slot positions), so passing it on any
+    /// other mesh is a no-op.
+    pub fn new_with_pyramid_basis<M: MeshTopology>(
+        mesh: &M,
+        order: u8,
+        pyramid_basis: PyramidBasisType,
+    ) -> Self {
         let periodic = is_periodic_merged(mesh);
         let mut dm = if periodic {
-            Self::build_periodic(mesh, order)
+            Self::build_periodic(mesh, order, pyramid_basis)
         } else {
-            Self::build(mesh, order)
+            Self::build(mesh, order, pyramid_basis)
         };
         // D56: a periodic geometry snapshot keeps per-element coordinates, so
         // the fold-based table above places seam DOFs at folded chord
@@ -287,12 +305,12 @@ impl DofManager {
         // covers periodic meshes with curved (order >= 2) geometry, whose
         // coordinates are evaluated through the high-order geometry basis.
         if periodic {
-            dm.rebuild_dof_coords_periodic(mesh);
+            dm.rebuild_dof_coords_periodic(mesh, pyramid_basis);
         }
         dm
     }
 
-    fn build<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+    fn build<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
         let topo_dim = mesh.topological_dim() as usize;
         match order {
             1 => Self::build_p1(mesh),
@@ -303,12 +321,12 @@ impl DofManager {
                         match npe {
                             6 => Self::build_prism_h1(mesh, 2),
                             // D191: unified MFEM entity-order pyramid builder.
-                            5 => Self::build_pyramid_pk(mesh, 2),
+                            5 => Self::build_pyramid_pk(mesh, 2, pyr),
                             8 => Self::build_q2_hex(mesh),
-                            _ => Self::build_pk(mesh, 2),
+                            _ => Self::build_pk(mesh, 2, pyr),
                         }
                     } else {
-                        Self::build_pk(mesh, 2)
+                        Self::build_pk(mesh, 2, pyr)
                     }
                 } else if mesh.n_elements() > 0
                     && mesh.element_nodes(0).len() == 4
@@ -316,7 +334,7 @@ impl DofManager {
                 {
                     Self::build_q2_quad(mesh)
                 } else {
-                    Self::build_pk(mesh, 2)
+                    Self::build_pk(mesh, 2, pyr)
                 }
             }
             3 => {
@@ -324,7 +342,7 @@ impl DofManager {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 6 { return Self::build_prism_h1(mesh, 3); }
                     // D191: unified MFEM entity-order pyramid builder.
-                    if npe == 5 { return Self::build_pyramid_pk(mesh, 3); }
+                    if npe == 5 { return Self::build_pyramid_pk(mesh, 3, pyr); }
                 }
                 // Quad Q3 / Hex Q3 via general pk path
                 if mesh.n_elements() > 0 {
@@ -332,7 +350,7 @@ impl DofManager {
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
                     if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
                 }
-                Self::build_pk(mesh, 3)
+                Self::build_pk(mesh, 3, pyr)
             }
             _ => {
                 // General arbitrary-order path for p >= 4
@@ -341,9 +359,11 @@ impl DofManager {
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
                     if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
                     if npe == 6 && topo_dim == 3 { return Self::build_prism_h1(mesh, order); }
-                    if npe == 5 && topo_dim == 3 { return Self::build_pyramid_pk(mesh, order); }
+                    if npe == 5 && topo_dim == 3 {
+                        return Self::build_pyramid_pk(mesh, order, pyr);
+                    }
                 }
-                Self::build_pk(mesh, order)
+                Self::build_pk(mesh, order, pyr)
             }
         }
     }
@@ -1880,16 +1900,29 @@ impl DofManager {
         fem_element::lagrange::h1_pyramid_slot_labels(p)
     }
 
-    /// General-order Lagrange DOF manager for pyramid meshes (D191/D299).
+    /// General-order Lagrange DOF manager for pyramid meshes (D191/D299/D347).
     ///
     /// DOF ordering per element follows MFEM's entity order — see
-    /// [`Self::pyramid_entity_slot_grid`] for the slot layout dumped from
-    /// MFEM 4.10.  DOF coordinates are evaluated through the *linear*
-    /// pyramid transformation at each slot's MFEM Bergot reference position
-    /// (`H1PyramidPk`'s GLL-barycentric node placement; MFEM
-    /// `SetCurvature`/`ProjectCoefficient` semantics), so curved-seam
-    /// rebuilds and coordinates agree for arbitrary (non-unit) pyramids.
-    fn build_pyramid_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+    /// [`Self::pyramid_entity_slot_grid`] for the Bergot slot layout dumped
+    /// from MFEM 4.10.  The **block structure** (5 vertices, 8 edge blocks of
+    /// `p−1`, the base quad face, 4 triangular faces, the interior) is shared
+    /// by both families; what differs is the per-element count of the last two
+    /// blocks (Bergot: `(p−1)(p−2)/2` tri and `(p−2)(p−1)(2p−3)/6` interior;
+    /// Fuentes: the same tri count and `(p−1)³` interior) and the reference
+    /// positions inside every block — taken here from the family's own
+    /// reference element ([`fem_element::lagrange::h1_pyramid_element`]), so
+    /// the numbering and the basis the assembler evaluates can never drift.
+    ///
+    /// DOF coordinates are evaluated through the *linear* pyramid
+    /// transformation at each slot's reference position (the family's node
+    /// table; MFEM `SetCurvature`/`ProjectCoefficient` semantics), so
+    /// curved-seam rebuilds and coordinates agree for arbitrary (non-unit)
+    /// pyramids.
+    fn build_pyramid_pk<M: MeshTopology>(
+        mesh: &M,
+        order: u8,
+        basis: PyramidBasisType,
+    ) -> Self {
         use fem_element::lagrange::pyramid::PyramidPk;
         use fem_element::ReferenceElement;
 
@@ -1901,11 +1934,23 @@ impl DofManager {
         let edge_dofs_per = if p >= 2 { p - 1 } else { 0 };
         let quad_face_dofs_per = if p >= 2 { (p - 1) * (p - 1) } else { 0 };
         let tri_face_dofs_per = if p >= 3 { (p - 1) * (p - 2) / 2 } else { 0 };
-        let volume_dofs_per = if p >= 3 { (p - 2) * (p - 1) * (2 * p - 3) / 6 } else { 0 };
+        // D347: the interior count is the one block that differs between the
+        // families (Bergot's stump grid vs Fuentes' `(p−1)³` tensor).
+        let volume_dofs_per = match basis {
+            PyramidBasisType::Bergot => {
+                if p >= 3 { (p - 2) * (p - 1) * (2 * p - 3) / 6 } else { 0 }
+            }
+            PyramidBasisType::Fuentes => if p >= 2 { (p - 1).pow(3) } else { 0 },
+        };
         let dofs_per_elem = 5 + 8 * edge_dofs_per + quad_face_dofs_per + 4 * tri_face_dofs_per
             + volume_dofs_per;
         let slots = Self::pyramid_entity_slot_grid(p);
-        assert_eq!(slots.len(), dofs_per_elem, "pyramid slot table size");
+        // The label table above is the *Bergot* layout; for Fuentes the block
+        // arithmetic is checked against the family's reference element below
+        // (both families share the block structure, D347).
+        if basis == PyramidBasisType::Bergot {
+            assert_eq!(slots.len(), dofs_per_elem, "pyramid slot table size");
+        }
 
         // Slot ranges (entity blocks) inside one element's dof span.
         let edge_block = 5usize..5 + 8 * edge_dofs_per;
@@ -1965,10 +2010,15 @@ impl DofManager {
                         dofs_flat[base + off + k] = d;
                     }
                 }
-                for k in 0..volume_dofs_per {
-                    dofs_flat[base + tri_block.end + k] = next_dof;
-                    next_dof += 1;
-                }
+            }
+            // D347: the interior block is the one whose *size* differs between
+            // the families — Fuentes already populates it at p = 2 (its
+            // `(p−1)³` tensor has 1 dof there, MFEM's
+            // `H1_FuentesPyramidElement` slot 14 at `(cp₁(1−cp₁), …, cp₁)`),
+            // so the guard is the block size, not the order.
+            for k in 0..volume_dofs_per {
+                dofs_flat[base + tri_block.end + k] = next_dof;
+                next_dof += 1;
             }
         }
 
@@ -1987,20 +2037,33 @@ impl DofManager {
             dof_coords[b..b + dim].copy_from_slice(c);
         }
         let linear = PyramidPk::new(1);
-        let slot_positions = fem_element::lagrange::H1PyramidPk::new(p).dof_coords();
-        debug_assert_eq!(slot_positions.len(), slots.len());
+        // D347: the family's own reference element is both the count oracle
+        // (its `n_dofs` must equal the block arithmetic above) and the slot
+        // position table — one source of truth with the basis the assembler
+        // evaluates (`ref_elem_vol_h1` → `h1_pyramid_element`).
+        let pyr_ref = fem_element::lagrange::h1_pyramid_element(p, basis);
+        assert_eq!(
+            pyr_ref.n_dofs(),
+            dofs_per_elem,
+            "build_pyramid_pk: {basis:?} reference element has {} dofs but the \
+             entity-block arithmetic gives {dofs_per_elem} at p={p}",
+            pyr_ref.n_dofs(),
+        );
+        let slot_positions = pyr_ref.dof_coords();
+        debug_assert_eq!(slot_positions.len(), dofs_per_elem);
         let mut phi = vec![0.0_f64; 5];
         // D191: `PyramidPk::eval_basis` slots are layer-ordered — the P1
         // element's slot 2/3 carry local vertices 3/2 (see the module-level
         // `PYR_P1_SLOT_VERTEX`, the same table as
-        // `Mesh::set_curvature_pyramid5`).
+        // `Mesh::set_curvature_pyramid5`).  At p = 1 both families and
+        // `PyramidPk` place slot `k` on the same collapsed-coordinate corner
+        // lattice, which is what makes the shared `linear` blend valid for
+        // either family.  Slots 0..5 are the mesh vertices themselves and need
+        // no coordinate write.
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             let base = e as usize * dofs_per_elem;
-            for (s, _g) in slots.iter().enumerate() {
-                if s < 5 {
-                    continue;
-                }
+            for s in 5..dofs_per_elem {
                 let theta = &slot_positions[s];
                 linear.eval_basis(theta, &mut phi);
                 let mut x = [0.0_f64; 3];
@@ -2047,7 +2110,7 @@ impl DofManager {
     // D157 — MFEM's `H1_TetrahedronElement` (tets, via [`DofManager::build_tet_h1`]).
     // For prism/pyramid, dispatches to specialized builders.
 
-    fn build_pk<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+    fn build_pk<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
         let dim = mesh.dim() as usize;
         let topo_dim = mesh.topological_dim() as usize;
         let p = order as usize;
@@ -2055,7 +2118,7 @@ impl DofManager {
         if topo_dim == 3 && mesh.n_elements() > 0 {
             let npe = mesh.element_nodes(0).len();
             if npe == 6 { return Self::build_prism_h1(mesh, order); }
-            if npe == 5 { return Self::build_pyramid_pk(mesh, order); }
+            if npe == 5 { return Self::build_pyramid_pk(mesh, order, pyr); }
             if npe == 4 { return Self::build_tet_h1(mesh, order); }
         }
         let n_nodes = mesh.n_nodes();
@@ -2493,9 +2556,9 @@ impl DofManager {
     /// numbering **bit-for-bit** whenever no key collision exists (≥3 cells
     /// per direction) — there the quotient only re-joins the covering images
     /// of seam entities that the folded build merged through the shared key.
-    fn build_periodic<M: MeshTopology>(mesh: &M, order: u8) -> Self {
+    fn build_periodic<M: MeshTopology>(mesh: &M, order: u8, pyr: PyramidBasisType) -> Self {
         let wrapper = UnfoldedPeriodicMesh { inner: mesh };
-        let uf = Self::build(&wrapper, order);
+        let uf = Self::build(&wrapper, order, pyr);
         let n_nodes = mesh.n_nodes();
         let dim = uf.dim;
 
@@ -2897,9 +2960,13 @@ impl DofManager {
     /// additionally checked against their own geometry corner (D332):
     /// silently keeping fold-based coordinates, or permuting the slots, is
     /// exactly the failure mode a count check alone cannot see.
-    fn rebuild_dof_coords_periodic<M: MeshTopology>(&mut self, mesh: &M) {
+    fn rebuild_dof_coords_periodic<M: MeshTopology>(
+        &mut self,
+        mesh: &M,
+        pyr: PyramidBasisType,
+    ) {
         use fem_element::lagrange::factory::{HexQk, H1TetPk, QuadQk};
-        use fem_element::lagrange::{H1PrismPk, H1PyramidPk, H1TriPk, PrismPk, PyramidPk};
+        use fem_element::lagrange::{H1PrismPk, H1TriPk, PrismPk, PyramidPk};
 
         let dim = self.dim;
         let topo_dim = mesh.topological_dim() as usize;
@@ -2945,25 +3012,39 @@ impl DofManager {
                         H1PrismPk::new(p).dof_coords().iter().map(|c| [c[0], c[1], c.get(2).copied().unwrap_or(0.0)]).collect(),
                         Box::new(PrismPk::new(geom_order)),
                     ),
-                    // D191/D332: the pyramid *field* slots follow the MFEM
-                    // entity-order slot table (the layout `build_pyramid_pk`
-                    // numbers `element_dofs` in) at the Bergot
-                    // GLL-barycentric positions `H1PyramidPk::dof_coords()`,
-                    // while the *geometry* table stays layer-major
-                    // `PyramidPk` (`set_curvature_pyramid5`'s frozen
-                    // contract).  The field slots used to be built from the
-                    // integer label grid `(i, j, k)/p` instead: that lattice
-                    // coincides with the Gauss-Lobatto one at p ≤ 2 and drifts
-                    // from p = 3 on (max 0.068670 at p = 3, 0.199682 at
-                    // p = 4) — with the same dof count, so the length guard
-                    // below could not see it.
+                    // D191/D332/D347: the pyramid *field* slots follow the MFEM
+                    // entity-order block layout (the one `build_pyramid_pk`
+                    // numbers `element_dofs` in) at the **selected family's**
+                    // reference positions (`h1_pyramid_element(p, pyr)` — Fuentes
+                    // by default since D347, the `(p−1)³` interior tensor of
+                    // `(cp[i](1−cp[k]), cp[j](1−cp[k]), cp[k])` bubbles;
+                    // Bergot's GLL-barycentric stump grid when the caller opted
+                    // out), while the *geometry* table follows
+                    // `set_curvature_pyramid5`.  The field slots used to be
+                    // built from the integer label grid `(i, j, k)/p` instead:
+                    // that lattice coincides with the Gauss-Lobatto one at
+                    // p ≤ 2 and drifts from p = 3 on (max 0.068670 at p = 3,
+                    // 0.199682 at p = 4) — with the same dof count, so the
+                    // length guard below could not see it.
                     (5, _) => (
-                        H1PyramidPk::new(p)
+                        fem_element::lagrange::h1_pyramid_element(p, pyr)
                             .dof_coords()
                             .iter()
                             .map(|c| [c[0], c[1], c[2]])
                             .collect(),
-                        Box::new(PyramidPk::new(geom_order)),
+                        // The *geometry* element follows the family the table
+                        // was written in: layer-major `PyramidPk` for the
+                        // straight (order-1) vertex-ordered snapshot, the
+                        // Fuentes element for a curved table
+                        // (`set_curvature_pyramid5`, D347).
+                        if geom_order > 1 {
+                            fem_element::lagrange::h1_pyramid_element(
+                                geom_order,
+                                fem_element::lagrange::PyramidBasisType::default(),
+                            )
+                        } else {
+                            Box::new(PyramidPk::new(geom_order))
+                        },
                     ),
                     _ => continue,
                 };
@@ -3044,12 +3125,13 @@ mod tests {
     /// collisions) the quotient numbering must reproduce the plain folded
     /// build bit-for-bit — same `dofs_flat`, same `n_dofs`, same entity maps.
     fn assert_periodic_matches_folded<M: MeshTopology>(mesh: &M, order: u8) {
+        let pyr = PyramidBasisType::default();
         let dm_new = DofManager::new(mesh, order);
-        let dm_ref = DofManager::build(mesh, order);
+        let dm_ref = DofManager::build(mesh, order, pyr);
         // Apply the same D56 coordinate rebuild to the reference so both sides
         // carry per-element seam coordinates.
         let mut dm_ref = dm_ref;
-        dm_ref.rebuild_dof_coords_periodic(mesh);
+        dm_ref.rebuild_dof_coords_periodic(mesh, pyr);
         assert_eq!(dm_new.n_dofs, dm_ref.n_dofs, "order {order}: n_dofs");
         assert_eq!(dm_new.dofs_flat, dm_ref.dofs_flat, "order {order}: dofs_flat");
         assert_eq!(dm_new.edge_dof_map, dm_ref.edge_dof_map, "order {order}: edge_dof_map");
@@ -3587,36 +3669,60 @@ mod tests {
         assert_eq!(dm.n_dofs,m.n_nodes());
     }
 
+    /// `p(p²+3)+1` — the Fuentes count MFEM's `H1_FECollection` default puts on
+    /// a pyramid (`fe_coll.cpp:1955`), and what `DofManager::new` selects since
+    /// D347.  Block-wise: `5 + 8(p−1) + (p−1)² + 4·(p−1)(p−2)/2 + (p−1)³`.
+    #[test] fn pyramid_fuentes_is_the_default_family() {
+        let m = make_pyramid_mesh();
+        for (p, ndof) in [(1usize, 5usize), (2, 15), (3, 37), (4, 77), (5, 141), (6, 235)] {
+            let dm = DofManager::new(&m, p as u8);
+            assert_eq!(
+                dm.dofs_per_elem, ndof,
+                "p={p}: default pyramid element must be the Fuentes arm \
+                 (p(p²+3)+1 = {})",
+                p * (p * p + 3) + 1,
+            );
+        }
+        // The Bergot opt-out keeps the pre-D347 counts
+        // `(p+1)(p+2)(2p+3)/6`.
+        for (p, ndof) in [(1u8, 5usize), (2, 14), (3, 30), (4, 55), (5, 91)] {
+            let dm = DofManager::new_with_pyramid_basis(
+                &m, p, PyramidBasisType::Bergot,
+            );
+            assert_eq!(dm.dofs_per_elem, ndof, "Bergot p={p}");
+        }
+    }
+
     #[test] fn pyramid_p2_basic() {
         let m=make_pyramid_mesh(); let dm=DofManager::new(&m,2);
-        assert_eq!(dm.dofs_per_elem,14); assert!(dm.n_dofs>m.n_nodes());
+        assert_eq!(dm.dofs_per_elem,15); assert!(dm.n_dofs>m.n_nodes());
         for e in 0..m.n_elements() as u32{assert_eq!(&dm.element_dofs(e)[..5],m.element_nodes(e));}
     }
 
     #[test] fn pyramid_p3_basic() {
         let m=make_pyramid_mesh(); let dm=DofManager::new(&m,3);
-        assert_eq!(dm.dofs_per_elem,30);
+        assert_eq!(dm.dofs_per_elem,37);
         assert!(dm.n_dofs>DofManager::new(&m,2).n_dofs);
     }
 
     #[test] fn pyramid_p4_basic() {
         let m=make_pyramid_mesh(); let dm=DofManager::new(&m,4);
-        // P4 pyramid total DOFs = (4+1)(4+2)(2*4+3)/6 = 5*6*11/6 = 55
-        assert_eq!(dm.dofs_per_elem,55);
+        // Fuentes P4 pyramid DOFs = p(p²+3)+1 = 4*19+1 = 77
+        assert_eq!(dm.dofs_per_elem,77);
         assert!(dm.n_dofs>DofManager::new(&m,3).n_dofs);
     }
 
     #[test] fn pyramid_p5_basic() {
         let m=make_pyramid_mesh(); let dm=DofManager::new(&m,5);
-        // P5 pyramid total DOFs = (5+1)(5+2)(2*5+3)/6 = 6*7*13/6 = 91
-        assert_eq!(dm.dofs_per_elem,91);
+        // Fuentes P5 pyramid DOFs = p(p²+3)+1 = 5*28+1 = 141
+        assert_eq!(dm.dofs_per_elem,141);
         assert!(dm.n_dofs>DofManager::new(&m,4).n_dofs);
     }
 
     #[test] fn pyramid_p6_basic() {
         let m=make_pyramid_mesh(); let dm=DofManager::new(&m,6);
-        // P6 pyramid total DOFs = (6+1)(6+2)(2*6+3)/6 = 7*8*15/6 = 140
-        assert_eq!(dm.dofs_per_elem,140);
+        // Fuentes P6 pyramid DOFs = p(p²+3)+1 = 6*39+1 = 235
+        assert_eq!(dm.dofs_per_elem,235);
         assert!(dm.n_dofs>DofManager::new(&m,5).n_dofs);
         for dof in 0..dm.n_dofs {
             let c=dm.dof_coord(dof as u32);

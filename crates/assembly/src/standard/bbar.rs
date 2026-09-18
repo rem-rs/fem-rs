@@ -63,6 +63,22 @@ use crate::assembler::GeoPyrP1;
 // ─── Reference element factory (re-exported from assembler) ─────────────────
 
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    ref_elem_vol_with_pyramid_basis(
+        elem_type,
+        order,
+        fem_element::lagrange::PyramidBasisType::default(),
+    )
+}
+
+/// [`ref_elem_vol`] with an explicit pyramid basis family (MFEM
+/// `H1_FECollection`'s `pyr_type`, D347): the BBAR space is an H¹ space, so its
+/// pyramid family must be the one the space numbered its dofs in.  Only
+/// pyramid cells at order ≥ 2 depend on it.
+fn ref_elem_vol_with_pyramid_basis(
+    elem_type: ElementType,
+    order: u8,
+    pyr_type: fem_element::lagrange::PyramidBasisType,
+) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriP1), // P0 handled elsewhere
         (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
@@ -86,11 +102,12 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         (ElementType::Hex8, 1) => Box::new(HexQ1),
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>
             Box::new(fem_element::lagrange::H1PrismPk::new(order as usize)),
-        // D299: MFEM's Bergot pyramid (`pyr_type=0`), entity slot order at
-        // the GLL-barycentric nodes — matches the H¹ pyramid dof numbering
-        // (`DofManager::build_pyramid_pk` / `ref_elem_vol_h1`).
+        // D299/D347: the pyramid element of the *chosen* family
+        // (`PyramidBasisType::default()` = Fuentes), entity slot order —
+        // matches the H¹ pyramid dof numbering (`DofManager::build_pyramid_pk` /
+        // `ref_elem_vol_h1_with_pyramid_basis`).
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) =>
-            Box::new(fem_element::lagrange::H1PyramidPk::new(order as usize)),
+            fem_element::lagrange::h1_pyramid_element(order as usize, pyr_type),
         _ => panic!("bbar::ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -135,6 +152,15 @@ fn geo_ref_elem(mesh: &dyn MeshTopology, e: u32) -> Option<Box<dyn ReferenceElem
     // paired with mesh-order vertices twists the Jacobian).
     if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) && g <= 1 {
         return Some(Box::new(GeoPyrP1::new()));
+    }
+    // D347: curved pyramids hold the **Fuentes** node order (MFEM
+    // `SetCurvature`'s default `pyr_type = 1`) — same arm as
+    // `assembler::geo_ref_elem`.
+    if matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) && g > 1 {
+        return Some(fem_element::lagrange::h1_pyramid_element(
+            g as usize,
+            fem_element::lagrange::PyramidBasisType::default(),
+        ));
     }
     let order = if g > 1 { g } else { 1 };
     let ft = mesh_type_to_factory(et);
@@ -221,7 +247,9 @@ where
     for e in 0..nelem as u32 {
         let elem_type = mesh.element_type(e);
         let order = space.element_order(e);
-        let ref_elem = ref_elem_vol(elem_type, order);
+        let ref_elem = ref_elem_vol_with_pyramid_basis(
+            elem_type, order, space.pyramid_basis(),
+        );
         let n_ldofs = ref_elem.n_dofs();
         let n_nodes = n_ldofs; // for VectorH1, n_dofs = n_nodes * dim
         let n_elem_dofs = n_nodes * dim;
@@ -471,7 +499,9 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
         for e in 0..nelem as u32 {
             let elem_type = mesh.element_type(e);
             let order = space.element_order(e);
-            let ref_elem = ref_elem_vol(elem_type, order);
+            let ref_elem = ref_elem_vol_with_pyramid_basis(
+                elem_type, order, space.pyramid_basis(),
+            );
             let n_ldofs = ref_elem.n_dofs();
             let n_nodes = n_ldofs;
             let n_elem_dofs = n_nodes * dim;

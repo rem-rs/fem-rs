@@ -36,6 +36,7 @@ use fem_mesh::topology::MeshTopology;
 use crate::dof_manager::DofManager;
 use crate::fe_space::{FESpace, SpaceType};
 use crate::ordering::Ordering;
+use fem_element::lagrange::PyramidBasisType;
 
 /// Vector-valued H¹ space: `dim` copies of a scalar H¹ Lagrange space.
 ///
@@ -49,6 +50,8 @@ pub struct VectorH1Space<M: MeshTopology> {
     /// Pre-computed element DOF tables (interleaved).
     elem_dofs: Vec<DofId>,
     dofs_per_elem: usize,
+    /// Pyramid basis family — MFEM `H1_FECollection`'s `pyr_type` (D347).
+    pyramid_basis: PyramidBasisType,
 }
 
 impl<M: MeshTopology + Clone> Clone for VectorH1Space<M> {
@@ -60,6 +63,7 @@ impl<M: MeshTopology + Clone> Clone for VectorH1Space<M> {
             dim: self.dim,
             elem_dofs: self.elem_dofs.clone(),
             dofs_per_elem: self.dofs_per_elem,
+            pyramid_basis: self.pyramid_basis,
         }
     }
 }
@@ -72,7 +76,18 @@ impl<M: MeshTopology> VectorH1Space<M> {
     /// The `dim` argument must match `mesh.dim()` for physical correctness,
     /// but is accepted as a parameter to allow independent testing.
     pub fn new(mesh: M, order: u8, dim: u8) -> Self {
-        let scalar_dm = DofManager::new(&mesh, order);
+        Self::with_pyramid_basis(mesh, order, dim, PyramidBasisType::default())
+    }
+
+    /// [`VectorH1Space::new`] with an explicit pyramid basis family (MFEM
+    /// `H1_FECollection`'s `pyr_type`, D347).
+    pub fn with_pyramid_basis(
+        mesh: M,
+        order: u8,
+        dim: u8,
+        pyramid_basis: PyramidBasisType,
+    ) -> Self {
+        let scalar_dm = DofManager::new_with_pyramid_basis(&mesh, order, pyramid_basis);
         let n_scalar  = scalar_dm.n_dofs;
         let n_ldofs   = scalar_dm.dofs_per_elem;
         let n_elems   = mesh.n_elements();
@@ -95,7 +110,7 @@ impl<M: MeshTopology> VectorH1Space<M> {
             }
         }
 
-        VectorH1Space { mesh, scalar_dm, order, dim, elem_dofs, dofs_per_elem }
+        VectorH1Space { mesh, scalar_dm, order, dim, elem_dofs, dofs_per_elem, pyramid_basis }
     }
 
     /// Number of scalar DOFs per component.
@@ -147,6 +162,9 @@ impl<M: MeshTopology> FESpace for VectorH1Space<M> {
     fn space_type(&self) -> SpaceType { SpaceType::VectorH1(self.dim) }
 
     fn order(&self) -> u8 { self.order }
+
+    /// Pyramid basis family of the scalar component space (D347).
+    fn pyramid_basis(&self) -> PyramidBasisType { self.pyramid_basis }
 }
 
 impl<M: MeshTopology> VectorH1Space<M> {
