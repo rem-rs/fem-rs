@@ -235,11 +235,74 @@ pub enum SchurMode {
     Gs,
 }
 
-enum SchurApprox {
+pub(crate) enum SchurApprox {
     Amg(AmgSolver<f64>),
     Dense { lu: Vec<f64>, piv: Vec<usize>, n: usize },
     Diag(Vec<f64>),
     Gs(GsSmoother),
+}
+
+impl SchurApprox {
+    /// Build the Schur-block approximation of `s` in `mode` — the `M1`
+    /// auxiliary solver shared by [`BdpMinresSolver`] and
+    /// [`crate::bramble_pasciak::BramblePasciakSolver`].
+    pub(crate) fn new(s: &CsrMatrix<f64>, mode: SchurMode) -> Self {
+        match mode {
+            SchurMode::Amg => {
+                // Guard zero rows (eliminated dofs) so the AMG hierarchy is
+                // SPD.  hypre BoomerAMG default semantics (Ruge–Stüben
+                // coarsening + symmetric Gauss–Seidel smoothing): the
+                // smoothed-aggregation + weighted-Jacobi default produces
+                // non-SPD V-cycles on these Schur matrices and stalls
+                // CG/MINRES.
+                let s_guarded = guard_zero_diagonal(s);
+                SchurApprox::Amg(AmgSolver::setup(&s_guarded, boomeramg_config()))
+            }
+            SchurMode::Dense => {
+                let n = s.nrows;
+                let mut lu = vec![0.0; n * n];
+                for i in 0..n {
+                    for p in s.row_ptr[i]..s.row_ptr[i + 1] {
+                        lu[i * n + s.col_idx[p] as usize] = s.values[p];
+                    }
+                }
+                let mut piv = vec![0_usize; n];
+                fem_linalg::dense::lu_factor(&mut lu, n, &mut piv)
+                    .expect("Schur complement S is singular");
+                SchurApprox::Dense { lu, piv, n }
+            }
+            SchurMode::Diag => {
+                let d = (0..s.nrows)
+                    .map(|i| {
+                        let dii = s.get(i, i);
+                        if dii.abs() < 1e-300 { 1.0 } else { 1.0 / dii }
+                    })
+                    .collect();
+                SchurApprox::Diag(d)
+            }
+            SchurMode::Gs => SchurApprox::Gs(GsSmoother::new(s, GsType::Symmetric, 1)),
+        }
+    }
+
+    /// Apply the approximation: `w ← S⁻¹_approx · v` (disjoint `v`/`w`).
+    pub(crate) fn apply(&self, v: &[f64], w: &mut [f64]) {
+        match self {
+            SchurApprox::Amg(amg) => {
+                let z = amg.precond_apply(v);
+                w.copy_from_slice(&z);
+            }
+            SchurApprox::Dense { lu, piv, n } => {
+                w.copy_from_slice(v);
+                fem_linalg::dense::lu_solve(lu, *n, piv, w);
+            }
+            SchurApprox::Diag(d) => {
+                for (wi, (&vi, &di)) in w.iter_mut().zip(v.iter().zip(d)) {
+                    *wi = vi * di;
+                }
+            }
+            SchurApprox::Gs(gs) => gs.mult(v, w),
+        }
+    }
 }
 
 /// Serial port of MFEM `blocksolvers::BDPMinresSolver`.
@@ -319,40 +382,7 @@ impl BdpMinresSolver {
             .collect();
         let s = schur_complement_bmb_diag(b, &m_diag);
         let bt = b.transpose();
-
-        let schur = match schur_mode {
-            SchurMode::Amg => {
-                // Guard zero rows (eliminated dofs) so the AMG hierarchy is SPD.
-                // hypre BoomerAMG default semantics (Ruge–Stüben coarsening +
-                // symmetric Gauss–Seidel smoothing): the smoothed-aggregation
-                // + weighted-Jacobi default produces non-SPD V-cycles on these
-                // Schur matrices and stalls CG/MINRES.
-                let s_guarded = guard_zero_diagonal(&s);
-                SchurApprox::Amg(AmgSolver::setup(&s_guarded, boomeramg_config()))
-            }
-            SchurMode::Dense => {
-                let n = n_p;
-                let mut lu = vec![0.0; n * n];
-                for i in 0..n {
-                    for p in s.row_ptr[i]..s.row_ptr[i + 1] {
-                        lu[i * n + s.col_idx[p] as usize] = s.values[p];
-                    }
-                }
-                let mut piv = vec![0_usize; n];
-                fem_linalg::dense::lu_factor(&mut lu, n, &mut piv).expect("BDPMinresSolver: S is singular");
-                SchurApprox::Dense { lu, piv, n }
-            }
-            SchurMode::Diag => {
-                let d = (0..n_p)
-                    .map(|i| {
-                        let dii = s.get(i, i);
-                        if dii.abs() < 1e-300 { 1.0 } else { 1.0 / dii }
-                    })
-                    .collect();
-                SchurApprox::Diag(d)
-            }
-            SchurMode::Gs => SchurApprox::Gs(GsSmoother::new(&s, GsType::Symmetric, 1)),
-        };
+        let schur = SchurApprox::new(&s, schur_mode);
 
         let m_diag: Vec<f64> = (0..n_u)
             .map(|i| {
@@ -437,24 +467,7 @@ impl BdpMinresSolver {
         for i in 0..self.n_u {
             w[i] = v[i] / self.m_diag[i];
         }
-        let vp = &v[self.n_u..];
-        let wp = &mut w[self.n_u..];
-        match &self.schur {
-            SchurApprox::Amg(amg) => {
-                let z = amg.precond_apply(vp);
-                wp.copy_from_slice(&z);
-            }
-            SchurApprox::Dense { lu, piv, n } => {
-                wp.copy_from_slice(vp);
-                fem_linalg::dense::lu_solve(lu, *n, piv, wp);
-            }
-            SchurApprox::Diag(d) => {
-                for (wi, (&vi, &di)) in wp.iter_mut().zip(vp.iter().zip(d)) {
-                    *wi = vi * di;
-                }
-            }
-            SchurApprox::Gs(gs) => gs.mult(vp, wp),
-        }
+        self.schur.apply(&v[self.n_u..], &mut w[self.n_u..]);
     }
 }
 

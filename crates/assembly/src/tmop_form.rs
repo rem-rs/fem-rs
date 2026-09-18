@@ -32,7 +32,9 @@
 //!   quadratically (`-alc` of mesh-optimizer).
 
 use crate::assembler::ref_elem_vol_h1;
-use fem_element::quadrature::{gauss_lobatto_01_arbitrary, gauss_lobatto_arbitrary};
+use fem_element::quadrature::{
+    gauss_legendre_01_arbitrary, gauss_lobatto_01_arbitrary, gauss_lobatto_arbitrary,
+};
 use fem_element::reference::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix, SolveResult, SolverConfig};
 use fem_mesh::element_type::ElementType;
@@ -1238,6 +1240,85 @@ pub enum TmopQuadType {
     GaussLobatto,
     /// GaussLegendre (`IntRules`) — from the reference element.
     GaussLegendre,
+    /// ClosedUniform (`IntRulesCU`, aka closed Newton-Cotes) — tensor-product
+    /// rules built from the 1-D closed-uniform segment rule with equally
+    /// spaced nodes (endpoints included).  In MFEM 4.10 `quad_type` only
+    /// changes the SEGMENT rule (`fem/intrules.cpp:1029`, `n = Order | 1`);
+    /// SQUARE/CUBE are its tensor products (`fem/intrules.cpp:1861/2533`)
+    /// and TRIANGLE/TET/PRISM keep the quad_type-independent
+    /// Witherden-Vincent rules.
+    ClosedUniform,
+}
+
+/// MFEM `QuadratureFunctions1D::ClosedUniform(np)` (`fem/intrules.cpp:856`):
+/// the `np`-point closed Newton-Cotes rule on `[0,1]`, equally spaced nodes
+/// `x_i = i/(np-1)` including the endpoints (`np == 1` degenerates to the
+/// single point 1/2 with weight 1).  The weights are
+/// `QuadratureFunctions1D::CalculateUniformWeights` (`fem/intrules.cpp:964`,
+/// non-MPFR path): each nodal Lagrange polynomial through the nodes is
+/// integrated exactly with the default `IntRules` Gauss-Legendre segment rule
+/// of order `np-1` (`(np-1)/2 + 1` points, `fem/intrules.cpp:986`), i.e.
+/// `w_i = Σ_k W_k L_i(x_k)`.
+pub fn quadrature_functions_1d_closed_uniform(np: usize) -> (Vec<f64>, Vec<f64>) {
+    assert!(np >= 1, "ClosedUniform: np must be >= 1");
+    if np == 1 {
+        // fem/intrules.cpp:861: Set1w(0.5, 1.0).
+        return (vec![0.5], vec![1.0]);
+    }
+    let xs: Vec<f64> = (0..np).map(|i| i as f64 / (np - 1) as f64).collect();
+    if np == 2 {
+        // CalculateUniformWeights case 2 (fem/intrules.cpp:976).
+        return (xs, vec![0.5, 0.5]);
+    }
+    // `IntRules.Get(Geometry::SEGMENT, np-1)` with the default GaussLegendre
+    // quad_type: m = (np-1)/2 + 1 points (fem/intrules.cpp:986, 1379-1381).
+    let m = (np - 1) / 2 + 1;
+    let (gx, gw) = gauss_legendre_01_arbitrary(m);
+    let mut ws = vec![0.0; np];
+    for (&xk, &wk) in gx.iter().zip(gw.iter()) {
+        for (i, xi) in xs.iter().enumerate() {
+            // L_i(xk) = prod_{j != i} (xk - xj) / (xi - xj).
+            let mut li = 1.0;
+            for (j, xj) in xs.iter().enumerate() {
+                if j != i {
+                    li *= (xk - xj) / (xi - xj);
+                }
+            }
+            ws[i] += wk * li;
+        }
+    }
+    (xs, ws)
+}
+
+/// Tensor product of a 1-D rule over `dim` directions, first direction
+/// outermost (matching the existing GaussLobatto arm and MFEM's
+/// `IntegrationRule(sr1, sr2[, sr3])` square/cube constructors,
+/// `fem/intrules.cpp:1871/2542`).
+fn tensor_product_1d(xs: &[f64], ws: &[f64], dim: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let mut points = Vec::with_capacity(xs.len().pow(dim as u32));
+    let mut weights = Vec::with_capacity(xs.len().pow(dim as u32));
+    match dim {
+        2 => {
+            for (xi, wi) in xs.iter().zip(ws.iter()) {
+                for (xj, wj) in xs.iter().zip(ws.iter()) {
+                    points.push(vec![*xi, *xj]);
+                    weights.push(wi * wj);
+                }
+            }
+        }
+        3 => {
+            for (xi, wi) in xs.iter().zip(ws.iter()) {
+                for (xj, wj) in xs.iter().zip(ws.iter()) {
+                    for (xk, wk) in xs.iter().zip(ws.iter()) {
+                        points.push(vec![*xi, *xj, *xk]);
+                        weights.push(wi * wj * wk);
+                    }
+                }
+            }
+        }
+        _ => unreachable!("TMOP forms are 2-D or 3-D"),
+    }
+    (points, weights)
 }
 
 /// The TMOP nonlinear form: E(dx) = Σ_integ ∫ μ(Jpt) over the mesh, with
@@ -1312,30 +1393,29 @@ impl<'a> TmopForm<'a> {
                     } else {
                         gauss_lobatto_arbitrary(n)
                     };
-                    let mut points = Vec::with_capacity(xs.len().pow(dim as u32));
-                    let mut weights = Vec::with_capacity(xs.len().pow(dim as u32));
-                    match dim {
-                        2 => {
-                            for (xi, wi) in xs.iter().zip(ws.iter()) {
-                                for (xj, wj) in xs.iter().zip(ws.iter()) {
-                                    points.push(vec![*xi, *xj]);
-                                    weights.push(wi * wj);
-                                }
-                            }
-                        }
-                        3 => {
-                            for (xi, wi) in xs.iter().zip(ws.iter()) {
-                                for (xj, wj) in xs.iter().zip(ws.iter()) {
-                                    for (xk, wk) in xs.iter().zip(ws.iter()) {
-                                        points.push(vec![*xi, *xj, *xk]);
-                                        weights.push(wi * wj * wk);
-                                    }
-                                }
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
-                    (points, weights)
+                    tensor_product_1d(&xs, &ws, dim)
+                }
+                (TmopQuadType::ClosedUniform, 2) | (TmopQuadType::ClosedUniform, 3) => {
+                    // MFEM IntegrationRules::SegmentIntegrationRule,
+                    // Quadrature1D::ClosedUniform arm (fem/intrules.cpp:1029):
+                    // n = Order | 1 equally spaced points (closed Newton-Cotes,
+                    // exact for degree n-1+n%2); SQUARE/CUBE rules are the
+                    // tensor products (fem/intrules.cpp:1861/2533). The rule
+                    // domain must match the reference element's domain.
+                    let n = (quad_order as usize) | 1;
+                    let (xs01, ws01) = quadrature_functions_1d_closed_uniform(n);
+                    let domain_unit = el_domain_is_unit(re.as_ref());
+                    let (xs, ws) = if domain_unit {
+                        (xs01, ws01)
+                    } else {
+                        // [-1,1]^d frame: eta = 2*xi - 1, weights double per
+                        // direction (same convention as gauss_lobatto_arbitrary).
+                        (
+                            xs01.iter().map(|x| 2.0 * x - 1.0).collect(),
+                            ws01.iter().map(|w| 2.0 * w).collect(),
+                        )
+                    };
+                    tensor_product_1d(&xs, &ws, dim)
                 }
                 _ => unreachable!("dim checked above"),
             };
@@ -4312,6 +4392,46 @@ mod tests {
                 assert!((x - 2.0 * y).abs() < 1e-13, "grad {unit:?}: {x} vs 2·{y}");
             }
         }
+    }
+
+    /// D369: `TmopQuadType::ClosedUniform` builds the MFEM `IntRulesCU`
+    /// rules: 1-D closed Newton-Cotes with `n = quad_order | 1` points,
+    /// tensor product per element.  Post-`UnitDomainElem` the stored points
+    /// are always on the `[0,1]^d` frame, so both the quad (81 pts) and the
+    /// hex (729 pts) rules at `-qo 8` match the MFEM 4.10 probe
+    /// (`../tmp/d369/qt3_probe.cpp`, see
+    /// `tests/d369_tmop_closed_uniform_quad.rs`).
+    #[test]
+    fn closed_uniform_form_quadrature() {
+        let w0 = 0.034885361552028218_f64; // probe nc1d np=9 endpoint weight
+
+        let mesh: Mesh<2> = Mesh::make_cartesian_2d(1, 1, 1.0, 1.0);
+        let order = 1u8;
+        let dm = DofManager::new(&mesh, order);
+        let topo: &dyn MeshTopology = &mesh;
+        let form = TmopForm::new(topo, &dm, order, TmopQuadType::ClosedUniform, 8);
+        let e = &form.elems[0];
+        assert_eq!(e.quad_points.len(), 81, "SQUARE np at -qo 8");
+        assert_eq!(e.quad_points[0], vec![0.0, 0.0]);
+        assert_eq!(e.quad_points[80], vec![1.0, 1.0]);
+        let w00 = e.quad_weights[0];
+        assert!((w00 - w0 * w0).abs() < 1e-15, "w00 = {w00}");
+        let wsum: f64 = e.quad_weights.iter().sum();
+        assert!((wsum - 1.0).abs() < 1e-13, "square wsum = {wsum}");
+
+        let mesh3: Mesh<3> =
+            Mesh::make_cartesian_3d(1, 1, 1, ElementType::Hex8, 1.0, 1.0, 1.0, false);
+        let dm3 = DofManager::new(&mesh3, order);
+        let topo3: &dyn MeshTopology = &mesh3;
+        let form3 = TmopForm::new(topo3, &dm3, order, TmopQuadType::ClosedUniform, 8);
+        let e3 = &form3.elems[0];
+        assert_eq!(e3.quad_points.len(), 729, "CUBE np at -qo 8");
+        assert_eq!(e3.quad_points[0], vec![0.0, 0.0, 0.0]);
+        assert_eq!(e3.quad_points[728], vec![1.0, 1.0, 1.0]);
+        let w000 = e3.quad_weights[0];
+        assert!((w000 - w0 * w0 * w0).abs() < 1e-15, "w000 = {w000}");
+        let wsum3: f64 = e3.quad_weights.iter().sum();
+        assert!((wsum3 - 1.0).abs() < 1e-12, "cube wsum = {wsum3}");
     }
 
     /// Straight hex mesh with P2 curvature: TMOP min det must be the exact

@@ -2055,6 +2055,80 @@ impl Assembler {
         (coo.into_csr(), all_dofs, all_mats, ldofs, n_elems)
     }
 
+    /// Assemble a global CSR matrix from **caller-supplied per-element dense
+    /// matrices** — the `BilinearForm::ComputeElementMatrices()` +
+    /// `AssembleElementMatrix(i, elmat, skip_zeros)` path of MFEM
+    /// (`fem/bilinearform.cpp`).
+    ///
+    /// `elem_mats[e]` is element `e`'s local matrix, row-major, in the
+    /// element's own dof convention (`space.element_dofs(e)` order) — exactly
+    /// the output convention of MFEM `ComputeElementMatrix(i, elmat)` (the
+    /// integrators' element matrix *before* the dof transformation).  The
+    /// scatter mirrors MFEM `BilinearForm::AssembleElementMatrix` →
+    /// `SparseMatrix::AddSubMatrix(vdofs, vdofs, elmat)`: entries of signed
+    /// dofs (`space.element_signs`, the fem-rs counterpart of MFEM's negative
+    /// `vdofs` entries) are conjugated `a_ij ← s_i·a_ij·s_j` when summed into
+    /// the global matrix.  Spaces without signed dofs (H1/L2) are scattered
+    /// as-is.  (Face-block rotations of 3-D H(curl) spaces are NOT expressed
+    /// by this scalar-sign path.)
+    ///
+    /// Typical use (MFEM `blocksolvers::BramblePasciakSolver::
+    /// ConstructMassPreconditioner`): build a per-element matrix `Q_e`, then
+    /// scatter with the same dof map/sign handling as a form-level assembly.
+    pub fn assemble_from_element_matrices<S: FESpace>(
+        space:     &S,
+        elem_mats: &[&[f64]],
+    ) -> CsrMatrix<f64> {
+        let mesh   = space.mesh();
+        let n_dofs = space.n_dofs();
+        assert_eq!(
+            elem_mats.len(),
+            mesh.n_elements() as usize,
+            "assemble_from_element_matrices: one block per element required"
+        );
+
+        let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
+        let mut signed: Vec<f64> = Vec::new();
+        for (k, e) in mesh.elem_iter().enumerate() {
+            let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+            let ld = dofs.len();
+            let mat = elem_mats[k];
+            assert_eq!(
+                mat.len(),
+                ld * ld,
+                "assemble_from_element_matrices: element {k} block must be {ld}×{ld} row-major"
+            );
+
+            // MFEM AddSubMatrix signed-vdofs semantics: negate row i / column j
+            // where the vdof sign is negative.
+            let mat_signed: &[f64] = match space.element_signs(e) {
+                Some(signs) => {
+                    assert_eq!(signs.len(), ld, "element_signs length must match element_dofs");
+                    signed.clear();
+                    signed.extend_from_slice(mat);
+                    for (i, &si) in signs.iter().enumerate() {
+                        if si != 1.0 {
+                            for v in &mut signed[i * ld..(i + 1) * ld] {
+                                *v *= si;
+                            }
+                        }
+                    }
+                    for (j, &sj) in signs.iter().enumerate() {
+                        if sj != 1.0 {
+                            for r in 0..ld {
+                                signed[r * ld + j] *= sj;
+                            }
+                        }
+                    }
+                    &signed
+                }
+                None => mat,
+            };
+            coo.add_element_matrix(&dofs, mat_signed);
+        }
+        coo.into_csr()
+    }
+
     /// Assemble the global load vector for a linear form.
     pub fn assemble_linear<S: FESpace>(
         space:       &S,
@@ -3627,6 +3701,83 @@ mod tests {
         }
         let rhs = Assembler::assemble_linear(&space, &[&Zero], 2);
         assert_eq!(rhs.len(), n);
+    }
+
+    /// D370: `assemble_from_element_matrices` reproduces the integrator-driven
+    /// `assemble_bilinear` result bit-for-bit when fed the per-element
+    /// matrices captured by `assemble_bilinear_with_elements` (same COO
+    /// triplets, same dedup path).  H1/L2 spaces have unsigned dofs, so this
+    /// also covers the no-sign scatter.
+    #[test]
+    fn assemble_from_element_matrices_matches_assemble_bilinear() {
+        let mesh  = Mesh::<2>::unit_square_tri(3);
+        let space = H1Space::new(mesh, 2);
+        let (csr, _dofs, mats, ld, ne) = Assembler::assemble_bilinear_with_elements(
+            &space,
+            &[&MassIntegrator { rho: 1.0 }],
+            4,
+        );
+        assert_eq!(mats.len(), ne * ld * ld);
+        let blocks: Vec<&[f64]> = (0..ne).map(|e| &mats[e * ld * ld..(e + 1) * ld * ld]).collect();
+        let rebuilt = Assembler::assemble_from_element_matrices(&space, &blocks);
+        assert_eq!(rebuilt.nrows, csr.nrows);
+        assert_eq!(rebuilt.values.len(), csr.values.len());
+        let max_dev = rebuilt
+            .values
+            .iter()
+            .zip(&csr.values)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert_eq!(max_dev, 0.0, "rebuilt matrix differs by {max_dev:.3e}");
+    }
+
+    /// D370: for a signed space (H(div)) the scatter conjugates each element
+    /// block by the dof signs (`a_ij ← s_i·a_ij·s_j`, MFEM AddSubMatrix with
+    /// signed vdofs).  Verified against a hand-rolled dense reference on the
+    /// RT(1) space of a small tri mesh.
+    #[test]
+    fn assemble_from_element_matrices_applies_dof_sign_conjugation() {
+        use fem_space::HDivSpace;
+
+        let mesh  = Mesh::<2>::unit_square_tri(2);
+        let space = HDivSpace::new(mesh, 1);
+        let n = space.n_dofs();
+
+        // Arbitrary (element-dependent) full local blocks.
+        let ne = space.mesh().n_elements() as usize;
+        let ld = space.element_dofs(0).len();
+        let blocks: Vec<Vec<f64>> = (0..ne)
+            .map(|e| {
+                (0..ld * ld)
+                    .map(|k| ((e * 131 + k) % 17) as f64 * 0.25 - 2.0)
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[f64]> = blocks.iter().map(|b| b.as_slice()).collect();
+
+        let global = Assembler::assemble_from_element_matrices(&space, &refs);
+
+        // Dense reference: conjugate and accumulate explicitly.
+        let mut expect = vec![0.0_f64; n * n];
+        for (e, block) in refs.iter().enumerate() {
+            let el = e as u32;
+            let dofs: Vec<usize> = space.element_dofs(el).iter().map(|&d| d as usize).collect();
+            let signs = space.element_signs(el).to_vec();
+            let ld = dofs.len();
+            for i in 0..ld {
+                for j in 0..ld {
+                    expect[dofs[i] * n + dofs[j]] += signs[i] * signs[j] * block[i * ld + j];
+                }
+            }
+        }
+        let mut worst = 0.0_f64;
+        for i in 0..n {
+            for ptr in global.row_ptr[i]..global.row_ptr[i + 1] {
+                let j = global.col_idx[ptr] as usize;
+                worst = worst.max((global.values[ptr] - expect[i * n + j]).abs());
+            }
+        }
+        assert!(worst == 0.0, "signed scatter differs by {worst:.3e}");
     }
 
     #[cfg(feature = "parallel")]

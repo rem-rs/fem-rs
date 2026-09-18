@@ -144,7 +144,7 @@ fn build_lor_amg_h1_generic<const D: usize>(
 // (`LORBase::GetDofPermutation`).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use fem_solver::{DenseVec, Preconditioner, fem_to_linlvo_csr};
+use fem_solver::{DenseVec, GsSmoother, GsType, Preconditioner, fem_to_linlvo_csr};
 use fem_mesh::MeshTopology;
 use fem_space::hcurl::HCurlSpace as HCurlSpaceGeneric;
 use fem_space::hdiv::HDivSpace as HDivSpaceGeneric;
@@ -319,17 +319,70 @@ pub fn build_lor_ams_nd_hex(
     })
 }
 
-/// Build the LOR-ADS solver for a hex H(div) space of order ≥ 1.
+/// Eliminate the essential dofs on the LOR matrix (D367) — the fem-rs
+/// counterpart of the essential-dof argument of MFEM's
+/// `LORSolver(BilinearForm&, const Array<int> &ess_tdof_list)`
+/// (`fem/lor/lor.hpp:210`).
+///
+/// MFEM semantics (serial, the path the 2-D quad ND/RT legs take): MFEM 4.10
+/// routes tensor-basis ND/RT forms through `BatchedLORAssembly`
+/// (`FormIsSupported` accepts ND with `CurlCurlIntegrator` +
+/// `VectorFEMassIntegrator` and RT with `DivDivIntegrator` +
+/// `VectorFEMassIntegrator`, `fem/lor/lor_batched.cpp:51-70`), which assembles
+/// the LOR matrix **directly in the HO dof numbering** (`FillJAndData` scatters
+/// through `fes_ho.GetElementRestriction`) and finishes with
+/// `A.As<SparseMatrix>()->EliminateBC(ess_dofs, DiagonalPolicy::DIAG_KEEP)`
+/// (`lor_batched.cpp:726-734`): for every essential dof, zero the off-diagonal
+/// entries of its row **and** column and **keep** the diagonal
+/// (`linalg/sparsemat.cpp` `EliminateBC`; the legacy `LegacyAssembleSystem`
+/// path is equivalent — `FormSystemMatrix` with the default
+/// `diag_policy = DIAG_KEEP`, `fem/bilinearform.cpp:75`).
+///
+/// The fem-rs `A_LOR` lives in the *LOR* dof numbering, so each HO ess dof `h`
+/// is first mapped to the LOR dof `l` with `|perm[l]| == h` (the signed LOR→HO
+/// permutation is a bijection onto `0..n_ho`).  The signed-permutation
+/// congruence commutes with DIAG_KEEP elimination (zeroing is index-wise and
+/// the kept diagonal is congruence-invariant since sign² = 1), so this yields
+/// exactly MFEM's eliminated operator.  The `rhs` scratch of
+/// [`CsrMatrix::apply_dirichlet_keep_diag`] is fed `value = 0` and discarded —
+/// MFEM's `EliminateBC` has no rhs at all.
+fn eliminate_lor_ess<L: LorPerm>(lor: &L, a_lor: &mut CsrMatrix<f64>, ess_ho_dofs: &[u32]) {
+    if ess_ho_dofs.is_empty() {
+        return;
+    }
+    let mut is_ess_ho = vec![false; a_lor.nrows];
+    for &d in ess_ho_dofs {
+        is_ess_ho[d as usize] = true;
+    }
+    let mut scratch_rhs = vec![0.0_f64; a_lor.nrows];
+    for (l, &p) in lor.perm().iter().enumerate() {
+        if is_ess_ho[p.unsigned_abs() as usize] {
+            a_lor.apply_dirichlet_keep_diag(l, 0.0, &mut scratch_rhs);
+        }
+    }
+}
+
 /// Build the LOR-AMS solver for a 2-D quad H(curl) space (order >= 2).
 ///
+/// `ess_ho_dofs` are the *high-order* essential true dofs (e.g. the boundary
+/// dofs the HO system was eliminated with); they are mapped through the inverse
+/// LOR permutation and eliminated on `A_LOR` with MFEM's DIAG_KEEP policy
+/// ([`eliminate_lor_ess`]) so the preconditioner sits on the same eliminated
+/// operator as the CG system (MFEM
+/// `LORSolver::LORSolver(a_ho, ess_tdof_list)`).
+///
 /// linger AMS with 2-D coordinates disables the face auxiliary space but the
-/// Hiptmair-Xu nodal auxiliary space remains fully effective.
+/// Hiptmair-Xu nodal auxiliary space remains fully effective.  The discrete
+/// gradient `G` needs **no** essential-dof treatment: MFEM's LOR-AMS builds it
+/// purely from the space topology (`BatchedLOR_AMS::FormGradientMatrix`,
+/// `fem/lor/lor_ams.cpp`) — the ess dofs only ever touch the matrix.
 pub fn build_lor_ams_nd_quad(
     ho_space: &HCurlSpaceGeneric<fem_mesh::simplex::Mesh<2>>,
     a_ho: &CsrMatrix<f64>,
     mass: f64,
     curl_curl: f64,
     ams_cfg: AmsConfig,
+    ess_ho_dofs: &[u32],
 ) -> FemResult<LorAmsSolverNdQuad> {
     let lor = LorNd::<2>::new_quad(ho_space)?;
     if a_ho.nrows != lor.n_ho() {
@@ -338,7 +391,8 @@ pub fn build_lor_ams_nd_quad(
             actual: a_ho.nrows,
         });
     }
-    let a_lor = assemble_lor_nd_quad(lor.lor_space(), mass, curl_curl);
+    let mut a_lor = assemble_lor_nd_quad(lor.lor_space(), mass, curl_curl);
+    eliminate_lor_ess(&lor, &mut a_lor, ess_ho_dofs);
 
     let h1_space = fem_space::h1::H1Space::new(lor.lor_mesh().clone(), 1);
     let g = DiscreteLinearOperator::gradient(&h1_space, lor.lor_space())
@@ -363,11 +417,17 @@ pub fn build_lor_ams_nd_quad(
 /// Build the LOR solver for a 2-D quad H(div) space (order >= 1) with a
 /// Jacobi-preconditioned LOR matrix.  linger has no 2-D ADS analogue; the
 /// Jacobi-smoothed LOR operator is the pragmatic fallback.
+///
+/// `ess_ho_dofs` are the *high-order* essential true dofs; they are mapped
+/// through the inverse LOR permutation and eliminated on `A_LOR` with MFEM's
+/// DIAG_KEEP policy ([`eliminate_lor_ess`], D367) — the same
+/// `LORSolver(a_ho, ess_tdof_list)` semantics as the ND builder.
 pub fn build_lor_jacobi_rt_quad(
     ho_space: &HDivSpaceGeneric<fem_mesh::simplex::Mesh<2>>,
     a_ho: &CsrMatrix<f64>,
     mass: f64,
     div_div: f64,
+    ess_ho_dofs: &[u32],
 ) -> FemResult<LorJacobiSolverRtQuad> {
     let lor = LorRt::<2>::new_quad(ho_space)?;
     if a_ho.nrows != lor.n_ho() {
@@ -376,7 +436,8 @@ pub fn build_lor_jacobi_rt_quad(
             actual: a_ho.nrows,
         });
     }
-    let a_lor = assemble_lor_rt_quad(lor.lor_space(), mass, div_div);
+    let mut a_lor = assemble_lor_rt_quad(lor.lor_space(), mass, div_div);
+    eliminate_lor_ess(&lor, &mut a_lor, ess_ho_dofs);
     let a_ll = fem_to_linlvo_csr(&a_lor);
     let inner = linlvo::JacobiPrecond::from_csr(&a_ll)
         .map_err(|e| FemError::Other(format!("LOR-Jacobi setup: {e}")))?;
@@ -405,6 +466,91 @@ fn assemble_lor_rt_quad(lor_space: &HDivSpaceGeneric<fem_mesh::simplex::Mesh<2>>
     if div_div != 0.0 { integrators.push(&dd); }
     if mass != 0.0 { integrators.push(&m); }
     VectorAssembler::assemble_bilinear(lor_space, &integrators, 4)
+}
+
+// ─── LOR + symmetric Gauss-Seidel (MFEM `LORSolver<GSSmoother>`) ────────────
+//
+// `miniapps/solvers/lor_solvers.cpp` built without SuiteSparse (and without
+// hypre) preconditions every leg with `LORSolver<GSSmoother>`: one symmetric
+// Gauss-Seidel sweep on the *eliminated* LOR matrix
+// (`GSSmoother(GSType::SYMMETRIC, 1)` — the MFEM defaults).  These builders
+// are the fem-rs expression of exactly that solver; [`LorSolver`] transfers
+// through the assumed-constraint permutation as usual.
+
+/// Adapter wrapping [`GsSmoother`] (the MFEM-faithful symmetric GS sweep,
+/// forward + backward) in linger's [`Preconditioner`] trait, which
+/// [`LorSolver`]'s inner preconditioner requires.  `GsSmoother` itself only
+/// exposes a `mult` method, and the trait cannot be implemented for it here
+/// (orphan rule: foreign trait, foreign type).
+pub struct LorSymGs(GsSmoother);
+
+impl Preconditioner for LorSymGs {
+    type Vector = DenseVec<f64>;
+
+    fn apply_precond(&self, x: &DenseVec<f64>, y: &mut DenseVec<f64>) {
+        self.0.mult(x.as_slice(), y.as_mut_slice());
+    }
+}
+
+/// LOR + one symmetric Gauss-Seidel sweep for a 2-D quad H(curl) system —
+/// MFEM's `LORSolver<GSSmoother>` (`lor_solvers.cpp:182` without SuiteSparse).
+///
+/// `ess_ho_dofs` eliminates the high-order essential dofs on `A_LOR` first
+/// ([`eliminate_lor_ess`], D367) so the preconditioner sits on the same
+/// eliminated operator the CG system carries.  Unlike a Jacobi inner (which
+/// only reads the diagonal and is blind to the elimination), the GS sweep uses
+/// the off-diagonal couplings and therefore needs the eliminated matrix.
+pub fn build_lor_sgs_nd_quad(
+    ho_space: &HCurlSpaceGeneric<fem_mesh::simplex::Mesh<2>>,
+    a_ho: &CsrMatrix<f64>,
+    mass: f64,
+    curl_curl: f64,
+    ess_ho_dofs: &[u32],
+) -> FemResult<LorSolver<LorNd<2>, LorSymGs>> {
+    let lor = LorNd::<2>::new_quad(ho_space)?;
+    if a_ho.nrows != lor.n_ho() {
+        return Err(FemError::DimMismatch {
+            expected: lor.n_ho(),
+            actual: a_ho.nrows,
+        });
+    }
+    let mut a_lor = assemble_lor_nd_quad(lor.lor_space(), mass, curl_curl);
+    eliminate_lor_ess(&lor, &mut a_lor, ess_ho_dofs);
+    let inner = LorSymGs(GsSmoother::new(&a_lor, GsType::Symmetric, 1));
+    Ok(LorSolver {
+        lor,
+        a_lor,
+        inner,
+        n_ho: ho_space.n_dofs(),
+    })
+}
+
+/// LOR + one symmetric Gauss-Seidel sweep for a 2-D quad H(div) system —
+/// MFEM's `LORSolver<GSSmoother>` (same construction as
+/// [`build_lor_sgs_nd_quad`], D367).
+pub fn build_lor_sgs_rt_quad(
+    ho_space: &HDivSpaceGeneric<fem_mesh::simplex::Mesh<2>>,
+    a_ho: &CsrMatrix<f64>,
+    mass: f64,
+    div_div: f64,
+    ess_ho_dofs: &[u32],
+) -> FemResult<LorSolver<LorRt<2>, LorSymGs>> {
+    let lor = LorRt::<2>::new_quad(ho_space)?;
+    if a_ho.nrows != lor.n_ho() {
+        return Err(FemError::DimMismatch {
+            expected: lor.n_ho(),
+            actual: a_ho.nrows,
+        });
+    }
+    let mut a_lor = assemble_lor_rt_quad(lor.lor_space(), mass, div_div);
+    eliminate_lor_ess(&lor, &mut a_lor, ess_ho_dofs);
+    let inner = LorSymGs(GsSmoother::new(&a_lor, GsType::Symmetric, 1));
+    Ok(LorSolver {
+        lor,
+        a_lor,
+        inner,
+        n_ho: ho_space.n_dofs(),
+    })
 }
 
 // ─── LOR-compatible high-order operators (2-D quad) ────────────────────────
@@ -1082,7 +1228,9 @@ mod lor_vector_tests {
                 let mesh = Mesh::<2>::unit_square_quad(n);
                 let ho = HCurlSpace::new(mesh.clone(), 3);
                 let a_ho = assemble_lor_compatible_nd_quad(&ho, 1.0, 1.0);
-                let lor = build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default()).expect("build");
+                let lor =
+                    build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default(), &[])
+                        .expect("build");
                 pcg_iters(&a_ho, &lor)
             })
             .collect();
@@ -1169,7 +1317,7 @@ mod lor_vector_tests {
             // The LOR-compatible `(GaussLobatto, IntegratedGLL)` pair (D76): the
             // library `vec_ref_elem` picks the GaussLegendre `QuadRT1`.
             let a_ho = assemble_lor_compatible_rt_quad(&ho, 1.0, 1.0);
-            let lor = build_lor_jacobi_rt_quad(&ho, &a_ho, 1.0, 1.0).expect("LOR RT build");
+            let lor = build_lor_jacobi_rt_quad(&ho, &a_ho, 1.0, 1.0, &[]).expect("LOR RT build");
             let nn = a_ho.nrows;
             let ones = vec![1.0_f64; nn];
             let mut rhs = vec![0.0_f64; nn];
@@ -1378,7 +1526,7 @@ mod lor_vector_tests {
             let mesh = Mesh::<2>::unit_square_quad(n);
             let ho = HCurlSpace::new(mesh.clone(), 3);
             let a_ho = assemble_lor_compatible_nd_quad(&ho, 1.0, 1.0);
-            let lor = build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default())
+            let lor = build_lor_ams_nd_quad(&ho, &a_ho, 1.0, 1.0, Default::default(), &[])
                 .expect("LOR ND build");
             let nn = a_ho.nrows;
             let ones = vec![1.0_f64; nn];

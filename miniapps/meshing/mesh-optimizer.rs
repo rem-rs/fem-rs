@@ -301,9 +301,6 @@ fn parse_args() -> Args {
     if a.adapt_eval != 0 && a.adapt_eval != 1 {
         unsupported("-ae (unknown adaptivity evaluator)");
     }
-    if a.quad_type != 1 && a.quad_type != 2 {
-        unsupported("-qt 3 (ClosedUniform)");
-    }
     a
 }
 
@@ -512,7 +509,12 @@ hr-adaptivity targets (9-11) not ported yet in this driver",
     let quad_type = match a.quad_type {
         1 => TmopQuadType::GaussLobatto,
         2 => TmopQuadType::GaussLegendre,
-        _ => unreachable!("rejected in parse_args"),
+        3 => TmopQuadType::ClosedUniform,
+        // MFEM mesh-optimizer.cpp:841: unknown quad_type prints and exits 3.
+        _ => {
+            println!("Unknown quad_type: {}", a.quad_type);
+            std::process::exit(3);
+        }
     };
     let quad_order = a.quad_order as u8;
 
@@ -621,7 +623,7 @@ hr-adaptivity targets (9-11) not ported yet in this driver",
         );
         println!(
             "Prism quadrature points: {}",
-            fem_element::quadrature::prism_rule(quad_order).n_points()
+            prism_point_count(quad_type, quad_order)
         );
     }
 
@@ -770,14 +772,37 @@ hr-adaptivity targets (9-11) not ported yet in this driver",
     );
 }
 
-fn quad_point_count(quad_type: TmopQuadType, quad_order: u8, dim: usize) -> usize {
-    match (quad_type, dim) {
+/// MFEM `IntegrationRules::PrismIntegrationRule` (fem/intrules.cpp:2500): the
+/// prism rule is the tensor product of the TRIANGLE rule (quad-type
+/// independent W&V data) with the SEGMENT rule, so its point count does
+/// depend on `-qt` through the 1-D segment factor
+/// (GLobatto `q/2+2`, GaussLegendre `q/2+1`, ClosedUniform `q|1`).
+fn prism_point_count(quad_type: TmopQuadType, quad_order: u8) -> usize {
+    let n_seg = match quad_type {
+        TmopQuadType::GaussLobatto => quad_order as usize / 2 + 2,
+        TmopQuadType::GaussLegendre => quad_order as usize / 2 + 1,
+        TmopQuadType::ClosedUniform => quad_order as usize | 1,
+    };
+    fem_element::quadrature::tri_rule(quad_order).n_points() * n_seg
+}
+
+fn quad_point_count(quad_type: TmopQuadType, quad_order: u8, dim: usize) -> usize {    match (quad_type, dim) {
         (TmopQuadType::GaussLobatto, 2) => {
             let n = quad_order as usize / 2 + 2;
             n * n
         }
         (TmopQuadType::GaussLobatto, 3) => {
             let n = quad_order as usize / 2 + 2;
+            n * n * n
+        }
+        // ClosedUniform SQUARE/CUBE: tensor products of the 1-D rule with
+        // n = Order | 1 points (MFEM intrules.cpp:1029, 1861, 2533).
+        (TmopQuadType::ClosedUniform, 2) => {
+            let n = quad_order as usize | 1;
+            n * n
+        }
+        (TmopQuadType::ClosedUniform, 3) => {
+            let n = quad_order as usize | 1;
             n * n * n
         }
         (_, 2) => fem_element::quadrature::quad_rule(quad_order).n_points(),

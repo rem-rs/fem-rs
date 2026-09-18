@@ -437,6 +437,10 @@ name = "mesh_fit_node_position"
 path = "../miniapps/meshing/fit-node-position.rs"
 
 [[example]]
+name = "mesh_bounding_boxes"
+path = "../miniapps/meshing/mesh_bounding_boxes.rs"
+
+[[example]]
 name = "tools_display_basis"
 path = "../miniapps/tools/display_basis.rs"
 

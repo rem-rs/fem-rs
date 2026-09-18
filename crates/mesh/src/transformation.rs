@@ -513,6 +513,98 @@ pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     (jac, xp)
 }
 
+/// MFEM `Mesh::GetJacobianDeterminantGF()` (`mesh/mesh.cpp:7285`) +
+/// `Mesh::UpdateJacobianDeterminantGF` (`:7262`): the |det J| field sampled at
+/// the node positions of the `L2_FECollection(det_order, Dim,
+/// BasisType::GaussLobatto)` space, with `det_order = Dim*mesh_poly_deg - 1`
+/// and `mesh_poly_deg` the geometric order (1 for a straight mesh — MFEM's
+/// `Nodes == NULL` default), returned as `(det_order, dof_values)`.
+///
+/// The values are laid out element-major, lexicographic (`x` fastest) per
+/// element — the element-continuous numbering of fem-rs' `L2Space` with
+/// `L2Basis::GaussLobatto`, matching MFEM's `L2_T1_*` tensor dofs
+/// (`L2_DOF_MAP` identity).  Wrap them in `GridFunction::new(
+/// &L2Space::new_with_basis(mesh, det_order, GaussLobatto), dof_values)` to
+/// obtain the grid function MFEM hands back.
+///
+/// Reference-domain detail: MFEM's elements are parametrized on `[0,1]^Dim`,
+/// while fem-rs' hex geometry element (`HexQk`) lives on `[-1,1]^3` — quads
+/// already match `[0,1]^2`.  Hex sample points are therefore mapped
+/// `ξ_rs = 2·ξ_mfem − 1`, and because the same physical element is
+/// parametrized over a reference interval twice as long, the fem-rs Jacobian
+/// is `J_mfem / 2` per axis: the determinant is multiplied back up by
+/// `2^Dim`.  `|det J|` is MFEM's `DenseMatrix::Weight()` for the square
+/// Jacobian.
+///
+/// The 1-D GLL node positions come from
+/// `fem_element::quadrature::gauss_lobatto_01_arbitrary`: for `np ≥ 6` that is
+/// bit-identical to MFEM's stored `QuadratureFunctions1D::GaussLobatto` rule
+/// (D275), while `np ≤ 5` maps the analytic table that is pinned to the same
+/// iteration on `[-1,1]` to the last bit (the `[0,1]` mapping may sit 1 ulp
+/// from MFEM's stored `z_i` — invisible at MFEM's print precision).
+///
+/// Errors on anything but an all-`Quad4` (2-D) / all-`Hex8` (3-D) mesh: the
+/// consumers of the field (`PLBound`, `mesh-bounding-boxes`) are
+/// tensor-product-only, and C++'s `GetElementBounds` aborts on non-tensor
+/// elements with `TensorBasis FiniteElement expected.` anyway.
+pub fn jacobian_determinant_dofs<const D: usize>(
+    mesh: &crate::Mesh<D>,
+) -> Result<(u8, Vec<f64>), String> {
+    let et = mesh.element_type(0);
+    let nelem = mesh.n_elements();
+    if nelem == 0 {
+        return Err("GetJacobianDeterminantGF: mesh has no elements".to_string());
+    }
+    let expected = match D {
+        2 => ElementType::Quad4,
+        3 => ElementType::Hex8,
+        _ => return Err(format!("GetJacobianDeterminantGF: unsupported dimension {D}")),
+    };
+    if et != expected {
+        return Err(format!(
+            "GetJacobianDeterminantGF: expected {expected:?} elements in {D}-D, got {et:?} \
+             (tensor-product geometry only; C++'s PLBound consumers abort on the rest)"
+        ));
+    }
+    for e in 1..nelem as u32 {
+        if mesh.element_type(e) != et {
+            return Err(format!(
+                "GetJacobianDeterminantGF: mixed element types are not supported (first \
+                 mismatch at element {e})"
+            ));
+        }
+    }
+    let det_order = D * mesh.geom_order().max(1) as usize - 1;
+    let nb = det_order + 1; // GLL points per direction
+    let (nodes1d, _w) = fem_element::quadrature::gauss_lobatto_01_arbitrary(nb);
+    // Hex samples run through `2·ξ − 1` (the `[-1,1]^3` HexQk domain) and the
+    // fem-rs Jacobian is `J_mfem/2` per axis there, so the determinant gains
+    // the `2^D` factor back; quads evaluate as-is.
+    let (hex, scale) = if D == 3 { (true, (1u64 << D) as f64) } else { (false, 1.0) };
+    let npe = nb.pow(D as u32);
+    let nb2 = nb * nb;
+    let mut vals = vec![0.0_f64; nelem * npe];
+    for e in 0..nelem as u32 {
+        for i in 0..npe {
+            let (ix, iy, iz) = if D == 3 { (i % nb, (i / nb) % nb, i / nb2) } else { (i % nb, i / nb, 0) };
+            let mut xi = [0.0_f64; D];
+            xi[0] = nodes1d[ix];
+            xi[1] = nodes1d[iy];
+            if D == 3 {
+                xi[2] = nodes1d[iz];
+            }
+            if hex {
+                for c in xi.iter_mut() {
+                    *c = 2.0 * *c - 1.0;
+                }
+            }
+            let (_jac, det, _x) = mesh.element_jacobian(e, &xi);
+            vals[e as usize * npe + i] = det.abs() * scale;
+        }
+    }
+    Ok((det_order as u8, vals))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,5 +987,84 @@ mod find_points_tests {
         let (ids, _xis) = find_points(&m, &pts, 2);
         assert_eq!(ids[0], 0, "point near origin is in the corner tet");
         let _ = ids[1]; // may be in either tet of the diagonal split
+    }
+
+    #[test]
+    fn jacobian_determinant_dofs_straight_meshes() {
+        // Unit quad (straight, geometry order 1): det_order = 2*1-1 = 1, GLL
+        // 2 points/direction, and |det J| = 1 everywhere (the `[-1,1]` →
+        // `[0,1]` HexQk-style domain factor does not exist in 2-D quads).
+        let m = Mesh::<2>::unit_square_quad(1);
+        let (order, vals) = super::jacobian_determinant_dofs(&m).unwrap();
+        assert_eq!(order, 1);
+        assert_eq!(vals.len(), 4);
+        assert!(vals.iter().all(|&v| v == 1.0), "quad det values {vals:?}");
+
+        // Unit hex (straight, geometry order 1): det_order = 3*1-1 = 2, 3
+        // GLL points/direction; the raw `[-1,1]^3` parametrization gives
+        // det = 1/8 per axis factor, and the `2^3` scale restores MFEM's
+        // unit `[0,1]^3` determinant.
+        let h = Mesh::<3>::unit_cube_hex(1);
+        let (order, vals) = super::jacobian_determinant_dofs(&h).unwrap();
+        assert_eq!(order, 2);
+        assert_eq!(vals.len(), 27);
+        assert!(vals.iter().all(|&v| v == 1.0), "hex det values {vals:?}");
+
+        // Tri meshes are rejected up front (PLBound consumers are
+        // tensor-product-only; C++'s GetElementBounds VERIFYs TensorBasis).
+        let t = Mesh::<2>::unit_square_tri(1);
+        assert!(super::jacobian_determinant_dofs(&t).is_err());
+    }
+
+    #[test]
+    fn jacobian_determinant_dofs_curved_hex() {
+        // A curved order-2 hex: det_order = 3*2-1 = 5 (6 GLL nodes per
+        // direction).  Bumping one interior geometry node must move the det
+        // field away from the straight-mesh constant while the corner nodes
+        // (which coincide with the mesh vertices) keep |det J| = 1.
+        let mut m = Mesh::<3>::unit_cube_hex(1);
+        m.set_curvature(2);
+        let (order, vals) = super::jacobian_determinant_dofs(&m).unwrap();
+        assert_eq!(order, 5);
+        assert_eq!(vals.len(), 216);
+        // `set_curvature`'s lattice projection of the straight mesh carries
+        // ~1e-15 roundoff in the interior node coordinates, so the det field
+        // is 1 + O(1e-15) rather than exactly 1 (MFEM's `SetCurvature`
+        // projection has the same property).
+        assert!(
+            vals.iter().all(|&v| (v - 1.0).abs() < 1e-12),
+            "straight order-2 geometry stays exact"
+        );
+
+        let geo = m.geometry.as_mut().unwrap();
+        // Bump an interior node of the 27-node table: pick the slot whose
+        // reference position is the lattice center (order-2 HexQk coords live
+        // on [-1,1]^3), independent of the table's slot ordering.
+        use fem_element::ReferenceElement;
+        let high = fem_element::lagrange::factory::ref_elem(
+            fem_element::lagrange::factory::ElemType::Hex,
+            2,
+        );
+        let center = high
+            .dof_coords()
+            .iter()
+            .position(|c| c.iter().all(|&t| t.abs() < 1e-12))
+            .expect("order-2 hex lattice has a center node");
+        geo.coords[center * 3] += 0.05;
+        let (order2, vals2) = super::jacobian_determinant_dofs(&m).unwrap();
+        assert_eq!(order2, 5);
+        assert!(
+            vals2.iter().any(|&v| (v - 1.0).abs() > 1e-6),
+            "bumped interior node changes the interior det samples"
+        );
+        for (i, (&a, &b)) in vals.iter().zip(vals2.iter()).enumerate() {
+            // Single element: `i` is the lexicographic dof index, 6 GLL
+            // nodes per direction.
+            let (ix, iy, iz) = (i % 6, (i / 6) % 6, i / 36);
+            let corner = (ix == 0 || ix == 5) && (iy == 0 || iy == 5) && (iz == 0 || iz == 5);
+            if corner {
+                assert_eq!(a, b, "corner sample {i} must be untouched");
+            }
+        }
     }
 }

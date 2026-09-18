@@ -843,6 +843,40 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         (global_min, global_max)
     }
 
+    /// `void GridFunction::GetElementDofValues(int el, Vector &dof_vals) const`
+    /// (`fem/gridfunc.cpp:1755`): the element's local DOF values in the
+    /// space's local dof-slot order.  fem-rs spaces carry no
+    /// `DofTransformation`, so MFEM's `doftrans.InvTransformPrimal(dof_vals)`
+    /// tail is an identity here (its purpose is to undo the rotated/twisted
+    /// dof maps that fem-rs does not introduce).
+    pub fn get_element_dof_values(&self, elem: u32) -> Vec<f64> {
+        self.space
+            .element_dofs(elem)
+            .iter()
+            .map(|&d| self.dofs()[d as usize])
+            .collect()
+    }
+
+    /// `PLBound GridFunction::GetBounds(Vector &lower, Vector &upper, const
+    /// int ref_factor, const int vdim) const` (`fem/gridfunc.cpp:5450`): the
+    /// PLBound per-element bounds reduced to one global (min, max) pair per
+    /// component.  fem-rs grid functions are scalar, so `vdim` must be `1`
+    /// (MFEM's `fes_dim == 1` case: size-1 `lower`/`upper`); `space` selects
+    /// the bounds basis, standing in for MFEM's `PLBound(fes, ncp)`
+    /// FEC-name dispatch (H1 GLL for H1 spaces, `L2` GL/GLL for `L2Space`).
+    pub fn get_bounds_vdim(
+        &self,
+        ref_factor: i32,
+        vdim: usize,
+        space: crate::postproc::plbound::BoundsSpace,
+    ) -> Result<(Vec<f64>, Vec<f64>), String> {
+        let (_plb, lel, uel) = crate::postproc::plbound::get_element_bounds_in(self, ref_factor, vdim, space)?;
+        Ok((
+            vec![lel.iter().cloned().reduce(f64::min).unwrap_or(f64::INFINITY)],
+            vec![uel.iter().cloned().reduce(f64::max).unwrap_or(f64::NEG_INFINITY)],
+        ))
+    }
+
     /// Evaluate the grid function at reference point `xi` on element `elem`.
     ///
     /// Computes `u_h(xi) = Σ_i c_i φ_i(xi)` where `c_i` are the local DOF

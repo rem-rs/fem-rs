@@ -27,6 +27,12 @@
 //! * [`get_element_bounds_in`] / [`estimate_function_minimum_in`] /
 //!   [`estimate_function_maximum_in`] — the same machinery for an explicit
 //!   [`BoundsSpace`] (H1 GLL or L2 GL/GLL), used by the `-l2`/`-bt` tiers.
+//! * [`get_element_bounds_components`] / [`get_bounds_components`] — the
+//!   `vdim = -1` (all-components) forms of `GridFunction::GetElementBounds` /
+//!   `GetBounds` for a vector field: fem-rs keeps one scalar grid function per
+//!   component, so the components come in as a slice and the results use
+//!   MFEM's component-major `lower(e + d*nel)` / `lower(d)` layouts (used by
+//!   `miniapps/meshing/mesh_bounding_boxes.rs`).
 //! * [`project_h1_to_l2`] — `GridFunction::ProjectGridFunction(src)` for a
 //!   discontinuous tensor target: per-element nodal interpolation of the H1
 //!   (GLL) source onto the target's 1-D node positions
@@ -964,6 +970,20 @@ pub fn get_element_bounds_in<S: FESpace>(
     if vdim != 1 {
         return Err(format!("GetElementBounds: vdim {vdim} not supported (port is scalar)"));
     }
+    let (plb, info, dim) = bounds_setup(gf, ref_factor, space)?;
+    let (lower, upper) = element_bounds_scalar(gf, &plb, &info, dim);
+    Ok((plb, lower, upper))
+}
+
+/// Shared `GetElementBounds*` setup: the C++ per-element loop runs on one
+/// representative element type (the `MFEM_VERIFY(tbe != NULL, "TensorBasis
+/// FiniteElement expected.")` fires on the first non-tensor element), with
+/// `PLBound(fes, ref_factor*(max_order+1))` built from the space's own order.
+fn bounds_setup<S: FESpace>(
+    gf: &GridFunction<'_, S>,
+    ref_factor: i32,
+    space: BoundsSpace,
+) -> Result<(PLBound, TensorInfo, usize), String> {
     let mesh = gf.space().mesh();
     let nel = mesh.n_elements();
     if nel == 0 {
@@ -989,17 +1009,77 @@ pub fn get_element_bounds_in<S: FESpace>(
         }
         BoundsSpace::L2(basis) => PLBound::from_l2(order, (ref_factor * (order as i32 + 1)) as usize, basis),
     };
+    Ok((plb, info, dim))
+}
 
+/// The per-element scalar bounds core shared by [`get_element_bounds_in`] and
+/// [`get_element_bounds_components`] (`GetElementBounds(elem, plb, ...)`:
+/// lexicographic element data → `GetNDBounds` → min/max over control points).
+fn element_bounds_scalar<S: FESpace>(
+    gf: &GridFunction<'_, S>,
+    plb: &PLBound,
+    info: &TensorInfo,
+    dim: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let nel = gf.space().mesh().n_elements();
     let mut lower = vec![0.0_f64; nel];
     let mut upper = vec![0.0_f64; nel];
     for e in 0..nel as u32 {
-        let lex = element_lex_data(gf, e, &info);
+        let lex = element_lex_data(gf, e, info);
         let (lo, up) = plb.get_nd_bounds(dim, &lex);
         // `GetElementBounds(elem, ...)`: min/max over the control points.
         lower[e as usize] = lo.iter().cloned().reduce(f64::min).unwrap();
         upper[e as usize] = up.iter().cloned().reduce(f64::max).unwrap();
     }
+    (lower, upper)
+}
+
+/// `GridFunction::GetElementBounds(plb, lower, upper, vdim = -1)` for a
+/// **vector** grid function: fem-rs keeps one scalar [`GridFunction`] per
+/// component (MFEM interleaves `vdim` over one space), so the components are
+/// passed as a slice and the shared [`PLBound`] is built once.
+///
+/// Returns the per-element bounds in MFEM's `lower(e + d*nel)` layout —
+/// component-major, `lower[d*nel + e]` / `upper[d*nel + e]`, `d` in `0..`
+/// component index (the layout `mesh-bounding-boxes` reads back).
+pub fn get_element_bounds_components<S: FESpace>(
+    gfs: &[&GridFunction<'_, S>],
+    ref_factor: i32,
+    space: BoundsSpace,
+) -> Result<(PLBound, Vec<f64>, Vec<f64>), String> {
+    let first = gfs
+        .first()
+        .ok_or_else(|| "GetElementBounds: no components given".to_string())?;
+    let (plb, info, dim) = bounds_setup(first, ref_factor, space)?;
+    let nel = first.space().mesh().n_elements();
+    let mut lower = vec![0.0_f64; gfs.len() * nel];
+    let mut upper = vec![0.0_f64; gfs.len() * nel];
+    for (d, gf) in gfs.iter().enumerate() {
+        let (lo, up) = element_bounds_scalar(gf, &plb, &info, dim);
+        lower[d * nel..(d + 1) * nel].copy_from_slice(&lo);
+        upper[d * nel..(d + 1) * nel].copy_from_slice(&up);
+    }
     Ok((plb, lower, upper))
+}
+
+/// `PLBound GridFunction::GetBounds(lower, upper, ref_factor, vdim = -1)` for
+/// a vector field: [`get_element_bounds_components`] reduced to one global
+/// (min, max) pair per component (`lower(d) = lelt.Min()` / `upper(d) =
+/// uelt.Max()` over the per-element vectors, `Vector::Min/Max` semantics).
+pub fn get_bounds_components<S: FESpace>(
+    gfs: &[&GridFunction<'_, S>],
+    ref_factor: i32,
+    space: BoundsSpace,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let (_plb, lel, uel) = get_element_bounds_components(gfs, ref_factor, space)?;
+    let nel = lel.len() / gfs.len();
+    let mut lower = Vec::with_capacity(gfs.len());
+    let mut upper = Vec::with_capacity(gfs.len());
+    for d in 0..gfs.len() {
+        lower.push(lel[d * nel..(d + 1) * nel].iter().cloned().reduce(f64::min).unwrap());
+        upper.push(uel[d * nel..(d + 1) * nel].iter().cloned().reduce(f64::max).unwrap());
+    }
+    Ok((lower, upper))
 }
 
 // ── EstimateFunctionMinimum / Maximum (gridfunc.cpp) ─────────────────────────

@@ -12,15 +12,25 @@
 //!
 //! Solvers (C++ block-solvers.cpp compares five; this serial cut currently
 //! wires the Bramble–Pasciak ones):
-//! * **BPCG** (`BramblePasciakSolver(use_bpcg=true)` — `fem_solver::bpcg::solve_bpcg`)
-//! * regular PCG on the transformed operator (`use_bpcg=false`), planned
+//! * **BPCG** (`BramblePasciakSolver(use_bpcg=true)`) — the historical inline
+//!   serial cut `-solver bpcg` (kept bit-identical to the historical run) and
+//!   the MFEM-shaped `-solver bp` (`fem_solver::BramblePasciakSolver`)
+//! * regular PCG on the transformed operator (`use_bpcg=false`), `-solver
+//!   bp-pcg` (`fem_solver::BramblePasciakSolver`, MFEM `CGSolver` port on
+//!   `mop_ = (A·N − Id)·A`)
 //!
 //! Bramble–Pasciak preconditioning: SPD `Q` with `M − Q` SPD (`Q_T =
 //! q_scaling·λ_min·diag(M_T)` element-wise — MFEM `ConstructMassPreconditioner`,
-//! assembled by `assemble_element_q_diag` with element mass matrices of the
-//! physical RT space), `N = diag(invQ, 0)`, particular preconditioner
-//! `P = cpc·tri` with `cpc = diag(invQ, M1)`, `tri = [[I,0],[B·invQ,−I]]` and
-//! `M1` a solver on the Schur complement `S = B·diag(M)⁻¹·Bᵀ`.
+//! per-element blocks from `element_q_block`, scattered by
+//! `Assembler::assemble_from_element_matrices` — the port of
+//! `qVarf.AssembleElementMatrix(i, Q_i, 1)`), `N = diag(invQ, 0)`, particular
+//! preconditioner `P = cpc·tri` with `cpc = diag(invQ, M1)`,
+//! `tri = [[I,0],[B·invQ,−I]]` and `M1` a solver on the Schur complement
+//! `S = B·diag(M)⁻¹·Bᵀ`.
+//!
+//! NOTE: the C++ driver has **no** `-solver` option — it always constructs
+//! and runs all five solvers back-to-back; the `-solver` dispatch is the
+//! serial cut's extension for running one arm at a time.
 
 use std::time::Instant;
 
@@ -38,7 +48,9 @@ use fem_solver::div_free_solver::{
 };
 use fem_solver::block::BlockSystem;
 use fem_solver::bpcg::solve_bpcg;
-use fem_solver::bramble_pasciak::element_q_scaling;
+use fem_solver::bramble_pasciak::{
+    element_q_block, element_q_scaling, BpsParameters, BramblePasciakSolver,
+};
 use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HDivSpace, L2Space};
 
@@ -81,16 +93,22 @@ fn main() {
     println!("dim(R+W) = {n}");
     println!("***********************************************************");
 
-    // ── Assemble (identical to examples/mfem_ex5_mixed_darcy.rs) ──────────
-    let qo = (2 * args.order as usize + 1).max(2) as u8;
+    // ── Assemble (1:1 with block-solvers.cpp: the C++ driver relies on the
+    //    MFEM integrator DEFAULT quadrature rules — VectorFEMassIntegrator:
+    //    `Trans.OrderW() + 2·GetOrder()` with `RT GetOrder() = k+1` and
+    //    `OrderW() = 0` on straight triangles ⇒ 2k+2 (bilininteg.cpp:2685);
+    //    VectorFEDivergenceIntegrator: `trial + test order − 1`
+    //    = (k+1) + k − 1 ⇒ 2k (bilininteg.cpp:1830)) ─────────────────────────
+    let k = args.order as usize;
     // M = ∫ u·v dx  (k = 1 coefficient)
     let m_csr = VectorAssembler::assemble_bilinear(
         &u_sp,
         &[&VectorMassIntegrator { alpha: 1.0 }],
-        qo,
+        (2 * k + 2) as u8,
     );
     // B = −∫ div(u) q dx
-    let mut b_csr = assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], qo);
+    let mut b_csr =
+        assemble_hdiv_l2_mixed(&p_sp, &u_sp, &[&HDivL2DivIntegrator], (2 * k) as u8);
     for v in &mut b_csr.values {
         *v *= -1.0;
     }
@@ -130,6 +148,57 @@ fn main() {
         // ── Bramble–Pasciak CG (MFEM BramblePasciakSolver, use_bpcg=true) ────
         "bpcg" => {
             solve_bpcg_mode(&args, &u_sp, &p_sp, &m_csr, &b_csr, &rhs, &cfg);
+        }
+        // ── Bramble–Pasciak CG via BramblePasciakSolver (MFEM
+        //    BramblePasciakSolver; `bp` = use_bpcg=true, `bp-pcg` = the
+        //    regular-PCG branch on the transformed operator) ─────────────────
+        bp_mode @ ("bp" | "bp-pcg") => {
+            let use_bpcg = bp_mode == "bp";
+            let name = if use_bpcg {
+                "Bramble Pasciak CG (using BPCG)"
+            } else {
+                "Bramble Pasciak CG (using regular PCG)"
+            };
+            // C++ block-solvers.cpp wires `BPSParameters bps_param;` defaults:
+            // print_level 0, max_iter 500, abs_tol 1e-12, rel_tol 1e-9,
+            // q_scaling 0.5 (only use_bpcg flips between the two solvers).
+            let param = BpsParameters {
+                iter: IterSolveParameters {
+                    print_level: 0,
+                    max_iter: 500,
+                    abs_tol: 1e-12,
+                    rel_tol: 1e-9,
+                },
+                use_bpcg,
+                q_scaling: args.q_scaling,
+            };
+            let schur = match args.schur.as_str() {
+                "amg" => SchurMode::Amg,
+                "diag" => SchurMode::Diag,
+                _ => SchurMode::Dense,
+            };
+            let line = "*".repeat(58);
+            println!("{line}");
+            println!("{name} solver:");
+            let start = Instant::now();
+            // Q via MFEM ConstructMassPreconditioner: per-element
+            // Q_T = q_scaling·λ_min·diag(M_T) blocks (element_q_block),
+            // scattered with Assembler::assemble_from_element_matrices —
+            // the port of `qVarf.AssembleElementMatrix(i, Q_i, 1)`.
+            let q_csr = assemble_element_q_csr(&u_sp, args.order, args.q_scaling);
+            let solver = BramblePasciakSolver::new(&m_csr, &b_csr, &q_csr, param, schur);
+            let setup = start.elapsed().as_secs_f64();
+            let start = Instant::now();
+            solver.mult(&rhs, &mut x);
+            let solve = start.elapsed().as_secs_f64();
+            if !solver.converged() {
+                eprintln!("BP did not converge ({} iters)", solver.num_iterations());
+            }
+            println!("   Setup time: {setup:.6}s.");
+            println!("   Solve time: {solve:.6}s.");
+            println!("   Total time: {:.6}s.", setup + solve);
+            println!("   Iteration count: {}", solver.num_iterations());
+            print_errors(&u_sp, &p_sp, &x, args.order);
         }
         // ── Block-diagonal-preconditioned MINRES (BDPMinresSolver) ───────────
         "bdp" => {
@@ -275,7 +344,9 @@ fn main() {
             print_errors(&u_sp, &p_sp, &x, args.order);
         }
         other => {
-            eprintln!("unknown -solver '{other}' (expected bpcg|bdp|dfs-dec|dfs-coupled)");
+            eprintln!(
+                "unknown -solver '{other}' (expected bpcg|bp|bp-pcg|bdp|dfs-dec|dfs-coupled)"
+            );
             std::process::exit(2);
         }
     }
@@ -314,7 +385,9 @@ fn print_errors(u_sp: &HDivSpace<Mesh<2>>, p_sp: &L2Space<Mesh<2>>, x: &[f64], o
     println!("|| p_h - p_ex || / || p_ex || = {:.6e}", ep / np.max(1e-32));
 }
 
-/// The original serial BPCG cut (kept bit-identical to the historical run).
+/// The original serial inline-BPCG cut (`fem_solver::bpcg::solve_bpcg` driven
+/// directly, with the diagonal-`Q` assembly and a `diag(S)⁻¹`/dense `M1`
+/// experiment switch).
 fn solve_bpcg_mode(
     args: &Args,
     u_sp: &HDivSpace<Mesh<2>>,
@@ -1286,60 +1359,84 @@ fn collect_dfs_data(
 /// preconditioner (MFEM `ConstructMassPreconditioner`):
 /// `Q[dof] += q_scaling·λ_min(M_T, diag(M_T))·diag(M_T)[dof]` per element.
 ///
-/// Supports Tri3 (RTk via `TriRTk`) and Quad4 (`QuadRTk`, reference domain
-/// [0,1]²) elements; the per-element mass matrix is integrated with the
-/// isoparametric geometry (`geometry_jacobian`, valid for both element
-/// types) under the contravariant Piola map.
+/// Historical diagonal path of `-solver bpcg` (the inline BPCG iteration);
+/// the MFEM-shaped `-solver bp|bp-pcg` path is [`assemble_element_q_csr`].
+/// Both produce the same `Q` diagonal; the CSR path goes through the
+/// `fem_assembly` scatter, this one accumulates in place.
 fn assemble_element_q_diag(space: &HDivSpace<Mesh<2>>, order: u8, q_scaling: f64) -> Vec<f64> {
-    use fem_element::raviart_thomas::{QuadRTk, TriRTk};
-    use fem_mesh::{ElementType, MeshTopology};
-
-    let mesh = space.mesh();
-    let n_dofs = space.n_dofs();
-    let mut q = vec![0.0; n_dofs];
-    // Quad4 geometry is bilinear, so keep a safe quadrature order.
-    let q_order = 2 * order + 4;
-
-    for (ei, e) in mesh.elem_iter().enumerate() {
-        let dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
-        match mesh.element_type(e) {
-            ElementType::Tri3 => {
-                add_element_q(mesh, e, &dofs, &TriRTk::new(order as usize), q_order, q_scaling, ei, &mut q);
-            }
-            ElementType::Quad4 => {
-                add_element_q(mesh, e, &dofs, &QuadRTk::new(order as usize), q_order, q_scaling, ei, &mut q);
-            }
-            other => panic!("assemble_element_q_diag: unsupported element type {other:?}"),
+    let mut q = vec![0.0; space.n_dofs()];
+    for_each_rt_element_mass(space, order, |ei, e, me| {
+        let n_ld = space.element_dofs(e).len();
+        let scaling = element_q_scaling(me, n_ld, q_scaling, ei);
+        for (j, &dof) in space.element_dofs(e).iter().enumerate() {
+            q[dof as usize] += scaling * me[j * n_ld + j];
         }
-    }
+    });
     q
 }
 
-/// One element's contribution to the global Q diagonal.
-fn add_element_q<RE: VectorReferenceElement>(
+/// MFEM `ConstructMassPreconditioner` global stage for `-solver bp|bp-pcg`:
+/// per-element `Q_T = q_scaling·λ_min·diag(M_T)` blocks (`element_q_block`),
+/// scattered by [`Assembler::assemble_from_element_matrices`] — the port of
+/// `qVarf.AssembleElementMatrix(i, Q_i, 1)` (+ `ParallelAssemble`, trivial
+/// in the serial cut).
+fn assemble_element_q_csr(
+    space: &HDivSpace<Mesh<2>>,
+    order: u8,
+    q_scaling: f64,
+) -> CsrMatrix<f64> {
+    let mut blocks: Vec<Vec<f64>> = Vec::new();
+    for_each_rt_element_mass(space, order, |ei, e, me| {
+        let n_ld = space.element_dofs(e).len();
+        blocks.push(element_q_block(me, n_ld, q_scaling, ei));
+    });
+    let refs: Vec<&[f64]> = blocks.iter().map(|b| b.as_slice()).collect();
+    Assembler::assemble_from_element_matrices(space, &refs)
+}
+
+/// Element loop shared by the two Q-assembly paths: invokes `f(ei, e, me)`
+/// per element, with `me` the row-major RT element mass matrix (element-own
+/// dof convention).  Supports Tri3 (RTk via `TriRTk`) and Quad4 (`QuadRTk`,
+/// reference domain [0,1]²) elements; the mass matrix is integrated with the
+/// isoparametric geometry (`geometry_jacobian`, valid for both element
+/// types) under the contravariant Piola map.
+fn for_each_rt_element_mass(
+    space: &HDivSpace<Mesh<2>>,
+    order: u8,
+    mut f: impl FnMut(usize, u32, &[f64]),
+) {
+    use fem_mesh::MeshTopology;
+
+    let mesh = space.mesh();
+    // MFEM `ConstructMassPreconditioner` reads the element matrices through
+    // `ComputeElementMatrix` — the VectorFEMassIntegrator DEFAULT rule
+    // (`Trans.OrderW() + 2·GetOrder()`, RT `GetOrder() = order + 1`):
+    // 2·(order+1) on straight triangles, +1 more on bilinear quads where the
+    // geometry weight is order 1.
+    for (ei, e) in mesh.elem_iter().enumerate() {
+        let q_order = match mesh.element_type(e) {
+            fem_mesh::ElementType::Quad4 => 2 * order + 3,
+            _ => 2 * order + 2,
+        };
+        let ref_elem = rt_ref_elem(mesh, e, order as usize);
+        let me = rt_element_mass_matrix(mesh, e, ref_elem.as_ref(), q_order);
+        f(ei, e, &me);
+    }
+}
+
+/// One element's RT mass matrix `M_T[j][k] = ∫ φ_j·φ_k dx` (contravariant
+/// Piola: `φ_phys = J·φ̂/detJ`), integrated with the isoparametric geometry.
+fn rt_element_mass_matrix<RE: VectorReferenceElement + ?Sized>(
     mesh: &Mesh<2>,
     e: u32,
-    dofs: &[usize],
     ref_elem: &RE,
     q_order: u8,
-    q_scaling: f64,
-    ei: usize,
-    q: &mut [f64],
-) {
+) -> Vec<f64> {
     let n_ld = ref_elem.n_dofs();
-    assert_eq!(
-        dofs.len(),
-        n_ld,
-        "RT element DOF count mismatch (elem {e}: {} DOFs vs {} basis)",
-        dofs.len(),
-        n_ld
-    );
     let qr = ref_elem.quadrature(q_order);
     let mut phi = vec![0.0; n_ld * 2];
     let mut phys = vec![0.0; n_ld * 2];
 
-    // Element RT mass matrix M_T[j][k] = ∫ φ_j·φ_k dx (contravariant Piola:
-    // φ_phys = J·φ̂/detJ), integrated with the isoparametric geometry.
     let mut me = vec![0.0; n_ld * n_ld];
     for (qi, xi) in qr.points.iter().enumerate() {
         ref_elem.eval_basis_vec(xi, &mut phi);
@@ -1358,10 +1455,7 @@ fn add_element_q<RE: VectorReferenceElement>(
             }
         }
     }
-    let scaling = element_q_scaling(&me, n_ld, q_scaling, ei);
-    for j in 0..n_ld {
-        q[dofs[j]] += scaling * me[j * n_ld + j];
-    }
+    me
 }
 
 fn compute_hdiv_l2_error_2d<F>(space: &HDivSpace<Mesh<2>>, u: &[f64], ex: &F) -> f64
@@ -1374,8 +1468,9 @@ where
 
     let order = space.order() as usize;
     let mut e2 = 0.0;
-    // Quadrature exact enough for the RT_k physical integrand (degree ≤ k+1).
-    let q_order = (2 * order + 4).min(9) as u8;
+    // Quadrature identical to C++ `irs_` (block-solvers.cpp: `IntRules.Get(
+    // geom, max(2, 2*order+1))`) so the printed ratio matches the oracle.
+    let q_order = (2 * order + 1).max(2) as u8;
 
     for e in space.mesh().elem_iter() {
         let ref_elem: Box<dyn VectorReferenceElement> = match space.mesh().element_type(e) {
