@@ -2105,6 +2105,52 @@ trace/sum/frob/`A00` 与 C++ 相等，1600 项幅值多重集与 40 个行范数
 - **流程注记**：**② 路的"审计+停手等授权"是本轮的价值核心**——它没有擅自改越权文件，而是把 C++ 逐位证据摆齐后请求裁定；主会话复现真值后亲自落地（与 D170/D329 同一模式）。**教训延续**：o≥2 从 panic 变可达后暴露下一个缺口——"解除阻塞后要做一次该路径的端到端对拍"应写入派单模板。
 - **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 688**+8ign / **element 513** / **io 136** / linalg 69 / linalg-gpu 13+2ign / **mesh 313** / parallel 243 / solver 266 / space 287）；集成层 **141 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**5m42s**）；pro 层 0 错误。
 
+## 第四十六轮（round 46）：两路 —— ① D337 hex RT 高阶 ex24，② D324 Fuentes 接线
+
+### 0. 本轮形状
+**两路交付，都挖出"预期之外的更深缺陷"。** ① 发现 ex24 的三行 L2 误差里有**两处库里真缺陷**（不是 RT 元素本身）；② 切 Fuentes 默认时发现 **Bergot 金字塔与 H1 四面体/棱柱三角面不 conforming**（MFEM 自己 `pyr_type=0` 也会坏）。
+
+| 路 | 目标 | 结果 |
+|---|---|---|
+| ① | **D337** hex RT `-o ≥ 2` 的 ex24 5 量级差 | ✅ **关闭**（两处库缺陷，见 §1；ex24 `-o 1/2/3` 三阶次全对齐 C++） |
+| ② | **D324** Fuentes 接线 | ✅ **关闭**（默认切 Fuentes + Bergot 显式出口；C++ 空间验收 worst **1.11e-16**） |
+
+### 1. ① 路：D337 关闭——RT 元素干净，病在两处消费层
+- **阶梯定位结论**：`HexRTk::new_gauss_legendre`/interior 翻转/面帧/`hex_rule` **全部干净**；差来自元素**外围**两层，且两者都命中**全部三行**（包括不碰 RT 的精确投影行——这就是定位起点）：
+  1. **`compute_l2_error_l2` 用 H1 基重构 L² 场**：对默认 GaussLegendre **lexicographic** `L2Space`（`HexL2GL`）用了 `ElementType::ref_elem(order)`（`HexQk`，GLL、拓扑序）。dof 值本身精确（2.7e-15），但**报出的误差是垃圾**：ex24 `-p 2 -o 3` **0.0166 vs C++ 1.16e-07（5 量级）**、`-o 2` **0.00768 vs 2.69e-05（285×）**。修：改用 `ref_elem_vol_for_space`（与装配同源）——`crates/assembly/src/postproc/grid_function.rs`。
+  2. **`project_hdiv_coefficient_{2,3}d` 做了 L² 投影，而 MFEM 的 `ProjectCoefficient` 是 `Project_RT`**（节点/对偶插值——唯一满足 `div∘I = P_L2∘div` 的算子，这正是 C++ `errSol == errProj` 的原因）。残差相对 **1.7e-3（-o 2）/ 2.4e-2（-o 3）**。修：委派 `HDivSpace::interpolate_vector`（D289 已验收）；旧 L² 路径仅保留给空间引擎不支持的 (元素,阶) 对（prism RT1、pyramid）。影响面 = 仅 ex24。
+- **修后数字**（`inline-hex.mesh` 32³，`-p 2`）：`-o 1` **逐位保持**（0.01089955/0.01089955/0.01089949，基线冻结）；`-o 2` **0.00002692 ×3 = C++ 2.69248e-05**；`-o 3` **0.00000012 ×3 = C++ 1.1615e-07**（**主会话现场复现三阶次**）。全精度：RT 两条腿在 64/512 hex 与 C++ 一致到 **1e-15…4e-12**、32³ 到 2e-15…2e-10；插值形式 (c) 到 2e-15…2e-10。新测试 `d337_ex24_div_ladder.rs`（5）。
+- **两个仲裁请求（主会话裁决）**：
+  - **AR1 → 记债 D342**：`-o 4`（hex RT3）在 `HDivSpace: Hex RT supports orders 0, 1, and 2`（`hdiv.rs:330`）**panic**（既有）——需放开到 3..6 并补 k=3 的 MFEM 元素 dump（`mfem_gl_dump.rs` 现只覆盖 k=1,2）；C++ 目标 1.3998768047217274e-10。**不在本轮做**（需新探针 dump，独立工作量）。
+  - **AR2 → 记债 D343（扩充）**：ex24 第三行 MFEM 用 `ProjectCoefficient`（节点插值）而 fem-rs 用内联 L² 质量解；**但主会话复测发现 o=1 三行都差最后一位**（fem-rs 0.01089955/0.01089955/0.01089949 vs C++ 0.01089963/0.01089963/0.01089970，相对 ~1e-6），不止 (c) —— 单行解释不完整，**故本轮不动示例基线**（冻结纪律），把证据记债。
+- 新债：**D342**（hex RT≥3 端到端不支持）、**D343**（ex24 三行 o=1 末位 + 第三行算子口径）、**D344**（`project_hcurl_coefficient{,_2d}` 同类 doc-vs-行为不符，未被使用）、**D345**（标量 `project_coefficient` 同类，被 7 个示例/miniapp 使用——需专项审计）、**D346**（新的 `hdiv_interpolant_available` 判据与空间支持表重复，应由空间导出）。
+
+### 2. ② 路：D324 关闭——默认切 Fuentes（附一条比 1:1 更强的论据）
+- **决策 = (a) 切默认 + 保留显式 Bergot 出口**，理由全部实测：
+  1. MFEM 默认就是 Fuentes（`ScalarPyramid::DefaultType=1` → `H1_FECollection` → `SetCurvature`，`fe_pyramid.hpp:23`/`mesh.cpp:7211-7230`），1:1 必须切。
+  2. **正确性硬证据**：`data/tinyzoo-3d.mesh`（hex+prism+pyramid+tet）上 MFEM 自己 `pyr_type=0` 在 p=3/p=4 出现 **4/9 个共享 dof 位置不一致**（worst 4.472e-1/6.546e-1，全在金字塔 4 个三角面），而 `pyr_type=1` 恒 **bad=0** ⇒ **Bergot 金字塔与 H1 四面体/棱柱三角面不 conforming**，Fuentes 才 conforming。
+  3. 波及面量化且可逆：单棱锥 dof p=2/3/4 由 14/30/55 → **15/37/77**（+141/235）；几何表节点数 `SetCurvature(2)` 14→15、`(3)` 30→37；**LOR/AMR 不受影响**（`lor.rs` 无金字塔分支、金字塔细化全转 Tet4，已核查）。受影响钉 6 处**全部改为显式请求 Bergot**（数字一个没改，顶部注明真值是 `pyr_type=0` dump）。
+- **改动（16 文件）**：element `PyramidBasisType::default()=Fuentes`；space `DofManager::new_with_pyramid_basis`/`build_pyramid_pk(..,basis)`/`rebuild_dof_coords_periodic(..,basis)` + `H1Space`/`VectorH1Space::with_pyramid_basis` + `FESpace::pyramid_basis()` trait；**并修一个真 bug**：Fuentes p=2 的 interior 块 `(p−1)³=1` 被 `if p>=3` 守卫吞掉（只分配 14 dof）；assembly `ref_elem_vol_h1_with_pyramid_basis` + mixed/bbar 按 space 取族；mesh `set_curvature_pyramid5`/`element_jacobian`/`geo_ref_elem`/`vector_assembler`/`curved.rs` 几何表 → Fuentes。
+- **C++ 对照（`tmp/d347/probe.cpp`，两 fixture 入库）**：空间级逐单元逐 slot 物理位置 vs MFEM `SLOTPOS` **worst |Δ| = 1.11e-16**（unit/twin/octahedron × p=1..4 × 两族，含 octa 基面**反向枚举**情形）；vsize/每元 dof 数/共享 dof **对数**逐位一致；几何端到端 `set_curvature(g)` 节点数 5/15/37、逐 slot 参考位置与节点值 = MFEM `GGEOM`/`GVAL`、`det J ≡ 1`、体积 1/3。
+- 新测试 `d347_pyramid_fuentes_wiring.rs`（6）。新债：**D348（P1）**金字塔 quad 基面共享 dof **取向盲**（既有缺陷、两族相同：octa 上 MFEM bad=0 而 fem-rs p=3 bad=4/p=4 bad=6，worst 6.3e-1/9.3e-1；MFEM 靠 `DofOrderForOrientation(SQUARE)`）；**D349（P2）** `DofManager` mixed 3D 只支持 p=1（zoo 场景不可复现）；**D350（P2）**不持 space 的分派点仍取 legacy 默认族。
+- 方法论要点（写进证据）：MFEM 全局 dof 按**实体**编号、fem-rs 按**单元**编号（整体置换，解向量不能按下标逐位比）；逐单元 oracle 必须用 `SLOTPOS` 而非 `POS`（后者按坐标排序会因 ~1e-16 tie 错位）；MFEM 金字塔 `ProjectCoefficient` **不是**节点插值（该 FE 非 nodal），round-45 的"slot→node 0 处不匹配"用最近点匹配掩盖了这一点。
+
+### 第四十六轮新债务
+- **D342（P2）**hex RT 阶 ≥3 端到端不支持（`hdiv.rs:330` cap 0..2；需 k=3 MFEM dump）。
+- **D343（P3）**ex24 三行 L2 误差 o=1 末位差（~1e-6 相对，三行都有）+ 第三行算子口径（MFEM 节点插值 vs fem-rs 内联质量解）。
+- **D344（P3）**`project_hcurl_coefficient{,_2d}` doc-vs-行为不符（未被使用）；**D345（P3）**标量 `project_coefficient` 同类（被 7 个示例/miniapp 使用，需专项审计）。
+- **D346（P3）**`hdiv_interpolant_available` 判据与空间支持表重复（应由 space 导出）。
+- **D348（P1）**金字塔 quad 基面共享 dof 取向盲（既有，两族相同；MFEM `DofOrderForOrientation(SQUARE)`）。
+- **D349（P2）**`DofManager` mixed 3D 只支持 p=1；**D350（P2）**不持 space 的分派点取 legacy 族。
+- **关闭**：~~D337~~、~~D324~~。
+- 沿用开放：D342–D350、D325/D340/D335/D341/D334/D336/D333/D339、D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+
+### 本轮统计
+- **测试增长**：`fem-assembly` + `d337_ex24_div_ladder`（5）；`fem-space` lib 287→**288** + `d347_pyramid_fuentes_wiring`（6）+ 2 个 MFEM 真值 fixture。全部实跑确认。
+- **主会话亲验**（不是转述）：**ex24 三个阶次现场复现**（o=1 基线冻结、o=2 = 2.69248e-05、o=3 = 1.1615e-07）；七套件实跑绿；pro 层 0 错误；**两次仲裁裁决**（AR1 记债、AR2 记债并扩充——三行都差末位故不动冻结基线）。
+- **流程注记**：**本轮两路都在"预期之外"挖到更深缺陷**（① 的 ex24 病根不在 RT 元素而在 L2 误差/投影算子；② 的 Fuentes 切换顺带证明 Bergot 非 conforming）——"先证伪再修"与"阶梯定位"两条纪律的价值再次实证。**裁决纪律**：AR2 若照代理单行解释改了示例，会把一个"三行都差"的问题伪装成"已修"——**主会话复测的独立价值**。
+- **全量回归（收尾实测）**：十 crate `--lib` 全绿（amg 23 / **assembly 688**+8ign / **element 513** / **io 136** / linalg 69 / linalg-gpu 13+2ign / **mesh 313** / parallel 243 / solver 266 / **space 288**）；集成层 **143 套 ok + 仅预存 D73**（`7.9085e-2` 逐位）；examples 0 错误（**5m52s**）；pro 层 0 错误。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
