@@ -5,11 +5,13 @@
 //! at all.  With the cap raised to `0..=6` it runs, and this file pins the
 //! numbers against MFEM 4.10.
 //!
-//! **Why a test and not just the example's stdout:** the example prints
-//! `{:.8}` (fixed 8 decimals, the repo's frozen format for every order), so at
-//! `-o 4` all three lines render as `0.00000000` — the value `1.4e-10` cannot
-//! be read off the example.  The pipeline replicated here is
-//! `solve_div_3d`'s, evaluated at 17 digits.
+//! **Why a test and not just the example's stdout:** when this file was written
+//! the example printed `{:.8}` (fixed 8 decimals), so at `-o 4` all three lines
+//! rendered `0.00000000` and the value `1.4e-10` could not be read off it.
+//! Round 47 (D343) switched the example to C++'s `cout` format
+//! (`fem_solver::fmt_g`), so it now prints `1.39988e-10`; this test is kept
+//! because it evaluates the same pipeline at **17 digits** against the C++
+//! values rather than against the printed text.
 //!
 //! Ground truth: `$HOME/work/d342/ex24_div_prec.cpp` (MFEM 4.10 ex24, div
 //! branch, `cout.precision(17)`; `-n N -r R` = `N³` Cartesian hexes refined `R`
@@ -56,6 +58,11 @@ fn gradp_exact(x: &[f64]) -> Vec<f64> {
 /// refined `ref_levels` times.  Returns `(errSol, errInterp, errProj_interp,
 /// errProj_l2, n_rt_dofs, n_l2_dofs)`; the error rule is C++'s
 /// `max(2, 2*order+1)` so the numbers are comparable digit for digit.
+///
+/// `errProj_l2` keeps the **historical** line-(c) route (an L² mass solve).
+/// The example itself no longer does that — round 47 (D343) switched it to the
+/// `Project_RT` interpolant, `errProj_interp` — but the old route is retained
+/// here as the comparison the D343 debt was measured against.
 fn ex24_div_pipeline(n: usize, ref_levels: usize, cli_order: u8) -> (f64, f64, f64, f64, usize, usize) {
     let mut mesh = Mesh::<3>::unit_cube_hex(n);
     for _ in 0..ref_levels {
@@ -113,7 +120,7 @@ fn d342_ex24_hex_rt3_matches_mfem_small_meshes() {
         assert_eq!((n_rt, n_l2), (want_rt, want_l2), "{elems} elements: dof counts");
         println!(
             "  {elems} hex o=4: sol={e1:.17e} interp={e2:.17e} proj(interp)={e3_interp:.17e} \
-             proj(L2, example)={e3_l2:.17e} (mfem {want_sol:.17e} / {want_proj:.17e})"
+             proj(L2, historical)={e3_l2:.17e} (mfem {want_sol:.17e} / {want_proj:.17e})"
         );
         for (tag, got, want) in [
             ("errSol", e1, want_sol),
@@ -133,8 +140,10 @@ fn d342_ex24_hex_rt3_matches_mfem_small_meshes() {
                 (got - want).abs() / want.abs()
             );
         }
-        // D343: the example's inline L²-projection form of line (c) carries an
-        // O(h^{p+1}) offset — still the documented one at o=4, no worse.
+        // D343: the *historical* line-(c) route (an L² mass solve, `errProj_l2`)
+        // carries an O(h^{p+1}) offset — still the documented one at o=4, no
+        // worse.  The example itself now uses the interpolant, so this bound is
+        // a guard on the old route only.
         assert!(
             (e3_l2 - want_proj).abs() <= 1e-2 * want_proj.abs(),
             "{elems} elements o=4 errProj (L², example): {e3_l2:.17e} vs mfem {want_proj:.17e}"
@@ -156,7 +165,7 @@ fn d342_ex24_hex_rt3_32cubed_matches_mfem() {
     assert_eq!((n_rt, n_l2), (6_340_608, 2_097_152), "32^3 dof counts vs C++");
     println!(
         "  32^3 -o 4: sol={e1:.17e} interp={e2:.17e} proj(interp)={e3_interp:.17e} \
-         proj(L2, example)={e3_l2:.17e}"
+         proj(L2, historical)={e3_l2:.17e}"
     );
     // Absolute tolerance, not relative: the L² error is a residual of two O(1)
     // fields, so at `-o 4` the *value* is ~1.4e-10 and the quadrature/mass-solve
@@ -181,7 +190,7 @@ fn d342_ex24_hex_rt3_32cubed_matches_mfem() {
     }
     assert!(
         (e3_l2 - 1.3998749928750382e-10).abs() <= 1e-3 * 1.3998749928750382e-10,
-        "32^3 -o 4 errProj (L², example): {e3_l2:.17e}"
+        "32^3 -o 4 errProj (L², historical route): {e3_l2:.17e}"
     );
 }
 

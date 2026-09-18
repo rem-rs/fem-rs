@@ -29,13 +29,12 @@ use fem_assembly::{
     },
     project_coefficient,
     project_hdiv_coefficient_2d,
-    standard::{DomainSourceIntegrator, MassIntegrator, VectorDomainLFIntegrator, VectorMassIntegrator},
-    postproc::coefficient::FnVectorCoeff,
+    standard::{MassIntegrator, VectorMassIntegrator},
     Assembler,
 };
 use fem_io::mfem::{read_mfem_file, write_mfem_file, write_mfem_file_3d, write_mfem_gf_file};
 use fem_mesh::{refine_uniform, ElementType, topology::MeshTopology, Mesh};
-use fem_solver::{solve_pcg_jacobi, SolverConfig};
+use fem_solver::{fmt_g, solve_pcg_jacobi, SolverConfig};
 use fem_space::{fe_space::FESpace, H1Space, HCurlSpace, HDivSpace, L2Space};
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -220,27 +219,22 @@ fn solve_grad_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     let interp_norm: f64 = e_interp.iter().map(|v| v * v).sum::<f64>().sqrt();
     println!("  DLO interpolant norm = {:.6e}", interp_norm);
 
-    // (c) Exact L² projection of grad p onto H(curl)
-    let rhs_ex = VectorAssembler::assemble_linear(&nd, &[
-        &VectorDomainLFIntegrator {
-            f: FnVectorCoeff(Box::new(|x: &[f64], out: &mut [f64]| {
-                let g = gradp_exact(x);
-                out[0] = g[0]; out[1] = g[1];
-            })),
-        }
-    ], qo);
-    let mut e_ex = vec![0.0; nd.n_dofs()];
-    solve_pcg_jacobi(&mass, &rhs_ex, &mut e_ex, &cfg).expect("exact PCG");
+    // (c) Exact projection of grad p onto H(curl) — C++ `ex24.cpp:290`
+    //     `exact_proj.ProjectCoefficient(gradp_coef)`, which for ND spaces is
+    //     MFEM's `Project_ND` nodal interpolant, not an L² mass solve.
+    let e_ex = nd.interpolate_vector(&|x: &[f64]| gradp_exact(x)).into_vec();
 
-    // L² errors (higher quadrature for accuracy)
-    let err_qo = (2 * order + 4).max(5) as u8;
+    // L² errors: C++ `ComputeL2Error(gradp_coef)` without an `irs` argument uses
+    // `intorder = 2*fe->GetOrder() + 3` (`fem/gridfunc.cpp:3410`), the ND
+    // element order being `order`.
+    let err_qo = 2 * order + 3;
     let gradp = |x: &[f64]| gradp_exact(x);
     let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo, None);
     let e2 = compute_l2_error_hcurl(&e_interp, &nd, &gradp, err_qo, None);
     let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo, None);
-    println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e1);
-    println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e2);
-    println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e3);
+    println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e2));
+    println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e3));
 
     // Output with precision(8) matching C++
     write_mfem_file("refined.mesh", mesh).expect("write mesh");
@@ -343,25 +337,18 @@ fn solve_grad_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
         println!("  DLO interpolant norm = {:.6e}", interp_norm);
     }
 
-    // (c) Exact L² projection of grad p onto H(curl) in 3D
-    let rhs_ex = VectorAssembler::assemble_linear(&nd, &[
-        &VectorDomainLFIntegrator {
-            f: FnVectorCoeff(Box::new(|x: &[f64], out: &mut [f64]| {
-                let g = gradp_exact(x);
-                for i in 0..3 { out[i] = g[i]; }
-            })),
-        }
-    ], qo);
-    let mut e_ex = vec![0.0; nd.n_dofs()];
-    solve_pcg_jacobi(&mass, &rhs_ex, &mut e_ex, &cfg).expect("exact PCG");
+    // (c) Exact projection of grad p onto H(curl) in 3D — C++ `ex24.cpp:290`
+    //     `ProjectCoefficient` == `Project_ND` (the nodal interpolant).
+    let e_ex = nd.interpolate_vector(&|x: &[f64]| gradp_exact(x)).into_vec();
 
-    // L² errors
-    let err_qo = (2 * order + 4).max(5) as u8;
+    // L² errors — C++ `ComputeL2Error(gradp_coef)` default rule
+    // `2*fe->GetOrder() + 3` (`fem/gridfunc.cpp:3410`).
+    let err_qo = 2 * order + 3;
     let gradp = |x: &[f64]| gradp_exact(x);
     let e1 = compute_l2_error_hcurl(&e_sol, &nd, &gradp, err_qo, None);
     let e3 = compute_l2_error_hcurl(&e_ex, &nd, &gradp, err_qo, None);
-    println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e1);
-    println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {:.8}\n", e3);
+    println!("\n Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{{L_2}} = {}\n", fmt_g(e3));
 
     // Output
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
@@ -402,27 +389,21 @@ fn solve_curl_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     let mut w_interp = vec![0.0; rt.n_dofs()];
     curl_dlo.spmv(&v, &mut w_interp);
 
-    // (c) Exact L² projection of curl v into H(div)
-    struct CurlVExact;
-    impl fem_assembly::postproc::coefficient::VectorCoeff for CurlVExact {
-        fn eval(&self, ctx: &fem_assembly::postproc::coefficient::CoeffCtx<'_>, out: &mut [f64]) {
-            let cv = curlv_exact(ctx.x);
-            for i in 0..3 { out[i] = cv[i]; }
-        }
-    }
-    let rhs_ex = VectorAssembler::assemble_linear(&rt, &[&VectorDomainLFIntegrator { f: CurlVExact }], qo);
-    let mut w_ex = vec![0.0; rt.n_dofs()];
-    solve_pcg_jacobi(&mass, &rhs_ex, &mut w_ex, &cfg).expect("exact PCG");
+    // (c) Exact projection of curl v into H(div) — C++ `ex24.cpp:294`
+    //     `exact_proj.ProjectCoefficient(curlv_coef)`, i.e. MFEM's `Project_RT`
+    //     (the nodal interpolant), not an L² mass solve.
+    let w_ex = rt.interpolate_vector(&|x: &[f64]| curlv_exact(x)).into_vec();
 
-    // L² errors
-    let err_qo = (2 * order + 4).max(5) as u8;
+    // L² errors — C++ `ComputeL2Error(curlv_coef)` default rule
+    // `2*fe->GetOrder() + 3`; the RT element order is `order - 1`.
+    let err_qo = 2 * order + 1;
     let curlv_fn = |x: &[f64]| curlv_exact(x);
     let e1 = compute_l2_error_hdiv(&w_sol, &rt, &curlv_fn, err_qo, None);
     let e2 = compute_l2_error_hdiv(&w_interp, &rt, &curlv_fn, err_qo, None);
     let e3 = compute_l2_error_hdiv(&w_ex, &rt, &curlv_fn, err_qo, None);
-    println!("\n Solution of (E_h,w) = (curl v_h,w) for E_h and w in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e1);
-    println!(" Curl interpolant E_h = curl v_h in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e2);
-    println!(" Projection E_h of exact curl v in H(div): || E_h - curl v ||_{{L_2}} = {:.8}\n", e3);
+    println!("\n Solution of (E_h,w) = (curl v_h,w) for E_h and w in H(div): || E_h - curl v ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Curl interpolant E_h = curl v_h in H(div): || E_h - curl v ||_{{L_2}} = {}\n", fmt_g(e2));
+    println!(" Projection E_h of exact curl v in H(div): || E_h - curl v ||_{{L_2}} = {}\n", fmt_g(e3));
 
     // Output
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");
@@ -470,19 +451,19 @@ fn solve_div_2d(mesh: &Mesh<2>, order: u8, vis: bool) {
     d.spmv(&v, &mut interp_rhs);
     solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
 
-    // (c) Exact L² projection of div(grad p) into L²
-    let rhs_ex = Assembler::assemble_linear(&l2, &[&DomainSourceIntegrator::new(div_gradp_exact)], qo);
-    let mut f_ex = vec![0.0; l2.n_dofs()];
-    solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
+    // (c) Exact projection of div(grad p) into L² — C++ `ex24.cpp:298`
+    //     `exact_proj.ProjectCoefficient(divgradp_coef)`, which on a nodal L²
+    //     space is the nodal interpolant, not an L² mass solve (D343).
+    let f_ex = l2.interpolate(&div_gradp_exact).into_vec();
 
-    // L² errors
-    let err_qo = (2 * order + 6).max(7) as u8;
+    // L² errors — C++ `ex24.cpp:334` `order_quad = max(2, 2*order+1)`.
+    let err_qo = (2 * order + 1).max(2);
     let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo, None);
     let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo, None);
     let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo, None);
-    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e1);
-    println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e2);
-    println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e3);
+    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e2));
+    println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e3));
 
     // Output
     write_mfem_file("refined.mesh", mesh).expect("write mesh");
@@ -530,19 +511,19 @@ fn solve_div_3d(mesh: &Mesh<3>, order: u8, vis: bool) {
     d.spmv(&v, &mut interp_rhs);
     solve_pcg_jacobi(&mass, &interp_rhs, &mut f_interp, &cfg).expect("interp mass solve");
 
-    // (c) Exact L² projection of div(grad p) into L²
-    let rhs_ex = Assembler::assemble_linear(&l2, &[&DomainSourceIntegrator::new(div_gradp_exact)], qo);
-    let mut f_ex = vec![0.0; l2.n_dofs()];
-    solve_pcg_jacobi(&mass, &rhs_ex, &mut f_ex, &cfg).expect("exact PCG");
+    // (c) Exact projection of div(grad p) into L² — C++ `ex24.cpp:298`
+    //     `exact_proj.ProjectCoefficient(divgradp_coef)`, which on a nodal L²
+    //     space is the nodal interpolant, not an L² mass solve (D343).
+    let f_ex = l2.interpolate(&div_gradp_exact).into_vec();
 
-    // L² errors
-    let err_qo = (2 * order + 6).max(7) as u8;
+    // L² errors — C++ `ex24.cpp:334` `order_quad = max(2, 2*order+1)`.
+    let err_qo = (2 * order + 1).max(2);
     let e1 = compute_l2_error_l2(&f_sol, &l2, &div_gradp_exact, err_qo, None);
     let e2 = compute_l2_error_l2(&f_interp, &l2, &div_gradp_exact, err_qo, None);
     let e3 = compute_l2_error_l2(&f_ex, &l2, &div_gradp_exact, err_qo, None);
-    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e1);
-    println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e2);
-    println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {:.8}\n", e3);
+    println!("\n Solution of (f_h,q) = (div v_h,q) for f_h and q in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e1));
+    println!(" Divergence interpolant f_h = div v_h in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e2));
+    println!(" Projection f_h of exact div v in L_2: || f_h - div v ||_{{L_2}} = {}\n", fmt_g(e3));
 
     // Output
     write_mfem_file_3d("refined.mesh", mesh).expect("write mesh 3d");

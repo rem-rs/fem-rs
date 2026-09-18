@@ -20,11 +20,13 @@
 //! * orders 0/1 — MFEM's `npts == 1` special case, bit-identical;
 //! * orders 2..5 (`n ≤ 3`) — **bit-frozen** legacy values: these are exactly
 //!   the quadrature orders of the p ≤ 2 assembly paths, whose results are
-//!   pinned by `d304_pyramid_h1_mass` / `d191_pyramid_h1_mfem_layout`;
-//! * orders 6..9 (`n = 4, 5`) — MFEM's `[0,1]` table, **bit-identical**;
-//! * orders 10..14 (`n ≥ 6`) — MFEM's point counts; the 1-D nodes come from
-//!   the O'Donnell Newton iteration, which is not MFEM's algorithm (D339), so
-//!   the deviation is bounded (measured ≤ 2.7e-14 relative) instead of zero.
+//!   pinned by `d304_pyramid_h1_mass` / `d191_pyramid_h1_mfem_layout`.  MFEM's
+//!   own `n = 2, 3` table entries differ from them by ≤ 1 ulp (D339 §"n ≤ 3");
+//! * orders 6..14 (`n = 4..8`) — MFEM's rule **bit-identical**, including the
+//!   point sequence.  `n = 4, 5` come from the `[0,1]` table, `n ≥ 6` from
+//!   `gauss_legendre_01_newton_mfem`, the 1:1 port of
+//!   `QuadratureFunctions1D::GaussLegendre` (`fem/intrules.cpp:620`) that
+//!   replaced the generic O'Donnell iteration (D339).
 
 use fem_element::quadrature::pyramid_rule;
 
@@ -188,11 +190,15 @@ fn orders_6_to_9_are_bit_identical_to_mfem() {
     }
 }
 
-/// Orders 10..14 (`n ≥ 6`): MFEM's point counts, values within the D339 bound
-/// (the 1-D nodes come from `gauss_legendre_01_arbitrary`, whose O'Donnell
-/// Newton iteration is not MFEM's `QuadratureFunctions1D::GaussLegendre`).
+/// Orders 10..14 (`n >= 6`) are MFEM's rule **bit-for-bit** after D339: the
+/// 1-D nodes come from [`gauss_legendre_01_newton_mfem`], the 1:1 port of
+/// `QuadratureFunctions1D::GaussLegendre` (`fem/intrules.cpp:620`), not the
+/// generic O'Donnell/Newton solver that used to sit behind
+/// `gauss_legendre_01_arbitrary` (which was up to 2.7e-14 off).
+///
+/// [`gauss_legendre_01_newton_mfem`]: fem_element::quadrature::gauss_legendre_01_newton_mfem
 #[test]
-fn orders_10_to_14_match_mfem_counts_and_within_d339_bound() {
+fn orders_10_to_14_are_bit_identical_to_mfem() {
     let mfem = parse_dump(MFEM_DUMP, "order");
     for order in 10u8..=14 {
         let want = &mfem.iter().find(|r| r.key == order as usize).expect("mfem block");
@@ -200,8 +206,25 @@ fn orders_10_to_14_match_mfem_counts_and_within_d339_bound() {
         assert_eq!(got.len(), want.npts, "order={order} npts");
         let (d, i, j) = max_rel_diff(&got, &want.rows);
         eprintln!("D339 pyramid_rule order={order}: max rel diff = {d:.3e} (row {i} comp {j})");
-        assert!(d < 1e-13, "order={order}: max rel diff {d:.3e}");
-        assert!(d > 0.0, "order={order}: expected the documented D339 deviation");
+        for (k, (g, w)) in got.iter().zip(want.rows.iter()).enumerate() {
+            assert_eq!(g, w, "order={order} point {k}: {g:?} != {w:?}");
+        }
+    }
+}
+
+/// The port and the `n <= 5` tables agree bit-for-bit — the cross-check MFEM's
+/// own source implies (`GaussLegendre` hard-codes `case 1/2/3` and iterates the
+/// rest, while the segment rule of `n = 4, 5` is the same iteration).  This is
+/// what makes it safe for `pyramid_rule` to take its `n = 4, 5` nodes from
+/// [`gauss_legendre_01`] and its `n >= 6` nodes from the port.
+#[test]
+fn mfem_port_agrees_with_the_1d_tables_up_to_five() {
+    use fem_element::quadrature::{gauss_legendre_01, gauss_legendre_01_newton_mfem};
+    for n in 1usize..=5 {
+        let (a, wa) = gauss_legendre_01_newton_mfem(n);
+        let (b, wb) = gauss_legendre_01(n);
+        assert_eq!(a, b, "n={n} nodes");
+        assert_eq!(wa, wb, "n={n} weights");
     }
 }
 

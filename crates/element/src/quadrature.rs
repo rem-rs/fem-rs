@@ -576,10 +576,103 @@ fn legendre_poly(n: usize, x: f64) -> (f64, f64) {
     (pn, pn1)
 }
 
+/// MFEM's `QuadratureFunctions1D::GaussLegendre(np, ir)` verbatim
+/// (`fem/intrules.cpp:620`): the `np`-point Gauss-Legendre rule on `[0, 1]`.
+///
+/// `np <= 3` are MFEM's hard-coded table entries (bit-identical to
+/// [`gauss_legendre_01`]); `np >= 4` Newton-iterates the Legendre roots with
+/// MFEM's initial guess `z = cos(π(i − 1/4)/(np + 1/2))`, the residual
+/// `pp = np·(z·P_np − P_{np−1})/(z² − 1)`, the stop test `|dz| < 1e-16` with
+/// one extra pass that re-evaluates `pp` at the converged point, and the
+/// round-off-safe mapping `xi = ((1 − z) + dz)/2` (the naive
+/// `(1 − (z − dz))/2` has bad round-off, per the C++ comment), storing the
+/// mirrored node `1 − xi` and the weight `1/(4·xi·(1 − xi)·pp²)`.
+///
+/// Every consumer of MFEM's 1-D Gauss-Legendre rule — the pyramid rule's Duffy
+/// map (`PyramidIntegrationRule`, `fem/intrules.cpp:2460`), `seg_rule` and the
+/// tensor rules derived from it — must use this generator: the generic
+/// O'Donnell/Newton solver in [`gauss_legendre_arbitrary`] is a *different*
+/// algorithm and lands ~1 ulp…3e-14 away from MFEM's values for `np >= 6`
+/// (D339).
+///
+/// This is the same port as `fem_assembly::postproc::plbound::mfem_gauss_legendre_01`
+/// (D259); it lives here too because `fem-element` cannot depend on
+/// `fem-assembly`, exactly as [`gauss_lobatto_01_newton_mfem`] duplicates
+/// `plbound::mfem_gauss_lobatto_01`.  `crates/assembly/tests/d343_quadrature_port_parity.rs`
+/// pins the two copies equal for `np = 1..=20` so they cannot drift apart.
+pub fn gauss_legendre_01_newton_mfem(np: usize) -> (Vec<f64>, Vec<f64>) {
+    match np {
+        1 => return (vec![0.5], vec![1.0]),
+        2 => {
+            return (
+                vec![0.21132486540518711775, 0.78867513459481288225],
+                vec![0.5, 0.5],
+            );
+        }
+        3 => {
+            return (
+                vec![0.11270166537925831148, 0.5, 0.88729833462074168852],
+                vec![5.0 / 18.0, 4.0 / 9.0, 5.0 / 18.0],
+            );
+        }
+        _ => {}
+    }
+    let n = np;
+    let m = (n + 1) / 2;
+    let mut x = vec![0.0_f64; np];
+    let mut w = vec![0.0_f64; np];
+    for i in 1..=m {
+        let mut z = (std::f64::consts::PI * (i as f64 - 0.25) / (n as f64 + 0.5)).cos();
+        let pp;
+        let mut xi = 0.0_f64;
+        let mut done = false;
+        loop {
+            let mut p2 = 1.0_f64;
+            let mut p1 = z;
+            for j in 2..=n {
+                let p3 = p2;
+                p2 = p1;
+                // `((2*j - 1)*z*p2 - (j-1)*p3) / j` with the int operands
+                // promoted exactly as C++ does.
+                p1 = ((2 * j - 1) as f64 * z * p2 - (j - 1) as f64 * p3) / j as f64;
+            }
+            // p1 is the Legendre polynomial P_n(z), p2 = P_{n-1}(z).
+            let pp_here = n as f64 * (z * p1 - p2) / (z * z - 1.0);
+            if done {
+                pp = pp_here;
+                break;
+            }
+            let dz = p1 / pp_here;
+            if dz.abs() < 1e-16 {
+                done = true;
+                // Map the new point (z-dz) to (0,1); continue one more pass to
+                // re-evaluate pp at the converged point, then exit.
+                xi = ((1.0 - z) + dz) / 2.0;
+            }
+            z -= dz;
+        }
+        x[i - 1] = xi;
+        x[n - i] = 1.0 - xi;
+        let wt = 1.0 / (4.0 * xi * (1.0 - xi) * pp * pp);
+        w[i - 1] = wt;
+        w[n - i] = wt;
+    }
+    (x, w)
+}
+
 /// Gauss-Legendre rule on `[0, 1]` with arbitrary `n` points.
 ///
-/// Weights sum to 1.
+/// Weights sum to 1.  `n >= 6` defers to [`gauss_legendre_01_newton_mfem`],
+/// MFEM's `QuadratureFunctions1D::GaussLegendre` (correction of D339: the
+/// generic O'Donnell iteration used here before differed from MFEM by up to
+/// 3e-14 for `n >= 6`).  `n = 1..5` keep the historical generic result —
+/// `gauss_legendre_01`'s `n <= 5` table is what the sensitive consumers
+/// (`seg_rule`, `quad_qk_rule`) use, and `ex41`'s BlockILU MDF tie-breaks are
+/// pinned to it being 1 ulp off the table at `n = 5`.
 pub fn gauss_legendre_01_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n >= 6 {
+        return gauss_legendre_01_newton_mfem(n);
+    }
     let (xs, ws) = gauss_legendre_arbitrary(n);
     let pts = xs.iter().map(|x| 0.5 * (x + 1.0)).collect();
     let wts = ws.iter().map(|w| 0.5 * w).collect();
@@ -2683,17 +2776,22 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 /// design.
 ///
 /// The 1-D rule is [`gauss_legendre_01`] (`n ≤ 5`: MFEM's `[0,1]` table,
-/// bit-identical) / [`gauss_legendre_01_arbitrary`] (`n ≥ 6`) — the same
-/// source [`seg_rule`] uses.
+/// bit-identical) / [`gauss_legendre_01_newton_mfem`] (`n ≥ 6`) — the same
+/// source [`seg_rule`] uses, and a 1:1 port of MFEM's
+/// `QuadratureFunctions1D::GaussLegendre`, so **every** order 0..14 is
+/// bit-identical to `PyramidIntegrationRule` (D339; the generic O'Donnell
+/// iteration that used to serve `n ≥ 6` was up to 2.7e-14 off).
 ///
 /// Orders 2..5 (`n ≤ 3`) are **bit-frozen** at the historical
 /// `[-1,1]`-mapped values: those are exactly the quadrature orders of the
 /// p ≤ 2 assembly paths, whose results are pinned
 /// (`d304_pyramid_h1_mass`, `d191_pyramid_h1_mfem_layout`).  MFEM's table
-/// values for `n ≤ 3` differ from the frozen ones by ≤ 1 ulp; D339 in
+/// values for `n ≤ 3` differ from the frozen ones by ≤ 1 ulp —
 /// `tmp/d339/EVIDENCE.md` records the ulp counts and the unification recipe
-/// (delete [`pyramid_rule_small_n_frozen`]).  Every order ≥ 6 (i.e. p ≥ 3)
-/// is MFEM's rule, bit-identical to C++ for `n ≤ 5`.
+/// (delete [`pyramid_rule_small_n_frozen`], letting orders ≤ 5 fall through to
+/// the `[0,1]` table); that recipe is *not* applied because it would move the
+/// p ≤ 2 pins for a ≤ 1 ulp gain, and D339's actual complaint (the 1-D
+/// generator behind `n ≥ 6`) is fixed.
 pub fn pyramid_rule(order: u8) -> QuadratureRule {
     let n = order as usize / 2 + 1;
     if n == 1 {

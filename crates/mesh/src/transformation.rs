@@ -10,6 +10,7 @@ use nalgebra::DMatrix;
 
 use crate::element_type::ElementType;
 use crate::topology::MeshTopology;
+use fem_element::ReferenceElement;
 
 /// `PyramidPk(1)`'s layer slot `k` carries the shape function of the mesh
 /// (MFEM) vertex `PYR_P1_SLOT_VERTEX[k]`: the pyramid base is enumerated
@@ -55,6 +56,52 @@ fn straight_pyramid_layer_nodes(
         layer[slot] = nodes[vertex];
     }
     Some(layer)
+}
+
+/// Curved-pyramid geometry: the order-`geom_order` element and its node table.
+///
+/// [`Mesh::set_curvature_pyramid5`](crate::simplex::Mesh::set_curvature) writes
+/// the pyramid geometry table in the slot order of
+/// `h1_pyramid_element(g, PyramidBasisType::default())` — MFEM's
+/// `SetCurvature`/`H1_FECollection` node family (Fuentes,
+/// `fem/fe/fe_pyramid.hpp:23`), the same element
+/// `Mesh::element_jacobian` evaluates with.  A curved pyramid must therefore be
+/// interpolated with **that** order-`g` element over its own table; the P1 basis
+/// over the corner vertices is not its geometry.
+///
+/// D334: without this arm the helpers below fell back to the vertex table and
+/// the P1 basis, which for the unit pyramid gives `∫|det J| = 0.1738` instead of
+/// the isoparametric `1/3` (and, because `straight_pyramid_layer_nodes` also
+/// declines at `geom_order > 1`, a twisted base).
+///
+/// Returns `None` for any other element type, for a straight pyramid (handled by
+/// [`straight_pyramid_layer_nodes`]) and whenever the table length does not
+/// match the element's dof count (i.e. no consistent pyramid geometry).
+fn curved_pyramid_geometry<M: MeshTopology + ?Sized>(
+    mesh: &M,
+    elem: ElemId,
+    et: ElementType,
+) -> Option<PyramidGeometry> {
+    if !matches!(et, ElementType::Pyramid5 | ElementType::Pyramid13) {
+        return None;
+    }
+    let g = mesh.geom_order();
+    if g < 2 {
+        return None;
+    }
+    let re: Box<dyn ReferenceElement> =
+        fem_element::lagrange::h1_pyramid_element(g as usize, fem_element::lagrange::PyramidBasisType::default());
+    let nodes = mesh.geometry_nodes(elem).to_vec();
+    if nodes.len() != re.n_dofs() {
+        return None;
+    }
+    Some(PyramidGeometry { re, nodes })
+}
+
+/// The order-`g` element and slot-ordered node table of a curved pyramid.
+struct PyramidGeometry {
+    re: Box<dyn ReferenceElement>,
+    nodes: Vec<NodeId>,
 }
 
 /// The node table to interpolate the geometry with: the element's own table
@@ -354,16 +401,27 @@ pub fn geometry_jacobian(
 ) -> (f64, DMatrix<f64>) {
     let et = mesh.element_type(elem);
     let n_pe = mesh.element_nodes(elem).len();
-    // Per-element geometry only when it is a P1-sized table (geometrically
-    // periodic meshes); high-order curved geometry keeps the previous
-    // vertex-table behavior here (the isoparametric paths handle curvature).
-    let raw = raw_geometry_nodes(mesh, elem, n_pe);
-    // D331: straight pyramids pair the layer-ordered `PyramidPk(1)` geometry
-    // basis with a vertex-ordered node table — permute it into layer slots.
-    let layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
-    let nodes: &[NodeId] = layer.as_ref().map_or(raw, |t| &t[..]);
+    // D334: a curved pyramid is interpolated with its own order-`g` element
+    // (see [`curved_pyramid_geometry`]); everything else keeps the P1 basis.
+    let curved = curved_pyramid_geometry(mesh, elem, et);
+    let p1_re;
+    let layer: Option<[NodeId; 5]>;
+    let raw: &[NodeId];
+    let (re_geom, nodes): (&dyn ReferenceElement, &[NodeId]) = match &curved {
+        Some(pg) => (pg.re.as_ref(), pg.nodes.as_slice()),
+        None => {
+            p1_re = et.ref_elem(1);
+            // Per-element geometry only when it is a P1-sized table (geometrically
+            // periodic meshes); high-order curved geometry keeps the previous
+            // vertex-table behavior here (the isoparametric paths handle curvature).
+            raw = raw_geometry_nodes(mesh, elem, n_pe);
+            // D331: straight pyramids pair the layer-ordered `PyramidPk(1)` geometry
+            // basis with a vertex-ordered node table — permute it into layer slots.
+            layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
+            (p1_re.as_ref(), layer.as_ref().map_or(raw, |t| &t[..]))
+        }
+    };
     let n_ldofs = nodes.len();
-    let re_geom = et.ref_elem(1);
     let mut grad = vec![0.0_f64; n_ldofs * dim];
     re_geom.eval_grad_basis(xi, &mut grad);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
@@ -415,20 +473,32 @@ pub fn element_jacobian_at<M: MeshTopology + ?Sized>(
     dim: usize,
 ) -> (DMatrix<f64>, Vec<f64>) {
     let et = mesh.element_type(elem);
-    let re = et.ref_elem(1);
+    // D334: a curved pyramid is interpolated with its own order-`g` element
+    // (see [`curved_pyramid_geometry`]); everything else keeps the P1 basis.
+    let curved = curved_pyramid_geometry(mesh, elem, et);
+    let p1_re;
+    let layer: Option<[NodeId; 5]>;
+    let raw: &[NodeId];
+    let (re, nodes): (&dyn ReferenceElement, &[NodeId]) = match &curved {
+        Some(pg) => (pg.re.as_ref(), pg.nodes.as_slice()),
+        None => {
+            p1_re = et.ref_elem(1);
+            // Per-element geometry only when it is a P1-sized table (geometrically
+            // periodic meshes); high-order curved geometry keeps the previous
+            // vertex-table behavior here (the isoparametric paths handle curvature).
+            raw = raw_geometry_nodes(mesh, elem, p1_re.n_dofs());
+            // D331: straight pyramids pair the layer-ordered `PyramidPk(1)`
+            // geometry basis with a vertex-ordered node table — permute it into
+            // layer slots.
+            layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
+            (p1_re.as_ref(), layer.as_ref().map_or(raw, |t| &t[..]))
+        }
+    };
     let npe = re.n_dofs();
     let mut grad = vec![0.0_f64; npe * dim];
     let mut phi = vec![0.0_f64; npe];
     re.eval_basis(xi, &mut phi);
     re.eval_grad_basis(xi, &mut grad);
-    // Per-element geometry only when it is a P1-sized table (geometrically
-    // periodic meshes); high-order curved geometry keeps the previous
-    // vertex-table behavior here (the isoparametric paths handle curvature).
-    let raw = raw_geometry_nodes(mesh, elem, npe);
-    // D331: straight pyramids pair the layer-ordered `PyramidPk(1)` geometry
-    // basis with a vertex-ordered node table — permute it into layer slots.
-    let layer = straight_pyramid_layer_nodes(et, mesh.geom_order(), raw);
-    let nodes: &[NodeId] = layer.as_ref().map_or(raw, |t| &t[..]);
     let mut jac = DMatrix::<f64>::zeros(dim, dim);
     let mut xp = vec![0.0_f64; dim];
     for k in 0..npe {

@@ -2676,6 +2676,20 @@ pub enum VecFamily {
 }
 
 /// Create a vector-valued reference element by family, type, and order.
+///
+/// **The hex RT arm carries MFEM's default basis pair.** `RT_FECollection(p,
+/// 3)` builds `RT_HexahedronElement(p, GaussLobatto, GaussLegendre)`
+/// (`fem/fe_coll.hpp`), so this factory returns
+/// [`HexRTk::new_gauss_legendre`] — the *same* element the assembler's
+/// dispatcher (`fem_assembly::vector_assembler::vec_ref_elem`) pins for
+/// `(HDiv, Hex8)` since D245 (D333: the two used to disagree, this factory
+/// returning the `IntegratedGLL` variant for every order).
+///
+/// The LOR stack is deliberately *not* affected: MFEM's
+/// `fem/lor/lor.cpp:317` (`CheckBasisType`) requires the
+/// `(GaussLobatto, IntegratedGLL)` pair there, so `fem_assembly::lor_factory`
+/// names `HexRTk::new` (IntegratedGLL) explicitly instead of going through this
+/// factory.
 pub fn vec_ref_elem(
     family: VecFamily,
     etype: ElemType,
@@ -2700,7 +2714,7 @@ pub fn vec_ref_elem(
             Box::new(crate::raviart_thomas::TetRTk::new(0))
         }
         (VecFamily::RaviartThomas, ElemType::Hex) if p == 0 => {
-            Box::new(crate::raviart_thomas::HexRTk::new(0))
+            Box::new(crate::raviart_thomas::HexRTk::new_gauss_legendre(0))
         }
         (VecFamily::RaviartThomas, ElemType::Tri) => {
             Box::new(crate::raviart_thomas::TriRTk::new(p))
@@ -2712,7 +2726,7 @@ pub fn vec_ref_elem(
             Box::new(crate::raviart_thomas::TetRTk::new(p))
         }
         (VecFamily::RaviartThomas, ElemType::Hex) => {
-            Box::new(crate::raviart_thomas::HexRTk::new(p))
+            Box::new(crate::raviart_thomas::HexRTk::new_gauss_legendre(p))
         }
         (VecFamily::RaviartThomas, ElemType::Prism) => {
             Box::new(crate::raviart_thomas::PrismRTk::new(p))

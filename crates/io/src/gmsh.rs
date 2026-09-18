@@ -27,7 +27,7 @@ use fem_mesh::{
     boundary::{NamedAttributeRegistry, NamedAttributeSet, PhysicalGroup},
     curved::CurvedMesh,
     element_type::ElementType,
-    simplex::Mesh,
+    simplex::{GeometryData, Mesh},
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +239,69 @@ fn permute_gmsh_conn(etype: ElementType, conn: Vec<u32>, npe: usize) -> Vec<u32>
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// High-order geometry table (D341)
+// ---------------------------------------------------------------------------
+
+/// The geometric order a Gmsh element type's node list provides *directly*, for
+/// a mesh of dimension `dim`.
+///
+/// For these types the file's node list already carries the full second-order
+/// geometry **and** the reader's connectivity is in the slot order of the
+/// element `Mesh::element_jacobian` evaluates with (the D319 `perm` tables
+/// above), so the mesh node table itself *is* a valid [`GeometryData`] — no
+/// nodes have to be invented and nothing has to be re-numbered.
+///
+/// Without the table `Mesh::geom_order()` stays 1 for a second-order import,
+/// and `Mesh::element_jacobian` then evaluates an **order-1** factory element
+/// (4/3/8 dofs) against 10/6/9/27/18 connectivity entries: index out of bounds
+/// at `crates/mesh/src/simplex.rs:383`.  That was D341.
+///
+/// Deliberately excluded:
+/// * the incomplete serendipity families `Quad8` / `Hex20` / `Prism15` — they
+///   have no fem-rs factory element with a matching layout; their geometry is
+///   the classical serendipity interpolant in `findpts::incomplete`, which owns
+///   its own (Gmsh) slot convention, and `element_jacobian` handles them before
+///   ever looking at `geom_order` (D244);
+/// * `Pyramid13` (Gmsh code 19): fem-rs maps code 19 to `Pyramid13`, but the
+///   factory element `PyramidPk(2)` has 14 dofs while the file supplies 13
+///   nodes, and MFEM's own 14-node pyramid (code 14) is not accepted by this
+///   reader at all.  Both conventions still need a ruling (D341, open);
+/// * order >= 3: the reader only stops applying permutations at order 2
+///   (see [`gmsh_node_permutation`]), so there is no verified slot order to
+///   attach a geometry table to.
+fn gmsh_geometry_order(etype: ElementType, dim: usize) -> Option<u8> {
+    match (dim, etype) {
+        (2, ElementType::Tri6 | ElementType::Quad9) => Some(2),
+        (3, ElementType::Tet10 | ElementType::Hex27 | ElementType::Prism18) => Some(2),
+        _ => None,
+    }
+}
+
+/// Attach the second-order geometry table described by [`gmsh_geometry_order`].
+///
+/// Only for a homogeneous element block: [`GeometryData`] carries a single
+/// `nodes_per_elem` stride, so a mesh that mixes quadratic and linear blocks
+/// (e.g. Tet4 + Tet10) keeps the linear view and has to be re-curved
+/// explicitly.
+fn attach_second_order_geometry<const D: usize>(mesh: &mut Mesh<D>, dim: usize, mixed: bool) {
+    if mixed {
+        return;
+    }
+    let Some(order) = gmsh_geometry_order(mesh.elem_type, dim) else {
+        return;
+    };
+    let npe = mesh.elem_type.nodes_per_element();
+    debug_assert_eq!(mesh.conn.len(), mesh.n_elems() * npe, "uniform stride");
+    mesh.geometry = Some(GeometryData {
+        order,
+        conn: mesh.conn.clone(),
+        nodes_per_elem: npe,
+        coords: mesh.coords.clone(),
+        n_nodes: mesh.n_nodes(),
+    });
 }
 
 
@@ -707,6 +770,8 @@ impl MshParser {
             mesh.face_types = Some(face_types_vec);
             mesh.face_offsets = Some(face_offsets_vec);
         }
+        // D341: a Tri6/Quad9 import carries its full second-order geometry.
+        attach_second_order_geometry(&mut mesh, 2, is_mixed);
         Ok(mesh)
     }
 
@@ -855,6 +920,9 @@ impl MshParser {
             mesh.face_types = Some(face_types_vec);
             mesh.face_offsets = Some(face_offsets_vec);
         }
+        // D341: a Tet10/Hex27/Prism18 import carries its full second-order
+        // geometry.
+        attach_second_order_geometry(&mut mesh, 3, is_mixed);
         Ok(mesh)
     }
 }

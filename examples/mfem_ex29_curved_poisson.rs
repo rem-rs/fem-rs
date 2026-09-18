@@ -16,7 +16,7 @@ use fem_assembly::postproc::coefficient::FnMatrixCoeff;
 use fem_assembly::standard::{DomainSourceIntegrator, TensorDiffusionIntegrator};
 use fem_element::ReferenceElement;
 use fem_mesh::{Mesh, topology::MeshTopology, ElementType};
-use fem_solver::{solve_pcg_gssmoother, SolverConfig};
+use fem_solver::{fmt_g, solve_pcg_gssmoother, SolverConfig};
 use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 fn main() {
@@ -92,10 +92,13 @@ fn main() {
     // 13. L2 error (MFEM ComputeL2Error uses intorder = 2*order + 3)
     let err_qo = (2 * order + 3) as u8; // = 9 for order 3 (matches C++ 5-point Gauss)
     let err_u = l2_error_surface(&mesh, &space, &x, &u_exact, err_qo);
-    println!("\n|u - u_h|_2 = {:.8}", err_u);
+    // C++ `ex29.cpp:172` prints these two with `cout` at the default stream
+    // precision (6 significant digits, C's `%g`); `precision(8)` there applies
+    // only to `mesh_ofs`/`sol_ofs`/the sockets.  `fmt_g` is that format (D343).
+    println!("|u - u_h|_2 = {}", fmt_g(err_u));
 
     let err_f = l2_error_flux_gf(&mesh, &space, &compute_flux_projected(&mesh, &space, &x, order), &flux_exact, err_qo);
-    println!("|f - f_h|_2 = {:.8}", err_f);
+    println!("|f - f_h|_2 = {}", fmt_g(err_f));
 }
 
 // ─── 4-panel Quad4 surface mesh ───────────────────────────────────────────────
