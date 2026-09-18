@@ -89,6 +89,64 @@ impl QuadFaceKey {
 /// `crates/assembly/src/assembler.rs` (`GeoPyrP1`, D304).
 const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
 
+// ─── D348: face-orientation transport ────────────────────────────────────────
+
+/// MFEM `Mesh::GetQuadOrientation(base, test)` (`mesh/mesh.cpp:7586-7634`): the
+/// index of the element's quad-face vertex configuration inside
+/// `quad_t::Orient`, relative to the canonical (first-encountering) one.
+///
+/// `Or = 2i` when `test[(i+1)%4] == base[1]`, else `2i+1`, with `i` the position
+/// of `base[0]` inside `test`.  The two lists must be the **element's**
+/// face-vertex lists as MFEM builds them (`AddQuadFaceElement`, `mesh.cpp:8741`;
+/// for a pyramid that is `Geometry::PYRAMID::FaceVert[0] = {3,2,1,0}` —
+/// `fem/geom.cpp:1086` — i.e. the base quad reversed), which is why
+/// `build_pyramid_pk` stores `[ns[3], ns[2], ns[1], ns[0]]` as the canonical
+/// order (and not the element's own base cycle).
+fn quad_face_orientation(canon: &[NodeId; 4], test: &[NodeId; 4]) -> usize {
+    let mut i = 0;
+    while test[i] != canon[0] {
+        i += 1;
+    }
+    if test[(i + 1) % 4] == canon[1] { 2 * i } else { 2 * i + 1 }
+}
+
+/// MFEM `QuadDofOrd[or][o]` (`H1_FECollection`, `fem/fe_coll.cpp:1914-1945`,
+/// non-serendipity branch: `pm1 = p-1`, `pm2 = p-2` — see `fe_coll.cpp:1750`),
+/// the table returned by `H1_FECollection::DofOrderForOrientation(SQUARE, Or)`
+/// (`fe_coll.cpp:2087-2105`) and consumed per element as
+/// `dofs[l_off + i*nfd + j] = g_off + f[i]*nfd + fd[j]` (`fe_coll.cpp:704-724`).
+///
+/// `o = i + j*pm1` is the **canonical** flat `(p-1)x(p-1)` base-face index
+/// (`i` fastest) and the return value is the canonical index that belongs in
+/// element slot `o`; in 1-based `(i,j)` the eight entries are the eight
+/// symmetries of the square — `0:(i,j) 1:(j,i) 2:(j,p-i) 3:(p-i,j)
+/// 4:(p-i,p-j) 5:(p-j,p-i) 6:(p-j,i) 7:(i,p-j)`.
+///
+/// D348: this is a pure **slot-index** permutation, deliberately *not* a
+/// geometric transport.  Measured against MFEM 4.10 (`tmp/d348/EVIDENCE.md`
+/// §3a-§3c) it is exact for the Fuentes base-face block (whose intra-block
+/// layout is itself `j`-reversed, `crates/element/src/lagrange/pyramid_fuentes.rs`)
+/// and for the four `Or` that are tensor-product-preserving for Bergot — which
+/// includes the octahedron's `Or = 7`.  MFEM is itself non-conforming for
+/// Bergot on the other four (`Or in {1,2,5,6}`); fem-rs reproduces MFEM here on
+/// purpose, since this module is a 1:1 port and not an improvement on it.
+fn quad_dof_ord(or: usize, o: usize, p: usize) -> usize {
+    let pm1 = p - 1;
+    let pm2 = p - 2;
+    let (i, j) = (o % pm1, o / pm1);
+    match or % 8 {
+        0 => i + j * pm1,
+        1 => j + i * pm1,
+        2 => j + (pm2 - i) * pm1,
+        3 => (pm2 - i) + j * pm1,
+        4 => (pm2 - i) + (pm2 - j) * pm1,
+        5 => (pm2 - j) + (pm2 - i) * pm1,
+        6 => (pm2 - j) + i * pm1,
+        _ => i + (pm2 - j) * pm1,
+    }
+}
+
+
 /// True when `mesh` carries a per-element geometry snapshot whose corner
 /// pairing against the folded connectivity reveals **merged (periodic)
 /// vertices**: some element corner references a different geometry node than
@@ -1958,8 +2016,16 @@ impl DofManager {
         let tri_block = quad_block.end..quad_block.end + 4 * tri_face_dofs_per;
 
         let mut edge_pk_map: HashMap<EdgeKey, Vec<DofId>> = HashMap::new();
-        let mut face_pk_map: HashMap<FaceKey, Vec<DofId>> = HashMap::new();
-        let mut quad_face_pk_map: HashMap<QuadFaceKey, Vec<DofId>> = HashMap::new();
+        // D348: face entities keep the dof list *and* the first-encountering
+        // vertex order that defines the list's orientation — the same pairing
+        // `build_prism_h1` uses for its face maps (see `tri_map`/`quad_map`
+        // there).  The stored order is MFEM's own face-vertex list: for the
+        // base quad that is `FaceVert[0] = {3,2,1,0}` (`fem/geom.cpp:1086`,
+        // reversed), for the triangular faces `FaceVert[1..5] = {0,1,4},
+        // {1,2,4}, {2,3,4}, {3,0,4}` (the element's own order).
+        let mut face_pk_map: HashMap<FaceKey, (Vec<DofId>, [NodeId; 3])> = HashMap::new();
+        let mut quad_face_pk_map: HashMap<QuadFaceKey, (Vec<DofId>, [NodeId; 4])> =
+            HashMap::new();
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
@@ -1967,6 +2033,15 @@ impl DofManager {
         let edge_pairs = [[0usize, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4]];
         // Local tri faces in MFEM face order.
         let tri_faces = [[0usize, 1], [1, 2], [2, 3], [3, 0]];
+        // D348: the barycentric labels of the triangular-face interior dofs, in
+        // the face's own frame and slot order (`[λ0, λ1, λ2]`, `j` outer and `i`
+        // inner) — the same table `build_prism_h1` uses, and the one the
+        // pyramid's tri blocks enumerate (checked against MFEM's `SLOTPOS` by
+        // `d191`/`d347`); a face is a triangle, so this is family-independent.
+        let tri_labels: Vec<[usize; 3]> = (1..p)
+            .flat_map(|j| (1..(p - j)).map(move |i| [p - i - j, i, j]))
+            .collect();
+        debug_assert_eq!(tri_labels.len(), tri_face_dofs_per);
 
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
@@ -1986,28 +2061,73 @@ impl DofManager {
                         dofs_flat[base + off + k] = d;
                     }
                 }
+                // D348: the base quad is shared by both elements of an
+                // octahedron-like pair, entered `(4,3,2,1)` by one and
+                // `(1,2,3,4)` by the other.  `QuadFaceKey` only sorts the four
+                // ids, so the *entity* matches but nothing about the traversal
+                // does; without the permutation below both elements write the
+                // same vector into slots that mean different points on the
+                // face, and every shared dof ends up at one point for one
+                // element and another point for the other.
+                let local = [ns[3], ns[2], ns[1], ns[0]];
                 let key = QuadFaceKey::new(ns[0], ns[1], ns[2], ns[3]);
-                // Allocate the shared vector in slot order (y-outer, x-fast).
-                let fd = quad_face_pk_map.entry(key).or_insert_with(|| {
-                    (0..quad_face_dofs_per)
-                        .map(|_| { let d = next_dof; next_dof += 1; d })
-                        .collect()
-                });
-                for (k, &d) in fd.iter().enumerate() {
-                    dofs_flat[base + quad_block.start + k] = d;
+                let (fd, canon) = {
+                    let entry = quad_face_pk_map.entry(key).or_insert_with(|| {
+                        // Allocate the shared vector in the first-encountering
+                        // element's slot order (y-outer, x-fast); that element
+                        // is MFEM's `Elem1` and gets orientation 0.
+                        let list: Vec<DofId> = (0..quad_face_dofs_per)
+                            .map(|_| { let d = next_dof; next_dof += 1; d })
+                            .collect();
+                        (list, local)
+                    });
+                    (entry.0.clone(), entry.1)
+                };
+                let or = quad_face_orientation(&canon, &local);
+                for k in 0..quad_face_dofs_per {
+                    dofs_flat[base + quad_block.start + k] = fd[quad_dof_ord(or, k, p)];
                 }
             }
             if p >= 3 {
                 for (b, &[la, lb]) in tri_faces.iter().enumerate() {
-                    let key = FaceKey::new(ns[la], ns[lb], ns[4]);
-                    let fd = face_pk_map.entry(key).or_insert_with(|| {
-                        (0..tri_face_dofs_per)
-                            .map(|_| { let d = next_dof; next_dof += 1; d })
-                            .collect()
-                    });
+                    let local_verts = [ns[la], ns[lb], ns[4]];
+                    let key = FaceKey::new(local_verts[0], local_verts[1], local_verts[2]);
+                    let (fd, canon) = {
+                        let entry = face_pk_map.entry(key).or_insert_with(|| {
+                            let list: Vec<DofId> = (0..tri_face_dofs_per)
+                                .map(|_| { let d = next_dof; next_dof += 1; d })
+                                .collect();
+                            (list, local_verts)
+                        });
+                        (entry.0.clone(), entry.1)
+                    };
+                    // D348 (same class of bug as the base quad): rotate slot
+                    // `k`'s barycentric label from the local triangle
+                    // orientation into the canonical one and look up the
+                    // canonical index — MFEM `TriDofOrd[Or % 6]`
+                    // (`H1_FECollection::DofOrderForOrientation(TRIANGLE, Or)`,
+                    // `fe_coll.cpp`, built just above the `QuadDofOrd` block),
+                    // where `Or` is `Mesh::GetTriOrientation`.  The labels are
+                    // the face-frame barycentric triples the pyramid's tri block
+                    // enumerates (`tri_labels` above), the same table and the
+                    // same transport `build_prism_h1` uses for its two
+                    // triangular faces.
                     let off = tri_block.start + b * tri_face_dofs_per;
-                    for (k, &d) in fd.iter().enumerate() {
-                        dofs_flat[base + off + k] = d;
+                    for (k, lab) in tri_labels.iter().enumerate() {
+                        let canon_label = [
+                            lab[local_verts.iter().position(|&v| v == canon[0]).unwrap_or(0)],
+                            lab[local_verts.iter().position(|&v| v == canon[1]).unwrap_or(0)],
+                            lab[local_verts.iter().position(|&v| v == canon[2]).unwrap_or(0)],
+                        ];
+                        let ci = tri_labels
+                            .iter()
+                            .position(|l| *l == canon_label)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "build_pyramid_pk: tri dof label {canon_label:?} not in table"
+                                )
+                            });
+                        dofs_flat[base + off + k] = fd[ci];
                     }
                 }
             }
@@ -2096,7 +2216,11 @@ impl DofManager {
             n_vertex_dofs: n_nodes,
             edge_dof_map, edge_dof2_map: HashMap::new(), phys_to_vertex_dof: HashMap::new(),
             edge_pk_map,
-            face_pk_map, quad_face_pk_map,
+            // D348: the stored canonical vertex orders were only needed while
+            // numbering; the public tables keep the plain dof vectors, like
+            // `build_prism_h1`'s `tri_map`/`quad_map` conversion.
+            face_pk_map: face_pk_map.into_iter().map(|(k, (d, _))| (k, d)).collect(),
+            quad_face_pk_map: quad_face_pk_map.into_iter().map(|(k, (d, _))| (k, d)).collect(),
             bubble_dof_start: n_dofs, n_volume_dofs: volume_dofs_per, elem_orders: None,
             edge_variants: HashMap::new(),
             face_variants: HashMap::new(),

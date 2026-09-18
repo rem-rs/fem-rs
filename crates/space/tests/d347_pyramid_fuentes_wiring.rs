@@ -616,32 +616,31 @@ fn curved_pyramid_geometry_matches_mfem_set_curvature() {
 /// two elements share while landing on different physical positions.
 ///
 /// MFEM reports `0` for every one of these (`SHARED ... bad=0` in the dump,
-/// both families).  fem-rs agrees everywhere except `octa` from `p = 3` on:
-/// the two pyramids' shared base quad is enumerated in *opposite* order
-/// (`4,3,2,1` vs `1,2,3,4`), and `DofManager::build_pyramid_pk` keys that face
-/// by its **sorted vertex set** (`QuadFaceKey`) and copies the `(p−1)²` face
-/// dofs slot-for-slot, so element 1 gets element 0's face dofs in rotated
-/// order and the two elements pair the same global dof with different shape
-/// functions (element 0's basis is then wrong on the seam).  MFEM instead
-/// numbers face dofs in the *face's* canonical order and permutes them per
-/// element by the face orientation (`H1_FECollection::DofOrderForOrientation`
-/// for `SQUARE`).
+/// both families).  That was **D348**: the two pyramids' shared base quad is
+/// enumerated in *opposite* order (`4,3,2,1` vs `1,2,3,4`), and
+/// `DofManager::build_pyramid_pk` keyed that face by its **sorted vertex set**
+/// (`QuadFaceKey`) and copied the `(p−1)²` face dofs slot-for-slot, so element 1
+/// got element 0's face dofs in rotated order and the two elements paired the
+/// same global dof with different shape functions (element 0's basis was then
+/// wrong on the seam).  MFEM instead numbers face dofs in the *face's*
+/// canonical order and permutes them per element by the face orientation
+/// (`H1_FECollection::DofOrderForOrientation(SQUARE)` = `QuadDofOrd[Or % 8]`).
 ///
-/// This is a **pre-existing, family-independent fem-rs gap** (identical numbers
-/// for Bergot and Fuentes) — recorded as D348 in `tmp/d347/EVIDENCE.md`.  It
-/// does not affect meshes whose shared pyramid bases are enumerated
-/// consistently (`unit`, `twin` — what fem-rs's own mesh readers produce), and
-/// `p ≤ 2` is always exact (the base block is then the single centre dof,
-/// which the rotation maps to itself).
+/// **D348 is fixed** (round 47): `build_pyramid_pk` now keeps the
+/// first-encountering vertex order alongside each face's dof list and permutes
+/// later elements through `quad_face_orientation` / `quad_dof_ord`
+/// (`crates/space/src/dof_manager.rs`, ports of `Mesh::GetQuadOrientation` and
+/// `QuadDofOrd`).  fem-rs therefore reproduces MFEM's dump above exactly —
+/// `0` everywhere, `worst == 0.0` — and this table is kept as a regression pin
+/// rather than a defect record.  The pre-existing, family-independent gap this
+/// function used to encode (4 of 4 at `p = 3`, 6 of 9 at `p = 4` on `octa`) is
+/// the `BEFORE` column of `tmp/d348/EVIDENCE.md` §4.
 fn known_shared_bad(name: &str, p: usize, pt: u8) -> usize {
     match (name, p) {
         ("unit", _) | ("twin", _) => 0,
-        ("octa", 1) | ("octa", 2) => 0,
-        // The (p−1)² face block, rotated against its partner.  The exact count
-        // is layout-derived (rotationally self-mapped dofs pair consistently):
-        // 4 of 4 at p = 3, 6 of 9 at p = 4 — identical for both families.
-        ("octa", 3) => 4,
-        ("octa", 4) => 6,
+        // D348 fix: the octahedron's `(p−1)²` base-face block is now permuted
+        // the way MFEM permutes it, so it conforms from `p = 3` on as well.
+        ("octa", 1) | ("octa", 2) | ("octa", 3) | ("octa", 4) => 0,
         other => panic!("no pinned fem-rs conformity for {other:?} (pyr_type={pt})"),
     }
 }
