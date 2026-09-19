@@ -102,6 +102,11 @@ pub mod tmop_form;
 pub mod cut;
 pub mod boundary;
 pub mod postproc;
+/// Discrete saddle-point compatibility correction (D411): exact conservative
+/// repair of the `Σ_q g_q = Σ_q (G·u_bc)_q` identity for ε-regularized mixed
+/// systems (Stokes/Darcy divergence rows).
+pub mod saddle_compat;
+pub use saddle_compat::{correct_saddle_compatibility, saddle_compatibility_defect};
 /// QuadratureSpace / QuadratureFunction (1:1 port of MFEM `fem/qspace.*` +
 /// `fem/qfunction.*`).
 pub mod qspace;

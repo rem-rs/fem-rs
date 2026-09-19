@@ -350,18 +350,26 @@ impl<T: Scalar> CsrMatrix<T> {
     /// Also subtracts the column contribution from other rows to maintain
     /// symmetry (the "symmetric elimination" approach).
     ///
-    /// For symmetric FEM matrices, exploits the fact that A[j,row] ≠ 0 only if
-    /// A[row,j] ≠ 0 — so we only visit neighbors of `row` in the sparsity graph,
-    /// reducing cost from O(n) to O(nnz_per_row). This is O(1) for sparse FEM
-    /// stiffness matrices regardless of problem size.
+    /// The reaction on each neighboring row `j` uses the **true column entry**
+    /// `A[j,row]`, matching MFEM `SparseMatrix::EliminateRowCol`
+    /// (linalg/sparsemat.cpp:1914; the reaction `rhs(col) -= sol * A[k]` at
+    /// :1959 uses the entry of row `col`, not of the pivot row).  This only
+    /// requires **structural** symmetry — the mirror `A[j,row]` must exist in
+    /// row `j`'s sparsity pattern (MFEM aborts when it does not, we silently
+    /// skip) — and is therefore valid for numerically nonsymmetric systems
+    /// such as saddle-point problems `[A −Bᵀ; B 0]` (D409).
+    ///
+    /// Exploiting the structural symmetry, we only visit neighbors of `row`
+    /// in the sparsity graph, reducing cost from O(n) to O(nnz_per_row).
     pub fn apply_dirichlet_symmetric(
         &mut self,
         row: usize,
         value: T,
         rhs: &mut [T],
     ) {
-        // For symmetric FEM matrices: A[j, row] != 0 iff A[row, j] != 0.
-        // Collect (other_row, a_ij) pairs from the row's sparsity pattern.
+        // Structural symmetry: A[j, row] exists in the pattern iff A[row, j]
+        // does — but its *value* may differ (saddle coupling is antisymmetric),
+        // so the reaction must be read from the true column entry.
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
 
@@ -369,13 +377,14 @@ impl<T: Scalar> CsrMatrix<T> {
         for k in start..end {
             let other_row = self.col_idx[k] as usize;
             if other_row == row { continue; }
-            // a_ij = A[other_row, row]; by symmetry equals A[row, other_row] = values[k]
-            let a_ij = self.values[k];
-            if a_ij == T::zero() { continue; }
-            rhs[other_row] -= a_ij * value;
-            // Zero A[other_row, row] via binary search in that row (CSR is sorted).
+            // a_ij = A[other_row, row]: look it up in that row's own pattern
+            // (CSR columns are in insertion order, so a linear scan).
             if let Some(pos) = self.find_entry(other_row, row) {
-                self.values[pos] = T::zero();
+                let a_ij = self.values[pos];
+                if a_ij != T::zero() {
+                    rhs[other_row] -= a_ij * value;
+                    self.values[pos] = T::zero();
+                }
             }
         }
 
@@ -393,11 +402,24 @@ impl<T: Scalar> CsrMatrix<T> {
     /// - zero the off-diagonal entries of row and column `row`;
     /// - **keep** the diagonal entry `A[row,row]` unchanged;
     /// - `rhs[row] = A[row,row] · value`;
-    /// - for every other row `j`: `rhs[j] -= A[j,row] · value`.
+    /// - for every other row `j`: `rhs[j] -= A[j,row] · value` with the **true
+    ///   column entry** `A[j,row]` (NOT the pivot-row entry `A[row,j]` — the
+    ///   two coincide only for numerically symmetric matrices; saddle systems
+    ///   `[A −Bᵀ; B 0]` have antisymmetric coupling blocks where using the row
+    ///   value flips the reaction sign, D409).
     ///
-    /// This is numerically equivalent to [`Self::apply_dirichlet_symmetric`]
-    /// (same solution) but reproduces MFEM's `FormLinearSystem` / `EliminateBC`
-    /// with `diag_policy = DIAG_KEEP`, which matters for bitwise PCG history.
+    /// 1:1 with MFEM `SparseMatrix::EliminateRowCol(rc, sol, rhs, DIAG_KEEP)`
+    /// (linalg/sparsemat.cpp:1914; `rhs(rc) = A[j]*sol` at :1933 for the
+    /// diagonal, `rhs(col) -= sol * A[k]` at :1959 for the reaction, where
+    /// `A[k]` is the entry of row `col`).
+    ///
+    /// Requires **structural** symmetry only: the mirrored entry `A[j,row]`
+    /// must exist in row `j`'s sparsity pattern (MFEM aborts with
+    /// `EliminateRowCol () #3` when it does not; here the entry is simply
+    /// skipped).  This is numerically equivalent to
+    /// [`Self::apply_dirichlet_symmetric`] (same solution) but reproduces
+    /// MFEM's `FormLinearSystem` / `EliminateBC` with `diag_policy =
+    /// DIAG_KEEP`, which matters for bitwise PCG history.
     pub fn apply_dirichlet_keep_diag(
         &mut self,
         row: usize,
@@ -412,14 +434,14 @@ impl<T: Scalar> CsrMatrix<T> {
             let other_row = self.col_idx[k] as usize;
             if other_row == row {
                 diag_val = self.values[k];
-            } else {
-                // rhs[j] -= A[j,row]·value, then zero A[j,row] (symmetric CSR).
-                let a_ij = self.values[k];
-                if a_ij != T::zero() {
-                    rhs[other_row] -= a_ij * value;
-                    if let Some(pos) = self.find_entry(other_row, row) {
-                        self.values[pos] = T::zero();
-                    }
+            } else if let Some(pos) = self.find_entry(other_row, row) {
+                // rhs[j] -= A[j,row]·value from the TRUE column entry
+                // (structural symmetry guarantees it exists in the pattern;
+                // its value may differ from A[row,j] — D409).
+                let a_ji = self.values[pos];
+                if a_ji != T::zero() {
+                    rhs[other_row] -= a_ji * value;
+                    self.values[pos] = T::zero();
                 }
             }
         }
@@ -475,7 +497,10 @@ impl<T: Scalar> CsrMatrix<T> {
 
     /// MFEM `EliminateRowColDiag` semantics (used by `EliminateEssentialBCDiag`
     /// for eigenvalue problems): zero **all** off-diagonals of row and column
-    /// `row` (symmetric CSR), and set the diagonal to `diag_val`.
+    /// `row` (structural symmetry: `A[other,row]` exists in the pattern iff
+    /// `A[row,other]` does — but the values may differ, so the mirror is
+    /// looked up by position, not by value), and set the diagonal to
+    /// `diag_val`.
     ///
     /// Unlike [`Self::eliminate_essential_bc_diag`] this removes the coupling
     /// of essential dofs entirely — shifting their eigenvalue to
@@ -486,13 +511,12 @@ impl<T: Scalar> CsrMatrix<T> {
         let start = self.row_ptr[row];
         let end   = self.row_ptr[row + 1];
 
-        // Zero the column entries A[other,row] (symmetric CSR: A[other,row]
-        // exists iff A[row,other] exists).
+        // Zero the column entries A[other,row] (structural symmetry: the
+        // mirror exists in the pattern; do NOT skip on A[row,other] == 0 —
+        // under mere structural symmetry the mirror may still be nonzero).
         for k in start..end {
             let other_row = self.col_idx[k] as usize;
             if other_row == row { continue; }
-            let a_ij = self.values[k];
-            if a_ij == T::zero() { continue; }
             if let Some(pos) = self.find_entry(other_row, row) {
                 self.values[pos] = T::zero();
             }

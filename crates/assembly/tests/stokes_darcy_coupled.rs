@@ -25,26 +25,22 @@
 //!
 //! ⚠️ Saddle-point Dirichlet elimination (D401/D409): the Stokes [A −Bᵀ; B] and
 //! Darcy [M −Dᵀ; D] systems are *structurally* symmetric but numerically
-//! antisymmetric on the coupling blocks.  The library helper
-//! `fem_space::constraints::apply_dirichlet` (via
-//! `CsrMatrix::apply_dirichlet_keep_diag`, crates/linalg/src/csr.rs) adjusts
-//! `rhs[j] -= A[row,j]·val` by iterating the pivoted *row*, which is only
-//! correct for numerically symmetric matrices; on a saddle system every
-//! nonzero essential value lands on the pressure/flux rows with a flipped
-//! sign (zero-valued BCs — as in every other MMS test in this crate — are
-//! unaffected, which is why only this coupled test ever exposed it).  The
-//! local [`apply_dirichlet_saddle`] below eliminates the true column instead.
-//! Fixing the library helper itself is tracked as debt D409 (linalg/space
-//! lane); this test must not regress on the saddle path in the meantime.
+//! antisymmetric on the coupling blocks.  The library entry
+//! `CsrMatrix::apply_dirichlet_keep_diag` (crates/linalg/src/csr.rs) now reads
+//! each column reaction from the true entry `A[j,row]`, 1:1 with MFEM
+//! `EliminateRowCol` (linalg/sparsemat.cpp:1959), so the D401 local workaround
+//! `apply_dirichlet_saddle` was retired (D409).  Regression coverage:
+//! crates/linalg/tests/d409_antisymmetric_dirichlet.rs.
 //!
 //! ⚠️ Discrete compatibility: ε-regularized saddle solves amplify any
 //! mismatch between `Σ_q rhs_q` and the discrete boundary reaction
 //! `Σ_q (B·u_bc)_q` (the discrete analog of ∫g = ∫∂Ωu·n) by 1/ε into the
 //! pressure nullspace (δ ≈ 1.5e-3 of quadrature+interpolation noise became a
-//! 1.4e11 pressure constant).  Both solvers below therefore apply a
-//! conservative correction `rhs_q += Δ/n_q` that makes the identity exact;
-//! the induced datum perturbation is O(h⁴) (Stokes) / O(h²) (Darcy) and
-//! vanishes under refinement.
+//! 1.4e11 pressure constant).  Both solvers below therefore apply the shared
+//! conservative correction [`fem_assembly::saddle_compat`] (D411)
+//! `rhs_q += Δ/n_q` that makes the identity exact; the induced datum
+//! perturbation is O(h⁴) (Stokes) / O(h²) (Darcy) and vanishes under
+//! refinement.
 
 use std::f64::consts::PI;
 use std::collections::BTreeMap;
@@ -61,6 +57,7 @@ use fem_assembly::{
     vector_integrator::VectorBilinearIntegrator,
     postproc::coefficient::FnVectorCoeff,
     DiscreteLinearOperator,
+    correct_saddle_compatibility, saddle_compatibility_defect,
 };
 use fem_element::{
     ReferenceElement, VectorReferenceElement,
@@ -74,94 +71,6 @@ use fem_space::{
     fe_space::FESpace,
     constraints::{boundary_dofs, boundary_dofs_hdiv},
 };
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Saddle-safe Dirichlet elimination (D401/D409 workaround)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Dirichlet elimination valid for *nonsymmetric* (saddle-point) matrices.
-///
-/// Discretizes the essential condition u_dof = val in MFEM's `DIAG_KEEP`
-/// convention (diagonal kept, `rhs[dof] = A[dof,dof]·val`), but — unlike
-/// `CsrMatrix::apply_dirichlet_keep_diag` — reads each column reaction from
-/// the true entry `A[j,dof]` instead of assuming `A[j,dof] == A[dof,j]`.
-/// For the saddle systems here,
-///
-///   Stokes:  [A −Bᵀ; B]  (A = ν∫∇u:∇v,  B[q,i] = ∫ φ_q ∇·v_i,
-///                         rows: −νΔu + ∇p = f,  ∇·u = g),
-///   Darcy:   [M −Dᵀ; D]  (M = ∫σ·τ,     D[q,i] = ∫ φ_q ∇·τ_i,
-///                         rows: σ + ∇p = f,  ∇·σ = g),
-///
-/// the coupling blocks satisfy M[j,row] = −M[row,j], so a row-driven
-/// elimination flips the sign of every nonzero essential contribution.
-fn apply_dirichlet_saddle(
-    mat: &mut CsrMatrix<f64>,
-    rhs: &mut [f64],
-    dofs: &BTreeMap<usize, f64>,
-) {
-    for (&row, &val) in dofs.iter() {
-        // Column elimination from the true entries A[j,row].
-        for r in 0..mat.nrows {
-            if r == row {
-                continue;
-            }
-            for k in mat.row_ptr[r]..mat.row_ptr[r + 1] {
-                if mat.col_idx[k] as usize == row {
-                    let a_jr = mat.values[k];
-                    if a_jr != 0.0 {
-                        rhs[r] -= a_jr * val;
-                        mat.values[k] = 0.0;
-                    }
-                }
-            }
-        }
-        // Row elimination; keep the diagonal (DIAG_KEEP).
-        let (start, end) = (mat.row_ptr[row], mat.row_ptr[row + 1]);
-        let mut diag = 0.0_f64;
-        for k in start..end {
-            if mat.col_idx[k] as usize == row {
-                diag = mat.values[k];
-            } else {
-                mat.values[k] = 0.0;
-            }
-        }
-        rhs[row] = diag * val;
-    }
-}
-
-/// Conservative compatibility correction for an ε-regularized saddle system.
-///
-/// For the mixed block [K −Gᵀ; G] with K ∈ {A (Stokes diffusion), M (Darcy
-/// mass)} and G[q,i] = ∫ φ_q ∇·(·)_i, the divergence rows G u = g are
-/// solvable only if `Σ_q g_q` equals the discrete boundary reaction
-/// `Σ_q (G u_bc)_q` — the discrete analog of ∫Ω ∇·u = ∫∂Ω u·n (with
-/// Σ_q φ_q = 1 the partition of unity, the identity is exact).  Quadrature
-/// and interpolation noise leave an O(h²..h⁴) mismatch Δ, which the εI
-/// regularization absorbs as a Δ/ε pressure blow-up.  Adding Δ/n_q to every
-/// pressure row restores the identity exactly; the induced datum change is a
-/// constant of size |Δ|/vol and vanishes under refinement.
-fn enforce_div_compatibility(
-    mat_g: &CsrMatrix<f64>,
-    rhs_g: &mut [f64],
-    pinned: &BTreeMap<usize, f64>,
-) {
-    // reaction = Σ_q (G·u_bc)_q  (free dofs contribute zero to the row sums)
-    let mut reaction = 0.0_f64;
-    for r in 0..mat_g.nrows {
-        for ptr in mat_g.row_ptr[r]..mat_g.row_ptr[r + 1] {
-            let c = mat_g.col_idx[ptr] as usize;
-            if let Some(&v) = pinned.get(&c) {
-                reaction += mat_g.values[ptr] * v;
-            }
-        }
-    }
-    let datum: f64 = rhs_g.iter().sum();
-    let delta = reaction - datum;
-    let n = rhs_g.len();
-    for v in rhs_g.iter_mut() {
-        *v += delta / n as f64;
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Mesh builder — half unit square
@@ -468,11 +377,15 @@ fn solve_stokes_on_mesh(mesh: Mesh<2>, _n_sub: usize) -> (f64, f64) {
         [v, v]
     }, dm, n_scalar, &mut pinned);
 
-    // Discrete compatibility Σ_q rhs_q = Σ_q (B·u_bc)_q (see module docs).
-    enforce_div_compatibility(&mat_b, &mut rhs_p, &pinned);
+    // Discrete compatibility Σ_q rhs_q = Σ_q (B·u_bc)_q (see module docs, D411).
+    let delta = saddle_compatibility_defect(&mat_b, &rhs_p, &pinned);
+    correct_saddle_compatibility(&mut rhs_p, delta);
     rhs_full[n_v..].copy_from_slice(&rhs_p);
 
-    apply_dirichlet_saddle(&mut mat_full, &mut rhs_full, &pinned);
+    // Library entry (D409): reactions read from the true column entries.
+    for (&row, &val) in &pinned {
+        mat_full.apply_dirichlet_keep_diag(row, val, &mut rhs_full);
+    }
 
     let sol = dense_solve(&mat_full, &rhs_full);
     let uh = &sol[..n_v];
@@ -660,11 +573,15 @@ fn solve_darcy_on_mesh(mesh: Mesh<2>, _n_sub: usize) -> (f64, f64) {
         pinned.insert(d as usize, sigma_exact_dofs[d as usize]);
     }
 
-    // Discrete compatibility Σ_q rhs_q = Σ_q (D·σ_bc)_q (see module docs).
-    enforce_div_compatibility(&mat_d, &mut rhs_p, &pinned);
+    // Discrete compatibility Σ_q rhs_q = Σ_q (D·σ_bc)_q (see module docs, D411).
+    let delta = saddle_compatibility_defect(&mat_d, &rhs_p, &pinned);
+    correct_saddle_compatibility(&mut rhs_p, delta);
     rhs_full[n_sigma..].copy_from_slice(&rhs_p);
 
-    apply_dirichlet_saddle(&mut mat_full, &mut rhs_full, &pinned);
+    // Library entry (D409): reactions read from the true column entries.
+    for (&row, &val) in &pinned {
+        mat_full.apply_dirichlet_keep_diag(row, val, &mut rhs_full);
+    }
 
     let sol = dense_solve(&mat_full, &rhs_full);
     let sigma_h = &sol[..n_sigma];
