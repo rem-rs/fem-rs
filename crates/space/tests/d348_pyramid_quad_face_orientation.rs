@@ -386,12 +386,14 @@ fn d348_octahedron_base_face_dof_positions_agree() {
 /// base-quad enumerations, at `p = 3, 4`, for both families.
 ///
 /// The assertion is on the **relative** permutation (element 1's slot `j` takes
-/// canonical slot `QuadDofOrd[Or][j]`), not on absolute dof ids: fem-rs's
-/// `build_pyramid_pk` still allocates in a single element-major first-touch pass
-/// while MFEM phases vertices -> edges -> faces -> interiors, so the two global
-/// numberings differ on multi-element meshes for reasons that have nothing to do
-/// with D348 (the same split that D177 fixed for prisms; not in this task's
-/// scope).  The embedded MFEM `e1=` ids still validate the rule itself: the
+/// canonical slot `QuadDofOrd[Or][j]`), not on absolute dof ids, because the
+/// rule under test is the orientation map itself, which must hold for all eight
+/// enumeration variants regardless of how ids are laid out.  (Since D352 —
+/// `d352_pyramid_entity_phase_numbering.rs` — `build_pyramid_pk` phases the
+/// global ids exactly like MFEM's `Construct`, vertices -> edges -> faces ->
+/// interiors, so the absolute numberings agree on multi-element meshes too;
+/// D348 just does not re-pin them here.)  The embedded MFEM `e1=` ids still
+/// validate the rule itself: the
 /// `0123` variant is the identity orientation, so its element-1 block *is*
 /// MFEM's canonical block, and every other variant must be `QuadDofOrd[Or]` of
 /// it — which is asserted before fem-rs is even consulted.
