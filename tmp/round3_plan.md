@@ -2924,6 +2924,158 @@ P3 测试）。**本批后 fem-rs 零红测试、零因缺陷忽略。**
 - **无行为回归**：`cargo test -p fem-assembly --lib` **684 passed / 0 failed / 8 ignored**
   （少 crate 批跑口径，见 §方法论 15）；`--tests` 见 HANDOVER 收尾节。
 
+## 第四十九轮（round 49）：D409 鞍点消元符号错误 + HDiv tet RT 解上限 + D364 参考元单一真源
+
+开局：round 48 的 13+7 个提交已推送（fem-rs `6810981..b40e066`、fem-pro `57f0b1d..60d6220`）。
+四路并行派单（号段 ①D409+D411 / ②D392-394+D410+D414+D435-437 / ③D364+D365-366+D438-440 /
+④D398+D354+D441-443）。**②③④三路中途被会话权限熔断，剩余工作由主会话接管落地**；
+①路完整交付。⚠️ 流程教训入派单模板：代理对同一条被拒命令最多重试一次、写文件一律
+Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要先 `git status`/逐文件审计代理
+半迁移现场**（④路的 dof_manager.rs 曾处于编译不过的中间态，已按其留档补丁回退）。
+
+### 1. D409（P1）关闭 —— `apply_dirichlet_keep_diag`/`apply_dirichlet_symmetric` 真列反力
+
+- **根因**：两入口遍历主元行并用 `A[row,j]` 充当列反力 `A[j,row]`（仅数值对称成立）；
+  鞍点系统 `[A −Bᵀ; B 0]` 耦合块数值反对称 ⇒ 非零本质值反力符号翻转（D401 隔离证明）。
+  **MFEM 对照**：`SparseMatrix::EliminateRowCol`（`linalg/sparsemat.cpp:1914`；DIAG_KEEP
+  主元行 `rhs(rc)=A[j]*sol` :1933；列反力 `rhs(col)-=sol*A[k]` :1959 用的是 col 行的
+  **真列项**）。假设从"数值对称"降为"**结构对称**"（镜像缺失时 MFEM abort #3、fem-rs
+  静默跳过，注释已注明）。
+- **同款三处一并修**：`eliminate_essential_bc_diag_symmetric`（同文件）、
+  `constraints/dirichlet.rs::apply_dirichlet_diag_one`（手写副本，改为委托库入口，
+  DIAG_ONE 语义逐位等价）、doc 措辞同步。
+- **验收（主会话亲跑复现）**：新测试 `crates/linalg/tests/d409_antisymmetric_dirichlet.rs`
+  **先红（5 failed，`rhs[2] = 2 want -1.0`）后绿（5 passed）**；
+  `stokes_darcy_coupled` **2/2 绿**，删除 D401 的本地变通 `apply_dirichlet_saddle`
+  改回库入口后收敛率逐位持平 round-48 基线：vel **2.951192839294477** /
+  p **3.297316175120067** / flux **0.9528948014436645** / p0 **0.9575228515664386**；
+  消费方回归 fem-linalg 61+12、fem-space 288、fem-solver 269+9+11、fem-assembly
+  694(5 ign)、fem-parallel 243 全绿。
+
+### 2. D411 关闭 —— 鞍点相容性防护 helper
+
+- 新文件 `crates/assembly/src/saddle_compat.rs`：`saddle_compatibility_defect`
+  （δ = Σ(G·u_bc) − Σrhs）+ `correct_saddle_compatibility`（δ/n 均匀分配）；
+  stokes_darcy_coupled.rs 的两处内联修正改用 helper（算术逐位不变——收敛率逐位一致即证）；
+  内嵌单测 2/2（修正后 |δ'| < 1e-15；δ=0 逐位 no-op）。
+
+### 3. D392 关闭 + D435 关闭 —— tet RT 解除阶上限 + 阶通用 nodal 元素
+
+- **validate_order tet** `order<=2` → **0..=6**（房规同 hex/quad，D342 先例；MFEM
+  `fe_coll.cpp:2531` 无界、`fe_rt.cpp:899` 阶通用）。
+- **oracle（②路 probe49，`tmp/d392/probe49.cpp` → `$HOME/work/d392/probe49`，留档
+  `tmp/d392/probe49_run1.out`）**：beam-tet（细分一次 ne=384）k=4/5/6 →
+  vsize/ess = **36600/4080、59304/5712、89824/7616**（k≤3 与 round48 一致复现）；
+  inline-hex k=4/5/6 → **196800/9600、338688/13824、536256/18816**。闭式核验
+  vsize=904·(k+1)(k+2)/2+384·k(k+1)(k+2)/2 逐 k 吻合。d377 ORACLE 表补 beam-tet
+  k=3..6 与 hex k=4..6（主会话亲跑 2/2 绿）。
+- **⭐ 关键裁定（主会话否决②路初版方案）**：插值引擎 k≥3 不能派 `TetRTk`（它是
+  **矩对偶**基，Vandermonde 用面/体积分矩构造，`tet_rtk.rs:156-227`），与引擎的
+  **点采样**行（`tet_rt1::mfem_nodal_dofs`）配对病态——实测 RT3 常量场重构误差
+  **2.97e1**（换 TetRTNodal 后若测试仍用 TetRTk 重构则 1.17e3，两处都错）。
+  正解 = 新元素 **`TetRTNodal`**（`tet_rt1.rs`，包装已存在的阶通用 nodal 机制
+  `eval_nodal_tet_basis/eval_nodal_tet_div`，cache 5 槽 k=0..=4）：与引擎行点对偶
+  （W=I），与 k=1,2 的 TetRT1/TetRT2 完全同构（MFEM nodal `Project_RT` 语义）。
+  `hdiv_interpolant_available` tet 臂 → **≤4**（元素层 5 槽 cache 是真正的绑定上限，
+  k=5/6 可构造/可取 ess 但插值拒绝——`interpolant_table_caps_at_element_layer` 钉住）。
+- **验收**：`d392_tet_rt_high_orders` **3/3 绿**（vsize/ess k=3..6 全对 + RT3/RT4
+  多项式场重构 1e-9/1e-8）——⚠️ 测试的重构基必须是 `TetRTNodal`（与引擎配对基一致，
+  k=1,2 的既有回归同样做法）。
+- **D435 关闭**：`vector_assembler.rs::vec_ref_elem_choice` 补
+  `(HDiv, Tet4|Tet10, 3, o>=3) => TetRTNodal::new(o)`（装配层此前对 tet RT≥3 panic）。
+
+### 4. D364（P2）关闭 —— `ref_elem_vol` 多份同名表合并到 `fem_space::ref_elem` 单一真源
+
+- 新模块 `crates/space/src/ref_elem.rs`：P0 家族唯一定义（P0Tensor/P0Tri/P0Tet/P0Pyr/
+  P0QuadCentred）+ 族构造器（h1_simplex_slots/gll_tensor/fixed_order_tensor/
+  equispaced_simplex/equispaced_prism/equispaced_pyramid/h1_prism_slots/
+  h1_pyramid_slots）+ **用途分派**（h1_field_element=MFEM H1 语义、l2_field_element/
+  field_element_for_space=MFEM L2 语义含 basis 开关、geometry_node_element=几何节点族、
+  legacy_equispaced_element=前 D157/D185 格）+ 模块 doc 的**参考域契约表**。
+- **五表委派化（迁移而非复制，旧表删除）**：`assembler.rs` 的
+  `ref_elem_vol_l2/ref_elem_vol_for_space/ref_elem_vol_h1/ref_elem_vol_h1_with_pyramid_basis/
+  ref_elem_vol`（P0 家族 105 行删除）+ `postproc/{grid_function,error_estimate,
+  flux_recovery,postprocess}.rs` 的四个 `ref_elem_vol`。**逐消费方核对**（③路
+  `tmp/d364/consumers.md`）：grid_function=几何节点族；error_estimate/flux_recovery
+  的 quad 臂配 [−1,1]² 框的解析双线性 geom_jacobian（D250）；postprocess 无 quad 臂
+  = 覆盖守卫；每臂含 panic 集）。
+- **域契约测试**：`crates/space/tests/d364_ref_elem_domain_contract.rs`（**3/3 绿**）——
+  每族构造器/分派的 dof_coords 与自身求积点全部落在声明的参考域内 + 标准规则测度
+  （tri ½/tet ⅛·2/square 1/cube 8/prism ½/pyramid ⅓）+ TetRTNodal(0..=4) 单位四面体契约。
+- **逐位基线（主会话亲跑）**：fem-assembly lib **694/0/5**（= 迁移前，含 plbound D371
+  六测、d353 oracle）、fem-space lib **288/0**、d353_sibling 4/4、d340 12/12、
+  poisson_solve 7/7（D73a 轨迹经 error_estimate 委派逐位不动）。
+- **新发现（D442，P3，既有非本轮引入）**：GLL 格族 p=0 边界——`H1TetPk(0)`/`H1PrismPk(0)`/
+  `PrismPk::new(0)`/`PyramidPk::new(0)` 构造即 panic（`gauss_lobatto_arbitrary(p+1)`，
+  n=1），order-0 Fuentes/Bergot 金字塔任意求积调用 panic；老表逐一同样 panic
+  （P0 专用臂只覆盖 tri/quad/hex/L2-pyramid），域契约测试如实跳过并注释。
+- **调查（只记录不改）**：`dg/dg_base.rs` 两份（覆盖面/基型切换语义不同，支持集上与
+  `l2_field_element(GL)` 构造一致，建议域契约钉住）；`mixed/mod.rs` 两份（多 serendipity/
+  Result/p≤10 上限，公共集上与 T8 逐臂一致，D31 已钉）。
+- **新债 D438**：`standard/bbar.rs:65/:77`、`physics/nonlinear_hyperelasticity.rs:1015`、
+  `parallel/par_l2zz_3d.rs:15` 三份越权同名表（**par_l2zz_3d 是 pre-D157 陈旧表**
+  ——p=3 与其余所有表分叉，并行 ZZ 若用 p≥3 会复现 D353 类错配，优先修）；
+  **D439**：`mixed/mod.rs:713` `assemble_hcurl_h1_gradient` 任意阶用 equispaced
+  遗留表对 H¹ 空间 dofs（p≥3 错配）。
+- **D365/D366 未开工**（③路裁定已留：D365 需先裁定 ZZ 通量采样点族——pyramid 臂应配
+  Fuentes `h1_pyramid_slots`（与 flux_recovery 的 Hex/Prism"基=几何同族"先例一致），
+  闭式 oracle 用 u=x+2y+3z；D366=fe_order 白名单补全，低风险）。
+
+### 5. D398 关闭 —— d348 测试文档漂移
+
+- `d348_pyramid_quad_face_orientation.rs` :388-397 文档段改写为与 D352 现状一致
+  （build_pyramid_pk 已是 Construct 实体分相序），断言与逻辑零改动（④路交付）。
+
+### 6. 诚实留白（oracle 全部就绪，下轮直接落地）
+
+- **D393/D394（HDiv 混合网格/棱柱面块，未落地）**：②路已完成全部 oracle 与修法设计
+  ——混合 hex+双锥网格（`tmp/d392/mixed_hex_bipyramid.mesh`）RT0..RT3 = **13/12、
+  63/42、174/90、370/156**（公式 `7·(k+1)(k+2)/2+6·(k+1)²+2·k(k+1)(k+2)/2+3k(k+1)²`
+  逐 k 吻合）；双 prism 堆叠（`tmp/d392/prism_stack.mesh`）RT0/1/2 = **9/8、47/30、
+  132/66**，fem-rs 修复目标 vsize=33（9 面块：3 tri×3+6 quad×4，元素层无内部）、
+  ess=30==MFEM。修法：`build_mixed`/`build_3d_prism`/`build_3d_pyramid` 的面块按形状
+  （tri (k+1)(k+2)/2、quad (k+1)²）+ interior 按元素层公式（tet k(k+1)(k+2)/2、
+  hex 3k(k+1)²、prism/pyramid 现元素层为 0）+ 面槽随取向的
+  `tri_face_grid_transform`/`transform_grid`（镜像 build_3d_tet/hex）+
+  `face_dofs()` 块长改由 `face_canon_verts[key].len()` 推导。
+  **D436**：`PrismRTk` ≠ MFEM `RT_WedgeElement`（k=1 fem-rs 18 dofs 无内部 vs MFEM 25，
+  内部 `p(p+1)(3p+4)/2`，面 dof 计数一致；面槽取向对应未实现）；**D437**：
+  `build_3d_pyramid` 面块/interior 与 `PyraRTk`（17 dofs @k=1）不一致，且 MFEM 用
+  Fuentes 族需单独对拍设计。
+- **D354（混合 3-D H¹ p≥3，未落地——本轮最重要的留白）**：④路完成了端到端设计
+  （MixedSlot 扩展 Edge{a,b,k}/QuadFace(ix)/TriFace(ix)、首触元素槽序为规范块序、
+  跨类型槽位按**物理位置**匹配、hex p≥3 用 H1_DOF_MAP 序、p=2 路径逐位不动），
+  C++ oracle 全部就绪并被本轮机检入树：`d354_mixed_3d_h1_order3.rs` 的
+  MFEM_ZOO_P3/P4 常量（tinyzoo p=3 **vsize=119 shared=51 bad=0**、p=4 **247/76**、
+  119 行 POS 表、Bergot p=3 vsize=112；MFEM 自身 pyr_type=0 bad=4 缺陷已注明），
+  完整函数级实现文本+补丁在 `tmp/d354_lane4_partial.patch` 与 round-49 ④路报告。
+  **未落地原因**：会话权限窗口关闭，重写从未编译/验证（其解析器尚有三处越界 bug，
+  主会话已修——见 d354 测试文件）；本轮回退其半迁移编辑保树可编译，
+  `DofManager::build_mixed_3d` 维持 p=2 + 显式 panic（d349 六测全绿）。
+- **D414（hdiv dof_coords，未落地）**：②路 grep 证实 `HDivSpace::dof_coords` 零外部
+  消费者，补全方案 = 引擎支持类型用 `interp_rows(et,order)` 采样点经单元映射填充；
+  BDM/pyramid/igll 变体保留质心回退+文档。
+- **D410 关闭（前提证伪，拒改）**：MFEM 默认 RT 的 Project 是**点值**
+  （`fe_base.cpp:1199` Project_RT：`dofs(k)=nk^T adj(J) f(x_k)`）；积分矩只属
+  IntegratedGLL 变体（`fe_rt.hpp:63`，fem-rs 该路径已正确）。D401 记的
+  −0.35355 vs −0.31831 是点值 vs 矩的固有 O(h²) 差，**不是缺陷**——现状即 1:1，
+  需要的是保护性 pin 测试（下轮顺手），**禁止按原债条目"改为积分矩"**。
+
+### 7. 流程注记（round 49）
+
+- **权限熔断与接管**：用户在会话中明确"不要问权限"；②③④路的工具调用（后台命令、
+  heredoc、部分 Edit/Bash）触发权限提示后被批量拒绝，代理按纪律停手并交出完整设计/
+  补丁/oracle，**主会话接管后零提示完成全部落地**。派单模板新增：代理避免后台命令与
+  heredoc、写文件只用 Write/Edit、同一条被拒命令至多重试一次。
+- **代理数字抽查**：①路收敛率四组逐位复现 ✓；②路 oracle k=0..3 与 round48 一致 ✓、
+  d392/d377 数字亲跑复现 ✓；③路基线计数亲跑复现 ✓；④路 oracle 文本经机检解析
+  （并发现其解析器 3 处 bug，佐证"未跑过的代码不可信"）。
+- **全量回归（收尾实测）**：十 crate lib 批跑 **10/10 ok / 2573 passed / 0 failed**；
+  `--tests` 全层 **192 targets / 3667 passed / 0 failed**（唯一失败曾为 d346 的
+  "冻结表" pin——D392 拓宽 tet 列后按先例同步更新为"hex 3..=6 + tet 3..=4 共 8 处
+  拓宽"）；examples `--keep-going` 0 错误；pro 层 `cargo check -p pro-bench-tests
+  -p pro-cad` **0 error**。
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
