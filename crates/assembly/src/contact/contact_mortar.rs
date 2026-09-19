@@ -224,14 +224,19 @@ impl<'a, M1: MeshTopology, M2: MeshTopology> MortarContact2D<'a, M1, M2> {
     }
 }
 
-/// Solve the Mortar contact saddle-point system using Uzawa iteration.
+/// Solve the Mortar contact problem with a projected Uzawa (dual ascent) loop.
 ///
-/// Uzawa method:
+/// `λ ≥ 0` is the interface normal contact pressure. Each outer iteration
+/// solves the elastic equilibrium under the current pressure
 /// ```text
-/// K_tilde · u^{k+1} = f - B^T · λ^k
-/// λ^{k+1} = max(0, λ^k + ρ · B · u^{k+1})
+/// K_A·u_A = f_A + B_Aᵀ·λ    (pressure pushes the slave body back)
+/// K_B·u_B = f_B − B_Bᵀ·λ    (…and the master body down)
 /// ```
-/// where K_tilde = [K_A 0; 0 K_B] is the block-diagonal stiffness.
+/// evaluates the Mortar-weighted penetration `g = B_B·u_B − B_A·u_A`
+/// (positive = interpenetration) and updates `λ ← max(0, λ + ρ·g)` until
+/// `‖g‖ < tol`. `K_A`/`K_B` must be SPD — apply Dirichlet conditions before
+/// calling; each block is solved with CG. For convergence the penalty needs
+/// `0 < ρ < 2/λ_max(B K⁻¹ Bᵀ)` (M = B_A K_A⁻¹ B_Aᵀ + B_B K_B⁻¹ B_Bᵀ).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn solve_mortar_uzawa(
     k_a: &CsrMatrix<f64>,
@@ -252,58 +257,47 @@ pub fn solve_mortar_uzawa(
     let mut u_b = vec![0.0_f64; n_b];
     let mut lambda = vec![0.0_f64; n_lambda];
 
-    // Pre-factor K_A and K_B using CG (SPD)
     use fem_solver::{SolverConfig, solve_cg};
 
-    let cfg = SolverConfig { rtol: 1e-8, max_iter: 5000, ..Default::default() };
+    let cfg = SolverConfig { rtol: 1e-10, max_iter: 5000, ..Default::default() };
 
     for _iter in 0..max_iter {
-        // u^{k+1} = K^{-1} (f - B^T · λ^k)
-        // f_tilde_a = f_a - B_A^T · lambda
+        // Elastic equilibrium under the current contact pressure.
         let mut rhs_a = f_a.to_vec();
-        let mut bt_lam_a = vec![0.0_f64; n_a];
         for li in 0..n_lambda {
             for k in b_a.row_ptr[li]..b_a.row_ptr[li + 1] {
-                bt_lam_a[b_a.col_idx[k] as usize] += b_a.values[k] * lambda[li];
+                rhs_a[b_a.col_idx[k] as usize] += b_a.values[k] * lambda[li];
             }
-        }
-        for i in 0..n_a {
-            rhs_a[i] -= bt_lam_a[i];
         }
         solve_cg(k_a, &rhs_a, &mut u_a, &cfg)
             .map_err(|e| format!("Mortar Uzawa A solve failed: {e}"))?;
 
-        // f_tilde_b = f_b + B_B^T · lambda
         let mut rhs_b = f_b.to_vec();
-        let mut bt_lam_b = vec![0.0_f64; n_b];
         for li in 0..n_lambda {
             for k in b_b.row_ptr[li]..b_b.row_ptr[li + 1] {
-                bt_lam_b[b_b.col_idx[k] as usize] += b_b.values[k] * lambda[li];
+                rhs_b[b_b.col_idx[k] as usize] -= b_b.values[k] * lambda[li];
             }
-        }
-        for i in 0..n_b {
-            rhs_b[i] += bt_lam_b[i];
         }
         solve_cg(k_b, &rhs_b, &mut u_b, &cfg)
             .map_err(|e| format!("Mortar Uzawa B solve failed: {e}"))?;
 
-        // Compute gap: g = B_A·u_a - B_B·u_b
+        // Penetration g = B_B·u_B − B_A·u_A (positive = interpenetration).
         let mut gap = vec![0.0_f64; n_lambda];
         for li in 0..n_lambda {
             for k in b_a.row_ptr[li]..b_a.row_ptr[li + 1] {
-                gap[li] += b_a.values[k] * u_a[b_a.col_idx[k] as usize];
+                gap[li] -= b_a.values[k] * u_a[b_a.col_idx[k] as usize];
             }
             for k in b_b.row_ptr[li]..b_b.row_ptr[li + 1] {
-                gap[li] -= b_b.values[k] * u_b[b_b.col_idx[k] as usize];
+                gap[li] += b_b.values[k] * u_b[b_b.col_idx[k] as usize];
             }
         }
 
-        // λ^{k+1} = max(0, λ^k + ρ · gap)
+        // λ^{k+1} = max(0, λ^k + ρ·g)
         for li in 0..n_lambda {
             lambda[li] = (lambda[li] + rho * gap[li]).max(0.0);
         }
 
-        // Convergence check: norm of gap
+        // Convergence check: norm of penetration.
         let gap_norm: f64 = gap.iter().map(|v| v * v).sum::<f64>().sqrt();
         if gap_norm < tol {
             return Ok((u_a, u_b, lambda));
@@ -318,8 +312,11 @@ pub fn solve_mortar_uzawa(
 /// Run a steel-on-steel contact benchmark: two rectangular blocks pressed
 /// together under a uniform vertical load.
 ///
-/// Returns `(u_a, u_b, lambda)` where u_a is the displacement of the top
-/// block and u_b of the bottom block.
+/// Both bodies are discretized with the real linear-elasticity operator
+/// ([`ElasticityIntegrator`] on a vector-valued P1 displacement field) and the
+/// frictionless normal constraint on the shared interface is enforced with the
+/// projected Uzawa loop of [`solve_mortar_uzawa`]. The problem is
+/// nondimensionalized by `young` so the Uzawa penalty stays scale-free.
 pub fn steel_on_steel_benchmark(
     n_per_side: usize,
     young: f64,
@@ -329,7 +326,8 @@ pub fn steel_on_steel_benchmark(
     use crate::standard::*;
     use crate::Assembler;
     use fem_mesh::Mesh;
-    use fem_space::H1Space;
+    use fem_space::fe_space::FESpace;
+    use fem_space::VectorH1Space;
 
     // Two unit squares: top block [0,1]×[0,1], bottom [0,1]×[-1,0]
     // Contact interface at y=0
@@ -342,26 +340,72 @@ pub fn steel_on_steel_benchmark(
         m
     };
 
-    // Contact edges: bottom edge of top block (tag 4 in unit_square_tri)
-    // and top edge of bottom block (tag 2 in unit_square_tri)
-    let space_a = H1Space::new(mesh_a.clone(), 1);
-    let space_b = H1Space::new(mesh_b.clone(), 1);
+    let space_a = VectorH1Space::new(mesh_a.clone(), 1, 2);
+    let space_b = VectorH1Space::new(mesh_b.clone(), 1, 2);
 
-    let diff = DiffusionIntegrator { kappa: young / (2.0 * (1.0 + poisson)) };
-    let k_a = Assembler::assemble_bilinear(&space_a, &[&diff], 2);
-    let k_b = Assembler::assemble_bilinear(&space_b, &[&diff], 2);
+    // Lamé parameters (plane strain), nondimensionalized by `young` so the
+    // Uzawa penalty below is O(1) regardless of the material scale.
+    let mu = young / (2.0 * (1.0 + poisson));
+    let lam = young * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson));
+    let (lam, mu) = (lam / young, mu / young);
+    let elast = ElasticityIntegrator::new(lam, mu);
+    let mut k_a = Assembler::assemble_bilinear(&space_a, &[&elast], 2);
+    let mut k_b = Assembler::assemble_bilinear(&space_b, &[&elast], 2);
 
-    let source = DomainSourceIntegrator::new(|_| 0.0);
-    let mut f_a = Assembler::assemble_linear(&space_a, &[&source], 2);
-    let f_b = Assembler::assemble_linear(&space_b, &[&source], 2);
+    // Global vector DOFs are block-ordered (`dof = comp·stride + scalar_dof`,
+    // scalar dof = node id for P1); element DOFs are interleaved.
+    let stride = space_a.n_scalar_dofs();
+    let ux = |n: u32| n as usize;
+    let uy = |n: u32| stride + n as usize;
 
-    // Apply vertical load on top block's top edge (tag 1)
-    for i in 0..mesh_a.n_nodes() as u32 {
-        let c = mesh_a.node_coords(i);
-        if (c[1] - 1.0).abs() < 1e-10 {
-            f_a[i as usize] -= load * 0.1; // scaled down for simple model
+    // Dirichlet support (rigid-mode analysis for the free top block):
+    // - `u_x = 0` along the loaded top edge and at the opposite interface
+    //   corner (0,0): a single x-translation is killed by any of them, but a
+    //   rotation about a point ON the top edge keeps `u_x = 0` there, so one
+    //   x-pin off that line is required to kill rotation as well;
+    // - `u_y = 0` at the leftmost top-edge node kills the y-translation. It
+    //   sits on the loaded edge so the load presses the interface *into* the
+    //   bottom block and the contact constraint stays active.
+    let pin_node = (0..mesh_a.n_nodes() as u32)
+        .filter(|&n| (mesh_a.node_coords(n)[1] - 1.0).abs() < 1e-10)
+        .min_by(|&p, &q| {
+            let dp = mesh_a.node_coords(p)[0];
+            let dq = mesh_a.node_coords(q)[0];
+            dp.total_cmp(&dq)
+        })
+        .ok_or("no top-edge node available for the vertical pin")?;
+    let corner = (0..mesh_a.n_nodes() as u32)
+        .filter(|&n| (mesh_a.node_coords(n)[1]).abs() < 1e-10)
+        .min_by(|&p, &q| {
+            let dp = mesh_a.node_coords(p)[0];
+            let dq = mesh_a.node_coords(q)[0];
+            dp.total_cmp(&dq)
+        })
+        .ok_or("no interface corner node available for the x-pin")?;
+    let mut fixed_a: Vec<usize> = (0..mesh_a.n_nodes() as u32)
+        .filter(|&n| (mesh_a.node_coords(n)[1] - 1.0).abs() < 1e-10)
+        .map(ux)
+        .collect();
+    fixed_a.push(ux(corner));
+    fixed_a.push(uy(pin_node));
+
+    // Vertical load on the top edge (y ≈ 1) of the top block: the load acts on
+    // the interface-normal (y) component of the vector DOFs. The pinned node
+    // carries no load so its Dirichlet value stays exactly zero.
+    let mut f_a = vec![0.0_f64; space_a.n_dofs()];
+    for n in 0..mesh_a.n_nodes() as u32 {
+        if (mesh_a.node_coords(n)[1] - 1.0).abs() < 1e-10 && n != pin_node {
+            f_a[uy(n)] -= load;
         }
     }
+    let f_b = vec![0.0_f64; space_b.n_dofs()];
+
+    let fixed_b: Vec<usize> = (0..mesh_b.n_nodes() as u32)
+        .filter(|&n| (mesh_b.node_coords(n)[1] + 1.0).abs() < 1e-10)
+        .flat_map(|n| [ux(n), uy(n)])
+        .collect();
+    eliminate_dofs(&mut k_a, &fixed_a);
+    eliminate_dofs(&mut k_b, &fixed_b);
 
     // Find contact edges: bottom edge of top block (y ≈ 0) and top of bottom (y ≈ 0)
     let slave_edges: Vec<(u32, u8)> = (0..mesh_a.n_elems() as u32)
@@ -404,17 +448,31 @@ pub fn steel_on_steel_benchmark(
     }
 
     let contact = MortarContact2D::new(&mesh_a, &mesh_b, &slave_edges, &master_edges, 4)?;
-    let (_k_saddle, _rhs) = contact.assemble_saddle(&k_a, &k_b, &f_a, &f_b);
+    // The node-based Mortar rows act on the interface-normal (y) component of
+    // the vector-valued displacement field.
+    let b_a = normal_constraint_dofs(&contact.b_a, stride, 1, space_a.n_dofs());
+    let b_b = normal_constraint_dofs(&contact.b_b, space_b.n_scalar_dofs(), 1, space_b.n_dofs());
 
-    let (u_a, u_b, _lambda) = solve_mortar_uzawa(
+    let (u_a, u_b, lambda) = solve_mortar_uzawa(
         &k_a, &k_b, &f_a, &f_b,
-        &contact.b_a, &contact.b_b, contact.n_lambda,
-        1e3, 500, 1e-8,
+        &b_a, &b_b, contact.n_lambda,
+        4.0, 2000, 1e-8,
     )?;
 
-    let max_u: f64 = u_a.iter().chain(u_b.iter()).map(|v| v.abs()).fold(0.0, f64::max);
-    if !max_u.is_finite() {
-        return Err("Non-finite displacement".into());
+    // Physical sanity: finite, non-negative contact pressure; finite
+    // displacement; and the loaded face actually moved downward.
+    if lambda.iter().any(|v| !v.is_finite() || *v < 0.0)
+        || u_a.iter().any(|v| !v.is_finite())
+        || u_b.iter().any(|v| !v.is_finite())
+    {
+        return Err("Non-finite or negative-pressure state".into());
+    }
+    let top_uy: f64 = (0..mesh_a.n_nodes() as u32)
+        .filter(|&n| (mesh_a.node_coords(n)[1] - 1.0).abs() < 1e-10)
+        .map(|n| u_a[uy(n)])
+        .sum::<f64>();
+    if !(top_uy < 0.0) {
+        return Err(format!("loaded face did not move down: Σu_y = {top_uy:.3e}"));
     }
 
     Ok(())
@@ -443,6 +501,43 @@ fn gauss_legendre(n: u8) -> (Vec<f64>, Vec<f64>) {
               vec![0.173927422568727, 0.326072577431273, 0.326072577431273, 0.173927422568727]),
         _ => panic!("unsupported GL order {n}"),
     }
+}
+
+/// Homogeneous Dirichlet elimination: zero the rows *and* columns of the
+/// fixed DOFs and put a unit diagonal on them.
+fn eliminate_dofs(k: &mut CsrMatrix<f64>, fixed: &[usize]) {
+    for &d in fixed {
+        for r in 0..k.nrows {
+            for p in k.row_ptr[r]..k.row_ptr[r + 1] {
+                if k.col_idx[p] as usize == d {
+                    k.values[p] = 0.0;
+                }
+            }
+        }
+        for p in k.row_ptr[d]..k.row_ptr[d + 1] {
+            k.values[p] = if k.col_idx[p] as usize == d { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+/// Expand node-based Mortar rows (`n_lambda × n_nodes`) into vector-DOF
+/// layout (`n_lambda × n_dofs`, block-ordered `dof = comp·stride + node`),
+/// keeping only the interface-normal component `axis` of each node
+/// (frictionless normal contact).
+fn normal_constraint_dofs(
+    b: &CsrMatrix<f64>,
+    stride: usize,
+    axis: usize,
+    n_dofs: usize,
+) -> CsrMatrix<f64> {
+    let mut coo = CooMatrix::<f64>::new(b.nrows, n_dofs);
+    for r in 0..b.nrows {
+        for p in b.row_ptr[r]..b.row_ptr[r + 1] {
+            let dof = axis * stride + b.col_idx[p] as usize;
+            coo.add(r, dof, b.values[p]);
+        }
+    }
+    coo.into_csr()
 }
 
 #[cfg(test)]
@@ -523,7 +618,6 @@ mod tests {
 }
 
     #[test]
-    #[ignore]  // Requires proper ElasticityIntegrator; runs as manual integration test
     fn steel_on_steel_converges() {
         let result = steel_on_steel_benchmark(4, 2e5, 0.3, 0.1);
         assert!(result.is_ok(), "steel-on-steel benchmark failed: {result:?}");

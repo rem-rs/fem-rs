@@ -2,8 +2,14 @@
 use fem_core::Scalar;
 use fem_linalg_gpu::{GpuContext, GpuVector, VectorOpsPipeline};
 
-fn ctx() -> GpuContext {
-    GpuContext::new_sync().expect("gpu context")
+/// GPU context or `None` (after a visible SKIP line) when the machine has no
+/// wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+fn ctx() -> Option<GpuContext> {
+    match GpuContext::new_sync() {
+        Ok(gpu) => Some(gpu),
+        Err(fem_linalg_gpu::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+        Err(e) => panic!("GPU context error: {e}"),
+    }
 }
 
 fn assert_close<T: Scalar>(actual: T, expected: T, tol: f64, label: &str) {
@@ -72,7 +78,7 @@ fn run_dot_simple<T: Scalar>(gpu: &GpuContext, tol: f64) {
 
 #[test]
 fn axpy_simple() {
-    let gpu = ctx();
+    let Some(gpu) = ctx() else { return; };
     if gpu.features.native_f64 {
         run_axpy_simple::<f64>(&gpu, 1e-14);
     } else {
@@ -82,7 +88,7 @@ fn axpy_simple() {
 
 #[test]
 fn dot_simple() {
-    let gpu = ctx();
+    let Some(gpu) = ctx() else { return; };
     if gpu.features.native_f64 {
         run_dot_simple::<f64>(&gpu, 1e-13);
     } else {

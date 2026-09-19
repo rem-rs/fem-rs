@@ -215,27 +215,35 @@ fn read_coo(path: &str) -> CsrMatrix<f64> {
     coo.into_csr()
 }
 
-/// Same convergence check on the *actual* block-solvers Schur matrices
-/// (star.mesh is irregular — not reproducible from structured constructors).
+/// Convergence check on the *actual* block-solvers Schur complements when the
+/// `tmp/amg` dumps are present (star.mesh is irregular — not reproducible from
+/// structured constructors); if a dump is missing the test falls back to a
+/// structured RT0×P0 Schur complement built in-test via [`assemble_schur`] at
+/// the matching refinement level, so the AMG-CG assertion always runs on
+/// something and is never vacuously green.
 ///
 /// Regenerate dumps with:
 /// `cargo run --release --example block_solvers -- -m data/star.mesh -rs <k> \
 ///  -solver bdp -dump-schur tmp/amg/S_star_rs<k>.coo`
 #[test]
-#[ignore = "requires tmp/amg dumps from block_solvers -dump-schur"]
-fn schur_dumped_star_mesh_amg_cg_converges() {
+fn schur_star_mesh_amg_cg_converges() {
     for k in 0..=2 {
         let path = ws(&format!("tmp/amg/S_star_rs{k}.coo"));
-        if !std::path::Path::new(&path).exists() {
-            continue;
-        }
-        let s = read_coo(&path);
+        let (s, source) = if std::path::Path::new(&path).exists() {
+            (read_coo(&path), format!("dumped star.mesh rs{k}"))
+        } else {
+            let n_elem = 4usize << k; // matches the dumped refinement ladder
+            let mesh = Mesh::<2>::unit_square_quad(n_elem);
+            (assemble_schur(&mesh),
+             format!("structured fallback rs{k} (n_elem = {n_elem}, no dump at tmp/amg/S_star_rs{k}.coo)"))
+        };
         let solver = AmgSolver::setup(&s, boomeramg_config());
         let (iters, ok) = pcg_with_precond(&s, &|v: &[f64], w: &mut [f64]| {
             let z = solver.precond_apply(v);
             w.copy_from_slice(&z);
         }, 200);
-        assert!(ok, "AMG-CG failed on dumped star rs{k} (n_p = {})", s.nrows);
-        assert!(iters <= 40, "AMG-CG too slow on star rs{k}: {iters} iterations");
+        assert!(ok, "AMG-CG failed on {source} (n_p = {})", s.nrows);
+        assert!(iters <= 40, "AMG-CG too slow on {source}: {iters} iterations");
+        println!("{source}: n_p = {}, AMG-CG converged in {iters} iterations", s.nrows);
     }
 }

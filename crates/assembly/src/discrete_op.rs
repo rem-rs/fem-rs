@@ -1467,7 +1467,6 @@ impl DiscreteLinearOperator {
         match hcurl_space.order() {
             1 | 2 => {}
             order => {
-                eprintln!("TEMP curl_3d bad hcurl order = {order}");
                 return Err(DiscreteOpError::UnsupportedHCurlOrder {
                     op: "curl_3d",
                     order,
@@ -1635,14 +1634,10 @@ impl DiscreteLinearOperator {
                     }
                 }
                 other => {
-                    return Err(DiscreteOpError::UnsupportedDimension {
+                    return Err(DiscreteOpError::UnsupportedCellType {
                         op: "curl_3d",
-                        dim: 3,
-                    })
-                    .map_err(|_| DiscreteOpError::UnsupportedHCurlOrder {
-                        op: "curl_3d",
-                        order: other as u8,
-                    })?;
+                        cell: element_type_name(other),
+                    });
                 }
             }
         }
@@ -2993,9 +2988,138 @@ mod tests {
         }
     }
 
-    /// Debug test: print curl_3d and divergence matrices for a single element.
+    /// D416: div-curl identity at machine precision — for random ND dofs `u`,
+    /// `D·C·u ≈ 0` exactly (the de Rham complex is a cochain complex, so the
+    /// composed matrix vanishes up to round-off).  This is the sharpest
+    /// correctness check for [`DiscreteLinearOperator::curl_3d`]: it is
+    /// insensitive to dof scaling and exercises every element at once.
+    /// Prints the observed residuals.
     #[test]
-    #[ignore] // Disabled - curl_3d is placeholder
+    fn div_curl_3d_identity_machine_precision() {
+        for &(hcurl_order, hdiv_order, l2_order, tol) in
+            &[(1u8, 0u8, 0u8, 1e-12f64), (2u8, 1u8, 1u8, 1e-11f64)]
+        {
+            let mesh = Mesh::<3>::unit_cube_tet(2);
+            let hcurl = HCurlSpace::new(mesh.clone(), hcurl_order);
+            let hdiv = HDivSpace::new(mesh.clone(), hdiv_order);
+            let l2 = L2Space::new(mesh, l2_order);
+
+            let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+            let d = DiscreteLinearOperator::divergence(&hdiv, &l2).unwrap();
+
+            let mut max_residual = 0.0_f64;
+            for seed in 0..5u64 {
+                let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let u: Vec<f64> = (0..hcurl.n_dofs())
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let r = ((state >> 11) as f64) / ((1u64 << 53) as f64);
+                        2.0 * r - 1.0
+                    })
+                    .collect();
+                let mut cu = vec![0.0_f64; hdiv.n_dofs()];
+                c.spmv(&u, &mut cu);
+                let mut dcu = vec![0.0_f64; l2.n_dofs()];
+                d.spmv(&cu, &mut dcu);
+                let residual: f64 = dcu.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+                max_residual = max_residual.max(residual);
+            }
+            println!(
+                "div-curl ND{hcurl_order}->RT{hdiv_order}->P{l2_order}: \
+                 max|D*C*u| over 5 random vectors = {max_residual:.3e}"
+            );
+            assert!(
+                max_residual < tol,
+                "ND{hcurl_order}: div(curl(u)) residual {max_residual:.3e} >= {tol:.1e}"
+            );
+        }
+    }
+
+    /// D416: manufactured-field convergence — for the smooth field
+    /// `A = (0, 0, sin(πx)·sin(πy))` with
+    /// `curl A = (π·sin(πx)·cos(πy), −π·cos(πx)·sin(πy), 0)`, the discrete
+    /// curl applied to the interpolated ND dofs converges to the interpolated
+    /// exact curl at (at least) first-order rate in the relative max dof error.
+    #[test]
+    fn curl_3d_manufactured_field_convergence() {
+        const PI: f64 = std::f64::consts::PI;
+        let field =
+            |x: &[f64]| vec![0.0, 0.0, (PI * x[0]).sin() * (PI * x[1]).sin()];
+        let exact_curl = |x: &[f64]| {
+            vec![
+                PI * (PI * x[0]).sin() * (PI * x[1]).cos(),
+                -PI * (PI * x[0]).cos() * (PI * x[1]).sin(),
+                0.0,
+            ]
+        };
+
+        for &(hcurl_order, hdiv_order, min_rate) in
+            &[(1u8, 0u8, 0.9f64), (2u8, 1u8, 0.9f64)]
+        {
+            let mut errors = Vec::new();
+            for &n in [2usize, 4, 8].iter() {
+                let mesh = Mesh::<3>::unit_cube_tet(n);
+                let hcurl = HCurlSpace::new(mesh.clone(), hcurl_order);
+                let hdiv = HDivSpace::new(mesh, hdiv_order);
+
+                let c = DiscreteLinearOperator::curl_3d(&hcurl, &hdiv).unwrap();
+
+                let a = hcurl.interpolate_vector(&field);
+                let mut ca = vec![0.0_f64; hdiv.n_dofs()];
+                c.spmv(a.as_slice(), &mut ca);
+
+                let curl_ref = hdiv.interpolate_vector(&exact_curl);
+                let denom: f64 = curl_ref
+                    .as_slice()
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0_f64, f64::max);
+                let err: f64 = ca
+                    .iter()
+                    .zip(curl_ref.as_slice())
+                    .map(|(l, r)| (l - r).abs())
+                    .fold(0.0_f64, f64::max)
+                    / denom;
+                errors.push(err);
+            }
+
+            println!(
+                "curl_3d ND{hcurl_order}->RT{hdiv_order} manufactured-field relative errors:"
+            );
+            for (i, e) in errors.iter().enumerate() {
+                let rate = if i == 0 {
+                    0.0
+                } else {
+                    (errors[i - 1] / e).log2()
+                };
+                println!("  n = {} : err = {e:.3e}  rate = {rate:.2}", 2usize << i);
+            }
+            // Monotone decrease, and the finest pair must have reached the
+            // asymptotic O(h) rate (the curl of the ND interpolant converges
+            // one order lower than the field itself; the coarse n=2 point is
+            // pre-asymptotic and excluded from the rate assertion).
+            for w in errors.windows(2) {
+                assert!(
+                    w[1] < w[0],
+                    "ND{hcurl_order}: errors not decreasing: {errors:?}"
+                );
+            }
+            let rate = (errors[errors.len() - 2] / errors[errors.len() - 1]).log2();
+            assert!(
+                rate >= min_rate,
+                "ND{hcurl_order}: finest-pair convergence rate {rate:.2} < {min_rate} (errors {errors:?})"
+            );
+        }
+    }
+
+    /// Debug test: print curl_3d and divergence matrices for a single element.
+    ///
+    /// D416: the 3-D discrete curl is fully implemented (ND1→RT0 topological
+    /// face-edge incidence, ND2→RT1 dual-basis reconstruction mirroring MFEM's
+    /// `CurlInterpolator` / `ProjectCurl3D_RT`), so this test is re-enabled and
+    /// now also asserts the div-curl identity `max|D*C| ≈ 0` on the printed
+    /// single-element data.
+    #[test]
     fn debug_curl_3d_single_element() {
         let mesh  = Mesh::<3>::unit_cube_tet(1);
         let mesh2 = Mesh::<3>::unit_cube_tet(1);
@@ -3052,8 +3176,10 @@ mod tests {
             println!("Element {}: HDiv DOFs {:?}, HCurl DOFs {:?}", e, hdiv_dofs, hcurl_dofs);
         }
 
-        // Compute D*C
-        let mut dc_max = 0.0f64;
+        // Compute the composed product D*C entry-wise (dense accumulate —
+        // the mesh is a single subdivided cube, so this is tiny) and take
+        // max |D*C|; per-path partial products would not cancel.
+        let mut dc = vec![0.0_f64; d.nrows * c.ncols];
         for i in 0..d.nrows {
             let d_start = d.row_ptr[i];
             let d_end = d.row_ptr[i+1];
@@ -3064,14 +3190,15 @@ mod tests {
                 let c_end = c.row_ptr[k+1];
                 for c_idx in c_start..c_end {
                     let j = c.col_idx[c_idx];
-                    let val: f64 = d_val * c.values[c_idx];
-                    if val.abs() > 1e-10 {
-                        println!("D*C[{},{}] += {:.3} * {:.1} = {:.3}", i, j, d_val, c.values[c_idx], val);
-                    }
-                    dc_max = dc_max.max(val.abs());
+                    dc[i * c.ncols + j as usize] += d_val * c.values[c_idx];
                 }
             }
         }
+        let dc_max: f64 = dc.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         println!("\nmax|D*C| = {}", dc_max);
+        assert!(
+            dc_max < 1e-12,
+            "div-curl identity on the single-element mesh: max|D*C| = {dc_max}"
+        );
     }
 }

@@ -242,8 +242,14 @@ mod tests {
     use super::*;
     use crate::{GpuContext, SpmvPipeline, VectorOpsPipeline, GpuCsrMatrix, GpuVector};
 
-    fn ctx() -> GpuContext {
-        GpuContext::new_sync().expect("GpuContext")
+    /// GPU context or `None` (after a visible SKIP line) when the machine has
+    /// no wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+    fn ctx() -> Option<GpuContext> {
+        match GpuContext::new_sync() {
+            Ok(gpu) => Some(gpu),
+            Err(crate::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+            Err(e) => panic!("GPU context error: {e}"),
+        }
     }
 
     fn tiny_spd() -> fem_linalg::CsrMatrix<f64> {
@@ -256,9 +262,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn cg_gpu_tiny_spd_f64() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
         let spmv = SpmvPipeline::new(&gpu.device, true);
@@ -282,9 +287,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn pcg_jacobi_gpu_tiny_spd_f64() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
         let spmv = SpmvPipeline::new(&gpu.device, true);

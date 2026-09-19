@@ -1,7 +1,9 @@
 //! GPU vs CPU MMS comparison test.
 //!
 //! Requires GPU backend (wgpu) with SHADER_F64 support.
-//! Run: cargo test -p fem-linalg-gpu -- --ignored gpu_mms
+//! Every test self-skips (with a visible `SKIP:` line) when the machine has no
+//! wgpu adapter or the adapter lacks native f64 shaders.
+//! Run: cargo test -p fem-linalg-gpu --test gpu_mms -- --nocapture
 
 use fem_linalg::CsrMatrix;
 use fem_mesh::Mesh;
@@ -14,6 +16,16 @@ use fem_solver::solve_cg;
 use fem_solver::SolverConfig;
 use fem_space::constraints::boundary_dofs;
 
+/// GPU context or `None` (after a visible SKIP line) when the machine has no
+/// wgpu adapter; lets the tests self-skip instead of requiring `#[ignore]`.
+fn gpu_ctx() -> Option<fem_linalg_gpu::GpuContext> {
+    match pollster::block_on(fem_linalg_gpu::GpuContext::new()) {
+        Ok(gpu) => Some(gpu),
+        Err(fem_linalg_gpu::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+        Err(e) => panic!("GPU context error: {e}"),
+    }
+}
+
 fn cpu_matrix(label: &str, n: usize, integrator: &dyn fem_assembly::BilinearIntegrator, quad: u8) -> CsrMatrix<f64> {
     let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
@@ -23,16 +35,11 @@ fn cpu_matrix(label: &str, n: usize, integrator: &dyn fem_assembly::BilinearInte
     mat
 }
 
-fn gpu_matrix_f64<F>(label: &str, _n: usize, assemble: F) -> Vec<(u32, u32, f64)>
+fn gpu_matrix_f64<F>(label: &str, gpu: &fem_linalg_gpu::GpuContext, assemble: F) -> Vec<(u32, u32, f64)>
 where F: FnOnce(&fem_linalg_gpu::GpuContext) -> Vec<(u32, u32, f64)>,
 {
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 {
-        eprintln!("GPU f64 not supported, skipping {label}");
-        return Vec::new();
-    }
     let start = std::time::Instant::now();
-    let triplets = assemble(&gpu);
+    let triplets = assemble(gpu);
     eprintln!("GPU {label}: {:.3}ms", start.elapsed().as_secs_f64() * 1e3);
     triplets
 }
@@ -65,15 +72,16 @@ fn compare_matrices(label: &str, cpu: &CsrMatrix<f64>, gpu_triplets: &[(u32, u32
 // ─── Poisson ────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_poisson_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 8;
     let cpu = cpu_matrix("Poisson", n, &DiffusionIntegrator { kappa: 1.0 }, 3);
     use fem_linalg_gpu::assembly::assemble_poisson_2d_p1_f64;
     let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space);
-    let triplets = gpu_matrix_f64("Poisson", n, |gpu| {
+    let triplets = gpu_matrix_f64("Poisson", &gpu, |gpu| {
         assemble_poisson_2d_p1_f64(gpu, &elem_nodes, &elem_dofs, n_elem)
     });
     compare_matrices("Poisson f64", &cpu, &triplets, 1e-12_f64);
@@ -82,8 +90,9 @@ fn gpu_vs_cpu_poisson_f64() {
 // ─── Mass ───────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_mass_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 8;
     use fem_assembly::standard::MassIntegrator;
     let cpu = cpu_matrix("Mass", n, &MassIntegrator { rho: 1.0 }, 3);
@@ -91,7 +100,7 @@ fn gpu_vs_cpu_mass_f64() {
     let mesh = Mesh::<2>::unit_square_tri(n);
     let space = H1Space::new(mesh, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_tri3_p1(&space);
-    let triplets = gpu_matrix_f64("Mass", n, |gpu| {
+    let triplets = gpu_matrix_f64("Mass", &gpu, |gpu| {
         assemble_mass_2d_tri3_f64(gpu, &elem_nodes, &elem_dofs, n_elem)
     });
     compare_matrices("Mass f64", &cpu, &triplets, 1e-12_f64);
@@ -100,8 +109,9 @@ fn gpu_vs_cpu_mass_f64() {
 // ─── Elasticity ─────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_elasticity_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 8;
     use fem_assembly::standard::VectorDiffusionIntegrator;
     use fem_space::vector_h1::VectorH1Space;
@@ -131,25 +141,23 @@ fn gpu_vs_cpu_elasticity_f64() {
         for i in 0..n_d { elem_dofs.push(dofs[i]); }
     }
 
-    let triplets = gpu_matrix_f64("Elasticity", n, |gpu| {
+    let triplets = gpu_matrix_f64("Elasticity", &gpu, |gpu| {
         assemble_elasticity_2d_tri3_f64(gpu, &elem_nodes, &elem_dofs, n_elem, 1.0, 1.0)
     });
-    if !triplets.is_empty() {
-        let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
-        for &(r, c, v) in &triplets { coo.add(r as usize, c as usize, v); }
-        let gpu: CsrMatrix<f64> = coo.into_csr();
-        let mut max_rel = 0.0_f64;
-        for i in 0..cpu.nrows.min(gpu.nrows) {
-            for k in cpu.row_ptr[i]..cpu.row_ptr[i+1] {
-                let j = cpu.col_idx[k] as usize;
-                let diff = (cpu.values[k] - gpu.get(i, j)).abs();
-                let rel = diff / cpu.values[k].abs().max(1.0_f64);
-                max_rel = max_rel.max(rel);
-            }
+    let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
+    for &(r, c, v) in &triplets { coo.add(r as usize, c as usize, v); }
+    let gpu: CsrMatrix<f64> = coo.into_csr();
+    let mut max_rel = 0.0_f64;
+    for i in 0..cpu.nrows.min(gpu.nrows) {
+        for k in cpu.row_ptr[i]..cpu.row_ptr[i+1] {
+            let j = cpu.col_idx[k] as usize;
+            let diff = (cpu.values[k] - gpu.get(i, j)).abs();
+            let rel = diff / cpu.values[k].abs().max(1.0_f64);
+            max_rel = max_rel.max(rel);
         }
-        eprintln!("Elasticity f64: max_rel={:.3e}", max_rel);
-        assert!(max_rel < 1e-10_f64, "Elasticity mismatch: {:.3e}", max_rel);
     }
+    eprintln!("Elasticity f64: max_rel={:.3e}", max_rel);
+    assert!(max_rel < 1e-10_f64, "Elasticity mismatch: {:.3e}", max_rel);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -192,8 +200,9 @@ fn extract_tet4_p1(space: &H1Space<Mesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
 // ─── Tet4 3D tests ─────────────────────────────────────────────────────────
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_poisson_tet4_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 4;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
@@ -209,8 +218,6 @@ fn gpu_vs_cpu_poisson_tet4_f64() {
     let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
 
     use fem_linalg_gpu::assembly::assemble_poisson_3d_tet4_f64;
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
     let triplets = assemble_poisson_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
     let mut coo = fem_linalg::CooMatrix::new(cpu.nrows, cpu.ncols);
@@ -231,8 +238,9 @@ fn gpu_vs_cpu_poisson_tet4_f64() {
 }
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_mass_tet4_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 4;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
@@ -248,8 +256,6 @@ fn gpu_vs_cpu_mass_tet4_f64() {
     let (elem_nodes, elem_dofs, n_elem) = extract_tet4_p1(&space);
 
     use fem_linalg_gpu::assembly::assemble_mass_3d_tet4_f64;
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
     let triplets = assemble_mass_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
     let mut coo = fem_linalg::CooMatrix::new(cpu.nrows, cpu.ncols);
@@ -270,8 +276,9 @@ fn gpu_vs_cpu_mass_tet4_f64() {
 }
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_elasticity_tet4_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 3;
     use fem_mesh::Mesh;
     use fem_space::vector_h1::VectorH1Space;
@@ -299,8 +306,6 @@ fn gpu_vs_cpu_elasticity_tet4_f64() {
     }
 
     use fem_linalg_gpu::assembly::assemble_elasticity_3d_tet4_f64;
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
     let triplets = assemble_elasticity_3d_tet4_f64(&gpu, &elem_nodes, &elem_dofs, n_elem, 1.0, 1.0);
     let mut coo = fem_linalg::CooMatrix::new(n_dofs, n_dofs);
@@ -323,8 +328,9 @@ fn gpu_vs_cpu_elasticity_tet4_f64() {
 // ─── End-to-end: GPU assembly → GPU solve vs CPU assembly → CPU solve ───────
 
 #[test]
-#[ignore]
 fn e2e_gpu_assemble_solve_poisson_2d() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 8;
     // ── CPU path ───────────────────────────────────────────────────────────
     let mesh = Mesh::<2>::unit_square_tri(n);
@@ -343,9 +349,6 @@ fn e2e_gpu_assemble_solve_poisson_2d() {
         .expect("CPU CG solve");
 
     // ── GPU path ───────────────────────────────────────────────────────────
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
-
     // 1. GPU assembly via f64 shader
     let mesh_g = Mesh::<2>::unit_square_tri(n);
     let space_g = H1Space::new(mesh_g, 1);
@@ -405,8 +408,9 @@ fn extract_hex8_p1(space: &H1Space<Mesh<3>>) -> (Vec<f64>, Vec<u32>, usize) {
 }
 
 #[test]
-#[ignore]
 fn gpu_vs_cpu_poisson_hex8_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 4;
     let mesh = Mesh::<3>::unit_cube_hex(n);
     let space = H1Space::new(mesh, 1);
@@ -418,8 +422,6 @@ fn gpu_vs_cpu_poisson_hex8_f64() {
     let (elem_nodes, elem_dofs, n_elem) = extract_hex8_p1(&space);
 
     use fem_linalg_gpu::assembly::assemble_poisson_3d_hex8_f64;
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
 
     let triplets = assemble_poisson_3d_hex8_f64(&gpu, &elem_nodes, &elem_dofs, n_elem);
     let mut coo = fem_linalg::CooMatrix::new(cpu.nrows, cpu.ncols);
@@ -440,8 +442,9 @@ fn gpu_vs_cpu_poisson_hex8_f64() {
 }
 
 #[test]
-#[ignore]
 fn e2e_hex8_assemble_solve_poisson_f64() {
+    let Some(gpu) = gpu_ctx() else { return; };
+    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
     let n = 3;
     // ── CPU reference ─────────────────────────────────────────────────────
     let mesh = Mesh::<3>::unit_cube_hex(n);
@@ -461,9 +464,6 @@ fn e2e_hex8_assemble_solve_poisson_f64() {
         .expect("CPU Hex8 CG");
 
     // ── GPU path ──────────────────────────────────────────────────────────
-    let gpu = pollster::block_on(fem_linalg_gpu::GpuContext::new()).expect("GPU context");
-    if !gpu.features.native_f64 { eprintln!("SKIP: no SHADER_F64"); return; }
-
     let mesh_g = Mesh::<3>::unit_cube_hex(n);
     let space_g = H1Space::new(mesh_g, 1);
     let (elem_nodes, elem_dofs, n_elem) = extract_hex8_p1(&space_g);

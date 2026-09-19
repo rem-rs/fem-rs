@@ -3,8 +3,14 @@ use fem_core::Scalar;
 use fem_linalg::CsrMatrix;
 use fem_linalg_gpu::{GpuContext, GpuCsrMatrix, GpuVector, SpmvPipeline};
 
-fn ctx() -> GpuContext {
-    GpuContext::new_sync().expect("gpu context")
+/// GPU context or `None` (after a visible SKIP line) when the machine has no
+/// wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+fn ctx() -> Option<GpuContext> {
+    match GpuContext::new_sync() {
+        Ok(gpu) => Some(gpu),
+        Err(fem_linalg_gpu::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+        Err(e) => panic!("GPU context error: {e}"),
+    }
 }
 
 /// 3×3 SPD matrix, manually verified.
@@ -72,7 +78,7 @@ fn run_spmv_with_alpha_beta<T: Scalar>(gpu: &GpuContext, tol: f64) {
 
 #[test]
 fn spmv_matches_cpu() {
-    let gpu = ctx();
+    let Some(gpu) = ctx() else { return; };
     if gpu.features.native_f64 {
         run_spmv_matches_cpu::<f64>(&gpu, 1e-14);
     } else {
@@ -82,7 +88,7 @@ fn spmv_matches_cpu() {
 
 #[test]
 fn spmv_with_alpha_beta() {
-    let gpu = ctx();
+    let Some(gpu) = ctx() else { return; };
     if gpu.features.native_f64 {
         run_spmv_with_alpha_beta::<f64>(&gpu, 1e-14);
     } else {

@@ -114,8 +114,11 @@ impl DeviceBuffer {
 mod tests {
     use super::*;
 
-    fn test_device() -> (wgpu::Device, wgpu::Queue) {
-        pollster::block_on(async {
+    /// A wgpu device/queue pair or `None` (after a visible SKIP line) when the
+    /// machine has no wgpu adapter; lets GPU tests self-skip instead of
+    /// requiring `#[ignore]`.
+    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let device = pollster::block_on(async {
             let instance = wgpu::Instance::default();
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
@@ -124,17 +127,19 @@ mod tests {
                     force_fallback_adapter: false,
                 })
                 .await
-                .expect("need a wgpu adapter");
+                .ok()?;
             adapter
                 .request_device(&wgpu::DeviceDescriptor::default())
                 .await
-                .expect("need a wgpu device")
-        })
+                .ok()
+        });
+        if device.is_none() { eprintln!("SKIP: no GPU adapter"); }
+        device
     }
 
     #[test]
     fn buffer_from_f64_slice() {
-        let (device, queue) = test_device();
+        let Some((device, queue)) = test_device() else { return; };
         let data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0];
         let buf = DeviceBuffer::from_bytes(
             &device, &queue, &data,
@@ -146,7 +151,7 @@ mod tests {
 
     #[test]
     fn buffer_with_staging_has_staging() {
-        let (device, _queue) = test_device();
+        let Some((device, _queue)) = test_device() else { return; };
         let buf = DeviceBuffer::with_staging(
             &device,
             1024,

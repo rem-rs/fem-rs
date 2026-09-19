@@ -95,14 +95,20 @@ mod tests {
     use super::*;
     use crate::GpuContext;
 
-    fn ctx() -> GpuContext {
-        GpuContext::new_sync().expect("gpu context")
+    /// GPU context or `None` (after a visible SKIP line) when the machine has
+    /// no wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+    fn ctx() -> Option<GpuContext> {
+        match GpuContext::new_sync() {
+            Ok(gpu) => Some(gpu),
+            Err(crate::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+            Err(e) => panic!("GPU context error: {e}"),
+        }
     }
 
     #[test]
     fn dense_solve_3x3() {
         // [4, -1, 0; -1, 4, -1; 0, -1, 4] * x = [3; 2; 3];  x = [1; 1; 1]
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let n = 3u32;
         let a_data: Vec<f64> = vec![4.0, -1.0, 0.0, -1.0, 4.0, -1.0, 0.0, -1.0, 4.0];
         let a_buf = DeviceBuffer::with_staging(
@@ -125,7 +131,7 @@ mod tests {
 
     #[test]
     fn dense_solve_identity() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let n = 5u32;
         let mut a_data = vec![0.0f64; (n * n) as usize];
         for i in 0..n as usize {
@@ -179,7 +185,7 @@ mod tests {
         lu_solve(&cpu_a, n, &piv, &mut cpu_x);
 
         // GPU solve
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let a_buf = DeviceBuffer::with_staging(
             &gpu.device, (n * n) as u64 * 8,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,

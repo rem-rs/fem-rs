@@ -98,13 +98,19 @@ mod tests {
     use super::*;
     use crate::GpuContext;
 
-    fn ctx() -> GpuContext {
-        GpuContext::new_sync().expect("gpu context")
+    /// GPU context or `None` (after a visible SKIP line) when the machine has
+    /// no wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+    fn ctx() -> Option<GpuContext> {
+        match GpuContext::new_sync() {
+            Ok(gpu) => Some(gpu),
+            Err(crate::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+            Err(e) => panic!("GPU context error: {e}"),
+        }
     }
 
     #[test]
     fn zeros_is_zero() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let v: GpuVector<f64> = GpuVector::zeros(&gpu, 10);
         let cpu = v.read_to_cpu(&gpu);
         assert_eq!(cpu.len(), 10);
@@ -113,7 +119,7 @@ mod tests {
 
     #[test]
     fn from_slice_roundtrip() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let data: Vec<f64> = vec![1.0, 2.0, 3.14159, -5.0];
         let v = GpuVector::from_slice(&gpu, &data);
         let cpu = v.read_to_cpu(&gpu);
@@ -125,7 +131,7 @@ mod tests {
 
     #[test]
     fn repeated_readback_reuses_staging() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let data: Vec<f64> = vec![0.5, -2.0, 9.25, 4.0];
         let v = GpuVector::from_slice(&gpu, &data);
 

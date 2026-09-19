@@ -78,8 +78,14 @@ mod tests {
     use super::*;
     use fem_linalg::CsrMatrix;
 
-    fn ctx() -> GpuContext {
-        GpuContext::new_sync().expect("gpu context")
+    /// GPU context or `None` (after a visible SKIP line) when the machine has
+    /// no wgpu adapter; lets GPU tests self-skip instead of requiring `#[ignore]`.
+    fn ctx() -> Option<GpuContext> {
+        match GpuContext::new_sync() {
+            Ok(gpu) => Some(gpu),
+            Err(crate::GpuError::NoAdapter) => { eprintln!("SKIP: no GPU adapter"); None }
+            Err(e) => panic!("GPU context error: {e}"),
+        }
     }
 
     /// Build a tiny 3×3 CSR matrix:
@@ -97,7 +103,7 @@ mod tests {
 
     #[test]
     fn from_cpu_preserves_dims() {
-        let gpu = ctx();
+        let Some(gpu) = ctx() else { return; };
         let cpu = tiny_csr();
         let gpu_mat = GpuCsrMatrix::<f64>::from_cpu(&gpu, &cpu);
         assert_eq!(gpu_mat.nrows, 3);
