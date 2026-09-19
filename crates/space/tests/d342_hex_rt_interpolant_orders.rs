@@ -156,7 +156,8 @@ fn d342_hex_rt_interpolant_is_mfem_project_rt_orders_0_to_6() {
 
 /// D346: the predicate that was moved out of `fem_assembly` must answer exactly
 /// as the old (frozen) table did for every pair that was reachable before, and
-/// only widen where D342 widened the cap (hex `0..=2` -> `0..=6`).
+/// only widen where a debt explicitly widened a cap (D342: hex `0..=2` ->
+/// `0..=6`; D392: tet `0..=2` -> `0..=4`, the element-layer nodal-table cap).
 #[test]
 fn d346_hdiv_interpolant_available_table_is_frozen_plus_hex_widening() {
     // The pre-D346 implementation, transcribed verbatim from
@@ -196,13 +197,27 @@ fn d346_hdiv_interpolant_available_table_is_frozen_plus_hex_widening() {
             let new = hdiv_interpolant_available(et, order);
             let old = old(et, order);
             if new != old {
-                assert_eq!(et, ElementType::Hex8, "unexpected table change: {et:?} {order}");
-                assert!(order >= 3 && order <= 6, "unexpected hex range: {order}");
+                match et {
+                    // D342: the hex cap moved to the 0..=6 house bound.
+                    ElementType::Hex8 => {
+                        assert!(order >= 3 && order <= 6, "unexpected hex range: {order}");
+                    }
+                    // D392: the tet interpolation engine is order-generic but
+                    // the element-layer nodal table has exactly 5 cache slots
+                    // (k = 0..=4).
+                    ElementType::Tet4 | ElementType::Tet10 => {
+                        assert!(order >= 3 && order <= 4, "unexpected tet range: {order}");
+                    }
+                    other => panic!("unexpected table change: {other:?} {order}"),
+                }
                 widen += 1;
             }
         }
     }
-    assert_eq!(widen, 4, "expected exactly the hex orders 3..=6 to widen");
+    assert_eq!(
+        widen, 8,
+        "expected exactly the hex orders 3..=6 and tet orders 3..=4 to widen"
+    );
     // The predicate must stay no looser than the space: every pair it accepts
     // in the hex column must be constructible, and pairs the space rejects
     // (prism RTk>=1, pyramids) must stay false.

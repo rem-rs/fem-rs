@@ -20,6 +20,20 @@
 //! mesh=inline-hex.mesh k=3 ne=512 vsize=101376 ess=6144   (384 faces x 16)
 //! ```
 //!
+//! D392 lifted the tet RT construction cap to the same house bound as hex
+//! (0..=6); the extended oracle (round 49, `tmp/d392/probe49.cpp` →
+//! `$HOME/work/d392/probe49`, archived `tmp/d392/probe49_run1.out`) pins the
+//! orders beyond k=3 as well:
+//!
+//! ```text
+//! mesh=beam-tet.mesh   k=4 ne=384 vsize=36600  ess=4080   (272 faces x 15)
+//! mesh=beam-tet.mesh   k=5 ne=384 vsize=59304  ess=5712   (272 faces x 21)
+//! mesh=beam-tet.mesh   k=6 ne=384 vsize=89824  ess=7616   (272 faces x 28)
+//! mesh=inline-hex.mesh k=4 ne=512 vsize=196800 ess=9600   (384 faces x 25)
+//! mesh=inline-hex.mesh k=5 ne=512 vsize=338688 ess=13824  (384 faces x 36)
+//! mesh=inline-hex.mesh k=6 ne=512 vsize=536256 ess=18816  (384 faces x 49)
+//! ```
+//!
 //! Before D377 fem-rs returned one dof per boundary face at every order
 //! (272 / 384 regardless of k), silently under-constraining RTk ≥ 1 BCs.
 
@@ -38,13 +52,20 @@ fn load_refined(rel: &str) -> Mesh<3> {
 }
 
 /// `(mesh file, [(k, MFEM GetVSize, MFEM GetBoundaryTrueDofs count)])`.
-/// beam-tet k=3 (ess=2720) is not pinned here: `HDivSpace::validate_order`
-/// still caps tet RT at order 2 (no TetRT3 reference element yet) — the C++
-/// number is recorded in the module docs for whoever lifts that cap.
+/// D392: beam-tet k=3..6 and inline-hex k=4..6 are pinned too — the
+/// construction cap is now the hex/quad house bound 0..=6 on both shapes.
 const ORACLE: &[(&str, &[(u8, usize, usize)])] = &[
     (
         "data/beam-tet.mesh",
-        &[(0, 904, 272), (1, 3864, 816), (2, 10032, 1632)],
+        &[
+            (0, 904, 272),
+            (1, 3864, 816),
+            (2, 10032, 1632),
+            (3, 20560, 2720),
+            (4, 36600, 4080),
+            (5, 59304, 5712),
+            (6, 89824, 7616),
+        ],
     ),
     (
         "data/inline-hex.mesh",
@@ -53,6 +74,9 @@ const ORACLE: &[(&str, &[(u8, usize, usize)])] = &[
             (1, 13056, 1536),
             (2, 43200, 3456),
             (3, 101376, 6144),
+            (4, 196800, 9600),
+            (5, 338688, 13824),
+            (6, 536256, 18816),
         ],
     ),
 ];

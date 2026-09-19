@@ -26,7 +26,7 @@ use fem_element::quadrature::{
     gauss_legendre_01, gauss_legendre_arbitrary, gauss_lobatto_01, gauss_lobatto_arbitrary,
 };
 use fem_element::raviart_thomas::{
-    HexRTk, PrismRT0, QuadRTk, TetRT1, TetRT2, TetRTk, TriRT1, TriRT2, TriRTk,
+    HexRTk, PrismRT0, QuadRTk, TetRT1, TetRT2, TetRTk, TetRTNodal, TriRT1, TriRT2, TriRTk,
 };
 use fem_element::VectorReferenceElement;
 use fem_linalg::Vector;
@@ -378,9 +378,25 @@ impl<M: MeshTopology> HDivSpace<M> {
                 order <= 6,
                 "HDivSpace: Quad RT supports orders 0..=6 (QuadRTk)"
             ),
+            // D392: MFEM 4.10 imposes NO order bound on the tet RT element
+            // (`RT_FECollection`'s ctor only verifies `p >= 0`,
+            // `fem/fe_coll.cpp:2531`, and `RT_TetrahedronElement`
+            // (`fem/fe/fe_rt.cpp:899`) is generic in `p` with
+            // `n_dofs = (p+1)(p+2)(p+4)/2`).  The bound here is the same
+            // conservative house limit as the hex (D342) and 2-D quad arms
+            // (0..=6): the space machinery — `build_3d_tet`'s face/interior
+            // formulas, `tri_face_grid_transform` and the `face_dofs` block
+            // sizing — is plain `p`-arithmetic, verified against MFEM
+            // `GetVSize`/`GetBoundaryTrueDofs` at every k=0..=6
+            // (`tests/d392_tet_rt_high_orders.rs`, probe
+            // `tmp/d392/probe49.cpp`).  Two lower bounds remain downstream:
+            // the interpolation engine covers 0..=4 (the element-layer nodal
+            // table `tet_rt1::mfem_nodal_dofs` has 5 cache slots) and the
+            // assembler's `vec_ref_elem` has no tet order>=3 arm yet — k=5/6
+            // spaces build and expose boundary dofs, everything else refuses.
             (3, ElementType::Tet4 | ElementType::Tet10) => assert!(
-                order <= 2,
-                "HDivSpace: Tet RT supports orders 0, 1, and 2"
+                order <= 6,
+                "HDivSpace: Tet RT supports orders 0..=6 (TetRTk)"
             ),
             // D342: MFEM 4.10 imposes NO order bound on the hex RT element
             // (`RT_FECollection`'s ctor only verifies `p >= 0`,
@@ -1553,7 +1569,16 @@ impl<M: MeshTopology> HDivSpace<M> {
                         // TetRT2 — all flux-dual with per-face support.
                         0 => Box::new(TetRTk::new(0)),
                         1 => Box::new(TetRT1),
-                        _ => Box::new(TetRT2),
+                        2 => Box::new(TetRT2),
+                        // D392: from order 3 on, dispatch the order-generic
+                        // *nodal* element — the same MFEM flux-dual semantics
+                        // as TetRT1/TetRT2 (point-dual to the very
+                        // `mfem_nodal_dofs(k)` rows above, W = I).  The
+                        // moment-dual `TetRTk` family is not point-dual to
+                        // these rows and makes the k ≥ 3 dual solve
+                        // ill-conditioned (measured: RT3 constant-field
+                        // reconstruction error 2.97e1).
+                        o => Box::new(TetRTNodal::new(o as usize)),
                     };
                     fill_dual_matrix(&rows, re.as_ref(), &mut w);
                 }
@@ -2056,7 +2081,11 @@ pub fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
     match et {
         ElementType::Tri3 | ElementType::Tri6 => order <= 2,
         ElementType::Quad4 => order <= 6,
-        ElementType::Tet4 | ElementType::Tet10 => order <= 2,
+        // D392: was `order <= 2`.  The tet RT interpolation engine is
+        // order-generic (rows from `tet_rt1::mfem_nodal_dofs(k)`, dual matrix
+        // from the order-generic `TetRTk`), but that table's cache holds
+        // exactly 5 slots (k = 0..=4) — the element layer is the binding cap.
+        ElementType::Tet4 | ElementType::Tet10 => order <= 4,
         // D342: was `order <= 2`.
         ElementType::Hex8 => order <= 6,
         ElementType::Prism6 => order == 0,

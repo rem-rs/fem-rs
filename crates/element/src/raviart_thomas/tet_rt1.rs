@@ -273,6 +273,61 @@ pub(super) fn eval_nodal_tet_div(k: usize, xi: &[f64], div_vals: &mut [f64]) {
     }
 }
 
+// ─── TetRTNodal (order-generic) ─────────────────────────────────────────────
+
+/// Order-generic nodal RT_k H(div) element on the reference tetrahedron —
+/// the same MFEM nodal flux-dual semantics as [`TetRT1`]/`TetRT2`, for every
+/// order the shared nodal table serves (`tet_rt1::mfem_nodal_dofs`, 5 cache
+/// slots: k = 0..=4).  D392: `HDivSpace::interpolate_vector` and the vector
+/// assembler dispatch tet RT ≥ 3 here, pairing the dual rows with a basis
+/// that is point-dual to them (`D_m(Φ_i) = δ_mi`, W = I) — the moment-dual
+/// `TetRTk` family is *not* point-dual and makes the k ≥ 3 dual solve
+/// catastrophically ill-conditioned.
+pub struct TetRTNodal {
+    k: usize,
+}
+
+impl TetRTNodal {
+    pub fn new(k: usize) -> Self {
+        assert!(k <= 4, "TetRTNodal: nodal table cache covers k = 0..=4, got {k}");
+        TetRTNodal { k }
+    }
+}
+
+impl VectorReferenceElement for TetRTNodal {
+    fn dim(&self) -> u8 {
+        3
+    }
+    fn order(&self) -> u8 {
+        self.k as u8
+    }
+    fn n_dofs(&self) -> usize {
+        nodal_tet_n_dofs(self.k)
+    }
+
+    fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
+        eval_nodal_tet_basis(self.k, xi, values);
+    }
+
+    fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
+        eval_nodal_tet_div(self.k, xi, div_vals);
+    }
+
+    fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {
+        for v in curl_vals.iter_mut() {
+            *v = 0.0;
+        }
+    }
+
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        tet_rule(order)
+    }
+
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        nodal_tet_dof_coords(self.k)
+    }
+}
+
 // ─── TetRT1 ─────────────────────────────────────────────────────────────────
 
 /// Raviart-Thomas RT1 H(div) element on the reference tetrahedron — 15 DOFs,

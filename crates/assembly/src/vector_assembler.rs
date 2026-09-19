@@ -16,9 +16,9 @@ use nalgebra::DMatrix;
 
 use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
-use fem_element::lagrange::{HexQ1, QuadQ1};
+use fem_element::lagrange::HexQ1;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexND2, HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
+use fem_element::nedelec::{HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
 use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRTk, QuadRT1, TriRTk, TetRTk, PrismRTk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
@@ -135,6 +135,13 @@ fn vec_ref_elem_choice(
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 0) => Box::new(TetRTk::new(0)),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 1) => Box::new(TetRT1),
         (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, 2) => Box::new(TetRT2),
+        // D435: from order 3 on, the order-generic *nodal* element (MFEM
+        // flux-dual semantics, same slot order as the D392 interpolation
+        // engine) — without this arm the assembly layer panicked on tet
+        // RT ≥ 3 while `HDivSpace::new` (D392) accepts them.
+        (SpaceType::HDiv, ElementType::Tet4 | ElementType::Tet10, 3, o) if o >= 3 => {
+            Box::new(fem_element::raviart_thomas::TetRTNodal::new(o as usize))
+        }
         (SpaceType::HDiv, ElementType::Prism6, 3, 0) => Box::new(PrismRTk::new(0)),
         (SpaceType::HDiv, ElementType::Prism6, 3, 1) => Box::new(PrismRTk::new(1)),
         (SpaceType::HCurl, ElementType::Prism6, 3, 1) => Box::new(PrismND1),
