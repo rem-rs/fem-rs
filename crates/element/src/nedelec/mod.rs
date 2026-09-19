@@ -64,7 +64,7 @@ pub use prism::{PrismND1, PrismNDk};
 pub use pyramid::{PyraND1, PyraNDk};
 pub use quad_nd2::QuadND2;
 pub use quad_ndk::QuadNDk;
-pub use quad_ndk_mfem::{QNdOpen, QuadND};
+pub use quad_ndk_mfem::{IntegratedDofFunctional, QNdOpen, QuadND};
 pub use tet_nd2::TetND2;
 pub use tet_ndk::TetNDk;
 pub use tri_nd2::TriND2;

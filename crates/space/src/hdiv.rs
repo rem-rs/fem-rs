@@ -257,6 +257,14 @@ pub struct HDivSpace<M: MeshTopology> {
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
     is_bdm: bool,
+    /// 2-D quad basis variant: `true` = MFEM's
+    /// `RT_FECollection(o, 2, GaussLobatto, IntegratedGLL)` collection (the
+    /// LOR-compatible basis pair, built by
+    /// [`Self::new_gauss_lobatto_integrated_gll`]); `false` = the library
+    /// default (`HDivSpace::new`, GaussLegendre open modes).  The variant
+    /// selects which reference element [`fem_assembly::VectorAssembler`]
+    /// pairs with the (identical) dof/slot tables — see `quad_integrated_gll`.
+    quad_igll: bool,
 }
 
 impl<M: MeshTopology> HDivSpace<M> {
@@ -281,10 +289,51 @@ impl<M: MeshTopology> HDivSpace<M> {
         let is_mixed = (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first_type);
         if !is_mixed {
             Self::validate_order(dim, &first_type, order);
-            Self::build(mesh, order, first_type, false)
+            Self::build(mesh, order, first_type, false, false)
         } else {
             Self::build_mixed(mesh, order)
         }
+    }
+
+    /// Construct the 2-D **quad** H(div) space of MFEM's LOR-compatible
+    /// collection `RT_FECollection(order, 2, BasisType::GaussLobatto,
+    /// BasisType::IntegratedGLL)` (`fem/fe_coll.hpp`).
+    ///
+    /// The global DOF numbering, slot tables and orientation signs are
+    /// **identical** to [`Self::new`] (MFEM's per-edge
+    /// `DofOrderForOrientation` rule does not depend on the 1-D basis); the
+    /// variant changes
+    ///
+    /// * which reference element the assembler pairs with the tables — the
+    ///   faithful `fem_element::raviart_thomas::QuadRTk::new_integrated_gll`
+    ///   (integrated Gerritsma open modes) instead of the GaussLegendre
+    ///   defaults — via
+    ///   [`fem_assembly::VectorAssembler::assemble_bilinear_quad_igll`], and
+    /// * [`Self::interpolate_vector`], which becomes MFEM's
+    ///   `ProjectIntegrated` (normal-flux sub-cell integrals) instead of the
+    ///   nodal projection, because `RT_QuadrilateralElement::Project`
+    ///   dispatches to `ProjectIntegrated` for the integrated type
+    ///   (`fe_rt.hpp:63`).
+    ///
+    /// On non-quad meshes the two constructors build the same space.
+    pub fn new_gauss_lobatto_integrated_gll(mesh: M, order: u8) -> Self {
+        let dim = mesh.dim() as usize;
+        let first_type = mesh.element_type(0);
+        let is_mixed = (1..mesh.n_elements() as u32).any(|e| mesh.element_type(e) != first_type);
+        if !is_mixed {
+            Self::validate_order(dim, &first_type, order);
+            Self::build(mesh, order, first_type, false, true)
+        } else {
+            Self::build_mixed(mesh, order)
+        }
+    }
+
+    /// Whether this space carries the `(GaussLobatto, IntegratedGLL)` quad
+    /// basis pair.  The assembler and LOR entry points must key off the same
+    /// variant as the space (D347 pattern): a variant space must be assembled
+    /// with the `*_quad_igll` entries, a default space with the plain ones.
+    pub fn quad_integrated_gll(&self) -> bool {
+        self.quad_igll
     }
 
     /// Construct an H(div) space using BDM (Brezzi-Douglas-Marini) elements.
@@ -310,7 +359,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             assert!(matches!(elem_type, ElementType::Tet4 | ElementType::Tet10),
                 "BDM on 3D only supports Tet4/Tet10");
         }
-        Self::build(mesh, order, elem_type, true)
+        Self::build(mesh, order, elem_type, true, false)
     }
 
     fn validate_order(dim: usize, elem_type: &ElementType, order: u8) {
@@ -479,13 +528,14 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Tet4,
             is_bdm: false,
+            quad_igll: false,
         }
     }
 
-    fn build(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool) -> Self {
+    fn build(mesh: M, order: u8, elem_type: ElementType, is_bdm: bool, quad_igll: bool) -> Self {
         match (mesh.dim(), &elem_type) {
             (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order, is_bdm),
-            (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order),
+            (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order, quad_igll),
             (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type, is_bdm),
             (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
             (3, ElementType::Prism6) => Self::build_3d_prism(mesh, order),
@@ -574,6 +624,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
             is_bdm,
+            quad_igll: false,
         }
     }
 
@@ -733,12 +784,13 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Tet4,
             is_bdm,
+            quad_igll: false,
         }
     }
 
     // ─── 2-D quadrilateral construction ───────────────────────────────────
 
-    fn build_2d_quad(mesh: M, order: u8) -> Self {
+    fn build_2d_quad(mesh: M, order: u8, quad_igll: bool) -> Self {
         let dofs_per_edge = (order as usize) + 1; // 1 for RT0, k+1 for RTk
         // Interior DOFs of RT_QuadrilateralElement(k): 2k(k+1) (k(k+1) per
         // component).  k=0 → 0, k=1 → 4, k=2 → 12.
@@ -824,6 +876,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
             is_bdm: false,
+            quad_igll,
         }
     }
 
@@ -954,6 +1007,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Hex8,
             is_bdm: false,
+            quad_igll: false,
         }
     }
 
@@ -1038,6 +1092,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Prism6,
             is_bdm: false,
+            quad_igll: false,
         }
     }
 
@@ -1114,6 +1169,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
+            quad_igll: false,
         }
     }
 
@@ -1134,6 +1190,23 @@ impl<M: MeshTopology> HDivSpace<M> {
     pub fn edge_face_dof(&self, edge: EdgeKey) -> Option<DofId> {
         match &self.face_map {
             FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => map.get(&edge).copied(),
+            FaceDofMap::Faces(_) | FaceDofMap::HexFaces(_) => None,
+        }
+    }
+
+    /// All global DOFs of a 2-D face (edge) — the full `order + 1` block.
+    ///
+    /// D368: [`Self::edge_face_dof`] returns only the block's *first* dof,
+    /// but an `RT_QuadrilateralElement(p)` / `RT_TriangleElement(p)` edge
+    /// carries `p + 1` dofs (MFEM `GetBoundaryTrueDofs` essential-constrains
+    /// all of them).  Boundary-dof queries must use this accessor; for order
+    /// 0 the two agree.
+    pub fn edge_face_dofs(&self, edge: EdgeKey) -> Option<Vec<DofId>> {
+        let nd = self.order as usize + 1;
+        match &self.face_map {
+            FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => map.get(&edge).map(|&first| {
+                (0..nd).map(|m| first + m as DofId).collect()
+            }),
             FaceDofMap::Faces(_) | FaceDofMap::HexFaces(_) => None,
         }
     }
@@ -1280,6 +1353,61 @@ impl<M: MeshTopology> HDivSpace<M> {
 /// [`hdiv_interpolant_available`].
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
+
+        // (GaussLobatto, IntegratedGLL) quad variant: MFEM
+        // `RT_QuadrilateralElement::Project` dispatches to `ProjectIntegrated`
+        // for the integrated type (`fe_rt.hpp:63`), so every DOF is the
+        // sub-cell normal-flux integral `∫ f·(adj(J)·n̂) ds` — not the
+        // canonical-moment functional of the engine below.
+        if self.quad_igll && self.elem_type == ElementType::Quad4 {
+            let el = fem_element::raviart_thomas::QuadRTk::new_integrated_gll(self.order as usize);
+            let functionals = el.integrated_functionals();
+            let r = result.as_slice_mut();
+            for e in 0..self.mesh.n_elements() as u32 {
+                let verts = self.mesh.element_nodes(e);
+                let c: Vec<[f64; 2]> = (0..4)
+                    .map(|i| {
+                        let p = self.mesh.node_coords(verts[i]);
+                        [p[0], p[1]]
+                    })
+                    .collect();
+                let dofs = self.element_dofs(e);
+                let signs = self.element_signs(e);
+                for (i, fi) in functionals.iter().enumerate() {
+                    let mut val = 0.0_f64;
+                    for &([xi, eta], w) in &fi.samples {
+                        // Bilinear quad map and its Jacobian
+                        // J = [[∂x/∂ξ, ∂x/∂η], [∂y/∂ξ, ∂y/∂η]].
+                        let px = (1.0 - xi) * (1.0 - eta) * c[0][0]
+                            + xi * (1.0 - eta) * c[1][0]
+                            + xi * eta * c[2][0]
+                            + (1.0 - xi) * eta * c[3][0];
+                        let py = (1.0 - xi) * (1.0 - eta) * c[0][1]
+                            + xi * (1.0 - eta) * c[1][1]
+                            + xi * eta * c[2][1]
+                            + (1.0 - xi) * eta * c[3][1];
+                        let dx_dxi = [
+                            (1.0 - eta) * (c[1][0] - c[0][0]) + eta * (c[2][0] - c[3][0]),
+                            (1.0 - eta) * (c[1][1] - c[0][1]) + eta * (c[2][1] - c[3][1]),
+                        ];
+                        let dx_deta = [
+                            (1.0 - xi) * (c[3][0] - c[0][0]) + xi * (c[2][0] - c[1][0]),
+                            (1.0 - xi) * (c[3][1] - c[0][1]) + xi * (c[2][1] - c[1][1]),
+                        ];
+                        // MFEM: `vk^T adj(J) nk = f(x) · (adj(J)·n̂)`.
+                        let adj_n = [
+                            fi.t[0] * dx_deta[1] - fi.t[1] * dx_deta[0],
+                            -fi.t[0] * dx_dxi[1] + fi.t[1] * dx_dxi[0],
+                        ];
+                        let fv = f(&[px, py]);
+                        val += w * (fv[0] * adj_n[0] + fv[1] * adj_n[1]);
+                    }
+                    r[dofs[i] as usize] = signs[i] * val;
+                }
+            }
+            return result;
+        }
+
         // Combinations whose dof values must keep the historical
         // canonical-moment semantics (BDM consumers) or that predate this
         // engine (pyramids) are served by the legacy path.  Since D33/D34 the

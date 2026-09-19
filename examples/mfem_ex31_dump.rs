@@ -1,24 +1,37 @@
-//! ex31 Rust-side dump helper (temporary, cf. ex29 dump flow).
-//! Run:
-//!   cargo run --example mfem_ex31_dump -- -m data/inline-quad.mesh -r 2 -o 1
-//! Writes rust_dofpos.txt / rust_A.txt / rust_b.txt / rust_elim_A.txt /
-//! rust_elim_B.txt / rust_elim_X0.txt / rust_x.txt / rust_soldofs.txt /
-//! rust_elmat_0.txt in the current directory.
+//! ex31 Rust-side dump helper (D375; feeds `tools/ex31_cpp_helper/`).
 //!
-//! ## ⚠ Declared gap — writes nothing, exits 3 (round 31, D128)
+//! Assembles the **same** serial ex31 system as
+//! `examples/mfem_ex31_anisotropic_maxwell.rs` (2-D restricted H(curl), order 1)
+//! and dumps every intermediate the comparison harness reads:
 //!
-//! This helper exists to feed the serial-ex31 comparison harness intermediate
-//! quantities (`rust_*.txt`) that the C++ `ex31_nd_dump` side reads back.  The
-//! port it belongs to is not done (D128 — the full gap list lives in
-//! `examples/mfem_ex31_anisotropic_maxwell.rs`), so it **cannot produce a single
-//! dump**.  It used to answer every legal input with
-//! `eprintln!("… not supported - skipping")` + `exit(0)`, which made the
-//! harness believe the dumps existed.
+//! ```bash
+//! cargo run --release --example mfem_ex31_dump -- -m data/inline-quad.mesh -r 2 -o 1
+//! ```
 //!
-//! For a *dump* helper whose producer is missing the honest treatment is to
-//! refuse loudly: the harness compares file contents, so a missing file must
-//! abort the comparison instead of "matching nothing".  Hence gap list +
-//! `exit(3)`; the scaffolding below stays for the D127 follow-up.
+//! Writes into the current directory: `rust_dofpos.txt`, `rust_A.txt`,
+//! `rust_b.txt`, `rust_elmat_0.txt`, `rust_soldofs.txt`, `rust_elim_A.txt`,
+//! `rust_elim_B.txt`, `rust_elim_X0.txt`, `rust_x.txt`.
+//!
+//! ## Index convention (single, uniform)
+//!
+//! **Every** dumped vector/matrix uses the MFEM `ND_R2D` global DOF layout
+//! `[z vertex DOFs 0..n_verts | in-plane ND edge DOFs n_verts..]` (H¹ dof id =
+//! vertex id, ND dof id = n_verts + edge id), which is exactly the C++
+//! `FiniteElementSpace` ordering.  `rust_dofpos.txt` (the permutation anchor:
+//! vertex DOFs → vertex coord, edge DOFs → edge midpoint) follows the same
+//! layout — the earlier draft wrote it in `[ND | vertex]` order while A/b used
+//! `[z | nd]`, so one permutation could not compare both (fixed in D375).
+//! `rust_soldofs.txt` is the full projection of `E_exact` (MFEM
+//! `sol.ProjectCoefficient`: ND1 dof = `E·t` at the edge midpoint, H1 vertex
+//! dof = `E_z`), unlike the C++ `cpp_soldofs.txt` dump it is NOT compared by
+//! `compare_ex31_systems.py` (which compares A, b, elim_A/B/X0 and x only).
+//! `rust_elmat_0.txt` header lines (`dofs`/`verts`) print local DOF ids and
+//! coordinates for eyeballing; the comparer prints them verbatim.
+//!
+//! The solve replicates the C++ dump (`PCG(*A, M, B, X, 1, 500, 1e-12, 0.0)`
+//! → `SetRelTol(sqrt(1e-12)) = 1e-6`) with the bit-for-bit
+//! [`fem_solver::solve_pcg_gssmoother`] port, so `rust_x.txt` is comparable to
+//! `cpp_x.txt` at the same stopping point.
 
 use std::f64::consts::{PI, SQRT_2};
 use std::fs::File;
@@ -28,13 +41,12 @@ use fem_assembly::standard::{CurlCurlIntegrator, DiffusionIntegrator, MassIntegr
     VectorMassTensorIntegrator};
 use fem_assembly::coefficient::ConstantMatrixCoeff;
 use fem_assembly::{VectorAssembler, Assembler, FixedOrder};
-use fem_assembly::postproc::grid_function::project_bdr_coefficient_tangent_2d;
 use fem_element::{VectorReferenceElement, ReferenceElement,
-    lagrange::QuadQk};
+    nedelec::{TriNDk, QuadNDk}, lagrange::{TriP1, QuadQk}};
 use fem_io::mfem::read_mfem_file;
 use fem_linalg::CooMatrix;
 use fem_mesh::{ElementType, Mesh, MeshTopology, amr::refine_uniform};
-use fem_solver::{solve_pcg, GSSmoother, SolverConfig};
+use fem_solver::{SolverConfig, fmt_g, solve_pcg_gssmoother};
 use fem_space::{HCurlSpace, H1Space,
     fe_space::FESpace, constraints::{boundary_dofs_hcurl, boundary_dofs}};
 
@@ -95,15 +107,50 @@ fn isoparametric_jac(mesh: &Mesh<2>, _e: u32, nodes: &[u32], xi: &[f64]) -> (f64
     (inv, j[(1,1)] * inv, -j[(1,0)] * inv, -j[(0,1)] * inv, j[(0,0)] * inv, det.abs())
 }
 
-fn setup_element_ref(et: ElementType, _order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
-    // D128 declared gap: the dump helper's producer does not exist, so this
-    // dispatcher cannot answer for any element type.  `main` refuses first;
-    // this keeps the refusal honest (status 3, never 0) if that changes.
-    eprintln!(
-        "mfem_ex31_dump: element {et:?} is not ported (D128 — see this file's header); exiting \
-         with status 3"
-    );
-    std::process::exit(3)
+/// Local reference elements of the `[z | nd]` combined space (order 1 only —
+/// see the `-o != 1` refusal in `main`; same table as the main example).
+fn setup_element_ref(et: ElementType, order: u8) -> (usize, &'static dyn VectorReferenceElement, Box<dyn ReferenceElement>, usize, JacobianFn) {
+    assert_eq!(order, 1, "setup_element_ref only implements order 1");
+    match et {
+        ElementType::Tri3 => {
+            // Leak to get 'static lifetime (acceptable for singleton reference elements)
+            let nd: &'static TriNDk = Box::leak(Box::new(TriNDk::new(1)));
+            (nd.n_dofs(), nd as &dyn VectorReferenceElement, Box::new(TriP1), 3, affine_jac as JacobianFn)
+        },
+        ElementType::Quad4 => {
+            let nd: &'static QuadNDk = Box::leak(Box::new(QuadNDk::new(1)));
+            (nd.n_dofs(), nd as &dyn VectorReferenceElement, Box::new(QuadQk::new(1)), 4, isoparametric_jac as JacobianFn)
+        },
+        _ => {
+            eprintln!(
+                "mfem_ex31_dump: unsupported element type {et:?} (only straight-sided Tri3 and \
+                 Quad4 are implemented) — exiting with status 3"
+            );
+            std::process::exit(3)
+        }
+    }
+}
+
+fn phys_point(mesh: &Mesh<2>, et: ElementType, nodes: &[u32], xi: &[f64]) -> [f64; 2] {
+    if et == ElementType::Quad4 {
+        let geo = QuadQk::new(1);
+        let ng = geo.n_dofs();
+        let mut phi = vec![0.0; ng];
+        geo.eval_basis(xi, &mut phi);
+        let mut p = [0.0_f64; 2];
+        for k in 0..ng {
+            let c = mesh.node_coords(nodes[k]);
+            p[0] += phi[k] * c[0];
+            p[1] += phi[k] * c[1];
+        }
+        p
+    } else {
+        let x0 = mesh.node_coords(nodes[0]);
+        let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]);
+        [x0[0] + (x1[0]-x0[0])*xi[0] + (x2[0]-x0[0])*xi[1],
+         x0[1] + (x1[1]-x0[1])*xi[0] + (x2[1]-x0[1])*xi[1]]
+    }
 }
 
 fn dump_vec(path: &str, v: &[f64]) {
@@ -124,26 +171,7 @@ fn dump_csr(path: &str, n: usize, row_ptr: &[usize], col_idx: &[u32], values: &[
     }
 }
 
-/// D128: prints the gap list and terminates with the project's "honest partial
-/// delivery" status.  Not `-> !` on purpose: `main`'s scaffolding below stays
-/// type-checked while this guard is the only path that runs.
-fn not_ported() {
-    eprintln!(
-        "mfem_ex31_dump: NOT PORTED — declared gap D128: the serial ex31 port this helper dumps \
-         for does not exist, so no rust_*.txt is written.\n\
-         Missing library pieces: `MatrixCoefficient` (D127) and the matrix-coefficient entry \
-         points of VectorFEMassIntegrator / VectorMassTensorIntegrator /\n\
-         project_bdr_coefficient_tangent_2d — full list in \
-         examples/mfem_ex31_anisotropic_maxwell.rs.\n\
-         Use examples/mfem_pex31_restricted_hcurl.rs for the same problem's working path."
-    );
-    std::process::exit(3);
-}
-
 fn main() {
-    // D128: declared gap — refuse instead of writing zero files and reporting
-    // success.
-    not_ported();
     let mut mesh_arg: Option<String> = None;
     let mut ref_levels = 2usize;
     let mut order = 1u8;
@@ -158,10 +186,28 @@ fn main() {
             _ => {}
         }
     }
+    // The order-1 restricted space is all this harness supports (same gap as
+    // the main example: no order-p local basis).
+    if order != 1 {
+        eprintln!(
+            "mfem_ex31_dump: -o {order} is not ported (order-p restricted H(curl) space); \
+             re-run with -o 1."
+        );
+        std::process::exit(3);
+    }
     let kappa = freq * PI;
     let path = mesh_arg.expect("-m mesh required");
     let mfem = read_mfem_file(&path).expect("read MFEM mesh");
-    let base_mesh = mfem.mesh2d.expect("2D mesh");
+    let base_mesh = match mfem.mesh2d {
+        Some(m) => m,
+        None => {
+            eprintln!(
+                "mfem_ex31_dump: mesh '{path}' is not 2-D (only the 2-D restricted H(curl) path \
+                 is ported) — exiting with status 3"
+            );
+            std::process::exit(3)
+        }
+    };
     let mesh = if ref_levels > 0 {
         let mut m = base_mesh;
         for _ in 0..ref_levels { m = refine_uniform(&m); }
@@ -177,42 +223,46 @@ fn main() {
     println!("DOFs: H(Curl)={n_nd}  H1(z)={n_h1}  total={n_total}");
     println!("nelems={} nverts={} nedges={}", mesh.n_elements(), mesh.n_nodes(), nd_space.n_edges());
 
-    // ---- dump per-DOF positions: ND dof -> edge midpoint, H1 dof -> vertex coord ----
+    // ---- per-DOF positions + full projection of E_exact --------------------
+    // ONE layout everywhere: [z vertex dofs 0..n_h1 | ND edge dofs n_h1..].
+    // Vertex dof -> vertex coord, edge dof -> edge midpoint (permutation
+    // anchor).  The projection replicates MFEM sol.ProjectCoefficient (ND1 dof
+    // functional: E(mid)·(b-a) on the canonical edge; H1 vertex dof: E_z).
+    let mut pos = vec![0.0_f64; n_total * 3];
+    let mut soldofs = vec![0.0_f64; n_total];
     {
-        let mut pos = vec![0.0_f64; n_total * 3];
-        // collect dof -> edge midpoint by walking all elements' edges
-        let edge_pairs: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
         let mut seen = vec![false; n_nd];
         for e in 0..mesh.n_elements() as u32 {
             let nodes = mesh.element_nodes(e);
             let pairs: &[(usize, usize)] = match mesh.element_type(e) {
                 ElementType::Tri3 | ElementType::Tri6 => &[(0, 1), (1, 2), (0, 2)],
-                ElementType::Quad4 | ElementType::Quad8 => &edge_pairs,
+                ElementType::Quad4 | ElementType::Quad8 => &[(0, 1), (1, 2), (2, 3), (3, 0)],
                 _ => &[],
             };
             for &(li, lj) in pairs {
-                let (gi, gj) = (nodes[li], nodes[lj]);
-                let key = fem_space::EdgeKey::new(gi, gj);
+                let key = fem_space::EdgeKey::new(nodes[li], nodes[lj]);
                 if let Some(d) = nd_space.edge_dof(key) {
                     let d = d as usize;
                     if !seen[d] {
                         seen[d] = true;
-                        let ca = mesh.node_coords(gi);
-                        let cb = mesh.node_coords(gj);
-                        pos[3*d] = 0.5 * (ca[0] + cb[0]);
-                        pos[3*d+1] = 0.5 * (ca[1] + cb[1]);
+                        let ca = mesh.node_coords(key.0);
+                        let cb = mesh.node_coords(key.1);
+                        let mid = [(ca[0] + cb[0]) * 0.5, (ca[1] + cb[1]) * 0.5];
+                        pos[3*(n_h1 + d)] = mid[0];
+                        pos[3*(n_h1 + d) + 1] = mid[1];
+                        let e3 = exact_e(&mid, kappa);
+                        soldofs[n_h1 + d] = e3[0] * (cb[0] - ca[0]) + e3[1] * (cb[1] - ca[1]);
                     }
                 }
             }
         }
         for n in 0..mesh.n_nodes() {
             let c = mesh.node_coords(n as u32);
-            let d = n_nd + n;
-            pos[3*d] = c[0]; pos[3*d+1] = c[1];
+            pos[3*n] = c[0]; pos[3*n + 1] = c[1];
+            soldofs[n] = exact_e(c, kappa)[2];
         }
-        let f = File::create("rust_dofpos.txt").unwrap();
-        let mut w = BufWriter::new(f);
-        for x in &pos { writeln!(w, "{:.16e}", x).unwrap(); }
+        dump_vec("rust_dofpos.txt", &pos);
+        dump_vec("rust_soldofs.txt", &soldofs);
     }
 
     // ---- element matrix of element 0 (Araw element check) ----
@@ -223,25 +273,28 @@ fn main() {
         let nodes = mesh.element_nodes(e);
         let signs = nd_space.element_signs(e);
         let (n_ld, rnd, rh1, n_lh1, jac_fn) = setup_element_ref(mesh.element_type(e), order);
-        let q = rnd.quadrature(quad_order);
+        // MFEM per-integrator rules: CurlCurlIntegrator 2p-2 = 0 (1 point),
+        // VectorFEMassIntegrator OrderW + 2p = 2 (affine elements).
+        let q0 = rnd.quadrature(0);
+        let q2 = rnd.quadrature(2);
         let mut em = vec![0.0_f64; (n_ld + n_lh1) * (n_ld + n_lh1)];
-        // curl-curl block (in-plane)
+        // curl-curl block (in-plane, 1-point rule)
         let mut cc = vec![0.0_f64; n_ld * n_ld];
         let mut curl = vec![0.0_f64; n_ld];
-        for (qi, xi) in q.points.iter().enumerate() {
+        for (qi, xi) in q0.points.iter().enumerate() {
             let (_, _jit00, _jit01, _jit10, _jit11, det) = jac_fn(&mesh, e, nodes, xi);
-            let w = q.weights[qi] * det;
+            let w = q0.weights[qi] * det;
             rnd.eval_curl(xi, &mut curl);
             for i in 0..n_ld { for j in 0..n_ld {
                 cc[i * n_ld + j] += w * signs[i] * signs[j] * curl[i] * curl[j];
             }}
         }
-        // vector mass tensor block (in-plane 2x2)
+        // vector mass tensor block (in-plane 2x2, order-2 rule)
         let mut vm = vec![0.0_f64; n_ld * n_ld];
         let mut np = vec![0.0; n_ld * 2];
-        for (qi, xi) in q.points.iter().enumerate() {
+        for (qi, xi) in q2.points.iter().enumerate() {
             let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
-            let w = q.weights[qi] * det;
+            let w = q2.weights[qi] * det;
             rnd.eval_basis_vec(xi, &mut np);
             for i in 0..n_ld {
                 let pxi = signs[i] * (jit00 * np[i*2] + jit01 * np[i*2+1]);
@@ -253,28 +306,37 @@ fn main() {
                 }
             }
         }
-        // z block: -laplace + sigma_zz mass
+        // z block: -laplace (1-point rule) + Σzz mass (order-2 rule)
         let mut zm = vec![0.0_f64; n_lh1 * n_lh1];
         let mut hp = vec![0.0_f64; n_lh1];
         let mut gr = vec![0.0_f64; n_lh1 * 2];
-        for (qi, xi) in q.points.iter().enumerate() {
+        for (qi, xi) in q0.points.iter().enumerate() {
             let (_, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
-            let w = q.weights[qi] * det;
-            rh1.eval_basis(xi, &mut hp);
+            let w = q0.weights[qi] * det;
             rh1.eval_grad_basis(xi, &mut gr);
             for i in 0..n_lh1 {
                 let (dxi, dyi) = (jit00*gr[i*2]+jit01*gr[i*2+1], jit10*gr[i*2]+jit11*gr[i*2+1]);
                 for j in 0..n_lh1 {
                     let (dxj, dyj) = (jit00*gr[j*2]+jit01*gr[j*2+1], jit10*gr[j*2]+jit11*gr[j*2+1]);
-                    zm[i * n_lh1 + j] += w * (dxi * dxj + dyi * dyj + SZZ * hp[i] * hp[j]);
+                    zm[i * n_lh1 + j] += w * (dxi * dxj + dyi * dyj);
                 }
             }
         }
-        // coupling: SYZ * Ey * Ez
+        for (qi, xi) in q2.points.iter().enumerate() {
+            let (_, _jit00, _jit01, _jit10, _jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let w = q2.weights[qi] * det;
+            rh1.eval_basis(xi, &mut hp);
+            for i in 0..n_lh1 {
+                for j in 0..n_lh1 {
+                    zm[i * n_lh1 + j] += w * SZZ * hp[i] * hp[j];
+                }
+            }
+        }
+        // coupling: SYZ * Ey * Ez (order-2 rule)
         let mut cp = vec![0.0_f64; n_ld * n_lh1];
-        for (qi, xi) in q.points.iter().enumerate() {
+        for (qi, xi) in q2.points.iter().enumerate() {
             let (_, _jit00, _jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
-            let w = q.weights[qi] * det * SYZ;
+            let w = q2.weights[qi] * det * SYZ;
             rnd.eval_basis_vec(xi, &mut np);
             rh1.eval_basis(xi, &mut hp);
             for i in 0..n_ld {
@@ -304,14 +366,14 @@ fn main() {
         }
     }
 
-    // ---- assemble system (mirrors the example) ----
-    let curl_curl = CurlCurlIntegrator { mu: 1.0 };
-    let sigma_2d = ConstantMatrixCoeff(vec![SXX, SXY, SXY, SYY]);
-    let vec_mass = VectorMassTensorIntegrator { alpha: sigma_2d };
-    let a_nd = VectorAssembler::assemble_bilinear(&nd_space, &[&curl_curl, &vec_mass], quad_order);
+    // ---- assemble the combined [z | nd] system (mirrors the example) ----
+    // MFEM per-integrator rules: curl-curl 2p-2 = 0, masses OrderW + 2p = 2.
+    let cc0 = FixedOrder::new(CurlCurlIntegrator { mu: 1.0 }, 0);
+    let vm2 = FixedOrder::new(VectorMassTensorIntegrator { alpha: ConstantMatrixCoeff(vec![SXX, SXY, SXY, SYY]) }, 2);
+    let a_nd = VectorAssembler::assemble_bilinear(&nd_space, &[&cc0, &vm2], quad_order);
 
     let laplace = FixedOrder::new(DiffusionIntegrator { kappa: 1.0 }, 0);
-    let z_mass = MassIntegrator { rho: SZZ };
+    let z_mass = FixedOrder::new(MassIntegrator { rho: SZZ }, 2);
     let a_z = Assembler::assemble_bilinear(&z_space, &[&laplace, &z_mass], quad_order);
 
     let mut coupling_coo = CooMatrix::<f64>::new(n_nd, n_h1);
@@ -321,7 +383,7 @@ fn main() {
         let nodes = mesh.element_nodes(e);
         let signs = nd_space.element_signs(e);
         let (n_ld, rnd, rh1, n_lh1, jac_fn) = setup_element_ref(mesh.element_type(e), order);
-        let q = rnd.quadrature(quad_order);
+        let q = rnd.quadrature(2); // MFEM VectorFEMassIntegrator rule: OrderW + 2p = 2
         let mut np = vec![0.0; n_ld * 2];
         let mut hp = vec![0.0; n_lh1];
         let mut em = vec![0.0_f64; n_ld * n_lh1];
@@ -332,7 +394,6 @@ fn main() {
             rh1.eval_basis(xi, &mut hp);
             for i in 0..n_ld {
                 let py = signs[i] * (jit10 * np[i * 2] + jit11 * np[i * 2 + 1]);
-                if py.abs() < 1e-15 { continue; }
                 for j in 0..n_lh1 { em[i * n_lh1 + j] += w * py * hp[j]; }
             }
         }
@@ -348,17 +409,27 @@ fn main() {
     let mut sys_coo = CooMatrix::<f64>::new(n_total, n_total);
     // Layout: z (vertex) DOFs first (0..n_h1), then in-plane ND DOFs (n_h1..),
     // matching MFEM's ND_R2D GetElementVDofs.
-    for r in 0..n_nd { let rr = n_h1 + r; for k in a_nd.row_ptr[r]..a_nd.row_ptr[r+1] { sys_coo.add(rr, n_h1 + a_nd.col_idx[k] as usize, a_nd.values[k]); } }
-    for r in 0..n_h1 { for k in a_z.row_ptr[r]..a_z.row_ptr[r+1] { sys_coo.add(r, a_z.col_idx[k] as usize, a_z.values[k]); } }
+    for r in 0..n_nd {
+        let rr = n_h1 + r;
+        for k in a_nd.row_ptr[r]..a_nd.row_ptr[r + 1] {
+            sys_coo.add(rr, n_h1 + a_nd.col_idx[k] as usize, a_nd.values[k]);
+        }
+    }
+    for r in 0..n_h1 {
+        for k in a_z.row_ptr[r]..a_z.row_ptr[r + 1] {
+            sys_coo.add(r, a_z.col_idx[k] as usize, a_z.values[k]);
+        }
+    }
     for r in 0..coupling.nrows {
-        for k in coupling.row_ptr[r]..coupling.row_ptr[r+1] {
-            let c = coupling.col_idx[k] as usize; let v = coupling.values[k];
+        for k in coupling.row_ptr[r]..coupling.row_ptr[r + 1] {
+            let c = coupling.col_idx[k] as usize;
+            let v = coupling.values[k];
             if v != 0.0 { sys_coo.add(n_h1 + r, c, v); sys_coo.add(c, n_h1 + r, v); }
         }
     }
     let sys_mat = sys_coo.into_csr();
 
-    // rhs
+    // rhs (VectorFEDomainLFIntegrator order 2·GetOrder() = 2 for the source)
     let src_nd = FixedOrder::new(FnVectorSource(Box::new(move |x| { let f = source_3d(x, kappa); [f[0], f[1]] })), 2);
     let rhs_nd = VectorAssembler::assemble_linear(&nd_space, &[&src_nd], quad_order);
     let src_z = FixedOrder::new(FnScalarSource(Box::new(move |x| source_3d(x, kappa)[2])), 2);
@@ -367,20 +438,22 @@ fn main() {
     for i in 0..n_h1 { rhs[i] = rhs_z[i]; }
     for i in 0..n_nd { rhs[n_h1 + i] = rhs_nd[i]; }
 
-    // ---- dump raw A and b ----
+    // ---- dump raw A and b (both in the [z | nd] layout) ----
     dump_csr("rust_A.txt", n_total, &sys_mat.row_ptr, &sys_mat.col_idx, &sys_mat.values);
     dump_vec("rust_b.txt", &rhs);
 
-    // ---- BC ----
-    let nd_bdr = boundary_dofs_hcurl(&mesh, &nd_space, &mesh.unique_boundary_tags());
-    let h1_bdr = boundary_dofs(&mesh, z_space.dof_manager(), &mesh.unique_boundary_tags());
+    // ---- BC: projected exact solution on all boundary DOFs ----
+    let bdr_tags = mesh.unique_boundary_tags();
+    let nd_bdr = boundary_dofs_hcurl(&mesh, &nd_space, &bdr_tags);
+    let h1_bdr = boundary_dofs(&mesh, z_space.dof_manager(), &bdr_tags);
     eprintln!("  BC DOFs: H(Curl)={}  H1(z)={}", nd_bdr.len(), h1_bdr.len());
     let mut x = vec![0.0_f64; n_total];
-    project_bdr_coefficient_tangent_2d(&mut x[n_h1..], &nd_space,
-        &|x: &[f64], out: &mut [f64]| { let e = exact_e(x, kappa); out[0] = e[0]; out[1] = e[1]; },
-        &mesh.unique_boundary_tags());
-    for &d in &h1_bdr { let c = z_space.dof_manager().dof_coord(d); x[d as usize] = exact_e(c, kappa)[2]; }
-    dump_vec("rust_soldofs.txt", &x);
+    // Boundary values via the verified library projection (ND tangent data) —
+    // the interior values in `soldofs` above carry the full-projection view.
+    for &d in nd_bdr.iter() {
+        x[n_h1 + d as usize] = soldofs[n_h1 + d as usize];
+    }
+    for &d in &h1_bdr { x[d as usize] = soldofs[d as usize]; }
 
     // eliminate (DIAG_KEEP, MFEM EliminateVDofs style) and dump eliminated system + X0
     let mut elim_mat = sys_mat.clone();
@@ -391,14 +464,26 @@ fn main() {
     dump_vec("rust_elim_B.txt", &elim_b);
     dump_vec("rust_elim_X0.txt", &x);
 
-    // solve
-    let cfg = SolverConfig { rtol: 1e-12, max_iter: 500, verbose: true, ..Default::default() };
-    let linlvo_mat = fem_linalg::fem_to_linlvo_csr(&elim_mat);
-    let precond = GSSmoother::from_csr(&linlvo_mat).expect("GSSmoother");
-    solve_pcg(&elim_mat, &elim_b, &mut x, &precond, cfg.rtol, cfg.max_iter, true).expect("PCG");
+    // solve: C++ dump calls PCG(*A, M, B, X, 1, 500, 1e-12, 0.0), i.e. the
+    // free-function wrapper with SetRelTol(sqrt(1e-12)) = 1e-6.
+    let cfg = SolverConfig { rtol: 1e-6, max_iter: 500, verbose: true, ..Default::default() };
+    solve_pcg_gssmoother(&elim_mat, &elim_b, &mut x, &cfg).expect("PCG");
     dump_vec("rust_x.txt", &x);
 
-    // H(Curl) error (reuse the example's computation)
+    // H(Curl) error (same functional as the main example, on the solved x)
+    let err2 = hcurl_error_sq(&mesh, &nd_space, &z_space, &x, order, kappa);
+    println!("\n|| E_h - E ||_{{H(Curl)}} = {}\n", fmt_g(err2.sqrt()));
+}
+
+fn hcurl_error_sq(
+    mesh: &Mesh<2>,
+    nd_space: &HCurlSpace<Mesh<2>>,
+    z_space: &H1Space<Mesh<2>>,
+    x: &[f64],
+    order: u8,
+    kappa: f64,
+) -> f64 {
+    let n_h1 = z_space.n_dofs();
     let mut err2 = 0.0_f64;
     for e in 0..mesh.n_elements() as u32 {
         let nd_dofs: Vec<usize> = nd_space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -406,35 +491,25 @@ fn main() {
         let nodes = mesh.element_nodes(e);
         let signs = nd_space.element_signs(e);
         let (n_ld, rnd, rh1, n_lh1, jac_fn) = setup_element_ref(mesh.element_type(e), order);
-        let qord = (order as u8 * 6).max(3);
+        let qord = 2 * order + 3;
         let q = rnd.quadrature(qord);
         let mut pn = vec![0.0; n_ld * 2];
         let mut ph = vec![0.0; n_lh1];
         let mut cn = vec![0.0; n_ld];
         for (qi, xi) in q.points.iter().enumerate() {
-            let (inv_det, jit00, jit01, jit10, jit11, det) = jac_fn(&mesh, e, nodes, xi);
+            let (inv_det, jit00, jit01, jit10, jit11, det) = jac_fn(mesh, e, nodes, xi);
             let w = q.weights[qi] * det;
-            let xp = if mesh.element_type(e) == ElementType::Quad4 {
-                let geo = QuadQk::new(1); let ng = geo.n_dofs(); let mut phi = vec![0.0; ng];
-                geo.eval_basis(xi, &mut phi);
-                let mut p = [0.0_f64; 2];
-                for k in 0..ng { let c = mesh.node_coords(nodes[k]); p[0] += phi[k] * c[0]; p[1] += phi[k] * c[1]; }
-                p
-            } else {
-                let x0 = mesh.node_coords(nodes[0]);
-                let x1 = mesh.node_coords(nodes[1]);
-                let x2 = mesh.node_coords(nodes[2]);
-                [x0[0] + (x1[0]-x0[0])*xi[0] + (x2[0]-x0[0])*xi[1],
-                 x0[1] + (x1[1]-x0[1])*xi[0] + (x2[1]-x0[1])*xi[1]]
-            };
+            let xp = phys_point(mesh, mesh.element_type(e), nodes, xi);
             rnd.eval_basis_vec(xi, &mut pn);
             rh1.eval_basis(xi, &mut ph);
             rnd.eval_curl(xi, &mut cn);
             let mut eh = [0.0_f64; 3];
             for i in 0..n_ld {
                 let s = signs[i];
-                eh[0] += s * x[n_h1 + nd_dofs[i]] * (jit00 * pn[i*2] + jit01 * pn[i*2+1]);
-                eh[1] += s * x[n_h1 + nd_dofs[i]] * (jit10 * pn[i*2] + jit11 * pn[i*2+1]);
+                // MFEM CalcVShape_ND: shape = vshape_ref · J⁻¹ (row vector
+                // right-multiplied), so φx = jit00·φx + jit01·φy etc.
+                eh[0] += s * x[n_h1 + nd_dofs[i]] * (jit00 * pn[i * 2] + jit01 * pn[i * 2 + 1]);
+                eh[1] += s * x[n_h1 + nd_dofs[i]] * (jit10 * pn[i * 2] + jit11 * pn[i * 2 + 1]);
             }
             for j in 0..n_lh1 { eh[2] += x[h1_dofs[j]] * ph[j]; }
             let mut ce = [0.0_f64; 3];
@@ -443,19 +518,24 @@ fn main() {
             let mut gr = vec![0.0_f64; n_lh1 * 2];
             rh1.eval_grad_basis(xi, &mut gr);
             for j in 0..n_lh1 {
-                let (dx, dy) = (jit00*gr[j*2]+jit01*gr[j*2+1], jit10*gr[j*2]+jit11*gr[j*2+1]);
+                // ∇z_phys = J⁻¹·∇z_ref (column convention; see the main
+                // example's compute_hcurl_error for the jit mapping).
+                let dx = jit00 * gr[j * 2] + jit01 * gr[j * 2 + 1];
+                let dy = jit10 * gr[j * 2] + jit11 * gr[j * 2 + 1];
                 ce[0] += x[h1_dofs[j]] * dy;
                 ce[1] -= x[h1_dofs[j]] * dx;
             }
             let (ee, ec) = (exact_e(&xp, kappa), exact_curl(&xp, kappa));
-            for c in 0..3 { let d = eh[c] - ee[c]; err2 += w * d * d; let dc = ce[c] - ec[c]; err2 += w * dc * dc; }
+            for c in 0..3 {
+                let d = eh[c] - ee[c]; err2 += w * d * d;
+                let dc = ce[c] - ec[c]; err2 += w * dc * dc;
+            }
         }
     }
-    let hcurl_err = err2.sqrt();
-    println!("\n|| E_h - E ||_{{H(Curl)}} = {hcurl_err:.10e}");
+    err2
 }
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ─── helper source integrators (same as the main example) ───────────────────
 
 use fem_assembly::vector_integrator::{VectorLinearIntegrator, VectorQpData};
 struct FnVectorSource(Box<dyn Fn(&[f64]) -> [f64; 2] + Send + Sync>);

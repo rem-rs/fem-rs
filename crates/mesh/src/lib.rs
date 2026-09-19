@@ -53,6 +53,7 @@ pub use boundary::{BoundaryTag, NamedAttributeRegistry, NamedAttributeSet, Physi
 pub use cad::{CadShape, CadModel, AnalyticSurface, FacetedCadSurface, NurbsCadSurface2D, TrimLoop, TrimmedNurbsSurface, ProjectionConfig, project_boundary_to_cad, project_elevated_node};
 pub use curved::{CurvedMesh, JacobianCache, CurvedElementTransformation, refine_curved_2d, refine_curved_3d, refine_curved_3d_general, refine_curved_2d_nc, refine_curved_3d_nc, refine_curved_3d_nc_general, refine_curved_2d_nc_with_cad, refine_curved_3d_nc_with_cad};
 pub use element_type::ElementType;
+pub use nurbs_patch::{NurbsKnotVector, NurbsPatch};
 pub use kdtree::{KdTree, KdTreeNodalProjection, Ordering as KdTreeOrdering};
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
 pub use findpts::{FindPoints, FindPointsOptions, LocatedPoint as FindPointResult};
@@ -64,3 +65,6 @@ pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
 pub use particle::ParticleSet;
 pub use supermesh::{build_supermesh, SupermeshElement};
 pub mod nurbs_mesh;
+/// NURBS patch object layer — port of MFEM `NURBSPatch` plus the `KnotVector`
+/// working API (Greville/Botella/Demko abscissae, `GetInterpolant`, `Print`).
+pub mod nurbs_patch;

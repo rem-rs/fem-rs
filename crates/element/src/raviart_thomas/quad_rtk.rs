@@ -351,6 +351,77 @@ impl QuadRTk {
             QuadRTOpen::IntegratedGLL => partial_open(&bary_eval(&d.cp, x).1),
         }
     }
+
+    /// Per-DOF data of MFEM `RT_QuadrilateralElement::ProjectIntegrated`
+    /// (`fe_rt.cpp`) — the *integrated* flux functionals of the
+    /// [`QuadRTOpen::IntegratedGLL`](QuadRTOpen::IntegratedGLL) variant
+    /// ([`Self::new_integrated_gll`]): each local DOF is the integral of
+    /// `f·(adj(J)·n̂)` over one boundary-parallel sub-cell segment, sampled
+    /// with MFEM's `IntRules.Get(SEGMENT, order)` Gauss rule (element order
+    /// `k+1`, weights `w_k·h`).
+    ///
+    /// The list is in the element's local DOF order (entry `n` = local DOF
+    /// `n`), and `n̂` already carries the `dof_map` flip (the decoded sign),
+    /// so a space scatters `global = sign · local` exactly as in assembly.
+    pub fn integrated_functionals(&self) -> Vec<crate::nedelec::IntegratedDofFunctional> {
+        assert!(
+            self.open == QuadRTOpen::IntegratedGLL,
+            "QuadRTk::integrated_functionals requires the IntegratedGLL variant"
+        );
+        let p = self.order;
+        let d = rt_data(p);
+        // MFEM `IntRules.Get(Geometry::SEGMENT, order)` with the element
+        // order `p + 1`.
+        let npts = (p + 3) / 2;
+        let (gx, gw) = crate::quadrature::gauss_legendre_01(npts);
+        let dof2 = d.dof / 2;
+        (0..d.dof)
+            .map(|idx| {
+                // Invert the dof_map entry of this local DOF's tensor slot.
+                let tslot = d.dof_map.iter().position(|&v| decode(v).0 == idx).expect(
+                    "RT_Quad dof_map is a bijection (pinned by the element tests)",
+                );
+                let (_, s) = decode(d.dof_map[tslot]);
+                let (i_fix, i_sub, along_x) = if tslot < dof2 {
+                    // x family: slot `i + j*(p+2)`, closed x `i`, open y `j`;
+                    // segment at `x = cp[i]` over the y sub-cell `j`.
+                    let i = tslot % (p + 2);
+                    let j = tslot / (p + 2);
+                    (i, j, false)
+                } else {
+                    // y family: slot `dof2 + i + j*(p+1)`, open x `i`,
+                    // closed y `j`; segment at `y = cp[j]` over the x
+                    // sub-cell `i`.
+                    let s2 = tslot - dof2;
+                    let i = s2 % (p + 1);
+                    let j = s2 / (p + 1);
+                    (j, i, true)
+                };
+                let h = d.cp[i_sub + 1] - d.cp[i_sub];
+                let samples: Vec<([f64; 2], f64)> = gx
+                    .iter()
+                    .zip(&gw)
+                    .map(|(&g, &w)| {
+                        let pt = if along_x {
+                            [d.cp[i_sub] + h * g, d.cp[i_fix]]
+                        } else {
+                            [d.cp[i_fix], d.cp[i_sub] + h * g]
+                        };
+                        (pt, w * h)
+                    })
+                    .collect();
+                // `nk`/`dof2nk`: the flip sign of the dof_map entry *is* the
+                // normal direction (`(±1, 0)` for the x family, `(0, ±1)` for
+                // the y family — MFEM's `nk` table).
+                let n = if tslot < dof2 {
+                    [s, 0.0]
+                } else {
+                    [0.0, s]
+                };
+                crate::nedelec::IntegratedDofFunctional { samples, t: n }
+            })
+            .collect()
+    }
 }
 
 /// Integrated (Gerritsma) open modes `o_i = -Σ_{j<=i} c'_j` from the derivative

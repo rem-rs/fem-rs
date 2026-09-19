@@ -20,16 +20,16 @@
 //! |---|---|
 //! | `Mesh mesh(mesh_file, 1, 1)` + `-r` `UniformRefinement()` | `read_mfem_file` + `refine_uniform` |
 //! | `H1_FECollection(order, dim, GaussLobatto)` | `H1Space::new(mesh, order)` |
-//! | `ND_FECollection(order, dim, GaussLobatto, IntegratedGLL)` | `HCurlSpace::new(mesh, order)` |
-//! | `RT_FECollection(order-1, dim, GaussLobatto, IntegratedGLL)` | `HDivSpace::new(mesh, order-1)` |
+//! | `ND_FECollection(order, dim, GaussLobatto, IntegratedGLL)` | `HCurlSpace::new_gauss_lobatto_integrated_gll` |
+//! | `RT_FECollection(order-1, dim, GaussLobatto, IntegratedGLL)` | `HDivSpace::new_gauss_lobatto_integrated_gll` |
 //! | `MassIntegrator + DiffusionIntegrator` (H1/L2) | `MassIntegrator` + `DiffusionIntegrator` |
 //! | `VectorFEMassIntegrator (+ CurlCurl/DivDiv)` (ND/RT) | `VectorMassIntegrator` + `CurlCurlIntegrator`/`DivDivIntegrator` |
-//! | `fes.GetBoundaryTrueDofs(ess_dofs)` | `boundary_dofs` / `boundary_dofs_hcurl` / `boundary_dofs_hdiv_quad_rt` |
-//! | `x.ProjectCoefficient(u_coeff / u_vec_coeff)` | `FESpace::interpolate` |
+//! | `fes.GetBoundaryTrueDofs(ess_dofs)` | `boundary_dofs` / `boundary_dofs_hcurl` / `boundary_dofs_hdiv` |
+//! | `x.ProjectCoefficient(u_coeff / u_vec_coeff)` | `FESpace::interpolate` / `interpolate_vector` |
 //! | `FormLinearSystem` (DIAG_KEEP) | `apply_dirichlet` (`DIAG_KEEP`) |
 //! | `LORSolver<GSSmoother>` (no SuiteSparse) | `build_lor_amg_h1` (H1) / `build_lor_sgs_nd_quad` / `build_lor_sgs_rt_quad` |
 //! | `CGSolver` (rtol 1e-12, 500 iters) | `solve_pcg_lor_amg` / `solve_pcg_precond` |
-//! | `x.ComputeL2Error(u)` | `GridFunction::compute_l2_error` / `compute_l2_error_hcurl/hdiv` |
+//! | `x.ComputeL2Error(u)` | `GridFunction::compute_l2_error` / `lor_factory::compute_l2_error_*_quad_igll` |
 //!
 //! ## Measured C++ reference (MFEM 4.10, `$HOME/mfem410_ser`, no SuiteSparse)
 //!
@@ -62,28 +62,28 @@
 //! the same solution (`star.mesh`: 26 fem-rs iterations against 58 C++
 //! iterations, `L2 error` identical to the printed digit).
 //!
+//! ## Verified: `-fe n` / `-fe r` on a quad mesh (D368)
+//!
+//! The high-order spaces are now MFEM's LOR-compatible collections exactly:
+//! `HCurlSpace::new_gauss_lobatto_integrated_gll` /
+//! `HDivSpace::new_gauss_lobatto_integrated_gll` build the
+//! `ND_FECollection(o, 2, GaussLobatto, IntegratedGLL)` /
+//! `RT_FECollection(o-1, 2, GaussLobatto, IntegratedGLL)` spaces (the faithful
+//! in-tree `QuadND` / `QuadRTk` IntegratedGLL elements behind identical slot
+//! tables), the `VectorAssembler::assemble_*_quad_igll` entries pair the same
+//! elements with those tables, `interpolate_vector` reproduces MFEM's
+//! `ProjectCoefficient` → `ProjectIntegrated` sub-cell functionals, and
+//! `boundary_dofs_hdiv` exposes the whole `order`-dof block of every boundary
+//! edge (D368's fem-space fix — the per-edge workaround this driver used to
+//! carry is deleted).  The LOR legs (`build_lor_sgs_*`, D367) eliminate the HO
+//! essential dofs on `A_LOR` and apply one symmetric GS sweep = MFEM's
+//! `LORSolver<GSSmoother>`.  On `data/inline-quad.mesh -o 3` both legs print
+//! `Number of DOFs: 1200` and `L2 error: 0.000134744` — byte-identical to the
+//! C++ (element-level parity is pinned by the D368 probe test in
+//! `crates/assembly/tests`).
+//!
 //! ## Not ported (honest gaps, refused with a message, never faked)
 //!
-//! * **`-fe n` / `-fe r` on a quad mesh (D368)**: the D367 capability landed —
-//!   `build_lor_sgs_nd_quad` / `build_lor_sgs_rt_quad` take the HO essential
-//!   dofs and eliminate them on `A_LOR` exactly like MFEM's
-//!   `LORSolver(a_ho, ess_tdof_list)` (serial `BatchedLORAssembly::Assemble`
-//!   finishes with `EliminateBC(ess_dofs, DIAG_KEEP)`, `lor_batched.cpp:726-734`;
-//!   the discrete gradient of an AMS inner needs no ess treatment,
-//!   `lor_ams.cpp`), and the inner is one symmetric GS sweep = MFEM's
-//!   `LORSolver<GSSmoother>`.  The H(div) essential list is also complete now
-//!   ([`boundary_dofs_hdiv_quad_rt`]: 3 dofs per boundary edge like MFEM's
-//!   `GetBoundaryTrueDofs`, where `boundary_dofs_hdiv` exposed only one).
-//!   What still fails is the **HO space basis** (D69): fem-rs's quad ND/RT
-//!   elements (the legacy `QuadNDk` / `QuadRTk` behind `vec_ref_elem`) are not
-//!   faithful `ND_FECollection` / `RT_FECollection` `(GaussLobatto,
-//!   IntegratedGLL)` ports, and the LOR transfer — built for MFEM's dof
-//!   functionals — then mismatches the HO operator it must precondition.
-//!   Measured on `data/inline-quad.mesh -o 3` with this very driver: ND PCG
-//!   does not converge (true relative residual `2.1e-02` after 500 iterations
-//!   against the C++'s 279); RT converges in 281 iterations (C++ 268 with the
-//!   same GS algorithm) but prints `L2 error: 0.000134747` against the C++'s
-//!   `0.000134744`.  Porting the faithful quad ND/RT spaces is D368/D69.
 //! * **`-fe n` / `-fe r` on a simplex mesh**: fem-rs's ND/RT LOR
 //!   discretisations are tensor-product only (`LorNd::<2>::new_quad` /
 //!   `LorRt::<2>::new_quad` require every element to be `Quad4`), while MFEM's
@@ -107,9 +107,7 @@
 use std::f64::consts::PI;
 
 use fem_assembly::coefficient::FnVectorCoeff;
-use fem_assembly::postproc::grid_function::{
-    compute_l2_error_hcurl, compute_l2_error_hdiv, GridFunction,
-};
+use fem_assembly::postproc::grid_function::GridFunction;
 use fem_assembly::standard::{
     CurlCurlIntegrator, DiffusionIntegrator, DivDivIntegrator, MassIntegrator,
     VectorDomainLFIntegrator, VectorMassIntegrator,
@@ -121,8 +119,8 @@ use fem_mesh::topology::MeshTopology;
 use fem_mesh::{refine_uniform, Mesh};
 use fem_solver::lor::solve_pcg_lor_amg;
 use fem_solver::{fmt_g, solve_pcg_precond, SolverConfig};
-use fem_space::constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl};
-use fem_space::{EdgeKey, FESpace, HCurlSpace, HDivSpace, H1Space};
+use fem_space::constraints::{apply_dirichlet, boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
+use fem_space::{FESpace, HCurlSpace, HDivSpace, H1Space};
 
 // ─── lor_mms.hpp ────────────────────────────────────────────────────────────
 
@@ -343,47 +341,12 @@ fn out_of_scope_guards(mesh: &Mesh<2>, leg: Leg, order: u8) {
         );
         std::process::exit(3);
     }
-    // Quad ND/RT: the D367 preconditioner fix is in (`build_lor_sgs_*` build on
-    // the eliminated LOR matrix, MFEM `EliminateBC` DIAG_KEEP semantics, plus
-    // the symmetric-GS inner of `LORSolver<GSSmoother>`), and the H(div)
-    // essential list is now complete (`boundary_dofs_hdiv_quad_rt`, 3 dofs per
-    // boundary edge = MFEM `GetBoundaryTrueDofs`).  What remains is **D368**:
-    // the high-order quad spaces are not field-faithful to MFEM's
-    // `(GaussLobatto, IntegratedGLL)` collections (D69), so the discrete
-    // solution differs and the legs do not meet the byte-identical bar.
-    // Measured on `data/inline-quad.mesh -o 3` with this very driver (the
-    // refusal below is the only thing that normally stops it):
-    // * `-fe n`: PCG does not converge — 500 iterations, true relative residual
-    //   2.1101872802611644e-02 (C++: 279 iterations).
-    // * `-fe r`: PCG converges in 281 iterations (C++: 268, same
-    //   `LORSolver<GSSmoother>` algorithm), true relative residual 2.090907e-12,
-    //   but `L2 error: 0.000134747` against the C++'s `0.000134744` — the
-    //   remaining gap is the HO space, not the solver (quadrature orders were
-    //   verified identical: the `2*el.GetOrder()` VectorFE load rule and the
-    //   per-integrator order-6 rules all select the same 4×4 Gauss product).
-    let n = if leg == Leg::HCurl { "n" } else { "r" };
-    eprintln!(
-        "lor_solvers: -fe {n} on a quad mesh does not meet the 1:1 fidelity bar (D368). The D367 \
-         fix landed: `fem_assembly::lor_factory::build_lor_sgs_nd_quad` / `build_lor_sgs_rt_quad` \
-         now take the HO essential dofs and eliminate them on `A_LOR` with MFEM's \
-         `EliminateBC(ess_dofs, DIAG_KEEP)` semantics (`lor_batched.cpp:726-734`), and the inner \
-         is one symmetric Gauss-Seidel sweep = MFEM's `LORSolver<GSSmoother>`. The remaining gap \
-         is the HO space basis: fem-rs's quad ND/RT elements (`vec_ref_elem` legacy `QuadNDk` / \
-         `QuadRTk`, D69) are not faithful ports of MFEM's \
-         `ND_FECollection(o, 2, GaussLobatto, IntegratedGLL)` / \
-         `RT_FECollection(o-1, 2, GaussLobatto, IntegratedGLL)`, so the LOR transfer (built for \
-         MFEM's dof functionals) does not spectrally match the HO operator. Measured \
-         (data/inline-quad.mesh, -o 3): {msg}. C++ reference: ND 279 iterations, RT 268 \
-         iterations, both `L2 error: 0.000134744`. Porting the faithful `QuadND`/`QuadRT` spaces \
-         is debt D368/D69 (large, separate). Exiting with status 3.",
-        msg = if leg == Leg::HCurl {
-            "PCG does not converge: 500 iterations, true relative residual 2.1101872802611644e-02"
-        } else {
-            "PCG converges in 281 iterations (true relative residual 2.090907e-12) but prints \
-             `L2 error: 0.000134747`, 3 ulps of the 7th digit away from the C++"
-        }
-    );
-    std::process::exit(3);
+    // Quad ND/RT (D368): both legs run on MFEM's LOR-compatible
+    // `(GaussLobatto, IntegratedGLL)` collections
+    // (`new_gauss_lobatto_integrated_gll` spaces, the `*_quad_igll` assembly
+    // entries and the fixed `boundary_dofs_hdiv` essential list) and are
+    // verified byte-identical to the C++ on this mesh/order — see the module
+    // doc.
 }
 
 /// Quadrature order for the bilinear forms.
@@ -440,52 +403,6 @@ fn form_system(a: CsrMatrix<f64>, b: Vec<f64>, ess: &[u32], x0: &[f64]) -> (CsrM
     (a, b, x0.to_vec())
 }
 
-/// `fes.GetBoundaryTrueDofs(ess_dofs)` for the H(div) leg on a quad mesh.
-///
-/// `fem_space::constraints::boundary_dofs_hdiv` exposes **one** dof per
-/// boundary edge (`HDivSpace::edge_face_dof` returns only the first), but the
-/// LOR-compatible `RT_FECollection(order-1, 2, GaussLobatto, IntegratedGLL)`
-/// element (MFEM `RT_QuadrilateralElement(p)`, `fem/fe/fe_rt.cpp:26`) carries
-/// `p + 1` dofs per edge — for the `-o 3` leg (`RT_Quad(2)`) three per edge,
-/// so a per-edge dof list would leave two thirds of the boundary normal trace
-/// unconstrained.  This walks the mesh boundary and collects the *full* edge
-/// dof block of `HDivSpace::element_dofs`: local edge `i` occupies the
-/// `f` consecutive slots `f·i .. f·i+f−1` with `f = p+1`, where
-/// `2·f·(f+1) = dofs per element` for the `RT_QuadrilateralElement` layout
-/// (orientation-reversed edges enumerate the block backwards, which does not
-/// change the dof set).
-fn boundary_dofs_hdiv_quad_rt(mesh: &Mesh<2>, space: &HDivSpace<Mesh<2>>, tags: &[i32]) -> Vec<u32> {
-    let dpe = space.element_dofs(0).len();
-    let f = (((1.0 + 2.0 * dpe as f64).sqrt() - 1.0) / 2.0).round() as usize;
-    assert!(
-        2 * f * (f + 1) == dpe && f >= 1,
-        "unexpected quad RT dof layout: {dpe} dofs per element"
-    );
-
-    // Edge key → (element, local edge index).
-    let mut edge_elem: std::collections::HashMap<EdgeKey, (u32, usize)> = Default::default();
-    for e in 0..mesh.n_elements() as u32 {
-        let verts = mesh.element_nodes(e);
-        for (i, (a, b)) in [(0usize, 1usize), (1, 2), (2, 3), (3, 0)].iter().enumerate() {
-            edge_elem.insert(EdgeKey::new(verts[*a], verts[*b]), (e, i));
-        }
-    }
-
-    let mut out: Vec<u32> = Vec::new();
-    for bf in 0..mesh.n_boundary_faces() as u32 {
-        if !tags.contains(&mesh.face_tag(bf)) {
-            continue;
-        }
-        let nodes = mesh.face_nodes(bf);
-        let key = EdgeKey::new(nodes[0], nodes[1]);
-        if let Some(&(e, li)) = edge_elem.get(&key) {
-            let dofs = space.element_dofs(e);
-            out.extend_from_slice(&dofs[li * f..li * f + f]);
-        }
-    }
-    out
-}
-
 /// `-fe h`: `M + K` on `H1(order)`, LOR-AMG preconditioned CG.
 fn run_h1(mesh: &Mesh<2>, order: u8) -> Outcome {
     let space = H1Space::new(mesh.clone(), order);
@@ -525,19 +442,30 @@ fn run_h1(mesh: &Mesh<2>, order: u8) -> Outcome {
 }
 
 /// `-fe n`: `M + curl-curl` on `H(curl, order)`, LOR-AMS preconditioned CG.
+///
+/// D368: the space is MFEM's LOR-compatible
+/// `ND_FECollection(order, 2, GaussLobatto, IntegratedGLL)` collection
+/// ([`HCurlSpace::new_gauss_lobatto_integrated_gll`]), assembled and evaluated
+/// with the matching `*_quad_igll` entries (the same basis pair the LOR
+/// builders use, D347 pattern), and the interpolation is MFEM's
+/// `ProjectCoefficient` → `ProjectIntegrated`.
 fn run_nd(mesh: &Mesh<2>, order: u8) -> Outcome {
-    let space = HCurlSpace::new(mesh.clone(), order);
+    let space = HCurlSpace::new_gauss_lobatto_integrated_gll(mesh.clone(), order);
+    assert!(
+        space.quad_integrated_gll(),
+        "the quad ND leg requires the (GaussLobatto, IntegratedGLL) variant"
+    );
     let n_dofs = space.n_dofs();
     let qo = bilinear_order(order);
     let mass = VectorMassIntegrator { alpha: 1.0 };
     let curl = CurlCurlIntegrator { mu: 1.0 };
-    let a = VectorAssembler::assemble_bilinear(&space, &[&mass, &curl], qo);
+    let a = VectorAssembler::assemble_bilinear_quad_igll(&space, &[&mass, &curl], qo);
     let src = VectorDomainLFIntegrator {
         f: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
             out.copy_from_slice(&f_vec_rhs(x, false));
         }),
     };
-    let b = VectorAssembler::assemble_linear(&space, &[&src], vector_load_order(order));
+    let b = VectorAssembler::assemble_linear_quad_igll(&space, &[&src], vector_load_order(order));
 
     let tags = mesh.unique_boundary_tags();
     let ess = boundary_dofs_hcurl(mesh, &space, &tags);
@@ -562,8 +490,12 @@ fn run_nd(mesh: &Mesh<2>, order: u8) -> Outcome {
     };
     let res = solve_pcg_precond(&a, &b, &mut x, &lor, &cfg).expect("LOR-SGS PCG failed");
 
-    let l2_err = compute_l2_error_hcurl(&x, &space, &|x: &[f64]| u_vec_exact(x),
-                                        l2_rule_order(order), None);
+    let l2_err = fem_assembly::lor_factory::compute_l2_error_hcurl_quad_igll(
+        &x,
+        &space,
+        &|x: &[f64]| u_vec_exact(x),
+        l2_rule_order(order),
+    );
     Outcome {
         n_dofs,
         iterations: res.iterations,
@@ -573,24 +505,35 @@ fn run_nd(mesh: &Mesh<2>, order: u8) -> Outcome {
 }
 
 /// `-fe r`: `M + div-div` on `H(div, order-1)`, LOR-Jacobi preconditioned CG.
+///
+/// D368: the space is MFEM's LOR-compatible
+/// `RT_FECollection(order-1, 2, GaussLobatto, IntegratedGLL)` collection
+/// ([`HDivSpace::new_gauss_lobatto_integrated_gll`]), the essential list comes
+/// from the fixed `boundary_dofs_hdiv` (`order` dofs per boundary edge = MFEM
+/// `GetBoundaryTrueDofs`), and the assembly/interpolation/L2 entries are the
+/// matching `*_quad_igll` ones.
 fn run_rt(mesh: &Mesh<2>, order: u8) -> Outcome {
     let rt_order = order - 1;
-    let space = HDivSpace::new(mesh.clone(), rt_order);
+    let space = HDivSpace::new_gauss_lobatto_integrated_gll(mesh.clone(), rt_order);
+    assert!(
+        space.quad_integrated_gll(),
+        "the quad RT leg requires the (GaussLobatto, IntegratedGLL) variant"
+    );
     let n_dofs = space.n_dofs();
     let qo = bilinear_order(order);
     let mass = VectorMassIntegrator { alpha: 1.0 };
     let divdiv = DivDivIntegrator { kappa: 1.0 };
-    let a = VectorAssembler::assemble_bilinear(&space, &[&mass, &divdiv], qo);
+    let a = VectorAssembler::assemble_bilinear_quad_igll(&space, &[&mass, &divdiv], qo);
     let src = VectorDomainLFIntegrator {
         f: FnVectorCoeff(|x: &[f64], out: &mut [f64]| {
             // MFEM `f_vec(RT)` with RT=true -> the grad-div load.
             out.copy_from_slice(&f_vec_rhs(x, true));
         }),
     };
-    let b = VectorAssembler::assemble_linear(&space, &[&src], vector_load_order(order));
+    let b = VectorAssembler::assemble_linear_quad_igll(&space, &[&src], vector_load_order(order));
 
     let tags = mesh.unique_boundary_tags();
-    let ess = boundary_dofs_hdiv_quad_rt(mesh, &space, &tags);
+    let ess = boundary_dofs_hdiv(mesh, &space, &tags);
     let x0 = space.interpolate_vector(&u_vec_exact).as_slice().to_vec();
 
     let (a, b, mut x) = form_system(a, b.as_slice().to_vec(), &ess, &x0);
@@ -606,8 +549,12 @@ fn run_rt(mesh: &Mesh<2>, order: u8) -> Outcome {
     };
     let res = solve_pcg_precond(&a, &b, &mut x, &lor, &cfg).expect("LOR-Jacobi PCG failed");
 
-    let l2_err = compute_l2_error_hdiv(&x, &space, &|x: &[f64]| u_vec_exact(x),
-                                       l2_rule_order(order), None);
+    let l2_err = fem_assembly::lor_factory::compute_l2_error_hdiv_quad_igll(
+        &x,
+        &space,
+        &|x: &[f64]| u_vec_exact(x),
+        l2_rule_order(order),
+    );
     Outcome {
         n_dofs,
         iterations: res.iterations,

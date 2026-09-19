@@ -40,6 +40,49 @@ pub(crate) fn vec_ref_elem(
     dim: usize,
     order: u8,
 ) -> Box<dyn VectorReferenceElement> {
+    vec_ref_elem_choice(space_type, elem_type, dim, order)
+}
+
+/// [`vec_ref_elem`] with the 2-D quad basis-variant selector (D347 pattern:
+/// the variant must be the space's own, `HCurlSpace::quad_integrated_gll` /
+/// `HDivSpace::quad_integrated_gll`, so space and assembler can never
+/// disagree).
+///
+/// `quad_igll = true` selects MFEM's `(GaussLobatto, IntegratedGLL)`
+/// collection elements on quad cells — the faithful
+/// `fem_element::nedelec::QuadND::new_integrated_gll` /
+/// `fem_element::raviart_thomas::QuadRTk::new_integrated_gll` — whose dof
+/// tables pair 1:1 with the (identical) space slot tables.  Every other cell
+/// type, and `quad_igll = false`, keeps the historical elements bit for bit.
+pub(crate) fn vec_ref_elem_with_basis(
+    space_type: SpaceType,
+    elem_type: ElementType,
+    dim: usize,
+    order: u8,
+    quad_igll: bool,
+) -> Box<dyn VectorReferenceElement> {
+    if quad_igll {
+        match (space_type, elem_type) {
+            (SpaceType::HCurl, ElementType::Quad4) if order >= 1 => {
+                return Box::new(fem_element::nedelec::QuadND::new_integrated_gll(order as usize));
+            }
+            (SpaceType::HDiv, ElementType::Quad4) => {
+                return Box::new(
+                    fem_element::raviart_thomas::QuadRTk::new_integrated_gll(order as usize),
+                );
+            }
+            _ => {}
+        }
+    }
+    vec_ref_elem_choice(space_type, elem_type, dim, order)
+}
+
+fn vec_ref_elem_choice(
+    space_type: SpaceType,
+    elem_type: ElementType,
+    dim: usize,
+    order: u8,
+) -> Box<dyn VectorReferenceElement> {
     match (space_type, elem_type, dim, order) {
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 1) => Box::new(TriNDk::new(1)),
         (SpaceType::HCurl, ElementType::Tri3 | ElementType::Tri6, 2, 2) => Box::new(TriND2),
@@ -363,6 +406,26 @@ pub fn accumulate_vector_bilinear_element_blocks<S: FESpace>(
     coo: &mut CooMatrix<f64>,
     blocks: &[FaceDofBlock],
 ) {
+    accumulate_vector_bilinear_element_blocks_with_basis(
+        space, e, integrators, quad_order, coo, blocks, false,
+    );
+}
+
+/// [`accumulate_vector_bilinear_element_blocks`] for the 2-D quad
+/// `(GaussLobatto, IntegratedGLL)` variant spaces (D368): selects the faithful
+/// `QuadND`/`QuadRTk` integrated-GLL reference elements — the same basis pair
+/// the space's `quad_integrated_gll` flag names, so space and assembler can
+/// never disagree (D347 pattern).
+#[allow(clippy::too_many_arguments)]
+pub fn accumulate_vector_bilinear_element_blocks_with_basis<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn VectorBilinearIntegrator],
+    quad_order: u8,
+    coo: &mut CooMatrix<f64>,
+    blocks: &[FaceDofBlock],
+    quad_igll: bool,
+) {
     let mesh = space.mesh();
     let edim = mesh.dim() as usize;      // embedding dimension (3 for a surface mesh)
     let tdim = mesh.topological_dim() as usize; // element dimension (2 for a surface mesh)
@@ -370,7 +433,7 @@ pub fn accumulate_vector_bilinear_element_blocks<S: FESpace>(
     let dim = edim;                       // physical component count of phi_vec
     let stype = space.space_type();
     let elem_type = mesh.element_type(e);
-    let ref_elem = vec_ref_elem(stype, elem_type, edim, space.order());
+    let ref_elem = vec_ref_elem_with_basis(stype, elem_type, edim, space.order(), quad_igll);
     let n_ldofs_ref = ref_elem.n_dofs();
     let ref_dim = ref_elem.dim() as usize; // 2 for surface Nédélec, == dim otherwise
     let global_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
@@ -681,6 +744,24 @@ pub fn accumulate_vector_linear_element_blocks<S: FESpace>(
     rhs: &mut [f64],
     blocks: &[FaceDofBlock],
 ) {
+    accumulate_vector_linear_element_blocks_with_basis(
+        space, e, integrators, quad_order, rhs, blocks, false,
+    );
+}
+
+/// [`accumulate_vector_linear_element_blocks`] for the 2-D quad
+/// `(GaussLobatto, IntegratedGLL)` variant spaces (D368) — see
+/// [`accumulate_vector_bilinear_element_blocks_with_basis`].
+#[allow(clippy::too_many_arguments)]
+pub fn accumulate_vector_linear_element_blocks_with_basis<S: FESpace>(
+    space: &S,
+    e: u32,
+    integrators: &[&dyn VectorLinearIntegrator],
+    quad_order: u8,
+    rhs: &mut [f64],
+    blocks: &[FaceDofBlock],
+    quad_igll: bool,
+) {
     let mesh = space.mesh();
     let edim = mesh.dim() as usize;
     let tdim = mesh.topological_dim() as usize;
@@ -688,7 +769,7 @@ pub fn accumulate_vector_linear_element_blocks<S: FESpace>(
     let dim = edim;
     let stype = space.space_type();
     let elem_type = mesh.element_type(e);
-    let ref_elem = vec_ref_elem(stype, elem_type, edim, space.order());
+    let ref_elem = vec_ref_elem_with_basis(stype, elem_type, edim, space.order(), quad_igll);
     let n_ldofs = ref_elem.n_dofs();
     let ref_dim = ref_elem.dim() as usize;
     let quad = ref_elem.quadrature(quad_order);
@@ -1276,6 +1357,22 @@ impl VectorAssembler {
         S: FESpace + Sync,
         S::Mesh: MeshTopology + Sync,
     {
+        Self::assemble_bilinear_single_many_with_basis(space, integrators, quad_order, false)
+    }
+
+    /// [`Self::assemble_bilinear_single_many`] for the 2-D quad
+    /// `(GaussLobatto, IntegratedGLL)` variant spaces (D368) — `quad_igll`
+    /// must be the space's own `quad_integrated_gll` flag (D347 pattern).
+    fn assemble_bilinear_single_many_with_basis<S>(
+        space: &S,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+        quad_igll: bool,
+    ) -> CsrMatrix<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
         let mesh = space.mesh();
         let n_dofs = space.n_dofs();
 
@@ -1288,8 +1385,8 @@ impl VectorAssembler {
                     .map(|e| {
                         let mut local = CooMatrix::<f64>::new(n_dofs, n_dofs);
                         let blocks = space.element_face_blocks(e);
-                        accumulate_vector_bilinear_element_blocks(
-                            space, e, integrators, quad_order, &mut local, blocks,
+                        accumulate_vector_bilinear_element_blocks_with_basis(
+                            space, e, integrators, quad_order, &mut local, blocks, quad_igll,
                         );
                         local
                     })
@@ -1307,11 +1404,65 @@ impl VectorAssembler {
         let mut coo = CooMatrix::<f64>::new(n_dofs, n_dofs);
         for e in mesh.elem_iter() {
             let blocks = space.element_face_blocks(e);
-            accumulate_vector_bilinear_element_blocks(
-                space, e, integrators, quad_order, &mut coo, blocks,
+            accumulate_vector_bilinear_element_blocks_with_basis(
+                space, e, integrators, quad_order, &mut coo, blocks, quad_igll,
             );
         }
         coo.into_csr()
+    }
+
+    /// [`Self::assemble_bilinear`] for the 2-D quad `(GaussLobatto,
+    /// IntegratedGLL)` variant spaces (D368): assembles with MFEM's
+    /// LOR-compatible collection elements (`ND_QuadrilateralElement(p,
+    /// GaussLobatto, IntegratedGLL)` / `RT_QuadrilateralElement(p, ·, ·)`).
+    /// `space.quad_integrated_gll()` must be `true` — the variant flag flows
+    /// from the space so space and assembler can never disagree (D347
+    /// pattern).
+    pub fn assemble_bilinear_quad_igll<S>(
+        space: &S,
+        integrators: &[&dyn VectorBilinearIntegrator],
+        quad_order: u8,
+    ) -> CsrMatrix<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let mesh = space.mesh();
+        let n_dofs = space.n_dofs();
+        let space_order = space.element_order(0);
+        let elem_type = mesh.element_type(0);
+        if integrators
+            .iter()
+            .any(|i| i.integration_order_for(space_order, elem_type).is_some())
+        {
+            let mut acc: Option<CsrMatrix<f64>> = None;
+            for integ in integrators {
+                let qo = integ
+                    .integration_order_for(space_order, elem_type)
+                    .unwrap_or(quad_order);
+                let m = Self::assemble_bilinear_single_with_basis(space, *integ, qo, true);
+                acc = Some(match acc {
+                    None => m,
+                    Some(a) => a.add(&m),
+                });
+            }
+            return acc.unwrap_or_else(|| CsrMatrix::new_empty(n_dofs, n_dofs));
+        }
+        Self::assemble_bilinear_single_many_with_basis(space, integrators, quad_order, true)
+    }
+
+    /// [`Self::assemble_bilinear_single`] with the basis-variant selector.
+    fn assemble_bilinear_single_with_basis<S>(
+        space: &S,
+        integ: &dyn VectorBilinearIntegrator,
+        quad_order: u8,
+        quad_igll: bool,
+    ) -> CsrMatrix<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        Self::assemble_bilinear_single_many_with_basis(space, &[integ], quad_order, quad_igll)
     }
 
     /// Assemble the rectangular **volume** operator ND2 → RT2 on 2D triangles used by
@@ -1538,6 +1689,21 @@ impl VectorAssembler {
         S: FESpace + Sync,
         S::Mesh: MeshTopology + Sync,
     {
+        Self::assemble_linear_single_many_with_basis(space, integrators, quad_order, false)
+    }
+
+    /// [`Self::assemble_linear_single_many`] for the 2-D quad
+    /// `(GaussLobatto, IntegratedGLL)` variant spaces (D368).
+    fn assemble_linear_single_many_with_basis<S>(
+        space: &S,
+        integrators: &[&dyn VectorLinearIntegrator],
+        quad_order: u8,
+        quad_igll: bool,
+    ) -> Vec<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
         let mesh = space.mesh();
         let n_dofs = space.n_dofs();
 
@@ -1551,8 +1717,8 @@ impl VectorAssembler {
                         || vec![0.0_f64; n_dofs],
                         |mut local, e| {
                             let blocks = space.element_face_blocks(e);
-                            accumulate_vector_linear_element_blocks(
-                                space, e, integrators, quad_order, &mut local, blocks,
+                            accumulate_vector_linear_element_blocks_with_basis(
+                                space, e, integrators, quad_order, &mut local, blocks, quad_igll,
                             );
                             local
                         },
@@ -1572,11 +1738,42 @@ impl VectorAssembler {
         let mut rhs = vec![0.0_f64; n_dofs];
         for e in mesh.elem_iter() {
             let blocks = space.element_face_blocks(e);
-            accumulate_vector_linear_element_blocks(
-                space, e, integrators, quad_order, &mut rhs, blocks,
+            accumulate_vector_linear_element_blocks_with_basis(
+                space, e, integrators, quad_order, &mut rhs, blocks, quad_igll,
             );
         }
         rhs
+    }
+
+    /// [`Self::assemble_linear`] for the 2-D quad `(GaussLobatto,
+    /// IntegratedGLL)` variant spaces (D368) — see
+    /// [`Self::assemble_bilinear_quad_igll`].
+    pub fn assemble_linear_quad_igll<S>(
+        space: &S,
+        integrators: &[&dyn VectorLinearIntegrator],
+        quad_order: u8,
+    ) -> Vec<f64>
+    where
+        S: FESpace + Sync,
+        S::Mesh: MeshTopology + Sync,
+    {
+        let n_dofs = space.n_dofs();
+        let space_order = space.element_order(0);
+        if integrators.iter().any(|i| i.integration_order(space_order).is_some()) {
+            let mut acc = vec![0.0_f64; n_dofs];
+            for integ in integrators {
+                let qo = integ.integration_order(space_order).unwrap_or(quad_order);
+                let v = Self::assemble_linear_single_many_with_basis(
+                    space,
+                    &[*integ] as &[&dyn VectorLinearIntegrator],
+                    qo,
+                    true,
+                );
+                for i in 0..n_dofs { acc[i] += v[i]; }
+            }
+            return acc;
+        }
+        Self::assemble_linear_single_many_with_basis(space, integrators, quad_order, true)
     }
 }
 

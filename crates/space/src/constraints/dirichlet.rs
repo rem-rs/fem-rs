@@ -502,9 +502,12 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
     for f in 0..mesh.n_boundary_faces() as u32 {
         if tags.contains(&mesh.face_tag(f)) {
             let nodes = mesh.face_nodes(f);
-            let dof = if dim == 2 {
+            let dofs = if dim == 2 {
                 if nodes.len() >= 2 {
-                    space.edge_face_dof(EdgeKey::new(nodes[0], nodes[1]))
+                    // D368: an RT edge carries `order + 1` dofs (MFEM's
+                    // `GetBoundaryTrueDofs` essential-constrains the whole
+                    // block); `edge_face_dof` alone exposed only the first.
+                    space.edge_face_dofs(EdgeKey::new(nodes[0], nodes[1]))
                 } else {
                     None
                 }
@@ -512,6 +515,7 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
                 if nodes.len() >= 3 {
                     if nodes.len() == 3 {
                         space.tri_face_dof(FaceKey::new(nodes[0], nodes[1], nodes[2]))
+                            .map(|d| vec![d])
                     } else {
                         // Quad face: the HDivSpace quad DOF key uses the
                         // first 3 vertices of the element-face ring, but the
@@ -522,7 +526,7 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
                             if let Some(d) =
                                 space.tri_face_dof(FaceKey::new(nodes[i], nodes[j], nodes[k]))
                             {
-                                found = Some(d);
+                                found = Some(vec![d]);
                                 break;
                             }
                         }
@@ -532,8 +536,8 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
                     None
                 }
             };
-            if let Some(d) = dof {
-                out.push(d);
+            if let Some(mut block) = dofs {
+                out.append(&mut block);
             }
         }
     }

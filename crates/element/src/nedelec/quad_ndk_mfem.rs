@@ -114,6 +114,23 @@ pub(crate) struct QNdSlot {
     pub sign: f64,
 }
 
+/// One local DOF's integrated (Gerritsma) functional — the per-DOF data MFEM's
+/// `ProjectIntegrated` uses (`fe_nd.cpp` / `fe_rt.cpp`): the reference sample
+/// points and weights `w_k·h` of the DOF's sub-cell line integral and the
+/// reference tangent/normal direction `t` (`tk` / `nk` incl. the `dof_map`
+/// flip).
+///
+/// Shared by [`QuadND`](super::QuadND) (H(curl), covariant `J·t`) and
+/// [`QuadRTk`](crate::raviart_thomas::QuadRTk) (H(div), contravariant
+/// `adj(J)·t`).
+#[derive(Clone, Debug)]
+pub struct IntegratedDofFunctional {
+    /// `(reference sample point, weight w_k·h)` pairs over the DOF's sub-cell.
+    pub samples: Vec<([f64; 2], f64)>,
+    /// Reference tangent (H(curl)) or normal (H(div)) direction, `±e_a`.
+    pub t: [f64; 2],
+}
+
 /// The local DOFs in MFEM's `Nodes` order — a 1:1 transcription of the
 /// `ND_QuadrilateralElement` constructor (`fem/fe/fe_nd.cpp`): build the
 /// signed `dof_map` (tensor slot -> ±local index) in the constructor's write
@@ -380,6 +397,67 @@ impl QuadND {
                 } else {
                     [0.0, 1.0] // right edge + interior y block (tk = 1)
                 }
+            })
+            .collect()
+    }
+
+    /// Per-DOF data of MFEM `ND_QuadrilateralElement::ProjectIntegrated`
+    /// (`fe_nd.cpp`) — the *integrated* (Gerritsma) DOF functionals of the
+    /// [`QNdOpen::IntegratedGLL`](Self::new_integrated_gll) variant: each local
+    /// DOF is the line integral of `f·(J·tk)` over one sub-cell
+    /// `[cp[i], cp[i+1]]` of the closed GLL partition, sampled with MFEM's
+    /// `IntRules.Get(SEGMENT, order)` Gauss rule (`weight = w_k·h`).
+    ///
+    /// The list is in the element's local DOF order, so entry `n` is the
+    /// functional of local DOF `n` (`CalcVShape` column `n`).  A space applies
+    /// its geometry by mapping every sample through the element map and
+    /// contracting `f(x)·(J·t)`; the orientation signs then behave exactly as
+    /// in assembly (`global = sign · local`).
+    pub fn integrated_functionals(&self) -> Vec<IntegratedDofFunctional> {
+        assert!(
+            self.open == QNdOpen::IntegratedGLL,
+            "QuadND::integrated_functionals requires the IntegratedGLL variant"
+        );
+        let p = self.order;
+        let d = nd_data(p);
+        // Closed GLL points on [0,1] (MFEM `ClosedPoints(p, GaussLobatto)`).
+        let cp: Vec<f64> = gll_nodes(p).iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        // MFEM `IntRules.Get(Geometry::SEGMENT, order)` — Gauss-Legendre with
+        // `(p+2)/2` points, bit-identical through `gauss_legendre_01` (D74).
+        let npts = (p + 2) / 2;
+        let (gx, gw) = crate::quadrature::gauss_legendre_01(npts);
+        d.slots
+            .iter()
+            .map(|&sl| {
+                // x family: sub-cell `i = ci` along x at height `cp[cj]`;
+                // y family: sub-cell `j = cj` along y at `cp[ci]`.
+                let (i_sub, j_fix, along_x) = if sl.xfam {
+                    (sl.ci, sl.cj, true)
+                } else {
+                    (sl.cj, sl.ci, false)
+                };
+                let h = cp[i_sub + 1] - cp[i_sub];
+                let samples: Vec<([f64; 2], f64)> = gx
+                    .iter()
+                    .zip(&gw)
+                    .map(|(&g, &w)| {
+                        let pt = if along_x {
+                            [cp[i_sub] + h * g, cp[j_fix]]
+                        } else {
+                            [cp[j_fix], cp[i_sub] + h * g]
+                        };
+                        (pt, w * h)
+                    })
+                    .collect();
+                // `dof2tk`/`tk`: −1 for the dof_map-flipped edge blocks (top /
+                // left), +1 otherwise — the same sign [`Self::dof_tangents`]
+                // reports.
+                let (tx, ty) = if sl.xfam {
+                    (if sl.oc == p { -1.0 } else { 1.0 }, 0.0)
+                } else {
+                    (0.0, if sl.oc == 0 { -1.0 } else { 1.0 })
+                };
+                IntegratedDofFunctional { samples, t: [tx, ty] }
             })
             .collect()
     }

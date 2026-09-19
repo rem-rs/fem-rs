@@ -3,8 +3,11 @@
 
 Layouts:
   C++  ND_R2D global dof = [H1 vertex dofs (0..nverts-1) | ND edge dofs (nverts..)]
-  Rust example        = [ND dofs (0..nedges-1) | H1 vertex dofs (nedges..)]
-So the permutation is anchored by physical position (vertex coord vs edge midpoint).
+  Rust (D375)         = same [z | nd] layout as C++ (both rust_dofpos.txt and
+  rust_A.txt/rust_b.txt; the pre-D375 draft wrote dofpos in [ND | vertex] order
+  while A/b used [z | nd], so one permutation could not compare both).
+The permutation is still anchored by physical position (vertex coord vs edge
+midpoint), which now double-checks the layout equality.
 
 Files (run from this directory):
   cpp_dofpos.txt / rust_dofpos.txt  — 833*3 doubles, per-dof physical coords

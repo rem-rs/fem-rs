@@ -726,6 +726,118 @@ pub fn assemble_lor_compatible_rt_quad(
     )
 }
 
+// ─── D368: L2 error of the quad (GaussLobatto, IntegratedGLL) spaces ───────
+//
+// `postproc::grid_function::compute_l2_error_hcurl/hdiv` evaluate the field
+// through `vec_ref_elem`, which for quads keeps the legacy GaussLegendre
+// elements.  A variant space (`quad_integrated_gll == true`) is assembled with
+// the faithful IntegratedGLL elements, so its L2 error must be evaluated with
+// the same basis — the two helpers below mirror `grid_function`'s
+// implementation (same quadrature rule, same Piola transforms, same
+// isoparametric geometry path) with the variant elements from
+// `vec_ref_elem_with_basis`.
+
+/// `‖u_h − u_exact‖_{L²}` of an H(curl) grid function on a 2-D quad
+/// `(GaussLobatto, IntegratedGLL)` variant space (covariant Piola).
+pub fn compute_l2_error_hcurl_quad_igll(
+    dofs: &[f64],
+    space: &HCurlSpaceGeneric<Mesh<2>>,
+    exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let mesh = space.mesh();
+    let vre = crate::vector_assembler::vec_ref_elem_with_basis(
+        fem_space::fe_space::SpaceType::HCurl,
+        fem_mesh::element_type::ElementType::Quad4,
+        2,
+        space.order(),
+        true,
+    );
+    let n = vre.n_dofs();
+    let quad = vre.quadrature(quad_order);
+    let mut err2 = 0.0_f64;
+    let mut ref_bv = vec![0.0_f64; n * 2];
+    for e in mesh.elem_iter() {
+        let elem_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
+        let geo_elem = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+            .expect("quad geometry element");
+        let geo_nds = mesh.geometry_nodes(e);
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (jac, det, xp) = crate::vector_assembler::isoparametric_jacobian(
+                mesh, &geo_nds, geo_elem.as_ref(), xi, 2,
+            );
+            let w = quad.weights[qi] * det.abs();
+            vre.eval_basis_vec(xi, &mut ref_bv);
+            // Covariant Piola: φ_phys = J⁻ᵀ φ_ref.
+            let jit = jac.try_inverse().expect("degenerate quad").transpose();
+            let mut uh = [0.0_f64; 2];
+            for i in 0..n {
+                let coeff = signs[i] * dofs[elem_dofs[i]];
+                for c in 0..2 {
+                    uh[c] += coeff * (jit[(c, 0)] * ref_bv[i * 2] + jit[(c, 1)] * ref_bv[i * 2 + 1]);
+                }
+            }
+            let ex = exact(&xp);
+            for c in 0..2 {
+                let d = uh[c] - ex[c];
+                err2 += w * d * d;
+            }
+        }
+    }
+    err2.max(0.0).sqrt()
+}
+
+/// `‖w_h − w_exact‖_{L²}` of an H(div) grid function on a 2-D quad
+/// `(GaussLobatto, IntegratedGLL)` variant space (contravariant Piola).
+pub fn compute_l2_error_hdiv_quad_igll(
+    dofs: &[f64],
+    space: &HDivSpaceGeneric<Mesh<2>>,
+    exact: &(dyn Fn(&[f64]) -> Vec<f64> + Send + Sync),
+    quad_order: u8,
+) -> f64 {
+    let mesh = space.mesh();
+    let vre = crate::vector_assembler::vec_ref_elem_with_basis(
+        fem_space::fe_space::SpaceType::HDiv,
+        fem_mesh::element_type::ElementType::Quad4,
+        2,
+        space.order(),
+        true,
+    );
+    let n = vre.n_dofs();
+    let quad = vre.quadrature(quad_order);
+    let mut err2 = 0.0_f64;
+    let mut ref_bv = vec![0.0_f64; n * 2];
+    for e in mesh.elem_iter() {
+        let elem_dofs: Vec<usize> = space.element_dofs(e).iter().map(|&d| d as usize).collect();
+        let signs = space.element_signs(e);
+        let geo_elem = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e)
+            .expect("quad geometry element");
+        let geo_nds = mesh.geometry_nodes(e);
+        for (qi, xi) in quad.points.iter().enumerate() {
+            let (jac, det, xp) = crate::vector_assembler::isoparametric_jacobian(
+                mesh, &geo_nds, geo_elem.as_ref(), xi, 2,
+            );
+            let w = quad.weights[qi] * det.abs();
+            vre.eval_basis_vec(xi, &mut ref_bv);
+            // Contravariant Piola: ψ_phys = J ψ_ref / det.
+            let mut uh = [0.0_f64; 2];
+            for i in 0..n {
+                let coeff = signs[i] * dofs[elem_dofs[i]] / det;
+                for c in 0..2 {
+                    uh[c] += coeff * (jac[(c, 0)] * ref_bv[i * 2] + jac[(c, 1)] * ref_bv[i * 2 + 1]);
+                }
+            }
+            let ex = exact(&xp);
+            for c in 0..2 {
+                let d = uh[c] - ex[c];
+                err2 += w * d * d;
+            }
+        }
+    }
+    err2.max(0.0).sqrt()
+}
+
 pub fn build_lor_ads_rt_hex(
     ho_space: &HDivSpaceGeneric<fem_mesh::simplex::Mesh<3>>,
     a_ho: &CsrMatrix<f64>,

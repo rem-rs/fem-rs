@@ -11,10 +11,10 @@
 //! ```
 
 use crate::constrained_operator::RectangularConstrainedOperator;
-use crate::SolverConfig;
-use fem_element::lagrange::factory::{H1TriPk, QuadQk};
+use crate::{solve_cg_mfem, solve_sli, IterResult, SolverConfig, SliOptions};
+use fem_element::lagrange::factory::{HexQk, H1TriPk, QuadQk};
 use fem_element::ReferenceElement;
-use fem_linalg::CsrMatrix;
+use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, ElementType};
 use nalgebra::DMatrix;
 
@@ -1348,6 +1348,652 @@ impl GeometricMgPrecond {
             }
         }
     }
+}
+
+// ─── AbsL1 geometric multigrid (ds-common `AbsL1GeometricMultigrid`) ────────
+
+/// ds-common `MG_MAX_ITER`: coarse-level solver iteration cap.
+pub const MG_MAX_ITER: usize = 10;
+
+/// ds-common `MG_REL_TOL`: coarse-level solver relative tolerance (`√1e-10`,
+/// which is the double `1e-5` bit-exactly).
+pub const MG_REL_TOL: f64 = 1.0e-5;
+
+/// ds-common `SolverType`: flavour of the coarse-level solver (`-s` option of
+/// the diag-smoothers MG miniapp — the same flag selects the global solver and
+/// the coarse solver).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MgCoarseSolverType {
+    /// Stationary linear iteration (ds-common `SLISolver`).
+    Sli,
+    /// Preconditioned conjugate gradient (ds-common `CGSolver`).
+    Cg,
+}
+
+/// One level of the AbsL1 multigrid hierarchy.  Levels are stored
+/// **coarsest-first** (`levels[0]` carries the coarse solver), matching MFEM
+/// `MultigridBase`'s level indexing.
+pub struct AbsL1Level {
+    /// System matrix at this level with the essential dofs eliminated under
+    /// MFEM's DIAG_KEEP policy (`BilinearForm::FormSystemMatrix`, LEGACY
+    /// assembly).
+    pub mat: CsrMatrix<f64>,
+    /// Essential true dofs (`FiniteElementSpace::GetEssentialTrueDofs`).
+    pub ess_dofs: Vec<u32>,
+    /// Jacobi smoother inverse diagonal: `dinv[i] = 1/(|A|·1)[i]` with the
+    /// smoother's essential-dof override `dinv[ess] = damping = 1` (ds-common
+    /// computes `d = level_mat->AbsMult(ones)` and hands it to
+    /// `OperatorJacobiSmoother(d, ess_tdofs)`, whose `Setup` inverts `d` and
+    /// then sets `dinv[ess] = damping`).
+    pub dinv: Vec<f64>,
+}
+
+impl AbsL1Level {
+    /// ds-common `ConstructOperatorAndSmoother` diagonal step: `d = |A|·1` of
+    /// the eliminated level matrix via `CsrMatrix::abs_mult`, inverted with
+    /// the essential-dof override.
+    pub fn new(mat: CsrMatrix<f64>, ess_dofs: Vec<u32>) -> Self {
+        let n = mat.nrows;
+        let ones = vec![1.0f64; n];
+        let mut d = vec![0.0f64; n];
+        mat.abs_mult(&ones, &mut d);
+        let mut dinv = vec![0.0f64; n];
+        for (i, di) in d.iter().enumerate() {
+            assert!(*di != 0.0, "Zero diagonal entry in AbsL1 Jacobi smoother");
+            dinv[i] = 1.0 / *di;
+        }
+        for &e in &ess_dofs {
+            dinv[e as usize] = 1.0;
+        }
+        AbsL1Level { mat, ess_dofs, dinv }
+    }
+}
+
+/// Geometric multigrid whose level smoothers are the `|A|`-L1 Jacobi diagonal
+/// and whose coarse level is an iterative solver preconditioned by the same
+/// smoother — 1:1 port of the diag-smoothers miniapp's ds-common
+/// `AbsL1GeometricMultigrid` on top of MFEM's `MultigridBase` cycle.
+///
+/// The caller assembles each level (mesh hierarchy + integrators, mirroring
+/// `FiniteElementSpaceHierarchy::{AddUniformlyRefinedLevel,
+/// AddOrderRefinedLevel}`) and hands over the level system matrix, the level
+/// essential dofs, and the coarse→fine prolongation between consecutive
+/// levels.
+///
+/// # Warning (ds-common)
+/// The smoother diagonal is based on `AbsMult`, which usually unfolds
+/// component-wise: if `A = B C`, then `|A|x = |B|(|C|x)`.
+pub struct AbsL1GeometricMultigrid {
+    /// Levels, coarsest first.
+    pub levels: Vec<AbsL1Level>,
+    /// `prolong[l]` maps level `l` → level `l+1` (coarse → fine), wrapped in
+    /// MFEM's `RectangularConstrainedOperator` for the essential dofs of both
+    /// levels (`GeometricMultigrid` ctor).
+    pub prolong: Vec<RectangularConstrainedOperator>,
+    cycle_type: MgCycleType,
+    pre_smoothing_steps: usize,
+    post_smoothing_steps: usize,
+    coarse_solver: MgCoarseSolverType,
+    coarse_max_iter: usize,
+    coarse_rtol: f64,
+}
+
+impl AbsL1GeometricMultigrid {
+    /// `AbsL1GeometricMultigrid::ConstructCoarseOperatorAndSolver`: start the
+    /// hierarchy with the coarsest level.  The coarse solve is PCG with the
+    /// AbsL1 Jacobi preconditioner, relative tolerance [`MG_REL_TOL`] and at
+    /// most [`MG_MAX_ITER`] iterations (defaults, `SetPrintLevel(-1)`).
+    pub fn new(mat: CsrMatrix<f64>, ess_dofs: Vec<u32>) -> Self {
+        AbsL1GeometricMultigrid {
+            levels: vec![AbsL1Level::new(mat, ess_dofs)],
+            prolong: Vec::new(),
+            cycle_type: MgCycleType::V,
+            pre_smoothing_steps: 1,
+            post_smoothing_steps: 1,
+            coarse_solver: MgCoarseSolverType::Cg,
+            coarse_max_iter: MG_MAX_ITER,
+            coarse_rtol: MG_REL_TOL,
+        }
+    }
+
+    /// `MultigridBase::AddLevel` + `ConstructOperatorAndSmoother`: append the
+    /// next finer level.  `prolong` is the coarse→fine interpolation matrix
+    /// (rows indexed by fine dofs), e.g.
+    /// `fem_space::constraints::prolong::build_h1_prolongation_matrix` or
+    /// [`build_h1_hex_refined_prolongation`].
+    pub fn add_fine_level(
+        &mut self,
+        mat: CsrMatrix<f64>,
+        ess_dofs: Vec<u32>,
+        prolong: CsrMatrix<f64>,
+    ) {
+        let ess_coarse = self.levels.last().expect("coarse level").ess_dofs.clone();
+        self.prolong.push(RectangularConstrainedOperator {
+            mat: prolong,
+            ess_fine: ess_dofs.clone(),
+            ess_coarse,
+        });
+        self.levels.push(AbsL1Level::new(mat, ess_dofs));
+    }
+
+    /// `MultigridBase::SetCycleType` (the miniapps use `VCYCLE, 1, 1`).
+    pub fn set_cycle_type(&mut self, cycle_type: MgCycleType, pre: usize, post: usize) {
+        self.cycle_type = cycle_type;
+        self.pre_smoothing_steps = pre;
+        self.post_smoothing_steps = post;
+    }
+
+    /// Coarse solver settings (ds-common's `MG_MAX_ITER` / `MG_REL_TOL`).
+    pub fn set_coarse_solver(&mut self, max_iter: usize, rel_tol: f64) {
+        self.coarse_max_iter = max_iter;
+        self.coarse_rtol = rel_tol;
+    }
+
+    /// ds-common `ConstructCoarseOperatorAndSolver`: the `-s` solver type
+    /// selects the coarse-level solver as well (SLI or CG).
+    pub fn set_coarse_solver_type(&mut self, solver: MgCoarseSolverType) {
+        self.coarse_solver = solver;
+    }
+
+    /// Number of levels.
+    pub fn num_levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// `GeometricMultigrid::FormFineLinearSystem` (LEGACY assembly, conforming
+    /// space): eliminate the essential dofs of the finest system under MFEM's
+    /// DIAG_KEEP policy — `B[j] -= A[j,ess]·x[ess]`, `B[ess] = A_ii·x[ess]`.
+    /// The caller passes `x[ess]` (the boundary-projected solution) as
+    /// `ess_vals`; the solve then runs in place on `x` and the recovered FEM
+    /// solution *is* `x` (`RecoverFEMSolution` copies `X = x` for conforming
+    /// serial spaces).
+    pub fn form_fine_linear_system(
+        a: &mut CsrMatrix<f64>,
+        b: &mut [f64],
+        ess_dofs: &[u32],
+        ess_vals: &[f64],
+    ) {
+        assert_eq!(ess_dofs.len(), ess_vals.len(), "ess dofs/values mismatch");
+        for (&d, &v) in ess_dofs.iter().zip(ess_vals.iter()) {
+            a.apply_dirichlet_keep_diag(d as usize, v, b);
+        }
+    }
+
+    /// MFEM `MultigridBase::Mult`: one V/W-cycle applied as a preconditioner,
+    /// `y = MG(x)` starting from the zero initial guess (`*Y(M-1,j) = 0.0`).
+    pub fn mult(&self, x: &[f64], y: &mut [f64]) {
+        let m = self.num_levels();
+        // MultigridBase X, Y, R, Z scratch (one vector per level per slot).
+        let mut xs: Vec<Vec<f64>> = self.levels.iter().map(|l| vec![0.0; l.mat.nrows]).collect();
+        let mut ys: Vec<Vec<f64>> = self.levels.iter().map(|l| vec![0.0; l.mat.nrows]).collect();
+        let mut rs: Vec<Vec<f64>> = self.levels.iter().map(|l| vec![0.0; l.mat.nrows]).collect();
+        let mut zs: Vec<Vec<f64>> = self.levels.iter().map(|l| vec![0.0; l.mat.nrows]).collect();
+        xs[m - 1].copy_from_slice(x);
+        self.cycle(m - 1, &mut xs, &mut ys, &mut rs, &mut zs);
+        y.copy_from_slice(&ys[m - 1]);
+    }
+
+    /// `MultigridBase::Cycle` (recursive V/W-cycle; the coarsest level runs
+    /// the coarse solver instead of a smoother).
+    fn cycle(
+        &self,
+        level: usize,
+        x: &mut [Vec<f64>],
+        y: &mut [Vec<f64>],
+        r: &mut [Vec<f64>],
+        z: &mut [Vec<f64>],
+    ) {
+        if level == 0 {
+            // Coarse solve: the user-selected solver (SLI or CG) preconditioned
+            // by the AbsL1 Jacobi smoother, rel tol MG_REL_TOL, at most
+            // MG_MAX_ITER iterations, print level -1 (ds-common).  Y(0) is
+            // zeroed by the restriction step of the parent level (and by
+            // `mult` for a single-level hierarchy), so the iterative solve
+            // starts from the zero initial guess.
+            let lvl = &self.levels[0];
+            let n = lvl.mat.nrows;
+            let opts = SliOptions {
+                rel_tol: self.coarse_rtol,
+                abs_tol: 0.0,
+                max_iter: self.coarse_max_iter as i32,
+                print_level: -1,
+            };
+            let dinv = &lvl.dinv;
+            let prec = move |rin: &[f64], zout: &mut [f64]| {
+                for i in 0..n {
+                    zout[i] = dinv[i] * rin[i];
+                }
+            };
+            let apply = |xin: &[f64], yout: &mut [f64]| lvl.mat.spmv(xin, yout);
+            let _: IterResult = match self.coarse_solver {
+                MgCoarseSolverType::Sli => {
+                    solve_sli(n, apply, &x[0], &mut y[0], Some(prec), &opts, true, None)
+                }
+                MgCoarseSolverType::Cg => {
+                    solve_cg_mfem(n, apply, &x[0], &mut y[0], Some(prec), &opts, true, None)
+                }
+            };
+            return;
+        }
+
+        // Pre-smooth.  The first V-cycle sweep starts from the zero guess
+        // (`SmoothingStep(level, VCYCLE && i == 0, ...)`).
+        for i in 0..self.pre_smoothing_steps {
+            let zero = self.cycle_type == MgCycleType::V && i == 0;
+            self.smoothing_step(level, zero, x, y, r, z);
+        }
+
+        // Residual and restriction: R = X - A·Y, X(l-1) = Pᵀ·R, Y(l-1) = 0.
+        let n = x[level].len();
+        let mut ay = vec![0.0f64; n];
+        self.levels[level].mat.spmv(&y[level], &mut ay);
+        for i in 0..n {
+            r[level][i] = x[level][i] - ay[i];
+        }
+        self.prolong[level - 1].restrict(&r[level], &mut x[level - 1]);
+        for v in y[level - 1].iter_mut() {
+            *v = 0.0;
+        }
+
+        // Coarse correction(s) — the W-cycle repeats it from the correction
+        // the first sweep produced.
+        self.cycle(level - 1, x, y, r, z);
+        if self.cycle_type == MgCycleType::W {
+            self.cycle(level - 1, x, y, r, z);
+        }
+
+        // Prolongate and add: Y(l) += P·Y(l-1).
+        let mut corr = vec![0.0f64; n];
+        self.prolong[level - 1].prolong(&y[level - 1], &mut corr);
+        for i in 0..n {
+            y[level][i] += corr[i];
+        }
+
+        // Post-smooth (`SmoothingStep(level, false, transpose=true)`; the
+        // transpose of a diagonal smoother is the smoother itself).
+        for _ in 0..self.post_smoothing_steps {
+            self.smoothing_step(level, false, x, y, r, z);
+        }
+    }
+
+    /// `MultigridBase::SmoothingStep` with the AbsL1 diagonal smoother
+    /// (`OperatorJacobiSmoother::Mult`, iterative_mode=false):
+    /// `zero=true` → `Y = D⁻¹·X`; `zero=false` → `Y += D⁻¹·(X - A·Y)`.
+    fn smoothing_step(
+        &self,
+        level: usize,
+        zero: bool,
+        x: &mut [Vec<f64>],
+        y: &mut [Vec<f64>],
+        r: &mut [Vec<f64>],
+        z: &mut [Vec<f64>],
+    ) {
+        let dinv = &self.levels[level].dinv;
+        let n = dinv.len();
+        if zero {
+            for i in 0..n {
+                y[level][i] = dinv[i] * x[level][i];
+            }
+        } else {
+            let mut ay = vec![0.0f64; n];
+            self.levels[level].mat.spmv(&y[level], &mut ay);
+            for i in 0..n {
+                r[level][i] = x[level][i] - ay[i];
+            }
+            for i in 0..n {
+                z[level][i] = dinv[i] * r[level][i];
+            }
+            for i in 0..n {
+                y[level][i] += z[level][i];
+            }
+        }
+    }
+}
+
+/// Exact order-1 nested-refinement H1 prolongation.  In a uniformly refined
+/// P1 hierarchy every fine DOF is one of
+///
+/// * a coarse DOF — weight `1`;
+/// * the midpoint of a coarse edge — `0.5 + 0.5`;
+/// * the centre of a coarse quadrilateral face (refined quads and hex faces) —
+///   `0.25 × 4`;
+/// * the centre of a coarse hex — `0.125 × 8`,
+///
+/// so the entries are the exact dyadic constants MFEM's
+/// `RefinementOperator` (tensor products of the 1D `[1/2, 1, 1/2]` matrices)
+/// produces — bitwise — whereas generic basis evaluation at recovered
+/// barycentric coordinates carries 1-ulp errors.  Those ulps are invisible
+/// for the solve but flip the truncated coarse-level solve path of the
+/// AbsL1 multigrid, changing its iteration history.
+pub fn build_h1_p1_refined_prolongation(
+    coarse_mesh: &dyn MeshTopology,
+    fine_dof_coord: &dyn Fn(u32) -> [f64; 3],
+    coarse_elem_dofs: &dyn Fn(u32) -> Vec<u32>,
+    n_fine: usize,
+) -> CsrMatrix<f64> {
+    // Coarse vertex DOFs with their positions (P1: DOFs == vertices).
+    let mut vtx: Vec<(u32, [f64; 3])> = Vec::new();
+    let mut edges: Vec<([u32; 2], [f64; 3])> = Vec::new();
+    let mut quad_faces: Vec<([u32; 4], [f64; 3])> = Vec::new();
+    let mut centers: Vec<([u32; 8], [f64; 3])> = Vec::new();
+
+    const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+    const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+    const TET_EDGES: [(usize, usize); 6] =
+        [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+    const HEX_EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ];
+    const HEX_FACES: [[usize; 4]; 6] = [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ];
+
+    let push_edge = |edges: &mut Vec<([u32; 2], [f64; 3])>,
+                     a: u32,
+                     b: u32,
+                     pa: [f64; 3],
+                     pb: [f64; 3]| {
+        let key = [a.min(b), a.max(b)];
+        if !edges.iter().any(|(k, _)| *k == key) {
+            let mid = [
+                (pa[0] + pb[0]) * 0.5,
+                (pa[1] + pb[1]) * 0.5,
+                (pa[2] + pb[2]) * 0.5,
+            ];
+            edges.push((key, mid));
+        }
+    };
+
+    for e in 0..coarse_mesh.n_elements() as u32 {
+        let dofs = coarse_elem_dofs(e);
+        let nodes = coarse_mesh.element_nodes(e);
+        let dim = coarse_mesh.dim() as usize;
+        let pv: Vec<[f64; 3]> = nodes
+            .iter()
+            .map(|&n| {
+                let c = coarse_mesh.node_coords(n);
+                [
+                    c[0],
+                    if dim > 1 { c[1] } else { 0.0 },
+                    if dim > 2 { c[2] } else { 0.0 },
+                ]
+            })
+            .collect();
+        for (i, _) in nodes.iter().enumerate() {
+            vtx.push((dofs[i], pv[i]));
+        }
+        match coarse_mesh.element_type(e) {
+            ElementType::Tri3 | ElementType::Tri6 => {
+                for &(a, b) in TRI_EDGES.iter() {
+                    push_edge(&mut edges, dofs[a], dofs[b], pv[a], pv[b]);
+                }
+            }
+            ElementType::Quad4 => {
+                for &(a, b) in QUAD_EDGES.iter() {
+                    push_edge(&mut edges, dofs[a], dofs[b], pv[a], pv[b]);
+                }
+                quad_faces.push((
+                    [dofs[0], dofs[1], dofs[2], dofs[3]],
+                    [
+                        (pv[0][0] + pv[1][0] + pv[2][0] + pv[3][0]) * 0.25,
+                        (pv[0][1] + pv[1][1] + pv[2][1] + pv[3][1]) * 0.25,
+                        (pv[0][2] + pv[1][2] + pv[2][2] + pv[3][2]) * 0.25,
+                    ],
+                ));
+            }
+            ElementType::Tet4 | ElementType::Tet10 => {
+                for &(a, b) in TET_EDGES.iter() {
+                    push_edge(&mut edges, dofs[a], dofs[b], pv[a], pv[b]);
+                }
+            }
+            ElementType::Hex8 => {
+                for &(a, b) in HEX_EDGES.iter() {
+                    push_edge(&mut edges, dofs[a], dofs[b], pv[a], pv[b]);
+                }
+                for f in HEX_FACES.iter() {
+                    quad_faces.push((
+                        [dofs[f[0]], dofs[f[1]], dofs[f[2]], dofs[f[3]]],
+                        [
+                            (pv[f[0]][0] + pv[f[1]][0] + pv[f[2]][0] + pv[f[3]][0]) * 0.25,
+                            (pv[f[0]][1] + pv[f[1]][1] + pv[f[2]][1] + pv[f[3]][1]) * 0.25,
+                            (pv[f[0]][2] + pv[f[1]][2] + pv[f[2]][2] + pv[f[3]][2]) * 0.25,
+                        ],
+                    ));
+                }
+                let mut corner = [0u32; 8];
+                corner.copy_from_slice(&dofs[..8]);
+                centers.push((
+                    corner,
+                    [
+                        pv.iter().map(|p| p[0]).sum::<f64>() * 0.125,
+                        pv.iter().map(|p| p[1]).sum::<f64>() * 0.125,
+                        pv.iter().map(|p| p[2]).sum::<f64>() * 0.125,
+                    ],
+                ));
+            }
+            ref other => panic!(
+                "build_h1_p1_refined_prolongation: unsupported element type {other:?}"
+            ),
+        }
+    }
+
+    // Mesh scale for the midpoint matching tolerance.
+    let mut scale = 0.0f64;
+    for (_, p) in &vtx {
+        for v in p {
+            scale = scale.max(v.abs());
+        }
+    }
+    let tol = 1e-9 * scale.max(1.0);
+
+    vtx.sort_by_key(|(d, _)| *d);
+    vtx.dedup_by_key(|(d, _)| *d);
+
+    let mut coo = CooMatrix::<f64>::new(n_fine, vtx.len());
+    'dofs: for f in 0..n_fine as u32 {
+        let x = fine_dof_coord(f);
+        for (d, p) in &vtx {
+            if iter_close3(&x, p, tol) {
+                coo.add(f as usize, *d as usize, 1.0);
+                continue 'dofs;
+            }
+        }
+        for (e, m) in &edges {
+            if iter_close3(&x, m, tol) {
+                coo.add(f as usize, e[0] as usize, 0.5);
+                coo.add(f as usize, e[1] as usize, 0.5);
+                continue 'dofs;
+            }
+        }
+        for (q, c) in &quad_faces {
+            if iter_close3(&x, c, tol) {
+                for d in q {
+                    coo.add(f as usize, *d as usize, 0.25);
+                }
+                continue 'dofs;
+            }
+        }
+        for (corner, c) in &centers {
+            if iter_close3(&x, c, tol) {
+                for d in corner {
+                    coo.add(f as usize, *d as usize, 0.125);
+                }
+                continue 'dofs;
+            }
+        }
+        panic!(
+            "build_h1_p1_refined_prolongation: fine DOF {f} at {x:?} matches no coarse \
+             vertex, edge midpoint, face centre or element centre"
+        );
+    }
+    coo.into_csr()
+}
+
+/// Component-wise proximity test.
+fn iter_close3(a: &[f64; 3], b: &[f64; 3], tol: f64) -> bool {
+    (a[0] - b[0]).abs() <= tol && (a[1] - b[1]).abs() <= tol && (a[2] - b[2]).abs() <= tol
+}
+
+/// H1 Gauss–Lobatto prolongation for a uniformly-refined **hexahedral** level:
+/// nodal interpolation of the coarse `HexQk` basis at the fine DOF positions —
+/// the fem-rs analogue of MFEM's `RefinementOperator`.  This is the hex path
+/// missing from `fem_space::constraints::prolong::build_h1_prolongation_matrix`
+/// (whose nested 3-D locator supports tetrahedra only); hex hierarchies of
+/// order ≥ 2 (where the exact P1 path above does not apply) need it.
+///
+/// The fine DOF's reference coordinate inside its parent hex is recovered by
+/// Newton inversion of the trilinear corner map (straight elements), then the
+/// coarse Gauss–Lobatto basis is evaluated there.
+pub fn build_h1_hex_refined_prolongation(
+    coarse_mesh: &dyn MeshTopology,
+    coarse_order: u8,
+    n_coarse: usize,
+    n_fine: usize,
+    coarse_elem_dofs: &dyn Fn(u32) -> Vec<u32>,
+    fine_dof_coord: &dyn Fn(u32) -> [f64; 3],
+) -> CsrMatrix<f64> {
+    assert!(
+        coarse_mesh.element_type(0) == ElementType::Hex8,
+        "build_h1_hex_refined_prolongation requires a hexahedral coarse mesh"
+    );
+    let hex = HexQk::new(coarse_order as usize);
+    let n_local = hex.n_dofs();
+    let mut phi = vec![0.0f64; n_local];
+    let mut coo = CooMatrix::<f64>::new(n_fine, n_coarse);
+    for f in 0..n_fine as u32 {
+        let px = fine_dof_coord(f);
+        let (e, xi) = locate_point_hex(coarse_mesh, &px)
+            .unwrap_or_else(|| panic!("fine DOF {f} at {px:?} lies outside the coarse hex mesh"));
+        hex.eval_basis(&xi, &mut phi);
+        for (ci, &cg) in coarse_elem_dofs(e).iter().enumerate() {
+            if phi[ci].abs() > 1e-14 {
+                coo.add(f as usize, cg as usize, phi[ci]);
+            }
+        }
+    }
+    coo.into_csr()
+}
+
+/// Locate a physical point in a hexahedral mesh; returns
+/// `(element, reference ξ)` with ξ on `[-1,1]³` (`HexQk` reference frame).
+fn locate_point_hex(mesh: &dyn MeshTopology, x: &[f64]) -> Option<(u32, [f64; 3])> {
+    const BBOX_EPS: f64 = 1e-12;
+    for e in 0..mesh.n_elements() as u32 {
+        if mesh.element_type(e) != ElementType::Hex8 {
+            continue;
+        }
+        let nodes = mesh.element_nodes(e);
+        let mut c = [[0.0f64; 3]; 8];
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for (i, &nd) in nodes.iter().enumerate() {
+            let p = mesh.node_coords(nd);
+            c[i] = [p[0], p[1], p[2]];
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        if x.iter().zip(lo.iter()).any(|(v, l)| *v < *l - BBOX_EPS)
+            || x.iter().zip(hi.iter()).any(|(v, h)| *v > *h + BBOX_EPS)
+        {
+            continue;
+        }
+        if let Some(xi) = invert_hex_trilinear(&c, [x[0], x[1], x[2]]) {
+            return Some((e, xi));
+        }
+    }
+    None
+}
+
+/// `CUBE` corner reference signs in MFEM hex vertex order (`HexQk` `Q1_NODES`).
+const HEX8_SIGNS: [(f64, f64, f64); 8] = [
+    (-1.0, -1.0, -1.0),
+    (1.0, -1.0, -1.0),
+    (1.0, 1.0, -1.0),
+    (-1.0, 1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+    (1.0, -1.0, 1.0),
+    (1.0, 1.0, 1.0),
+    (-1.0, 1.0, 1.0),
+];
+
+/// Newton-invert the trilinear Q1 corner map of a straight hex; returns the
+/// reference coordinate ξ on `[-1,1]³` if the point is inside.
+fn invert_hex_trilinear(c: &[[f64; 3]; 8], x: [f64; 3]) -> Option<[f64; 3]> {
+    let mut xi = [0.0f64; 3];
+    for _ in 0..40 {
+        let mut n = [0.0f64; 8];
+        let mut g = [0.0f64; 24]; // g[i*3 + d] = ∂N_i/∂ξ_d
+        for (i, &(sx, sy, sz)) in HEX8_SIGNS.iter().enumerate() {
+            n[i] = 0.125 * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
+            g[i * 3] = 0.125 * sx * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
+            g[i * 3 + 1] = 0.125 * sy * (1.0 + sx * xi[0]) * (1.0 + sz * xi[2]);
+            g[i * 3 + 2] = 0.125 * sz * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]);
+        }
+        let mut res = [0.0f64; 3];
+        let mut jac = [[0.0f64; 3]; 3]; // jac[d][k] = ∂x_d/∂ξ_k
+        for (i, &ni) in n.iter().enumerate() {
+            for d in 0..3 {
+                res[d] += ni * c[i][d];
+                for k in 0..3 {
+                    jac[d][k] += g[i * 3 + k] * c[i][d];
+                }
+            }
+        }
+        for d in 0..3 {
+            res[d] -= x[d];
+        }
+        // δ = J⁻¹·(-res) via the adjugate of the 3×3 Jacobian.
+        let (j0, j1, j2, j3, j4, j5, j6, j7, j8) = (
+            jac[0][0], jac[0][1], jac[0][2], jac[1][0], jac[1][1], jac[1][2], jac[2][0],
+            jac[2][1], jac[2][2],
+        );
+        let det =
+            j0 * (j4 * j8 - j5 * j7) - j1 * (j3 * j8 - j5 * j6) + j2 * (j3 * j7 - j4 * j6);
+        if det.abs() < 1e-30 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let adj = [
+            [j4 * j8 - j5 * j7, j2 * j7 - j1 * j8, j1 * j5 - j2 * j4],
+            [j5 * j6 - j3 * j8, j0 * j8 - j2 * j6, j2 * j3 - j0 * j5],
+            [j3 * j7 - j4 * j6, j1 * j6 - j0 * j7, j0 * j4 - j1 * j3],
+        ];
+        let mut step = 0.0f64;
+        for k in 0..3 {
+            let dk =
+                (adj[k][0] * (-res[0]) + adj[k][1] * (-res[1]) + adj[k][2] * (-res[2])) * inv;
+            xi[k] += dk;
+            step += dk * dk;
+        }
+        if step < 1e-26 {
+            break;
+        }
+        if xi.iter().any(|v| v.abs() > 1.5) {
+            return None; // wandered outside the element
+        }
+    }
+    if xi.iter().any(|v| v.abs() > 1.0 + 1e-9) {
+        return None;
+    }
+    Some(xi)
 }
 
 #[cfg(test)]

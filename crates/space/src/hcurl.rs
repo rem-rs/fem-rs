@@ -482,6 +482,15 @@ pub struct HCurlSpace<M: MeshTopology> {
     dim: usize,
     /// Cell type used by this space.
     cell_type: ElementType,
+    /// 2-D quad basis variant: `true` = MFEM's
+    /// `ND_FECollection(o, 2, GaussLobatto, IntegratedGLL)` collection (the
+    /// LOR-compatible basis pair, built by
+    /// [`Self::new_gauss_lobatto_integrated_gll`]); `false` = the library
+    /// default (`HCurlSpace::new`, GaussLegendre open modes).  The variant
+    /// selects which reference element [`fem_assembly::VectorAssembler`]
+    /// pairs with the (identical) dof/slot tables — see
+    /// `quad_integrated_gll`.
+    quad_igll: bool,
 }
 
 impl<M: MeshTopology> HCurlSpace<M> {
@@ -489,6 +498,42 @@ impl<M: MeshTopology> HCurlSpace<M> {
     ///
     /// Supports ND1 (order 1) and NDk (order k >= 2) for Tri3/Tri6, Quad4/Quad8, Tet4/Tet10, Hex8/Hex20.
     pub fn new(mesh: M, order: u8) -> Self {
+        Self::build(mesh, order, false)
+    }
+
+    /// Construct the 2-D **quad** H(curl) space of MFEM's LOR-compatible
+    /// collection `ND_FECollection(order, 2, BasisType::GaussLobatto,
+    /// BasisType::IntegratedGLL)` (`fem/fe_coll.hpp`).
+    ///
+    /// The global DOF numbering, slot tables and orientation signs are
+    /// **identical** to [`Self::new`] (MFEM's per-edge
+    /// `DofOrderForOrientation` rule does not depend on the 1-D basis); the
+    /// variant changes
+    ///
+    /// * which reference element the assembler pairs with the tables — the
+    ///   faithful `fem_element::nedelec::QuadND::new_integrated_gll`
+    ///   (integrated Gerritsma open modes) instead of the legacy
+    ///   GaussLegendre elements — via
+    ///   [`fem_assembly::VectorAssembler::assemble_bilinear_quad_igll`], and
+    /// * [`Self::interpolate_vector`], which becomes MFEM's
+    ///   `ProjectIntegrated` (sub-cell line integrals) instead of point
+    ///   values, because `ND_QuadrilateralElement::Project` dispatches to
+    ///   `ProjectIntegrated` for the integrated type (`fe_nd.hpp:68`).
+    ///
+    /// On non-quad meshes the two constructors build the same space.
+    pub fn new_gauss_lobatto_integrated_gll(mesh: M, order: u8) -> Self {
+        Self::build(mesh, order, true)
+    }
+
+    /// Whether this space carries the `(GaussLobatto, IntegratedGLL)` quad
+    /// basis pair.  The assembler and LOR entry points must key off the same
+    /// variant as the space (D347 pattern): a variant space must be assembled
+    /// with the `*_quad_igll` entries, a default space with the plain ones.
+    pub fn quad_integrated_gll(&self) -> bool {
+        self.quad_igll
+    }
+
+    fn build(mesh: M, order: u8, quad_igll: bool) -> Self {
         assert!(order >= 1, "HCurlSpace: order must be >= 1");
         let dim = mesh.dim() as usize;
         assert!(mesh.n_elements() > 0, "HCurlSpace: mesh must contain at least one element");
@@ -888,6 +933,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
             quad_face_anchor,
             dim,
             cell_type: first_cell_type,
+            quad_igll,
         }
     }
 
@@ -1051,6 +1097,58 @@ impl<M: MeshTopology> HCurlSpace<M> {
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
         let k = self.order as usize;
+
+        // (GaussLobatto, IntegratedGLL) quad variant: MFEM
+        // `ND_QuadrilateralElement::Project` dispatches to `ProjectIntegrated`
+        // for the integrated type (`fe_nd.hpp:68`), so every DOF is the
+        // sub-cell line integral `∫ f·(Jᵀt) ds` — not a point value.
+        if self.quad_igll && self.cell_type == ElementType::Quad4 {
+            let el = fem_element::nedelec::QuadND::new_integrated_gll(k);
+            let functionals = el.integrated_functionals();
+            let r = result.as_slice_mut();
+            for e in 0..self.mesh.n_elements() as u32 {
+                let verts = self.mesh.element_nodes(e);
+                let c: Vec<[f64; 2]> = (0..4)
+                    .map(|i| {
+                        let p = self.mesh.node_coords(verts[i]);
+                        [p[0], p[1]]
+                    })
+                    .collect();
+                let dofs = self.element_dofs(e);
+                let signs = self.element_signs(e);
+                for (i, fi) in functionals.iter().enumerate() {
+                    let mut val = 0.0_f64;
+                    for &([xi, eta], w) in &fi.samples {
+                        // Bilinear quad map and its Jacobian.
+                        let px = (1.0 - xi) * (1.0 - eta) * c[0][0]
+                            + xi * (1.0 - eta) * c[1][0]
+                            + xi * eta * c[2][0]
+                            + (1.0 - xi) * eta * c[3][0];
+                        let py = (1.0 - xi) * (1.0 - eta) * c[0][1]
+                            + xi * (1.0 - eta) * c[1][1]
+                            + xi * eta * c[2][1]
+                            + (1.0 - xi) * eta * c[3][1];
+                        let dx_dxi = [
+                            (1.0 - eta) * (c[1][0] - c[0][0]) + eta * (c[2][0] - c[3][0]),
+                            (1.0 - eta) * (c[1][1] - c[0][1]) + eta * (c[2][1] - c[3][1]),
+                        ];
+                        let dx_deta = [
+                            (1.0 - xi) * (c[3][0] - c[0][0]) + xi * (c[2][0] - c[1][0]),
+                            (1.0 - xi) * (c[3][1] - c[0][1]) + xi * (c[2][1] - c[1][1]),
+                        ];
+                        // MFEM: `tk^T J vk` = `f(x) · (t0 ∂x/∂ξ + t1 ∂x/∂η)`.
+                        let j_t = [
+                            fi.t[0] * dx_dxi[0] + fi.t[1] * dx_deta[0],
+                            fi.t[0] * dx_dxi[1] + fi.t[1] * dx_deta[1],
+                        ];
+                        let fv = f(&[px, py]);
+                        val += w * (fv[0] * j_t[0] + fv[1] * j_t[1]);
+                    }
+                    r[dofs[i] as usize] = signs[i] * val;
+                }
+            }
+            return result;
+        }
 
         if k == 1 {
             // ND1: midpoint rule per edge.
