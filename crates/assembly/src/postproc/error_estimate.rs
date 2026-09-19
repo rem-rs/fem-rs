@@ -17,36 +17,18 @@ use crate::standard::MassIntegrator;
 use crate::Assembler;
 // âââ Reference element helper (same as grid_function.rs) ââââââââââââââââââââââ
 
+/// D364: delegated to the single source of truth.  Arm-for-arm identical to
+/// the historical local table: simplex arms on the H¹ slot lattice
+/// (`TriP1`/`TriPk(2)`/`H1TriPk` GLL from p = 3 — D185/D202, pairing with
+/// `space.element_dofs` / `zz_estimator_nodal`'s dof coords) and the legacy
+/// `[-1,1]²` `QuadQ1`/`QuadQ2` frames the analytic bilinear `geom_jacobian`
+/// evaluates.  Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        // D185: evaluated against `space.element_dofs` (and its dof coords,
-        // in `zz_estimator_nodal`), whose tri slots are MFEM
-        // `H1_TriangleElement` (Gauss-Lobatto, entity order) from p = 3 on —
-        // the equispaced `factory::TriPk` agrees with it only at p ≤ 2.
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(3))
+        (ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4, _) => {
+            fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: evaluated against `space.element_dofs`, whose tet slots are
-        // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order) since the
-        // field moved off the equispaced lattice.
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        // D202: orders >= 4 stay on the same H¹ Gauss-Lobatto slots as the
-        // order-3 arms — MFEM `H1_TriangleElement`/`H1_TetrahedronElement`
-        // (entity order) at every p; the assembler's space dispatch
-        // (`assembler.rs::ref_elem_vol_h1`) makes the same choice, and the
-        // D202 unit test below pins slot equality with it.
-        (ElementType::Tri3 | ElementType::Tri6, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
-        }
-        (ElementType::Tet4, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
-        }
+        (ElementType::Quad4, 1 | 2) => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }

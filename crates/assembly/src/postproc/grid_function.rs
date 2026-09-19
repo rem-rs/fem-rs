@@ -6,9 +6,6 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{TetP1, TetP2, TriP1};
-use fem_element::lagrange::factory::TriPk;
-use fem_element::quadrature::quad_rule_01;
 use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, QuadratureRule, VectorReferenceElement};
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_jacobian_at;
@@ -16,8 +13,7 @@ use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::{solve_cg, SolverConfig};
 use fem_space::fe_space::FESpace;
-use fem_space::{EdgeKey, HCurlSpace, HDivSpace, L2Space};
-use fem_mesh::Mesh;
+use fem_space::{HCurlSpace, HDivSpace, L2Space};
 
 use crate::assembler::Assembler;
 use crate::standard::{DomainSourceIntegrator, MassIntegrator};
@@ -28,77 +24,18 @@ use crate::vector_assembler::{
 
 // ─── Reference element factory (mirrors assembler.rs) ──────────────────────
 
+/// Reference element for the **mesh geometry-node table** readers.
+///
+/// D364: the table moved to `fem_space::ref_elem::geometry_node_element` —
+/// the single source of truth shared with the other postproc tables (D353
+/// prevention).  Arm-for-arm identical to the historical local table:
+/// `TriP1`/`TriPk(2)`/`H1TriPk` GLL tri lattice (D185), `QuadQk` on `[0,1]²`
+/// with the centred P0 at order 0, `TetP1`/`TetP2`/`H1TetPk` (D157 — pairs
+/// with `set_curvature_tet4`'s entity-ordered GLL geometry table),
+/// `HexQk(o.max(1))` on `[-1,1]³`, layer-major `PrismPk`, and the **Fuentes**
+/// curved-pyramid geometry element (D334/D347).  Same panic set as before.
 pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        // D185: evaluated against `space.element_dofs` / the geometry-node
-        // table, whose tri slots are MFEM `H1_TriangleElement` (Gauss-Lobatto,
-        // entity order) from p = 3 on — the equispaced `factory::TriPk`
-        // agrees with it only at p ≤ 2.
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(3))
-        }
-        // Quad4: order 0 (L² P0) is the constant element; orders 1+ use
-        // QuadQk (Gauss-Lobatto nodes on [0,1]^2) — must match the
-        // assembler's reference element (assembler.rs::ref_elem_vol).  The
-        // legacy QuadQ1/Q2/Q3 live on [-1,1]^2 while quadrature rules
-        // (quad_rule_01) live on [0,1]^2 — mixing them gave wrong L2 errors.
-        (ElementType::Quad4, 0) => Box::new(P0),
-        (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: this table pairs with the **mesh geometry table** (the
-        // callers below evaluate it against `mesh.geometry_nodes`), and
-        // `set_curvature_tet4` lays that table out on `H1TetPk`'s
-        // Gauss-Lobatto lattice in MFEM's entity slot order — the equispaced
-        // `factory::TetPk` disagrees with it from p = 3 on.  (Space-aware
-        // evaluation goes through `ref_elem_vol_for_space` above, which picks
-        // the same element via the assembler dispatch.)
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        // Hex8/HexQk: Gauss-Lobatto nodes on [0,1]^3 (same family as QuadQk).
-        (ElementType::Hex8, o) => {
-            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
-        }
-        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::H1TetPk::new(o.max(1) as usize)),
-        // D185: like the Tet4 arm above, GLL at every order — the order-
-        // generic tri arm serves the **high-order geometry** readers in
-        // `compute_l2_error_owned`/`compute_h1_error_owned`
-        // (`geo_elem = ref_elem_vol(elem_type, g_order)` against
-        // `mesh.geometry_nodes`), and `set_curvature_tri3` lays those nodes
-        // out on `H1TriPk`'s Gauss-Lobatto lattice (D178; the 3-D surface
-        // variant shares the same lattice since D187), so the equispaced
-        // `factory::TriPk` misreads them from order 3 on.  p ≤ 2 is
-        // bit-identical either way.
-        (ElementType::Tri3 | ElementType::Tri6, o) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o.max(1) as usize))
-        }
-        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, o) => {
-            Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))
-        }
-        // D334: the **curved**-pyramid geometry element (this table is only
-        // reached for high-order geometry, `g_order > 1` — straight pyramids
-        // take their own branch in `compute_l2_error_owned`).  It delegates to
-        // `fem_element::lagrange::h1_pyramid_element(g, PyramidBasisType::
-        // default())` — the one source of truth for the pyramid geometry
-        // element, the *same* call `crates/mesh/src/transformation.rs::
-        // curved_pyramid_geometry` (the D334 arm of `element_jacobian_at`) and
-        // `vector_assembler::geo_ref_elem_from_mesh`'s curved-pyramid arm make.
-        // It is the **Fuentes** family (`ScalarPyramid::DefaultType = 1`,
-        // `fe_pyramid.hpp:23`) because that is what
-        // `Mesh::set_curvature_pyramid5` writes the geometry table in (D347)
-        // and what `Mesh::element_jacobian` reads it with — one table, one
-        // family, no third hand-rolled pyramid map.  Before this arm the
-        // curved case panicked here: `ref_elem_vol: unsupported
-        // (element_type=Pyramid5, order=2)`.
-        (ElementType::Pyramid5 | ElementType::Pyramid13, o) => {
-            fem_element::lagrange::h1_pyramid_element(
-                o.max(1) as usize,
-                fem_element::lagrange::PyramidBasisType::default(),
-            )
-        }
-        _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
-    }
+    fem_space::ref_elem::geometry_node_element(elem_type, order)
 }
 
 /// Reference element for evaluating a space's own DOF vector.
@@ -118,21 +55,9 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     crate::assembler::ref_elem_vol_for_space(space, elem_type, order)
 }
 
-/// Constant (P0) reference element on `[0,1]²` — 1 DOF, basis ≡ 1.
-struct P0;
-
-impl ReferenceElement for P0 {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 1 }
-    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
-        g[0] = 0.0;
-        g[1] = 0.0;
-    }
-    fn quadrature(&self, order: u8) -> QuadratureRule { quad_rule_01(order) }
-    fn dof_coords(&self) -> Vec<Vec<f64>> { vec![vec![0.5, 0.5]] }
-}
+// D364: the local `P0` constant element (dof at `[0.5, 0.5]`, square rule)
+// moved to `fem_space::ref_elem::P0QuadCentred` — one family definition
+// shared with the assembler.
 
 // ─── Jacobian helpers (same as assembler.rs) ───────────────────────────────
 

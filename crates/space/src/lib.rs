@@ -16,6 +16,9 @@ pub mod dof_manager;
 pub mod fe_space;
 pub mod dof_transformation;
 pub mod ordering;
+/// D364: single source of truth for scalar Lagrange reference-element
+/// dispatch (family constructors + purpose dispatches, domain contracts).
+pub mod ref_elem;
 pub mod h1;
 pub mod l2;
 pub mod hcurl;

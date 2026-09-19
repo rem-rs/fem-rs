@@ -8,17 +8,14 @@ use nalgebra::DMatrix;
 
 use fem_core::types::DofId;
 use fem_element::{
-    QuadratureRule, ReferenceElement, PrismPk, PyramidPk,
-    lagrange::{SegP1, SegP2, TetP1, TetP2, TriP1,
-                HexQ1},
-    lagrange::factory::{TriPk, TetPk},
+    QuadratureRule, ReferenceElement, PyramidPk,
+    lagrange::{SegP1, SegP2, TriP1},
     quadrature::quad_rule_01,
 };
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
-use fem_space::{L2Basis, SpaceType};
 
 use crate::integrator::{BdQpData, BoundaryBilinearIntegrator, BoundaryLinearIntegrator, BilinearIntegrator, LinearIntegrator, QpData};
 
@@ -99,111 +96,9 @@ pub fn assembly_parallel_min_elems() -> usize {
 }
 
 // ─── P0 (constant) reference element ─────────────────────────────────────────
-
-/// Constant (P0) reference element: 1 DOF, basis ≡ 1.0, gradient ≡ 0.
-///
-/// `dim` selects the reference domain: 2 → `[0,1]²` (tri/quad), 3 → `[-1,1]³`
-/// (hex).  The quadrature must live on the same domain as the geometry element
-/// used by the isoparametric Jacobian.
-struct P0 {
-    dim: u8,
-}
-
-/// Constant (P0) element on the standard tetrahedron reference domain
-/// (volume 1/6): the generic [`P0`] with `dim: 3` uses the hex `[-1,1]³`
-/// Gauss rule (weight sum 8), which scales the L2 volume integral by
-/// `8/(1/6) = 48` on tets.  `tet_rule` has weight sum 1/6, matching the
-/// simplex `ElementTransformation` reference volume.
-struct P0Tet;
-
-impl ReferenceElement for P0Tet {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 1 }
-    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
-        for x in g.iter_mut() { *x = 0.0; }
-    }
-    fn quadrature(&self, order: u8) -> QuadratureRule {
-        fem_element::quadrature::tet_rule(order)
-    }
-    fn dof_coords(&self) -> Vec<Vec<f64>> {
-        vec![vec![0.0; 3]]
-    }
-}
-
-/// Constant (P0) element on the standard **pyramid** reference domain
-/// (volume 1/3) — the D340 pyramid counterpart of [`P0Tri`]/[`P0Tet`].
-///
-/// The generic [`P0`] with `dim: 3` uses the hex `[-1,1]³` Gauss rule (weight
-/// sum 8) and evaluates the geometry at cube points, which on a pyramid are
-/// both outside its domain and summed against the wrong weight; `pyramid_rule`
-/// has weight sum 1/3 (MFEM `IntRules.Get(Geometry::PYRAMID, order)`), matching
-/// the reference pyramid's measure — the same defect class as [`P0Tet`] and
-/// [`P0Tri`].
-struct P0Pyr;
-
-impl ReferenceElement for P0Pyr {
-    fn dim(&self) -> u8 { 3 }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 1 }
-    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
-        for x in g.iter_mut() { *x = 0.0; }
-    }
-    fn quadrature(&self, order: u8) -> QuadratureRule {
-        fem_element::quadrature::pyramid_rule(order)
-    }
-    fn dof_coords(&self) -> Vec<Vec<f64>> {
-        vec![vec![0.0; 3]]
-    }
-}
-
-/// Constant (P0) element on the standard triangle reference domain
-/// (area 1/2): the generic [`P0`] with `dim: 2` uses the square `[0,1]²`
-/// Gauss rule (weight sum 1), which doubles every standard assembly
-/// integral on triangles — the square-rule points fall outside the tri
-/// reference domain where the affine map still has |detJ| = 2·Area.
-/// `tri_rule` has weight sum 1/2 (MFEM `IntRules.Get(TRIANGLE, order)`
-/// semantics), matching the simplex `ElementTransformation` reference area
-/// (same defect class as [`P0Tet`]).
-struct P0Tri;
-
-impl ReferenceElement for P0Tri {
-    fn dim(&self) -> u8 { 2 }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 1 }
-    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
-        for x in g.iter_mut() { *x = 0.0; }
-    }
-    fn quadrature(&self, order: u8) -> QuadratureRule {
-        fem_element::quadrature::tri_rule(order)
-    }
-    fn dof_coords(&self) -> Vec<Vec<f64>> {
-        vec![vec![0.0; 2]]
-    }
-}
-
-impl ReferenceElement for P0 {
-    fn dim(&self) -> u8 { self.dim }
-    fn order(&self) -> u8 { 0 }
-    fn n_dofs(&self) -> usize { 1 }
-    fn eval_basis(&self, _xi: &[f64], v: &mut [f64]) { v[0] = 1.0; }
-    fn eval_grad_basis(&self, _xi: &[f64], g: &mut [f64]) {
-        for x in g.iter_mut() { *x = 0.0; }
-    }
-    fn quadrature(&self, order: u8) -> QuadratureRule {
-        if self.dim == 2 {
-            quad_rule_01(order)
-        } else {
-            fem_element::quadrature::hex_rule(order)
-        }
-    }
-    fn dof_coords(&self) -> Vec<Vec<f64>> {
-        vec![vec![0.0; self.dim as usize]]
-    }
-}
+// D364: the constant-element family (`P0`/`P0Tri`/`P0Tet`/`P0Pyr`) moved to
+// `fem_space::ref_elem` (`P0Tensor`/`P0Tri`/`P0Tet`/`P0Pyr`) — one definition
+// shared with the postproc tables; the dispatches below delegate to it.
 
 /// Bilinear (Q1) geometry element on `[0,1]²` with MFEM's `BiLinear2DFiniteElement`
 /// direct formulas (H1 topological DOF order: v0=(0,0), v1=(1,0), v2=(1,1),
@@ -253,57 +148,9 @@ impl ReferenceElement for BiLinearGeo2D {
 /// `L2_TetrahedronElement`, D269), and pyramid cells use MFEM's
 /// `L2_FuentesPyramidElement` (D340).
 pub fn ref_elem_vol_l2(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match elem_type {
-        ElementType::Quad4 => match order {
-            0 => Box::new(P0 { dim: 2 }),
-            // MFEM L2_FECollection uses Gauss-Legendre tensor-product basis
-            // (BasisType::GaussLegendre), NOT the GLL basis of H1.  QuadL2GL
-            // reproduces it bit-identically on [0,1]² with lexicographic DOFs.
-            o => Box::new(fem_element::lagrange::QuadL2GL::new(o as usize)),
-        },
-        ElementType::Hex8 => match order {
-            0 => Box::new(P0 { dim: 3 }),
-            // MFEM L2_HexahedronElement(o, GaussLegendre): interior GL tensor
-            // nodes with lexicographic DOFs.  HexL2GL keeps the fem-rs hex
-            // reference domain [-1,1]³ (same as HexQk/hex_rule) so quadrature
-            // and the isoparametric Jacobian stay on a common domain.
-            o => Box::new(fem_element::lagrange::HexL2GL::new(o as usize)),
-        },
-        ElementType::Tri3 => match order {
-            // order 0 keeps the simplex P0 element (tri rule; the shared `P0`
-            // here would carry the square rule and double the mass).
-            0 => Box::new(P0Tri),
-            // MFEM L2_TriangleElement(o, GaussLegendre): open barycentric GL
-            // nodes on the unit simplex, nodal Lagrange basis (D269).
-            o => Box::new(fem_element::lagrange::TriL2GL::new(o as usize)),
-        },
-        ElementType::Tet4 => match order {
-            0 => Box::new(P0Tet),
-            // MFEM L2_TetrahedronElement(o, GaussLegendre): open barycentric
-            // GL nodes on the unit tetrahedron (D269).
-            o => Box::new(fem_element::lagrange::TetL2GL::new(o as usize)),
-        },
-        // D340: MFEM `L2_FECollection`'s pyramid arm — `pyr_type =
-        // ScalarPyramid::DefaultType = 1` (`fe_coll.cpp:2340-2351`) puts
-        // `L2_FuentesPyramidElement(o, btype)` on PYRAMID cells, `(p+1)³` DOFs.
-        // The element comes from `fem_space::l2::l2_pyramid_element` — the very
-        // function `L2Space::build_pyramid` numbers the space's DOFs from, so
-        // the two cannot disagree (this arm previously fell through to
-        // `ref_elem_vol`, the legacy equispaced `PyramidPk` with
-        // `(p+1)(p+2)(2p+3)/6` DOFs, and every assembly on an L2 pyramid space
-        // panicked on the count mismatch).  `order == 0` needs the pyramid P0:
-        // the shared `P0 { dim: 3 }` carries the *hex* rule, whose points and
-        // weight sum are wrong for a pyramid (same defect class as
-        // [`P0Tri`]/[`P0Tet`]).
-        ElementType::Pyramid5 | ElementType::Pyramid13 => match order {
-            0 => Box::new(P0Pyr),
-            o => fem_space::l2::l2_pyramid_element(
-                o as usize,
-                fem_space::L2Basis::GaussLegendre,
-            ),
-        },
-        _ => ref_elem_vol(elem_type, order),
-    }
+    // D364: the L2/DG dispatch (this table) moved to `fem_space::ref_elem` —
+    // single source of truth shared with the postproc tables (D353 prevention).
+    fem_space::ref_elem::l2_field_element(elem_type, order, fem_space::L2Basis::GaussLegendre)
 }
 
 /// Reference element for `space`: L2/DG spaces get the lexicographic
@@ -314,44 +161,11 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
     elem_type: ElementType,
     order: u8,
 ) -> Box<dyn ReferenceElement> {
-    if space.space_type() == SpaceType::L2 {
-        // MFEM `L2_FECollection(btype)` with GaussLobatto uses GLL nodes with
-        // lexicographic DOFs (`L2_DOF_MAP`) on tensor elements —
-        // `QuadQk::new_lex`/`HexQk::new_lex`, NOT the GL-noded
-        // `QuadL2GL`/`HexL2GL` (which match only `L2_FECollection`'s default
-        // `GaussLegendre`).  Using the wrong basis silently changes every
-        // element matrix (ex41 regression: M/S/K off by ~6×, IMEX diverged).
-        let gll = space.l2_basis() == Some(L2Basis::GaussLobatto);
-        let gll_lex = gll && matches!(elem_type, ElementType::Quad4 | ElementType::Hex8);
-        if gll_lex && order >= 1 {
-            return match elem_type {
-                ElementType::Quad4 => Box::new(
-                    fem_element::lagrange::factory::QuadQk::new_lex(order as usize),
-                ),
-                _ => Box::new(fem_element::lagrange::factory::HexQk::new_lex(order as usize)),
-            };
-        }
-        if gll && order >= 1 && matches!(elem_type, ElementType::Tri3 | ElementType::Tet4) {
-            // The closed DG simplex placement (corner/equispaced nodal dofs).
-            return ref_elem_vol(elem_type, order);
-        }
-        // D340: an L2 pyramid space with the GaussLobatto basis —
-        // `L2_FECollection(p, 3, BasisType::GaussLobatto)`'s arm, which is
-        // `L2_FuentesPyramidElement(p, GaussLobatto)` (a *different* node table
-        // from the GaussLegendre default).  Dispatched on the space's basis
-        // through the same single-source-of-truth function
-        // `L2Space::build_pyramid` uses.
-        if gll && order >= 1 && matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13)
-        {
-            return fem_space::l2::l2_pyramid_element(order as usize, L2Basis::GaussLobatto);
-        }
-        ref_elem_vol_l2(elem_type, order)
-    } else {
-        // D347: the pyramid family follows the *space* (MFEM `H1_FECollection`'s
-        // `pyr_type`), so the reference element and the DOF numbering the space
-        // built (`DofManager::new_with_pyramid_basis`) can never disagree.
-        ref_elem_vol_h1_with_pyramid_basis(elem_type, order, space.pyramid_basis())
-    }
+    // D364: delegated to the single source of truth — same L2-basis switch
+    // (GaussLobatto → lexicographic GLL tensor / closed-DG simplex placement /
+    // GaussLobatto Fuentes pyramid) and same H¹ dispatch as the historical
+    // table, now shared with the postproc tables.
+    fem_space::ref_elem::field_element_for_space(space, elem_type, order)
 }
 
 /// H1 solution reference element: MFEM `H1_FECollection` semantics
@@ -369,7 +183,9 @@ pub(crate) fn ref_elem_vol_for_space<S: FESpace>(
 /// the space must use [`ref_elem_vol_h1_with_pyramid_basis`] (or
 /// [`ref_elem_vol_for_space`]) so an explicit `Bergot` space is honoured.
 pub(crate) fn ref_elem_vol_h1(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    ref_elem_vol_h1_with_pyramid_basis(
+    // D364: H¹ dispatch moved to `fem_space::ref_elem` (single source of truth);
+    // the default pyramid family (Fuentes) matches the historical behaviour.
+    fem_space::ref_elem::h1_field_element(
         elem_type,
         order,
         fem_element::lagrange::PyramidBasisType::default(),
@@ -384,105 +200,17 @@ pub(crate) fn ref_elem_vol_h1_with_pyramid_basis(
     order: u8,
     pyr_type: fem_element::lagrange::PyramidBasisType,
 ) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
-        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(3))
-        }
-        (ElementType::Tri3 | ElementType::Tri6, 4) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(4))
-        }
-        (ElementType::Tri3 | ElementType::Tri6, o) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
-        }
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: orders ≥ 3 use [`H1TetPk`] — MFEM `H1_TetrahedronElement`
-        // (closed Gauss-Lobatto nodes, entity slot order), matching the H1
-        // dof numbering `fem_space`'s `DofManager::build_tet_h1` produces.
-        // The equispaced `factory::TetPk` agrees only at p ≤ 2.
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        (ElementType::Tet4, o) => Box::new(fem_element::lagrange::H1TetPk::new(o as usize)),
-        (ElementType::Quad4, 0) => Box::new(P0 { dim: 2 }),
-        // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
-        // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
-        // historically on [-1,1]^2; affine-embedding equivalent for the
-        // gradient (Diffusion) but NOT for the mass ∫φ² (4× off on [0,1]²),
-        // so the reference domain must be [0,1]^2 for all orders.
-        (ElementType::Quad4, 1) => Box::new(fem_element::lagrange::QuadQk::new(1)),
-        (ElementType::Quad4, 2) => Box::new(fem_element::lagrange::QuadQk::new(2)),
-        // order >= 3: Gauss-Lobatto-Legendre nodes on [0,1]^2 (matches MFEM
-        // H1_FECollection's default BasisType::GaussLobatto); QuadQ3 is
-        // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
-        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
-        (ElementType::Quad4, o) => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
-        (ElementType::Hex8, 0) => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on hexes
-        (ElementType::Hex8, 1) => Box::new(HexQ1),
-        (ElementType::Hex8, o) => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
-        // MFEM `H1_FECollection(p, 3)`'s wedge element: Gauss-Lobatto nodes in
-        // MFEM's entity slot order (D168) — the same layout `fem_space`'s
-        // `DofManager::build_prism_h1` numbers `element_dofs` in.
-        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
-            Box::new(fem_element::lagrange::H1PrismPk::new(order as usize))
-        }
-        // D299/D347: the pyramid element of the *chosen* family
-        // (`PyramidBasisType::default()` = Fuentes = MFEM's
-        // `ScalarPyramid::DefaultType`) in MFEM's entity slot order — the
-        // element `H1_FECollection(p, 3, GaussLobatto)` puts on pyramid cells,
-        // matching `fem_space`'s `build_pyramid_pk` numbering.  The equispaced
-        // layer-order `PyramidPk` that used to sit here (a) paired different
-        // functions with the entity-ordered `dofs_flat` from p = 2 on
-        // (layer-order basis × entity-order dofs) and (b) sits on the wrong
-        // lattice from p = 3 on.
-        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
-            fem_element::lagrange::h1_pyramid_element(order as usize, pyr_type)
-        }
-        _ => panic!(
-            "ref_elem_vol_h1: unsupported combination (element_type={elem_type:?}, order={order}). \
-             Try using a different polynomial order or a simplex mesh."
-        ),
-    }
+    // D364: delegated — see [`ref_elem_vol_h1`].
+    fem_space::ref_elem::h1_field_element(elem_type, order, pyr_type)
 }
 
 /// Return the solution reference element matching `elem_type` and polynomial `order`.
 pub(crate) fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
-        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
-        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(TriPk::new(4)),
-        (ElementType::Tri3 | ElementType::Tri6, o) => Box::new(TriPk::new(o as usize)),
-        (ElementType::Tet4, 0)                           => Box::new(P0Tet), // L2 P0 (constant) on tets
-        (ElementType::Tet4, 1)                           => Box::new(TetP1),
-        (ElementType::Tet4, 2)                           => Box::new(TetP2),
-        (ElementType::Tet4, 3)                           => Box::new(TetPk::new(3)),
-        (ElementType::Tet4, o)                           => Box::new(fem_element::lagrange::TetPk::new(o as usize)),
-        (ElementType::Quad4, 0)                          => Box::new(P0 { dim: 2 }),
-        // order 1..=2: QuadQk (Gauss-Lobatto nodes on [0,1]^2) — matches MFEM
-        // H1_FECollection's default BasisType::GaussLobatto.  QuadQ1/Q2 were
-        // historically on [-1,1]^2; affine-embedding equivalent for the
-        // gradient (Diffusion) but NOT for the mass ∫φ² (4× off on [0,1]²),
-        // so the reference domain must be [0,1]^2 for all orders.
-        (ElementType::Quad4, 1)                          => Box::new(fem_element::lagrange::QuadQk::new(1)),
-        (ElementType::Quad4, 2)                          => Box::new(fem_element::lagrange::QuadQk::new(2)),
-        // order >= 3: Gauss-Lobatto-Legendre nodes on [0,1]^2 (matches MFEM
-        // H1_FECollection's default BasisType::GaussLobatto); QuadQ3 is
-        // equidistant on [-1,1]^2 and therefore NOT MFEM-compatible at p=3.
-        (ElementType::Quad4, 3)                          => Box::new(fem_element::lagrange::QuadQk::new(3)),
-        (ElementType::Quad4, o)                          => Box::new(fem_element::lagrange::QuadQk::new(o as usize)),
-        (ElementType::Hex8, 0)                           => Box::new(P0 { dim: 3 }), // L2 P0 (constant) on hexes
-        (ElementType::Hex8, 1)                           => Box::new(HexQ1),
-        (ElementType::Hex8, o)                           => Box::new(fem_element::lagrange::HexQk::new(o as usize)),
-        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => Box::new(PrismPk::new(order as usize)),
-        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => Box::new(PyramidPk::new(order as usize)),
-        _ => panic!(
-            "ref_elem_vol: unsupported combination (element_type={elem_type:?}, order={order}). \
-             Try using a different polynomial order or a simplex mesh."
-        ),
-    }
+    // D364: the legacy equispaced table moved to `fem_space::ref_elem` —
+    // arm-for-arm identical (P0 arms, fixed-order p ≤ 2 simplices, equispaced
+    // `TriPk`/`TetPk` above, `[0,1]²` `QuadQk`, `HexQ1`+`HexQk`, layer-major
+    // `PrismPk`/`PyramidPk`, same panic text).
+    fem_space::ref_elem::legacy_equispaced_element(elem_type, order)
 }
 
 /// Map a quadrature point from the solution basis domain to the geometry

@@ -56,50 +56,22 @@ pub trait FluxRecovery {
 
 // ─── Reference element helper ────────────────────────────────────────────────
 
+/// D364: delegated to the single source of truth.  Arm-for-arm identical to
+/// the historical local table: H¹-slot simplices (D185/D157/D202), the legacy
+/// `[-1,1]²` `QuadQ1`/`QuadQ2` frames, and the D353-sweep hex/prism arms where
+/// basis and geometry share one frame (`HexQk`/`PrismPk`, `o.max(1)`).
+/// Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TriP1};
-    use fem_element::lagrange::factory::TriPk;
-    match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        // D185: evaluated against `space.element_dofs` / the flux dof coords,
-        // whose tri slots are MFEM `H1_TriangleElement` (Gauss-Lobatto,
-        // entity order) from p = 3 on — the equispaced `factory::TriPk`
-        // agrees with it only at p ≤ 2.
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(3))
+    match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 => {
+            fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        // D353 sweep: hexes were refused here, so the 3-D hex ZZ estimator had
-        // no entry point at all.  HexQk is the frame `geom_jacobian`'s hex arm
-        // evaluates the geometry in, and the frame `HexQk::dof_coords()` (the
-        // usual flux sample set) is expressed in — one element, one frame.
-        (ElementType::Hex8 | ElementType::Hex20, o) => {
-            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
+        ElementType::Quad4 => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
+        ElementType::Hex8 | ElementType::Hex20 => {
+            fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
         }
-        // Same reasoning as the hex arm above, for the wedge: `PrismPk` is what
-        // `geo_ref_elem_from_mesh` returns for a prism and what the geometry arm
-        // of `geom_jacobian` evaluates, so basis and geometry share one frame.
-        (ElementType::Prism6 | ElementType::Prism15, o) => {
-            Box::new(fem_element::lagrange::PrismPk::new(o.max(1) as usize))
-        }
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: evaluated against `space.element_dofs` / `fe_order`, whose tet
-        // slots are MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order)
-        // since the field moved off the equispaced lattice.
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        // D202: orders >= 4 stay on the same H¹ Gauss-Lobatto slots as the
-        // order-3 arms — MFEM `H1_TriangleElement`/`H1_TetrahedronElement`
-        // (entity order) at every p; the assembler's space dispatch
-        // (`assembler.rs::ref_elem_vol_h1`) makes the same choice, and the
-        // D202 unit test below pins slot equality with it.
-        (ElementType::Tri3 | ElementType::Tri6, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
-        }
-        (ElementType::Tet4, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
+        ElementType::Prism6 | ElementType::Prism15 => {
+            fem_space::ref_elem::equispaced_prism(order.max(1))
         }
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }

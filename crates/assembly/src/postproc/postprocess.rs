@@ -20,40 +20,16 @@ use fem_space::fe_space::{FESpace, SpaceType};
 
 // ─── Reference element factories ───────────────────────────────────────────
 
+/// D364: delegated to the single source of truth.  Arm-for-arm identical to
+/// the historical local table: H¹-slot simplices (D185/D157/D202 — pairs with
+/// `space.element_dofs`) and the D265 hex arm (`HexQk` GLL slots on `[-1,1]³`,
+/// `o.max(1)`).  Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        // D185: evaluated against `space.element_dofs`, whose tri slots are
-        // MFEM `H1_TriangleElement` (Gauss-Lobatto, entity order) from p = 3
-        // on — the equispaced `factory::TriPk` agrees with it only at p ≤ 2.
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => {
-            Box::new(fem_element::lagrange::H1TriPk::new(3))
+    match elem_type {
+        ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 => {
+            fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: evaluated against `space.element_dofs`, whose tet slots are
-        // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order) since the
-        // field moved off the equispaced lattice.
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        // D202: orders >= 4 stay on the same H¹ Gauss-Lobatto slots as the
-        // order-3 arms — MFEM `H1_TriangleElement`/`H1_TetrahedronElement`
-        // (entity order) at every p; the assembler's space dispatch
-        // (`assembler.rs::ref_elem_vol_h1`) makes the same choice, and the
-        // D202 unit test below pins slot equality with it.
-        (ElementType::Tri3 | ElementType::Tri6, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
-        }
-        (ElementType::Tet4, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
-        }
-        // D265: hex scalar arm — same element as the `GridFunction` table
-        // (`postproc/grid_function.rs::ref_elem_vol`): `HexQk` Gauss-Lobatto
-        // slots on `[-1,1]³` in MFEM `H1_HexahedronElement` order, pairing
-        // with the H¹ space's `element_dofs` layout.
-        (ElementType::Hex8, o) => {
-            Box::new(fem_element::lagrange::HexQk::new(o.max(1) as usize))
-        }
+        ElementType::Hex8 => fem_space::ref_elem::gll_tensor(elem_type, order.max(1)),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
