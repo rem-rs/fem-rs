@@ -770,36 +770,6 @@ fn main() {
     });
 }
 
-// ─── Block extraction helpers ────────────────────────────────────────────────
-
-/// Extract the CSR sub-block `rows[rs..re] × cols[cs..ce]` of a ParCsrMatrix
-/// (rows/cols in partition layout).
-fn extract_block(a: &ParCsrMatrix, rs: usize, re: usize, cs: usize, ce: usize) -> CsrMatrix<f64> {
-    let mut coo = CooMatrix::<f64>::new(re - rs, ce - cs);
-    let diag = a.diag_block();
-    let offd = a.offd_block();
-    for r in rs..re {
-        let row = r - rs;
-        // diag block (cols 0..n_owned)
-        for k in diag.row_ptr[r]..diag.row_ptr[r + 1] {
-            let c = diag.col_idx[k] as usize;
-            if c >= cs && c < ce {
-                coo.add(row, c - cs, diag.values[k]);
-            }
-        }
-        // offd block (cols >= n_owned)
-        if offd.nrows > r {
-            for k in offd.row_ptr[r]..offd.row_ptr[r + 1] {
-                let c = a.n_owned() + offd.col_idx[k] as usize;
-                if c >= cs && c < ce {
-                    coo.add(row, c - cs, offd.values[k]);
-                }
-            }
-        }
-    }
-    coo.into_csr()
-}
-
 // ─── H(Curl) error (owned elements + allreduce) ──────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -855,8 +825,17 @@ fn compute_hcurl_error(
             let mut gr = vec![0.0_f64; n_lh1 * 2];
             rh1.eval_grad_basis(xi, &mut gr);
             for j in 0..n_lh1 {
-                let dx = jit00 * gr[j * 2] + jit10 * gr[j * 2 + 1];
-                let dy = jit01 * gr[j * 2] + jit11 * gr[j * 2 + 1];
+                // ∇z_phys = J⁻ᵀ·∇z_ref, i.e. row 0 of J⁻ᵀ dotted with the
+                // reference gradient (MFEM GetCurl: grad_hat · J⁻¹ in row
+                // convention; fe_base.cpp ComputeCurl_ND / VectorCoefficient
+                // GetCurl).  jit is J⁻ᵀ (jit00=j11/det, jit01=−j10/det,
+                // jit10=−j01/det, jit11=j00/det), so ∂z/∂x = jit00·gξ +
+                // jit01·gη and ∂z/∂y = jit10·gξ + jit11·gη.  The transposed
+                // (swapped jit01/jit10) convention agrees on axis-aligned
+                // inline-quad elements (diagonal J) but inflates the H(Curl)
+                // error ~10× on sheared triangles (star/inline-tri).
+                let dx = jit00 * gr[j * 2] + jit01 * gr[j * 2 + 1];
+                let dy = jit10 * gr[j * 2] + jit11 * gr[j * 2 + 1];
                 ce[0] += x_dm[h1_dofs[j]] * dy;
                 ce[1] -= x_dm[h1_dofs[j]] * dx;
             }

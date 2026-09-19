@@ -9,3 +9,8 @@ fem-mesh    = { path = "../mesh" }
 fem-element = { path = "../element" }
 fem-linalg  = { path = "../linalg" }
 nalgebra    = { workspace = true }
+
+[dev-dependencies]
+# D377: the 3-D boundary-dof oracle test loads real MFEM mesh files
+# (beam-tet.mesh / inline-hex.mesh) — same dev-dep pattern as fem-mesh.
+fem-io      = { path = "../io" }

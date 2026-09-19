@@ -1852,10 +1852,13 @@ fn iter_close3(a: &[f64; 3], b: &[f64; 3], tol: f64) -> bool {
 
 /// H1 Gauss–Lobatto prolongation for a uniformly-refined **hexahedral** level:
 /// nodal interpolation of the coarse `HexQk` basis at the fine DOF positions —
-/// the fem-rs analogue of MFEM's `RefinementOperator`.  This is the hex path
-/// missing from `fem_space::constraints::prolong::build_h1_prolongation_matrix`
-/// (whose nested 3-D locator supports tetrahedra only); hex hierarchies of
-/// order ≥ 2 (where the exact P1 path above does not apply) need it.
+/// the fem-rs analogue of MFEM's `RefinementOperator`.  This was originally the
+/// hex path missing from `fem_space::constraints::prolong::build_h1_prolongation_matrix`
+/// (D376); since D386 that function carries its own hex branch (an exact port
+/// of this Newton locator), so fem-space now provides the direct path and this
+/// verified implementation remains the AbsL1 hierarchy's reference.  Hex
+/// hierarchies of order ≥ 2 (where the exact P1 path above does not apply)
+/// need it.
 ///
 /// The fine DOF's reference coordinate inside its parent hex is recovered by
 /// Newton inversion of the trilinear corner map (straight elements), then the

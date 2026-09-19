@@ -881,50 +881,22 @@ impl NurbsPatch {
     /// given knot values (which must lie within the range and respect the
     /// order) into direction `dir`.
     ///
-    /// Delegates to the `fem_element::nurbs` A5.1 insertion kernel
-    /// `h_refine_uk`, applied per knot value (MFEM inserts the whole vector in
-    /// one A5.5 pass; the results agree up to one rounding step, visible only
-    /// as ~1e-17 residuals on exactly-cancelled control points).
-    ///
-    /// Direction 1 inserts in the u direction of the exactly transposed patch
-    /// and transposes back: `h_refine_vk` cannot be used because it rebuilds
-    /// the control-point list column-wise while reading it row-wise, so any
-    /// multi-knot (v-direction) insertion comes back scrambled (D380, in the
-    /// element crate — read-only for D374).
+    /// Delegates to the `fem_element::nurbs` A5.1 insertion kernels
+    /// `h_refine_uk` (direction 0) and `h_refine_vk` (direction 1), applied per
+    /// knot value (MFEM inserts the whole vector in one A5.5 pass; the results
+    /// agree up to one rounding step, visible only as ~1e-17 residuals on
+    /// exactly-cancelled control points).
     pub fn knot_insert(&mut self, dir: usize, knots: &[f64]) {
         if knots.is_empty() {
             return; // nurbs.cpp:1770-1772
         }
         assert!(dir < 2, "NURBSPatch::KnotInsert : Invalid direction!");
-        if dir == 1 {
-            self.transpose_2d();
-        }
         let pd = self.to_patch_data_2d();
-        let refined = fem_element::nurbs::h_refine_uk(&pd, knots);
+        let refined = match dir {
+            0 => fem_element::nurbs::h_refine_uk(&pd, knots),
+            _ => fem_element::nurbs::h_refine_vk(&pd, knots),
+        };
         self.from_patch_data_2d(&refined);
-        if dir == 1 {
-            self.transpose_2d();
-        }
-    }
-
-    /// Exact data permutation `(i, j, l) -> (j, i, l)` together with the
-    /// knot vectors — the parameterization is unchanged, so insertion in the
-    /// u direction of the transposed patch equals insertion in the v
-    /// direction of the original.
-    fn transpose_2d(&mut self) {
-        let (ni, nj, dim) = (self.ni, self.nj, self.dim);
-        let mut t = vec![0.0; self.data.len()];
-        for j in 0..nj {
-            for i in 0..ni {
-                for l in 0..dim {
-                    t[(j + i * nj) * dim + l] = self.data[(i + j * ni) * dim + l];
-                }
-            }
-        }
-        self.data = t;
-        self.kv.swap(0, 1);
-        self.ni = nj;
-        self.nj = ni;
     }
 
     /// MFEM `NURBSPatch::KnotInsert(dir, const KnotVector &newkv)`

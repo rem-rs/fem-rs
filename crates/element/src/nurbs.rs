@@ -1728,8 +1728,8 @@ pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
         let nn = cv + 1; // each insertion adds one basis function
         let orig_knots = kk.knots.clone(); // all columns use the SAME original knot vector
         kk = KnotVector::new(orig_knots.clone(), pv); // reset to original (will be updated after loop)
-        let mut new_cc = Vec::with_capacity(nu * nn);
-        let mut new_ww = Vec::with_capacity(nu * nn);
+        let mut new_cc = vec![[0.0; 2]; nu * nn];
+        let mut new_ww = vec![0.0; nu * nn];
         for i in 0..nu {
             let cx: Vec<f64> = (0..cv)
                 .map(|j| cc[j * nu + i][0] * ww[j * nu + i])
@@ -1746,12 +1746,17 @@ pub fn h_refine_vk(pd: &NurbsPatch2DData, v: &[f64]) -> NurbsPatch2DData {
             }
             for j in 0..nn {
                 let w = rw[j];
-                if w.abs() > 1e-300 {
-                    new_cc.push([rx[j] / w, ry[j] / w]);
+                // Scatter back to the row-major grid (u index fastest), the
+                // layout every later iteration and the caller read — pushing
+                // the refined column as a contiguous block scrambled the grid
+                // (D380).
+                let idx = j * nu + i;
+                new_cc[idx] = if w.abs() > 1e-300 {
+                    [rx[j] / w, ry[j] / w]
                 } else {
-                    new_cc.push([0.0, 0.0]);
-                }
-                new_ww.push(w);
+                    [0.0, 0.0]
+                };
+                new_ww[idx] = w;
             }
         }
         cc = new_cc;
@@ -2423,6 +2428,107 @@ mod tests {
         let cp_old = pd.control_pts.len();
         let r = h_refine_uk(&pd, &[0.5]);
         assert_eq!(r.control_pts.len(), cp_old + pd.kv_v.n_basis());
+    }
+
+    /// D380 regression: `h_refine_vk` must scatter each refined v-column back
+    /// to the row-major grid (`index = j*nu + i`, u fastest) — it used to push
+    /// the column as a contiguous block while every later iteration and the
+    /// caller read the grid row-wise, scrambling any multi-knot v-insertion.
+    /// The u-direction twin `h_refine_uk` is the proven-correct kernel (it
+    /// drives the MFEM-byte-exact `nurbs_curveint` port), so inserting the
+    /// same knots into the exactly transposed patch and transposing back must
+    /// reproduce the v-inserted grid bitwise: both paths feed identical 1-D
+    /// sequences to the same `insert_knot_1d` kernel.
+    #[test]
+    fn h_refine_vk_multi_knot_matches_swapped_uk() {
+        fn transpose(pd: &NurbsPatch2DData) -> NurbsPatch2DData {
+            let (nu, nv) = (pd.kv_u.n_basis(), pd.kv_v.n_basis());
+            NurbsPatch2DData {
+                kv_u: pd.kv_v.clone(),
+                kv_v: pd.kv_u.clone(),
+                // New grid index k = j'*nv + i' (u' = old v, count nv);
+                // the point (u' = i', v' = j') is the old (u = j', v = i'),
+                // which lives at i'*nu + j' (the v index strides by nu).
+                control_pts: (0..nu * nv)
+                    .map(|k| {
+                        let (i, j) = (k % nv, k / nv);
+                        pd.control_pts[i * nu + j]
+                    })
+                    .collect(),
+                weights: (0..nu * nv)
+                    .map(|k| {
+                        let (i, j) = (k % nv, k / nv);
+                        pd.weights[i * nu + j]
+                    })
+                    .collect(),
+                tag: pd.tag,
+            }
+        }
+
+        // Asymmetric patch (u and v knot vectors differ, non-symmetric control
+        // points, non-unit weights) so a transposed/scrambled grid cannot
+        // masquerade as the correct one.
+        let pd = NurbsPatch2DData {
+            kv_u: KnotVector::uniform(2, 3), // 5 basis functions in u
+            kv_v: KnotVector::uniform(1, 2), // 3 basis functions in v
+            control_pts: (0..15)
+                .map(|i| {
+                    [
+                        ((i * 7) % 15) as f64 * 0.25 - 1.0,
+                        ((i * 5) % 13) as f64 * 0.5 - 2.0,
+                    ]
+                })
+                .collect(),
+            weights: (0..15).map(|i| 1.0 + 0.25 * (i % 3) as f64).collect(),
+            tag: 1,
+        };
+        let knots = [0.3, 0.75];
+
+        let r_v = h_refine_vk(&pd, &knots);
+        let r_swapped = transpose(&h_refine_uk(&transpose(&pd), &knots));
+        assert_eq!(r_v.control_pts.len(), r_swapped.control_pts.len());
+        for k in 0..r_v.control_pts.len() {
+            assert_eq!(r_v.control_pts[k], r_swapped.control_pts[k], "cp {k}");
+            assert_eq!(r_v.weights[k], r_swapped.weights[k], "weight {k}");
+        }
+        assert_eq!(r_v.kv_u.knots, r_swapped.kv_u.knots);
+        assert_eq!(r_v.kv_v.knots, r_swapped.kv_v.knots);
+
+        // Geometry preservation through 2+ v-knots: the refined patch must
+        // evaluate to the same surface (unit weights so the plain tensor
+        // B-spline eval below is the exact surface).
+        let flat = NurbsPatch2DData {
+            weights: vec![1.0; 15],
+            ..pd
+        };
+        let eval = |pd: &NurbsPatch2DData, u: f64, v: f64| -> [f64; 2] {
+            let (nu_, nv_) = (pd.kv_u.n_basis(), pd.kv_v.n_basis());
+            let mut p = [0.0f64; 2];
+            for (d, pv) in p.iter_mut().enumerate() {
+                let col: Vec<f64> = (0..nv_)
+                    .map(|j| {
+                        let row: Vec<f64> =
+                            (0..nu_).map(|i| pd.control_pts[j * nu_ + i][d]).collect();
+                        eval_1d(&pd.kv_u, &row, u)
+                    })
+                    .collect();
+                *pv = eval_1d(&pd.kv_v, &col, v);
+            }
+            p
+        };
+        let rf = h_refine_vk(&flat, &[0.3, 0.55, 0.8]);
+        assert_eq!(rf.kv_v.n_basis(), flat.kv_v.n_basis() + 3);
+        for s in 1..8 {
+            for t in 1..8 {
+                let (u, v) = (s as f64 / 8.0, t as f64 / 8.0);
+                let a = eval(&flat, u, v);
+                let b = eval(&rf, u, v);
+                assert!(
+                    (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12,
+                    "surface changed at ({u},{v}): {a:?} vs {b:?}"
+                );
+            }
+        }
     }
 
     #[test]

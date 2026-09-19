@@ -514,19 +514,23 @@ pub fn boundary_dofs_hdiv<M: fem_mesh::topology::MeshTopology>(
             } else {
                 if nodes.len() >= 3 {
                     if nodes.len() == 3 {
-                        space.tri_face_dof(FaceKey::new(nodes[0], nodes[1], nodes[2]))
-                            .map(|d| vec![d])
+                        // D377: an order-k RT triangular face carries
+                        // `(k+1)(k+2)/2` dofs (MFEM's `GetBoundaryTrueDofs`
+                        // essential-constrains the whole block);
+                        // `tri_face_dof` alone exposed only the first.
+                        space.face_dofs(FaceKey::new(nodes[0], nodes[1], nodes[2]))
                     } else {
                         // Quad face: the HDivSpace quad DOF key uses the
                         // first 3 vertices of the element-face ring, but the
                         // boundary ring may start at a different vertex —
-                        // try all 4 triplets of the quad.
+                        // try all 4 triplets of the quad.  D377: the hit
+                        // returns the face's whole `(k+1)^2`-sized block.
                         let mut found = None;
                         for (i, j, k) in [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
-                            if let Some(d) =
-                                space.tri_face_dof(FaceKey::new(nodes[i], nodes[j], nodes[k]))
+                            if let Some(block) =
+                                space.face_dofs(FaceKey::new(nodes[i], nodes[j], nodes[k]))
                             {
-                                found = Some(vec![d]);
+                                found = Some(block);
                                 break;
                             }
                         }

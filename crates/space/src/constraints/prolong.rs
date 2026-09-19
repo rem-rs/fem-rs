@@ -272,11 +272,16 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 ///   property (basis functions of nodes not on a shared edge/vertex vanish
 ///   there), any single adjacent element yields the complete row.
 /// - **h-refinement** (`fine_mesh` is a refinement of `coarse_mesh`): each fine
-///   DOF is located in a coarse element (barycentric test for triangles, Newton
-///   inversion of the bilinear map for quads) and the coarse basis is evaluated
-///   at the inverted reference point.
+///   DOF is located in a coarse element (barycentric test for triangles,
+///   Newton inversion of the bilinear map for quads, barycentric test for
+///   tets, Newton inversion of the trilinear map for hexes) and the coarse
+///   basis is evaluated at the inverted reference point.  On a uniformly
+///   refined hex hierarchy the resulting order-1 entries are the dyadic
+///   `RefinementOperator` constants (1, 1/2, 1/4, 1/8) up to Newton
+///   round-off; `fem_solver::geometric_mg::build_h1_p1_refined_prolongation`
+///   provides the bitwise-dyadic variant for the AbsL1 hierarchy.
 ///
-/// 2-D only (Tri3 / Quad4, straight-edged elements).
+/// Straight-edged Tri3 / Quad4 / Tet4 / Hex8 spaces.
 pub fn build_h1_prolongation_matrix<M: MeshTopology>(
     coarse_mesh: &M,
     coarse_dm: &DofManager,
@@ -355,7 +360,121 @@ fn locate_point_3d_tet<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f6
     None
 }
 
-/// 3-D prolongation: locate fine DOFs in coarse mesh, evaluate coarse basis.
+/// `CUBE` corner reference signs in MFEM hex vertex order (the `HexQk`
+/// `[-1,1]³` reference frame).
+const HEX8_SIGNS: [(f64, f64, f64); 8] = [
+    (-1.0, -1.0, -1.0),
+    (1.0, -1.0, -1.0),
+    (1.0, 1.0, -1.0),
+    (-1.0, 1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+    (1.0, -1.0, 1.0),
+    (1.0, 1.0, 1.0),
+    (-1.0, 1.0, 1.0),
+];
+
+/// Newton-invert the trilinear Q1 corner map of a straight hex; returns the
+/// reference coordinate ξ on `[-1,1]³` if the point is inside.
+///
+/// Exact port of `fem_solver::geometric_mg::invert_hex_trilinear` (D376,
+/// verified bitwise against MFEM's `RefinementOperator` values) — duplicated
+/// here because fem-space cannot depend on fem-solver (D386).
+fn invert_hex_trilinear(c: &[[f64; 3]; 8], x: [f64; 3]) -> Option<[f64; 3]> {
+    let mut xi = [0.0f64; 3];
+    for _ in 0..40 {
+        let mut n = [0.0f64; 8];
+        let mut g = [0.0f64; 24]; // g[i*3 + d] = ∂N_i/∂ξ_d
+        for (i, &(sx, sy, sz)) in HEX8_SIGNS.iter().enumerate() {
+            n[i] = 0.125 * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
+            g[i * 3] = 0.125 * sx * (1.0 + sy * xi[1]) * (1.0 + sz * xi[2]);
+            g[i * 3 + 1] = 0.125 * sy * (1.0 + sx * xi[0]) * (1.0 + sz * xi[2]);
+            g[i * 3 + 2] = 0.125 * sz * (1.0 + sx * xi[0]) * (1.0 + sy * xi[1]);
+        }
+        let mut res = [0.0f64; 3];
+        let mut jac = [[0.0f64; 3]; 3]; // jac[d][k] = ∂x_d/∂ξ_k
+        for (i, &ni) in n.iter().enumerate() {
+            for d in 0..3 {
+                res[d] += ni * c[i][d];
+                for k in 0..3 {
+                    jac[d][k] += g[i * 3 + k] * c[i][d];
+                }
+            }
+        }
+        for d in 0..3 {
+            res[d] -= x[d];
+        }
+        // δ = J⁻¹·(-res) via the adjugate of the 3×3 Jacobian.
+        let (j0, j1, j2, j3, j4, j5, j6, j7, j8) = (
+            jac[0][0], jac[0][1], jac[0][2], jac[1][0], jac[1][1], jac[1][2], jac[2][0],
+            jac[2][1], jac[2][2],
+        );
+        let det =
+            j0 * (j4 * j8 - j5 * j7) - j1 * (j3 * j8 - j5 * j6) + j2 * (j3 * j7 - j4 * j6);
+        if det.abs() < 1e-30 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let adj = [
+            [j4 * j8 - j5 * j7, j2 * j7 - j1 * j8, j1 * j5 - j2 * j4],
+            [j5 * j6 - j3 * j8, j0 * j8 - j2 * j6, j2 * j3 - j0 * j5],
+            [j3 * j7 - j4 * j6, j1 * j6 - j0 * j7, j0 * j4 - j1 * j3],
+        ];
+        let mut step = 0.0f64;
+        for k in 0..3 {
+            let dk =
+                (adj[k][0] * (-res[0]) + adj[k][1] * (-res[1]) + adj[k][2] * (-res[2])) * inv;
+            xi[k] += dk;
+            step += dk * dk;
+        }
+        if step < 1e-26 {
+            break;
+        }
+        if xi.iter().any(|v| v.abs() > 1.5) {
+            return None; // wandered outside the element
+        }
+    }
+    if xi.iter().any(|v| v.abs() > 1.0 + 1e-9) {
+        return None;
+    }
+    Some(xi)
+}
+
+/// Locate a physical point in a hexahedral mesh; returns
+/// `(element, reference ξ)` with ξ on `[-1,1]³` (the `HexQk` reference frame).
+/// Exact port of `fem_solver::geometric_mg::locate_point_hex` (D386).
+fn locate_point_3d_hex<M: MeshTopology>(mesh: &M, x: &[f64]) -> Option<(u32, [f64; 3])> {
+    const BBOX_EPS: f64 = 1e-12;
+    for e in 0..mesh.n_elements() as u32 {
+        if mesh.element_type(e) != fem_mesh::ElementType::Hex8 {
+            continue;
+        }
+        let nodes = mesh.element_nodes(e);
+        let mut c = [[0.0f64; 3]; 8];
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for (i, &nd) in nodes.iter().enumerate() {
+            let p = mesh.node_coords(nd);
+            c[i] = [p[0], p[1], p[2]];
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        if x.iter().zip(lo.iter()).any(|(v, l)| *v < *l - BBOX_EPS)
+            || x.iter().zip(hi.iter()).any(|(v, h)| *v > *h + BBOX_EPS)
+        {
+            continue;
+        }
+        if let Some(xi) = invert_hex_trilinear(&c, [x[0], x[1], x[2]]) {
+            return Some((e, xi));
+        }
+    }
+    None
+}
+
+/// 3-D prolongation: locate fine DOFs in coarse mesh (barycentric containment
+/// for tetrahedra, Newton inversion of the trilinear corner map for hexes) and
+/// evaluate the coarse basis at the recovered reference point.
 fn build_prolongation_nested_mesh_3d<M: MeshTopology>(
     coarse_mesh: &M,
     coarse_dm: &DofManager,
@@ -364,9 +483,11 @@ fn build_prolongation_nested_mesh_3d<M: MeshTopology>(
 ) {
     for f in 0..fine_dm.n_dofs as u32 {
         let x = fine_dm.dof_coord(f);
-        let (e, xi) = locate_point_3d_tet(coarse_mesh, x).unwrap_or_else(|| {
-            panic!("build_h1_prolongation_matrix 3-D: fine DOF {f} at {x:?} outside coarse mesh")
-        });
+        let (e, xi) = locate_point_3d_tet(coarse_mesh, x)
+            .or_else(|| locate_point_3d_hex(coarse_mesh, x))
+            .unwrap_or_else(|| {
+                panic!("build_h1_prolongation_matrix 3-D: fine DOF {f} at {x:?} outside coarse mesh")
+            });
         let c_ref = lagrange_ref_3d(coarse_mesh.element_type(e), coarse_dm.order);
         let mut phi = vec![0.0_f64; c_ref.n_dofs()];
         c_ref.eval_basis(&xi, &mut phi);

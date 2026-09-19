@@ -940,6 +940,7 @@ version = "0.1.0"
 dependencies = [
  "fem-core",
  "fem-element",
+ "fem-io",
  "fem-linalg",
  "fem-mesh",
  "nalgebra 0.33.3",

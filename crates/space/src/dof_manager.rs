@@ -2139,6 +2139,28 @@ impl DofManager {
             .collect();
         debug_assert_eq!(tri_labels.len(), tri_face_dofs_per);
 
+        // D352: the *global* dof numbering follows MFEM's entity phases —
+        // vertices, then every edge dof (mesh edge-table order: first
+        // encounter walking the elements, each element's
+        // `Constants<PYRAMID>::Edges` list, `GetElementToEdgeTable`/
+        // `GetVertexToVertexTable` `mesh/mesh.cpp:8551`/`8526` +
+        // `fem/geom.cpp:1076`), then every face dof (mesh face-table order:
+        // first encounter, base quad then the four side triangles,
+        // `GetElementToFaceTable` `mesh/mesh.cpp:8996` + `FaceVert`
+        // `fem/geom.cpp:1086`), then the element-private interiors (element
+        // order).  `FiniteElementSpace` lays the ids out in exactly these
+        // blocks (`Construct`, `fem/fespace.cpp:2769`: `nvdofs`, `nedofs`,
+        // `nfdofs`, `nbdofs` in that order; consumed per element by
+        // `GetElementDofs`, `fem/fespace.cpp:3428`), so the old single-pass
+        // element-major first-touch loop — which interleaved later elements'
+        // edge dofs with earlier elements' face/interior dofs — scrambled
+        // every absolute id past the first element's edges (the same split
+        // D177 fixed for the prism; on `data/octahedron.mesh` at p = 3 it put
+        // element 0's base-quad block at 22..25 where MFEM has 30..33).  The
+        // element-LOCAL slot tables (what each element's dof span *means*)
+        // are unchanged; only the global id each slot maps to moves.
+        //
+        // Phase 1: vertices and edges.
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
             assert!(ns.len() >= 5);
@@ -2157,6 +2179,18 @@ impl DofManager {
                         dofs_flat[base + off + k] = d;
                     }
                 }
+            }
+        }
+        // Phase 2: face DOFs, after ALL edge DOFs.  Within one element the
+        // walk is [base quad, tri 0-1-4, 1-2-4, 2-3-4, 3-0-4] — MFEM's
+        // `FaceVert` order — so first-touch allocation from the shared counter
+        // interleaves the quadrilateral and triangular face blocks exactly as
+        // MFEM's face table does.  Each face's list keeps the
+        // first-encountering vertex order that defines its orientation.
+        for e in 0..n_elems as u32 {
+            let ns = mesh.element_nodes(e);
+            let base = e as usize * dofs_per_elem;
+            if p >= 2 {
                 // D348: the base quad is shared by both elements of an
                 // octahedron-like pair, entered `(4,3,2,1)` by one and
                 // `(1,2,3,4)` by the other.  `QuadFaceKey` only sorts the four
@@ -2227,11 +2261,15 @@ impl DofManager {
                     }
                 }
             }
-            // D347: the interior block is the one whose *size* differs between
-            // the families — Fuentes already populates it at p = 2 (its
-            // `(p−1)³` tensor has 1 dof there, MFEM's
-            // `H1_FuentesPyramidElement` slot 14 at `(cp₁(1−cp₁), …, cp₁)`),
-            // so the guard is the block size, not the order.
+        }
+        // Phase 3: element-private interior DOFs, after ALL face DOFs.
+        // D347: the interior block is the one whose *size* differs between
+        // the families — Fuentes already populates it at p = 2 (its
+        // `(p−1)³` tensor has 1 dof there, MFEM's
+        // `H1_FuentesPyramidElement` slot 14 at `(cp₁(1−cp₁), …, cp₁)`),
+        // so the guard is the block size, not the order.
+        for e in 0..n_elems as u32 {
+            let base = e as usize * dofs_per_elem;
             for k in 0..volume_dofs_per {
                 dofs_flat[base + tri_block.end + k] = next_dof;
                 next_dof += 1;

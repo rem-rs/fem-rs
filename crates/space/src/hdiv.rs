@@ -253,6 +253,12 @@ pub struct HDivSpace<M: MeshTopology> {
     /// MFEM FaceVert ordering).  Used by interpolate_vector to compute the
     /// RT0 face normal consistent with MFEM DofOrderForOrientation.
     face_canon_verts: std::collections::HashMap<FaceKey, Vec<u32>>,
+    /// Global dofs per face entity, as allocated by the builder: 1 for RT0,
+    /// `(k+1)(k+2)/2` per tet face, `(k+1)^2` per hex face, `k+1` per
+    /// prism/pyramid face.  The face block `[face_map[key],
+    /// face_map[key] + dofs_per_face)` is the face's complete dof set
+    /// (D377: boundary-dof queries must expose the whole block).
+    dofs_per_face: usize,
     /// Cached element type for dispatch.
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
@@ -526,6 +532,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets,
             face_map: FaceDofMap::Faces(face_map),
             face_canon_verts,
+            dofs_per_face,
             elem_type: ElementType::Tet4,
             is_bdm: false,
             quad_igll: false,
@@ -621,6 +628,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_canon_verts: HashMap::new(),
+            dofs_per_face,
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
             is_bdm,
@@ -782,6 +790,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::Faces(face_map),
             face_canon_verts,
+            dofs_per_face,
             elem_type: ElementType::Tet4,
             is_bdm,
             quad_igll: false,
@@ -873,6 +882,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_canon_verts: HashMap::new(),
+            dofs_per_face: dofs_per_edge,
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
             is_bdm: false,
@@ -1005,6 +1015,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
+            dofs_per_face,
             elem_type: ElementType::Hex8,
             is_bdm: false,
             quad_igll: false,
@@ -1090,6 +1101,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
+            dofs_per_face,
             elem_type: ElementType::Prism6,
             is_bdm: false,
             quad_igll: false,
@@ -1167,6 +1179,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
+            dofs_per_face,
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
             quad_igll: false,
@@ -1215,6 +1228,24 @@ impl<M: MeshTopology> HDivSpace<M> {
     pub fn tri_face_dof(&self, face: FaceKey) -> Option<DofId> {
         match &self.face_map {
             FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => map.get(&face).copied(),
+            FaceDofMap::Edges(_) | FaceDofMap::QuadEdges(_) => None,
+        }
+    }
+
+    /// All global DOFs of a 3-D face — the complete face block.
+    ///
+    /// D377: [`Self::tri_face_dof`] returns only the block's *first* dof,
+    /// but an order-k RT face carries `(k+1)(k+2)/2` dofs on tet/prism
+    /// triangles and `(k+1)^2` on hex quadrilaterals (MFEM's
+    /// `GetBoundaryTrueDofs` essential-constrains all of them).
+    /// Boundary-dof queries must use this accessor; for order 0 the two
+    /// agree.
+    pub fn face_dofs(&self, face: FaceKey) -> Option<Vec<DofId>> {
+        let nd = self.dofs_per_face;
+        match &self.face_map {
+            FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => map.get(&face).map(|&first| {
+                (0..nd).map(|m| first + m as DofId).collect()
+            }),
             FaceDofMap::Edges(_) | FaceDofMap::QuadEdges(_) => None,
         }
     }
