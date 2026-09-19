@@ -329,6 +329,10 @@ name = "mini_nurbs_printfunc"
 path = "../miniapps/nurbs/nurbs_printfunc.rs"
 
 [[example]]
+name = "nurbs_curveint"
+path = "../miniapps/nurbs/nurbs_curveint.rs"
+
+[[example]]
 name = "miniapp_gridfunction_bounds"
 path = "../miniapps/tools/gridfunction_bounds.rs"
 
@@ -455,6 +459,10 @@ path = "../miniapps/tools/lor_transfer.rs"
 [[example]]
 name = "diag_abs_l1_jacobi"
 path = "../miniapps/diag-smoothers/abs-l1-jacobi.rs"
+
+[[example]]
+name = "diag_mg_abs_l1_jacobi"
+path = "../miniapps/diag-smoothers/mg_abs_l1_jacobi.rs"
 
 [[example]]
 name = "spde_generate_random_field"
