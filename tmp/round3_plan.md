@@ -2620,7 +2620,99 @@ lor `-fe r`/`-fe h` 基线、d377/d352/d386 新测试）全部复现。
   失败先自检"要防的场景。
 - 一处许可偏离（space/Cargo.toml dev-dep）：已审计接受，记入 ②。
 
-### 第四十八轮（round 48）侦察结论：其余簇（未开工项已全部关闭或转明确残差）
+### 第四十八轮（round 48）第六批：失败/忽略测试修复批（D73a/D73b/D401/D402，全部关闭）
+
+用户指令"先修复失败和忽略的测试"。**ignore 全量清单（38 处）分类**：4 处因缺陷被忽略
+（本轮全修）+ 1 处红测试（本轮修复）；其余合法保留——诊断探针（lor_factory 5 项、
+par_lor_h1 2 项、d269、d224 ×2）、基准（ras_benchmark ×3、d260 热路径、d244 RS probe）、
+长验收（d342 32³ RT3、d337 32³ RT2）、环境（linalg-gpu 10 项 GPU 相关、amg schur 需 dump）、
+手动诊断（poisson_p3_debug_rates——本轮确认合法：仅打印无断言，真门槛是非 ignore 的
+P3 测试）。**本批后 fem-rs 零红测试、零因缺陷忽略。**
+
+#### ① D73(a) + D403 —— 唯一红测试 `poisson_nc_amr_convergence` 修复
+
+- **根因**：`ElementIndicators::dorfler_mark`（error_estimate.rs）把 Dörfler 体判据写成
+  **η 线性累加对 θ·‖η‖₂ 停止**，而非 **Ση²_marked ≥ θ·Ση²**。对本题近均匀误差分布
+  （level 0: η ∈ [0.273, 0.545] / 8 单元），线性 ℓ¹ 累加每轮只标 ~2 个单元 ⇒ 网格
+  5 轮仅 8→38，AMR 卡在一次性加密的误差水平 **7.9085e-2**。
+- **链路排除**（仪表化探针，用后即删）：约束装配残差 ~1e-16；悬挂值恢复按构造精确
+  C⁰（u_c = ½u_a+½u_b 即粗边插值）；`nc_state.refine` 忠实传递标记集（每标记单元
+  +3 子元）；`l2_error` 叶元单次积分、Jacobian 正确 ⇒ **唯一坏件就是 dorfler_mark**。
+- **修法**：一处改为体判据。**测试原断言直接通过**：末级 L2 **4.1594e-2**（< 0.05），
+  单调性保持，轨迹 2.4989e-1 → 2.4597e-1 → 2.3384e-1 → 7.9090e-2 → 6.1045e-2 →
+  4.1594e-2（ne 8→17→26→38→65→95）。
+- **MFEM 仲裁**：C++ 对照（ZZ + `ThresholdRefiner` fraction 0.5，`mesh_operators.cpp`
+  默认 `total_norm_p=∞`）5 轮达 **4.27e-4** ⇒ 测试期望保守合理，**未放松任何阈值**。
+- **新债 D404**：fem-rs 质心 ZZ 判别力低于 MFEM 的 L2 投影 ZZ（同标定 4.16e-2 vs
+  4.27e-4）；`zz_estimator_l2_nc`/`zz_estimator_nodal` 已在树上，NC AMR 消费方可切换。
+
+#### ② D73(b) + D406 —— ams_ads 复数 GMRES-AMS hpc 平台（取消 ignore）
+
+- **根因 = (b) 驱动层左预处理判据失真**（旧 HANDOVER 的 (a) 奇异正则化假设**被推翻**）：
+  hpc 加权 Jacobi+additive 循环以**实部 A_re** 构建后作左预处理，fem-linalg
+  `solve_gmres_complex_with` 的循环内停机判据用 ‖M⁻¹(b−Ax)‖/‖b‖——对近奇异的粗模态
+  低估真残差 ~2 个量级 ⇒ 每轮重启提前退出，平台**随 tol 线性移动、与预算/重启无关**
+  （tol 探针：1e-8/1e-10/1e-12 → 真残差 6.8e-7/6.4e-9/1.2e-10，排除 (a)/(c)）。
+- **修法**（fem-solver 驱动层，vendor/linger 未动）：`solve_gmres_ams_complex` 改用新
+  `solve_gmres_complex_right_prec` —— **右预处理**重启 GMRES（Krylov 空间在 A·M⁻¹ 上、
+  修正 x += M⁻¹Vy），最小化/监控/重启复核的都是**真残差**。注：MFEM 的 GMRESSolver
+  本身是左预处理+预条件停机（`solvers.cpp:1134`），本修复**超出 MFEM**，与 D72 类
+  真残差纪律一致。
+- **验收**：hpc 16×16 **2000 迭代/6.05e-5 平台 → 25 迭代/6.27e-7 收敛**；default 预设
+  22→18 迭代（仍收敛）；`ams_ads` **11 passed / 0 ignored**（测试更名
+  `complex_ams_2d_16x16_converges`，断言 hpc ≤ 1e-6 + default 回归守卫）；其余复数
+  路径同步改善（12×12 hpc 15→11 it）。
+
+#### ③ D401 —— stokes_darcy_coupled MMS（取消 ignore）
+
+- **根因 = 测试侧两处 + 库侧一处隐患**：
+  (i) **库函数 `apply_dirichlet_keep_diag`（linalg/csr.rs:401）假设数值对称**——从
+  主元行取列反力（`rhs[j] -= A[row,j]·val`），对 `[A −Bᵀ; B]` 鞍点系统把**非零**
+  本质值的耦合贡献**符号翻转**（隔离证明：div 行钉 −0.4167 时 rhs 得 −0.4167 而非
+  +0.4167）。所有既有 MMS 测试只钉零值 ⇒ 仅此测试暴露。测试内改真列消元
+  （`apply_dirichlet_saddle`，交叉引用债务号）；库侧记 **D409**。
+  (ii) Stokes 块带 Brinkman 质量项（`VectorH1MassIntegrator κ=1`）而 `f_stokes` 按纯
+  Stokes 导出——O(1) 算子/数据失配（删除；纯扩散在全边界钉写下 SPD）。
+  (iii) εI 正则把离散相容性失配 δ = Σrhs_p − Σ(B·u_bc)_p（1.5e-3，求积+插值噪声）
+  按 1/ε 放大成 1.4e11 的压力常数（改精确守恒修正 `rhs_q += Δ/n_q`；**D411** 建议做
+  共享的相容性防护 helper）。
+- **验收**：取消 ignore 后 2/2 绿；收敛率修前 → 修后：vel 0.07 → **2.95**（P2 TH，
+  理论 ≥2）、p 0.31 → **3.30**（≥1）、flux 0.06 → **0.95**（RT0，≥1）、p 0.64 →
+  **0.96**（P0，≥1）。
+- **新债 D410**：`HDivSpace::interpolate_vector` 的 RT0 面数据用单点中值
+  `|F|·f(x_mid)·n̂` 而非 ∫_F f·n 矩（实测 −0.35355 vs −0.31831/面 @ n=2；O(h²) 偏差，
+  不影响最优率，影响精确数据研究）。
+
+#### ④ D402 + D412/D413 —— 并行 ND2/RT1 DOF 分区（取消 ignore）
+
+- **根因（三类跨 rank 不一致）**：`DofPartition::from_edge_space` 把 3-D NDk 的
+  **面自由度**按"首次所见单元"的 `(elem_gid, slot)` 键控/归属（两 rank 首见不同单元
+  ⇒ ND2 哨兵 gid + `GhostExchange` panic）；`from_face_space` 的 RTk 面内位置取
+  首见单元的块（k≥1 静默别名同面 dof；RT0 逃逸因每面 1 dof）；`dofs_per_edge > 1`
+  时边内位置取 min-**局部**顶点序（compact 节点模式下与全局序无关 ⇒ 镜像边 dof
+  跨 rank 互换）。
+- **修法 = 拓扑/几何规范键 + 既有交换轮次**（MFEM `pfespace.cpp`
+  `GetFaceNbrElementDofs`/`Synchronize` 的形）：面 dof 按（3 个最小全局顶点 id +
+  **最小 gid 相邻单元**的面块内位置）键控、按最小 owner 归属，经既有
+  `exchange_ghost_face_keys::<3>` 轮次解析（face-closure ghost 层保证相邻单元双方
+  均本地可见）；多 dof 边按全局 min→max 端点方向几何重定基（identity 模式逐位
+  不变）；2-D 与 ND1/RT0 逐位不变。
+- **验收**：d110 取消 ignore，ranks 2/4 全绿（1089 dof 的 ND2 梯度 == 串行）；
+  新增 `d412_nd2_rt1_face_dof_partition_3d_par.rs`（350 行，独立实体键双向校验，
+  **对修复前代码验证过"有牙"**——换回旧文件两测试即红）；`fem-parallel` lib
+  243 全绿 + 全部集成测试绿。
+- **新债 D414**：`HDivSpace::dof_coords`（hdiv.rs:1275）每面只填 `order+1` 个坐标、
+  RTk 内部 dof 留 [0,0,0]——不应作为 dof 身份键（完成或文档声明，下轮顺手）。
+
+#### 第六批流程注记
+
+- **抽查复现**：poisson_solve 7/7（红转绿）、ams_ads 11/11（0 ignored）、
+  stokes_darcy 2/2、d110+d412 4/4。
+- **两条旧诊断被证据推翻/修正**：D73(b) 的"hpc 循环缺陷/奇异正则化"假设被 tol 探针
+  排除（真因 = 左预处理判据）；D73(a) 的"归属未定"落定为 `dorfler_mark` 一处。
+- **方法论沉淀**：④ 路的"回归测试先对修复前代码验证有牙"再落地——建议写入派单模板。
+
+### 第四十八轮（round 48）侦察结论：其余簇（全部关闭或转明确残差）
 
 四路只读侦察的具体结论（**这是下一轮派单的直接输入**）：
 
@@ -2721,25 +2813,37 @@ lor `-fe r`/`-fe h` 基线、d377/d352/d386 新测试）全部复现。
 - **D398（P3 文档漂移）**`crates/space/tests/d348_pyramid_quad_face_orientation.rs:388-394`
   的文档段落仍写 `build_pyramid_pk` "单趟分配、不在本任务范围"——D352 已解决，
   断言不受影响，仅措辞过期（该文件不在第五批 ④ 路许可清单内，留下轮顺手改）。
-- **关闭**：~~D353~~（P1，含 C++ 对拍）；~~D358~~（**文档修正、无代码改动**：
-  `miniapps/tools/nodal_transfer.rs:273` 的局部 `project_coefficient` 实测**已经是
-  节点插值**（`test_coeff(dm.dof_coord(d))`），不是 D345 的 L² 质量解 ⇒ 该项原本就
-  不存在，round 47 ④ 路的记载有误）；~~D140~~（`lor_solvers` 桩 → 真 1:1 driver，
-  `-fe h` 三组配置与 C++ 逐字节；`-fe n/r/l` 转为**带实测数字的明确拒绝** ⇒ 残差归 D367/D368）；
-  **第三批**：~~D367~~（LOR 预条件子收 ess 表；残差转 D368/D69）、~~D369~~、
-  ~~D370~~（BramblePasciakSolver；残差 = fem-amg vs hypre BoomerAMG 的固有替代差异）、
-  ~~D371~~（mesh-bounding-boxes；曲面 IO 残差 = 既有 D112b）；
-  **第四批**：~~D368~~（quad ND/RT 忠实 IGLL 基；`-fe n/r` 逐字节；残差 = D377）、
-  ~~D374~~（NURBSPatch 对象层 + curveint；残差 = D380 + patches 版 NurbsExtension 仍拒），
-  ~~D375~~（串行 ex31，**关闭 D128**；残差 = D383 交叉发现 + D384）、
-  ~~D376~~（mg-abs-l1-jacobi 逐位；残差 = D386/D387/D388）；
-  **第五批**：~~D383~~（pex31 转置；inline-quad 逐位不动 + 剪切网格吻合 C++）、
-  ~~D377~~（3-D 面自由度；8/8 oracle 对齐；同族残差 = D392/D393/D394）、
-  ~~D380~~（h_refine_vk；逐位往返）+ ~~D386~~（hex 定位器；与 Newton 路径逐位同）、
-  ~~D352~~（金字塔实体分相编号；p=1..3 探针钉死）。
-- 沿用开放：**D352 已关**；**D354**（混合 3-D H¹ order≥3 跨类型面块——r47 space 项）、
-  D355–D357、D359–D363、D364–D366、**D392/D393/D394**（HDiv 同族三件，建议一次派单）、
-  **D398**、D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
+- **D404（P3）**fem-rs 质心 ZZ 估计子判别力远低于 MFEM 的 L2 投影 ZZ
+  （D73a 仲裁基准：同标定 5 轮 4.16e-2 vs 4.27e-4）；`zz_estimator_l2_nc`/
+  `zz_estimator_nodal` 已在树上，NC AMR 消费方（ex15/pex15/tesla 的估计子选择）
+  可切换后对拍 MFEM 的单元数轨迹。
+- **D409（P1，必修）`CsrMatrix::apply_dirichlet_keep_diag`（linalg/csr.rs:401）假设
+  数值对称**：列反力从主元行 `A[row,j]` 取，鞍点系统 `[A −Bᵀ; B]` 的耦合块
+  数值反对称 ⇒ **非零**本质值的贡献符号翻转（D401 隔离证明：div 行钉 −0.4167 时
+  rhs 得 −0.4167 而非 +0.4167）。所有既有测试只钉零值 ⇒ 未暴露。修法 = 从真列项
+  `A[j,row]` 取反力；`fem_space::constraints::apply_dirichlet` 的"same solution"
+  文档同步修。验证 = D401 的 `apply_dirichlet_saddle` 改回库入口后 2/2 仍绿
+  （或直接对拍 saddle 消元结果逐位）。
+- **D410（P3）`HDivSpace::interpolate_vector` 的 RT0 面数据用单点中值**而非
+  ∫_F f·n 矩（−0.35355 vs −0.31831/面 @ n=2；O(h²) 偏差，不影响最优率）。
+- **D411（P3）鞍点求解相容性防护缺失**：εI 正则 + 稠密 LU 把 δ = Σrhs_p −
+  Σ(B·u_bc)_p 按 1/ε 放大成压力零空间常数（D401 实测 δ=1.5e-3 → p≈1.4e11）；
+  建议共享的 compat-aware helper/断言。
+- **D414（P3）`HDivSpace::dof_coords`（hdiv.rs:1275）每面只填 `order+1` 坐标、
+  RTk 内部 dof [0,0,0]**——完成之或文档声明"非 dof 身份键"。
+- **关闭**：~~D353~~；~~D358~~；~~D140~~；**第三批**：~~D367~~、~~D369~~、~~D370~~、~~D371~~；
+  **第四批**：~~D368~~、~~D374~~、~~D375~~（**关闭 D128**）、~~D376~~；
+  **第五批**：~~D383~~、~~D377~~、~~D380~~+~~D386~~、~~D352~~；
+  **第六批**：~~D73(a)~~+~~D403~~（dorfler_mark 体判据；唯一红测试清零）、
+  ~~D73(b)~~+~~D406~~（右预处理重启 GMRES；hpc 25 it/6.27e-7）、
+  ~~D401~~（stokes_darcy MMS；四率达理论）、~~D402~~+~~D412~~+~~D413~~
+  （并行 ND2/RT1 分区；d110 取消 ignore）。
+- 沿用开放：**D354**（混合 3-D H¹ order≥3 跨类型面块）、D355–D357、D359–D363、
+  D364–D366、D392/D393/D394（HDiv 同族三件）、D398、**D404/D409/D410/D411/D414**、
+  D220/D234/D235/D263/D277/D276/D143 残留、及更早遗留（见 §五/HANDOVER）。
+  **D73 全账关闭**（(a) 红测试已修、(b) ignored 已修并取消 ignore）；
+  **自 round 20 以来首次全量 0 failed / 0 因缺陷 ignored**（合法 ignore：
+  诊断探针/基准/长验收/GPU 环境，见第六批清单）。
 
 ### 本轮统计
 

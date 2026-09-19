@@ -973,6 +973,52 @@ miniapps/
   （`ThresholdRefiner` 现在可以在 3-D 上跑；此前 panic）。
   **留白**：Pyramid5 仍无 `ref_elem_vol` 臂（记 D365）。
 
+### round 48（六）— 失败/忽略测试修复批（D73a/D73b/D401/D402，全部关闭；唯一红测试清零）
+
+用户指令"先修复失败和忽略的测试"。清单：38 处 `#[ignore]` 逐一分类——**4 处因缺陷被忽略**、
+1 处红测试；其余为合法（诊断探针/基准/长验收/手动诊断，如 d342 32³、lor_factory 5 项
+打印诊断、ras_benchmark、poisson_p3_debug_rates 等，本轮确认保留）。
+
+1. **D73(a) + D403 —— 唯一红测试 `poisson_nc_amr_convergence` 修复**：根因是
+   `ElementIndicators::dorfler_mark` 把 Dörfler 判据写错——按 **η 线性**累加对
+   θ·‖η‖₂ 停止，而非标准体判据 **Ση²_marked ≥ θ·Ση²**。对本题近均匀误差分布，
+   每轮只标 ~2 个单元（网格 5 轮仅 8→38），AMR 卡在一次性加密水平 7.9e-2。
+   修正后（`error_estimate.rs` 一处）测试**原断言直接通过**：末级 L2 **4.16e-2**，
+   单调性保持；并用 MFEM 4.10 C++ 对照（ZZ + ThresholdRefiner 0.5，5 轮 4.27e-4）
+   证明期望本身保守合理——未放松任何阈值。链路其余环节
+   （约束装配残差 ~1e-16、悬挂值恢复精确 C⁰、l2_error 叶元积分）均探针验证健康。
+   **新债 D404**：fem-rs 的质心 ZZ 估计子判别力远低于 MFEM 的 L2 投影 ZZ
+   （同标定下 4.16e-2 vs 4.27e-4）；MFEM 级路径（`zz_estimator_l2_nc`/`zz_estimator_nodal`）
+   已在树上，NC AMR 示例可切换。
+2. **D73(b) + D406 —— ams_ads 复数 GMRES-AMS hpc 平台修复（取消 ignore）**：根因是
+   驱动层**左预处理收敛判据失真**——预条件残差 ‖M⁻¹r‖ 低估真残差 ~2 个量级，每个
+   重启循环提前退出（平台**随 tol 线性移动、与预算无关**——tol 探针 6.8e-7/6.4e-9/
+   1.2e-10 证明 (a) 奇异、(c) 循环缺陷均不成立，HANDOVER 旧假设被推翻）。
+   修复在 fem-solver 自己的驱动层：`solve_gmres_ams_complex` 改用新实现的
+   **右预处理**重启 GMRES（真残差最小化 + 监控 + 每轮重启复核），vendor/linger 未动。
+   实测 hpc 16×16：**2000 迭代/6.05e-5 平台 → 25 迭代/6.27e-7 收敛**；default 预设
+   同步改善（22→18 迭代）；`ams_ads` 全部 **11 个测试通过（0 ignored）**。
+3. **D401 —— stokes_darcy_coupled MMS 取消 ignore**：根因是**两个测试侧缺陷 +
+   一个库侧隐患**：(i) 库函数 `apply_dirichlet_keep_diag` 按**对称矩阵**语义从主元行
+   取列反力，对 `[A −Bᵀ; B]` 型鞍点系统把**非零**本质值的贡献符号翻转（所有只钉
+   零值的既有测试均不受影响 ⇒ 只有此测试暴露）——测试内改真列消元，库侧记
+   **D409**；(ii) Stokes 块带 Brinkman 质量项而右端按纯 Stokes 导出（删除）；
+   (iii) εI 正则把离散相容性失配 δ=1.5e-3 放大成 1.4e11 的压力常数（改守恒型
+   修正，**D411**）。修后四条收敛率恢复理论值：vel **2.95**/p **3.30**/flux **0.95**/
+   p **0.96**（修前 0.07/0.31/0.06/0.64）。`poisson.rs:178` 的裸 ignore 确认为合法
+   手动诊断（P3 打印、无断言），保留。
+   **新债 D410**：RT0 面数据用单点中值而非 ∫_F f·n 矩（O(h²) 偏差，仅影响
+   精确数据研究）。
+4. **D402 + D412/D413 —— 并行 ND2/RT1 DOF 分区修复（取消 ignore）**：3-D NDk
+   (k≥2)/RTk(k≥1) 的**面自由度**被按"首次所见单元"键控与归属（跨 rank 不稳定 ⇒
+   ND2 哨兵 gid + GhostExchange panic；RT1 同面 gid 静默别名）；多 dof 边的位置在
+   compact 节点模式下取局部序 ⇒ 镜像边 dof 跨 rank 互换。修复 = 拓扑/几何规范键：
+   面按（3 个最小全局顶点 + 最小 gid 单元的面块位置）经既有 `exchange_ghost_face_keys`
+   轮次交换，边按全局最小端点重定基；2-D 与 ND1/RT0 逐位不变。d110 取消 ignore、
+   ranks 2/4 全绿；新增 `d412` 回归测试（**对修复前代码验证过"有牙"**）。
+   **新债 D414**：`HDivSpace::dof_coords` 对 RTk 的面/内部 dof 坐标不完整
+   （RT0 级锚点 + [0,0,0]），不应作为 dof 身份键使用。
+
 ### round 48（五）— 四路并行修复批（D383/D377/D380+D386/D352，全部关闭）
 
 1. **D383（P1）pex31 ∇z 梯度转置约定 —— 关闭**：`mfem_pex31_restricted_hcurl.rs`
