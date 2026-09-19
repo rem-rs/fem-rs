@@ -2546,7 +2546,81 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
   并给出正确绕过，体现了"绕过 + 立债"的正确姿势。
 - C++ oracle 新增：`$HOME/work/{d368,d374,d375,d376}/`。
 
-### 第四十八轮（round 48）侦察结论：其余簇（未开工，按价值排序；①③ 已由三/四批关闭）
+### 第四十八轮（round 48）第五批：四路并行修复批（D383/D377/D380+D386/D352，全部关闭）
+
+用户指令"继续并行推进**修复**"。四路全部为既有债务的定点修复（号段预分配
+D383/D377/D380+D386/D352，新债号段 D389–D400）；主会话抽查（pex31 剪切网格、
+lor `-fe r`/`-fe h` 基线、d377/d352/d386 新测试）全部复现。
+
+#### ① D383（P1）pex31 ∇z 梯度转置 —— **关闭**
+
+- `compute_hcurl_error` 的 `dx/dy` 误用 J⁻ᵀ 反对角元素（`jit10`/`jit01`），改为
+  `dx = jit00·gξ + jit01·gη`、`dy = jit10·gξ + jit11·gη`（= 串行 ex31 已验证的
+  写法 = MFEM `GetCurl` 的 `grad_hat·J⁻¹` 行约定）。
+- **验收**：inline-quad（对角 J）np1-4 **逐位不动**（`0.0907163` + 全部 checksum）；
+  剪切网格恢复正确——inline-tri `3.1291284594e-1`（1089 unk）、star
+  `8.5873457349e-1`（1041 unk），与 C++ ex31（`$HOME/work/d389/ex31_cpp -r 2`）
+  在 6 位打印精度完全吻合（= D375 已逐字节的 0.312913/0.858735）。
+  顺带删除 HEAD 即死代码的 `extract_block`（release 非增量编译的死代码告警源）。
+
+#### ② D377（P2）`boundary_dofs_hdiv` 3-D 面自由度 —— **关闭**
+
+- `HDivSpace` 新增 `face_dofs(FaceKey)` 整块访问器（7 个 builder 各报面块尺寸：
+  tet `(k+1)(k+2)/2`、hex `(k+1)²`、prism/pyramid/mixed `k+1`）；3-D 分支改用整块
+  （镜像 D368 的 2-D 修法）。RT0 行为不变。
+- **Oracle**：`tmp/d392/ess3d_probe.cpp`（`$HOME/work/d392/d392_probe.out`）——
+  beam-tet/inline-hex × k=0..2 共 **8/8 对齐**（含 `GetVSize` 逐项相等）。此前
+  k≥1 欠约束：beam-tet RT1 ess 272 → **816**（= 272·3）、RT2 272 → **1632**；
+  inline-hex RT1 384 → **1536**（= 384·4）。k=3 tet 的 C++ 数（ess=2720）已备好
+  待 D392 解除阶上限后 pin。
+- **消费者审计：零 pinned baseline 移动**（ex4 默认 2-D RT0、pex4 硬编码 RT0、
+  ex34 默认 `-o 1` RT0、ex22 在 2-D；lor 2-D IGLL pinned 值保持）。
+- ⚠️ **许可偏离备案**：该路改了 `crates/space/Cargo.toml`（`[dev-dependencies]
+  fem-io`，测试需读真实 MFEM 网格；与 fem-mesh 的 dev-dep 同款）——不在其许可
+  清单内，但必要、最小且已申报，主会话审计后接受。
+- **新债 D392**（tet RT 阶上限 `k≤2`，MFEM 无上限）、**D393**（`build_mixed` 的
+  tet 面块按 `k+1` 而非 `(k+1)(k+2)/2` 分配——混合网格 order≥1 的 dof 布局偏离
+  MFEM）、**D394**（`build_3d_prism` 的 tri 面同病）——三者为同族、一次派单可收。
+
+#### ③ D380 + D386 —— **关闭**
+
+- **D380**：`h_refine_vk` 的 v 列改为按 `j*nu+i` 散写（= MFEM `KnotInsert` A5.5
+  切片布局）；回归测试 = 非对称 5u×3v 有理 patch 双 v 结点插入与"转置↔
+  `h_refine_uk`↔转置"**逐位相等** + 3 结点几何保持（曲面求值 ≤1e-12）；
+  D374 的转置绕行补丁与 `transpose_2d` 死代码删除；`d374_curveint_patch` 字节级
+  验收不变（sin-fit.mesh 仍恰 10 个 ~5e-17 物理零残差差异）。
+- **D386**：fem-space `build_prolongation_nested_mesh_3d` 补 hex 定位器
+  （`locate_point_3d_hex` + `invert_hex_trilinear`，移植 D376 已验证代码）。
+  验收：unit_cube_hex 加密一次、order 1/2 —— P·1=1（~1e-16）、Pᵀ 单亲划分成立、
+  与 fem-solver Newton 路径 **max|diff| = 0（逐位）**（order 1 另与 dyadic 参考
+  逐位同）。fem-solver 侧 Newton 路径保留（已验证），仅补一行文档注明直连路径。
+
+#### ④ D352（P2，r47 遗留）—— **关闭**
+
+- `build_pyramid_pk` 全局编号改为 MFEM `Construct` 实体分相序（顶点 → 全部边
+  （DSTable 首触序）→ 全部面（STable3D 首触、基四边形在前）→ 内部；引用
+  `fem/fespace.cpp:2769/3428`、`mesh/mesh.cpp:8551/8996`、`fem/geom.cpp:1076/1086`），
+  与 D177 棱柱同构；单元局部槽表不动。
+- **Oracle**：`tmp/d398/d398_probe.cpp`（mfem410_ser）在 `data/octahedron.mesh` 上
+  打印 p=1..3 的 `GetElementDofs` 绝对编号表（vsize 6/21/58），钉入
+  `d352_pyramid_entity_phase_numbering.rs`——含 D348 旋转基的 ELEM1
+  `32 33 30 31`；round-47 测得的 `22..25 → 30..33` 已反转。
+- **无任何测试钉过旧的 fem-rs 绝对 id**（d348 只断言相对 `QuadDofOrd` 排列、
+  d349 用集合比较）⇒ 金字塔套件 d348(5)/d340(7)/d349(6)/d340-assembly(12)/
+  d335(6) 全绿不动。
+- **新债 D398**（P3 文档漂移）：d348 测试文档仍写"单趟分配，不在本任务范围"
+  ——断言不受影响，仅措辞过期。
+
+#### 第五批流程注记
+
+- 抽查四组：pex31 inline-tri/star、lor `-fe r`/`-fe h` 基线、三个新测试文件 ——
+  全部复现。
+- **并发协作实证**：B 路中途遇到 C 路在飞的 `prolong.rs` 编译错误（约 2 分钟后
+  自愈）——按纪律原样转述、未动他人代码，这正是"同一文件只给一个代理 +
+  失败先自检"要防的场景。
+- 一处许可偏离（space/Cargo.toml dev-dep）：已审计接受，记入 ②。
+
+### 第四十八轮（round 48）侦察结论：其余簇（未开工项已全部关闭或转明确残差）
 
 四路只读侦察的具体结论（**这是下一轮派单的直接输入**）：
 
@@ -2644,6 +2718,9 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
 - **D388（P3）`fem_mesh::kershaw_map` 与 MFEM `KershawTransformation` 在非规则/
   混合网格不等价**（star 上 C++ 自身产生折叠单元/NaN；beam-quad 逐位一致）——
   属 C++ 侧未定义行为，fem-rs 收敛更好，但要在文档标注"非对拍"。
+- **D398（P3 文档漂移）**`crates/space/tests/d348_pyramid_quad_face_orientation.rs:388-394`
+  的文档段落仍写 `build_pyramid_pk` "单趟分配、不在本任务范围"——D352 已解决，
+  断言不受影响，仅措辞过期（该文件不在第五批 ④ 路许可清单内，留下轮顺手改）。
 - **关闭**：~~D353~~（P1，含 C++ 对拍）；~~D358~~（**文档修正、无代码改动**：
   `miniapps/tools/nodal_transfer.rs:273` 的局部 `project_coefficient` 实测**已经是
   节点插值**（`test_coeff(dm.dof_coord(d))`），不是 D345 的 L² 质量解 ⇒ 该项原本就
@@ -2655,10 +2732,14 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
   **第四批**：~~D368~~（quad ND/RT 忠实 IGLL 基；`-fe n/r` 逐字节；残差 = D377）、
   ~~D374~~（NURBSPatch 对象层 + curveint；残差 = D380 + patches 版 NurbsExtension 仍拒），
   ~~D375~~（串行 ex31，**关闭 D128**；残差 = D383 交叉发现 + D384）、
-  ~~D376~~（mg-abs-l1-jacobi 逐位；残差 = D386/D387/D388）。
-- 沿用开放：**D352/D354**（r47 的 space 两项）、D355–D357、D359–D363、D364–D366、
-  **D377/D380/D383/D384/D386/D387/D388**、D220/D234/D235/D263/D277/D276/D143 残留、
-  D73、及更早遗留（见 §五/HANDOVER）。
+  ~~D376~~（mg-abs-l1-jacobi 逐位；残差 = D386/D387/D388）；
+  **第五批**：~~D383~~（pex31 转置；inline-quad 逐位不动 + 剪切网格吻合 C++）、
+  ~~D377~~（3-D 面自由度；8/8 oracle 对齐；同族残差 = D392/D393/D394）、
+  ~~D380~~（h_refine_vk；逐位往返）+ ~~D386~~（hex 定位器；与 Newton 路径逐位同）、
+  ~~D352~~（金字塔实体分相编号；p=1..3 探针钉死）。
+- 沿用开放：**D352 已关**；**D354**（混合 3-D H¹ order≥3 跨类型面块——r47 space 项）、
+  D355–D357、D359–D363、D364–D366、**D392/D393/D394**（HDiv 同族三件，建议一次派单）、
+  **D398**、D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留（见 §五/HANDOVER）。
 
 ### 本轮统计
 

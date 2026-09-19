@@ -973,7 +973,40 @@ miniapps/
   （`ThresholdRefiner` 现在可以在 3-D 上跑；此前 panic）。
   **留白**：Pyramid5 仍无 `ref_elem_vol` 臂（记 D365）。
 
-### round 48（四）— 四路并行第二批（D368/D374/D375/D376）
+### round 48（五）— 四路并行修复批（D383/D377/D380+D386/D352，全部关闭）
+
+1. **D383（P1）pex31 ∇z 梯度转置约定 —— 关闭**：`mfem_pex31_restricted_hcurl.rs`
+   的 `compute_hcurl_error` 误用 J⁻ᵀ 反对角（`dx←jit10`、`dy←jit01`），改为与串行
+   ex31/MFEM `GetCurl`（`grad_hat·J⁻¹` 行约定）一致的 `dx = jit00·gξ + jit01·gη`、
+   `dy = jit10·gξ + jit11·gη`。**inline-quad（对角 J）逐位不动**：np1-4 的
+   `0.0907163` + ‖u‖/sum/checksum 全部保持；**剪切网格恢复正确**：inline-tri
+   `0.312913`（1089 unk）、star `0.858735`（1041 unk），与 C++ ex31（-r 2）打印
+   精度完全吻合。顺带删除 HEAD 即死代码的 `extract_block`。
+2. **D377（P2）`boundary_dofs_hdiv` 3-D 面自由度 —— 关闭**：`HDivSpace` 新增
+   `face_dofs(FaceKey)` 整块访问器（tet 面 `(k+1)(k+2)/2`、hex 面 `(k+1)²`），
+   3-D 分支镜像 D368 的 2-D 修法。MFEM `GetBoundaryTrueDofs` oracle 在
+   beam-tet/inline-hex × k=0..2 上 **8/8 对齐**（含 `GetVSize` 逐项；此前 k≥1 欠约束：
+   beam-tet RT1 272 → 816）。**消费者审计：零 pinned baseline 移动**（3-D RT0 与
+   2-D 不受影响）。⚠️ 测试需读真实 MFEM 网格 ⇒ `crates/space/Cargo.toml` 增加
+   `[dev-dependencies] fem-io`（超出该路许可清单的一处必要偏离，主会话审计后接受）。
+   **新债 D392/D393/D394**：tet RT 阶上限 k≤2（MFEM 无上限，k=3 oracle 已备）；
+   `build_mixed` 的 tet 面块按 `k+1` 而非 `(k+1)(k+2)/2`；`build_3d_prism` 的 tri 面
+   同病。
+3. **D380+D386 —— 关闭**：`h_refine_vk` 改为按 `j*nu+i` 精确散写（= MFEM
+   `KnotInsert` A5.5 布局），多结点 v 插入与"转置↔`h_refine_uk`↔转置"逐位一致，
+   D374 的绕行补丁与死代码删除，`d374_curveint_patch` 字节级验收不变；
+   fem-space 嵌套 3-D 分支补 hex 定位器（移植 D376 已验证的 Newton 反演），
+   P·1=1、Pᵀ 单亲划分成立，且与 fem-solver Newton 路径及一阶 dyadic 参考
+   **max|diff| = 0（逐位）**（order 1 与 2）。
+4. **D352（P2，r47 遗留）—— 关闭**：`build_pyramid_pk` 全局编号由"元素首次触及"
+   改为 MFEM `Construct` 实体分相序（顶点→全部边→全部面（基四边形在前）→内部），
+   与 D177 棱柱同构；单元局部槽表不动。`data/octahedron.mesh` p=1..3 的
+   `GetElementDofs` 绝对编号表由 mfem410_ser 探针钉入
+   `d352_pyramid_entity_phase_numbering.rs`（含 D348 旋转基 `32 33 30 31`）；
+   vsize 6/21/58 不变，round-47 的 `22..25 → 30..33` 已反转。d348/d340/d349/d335
+   金字塔套件全绿。**新债 D398**（P3 文档漂移）：d348 测试文档仍描述旧的单趟分配。
+
+
 
 1. **D368（quad ND/RT 忠实基）——关闭，`lor_solvers -fe n/r` 达成逐字节**：
    opt-in `new_gauss_lobatto_integrated_gll` 构造器 + `vec_ref_elem_with_basis` 装配入口 +
