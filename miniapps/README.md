@@ -973,6 +973,46 @@ miniapps/
   （`ThresholdRefiner` 现在可以在 3-D 上跑；此前 panic）。
   **留白**：Pyramid5 仍无 `ref_elem_vol` 臂（记 D365）。
 
+### round 48（七）— 忽略测试清剿批（D415–D419，全部关闭；`#[ignore]` 仅剩合法诊断/长验收）
+
+用户指令"优先修复忽略的测试"。四路把最后 5 处**因缺陷/缺料被忽略**的测试全部清零；
+至此 `#[ignore]` 仅剩合法类别：诊断探针（lor_factory 5、par_lor_h1 2、d269、d224 ×2、
+d244、poisson_p3_debug_rates）、基准（ras_benchmark ×3、d260 热路径）、长验收
+（d342/d337 32³）、GPU 环境自跳过（见 ①，已非 ignore）。
+
+1. **D415 —— linalg-gpu 11 处 ignore 全部移除，改"适配器条件自跳过"**：本机实测
+   wgpu 适配器**存在**但**不支持 SHADER_F64**——原 `ctx().expect("GpuContext")` 在
+   无适配器机器上会 panic，这是当年加 ignore 的原因。现全部上下文助手返回 `Option`、
+   无适配器/无 f64 时打印可见 `SKIP:` 行后提前返回；`cargo test -p fem-linalg-gpu`
+   **28/28 全绿（0 ignored）**，f32 分支真实执行，f64 数值路径待有 f64 适配器的机器
+   验证（如实记录）。
+2. **D416 —— `curl_3d`"占位"实为历史误标，修正遗留缺陷并补性质检验**：核查发现
+   ND1→RT0（拓扑面-边关联）与 ND2→RT1（双基重构，= MFEM `CurlInterpolator`/
+   `ProjectCurl3D_RT`，`bilininteg.hpp:4159`、`fe_base.cpp:1385`）**早已完整实现**，
+   并行端 `ParDiscreteLinearOperator::curl_3d` 直接复用串行矩阵。本轮修三处遗留：
+   调试 `eprintln!("TEMP …")` 残留删除；不支持单元分支误用
+   `UnsupportedHCurlOrder{order: elem_type as u8}` 改 `UnsupportedCellType`；
+   陈旧 ignore + 测的是**未合成部分乘积**的打印循环改真稠密乘积并加断言。
+   **验收**：div∘curl 恒等式达机器精度（ND1→RT0→P0 **4.441e-16**、ND2→RT1→P1
+   **1.187e-12**）；制造场收敛率 1.01/1.01（一阶）、渐近 0.96（二阶，O(h) 符合
+   预期）；`discrete_op` **47/47 绿（0 ignored）**。
+3. **D417 —— HDG 弹性 3-D skeleton（取消 ignore）**：四个真缺陷——**NaN 根因** =
+   重建通道硬编码 2-D 行列式（Kuhn 四面体前导 2×2 奇异 ⇒ det=0 → inf·0 = NaN）；
+   `face_size` 的 3-D 面-顶点表与 `local_faces` 不一致（每个 ∂K 积分用错面的测度）；
+   面 3 求积映射置换了面基-顶点配对；梯度变换用 J⁻¹ 而非 J⁻ᵀ（**两维都有**，斜切
+   单元刚度错）+ 内部面 λ 槽按恒等映射绑定（数值通量跨面不单值）。修法：统一为
+   维度无关 `build_condensed` + 正确伴随 + λ 槽置换。**验收**：零源问题精确复零解
+   （max|u|=max|λ|=0，修前 NaN）；`hdg` **16/16 绿（0 ignored）**。新债
+   **D426/D427/D428 均已随修关闭**。
+4. **D418/D419 —— contact_mortar 与 schur_s_matrix（取消 ignore）**：前者从标量
+   Laplace 占位升级为真 `ElasticityIntegrator` + `VectorH1Space`（关键发现：其全局
+   dof 是**分块布局** `dof = comp·n_scalar + node`），补齐消除平移/旋转刚性模态的
+   Dirichlet 支承（Jacobi 特征分解证明的铰链机构），`solve_mortar_uzawa` 修正为
+   符号物理一致的投影 Uzawa（λ≥0 = 接触压力）；~1400 次 Uzawa 迭代收敛，3/3 绿。
+   后者：重新生成 star.mesh 三个 Schur 补 dump（20/80/320 阶）+ 新增结构化回退
+   （缺 dump 时 `assemble_schur` 构造同规格矩阵，**永不空转**）；无 dump 5/6/7 次、
+   有 dump 5/7/9 次，均收敛 ≤40。
+
 ### round 48（六）— 失败/忽略测试修复批（D73a/D73b/D401/D402，全部关闭；唯一红测试清零）
 
 用户指令"先修复失败和忽略的测试"。清单：38 处 `#[ignore]` 逐一分类——**4 处因缺陷被忽略**、

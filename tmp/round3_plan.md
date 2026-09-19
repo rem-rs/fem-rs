@@ -2712,6 +2712,76 @@ P3 测试）。**本批后 fem-rs 零红测试、零因缺陷忽略。**
   排除（真因 = 左预处理判据）；D73(a) 的"归属未定"落定为 `dorfler_mark` 一处。
 - **方法论沉淀**：④ 路的"回归测试先对修复前代码验证有牙"再落地——建议写入派单模板。
 
+### 第四十八轮（round 48）第七批：忽略测试清剿批（D415–D419，全部关闭）
+
+用户指令"继续优先修复 97 个忽略的测试"。按上一批的 38 处分类，本批清掉最后 5 处
+**因缺陷/缺料被忽略**的测试；至此 `#[ignore]` 仅剩合法类别（诊断探针/基准/长验收/
+手动打印），**全仓 0 因缺陷或缺料忽略**。
+
+#### ① D415 —— linalg-gpu 11 处 ignore 移除（改"适配器条件自跳过"）
+
+- **本机实测**：wgpu 适配器**存在**（HighPerformance 请求成功）但**不支持
+  SHADER_F64**——原 `ctx().expect("GpuContext")` 在无适配器机器上 panic，这是当年
+  加 ignore 的原因。
+- **修法**：全部 GPU 上下文助手改返回 `Option`（`NoAdapter` → 打印可见 `SKIP:` 行
+  提前返回；其他错误仍 panic）；f32 分支真实执行。
+- **验收**：`cargo test -p fem-linalg-gpu` **28/28 全绿（0 ignored）**（lib 15 +
+  gpu_mms 9 + spmv 2 + vector_ops 2）。**如实留白**：f64 数值路径本机不可验证，
+  待有 f64 适配器的机器。
+
+#### ② D416 —— `curl_3d`"占位"实为历史误标（关闭 + 三处遗留修正）
+
+- **核查结论**：`DiscreteLinearOperator::curl_3d` **早已完整实现**——ND1→RT0 为
+  拓扑面-边关联（Stokes 符号）；ND2→RT1 为双基重构（MFEM 节点点值 ND2 泛函 +
+  `ProjectCurl3D_RT` 通量泛函，`bilininteg.hpp:4159`、`fe_base.cpp:1385`）；并行端
+  `ParDiscreteLinearOperator::curl_3d` **直接复用**串行矩阵（`par_discrete_operator.rs:
+  84-87`）⇒ 两端数学一致性由构造成立。ignore 的"placeholder"注释是历史误标。
+- **三处遗留修正**：调试 `eprintln!("TEMP curl_3d bad hcurl order …")` 删除；
+  不支持单元分支误用 `UnsupportedHCurlOrder{order: elem_type as u8}` 改
+  `UnsupportedCellType`；测试的 `max|D·C|` 打印循环测的是**未合成的部分乘积**——
+  改真稠密乘积并加断言、取消 ignore。
+- **验收**：div∘curl 恒等式随机向量达机器精度（**4.441e-16** / **1.187e-12**）；
+  制造场 A=(0,0,sinπx·sinπy) 收敛率 1.01/1.01（ND1→RT0）、0.86→**0.96**（ND2→RT1，
+  O(h) 符合预期：ND 卷积近似低一阶）；`discrete_op` **47/47 绿**。
+
+#### ③ D417 —— HDG 弹性 3-D skeleton（取消 ignore）
+
+- **四个真缺陷**：① **NaN 根因** = 重建通道硬编码 2-D 行列式（Kuhn 四面体
+  `[0,3,7,6]` 前导 2×2 奇异 ⇒ det=0 → inf·0 = NaN）；② `face_size` 的 3-D 面-顶点表
+  （MFEM 对顶点约定）与 `local_faces` 不一致 ⇒ 每个 ∂K 积分用错面的测度；③ 面 3
+  求积映射 `(s,t,1−s−t)` 置换面基-顶点配对（改 `(1−s−t,s,t)`）；④ 梯度变换用
+  J⁻¹ 而非 J⁻ᵀ（**两维都有**；三角 (0,0),(1,0),(1,1) 解析验证 ∂φ/∂y 得 0 而非 −1）
+  + 内部面 λ 槽按恒等映射绑定（数值通量跨面不单值，改显式槽置换）。
+- **修法**：单元构建统一为维度无关 `HdgProblem::build_condensed`（装配与重建共用）。
+- **验收**：`hdg_elasticity_3d_finite` 取消 ignore 后通过；零源问题精确复零解
+  （max|u| = max|λ| = **0.000e0**，修前 NaN）；`hdg` **16/16 绿**。
+  **D426/D427/D428 均随修关闭**。
+
+#### ④ D418 + D419 —— contact_mortar 与 schur_s_matrix（取消 ignore）
+
+- **D418**：`steel_on_steel_benchmark` 从标量 Laplace 占位升级为真
+  `ElasticityIntegrator` + `VectorH1Space`（P1 双分量；**关键发现：其全局 dof 是分块
+  布局 `dof = comp·n_scalar + node`** 而非节点交错——首次尝试散射错位导致 K 奇异）；
+  Dirichlet 支承经 Jacobi 特征分解证明需钉 ux 顶边 + 对角界面角点 + 一节点 uy
+  （否则绕角点刚体转动为零空间）；`solve_mortar_uzawa` 修正为符号物理一致的投影
+  Uzawa（`λ ← max(0, λ+ρg)`，λ≥0 = 接触压力；原符号在压缩下永不激活）。验收：
+  ρ=4 约 1400 次迭代收敛（tol 1e-8），λ 有限非负、承载面下移断言；`contact_mortar`
+  **3/3 绿**。
+- **D419**：重新生成 star.mesh 三个 Schur 补 dump（20/80/320 阶；`block_solvers
+  -dump-schur`）；测试新增**结构化回退**（缺 dump 时 `assemble_schur` 构造同规格
+  矩阵，永不空转）；无 dump 5/6/7 次、有 dump 5/7/9 次，均收敛 ≤40；更名
+  `schur_star_mesh_amg_cg_converges` 并取消 ignore。
+- **D429–D431 未用**（三处问题都在两个许可文件内修掉）。
+
+#### 第七批流程注记
+
+- 抽查五组：discrete_op 47/47、hdg 16/16、contact 3/3、schur 3/3、linalg-gpu 28/28
+  ——全部 0 ignored 复现。
+- **跨路并发事件**：B 路（discrete_op）与 C 路（hdg）各自观察到 D 路（contact）
+  在飞编辑造成的短暂编译失败/测试红，均按纪律原样转述未动他人文件；最终态全绿。
+- **历史误标教训**：D416 的"placeholder"注释与实现状态脱节多轮——ignore 消息本身
+  也需要随代码审计（本批 38 处分类即为此设计）。
+
 ### 第四十八轮（round 48）侦察结论：其余簇（全部关闭或转明确残差）
 
 四路只读侦察的具体结论（**这是下一轮派单的直接输入**）：
@@ -2834,16 +2904,16 @@ P3 测试）。**本批后 fem-rs 零红测试、零因缺陷忽略。**
 - **关闭**：~~D353~~；~~D358~~；~~D140~~；**第三批**：~~D367~~、~~D369~~、~~D370~~、~~D371~~；
   **第四批**：~~D368~~、~~D374~~、~~D375~~（**关闭 D128**）、~~D376~~；
   **第五批**：~~D383~~、~~D377~~、~~D380~~+~~D386~~、~~D352~~；
-  **第六批**：~~D73(a)~~+~~D403~~（dorfler_mark 体判据；唯一红测试清零）、
-  ~~D73(b)~~+~~D406~~（右预处理重启 GMRES；hpc 25 it/6.27e-7）、
-  ~~D401~~（stokes_darcy MMS；四率达理论）、~~D402~~+~~D412~~+~~D413~~
-  （并行 ND2/RT1 分区；d110 取消 ignore）。
+  **第六批**：~~D73(a)~~+~~D403~~、~~D73(b)~~+~~D406~~、~~D401~~、~~D402~~+~~D412~~+~~D413~~；
+  **第七批**：~~D415~~（GPU 适配器条件自跳过；11 处 ignore 移除）、~~D416~~
+  （curl_3d 历史误标 + 三处遗留；div∘curl 机器精度）、~~D417~~（HDG 3-D skeleton
+  四缺陷；16/16）、~~D418~~（contact 真弹性 + 投影 Uzawa；3/3）、~~D419~~
+  （schur dump + 结构化回退；双路径绿）；~~D426/D427/D428~~（随 D417 关闭）。
 - 沿用开放：**D354**（混合 3-D H¹ order≥3 跨类型面块）、D355–D357、D359–D363、
-  D364–D366、D392/D393/D394（HDiv 同族三件）、D398、**D404/D409/D410/D411/D414**、
+  D364–D366、D392/D393/D394（HDiv 同族三件）、D398、D404/D409/D410/D411/D414、
   D220/D234/D235/D263/D277/D276/D143 残留、及更早遗留（见 §五/HANDOVER）。
-  **D73 全账关闭**（(a) 红测试已修、(b) ignored 已修并取消 ignore）；
-  **自 round 20 以来首次全量 0 failed / 0 因缺陷 ignored**（合法 ignore：
-  诊断探针/基准/长验收/GPU 环境，见第六批清单）。
+  **D73 全账关闭；自 round 20 以来首次全量 0 failed、0 因缺陷/缺料 ignored**——
+  剩余 `#[ignore]` 全部为合法类别（诊断探针/基准/长验收/手动打印/代码围栏）。
 
 ### 本轮统计
 
