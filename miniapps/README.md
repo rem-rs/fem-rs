@@ -374,7 +374,33 @@ miniapps/
 │   ├── mesh-optimizer.rs    ← TMOP 网格优化 (1:1, 2D quad/3D hex;
 │   │                            icf/cube/jagged 的 min det 与能量
 │   │                            与 C++ 逐位一致; 目标 tid 1/2/3,
-│   │                            线搜索 = TMOPNewtonSolver)
+│   │                            线搜索 = TMOPNewtonSolver)。
+│   │                            **round 48 D369：`-qt 3`（ClosedUniform/IntRulesCU）
+│   │                            解除封锁** —— `TmopQuadType::ClosedUniform` 按
+│   │                            `QuadratureFunctions1D::ClosedUniform`/`CalculateUniformWeights`/
+│   │                            `SegmentIntegrationRule`（intrules.cpp:856/964/1029）逐行移植；
+│   │                            关键发现：**MFEM 的 ClosedUniform 只改 SEGMENT 规则**，
+│   │                            TRI/TET 是与 qt 无关的 Witherden-Vincent 规则。
+│   │                            star-q2/beam-hex 双端 2-D/3-D 点数、min det(J)、
+│   │                            Newton 能量全部一致；orders 2..=12 的规则点数/权重
+│   │                            由 `d369_tmop_closed_uniform_quad.rs` 对探针钉死。
+│   │                            顺带修正 qt 相关的 **Prism 点数打印**（先前对
+│   │                            -qt 1/3 打错）。⚠️ `fem_element::quadrature::prism_rule`
+│   │                            本体仍是 qt 无关欠点规则 ⇒ **D372**。
+│   ├── mesh_bounding_boxes.rs ← ✅ **round 48 D371：mesh-bounding-boxes 1:1 port**
+│   │                            （此前无对位）。三块核心能力：plbound 全分量
+│   │                            bounds（标量路径逐位不变）、
+│   │                            `GridFunction::get_element_dof_values`/`get_bounds_vdim`、
+│   │                            `Mesh` 的 `GetJacobianDeterminantGF` 对位
+│   │                            （`det_order = dim·p−1`、GLL L2 节点、fem-rs hex
+│   │                            `[-1,1]³` 参考域对 MFEM `[0,1]³` 的 2^dim 雅可比域因子补偿）。
+│   │                            triple-pt-1（2-D 直边 quad）与 fichera-q2（3-D 曲边 hex）
+│   │                            共 10 组命令行组合输出与 C++ **逐字节一致**
+│   │                            （含 det bounds `0.0699225/1.19096`、nodal `-1.03976…`）。
+│   │                            ⚠️ klein-bottle/star-surf 是 `dim 2 / spaceDim 3` 曲面网格，
+│   │                            fem-rs 网格 IO 按 D112b 截断 2 分量 ⇒ 驱动检测后
+│   │                            **主动 exit 3**（C++ 真值已留档 tmp/d371/）；
+│   │                            `-visit` 未移植 exit 3；`-vis` 文档化 no-op。
 │   ├── fit-node-position.rs ← TMOP 节点位置拟合到曲面 (1:1, 2D quad;
 │   │                            EnableSurfaceFitting: 能量/梯度/Hessian
 │   │                            拟合项 + 自适应拟合权 + 拟合误差终止;
@@ -538,15 +564,25 @@ miniapps/
 │                                `LORSolver<GSSmoother>`（LOR 矩阵上一次 GS），fem-rs 是
 │                                LOR 上的 AMG ⇒ star.mesh 26 次 vs C++ 58 次，**解与
 │                                L2 误差相同**。
-│                                ⚠️ **`-fe n`/`-fe r` 明确拒绝并联入债务**（D367）：LOR
-│                                预条件子必须建在**消元后**的算子上，而
-│                                `build_lor_ams_nd_quad`/`build_lor_jacobi_rt_quad` 从
-│                                `(mass, curl_curl)` 系数**内部**推导 `A_LOR`、**不收
-│                                essential-dof 表**（MFEM 的 `LORSolver(a, ess_tdofs)` 会
-│                                跑 `LORBase::AssembleSystem → FormSystemMatrix(ess)`）。
-│                                实测：ND **不收敛**（500 次后真残差 `1.2070903825e-01`，
-│                                C++ 279 次），RT 收敛（204 次）但 L2 差 C++ 末位
-│                                （`0.000134745` vs `0.000134744`）⇒ 不声称对拍。
+│                                ⚠️ **`-fe n`/`-fe r`（quad）仍未达 1:1 并如实拒绝**
+│                                （**round 48 二批更新**）：D367 **已落地**——
+│                                `build_lor_sgs_nd_quad`/`build_lor_sgs_rt_quad` 现收
+│                                HO essential-dof 表、按 MFEM `EliminateBC(ess, DIAG_KEEP)`
+│                                （串行 batched 路径 `lor_batched.cpp:726-734`）映射到 LOR
+│                                编号后在 `A_LOR` 上消元，内层 = 一次对称 GS
+│                                （= MFEM 无 SuiteSparse 的 `LORSolver<GSSmoother>`）；
+│                                顺带发现并修掉 H(div) 腿 essential 表缺 per-edge
+│                                `p+1`-1 个 dof 的缺陷（MFEM 探针 `ess=96` 逐位对齐）。
+│                                **但 ND 仍不收敛**（500 步真残差 `2.1101872802611644e-02`，
+│                                C++ 279 步）、**RT 收敛 281 步**（= C++ 268 的同 GS 算法）
+│                                但 `L2 error 0.000134747` vs C++ `0.000134744`。
+│                                剩余差距定位在 **D368/D69**：fem-rs 的 quad ND/RT
+│                                **高阶单元**（legacy `QuadNDk`/`QuadRTk`）不是
+│                                `ND_FECollection`/`RT_FECollection(GaussLobatto,
+│                                IntegratedGLL)` 的忠实移植，LOR 传递（按 MFEM 泛函构造）
+│                                与旧版 HO 算子不谱匹配——用 IGLL HO 矩阵时同一栈
+│                                健康（精确内部 6→7、LOR-AMS 33→9，d69 诊断复测）。
+│                                忠实移植 quad ND/RT = D368 主件（大，另立）。
 │                                `-fe l`（DG 面项）与"单形网格上的 `-fe n/r`"（fem-rs 的
 │                                ND/RT LOR 只支持张量元）同样拒绝并给出理由。
 │                                ⚠️ **另记**：`lor_solvers -m data/inline-tri.mesh -fe h`
@@ -576,6 +612,30 @@ miniapps/
 │                                ND/RT 需**分布式** AMS/ADS（linger 只有串行版，
 │                                估 1–2 周），L²/DG 需并行面积分器（~1 周）⇒
 │                                `-fe n|r|l` 显式拒绝并给出原因
+├── solvers/block_solvers.rs ← ✅ **round 48 D370：接入 `-solver bp|bp-pcg`**
+│                                （MFEM `blocksolvers::BramblePasciakSolver` 的
+│                                串行 1:1；此前 4/5 个求解器，`bp` 缺位 exit(2)）。
+│                                新核心件：`fem-assembly` 的
+│                                `Assembler::assemble_from_element_matrices`
+│                                （= `ComputeElementMatrices +
+│                                `AssembleElementMatrix(i, Q_i, 1)` 路径，含
+│                                `element_signs` 共轭散射）+ `fem-solver` 的
+│                                `BPSParameters`/`BramblePasciakSolver`
+│                                （`use_bpcg` 两分支）+ `element_q_block`。
+│                                **比对中发现并修正 miniapp 装配积分阶**：
+│                                M/Q = `2k+2`、B = `2k`（MFEM 积分器默认
+│                                `Trans.OrderW()+2·GetOrder()`，RT `GetOrder()=k+1`，
+│                                `bilininteg.cpp:2685/1830`）——修前 0 阶 u-误差差 10×。
+│                                C++ oracle（`$HOME/work/d370/block_solvers_cpp`，
+│                                **MPI 库构建**——block-solvers.cpp 是 MPI miniapp，
+│                                串行 lib 链接失败；`mpirun -np 1` 串行协议）：
+│                                `-o 0` 的 `bp`/`bp-pcg` L2 `0.0479712` 与 C++ **全部
+│                                6 位一致**；`-o 1` `bp-pcg` 迭代数**精确一致（66=66）**、
+│                                L2 5–6 位；`-o 2` L2 ~3 位（残差在求解器容差地板）。
+│                                剩余迭代数/L2 微差归因 **fem-amg vs hypre BoomerAMG**
+│                                （唯一非 1:1 组件，o0/o1 已隔离证明系统/RHS/Q 逐位）。
+│                                `DarcySolver` trait 统一**暂缓**（Bdp/BP 表面已一致
+│                                ~20 行；并入 DivFreeSolver 中等）。
 ├── adjoint/                 ← 对应 miniapps/adjoint/
 │   ├── adjoint_cvodes_roberts.rs ← Robertson 伴随敏感性 (自研
 │   │                              Nordsieck BDF 对位 CVODES 语义,
@@ -869,6 +929,41 @@ miniapps/
   ⇒ 新增能力：**3-D hex / prism 的系数感知 ZZ 通量恢复与误差估计**
   （`ThresholdRefiner` 现在可以在 3-D 上跑；此前 panic）。
   **留白**：Pyramid5 仍无 `ref_elem_vol` 臂（记 D365）。
+
+### round 48（三）— 四路并行（D367/D369/D370/D371）
+
+1. **D367（LOR essential-dof）**：`build_lor_sgs_nd_quad`/`build_lor_sgs_rt_quad`
+   （新）与改造后的 AMS/Jacobi 构造器收 HO essential-dof 表，按 MFEM 串行
+   batched 路径 `EliminateBC(ess_dofs, DIAG_KEEP)`（`lor_batched.cpp:726-734`）
+   映射到 LOR 编号后消元；新增 `LorSymGs` 适配器（= `LORSolver<GSSmoother>`）。
+   顺带发现并修正 `boundary_dofs_hdiv` 每边界边只暴露 1 个 dof 而 `RT_Quad(2)`
+   需 `p+1`=3 个的缺陷（MFEM 探针 `ess=96/96` 对齐）。`-fe h` 三组基线不动；
+   `-fe n`/`-fe r` 仍拒绝但根因已定位到 **D368/D69**（HO quad ND/RT 单元非忠实
+   移植 ⇒ 谱不匹配；IGLL HO 矩阵下同一栈健康）。**`boundary_dofs_hdiv` 的
+   per-edge dof 数建议在 fem-space 正式修复**（当前以驱动侧 `boundary_dofs_hdiv_quad_rt`
+   变通）——记入 D368 附注。
+2. **D369（`-qt 3` ClosedUniform）**：`TmopQuadType::ClosedUniform` +
+   `quadrature_functions_1d_closed_uniform`（`intrules.cpp:856/964/1029` 逐行）。
+   关键发现：MFEM 的 ClosedUniform **只改 SEGMENT 规则**（TRI/TET 是与 qt 无关的
+   Witherden-Vincent 规则）。`mesh-optimizer -qt 3` 解除封锁，双端 2-D/3-D
+   点数、min det(J)、Newton 能量全部一致；orders 2..=12 规则钉死
+   （`d369_tmop_closed_uniform_quad.rs`）。顺带修正 qt 相关 **Prism 点数打印**。
+   ⚠️ `fem_element::quadrature::prism_rule` 本体仍是 qt 无关欠点规则 ⇒ **D372**。
+3. **D370（BramblePasciakSolver）**：`fem-assembly` 新增
+   `Assembler::assemble_from_element_matrices`（`ComputeElementMatrices +
+   AssembleElementMatrix(i, Q_i, 1)` 路径）；`fem-solver` 新增
+   `BPSParameters`/`BramblePasciakSolver`（`use_bpcg` 两分支）；`block_solvers`
+   接入 `bp`/`bp-pcg`。**比对发现并修正 miniapp 装配积分阶**（M/Q=2k+2、B=2k，
+   `bilininteg.cpp:2685/1830`；修前 0 阶 u-误差差 10×）。o0 L2 `0.0479712`
+   与 C++ 6 位全同、o1 `bp-pcg` 迭代 66=66；剩余微差归因 fem-amg vs hypre
+   BoomerAMG（唯一非 1:1 组件）。
+4. **D371（mesh-bounding-boxes）**：1:1 port；plbound 全分量 bounds（标量路径
+   逐位不变）+ `get_element_dof_values`/`get_bounds_vdim` +
+   `Mesh` 的 `GetJacobianDeterminantGF` 对位（`det_order = dim·p−1`，含 fem-rs
+   hex `[-1,1]³` 对 MFEM `[0,1]³` 的 2^dim 域因子补偿）。triple-pt-1 与
+   fichera-q2 共 10 组 CLI 输出与 C++ **逐字节一致**。曲面网格（klein-bottle/
+   star-surf）因 D112b IO 缺口主动 exit 3（C++ 真值留档 `tmp/d371/`）。
+
 
 - `fem_assembly::dist_solver` — MFEM `fem/dist_solver.*` 1:1 距离场
   支撑库 (3924 行)：Heat/Normalization/p-Laplace 距离求解器、
