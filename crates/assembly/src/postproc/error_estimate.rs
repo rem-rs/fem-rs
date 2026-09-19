@@ -221,14 +221,36 @@ impl ElementIndicators {
         ElementIndicators { eta, total_error, estimator_name: name, aniso_flags: None }
     }
 
+    /// Dörfler (bulk) marking: the smallest set `M` of elements, taken in
+    /// order of decreasing indicator, satisfying
+    ///
+    /// ```text
+    /// Σ_{K∈M} η_K²  ≥  θ · Σ_K η_K²      (θ ∈ [0,1])
+    /// ```
+    ///
+    /// i.e. `M` covers a fraction `θ` of the total error *energy*.  This is
+    /// the classical bulk criterion of Dörfler (1996) as used in AFEM
+    /// convergence theory (Cascon–Kreuzer–Nochetto–Siebert 2008); it is the
+    /// marking MFEM's `ThresholdRefiner` degenerates to with
+    /// `SetTotalErrorNormP(2)` + `SetTotalErrorFraction(θ)` (threshold
+    /// `θ·‖η‖₂/√N`).
+    ///
+    /// D73(a)/D403: the previous implementation accumulated `η` (not `η²`)
+    /// against `θ·‖η‖₂`, which is *not* the Dörfler criterion — on
+    /// near-uniform indicator distributions (the generic case for smooth
+    /// problems) it marks only ~2 cells per round regardless of the mesh
+    /// size, stalling adaptive loops (observed in
+    /// `poisson_nc_amr_convergence`: 2-of-8 marks every round, L2 plateau
+    /// at 7.9e-2).
     pub fn dorfler_mark(&self, theta: f64) -> Vec<u32> {
-        let target = theta.clamp(0.0, 1.0) * self.total_error;
+        let target = theta.clamp(0.0, 1.0) * self.total_error * self.total_error;
         let mut idx: Vec<u32> = (0..self.eta.len() as u32).collect();
         idx.sort_unstable_by(|&a, &b| self.eta[b as usize].partial_cmp(&self.eta[a as usize]).unwrap());
         let mut acc = 0.0;
         let mut marked = Vec::new();
         for e in idx {
-            acc += self.eta[e as usize];
+            let e2 = self.eta[e as usize] * self.eta[e as usize];
+            acc += e2;
             marked.push(e);
             if acc >= target { break; }
         }

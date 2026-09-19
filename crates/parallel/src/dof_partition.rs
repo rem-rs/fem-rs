@@ -226,6 +226,74 @@ fn segments_cross(
         && (side(p, q, i) > 0.0) != (side(p, q, j) > 0.0)
 }
 
+// ── 3-D NDk face blocks ─────────────────────────────────────────────────────
+
+/// One face block of a 3-D NDk (`k ≥ 2`) element's slot table: the face's
+/// element-local vertex indices and the number of ND DOFs sitting on it.  The
+/// blocks occupy the element's slots immediately after the edge block, in the
+/// order [`nd_face_blocks_for_elem`] returns them.
+struct NdFaceBlock {
+    verts: &'static [usize],
+    n_dofs: usize,
+}
+
+/// Face blocks of one 3-D NDk (`k ≥ 2`) element in `HCurlSpace`'s slot order,
+/// mirroring `crates/space/src/hcurl.rs`: `TET_FACES` order for tetrahedra,
+/// MFEM `FaceVert` block order for hexahedra (`HEX_ND_BLOCK_TO_QUAD_FACE` =
+/// `[0, 2, 5, 3, 4, 1]` into `HEX_QUAD_FACES`), `PRISM_TRI_FACES` +
+/// `PRISM_QUAD_FACES` and `PYRAMID_TRI_FACES` + `PYRAMID_QUAD_FACE` order
+/// otherwise.  DOFs per face: `k(k−1)` on a triangle, `2k(k−1)` on a
+/// quadrilateral.  `None` when the element carries no face block (2-D, `k = 1`,
+/// unsupported type) — such elements have only edge + element-private DOFs.
+fn nd_face_blocks_for_elem(et: fem_mesh::ElementType, k: usize) -> Option<Vec<NdFaceBlock>> {
+    use fem_mesh::ElementType;
+    let ndf = k * (k - 1);
+    let ndf_quad = 2 * k * (k - 1);
+    let blocks: Vec<NdFaceBlock> = match et {
+        ElementType::Tet4 | ElementType::Tet10 => vec![
+            NdFaceBlock { verts: &[1, 2, 3], n_dofs: ndf },
+            NdFaceBlock { verts: &[0, 2, 3], n_dofs: ndf },
+            NdFaceBlock { verts: &[0, 1, 3], n_dofs: ndf },
+            NdFaceBlock { verts: &[0, 1, 2], n_dofs: ndf },
+        ],
+        ElementType::Hex8 | ElementType::Hex20 => {
+            // Block order = hcurl `HEX_ND_BLOCK_TO_QUAD_FACE` [0, 2, 5, 3, 4, 1]
+            // over `HEX_QUAD_FACES`: z−, y−, x+, y+, x−, z+.
+            const HEX_ND_BLOCK_VERTS: [&[usize]; 6] = [
+                &[0, 1, 2, 3],
+                &[0, 1, 5, 4],
+                &[1, 2, 6, 5],
+                &[2, 3, 7, 6],
+                &[0, 3, 7, 4],
+                &[4, 5, 6, 7],
+            ];
+            HEX_ND_BLOCK_VERTS
+                .iter()
+                .map(|&verts| NdFaceBlock { verts, n_dofs: ndf_quad })
+                .collect()
+        }
+        ElementType::Prism6 => vec![
+            NdFaceBlock { verts: &[0, 1, 2], n_dofs: ndf },
+            NdFaceBlock { verts: &[3, 4, 5], n_dofs: ndf },
+            NdFaceBlock { verts: &[0, 1, 4, 3], n_dofs: ndf_quad },
+            NdFaceBlock { verts: &[1, 2, 5, 4], n_dofs: ndf_quad },
+            NdFaceBlock { verts: &[0, 2, 5, 3], n_dofs: ndf_quad },
+        ],
+        ElementType::Pyramid5 => vec![
+            NdFaceBlock { verts: &[0, 1, 4], n_dofs: ndf },
+            NdFaceBlock { verts: &[1, 2, 4], n_dofs: ndf },
+            NdFaceBlock { verts: &[2, 3, 4], n_dofs: ndf },
+            NdFaceBlock { verts: &[3, 0, 4], n_dofs: ndf },
+            NdFaceBlock { verts: &[0, 1, 2, 3], n_dofs: ndf_quad },
+        ],
+        _ => return None,
+    };
+    if k < 2 {
+        return None; // ND1 has no face DOFs
+    }
+    Some(blocks)
+}
+
 // ── DofPartition ────────────────────────────────────────────────────────────
 
 /// DOF-level partition descriptor for one MPI rank.
@@ -933,8 +1001,16 @@ impl DofPartition {
     /// For H(curl) ND1 and H(div) RT0 on triangles, DOFs are edges — no vertex DOFs.
     /// Edge ownership: `owner(edge(a,b)) = min(owner(a), owner(b))`.
     ///
+    /// For 3-D H(curl) NDk with `k ≥ 2` the space also carries **face DOFs**
+    /// shared by the two elements adjacent to a face; they are classified by
+    /// face (Step 0/2c), owned by the minimum owner of the adjacent elements,
+    /// and their ghost global ids are exchanged by `(face key, position)` like
+    /// the H¹/RT face paths.  The remaining non-edge DOFs are element-private
+    /// and keyed by `(elem_gid, slot)`.
+    ///
     /// The permutation maps from the serial space's DOF ordering (edge enum order)
-    /// to the partition layout: `[owned_edges | ghost_edges]`.
+    /// to the partition layout:
+    /// `[owned_edges | owned_faces | owned_interior | ghost_edges | ghost_faces | ghost_interior]`.
     ///
     /// **Sign corrections** — H(curl) / H(div) basis functions carry a sign that
     /// depends on the local vertex ordering (`nodes[li] < nodes[lj]`).  After
@@ -1037,12 +1113,161 @@ impl DofPartition {
             _ => 1,
         };
 
+        // ── Step 0: 3-D ND face DOFs (HCurl, k ≥ 2) ───────────────────────────
+        //
+        // MFEM's 3-D Nédélec spaces of order ≥ 2 carry face DOFs shared by the
+        // two elements adjacent to a face (ND1 has none).  Classifying them as
+        // element-interior DOFs (the pre-D412 behaviour) keys them by
+        // `(elem_gid, slot)` and gives their ownership to the first-seen
+        // element's owner — but a face's DOFs appear in BOTH adjacent elements'
+        // slot tables and the two ranks' local traversals first-see different
+        // elements across a partition boundary, so the owner's
+        // `(elem_gid, slot)` map misses the requester's key
+        // (`exchange_ghost_interior_ids` sentinel GIDs → `GhostExchange` panic)
+        // and both ends of a shared face can even claim ownership (duplicate
+        // global DOFs).
+        //
+        // Instead each face DOF is keyed by its **face** (the 3 smallest global
+        // vertex ids — the same convention `from_face_space` uses), its
+        // position within the face is read from the **minimum-global-id
+        // adjacent element's** face block (cross-rank consistent: both
+        // adjacent elements are local on every rank thanks to the face-closure
+        // ghost layer), and the face is owned by the minimum owner of its
+        // adjacent elements.  Ghost face DOFs then resolve through the same
+        // `exchange_ghost_face_keys` round the H¹/RT paths use.
+        let nd_faces_active = dim == 3
+            && order >= 2
+            && space_type == fem_space::fe_space::SpaceType::HCurl;
+        // Per face: (min global elem gid, min adjacent-element owner).
+        let mut nd_face_data: HashMap<(u32, u32, u32), (u32, Rank)> = HashMap::new();
+        // Face DOF id → (global face key, position within the face).
+        let mut nd_face_key: HashMap<u32, (u32, u32, u32)> = HashMap::new();
+        let mut nd_face_pos: HashMap<u32, u32> = HashMap::new();
+        if nd_faces_active {
+            // Pass A: per-face canonical data (min global elem id, owner).
+            for e in mesh.elem_iter() {
+                let et = mesh.element_type(e);
+                let Some(blocks) = nd_face_blocks_for_elem(et, order) else {
+                    continue;
+                };
+                let nodes = mesh.element_nodes(e);
+                let gid = partition.global_elem(e);
+                let owner = if (e as usize) < partition.n_owned_elems {
+                    local_rank
+                } else {
+                    partition.elem_owner[e as usize]
+                };
+                for block in &blocks {
+                    let mut g: Vec<u32> = block
+                        .verts
+                        .iter()
+                        .map(|&li| partition.global_node(nodes[li]))
+                        .collect();
+                    g.sort_unstable();
+                    let key = (g[0], g[1], g[2]);
+                    let entry = nd_face_data.entry(key).or_insert((gid, owner));
+                    if gid < entry.0 {
+                        entry.0 = gid;
+                    }
+                    if owner < entry.1 {
+                        entry.1 = owner;
+                    }
+                }
+            }
+            // Pass B: DOF → (face key, position).  The position is
+            // authoritative only from the min-global-id element of the face;
+            // the other adjacent element merely records membership.
+            for e in mesh.elem_iter() {
+                let et = mesh.element_type(e);
+                let Some(blocks) = nd_face_blocks_for_elem(et, order) else {
+                    continue;
+                };
+                let dofs = space.element_dofs(e);
+                let nodes = mesh.element_nodes(e);
+                let gid = partition.global_elem(e);
+                let mut off = edges_for_elem(space_type, dim as u8, et).len() * dofs_per_edge;
+                for block in &blocks {
+                    let mut g: Vec<u32> = block
+                        .verts
+                        .iter()
+                        .map(|&li| partition.global_node(nodes[li]))
+                        .collect();
+                    g.sort_unstable();
+                    let key = (g[0], g[1], g[2]);
+                    let slots = &dofs[off..off + block.n_dofs];
+                    if nd_face_data[&key].0 == gid {
+                        for (j, &d) in slots.iter().enumerate() {
+                            nd_face_key.insert(d, key);
+                            nd_face_pos.insert(d, j as u32);
+                        }
+                    } else {
+                        for &d in slots {
+                            nd_face_key.entry(d).or_insert(key);
+                        }
+                    }
+                    off += block.n_dofs;
+                }
+            }
+        }
+
+        // ── Step 0b: edge-DOF positions along their edge (geometry-based) ─────
+        //
+        // The exchange key of an edge's DOF group is (global min/max endpoint,
+        // position along the edge), so the position must be counted from the
+        // **global-min-gid endpoint**.  The space orders an edge's DOFs from
+        // its min *local-vertex* endpoint, which agrees with the global order
+        // only in identity node mode; in compact mode (`partition_mesh`) the
+        // two orders are unrelated, so the space-derived position keyed ghost
+        // requests to the wrong DOF — the owner silently returned the gid of
+        // the mirrored Gauss-point DOF (D412).  The DOF's position is
+        // therefore re-based here onto the global-min→global-max direction:
+        // `c = dof − base` counts positions along the local-min→local-max
+        // geometric leg, and the leg's alignment with the global direction
+        // (a pure function of the shared mesh geometry) decides whether the
+        // index counts as-is or mirrored.  Identical to the space-derived key
+        // in identity mode, correct in both.
+        let mut dof_to_edge_pos: HashMap<u32, u32> = HashMap::new();
+        if dofs_per_edge > 1 {
+            for e in mesh.elem_iter() {
+                let et = mesh.element_type(e);
+                let local_edges = edges_for_elem(space_type, dim as u8, et);
+                let dofs = space.element_dofs(e);
+                let nodes = mesh.element_nodes(e);
+                for (edge_idx, &(a, b)) in local_edges.iter().enumerate() {
+                    let start = edge_idx * dofs_per_edge;
+                    let block = &dofs[start..start + dofs_per_edge];
+                    let base = block.iter().min().copied().unwrap_or(dofs[start]);
+                    let (lo_node, hi_node) = (nodes[a].min(nodes[b]), nodes[a].max(nodes[b]));
+                    let p_lo = mesh.node_coords(lo_node);
+                    let p_hi = mesh.node_coords(hi_node);
+                    let (ga, gb) =
+                        (partition.global_node(nodes[a]), partition.global_node(nodes[b]));
+                    let g_lo = if ga <= gb { nodes[a] } else { nodes[b] };
+                    let g_hi = if ga <= gb { nodes[b] } else { nodes[a] };
+                    let q_lo = mesh.node_coords(g_lo);
+                    let q_hi = mesh.node_coords(g_hi);
+                    let aligned = (p_hi[0] - p_lo[0]) * (q_hi[0] - q_lo[0])
+                        + (p_hi[1] - p_lo[1]) * (q_hi[1] - q_lo[1])
+                        + (p_hi[2] - p_lo[2]) * (q_hi[2] - q_lo[2])
+                        > 0.0;
+                    for &d in block.iter() {
+                        // Local-canonical index: the space numbers an edge's
+                        // DOF block consecutively from its local-min-vertex
+                        // endpoint, so `d − base` counts positions along the
+                        // local-min→local-max geometric leg.
+                        let c = (d - base) as usize;
+                        let key = if aligned { c } else { dofs_per_edge - 1 - c };
+                        dof_to_edge_pos.insert(d, key as u32);
+                    }
+                }
+            }
+        }
+
         // ── Step 1: Map each DOF to its canonical edge (or interior) ──────────
         //
         // For higher-order spaces, DOFs are grouped:
         //   [edge0 × dofs_per_edge, edge1 × dofs_per_edge, ..., interior...]
         let mut dof_to_edge: HashMap<u32, (u32, u32)> = HashMap::new();
-        let mut dof_to_edge_pos: HashMap<u32, u32> = HashMap::new(); // dof_id -> position within its edge
         let mut interior_dofs: Vec<(u32, u32, u32)> = Vec::new(); // (dof_id, local_elem_id, dof_idx_in_elem)
         let mut sign_corr: Vec<f64> = vec![1.0; n_space_dofs];
 
@@ -1068,20 +1293,10 @@ impl DofPartition {
                     let gb = partition.global_node(local_b);
 
                     dof_to_edge.insert(dof_id, (ga.min(gb), ga.max(gb)));
-                    // Physical per-edge position (mom0/mom1): the edge's DOFs
-                    // are [first, first+dofs_per_edge) in the space's global
-                    // numbering, so `dof_id - first` identifies the moment
-                    // regardless of the element's edge orientation (rev).
-                    // Using `i % dofs_per_edge` instead is WRONG: it depends
-                    // on which element first "sees" the edge, and that
-                    // traversal order differs between ranks.
-                    let edge_start = edge_idx * dofs_per_edge;
-                    let edge_first = dofs[edge_start..edge_start + dofs_per_edge]
-                        .iter()
-                        .min()
-                        .copied()
-                        .unwrap_or(dof_id);
-                    dof_to_edge_pos.insert(dof_id, dof_id - edge_first);
+                    // The in-edge position (`dof_key`) was computed
+                    // geometrically in Step 0b — counted from the global-min
+                    // endpoint, it is cross-rank consistent in both node
+                    // modes.
 
                     // Sign correction: local_sign * d = global_sign, so d = global_sign / local_sign.
                     let local_sign: f64 = if local_a < local_b { 1.0 } else { -1.0 };
@@ -1094,6 +1309,10 @@ impl DofPartition {
                         None => if ga < gb { 1.0 } else { -1.0 },
                     };
                     sign_corr[dof_id as usize] = global_sign / local_sign;
+                } else if nd_face_key.contains_key(&dof_id) {
+                    // 3-D ND face DOF — shared by the two elements adjacent to
+                    // its face; keyed/owned/exchanged by face in Step 2c, not
+                    // by its (first-seen) element.
                 } else {
                     // Interior DOF: record with element info for ownership later.
                     interior_dofs.push((dof_id, e, i as u32));
@@ -1180,12 +1399,43 @@ impl DofPartition {
         owned_interior.sort();
         ghost_interior.sort_by_key(|&(dof_id, _, _, _)| dof_id);
 
+        // ── Step 2c: 3-D ND face DOFs (see Step 0) ────────────────────────────
+        let mut owned_faces: Vec<FaceDofInfo> = Vec::new();
+        let mut ghost_faces: Vec<FaceDofInfo> = Vec::new();
+        if nd_faces_active {
+            for (&dof_id, &key) in &nd_face_key {
+                let owner = nd_face_data[&key].1;
+                let info = FaceDofInfo {
+                    local_dof_id: dof_id,
+                    face_key: key,
+                    pos: *nd_face_pos.get(&dof_id).unwrap_or_else(|| {
+                        panic!(
+                            "from_edge_space: face DOF {dof_id} of face {key:?} has no \
+                             canonical position — the min-global-id adjacent element is \
+                             not in the local mesh (ghost layer does not close faces)"
+                        )
+                    }),
+                    owner,
+                };
+                if owner == local_rank {
+                    owned_faces.push(info);
+                } else {
+                    ghost_faces.push(info);
+                }
+            }
+            // Deterministic ordering by (face key, position within the face).
+            owned_faces.sort_by_key(|f| (f.face_key, f.pos));
+            ghost_faces.sort_by_key(|f| (f.face_key, f.pos));
+        }
+
         let n_owned_edge = owned_edges.len();
         let n_ghost_edge = ghost_edges.len();
+        let n_owned_face = owned_faces.len();
+        let n_ghost_face = ghost_faces.len();
         let n_owned_interior = owned_interior.len();
         let n_ghost_interior = ghost_interior.len();
-        let n_owned = n_owned_edge + n_owned_interior;
-        let n_ghost = n_ghost_edge + n_ghost_interior;
+        let n_owned = n_owned_edge + n_owned_face + n_owned_interior;
+        let n_ghost = n_ghost_edge + n_ghost_face + n_ghost_interior;
         let total = n_owned + n_ghost;
 
         // Note: interior DOFs may not cover all remaining DOFs if the space
@@ -1231,8 +1481,17 @@ impl DofPartition {
             );
         }
 
+        // Owned face DOFs follow the owned edges (Step 2c).
+        let mut owned_face_global_map: HashMap<([u32; 3], u32), u32> = HashMap::new();
+        for (i, f) in owned_faces.iter().enumerate() {
+            let gid = edge_offset + (n_owned_edge + i) as u32;
+            global_dof_ids.push(gid);
+            dof_owner_vec.push(local_rank);
+            owned_face_global_map.insert(([f.face_key.0, f.face_key.1, f.face_key.2], f.pos), gid);
+        }
+
         // Owned interior DOFs.
-        let owned_interior_offset = edge_offset + owned_edges.len() as u32;
+        let owned_interior_offset = edge_offset + (n_owned_edge + n_owned_face) as u32;
         let mut owned_interior_map: HashMap<(u32, u32), u32> = HashMap::new();
         for (j, &(_dof_id, elem_gid, dof_idx)) in owned_interior.iter().enumerate() {
             let gid = owned_interior_offset + j as u32;
@@ -1241,13 +1500,26 @@ impl DofPartition {
             owned_interior_map.insert((elem_gid, dof_idx), gid);
         }
 
-        // 4b. Ghost DOFs: edges then interior.
+        // 4b. Ghost DOFs: edges, faces, interior.
         let ghost_edge_gids = exchange_ghost_edge_ids(
             &ghost_edges, &owned_edge_global_map, comm,
         );
         for (i, edge) in ghost_edges.iter().enumerate() {
             global_dof_ids.push(ghost_edge_gids[i]);
             dof_owner_vec.push(edge.owner);
+        }
+
+        // Ghost face DOFs: the owning rank resolves the (face key, position)
+        // to its global id.
+        let ghost_face_requests: Vec<(Rank, [u32; 3], u32)> = ghost_faces
+            .iter()
+            .map(|f| (f.owner, [f.face_key.0, f.face_key.1, f.face_key.2], f.pos))
+            .collect();
+        let ghost_face_gids =
+            exchange_ghost_face_keys(&ghost_face_requests, &owned_face_global_map, comm);
+        for (i, f) in ghost_faces.iter().enumerate() {
+            global_dof_ids.push(ghost_face_gids[i]);
+            dof_owner_vec.push(f.owner);
         }
 
         let ghost_interior_gids = exchange_ghost_interior_ids(
@@ -1269,16 +1541,24 @@ impl DofPartition {
         for (i, edge) in owned_edges.iter().enumerate() {
             dm_to_partition[edge.local_dof_id as usize] = i as u32;
         }
-        // Owned interior DOFs follow owned edges.
-        for (j, &(dof_id, _, _)) in owned_interior.iter().enumerate() {
-            dm_to_partition[dof_id as usize] = (n_owned_edge + j) as u32;
+        // Owned face DOFs follow owned edges.
+        for (i, f) in owned_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] = (n_owned_edge + i) as u32;
         }
-        // Ghost edges/interior start after the whole owned segment.
+        // Owned interior DOFs follow owned edges + faces.
+        for (j, &(dof_id, _, _)) in owned_interior.iter().enumerate() {
+            dm_to_partition[dof_id as usize] = (n_owned_edge + n_owned_face + j) as u32;
+        }
+        // Ghost edges/faces/interior start after the whole owned segment.
         for (i, edge) in ghost_edges.iter().enumerate() {
             dm_to_partition[edge.local_dof_id as usize] = (n_owned + i) as u32;
         }
+        for (i, f) in ghost_faces.iter().enumerate() {
+            dm_to_partition[f.local_dof_id as usize] = (n_owned + n_ghost_edge + i) as u32;
+        }
         for (j, &(dof_id, _, _, _)) in ghost_interior.iter().enumerate() {
-            dm_to_partition[dof_id as usize] = (n_owned + n_ghost_edge + j) as u32;
+            dm_to_partition[dof_id as usize] =
+                (n_owned + n_ghost_edge + n_ghost_face + j) as u32;
         }
         // Build reverse permutation
         for (dm_id, &part_id) in dm_to_partition.iter().enumerate() {
@@ -1476,6 +1756,10 @@ impl DofPartition {
                     // first-seen rule), in the traversal's vertex order.
                     entry.first_order = verts_global.clone();
                     dof_to_face.insert(dof_id, key);
+                    // First-seen position — kept only as the fallback for
+                    // faces whose min-global-id element is not local (should
+                    // not happen with the face-closure ghost layer); the
+                    // canonical pass below overwrites it.
                     dof_to_pos.insert(dof_id, pos as u32);
                 }
                 if elem_gid < entry.min_gid_elem {
@@ -1489,6 +1773,47 @@ impl DofPartition {
                 };
                 if owner < entry.min_elem_owner {
                     entry.min_elem_owner = owner;
+                }
+            }
+        }
+
+        // D412: the position within the face must be cross-rank consistent.
+        // The first-seen element's slot order is NOT — across a partition
+        // boundary the two ranks' local traversals first-see different
+        // elements, and the slot order inside a face block depends on the
+        // element's local face orientation — so ghost requests keyed
+        // `(face, first-seen pos)` missed the owner's map for RTk with `k ≥ 1`
+        // (RT0 escaped: one DOF per face, position ≡ 0).  Overwrite with the
+        // position inside the **minimum-global-id adjacent element's** face
+        // block — the same canonical element the sign corrections use, local
+        // on every rank thanks to the face-closure ghost layer.
+        for e in mesh.elem_iter() {
+            let dofs = space.element_dofs(e);
+            let nodes = mesh.element_nodes(e);
+            let elem_gid = partition.global_elem(e);
+            let et = mesh.element_type(e);
+            let (faces, _n_interior) = faces_for_elem(et, space.order() as usize);
+            let fcounts = face_dof_counts(et, space.order() as usize);
+            let mut face_off = Vec::with_capacity(fcounts.len());
+            let mut acc = 0usize;
+            for &n in &fcounts {
+                face_off.push(acc);
+                acc += n;
+            }
+            let n_face_dofs_total = acc;
+            for (i, &dof_id) in dofs.iter().enumerate() {
+                if i >= n_face_dofs_total {
+                    break; // face blocks precede the element-private DOFs
+                }
+                let face_idx = face_off.partition_point(|&o| o <= i) - 1;
+                let pos = i - face_off[face_idx];
+                let (fv, _is_tri) = &faces[face_idx];
+                let mut v4: Vec<u32> =
+                    fv.iter().map(|&li| partition.global_node(nodes[li])).collect();
+                v4.sort_unstable();
+                let key = (v4[0], v4[1], v4[2]);
+                if face_info[&key].min_gid_elem == elem_gid {
+                    dof_to_pos.insert(dof_id, pos as u32);
                 }
             }
         }

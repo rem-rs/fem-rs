@@ -6,6 +6,13 @@
 //! them to both real and imaginary residual components (block-diagonal
 //! real-part preconditioning).
 //!
+//! The AMS GMRES driver ([`solve_gmres_ams_complex`]) runs its Krylov
+//! iteration **right**-preconditioned
+//! ([`solve_gmres_complex_right_prec`]) so the convergence check and the
+//! minimized residual are the true residual `‖b − A x‖/‖b‖`, not the
+//! preconditioned one (defect D73/D406).  The ADS and BiCGSTAB drivers still
+//! use the left-preconditioned `fem_linalg` kernels.
+//!
 //! # Usage
 //! ```rust,ignore
 //! use fem_solver::complex_ams::{build_ams_precond, solve_gmres_ams_complex};
@@ -85,6 +92,14 @@ pub fn build_ads_precond(
 ///
 /// The preconditioner is built from the real part of A with the given
 /// discrete gradient matrix G.
+///
+/// The GMRES iteration is **right**-preconditioned (see
+/// [`solve_gmres_complex_right_prec`]): the minimized and monitored residual
+/// is the true residual `‖b − A x‖ / ‖b‖`.  This is the defect-D73/D406 fix —
+/// a left-preconditioned in-cycle check exits every restart cycle when the
+/// *preconditioned* residual crosses `tol`, which under the `hpc_default`
+/// cycle underestimates the true residual by ≈2 orders of magnitude and
+/// plateaus the solve at `‖r‖/‖b‖ ≈ 60·tol` regardless of budget.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_gmres_ams_complex(
     a_complex: &ComplexCsr,
@@ -100,7 +115,7 @@ pub fn solve_gmres_ams_complex(
 ) -> Result<(usize, f64), String> {
     let ams = build_ams_precond(a_complex, g, ams_config)?;
     let prec = make_ams_closure(&ams);
-    fem_linalg::complex_csr::solve_gmres_complex_with(
+    solve_gmres_complex_right_prec(
         a_complex, b_re, b_im, x_re, x_im, tol, max_iter, restart, &prec,
     )
 }
@@ -282,7 +297,241 @@ pub fn solve_cg_complex(
     Err(format!("CG did not converge in {} iterations (residual={:.3e})", max_iter, rs_norm_sq.sqrt()))
 }
 
+// ─── Right-preconditioned complex GMRES (true-residual driver) ────────────────
+
+/// Restarted **right**-preconditioned GMRES for `A x = b` with a
+/// caller-provided preconditioner `M ≈ A`.
+///
+/// `apply_prec(r_re, r_im) -> (z_re, z_im)` must compute `z = M⁻¹·r`.
+///
+/// The Krylov space is built on `A·M⁻¹` (`wⱼ = A·(M⁻¹·vⱼ)`) and the correction
+/// is applied as `x ← x + M⁻¹·V·y`, so the minimized — and recursively
+/// estimated — residual is the **true** residual `‖b − A x‖ / ‖b‖`.  With
+/// *left* preconditioning (the usual `w = M⁻¹·(A·v)` form) the in-cycle
+/// estimate is `‖M⁻¹(b − A x)‖`, which for auxiliary-space cycles whose
+/// preconditioned residual is much smaller than the true residual (the
+/// `hpc_default` Jacobi+additive cycle is nearly singular in its coarse mode)
+/// crosses `tol` orders of magnitude too early: every restart cycle then exits
+/// after a few iterations and the solve plateaus at `≈ 60·tol` no matter the
+/// budget — the D73/D406 plateau (16×16 complex Maxwell, 6.0e-5 for tol 1e-6,
+/// while tol=1e-8/1e-10/1e-12 probes land at 6.8e-7/6.4e-9/1.2e-10, i.e. the
+/// plateau tracks the tolerance, not the budget).
+///
+/// The true residual is recomputed from scratch at the end of every restart
+/// cycle, so the cheap in-cycle estimate is always confirmed against the
+/// quantity the caller actually cares about.  The best iterate is returned
+/// even on non-convergence (soft failure), as `(iterations, rel_res)`.
+#[allow(clippy::too_many_arguments)]
+fn solve_gmres_complex_right_prec<F>(
+    a: &ComplexCsr,
+    b_re: &[f64],
+    b_im: &[f64],
+    x_re: &mut Vec<f64>,
+    x_im: &mut Vec<f64>,
+    tol: f64,
+    max_iter: usize,
+    restart: usize,
+    apply_prec: &F,
+) -> Result<(usize, f64), String>
+where
+    F: Fn(&[f64], &[f64]) -> (Vec<f64>, Vec<f64>),
+{
+    let n = a.nrows;
+    assert_eq!(b_re.len(), n);
+    assert_eq!(b_im.len(), n);
+    if n == 0 {
+        return Ok((0, 0.0));
+    }
+    if x_re.len() != n {
+        *x_re = vec![0.0; n];
+    }
+    if x_im.len() != n {
+        *x_im = vec![0.0; n];
+    }
+
+    let dot2 = |ar: &[f64], ai: &[f64], br: &[f64], bi: &[f64]| -> (f64, f64) {
+        // (a, b) = sum conj(a_k) * b_k
+        let mut sr = 0.0_f64;
+        let mut si = 0.0_f64;
+        for i in 0..n {
+            sr += ar[i] * br[i] + ai[i] * bi[i];
+            si += ar[i] * bi[i] - ai[i] * br[i];
+        }
+        (sr, si)
+    };
+
+    let norm2 = |vr: &[f64], vi: &[f64]| -> f64 {
+        vr.iter().zip(vi.iter()).map(|(u, v)| u * u + v * v).sum::<f64>().sqrt()
+    };
+
+    // Initial TRUE residual r = b − A x
+    let mut r_re = vec![0.0_f64; n];
+    let mut r_im = vec![0.0_f64; n];
+    a.spmv_into(x_re, x_im, &mut r_re, &mut r_im);
+    for i in 0..n {
+        r_re[i] = b_re[i] - r_re[i];
+        r_im[i] = b_im[i] - r_im[i];
+    }
+
+    let b_norm = norm2(b_re, b_im).max(1e-300);
+    let mut res = norm2(&r_re, &r_im) / b_norm;
+    if res < tol {
+        return Ok((0, res));
+    }
+
+    let mut total_iter = 0usize;
+    let m = restart.max(1).min(n);
+
+    'restart: while total_iter < max_iter {
+        // Arnoldi on A·M⁻¹ starting from the true residual v₀ = r/‖r‖.
+        let r_norm = norm2(&r_re, &r_im);
+        if r_norm <= 1e-300 {
+            break 'restart;
+        }
+        let mut v_re: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
+        let mut v_im: Vec<Vec<f64>> = Vec::with_capacity(m + 1);
+        v_re.push(r_re.iter().map(|&x| x / r_norm).collect());
+        v_im.push(r_im.iter().map(|&x| x / r_norm).collect());
+        let mut h = vec![vec![(0.0_f64, 0.0_f64); m]; m + 1]; // H[i][j]
+        let mut givens: Vec<[(f64, f64); 4]> = Vec::with_capacity(m);
+        let mut g = vec![(0.0_f64, 0.0_f64); m + 1];
+        g[0] = (r_norm, 0.0);
+
+        let mut k = 0usize; // number of Arnoldi columns built
+        for j in 0..m {
+            k = j + 1;
+            total_iter += 1;
+
+            // w = A·(M⁻¹·v_j)  — right-preconditioned operator
+            let (z_re, z_im) = apply_prec(&v_re[j], &v_im[j]);
+            let mut w_re = vec![0.0; n];
+            let mut w_im = vec![0.0; n];
+            a.spmv_into(&z_re, &z_im, &mut w_re, &mut w_im);
+
+            // Modified Gram-Schmidt orthogonalization
+            for i in 0..=j {
+                let (hr, hi) = dot2(&v_re[i], &v_im[i], &w_re, &w_im);
+                h[i][j] = (hr, hi);
+                for kk in 0..n {
+                    w_re[kk] -= hr * v_re[i][kk] - hi * v_im[i][kk];
+                    w_im[kk] -= hr * v_im[i][kk] + hi * v_re[i][kk];
+                }
+            }
+            let w_norm = norm2(&w_re, &w_im);
+            h[j + 1][j] = (w_norm, 0.0);
+
+            if w_norm > 1e-300 {
+                v_re.push(w_re.iter().map(|&x| x / w_norm).collect());
+                v_im.push(w_im.iter().map(|&x| x / w_norm).collect());
+            } else {
+                // happy breakdown: the Krylov space already spans the solution
+                v_re.push(vec![0.0; n]);
+                v_im.push(vec![0.0; n]);
+            }
+
+            // Apply previous Givens rotations to the new column
+            for (i, gt) in givens.iter().enumerate().take(j) {
+                let h1 = h[i][j];
+                let h2 = h[i + 1][j];
+                h[i][j] = givens_row_apply(gt[0], gt[1], h1, h2);
+                h[i + 1][j] = givens_row_apply(gt[2], gt[3], h1, h2);
+            }
+
+            // New Givens rotation annihilating h[j+1][j] (same full 2×2
+            // complex unitary form as the left-preconditioned driver)
+            let h1 = h[j][j];
+            let h2 = h[j + 1][j];
+            let rot = (h1.0 * h1.0 + h1.1 * h1.1 + h2.0 * h2.0 + h2.1 * h2.1).sqrt();
+            let gt = if rot < 1e-300 {
+                [(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]
+            } else {
+                [
+                    (h1.0 / rot, -h1.1 / rot),
+                    (h2.0 / rot, -h2.1 / rot),
+                    (-h2.0 / rot, -h2.1 / rot),
+                    (h1.0 / rot, h1.1 / rot),
+                ]
+            };
+            givens.push(gt);
+            h[j][j] = givens_row_apply(gt[0], gt[1], h1, h2);
+            h[j + 1][j] = (0.0, 0.0);
+
+            let g1 = g[j];
+            let g2 = g[j + 1];
+            g[j] = givens_row_apply(gt[0], gt[1], g1, g2);
+            g[j + 1] = givens_row_apply(gt[2], gt[3], g1, g2);
+
+            // Residual estimate |g[j+1]| — for right preconditioning this IS
+            // the true residual ‖b − A x_j‖ of the current partial iterate.
+            res = g[j + 1].0.hypot(g[j + 1].1) / b_norm;
+            if res < tol || total_iter >= max_iter {
+                break;
+            }
+        }
+
+        // Back-substitution: solve upper triangular H * y = g
+        let mut y_re = vec![0.0_f64; k];
+        let mut y_im = vec![0.0_f64; k];
+        for i in (0..k).rev() {
+            let (mut rr, mut ri) = (g[i].0, g[i].1);
+            for jj in (i + 1)..k {
+                let (hr, hi) = h[i][jj];
+                rr -= hr * y_re[jj] - hi * y_im[jj];
+                ri -= hr * y_im[jj] + hi * y_re[jj];
+            }
+            let (hr, hi) = h[i][i];
+            let mag2 = hr * hr + hi * hi;
+            if mag2 > 1e-300 {
+                y_re[i] = (rr * hr + ri * hi) / mag2;
+                y_im[i] = (ri * hr - rr * hi) / mag2;
+            }
+        }
+
+        // Update x ← x + M⁻¹·V·y (the preconditioner maps Krylov corrections
+        // back to solution space)
+        for j in 0..k {
+            let (z_re, z_im) = apply_prec(&v_re[j], &v_im[j]);
+            for i in 0..n {
+                x_re[i] += y_re[j] * z_re[i] - y_im[j] * z_im[i];
+                x_im[i] += y_re[j] * z_im[i] + y_im[j] * z_re[i];
+            }
+        }
+
+        // Refresh the true residual (recursive estimate → confirmed here)
+        a.spmv_into(x_re, x_im, &mut r_re, &mut r_im);
+        for i in 0..n {
+            r_re[i] = b_re[i] - r_re[i];
+            r_im[i] = b_im[i] - r_im[i];
+        }
+        res = norm2(&r_re, &r_im) / b_norm;
+
+        if res < tol {
+            break 'restart;
+        }
+    }
+
+    Ok((total_iter, res))
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Apply one row `(g0, g1)` of a complex 2×2 Givens rotation to the pair
+/// `(h1, h2)`: `out = g0·h1 + g1·h2` (component-wise complex arithmetic).
+///
+/// Local copy of the private helper in `fem_linalg::complex_csr` (which cannot
+/// be re-used across crates) for [`solve_gmres_complex_right_prec`].
+#[inline]
+fn givens_row_apply(
+    g0: (f64, f64),
+    g1: (f64, f64),
+    h1: (f64, f64),
+    h2: (f64, f64),
+) -> (f64, f64) {
+    (
+        g0.0 * h1.0 - g0.1 * h1.1 + g1.0 * h2.0 - g1.1 * h2.1,
+        g0.0 * h1.1 + g0.1 * h1.0 + g1.0 * h2.1 + g1.1 * h2.0,
+    )
+}
 
 /// Extract the real part of a `ComplexCsr` as a linlvo CSR matrix.
 fn real_part_csr(c: &ComplexCsr) -> linlvoCsr<f64> {

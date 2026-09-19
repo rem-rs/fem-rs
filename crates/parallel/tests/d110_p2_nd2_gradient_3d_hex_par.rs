@@ -7,24 +7,16 @@
 //! against the serial gradient assembled on the same local mesh, permuted
 //! with both partitions and truncated to the owned rows.
 //!
-//! The single-rank case is the runnable one.  The multi-rank case is
-//! `#[ignore]`d because it hits a **pre-existing** defect that is independent
-//! of the gradient: at ≥ 2 ranks the parallel Nédélec `ND2` (and `RT1`)
-//! DOF partition asks the neighbour for the *face/interior* DOF ids of ghost
-//! elements, and the ghost-interior exchange cannot resolve them, so it
-//! emits
-//!
-//! ```text
-//! Warning: exchange_ghost_interior_ids: rank 1 requested interior DOF
-//!          (elem=16, idx=24) not found, using sentinel GID
-//! ```
-//!
-//! and then aborts in
-//! `GhostExchange::from_partition` ("requested global node 4294967295 but
-//! this rank does not own it", `crates/parallel/src/ghost.rs:178`) for
-//! smaller meshes.  The same warnings already appear when the *joule*
-//! miniapp builds its four spaces at `--ranks 2/3/4` (no gradient involved),
-//! so the fix belongs in the DOF-partition / ghost-exchange layer, not here.
+//! Both the single-rank and the multi-rank cases are runnable.  (The
+//! multi-rank case used to be `#[ignore]`d: the ND2/RT1 DOF partition
+//! classified the *face* DOFs of 3-D NDk elements as element-interior DOFs,
+//! keying them by `(elem_gid, slot)` of the first-seen element, which is not
+//! cross-rank consistent — `exchange_ghost_interior_ids` emitted sentinel
+//! GIDs and `GhostExchange::from_partition` panicked.  D412 fixed this in
+//! `DofPartition::from_edge_space` / `from_face_space`: face DOFs are now
+//! keyed by face (3 smallest global vertex ids), positioned by the
+//! min-global-id adjacent element's face block, and exchanged through the
+//! same `exchange_ghost_face_keys` round the H¹/RT paths use.)
 
 use fem_assembly::DiscreteLinearOperator;
 use fem_mesh::Mesh;
@@ -112,12 +104,9 @@ fn par_p2_nd2_gradient_hex3d_matches_the_serial_gradient_at_one_rank() {
     check_reports(&rep, 1);
 }
 
-/// Multi-rank: see the module docs — blocked by the pre-existing ND2/RT1
-/// parallel DOF-partition defect in `crates/parallel` (sentinel ghost GIDs for
-/// face/interior DOFs of ghost elements, then a `GhostExchange` panic).
+/// Multi-rank: exercises the D412 face-DOF partition fix (ND2 face DOFs of
+/// ghost elements resolve through the face-key exchange) at 2 and 4 ranks.
 #[test]
-#[ignore = "pre-existing ND2/RT1 parallel DOF-partition defect at >=2 ranks \
-            (exchange_ghost_interior_ids sentinel GIDs -> GhostExchange panic)"]
 fn par_p2_nd2_gradient_hex3d_matches_the_serial_gradient_multi_rank() {
     for n_ranks in [2usize, 4] {
         let rep = run_at_ranks(Mesh::<3>::unit_cube_hex(4), n_ranks);
