@@ -2460,23 +2460,107 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
   `poisson_nc_amr_convergence`（`7.9085e-2` 逐位 = 基线）；示例 release 构建
   0 错误；pro 层 0 error。
 
-### 第四十八轮（round 48）侦察结论：其余簇（未开工，按价值排序；①已由第三批关闭）
+### 第四十八轮（round 48）第四批：四路并行第二批（D368/D374/D375/D376）
+
+用户再次"继续并行推进"。四路（号段预分配 D368/D374–D376 + 各留 3 个新债务号），
+文件零重叠；全部返回后主会话抽查 4 组关键数字**全部复现**。
+
+#### ① D368（P2）quad ND/RT 忠实 (GaussLobatto, IntegratedGLL) 基 —— **关闭**
+
+- **opt-in 构造器** `HCurlSpace/HDivSpace::new_gauss_lobatto_integrated_gll`（默认
+  `new` 不动 ⇒ 全部既有基线不动）；dof/slot 表与默认空间逐位一致（探针证明在树的
+  slot 规则本就是 MFEM 的：对齐 `base+j`/+1、反向 `base+nd−1−j`/−1，经 `EncodeDof`
+  解码 = `SegDofOrd` 律）。装配器新增 `vec_ref_elem_with_basis` + `*_quad_igll`
+  入口（D347 模式）；`interpolate_vector` 复现 MFEM `ProjectIntegrated` 子胞积分泛函。
+- **`boundary_dofs_hdiv` 2-D 正式修复**（每条 2-D 边界边暴露全部 `order+1` 个 dof），
+  删除 lor_solvers 驱动侧 workaround。
+- **元素级 oracle**：`tmp/d368/quad_nd_rt_probe.cpp` → `$HOME/work/d368/d368_probe.out`
+  （ND p=1..4 / RT p=0..3 全表）；钉入 `crates/space/tests/d368_quad_nd_rt_igll_mfem_parity.rs`（8 项）。
+- **验收（主会话复现）**：`-fe n`/`-fe r` 在 inline-quad `-o 3` 均打印
+  `1200 / 0.000134744`（**与 C++ 逐字节**；迭代 277/200 vs C++ 279/268）；
+  `-fe h` 基线 `781/0.000395471` 不动。
+- **新债 D377**：`boundary_dofs_hdiv` 的 **3-D** face 分支同类缺陷（每面 1 个 dof vs
+  tet/hex RT_k 面的 (k+1)(k+2)/2 / (k+1)²），为不动 3-D hex RT 基线暂缓。
+
+#### ② D374（P2）NURBSPatch 对象层 + nurbs_curveint —— **关闭**
+
+- `crates/mesh/src/nurbs_patch.rs`（新，1313 行含测试）：`operator()(i,j,l)` 布局
+  `(i+j·ni)·Dim+l`、`DegreeElevate`、`KnotInsert`、`%g` 精确 `Print`；
+  **孤儿 `NurbsKnotVector`（零消费方）迁入补全**（Demko–Remez、`GetInterpolant`
+  = MFEM 同款 Gauss–Jordan 显式求逆 + kernels::Mult、`Difference`）。
+  全部带 nurbs.cpp 文件:行号。
+- 驱动 `miniapps/nurbs/nurbs_curveint.rs`（stub → 410 行 1:1）。
+- **验收**：`-uw -n 9` stdout 与 C++ 一致（h/kappa 四行如实省略——NurbsExtension
+  仍拒绝 patches 格式，属 D70④ 既有）；`sin-fit.mesh` 头 + knotvector +
+  **143/153 控制点逐字节相同**；正弦插值控制点 **逐位一致**（`%.17g` 探针钉入
+  `d374_curveint_patch.rs`）。10 个差异全在物理零残差行/列（~5e-17：委派的
+  `h_refine_uk` 逐结点 A5.1 vs MFEM 一次 A5.5 精确消去）。
+- **新债 D380（真缺陷）**：`fem_element::nurbs::h_refine_vk`（nurbs.rs:1720）按列
+  重建、按行读回 ⇒ 多结点 v 向插结点返回**错乱数据**（已绕过：转置→h_refine_uk→
+  转置回；上游修复待做）。
+
+#### ③ D375（P1→已关）串行 ex31 —— **关闭 D128**
+
+- `mfem_ex31_anisotropic_maxwell` 从无条件 `exit(3)` 桩 → 522 行真 1:1
+  （`[H¹(z)|H(curl)(xy)]` 组合空间 = ND_R2D 受限元、DIAG_KEEP 消元、GS 预条件 PCG，
+  注意 MFEM 自由函数 PCG 的 `sqrt(1e-12)=1e-6` 语义）；`mfem_ex31_dump` 重写为
+  单一索引约定的真 dump 生产者（修掉 `[ND|vertex]` vs `[vertex|ND]` 双约定缺陷）。
+- **验收（主会话复现）**：inline-quad `-r 2` **整段 stdout 与 C++ 逐字节**
+  （`0.181455`、74 次 PCG、ARF `0.829075`）；inline-tri `0.312913`、star
+  `0.858735`（斜切三角形的非对角 J 路径）亦逐字节；dump 对比 A/b/消元/x
+  5.7e-14 / 8.9e-16 / … / 1.2e-13（x 累计 74 次迭代的 1-ulp 差）。
+- **新债 D383（真缺陷，必修）**：`mfem_pex31_restricted_hcurl.rs:858` 的 ∇z 物理
+  梯度 **Jacobian 转置约定反了**（`dx` 应为 `jit00·gξ + jit01·gη`，`dy` =
+  `jit10·gξ + jit11·gη`，MFEM `GetCurl` 的 `grad_hat·J⁻¹`）——对角 J 的
+  inline-quad 上不可见（pex31 已发布 np1-4 数字仍有效），**斜切三角形上
+  H(curl) 误差虚大 ~10×**。**D384**（妆饰）：raw A 多 392 个显式 ≈0 结构项
+  （值全部 ≤5.7e-14 一致）。
+
+#### ④ D376（P2）mg-abs-l1-jacobi —— **关闭**
+
+- `crates/solver/src/geometric_mg.rs`（+646 行）：`AbsL1GeometricMultigrid`
+  （ds-common 1:1；VCYCLE/WCYCLE、`|A|·1` 对角光滑、粗层 SLI/CG +
+  `MG_REL_TOL=√1e-10`/`MG_MAX_ITER=10`）、`form_fine_linear_system`、
+  **精确 P1 细化延拓**（1/0.5/0.25/0.125 二进制常数，逐位 = MFEM
+  RefinementOperator，tri/quad/tet/hex）与 hex ≥2 阶 Newton 嵌套延拓。
+  驱动 `mg_abs_l1_jacobi.rs`（stub → 585 行，全部 CLI/打印/混合网格/monitor CSV）。
+- 过程中修的两处自身缺陷（方法论价值）：① C++ `-s` 同时**选粗层求解器**
+  （初版硬编码 CG 致 SLI 路径分歧）；② P1 延拓必须精确二进制常数
+  （barycentric 反求 1-ulp 翻转截断粗解的迭代路径：star 16 vs 13 次）。
+- **验收（主会话复现）**：ref-cube `-a 0 -rs 3 -gl 1 -ol 1` 与 C++ MPI oracle
+  （`mpirun -np 1`）**逐位一致**：`35937` 未知数、20 步 CG 全轨迹
+  （`154.905 → 3.00892e-19`）、ARF `0.285073`、L2 `2.66219e-05`；
+  star/beam-quad/beam-tet、SLI、mass、`-o 2`、`-rp`、`-ol`、`-mon` CSV 全对齐。
+- **新债 D386**（fem-space 嵌套 3-D 延拓只支持 tet，hex panic——本次绕过）、
+  **D387**（MFEM `FormLinearSystem` ess 行 RHS = `x[ess]`（DIAG_ONE 语义）vs
+  fem-rs DIAG_KEEP 的 `A_ii·x`——解相同但 `‖b‖` 类诊断不可直接对拍）、
+  **D388**（`kershaw_map` 与 MFEM `KershawTransformation` 在非规则网格不等价：
+  star 上 **C++ 自身**产生折叠单元/NaN——beam-quad 逐位一致）。
+
+#### 第四批流程注记
+
+- 抽查四组：lor `-fe n/r/h`、ex31 `0.181455`、MG `0.285073/2.66219e-05`、
+  nurbs stdout —— 全部复现。
+- **交叉发现**：③ 路（examples）在 ① 路（spaces）落地后才能验证 star 网格
+  （非对角 J）——两路先后交付形成互补；② 路因 fem-element 只读约束发现 D380
+  并给出正确绕过，体现了"绕过 + 立债"的正确姿势。
+- C++ oracle 新增：`$HOME/work/{d368,d374,d375,d376}/`。
+
+### 第四十八轮（round 48）侦察结论：其余簇（未开工，按价值排序；①③ 已由三/四批关闭）
 
 四路只读侦察的具体结论（**这是下一轮派单的直接输入**）：
 
 1. **~~`-fe n`/`-fe r` 的 LOR 预条件子~~（第三批 D367 已关闭）**：原缺口
    （builder 不收 essential-dof 表）已落地为 `build_lor_sgs_nd_quad`/
    `build_lor_sgs_rt_quad`；残差 = D368/D69 的 HO quad ND/RT 基（见第三批 ①）。
-2. **`BramblePasciakSolver` + `DarcySolver` trait**（H(div) 鞍点族）：`bramble_pasciak.rs` 现只有
-   `element_q_scaling`（`ConstructMassPreconditioner` 的标量部分）+ `bpcg.rs::solve_bpcg`，
-   **没有 solver 类型**；`block-solvers.cpp` 的 5 个求解器只缺 `bp-pcg`（`block_solvers.rs:279`
-   `exit(2)`）。另需"由调用方给的单元矩阵组装全局 Q"的入口（MFEM `ComputeElementMatrices` +
-   `AssembleElementMatrix(i, Q_i, 1)`），fem-rs 的 `Assembler` 只收积分器列表。
-3. **`mesh-bounding-boxes`**（唯一缺的串/并行 meshing miniapp 里最干净的）：**不依赖 GSLIB**
+2. **~~`BramblePasciakSolver`~~（第三批 D370 已关闭；`DarcySolver` trait 暂缓 = D373）**：
+   原缺口（无 solver 类型、无单元矩阵组装入口）已落地。
+3. **~~`mesh-bounding-boxes`~~（第三批 D371 已关闭）**：原缺口（vdim bounds/
+   `GetElementDofValues`/`GetJacobianDeterminantGF`）已落地；当时记录：**不依赖 GSLIB**
    （已 grep 确认）；缺 `GridFunction::GetElementBounds` 的 **vdim** 支持
    （`plbound.rs:964` 现硬报 `vdim != 1 not supported`）、`GetBounds`、`GetElementDofValues`、
    `Mesh::GetJacobianDeterminantGF`。全部有 C++ oracle（miniapp 直接打印 lower/upper）。
-4. **NURBS 族**（6 个 miniapp 无对位）：`nurbs_mesh_info`/`curveint`/`patch_ex1`/`surface`/
+4. **NURBS 族**（`curveint` 已由第四批 D374 关闭；其余 5 个无对位）：`nurbs_mesh_info`/`patch_ex1`/`surface`/
    `naca_cmesh`/`ex10`。根因是**没有 `NURBSPatch` 对象层**（`NurbsPatch2D/3D` 只是参考元素；
    `NurbsPatch2DData/3DData` 是数据但无 `new/operator()/DegreeElevate(dir,t)/KnotInsert(dir,kv)/Print`），
    且 `KnotVector` 分裂成 4 个类型（`element::iga::KnotVector`、`element::nurbs::KnotVector`、
@@ -2489,9 +2573,9 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
    细化 + `AnisotropicConflict`、`QuadratureInterpolator`/`GeometricFactors`/`ElementRestriction`、
    并行面邻 DOF 交换；**`lsf_integral` 建议明确 out-of-scope**（它是 external Blitz+Algoim 的
    薄包装，`MFEM_USE_ALGOIM` 门控）。
-7. **声明式桩族其余 5 个的过期情况**（供下一轮）：`ex31`+`ex31_dump`（D128）——`MatrixCoeff` 与
-   矩阵系数版 `VectorMassTensorIntegrator` **都已存在**，缺口清单**已过期**，真残差只有"order 1
-   的受限 ND 分派器"（可照抄 `mfem_pex31_restricted_hcurl.rs:208`）；`tesla`（D139）——网格/加密/
+7. **声明式桩族其余 4 个的过期情况**（`ex31`+`ex31_dump` 已由第四批 D375 关闭）：
+   其余桩的缺口清单多数**已过期**（`MatrixCoeff` 与矩阵系数版 `VectorMassTensorIntegrator`
+   **都已存在**）；`tesla`（D139）——网格/加密/
    分区/PCL-AMG 全可用，真缺 H(curl) ZZ 估计子 + 阈值加密 + rebalance + `SurfaceCurrent`；
    `lorentz`（D139）——Boris/`find_and_interpolate_3d` 全可用，真缺并行 DC 读取 + 粒子重分布；
    `mesh-optimizer`——16 个选项门 + 指标动物园缺口（`-qt 3` 只差 `TmopQuadType::ClosedUniform`）。
@@ -2536,6 +2620,30 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
 - **D373（P3）`DarcySolver` trait 统一暂缓**：`BdpMinresSolver`/`BramblePasciakSolver`
   表面已一致（~20 行 trait）；并入 `DivFreeSolver` 中等（不同构造器/`DfsData` 与
   零初值预条件子语义）。
+- **D377（P2）`boundary_dofs_hdiv` 的 3-D face 分支**：每边界*面*仍只暴露 1 个 dof，
+  tet/hex RT_k 面应为 (k+1)(k+2)/2 / (k+1)² 个（D368 的 2-D 修复已落地，3-D 为不
+  动 hex RT 基线暂缓）；修后需复核 3-D RT 消费方（tesla/volta/ex22 的 ess 列表）。
+- **D380（P2）`fem_element::nurbs::h_refine_vk` 行列布局缺陷**（nurbs.rs:1720）：
+  按列重建控制点、按行读回 ⇒ 多结点 v 向插结点返回错乱数据；D374 已绕过
+  （转置→`h_refine_uk`→转置回），上游修复待做并补 round-trip 测试。
+- **D383（P1，必修）`mfem_pex31_restricted_hcurl.rs:858` ∇z 物理梯度 Jacobian
+  转置约定反了**：`dx` 应为 `jit00·gξ + jit01·gη`、`dy` = `jit10·gξ + jit11·gη`
+  （MFEM `GetCurl` 的 `grad_hat·J⁻¹`；D375 在串行 ex31 中修对后交叉发现）。对角 J
+  （inline-quad）不可见 ⇒ pex31 已发布 np1-4 数字仍有效；斜切三角形上
+  H(curl) 误差虚大 ~10×。修法 = 与 `mfem_ex31_anisotropic_maxwell.rs` 的修对版本
+  对齐 + star/hexagon 网格对拍 C++ ex31p。
+- **D384（P3）**fem-rs raw A 多 392 个显式 ≈0 结构项（ex31 dump nnz 11505 vs
+  C++ 11113；值全部 ≤5.7e-14 一致）——妆饰性。
+- **D386（P2）`fem_space::constraints::prolong::build_h1_prolongation_matrix` 嵌套
+  3-D 路径只支持 tet**，hex 网格直接 panic（D376 在 fem-solver 侧以 Newton 反演
+  绕过；建议上游补 hex locator）。
+- **D387（P3）ess 行 RHS 约定差异**：MFEM `FormLinearSystem` 的 ess 行 RHS =
+  `x[ess]`（对角=1 语义），fem-rs `apply_dirichlet` 系列为 DIAG_KEEP 的 `A_ii·x`；
+  外层解相同（ess 行解耦）但 `‖b‖` 类诊断量与 C++ 不可直接对拍（D376 遇到，
+  记录在案）。
+- **D388（P3）`fem_mesh::kershaw_map` 与 MFEM `KershawTransformation` 在非规则/
+  混合网格不等价**（star 上 C++ 自身产生折叠单元/NaN；beam-quad 逐位一致）——
+  属 C++ 侧未定义行为，fem-rs 收敛更好，但要在文档标注"非对拍"。
 - **关闭**：~~D353~~（P1，含 C++ 对拍）；~~D358~~（**文档修正、无代码改动**：
   `miniapps/tools/nodal_transfer.rs:273` 的局部 `project_coefficient` 实测**已经是
   节点插值**（`test_coeff(dm.dof_coord(d))`），不是 D345 的 L² 质量解 ⇒ 该项原本就
@@ -2543,10 +2651,14 @@ block_solvers `bp-pcg` o0、bbox star.mesh、`-qt 3` star-q2）**全部复现**�
   `-fe h` 三组配置与 C++ 逐字节；`-fe n/r/l` 转为**带实测数字的明确拒绝** ⇒ 残差归 D367/D368）；
   **第三批**：~~D367~~（LOR 预条件子收 ess 表；残差转 D368/D69）、~~D369~~、
   ~~D370~~（BramblePasciakSolver；残差 = fem-amg vs hypre BoomerAMG 的固有替代差异）、
-  ~~D371~~（mesh-bounding-boxes；曲面 IO 残差 = 既有 D112b）。
+  ~~D371~~（mesh-bounding-boxes；曲面 IO 残差 = 既有 D112b）；
+  **第四批**：~~D368~~（quad ND/RT 忠实 IGLL 基；`-fe n/r` 逐字节；残差 = D377）、
+  ~~D374~~（NURBSPatch 对象层 + curveint；残差 = D380 + patches 版 NurbsExtension 仍拒），
+  ~~D375~~（串行 ex31，**关闭 D128**；残差 = D383 交叉发现 + D384）、
+  ~~D376~~（mg-abs-l1-jacobi 逐位；残差 = D386/D387/D388）。
 - 沿用开放：**D352/D354**（r47 的 space 两项）、D355–D357、D359–D363、D364–D366、
-  **D368**、**D372/D373**、D220/D234/D235/D263/D277/D276/D143 残留、D73、及更早遗留
-  （见 §五/HANDOVER）。
+  **D377/D380/D383/D384/D386/D387/D388**、D220/D234/D235/D263/D277/D276/D143 残留、
+  D73、及更早遗留（见 §五/HANDOVER）。
 
 ### 本轮统计
 
