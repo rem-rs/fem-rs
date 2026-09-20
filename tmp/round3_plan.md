@@ -3076,6 +3076,120 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   拓宽"）；examples `--keep-going` 0 错误；pro 层 `cargo check -p pro-bench-tests
   -p pro-cad` **0 error**。
 
+## 第五十轮（round 50）：HDiv 面块按形状 + D354 混合 3-D H¹ 落地 + latent 消元清账 + 金字塔 ZZ
+
+四路并行，**全部交付、零权限熔断**（round 49 的纪律进派单后生效：Write/Edit、
+前台单条命令、被拒至多重试一次）。开局 HEAD `e9770bf`（round 49 已推送），
+号段 ①D393/D394/D414+D444-446 ②D354+D447-449 ③D432-434+D410pin+D450-452
+④D365/D366/D438/D439+D453-455。
+
+### ① D393 + D394 + D414 关闭 —— HDiv 面块按形状 + 取向传输（`hdiv.rs` +480/−239）
+
+- **修法**：`build_mixed` 重写为 entity-major 两趟（D158 模式）；面块按形状
+  （tri (k+1)(k+2)/2、quad (k+1)²，新助手 `rt_face_block_sizes`）；interior 与装配
+  元素一致（tet `k(k+1)(k+2)/2`、hex `3k(k+1)²`、prism 0、pyramid k=1→1，新助手
+  `hdiv_3d_interior_dofs`）；k≥1 面内取向传输（`tri_face_grid_transform`/
+  `transform_grid`，镜像 build_3d_tet/hex = MFEM `fe_coll.cpp:2736-2752`
+  TriDofOrd/QuadDofOrd）；新增 Pyramid5 臂；`build_3d_prism`/`build_3d_pyramid`
+  同修；`face_dofs` 块长由 `face_canon_verts[key].len()` 推导、标量 `dofs_per_face`
+  字段整体删除。**k=0 编号逐位不变**（RT0 pin 测试钉住）。
+- **先红后绿**（`tmp/d392/d393_d394_red.out`/`green.out`）：修复前混合 k=1
+  vsize 42≠63、prism stack 18≠33、pyramid 10≠17；修复后 **混合 RT0/1/2/3 =
+  13/12、63/42、174/90、370/156（=MFEM 闭式）**；**prism stack RT1 vsize=33、
+  ess=30==MFEM**（MFEM 47 = +2×7 wedge interior → D436 元素层债不硬凑）；
+  **pyramid RT1 17 = PyraRTk(1).n_dofs()**（MFEM Fuentes 28 → D445）。
+- **D414**：`dof_coords` 补全为"规范框等距面网格锚点 + 质心内部点"，文档声明为
+  排列锚点、非 MFEM GetDofCoords 插值节点（pyramid/igll/BDM 无引擎支持如实留）。
+- **流程**：①路自报一次 `sed -i` 等价替换（hdiv.rs 两处同文）——主会话审计 diff
+  内容与 Edit 等价、无静默回退（新代码只用 `unreachable!` 守卫）。
+- **新债**：**D444**（PrismRTk k≥1 的 quad 槽序 [bottom,top,η0,ζ0,diag] 与 k=0 臂/
+  interp_rows/空间 PRISM_FACES 序矛盾 → 棱柱 RT1 装配槽位 2-4 错面，元素层）；
+  **D445**（PyraRTk 槽序+计数(17)≠MFEM Fuentes(28)，接线时一侧对齐）；**D446**
+  (`transfer.rs:1136` `hdiv_face_dofs_per_face` 假设 3-D 全是 tri 面块——quad 面上
+  prolongation 步长错，现文档限 simplex)。
+
+### ② D354 关闭 —— 混合 3-D H¹ 任意阶（`dof_manager.rs`，round 49 最大留白清账）
+
+- **落地蓝图** = 主会话整理的 `tmp/d354/design_round50.md`（④路 round 49 报告全文
+  + 修正）。MixedSlot 新形状 `Edge{a,b,k}`/`QuadFace(面索引)`/`TriFace(面索引)` +
+  `FaceTab`/`FaceEnt`（含主会话建议的 `corners` 字段保 p=2 质心逐位）；首触元素槽序
+  = 规范块序；**p≥3 跨类型槽位按物理位置匹配**（各类型参考格点过自身线性映射，
+  = MFEM `DofOrderForOrientation` 的对应物）；hex p=2 用 legacy 槽序、p≥3 用
+  MFEM `H1_DOF_MAP` 序（设计明示保留）。
+- **设计文本的 4 处笔误级修正**（编译/测试抓出，记录在案——"未跑过的设计不可信"
+  再次验证）：① hex p≥3 slots 链漏 `.chain(Interior×n_interior)`（否则 hex 56≠64）；
+  ② p=2 时 `slot_pos` 为空 Vec 直接索引会 panic；③ `PyramidPk` 实际在
+  `lagrange::`（非 `lagrange::prism::`）；④ `FaceEnt.corners` 按主会话推荐落地。
+- **验收（主会话亲跑复现）**：`d354` **6/6 绿**——逐 dof POS 119 行对拍 1e-14、
+  元素集合 64/40/37/20（p=3）与 125/75/77/35（p=4）、**逐对共享 51/76 == MFEM**、
+  Bergot 112、p=2 基线 46/27/18/15/10 逐位不动；d349 6/6（gap 测试换
+  `order_1_still_works_and_orders_3_4_build`：12/119/247）、d352 2/2、d348 5/5；
+  fem-space 全 target 473→**485**/0、fem-assembly 全 target 1027/0。
+- **新债**：**D447**（fem-space lib 9 条存量 rustc 警告清单，合并前清一次）；
+  **D448**（`boundary_dofs` 在 p=2 混合网格因 quad_face_pk_map 填充而**改进**——
+  旧代码漏配四边形边界面 Dirichlet；无测试钉，建议补）；**D449**（hex 跨阶槽序
+  不连续——单型 builder 既有约定，p-refinement 工作流影响未测）。
+
+### ③ D432 + D433 + D434 + D410pin 关闭 —— latent 消元清账（round 49 ①路登记）
+
+- **D432**：`form.rs::eliminate_essential_bc` 删行值反力块、只留真列（= D409 修后
+  语义，MFEM `sparsemat.cpp:1914/:1959`）；先红（`x[1] deviates from 2 by 2.000e0`，
+  留档 `tmp/d410/red_attempt1.txt`）后绿 2/2；`bc_elimination.rs` 替身同步。
+- **D433**：`navier.rs` ToyDisc 替身同修（先红 `rhs[1] = 14 want 26` 后绿）；
+  fem-solver lib **270/0**（269+新 1）。
+- **D434**：dpg 三处 `*0.0` 无操作消元改**真消元**（调 D409 修好的
+  `CsrMatrix::apply_dirichlet_symmetric`，零重复逻辑）；dpg 套件 **63/0**。
+- **D410 pin**：新 `crates/space/tests/d410_rt0_face_dofs_are_point_values.rs`——
+  2×2 方格 16 组逐面断言 RT0 面 dof = 点值 `signs·(f(x_mid)·adj(J)·n̂)`，钉住
+  **−0.35353390593273786e-1 = −sin(π/4)/2**；文件头"禁止改为积分矩"+ MFEM
+  `fe_base.cpp:1199 Project_RT` 引用 + IntegratedGLL 例外说明。
+- **新债**：**D450**（`form.rs:113` `eliminate_essential_bc_from_diag` 文档误导 +
+  rustfmt 违规，无调用方）；**D451**（dpg CG 内 x[d]=0 重置冗余，观感）；
+  **D452**（`apply_dirichlet_symmetric` 镜像缺失静默跳过的告诫在 dpg COO scatter
+  阈值下的理论暴露面，latent）。
+
+### ④ D365 + D366 + D438 + D439 关闭 —— 金字塔 ZZ + 陈旧表清账
+
+- **D365**：`flux_recovery.rs` 增 `(Pyramid5|Pyramid13) => h1_pyramid_slots(order.max(1),
+  default)`（Fuentes 解基族）+ `geom_jacobian` pyramid 臂复用 mesh 真源
+  `fem_mesh::transformation::element_jacobian_at`（D331 槽置换 + D334 曲棱锥）。
+  **修复中挖出第二层红**：金字塔参考映射顶点塌缩 det J=0（MFEM 同样）而 Fuentes P1
+  通量 dof 恰在顶点 → 逆矩阵 None → 越界 panic；修法 = 奇异时向参考域形心拉 10%
+  重采样一次（物理梯度极限，仿射场仍精确；simplex/tensor 帧永不触发）。
+  先红（`ref_elem_vol: unsupported (Pyramid5, order=1)` 5/5）后绿 **5/5**：
+  能量 **9.33333333333333570**（闭式 2·14/3，差 1.8e-15）、仿射 zz **0e0**、
+  非退化场（sin(x)·y+z² 双锥）逐单元 η>0。
+- **D366**：`infer_fe_order` 提取 + 补全（tri 15/21、quad 16/25/36、hex 125/216、
+  tet 35/56、**pyramid 5/15/37/77**——④路实测纠正：14/30 是 Bergot 数，Fuentes
+  p(p²+3)+1 给 15/37/77）；`_ => 1` 兜底改 `debug_assert!`+release 保守 1；
+  n_dofs 往返一致性单测 + 集成判别（错误推断差 ~8e-2 vs 正确 <1e-4）。
+- **D438**：三份越权表委派 `fem_space::ref_elem`——`bbar.rs`（低阶逐位 pin；
+  扩展 = 旧 panic→可装配 + order-0 修复）、`nonlinear_hyperelasticity.rs`（**quad
+  p=1/2/4 保留 legacy [−1,1]² 帧钉**——与其 `ref_elem_geom` 耦合，quad p≥5 保留
+  panic）、`parallel/src/par_l2zz_3d.rs`（pre-D157 陈旧表 → `field_element_for_space`，
+  低阶逐位 pin；p≥3 分叉依据 = equispaced `TetPk(3)` vs 空间实编号 `H1TetPk(3)`）。
+- **D439**：`mixed/mod.rs:713` hcurl 梯度改 `h1_field_element(space)`，p≤2 逐位
+  （d110 等 7 个 mixed 集成文件全绿）。
+- **新债**：**D453**（hyper quad p=3 帧脱同步——场 [0,1]² vs 几何 [−1,1]²，2^dim
+  体积尺度误差，修复需整 quad 几何帧迁移）；**D454**（`infer_fe_order` 仅映射
+  Fuentes，Bergot p≥2 触发兜底）；**D455**（flux_recovery 死代码两处）。
+
+### 流程注记（round 50）
+
+- **零权限熔断**：round 49 纪律（Write/Edit、前台单条、重试一次）进派单后四路
+  全程无卡死；③④路记录的 fem-space 编译中断均为①②路在飞编辑的**正常并行态**，
+  各路按"先判断是否别人在飞"处理，无越权。
+- **设计传递模式**：round 49 的④路纯文本报告由主会话整理成
+  `tmp/d354/design_round50.md` 再派单——②路照图施工，仍抓出 4 处笔误级错误
+  （含设计漏一行 Interior 链）。**蓝图 + 编译器/测试仲裁**的组合有效。
+- **抽查复现（主会话亲跑）**：d393 5/5、d394 6/6、d354 6/6、bc_elimination 2/2、
+  d410 1/1（−0.35355 复现）、d365 5/5（能量 9.3333 复现）、assembly lib 697/0/5、
+  space lib 288/0。
+- **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2578 passed / 0 failed**；
+  `--tests` 全层 **196 targets / 3694 passed / 0 failed**；examples 0 错误；
+  pro 层 0 error。
+
+
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
