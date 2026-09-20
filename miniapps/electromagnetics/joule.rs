@@ -91,13 +91,16 @@
 //!   Jacobian through `simplex_jacobian`, which for `Hex8` is the constant
 //!   corner-based (affine) Jacobian — wrong for the trilinear/curved hexes of
 //!   `cylinder-hex.mesh`.  Needs a trilinear-map-aware entry point;
-//! * the parallel Nédélec `ND2` / `RT1` DOF partition at ≥ 2 ranks: building
-//!   the four spaces in this file on `cylinder-hex.mesh` already prints
-//!   `Warning: exchange_ghost_interior_ids: rank N requested interior DOF
-//!   (elem=E, idx=I) not found, using sentinel GID` for the face/interior DOFs
-//!   of ghost elements (and `GhostExchange::from_partition` panics on a smaller
-//!   hex mesh).  This is pre-existing and independent of the gradient (D110);
-//!   it is why the multi-rank form of the D110 parallel test is `#[ignore]`d;
+//! * the parallel Nédélec `ND2` / `RT1` DOF partition at ≥ 2 ranks —
+//!   **closed in D412** (round 48): the H(curl)/H(div) partitions now key
+//!   3-D face DOFs by canonical face geometry (3 smallest global vertex ids,
+//!   position read from the min-global-id adjacent element) and edge DOFs by
+//!   the global-min endpoint, so `exchange_ghost_interior_ids` no longer
+//!   emits sentinel GIDs for ghost face/interior DOFs and
+//!   `GhostExchange::from_partition` no longer panics; the multi-rank form of
+//!   the D110 parallel test is un-`#[ignore]`d and green at 2/4 ranks
+//!   (`crates/parallel/tests/d412_nd2_rt1_face_dof_partition_3d_par.rs`,
+//!   `crates/parallel/tests/d110_p2_nd2_gradient_3d_hex_par.rs`);
 //! * `-sc 1` static condensation (`ParBilinearForm::EnableStaticCondensation`),
 //!   `-amr 1` (`GeneralRefinement` + `Rebalance`), `-debug 1`
 //!   (`hypre_ParCSRMatrixPrint`), `-gfprint 1`, `-vis`, `-visit` (no
@@ -699,9 +702,10 @@ fn main() {
                  element-wise projection: postproc::project_coefficient takes a physical-point\n\
                  closure, and GridFunction::evaluate_vector_at_element uses the affine\n\
                  simplex_jacobian, which is wrong for the trilinear hexes of this mesh.\n\
-                 3. >=2 ranks: the parallel ND2/RT1 DOF partition does not resolve the\n\
-                 face/interior DOFs of ghost elements (exchange_ghost_interior_ids sentinel\n\
-                 GIDs, see the warnings on stderr).\n\
+                 3. CLOSED by D412: the >=2-ranks parallel ND2/RT1 DOF partition\n\
+                 now resolves the face/interior DOFs of ghost elements through\n\
+                 the canonical face-key exchange (d412 regression test; the\n\
+                 multi-rank D110 test is un-ignored at 2/4 ranks).\n\
                  CLOSED by D110: the H1(P2) -> ND2 discrete gradient (3-D hexahedra) now\n\
                  exists -- DiscreteLinearOperator::gradient, tests\n\
                  crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs.\n\

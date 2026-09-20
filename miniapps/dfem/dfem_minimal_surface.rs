@@ -585,24 +585,60 @@ impl Operator for FdJacobian<'_> {
 
 // ─── MFEM CGSolver / NewtonSolver (serial ports, no preconditioner) ─────────
 
-/// MFEM `PrintLevel` flags derived from the legacy print level.
-struct PrintLevel {
+/// The unified MFEM legacy print scale (`fem_linalg::PrintLevel` — the landed
+/// PrintLevel mechanism, D103).  Mapping per MFEM `FromLegacyPrintLevel`
+/// (`linalg/solvers.cpp:119`): -1 Silent / 0 WarningsOnly / 1 Iterations /
+/// 2 Summary / 3 FirstAndLast.
+fn legacy_print_level(lvl: i32) -> fem_linalg::PrintLevel {
+    use fem_linalg::PrintLevel;
+    match lvl {
+        -1 => PrintLevel::Silent,
+        0 => PrintLevel::WarningsOnly,
+        1 => PrintLevel::Iterations,
+        2 => PrintLevel::Summary,
+        3 => PrintLevel::FirstAndLast,
+        _ => PrintLevel::WarningsOnly,
+    }
+}
+
+/// The four `IterativeSolver::PrintLevel` gates the unified mechanism derives
+/// from the level (same table as `FromLegacyPrintLevel` +
+/// `crates/solver/src/iterative.rs` `CgTrailerGates::from_config`).
+#[derive(Clone, Copy)]
+struct PrintGates {
     warnings: bool,
     iterations: bool,
     summary: bool,
     first_and_last: bool,
 }
 
-/// MFEM `FromLegacyPrintLevel`.
-fn from_legacy_print_level(lvl: i32) -> PrintLevel {
-    match lvl {
-        -1 => PrintLevel { warnings: false, iterations: false, summary: false, first_and_last: false },
-        0 => PrintLevel { warnings: true, iterations: false, summary: false, first_and_last: false },
-        1 => PrintLevel { warnings: true, iterations: true, summary: false, first_and_last: false },
-        2 => PrintLevel { warnings: true, iterations: false, summary: true, first_and_last: false },
-        3 => PrintLevel { warnings: true, iterations: false, summary: false, first_and_last: true },
-        _ => PrintLevel { warnings: true, iterations: false, summary: false, first_and_last: false },
+impl PrintGates {
+    fn of(level: fem_linalg::PrintLevel) -> Self {
+        use fem_linalg::PrintLevel;
+        match level {
+            PrintLevel::Silent => {
+                Self { warnings: false, iterations: false, summary: false, first_and_last: false }
+            }
+            PrintLevel::WarningsOnly => {
+                Self { warnings: true, iterations: false, summary: false, first_and_last: false }
+            }
+            PrintLevel::Summary => {
+                Self { warnings: true, iterations: false, summary: true, first_and_last: false }
+            }
+            PrintLevel::Iterations | PrintLevel::Debug => {
+                Self { warnings: true, iterations: true, summary: false, first_and_last: false }
+            }
+            PrintLevel::FirstAndLast => {
+                Self { warnings: true, iterations: false, summary: false, first_and_last: true }
+            }
+        }
     }
+}
+
+/// Gates of a legacy print level (goes through the unified
+/// [`legacy_print_level`] mapping).
+fn print_gates(lvl: i32) -> PrintGates {
+    PrintGates::of(legacy_print_level(lvl))
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -626,7 +662,7 @@ fn cg_mult(
     rtol: f64,
     atol: f64,
     max_iter: usize,
-    pl: &PrintLevel,
+    pl: &PrintGates,
 ) -> (bool, usize, f64) {
     let n = a.height();
     // iterative_mode == false: r = b; x = 0.0;
@@ -738,11 +774,11 @@ fn newton_mult(
     rel_tol: f64,
     abs_tol: f64,
     max_iter: usize,
-    pl: &PrintLevel,
+    pl: &PrintGates,
     cg_rtol: f64,
     cg_atol: f64,
     cg_max_iter: usize,
-    cg_pl: &PrintLevel,
+    cg_pl: &PrintGates,
 ) -> (bool, usize, f64) {
     let n = oper.height();
     let mut r = vec![0.0_f64; n];
@@ -926,7 +962,7 @@ fn main() {
     let cg_rtol = 1e-4;
     let cg_atol = 0.0;
     let cg_max_iter = 500_usize;
-    let cg_pl = from_legacy_print_level(2);
+    let cg_pl = print_gates(2);
 
     // 13. NewtonSolver: relTol 1e-6, absTol 0, maxIter 10, printLevel 1
     // 14. X = restriction of u; newton.Mult(zero, X)
@@ -937,7 +973,7 @@ fn main() {
         1e-6,
         0.0,
         10,
-        &from_legacy_print_level(1),
+        &print_gates(1),
         cg_rtol,
         cg_atol,
         cg_max_iter,

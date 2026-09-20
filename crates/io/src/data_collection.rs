@@ -64,22 +64,53 @@ impl DcFormat {
     }
 }
 
-/// One registered grid function (`VisItDataCollection::RegisterField`).
+/// Field association (`VisItFieldInfo::association`) — the `"assoc"` root
+/// tag.  `VisItDataCollection::LoadFields` (`fem/datacollection.cpp:633-664`)
+/// dispatches on it: `"nodes"` rebuilds a `GridFunction`, `"quadrature"` (and
+/// the legacy `"elements"`) a `QuadratureFunction`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DcAssoc {
+    /// `VisItDataCollection::RegisterField` — nodal grid function.
+    #[default]
+    Nodes,
+    /// `VisItDataCollection::RegisterQField` — quadrature-point function.
+    Quadrature,
+}
+
+impl DcAssoc {
+    /// The root-file tag string.
+    pub fn tag(self) -> &'static str {
+        match self {
+            DcAssoc::Nodes => "nodes",
+            DcAssoc::Quadrature => "quadrature",
+        }
+    }
+}
+
+/// One registered grid function (`VisItDataCollection::RegisterField`) or
+/// quadrature function (`VisItDataCollection::RegisterQField`).
 #[derive(Clone, Debug)]
 pub struct DcField {
     pub name: String,
-    /// MFEM finite-element-collection name, e.g. `"H1_2D_P4"`.
+    /// MFEM finite-element-collection name, e.g. `"H1_2D_P4"`; quadrature
+    /// fields use MFEM's `QF_{ORDER}_{VDIM}` pattern instead.
     pub basis: String,
     /// `FEColl()->GetOrder()` — the `"order"` root tag.
     pub order: u32,
     /// `std::max(1, max element order)` — the `"lod"` root tag. Starts at 1 in
-    /// C++, so a P0 field has `lod == 1` while `order == 0`.
+    /// C++, so a P0 field has `lod == 1` while `order == 0`.  Quadrature
+    /// fields derive it from the per-element quadrature-point counts instead
+    /// (see [`qfield_lod`]) and may be `0`.
     pub lod: u32,
     /// Number of vector components (VDim) — the `"comps"` root tag.
     pub vdim: u32,
     /// FES ordering: `false` = `Ordering: 0` (byNODES, one DOF per line),
-    /// `true` = `Ordering: 1` (byVDIM, `vdim` DOFs per line).
+    /// `true` = `Ordering: 1` (byVDIM, `vdim` DOFs per line).  Quadrature
+    /// fields always print `vdim` values per line regardless of this flag
+    /// (`QuadratureFunction::Save` calls `Vector::Print(os, vdim)`).
     pub by_vdim: bool,
+    /// Field association — the `"assoc"` root tag.
+    pub assoc: DcAssoc,
     /// DOF values in the FES's own ordering.
     pub values: Vec<f64>,
 }
@@ -101,11 +132,32 @@ impl DcField {
             lod: order.max(1),
             vdim,
             by_vdim: false,
+            assoc: DcAssoc::Nodes,
             values,
         }
     }
 
-    /// Override the `"lod"` tag (variable-order spaces, explicit LODs).
+    /// Register a quadrature (`assoc: "quadrature"`) function.  MFEM
+    /// `VisItDataCollection::RegisterQField` (`fem/datacollection.cpp:454-478`)
+    /// names the basis `QF_{ORDER}_{VDIM}` and derives the LOD from the
+    /// per-element quadrature-point counts (`GetRefinementLevelFromElems`,
+    /// starting at -1), so the LOD must be attached separately with
+    /// [`DcField::with_lod`] when the element data is available.
+    pub fn quadrature(name: impl Into<String>, order: u32, vdim: u32, values: Vec<f64>) -> Self {
+        DcField {
+            name: name.into(),
+            basis: format!("QF_{order}_{vdim}"),
+            order,
+            lod: 0,
+            vdim,
+            by_vdim: false,
+            assoc: DcAssoc::Quadrature,
+            values,
+        }
+    }
+
+    /// Override the `"lod"` tag (variable-order spaces, explicit LODs, and the
+    /// quadrature-field LOD from [`qfield_lod`]).
     pub fn with_lod(mut self, lod: u32) -> Self {
         self.lod = lod;
         self
@@ -115,6 +167,53 @@ impl DcField {
     pub fn by_vdim(mut self) -> Self {
         self.by_vdim = true;
         self
+    }
+}
+
+/// Element base geometry for the quadrature LOD derivation — MFEM
+/// `Geometry::Type` as used by `GetElementBaseGeometry`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DcGeom {
+    Point,
+    Segment,
+    Triangle,
+    Square,
+    Tetrahedron,
+    Cube,
+    Prism,
+    Pyramid,
+}
+
+/// MFEM `GeometryRefiner::GetRefinementLevelFromElems` (`fem/geom.cpp:1972`):
+/// the refinement level `n` whose refined geometry carries exactly `n_qp`
+/// quadrature points (`n^dim == n_qp`; segments take the count directly,
+/// points are `-1`), or `-1` when no `n < 15` matches.  Pyramids abort in
+/// C++ (`MFEM_ABORT`) and do the same here.
+pub fn qfield_lod(geom: DcGeom, n_qp: usize) -> i32 {
+    match geom {
+        DcGeom::Point => -1,
+        DcGeom::Segment => n_qp as i32,
+        DcGeom::Triangle | DcGeom::Square => {
+            let mut n = 0i32;
+            while n < 15 && (n as usize) * (n as usize) < n_qp + 1 {
+                if (n as usize) * (n as usize) == n_qp {
+                    return n - 1;
+                }
+                n += 1;
+            }
+            -1
+        }
+        DcGeom::Cube | DcGeom::Tetrahedron | DcGeom::Prism => {
+            let mut n = 0i32;
+            while n < 15 && (n as usize) * (n as usize) * (n as usize) < n_qp + 1 {
+                if (n as usize) * (n as usize) * (n as usize) == n_qp {
+                    return n - 1;
+                }
+                n += 1;
+            }
+            -1
+        }
+        DcGeom::Pyramid => panic!("Reference element type is not supported!"),
     }
 }
 
@@ -217,6 +316,18 @@ impl VisItCollection {
         self
     }
 
+    /// `VisItDataCollection::RegisterQField` — register a quadrature function
+    /// (build it with [`DcField::quadrature`]).  As in C++, the VisIt root
+    /// keeps both kinds in one `fields` map (the tags' `"assoc"` value is what
+    /// distinguishes them on load, `fem/datacollection.cpp:633-664`), so this
+    /// is the same registration path; the slice file, however, is written with
+    /// the `QuadratureSpace` header (see [`gf_text`]).  The C++ updates its
+    /// internal `visit_levels_of_detail` ceiling here, which is never
+    /// serialized — the root's `"max_lods"` tag is a separate member.
+    pub fn register_qfield(&mut self, field: DcField) -> &mut Self {
+        self.register_field(field)
+    }
+
     /// Collection directory name, e.g. `"Maxwell-Parallel_000003"`.
     pub fn dir_name(&self) -> String {
         format!("{}_{:0width$}", self.name, self.cycle, width = PAD_DIGITS)
@@ -280,7 +391,10 @@ impl VisItCollection {
                     json_escape(&format!("{dir}/{}.%06d", f.name))
                 ));
                 s.push_str("          \"tags\": {\n");
-                s.push_str("            \"assoc\": \"nodes\",\n");
+                s.push_str(&format!(
+                    "            \"assoc\": \"{}\",\n",
+                    f.assoc.tag()
+                ));
                 s.push_str(&format!(
                     "            \"basis\": {},\n",
                     json_escape(&f.basis)
@@ -432,7 +546,7 @@ fn gf_value(v: f64) -> String {
     }
 }
 
-/// `FiniteElementSpace::Save` + `GridFunction::Save` header.
+/// `FiniteElementSpace::Save` + `GridFunction::Save` header (nodal fields).
 fn gf_header(f: &DcField) -> String {
     format!(
         "FiniteElementSpace\nFiniteElementCollection: {}\nVDim: {}\nOrdering: {}\n\n",
@@ -442,12 +556,30 @@ fn gf_header(f: &DcField) -> String {
     )
 }
 
-/// Write one grid-function slice file (`FiniteElementSpace` header + values).
+/// `QuadratureSpace::Save` + `QuadratureFunction::Save` header
+/// (`fem/qspace.cpp:187`, `fem/qfunction.cpp:50`): no `FiniteElementSpace`
+/// block and no `Ordering` line — the values always print `vdim` per line
+/// (`Vector::Print(os, vdim)`).
+fn qf_header(f: &DcField) -> String {
+    format!(
+        "QuadratureSpace\nType: default_quadrature\nOrder: {}\nVDim: {}\n\n",
+        f.order, f.vdim
+    )
+}
+
+/// Write one grid-function/quadrature-function slice file.
 fn gf_text(f: &DcField) -> String {
-    let mut s = gf_header(f);
-    // Vector::Print(os, width) with width = 1 for byNODES, VDim for byVDIM; no
-    // output at all for an empty vector.
-    let width = if f.by_vdim { f.vdim.max(1) as usize } else { 1 };
+    let mut s = match f.assoc {
+        DcAssoc::Nodes => gf_header(f),
+        DcAssoc::Quadrature => qf_header(f),
+    };
+    // Vector::Print(os, width) with width = 1 for byNODES, VDim for byVDIM (or
+    // always VDim for quadrature fields); no output at all for an empty vector.
+    let width = match f.assoc {
+        DcAssoc::Quadrature => f.vdim.max(1) as usize,
+        DcAssoc::Nodes if f.by_vdim => f.vdim.max(1) as usize,
+        DcAssoc::Nodes => 1,
+    };
     for (i, v) in f.values.iter().enumerate() {
         s.push_str(&gf_value(*v));
         if i + 1 == f.values.len() {
@@ -523,9 +655,14 @@ pub fn read_visit_root(root_path: &Path) -> std::io::Result<(usize, usize, Vec<D
                 let vdim = extract_json_usize(body, "\"comps\"").unwrap_or(1) as u32;
                 let order = extract_json_usize(body, "\"order\"").unwrap_or(1) as u32;
                 let lod = extract_json_usize(body, "\"lod\"").unwrap_or(order.max(1) as usize) as u32;
+                let assoc = match extract_json_str(body, "\"assoc\"") {
+                    Some("quadrature") | Some("elements") => DcAssoc::Quadrature,
+                    _ => DcAssoc::Nodes,
+                };
                 if let Some(basis) = basis {
                     let mut f = DcField::nodes(name.to_string(), basis.to_string(), order, vdim, Vec::new());
                     f.lod = lod;
+                    f.assoc = assoc;
                     fields.push(f);
                 }
                 i = j + span;
@@ -605,19 +742,40 @@ pub fn read_mesh_slice(path: &Path) -> std::io::Result<String> {
 }
 
 /// Read a grid-function slice file.
+///
+/// Both slice flavors are recognized (`VisItDataCollection::LoadFields`
+/// dispatches the same way, `fem/datacollection.cpp:633-664`): the
+/// `FiniteElementSpace` header of nodal grid functions and the
+/// `QuadratureSpace` header of quadrature functions.  A quadrature slice
+/// carries no collection name, so the basis is reported with MFEM's
+/// `QF_{ORDER}_{VDIM}` pattern — the same string
+/// `VisItDataCollection::RegisterQField` writes into the root tags.
 pub fn read_gf_slice(path: &Path) -> std::io::Result<(String, u32, Vec<f64>)> {
     let content = fs::read_to_string(path)?;
     let mut lines = content.lines();
     // Skip header lines
     let mut basis = String::new();
     let mut vdim = 1u32;
+    let mut qspace_order: Option<u32> = None;
     for line in &mut lines {
         if line.starts_with("FiniteElementCollection:") {
             basis = line["FiniteElementCollection:".len()..].trim().to_string();
+        } else if line.starts_with("QuadratureSpace") {
+            // header type marker; the Order: line that follows carries the rule
+        } else if line.starts_with("Type:") {
+            // only `default_quadrature` exists (QuadratureSpace::Load aborts
+            // on anything else, fem/qspace.cpp:165-183)
+        } else if let Some(rest) = line.strip_prefix("Order:") {
+            qspace_order = rest.trim().parse().ok();
         } else if line.starts_with("VDim:") {
             vdim = line["VDim:".len()..].trim().parse().unwrap_or(1);
         } else if line.is_empty() {
             break;
+        }
+    }
+    if basis.is_empty() {
+        if let Some(order) = qspace_order {
+            basis = format!("QF_{order}_{vdim}");
         }
     }
     // Read values

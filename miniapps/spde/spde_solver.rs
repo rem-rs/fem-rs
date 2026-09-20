@@ -220,7 +220,12 @@ impl SpdeSolver {
             std::process::exit(3);
         }
 
-        if print_level_active(1) {
+        // The C++ `print_level_` member default (spde_solver.hpp:210); the
+        // `PrintOutput` gates below read this value, exactly as the C++
+        // constructor's `PrintOutput(fespace_ptr_, print_level_)` calls do.
+        let print_level = 1;
+
+        if print_output(print_level) {
             println!("<SPDESolver> Initialize Solver ..");
         }
 
@@ -249,7 +254,7 @@ impl SpdeSolver {
         let mut poles = Vec::new();
         let mut integer_order = false;
         if exponent_to_approximate.abs() > 1e-12 {
-            if print_level_active(1) {
+            if print_output(print_level) {
                 println!("<SPDESolver> Approximating the fractional exponent {exponent_to_approximate}");
             }
             let (c, p) = compute_partial_fraction_approximation(exponent_to_approximate);
@@ -257,7 +262,7 @@ impl SpdeSolver {
             poles = p;
         } else {
             integer_order = true;
-            if print_level_active(1) {
+            if print_output(print_level) {
                 println!("<SPDESolver> Treating integer order PDE.");
             }
         }
@@ -373,11 +378,7 @@ impl SpdeSolver {
             atol: 0.0,
             max_iter: 2000,
             verbose: false,
-            print_level: if self.print_level > 1 {
-                PrintLevel::Iterations
-            } else {
-                PrintLevel::Summary
-            },
+            print_level: cg_print_level(self.print_level),
         };
         let amg = AmgConfig::default();
 
@@ -432,9 +433,26 @@ fn effective_seed(seed: i32) -> i32 {
     }
 }
 
-/// Helper that determines if output should be printed (rank 0, print level).
-fn print_level_active(print_level: i32) -> bool {
+/// MFEM `PrintOutput` (spde_solver.cpp:26-29): `rank == 0 && print_level > 0`,
+/// gating every `<SPDESolver> ...` message.  Serial port: the rank is always
+/// 0, so only the unified print level remains (D103: the gate now reads the
+/// configured level — the former local helper was called with a hard-coded
+/// `1`, i.e. it could never go quiet).
+fn print_output(print_level: i32) -> bool {
     print_level > 0
+}
+
+/// MFEM `cg.SetPrintLevel(std::max(0, print_level_ - 1))`
+/// (spde_solver.cpp:785) mapped onto the unified MFEM legacy scale
+/// (`fem_linalg::PrintLevel`, `FromLegacyPrintLevel`).
+fn cg_print_level(print_level: i32) -> PrintLevel {
+    match (print_level - 1).max(0) {
+        0 => PrintLevel::WarningsOnly,
+        1 => PrintLevel::Iterations,
+        2 => PrintLevel::Summary,
+        3 => PrintLevel::FirstAndLast,
+        _ => PrintLevel::WarningsOnly,
+    }
 }
 
 /// Sorted unique boundary attributes of the mesh (MFEM `bdr_attributes`).

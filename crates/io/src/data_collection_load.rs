@@ -155,36 +155,87 @@ mod tests {
     use crate::data_collection::{DcField, VisItCollection};
     use std::path::PathBuf;
 
-    /// Test: parse the existing Example23 sample root file.
+    /// Test: parse a VisIt root file end-to-end.
+    ///
+    /// D104b (round 54): this test used to read
+    /// `crates/output/Example23_000000.mfem_root` — a path that exists
+    /// nowhere — and silently SKIPped on every machine.  The `Example23_*`
+    /// fixtures are machine-local and gitignored (`.gitignore` `Example23_*`),
+    /// so a loud error would break fresh clones; instead the fixture is built
+    /// in-code with the writer itself and the load always runs.  The
+    /// machine-local sample (cycles ≥ 5 under the repo root) is cross-checked
+    /// additively when present.
     #[test]
     fn load_example23_root() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let root = PathBuf::from(manifest_dir)
-            .join("../output/Example23_000000.mfem_root");
-        if !root.exists() {
-            eprintln!("SKIP: {} not found", root.display());
-            return;
-        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut dc = VisItCollection::new("Example23");
+        dc.set_prefix_path(dir.path().to_str().unwrap());
+        dc.set_cycle(0);
+        dc.spatial_dim = 3;
+        dc.topo_dim = 3;
+        dc.register_field(DcField::nodes(
+            "sigma",
+            "L2_3D_P0",
+            0,
+            1,
+            vec![1.0, 2.0, 3.0, 4.0],
+        ));
+        dc.save(0, HEX_MESH_TXT).expect("save failed");
+
+        let root = dir.path().join("Example23_000000.mfem_root");
         let (cycle, mesh_txt, fields) = load_visit_collection(&root).expect("load failed");
         assert_eq!(cycle, 0);
         assert!(mesh_txt.contains("MFEM mesh"), "mesh text should start with MFEM header");
         assert!(!fields.is_empty(), "should have at least one field");
+        assert_eq!(fields[0].0, "sigma");
+        assert_eq!(fields[0].3, vec![1.0, 2.0, 3.0, 4.0], "field DOFs must round-trip");
+
+        // Machine-local golden sample (gitignored; cycle 5 carries only the
+        // root file on this machine, cycle 10 has the full slice set): when
+        // it is present, exercise the real C++-produced root as well.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let sample = PathBuf::from(&manifest_dir).join("../../Example23_000010.mfem_root");
+        if sample.exists() {
+            let (cycle, mesh_txt, fields) =
+                load_visit_collection(&sample).expect("machine-local Example23 failed to load");
+            assert_eq!(cycle, 10);
+            assert!(mesh_txt.contains("MFEM mesh"));
+            assert!(!fields.is_empty());
+        } else {
+            eprintln!("note: machine-local Example23 sample absent (fresh clone) — in-code fixture covered the loader");
+        }
     }
 
     /// Test: load_visit_mesh returns `VisitMesh::Mesh3d` for a 3-D slice.
+    ///
+    /// D104b (round 54): the former body pointed at the nonexistent
+    /// `crates/output/` fixture and silently SKIPped; see
+    /// [`load_example23_root`] for the fixture decision.  The in-code hex
+    /// fixture always runs; the machine-local sample is additive.
     #[test]
     fn load_example23_mesh() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-        let root = PathBuf::from(manifest_dir)
-            .join("../output/Example23_000000.mfem_root");
-        if !root.exists() {
-            eprintln!("SKIP: {} not found", root.display());
-            return;
-        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut dc = VisItCollection::new("Example23");
+        dc.set_prefix_path(dir.path().to_str().unwrap());
+        dc.set_cycle(0);
+        dc.spatial_dim = 3;
+        dc.topo_dim = 3;
+        dc.register_field(DcField::nodes("u", "H1_3D_P1", 1, 1, vec![0.0; 8]));
+        dc.save(0, HEX_MESH_TXT).expect("save failed");
+
+        let root = dir.path().join("Example23_000000.mfem_root");
         let (cycle, mesh) = load_visit_mesh(&root).expect("load mesh failed");
         assert_eq!(cycle, 0);
-        assert!(matches!(mesh, VisitMesh::Mesh3d(_)), "Example23 is a 3-D slice");
-        assert!(mesh.n_elems() > 0, "mesh should have elements");
+        assert!(matches!(mesh, VisitMesh::Mesh3d(_)), "the hex fixture is a 3-D slice");
+        assert_eq!(mesh.n_elems(), 1, "mesh should have elements");
+
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+        let sample = PathBuf::from(&manifest_dir).join("../../Example23_000010.mfem_root");
+        if sample.exists() {
+            let (_cycle, mesh) = load_visit_mesh(&sample).expect("load failed");
+            assert!(matches!(mesh, VisitMesh::Mesh2d(_)), "Example23 is a 2-D slice");
+            assert!(mesh.n_elems() > 0);
+        }
     }
 
     /// One-quad 2-D MFEM mesh slice (v1.0 text, with a boundary element).
@@ -322,13 +373,16 @@ mod tests {
         assert_eq!(m3.n_elems(), direct.n_elems());
         assert_eq!(m3.element_nvertices(), direct.element_nvertices());
 
-        // Optional: the repo's Example23 sample, when present, is also 3-D.
+        // Optional: the repo's machine-local Example23 sample (gitignored,
+        // 2-D — D104b fixed the stale `crates/output/` path and the stale
+        // "3-D" claim, which had never executed because the old test always
+        // skipped), when present.
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
         let root = PathBuf::from(&manifest_dir)
-            .join("../output/Example23_000000.mfem_root");
+            .join("../../Example23_000010.mfem_root");
         if root.exists() {
             let (_cycle, mesh) = load_visit_mesh(&root).expect("load failed");
-            assert!(matches!(mesh, VisitMesh::Mesh3d(_)), "Example23 is a 3-D slice");
+            assert!(matches!(mesh, VisitMesh::Mesh2d(_)), "Example23 is a 2-D slice");
         }
     }
 }
