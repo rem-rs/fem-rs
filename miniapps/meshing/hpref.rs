@@ -19,6 +19,13 @@
 //!   realized with two `general_refinement_2d` splits and MFEM's in-place
 //!   child ordering [BL, BR, TR, TL]; children inherit the parent order
 //!   (MFEM `fespace.cpp Update`).
+//! - `NCMesh::UpdateVertices` (`mesh/ncmesh.cpp`) is ported as
+//!   `renumber_vertices_mfem_sfc`: after the refinement loop the mesh nodes
+//!   are renumbered to MFEM's vertex order (top-level vertices first, then
+//!   the SFC leaf walk).  Node ids then *are* MFEM's vertex ids, which the
+//!   variable-order DOF numbering builds on (vertex dofs by vertex id, edge
+//!   dofs by the DSTable first-encounter enumeration — see
+//!   `fem_space::p_refine::build_variable_order_dof_manager`, D136).
 //! - The true (constrained) system is built with `conforming_assemble`
 //!   (MFEM `BilinearForm::ConformingAssemble`); the printed unknown count is
 //!   `GetTrueVSize()`.
@@ -391,6 +398,51 @@ fn check_h1_continuity(
     error_max
 }
 
+// ─── MFEM vertex numbering (NCMesh::UpdateVertices) ───────────────────────────
+
+/// MFEM `NCMesh::UpdateVertices` (`mesh/ncmesh.cpp:2480`): the vertex numbering
+/// seen by the FESpace keeps the top-level (coarse) vertices first, in their
+/// original order, then numbers every refined vertex while walking the leaf
+/// elements in SFC order, corner nodes in local element order.  Physically
+/// renumbering the mesh nodes to this order keeps node ids == MFEM vertex ids,
+/// which is the base layer of the variable-order DOF numbering (MFEM numbers
+/// vertex dofs by vertex id and edge-variant dofs by the DSTable edge
+/// enumeration) — and it makes `refined.mesh` match `Mesh::Print` output.
+fn renumber_vertices_mfem_sfc(mesh: &mut Mesh<2>, n_top_level: usize) {
+    let dim = 2usize;
+    let n_nodes = mesh.n_nodes();
+    if n_nodes == n_top_level {
+        return; // unrefined: node ids already are the top-level numbering
+    }
+    let mut new_id = vec![u32::MAX; n_nodes];
+    for v in 0..n_top_level {
+        new_id[v] = v as u32;
+    }
+    let mut next = n_top_level as u32;
+    for e in 0..mesh.n_elems() as u32 {
+        let ns: [u32; 4] = mesh.elem_nodes(e).try_into().unwrap();
+        for &n in &ns {
+            if new_id[n as usize] == u32::MAX {
+                new_id[n as usize] = next;
+                next += 1;
+            }
+        }
+    }
+    assert_eq!(next as usize, n_nodes, "every refined node must be a leaf corner");
+    let mut coords = vec![0.0_f64; n_nodes * dim];
+    for (old, &nid) in new_id.iter().enumerate() {
+        coords[nid as usize * dim] = mesh.coords[old * dim];
+        coords[nid as usize * dim + 1] = mesh.coords[old * dim + 1];
+    }
+    mesh.coords = coords;
+    for c in mesh.conn.iter_mut() {
+        *c = new_id[*c as usize];
+    }
+    for c in mesh.face_conn.iter_mut() {
+        *c = new_id[*c as usize];
+    }
+}
+
 // ─── hp-refinement loop ───────────────────────────────────────────────────────
 
 /// The state left by MFEM's step 5 hp-refinement loop.
@@ -417,6 +469,8 @@ fn run_hp_refinement(
     let mut num_h = 0usize;
     let mut num_p = 0usize;
     let mut seed = 0i32;
+    // Top-level (coarse) vertex count for the MFEM `UpdateVertices` renumbering.
+    let n_top_level = mesh.n_nodes();
 
     for iter in 0..num_iter {
         let r1 = if deterministic { det_rand(&mut seed) } else {
@@ -455,6 +509,11 @@ fn run_hp_refinement(
         }
     }
 
+    // Final MFEM `UpdateVertices` renumbering: node ids become the MFEM vertex
+    // ids the variable-order DOF numbering builds on (stateless in the final
+    // SFC walk, so one pass after the loop equals MFEM's per-update renumbering).
+    renumber_vertices_mfem_sfc(&mut mesh, n_top_level);
+
     HpRefinement { mesh, orders, num_h, num_p }
 }
 
@@ -470,6 +529,7 @@ fn main() {
     let mut deterministic = true;
     let mut project_solution = false;
     let mut only_pref = false;
+    let mut device_config = String::from("cpu");
 
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().skip(1);
@@ -481,6 +541,7 @@ fn main() {
             "-no-vis" | "--no-visualization" => visualization = false,
             "-n" | "--num-iter" => num_iter = it.next().unwrap().parse().unwrap(),
             "-dim" | "--dim" => dim = it.next().unwrap().parse().unwrap(),
+            "-d" | "--device" => device_config = it.next().unwrap().clone(),
             "-det" | "--deterministic" => deterministic = true,
             "-not-det" | "--not-deterministic" => deterministic = false,
             "-proj" | "--project-solution" => project_solution = true,
@@ -495,6 +556,25 @@ fn main() {
         }
     }
     let _ = visualization; // GLVis socket output is not ported (as in other ports)
+
+    // MFEM `args.PrintOptions(cout)` + `device.Print()` (general/optparser.cpp,
+    // general/device.cpp): the option table of hpref.cpp in registration
+    // order; ENABLE pairs print the long name of the active variant, value
+    // options print `   --<name> <value>` (an empty string value keeps the
+    // trailing space).  The device runs on the host: any backend string is
+    // accepted and printed like MFEM's single-backend configuration.
+    println!("Options used:");
+    println!("   --mesh {mesh_file}");
+    println!("   --order {order}");
+    println!("   --device {device_config}");
+    println!("   --{}", if visualization { "visualization" } else { "no-visualization" });
+    println!("   --num-iter {num_iter}");
+    println!("   --dim {dim}");
+    println!("   --{}", if deterministic { "deterministic" } else { "not-deterministic" });
+    println!("   --{}", if project_solution { "project-solution" } else { "no-project" });
+    println!("   --{}", if only_pref { "only-p-refinement" } else { "hp-refinement" });
+    println!("Device configuration: {device_config}");
+    println!("Memory configuration: host-std");
 
     if dim != 2 {
         panic!("mesh_hpref: only 2D (quad) meshes are supported; use -dim 2");
@@ -551,8 +631,10 @@ fn main() {
     };
     println!("Number of finite element unknowns: {size}");
     let max_p = space.order();
+    // (No trailing blank line — MFEM's `cout << ... << "\nMaximum order "
+    // << maxP << "\n"` emits exactly one newline here.)
     println!(
-        "Total number of h-refinements: {num_h}\nTotal number of p-refinements: {num_p}\nMaximum order {max_p}\n"
+        "Total number of h-refinements: {num_h}\nTotal number of p-refinements: {num_p}\nMaximum order {max_p}"
     );
 
     // 6-12. Assemble and solve -Delta u = 1 with homogeneous Dirichlet BCs.
@@ -611,7 +693,8 @@ fn main() {
     // H1 continuity check (MFEM_VERIFY(h1error < 1.0e-12)).
     let gf = GridFunction::new(&space, x.clone());
     let h1error = check_h1_continuity(&gf, &mesh, &space);
-    println!("H1 continuity error {h1error}");
+    // MFEM prints through `operator<<` (default 6-significant-digit %g style).
+    println!("H1 continuity error {}", fem_solver::fmt_g(h1error));
     assert!(h1error < 1.0e-12, "H1 continuity is not satisfied");
 
     // order.gf: element orders as a P0 L2 field (MFEM writes xo over an
@@ -622,7 +705,7 @@ fn main() {
         "L2", 0, 1, 8,
     )
     .map_err(|e| eprintln!("warning: could not write order.gf: {e}"));
-    println!("Saved refined.mesh and order.gf");
+    // (MFEM writes the files silently — no trailing message.)
 }
 
 #[cfg(test)]

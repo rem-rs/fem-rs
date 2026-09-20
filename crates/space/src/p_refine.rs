@@ -467,6 +467,13 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
     // degree on the interface), and every slave edge adopts the master's
     // minimum order.  Iterate until fixpoint (master/slave hierarchies
     // propagate upwards).
+    //
+    // MFEM applies the master's minimum **after** the master itself absorbed
+    // the slaves' minimum (`min_mask = 1 << MinOrder(edge_orders[master])` is
+    // read post-update); using the pre-update minimum here lets a mid-chain
+    // slave inherit an order the master no longer holds, allocating variant
+    // DOFs MFEM never creates (D136: 4 spurious order-2 variants at
+    // `hpref -n 100`).
     if dim == 2 {
         let nc = detect_nc_geometry_2d(mesh);
         let mut masters: Vec<EdgeKey> = nc.masters.iter().map(|m| m.key).collect();
@@ -489,7 +496,9 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
                     edge_sets.get_mut(mkey).unwrap().0.insert(min_slaves);
                     changed = true;
                 }
-                // apply the master's minimum order to all slave edges
+                // apply the master's post-update minimum order to all slave
+                // edges (MFEM's unconditional `|=` of `min_mask`)
+                let min_master = edge_sets[mkey].0.iter().copied().next().unwrap();
                 for sk in slaves {
                     let min_slave = edge_sets[sk].0.iter().copied().next().unwrap();
                     if min_master < min_slave {
@@ -502,14 +511,32 @@ pub fn build_variable_order_dof_manager<M: MeshTopology>(
         }
     }
 
-    // 2. Assign global DOF ids: vertices, then edge variants (sorted by edge,
-    //    ascending order within an edge), then face variants (3D).
+    // 2. Assign global DOF ids: vertices, then edge variants (ascending order
+    //    within an edge), then face variants (3D).
     let mut next_dof = n_nodes as DofId;
 
     // edge key → [(order, dofs)] ascending in order.
     let mut edge_variants: HashMap<EdgeKey, Vec<(u8, Vec<DofId>)>> = HashMap::new();
-    let mut edge_list: Vec<EdgeKey> = edge_sets.keys().copied().collect();
-    edge_list.sort();
+    // MFEM numbers the edge-variant DOF blocks by **edge id**, where edge ids
+    // come from the flat Mesh's DSTable enumeration (`Mesh::GetEdgeVertexTable`
+    // → `GetVertexToVertexTable`): scan the elements in order, each element's
+    // edges in local order, canonicalized (min, max) — the first encounter of a
+    // vertex pair is its edge id (`mesh/mesh.cpp:8526`, `general/table.hpp`
+    // `DSTable::Push`).  This is NOT lexicographic by node pair; matching it is
+    // what keeps the global DOF numbering (and hence the GS/PCG iteration
+    // path) aligned with MFEM's variable-order spaces (D136).
+    let mut edge_list: Vec<EdgeKey> = Vec::with_capacity(edge_sets.len());
+    let mut edge_seen: HashSet<EdgeKey> = HashSet::new();
+    for e in 0..n_elems as u32 {
+        let ns = mesh.element_nodes(e);
+        for (a, b) in elem_local_edges(dim, ns) {
+            let key = EdgeKey::new(a, b);
+            if edge_seen.insert(key) {
+                edge_list.push(key);
+            }
+        }
+    }
+    debug_assert_eq!(edge_list.len(), edge_sets.len(), "edge scan must find every variant edge");
     for key in &edge_list {
         let (orders, _) = &edge_sets[key];
         let mut variants: Vec<(u8, Vec<DofId>)> = Vec::with_capacity(orders.len());
