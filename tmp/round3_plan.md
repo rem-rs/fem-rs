@@ -3536,6 +3536,113 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   `--tests` 全层 **213 targets / 3768 passed / 0 failed**；examples 0 错误；pro 层
   0 error。
 
+## 第五十四轮（round 54）：并行本质边界 + hpref 逐字节 + prolongation 余项 + NURBS 三线 + 陈账审计
+
+七路并行（④收工后主会话加开⑤⑥⑦），**全部交付、零权限熔断**。开局 HEAD
+`a5307e0`，号段 ①D124+D504-506 ②D136/D156+D507-509 ③D493/D494+D510-512
+④D492/D498-500+D513-515 ⑤D497+D516-518 ⑥D496+D519-521 ⑦D103/D104/D501+D522-524。
+
+### ① D124 关闭 —— 分布式本质边界集入口（审计最重仍开项）
+
+- **红比登记更重**：裸缺陷无绕过时 np2 直接 **NaN 发散**（非 2.0e-3 漂移）；missing
+  实证 H1-P2 tri np2=2、quad Q2 np2=2、ND2 hex np2=6。
+- **落地**：`ParallelFESpace::essential_true_dofs`（= MFEM
+  `ParFiniteElementSpace::GetEssentialTrueDofs`，pfespace.cpp:1142/1152/1165-1181）：
+  族分派本地收集 → dof halo 双向 OR 同步 → true-dof 限缩。三消费方接线（plor_solvers
+  删 accumulate_ghosts 绕过、pex3/pex4 删 rank-local 检测+手写 gid alltoallv）。
+- **MFEM MPI 逐 dof 对拍**：H1-Q2 的 **98 个本质 true dof 在 np1/np2/np4 全同**；
+  解 np1/np2/4 全有限 max|Δu|<1e-9（实际逐位）。驱动数字全对基线（plor star o3
+  L2=2.502523e-5 = C++、pex4 三 rank 全同）。
+- **新债**：**D504**（quad Q2 分区 halo np=4 死锁，日志留档）、**D505**
+  （`boundary_dofs_hcurl` hex ND2 边界集 97 vs MFEM 192——96 个面内部 dof 缺失）、
+  **D506**（`boundary_dofs_hdiv` hex RT1 边界集 26 vs 96——quad 面 (k+1)² 块未暴露）。
+
+### ② D136 + D156 关闭 —— hpref 三层布局根因 + 打印（PCG 逐字节）
+
+- **三层根因全实证**（两侧探针证明 dof 集合全同/序不同）：①顶点序 = MFEM
+  `NCMesh::UpdateVertices`"粗顶点优先+SFC 叶序首现"（fem-rs 原节点创建序）→ 驱动侧
+  `renumber_vertices_mfem_sfc` 1:1 移植（refined.mesh 顺带逐字节对齐）；②边序 = 扁平
+  Mesh 的 DSTable 首现序（fem-rs 原字典序，466/466 全错位）；③变阶传播 = master
+  **POST-update** min（fem-rs 原传 PRE → 4 个伪 order-2 变体）。
+- **验收**：`hpref -n 100` **41 步 PCG 历史 diff 全空**（首步 0.00442905 逐字节复现、
+  ARF 行同）；element_dofs **157/157 行逐行全同**、466 边 variant 集全同、unknowns 421；
+  `refined.mesh`（7727 B）/`order.gf` 字节同；CLI 矩阵 8 档：4 档全输出逐字节同、
+  4 档 PCG 全同仅 continuity 检查值差 1-4 ulp。**零测试改动**（旧 pin 钉实体布局非
+  字典序 id）。
+- **新债**：**D507**（3D face-variant 仍字典序——3D hp 全局 id 无逐字节基准前不盲动）、
+  **D508**（H1 continuity 检查值 1-4 ulp ε——采样算术差异，断言门限 1e-12 无正确性影响）。
+
+### ③ D468/D469/D460 关闭（tet 部分+D461 留 D481/D482）—— 延拓精确化（MFEM 语义裁定）
+
+- **D481 tet RT0 双根因**：镜像子单元负 Jacobian 帧置换 + **3-D 伴随转置错误**
+  （MFEM `adjJᵀ·n̂`=余因子作用；对称子帧 bitwise 掩盖、tet 非对称全暴露）——tet
+  **264/264 max 5.551e-17**。**D482-prism** 88/88 逐位 0.0。**D461-tet RT1** bubble
+  逐位。oracle fixture 改 `mfem_tet_refine`（fem-rs 直网格镜像朝向与 MFEM 不同）。
+- **新债**：**D492**（tri RT1 sliver pairing——space 侧；oracle `#[ignore]`）、**D493**
+  （pyramid：Fuentes nodal vs legacy canonical-moment + 混合细化；probe 坐标段乱值
+  待修）、**D494**（RT1 扩展余项）。
+
+### ④ D465/D467/D471 关闭 —— 三 crate 警告清零 + D492/D498/D499/D500
+
+- **D456 表级对齐**（登记修正：仅 r2/r6 互换；**可达性定理**：conforming 内部面取向
+  必奇，修复对合法网格惰性；12 多取向夹具入库）。
+- **D492 定位精确、修复越界停手**：三层差（slot π=[4,5,0,1,3,2,6,7]、全局编号逐元
+  交错 vs 实体主序→D513、符号差→D514）；**机器证明 220/220 律命中 max 3.6e-16**
+  ——fem-rs P 与 MFEM 数学恒等，差异纯在配对层；`d492_tri_rt1_slot_semantics` 钉死
+  双侧表/符号/π 桥（联合置换轮翻绿 oracle）。**D498**（ex15 fraction 行——轨迹与
+  C++ 逐步一致）、**D499**（mfem≡mfem_nc 合并 −67 行，位恒等守卫绿）、**D500**
+  （`set_op` min/sum/max + `non_conforming` 标志，默认逐位；3 新测试）。
+- **D493/D494+D461**（③路）：quad RT1 **144/144 max 1.665e-16**、hex RT1 **1728/1728
+  max 2.498e-16**、tet RT1 自身网格 504/504 全覆盖（不再回退 legacy）；element 增
+  `pub mfem_{quad,hex}_nodal_dofs`。**D493 pyramid 两阻断实锤**：① MFEM 上游 bug
+  （`RefinementMatrix_main` 金字塔 tet 子元用 tet 恒等行 + SetRow 越界读拾残值——
+  建议上报上游）；② fem-rs pyramid dof 值约定（legacy canonical-moment vs nodal）
+  需 space 侧翻转。**D510**（quad RT1 dof 值 = W⁻¹·MFEM 采样）、**D511**（MFEM 上游
+  pyramid bug 上报建议）、**D512**（prism RT1 space 支持）。
+
+### ⑤⑥⑦ NURBS 三线 + io 收尾
+
+- **⑤ D497**：`iga/nurbs_patch.rs`（ApplyToKnotIntervals **位精确**、NurbsPatchRules、
+  PATCHWISE 全积分逐条移植）+ NurbsMeshGeometry；**nurbs_patch_ex1 四档对拍**：
+  beam 默认**逐字节**（8 行）、ball 默认**逐字节**（366 行）、ball `-patcha -fint`
+  **逐字节**（360 行）、beam `-ref 2 -iro 8` 仅 1 行差（两侧机器精度）；**ball 全局
+  矩阵位精确**（98617 nnz，max rel 0.000e0）、9/9 测试。**环境发现**：Windows MFEM
+  dev 快照 NURBS 路径损坏，对拍切换 4.10 release 串行库。**ex10 诚实留桩**（大型
+  移植：向量 NURBS 空间/NURBS 超弹性特化，gap 桩列全）。**新债 D516 升级为实质缺陷**
+  （ball-nurbs weights 1040 值 vs GetNDof 517，MFEM 取前 517——fem-rs 静默回退全 1
+  → 全管线百分级偏差，`nurbs_fe_space.rs:840` 附近）、**D517**（DegreeElevate）、
+  **D518**（NNLS/-pa/-ref>0）。
+- **⑥ D496**：`mini_nurbs_mesh_info` 三档 **stdout+dat 全 IDENTICAL**（Mesh
+  Characteristics/Patch info/PrintFunctions/k*.dat/Chebyshev）；`mini_nurbs_surface`
+  stdout 全 IDENTICAL、网格文件 identical（Output 1 ulp 噪声=D519）；通用
+  `Mesh::PrintCharacteristics/PrintInfo` 六网格×r0/r1 逐字节（含 `PerfGeomToGeomJac`
+  常量右乘 %.17g 取值）；`NurbsPatch` 泛化 2/3-kv + knot_insert 升级 A5.5 精确
+  （**d374 测试改善**：10 条残差例外消失）。**新债**：**D519**（采样链 ~1 ulp 残差，
+  控制网/基已 17 位证实一致，嫌疑在求值链最后一环）、**D520**
+  （`NurbsExtension::element_vertices` 细化后 panic——space 只读未修，已绕开）、
+  **D521**（mesh_characteristics 边界文档化）。
+- **⑦ D103/D104/D501**：`RegisterQField` 移植（assoc tag/qfield_lod=`
+  GetRefinementLevelFromElems` 逐行/QP 文件布局，5 新测试）；**两个静默 SKIP 消除**
+  （代码内构造必跑 fixture + 机器本地样例附加对拍；顺带纠正从未执行过的旧断言——
+  Example23 实为 2-D）；三 miniapp 本地 gate 迁 PrintLevel——**改前/改后 diff 全空 ×3**
+  （dfem 21 行/hooke 41 行/spde 38 行，spde pl=1 CG 级别纠正为 C++ 语义）；joule
+  文案 "CLOSED by D412"。**新债**：**D522**（Example23 golden 机器本地+gitignore）、
+  **D523**（`lod: u32` 无法表达 -1 tag）、**D524**（spde print-level 无 CLI 端到端）。
+
+### 流程注记（round 54）
+
+- **零权限熔断**六轮连续；两轮加开（③路收工加开④？——本轮为④收工后加开⑤⑥⑦）
+  机制成熟。
+- **审计驱动派单首次实践**：④路 18 笔审计直接生成 round 54 的①②路任务（D124/
+  D136+D156 探针现成）与 D498/D499/D500 小件批。
+- **抽查复现（主会话亲跑）**：d472 5/0、mesh lib 317→**319**/0、amr_regression 15/0、
+  d456 6/6、d468 9/0+1ign、assembly lib 700→**703**/0/5、poisson_solve 8/0、
+  d143_gaps 6/6、fem-io lib 136/0、space lib 289/0。
+- **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2590 passed / 0 failed**；
+  `--tests` 全层 **219 targets / 3806 passed / 0 failed**；examples 0 错误；pro 层
+  0 error。
+
+
 
 
 
