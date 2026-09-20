@@ -218,6 +218,102 @@ fn transform_grid(i: usize, j: usize, m: usize, r: usize) -> (usize, usize) {
     }
 }
 
+/// Per-shape RT face block sizes: `(tri, quad)` for order `k`.
+///
+/// MFEM's RT collections size every face by its trace space: triangular
+/// faces carry the `RT_TriangleElement(k)` trace, `(k+1)(k+2)/2` dofs;
+/// quadrilateral faces the `RT_QuadrilateralElement(k)` trace, `(k+1)^2`
+/// (`RT_TetrahedronElement` `fe/fe_rt.cpp:899`, `RT_HexahedronElement`
+/// `fe/fe_rt.cpp:326`, `RT_WedgeElement` `fe/fe_rt.cpp:1082`).
+fn rt_face_block_sizes(k: usize) -> (usize, usize) {
+    ((k + 1) * (k + 2) / 2, (k + 1) * (k + 1))
+}
+
+/// The MFEM-canonical faces of one 3-D element as `(FaceKey, canonical local
+/// verts)` pairs, in the element's local face-slot order (the order the
+/// per-shape builders enumerate them in).
+fn element_faces_3d(et: ElementType, verts: &[u32]) -> Vec<(FaceKey, FaceCanon)> {
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => TET_FACES_CANON
+            .iter()
+            .map(|c| {
+                let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
+                (FaceKey::new(local[0], local[1], local[2]), FaceCanon::Tri(local))
+            })
+            .collect(),
+        ElementType::Hex8 => HEX_FACES
+            .iter()
+            .map(|c| {
+                let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                let mut v4 = local;
+                v4.sort_unstable();
+                (FaceKey::new(v4[0], v4[1], v4[2]), FaceCanon::Quad(local))
+            })
+            .collect(),
+        ElementType::Prism6 => PRISM_FACES
+            .iter()
+            .zip(PRISM_FACES_CANON.iter())
+            .map(|(fv, c)| {
+                if fv[2] == fv[3] {
+                    let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
+                    (FaceKey::new(local[0], local[1], local[2]), FaceCanon::Tri(local))
+                } else {
+                    let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                    let mut v4 = local;
+                    v4.sort_unstable();
+                    (FaceKey::new(v4[0], v4[1], v4[2]), FaceCanon::Quad(local))
+                }
+            })
+            .collect(),
+        ElementType::Pyramid5 => PYRAMID_FACES
+            .iter()
+            .enumerate()
+            .map(|(i, fv)| {
+                let c = PYRAMID_FACES_CANON[PYRAMID_MFEM_FACE_IDX[i]];
+                if fv[2] == fv[3] {
+                    let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
+                    (FaceKey::new(local[0], local[1], local[2]), FaceCanon::Tri(local))
+                } else {
+                    let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                    let mut v4 = local;
+                    v4.sort_unstable();
+                    (FaceKey::new(v4[0], v4[1], v4[2]), FaceCanon::Quad(local))
+                }
+            })
+            .collect(),
+        other => panic!("HDivSpace: unsupported 3-D element type {other:?}"),
+    }
+}
+
+/// Interior (bubble) dof count of the 3-D reference element the assembler
+/// pairs with `et` at `order` — the space's per-element slot count must equal
+/// that element's `n_dofs`, so the builders size interiors from this table.
+///
+/// - tet: `k(k+1)(k+2)/2` (MFEM `RT_TetrahedronElement`, `fe/fe_rt.cpp:899`)
+/// - hex: `3k(k+1)^2` (MFEM `RT_HexahedronElement`, `fe/fe_rt.cpp:326`)
+/// - prism: `PrismRTk` interior `k(k-1)(k+1)/2` — 0 at the capped orders
+///   (k ≤ 1).  MFEM's `RT_WedgeElement` has `p(p+1)(3p+4)/2` = 7 at k=1
+///   (`fe_coll.cpp:2581`); the difference is element-layer debt (D436).
+/// - pyramid: `PyraRTk` interior table — 0 at k=0, 1 at k=1 (higher orders
+///   unreachable: `validate_order` caps pyramid RT at 1).  MFEM's
+///   `RT_FuentesPyramidElement` counts `(p+1)(3p(p+2)+5)` (`fe_rt.cpp:1273`)
+///   with a different interior split — element-layer debt (D437 family).
+fn hdiv_3d_interior_dofs(et: ElementType, order: u8) -> usize {
+    let k = order as usize;
+    match et {
+        ElementType::Tet4 | ElementType::Tet10 => k * (k + 1) * (k + 2) / 2,
+        ElementType::Hex8 => 3 * k * (k + 1) * (k + 1),
+        ElementType::Prism6 => 0,
+        ElementType::Pyramid5 => {
+            match k {
+                1 => 1,
+                _ => 0,
+            }
+        }
+        other => panic!("HDivSpace: unsupported 3-D element type {other:?}"),
+    }
+}
+
 // ─── Face DOF map ───────────────────────────────────────────────────────────
 
 /// Unified face-to-DOF lookup: edges in 2-D, triangular/quad faces in 3-D.
@@ -251,14 +347,10 @@ pub struct HDivSpace<M: MeshTopology> {
     face_map: FaceDofMap,
     /// Canonical vertex order of each global face (first-seen element's
     /// MFEM FaceVert ordering).  Used by interpolate_vector to compute the
-    /// RT0 face normal consistent with MFEM DofOrderForOrientation.
+    /// RT0 face normal consistent with MFEM DofOrderForOrientation, and (as
+    /// of D393/D394) to derive each face's block length: 3 vertices → tri
+    /// face `(k+1)(k+2)/2` dofs, 4 vertices → quad face `(k+1)^2` dofs.
     face_canon_verts: std::collections::HashMap<FaceKey, Vec<u32>>,
-    /// Global dofs per face entity, as allocated by the builder: 1 for RT0,
-    /// `(k+1)(k+2)/2` per tet face, `(k+1)^2` per hex face, `k+1` per
-    /// prism/pyramid face.  The face block `[face_map[key],
-    /// face_map[key] + dofs_per_face)` is the face's complete dof set
-    /// (D377: boundary-dof queries must expose the whole block).
-    dofs_per_face: usize,
     /// Cached element type for dispatch.
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
@@ -427,113 +519,126 @@ impl<M: MeshTopology> HDivSpace<M> {
     }
 
     /// Build an H(div) space for a 3-D mesh with mixed element types.
+    ///
+    /// D393: face blocks follow the **face shape** — tri faces carry
+    /// `(k+1)(k+2)/2` dofs, quad faces `(k+1)^2` ([`rt_face_block_sizes`]) —
+    /// and the per-element slot count equals the assembly reference element's
+    /// `n_dofs` (tet `4·tri + k(k+1)(k+2)/2`, hex `6·quad + 3k(k+1)²`, prism
+    /// `2·tri + 3·quad`, pyramid `4·tri + quad + PyraRTk` interior), so the
+    /// vector assembler can pair slots with basis functions on mixed meshes.
+    /// Numbering is MFEM entity-major (D158): pass 1 enumerates the unique
+    /// faces in first-encounter order, pass 2 fills each element's slots —
+    /// faces with the orientation transfer of [`tri_face_grid_transform`] /
+    /// [`transform_grid`] (the same recipe as `build_3d_tet`/`build_3d_hex`),
+    /// then interiors at the shared interior base.  At order 0 the layout is
+    /// bit-identical to the previous single-pass builder.
     fn build_mixed(mesh: M, order: u8) -> Self {
-        let dofs_per_face = (order as usize) + 1;
+        let k = order as usize;
+        let (tri_block, quad_block) = rt_face_block_sizes(k);
         let n_elem = mesh.n_elements();
-        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
-        // Tracks the MFEM canonical (Elem1) vertex ordering of each face so
-        // that element-face RT signs can be computed topologically.
-        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
-        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
-        let mut next_dof: DofId = 0;
-        let mut dofs_flat = Vec::new();
-        let mut signs_flat = Vec::new();
-        let mut elem_offsets = Vec::with_capacity(n_elem + 1);
-        elem_offsets.push(0);
 
+        // Pass 1: unique faces in first-encounter order, each block sized by
+        // its shape.  Prism/pyramid RT carry the same construction cap as the
+        // pure-mesh builders (`validate_order`).
+        let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
+        let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
+        let mut face_cursor: DofId = 0;
+        let mut interior_prefix: Vec<usize> = Vec::with_capacity(n_elem + 1);
+        interior_prefix.push(0);
+        let mut interior_total = 0usize;
+        for e in 0..n_elem as u32 {
+            let et = mesh.element_type(e);
+            if matches!(et, ElementType::Prism6 | ElementType::Pyramid5) {
+                assert!(
+                    order <= 1,
+                    "HDivSpace: Prism/Pyramid RTk supports orders 0 and 1 \
+                     (higher orders pending Phase 1B.4)"
+                );
+            }
+            let verts = mesh.element_nodes(e);
+            for (key, canon) in element_faces_3d(et, verts) {
+                if let std::collections::hash_map::Entry::Vacant(vac) = face_map.entry(key) {
+                    let block = match canon {
+                        FaceCanon::Tri(_) => tri_block,
+                        FaceCanon::Quad(_) => quad_block,
+                    };
+                    vac.insert(face_cursor);
+                    face_cursor += block as DofId;
+                    face_canon_verts.entry(key).or_insert_with(|| match canon {
+                        FaceCanon::Tri(v) => v.to_vec(),
+                        FaceCanon::Quad(v) => v.to_vec(),
+                    });
+                }
+            }
+            interior_total += hdiv_3d_interior_dofs(et, order);
+            interior_prefix.push(interior_total);
+        }
+        let interior_base: DofId = face_cursor;
+        let n_dofs: DofId = interior_base + interior_total as DofId;
+
+        // Pass 2: element slot tables.
+        let mut dofs_flat: Vec<DofId> = Vec::new();
+        let mut signs_flat: Vec<f64> = Vec::new();
+        let mut elem_offsets = Vec::with_capacity(n_elem + 1);
+        elem_offsets.push(0usize);
         for e in 0..n_elem as u32 {
             let et = mesh.element_type(e);
             let verts = mesh.element_nodes(e);
-            let nd = dofs_per_face as u32;
-
-            match et {
-                ElementType::Tet4 | ElementType::Tet10 => {
-                    let interior = if order == 0 { 0 } else if order == 1 { 2 } else { 6 };
-                    for lf in 0..4 {
-                        // Canonical ordering = MFEM tet FaceVert (not the
-                        // simple opposite-vertex triple used for the key).
-                        let [la, lb, lc] = TET_FACES_CANON[lf];
-                        let local = [verts[la], verts[lb], verts[lc]];
-                        let key = FaceKey::new(local[0], local[1], local[2]);
-                        let sign = match face_canon.get(&key) {
-                            Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                            _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
-                        };
-                        if nd == 1 {
-                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
+            for (key, canon) in element_faces_3d(et, verts) {
+                let base = &face_canon_verts[&key];
+                let (sign, orientation) = match (canon, base.as_slice()) {
+                    (FaceCanon::Tri(local), [b0, b1, b2]) => {
+                        let o = tri_orientation([*b0, *b1, *b2], local);
+                        (rt_face_sign(o), o)
+                    }
+                    (FaceCanon::Quad(local), [b0, b1, b2, b3]) => {
+                        let o = quad_orientation([*b0, *b1, *b2, *b3], local);
+                        (rt_face_sign(o), o)
+                    }
+                    _ => unreachable!("face canon registered in pass 1 with matching shape"),
+                };
+                let first = face_map[&key];
+                match canon {
+                    FaceCanon::Tri(_) => {
+                        if tri_block == 1 {
+                            dofs_flat.push(first);
                             signs_flat.push(sign);
                         } else {
-                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
-                        }
-                    }
-                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
-                }
-                ElementType::Hex8 => {
-                    let interior = if order == 0 { 0 } else { 12 };
-                    for (hf, &fv) in HEX_FACES.iter().enumerate() {
-                        // canonical key from all 4 sorted vertices (shared
-                        // quad faces must map to one DOF)
-                        let mut v4 = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
-                        v4.sort_unstable();
-                        let key = FaceKey::new(v4[0], v4[1], v4[2]);
-                        // Canonical ordering = MFEM hex FaceVert (HEX_FACES
-                        // already follows that ordering).
-                        let c = HEX_FACES[hf];
-                        let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
-                        let sign = match face_canon.get(&key) {
-                            Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                            _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
-                        };
-                        if nd == 1 {
-                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
-                            signs_flat.push(sign);
-                        } else {
-                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
-                        }
-                    }
-                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
-                }
-                ElementType::Prism6 => {
-                    let interior = 0;
-                    // 2 tri faces + 3 quad faces; PRISM_FACES pads tri faces
-                    // with a repeated 4th vertex.
-                    for i in 0..5 {
-                        let fv = &PRISM_FACES[i];
-                        let key = if fv[2] == fv[3] {
-                            FaceKey::new(verts[fv[0]], verts[fv[1]], verts[fv[2]])
-                        } else {
-                            let mut v4 = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
-                            v4.sort_unstable();
-                            FaceKey::new(v4[0], v4[1], v4[2])
-                        };
-                        // Canonical ordering = MFEM prism FaceVert.
-                        let c = PRISM_FACES_CANON[i];
-                        let sign = if fv[2] == fv[3] {
-                            let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
-                            match face_canon.get(&key) {
-                                Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                                _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+                            // Face-grid alignment (MFEM TriDofOrd): same
+                            // recipe as build_3d_tet.
+                            for j in 0..=k {
+                                for i in 0..=(k - j) {
+                                    let c = tri_face_grid_transform(k, orientation, j, i);
+                                    dofs_flat.push(first + c as DofId);
+                                    signs_flat.push(sign);
+                                }
                             }
-                        } else {
-                            let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
-                            match face_canon.get(&key) {
-                                Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                                _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
-                            }
-                        };
-                        if nd == 1 {
-                            dofs_flat.push(*face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d }));
-                            signs_flat.push(sign);
-                        } else {
-                            let first = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += nd; d });
-                            for m in 0..dofs_per_face { dofs_flat.push(first + m as u32); signs_flat.push(sign); }
                         }
                     }
-                    for _ in 0..interior { dofs_flat.push(next_dof); next_dof += 1; signs_flat.push(1.0); }
+                    FaceCanon::Quad(_) => {
+                        if quad_block == 1 {
+                            dofs_flat.push(first);
+                            signs_flat.push(sign);
+                        } else {
+                            // Face-grid alignment (MFEM QuadDofOrd): same
+                            // recipe as build_3d_hex.
+                            let side = k + 1;
+                            for j in 0..side {
+                                for i in 0..side {
+                                    let (ic, jc) = transform_grid(i, j, side, orientation);
+                                    dofs_flat.push(first + (jc * side + ic) as DofId);
+                                    signs_flat.push(sign);
+                                }
+                            }
+                        }
+                    }
                 }
-                _ => panic!("HDivSpace::build_mixed: unsupported {et:?}"),
+            }
+            // Interior bubble dofs at the shared entity-major base.
+            let ib = interior_base + interior_prefix[e as usize] as DofId;
+            for j in 0..hdiv_3d_interior_dofs(et, order) as DofId {
+                dofs_flat.push(ib + j);
+                signs_flat.push(1.0);
             }
             elem_offsets.push(dofs_flat.len());
         }
@@ -541,14 +646,13 @@ impl<M: MeshTopology> HDivSpace<M> {
         HDivSpace {
             mesh,
             order,
-            n_dofs: next_dof as usize,
+            n_dofs: n_dofs as usize,
             dofs_flat,
             signs_flat,
             dofs_per_elem: 0,
             elem_offsets,
             face_map: FaceDofMap::Faces(face_map),
             face_canon_verts,
-            dofs_per_face,
             elem_type: ElementType::Tet4,
             is_bdm: false,
             quad_igll: false,
@@ -644,7 +748,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_canon_verts: HashMap::new(),
-            dofs_per_face,
             face_map: FaceDofMap::Edges(edge_map),
             elem_type: ElementType::Tri3,
             is_bdm,
@@ -741,7 +844,7 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
         let n_faces = face_map.len() as DofId;
         let interior_base: DofId = n_faces * dofs_per_face as DofId;
-        let mut next_dof: DofId = interior_base + n_elem as DofId * interior_dofs as DofId;
+        let next_dof: DofId = interior_base + n_elem as DofId * interior_dofs as DofId;
 
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -806,7 +909,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::Faces(face_map),
             face_canon_verts,
-            dofs_per_face,
             elem_type: ElementType::Tet4,
             is_bdm,
             quad_igll: false,
@@ -898,7 +1000,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             dofs_per_elem,
             elem_offsets: vec![],
             face_canon_verts: HashMap::new(),
-            dofs_per_face: dofs_per_edge,
             face_map: FaceDofMap::QuadEdges(edge_map),
             elem_type: ElementType::Quad4,
             is_bdm: false,
@@ -1031,7 +1132,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
-            dofs_per_face,
             elem_type: ElementType::Hex8,
             is_bdm: false,
             quad_igll: false,
@@ -1041,13 +1141,23 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D prism construction (RT0/RT1) ────────────────────────────────
 
     fn build_3d_prism(mesh: M, order: u8) -> Self {
-        let dofs_per_face = (order as usize) + 1;
-        let interior_dofs = 0; // RT0/RT1 for prism has no interior DOFs
-        let dofs_per_elem = PRISM_FACES.len() * dofs_per_face + interior_dofs;
+        // MFEM `RT_WedgeElement(p)` face blocks (`fe/fe_rt.cpp:1082`): the 2
+        // triangular faces carry the `RT_TriangleElement(p)` trace,
+        // `(k+1)(k+2)/2` dofs each; the 3 quadrilateral faces the
+        // `RT_QuadrilateralElement(p)` trace, `(k+1)^2` each.  Interior dofs:
+        // D436 — MFEM's wedge has `p(p+1)(3p+4)/2` (= 7 at k=1,
+        // `fe_coll.cpp:2581`), but the fem-rs `PrismRTk` element has interior
+        // `k(k-1)(k+1)/2` = 0 at the capped orders (k ≤ 1), and the space's
+        // per-element slot count must equal the assembly element's `n_dofs`,
+        // so the interior stays 0 until the element layer closes D436.
+        let k = order as usize;
+        let (tri_block, quad_block) = rt_face_block_sizes(k);
+        let dofs_per_elem = 2 * tri_block + 3 * quad_block;
         let n_elem = mesh.n_elements();
 
+        // Single pass, no interiors: first-encounter face order == MFEM's
+        // entity-major layout (D158) bit-for-bit at every capped order.
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
-        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
         let mut next_dof: DofId = 0;
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
@@ -1055,55 +1165,69 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for i in 0..5 {
-                let face_verts = &PRISM_FACES[i];
-                let a = verts[face_verts[0]];
-                let b = verts[face_verts[1]];
-                let c = verts[face_verts[2]];
-                // PRISM_FACES pads triangles with a repeated 4th vertex;
-                // quad faces get a canonical key from all 4 sorted vertices.
-                let key = if face_verts[2] == face_verts[3] {
-                    FaceKey::new(a, b, c)
-                } else {
-                    let d = verts[face_verts[3]];
-                    let mut v4 = [a, b, c, d];
-                    v4.sort_unstable();
-                    FaceKey::new(v4[0], v4[1], v4[2])
-                };
-                // Canonical ordering = MFEM prism FaceVert.
-                let cf = PRISM_FACES_CANON[i];
-                let sign = if face_verts[2] == face_verts[3] {
-                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
-                    match face_canon.get(&key) {
-                        Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+            for (key, canon) in element_faces_3d(ElementType::Prism6, verts) {
+                let base = face_canon_verts
+                    .entry(key)
+                    .or_insert_with(|| match canon {
+                        FaceCanon::Tri(v) => v.to_vec(),
+                        FaceCanon::Quad(v) => v.to_vec(),
+                    })
+                    .clone();
+                let (sign, orientation) = match (canon, base.as_slice()) {
+                    (FaceCanon::Tri(local), [b0, b1, b2]) => {
+                        let o = tri_orientation([*b0, *b1, *b2], local);
+                        (rt_face_sign(o), o)
                     }
-                } else {
-                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
-                    match face_canon.get(&key) {
-                        Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+                    (FaceCanon::Quad(local), [b0, b1, b2, b3]) => {
+                        let o = quad_orientation([*b0, *b1, *b2, *b3], local);
+                        (rt_face_sign(o), o)
                     }
+                    _ => unreachable!("canon shape matches its vertex count"),
                 };
-                if dofs_per_face == 1 {
-                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                    dofs_flat.push(dof);
-                    signs_flat.push(sign);
-                } else {
-                    let nd = dofs_per_face as u32;
-                    let first = *face_map.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += nd; d
-                    });
-                    for k in 0..dofs_per_face {
-                        dofs_flat.push(first + k as u32);
-                        signs_flat.push(sign);
+                let first = *face_map.entry(key).or_insert_with(|| {
+                    let d = next_dof;
+                    let block = match canon {
+                        FaceCanon::Tri(_) => tri_block,
+                        FaceCanon::Quad(_) => quad_block,
+                    };
+                    next_dof += block as DofId;
+                    d
+                });
+                match canon {
+                    FaceCanon::Tri(_) => {
+                        if tri_block == 1 {
+                            dofs_flat.push(first);
+                            signs_flat.push(sign);
+                        } else {
+                            // Triangular-face grid alignment (MFEM TriDofOrd),
+                            // same recipe as build_3d_tet.
+                            for j in 0..=k {
+                                for i in 0..=(k - j) {
+                                    let c = tri_face_grid_transform(k, orientation, j, i);
+                                    dofs_flat.push(first + c as DofId);
+                                    signs_flat.push(sign);
+                                }
+                            }
+                        }
+                    }
+                    FaceCanon::Quad(_) => {
+                        if quad_block == 1 {
+                            dofs_flat.push(first);
+                            signs_flat.push(sign);
+                        } else {
+                            // Quadrilateral-face grid alignment (MFEM
+                            // QuadDofOrd), same recipe as build_3d_hex.
+                            let side = k + 1;
+                            for j in 0..side {
+                                for i in 0..side {
+                                    let (ic, jc) = transform_grid(i, j, side, orientation);
+                                    dofs_flat.push(first + (jc * side + ic) as DofId);
+                                    signs_flat.push(sign);
+                                }
+                            }
+                        }
                     }
                 }
-            }
-            for _ in 0..interior_dofs {
-                dofs_flat.push(next_dof);
-                next_dof += 1;
-                signs_flat.push(1.0);
             }
         }
 
@@ -1117,7 +1241,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
-            dofs_per_face,
             elem_type: ElementType::Prism6,
             is_bdm: false,
             quad_igll: false,
@@ -1127,60 +1250,106 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D pyramid construction (RT0/RT1) ──────────────────────────────
 
     fn build_3d_pyramid(mesh: M, order: u8) -> Self {
-        let dofs_per_face = (order as usize) + 1;
-        let interior_dofs = 0;
-        let dofs_per_elem = PYRAMID_FACES.len() * dofs_per_face + interior_dofs;
+        // D394: face blocks by shape — the 4 triangular faces carry
+        // `(k+1)(k+2)/2` dofs, the base quadrilateral `(k+1)^2`
+        // ([`rt_face_block_sizes`]).  Interior: `PyraRTk` (the assembly
+        // element, `raviart_thomas/pyramid.rs:192`) has 1 interior dof at
+        // k = 1, so the space exposes it — the slot count must equal the
+        // element's `n_dofs` (17 at k=1).  MFEM has no classical RT pyramid;
+        // its `RT_FuentesPyramidElement(p)` counts `(p+1)(3p(p+2)+5)`
+        // (`fe/fe_rt.cpp:1273`) with a different interior split — the gap is
+        // element-layer debt (D437 family), recorded, not papered over here.
+        let k = order as usize;
+        let (tri_block, quad_block) = rt_face_block_sizes(k);
+        let interior_dofs = hdiv_3d_interior_dofs(ElementType::Pyramid5, order);
+        let dofs_per_elem = 4 * tri_block + quad_block + interior_dofs;
         let n_elem = mesh.n_elements();
 
+        // MFEM entity-major layout (D158): pass 1 enumerates the unique
+        // faces, pass 2 fills the slots with interiors at the shared base.
+        // At order 0 (no interiors) the numbering is bit-identical to the
+        // previous single-pass builder.
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
-        let mut face_canon: HashMap<FaceKey, FaceCanon> = HashMap::new();
         let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
-        let mut next_dof: DofId = 0;
+        let mut face_cursor: DofId = 0;
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for (key, canon) in element_faces_3d(ElementType::Pyramid5, verts) {
+                if let std::collections::hash_map::Entry::Vacant(vac) = face_map.entry(key) {
+                    let block = match canon {
+                        FaceCanon::Tri(_) => tri_block,
+                        FaceCanon::Quad(_) => quad_block,
+                    };
+                    vac.insert(face_cursor);
+                    face_cursor += block as DofId;
+                    face_canon_verts.entry(key).or_insert_with(|| match canon {
+                        FaceCanon::Tri(v) => v.to_vec(),
+                        FaceCanon::Quad(v) => v.to_vec(),
+                    });
+                }
+            }
+        }
+        let interior_base: DofId = face_cursor;
+        let n_dofs: DofId = interior_base + n_elem as DofId * interior_dofs as DofId;
+
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for i in 0..5 {
-                let face_verts = &PYRAMID_FACES[i];
-                let a = verts[face_verts[0]];
-                let b = verts[face_verts[1]];
-                let c = verts[face_verts[2]];
-                let key = FaceKey::new(a, b, c);
-                // Canonical ordering = MFEM pyramid FaceVert (Rust lists the 4
-                // tri faces first, then the base quad).
-                let cf = PYRAMID_FACES_CANON[PYRAMID_MFEM_FACE_IDX[i]];
-                let sign = if face_verts[2] == face_verts[3] {
-                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]]];
-                    match face_canon.get(&key) {
-                        Some(FaceCanon::Tri(base)) => rt_face_sign(tri_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Tri(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+            for (key, canon) in element_faces_3d(ElementType::Pyramid5, verts) {
+                let base = &face_canon_verts[&key];
+                let (sign, orientation) = match (canon, base.as_slice()) {
+                    (FaceCanon::Tri(local), [b0, b1, b2]) => {
+                        let o = tri_orientation([*b0, *b1, *b2], local);
+                        (rt_face_sign(o), o)
                     }
-                } else {
-                    let local = [verts[cf[0]], verts[cf[1]], verts[cf[2]], verts[cf[3]]];
-                    match face_canon.get(&key) {
-                        Some(FaceCanon::Quad(base)) => rt_face_sign(quad_orientation(*base, local)),
-                        _ => { face_canon.insert(key, FaceCanon::Quad(local)); face_canon_verts.entry(key).or_insert_with(|| local.to_vec()); 1.0 }
+                    (FaceCanon::Quad(local), [b0, b1, b2, b3]) => {
+                        let o = quad_orientation([*b0, *b1, *b2, *b3], local);
+                        (rt_face_sign(o), o)
                     }
+                    _ => unreachable!("face canon registered in pass 1 with matching shape"),
                 };
-                if dofs_per_face == 1 {
-                    let dof = *face_map.entry(key).or_insert_with(|| { let d = next_dof; next_dof += 1; d });
-                    dofs_flat.push(dof);
-                    signs_flat.push(sign);
-                } else {
-                    let nd = dofs_per_face as u32;
-                    let first = *face_map.entry(key).or_insert_with(|| {
-                        let d = next_dof; next_dof += nd; d
-                    });
-                    for k in 0..dofs_per_face {
-                        dofs_flat.push(first + k as u32);
-                        signs_flat.push(sign);
+                let first = face_map[&key];
+                match canon {
+                    FaceCanon::Tri(_) => {
+                        if tri_block == 1 {
+                            dofs_flat.push(first);
+                            signs_flat.push(sign);
+                        } else {
+                            // Triangular-face grid alignment (MFEM TriDofOrd),
+                            // same recipe as build_3d_tet.
+                            for j in 0..=k {
+                                for i in 0..=(k - j) {
+                                    let c = tri_face_grid_transform(k, orientation, j, i);
+                                    dofs_flat.push(first + c as DofId);
+                                    signs_flat.push(sign);
+                                }
+                            }
+                        }
+                    }
+                    FaceCanon::Quad(_) => {
+                        if quad_block == 1 {
+                            dofs_flat.push(first);
+                            signs_flat.push(sign);
+                        } else {
+                            // Base-quad grid alignment (MFEM QuadDofOrd),
+                            // same recipe as build_3d_hex.
+                            let side = k + 1;
+                            for j in 0..side {
+                                for i in 0..side {
+                                    let (ic, jc) = transform_grid(i, j, side, orientation);
+                                    dofs_flat.push(first + (jc * side + ic) as DofId);
+                                    signs_flat.push(sign);
+                                }
+                            }
+                        }
                     }
                 }
             }
-            for _ in 0..interior_dofs {
-                dofs_flat.push(next_dof);
-                next_dof += 1;
+            // Interior bubble dof(s) at the entity-major base.
+            for j in 0..interior_dofs as DofId {
+                dofs_flat.push(interior_base + e as DofId * interior_dofs as DofId + j);
                 signs_flat.push(1.0);
             }
         }
@@ -1188,14 +1357,13 @@ impl<M: MeshTopology> HDivSpace<M> {
         HDivSpace {
             mesh,
             order,
-            n_dofs: next_dof as usize,
+            n_dofs: n_dofs as usize,
             dofs_flat,
             signs_flat,
             dofs_per_elem,
             elem_offsets: vec![],
             face_map: FaceDofMap::HexFaces(face_map),
             face_canon_verts,
-            dofs_per_face,
             elem_type: ElementType::Pyramid5,
             is_bdm: false,
             quad_igll: false,
@@ -1251,13 +1419,21 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// All global DOFs of a 3-D face — the complete face block.
     ///
     /// D377: [`Self::tri_face_dof`] returns only the block's *first* dof,
-    /// but an order-k RT face carries `(k+1)(k+2)/2` dofs on tet/prism
-    /// triangles and `(k+1)^2` on hex quadrilaterals (MFEM's
-    /// `GetBoundaryTrueDofs` essential-constrains all of them).
+    /// but an order-k RT face carries `(k+1)(k+2)/2` dofs on triangles and
+    /// `(k+1)^2` on quadrilaterals (MFEM's `GetBoundaryTrueDofs`
+    /// essential-constrains all of them).  D393/D394: the block length is
+    /// derived from the face's **shape** (`face_canon_verts` vertex count)
+    /// instead of a scalar `dofs_per_face` — mixed and prism/pyramid meshes
+    /// hold both shapes, so a single scalar cannot represent them.
     /// Boundary-dof queries must use this accessor; for order 0 the two
     /// agree.
     pub fn face_dofs(&self, face: FaceKey) -> Option<Vec<DofId>> {
-        let nd = self.dofs_per_face;
+        let k = self.order as usize;
+        let nd = match self.face_canon_verts.get(&face).map(Vec::len) {
+            Some(3) => (k + 1) * (k + 2) / 2,
+            Some(_) => (k + 1) * (k + 1),
+            None => return None,
+        };
         match &self.face_map {
             FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => map.get(&face).map(|&first| {
                 (0..nd).map(|m| first + m as DofId).collect()
@@ -1285,67 +1461,132 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     /// Physical coordinates of every global DOF (MFEM `GetDofCoords` analog).
     ///
-    /// For RT elements the DOF sits at the face centroid; for RTk (k≥1) at
-    /// interior points along the face (equispaced — used only as a permutation
-    /// anchor, exact placement is not required for matching).
+    /// D414: these are **geometric anchor points**, not MFEM's
+    /// reference-frame interpolation nodes.  Each 3-D face block is filled
+    /// with the equispaced face-grid points of the face's *canonical* frame —
+    /// the `(k+1)(k+2)/2` barycentric lattice on triangles, the `(k+1)^2`
+    /// tensor lattice on quadrilaterals, enumerated exactly like the
+    /// canonical dof indices (`tri_grid_index` / row-major) — 2-D edge
+    /// blocks with `order+1` equispaced points along the canonical edge
+    /// direction, and interior dofs with the centroid of (any) owning
+    /// element.  MFEM's `GetDofCoords` returns the interpolation-node
+    /// coordinates of the actual basis, which fem-rs' Vandermonde RT elements
+    /// do not expose uniformly (their `dof_coords` are placeholders at
+    /// k >= 1); consumers must therefore treat these coordinates as a
+    /// *permutation anchor* — an identity key that is unique and
+    /// face-consistent within one block, not an evaluation node.
     pub fn dof_coords(&self) -> Vec<[f64; 3]> {
-        let mut out = vec![[0.0f64; 3]; self.n_dofs()];
+        let k = self.order as usize;
         let dim = self.mesh.dim() as usize;
-        let nf = self.order as usize + 1; // DOFs per face (simplified)
+        let mut out = vec![[0.0f64; 3]; self.n_dofs()];
+        let mut filled = vec![false; self.n_dofs()];
+        let put = |out: &mut [[f64; 3]], filled: &mut [bool], d: DofId, p: [f64; 3]| {
+            let d = d as usize;
+            if d < out.len() {
+                out[d] = p;
+                filled[d] = true;
+            }
+        };
         match &self.face_map {
             FaceDofMap::Faces(map) | FaceDofMap::HexFaces(map) => {
                 for (&face, &first) in map {
-                    // Compute face centroid from the face key (node IDs).
-                    let mut centroid = [0.0f64; 3];
-                    // Use the face_canon_verts map to get the actual vertex list.
-                    let n_nodes = if let Some(verts) = self.face_canon_verts.get(&face) {
-                        for &n in verts {
-                            let nc = self.mesh.node_coords(n);
-                            for c in 0..dim {
-                                centroid[c] += nc[c];
-                            }
-                        }
-                        verts.len()
-                    } else {
-                        // Fallback: use the key's node IDs directly.
-                        let nodes = [face.0, face.1, face.2];
-                        for &n in &nodes {
-                            let nc = self.mesh.node_coords(n);
-                            for c in 0..dim {
-                                centroid[c] += nc[c];
-                            }
-                        }
-                        3
+                    let verts: Vec<u32> = match self.face_canon_verts.get(&face) {
+                        Some(v) => v.clone(),
+                        // Fallback: the key's node ids directly.
+                        None => vec![face.0, face.1, face.2],
                     };
-                    if n_nodes > 0 {
-                        for c in 0..dim {
-                            centroid[c] /= n_nodes as f64;
+                    let coord = |n: u32| self.mesh.node_coords(n);
+                    if verts.len() == 3 {
+                        // Triangular face: barycentric lattice (i + j <= k),
+                        // canonical index = tri_grid_index(k, j, i).
+                        let c: Vec<[f64; 3]> = (0..3).map(|m| {
+                            let nc = coord(verts[m]);
+                            let mut p = [0.0; 3];
+                            p[..dim].copy_from_slice(&nc[..dim]);
+                            p
+                        }).collect();
+                        if k == 0 {
+                            let mut cen = [0.0; 3];
+                            for p in &c { for t in 0..dim { cen[t] += p[t] / 3.0; } }
+                            put(&mut out, &mut filled, first, cen);
+                        } else {
+                            for j in 0..=k {
+                                for i in 0..=(k - j) {
+                                    let (w0, w1, w2) = (
+                                        (k - i - j) as f64 / k as f64,
+                                        j as f64 / k as f64,
+                                        i as f64 / k as f64,
+                                    );
+                                    let mut p = [0.0; 3];
+                                    for t in 0..dim {
+                                        p[t] = w0 * c[0][t] + w1 * c[1][t] + w2 * c[2][t];
+                                    }
+                                    let d = first + tri_grid_index(k, j, i) as DofId;
+                                    put(&mut out, &mut filled, d, p);
+                                }
+                            }
                         }
-                    }
-                    // For RT0, one DOF at centroid. For RTk, distribute along face.
-                    for m in 0..nf {
-                        let d = (first + m as u32) as usize;
-                        if d < out.len() {
-                            out[d] = centroid;
+                    } else {
+                        // Quadrilateral face: tensor lattice over the canon
+                        // frame (u along verts[0]→verts[1], v along
+                        // verts[0]→verts[3]), canonical index = jc*side + ic.
+                        let c: Vec<[f64; 3]> = (0..4).map(|m| {
+                            let nc = coord(verts[m]);
+                            let mut p = [0.0; 3];
+                            p[..dim].copy_from_slice(&nc[..dim]);
+                            p
+                        }).collect();
+                        let side = k + 1;
+                        for jc in 0..side {
+                            for ic in 0..side {
+                                let (u, v) = if k == 0 {
+                                    (0.5, 0.5)
+                                } else {
+                                    (ic as f64 / k as f64, jc as f64 / k as f64)
+                                };
+                                let mut p = [0.0; 3];
+                                for t in 0..dim {
+                                    p[t] = c[0][t]
+                                        + u * (c[1][t] - c[0][t])
+                                        + v * (c[3][t] - c[0][t]);
+                                }
+                                let d = first + (jc * side + ic) as DofId;
+                                put(&mut out, &mut filled, d, p);
+                            }
                         }
                     }
                 }
             }
             FaceDofMap::Edges(map) | FaceDofMap::QuadEdges(map) => {
                 for (&edge, &first) in map {
-                    // Compute edge midpoint from the edge key (two node IDs).
                     let pa = self.mesh.node_coords(edge.0);
                     let pb = self.mesh.node_coords(edge.1);
-                    let mut midpoint = [0.0f64; 3];
-                    for c in 0..dim {
-                        midpoint[c] = (pa[c] + pb[c]) / 2.0;
-                    }
-                    for m in 0..nf {
-                        let d = (first + m as u32) as usize;
-                        if d < out.len() {
-                            out[d] = midpoint;
+                    for m in 0..=k {
+                        let t = if k == 0 { 0.5 } else { m as f64 / k as f64 };
+                        let mut p = [0.0; 3];
+                        for c in 0..dim {
+                            p[c] = pa[c] + t * (pb[c] - pa[c]);
                         }
+                        put(&mut out, &mut filled, first + m as DofId, p);
                     }
+                }
+            }
+        }
+        // Interior dofs (not on any face): centroid of an owning element.
+        for e in 0..self.mesh.n_elements() as u32 {
+            let verts = self.mesh.element_nodes(e);
+            let mut cen = [0.0; 3];
+            for &n in verts {
+                let nc = self.mesh.node_coords(n);
+                for c in 0..dim {
+                    cen[c] += nc[c] / verts.len() as f64;
+                }
+            }
+            for &d in self.element_dofs(e) {
+                let d = d as usize;
+                if !filled[d] {
+                    out[d] = cen;
+                    filled[d] = true;
                 }
             }
         }
