@@ -1394,6 +1394,10 @@ fn avg4(a: &[f64; 2], b: &[f64; 2], c: &[f64; 2], d: &[f64; 2]) -> [f64; 2] {
 ///
 /// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Hex20 → 8 Hex8, Hex27 → 8 Hex8,
 /// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
+///
+/// A **mixed**-element mesh (`elem_types` set) takes the `refine_mixed_3d`
+/// path instead, where a Pyramid5 follows MFEM's
+/// `UniformRefinement3D_base` PYRAMID branch: 6 Pyramid5 + 4 Tet4 children.
 pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     // For mixed-element meshes, use per-element-type refinement with shared edge map.
@@ -1652,6 +1656,14 @@ pub fn mark_tet_mesh_for_refinement(mesh: &mut Mesh<3>) {
     let prism_edges: [[usize; 2]; 9] = [
         [0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 3], [1, 4], [2, 5],
     ];
+    // MFEM pyr_t::Edges (fem/geom.cpp): base {0,1},{1,2},{3,2},{0,3}, then
+    // laterals {0,4},{1,4},{2,4},{3,4}.  MFEM's GetVertexToVertexTable feeds
+    // the edges of EVERY element into the table, so a pyramid's edges must be
+    // registered here too (D114): otherwise MarkEdge panics on a
+    // pyramid-owned boundary-triangle edge of a mixed tet+pyramid mesh.
+    let pyramid_edges: [[usize; 2]; 8] = [
+        [0, 1], [1, 2], [3, 2], [0, 3], [0, 4], [1, 4], [2, 4], [3, 4],
+    ];
     let mut em: HashMap<(u32, u32), usize> = HashMap::new();
     let mut edge_len: Vec<f64> = Vec::new();
     for e in 0..mesh.n_elems() as ElemId {
@@ -1661,6 +1673,7 @@ pub fn mark_tet_mesh_for_refinement(mesh: &mut Mesh<3>) {
             ElementType::Tet4 | ElementType::Tet10 => &tet_edges,
             ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => &hex_edges,
             ElementType::Prism6 | ElementType::Prism15 => &prism_edges,
+            ElementType::Pyramid5 => &pyramid_edges,
             _ => &[],
         };
         for &[a, b] in edges {
@@ -1788,6 +1801,8 @@ fn mark_edge_tri(n: &mut [u32; 3], len: impl Fn(u32, u32) -> usize) {
 ///
 /// All element types contribute to and use the same edge midpoint map,
 /// ensuring conforming interfaces between different element types.
+/// Pyramid5 parents follow MFEM's `UniformRefinement3D_base` PYRAMID branch:
+/// 6 Pyramid5 + 4 Tet4 children (D114 — they used to be dropped silently).
 ///
 /// Refinement of a **mixed** 3-D mesh never sees curved geometry today: no
 /// code path can build a curved mixed Tet4/Hex8/Prism6 mesh (`set_curvature`
@@ -1807,6 +1822,10 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let tet_edges = local_edges_tet();
     let hex_edges = local_edges_hex();
     let prism_edges = local_edges_prism();
+    // Slot order equals MFEM pyr_t::Edges after edge_key canonicalization
+    // ({2,3}≡{3,2}, {3,0}≡{0,3}), so the first-touch insertion sequence
+    // matches GetVertexToVertexTable (D114).
+    let pyramid_edges = local_edges_pyramid();
     // (edge_key, insertion id) pairs in element × local-edge order — this IS
     // MFEM's GetVertexToVertexTable ordering.
     let mut em_ids: Vec<((NodeId, NodeId), usize)> = Vec::new();
@@ -1817,6 +1836,7 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
             ElementType::Tet4 | ElementType::Tet10 => &tet_edges[..],
             ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => &hex_edges[..],
             ElementType::Prism6 | ElementType::Prism15 => &prism_edges[..],
+            ElementType::Pyramid5 => &pyramid_edges[..],
             _ => continue,
         };
         for &(a, b) in edges {
@@ -1833,39 +1853,58 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
     //   e2v[edge] = position of the edge in J_v2v after sorting each row
     //   [row_start, end) with libstdc++ std::sort (Pair compares only the
     //   column id j).  The refined edge-midpoint vertex id = oedge + e2v[em].
+    //
+    //   MFEM builds e2v ONLY when the mesh has tetrahedra
+    //   (`if (HasGeometry(Geometry::TETRAHEDRON))`, mesh.cpp:10452); for a
+    //   tet-free mesh the midpoint id is the raw `el_to_edge` insertion
+    //   index (oedge + first-touch id).  D114: the fichera mixed mesh
+    //   (hex+prism+pyramid, no tets) must take the raw path to keep MFEM's
+    //   vertex numbering.
+    let has_tet = (0..n_elems as ElemId).any(|e| {
+        matches!(mesh.element_type_at(e), ElementType::Tet4 | ElementType::Tet10)
+    });
     let n_verts = mesh.n_nodes();
-    let mut rows: Vec<Vec<(u32, usize)>> = vec![Vec::new(); n_verts];
-    for (eid, &(key, _)) in em_ids.iter().enumerate() {
-        let (i, j) = key;
-        rows[i as usize].push((j, eid));
-    }
-    let mut j_v2v: Vec<(i32, usize)> = Vec::new();
-    for i in 0..n_verts {
-        let start = j_v2v.len();
-        for &(j, eid) in &rows[i] {
-            j_v2v.push((j as i32, eid));
+    let e2v: Option<Vec<usize>> = if !has_tet {
+        None
+    } else {
+        let mut rows: Vec<Vec<(u32, usize)>> = vec![Vec::new(); n_verts];
+        for (eid, &(key, _)) in em_ids.iter().enumerate() {
+            let (i, j) = key;
+            rows[i as usize].push((j, eid));
         }
-        // std::sort(row_start, end): sorts [start..len) by column id only.
-        std_sort_by(&mut j_v2v[start..], |x, y| x.0 < y.0);
-    }
-    let mut e2v = vec![0usize; em_ids.len()];
-    for (pos, &(_, eid)) in j_v2v.iter().enumerate() {
-        e2v[eid] = pos;
-    }
-    // Edge-midpoint vertex id = oedge + e2v[insertion id]; coords must be
-    // stored in vertex-id order (oedge..oedge+n_edges).
+        let mut j_v2v: Vec<(i32, usize)> = Vec::new();
+        for i in 0..n_verts {
+            let start = j_v2v.len();
+            for &(j, eid) in &rows[i] {
+                j_v2v.push((j as i32, eid));
+            }
+            // std::sort(row_start, end): sorts [start..len) by column id only.
+            std_sort_by(&mut j_v2v[start..], |x, y| x.0 < y.0);
+        }
+        let mut e2v = vec![0usize; em_ids.len()];
+        for (pos, &(_, eid)) in j_v2v.iter().enumerate() {
+            e2v[eid] = pos;
+        }
+        Some(e2v)
+    };
+    // Edge-midpoint vertex id = oedge + (has_tet ? e2v[id] : id); coords must
+    // be stored in vertex-id order (oedge..oedge+n_edges).
+    let mid_vertex = |id: usize| -> usize {
+        e2v.as_ref().map_or(id, |m| m[id])
+    };
     let mut mid_coords = vec![[0.0_f64; 3]; em_ids.len()];
     for (id, &(key, _)) in em_ids.iter().enumerate() {
         let (a, b) = key;
         let ca = mesh.coords_of(a);
         let cb = mesh.coords_of(b);
-        mid_coords[e2v[id]] = [0.5*(ca[0]+cb[0]), 0.5*(ca[1]+cb[1]), 0.5*(ca[2]+cb[2])];
+        mid_coords[mid_vertex(id)] =
+            [0.5*(ca[0]+cb[0]), 0.5*(ca[1]+cb[1]), 0.5*(ca[2]+cb[2])];
     }
     for c in &mid_coords {
         coords.extend_from_slice(c);
     }
     for (id, &(key, _)) in em_ids.iter().enumerate() {
-        em.insert(key, next_node0 + e2v[id] as NodeId);
+        em.insert(key, next_node0 + mid_vertex(id) as NodeId);
     }
     let mut next_node = next_node0 + em_ids.len() as NodeId; // oface start
 
@@ -1907,6 +1946,18 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                         let id = next_node; next_node += 1; id
                     });
                 }
+            }
+            ElementType::Pyramid5 => {
+                // MFEM pyr_t::FaceVert[0]: the base quad {3,2,1,0} is the
+                // pyramid's only quad face and takes an `oface + f2qf` slot
+                // like the hex/wedge quads (D114).
+                let fns = [ns[3], ns[2], ns[1], ns[0]];
+                quad_fc.entry(quad_face_key(fns)).or_insert_with(|| {
+                    let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+                    for &n in &fns { let c = mesh.coords_of(n); x += c[0]; y += c[1]; z += c[2]; }
+                    coords.extend_from_slice(&[x / 4.0, y / 4.0, z / 4.0]);
+                    let id = next_node; next_node += 1; id
+                });
             }
             _ => {}
         }
@@ -2027,6 +2078,33 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                     [q2,q1,m25,m35,m45,ns[5]],
                 ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
                 for _ in 0..8 { new_tags.push(tag); new_types.push(ElementType::Prism6); }
+            }
+            ElementType::Pyramid5 => {
+                // MFEM UniformRefinement3D_base, PYRAMID branch (mesh.cpp:
+                // 10766-10855): 6 pyramids + 4 tets.  pyr_t::Edges slots:
+                // e0=(0,1), e1=(1,2), e2=(3,2), e3=(0,3), e4=(0,4), e5=(1,4),
+                // e6=(2,4), e7=(3,4); qf0 = base-quad center (FaceVert[0]).
+                // Corner pyramids, the apex pyramid, the inverted inner
+                // pyramid, then the 4 base-center tets — in MFEM's order.
+                let e0=mid!(ns[0],ns[1]);let e1=mid!(ns[1],ns[2]);let e2=mid!(ns[3],ns[2]);let e3=mid!(ns[0],ns[3]);
+                let e4=mid!(ns[0],ns[4]);let e5=mid!(ns[1],ns[4]);let e6=mid!(ns[2],ns[4]);let e7=mid!(ns[3],ns[4]);
+                let qf0 = quad_fc[&quad_face_key([ns[3], ns[2], ns[1], ns[0]])];
+                for &ch in &[
+                    [ns[0],e0,qf0,e3,e4],
+                    [e0,ns[1],e1,qf0,e5],
+                    [qf0,e1,ns[2],e2,e6],
+                    [e3,qf0,e2,ns[3],e7],
+                    [e4,e5,e6,e7,ns[4]],
+                    [e7,e6,e5,e4,qf0],
+                ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                for _ in 0..6 { new_tags.push(tag); new_types.push(ElementType::Pyramid5); }
+                for &ch in &[
+                    [e0,e4,e5,qf0],
+                    [e1,e5,e6,qf0],
+                    [e2,e6,e7,qf0],
+                    [e3,e7,e4,qf0],
+                ] { new_conn.extend_from_slice(&ch); new_offsets.push(new_conn.len()); }
+                for _ in 0..4 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
             _ => {}
         }
@@ -7786,13 +7864,13 @@ pub fn refine_nonconforming_pyramid_aniso(
 }
 
 /// Local 8 edges of a Pyramid5 element.
-#[allow(dead_code)]
+///
+/// The slot sequence equals MFEM `pyr_t::Edges` after `edge_key`
+/// canonicalization ({2,3}≡{3,2}, {3,0}≡{0,3}).
 fn local_edges_pyramid() -> [(usize, usize); 8] {
     [(0, 1), (1, 2), (2, 3), (3, 0), (0, 4), (1, 4), (2, 4), (3, 4)]
 }
-#[allow(dead_code)]
 pub(crate) fn local_faces_pyramid_quad() -> [[usize; 4]; 1] { [[0, 1, 2, 3]] }
-#[allow(dead_code)]
 pub(crate) fn local_faces_pyramid_tri() -> [(usize, usize, usize); 4] {
     [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)]
 }

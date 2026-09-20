@@ -6,8 +6,6 @@
 //! for each quadrature point in each element. The target matrix defines the
 //! "ideal" shape/size that the mesh optimization should achieve.
 
-use crate::tmop::invariants::{InvariantsEvaluator2D, InvariantsEvaluator3D};
-
 /// Target-matrix construction algorithms (matches MFEM's TargetType).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetType {

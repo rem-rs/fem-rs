@@ -10,9 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fem_core::{ElemId, FaceId, NodeId};
+use fem_core::{ElemId, NodeId};
 
-use crate::{ElementType, Mesh, MeshTopology, NamedAttributeRegistry};
+use crate::{ElementType, Mesh};
 use crate::submesh::{SubMesh, extract_submesh};
 
 /// Parallel submesh extracted from a parent parallel mesh.

@@ -8,9 +8,8 @@
 //!   Jrt = ref→target Jacobian (from TargetConstructor)
 //!   W = quality metric
 
-use crate::tmop::invariants::{InvariantsEvaluator2D, InvariantsEvaluator3D};
 use crate::tmop::metrics::{TmopQualityMetric, TmopQualityMetric3D};
-use crate::tmop::target::{TargetConstructor, ideal_shape_jac_2d, ideal_shape_jac_3d};
+use crate::tmop::target::TargetConstructor;
 
 /// TMOP integrator for 2D meshes.
 ///
@@ -314,7 +313,7 @@ fn matmul_3x3(a: &nalgebra::Matrix3<f64>, b: &[f64; 9]) -> [f64; 9] {
 mod tests {
     use super::*;
     use crate::tmop::metrics::{TmopMetric002, TmopMetric007};
-    use crate::tmop::target::TargetType;
+    use crate::tmop::target::{TargetType, ideal_shape_jac_2d, ideal_shape_jac_3d};
 
     #[test]
     fn test_integrator_2d_energy() {

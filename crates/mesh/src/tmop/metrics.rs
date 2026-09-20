@@ -1146,11 +1146,9 @@ impl TmopQualityMetric3D for TmopMetric321 {
         let ndof = ds.len();
         let mut ie = InvariantsEvaluator3D::new(Some(&jac));
         ie.set_derivative_matrix(ndof, &flatten_3d(ds));
-        let i1 = ie.get_i1();
         let i2 = ie.get_i2();
         let i3 = ie.get_i3();
         let i3b = ie.get_i3b();
-        let di1 = ie.get_di1().clone();
         let di2 = ie.get_di2().clone();
         let di3b = ie.get_di3b().clone();
         // P = dI1 + (1/I3) dI2 - (2*I2/I3b³) dI3b
