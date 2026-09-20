@@ -62,21 +62,25 @@ impl<S: FESpace> BilinearForm<S> {
     ///
     /// Modifies the cached matrix `A` and `rhs` in-place so that
     /// the solution satisfies `u[d] = bc_vals[i]` for each `d = ess_dofs[i]`.
+    ///
+    /// Reaction semantics (D432): each reaction is taken from the **true
+    /// column entry** `A[i,d]` only — MFEM
+    /// `SparseMatrix::EliminateRowCol(rc, sol, rhs, DIAG_ONE)`
+    /// (linalg/sparsemat.cpp:1914; the reaction `rhs(col) -= sol·A[k]` at
+    /// :1959 reads row `col`'s own entry), matching
+    /// `CsrMatrix::apply_dirichlet_keep_diag` (D409).  An earlier revision
+    /// *also* subtracted the pivot-row entries `A[d,j]`, doubling every
+    /// nonzero reaction on numerically symmetric matrices (`A[d,j] ==
+    /// A[j,d]` there) and flipping signs on antisymmetric coupling blocks.
     pub fn eliminate_essential_bc(&mut self, ess_dofs: &[usize], bc_vals: &[f64], rhs: &mut [f64]) {
         let a = self.cached.as_mut().expect("assemble() must be called first");
         let n = a.nrows;
         let ess: std::collections::HashSet<usize> = ess_dofs.iter().copied().collect();
         for (pos, &d) in ess_dofs.iter().enumerate() {
             let val = bc_vals[pos];
-            // Row contributions: A[d,j] * val subtracted from rhs[j]
-            for r in a.row_ptr[d]..a.row_ptr[d + 1] {
-                let j = a.col_idx[r] as usize;
-                if !ess.contains(&j) {
-                    rhs[j] -= a.values[r] * val;
-                }
-            }
-            // Column contributions: A[i,d] * val subtracted from rhs[i]
-            // Scan all rows for column d
+            // Column contributions only (D432): `rhs[i] -= A[i,d] * val`
+            // from the true column entry, then zero it.  The symmetric row
+            // counterpart `A[d,j]` must NOT also be subtracted.
             for i in 0..n {
                 if ess.contains(&i) { continue; }
                 for r in a.row_ptr[i]..a.row_ptr[i + 1] {

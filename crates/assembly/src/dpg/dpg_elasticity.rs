@@ -221,7 +221,7 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
         }
     }
 
-    let mat = coo.into_csr();
+    let mut mat = coo.into_csr();
     let mut rhs = rhs_global;
 
     // Dirichlet BC: fix boundary ux=uy=0
@@ -234,10 +234,12 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
     }
     bc_dofs.sort_unstable(); bc_dofs.dedup();
 
+    // D434: true symmetric elimination (MFEM `EliminateRowCol` DIAG_ONE via
+    // `CsrMatrix::apply_dirichlet_symmetric`) instead of the previous no-op
+    // `rhs[j] -= A[d,j]·0.0` loop that left rows and columns coupled, so a
+    // nonzero essential value would have been silently ignored.
     for &d in &bc_dofs {
-        let s = mat.row_ptr[d]; let e = mat.row_ptr[d + 1];
-        for p in s..e { let j = mat.col_idx[p] as usize; if j != d { rhs[j] -= mat.values[p] * 0.0; } }
-        rhs[d] = 0.0;
+        mat.apply_dirichlet_symmetric(d, 0.0, &mut rhs);
     }
 
     // CG solver

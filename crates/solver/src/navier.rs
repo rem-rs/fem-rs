@@ -1253,10 +1253,14 @@ mod tests {
                     if c == d {
                         diag = mat.values[j];
                     } else {
-                        let a = mat.values[j];
-                        if a != 0.0 {
-                            rhs[c] -= a * values[k];
-                            if let Some(p) = mat.find_entry(c, d) {
+                        // Reaction from the TRUE column entry `A[c,d]` only
+                        // (MFEM DIAG_KEEP `EliminateRowCol`, cf.
+                        // `apply_dirichlet_keep_diag`, D409/D433) — not from
+                        // the pivot-row entry `A[d,c]`.
+                        if let Some(p) = mat.find_entry(c, d) {
+                            let a_cd = mat.values[p];
+                            if a_cd != 0.0 {
+                                rhs[c] -= a_cd * values[k];
                                 mat.values[p] = 0.0;
                             }
                         }
@@ -1306,6 +1310,37 @@ mod tests {
         assert!(cfl > 0.0);
         assert!(s.iter_mvsolve() > 0);
         assert!(s.iter_hsolve() > 0);
+    }
+
+    /// D433 regression: the `eliminate_bc` test double must take reactions
+    /// from the **true column entries** `A[other, dof]` — MFEM DIAG_KEEP
+    /// `SparseMatrix::EliminateRowCol` semantics, cf. `CsrMatrix::
+    /// apply_dirichlet_keep_diag` (D409) — not from the pivot-row entries
+    /// `A[dof, other]`, which coincide only for numerically symmetric
+    /// matrices.  Failed on the pre-D433 double (row-driven reaction); the
+    /// red run is archived under `tmp/d410/d433_red.txt`.
+    #[test]
+    fn eliminate_bc_double_uses_true_column_reaction() {
+        let disc = ToyDisc::new(2, 1, true);
+        // Structurally symmetric, numerically **antisymmetric** 2×2:
+        // A[0,1] = +3, A[1,0] = −3 (saddle-coupling style).
+        let mut a = CsrMatrix::new_empty(2, 2);
+        a.row_ptr = vec![0, 2, 4];
+        a.col_idx = vec![0, 1, 0, 1];
+        a.values = vec![4.0, 3.0, -3.0, 5.0];
+        let mut rhs = [10.0_f64, 20.0];
+        disc.eliminate_bc(&mut a, &mut rhs, &[0], &[2.0]);
+        // DIAG_KEEP: rhs[0] = A[0,0]·2 = 8; reaction from the TRUE column
+        // entry A[1,0] = −3: rhs[1] = 20 − (−3)·2 = 26.  The pre-D433
+        // row-driven variant used A[0,1] = +3 and produced 20 − 6 = 14.
+        assert!((rhs[0] - 8.0).abs() < 1e-14, "rhs[0] = {} want 8", rhs[0]);
+        assert!(
+            (rhs[1] - 26.0).abs() < 1e-14,
+            "rhs[1] = {} want 26 (reaction must come from A[1,0] = -3, not A[0,1] = +3)",
+            rhs[1]
+        );
+        assert!(a.get(0, 1).abs() < 1e-14, "row off-diag not eliminated");
+        assert!(a.get(1, 0).abs() < 1e-14, "column off-diag not eliminated");
     }
 
     /// The *fully periodic* configuration (both essential DOF lists empty, as

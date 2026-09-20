@@ -249,7 +249,7 @@ pub fn solve_dpg_stokes_2d<M: MeshTopology>(
         }
     }
 
-    let mat = coo.into_csr();
+    let mut mat = coo.into_csr();
 
     // Apply homogeneous Dirichlet BC on velocity: u_x = 0, u_y = 0 on boundary.
     // Pin pressure at node 0 to zero.
@@ -263,14 +263,14 @@ pub fn solve_dpg_stokes_2d<M: MeshTopology>(
     }
     bc_dofs.push(pres_dof(0)); // pin pressure
 
+    // D434: true symmetric elimination (MFEM `EliminateRowCol` DIAG_ONE via
+    // `CsrMatrix::apply_dirichlet_symmetric`) — clears the off-diagonal
+    // entries of row AND column `d` and sets the diagonal to 1.  The previous
+    // `rhs[j] -= A[d,j]·0.0` loop was a no-op that never cleared the coupling
+    // columns, so a nonzero essential value would have been silently ignored.
     let mut rhs = rhs_global;
     for &d in &bc_dofs {
-        let s = mat.row_ptr[d]; let e = mat.row_ptr[d + 1];
-        for p in s..e {
-            let j = mat.col_idx[p] as usize;
-            if j != d { rhs[j] -= mat.values[p] * 0.0; } // val=0 → no change needed
-        }
-        rhs[d] = 0.0;
+        mat.apply_dirichlet_symmetric(d, 0.0, &mut rhs);
     }
 
     // Solve with a few CG iterations
