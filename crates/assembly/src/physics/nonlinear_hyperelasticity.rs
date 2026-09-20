@@ -1008,59 +1008,53 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Displacement/geometry reference element for the hyperelasticity assembly.
+///
+/// D453: the whole table delegates to the single source of truth,
+/// [`fem_space::ref_elem::h1_field_element`] — the space dispatch itself, so
+/// the field slots match `VectorH1Space::element_dofs` by construction at
+/// every order and cell type.
+///
+/// The point of the delegation is the **quad frame**: `h1_field_element` puts
+/// `Quad4` on the `[0,1]²` closed-GLL frame (`QuadQk`, weights-sum-1
+/// `quad_rule_01`) at *every* order.  Historically this table was frame-split:
+/// the p = 3 field arm sat on `QuadQk(3)` (`[0,1]²`) while p = 1/2/4 kept the
+/// legacy `[-1,1]²` `QuadQ1`/`QuadQ2`/`QuadQ4` arms *and* `ref_elem_geom`
+/// (= this table at order 1) evaluated the legacy `QuadQ1` gradients — so at
+/// p = 3 the geometry Jacobian was evaluated at `[0,1]²` points in a `[-1,1]²`
+/// basis (`det J ≡ 1/4` on the unit square, a `2^dim` volume-scale error —
+/// pinned red by `d453_quad_*` below).  Migrating the whole quad column (field
+/// **and** the order-1 geometry read through `ref_elem_geom`) to the `[0,1]²`
+/// frame removes the split; the p = 1/2/4 arms were verified to move
+/// physically-identically (analytic homogeneous-stretch energies match to
+/// ~1e-16 before and after, see the `d453_quad_*` tests).
+///
+/// The other cell types were already on this dispatch (D438) and are
+/// frame-consistent: tri/tet on the unit simplices, hex on the `[-1,1]³`
+/// `HexQk` frame (`HexQ1` geometry arm shares it), prisms on the unit wedge
+/// (`H1PrismPk` both), pyramids on the unit Fuentes pyramid.  Quad p ≥ 5 is no
+/// longer a panic: `QuadQk` is generic in the order and the geometry stays on
+/// the same frame at any p.
 fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::quad::QuadQ4;
-    match (et, order) {
-        // D438 quad pin — the legacy `[-1,1]²` frame is load-bearing in this
-        // file: `ref_elem_geom(et) = ref_elem_vol(et, 1)` couples the geometry
-        // Jacobian (and `QuadQ1`/`QuadQ2`' own quadrature rules) to the same
-        // arms, so the basis frame cannot be switched one arm at a time.
-        // `fixed_order_tensor` is the true-source module's own legacy family;
-        // `QuadQ4` (25 dofs, MFEM entity slot order) has no true-source
-        // constructor and stays hand-named for the same frame reason.
-        (ElementType::Quad4, 1) => fem_space::ref_elem::fixed_order_tensor(et, 1),
-        (ElementType::Quad4, 2) => fem_space::ref_elem::fixed_order_tensor(et, 2),
-        // Quad p = 3 keeps the historical `QuadQk(3)` arm (the [0,1]² GLL
-        // frame) — routed through the dispatch, which makes the same choice.
-        (ElementType::Quad4, 3) => fem_space::ref_elem::h1_field_element(
-            et,
-            order,
-            fem_element::lagrange::PyramidBasisType::default(),
-        ),
-        (ElementType::Quad4, 4) => Box::new(QuadQ4),
-        // Quad p ≥ 5 stays unsupported (the historical panic set): the field
-        // would land on the `[0,1]²` GLL frame while `ref_elem_geom` stays on
-        // `[-1,1]²` — a desynced sub-parametric path.  Migrating the whole
-        // quad geometry frame is its own debt (recorded D454).
-        (ElementType::Quad4, _) => {
-            panic!("hyperelasticity ref_elem_vol: unsupported ({et:?}, {order})")
-        }
-        // D438: everything else delegated to the single source of truth —
-        // the H¹ field dispatch.  On the previously supported set it is
-        // arm-for-arm identical: tri/tet `TriP1`/`TriPk(2)`/`H1TriPk`/
-        // `TetP1`/`TetP2`/`H1TetPk` at p ≤ 3 and the D202 `H1TriPk`/`H1TetPk`
-        // arms at p ≥ 4 (pinned bit-for-bit by `d438_hyper_*` below and the
-        // D202 slot-equality test), `QuadQk(3)` at quad p = 3, `H1PrismPk`
-        // prisms and the Fuentes `h1_pyramid_element` pyramids.  Extensions
-        // outside that set: hex p ≥ 2 assembles on `HexQk` (the `[-1,1]³`
-        // frame of the historical `HexQ1` arm, so `ref_elem_geom(Hex8)` stays
-        // frame-consistent); order 0 maps to the P0 elements (no caller in
-        // this file reaches order 0 — the `l2_order == 0` consumer is
-        // special-cased before the table).
-        _ => fem_space::ref_elem::h1_field_element(
-            et,
-            order,
-            fem_element::lagrange::PyramidBasisType::default(),
-        ),
-    }
+    fem_space::ref_elem::h1_field_element(
+        et,
+        order,
+        fem_element::lagrange::PyramidBasisType::default(),
+    )
 }
 
-/// Geometry reference element (always order 1 — P1/Q1).
+/// Geometry reference element (always order 1 — the lowest-order arm of
+/// [`ref_elem_vol`]).
 ///
 /// The element mapping Jacobian is always computed from the lowest-order
 /// geometry (mesh vertex nodes), even when the field uses higher-order
 /// basis functions (sub-parametric formulation).  This matches MFEM's
 /// behaviour where the transformation uses the mesh's reference element.
+/// D453: the order-1 arm lives on the *same* reference frame as the field
+/// column per cell type — `QuadQk(1)` on `[0,1]²` for quads (was the legacy
+/// `[-1,1]²` `QuadQ1`, the source of the p = 3 frame desync), `HexQ1` on the
+/// `[-1,1]³` frame shared with `HexQk`, unit-simplex P1s, `H1PrismPk(1)` on
+/// the unit wedge and the order-1 Fuentes pyramid on the unit pyramid.
 fn ref_elem_geom(et: ElementType) -> Box<dyn ReferenceElement> {
     ref_elem_vol(et, 1)
 }
@@ -1298,7 +1292,8 @@ mod tests {
     fn arruda_boyce_identity() {
         let f = DMatrix::identity(3, 3);
         let s = arruda_boyce_pk1_stress(&f, 0.3, 3.0, 1e3);
-        let psi = arruda_boyce_energy(&f, 0.3, 3.0, 1e3);
+        // Smoke-run the energy density at F = I (no panic, finite value).
+        let _psi = arruda_boyce_energy(&f, 0.3, 3.0, 1e3);
         for i in 0..3 { for j in 0..3 {
             assert!(s[(i,j)].abs() < 1.0, "stress at I, s[{}][{}] = {}", i, j, s[(i,j)]);
         }}
@@ -1317,7 +1312,8 @@ mod tests {
     #[test]
     fn yeoh_identity() {
         let f = DMatrix::identity(3, 3);
-        let psi = yeoh_energy(&f, 0.3, -0.1, 0.02, 1e3);
+        // Smoke-run the energy density at F = I (no panic, finite value).
+        let _psi = yeoh_energy(&f, 0.3, -0.1, 0.02, 1e3);
     }
 
     /// Verify the analytical MfemNeoHookean tangent against central-difference
@@ -1437,16 +1433,85 @@ mod tests {
         }
     }
 
-    // ─── D438: delegation pin ────────────────────────────────────────────────
-    /// After delegating the table to `fem_space::ref_elem::h1_field_element`,
-    /// the previously supported arms must stay bit-for-bit identical — pinned
-    /// here against the concrete families the old arms constructed (the
-    /// tri/tet ≥ 4 arms are pinned against the space dispatch by the D202
-    /// test above).  The quad p = 1/2/4 arms stay on the legacy `[-1,1]²`
-    /// frame by design (`ref_elem_geom` couples to them).
+    /// D453 bookkeeping for the retired p = 4 arm: the legacy `QuadQ4`
+    /// (`[-1,1]²`, **equispaced** nodes) and its replacement `QuadQk(4)`
+    /// (`[0,1]²`, **GLL** nodes) carry the *same* MFEM entity slot order —
+    /// corners CCW, bottom/right/top/left edges, row-major interior — so the
+    /// migration relabelled the frame and the node placement, not the
+    /// slot↔entity mapping.  The node-placement part is not cosmetic: the H¹
+    /// space stores GLL-sampled dof values (its dispatch element is
+    /// `QuadQk(4)`), which the retired equispaced `QuadQ4` basis silently read
+    /// as values at the equispaced points — a second, subtler p = 4 defect
+    /// (besides the p = 3 frame desync) that routing the column through
+    /// `h1_field_element` fixes; the post-migration p = 4 stretch energy
+    /// matches the analytic value to 3e-15 relative (`d453_quad_*` below),
+    /// where the retired arm had no such guarantee.
     #[test]
-    fn d438_delegated_table_is_bitwise_the_old_arms_on_the_supported_set() {
-        use fem_element::lagrange::quad::{QuadQ1, QuadQ2, QuadQ4};
+    fn d453_retired_quad_q4_arm_shared_the_qk4_slot_order() {
+        let keys = |coords: &[Vec<f64>]| -> Vec<(u8, u8, u8)> {
+            const P: u8 = 4;
+            coords
+                .iter()
+                .map(|c| {
+                    let eps = 1e-9;
+                    let (x, y) = (c[0], c[1]);
+                    let (on_l, on_r) = (x < eps, (x - 1.0).abs() < eps);
+                    let (on_b, on_t) = (y < eps, (y - 1.0).abs() < eps);
+                    let gx = (x * P as f64).round() as u8;
+                    let gy = (y * P as f64).round() as u8;
+                    if on_b && on_l {
+                        (0, 0, 0)
+                    } else if on_b && on_r {
+                        (1, 0, 0)
+                    } else if on_t && on_r {
+                        (2, 0, 0)
+                    } else if on_t && on_l {
+                        (3, 0, 0)
+                    } else if on_b {
+                        (4, gx, 0)
+                    } else if on_r {
+                        (5, 0, gy)
+                    } else if on_t {
+                        (6, (P - gx) % P, 0)
+                    } else if on_l {
+                        (7, 0, (P - gy) % P)
+                    } else {
+                        (8, gy - 1, gx - 1)
+                    }
+                })
+                .collect()
+        };
+        let legacy = fem_element::lagrange::quad::QuadQ4;
+        let qk = fem_element::lagrange::factory::QuadQk::new(4);
+        let map01 = |c: &Vec<f64>| vec![0.5 * (c[0] + 1.0), 0.5 * (c[1] + 1.0)];
+        let legacy_01: Vec<Vec<f64>> = legacy.dof_coords().iter().map(map01).collect();
+        assert_eq!(
+            keys(&legacy_01),
+            keys(&qk.dof_coords()),
+            "QuadQ4 and QuadQk(4) must assign the same slot to the same entity"
+        );
+        // …while the node placements genuinely differ (equispaced vs GLL) —
+        // the reason the retired arm could not evaluate the space's dofs.
+        assert_ne!(
+            legacy_01,
+            qk.dof_coords(),
+            "expected equispaced (QuadQ4) vs GLL (QuadQk) node placement to differ"
+        );
+    }
+
+    // ─── D438 (as updated by D453): delegation pin ───────────────────────────
+    /// After delegating the table to `fem_space::ref_elem::h1_field_element`,
+    /// the arms must stay pinned against the concrete families the dispatch
+    /// selects (the tri/tet ≥ 4 arms are pinned against the space dispatch by
+    /// the D202 test above).  D453 moved the whole quad column onto the
+    /// `[0,1]²` GLL `QuadQk` frame at every order — including the order-1
+    /// geometry read through `ref_elem_geom` — replacing the legacy
+    /// `[-1,1]²` `QuadQ1`/`QuadQ2`/`QuadQ4` arms (the p = 3 frame desync they
+    /// caused is pinned red/green by the `d453_quad_*` tests below; the p = 1/2
+    /// physical equivalence of the move is pinned there against analytic
+    /// homogeneous-stretch energies).
+    #[test]
+    fn d438_delegated_table_is_bitwise_the_dispatch_families_on_the_supported_set() {
         use fem_element::lagrange::factory::QuadQk;
         use fem_element::lagrange::{TetP1, TetP2, TriP1};
         let coords_bit_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| {
@@ -1470,14 +1535,14 @@ mod tests {
         bit_eq(ElementType::Tet4, 1, &TetP1);
         bit_eq(ElementType::Tet4, 2, &TetP2);
         bit_eq(ElementType::Tet4, 3, &fem_element::lagrange::H1TetPk::new(3));
-        // Quad p = 1/2: the pinned legacy `[-1,1]²` arms.
-        bit_eq(ElementType::Quad4, 1, &QuadQ1);
-        bit_eq(ElementType::Quad4, 2, &QuadQ2);
-        // Quad p = 4: the pinned legacy `QuadQ4` arm.
-        bit_eq(ElementType::Quad4, 4, &QuadQ4);
-        // Quad p = 3: historical `QuadQk(3)` (the [0,1]² GLL frame).
-        bit_eq(ElementType::Quad4, 3, &QuadQk::new(3));
-        // Hex p = 1: historical `HexQ1`.
+        // Quad p = 1..=5: the single `[0,1]²` GLL `QuadQk` frame (D453) —
+        // the same element the H¹ space dispatch numbers the DOFs in, at
+        // every order, geometry included.
+        for p in 1..=5u8 {
+            bit_eq(ElementType::Quad4, p, &QuadQk::new(p as usize));
+        }
+        // Hex p = 1: historical `HexQ1` (the `[-1,1]³` frame shared with the
+        // `HexQk` field arms).
         bit_eq(ElementType::Hex8, 1, &fem_element::lagrange::HexQ1);
         // Prism: historical `H1PrismPk` arm.
         bit_eq(ElementType::Prism6, 2, &fem_element::lagrange::H1PrismPk::new(2));
@@ -1487,5 +1552,65 @@ mod tests {
             fem_element::lagrange::PyramidBasisType::default(),
         );
         bit_eq(ElementType::Pyramid5, 2, want.as_ref());
+    }
+
+    // ─── D453: quad geometry-frame migration ([-1,1]² → [0,1]²) ─────────────
+
+    /// D453: on a straight unit-square quad the assembly weight
+    /// `w = quad.weights[q]·|det J(ξ_q)|` must integrate to the element's
+    /// physical volume (1.0) at every field order.  That only holds when the
+    /// field quadrature frame and the geometry-basis frame agree: at p = 3 the
+    /// field arm sat on the `[0,1]²` `QuadQk` frame (weights sum 1) while
+    /// `ref_elem_geom` still evaluated the legacy `[-1,1]²` `QuadQ1` gradients
+    /// (`det J ≡ 1/4` on the unit square) — a 2^dim volume-scale error.
+    #[test]
+    fn d453_quad_unit_cell_quadrature_volume_is_the_physical_volume() {
+        let mesh = Mesh::<2>::unit_square_quad(1);
+        let et = mesh.element_type(0);
+        for p in 1..=5u8 {
+            let re = ref_elem_vol(et, p);
+            let quad = re.quadrature(2 * p);
+            let mut vol = 0.0;
+            for (q, xi) in quad.points.iter().enumerate() {
+                let (_j, det_j, _jit) = jacobian_at_point(&mesh, 0, xi, 2);
+                vol += quad.weights[q] * det_j.abs();
+            }
+            eprintln!("D453 quad p={p}: quadrature volume = {vol:.17e}");
+            assert!(
+                (vol - 1.0).abs() < 1e-14,
+                "quad p={p}: quadrature volume {vol} != physical volume 1.0 \
+                 (frame-desynced 2^dim scale error)"
+            );
+        }
+    }
+
+    /// D453 end-to-end: homogeneous uniaxial stretch `u = (a·x, 0)` on one
+    /// unit-square quad gives the constant `F = diag(1+a, 1)`, so the exact
+    /// energy is `ψ(F)·V` with `V = 1`;  the compressible Neo-Hookean density
+    /// is `ψ = μ/2·((1+a)² + 1 − 2) − μ·ln(1+a) + λ/2·(ln(1+a))²`.
+    #[test]
+    fn d453_quad_uniaxial_stretch_energy_matches_the_analytic_density() {
+        let (a, mu, lambda): (f64, f64, f64) = (0.1, 0.5, 1.0);
+        let ln_j = (1.0 + a).ln();
+        let psi_true =
+            0.5 * mu * ((1.0 + a) * (1.0 + a) + 1.0 - 2.0) - mu * ln_j
+                + 0.5 * lambda * ln_j * ln_j;
+        for p in 1..=5u8 {
+            let mesh = Mesh::<2>::unit_square_quad(1);
+            let space = VectorH1Space::new(mesh, p, 2);
+            let model = HyperelasticModel::NeoHookean { mu, lambda };
+            let form = HyperelasticityForm::new(space, model, vec![], 2 * p);
+            // Interpolating through the space keeps the test frame-agnostic:
+            // the dof physical coordinates are the space's own.
+            let u = form.space().interpolate_vec(&|x| vec![a * x[0], 0.0]);
+            let e = form.elastic_energy(u.as_slice());
+            eprintln!(
+                "D453 quad p={p}: elastic_energy = {e:.17e}, analytic ψ·V = {psi_true:.17e}"
+            );
+            assert!(
+                (e - psi_true).abs() < 1e-12,
+                "quad p={p}: energy {e} != analytic ψ·V {psi_true} (frame-desynced assembly)"
+            );
+        }
     }
 }
