@@ -338,34 +338,13 @@ fn tet_rt1_prolongation_structure_unchanged() {
     check_hierarchy("tet rt1", coarse, fine, 1);
 }
 
-/// TET hierarchy, RT0.
-#[test]
-fn tet_rt0_prolongation_structure_unchanged() {
-    let coarse = Mesh::<3>::unit_cube_tet(1);
-    let fine = fem_mesh::refine_uniform_3d(&coarse);
-    check_hierarchy("tet rt0", coarse, fine, 0);
-}
-
-/// PRISM: one element carrying BOTH face shapes (2 tri + 3 quad faces).  The
-/// old tet-tuple walk found only some faces, by accident, with the tri stride
-/// on its quads; the shape-driven walk must cover all five face blocks.
-#[test]
-fn prism_rt0_prolongation_covers_both_face_shapes() {
-    let mut mesh = Mesh::<3>::uniform(
-        vec![
-            0., 0., 0., 1., 0., 0., 0., 1., 0., //
-            0., 0., 1., 1., 0., 1., 0., 1., 1.,
-        ],
-        vec![0, 1, 2, 3, 4, 5],
-        vec![1],
-        ElementType::Prism6,
-        vec![],
-        vec![],
-        ElementType::Tri3,
-    );
-    mesh.elem_types = Some(vec![ElementType::Prism6]);
-    mesh.elem_offsets = Some(vec![0usize, 6]);
-    let fine = fem_mesh::refine_uniform_3d(&mesh);
-    check_hierarchy("prism rt0", mesh, fine, 0);
-}
+// TET/PRISM hierarchy, RT0: (D481/D482, round 53) both geometries now use the
+// MFEM-exact `LocalInterpolation_RT` semantics — mirrored-sliver frames on the
+// tet, the Prism family slot rows on the wedge — so midline/interior sub-faces
+// carry dense interpolation rows and the old "unparented ⇒ empty row" /
+// block-identity structural pins no longer describe the truth.  The stronger
+// bitwise pins live in tests/d468_hdiv_prolongation_mfem_parity.rs
+// (tet_rt0 264/264 rows at 5.551e-17, prism_rt0 88/88 rows bitwise), together
+// with the constant-field P·x_c ≡ x_f semantics tests.  The superseded legacy
+// pins were removed rather than ignored.
 
