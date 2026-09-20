@@ -165,11 +165,12 @@ fn tri_grid_index(p: usize, j: usize, i: usize) -> usize {
 
 /// Map the element-local face-grid slot `(j, i)` to the canonical face dof
 /// index for face orientation `r` (`GetTriOrientation` value 0..5), following
-/// MFEM `RT_FECollection::InitFaces` `TriDofOrd`:
-/// r=0: (j,i); r=1: (j,k); r=2: (i,k); r=3: (k,i); r=4: (k,j); r=5: (i,j)
-/// with `k = p − i − j`.  Odd `r` additionally flip the dof sign
-/// ([`rt_face_sign`]).
-fn tri_face_grid_transform(p: usize, r: usize, j: usize, i: usize) -> usize {
+/// MFEM `RT_FECollection::InitFaces` `TriDofOrd`
+/// (`fem/fe_coll.cpp:2695-2710`, 4.10):
+/// r=0: (j,i); r=1: (j,k)−; r=2: (i,k); r=3: (k,i)−; r=4: (k,j); r=5: (i,j)−
+/// with `k = p − i − j` (− marks the flipped odd rows).  Odd `r` additionally
+/// flip the dof sign ([`rt_face_sign`]).
+pub fn tri_face_grid_transform(p: usize, r: usize, j: usize, i: usize) -> usize {
     let k = p - i - j;
     let (a, b) = match r % 6 {
         0 => (j, i),
@@ -195,16 +196,23 @@ pub fn rt_face_sign(orientation: usize) -> f64 {
 /// [`quad_orientation`]).  This is the quad-face analogue of MFEM's
 /// `DofOrderForOrientation` dof permutation for RT spaces on quadrilateral
 /// faces: the tensor-product grid rotates with `i0` and mirrors with `flip`.
-fn transform_grid(i: usize, j: usize, m: usize, r: usize) -> (usize, usize) {
+/// MFEM 4.10 `RT_FECollection::InitFaces` `QuadDofOrd`
+/// (`fem/fe_coll.cpp:2712-2730`) serves the same rows from
+/// `DofOrderForOrientation(SQUARE, Or)`: slot `o = i + j*m` maps to canonical
+/// index `jc*m + ic`, with the whole block flipped for odd `r`
+/// ([`rt_face_sign`]).  Rows as (ic, jc), mm = m-1:
+/// 0:(i,j) 1:(j,i)− 2:(j,mm−i) 3:(mm−i,j)− 4:(mm−i,mm−j) 5:(mm−j,mm−i)−
+/// 6:(mm−j,i) 7:(i,mm−j)−.
+pub fn transform_grid(i: usize, j: usize, m: usize, r: usize) -> (usize, usize) {
     let mm = m - 1;
     match r & 7 {
         0 => (i, j),
         1 => (j, i),
-        2 => (mm - j, i),
+        2 => (j, mm - i),
         3 => (mm - i, j),
         4 => (mm - i, mm - j),
         5 => (mm - j, mm - i),
-        6 => (j, mm - i),
+        6 => (mm - j, i),
         _ => (i, mm - j),
     }
 }
