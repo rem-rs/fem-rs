@@ -36,7 +36,7 @@ use fem_space::fe_space::FESpace;
 
 use super::dg_base::{
     build_face_elem_map, face_geom_2d, orient_normal_outward, phys_to_ref,
-    quad_jac_at, quad_jac_at_01, phys_to_ref_quad_01, ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
+    quad_jac_at_01, phys_to_ref_quad_01, ref_elem_face, ref_elem_vol, simplex_jac, xform_grads,
 };
 use crate::interior_faces::InteriorFaceList;
 #[cfg(feature = "parallel")]
@@ -468,7 +468,7 @@ fn assemble_interior_face<S: FESpace>(
         xform_grads(&jit_r, &gref_r, &mut gphys_r, n_r, dim);
 
         // Per-point Jacobian for quads (triangles use constant from simplex_jac).
-        let (jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
+        let (_jac_pt_l, det_l, jit_pt_l) = if nodes_l.len() > 3 {
             let (j, d) = quad_jac_at_01(&xl, &yl, xi_l[0], xi_l[1]);
             let d_safe = d.abs().max(1e-14);
             let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();
@@ -476,7 +476,7 @@ fn assemble_interior_face<S: FESpace>(
         } else {
             (jac_l.clone(), jac_l.determinant().abs().max(1e-14), jit_l.clone())
         };
-        let (jac_pt_r, det_r, jit_pt_r) = if nodes_r.len() > 3 {
+        let (_jac_pt_r, det_r, jit_pt_r) = if nodes_r.len() > 3 {
             let (j, d) = quad_jac_at_01(&xr, &yr, xi_r[0], xi_r[1]);
             let d_safe = d.abs().max(1e-14);
             let ji = j.clone().try_inverse().unwrap_or_else(|| DMatrix::identity(2,2)).transpose();

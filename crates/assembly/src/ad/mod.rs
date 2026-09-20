@@ -768,7 +768,6 @@ mod tests {
         let d_s = x / s;
         let t = 1.0 + x * x * x;
         let d_t = 3.0 * x * x;
-        let u = (2.0 + x * x).powf(3.5);
         let d_u = 3.5 * (2.0 + x * x).powf(2.5) * 2.0 * x;
         let expected = d_s * t.ln() + s * (d_t / t) + d_u;
 
@@ -1233,7 +1232,7 @@ mod tests {
 
         let h = 1e-4;
         let hf = |k: usize, l: usize| -> f64 {
-            let mut f = |d1: usize, d2: usize| -> f64 {
+            let f = |d1: usize, d2: usize| -> f64 {
                 let mut u2 = uu;
                 u2[d1] += h;
                 u2[d2] += h;

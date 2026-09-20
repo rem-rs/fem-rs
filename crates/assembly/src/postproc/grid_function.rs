@@ -6,7 +6,7 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::{vec_ref_elem, VecFamily, ReferenceElement, QuadratureRule, VectorReferenceElement};
+use fem_element::{vec_ref_elem, VecFamily, ReferenceElement};
 use fem_linalg::CsrMatrix;
 use fem_mesh::element_jacobian_at;
 use fem_mesh::element_type::ElementType;
@@ -534,7 +534,6 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         dm: &fem_space::DofManager,
     ) {
         use fem_space::constraints::dirichlet::boundary_dofs;
-        use fem_mesh::topology::MeshTopology;
         let mesh = self.space.mesh();
         let dofs = boundary_dofs(mesh, dm, bdr_attr);
         for &d in &dofs {
@@ -1054,7 +1053,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
         // D158 ARBITRATION REQUEST: same geometry-Jacobian convention as
         // `evaluate_vector_at_element` ([-1,1] isoparametric J for tensor
         // elements; see the note there).
-        let (jac, det_j) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
+        let (_jac, det_j) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
             Some(geo) => {
                 let (j, d, _xp) = crate::vector_assembler::isoparametric_jacobian(
                     mesh,
@@ -1367,7 +1366,7 @@ impl<'a, S: FESpace> GridFunction<'a, S> {
                     // shares the [0,1]^d reference domain with the QuadQk
                     // solution basis.
                     let ge = geo_elem.as_ref().unwrap();
-                    let (jac, det_j, xp) =
+                    let (_jac, det_j, xp) =
                         iso_jacobian_geom(mesh, geo_nodes, ge.as_ref(), xi, dim);
                     (quad.weights[q] * det_j.abs(), xp)
                 } else if pyramid_geo {
@@ -2345,7 +2344,7 @@ pub fn compute_l2_error_l2<M: MeshTopology>(
         for (qi, xi) in quad.points.iter().enumerate() {
             let (w, xp) = if use_iso {
                 let ge = geo_elem.as_ref().unwrap();
-                let (jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
+                let (_jac, det, xp_vec) = crate::isoparametric_jacobian(mesh, &nodes, ge.as_ref(), xi, dim);
                 (quad.weights[qi] * det.abs(), xp_vec)
             } else {
                 let (jac, xp_vec) = element_jacobian_at(mesh, e, xi, dim);

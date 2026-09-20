@@ -11,7 +11,7 @@
 //!    - For friction: compute tangential slip and apply stick/split via radial return
 //! 2. Add contact contributions to residual and stiffness matrix of both bodies
 
-use fem_linalg::{CsrMatrix, CooMatrix, SolverConfig, SolveResult};
+use fem_linalg::{CsrMatrix, CooMatrix, SolverConfig};
 use fem_mesh::topology::MeshTopology;
 
 /// Configuration for node-to-segment penalty contact.
@@ -167,10 +167,10 @@ pub(crate) fn find_closest_segment(
 pub fn assemble_n2s_contact_2d<M: MeshTopology>(
     slave_mesh: &M,
     slave_contact_tags: &[i32],
-    slave_dofs: &[usize],
+    _slave_dofs: &[usize],
     master_mesh: &M,
     master_contact_tags: &[i32],
-    master_dof_offset: usize,
+    _master_dof_offset: usize,
     u: &[f64],
     cfg: &N2SContactConfig,
     n_total_dofs: usize,
@@ -213,7 +213,7 @@ pub fn assemble_n2s_contact_2d<M: MeshTopology>(
         let xm = [(x0[0] + x1[0]) * 0.5, (x0[1] + x1[1]) * 0.5];
 
         // Find closest master segment
-        if let Some((_seg_idx, closest, gap, xi)) = find_closest_segment(&xm, &segments, cfg.search_dist) {
+        if let Some((_seg_idx, closest, gap, _xi)) = find_closest_segment(&xm, &segments, cfg.search_dist) {
             if gap >= 0.0 { continue; } // no penetration
 
             // Normal direction (from master surface toward slave)

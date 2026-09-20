@@ -175,7 +175,6 @@ mod tests {
     use crate::standard::nonlinear_form::NonlinearForm;
     use crate::standard::VectorH1MassIntegrator;
     use crate::Assembler;
-    use fem_element::ReferenceElement;
     use fem_mesh::{topology::MeshTopology, Mesh};
     use fem_space::fe_space::FESpace;
     use fem_space::VectorH1Space;

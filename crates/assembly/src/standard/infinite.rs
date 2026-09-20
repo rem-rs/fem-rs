@@ -20,7 +20,6 @@
 //! ```
 
 use crate::integrator::{BilinearIntegrator, QpData};
-use crate::postproc::coefficient::{CoeffCtx, ScalarCoeff};
 
 /// Infinite-element bilinear form integrator.
 ///
@@ -88,8 +87,6 @@ impl<I: BilinearIntegrator> BilinearIntegrator for InfiniteDomainIntegrator<I> {
             1.0 // inside the reference sphere, no decay
         };
 
-        // Scale the weight by the decay factor
-        let original_weight = qp.weight;
         // We can't modify qp directly (it's immutable), so we patch k_elem after
         // First, let the inner integrator compute with the original weight
         self.inner.add_to_element_matrix(qp, k_elem);
@@ -98,7 +95,6 @@ impl<I: BilinearIntegrator> BilinearIntegrator for InfiniteDomainIntegrator<I> {
         // This is correct only if the inner integrator produces entries
         // proportional to qp.weight (which all standard integrators do).
         if (decay - 1.0).abs() > 1e-15 {
-            let n = qp.n_dofs;
             for entry in k_elem.iter_mut() {
                 *entry *= decay;
             }

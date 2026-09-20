@@ -194,7 +194,7 @@ impl<M: MeshTopology> DpgNormalOperator<M> {
 pub fn build_shat<M: MeshTopology>(
     bhat: &CsrMatrix<f64>,
     sinv: &SinvBuilder<M>,
-    n_trace: usize,
+    _n_trace: usize,
 ) -> CsrMatrix<f64> {
     let mat_sinv = assemble_sinv_sparse(sinv);
     bhat.rap_product(&mat_sinv, bhat)

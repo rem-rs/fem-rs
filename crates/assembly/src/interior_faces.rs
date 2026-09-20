@@ -112,10 +112,6 @@ impl InteriorFaceList {
                 };
                 neg.sort_by_key(|&i| (coord(i) * 1e6) as i64);
                 pos.sort_by_key(|&i| (coord(i) * 1e6) as i64);
-                for i in 0..neg.len() {
-                    let (el_neg, ref nodes_neg, _) = &bdr[neg[i]];
-                    let (el_pos, ref nodes_pos, _) = &bdr[pos[i]];
-                }
                 // Note: periodic faces need special handling because the
                 // face is not shared by adjacent elements in physical space.
                 // Use assemble_periodic_faces() at the application level.

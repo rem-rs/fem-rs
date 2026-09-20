@@ -15,7 +15,6 @@ use fem_element::{
     lagrange::{QuadL2GL, TriL2GL},
     quadrature::{tri_rule, quad_rule_01},
 };
-use fem_linalg::CsrMatrix;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_space::fe_space::FESpace;

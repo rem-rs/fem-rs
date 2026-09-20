@@ -605,7 +605,6 @@ pub fn solve_contact_newton<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_linalg::CooMatrix;
     use fem_mesh::Mesh;
 
     fn setup_2d() -> (Mesh<2>, ContactConfig) {

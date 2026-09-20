@@ -3,8 +3,6 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{TetP1, TetP2, TriP1};
-use fem_element::lagrange::factory::{TriPk, TetPk};
 use fem_element::nedelec::{
     HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk,
 };
@@ -698,7 +696,6 @@ pub fn integrate_element_scalar_2d<S: FESpace>(
     space: &S,
     elem_values: &[f64],
 ) -> Vec<f64> {
-    use fem_element::ReferenceElement;
     use fem_mesh::element_type::ElementType;
     let qo = (2 * space.order() + 1).max(4);
     let ne = mesh.n_elements();
@@ -734,7 +731,6 @@ pub fn integrate_element_scalar_3d<S: FESpace>(
     space: &S,
     elem_values: &[f64],
 ) -> Vec<f64> {
-    use fem_element::ReferenceElement;
     use fem_mesh::element_type::ElementType;
     let qo = (2 * space.order() + 1).max(4);
     let ne = mesh.n_elements();
@@ -1059,7 +1055,6 @@ mod d202_high_order_tables {
 
     use super::ref_elem_vol;
     use crate::assembler::ref_elem_vol_h1;
-    use fem_element::ReferenceElement;
     use fem_mesh::element_type::ElementType;
 
     #[test]

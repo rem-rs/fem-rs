@@ -964,7 +964,6 @@ mod tests {
                     let j = next_node; next_node += 1;
                     let (xa, ya, za) = (coords[a as usize*3], coords[a as usize*3+1], coords[a as usize*3+2]);
                     let (xb, yb, zb) = (coords[b as usize*3], coords[b as usize*3+1], coords[b as usize*3+2]);
-                    let len = ((xa-xb).powi(2)+(ya-yb).powi(2)+(za-zb).powi(2)).sqrt();
                     let cx = (xa+xb)/2.0; let cy = (ya+yb)/2.0; let cz = (za+zb)/2.0;
                     let r = 1.0 / (cx*cx+cy*cy+cz*cz).sqrt();
                     coords.extend_from_slice(&[cx*r, cy*r, cz*r]);

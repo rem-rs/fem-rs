@@ -1651,7 +1651,6 @@ impl VectorAssembler {
         S: FESpace + Sync,
         S::Mesh: MeshTopology + Sync,
     {
-        let mesh = space.mesh();
         let n_dofs = space.n_dofs();
 
         // MFEM semantics: each integrator may select its own quadrature order.

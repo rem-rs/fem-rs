@@ -17,7 +17,7 @@
 
 use nalgebra::DMatrix;
 use fem_element::{ReferenceElement, VectorReferenceElement, lagrange::{TetP1, TetP2, TriP1, QuadQk, HexQ1, HexQ2, HexQ3}, lagrange::factory::TriPk, serendipity::{QuadSerendipityPk, HexSerendipityPk}};
-use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
+use fem_element::raviart_thomas::{QuadRTk, QuadRT1, TriRT1, TetRT1, HexRTk, TriRTk, TetRTk, PrismRTk};
 use fem_element::nedelec::{QuadNDk, HexNDk, PrismND1, PrismNDk, TriNDk, TetNDk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};

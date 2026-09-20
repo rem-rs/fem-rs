@@ -148,7 +148,7 @@ pub fn build_normal_constraints<M: MeshTopology>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fem_mesh::{Mesh, element_type::ElementType, topology::MeshTopology};
+    use fem_mesh::{Mesh, element_type::ElementType};
     use fem_space::DofManager;
 
     /// The ex28 trapezoid mesh, uniformly refined 4 times (17×17 nodes).

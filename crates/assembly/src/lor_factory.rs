@@ -1672,7 +1672,6 @@ mod lor_vector_tests {
                 Ok(r) => println!("ND3 quad IGLL n={n} exact-inner PCG: {} iters", r.iterations),
                 Err(e) => println!("ND3 quad IGLL n={n} exact-inner PCG: FAILED {e}"),
             }
-            let mut x1 = vec![0.0_f64; nn];
             match fem_solver::solve_pcg_precond(&a_ho, &rhs, &mut x0, &lor, &cfg) {
                 Ok(r) => println!("ND3 quad IGLL n={n} LOR-AMS PCG: {} iters", r.iterations),
                 Err(e) => println!("ND3 quad IGLL n={n} LOR-AMS PCG: FAILED {e}"),
@@ -2146,7 +2145,7 @@ mod lor_transfer_tests {
     use crate::vector_assembler::VectorAssembler;
     use fem_mesh::ElementType;
     use fem_space::hcurl::HCurlSpace;
-    use fem_solver::{solve_fgmres_precond, DenseVec, Preconditioner, SolverConfig};
+    use fem_solver::{solve_fgmres_precond, SolverConfig};
     use linlvo::precond::{AmsConfig, AmsPrecond};
 
     /// AMS applied directly to the LOR matrix converges in a handful of
@@ -2197,7 +2196,7 @@ mod lor_transfer_tests {
         let ho = HCurlSpace::new(mesh.clone(), 2);
         let lor = LorNd::<3>::new_hex(&ho).expect("LOR build");
         let n = lor.n_ho();
-        let mut x_ho: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
+        let x_ho: Vec<f64> = (0..n).map(|i| ((i * 7) % 13) as f64 - 6.0).collect();
         let mut x_lor = vec![0.0_f64; n];
         let mut back = vec![0.0_f64; n];
         lor.restrict(&x_ho, &mut x_lor);

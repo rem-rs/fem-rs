@@ -2064,7 +2064,7 @@ mod tests {
         let n_scalar = scalar_ref_elem(et, p - 1).n_dofs();
         let offs = a.trial_offsets();
         let mut xr = vec![0.0_f64; a.size()];
-        let mut xi = vec![0.0_f64; a.size()];
+        let xi = vec![0.0_f64; a.size()];
         for e in 0..mesh.n_elements() as u32 {
             xr[offs[ps] + e as usize * n_scalar] = 1.0;
         }
@@ -2091,15 +2091,14 @@ mod tests {
             let vecfediv_v = DpgVectorFEDivergenceIntegrator { q: -omega };
             let scalweakgrad_q = DpgMixedScalarWeakGradientIntegrator { q: -omega };
             let (qpts, qwts) = crate::dpg::dpg_basis::vol_quadrature(et, 8);
-            let mut tq = VolVals::default();
-            let mut tv = VolVals::default();
+            let tq = VolVals::default();
+            let tv = VolVals::default();
             let georef = crate::vector_assembler::geo_ref_elem_from_mesh(&mesh, 0).unwrap();
             let gnodes = mesh.geometry_nodes(0).to_vec();
             for (qi, xi) in qpts.iter().enumerate() {
-                let (jac, det, xp) = crate::vector_assembler::isoparametric_jacobian(
+                let (_jac, det, xp) = crate::vector_assembler::isoparametric_jacobian(
                     &mesh, &gnodes, georef.as_ref(), xi, 2,
                 );
-                let jit = inv_transpose(&jac, 2);
                 let ctx = VolCtx { w: qwts[qi] * det.abs(), x: xp.clone(), dim: 2, elem: 0 };
                 // the four imaginary cross blocks, in (row, col) placement
                 let integs: Vec<(usize, usize, &dyn DpgBilinear2)> = vec![

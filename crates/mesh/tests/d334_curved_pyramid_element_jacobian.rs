@@ -196,7 +196,6 @@ fn pre_d334_volume(mesh: &Mesh<3>, e: u32, order: u8) -> f64 {
 
 /// `(J, x)` of the pre-D334 fallback at `xi`.
 fn pre_d334_map(mesh: &Mesh<3>, e: u32, xi: &[f64]) -> (nalgebra::DMatrix<f64>, [f64; 3]) {
-    use fem_element::ReferenceElement;
     let re = ElementType::Pyramid5.ref_elem(1);
     let npe = re.n_dofs();
     let nodes = mesh.element_nodes(e).to_vec();

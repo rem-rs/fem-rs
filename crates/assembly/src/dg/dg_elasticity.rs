@@ -290,8 +290,8 @@ fn assemble_interior_face_stress<S: FESpace>(
 
     let nodes_l = mesh.element_nodes(el);
     let nodes_r = mesh.element_nodes(er);
-    let (jac_l, det_l) = simplex_jac(mesh, nodes_l, dim);
-    let (jac_r, det_r) = simplex_jac(mesh, nodes_r, dim);
+    let (jac_l, _det_l) = simplex_jac(mesh, nodes_l, dim);
+    let (jac_r, _det_r) = simplex_jac(mesh, nodes_r, dim);
     let jit_l = jac_l.clone().try_inverse().unwrap().transpose();
     let jit_r = jac_r.clone().try_inverse().unwrap().transpose();
 

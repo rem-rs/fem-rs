@@ -14,7 +14,6 @@
 use fem_linalg::CooMatrix;
 use fem_mesh::topology::MeshTopology;
 use fem_solver::SolverConfig;
-use fem_element::ReferenceElement;
 use fem_element::lagrange::{TriPk, TetPk, SegPk, TriPk as TriFacePk};
 
 /// Scalar Pk DOFs for a simplex in dimension `dim`.

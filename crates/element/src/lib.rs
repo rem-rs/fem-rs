@@ -102,12 +102,12 @@ pub use serendipity::{HexSerendipityPk, QuadSerendipityPk};
 /// Describes how DOFs are mapped from reference to physical space:
 /// - `VALUE`: Point values (standard Lagrange)
 /// - `INTEGRAL`: Integral moments (e.g., RT face integrals)
-/// - `H_DIV`: H(div) mapping (contravariant Piola)
-/// - `H_CURL`: H(curl) mapping (covariant Piola)
-/// - `H_DIV_R1D`: H(div) mapping for 1D elements
-/// - `H_CURL_R1D`: H(curl) mapping for 1D elements
-/// - `H_DIV_R2D`: H(div) mapping for 2D elements
-/// - `H_CURL_R2D`: H(curl) mapping for 2D elements
+/// - `HDiv`: H(div) mapping (contravariant Piola)
+/// - `HCurl`: H(curl) mapping (covariant Piola)
+/// - `HDivR1d`: H(div) mapping for 1D elements
+/// - `HCurlR1d`: H(curl) mapping for 1D elements
+/// - `HDivR2d`: H(div) mapping for 2D elements
+/// - `HCurlR2d`: H(curl) mapping for 2D elements
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MapType {
     /// Point values (standard Lagrange).
@@ -115,17 +115,17 @@ pub enum MapType {
     /// Integral moments (e.g., RT face integrals).
     INTEGRAL = 2,
     /// H(div) mapping (contravariant Piola).
-    H_DIV = 3,
+    HDiv = 3,
     /// H(curl) mapping (covariant Piola).
-    H_CURL = 4,
+    HCurl = 4,
     /// H(div) mapping for 1D elements.
-    H_DIV_R1D = 5,
+    HDivR1d = 5,
     /// H(curl) mapping for 1D elements.
-    H_CURL_R1D = 6,
+    HCurlR1d = 6,
     /// H(div) mapping for 2D elements.
-    H_DIV_R2D = 7,
+    HDivR2d = 7,
     /// H(curl) mapping for 2D elements.
-    H_CURL_R2D = 8,
+    HCurlR2d = 8,
 }
 
 impl Default for MapType {
@@ -144,7 +144,7 @@ impl MapType {
     pub fn is_hdiv(&self) -> bool {
         matches!(
             self,
-            MapType::H_DIV | MapType::H_DIV_R1D | MapType::H_DIV_R2D
+            MapType::HDiv | MapType::HDivR1d | MapType::HDivR2d
         )
     }
 
@@ -152,7 +152,7 @@ impl MapType {
     pub fn is_hcurl(&self) -> bool {
         matches!(
             self,
-            MapType::H_CURL | MapType::H_CURL_R1D | MapType::H_CURL_R2D
+            MapType::HCurl | MapType::HCurlR1d | MapType::HCurlR2d
         )
     }
 }
@@ -168,25 +168,25 @@ mod tests {
     fn map_type_is_integral() {
         assert!(MapType::INTEGRAL.is_integral());
         assert!(!MapType::VALUE.is_integral());
-        assert!(!MapType::H_DIV.is_integral());
+        assert!(!MapType::HDiv.is_integral());
     }
 
     #[test]
     fn map_type_is_hdiv() {
-        assert!(MapType::H_DIV.is_hdiv());
-        assert!(MapType::H_DIV_R1D.is_hdiv());
-        assert!(MapType::H_DIV_R2D.is_hdiv());
+        assert!(MapType::HDiv.is_hdiv());
+        assert!(MapType::HDivR1d.is_hdiv());
+        assert!(MapType::HDivR2d.is_hdiv());
         assert!(!MapType::VALUE.is_hdiv());
-        assert!(!MapType::H_CURL.is_hdiv());
+        assert!(!MapType::HCurl.is_hdiv());
     }
 
     #[test]
     fn map_type_is_hcurl() {
-        assert!(MapType::H_CURL.is_hcurl());
-        assert!(MapType::H_CURL_R1D.is_hcurl());
-        assert!(MapType::H_CURL_R2D.is_hcurl());
+        assert!(MapType::HCurl.is_hcurl());
+        assert!(MapType::HCurlR1d.is_hcurl());
+        assert!(MapType::HCurlR2d.is_hcurl());
         assert!(!MapType::VALUE.is_hcurl());
-        assert!(!MapType::H_DIV.is_hcurl());
+        assert!(!MapType::HDiv.is_hcurl());
     }
 
     #[test]

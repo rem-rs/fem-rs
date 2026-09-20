@@ -18,7 +18,7 @@ use nalgebra::DMatrix;
 
 use std::f64::consts::PI;
 
-use fem_core::types::{DofId, ElemId, NodeId};
+use fem_core::types::{ElemId, NodeId};
 use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
@@ -384,8 +384,6 @@ impl<V: VectorCoeff> DgFaceIntegrator for DGAdvectionIntegrator<V> {
 
         // Project velocity onto face normal: vn = b·n
         let vn: f64 = (0..d).map(|i| b[i] * qp.normal[i]).sum();
-        let vn_pos = vn.max(0.0);
-        let vn_neg = vn.min(0.0);
 
         let phi_l = qp.phi_l;
         let phi_r = qp.phi_r;
@@ -828,7 +826,7 @@ pub fn solve_dg_implicit(
     u: &mut [f64],
     cfg: &fem_solver::SolverConfig,
 ) -> Result<fem_solver::SolveResult, fem_solver::SolverError> {
-    use fem_solver::{solve_gmres_iluk, SolverConfig};
+    use fem_solver::solve_gmres_iluk;
     let n = mass.nrows;
     // A = M + dt*K  (backward Euler: β=1)
     // Build A as CooMatrix to handle different sparsity patterns of M and K

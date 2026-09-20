@@ -1,8 +1,10 @@
 //! Rebuild boundary face data for a 3-D mesh after refinement.
 //!
 //! 3-D refinement functions (`refine_nonconforming_3d`, `refine_prism6_uniform`,
-//! `refine_pyramid5_uniform`, `refine_mixed_3d`) produce meshes without
-//! `face_conn` / `face_tags`. This module provides `rebuild_3d_boundary` to
+//! `refine_mixed_3d`) produce meshes without
+//! `face_conn` / `face_tags`.  (`refine_pyramid5_uniform` delegates to
+//! `refine_mixed_3d` since D472 and returns an already-rebuilt mixed mesh.)
+//! This module provides `rebuild_3d_boundary` to
 //! reconstruct them from the original mesh's boundary faces, matching MFEM's
 //! `UniformRefinement3D_base` boundary-element generation **exactly**:
 //!

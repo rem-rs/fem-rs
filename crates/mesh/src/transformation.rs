@@ -1040,7 +1040,6 @@ mod find_points_tests {
         // Bump an interior node of the 27-node table: pick the slot whose
         // reference position is the lattice center (order-2 HexQk coords live
         // on [-1,1]^3), independent of the table's slot ordering.
-        use fem_element::ReferenceElement;
         let high = fem_element::lagrange::factory::ref_elem(
             fem_element::lagrange::factory::ElemType::Hex,
             2,

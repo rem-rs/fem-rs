@@ -45,10 +45,10 @@ use fem_core::ElemId;
 use fem_element::lagrange::QuadQ2;
 use fem_element::raviart_thomas::QuadRT1;
 use fem_element::{ReferenceElement, VectorReferenceElement};
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::CooMatrix;
 use fem_element::raviart_thomas::QuadRTk;
-use fem_space::{FESpace, HDivSpace};
-use fem_mesh::{Mesh, topology::MeshTopology};
+use fem_space::HDivSpace;
+use fem_mesh::Mesh;
 use fem_solver::{SolverConfig, solve_pcg_dsmoother, solve_pcg_gssmoother};
 
 /// RT1 slave→master transfer matrices (fine edge = GL points of the coarse
@@ -146,11 +146,11 @@ pub fn rt1_hanging_constraints(
     let mut out: Vec<Rt1Slave> = Vec::new();
     let mut n_missing = 0usize;
     for (&edge, &slave_base) in edge_dof {
-        let Some(&((mut cur), mut m)) = parent_of.get(&edge) else { continue };
+        let Some(&(mut cur, mut m)) = parent_of.get(&edge) else { continue };
         // Chain to the ultimate master that is a current element edge.
         let mut guard = 0;
         while !edge_dof.contains_key(&cur) {
-            let Some(&((pp), mm)) = parent_of.get(&cur) else {
+            let Some(&(pp, mm)) = parent_of.get(&cur) else {
                 break; // no further parent — leave as-is (should not happen)
             };
             m = mat_mul(m, mm);

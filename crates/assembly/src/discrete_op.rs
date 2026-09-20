@@ -2267,9 +2267,7 @@ mod tests {
                 coeffs[k] = 2.0 * r - 1.0;
             }
 
-            let [a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3] = coeffs else {
-                unreachable!()
-            };
+            let [a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3] = coeffs;
 
             // A = (a0 + a1·x + a2·y + a3·z, b0 + b1·x + b2·y + b3·z,
             //      c0 + c1·x + c2·y + c3·z)

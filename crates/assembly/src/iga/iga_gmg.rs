@@ -19,8 +19,7 @@ use fem_core::DofId;
 use fem_element::iga::{NurbsKnotVector, NurbsMesh3D, NurbsPatch3DData};
 use fem_linalg::{CooMatrix, CsrMatrix, csr_spmm};
 use fem_solver::geometric_mg::{
-    GeometricMgConfig, GeometricMgHierarchy, GeometricMgLevel, GeometricMgPrecond,
-    MgCycleType, MgSmootherType,
+    GeometricMgHierarchy, GeometricMgLevel, GeometricMgPrecond,
 };
 use fem_space::IgaMultiPatchMesh3D;
 use linlvo::core::preconditioner::Preconditioner;
@@ -735,6 +734,7 @@ pub fn build_iga_gmg_hierarchy_multipatch_3d(
 mod tests {
     use super::*;
     use fem_linalg::CooMatrix;
+    use fem_solver::geometric_mg::{GeometricMgConfig, MgCycleType, MgSmootherType};
     use fem_solver::{solve_cg, solve_pcg_precond, SolverConfig};
 
     /// Build a degree-1 B-spline (hat-function) stiffness matrix on [0, 1]

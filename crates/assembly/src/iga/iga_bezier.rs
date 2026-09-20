@@ -346,8 +346,8 @@ pub fn assemble_iga_diffusion_2d_bezier(
         let mut phi_r = vec![0.0_f64; n_local];
         let mut grads_r = vec![0.0_f64; n_local * 2];
 
-        for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
-            for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+        for (eu, (span_u, _u0, _u1)) in spans_u.iter().enumerate() {
+            for (ev, (span_v, _v0, _v1)) in spans_v.iter().enumerate() {
                 element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {
@@ -415,8 +415,8 @@ pub fn assemble_iga_mass_2d_bezier(
         let mut phi_r = vec![0.0_f64; n_local];
         let mut grads_r = vec![0.0_f64; n_local * 2];
 
-        for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
-            for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+        for (eu, (span_u, _u0, _u1)) in spans_u.iter().enumerate() {
+            for (ev, (span_v, _v0, _v1)) in spans_v.iter().enumerate() {
                 element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {
@@ -482,8 +482,8 @@ pub fn assemble_iga_load_2d_bezier(
         let mut phi_r = vec![0.0_f64; n_local];
         let mut grads_r = vec![0.0_f64; n_local * 2];
 
-        for (eu, (span_u, u0, u1)) in spans_u.iter().enumerate() {
-            for (ev, (span_v, v0, v1)) in spans_v.iter().enumerate() {
+        for (eu, (span_u, _u0, _u1)) in spans_u.iter().enumerate() {
+            for (ev, (span_v, _v0, _v1)) in spans_v.iter().enumerate() {
                 element_dof_map(*span_u, *span_v, p, q, nu, 0, &mut patch_idx);
                 element_dof_map(*span_u, *span_v, p, q, nu, dof_offset, &mut l2g);
                 for (&qx, &wx) in qpts.iter().zip(&qwts) {

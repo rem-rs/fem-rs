@@ -390,7 +390,6 @@ mod tests {
             let ndl = sre.n_dofs();
             let mut phi = vec![0.0_f64; ndl];
             for (q, &s) in gs.iter().enumerate() {
-                let xi = [0.5 * (1.0 + s)];
                 let x = [mid[0] + s * 0.5 * (p1[0] - p0[0]), mid[1] + s * 0.5 * (p1[1] - p0[1])];
                 let w = ws[q] * len * 0.5;
                 let xi_e = geo.invert(&x);

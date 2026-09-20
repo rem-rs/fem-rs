@@ -328,7 +328,7 @@ impl H1TetFacePk {
         // order is `[v0, v1, v2, edge v0→v1, edge v1→v2, edge v2→v0,
         // interior…]`, nodes at the closed Gauss-Lobatto points), so its
         // coordinates are the face dof positions directly.
-        let mut nodes: Vec<[f64; 2]> = fem_element::lagrange::H1TriPk::new(p)
+        let nodes: Vec<[f64; 2]> = fem_element::lagrange::H1TriPk::new(p)
             .dof_coords()
             .into_iter()
             .map(|c| [c[0], c[1]])
@@ -3977,7 +3977,6 @@ mod tests {
             // Gauss-Lobatto `H1_TetrahedronElement` and the boundary element
             // (`H1TetFacePk`) is its trace, so the per-DOF node positions and
             // the assembled values match MFEM at all orders.
-            let agrees = true;
             let mesh = Mesh::<3>::make_cartesian_3d(1, 1, 1, etype, 1.0, 1.0, 1.0, false);
             let space = H1Space::new(mesh, case.p);
             let fdofs = face_dofs_h1(&space);

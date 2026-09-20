@@ -92,8 +92,6 @@ pub fn build_quad_qk_pa_data<M: MeshTopology>(
 
     let (qpts, _qwts) = gauss_legendre_1d_n(nq);
 
-    let quad4_ref = quad_vertices();
-
     for e in 0..n_elems {
         let nodes = mesh.element_nodes(e as u32);
         let v: Vec<[f64; 2]> = (0..4)

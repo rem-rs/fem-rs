@@ -36,8 +36,6 @@ use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_linalg::complex_csr::{ComplexCoo, ComplexCsr, solve_gmres_complex};
 use fem_mesh::ElementTransformation;
 use fem_mesh::topology::MeshTopology;
-use fem_element::ReferenceElement;
-use fem_mesh::element_type::ElementType;
 use crate::postproc::grid_function::{ref_elem_vol, simplex_jacobian, phys_coords};
 use fem_space::fe_space::FESpace;
 
@@ -1307,11 +1305,13 @@ impl<M: MeshTopology + Clone> ComplexGridFunctionSpace for fem_space::H1Space<M>
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use fem_mesh::Mesh;
     use fem_space::H1Space;
     use crate::standard::{DiffusionIntegrator, MassIntegrator};
+    use crate::mixed::PressureDivIntegrator;
 
     /// For 蠅 = 0 the complex system collapses to the pure stiffness matrix.
     #[test]
@@ -1433,9 +1433,6 @@ mod tests {
 
     /// Test compute_lp_error for a complex field against exact solution.
     #[test]
-
-    /// Test compute_lp_error for a complex field against exact solution.
-    #[test]
     fn complex_compute_lp_error_l2() {
         let mesh = Mesh::<2>::unit_square_tri(8);
         let space = H1Space::new(mesh, 1);
@@ -1496,7 +1493,6 @@ mod tests {
     }
 
     use super::{MixedSesquilinearForm, MixedComplexSystem};
-    use crate::mixed::PressureDivIntegrator;
 
     #[test]
     fn mixed_sesquilinear_form_rectangular() {

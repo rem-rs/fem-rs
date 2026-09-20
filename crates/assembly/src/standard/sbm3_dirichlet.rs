@@ -1127,12 +1127,10 @@ mod tests {
         let space = H1Space::new(Mesh::<2>::unit_square_tri(4), 1);
         let marker = marker_split(space.mesh());
         let nd = space.n_dofs();
-        let dm = space.dof_manager();
 
         let d0 = [0.1_f64, 0.05];
         let mut dist = vec![0.0_f64; 2 * nd];
         for dof in 0..nd as u32 {
-            let x = dm.dof_coord(dof);
             dist[dof as usize] = d0[0];
             dist[nd + dof as usize] = d0[1];
         }

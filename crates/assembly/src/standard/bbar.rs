@@ -488,7 +488,6 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
             let raw_dofs: &[u32] = space.element_dofs(e);
             let global_dofs: Vec<usize> = raw_dofs.iter().map(|&d| d as usize).collect();
             let nodes = mesh.element_nodes(e);
-            let elem_tag = mesh.element_tag(e);
 
             // Current element displacement vector
             let mut u_elem = vec![0.0_f64; n_elem_dofs];
@@ -513,11 +512,11 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
             let mut avg_J = 0.0_f64;
             let mut elem_vol_0 = 0.0_f64; // volume of the reference configuration
 
-            for (q, xi) in quad.points.iter().enumerate() {
+            for (_q, xi) in quad.points.iter().enumerate() {
                 let (w_q, _xp) = Self::eval_gradients(
                     mesh, e, xi, affine_tr.as_ref(), geo_elem.as_ref(),
                     &ref_elem, &mut phi, &mut grad_ref, &mut grad_phys,
-                    n_ldofs, dim,
+                    dim,
                 );
                 // Deformation gradient F = I + ∇u (full 3×3 identity ensures
                 // F_33 = 1 for 2D plane-strain, which StVenantKirchhoff expects)
@@ -555,7 +554,7 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
                 let (w_q, _xp) = Self::eval_gradients(
                     mesh, e, xi, affine_tr.as_ref(), geo_elem.as_ref(),
                     &ref_elem, &mut phi, &mut grad_ref, &mut grad_phys,
-                    n_ldofs, dim,
+                    dim,
                 );
 
                 // Deformation gradient F (full 3×3 identity)
@@ -722,7 +721,6 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
         phi: &mut [f64],
         grad_ref: &mut [f64],
         grad_phys: &mut [f64],
-        n_ldofs: usize,
         dim: usize,
     ) -> (f64, Vec<f64>) {
         let n_ldofs = ref_elem.n_dofs();

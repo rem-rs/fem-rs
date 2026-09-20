@@ -321,7 +321,7 @@ pub fn assemble_n2s_contact_3d(
     for (slave_node_id, slave_pos) in slave_coords.iter().enumerate() {
         let p = [slave_pos[0], slave_pos[1], slave_pos[2]];
 
-        if let Some((tri_idx, closest, gap)) = bvh.find_closest(&p, master_triangles, cfg.search_dist) {
+        if let Some((tri_idx, _closest, gap)) = bvh.find_closest(&p, master_triangles, cfg.search_dist) {
             if gap >= 0.0 { continue; }
 
             let tri = &master_triangles[tri_idx];
@@ -431,7 +431,7 @@ pub fn assemble_n2s_contact_3d_force_only(
     for (slave_node_id, slave_pos) in slave_coords.iter().enumerate() {
         let p = [slave_pos[0], slave_pos[1], slave_pos[2]];
 
-        if let Some((tri_idx, closest, gap)) = bvh.find_closest(&p, master_triangles, cfg.search_dist) {
+        if let Some((tri_idx, _closest, gap)) = bvh.find_closest(&p, master_triangles, cfg.search_dist) {
             if gap >= 0.0 { continue; }
 
             let tri = &master_triangles[tri_idx];
@@ -546,7 +546,7 @@ pub fn assemble_general_contact_3d<M: MeshTopology>(
         // Skip triangles that share an edge (same face adjacency)
         // For now: use a simplified approach — for each master triangle,
         // check nearby triangles, skip adjacent ones
-        let (f_self, k_self) = assemble_self_contact_3d(
+        let (f_self, _k_self) = assemble_self_contact_3d(
             &master_tris, &bvh, u, &n2s_cfg, n_total_dofs,
         );
 
@@ -574,14 +574,12 @@ pub fn assemble_general_contact_3d<M: MeshTopology>(
 fn assemble_self_contact_3d(
     master_triangles: &[MasterTriangle],
     bvh: &Bvh,
-    u: Option<&[f64]>,
+    _u: Option<&[f64]>,
     cfg: &N2SContactConfig3D,
     n_total_dofs: usize,
 ) -> (Vec<f64>, CooMatrix<f64>) {
     let f_self = vec![0.0_f64; n_total_dofs];
     let k_self = CooMatrix::new(n_total_dofs, n_total_dofs);
-    let has_friction = cfg.mu > 0.0 && cfg.eps_t > 0.0 && u.is_some();
-    let u_vec = u.unwrap_or(&[]);
 
     let n_tris = master_triangles.len();
 
@@ -595,7 +593,7 @@ fn assemble_self_contact_3d(
             p[2] - tri_i.normal[2] * 0.01,
         ];
 
-        if let Some((j_idx, closest, gap)) = bvh.find_closest(&search_pt, master_triangles, cfg.search_dist) {
+        if let Some((j_idx, _closest, gap)) = bvh.find_closest(&search_pt, master_triangles, cfg.search_dist) {
             if j_idx == i { continue; } // same triangle
             if gap >= 0.0 { continue; }
 
@@ -614,8 +612,6 @@ fn assemble_self_contact_3d(
             // Distribute force to triangle vertices (linear shape functions)
             // Using barycentric coords of the closest point on the triangle
             // For simplicity, distribute equally to all 3 nodes
-            let w = 1.0 / 3.0;
-
             for &node in &[tri_j.a, tri_j.b, tri_j.c] {
                 // Find node index — simplified: use face_idx and mesh to determine
                 // Without a mesh, we can't map back to global DOF indices.

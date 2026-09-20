@@ -6,7 +6,7 @@ use fem_mesh::Mesh;
 #[test]
 fn nc_state_3d_tet4_refine_derefine_roundtrip() {
     let mut nc = amr::NCState3D::new();
-    let mut mesh = Mesh::<3>::unit_cube_tet(2);
+    let mesh = Mesh::<3>::unit_cube_tet(2);
     let orig_nodes = mesh.n_nodes();
     let orig_elems = mesh.n_elems();
     let marked = vec![0u32];

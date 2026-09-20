@@ -1517,7 +1517,7 @@ fn csr_axpy_solve(
 //
 // Reference: Buffa, De Falco, Sangalli [2010], Evans, Hughes [2013].
 
-use fem_element::nurbs_vector::{NurbsHDiv2D, NurbsHDiv3D, NurbsHCurl2D, NurbsHCurl3D};
+use fem_element::nurbs_vector::{NurbsHDiv2D, NurbsHCurl2D};
 use fem_element::reference::VectorReferenceElement;
 
 /// Assemble the H(div) mass matrix for a 2D NURBS patch: M_{AB} = ∫ (v_A · v_B) dΩ.
@@ -1535,8 +1535,6 @@ pub fn assemble_nurbs_hdiv_mass_2d(
     let qr = patch_quad_2d(pd, quad_order);
 
     let mut basis_ref = vec![0.0_f64; n * 2];
-    let mut jac = [[0.0_f64; 2]; 2];
-    let mut x_phys = [0.0_f64; 2];
 
     for (qp_xi, qp_w) in qr.points.iter().zip(qr.weights.iter()) {
         // Evaluate reference-space basis functions.
@@ -1551,8 +1549,8 @@ pub fn assemble_nurbs_hdiv_mass_2d(
         let mut basis = vec![0.0_f64; patch.n_dofs()];
         patch.eval_basis(qp_xi, &mut basis);
 
-        jac = [[0.0_f64; 2]; 2];
-        x_phys = [0.0_f64; 2];
+        let mut jac = [[0.0_f64; 2]; 2];
+        let mut x_phys = [0.0_f64; 2];
         for a in 0..patch.n_dofs() {
             x_phys[0] += basis[a] * pd.control_pts[a][0];
             x_phys[1] += basis[a] * pd.control_pts[a][1];
@@ -2332,7 +2330,7 @@ mod tests {
             Err(r) => eprintln!("  [IGA hyperelasticity] FAILED: {} iters, ‖F‖={:.3e}", r.iterations, r.final_residual),
         }
 
-        if let Ok(r) = &result {
+        if result.is_ok() {
             let norm: f64 = u.iter().map(|x| x * x).sum::<f64>().sqrt();
             eprintln!("  [IGA hyperelasticity 2D] ||u||={:.6e}", norm);
             assert!(norm > 0.0 && norm < 100.0, "||u||={:.6e} outside range", norm);

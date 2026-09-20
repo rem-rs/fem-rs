@@ -14,8 +14,7 @@
 use fem_core::types::{ElemId, FaceId, NodeId};
 use fem_element::lagrange::factory::QuadQk;
 use fem_element::ReferenceElement;
-use fem_mesh::{element_type::ElementType, simplex::Mesh, topology::MeshTopology};
-use fem_linalg::CooMatrix;
+use fem_mesh::{simplex::Mesh, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 use fem_space::L2Space;
 
@@ -289,7 +288,6 @@ pub fn assemble_ex41_bdr_faces<F>(
     let (gp4, gw4) = fem_element::quadrature::gauss_legendre_01(4);
 
     for f in bdr_faces {
-        let e1 = f.e1 as usize;
         let gn1 = mesh.geometry_nodes(f.e1);
         for k in 0..4 {
             let c = mesh.geom_coords_of(gn1[k]);
@@ -505,8 +503,6 @@ pub fn assemble_ex41_interior_faces<F>(
     let (gp4, gw4) = fem_element::quadrature::gauss_legendre_01(4);
 
     for f in faces {
-        let e1 = f.e1 as usize;
-        let e2 = f.e2 as usize;
         let gn1 = mesh.geometry_nodes(f.e1);
         let gn2 = mesh.geometry_nodes(f.e2);
         for k in 0..4 {

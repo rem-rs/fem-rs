@@ -314,7 +314,6 @@ pub struct TetRTk {
 }
 impl TetRTk {
     pub fn new(p: usize) -> Self {
-        assert!(p >= 0);
         TetRTk { order: p }
     }
 }

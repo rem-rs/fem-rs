@@ -6,11 +6,10 @@
 //! - [`iga_collect_refinement_knots`] — collect midpoints of marked knot spans
 //! - [`iga_adaptivity_step_2d`] — one complete estimate–mark–refine cycle
 
-use fem_element::iga::{NurbsKnotVector, NurbsMesh2D, NurbsPatch2D, NurbsPatch2DData};
+use fem_element::iga::{NurbsMesh2D, NurbsPatch2D, NurbsPatch2DData};
 use fem_element::nurbs::h_refine2d;
 use fem_element::quadrature::seg_rule;
 use fem_element::ReferenceElement;
-use fem_linalg::{CooMatrix, CsrMatrix};
 
 use crate::iga::iga_gmg::{build_prolongation_1d_between, build_prolongation_2d};
 use crate::postproc::error_estimate::ElementIndicators;
@@ -63,7 +62,7 @@ pub fn iga_zz_estimator_2d(
 
         // - 2 - Evaluate σ_h = ∇u_h at each span centre ------------------------------
         let mut sigma_h = Vec::with_capacity(n_spans);
-        for (eu, (_su, u0, u1)) in spans_u.iter().enumerate() {
+        for (_eu, (_su, u0, u1)) in spans_u.iter().enumerate() {
             for (_ev, (_sv, v0, v1)) in spans_v.iter().enumerate() {
                 let uc = (u0 + u1) / 2.0;
                 let vc = (v0 + v1) / 2.0;
@@ -82,7 +81,6 @@ pub fn iga_zz_estimator_2d(
 
         // - 3 - Nodal averaging: recovered gradient G at control points ---------------
         let nu = pd.kv_u.n_basis();
-        let nv = pd.kv_v.n_basis();
         let mut g_sum = vec![[0.0_f64; 2]; n_dof];
         let mut g_count = vec![0usize; n_dof];
 
@@ -120,7 +118,7 @@ pub fn iga_zz_estimator_2d(
         let qpts: Vec<f64> = seg.points.iter().map(|p| p[0]).collect();
         let qwts = seg.weights;
 
-        for (eu, (_su, u0, u1)) in spans_u.iter().enumerate() {
+        for (_eu, (_su, u0, u1)) in spans_u.iter().enumerate() {
             let hu = u1 - u0;
             for (_ev, (_sv, v0, v1)) in spans_v.iter().enumerate() {
                 let hv = v1 - v0;

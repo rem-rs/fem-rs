@@ -321,7 +321,6 @@ pub fn gauss_jacobi(n: usize, alpha: f64, beta: f64) -> (Vec<f64>, Vec<f64>) {
 
     // Golub-Welsch algorithm: build the symmetric tridiagonal Jacobi matrix
     // and compute its eigenvalues (nodes) and first components of eigenvectors (weights).
-    let n_f = n as f64;
     let mut diag = vec![0.0f64; n];
     let mut offd = vec![0.0f64; n - 1];
 

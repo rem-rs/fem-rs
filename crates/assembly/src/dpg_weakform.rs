@@ -1976,7 +1976,6 @@ mod tests {
     /// normal equations `A x = b` element-wise (before BC elimination).
     #[test]
     fn poisson_dpg_exact_solution_satisfies_system() {
-        use fem_element::{ReferenceElement, VectorReferenceElement};
         use fem_mesh::MeshTopology as MT;
 
         let _pi = std::f64::consts::PI;
@@ -2072,7 +2071,6 @@ mod tests {
     fn poisson_dpg_elementwise_debug() {
         use fem_mesh::MeshTopology as MT;
 
-        let pi = std::f64::consts::PI;
         let mesh = Mesh::<2>::unit_square_quad(2);
         let p = 1u8;
         let mut a: DpgWeakForm<Mesh<2>> = DpgWeakForm::new(mesh.clone());

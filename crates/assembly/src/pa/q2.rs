@@ -270,7 +270,6 @@ mod tests {
     use super::*;
     use fem_element::ReferenceElement;
     use fem_mesh::Mesh;
-    use fem_space::H1Space;
     use fem_space::fe_space::FESpace;
 
     /// D77 pin: the kernel's slot → tensor map is **bit-identical** to

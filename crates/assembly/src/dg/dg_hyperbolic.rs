@@ -293,7 +293,6 @@ fn compute_inv_mass(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
             let det_j = match shape {
                 ElemShape::Tri => tri3_jac_at_qp(mesh, e as u32).0,
                 ElemShape::Quad => {
-                    let nodes = mesh.element_nodes(e as u32);
                     let p = get_quad_nodes(mesh, e as u32);
                     let (det, _) = quad4_jac_at_qp(&p, xi[0], xi[1]);
                     det
@@ -318,7 +317,6 @@ fn elem_centroid_jac(mesh: &dyn MeshTopology, elem: u32, shape: ElemShape) -> f6
     match shape {
         ElemShape::Tri => tri3_jac_at_qp(mesh, elem).0,
         ElemShape::Quad => {
-            let nodes = mesh.element_nodes(elem);
             let p = get_quad_nodes(mesh, elem);
             quad4_jac_at_qp(&p, 0.0, 0.0).0  // centroid (ξ=0, η=0)
         }
@@ -343,7 +341,6 @@ fn compute_weak_div(mesh: &dyn MeshTopology, ref_elem: &dyn ReferenceElement, n_
             let (det_j, jit) = match shape {
                 ElemShape::Tri => tri3_jac_at_qp(mesh, e as u32),
                 ElemShape::Quad => {
-                    let nodes = mesh.element_nodes(e as u32);
                     let p = get_quad_nodes(mesh, e as u32);
                     quad4_jac_at_qp(&p, xi[0], xi[1])
                 }
