@@ -355,9 +355,25 @@ impl<T: Scalar> CsrMatrix<T> {
     /// (linalg/sparsemat.cpp:1914; the reaction `rhs(col) -= sol * A[k]` at
     /// :1959 uses the entry of row `col`, not of the pivot row).  This only
     /// requires **structural** symmetry — the mirror `A[j,row]` must exist in
-    /// row `j`'s sparsity pattern (MFEM aborts when it does not, we silently
+    /// row `row`'s sparsity pattern (MFEM aborts when it does not, we silently
     /// skip) — and is therefore valid for numerically nonsymmetric systems
     /// such as saddle-point problems `[A −Bᵀ; B 0]` (D409).
+    ///
+    /// Exposure to one-sidedly asymmetric patterns (D452): the column sweep
+    /// below only visits the entries *stored in row `row`*, so a column entry
+    /// `A[j,row]` whose mirror `A[row,j]` is **absent** from row `row`'s
+    /// pattern is never visited — it is neither zeroed nor reaction-compensated
+    /// and silently corrupts row `j` once `x[row] = value` is enforced.  MFEM
+    /// aborts in this situation (`EliminateRowCol () #3`); here it is silent.
+    /// In practice COO→CSR can build such a pattern: the DPG assemblers scatter
+    /// element entries through `CooMatrix::add` with a `|v| > 1e-30` drop
+    /// filter (see `dpg_maxwell.rs`/`dpg_elasticity.rs`), so under that
+    /// threshold one direction of a numerically symmetric coupling can be
+    /// dropped while its mirror survives.  With `value == 0.0` (the DPG usage)
+    /// the skipped reaction and the surviving `A[j,row]·x[row]` term are both
+    /// zero, so no harm is done; callers eliminating **nonzero** essential
+    /// values must guarantee a structurally symmetric pattern (e.g. scatter
+    /// both `A[i,j]` and `A[j,i]` unconditionally).
     ///
     /// Exploiting the structural symmetry, we only visit neighbors of `row`
     /// in the sparsity graph, reducing cost from O(n) to O(nnz_per_row).

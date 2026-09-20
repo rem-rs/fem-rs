@@ -109,8 +109,25 @@ impl<S: FESpace> BilinearForm<S> {
         }
     }
 
-    /// Fast diagonal-only BC elimination for SPD systems.
-    pub fn eliminate_essential_bc_from_diag(&mut self, ess_dofs: &[usize], bc_vals: &[f64], rhs: &mut [f64]) {        let a = self.cached.as_mut().expect("assemble() must be called first");
+    /// Diagonal-only BC elimination (D450).
+    ///
+    /// For each essential DOF `d = ess_dofs[i]` this does **only** two things:
+    /// sets the stored diagonal entry `A[d,d] = 1.0` and `rhs[d] = bc_vals[i]`.
+    ///
+    /// It does **not** zero the off-diagonal entries of row `d`/column `d`,
+    /// and it computes **no reactions** (no `rhs[i] -= A[i,d]·val`).  This is
+    /// the eigenvalue-style `EliminateEssentialBCDiag` semantics (MFEM
+    /// `DiagonalPolicy::DIAG_ONE`), appropriate when reactions are not needed
+    /// (e.g. generalized eigenproblems) or when the essential rows/cols are
+    /// already decoupled by the caller.  For full symmetric elimination with
+    /// reaction recovery use [`Self::eliminate_essential_bc`].
+    pub fn eliminate_essential_bc_from_diag(
+        &mut self,
+        ess_dofs: &[usize],
+        bc_vals: &[f64],
+        rhs: &mut [f64],
+    ) {
+        let a = self.cached.as_mut().expect("assemble() must be called first");
         for (pos, &d) in ess_dofs.iter().enumerate() {
             for r in a.row_ptr[d]..a.row_ptr[d + 1] {
                 if a.col_idx[r] as usize == d {

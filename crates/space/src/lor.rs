@@ -504,7 +504,9 @@ fn build_nd_perm_3d(
                             // - x− : y-group (iz−1)·k + (k−1−a), z-group
                             //   a·(k−1) + (k−1−iy).
                             let g = k * (k - 1);
-                            let (lo, hi) = if i1 == 0 || i1 == k {
+                            // `hi` component of the split is not needed here —
+                            // only the `lo` flag selects the tangent group.
+                            let (lo, _) = if i1 == 0 || i1 == k {
                                 (i1 == k, i2)
                             } else {
                                 (i2 == k, i1)

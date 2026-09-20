@@ -330,7 +330,8 @@ fn build_hdiv_quad_face_constraints<M: MeshTopology>(
     // and the 4 local vertex indices of each such face.
     // Hex8:  6 faces, all quad — HEX_FACES local indices.
     // Prism6: faces 2,3,4 are quad — PRISM_FACES[2..5].
-    // Pyramid5: face 4 is quad — PYRAMID_FACES[4].
+    // Pyramid5: face 0 is the base quad — PYRAMID_FACES[0] (D445 reordered
+    // PYRAMID_FACES to MFEM FaceVert order: base first, then the 4 triangles).
     let quad_face_info: Vec<[usize; 4]> = match npe {
         8 => vec![
             [0, 1, 2, 3], // bottom

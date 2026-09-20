@@ -626,7 +626,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         let verts8 = hex8_verts(&mesh, e);
                         // D225: register in MFEM `FaceVert` block order so the
                         // global face-dof ranges follow MFEM's numbering.
-                        for (block, &lf) in HEX_ND_BLOCK_TO_QUAD_FACE.iter().enumerate() {
+                        for &lf in HEX_ND_BLOCK_TO_QUAD_FACE.iter() {
                             let (la, lb, lc, ld) = HEX_QUAD_FACES[lf];
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             if quad_face_to_dof.contains_key(&key) {
@@ -831,7 +831,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         // `FaceVert` block order (`HEX_QUAD_FACE_TO_ND_BLOCK`
                         // maps this loop's block index to the `HEX_QUAD_FACES`
                         // entry), so the slot table is filled in block order.
-                        for (block, &lf) in HEX_ND_BLOCK_TO_QUAD_FACE.iter().enumerate() {
+                        for &lf in HEX_ND_BLOCK_TO_QUAD_FACE.iter() {
                             let (la, lb, lc, ld) = HEX_QUAD_FACES[lf];
                             let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             let first_dof = quad_face_to_dof[&key];

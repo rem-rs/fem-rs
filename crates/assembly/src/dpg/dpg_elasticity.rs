@@ -262,7 +262,9 @@ pub fn solve_dpg_elasticity_2d<M: MeshTopology>(
         let rar: f64 = (0..n_total).map(|i| r[i] * ar[i]).sum();
         let alpha = if rar.abs() > 1e-30 { rr / rar } else { 0.0 };
         for i in 0..n_total { x[i] += alpha * r[i]; }
-        for &d in &bc_dofs { x[d] = 0.0; }
+        // No per-iteration reset of BC dofs needed (D451): after
+        // `apply_dirichlet_symmetric(d, 0.0, ..)` above, row d is e_d with
+        // rhs[d] = 0, so r[d] = 0 every step and x[d] stays exactly 0.0.
     }
 
     let ux: Vec<f64> = x[..n_nodes].to_vec();

@@ -30,13 +30,18 @@ pub use periodic::*;
 pub use prolong::*;
 pub use mpc::*;
 
+/// D447: gate the test module so `cargo build` (cfg(test) off, where rustc
+/// strips `#[test]` bodies) stops flagging the module-level imports below as
+/// unused — they are required when the tests actually compile.
+#[cfg(test)]
 mod tests {
     use super::*;
     use fem_linalg::{CooMatrix, CsrMatrix};
     use fem_mesh::amr::{HangingFaceConstraint, HangingNodeConstraint};
     use fem_mesh::{Mesh, NCState};
     use crate::dof_manager::DofManager;
-    use crate::fe_space::FESpace;
+    // NOTE: no outer `use crate::fe_space::FESpace;` — every test that needs it
+    // re-imports locally (outer import would make those inner ones redundant).
 
     fn simple_system() -> (CsrMatrix<f64>, Vec<f64>) {
         let mut coo = CooMatrix::<f64>::new(3, 3);
@@ -529,7 +534,6 @@ mod tests {
     #[test]
     fn build_hcurl_hanging_constraints_3d_tet_nd1() {
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::{NCState3D, HangingNodeConstraint, HangingFaceConstraint};
 
         // Create a 3-D Tet mesh and non-conforming refinement.
@@ -568,7 +572,6 @@ mod tests {
     #[test]
     fn build_hcurl_hanging_constraints_3d_tet_nd2() {
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -624,7 +627,6 @@ mod tests {
     #[test]
     fn build_hdiv_hanging_constraints_3d_tet_rt0() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -653,7 +655,6 @@ mod tests {
     #[test]
     fn apply_linear_constraints_hcurl_nd2_preserves_solvability() {
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         // Build a small 3D non-conforming mesh and HCurl ND2 space.
@@ -702,7 +703,6 @@ mod tests {
     #[test]
     fn apply_linear_constraints_hdiv_rt0_preserves_solvability() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -737,7 +737,6 @@ mod tests {
     #[test]
     fn recover_hanging_values_hcurl_nd2_after_solve() {
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -782,7 +781,6 @@ mod tests {
     #[test]
     fn recover_hanging_values_hdiv_rt0_after_solve() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -881,7 +879,6 @@ mod tests {
     #[test]
     fn build_hdiv_hanging_constraints_3d_tet_rt1() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -905,7 +902,6 @@ mod tests {
     #[test]
     fn build_hdiv_hanging_constraints_3d_tet_rt2() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -925,7 +921,6 @@ mod tests {
     #[test]
     fn recover_hanging_values_hdiv_rt1_after_solve() {
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
         use fem_mesh::amr::NCState3D;
 
         let mesh = Mesh::<3>::unit_cube_tet(1);
@@ -974,7 +969,6 @@ mod tests {
     fn build_hcurl_hanging_constraints_hex_nd2() {
         use fem_mesh::amr::NCStateHex;
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
 
         // 2×2×2 hex mesh; refine element 0 → hanging quad faces on the
         // interface with neighbour elements.
@@ -1008,7 +1002,6 @@ mod tests {
     fn build_hcurl_hanging_constraints_hex_nd3() {
         use fem_mesh::amr::NCStateHex;
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
@@ -1038,7 +1031,6 @@ mod tests {
     fn apply_hcurl_hanging_constraints_hex_nd2_preserves_solvability() {
         use fem_mesh::amr::NCStateHex;
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
@@ -1075,7 +1067,6 @@ mod tests {
     fn recover_hcurl_hanging_values_hex_nd2_after_solve() {
         use fem_mesh::amr::NCStateHex;
         use crate::hcurl::HCurlSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
@@ -1120,7 +1111,6 @@ mod tests {
     fn build_hdiv_hanging_constraints_hex_rt0() {
         use fem_mesh::amr::NCStateHex;
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
@@ -1150,7 +1140,6 @@ mod tests {
     fn apply_hdiv_hanging_constraints_hex_rt0_preserves_solvability() {
         use fem_mesh::amr::NCStateHex;
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
@@ -1185,7 +1174,6 @@ mod tests {
     fn recover_hdiv_hanging_values_hex_rt0_after_solve() {
         use fem_mesh::amr::NCStateHex;
         use crate::hdiv::HDivSpace;
-        use crate::fe_space::FESpace;
 
         let mesh = Mesh::<3>::unit_cube_hex(2);
         let mut nc = NCStateHex::new();
