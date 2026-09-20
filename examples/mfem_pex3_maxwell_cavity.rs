@@ -35,7 +35,7 @@ use fem_parallel::{
 };
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_solver::SolverConfig;
-use fem_space::{HCurlSpace, fe_space::FESpace, constraints::boundary_dofs_hcurl};
+use fem_space::{HCurlSpace, fe_space::FESpace};
 
 struct Src { kappa: f64 }
 impl VectorLinearIntegrator for Src {
@@ -138,7 +138,11 @@ fn main() {
         // PEC BC — zero tangential field on all boundaries.  Non-homogeneous
         // (MFEM ex3p: x.ProjectCoefficient(E)): DIAG_KEEP elimination (symmetric
         // system, matching C++ FormLinearSystem) + PCG + AMG (C++: HyprePCG + HypreAMS).
-        let bdr = boundary_dofs_hcurl(ps.local_space().mesh(), ps.local_space(), &[1]);
+        // D124: the distributed essential set (MFEM
+        // `ParFiniteElementSpace::GetEssentialTrueDofs`, pfespace.cpp:1165) —
+        // halo-synchronised replacement for the former rank-local
+        // `boundary_dofs_hcurl` + hand-rolled gid alltoallv workaround.
+        let bdr = ps.essential_true_dofs(&[1]);
         let dp = ps.dof_partition();
         let n_owned = dp.n_owned_dofs;
 
@@ -152,35 +156,27 @@ fn main() {
             comm.clone(),
         );
 
-        // Collect global IDs of locally-essential DOFs for cross-rank exchange
-        // (matching C++ GetEssentialTrueDofs + parallel distribution).
-        let local_bnd_global: Vec<u32> = bdr
+        // DIAG_KEEP elimination for owned essential DOFs (symmetric, keeps
+        // diag); ghost-slot essential columns eliminated on the local rows.
+        let clamped: Vec<(usize, f64)> = bdr
             .iter()
-            .map(|&d| dp.global_dof(dp.permute_dof(d)))
+            .filter_map(|&d| {
+                let pid = dp.permute_dof(d) as usize;
+                (pid < dp.n_owned_dofs).then_some((pid, 0.0))
+            })
             .collect();
-        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
-        for r in 0..comm.size() as i32 {
-            if r == comm.rank() { continue; }
-            let mut bytes = Vec::with_capacity(local_bnd_global.len() * 4);
-            for &g in &local_bnd_global {
-                bytes.extend_from_slice(&g.to_le_bytes());
-            }
-            sends.push((r, bytes));
-        }
-        let incoming = comm.alltoallv_bytes(&sends);
-        let mut all_bnd: std::collections::HashSet<u32> = local_bnd_global.iter().copied().collect();
-        for (_, bytes) in incoming {
-            for chunk in bytes.chunks_exact(4) {
-                all_bnd.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
-            }
-        }
-        // DIAG_KEEP elimination for owned essential DOFs (symmetric, keeps diag).
-        let clamped: Vec<usize> = (0..dp.n_owned_dofs)
-            .filter(|&pid| all_bnd.contains(&dp.global_dof(pid as u32)))
-            .collect();
-        for &pid in &clamped {
-            let bc_val = u.owned_slice()[pid];
+        for &(pid, bc_val) in &clamped {
             stiff.apply_dirichlet_par_keep_diag(pid, bc_val, &mut rhs);
+        }
+        let ghost_ess: Vec<(usize, f64)> = bdr
+            .iter()
+            .filter_map(|&d| {
+                let pid = dp.permute_dof(d) as usize;
+                (pid >= dp.n_owned_dofs).then_some((pid - dp.n_owned_dofs, 0.0))
+            })
+            .collect();
+        if !ghost_ess.is_empty() {
+            stiff.apply_ghost_ess_columns(&ghost_ess, &mut rhs);
         }
 
         let cfg = SolverConfig { rtol: 1e-8, max_iter: 10000, verbose: false, ..Default::default() };

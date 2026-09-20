@@ -16,7 +16,7 @@
 //! | `ParMesh mesh(MPI_COMM_WORLD, serial_mesh)` + `-rp` | `partition_mesh` (fem-parallel has no parallel uniform refinement, so the refinements run serially up front — same global mesh) |
 //! | `ParFiniteElementSpace fes(&mesh, fec)` | `ParallelFESpace::new_with_dof_manager` |
 //! | `fes.GlobalTrueVSize()` | `ParallelFESpace::n_global_dofs()` |
-//! | `fes.GetBoundaryTrueDofs` | `boundary_dofs` on the rank-local mesh |
+//! | `fes.GetBoundaryTrueDofs` | `ParallelFESpace::essential_true_dofs` (D124) |
 //! | `MassIntegrator + DiffusionIntegrator`, `DomainLFIntegrator(f)`, `UseFastAssembly` | `ParAssembler` with the same MMS `f` |
 //! | `FormLinearSystem` | MFEM `DIAG_KEEP` elimination (`apply_dirichlet_par_keep_diag` + `apply_ghost_ess_columns`) |
 //! | `LORSolver<HypreBoomerAMG>` | `LorH1` + `Assembler` on the refined mesh + `ParAmgHierarchy` |
@@ -70,7 +70,6 @@ use fem_parallel::par_vector::ParVector;
 use fem_parallel::{Comm, ParAssembler, ParallelFESpace, WorkerConfig};
 use fem_solver::par_lor::{solve_pcg_par_lor, ParOperator, ParPrecond};
 use fem_solver::SolverConfig;
-use fem_space::constraints::boundary_dofs;
 use fem_space::dof_manager::DofManager;
 use fem_space::lor::LorH1;
 use fem_space::{FESpace, H1Space};
@@ -353,49 +352,22 @@ fn run_rank(mesh: &Mesh<2>, comm: &Comm, run: &RunArgs) -> RunResult {
 
     // ── essential (boundary) dofs, with the MMS Dirichlet data u|∂Ω ──────────
     //
-    // `boundary_dofs` runs on the rank-local mesh, and the one-layer ghost
-    // overlap does not always contain the boundary face a rank needs: an
-    // **owned** edge-interior dof can have its boundary edge only on a
-    // neighbour (the owner then leaves the dof free), and a **ghost** one can
-    // be missed locally (its column then survives the elimination).  The flags
-    // are therefore exchanged in both directions — reverse
-    // (`accumulate_ghosts`, ghost → owner) and forward (`update_ghosts`,
-    // owner → ghost) — which is what `GetBoundaryTrueDofs` gives MFEM for
-    // free.  Measured without it: 2.0e-3 solution drift between np = 1 and
-    // np = 2, and 9 un-eliminated LOR couplings at np = 4.
+    // D124: `ParallelFESpace::essential_true_dofs` — the fem-rs counterpart
+    // of MFEM `ParFiniteElementSpace::GetBoundaryTrueDofs`
+    // (`GetEssentialTrueDofs` with all boundary attributes marked).  The
+    // rank-local collector alone is not enough: the one-layer ghost overlap
+    // does not always contain the boundary face a rank needs — an **owned**
+    // edge-interior dof can have its boundary edge only on a neighbour (the
+    // owner then leaves the dof free) and a **ghost** one can be missed
+    // locally (its column then survives the elimination).  The entry
+    // OR-synchronises the marker over the dof halo (MFEM
+    // `ParFiniteElementSpace::Synchronize`, pfespace.cpp:1142) and reports
+    // the owner-consistent set.  Measured without synchronisation
+    // (tmp/d124/red_evidence.md): 2.0e-3-class solution drift np1↔np2 and
+    // NaN divergence; on this driver's meshes the pre-D124 local detection
+    // misses 2 essential dofs at np = 2.
     let bdr_tags = local_mesh.unique_boundary_tags();
-    let bc_dofs = boundary_dofs(&local_mesh, &dm, &bdr_tags);
-    let mk_mask = |slots: &[u32]| {
-        let mut v = ParVector::from_local_raw(
-            vec![0.0_f64; n_total],
-            n_owned,
-            ghost_arc.clone(),
-            comm.clone(),
-        );
-        for &d in slots {
-            v.as_slice_mut()[dof_part.permute_dof(d) as usize] = 1.0;
-        }
-        v
-    };
-    let ess_dm: Vec<u32> = {
-        let mut detected = mk_mask(&bc_dofs);
-        detected.accumulate_ghosts();
-        let mut owned = mk_mask(&[]);
-        {
-            let (flags, src) = (owned.as_slice_mut(), detected.as_slice());
-            for pid in 0..n_owned {
-                if src[pid] > 0.5 {
-                    flags[pid] = 1.0;
-                }
-            }
-        }
-        owned.update_ghosts();
-        let (det, own) = (detected.as_slice(), owned.as_slice());
-        (0..n_total)
-            .filter(|&i| det[i] > 0.5 || own[i] > 0.5)
-            .map(|i| dof_part.unpermute_dof(i as u32))
-            .collect()
-    };
+    let ess_dm: Vec<u32> = par_space.essential_true_dofs(&bdr_tags);
     let mut owned_ess: Vec<(usize, f64)> = Vec::new();
     let mut ghost_ess: Vec<(usize, f64)> = Vec::new();
     for &d in &ess_dm {

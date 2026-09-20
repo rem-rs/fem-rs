@@ -30,7 +30,6 @@ use fem_parallel::{
     par_partition::partition_mesh, par_solve_pcg_amg,
 };
 use fem_solver::SolverConfig;
-use fem_space::constraints::boundary_dofs_hdiv;
 use fem_space::fe_space::FESpace;
 use fem_space::HDivSpace;
 
@@ -97,9 +96,13 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
 
         // 2. Essential BCs: all external boundaries (non-homogeneous:
         //    F·n = exact projected values, like ex4p's x.ProjectCoefficient).
-        let mesh_ref = par_space.local_space().mesh();
-        let all_tags: Vec<i32> = mesh_ref.unique_boundary_tags();
-        let ess = boundary_dofs_hdiv(mesh_ref, par_space.local_space(), &all_tags);
+        //    D124: the distributed essential set (MFEM
+        //    `ParFiniteElementSpace::GetEssentialTrueDofs`, pfespace.cpp:1165)
+        //    — halo-synchronised replacement for the former rank-local
+        //    `boundary_dofs_hdiv` + gid alltoallv workaround.
+        let ess = par_space.essential_true_dofs(
+            &par_space.local_space().mesh().unique_boundary_tags(),
+        );
 
         // 3. RHS: b(v) = ∫ f·v, f = (1+2κ²)·F_exact  (local, dm order).
         let quad_order = 4u8; // RT0 → MFEM ex4 uses order*2+2
@@ -143,33 +146,30 @@ fn run_case(n_workers: usize, dump_sol: Option<String>) -> RunResult {
 
         // 6. Essential BCs with the projected boundary values.
         //    DIAG_KEEP elimination (symmetric, matching C++ FormLinearSystem)
-        //    + PCG + AMG (C++: HyprePCG + HypreAMS).
-        let ess_global: Vec<u32> = ess
+        //    + PCG + AMG (C++: HyprePCG + HypreAMS).  `ess` carries ghost
+        //    slots too; their columns are eliminated on the local rows with
+        //    the owner's projected value (filled by the halo update).
+        u.update_ghosts();
+        let clamped: Vec<(usize, f64)> = ess
             .iter()
-            .map(|&d| dof_part.global_dof(dof_part.permute_dof(d)))
+            .filter_map(|&d| {
+                let pid = dof_part.permute_dof(d) as usize;
+                (pid < dof_part.n_owned_dofs).then(|| (pid, u.owned_slice()[pid]))
+            })
             .collect();
-        let mut sends: Vec<(i32, Vec<u8>)> = Vec::new();
-        for r in 0..comm.size() as i32 {
-            if r == comm.rank() { continue; }
-            let mut bytes = Vec::with_capacity(ess_global.len() * 4);
-            for &g in &ess_global {
-                bytes.extend_from_slice(&g.to_le_bytes());
-            }
-            sends.push((r, bytes));
-        }
-        let incoming = comm.alltoallv_bytes(&sends);
-        let mut all_bnd: std::collections::HashSet<u32> = ess_global.iter().copied().collect();
-        for (_, bytes) in incoming {
-            for chunk in bytes.chunks_exact(4) {
-                all_bnd.insert(u32::from_le_bytes(chunk.try_into().unwrap()));
-            }
-        }
-        let clamped: Vec<usize> = (0..dof_part.n_owned_dofs)
-            .filter(|&pid| all_bnd.contains(&dof_part.global_dof(pid as u32)))
-            .collect();
-        for &pid in &clamped {
-            let bc_val = u.owned_slice()[pid];
+        for &(pid, bc_val) in &clamped {
             a_mat.apply_dirichlet_par_keep_diag(pid, bc_val, &mut rhs);
+        }
+        let ghost_ess: Vec<(usize, f64)> = ess
+            .iter()
+            .filter_map(|&d| {
+                let pid = dof_part.permute_dof(d) as usize;
+                (pid >= dof_part.n_owned_dofs)
+                    .then(|| (pid - dof_part.n_owned_dofs, u.as_slice()[pid]))
+            })
+            .collect();
+        if !ghost_ess.is_empty() {
+            a_mat.apply_ghost_ess_columns(&ghost_ess, &mut rhs);
         }
 
         // 7. Solve: PCG + AMG (C++: HyprePCG + HypreAMS, rtol 1e-12).

@@ -212,6 +212,107 @@ where
     pub fn reverse_dof_exchange(&self, data: &mut [f64]) {
         self.dof_ghost_exchange.reverse(&self.comm, data);
     }
+
+    /// Distributed essential-boundary detection — the fem-rs counterpart of
+    /// MFEM `ParFiniteElementSpace::GetEssentialTrueDofs`
+    /// (fem/pfespace.cpp:1165); `GetBoundaryTrueDofs` (fem/fespace.hpp:1379)
+    /// is the same entry with **all** boundary attributes marked.
+    ///
+    /// Returns the **rank-local full-dof ids** (the space's own dof numbering,
+    /// the same id space the serial collectors
+    /// `fem_space::constraints::boundary_dofs*` return) of the essential set,
+    /// synchronized across the dof ghost halo so that every rank sees the
+    /// complete, owner-consistent set:
+    ///
+    /// 1. rank-local detection on the local mesh (MFEM:
+    ///    `FiniteElementSpace::GetEssentialVDofs`);
+    /// 2. the 0/1 marker is OR-synchronized over the dof halo — reverse
+    ///    (ghost → owner) then threshold, forward (owner → ghost) — MFEM:
+    ///    `ParFiniteElementSpace::Synchronize`, "implement allreduce(|) as
+    ///    reduce(|) + broadcast" (pfespace.cpp:1142);
+    /// 3. the caller restricts to true dofs by mapping each id through
+    ///    `dof_partition().permute_dof`: slots `< n_owned_dofs` are the true
+    ///    dofs (global true-dof id = `global_dof(pid)`), the rest are ghosts
+    ///    whose owner reports the same dof — the fem-rs equivalent of MFEM's
+    ///    `GetRestrictionMatrix()->BooleanMult` (pfespace.cpp:1181).
+    ///
+    /// This closes the D124 defect: a rank that owns a shared-entity dof but
+    /// holds none of its boundary faces (face ownership follows the minimum
+    /// global node id in `partition_mesh::extract_local_faces`, dof ownership
+    /// the per-family minimum-owner rules) nevertheless reports the dof,
+    /// because the rank that holds the face pushes the marker through the
+    /// halo — what MFEM's `GetEssentialTrueDofs` provides for free.
+    ///
+    /// At `comm.size() == 1` the halo is trivial and the result is the serial
+    /// collector's output **bitwise**.
+    ///
+    /// Supported families: `H1Space` (any order, via `DofManager`),
+    /// `HCurlSpace`, `HDivSpace` — the same dispatch as
+    /// [`ParallelFESpace::new`].  (Vector spaces route through their scalar
+    /// space / vdim expansion by the caller, as in `mfem_pex2`.)
+    pub fn essential_true_dofs(
+        &self,
+        bdr_attr_is_ess: &[i32],
+    ) -> Vec<fem_core::types::DofId>
+    where
+        S: 'static,
+        S::Mesh: 'static,
+    {
+        use std::any::Any;
+
+        use fem_space::constraints::{boundary_dofs, boundary_dofs_hcurl, boundary_dofs_hdiv};
+
+        // 1. Rank-local detection (MFEM: FiniteElementSpace::GetEssentialVDofs
+        //    on the local mesh).
+        let mesh = self.local_space.mesh();
+        let local: Vec<fem_core::types::DofId> = {
+            let any = &self.local_space as &dyn Any;
+            if let Some(h1) = any.downcast_ref::<fem_space::H1Space<S::Mesh>>() {
+                boundary_dofs(mesh, h1.dof_manager(), bdr_attr_is_ess)
+            } else if let Some(nd) = any.downcast_ref::<fem_space::HCurlSpace<S::Mesh>>() {
+                boundary_dofs_hcurl(mesh, nd, bdr_attr_is_ess)
+            } else if let Some(rt) = any.downcast_ref::<fem_space::HDivSpace<S::Mesh>>() {
+                boundary_dofs_hdiv(mesh, rt, bdr_attr_is_ess)
+            } else {
+                panic!(
+                    "ParallelFESpace::essential_true_dofs: no boundary collector for \
+                     this space family (supported: H1Space, HCurlSpace, HDivSpace)"
+                )
+            }
+        };
+
+        let dp = &self.dof_partition;
+        let n_owned = dp.n_owned_dofs;
+        let n_total = dp.n_total_dofs();
+
+        // 2. Synchronize the marker over the dof halo (MFEM:
+        //    ParFiniteElementSpace::Synchronize — allreduce(BitOR) over each
+        //    dof's group).  The 0/1 flags accumulate additively in `reverse`,
+        //    so the owner-side test is `> 0.5`.
+        let mut marker = vec![0.0_f64; n_total];
+        for &d in &local {
+            marker[dp.permute_dof(d) as usize] = 1.0;
+        }
+        self.reverse_dof_exchange(&mut marker);
+
+        // 3. Restrict to the owned (true-dof) slots — MFEM:
+        //    GetRestrictionMatrix()->BooleanMult (pfespace.cpp:1181) — and
+        //    push the owner's marker back into the ghost slots (MFEM:
+        //    Synchronize's Bcast leg) so ghosts agree with their owner.
+        let mut true_marker = vec![0.0_f64; n_total];
+        for (i, flag) in true_marker.iter_mut().enumerate().take(n_owned) {
+            *flag = if marker[i] > 0.5 { 1.0 } else { 0.0 };
+        }
+        self.forward_dof_exchange(&mut true_marker);
+
+        let mut out: Vec<fem_core::types::DofId> = (0..n_total)
+            .filter(|&i| marker[i] > 0.5 || true_marker[i] > 0.5)
+            .map(|i| dp.unpermute_dof(i as u32))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 }
 
 /// Build a `GhostExchange` from DOF ownership data.
