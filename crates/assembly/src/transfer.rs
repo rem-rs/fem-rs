@@ -1132,46 +1132,130 @@ pub fn get_prolongation_hcurl<M: MeshTopology>(
 // HDiv (Raviart-Thomas) prolongation for h-refinement
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Number of face DOFs per face for HDiv on simplices.
-fn hdiv_face_dofs_per_face(dim: u8, order: u8) -> usize {
+/// Number of DOFs in one HDiv face block, derived from the face's vertex
+/// count (D446): a 2-D edge (2 verts) carries `k + 1` dofs, a 3-D triangular
+/// face (3 verts) `(k+1)(k+2)/2` and a 3-D quadrilateral face (4 verts)
+/// `(k+1)^2` — the same shape rule as `HDivSpace::face_dofs`, so hex/prism/
+/// pyramid/mixed meshes walk their quad face blocks with the right stride.
+fn hdiv_face_dofs_per_face(face_verts: usize, order: u8) -> usize {
     let k = order as usize;
-    if dim == 2 { k + 1 } else { (k + 1) * (k + 2) / 2 }
+    match face_verts {
+        2 => k + 1,
+        3 => (k + 1) * (k + 2) / 2,
+        _ => (k + 1) * (k + 1),
+    }
 }
 
-/// Build HDiv prolongation matrix for h-refinement on 2-D/3-D simplex meshes.
+/// Local faces of each 3-D element shape the HDiv builders support, as local
+/// vertex-index slices: a 3-entry slice is a triangular face, a 4-entry slice
+/// a quadrilateral face (D446 — the face's shape, not a global table, decides
+/// the block size).  Vertex sets mirror the HDivSpace builders' face tables
+/// (`crates/space/src/hdiv.rs` TET/HEX/PRISM/PYRAMID tables); `FaceKey`
+/// lookups sort internally, so only the vertex *set* matters.
+fn hdiv_element_faces_3d(et: fem_mesh::ElementType) -> &'static [&'static [usize]] {
+    static TET: [&[usize]; 4] = [&[1, 2, 3], &[0, 2, 3], &[0, 1, 3], &[0, 1, 2]];
+    static HEX: [&[usize]; 6] = [
+        &[0, 1, 2, 3], // z=-1 (bottom)
+        &[4, 5, 6, 7], // z=+1 (top)
+        &[0, 1, 5, 4], // y=-1 (front)
+        &[2, 3, 7, 6], // y=+1 (back)
+        &[0, 3, 7, 4], // x=-1 (left)
+        &[1, 2, 6, 5], // x=+1 (right)
+    ];
+    static PRISM: [&[usize]; 5] = [
+        &[0, 1, 2],    // bottom tri
+        &[3, 4, 5],    // top tri
+        &[0, 1, 4, 3], // quad 0 (front)
+        &[1, 2, 5, 4], // quad 1 (right)
+        &[0, 2, 5, 3], // quad 2 (left)
+    ];
+    static PYRAMID: [&[usize]; 5] = [
+        &[0, 1, 4],    // tri (apex)
+        &[1, 2, 4],    // tri (apex)
+        &[2, 3, 4],    // tri (apex)
+        &[3, 0, 4],    // tri (apex)
+        &[0, 1, 2, 3], // base quad
+    ];
+    match et {
+        fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10 => &TET,
+        fem_mesh::ElementType::Hex8 => &HEX,
+        fem_mesh::ElementType::Prism6 => &PRISM,
+        fem_mesh::ElementType::Pyramid5 => &PYRAMID,
+        other => panic!("build_prolongation_hdiv: unsupported 3-D element type {other:?}"),
+    }
+}
+
+/// Local edges of each 2-D element shape the HDiv builders support, as local
+/// vertex-index pairs (D459 — the 2-D mirror of
+/// [`hdiv_element_faces_3d`]): the quad table is the element's four boundary
+/// edges in `HDivSpace`'s `QUAD_FACES` order, the triangle table the
+/// historical `local_edges_2d`.  `EdgeKey` lookups sort internally, so only
+/// each pair's vertex *set* matters.  On a quad the old tri table's third
+/// pair `(0,2)` is the diagonal while the real top `(2,3)` and left `(3,0)`
+/// edges were never walked — boundary edges belong to one element only, so
+/// their fine dofs kept all-zero prolongation rows.
+fn hdiv_element_edges_2d(et: fem_mesh::ElementType) -> &'static [(usize, usize)] {
+    static TRI: [(usize, usize); 3] = [(0, 1), (1, 2), (0, 2)];
+    static QUAD: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+    match et {
+        fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6 => &TRI,
+        fem_mesh::ElementType::Quad4 => &QUAD,
+        other => panic!("build_prolongation_hdiv: unsupported 2-D element type {other:?}"),
+    }
+}
+
+/// Canonical HDiv face key for a face's global vertices: tri faces use all
+/// three (sorted by `FaceKey::new`); quad faces use the sorted first 3 of
+/// their 4 verts — exactly the key rule the HDivSpace builders use, so quad
+/// faces of hex/prism/pyramid elements resolve in the space's face map.
+fn hdiv_face_key(verts: &[u32]) -> FaceKey {
+    if verts.len() == 3 {
+        FaceKey::new(verts[0], verts[1], verts[2])
+    } else {
+        let mut v4 = [verts[0], verts[1], verts[2], verts[3]];
+        v4.sort_unstable();
+        FaceKey::new(v4[0], v4[1], v4[2])
+    }
+}
+
+/// Build HDiv prolongation matrix for h-refinement.
 ///
-/// Uses `edge_face_dof` (2-D) / `tri_face_dof` (3-D) to map coarse face DOFs
-/// to fine sub-face DOFs.  For RT0 sub-faces the mapping is the area ratio
-/// (0.5 in 2-D, 0.25 in 3-D for uniform refinement).  For higher orders the
-/// same ratio is applied per face DOF as an approximation.
+/// Uses `edge_face_dof` (2-D edges) / `tri_face_dof` + `face_dofs` (3-D
+/// faces) to map coarse face DOFs to fine sub-face DOFs.  For RT0 sub-faces
+/// the mapping is the area ratio (0.5 in 2-D, 0.25 in 3-D for uniform
+/// refinement).  For higher orders the same ratio is applied per face DOF as
+/// an approximation.  In 3-D each element's faces are enumerated **by shape**
+/// (D446): a quad face builds its `FaceKey` from the sorted first 3 of its 4
+/// verts and carries `(k+1)^2` dofs, so hex/prism/pyramid/mixed hierarchies
+/// walk their face blocks correctly.  In 2-D the same shape-driven rule
+/// (D459) walks each element's own edges — quads their four boundary edges,
+/// triangles their three (the former triangular-only walk sampled the quad
+/// *diagonal* and never reached a quad's top/left boundary edges).
 pub fn build_prolongation_hdiv<M: MeshTopology>(
     coarse: &HDivSpace<M>,
     fine: &HDivSpace<M>,
 ) -> (CsrMatrix<f64>, TransferStats) {
     let dim = coarse.mesh().dim();
     let order = coarse.order();
-    let dpf = hdiv_face_dofs_per_face(dim, order); // DOFs per face
     let n_coarse = coarse.n_dofs();
     let n_fine = fine.n_dofs();
     let mut coo = CooMatrix::new(n_fine, n_coarse);
     let mut loc = 0usize;
     let xtra = 0usize;
-    let _cell_type = coarse.mesh().element_type(0);
-
-    // Local edge/face definitions for simplices
-    let local_edges_2d: &[(usize, usize)] = &[(0, 1), (1, 2), (0, 2)];
-    let local_faces_3d: &[(usize, usize, usize)] = &[
-        (1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2),
-    ];
 
     // 1. Build coarse face DOF map from element-local edges/faces
     let mut coarse_face_map_2d: HashMap<EdgeKey, DofId> = HashMap::new();
     let mut coarse_face_map_3d: HashMap<FaceKey, DofId> = HashMap::new();
+    // D446: global verts of each coarse 3-D face (canonical table order), so
+    // the sub-face search can extend by the face's own shape.
+    let mut coarse_face_verts_3d: HashMap<FaceKey, Vec<u32>> = HashMap::new();
 
     if dim == 2 {
         for e in 0..coarse.mesh().n_elements() as u32 {
             let nodes = coarse.mesh().element_nodes(e);
-            for &(li, lj) in local_edges_2d {
+            // D459: walk the element's own edges — quads contribute their four
+            // boundary edges, not a diagonal.
+            for &(li, lj) in hdiv_element_edges_2d(coarse.mesh().element_type(e)) {
                 let ek = EdgeKey::new(nodes[li], nodes[lj]);
                 if let Some(dof) = coarse.edge_face_dof(ek) {
                     coarse_face_map_2d.entry(ek).or_insert(dof);
@@ -1181,60 +1265,95 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     } else {
         for elem in 0..coarse.mesh().n_elements() as u32 {
             let nodes = coarse.mesh().element_nodes(elem);
-            for &(li, lj, lk) in local_faces_3d {
-                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+            for fv in hdiv_element_faces_3d(coarse.mesh().element_type(elem)) {
+                let verts: Vec<u32> = fv.iter().map(|&i| nodes[i]).collect();
+                let fk = hdiv_face_key(&verts);
                 if let Some(dof) = coarse.tri_face_dof(fk) {
+                    coarse_face_verts_3d.entry(fk).or_insert(verts);
                     coarse_face_map_3d.entry(fk).or_insert(dof);
                 }
             }
         }
     }
 
-    // 2. Build midpoint map from coarse elements
+    // 2. Build midpoint map from coarse elements (D446: the element's edges
+    //    are derived from its shape-driven face table — consecutive face
+    //    vertices, wrapping — so hexes/prisms/pyramids contribute all their
+    //    edges; quad faces also record their face center, which a refined
+    //    quad's sub-faces need).
     let fine_n_nodes = fine.mesh().n_nodes() as u32;
     let fine_coords: Vec<f64> = (0..fine_n_nodes)
         .flat_map(|n| fine.mesh().node_coords(n).to_vec())
         .collect();
     let dim_f = dim as usize;
+    let nearest_fine_node = |mx: f64, my: f64, mz: f64| -> Option<u32> {
+        let mut best = None;
+        let mut best_d2 = 1e-10;
+        for n in 0..fine_n_nodes {
+            let off = n as usize * dim_f;
+            let dx = fine_coords[off] - mx;
+            let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
+            let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if d2 < best_d2 && d2 < 1e-6 {
+                best_d2 = d2;
+                best = Some(n);
+            }
+        }
+        best
+    };
     let mut midpoint_map: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut quad_center_map: HashMap<[u32; 4], u32> = HashMap::new();
+    let add_midpoint = |a: u32, b: u32, midpoint_map: &mut HashMap<(u32, u32), u32>| {
+        if midpoint_map.contains_key(&(a, b)) { return; }
+        let ca = coarse.mesh().node_coords(a);
+        let cb = coarse.mesh().node_coords(b);
+        let mx = 0.5 * (ca[0] + cb[0]);
+        let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
+        let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
+        if let Some(mid) = nearest_fine_node(mx, my, mz) {
+            midpoint_map.insert((a, b), mid);
+            midpoint_map.insert((b, a), mid);
+        }
+    };
     for e in 0..coarse.mesh().n_elements() as u32 {
         let nodes = coarse.mesh().element_nodes(e);
-        let edge_list: &[(usize, usize)] = if dim == 2 { local_edges_2d } else {
-            // TET edges
-            &[(0, 1), (1, 2), (0, 2), (0, 3), (1, 3), (2, 3)]
-        };
-        for &(li, lj) in edge_list {
-            let a = nodes[li];
-            let b = nodes[lj];
-            if midpoint_map.contains_key(&(a, b)) { continue; }
-            let ca = coarse.mesh().node_coords(a);
-            let cb = coarse.mesh().node_coords(b);
-            let mx = 0.5 * (ca[0] + cb[0]);
-            let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
-            let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
-            let mut best = None;
-            let mut best_d2 = 1e-10;
-            for n in 0..fine_n_nodes {
-                let off = n as usize * dim_f;
-                let dx = fine_coords[off] - mx;
-                let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
-                let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
-                let d2 = dx * dx + dy * dy + dz * dz;
-                if d2 < best_d2 && d2 < 1e-6 {
-                    best_d2 = d2;
-                    best = Some(n);
-                }
+        if dim == 2 {
+            // D459: midpoints of the element's own edges (quads: all four).
+            for &(li, lj) in hdiv_element_edges_2d(coarse.mesh().element_type(e)) {
+                add_midpoint(nodes[li], nodes[lj], &mut midpoint_map);
             }
-            if let Some(mid) = best {
-                midpoint_map.insert((a, b), mid);
-                midpoint_map.insert((b, a), mid);
+        } else {
+            for fv in hdiv_element_faces_3d(coarse.mesh().element_type(e)) {
+                for i in 0..fv.len() {
+                    add_midpoint(nodes[fv[i]], nodes[fv[(i + 1) % fv.len()]], &mut midpoint_map);
+                }
+                if fv.len() == 4 {
+                    let mut key = [nodes[fv[0]], nodes[fv[1]], nodes[fv[2]], nodes[fv[3]]];
+                    key.sort_unstable();
+                    if !quad_center_map.contains_key(&key) {
+                        let mut s = [0.0_f64; 3];
+                        for &vi in fv.iter() {
+                            let c = coarse.mesh().node_coords(nodes[vi]);
+                            for k in 0..dim_f {
+                                s[k] += c[k];
+                            }
+                        }
+                        if let Some(center) =
+                            nearest_fine_node(s[0] / 4.0, s[1] / 4.0, if dim_f >= 3 { s[2] / 4.0 } else { 0.0 })
+                        {
+                            quad_center_map.insert(key, center);
+                        }
+                    }
+                }
             }
         }
     }
 
-    // Helper: given a first DOF and dpf, add identity or scaled entries
-    let add_face_dofs = |coo: &mut CooMatrix<f64>, coarse_first: DofId, fine_first: DofId, scale: f64| {
-        for m in 0..dpf {
+    // Helper: given a first DOF and a block length, add identity or scaled
+    // entries (fine block offset m -> coarse block offset m).
+    let add_face_dofs = |coo: &mut CooMatrix<f64>, coarse_first: DofId, fine_first: DofId, nd: usize, scale: f64| {
+        for m in 0..nd {
             coo.add(
                 (fine_first + m as DofId) as usize,
                 (coarse_first + m as DofId) as usize,
@@ -1245,14 +1364,17 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
 
     // 3. Process fine faces via element-local edges/faces
     if dim == 2 {
+        let dpf = hdiv_face_dofs_per_face(2, order); // DOFs per edge block
         for e in 0..fine.mesh().n_elements() as u32 {
             let nodes = fine.mesh().element_nodes(e);
-            for &(li, lj) in local_edges_2d {
+            // D459: the element's own edge table — quads walk all four
+            // boundary edges, triangles the three edges.
+            for &(li, lj) in hdiv_element_edges_2d(fine.mesh().element_type(e)) {
                 let ek = EdgeKey::new(nodes[li], nodes[lj]);
 
                 if let Some(&coarse_first) = coarse_face_map_2d.get(&ek) {
                     if let Some(fine_first) = fine.edge_face_dof(ek) {
-                        add_face_dofs(&mut coo, coarse_first, fine_first, 1.0);
+                        add_face_dofs(&mut coo, coarse_first, fine_first, dpf, 1.0);
                         loc += dpf;
                     }
                     continue;
@@ -1272,7 +1394,7 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
                     let ck = EdgeKey::new(pa, pb);
                     if let Some(&coarse_first) = coarse_face_map_2d.get(&ck) {
                         if let Some(fine_first) = fine.edge_face_dof(ek) {
-                            add_face_dofs(&mut coo, coarse_first, fine_first, 0.5);
+                            add_face_dofs(&mut coo, coarse_first, fine_first, dpf, 0.5);
                             loc += dpf;
                         }
                     }
@@ -1282,29 +1404,51 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     } else {
         for elem in 0..fine.mesh().n_elements() as u32 {
             let nodes = fine.mesh().element_nodes(elem);
-            for &(li, lj, lk) in local_faces_3d {
-                let fk = FaceKey::new(nodes[li], nodes[lj], nodes[lk]);
+            for fv in hdiv_element_faces_3d(fine.mesh().element_type(elem)) {
+                let verts: Vec<u32> = fv.iter().map(|&i| nodes[i]).collect();
+                let fk = hdiv_face_key(&verts);
+                // D446: the block stride follows the face's shape.
+                let nd = hdiv_face_dofs_per_face(fv.len(), order);
 
                 if let Some(&coarse_first) = coarse_face_map_3d.get(&fk) {
                     if let Some(fine_first) = fine.tri_face_dof(fk) {
-                        add_face_dofs(&mut coo, coarse_first, fine_first, 1.0);
-                        loc += dpf;
+                        add_face_dofs(&mut coo, coarse_first, fine_first, nd, 1.0);
+                        loc += nd;
                     }
                     continue;
                 }
 
-                // Sub-face of a coarse face: area ratio ≈ 1/4 for uniform ref
-                let v: HashSet<u32> = [nodes[li], nodes[lj], nodes[lk]].iter().copied().collect();
+                // Sub-face of a coarse face: area ratio ≈ 1/4 for uniform
+                // refinement.  The candidate parent is matched by its own
+                // shape (D446): a tri sub-face sits inside {verts, edge
+                // midpoints}; a quad sub-face also admits the face center.
+                let v: HashSet<u32> = verts.iter().copied().collect();
                 for (&cfk, &coarse_first) in &coarse_face_map_3d {
+                    let cverts = match coarse_face_verts_3d.get(&cfk) {
+                        Some(cv) => cv,
+                        None => continue,
+                    };
+                    let nv = cverts.len();
                     let mut extended = HashSet::new();
-                    extended.insert(cfk.0); extended.insert(cfk.1); extended.insert(cfk.2);
-                    if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.1)) { extended.insert(m); }
-                    if let Some(&m) = midpoint_map.get(&(cfk.1, cfk.2)) { extended.insert(m); }
-                    if let Some(&m) = midpoint_map.get(&(cfk.0, cfk.2)) { extended.insert(m); }
+                    for &cv in cverts {
+                        extended.insert(cv);
+                    }
+                    for i in 0..nv {
+                        if let Some(&m) = midpoint_map.get(&(cverts[i], cverts[(i + 1) % nv])) {
+                            extended.insert(m);
+                        }
+                    }
+                    if nv == 4 {
+                        let mut key = [cverts[0], cverts[1], cverts[2], cverts[3]];
+                        key.sort_unstable();
+                        if let Some(&c) = quad_center_map.get(&key) {
+                            extended.insert(c);
+                        }
+                    }
                     if v.is_subset(&extended) {
                         if let Some(fine_first) = fine.tri_face_dof(fk) {
-                            add_face_dofs(&mut coo, coarse_first, fine_first, 0.25);
-                            loc += dpf;
+                            add_face_dofs(&mut coo, coarse_first, fine_first, nd, 0.25);
+                            loc += nd;
                         }
                         break;
                     }
