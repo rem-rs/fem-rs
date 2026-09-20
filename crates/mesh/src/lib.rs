@@ -65,6 +65,9 @@ pub use extrusion::{extrude_tri3_to_prisms, extrude_quad4_to_hex8};
 pub use particle::ParticleSet;
 pub use supermesh::{build_supermesh, SupermeshElement};
 pub mod nurbs_mesh;
+/// `Mesh::PrintCharacteristics` / `Mesh::PrintInfo` — port of MFEM
+/// `mesh/mesh.cpp:255` (`D496`).
+pub mod mesh_characteristics;
 /// NURBS patch object layer — port of MFEM `NURBSPatch` plus the `KnotVector`
 /// working API (Greville/Botella/Demko abscissae, `GetInterpolant`, `Print`).
 pub mod nurbs_patch;

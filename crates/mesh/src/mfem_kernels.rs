@@ -630,9 +630,77 @@ pub fn calc_singularvalue_3(data: &[f64; 9], i: usize) -> f64 {
     aa.abs().sqrt() * mult
 }
 
+/// MFEM `kernels::CalcSingularvalue<2>` (linalg/kernels.hpp): the `i`-th
+/// singular value of a 2×2 matrix given in the same `data` layout the C++
+/// kernel reads (DenseMatrix column-major: `d0=A00, d1=A10, d2=A01, d3=A11`).
+///
+/// Ported for `Mesh::PrintCharacteristics` (D496), which computes the element
+/// aspect ratio `κ = σ₀/σ₁` through `DenseMatrix::CalcSingularvalue(0/1)`.
+pub fn calc_singularvalue_2(data: &[f64; 4], i: usize) -> f64 {
+    let mut d0 = data[0];
+    let mut d1 = data[1];
+    let mut d2 = data[2];
+    let mut d3 = data[3];
+
+    let mut d_max = d0.abs();
+    if d_max < d1.abs() {
+        d_max = d1.abs();
+    }
+    if d_max < d2.abs() {
+        d_max = d2.abs();
+    }
+    if d_max < d3.abs() {
+        d_max = d3.abs();
+    }
+    let mult = get_scaling_factor(d_max);
+
+    d0 /= mult;
+    d1 /= mult;
+    d2 /= mult;
+    d3 /= mult;
+
+    let mut t = 0.5 * ((d0 + d2) * (d0 - d2) + (d1 - d3) * (d1 + d3));
+    let mut s = d0 * d2 + d1 * d3;
+    s = (0.5 * (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3) + (t * t + s * s).sqrt()).sqrt();
+
+    if s == 0.0 {
+        return 0.0;
+    }
+    t = (d0 * d3 - d1 * d2).abs() / s;
+    if t > s {
+        if i == 0 {
+            return t * mult;
+        }
+        return s * mult;
+    }
+    if i == 0 {
+        return s * mult;
+    }
+    t * mult
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MFEM probe ground truth for `CalcSingularvalue<2>` (D496): reference
+    /// values printed at %.17g by `tmp/d496/sv2_probe.cpp` (DenseMatrix ::
+    /// CalcSingularvalue, `mfem410_ser`).
+    #[test]
+    fn singularvalue_2_matches_mfem() {
+        // diag(3, 2) — column-major {A00,A10,A01,A11}.
+        let d = [3.0, 0.0, 0.0, 2.0];
+        assert_eq!(calc_singularvalue_2(&d, 0), 3.0);
+        assert_eq!(calc_singularvalue_2(&d, 1), 2.0);
+        // Shear [[1,0],[1,1]] — the golden-ratio pair.
+        let s = [1.0, 1.0, 0.0, 1.0];
+        assert_eq!(calc_singularvalue_2(&s, 0), 1.6180339887498949);
+        assert_eq!(calc_singularvalue_2(&s, 1), 0.61803398874989479);
+        // Generic non-symmetric entries.
+        let m = [0.4876093, -0.0215, 0.113, 0.243806];
+        assert_eq!(calc_singularvalue_2(&m, 0), 0.50204351945070824);
+        assert_eq!(calc_singularvalue_2(&m, 1), 0.24163557200883387);
+    }
 
     /// Sanity: identity → singular values 1,1,1.
     #[test]

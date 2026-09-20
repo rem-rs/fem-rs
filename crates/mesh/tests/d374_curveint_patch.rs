@@ -7,15 +7,12 @@
 //! `$HOME/mfem410_ser/libmfem.a` and run with `-uw -n 9 -no-visit`
 //! (binary and reference file kept under `$HOME/work/d374/`, D374).
 //!
-//! The only differences versus the C++ bytes are 10 control-point entries,
-//! all in the column `i == 4` / row `j == 4` of the 9x9 patch where the exact
-//! value is a solve residual of magnitude ~5e-17 (physically zero): MFEM
-//! inserts all six knots in one Piegl-Tiller A5.5 pass whose arithmetic
-//! cancels those entries to ~0, while the delegated
-//! `fem_element::nurbs::h_refine_uk` kernel (A5.1 per knot, mandated by the
-//! D374 constraints) leaves a ~4.2e-17 residual.  The test pins every other
-//! line byte-exactly and requires each exception to be numerically zero on
-//! both sides.
+//! D496 update: the ten former residual entries are gone.  `NurbsPatch::
+//! knot_insert` is now the exact single-pass A5.5 port of
+//! `NURBSPatch::KnotInsert(dir, Vector&)` (mesh/nurbs.cpp:1767-1873) — the
+//! arithmetic MFEM uses to cancel those entries — so the patch print is
+//! byte-for-byte identical to the C++ and the test requires full equality on
+//! every line.
 
 use fem_mesh::{NurbsKnotVector, NurbsPatch};
 
@@ -186,21 +183,6 @@ fn build_sin_fit_patch() -> NurbsPatch {
     patch
 }
 
-/// D374 residual entry: the rows differ textually, but every component
-/// agrees within 1e-15 and at least one component is a ~5e-17 solve residual
-/// on both sides (physically zero).
-fn tiny_residual_row(rust_line: &str, cpp_line: &str) -> bool {
-    let parse = |line: &str| -> Option<Vec<f64>> {
-        line.split(' ').map(|t| t.parse::<f64>().ok()).collect::<Option<Vec<f64>>>()
-    };
-    let (Some(rv), Some(cv)) = (parse(rust_line), parse(cpp_line)) else {
-        return false;
-    };
-    rv.len() == cv.len()
-        && rv.iter().zip(cv.iter()).all(|(a, b)| (a - b).abs() < 1e-15)
-        && rv.iter().zip(cv.iter()).any(|(a, b)| a.abs() < 1e-15 && b.abs() < 1e-15)
-}
-
 #[test]
 fn sin_fit_patch_print_matches_mfem() {
     let rust = build_sin_fit_patch().print();
@@ -208,34 +190,9 @@ fn sin_fit_patch_print_matches_mfem() {
     let cpp_lines: Vec<&str> = CPP_SIN_FIT_PATCH.lines().collect();
     assert_eq!(rust_lines.len(), cpp_lines.len(), "line count");
 
-    // Patch header (knot vectors + dimension) must be byte-exact.
-    for i in 0..9 {
-        assert_eq!(rust_lines[i], cpp_lines[i], "patch header line {i}");
-    }
-
-    // Control points: byte-exact except the documented ~5e-17 residual
-    // entries of the delegated A5.1 insertion kernel (see module comment).
-    let mut exceptions = 0usize;
-    for i in 9..cpp_lines.len() {
-        if rust_lines[i] == cpp_lines[i] {
-            continue;
-        }
-        exceptions += 1;
-        assert!(
-            tiny_residual_row(rust_lines[i], cpp_lines[i]),
-            "line {i} differs and is not a zero residual:\n  rust: {}\n  cpp:  {}",
-            rust_lines[i],
-            cpp_lines[i]
-        );
-    }
-    assert_eq!(
-        exceptions, 10,
-        "expected exactly the 10 documented residual entries to differ"
-    );
-
-    // The interpolated sine's control points — row 0, the part produced by
-    // GetDemko/GetInterpolant — must match MFEM byte-for-byte.
-    for i in 9..18 {
-        assert_eq!(rust_lines[i], cpp_lines[i], "interpolated row 0 line {i}");
+    // Everything — patch header and control points — is byte-exact since the
+    // A5.5 single-pass KnotInsert port (D496).
+    for i in 0..cpp_lines.len() {
+        assert_eq!(rust_lines[i], cpp_lines[i], "line {i}");
     }
 }

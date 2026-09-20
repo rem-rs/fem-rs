@@ -34,10 +34,11 @@
 //!   kernels round-trip through Cartesian form (`x*w` blended, divided back by
 //!   the blended `w`).  For unit weights (the whole `-uw`/B-spline path of
 //!   `nurbs_curveint`) the round trip is exact; with non-unit weights a
-//!   last-bit difference versus MFEM's raw storage is possible.
-//! - Only the 2-D patch (two knot vectors) is implemented; MFEM also supports
-//!   1-D/3-D patches (`mesh/nurbs.cpp:1274-1335`), which the
-//!   `nurbs_curveint` miniapp does not exercise.
+//!   last-bit difference versus MFEM's raw storage is possible.  (Since D496
+//!   `NurbsPatch::knot_insert` is the exact raw-data A5.5 port, only
+//!   `degree_elevate` still goes through the delegated kernels.)
+//! - The 1-D (single knot vector) patch of `mesh/nurbs.cpp:1281-1296` is not
+//!   implemented; the 2-D and 3-D patches are.
 
 use std::fmt;
 
@@ -531,6 +532,249 @@ impl NurbsKnotVector {
         }
     }
 
+    /// MFEM `KnotVector::GetNKS()` (`mesh/nurbs.hpp`): number of knot spans
+    /// including the empty ones between repeated knots.
+    pub fn n_ks(&self) -> usize {
+        self.knots.len() - 2 * self.order as usize - 1
+    }
+
+    /// MFEM `KnotVector::isElement(ks)` (`mesh/nurbs.hpp`): span `ks` is a
+    /// real element when its knots are not repeated.
+    pub fn is_element(&self, ks: usize) -> bool {
+        let o = self.order as usize;
+        self.knots[ks + o] < self.knots[ks + o + 1]
+    }
+
+    /// MFEM `KnotVector::GetNE()` (`mesh/nurbs.cpp:616-625`): the number of
+    /// non-empty knot spans.
+    pub fn n_elements(&self) -> usize {
+        let o = self.order as usize;
+        let mut ne = 0;
+        for i in o..(self.num_cp as usize) {
+            if self.knots[i] != self.knots[i + 1] {
+                ne += 1;
+            }
+        }
+        ne
+    }
+
+    /// MFEM `KnotVector::CalcShape(shape, i, xi)` (`mesh/nurbs.cpp:728`):
+    /// the `Order+1` non-vanishing basis functions at reference coordinate
+    /// `xi` of the element (span) starting at knot index `i`.  `i` may be
+    /// negative, meaning the mirrored span (see `CalcShape`).
+    pub fn calc_shape_at(&self, i: i32, xi: f64) -> Vec<f64> {
+        let mut shape = vec![0.0; self.order as usize + 1];
+        self.calc_shape(&mut shape, i, xi);
+        shape
+    }
+
+    /// MFEM `KnotVector::CalcDShape(grad, i, xi)` (`mesh/nurbs.cpp:755`):
+    /// first derivatives of [`Self::calc_shape_at`].
+    pub fn calc_dshape_at(&self, i: i32, xi: f64) -> Vec<f64> {
+        let mut grad = vec![0.0; self.order as usize + 1];
+        self.calc_dshape(&mut grad, i, xi);
+        grad
+    }
+
+    /// MFEM `KnotVector::CalcD2Shape(grad, i, xi)` (`mesh/nurbs.hpp:214`,
+    /// `CalcDnShape(grad, 2, i, xi)`): second derivatives of
+    /// [`Self::calc_shape_at`].
+    pub fn calc_d2shape_at(&self, i: i32, xi: f64) -> Vec<f64> {
+        let mut grad = vec![0.0; self.order as usize + 1];
+        self.calc_dn_shape(&mut grad, 2, i, xi);
+        grad
+    }
+
+    /// MFEM `KnotVector::PrintFunctions(os, samples)` (`mesh/nurbs.cpp:638`):
+    /// over every non-empty span, at `samples` reference points, one line
+    /// `u \t N_0 … N_p \t dN_0 … \t d²N_0 …` (tab separated, `%g` values).
+    pub fn print_functions(&self, samples: usize) -> String {
+        assert!(self.n_elements() > 0, "Elements not counted. Use GetElements().");
+        let order = self.order as usize;
+        let mut s = String::new();
+        let dxi = 1.0 / (samples - 1) as f64;
+        for ks in 0..self.n_ks() {
+            if !self.is_element(ks) {
+                continue;
+            }
+            for j in 0..samples {
+                let xi = j as f64 * dxi;
+                s.push_str(&format_g(self.get_knot_location(xi, ks + order), 6));
+                s.push('\t');
+                let sh = self.calc_shape_at(ks as i32, xi);
+                for v in &sh {
+                    s.push('\t');
+                    s.push_str(&format_g(*v, 6));
+                }
+                let dsh = self.calc_dshape_at(ks as i32, xi);
+                for v in &dsh {
+                    s.push('\t');
+                    s.push_str(&format_g(*v, 6));
+                }
+                let d2sh = self.calc_d2shape_at(ks as i32, xi);
+                for (d, v) in d2sh.iter().enumerate() {
+                    s.push('\t');
+                    s.push_str(&format_g(*v, 6));
+                    if d + 1 == d2sh.len() {
+                        s.push('\n');
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    /// MFEM `KnotVector::PrintFunction(os, a, samples)` (`mesh/nurbs.cpp:669`):
+    /// over every non-empty span, at `samples` reference points, one line
+    /// `u \t Σ a·N \t Σ a·dN \t Σ a·d²N` for the spline with coefficients
+    /// `a`.  This is what `miniapps/nurbs/nurbs_mesh_info.cpp` writes to its
+    /// `k<k>_n<i>.dat` / `k<k>_cheby.dat` files.
+    pub fn print_function(&self, a: &[f64], samples: usize) -> String {
+        assert!(self.n_elements() > 0, "Elements not counted. Use GetElements().");
+        let order = self.order as usize;
+        let mut s = String::new();
+        let dxi = 1.0 / (samples - 1) as f64;
+        for ks in 0..self.n_ks() {
+            if !self.is_element(ks) {
+                continue;
+            }
+            for j in 0..samples {
+                let xi = j as f64 * dxi;
+                s.push_str(&format_g(self.get_knot_location(xi, ks + order), 6));
+                s.push('\t');
+
+                let sh = self.calc_shape_at(ks as i32, xi);
+                let mut val = 0.0;
+                for p in 0..=order {
+                    val += a[ks + p] * sh[p];
+                }
+                s.push_str(&format_g(val, 6));
+                s.push('\t');
+
+                let dsh = self.calc_dshape_at(ks as i32, xi);
+                let mut val = 0.0;
+                for p in 0..=order {
+                    val += a[ks + p] * dsh[p];
+                }
+                s.push_str(&format_g(val, 6));
+                s.push('\t');
+
+                let d2sh = self.calc_d2shape_at(ks as i32, xi);
+                let mut val = 0.0;
+                for p in 0..=order {
+                    val += a[ks + p] * d2sh[p];
+                }
+                s.push_str(&format_g(val, 6));
+                s.push('\n');
+            }
+        }
+        s
+    }
+
+    /// MFEM `KnotVector::UniformRefinement(new_knots, rf)`
+    /// (`mesh/nurbs.cpp:432-451`, non-spacing branch): the `rf-1` new knots
+    /// inside every non-empty span, `(1 - m·h)·knot(i) + m·h·knot(i+1)`.
+    ///
+    /// (The `spacing`-function branch of `KnotVector::Refinement` — v1.1
+    /// spacing files — is not ported; D496 meshes carry plain knot vectors.)
+    pub fn uniform_refinement_knots(&self, rf: i32) -> Vec<f64> {
+        assert!(rf > 1, "Refinement factor must be at least 2.");
+        let h = 1.0 / rf as f64;
+        let mut new_knots = Vec::with_capacity(self.n_elements() * (rf - 1) as usize);
+        for i in 0..self.knots.len() - 1 {
+            if self.knots[i] != self.knots[i + 1] {
+                for m in 1..rf {
+                    let m = m as f64;
+                    new_knots.push((1.0 - m * h) * self.knots[i] + m * h * self.knots[i + 1]);
+                }
+            }
+        }
+        new_knots
+    }
+
+    /// MFEM `KnotVector::KnotVector(int order, const Vector &intervals,
+    /// const Array<int> &continuity)` (`mesh/nurbs.cpp`, used by
+    /// `miniapps/nurbs/surface.cpp`): a clamped knot vector of the given
+    /// order with `intervals.len()` spans of the given widths, interior knot
+    /// multiplicity `order - continuity[i]` at each span junction.
+    pub fn new_from_intervals(order: i32, intervals: &[f64], continuity: &[i32]) -> Self {
+        assert!(
+            continuity.len() == intervals.len() + 1,
+            "Incompatible sizes of continuity and intervals."
+        );
+        let num_knots = order as i64 * continuity.len() as i64
+            - continuity.iter().map(|&c| c as i64).sum::<i64>();
+        assert!(num_knots >= 0, "Invalid continuity vector for order.");
+        let num_knots = num_knots as usize;
+        let num_cp = num_knots - order as usize - 1;
+        let mut knots = vec![0.0f64; num_knots];
+        let mut accum = 0.0f64;
+        let mut iknot = 0usize;
+        for (i, &c) in continuity.iter().enumerate() {
+            let multiplicity = order - c;
+            assert!(
+                (1..=order + 1).contains(&multiplicity),
+                "Invalid knot multiplicity for order."
+            );
+            for _ in 0..multiplicity {
+                knots[iknot] = accum;
+                iknot += 1;
+            }
+            if i < intervals.len() {
+                accum += intervals[i];
+            }
+        }
+        assert!(
+            knots.len() >= 2 * (order as usize + 1),
+            "Insufficient number of knots to define NURBS."
+        );
+        let kv = Self::new(order, num_cp as i32, knots);
+        debug_assert_eq!(kv.num_cp as usize, num_cp);
+        kv
+    }
+
+    /// MFEM `KnotVector::GetInterpolant(Array<Vector*>&, u, reuse_inverse)`
+    /// (`mesh/nurbs.cpp:1092-1195`, non-LAPACK branch): solve the collocation
+    /// system for several right-hand sides with a single assembly +
+    /// inversion.  `x` is overwritten in place with the spline coefficients.
+    ///
+    /// MFEM's `reuse_inverse` flag skips re-assembling/inverting the
+    /// collocation matrix when `u` did not change since the previous call.
+    /// The port always assembles and inverts: the matrix depends only on `u`,
+    /// so the rebuilt inverse is bit-identical to the cached one and the flag
+    /// is a pure performance shortcut.
+    pub fn get_interpolant_multi(&self, x: &mut [Vec<f64>], u: &[f64], _reuse_inverse: bool) {
+        let ncp = self.num_cp as usize;
+        let order = self.order as usize;
+
+        // Assemble the collocation matrix A(i, j) = N_j(u_i) and invert it in
+        // place (`A_coll_inv.Invert()`), exactly like the single-vector
+        // [`Self::get_interpolant`].
+        let mut a_coll_inv = vec![0.0f64; ncp * ncp];
+        let mut shape = vec![0.0; order + 1];
+        for i in 0..ncp {
+            let ks = self.get_span(u[i]);
+            let xi = self.get_ref_point(u[i], ks);
+            self.calc_shape(&mut shape, (ks as i32) - order as i32, xi);
+            for p in 0..=order {
+                a_coll_inv[i * ncp + (ks - order + p)] = shape[p];
+            }
+        }
+        invert_dense(&mut a_coll_inv, ncp);
+
+        // A_coll_inv.Mult(tmp, *x[i]) (kernels::Mult, ascending j).
+        for xi in x.iter_mut() {
+            let tmp = xi.clone();
+            for (i, out) in xi.iter_mut().enumerate() {
+                let mut sum = 0.0;
+                for j in 0..ncp {
+                    sum += a_coll_inv[i * ncp + j] * tmp[j];
+                }
+                *out = sum;
+            }
+        }
+    }
+
     /// MFEM `KnotVector::Difference(kv, diff)` (`mesh/nurbs.cpp:1219-1252`):
     /// the knots of `kv` not contained in `self` (matched within
     /// `2*epsilon`).
@@ -771,23 +1015,28 @@ impl fmt::Display for NurbsKnotVector {
 
 /// NURBS patch control-point object — port of MFEM `NURBSPatch`
 /// (`mesh/nurbs.hpp:320`, `mesh/nurbs.cpp:1274-1520`) for the 2-D (two knot
-/// vector) case.
+/// vector) and 3-D (three knot vector) cases.
 ///
 /// `data` stores `dim` components per control point in MFEM's raw
 /// (homogeneous) form `(x*w, y*w, w)` at exactly the C++ layout
 /// `data[(i + j*ni)*dim + l]` (`mesh/nurbs.hpp:1364`,
-/// `NURBSPatch::operator()(int, int, int)`).
+/// `NURBSPatch::operator()(int, int, int)`); a 3-D patch extends the flat
+/// index to `(i + j*ni + k*ni*nj)*dim + l` — MFEM's
+/// `operator()(int, int, int, int)` (`mesh/nurbs.hpp:1377`).
 #[derive(Debug, Clone)]
 pub struct NurbsPatch {
     /// Knot vectors per parametric direction (`NURBSPatch::kv`).
-    kv: [NurbsKnotVector; 2],
+    kv: Vec<NurbsKnotVector>,
     /// Physical dimension plus 1 (`NURBSPatch::Dim`, nurbs.cpp:1290).
     dim: usize,
     /// Number of control points in the u direction (`NURBSPatch::ni`).
     ni: usize,
     /// Number of control points in the v direction (`NURBSPatch::nj`).
     nj: usize,
-    /// Raw component data, `data[(i + j*ni)*dim + l]`.
+    /// Number of control points in the w direction (`NURBSPatch::nk`); `0`
+    /// for a 2-D patch (MFEM stores `-1` there).
+    nk: usize,
+    /// Raw component data, `data[(i + j*ni [+ k*ni*nj])*dim + l]`.
     data: Vec<f64>,
 }
 
@@ -806,11 +1055,41 @@ impl NurbsPatch {
         let nj = kv_v.num_cp() as usize;
         assert!(ni > 0 && nj > 0, "Invalid knot vector dimensions.");
         Self {
-            kv: [kv_u, kv_v],
+            kv: vec![kv_u, kv_v],
             dim: n_components,
             ni,
             nj,
+            nk: 0,
             data: vec![0.0; ni * nj * n_components],
+        }
+    }
+
+    /// Create a 3-D patch — port of
+    /// `NURBSPatch::NURBSPatch(kv0, kv1, kv2, dim)`
+    /// (`mesh/nurbs.cpp:1410-1418`, used by `miniapps/nurbs/surface.cpp` to
+    /// build the interpolation volume).  `n_components` is MFEM's `dim`
+    /// (physical dimension plus 1); the data is zero-initialized.
+    pub fn new_3d(
+        kv_u: NurbsKnotVector,
+        kv_v: NurbsKnotVector,
+        kv_w: NurbsKnotVector,
+        n_components: usize,
+    ) -> Self {
+        assert!(
+            n_components > 1,
+            "NURBS patch dimension (including weight) must be greater than 1."
+        );
+        let ni = kv_u.num_cp() as usize;
+        let nj = kv_v.num_cp() as usize;
+        let nk = kv_w.num_cp() as usize;
+        assert!(ni > 0 && nj > 0 && nk > 0, "Invalid knot vector dimensions.");
+        Self {
+            kv: vec![kv_u, kv_v, kv_w],
+            dim: n_components,
+            ni,
+            nj,
+            nk,
+            data: vec![0.0; ni * nj * nk * n_components],
         }
     }
 
@@ -828,6 +1107,25 @@ impl NurbsPatch {
         self.data[(i + j * self.ni) * self.dim + l] = value;
     }
 
+    /// MFEM `NURBSPatch::operator()(i, j, k, l)` (`mesh/nurbs.hpp:1377`):
+    /// component `l` of the 3-D patch control point at `(i, j, k)`.
+    pub fn get_ijk(&self, i: usize, j: usize, k: usize, l: usize) -> f64 {
+        assert!(
+            self.nk > 0 && i < self.ni && j < self.nj && k < self.nk && l < self.dim,
+            "NURBSPatch::operator() 3D"
+        );
+        self.data[(i + j * self.ni + k * self.ni * self.nj) * self.dim + l]
+    }
+
+    /// Mutable counterpart of [`Self::get_ijk`], e.g. `(*patch)(i,j,k,3) = 1.0`.
+    pub fn set_ijk(&mut self, i: usize, j: usize, k: usize, l: usize, value: f64) {
+        assert!(
+            self.nk > 0 && i < self.ni && j < self.nj && k < self.nk && l < self.dim,
+            "NURBSPatch::operator() 3D"
+        );
+        self.data[(i + j * self.ni + k * self.ni * self.nj) * self.dim + l] = value;
+    }
+
     /// Knot vector in the u direction (`NURBSPatch::GetKV(0)`).
     pub fn kv_u(&self) -> &NurbsKnotVector {
         &self.kv[0]
@@ -836,6 +1134,18 @@ impl NurbsPatch {
     /// Knot vector in the v direction (`NURBSPatch::GetKV(1)`).
     pub fn kv_v(&self) -> &NurbsKnotVector {
         &self.kv[1]
+    }
+
+    /// Knot vector in the w direction (`NURBSPatch::GetKV(2)`); panics on a
+    /// 2-D patch.
+    pub fn kv_w(&self) -> &NurbsKnotVector {
+        assert!(self.nk > 0, "NURBSPatch::GetKV(2) on a 2-D patch");
+        &self.kv[2]
+    }
+
+    /// All knot vectors (`NURBSPatch::kv` / `GetNKV()`).
+    pub fn kvs(&self) -> &[NurbsKnotVector] {
+        &self.kv
     }
 
     /// Number of components per control point (`NURBSPatch::Dim`).
@@ -851,6 +1161,42 @@ impl NurbsPatch {
     /// Control points in the v direction (`NURBSPatch::nj`).
     pub fn nj(&self) -> usize {
         self.nj
+    }
+
+    /// Control points in the w direction (`NURBSPatch::nk`; `0` for 2-D).
+    pub fn nk(&self) -> usize {
+        self.nk
+    }
+
+    /// Per-direction NCPs, `[ni]`, `[ni, nj]` or `[ni, nj, nk]`.
+    pub fn kv_dims(&self) -> Vec<usize> {
+        if self.nk > 0 {
+            vec![self.ni, self.nj, self.nk]
+        } else {
+            vec![self.ni, self.nj]
+        }
+    }
+
+    /// Raw component `l` of the flat control point `flat` (MFEM tensor order:
+    /// `flat = i + j*ni [+ k*ni*nj]`), i.e. `data[flat*Dim + l]`.
+    pub fn get_flat(&self, flat: usize, l: usize) -> f64 {
+        self.data[flat * self.dim + l]
+    }
+
+    /// Mutable counterpart of [`Self::get_flat`].
+    pub fn set_flat(&mut self, flat: usize, l: usize, value: f64) {
+        self.data[flat * self.dim + l] = value;
+    }
+
+    /// Raw component `l` of the control point at the multi-index `midx`
+    /// (length 2 or 3), tensor order `flat = i + j*ni [+ k*ni*nj]`.
+    pub fn raw_at(&self, midx: &[usize], l: usize) -> f64 {
+        let flat = if midx.len() > 2 {
+            midx[0] + midx[1] * self.ni + midx[2] * self.ni * self.nj
+        } else {
+            midx[0] + midx[1] * self.ni
+        };
+        self.data[flat * self.dim + l]
     }
 
     /// MFEM `NURBSPatch::DegreeElevate(dir, t)` (`mesh/nurbs.cpp:2082-2178`,
@@ -877,26 +1223,146 @@ impl NurbsPatch {
     }
 
     /// MFEM `NURBSPatch::KnotInsert(dir, const Vector &knot)`
-    /// (`mesh/nurbs.cpp:1767-1873`, NURBS Book Algorithm A5.5): insert the
-    /// given knot values (which must lie within the range and respect the
-    /// order) into direction `dir`.
+    /// (`mesh/nurbs.cpp:1767-1873`, NURBS Book Algorithm A5.5): insert all
+    /// knot values in one pass, operating on the raw homogeneous control net
+    /// through MFEM's `SetLoopDirection`/`slice` flattened access — an exact
+    /// port, unlike the per-value A5.1 delegation this method used before
+    /// D496.
     ///
-    /// Delegates to the `fem_element::nurbs` A5.1 insertion kernels
-    /// `h_refine_uk` (direction 0) and `h_refine_vk` (direction 1), applied per
-    /// knot value (MFEM inserts the whole vector in one A5.5 pass; the results
-    /// agree up to one rounding step, visible only as ~1e-17 residuals on
-    /// exactly-cancelled control points).
+    /// This is also the kernel behind `NURBSPatch::UniformRefinement`
+    /// (nurbs.cpp:1583): refinement knots come from
+    /// [`NurbsKnotVector::uniform_refinement_knots`].
     pub fn knot_insert(&mut self, dir: usize, knots: &[f64]) {
         if knots.is_empty() {
             return; // nurbs.cpp:1770-1772
         }
-        assert!(dir < 2, "NURBSPatch::KnotInsert : Invalid direction!");
-        let pd = self.to_patch_data_2d();
-        let refined = match dir {
-            0 => fem_element::nurbs::h_refine_uk(&pd, knots),
-            _ => fem_element::nurbs::h_refine_vk(&pd, knots),
+        assert!(dir < self.kv.len(), "NURBSPatch::KnotInsert : Invalid direction!");
+
+        let dim = self.dim;
+        let (ni, nj, nk) = (self.ni, self.nj, self.nk);
+        let old_kv = &self.kv[dir];
+        let order = old_kv.order() as usize;
+        let ml = old_kv.num_cp() as usize; // old NCP along `dir`
+        let rr = knots.len() - 1; // nurbs.cpp:1806
+
+        // `a = oldkv.GetSpan(knot(0))`, `b = oldkv.GetSpan(knot(rr))`
+        // (nurbs.cpp:1807-1808).
+        let a = old_kv.get_span(knots[0]);
+        let b = old_kv.get_span(knots[rr]);
+
+        // New knot vector: copies of the old knots around the inserted ones
+        // (nurbs.cpp:1811-1819), interior slots filled by the A5.5 loop.
+        let mut new_knots = vec![0.0f64; old_kv.len() + knots.len()];
+        for (j, slot) in new_knots.iter_mut().enumerate().take(a + 1) {
+            *slot = old_kv.values()[j];
+        }
+        for j in b + order..=ml + order {
+            new_knots[j + rr + 1] = old_kv.values()[j];
+        }
+
+        // Flattened (sd, nd) of the old and new nets along `dir`
+        // (`SetLoopDirection`, nurbs.cpp:1508-1560).
+        let (sd, nd, ls) = match (nj != 0, nk != 0) {
+            (_, true) => match dir {
+                0 => (dim, ni, nj * nk * dim),
+                1 => (ni * dim, nj, ni * nk * dim),
+                _ => (ni * nj * dim, nk, ni * nj * dim),
+            },
+            (true, false) => match dir {
+                0 => (dim, ni, nj * dim),
+                _ => (ni * dim, nj, ni * dim),
+            },
+            _ => (dim, ni, dim),
         };
-        self.from_patch_data_2d(&refined);
+        // The flattened size is invariant (nurbs.cpp:1810-1813).
+        let slice = |sd: usize, nd: usize, i: usize, j: usize| -> usize {
+            j % sd + sd * (i + (j / sd) * nd)
+        };
+
+        let old_data = std::mem::take(&mut self.data);
+        let ml_new = ml + knots.len();
+        // `nd` differs along `dir` between the old and the new net
+        // (`nd_new = nd + rr + 1`).  New data size through the flattened
+        // view: `nd_new * ls` entries (equals `ni_new*nj*dim` etc. for every
+        // direction).
+        let nd_new = nd + knots.len();
+        let mut new_data = vec![0.0f64; nd_new * ls];
+        for k in 0..=a.saturating_sub(order) {
+            for ll in 0..ls {
+                new_data[slice(sd, nd_new, k, ll)] = old_data[slice(sd, nd, k, ll)];
+            }
+        }
+        // nurbs.cpp:1827-1834: `for (k = b-1; k < ml; k++)`
+        for k in b.saturating_sub(1)..ml {
+            for ll in 0..ls {
+                new_data[slice(sd, nd_new, k + rr + 1, ll)] = old_data[slice(sd, nd, k, ll)];
+            }
+        }
+
+        // The A5.5 insertion loop (nurbs.cpp:1836-1870).
+        let old_knots = old_kv.values();
+        let mut i = b + order - 1;
+        let mut k = b + order + rr;
+        for j in (0..=rr).rev() {
+            while knots[j] <= old_knots[i] && i > a {
+                new_knots[k] = old_knots[i];
+                for ll in 0..ls {
+                    new_data[slice(sd, nd_new, k - order - 1, ll)] =
+                        old_data[slice(sd, nd, i - order - 1, ll)];
+                }
+                k -= 1;
+                i -= 1;
+            }
+
+            for ll in 0..ls {
+                new_data[slice(sd, nd_new, k - order - 1, ll)] =
+                    new_data[slice(sd, nd_new, k - order, ll)];
+            }
+
+            for l in 1..=order {
+                let ind = k - order + l;
+                let mut alfa = new_knots[k + l] - knots[j];
+                if alfa.abs() == 0.0 {
+                    for ll in 0..ls {
+                        new_data[slice(sd, nd_new, ind - 1, ll)] =
+                            new_data[slice(sd, nd_new, ind, ll)];
+                    }
+                } else {
+                    alfa /= new_knots[k + l] - old_knots[i - order + l];
+                    for ll in 0..ls {
+                        let dst = slice(sd, nd_new, ind - 1, ll);
+                        new_data[dst] = alfa * new_data[dst]
+                            + (1.0 - alfa) * new_data[slice(sd, nd_new, ind, ll)];
+                    }
+                }
+            }
+
+            new_knots[k] = knots[j];
+            k -= 1;
+        }
+
+        // `newkv.GetElements(); swap(newpatch);` — rebuild the knot vector and
+        // patch dimensions in direction `dir` (nurbs.cpp:1871-1873).
+        self.data = new_data;
+        self.kv[dir] = NurbsKnotVector::new(order as i32, ml_new as i32, new_knots);
+        match dir {
+            0 => self.ni = ml_new,
+            1 => self.nj = ml_new,
+            _ => self.nk = ml_new,
+        }
+    }
+
+    /// MFEM `NURBSPatch::UniformRefinement(rf, multiplicity=1)`
+    /// (`mesh/nurbs.cpp:1583-1597`): per direction, insert the refinement
+    /// knots of `KnotVector::Refinement`/`UniformRefinement` in one A5.5 pass.
+    pub fn uniform_refine(&mut self, rf: i32) {
+        if rf <= 1 {
+            return;
+        }
+        for dir in 0..self.kv.len() {
+            let new_knots = self.kv[dir].uniform_refinement_knots(rf);
+            self.knot_insert(dir, &new_knots);
+        }
     }
 
     /// MFEM `NURBSPatch::KnotInsert(dir, const KnotVector &newkv)`
@@ -994,6 +1460,7 @@ impl NurbsPatch {
         );
         self.ni = pd.kv_u.n_basis();
         self.nj = pd.kv_v.n_basis();
+        self.nk = 0;
         let n = self.ni * self.nj;
         self.data = Vec::with_capacity(n * self.dim);
         for k in 0..n {
