@@ -3,8 +3,6 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::lagrange::{QuadQ1, QuadQ2, TetP1, TetP2, TriP1};
-use fem_element::lagrange::factory::TriPk;
 use fem_element::ReferenceElement;
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
@@ -212,10 +210,7 @@ impl ElementIndicators {
     ///
     /// i.e. `M` covers a fraction `θ` of the total error *energy*.  This is
     /// the classical bulk criterion of Dörfler (1996) as used in AFEM
-    /// convergence theory (Cascon–Kreuzer–Nochetto–Siebert 2008); it is the
-    /// marking MFEM's `ThresholdRefiner` degenerates to with
-    /// `SetTotalErrorNormP(2)` + `SetTotalErrorFraction(θ)` (threshold
-    /// `θ·‖η‖₂/√N`).
+    /// convergence theory (Cascon–Kreuzer–Nochetto–Siebert 2008).
     ///
     /// D73(a)/D403: the previous implementation accumulated `η` (not `η²`)
     /// against `θ·‖η‖₂`, which is *not* the Dörfler criterion — on
@@ -224,6 +219,19 @@ impl ElementIndicators {
     /// size, stalling adaptive loops (observed in
     /// `poisson_nc_amr_convergence`: 2-of-8 marks every round, L2 plateau
     /// at 7.9e-2).
+    ///
+    /// D404 correction: an earlier version of this doc claimed Dörfler
+    /// marking "is the marking MFEM's `ThresholdRefiner` degenerates to with
+    /// `SetTotalErrorNormP(2)` + `SetTotalErrorFraction(θ)`".  That is only
+    /// approximately true for *flat* indicator distributions: the RMS
+    /// threshold `θ·‖η‖₂/√N` marks **every** element above `θ·RMS`, while
+    /// the Dörfler prefix stops as soon as `θ` of the energy is covered.
+    /// On the skewed distributions typical of NC-AMR meshes Dörfler(0.5)
+    /// marks 4–15% of the elements per round (top spikes soak up the energy
+    /// budget) versus 30–80% for the RMS threshold, stalling the loop
+    /// (fem-rs NC AMR: final L2 3.2e-2 vs MFEM 4.27e-4).  Use
+    /// [`ElementIndicators::rms_mark`] for the MFEM `total_norm_p=2`
+    /// behaviour.
     pub fn dorfler_mark(&self, theta: f64) -> Vec<u32> {
         let target = theta.clamp(0.0, 1.0) * self.total_error * self.total_error;
         let mut idx: Vec<u32> = (0..self.eta.len() as u32).collect();
@@ -237,6 +245,31 @@ impl ElementIndicators {
             if acc >= target { break; }
         }
         marked
+    }
+
+    /// MFEM `ThresholdRefiner` marking with `SetTotalErrorNormP(2)`:
+    /// mark every element whose indicator exceeds `θ·‖η‖₂/√N` (a fraction
+    /// `θ` of the RMS indicator), i.e. `η_K > θ·RMS(η)`.
+    ///
+    /// Unlike the Dörfler prefix ([`ElementIndicators::dorfler_mark`]) this
+    /// threshold rule marks **all** elements above the cut, which on skewed
+    /// indicator distributions (the generic NC-AMR case) is far more
+    /// aggressive and matches MFEM's per-round mark counts.  D404
+    /// cross-validation against MFEM 4.10 (Poisson MMS, 2×2-tri unit square,
+    /// 5 NC-AMR rounds): RMS marking reaches L2 4.9e-4 at ne=6452 vs MFEM's
+    /// 4.27e-4 (linf mode) / 3.51e-4 (p2 mode) at ne=6032 / 7768, while
+    /// Dörfler(0.5) stalls at 3.2e-2 / ne=125.
+    pub fn rms_mark(&self, theta: f64) -> Vec<u32> {
+        let ne = self.eta.len();
+        if ne == 0 { return Vec::new(); }
+        let thresh = theta.clamp(0.0, 1.0)
+            * self.total_error / (ne as f64).sqrt();
+        self.eta
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e > thresh)
+            .map(|(i, _)| i as u32)
+            .collect()
     }
 
     /// Mark elements whose error exceeds a local absolute threshold.
@@ -2361,7 +2394,6 @@ mod d202_high_order_tables {
 
     use super::ref_elem_vol;
     use crate::assembler::ref_elem_vol_h1;
-    use fem_element::ReferenceElement;
     use fem_mesh::element_type::ElementType;
 
     #[test]
