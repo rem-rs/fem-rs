@@ -3314,6 +3314,122 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   `--tests` 全层 **204 targets / 3728 passed / 0 failed**；examples 0 错误；pro 层
   0 error。
 
+## 第五十二轮（round 52）：QuadDofOrd 表级对齐 + 延拓精确化（MFEM 语义裁定）+ NURBS 读取四缺口 + D404 轨迹入窗
+
+六路并行（④收工后加开⑤⑥），**全部交付、零权限熔断**。开局 HEAD `2f2d96b`，
+号段 ①D456+D474-476 ②D472+D477-479 ③D468/D469/D460/D461+D480-482 ④D465/D467/D471+D483-485
+⑤D143 残留+D486-488 ⑥D404+D489-491。
+
+### ① D456 关闭 —— QuadDofOrd 表级对齐（登记被现场修正）
+
+- **探针先行**：直接调 `RT_FECollection::DofOrderForOrientation(SQUARE/TRIANGLE, ori)`
+  打全表 + 多取向网格 `GetElementVDofs` 逐位 pins。
+- **登记修正**：仅 **r2/r6 两行互换**（fem-rs r2≡MFEM r6、反之）；登记中"r4/r5 符号反"
+  经现场核实**不成立**，未动。tri 侧 `tri_face_grid_transform` vs `TriDofOrd` 逐位一致
+  （静态+探针双证），未修。
+- **⭐ 可达性定理（红旗预案核查结果，反证无行为影响）**：对邻居元素全正 Jacobian 编号
+  穷举（hex 40320、prism 720 全排列）证明 conforming 内部面取向**必为奇数**（quad∈{1,3,5,7}、
+  tri∈{1,3,5}）→ 偶数行只在 MFEM 表层面存在，修复对合法网格 `GetElementDofs` 惰性。
+  集成 pins（hex Or∈{1,3,5,7}×k∈{1,2} 36/108 槽、tet/prisq/prist）全部逐位绿。
+- 红→绿（表级断言 `QuadDofOrd p=1 Or=2 slot(0,0): left (1,1.0) right (2,1.0)` → 6/6）；
+  12 个多取向夹具 `data/d456_*.mesh` 入库（MFEM `CheckElementOrientation` 全正验证）。
+- **观察三条（非缺陷）**：D474（tet 最长边规范化与 MFEM 逐位一致；对拍必须 `Mesh(f,1,1)`
+  加载）、D475（奇取向定理；NC/悬挂面 RT 传递才需偶数行）、D476（.mesh `vertices` 段
+  空间维数行漏写会静默解析成垃圾）。
+
+### ② D472 关闭 —— 纯 pyramid 细化对齐 MFEM（6 Pyr + 4 Tet）
+
+- **修法**：`refine_pyramid5_uniform` **直接委托 `refine_mixed_3d`**（= round 51 ⑥路的
+  MFEM PYRAMID 分支实现，同一套生成器零第二份）；顺带消除 dispatch 路径既有 panic
+  （`quad-face-center vertex not found`）。
+- **oracle**：单锥 L1 10 子元（NV 14/NE 10/NBE 20）+ L2 92（36P+56T）、双锥 L1/L2、
+  MFEM 读回（`r31_meshread`）；体积 1/3、2/3 精确；det>0 全绿；IO roundtrip。
+- 既有 16-tet pin 更新（d336 两测试钉值 16→10、语义依据注释）；新 `d472` 5/0；
+  mesh lib 317/0、amr_regression 15/0、d114 4/0 不动。
+- **新债**：**D477**（合成"quad 底面拆两三角边界"网格 MFEM 自身加载 abort——STable3D
+  设计缺陷；fem-rs 接受并文档化 boundary-only 边中点分配）、**D478**（MFEM 自身 L2 细化
+  输出 18/92 负向子 tet 自修复——MFEM 怪癖无需行动）、**D479**（rebuild_boundary.rs 模块
+  头过期——主会话顺手修）。
+
+### ③ D468/D469/D460 关闭（tet 部分+D461 留 D481/D482）—— 延拓精确化（MFEM 语义裁定）
+
+- **语义裁定（源码链路）**：`GetUpdateOperator()` → `RefinementOperator`/
+  `RefinementMatrix_main` → **`VectorFiniteElement::LocalInterpolation_RT`
+  （fe_base.cpp:1600）**：RT 延拓行是**稠密插值行** `I(k,j)=φ_j^parent(F(x̂_k))·(adjJ_Fᵀ·n̂_k)`
+  ——现 fem-rs 的空行/双计/单值行全是错值。设计文档 `tmp/d468/design.md`（含实施期
+  §4.0 五项修正）+ 四几何 P 矩阵探针 dump 逐行 oracle。
+- **落地**：RT0+tri/quad/tet/hex 同族走新 `build_prolongation_hdiv_rt0_mfem`（复用
+  fem_element 的 MFEM nodal 表与 RT 基；extended-vertex + 质心定父；`written` 掩码单写
+  消灭双计）；order≥1/prism/pyramid/混合走旧路径不变。实施期三个必要修正：P=b·W⁻¹
+  （基规约）、hex 参考域 [−1,1]³、join/父元判定几何修正。
+- **验收**：对拍 tri 28/28、quad 16/16 max|Δ|=0、hex 48/48 max|Δ|=1.1e-16 + 稀疏结构
+  双向相等；**红→绿实证**（临时禁用新分派 → 5 活跃测试全红）；poisson_solve 8/0
+  （D73a 质心锚独立保留）、amr_regression 0 failed、space lib 289/0（他路+1）。
+- **仲裁记录**：d446 的"midline 行必须为空"旧 pin 被 MFEM 真值取代——**删除而非 ignore**
+  （零缺陷 ignore 纪律；d468 的逐位 parity 是更强替代）。
+- **留债**：**D481**（tet RT0 midline 行 octa 子元偏 −1/6 vs 0.25，tet 回退 legacy 不引入
+  新偏差；order≥1 全量 MFEM 插值语义含 D461 bubble；MFEM oracle 以 `#[ignore]` 留档——
+  诊断探针类，实现者翻红即用）、**D482**（prism/pyramid RT0 延拓未覆盖）。
+
+### ④ D465 + D467 + D471 关闭 —— 三 crate 警告清零（45 文件）
+
+- fem-element lib **10→0**（MapType/NURBS 变体改名、死绑定删、恒真断言删）；
+  fem-mesh 测试 **3→0**；fem-assembly own 文件清零（lib build 97→5 全在禁动 physics/**）。
+- **结构发现（同 round 51 款）**：`complex.rs` 的 `mod tests` 缺 `#[cfg(test)]` 门——
+  6 条假性 unused import，补门后由 test 构建裁决。
+- **附带破案**：assembly lib 701→700 = ④路删除 complex.rs 游离重复 `#[test]` 属性
+  （⑥路独立归因一致；src diff 无任何测试函数删除）。
+- 纪律偏差 1 处：`sbm3_dirichlet.rs` 非 UTF-8 导致 Read/Edit 拒开，2 处单行删除用
+  `sed -i` 执行——主会话审计 diff：内容为测试内未用变量删除，与描述一致，接受并记录。
+- 残留列明：physics/** 6 处（禁动）、vendor/linger 20、fem-solver 8（越界）。
+
+### ⑤ D143 残留全关 —— NURBS 网格读取四缺口（含批准越界件 D486）
+
+- **事实修正**：MFEM 4.10 已无 `NURBSBSPatch` 类；`square-disc-nurbs-patch.mesh` 是
+  `NURBS mesh v1.0` + `patches` 段，卡点 = `nurbs_extension.rs:558` 显式拒绝。
+- **四类全关**：① patches 变体 1:1（`NURBSPatchMap` dof 网格探针全中、方向边/
+  CheckKVDirection/KnotVector::Flip 移植）；② v1.1 `spacing` 段八种 SpacingType 解析+
+  回写（读入不改 knot 向量，探针证实）；③ 多补丁 knotvectors **超出最小闭环**——经
+  `fem_space::NurbsExtension`（= `NURBS_PatchMap` 移植）逐 patch 全量控制点，6 夹具
+  NP 对拍、3 夹具控制点逐点钉死；④ 1-D `NurbsFile` 变体。
+- **强验证**：fem-rs 重写的 5 个文件由 MFEM 4.10 原库回读，NP/NKV/NDof/kv 结构逐一相等。
+- **D486（批准越界件）**：io `read_node_block`/write 对 `Ordering:1`（byVDIM）文件按
+  byNODES 切块——5 个 NURBS 夹具的坐标语义全错（读写互逆故 roundtrip 未暴露）。修为
+  按声明 Ordering 归一/转置回流；护栏 12 夹具 token 保留 + byVDIM pin；roundtrip/
+  nodes_writer/legacy_fec_nodes/round31 全绿。
+- **新债**：**D487**（`NurbsExtension::parse_nodes` 的 space 侧镜像 ordering 缺陷——按
+  裁定"影响面超 io 停手"留债）、**D488**（spacing 求值/h-refinement 未移植 + 5 个
+  NURBS miniapp 接线——io/space 前置件已全部就位）。
+- 基线：fem-io lib 136/0、fem-space lib **289/0**（+1）、io 全套 268/0、space 全套 506/0。
+
+### ⑥ D404 关闭 —— NC AMR 切 L2 投影 ZZ，轨迹入 MFEM 窗口
+
+- **MFEM 双模式真值**（重编 d403/d404 探针）：linf（默认 ∞ 范数）ne 8→32→128→428→
+  1624→6032、末级 l2 **4.271716e-4**；p2 模式 ne→7768、l2 3.506350e-04。
+- **切换**：`poisson_nc_amr_convergence` 改 `zz_estimator_l2_nc(&gf,&[]).rms_mark(0.5)`
+  （新增 `pub fn rms_mark` = MFEM `total_norm_p=2` 标记）；**fem-rs 新轨迹 ne 8→32→116→
+  440→1676→6452、末级 L2 4.892040e-4——落在 MFEM 双模式窗口内**（切换前 3.214e-2，
+  偏差 75×且失速）。D73a 质心锚原样保留为独立测试（旧轨迹逐字复现）。
+- **诊断归因（探针证据齐全）**：**D489**（Dörfler 前缀标记 ≠ MFEM p2 阈值标记——偏斜
+  η 分布每轮只标 4-15 个失速；`dorfler_mark` 错误文档已修正）、**D490**（约束恢复空间
+  在 NC 界面膨胀 η——效应比 31 vs 12，主测试用无约束变体）、**D491**
+  （`zz_estimator_nodal` ≡ `zz_estimator_mfem_nc` 逐位相同疑重复实现；`mfem_nc`+RMS
+  = 3.72e-4 最贴 MFEM）。
+- poisson_solve **8/0**（7+新 1）、fem-solver lib 270/0。
+
+### 流程注记（round 52）
+
+- **零权限熔断**延续（四轮连续）；纪律偏差 2 处（④路 sbm3 非 UTF-8 文件 sed -i、
+  ②路无——均为最小面且经主会话审计）。
+- **加开路机制成熟**：④收工即加开⑤⑥，六路全程无文件冲突。
+- **抽查复现（主会话亲跑）**：d472 5/0、mesh lib 317/0、amr_regression 15/0、d456 6/6、
+  space lib 288→289/0、d143_gaps 4/0（+patches 2/0）、fem-io 136/0、d462 3/3、d459 3/3、
+  assembly lib 700/0/5、poisson_solve 8/0。
+- **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2583 passed / 0 failed**；
+  `--tests` 全层 **210 targets / 3753 passed / 0 failed**；examples 0 错误；pro 层
+  0 error。
+
+
 
 
 
