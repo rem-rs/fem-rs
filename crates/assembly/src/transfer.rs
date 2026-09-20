@@ -14,7 +14,10 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use fem_core::types::DofId;
-use fem_element::{ReferenceElement, TetP1, TriP1};
+use fem_element::raviart_thomas::{
+    free_axes, tet_rt1, tri_rt1, HexRTk, QuadRTk, TetRTk, TriRTk, HEX_RT_FACES,
+};
+use fem_element::{ReferenceElement, VectorReferenceElement, TetP1, TriP1};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{topology::MeshTopology, Mesh, TetPointLocator, TriPointLocator};
 use fem_solver::{solve_cg, SolverConfig};
@@ -1218,6 +1221,723 @@ fn hdiv_face_key(verts: &[u32]) -> FaceKey {
     }
 }
 
+// ─── RT0 MFEM-exact prolongation (D468/D469/D460) ───────────────────────────
+//
+// MFEM prolongs an h-refined RT space through
+// `FiniteElementSpace::RefinementOperator` → `GetLocalRefinementMatrices` →
+// `VectorFiniteElement::LocalInterpolation_RT` (`mfem410 fem/fe/fe_base.cpp:1600`):
+//
+//   for each fine element (child embedding F: fine-ref → parent-ref, affine):
+//     I(k, j) = φ_j^parent(F(x̂_k)) · (adjJ_Fᵀ · nk_k)
+//
+// where (x̂_k, nk_k) are the fine dof's reference node/normal and φ_j the
+// parent's reference RT basis.  The assembled matrix (`RefinementMatrix_main`)
+// writes each fine dof's row once (`mark[]`, first-writer-wins — every writer
+// computes the same row) and folds the face-orientation signs in through the
+// signed-dof entries of `SparseMatrix::SetRow`.  Design + probe evidence:
+// `tmp/d468/design.md`, dumps `tmp/d468/d468_{tri,quad,tet,hex}_o0.txt`.
+
+/// Element families the RT0 exact path serves: a mesh qualifies when every
+/// element belongs to the same family (mixed meshes keep the legacy builder).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HdivRt0Family {
+    Tri,
+    Quad,
+    Tet,
+    Hex,
+}
+
+fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
+    let dim = mesh.dim();
+    let family_of = |et: fem_mesh::ElementType| match (dim, et) {
+        (2, fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6) => Some(HdivRt0Family::Tri),
+        (2, fem_mesh::ElementType::Quad4) => Some(HdivRt0Family::Quad),
+        (3, fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10) => {
+            Some(HdivRt0Family::Tet)
+        }
+        (3, fem_mesh::ElementType::Hex8) => Some(HdivRt0Family::Hex),
+        _ => None,
+    };
+    let first = family_of(mesh.element_type(0))?;
+    for e in 1..mesh.n_elements() as u32 {
+        if family_of(mesh.element_type(e)) != Some(first) {
+            return None;
+        }
+    }
+    Some(first)
+}
+
+/// Reference dof rows (nodal point, reference normal) of the RT0 element for
+/// one family, ordered exactly like `HDivSpace`'s element-local slots (faces in
+/// face-table order).  Tri/tet reuse the shared MFEM nodal tables from
+/// `fem_element` (the same tables `HDivSpace::interp_rows` consumes); quad/hex
+/// enumerate one Gauss–Legendre sample per face (RT0: t = 0.5), mirroring
+/// `interp_rows`' face loops.
+fn hdiv_rt0_slot_rows(family: HdivRt0Family) -> Vec<([f64; 3], [f64; 3])> {
+    let z2 = |p: [f64; 2]| [p[0], p[1], 0.0];
+    match family {
+        HdivRt0Family::Tri => {
+            let (pts, nks) = tri_rt1::mfem_tri_nodal_dofs(0);
+            pts.iter().zip(nks.iter()).map(|(p, n)| (z2(*p), z2(*n))).collect()
+        }
+        HdivRt0Family::Quad => {
+            // QUAD_FACES order (bottom/right/top/left) — the same face frame
+            // `HDivSpace::interp_rows` uses for quads.
+            const FACES: [([f64; 2], [f64; 2], [f64; 2]); 4] = [
+                ([0.0, 0.0], [1.0, 0.0], [0.0, -1.0]),
+                ([1.0, 0.0], [0.0, 1.0], [1.0, 0.0]),
+                ([1.0, 1.0], [-1.0, 0.0], [0.0, 1.0]),
+                ([0.0, 1.0], [0.0, -1.0], [-1.0, 0.0]),
+            ];
+            FACES
+                .iter()
+                .map(|(p, u, nk)| (z2([p[0] + 0.5 * u[0], p[1] + 0.5 * u[1]]), z2(*nk)))
+                .collect()
+        }
+        HdivRt0Family::Tet => {
+            let (pts, nks) = tet_rt1::mfem_nodal_dofs(0);
+            pts.iter().zip(nks.iter()).map(|(p, n)| (*p, *n)).collect()
+        }
+        HdivRt0Family::Hex => {
+            // HEX_FACES order via `HEX_RT_FACES`; the fem-rs/MFEM hex reference
+            // element lives on [-1,1]³ (hdiv's hex arm samples
+            // `gauss_legendre_arbitrary`), so the RT0 face sample sits at
+            // ξ_normal = ±1, ξ_free = 0 on each face (the f1/f2 reversals of
+            // the frame are no-ops at m = 1).
+            let mut rows = Vec::with_capacity(6);
+            for &(nc, at_max, _s, _f1, _f2) in &HEX_RT_FACES {
+                let cnorm = if at_max { 1.0 } else { -1.0 };
+                let (a1, a2) = free_axes(nc);
+                let mut xi = [0.0_f64; 3];
+                xi[nc] = cnorm;
+                xi[a1] = 0.0;
+                xi[a2] = 0.0;
+                let mut nk = [0.0_f64; 3];
+                nk[nc] = cnorm;
+                rows.push((xi, nk));
+            }
+            rows
+        }
+    }
+}
+
+fn hdiv_rt0_basis(family: HdivRt0Family) -> Box<dyn VectorReferenceElement> {
+    match family {
+        HdivRt0Family::Tri => Box::new(TriRTk::new(0)),
+        HdivRt0Family::Quad => Box::new(QuadRTk::new(0)),
+        HdivRt0Family::Tet => Box::new(TetRTk::new(0)),
+        HdivRt0Family::Hex => Box::new(HexRTk::new(0)),
+    }
+}
+
+/// Element's own edges per RT0 family: in 2-D the boundary-edge tables of
+/// [`hdiv_element_edges_2d`]; in 3-D the edge skeletons (tet: all 6 vertex
+/// pairs; hex: the 12 unit-cube edges in Hex8 corner numbering).
+fn hdiv_rt0_elem_edges(family: HdivRt0Family) -> &'static [(usize, usize)] {
+    const TET: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+    const HEX: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (0, 3), // bottom z=0
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (4, 7), // top z=1
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // verticals
+    ];
+    match family {
+        HdivRt0Family::Tri => hdiv_element_edges_2d(fem_mesh::ElementType::Tri3),
+        HdivRt0Family::Quad => hdiv_element_edges_2d(fem_mesh::ElementType::Quad4),
+        HdivRt0Family::Tet => &TET,
+        HdivRt0Family::Hex => &HEX,
+    }
+}
+
+/// Fine-node reference-position tables a uniform-refinement child draws its
+/// vertices from, keyed per coarse local slot: the reference corner each local
+/// node slot occupies on the child (used to fit the affine child embedding F).
+/// Reference corner coordinates of each local node slot, in the family's
+/// reference domain: unit-simplex/unit-square corners for tri/tet/quad and the
+/// [-1,1]³ cube corners for hex (the fem-rs/MFEM hex reference element — its
+/// quadrature lives on [-1,1]).
+fn hdiv_rt0_ref_corners(family: HdivRt0Family) -> Vec<(f64, f64, f64)> {
+    let t = |(a, b, c): (f64, f64, f64)| (a, b, c);
+    match family {
+        HdivRt0Family::Tri => vec![
+            t((0.0, 0.0, 0.0)),
+            t((1.0, 0.0, 0.0)),
+            t((0.0, 1.0, 0.0)),
+        ],
+        HdivRt0Family::Quad => vec![
+            t((0.0, 0.0, 0.0)),
+            t((1.0, 0.0, 0.0)),
+            t((1.0, 1.0, 0.0)),
+            t((0.0, 1.0, 0.0)),
+        ],
+        HdivRt0Family::Tet => vec![
+            t((0.0, 0.0, 0.0)),
+            t((1.0, 0.0, 0.0)),
+            t((0.0, 1.0, 0.0)),
+            t((0.0, 0.0, 1.0)),
+        ],
+        HdivRt0Family::Hex => vec![
+            t((-1.0, -1.0, -1.0)),
+            t((1.0, -1.0, -1.0)),
+            t((1.0, 1.0, -1.0)),
+            t((-1.0, 1.0, -1.0)),
+            t((-1.0, -1.0, 1.0)),
+            t((1.0, -1.0, 1.0)),
+            t((1.0, 1.0, 1.0)),
+            t((-1.0, 1.0, 1.0)),
+        ],
+    }
+}
+
+/// Solve the d×d system `B ξ = r` (B stored column-major, `b[col][comp]`) by
+/// Gaussian elimination with partial pivoting; `None` when numerically singular.
+fn hdiv_solve_frame(b: &[[f64; 3]; 3], r: [f64; 3], d: usize) -> Option<[f64; 3]> {    let mut m = [[0.0_f64; 3]; 3];
+    for row in 0..d {
+        for col in 0..d {
+            m[row][col] = b[col][row];
+        }
+    }
+    let mut x = r;
+    for col in 0..d {
+        let mut piv = col;
+        for r2 in (col + 1)..d {
+            if m[r2][col].abs() > m[piv][col].abs() {
+                piv = r2;
+            }
+        }
+        if m[piv][col].abs() < 1e-30 {
+            return None;
+        }
+        m.swap(piv, col);
+        x.swap(piv, col);
+        for r2 in (col + 1)..d {
+            let f = m[r2][col] / m[col][col];
+            for c2 in col..d {
+                m[r2][c2] -= f * m[col][c2];
+            }
+            x[r2] -= f * x[col];
+        }
+    }
+    for col in (0..d).rev() {
+        x[col] /= m[col][col];
+        for r2 in 0..col {
+            x[r2] -= m[r2][col] * x[col];
+        }
+    }
+    Some(x)
+}
+
+/// Invert a row-major `n×n` matrix (Gauss-Jordan with partial pivoting); `None`
+/// when singular.
+fn hdiv_invert_small(w: &[f64], n: usize) -> Option<Vec<f64>> {
+    let mut a = vec![0.0_f64; n * 2 * n];
+    for i in 0..n {
+        a[i * 2 * n..i * 2 * n + n].copy_from_slice(&w[i * n..i * n + n]);
+        a[i * 2 * n + n + i] = 1.0;
+    }
+    for col in 0..n {
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if a[r * 2 * n + col].abs() > a[piv * 2 * n + col].abs() {
+                piv = r;
+            }
+        }
+        if a[piv * 2 * n + col].abs() < 1e-30 {
+            return None;
+        }
+        if piv != col {
+            for c2 in 0..2 * n {
+                a.swap(col * 2 * n + c2, piv * 2 * n + c2);
+            }
+        }
+        let inv = 1.0 / a[col * 2 * n + col];
+        for c2 in 0..2 * n {
+            a[col * 2 * n + c2] *= inv;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = a[r * 2 * n + col];
+            if f != 0.0 {
+                for c2 in 0..2 * n {
+                    a[r * 2 * n + c2] -= f * a[col * 2 * n + c2];
+                }
+            }
+        }
+    }
+    let mut inv = vec![0.0_f64; n * n];
+    for i in 0..n {
+        inv[i * n..i * n + n].copy_from_slice(&a[i * 2 * n + n..i * 2 * n + 2 * n]);
+    }
+    Some(inv)
+}
+
+/// Affine frame (origin `v0`, edge vectors as columns `b[col][comp]`) of one
+/// element under its reference vertex order.  Quads/hexes are verified affine
+/// on their far corners (the RT0 path only serves uniform refinement of affine
+/// parents); `None` on a residual means "cannot prolong this element exactly".
+fn hdiv_elem_frame<M: MeshTopology>(
+    mesh: &M,
+    e: u32,
+    family: HdivRt0Family,
+) -> Option<([f64; 3], [[f64; 3]; 3])> {
+    let dim = mesh.dim() as usize;
+    let nd = mesh.element_nodes(e);
+    let pt = |i: usize| {
+        let p = mesh.node_coords(nd[i]);
+        [p[0], p[1], if dim == 3 { p[2] } else { 0.0 }]
+    };
+    let sub = |x: [f64; 3], y: [f64; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let v0 = pt(0);
+    let mut b = [[0.0_f64; 3]; 3];
+    match family {
+        HdivRt0Family::Tri => {
+            b[0] = sub(pt(1), v0);
+            b[1] = sub(pt(2), v0);
+        }
+        HdivRt0Family::Quad => {
+            b[0] = sub(pt(1), v0);
+            b[1] = sub(pt(3), v0);
+            let v2 = pt(2);
+            let pred = [v0[0] + b[0][0] + b[1][0], v0[1] + b[0][1] + b[1][1], 0.0];
+            if (pred[0] - v2[0]).abs() + (pred[1] - v2[1]).abs() > 1e-8 {
+                return None;
+            }
+        }
+        HdivRt0Family::Tet => {
+            b[0] = sub(pt(1), v0);
+            b[1] = sub(pt(2), v0);
+            b[2] = sub(pt(3), v0);
+        }
+        HdivRt0Family::Hex => {
+            // [-1,1]³ reference cube: return the CENTER and the half-edge
+            // vectors so that x = center + Σ ξ_i·b_i for ξ ∈ [-1,1]³ — the
+            // same affine-algebra shape as the origin-corner families, with
+            // the ±1 corners of `hdiv_rt0_ref_corners`.
+            let mut sum = [0.0_f64; 3];
+            for i in 0..8 {
+                let c = pt(i);
+                sum[0] += c[0] / 8.0;
+                sum[1] += c[1] / 8.0;
+                sum[2] += c[2] / 8.0;
+            }
+            b[0] = [sub(pt(1), pt(0))[0] / 2.0, sub(pt(1), pt(0))[1] / 2.0, sub(pt(1), pt(0))[2] / 2.0];
+            b[1] = [sub(pt(3), pt(0))[0] / 2.0, sub(pt(3), pt(0))[1] / 2.0, sub(pt(3), pt(0))[2] / 2.0];
+            b[2] = [sub(pt(4), pt(0))[0] / 2.0, sub(pt(4), pt(0))[1] / 2.0, sub(pt(4), pt(0))[2] / 2.0];
+            // affine verification on all 8 corners
+            for (i, corner) in hdiv_rt0_ref_corners(family).iter().enumerate() {
+                let vp = pt(i);
+                let mut pred = [0.0_f64; 3];
+                let cs = [corner.0, corner.1, corner.2];
+                for dd in 0..3 {
+                    pred[dd] = sum[dd] + cs[0] * b[0][dd] + cs[1] * b[1][dd] + cs[2] * b[2][dd];
+                }
+                let res = (pred[0] - vp[0]).abs() + (pred[1] - vp[1]).abs() + (pred[2] - vp[2]).abs();
+                if res > 1e-8 {
+                    return None;
+                }
+            }
+            return Some((sum, b));
+        }
+    }
+    Some((v0, b))
+}
+
+/// Refinement vertex maps shared by the HDiv prolongation builders: coarse-edge
+/// midpoint → fine node (both endpoint orders), coarse quad-face center → fine
+/// node (3-D), and — on request — per-coarse-element body center → fine node
+/// (2-D quads refine around their center vertex; hexes around theirs).
+struct HdivVertexMaps {
+    midpoint_map: HashMap<(u32, u32), u32>,
+    quad_center_map: HashMap<[u32; 4], u32>,
+    body_center_map: HashMap<u32, u32>,
+}
+
+impl HdivVertexMaps {
+    fn build<M: MeshTopology>(coarse: &M, fine: &M, want_body_center: bool) -> Self {
+        let dim = coarse.dim();
+        let dim_f = dim as usize;
+        let fine_n_nodes = fine.n_nodes() as u32;
+        let fine_coords: Vec<f64> = (0..fine_n_nodes)
+            .flat_map(|n| fine.node_coords(n).to_vec())
+            .collect();
+        let nearest_fine_node = |mx: f64, my: f64, mz: f64| -> Option<u32> {
+            let mut best = None;
+            let mut best_d2 = 1e-10;
+            for n in 0..fine_n_nodes {
+                let off = n as usize * dim_f;
+                let dx = fine_coords[off] - mx;
+                let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
+                let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < best_d2 && d2 < 1e-6 {
+                    best_d2 = d2;
+                    best = Some(n);
+                }
+            }
+            best
+        };
+        let mut midpoint_map: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut quad_center_map: HashMap<[u32; 4], u32> = HashMap::new();
+        let add_midpoint = |a: u32, b: u32, midpoint_map: &mut HashMap<(u32, u32), u32>| {
+            if midpoint_map.contains_key(&(a, b)) {
+                return;
+            }
+            let ca = coarse.node_coords(a);
+            let cb = coarse.node_coords(b);
+            let mx = 0.5 * (ca[0] + cb[0]);
+            let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
+            let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
+            if let Some(mid) = nearest_fine_node(mx, my, mz) {
+                midpoint_map.insert((a, b), mid);
+                midpoint_map.insert((b, a), mid);
+            }
+        };
+        for e in 0..coarse.n_elements() as u32 {
+            let nodes = coarse.element_nodes(e);
+            if dim == 2 {
+                // D459: midpoints of the element's own edges (quads: all four).
+                for &(li, lj) in hdiv_element_edges_2d(coarse.element_type(e)) {
+                    add_midpoint(nodes[li], nodes[lj], &mut midpoint_map);
+                }
+            } else {
+                for fv in hdiv_element_faces_3d(coarse.element_type(e)) {
+                    for i in 0..fv.len() {
+                        add_midpoint(nodes[fv[i]], nodes[fv[(i + 1) % fv.len()]], &mut midpoint_map);
+                    }
+                    if fv.len() == 4 {
+                        let mut key = [nodes[fv[0]], nodes[fv[1]], nodes[fv[2]], nodes[fv[3]]];
+                        key.sort_unstable();
+                        if !quad_center_map.contains_key(&key) {
+                            let mut s = [0.0_f64; 3];
+                            for &vi in fv.iter() {
+                                let c = coarse.node_coords(nodes[vi]);
+                                for k in 0..dim_f {
+                                    s[k] += c[k];
+                                }
+                            }
+                            if let Some(center) = nearest_fine_node(
+                                s[0] / 4.0,
+                                s[1] / 4.0,
+                                if dim_f >= 3 { s[2] / 4.0 } else { 0.0 },
+                            ) {
+                                quad_center_map.insert(key, center);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let body_center_map = if want_body_center {
+            let mut bcm: HashMap<u32, u32> = HashMap::new();
+            for e in 0..coarse.n_elements() as u32 {
+                let nodes = coarse.element_nodes(e);
+                let mut s = [0.0_f64; 3];
+                for &n in nodes.iter() {
+                    let c = coarse.node_coords(n);
+                    s[0] += c[0];
+                    s[1] += c[1];
+                    if dim >= 3 {
+                        s[2] += c[2];
+                    }
+                }
+                let nv = nodes.len() as f64;
+                if let Some(node) = nearest_fine_node(s[0] / nv, s[1] / nv, s[2] / nv) {
+                    bcm.insert(e, node);
+                }
+            }
+            bcm
+        } else {
+            HashMap::new()
+        };
+        Self { midpoint_map, quad_center_map, body_center_map }
+    }
+}
+
+/// Build the RT0 HDiv prolongation with MFEM's exact `LocalInterpolation_RT`
+/// semantics (tri/quad/tet/hex, order 0): per fine element, locate its coarse
+/// parent, fit the affine child embedding `F: fine-ref → parent-ref`, and emit
+/// each fine dof row as `P[k, j] = s_k · φ_j(F(x̂_k))·(adjJ_Fᵀ n̂_k) · s_j` over
+/// the parent's local dofs (signs from `element_signs`, mirroring MFEM's
+/// signed-dof `SetRow`).  Each fine dof is written once (`written` mask), the
+/// equivalent of MFEM's `mark[]` — this removes the internal sub-face
+/// double-count the COO sum produced (D469/D460) and fills the midline rows
+/// that used to stay empty (D468).
+fn build_prolongation_hdiv_rt0_mfem<M: MeshTopology>(
+    coarse: &HDivSpace<M>,
+    fine: &HDivSpace<M>,
+    family: HdivRt0Family,
+) -> (CsrMatrix<f64>, TransferStats) {
+    let dim = coarse.mesh().dim() as usize;
+    let slot_rows = hdiv_rt0_slot_rows(family);
+    let basis = hdiv_rt0_basis(family);
+    let n_parent_slots = basis.n_dofs();
+
+    // Reference dual matrix W[i][j] = phi_j(xi_i) . nk_i of the RT0 basis in
+    // the slot convention.  The prolongation acts on dof vectors, so the raw
+    // interpolation rows B (basis-function pullbacks) must be mapped through
+    // the dual: P = B . W^{-1}.  This is basis-convention agnostic — fem-rs's
+    // tri/quad RT0 bases are point-dual (W = I), while TetRTk carries W = 2I
+    // and HexRTk a non-uniform dual, which is exactly the factor the raw rows
+    // were missing against the MFEM probe.
+    let n = n_parent_slots;
+    let mut w = vec![0.0_f64; n * n];
+    {
+        let mut phi_w = vec![0.0_f64; n * dim];
+        for (i, (xi, nk)) in slot_rows.iter().enumerate() {
+            basis.eval_basis_vec(&xi[..dim], &mut phi_w);
+            for j in 0..n {
+                let mut s = 0.0_f64;
+                for dd in 0..dim {
+                    s += phi_w[j * dim + dd] * nk[dd];
+                }
+                w[i * n + j] = s;
+            }
+        }
+    }
+    let winv = hdiv_invert_small(&w, n).expect("RT0 reference dual matrix must be invertible");
+
+    let mut coo = CooMatrix::new(fine.n_dofs(), coarse.n_dofs());
+    let mut written = vec![false; fine.n_dofs()];
+    let mut loc = 0usize;
+
+    let maps = HdivVertexMaps::build(coarse.mesh(), fine.mesh(), true);
+
+    // Per coarse element, the fine-node set a uniform-refinement child may draw
+    // its vertices from: own vertices + edge midpoints + (hex) quad-face
+    // centers + (quad/hex) body center.  Every child's vertex set is contained
+    // in exactly one parent's set (design.md §4.5), so the subset scan pins the
+    // parent.
+    let edges = hdiv_rt0_elem_edges(family);
+    let mut extended: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for e in 0..coarse.mesh().n_elements() as u32 {
+        let nodes = coarse.mesh().element_nodes(e);
+        let mut set: HashSet<u32> = nodes.iter().copied().collect();
+        for &(li, lj) in edges {
+            if let Some(&m) = maps.midpoint_map.get(&(nodes[li], nodes[lj])) {
+                set.insert(m);
+            }
+        }
+        if family == HdivRt0Family::Hex {
+            for fv in hdiv_element_faces_3d(fem_mesh::ElementType::Hex8) {
+                let mut key = [nodes[fv[0]], nodes[fv[1]], nodes[fv[2]], nodes[fv[3]]];
+                key.sort_unstable();
+                if let Some(&c) = maps.quad_center_map.get(&key) {
+                    set.insert(c);
+                }
+            }
+        }
+        if let Some(&c) = maps.body_center_map.get(&e) {
+            set.insert(c);
+        }
+        extended.insert(e, set);
+    }
+
+    let ref_corners = hdiv_rt0_ref_corners(family);
+
+    for e in 0..fine.mesh().n_elements() as u32 {
+        let nodes = fine.mesh().element_nodes(e);
+        let fverts: HashSet<u32> = nodes.iter().copied().collect();
+        let mut candidates: Vec<u32> = Vec::new();
+        for (pe, set) in &extended {
+            if fverts.is_subset(set) {
+                candidates.push(*pe);
+            }
+        }
+        // Vertex sets alone can be ambiguous near shared faces (an octahedron
+        // child's midpoints may all lie on a neighbour's extended set too);
+        // the true parent strictly contains the child, decided by the fine
+        // centroid's parent-ref coordinates.
+        let mut parent = None;
+        if candidates.len() == 1 {
+            parent = Some(candidates[0]);
+        } else if candidates.len() > 1 {
+            let mut ctr = [0.0_f64; 3];
+            for &n in nodes.iter() {
+                let c = fine.mesh().node_coords(n);
+                ctr[0] += c[0] / nodes.len() as f64;
+                ctr[1] += c[1] / nodes.len() as f64;
+                ctr[2] += c[2] / nodes.len() as f64;
+            }
+            for &pe in &candidates {
+                let Some((p0, pb)) = hdiv_elem_frame(coarse.mesh(), pe, family) else {
+                    continue;
+                };
+                let Some(xi) =
+                    hdiv_solve_frame(&pb, [ctr[0] - p0[0], ctr[1] - p0[1], ctr[2] - p0[2]], dim)
+                else {
+                    continue;
+                };
+                let eps = 1e-9;
+                let (lo, hi) = match family {
+                    HdivRt0Family::Hex => (-1.0 - eps, 1.0 + eps),
+                    _ => (-eps, 1.0 + eps),
+                };
+                let sum: f64 = (0..dim).map(|i| xi[i]).sum();
+                let inside = match family {
+                    HdivRt0Family::Tri | HdivRt0Family::Tet => {
+                        (0..dim).all(|i| xi[i] > lo) && sum < hi
+                    }
+                    _ => (0..dim).all(|i| xi[i] > lo && xi[i] < hi),
+                };
+                if inside {
+                    parent = Some(pe);
+                    break;
+                }
+            }
+        }
+        let parent = match parent {
+            Some(p) => p,
+            None => continue,
+        };
+        let Some((p0, pb)) = hdiv_elem_frame(coarse.mesh(), parent, family) else {
+            continue;
+        };
+        let Some((f0, fb)) = hdiv_elem_frame(fine.mesh(), e, family) else {
+            continue;
+        };
+        // Child embedding F(x̂) = b + A x̂ in parent-ref coordinates:
+        //   b   = Bp⁻¹ (f0 − p0)
+        //   A_c = Bp⁻¹ fb[c]   (columns along the reference unit axes)
+        let Some(bv) = hdiv_solve_frame(&pb, [f0[0] - p0[0], f0[1] - p0[1], f0[2] - p0[2]], dim)
+        else {
+            continue;
+        };
+        let mut a = [[0.0_f64; 3]; 3];
+        let mut fit_ok = true;
+        for c in 0..dim {
+            match hdiv_solve_frame(&pb, fb[c], dim) {
+                Some(col) => a[c] = col,
+                None => {
+                    fit_ok = false;
+                    break;
+                }
+            }
+        }
+        if !fit_ok {
+            continue;
+        }
+        // Verify the full vertex correspondence (catches non-affine parents).
+        let mut verified = true;
+        for (li, corner) in ref_corners.iter().enumerate() {
+            let p = fine.mesh().node_coords(nodes[li]);
+            let px = [p[0], p[1], if dim == 3 { p[2] } else { 0.0 }];
+            let Some(actual) =
+                hdiv_solve_frame(&pb, [px[0] - p0[0], px[1] - p0[1], px[2] - p0[2]], dim)
+            else {
+                verified = false;
+                break;
+            };
+            let mut pred = bv;
+            for (cnt, col) in [(corner.0, a[0]), (corner.1, a[1]), (corner.2, a[2])] {
+                for dd in 0..dim {
+                    pred[dd] += cnt * col[dd];
+                }
+            }
+            let res = (pred[0] - actual[0]).abs()
+                + (pred[1] - actual[1]).abs()
+                + (pred[2] - actual[2]).abs();
+            if res > 1e-8 {
+                verified = false;
+                break;
+            }
+        }
+        if !verified {
+            continue;
+        }
+        // adjJ = adjugate(A) — MFEM's `AdjugateJacobian` of the (linear) child
+        // embedding; with M[row][comp] = A[col][comp] the adjugate is the
+        // TRANSPOSED cofactor matrix: adj[i][j] = cof(j, i).
+        let m = [
+            [a[0][0], a[1][0], a[2][0]],
+            [a[0][1], a[1][1], a[2][1]],
+            [a[0][2], a[1][2], a[2][2]],
+        ];
+        let adj: [[f64; 3]; 3] = if dim == 2 {
+            [[m[1][1], -m[0][1], 0.0], [-m[1][0], m[0][0], 0.0], [0.0, 0.0, 0.0]]
+        } else {
+            [
+                [
+                    m[1][1] * m[2][2] - m[1][2] * m[2][1],
+                    -(m[1][0] * m[2][2] - m[1][2] * m[2][0]),
+                    m[1][0] * m[2][1] - m[1][1] * m[2][0],
+                ],
+                [
+                    -(m[0][1] * m[2][2] - m[0][2] * m[2][1]),
+                    m[0][0] * m[2][2] - m[0][2] * m[2][0],
+                    -(m[0][0] * m[2][1] - m[0][1] * m[2][0]),
+                ],
+                [
+                    m[0][1] * m[1][2] - m[0][2] * m[1][1],
+                    -(m[0][0] * m[2][1] - m[0][1] * m[2][0]),
+                    m[0][0] * m[1][1] - m[0][1] * m[1][0],
+                ],
+            ]
+        };
+        // vk = adjJᵀ · nk (MFEM: `adjJ.MultTranspose(nk, vk)`), computed per
+        // slot below from the slot's reference normal.
+
+        let dofs = fine.element_dofs(e);
+        let signs_f = fine.element_signs(e);
+        let c_dofs = coarse.element_dofs(parent);
+        let c_signs = coarse.element_signs(parent);
+        debug_assert_eq!(dofs.len(), slot_rows.len());
+        debug_assert_eq!(c_dofs.len(), n_parent_slots);
+        let mut phi = vec![0.0_f64; n * dim];
+        let mut b_row = vec![0.0_f64; n];
+        for (k, &gk) in dofs.iter().enumerate() {
+            let gk = gk as usize;
+            if written[gk] {
+                continue;
+            }
+            let (xi, nk) = &slot_rows[k];
+            let xk: [f64; 3] = std::array::from_fn(|comp| {
+                bv[comp]
+                    + a[0][comp] * xi[0]
+                    + a[1][comp] * xi[1]
+                    + a[2][comp] * xi[2]
+            });
+            let vk: [f64; 3] = std::array::from_fn(|i| {
+                adj[0][i] * nk[0] + adj[1][i] * nk[1] + if dim == 3 { adj[2][i] * nk[2] } else { 0.0 }
+            });
+            basis.eval_basis_vec(&xk[..dim], &mut phi);
+            for j in 0..n {
+                let mut dot = 0.0_f64;
+                for dd in 0..dim {
+                    dot += phi[j * dim + dd] * vk[dd];
+                }
+                b_row[j] = dot;
+            }
+            let sk = signs_f[k];
+            for j in 0..n {
+                let mut val = 0.0_f64;
+                for m in 0..n {
+                    val += b_row[m] * winv[m * n + j];
+                }
+                // MFEM truncates |I(k,j)| < 1e-12 to zero (`LocalInterpolation_RT`).
+                if val.abs() < 1e-12 {
+                    continue;
+                }
+                coo.add(gk, c_dofs[j] as usize, sk * c_signs[j] * val);
+            }
+            written[gk] = true;
+            loc += 1;
+        }
+    }
+
+    (coo.into_csr(), TransferStats { located_count: loc, extrapolated_count: 0 })
+}
+
+
 /// Build HDiv prolongation matrix for h-refinement.
 ///
 /// Uses `edge_face_dof` (2-D edges) / `tri_face_dof` + `face_dofs` (3-D
@@ -1235,6 +1955,22 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     coarse: &HDivSpace<M>,
     fine: &HDivSpace<M>,
 ) -> (CsrMatrix<f64>, TransferStats) {
+    // D468/D469/D460: order-0 RT on tri/quad/hex takes the MFEM-exact
+    // `LocalInterpolation_RT` path — dense interpolation rows for every fine
+    // face dof (including the midline rows that used to stay empty), written
+    // once per fine dof.  Tet RT0 stays on the legacy path for now: the
+    // octahedron-children midline rows still deviate from the MFEM probe
+    // (documented in tmp/d468/design.md §4.4, debt D481).  All other
+    // combinations (order >= 1, prisms, pyramids, mixed meshes) also keep the
+    // historical search-based builder below.
+    if coarse.order() == 0 && fine.order() == 0 {
+        if let (Some(cf), Some(ff)) = (hdiv_rt0_family(coarse.mesh()), hdiv_rt0_family(fine.mesh()))
+        {
+            if cf == ff && cf != HdivRt0Family::Tet {
+                return build_prolongation_hdiv_rt0_mfem(coarse, fine, cf);
+            }
+        }
+    }
     let dim = coarse.mesh().dim();
     let order = coarse.order();
     let n_coarse = coarse.n_dofs();
@@ -1281,74 +2017,8 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     //    vertices, wrapping — so hexes/prisms/pyramids contribute all their
     //    edges; quad faces also record their face center, which a refined
     //    quad's sub-faces need).
-    let fine_n_nodes = fine.mesh().n_nodes() as u32;
-    let fine_coords: Vec<f64> = (0..fine_n_nodes)
-        .flat_map(|n| fine.mesh().node_coords(n).to_vec())
-        .collect();
-    let dim_f = dim as usize;
-    let nearest_fine_node = |mx: f64, my: f64, mz: f64| -> Option<u32> {
-        let mut best = None;
-        let mut best_d2 = 1e-10;
-        for n in 0..fine_n_nodes {
-            let off = n as usize * dim_f;
-            let dx = fine_coords[off] - mx;
-            let dy = if dim_f >= 2 { fine_coords[off + 1] - my } else { 0.0 };
-            let dz = if dim_f >= 3 { fine_coords[off + 2] - mz } else { 0.0 };
-            let d2 = dx * dx + dy * dy + dz * dz;
-            if d2 < best_d2 && d2 < 1e-6 {
-                best_d2 = d2;
-                best = Some(n);
-            }
-        }
-        best
-    };
-    let mut midpoint_map: HashMap<(u32, u32), u32> = HashMap::new();
-    let mut quad_center_map: HashMap<[u32; 4], u32> = HashMap::new();
-    let add_midpoint = |a: u32, b: u32, midpoint_map: &mut HashMap<(u32, u32), u32>| {
-        if midpoint_map.contains_key(&(a, b)) { return; }
-        let ca = coarse.mesh().node_coords(a);
-        let cb = coarse.mesh().node_coords(b);
-        let mx = 0.5 * (ca[0] + cb[0]);
-        let my = if dim_f >= 2 { 0.5 * (ca[1] + cb[1]) } else { 0.0 };
-        let mz = if dim_f >= 3 { 0.5 * (ca[2] + cb[2]) } else { 0.0 };
-        if let Some(mid) = nearest_fine_node(mx, my, mz) {
-            midpoint_map.insert((a, b), mid);
-            midpoint_map.insert((b, a), mid);
-        }
-    };
-    for e in 0..coarse.mesh().n_elements() as u32 {
-        let nodes = coarse.mesh().element_nodes(e);
-        if dim == 2 {
-            // D459: midpoints of the element's own edges (quads: all four).
-            for &(li, lj) in hdiv_element_edges_2d(coarse.mesh().element_type(e)) {
-                add_midpoint(nodes[li], nodes[lj], &mut midpoint_map);
-            }
-        } else {
-            for fv in hdiv_element_faces_3d(coarse.mesh().element_type(e)) {
-                for i in 0..fv.len() {
-                    add_midpoint(nodes[fv[i]], nodes[fv[(i + 1) % fv.len()]], &mut midpoint_map);
-                }
-                if fv.len() == 4 {
-                    let mut key = [nodes[fv[0]], nodes[fv[1]], nodes[fv[2]], nodes[fv[3]]];
-                    key.sort_unstable();
-                    if !quad_center_map.contains_key(&key) {
-                        let mut s = [0.0_f64; 3];
-                        for &vi in fv.iter() {
-                            let c = coarse.mesh().node_coords(nodes[vi]);
-                            for k in 0..dim_f {
-                                s[k] += c[k];
-                            }
-                        }
-                        if let Some(center) =
-                            nearest_fine_node(s[0] / 4.0, s[1] / 4.0, if dim_f >= 3 { s[2] / 4.0 } else { 0.0 })
-                        {
-                            quad_center_map.insert(key, center);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let HdivVertexMaps { midpoint_map, quad_center_map, body_center_map: _ } =
+        HdivVertexMaps::build(coarse.mesh(), fine.mesh(), false);
 
     // Helper: given a first DOF and a block length, add identity or scaled
     // entries (fine block offset m -> coarse block offset m).

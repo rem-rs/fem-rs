@@ -319,14 +319,15 @@ fn hex_rt1_prolongation_walks_quad_face_blocks() {
     check_hierarchy("hex rt1", coarse, fine, 1);
 }
 
-/// HEX hierarchy, RT0: block size 1 hides a wrong *stride* but not a wrong
-/// *walk* — the old tet-only face enumeration still returned an empty P here.
-#[test]
-fn hex_rt0_prolongation_walks_quad_faces() {
-    let coarse = Mesh::<3>::unit_cube_hex(2);
-    let fine = fem_mesh::refine_uniform_3d(&coarse);
-    check_hierarchy("hex rt0", coarse, fine, 0);
-}
+// HEX hierarchy, RT0: block size 1 hides a wrong *stride* but not a wrong
+// *walk* — the old tet-only face enumeration still returned an empty P here.
+// (D468, round 52: hex RT0 prolongation now uses the MFEM-exact
+// `LocalInterpolation_RT` semantics — dense midline rows, single-write sub-face
+// ratios — so the old structural walk pin no longer described the truth; the
+// stronger bitwise pin lives in
+// tests/d468_hdiv_prolongation_mfem_parity.rs::d468_hex_rt0_matches_mfem,
+// which also asserts the sparse structure bidirectionally.  The superseded
+// legacy pin was removed rather than ignored.)
 
 /// TET hierarchy, RT1: the pre-existing simplex path must survive the
 /// shape-driven rewrite bit-for-bit (same audit, triangular faces only).
