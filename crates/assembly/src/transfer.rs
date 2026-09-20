@@ -15,8 +15,7 @@ use thiserror::Error;
 
 use fem_core::types::DofId;
 use fem_element::raviart_thomas::{
-    free_axes, tet_rt1, tri_rt1, HexRTk, PrismRT0, QuadRTk, TetRT1, TetRTk, TriRT1, TriRTk,
-    HEX_RT_FACES,
+    hex_rt1, quad_rt1, tet_rt1, tri_rt1, HexRTk, PrismRT0, QuadRTk, TetRT1, TetRTk, TriRT1, TriRTk,
 };
 use fem_element::{ReferenceElement, VectorReferenceElement, TetP1, TriP1};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1274,9 +1273,13 @@ fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
 /// one family and order, ordered exactly like `HDivSpace`'s element-local
 /// slots (faces in face-table order, then interior samples).  Tri/tet reuse
 /// the shared MFEM nodal tables from `fem_element` for orders 0 and 1 (the
-/// same tables `HDivSpace::interp_rows` consumes); quad/hex/prism enumerate
-/// their order-0 Gauss–Legendre samples per face, mirroring `interp_rows`'s
-/// face loops (higher quad/hex/prism orders stay on the legacy builder).
+/// same tables `HDivSpace::interp_rows` consumes); quad/hex consume the
+/// order-generic MFEM nodal tables `quad_rt1::mfem_quad_nodal_dofs` /
+/// `hex_rt1::mfem_hex_nodal_dofs` (D494 — same enumeration
+/// `HDivSpace::interp_rows` performs: face Gauss grids, then the interior
+/// closed×open blocks with the HexRTk orientation flips in the normal);
+/// prism enumerates its order-0 Gauss–Legendre samples per face (higher
+/// prism orders stay on the legacy builder).
 fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], [f64; 3])>> {
     let z2 = |p: [f64; 2]| [p[0], p[1], 0.0];
     match (family, order) {
@@ -1288,40 +1291,16 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             let (pts, nks) = tet_rt1::mfem_nodal_dofs(o as usize);
             Some(pts.iter().zip(nks.iter()).map(|(p, n)| (*p, *n)).collect())
         }
-        (HdivRt0Family::Quad, 0) => Some({
-            // QUAD_FACES order (bottom/right/top/left) — the same face frame
-            // `HDivSpace::interp_rows` uses for quads.
-            const FACES: [([f64; 2], [f64; 2], [f64; 2]); 4] = [
-                ([0.0, 0.0], [1.0, 0.0], [0.0, -1.0]),
-                ([1.0, 0.0], [0.0, 1.0], [1.0, 0.0]),
-                ([1.0, 1.0], [-1.0, 0.0], [0.0, 1.0]),
-                ([0.0, 1.0], [0.0, -1.0], [-1.0, 0.0]),
-            ];
-            FACES
-                .iter()
-                .map(|(p, u, nk)| (z2([p[0] + 0.5 * u[0], p[1] + 0.5 * u[1]]), z2(*nk)))
-                .collect()
-        }),
-        (HdivRt0Family::Hex, 0) => Some({
-            // HEX_FACES order via `HEX_RT_FACES`; the fem-rs/MFEM hex reference
-            // element lives on [-1,1]³ (hdiv's hex arm samples
-            // `gauss_legendre_arbitrary`), so the RT0 face sample sits at
-            // ξ_normal = ±1, ξ_free = 0 on each face (the f1/f2 reversals of
-            // the frame are no-ops at m = 1).
-            let mut rows = Vec::with_capacity(6);
-            for &(nc, at_max, _s, _f1, _f2) in &HEX_RT_FACES {
-                let cnorm = if at_max { 1.0 } else { -1.0 };
-                let (a1, a2) = free_axes(nc);
-                let mut xi = [0.0_f64; 3];
-                xi[nc] = cnorm;
-                xi[a1] = 0.0;
-                xi[a2] = 0.0;
-                let mut nk = [0.0_f64; 3];
-                nk[nc] = cnorm;
-                rows.push((xi, nk));
-            }
-            rows
-        }),
+        (HdivRt0Family::Quad, o) => {
+            let (pts, nks) = quad_rt1::mfem_quad_nodal_dofs(o as usize);
+            Some(pts.iter().zip(nks.iter()).map(|(p, n)| (z2(*p), z2(*n))).collect())
+        }
+        (HdivRt0Family::Hex, o) => {
+            // The fem-rs/MFEM hex reference element lives on [-1,1]³ — the
+            // published table's points/normals are already in that frame.
+            let (pts, nks) = hex_rt1::mfem_hex_nodal_dofs(o as usize);
+            Some(pts.iter().zip(nks.iter()).map(|(p, n)| (*p, *n)).collect())
+        }
         (HdivRt0Family::Prism, 0) => Some(vec![
             // Prism RT0 rows in the ENGINE frame (axes = vertical, eta,
             // zeta — columns pt(3)−pt(0), pt(1)−pt(0), pt(2)−pt(0)),
@@ -1936,34 +1915,56 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         let mut frame_bv = bv;
         let mut frame_a = a;
         // slot k of the mesh element -> slot of the evaluation frame (identity
-        // tail up to the hex slot count; only the first entries are meaningful
-        // for simplices)
-        let mut slot_map = [0usize, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        // tail; sized for the largest served slot count — hex RT1 carries 36)
+        const MAX_SLOTS: usize = 40;
+        let mut slot_map: [usize; MAX_SLOTS] = std::array::from_fn(|i| i);
         // multiplicative sign correction per mesh slot
-        let mut slot_eps = [1.0_f64; 16];
+        let mut slot_eps = [1.0_f64; MAX_SLOTS];
         // evaluation-frame vertex i -> mesh vertex index (identity tail up to
         // the hex corner count; only the first 4 entries are meaningful for
         // simplices)
         let mut corner_map = [0usize, 1, 2, 3, 4, 5, 6, 7];
         if det < 0.0 {
-            if order != 0 || dim != 3 || family != HdivRt0Family::Tet {
-                // Order >= 1 mirrored tet children would need the face-grid
-                // remap on top of the slot map — fall back to the legacy
+            if dim != 3 || family != HdivRt0Family::Tet || order > 1 {
+                // Mirrored children beyond tet order 1 would need the
+                // higher-order face-grid remap — fall back to the legacy
                 // builder for the whole operator instead.
                 return None;
             }
-            // Swapped frame: F'(eps_i) = ref(w_{pi(i)}), pi = (0 1):
-            //   origin' = ref(w_1) = bv + a[0]
-            //   col j   = ref(w_{pi(j+1)}) - ref(w_1)
-            frame_bv = [bv[0] + a[0][0], bv[1] + a[0][1], bv[2] + a[0][2]];
-            for comp in 0..3 {
-                frame_a[0][comp] = -a[0][comp];
-                frame_a[1][comp] = a[1][comp] - a[0][comp];
-                frame_a[2][comp] = a[2][comp] - a[0][comp];
+            // Swapped frame (order 0 only): F'(eps_i) = ref(w_{pi(i)}),
+            // pi = (0 1): origin' = ref(w_1) = bv + a[0];
+            // col j = ref(w_{pi(j+1)}) - ref(w_1)
+            if order == 0 {
+                frame_bv = [bv[0] + a[0][0], bv[1] + a[0][1], bv[2] + a[0][2]];
+                for comp in 0..3 {
+                    frame_a[0][comp] = -a[0][comp];
+                    frame_a[1][comp] = a[1][comp] - a[0][comp];
+                    frame_a[2][comp] = a[2][comp] - a[0][comp];
+                }
+                slot_map = [
+                    1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+                ];
+                slot_eps = [
+                    -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                ];
+                corner_map = [1, 0, 2, 3, 4, 5, 6, 7];
+            } else {
+                // Order 1: keep the child's own frame and corner
+                // correspondence (slot_map/slot_eps/corner_map stay identity).
+                // The interpolation row
+                // I(k, j) = phi_j(F(x_hat_k)) · (adjJ_F^T n_hat_k) is
+                // algebraic in the affine map F and needs no positive
+                // determinant — the mesh slot signs (`element_signs`) already
+                // encode the mirrored frames' orientation, exactly as on
+                // positively framed children.  (The order-0 arm above keeps
+                // its historical swapped-frame derivation, bitwise-validated
+                // against the MFEM probe; the interior component samples of
+                // order >= 1 have no single-slot correspondence under the
+                // corner swap, so the swap trick cannot be reused here.)
             }
-            slot_map = [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-            slot_eps = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
-            corner_map = [1, 0, 2, 3, 4, 5, 6, 7];
         }
         // Verify the full vertex correspondence (catches non-affine parents).
         // The check runs against the evaluation frame's corner correspondence
@@ -2115,15 +2116,21 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     coarse: &HDivSpace<M>,
     fine: &HDivSpace<M>,
 ) -> (CsrMatrix<f64>, TransferStats) {
-    // D461/D468/D469/D460: RT on same-family meshes takes the MFEM-exact
+    // D461/D468/D469/D460/D494: RT on same-family meshes takes the MFEM-exact
     // `LocalInterpolation_RT` path — dense interpolation rows for every fine
     // dof (including the midline rows that used to stay empty), written once
     // per fine dof.  Order 0 covers tri/quad/tet/hex/prism; order 1 covers
-    // tri/tet (their MFEM nodal tables are public in `fem_element`; the other
-    // families' order-1 tables and the tet face-grid mirror remap stay on the
-    // legacy builder, see D461).  The exact path declines (returns `None`)
-    // when a fine element cannot be prolongated exactly — the historical
-    // search-based builder below then produces the full operator.
+    // tri/tet/quad/hex (the MFEM nodal tables are public in `fem_element`,
+    // D494; mirrored tet children keep their own frames, whose mesh slot
+    // signs carry the orientation).  The prism/pyramid families stay on the
+    // legacy builder: pyramids need the Fuentes nodal dof-value convention
+    // first (D493 — the space-side canonical-moment engine is read-only this
+    // round, and MFEM's own assembled pyramid tet-child rows are an upstream
+    // bug, see tmp/d493/), and prism RT1 lacks an interpolant entirely
+    // (`hdiv_interpolant_available(Prism6, 1) == false`).  The exact path
+    // declines (returns `None`) when a fine element cannot be prolongated
+    // exactly — the historical search-based builder below then produces the
+    // full operator.
     if coarse.order() == fine.order() {
         if let (Some(cf), Some(ff)) = (hdiv_rt0_family(coarse.mesh()), hdiv_rt0_family(fine.mesh()))
         {
@@ -2137,6 +2144,11 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
                         | HdivRt0Family::Hex
                         | HdivRt0Family::Prism,
                     ) => true,
+                    // D494/D461: order-1 quad/hex take the exact path too —
+                    // the published nodal tables carry the interior (bubble)
+                    // rows, so every fine dof row is the MFEM interpolation
+                    // row (no zero columns).
+                    (1, HdivRt0Family::Quad | HdivRt0Family::Hex) => true,
                     (1, HdivRt0Family::Tri | HdivRt0Family::Tet) => true,
                     _ => false,
                 };

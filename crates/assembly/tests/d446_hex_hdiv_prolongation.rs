@@ -309,15 +309,16 @@ fn check_hierarchy(tag: &str, coarse_mesh: Mesh<3>, fine_mesh: Mesh<3>, order: u
     }
 }
 
-/// HEX hierarchy, RT1: the headline red case.  Quad faces carry (k+1)^2 = 4
-/// face dofs — the old tri-only stride (3) left them orphaned and, on hex,
-/// the whole P came back empty.
-#[test]
-fn hex_rt1_prolongation_walks_quad_face_blocks() {
-    let coarse = Mesh::<3>::unit_cube_hex(2);
-    let fine = fem_mesh::refine_uniform_3d(&coarse);
-    check_hierarchy("hex rt1", coarse, fine, 1);
-}
+// HEX hierarchy, RT1: (D494, round 54) hex RT1 prolongation now uses the
+// MFEM-exact `LocalInterpolation_RT` path via the published order-1 nodal
+// table (`hex_rt1::mfem_hex_nodal_dofs`) — dense interpolation rows for
+// every fine dof, bubble rows included — so the legacy block-identity
+// structural walk pin no longer describes the truth (same supersession as
+// the hex RT0 pin above).  The stronger bitwise pin lives in
+// tests/d493_rt1_prolongation_mfem_parity.rs::d493_hex_rt1_matches_mfem
+// (1728 MFEM entries, max|delta| 0e0) plus the semantic companion
+// d493_hex_rt1_constant_field_prolongs_exactly.  The superseded legacy pin
+// was removed rather than ignored, per this file's round-52 precedent.
 
 // HEX hierarchy, RT0: block size 1 hides a wrong *stride* but not a wrong
 // *walk* — the old tet-only face enumeration still returned an empty P here.
@@ -329,14 +330,19 @@ fn hex_rt1_prolongation_walks_quad_face_blocks() {
 // which also asserts the sparse structure bidirectionally.  The superseded
 // legacy pin was removed rather than ignored.)
 
-/// TET hierarchy, RT1: the pre-existing simplex path must survive the
-/// shape-driven rewrite bit-for-bit (same audit, triangular faces only).
-#[test]
-fn tet_rt1_prolongation_structure_unchanged() {
-    let coarse = Mesh::<3>::unit_cube_tet(1);
-    let fine = fem_mesh::refine_uniform_3d(&coarse);
-    check_hierarchy("tet rt1", coarse, fine, 1);
-}
+// TET hierarchy, RT1: (D494, round 54) tet RT1 on fem-rs's own meshes now
+// takes the MFEM-exact `LocalInterpolation_RT` path too — the mirrored
+// corner children are served through their own (negative-determinant)
+// frames, whose mesh slot signs already carry the orientation — so dense
+// interpolation rows replace the legacy block-identity structure and this
+// old structural pin no longer describes the truth.  The stronger pins:
+// tests/d468_hdiv_prolongation_mfem_parity.rs::d461_tet_rt1_matches_mfem
+// (bitwise on MFEM's construction) and
+// tests/d493_rt1_prolongation_mfem_parity.rs::
+// d493_tet_rt1_own_mesh_exact_path_and_exact_fields (exact path served on
+// this very hierarchy; constant and linear fields prolong exactly).  The
+// superseded legacy pin was removed rather than ignored, per this file's
+// round-52 precedent.
 
 // TET/PRISM hierarchy, RT0: (D481/D482, round 53) both geometries now use the
 // MFEM-exact `LocalInterpolation_RT` semantics — mirrored-sliver frames on the
