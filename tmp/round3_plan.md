@@ -3429,6 +3429,114 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   `--tests` 全层 **210 targets / 3753 passed / 0 failed**；examples 0 错误；pro 层
   0 error。
 
+## 第五十三轮（round 53）：prolongation 完成化 + NURBS space 侧 + 陈账审计
+
+六路并行（④审计收工后主会话加开⑤⑥），**全部交付、零权限熔断**。开局 HEAD
+`3a9b11b`，号段 ①D481/D482+D492-494 ②D487/D488+D495-497 ③D491+D498-500
+④D501-503 ⑤⑥无新号（审计/仲裁）。
+
+### ① D481 关闭 + D482-prism 关闭 —— prolongation MFEM 语义完成化
+
+- **D481 tet RT0：两个独立根因**——① `refine_nonconforming_3d` 直网格角子元 1/3
+  保留**历史镜像顶点序**（负 Jacobian，mesh 回归 pin 不可动）：det<0 时在奇置换正定向
+  帧上求值（σ=[1,0,2,3]、ε=全 −1），fem-rs 自身语义严格自洽（P·x_c≡x_f 恒成立）；
+  ② **3-D 伴随转置错误**（探针对拍逼出的深层 bug）：MFEM `CalcAdjugate` 3×3 = 经典
+  伴随 det·J⁻¹，`adjJᵀ·n̂` 实际作用**余因子矩阵** C·n̂；fem-rs 算的是 `adjᵀ·n̂`=
+  伴随·n̂——**转置反了**且 `adj[2][1]` 项式错写；tri/quad/hex 子帧对称（C=Cᵀ）故
+  bitwise 未暴露，tet 非对称子帧全暴露。修复后 tet RT0 **264/264 条 max 5.551e-17**。
+- **D482-prism**：新增 `HdivRt0Family::Prism`（slot 行与 `interp_rows` 逐位一致）；
+  fem-rs `refine_prism6_uniform` 子元序 = MFEM `pri_children`，**88/88 条 max 0.0**。
+- **D461 tet RT1**：interior bubble dof 插值行**逐位对拍通过**。
+- **对拍 fixture 修正**：tet oracle 的 fine 网格改 `mfem_tet_refine`（逐字复刻
+  `UniformRefinement3D_base`；fem-rs 直网格镜像子元首注册面朝向与 MFEM 不同，逐位
+  MFEM 值不可同时满足——fem-rs 自身网格正确性由常场语义测试覆盖）。
+- **留债**：**D492**（tri RT1 sliver：order-1 tri 边内 face-block 布局与 `TriDofOrd`
+  某些取向不符，属 space 侧；oracle `#[ignore]` 留档）、**D493**（pyramid：MFEM
+  nodal Fuentes + 混合细化 vs fem-rs legacy canonical-moment，probe 证据在
+  `tmp/d481/d482_pyramid_o0.txt`——坐标段乱值下轮修 dump 读数）、**D494**（RT1 扩展
+  余项：quad/hex nodal 表、prism 引擎支持）。
+- **验收（主会话亲跑）**：d468 parity **9/0+1 ign**、assembly lib **700/0/5**、
+  d459 3/0、poisson_solve 8/0、amr_regression 15/0、space lib 289/0。
+
+### ② D487 + D488 关闭 —— NURBS space 侧 ordering + spacing 求值 + naca 接线
+
+- **⭐ 首要发现：D487 的债务前提与 MFEM 事实相反**——`linalg/ordering.hpp:18-48`：
+  `byNODES(0)`=component-major、`byVDIM(1)`=interleaved；**仓库全部 16 个 NURBS
+  夹具都是 `Ordering: 1`（interleaved）→ space 侧 `parse_nodes` 原有 `chunks(vdim)`
+  本来就对**。MFEM 探针实证：disc-nurbs 与其转置 Ordering:0 像在 MFEM 4.10 下
+  CP/GEOM **逐字节相同**。修法 = `parse_nodes` 读 `Ordering:` 双臂归一（缺省 1 保持
+  旧行为），红→绿（byNODES 像的 CP y=2.0≠−2.0、几何 max|dW|=2.302e1 → <5e-15）。
+  **由此揭出 round 52 D486 修复方向反了（→ D495，见⑤）**。
+- **D488a spacing 求值**：`NurbsSpacingRecord::eval`（=`SpacingFunction::EvalAll`
+  逐行移植）八类型 vs WSL 探针 %.17g 真值——**最大相对偏差 0e0（位级相同）**。
+- **D488b 接线**：**naca_cmesh 变真**——NACA4/四 kv 助手/5 patch 构建/按 C++ 布局
+  写文件，默认档与官方样例档的 `naca-cmesh.mesh` 与 C++ 输出 **`cmp` 逐字节相同**；
+  其余 4 个列明前置缺口留债（D496：nurbs_mesh_info/surface 需 mesh crate
+  PrintInfo/3-kv patch 层；D497：patch_ex1/ex10 需 assembly 的 NURBS patch 装配/
+  非线性形式）。
+- **验收**：fem-io lib 136/0、fem-space lib 289/0、NURBS 七套件全绿（21/10/4/2/6/3/9）。
+
+### ⑤ 主会话仲裁 —— D495：翻转 round 52 D486 的反向回归
+
+- ②路揭出 D486 反向后，主会话亲测夹具（`data/disc-nurbs.mesh` 顶点块 `-2 -2 / 2 -2 /
+  …` = 逐 dof 交错，与 MFEM 探针真值一致）后翻转 `read_node_block`/writer 两臂 +
+  修正注释；**测试侧两处钉着反语义的期望同步翻正**（`nurbs_mesh_write_roundtrip.rs`
+  的 byVDIM pin、`nurbs_d143_gaps.rs` 的 `node_block_per_dof` 助手）。roundtrip 互逆
+  掩盖机制如②路所述——翻转后全部 fem-io 套件 0 failed。
+- **教训入账**：登记"真值"必须来自 MFEM 探针实跑，不能从自身解码推导（round 52 ⑤
+  的 [-2,0] 即推导产物）。
+
+### ③ D491 关闭 + D404 深化 —— 估计子"逐位相同"被证伪 + ThresholdRefiner 全语义
+
+- **D491 破伪**：`zz_estimator_nodal` vs `zz_estimator_mfem_nc` **非重复实现**——同一
+  三步 MFEM ZZ 数学但浮点操作序不同（transform-first vs combine-first=刻意位对位
+  MFEM parity），实测 max|Δη|=1.110e-16、bit-equal 6/8（"逐位相同"印象来自探针
+  4 位打印）；功能集不同不可删。**真正的字面复制对是 `zz_estimator_mfem ≡ _nc`**
+  （位恒等已钉，合并记 **D499**）。`_constraints` 维持带理由注释（MFEM H1 通量空间下
+  应用恢复会 ~3.7× 偏置）。
+- **D404 深化**：`ThresholdRefiner` 重写为 MFEM `MarkWithoutRefining`
+  （mesh_operators.cpp:83-133）全语义——`set_total_error_norm_p`/`set_total_error_fraction`/
+  阈值公式 `max(η_p·fraction·N^(−1/p), local_err_goal)`（local goal 是**下限**，改前
+  被当整个阈值）/`Normlp` 特判/`max_elements`+`total_error_goal` 双 STOP/`threshold()`
+  访问/aniso 接同一参数族。**红线保持**：poisson_solve 8/0、D404 轨迹逐字
+  （6452/4.892040e-4）、CentroidZz 锚不变。
+- **新债**：**D498**（ex15 两例需补 `set_total_error_fraction(0.0)` 对齐 C++
+  ex15.cpp:233——示例非本路授权；pex15 已验证不受影响）、**D499**（字面复制对合并）、
+  **D500**（`non_conforming` 标志 + Derefiner `SetOp` 未移植）。
+- **验收**：新测试 d491 **6/0**、d404 探针改前后输出逐字同、ex15 两例编译通过。
+
+### ④ 陈账审计 —— 18 笔逐笔核实（`tmp/audit53/AUDIT.md`）
+
+- **判定：已修 9 / 仍开 9 / 登记有误 1 / 无法验证 0**。
+- **已修未销账**：**D119**（prism 高阶几何——toroid-wedge 六元中心 det 与 MFEM
+  **逐位一致 0.432902**，经 D177/D295/D164/168 修复而非原建议）、**D122**（round 48
+  D412 已关：`--ranks 2/3/4` sentinel 告警 0）、D164/D171/D149/D155/D263/D276/D110。
+- **登记有误**：**D136** 的 PCG 数字**归属写反**（实为 fem-rs=0.00441429 vs
+  C++=0.00442905——差异本体真实，第 0 步起 3.3e-3 相对差；两侧探针已备
+  `$HOME/work/audit53/`）。
+- **最重仍开**：**D124**（P2：`crates/parallel` 至今无分布式本质边界入口——rank-local
+  导致解漂 2.0e-3，round 54 首选）；D136+D156（变阶布局+打印，探针现成）、D103/D104
+  （部分收敛）、D220/D234/D235/D277（parked 有据）。
+- **新发现**：**D501**（joule.rs 头注释缺口文案被 D412 关闭后腐烂，~10 行）、**D502**
+  （target/ 残留已删示例陈旧 exe——审计陷阱，勿信未重建的二进制）、**D503**（
+  mesh-optimizer `-mid 2 -nor` Final energy 0.09% 残差）。
+
+### 流程注记（round 53）
+
+- **零权限熔断**五轮连续；加开⑤⑥机制第三次使用。
+- **①路最终报告的 d446 计数为中间态**（tet/prism 启用后未复跑）——主会话全量回归
+  抓出并按"被取代 pin 删除"先例处理。教训：**改语义后必须复跑全部 sensitive pins，
+  报告数字以最终态为准**。
+- **D495 破案链**：②路 MFEM 探针 → 主会话亲测夹具顶点块 → 翻转读/写+测试助手 →
+  d143_gaps 6/6。round 52 ⑤路的"真值"系推导产物未实跑探针——**"探针先行"不可省**
+  二次验证。
+- **抽查复现（主会话亲跑）**：d468 9/0+1ign、assembly lib 700/0/5、poisson_solve 8/0、
+  d472 5/0、mesh lib 317/0、d456 6/6、d143_gaps 6/6、fem-io 136/0、space lib 289/0。
+- **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2583 passed / 0 failed**；
+  `--tests` 全层 **213 targets / 3768 passed / 0 failed**；examples 0 错误；pro 层
+  0 error。
+
+
 
 
 
