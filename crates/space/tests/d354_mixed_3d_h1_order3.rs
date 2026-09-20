@@ -1,17 +1,16 @@
 //! D354 — `DofManager` on a **mixed** 3-D H¹ mesh at orders `>= 3`.
 //!
-//! ## Round 49 status: **deferred — the builder stays `p = 2`** (open debt)
+//! ## Status: **landed** (round 50, per `tmp/d354/design_round50.md`)
 //!
-//! The D354 builder generalization was designed end-to-end this round (slot
-//! descriptors, physical-position face matching, the full rewritten
-//! `build_mixed_3d`, complete design + partial patch archived in
-//! `tmp/d354/` and the round-49 report) but was **not landed**: the session's
-//! permission window closed before the rewrite could be compiled and
-//! validated.  `DofManager::build_mixed_3d` therefore still refuses `p >= 3`
-//! with an explicit panic (pinned by the d349 suite's gap test), and this
-//! file pins only what is true today: the `p = 2` D349 baseline, plus the
-//! **self-consistency of the archived MFEM oracle blocks** — so the numbers
-//! below are in-tree and pre-validated for whoever lands the builder.
+//! The D354 builder generalization designed in round 49 lives in
+//! `DofManager::build_mixed_3d`: a mixed 3-D H¹ mesh builds at **any order
+//! `p >= 2`**, the cross-type shared faces resolved by **physical position**
+//! (each type's own reference lattice through its linear map — the
+//! correspondence MFEM establishes with `DofOrderForOrientation`, identical
+//! whenever both elements' face maps agree on the shared face, which holds
+//! for straight-sided meshes).  The tests below pin the builder against the
+//! archived MFEM oracle blocks; the `p = 2` D349 baseline stays as a
+//! bit-stability guard.
 //!
 //! ## The gap this closes
 //!
@@ -38,13 +37,15 @@
 //! (`pyr_type = 0`, Bergot, has `bad=4`/`bad=9` **in MFEM itself** — the
 //! D348-family transpose-index defect — so only its `vsize` is pinned here.)
 //!
-//! When the builder lands, the POS table is compared **exactly**, DOF by DOF
-//! (tolerance 1e-14 for print round-off), and the `ELEM` lists as **sets**:
-//! the per-type slot orders are fem-rs's own positional conventions (the hex
-//! at `p >= 3` uses MFEM's `H1_DOF_MAP` block order; the p = 2 legacy order
-//! stays at p = 2), not MFEM's element dumps.  Together the two pin the whole
-//! numbering: the entity allocation stream (which face got which ids) *and*
-//! the physical point every id sits at.
+//! The POS table is compared **exactly**, DOF by DOF (tolerance 1e-14 for
+//! print round-off), and the `ELEM` lists as **sets**: the per-type slot
+//! orders are fem-rs's own positional conventions (the hex at `p >= 3` uses
+//! MFEM's `H1_DOF_MAP` block order; the p = 2 legacy order stays at p = 2),
+//! not MFEM's element dumps.  Together the two pin the whole numbering: the
+//! entity allocation stream (which face got which ids) *and* the physical
+//! point every id sits at.
+
+use std::collections::HashSet;
 
 use fem_mesh::{ElementType, Mesh};
 use fem_space::DofManager;
@@ -280,11 +281,10 @@ fn reference(block: &str) -> Ref {
 }
 
 /// The archived oracle blocks are self-consistent and carry the headline
-/// numbers the builder-side tests will pin when D354 lands: `vsize`
-/// (119/247), the shared-incidence totals (51/76), the per-type element sizes
-/// (hex 64/125, prism 40/75, Fuentes pyramid 37/77, tet 20/35) and a complete
-/// 119-row POS table at `p = 3`.  (No `DofManager` call above `p = 2` here —
-/// the builder still refuses `p >= 3` while D354 is open.)
+/// numbers the builder-side tests pin: `vsize` (119/247), the
+/// shared-incidence totals (51/76), the per-type element sizes (hex 64/125,
+/// prism 40/75, Fuentes pyramid 37/77, tet 20/35) and a complete 119-row POS
+/// table at `p = 3`.
 #[test]
 fn d354_oracle_blocks_are_selfconsistent() {
     let p3 = reference(MFEM_ZOO_P3);
@@ -312,4 +312,102 @@ fn d354_order2_baseline_is_unchanged() {
     assert_eq!(dm.element_dofs(1).len(), 18);
     assert_eq!(dm.element_dofs(2).len(), 15);
     assert_eq!(dm.element_dofs(3).len(), 10);
+}
+
+/// The whole conformity statement at `p = 3`: MFEM's `vsize = 119` and its
+/// **exact** per-DOF position table, dof by dof (tolerance 1e-14 for the
+/// dump's print round-off).
+#[test]
+fn d354_order3_positions_match_mfem_exactly() {
+    let r = reference(MFEM_ZOO_P3);
+    let dm = DofManager::new(&tinyzoo(), 3);
+    assert_eq!(dm.n_dofs, r.vsize, "vsize vs MFEM {}", r.vsize);
+    for d in 0..r.vsize {
+        let got = dm.dof_coord(d as u32);
+        for k in 0..3 {
+            assert!(
+                (got[k] - r.pos[d][k]).abs() <= 1e-14,
+                "POS {d} comp {k}: got {} want {}",
+                got[k],
+                r.pos[d][k]
+            );
+        }
+    }
+}
+
+/// Each element's DOF *set* is MFEM's `ELEM` list at `p = 3` and `p = 4`
+/// (the per-type slot order is fem-rs's own — see the module header — so the
+/// comparison is set-valued).  Sizes: hex 64/125, prism 40/75, Fuentes
+/// pyramid 37/77, tet 20/35.
+#[test]
+fn d354_element_dof_sets_match_mfem_p3_and_p4() {
+    let mesh = tinyzoo();
+    for (block, orders) in [(MFEM_ZOO_P3, 3u8), (MFEM_ZOO_P4, 4u8)] {
+        let r = reference(block);
+        let dm = DofManager::new(&mesh, orders);
+        assert_eq!(dm.n_dofs, r.vsize, "p={orders} vsize vs MFEM {}", r.vsize);
+        for (e, want) in r.elems.iter().enumerate() {
+            let got: HashSet<u32> = dm.element_dofs(e as u32).iter().copied().collect();
+            assert_eq!(got.len(), want.len(), "p={orders} element {e} DOF count");
+            let want_set: HashSet<u32> = want.iter().copied().collect();
+            assert_eq!(got, want_set, "p={orders} element {e} DOF set");
+        }
+    }
+}
+
+/// MFEM's own conformity metric: `shared` is `Σ_{element pairs} |DOFs in
+/// both|`, and MFEM reports 51 at `p = 3` and 76 at `p = 4` (`bad = 0` — in
+/// fem-rs a shared DOF has exactly one position, pinned by the POS test
+/// above).  The per-pair counts must agree element pair by element pair, not
+/// just in the total.
+#[test]
+fn d354_shared_incidences_match_mfems_51_and_76() {
+    let mesh = tinyzoo();
+    for (block, orders, total) in
+        [(MFEM_ZOO_P3, 3u8, 51usize), (MFEM_ZOO_P4, 4u8, 76usize)]
+    {
+        let r = reference(block);
+        let dm = DofManager::new(&mesh, orders);
+        let sets: Vec<HashSet<u32>> = (0..4u32)
+            .map(|e| dm.element_dofs(e).iter().copied().collect())
+            .collect();
+        let mut shared = 0usize;
+        for a in 0..4 {
+            for b in (a + 1)..4 {
+                let mfem_pair = r.elems[a]
+                    .iter()
+                    .filter(|d| r.elems[b].contains(d))
+                    .count();
+                let got_pair = sets[a].intersection(&sets[b]).count();
+                assert_eq!(
+                    got_pair, mfem_pair,
+                    "p={orders} shared dofs between elements {a} and {b}"
+                );
+                shared += got_pair;
+            }
+        }
+        assert_eq!(shared, total, "p={orders} shared DOF incidences vs MFEM");
+    }
+}
+
+/// The per-type element sizes at `p = 3` (Fuentes 37, the MFEM default
+/// `pyr_type = 1`), and the Bergot arm (`pyr_type = 0`, MFEM's own
+/// `vsize = 112` — MFEM itself reports `bad = 4` there, the D348-family
+/// transpose-index defect, so only sizes are pinned): the Bergot pyramid
+/// contributes 30 DOFs, the hex and tet are unchanged (64/20).
+#[test]
+fn d354_order3_element_sizes_and_bergot_arm() {
+    let mesh = tinyzoo();
+    let dm = DofManager::new(&mesh, 3);
+    let sizes: Vec<usize> = (0..4u32).map(|e| dm.element_dofs(e).len()).collect();
+    assert_eq!(sizes, vec![64, 40, 37, 20], "p=3 per-type sizes (Fuentes)");
+
+    let bergot = DofManager::new_with_pyramid_basis(
+        &mesh,
+        3,
+        fem_element::lagrange::PyramidBasisType::Bergot,
+    );
+    assert_eq!(bergot.n_dofs, 112, "MFEM zoo p=3 pyr_type=0 vsize = 112");
+    let b_sizes: Vec<usize> = (0..4u32).map(|e| bergot.element_dofs(e).len()).collect();
+    assert_eq!(b_sizes, vec![64, 40, 30, 20], "p=3 per-type sizes (Bergot)");
 }

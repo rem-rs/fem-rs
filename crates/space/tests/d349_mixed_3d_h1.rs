@@ -338,29 +338,17 @@ fn element_order_does_not_change_the_builder() {
     assert_eq!(dm.element_dofs(3).len(), 27, "hex last");
 }
 
-/// Order 1 is unchanged (it always handled mixed meshes), and order >= 3 now
-/// fails with the *gap* message rather than an index-out-of-bounds panic.
+/// Order 1 is unchanged (it always handled mixed meshes); orders 3 and 4 are
+/// D354's generalization of this builder — the numbers below are MFEM's own
+/// (`tmp/d347/space.txt` / `tmp/d354/d354_probe.cpp`), pinned test-by-test
+/// by the `d354_mixed_3d_h1_order3` suite.
 #[test]
-fn order_1_still_works_and_order_3_states_the_gap() {
+fn order_1_still_works_and_orders_3_4_build() {
     let mesh = tinyzoo();
     let dm1 = DofManager::new(&mesh, 1);
     assert_eq!(dm1.n_dofs, 12, "MFEM zoo p=1 vsize = 12");
-
-    for order in [3u8, 4] {
-        let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            DofManager::new(&mesh, order).n_dofs
-        }))
-        .expect_err("mixed 3-D order >= 3 must be an explicit, documented gap");
-        let text = msg
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| msg.downcast_ref::<&str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        assert!(
-            text.contains("order 1") && text.contains("order 2"),
-            "order {order}: panic should state the D349 gap, got {text:?}"
-        );
-    }
+    assert_eq!(DofManager::new(&mesh, 3).n_dofs, 119, "MFEM zoo p=3 pyr_type=1 vsize");
+    assert_eq!(DofManager::new(&mesh, 4).n_dofs, 247, "MFEM zoo p=4 pyr_type=1 vsize");
 }
 
 /// The pyramid's share of the mixed space is the family's, not a fixed count:
