@@ -64,6 +64,25 @@ pub trait FluxRecovery {
 /// (Fuentes, entity slot order), the same slots `DofManager::build_pyramid_pk`
 /// numbers the H¹ space's `element_dofs` in.  Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
+    ref_elem_vol_with_pyramid_basis(
+        elem_type,
+        order,
+        fem_element::lagrange::PyramidBasisType::default(),
+    )
+}
+
+/// [`ref_elem_vol`] with an explicit pyramid H¹ basis family — the
+/// flux-recovery analogue of the assembler's
+/// `ref_elem_vol_h1_with_pyramid_basis` (MFEM `H1_FECollection`'s `pyr_type`
+/// switch).  D462: callers that hold the *solution* space must thread
+/// `space.pyramid_basis()` through here, so a Bergot pyramid space
+/// (`pyr_type = 0`) is sampled in its own slot order; only pyramid cells at
+/// order ≥ 2 depend on it, every other arm ignores `pyr`.
+fn ref_elem_vol_with_pyramid_basis(
+    elem_type: ElementType,
+    order: u8,
+    pyr: fem_element::lagrange::PyramidBasisType,
+) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 => {
             fem_space::ref_elem::h1_simplex_slots(elem_type, order)
@@ -75,11 +94,12 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         ElementType::Prism6 | ElementType::Prism15 => {
             fem_space::ref_elem::equispaced_prism(order.max(1))
         }
-        ElementType::Pyramid5 | ElementType::Pyramid13 => fem_space::ref_elem::h1_pyramid_slots(
-            order.max(1),
-            fem_element::lagrange::PyramidBasisType::default(),
+        ElementType::Pyramid5 | ElementType::Pyramid13 => {
+            fem_space::ref_elem::h1_pyramid_slots(order.max(1), pyr)
+        }
+        _ => panic!(
+            "ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"
         ),
-        _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
 
@@ -205,7 +225,7 @@ use crate::standard::DiffusionIntegrator;
 /// `_ => 1` — right by accident at p = 1 only, and for any higher-order flux
 /// space it read an order-1 basis against an order-p flux vector (the D353
 /// defect class).  The arms now cover every H¹ cell type through p = 5
-/// (pyramids, the Fuentes `h1_pyramid_element` counts, through p = 3), and
+/// (pyramids through p = 4, both families — see the pyramid arm), and
 /// the fallback is no longer silent: a `debug_assert!` names the unmapped
 /// `(element_type, n_flux_dofs)` pair in debug builds while release builds
 /// keep the conservative order-1 quadrature.
@@ -237,26 +257,68 @@ fn infer_fe_order(elem_type: ElementType, n_flux_dofs: usize) -> u8 {
         (ElementType::Tet4, 20) => 3,
         (ElementType::Tet4, 35) => 4,
         (ElementType::Tet4, 56) => 5,
-        // D365/D366: the Fuentes H¹ pyramid element (`p(p²+3)+1` DOFs — the
-        // counts pinned by `fem_element::lagrange::pyramid`'s
-        // `pyramid_basis_type_family_map`: 5 / 15 / 37 / 77 at p = 1..4).
-        // NOTE: the Bergot opt-out counts differently (14/30 at p = 2/3); a
-        // Bergot-pyramid flux space of order ≥ 2 hits the debug_assert arm.
+        // D365/D366: the pyramid counts.  Two MFEM families live on pyramid
+        // cells (`H1_FECollection`'s `pyr_type`), and at p ≥ 2 their counts
+        // differ, so the flux-vector length pins the *order* either way:
+        //   Fuentes (default, `p(p²+3)+1`): 5 / 15 / 37 / 77 at p = 1..4
+        //     (`fem_element::lagrange::pyramid`'s `pyramid_basis_type_family_map`);
+        //   Bergot (`(p+1)(p+2)(2p+3)/6`, the `pyr_type = 0` opt-out,
+        //     D454): 5 / 14 / 30 / 55 at p = 1..4 — counts measured from
+        //     `h1_pyramid_slots(p, PyramidBasisType::Bergot).n_dofs()` and
+        //     pinned by `fem_element`'s `h1_pyramid_pk_counts`.
+        // The 5 at p = 1 is shared and maps to the same order in both
+        // families; 14/30/55 collide with no other arm of this table.
         (ElementType::Pyramid5 | ElementType::Pyramid13, 5) => 1,
         (ElementType::Pyramid5 | ElementType::Pyramid13, 15) => 2,
         (ElementType::Pyramid5 | ElementType::Pyramid13, 37) => 3,
         (ElementType::Pyramid5 | ElementType::Pyramid13, 77) => 4,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 14) => 2,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 30) => 3,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 55) => 4,
         other => {
             debug_assert!(
                 false,
                 "infer_fe_order: unmapped (element_type, n_flux_dofs) = \
-                 ({:?}, {}) — add an arm; conservatively using quadrature \
-                 order 2 (= 2·1)",
+                 ({:?}, {}) — matches no H¹ count of any supported family \
+                 (Fuentes *and* Bergot pyramids included since D454); add an \
+                 arm; conservatively using quadrature order 2 (= 2·1)",
                 other.0, other.1
             );
             1
         }
     }
+}
+
+/// D454: pick the pyramid flux basis **family** from the flux-vector length.
+///
+/// [`infer_fe_order`] resolves the length to the order for both pyramid
+/// families, but [`ref_elem_vol`] only builds the Fuentes default — a Bergot
+/// flux space (MFEM `H1_FECollection(.., pyr_type = 0)`) would then be read
+/// against a 15/37/77-DOF Fuentes basis (the D353 defect class).  The caller
+/// chain (`compute_flux_energy`) holds no space object, only the count — but
+/// the count distinguishes the families at every p ≥ 2, so reconstruct the
+/// element from it: Fuentes if the count matches, Bergot otherwise.
+fn pyramid_flux_element(order: u8, n_flux_dofs: usize) -> Box<dyn ReferenceElement> {
+    let fuentes = fem_space::ref_elem::h1_pyramid_slots(
+        order,
+        fem_element::lagrange::PyramidBasisType::Fuentes,
+    );
+    if fuentes.n_dofs() == n_flux_dofs {
+        return fuentes;
+    }
+    let bergot = fem_space::ref_elem::h1_pyramid_slots(
+        order,
+        fem_element::lagrange::PyramidBasisType::Bergot,
+    );
+    debug_assert_eq!(
+        bergot.n_dofs(),
+        n_flux_dofs,
+        "pyramid_flux_element: n_flux_dofs={n_flux_dofs} matches neither family \
+         at order {order} (Fuentes {}, Bergot {})",
+        fuentes.n_dofs(),
+        bergot.n_dofs()
+    );
+    bergot
 }
 
 impl FluxRecovery for DiffusionIntegrator<f64> {
@@ -272,7 +334,15 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let n_flux_dofs = flux_dof_coords.len();
         let elem_type = mesh.element_type(element);
         let order = space.order();
-        let ref_elem = ref_elem_vol(elem_type, order);
+        // D462: the sampler is the *solution* space's own H¹ basis — a Bergot
+        // pyramid space (`pyr_type = 0`) numbers its `element_dofs` in Bergot
+        // slot order, so reading the Fuentes default here desynchronises the
+        // basis from the dof table.
+        let ref_elem = ref_elem_vol_with_pyramid_basis(
+            elem_type,
+            order,
+            space.pyramid_basis(),
+        );
         let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
         let elem_dofs = space.element_dofs(element);
@@ -319,13 +389,29 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
                     let xi_in: Vec<f64> =
                         xi.iter().map(|&c| (1.0 - pull) * c + pull * centroid).collect();
                     let (jac_in, _) = geom_jacobian(mesh, element, nodes, &xi_in, dim, elem_type);
-                    jac_in.try_inverse().unwrap_or_else(|| {
+                    let j_inv = jac_in.try_inverse().unwrap_or_else(|| {
                         panic!(
                             "compute_element_flux: singular geometry Jacobian at \
                              a flux dof and its pulled interior resample \
                              (element_type={elem_type:?}, xi={xi:?})"
                         )
-                    })
+                    });
+                    // D462: the reference gradient must be sampled at the
+                    // *same* point as the geometry Jacobian.  For an
+                    // exactly-represented field ∇ξu_h(ξ) = Jᵀ(ξ)·∇xu, so the
+                    // pulled-point Jacobian pairs with the pulled-point
+                    // gradient — mixing the apex gradient with the pulled
+                    // Jacobian broke affine exactness for the Bergot pyramid
+                    // spaces whose flux dof sits on the apex.
+                    ref_elem.eval_grad_basis(&xi_in, &mut grad_ref);
+                    for j in 0..dim {
+                        let mut s = 0.0;
+                        for k in 0..n_ldofs {
+                            s += solution_dofs[elem_dofs[k] as usize] * grad_ref[k * dim + j];
+                        }
+                        vec[j] = s;
+                    }
+                    j_inv
                 }
             };
             for d in 0..dim {
@@ -357,7 +443,14 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         let fe_order = infer_fe_order(elem_type, n_flux_dofs);
         // MFEM: order = 2 * fluxelem.GetOrder(); IntRules.Get(geom, order).
         let quad_order = (fe_order as u8) * 2;
-        let ref_elem = ref_elem_vol(elem_type, fe_order as u8);
+        // D454: on pyramid cells the flux basis family is reconstructed from
+        // the flux-vector length (the Fuentes default that `ref_elem_vol`
+        // builds would misread a Bergot flux space).
+        let ref_elem = if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+            pyramid_flux_element(fe_order as u8, n_flux_dofs)
+        } else {
+            ref_elem_vol(elem_type, fe_order as u8)
+        };
         let n_ldofs = ref_elem.n_dofs();
         let nodes = mesh.element_nodes(element);
         let quad = ref_elem.quadrature(quad_order);
@@ -420,7 +513,13 @@ where
     let order = gf.space().order();
     let elem_type = mesh.element_type(0);
 
-    let ref_elem = ref_elem_vol(elem_type, order);
+    // D462: sample the solution space in its own pyramid slot order — the
+    // Fuentes default misreads a Bergot pyramid space (`pyr_type = 0`).
+    let ref_elem = ref_elem_vol_with_pyramid_basis(
+        elem_type,
+        order,
+        gf.space().pyramid_basis(),
+    );
     let n_ldofs = ref_elem.n_dofs();
     let dof_coords = ref_elem.dof_coords();
 
@@ -431,7 +530,6 @@ where
 
     for e in 0..ne as u32 {
         let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
-        let elem_dofs = gf.space().element_dofs(e);
         let elem_dofs = gf.space().element_dofs(e);
         for (i, &gdof) in elem_dofs.iter().enumerate() {
             let idx = gdof as usize;
@@ -478,10 +576,18 @@ where
 ///
 /// For constrained DOFs, the averaged flux is recovered from parent DOFs via
 /// the constraint relationship, matching MFEM's flux-space handling.
+///
+/// D455: `constraints` is currently **unused** — see the NOTE on the averaging
+/// step below (MFEM's `H1_FECollection` flux spaces make the primal
+/// `TransformPrimal`/`InvTransformPrimal` calls no-ops, so applying hanging-node
+/// recovery here biased the estimator).  The parameter is kept because the
+/// caller (`postproc::amr_refiner`) threads its AMR constraint table through
+/// this API surface, and an MFEM-parity recovery (a flux space whose collection
+/// *does* transform slaves) would need exactly this input.
 pub fn zz_estimator_mfem_nc<'a, M, S, F>(
     gf: &GridFunction<'a, S>,
     integrator: &F,
-    constraints: &[fem_mesh::amr::HangingNodeConstraint],
+    _constraints: &[fem_mesh::amr::HangingNodeConstraint],
 ) -> ElementIndicators
 where
     M: MeshTopology,
@@ -495,7 +601,13 @@ where
     let order = gf.space().order();
     let elem_type = mesh.element_type(0);
 
-    let ref_elem = ref_elem_vol(elem_type, order);
+    // D462: sample the solution space in its own pyramid slot order — the
+    // Fuentes default misreads a Bergot pyramid space (`pyr_type = 0`).
+    let ref_elem = ref_elem_vol_with_pyramid_basis(
+        elem_type,
+        order,
+        gf.space().pyramid_basis(),
+    );
     let n_ldofs = ref_elem.n_dofs();
     let dof_coords = ref_elem.dof_coords();
 
@@ -617,7 +729,6 @@ mod d202_high_order_tables {
 
     use super::ref_elem_vol;
     use crate::assembler::ref_elem_vol_h1;
-    use fem_element::ReferenceElement;
     use fem_mesh::element_type::ElementType;
 
     #[test]
@@ -662,10 +773,10 @@ mod d366_fe_order_table {
     //! the same order — otherwise the energy integral reads an order-1 basis
     //! against an order-p flux vector (the D353 defect class).
 
-    use super::infer_fe_order;
+    use super::{infer_fe_order, pyramid_flux_element};
     use fem_element::lagrange::PyramidBasisType;
     use fem_mesh::element_type::ElementType;
-    use fem_space::ref_elem::h1_field_element;
+    use fem_space::ref_elem::{h1_field_element, h1_pyramid_slots};
 
     #[test]
     fn every_cell_type_order_resolves_back_from_its_n_dofs() {
@@ -689,6 +800,40 @@ mod d366_fe_order_table {
                     infer_fe_order(*et, n),
                     p,
                     "{et:?}: n_dofs({p}) = {n} did not resolve back to order {p}"
+                );
+            }
+        }
+    }
+
+    /// D454: the Bergot opt-out family (`pyr_type = 0`,
+    /// `(p+1)(p+2)(2p+3)/6` DOFs — 5/14/30/55 at p = 1..4) resolves back to
+    /// the same order, and `pyramid_flux_element` reconstructs a Bergot basis
+    /// whose DOF count matches the flux vector exactly.
+    #[test]
+    fn bergot_pyramid_counts_resolve_back_and_pick_the_bergot_family() {
+        for p in 1..=4u8 {
+            let n = h1_pyramid_slots(p, PyramidBasisType::Bergot).n_dofs();
+            assert_eq!(
+                infer_fe_order(ElementType::Pyramid5, n),
+                p,
+                "Bergot p={p}: n_dofs={n} did not resolve back to order {p}"
+            );
+            let e = pyramid_flux_element(p, n);
+            assert_eq!(
+                e.n_dofs(),
+                n,
+                "Bergot p={p}: reconstructed flux basis must hold exactly {n} dofs"
+            );
+            if p >= 2 {
+                // The families are distinguishable from p = 2 on: the
+                // reconstructed element must be the Bergot one, not the
+                // Fuentes default.
+                let fuentes =
+                    h1_pyramid_slots(p, PyramidBasisType::Fuentes);
+                assert_ne!(
+                    e.n_dofs(),
+                    fuentes.n_dofs(),
+                    "Bergot p={p}: family reconstruction collapsed onto Fuentes"
                 );
             }
         }
