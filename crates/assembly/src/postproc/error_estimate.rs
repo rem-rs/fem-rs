@@ -259,6 +259,13 @@ impl ElementIndicators {
     /// 5 NC-AMR rounds): RMS marking reaches L2 4.9e-4 at ne=6452 vs MFEM's
     /// 4.27e-4 (linf mode) / 3.51e-4 (p2 mode) at ne=6032 / 7768, while
     /// Dörfler(0.5) stalls at 3.2e-2 / ne=125.
+    ///
+    /// D497: `amr_refiner::ThresholdRefiner` now realizes the same rule
+    /// natively through its MFEM parameter family
+    /// (`set_total_error_norm_p(2)` + `set_total_error_fraction(θ)`; the
+    /// marking sets coincide up to rounding of the threshold, verified in
+    /// `tests/d491_zz_equivalence_threshold_refiner.rs`).  This method stays:
+    /// `poisson_solve`'s D404 trajectory anchors on it.
     pub fn rms_mark(&self, theta: f64) -> Vec<u32> {
         let ne = self.eta.len();
         if ne == 0 { return Vec::new(); }
@@ -274,8 +281,14 @@ impl ElementIndicators {
 
     /// Mark elements whose error exceeds a local absolute threshold.
     ///
-    /// Returns indices of elements with `Î· > max_err`.
-    /// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
+    /// Returns indices of elements with `η > max_err`.
+    ///
+    /// MFEM parity (D497): this is `ThresholdRefiner` with
+    /// `SetTotalErrorFraction(0)` + `SetLocalErrorGoal(max_err)` — ex15's
+    /// "purely local threshold" configuration.  `local_err_goal` alone is
+    /// only a *floor* on the p-norm threshold; the full
+    /// `max(θ·‖η‖_p·N^(−1/p), goal)` rule lives in
+    /// `amr_refiner::ThresholdRefiner`.
     pub fn threshold_mark(&self, max_err: f64) -> Vec<u32> {
         self.eta
             .iter()
@@ -301,8 +314,14 @@ impl ElementIndicators {
 
 /// Mark elements whose error exceeds a local absolute threshold.
 ///
-/// Returns indices of elements with `Î· > max_err`.
-/// Equivalent to MFEM's `ThresholdRefiner::SetLocalErrorGoal(max_err)`.
+/// Returns indices of elements with `η > max_err`.
+///
+/// MFEM parity (D497): this is `ThresholdRefiner` with
+/// `SetTotalErrorFraction(0)` + `SetLocalErrorGoal(max_err)` — ex15's
+/// "purely local threshold" configuration.  `local_err_goal` alone is
+/// only a *floor* on the p-norm threshold; the full
+/// `max(θ·‖η‖_p·N^(−1/p), goal)` rule lives in
+/// `amr_refiner::ThresholdRefiner`.
 pub fn threshold_mark(eta: &[f64], max_err: f64) -> Vec<u32> {
     eta.iter()
         .enumerate()
@@ -884,6 +903,31 @@ where
 /// ```
 /// where `f = flux_coeff â smoothed_coeff` are the DOF coefficients of the
 /// flux difference and `M_K` is the element mass matrix.
+///
+/// # D491 — relationship to `flux_recovery::zz_estimator_mfem_nc`
+///
+/// The two functions are **mathematically identical** (the same three-step
+/// ZZ algorithm above) but are **not duplicates** and must remain separate
+/// implementations:
+///
+/// * Floating-point operation order differs.  `zz_estimator_nodal` builds the
+///   physical gradient *transform-first* (`grad_phys_i = J⁻ᵀ·∂φ_i`, then
+///   `∇u = Σ u_i·grad_phys_i`, in [`eval_grad_at`]); `zz_estimator_mfem_nc`
+///   goes *combine-first* (`∇ξu = Σ u_i·∂φ_i`, then `flux = J⁻¹·∇ξu`) because
+///   that order matches MFEM `DiffusionIntegrator::ComputeElementFlux`
+///   bit-for-bit (see the note on `compute_element_flux`).  The two orders
+///   round differently, so the η vectors agree only to a few ulps — on the
+///   D404 Poisson MMS probe they print identically at 4 significant digits
+///   while near-threshold mark counts can differ by a few elements (D491:
+///   the "bit-identical duplicate" suspicion is refuted; see
+///   `tests/d491_zz_equivalence_threshold_refiner.rs` for the measurement).
+/// * Feature sets differ.  This function computes the `aniso_flags`
+///   (directional reference-domain energies) and samples via
+///   [`ref_elem_vol`]; `zz_estimator_mfem_nc` is generic over the
+///   [`crate::postproc::flux_recovery::FluxRecovery`] integrator, supports
+///   the Bergot pyramid sampling (D462/D365) and is the `ThresholdRefiner`
+///   entry point.  Merging either way would either break the MFEM
+///   bit-parity of the refiner path or drop the aniso/ex6 path.
 ///
 /// `hanging` is accepted for API compatibility but is NOT used by the
 /// recovery: matching MFEM's `SumFluxAndCount` (gridfunc.cpp), hanging DOFs
