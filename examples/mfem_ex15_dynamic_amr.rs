@@ -218,6 +218,8 @@ fn main() {
 
     // ─── 3. Threshold refiner / derefiner ────────────────────────────────────
     let mut refiner = ThresholdRefiner::new(args.estimator == 1);
+    // C++ ex15.cpp:233 — refiner.SetTotalErrorFraction(0.0); use purely local threshold
+    refiner.set_total_error_fraction(0.0);
     refiner.set_local_error_goal(args.max_elem_error);
     refiner.set_nc_limit(args.nc_limit);
 

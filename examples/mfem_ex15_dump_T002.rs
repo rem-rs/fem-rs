@@ -55,6 +55,8 @@ fn main() {
     let mut mesh = mesh0;
     let mut nc_state: NCStateQuad = NCStateQuad::new();
     let mut refiner = ThresholdRefiner::new(false);
+    // C++ ex15.cpp:233 — refiner.SetTotalErrorFraction(0.0); use purely local threshold
+    refiner.set_total_error_fraction(0.0);
     refiner.set_local_error_goal(0.005);
     refiner.set_nc_limit(3);
     let mut derefiner = ThresholdDerefiner::new();

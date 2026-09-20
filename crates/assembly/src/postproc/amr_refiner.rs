@@ -90,6 +90,18 @@ pub struct ThresholdRefiner {
     use_kelly: bool,
     /// Number of elements refined in the last `apply` call; `0` → `stop() == true`.
     last_marked_count: usize,
+    /// MFEM `ThresholdRefiner::non_conforming` flag (`mesh/mesh_operators.hpp`):
+    /// `1` after [`Self::prefer_nonconforming_refinement`], `-1` after
+    /// [`Self::prefer_conforming_refinement`] (the constructor default, as in
+    /// MFEM's constructor `non_conforming = -1`).  MFEM's
+    /// `Mesh::GeneralRefinement` overrides the flag to *non-conforming* whenever
+    /// the mesh already carries an `NCMesh` — ex15.cpp:142
+    /// (`mesh.EnsureNCMesh(true)`) always arranges that, so the flag never
+    /// diverts ex15.  [`Self::apply`] mirrors the same override (its refinement
+    /// engine *is* the `NcState2D` NC machinery), so the flag is recorded for
+    /// API parity and surfaced by [`Self::non_conforming`]; MFEM's conforming
+    /// red-green branch (`Mesh::LocalRefinement`) is not ported.
+    non_conforming: i32,
     /// Per-element error from the last `apply` call.
     pub eta: Vec<f64>,
     /// Elements marked in the last `apply`, in ascending order.
@@ -116,6 +128,7 @@ impl ThresholdRefiner {
             nc_limit: 0,
             use_kelly,
             last_marked_count: 0,
+            non_conforming: -1,
             eta: Vec::new(),
             last_marked: Vec::new(),
             constraints: Vec::new(),
@@ -145,6 +158,22 @@ impl ThresholdRefiner {
 
     /// Maximum non-conforming refinement level difference (0 = no limit).
     pub fn set_nc_limit(&mut self, limit: u32) { self.nc_limit = limit; }
+
+    /// MFEM `ThresholdRefiner::PreferNonconformingRefinement` (`non_conforming
+    /// = 1`): use nonconforming refinement, if possible.  See the field doc
+    /// for the `GeneralRefinement` override that makes the NC engine win
+    /// whenever an NC state is in play (ex15 always).
+    pub fn prefer_nonconforming_refinement(&mut self) { self.non_conforming = 1; }
+
+    /// MFEM `ThresholdRefiner::PreferConformingRefinement` (`non_conforming =
+    /// -1`, the constructor default): use conforming refinement, if possible.
+    /// ex15.cpp:235 calls this — with no effect there, because ex15.cpp:142
+    /// `EnsureNCMesh` forces the NC path (see the field doc).
+    pub fn prefer_conforming_refinement(&mut self) { self.non_conforming = -1; }
+
+    /// The MFEM `non_conforming` preference flag: `-1` = prefer conforming
+    /// (default), `1` = prefer non-conforming.
+    pub fn non_conforming(&self) -> i32 { self.non_conforming }
 
     /// MFEM `GetThreshold`: the threshold used in the last `apply` call
     /// (`0` before the first call / on early-STOP paths).
@@ -314,13 +343,42 @@ impl ThresholdRefiner {
 pub struct ThresholdDerefiner {
     threshold: f64,
     nc_limit: u32,
+    /// MFEM `ThresholdDerefiner::op` — child-error aggregation
+    /// (`Mesh::AggregateError`): `0` = min, `1` = sum (constructor default),
+    /// `2` = max.
+    op: i32,
 }
 
 impl ThresholdDerefiner {
-    pub fn new() -> Self { ThresholdDerefiner { threshold: 0.0, nc_limit: 0 } }
+    /// MFEM constructor defaults: `threshold = 0`, `nc_limit = 0`, `op = 1`.
+    pub fn new() -> Self { ThresholdDerefiner { threshold: 0.0, nc_limit: 0, op: 1 } }
 
     /// Elements whose children's aggregate error falls below `thresh` are coarsened.
     pub fn set_threshold(&mut self, thresh: f64) { self.threshold = thresh; }
+
+    /// MFEM `ThresholdDerefiner::SetOp`: aggregation of the children's errors
+    /// in a derefinement group — `0` = min, `1` = sum (default), `2` = max
+    /// (`Mesh::AggregateError`).
+    pub fn set_op(&mut self, op: i32) {
+        assert!(matches!(op, 0 | 1 | 2), "ThresholdDerefiner::set_op: invalid op {op} (MFEM AggregateError: 0=min, 1=sum, 2=max)");
+        self.op = op;
+    }
+
+    /// `Mesh::AggregateError(elem_error, fine, nfine, op)` over the group's
+    /// children (all of which must be valid `eta` indices — the caller
+    /// filters otherwise).
+    fn aggregate(&self, children: &[ElemId], eta: &[f64]) -> f64 {
+        let mut it = children.iter().map(|&c| eta[c as usize]);
+        let Some(mut error) = it.next() else { return 0.0 };
+        for err_fine in it {
+            match self.op {
+                0 => error = error.min(err_fine),
+                1 => error += err_fine,
+                _ => error = error.max(err_fine),
+            }
+        }
+        error
+    }
 
     /// Maximum NC level difference between adjacent elements after
     /// derefinement (0 = unlimited).  MFEM `ThresholdDerefiner::SetNCLimit`;
@@ -359,7 +417,7 @@ impl ThresholdDerefiner {
             }
             let children = nc_state.deref_group_children(g);
             if children.iter().any(|&c| c as usize >= refiner.eta.len()) { continue; }
-            let agg: f64 = children.iter().map(|&c| refiner.eta[c as usize]).sum();
+            let agg = self.aggregate(&children, &refiner.eta);
             if agg < self.threshold {
                 to_derefine.push(g);
                 agg_below += 1;
@@ -371,8 +429,7 @@ impl ThresholdDerefiner {
                 if self.nc_limit > 0 && !nc_state.deref_group_nc_ok(g, self.nc_limit, mesh) { continue; }
                 let children = nc_state.deref_group_children(g);
                 if children.iter().any(|&c| c as usize >= refiner.eta.len()) { continue; }
-                let agg: f64 = children.iter().map(|&c| refiner.eta[c as usize]).sum();
-                if agg < self.threshold { aggs.push(agg); }
+                aggs.push(self.aggregate(&children, &refiner.eta));
             }
             aggs.sort_by(|a, b| b.partial_cmp(a).unwrap());
             eprintln!("DBG derefiner: groups={} nc_filtered={nc_filtered} agg_below={agg_below} chosen={} top5-agg={:?}",
@@ -387,5 +444,144 @@ impl ThresholdDerefiner {
         *mesh = new_mesh;
         refiner.constraints = nc_state.constraints().to_vec();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::standard::DiffusionIntegrator;
+    use fem_mesh::amr::NCStateQuad;
+    use fem_space::H1Space;
+
+    type M2 = Mesh<2>;
+
+    /// One derefinable quad group with child errors 1, 2, 3, 4.  The fixture
+    /// mesh is the single-element `unit_square_quad(1)`; splitting element 0
+    /// yields 4 elements (one tree group with children [0, 1, 2, 3]), and
+    /// coarsening returns to 1.
+    fn deref_fixture() -> (M2, NCStateQuad, usize) {
+        let mesh = M2::unit_square_quad(1);
+        let mut nc_state = NCStateQuad::new();
+        let (mesh, _cons, _) = nc_state.refine(&mesh, &[0], 0);
+        let ne = mesh.n_elements();
+        assert_eq!(ne, 4);
+        (mesh, nc_state, ne)
+    }
+
+    /// eta values: 1, 2, 3, 4 on the group's children (in the order the tree
+    /// reports them).
+    fn synthetic_eta(nc_state: &NCStateQuad, ne: usize) -> Vec<f64> {
+        let mut eta = vec![100.0_f64; ne];
+        let children = nc_state.deref_group_children(nc_state.deref_groups()[0]);
+        for (k, &c) in children.iter().enumerate() {
+            eta[c as usize] = (k + 1) as f64;
+        }
+        eta
+    }
+
+    /// D500 — `ThresholdDerefiner::SetOp`: op 0/1/2 aggregate a group as
+    /// min/sum/max exactly like MFEM `Mesh::AggregateError`.  With children
+    /// (1, 2, 3, 4): min = 1, sum = 10, max = 4, so a threshold of 2 fires
+    /// only for min, 4.5 only for max, and 10.5 for sum.
+    #[test]
+    fn d500_derefiner_set_op_selects_aggregation() {
+        // (a) op = 0 (min): 1 < 2 ⇒ deref (back to the single parent quad).
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(2.0);
+        derefiner.set_op(0);
+        assert!(derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), 1, "min(1,2,3,4)=1 < 2 must coarsen");
+
+        // (b) op = 1 (sum): 10 ≥ 2 ⇒ no deref.
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(2.0);
+        derefiner.set_op(1);
+        assert!(!derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), ne, "sum=10 must not coarsen at 2");
+
+        // (c) op = 2 (max): 4 ≥ 2 stays; 4 < 5 coarsens.
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(2.0);
+        derefiner.set_op(2);
+        assert!(!derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), ne, "max=4 must not coarsen at 2");
+
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(5.0);
+        derefiner.set_op(2);
+        assert!(derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), 1, "max=4 < 5 must coarsen");
+
+        // (d) sum fires at 10.5 (completes the sum branch through set_op).
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(10.5);
+        derefiner.set_op(1);
+        assert!(derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), 1, "sum=10 < 10.5 must coarsen");
+    }
+
+    /// D500 — the default op is MFEM's constructor default `op = 1` (sum): at
+    /// a threshold between max (4) and sum (10) the default must *not* fire,
+    /// i.e. the pre-D500 hard-coded sum behaviour is bit-identical.
+    #[test]
+    fn d500_derefiner_default_op_is_sum() {
+        let (mut mesh, mut nc_state, ne) = deref_fixture();
+        let mut refiner = ThresholdRefiner::new(false);
+        refiner.eta = synthetic_eta(&nc_state, ne);
+        let mut derefiner = ThresholdDerefiner::new();
+        derefiner.set_threshold(4.5);
+        assert!(!derefiner.apply(&mut mesh, &mut nc_state, &mut refiner));
+        assert_eq!(mesh.n_elements(), ne, "default op = sum (10) must stay above 4.5");
+    }
+
+    /// D500 — the `non_conforming` flag mirrors MFEM: constructor default
+    /// `-1`, `PreferNonconformingRefinement` → 1, `PreferConformingRefinement`
+    /// → −1 (ex15.cpp:235), and — per MFEM `GeneralRefinement`'s
+    /// `if (ncmesh) nonconforming = 1` override — `apply` keeps refining
+    /// through the NC engine even with the conforming preference set.
+    #[test]
+    fn d500_refiner_non_conforming_flag_parity() {
+        let mesh = M2::unit_square_tri(2);
+        let space = H1Space::new(mesh.clone(), 1);
+        let d = space.interpolate(&|x: &[f64]| (std::f64::consts::PI * x[0]).sin());
+        let gf = GridFunction::new(&space, d.as_slice().to_vec());
+        let int = DiffusionIntegrator { kappa: 1.0 };
+
+        let mut r = ThresholdRefiner::new(false);
+        assert_eq!(r.non_conforming(), -1, "constructor default = -1");
+        r.prefer_nonconforming_refinement();
+        assert_eq!(r.non_conforming(), 1);
+        r.prefer_conforming_refinement();
+        assert_eq!(r.non_conforming(), -1, "ex15.cpp:235 preference");
+
+        // The conforming preference does not divert the NC engine (MFEM
+        // GeneralRefinement override for meshes with NC state): the mesh
+        // grows through `nc_state.refine` and the derefinement tree becomes
+        // available (rollback = the NC engine's witness).
+        let ne0 = mesh.n_elements();
+        let mut m = mesh;
+        let mut nc = fem_mesh::amr::NCState::new();
+        r.set_total_error_fraction(0.0);
+        r.set_local_error_goal(1.0e-3);
+        r.apply(&mut m, &mut nc, &gf, &int, Some(&[]));
+        assert!(!r.stop(), "marks expected on the MMS field");
+        assert!(m.n_elements() > ne0, "apply must refine through the NC engine");
+        assert!(nc.can_derefine(), "apply must drive the NC tree (rollback available)");
     }
 }

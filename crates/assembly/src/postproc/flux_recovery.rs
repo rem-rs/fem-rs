@@ -506,70 +506,7 @@ where
     S: FESpace<Mesh = M>,
     F: FluxRecovery,
 {
-    let mesh: &M = gf.space().mesh();
-    let ne = mesh.n_elements();
-    let nd = gf.space().n_dofs();
-    let dim = mesh.dim() as usize;
-    let order = gf.space().order();
-    let elem_type = mesh.element_type(0);
-
-    // D462: sample the solution space in its own pyramid slot order — the
-    // Fuentes default misreads a Bergot pyramid space (`pyr_type = 0`).
-    let ref_elem = ref_elem_vol_with_pyramid_basis(
-        elem_type,
-        order,
-        gf.space().pyramid_basis(),
-    );
-    let n_ldofs = ref_elem.n_dofs();
-    let dof_coords = ref_elem.dof_coords();
-
-    // ── Step 1-2: SumFluxAndCount ────────────────────────────────────────────
-    let mut flux_sum = vec![vec![0.0; dim]; nd];
-    let mut flux_count = vec![0usize; nd];
-    let dofs_vec = gf.dofs();
-
-    for e in 0..ne as u32 {
-        let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
-        let elem_dofs = gf.space().element_dofs(e);
-        for (i, &gdof) in elem_dofs.iter().enumerate() {
-            let idx = gdof as usize;
-            for d in 0..dim {
-                flux_sum[idx][d] += raw[i * dim + d];
-            }
-            flux_count[idx] += 1;
-        }
-    }
-
-    // Average
-    let mut flux_avg = vec![vec![0.0; dim]; nd];
-    for i in 0..nd {
-        let c = flux_count[i] as f64;
-        if c > 0.0 {
-            for d in 0..dim {
-                flux_avg[i][d] = flux_sum[i][d] / c;
-            }
-        }
-    }
-
-    // ── Step 3: per-element error ────────────────────────────────────────────
-    let mut eta = vec![0.0; ne];
-    for e in 0..ne as u32 {
-        let raw = integrator.compute_element_flux(mesh, gf.space(), e, &dofs_vec, &dof_coords);
-        let elem_dofs = gf.space().element_dofs(e);
-
-        let mut diff = vec![0.0; n_ldofs * dim];
-        for (i, &gdof) in elem_dofs.iter().enumerate() {
-            let idx = gdof as usize;
-            for d in 0..dim {
-                diff[i * dim + d] = raw[i * dim + d] - flux_avg[idx][d];
-            }
-        }
-
-        let eng = integrator.compute_flux_energy(mesh, e, &diff);
-        eta[e as usize] = eng.sqrt();
-    }
-
-    ElementIndicators::new(eta, "ZZ(MFEM)")
+    zz_estimator_mfem_impl(gf, integrator, "ZZ(MFEM)")
 }
 
 /// MFEM-style ZZ estimator with hanging-node constraint support.
@@ -588,6 +525,26 @@ pub fn zz_estimator_mfem_nc<'a, M, S, F>(
     gf: &GridFunction<'a, S>,
     integrator: &F,
     _constraints: &[fem_mesh::amr::HangingNodeConstraint],
+) -> ElementIndicators
+where
+    M: MeshTopology,
+    S: FESpace<Mesh = M>,
+    F: FluxRecovery,
+{
+    zz_estimator_mfem_impl(gf, integrator, "ZZ(MFEM-NC)")
+}
+
+/// Shared body of [`zz_estimator_mfem`] / [`zz_estimator_mfem_nc`] — D499: the
+/// two entry points were literal copies (round-53 ③路钉位恒等) and are now
+/// thin delegates that differ only in the indicator label and the D455
+/// `constraints` parameter.  The single body keeps their outputs identical:
+/// averaging over all DOFs with **no** hanging-node recovery (MFEM
+/// `H1_FECollection` flux spaces make `TransformPrimal`/`InvTransformPrimal`
+/// no-ops), exactly the NOTE semantics below.
+fn zz_estimator_mfem_impl<'a, M, S, F>(
+    gf: &GridFunction<'a, S>,
+    integrator: &F,
+    label: &'static str,
 ) -> ElementIndicators
 where
     M: MeshTopology,
@@ -628,7 +585,8 @@ where
         }
     }
 
-    // Average (on unconstrained DOFs only)
+    // Average (over unconstrained DOFs the average is the plain sum/count; on
+    // constrained DOFs see the NOTE below — no hanging-node recovery).
     let mut flux_avg = vec![vec![0.0; dim]; nd];
     for i in 0..nd {
         let c = flux_count[i] as f64;
@@ -666,7 +624,7 @@ where
         eta[e as usize] = eng.sqrt();
     }
 
-    ElementIndicators::new(eta, "ZZ(MFEM-NC)")
+    ElementIndicators::new(eta, label)
 }
 
 #[cfg(test)]
