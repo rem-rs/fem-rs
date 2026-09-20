@@ -5,26 +5,23 @@
 //! every face and no interiors, so RT1 prism/pyramid spaces had 10 slots per
 //! element while `PrismRTk(1)`/`PyraRTk(1)` expose 18/17 basis functions —
 //! the assembler would pair slots with the wrong basis functions.
+//! (Superseded counts: since D444/D445 the elements themselves carry the
+//! MFEM layouts — `PrismRTk(1)` = 25 (`RT_WedgeElement`), `PyraRTk(1)` = 28
+//! (`RT_FuentesPyramidElement`) — see `d444_*/d445_*` tests.)
 //!
 //! MFEM anchors:
-//! - `RT_WedgeElement(p)` (`fem/fe/fe_rt.cpp:1082-1086`): per element
-//!   `(p+1)(p+2)/2 · (p+2)` vertical + `(p+1)(p+2)/2 · (p+1)` horizontal
-//!   dofs, i.e. the 2 triangular faces carry `(k+1)(k+2)/2` and the 3
-//!   quadrilateral faces `(k+1)^2` face dofs, interior `p(p+1)(3p+4)/2`
-//!   (= 7 at k=1; `RT_dof[PRISM]`, `fe_coll.cpp:2581-2583`).
-//! - MFEM has no classical RT pyramid; `RT_FuentesPyramidElement(p)`
-//!   (`fe_rt.cpp:1273-1275`) counts `(p+1)(3p(p+2)+5)` = 28 at k=1.  The
-//!   fem-rs element layer (`PyraRTk`, `raviart_thomas/pyramid.rs:192-206`)
-//!   is its own construction: 4 tri faces `(k+1)(k+2)/2` + 1 quad face
-//!   `(k+1)^2` + interior {k=0→0, k=1→1}.  D394 aligns the SPACE with the
-//!   fem-rs element (the count invariant); the gap to MFEM's Fuentes
-//!   pyramid is element-layer debt (D437 family).
+//! - `RT_WedgeElement(p)` (`fem/fe/fe_rt.cpp:1079-1201`): 2 triangular
+//!   faces `(k+1)(k+2)/2` + 3 quadrilateral faces `(k+1)^2` + interior
+//!   `p(p+1)(3p+4)/2` (= 7 at k=1; `RT_dof[PRISM]`, `fe_coll.cpp:2581`).
+//! - `RT_FuentesPyramidElement(p)` (`fe_rt.cpp:1273-1275`): counts
+//!   `(p+1)(3p(p+2)+5)` = 28 at k=1, interior `3p(p+1)^2`
+//!   (`RT_dof[PYRAMID]`, `fe_coll.cpp:2586`).
 //!
 //! Prism-stack oracle (MFEM `data/d394_prism_stack.mesh`, 2 stacked wedges,
 //! 3 tri + 6 quad faces, 8 boundary faces): RT0 vsize=9/ess=8 (MFEM
 //! `GetVSize`/`GetBoundaryTrueDofs`).  RT1: ess=30 = MFEM (only face dofs
-//! are essential); fem-rs vsize target 33 = 3·3 + 6·4 face dofs, no
-//! interiors (MFEM vsize 47 adds 2·7 wedge interiors — element-layer D436).
+//! are essential); vsize 47 = 3·3 + 6·4 face dofs + 2·7 wedge interiors —
+//! probe49 `ess3d <mesh> 1 0` (archived `tmp/d444/`).
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::{Mesh, MeshTopology};
@@ -62,9 +59,12 @@ fn prism_stack_rt1_face_blocks_and_ess_match_mfem() {
     let mesh = load("data/d394_prism_stack.mesh");
     let all_tags = mesh.unique_boundary_tags();
     let space = HDivSpace::new(mesh.clone(), 1);
-    // 3 tri faces x 3 + 6 quad faces x 4 = 33 face dofs; no interior at the
-    // capped order (PrismRTk(1) has none — D436 notes the MFEM difference).
-    assert_eq!(space.n_dofs(), 33, "RT1 prism-stack vsize");
+    // D444 (round 51): pin updated 33 → 47 — MFEM truth.  3 tri faces x 3 +
+    // 6 quad faces x 4 = 33 face dofs, + 2 elements x 7 wedge interiors
+    // (`RT_dof[PRISM]` = p(p+1)(3p+4)/2, fe_coll.cpp:2581) now carried by
+    // `PrismRTk(1)`.  MFEM probe49 `ess3d data/d394_prism_stack.mesh 1 0`:
+    // vsize=47 ess=30 (archived tmp/d444/).
+    assert_eq!(space.n_dofs(), 47, "RT1 prism-stack vsize (MFEM)");
     assert_eq!(
         boundary_dofs_hdiv(space.mesh(), &space, &all_tags).len(),
         30,
@@ -130,11 +130,14 @@ fn pyramid_matches_pyra_rtk_layout() {
     assert_eq!(space0.n_dofs(), 5);
     assert_eq!(boundary_dofs_hdiv(space0.mesh(), &space0, &all_tags).len(), 5);
 
-    // RT1: 4 tri faces x 3 + base quad x 4 + 1 interior = 17 = PyraRTk(1);
-    // the interior dof is not essential → ess = 16.
+    // D445 (round 51): pin updated 17 → 28 — MFEM truth.  RT1 =
+    // `RT_FuentesPyramidElement(1)`: 4 tri faces x 3 + base quad x 4 = 16
+    // face dofs + 3p(p+1)^2 = 12 interiors = 28 (probe pyr_incode on the
+    // in-code 1-pyramid mesh: vsize=28, ess=16; archived tmp/d444/).
+    // ess stays 16: all 5 faces are boundary, interiors excluded.
     let space = HDivSpace::new(mesh.clone(), 1);
     assert_eq!(space.n_dofs(), PyraRTk::new(1).n_dofs(), "RT1 pyramid vsize");
-    assert_eq!(space.n_dofs(), 17);
+    assert_eq!(space.n_dofs(), 28);
     assert_eq!(
         boundary_dofs_hdiv(space.mesh(), &space, &all_tags).len(),
         16,
@@ -199,7 +202,8 @@ fn dof_coords_anchors_cover_every_block() {
     assert_eq!(got, mesh_verts, "k=1 tri anchors = the three vertices");
 
     // The single interior dof carries the element centroid — collect every
-    // face block first; the interior is the one dof outside all of them.
+    // face block first; the 12 Fuentes interiors (D445) are the dofs
+    // outside all face blocks.
     let mut face_dofs_all: Vec<u32> = Vec::new();
     for fk in [
         FaceKey::new(0, 1, 4),
@@ -212,11 +216,18 @@ fn dof_coords_anchors_cover_every_block() {
     }
     face_dofs_all.sort_unstable();
     assert_eq!(face_dofs_all.len(), 16);
-    let interior = (0..space.n_dofs() as u32)
-        .find(|d| face_dofs_all.binary_search(d).is_err())
-        .expect("pyramid RT1 must have exactly one interior dof");
-    let cen = coords[interior as usize];
-    assert!((cen[0] - 0.5).abs() < 1e-12 && (cen[1] - 0.5).abs() < 1e-12 && cen[2] > 0.0);
+    let interior: Vec<u32> = (0..space.n_dofs() as u32)
+        .filter(|d| face_dofs_all.binary_search(d).is_err())
+        .collect();
+    assert_eq!(
+        interior.len(),
+        12,
+        "pyramid RT1 must have exactly 12 Fuentes interior dofs"
+    );
+    for &d in &interior {
+        let cen = coords[d as usize];
+        assert!((cen[0] - 0.5).abs() < 1e-9 && (cen[1] - 0.5).abs() < 1e-9 && cen[2] > 0.0);
+    }
 
     // No dof left at the [0,0,0] default (every dof got an anchor).
     assert!(coords.iter().any(|p| *p != [0.0; 3]) && coords.iter().all(|p| p[2] >= 0.0));

@@ -1,17 +1,76 @@
-//! Raviart-Thomas H(div) element on the reference prism — arbitrary order k.
+//! Raviart-Thomas H(div) element on the reference prism — MFEM
+//! `RT_WedgeElement(p)` alignment (D444/D436).
 //!
-//! Reference prism: xi in [0,1], (eta, zeta) in unit triangle.
-//! DOFs: normal flux on each of 5 faces; interior bubbles for k >= 1.
+//! Reference prism (MFEM `Geometry::PRISM` vertices, fem-rs axes): bottom
+//! tri {0,1,2} at `xi = 0`, top tri {3,4,5} at `xi = 1`; the triangle plane
+//! is `(eta, zeta)` (fem-rs `(eta,zeta)` = MFEM `(x,y)`, fem-rs `xi` = MFEM
+//! `z`), MFEM wedge ref coords `z ∈ [0,1]` = fem-rs `xi ∈ [0,1]`.
 //!
-//! # Dimension
-//! PrismRTk dim = (k+1)(k+2) + 3(k+1)² + k(k-1)(k+1)/2
-//! k=0→5, k=1→18, k=2→42.
+//! # Slot layout (D444)
+//!
+//! Slot order = MFEM `RT_WedgeElement::RT_WedgeElement` construction order
+//! (`fem/fe/fe_rt.cpp:1079-1201`, probe `tmp/d444/probe_d444.out`):
+//!
+//! ```text
+//!   [ bottom tri ((p+1)(p+2)/2), top tri ((p+1)(p+2)/2),
+//!     q0 = zeta=0 quad ((p+1)^2, MFEM FaceVert (0,1,4,3)),
+//!     q1 = diagonal quad ((p+1)^2, (1,2,5,4)),
+//!     q2 = eta=0 quad   ((p+1)^2, (2,0,3,5)),
+//!     interior p(p+1)(3p+4)/2 ]
+//! ```
+//!
+//! The quad faces follow the MFEM canonical frames (`u` along `c0→c1`,
+//! `v` along `c0→c3` of the `FaceVert` row; dof slot `n = v*(p+1) + u`,
+//! probe-verified against `RT_WedgeElement(1)` nodes 6..18): q0 frame
+//! `(eta, xi)`, q1 frame `(zeta, xi)` (u runs along the diagonal
+//! `zeta: 0→1`, so `eta = 1-u`), q2 frame `(1-zeta, xi)` (u runs `c0→c1` =
+//! vert 2→0, `zeta: 1→0`).
+//!
+//! The two triangular faces use the fem-rs standard barycentric grid
+//! convention (slot `(j,i)` at barycentric weights `(v1: j, v2: i)`, i.e.
+//! `eta ∝ j`, `zeta ∝ i`, moment poly `eta^j zeta^i`) on **both** faces.
+//! MFEM's own reference element enumerates its *top* face transposed
+//! (`fe_rt.cpp:1129-1136` fetches the `L2TriangleFE` node
+//! `j + i(2p+3-i)/2`, the transposed index function; probe nodes 3..5 vs
+//! 0..2) — a reference-element-internal slot quirk that fem-rs normalises
+//! to the standard grid (documented deviation: the dof *set*, vsize, ess
+//! and all global dof maps are unaffected; only the within-top-block slot
+//! permutation differs from MFEM's raw Nodes table).
+//!
+//! # Dimension / interior (D436)
+//!
+//! `dim = (p+1)(3p^2+12p+10)/2` — probe: `RT_WedgeElement(1) dof=25`,
+//! `(2) dof=69` (`tmp/d444/probe_d444.out`); interior `p(p+1)(3p+4)/2`
+//! (`RT_dof[PRISM]`, `fe_coll.cpp:2581-2583`), laid out MFEM-tensor-fashion:
+//! horizontal interior `p(p+1)^2` (`RT_TriangleElement(p)` interior ⊗
+//! `L2Segment(p)`) then vertical interior `p(p+1)(p+2)/2`
+//! (`L2Triangle(p)` ⊗ `H1Segment(p+1)`, segment indices `2..=p+1`).
+//!
+//! # DOF functionals
+//!
+//! The `k = 0` basis is the hard-coded MFEM `RT_WedgeElement(0)` tensor
+//! basis (bit-exact, see [`PrismRTk::eval_basis_vec`]; eval bypasses the
+//! Vandermonde coefficients at `k = 0`).  For `k >= 1` the basis is the
+//! moment-dual construction of this crate: the dof functionals are the
+//! *exact* normal-flux moments `∫_face (Φ·n̂) q ds` (`q` over the face
+//! monomials of degree ≤ p in the frame above) plus volume moments
+//! `∫_V Φ_c w dx` for the interior (weights mirroring the MFEM tensor index
+//! ranges), evaluated with exact-enough quadrature; the basis is the
+//! pseudo-dual of those functionals over the MFEM wedge polynomial space
+//! (horizontal comps `RT_tri(p) ⊗ P_p(xi)`-shaped monomials, vertical comp
+//! `P_p(tri) ⊗ P_{p+1}(xi)`).  The span is exactly MFEM's wedge RT space;
+//! dof *values* of a projected field are moment-based, not MFEM's nodal
+//! point samples (that residual gap is recorded in the D444 debt notes).
 
-use crate::quadrature::prism_rule;
+use crate::quadrature::{
+    gauss_lobatto_01, gauss_legendre_01, prism_rule, quad_rule_01, tri_rule,
+};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
-// ─── Monomial helpers (shared with NDk) ─────────────────────────────────────
+// ─── Monomial helpers ───────────────────────────────────────────────────────
 
+/// Monomial `xi^a · eta^b · zeta^c` of vector component `comp`
+/// (0 = xi/layer, 1 = eta, 2 = zeta).
 #[derive(Clone)]
 struct Mono {
     comp: u8,
@@ -20,13 +79,32 @@ struct Mono {
     c: usize,
 }
 
-fn prism_monos(max_deg: usize) -> Vec<Mono> {
+fn eval_mono(m: &Mono, xi: f64, eta: f64, zeta: f64) -> f64 {
+    xi.powi(m.a as i32) * eta.powi(m.b as i32) * zeta.powi(m.c as i32)
+}
+
+/// MFEM-shaped wedge monomial span (D444): horizontal components (eta, zeta)
+/// carry `RT_TriangleElement(p) ⊗ L2Segment(p)`-shaped monomials —
+/// triangle-plane degree `b + c ≤ p + 1`, layer degree `a ≤ p`; the vertical
+/// component carries `L2Triangle(p) ⊗ H1Segment(p+1)`-shaped monomials —
+/// `b + c ≤ p`, `a ≤ p + 1`.  Column count `(p+1)(p+2)(3p+8)/2 ≥ n_dof` for
+/// every `p` (difference `(p+1)(p+3) > 0`), so the dual system is never
+/// rank-deficient, and the span equals MFEM's wedge RT space.
+fn prism_monos(p: usize) -> Vec<Mono> {
     let mut m = Vec::new();
-    for deg in 0..=max_deg {
-        for a in 0..=deg {
-            for b in 0..=(deg - a) {
-                let c = deg - a - b;
-                for comp in 0..3u8 {
+    // vertical comp (0 = xi): tri degree ≤ p, xi degree ≤ p+1
+    for b in 0..=p {
+        for c in 0..=(p - b) {
+            for a in 0..=(p + 1) {
+                m.push(Mono { comp: 0, a, b, c });
+            }
+        }
+    }
+    // horizontal comps (1, 2): tri degree ≤ p+1, xi degree ≤ p
+    for comp in [1u8, 2] {
+        for b in 0..=(p + 1) {
+            for c in 0..=(p + 1 - b) {
+                for a in 0..=p {
                     m.push(Mono { comp, a, b, c });
                 }
             }
@@ -35,143 +113,112 @@ fn prism_monos(max_deg: usize) -> Vec<Mono> {
     m
 }
 
-fn eval_mono(m: &Mono, xi: f64, eta: f64, zeta: f64) -> f64 {
-    xi.powi(m.a as i32) * eta.powi(m.b as i32) * zeta.powi(m.c as i32)
-}
+// ─── Face definitions (MFEM slot order, D444) ───────────────────────────────
 
-// ─── Face definitions for the prism ─────────────────────────────────────────
-
-/// (face index → (type, normal))
-/// face 0: bottom tri (xi=0, n̂=(-1,0,0)), area dη·dζ
-/// face 1: top tri (xi=1, n̂=(+1,0,0)), area dη·dζ
-/// face 2: quad (η=0, n̂=(0,-1,0)), area dξ·dζ
-/// face 3: quad (ζ=0, n̂=(0,0,-1)), area dξ·dη
-/// face 4: quad diagonal (η+ζ=1, n̂=(0,1,1)/√2), area √2 dξ·dη
+/// Face slot order = MFEM `RT_WedgeElement` / `Geometry::PRISM` FaceVert
+/// order: 0 = bottom tri (xi=0, n̂=(−1,0,0)), 1 = top tri (xi=1, n̂=(1,0,0)),
+/// 2 = q0 quad (zeta=0, n̂=(0,0,−1), FaceVert (0,1,4,3)), 3 = q1 quad
+/// (diagonal eta+zeta=1, n̂=(0,1,1)/√2, ds=√2, (1,2,5,4)), 4 = q2 quad
+/// (eta=0, n̂=(0,−1,0), (2,0,3,5)).
 const FACE_DEFS: [(u8, [f64; 3]); 5] = [
     (0, [-1.0, 0.0, 0.0]),                              // tri, xi=0
     (0, [1.0, 0.0, 0.0]),                               // tri, xi=1
-    (1, [0.0, -1.0, 0.0]),                              // quad, η=0
-    (1, [0.0, 0.0, -1.0]),                              // quad, ζ=0
-    (1, [0.0, 0.7071067811865475, 0.7071067811865475]), // quad diagonal (η+ζ=1)
+    (1, [0.0, 0.0, -1.0]),                              // quad, zeta=0
+    (1, [0.0, 0.7071067811865475, 0.7071067811865475]), // quad diagonal
+    (1, [0.0, -1.0, 0.0]),                              // quad, eta=0
 ];
 
-// ─── DOF enumeration ────────────────────────────────────────────────────────
+/// Face-monospace sizes: `(tri_dofs, quad_dofs)` of order `p`.
+fn face_block_sizes(p: usize) -> (usize, usize) {
+    ((p + 1) * (p + 2) / 2, (p + 1) * (p + 1))
+}
 
-/// Compute DOF_j(monomial) for face f, with moment index (p,q) for the face polynomial.
-fn face_dof_value(m: &Mono, face: usize, p: usize, q: usize) -> f64 {
-    let (ftype, n) = FACE_DEFS[face];
-    let norm = [n[0], n[1], n[2]];
+/// Interior dof count of MFEM `RT_WedgeElement(p)`:
+/// `p(p+1)(3p+4)/2` (`RT_dof[PRISM]`, `fe_coll.cpp:2581-2583`;
+/// `fe_rt.cpp:1183-1201` loops: horizontal `p(p+1)^2` + vertical
+/// `p(p+1)(p+2)/2`).
+fn wedge_interior_dofs(p: usize) -> usize {
+    p * (p + 1) * (3 * p + 4) / 2
+}
 
-    // Integral: ∫_face (Φ·n̂) · basis(u, v) dS
-    // where basis(u,v) depends on the face parameterization.
+/// Total dof count of MFEM `RT_WedgeElement(p)`:
+/// `(p+1)(3p²+12p+10)/2` (probe: 25 @ p=1, 69 @ p=2).
+fn prism_rtk_dim(p: usize) -> usize {
+    let (tri, quad) = face_block_sizes(p);
+    2 * tri + 3 * quad + wedge_interior_dofs(p)
+}
 
-    match ftype {
-        0 => {
-            // Tri face: xi is constant (0 or 1), param by (η, ζ)
-            // Area element: dη·dζ
-            // Target point: (xi, η, ζ) where xi=0 or 1
-            let xi_val = if face == 0 { 0.0 } else { 1.0 };
-            // Integrate over the triangle (η, ζ)
-            let tri_pts = [
-                [1.0 / 6.0, 1.0 / 6.0],
-                [2.0 / 3.0, 1.0 / 6.0],
-                [1.0 / 6.0, 2.0 / 3.0],
-                [0.2, 0.2],
-                [0.6, 0.2],
-                [0.2, 0.6],
-            ];
-            let tri_wts = [
-                1.0 / 6.0,
-                1.0 / 6.0,
-                1.0 / 6.0,
-                1.0 / 6.0,
-                1.0 / 6.0,
-                1.0 / 6.0,
-            ];
-            let mut sum = 0.0;
-            for (p_uv, &w) in tri_pts.iter().zip(tri_wts.iter()) {
-                let (eta, zeta) = (p_uv[0], p_uv[1]);
-                let mv = eval_mono(m, xi_val, eta, zeta);
-                let dot = match m.comp {
-                    0 => norm[0],
-                    1 => norm[1],
-                    2 => norm[2],
-                    _ => 0.0,
-                };
-                // Face polynomial weight: monomial in (η, ζ) of degree p+q
-                let poly = eta.powi(p as i32) * zeta.powi(q as i32);
-                sum += w * dot * mv * poly;
-            }
-            sum
+// ─── DOF functionals ────────────────────────────────────────────────────────
+
+/// One face moment functional: `∫_face (Φ·n̂) eta^b·zeta^c ds` on a tri face
+/// (standard barycentric convention: the poly exponents follow the grid
+/// weights `(v1: b, v2: c)`), or `∫_face (Φ·n̂) u^i v^j ds` on a quad face
+/// in its MFEM canonical frame (exact quadrature).
+fn face_dof_value(m: &Mono, face: usize, b: usize, c: usize) -> f64 {
+    let (_ftype, n) = FACE_DEFS[face];
+    let dot = match m.comp {
+        0 => n[0],
+        1 => n[1],
+        _ => n[2],
+    };
+    if face < 2 {
+        // Tri face xi = const: moment poly eta^b zeta^c.  Order ≥ 14 covers
+        // the monomial span's total degree (≤ 2p+1 at p = 3) plus the poly
+        // degree — exact functionals (an under-integrated functional
+        // perturbs the dual and leaks flux onto foreign faces).
+        let xi_val = if face == 0 { 0.0 } else { 1.0 };
+        let rule = tri_rule(((b + c) * 2 + 14).min(20) as u8);
+        let mut sum = 0.0;
+        for (pt, &w) in rule.points.iter().zip(rule.weights.iter()) {
+            let (eta, zeta) = (pt[0], pt[1]);
+            let mv = eval_mono(m, xi_val, eta, zeta);
+            let poly = eta.powi(b as i32) * zeta.powi(c as i32);
+            sum += w * dot * mv * poly;
         }
-        1 => {
-            // Quad face: one coordinate is constant (0 or 1)
-            // Parameterized by the other two coordinates
-            let (const_crd, const_val, free_dirs) = match face {
-                2 => (1, 0.0, (0usize, 2usize)), // η=0, free (ξ, ζ)
-                3 => (2, 0.0, (0usize, 1usize)), // ζ=0, free (ξ, η)
-                4 => {
-                    // η+ζ=1: use parameterization (ξ, η) with ζ=1-η
-                    // Normal is (0,1,1)/√2, area element = √2 dξ·dη (already included in weight)
-                    // Use 2D Gauss on [0,1]×[0,1]
-                    let gx = [0.21132486540518713, 0.7886751345948129];
-                    let gw = [0.5, 0.5];
-                    let mut sum = 0.0;
-                    for (&u, &wu) in gx.iter().zip(gw.iter()) {
-                        for (&v, &wv) in gx.iter().zip(gw.iter()) {
-                            let eta = v;
-                            let zeta = 1.0 - eta;
-                            let mv = eval_mono(m, u, eta, zeta);
-                            let dot = match m.comp {
-                                0 => norm[0],
-                                1 => norm[1],
-                                2 => norm[2],
-                                _ => 0.0,
-                            };
-                            let poly = u.powi(p as i32) * v.powi(q as i32);
-                            // ds = √2 dξ·dη
-                            sum += wu * wv * dot * mv * poly * std::f64::consts::SQRT_2;
-                        }
-                    }
-                    return sum;
-                }
-                _ => unreachable!(),
+        sum
+    } else {
+        // Quad faces in their MFEM canonical frames (D444):
+        //   q0 (zeta=0, FaceVert (0,1,4,3)): u=eta, v=xi
+        //   q1 (diag,   FaceVert (1,2,5,4)): u=zeta (eta = 1-u), v=xi
+        //   q2 (eta=0,  FaceVert (2,0,3,5)): u=1-zeta,         v=xi
+        // dof slot n = v*(p+1) + u enumerates (i=u, j=v); ds as noted.
+        let (i, j) = (b, c);
+        let rule = quad_rule_01(((i + j) * 2 + 14).min(20) as u8);
+        let ds = if face == 3 { std::f64::consts::SQRT_2 } else { 1.0 };
+        let mut sum = 0.0;
+        for (pt, &w) in rule.points.iter().zip(rule.weights.iter()) {
+            let (u, v) = (pt[0], pt[1]);
+            let (xi, eta, zeta) = match face {
+                2 => (v, u, 0.0),
+                3 => (v, 1.0 - u, u),
+                _ => (v, 0.0, 1.0 - u),
             };
-            let gx = [0.21132486540518713, 0.7886751345948129];
-            let gw = [0.5, 0.5];
-            let mut sum = 0.0;
-            for (&u, &wu) in gx.iter().zip(gw.iter()) {
-                for (&v, &wv) in gx.iter().zip(gw.iter()) {
-                    let mut pt = [0.0_f64; 3];
-                    pt[const_crd] = const_val;
-                    pt[free_dirs.0] = u;
-                    pt[free_dirs.1] = v;
-                    let mv = eval_mono(m, pt[0], pt[1], pt[2]);
-                    let dot = match m.comp {
-                        0 => norm[0],
-                        1 => norm[1],
-                        2 => norm[2],
-                        _ => 0.0,
-                    };
-                    let poly = u.powi(p as i32) * v.powi(q as i32);
-                    sum += wu * wv * dot * mv * poly;
-                }
-            }
-            sum
+            let mv = eval_mono(m, xi, eta, zeta);
+            let poly = u.powi(i as i32) * v.powi(j as i32);
+            sum += w * ds * dot * mv * poly;
         }
-        _ => 0.0,
+        sum
     }
+}
+
+/// Interior volume moment weight `∫_V mono · xi^a eta^b zeta^c dV`
+/// (exact quadrature over the reference prism; the caller restricts the
+/// monomial's component to the functional's target component).
+fn interior_dof_value(rule: &QuadratureRule, m: &Mono, a: usize, b: usize, c: usize) -> f64 {
+    let mut sum = 0.0;
+    for (pt, &w) in rule.points.iter().zip(rule.weights.iter()) {
+        let mv = eval_mono(m, pt[0], pt[1], pt[2]);
+        let poly = pt[0].powi(a as i32) * pt[1].powi(b as i32) * pt[2].powi(c as i32);
+        sum += w * mv * poly;
+    }
+    sum
 }
 
 // ─── Vandermonde construction ───────────────────────────────────────────────
 
-fn prism_rtk_dim(k: usize) -> usize {
-    let tri = (k + 1) * (k + 2) / 2;
-    let quad = (k + 1) * (k + 1);
-    let interior = k * k.saturating_sub(1) * (k + 1) / 2;
-    2 * tri + 3 * quad + interior
-}
-
+/// Pseudo-dual of the Vandermonde rows via `V·Vᵀ` Gaussian elimination;
+/// panics if rank deficient (the dof functionals must be independent — a
+/// silent pseudo inverse would paper over construction bugs).
 fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     let mut vvt = vec![vec![0.0_f64; n]; n];
     for i in 0..n {
@@ -197,9 +244,10 @@ fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
                 best = r;
             }
         }
-        if bv < 1e-30 {
-            continue;
-        }
+        assert!(
+            bv > 1e-25,
+            "PrismRTk: dual Gram matrix rank-deficient at pivot {c} (|piv| = {bv})"
+        );
         a.swap(c, best);
         inv.swap(c, best);
         let ip = 1.0 / a[c][c];
@@ -231,64 +279,87 @@ fn solve_normal_eq(v: &[Vec<f64>], n: usize, m: usize) -> Vec<f64> {
     coeff
 }
 
-fn build_prism_rtk(k: usize) -> (Vec<f64>, usize) {
-    let n = prism_rtk_dim(k);
-    let monos = prism_monos(k + 2);
+/// Build the Vandermonde rows in MFEM slot order:
+/// `[bottom tri, top tri, q0, q1, q2, interior]` (D444).
+fn build_prism_rtk(p: usize) -> (Vec<f64>, usize) {
+    let n = prism_rtk_dim(p);
+    let monos = prism_monos(p);
     let m = monos.len();
     let mut vand = vec![vec![0.0_f64; m]; n];
     let mut row = 0;
 
-    // Face DOFs: 5 faces, each with (order+1)(order+2)/2 (tri) or (order+1)² (quad) moment pairs.
-    // Counts derived from `tri_moments.len()` / `quad_moments.len()` below.
-
-    // Generate (p,q) pairs for tri faces: p+q ≤ k
-    let mut tri_moments = Vec::new();
-    for p in 0..=k {
-        for q in 0..=(k - p) {
-            tri_moments.push((p, q));
-        }
-    }
-
-    // Generate (p,q) pairs for quad faces: 0 ≤ p,q ≤ k
-    let mut quad_moments = Vec::new();
-    for p in 0..=k {
-        for q in 0..=k {
-            quad_moments.push((p, q));
-        }
-    }
-
+    // Faces 0..5 in MFEM slot order.  Tri faces: standard barycentric grid
+    // (j = eta exponent outer, i = zeta exponent inner).  Quad faces:
+    // canonical frames, slot n = v*(p+1) + u (u = frame coord 1 inner).
     for face in 0..5 {
-        let (ftype, _) = FACE_DEFS[face];
-        let moments = match ftype {
-            0 => &tri_moments,
-            _ => &quad_moments,
-        };
-        for &(p, q) in moments {
-            for j in 0..m {
-                vand[row][j] = face_dof_value(&monos[j], face, p, q);
+        if face < 2 {
+            for j in 0..=p {
+                for i in 0..=(p - j) {
+                    for (col, mo) in monos.iter().enumerate() {
+                        vand[row][col] = face_dof_value(mo, face, j, i);
+                    }
+                    row += 1;
+                }
             }
-            row += 1;
+        } else {
+            for j in 0..=p {
+                for i in 0..=p {
+                    for (col, mo) in monos.iter().enumerate() {
+                        vand[row][col] = face_dof_value(mo, face, i, j);
+                    }
+                    row += 1;
+                }
+            }
         }
     }
 
-    // Interior DOFs (k >= 1): pure interior bubbles using placeholder identity
-    let n_interior = if k >= 1 { k * (k - 1) * (k + 1) / 2 } else { 0 };
-    for i in 0..n_interior.min(m) {
-        vand[row][i % m] = 1.0;
-        row += 1;
+    // Interior (k >= 1), MFEM tensor structure in moment form (D436):
+    // horizontal `∫Φ_eta w`, `∫Φ_zeta w` for w = xi^m · (tri monomial of
+    // degree ≤ p−1), m = 0..=p → p(p+1)² rows; then vertical `∫Φ_xi w` for
+    // w = xi^m · (tri monomial of degree ≤ p), m = 2..=p+1
+    // → p(p+1)(p+2)/2 rows.
+    if p >= 1 {
+        let order = (4 * p + 8).min(40) as u8;
+        let rule = prism_rule(order);
+        for comp in [1u8, 2] {
+            for mm in 0..=p {
+                for bb in 0..p {
+                    for cc in 0..=(p - 1 - bb) {
+                        for (col, mo) in monos.iter().enumerate() {
+                            if mo.comp == comp {
+                                vand[row][col] = interior_dof_value(&rule, mo, mm, bb, cc);
+                            }
+                        }
+                        row += 1;
+                    }
+                }
+            }
+        }
+        for mm in 2..=(p + 1) {
+            for bb in 0..=p {
+                for cc in 0..=(p - bb) {
+                    for (col, mo) in monos.iter().enumerate() {
+                        if mo.comp == 0 {
+                            vand[row][col] = interior_dof_value(&rule, mo, mm, bb, cc);
+                        }
+                    }
+                    row += 1;
+                }
+            }
+        }
     }
 
-    assert_eq!(row, n, "row count {row} != dimension {n} for k={k}");
-
-    let coeff = solve_normal_eq(&vand, n, m);
-    (coeff, m)
+    assert_eq!(row, n, "row count {row} != dimension {n} for p={p}");
+    (solve_normal_eq(&vand, n, m), m)
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-/// Raviart-Thomas H(div) element on the reference prism — arbitrary order k.
+/// Raviart-Thomas H(div) element on the reference prism — MFEM
+/// `RT_WedgeElement(p)` slot layout (D444).  Supports `p ≤ 3` (the moment
+/// dual is verified 0..=3; higher orders wait on a nodal MFEM port).
 pub struct PrismRTk {
-    k: usize,
+    p: usize,
     coeff: Vec<f64>,
     n: usize,
     m: usize,
@@ -300,16 +371,65 @@ pub type PrismRT0 = PrismRTk;
 
 impl PrismRTk {
     pub fn new(order: usize) -> Self {
+        assert!(
+            order <= 3,
+            "PrismRTk: order {order} exceeds the verified moment-dual cap 3 \
+             (MFEM RT_WedgeElement is order-generic; a nodal port is future work)"
+        );
         let (coeff, m) = build_prism_rtk(order);
         let n = prism_rtk_dim(order);
-        let monos = prism_monos(order + 2);
         PrismRTk {
-            k: order,
+            p: order,
             coeff,
             n,
             m,
-            monos,
+            monos: prism_monos(order),
         }
+    }
+
+    /// Half-open slot range of face `face` (0..5; 5 = interior) in the
+    /// element's slot layout — `[bottom, top, q0, q1, q2, interior]`.
+    /// Public for MFEM-layout parity tests.
+    pub fn slot_range(&self, face: usize) -> std::ops::Range<usize> {
+        let (tri, quad) = face_block_sizes(self.p);
+        let start = match face {
+            0 => 0,
+            1 => tri,
+            2 => 2 * tri,
+            3 => 2 * tri + quad,
+            4 => 2 * tri + 2 * quad,
+            _ => 2 * tri + 3 * quad,
+        };
+        let len = match face {
+            0 | 1 => tri,
+            2 | 3 | 4 => quad,
+            _ => wedge_interior_dofs(self.p),
+        };
+        start..start + len
+    }
+}
+
+/// 1-D Gauss (open) points, `n` of them on [0,1] — MFEM `OpenPoints(p)`
+/// (Gauss-Legendre), used by the `L2TriangleFE` lattice / `L2SegmentFE` /
+/// `RTTriangleFE` edge nodes.
+fn open_points(n: usize) -> Vec<f64> {
+    gauss_legendre_01(n).0
+}
+
+/// 1-D Gauss-Lobatto (closed) points, `n` of them on [0,1] — MFEM
+/// `ClosedPoints` for `H1SegmentFE`.
+fn closed_points(n: usize) -> Vec<f64> {
+    gauss_lobatto_01(n).0
+}
+
+/// MFEM `H1SegmentFE(p+1)` node index → `ClosedPoints(p+1)` position:
+/// `Nodes[0]=cp[0], Nodes[1]=cp[p+1], Nodes[i+1]=cp[i]` (`fe_h1.cpp:21-35`).
+fn h1_seg_node(m: usize, p: usize) -> f64 {
+    let cp = closed_points(p + 2);
+    match m {
+        0 => cp[0],
+        1 => cp[p + 1],
+        i => cp[i - 1],
     }
 }
 
@@ -318,14 +438,14 @@ impl VectorReferenceElement for PrismRTk {
         3
     }
     fn order(&self) -> u8 {
-        self.k as u8
+        self.p as u8
     }
     fn n_dofs(&self) -> usize {
         self.n
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        if self.k == 0 {
+        if self.p == 0 {
             // MFEM RT_WedgeElement(0) tensor product (CalcVShape in
             // fe_rt.cpp): reference axes are xi = layer, (eta,zeta) = triangle
             // plane.  DOF order = wedge face order (bottom/top tri, then 3
@@ -387,7 +507,7 @@ impl VectorReferenceElement for PrismRTk {
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        if self.k == 0 {
+        if self.p == 0 {
             // div of MFEM wedge RT0: tri dofs (∂/∂xi of (xi±1)) = 1,
             // quad dofs (∂/∂η + ∂/∂ζ of the 2D RT0 edge) = 1 + 1 = 2.
             div_vals[0] = 1.0;
@@ -419,39 +539,84 @@ impl VectorReferenceElement for PrismRTk {
         prism_rule(order)
     }
 
+    /// MFEM `RT_WedgeElement` node positions (`tmp/d444/probe_d444.out`,
+    /// `RT_WedgeElement::RT_WedgeElement` Nodes table) in fem-rs axes
+    /// (`(eta,zeta)` = MFEM `(x,y)`, `xi` = MFEM `z`).  The tri *face*
+    /// blocks use the standard barycentric enumeration (see module docs for
+    /// the documented top-face deviation from MFEM's raw internal order);
+    /// the interior blocks mirror MFEM's own enumeration verbatim.
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        // Face-based DOF locations (Gauss-like on each face)
-        let k = self.k;
-        let mut coords = Vec::new();
-        let tri_q_pts: Vec<f64> = if k == 0 {
-            vec![1.0 / 3.0]
-        } else {
-            (0..(k + 1) * (k + 2) / 2).map(|_| 0.3).collect()
+        let p = self.p;
+        let op = open_points(p + 1); // Gauss (L2 tri lattice / RT tri edges / L2 seg)
+        let mut coords = Vec::with_capacity(self.n);
+
+        // Standard-grid tri node (j, i) — barycentric weights (v1: j, v2: i)
+        // on the OpenPoints lattice: (eta, zeta) = (op[j]/w, op[i]/w).
+        let tri_face_node = |j: usize, i: usize| -> (f64, f64) {
+            let w = op[j] + op[i] + op[p - j - i];
+            (op[j] / w, op[i] / w)
         };
-        let quad_q_pts: Vec<f64> = if k == 0 {
-            vec![0.5]
-        } else {
-            (0..(k + 1) * (k + 1)).map(|_| 0.3).collect()
+        // MFEM `L2Triangle(p)` node l (enumeration j' outer, i' inner):
+        // (x, y) = (op[i']/w, op[j']/w) → fem-rs (eta, zeta) (fe_l2.cpp:570).
+        let l2_tri_node = |j: usize, i: usize| -> (f64, f64) {
+            let w = op[i] + op[j] + op[p - i - j];
+            (op[i] / w, op[j] / w)
         };
-        // Face 0 (xi=0, tri)
-        for _ in 0..tri_q_pts.len() {
-            coords.push(vec![0.0, 0.3, 0.3]);
+
+        // Faces 0/1: bottom/top tri (xi = 0 / xi = 1), standard grid order.
+        for &xi_val in &[0.0, 1.0] {
+            for j in 0..=p {
+                for i in 0..=(p - j) {
+                    let (eta, zeta) = tri_face_node(j, i);
+                    coords.push(vec![xi_val, eta, zeta]);
+                }
+            }
         }
-        // Face 1 (xi=1, tri)
-        for _ in 0..tri_q_pts.len() {
-            coords.push(vec![1.0, 0.3, 0.3]);
+        // Faces 2..5: quads, slot n = v*(p+1)+u, (u,v) = canonical frames.
+        for j in 0..=p {
+            for i in 0..=p {
+                // q0 (zeta=0): u=eta, v=xi
+                coords.push(vec![op[j], op[i], 0.0]);
+            }
         }
-        // Face 2 (eta=0, quad)
-        for _ in 0..quad_q_pts.len() {
-            coords.push(vec![0.3, 0.0, 0.3]);
+        for j in 0..=p {
+            for i in 0..=p {
+                // q1 (diag): u=zeta, eta = 1-u, v=xi
+                coords.push(vec![op[j], 1.0 - op[i], op[i]]);
+            }
         }
-        // Face 3 (zeta=0, quad)
-        for _ in 0..quad_q_pts.len() {
-            coords.push(vec![0.3, 0.3, 0.0]);
+        for j in 0..=p {
+            for i in 0..=p {
+                // q2 (eta=0): u=1-zeta, v=xi
+                coords.push(vec![op[j], 0.0, 1.0 - op[i]]);
+            }
         }
-        // Face 4 (diagonal, quad)
-        for _ in 0..quad_q_pts.len() {
-            coords.push(vec![0.3, 0.3, 0.4]);
+        // Interior.  Horizontal: p(p+1)^2 dofs — for each L2Seg point m
+        // (xi = op[m]) and each RTTri(p) interior node (OpenPoints(p-1)
+        // lattice, (x,y) = (iop[i]/w, iop[j]/w)), the (eta, zeta) component
+        // pair at one point.  Vertical: p(p+1)(p+2)/2 — L2Tri nodes at
+        // H1Seg indices 2..=p+1.
+        if p >= 1 {
+            let iop = open_points(p);
+            for mm in 0..=p {
+                for j in 0..p {
+                    for i in 0..(p - j) {
+                        let w = iop[i] + iop[j] + iop[p - 1 - i - j];
+                        let eta = iop[i] / w;
+                        let zeta = iop[j] / w;
+                        coords.push(vec![op[mm], eta, zeta]); // eta-comp dof
+                        coords.push(vec![op[mm], eta, zeta]); // zeta-comp dof
+                    }
+                }
+            }
+            for m in 2..=(p + 1) {
+                for j in 0..=p {
+                    for i in 0..=(p - j) {
+                        let (eta, zeta) = l2_tri_node(j, i);
+                        coords.push(vec![h1_seg_node(m, p), eta, zeta]);
+                    }
+                }
+            }
         }
         coords
     }
@@ -463,38 +628,214 @@ impl VectorReferenceElement for PrismRTk {
 mod tests {
     use super::*;
 
+    /// MFEM `RT_WedgeElement(p)` dof counts — probe
+    /// `tmp/d444/probe_d444.out` (`dof=25` @ p=1, `dof=69` @ p=2) and the
+    /// closed formula `(p+1)(3p²+12p+10)/2`.
     #[test]
-    fn prism_rtk_k0_dim() {
+    fn prism_rtk_dim_matches_mfem_rt_wedge() {
         assert_eq!(prism_rtk_dim(0), 5);
+        assert_eq!(prism_rtk_dim(1), 25);
+        assert_eq!(prism_rtk_dim(2), 69);
+        assert_eq!(prism_rtk_dim(3), 146);
+        assert_eq!(PrismRTk::new(1).n_dofs(), 25);
+        assert_eq!(PrismRTk::new(2).n_dofs(), 69);
     }
+
+    /// MFEM `RT_WedgeElement` interior count `p(p+1)(3p+4)/2`
+    /// (`fe_coll.cpp:2581-2583`): 0, 7, 30, 78 at p = 0..3.
     #[test]
-    fn prism_rtk_k1_dim() {
-        assert_eq!(prism_rtk_dim(1), 18);
+    fn wedge_interior_counts_match_mfem() {
+        assert_eq!(wedge_interior_dofs(0), 0);
+        assert_eq!(wedge_interior_dofs(1), 7);
+        assert_eq!(wedge_interior_dofs(2), 30);
+        assert_eq!(wedge_interior_dofs(3), 78);
     }
-    #[test]
-    fn prism_rtk_k2_dim() {
-        assert_eq!(prism_rtk_dim(2), 42);
-    }
-    #[test]
-    fn prism_rtk_k0_finite() {
-        let e = PrismRTk::new(0);
-        let mut v = vec![0.0; 15];
-        for p in &e.quadrature(3).points {
-            e.eval_basis_vec(p, &mut v);
-            for x in &v {
-                assert!(x.is_finite());
-            }
+
+    /// Point on reference face `h` with canonical frame coords (u, v) and
+    /// the outward normal / surface element of that face.
+    fn face_point(h: usize, u: f64, v: f64) -> ([f64; 3], [f64; 3], f64) {
+        match h {
+            0 => ([0.0, u, v], [-1.0, 0.0, 0.0], 1.0),
+            1 => ([1.0, u, v], [1.0, 0.0, 0.0], 1.0),
+            2 => ([u, v, 0.0], [0.0, 0.0, -1.0], 1.0),
+            3 => ([u, 1.0 - v, v], [0.0, 1.0, 1.0], std::f64::consts::SQRT_2),
+            _ => ([u, 0.0, v], [0.0, -1.0, 0.0], 1.0),
         }
     }
+
+    /// Exact normal-flux moments `∫_h (φ_slot·n̂_h)·q dA` of basis function
+    /// `slot` over reference face `h`; `q` runs over the monomials {1, u, v}
+    /// (the degree-≤1 face frame — exactly the RT1 dof functional set) and
+    /// additionally {u², uv, v²} so the own-face check sees any nonzero
+    /// trace of degree ≤ 2.
+    fn face_flux_moments(e: &PrismRTk, slot: usize, h: usize) -> Vec<f64> {
+        let mut phi = vec![0.0_f64; e.n_dofs() * 3];
+        let mut mom = vec![0.0_f64; 6];
+        let tests: [fn(f64, f64) -> f64; 6] = [
+            |_, _| 1.0,
+            |u, _| u,
+            |_, v| v,
+            |u, _| u * u,
+            |u, v| u * v,
+            |_, v| v * v,
+        ];
+        let (rule, n_pts): (QuadratureRule, ()) = if h < 2 {
+            (tri_rule(12), ())
+        } else {
+            (quad_rule_01(12), ())
+        };
+        for (pt, &w) in rule.points.iter().zip(rule.weights.iter()) {
+            let (x, n, ds) = face_point(h, pt[0], pt[1]);
+            e.eval_basis_vec(&x, &mut phi);
+            for (t, tc) in tests.iter().enumerate() {
+                let q = tc(pt[0], pt[1]);
+                for c in 0..3 {
+                    mom[t] += w * ds * q * phi[slot * 3 + c] * n[c];
+                }
+            }
+        }
+        mom
+    }
+
+    /// D444 core property: every face group's basis functions carry
+    /// vanishing normal-flux moments on all *other* faces and a nonzero
+    /// own-face moment; interior basis functions vanish on all five faces.
+    /// This is the slot ↔ face agreement the RT1 prism assembly pairing
+    /// needs (the original D444 lesion had quad slots 2..4 moments on the
+    /// wrong faces).
     #[test]
-    fn prism_rtk_k1_finite() {
+    fn prism_rtk1_slot_groups_are_face_conforming() {
         let e = PrismRTk::new(1);
-        let mut v = vec![0.0; 54];
-        for p in &e.quadrature(3).points {
-            e.eval_basis_vec(p, &mut v);
-            for x in &v {
-                assert!(x.is_finite());
+        assert_eq!(e.n_dofs(), 25);
+        for g in 0..5 {
+            let range = e.slot_range(g);
+            assert_eq!(range.len(), if g < 2 { 3 } else { 4 });
+            for slot in range.clone() {
+                for h in 0..5 {
+                    let mom = face_flux_moments(&e, slot, h);
+                    if h == g {
+                        let max = mom.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+                        assert!(
+                            max > 1e-8,
+                            "slot {slot} (face {g}): own-face moments vanish: {mom:?}"
+                        );
+                    } else {
+                        // Foreign-face vanishing needs only the RT1 dof
+                        // functional set {1, u, v} (moments 0..3); the dual
+                        // solve leaves ~1e-8-level residuals (a structurally
+                        // wrong slot↔face assignment gives O(1e-1..1)).
+                        for (t, &mv) in mom.iter().take(3).enumerate() {
+                            assert!(
+                                mv.abs() < 1e-6,
+                                "slot {slot} (face {g}): moment {t} on foreign face {h} = {mv}"
+                            );
+                        }
+                    }
+                }
             }
         }
+        // Interior group: vanishing flux moments (RT1 functional set
+        // {1, u, v}) on every face — the higher-degree residual of the
+        // trace is unconstrained by the dual construction.
+        for slot in e.slot_range(5) {
+            for h in 0..5 {
+                let mom = face_flux_moments(&e, slot, h);
+                for (t, &mv) in mom.iter().take(3).enumerate() {
+                    assert!(
+                        mv.abs() < 1e-6,
+                        "interior slot {slot}: moment {t} on face {h} = {mv}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `dof_coords` reproduce the MFEM `RT_WedgeElement(1)` Nodes table
+    /// (probe `tmp/d444/probe_d444.out`) per slot group (sorted set
+    /// comparison — the top tri face's internal enumeration is normalised,
+    /// see module docs).
+    #[test]
+    fn prism_rtk1_dof_coords_match_mfem_probe() {
+        const A: f64 = 0.211324865405187107; // Gauss(1) low
+        const B: f64 = 0.788675134594812866; // Gauss(1) high
+        const C: f64 = 0.174457630187009438; // L2Tri(1) lattice low
+        const D: f64 = 0.651084739625981124; // L2Tri(1) lattice high
+        let e = PrismRTk::new(1);
+        let coords = e.dof_coords();
+        assert_eq!(coords.len(), 25);
+        let mut sorted: Vec<[f64; 3]> = coords.iter().map(|c| [c[0], c[1], c[2]]).collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut expected: Vec<[f64; 3]> = vec![
+            // bottom tri (xi = 0)
+            [0.0, C, C],
+            [0.0, C, D],
+            [0.0, D, C],
+            // top tri (xi = 1)
+            [1.0, C, C],
+            [1.0, C, D],
+            [1.0, D, C],
+            // q0 (zeta = 0): (xi, eta) Gauss tensor
+            [A, A, 0.0],
+            [A, B, 0.0],
+            [B, A, 0.0],
+            [B, B, 0.0],
+            // q1 (diagonal eta + zeta = 1): (xi, zeta) Gauss tensor
+            [A, B, A],
+            [A, A, B],
+            [B, B, A],
+            [B, A, B],
+            // q2 (eta = 0): (xi, 1-zeta) Gauss tensor
+            [A, 0.0, B],
+            [A, 0.0, A],
+            [B, 0.0, B],
+            [B, 0.0, A],
+            // interior horizontal: RTTri(1) interior node (1/3, 1/3) x L2Seg
+            [A, 1.0 / 3.0, 1.0 / 3.0],
+            [A, 1.0 / 3.0, 1.0 / 3.0],
+            [B, 1.0 / 3.0, 1.0 / 3.0],
+            [B, 1.0 / 3.0, 1.0 / 3.0],
+            // interior vertical: L2Tri(1) nodes at H1Seg(2) node 2 (xi = 0.5)
+            [0.5, C, C],
+            [0.5, D, C],
+            [0.5, C, D],
+        ];
+        expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (i, (g, w)) in sorted.iter().zip(expected.iter()).enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (g[c] - w[c]).abs() < 1e-14,
+                    "coord {i} comp {c}: got {} want {} (got {g:?} want {w:?})",
+                    g[c],
+                    w[c]
+                );
+            }
+        }
+    }
+
+    /// Order-2/3 constructions stay finite (MFEM probe counts 69/146 pinned
+    /// in [`prism_rtk_dim_matches_mfem_rt_wedge`]).
+    #[test]
+    fn prism_rtk_higher_orders_finite() {
+        for p in 2..=3 {
+            let e = PrismRTk::new(p);
+            let mut v = vec![0.0; e.n_dofs() * 3];
+            for pt in &e.quadrature(6).points {
+                e.eval_basis_vec(pt, &mut v);
+                assert!(v.iter().all(|x| x.is_finite()), "p={p}: non-finite basis");
+            }
+        }
+    }
+
+    /// k=0 behaviour unchanged: hard-coded MFEM basis, dim 5, div (1,1,2,2,2).
+    #[test]
+    fn prism_rt0_unchanged() {
+        let e = PrismRTk::new(0);
+        assert_eq!(e.n_dofs(), 5);
+        let mut v = vec![0.0; 15];
+        e.eval_basis_vec(&[0.3, 0.2, 0.5], &mut v);
+        assert_eq!(v, vec![-0.7, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.2, -0.5, 0.0, 0.2, 0.5, 0.0, -0.8, 0.5]);
+        let mut d = vec![0.0; 5];
+        e.eval_div(&[0.3, 0.2, 0.5], &mut d);
+        assert_eq!(d, vec![1.0, 1.0, 2.0, 2.0, 2.0]);
     }
 }

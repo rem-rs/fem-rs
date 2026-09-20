@@ -85,13 +85,16 @@ const PRISM_FACES: [[usize; 4]; 5] = [
     [0, 2, 5, 3],    // quad 2 (left)
 ];
 
-/// Pyramid faces: 4 tri + 1 quad; ordered for RT DOF mapping.
+/// Pyramid faces in MFEM `Geometry::PYRAMID` FaceVert slot order (D445):
+/// base quad first (FaceVert (3,2,1,0)), then the 4 triangular faces
+/// (0,1,4), (1,2,4), (2,3,4), (3,0,4) — matching `PyraRTk`'s
+/// `RT_FuentesPyramidElement` slot layout and MFEM's own face numbering.
 const PYRAMID_FACES: [[usize; 4]; 5] = [
-    [0, 1, 4, 4],    // tri face (apex)
-    [1, 2, 4, 4],    // tri face (apex)
-    [2, 3, 4, 4],    // tri face (apex)
-    [3, 0, 4, 4],    // tri face (apex)
-    [0, 1, 2, 3],    // base quad
+    [3, 2, 1, 0],    // base quad (MFEM face 0)
+    [0, 1, 4, 4],    // tri (0,1,4)
+    [1, 2, 4, 4],    // tri (1,2,4)
+    [2, 3, 4, 4],    // tri (2,3,4)
+    [3, 0, 4, 4],    // tri (3,0,4)
 ];
 
 // ─── MFEM canonical face orientation tables ─────────────────────────────────
@@ -121,18 +124,6 @@ const PRISM_FACES_CANON: [[usize; 4]; 5] = [
     [1, 2, 5, 4], // quad 1 (right)
     [2, 0, 3, 5], // quad 2 (left)
 ];
-
-/// MFEM `Constants<Geometry::PYRAMID>::FaceVert` (tri faces padded).
-/// Rust [`PYRAMID_FACES`] lists 4 tri faces first, then the base quad; MFEM
-/// lists the base quad first.  Maps Rust face index → MFEM face index.
-const PYRAMID_FACES_CANON: [[usize; 4]; 5] = [
-    [3, 2, 1, 0], // base quad
-    [0, 1, 4, 0], // tri (apex)
-    [1, 2, 4, 0], // tri (apex)
-    [2, 3, 4, 0], // tri (apex)
-    [3, 0, 4, 0], // tri (apex)
-];
-const PYRAMID_MFEM_FACE_IDX: [usize; 5] = [1, 2, 3, 4, 0];
 
 /// Canonical (Elem1) ordering of a face, tracked per `FaceKey` while building.
 #[derive(Clone, Copy)]
@@ -267,14 +258,12 @@ fn element_faces_3d(et: ElementType, verts: &[u32]) -> Vec<(FaceKey, FaceCanon)>
             .collect(),
         ElementType::Pyramid5 => PYRAMID_FACES
             .iter()
-            .enumerate()
-            .map(|(i, fv)| {
-                let c = PYRAMID_FACES_CANON[PYRAMID_MFEM_FACE_IDX[i]];
+            .map(|fv| {
                 if fv[2] == fv[3] {
-                    let local = [verts[c[0]], verts[c[1]], verts[c[2]]];
+                    let local = [verts[fv[0]], verts[fv[1]], verts[fv[2]]];
                     (FaceKey::new(local[0], local[1], local[2]), FaceCanon::Tri(local))
                 } else {
-                    let local = [verts[c[0]], verts[c[1]], verts[c[2]], verts[c[3]]];
+                    let local = [verts[fv[0]], verts[fv[1]], verts[fv[2]], verts[fv[3]]];
                     let mut v4 = local;
                     v4.sort_unstable();
                     (FaceKey::new(v4[0], v4[1], v4[2]), FaceCanon::Quad(local))
@@ -291,25 +280,18 @@ fn element_faces_3d(et: ElementType, verts: &[u32]) -> Vec<(FaceKey, FaceCanon)>
 ///
 /// - tet: `k(k+1)(k+2)/2` (MFEM `RT_TetrahedronElement`, `fe/fe_rt.cpp:899`)
 /// - hex: `3k(k+1)^2` (MFEM `RT_HexahedronElement`, `fe/fe_rt.cpp:326`)
-/// - prism: `PrismRTk` interior `k(k-1)(k+1)/2` — 0 at the capped orders
-///   (k ≤ 1).  MFEM's `RT_WedgeElement` has `p(p+1)(3p+4)/2` = 7 at k=1
-///   (`fe_coll.cpp:2581`); the difference is element-layer debt (D436).
-/// - pyramid: `PyraRTk` interior table — 0 at k=0, 1 at k=1 (higher orders
-///   unreachable: `validate_order` caps pyramid RT at 1).  MFEM's
-///   `RT_FuentesPyramidElement` counts `(p+1)(3p(p+2)+5)` (`fe_rt.cpp:1273`)
-///   with a different interior split — element-layer debt (D437 family).
+/// - prism: `k(k+1)(3k+4)/2` — MFEM `RT_dof[PRISM]` (`fe_coll.cpp:2581`,
+///   = 7 at k=1), carried by `PrismRTk` since D444/D436.
+/// - pyramid: `3k(k+1)^2` — MFEM `RT_dof[PYRAMID]` (`fe_coll.cpp:2586`),
+///   the `RT_FuentesPyramidElement` interior, carried by `PyraRTk` since
+///   D445/D437.
 fn hdiv_3d_interior_dofs(et: ElementType, order: u8) -> usize {
     let k = order as usize;
     match et {
         ElementType::Tet4 | ElementType::Tet10 => k * (k + 1) * (k + 2) / 2,
         ElementType::Hex8 => 3 * k * (k + 1) * (k + 1),
-        ElementType::Prism6 => 0,
-        ElementType::Pyramid5 => {
-            match k {
-                1 => 1,
-                _ => 0,
-            }
-        }
+        ElementType::Prism6 => k * (k + 1) * (3 * k + 4) / 2,
+        ElementType::Pyramid5 => 3 * k * (k + 1) * (k + 1),
         other => panic!("HDivSpace: unsupported 3-D element type {other:?}"),
     }
 }
@@ -504,13 +486,19 @@ impl<M: MeshTopology> HDivSpace<M> {
                 order <= 6,
                 "HDivSpace: Hex RT supports orders 0..=6 (HexRTk)"
             ),
+            // D444/D445: MFEM 4.10 has no order bound on `RT_WedgeElement` /
+            // `RT_FuentesPyramidElement` (`fe_coll.cpp:2531` only verifies
+            // `p >= 0`), and the fem-rs elements are order-generic formulas
+            // — but the moment-dual construction is verified 0..=3 (the
+            // same conservative house cap as the tet/hex arms at the
+            // verified level).  Higher orders wait on a nodal MFEM port.
             (3, ElementType::Prism6) => assert!(
-                order <= 1,
-                "HDivSpace: Prism RTk supports orders 0 and 1 (higher orders pending Phase 1B.4)"
+                order <= 3,
+                "HDivSpace: Prism RT supports orders 0..=3 (PrismRTk verified cap)"
             ),
             (3, ElementType::Pyramid5) => assert!(
-                order <= 1,
-                "HDivSpace: Pyramid RTk supports orders 0 and 1 (higher orders pending Phase 1B.4)"
+                order <= 3,
+                "HDivSpace: Pyramid RT supports orders 0..=3 (PyraRTk verified cap)"
             ),
             _ => panic!(
                 "HDivSpace: unsupported (dim={dim}, elem_type={elem_type:?})"
@@ -550,9 +538,9 @@ impl<M: MeshTopology> HDivSpace<M> {
             let et = mesh.element_type(e);
             if matches!(et, ElementType::Prism6 | ElementType::Pyramid5) {
                 assert!(
-                    order <= 1,
-                    "HDivSpace: Prism/Pyramid RTk supports orders 0 and 1 \
-                     (higher orders pending Phase 1B.4)"
+                    order <= 3,
+                    "HDivSpace: Prism/Pyramid RT supports orders 0..=3 \
+                     (element verified cap)"
                 );
             }
             let verts = mesh.element_nodes(e);
@@ -1141,38 +1129,57 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D prism construction (RT0/RT1) ────────────────────────────────
 
     fn build_3d_prism(mesh: M, order: u8) -> Self {
-        // MFEM `RT_WedgeElement(p)` face blocks (`fe/fe_rt.cpp:1082`): the 2
-        // triangular faces carry the `RT_TriangleElement(p)` trace,
-        // `(k+1)(k+2)/2` dofs each; the 3 quadrilateral faces the
-        // `RT_QuadrilateralElement(p)` trace, `(k+1)^2` each.  Interior dofs:
-        // D436 — MFEM's wedge has `p(p+1)(3p+4)/2` (= 7 at k=1,
-        // `fe_coll.cpp:2581`), but the fem-rs `PrismRTk` element has interior
-        // `k(k-1)(k+1)/2` = 0 at the capped orders (k ≤ 1), and the space's
-        // per-element slot count must equal the assembly element's `n_dofs`,
-        // so the interior stays 0 until the element layer closes D436.
+        // MFEM `RT_WedgeElement(p)` layout (D444/D436): the 2 triangular
+        // faces carry the `RT_TriangleElement(p)` trace, `(k+1)(k+2)/2` dofs
+        // each; the 3 quadrilateral faces the `RT_QuadrilateralElement(p)`
+        // trace, `(k+1)^2` each; interior `p(p+1)(3p+4)/2`
+        // (`RT_dof[PRISM]`, `fe_coll.cpp:2581`), carried by `PrismRTk` since
+        // D444.
         let k = order as usize;
         let (tri_block, quad_block) = rt_face_block_sizes(k);
-        let dofs_per_elem = 2 * tri_block + 3 * quad_block;
+        let interior_dofs = hdiv_3d_interior_dofs(ElementType::Prism6, order);
+        let dofs_per_elem = 2 * tri_block + 3 * quad_block + interior_dofs;
         let n_elem = mesh.n_elements();
 
-        // Single pass, no interiors: first-encounter face order == MFEM's
-        // entity-major layout (D158) bit-for-bit at every capped order.
+        // MFEM entity-major layout (D158): pass 1 enumerates the unique
+        // faces, pass 2 fills the slots with interiors at the shared base.
+        // At order 0 (no interiors) the numbering is bit-identical to the
+        // previous single-pass builder.
         let mut face_map: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_canon_verts: HashMap<FaceKey, Vec<u32>> = HashMap::new();
-        let mut next_dof: DofId = 0;
+        let mut face_cursor: DofId = 0;
+        let mut interior_prefix: Vec<usize> = Vec::with_capacity(n_elem + 1);
+        interior_prefix.push(0);
+        let mut interior_total = 0usize;
+        for e in 0..n_elem as u32 {
+            let verts = mesh.element_nodes(e);
+            for (key, canon) in element_faces_3d(ElementType::Prism6, verts) {
+                if let std::collections::hash_map::Entry::Vacant(vac) = face_map.entry(key) {
+                    let block = match canon {
+                        FaceCanon::Tri(_) => tri_block,
+                        FaceCanon::Quad(_) => quad_block,
+                    };
+                    vac.insert(face_cursor);
+                    face_cursor += block as DofId;
+                    face_canon_verts.entry(key).or_insert_with(|| match canon {
+                        FaceCanon::Tri(v) => v.to_vec(),
+                        FaceCanon::Quad(v) => v.to_vec(),
+                    });
+                }
+            }
+            interior_total += interior_dofs;
+            interior_prefix.push(interior_total);
+        }
+        let interior_base: DofId = face_cursor;
+        let n_dofs: DofId = interior_base + interior_total as DofId;
+
         let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
         let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
 
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
             for (key, canon) in element_faces_3d(ElementType::Prism6, verts) {
-                let base = face_canon_verts
-                    .entry(key)
-                    .or_insert_with(|| match canon {
-                        FaceCanon::Tri(v) => v.to_vec(),
-                        FaceCanon::Quad(v) => v.to_vec(),
-                    })
-                    .clone();
+                let base = &face_canon_verts[&key];
                 let (sign, orientation) = match (canon, base.as_slice()) {
                     (FaceCanon::Tri(local), [b0, b1, b2]) => {
                         let o = tri_orientation([*b0, *b1, *b2], local);
@@ -1184,15 +1191,7 @@ impl<M: MeshTopology> HDivSpace<M> {
                     }
                     _ => unreachable!("canon shape matches its vertex count"),
                 };
-                let first = *face_map.entry(key).or_insert_with(|| {
-                    let d = next_dof;
-                    let block = match canon {
-                        FaceCanon::Tri(_) => tri_block,
-                        FaceCanon::Quad(_) => quad_block,
-                    };
-                    next_dof += block as DofId;
-                    d
-                });
+                let first = face_map[&key];
                 match canon {
                     FaceCanon::Tri(_) => {
                         if tri_block == 1 {
@@ -1229,12 +1228,18 @@ impl<M: MeshTopology> HDivSpace<M> {
                     }
                 }
             }
+            // Interior bubble dofs at the entity-major base.
+            let ib = interior_base + interior_prefix[e as usize] as DofId;
+            for j in 0..interior_dofs as DofId {
+                dofs_flat.push(ib + j);
+                signs_flat.push(1.0);
+            }
         }
 
         HDivSpace {
             mesh,
             order,
-            n_dofs: next_dof as usize,
+            n_dofs: n_dofs as usize,
             dofs_flat,
             signs_flat,
             dofs_per_elem,
@@ -1250,15 +1255,14 @@ impl<M: MeshTopology> HDivSpace<M> {
     // ─── 3-D pyramid construction (RT0/RT1) ──────────────────────────────
 
     fn build_3d_pyramid(mesh: M, order: u8) -> Self {
-        // D394: face blocks by shape — the 4 triangular faces carry
-        // `(k+1)(k+2)/2` dofs, the base quadrilateral `(k+1)^2`
-        // ([`rt_face_block_sizes`]).  Interior: `PyraRTk` (the assembly
-        // element, `raviart_thomas/pyramid.rs:192`) has 1 interior dof at
-        // k = 1, so the space exposes it — the slot count must equal the
-        // element's `n_dofs` (17 at k=1).  MFEM has no classical RT pyramid;
-        // its `RT_FuentesPyramidElement(p)` counts `(p+1)(3p(p+2)+5)`
-        // (`fe/fe_rt.cpp:1273`) with a different interior split — the gap is
-        // element-layer debt (D437 family), recorded, not papered over here.
+        // D394/D445: face blocks by shape in MFEM FaceVert slot order — the
+        // base quadrilateral first (`(k+1)^2` dofs), then the 4 triangular
+        // faces (`(k+1)(k+2)/2` each, [`rt_face_block_sizes`]).  Interior:
+        // `3k(k+1)^2` — the `RT_FuentesPyramidElement` interior
+        // (`RT_dof[PYRAMID]`, `fe_coll.cpp:2586`), carried by `PyraRTk`
+        // since D445/D437; total `(p+1)(3p(p+2)+5)` per element
+        // (`fe_rt.cpp:1273`, probe `tmp/d444/pyr_incode.out`: single
+        // pyramid k=0 → vsize 5/ess 5, k=1 → vsize 28/ess 16).
         let k = order as usize;
         let (tri_block, quad_block) = rt_face_block_sizes(k);
         let interior_dofs = hdiv_3d_interior_dofs(ElementType::Pyramid5, order);
@@ -2330,8 +2334,10 @@ pub fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
         // D342: was `order <= 2`.
         ElementType::Hex8 => order <= 6,
         ElementType::Prism6 => order == 0,
-        // Prism RT1 / pyramid RTk(≤1) construct a space but are served, if at
-        // all, by the legacy canonical-moment engine — keep the L² path.
+        // Prism RT1..3 / pyramid RT1..3 construct a space (MFEM counts
+        // verified, D444/D445) but the interpolation engine has no prism
+        // k≥1 / pyramid rows — served, if at all, by the legacy
+        // canonical-moment engine (pyramids) or the L² fallback.
         _ => false,
     }
 }
