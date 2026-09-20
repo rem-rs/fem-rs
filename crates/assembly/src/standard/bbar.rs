@@ -45,15 +45,9 @@
 //! ```
 
 use nalgebra::DMatrix;
-use fem_core::types::ElemId;
-use fem_element::{
-    ReferenceElement,
-    lagrange::{SegP1, TetP1, TetP2, TriP1, QuadQ1, HexQ1},
-};
-use fem_element::lagrange::factory::TriPk;
+use fem_element::ReferenceElement;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
 use fem_linalg::CooMatrix;
-use fem_linalg::CsrMatrix;
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
 
@@ -74,42 +68,28 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
 /// `H1_FECollection`'s `pyr_type`, D347): the BBAR space is an H¹ space, so its
 /// pyramid family must be the one the space numbered its dofs in.  Only
 /// pyramid cells at order ≥ 2 depend on it.
+///
+/// D438: delegated to the single source of truth — the H¹ field dispatch
+/// [`fem_space::ref_elem::h1_field_element`], the very function the
+/// assembler's space dispatch (`assembler.rs::ref_elem_vol_h1_with_pyramid_basis`)
+/// has delegated to since D364.  On the previously supported set the table is
+/// arm-for-arm identical (tri p ≤ 4, tet p ≤ 3, quad p ≥ 1, hex p = 1, prisms,
+/// pyramids — pinned bit-for-bit by the `d181_bbar_*` / `d438_bbar_*` tests).
+/// Two documented differences, both outside that set:
+/// * order 0: the historical `(Tri3|Tri6, 0) => TriP1` arm handed a **3-dof**
+///   element to an order-0 space whose `element_dofs` carry one dof per cell
+///   (an out-of-bounds read one call later); the dispatch's `P0Tri` is the
+///   correct order-0 element.  `(Quad4, 0)` moves from `QuadQk(0)` to
+///   `P0Tensor { dim: 2 }` — both a single constant dof on the `[0,1]²` rule.
+/// * previously unsupported combinations (hex p ≥ 2, tet p = 4, tri p = 5)
+///   now assemble with the H¹ space's own element instead of panicking — the
+///   space has numbered their dofs all along.
 fn ref_elem_vol_with_pyramid_basis(
     elem_type: ElementType,
     order: u8,
     pyr_type: fem_element::lagrange::PyramidBasisType,
 ) -> Box<dyn ReferenceElement> {
-    match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(TriP1), // P0 handled elsewhere
-        (ElementType::Tri3 | ElementType::Tri6, 1) => Box::new(TriP1),
-        // p = 2 stays on the equispaced `TriPk`: the two lattices coincide at
-        // p ≤ 2 (all six dof points identical, verified bit-for-bit in
-        // `d181_tri_h1_ref_elem.rs`).
-        (ElementType::Tri3 | ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        // D181: MFEM `H1_TriangleElement` (Gauss-Lobatto, entity slot order) —
-        // matches the H¹ tri dof numbering (`DofManager::build_pk` /
-        // `assembler::ref_elem_vol_h1`); the equispaced `factory::TriPk` only
-        // agreed at p ≤ 2 (6/10 slots off at p = 3, 9/15 at p = 4).
-        (ElementType::Tri3 | ElementType::Tri6, 3) => Box::new(fem_element::lagrange::H1TriPk::new(3)),
-        (ElementType::Tri3 | ElementType::Tri6, 4) => Box::new(fem_element::lagrange::H1TriPk::new(4)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: MFEM `H1_TetrahedronElement` — matches the H¹ tet dof
-        // numbering (`DofManager::build_tet_h1` / `ref_elem_vol_h1`); the
-        // equispaced `factory::TetPk` only agreed at p ≤ 2.
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        (ElementType::Quad4, _) => Box::new(fem_element::lagrange::factory::QuadQk::new(order as usize)),
-        (ElementType::Hex8, 1) => Box::new(HexQ1),
-        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) =>
-            Box::new(fem_element::lagrange::H1PrismPk::new(order as usize)),
-        // D299/D347: the pyramid element of the *chosen* family
-        // (`PyramidBasisType::default()` = Fuentes), entity slot order —
-        // matches the H¹ pyramid dof numbering (`DofManager::build_pyramid_pk` /
-        // `ref_elem_vol_h1_with_pyramid_basis`).
-        (ElementType::Pyramid5 | ElementType::Pyramid13, _) =>
-            fem_element::lagrange::h1_pyramid_element(order as usize, pyr_type),
-        _ => panic!("bbar::ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
-    }
+    fem_space::ref_elem::h1_field_element(elem_type, order, pyr_type)
 }
 
 fn mesh_type_to_factory(et: ElementType) -> FactoryElemType {
@@ -774,6 +754,7 @@ impl<M: crate::standard::elasticity::HyperelasticModel> FBarIntegrator<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fem_linalg::CsrMatrix;
     use fem_mesh::Mesh;
     use fem_space::VectorH1Space;
     use crate::standard::ElasticityIntegrator;
@@ -988,8 +969,53 @@ mod tests {
             let e = ref_elem_vol(ElementType::Tri6, p as u8);
             assert!(coords_bit_eq(
                 &e.dof_coords(),
-                &TriPk::new(p).dof_coords()
+                &fem_element::lagrange::factory::TriPk::new(p).dof_coords()
             ));
+        }
+    }
+
+    /// D438: the delegated table must stay arm-for-arm identical to the
+    /// historical local one on the previously supported set — pinned here
+    /// against the concrete families the old arms constructed (tet, quad,
+    /// hex, prism, pyramid; the tri arms are pinned by `d181_bbar_tri_ref_elem_matches_h1tripk`).
+    #[test]
+    fn d438_bbar_delegated_table_is_bitwise_the_old_arms_on_the_supported_set() {
+        use fem_element::lagrange::factory::QuadQk;
+        use fem_element::lagrange::{
+            h1_pyramid_element, HexQ1, H1PrismPk, PyramidBasisType, TetP1, TetP2,
+        };
+        let coords_bit_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.len() == y.len()
+                        && x.iter().zip(y.iter()).all(|(u, v)| u.to_bits() == v.to_bits())
+                })
+        };
+        let bit_eq = |et: ElementType, p: u8, want: &dyn ReferenceElement| {
+            let e = ref_elem_vol(et, p);
+            assert_eq!(e.n_dofs(), want.n_dofs(), "{et:?} p={p}: n_dofs");
+            assert!(
+                coords_bit_eq(&e.dof_coords(), &want.dof_coords()),
+                "{et:?} p={p}: dof_coords must be bit-identical"
+            );
+        };
+        bit_eq(ElementType::Tet4, 1, &TetP1);
+        bit_eq(ElementType::Tet4, 2, &TetP2);
+        bit_eq(
+            ElementType::Tet4,
+            3,
+            &fem_element::lagrange::H1TetPk::new(3),
+        );
+        for p in 1..=4u8 {
+            bit_eq(ElementType::Quad4, p, &QuadQk::new(p as usize));
+        }
+        bit_eq(ElementType::Hex8, 1, &HexQ1);
+        for p in [1u8, 2] {
+            bit_eq(ElementType::Prism6, p, &H1PrismPk::new(p as usize));
+        }
+        for p in [1u8, 2] {
+            let want = h1_pyramid_element(p as usize, PyramidBasisType::default());
+            bit_eq(ElementType::Pyramid5, p, want.as_ref());
         }
     }
 

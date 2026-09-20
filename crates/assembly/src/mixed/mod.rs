@@ -710,7 +710,18 @@ where
 
     for e in mesh.elem_iter() {
         let elem_type = mesh.element_type(e);
-        let h1_ref = crate::assembler::ref_elem_vol(elem_type, h1_space.order());
+        // D439: the H¹ column space's dofs are numbered in MFEM
+        // `H1_FECollection` slot order — dispatch through the space's own
+        // element (`h1_field_element` with the space's pyramid family), not
+        // the legacy equispaced `assembler::ref_elem_vol`, whose simplex
+        // lattice disagrees with the space's numbering from p = 3 on
+        // (`TriPk(3)` vs `H1TriPk(3)`: 6/10 slots, the D157/D181 fork).
+        // p ≤ 2 is bit-identical either way (pinned in d31).
+        let h1_ref = fem_space::ref_elem::h1_field_element(
+            elem_type,
+            h1_space.order(),
+            h1_space.pyramid_basis(),
+        );
         let n_h1 = h1_ref.n_dofs();
 
         let nd_ref = ref_elem_vec(elem_type, nd_space.order(), SpaceType::HCurl)

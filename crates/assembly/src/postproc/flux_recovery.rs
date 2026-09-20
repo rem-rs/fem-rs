@@ -58,9 +58,11 @@ pub trait FluxRecovery {
 
 /// D364: delegated to the single source of truth.  Arm-for-arm identical to
 /// the historical local table: H¹-slot simplices (D185/D157/D202), the legacy
-/// `[-1,1]²` `QuadQ1`/`QuadQ2` frames, and the D353-sweep hex/prism arms where
-/// basis and geometry share one frame (`HexQk`/`PrismPk`, `o.max(1)`).
-/// Same panic set.
+/// `[-1,1]²` `QuadQ1`/`QuadQ2` frames, the D353-sweep hex/prism arms where
+/// basis and geometry share one frame (`HexQk`/`PrismPk`, `o.max(1)`), and —
+/// D365 — the pyramid arm: the H¹ pyramid element of the default family
+/// (Fuentes, entity slot order), the same slots `DofManager::build_pyramid_pk`
+/// numbers the H¹ space's `element_dofs` in.  Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 => {
@@ -73,6 +75,10 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
         ElementType::Prism6 | ElementType::Prism15 => {
             fem_space::ref_elem::equispaced_prism(order.max(1))
         }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => fem_space::ref_elem::h1_pyramid_slots(
+            order.max(1),
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -90,6 +96,18 @@ fn is_simplex(elem_type: ElementType) -> bool {
 /// - **Hex8/Hex20**: the isoparametric `HexQk` geometry, i.e. the *same*
 ///   element family the solution basis uses, so the basis and the geometry
 ///   share one reference frame.
+/// - **Prism6/Prism15**: the isoparametric `PrismPk` geometry (same family
+///   argument as the hex).
+/// - **Pyramid5/Pyramid13** (D365): delegated to
+///   [`fem_mesh::transformation::element_jacobian_at`], the mesh crate's
+///   single source of truth for geometry Jacobians — it applies the straight
+///   pyramid's `PYR_P1_SLOT_VERTEX` slot permutation (D331: `PyramidPk(1)`'s
+///   layer slots carry the shape functions of MFEM vertices `0,1,3,2,4`) and
+///   evaluates a curved pyramid (`geom_order > 1`) with its own order-`g`
+///   Fuentes element (D334), the same delegation
+///   `postproc/grid_function.rs::element_jacobian` already makes.  The
+///   straight-pyramid geometry and the Fuentes solution basis live on the same
+///   unit-pyramid reference domain, so one `xi` means the same point for both.
 /// - **Anything else**: the P1 corner-difference map.
 ///
 /// D353 sweep.  The last arm used to be the only one for 3-D non-simplex
@@ -153,6 +171,15 @@ fn geom_jacobian<M: MeshTopology>(
         let (j, det, _xp) =
             crate::vector_assembler::isoparametric_jacobian(mesh, geo_nodes, &geo, xi, 3);
         (j, det)
+    } else if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
+        // D365: the pyramid geometry is *not* the solution basis family (the
+        // straight-pyramid map is the `PyramidPk(1)` layer-slot frame, a
+        // curved one its own order-`g` Fuentes element) — exactly the cases
+        // the mesh crate's `element_jacobian_at` already encodes.  Reuse it
+        // instead of a fourth hand-rolled pyramid Jacobian.
+        let (j, _xp) = fem_mesh::transformation::element_jacobian_at(mesh, element, xi, dim);
+        let det = j.determinant();
+        (j, det)
     } else {
         let x0 = mesh.node_coords(nodes[0]);
         let mut j = DMatrix::<f64>::zeros(dim, dim);
@@ -167,6 +194,70 @@ fn geom_jacobian<M: MeshTopology>(
 // ─── Implementation for DiffusionIntegrator ──────────────────────────────────
 
 use crate::standard::DiffusionIntegrator;
+
+/// The flux-vector length → FE order inference behind
+/// [`FluxRecovery::compute_flux_energy`] (MFEM: `order =
+/// 2*fluxelem.GetOrder(); IntRules.Get(geom, order)` — the flux space has the
+/// same order as the solution space, so `n_flux_dofs = flux_diff.len()/dim`
+/// pins it).
+///
+/// D366: the table used to stop at p = 3 and fall through to a **silent**
+/// `_ => 1` — right by accident at p = 1 only, and for any higher-order flux
+/// space it read an order-1 basis against an order-p flux vector (the D353
+/// defect class).  The arms now cover every H¹ cell type through p = 5
+/// (pyramids, the Fuentes `h1_pyramid_element` counts, through p = 3), and
+/// the fallback is no longer silent: a `debug_assert!` names the unmapped
+/// `(element_type, n_flux_dofs)` pair in debug builds while release builds
+/// keep the conservative order-1 quadrature.
+fn infer_fe_order(elem_type: ElementType, n_flux_dofs: usize) -> u8 {
+    match (elem_type, n_flux_dofs) {
+        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => 1,
+        (ElementType::Tri3, 6) | (ElementType::Tri6, 6) => 2,
+        (ElementType::Tri3, 10) | (ElementType::Tri6, 10) => 3,
+        (ElementType::Tri3, 15) | (ElementType::Tri6, 15) => 4,
+        (ElementType::Tri3, 21) | (ElementType::Tri6, 21) => 5,
+        (ElementType::Quad4, 4) => 1,
+        (ElementType::Quad4, 9) => 2,
+        (ElementType::Quad4, 16) => 3,
+        (ElementType::Quad4, 25) => 4,
+        (ElementType::Quad4, 36) => 5,
+        // D353 sweep: the `_ => 1` fallback happened to be right for the
+        // hex only at p = 1 (HexQk(1) has 8 DOFs); at p >= 2 the estimator
+        // would read an 8-DOF basis against a 27- (or 64-) DOF flux vector.
+        (ElementType::Hex8 | ElementType::Hex20, 8) => 1,
+        (ElementType::Hex8 | ElementType::Hex20, 27) => 2,
+        (ElementType::Hex8 | ElementType::Hex20, 64) => 3,
+        (ElementType::Hex8 | ElementType::Hex20, 125) => 4,
+        (ElementType::Hex8 | ElementType::Hex20, 216) => 5,
+        (ElementType::Prism6 | ElementType::Prism15, 6) => 1,
+        (ElementType::Prism6 | ElementType::Prism15, 18) => 2,
+        (ElementType::Prism6 | ElementType::Prism15, 40) => 3,
+        (ElementType::Tet4, 4) => 1,
+        (ElementType::Tet4, 10) => 2,
+        (ElementType::Tet4, 20) => 3,
+        (ElementType::Tet4, 35) => 4,
+        (ElementType::Tet4, 56) => 5,
+        // D365/D366: the Fuentes H¹ pyramid element (`p(p²+3)+1` DOFs — the
+        // counts pinned by `fem_element::lagrange::pyramid`'s
+        // `pyramid_basis_type_family_map`: 5 / 15 / 37 / 77 at p = 1..4).
+        // NOTE: the Bergot opt-out counts differently (14/30 at p = 2/3); a
+        // Bergot-pyramid flux space of order ≥ 2 hits the debug_assert arm.
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 5) => 1,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 15) => 2,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 37) => 3,
+        (ElementType::Pyramid5 | ElementType::Pyramid13, 77) => 4,
+        other => {
+            debug_assert!(
+                false,
+                "infer_fe_order: unmapped (element_type, n_flux_dofs) = \
+                 ({:?}, {}) — add an arm; conservatively using quadrature \
+                 order 2 (= 2·1)",
+                other.0, other.1
+            );
+            1
+        }
+    }
+}
 
 impl FluxRecovery for DiffusionIntegrator<f64> {
     fn compute_element_flux<M: MeshTopology, S: FESpace<Mesh = M>>(
@@ -210,7 +301,33 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
                 vec[j] = s;
             }
             let (jac, _) = geom_jacobian(mesh, element, nodes, xi, dim, elem_type);
-            let j_inv = jac.try_inverse().unwrap_or_default();
+            // D365: a pyramid's reference map collapses at its apex — `det J`
+            // vanishes there (the base plane maps to a single point) — and the
+            // Fuentes H¹ flux DOF sits exactly on that point.  MFEM's own
+            // pyramid transformation has the same singularity; the physical
+            // gradient, however, has a finite limit at the apex, so resample
+            // once at a point pulled 10% toward the reference-domain centroid
+            // (an interior point for every supported frame) and invert that —
+            // exact for affine fields, first-order for the estimator.  The
+            // simplex/tensor frames are regular everywhere, so this arm is
+            // never reached for them.
+            let j_inv = match jac.try_inverse() {
+                Some(inv) => inv,
+                None => {
+                    let pull = 0.1;
+                    let centroid = 1.0 / (dim as f64 + 1.0);
+                    let xi_in: Vec<f64> =
+                        xi.iter().map(|&c| (1.0 - pull) * c + pull * centroid).collect();
+                    let (jac_in, _) = geom_jacobian(mesh, element, nodes, &xi_in, dim, elem_type);
+                    jac_in.try_inverse().unwrap_or_else(|| {
+                        panic!(
+                            "compute_element_flux: singular geometry Jacobian at \
+                             a flux dof and its pulled interior resample \
+                             (element_type={elem_type:?}, xi={xi:?})"
+                        )
+                    })
+                }
+            };
             for d in 0..dim {
                 let mut s = 0.0;
                 for j in 0..dim {
@@ -237,26 +354,7 @@ impl FluxRecovery for DiffusionIntegrator<f64> {
         // estimator's flux FES is built from the same H1_FECollection).  The
         // FE order is inferred from the flux_diff layout (n_dofs per component).
         let n_flux_dofs = if dim > 0 { flux_diff.len() / dim } else { 0 };
-        let fe_order = match (elem_type, n_flux_dofs) {
-            (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => 1,
-            (ElementType::Tri3, 6) | (ElementType::Tri6, 6) => 2,
-            (ElementType::Tri3, 10) | (ElementType::Tri6, 10) => 3,
-            (ElementType::Quad4, 4) => 1,
-            (ElementType::Quad4, 9) => 2,
-            // D353 sweep: the `_ => 1` fallback happened to be right for the
-            // hex only at p = 1 (HexQk(1) has 8 DOFs); at p >= 2 the estimator
-            // would read an 8-DOF basis against a 27- (or 64-) DOF flux vector.
-            (ElementType::Hex8 | ElementType::Hex20, 8) => 1,
-            (ElementType::Hex8 | ElementType::Hex20, 27) => 2,
-            (ElementType::Hex8 | ElementType::Hex20, 64) => 3,
-            (ElementType::Prism6 | ElementType::Prism15, 6) => 1,
-            (ElementType::Prism6 | ElementType::Prism15, 18) => 2,
-            (ElementType::Prism6 | ElementType::Prism15, 40) => 3,
-            (ElementType::Tet4, 4) => 1,
-            (ElementType::Tet4, 10) => 2,
-            (ElementType::Tet4, 20) => 3,
-            _ => 1,
-        };
+        let fe_order = infer_fe_order(elem_type, n_flux_dofs);
         // MFEM: order = 2 * fluxelem.GetOrder(); IntRules.Get(geom, order).
         let quad_order = (fe_order as u8) * 2;
         let ref_elem = ref_elem_vol(elem_type, fe_order as u8);
@@ -550,6 +648,49 @@ mod d202_high_order_tables {
             local.eval_basis(&[0.25, 0.3, 0.2], &mut phi);
             let sum: f64 = phi.iter().sum();
             assert!((sum - 1.0).abs() < 1e-10, "tet partition of unity at order {o}: {sum}");
+        }
+    }
+}
+
+// ─── D366: fe_order inference covers every cell type × order ────────────────
+#[cfg(test)]
+mod d366_fe_order_table {
+    //! `compute_flux_energy` infers the FE order from the flux-vector length.
+    //! For every H¹ cell type and every order the flux space can hand over
+    //! (p ≤ 5; pyramids p ≤ 3, the Fuentes counts measured through
+    //! `h1_pyramid_element`), the inference must resolve that length back to
+    //! the same order — otherwise the energy integral reads an order-1 basis
+    //! against an order-p flux vector (the D353 defect class).
+
+    use super::infer_fe_order;
+    use fem_element::lagrange::PyramidBasisType;
+    use fem_mesh::element_type::ElementType;
+    use fem_space::ref_elem::h1_field_element;
+
+    #[test]
+    fn every_cell_type_order_resolves_back_from_its_n_dofs() {
+        let pyr = PyramidBasisType::default();
+        // (element type, orders mapped by the table)
+        let cases: &[(ElementType, std::ops::RangeInclusive<u8>)] = &[
+            (ElementType::Tri3, 1..=5),
+            (ElementType::Tri6, 1..=5),
+            (ElementType::Quad4, 1..=5),
+            (ElementType::Hex8, 1..=5),
+            (ElementType::Prism6, 1..=3),
+            (ElementType::Prism15, 1..=3),
+            (ElementType::Tet4, 1..=5),
+            (ElementType::Pyramid5, 1..=4),
+            (ElementType::Pyramid13, 1..=4),
+        ];
+        for (et, orders) in cases {
+            for p in orders.clone() {
+                let n = h1_field_element(*et, p, pyr).n_dofs();
+                assert_eq!(
+                    infer_fe_order(*et, n),
+                    p,
+                    "{et:?}: n_dofs({p}) = {n} did not resolve back to order {p}"
+                );
+            }
         }
     }
 }

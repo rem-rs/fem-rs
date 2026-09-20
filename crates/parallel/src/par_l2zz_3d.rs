@@ -12,21 +12,22 @@ use crate::par_mesh::ParallelMesh;
 use crate::par_space::ParallelFESpace;
 use crate::par_vector::ParVector;
 
-fn ref_elem_vol(
+/// D438: delegated to the single source of truth — the per-space dispatch
+/// [`fem_space::ref_elem::field_element_for_space`], the element the passed
+/// space's own DOF coefficients live in (H¹ spaces: MFEM `H1_FECollection`
+/// semantics; L² spaces: `L2_FECollection`).  The historical local table was
+/// the pre-D157 lattice: it agreed with the H¹ dispatch at tet p ≤ 2 (pinned
+/// by `d438_par_l2zz_*` below) and **forked at p = 3**, where it handed back
+/// the equispaced `TetPk(3)` while the H¹ space numbers its dofs in
+/// `H1TetPk(3)`'s Gauss-Lobatto entity order — a p ≥ 3 gradient sampled
+/// against the wrong slots.  The Tri arms of the old table were unreachable
+/// (this estimator asserts `dim == 3`; triangle cells cannot be volume cells).
+fn ref_elem_vol<S: FESpace>(
+    space: &S,
     elem_type: ElementType,
     order: u8,
 ) -> Box<dyn fem_element::ReferenceElement> {
-    use fem_element::lagrange::{TetP1, TetP2, TriP1};
-    use fem_element::lagrange::factory::{TetPk, TriPk};
-    match (elem_type, order) {
-        (ElementType::Tri3, 1) | (ElementType::Tri6, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) | (ElementType::Tri6, 2) => Box::new(TriPk::new(2)),
-        (ElementType::Tri3, 3) | (ElementType::Tri6, 3) => Box::new(TriPk::new(3)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        (ElementType::Tet4, 3) => Box::new(TetPk::new(3)),
-        _ => panic!("ref_elem_vol: unsupported (elem_type={elem_type:?}, order={order})"),
-    }
+    fem_space::ref_elem::field_element_for_space(space, elem_type, order)
 }
 
 fn geom_jacobian<M: MeshTopology>(
@@ -118,7 +119,7 @@ where
         let nodes = mesh.element_nodes(e);
         let etype = mesh.element_type(e);
         let order = space.order();
-        let ref_elem = ref_elem_vol(etype, order);
+        let ref_elem = ref_elem_vol(space, etype, order);
         let nldofs = ref_elem.n_dofs();
         let elem_dofs = space.element_dofs(e);
 
@@ -308,6 +309,31 @@ mod tests {
     use crate::par_partition::partition_mesh;
     use fem_mesh::Mesh;
     use fem_space::{H1Space, HDivSpace, L2Space};
+
+    /// D438: on the low orders the old local table served, the delegated
+    /// dispatch must hand back bit-identical dof layouts (tet p = 1/2: the
+    /// fixed-order `TetP1`/`TetP2` arms, where every family coincides).
+    #[test]
+    fn d438_par_l2zz_ref_elem_low_orders_bitwise_unchanged() {
+        let mesh = Mesh::<3>::unit_cube_tet(1);
+        for p in [1u8, 2] {
+            let h1 = H1Space::new(mesh.clone(), p);
+            let got = ref_elem_vol(&h1, ElementType::Tet4, p);
+            let want: Box<dyn fem_element::ReferenceElement> = match p {
+                1 => Box::new(fem_element::lagrange::TetP1),
+                _ => Box::new(fem_element::lagrange::TetP2),
+            };
+            assert_eq!(got.n_dofs(), want.n_dofs(), "tet p={p}: n_dofs");
+            let a = got.dof_coords();
+            let b = want.dof_coords();
+            assert!(
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.iter().zip(y.iter()).all(|(u, v)| u.to_bits() == v.to_bits())),
+                "tet p={p}: dof_coords must be bit-identical"
+            );
+        }
+    }
 
     #[test]
     fn l2_zz_3d_linear_solution_small_error() {

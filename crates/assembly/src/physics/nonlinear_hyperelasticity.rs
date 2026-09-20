@@ -32,11 +32,7 @@
 use nalgebra::DMatrix;
 use nalgebra::linalg::SVD;
 
-use fem_element::{
-    ReferenceElement,
-    lagrange::{TriP1, TetP1, TetP2},
-    lagrange::factory::TriPk,
-};
+use fem_element::ReferenceElement;
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{element_type::ElementType, topology::MeshTopology};
 use fem_space::fe_space::FESpace;
@@ -1013,39 +1009,49 @@ impl<M: MeshTopology> NonlinearForm for HyperelasticityForm<M> {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ref_elem_vol(et: ElementType, order: u8) -> Box<dyn ReferenceElement> {
-    use fem_element::lagrange::quad::*;
+    use fem_element::lagrange::quad::QuadQ4;
     match (et, order) {
-        (ElementType::Tri3, 1) => Box::new(TriP1),
-        (ElementType::Tri3, 2) => Box::new(TriPk::new(2)),
-        // D186: the displacement dof table is the H¹ space's — MFEM
-        // `H1_TriangleElement` (Gauss-Lobatto, entity order) from p = 3 on;
-        // the equispaced `factory::TriPk` agrees only at p ≤ 2 (tet twin
-        // fixed by D157).
-        (ElementType::Tri3, 3) => Box::new(fem_element::lagrange::H1TriPk::new(3)),
-        (ElementType::Tet4, 1) => Box::new(TetP1),
-        (ElementType::Tet4, 2) => Box::new(TetP2),
-        // D157: the element pairs with the H¹ space's tet dof order —
-        // MFEM `H1_TetrahedronElement` (Gauss-Lobatto, entity order).
-        (ElementType::Tet4, 3) => Box::new(fem_element::lagrange::H1TetPk::new(3)),
-        // D202: orders >= 4 stay on the same H¹ Gauss-Lobatto slots as the
-        // order-3 arms — MFEM `H1_TriangleElement`/`H1_TetrahedronElement`
-        // (entity order) at every p; the assembler's space dispatch
-        // (`assembler.rs::ref_elem_vol_h1`) makes the same choice, and the
-        // D202 unit test below pins slot equality with it.
-        (ElementType::Tri3, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TriPk::new(o as usize))
-        }
-        (ElementType::Tet4, o) if o >= 4 => {
-            Box::new(fem_element::lagrange::H1TetPk::new(o as usize))
-        }
-        // Quadrilateral elements (straight-sided or curved via isoparametric mapping)
-        (ElementType::Quad4, 1) => Box::new(QuadQ1),
-        (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        // order >= 3: GLL nodes on [0,1]^2 (MFEM H1 default); QuadQ3 is
-        // equidistant [-1,1]^2 and NOT MFEM-compatible at p=3.
-        (ElementType::Quad4, 3) => Box::new(fem_element::lagrange::QuadQk::new(3)),
+        // D438 quad pin — the legacy `[-1,1]²` frame is load-bearing in this
+        // file: `ref_elem_geom(et) = ref_elem_vol(et, 1)` couples the geometry
+        // Jacobian (and `QuadQ1`/`QuadQ2`' own quadrature rules) to the same
+        // arms, so the basis frame cannot be switched one arm at a time.
+        // `fixed_order_tensor` is the true-source module's own legacy family;
+        // `QuadQ4` (25 dofs, MFEM entity slot order) has no true-source
+        // constructor and stays hand-named for the same frame reason.
+        (ElementType::Quad4, 1) => fem_space::ref_elem::fixed_order_tensor(et, 1),
+        (ElementType::Quad4, 2) => fem_space::ref_elem::fixed_order_tensor(et, 2),
+        // Quad p = 3 keeps the historical `QuadQk(3)` arm (the [0,1]² GLL
+        // frame) — routed through the dispatch, which makes the same choice.
+        (ElementType::Quad4, 3) => fem_space::ref_elem::h1_field_element(
+            et,
+            order,
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
         (ElementType::Quad4, 4) => Box::new(QuadQ4),
-        _ => panic!("hyperelasticity ref_elem_vol: unsupported ({et:?}, {order})"),
+        // Quad p ≥ 5 stays unsupported (the historical panic set): the field
+        // would land on the `[0,1]²` GLL frame while `ref_elem_geom` stays on
+        // `[-1,1]²` — a desynced sub-parametric path.  Migrating the whole
+        // quad geometry frame is its own debt (recorded D454).
+        (ElementType::Quad4, _) => {
+            panic!("hyperelasticity ref_elem_vol: unsupported ({et:?}, {order})")
+        }
+        // D438: everything else delegated to the single source of truth —
+        // the H¹ field dispatch.  On the previously supported set it is
+        // arm-for-arm identical: tri/tet `TriP1`/`TriPk(2)`/`H1TriPk`/
+        // `TetP1`/`TetP2`/`H1TetPk` at p ≤ 3 and the D202 `H1TriPk`/`H1TetPk`
+        // arms at p ≥ 4 (pinned bit-for-bit by `d438_hyper_*` below and the
+        // D202 slot-equality test), `QuadQk(3)` at quad p = 3, `H1PrismPk`
+        // prisms and the Fuentes `h1_pyramid_element` pyramids.  Extensions
+        // outside that set: hex p ≥ 2 assembles on `HexQk` (the `[-1,1]³`
+        // frame of the historical `HexQ1` arm, so `ref_elem_geom(Hex8)` stays
+        // frame-consistent); order 0 maps to the P0 elements (no caller in
+        // this file reaches order 0 — the `l2_order == 0` consumer is
+        // special-cased before the table).
+        _ => fem_space::ref_elem::h1_field_element(
+            et,
+            order,
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
     }
 }
 
@@ -1429,5 +1435,57 @@ mod tests {
             let sum: f64 = phi.iter().sum();
             assert!((sum - 1.0).abs() < 1e-10, "tet partition of unity at order {o}: {sum}");
         }
+    }
+
+    // ─── D438: delegation pin ────────────────────────────────────────────────
+    /// After delegating the table to `fem_space::ref_elem::h1_field_element`,
+    /// the previously supported arms must stay bit-for-bit identical — pinned
+    /// here against the concrete families the old arms constructed (the
+    /// tri/tet ≥ 4 arms are pinned against the space dispatch by the D202
+    /// test above).  The quad p = 1/2/4 arms stay on the legacy `[-1,1]²`
+    /// frame by design (`ref_elem_geom` couples to them).
+    #[test]
+    fn d438_delegated_table_is_bitwise_the_old_arms_on_the_supported_set() {
+        use fem_element::lagrange::quad::{QuadQ1, QuadQ2, QuadQ4};
+        use fem_element::lagrange::factory::QuadQk;
+        use fem_element::lagrange::{TetP1, TetP2, TriP1};
+        let coords_bit_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| {
+                    x.len() == y.len()
+                        && x.iter().zip(y.iter()).all(|(u, v)| u.to_bits() == v.to_bits())
+                })
+        };
+        let bit_eq = |et: ElementType, p: u8, want: &dyn ReferenceElement| {
+            let e = ref_elem_vol(et, p);
+            assert_eq!(e.n_dofs(), want.n_dofs(), "{et:?} p={p}: n_dofs");
+            assert!(
+                coords_bit_eq(&e.dof_coords(), &want.dof_coords()),
+                "{et:?} p={p}: dof_coords must be bit-identical"
+            );
+        };
+        bit_eq(ElementType::Tri3, 1, &TriP1);
+        bit_eq(ElementType::Tri3, 2, &fem_element::lagrange::factory::TriPk::new(2));
+        bit_eq(ElementType::Tri3, 3, &fem_element::lagrange::H1TriPk::new(3));
+        bit_eq(ElementType::Tet4, 1, &TetP1);
+        bit_eq(ElementType::Tet4, 2, &TetP2);
+        bit_eq(ElementType::Tet4, 3, &fem_element::lagrange::H1TetPk::new(3));
+        // Quad p = 1/2: the pinned legacy `[-1,1]²` arms.
+        bit_eq(ElementType::Quad4, 1, &QuadQ1);
+        bit_eq(ElementType::Quad4, 2, &QuadQ2);
+        // Quad p = 4: the pinned legacy `QuadQ4` arm.
+        bit_eq(ElementType::Quad4, 4, &QuadQ4);
+        // Quad p = 3: historical `QuadQk(3)` (the [0,1]² GLL frame).
+        bit_eq(ElementType::Quad4, 3, &QuadQk::new(3));
+        // Hex p = 1: historical `HexQ1`.
+        bit_eq(ElementType::Hex8, 1, &fem_element::lagrange::HexQ1);
+        // Prism: historical `H1PrismPk` arm.
+        bit_eq(ElementType::Prism6, 2, &fem_element::lagrange::H1PrismPk::new(2));
+        // Pyramid: historical Fuentes arm.
+        let want = fem_element::lagrange::h1_pyramid_element(
+            2,
+            fem_element::lagrange::PyramidBasisType::default(),
+        );
+        bit_eq(ElementType::Pyramid5, 2, want.as_ref());
     }
 }
