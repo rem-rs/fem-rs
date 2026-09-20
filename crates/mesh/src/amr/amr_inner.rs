@@ -1393,11 +1393,13 @@ fn avg4(a: &[f64; 2], b: &[f64; 2], c: &[f64; 2], d: &[f64; 2]) -> [f64; 2] {
 /// refinement path.
 ///
 /// Tet4 → 8 Tet4, Hex8 → 8 Hex8, Hex20 → 8 Hex8, Hex27 → 8 Hex8,
-/// Prism6 → 8 Prism6, Pyramid5 → 16 Tet4.
+/// Prism6 → 8 Prism6, Pyramid5 → 6 Pyramid5 + 4 Tet4 (D472: MFEM's
+/// `UniformRefinement3D_base` PYRAMID branch — the child mesh is mixed).
 ///
 /// A **mixed**-element mesh (`elem_types` set) takes the `refine_mixed_3d`
-/// path instead, where a Pyramid5 follows MFEM's
-/// `UniformRefinement3D_base` PYRAMID branch: 6 Pyramid5 + 4 Tet4 children.
+/// path, where a Pyramid5 follows the same MFEM PYRAMID branch;
+/// `refine_pyramid5_uniform` delegates a pure Pyramid5 mesh to that very
+/// generator, so both paths share one implementation.
 pub fn refine_uniform_3d(mesh: &Mesh<3>) -> Mesh<3> {
     let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
     // For mixed-element meshes, use per-element-type refinement with shared edge map.
@@ -1483,10 +1485,14 @@ vertex_parents: vec![],
                 rebuild_3d_boundary(&mut result, mesh, None);
             }
         }
-        // Pyramid meshes have linear vertex coordinates (only the Hex8,
-        // Prism6 and Tet4 kernels carry curved geometry), so the
-        // coordinate-keyed rebuild is exact.
-        //
+        // Pyramid5: `refine_pyramid5_uniform` delegates to `refine_mixed_3d`,
+        // which already rebuilt the boundary faces itself — topologically,
+        // from its own midpoint / base-quad-center maps, in the exact MFEM
+        // `new_boundary` order (D472).  A second, coordinate-keyed rebuild
+        // here would be redundant for straight parents and unsolvable for a
+        // curved one (the old pure path panicked on a quad boundary face for
+        // exactly this reason).
+        ElementType::Pyramid5 => {}
         // Prism6: a *curved* mesh's new vertices are geometry-dof picks — no
         // coordinate lookup can find them — so the refinement's own topological
         // maps resolve the child boundary faces instead.  Straight-sided prism
@@ -2107,6 +2113,33 @@ fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
                 for _ in 0..4 { new_tags.push(tag); new_types.push(ElementType::Tet4); }
             }
             _ => {}
+        }
+    }
+
+    // Boundary-only edges: a synthetic boundary table may split a quad face
+    // into two triangles along a diagonal that is not an element edge (a
+    // fem-rs fixture convention; MFEM 4.10 refuses such meshes outright —
+    // STable3D abort in GetElementToFaceTable).  The topological boundary
+    // rebuild below needs a midpoint for *every* boundary edge, so allocate
+    // one per boundary-only edge, after all MFEM-space vertices, in
+    // boundary-walk order.  No-op for MFEM-conforming meshes, whose boundary
+    // edges are all element edges.
+    for f in 0..mesh.n_faces() {
+        let fs = mesh.bface_nodes(f as FaceId);
+        let n = fs.len();
+        if n != 3 && n != 4 { continue; }
+        for k in 0..n {
+            let key = edge_key(fs[k], fs[(k + 1) % n]);
+            em.entry(key).or_insert_with(|| {
+                let xa = mesh.coords_of(fs[k]);
+                let xb = mesh.coords_of(fs[(k + 1) % n]);
+                coords.extend_from_slice(&[
+                    0.5 * (xa[0] + xb[0]),
+                    0.5 * (xa[1] + xb[1]),
+                    0.5 * (xa[2] + xb[2]),
+                ]);
+                let id = next_node; next_node += 1; id
+            });
         }
     }
 
@@ -7877,13 +7910,33 @@ pub(crate) fn local_faces_pyramid_tri() -> [(usize, usize, usize); 4] {
 
 // ─── Pyramid5 uniform refinement ──────────────────────────────────────────────
 
-/// Uniformly refine Pyramid5 → 16 Tet4 (split along diagonal (0,2), each tet → 8).
+/// Uniformly refine a Pyramid5 mesh following MFEM's `UniformRefinement3D_base`
+/// PYRAMID branch (mesh.cpp:10766-10855, oracle `tmp/d472/probe_pyr*.out`,
+/// D472): each parent → 6 Pyramid5 + 4 Tet4 children, so the child mesh is
+/// *mixed* (`elem_types` set).  This replaces fem-rs's own 16-Tet4 split,
+/// which no MFEM version produces.
+///
+/// Vertex numbering is MFEM's tet-free path: edge-midpoint vertices
+/// `oedge + e` in first-touch `pyr_t::Edges` order, then the base-quad center
+/// `oface + f2qf` per parent; a pure pyramid parent has no TETRAHEDRON
+/// geometry, so the `e2v` re-sort does not apply (mesh.cpp:10452).  Rather
+/// than duplicating that generator, this delegates to `refine_mixed_3d`,
+/// whose pyramid branch IS the MFEM implementation shared with the mixed
+/// fichera path (D114) — one generator for both routes.
 pub fn refine_pyramid5_uniform(
     mesh: &Mesh<3>,
     marked: &[ElemId],
 ) -> (Mesh<3>, Vec<HangingNodeConstraint>) {
-    let (m, c, _, _, _, _) = refine_nonconforming_pyramid_internal(mesh, marked, None);
-    (m, c)
+    if marked.is_empty() {
+        return (mesh.clone(), Vec::new());
+    }
+    assert_eq!(
+        marked.len(),
+        mesh.n_elems(),
+        "refine_pyramid5_uniform: uniform refinement marks every element (partial \
+         marking needs refine_nonconforming_pyramid)"
+    );
+    (refine_mixed_3d(mesh), Vec::new())
 }
 
 // ─── Pyramid5 non-conforming refinement ─────────────────────────────────────
@@ -9232,10 +9285,15 @@ vertex_parents: vec![],
         let v0 = pyramid5_vol(&mesh, 0); assert!((v0-1.0/3.0).abs() < 1e-14);
         let all: Vec<ElemId> = (0..mesh.n_elems() as ElemId).collect();
         let (fine, c) = refine_pyramid5_uniform(&mesh, &all);
-        assert_eq!(fine.n_elems(), 16); assert!(c.is_empty());
-        let vs: f64 = (0..fine.n_elems()).map(|e| { let ns=fine.elem_nodes(e as ElemId);
+        // D472: MFEM `UniformRefinement3D_base` PYRAMID branch — 6 Pyramid5 +
+        // 4 Tet4 children (oracle tmp/d472/probe_pyr1.out), not 16 Tet4.
+        assert_eq!(fine.n_elems(), 10); assert!(c.is_empty());
+        assert_eq!((0..fine.n_elems()).filter(|&e| fine.element_type_at(e as ElemId) == ElementType::Pyramid5).count(), 6);
+        let vs: f64 = (0..fine.n_elems()).map(|e| { let eid = e as ElemId; let ns=fine.elem_nodes(eid);
             let c2=|i|{let off=ns[i]as usize*3;[fine.coords[off],fine.coords[off+1],fine.coords[off+2]]};
-            tet_signed_vol(&c2(0),&c2(1),&c2(2),&c2(3)).abs() }).sum();
+            if fine.element_type_at(eid) == ElementType::Pyramid5 {
+                tet_signed_vol(&c2(0),&c2(1),&c2(2),&c2(4)).abs()+tet_signed_vol(&c2(2),&c2(3),&c2(0),&c2(4)).abs()
+            } else { tet_signed_vol(&c2(0),&c2(1),&c2(2),&c2(3)).abs() } }).sum();
         assert!((vs - v0).abs() < 1e-12);
     }
 
@@ -9249,7 +9307,8 @@ vertex_parents: vec![],
             vertex_parents: vec![],
             face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![], nc_vertex_view: None, geometry: None };
         let fine = refine_uniform_3d(&mesh);
-        assert_eq!(fine.n_elems(), 16); fine.check().unwrap();
+        // D472: MFEM PYRAMID branch — 6 Pyramid5 + 4 Tet4 children per parent.
+        assert_eq!(fine.n_elems(), 10); fine.check().unwrap();
     }
 
     fn make_pyramid_mesh() -> Mesh<3> {

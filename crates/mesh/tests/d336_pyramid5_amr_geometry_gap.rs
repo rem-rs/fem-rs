@@ -2,11 +2,11 @@
 //!
 //! `amr_inner::refine_nonconforming_pyramid_internal` builds its 16 Tet4
 //! children with `Mesh::uniform(..)` — `geometry: None` — and derives every new
-//! vertex from `mesh.coords_of(..)`, i.e. from the **vertex** table.  The
-//! `refine_uniform_3d` tail comment still claims "Pyramid meshes have linear
-//! vertex coordinates (only the Hex8, Prism6 and Tet4 kernels carry curved
-//! geometry)", which stopped being true when `Mesh::set_curvature_pyramid5`
-//! gained its Fuentes order-`g` table.
+//! vertex from `mesh.coords_of(..)`, i.e. from the **vertex** table.  Since
+//! D472 the *uniform* path (`refine_pyramid5_uniform` → `refine_mixed_3d`)
+//! follows MFEM's PYRAMID branch instead (6 Pyramid5 + 4 Tet4, straight
+//! children, `geometry: None` as well) — either way every new vertex comes
+//! from the vertex table, and the curved gap below is untouched.
 //!
 //! Consequences for a **curved** pyramid parent, both measured below:
 //! * `geom_order()` of the refined mesh is 1 (the curvature is silently dropped);
@@ -18,7 +18,7 @@
 //! same shape as the hex one: create each new node by evaluating the parent's
 //! isoparametric map at that node's *reference* position (all of them lie on
 //! parent edges / the parent's base-quad center, so the positions are known in
-//! the local slot frame), and attach an order-`g` geometry table to the Tet4
+//! the local slot frame), and attach an order-`g` geometry table to the
 //! children.  **Not implemented in this round** — the numbers below are the
 //! gap's exact size, and the straight-path behaviour is pinned so a future fix
 //! cannot regress it.
@@ -79,15 +79,17 @@ fn volume(mesh: &Mesh<3>) -> f64 {
     vol
 }
 
-/// Straight pyramids refine correctly today: 16 Tet4, no geometry table needed,
-/// same volume (this is what the existing AMR regression pins).
+/// Straight pyramids refine geometrically exact: since D472 the uniform path
+/// follows MFEM's PYRAMID branch — 6 Pyramid5 + 4 Tet4 children (oracle
+/// `tmp/d472/probe_pyr1.out`); it used to be fem-rs's own 16-Tet4 split.  No
+/// geometry table is needed, same volume (this is what the AMR regression pins).
 #[test]
 fn d336_straight_pyramid_refinement_is_geometrically_exact() {
     let mesh = unit_pyramid();
     let before = volume(&mesh);
     let refined = refine_uniform_3d(&mesh);
-    assert_eq!(refined.n_elems(), 16);
-    assert_eq!(refined.element_type(0), ElementType::Tet4);
+    assert_eq!(refined.n_elems(), 10);
+    assert_eq!(refined.element_type(0), ElementType::Pyramid5);
     assert!(refined.geometry.is_none(), "straight children need no geometry table");
     let after = volume(&refined);
     eprintln!("D336 straight: parent = {before:.15}, children = {after:.15}");
@@ -114,8 +116,10 @@ fn d336_curved_pyramid_loses_its_geometry() {
     assert!((parent - 0.222222222222222).abs() < 1e-12, "parent volume {parent:.15}");
 
     let refined = refine_uniform_3d(&mesh);
-    assert_eq!(refined.n_elems(), 16);
-    assert_eq!(refined.element_type(0), ElementType::Tet4);
+    // D472: the uniform path now produces MFEM's 6 Pyramid5 + 4 Tet4 children
+    // (still straight-sided); the curved-geometry gap below is unchanged.
+    assert_eq!(refined.n_elems(), 10);
+    assert_eq!(refined.element_type(0), ElementType::Pyramid5);
     let child = volume(&refined);
 
     eprintln!(
