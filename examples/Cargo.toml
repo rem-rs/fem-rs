@@ -333,6 +333,10 @@ name = "nurbs_curveint"
 path = "../miniapps/nurbs/nurbs_curveint.rs"
 
 [[example]]
+name = "nurbs_naca_cmesh"
+path = "../miniapps/nurbs/nurbs_naca_cmesh.rs"
+
+[[example]]
 name = "miniapp_gridfunction_bounds"
 path = "../miniapps/tools/gridfunction_bounds.rs"
 

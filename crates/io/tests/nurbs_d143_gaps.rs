@@ -68,7 +68,11 @@ fn node_block_per_dof(text: &str) -> Vec<Vec<f64>> {
     }
     assert!(vdim > 0, "no VDim found");
     let n = vals.len() / vdim;
-    if ordering == 1 {
+    // MFEM `linalg/ordering.hpp`: byNODES (0) is component-major
+    // (`Map = dof + ndofs·vd`), byVDIM (1) is interleaved
+    // (`Map = vd + vdim·dof`).  D495: the D486 revision had the two arms
+    // swapped; every in-repo NURBS fixture is `Ordering: 1` interleaved.
+    if ordering == 0 {
         (0..n)
             .map(|d| (0..vdim).map(|c| vals[c * n + d]).collect())
             .collect()

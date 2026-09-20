@@ -421,9 +421,11 @@ impl NurbsMeshFormat {
 /// (`mesh/spacing.hpp`: `0=UNIFORM 1=LINEAR 2=GEOMETRIC 3=BELL 4=GAUSSIAN
 /// 5=LOGARITHMIC 6=PIECEWISE 7=PARTIAL`).
 ///
-/// The parameters are retained verbatim so the section round-trips.  Spacing
-/// functions only influence NURBS *h*-refinement, which fem-rs has not ported;
-/// reading them leaves the knot vectors themselves untouched (probe-verified:
+/// The parameters are retained verbatim so the section round-trips, and
+/// [`Self::eval`] evaluates the spacing function itself (`SpacingFunction::
+/// EvalAll`): the interval widths MFEM's `KnotVector::UniformRefinement`
+/// consumes for NURBS *h*-refinement with spacing.  Reading the section still
+/// leaves the knot vectors themselves untouched (probe-verified:
 /// `beam-quad-nurbs-sf.mesh` and its spacing-less twin `beam-quad-nurbs.mesh`
 /// carry identical knot structures, NKV=3, NDof=18).
 #[derive(Debug, Clone, PartialEq)]
@@ -433,10 +435,545 @@ pub struct NurbsSpacingRecord {
     pub knotvector: usize,
     /// `SpacingType` discriminant.
     pub spacing_type: i32,
-    /// Integer parameters (`ipar`).
+    /// Integer parameters (`ipar`); `ipar[0]` is the function's size `n`
+    /// (the number of intervals).
     pub int_params: Vec<i32>,
     /// Real parameters (`dpar`).
     pub real_params: Vec<f64>,
+}
+
+impl NurbsSpacingRecord {
+    /// MFEM `SpacingFunction::EvalAll` (`mesh/spacing.cpp`): the widths of all
+    /// `Size()` intervals in interval order (`Eval(0) … Eval(Size()-1)` — for
+    /// a `reverse` function this is the reversed table, exactly as in MFEM).
+    ///
+    /// The evaluation mirrors MFEM's constructors (`CalculateSpacing`) and
+    /// `Eval` operations one for one, including the Newton iterations of the
+    /// GEOMETRIC/GAUSSIAN types and the iterative scheme of BELL; `MFEM_VERIFY`
+    /// failures become errors.
+    pub fn eval(&self) -> FemResult<Vec<f64>> {
+        spacing_eval_all(self.spacing_type, &self.int_params, &self.real_params)
+    }
+}
+
+/// `mfem::GetSpacingFunction(type, ipar, dpar)->EvalAll()` (`mesh/spacing.cpp`).
+///
+/// `ipar[0]` is the function's size `n`; the parameter layouts are the ones
+/// `SpacingFunction::Print`/`GetIntParameters`/`GetDoubleParameters` write
+/// into a v1.1 `spacing` record.
+fn spacing_eval_all(spacing_type: i32, ipar: &[i32], dpar: &[f64]) -> FemResult<Vec<f64>> {
+    match spacing_type {
+        0 => {
+            // UniformSpacingFunction: n intervals of width 1/n.
+            if ipar.len() != 1 || !dpar.is_empty() {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            Ok(vec![1.0 / ipar[0] as f64; ipar[0] as usize])
+        }
+        1 => {
+            // LinearSpacingFunction(n, reverse, s, scale).
+            if ipar.len() != 3 || dpar.len() != 1 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            linear_widths(ipar[0], ipar[1] != 0, dpar[0])
+        }
+        2 => {
+            // GeometricSpacingFunction(n, reverse, s, scale).
+            if ipar.len() != 3 || dpar.len() != 1 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            geometric_widths(ipar[0], ipar[1] != 0, dpar[0])
+        }
+        3 => {
+            // BellSpacingFunction(n, reverse, s0, s1, scale).
+            if ipar.len() != 3 || dpar.len() != 2 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            bell_widths(ipar[0], ipar[1] != 0, dpar[0], dpar[1])
+        }
+        4 => {
+            // GaussianSpacingFunction(n, reverse, s0, s1, scale).
+            if ipar.len() != 3 || dpar.len() != 2 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            gaussian_widths(ipar[0], ipar[1] != 0, dpar[0], dpar[1])
+        }
+        5 => {
+            // LogarithmicSpacingFunction(n, reverse, sym, logBase).
+            if ipar.len() != 3 || dpar.len() != 1 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            logarithmic_widths(ipar[0], ipar[1] != 0, ipar[2] != 0, dpar[0])
+        }
+        6 => {
+            // PiecewiseSpacingFunction(n, np, reverse, relN, pieces' ipar,
+            //                           dpar = [partition | pieces' dpar]).
+            if ipar.len() < 3 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            let np = ipar[1] as usize;
+            if ipar.len() < 3 + np {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            let rel_n = &ipar[3..3 + np];
+            let piece_ipar = &ipar[3 + np..];
+            piecewise_widths(ipar[0], np, ipar[2] != 0, rel_n, piece_ipar, dpar)
+        }
+        7 => {
+            // PartialSpacingFunction(n, reverse, first_elem, num_elems,
+            //                        num_elems_full, iparsub, dpar, typeFull).
+            if ipar.len() < 8 {
+                return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+            }
+            partial_widths(ipar[0], ipar[1] != 0, ipar[2], ipar[3], ipar[4], ipar[5],
+                           &ipar[8..], dpar)
+        }
+        other => Err(FemError::Mesh(format!("Unknown spacing type \"{other}\""))),
+    }
+}
+
+/// `LinearSpacingFunction::CalculateDifference` + `Eval`.
+fn linear_widths(n: i32, reverse: bool, s: f64) -> FemResult<Vec<f64>> {
+    if !(0.0 < s && s < 1.0) {
+        return Err(FemError::Mesh("Initial spacing must be in (0,1)".into()));
+    }
+    let n = n as usize;
+    let d = if n < 2 {
+        0.0
+    } else {
+        // Spacings are s, s + d, …, s + (n-1)d with the sum equal to 1.
+        2.0 * (1.0 - (n as f64) * s) / ((n * (n - 1)) as f64)
+    };
+    if s + (((n - 1) as f64) * d) <= 0.0 {
+        return Err(FemError::Mesh("Invalid linear spacing parameters".into()));
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s + (i as f64) * d
+        })
+        .collect())
+}
+
+/// `GeometricSpacingFunction::CalculateSpacing` + `Eval`: widths `s*r^i` with
+/// `r` solved from `s*(r^n - 1) - r + 1 = 0` by Newton's method.
+fn geometric_widths(n: i32, reverse: bool, s: f64) -> FemResult<Vec<f64>> {
+    let n = n as usize;
+    if n == 1 {
+        // CalculateSpacing returns early; Eval special-cases n == 1.
+        return Ok(vec![1.0]);
+    }
+    let conv_tol = 1.0e-8;
+    let max_iter = 100;
+    let n_f = n as f64;
+    let s_unif = 1.0 / n_f;
+    let mut r: f64 = if s < s_unif { 1.5 } else { 0.5 };
+    let mut converged = false;
+    for _ in 0..max_iter {
+        let g = s * (r.powf(n_f) - 1.0) - r + 1.0;
+        let dg = n_f * s * r.powf(n_f - 1.0) - 1.0;
+        r -= g / dg;
+        if (g / dg).abs() < conv_tol {
+            converged = true;
+            break;
+        }
+    }
+    if !converged {
+        return Err(FemError::Mesh(
+            "Convergence failure in GeometricSpacingFunction".into(),
+        ));
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s * r.powf(i as f64)
+        })
+        .collect())
+}
+
+/// `BellSpacingFunction::CalculateSpacing` + `Eval`: `s[0] = s0`, `s[n-1] =
+/// s1`, and the interior spacings from the iterative scheme that minimizes the
+/// ratios of adjacent spacings.
+fn bell_widths(n: i32, reverse: bool, s0: f64, s1: f64) -> FemResult<Vec<f64>> {
+    let n = n as usize;
+    if n < 3 {
+        return Ok(vec![1.0 / n as f64; n]);
+    }
+    if s0 + s1 >= 1.0 {
+        return Err(FemError::Mesh(
+            "Sum of first and last Bell spacings must be less than 1".into(),
+        ));
+    }
+    let mut s = vec![0.0_f64; n];
+    s[0] = s0;
+    s[n - 1] = s1;
+    if n == 3 {
+        s[1] = 1.0 - s0 - s1;
+    } else {
+        // Solve a system iteratively (spacing.cpp lines 148-247).
+        let urk = 1.0;
+        let initial_guess = (1.0 - s0 - s1) / ((n - 2) as f64);
+        for v in s.iter_mut().take(n - 1).skip(1) {
+            *v = initial_guess;
+        }
+        let mut wk = [0.0_f64; 7];
+        let mut s_new = vec![0.0_f64; n];
+        let mut a = vec![0.5_f64; n + 2];
+        a[0] = 0.0;
+        a[1] = 0.0;
+        let mut b = a.clone();
+        let mut alpha = vec![0.0_f64; n + 2];
+        let mut beta = vec![0.0_f64; n + 2];
+        let mut gamma = vec![0.0_f64; n + 2];
+        gamma[1] = s0;
+
+        let max_iter = 100;
+        let conv_tol = 1.0e-10;
+        let mut converged = false;
+        for _ in 0..max_iter {
+            for j in 1..=(n - 3) {
+                wk[0] = (s[j] + s[j + 1]) * (s[j] + s[j + 1]);
+                wk[1] = s[j - 1];
+                wk[2] = (s[j - 1] + s[j]) * (s[j - 1] + s[j]) * (s[j - 1] + s[j]);
+                wk[3] = s[j + 2];
+                wk[4] = (s[j + 2] + s[j + 1]) * (s[j + 2] + s[j + 1]) * (s[j + 2] + s[j + 1]);
+                wk[5] = wk[0] * wk[1] / wk[2];
+                wk[6] = wk[0] * wk[3] / wk[4];
+                a[j + 1] += urk * (wk[5] - a[j + 1]);
+                b[j + 1] += urk * (wk[6] - b[j + 1]);
+            }
+            for j in 2..=(n - 2) {
+                wk[0] = a[j] * (1.0 - 2.0 * alpha[j - 1] + alpha[j - 1] * alpha[j - 2]
+                                     + beta[j - 2])
+                        + b[j] + 2.0 - alpha[j - 1];
+                wk[1] = 1.0 / wk[0];
+                alpha[j] = wk[1] * (a[j] * beta[j - 1] * (2.0 - alpha[j - 2])
+                                        + 2.0 * b[j] + beta[j - 1] + 1.0);
+                beta[j] = -b[j] * wk[1];
+                gamma[j] = wk[1] * (a[j] * (2.0 * gamma[j - 1] - gamma[j - 2]
+                                                - alpha[j - 2] * gamma[j - 1])
+                                        + gamma[j - 1]);
+            }
+            s_new[0] = s[0];
+            for j in 1..n {
+                s_new[j] = s_new[j - 1] + s[j];
+            }
+            for j in (1..=(n - 3)).rev() {
+                s_new[j] = alpha[j + 1] * s_new[j + 1] + beta[j + 1] * s_new[j + 2]
+                           + gamma[j + 1];
+            }
+            // Convert back from points to spacings.
+            for j in (1..n).rev() {
+                s_new[j] -= s_new[j - 1];
+            }
+            wk[5] = 0.0;
+            wk[6] = 0.0;
+            for j in (2..=(n - 2)).rev() {
+                wk[5] += s_new[j] * s_new[j];
+                wk[6] += (s_new[j] - s[j]).powf(2.0);
+            }
+            s.copy_from_slice(&s_new);
+            let res = (wk[6] / wk[5]).sqrt();
+            if res < conv_tol {
+                converged = true;
+                break;
+            }
+        }
+        if !converged {
+            return Err(FemError::Mesh(
+                "Convergence failure in BellSpacingFunction".into(),
+            ));
+        }
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s[i]
+        })
+        .collect())
+}
+
+/// `GaussianSpacingFunction::CalculateSpacing` + `Eval`: a Gaussian
+/// `q*exp(-u*(x-m)^2/c^2)` fitted to the endpoint widths by Newton's method.
+fn gaussian_widths(n: i32, reverse: bool, s0: f64, s1: f64) -> FemResult<Vec<f64>> {
+    let n = n as usize;
+    if n < 3 {
+        return Ok(vec![1.0 / n as f64; n]);
+    }
+    let mut s = vec![0.0_f64; n];
+    s[0] = s0;
+    s[n - 1] = s1;
+    if n == 3 {
+        s[1] = 1.0 - s0 - s1;
+    } else {
+        let lnz01 = (s0 / s1).ln();
+        let h = 1.0 / ((n - 1) as f64);
+        // Determine concavity by comparing the linear distribution to 1.
+        let slinear = (n as f64) * (s0 + (h * (s1 - s0) * 0.5 * ((n - 1) as f64)));
+        if (slinear - 1.0).abs() <= 1.0e-8 {
+            return Err(FemError::Mesh(
+                "Bell distribution is too close to linear.".into(),
+            ));
+        }
+        let u = if slinear < 1.0 { 1.0 } else { -1.0 };
+        let mut c = 0.3; // Initial guess
+
+        let max_iter = 10;
+        let conv_tol = 1.0e-8;
+        let mut converged = false;
+        for _ in 0..max_iter {
+            let c2 = c * c;
+            let m = 0.5 * (1.0 - (u * c2 * lnz01));
+            let dmdc = -u * c * lnz01;
+            let mut r = 0.0_f64; // Residual
+            let mut drdc = 0.0_f64; // Derivative of residual
+            for i in 0..n {
+                let x = i as f64 * h;
+                let ti = ((-(x * x) + (2.0 * x * m)) * u / c2).exp(); // Gaussian
+                r += ti;
+                // Derivative of Gaussian
+                drdc += ((-2.0 * (-(x * x) + (2.0 * x * m)) / (c2 * c))
+                         + ((2.0 * x * dmdc) / c2)) * ti;
+            }
+            r *= s0;
+            r -= 1.0; // Sum of spacings should equal 1.
+            if r.abs() < conv_tol {
+                converged = true;
+                break;
+            }
+            drdc *= s0 * u;
+            // Newton update limited by factors of 1/2 and 2.
+            let mut dc = (-r / drdc).max(-0.5 * c);
+            dc = dc.min(2.0 * c);
+            c += dc;
+        }
+        if !converged {
+            return Err(FemError::Mesh(
+                "Convergence failure in GaussianSpacingFunction".into(),
+            ));
+        }
+
+        let c2 = c * c;
+        let m = 0.5 * (1.0 - (u * c2 * lnz01));
+        let q = s0 * (u * m * m / c2).exp();
+        for (i, v) in s.iter_mut().enumerate() {
+            let x = i as f64 * h - m;
+            *v = q * (-u * x * x / c2).exp();
+        }
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s[i]
+        })
+        .collect())
+}
+
+/// `LogarithmicSpacingFunction::CalculateSpacing` (+ symmetric variant):
+/// uniform in `log(logBase)` over the unit interval.
+fn logarithmic_widths(n: i32, reverse: bool, sym: bool, log_base: f64) -> FemResult<Vec<f64>> {
+    if n <= 0 || log_base <= 1.0 {
+        return Err(FemError::Mesh(
+            "Invalid parameters in LogarithmicSpacingFunction".into(),
+        ));
+    }
+    let n = n as usize;
+    let mut s = vec![0.0_f64; n];
+    if sym {
+        let odd = n % 2 == 1;
+        let m0 = n / 2;
+        let m = if odd { m0 + 1 } else { m0 };
+        let h = 1.0 / m as f64;
+        let mut p = 1.0; // Initialize at right endpoint of [0,1].
+        for i in (0..m.saturating_sub(1)).rev() {
+            let p_i = (log_base.powf((i + 1) as f64 * h) - 1.0) / (log_base - 1.0);
+            s[i + 1] = p - p_i;
+            p = p_i;
+        }
+        s[0] = p;
+        let t = if odd { 1.0 / (2.0 - s[m - 1]) } else { 0.5 };
+        for i in 0..m {
+            s[i] *= t;
+            if i < (m - 1) || !odd {
+                s[n - i - 1] = s[i];
+            }
+        }
+    } else {
+        let h = 1.0 / n as f64;
+        let mut p = 1.0;
+        for i in (0..n.saturating_sub(1)).rev() {
+            let p_i = (log_base.powf((i + 1) as f64 * h) - 1.0) / (log_base - 1.0);
+            s[i + 1] = p - p_i;
+            p = p_i;
+        }
+        s[0] = p;
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s[i]
+        })
+        .collect())
+}
+
+/// `PiecewiseSpacingFunction`: spacing functions on `np` fixed subintervals
+/// of the unit interval (`dpar[0..np-1]` is the partition), the piece in
+/// interval `p` carrying `ref * relN[p]` of the `n` intervals.
+fn piecewise_widths(
+    n: i32,
+    np: usize,
+    reverse: bool,
+    rel_n: &[i32],
+    piece_ipar: &[i32],
+    dpar: &[f64],
+) -> FemResult<Vec<f64>> {
+    let n = n as usize;
+    // SetupPieces: the partition must ascend strictly inside (0,1).
+    let mut partition = Vec::with_capacity(np - 1);
+    for (i, &v) in dpar.iter().take(np - 1).enumerate() {
+        if v <= 0.0 || v >= 1.0 || (i > 0 && v <= partition[i - 1]) {
+            return Err(FemError::Mesh("Invalid partition".into()));
+        }
+        partition.push(v);
+    }
+    // SetupPieces: decode each piece's `(type, nip, nrp, ipar…, dpar…)` block.
+    let mut piece_defs: Vec<(i32, Vec<i32>, Vec<f64>)> = Vec::with_capacity(np);
+    let mut osi = 0;
+    let mut osd = np - 1;
+    let mut n0 = 0_usize;
+    for p in 0..np {
+        if osi + 3 > piece_ipar.len() {
+            return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+        }
+        let ptype = piece_ipar[osi];
+        let nip = piece_ipar[osi + 1] as usize;
+        let nrd = piece_ipar[osi + 2] as usize;
+        if osi + 3 + nip > piece_ipar.len() || osd + nrd > dpar.len() {
+            return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+        }
+        piece_defs.push((
+            ptype,
+            piece_ipar[osi + 3..osi + 3 + nip].to_vec(),
+            dpar[osd..osd + nrd].to_vec(),
+        ));
+        osi += 3 + nip;
+        osd += nrd;
+        n0 += rel_n[p] as usize;
+    }
+    if osi != piece_ipar.len() || osd != dpar.len() {
+        return Err(FemError::Mesh("Invalid spacing function parameters".into()));
+    }
+
+    // CalculateSpacing.
+    let mut out;
+    if n == 1 {
+        out = vec![1.0];
+    } else {
+        let ref_factor = n / n0; // Refinement factor
+        let cf = n0 / n; // Coarsening factor
+        let mut coarsen = cf > 1 && n > 1;
+        if coarsen {
+            // If coarsening, check whether all pieces have size divisible by
+            // cf (a piece's *file* size is its own `ipar[0]`).
+            for def in &piece_defs {
+                let size = def.1.first().copied().unwrap_or(0).max(0) as usize;
+                if size != cf * (size / cf) {
+                    coarsen = false;
+                }
+            }
+        }
+        if !(coarsen || n >= n0) {
+            return Err(FemError::Mesh(
+                "Invalid case in PiecewiseSpacingFunction::CalculateSpacing".into(),
+            ));
+        }
+        out = Vec::with_capacity(n);
+        for (p, (ptype, pipar, pdpar)) in piece_defs.iter().enumerate() {
+            let piece_n = if coarsen {
+                (rel_n[p] as usize) / cf
+            } else {
+                ref_factor * rel_n[p] as usize
+            };
+            // `pieces[p]->SetSize(piece_n)` re-runs the piece's calculation at
+            // the composite size, then `Eval(i)` reads its table.
+            let widths = spacing_eval_all_n(*ptype, pipar, pdpar, piece_n)?;
+            let p0 = if p == 0 { 0.0 } else { partition[p - 1] };
+            let p1 = if p == np - 1 { 1.0 } else { partition[p] };
+            let h_p = p1 - p0;
+            out.extend(widths.into_iter().map(|w| h_p * w));
+        }
+        if out.len() != n {
+            return Err(FemError::Mesh(
+                "Invalid case in PiecewiseSpacingFunction::CalculateSpacing".into(),
+            ));
+        }
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            out[i]
+        })
+        .collect())
+}
+
+/// `PartialSpacingFunction::CalculateSpacing` + `Eval`: a contiguous
+/// `num_elems`-window of the *full* function's table, normalized to sum to 1.
+#[allow(clippy::too_many_arguments)]
+fn partial_widths(
+    n: i32,
+    reverse: bool,
+    first_elem: i32,
+    num_elems: i32,
+    num_elems_full: i32,
+    type_full: i32,
+    full_ipar: &[i32],
+    dpar: &[f64],
+) -> FemResult<Vec<f64>> {
+    let ref_factor = n / num_elems;
+    if ref_factor * num_elems != n {
+        return Err(FemError::Mesh("Invalid number of elements".into()));
+    }
+    let n = n as usize;
+    if n == 1 {
+        return Ok(vec![1.0]);
+    }
+    let full = spacing_eval_all_n(type_full, full_ipar, dpar, (ref_factor * num_elems_full) as usize)?;
+    let os = (ref_factor * first_elem) as usize;
+    if os + n > full.len() {
+        return Err(FemError::Mesh(
+            "partial spacing window outside the full spacing function".into(),
+        ));
+    }
+    let mut s: Vec<f64> = full[os..os + n].to_vec();
+    // Normalize.
+    let d1: f64 = s.iter().sum();
+    for v in &mut s {
+        *v /= d1;
+    }
+    Ok((0..n)
+        .map(|p| {
+            let i = if reverse { n - 1 - p } else { p };
+            s[i]
+        })
+        .collect())
+}
+
+/// [`spacing_eval_all`] with the size `n` overridden — what MFEM's
+/// `SpacingFunction::SetSize` does when a composite function recomputes a
+/// piece at its own interval count (`piece_n` replaces `ipar[0]`).
+fn spacing_eval_all_n(
+    spacing_type: i32,
+    ipar: &[i32],
+    dpar: &[f64],
+    piece_n: usize,
+) -> FemResult<Vec<f64>> {
+    let mut ipar_n = ipar.to_vec();
+    if ipar_n.is_empty() {
+        ipar_n.push(piece_n as i32);
+    } else {
+        ipar_n[0] = piece_n as i32;
+    }
+    spacing_eval_all(spacing_type, &ipar_n, dpar)
 }
 
 /// One `elements` / `boundary` record: attribute, MFEM geometry type and the
@@ -1226,9 +1763,12 @@ fn read_spacing_record(s: &mut DocScanner) -> FemResult<NurbsSpacingRecord> {
 /// `patches` flavour may omit it (see [`NurbsMeshDoc::has_node_block`]).
 ///
 /// The coordinate rows are normalised to one row per control point
-/// regardless of the file's `Ordering:` (`0` = byNODES interleaves the
-/// components, `1` = byVDIM stores all of a component first) — MFEM's
-/// `GridFunction::Load` applies the same permutation.
+/// regardless of the file's `Ordering:` — MFEM `linalg/ordering.hpp`:
+/// `Ordering::byNODES` (`0`) is **component-major** (`Map = dof + ndofs·vd`,
+/// all of a component first), `Ordering::byVDIM` (`1`) is **interleaved**
+/// (`Map = vd + vdim·dof`, `XYZ,XYZ,…` per control point).  D495: the D486
+/// revision had the two arms swapped; the interleaved decode is what every
+/// in-repo NURBS fixture (`Ordering: 1`) actually uses.
 fn read_node_block(s: &mut DocScanner) -> FemResult<(String, usize, i32, Vec<Vec<f64>>)> {
     s.expect("FiniteElementCollection:")?;
     let collection = s.next_token()?;
@@ -1254,7 +1794,7 @@ fn read_node_block(s: &mut DocScanner) -> FemResult<(String, usize, i32, Vec<Vec
         )));
     }
     let n = flat.len() / vdim;
-    let coords: Vec<Vec<f64>> = if ordering == 1 {
+    let coords: Vec<Vec<f64>> = if ordering == 0 {
         (0..n)
             .map(|d| (0..vdim).map(|c| flat[c * n + d]).collect())
             .collect()
@@ -1594,10 +2134,10 @@ pub fn write_nurbs_mesh_doc_with_precision<W: Write>(
     writeln!(writer, "VDim: {}", doc.vdim)?;
     writeln!(writer, "Ordering: {}", doc.ordering)?;
     writeln!(writer)?;
-    // `GridFunction::Save`: the data stream is per-`Ordering` — byNODES
-    // interleaves the components of each control point, byVDIM stores all of
+    // `GridFunction::Save`: the data stream is per-`Ordering` — byVDIM
+    // interleaves the components of each control point, byNODES stores all of
     // a component first — and `Vector::Print` wraps it at `vdim` values per
-    // line (1 for byNODES, `vdim` for byVDIM).
+    // line (vdim for byVDIM, 1 for byNODES).
     for (i, cp) in doc.coords.iter().enumerate() {
         if cp.len() != doc.vdim {
             return Err(FemError::Mesh(format!(
@@ -1609,15 +2149,15 @@ pub fn write_nurbs_mesh_doc_with_precision<W: Write>(
     }
     let mut stream: Vec<String> = Vec::with_capacity(doc.coords.len() * doc.vdim);
     if doc.ordering == 1 {
-        for c in 0..doc.vdim {
-            for cp in &doc.coords {
-                stream.push(g(cp[c]));
-            }
-        }
-    } else {
         for cp in &doc.coords {
             for v in cp {
                 stream.push(g(*v));
+            }
+        }
+    } else {
+        for c in 0..doc.vdim {
+            for cp in &doc.coords {
+                stream.push(g(cp[c]));
             }
         }
     }

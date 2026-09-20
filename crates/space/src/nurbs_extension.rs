@@ -1089,8 +1089,18 @@ impl NurbsExtension {
     }
 
     /// The control-point coordinates of a NURBS mesh file: the
-    /// `FiniteElementSpace` / `VDim: <n>` / `Ordering: 1` block that MFEM reads
-    /// into the mesh's `Nodes` grid function (the B-spline control net).
+    /// `FiniteElementSpace` / `VDim: <n>` / `Ordering: <0|1>` block that MFEM
+    /// reads into the mesh's `Nodes` grid function (the B-spline control net).
+    ///
+    /// The file's `Ordering:` line is honoured exactly as MFEM's
+    /// `FiniteElementSpace`/`GridFunction` pair does
+    /// (`linalg/ordering.hpp::Ordering::Map`): `1` = byVDIM interleaves the
+    /// components of each control point (`XYZ,XYZ,...`, i.e. `chunks(vdim)`),
+    /// `0` = byNODES stores the data component-major (`XXX...,YYY...`, i.e.
+    /// `values[d*n_dofs + i]`).  An MFEM 4.10 probe (`tmp/d487/probe.cpp`)
+    /// dumps identical control points and element geometry for
+    /// `disc-nurbs.mesh` and for a transposed `Ordering: 0` image of it,
+    /// pinning this interpretation.
     ///
     /// `n_dofs` is the expected number of control points (`GetNDof`), so a
     /// truncated or mismatched block is rejected rather than silently accepted.
@@ -1101,6 +1111,7 @@ impl NurbsExtension {
             return Err(format!("not an MFEM NURBS mesh file (first line: {banner:?})"));
         }
         let mut vdim = None;
+        let mut ordering = 1;
         let mut values: Vec<f64> = Vec::new();
         let mut in_block = false;
         for raw in lines {
@@ -1123,9 +1134,21 @@ impl NurbsExtension {
                 );
                 continue;
             }
-            // Header lines (`FiniteElementCollection: …`, `Ordering: …`) carry
-            // the only non-numeric columns; the coordinate rows are plain
-            // numbers.
+            if let Some(rest) = trimmed.strip_prefix("Ordering:") {
+                ordering = rest
+                    .trim()
+                    .parse::<i32>()
+                    .map_err(|_| format!("FiniteElementSpace: bad Ordering {rest:?}"))?;
+                if ordering != 0 && ordering != 1 {
+                    return Err(format!(
+                        "FiniteElementSpace: Ordering must be 0 (byNODES) or 1 (byVDIM), \
+                         got {ordering}"
+                    ));
+                }
+                continue;
+            }
+            // Header lines (`FiniteElementCollection: …`) carry the only other
+            // non-numeric columns; the coordinate rows are plain numbers.
             if trimmed.contains(':') {
                 continue;
             }
@@ -1147,7 +1170,16 @@ impl NurbsExtension {
                 values.len()
             ));
         }
-        let coords = values.chunks(vdim).map(|c| c.to_vec()).collect();
+        // `Ordering::Map`: byVDIM = `vd + vdim*dof` (a control point's
+        // components are contiguous), byNODES = `dof + ndofs*vd`
+        // (component-major blocks).
+        let coords: Vec<Vec<f64>> = if ordering == 1 {
+            values.chunks(vdim).map(|c| c.to_vec()).collect()
+        } else {
+            (0..n_dofs)
+                .map(|i| (0..vdim).map(|d| values[d * n_dofs + i]).collect())
+                .collect()
+        };
         Ok(NurbsNodes { vdim, coords })
     }
 

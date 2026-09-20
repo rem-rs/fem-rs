@@ -581,12 +581,13 @@ fn edges_reference_knot_vectors_in_range() {
     }
 }
 
-/// D486 guardrail: the node block's `Ordering:` must be honoured when the
-/// document is built.  `disc-nurbs.mesh` stores its control points byVDIM
-/// (`Ordering: 1`, component-major: all `x`, then all `y`), so the per-DOF
-/// coordinate rows are *not* the file's line groups; the document rows must
-/// match a manual byVDIM permutation of the file's token stream, and a read
-/// -> write cycle must reproduce that stream exactly.
+/// D486/D495 guardrail: the node block's `Ordering:` must be honoured when the
+/// document is built.  MFEM `linalg/ordering.hpp`: `Ordering::byVDIM` (`1`) is
+/// **interleaved** — `disc-nurbs.mesh` stores each control point's components
+/// consecutively (`-2 -2`, `2 -2`, …), so the document rows are the file's line
+/// groups themselves; a read -> write cycle must reproduce that stream exactly.
+/// (D495, round 53: the D486 revision decoded byVDIM as component-major — the
+/// two arms are now per MFEM `linalg/ordering.hpp`.)
 #[test]
 fn byvdim_node_blocks_are_permuted_per_ordering() {
     let path = data_path("disc-nurbs.mesh");
@@ -613,7 +614,11 @@ fn byvdim_node_blocks_are_permuted_per_ordering() {
     }
     assert_eq!(vals.len(), 50, "25 DOFs x VDim 2");
     for (d, row) in doc.coords.iter().enumerate() {
-        assert_eq!(row, &[vals[d], vals[25 + d]], "dof {d} (byVDIM permutation)");
+        assert_eq!(
+            row,
+            &[vals[2 * d], vals[2 * d + 1]],
+            "dof {d} (byVDIM interleaved)"
+        );
     }
 
     // The rewrite reproduces the component-major token order of the file
