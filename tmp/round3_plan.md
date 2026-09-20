@@ -3189,6 +3189,132 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   `--tests` 全层 **196 targets / 3694 passed / 0 failed**；examples 0 错误；
   pro 层 0 error。
 
+## 第五十一轮（round 51）：元素层棱柱/金字塔 RT 对齐 MFEM + 六路扫尾
+
+六路并行（④路收工后加开⑤⑥），**全部交付、零权限熔断**。开局 HEAD `1d9c018`，
+号段 ①D444/D445+D456-458 ②D446/D448+D459-461 ③D453/D454/D455+D462 ④D447/D450-D452+D465-467
+⑤D462/D459+D468-470 ⑥D466/D114+D471-473。
+
+### ① D444 + D445 + D436 + D437 关闭（目标档）—— 棱柱/金字塔 RT 对齐 MFEM
+
+- **探针实值（`tmp/d444/probe_d444.*`，MFEM 4.10）**：`RT_WedgeElement(1)=25/(2)=69/(3)=146`；
+  `RT_FuentesPyramidElement(1)=28/(2)=87/(3)=200`（节点表 %.17e dump）；空间级
+  prism stack **47/30**、in-code 单金字塔 **28/16**（MFEM 读 pyramid mesh 文件段错误
+  留证，改 in-code 建网）。
+- **`PrismRTk` 重写**：槽序 `[bottom, top, q0(ζ=0), q1(对角), q2(η=0), interior]`
+  （MFEM 规范标架 slot n = v(p+1)+u）；interior `p(p+1)(3p+4)/2`；span 改 MFEM 楔形
+  `RT_tri⊗P_p / P_p⊗P_{p+1}`；functionals 精确积分（修原 (b+c)·2+4 欠积分——开发期
+  conforming 残差 6e-10 暴露）；`dof_coords` = MFEM 节点表（原 0.3 占位）；cap 0..=3；
+  k=0 硬编码臂逐位未动。**`PyraRTk` 重写**：Fuentes 槽序 `[base, 4 tri, int-x/y/z]`、
+  interior `3p(p+1)²`、dim `(p+1)(3p(p+2)+5)`、L² 等比列平衡（收缩锥 ζ 高次单体质量
+  极小，max 缩放不够——三轮红定位）。
+- **空间随动**（`hdiv.rs`）：`PYRAMID_FACES` 改 MFEM FaceVert 序（base 在前，删两张死表）；
+  `hdiv_3d_interior_dofs` prism `k(k+1)(3k+4)/2`、pyramid `3k(k+1)²`；`build_3d_prism`
+  两遍化；prism/pyramid cap ≤1 → **0..=3**。round 50 pin 更新：棱柱 RT1 **33→47**、
+  金字塔 RT1 **17→28**（ess 30/16 不变；k=0 9/8 逐位不动）。
+- **验收（主会话亲跑）**：d394 **6/6**（47/30、28/16）、d444 **5/5**、d445 **4/4**、
+  d393 **2/2**（混合值不动）；d392/d377/hdiv_regression/d289/d342/d340/d352 全绿；
+  装配级 D444 原始病灶绿（空间槽组 × `PrismRTk(1)` 面组逐槽矩对偶：他面 ≈1e-8）；
+  fem-element lib **516/0**、fem-space 288/0、assembly 701/0/5。
+- **新债（MFEM 布局层残差，fem-rs 内部自洽）**：**D456**（`transform_grid` r∈{2,6}/{4,5}
+  行与 MFEM QuadDofOrd 互为转置且 4↔5 符号反——需多取向 hex 探针）；**D457**（MFEM 自身
+  部分面块转置/逆序内部枚举，fem-rs 归一到标准重心网格——dof 集/vsize/ess 不受影响）；
+  **D458**（k≥1 矩对偶基非节点点对偶——投影 dof 值不逐位；prism k≥1/pyramid 插值引擎
+  仍关，完整节点化移植留债）。
+- **主会话顺手**：`constraints/hdiv.rs:333` 过期注释（D445 重排后 base=槽 0），代码臂已
+  一致、仅注释。
+
+### ② D446 + D448 关闭 —— HDiv prolongation 按形状 + D354 副作用钉死
+
+- **D446 比登记更重**：hex 网格上 `build_prolongation_hdiv` 的 P 是**空矩阵**（tet 元组
+  FaceKey 在 hex 退化，sub-face 兜底永不命中）。修法 = `hdiv_face_dofs_per_face` 按
+  形状（2 顶点→k+1、3→(k+1)(k+2)/2、4→(k+1)²）+ `hdiv_element_faces_3d`（tet/hex/
+  prism/pyramid 面表）+ `hdiv_face_key`（quad 4 顶点排序取前 3，= HDivSpace 构造器
+  同规则）+ quad 面心图；删死代码 `_cell_type`，文档去"限 simplex"。
+  **worktree 考古红**（@e9770bf）：hex rt0/rt1、prism rt0 FAILED 3/5 → 修后 5/5；
+  tet 路径集合逐位不变（审计计数 新=旧）。
+- **D448**：tinyzoo p=2 quad 边界面 `boundary_dofs` == 几何 dof 集 9 个（含面心 dof 37
+  单独断言）+ tri 面 6 个 + 端到端 Dirichlet 互证；**worktree 红实锤**：旧代码
+  `left:[...21] vs right:[...21,37]`（面心漏配）。
+- **新债**：**D459 初登**（2-D quad 走格 tri-only，⑤路接手关闭）、**D460**（共享面
+  COO 重复求和 → 内部子面 0.5/边界 0.25 语义怪象，MFEM patch-projection 式精确算子
+  需另立设计）、**D461**（HDiv bubble dof 零列，MFEM 真 RT prolongation 会插值）。
+
+### ③ D453 + D454 + D455 关闭 —— hyper 帧迁移 + fe_order 族重建 + 死代码
+
+- **D453**：`nonlinear_hyperelasticity.rs::ref_elem_vol` 整表委托
+  `h1_field_element`（quad 全阶 [0,1]² GLL 帧，p≥5 panic 解除，legacy QuadQ4 臂退役）。
+  **红证据教科书级**：p=3 装配权重恰 **0.25 = 1/2^dim**；NeoHookean 单轴拉伸能量偏差
+  −5.56%。绿：体积 p=1..5 max|Δ| 4.5e-15、**p=1/2 逐位不变**（17 位一致）、p=3/4/5
+  ≤3.7e-15。**顺带挖出第二缺陷**：退役 `QuadQ4` 是 equispaced 布点而 `QuadQk(4)` 是
+  GLL——槽序同布点不同，迁移消解。
+- **D454 超额**：`pyramid_flux_element(order, n_flux_dofs)` 按计数重建族（Bergot
+  14/30/55 入表且与 Fuentes 15/37/77 无冲突）——防 Bergot 通量向量被 Fuentes 基误读
+  （D353 类）。
+- **D455**：死代码清理（重复行 + `_constraints` 带理由注释）。
+- **新债 D462**（初登，⑤路接手关闭）。
+
+### ④ D447 + D450 + D451 + D452 关闭 —— 警告清零 + 小件
+
+- **D447 根因发现**：`constraints/mod.rs` 的 `mod tests` 缺 `#[cfg(test)]`——rustc
+  非 test 构建剥离测试体后误报 import unused（实验证实 test 模式删这些 import 直接
+  编译失败）。修 = 加门 + 删 test 模式真冗余 18 处。**fem-space lib 警告 8→0**
+  （test 模式 21→0）；build 总警告 28→19（余 17 条在 element/mesh → D465/D466）。
+  hcurl 两处去 enumerate、lor `hi`→`_`。288/0 保持。
+- **D450**（form.rs:113 文档改为真实 DIAG_ONE 语义 + rustfmt，零行为）、**D451**
+  （dpg 冗余零重置删除，不变量注释防回潮；63/0）、**D452**（csr.rs 补"单侧非对称
+  pattern 暴露面"文档；61/0）。
+- **新债**：**D465**（element lib 10 条——NURBS 命名 ×5 迁移至此 + tet_rtk useless
+  comparison 等）、**D466 初登**（mesh 7 条，⑥路接手关闭）、**D467**（assembly lib
+  test 121 条存量）。
+
+### ⑤ D462 + D459 关闭 —— Bergot 感知 ZZ + 2-D quad 走格
+
+- **D462**：`ref_elem_vol_with_pyramid_basis(elem_type, order, pyr)`（`ref_elem_vol`
+  变 Fuentes 默认委托），三个取解基点全部改走 `space.pyramid_basis()`，签名/调用方
+  零改动。**额外必要修复**：D365 的 apex 奇异重采样原保留 apex 处参考梯度却用 pulled
+  点 Jacobian 求逆——p=1 Fuentes 碰巧精确，Bergot p=2 apex dof 给 flux=(0.5,1.0,2.25)
+  应为 (1,2,3)；修为 pulled 点同时重估 `eval_grad_basis`（∇ξu=Jᵀ∇x 任意点精确）。
+  红（`index out of bounds: len 14 index 14` @ Fuentes15×Bergot14 槽表）→ 绿 3/3；
+  d365 5/0、d353 4/0 守卫不动。
+- **D459**：`hdiv_element_edges_2d`（TRI 原表逐位；QUAD=QUAD_FACES 环）+ 三处走格按
+  `element_type(e)` 分派，删 `local_edges_2d`（迁移非复制）。红（RT1 16/32、RT0 8/16
+  boundary 边无 prolongation 行）→ 绿 3/3；tri 既有 12/0 逐位不动。
+- **新债**：**D468**（2-D 无中点边子面搜索——midline 边 prolongation 行全空，quad
+  empty=16/tri 24）、**D469**（内部细边双侧求和 1.0 vs 边界 0.5 怪象，与 D460 同族）、
+  **D470**（`zz_estimator_mfem*` 只读 element_type(0)——混合 H¹ 网格采样错位）。
+
+### ⑥ D466 + D114 关闭 —— mesh 警告清零 + 混合 AMR 对齐 MFEM（超额）
+
+- **D466**：fem-mesh lib 警告 **7→0**（`ideal_shape_jac_2d/3d` 移入 cfg(test)）；
+  mesh lib **317/0** 不动。
+- **D114 超出可接受档**：**根因修正挂账描述**——fichera-mixed-16 是 1 hex + 6 prism +
+  **9 pyramid、无 tet**（非"tet MarkEdge 缺边"）：①两个边登记表 `_ => &[]`/
+  `_ => continue` 漏 pyramid 边；②步 3 `_ => {}` **静默丢弃 pyramid 父元素**；③e2v
+  重排被无条件应用而 MFEM 仅含 tet 时构建（`mesh.cpp:10452`）。修法对照
+  `UniformRefinement3D_base` PYRAMID 分支（mesh.cpp:10766-10855）：补 pyramid 边/
+  基面 quad center/步 3 新增 Pyramid5 → **6 Pyr + 4 Tet** 子元素（MFEM 顺序）。
+  **MFEM 真值对拍逐项一致**：146 元素（36 tet+8 hex+48 prism+54 pyr）/156 边界/117
+  顶点，**多重集 identical 含编号**；`r31_meshread` 回读无错。先红 4/4 FAILED
+  （`rebuild_boundary.rs:110` midpoint missing）。
+- **新债**：**D471**（mesh 测试目标 3 条 unused import，疑①路波及）、**D472**（纯
+  pyramid 网格均匀细化 fem-rs 16-tet 语义 vs MFEM 6Pyr+4Tet 不一致——既有测试钉住
+  旧语义，对拍留债）、**D473**（data/ 下 fichera-mixed 系列未跟踪清单）。
+
+### 流程注记（round 51）
+
+- **零权限熔断**延续；②⑤路各自报告了 tmp/ 临时产物的 heredoc/截断操作（自身探针
+  清理，无涉源码，已审计）。
+- **夹具纪律升级生效**：测试运行时夹具全部入库（`data/d445_one_pyramid.mesh`、
+  `data/fichera-mixed-16.mesh` add -f）或代码内构造（d446/d448/d462/d459），无 tmp/
+  运行时依赖。
+- **抽查复现（主会话亲跑）**：d394 6/6（47/30、28/16）、d444 5/5、d445 4/4、d393 2/2、
+  d114 4/4、mesh lib 317/0、d462 3/3、d459 3/3、assembly lib 701/0/5。
+- **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2583 passed / 0 failed**；
+  `--tests` 全层 **204 targets / 3728 passed / 0 failed**；examples 0 错误；pro 层
+  0 error。
+
+
 
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
