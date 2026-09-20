@@ -153,6 +153,33 @@ const FIXTURES: &[Fixture] = &[
         mfem_n_patches: 5,
         exact_precision: Some(6),
     },
+    // The v1.1 fixtures (D143): the `spacing` section round-trips, and the
+    // probe confirms the knot vectors themselves are untouched (beam-quad
+    // and beam-quad-sf share NKV=3/NDof=18).
+    Fixture {
+        file: "beam-quad-nurbs-sf.mesh",
+        mfem_dim: 2,
+        mfem_ne: 8,
+        mfem_nbe: 18,
+        mfem_n_patches: 2,
+        exact_precision: None,
+    },
+    Fixture {
+        file: "square-nurbs-pw.mesh",
+        mfem_dim: 2,
+        mfem_ne: 1,
+        mfem_nbe: 4,
+        mfem_n_patches: 1,
+        exact_precision: None,
+    },
+    Fixture {
+        file: "pipe-nurbs-log.mesh",
+        mfem_dim: 3,
+        mfem_ne: 8,
+        mfem_nbe: 24,
+        mfem_n_patches: 4,
+        exact_precision: None,
+    },
 ];
 
 // ── Diff classification ────────────────────────────────────────────────────
@@ -483,15 +510,10 @@ fn single_patch_representable_flags() {
             doc.is_single_patch_representable(),
             "{name} should be single-patch"
         );
-        if doc.dim >= 2 {
-            doc.to_nurbs_file().unwrap();
-        } else {
-            // `NurbsFile` has no 1-D variant (`NurbsMesh2D`/`NurbsMesh3D` only)
-            // — a pre-existing gap that has nothing to do with the writer: the
-            // 1-D document still round-trips (see the tests above).
-            let err = doc.to_nurbs_file().unwrap_err().to_string();
-            println!("{name}: to_nurbs_file -> {err}");
-            assert!(err.contains("unsupported dimension 1"));
+        match doc.to_nurbs_file().unwrap() {
+            NurbsFile::Mesh1D(m) => assert_eq!(name, "segment-nurbs.mesh", "{name}: 1-D"),
+            NurbsFile::Mesh2D(m) => assert_eq!(m.n_patches(), 1, "{name}"),
+            NurbsFile::Mesh3D(m) => assert_eq!(m.n_patches(), 1, "{name}"),
         }
     }
     for name in multi {
@@ -500,24 +522,15 @@ fn single_patch_representable_flags() {
             !doc.is_single_patch_representable(),
             "{name} should need several patches"
         );
-        match &doc.geometry {
-            // The `patches` flavour converts completely — it must never keep
-            // only the first block.
-            NurbsGeometry::Patches(blocks) => {
-                let expected = blocks.len();
-                match doc.to_nurbs_file().unwrap() {
-                    NurbsFile::Mesh2D(m) => assert_eq!(m.n_patches(), expected),
-                    NurbsFile::Mesh3D(m) => assert_eq!(m.n_patches(), expected),
-                }
-            }
-            // The multi-patch `knotvectors` flavour cannot be converted to a
-            // patch-wise view yet, so it must refuse rather than truncate.
-            NurbsGeometry::Global { .. } => {
-                assert!(
-                    doc.to_nurbs_file().is_err(),
-                    "{name}: to_nurbs_file must not silently truncate"
-                );
-            }
+        // Every multi-patch document converts completely now — the `patches`
+        // flavour block by block, the `knotvectors` flavour through
+        // `NurbsExtension`'s port of MFEM's `NURBS_PatchMap` — one patch per
+        // topology element, never a truncation.
+        let expected = doc.n_patches();
+        match doc.to_nurbs_file().unwrap() {
+            NurbsFile::Mesh1D(m) => assert_eq!(m.n_patches(), expected, "{name}"),
+            NurbsFile::Mesh2D(m) => assert_eq!(m.n_patches(), expected, "{name}"),
+            NurbsFile::Mesh3D(m) => assert_eq!(m.n_patches(), expected, "{name}"),
         }
     }
 
@@ -568,13 +581,64 @@ fn edges_reference_knot_vectors_in_range() {
     }
 }
 
+/// D486 guardrail: the node block's `Ordering:` must be honoured when the
+/// document is built.  `disc-nurbs.mesh` stores its control points byVDIM
+/// (`Ordering: 1`, component-major: all `x`, then all `y`), so the per-DOF
+/// coordinate rows are *not* the file's line groups; the document rows must
+/// match a manual byVDIM permutation of the file's token stream, and a read
+/// -> write cycle must reproduce that stream exactly.
+#[test]
+fn byvdim_node_blocks_are_permuted_per_ordering() {
+    let path = data_path("disc-nurbs.mesh");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let doc = read_nurbs_mesh_doc_file(&path).unwrap();
+    assert_eq!(doc.ordering, 1, "disc-nurbs is byVDIM");
+    assert_eq!(doc.vdim, 2);
+    assert_eq!(doc.coords.len(), 25, "GetNDof");
+
+    // The coordinate stream = every token after the `Ordering:` line.
+    let mut vals: Vec<f64> = Vec::new();
+    let mut after_ordering = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("Ordering:") {
+            after_ordering = true;
+            continue;
+        }
+        if after_ordering && !t.is_empty() && !t.starts_with('#') {
+            for tok in t.split_whitespace() {
+                vals.push(tok.parse().expect("coordinate"));
+            }
+        }
+    }
+    assert_eq!(vals.len(), 50, "25 DOFs x VDim 2");
+    for (d, row) in doc.coords.iter().enumerate() {
+        assert_eq!(row, &[vals[d], vals[25 + d]], "dof {d} (byVDIM permutation)");
+    }
+
+    // The rewrite reproduces the component-major token order of the file
+    // (token streams compared numerically — `disc-nurbs` mixes precisions).
+    let mut out = Vec::new();
+    write_nurbs_mesh_doc(&doc, &mut out).unwrap();
+    let rewritten = String::from_utf8(out).unwrap();
+    let orig_tokens = content_tokens(&text);
+    let new_tokens = content_tokens(&rewritten);
+    assert_eq!(orig_tokens.len(), new_tokens.len());
+    for (i, (a, b)) in orig_tokens.iter().zip(new_tokens.iter()).enumerate() {
+        assert!(
+            tokens_equal(a, b),
+            "token {i}: '{a}' != '{b}' (byVDIM node block order)"
+        );
+    }
+}
+
 /// Unsupported flavours must fail loudly, naming the section or the format.
+///
+/// Since D143 the v1.1 `spacing` section is *supported* (parsed and
+/// round-tripped), so only the NC-patch flavour still has to refuse.
 #[test]
 fn unsupported_flavours_error_explicitly() {
     for (name, needle) in [
-        ("square-nurbs-pw.mesh", "spacing"),
-        ("pipe-nurbs-log.mesh", "spacing"),
-        ("beam-quad-nurbs-sf.mesh", "spacing"),
         ("nc3-nurbs.mesh", "NC-patch"),
         ("nc-nurbs3d.mesh", "NC-patch"),
     ] {
@@ -586,6 +650,17 @@ fn unsupported_flavours_error_explicitly() {
             msg.contains(needle),
             "{name}: message {msg:?} lacks {needle:?}"
         );
+    }
+    // The v1.1 spacing fixtures read cleanly now, carrying their records.
+    for name in [
+        "square-nurbs-pw.mesh",
+        "pipe-nurbs-log.mesh",
+        "beam-quad-nurbs-sf.mesh",
+    ] {
+        let doc = read_nurbs_mesh_doc_file(data_path(name))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(doc.format, NurbsMeshFormat::V1_1, "{name}");
+        assert!(!doc.spacing.is_empty(), "{name}: spacing records lost");
     }
     // Sanity: the v1.1 header itself is recognised, and non-NURBS headers are
     // rejected with a message that names the format.

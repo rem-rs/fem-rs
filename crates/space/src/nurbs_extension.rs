@@ -7,10 +7,13 @@
 //!
 //! # What is reproduced
 //!
-//! * `Mesh::LoadPatchTopo` + `NURBSExtension::Load` for the `knotvectors` file
-//!   variant (the one every `data/*-nurbs.mesh` mesh uses except
-//!   `square-disc-nurbs-patch.mesh`): `dimension`, `elements`, `boundary`,
-//!   `edges`, `vertices`, `knotvectors`, `weights`.
+//! * `Mesh::LoadPatchTopo` + `NURBSExtension::Load` for both file variants:
+//!   the `knotvectors` flavour (what most `data/*-nurbs.mesh` meshes use) and
+//!   the `patches` flavour (`NURBSPatch` blocks, e.g.
+//!   `square-disc-nurbs-patch.mesh`, from which the unique knot vectors are
+//!   reconstructed through `GetPatchDirectionEdges` / `CheckKVDirection` /
+//!   `KnotVector::Flip`): `dimension`, `elements`, `boundary`, `edges`,
+//!   `vertices`, `knotvectors`, `spacing`, `weights`.
 //! * Edge canonicalisation (`edge_to_ukv` sign flip when the file writes the
 //!   pair in decreasing vertex order) — `Mesh::LoadPatchTopo`.
 //! * `NURBSExtension::GenerateOffsets` / `GetPatchOffsets`: the mesh and space
@@ -29,7 +32,7 @@
 //! all-true (no `mesh_elements` section), `activeVert` is trivial, the periodic
 //! `d_to_d` map is the identity, `NCNURBSExtension` master edges/faces are
 //! absent (as in a conforming mesh, where `IsMasterEdge`/`IsMasterFace` are
-//! false), and the `patches` mesh-file variant, the per-row boundary-element
+//! false), and the per-row boundary-element
 //! DOF *table* (`{Self::boundary_sides}` reproduces the union it feeds into
 //! `GetEssentialTrueDofs`, with the attribute of each row), B-net/patch
 //! conversion, refinement and `Print`/`PrintSolution` are out of scope.  See
@@ -261,6 +264,130 @@ fn section<'a>(
 /// Whether a section is present.
 fn has_section(sections: &[(String, Vec<f64>)], name: &str) -> bool {
     sections.iter().any(|(k, _)| k == name)
+}
+
+/// MFEM `KnotVector::Flip` (mesh/nurbs.cpp): mirror the interior knots around
+/// the midpoint of the parameter interval, `k -> k(0) + k(size-1) - k`.  The
+/// clamped end knots and the order/NCP/element counts are unaffected.
+fn flip_knot_vector(knots: &[f64], order: usize) -> Vec<f64> {
+    let mut k = knots.to_vec();
+    let ncp = k.len() - order - 1;
+    let apb = k[0] + k[k.len() - 1];
+    let ns = ncp.saturating_sub(order) / 2;
+    for i in 1..=ns {
+        let tmp = apb - k[order + i];
+        k[order + i] = apb - k[ncp - i];
+        k[ncp - i] = tmp;
+    }
+    k
+}
+
+/// One `patches`-flavour block — the file image of MFEM's `NURBSPatch`.
+///
+/// The extension only consumes the block's knot vectors (the analysis space's
+/// weights stay unit and the geometry arrives through the mesh's node block),
+/// so the `dimension` / `controlpoints*` payload is validated and skipped.
+struct PatchBlock {
+    /// One `(order, knots)` pair per parametric direction
+    /// (`NCP = knots.len() - order - 1`).
+    knotvectors: Vec<(usize, Vec<f64>)>,
+}
+
+/// Whitespace token scanner over the raw file text, with MFEM's `#` comment
+/// handling (`skip_comment_lines`).
+struct PatchTokens {
+    toks: Vec<String>,
+    pos: usize,
+}
+
+impl PatchTokens {
+    fn next(&mut self) -> Result<String, String> {
+        let tok = self
+            .toks
+            .get(self.pos)
+            .cloned()
+            .ok_or_else(|| "patches: unexpected end of input".to_string())?;
+        self.pos += 1;
+        Ok(tok)
+    }
+
+    fn next_usize(&mut self, what: &str) -> Result<usize, String> {
+        let tok = self.next()?;
+        tok.parse::<usize>()
+            .map_err(|_| format!("patches: expected {what}, got '{tok}'"))
+    }
+
+    fn next_f64(&mut self, what: &str) -> Result<f64, String> {
+        let tok = self.next()?;
+        tok.parse::<f64>()
+            .map_err(|_| format!("patches: expected {what}, got '{tok}'"))
+    }
+
+    fn expect(&mut self, keyword: &str) -> Result<(), String> {
+        let got = self.next()?;
+        if got != keyword {
+            return Err(format!("patches: expected '{keyword}', got '{got}'"));
+        }
+        Ok(())
+    }
+}
+
+/// `NURBSPatch::NURBSPatch(std::istream &)` (mesh/nurbs.cpp): `np` blocks of
+/// `knotvectors / dimension / controlpoints[_cartesian|_homogeneous]`.
+fn parse_patch_blocks(text: &str, np: usize) -> Result<Vec<PatchBlock>, String> {
+    let toks: Vec<String> = text
+        .lines()
+        .map(|l| match l.find('#') {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .flat_map(str::split_whitespace)
+        .map(str::to_string)
+        .collect();
+    let pos = toks
+        .iter()
+        .position(|t| t == "patches")
+        .ok_or_else(|| "patches: missing 'patches' section".to_string())?;
+    let mut s = PatchTokens { toks, pos: pos + 1 };
+    let mut blocks = Vec::with_capacity(np);
+    for p in 0..np {
+        s.expect("knotvectors").map_err(|e| format!("patch {p}: {e}"))?;
+        let n_kv = s.next_usize("knot vector count")?;
+        let mut knotvectors = Vec::with_capacity(n_kv);
+        for _ in 0..n_kv {
+            let order = s.next_usize("knot vector order")?;
+            let ncp = s.next_usize("knot vector NCP")?;
+            let n = ncp + order + 1;
+            let mut knots = Vec::with_capacity(n);
+            for _ in 0..n {
+                knots.push(s.next_f64("knot value")?);
+            }
+            knotvectors.push((order, knots));
+        }
+        s.expect("dimension").map_err(|e| format!("patch {p}: {e}"))?;
+        let d = s.next_usize("patch dimension")?;
+        if d == 0 || d > 3 {
+            return Err(format!("patch {p}: unsupported dimension {d}"));
+        }
+        let keyword = s.next()?;
+        match keyword.as_str() {
+            "controlpoints" | "controlpoints_homogeneous" | "controlpoints_cartesian" => {}
+            other => {
+                return Err(format!(
+                    "patch {p}: expected 'controlpoints', 'controlpoints_homogeneous' or \
+                     'controlpoints_cartesian', got '{other}'"
+                ));
+            }
+        }
+        let n_cp: usize = knotvectors.iter().map(|(o, k)| k.len() - o - 1).product();
+        for _ in 0..n_cp {
+            for _ in 0..(d + 1) {
+                s.next_f64("control point value")?;
+            }
+        }
+        blocks.push(PatchBlock { knotvectors });
+    }
+    Ok(blocks)
 }
 
 fn as_usize(v: f64, what: &str) -> Result<usize, String> {
@@ -550,18 +677,12 @@ impl BdrQuadDofMap<'_> {
 }
 
 impl NurbsExtension {
-    /// Read a NURBS mesh file (`NURBSExtension(std::istream&)` with the
-    /// `knotvectors` variant).
+    /// Read a NURBS mesh file (`NURBSExtension(std::istream&)`).  Both
+    /// geometry flavours of `NURBSExtension::Load` are supported: the
+    /// `knotvectors` variant and the `patches` variant (`NURBSPatch` blocks,
+    /// from which the unique knot vectors are reconstructed).
     pub fn from_mesh_str(text: &str) -> Result<Self, String> {
         let sections = tokenize_mesh(text)?;
-
-        if has_section(&sections, "patches") {
-            return Err(
-                "NurbsExtension: the 'patches' mesh-file variant (NURBSPatch data) is not \
-                 supported yet; use a 'knotvectors' mesh"
-                    .to_string(),
-            );
-        }
 
         // ── patch topology (`Mesh::LoadPatchTopo`) ────────────────────────────
         let dim = as_usize(section(&sections, "dimension")?[0], "dimension")?;
@@ -608,24 +729,6 @@ impl NurbsExtension {
             .unwrap_or(0);
         let n_topo_vertices = declared_vertices.max(max_used);
 
-        // ── unique knot vectors (`NURBSExtension::Load`) ──────────────────────
-        let kv_payload = section(&sections, "knotvectors")?;
-        let n_kv = as_usize(kv_payload[0], "knotvectors")?;
-        let mut knot_vectors = Vec::with_capacity(n_kv);
-        let mut i = 1;
-        for k in 0..n_kv {
-            let order = as_usize(kv_payload[i], "knotvectors order")?;
-            let ncp = as_usize(kv_payload[i + 1], "knotvectors NCP")?;
-            let size = ncp + order + 1;
-            let knots: Vec<f64> = kv_payload
-                .get(i + 2..i + 2 + size)
-                .ok_or_else(|| format!("knotvectors: truncated knot vector {k}"))?
-                .to_vec();
-            let kv = KnotVector::new_clamped(knots)?;
-            knot_vectors.push(NurbsKnot::new(kv, order)?);
-            i += 2 + size;
-        }
-
         // 1D: edge indices are patch indices, the sign encodes orientation.
         let edge_to_ukv = if n_edges == 0 && dim == 1 {
             let mut e2u = vec![0i32; elements.len()];
@@ -639,6 +742,33 @@ impl NurbsExtension {
             e2u
         } else {
             raw_ukv
+        };
+
+        // ── unique knot vectors (`NURBSExtension::Load`) ──────────────────────
+        // The `patches` variant reconstructs them from the patch blocks once
+        // the patch topology (per-patch direction edges) exists; see
+        // `fill_knot_vectors_from_patches`.
+        let patches_variant = has_section(&sections, "patches");
+        let knot_vectors: Vec<NurbsKnot> = if patches_variant {
+            Vec::new()
+        } else {
+            let kv_payload = section(&sections, "knotvectors")?;
+            let n_kv = as_usize(kv_payload[0], "knotvectors")?;
+            let mut knot_vectors = Vec::with_capacity(n_kv);
+            let mut i = 1;
+            for k in 0..n_kv {
+                let order = as_usize(kv_payload[i], "knotvectors order")?;
+                let ncp = as_usize(kv_payload[i + 1], "knotvectors NCP")?;
+                let size = ncp + order + 1;
+                let knots: Vec<f64> = kv_payload
+                    .get(i + 2..i + 2 + size)
+                    .ok_or_else(|| format!("knotvectors: truncated knot vector {k}"))?
+                    .to_vec();
+                let kv = KnotVector::new_clamped(knots)?;
+                knot_vectors.push(NurbsKnot::new(kv, order)?);
+                i += 2 + size;
+            }
+            knot_vectors
         };
 
         let mut ext = Self {
@@ -678,6 +808,13 @@ impl NurbsExtension {
             d_to_d: Vec::new(),
         };
 
+        ext.build_patch_topology()?;
+
+        if patches_variant {
+            // `NURBSExtension::Load`, `patches` branch.
+            ext.fill_knot_vectors_from_patches(text)?;
+        }
+
         // `SetOrdersFromKnotVectors` + `SetOrderFromOrders`.
         ext.orders = ext.knot_vectors.iter().map(|k| k.order()).collect();
         ext.order = {
@@ -691,7 +828,6 @@ impl NurbsExtension {
             o
         };
 
-        ext.build_patch_topology()?;
         if ext.boundary.is_empty() {
             ext.generate_boundary_elements();
         }
@@ -723,6 +859,111 @@ impl NurbsExtension {
         let text = std::fs::read_to_string(path.as_ref())
             .map_err(|e| format!("NurbsExtension::from_mesh_file: {e}"))?;
         Self::from_mesh_str(&text)
+    }
+
+    // ── the `patches` mesh-file variant (`NURBSExtension::Load`) ─────────────
+
+    /// MFEM `NURBSExtension::Load`, `patches` branch: parse the `GetNP()`
+    /// `NURBSPatch` blocks from the raw file text and reconstruct the unique
+    /// knot vectors, each stored in the canonical orientation
+    /// (`KnotVector::Flip` when the patch direction runs against its edge).
+    ///
+    /// Must be called after [`Self::build_patch_topology`] — the per-patch
+    /// direction edges (`GetPatchDirectionEdges`) come from it.
+    fn fill_knot_vectors_from_patches(&mut self, text: &str) -> Result<(), String> {
+        let blocks = parse_patch_blocks(text, self.elements.len())?;
+        let n_kv = (0..self.edge_to_ukv.len())
+            .map(|e| self.knot_ind(e) + 1)
+            .max()
+            .unwrap_or(0);
+        let dim = self.dim;
+        let mut filled: Vec<Option<NurbsKnot>> = (0..n_kv).map(|_| None).collect();
+        for (p, block) in blocks.iter().enumerate() {
+            let dir_edges: Vec<usize> = match dim {
+                1 => vec![self.el_edges[p][0]],
+                2 => vec![self.el_edges[p][0], self.el_edges[p][1]],
+                3 => vec![self.el_edges[p][0], self.el_edges[p][3], self.el_edges[p][8]],
+                d => return Err(format!("patches: unsupported dimension {d}")),
+            };
+            if block.knotvectors.len() != dim {
+                return Err(format!(
+                    "patch {p}: {} knot vectors, expected {dim}",
+                    block.knotvectors.len()
+                ));
+            }
+            let kvdir = self.check_kv_direction(p)?;
+            for (d, &edge) in dir_edges.iter().enumerate() {
+                let kv = self.knot_ind(edge);
+                if filled[kv].is_some() {
+                    continue;
+                }
+                let (order, knots) = &block.knotvectors[d];
+                let knots = if kvdir[d] == -1 {
+                    flip_knot_vector(knots, *order)
+                } else {
+                    knots.clone()
+                };
+                let kvec = KnotVector::new_clamped(knots)?;
+                filled[kv] = Some(NurbsKnot::new(kvec, *order)?);
+            }
+        }
+        self.knot_vectors = filled
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| {
+                k.ok_or_else(|| {
+                    format!("patches: knot vector {i} is not defined by any patch block")
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(())
+    }
+
+    /// MFEM `NURBSExtension::CheckKVDirection` — the per-direction orientation
+    /// (`+1` / `-1`) of patch `p`'s knot vectors, derived by comparing each
+    /// direction edge's vertices with the patch's first vertices.
+    ///
+    /// In 1D the sign of `edge_to_ukv` *is* the orientation.
+    fn check_kv_direction(&self, p: usize) -> Result<Vec<i32>, String> {
+        let dim = self.dim;
+        if dim == 1 {
+            return Ok(vec![self.knot_sign(self.el_edges[p][0])]);
+        }
+        let patchvert = &self.elements[p].verts;
+        let mut kvdir = vec![0i32; dim];
+        for &e in &self.el_edges[p] {
+            let (ev0, ev1) = self.edge_vertex[e];
+            let ks = self.knot_sign(e);
+            // First side (direction 0 runs along patchvert[0] -> patchvert[1]).
+            if ev0 == patchvert[0] && ev1 == patchvert[1] {
+                kvdir[0] = ks;
+            }
+            if ev0 == patchvert[1] && ev1 == patchvert[0] {
+                kvdir[0] = -ks;
+            }
+            // Second side (direction 1 along patchvert[0] -> patchvert[3]).
+            if ev0 == patchvert[0] && ev1 == patchvert[3] {
+                kvdir[1] = ks;
+            }
+            if ev0 == patchvert[3] && ev1 == patchvert[0] {
+                kvdir[1] = -ks;
+            }
+            if dim == 3 {
+                // Third side (direction 2 along patchvert[0] -> patchvert[4]).
+                if ev0 == patchvert[0] && ev1 == patchvert[4] {
+                    kvdir[2] = ks;
+                }
+                if ev0 == patchvert[4] && ev1 == patchvert[0] {
+                    kvdir[2] = -ks;
+                }
+            }
+        }
+        if kvdir.contains(&0) {
+            return Err(format!(
+                "patch {p}: could not find the direction of a knot vector"
+            ));
+        }
+        Ok(kvdir)
     }
 
     // ── derived data (`SetOrdersFromKnotVectors` … `GenerateElementDofTable`) ─
@@ -2358,3 +2599,23 @@ impl NurbsExtension {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod flip_tests {
+    use super::flip_knot_vector;
+
+    #[test]
+    fn mirrors_interior_knots_like_mfem() {
+        // Hand-computed from `KnotVector::Flip`: apb = k(0)+k(size-1) = 1,
+        // ns = (NCP-Order)/2, k(Order+i) <-> apb - k(NCP-i).  For the
+        // asymmetric interior knot 0.2 the flip mirrors it to 0.8.
+        let kv = [0.0, 0.0, 0.2, 1.0, 1.0];
+        assert_eq!(flip_knot_vector(&kv, 1), vec![0.0, 0.0, 0.8, 1.0, 1.0]);
+        // A symmetric knot vector is its own flip.
+        let sym = [0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0];
+        assert_eq!(flip_knot_vector(&sym, 1), sym.to_vec());
+        // Clamped quadratic with no interior knots is unchanged.
+        let clamp = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        assert_eq!(flip_knot_vector(&clamp, 2), clamp.to_vec());
+    }
+}

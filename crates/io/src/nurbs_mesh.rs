@@ -11,8 +11,10 @@
 //! Both geometry flavours are handled: the `knotvectors` + `weights` flavour,
 //! and the `patches` flavour (one block per patch; the patch count comes from
 //! the `elements` section, matching MFEM's `NURBSExtension::GetNP()`).
-//! `MFEM NURBS NC-patch mesh v1.0` and the v1.1 `spacing` section are rejected
-//! with an error that names the section.
+//! The v1.1 `spacing` section is parsed into [`NurbsSpacingRecord`]s and
+//! round-tripped (the knot vectors themselves are unaffected); only
+//! `MFEM NURBS NC-patch mesh v1.0` is still rejected with an error that names
+//! the format.
 //!
 //! # Format
 //!
@@ -47,7 +49,9 @@
 //! n_kv
 //! Order NCP kv0 ... kvNCP+Order            (NCP + Order + 1 knot values)
 //!
-//! spacing                                 (v1.1 only — not supported yet)
+//! spacing                                 (v1.1 only, optional)
+//! n
+//! kv type nip nrp ipar... dpar...         (one record per spacing function)
 //!
 //! weights
 //! w0 w1 ...                               (one per control point)
@@ -86,10 +90,40 @@ use fem_element::nurbs::{
 /// Result from parsing a NURBS mesh file.
 #[derive(Debug, Clone)]
 pub enum NurbsFile {
+    /// A 1-D NURBS mesh (`segment-nurbs.mesh`; the `knotvectors` flavour).
+    Mesh1D(NurbsMesh1D),
     /// A 2-D NURBS mesh.
     Mesh2D(NurbsMesh2D),
     /// A 3-D NURBS mesh.
     Mesh3D(NurbsMesh3D),
+}
+
+/// One patch of a 1-D NURBS mesh.
+#[derive(Debug, Clone)]
+pub struct NurbsPatch1DData {
+    /// The single parametric knot vector.
+    pub kv: KnotVector,
+    /// One scalar coordinate per control point — the 1-D fixtures carry
+    /// `VDim: 1`; a larger node-block `VDim` is rejected on read.
+    pub control_pts: Vec<f64>,
+    /// One rational weight per control point.
+    pub weights: Vec<f64>,
+    /// Patch attribute (the `elements` section tag).
+    pub tag: i32,
+}
+
+/// A 1-D NURBS mesh.
+#[derive(Debug, Clone)]
+pub struct NurbsMesh1D {
+    /// One entry per topology element (MFEM's `GetNP()`).
+    pub patches: Vec<NurbsPatch1DData>,
+}
+
+impl NurbsMesh1D {
+    /// Number of patches.
+    pub fn n_patches(&self) -> usize {
+        self.patches.len()
+    }
 }
 
 /// Read an MFEM NURBS mesh file from a `BufRead` source.
@@ -101,9 +135,10 @@ pub enum NurbsFile {
 ///   `patches.len() == mesh.n_patches()`;
 /// * `knotvectors` + `weights` — the *legacy* single-patch view: the first
 ///   `dim` knot vectors and the control points they consume.  A multi-patch
-///   file in this flavour (e.g. `disc-nurbs.mesh`: 5 knot vectors, 5 patches)
+///   file in this flavour (e.g. `disc-nurbs.mesh`: 3 knot vectors, 5 patches)
 ///   is still reduced to its first patch; use [`read_nurbs_mesh_doc`] plus
-///   [`NurbsMeshDoc::is_single_patch_representable`] to detect it, or
+///   [`NurbsMeshDoc::is_single_patch_representable`] to detect it,
+///   [`NurbsMeshDoc::to_nurbs_file`] for the full multi-patch view, or
 ///   [`NurbsMeshDoc::n_patches`] to count the patches the file really has.
 pub fn read_nurbs_mesh<R: Read>(reader: R) -> FemResult<NurbsFile> {
     let doc = read_nurbs_mesh_doc(reader)?;
@@ -198,6 +233,40 @@ fn build_single_patch_2d(
             tag: 1,
         }],
         edge_connectivity: Vec::new(),
+    }))
+}
+
+/// Single-patch view of a 1-D `knotvectors` document (`segment-nurbs.mesh`).
+fn build_single_patch_1d(
+    kv_data: &[(usize, Vec<f64>)],
+    weights: &[f64],
+    ctrl_coords: &[f64],
+    vdim: usize,
+) -> FemResult<NurbsFile> {
+    let (order, knots) = kv_data
+        .first()
+        .ok_or_else(|| FemError::Mesh("1D needs 1 knot vector".into()))?;
+    if vdim != 1 {
+        return Err(FemError::Mesh(format!(
+            "nurbs mesh: the 1-D NurbsFile variant carries one scalar coordinate per \
+             control point, but the node block has VDim {vdim}"
+        )));
+    }
+    let kv = KnotVector::new(knots.clone(), *order);
+    let expected = kv.n_basis();
+    let n_cp = ctrl_coords.len().min(expected);
+    let mut control_pts = Vec::with_capacity(expected);
+    control_pts.extend_from_slice(&ctrl_coords[..n_cp]);
+    control_pts.resize(expected, 0.0);
+    let mut w: Vec<f64> = weights[..weights.len().min(expected)].to_vec();
+    w.resize(expected, 1.0);
+    Ok(NurbsFile::Mesh1D(NurbsMesh1D {
+        patches: vec![NurbsPatch1DData {
+            kv,
+            control_pts,
+            weights: w,
+            tag: 1,
+        }],
     }))
 }
 
@@ -345,6 +414,31 @@ impl NurbsMeshFormat {
     }
 }
 
+/// One record of the v1.1 `spacing` section — MFEM `NURBSExtension::Load`
+/// (the `spacing` flag): the knot-vector index followed by the
+/// `SpacingFunction::Print` image
+/// `<SpacingType> <num-int> <num-real> <int params…> <real params…>`
+/// (`mesh/spacing.hpp`: `0=UNIFORM 1=LINEAR 2=GEOMETRIC 3=BELL 4=GAUSSIAN
+/// 5=LOGARITHMIC 6=PIECEWISE 7=PARTIAL`).
+///
+/// The parameters are retained verbatim so the section round-trips.  Spacing
+/// functions only influence NURBS *h*-refinement, which fem-rs has not ported;
+/// reading them leaves the knot vectors themselves untouched (probe-verified:
+/// `beam-quad-nurbs-sf.mesh` and its spacing-less twin `beam-quad-nurbs.mesh`
+/// carry identical knot structures, NKV=3, NDof=18).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NurbsSpacingRecord {
+    /// Knot-vector index the spacing function belongs to (MFEM verifies
+    /// `0 <= ki < NumOfKnotVectors`).
+    pub knotvector: usize,
+    /// `SpacingType` discriminant.
+    pub spacing_type: i32,
+    /// Integer parameters (`ipar`).
+    pub int_params: Vec<i32>,
+    /// Real parameters (`dpar`).
+    pub real_params: Vec<f64>,
+}
+
 /// One `elements` / `boundary` record: attribute, MFEM geometry type and the
 /// node (vertex) indices — `Mesh::ReadElement` in mesh/mesh.cpp.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,6 +553,9 @@ pub struct NurbsMeshDoc {
     pub n_vertices: usize,
     /// Geometry section.
     pub geometry: NurbsGeometry,
+    /// The v1.1 `spacing` section (empty for v1.0 files and the `patches`
+    /// flavour).  See [`NurbsSpacingRecord`].
+    pub spacing: Vec<NurbsSpacingRecord>,
     /// Finite-element collection name from the node block, e.g. `NURBS1`.
     /// Synthesised as `NURBS<order>` when the file has no node block.
     pub collection: String,
@@ -510,35 +607,25 @@ impl NurbsMeshDoc {
     /// Build the patch-wise [`NurbsFile`] view used by the NURBS element and
     /// space code.
     ///
-    /// Supported: the `patches` flavour (one patch per block, in file order)
-    /// and the `knotvectors` flavour when the document really is a single patch
-    /// (`dim` knot vectors, one element) of dimension 2 or 3.
+    /// Supported:
     ///
-    /// A 1-D document cannot be converted: [`NurbsFile`] has no 1-D variant
-    /// (`NurbsMesh2D` / `NurbsMesh3D` only).  The *document* model and the
-    /// writer handle 1-D fine (`data/segment-nurbs.mesh` round-trips
-    /// byte-exactly); only this patch-wise view is limited.
-    ///
-    /// A multi-patch `knotvectors` document is rejected: mapping
-    /// element -> (knot vectors, control points) needs MFEM's
-    /// `NURBS_PatchMap` / `GenerateElementDofTable` machinery, which fem-rs has
-    /// not ported.  Use [`Self::elements`] and [`Self::geometry`] directly, or
-    /// [`Self::is_single_patch_representable`] to detect the situation.
+    /// * the `patches` flavour (one patch per block, in file order);
+    /// * the `knotvectors` flavour when the document really is a single patch
+    ///   (`dim` knot vectors, one element) of any dimension;
+    /// * multi-patch `knotvectors` documents: one patch per topology element,
+    ///   with per-direction knot vectors, control points and orientation
+    ///   resolved through `fem_space`'s `NurbsExtension` (the port of MFEM's
+    ///   `NURBS_PatchMap` / `GenerateElementDofTable` machinery).  Requires a
+    ///   node block whose row count equals MFEM's `GetNDof()`.
     pub fn to_nurbs_file(&self) -> FemResult<NurbsFile> {
         match &self.geometry {
             NurbsGeometry::Patches(blocks) => self.patches_to_nurbs_file(blocks),
             NurbsGeometry::Global { .. } => {
-                if !self.is_single_patch_representable() {
-                    return Err(FemError::Mesh(format!(
-                        "nurbs mesh: {}-D document has {} knot vectors and {} elements — \
-                         only the `patches` flavour and single-patch `knotvectors` \
-                         documents can be converted to a patch-wise NurbsFile",
-                        self.dim,
-                        self.n_knot_vectors(),
-                        self.elements.len()
-                    )));
+                if self.is_single_patch_representable() {
+                    self.global_single_patch_to_nurbs_file()
+                } else {
+                    self.global_multi_patch_to_nurbs_file()
                 }
-                self.global_single_patch_to_nurbs_file()
             }
         }
     }
@@ -563,12 +650,150 @@ impl NurbsMeshDoc {
             .collect();
         let flat: Vec<f64> = self.coords.iter().flatten().copied().collect();
         match self.dim {
+            1 => build_single_patch_1d(&kv_data, weights, &flat, self.vdim),
             2 => build_single_patch_2d(&kv_data, weights, &flat, self.vdim, self.coords.len()),
             3 => build_single_patch_3d(&kv_data, weights, &flat, self.vdim, self.coords.len()),
             _ => Err(FemError::Mesh(format!(
                 "nurbs mesh: unsupported dimension {}",
                 self.dim
             ))),
+        }
+    }
+
+    /// Multi-patch `knotvectors` view: MFEM's unified-knotvector representation
+    /// maps every element (= patch) to its per-direction knot vectors and
+    /// control points through `NURBS_PatchMap` / `GenerateElementDofTable`.
+    /// That machinery is ported in `fem_space::NurbsExtension`, so this
+    /// re-serializes the document, builds the extension from it, and gathers
+    /// each patch's control points by global DOF (probe-pinned against MFEM
+    /// 4.10's `NURBSPatchMap` dumps — see `tmp/d143/probe_truth.txt`).
+    fn global_multi_patch_to_nurbs_file(&self) -> FemResult<NurbsFile> {
+        let mut buf = Vec::new();
+        write_nurbs_mesh_doc(self, &mut buf)?;
+        let text = String::from_utf8(buf).map_err(|e| {
+            FemError::Mesh(format!("nurbs mesh: document re-serialization failed: {e}"))
+        })?;
+        let ext = fem_space::NurbsExtension::from_mesh_str(&text)
+            .map_err(|e| FemError::Mesh(format!("nurbs mesh: {e}")))?;
+        if self.coords.len() != ext.n_dofs() {
+            return Err(FemError::Mesh(format!(
+                "nurbs mesh: the node block carries {} control points, expected \
+                 GetNDof {}",
+                self.coords.len(),
+                ext.n_dofs()
+            )));
+        }
+        if self.vdim < self.dim {
+            return Err(FemError::Mesh(format!(
+                "nurbs mesh: node block VDim {vdim} cannot carry dimension {d} geometry",
+                vdim = self.vdim,
+                d = self.dim
+            )));
+        }
+        if self.dim == 1 && self.vdim != 1 {
+            return Err(FemError::Mesh(
+                "nurbs mesh: the 1-D NurbsFile variant carries one scalar coordinate per \
+                 control point"
+                    .into(),
+            ));
+        }
+        let NurbsGeometry::Global { weights, .. } = &self.geometry else {
+            unreachable!("caller checked the geometry flavour");
+        };
+
+        let mut p1: Vec<NurbsPatch1DData> = Vec::new();
+        let mut p2: Vec<NurbsPatch2DData> = Vec::with_capacity(ext.n_patches());
+        let mut p3: Vec<NurbsPatch3DData> = Vec::with_capacity(ext.n_patches());
+        for p in 0..ext.n_patches() {
+            let kvs = ext
+                .patch_knot_vectors(p)
+                .map_err(FemError::Mesh)?;
+            let ncps: Vec<usize> = kvs.iter().map(|kv| kv.ncp()).collect();
+            let n_cp: usize = ncps.iter().product();
+            let tag = self.elements.get(p).map(|e| e.attribute).unwrap_or(1);
+
+            // Patch-local control points in MFEM's `NURBSPatchMap` order
+            // (i fastest along the first knot vector).
+            let mut dofs = Vec::with_capacity(n_cp);
+            let dof = |multi: &[usize]| -> FemResult<usize> {
+                ext.patch_dof(p, multi)
+                    .map_err(|e| FemError::Mesh(format!("nurbs mesh: patch {p}: {e}")))
+            };
+            match self.dim {
+                1 => {
+                    for i in 0..ncps[0] {
+                        dofs.push(dof(&[i])?);
+                    }
+                }
+                2 => {
+                    for j in 0..ncps[1] {
+                        for i in 0..ncps[0] {
+                            dofs.push(dof(&[i, j])?);
+                        }
+                    }
+                }
+                3 => {
+                    for k in 0..ncps[2] {
+                        for j in 0..ncps[1] {
+                            for i in 0..ncps[0] {
+                                dofs.push(dof(&[i, j, k])?);
+                            }
+                        }
+                    }
+                }
+                d => {
+                    return Err(FemError::Mesh(format!(
+                        "nurbs mesh: unsupported dimension {d}"
+                    )));
+                }
+            }
+            let coord = |d: usize| -> FemResult<Vec<f64>> {
+                Ok(self.coords[d][..self.dim].to_vec())
+            };
+            let weight = |d: usize| weights.get(d).copied().unwrap_or(1.0);
+            let cps: Vec<(Vec<f64>, f64)> = dofs
+                .iter()
+                .map(|&d| Ok((coord(d)?, weight(d))))
+                .collect::<FemResult<Vec<_>>>()?;
+            // `NurbsKnot` stores an `iga::KnotVector`; the patch data carries
+            // the `nurbs::KnotVector` flavour, rebuilt from the same knots.
+            let kv = |i: usize| {
+                KnotVector::new(kvs[i].knot_vector().as_slice().to_vec(), kvs[i].order())
+            };
+            match self.dim {
+                1 => p1.push(NurbsPatch1DData {
+                    kv: kv(0),
+                    control_pts: cps.iter().map(|(c, _)| c[0]).collect(),
+                    weights: cps.iter().map(|(_, w)| *w).collect(),
+                    tag,
+                }),
+                2 => p2.push(NurbsPatch2DData {
+                    kv_u: kv(0),
+                    kv_v: kv(1),
+                    control_pts: cps.iter().map(|(c, _)| [c[0], c[1]]).collect(),
+                    weights: cps.iter().map(|(_, w)| *w).collect(),
+                    tag,
+                }),
+                _ => p3.push(NurbsPatch3DData {
+                    kv_u: kv(0),
+                    kv_v: kv(1),
+                    kv_w: kv(2),
+                    control_pts: cps.iter().map(|(c, _)| [c[0], c[1], c[2]]).collect(),
+                    weights: cps.iter().map(|(_, w)| *w).collect(),
+                    tag,
+                }),
+            }
+        }
+        match self.dim {
+            1 => Ok(NurbsFile::Mesh1D(NurbsMesh1D { patches: p1 })),
+            2 => Ok(NurbsFile::Mesh2D(NurbsMesh2D {
+                patches: p2,
+                edge_connectivity: Vec::new(),
+            })),
+            _ => Ok(NurbsFile::Mesh3D(NurbsMesh3D {
+                patches: p3,
+                face_connectivity: Vec::new(),
+            })),
         }
     }
 
@@ -736,6 +961,7 @@ pub fn read_nurbs_mesh_doc_str(src: &str) -> FemResult<NurbsMeshDoc> {
 
     // ── Geometry section ────────────────────────────────────────────────
     let section = s.next_token()?;
+    let mut spacing = Vec::new();
     let geometry = match section.as_str() {
         "knotvectors" => {
             let n_kv = s.next_usize()?;
@@ -744,13 +970,51 @@ pub fn read_nurbs_mesh_doc_str(src: &str) -> FemResult<NurbsMeshDoc> {
                 knotvectors.push(read_kv_record(&mut s)?);
             }
             let kw = s.next_token()?;
-            if kw != "weights" {
-                return Err(FemError::Mesh(format!(
-                    "nurbs mesh line {}: expected 'weights' after 'knotvectors', got '{kw}'. \
-                     The v1.1 'spacing' section and the 'mesh_elements' / 'periodic' \
-                     sections are not supported yet.",
-                    s.line_no()
-                )));
+            match kw.as_str() {
+                "spacing" => {
+                    // v1.1: one record per spacing function; the knot vectors
+                    // themselves are unaffected.
+                    let n = s.next_usize()?;
+                    spacing.reserve(n);
+                    for _ in 0..n {
+                        let r = read_spacing_record(&mut s)?;
+                        if r.knotvector >= n_kv {
+                            return Err(FemError::Mesh(format!(
+                                "nurbs mesh line {}: spacing record for knot vector {}, \
+                                 but the file declares only {n_kv}",
+                                s.line_no(),
+                                r.knotvector
+                            )));
+                        }
+                        spacing.push(r);
+                    }
+                    let w = s.next_token()?;
+                    if w != "weights" {
+                        return Err(FemError::Mesh(format!(
+                            "nurbs mesh line {}: expected 'weights' after 'knotvectors', \
+                             got '{w}'",
+                            s.line_no()
+                        )));
+                    }
+                }
+                "weights" => {}
+                // MFEM also accepts these before `spacing`; they carry NURBS
+                // refinement bookkeeping, which fem-rs has not ported.
+                "refinements" | "knotvector_refinements" => {
+                    return Err(FemError::Mesh(format!(
+                        "nurbs mesh line {}: the '{kw}' section (MFEM NURBS refinement \
+                         bookkeeping) is not supported yet",
+                        s.line_no()
+                    )));
+                }
+                other => {
+                    return Err(FemError::Mesh(format!(
+                        "nurbs mesh line {}: expected 'weights' after 'knotvectors', \
+                         got '{other}'. The 'mesh_elements' / 'periodic' sections are \
+                         not supported yet.",
+                        s.line_no()
+                    )));
+                }
             }
             let mut weights = Vec::new();
             while let Some(tok) = s.next_weight_until_fes()? {
@@ -815,6 +1079,7 @@ pub fn read_nurbs_mesh_doc_str(src: &str) -> FemResult<NurbsMeshDoc> {
         edges,
         n_vertices,
         geometry,
+        spacing,
         collection,
         vdim,
         ordering,
@@ -933,8 +1198,37 @@ fn read_patch_record(s: &mut DocScanner) -> FemResult<NurbsPatchRecord> {
     })
 }
 
+/// One record of the v1.1 `spacing` section (MFEM `NURBSExtension::Load`):
+/// `<kv> <SpacingType> <num-int> <num-real> <ipar…> <dpar…>` — see
+/// [`NurbsSpacingRecord`].
+fn read_spacing_record(s: &mut DocScanner) -> FemResult<NurbsSpacingRecord> {
+    let knotvector = s.next_usize()?;
+    let spacing_type = s.next_i32()?;
+    let nip = s.next_usize()?;
+    let nrp = s.next_usize()?;
+    let mut int_params = Vec::with_capacity(nip);
+    for _ in 0..nip {
+        int_params.push(s.next_i32()?);
+    }
+    let mut real_params = Vec::with_capacity(nrp);
+    for _ in 0..nrp {
+        real_params.push(s.next_f64()?);
+    }
+    Ok(NurbsSpacingRecord {
+        knotvector,
+        spacing_type,
+        int_params,
+        real_params,
+    })
+}
+
 /// The `FiniteElementSpace` node block, when the file has one.  Only the
 /// `patches` flavour may omit it (see [`NurbsMeshDoc::has_node_block`]).
+///
+/// The coordinate rows are normalised to one row per control point
+/// regardless of the file's `Ordering:` (`0` = byNODES interleaves the
+/// components, `1` = byVDIM stores all of a component first) — MFEM's
+/// `GridFunction::Load` applies the same permutation.
 fn read_node_block(s: &mut DocScanner) -> FemResult<(String, usize, i32, Vec<Vec<f64>>)> {
     s.expect("FiniteElementCollection:")?;
     let collection = s.next_token()?;
@@ -959,12 +1253,15 @@ fn read_node_block(s: &mut DocScanner) -> FemResult<(String, usize, i32, Vec<Vec
             flat.len()
         )));
     }
-    Ok((
-        collection,
-        vdim,
-        ordering,
-        flat.chunks(vdim).map(|c| c.to_vec()).collect(),
-    ))
+    let n = flat.len() / vdim;
+    let coords: Vec<Vec<f64>> = if ordering == 1 {
+        (0..n)
+            .map(|d| (0..vdim).map(|c| flat[c * n + d]).collect())
+            .collect()
+    } else {
+        flat.chunks(vdim).map(|c| c.to_vec()).collect()
+    };
+    Ok((collection, vdim, ordering, coords))
 }
 
 /// Whitespace-agnostic token scanner with MFEM's `#` comment handling.
@@ -1223,6 +1520,28 @@ pub fn write_nurbs_mesh_doc_with_precision<W: Write>(
             for kv in knotvectors {
                 write_kv_record(&mut writer, kv, &g)?;
             }
+            if !doc.spacing.is_empty() {
+                // `NURBSExtension::Print`: `\nspacing\n<count>\n` then one
+                // `<kv> <type> <nip> <nrp> <ipar…> <dpar…>` line per record.
+                writeln!(writer, "\nspacing\n{}", doc.spacing.len())?;
+                for r in &doc.spacing {
+                    write!(
+                        writer,
+                        "{} {} {} {}",
+                        r.knotvector,
+                        r.spacing_type,
+                        r.int_params.len(),
+                        r.real_params.len()
+                    )?;
+                    for v in &r.int_params {
+                        write!(writer, " {v}")?;
+                    }
+                    for v in &r.real_params {
+                        write!(writer, " {}", g(*v))?;
+                    }
+                    writeln!(writer)?;
+                }
+            }
             writeln!(writer, "\nweights")?;
             for w in weights {
                 writeln!(writer, "{}", g(*w))?;
@@ -1275,6 +1594,10 @@ pub fn write_nurbs_mesh_doc_with_precision<W: Write>(
     writeln!(writer, "VDim: {}", doc.vdim)?;
     writeln!(writer, "Ordering: {}", doc.ordering)?;
     writeln!(writer)?;
+    // `GridFunction::Save`: the data stream is per-`Ordering` — byNODES
+    // interleaves the components of each control point, byVDIM stores all of
+    // a component first — and `Vector::Print` wraps it at `vdim` values per
+    // line (1 for byNODES, `vdim` for byVDIM).
     for (i, cp) in doc.coords.iter().enumerate() {
         if cp.len() != doc.vdim {
             return Err(FemError::Mesh(format!(
@@ -1283,7 +1606,23 @@ pub fn write_nurbs_mesh_doc_with_precision<W: Write>(
                 doc.vdim
             )));
         }
-        writeln!(writer, "{}", join_numbers(cp, &g))?;
+    }
+    let mut stream: Vec<String> = Vec::with_capacity(doc.coords.len() * doc.vdim);
+    if doc.ordering == 1 {
+        for c in 0..doc.vdim {
+            for cp in &doc.coords {
+                stream.push(g(cp[c]));
+            }
+        }
+    } else {
+        for cp in &doc.coords {
+            for v in cp {
+                stream.push(g(*v));
+            }
+        }
+    }
+    for chunk in stream.chunks(doc.vdim.max(1)) {
+        writeln!(writer, "{}", chunk.join(" "))?;
     }
     Ok(())
 }
