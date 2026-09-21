@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use fem_linalg::{CooMatrix, CsrMatrix};
 
-use crate::darcy_solvers::{BdpMinresSolver, IterSolveParameters, SchurMode};
+use crate::darcy_solvers::{BdpMinresSolver, DarcySolver, IterSolveParameters, SchurMode};
 
 /// MFEM `blocksolvers::DFSParameters`.
 #[derive(Debug, Clone)]
@@ -993,6 +993,11 @@ impl DivFreeSolver {
         self.n
     }
 
+    /// Block sizes `[0, n_u, n_u + n_p]` (MFEM `DarcySolver::offsets_`).
+    pub fn offsets(&self) -> [usize; 3] {
+        [0, self.n_u, self.n]
+    }
+
     /// Number of multilevel levels (`P_l2.size() + 1`).
     pub fn num_levels(&self) -> usize {
         self.finest + 1
@@ -1175,6 +1180,19 @@ impl DivFreeSolver {
     /// BBT (potential) solver iteration count of the last `mult`.
     pub fn bbt_iterations(&self) -> usize {
         self.bbt_solver.num_iterations()
+    }
+}
+
+impl DarcySolver for DivFreeSolver {
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        // Inherent-method path: does not recurse into this trait impl.
+        DivFreeSolver::mult(self, x, y)
+    }
+    fn num_iterations(&self) -> usize {
+        DivFreeSolver::num_iterations(self)
+    }
+    fn offsets(&self) -> [usize; 3] {
+        DivFreeSolver::offsets(self)
     }
 }
 

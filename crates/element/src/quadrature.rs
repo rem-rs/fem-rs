@@ -283,93 +283,140 @@ pub fn gauss_legendre_arbitrary(n: usize) -> (Vec<f64>, Vec<f64>) {
     (pts_sorted, wts_sorted)
 }
 
-/// Compute Gauss-Jacobi points and weights on `[-1, 1]` for arbitrary `n` points.
+/// Gauss-Jacobi points and weights on `[-1, 1]` for arbitrary `n` points.
 ///
-/// Gauss-Jacobi quadrature integrates functions with weight `(1-x)^α (1+x)^β`.
-/// Special cases:
-/// - α = β = 0: Gauss-Legendre
-/// - α = β = -0.5: Gauss-Chebyshev
-/// - α = β: Gauss-Gegenbauer
+/// Gauss-Jacobi quadrature integrates functions with weight `(1-x)^α (1+x)^β`;
+/// the rule is exact for polynomials of degree `2n-1` and the weights sum to
+/// `2^(α+β+1) · B(α+1, β+1)`.
 ///
-/// Uses the Golub-Welsch algorithm (eigenvalue decomposition of the Jacobi matrix).
-/// Returns (points, weights) where weights sum to 2^(α+β+1) * B(α+1, β+1).
+/// D564/D565: this is a 1:1 port of MFEM 4.10
+/// `QuadratureFunctions1D::GaussJacobi` (`fem/intrules.cpp:488`) — Gatteschi
+/// asymptotic initial guess + Newton iteration on the Jacobi three-term
+/// recurrence, with `lgamma`-based weight constants — evaluated on the `[-1,1]`
+/// variable and stored in increasing node order, then served through the
+/// historical `[-1,1]` convention of this function (`x = 2t − 1`,
+/// `w = w_t · 2^(α+β+1)`, the exact conversion
+/// `tmp/d550/probe_gj.cpp` applies to MFEM's `[0,1]` output).  It *replaces*
+/// the former Golub-Welsch route whose hand-rolled tridiagonal eigen-solver
+/// panicked (`d[l+1]` out of bounds) for 161 of the 240 `(α,β,n)` probe
+/// combinations and returned wrong rules for the `α+β=±0.5` faces; the
+/// `(0,0)` case now runs the same MFEM algorithm instead of a Gauss-Legendre
+/// shortcut (agrees with it to ≤ 5.5e-15, see `tmp/d550/d550_evidence.md`).
 ///
 /// # Arguments
 /// * `n` — number of quadrature points
-/// * `alpha` — left exponent α
-/// * `beta` — right exponent β
+/// * `alpha` — left exponent α (must be > -1 and ≤ 4, like MFEM)
+/// * `beta` — right exponent β (must be > -1 and ≤ 4, like MFEM)
+///
+/// # Panics
+/// Panics if `alpha ≤ -1`, `beta ≤ -1`, `alpha > 4` or `beta > 4` (MFEM's
+/// `MFEM_ABORT` conditions: the Jacobi weight is undefined below −1 and the
+/// Gatteschi expansion is only validated up to 4).
 ///
 /// # Returns
-/// (points, weights) where points are in increasing order
+/// (points, weights) where points are in increasing order on `[-1, 1]`
 pub fn gauss_jacobi(n: usize, alpha: f64, beta: f64) -> (Vec<f64>, Vec<f64>) {
     if n == 0 {
         return (vec![], vec![]);
     }
-    // For α=β=0, use Gauss-Legendre (avoids removable singularity in Golub-Welsch)
-    if (alpha.abs() < 1e-15) && (beta.abs() < 1e-15) {
-        return if n <= 4 {
-            gauss_legendre_1d(n)
-        } else {
-            gauss_legendre_arbitrary(n)
-        };
+    if alpha <= -1.0 || beta <= -1.0 {
+        panic!(
+            "gauss_jacobi: only defined for alpha > -1 and beta > -1 (got alpha={alpha}, beta={beta})"
+        );
     }
+    if alpha > 4.0 || beta > 4.0 {
+        panic!(
+            "gauss_jacobi: current implementation only tested for alpha <= 4 and beta <= 4 (got alpha={alpha}, beta={beta})"
+        );
+    }
+
+    let ab = alpha + beta;
+    // `2^(α+β+1)`: the factor the probe (and this function's `[-1,1]`
+    // convention) applies to MFEM's `[0,1]` weights.
+    let p2 = 2.0_f64.powf(ab + 1.0);
+
     if n == 1 {
+        // MFEM `switch (np) case 1` (`fem/intrules.cpp:523`), operation for
+        // operation — including the `0.5 * w / 2^(α+β)` mapping factor — then
+        // converted back to `[-1,1]`.
         let x = (beta - alpha) / (alpha + beta + 2.0);
-        let w = 2.0_f64.powf(alpha + beta + 1.0);
-        return (vec![x], vec![w]);
+        let w = p2 * ln_gamma(alpha + 2.0).exp() * ln_gamma(beta + 2.0).exp()
+            / ln_gamma(alpha + beta + 2.0).exp();
+        let w = 0.5 * w / 2.0_f64.powf(ab);
+        let wt = 4.0 * w / ((1.0 - x * x) * (alpha + beta + 2.0) * (alpha + beta + 2.0));
+        let t = 0.5 * x + 0.5;
+        return (vec![2.0 * t - 1.0], vec![wt * p2]);
     }
 
-    // Golub-Welsch algorithm: build the symmetric tridiagonal Jacobi matrix
-    // and compute its eigenvalues (nodes) and first components of eigenvectors (weights).
-    let mut diag = vec![0.0f64; n];
-    let mut offd = vec![0.0f64; n - 1];
+    // Common constants for the Jacobi polynomials (MFEM, `intrules.cpp:549`).
+    let a2_minus_b2 = (alpha - beta) * (alpha + beta);
+    let mut xs = vec![0.0_f64; n];
+    let mut ws = vec![0.0_f64; n];
 
-    for i in 0..n {
-        let i_f = i as f64;
-        // Diagonal element
-        let a = alpha;
-        let b = beta;
-        let num = b * b - a * a;
-        let den = (2.0 * i_f + a + b) * (2.0 * i_f + a + b + 2.0);
-        if den.abs() > 1e-30 {
-            diag[i] = num / den;
-        } else {
-            diag[i] = 0.0;
+    // Roots of P^(α,β)_n on [-1,1]: Gatteschi initial guess + Newton.
+    for i in 1..=n {
+        let n_ab_plus_1 = (2 * n) as f64 + alpha + beta + 1.0;
+        let v = (2.0 * i as f64 + alpha - 0.5) * std::f64::consts::PI / n_ab_plus_1;
+        let theta = v
+            + 1.0 / (n_ab_plus_1 * n_ab_plus_1)
+                * ((0.25 - alpha * alpha) * 1.0 / (0.5 * v).tan()
+                    - (0.25 - beta * beta) * (0.5 * v).tan());
+        let mut z = theta.cos();
+
+        let pp_final;
+        let mut p1;
+        let mut xi = 0.0_f64;
+        let mut done = false;
+        loop {
+            let mut p2_rec = 1.0_f64;
+            p1 = ((alpha - beta) + (alpha + beta + 2.0) * z) / 2.0;
+            for j in 1..=(n - 1) {
+                let p3 = p2_rec;
+                p2_rec = p1;
+
+                let j_f = j as f64;
+                let jx2_ab = 2.0 * j_f + ab;
+                let an = jx2_ab * (jx2_ab + 2.0);
+                let bn = a2_minus_b2;
+                let cn = 2.0 * (j_f + alpha) * (j_f + beta) * (jx2_ab + 2.0) / (jx2_ab + 1.0);
+                let d = (jx2_ab + 1.0) / (2.0 * (j_f + 1.0) * (j_f + ab + 1.0) * jx2_ab);
+                p1 = ((an * z + bn) * p2_rec - cn * p3) * d;
+            }
+            // p1 is the Jacobi polynomial, pp its derivative.  Like MFEM (and
+            // [`gauss_legendre_01_newton_mfem`]), after the convergence test
+            // fires the recurrence runs one more pass to re-evaluate `pp` at
+            // the converged point.
+            let pp_here = ((n as f64 * (alpha - beta - ((2 * n) as f64 + ab) * z) * p1
+                + 2.0 * (n as f64 + alpha) * (n as f64 + beta) * p2_rec))
+                / (((2 * n) as f64 + ab) * (1.0 - z * z));
+            if done {
+                pp_final = pp_here;
+                break;
+            }
+            let dz = p1 / pp_here;
+            if dz.abs() < f64::EPSILON {
+                done = true;
+                xi = z - dz;
+            }
+            z -= dz;
         }
+        let c0 = exp_ln_gamma_ratio(n as f64 + alpha + 1.0, n as f64 + ab + 1.0)
+            * exp_ln_gamma_ratio(n as f64 + beta + 1.0, (n + 1) as f64);
+        // Map to [0,1] exactly as MFEM stores, then back to [-1,1] (probe
+        // convention: xi = 2t - 1, wxi = wt * 2^(α+β+1)).
+        let t = 0.5 * xi + 0.5;
+        let wt = 0.5 * c0 * p2 / ((1.0 - xi * xi) * pp_final * pp_final) / 2.0_f64.powf(ab);
+        xs[n - i] = 2.0 * t - 1.0;
+        ws[n - i] = wt * p2;
     }
-
-    for i in 0..(n - 1) {
-        let i_f = i as f64;
-        let a = alpha;
-        let b = beta;
-        let num1 = 4.0 * (i_f + 1.0) * (i_f + a + 1.0) * (i_f + b + 1.0) * (i_f + a + b + 1.0);
-        let den1 = (2.0 * i_f + a + b + 1.0).powi(2) * ((2.0 * i_f + a + b + 1.0).powi(2) - 1.0);
-        if den1.abs() > 1e-30 {
-            offd[i] = (num1 / den1).sqrt();
-        } else {
-            offd[i] = 0.0;
-        }
-    }
-
-    // Solve the symmetric tridiagonal eigenvalue problem using QR iteration
-    let (eigenvals, eigenvecs) = symmetric_tridiag_eigen(&diag, &offd);
-
-    // Weights: w_i = μ_0 * (v_{i,0})² where μ_0 = ∫(1-x)^α(1+x)^β dx
-    let mu0 = 2.0_f64.powf(alpha + beta + 1.0) * beta_fn(alpha + 1.0, beta + 1.0);
-
-    let mut result: Vec<(f64, f64)> = eigenvals
-        .iter()
-        .zip(eigenvecs.iter())
-        .map(|(&x, v)| (x, mu0 * v[0] * v[0]))
-        .collect();
-
-    result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    result.into_iter().unzip()
+    (xs, ws)
 }
 
-/// Beta function B(a,b) = Γ(a)Γ(b)/Γ(a+b)
-fn beta_fn(a: f64, b: f64) -> f64 {
-    (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)).exp()
+/// `exp(lgamma(a) - lgamma(b))` — MFEM computes the Gamma ratios of the
+/// Gauss-Jacobi weight constant in log space (`fem/intrules.cpp:594`) because
+/// the direct ratio overflows for large `n`.
+fn exp_ln_gamma_ratio(a: f64, b: f64) -> f64 {
+    (ln_gamma(a) - ln_gamma(b)).exp()
 }
 
 /// Logarithm of the gamma function (Lanczos approximation)
@@ -405,133 +452,6 @@ fn ln_gamma(x: f64) -> f64 {
         a += p[i] / (x + i as f64);
     }
     0.5 * (2.0 * std::f64::consts::PI).ln() + (t).ln() * (x + 0.5) - t + a.ln()
-}
-
-/// Solve symmetric tridiagonal eigenvalue problem using QR iteration.
-/// Returns (eigenvalues, eigenvectors) where eigenvectors[i] is the i-th eigenvector.
-fn symmetric_tridiag_eigen(diag: &[f64], offd: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
-    let n = diag.len();
-    if n == 0 {
-        return (vec![], vec![]);
-    }
-    if n == 1 {
-        return (vec![diag[0]], vec![vec![1.0]]);
-    }
-
-    // Use implicit QR iteration for symmetric tridiagonal matrices
-    // For simplicity, use the power method for each eigenvalue (not efficient but correct)
-    let mut eigenvals = vec![0.0f64; n];
-    let mut eigenvecs: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
-
-    // Use the QR algorithm with Wilkinson shift
-    let mut d = diag.to_vec();
-    let mut e = offd.to_vec();
-    let mut z = identity_matrix(n);
-
-    let max_iter = 100 * n;
-    let eps = 1e-15;
-
-    for _ in 0..max_iter {
-        // Check for convergence
-        let mut converged = true;
-        for i in 0..(n - 1) {
-            if e[i].abs() > eps * (d[i].abs() + d[i + 1].abs()) {
-                converged = false;
-                break;
-            }
-        }
-        if converged {
-            break;
-        }
-
-        // Find the largest unconverged subdiagonal
-        let mut l = n - 1;
-        for i in 0..(n - 1) {
-            if e[i].abs() <= eps * (d[i].abs() + d[i + 1].abs()) {
-                l = i;
-                break;
-            }
-        }
-
-        // Wilkinson shift
-        let dl = d[l];
-        let dl1 = d[l + 1];
-        let el = e[l];
-        let delta = (dl - dl1) / 2.0;
-        let s = if delta.abs() < 1e-30 {
-            dl1 - el.abs()
-        } else {
-            let sign_delta = if delta >= 0.0 { 1.0 } else { -1.0 };
-            dl1 - el * el / (delta + sign_delta * (delta * delta + el * el).sqrt())
-        };
-
-        // QR step with shift
-        let mut x = d[0] - s;
-        let mut y = e[0];
-        for i in 0..(n - 1) {
-            // Givens rotation to zero out y
-            let (c, s, r) = if x.abs() < 1e-30 {
-                (0.0, 1.0, y)
-            } else if x.abs() > y.abs() {
-                let t = y / x;
-                let r = (1.0 + t * t).sqrt();
-                (1.0 / r, t / r, x * r)
-            } else {
-                let t = x / y;
-                let r = (1.0 + t * t).sqrt();
-                (t / r, 1.0 / r, y * r)
-            };
-
-            // Apply rotation
-            let di = d[i];
-            let di1 = d[i + 1];
-            let ei = if i < e.len() { e[i] } else { 0.0 };
-            let ei1 = if i + 1 < e.len() { e[i + 1] } else { 0.0 };
-
-            d[i] = c * c * di + 2.0 * c * s * ei + s * s * di1;
-            d[i + 1] = s * s * di - 2.0 * c * s * ei + c * c * di1;
-            e[i] = c * s * (di1 - di) + (c * c - s * s) * ei;
-            if i + 1 < e.len() {
-                e[i + 1] = c * ei1;
-            }
-            if i > 0 {
-                e[i - 1] = r;
-            }
-
-            // Update eigenvector matrix
-            for k in 0..n {
-                let zki = z[k][i];
-                let zki1 = z[k][i + 1];
-                z[k][i] = c * zki + s * zki1;
-                z[k][i + 1] = -s * zki + c * zki1;
-            }
-
-            if i + 1 < n - 1 {
-                x = e[i + 1];
-                y = s * e[i + 1];
-                e[i + 1] = c * e[i + 1];
-            }
-        }
-    }
-
-    for i in 0..n {
-        eigenvals[i] = d[i];
-    }
-    for i in 0..n {
-        for k in 0..n {
-            eigenvecs[i][k] = z[k][i];
-        }
-    }
-
-    (eigenvals, eigenvecs)
-}
-
-fn identity_matrix(n: usize) -> Vec<Vec<f64>> {
-    let mut m = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        m[i][i] = 1.0;
-    }
-    m
 }
 
 /// Compute Gauss-Chebyshev (1st kind) points and weights on `[-1, 1]`.
@@ -931,18 +851,35 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
 /// All weights are positive and all points are interior (strictly inside the triangle).
 fn wv_tri_rule(order: u8) -> QuadratureRule {
     let (centroid, s21, s111) = wv_tri_params(order);
-    build_wv_tri(centroid, &s21, &s111)
+    build_wv_tri(centroid, &s21, &s111, WvTriOrbitOrder::Historical)
+}
+
+/// Orbit ordering of the Witherden-Vincent triangle rule builder.  The rule
+/// *content* is identical either way; only the storage sequence differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WvTriOrbitOrder {
+    /// The historical fem-rs sequence (S21: `(a,a),(b,a),(a,b)`, S111:
+    /// `(a,b),(a,c),(b,a),(b,c),(c,a),(c,b)`), which the existing assembly
+    /// tests are pinned to.
+    Historical,
+    /// MFEM's `AddTriPoints3` / `AddTriPoints6` storage sequence
+    /// (`fem/intrules.hpp:113`/`:128`) — S21: `(a,a),(a,b),(b,a)`, S111:
+    /// `(a,b),(b,a),(a,c),(c,a),(b,c),(c,b)`.  Required for entry-level
+    /// parity of [`prism_rule_qt`] with `IntegrationRules::Get(PRISM, ...)`.
+    Mfem,
 }
 
 /// Build a triangle quadrature rule from WV parameters.
 ///
 /// - `centroid`: optional (weight,) for S3 (centroid at (1/3,1/3))
-/// - `s21`: list of (a, weight) — each generates 3 points: (a,a),(1-2a,a),(a,1-2a)
+/// - `s21`: list of (a, weight) — each generates 3 points orbiting (a,a,1-2a)
 /// - `s111`: list of (a, b, weight) — each generates 6 permutations of (a,b,1-a-b)
+/// - `orbit_order`: within-orbit point sequence (see [`WvTriOrbitOrder`])
 fn build_wv_tri(
     centroid: Option<f64>,
     s21: &[(f64, f64)],
     s111: &[(f64, f64, f64)],
+    orbit_order: WvTriOrbitOrder,
 ) -> QuadratureRule {
     let mut points: Vec<Vec<f64>> = Vec::new();
     let mut weights: Vec<f64> = Vec::new();
@@ -956,9 +893,11 @@ fn build_wv_tri(
     // S21: 3 points per entry
     for &(a, w) in s21 {
         let b = 1.0 - 2.0 * a;
-        points.push(vec![a, a]);
-        points.push(vec![b, a]);
-        points.push(vec![a, b]);
+        let orbit = match orbit_order {
+            WvTriOrbitOrder::Historical => [vec![a, a], vec![b, a], vec![a, b]],
+            WvTriOrbitOrder::Mfem => [vec![a, a], vec![a, b], vec![b, a]],
+        };
+        points.extend(orbit);
         weights.push(w);
         weights.push(w);
         weights.push(w);
@@ -967,18 +906,16 @@ fn build_wv_tri(
     // S111: 6 points per entry
     for &(a, b, w) in s111 {
         let c = 1.0 - a - b;
-        points.push(vec![a, b]);
-        points.push(vec![a, c]);
-        points.push(vec![b, a]);
-        points.push(vec![b, c]);
-        points.push(vec![c, a]);
-        points.push(vec![c, b]);
-        weights.push(w);
-        weights.push(w);
-        weights.push(w);
-        weights.push(w);
-        weights.push(w);
-        weights.push(w);
+        let orbit = match orbit_order {
+            WvTriOrbitOrder::Historical => {
+                [vec![a, b], vec![a, c], vec![b, a], vec![b, c], vec![c, a], vec![c, b]]
+            }
+            WvTriOrbitOrder::Mfem => {
+                [vec![a, b], vec![b, a], vec![a, c], vec![c, a], vec![b, c], vec![c, b]]
+            }
+        };
+        points.extend(orbit);
+        weights.extend(std::iter::repeat(w).take(6));
     }
 
     QuadratureRule { points, weights }
@@ -2717,6 +2654,204 @@ fn dunavant_tri_12() -> QuadratureRule {
 
 
 
+// ─── MFEM `Quadrature1D` 1-D families (quad_type) ─────────────────────────────
+
+/// MFEM `Quadrature1D` 1-D quadrature type (`fem/intrules.hpp:412`): the
+/// `quad_type` an `IntegrationRules(qt, ...)` object carries and
+/// `SegmentIntegrationRule` (`fem/intrules.cpp:1374`) dispatches on.  MFEM's
+/// `ClosedGL = 5` variant is only reachable through `Poly_1D` basis nodes
+/// (`GivePolyPoints`), not through `IntegrationRules::Get`, so it has no
+/// segment/prism rule here either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quadrature1DType {
+    /// `Quadrature1D::GaussLegendre = 0` — `n = Order/2 + 1` points.
+    GaussLegendre,
+    /// `Quadrature1D::GaussLobatto = 1` — `n = Order/2 + 2` points.
+    GaussLobatto,
+    /// `Quadrature1D::OpenUniform = 2` — open Newton-Cotes, `n = Order | 1`.
+    OpenUniform,
+    /// `Quadrature1D::ClosedUniform = 3` — closed Newton-Cotes, `n = Order | 1`.
+    ClosedUniform,
+    /// `Quadrature1D::OpenHalfUniform = 4` — "open half" Newton-Cotes,
+    /// `n = Order | 1`.
+    OpenHalfUniform,
+}
+
+/// MFEM `QuadratureFunctions1D::OpenUniform(np)` (`fem/intrules.cpp:836`):
+/// `np` equally spaced interior nodes `x_i = (i+1)/(np+1)` with the
+/// `CalculateUniformWeights` weights (the exact integrals of the nodal
+/// Lagrange polynomials, `fem/intrules.cpp:964`, non-MPFR path).
+pub fn quadrature_1d_open_uniform(np: usize) -> (Vec<f64>, Vec<f64>) {
+    assert!(np >= 1, "quadrature_1d_open_uniform: np must be >= 1");
+    let xs: Vec<f64> = (0..np).map(|i| (i + 1) as f64 / (np + 1) as f64).collect();
+    let ws = calculate_uniform_weights(&xs);
+    (xs, ws)
+}
+
+/// MFEM `QuadratureFunctions1D::ClosedUniform(np)` (`fem/intrules.cpp:856`):
+/// `np` equally spaced nodes `x_i = i/(np-1)` including the endpoints
+/// (`np == 1` degenerates to the single point 1/2 with weight 1).
+pub fn quadrature_1d_closed_uniform(np: usize) -> (Vec<f64>, Vec<f64>) {
+    assert!(np >= 1, "quadrature_1d_closed_uniform: np must be >= 1");
+    if np == 1 {
+        return (vec![0.5], vec![1.0]);
+    }
+    let xs: Vec<f64> = (0..np).map(|i| i as f64 / (np - 1) as f64).collect();
+    let ws = calculate_uniform_weights(&xs);
+    (xs, ws)
+}
+
+/// MFEM `QuadratureFunctions1D::OpenHalfUniform(np)` (`fem/intrules.cpp:877`):
+/// the centers of `np` uniform intervals, `x_i = (2i+1)/(2np)`.
+pub fn quadrature_1d_open_half_uniform(np: usize) -> (Vec<f64>, Vec<f64>) {
+    assert!(np >= 1, "quadrature_1d_open_half_uniform: np must be >= 1");
+    let xs: Vec<f64> = (0..np).map(|i| (2 * i + 1) as f64 / (2 * np) as f64).collect();
+    let ws = calculate_uniform_weights(&xs);
+    (xs, ws)
+}
+
+/// MFEM `QuadratureFunctions1D::CalculateUniformWeights` (`fem/intrules.cpp:964`,
+/// double-precision path): the weight of each node is the exact integral of
+/// its nodal Lagrange polynomial, evaluated with the *default* (`GaussLegendre`)
+/// segment rule of order `n-1` — `m = (n-1)/2 + 1` points.  `n = 1, 2` are
+/// hard-wired `1` / `{1/2, 1/2}`.
+///
+/// The Lagrange evaluation is MFEM's `Poly_1D::Basis` in its default
+/// barycentric mode (`fem/fe/fe_base.cpp:1811`/`:1875`), ported operation for
+/// operation; combined with the bit-exact [`gauss_legendre_01`] /
+/// [`gauss_legendre_01_newton_mfem`] nodes the resulting weights match MFEM
+/// bit for bit (only `+ - * /` are involved).
+fn calculate_uniform_weights(xs: &[f64]) -> Vec<f64> {
+    let n = xs.len();
+    if n == 1 {
+        return vec![1.0];
+    }
+    if n == 2 {
+        return vec![0.5, 0.5];
+    }
+    // `IntRules.Get(Geometry::SEGMENT, n-1)`: real order `(n-1)|1`, so
+    // `m = ((n-1)|1)/2 + 1 = (n-1)/2 + 1` Gauss-Legendre points.
+    let m = (n - 1) / 2 + 1;
+    let (gx, gw) = if m <= 5 {
+        gauss_legendre_01(m)
+    } else {
+        gauss_legendre_01_newton_mfem(m)
+    };
+    let basis = Poly1dBasisBarycentric::new(xs);
+    let mut w = vec![0.0_f64; n];
+    for (&q, &wq) in gx.iter().zip(gw.iter()) {
+        let u = basis.eval(q);
+        for (wj, &uj) in w.iter_mut().zip(u.iter()) {
+            // `w.Add(ip.weight, xv)` (`fem/intrules.cpp:1001`).
+            *wj += wq * uj;
+        }
+    }
+    w
+}
+
+/// MFEM `Poly_1D::Basis` with the default `Barycentric` eval type
+/// (`fem/fe/fe_base.cpp:1811` constructor, `:1875` scalar `Eval`).
+struct Poly1dBasisBarycentric {
+    x: Vec<f64>,
+    w: Vec<f64>,
+}
+
+impl Poly1dBasisBarycentric {
+    fn new(nodes: &[f64]) -> Self {
+        let n = nodes.len();
+        let mut w = vec![1.0_f64; n];
+        for i in 1..n {
+            for j in 0..i {
+                let xij = nodes[i] - nodes[j];
+                w[i] *= xij;
+                w[j] *= -xij;
+            }
+        }
+        for wi in w.iter_mut() {
+            *wi = 1.0 / *wi;
+        }
+        Self {
+            x: nodes.to_vec(),
+            w,
+        }
+    }
+
+    /// All `p+1` nodal basis values at `y`, in MFEM's node-bisector branching.
+    fn eval(&self, y: f64) -> Vec<f64> {
+        let p = self.x.len() - 1;
+        if p == 0 {
+            return vec![1.0];
+        }
+        // `lk` accumulates (y - x_k) on one side of the bisector bracket.
+        let mut lk = 1.0_f64;
+        let mut k = 0usize;
+        while k < p {
+            if y >= (self.x[k] + self.x[k + 1]) / 2.0 {
+                lk *= y - self.x[k];
+                k += 1;
+            } else {
+                for i in k + 1..=p {
+                    lk *= y - self.x[i];
+                }
+                break;
+            }
+        }
+        let l = lk * (y - self.x[k]);
+        let mut u = vec![0.0_f64; p + 1];
+        for i in 0..k {
+            u[i] = l * self.w[i] / (y - self.x[i]);
+        }
+        u[k] = lk * self.w[k];
+        for i in k + 1..=p {
+            u[i] = l * self.w[i] / (y - self.x[i]);
+        }
+        u
+    }
+}
+
+/// MFEM `IntegrationRules::SegmentIntegrationRule` (`fem/intrules.cpp:1374`)
+/// for an arbitrary `quad_type`: `n`-point 1-D rule on `[0,1]` with `n`
+/// depending on the family (Gauss-Legendre `Order/2+1`, Gauss-Lobatto
+/// `Order/2+2`, the three Newton-Cotes families `Order|1`).
+pub fn seg_rule_qt(qt: Quadrature1DType, order: u8) -> QuadratureRule {
+    let o = order as usize;
+    let (pts, wts) = match qt {
+        Quadrature1DType::GaussLegendre => {
+            let n = o / 2 + 1;
+            if n <= 5 {
+                gauss_legendre_01(n)
+            } else {
+                gauss_legendre_01_newton_mfem(n)
+            }
+        }
+        Quadrature1DType::GaussLobatto => {
+            let n = o / 2 + 2;
+            // `n >= 2` for every order.  The Newton iteration is used for ALL
+            // `n` (not the `n <= 5` table): MFEM stores `z = ((1+x) - dx)/2`
+            // at the converged step, which differs from the table's
+            // `0.5*(1+x)` mapping by the sub-ulp residual `dx/2` (up to 1 ulp
+            // on the [0,1] values, measured at orders 6-7).
+            gauss_lobatto_01_newton_mfem(n)
+        }
+        Quadrature1DType::OpenUniform => {
+            let n = o | 1;
+            quadrature_1d_open_uniform(n)
+        }
+        Quadrature1DType::ClosedUniform => {
+            let n = o | 1;
+            quadrature_1d_closed_uniform(n)
+        }
+        Quadrature1DType::OpenHalfUniform => {
+            let n = o | 1;
+            quadrature_1d_open_half_uniform(n)
+        }
+    };
+    QuadratureRule {
+        points: pts.into_iter().map(|x| vec![x]).collect(),
+        weights: wts,
+    }
+}
+
 // ─── Prism ─────────────────────────────────────────────────────────────────────
 
 /// Tensor product of triangle × segment quadrature rule on the reference prism.
@@ -2736,6 +2871,70 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
     let mut wts = Vec::with_capacity(nt * ns);
     for t in 0..nt {
         for s in 0..ns {
+            pts.push(vec![seg.points[s][0], tri.points[t][0], tri.points[t][1]]);
+            wts.push(tri.weights[t] * seg.weights[s]);
+        }
+    }
+    QuadratureRule {
+        points: pts,
+        weights: wts,
+    }
+}
+
+/// The triangle factor of [`prism_rule_qt`]: the quad_type-independent
+/// `IntegrationRules::TriangleIntegrationRule` in MFEM's exact storage
+/// sequence (orbit order `AddTriPoints3`/`AddTriPoints6`; orders 0/1/2 are
+/// MFEM's inline branches).  Orders above 20 fall back to Grundmann-Möller
+/// exactly like [`tri_rule`] (MFEM has 126-point rules for 21-25; porting
+/// those tables is outstanding debt).
+fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
+    if order <= 1 {
+        QuadratureRule {
+            points: vec![vec![1.0 / 3.0, 1.0 / 3.0]],
+            weights: vec![0.5],
+        }
+    } else if order == 2 {
+        // `AddTriPoints3(0, 1./6., 1./6.)` (fem/intrules.cpp:1422): the
+        // second orbit coordinate is MFEM's `1.-2.*a`, which is 1 ulp away
+        // from the literal `2./3.`
+        let (a, b) = (1.0 / 6.0, 1.0 - 2.0 * (1.0 / 6.0));
+        QuadratureRule {
+            points: vec![vec![a, a], vec![a, b], vec![b, a]],
+            weights: vec![a, a, a],
+        }
+    } else if order <= 20 {
+        let (centroid, s21, s111) = wv_tri_params(order);
+        build_wv_tri(centroid, &s21, &s111, WvTriOrbitOrder::Mfem)
+    } else {
+        let s = ((order as u32).saturating_sub(1)) / 2;
+        grundmann_moller_simplex(2, s)
+    }
+}
+
+/// MFEM `IntegrationRules(qt).Get(Geometry::PRISM, order)` (D372): the
+/// `quad_type`-parameterized prism rule, 1:1 with
+/// `IntegrationRules::PrismIntegrationRule` (`fem/intrules.cpp:2500`).
+///
+/// The triangle factor is `quad_type`-independent (Witherden-Vincent,
+/// `fem/intrules.cpp:1405`) and the segment factor dispatches on `qt`
+/// ([`seg_rule_qt`]); the weight is `ipt.weight * ips.weight` in MFEM's
+/// multiplication order.  Point nesting mirrors MFEM's `kp = ks*nt + kt`
+/// (segment slowest, triangle fastest) with this crate's prism coordinate
+/// convention `[ξ_seg, tri_a, tri_b]` — MFEM's `IntegrationPoint` stores
+/// `(x, y)` = triangle, `z` = segment, i.e. the coordinate *slots* are
+/// permuted but the point *sequence* and every value match the C++ rule.
+/// The legacy [`prism_rule`] (triangle-slowest nesting, historical tri
+/// orbit order) is kept untouched because the prism element consumers are
+/// pinned to it.
+pub fn prism_rule_qt(qt: Quadrature1DType, order: u8) -> QuadratureRule {
+    let tri = tri_rule_mfem_order(order);
+    let seg = seg_rule_qt(qt, order);
+    let nt = tri.points.len();
+    let ns = seg.points.len();
+    let mut pts = Vec::with_capacity(nt * ns);
+    let mut wts = Vec::with_capacity(nt * ns);
+    for s in 0..ns {
+        for t in 0..nt {
             pts.push(vec![seg.points[s][0], tri.points[t][0], tri.points[t][1]]);
             wts.push(tri.weights[t] * seg.weights[s]);
         }

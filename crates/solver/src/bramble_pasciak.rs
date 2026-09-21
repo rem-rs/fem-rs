@@ -44,7 +44,7 @@ use fem_linalg::{CsrMatrix, PrintLevel, SolverConfig, SolverError};
 use crate::block::BlockSystem;
 use crate::bpcg::solve_bpcg;
 use crate::darcy_solvers::{
-    schur_complement_bmb_diag, IterSolveParameters, SchurApprox, SchurMode,
+    schur_complement_bmb_diag, DarcySolver, IterSolveParameters, SchurApprox, SchurMode,
 };
 use crate::geometric_mg::GlibcRand;
 use crate::{solve_cg_mfem, SliOptions};
@@ -462,6 +462,19 @@ impl BramblePasciakSolver {
             w[i] = v[i] / self.m_diag[i];
         }
         self.m1.apply(&v[self.n_u..], &mut w[self.n_u..]);
+    }
+}
+
+impl DarcySolver for BramblePasciakSolver {
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        // Inherent-method path: does not recurse into this trait impl.
+        BramblePasciakSolver::mult(self, x, y)
+    }
+    fn num_iterations(&self) -> usize {
+        BramblePasciakSolver::num_iterations(self)
+    }
+    fn offsets(&self) -> [usize; 3] {
+        BramblePasciakSolver::offsets(self)
     }
 }
 

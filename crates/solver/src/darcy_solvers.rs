@@ -51,6 +51,31 @@ fn check_options(param: &IterSolveParameters) {
     assert!(param.rel_tol >= 0.0 && param.abs_tol >= 0.0);
 }
 
+/// MFEM `blocksolvers::DarcySolver` base surface
+/// (`miniapps/solvers/darcy_solver.hpp:38`) shared by the three serial block
+/// solvers: [`BdpMinresSolver`], [`crate::bramble_pasciak::BramblePasciakSolver`]
+/// and [`crate::div_free_solver::DivFreeSolver`] (D373).
+///
+/// The C++ base stores `offsets_ = {0, size0, height}` and declares
+/// `GetNumIterations()`; `Mult` arrives from the `Solver` base, and `height`
+/// is `offsets()[2]`.  Deliberately minimal: the ess-dof and convergence
+/// bookkeeping is NOT part of the C++ base either — BDP/BP zero ess dofs
+/// after the solve and expose `converged()`; DFS takes its ess dofs through
+/// [`crate::div_free_solver::DfsData`] — so those remain on the inherent
+/// types.
+pub trait DarcySolver {
+    /// MFEM `Solver::Mult`: `y ← solve(x)`.
+    fn mult(&self, x: &[f64], y: &mut [f64]);
+    /// MFEM `DarcySolver::GetNumIterations`.
+    fn num_iterations(&self) -> usize;
+    /// MFEM `DarcySolver::offsets_`: block starts `[0, n_u, n_u + n_p]`.
+    fn offsets(&self) -> [usize; 3];
+    /// MFEM `Solver::height` — `offsets()[2]`.
+    fn size(&self) -> usize {
+        self.offsets()[2]
+    }
+}
+
 /// Exact port of `MINRESSolver::Mult` (mfem/linalg/solvers.cpp, v4.10).
 ///
 /// Based on the MINRES algorithm on p. 86, Fig. 6.9 in "Iterative Krylov
@@ -468,6 +493,19 @@ impl BdpMinresSolver {
             w[i] = v[i] / self.m_diag[i];
         }
         self.schur.apply(&v[self.n_u..], &mut w[self.n_u..]);
+    }
+}
+
+impl DarcySolver for BdpMinresSolver {
+    fn mult(&self, x: &[f64], y: &mut [f64]) {
+        // Inherent-method path: does not recurse into this trait impl.
+        BdpMinresSolver::mult(self, x, y)
+    }
+    fn num_iterations(&self) -> usize {
+        BdpMinresSolver::num_iterations(self)
+    }
+    fn offsets(&self) -> [usize; 3] {
+        BdpMinresSolver::offsets(self)
     }
 }
 
