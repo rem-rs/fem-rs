@@ -395,10 +395,8 @@ impl MixedHyperelasticityForm {
                 // K_uu
                 for a in 0..n_du {
                     for i in 0..self.dim {
-                        let row = a * self.dim + i;
                         for b in 0..n_du {
                             for j in 0..self.dim {
-                                let col = b * self.dim + j;
                                 let mut v = 0.0;
                                 if i == j {
                                     for l in 0..self.dim {
@@ -417,7 +415,6 @@ impl MixedHyperelasticityForm {
                 // K_up
                 for a in 0..n_du {
                     for i in 0..self.dim {
-                        let row = a * self.dim + i;
                         let ft_gp: f64 = (0..self.dim).map(|l| FT[(i, l)] * gp_u[a * self.dim + l]).sum();
                         for m in 0..n_dp {
                             coo.add(eu[a], self.nu + ep[m], -w * ft_gp * phi_p[m]);

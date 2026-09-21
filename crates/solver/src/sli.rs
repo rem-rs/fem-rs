@@ -110,7 +110,7 @@ where
         p(&r, &mut z);
     }
     let nom0 = if prec.is_some() { dot(&z, &z).sqrt() } else { dot(&r, &r).sqrt() };
-    let mut nom = nom0;
+    let mut nom;
 
     if print_iterations {
         println!("   Iteration : {:>3}  ||Br|| = {}", 0, f(nom0));
@@ -133,11 +133,11 @@ where
     let mut converged = false;
     let mut final_iter = opts.max_iter;
     let mut nomold = 1.0f64;
-    let mut cf = 0.0f64;
+    let mut cf;
     let mut i = 1i32;
     loop {
         match prec.as_mut() {
-            Some(p) => {
+            Some(_) => {
                 for k in 0..n {
                     x[k] += z[k]; // x = x + B (b - A x)
                 }
@@ -310,7 +310,7 @@ where
     // start iteration
     let mut converged = false;
     let mut final_iter = opts.max_iter;
-    let mut betanom = 0.0f64;
+    let mut betanom;
     let mut i = 1i32;
     loop {
         let alpha = nom / den;

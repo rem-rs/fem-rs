@@ -23,7 +23,6 @@
 //!   than Jacobi
 
 use linlvo::{
-    core::scalar::Scalar as linlvoScalar,
     iterative::ConjugateGradient,
     DenseVec,
     KrylovSolver,

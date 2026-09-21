@@ -20,7 +20,7 @@
 //! ```
 
 use fem_linalg::CsrMatrix;
-use fem_solver::{solve_gmres, solve_gmres_ilu0, solve_pcg_gssmoother, solve_sparse_lu, SolverConfig};
+use fem_solver::{solve_gmres_ilu0, SolverConfig};
 
 /// Linear solver strategy for the Newton inner system `J(x) · dx = -F(x)`.
 ///

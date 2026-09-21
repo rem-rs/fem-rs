@@ -82,7 +82,7 @@ impl HamiltonianSiavSolver {
         sys: &dyn HamiltonianSystem,
         q: &mut [f64],
         p: &mut [f64],
-        t: f64,
+        _t: f64,
         dt: f64,
     ) {
         let n = q.len();

@@ -1,7 +1,6 @@
 use fem_linalg::CsrMatrix as FemCsr;
 use fem_linalg::{fem_to_linlvo_csr, into_result, SolveResult, SolverConfig, SolverError};
 use linlvo::{
-    core::operator::LinearOperator,
     core::scalar::Scalar as linlvoScalar,
     iterative::{ConjugateGradient, Fgmres, Gmres},
     precond::{AdsConfig, AdsPrecond, AmsConfig, AmsPrecond},
@@ -256,7 +255,6 @@ pub fn solve_pcg_ads<T: linlvoScalar>(
     // Same true-residual restart driver as `solve_pcg_ams` (see there): the
     // preconditioned energy criterion can report convergence well before the
     // true residual meets the tolerance.
-    let n = la.nrows();
     let b_norm = b
         .iter()
         .fold(T::zero(), |s, &v| s + v * v)

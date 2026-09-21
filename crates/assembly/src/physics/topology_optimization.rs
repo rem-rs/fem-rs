@@ -336,7 +336,7 @@ pub fn bregman_volume_projection<M: MeshTopology>(
 
         // Illinois
         let mut c = 0.0;
-        let mut f_c = 0.0;
+        let mut f_c;
         let mut side = 0i8;
         let mut done = false;
 
