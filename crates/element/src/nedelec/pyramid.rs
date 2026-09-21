@@ -11,7 +11,8 @@
 //!   nodal pyramidal elements", J. Sci. Comput. 2010.
 //! - G. C. Hsiao, "Nédélec pyramidal edge element", IMA J. Numer. Anal. 2010.
 
-use crate::quadrature::pyramid_rule;
+use crate::gll_basis::gll_nodes;
+use crate::quadrature::{gauss_legendre_01, pyramid_rule};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 // ─── Edge and face definitions ───────────────────────────────────────────────
@@ -406,6 +407,141 @@ impl PyraNDk {
             monos,
         }
     }
+
+    /// Reference points of the MFEM `ND_FuentesPyramidElement(p)` nodal
+    /// layout (`FE::Nodes`, one entry per element slot) — the layout the
+    /// HCurlSpace pyramid slot tables mirror (D525).
+    ///
+    /// Frame: the Fuentes collapsed frame — base quad [0,1]² at z = 0 with
+    /// vertices (0,0), (1,0), (1,1), (0,1) and apex (0,0,1).  Slot order =
+    /// the constructor's (`fe_nd.cpp`): the 8 edge blocks (`8p`), the base
+    /// quad face (3,2,1,0) (`2p(p−1)` slots: x-tangent block then
+    /// y-tangent block), the four tri faces (0,1,4), (1,2,4), (2,3,4),
+    /// (3,0,4) (`p(p−1)` slots each, two tangent slots per point) and the
+    /// interior (`3p(p−1)²`).
+    ///
+    /// The Vandermonde basis this struct carries is a k = 1 placeholder
+    /// (`pyramid_ndk_dim` differs from MFEM's `p(3p²+5)` already at p = 2),
+    /// so this table is a pure function of `k` and may be longer than
+    /// [`VectorReferenceElement::n_dofs`].
+    pub fn mfem_layout_points(&self) -> Vec<[f64; 3]> {
+        let p = self.k;
+        let pm2 = p.saturating_sub(2);
+        // MFEM `OpenPoints(p-1, GaussLegendre)`.
+        let (qop, _) = gauss_legendre_01(p);
+        // MFEM `ClosedPoints(p, GaussLobatto)`, increasing, on [0,1].
+        let qcp: Vec<f64> = gll_nodes(p).iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        // MFEM `OpenPoints(p-2)` (`p-1` points, order `p-2` Gauss-Legendre;
+        // never empty).
+        let (top, _) = gauss_legendre_01((p - 1).max(1));
+
+        let mut pts = Vec::with_capacity(p * (3 * p * p + 5));
+        // edges: (0,1) (1,2) (3,2) (0,3) (0,4) (1,4) (2,4) (3,4)
+        for i in 0..p {
+            pts.push([qop[i], 0.0, 0.0]);
+        }
+        for i in 0..p {
+            pts.push([1.0, qop[i], 0.0]);
+        }
+        for i in 0..p {
+            pts.push([qop[i], 1.0, 0.0]);
+        }
+        for i in 0..p {
+            pts.push([0.0, qop[i], 0.0]);
+        }
+        for i in 0..p {
+            pts.push([0.0, 0.0, qop[i]]);
+        }
+        for i in 0..p {
+            pts.push([1.0 - qop[i], 0.0, qop[i]]);
+        }
+        for i in 0..p {
+            pts.push([1.0 - qop[i], 1.0 - qop[i], qop[i]]);
+        }
+        for i in 0..p {
+            pts.push([0.0, 1.0 - qop[i], qop[i]]);
+        }
+        if p >= 2 {
+            // base quad face (3,2,1,0): x-tangent block then y-tangent block.
+            for j in 1..p {
+                for i in 0..p {
+                    pts.push([qop[i], qcp[p - j], 0.0]);
+                }
+            }
+            for j in 0..p {
+                for i in 1..p {
+                    pts.push([qcp[i], qop[p - 1 - j], 0.0]);
+                }
+            }
+            // tri faces: two tangent slots per barycentric GL point.
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let w = top[i] + top[j] + top[pm2 - i - j];
+                    let x = top[i] / w;
+                    let z = top[j] / w;
+                    pts.push([x, 0.0, z]);
+                    pts.push([x, 0.0, z]);
+                }
+            }
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let w = top[i] + top[j] + top[pm2 - i - j];
+                    let x = (top[i] + top[pm2 - i - j]) / w;
+                    let y = top[i] / w;
+                    let z = top[j] / w;
+                    pts.push([x, y, z]);
+                    pts.push([x, y, z]);
+                }
+            }
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let w = top[i] + top[j] + top[pm2 - i - j];
+                    let x = top[pm2 - i - j] / w;
+                    let y = (top[i] + top[pm2 - i - j]) / w;
+                    let z = top[j] / w;
+                    pts.push([x, y, z]);
+                    pts.push([x, y, z]);
+                }
+            }
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let w = top[i] + top[j] + top[pm2 - i - j];
+                    let y = top[pm2 - i - j] / w;
+                    let z = top[j] / w;
+                    pts.push([0.0, y, z]);
+                    pts.push([0.0, y, z]);
+                }
+            }
+        }
+        // interior: x block, then y block, then z block (collapsed scaling
+        // `w = 1 - qcp[k]` / `1 - qop[k]` about the apex axis).
+        for k in 1..p {
+            let w = 1.0 - qcp[k];
+            for j in 1..p {
+                for i in 0..p {
+                    pts.push([qop[i] * w, qcp[j] * w, qcp[k]]);
+                }
+            }
+        }
+        for k in 1..p {
+            let w = 1.0 - qcp[k];
+            for j in 0..p {
+                for i in 1..p {
+                    pts.push([qcp[i] * w, qop[j] * w, qcp[k]]);
+                }
+            }
+        }
+        for k in 0..p {
+            let w = 1.0 - qop[k];
+            for j in 1..p {
+                for i in 1..p {
+                    pts.push([qcp[i] * w, qcp[j] * w, qop[k]]);
+                }
+            }
+        }
+        debug_assert_eq!(pts.len(), p * (3 * p * p + 5));
+        pts
+    }
 }
 
 impl VectorReferenceElement for PyraNDk {
@@ -511,6 +647,17 @@ impl VectorReferenceElement for PyraNDk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MFEM `ND_FuentesPyramidElement` layout table: `p(3p^2+5)` slots
+    /// for every order (34 at p = 2 — the placeholder Vandermonde dimension
+    /// says 30 there).
+    #[test]
+    fn mfem_layout_point_counts() {
+        let want = |p: usize| p * (3 * p * p + 5);
+        for p in 1..=4usize {
+            assert_eq!(PyraNDk::new(p).mfem_layout_points().len(), want(p));
+        }
+    }
 
     #[test]
     fn pyra_ndk_k1_n_dofs() {

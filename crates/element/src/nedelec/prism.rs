@@ -6,7 +6,8 @@
 //! Provides PrismND1 (order-1 barycentric Whitney forms) and PrismNDk
 //! (arbitrary-order via Vandermonde monomial construction).
 
-use crate::quadrature::prism_rule;
+use crate::gll_basis::gll_nodes;
+use crate::quadrature::{gauss_legendre_01, prism_rule};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
 // ─── Barycentric coordinates (needed by PrismND1) ────────────────────────────
@@ -361,6 +362,165 @@ impl PrismNDk {
             monos,
         }
     }
+
+    /// Reference points of the MFEM `ND_WedgeElement(p)` nodal layout
+    /// (`FE::Nodes`, one entry per element slot) — the layout the HCurlSpace
+    /// prism slot tables mirror (D525).
+    ///
+    /// Frame: MFEM's wedge — the triangle {(0,0),(1,0),(0,1)} in (x,y) and
+    /// z ∈ [0,1] (the `LinearWedgeFiniteElement` map).  Slot order = the
+    /// constructor's (`fe_nd.cpp`): the 9 edge blocks (`9p`), the bottom tri
+    /// face (0,2,1) and top tri face (3,4,5) (`p(p−1)` slots each, two
+    /// tangent slots per point — bottom lists the tk4 slot first, top the
+    /// tk0 slot), the three quad faces (0,1,4,3), (1,2,5,4), (2,0,3,5)
+    /// (`2p(p−1)` slots each) and the interior (`p(p−1)² + p(p−1)(p−2)/2`).
+    ///
+    /// The Vandermonde basis this struct carries shares only the *dimension*
+    /// with MFEM's element (and diverges from p = 3 on: 87 vs MFEM's 90), so
+    /// this table is a pure function of `k` and may be longer than
+    /// [`VectorReferenceElement::n_dofs`].
+    pub fn mfem_layout_points(&self) -> Vec<[f64; 3]> {
+        let p = self.k;
+        let pm1 = p - 1;
+        let pm2 = p.saturating_sub(2);
+        // MFEM `OpenPoints(p-1)` (ND segment / triangle edges).
+        let (eop, _) = gauss_legendre_01(p);
+        // MFEM `OpenPoints(p-2)` (ND triangle interior barycentric points;
+        // `p-1` points, i.e. order `p-2` Gauss-Legendre; never empty).
+        let (iop, _) = gauss_legendre_01((p - 1).max(1));
+        // MFEM `ClosedPoints(p, GaussLobatto)`, increasing, on [0,1].
+        let cp: Vec<f64> = gll_nodes(p).iter().map(|&x| 0.5 * (x + 1.0)).collect();
+        // `H1_SegmentElement` node order: endpoints first, then the interior
+        // GLL points — s1[j] = cp[0], cp[p], cp[1], .., cp[p-1].
+        let s1: Vec<f64> = [cp[0], cp[p]]
+            .into_iter()
+            .chain(cp[1..p].iter().copied())
+            .collect();
+
+        let mut pts = Vec::with_capacity(3 * p * (p + 1) * (p + 2) / 2);
+        // edges: (0,1) (1,2) (2,0) at z=0, then at z=1, then (0,3) (1,4) (2,5)
+        for i in 0..p {
+            pts.push([eop[i], 0.0, 0.0]);
+        }
+        for i in 0..p {
+            pts.push([eop[pm1 - i], eop[i], 0.0]);
+        }
+        for i in 0..p {
+            pts.push([0.0, eop[pm1 - i], 0.0]);
+        }
+        for i in 0..p {
+            pts.push([eop[i], 0.0, 1.0]);
+        }
+        for i in 0..p {
+            pts.push([eop[pm1 - i], eop[i], 1.0]);
+        }
+        for i in 0..p {
+            pts.push([0.0, eop[pm1 - i], 1.0]);
+        }
+        for i in 0..p {
+            pts.push([0.0, 0.0, eop[i]]);
+        }
+        for i in 0..p {
+            pts.push([1.0, 0.0, eop[i]]);
+        }
+        for i in 0..p {
+            pts.push([0.0, 1.0, eop[i]]);
+        }
+        if p >= 2 {
+            // Barycentric GL point (i,j) of the ND triangle interior.
+            let tri_pt =
+                |i: usize, j: usize| -> (f64, f64) {
+                    let w = iop[i] + iop[j] + iop[pm2 - i - j];
+                    (iop[i] / w, iop[j] / w)
+                };
+            // The NDTriangle interior points in their own enumeration order
+            // (dof `3p + 2l` / `3p + 2l + 1` sit at `ndtri_pts[l]`).
+            let mut ndtri_pts: Vec<(f64, f64)> = Vec::new();
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    ndtri_pts.push(tri_pt(i, j));
+                }
+            }
+            // bottom tri face (0,2,1): the wedge loop enumerates (j,i) but
+            // pushes the NDTriangle point with index `l = j + (2p-1-i)i/2`
+            // — not the loop-count-th point — so both orderings interleave
+            // here (two slots per point, tk4 then tk0).
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let l = j + (2 * p - 1 - i) * i / 2;
+                    let (x, y) = ndtri_pts[l];
+                    pts.push([x, y, 0.0]);
+                    pts.push([x, y, 0.0]);
+                }
+            }
+            // top tri face (3,4,5): tk0 first, then tk4.
+            for j in 0..=pm2 {
+                for i in 0..=(pm2 - j) {
+                    let (x, y) = tri_pt(i, j);
+                    pts.push([x, y, 1.0]);
+                    pts.push([x, y, 1.0]);
+                }
+            }
+            // quad face (0,1,4,3): x-tangent block at closed z layers, then
+            // z-tangent block at open z layers on the H1 edge-(0,1) points.
+            for j in 2..=p {
+                for i in 0..p {
+                    pts.push([eop[i], 0.0, s1[j]]);
+                }
+            }
+            for j in 0..p {
+                for i in 1..=pm1 {
+                    pts.push([cp[i], 0.0, eop[j]]);
+                }
+            }
+            // quad face (1,2,5,4)
+            for j in 2..=p {
+                for i in 0..p {
+                    pts.push([eop[pm1 - i], eop[i], s1[j]]);
+                }
+            }
+            for j in 0..p {
+                for i in 1..=pm1 {
+                    pts.push([cp[p - i], cp[i], eop[j]]);
+                }
+            }
+            // quad face (2,0,3,5)
+            for j in 2..=p {
+                for i in 0..p {
+                    pts.push([0.0, eop[pm1 - i], s1[j]]);
+                }
+            }
+            for j in 0..p {
+                for i in 1..=pm1 {
+                    pts.push([0.0, cp[p - i], eop[j]]);
+                }
+            }
+            // interior: tri-interior points on the closed layers (2 slots
+            // each), then H1 tri-interior points on the open layers.
+            for l in 2..=p {
+                for j in 0..=pm2 {
+                    for i in 0..=(pm2 - j) {
+                        let (x, y) = tri_pt(i, j);
+                        pts.push([x, y, s1[l]]);
+                        pts.push([x, y, s1[l]]);
+                    }
+                }
+            }
+            for k in 0..p {
+                // The `j`/`i` loops run from 0 (MFEM's `l` walks the H1 tri
+                // interior node list in its own enumeration order, whose
+                // barycentric indices are `i+1`, `j+1`).
+                for j in 0..pm2 {
+                    for i in 0..(pm2 - j) {
+                        let w = cp[i + 1] + cp[j + 1] + cp[p - i - j - 2];
+                        pts.push([cp[i + 1] / w, cp[j + 1] / w, eop[k]]);
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(pts.len(), 3 * p * (p + 1) * (p + 2) / 2);
+        pts
+    }
 }
 
 impl VectorReferenceElement for PrismNDk {
@@ -466,6 +626,17 @@ impl VectorReferenceElement for PrismNDk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MFEM `ND_WedgeElement` layout table: `3p(p+1)(p+2)/2` slots for
+    /// every order (90 at p = 3 — longer than the placeholder Vandermonde
+    /// dimension, which says 87 there).
+    #[test]
+    fn mfem_layout_point_counts() {
+        let want = |p: usize| 3 * p * (p + 1) * (p + 2) / 2;
+        for p in 1..=4usize {
+            assert_eq!(PrismNDk::new(p).mfem_layout_points().len(), want(p));
+        }
+    }
 
     #[test]
     fn prism_nd1_n_dofs() {

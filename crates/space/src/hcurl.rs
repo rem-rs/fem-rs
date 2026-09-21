@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use fem_core::types::DofId;
-use fem_element::nedelec::{HexNDk, TetNDk, TriNDk};
+use fem_element::nedelec::{HexNDk, PrismNDk, PyraNDk, QuadND, TetNDk, TriNDk};
 use fem_element::quadrature::gauss_legendre_01;
 use fem_element::reference::VectorReferenceElement;
 use fem_linalg::Vector;
@@ -210,6 +210,154 @@ const HEX_QUAD_FACE_TO_ND_BLOCK: [usize; 6] = [0, 5, 1, 3, 4, 2];
 /// `HEX_QUAD_FACES` entry, so the element-slot table can be filled in block
 /// order.
 const HEX_ND_BLOCK_TO_QUAD_FACE: [usize; 6] = [0, 2, 5, 3, 4, 1];
+
+// ─── Prism / pyramid ND face-interior DOF geometry (D525) ───────────────────
+
+/// Trilinear prism map (MFEM `LinearWedgeFiniteElement` frame): reference
+/// (x, y, z) with barycentric (1−x−y, x, y) over the bottom triangle
+/// (V0,V1,V2) and the same over the top triangle (V3,V4,V5), z ∈ [0,1].
+fn prism_trilinear_map(verts: &[[f64; 3]; 6], x: f64, y: f64, z: f64) -> [f64; 3] {
+    let (l0, b) = (1.0 - x - y, 1.0 - z);
+    let n = [l0 * b, x * b, y * b, l0 * z, x * z, y * z];
+    let mut p = [0.0_f64; 3];
+    for (i, v) in verts.iter().enumerate() {
+        for d in 0..3 {
+            p[d] += n[i] * v[d];
+        }
+    }
+    p
+}
+
+/// The 6 prism vertices of element `e` (the corners are the whole `Prism6`
+/// node list, bottom triangle V0..V2, top V3..V5).
+fn prism6_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 6] {
+    let nodes = mesh.element_nodes(e);
+    let mut v = [[0.0_f64; 3]; 6];
+    for i in 0..6 {
+        let c = mesh.node_coords(nodes[i]);
+        for d in 0..3 {
+            v[i][d] = c[d];
+        }
+    }
+    v
+}
+
+/// The 5 pyramid vertices of element `e` (base V0..V3, apex V4).
+fn pyramid5_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 5] {
+    let nodes = mesh.element_nodes(e);
+    let mut v = [[0.0_f64; 3]; 5];
+    for i in 0..5 {
+        let c = mesh.node_coords(nodes[i]);
+        for d in 0..3 {
+            v[i][d] = c[d];
+        }
+    }
+    v
+}
+
+/// Collapsed straight-sided pyramid map: `phys = (1−z)·B(x/(1−z), y/(1−z)) +
+/// z·V4`, with `B` the bilinear base map over (V0..V3) — on straight pyramids
+/// this is exactly MFEM's `LinearPyramidFiniteElement` interpolation and
+/// restricts to the affine face map on every side face.
+fn pyramid_map(verts: &[[f64; 3]; 5], x: f64, y: f64, z: f64) -> [f64; 3] {
+    let w = 1.0 - z;
+    if w <= 1e-30 {
+        return verts[4];
+    }
+    let (u, v) = (x / w, y / w);
+    let b = [(1.0 - u) * (1.0 - v), u * (1.0 - v), u * v, (1.0 - u) * v];
+    let mut p = [0.0_f64; 3];
+    for d in 0..3 {
+        p[d] = w
+            * (b[0] * verts[0][d]
+                + b[1] * verts[1][d]
+                + b[2] * verts[2][d]
+                + b[3] * verts[3][d])
+            + z * verts[4][d];
+    }
+    p
+}
+
+/// Physical points of the element's local prism tri-face slot block: `f = 0`
+/// bottom (0,1,2), `f = 1` top (3,4,5); `k(k−1)` slots, two per point.  The
+/// reference slots are the MFEM `ND_WedgeElement` layout tail (D525).
+fn prism_tri_face_nodes(
+    verts: &[[f64; 3]; 6],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
+    let nfd = k * (k - 1);
+    let off = 9 * k + f * nfd;
+    layout[off..off + nfd]
+        .iter()
+        .map(|p| prism_trilinear_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Physical points of one prism quad-face slot block (`2k(k−1)` slots):
+/// `f = 0,1,2` = the MFEM faces (0,1,4,3), (1,2,5,4), (2,0,3,5) (D525).
+fn prism_quad_face_nodes(
+    verts: &[[f64; 3]; 6],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
+    let nfd = 2 * k * (k - 1);
+    let off = 9 * k + 2 * k * (k - 1) + f * nfd;
+    layout[off..off + nfd]
+        .iter()
+        .map(|p| prism_trilinear_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Physical points of the prism interior slot block
+/// (`k(k−1)² + k(k−1)(k−2)/2` slots, D525).
+fn prism_interior_nodes(verts: &[[f64; 3]; 6], k: usize, layout: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    let off = 9 * k + 8 * k * (k - 1);
+    layout[off..]
+        .iter()
+        .map(|p| prism_trilinear_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Physical points of one pyramid tri-face slot block (`k(k−1)` slots):
+/// `f = 0..4` = the MFEM faces (0,1,4), (1,2,4), (2,3,4), (3,0,4) (D525).
+fn pyramid_tri_face_nodes(
+    verts: &[[f64; 3]; 5],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
+    let nfd = k * (k - 1);
+    let off = 8 * k + 2 * k * (k - 1) + f * nfd;
+    layout[off..off + nfd]
+        .iter()
+        .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Physical points of the pyramid base quad-face slot block (`2k(k−1)`
+/// slots, D525).
+fn pyramid_quad_face_nodes(verts: &[[f64; 3]; 5], k: usize, layout: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    let nfd = 2 * k * (k - 1);
+    let off = 8 * k;
+    layout[off..off + nfd]
+        .iter()
+        .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Physical points of the pyramid interior slot block (`3k(k−1)²`, D525).
+fn pyramid_interior_nodes(verts: &[[f64; 3]; 5], k: usize, layout: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    let off = 8 * k + 6 * k * (k - 1);
+    layout[off..]
+        .iter()
+        .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
+        .collect()
+}
+
+// ─── Hex ND face-interior DOF geometry ──────────────────────────────────────
 
 /// Physical point and tangent of every local DOF of one hex NDk face block.
 fn hex_face_slots(
@@ -469,6 +617,9 @@ pub struct HCurlSpace<M: MeshTopology> {
     /// Face → canonical (shared) DOF functional anchor for 3-D tet NDk
     /// (`k(k−1)/2` point-value pairs), fixed by the face-creating element.
     face_anchor: HashMap<FaceKey, TetFaceAnchor>,
+    /// Prism/pyramid triangular face → canonical per-slot physical points
+    /// (`k(k−1)` slots), fixed by the face-creating element (D525).
+    tri_face_nodes: HashMap<FaceKey, Vec<[f64; 3]>>,
     /// Per element: the 2×2 face-DOF block transforms into the canonical
     /// (face-creating element) basis — empty for spaces without shared face
     /// DOF pairs (2-D, hex, k = 1).  See [`FaceDofBlock`].
@@ -478,6 +629,9 @@ pub struct HCurlSpace<M: MeshTopology> {
     /// Quad-face → physical DOF points/tangents (`σ_m(Φ) = Φ(x_m)·t_m`) of
     /// the face's canonical DOF list, fixed by the face-creating element.
     quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor>,
+    /// Prism/pyramid quad face → canonical per-slot physical points
+    /// (`2k(k−1)` slots), fixed by the face-creating element (D525).
+    quad_face_nodes: HashMap<QuadFaceKey, Vec<[f64; 3]>>,
     /// Spatial dimension.
     dim: usize,
     /// Cell type used by this space.
@@ -545,9 +699,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_anchor: HashMap<FaceKey, TetFaceAnchor> = HashMap::new();
+        let mut tri_face_nodes: HashMap<FaceKey, Vec<[f64; 3]>> = HashMap::new();
         let mut elem_face_blocks: Vec<Vec<FaceDofBlock>> = Vec::with_capacity(n_elem);
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor> = HashMap::new();
+        let mut quad_face_nodes: HashMap<QuadFaceKey, Vec<[f64; 3]>> = HashMap::new();
 
         // D158: MFEM's global numbering is **entity-major** — all edge DOFs
         // (mesh-edge index order = first-encounter order), then all face DOFs
@@ -599,6 +755,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 let hnd = HexNDk::new(k);
                 (hnd.dof_coords(), hnd.dof_tangents())
             };
+            // MFEM nodal layouts (`FE::Nodes`) of the wedge / Fuentes pyramid,
+            // used to anchor the prism/pyramid face blocks (D525).
+            let prism_layout = PrismNDk::new(k).mfem_layout_points();
+            let pyra_layout = PyraNDk::new(k).mfem_layout_points();
             for e in 0..n_elem as u32 {
                 let cell_type = mesh.element_type(e);
                 let verts = mesh.element_nodes(e);
@@ -643,6 +803,7 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         }
                     }
                     ElementType::Prism6 => {
+                        let verts6 = prism6_verts(&mesh, e);
                         for (f, &(la, lb, lc)) in PRISM_TRI_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             if face_to_dof.contains_key(&key) {
@@ -651,6 +812,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             face_to_dof.insert(key, next_dof);
                             next_dof += ndf as DofId;
                             face_creators.insert((e, f));
+                            tri_face_nodes.insert(
+                                key,
+                                prism_tri_face_nodes(&verts6, k, f, &prism_layout),
+                            );
                         }
                         let ndf_quad = 2 * k * (k - 1);
                         for (f, &(la, lb, lc, ld)) in PRISM_QUAD_FACES.iter().enumerate() {
@@ -661,9 +826,28 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             quad_face_to_dof.insert(key, next_dof);
                             next_dof += ndf_quad as DofId;
                             face_creators.insert((e, 100 + f));
+                            quad_face_nodes.insert(
+                                key,
+                                prism_quad_face_nodes(&verts6, k, f, &prism_layout),
+                            );
                         }
                     }
                     ElementType::Pyramid5 => {
+                        let verts5 = pyramid5_verts(&mesh, e);
+                        // Registration order = MFEM's mesh face numbering
+                        // (`FaceVert` walk: the base quad is the element's
+                        // first face, then the four apex tris) so the global
+                        // face-dof blocks line up with MFEM's (D525).
+                        let ndf_quad = 2 * k * (k - 1);
+                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
+                        let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                        if !quad_face_to_dof.contains_key(&key) {
+                            quad_face_to_dof.insert(key, next_dof);
+                            next_dof += ndf_quad as DofId;
+                            face_creators.insert((e, 100));
+                            quad_face_nodes
+                                .insert(key, pyramid_quad_face_nodes(&verts5, k, &pyra_layout));
+                        }
                         for (f, &(la, lb, lc)) in PYRAMID_TRI_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             if face_to_dof.contains_key(&key) {
@@ -672,14 +856,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             face_to_dof.insert(key, next_dof);
                             next_dof += ndf as DofId;
                             face_creators.insert((e, f));
-                        }
-                        let ndf_quad = 2 * k * (k - 1);
-                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
-                        let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                        if !quad_face_to_dof.contains_key(&key) {
-                            quad_face_to_dof.insert(key, next_dof);
-                            next_dof += ndf_quad as DofId;
-                            face_creators.insert((e, 100));
+                            tri_face_nodes.insert(
+                                key,
+                                pyramid_tri_face_nodes(&verts5, k, f, &pyra_layout),
+                            );
                         }
                     }
                     _ => {}
@@ -704,8 +884,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => {
                         (3 * k * (k - 1) * (k - 1)) as u32
                     }
-                    (3, ElementType::Prism6) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
-                    (3, ElementType::Pyramid5) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                    (3, ElementType::Prism6) if k >= 2 => {
+                        // MFEM `ND_WedgeElement`: `p(p−1)²` tri⊗layer slots +
+                        // `p(p−1)(p−2)/2` vertical slots (D525).
+                        ((k * (k - 1) * (k - 1)) + (k * (k - 1) * (k - 2)) / 2) as u32
+                    }
+                    (3, ElementType::Pyramid5) if k >= 2 => {
+                        // MFEM `ND_FuentesPyramidElement`: `3p(p−1)²` (D525).
+                        (3 * k * (k - 1) * (k - 1)) as u32
+                    }
                     _ => 0,
                 }
             })
@@ -903,8 +1090,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 (3, ElementType::Hex8 | ElementType::Hex20) if k >= 2 => {
                     (3 * k * (k - 1) * (k - 1)) as u32
                 }
-                (3, ElementType::Prism6) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
-                (3, ElementType::Pyramid5) if k >= 2 => (k * (k - 1) * (k - 1)) as u32,
+                (3, ElementType::Prism6) if k >= 2 => {
+                    ((k * (k - 1) * (k - 1)) + (k * (k - 1) * (k - 2)) / 2) as u32
+                }
+                (3, ElementType::Pyramid5) if k >= 2 => (3 * k * (k - 1) * (k - 1)) as u32,
                 _ => 0,
             };
             for _ in 0..interior_count {
@@ -928,9 +1117,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
             edge_to_dof,
             face_to_dof,
             face_anchor,
+            tri_face_nodes,
             elem_face_blocks,
             quad_face_to_dof,
             quad_face_anchor,
+            quad_face_nodes,
             dim,
             cell_type: first_cell_type,
             quad_igll,
@@ -973,12 +1164,15 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// list, so they take the face-creating element's physical anchor points
     /// (`face_anchor` / `quad_face_anchor`).  D505: the hex quad-face branch
     /// was missing entirely, leaving all `2k(k−1)` DOFs of every hex face at
-    /// `[0,0,0]` — a coordinate-keyed comparison (e.g. the D124 boundary-set
-    /// oracle) then collapsed all of them onto one key (hex ND2 boundary set
-    /// measured 96 edge keys + one collapsed key = 97 instead of MFEM's 192).
-    /// Prism/pyramid quad faces have no anchor (their `PrismNDk`/pyramid
-    /// reference elements expose no face DOF point table) and keep the
-    /// zero-coordinate placeholder — see the D525 registration.
+    /// `[0,0,0]`; D525 extended the same anchor semantics to the prism /
+    /// pyramid triangular faces (`tri_face_nodes`, from the MFEM
+    /// `ND_WedgeElement` / `ND_FuentesPyramidElement` layouts) and their quad
+    /// faces (`quad_face_nodes`).
+    ///
+    /// D525 (c): **element-interior** DOFs take the owning element's physical
+    /// points, obtained by pushing the interior slots of the MFEM nodal
+    /// layout through the element map (trilinear hex, affine tet, trilinear
+    /// prism, collapsed pyramid; 2-D tri/quad likewise).
     pub fn dof_coords(&self) -> Vec<[f64; 3]> {
         let mut out = vec![[0.0f64; 3]; self.n_dofs()];
         let dim = self.mesh.dim() as usize;
@@ -997,35 +1191,165 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 }
             }
         }
-        // Tet face DOFs sit at the canonical face DOF points (the
-        // face-creating element's TetNDk point-value sites).  Prism/pyramid
-        // triangular faces also live in `face_to_dof` but have **no** anchor
-        // (pass 2 fills `face_anchor` for tet faces only, and their block is
-        // `k(k−1)` dofs, not the tet `2·k(k−1)`), so an unguarded lookup panics
-        // on any prism/pyramid mesh at k ≥ 2 (D525) — they keep the zero
-        // placeholder like the prism/pyramid quad faces below.
+        // Triangular face DOFs (k ≥ 2, 3-D) sit at the canonical face slot
+        // points of the face-creating element: tets through the tangent-pair
+        // anchor (`face_anchor`), prisms/pyramids through their per-slot
+        // point lists (`tri_face_nodes`, MFEM wedge / Fuentes pyramid slot
+        // order).  Both branches must cover every registered tri face — a
+        // miss is a build bug, not a placeholder situation (D525).
         for (&key, &first) in &self.face_to_dof {
-            if self.order < 2 { break; }
-            let Some(anchor) = self.face_anchor.get(&key) else {
-                continue;
-            };
-            for p in 0..anchor.n_points() {
-                for j in 0..2 {
-                    let d = (first + 2 * p as u32 + j as u32) as usize;
-                    out[d] = anchor.point(p);
+            if self.order < 2 {
+                break;
+            }
+            if let Some(anchor) = self.face_anchor.get(&key) {
+                for p in 0..anchor.n_points() {
+                    for j in 0..2 {
+                        let d = (first + 2 * p as u32 + j as u32) as usize;
+                        out[d] = anchor.point(p);
+                    }
                 }
+            } else if let Some(nodes) = self.tri_face_nodes.get(&key) {
+                for (m, p) in nodes.iter().enumerate() {
+                    out[(first + m as u32) as usize] = *p;
+                }
+            } else {
+                panic!("HCurlSpace::dof_coords: triangular face {key:?} has no canonical anchor");
             }
         }
-        // Hex quad-face DOFs (D505): `2k(k−1)` slots, the point-value sites of
-        // the face's canonical list (`FE::Nodes` semantics), fixed by the
-        // face-creating element.
+        // Quadrilateral face DOFs (k ≥ 2, 3-D): hexes through the tangent
+        // anchor (`quad_face_anchor`, D505), prisms/pyramids through their
+        // per-slot point lists (`quad_face_nodes`, D525).
         for (&key, &first) in &self.quad_face_to_dof {
-            let Some(anchor) = self.quad_face_anchor.get(&key) else {
-                continue;
-            };
-            for (m, p) in anchor.nodes.iter().enumerate() {
-                let d = (first + m as u32) as usize;
-                out[d] = *p;
+            if let Some(anchor) = self.quad_face_anchor.get(&key) {
+                for (m, p) in anchor.nodes.iter().enumerate() {
+                    let d = (first + m as u32) as usize;
+                    out[d] = *p;
+                }
+            } else if let Some(nodes) = self.quad_face_nodes.get(&key) {
+                for (m, p) in nodes.iter().enumerate() {
+                    out[(first + m as u32) as usize] = *p;
+                }
+            } else {
+                panic!("HCurlSpace::dof_coords: quad face {key:?} has no canonical anchor");
+            }
+        }
+        // Element-interior DOFs (D525c): element-owned, so their points come
+        // from the owning element's map applied to the interior slots of the
+        // MFEM nodal layout (the tail of each layout table).
+        if self.order >= 2 {
+            let mut hex_coords: Option<Vec<Vec<f64>>> = None;
+            let mut tet_coords: Option<Vec<Vec<f64>>> = None;
+            let mut tri_coords: Option<Vec<Vec<f64>>> = None;
+            let mut quad_coords: Option<Vec<Vec<f64>>> = None;
+            let mut prism_layout: Option<Vec<[f64; 3]>> = None;
+            let mut pyra_layout: Option<Vec<[f64; 3]>> = None;
+            for e in 0..self.mesh.n_elements() as u32 {
+                let cell_type = self.mesh.element_type(e);
+                let dofs = self.element_dofs(e);
+                match (dim, cell_type) {
+                    (3, ElementType::Hex8 | ElementType::Hex20) => {
+                        let coords = hex_coords.get_or_insert_with(|| HexNDk::new(nd).dof_coords());
+                        let verts8 = hex8_verts(&self.mesh, e);
+                        let ndf_quad = 2 * nd * (nd - 1);
+                        let off = 12 * nd + 6 * ndf_quad;
+                        for (n, xi) in coords.iter().skip(off).enumerate() {
+                            let x = hex_trilinear_map(&verts8, xi).0;
+                            out[dofs[dofs.len() - coords.len() + off + n] as usize] = x;
+                        }
+                    }
+                    (3, ElementType::Tet4 | ElementType::Tet10) if nd >= 3 => {
+                        let n_interior = nd * (nd - 1) * (nd - 2) / 2;
+                        let coords =
+                            tet_coords.get_or_insert_with(|| TetNDk::new(nd).dof_coords());
+                        let off = coords.len() - n_interior;
+                        let nodes = self.mesh.element_nodes(e);
+                        let p0 = self.mesh.node_coords(nodes[0]);
+                        for (n, xi) in coords.iter().skip(off).enumerate() {
+                            let mut x = [p0[0], p0[1], p0[2]];
+                            for (c, lv) in [1usize, 2, 3].iter().enumerate() {
+                                let p = self.mesh.node_coords(nodes[*lv]);
+                                for d in 0..3 {
+                                    x[d] += (p[d] - p0[d]) * xi[c];
+                                }
+                            }
+                            out[dofs[dofs.len() - n_interior + n] as usize] = x;
+                        }
+                    }
+                    (3, ElementType::Prism6) => {
+                        let n_interior =
+                            (nd * (nd - 1) * (nd - 1)) + (nd * (nd - 1) * (nd - 2)) / 2;
+                        let layout = prism_layout
+                            .get_or_insert_with(|| PrismNDk::new(nd).mfem_layout_points());
+                        let verts6 = prism6_verts(&self.mesh, e);
+                        for (n, p) in prism_interior_nodes(&verts6, nd, layout)
+                            .iter()
+                            .enumerate()
+                        {
+                            out[dofs[dofs.len() - n_interior + n] as usize] = *p;
+                        }
+                    }
+                    (3, ElementType::Pyramid5) => {
+                        let layout = pyra_layout
+                            .get_or_insert_with(|| PyraNDk::new(nd).mfem_layout_points());
+                        let verts5 = pyramid5_verts(&self.mesh, e);
+                        for (n, p) in pyramid_interior_nodes(&verts5, nd, layout)
+                            .iter()
+                            .enumerate()
+                        {
+                            out[dofs[dofs.len() - 3 * nd * (nd - 1) * (nd - 1) + n] as usize] = *p;
+                        }
+                    }
+                    (2, ElementType::Tri3 | ElementType::Tri6) => {
+                        let n_interior = nd * (nd - 1);
+                        let coords =
+                            tri_coords.get_or_insert_with(|| TriNDk::new(nd).dof_coords());
+                        let off = coords.len() - n_interior;
+                        let nodes = self.mesh.element_nodes(e);
+                        let x0 = self.mesh.node_coords(nodes[0]);
+                        let x1 = self.mesh.node_coords(nodes[1]);
+                        let x2 = self.mesh.node_coords(nodes[2]);
+                        for (n, xi) in coords.iter().skip(off).enumerate() {
+                            out[dofs[dofs.len() - n_interior + n] as usize] = [
+                                x0[0] + (x1[0] - x0[0]) * xi[0] + (x2[0] - x0[0]) * xi[1],
+                                x0[1] + (x1[1] - x0[1]) * xi[0] + (x2[1] - x0[1]) * xi[1],
+                                0.0,
+                            ];
+                        }
+                    }
+                    (2, ElementType::Quad4 | ElementType::Quad8) => {
+                        let n_interior = 2 * nd * (nd - 1);
+                        let coords =
+                            quad_coords.get_or_insert_with(|| QuadND::new(nd).dof_coords());
+                        let off = coords.len() - n_interior;
+                        let nodes = self.mesh.element_nodes(e);
+                        let c: Vec<[f64; 2]> = (0..4)
+                            .map(|i| {
+                                let p = self.mesh.node_coords(nodes[i]);
+                                [p[0], p[1]]
+                            })
+                            .collect();
+                        for (n, xi) in coords.iter().skip(off).enumerate() {
+                            let w = [
+                                (1.0 - xi[0]) * (1.0 - xi[1]),
+                                xi[0] * (1.0 - xi[1]),
+                                xi[0] * xi[1],
+                                (1.0 - xi[0]) * xi[1],
+                            ];
+                            out[dofs[dofs.len() - n_interior + n] as usize] = [
+                                w[0] * c[0][0]
+                                    + w[1] * c[1][0]
+                                    + w[2] * c[2][0]
+                                    + w[3] * c[3][0],
+                                w[0] * c[0][1]
+                                    + w[1] * c[1][1]
+                                    + w[2] * c[2][1]
+                                    + w[3] * c[3][1],
+                                0.0,
+                            ];
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         out

@@ -448,18 +448,17 @@ pub fn boundary_dofs_hcurl<M: fem_mesh::topology::MeshTopology>(
                         out.append(&mut fdofs);
                     }
                 }
-                // Tet triangular face (tet NDk, k >= 2): the face carries
-                // `2 * n_points = k(k-1)` DOFs sitting at the shared face
-                // anchor points, so an essential (PEC) BC must constrain them
-                // too — otherwise the ND2/ND3 tangential trace is only
-                // partially imposed and the solution is O(1) wrong (D47).
+                // Triangular face interior DOFs (NDk, k >= 2): every NDk
+                // triangular face block carries `k(k-1)` dofs — `k(k-1)/2`
+                // point sites x 2 tangent slots — for tets (the
+                // `face_anchor`), prisms (MFEM `ND_WedgeElement`) and
+                // pyramids (the MFEM Fuentes pyramid) alike, so the count
+                // comes from the order, not from the tet-only anchor (D525).
                 3 => {
                     let key = FaceKey::new(nodes[0], nodes[1], nodes[2]);
-                    if let (Some(first), Some(anchor)) =
-                        (space.face_dof(key), space.face_anchor(key))
-                    {
-                        let n = 2 * anchor.n_points() as DofId;
-                        out.extend(first..first + n);
+                    if let Some(first) = space.face_dof(key) {
+                        let k = space.order() as DofId;
+                        out.extend(first..first + k * (k - 1));
                     }
                 }
                 _ => {}
