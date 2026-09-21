@@ -500,7 +500,6 @@ impl SurfaceInterpolator {
         for (dof, (i, j)) in order.iter().enumerate() {
             ordered[dof] = coords[i + nu * j].clone();
         }
-        if std::env::var("SURF_DEBUG").is_ok() { eprintln!("DEBUG order[0..4] = {:?}", &order[0..4]); eprintln!("DEBUG p(4,0,3,0)={} p(4,0,3,1)={} p(4,0,3,2)={}", self.cmesh[0].get_ijk(4, 0, 3, 0), self.cmesh[0].get_ijk(4, 0, 3, 1), self.cmesh[0].get_ijk(4, 0, 3, 2)); eprintln!("DEBUG p(0,4,3,0)={} p(0,4,3,1)={} p(0,4,3,2)={}", self.cmesh[0].get_ijk(0, 4, 3, 0), self.cmesh[0].get_ijk(0, 4, 3, 1), self.cmesh[0].get_ijk(0, 4, 3, 2)); eprintln!("DEBUG ordered[0..4] = {:?}", &ordered[0..4]); } 
         let doc = nurbs_doc_2d(&[self.kv[0].clone(), self.kv[1].clone()], &ordered);
 
         let filename = format!("{basename}.mesh");
