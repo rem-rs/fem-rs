@@ -337,6 +337,22 @@ name = "nurbs_naca_cmesh"
 path = "../miniapps/nurbs/nurbs_naca_cmesh.rs"
 
 [[example]]
+name = "nurbs_patch_ex1"
+path = "../miniapps/nurbs/nurbs_patch_ex1.rs"
+
+[[example]]
+name = "nurbs_ex10"
+path = "../miniapps/nurbs/nurbs_ex10.rs"
+
+[[example]]
+name = "mini_nurbs_mesh_info"
+path = "../miniapps/nurbs/nurbs_mesh_info.rs"
+
+[[example]]
+name = "mini_nurbs_surface"
+path = "../miniapps/nurbs/nurbs_surface.rs"
+
+[[example]]
 name = "miniapp_gridfunction_bounds"
 path = "../miniapps/tools/gridfunction_bounds.rs"
 
