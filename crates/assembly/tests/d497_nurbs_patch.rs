@@ -30,16 +30,14 @@ fn root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Build `NurbsFESpace` like `nurbs_patch_ex1` does: mesh orders (no `-o`),
-/// `ref_levels` refinements.
+/// Build `NurbsFESpace` like `nurbs_patch_ex1` does: the mesh's own orders
+/// (no `-o`), `ref_levels` refinements, and the **mesh's rational weights**
+/// (`FiniteElementSpace fespace(&mesh, mesh.GetNodes()->OwnFEC())`,
+/// `fem/fespace.cpp:2559-2565`).
 fn build_space(mesh: &str, ref_levels: usize) -> NurbsFESpace {
     let text = std::fs::read_to_string(root_dir().join("data").join(mesh))
         .expect("mesh file");
-    let mesh_ext = NurbsExtension::from_mesh_str(&text).expect("parse");
-    let orders: Vec<usize> = (0..mesh_ext.n_knot_vectors())
-        .map(|i| mesh_ext.knot_vector(i).order())
-        .collect();
-    NurbsFESpace::from_mesh_str(&text, ref_levels, &orders).expect("space")
+    NurbsFESpace::from_mesh_isoparametric_str(&text, ref_levels).expect("space")
 }
 
 /// Build the patch rules exactly as `nurbs_patch_ex1.cpp` does.
@@ -459,10 +457,50 @@ fn d497_ball_residual_report() {
 
 #[test]
 fn d497_ball_weights_match_mfem() {
+    // MFEM 4.10 (`tmp/r55/d516_ref.cpp`, dump `tmp/r55/d516_ref_ball.txt`):
+    // the mesh extension's weights, and element 1's `NURBSFiniteElement` weights
+    // (`NURBSExtension::LoadFE` → `weights.GetSubVector(el_dofs)`).
     let text = std::fs::read_to_string(root_dir().join("data/ball-nurbs.mesh")).unwrap();
+    let ext = NurbsExtension::from_mesh_str(&text).expect("ball");
+    assert_eq!(ext.n_dofs(), 517);
+    let w = ext.weights();
+    assert_eq!(w.len(), 517);
+    assert_eq!(w.iter().filter(|&&v| v != 1.0).count(), 360, "MFEM NONUNIT");
+    assert_eq!(w[16], 0.8912112036084, "first non-unit weight");
+    assert_eq!(w[516], 0.94056488160479002, "last non-unit weight");
+    for (i, &v) in w.iter().enumerate().take(16) {
+        assert_eq!(v, 1.0, "the inner-cube patch's weights are one (w[{i}])");
+    }
+
+    // `nurbs_patch_ex1` builds `FiniteElementSpace(&mesh, fec)`, whose
+    // `NURBSext` is the mesh's own — so the *space* carries the rational
+    // weights too (via `NurbsMeshGeometry`, which reads the file's section the
+    // way `Vector::Load(in, GetNDof())` does).
     let space = build_space("ball-nurbs.mesh", 0);
     let geo = NurbsMeshGeometry::from_mesh_text(&text, space.extension()).unwrap();
-    for e in [1usize, 2] {
-        println!("fem-rs elem {e} w[0..12]: {:?}", &geo.element_weights(&space, e)[..12]);
-    }
+    let mfem_el1_prefix: [f64; 15] = [
+        1.0,
+        0.8912112036084,
+        0.85911675639653995,
+        0.8912112036084,
+        1.0,
+        0.8912112036084,
+        0.76225952641915995,
+        0.71866517354005,
+        0.76225952641915995,
+        0.8912112036084,
+        0.85911675639653995,
+        0.71866517354005,
+        0.67127243159192995,
+        0.71866517354005,
+        0.85911675639653995,
+    ];
+    let e1 = geo.element_weights(&space, 1);
+    assert_eq!(e1.len(), 125);
+    assert_eq!(&e1[..15], &mfem_el1_prefix[..], "element 1 weights (MFEM EL1_WEIGHTS)");
+    assert_eq!(e1.iter().filter(|&&v| v != 1.0).count(), 84, "element 1 NONUNIT");
+    assert!(
+        geo.element_weights(&space, 0).iter().all(|&v| v == 1.0),
+        "element 0 (the inner cube) is unit-weighted"
+    );
 }

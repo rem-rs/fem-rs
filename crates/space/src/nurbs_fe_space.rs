@@ -458,6 +458,55 @@ impl NurbsFESpace {
     /// `nurbs_ex1` does with `order.SetSize(nkv); order = tmp`) or one per knot
     /// vector.
     pub fn from_mesh_str(text: &str, ref_levels: usize, orders: &[usize]) -> Result<Self, String> {
+        Self::build(text, ref_levels, orders, false)
+    }
+
+    /// The other MFEM construction: `FiniteElementSpace fespace(&mesh,
+    /// mesh.GetNodes()->OwnFEC())` — `nurbs_patch_ex1`'s isoparametric form.
+    ///
+    /// `FiniteElementSpace::Constructor` (`fem/fespace.cpp:2557-2567`) keeps
+    /// `NURBSext_ == NULL` and takes `NURBSext = mesh_->NURBSext`, so the space
+    /// **inherits the mesh's rational weights** and
+    /// `NURBSFiniteElement::CalcShape` (`fem/fe/fe_nurbs.cpp:38-42`) normalizes
+    /// the B-spline values by them.  The orders are the mesh's own (a
+    /// `NURBSFECollection` built from the mesh's `Nodes` grid function), so no
+    /// elevation happens and the control net is unchanged.
+    ///
+    /// Contrast [`Self::from_mesh_str`], which mirrors
+    /// `new NURBSExtension(mesh->NURBSext, order)` (`nurbs_ex1 -o ≥ 1`,
+    /// `miniapps/nurbs/nurbs_ex1.cpp:282`) and therefore resets the weights to
+    /// one (`mesh/nurbs.cpp:2998-3001`).
+    pub fn from_mesh_isoparametric_str(
+        text: &str,
+        ref_levels: usize,
+    ) -> Result<Self, String> {
+        let geo = NurbsExtension::from_mesh_str(text)?;
+        let orders: Vec<usize> = (0..geo.n_knot_vectors())
+            .map(|i| geo.knot_vector(i).order())
+            .collect();
+        Self::build(text, ref_levels, &orders, true)
+    }
+
+    /// Read a NURBS mesh file and build the isoparametric space (see
+    /// [`Self::from_mesh_isoparametric_str`]).
+    pub fn from_mesh_isoparametric_file(
+        path: impl AsRef<std::path::Path>,
+        ref_levels: usize,
+    ) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path.as_ref())
+            .map_err(|e| format!("NurbsFESpace::from_mesh_isoparametric_file: {e}"))?;
+        Self::from_mesh_isoparametric_str(&text, ref_levels)
+    }
+
+    /// Shared body of the two constructions; `own_weights` selects between
+    /// `NURBSext = mesh->NURBSext` (mesh orders, mesh weights) and
+    /// `NURBSExtension(mesh->NURBSext, orders)` (unit weights).
+    fn build(
+        text: &str,
+        ref_levels: usize,
+        orders: &[usize],
+        own_weights: bool,
+    ) -> Result<Self, String> {
         let geo = NurbsExtension::from_mesh_str(text)?;
         let dim = geo.dim();
         if dim < 1 || dim > 3 {
@@ -489,7 +538,14 @@ impl NurbsFESpace {
                 mesh_ext.n_knot_vectors()
             ));
         };
-        let ext = mesh_ext.with_orders(&orders)?;
+        // `NURBSext = mesh->NURBSext` (the mesh's own collection) keeps the
+        // mesh's rational weights; `NURBSExtension(mesh->NURBSext, orders)`
+        // resets them to one.  See the two constructors above.
+        let ext = if own_weights {
+            mesh_ext.with_orders_keeping_weights(&orders)?
+        } else {
+            mesh_ext.with_orders(&orders)?
+        };
 
         let mut geo_element = Vec::with_capacity(ext.n_elements());
         for e in 0..ext.n_elements() {

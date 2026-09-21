@@ -284,13 +284,22 @@ fn flip_knot_vector(knots: &[f64], order: usize) -> Vec<f64> {
 
 /// One `patches`-flavour block — the file image of MFEM's `NURBSPatch`.
 ///
-/// The extension only consumes the block's knot vectors (the analysis space's
-/// weights stay unit and the geometry arrives through the mesh's node block),
-/// so the `dimension` / `controlpoints*` payload is validated and skipped.
+/// The extension consumes the block's knot vectors and its **homogeneous
+/// weights** (`Nurbsextension::weights`); the Cartesian coordinates of the
+/// control points are validated and skipped (the geometry arrives through the
+/// mesh's node block).
 struct PatchBlock {
     /// One `(order, knots)` pair per parametric direction
     /// (`NCP = knots.len() - order - 1`).
     knotvectors: Vec<(usize, Vec<f64>)>,
+    /// Per-direction control-point counts (`KnotVector::GetNCP`).
+    ncp: Vec<usize>,
+    /// The homogeneous last component of every control point, in MFEM's
+    /// `NURBSPatch` storage order `i + j*ncp[0] + k*ncp[0]*ncp[1]`
+    /// (`NURBSPatch::NURBSPatch(std::istream&)` fills `data[dim]` that way for
+    /// both the `controlpoints_homogeneous` and the `controlpoints_cartesian`
+    /// flavour — the latter multiplies the first `dim` components by it).
+    weights: Vec<f64>,
 }
 
 /// Whitespace token scanner over the raw file text, with MFEM's `#` comment
@@ -380,12 +389,16 @@ fn parse_patch_blocks(text: &str, np: usize) -> Result<Vec<PatchBlock>, String> 
             }
         }
         let n_cp: usize = knotvectors.iter().map(|(o, k)| k.len() - o - 1).product();
+        let ncp: Vec<usize> = knotvectors.iter().map(|(o, k)| k.len() - o - 1).collect();
+        let mut weights = Vec::with_capacity(n_cp);
         for _ in 0..n_cp {
+            let mut last = 0.0_f64;
             for _ in 0..(d + 1) {
-                s.next_f64("control point value")?;
+                last = s.next_f64("control point value")?;
             }
+            weights.push(last);
         }
-        blocks.push(PatchBlock { knotvectors });
+        blocks.push(PatchBlock { knotvectors, ncp, weights });
     }
     Ok(blocks)
 }
@@ -395,6 +408,161 @@ fn as_usize(v: f64, what: &str) -> Result<usize, String> {
         return Err(format!("{what}: expected a non-negative integer, got {v}"));
     }
     Ok(v as usize)
+}
+
+/// Row-major strides of a tensor with one entry per direction
+/// (`stride[0] = 1`, MFEM's `NURBSPatch` layout `i + j*ni + k*ni*nj`).
+fn tensor_strides(ncp: &[usize]) -> Vec<usize> {
+    let mut s = vec![1usize; ncp.len()];
+    for i in 1..ncp.len() {
+        s[i] = s[i - 1] * ncp[i - 1];
+    }
+    s
+}
+
+/// The flat index of `multi` in a tensor of shape `ncp` (the inverse of the
+/// digit decomposition `multi_index_from`'s callers use).
+fn multi_index_from(multi: &[usize], ncp: &[usize]) -> usize {
+    debug_assert_eq!(multi.len(), ncp.len());
+    multi.iter().zip(ncp).enumerate().map(|(d, (&m, &n))| {
+        debug_assert!(m < n, "multi-index out of range in direction {d}");
+        m * tensor_strides(ncp)[d]
+    }).sum()
+}
+
+/// MFEM `KnotVector::GetSpan` (`mesh/nurbs.cpp:1187`) — the knot-span index of
+/// the parameter `u` (`knots.len() == ncp + order + 1`).  Note the two exact
+/// endpoint shortcuts and the `[order, ncp]` search window: they matter, because
+/// `NURBSPatch::KnotInsert` uses this span to *start* its A5.5 loop.
+fn get_span(knots: &[f64], order: usize, ncp: usize, u: f64) -> usize {
+    if u == knots[ncp + order] {
+        return ncp - 1;
+    }
+    if u == knots[0] {
+        return order;
+    }
+    let (mut low, mut high) = (order, ncp);
+    let mut mid = (low + high) / 2;
+    while u < knots[mid] || u >= knots[mid + 1] {
+        if u < knots[mid] {
+            high = mid;
+        } else {
+            low = mid;
+        }
+        mid = (low + high) / 2;
+    }
+    mid
+}
+
+/// MFEM `NURBSPatch::KnotInsert(dir, const Vector &knot)` (`mesh/nurbs.cpp:1767`,
+/// NURBS Book **A5.5** as MFEM implements it) applied to one control polygon:
+/// insert **all** of `knots_in` in a single backward pass.
+///
+/// This is deliberately not textbook A5.1.  MFEM's loop runs `j` from the last
+/// inserted knot down to the first, carrying `i` (old index) and `k` (new index)
+/// downward, and computes the blend factor from the **new** knot vector,
+/// `alfa = (newkv[k+l] - u_j) / (newkv[k+l] - oldkv[i-pl+l])`, applying
+/// `Q[ind-1] = alfa*Q[ind-1] + (1-alfa)*Q[ind]`.  The result differs from A5.1's
+/// `[p0, p1, (p1+p2)/2, ...]` at the low end: for a single inserted knot in a
+/// uniformly single-span order-4 patch MFEM produces
+/// `[p0, (p0+p1)/2, (p1+p2)/2, (p2+p3)/2, (p3+p4)/2, p4]`.  Verified against the
+/// MFEM 4.10 `weights` of every refined `ball-nurbs.mesh` element
+/// (`crates/space/tests/d516_nurbs_weights.rs`).
+///
+/// `pl` is the MFEM order (= degree + 1) and `p` the `ml` control values.
+fn knot_insert_line(kv_old: &[f64], pl: usize, p: &[f64], knots_in: &[f64]) -> Vec<f64> {
+    let ml = p.len();
+    let rr = knots_in.len() - 1;
+    let a = get_span(kv_old, pl, ml, knots_in[0]);
+    let b = get_span(kv_old, pl, ml, knots_in[rr]);
+    let mut newkv = vec![0.0_f64; kv_old.len() + knots_in.len()];
+    let mut q = vec![0.0_f64; ml + knots_in.len()];
+
+    for j in 0..=a {
+        newkv[j] = kv_old[j];
+    }
+    for j in (b + pl)..=(ml + pl) {
+        newkv[j + rr + 1] = kv_old[j];
+    }
+    if a >= pl {
+        for k in 0..=(a - pl) {
+            q[k] = p[k];
+        }
+    }
+    for k in (b - 1)..ml {
+        q[k + rr + 1] = p[k];
+    }
+
+    let mut i = (b + pl - 1) as isize;
+    let mut k = (b + pl + rr) as isize;
+    for j in (0..=rr).rev() {
+        while knots_in[j] <= kv_old[i as usize] && i > a as isize {
+            newkv[k as usize] = kv_old[i as usize];
+            q[(k - pl as isize - 1) as usize] = p[(i - pl as isize - 1) as usize];
+            k -= 1;
+            i -= 1;
+        }
+        q[(k - pl as isize - 1) as usize] = q[(k - pl as isize) as usize];
+        for l in 1..=pl {
+            let ind = (k - pl as isize + l as isize) as usize;
+            let mut alfa = newkv[k as usize + l] - knots_in[j];
+            if alfa == 0.0 {
+                q[ind - 1] = q[ind];
+            } else {
+                alfa /= newkv[k as usize + l] - kv_old[(i - pl as isize + l as isize) as usize];
+                q[ind - 1] = alfa * q[ind - 1] + (1.0 - alfa) * q[ind];
+            }
+        }
+        newkv[k as usize] = knots_in[j];
+        k -= 1;
+    }
+    q
+}
+
+/// [`knot_insert_line`] applied to every line of a tensor along direction `d`:
+/// `w` is a tensor of shape `ncp`, the result a tensor of shape `ncp` with
+/// `ncp[d] + knots_in.len()` entries along `d`.
+fn insert_knot_direction(
+    w: &[f64],
+    ncp: &[usize],
+    d: usize,
+    knots: &[f64],
+    order: usize,
+    knots_in: &[f64],
+) -> Vec<f64> {
+    let dim = ncp.len();
+    let old_strides = tensor_strides(ncp);
+    let mut nnew = ncp.to_vec();
+    nnew[d] += knots_in.len();
+    let new_strides = tensor_strides(&nnew);
+    let mut out = vec![0.0_f64; nnew.iter().product()];
+    let outer: usize = ncp
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != d)
+        .map(|(_, &v)| v)
+        .product();
+    let mut idx = vec![0usize; dim];
+    for _ in 0..outer {
+        let base: usize = (0..dim).map(|i| idx[i] * old_strides[i]).sum();
+        let line: Vec<f64> = (0..ncp[d]).map(|i| w[base + i * old_strides[d]]).collect();
+        let q = knot_insert_line(knots, order, &line, knots_in);
+        let base_new: usize = (0..dim).map(|i| idx[i] * new_strides[i]).sum();
+        for (i, &v) in q.iter().enumerate() {
+            out[base_new + i * new_strides[d]] = v;
+        }
+        for i in 0..dim {
+            if i == d {
+                continue;
+            }
+            idx[i] += 1;
+            if idx[i] < ncp[i] {
+                break;
+            }
+            idx[i] = 0;
+        }
+    }
+    out
 }
 
 /// A topology element (patch or boundary element).
@@ -832,23 +1000,52 @@ impl NurbsExtension {
             ext.generate_boundary_elements();
         }
         ext.rebuild()?;
-        ext.weights = ext.unit_weights();
 
         // ── weights ───────────────────────────────────────────────────────────
-        // `NURBSExtension::Load` does `weights.Load(input, GetNDof())`: the
-        // section carries exactly `GetNDof()` values and no count.
-        if let Ok(w) = section(&sections, "weights") {
-            if w.len() != ext.n_dofs {
-                return Err(format!(
-                    "weights: expected {} values (GetNDof), found {}",
-                    ext.n_dofs,
-                    w.len()
-                ));
-            }
-            ext.weights = w.to_vec();
+        if patches_variant {
+            // `Mesh::ReadNURBSMesh` → `NURBSext->SetCoordsFromPatches(*Nodes,
+            // vdim)` → `NURBSExtension::Set{1,2,3}DSolutionVector`.  MFEM's
+            // `NURBSExtension::Load` guards the `weights` section with
+            // `if (patches.Size() == 0)`, so the `patches` flavour never reads
+            // one: its rational weights are the homogeneous last component of
+            // the patch control points.
+            ext.fill_weights_from_patches(text)?;
         } else {
-            // `unitweights` / `autoweights`.
-            ext.weights = vec![1.0; ext.n_dofs];
+            // `NURBSExtension::Load` does `weights.Load(input, GetNDof())`, and
+            // `Vector::Load(std::istream &in, int Size)` reads **exactly**
+            // `Size` values sequentially from the stream — there is no count
+            // and no length check, and anything the section carries beyond the
+            // first `GetNDof()` values is simply never consumed (the stream
+            // position is left on it; `weights` is the last section of the
+            // v1.0 format, so nothing else reads it either).  The mesh's
+            // rational weights are therefore the **first `GetNDof()` numbers**
+            // after the keyword — `ball-nurbs.mesh` is the file that exercises
+            // this: its section holds 517 values for `GetNDof() == 517`, and
+            // the trailing `FiniteElementSpace` node block (a further 1560
+            // tokens) is *not* part of it.
+            //
+            // A section shorter than `GetNDof()` cannot be reproduced
+            // faithfully (MFEM would keep reading and consume the following
+            // block's tokens), so it is rejected loudly rather than padded or
+            // silently replaced by unit weights.
+            match section(&sections, "weights") {
+                Ok(w) if w.len() >= ext.n_dofs => {
+                    ext.weights = w[..ext.n_dofs].to_vec();
+                }
+                Ok(w) => {
+                    return Err(format!(
+                        "weights: MFEM's `weights.Load(input, GetNDof())` reads {} values, \
+                         the section holds {}",
+                        ext.n_dofs,
+                        w.len()
+                    ));
+                }
+                Err(_) => {
+                    // `unitweights` / `autoweights`:
+                    // `weights.SetSize(GetNDof()); weights = 1.0;`
+                    ext.weights = ext.unit_weights();
+                }
+            }
         }
 
         Ok(ext)
@@ -916,6 +1113,69 @@ impl NurbsExtension {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        Ok(())
+    }
+
+    /// MFEM `Mesh::ReadNURBSMesh`'s `NURBSext->SetCoordsFromPatches(*Nodes,
+    /// vdim)` → `NURBSExtension::Set{1,2,3}DSolutionVector`: the rational
+    /// weights of a `patches`-flavour mesh are the **homogeneous last
+    /// component** of the patch control points,
+    ///
+    /// ```text
+    ///   weights(p2g(i,j,k)) = patch(i,j,k,vdim)      (nurbs.cpp:5496/5556/5620)
+    /// ```
+    ///
+    /// with `p2g` MFEM's `NURBSPatchMap::operator()` — [`Self::patch_dof`]
+    /// here.  MFEM writes every patch's block unconditionally (the
+    /// `dof2patch` guard only fires for the non-conforming extension), so a
+    /// control point shared by two patches takes its weight from the last one
+    /// to reach it; the knot-insertion invariance of the shared net makes both
+    /// values equal, and the completeness check below keeps a partially
+    /// covered net from passing silently.
+    ///
+    /// Must be called after the knot vectors and the DOF numbering are final
+    /// (`rebuild`).
+    fn fill_weights_from_patches(&mut self, text: &str) -> Result<(), String> {
+        let blocks = parse_patch_blocks(text, self.elements.len())?;
+        let dim = self.dim;
+        let mut weights = vec![0.0_f64; self.n_dofs];
+        let mut covered = vec![false; self.n_dofs];
+        for (p, block) in blocks.iter().enumerate() {
+            if block.ncp.len() != dim {
+                return Err(format!(
+                    "patch {p}: {} knot vectors, expected {dim}",
+                    block.ncp.len()
+                ));
+            }
+            let n_cp: usize = block.ncp.iter().product();
+            if block.weights.len() != n_cp {
+                return Err(format!(
+                    "patch {p}: {} control-point weights for {n_cp} control points",
+                    block.weights.len()
+                ));
+            }
+            let mut multi = vec![0usize; dim];
+            for (flat, &w) in block.weights.iter().enumerate() {
+                // `NURBSPatch` layout `i + j*ncp[0] + k*ncp[0]*ncp[1]`
+                // (`mesh/nurbs.hpp:1364`).
+                let mut rem = flat;
+                for d in 0..dim {
+                    multi[d] = rem % block.ncp[d];
+                    rem /= block.ncp[d];
+                }
+                let g = self.patch_dof(p, &multi)?;
+                weights[g] = w;
+                covered[g] = true;
+            }
+        }
+        if let Some(g) = covered.iter().position(|&c| !c) {
+            return Err(format!(
+                "patches: control point {g} is not covered by any patch block \
+                 ({} DOFs)",
+                self.n_dofs
+            ));
+        }
+        self.weights = weights;
         Ok(())
     }
 
@@ -1007,6 +1267,63 @@ impl NurbsExtension {
         vec![1.0; self.n_dofs]
     }
 
+    /// The analysis extension of MFEM's **`NURBSext == NULL`** finite element
+    /// space — `FiniteElementSpace::Constructor` (`fem/fespace.cpp:2557-2567`):
+    ///
+    /// ```cpp
+    /// const NURBSFECollection *nurbs_fec = dynamic_cast<...>(fec_);
+    /// if (nurbs_fec)
+    /// {
+    ///    MFEM_VERIFY(mesh_->NURBSext, "NURBS FE space requires a NURBS mesh.");
+    ///    if (NURBSext_ == NULL) { NURBSext = mesh_->NURBSext; own_ext = 0; }
+    ///    else                   { NURBSext = NURBSext_;      own_ext = 1; }
+    /// ```
+    ///
+    /// With `NURBSext_ == NULL` — the `nurbs_patch_ex1` configuration
+    /// (`FiniteElementSpace fespace(&mesh, fec)`) — the space's extension *is*
+    /// the mesh's, so it inherits the mesh's **rational** weights, and
+    /// `NURBSFiniteElement::CalcShape` (`fem/fe/fe_nurbs.cpp:38-42`) normalizes
+    /// the B-spline values by them.  That is the opposite of
+    /// [`Self::with_orders`], which mirrors `new NURBSExtension(parent, order)`
+    /// (`nurbs_ex1 -o ≥ 1`) and resets the weights to one.
+    ///
+    /// The target orders therefore have to *equal* the mesh's orders: MFEM
+    /// never elevates through this path (the collection comes from the mesh's
+    /// own `Nodes` grid function), and a raised order would need a refined
+    /// control net that this extension does not carry.  Both cases are rejected
+    /// loudly instead of silently dropping the rational weighting.
+    pub fn with_orders_keeping_weights(&self, orders: &[usize]) -> Result<Self, String> {
+        if orders.len() != self.knot_vectors.len() {
+            return Err(format!(
+                "NurbsExtension::with_orders_keeping_weights: {} orders for {} knot vectors",
+                orders.len(),
+                self.knot_vectors.len()
+            ));
+        }
+        let mismatched: Vec<usize> = (0..orders.len())
+            .filter(|&i| orders[i] != self.knot_vectors[i].order())
+            .collect();
+        if !mismatched.is_empty() {
+            return Err(format!(
+                "NurbsExtension::with_orders_keeping_weights: target orders {:?} differ from the \
+                 mesh orders {:?} at knot vectors {mismatched:?}; MFEM's \
+                 `FiniteElementSpace(mesh, fec)` has `NURBSext == mesh->NURBSext`, so it cannot \
+                 elevate — use `with_orders` for `nurbs_ex1`'s \
+                 `NURBSExtension(mesh->NURBSext, order)`",
+                orders, self.orders
+            ));
+        }
+        if self.weights.len() != self.n_dofs {
+            return Err(format!(
+                "NurbsExtension::with_orders_keeping_weights: {} weights for {} DOFs — the mesh \
+                 extension's weights must cover its control net",
+                self.weights.len(),
+                self.n_dofs
+            ));
+        }
+        Ok(self.clone())
+    }
+
     /// MFEM `NURBSExtension(NURBSExtension *parent, const Array<int> &newOrders)`
     /// (and the single-order form used by `nurbs_ex1`/`nurbs_ex3`).
     ///
@@ -1040,18 +1357,25 @@ impl NurbsExtension {
 
     /// MFEM `Mesh::NURBSUniformRefinement` at the extension level:
     /// `KnotVector::UniformRefinement(new_knots, rf)` inserts `rf - 1` equally
-    /// spaced knots into every non-empty span of every unique knot vector.
+    /// spaced knots into every non-empty span of every unique knot vector, and
+    /// `NURBSPatch::KnotInsert` re-derives the control net by knot insertion in
+    /// **homogeneous** form — so the refined weights are A5.1 blends of the old
+    /// ones, not the old values repeated.
     ///
-    /// The mesh's *control points* are re-derived by MFEM's
-    /// `NURBSPatch::UniformRefinement`; knot insertion leaves the geometry
-    /// invariant, so [`crate::NurbsFESpace`] keeps the original control net and
-    /// evaluates it over the refined parameter intervals instead.
+    /// The refined *geometry* is not stored: knot insertion leaves the
+    /// parametric surface invariant, so [`crate::NurbsFESpace`] evaluates the
+    /// original control net over the refined parameter intervals (see
+    /// [`crate::NurbsFESpace::geometry`]).  The refined **weights** do have to
+    /// be materialised, because they are what
+    /// `NURBSFiniteElement::CalcShape` normalizes by on the refined mesh
+    /// (`NURBSExtension::LoadFE` copies `weights.GetSubVector(el_dofs)`).
     pub fn uniform_refinement(&mut self, rf: usize) -> Result<(), String> {
         if rf < 2 {
             return Err(format!(
                 "NurbsExtension::uniform_refinement: refinement factor must be >= 2, got {rf}"
             ));
         }
+        let old = self.clone();
         for k in self.knot_vectors.iter_mut() {
             let knots = k.knot_vector().as_slice();
             // `KnotVector::UniformRefinement`: for every non-empty span
@@ -1071,7 +1395,135 @@ impl NurbsExtension {
             }
             *k = NurbsKnot::new(KnotVector::new_clamped(refined)?, k.order())?;
         }
-        self.rebuild()
+        self.rebuild()?;
+        self.weights = old.refined_weights(self, rf)?;
+        Ok(())
+    }
+
+    /// The rational weights of the uniformly refined control net:
+    /// per patch, `NURBSPatch::KnotInsert(dir, knot)` (Piegl & Tiller A5.1)
+    /// applied to the **homogeneous** weight tensor, direction by direction.
+    ///
+    /// `self` is the pre-refinement extension (source of the old weights),
+    /// `new` the post-refinement one (source of the new DOF numbering).  The
+    /// projective form of a rational patch is invariant under knot insertion, so
+    /// inserting one knot `u` along direction `d` turns a weight line `w[i]`
+    /// into `boehm_insert(order_d, knots_d, u, w)`; the control points shared by
+    /// neighbouring patches get the same value (both blend the same projective
+    /// net), and the disagreement check keeps a damaged net from passing
+    /// silently.
+    ///
+    /// The local control point ⇄ global DOF correspondence is taken from the
+    /// **element DOF tables** ([`Self::patch_local_dofs`]) rather than from
+    /// [`Self::patch_dof`], whose 1-D arm produces out-of-range values on a
+    /// refined extension (see the debt note on `patch_map_mode`).
+    fn refined_weights(&self, new: &NurbsExtension, rf: usize) -> Result<Vec<f64>, String> {
+        let dim = self.dim;
+        let mut out = vec![0.0_f64; new.n_dofs];
+        let mut set = vec![false; new.n_dofs];
+        for p in 0..self.n_patches() {
+            let pkv = self.patch_knot_vectors(p)?;
+            let mut ncp: Vec<usize> = pkv.iter().map(|k| k.ncp()).collect();
+            let mut wts = vec![0.0_f64; ncp.iter().product()];
+            for (multi, g) in self.patch_local_dofs(p)? {
+                let flat = multi_index_from(&multi, &ncp);
+                wts[flat] = self.weights[g];
+            }
+            for d in 0..dim {
+                let order = pkv[d].order();
+                let knots = pkv[d].knot_vector().as_slice();
+                let mut inserted: Vec<f64> = Vec::new();
+                for pair in knots.windows(2) {
+                    if pair[0] != pair[1] {
+                        for m in 1..rf {
+                            let t = m as f64 / rf as f64;
+                            inserted.push((1.0 - t) * pair[0] + t * pair[1]);
+                        }
+                    }
+                }
+                if inserted.is_empty() {
+                    continue;
+                }
+                wts = insert_knot_direction(&wts, &ncp, d, knots, order, &inserted);
+                ncp[d] += inserted.len();
+            }
+            for (multi, g) in new.patch_local_dofs(p)? {
+                let v = wts[multi_index_from(&multi, &ncp)];
+                if set[g] && (out[g] - v).abs() > 1e-12 * out[g].abs().max(1.0) {
+                    return Err(format!(
+                        "NurbsExtension::uniform_refinement: control point {g} of patch {p} \
+                         disagrees with the value another patch wrote ({} vs {v})",
+                        out[g]
+                    ));
+                }
+                out[g] = v;
+                set[g] = true;
+            }
+        }
+        if let Some(g) = set.iter().position(|&s| !s) {
+            return Err(format!(
+                "NurbsExtension::uniform_refinement: refined control point {g} is not covered \
+                 by any patch"
+            ));
+        }
+        Ok(out)
+    }
+
+    /// The patch-local control point ⇄ global DOF correspondence of patch `p`,
+    /// as `(local multi-index, DOF)` pairs — read off the **element DOF
+    /// tables**, which is the same data the finite element space itself uses.
+    ///
+    /// MFEM deep-copies an element's `(i, j, k)` and its `el_dof` row in
+    /// `NURBSExtension::LoadFE`, and `NURBSPatchMap::SetPatchDofMap` reads the
+    /// same numbering, so the two views agree: for an element whose patch-local
+    /// span indices are `spans`, local DOF `o` of `element_dofs(e)` belongs to
+    /// the control point `spans[d] + o_d`, where `o_d` is the `d`-th digit of `o`
+    /// in the `(order_d + 1)`-per-direction tensor layout (x fastest — the
+    /// `NurbsScalar{1,2,3}D` dof order).
+    ///
+    /// A control point on a patch boundary appears in several elements and is
+    /// assigned once per global DOF; the returned pairs are unique per `multi`
+    /// and per `dof`.
+    fn patch_local_dofs(&self, p: usize) -> Result<Vec<(Vec<usize>, usize)>, String> {
+        let dim = self.dim;
+        let kvs = self.patch_knot_vectors(p)?;
+        let nloc: Vec<usize> = kvs.iter().map(|k| k.order() + 1).collect();
+        let ncp: Vec<usize> = kvs.iter().map(|k| k.ncp()).collect();
+        let total: usize = ncp.iter().product();
+        let mut pairs: Vec<(Vec<usize>, usize)> = Vec::with_capacity(total);
+        let mut seen = vec![false; total];
+        for e in 0..self.n_elements() {
+            if self.element_patch(e) != p {
+                continue;
+            }
+            let spans = self.element_ijk(e);
+            for (o, &g) in self.element_dofs(e).iter().enumerate() {
+                let mut rem = o;
+                let mut multi = vec![0usize; dim];
+                for d in 0..dim {
+                    if spans[d] + rem % nloc[d] >= ncp[d] {
+                        return Err(format!(
+                            "NurbsExtension::patch_local_dofs: element {e} local DOF {o} leaves \
+                             patch {p}'s net in direction {d}"
+                        ));
+                    }
+                    multi[d] = spans[d] + rem % nloc[d];
+                    rem /= nloc[d];
+                }
+                let flat = multi_index_from(&multi, &ncp);
+                if !seen[flat] {
+                    seen[flat] = true;
+                    pairs.push((multi, g));
+                }
+            }
+        }
+        if let Some(flat) = seen.iter().position(|&s| !s) {
+            return Err(format!(
+                "NurbsExtension::patch_local_dofs: patch {p} control point {flat} is not reached \
+                 by any element"
+            ));
+        }
+        Ok(pairs)
     }
 
     /// MFEM `NURBSPatchMap::operator()(i, j, k)` with `MapMode::Dof` — the
@@ -2613,13 +3065,6 @@ impl NurbsExtension {
     /// `e` in its patch (MFEM's `el_to_IJK`).
     pub fn element_ijk(&self, e: usize) -> [usize; 3] {
         self.el_to_ijk[e]
-    }
-
-    /// The mesh-element vertex list of element `e` (MFEM
-    /// `Mesh::GetElementVertices`), used to orient a boundary element against
-    /// the volume element that owns it.
-    pub fn element_vertices(&self, e: usize) -> &[usize] {
-        &self.elements[e].verts
     }
 
     /// The mesh-boundary-element vertex list of boundary element `b` (MFEM

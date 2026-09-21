@@ -52,10 +52,20 @@ fn patches_variant_loads_square_disc() {
     grid(0, &[[0, 18, 3], [10, 29, 12], [11, 30, 13], [4, 19, 7]]);
     grid(1, &[[3, 20, 2], [12, 31, 16], [13, 32, 17], [7, 21, 6]]);
 
-    // The patch blocks carry their own rational weights, so the *analysis*
-    // weights stay unit (MFEM reads no `weights` section for this flavour).
-    assert_eq!(ext.weights().len(), 38);
-    assert!(ext.weights().iter().all(|&w| w == 1.0));
+    // The patch blocks carry their own rational weights: MFEM reads no
+    // `weights` section for this flavour (its `NURBSExtension::Load` guards it
+    // with `if (patches.Size() == 0)`), so the weights are the homogeneous last
+    // component of the patch control points — `Mesh::ReadNURBSMesh` →
+    // `SetCoordsFromPatches` → `Set3DSolutionVector`/`Set2DSolutionVector`.
+    // MFEM 4.10 dump (`tmp/r55/d516_patchw.cpp`): indices 19, 21..25, 29..36.
+    let mfem_weights: [f64; 38] = [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 0.70710700000000004, 1.0, 0.70710700000000004, 1.0, 0.70710700000000004, 1.0,
+        0.70710700000000004, 1.0, 1.0, 1.0, 0.70710700000000004, 0.70710700000000004,
+        0.70710700000000004, 0.70710700000000004, 0.70710700000000004, 0.70710700000000004,
+        0.70710700000000004, 0.70710700000000004, 1.0,
+    ];
+    assert_eq!(ext.weights(), mfem_weights.as_slice());
 }
 
 #[test]

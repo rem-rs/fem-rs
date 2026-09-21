@@ -6,7 +6,11 @@
 //!
 //! The discretization is `mesh->NURBSext` + `NURBSFECollection` (isoparametric:
 //! the space keeps the mesh's own orders — there is no `-o` option), i.e.
-//! [`NurbsFESpace`] with `orders = mesh orders`.
+//! `FiniteElementSpace fespace(&mesh, mesh.GetNodes()->OwnFEC())`:
+//! [`NurbsFESpace::from_mesh_isoparametric_str`], which keeps the mesh's
+//! **rational** weights (`NURBSext_ == NULL` ⇒ `NURBSext = mesh->NURBSext`,
+//! `fem/fespace.cpp:2559-2565`).  Contrast `nurbs_ex1`'s
+//! `NURBSExtension(mesh->NURBSext, order)`, whose weights are one.
 //!
 //! Port notes:
 //! * **The patch rules** (`NURBSMeshRules`, `IntegrationRule::
@@ -30,9 +34,12 @@
 //!   - `-patcha` without `-fint` (the default `-rint` reduced integration):
 //!     `GetReducedRule` needs MFEM's `NNLSSolver` (LAPACK).
 //!   - `-pa`: patch-wise partial assembly.
-//!   - `-patcha -fint` with `-ref > 0`: the bit-faithful patch-wise assembly
-//!     needs the refined mesh's control points (see
-//!     `crates/assembly/src/iga/nurbs_patch.rs`, `NurbsMeshGeometry`).
+//!   - `-patcha -fint` with `-ref > 0`: the bit-faithful PATCHWISE assembly
+//!     (`NurbsMeshGeometry`) evaluates MFEM's *refined* control net, whereas
+//!     fem-rs evaluates the original rational patch over the refined parameter
+//!     span — the same surface, different rounding.  The refined **weights**
+//!     are already reproduced bit-for-bit (`NurbsExtension::uniform_refinement`);
+//!     what is still missing is the refined net's **coordinates**.
 //! * Not ported, silently (they do not change the printed numbers): the GLVis
 //!   socket (`-vis`/`-p`), `refined.mesh`/`sol.gf` output, `-d cpu`, and the
 //!   `Options used:` / `Device configuration:` / `Timing for ...` banners
@@ -41,8 +48,7 @@
 use fem_assembly::nurbs_patch::{
     apply_to_knot_intervals, assemble_diffusion_patch_rules,
     assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise, assemble_domain_lf_exact,
-    assemble_diffusion_standard_exact, parse_weights_section, segment_rule, NurbsMeshGeometry,
-    NurbsPatchRules,
+    assemble_diffusion_standard_exact, segment_rule, NurbsMeshGeometry, NurbsPatchRules,
 };
 
 use fem_linalg::fem_to_linlvo_csr;
@@ -317,32 +323,17 @@ fn main() {
     // Step 4: uniform refinements.
     let ref_levels = args.ref_levels.max(0) as usize;
 
-    // Step 5: isoparametric space — the mesh's own orders (no `-o` option).
+    // Step 5: isoparametric space — the mesh's own orders (no `-o` option),
+    // built as `FiniteElementSpace fespace(&mesh, fec)` with
+    // `fec = mesh.GetNodes()->OwnFEC()`.  MFEM's `FiniteElementSpace` then keeps
+    // `NURBSext == mesh->NURBSext`, so the analysis basis is **rational** (the
+    // mesh's own weights; contrast `nurbs_ex1`'s
+    // `NURBSExtension(mesh->NURBSext, order)`, which resets them to one).
     let mesh_ext = NurbsExtension::from_mesh_str(&text).expect("failed to parse the NURBS mesh");
     let dim = mesh_ext.dim();
-    let mesh_orders: Vec<usize> =
-        (0..mesh_ext.n_knot_vectors()).map(|i| mesh_ext.knot_vector(i).order()).collect();
-    let space = NurbsFESpace::from_mesh_str(&text, ref_levels, &mesh_orders)
+    let space = NurbsFESpace::from_mesh_isoparametric_str(&text, ref_levels)
         .expect("failed to build the space");
     println!("Number of finite element unknowns: {}", space.n_dofs());
-
-    // `NurbsFESpace`'s loader falls back to unit weights when the file's
-    // `weights` section holds `GetNDof()`-of-more values (ball-nurbs.mesh:
-    // 1040 values, `GetNDof()` = 517).  MFEM consumes the first `GetNDof()`
-    // values, so on a refined weighted mesh the fallback makes the space
-    // geometry wrong at the percent level — refuse rather than misreport.
-    let weighted = parse_weights_section(&text)
-        .map(|w| w.iter().take(space.n_dofs()).any(|&x| x != 1.0))
-        .unwrap_or(false);
-    if weighted && ref_levels > 0 {
-        gap_exit(
-            "-ref > 0 on a rationally-weighted NURBS mesh",
-            "NurbsFESpace's `weights` fallback (unit weights when the file stores more \
-             weights than GetNDof) must first expose MFEM's first-GetNDof interpretation, \
-             and the refined control-point net for NurbsMeshGeometry \
-             (crates/space/src/nurbs_fe_space.rs, crates/space/src/nurbs_extension.rs)",
-        );
-    }
 
     // Step 6: all boundary attributes essential (`ess_bdr = 1`).
     let n_attrs = mesh_ext.max_bdr_attribute().max(0) as usize;
@@ -395,8 +386,11 @@ fn main() {
     if use_patchwise && ref_levels > 0 {
         gap_exit(
             "-patcha -fint with -ref > 0 (refined control-point geometry)",
-            "the refined control-point net for NurbsMeshGeometry \
-             (crates/space/src/nurbs_extension.rs)",
+            "`NurbsMeshGeometry` must evaluate MFEM's refined control net; the refined \
+             weights are already bit-exact (`NurbsExtension::uniform_refinement`), the \
+             refined **coordinates** (projective `NURBSPatch::KnotInsert`) are not \
+             materialised (crates/space/src/nurbs_extension.rs, \
+             crates/assembly/src/iga/nurbs_patch.rs)",
         );
     }
 

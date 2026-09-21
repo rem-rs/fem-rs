@@ -1529,6 +1529,57 @@ mod tests {
     }
 
     #[test]
+    fn degree_elevate_kernels_are_distinct_and_agree_on_one_span() {
+        // D517: this crate keeps **no** elevation kernel of its own — the old
+        // "repeated midpoint knot insertion" implementation that used to live in
+        // `nurbs_mesh.rs` is gone, and the two remaining entry points delegate:
+        //
+        //  * `NurbsKnotVector::degree_elevate(t)` →
+        //    `fem_element::nurbs_fe_collection::degree_elevate`, MFEM's
+        //    `KnotVector::DegreeElevate(t)` (`mesh/nurbs.cpp:405-429`): the new
+        //    vector is `KnotVector(Order + t, NCP + t)` with every interior knot
+        //    repeated `t` more times, i.e. the new spans keep the original C⁰
+        //    joints — `NCP += t` **regardless of the span count**.
+        //  * `NurbsPatch::degree_elevate(dir, t)` →
+        //    `fem_element::nurbs::elevate_{u,v}_2d`, MFEM's
+        //    `NURBSPatch::DegreeElevate` (NURBS Book A5.9): the *true* degree
+        //    elevation, `NCP += t * spans`.
+        //
+        // The two therefore coincide on a single-span vector and must differ on
+        // a multi-span one; both are MFEM behaviour, so this test pins each.
+        let one_span = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let two_span = vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0];
+        for t in 0..=2 {
+            let patch_of = |values: &Vec<f64>| {
+                let ncp = (values.len() - 3) as i32;
+                let mut p = NurbsPatch::new_2d(
+                    NurbsKnotVector::new(2, ncp, values.clone()),
+                    NurbsKnotVector::new(2, ncp, values.clone()),
+                    3,
+                );
+                p.degree_elevate(0, t as usize);
+                (p.kv[0].order(), p.kv[0].num_cp(), p.kv[0].values().to_vec())
+            };
+
+            let knot = NurbsKnotVector::new(2, 3, one_span.clone()).degree_elevate(t);
+            let (p_order, p_ncp, p_values) = patch_of(&one_span);
+            assert_eq!(knot.order(), 2 + t, "one span, t = {t}: order");
+            assert_eq!(knot.num_cp(), 3 + t, "one span, t = {t}: NCP");
+            assert_eq!(
+                (p_order, p_ncp),
+                (knot.order(), knot.num_cp()),
+                "one span, t = {t}: the two kernels must agree"
+            );
+            assert_eq!(p_values, knot.values(), "one span, t = {t}: knots");
+
+            let knot2 = NurbsKnotVector::new(2, 4, two_span.clone()).degree_elevate(t);
+            let (_, p2_ncp, _) = patch_of(&two_span);
+            assert_eq!(knot2.num_cp(), 4 + t, "two spans, t = {t}: KnotVector NCP");
+            assert_eq!(p2_ncp, 4 + 2 * t, "two spans, t = {t}: A5.9 NCP (NCP + spans*t)");
+        }
+    }
+
+    #[test]
     fn botella_abscissae() {
         // Fully clamped quadratic B-spline: knots [0,0,0, 0.5, 1,1,1]
         let kv = NurbsKnotVector::new(2, 4, vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
