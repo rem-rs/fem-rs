@@ -1,32 +1,168 @@
-//! Arbitrary-order RT_k on reference triangle.
+//! Arbitrary-order RT_k on the reference triangle — MFEM `RT_TriangleElement`
+//! construction, verbatim (D529).
 //!
-//! Uses the same construction as MFEM `RT_TriangleElement`:
-//! - Edge DOFs at Gauss-Legendre open points
-//! - Piola forms for lowest order, polynomial expansion for higher order
-//! - Interior DOFs for k >= 1
+//! MFEM (`fem/fe/fe_rt.cpp`) builds the basis from the **point-value duality**
+//! `D_k(v) = v(node_k)·nk_k` over the nodal sample table
+//! ([`mfem_tri_nodal_dofs`]): with `u_o` running over the `[P_k]²` Chebyshev
+//! products `T_i(2x−1)·T_j(2y−1)·T_{k−i−j}(2(1−x−y)−1)` (two components each)
+//! plus the bubble components `(x−c)·s, (y−c)·s` with `s = T_i·T_{k−i}` and
+//! `c = 1/3` (MFEM evaluates `Poly_1D::CalcBasis` = `CalcChebyshev`), the flux
+//! matrix `T(o,k) = u_o(node_k)·nk_k` is factored once
+//! (`Ti.Factor(T)`) and every basis function is `φ_k = Σ_o (T⁻¹)_{k,o}·u_o`
+//! (`CalcVShape`: `Ti.Mult(u, shape)`; `CalcDivShape` likewise on the
+//! divergences of `u_o`).  The dof values are therefore exactly MFEM's —
+//! `W[i][j] = φ_j(node_i)·nk_i = I` against the sample table.
+//!
+//! fem-rs used to build the *moment* duals `∫(Φ·n)t^p dt` instead: the same
+//! space, but a different dual basis, so any path reading tri RTk dof values
+//! disagreed with MFEM while the `P = B·W⁻¹` machinery hid the difference
+//! (D529, round 55: `TriRTk(1)` gave `max|W−I| = 3.5e+0`).
 
 use crate::reference::VectorReferenceElement;
+use crate::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs;
 use std::sync::OnceLock;
 
+/// MFEM `RT_TriangleElement::nk` — the reference flux directions indexed by
+/// `dof2nk`: bottom (v0,v1) → (0,−1), hypotenuse (v1,v2) → (1,1) (unnormalised
+/// as in MFEM), left (v2,v0) → (−1,0).
+const NK: [[f64; 2]; 3] = [[0.0, -1.0], [1.0, 1.0], [-1.0, 0.0]];
+
+/// MFEM `RT_TriangleElement::c` — the bubble shift.
+const C: f64 = 1.0 / 3.0;
+
 struct TriRTkData {
-    coeff: Vec<f64>,
-    n: usize,
-    /// Total number of monomials spanning the trial space: the `[P_k]²` block
-    /// (two per `(a, b)`) plus the `x^a y^b·(x, y)` bubble block.  Exceeds
-    /// `n` — the Gauss-Jordan pivot selection drops the redundant columns.
-    mt: usize,
-    /// For each basis function, the monomial it was pivoted on.
-    monomap: Vec<usize>,
+    /// `Ti = T⁻¹` in row-major `n×n` layout, `T(o,k) = u_o(node_k)·nk_k`
+    /// (MFEM `DenseMatrix Ti` of `RT_TriangleElement`).
+    ti: Vec<f64>,
 }
 
-fn tri_int(a: usize, b: usize) -> f64 {
-    (1..=a).fold(1.0, |p, i| p * i as f64) * (1..=b).fold(1.0, |p, i| p * i as f64)
-        / (1..=a + b + 2).fold(1.0, |p, i| p * i as f64)
+/// MFEM `Poly_1D::CalcBasis` = `CalcChebyshev` (`fe_base.cpp:2376`): the
+/// Chebyshev polynomials `T_i(2x−1)` through degree `p` with `x`-derivatives,
+/// via `T_{i+1} = 2z·T_i − T_{i−1}` (`z = 2x−1`) and
+/// `d_{i+1} = (i+1)·(z·d_i/i + 2·T_i)`.
+///
+/// The basis is load-bearing, not cosmetic: the bubble span
+/// `{T_i(x)·T_{k−i}(y)}` differs from the Legendre-product span (it carries
+/// mixed linear terms), and only with it are the MFEM nodal functionals
+/// independent on the RT space — a Legendre-product `T` is exactly singular
+/// for `k ≥ 2`.
+fn cheb_all(p: usize, x: f64) -> (Vec<f64>, Vec<f64>) {
+    let mut v = Vec::with_capacity(p + 1);
+    let mut d = Vec::with_capacity(p + 1);
+    v.push(1.0);
+    d.push(0.0);
+    if p >= 1 {
+        v.push(2.0 * x - 1.0);
+        d.push(2.0);
+    }
+    for i in 1..p {
+        let z = 2.0 * x - 1.0;
+        v.push(2.0 * z * v[i] - v[i - 1]);
+        d.push((i + 1) as f64 * (z * d[i] / i as f64 + 2.0 * v[i]));
+    }
+    (v, d)
 }
 
-fn beta_int(a: usize, b: usize) -> f64 {
-    (1..=a).fold(1.0, |p, i| p * i as f64) * (1..=b).fold(1.0, |p, i| p * i as f64)
-        / (1..=a + b + 1).fold(1.0, |p, i| p * i as f64)
+/// Solve `T·X = I` with a partial-pivot LU (MFEM `DenseMatrix::Factor` +
+/// `CalcInverse` semantics), returning `X` row-major.
+fn invert(n: usize, t: &[f64]) -> Vec<f64> {
+    let mut lu = t.to_vec();
+    let mut x = vec![0.0_f64; n * n];
+    for i in 0..n {
+        x[i * n + i] = 1.0;
+    }
+    for c in 0..n {
+        let mut pr = c;
+        let mut pv = lu[c * n + c].abs();
+        for r in c + 1..n {
+            let v = lu[r * n + c].abs();
+            if v > pv {
+                pv = v;
+                pr = r;
+            }
+        }
+        assert!(pv > 1e-300, "TriRTk: singular T matrix at column {c}");
+        if pr != c {
+            for j in 0..n {
+                lu.swap(c * n + j, pr * n + j);
+                x.swap(c * n + j, pr * n + j);
+            }
+        }
+        let inv = 1.0 / lu[c * n + c];
+        for r in c + 1..n {
+            let f = lu[r * n + c] * inv;
+            lu[r * n + c] = f;
+            if f != 0.0 {
+                for j in (c + 1)..n {
+                    lu[r * n + j] -= f * lu[c * n + j];
+                }
+                for j in 0..n {
+                    x[r * n + j] -= f * x[c * n + j];
+                }
+            }
+        }
+    }
+    for c in 0..n {
+        for r in (0..n).rev() {
+            let mut s = x[r * n + c];
+            for j in (r + 1)..n {
+                s -= lu[r * n + j] * x[j * n + c];
+            }
+            x[r * n + c] = s / lu[r * n + r];
+        }
+    }
+    x
+}
+
+/// `u_o(ip)` in MFEM's row layout: for `j = 0..=k`, `i + j ≤ k` the pair
+/// `(s, 0), (0, s)` with `s = T_i(x)·T_j(y)·T_{k−i−j}(1−x−y)` (Chebyshev,
+/// `T_m(w) = T_m(2w−1)`), then for `i = 0..=k` the bubble
+/// `((x−c)s, (y−c)s)` with `s = T_i(x)·T_{k−i}(y)`.
+/// Interleaved `(o, component)` pairs, `2n` entries.
+fn eval_u(k: usize, x: f64, y: f64) -> Vec<f64> {
+    let (lx, _) = cheb_all(k, x);
+    let (ly, _) = cheb_all(k, y);
+    let (ll, _) = cheb_all(k, 1.0 - x - y);
+    let mut u = Vec::with_capacity(2 * (k + 1) * (k + 3));
+    for j in 0..=k {
+        for i in 0..=(k - j) {
+            let s = lx[i] * ly[j] * ll[k - i - j];
+            u.push(s);
+            u.push(0.0);
+            u.push(0.0);
+            u.push(s);
+        }
+    }
+    for i in 0..=k {
+        let s = lx[i] * ly[k - i];
+        u.push((x - C) * s);
+        u.push((y - C) * s);
+    }
+    u
+}
+
+/// `∇·u_o(ip)` in the same `o` layout (MFEM `CalcDivShape`): the `[P_k]²`
+/// blocks contribute `∂_x s` / `∂_y s` (with `∂_x(1−x−y) = ∂_y(1−x−y) = −1`),
+/// the bubble contributes `2s + (x−c)·∂_x s + (y−c)·∂_y s`.
+fn eval_div_u(k: usize, x: f64, y: f64) -> Vec<f64> {
+    let (lx, dx) = cheb_all(k, x);
+    let (ly, dy) = cheb_all(k, y);
+    let (ll, dl) = cheb_all(k, 1.0 - x - y);
+    let mut divu = Vec::with_capacity((k + 1) * (k + 3));
+    for j in 0..=k {
+        for i in 0..=(k - j) {
+            let kk = k - i - j;
+            divu.push((dx[i] * ll[kk] - lx[i] * dl[kk]) * ly[j]);
+            divu.push((dy[j] * ll[kk] - ly[j] * dl[kk]) * lx[i]);
+        }
+    }
+    for i in 0..=k {
+        let j = k - i;
+        divu.push(
+            (lx[i] + (x - C) * dx[i]) * ly[j] + (ly[j] + (y - C) * dy[j]) * lx[i],
+        );
+    }
+    divu
 }
 
 fn tri_data(k: usize) -> &'static TriRTkData {
@@ -43,177 +179,34 @@ fn tri_data(k: usize) -> &'static TriRTkData {
     ];
     CACHE[k].get_or_init(|| {
         let n = (k + 1) * (k + 3);
-        let mut mc = Vec::new();
-        let mut mb = Vec::new();
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                mc.push((a, b, 0));
-                mc.push((a, b, 1));
-                mb.push((a, b));
-            }
-        }
-        let mt = mc.len() + mb.len();
-        let mut v = vec![vec![0.0; mt]; n];
-        let mut di = 0usize;
-
-        // Edge blocks follow MFEM `RT_TriangleElement`'s local dof order
-        // (`Geometry::TRIANGLE::Edges` = (v0,v1), (v1,v2), (v2,v0)) with the
-        // moment parameter `t` ascending along the *listed* direction and
-        // `p = 0..k` inside each block — the slot order
-        // `mfem_tri_nodal_dofs` publishes.  The functionals are the analytic
-        // moments `∫ (Φ·n) t^p dt` of `tri_data`.
-
-        // Edge 0: bottom (t,0), normal (0,-1), length 1 → −∫ Φ_y(t,0) t^p dt
-        for p in 0..=k {
-            for (j, &(a, b, comp)) in mc.iter().enumerate() {
-                let val = if comp == 1 && b == 0 {
-                    -1.0 / (a + p + 1) as f64
-                } else {
-                    0.0
-                };
-                v[di][j] = val;
-            }
-            for (j, &(_a, _b)) in mb.iter().enumerate() {
-                let jj = mc.len() + j;
-                v[di][jj] = 0.0;
-            }
-            di += 1;
-        }
-
-        // Edge 1: hypotenuse (1-t,t), normal (1,1)/√2, length √2 →
-        // ∫₀¹ (Φ_x+Φ_y)(1−t, t) t^p dt
-        for p in 0..=k {
-            for (j, &(a, b, _comp)) in mc.iter().enumerate() {
-                v[di][j] = beta_int(a, b + p);
-            }
-            for (j, &(a, b)) in mb.iter().enumerate() {
-                let jj = mc.len() + j;
-                v[di][jj] = beta_int(a + 1, b + p) + beta_int(a, b + p + 1);
-            }
-            di += 1;
-        }
-
-        // Edge 2: left (0, 1−t), normal (−1,0), length 1 →
-        // −∫₀¹ Φ_x(0, 1−t) t^p dt with the parameter running from v2=(0,1)
-        // towards v0=(0,0) as in MFEM's `(2,0)` block.
-        for p in 0..=k {
-            for (j, &(a, b, comp)) in mc.iter().enumerate() {
-                let val = if comp == 0 && a == 0 { -beta_int(p, b) } else { 0.0 };
-                v[di][j] = val;
-            }
-            for (j, &(_a, _b)) in mb.iter().enumerate() {
-                let jj = mc.len() + j;
-                v[di][jj] = 0.0;
-            }
-            di += 1;
-        }
-
-        // Interior DOFs: ∫ Φ_x·x^ix y^iy dA and ∫ Φ_y·x^ix y^iy dA for ix+iy ≤ k-1
-        if k >= 1 {
-            for deg in 0..=(k - 1) {
-                for ix in 0..=deg {
-                    let iy = deg - ix;
-                    for comp in 0..2 {
-                        for (j, &(a, b, mc_comp)) in mc.iter().enumerate() {
-                            let val = if mc_comp == comp {
-                                tri_int(a + ix, b + iy)
-                            } else {
-                                0.0
-                            };
-                            v[di][j] = val;
-                        }
-                        for (j, &(a, b)) in mb.iter().enumerate() {
-                            let jj = mc.len() + j;
-                            let val = if comp == 0 {
-                                tri_int(a + 1 + ix, b + iy)
-                            } else {
-                                tri_int(a + ix, b + 1 + iy)
-                            };
-                            v[di][jj] = val;
-                        }
-                        di += 1;
-                    }
+        let (nodes, nks) = mfem_tri_nodal_dofs(k);
+        debug_assert_eq!(nodes.len(), n, "TriRTk({k}): sample table size");
+        // T(o,k) = u_o(node_k)·nk_k, rows `o` = basis functions, columns
+        // `k` = dofs — verbatim MFEM `RT_TriangleElement::RT_TriangleElement`.
+        let mut t = vec![0.0_f64; n * n];
+        for (kk, (ip, nk)) in nodes.iter().zip(nks.iter()).enumerate() {
+            let (lx, _) = cheb_all(k, ip[0]);
+            let (ly, _) = cheb_all(k, ip[1]);
+            let (ll, _) = cheb_all(k, 1.0 - ip[0] - ip[1]);
+            let (nx, ny) = (nk[0], nk[1]);
+            let mut o = 0usize;
+            for j in 0..=k {
+                for i in 0..=(k - j) {
+                    let s = lx[i] * ly[j] * ll[k - i - j];
+                    t[o * n + kk] = s * nx;
+                    o += 1;
+                    t[o * n + kk] = s * ny;
+                    o += 1;
                 }
             }
+            for i in 0..=k {
+                let s = lx[i] * ly[k - i];
+                t[o * n + kk] = s * ((ip[0] - C) * nx + (ip[1] - C) * ny);
+                o += 1;
+            }
+            debug_assert_eq!(o, n, "TriRTk({k}): u row count");
         }
-
-        assert_eq!(di, n, "TriRTk({k}): DOF count {di} vs {n}");
-
-        // Gauss-Jordan with column + row pivoting.  Mirrors `tet_rtk.rs`
-        // (D33/D44): see the D33 note there for why both the column
-        // permutation and the transposed coefficient extraction are needed.
-        let mut cp: Vec<usize> = (0..mt).collect();
-        let mut row = vec![vec![0.0; n + mt]; n];
-        for i in 0..n {
-            for j in 0..mt {
-                row[i][j] = v[i][j];
-            }
-            row[i][mt + i] = 1.0;
-        }
-        let mut sel = Vec::new();
-        for c in 0..n {
-            let mut bc = c;
-            let mut bv = 0.0_f64;
-            for cc in c..mt {
-                let mut mr = 0.0_f64;
-                for rr in c..n {
-                    mr = mr.max(row[rr][cc].abs());
-                }
-                if mr > bv {
-                    bv = mr;
-                    bc = cc;
-                }
-            }
-            cp.swap(c, bc);
-            for rr in 0..n {
-                row[rr].swap(c, bc);
-            }
-            // Row pivoting: the column with the largest residual entry need
-            // not have a usable entry in row `c` (tri_rtk previously silently
-            // `continue`d, leaving the row unnormalised — a corrupted basis
-            // instead of a loud failure).
-            let mut pr = c;
-            let mut pv = row[c][c].abs();
-            for rr in c + 1..n {
-                if row[rr][c].abs() > pv {
-                    pv = row[rr][c].abs();
-                    pr = rr;
-                }
-            }
-            row.swap(c, pr);
-            let pivot = row[c][c];
-            assert!(pivot.abs() > 1e-14, "TriRTk({k}): singular at col {c}");
-            let ip = 1.0 / pivot;
-            for j in c..(n + mt) {
-                row[c][j] *= ip;
-            }
-            for r in 0..n {
-                if r != c {
-                    let factor = row[r][c];
-                    for j in c..(n + mt) {
-                        row[r][j] -= factor * row[c][j];
-                    }
-                }
-            }
-            // `sel` records cp[c]: the monomial pivot column c was drawn from.
-            sel.push(cp[c]);
-        }
-
-        // D44/D33: R · V · P = [I | X], so the dual basis is
-        // Φ_j = Σ_a R[a][j]·mono_{cp[a]} — the coefficient matrix is the
-        // TRANSPOSE of the reduced right block, paired with the permuted
-        // monomials `cp`.  (The previous `row[i][mt + j]` dropped the column
-        // permutation and transposition, so the basis was not dual to the
-        // face-flux functionals.)
-        let mut coeff = vec![0.0_f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                coeff[i * n + j] = row[j][mt + i];
-            }
-        }
-
-        TriRTkData { coeff, n, mt, monomap: sel }
+        TriRTkData { ti: invert(n, &t) }
     })
 }
 
@@ -260,47 +253,16 @@ impl VectorReferenceElement for TriRTk {
         }
 
         let d = tri_data(k);
-        let n = d.n;
-        // Monomial value table, in the exact enumeration order of
-        // `tri_data`: the `[P_k]²` monomials `x^a y^b e_c` (two per `(a, b)`,
-        // component 0 then 1) followed by the "bubble" monomials
-        // `x^a y^b·(x, y)` (one per `(a, b)`).  Omitting the bubble block
-        // (as the pre-D44 code did, sizing the table as `(k+1)(k+2)` entries)
-        // made `mono_vals[monomap[·] * 2]` read out of bounds whenever the
-        // pivot selection picked a bubble column — a panic for every `k ≥ 1`.
-        let mt = d.mt;
-        let mut mono_vals = vec![0.0_f64; mt * 2];
-        let mut idx = 0usize;
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                let v = x.powi(a as i32) * y.powi(b as i32);
-                mono_vals[idx * 2] = v;
-                mono_vals[idx * 2 + 1] = 0.0;
-                idx += 1;
-                mono_vals[idx * 2] = 0.0;
-                mono_vals[idx * 2 + 1] = v;
-                idx += 1;
-            }
-        }
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                let v = x.powi(a as i32) * y.powi(b as i32);
-                mono_vals[idx * 2] = x * v;
-                mono_vals[idx * 2 + 1] = y * v;
-                idx += 1;
-            }
-        }
-        debug_assert_eq!(idx, mt, "TriRTk({k}): monomial table mismatch");
-
-        for i in 0..n {
+        let n = self.n_dofs();
+        let u = eval_u(k, x, y);
+        for (i, row) in d.ti.chunks_exact(n).enumerate() {
             let mut vx = 0.0;
             let mut vy = 0.0;
-            for (ji, &sel) in d.monomap.iter().enumerate() {
-                let c = d.coeff[i * n + ji];
-                vx += c * mono_vals[sel * 2];
-                vy += c * mono_vals[sel * 2 + 1];
+            for (o, &c) in row.iter().enumerate() {
+                if c != 0.0 {
+                    vx += c * u[o * 2];
+                    vy += c * u[o * 2 + 1];
+                }
             }
             values[i * 2] = vx;
             values[i * 2 + 1] = vy;
@@ -325,40 +287,14 @@ impl VectorReferenceElement for TriRTk {
         }
 
         let d = tri_data(k);
-        let x = xi[0];
-        let y = xi[1];
-        let n = d.n;
-
-        // The divergence table follows the same monomial enumeration as
-        // `eval_basis_vec`: ∂_x/∂_y of each `[P_k]²` monomial, then
-        // ∇·(x^a y^b·(x, y)) = (a+b+2)·x^a y^b for the bubble block.
-        let mut dm = vec![0.0_f64; d.mt];
-        let mut idx = 0usize;
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                let xp = if a > 0 { x.powi((a - 1) as i32) } else { 0.0 };
-                let yp = if b > 0 { y.powi((b - 1) as i32) } else { 0.0 };
-                dm[idx] = (a as f64) * xp * y.powi(b as i32);
-                idx += 1;
-                dm[idx] = (b as f64) * x.powi(a as i32) * yp;
-                idx += 1;
-            }
-        }
-        for deg in 0..=k {
-            for a in 0..=deg {
-                let b = deg - a;
-                let v = x.powi(a as i32) * y.powi(b as i32);
-                dm[idx] = (a + b + 2) as f64 * v;
-                idx += 1;
-            }
-        }
-        debug_assert_eq!(idx, d.mt, "TriRTk({k}): divergence table mismatch");
-
-        for i in 0..n {
+        let n = self.n_dofs();
+        let divu = eval_div_u(k, xi[0], xi[1]);
+        for (i, row) in d.ti.chunks_exact(n).enumerate() {
             let mut s = 0.0;
-            for (ji, &sel) in d.monomap.iter().enumerate() {
-                s += d.coeff[i * n + ji] * dm[sel];
+            for (o, &c) in row.iter().enumerate() {
+                if c != 0.0 {
+                    s += c * divu[o];
+                }
             }
             div_vals[i] = s;
         }
@@ -381,25 +317,14 @@ impl VectorReferenceElement for TriRTk {
             ];
         }
 
-        let n = (k + 1) * (k + 3);
-        let mut c = Vec::with_capacity(n);
-        for p in 0..=k {
-            let t = (p + 1) as f64 / (k + 2) as f64;
-            c.push(vec![t, 0.0]);
-        }
-        for p in 0..=k {
-            let t = (p + 1) as f64 / (k + 2) as f64;
-            c.push(vec![1.0 - t, t]);
-        }
-        for p in 0..=k {
-            let t = (p + 1) as f64 / (k + 2) as f64;
-            c.push(vec![0.0, 1.0 - t]);
-        }
-        let remaining = n - c.len();
-        for _ in 0..remaining {
-            c.push(vec![1.0 / 3.0, 1.0 / 3.0]);
-        }
-        c
+        // MFEM `RT_TriangleElement` node table: edge blocks on the
+        // Gauss-Legendre open points, then the interior component samples
+        // (two dofs per interior point, `dof2nk` 0 then 2).
+        mfem_tri_nodal_dofs(k)
+            .0
+            .iter()
+            .map(|p| vec![p[0], p[1]])
+            .collect()
     }
 }
 
@@ -445,13 +370,10 @@ mod tests {
     }
 
     /// D44 regression: `eval_basis_vec` must evaluate **all** `k ≥ 1` orders
-    /// without panicking.  The monomial table used to omit the `x^a y^b·(x,y)`
-    /// bubble block, so `mono_vals[monomap[·]*2]` indexed out of bounds as
-    /// soon as the pivot selection picked a bubble column (dpg_poisson_2d
-    /// `-tri -o 1` panicked at tri_rtk.rs:257).
+    /// without panicking or producing non-finite values.
     #[test]
     fn eval_all_orders_is_in_bounds() {
-        for k in 0..=4usize {
+        for k in 0..=8usize {
             let e = TriRTk::new(k);
             let n = e.n_dofs();
             let mut vals = vec![0.0f64; n * 2];
@@ -466,94 +388,60 @@ mod tests {
         }
     }
 
-    /// D44 regression (same invariant as `tet_rtk`'s D33 test): the
-    /// constructed basis must be *dual* to the moment functionals used to
-    /// build it, `D_i(Φ_j) = δ_ij`.  Before the fix the transposed
-    /// coefficient extraction paired the basis functions with the wrong
-    /// monomials whenever a column pivot kicked in (`k ≥ 1`), and `k ≥ 1`
-    /// additionally panicked.  The functionals below are the analytic moments
-    /// of `tri_data` evaluated with independent quadrature:
-    ///   edges  `∫ (Φ·n_f) t^p ds` in MFEM's edge-block order — bottom (v0v1),
-    ///   hypotenuse (v1v2) with `n = (1,1)/√2·(√2 ds)`, left (v2v0) — and the
-    ///   interior `∫_T Φ_c x^a y^b dA`, `a+b ≤ k-1`.
+
+    /// D529 regression: the basis must be **point-dual** to MFEM's nodal
+    /// sample table, `W[i][j] = φ_j(node_i)·nk_i = δ_ij` — the dof values are
+    /// MFEM's.  Round ≤55 built the moment duals `∫(Φ·n)t^p dt` instead, and
+    /// `TriRTk(1)`/`TriRTk(2)` scored `max|W−I| = 3.5e+0`/`1.8e+1` here.
     #[test]
-    fn basis_dual_to_moment_functionals() {
-        for k in 0..=3usize {
+    fn basis_dual_to_point_functionals() {
+        for k in 0..=4usize {
             let e = TriRTk::new(k);
             let n = e.n_dofs();
-            let qs = crate::quadrature::seg_rule_arbitrary((2 * k + 1) as u8);
-            let qt = crate::quadrature::tri_rule_arbitrary(((3 * k) as u8).max(2));
-
-            let mut dual = vec![0.0f64; n * n];
+            let (nodes, nks) = mfem_tri_nodal_dofs(k);
+            assert_eq!(nodes.len(), n, "k={k}: sample table size");
+            let mut max_off = 0.0_f64;
             let mut phi = vec![0.0f64; n * 2];
-            let mut row = 0usize;
-
-            // Edge 0: y=0, outward normal (0,−1), length 1 → ∫₀¹ (−Φ_y)(t,0) t^p dt.
-            for p in 0..=k {
-                for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
-                    let (t, w) = (t[0], *w);
-                    e.eval_basis_vec(&[t, 0.0], &mut phi);
-                    for j in 0..n {
-                        dual[row * n + j] -= w * phi[j * 2 + 1] * t.powi(p as i32);
-                    }
-                }
-                row += 1;
-            }
-            // Edge 1: hypotenuse x+y=1, outward normal (1,1)/√2, ds = √2 dt →
-            // ∫₀¹ (Φ_x+Φ_y)(1−t, t) t^p dt.
-            for p in 0..=k {
-                for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
-                    let (t, w) = (t[0], *w);
-                    e.eval_basis_vec(&[1.0 - t, t], &mut phi);
-                    for j in 0..n {
-                        dual[row * n + j] +=
-                            w * (phi[j * 2] + phi[j * 2 + 1]) * t.powi(p as i32);
-                    }
-                }
-                row += 1;
-            }
-            // Edge 2: x=0, outward normal (−1,0), length 1, parameter running
-            // from v2=(0,1) towards v0=(0,0) → ∫₀¹ (−Φ_x)(0,1−t) t^p dt.
-            for p in 0..=k {
-                for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
-                    let (t, w) = (t[0], *w);
-                    e.eval_basis_vec(&[0.0, 1.0 - t], &mut phi);
-                    for j in 0..n {
-                        dual[row * n + j] -= w * phi[j * 2] * t.powi(p as i32);
-                    }
-                }
-                row += 1;
-            }
-            // Interior monomial moments ∫_T Φ_c x^a y^b dA, deg ≤ k−1.
-            if k >= 1 {
-                for dg in 0..=(k - 1) {
-                    for a in 0..=dg {
-                        let b = dg - a;
-                        for comp in 0..2 {
-                            for (qp, w) in qt.points.iter().zip(qt.weights.iter()) {
-                                e.eval_basis_vec(qp, &mut phi);
-                                let mono = qp[0].powi(a as i32) * qp[1].powi(b as i32);
-                                for j in 0..n {
-                                    dual[row * n + j] += w * phi[j * 2 + comp] * mono;
-                                }
-                            }
-                            row += 1;
-                        }
-                    }
-                }
-            }
-            assert_eq!(row, n, "k={k}");
-
-            for i in 0..n {
+            for (i, (pt, nk)) in nodes.iter().zip(nks.iter()).enumerate() {
+                e.eval_basis_vec(pt, &mut phi);
                 for j in 0..n {
-                    let exp = if i == j { 1.0 } else { 0.0 };
-                    assert!(
-                        (dual[i * n + j] - exp).abs() < 1e-9,
-                        "k={k}: D_{i}(phi_{j}) = {}, expected {exp}",
-                        dual[i * n + j]
-                    );
+                    let d = phi[j * 2] * nk[0] + phi[j * 2 + 1] * nk[1];
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    max_off = max_off.max((d - want).abs());
                 }
             }
+            assert!(
+                max_off <= 1e-12,
+                "k={k}: max |W - I| = {max_off:.3e}, expected point-dual (≤1e-12)"
+            );
+        }
+    }
+
+    /// D529 consistency pin: the generic `TriRTk` construction reproduces the
+    /// independently built (and MFEM-verified, d468) low-order elements
+    /// slot-for-slot.
+    #[test]
+    fn matches_low_order_mfem_elements() {
+        use crate::raviart_thomas::{TriRT1, TriRT2};
+
+        for (k, lo) in [(1usize, &TriRT1 as &dyn VectorReferenceElement), (2, &TriRT2)] {
+            let e = TriRTk::new(k);
+            assert_eq!(e.n_dofs(), lo.n_dofs());
+            let n = e.n_dofs();
+            let mut a = vec![0.0f64; n * 2];
+            let mut b = vec![0.0f64; n * 2];
+            let mut max_diff = 0.0_f64;
+            for pt in &e.quadrature(8).points {
+                e.eval_basis_vec(pt, &mut a);
+                lo.eval_basis_vec(pt, &mut b);
+                for (x, y) in a.iter().zip(b.iter()) {
+                    max_diff = max_diff.max((x - y).abs());
+                }
+            }
+            assert!(
+                max_diff <= 1e-11,
+                "k={k}: TriRTk vs low-order element max diff {max_diff:.3e}"
+            );
         }
     }
 }

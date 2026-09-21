@@ -87,7 +87,13 @@ fn eval_monomial_divs(x: f64, y: f64, divs: &mut [f64; 8]) {
 /// parametrised from `v2=(0,1)` towards `v0=(0,0)`, so its sample `t` runs
 /// into `1 − t` in the reference `y` coordinate.
 pub fn mfem_tri_nodal_dofs(k: usize) -> &'static (Vec<[f64; 2]>, Vec<[f64; 2]>) {
-    static CACHE: [OnceLock<(Vec<[f64; 2]>, Vec<[f64; 2]>)>; 5] = [
+    // 9 slots: `TriRTk` covers `k ≤ 8` (`tri_rtk::tri_data` cache) and shares
+    // this table since D529.
+    static CACHE: [OnceLock<(Vec<[f64; 2]>, Vec<[f64; 2]>)>; 9] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),

@@ -507,6 +507,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             }
         }
         repair_legacy_geometry(&mut mesh, &h1_nodes);
+        // D530: MFEM's reader fixes negatively oriented elements at load time
+        // (`Mesh::Mesh(filename, generate_edges, fix_geometry)` →
+        // `FinalizeTriMesh` → `CheckElementOrientation(fix)`); without it a CW
+        // triangle silently corrupts the HDiv/HCurl dof gauges.
+        mesh.check_element_orientation(true);
         Ok(MfemFile { mesh2d: Some(mesh), mesh3d: None })
     } else {
         let mut mesh = Mesh {
@@ -569,6 +574,10 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
             }
         }
         repair_legacy_geometry(&mut mesh, &h1_nodes);
+        // D530: `FinalizeTetMesh(generate_edges, refine, fix_orientation)` →
+        // `CheckElementOrientation(fix)` — flipped tets are repaired by
+        // `Swap(vi[0], vi[1])` before the refinement marking.
+        mesh.check_element_orientation(true);
         Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
     }
 }

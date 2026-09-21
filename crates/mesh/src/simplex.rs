@@ -1811,6 +1811,130 @@ impl<const D: usize> Mesh<D> {
         Ok(())
     }
 
+    /// Check element orientation and optionally repair negatively oriented
+    /// (clockwise / inside-out) elements — MFEM `Mesh::CheckElementOrientation`
+    /// (`mesh/mesh.cpp:7346`, 4.10) semantics:
+    ///
+    /// - 2D: the Jacobian with rows `v_{j+1}−v_0` (vertex rows for linear
+    ///   geometry; MFEM's `Nodes != NULL` branch uses the Jacobian at the
+    ///   element center instead) must have positive determinant.  A flipped
+    ///   TRIANGLE is repaired by swapping `vi[0] ↔ vi[1]`, a QUADRILATERAL by
+    ///   `vi[1] ↔ vi[3]`.
+    /// - 3D: a flipped TETRAHEDRON (vertex/center Jacobian) is repaired by
+    ///   `vi[0] ↔ vi[1]`, a PYRAMID (center Jacobian) by `vi[1] ↔ vi[3]`;
+    ///   WEDGE/HEXAHEDRON are counted but cannot be repaired (MFEM "// how?").
+    ///
+    /// When anything is flagged, MFEM's one-line warning
+    /// `Elements with wrong orientation: <wo> / <n> (<fixed|not fixed>)` is
+    /// printed; the wrong-orientation count is returned.
+    ///
+    /// D530: fem-rs's HDiv/HCurl space conventions key on vertex order alone
+    /// (`SegDofOrd`-style), which requires positively oriented elements — a
+    /// silent CW triangle corrupted the global dof gauges.  With high-order
+    /// geometry attached (`geometry.is_some()`) the connectivity swap would
+    /// desynchronise the per-element node tables, so only the warning is
+    /// issued there (curved repair tracked as D544).
+    pub fn check_element_orientation(&mut self, fix_it: bool) -> usize {
+        if D != 2 && D != 3 {
+            return 0;
+        }
+        let mut wo = 0usize; // wrong-orientation count
+        let mut fo = 0usize; // fixed count
+        let n = self.n_elems();
+        for e in 0..n {
+            let et = self.element_type_at(e as u32);
+            if et == ElementType::Polygon || et.dim() as usize != D {
+                continue;
+            }
+            let Some(det) = self.element_orientation_det(e as u32, et) else {
+                continue;
+            };
+            if det >= 0.0 {
+                continue;
+            }
+            wo += 1;
+            if !fix_it || self.geometry.is_some() {
+                continue;
+            }
+            let swappable = match (D, et) {
+                (2, ElementType::Tri3 | ElementType::Tri6) => Some((0, 1)),
+                (2, ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9) => {
+                    Some((1, 3))
+                }
+                (3, ElementType::Tet4 | ElementType::Tet10) => Some((0, 1)),
+                (3, ElementType::Pyramid5 | ElementType::Pyramid13) => Some((1, 3)),
+                // MFEM "// how?": wedge/hex flips are counted but not fixed.
+                (3, ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18) => None,
+                (3, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) => None,
+                _ => None,
+            };
+            if let Some((a, b)) = swappable {
+                let start = if let Some(ref offsets) = self.elem_offsets {
+                    offsets[e]
+                } else {
+                    e * self.elem_type.nodes_per_element()
+                };
+                self.conn.swap(start + a, start + b);
+                self.invalidate_locators(); // D241: conn permuted
+                fo += 1;
+            }
+        }
+        if wo > 0 {
+            println!(
+                "Elements with wrong orientation: {wo} / {n} ({})",
+                if wo == fo { "fixed" } else { "not fixed" }
+            );
+        }
+        wo
+    }
+
+    /// Signed orientation determinant of element `e`: `det[v_{j+1} − v_0]`
+    /// from the corner vertices for linear geometry, the Jacobian determinant
+    /// at the MFEM geometry center for curved geometry (`None` for
+    /// non-cell types, which MFEM's checker never sees).
+    fn element_orientation_det(&self, e: u32, et: ElementType) -> Option<f64> {
+        if et == ElementType::Polygon {
+            return None;
+        }
+        if et.dim() as usize != D {
+            return None;
+        }
+        if self.geometry.is_none() {
+            // Linear geometry: corner-vertex determinant (MFEM `Nodes == NULL`).
+            let nodes = self.elem_nodes(e);
+            let v0 = self.coords_of(nodes[0]);
+            let v1 = self.coords_of(nodes[1]);
+            let v2 = self.coords_of(nodes[2]);
+            if D == 2 {
+                return Some((v1[0] - v0[0]) * (v2[1] - v0[1])
+                    - (v1[1] - v0[1]) * (v2[0] - v0[0]));
+            }
+            let v3 = self.coords_of(nodes[3]);
+            let (r0, r1, r2) = (
+                [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]],
+                [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]],
+                [v3[0] - v0[0], v3[1] - v0[1], v3[2] - v0[2]],
+            );
+            return Some(r0[0] * (r1[1] * r2[2] - r1[2] * r2[1])
+                - r0[1] * (r1[0] * r2[2] - r1[2] * r2[0])
+                + r0[2] * (r1[0] * r2[1] - r1[1] * r2[0]));
+        }
+        // Curved geometry: MFEM checks only the Jacobian at the element
+        // center (`Geometries.GetCenter` values, fem/geom.cpp:176-198).
+        let center: &[f64] = match et {
+            ElementType::Tri3 | ElementType::Tri6 => &[1.0 / 3.0, 1.0 / 3.0],
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => &[0.5, 0.5],
+            ElementType::Tet4 | ElementType::Tet10 => &[0.25, 0.25, 0.25],
+            ElementType::Pyramid5 | ElementType::Pyramid13 => &[0.375, 0.375, 0.25],
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+                &[1.0 / 3.0, 1.0 / 3.0, 0.5]
+            }
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => &[0.5, 0.5, 0.5],
+            _ => return None,
+        };
+        Some(self.element_jacobian(e, center).1)
+    }
+
     /// Create a uniform (non-mixed) mesh.  Convenience constructor that sets
     /// all mixed-element fields to `None`.
     pub fn uniform(
@@ -3165,7 +3289,13 @@ impl<const D: usize> Mesh<D> {
     }
 
     /// Finalize topology (boundary faces).
+    ///
+    /// Runs the D530 element-orientation check (MFEM's `FinalizeTriMesh` /
+    /// `FinalizeQuadMesh` / `FinalizeTetMesh` all call
+    /// `CheckElementOrientation(fix_orientation)` before anything else) and
+    /// then builds the boundary face-to-element mapping.
     pub fn finalize_topology(&mut self) {
+        self.check_element_orientation(true);
         self.build_face_to_elem();
     }
 
@@ -4644,5 +4774,52 @@ mod tet_geometry_family_tests {
             assert!((xp_cur[i] - xp_lin[i]).abs() < 1e-12);
         }
         assert!((det_cur - det_lin).abs() < 1e-12);
+    }
+
+    /// MFEM's triangulation fixture (unit square, main diagonal) with element
+    /// 0's vertex order reversed (CW).  D530: `check_element_orientation`
+    /// counts the flip, repairs it with MFEM's `Swap(vi[0], vi[1])`, and a
+    /// second pass is a no-op.
+    #[test]
+    fn check_element_orientation_fixes_cw_triangle() {
+        let mut cw = Mesh::<2> {
+            coords: vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            conn: vec![3, 0, 2, 3, 0, 1], // element 0 is CW
+            vertex_parents: vec![],
+            elem_tags: vec![1, 1],
+            elem_type: ElementType::Tri3,
+            face_conn: vec![0, 1, 1, 3, 3, 2, 2, 0],
+            face_tags: vec![1, 1, 1, 1],
+            face_type: ElementType::Line2,
+            elem_types: None,
+            elem_offsets: None,
+            face_types: None,
+            face_offsets: None,
+            face_to_elem: None,
+            edge_conn: vec![],
+            edge_to_elem: vec![],
+            nc_vertex_view: None,
+            geometry: None,
+        };
+        // detect-only: count 1, connectivity untouched
+        assert_eq!(cw.check_element_orientation(false), 1);
+        assert_eq!(&cw.conn[..3], &[3, 0, 2]);
+        // fix: MFEM `Swap(vi[0], vi[1])` restores the CCW vertex order
+        assert_eq!(cw.check_element_orientation(true), 1);
+        assert_eq!(&cw.conn[..3], &[0, 3, 2]);
+        assert_eq!(&cw.conn[3..], &[3, 0, 1]);
+        // idempotent: the repaired mesh is clean
+        assert_eq!(cw.check_element_orientation(true), 0);
+        // the positively oriented fixture is never flagged
+        let mut ok = cw.clone();
+        assert_eq!(ok.check_element_orientation(false), 0);
+        // tet fixture: a flipped tet is repaired by the same `Swap(vi[0], vi[1])`
+        let mut tet = Mesh::<3>::unit_cube_tet(1);
+        assert_eq!(tet.check_element_orientation(false), 0);
+        let conn0: Vec<u32> = tet.conn[0..4].to_vec();
+        tet.conn[0] = conn0[1];
+        tet.conn[1] = conn0[0];
+        assert_eq!(tet.check_element_orientation(true), 1);
+        assert_eq!(&tet.conn[0..4], &conn0[..]);
     }
 }
