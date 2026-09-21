@@ -19,19 +19,43 @@ use fem_assembly::transfer::build_prolongation_hdiv;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
 use fem_mesh::Mesh;
-use fem_space::HDivSpace;
+use fem_space::{FaceKey, HDivSpace};
 
 // Generated from tmp/d493/d493_quad_o1.txt / d493_hex_o1.txt by
 // tmp/d493/gen_truth.py — do not edit.
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d493/quad_o1_truth.rs"));
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d493/hex_o1_truth.rs"));
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d493/pyramid_o0_truth.rs"));
+// D493 (round 55): MFEM's as-shipped pyramid P has no trustworthy tet-child
+// rows (see `d493_pyramid_rt0_matches_corrected_mfem`), so the parity oracle is
+// the operator re-assembled with the parent's finite element —
+// tmp/d493/probe_fixed.cpp -> tmp/d493/pyramid_o0_fixed_truth.rs.
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d493/pyramid_o0_fixed_truth.rs"));
 
 
 // ── mesh fixtures (MFEM's exact connectivity from the probe dump) ────────────
 
 fn q(v: f64) -> i64 {
     (v * 1e9).round() as i64
+}
+
+fn coord3(mesh: &Mesh<3>, v: u32) -> [f64; 3] {
+    let c = mesh.node_coords(v);
+    [c[0], c[1], c[2]]
+}
+
+/// Face identity key: the face's vertex coordinates sorted lexicographically
+/// and flattened onto the 1e-9 grid (the prism oracle's join key).
+fn face_key(mut vs: Vec<[f64; 3]>) -> Vec<i64> {
+    let mut s: Vec<[i64; 3]> = vs.drain(..).map(|c| [q(c[0]), q(c[1]), q(c[2])]).collect();
+    s.sort();
+    s.into_iter().flatten().collect()
+}
+
+/// The same key built from a flattened coordinate run (a truth row's face
+/// segment), quantised and sorted so the dump's vertex order does not matter.
+fn key_from_run(run: &[f64]) -> Vec<i64> {
+    face_key(run.chunks(3).map(|c| [c[0], c[1], c[2]]).collect())
 }
 
 /// MFEM `MakeCartesian2D(1, 1, QUADRILATERAL)` (coarse) and its uniform
@@ -396,12 +420,363 @@ fn d493_tet_rt1_own_mesh_exact_path_and_exact_fields() {
 ///    space convention flips, an MFEM-equal matrix would still not be the
 ///    fem-rs-consistent prolongation operator.
 #[test]
-#[ignore = "D493 open: MFEM upstream tet-child rows are tet-identity + stale-buffer artifact (probe_lf/probe_lp evidence, tmp/d493/); fem-rs pyramid dof convention (moment vs Fuentes-nodal) needs the space-side flip first"]
+#[ignore = "D493 open: MFEM upstream tet-child rows are tet-identity + stale-buffer artifact (probe_lf/probe_lp evidence, tmp/d493/); superseded in substance by d493_pyramid_rt0_matches_corrected_mfem, which pins the corrected operator"]
 fn d493_pyramid_rt0_mfem_oracle() {
-    // The oracle body is intentionally minimal: the truth table is kept
-    // machine-readable in tmp/d493/pyramid_o0_truth.rs for the follow-up
-    // round; wiring it here requires the two blockers above to clear.
+    // Kept as the as-shipped-MFEM artefact of record: 89 entries, of which the
+    // 4 tet-child rows carry the stale buffer value.  The operator fem-rs now
+    // produces is checked against the *corrected* table
+    // (`MFEM_PYRAMID_O0_FIXED`, tmp/d493/d493_pyramid_o0_fixed.txt) below.
     assert!(MFEM_PYRAMID_O0.len() == 89);
+}
+
+/// Unit-pyramid coarse mesh of the round-54/55 probes (MFEM's PYRAMID vertex
+/// order: unit-square base, apex above its centre).
+fn mfem_pyramid_mesh() -> Mesh<3> {
+    Mesh::<3> {
+        coords: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0],
+        conn: vec![0, 1, 2, 3, 4],
+        vertex_parents: vec![],
+        elem_tags: vec![1],
+        elem_type: ElementType::Pyramid5,
+        face_conn: vec![0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 0, 3, 2, 1],
+        face_tags: vec![1; 5],
+        face_type: ElementType::Tri3,
+        elem_types: None,
+        elem_offsets: None,
+        face_types: None,
+        face_offsets: None,
+        face_to_elem: None,
+        edge_conn: vec![],
+        edge_to_elem: vec![],
+        nc_vertex_view: None,
+        geometry: None,
+    }
+}
+
+/// fem-rs RT0 face table on a mixed pyramid/tet mesh: the sorted face-vertex
+/// coordinates → global dof (the same key rule `hdiv_face_key` uses — quad
+/// faces key on their sorted first three vertices).
+fn face_dofs_pyramid(
+    space: &HDivSpace<Mesh<3>>,
+    mesh: &Mesh<3>,
+) -> HashMap<Vec<i64>, u32> {
+    const PYR_TRI: [[usize; 3]; 4] = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
+    const PYR_QUAD: [usize; 4] = [0, 1, 2, 3];
+    const TET_TRI: [[usize; 3]; 4] = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]];
+    let mut out: HashMap<Vec<i64>, u32> = HashMap::new();
+    for e in 0..mesh.n_elements() as u32 {
+        let nd = mesh.element_nodes(e);
+        let tri = |v: &[usize]| -> Vec<u32> { v.iter().map(|&i| nd[i]).collect() };
+        let mut faces: Vec<Vec<u32>> = Vec::new();
+        match mesh.element_type(e) {
+            ElementType::Pyramid5 => {
+                for t in &PYR_TRI {
+                    faces.push(tri(t));
+                }
+                faces.push(tri(&PYR_QUAD));
+            }
+            ElementType::Tet4 => {
+                for t in &TET_TRI {
+                    faces.push(tri(t));
+                }
+            }
+            other => panic!("unexpected element type {other:?}"),
+        }
+        for f in faces {
+            let key = if f.len() == 3 {
+                FaceKey::new(f[0], f[1], f[2])
+            } else {
+                let mut v = f.clone();
+                v.sort_unstable();
+                FaceKey::new(v[0], v[1], v[2])
+            };
+            let dof = space
+                .tri_face_dof(key)
+                .unwrap_or_else(|| panic!("missing RT0 face dof for {f:?}"));
+            let coords: Vec<[f64; 3]> = f.iter().map(|&v| coord3(mesh, v)).collect();
+            out.insert(face_key(coords), dof);
+        }
+    }
+    out
+}
+
+/// Variable-length face-key join for the pyramid refinement (fine faces are
+/// tri 9-coord or quad 12-coord, coarse likewise → truth rows of 19/22/25
+/// entries), plus the strict "no extra entries" guard.
+fn fm_get(m: &HashMap<Vec<i64>, u32>, k: &[i64]) -> Option<u32> {
+    m.get(k).copied()
+}
+
+fn assert_matches_mfem_pyramid(
+    p: &fem_linalg::CsrMatrix<f64>,
+    fine_map: &HashMap<Vec<i64>, u32>,
+    coarse_map: &HashMap<Vec<i64>, u32>,
+    truth: &[&[f64]],
+    label: &str,
+) -> (usize, f64) {
+    let mut rs: HashMap<u32, HashMap<u32, f64>> = HashMap::new();
+    for r in 0..p.nrows {
+        for k in p.row_ptr[r]..p.row_ptr[r + 1] {
+            rs.entry(r as u32).or_default().insert(p.col_idx[k] as u32, p.values[k]);
+        }
+    }
+    let mut matched = HashSet::new();
+    let mut max_err = 0.0_f64;
+    let mut bad: Vec<(u32, u32, f64, f64)> = Vec::new();
+    for row in truth {
+        let n = row.len();
+        let mut found = false;
+        let mut tried = String::new();
+        for (vf, vc) in [(3usize, 3usize), (3, 4), (4, 3), (4, 4)] {
+            if 3 * vf + 3 * vc + 1 != n {
+                continue;
+            }
+            let fine_key = key_from_run(&row[..3 * vf]);
+            let coarse_key = key_from_run(&row[3 * vf..3 * vf + 3 * vc]);
+            let v = row[n - 1];
+            tried.push_str(&format!(
+                " (vf={vf},vc={vc}: fine {} coarse {})",
+                fm_get(fine_map, &fine_key).is_some(),
+                fm_get(coarse_map, &coarse_key).is_some()
+            ));
+            let (Some(&r), Some(&c)) = (fine_map.get(&fine_key), coarse_map.get(&coarse_key))
+            else {
+                continue;
+            };
+            let got = rs.get(&r).and_then(|m| m.get(&c)).unwrap_or_else(|| {
+                panic!("{label}: fem-rs P[{r},{c}] missing for MFEM entry {v}")
+            });
+            max_err = max_err.max((got - v).abs());
+            if (got - v).abs() > 1e-12 {
+                bad.push((r, c, v, *got));
+            }
+            matched.insert((r, c));
+            found = true;
+            break;
+        }
+        assert!(found, "{label}: no join for truth row {row:?}; lookups:{tried}");
+    }
+    assert!(
+        bad.is_empty(),
+        "{label}: {} of {} entries differ (first {}: {})",
+        bad.len(),
+        truth.len(),
+        bad.len().min(8),
+        bad.iter()
+            .take(8)
+            .map(|(r, c, v, g)| format!("P[{r},{c}] {g} vs {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let extra: Vec<(u32, u32)> = rs
+        .iter()
+        .flat_map(|(r, m)| m.keys().map(move |c| (*r, *c)))
+        .filter(|k| !matched.contains(k))
+        .collect();
+    assert!(
+        extra.is_empty(),
+        "{label}: fem-rs carries {} entries absent from the truth table, e.g. {:?}",
+        extra.len(),
+        &extra[..extra.len().min(4)]
+    );
+    eprintln!(
+        "{label}: {} MFEM entries matched, max|delta| = {max_err:.3e}",
+        truth.len()
+    );
+    (truth.len(), max_err)
+}
+
+/// D493 (round 55): pyramid RT0 prolongation against the **corrected** MFEM
+/// oracle.
+///
+/// The oracle (`tmp/d493/d493_pyramid_o0_fixed.txt`, probe
+/// `tmp/d493/probe_fixed.cpp`) assembles the operator MFEM *would* produce:
+/// per child `LocalInterpolation_RT` with the **parent's** element
+/// (`GetLocalInterpolation` for the 6 pyramid children — the call MFEM's own
+/// assembly makes — and `GetTransferMatrix` across the 4 tetrahedron
+/// children), with the child's own reference nodes/normals and its affine
+/// embedding recovered through the parent's affine frame.  Two independent
+/// checks make this the right oracle rather than a re-run of the shipped bug:
+///
+/// * the affine-frame embeddings reproduce `mesh.cpp`'s `pyr_children` point
+///   matrices **138/138 entries** (all 10 children), and
+/// * the corrected operator prolongates a constant flux field exactly
+///   (`max|P·x_c − x_f| = 1.7e-16` with MFEM's own `Project_RT` dof values),
+///   while MFEM's as-shipped operator misses by **0.633** — the tet children's
+///   rows.
+#[test]
+#[ignore = "D493 round 55: the exact path now serves pyramids (complete operator, all 33 fine dofs) but fem-rs's PyraRTk spans a different 5-dim function space than MFEM's RT_FuentesPyramidElement (81 of the 85 oracle entries differ; the same recipe is bitwise on tri/quad/tet/hex/prism).  Closing needs the Fuentes raw-basis port (D534) and the space-side dof-convention flip (D535, hdiv.rs).  Measured constant-field residual of the current operator: 3.74e-1 (legacy builder: 3.63e-1 with 13 empty rows)."]
+fn d493_pyramid_rt0_matches_corrected_mfem() {
+    let coarse_mesh = mfem_pyramid_mesh();
+    let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
+    assert_eq!(fine_mesh.n_elements(), 10);
+    let coarse_space = HDivSpace::new(coarse_mesh.clone(), 0);
+    let fine_space = HDivSpace::new(fine_mesh.clone(), 0);
+    let (p, stats) = build_prolongation_hdiv(&coarse_space, &fine_space);
+    assert_eq!(stats.located_count, fine_space.n_dofs());
+    assert_eq!(fine_space.n_dofs(), 33);
+    assert_exact_path_served(&p, fine_space.n_dofs());
+    let cm = face_dofs_pyramid(&coarse_space, &coarse_mesh);
+    let fm = face_dofs_pyramid(&fine_space, &fine_mesh);
+    let (n, err) = assert_matches_mfem_pyramid(&p, &fm, &cm, MFEM_PYRAMID_O0_FIXED, "pyramid RT0");
+    assert_eq!(n, 85);
+    assert!(err <= 1e-12, "pyramid RT0: max|delta| = {err:.3e}");
+}
+
+/// The upstream-bug delineation, computed from the two MFEM dumps alone (no
+/// fem-rs operator involved, so this test stays active):
+///
+/// * MFEM's **as-shipped** P (89 rows, `tmp/d493/d493_pyramid_o0.txt`) and the
+///   **corrected** P (85 rows, `tmp/d493/d493_pyramid_o0_fixed.txt`) are joined
+///   by face coordinates; every entry they disagree on must sit on a fine dof
+///   of one of the four interior *tetrahedron* children, and
+/// * the stale buffer value `0.15625` (`localP[PYRAMID](5)` row 4's last
+///   entry, read out of bounds by `SetRow`) appears in exactly the four
+///   tet-child rows.
+#[test]
+fn d493_pyramid_mfem_shipped_p_diverges_only_on_tet_children() {
+    let coarse_mesh = mfem_pyramid_mesh();
+    let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
+    let coarse_space = HDivSpace::new(coarse_mesh.clone(), 0);
+    let fine_space = HDivSpace::new(fine_mesh.clone(), 0);
+    let cm = face_dofs_pyramid(&coarse_space, &coarse_mesh);
+    let fm = face_dofs_pyramid(&fine_space, &fine_mesh);
+    // fine dof -> the element shapes that own it (bit 0 = Pyramid5, bit 1 = Tet4)
+    let mut dof_shapes: HashMap<u32, u8> = HashMap::new();
+    for e in 0..fine_mesh.n_elements() as u32 {
+        let bit = match fine_mesh.element_type(e) {
+            ElementType::Pyramid5 => 1u8,
+            ElementType::Tet4 => 2u8,
+            other => panic!("unexpected fine element {other:?}"),
+        };
+        for &d in fine_space.element_dofs(e) {
+            *dof_shapes.entry(d).or_insert(0) |= bit;
+        }
+    }
+    const PYR: u8 = 1;
+    const TET: u8 = 2;
+    let join = |row: &[f64]| -> Option<(u32, u32, f64)> {
+        let n = row.len();
+        for (vf, vc) in [(3usize, 3usize), (3, 4), (4, 3), (4, 4)] {
+            if 3 * vf + 3 * vc + 1 != n {
+                continue;
+            }
+            let fk = key_from_run(&row[..3 * vf]);
+            let ck = key_from_run(&row[3 * vf..3 * vf + 3 * vc]);
+            if let (Some(&r), Some(&c)) = (fm.get(&fk), cm.get(&ck)) {
+                return Some((r, c, row[n - 1]));
+            }
+        }
+        None
+    };
+    let mut shipped: HashMap<(u32, u32), f64> = HashMap::new();
+    for row in MFEM_PYRAMID_O0 {
+        let (r, c, v) = join(row).expect("as-shipped row must join");
+        shipped.insert((r, c), v);
+    }
+    let mut corrected: HashMap<(u32, u32), f64> = HashMap::new();
+    for row in MFEM_PYRAMID_O0_FIXED {
+        let (r, c, v) = join(row).expect("corrected row must join");
+        corrected.insert((r, c), v);
+    }
+    assert_eq!(MFEM_PYRAMID_O0.len(), 89);
+    assert_eq!(MFEM_PYRAMID_O0_FIXED.len(), 85);
+    let shared = shipped.keys().filter(|k| corrected.contains_key(*k)).count();
+    assert!(shared >= 80, "expected >= 80 shared entries, got {shared}");
+    // (a) every shared entry on a pyramid-only fine dof agrees exactly
+    let mut pyr_only_shared = 0usize;
+    for (key, v) in &shipped {
+        if dof_shapes[&key.0] != PYR {
+            continue; // shared with a tet child (or tet-only): see (b)
+        }
+        let w = corrected.get(key).expect("shared key");
+        assert!((v - w).abs() <= 1e-14, "pyramid-only entry {key:?}: {v} vs {w}");
+        pyr_only_shared += 1;
+    }
+    assert!(
+        pyr_only_shared >= 20,
+        "expected >= 20 pyramid-only shared entries, got {pyr_only_shared}"
+    );
+    // (b) every *value* divergence sits on a fine dof owned by a tet child;
+    //     entries that are an explicit zero on one side only are MFEM's
+    //     `|Ikj| < 1e-12` truncation vs the builder's skip (same value)
+    let mut diverging: Vec<(u32, u32)> = Vec::new();
+    let zeroish = |v: Option<&f64>| v.map_or(true, |x| x.abs() <= 1e-12);
+    for key in shipped.keys().chain(corrected.keys()) {
+        let same = match (shipped.get(key), corrected.get(key)) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-14,
+            _ => zeroish(shipped.get(key)) && zeroish(corrected.get(key)),
+        };
+        if !same {
+            assert_ne!(
+                dof_shapes[&key.0] & TET,
+                0,
+                "as-shipped vs corrected divergence on {key:?}, whose dof is not a tet-child dof"
+            );
+            diverging.push(*key);
+        }
+    }
+    assert!(!diverging.is_empty(), "the tet children must diverge");
+    // (c) the out-of-bounds artefact: the four tet-child rows repeat the last
+    //     row buffer's stale value — empirically P[28, 4] = 0.15625, the last
+    //     pyramid child's `localP(5)` row 4 — in a column the corrected table
+    //     leaves empty
+    let stale = shipped[&(28, 4)];
+    assert!((stale - 0.15625).abs() < 1e-15, "pyramid child 5's last row: {stale}");
+    for r in 29..=32u32 {
+        let v = shipped
+            .get(&(r, 4))
+            .copied()
+            .unwrap_or_else(|| panic!("expected the stale entry P[{r},4]"));
+        assert!((v - stale).abs() < 1e-15, "P[{r},4] = {v}, expected the stale {stale}");
+        assert!(
+            corrected.get(&(r, 4)).map_or(true, |w| (w - stale).abs() > 1e-15),
+            "corrected P[{r},4] repeats the stale value {stale}"
+        );
+    }
+    eprintln!(
+        "as-shipped MFEM pyramid P: 89 entries, {shared} shared with the corrected oracle, \
+         {} diverging entries, 4 stale duplicate rows (P[29..32,4] = P[28,4] = 0.15625)",
+        diverging.len()
+    );
+}
+
+/// fem-rs's current pyramid RT0 prolongation, pinned structurally.
+///
+/// The exact path now serves a pyramid mesh (the 6 pyramid children through
+/// their own geometry, the 4 tets through the parent pyramid's element — D493),
+/// so the operator is complete: every fine dof has a row (the legacy builder
+/// left 13 of the 33 rows empty, i.e. those fine dofs were silently zeroed on
+/// transfer).  The *values* still cannot match the corrected oracle: fem-rs's
+/// `PyraRTk` spans a different 5-dimensional function space than MFEM's
+/// `RT_FuentesPyramidElement` — the element is the *moment*-dual of a
+/// monomial Vandermonde system, whose basis functions are not the Fuentes
+/// basis (measured: 81 of the 85 oracle entries differ; the same recipe is
+/// bitwise on tri/quad/tet/hex/prism, whose bases do coincide).  Constant-field
+/// residual of the current operator: 3.74e-1 (legacy builder: 3.63e-1 with 13
+/// empty rows) — both are dominated by the dof-convention gap, see D534/D535.
+#[test]
+fn d493_pyramid_rt0_exact_path_serves_every_fine_dof() {
+    let coarse_mesh = mfem_pyramid_mesh();
+    let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
+    let coarse_space = HDivSpace::new(coarse_mesh, 0);
+    let fine_space = HDivSpace::new(fine_mesh, 0);
+    let (p, stats) = build_prolongation_hdiv(&coarse_space, &fine_space);
+    assert_eq!(fine_space.n_dofs(), 33);
+    assert_eq!(stats.located_count, fine_space.n_dofs());
+    assert_exact_path_served(&p, fine_space.n_dofs());
+    // the children's mixed geometry: 6 pyramids serve 5 dofs each, the 4 tets 4
+    // — 10 elements, 33 fine dofs, every one with a row
+    let c3 = [0.9_f64, 0.4, -1.1];
+    let x_c = coarse_space.interpolate_vector(&|_| c3.to_vec());
+    let x_f = fine_space.interpolate_vector(&|_| c3.to_vec());
+    let mut y = vec![0.0_f64; fine_space.n_dofs()];
+    p.spmv(x_c.as_slice(), &mut y);
+    let max = (0..fine_space.n_dofs())
+        .map(|i| (y[i] - x_f.as_slice()[i]).abs())
+        .fold(0.0_f64, f64::max);
+    eprintln!("pyramid RT0 constant-field residual (open convention gap): {max:.3e}");
+    assert!(max.is_finite());
 }
 
 /// Sanity pin (kept active): fem-rs's own uniform pyramid refinement is

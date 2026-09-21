@@ -15,7 +15,8 @@ use thiserror::Error;
 
 use fem_core::types::DofId;
 use fem_element::raviart_thomas::{
-    hex_rt1, quad_rt1, tet_rt1, tri_rt1, HexRTk, PrismRT0, QuadRTk, TetRT1, TetRTk, TriRT1, TriRTk,
+    hex_rt1, quad_rt1, tet_rt1, tri_rt1, HexRTk, PrismRT0, PyraRTk, QuadRTk, TetRT1, TetRTk,
+    TriRT1, TriRTk,
 };
 use fem_element::{ReferenceElement, VectorReferenceElement, TetP1, TriP1};
 use fem_linalg::{CooMatrix, CsrMatrix};
@@ -1237,8 +1238,11 @@ fn hdiv_face_key(verts: &[u32]) -> FaceKey {
 // signed-dof entries of `SparseMatrix::SetRow`.  Design + probe evidence:
 // `tmp/d468/design.md`, dumps `tmp/d468/d468_{tri,quad,tet,hex}_o0.txt`.
 
-/// Element families the RT0 exact path serves: a mesh qualifies when every
-/// element belongs to the same family (mixed meshes keep the legacy builder).
+/// Element families the RT0 exact path serves: the *coarse* mesh qualifies
+/// when every element belongs to the same family.  The fine mesh may mix
+/// `Pyramid` and `Tet` elements (D493: a uniformly refined pyramid is 6
+/// pyramid + 4 tetrahedron children); every other mixture still keeps the
+/// legacy builder.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum HdivRt0Family {
     Tri,
@@ -1246,11 +1250,18 @@ enum HdivRt0Family {
     Tet,
     Hex,
     Prism,
+    /// D493: the pyramid is the one family whose uniform refinement mixes
+    /// geometries — 6 pyramid children plus 4 tets (mesh.cpp:10766-10855).
+    /// Both are listed so a fine element can be resolved to its own family
+    /// while the *parent* family stays `Pyramid`.
+    Pyramid,
 }
 
-fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
-    let dim = mesh.dim();
-    let family_of = |et: fem_mesh::ElementType| match (dim, et) {
+/// Family of a single element type in `dim` dimensions (D493 factored this out
+/// of [`hdiv_rt0_family`] so the mixed pyramid refinement can resolve each fine
+/// element's own family).
+fn hdiv_rt0_family_of(dim: u8, et: fem_mesh::ElementType) -> Option<HdivRt0Family> {
+    match (dim, et) {
         (2, fem_mesh::ElementType::Tri3 | fem_mesh::ElementType::Tri6) => Some(HdivRt0Family::Tri),
         (2, fem_mesh::ElementType::Quad4) => Some(HdivRt0Family::Quad),
         (3, fem_mesh::ElementType::Tet4 | fem_mesh::ElementType::Tet10) => {
@@ -1258,11 +1269,16 @@ fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
         }
         (3, fem_mesh::ElementType::Hex8) => Some(HdivRt0Family::Hex),
         (3, fem_mesh::ElementType::Prism6) => Some(HdivRt0Family::Prism),
+        (3, fem_mesh::ElementType::Pyramid5) => Some(HdivRt0Family::Pyramid),
         _ => None,
-    };
-    let first = family_of(mesh.element_type(0))?;
+    }
+}
+
+fn hdiv_rt0_family<M: MeshTopology>(mesh: &M) -> Option<HdivRt0Family> {
+    let dim = mesh.dim();
+    let first = hdiv_rt0_family_of(dim, mesh.element_type(0))?;
     for e in 1..mesh.n_elements() as u32 {
-        if family_of(mesh.element_type(e)) != Some(first) {
+        if hdiv_rt0_family_of(dim, mesh.element_type(e)) != Some(first) {
             return None;
         }
     }
@@ -1313,6 +1329,24 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
             ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
         ]),
+        // D493: `RT_FuentesPyramidElement(p=0)` dof nodes and normals
+        // (`fe_rt.cpp:1273-1355` + the `nk[24]` table), in the element's own
+        // slot order — base quad first, then the four triangular faces
+        // (0,1,4), (1,2,4), (2,3,4), (3,0,4), exactly `HDivSpace`'s
+        // `PYRAMID_FACES`.  The triangular normals are MFEM's *unnormalised*
+        // (1,0,1) / (0,1,1) — the same convention the other families use.
+        // Order ≥ 1 stays on the legacy builder: MFEM's reference element
+        // enumerates its triangular faces with heterogeneous internal orders
+        // (transposed on (0,1,4), reversed on (2,3,4)/(3,0,4)) while fem-rs's
+        // `PyraRTk` normalises them to the standard barycentric grid, so a
+        // slot bridge would be needed first (D534).
+        (HdivRt0Family::Pyramid, 0) => Some(vec![
+            ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
+            ([1.0 / 3.0, 0.0, 1.0 / 3.0], [0.0, -1.0, 0.0]),
+            ([2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], [1.0, 0.0, 1.0]),
+            ([1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], [0.0, 1.0, 1.0]),
+            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-1.0, 0.0, 0.0]),
+        ]),
         _ => None,
     }
 }
@@ -1326,6 +1360,7 @@ fn hdiv_rt_basis(family: HdivRt0Family, order: u8) -> Box<dyn VectorReferenceEle
         (HdivRt0Family::Quad, o) => Box::new(QuadRTk::new(o as usize)),
         (HdivRt0Family::Hex, o) => Box::new(HexRTk::new(o as usize)),
         (HdivRt0Family::Prism, o) => Box::new(PrismRT0::new(o as usize)),
+        (HdivRt0Family::Pyramid, o) => Box::new(PyraRTk::new(o as usize)),
     }
 }
 
@@ -1359,12 +1394,24 @@ fn hdiv_rt0_elem_edges(family: HdivRt0Family) -> &'static [(usize, usize)] {
         (1, 4),
         (2, 5), // verticals
     ];
+    // MFEM `pyr_t::Edges`: base quad, then the four apex edges.
+    const PYRAMID: [(usize, usize); 8] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (0, 4),
+        (1, 4),
+        (2, 4),
+        (3, 4),
+    ];
     match family {
         HdivRt0Family::Tri => hdiv_element_edges_2d(fem_mesh::ElementType::Tri3),
         HdivRt0Family::Quad => hdiv_element_edges_2d(fem_mesh::ElementType::Quad4),
         HdivRt0Family::Tet => &TET,
         HdivRt0Family::Hex => &HEX,
         HdivRt0Family::Prism => &PRISM,
+        HdivRt0Family::Pyramid => &PYRAMID,
     }
 }
 
@@ -1417,6 +1464,21 @@ fn hdiv_rt0_ref_corners(family: HdivRt0Family) -> Vec<(f64, f64, f64)> {
                 t((1.0, 0.0, 0.0)),
                 t((1.0, 1.0, 0.0)),
                 t((1.0, 0.0, 1.0)),
+            ]
+        }
+        HdivRt0Family::Pyramid => {
+            // MFEM `Geometry::PYRAMID` (`fem/geom.hpp:34`): unit-square base
+            // on z = 0 with the *collapsed* apex at (0,0,1) — not the
+            // "centre" apex (0.5,0.5,1).  The frame columns are therefore
+            // pt(1)−pt(0), pt(3)−pt(0), pt(4)−pt(0), and node 2 lives at the
+            // parallelogram corner (1,1,0) — the verification in
+            // [`hdiv_elem_frame`] enforces exactly that.
+            vec![
+                t((0.0, 0.0, 0.0)),
+                t((1.0, 0.0, 0.0)),
+                t((1.0, 1.0, 0.0)),
+                t((0.0, 1.0, 0.0)),
+                t((0.0, 0.0, 1.0)),
             ]
         }
     }
@@ -1542,6 +1604,37 @@ fn hdiv_elem_frame<M: MeshTopology>(
             b[0] = sub(pt(1), v0);
             b[1] = sub(pt(2), v0);
             b[2] = sub(pt(3), v0);
+        }
+        HdivRt0Family::Pyramid => {
+            // D493: frame columns x = v0 + ξ·pt(1)_v + η·pt(3)_v + ζ·pt(4)_v
+            // (columns pt(1)−pt(0), pt(3)−pt(0), pt(4)−pt(0)), whose
+            // coordinates ARE the pyramid reference corner coordinates of
+            // [`hdiv_rt0_ref_corners`] for the base parallelogram and the
+            // collapsed apex.  Every fine vertex of MFEM's uniform pyramid
+            // refinement is a physical average of parent vertices/
+            // parallelogram centre, so this frame inverts them exactly and
+            // reproduces MFEM's tabulated `pyr_children` point matrices entry
+            // for entry (138/138, tmp/d493/).
+            b[0] = sub(pt(1), v0);
+            b[1] = sub(pt(3), v0);
+            b[2] = sub(pt(4), v0);
+            // Verify the four corner nodes against the frame: node 2 = the
+            // parallelogram corner (1,1,0) pins the base to a parallelogram,
+            // node 4 = the collapsed apex (0,0,1) pins the apex direction.
+            for (i, corner) in [(2usize, [1.0_f64, 1.0, 0.0]), (4, [0.0, 0.0, 1.0])] {
+                let vp = pt(i);
+                let mut pred = [0.0_f64; 3];
+                for dd in 0..3 {
+                    pred[dd] = v0[dd]
+                        + corner[0] * b[0][dd]
+                        + corner[1] * b[1][dd]
+                        + corner[2] * b[2][dd];
+                }
+                let res = (pred[0] - vp[0]).abs() + (pred[1] - vp[1]).abs() + (pred[2] - vp[2]).abs();
+                if res > 1e-8 {
+                    return None;
+                }
+            }
         }
         HdivRt0Family::Prism => {
             // Frame columns in the ENGINE prism frame: vertical = pt(3)−pt(0),
@@ -1784,12 +1877,20 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
                 set.insert(m);
             }
         }
-        if family == HdivRt0Family::Hex || family == HdivRt0Family::Prism {
+        if matches!(
+            family,
+            HdivRt0Family::Hex | HdivRt0Family::Prism | HdivRt0Family::Pyramid
+        ) {
+            // D493: the pyramid's base is a quad face whose centre is the
+            // refinement's `oface+qf0` vertex (the inner inverted pyramid's
+            // apex) — the same rule as a hex/prism quad face.
             for fv in hdiv_element_faces_3d(
                 if family == HdivRt0Family::Hex {
                     fem_mesh::ElementType::Hex8
-                } else {
+                } else if family == HdivRt0Family::Prism {
                     fem_mesh::ElementType::Prism6
+                } else {
+                    fem_mesh::ElementType::Pyramid5
                 },
             ) {
                 if fv.len() != 4 {
@@ -1808,9 +1909,24 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         extended.insert(e, set);
     }
 
-    let ref_corners = hdiv_rt0_ref_corners(family);
-
     for e in 0..fine.mesh().n_elements() as u32 {
+        // D493: a fine element carries its *own* family's reference corners and
+        // slot rows (`LocalInterpolation_RT`'s `this` side) while the columns
+        // stay the parent's (the `cfe` side).  Uniform pyramid refinement is
+        // the one place the two differ: 6 pyramid + 4 tetrahedron children.
+        let cfam = match hdiv_rt0_family_of(dim as u8, fine.mesh().element_type(e)) {
+            Some(f) => f,
+            None => return None,
+        };
+        let same_geometry = cfam == family;
+        if !same_geometry && !(family == HdivRt0Family::Pyramid && cfam == HdivRt0Family::Tet) {
+            return None;
+        }
+        let child_slot_rows = match hdiv_rt_slot_rows(cfam, order) {
+            Some(r) => r,
+            None => return None,
+        };
+        let child_corners = hdiv_rt0_ref_corners(cfam);
         let nodes = fine.mesh().element_nodes(e);
         let fverts: HashSet<u32> = nodes.iter().copied().collect();
         let mut candidates: Vec<u32> = Vec::new();
@@ -1868,7 +1984,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         let Some((p0, pb)) = hdiv_elem_frame(coarse.mesh(), parent, family) else {
             return None;
         };
-        let Some((f0, fb)) = hdiv_elem_frame(fine.mesh(), e, family) else {
+        let Some((f0, fb)) = hdiv_elem_frame(fine.mesh(), e, cfam) else {
             return None;
         };
         // Child embedding F(x̂) = b + A x̂ in parent-ref coordinates:
@@ -1925,16 +2041,29 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         // simplices)
         let mut corner_map = [0usize, 1, 2, 3, 4, 5, 6, 7];
         if det < 0.0 {
-            if dim != 3 || family != HdivRt0Family::Tet || order > 1 {
+            // D493: the uniform pyramid refinement's inner child
+            // (`Pyramid(oedge+e[7], oedge+e[6], oedge+e[5], oedge+e[4],
+            // oface+qf0)`, mesh.cpp:10800) is an *inverted* pyramid — its base
+            // normals point the other way, so the affine embedding has a
+            // negative determinant.  MFEM treats it like every other child:
+            // `LocalInterpolation_RT`'s adjugate carries the mirror and no slot
+            // remap is applied (the mesh slot signs from `element_signs`
+            // complete the orientation bookkeeping), exactly like the tet
+            // order-1 arm below.  The order-0 tet swap below is a fem-rs
+            // historical-vertex-order artefact of `refine_nonconforming_3d`
+            // and does not apply here.
+            let mirrored_ok = if same_geometry {
+                (family == HdivRt0Family::Tet && order <= 1) || (family == HdivRt0Family::Pyramid)
+            } else {
+                family == HdivRt0Family::Pyramid && cfam == HdivRt0Family::Tet
+            };
+            if dim != 3 || !mirrored_ok {
                 // Mirrored children beyond tet order 1 would need the
                 // higher-order face-grid remap — fall back to the legacy
                 // builder for the whole operator instead.
                 return None;
             }
-            // Swapped frame (order 0 only): F'(eps_i) = ref(w_{pi(i)}),
-            // pi = (0 1): origin' = ref(w_1) = bv + a[0];
-            // col j = ref(w_{pi(j+1)}) - ref(w_1)
-            if order == 0 {
+            if family == HdivRt0Family::Tet && same_geometry && order == 0 {
                 frame_bv = [bv[0] + a[0][0], bv[1] + a[0][1], bv[2] + a[0][2]];
                 for comp in 0..3 {
                     frame_a[0][comp] = -a[0][comp];
@@ -1952,14 +2081,15 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
                 ];
                 corner_map = [1, 0, 2, 3, 4, 5, 6, 7];
             } else {
-                // Order 1: keep the child's own frame and corner
-                // correspondence (slot_map/slot_eps/corner_map stay identity).
+                // Order 1 (tet), and every mirrored pyramid child: keep the
+                // child's own frame and corner correspondence
+                // (slot_map/slot_eps/corner_map stay identity).
                 // The interpolation row
                 // I(k, j) = phi_j(F(x_hat_k)) · (adjJ_F^T n_hat_k) is
                 // algebraic in the affine map F and needs no positive
                 // determinant — the mesh slot signs (`element_signs`) already
                 // encode the mirrored frames' orientation, exactly as on
-                // positively framed children.  (The order-0 arm above keeps
+                // positively framed children.  (The order-0 tet arm above keeps
                 // its historical swapped-frame derivation, bitwise-validated
                 // against the MFEM probe; the interior component samples of
                 // order >= 1 have no single-slot correspondence under the
@@ -1970,7 +2100,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         // The check runs against the evaluation frame's corner correspondence
         // (identity, or the odd swap for mirrored children).
         let mut verified = true;
-        for (li, corner) in ref_corners.iter().enumerate() {
+        for (li, corner) in child_corners.iter().enumerate() {
             let p = fine.mesh().node_coords(nodes[corner_map[li]]);
             let px = [p[0], p[1], if dim == 3 { p[2] } else { 0.0 }];
             let Some(actual) =
@@ -2036,7 +2166,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         let signs_f = fine.element_signs(e);
         let c_dofs = coarse.element_dofs(parent);
         let c_signs = coarse.element_signs(parent);
-        debug_assert_eq!(dofs.len(), slot_rows.len());
+        debug_assert_eq!(dofs.len(), child_slot_rows.len());
         debug_assert_eq!(c_dofs.len(), n_parent_slots);
         let mut phi = vec![0.0_f64; n * dim];
         let mut b_row = vec![0.0_f64; n];
@@ -2045,7 +2175,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
             if written[gk] {
                 continue;
             }
-            let (xi, nk) = &slot_rows[slot_map[k]];
+            let (xi, nk) = &child_slot_rows[slot_map[k]];
             let xk: [f64; 3] = std::array::from_fn(|comp| {
                 frame_bv[comp]
                     + frame_a[0][comp] * xi[0]
@@ -2116,48 +2246,51 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
     coarse: &HDivSpace<M>,
     fine: &HDivSpace<M>,
 ) -> (CsrMatrix<f64>, TransferStats) {
-    // D461/D468/D469/D460/D494: RT on same-family meshes takes the MFEM-exact
-    // `LocalInterpolation_RT` path — dense interpolation rows for every fine
-    // dof (including the midline rows that used to stay empty), written once
-    // per fine dof.  Order 0 covers tri/quad/tet/hex/prism; order 1 covers
+    // D461/D468/D469/D460/D494/D493: RT on same-family meshes takes the
+    // MFEM-exact `LocalInterpolation_RT` path — dense interpolation rows for
+    // every fine dof (including the midline rows that used to stay empty),
+    // written once per fine dof.  Order 0 covers tri/quad/tet/hex/prism and
+    // the pyramid (whose uniform refinement mixes 6 pyramid + 4 tet children,
+    // each child contributing *its own* family's reference nodes/normals
+    // against the parent pyramid's shape functions — D493); order 1 covers
     // tri/tet/quad/hex (the MFEM nodal tables are public in `fem_element`,
     // D494; mirrored tet children keep their own frames, whose mesh slot
-    // signs carry the orientation).  The prism/pyramid families stay on the
-    // legacy builder: pyramids need the Fuentes nodal dof-value convention
-    // first (D493 — the space-side canonical-moment engine is read-only this
-    // round, and MFEM's own assembled pyramid tet-child rows are an upstream
-    // bug, see tmp/d493/), and prism RT1 lacks an interpolant entirely
-    // (`hdiv_interpolant_available(Prism6, 1) == false`).  The exact path
-    // declines (returns `None`) when a fine element cannot be prolongated
-    // exactly — the historical search-based builder below then produces the
-    // full operator.
+    // signs carry the orientation).  Prism RT1 and pyramid RT1..3 stay on the
+    // legacy builder (no interpolant: `hdiv_interpolant_available` is false,
+    // and MFEM's Fuentes pyramid enumerates its order>=1 triangular faces in a
+    // different internal order than fem-rs's `PyraRTk` — D512/D534).  The
+    // exact path declines (returns `None`) when a fine element cannot be
+    // prolongated exactly — the historical search-based builder below then
+    // produces the full operator.
     if coarse.order() == fine.order() {
-        if let (Some(cf), Some(ff)) = (hdiv_rt0_family(coarse.mesh()), hdiv_rt0_family(fine.mesh()))
-        {
-            if cf == ff {
-                let eligible = match (coarse.order(), cf) {
-                    (
-                        0,
-                        HdivRt0Family::Tri
-                        | HdivRt0Family::Quad
-                        | HdivRt0Family::Tet
-                        | HdivRt0Family::Hex
-                        | HdivRt0Family::Prism,
-                    ) => true,
-                    // D494/D461: order-1 quad/hex take the exact path too —
-                    // the published nodal tables carry the interior (bubble)
-                    // rows, so every fine dof row is the MFEM interpolation
-                    // row (no zero columns).
-                    (1, HdivRt0Family::Quad | HdivRt0Family::Hex) => true,
-                    (1, HdivRt0Family::Tri | HdivRt0Family::Tet) => true,
-                    _ => false,
-                };
-                if eligible {
-                    if let Some(out) =
-                        build_prolongation_hdiv_rt_mfem(coarse, fine, cf, coarse.order())
-                    {
-                        return out;
-                    }
+        if let Some(cf) = hdiv_rt0_family(coarse.mesh()) {
+            let eligible = match (coarse.order(), cf) {
+                (
+                    0,
+                    HdivRt0Family::Tri
+                    | HdivRt0Family::Quad
+                    | HdivRt0Family::Tet
+                    | HdivRt0Family::Hex
+                    | HdivRt0Family::Prism
+                    | HdivRt0Family::Pyramid,
+                ) => true,
+                // D494/D461: order-1 quad/hex take the exact path too —
+                // the published nodal tables carry the interior (bubble)
+                // rows, so every fine dof row is the MFEM interpolation
+                // row (no zero columns).
+                (1, HdivRt0Family::Quad | HdivRt0Family::Hex) => true,
+                (1, HdivRt0Family::Tri | HdivRt0Family::Tet) => true,
+                _ => false,
+            };
+            if eligible {
+                // The fine mesh need not be single-family (a refined pyramid
+                // is 6 pyramid + 4 tet elements); `build_prolongation_hdiv_rt_mfem`
+                // resolves each fine element's own family and returns `None` for
+                // any combination the exact path cannot serve.
+                if let Some(out) =
+                    build_prolongation_hdiv_rt_mfem(coarse, fine, cf, coarse.order())
+                {
+                    return out;
                 }
             }
         }
