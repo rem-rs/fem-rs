@@ -8,6 +8,15 @@
 //! cargo run --example mfem_ex29_curved_poisson
 //! cargo run --example mfem_ex29_curved_poisson -- -mt 4 -r 0 -mo 3 -o 3
 //! ```
+//!
+//! ## Known differences vs C++
+//! * `-mt 3` (C++ `GetMesh(3)`, the 12-vertex / 16-triangle **triangular**
+//!   tube) is **not ported** — the surface machinery of this example
+//!   (`surface_jacobian`) evaluates only the quad `QuadQk`/`QuadQ1` curved
+//!   geometry.  A non-4 `-mt` is refused with exit status 3 (the pex31
+//!   unported-option convention) instead of silently assembling the
+//!   quadrilateral mesh (D357: the flag used to be parsed + printed but never
+//!   consumed).  `-r > 0` keeps its existing surface-refinement warning.
 
 
 use std::f64::consts::PI;
@@ -21,6 +30,18 @@ use fem_space::{H1Space, fe_space::FESpace, constraints::boundary_dofs};
 
 fn main() {
     let args = parse_args();
+    // D357: C++ ex29's `-mt` selects `GetMesh(3)` (triangular tube) or
+    // `GetMesh(4)` (quadrilateral tube).  Only the quadrilateral surface is
+    // ported — refuse the triangular type instead of silently building the
+    // quad mesh while printing `--mesh-type 3`.
+    if args.mesh_type != 4 {
+        eprintln!(
+            "mfem_ex29_curved_poisson: -mt {} (triangular tube, C++ GetMesh(3)) is not ported; \
+             only the quadrilateral surface (GetMesh(4)) exists. Re-run with -mt 4.",
+            args.mesh_type
+        );
+        std::process::exit(3);
+    }
     println!("Options used:");
     println!("   --mesh-type {}", args.mesh_type);
     println!("   --mesh-order {}", args.mesh_order);

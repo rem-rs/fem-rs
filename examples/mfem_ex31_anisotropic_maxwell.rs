@@ -30,6 +30,21 @@
 //!   on raw `A`, raw `b`, eliminated `A`/`B`/`X0` and the solution `x` to
 //!   ≤ 1e-13 (dumped by `examples/mfem_ex31_dump.rs`, same assembly code).
 //!
+//! **D384 (raw-A structural zeros):** the `Σ_yz ∫ E_y φ_z` coupling rows of
+//! the horizontally-polarized edge functions are *identically zero*; MFEM's
+//! assembly drops those element entries (`SparseMatrix::AddSubMatrix` skips
+//! `a == 0.0` unless the mirror entry is nonzero), while the pre-D384 port
+//! accumulated `≤ 3e-18` rounding noise that passed the `v != 0.0` check and
+//! entered the COO (784 spurious nnz = 392 mirrored pairs on the default
+//! mesh).  The coupling add now requires `|v| > 1e-12` — nine orders below
+//! the smallest physical coupling entry, six above the measured noise, and
+//! the margin grows on finer meshes (v scales like h).  Residual, documented
+//! nnz difference: C++ *keeps* 392 of its own ≤ 5e-18 noise entries at
+//! mirror-nonzero positions (the `skip_zeros == 1` mirror rule), which this
+//! port does not reproduce — reproducing them would mean deliberately
+//! assembling noise; every compared A/x value still agrees to ≤ 1.3e-13 and
+//! the printed metrics are unchanged.
+//!
 //! **Honest gaps (refused with exit status 3):**
 //! * `-o > 1`: the order-p restricted space (ND_R2D edge moments + higher-order
 //!   H¹ z-block) is not ported; only the order-1 local basis exists (C++ ex31
@@ -361,7 +376,17 @@ fn main() {
         for (li, &ri) in nd_dofs.iter().enumerate() {
             for (lj, &cj) in h1_dofs.iter().enumerate() {
                 let v = em[li * n_lh1 + lj];
-                if v != 0.0 { coupling_coo.add(ri, cj, v); }
+                // D384: the coupling rows of horizontally-polarized edge
+                // functions are *identically zero* (E_y ≡ 0); their rounding
+                // noise is ≤ 3e-18 on this mesh while the smallest physical
+                // coupling entry is ≈ 3.7e-3, so anything below 1e-12 is
+                // pattern noise, not signal.  MFEM's assembly drops the same
+                // positions at exact zero (`SparseMatrix::AddSubMatrix`
+                // skip_zeros); the pex31 port filters the equivalent rows at
+                // generation.  1e-12 is nine orders below signal and six
+                // above the measured noise, and v scales down with h² so the
+                // margin only grows on finer meshes.
+                if v.abs() > 1e-12 { coupling_coo.add(ri, cj, v); }
             }
         }
     }

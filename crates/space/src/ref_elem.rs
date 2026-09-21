@@ -179,6 +179,13 @@ impl ReferenceElement for P0QuadCentred {
 /// `H1TriPk`/`H1TetPk` in entity slot order (vertices → edges → faces →
 /// interior) from p = 3 on (D157/D185).
 ///
+/// `Tet10` cells (D235) share the tet lattice: a quadratic tet's H¹ space
+/// element is the same `TetP1`/`TetP2`/`H1TetPk` family on the unit simplex,
+/// whose first four connectivity nodes are the vertices the P1 geometry map
+/// reads.  (The scalar H¹ space itself does not number Tet10 cells yet —
+/// this arm serves the postproc estimators, whose `is_simplex` geometry
+/// already accepted Tet10.)
+///
 /// Order 0 is **not** a member of this family: the H¹ purpose dispatch maps it
 /// to the P0 elements instead, and a direct call panics at the constructor's
 /// own `assert` — callers must decide which P0 geometry rule applies.
@@ -189,7 +196,7 @@ pub fn h1_simplex_slots(elem_type: ElementType, order: u8) -> Box<dyn ReferenceE
             2 => Box::new(TriPk::new(2)),
             o => Box::new(H1TriPk::new(o as usize)),
         },
-        ElementType::Tet4 => match order {
+        ElementType::Tet4 | ElementType::Tet10 => match order {
             1 => Box::new(TetP1),
             2 => Box::new(TetP2),
             o => Box::new(H1TetPk::new(o as usize)),

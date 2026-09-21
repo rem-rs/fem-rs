@@ -394,13 +394,19 @@ fn main() {
             rh1.eval_basis(xi, &mut hp);
             for i in 0..n_ld {
                 let py = signs[i] * (jit10 * np[i * 2] + jit11 * np[i * 2 + 1]);
+                // D384: skip the identically-zero E_y rows (±1e-16 rounding
+                // noise) — same generation-end guard as the main example.
+                if py.abs() < 1e-15 { continue; }
                 for j in 0..n_lh1 { em[i * n_lh1 + j] += w * py * hp[j]; }
             }
         }
         for (li, &ri) in nd_dofs.iter().enumerate() {
             for (lj, &cj) in h1_dofs.iter().enumerate() {
                 let v = em[li * n_lh1 + lj];
-                if v != 0.0 { coupling_coo.add(ri, cj, v); }
+                // D384: drop the identically-zero E_y coupling rows' rounding
+                // noise (|v| ≤ 3e-18 vs signal ≥ 3.7e-3) — same guard as the
+                // main example.
+                if v.abs() > 1e-12 { coupling_coo.add(ri, cj, v); }
             }
         }
     }

@@ -3,7 +3,7 @@
 
 use nalgebra::DMatrix;
 
-use fem_element::ReferenceElement;
+use fem_element::{QuadratureRule, ReferenceElement};
 use fem_mesh::amr::HangingNodeConstraint;
 use fem_mesh::element_type::ElementType;
 use fem_mesh::topology::MeshTopology;
@@ -15,25 +15,103 @@ use crate::standard::MassIntegrator;
 use crate::Assembler;
 // âââ Reference element helper (same as grid_function.rs) ââââââââââââââââââââââ
 
-/// D364: delegated to the single source of truth.  Arm-for-arm identical to
-/// the historical local table: simplex arms on the H¹ slot lattice
-/// (`TriP1`/`TriPk(2)`/`H1TriPk` GLL from p = 3 — D185/D202, pairing with
-/// `space.element_dofs` / `zz_estimator_nodal`'s dof coords) and the legacy
-/// `[-1,1]²` `QuadQ1`/`QuadQ2` frames the analytic bilinear `geom_jacobian`
-/// evaluates.  Same panic set.
+/// D364: delegated to the single source of truth.  Simplex arms on the H¹ slot
+/// lattice (`TriP1`/`TriPk(2)`/`H1TriPk` GLL from p = 3 — D185/D202, pairing
+/// with `space.element_dofs` / `zz_estimator_nodal`'s dof coords) and the
+/// legacy `[-1,1]²` `QuadQ1`/`QuadQ2` frames the analytic bilinear
+/// `geom_jacobian` evaluates.
+///
+/// D235 widens the dispatch along the families `fem_space::ref_elem` already
+/// carries (no local table): `Quad4` from order 3 on through the `QuadQk` GLL
+/// family re-framed onto the legacy `[-1,1]²` frame by [`QuadPM1Frame`]; hexes
+/// (`HexQ1` at order 1 — the H¹ space's own element — and `HexQk` on the
+/// fem-rs `[-1,1]³` cube from order 2 on, `Hex20` cells included); `Tet10`
+/// cells through the shared tet lattice; `Prism6` through the H¹ wedge family
+/// (`H1PrismPk`, MFEM entity slot order — the slots `DofManager::build_prism_h1`
+/// numbers the space's `element_dofs` in); `Pyramid5` through the H¹ Fuentes
+/// element (the slots `build_pyramid_pk` numbers).  Still unsupported (panic):
+/// `Hex27`/`Prism15+`/`Pyramid13+` cells — no `ref_elem` family and no space
+/// numbering exists for them (D581).
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
-        (ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4, _) => {
+        (ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10, _) => {
             fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
         (ElementType::Quad4, 1 | 2) => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
+        (ElementType::Quad4, _) => Box::new(QuadPM1Frame {
+            inner: fem_space::ref_elem::gll_tensor(elem_type, order),
+        }),
+        (ElementType::Hex8, 1) => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
+        (ElementType::Hex8 | ElementType::Hex20, _) => {
+            fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
+        }
+        (ElementType::Prism6, _) => fem_space::ref_elem::h1_prism_slots(order.max(1)),
+        (ElementType::Pyramid5, _) => fem_space::ref_elem::h1_pyramid_slots(
+            order.max(1),
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
+    }
+}
+
+/// D235 frame adapter: presents the `[0,1]²` GLL tensor element
+/// ([`fem_space::ref_elem::gll_tensor`] = `QuadQk`, the H¹ space's Quad4
+/// family from order 3 on) on the **legacy `[-1,1]²` frame** every quad arm of
+/// this file's geometry code evaluates — the analytic bilinear `geom_jacobian`,
+/// `ref_vertex_coords` and `vertex_shapes`.  `ξ = 2t − 1`; the slot order and
+/// DOF identity are the inner element's own (so `dof_coords[i]` still pairs
+/// with `space.element_dofs(e)[i]`), only the coordinates and the quadrature
+/// measure (doubled per dimension, weight sum 1 → 4) change.
+struct QuadPM1Frame {
+    inner: Box<dyn ReferenceElement>,
+}
+
+impl ReferenceElement for QuadPM1Frame {
+    fn dim(&self) -> u8 { 2 }
+    fn order(&self) -> u8 { self.inner.order() }
+    fn n_dofs(&self) -> usize { self.inner.n_dofs() }
+    fn eval_basis(&self, xi: &[f64], values: &mut [f64]) {
+        self.inner.eval_basis(&[(xi[0] + 1.0) * 0.5, (xi[1] + 1.0) * 0.5], values);
+    }
+    fn eval_grad_basis(&self, xi: &[f64], grads: &mut [f64]) {
+        let t = [(xi[0] + 1.0) * 0.5, (xi[1] + 1.0) * 0.5];
+        self.inner.eval_grad_basis(&t, grads);
+        // ∂φ/∂ξ = ∂φ/∂t · dt/dξ, dt/dξ = 1/2 per dimension.
+        for g in grads.iter_mut() { *g *= 0.5; }
+    }
+    fn quadrature(&self, order: u8) -> QuadratureRule {
+        let mut q = self.inner.quadrature(order); // [0,1]² rule, weight sum 1
+        for p in q.points.iter_mut() {
+            p[0] = 2.0 * p[0] - 1.0;
+            p[1] = 2.0 * p[1] - 1.0;
+        }
+        for w in q.weights.iter_mut() { *w *= 4.0; }
+        q
+    }
+    fn dof_coords(&self) -> Vec<Vec<f64>> {
+        self.inner
+            .dof_coords()
+            .into_iter()
+            .map(|c| vec![2.0 * c[0] - 1.0, 2.0 * c[1] - 1.0])
+            .collect()
     }
 }
 
 /// True for simplex element types (Tri3, Tri6, Tet4, â¦).
 fn is_simplex(elem_type: ElementType) -> bool {
     matches!(elem_type, ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10)
+}
+
+/// Number of element **vertices** the vertex-sampled estimators loop over:
+/// the connectivity node count, except for quadratic simplices (Tet10) whose
+/// conn carries 6 extra edge nodes beyond the 4 vertices (MFEM tet10 order —
+/// `p_refine_tet4_to_tet10` writes `[v0 v1 v2 v3 | m01 m02 m03 m12 m13 m23]`).
+/// D235: without this guard the newly-dispatched Tet10 arm made
+/// `zz_estimator_stress` sample all 10 conn nodes through
+/// `ref_vertex_coords`'s `_ => {}` origin fallback — ten identical
+/// centroid "vertices" (silent garbage where the dispatch used to panic).
+fn elem_vertex_count(elem_type: ElementType, npe: usize, dim: usize) -> usize {
+    if is_simplex(elem_type) && npe > dim + 1 { dim + 1 } else { npe }
 }
 
 /// Geometric-mapping Jacobian at reference point `xi` on element `e`.
@@ -50,6 +128,16 @@ fn is_simplex(elem_type: ElementType) -> bool {
 /// straight-quad analytic arm below stays bit-identical); hexes evaluate the
 /// `HexQk` [-1,1]Â³ geometry directly.  Curved (geom_order > 1) geometries read
 /// the geometry-node table through `geo_ref_elem_from_mesh`.
+///
+/// D235 completes the 3-D arms along the D365 flux-recovery pattern: wedges
+/// evaluate the isoparametric `PrismPk` geometry (the family
+/// `geo_ref_elem_from_mesh` selects, the same unit-prism frame the HÂ¹ wedge
+/// basis `ref_elem_vol(Prism6, Â·)` evaluates), and pyramids delegate to
+/// `fem_mesh::transformation::element_jacobian_at` â the straight pyramid's
+/// `PYR_P1_SLOT_VERTEX`-permuted `PyramidPk(1)` map (D331) or its own order-`g`
+/// Fuentes element when curved (D334) â never the affine corner-difference
+/// fallback, whose three base-edge columns are coplanar (det â¡ 0) on a
+/// flat-based pyramid.
 ///
 /// Returns `(J, det J)` where J is the `dim Ã dim` Jacobian matrix.
 fn geom_jacobian<M: MeshTopology>(mesh: &M, elem: u32, nodes: &[u32], xi: &[f64], dim: usize, elem_type: ElementType) -> (DMatrix<f64>, f64) {
@@ -76,10 +164,21 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, elem: u32, nodes: &[u32], xi: &[f64]
         let det = j00 * j11 - j01 * j10;
         let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
         (jac, det)
+    } else if matches!(elem_type, ElementType::Pyramid5) {
+        // D235/D365: the pyramid geometry is *not* the solution basis family
+        // (the straight-pyramid map is the `PyramidPk(1)` layer-slot frame
+        // with the D331 vertex permutation; a curved one its own order-`g`
+        // Fuentes element) — exactly the cases the mesh crate's
+        // `element_jacobian_at` already encodes.  Reuse it instead of a
+        // hand-rolled pyramid Jacobian; the unit-pyramid frame is the same
+        // one `h1_pyramid_slots` evaluates.
+        let (j, _xp) = fem_mesh::transformation::element_jacobian_at(mesh, elem, xi, dim);
+        let det = j.determinant();
+        (j, det)
     } else if matches!(
         elem_type,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-            | ElementType::Hex8 | ElementType::Hex20
+            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Prism6
     ) {
         // D250: isoparametric geometry (see the doc above).
         if let Some(geo) = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
@@ -417,7 +516,7 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
         let n_ldofs = ref_elem.n_dofs();
         let elem_dofs = gf.space().element_dofs(e);
         let nodes = m.element_nodes(e);
-        let npe = nodes.len();
+        let npe = elem_vertex_count(elem_type, nodes.len(), d);
         let (l, mu_c) = (lam(m.element_tag(e)), mu(m.element_tag(e)));
 
         let mut sigmas = Vec::with_capacity(npe);
@@ -473,7 +572,9 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
     let mut nc = vec![0u32; nn];
     for e in 0..ne as u32 {
         let nodes = m.element_nodes(e);
-        for (k, &n) in nodes.iter().enumerate() {
+        // Only the vertex slots carry a sampled stress (Tet10 conns list the
+        // edge nodes after the 4 vertices — D235).
+        for (k, &n) in nodes.iter().take(eg[e as usize].len()).enumerate() {
             for di in 0..tdim { ns[n as usize][di] += eg[e as usize][k][di]; }
             nc[n as usize] += 1;
         }
@@ -486,7 +587,8 @@ where M: MeshTopology, S: FESpace<Mesh = M> {
     let mut eta = vec![0.0; ne];
     for e in 0..ne as u32 {
         let nodes = m.element_nodes(e);
-        let npe = nodes.len();
+        // Same vertex count the sampling loop used (Tet10: 4 vertices).
+        let npe = eg[e as usize].len();
         let (l, mu_c) = (lam(m.element_tag(e)), mu(m.element_tag(e)));
         let mut s = vec![0.0; tdim];
         for k in 0..npe {
@@ -2468,6 +2570,192 @@ mod d202_high_order_tables {
             local.eval_basis(&[0.25, 0.3, 0.2], &mut phi);
             let sum: f64 = phi.iter().sum();
             assert!((sum - 1.0).abs() < 1e-10, "tet partition of unity at order {o}: {sum}");
+        }
+    }
+}
+
+// ─── D235: the widened dispatch's arms must integrate volumes exactly ───────
+#[cfg(test)]
+mod d235_ref_elem_volume {
+    //! Every arm `ref_elem_vol` gained in D235 gets a volume test: integrate
+    //! 1 over each mesh element through the estimator's own machinery
+    //! ([`super::ref_elem_vol`] quadrature × [`super::geom_jacobian`]) and
+    //! compare against the analytic / MFEM 4.10 truth.
+    //!
+    //! MFEM truth probe (`tmp/d235/d235_probe.cpp`, mfem 4.10 serial):
+    //! `Mesh::GetElementVolume` — `IntRules.Get(geom, OrderJ())` against the
+    //! same straight geometry — printed
+    //!   * `data/inline-wedge.mesh`: 128 wedges × 0.0078125, total 1,
+    //!   * `data/d235_pyramid_2x2x2.mesh` (the mfem inline-pyramid spec
+    //!     printed to explicit MFEM format — fem-rs' INLINE reader does not
+    //!     know `type = pyramid` yet, D582): 48 pyramids ×
+    //!     0.020833333333333332, total 1.0000000000000007,
+    //!   * the mildly warped hex below: 1.0329149999999998 under MFEM's
+    //!     explicit order-4 rule (`GetElementVolume` itself integrates straight
+    //!     hexes with the single-point `OrderJ()`=1 rule — a 4.9e-5 error on
+    //!     this cell; the earlier 0.2-magnitude warp variant FOLDED the
+    //!     trilinear map, making |det J| non-polynomial and rule-dependent).
+
+    use super::{geom_jacobian, ref_elem_vol};
+    use fem_io::mfem::read_mfem_file;
+    use fem_mesh::{ElementType, Mesh, MeshTopology};
+
+    /// Σ_q w_q·|det J(x_q)| per element — the measure the estimators use.
+    fn element_volumes<M: MeshTopology>(mesh: &M, order: u8, quad_order: u8) -> Vec<f64> {
+        let d = mesh.dim() as usize;
+        (0..mesh.n_elements() as u32)
+            .map(|e| {
+                let et = mesh.element_type(e);
+                let re = ref_elem_vol(et, order);
+                let q = re.quadrature(quad_order);
+                let nodes = mesh.element_nodes(e);
+                let mut vol = 0.0;
+                for (qi, xi) in q.points.iter().enumerate() {
+                    let (_j, det) = geom_jacobian(mesh, e, nodes, xi, d, et);
+                    vol += q.weights[qi] * det.abs();
+                }
+                vol
+            })
+            .collect()
+    }
+
+    fn sorted(mut v: Vec<f64>) -> Vec<f64> { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v }
+
+    /// Warped 2×2 quad (vertex 4 = the interior lattice node moved by
+    /// (0.12, 0.15) — the d250 warped-quad geometry, MFEM-probe volumes).
+    fn warped_quad_mesh() -> Mesh<2> {
+        let mut mesh = Mesh::<2>::unit_square_quad(2);
+        mesh.coords[4 * 2] += 0.12;
+        mesh.coords[4 * 2 + 1] += 0.15;
+        mesh
+    }
+
+    /// Mildly warped single hex: the four z=+1 ring vertices (4..7) nudged
+    /// like the MFEM probe's warped box (small enough to keep det J > 0 —
+    /// a 0.2-magnitude warp FOLDS the trilinear map, making |det J|
+    /// non-polynomial and the integral rule-order-dependent).
+    fn warped_hex_mesh() -> Mesh<3> {
+        let mut mesh = Mesh::<3>::unit_cube_hex(1);
+        let d = [
+            [0.05, -0.04, 0.06],
+            [0.02, 0.01, 0.04],
+            [-0.01, 0.03, -0.02],
+            [0.004, -0.016, 0.024],
+        ];
+        for (k, dv) in d.iter().enumerate() {
+            for c in 0..3 { mesh.coords[(4 + k) * 3 + c] += dv[c]; }
+        }
+        mesh
+    }
+
+    #[test]
+    fn d235_quad4_order_3_and_4_volumes() {
+        // Straight unit square: total 1 exactly (any ≥2-order rule integrates
+        // the planar bilinear det J exactly).
+        for o in [3u8, 4] {
+            let straight = element_volumes(&Mesh::<2>::unit_square_quad(2), o, 8);
+            assert!((straight.iter().sum::<f64>() - 1.0).abs() < 1e-14,
+                "Quad4 o={o} straight: {:?}", straight);
+            // Warped: pin element-by-element (sorted) against MFEM 4.10.
+            let warped = element_volumes(&warped_quad_mesh(), o, 8);
+            let cpp_sorted = [0.1825, 0.24250000000000005, 0.25750000000000001, 0.3175];
+            for (got, want) in sorted(warped).iter().zip(cpp_sorted) {
+                assert!((got - want).abs() < 1e-13, "Quad4 o={o} warped: {got:.17e} vs {want:.17e}");
+            }
+        }
+    }
+
+    #[test]
+    fn d235_hex8_orders_1_to_3_volumes() {
+        // MFEM probe, explicit IntRules.Get(CUBE, 4) rule (27 points) on the
+        // warped box — GetElementVolume itself integrates straight hexes with
+        // the single-point OrderJ()=1 rule, which carries a 4.9e-5 quadrature
+        // error on this geometry; at orders 4/6/10/16 MFEM converges to this
+        // same value and the fem-rs order-10 arm agrees to 7e-16.
+        let cpp_warped = 1.0329149999999998_f64;
+        for o in [1u8, 2, 3] {
+            let straight = element_volumes(&Mesh::<3>::unit_cube_hex(1), o, 10);
+            assert!((straight.iter().sum::<f64>() - 1.0).abs() < 1e-14,
+                "Hex8 o={o} straight: {:?}", straight);
+            // Warped: det J is a per-variable degree-≤3 polynomial of the
+            // trilinear map; the order-10 (per-dim 6-pt Gauss) rule integrates
+            // it to rounding — and MFEM's OrderJ-rule probe agrees.
+            let warped = element_volumes(&warped_hex_mesh(), o, 10);
+            assert!((warped[0] - cpp_warped).abs() < 1e-13,
+                "Hex8 o={o} warped: {:.17e} vs {cpp_warped:.17e}", warped[0]);
+        }
+    }
+
+    #[test]
+    fn d235_hex20_cells_volume() {
+        // Hex8 → Hex20 p-refined box: the same straight geometry, total 1.
+        let hex8 = Mesh::<3>::unit_cube_hex(1);
+        let marked: Vec<u32> = (0..hex8.n_elements() as u32).collect();
+        let (hex20, _) = fem_mesh::amr::p_refine_hex8_to_hex20(&hex8, &marked);
+        assert_eq!(hex20.element_type(0), ElementType::Hex20);
+        for o in [1u8, 2] {
+            let vol = element_volumes(&hex20, o, 10);
+            assert!((vol.iter().sum::<f64>() - 1.0).abs() < 1e-14,
+                "Hex20 o={o}: {:?}", vol);
+        }
+    }
+
+    #[test]
+    fn d235_tet10_cells_volume() {
+        // Unit cube split into 6 tets (volume 1), then every tet p-refined
+        // Tet4 → Tet10 (same straight geometry, vertices stay conn[0..4]).
+        let tet4 = Mesh::<3>::make_cartesian_3d(1, 1, 1, ElementType::Tet4, 1.0, 1.0, 1.0, false);
+        let before: f64 = 1.0;
+        let marked: Vec<u32> = (0..tet4.n_elements() as u32).collect();
+        let (tet10, _) = fem_mesh::amr::p_refine_tet4_to_tet10(&tet4, &marked);
+        assert_eq!(tet10.element_type(0), ElementType::Tet10);
+        for o in [1u8, 2, 3] {
+            let vol = element_volumes(&tet10, o, 10);
+            assert!((vol.iter().sum::<f64>() - before).abs() < 1e-14,
+                "Tet10 o={o}: {:?}", vol);
+        }
+    }
+
+    fn load_3d(rel: &str) -> Mesh<3> {
+        let path = format!("{}/../../{}", env!("CARGO_MANIFEST_DIR"), rel);
+        let mfem = read_mfem_file(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        mfem.mesh3d.unwrap_or_else(|| panic!("{rel} must be a 3-D mesh"))
+    }
+
+    #[test]
+    fn d235_prism6_volumes_match_mfem() {
+        let mesh = load_3d("data/inline-wedge.mesh");
+        assert_eq!(mesh.element_type(0), ElementType::Prism6);
+        let cpp = 0.0078125_f64; // MFEM GetElementVolume per wedge
+        for o in [1u8, 2, 3] {
+            // Affine wedge map → constant det J: exact at any rule ≥ 1.
+            let vol = element_volumes(&mesh, o, 8);
+            assert_eq!(vol.len(), 128, "inline-wedge must hold 128 wedges");
+            for (e, v) in vol.iter().enumerate() {
+                assert!((v - cpp).abs() < 1e-14, "Prism6 o={o} wedge {e}: {v:.17e} vs {cpp:.17e}");
+            }
+        }
+    }
+
+    #[test]
+    fn d235_pyramid5_volumes_match_mfem() {
+        // The mfem inline-pyramid spec printed to explicit MFEM format (the
+        // fem-rs INLINE reader does not know `type = pyramid` yet — D582).
+        let mesh = load_3d("data/d235_pyramid_2x2x2.mesh");
+        assert_eq!(mesh.element_type(0), ElementType::Pyramid5);
+        let cpp = 0.020833333333333332_f64; // MFEM GetElementVolume per pyramid
+        let cpp_total = 1.0000000000000007_f64;
+        for o in [1u8, 2, 3] {
+            // The straight-pyramid |det J| is rational — the polynomial rule
+            // reproduces MFEM's own OrderJ-rule numbers to rounding (the D331
+            // map parity keeps the same geometry).
+            let vol = element_volumes(&mesh, o, 8);
+            assert_eq!(vol.len(), 48, "pyramid stack must hold 48 pyramids");
+            for (e, v) in vol.iter().enumerate() {
+                assert!((v - cpp).abs() < 1e-12, "Pyramid5 o={o} pyramid {e}: {v:.17e} vs {cpp:.17e}");
+            }
+            let total: f64 = vol.iter().sum();
+            assert!((total - cpp_total).abs() < 1e-12, "Pyramid5 o={o} total: {total:.17e}");
         }
     }
 }

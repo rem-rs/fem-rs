@@ -9,7 +9,24 @@
 //!
 //! The C++ class is a `VectorCoefficient` evaluated at the *physical* point
 //! of the (identity) reference map, so applying it to every mesh vertex
-//! reproduces `Mesh::Transform(kershawT)`.
+//! reproduces `Mesh::Transform(kershawT)` — **on a regular `[0,1]^D`
+//! Cartesian mesh**, the input MFEM's own doc comment prescribes.  That
+//! equivalence is pinned vertex-for-vertex against MFEM 4.10 by
+//! `d388_regular_mesh_mfem_parity` below (probe
+//! `tmp/d388/d388_probe.cpp`, dump `data/d388_kershaw_dump.txt`).
+//!
+//! D388 pin (non-regular meshes): MFEM's `Eval` reads the *current* physical
+//! position through `T.Transform(ip, pos)` and forms `layer = x*6.0` from it.
+//! On a mesh that has already been transformed (or refined after a first
+//! transform, or is not the unit box at all), those positions leave
+//! `[0,1]^D`, the layer index runs past the six documented layers and
+//! `lambda` leaves `[0,1]` — the C++ map then folds the geometry onto
+//! overlapping layers (self-intersecting cells, down to NaNs in extreme
+//! cases).  That self-interacting behaviour is C++-side emergent behaviour,
+//! **not** part of this port's contract: `kershaw_map` is the pure point map
+//! of the reference transformation, which is the only piece the 1:1
+//! miniapp drivers (`-Ky`/`-Kz` diag-smoothers, TMOP benchmarks) apply to a
+//! fresh Cartesian mesh.
 
 /// 1D transformation toward the right boundary of the unit interval.
 #[inline]
@@ -111,5 +128,78 @@ mod tests {
         // Just inside layer 0 (x in [0, 1/6)), y is compressed toward 0.
         let q = kershaw_map::<2>([0.05, 0.5], 0.2, 0.0);
         assert!(q[1] < 0.5 - 1e-3, "left layer must compress: {}", q[1]);
+    }
+
+    /// D388: the `Mesh::Transform(kershawT)` equivalence, pinned
+    /// vertex-for-vertex against MFEM 4.10 on regular Cartesian `[0,1]^D`
+    /// meshes.  The fixture `data/d388_kershaw_dump.txt` was produced by the
+    /// C++ probe `tmp/d388/d388_probe.cpp` (mfem 4.10 serial,
+    /// `miniapps/common/mesh_extras.hpp`): `common::KershawTransformation`
+    /// with `smooth = 1`, `eps_y = 0.3` (2-D: `eps_z = 0` ignored; 3-D:
+    /// `eps_z = 0.2`), applied through `Mesh::Transform` to
+    /// `MakeCartesian2D(12,4)`, `MakeCartesian2D(5,3)` (a grid that straddles
+    /// the six layers) and `MakeCartesian3D(12,4,4)`.  Each section lists the
+    /// transformed coordinates of vertex `i` in MFEM's `VTX` lattice order;
+    /// this test rebuilds the *untransformed* lattice coordinate from `i`,
+    /// evaluates [`kershaw_map`], and demands the same point.
+    #[test]
+    fn d388_regular_mesh_mfem_parity() {
+        let path = format!("{}/../../data/d388_kershaw_dump.txt", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+
+        // Section state machine: "==" header → dims, data lines → compare.
+        let mut dims = [0usize; 3];
+        let mut dim = 0usize;
+        let mut checked = 0usize;
+        let mut total = 0usize;
+        for line in text.lines() {
+            if let Some(hdr) = line.strip_prefix("== ") {
+                let toks: Vec<&str> = hdr.trim().split_whitespace().collect();
+                dim = if toks[0].starts_with("3D") { 3 } else { 2 };
+                let grid: Vec<usize> = toks[1].split('x').map(|t| t.parse().unwrap()).collect();
+                dims = [grid[0], grid[1], if dim == 3 { grid[2] } else { 0 }];
+                checked = 0;
+                continue;
+            }
+            if dim == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let v: Vec<f64> = line
+                .split_whitespace()
+                .skip(1) // leading vertex id
+                .map(|t| t.parse().unwrap())
+                .collect();
+            let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
+            // MFEM VTX order: x fastest, then y, then z.
+            let i = checked;
+            let base: [f64; 3] = match dim {
+                2 => [(i % (nx + 1)) as f64 / nx as f64,
+                      (i / (nx + 1)) as f64 / ny as f64,
+                      0.0],
+                3 => [(i % (nx + 1)) as f64 / nx as f64,
+                      (i / (nx + 1) % (dims[1] + 1)) as f64 / dims[1] as f64,
+                      (i / ((nx + 1) * (dims[1] + 1))) as f64 / nz as f64],
+                _ => unreachable!(),
+            };
+            let q = if dim == 2 {
+                let q = kershaw_map::<2>([base[0], base[1]], 0.3, 0.0);
+                [q[0], q[1], 0.0]
+            } else {
+                let q = kershaw_map::<3>([base[0], base[1], base[2]], 0.3, 0.2);
+                [q[0], q[1], q[2]]
+            };
+            for k in 0..dim {
+                assert!(
+                    (q[k] - v[k]).abs() < 1e-14,
+                    "vertex {i} (2D/3D={dim}) component {k}: rust {:.17e} vs mfem {:.17e} (base {base:?})",
+                    q[k], v[k]
+                );
+            }
+            checked += 1;
+            total += 1;
+        }
+        // 65 + 24 + 325 vertices across the three sections.
+        assert_eq!(total, 414, "fixture must carry 414 transformed vertices");
     }
 }
