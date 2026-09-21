@@ -4176,11 +4176,14 @@ Edit 工具；未用 git commit/push/stash。
 - **提交（7 笔，fem-rs）**：`68d7b15`（开局补 miniapp 注册）→ `9dab985`（①D504-506）
   → `6ec367c`（②D492）→ `3d2fde0`（③NURBS）→ `ea00f54`（④D493）→ `51fc81b`（D537 + d446）
   → plan 文档提交（本笔；hash 随 amend 变动，以 fem-pro 指针为准）；fem-pro 指针提交见 `git log`。
-- **⚠️ 推送未完成（网络）**：收尾时 **`github.com:443` 不可达**——`curl https://api.github.com`
+- **推送：已完成（但过程值得记）**。收尾时 **`github.com:443` 抖动/不可达**——`curl https://api.github.com`
   返回 **200** 而 `curl https://github.com` 返回 **000/超时**，`git push` 报
-  `Failed to connect to github.com port 443`；无 `http.proxy` 配置、无代理环境变量。
-  多轮退避重试（含 8×60s 后台循环）全部失败 ⇒ **两仓提交均在本地，网络恢复后
-  `cd fem-rs && git push origin main` 再 `cd .. && git push origin main` 即可**。
+  `Failed to connect to github.com port 443`；无 `http.proxy` 配置、无代理环境变量
+  ⇒ **不是代理问题，是到 github.com 的连通性本身在抖**。多轮退避重试（21s 超时 × 60s 间隔）
+  后在窗口内推成，最后以 **`git ls-remote origin main` 对远端真值双向校验**：
+  fem-rs = **`a2e2ff8`**、fem-pro = **`0d057d3`**，两仓各 0 笔未推。
+  **教训**：`origin/main` 跟踪引用在"推送失败"时不会前进，但在"推成功过又被 amend"时会显得
+  自洽——**判推送状态要用 `git ls-remote`（问远端），不要看本地跟踪引用**。
 - **方法论新增（已写入 HANDOVER 硬纪律）**：① **审计产物只可当线索**——本轮只读审计的
   "已关"判定被亲验**证伪 3/4**（D149/D155/D276 仍开；`nurbs_mesh.rs` 被说成"已不存在"实为 11 行 shim；
   `amr_refiner.rs` 路径写错）。② **测试里做钳位必须配对侧断言**——`residual_sq.max(0.0).sqrt()`
