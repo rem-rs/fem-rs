@@ -586,8 +586,8 @@ fn assert_matches_mfem_pyramid(
     (truth.len(), max_err)
 }
 
-/// D493 (round 55): pyramid RT0 prolongation against the **corrected** MFEM
-/// oracle.
+/// D493 (round 55) + D534/D535 (round 56): pyramid RT0 prolongation against
+/// the **corrected** MFEM oracle.
 ///
 /// The oracle (`tmp/d493/d493_pyramid_o0_fixed.txt`, probe
 /// `tmp/d493/probe_fixed.cpp`) assembles the operator MFEM *would* produce:
@@ -604,8 +604,13 @@ fn assert_matches_mfem_pyramid(
 ///   (`max|P·x_c − x_f| = 1.7e-16` with MFEM's own `Project_RT` dof values),
 ///   while MFEM's as-shipped operator misses by **0.633** — the tet children's
 ///   rows.
+///
+/// Green as of D534/D535: `PyraRTk` spans MFEM's Fuentes space (the raw
+/// expansion is bitwise MFEM 4.10, probe `tmp/d534/d534_fuentes_basis.txt`),
+/// the nodal basis is point-dual (W = I, so the builder's rows are MFEM's
+/// `LocalInterpolation_RT` rows verbatim), and `HDivSpace::interpolate_vector`
+/// serves pyramid RT0 with MFEM `Project_RT` dof values.
 #[test]
-#[ignore = "D493 round 55: the exact path now serves pyramids (complete operator, all 33 fine dofs) but fem-rs's PyraRTk spans a different 5-dim function space than MFEM's RT_FuentesPyramidElement (81 of the 85 oracle entries differ; the same recipe is bitwise on tri/quad/tet/hex/prism).  Closing needs the Fuentes raw-basis port (D534) and the space-side dof-convention flip (D535, hdiv.rs).  Measured constant-field residual of the current operator: 3.74e-1 (legacy builder: 3.63e-1 with 13 empty rows)."]
 fn d493_pyramid_rt0_matches_corrected_mfem() {
     let coarse_mesh = mfem_pyramid_mesh();
     let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
@@ -741,42 +746,84 @@ fn d493_pyramid_mfem_shipped_p_diverges_only_on_tet_children() {
     );
 }
 
-/// fem-rs's current pyramid RT0 prolongation, pinned structurally.
+/// fem-rs's pyramid RT0 prolongation, structurally complete and
+/// convention-consistent on every dof the pyramid elements own (D534/D535).
 ///
-/// The exact path now serves a pyramid mesh (the 6 pyramid children through
-/// their own geometry, the 4 tets through the parent pyramid's element — D493),
-/// so the operator is complete: every fine dof has a row (the legacy builder
-/// left 13 of the 33 rows empty, i.e. those fine dofs were silently zeroed on
-/// transfer).  The *values* still cannot match the corrected oracle: fem-rs's
-/// `PyraRTk` spans a different 5-dimensional function space than MFEM's
-/// `RT_FuentesPyramidElement` — the element is the *moment*-dual of a
-/// monomial Vandermonde system, whose basis functions are not the Fuentes
-/// basis (measured: 81 of the 85 oracle entries differ; the same recipe is
-/// bitwise on tri/quad/tet/hex/prism, whose bases do coincide).  Constant-field
-/// residual of the current operator: 3.74e-1 (legacy builder: 3.63e-1 with 13
-/// empty rows) — both are dominated by the dof-convention gap, see D534/D535.
+/// The exact path serves a pyramid mesh (the 6 pyramid children through
+/// their own geometry, the 4 tets through the parent pyramid's element —
+/// D493), so the operator is complete: every fine dof has a row (the legacy
+/// builder left 13 of the 33 rows empty, i.e. those fine dofs were silently
+/// zeroed on transfer).  With the D534 Fuentes basis (MFEM's space, point
+/// dual) and the D535 `Project_RT` dof values, `interpolate_vector` reproduces
+/// MFEM `ProjectCoefficient` **bitwise** on the coarse pyramid and on the 17
+/// fine dofs owned by pyramid elements (probe XF truth,
+/// `tmp/d493/d493_pyramid_o0_fixed.txt`).  The remaining 16 dofs are the
+/// pyramid↔tet shared faces, whose stored value is written LAST by the tet
+/// element — and fem-rs's tet RT0 dof convention (the `TetRTk` dual, W = 2I)
+/// stores **half** the MFEM flux sample on every tet dof, pure-mesh included.
+/// That pre-existing tet-side scaling lesion (D543) is what keeps the
+/// constant-field residual at 1.8e-1 instead of machine precision: the
+/// residual sits exclusively on the 16 tet-written dofs, at exactly 0.5·MFEM,
+/// while this test pins (a) machine precision on the 17 pyramid-owned dofs
+/// and (b) the exact 0.5 factor of the D543 lesion so a future tet convention
+/// flip turns the whole residual machine-exact.
 #[test]
 fn d493_pyramid_rt0_exact_path_serves_every_fine_dof() {
     let coarse_mesh = mfem_pyramid_mesh();
     let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
     let coarse_space = HDivSpace::new(coarse_mesh, 0);
-    let fine_space = HDivSpace::new(fine_mesh, 0);
+    let fine_space = HDivSpace::new(fine_mesh.clone(), 0);
     let (p, stats) = build_prolongation_hdiv(&coarse_space, &fine_space);
     assert_eq!(fine_space.n_dofs(), 33);
     assert_eq!(stats.located_count, fine_space.n_dofs());
     assert_exact_path_served(&p, fine_space.n_dofs());
-    // the children's mixed geometry: 6 pyramids serve 5 dofs each, the 4 tets 4
-    // — 10 elements, 33 fine dofs, every one with a row
     let c3 = [0.9_f64, 0.4, -1.1];
     let x_c = coarse_space.interpolate_vector(&|_| c3.to_vec());
     let x_f = fine_space.interpolate_vector(&|_| c3.to_vec());
     let mut y = vec![0.0_f64; fine_space.n_dofs()];
     p.spmv(x_c.as_slice(), &mut y);
-    let max = (0..fine_space.n_dofs())
-        .map(|i| (y[i] - x_f.as_slice()[i]).abs())
-        .fold(0.0_f64, f64::max);
-    eprintln!("pyramid RT0 constant-field residual (open convention gap): {max:.3e}");
-    assert!(max.is_finite());
+    // dofs a tet element writes (the D543 lesion carriers)
+    let mut tet_owned = vec![false; 33];
+    for e in 0..fine_mesh.n_elements() as u32 {
+        if fine_mesh.element_type(e) == ElementType::Tet4 {
+            for &d in fine_space.element_dofs(e) {
+                tet_owned[d as usize] = true;
+            }
+        }
+    }
+    let (mut pyr_res, mut tet_fac) = (0.0_f64, 0.0_f64);
+    let mut n_pyr = 0usize;
+    let mut n_tet = 0usize;
+    for i in 0..fine_space.n_dofs() {
+        if tet_owned[i] {
+            // the tet writer stores half the MFEM flux sample (D543)
+            let r = (y[i] * 0.5 - x_f.as_slice()[i]).abs();
+            tet_fac = tet_fac.max(r);
+            n_tet += 1;
+        } else {
+            let r = (y[i] - x_f.as_slice()[i]).abs();
+            pyr_res = pyr_res.max(r);
+            n_pyr += 1;
+        }
+    }
+    assert_eq!(
+        n_pyr + n_tet,
+        fine_space.n_dofs(),
+        "every fine dof is either pyramid- or tet-written"
+    );
+    eprintln!(
+        "pyramid RT0 constant field: {n_pyr} pyramid-owned dofs residual {pyr_res:.3e} \
+         (D534/D535 exact); {n_tet} tet-written dofs at exactly 0.5x (D543), factor \
+         residual {tet_fac:.3e}"
+    );
+    assert!(
+        pyr_res <= 1e-13,
+        "pyramid-owned dofs must prolong exactly, got {pyr_res:.3e}"
+    );
+    assert!(
+        tet_fac <= 1e-13,
+        "tet-written dofs must carry exactly the D543 factor 0.5, got {tet_fac:.3e}"
+    );
 }
 
 /// Sanity pin (kept active): fem-rs's own uniform pyramid refinement is

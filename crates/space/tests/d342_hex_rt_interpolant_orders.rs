@@ -208,6 +208,13 @@ fn d346_hdiv_interpolant_available_table_is_frozen_plus_hex_widening() {
                     ElementType::Tet4 | ElementType::Tet10 => {
                         assert!(order >= 3 && order <= 4, "unexpected tet range: {order}");
                     }
+                    // D534/D535: `PyraRTk` is the 1:1 MFEM
+                    // `RT_FuentesPyramidElement` port (nodal, point-dual to
+                    // its order-0 rows), so the pyramid RT0 pair joins the
+                    // interpolation engine.
+                    ElementType::Pyramid5 => {
+                        assert_eq!(order, 0, "unexpected pyramid range: {order}");
+                    }
                     other => panic!("unexpected table change: {other:?} {order}"),
                 }
                 widen += 1;
@@ -215,16 +222,16 @@ fn d346_hdiv_interpolant_available_table_is_frozen_plus_hex_widening() {
         }
     }
     assert_eq!(
-        widen, 8,
-        "expected exactly the hex orders 3..=6 and tet orders 3..=4 to widen"
+        widen, 9,
+        "expected exactly the hex orders 3..=6, tet orders 3..=4 and pyramid order 0 to widen"
     );
     // The predicate must stay no looser than the space: every pair it accepts
     // in the hex column must be constructible, and pairs the space rejects
-    // (prism RTk>=1, pyramids) must stay false.
+    // (prism RTk>=1, pyramid RTk>=1) must stay false.
     for k in 0..=6u8 {
         let _ = HDivSpace::new(Mesh::<3>::unit_cube_hex(1), k);
     }
     assert!(!hdiv_interpolant_available(ElementType::Prism6, 1));
-    assert!(!hdiv_interpolant_available(ElementType::Pyramid5, 0));
+    assert!(hdiv_interpolant_available(ElementType::Pyramid5, 0));
     assert!(!hdiv_interpolant_available(ElementType::Pyramid5, 1));
 }

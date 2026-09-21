@@ -152,12 +152,15 @@ pub(crate) fn mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
 pub(crate) fn mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> f64 {
     xy[ab - 1] / (1.0 - z)
 }
-fn grad_mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
+/// MFEM `FuentesPyramid::grad_mu0(z, xy, ab)` (`fe_pyramid.cpp:187`) —
+/// `pub(crate)` for the RT Fuentes pyramid (D534).
+pub(crate) fn grad_mu0_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
     let mut d = [0.0, 0.0, -xy[ab - 1] / ((1.0 - z) * (1.0 - z))];
     d[ab - 1] = -1.0 / (1.0 - z);
     d
 }
-fn grad_mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
+/// MFEM `FuentesPyramid::grad_mu1(z, xy, ab)` (`fe_pyramid.cpp:192`).
+pub(crate) fn grad_mu1_xy(z: f64, xy: [f64; 2], ab: usize) -> [f64; 3] {
     let mut d = [0.0, 0.0, xy[ab - 1] / ((1.0 - z) * (1.0 - z))];
     d[ab - 1] = 1.0 / (1.0 - z);
     d
@@ -171,30 +174,36 @@ pub(crate) fn mu0_z(z: f64) -> f64 {
 pub(crate) fn mu1_z(z: f64) -> f64 {
     z
 }
-const GRAD_MU0_Z: [f64; 3] = [0.0, 0.0, -1.0];
-const GRAD_MU1_Z: [f64; 3] = [0.0, 0.0, 1.0];
+pub(crate) const GRAD_MU0_Z: [f64; 3] = [0.0, 0.0, -1.0];
+pub(crate) const GRAD_MU1_Z: [f64; 3] = [0.0, 0.0, 1.0];
 
-fn nu0(z: f64, xy: [f64; 2], ab: usize) -> f64 {
+/// MFEM `FuentesPyramid::nu0(z, xy, ab)` (`fe_pyramid.hpp:192`) — `pub(crate)`
+/// for the RT Fuentes pyramid (D534), which evaluates the raw expansion on the
+/// same `nu` blocks.
+pub(crate) fn nu0(z: f64, xy: [f64; 2], ab: usize) -> f64 {
     1.0 - xy[ab - 1] - z
 }
-fn nu1(xy: [f64; 2], ab: usize) -> f64 {
+/// MFEM `FuentesPyramid::nu1(z, xy, ab)` (`fe_pyramid.hpp:193`).
+pub(crate) fn nu1(xy: [f64; 2], ab: usize) -> f64 {
     xy[ab - 1]
 }
-fn nu2(z: f64) -> f64 {
+/// MFEM `FuentesPyramid::nu2(z, xy, ab)` (`fe_pyramid.hpp:194`).
+pub(crate) fn nu2(z: f64) -> f64 {
     z
 }
 /// MFEM's `grad_nu0(z, xy, ab)` (`fe_pyramid.cpp:216`) does not use `z`/`xy`.
-fn grad_nu0(ab: usize) -> [f64; 3] {
+pub(crate) fn grad_nu0(ab: usize) -> [f64; 3] {
     let mut d = [0.0, 0.0, -1.0];
     d[ab - 1] = -1.0;
     d
 }
-fn grad_nu1(ab: usize) -> [f64; 3] {
+/// MFEM `FuentesPyramid::grad_nu1(z, xy, ab)` (`fe_pyramid.cpp:221`).
+pub(crate) fn grad_nu1(ab: usize) -> [f64; 3] {
     let mut d = [0.0, 0.0, 0.0];
     d[ab - 1] = 1.0;
     d
 }
-const GRAD_NU2: [f64; 3] = [0.0, 0.0, 1.0];
+pub(crate) const GRAD_NU2: [f64; 3] = [0.0, 0.0, 1.0];
 
 // ─── Polynomial building blocks (fe_pyramid.cpp:293-958) ────────────────────
 
@@ -317,13 +326,19 @@ fn calc_homogenized_int_legendre(
 
 /// `phi_E(p, s)` (`fe_pyramid.cpp:730-749`) — the (homogenised) edge function
 /// of an edge whose coordinates are `s = (s₀, s₁)`.
-fn phi_e(p: usize, s: [f64; 2]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+///
+/// `pub(crate)` since D534: the RT Fuentes pyramid's Family-IV interior block
+/// evaluates the value-only overload (`fe_rt.cpp:1672`).
+pub(crate) fn phi_e(p: usize, s: [f64; 2]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     calc_homogenized_int_legendre(p, s[0], s[1])
 }
 
 /// `phi_E(p, s, ∇s, u, ∇u)` (`fe_pyramid.cpp:762`) — value and reference
 /// gradient, `∇u = (∂u/∂s₀)∇s₀ + (∂u/∂s₁)∇s₁`.
-fn phi_e_grad(p: usize, s: [f64; 2], grad_s: [[f64; 3]; 2]) -> (Vec<f64>, Vec<[f64; 3]>) {
+///
+/// `pub(crate)` since D534: the RT Fuentes pyramid reaches `phi_E` through
+/// `E_E`/`E_Q`/`V_L`/`V_R` (`fe_pyramid.cpp:983,1066,1469,1538`).
+pub(crate) fn phi_e_grad(p: usize, s: [f64; 2], grad_s: [[f64; 3]; 2]) -> (Vec<f64>, Vec<[f64; 3]>) {
     let (u, d0, d1) = calc_homogenized_int_legendre(p, s[0], s[1]);
     let mut gu = vec![[0.0; 3]; p + 1];
     for i in 0..=p {
@@ -350,7 +365,10 @@ fn phi_q(p: usize, s: [f64; 2], t: [f64; 2]) -> Vec<f64> {
 
 /// `phi_Q(p, s, ∇s, t, ∇t, u, ∇u)` (`fe_pyramid.cpp:814`) — value matrix plus
 /// its reference gradients (`(p+1)×(p+1)` each).
-fn phi_q_grad(
+///
+/// `pub(crate)` since D534: the RT Fuentes pyramid's Family-III interior block
+/// evaluates `phi_Q` with gradients (`fe_rt.cpp:1613`).
+pub(crate) fn phi_q_grad(
     p: usize,
     s: [f64; 2],
     grad_s: [[f64; 3]; 2],

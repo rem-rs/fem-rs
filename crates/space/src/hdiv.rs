@@ -34,7 +34,7 @@ use fem_element::quadrature::{
     gauss_legendre_01, gauss_legendre_arbitrary, gauss_lobatto_01, gauss_lobatto_arbitrary,
 };
 use fem_element::raviart_thomas::{
-    HexRTk, PrismRT0, QuadRTk, TetRT1, TetRT2, TetRTk, TetRTNodal, TriRT1, TriRT2, TriRTk,
+    HexRTk, PrismRT0, PyraRTk, QuadRTk, TetRT1, TetRT2, TetRTk, TetRTNodal, TriRT1, TriRT2, TriRTk,
 };
 use fem_element::VectorReferenceElement;
 use fem_linalg::Vector;
@@ -1651,9 +1651,9 @@ impl<M: MeshTopology> HDivSpace<M> {
 /// coincide with MFEM `Project_RT` (up to fem-rs' unnormalised-normal scaling).
 ///
 /// Supported by this engine: RT0/RT1/RT2 on triangles, RTk on quads,
-/// RT0/RT1/RT2 on tets, RT0..6 on hexes (D342), RT0 on prisms.  BDM and
-/// pyramids are served by the legacy path.  The authoritative table is
-/// [`hdiv_interpolant_available`].
+/// RT0/RT1/RT2 on tets, RT0..6 on hexes (D342), RT0 on prisms, RT0 on
+/// pyramids (D534/D535).  BDM is served by the legacy path.  The
+/// authoritative table is [`hdiv_interpolant_available`].
     pub fn interpolate_vector(&self, f: &dyn Fn(&[f64]) -> Vec<f64>) -> Vector<f64> {
         let mut result = Vector::zeros(self.n_dofs);
 
@@ -1712,18 +1712,14 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
 
         // Combinations whose dof values must keep the historical
-        // canonical-moment semantics (BDM consumers) or that predate this
-        // engine (pyramids) are served by the legacy path.  Since D33/D34 the
-        // tet RT bases (TetRTk/TetRT1/TetRT2) and the tri RT bases
-        // (TriRTk/TriRT1/TriRT2) are flux-dual with per-face support, so RT on
-        // tri/quad/tet/hex/prism is served by this engine.
-        let needs_legacy = self.is_bdm
-            || (0..self.mesh.n_elements() as u32).any(|e| {
-                matches!(
-                    (self.mesh.element_type(e), self.order),
-                    (ElementType::Pyramid5, _)
-                )
-            });
+        // canonical-moment semantics (BDM consumers) are served by the legacy
+        // path.  Since D33/D34 the tet RT bases (TetRTk/TetRT1/TetRT2) and the
+        // tri RT bases (TriRTk/TriRT1/TriRT2) are flux-dual with per-face
+        // support, so RT on tri/quad/tet/hex/prism is served by this engine;
+        // D534/D535: the pyramid joins them — `PyraRTk` is the 1:1 port of
+        // MFEM's nodal `RT_FuentesPyramidElement`, whose nodal dual matrix is
+        // the identity at order 0.
+        let needs_legacy = self.is_bdm;
         if needs_legacy {
             self.interpolate_vector_legacy(f, &mut result);
             return result;
@@ -1905,6 +1901,38 @@ impl<M: MeshTopology> HDivSpace<M> {
                         *di = val;
                     }
                     fill_dual_matrix(&rows, &PrismRT0::new(0), &mut w);
+                }
+                ElementType::Pyramid5 => {
+                    // D534/D535: MFEM `RT_FuentesPyramidElement` dof values —
+                    // `d_i = u(x_i)·(cof(J)(xi_i)·nk_i)` with J evaluated per
+                    // sample from the pyramid's own (non-affine) isoparametric
+                    // map, exactly `VectorFiniteElement::Project_RT`'s per-point
+                    // `AdjugateJacobian`.  The reference dual matrix is the
+                    // identity (the D534 `PyraRTk` is point-dual to its nodes),
+                    // so the solve returns the nodal samples themselves.
+                    for (row, di) in rows.iter().zip(d.iter_mut()) {
+                        let (jac, x) = fem_mesh::element_jacobian_at(
+                            &self.mesh,
+                            e,
+                            &row.xi[..3],
+                            3,
+                        );
+                        let j = [
+                            [jac[(0, 0)], jac[(0, 1)], jac[(0, 2)]],
+                            [jac[(1, 0)], jac[(1, 1)], jac[(1, 2)]],
+                            [jac[(2, 0)], jac[(2, 1)], jac[(2, 2)]],
+                        ];
+                        let cof = cof3(&j);
+                        let fv = f(&x);
+                        let mut val = 0.0;
+                        for r in 0..3 {
+                            val += fv[r] * (cof[r][0] * row.nk[0]
+                                + cof[r][1] * row.nk[1]
+                                + cof[r][2] * row.nk[2]);
+                        }
+                        *di = val;
+                    }
+                    fill_dual_matrix(&rows, &PyraRTk::new(order as usize), &mut w);
                 }
                 other => panic!("HDivSpace::interpolate_vector: unsupported {other:?}"),
             }
@@ -2345,10 +2373,10 @@ pub fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
         // D342: was `order <= 2`.
         ElementType::Hex8 => order <= 6,
         ElementType::Prism6 => order == 0,
-        // Prism RT1..3 / pyramid RT1..3 construct a space (MFEM counts
-        // verified, D444/D445) but the interpolation engine has no prism
-        // k≥1 / pyramid rows — served, if at all, by the legacy
-        // canonical-moment engine (pyramids) or the L² fallback.
+        // D534/D535: the D534 `PyraRTk` is MFEM's nodal
+        // `RT_FuentesPyramidElement`, point-dual to the order-0 rows; the
+        // engine serves pyramid RT0 (RT1..3 wait on the slot bridge, D536).
+        ElementType::Pyramid5 => order == 0,
         _ => false,
     }
 }
@@ -2505,6 +2533,24 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
             rows.push(InterpRow { xi: [0.5, 0.5, 0.0], nk: [0.0, 0.0, -1.0] });
             rows.push(InterpRow { xi: [0.5, 0.5, 0.5], nk: [0.0, 1.0, 1.0] });
             rows.push(InterpRow { xi: [0.5, 0.0, 0.5], nk: [0.0, -1.0, 0.0] });
+        }
+        // PYRAMID_FACES slot order: base quad (3,2,1,0) centre, then the
+        // triangular faces (0,1,4), (1,2,4), (2,3,4), (3,0,4) — MFEM
+        // `RT_FuentesPyramidElement(0)` nodes/normals (`fe_rt.cpp:1273-1355`
+        // + the `nk[24]` table; D534), the same rows the prolongation builder
+        // consumes via `hdiv_rt_slot_rows(HdivRt0Family::Pyramid, 0)`.  The
+        // D534 `PyraRTk` is point-dual to these rows (W = I).  Orders >= 1
+        // have no engine rows yet (D536).
+        ElementType::Pyramid5 => {
+            assert!(
+                order == 0,
+                "interp_rows: pyramid rows only at order 0 (RT1..3 slot bridge is D536)"
+            );
+            rows.push(InterpRow { xi: [0.5, 0.5, 0.0], nk: [0.0, 0.0, -1.0] });
+            rows.push(InterpRow { xi: [1.0 / 3.0, 0.0, 1.0 / 3.0], nk: [0.0, -1.0, 0.0] });
+            rows.push(InterpRow { xi: [2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], nk: [1.0, 0.0, 1.0] });
+            rows.push(InterpRow { xi: [1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], nk: [0.0, 1.0, 1.0] });
+            rows.push(InterpRow { xi: [0.0, 1.0 / 3.0, 1.0 / 3.0], nk: [-1.0, 0.0, 0.0] });
         }
         other => panic!("interp_rows: unsupported {other:?}"),
     }
