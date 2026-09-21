@@ -26,6 +26,23 @@
 //! [`TetRTNodal`](super::tet_rt1::TetRTNodal) are all the same point-dual
 //! family (`W = I`).
 //!
+//! # D560/D571: the k = 0 basis is MFEM's `RT0TetFiniteElement`
+//!
+//! MFEM 4.10 keeps a **fixed-order** RT0 tet (`fe_fixed_order.cpp:6246`) and
+//! serves it for tets from `RT0_3DFECollection` (`fe_coll.hpp:1473`) — the
+//! RT0 space of every legacy script and golden.  Its basis is exactly twice
+//! the generic `RT_TetrahedronElement(0)`'s (`CalcVShape = 2(x,y,z),
+//! 2(x−1,y,z), 2(x,y−1,z), 2(x,y,z−1)`, div = 6) and its dual table is
+//! `nk = {{.5,.5,.5}, {-.5,0,0}, {0,-.5,0}, {0,0,-.5}}` — the face normals
+//! `n̂|F|`.  Since the Vandermonde below consumes
+//! [`mfem_nodal_dofs`](super::tet_rt1::mfem_nodal_dofs), the k = 0 halving of
+//! that table's `nk` doubles this basis to the RT0Tet scale while
+//! `HDivSpace::interpolate_vector`'s flux rows halve the stored functional —
+//! the stored dof becomes `RT0TetFiniteElement::Project`'s
+//! `f·adj(J)·n̂|F|` and `W` stays the identity.  Orders `k ≥ 1` are the
+//! generic `RT_TetrahedronElement(k)` (`RT_FECollection(p, 3)`,
+//! `fe_coll.cpp:2575`), unchanged.
+//!
 //! # Slot order
 //!
 //! MFEM's own: faces `(1,2,3), (0,3,2), (0,1,3), (0,2,1)` with
@@ -243,9 +260,12 @@ pub(super) fn eval_mfem_rt_tet_div(k: usize, xi: &[f64], div_vals: &mut [f64]) {
 }
 
 /// Raviart-Thomas H(div) element on the reference tetrahedron — a 1:1 port
-/// of MFEM `RT_TetrahedronElement(k)` (D540): `(k+1)(k+2)(k+4)/2` DOFs,
-/// nodal flux-sample functionals `dof_m = φ(node_m)·(cof J n̂_m)`,
-/// `φ_m(node_l)·nk_l = δ_{ml}` (`W = I`).
+/// of MFEM's tet RT nodal element at order `k` (D540, D560/D571): at
+/// `k = 0` the collection-served fixed-order `RT0TetFiniteElement`
+/// (`fe_fixed_order.cpp:6246`, 4 DOFs, duals `n̂|F|`, basis 2× the generic
+/// element), at `k ≥ 1` the generic `RT_TetrahedronElement(k)`.
+/// `(k+1)(k+2)(k+4)/2` DOFs, nodal flux-sample functionals
+/// `dof_m = φ(node_m)·(cof J n̂_m)`, `φ_m(node_l)·nk_l = δ_{ml}` (`W = I`).
 pub struct TetRTk {
     order: usize,
 }
@@ -363,15 +383,29 @@ mod tests {
                         f[5].parse().unwrap(),
                         f[6].parse().unwrap(),
                     ];
+                    // D560/D571 re-pin (MFEM truth backed): the golden dumps
+                    // the *generic* `RT_TetrahedronElement(p)`; at p = 0 the
+                    // collection-served element is MFEM's fixed-order
+                    // `RT0TetFiniteElement` (`fe_fixed_order.cpp:6267`), whose
+                    // basis is exactly twice the generic one — verified
+                    // against the live 4.10 library: `tmp/d560/`
+                    // `d560_trace_probe.cpp` (RT0_3DFECollection) REF lines vs
+                    // the `tmp/d540/d540_tet_nodal_basis.txt` NOD lines at the
+                    // shared sample points, ratio 2.0 on every entry
+                    // (`tmp/d560/one_tet_mfem.txt`).  fem-rs' `TetRTk(0)` IS
+                    // the RT0Tet element (duals n̂|F| from
+                    // `mfem_nodal_dofs(0)`), so its basis must be 2× the
+                    // golden's at p = 0.
+                    let scale = if p == 0 { 2.0 } else { 1.0 };
                     TetRTk::new(p).eval_basis_vec(&nod_point(t), &mut phi);
                     for c in 0..3 {
-                        let d = (phi[slot * 3 + c] - want[c]).abs();
+                        let d = (phi[slot * 3 + c] - scale * want[c]).abs();
                         max_nod = max_nod.max(d);
                         // the nodal values grow like cond(T); scale the
                         // comparison with the entry magnitude
                         let tol = 5e-11 * (1.0 + want[c].abs());
                         let got = phi[slot * 3 + c];
-                        let wc = want[c];
+                        let wc = scale * want[c];
                         assert!(
                             d <= tol,
                             "NOD p={p} pt={t} dof={slot} comp={c}: {got} vs {wc}"
@@ -384,12 +418,17 @@ mod tests {
                     let t: usize = f[2].parse().unwrap();
                     let slot: usize = f[3].parse().unwrap();
                     let want: f64 = f[4].parse().unwrap();
+                    // Same D560/D571 re-pin as the NOD branch: `div φ_i` of
+                    // the RT0Tet element is 6 = 2× the generic 3
+                    // (`fe_fixed_order.cpp:6289-6296`).
+                    let scale = if p == 0 { 2.0 } else { 1.0 };
                     TetRTk::new(p).eval_div(&nod_point(t), &mut div);
-                    let d = (div[slot] - want).abs();
+                    let d = (div[slot] - scale * want).abs();
                     max_div = max_div.max(d);
                     let tol = 5e-11 * (1.0 + want.abs());
                     let got = div[slot];
-                    assert!(d <= tol, "DIV p={p} pt={t} dof={slot}: {got} vs {want}");
+                    let wc = scale * want;
+                    assert!(d <= tol, "DIV p={p} pt={t} dof={slot}: {got} vs {wc}");
                     n_div += 1;
                 }
                 other => panic!("unexpected probe line {other:?}"),

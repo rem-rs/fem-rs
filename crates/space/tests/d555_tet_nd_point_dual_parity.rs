@@ -8,9 +8,12 @@
 //! * ND1: the dual is MFEM's `Project_ND` point value `Φ(mid)·(J tk)` — the
 //!   FULL physical edge vector.  Fem-rs matches bit-for-bit, which settles
 //!   D555's "ND half-circulation" hypothesis in the negative.
-//! * RT0: the dual is MFEM's tet RT face functional `f·cof(J)·nk/2` = the
-//!   face flux ∫_F f·n̂ ds (D560 fix in `HDivSpace::interpolate_vector`);
-//!   before the fix fem-rs was exactly 2× MFEM on all 64 nonzero dofs.
+//! * RT0: the dual is MFEM's tet RT0 face functional `f·cof(J)·n̂|F|` =
+//!   `f·cof(J)·nk_full/2` — the fixed-order `RT0TetFiniteElement::Project`
+//!   (`fe_fixed_order.cpp:6356`) served by `RT0_3DFECollection` (D560/D571
+//!   fix in the shared `tet_rt1::mfem_nodal_dofs(0)` table, whose k = 0
+//!   normals are now `n̂|F|`); before the fix fem-rs was exactly 2× MFEM on
+//!   all 64 nonzero dofs.
 
 use fem_io::mfem::read_mfem_file;
 use fem_mesh::Mesh;
@@ -76,7 +79,6 @@ fn d555_nd1_interpolation_matches_mfem_point_duals() {
 }
 
 #[test]
-#[ignore = "D560 (OPEN): fem-rs tet RT0 interpolation is exactly 2x MFEM's gridfunction convention - MFEM's tet RT face dual = f*cof(J)*nk_full/2 = the face flux (measured: golden RT0P here; main-session d560_ratio probe 64/64 ratio 2.0). The validated fix recipe: halve the tet RT0 dual in HDivSpace::interpolate_vector's Tet4|Tet10 arm (scoped order 0) - then this test goes green AND curl_3d_manufactured_field_convergence restores rate ~1.0. HOWEVER the halving exposes the stack-wide normalization split: hdiv_interpolate_regression::tet_rt0_constant_fields (reconstruction round-trip) and d493_pyramid_rt0_exact_path pin the old full-cross convention, i.e. the tet RT0 stack (interpolate / get-values / assembly basis - the assembled mass is exactly 1/4 MFEM, see d560_rt0_mass_parity) needs a coordinated 2x unification across hdiv.rs + raviart_thomas + transfer.rs before the flux convention can land. Deferred with main-session approval."]
 fn d560_rt0_interpolation_matches_mfem_face_flux_duals() {
     let mesh = load_mfem_mesh();
     let space = HDivSpace::new(mesh, 0);

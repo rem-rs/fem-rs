@@ -44,6 +44,22 @@ pub(super) fn nodal_tet_n_dofs(k: usize) -> usize {
 /// normals)` — the canonical slot/dof definition shared by the basis
 /// construction (`tet_rtk`), `HDivSpace::interpolate_vector` and the discrete
 /// operators (`crates/assembly/src/discrete_op.rs`).
+///
+/// D560/D571: at `k = 0` the table carries MFEM's **fixed-order**
+/// `RT0TetFiniteElement` duals (`fem/fe/fe_fixed_order.cpp:6298`): the tet
+/// RT0 space MFEM actually serves — `RT0_3DFECollection` (fe_coll.hpp:1473),
+/// i.e. every legacy RT0 script/golden — stores `dof = f·adj(J)·n̂|F|` with
+/// `nk = {{.5,.5,.5}, {-.5,0,0}, {0,-.5,0}, {0,0,-.5}}` (face normals scaled
+/// by the reference-face area) and a basis twice the generic
+/// `RT_TetrahedronElement(0)`'s (`CalcVShape = 2(x,y,z), 2(x−1,y,z), …`,
+/// `fe_fixed_order.cpp:6267-6287`).  Both scalings flow from this one table:
+/// the `TetRTk::new(0)` Vandermonde is built from these `nk` (basis ×2),
+/// while `HDivSpace::interpolate_vector`'s flux rows read them directly
+/// (functional ×½) — so the stored dof is exactly `RT0TetFiniteElement::
+/// Project`'s (`fe_fixed_order.cpp:6356-6370`) and `W = φ·nk` stays the
+/// identity.  Orders `k ≥ 1` keep the generic `RT_TetrahedronElement(k)`
+/// table (`nk` unnormalised), which is what `RT_FECollection(p, 3)` serves
+/// (`fe_coll.cpp:2575`).
 pub fn mfem_nodal_dofs(k: usize) -> &'static (Vec<[f64; 3]>, Vec<[f64; 3]>) {
     static CACHE: [OnceLock<(Vec<[f64; 3]>, Vec<[f64; 3]>)>; 5] = [
         OnceLock::new(),
@@ -72,7 +88,13 @@ pub fn mfem_nodal_dofs(k: usize) -> &'static (Vec<[f64; 3]>, Vec<[f64; 3]>) {
                         _ => [b2, b1, 0.0], // (0,2,1): Set3(bop[j], bop[i], 0)/w
                     };
                     pts.push(pt);
-                    nks.push(*nk);
+                    // D560/D571: k = 0 carries `RT0TetFiniteElement::nk`
+                    // (n̂·|F|, `fe_fixed_order.cpp:6298`) — see the fn docs.
+                    nks.push(if k == 0 {
+                        [nk[0] * 0.5, nk[1] * 0.5, nk[2] * 0.5]
+                    } else {
+                        *nk
+                    });
                 }
             }
         }

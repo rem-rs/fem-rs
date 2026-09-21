@@ -1,22 +1,25 @@
 //! D560 — tet RT0 mass matrix parity with MFEM 4.10 on the 2×2×2 tet cube.
 //!
-//! This is the basis-side verifier of the D560 dual-normalization fix: the
-//! mass matrix depends only on the RT0 basis (not on the dof convention), so
-//! an entry-by-entry match against MFEM's `VectorFEMassIntegrator` output
-//! (golden `d560_rt0mass_tet222_mfem.txt` from `tmp/d546/d560_final_probe.cpp`)
-//! proves the fem-rs `TetRTk(0)` reference basis normalization is bit-faithful
-//! while the D560-halved interpolation duals live in MFEM's gridfunction
-//! convention.
+//! This is the basis-side verifier of the D560/D571 dual-normalization fix:
+//! the mass matrix depends only on the RT0 basis (not on the dof
+//! convention), so an entry-by-entry match against MFEM's
+//! `VectorFEMassIntegrator` output (golden `d560_rt0mass_tet222_mfem.txt`
+//! from `tmp/d546/d560_final_probe.cpp`) proves the fem-rs `TetRTk(0)`
+//! reference basis normalization is bit-faithful to MFEM's fixed-order
+//! `RT0TetFiniteElement` — the element `RT0_3DFECollection` actually serves
+//! (`fe_fixed_order.cpp:6246`, basis = 2× the generic
+//! `RT_TetrahedronElement(0)`) — while the D560-halved interpolation duals
+//! (`n̂|F|` rows in `mfem_nodal_dofs(0)`) live in the same element's
+//! gridfunction convention.
 
 use fem_assembly::standard::VectorMassIntegrator;
 use fem_assembly::VectorAssembler;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::Mesh;
-use fem_space::{FESpace, HDivSpace};
+use fem_space::HDivSpace;
 
 const GOLDEN: &str = include_str!("data/d560_rt0mass_tet222_mfem.txt");
 
-#[ignore = "D562 (OPEN): tet RT0 assembled mass is exactly 1/4 of MFEM on every entry (femrs (0,0)=1/3 vs 4/3, (0,3)=-1/12 vs -1/3) => the tet HDiv assembly-side physical basis is 1/2 of MFEM, while the reference basis (TetRTk(0) vs RT_TetrahedronElement(0) CalcVShape) is bit-exact - so the 1/2 enters in the tet HDiv assembly transform chain (piola/element transformation), not in the reference element. Paired with the D560 interpolate /2 this leaves tet RT0 reconstruction-field consistency as the open question: localizing the assembly 1/2 (mass => basis 2x) is the remaining D562 work."]
+#[test]
 fn d560_tet_rt0_mass_matrix_matches_mfem() {
     let path = format!(
         "{}/tests/data/d555_tet222_mfem.mesh",
