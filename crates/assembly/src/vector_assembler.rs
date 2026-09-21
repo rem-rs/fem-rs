@@ -18,7 +18,7 @@ use fem_element::ReferenceElement;
 use fem_element::reference::VectorReferenceElement;
 use fem_element::lagrange::HexQ1;
 use fem_element::lagrange::factory::{ref_elem as factory_ref_elem, ElemType as FactoryElemType};
-use fem_element::nedelec::{HexNDk, PrismND1, PrismNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
+use fem_element::nedelec::{HexNDk, PrismND1, PrismNDk, PyraNDk, QuadND2, QuadNDk, TetND2, TetNDk, TriND2, TriNDk};
 use fem_element::raviart_thomas::{TriRT1, TriRT2, TetRT1, TetRT2, QuadRTk, HexRTk, QuadRT1, TriRTk, TetRTk, PrismRTk};
 use fem_linalg::{CooMatrix, CsrMatrix};
 use fem_mesh::{ElementTransformation, element_type::ElementType, topology::MeshTopology};
@@ -146,6 +146,13 @@ fn vec_ref_elem_choice(
         (SpaceType::HDiv, ElementType::Prism6, 3, 1) => Box::new(PrismRTk::new(1)),
         (SpaceType::HCurl, ElementType::Prism6, 3, 1) => Box::new(PrismND1),
         (SpaceType::HCurl, ElementType::Prism6, 3, o) if o >= 2 => Box::new(PrismNDk::new(o as usize)),
+        // D547: the pyramid HCurl arm — the MFEM-faithful Fuentes element
+        // `ND_FuentesPyramidElement(p)` (`PyraNDk`, `p(3p²+5)` slots),
+        // pairing with the space's D525 pyramid slot tables.
+        (SpaceType::HCurl, ElementType::Pyramid5, 3, 1) => Box::new(PyraNDk::new(1)),
+        (SpaceType::HCurl, ElementType::Pyramid5, 3, o) if o >= 2 => {
+            Box::new(PyraNDk::new(o as usize))
+        }
         _ => panic!(
             "vec_ref_elem: unsupported (space_type={space_type:?}, elem_type={elem_type:?}, dim={dim}, order={order})"
         ),

@@ -87,8 +87,14 @@ const PRISM_EDGES: [(usize, usize); 9] = [
 ];
 
 /// Local edge vertex pairs for pyramid (Pyramid5 ordering).
+///
+/// Ordering **and directions** = MFEM `Geometry::Constants<Geometry::PYRAMID>::
+/// Edges` — note edge 2 is directed (3,2) and edge 3 (0,3) (D547: a (2,3)/
+/// (3,0) reading flips the edge orientation sign and the ND≥2 anti-diagonal
+/// slot placement of exactly those two edges, which shows up in assembly but
+/// not in the entity-canonical interpolation).
 const PYRAMID_EDGES: [(usize, usize); 8] = [
-    (0, 1), (1, 2), (2, 3), (3, 0), // base quad
+    (0, 1), (1, 2), (3, 2), (0, 3), // base quad
     (0, 4), (1, 4), (2, 4), (3, 4), // apex edges
 ];
 
@@ -228,6 +234,29 @@ fn prism_trilinear_map(verts: &[[f64; 3]; 6], x: f64, y: f64, z: f64) -> [f64; 3
     p
 }
 
+/// Jacobian of [`prism_trilinear_map`], `J[d][c] = ∂x_d/∂ξ_c` (MFEM frame).
+fn prism_map_jacobian(verts: &[[f64; 3]; 6], x: f64, y: f64, z: f64) -> [[f64; 3]; 3] {
+    let l0 = 1.0 - x - y;
+    // ∂N/∂(x, y, z) per vertex
+    let dn = [
+        [-(1.0 - z), -(1.0 - z), -l0],
+        [1.0 - z, 0.0, -x],
+        [0.0, 1.0 - z, -y],
+        [-z, -z, l0],
+        [z, 0.0, x],
+        [0.0, z, y],
+    ];
+    let mut j = [[0.0_f64; 3]; 3];
+    for (i, v) in verts.iter().enumerate() {
+        for d in 0..3 {
+            for c in 0..3 {
+                j[d][c] += dn[i][c] * v[d];
+            }
+        }
+    }
+    j
+}
+
 /// The 6 prism vertices of element `e` (the corners are the whole `Prism6`
 /// node list, bottom triangle V0..V2, top V3..V5).
 fn prism6_verts<M: MeshTopology>(mesh: &M, e: u32) -> [[f64; 3]; 6] {
@@ -278,37 +307,42 @@ fn pyramid_map(verts: &[[f64; 3]; 5], x: f64, y: f64, z: f64) -> [f64; 3] {
     p
 }
 
-/// Physical points of the element's local prism tri-face slot block: `f = 0`
-/// bottom (0,1,2), `f = 1` top (3,4,5); `k(k−1)` slots, two per point.  The
-/// reference slots are the MFEM `ND_WedgeElement` layout tail (D525).
-fn prism_tri_face_nodes(
-    verts: &[[f64; 3]; 6],
-    k: usize,
-    f: usize,
-    layout: &[[f64; 3]],
-) -> Vec<[f64; 3]> {
-    let nfd = k * (k - 1);
-    let off = 9 * k + f * nfd;
-    layout[off..off + nfd]
-        .iter()
-        .map(|p| prism_trilinear_map(verts, p[0], p[1], p[2]))
-        .collect()
+/// Physical point and Jacobian of the collapsed straight-sided pyramid map
+/// `phys = (1−z)·B(x/(1−z), y/(1−z)) + z·V4`, `J[d][c] = ∂x_d/∂ξ_c`.
+fn pyramid_map_jacobian(verts: &[[f64; 3]; 5], x: f64, y: f64, z: f64) -> [[f64; 3]; 3] {
+    let w = 1.0 - z;
+    if w <= 1e-30 {
+        return [[0.0; 3]; 3];
+    }
+    let (u, v) = (x / w, y / w);
+    // bilinear base B over (V0..V3) and its ∂/∂u, ∂/∂v
+    let b = [(1.0 - u) * (1.0 - v), u * (1.0 - v), u * v, (1.0 - u) * v];
+    let bu = [-(1.0 - v), 1.0 - v, v, -v];
+    let bv = [-(1.0 - u), -u, u, 1.0 - u];
+    let mut j = [[0.0_f64; 3]; 3];
+    for d in 0..3 {
+        // ∂/∂x = ∂B/∂u · V (the (1−z) factors cancel)
+        j[d][0] = bu[0] * verts[0][d] + bu[1] * verts[1][d] + bu[2] * verts[2][d]
+            + bu[3] * verts[3][d];
+        j[d][1] = bv[0] * verts[0][d] + bv[1] * verts[1][d] + bv[2] * verts[2][d]
+            + bv[3] * verts[3][d];
+        let base = b[0] * verts[0][d] + b[1] * verts[1][d] + b[2] * verts[2][d]
+            + b[3] * verts[3][d];
+        j[d][2] =
+            -base + (bu[0] * verts[0][d] + bu[1] * verts[1][d] + bu[2] * verts[2][d]
+                + bu[3] * verts[3][d])
+                * x / w
+                + (bv[0] * verts[0][d] + bv[1] * verts[1][d] + bv[2] * verts[2][d]
+                    + bv[3] * verts[3][d])
+                * y / w
+                + verts[4][d];
+    }
+    j
 }
 
-/// Physical points of one prism quad-face slot block (`2k(k−1)` slots):
-/// `f = 0,1,2` = the MFEM faces (0,1,4,3), (1,2,5,4), (2,0,3,5) (D525).
-fn prism_quad_face_nodes(
-    verts: &[[f64; 3]; 6],
-    k: usize,
-    f: usize,
-    layout: &[[f64; 3]],
-) -> Vec<[f64; 3]> {
-    let nfd = 2 * k * (k - 1);
-    let off = 9 * k + 2 * k * (k - 1) + f * nfd;
-    layout[off..off + nfd]
-        .iter()
-        .map(|p| prism_trilinear_map(verts, p[0], p[1], p[2]))
-        .collect()
+/// `J·t` (physical image of a reference tangent).
+fn j_mul(j: &[[f64; 3]; 3], t: &[f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|d| j[d][0] * t[0] + j[d][1] * t[1] + j[d][2] * t[2])
 }
 
 /// Physical points of the prism interior slot block
@@ -321,33 +355,6 @@ fn prism_interior_nodes(verts: &[[f64; 3]; 6], k: usize, layout: &[[f64; 3]]) ->
         .collect()
 }
 
-/// Physical points of one pyramid tri-face slot block (`k(k−1)` slots):
-/// `f = 0..4` = the MFEM faces (0,1,4), (1,2,4), (2,3,4), (3,0,4) (D525).
-fn pyramid_tri_face_nodes(
-    verts: &[[f64; 3]; 5],
-    k: usize,
-    f: usize,
-    layout: &[[f64; 3]],
-) -> Vec<[f64; 3]> {
-    let nfd = k * (k - 1);
-    let off = 8 * k + 2 * k * (k - 1) + f * nfd;
-    layout[off..off + nfd]
-        .iter()
-        .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
-        .collect()
-}
-
-/// Physical points of the pyramid base quad-face slot block (`2k(k−1)`
-/// slots, D525).
-fn pyramid_quad_face_nodes(verts: &[[f64; 3]; 5], k: usize, layout: &[[f64; 3]]) -> Vec<[f64; 3]> {
-    let nfd = 2 * k * (k - 1);
-    let off = 8 * k;
-    layout[off..off + nfd]
-        .iter()
-        .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
-        .collect()
-}
-
 /// Physical points of the pyramid interior slot block (`3k(k−1)²`, D525).
 fn pyramid_interior_nodes(verts: &[[f64; 3]; 5], k: usize, layout: &[[f64; 3]]) -> Vec<[f64; 3]> {
     let off = 8 * k + 6 * k * (k - 1);
@@ -355,6 +362,150 @@ fn pyramid_interior_nodes(verts: &[[f64; 3]; 5], k: usize, layout: &[[f64; 3]]) 
         .iter()
         .map(|p| pyramid_map(verts, p[0], p[1], p[2]))
         .collect()
+}
+
+// ─── Prism / pyramid face slot anchors (D546/D547) ──────────────────────────
+
+/// `MFEM-frame` reference tangents of the `ND_WedgeElement` slots: the
+/// element's own (fem-rs frame `(ξ,η,ζ) = (z,x,y)`) tangents rotated back
+/// `(t_ξ,t_η,t_ζ) → (t_η,t_ζ,t_ξ)` so they pair with the MFEM-frame layout
+/// points and the MFEM-frame prism Jacobian.
+fn prism_tangents_mfem(k: usize) -> Vec<[f64; 3]> {
+    PrismNDk::new(k)
+        .dof_tangents()
+        .iter()
+        .map(|t| [t[1], t[2], t[0]])
+        .collect()
+}
+
+/// Physical `(point, tangent-pair)` of one prism tri-face slot block
+/// (`k(k−1)` slots, two per point, `f = 0` bottom / `f = 1` top): the
+/// creating element's canonical shared-face functionals, `t = J·t̂`.
+fn prism_tri_face_slots(
+    verts: &[[f64; 3]; 6],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>) {
+    let nfd = k * (k - 1);
+    let off = 9 * k + f * nfd;
+    let mut pts = Vec::with_capacity(nfd / 2);
+    let mut tans = Vec::with_capacity(nfd / 2);
+    for i in 0..nfd / 2 {
+        let xi = layout[off + 2 * i];
+        let j = prism_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(prism_trilinear_map(verts, xi[0], xi[1], xi[2]));
+        tans.push([j_mul(&j, &tks[off + 2 * i]), j_mul(&j, &tks[off + 2 * i + 1])]);
+    }
+    (pts, tans)
+}
+
+/// Physical `(point, tangent)` list of one prism quad-face slot block
+/// (`2k(k−1)` slots, `f = 0,1,2` = the MFEM faces (0,1,4,3), (1,2,5,4),
+/// (2,0,3,5)).
+fn prism_quad_face_slots(
+    verts: &[[f64; 3]; 6],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let nfd = 2 * k * (k - 1);
+    let off = 9 * k + 2 * k * (k - 1) + f * nfd;
+    let mut pts = Vec::with_capacity(nfd);
+    let mut tans = Vec::with_capacity(nfd);
+    for n in 0..nfd {
+        let xi = layout[off + n];
+        let j = prism_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(prism_trilinear_map(verts, xi[0], xi[1], xi[2]));
+        tans.push(j_mul(&j, &tks[off + n]));
+    }
+    (pts, tans)
+}
+
+/// Physical `(point, tangent-pair)` of one pyramid tri-face slot block
+/// (`k(k−1)` slots, `f = 0..4` = the MFEM faces (0,1,4), (1,2,4), (2,3,4),
+/// (3,0,4)).
+fn pyramid_tri_face_slots(
+    verts: &[[f64; 3]; 5],
+    k: usize,
+    f: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>) {
+    let nfd = k * (k - 1);
+    let off = 8 * k + 2 * k * (k - 1) + f * nfd;
+    let mut pts = Vec::with_capacity(nfd / 2);
+    let mut tans = Vec::with_capacity(nfd / 2);
+    for i in 0..nfd / 2 {
+        let xi = layout[off + 2 * i];
+        let j = pyramid_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(pyramid_map(verts, xi[0], xi[1], xi[2]));
+        tans.push([j_mul(&j, &tks[off + 2 * i]), j_mul(&j, &tks[off + 2 * i + 1])]);
+    }
+    (pts, tans)
+}
+
+/// Physical `(point, tangent)` list of the pyramid base quad-face slot block
+/// (`2k(k−1)` slots, D525).
+fn pyramid_quad_face_slots(
+    verts: &[[f64; 3]; 5],
+    k: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let nfd = 2 * k * (k - 1);
+    let off = 8 * k;
+    let mut pts = Vec::with_capacity(nfd);
+    let mut tans = Vec::with_capacity(nfd);
+    for n in 0..nfd {
+        let xi = layout[off + n];
+        let j = pyramid_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(pyramid_map(verts, xi[0], xi[1], xi[2]));
+        tans.push(j_mul(&j, &tks[off + n]));
+    }
+    (pts, tans)
+}
+
+/// Physical `(point, tangent)` list of the prism interior slot block — the
+/// element-owned `Project_ND` functionals (`t = J·t̂`).
+fn prism_interior_slots(
+    verts: &[[f64; 3]; 6],
+    k: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let off = 9 * k + 8 * k * (k - 1);
+    let mut pts = Vec::new();
+    let mut tans = Vec::new();
+    for n in off..layout.len() {
+        let xi = layout[n];
+        let j = prism_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(prism_trilinear_map(verts, xi[0], xi[1], xi[2]));
+        tans.push(j_mul(&j, &tks[n]));
+    }
+    (pts, tans)
+}
+
+/// Physical `(point, tangent)` list of the pyramid interior slot block
+/// (`3k(k−1)²` slots).
+fn pyramid_interior_slots(
+    verts: &[[f64; 3]; 5],
+    k: usize,
+    layout: &[[f64; 3]],
+    tks: &[[f64; 3]],
+) -> (Vec<[f64; 3]>, Vec<[f64; 3]>) {
+    let off = 8 * k + 6 * k * (k - 1);
+    let mut pts = Vec::new();
+    let mut tans = Vec::new();
+    for n in off..layout.len() {
+        let xi = layout[n];
+        let j = pyramid_map_jacobian(verts, xi[0], xi[1], xi[2]);
+        pts.push(pyramid_map(verts, xi[0], xi[1], xi[2]));
+        tans.push(j_mul(&j, &tks[n]));
+    }
+    (pts, tans)
 }
 
 // ─── Hex ND face-interior DOF geometry ──────────────────────────────────────
@@ -614,12 +765,10 @@ pub struct HCurlSpace<M: MeshTopology> {
     edge_to_dof: HashMap<EdgeKey, DofId>,
     /// Face → first global DOF map for 3D ND2 (second = first + 1).
     face_to_dof: HashMap<FaceKey, DofId>,
-    /// Face → canonical (shared) DOF functional anchor for 3-D tet NDk
-    /// (`k(k−1)/2` point-value pairs), fixed by the face-creating element.
+    /// Face → canonical (shared) DOF functional anchor for 3-D NDk
+    /// (`k(k−1)/2` point-value pairs on tets; `k(k−1)` slots on prism /
+    /// pyramid tri faces), fixed by the face-creating element.
     face_anchor: HashMap<FaceKey, TetFaceAnchor>,
-    /// Prism/pyramid triangular face → canonical per-slot physical points
-    /// (`k(k−1)` slots), fixed by the face-creating element (D525).
-    tri_face_nodes: HashMap<FaceKey, Vec<[f64; 3]>>,
     /// Per element: the 2×2 face-DOF block transforms into the canonical
     /// (face-creating element) basis — empty for spaces without shared face
     /// DOF pairs (2-D, hex, k = 1).  See [`FaceDofBlock`].
@@ -627,11 +776,9 @@ pub struct HCurlSpace<M: MeshTopology> {
     /// Quad-face → first global DOF for hex NDk (2k(k-1) DOFs per face).
     quad_face_to_dof: HashMap<QuadFaceKey, DofId>,
     /// Quad-face → physical DOF points/tangents (`σ_m(Φ) = Φ(x_m)·t_m`) of
-    /// the face's canonical DOF list, fixed by the face-creating element.
+    /// the face's canonical DOF list, fixed by the face-creating element
+    /// (hex D505, prism/pyramid D546).
     quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor>,
-    /// Prism/pyramid quad face → canonical per-slot physical points
-    /// (`2k(k−1)` slots), fixed by the face-creating element (D525).
-    quad_face_nodes: HashMap<QuadFaceKey, Vec<[f64; 3]>>,
     /// Spatial dimension.
     dim: usize,
     /// Cell type used by this space.
@@ -699,11 +846,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
         let mut edge_to_dof: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut face_to_dof: HashMap<FaceKey, DofId> = HashMap::new();
         let mut face_anchor: HashMap<FaceKey, TetFaceAnchor> = HashMap::new();
-        let mut tri_face_nodes: HashMap<FaceKey, Vec<[f64; 3]>> = HashMap::new();
         let mut elem_face_blocks: Vec<Vec<FaceDofBlock>> = Vec::with_capacity(n_elem);
         let mut quad_face_to_dof: HashMap<QuadFaceKey, DofId> = HashMap::new();
         let mut quad_face_anchor: HashMap<QuadFaceKey, QuadFaceAnchor> = HashMap::new();
-        let mut quad_face_nodes: HashMap<QuadFaceKey, Vec<[f64; 3]>> = HashMap::new();
 
         // D158: MFEM's global numbering is **entity-major** — all edge DOFs
         // (mesh-edge index order = first-encounter order), then all face DOFs
@@ -756,9 +901,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
                 (hnd.dof_coords(), hnd.dof_tangents())
             };
             // MFEM nodal layouts (`FE::Nodes`) of the wedge / Fuentes pyramid,
-            // used to anchor the prism/pyramid face blocks (D525).
+            // used to anchor the prism/pyramid face blocks (D525), and the
+            // matching MFEM-frame slot tangents (D546/D547).
             let prism_layout = PrismNDk::new(k).mfem_layout_points();
             let pyra_layout = PyraNDk::new(k).mfem_layout_points();
+            let prism_tks = prism_tangents_mfem(k);
+            let pyra_tks = PyraNDk::new(k).dof_tangents();
             for e in 0..n_elem as u32 {
                 let cell_type = mesh.element_type(e);
                 let verts = mesh.element_nodes(e);
@@ -812,9 +960,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             face_to_dof.insert(key, next_dof);
                             next_dof += ndf as DofId;
                             face_creators.insert((e, f));
-                            tri_face_nodes.insert(
+                            let (pts, tans) =
+                                prism_tri_face_slots(&verts6, k, f, &prism_layout, &prism_tks);
+                            face_anchor.insert(
                                 key,
-                                prism_tri_face_nodes(&verts6, k, f, &prism_layout),
+                                TetFaceAnchor { pts: pts.clone(), tans: tans.clone() },
                             );
                         }
                         let ndf_quad = 2 * k * (k - 1);
@@ -826,9 +976,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             quad_face_to_dof.insert(key, next_dof);
                             next_dof += ndf_quad as DofId;
                             face_creators.insert((e, 100 + f));
-                            quad_face_nodes.insert(
+                            let (xs, ts) =
+                                prism_quad_face_slots(&verts6, k, f, &prism_layout, &prism_tks);
+                            quad_face_anchor.insert(
                                 key,
-                                prism_quad_face_nodes(&verts6, k, f, &prism_layout),
+                                QuadFaceAnchor { nodes: xs, tangents: ts },
                             );
                         }
                     }
@@ -845,8 +997,12 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             quad_face_to_dof.insert(key, next_dof);
                             next_dof += ndf_quad as DofId;
                             face_creators.insert((e, 100));
-                            quad_face_nodes
-                                .insert(key, pyramid_quad_face_nodes(&verts5, k, &pyra_layout));
+                            let (xs, ts) =
+                                pyramid_quad_face_slots(&verts5, k, &pyra_layout, &pyra_tks);
+                            quad_face_anchor.insert(
+                                key,
+                                QuadFaceAnchor { nodes: xs, tangents: ts },
+                            );
                         }
                         for (f, &(la, lb, lc)) in PYRAMID_TRI_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
@@ -856,9 +1012,11 @@ impl<M: MeshTopology> HCurlSpace<M> {
                             face_to_dof.insert(key, next_dof);
                             next_dof += ndf as DofId;
                             face_creators.insert((e, f));
-                            tri_face_nodes.insert(
+                            let (pts, tans) =
+                                pyramid_tri_face_slots(&verts5, k, f, &pyra_layout, &pyra_tks);
+                            face_anchor.insert(
                                 key,
-                                pyramid_tri_face_nodes(&verts5, k, f, &pyra_layout),
+                                TetFaceAnchor { pts: pts.clone(), tans: tans.clone() },
                             );
                         }
                     }
@@ -1050,31 +1208,170 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         }
                     }
                     ElementType::Prism6 => {
-                        // Tri face DOFs
-                        for &(la, lb, lc) in PRISM_TRI_FACES.iter() {
+                        // Tri face DOFs (D546): the element's local face
+                        // slots are the point-value functionals at the
+                        // wedge-layout face points with the layout tangents;
+                        // the face-creating element fixes the canonical list
+                        // and every other element records the 2×2 change of
+                        // basis into it (MFEM `ND_DofTransformation`).
+                        let layout = PrismNDk::new(k).mfem_layout_points();
+                        let tks = prism_tangents_mfem(k);
+                        let verts6 = prism6_verts(&mesh, e);
+                        let fbase = 9 * k;
+                        for (f, &(la, lb, lc)) in PRISM_TRI_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             let first_dof = face_to_dof[&key];
-                            for m in 0..ndf { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
+                            let (pts, tans) =
+                                prism_tri_face_slots(&verts6, k, f, &layout, &tks);
+                            if face_creators.contains(&(e, f)) {
+                                for i in 0..pts.len() {
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * ndf + 2 * i,
+                                        canon_dofs: [
+                                            first_dof + 2 * i as u32,
+                                            first_dof + 2 * i as u32 + 1,
+                                        ],
+                                        s: ID2,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * i as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * i as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
+                            } else {
+                                let anchor = &face_anchor[&key];
+                                for i in 0..pts.len() {
+                                    let p = match_face_point(anchor, pts[i]);
+                                    let w = anchor.tangents(p);
+                                    let s = face_pair_change_of_basis(
+                                        &tans[i],
+                                        &w,
+                                        "prism tri face block transform",
+                                    );
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * ndf + 2 * i,
+                                        canon_dofs: [
+                                            first_dof + 2 * p as u32,
+                                            first_dof + 2 * p as u32 + 1,
+                                        ],
+                                        s,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * p as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * p as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
+                            }
                         }
-                        // Quad face DOFs
+                        // Quad face DOFs (D546): the shared face's DOFs are
+                        // the canonical list re-indexed by the orientation of
+                        // this element's local face cycle — the geometric
+                        // form of MFEM's `ND_FECollection::QuadDofOrd[ori]`
+                        // signed permutation.
                         let ndf_quad = 2 * k * (k - 1);
-                        for &(la, lb, lc, ld) in PRISM_QUAD_FACES.iter() {
-                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                        for (f, &(la, lb, lc, ld)) in PRISM_QUAD_FACES.iter().enumerate() {
+                            let key =
+                                QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
                             let first_dof = quad_face_to_dof[&key];
-                            for m in 0..ndf_quad { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
+                            let (xs, ts) =
+                                prism_quad_face_slots(&verts6, k, f, &layout, &tks);
+                            if face_creators.contains(&(e, 100 + f)) {
+                                for m in 0..ndf_quad {
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(1.0);
+                                }
+                            } else {
+                                let anchor = &quad_face_anchor[&key];
+                                for n in 0..ndf_quad {
+                                    let (m, s) = match_face_dof(
+                                        &anchor.nodes,
+                                        &anchor.tangents,
+                                        xs[n],
+                                        ts[n],
+                                    );
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(s);
+                                }
+                            }
                         }
                     }
                     ElementType::Pyramid5 => {
-                        for &(la, lb, lc) in PYRAMID_TRI_FACES.iter() {
+                        let layout = PyraNDk::new(k).mfem_layout_points();
+                        let tks = PyraNDk::new(k).dof_tangents();
+                        let verts5 = pyramid5_verts(&mesh, e);
+                        // Base quad face (registered as local face 100).
+                        let ndf_quad = 2 * k * (k - 1);
+                        {
+                            let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
+                            let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
+                            let first_dof = quad_face_to_dof[&key];
+                            let (xs, ts) = pyramid_quad_face_slots(&verts5, k, &layout, &tks);
+                            if face_creators.contains(&(e, 100)) {
+                                for m in 0..ndf_quad {
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(1.0);
+                                }
+                            } else {
+                                let anchor = &quad_face_anchor[&key];
+                                for n in 0..ndf_quad {
+                                    let (m, s) = match_face_dof(
+                                        &anchor.nodes,
+                                        &anchor.tangents,
+                                        xs[n],
+                                        ts[n],
+                                    );
+                                    dofs_flat.push(first_dof + m as DofId);
+                                    signs_flat.push(s);
+                                }
+                            }
+                        }
+                        // Apex tri faces.
+                        let fbase = 8 * k + 2 * k * (k - 1);
+                        for (f, &(la, lb, lc)) in PYRAMID_TRI_FACES.iter().enumerate() {
                             let key = FaceKey::new(verts[la], verts[lb], verts[lc]);
                             let first_dof = face_to_dof[&key];
-                            for m in 0..ndf { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
+                            let (pts, tans) =
+                                pyramid_tri_face_slots(&verts5, k, f, &layout, &tks);
+                            if face_creators.contains(&(e, f)) {
+                                for i in 0..pts.len() {
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * ndf + 2 * i,
+                                        canon_dofs: [
+                                            first_dof + 2 * i as u32,
+                                            first_dof + 2 * i as u32 + 1,
+                                        ],
+                                        s: ID2,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * i as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * i as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
+                            } else {
+                                let anchor = &face_anchor[&key];
+                                for i in 0..pts.len() {
+                                    let p = match_face_point(anchor, pts[i]);
+                                    let w = anchor.tangents(p);
+                                    let s = face_pair_change_of_basis(
+                                        &tans[i],
+                                        &w,
+                                        "pyramid tri face block transform",
+                                    );
+                                    elem_blocks.push(FaceDofBlock {
+                                        slot: fbase + f * ndf + 2 * i,
+                                        canon_dofs: [
+                                            first_dof + 2 * p as u32,
+                                            first_dof + 2 * p as u32 + 1,
+                                        ],
+                                        s,
+                                    });
+                                    dofs_flat.push(first_dof + 2 * p as u32);
+                                    signs_flat.push(1.0);
+                                    dofs_flat.push(first_dof + 2 * p as u32 + 1);
+                                    signs_flat.push(1.0);
+                                }
+                            }
                         }
-                        let ndf_quad = 2 * k * (k - 1);
-                        let (la, lb, lc, ld) = PYRAMID_QUAD_FACE[0];
-                        let key = QuadFaceKey::new(verts[la], verts[lb], verts[lc], verts[ld]);
-                        let first_dof = quad_face_to_dof[&key];
-                        for m in 0..ndf_quad { dofs_flat.push(first_dof + m as DofId); signs_flat.push(1.0); }
                     }
                     _ => {}
                 }
@@ -1117,11 +1414,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
             edge_to_dof,
             face_to_dof,
             face_anchor,
-            tri_face_nodes,
             elem_face_blocks,
             quad_face_to_dof,
             quad_face_anchor,
-            quad_face_nodes,
             dim,
             cell_type: first_cell_type,
             quad_igll,
@@ -1193,10 +1488,9 @@ impl<M: MeshTopology> HCurlSpace<M> {
         }
         // Triangular face DOFs (k ≥ 2, 3-D) sit at the canonical face slot
         // points of the face-creating element: tets through the tangent-pair
-        // anchor (`face_anchor`), prisms/pyramids through their per-slot
-        // point lists (`tri_face_nodes`, MFEM wedge / Fuentes pyramid slot
-        // order).  Both branches must cover every registered tri face — a
-        // miss is a build bug, not a placeholder situation (D525).
+        // anchor (`face_anchor`), prisms/pyramids likewise (D525 layouts with
+        // the D546 tangents).  The branch must cover every registered tri
+        // face — a miss is a build bug, not a placeholder situation (D525).
         for (&key, &first) in &self.face_to_dof {
             if self.order < 2 {
                 break;
@@ -1208,26 +1502,18 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         out[d] = anchor.point(p);
                     }
                 }
-            } else if let Some(nodes) = self.tri_face_nodes.get(&key) {
-                for (m, p) in nodes.iter().enumerate() {
-                    out[(first + m as u32) as usize] = *p;
-                }
             } else {
                 panic!("HCurlSpace::dof_coords: triangular face {key:?} has no canonical anchor");
             }
         }
-        // Quadrilateral face DOFs (k ≥ 2, 3-D): hexes through the tangent
-        // anchor (`quad_face_anchor`, D505), prisms/pyramids through their
-        // per-slot point lists (`quad_face_nodes`, D525).
+        // Quadrilateral face DOFs (k ≥ 2, 3-D): hexes (D505), prisms and
+        // pyramids (D525/D546) through the per-slot point lists of the
+        // face-creating element (`quad_face_anchor`).
         for (&key, &first) in &self.quad_face_to_dof {
             if let Some(anchor) = self.quad_face_anchor.get(&key) {
                 for (m, p) in anchor.nodes.iter().enumerate() {
                     let d = (first + m as u32) as usize;
                     out[d] = *p;
-                }
-            } else if let Some(nodes) = self.quad_face_nodes.get(&key) {
-                for (m, p) in nodes.iter().enumerate() {
-                    out[(first + m as u32) as usize] = *p;
                 }
             } else {
                 panic!("HCurlSpace::dof_coords: quad face {key:?} has no canonical anchor");
@@ -1388,8 +1674,10 @@ impl<M: MeshTopology> HCurlSpace<M> {
     }
 
     /// The element's face-DOF block transforms into the canonical
-    /// (face-creating element) basis (D37).  Empty when the space has no
-    /// shared face-DOF pairs (2-D spaces, hex/prism NDk at any k, k = 1).
+    /// (face-creating element) basis (D37; D546 adds the prism / pyramid
+    /// tri faces).  Empty when the space has no shared tri-face DOF pairs
+    /// (2-D spaces, hex/prism/pyramid quad faces use signed permutations, and
+    /// k = 1).
     ///
     /// For element matrices assembled in the element's own (signed) local
     /// DOFs, the canonical representation is `A ← Tᵀ·A·T` and `b ← Tᵀ·b`, with
@@ -1660,12 +1948,13 @@ impl<M: MeshTopology> HCurlSpace<M> {
                     r[dofs[b_start + 2 * m + 1] as usize] = j01 * fv[0] + j11 * fv[1];
                 }
             }
-        } else if self.dim == 3 && k >= 2 && matches!(self.cell_type, ElementType::Tet4 | ElementType::Tet10) {
-            // ── Tet NDk face DOFs: point values at the canonical (shared)
-            // face DOF points with the canonical tangent pair — the
-            // face-creating element's functionals, so the values are the
-            // canonical (global) dof values directly (no element orientation
-            // enters).  k ≥ 3 uses every face point of the TetNDk layout.
+        } else if self.dim == 3 && k >= 2 {
+            // ── Shared tri-face DOFs (tet D38, prism/pyramid D547): point
+            // values at the canonical (shared) face DOF points with the
+            // canonical tangent pair — the face-creating element's
+            // functionals, so the values are the canonical (global) dof
+            // values directly.  Tet k ≥ 3 additionally owns interior dofs
+            // (below); hex has no tri faces.
             for (&face_key, &first_dof) in &self.face_to_dof {
                 let anchor = match self.face_anchor.get(&face_key) {
                     Some(a) => a,
@@ -1682,12 +1971,24 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
                 }
             }
-            if k >= 3 {
+            // ── Shared quad-face DOFs (hex, prism D547, pyramid D547): point
+            // values at the canonical per-slot points/tangents of the
+            // face-creating element.
+            for (&key, &first_dof) in &self.quad_face_to_dof {
+                let anchor = &self.quad_face_anchor[&key];
+                let r = result.as_slice_mut();
+                for (m, (x, t)) in anchor.nodes.iter().zip(anchor.tangents.iter()).enumerate() {
+                    let fv = f(x);
+                    r[first_dof as usize + m] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                }
+            }
+            // ── Element-interior DOFs: element-owned, their functionals use
+            // the owning element's map.
+            if matches!(self.cell_type, ElementType::Tet4 | ElementType::Tet10) && k >= 3 {
                 // Tet NDk (k ≥ 3) interior DOFs: point values at the MFEM
                 // `FE::Nodes` barycentric GL points with the reference
                 // tangents (1,0,0), (0,1,0), (0,0,1) pushed through the
-                // element's affine map — element-owned, so no orientation
-                // bookkeeping.
+                // element's affine map.
                 let n_interior = k * (k - 1) * (k - 2) / 2;
                 let tnd = TetNDk::new(k);
                 let coords = tnd.dof_coords();
@@ -1722,52 +2023,85 @@ impl<M: MeshTopology> HCurlSpace<M> {
                         r[dofs[base + m] as usize] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
                     }
                 }
-            }
-        } else if self.dim == 3
-            && k >= 2
-            && matches!(self.cell_type, ElementType::Hex8 | ElementType::Hex20)
-        {
-            // ── Hex NDk: point-value DOFs with the unnormalized physical
-            // tangents `J t̂` (MFEM `Project_ND`), matching the nodal element
-            // basis exactly (round-15 D36 rework).
-            //
-            // Face-interior DOFs are shared: their functionals are the
-            // face's canonical (face-creating element) list stored in
-            // `quad_face_anchor`.  Interior DOFs are element-owned, so their
-            // functionals use the owning element's map.
-            let ndf_quad = 2 * k * (k - 1);
-            let hnd = HexNDk::new(k);
-            let coords = hnd.dof_coords();
-            let tks = hnd.dof_tangents();
-            {
-                let r = result.as_slice_mut();
-                for (&key, &first_dof) in &self.quad_face_to_dof {
-                    let anchor = &self.quad_face_anchor[&key];
-                    for (m, (x, t)) in anchor.nodes.iter().zip(anchor.tangents.iter()).enumerate() {
-                        let fv = f(x);
-                        r[first_dof as usize + m] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+            } else if matches!(self.cell_type, ElementType::Hex8 | ElementType::Hex20) {
+                // Hex NDk interior DOFs: point values with the unnormalized
+                // physical tangents `J t̂` (MFEM `Project_ND`, round-15 D36).
+                let ndf_quad = 2 * k * (k - 1);
+                let hnd = HexNDk::new(k);
+                let coords = hnd.dof_coords();
+                let tks = hnd.dof_tangents();
+                let n_interior = 3 * k * (k - 1) * (k - 1);
+                if n_interior > 0 {
+                    let off = 12 * k + 6 * ndf_quad;
+                    for e in 0..n_elem as u32 {
+                        let verts8 = hex8_verts(&self.mesh, e);
+                        let dofs = self.element_dofs(e);
+                        let base = dofs.len() - n_interior;
+                        let r = result.as_slice_mut();
+                        for n in 0..n_interior {
+                            let xi = &coords[off + n];
+                            let (x, jac) = hex_trilinear_map(&verts8, xi);
+                            let tau = tks[off + n];
+                            let t = [
+                                jac[0][0] * tau[0] + jac[0][1] * tau[1] + jac[0][2] * tau[2],
+                                jac[1][0] * tau[0] + jac[1][1] * tau[1] + jac[1][2] * tau[2],
+                                jac[2][0] * tau[0] + jac[2][1] * tau[1] + jac[2][2] * tau[2],
+                            ];
+                            let fv = f(&x);
+                            r[dofs[base + n] as usize] =
+                                fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                        }
                     }
                 }
-            }
-            let n_interior = 3 * k * (k - 1) * (k - 1);
-            if n_interior > 0 {
-                let off = 12 * k + 6 * ndf_quad;
-                for e in 0..n_elem as u32 {
-                    let verts8 = hex8_verts(&self.mesh, e);
-                    let dofs = self.element_dofs(e);
-                    let base = dofs.len() - n_interior;
-                    let r = result.as_slice_mut();
-                    for n in 0..n_interior {
-                        let xi = &coords[off + n];
-                        let (x, jac) = hex_trilinear_map(&verts8, xi);
-                        let tau = tks[off + n];
-                        let t = [
-                            jac[0][0] * tau[0] + jac[0][1] * tau[1] + jac[0][2] * tau[2],
-                            jac[1][0] * tau[0] + jac[1][1] * tau[1] + jac[1][2] * tau[2],
-                            jac[2][0] * tau[0] + jac[2][1] * tau[1] + jac[2][2] * tau[2],
-                        ];
-                        let fv = f(&x);
-                        r[dofs[base + n] as usize] = fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+            } else if self.cell_type == ElementType::Prism6 {
+                // Prism NDk interior DOFs (D547): point values at the
+                // MFEM `ND_WedgeElement` layout tail pushed through the
+                // element's trilinear map, tangents `J·t̂` (MFEM frame).
+                let n_interior = k * (k - 1) * (k - 1) + k * (k - 1) * (k - 2) / 2;
+                if n_interior > 0 {
+                    let pend = PrismNDk::new(k);
+                    let layout = pend.mfem_layout_points();
+                    let tks = prism_tangents_mfem(k);
+                    let off = layout.len() - n_interior;
+                    for e in 0..n_elem as u32 {
+                        let verts6 = prism6_verts(&self.mesh, e);
+                        let dofs = self.element_dofs(e);
+                        let base = dofs.len() - n_interior;
+                        let r = result.as_slice_mut();
+                        for n in 0..n_interior {
+                            let xi = layout[off + n];
+                            let x = prism_trilinear_map(&verts6, xi[0], xi[1], xi[2]);
+                            let j = prism_map_jacobian(&verts6, xi[0], xi[1], xi[2]);
+                            let t = j_mul(&j, &tks[off + n]);
+                            let fv = f(&x);
+                            r[dofs[base + n] as usize] =
+                                fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                        }
+                    }
+                }
+            } else if self.cell_type == ElementType::Pyramid5 {
+                // Pyramid NDk interior DOFs (D547): the Fuentes layout tail
+                // through the collapsed map, tangents `J·tk`.
+                let n_interior = 3 * k * (k - 1) * (k - 1);
+                if n_interior > 0 {
+                    let pynd = PyraNDk::new(k);
+                    let layout = pynd.mfem_layout_points();
+                    let tks = pynd.dof_tangents();
+                    let off = layout.len() - n_interior;
+                    for e in 0..n_elem as u32 {
+                        let verts5 = pyramid5_verts(&self.mesh, e);
+                        let dofs = self.element_dofs(e);
+                        let base = dofs.len() - n_interior;
+                        let r = result.as_slice_mut();
+                        for n in 0..n_interior {
+                            let xi = layout[off + n];
+                            let x = pyramid_map(&verts5, xi[0], xi[1], xi[2]);
+                            let j = pyramid_map_jacobian(&verts5, xi[0], xi[1], xi[2]);
+                            let t = j_mul(&j, &tks[off + n]);
+                            let fv = f(&x);
+                            r[dofs[base + n] as usize] =
+                                fv[0] * t[0] + fv[1] * t[1] + fv[2] * t[2];
+                        }
                     }
                 }
             }

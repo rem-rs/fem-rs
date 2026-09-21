@@ -4,9 +4,10 @@
 //! (eta, zeta) in unit triangle.
 //!
 //! Provides PrismND1 (order-1 barycentric Whitney forms) and PrismNDk
-//! (arbitrary-order via Vandermonde monomial construction).
+//! (1:1 port of MFEM `ND_WedgeElement`).
 
 use crate::gll_basis::gll_nodes;
+use crate::nedelec::tri_ndk::{chebyshev_d, invert_dense, TriNDk};
 use crate::quadrature::{gauss_legendre_01, prism_rule};
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
@@ -27,18 +28,21 @@ fn barycentric(xi: f64, eta: f64, zeta: f64) -> ([f64; 6], [[f64; 3]; 6]) {
     (lam, grad)
 }
 
-const EDGES: [(usize, usize); 9] = [
-    // MFEM `Constants<Geometry::PRISM>::Edges` ordering.
-    (0, 1),
-    (1, 2),
-    (2, 0), // bottom tri
-    (3, 4),
-    (4, 5),
-    (5, 3), // top tri
-    (0, 3),
-    (1, 4),
-    (2, 5), // vertical
-];
+fn edge_geom(edge: usize) -> ([f64; 3], [f64; 3]) {
+    // MFEM `Constants<Geometry::PRISM>::Edges` ordering:
+    // (0,1),(1,2),(2,0),(3,4),(4,5),(5,3),(0,3),(1,4),(2,5).
+    match edge {
+        0 => ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // (0,1)
+        1 => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), // (1,2)
+        2 => ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]), // (2,0)
+        3 => ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]), // (3,4)
+        4 => ([1.0, 1.0, 0.0], [1.0, 0.0, 1.0]), // (4,5)
+        5 => ([1.0, 0.0, 1.0], [1.0, 0.0, 0.0]), // (5,3)
+        6 => ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), // (0,3)
+        7 => ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0]), // (1,4)
+        _ => ([0.0, 0.0, 1.0], [1.0, 0.0, 1.0]), // (2,5)
+    }
+}
 
 // ─── PrismND1 (original barycentric Whitney 1-forms) ─────────────────────────
 
@@ -145,381 +149,427 @@ impl VectorReferenceElement for PrismND1 {
     }
 }
 
-// ─── PrismNDk (arbitrary-order, Vandermonde monomial construction) ──────────
+// ─── PrismNDk (1:1 port of MFEM `ND_WedgeElement`) ──────────────────────────
 
-/// Vandermonde matrix builder for Prism NDk.
-/// Builds a n×n matrix from monomials up to degree D, then inverts.
-fn build_prism_ndk(k: usize) -> (Vec<f64>, usize) {
-    let n = total_prism_ndk_dofs(k);
-    // Monomials up to degree k+2 (need enough to span the space)
-    let monos = prism_monomials(k + 2);
-    let m = monos.len();
-    let mut v = vec![vec![0.0_f64; m]; n];
+/// One element-local DOF of the MFEM `ND_WedgeElement` slot table:
+/// `(t_dof, s_dof, dof2tk)` — `t_dof` indexes the triangular sub-element
+/// (`dof2tk != 3`: the Nédélec triangle; `dof2tk == 3`: the H¹ triangle),
+/// `s_dof` the extruded sub-segment (H¹ for the in-plane tangents, Nédélec
+/// for the vertical `dof2tk == 3`), and `dof2tk` the reference tangent of
+/// MFEM's wedge `tk` table.
+type WedgeSlot = (u16, u16, u8);
 
-    let mut row = 0;
-    // Edge DOFs: 9 edges, k moments each
-    for edge in 0..9 {
-        for p in 0..k {
-            for j in 0..m {
-                v[row][j] = edge_dof_value(&monos[j], edge, p);
+/// MFEM `ND_WedgeElement` wedge `tk` table, already mapped to the fem-rs
+/// reference frame `(ξ,η,ζ) = (z,x,y)` (MFEM `(x,y,z)` components rotate as
+/// `(z,x,y)`):
+///   tk0 `(1,0,0)` → `(0,1,0)`, tk1 `(−1,1,0)` → `(0,−1,1)`,
+///   tk2 `(0,−1,0)` → `(0,0,−1)`, tk3 `(0,0,1)` → `(1,0,0)`,
+///   tk4 `(0,1,0)` → `(0,0,1)`.
+const WEDGE_TK_RUST: [[f64; 3]; 5] = [
+    [0.0, 1.0, 0.0],
+    [0.0, -1.0, 1.0],
+    [0.0, 0.0, -1.0],
+    [1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0],
+];
+
+/// The slot enumeration of MFEM `ND_WedgeElement::ND_WedgeElement`
+/// (`fe_nd.cpp`): `9p` edge slots (bottom triangle edges (0,1) (1,2) (2,0),
+/// top (3,4) (4,5) (5,3), vertical (0,3) (1,4) (2,5)), the bottom tri face
+/// (0,2,1) and top tri face (3,4,5) — two tangent slots per point, the three
+/// quad faces (0,1,4,3), (1,2,5,4), (2,0,3,5) — an in-plane-tangent block
+/// then a vertical-tangent block — and the interior (in-plane pairs on the
+/// closed layers, then vertical slots on the open layers).
+fn wedge_slot_table(p: usize) -> Vec<WedgeSlot> {
+    let pm1 = p - 1;
+    let pm2 = p.saturating_sub(2);
+    let mut t: Vec<WedgeSlot> = Vec::with_capacity(3 * p * (p + 1) * (p + 2) / 2);
+    // edges
+    for i in 0..p {
+        t.push((i as u16, 0, 0));
+    }
+    for i in 0..p {
+        t.push(((p + i) as u16, 0, 1));
+    }
+    for i in 0..p {
+        t.push(((2 * p + i) as u16, 0, 2));
+    }
+    for i in 0..p {
+        t.push((i as u16, 1, 0));
+    }
+    for i in 0..p {
+        t.push(((p + i) as u16, 1, 1));
+    }
+    for i in 0..p {
+        t.push(((2 * p + i) as u16, 1, 2));
+    }
+    for i in 0..p {
+        t.push((0, i as u16, 3));
+    }
+    for i in 0..p {
+        t.push((1, i as u16, 3));
+    }
+    for i in 0..p {
+        t.push((2, i as u16, 3));
+    }
+    if p >= 2 {
+        // bottom tri face (0,2,1): the ND-triangle interior point with index
+        // `l = j + (2p−1−i)·i/2`, tk4 slot first then tk0.
+        for j in 0..=pm2 {
+            for i in 0..=(pm2 - j) {
+                let l = j + (2 * p - 1 - i) * i / 2;
+                t.push(((3 * p + 2 * l + 1) as u16, 0, 4));
+                t.push(((3 * p + 2 * l) as u16, 0, 0));
             }
-            row += 1;
         }
-    }
-    // Face + interior DOFs omitted for k>=2 (tracked as Phase 1B.2 continuation)
-
-    // Use normal equations: C = V^T * (V * V^T)^{-1}
-    // Build small matrix VVT = V * V^T (n × n)
-    let mut vvt = vec![vec![0.0_f64; n]; n];
-    for i in 0..n {
-        for j in 0..n {
-            let mut s = 0.0;
-            for col in 0..m {
-                s += v[i][col] * v[j][col];
+        // top tri face (3,4,5): tk0 slot first then tk4.
+        let mut m = 0;
+        for _j in 0..=pm2 {
+            for _i in 0..=(pm2 - _j) {
+                t.push(((3 * p + m) as u16, 1, 0));
+                m += 1;
+                t.push(((3 * p + m) as u16, 1, 4));
+                m += 1;
             }
-            vvt[i][j] = s;
         }
-    }
-    // Invert VVT (n × n, should be SPD for sufficient monomials)
-    let inv_vvt = invert_vm(&vvt, n);
-    // C = V^T * inv(VVT): C is m × n, we want coeff as flat n × m
-    // coeff[i][j] = sum_k inv_vvt[i][k] * v[k][j]... wait, C is n × m:
-    // C[i][j] where basis i uses monomial j
-    // = sum_k inv(VVT)[i][k] * V[k][j]  (since C = V^T * inv(VVT))
-    // Hmm that's V^T * inv(VVT) → (m × n) * (n × n) = m × n, transposed
-    // We want coeff[i][j] for basis i, monomial j:
-    // = sum_k V^T[j][k] * inv(VVT)[k][i] = sum_k V[k][j] * inv(VVT)[k][i]
-    let mut coeff = vec![0.0_f64; n * m];
-    for i in 0..n {
-        for j in 0..m {
-            let mut s = 0.0;
-            for k in 0..n {
-                s += v[k][j] * inv_vvt[k][i];
+        // quad face (0,1,4,3)
+        for j in 2..=p {
+            for i in 0..p {
+                t.push((i as u16, j as u16, 0));
             }
-            coeff[i * m + j] = s;
         }
-    }
-    (coeff, m)
-}
-
-fn total_prism_ndk_dofs(k: usize) -> usize {
-    match k {
-        1 => 9,
-        2 => 36,
-        3 => 87,
-        _ => k * (k + 2) * (2 * k + 7) / 6,
-    }
-}
-
-#[derive(Clone)]
-struct Mono {
-    comp: u8,
-    a: usize,
-    b: usize,
-    c: usize,
-}
-
-fn prism_monomials(max_deg: usize) -> Vec<Mono> {
-    let mut m = Vec::new();
-    for deg in 0..=max_deg {
-        for a in 0..=deg {
-            for b in 0..=(deg - a) {
-                let c = deg - a - b;
-                for comp in 0..3u8 {
-                    m.push(Mono { comp, a, b, c });
+        for j in 0..p {
+            for i in 0..pm1 {
+                t.push(((3 + i) as u16, j as u16, 3));
+            }
+        }
+        // quad face (1,2,5,4)
+        for j in 2..=p {
+            for i in 0..p {
+                t.push(((p + i) as u16, j as u16, 1));
+            }
+        }
+        for j in 0..p {
+            for i in 0..pm1 {
+                t.push(((p + 2 + i) as u16, j as u16, 3));
+            }
+        }
+        // quad face (2,0,3,5)
+        for j in 2..=p {
+            for i in 0..p {
+                t.push(((2 * p + i) as u16, j as u16, 2));
+            }
+        }
+        for j in 0..p {
+            for i in 0..pm1 {
+                t.push(((2 * p + 1 + i) as u16, j as u16, 3));
+            }
+        }
+        // interior: in-plane pairs on the closed layers
+        for k in 2..=p {
+            let mut l = 0;
+            for _j in 0..=pm2 {
+                for _i in 0..=(pm2 - _j) {
+                    t.push(((3 * p + l) as u16, k as u16, 0));
+                    l += 1;
+                    t.push(((3 * p + l) as u16, k as u16, 4));
+                    l += 1;
+                }
+            }
+        }
+        // interior: vertical slots on the open layers (H1-tri interior points)
+        for k in 0..p {
+            let mut l = 0;
+            for _j in 0..pm2 {
+                for _i in 0..(pm2 - _j) {
+                    t.push(((3 * p + l) as u16, k as u16, 3));
+                    l += 1;
                 }
             }
         }
     }
-    m
+    t
 }
 
-fn eval_mono(m: &Mono, xi: f64, eta: f64, zeta: f64) -> f64 {
-    xi.powi(m.a as i32) * eta.powi(m.b as i32) * zeta.powi(m.c as i32)
-}
-
-fn edge_dof_value(m: &Mono, edge: usize, p: usize) -> f64 {
-    // Edge parameterization + tangent definition for each of 9 edges.
-    // E0-E2: bottom tri (xi=0), E3-E5: top tri (xi=1), E6-E8: vertical
-    let (s, e) = edge_geom(edge);
-    let tangent = [e[0] - s[0], e[1] - s[1], e[2] - s[2]];
-    // Parameter t in [0,1], point = s + t*(e-s)
-    // For monomial value at s + t*(e-s), the integration is
-    // ∫₀¹ monomial(s+t*(e-s)) · tangent · t^p dt
-    // Using the general formula: for monomial xi^a * eta^b * zeta^c:
-    // = tangent[0] * ∫₀¹ (sx+t*dx)^a * (sy+t*dy)^b * (sz+t*dz)^c * t^p dt
-    //   + tangent[1] * ...
-    // Compute via moment integration.
-    let dx = e[0] - s[0];
-    let dy = e[1] - s[1];
-    let dz = e[2] - s[2];
-    let sx = s[0];
-    let sy = s[1];
-    let sz = s[2];
-
-    // Integrate using simple midpoint rule for generality (avoid multinomial expansion).
-    // Use 4-point Gauss-Legendre for accuracy.
-    let gl_pts = [0.0694318442, 0.3300094782, 0.6699905218, 0.9305681558];
-    let gl_wts = [0.1739274226, 0.3260725774, 0.3260725774, 0.1739274226];
-
-    let mut sum = 0.0;
-    for (&t, &w) in gl_pts.iter().zip(gl_wts.iter()) {
-        let pt = [sx + t * dx, sy + t * dy, sz + t * dz];
-        let val = eval_mono(m, pt[0], pt[1], pt[2]);
-        // Dot with tangent, weight by t^p
-        let comp_val = match m.comp {
-            0 => tangent[0],
-            1 => tangent[1],
-            2 => tangent[2],
-            _ => 0.0,
-        };
-        sum += w * comp_val * val * t.powi(p as i32);
-    }
-    sum
-}
-
-fn edge_geom(edge: usize) -> ([f64; 3], [f64; 3]) {
-    // MFEM `Constants<Geometry::PRISM>::Edges` ordering:
-    // (0,1),(1,2),(2,0),(3,4),(4,5),(5,3),(0,3),(1,4),(2,5).
-    match edge {
-        0 => ([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // (0,1)
-        1 => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), // (1,2)
-        2 => ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]), // (2,0)
-        3 => ([1.0, 0.0, 0.0], [1.0, 1.0, 0.0]), // (3,4)
-        4 => ([1.0, 1.0, 0.0], [1.0, 0.0, 1.0]), // (4,5)
-        5 => ([1.0, 0.0, 1.0], [1.0, 0.0, 0.0]), // (5,3)
-        6 => ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), // (0,3)
-        7 => ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0]), // (1,4)
-        _ => ([0.0, 0.0, 1.0], [1.0, 0.0, 1.0]), // (2,5)
-    }
-}
-
-fn invert_vm(mat: &[Vec<f64>], n: usize) -> Vec<Vec<f64>> {
-    let mut a = mat.to_vec();
-    let mut inv = vec![vec![0.0_f64; n]; n];
-    for i in 0..n {
-        inv[i][i] = 1.0;
-    }
-    for c in 0..n {
-        let mut best = c;
-        let mut bv = a[c][c].abs();
-        for r in (c + 1)..n {
-            if a[r][c].abs() > bv {
-                bv = a[r][c].abs();
-                best = r;
+/// Lagrange basis (values + derivatives) on the arbitrary ascending node set
+/// `nodes` evaluated at `x` — the shared 1-D factor of the H¹ segment
+/// (Gauss-Lobatto nodes) and the Nédélec segment (Gauss-Legendre nodes).
+fn lagrange_eval(nodes: &[f64], x: f64) -> (Vec<f64>, Vec<f64>) {
+    let n = nodes.len();
+    let mut w = vec![1.0_f64; n];
+    for j in 0..n {
+        for k in 0..n {
+            if k != j {
+                w[j] /= nodes[j] - nodes[k];
             }
         }
-        if bv < 1e-30 {
-            continue;
-        }
-        a.swap(c, best);
-        inv.swap(c, best);
-        let ip = 1.0 / a[c][c];
+    }
+    let exact = (0..n).find(|&m| x == nodes[m]);
+    let mut v = vec![0.0_f64; n];
+    let mut d = vec![0.0_f64; n];
+    if let Some(m) = exact {
+        v[m] = 1.0;
+        let a0: f64 = (0..n)
+            .filter(|&k| k != m)
+            .map(|k| 1.0 / (nodes[m] - nodes[k]))
+            .sum();
+        d[m] = a0;
         for j in 0..n {
-            a[c][j] *= ip;
-            inv[c][j] *= ip;
-        }
-        for r in 0..n {
-            if r == c {
-                continue;
+            if j != m {
+                d[j] = (w[j] / w[m]) / (nodes[m] - nodes[j]);
             }
-            let f = a[r][c];
-            for j in 0..n {
-                a[r][j] -= f * a[c][j];
-                inv[r][j] -= f * inv[c][j];
+        }
+    } else {
+        let mut lam = vec![0.0_f64; n];
+        let mut dlam = vec![0.0_f64; n];
+        let (mut s, mut ds) = (0.0_f64, 0.0_f64);
+        for j in 0..n {
+            let t = x - nodes[j];
+            lam[j] = w[j] / t;
+            dlam[j] = -w[j] / (t * t);
+            s += lam[j];
+            ds += dlam[j];
+        }
+        for j in 0..n {
+            v[j] = lam[j] / s;
+            d[j] = (dlam[j] - v[j] * ds) / s;
+        }
+    }
+    (v, d)
+}
+
+/// MFEM `H1_TriangleElement` GLL node set (ascending `[0,1]`).
+fn wedge_gll(p: usize) -> Vec<f64> {
+    gll_nodes(p).iter().map(|&x| 0.5 * (x + 1.0)).collect()
+}
+
+/// The H¹ triangle nodes in MFEM entity order (`fe_h1.cpp`): vertices, then
+/// the edge interiors — (0,1) ascending, (1,2), (2,0) descending — then the
+/// barycentric GLL interior points.
+fn h1_tri_nodes(p: usize, cp: &[f64]) -> Vec<[f64; 2]> {
+    let mut nodes = vec![[cp[0], cp[0]], [cp[p], cp[0]], [cp[0], cp[p]]];
+    if p >= 2 {
+        for i in 1..p {
+            nodes.push([cp[i], cp[0]]);
+        }
+        for i in 1..p {
+            nodes.push([cp[p - i], cp[i]]);
+        }
+        for i in 1..p {
+            nodes.push([cp[0], cp[p - i]]);
+        }
+        for j in 1..p {
+            for i in 1..(p - j) {
+                let w = cp[i] + cp[j] + cp[p - i - j];
+                nodes.push([cp[i] / w, cp[j] / w]);
             }
         }
     }
-    inv
+    nodes
 }
 
-/// Arbitrary-order Nedelec-I element on the prism (Vandermonde construction).
+/// `(point, tangent)` of every local DOF in MFEM's reference frame — the
+/// single source of truth behind [`PrismNDk::mfem_layout_points`],
+/// [`VectorReferenceElement::dof_coords`] (frame-permuted) and
+/// [`PrismNDk::dof_tangents`].  Node of slot `(t_dof, s_dof, tk)`:
+/// `tk != 3` → the Nédélec-triangle point `t_dof` on the layer
+/// `s1_nodes[s_dof]` (H¹ segment, endpoints first); `tk == 3` → the H¹-tri
+/// point `t_dof` at the Nédélec-segment layer `sn_nodes[s_dof]`.
+fn wedge_layout(p: usize, slots: &[WedgeSlot]) -> Vec<([f64; 3], [f64; 3])> {
+    let cp = wedge_gll(p);
+    // H1 segment node order (fe_h1.cpp): endpoints first, then the interior
+    // GLL points ascending.
+    let s1_nodes: Vec<f64> = [cp[0], cp[p]]
+        .into_iter()
+        .chain(cp[1..p].iter().copied())
+        .collect();
+    let sn_nodes = gauss_legendre_01(p).0;
+    let tn_nodes: Vec<[f64; 2]> = TriNDk::new(p)
+        .dof_coords()
+        .iter()
+        .map(|c| [c[0], c[1]])
+        .collect();
+    let t1_nodes = h1_tri_nodes(p, &cp);
+    slots
+        .iter()
+        .map(|&(td, sd, tk)| {
+            let (td, sd) = (td as usize, sd as usize);
+            // fem-rs frame (ξ,η,ζ) = (z,x,y): extrusion first, tri plane last.
+            let node = if tk != 3 {
+                [s1_nodes[sd], tn_nodes[td][0], tn_nodes[td][1]]
+            } else {
+                [sn_nodes[sd], t1_nodes[td][0], t1_nodes[td][1]]
+            };
+            (node, WEDGE_TK_RUST[tk as usize])
+        })
+        .collect()
+}
+
+/// MFEM-faithful arbitrary-order Nédélec-I element on the reference prism
+/// (1:1 port of MFEM `ND_WedgeElement(p, GaussLobatto, GaussLegendre)`,
+/// `fe_nd.cpp`).
+///
+/// Frame: the fem-rs reference `(ξ, η, ζ)` carries the extrusion in `ξ` and
+/// the unit triangle in `(η, ζ)` — i.e. `(ξ,η,ζ) = (z,x,y)` of MFEM's wedge,
+/// the frame the assembly geometry element (`PrismPk`) uses.  Basis vectors
+/// rotate with the frame (`(v_ξ,v_η,v_ζ)_RUST = (v_z,v_x,v_y)_MFEM`); the
+/// slot order is exactly MFEM's `dof_map` enumeration ([`wedge_slot_table`]).
+///
+/// The DOF functionals are MFEM's nodal point values `σ_i(Φ) = Φ(x_i)·(J tk_i)`
+/// (`fe_base.cpp::Project_ND`) at the `FE::Nodes` points [`dof_coords`] with
+/// the *unnormalized* reference tangents [`dof_tangents`] — on the shared
+/// `[0,1]³` reference domain there is no pull-back rescaling, the reference
+/// basis *is* MFEM's.
 pub struct PrismNDk {
-    k: usize,
-    coeff: Vec<f64>,
-    n: usize,
-    m: usize,
-    monos: Vec<Mono>,
+    order: usize,
+    slots: Vec<WedgeSlot>,
+    /// H¹-triangle entity-ordered basis via `Ti` (`T` = lex tensor values at
+    /// the entity-ordered nodes, MFEM `H1_TriangleElement`).
+    h1_tri_ti: Vec<f64>,
+    ndtri: TriNDk,
+    layout: Vec<([f64; 3], [f64; 3])>,
 }
 
 impl PrismNDk {
     pub fn new(order: usize) -> Self {
         assert!(order >= 1, "PrismNDk: order >= 1");
-        let (coeff, m) = build_prism_ndk(order);
-        let n = total_prism_ndk_dofs(order);
-        let monos = prism_monomials(order + 2); // must match build_prism_ndk (k+2)
-        assert_eq!(
-            m,
-            monos.len(),
-            "monomial count mismatch: build={m}, new={}",
-            monos.len()
-        );
+        let slots = wedge_slot_table(order);
+        let layout = wedge_layout(order, &slots);
+        // H1 triangle interpolation matrix (lex-ordered tensor values at the
+        // entity-ordered nodes) and its inverse.
+        let p = order;
+        let cp = wedge_gll(p);
+        let t1_nodes = h1_tri_nodes(p, &cp);
+        let n1 = (p + 1) * (p + 2) / 2;
+        let mut t = vec![0.0_f64; n1 * n1];
+        for (k, nd) in t1_nodes.iter().enumerate() {
+            // MFEM `poly1d.CalcBasis` is the **Chebyshev** basis
+            // (`T_j(2x−1)`), not the nodal Lagrange — the raw lex products
+            // built from it are not individually nodal, which is exactly why
+            // the `Ti` interpolation inverse is needed.
+            let (sx, _) = chebyshev_d(p, nd[0]);
+            let (sy, _) = chebyshev_d(p, nd[1]);
+            let (sl, _) = chebyshev_d(p, 1.0 - nd[0] - nd[1]);
+            let mut o = 0;
+            for j in 0..=p {
+                for i in 0..=(p - j) {
+                    // MFEM stores T[o][k] = lex value o at the entity node k
+                    // and factors `Ti = T⁻¹`; entity-ordered values are then
+                    // `Ti · lex(pt)`.
+                    t[o * n1 + k] = sx[i] * sy[j] * sl[p - i - j];
+                    o += 1;
+                }
+            }
+        }
+        let h1_tri_ti = invert_dense(n1, &t, "PrismNDk H1 tri");
         PrismNDk {
-            k: order,
-            coeff,
-            n,
-            m,
-            monos,
+            order,
+            slots,
+            h1_tri_ti,
+            ndtri: TriNDk::new(order),
+            layout,
         }
     }
 
-    /// Reference points of the MFEM `ND_WedgeElement(p)` nodal layout
-    /// (`FE::Nodes`, one entry per element slot) — the layout the HCurlSpace
-    /// prism slot tables mirror (D525).
-    ///
-    /// Frame: MFEM's wedge — the triangle {(0,0),(1,0),(0,1)} in (x,y) and
-    /// z ∈ [0,1] (the `LinearWedgeFiniteElement` map).  Slot order = the
-    /// constructor's (`fe_nd.cpp`): the 9 edge blocks (`9p`), the bottom tri
-    /// face (0,2,1) and top tri face (3,4,5) (`p(p−1)` slots each, two
-    /// tangent slots per point — bottom lists the tk4 slot first, top the
-    /// tk0 slot), the three quad faces (0,1,4,3), (1,2,5,4), (2,0,3,5)
-    /// (`2p(p−1)` slots each) and the interior (`p(p−1)² + p(p−1)(p−2)/2`).
-    ///
-    /// The Vandermonde basis this struct carries shares only the *dimension*
-    /// with MFEM's element (and diverges from p = 3 on: 87 vs MFEM's 90), so
-    /// this table is a pure function of `k` and may be longer than
-    /// [`VectorReferenceElement::n_dofs`].
-    pub fn mfem_layout_points(&self) -> Vec<[f64; 3]> {
-        let p = self.k;
-        let pm1 = p - 1;
-        let pm2 = p.saturating_sub(2);
-        // MFEM `OpenPoints(p-1)` (ND segment / triangle edges).
-        let (eop, _) = gauss_legendre_01(p);
-        // MFEM `OpenPoints(p-2)` (ND triangle interior barycentric points;
-        // `p-1` points, i.e. order `p-2` Gauss-Legendre; never empty).
-        let (iop, _) = gauss_legendre_01((p - 1).max(1));
-        // MFEM `ClosedPoints(p, GaussLobatto)`, increasing, on [0,1].
-        let cp: Vec<f64> = gll_nodes(p).iter().map(|&x| 0.5 * (x + 1.0)).collect();
-        // `H1_SegmentElement` node order: endpoints first, then the interior
-        // GLL points — s1[j] = cp[0], cp[p], cp[1], .., cp[p-1].
-        let s1: Vec<f64> = [cp[0], cp[p]]
+    /// Reference tangents `t̂_i` of every local DOF in the fem-rs frame
+    /// `(ξ,η,ζ) = (z,x,y)` — MFEM's `tk[dof2tk[i]]` rotated; the physical dual
+    /// tangent is `J·t̂` (`fe_base.cpp::Project_ND`).
+    pub fn dof_tangents(&self) -> Vec<[f64; 3]> {
+        self.slots
+            .iter()
+            .map(|&(_, _, tk)| WEDGE_TK_RUST[tk as usize])
+            .collect()
+    }
+
+    /// The sub-element shape values at `xi` (fem-rs frame): the
+    /// Nédélec-triangle values/curls, the H¹-triangle values/gradients
+    /// (entity order), the H¹-segment values/derivatives (H¹ dof order) and
+    /// the Nédélec-segment values.
+    #[allow(clippy::type_complexity)]
+    fn sub_shapes(
+        &self,
+        xi: &[f64],
+    ) -> (
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        let p = self.order;
+        let (x, y, z) = (xi[1], xi[2], xi[0]); // MFEM (x,y,z) = (η,ζ,ξ)
+        let n_t = self.ndtri.n_dofs();
+        let mut tn = vec![0.0_f64; 2 * n_t];
+        self.ndtri.eval_basis_vec(&[x, y], &mut tn);
+        let mut tn_curl = vec![0.0_f64; n_t];
+        self.ndtri.eval_curl(&[x, y], &mut tn_curl);
+        // H1 triangle: entity-ordered values and gradients from the Chebyshev
+        // lex tensor products through `Ti` (MFEM `H1_TriangleElement`).
+        let n1 = (p + 1) * (p + 2) / 2;
+        let cp = wedge_gll(p);
+        let (sx, dx) = chebyshev_d(p, x);
+        let (sy, dy) = chebyshev_d(p, y);
+        let (sl, dl) = chebyshev_d(p, 1.0 - x - y);
+        let mut lex = vec![0.0_f64; n1];
+        let mut lex_dx = vec![0.0_f64; n1];
+        let mut lex_dy = vec![0.0_f64; n1];
+        let mut o = 0;
+        for j in 0..=p {
+            for i in 0..=(p - j) {
+                let l = p - i - j;
+                lex[o] = sx[i] * sy[j] * sl[l];
+                lex_dx[o] = dx[i] * sy[j] * sl[l] - sx[i] * sy[j] * dl[l];
+                lex_dy[o] = sx[i] * dy[j] * sl[l] - sx[i] * sy[j] * dl[l];
+                o += 1;
+            }
+        }
+        let mut t1 = vec![0.0_f64; n1];
+        let mut t1_dx = vec![0.0_f64; n1];
+        let mut t1_dy = vec![0.0_f64; n1];
+        for k in 0..n1 {
+            for b in 0..n1 {
+                let c = self.h1_tri_ti[k * n1 + b];
+                t1[k] += c * lex[b];
+                t1_dx[k] += c * lex_dx[b];
+                t1_dy[k] += c * lex_dy[b];
+            }
+        }
+        // H1 segment in H1 dof order (endpoints first), Nédélec segment
+        // ascending.
+        let s1_nodes: Vec<f64> = [cp[0], cp[p]]
             .into_iter()
             .chain(cp[1..p].iter().copied())
             .collect();
+        let (sa, da) = lagrange_eval(&cp, z);
+        let mut s1 = vec![0.0_f64; p + 1];
+        let mut s1_d = vec![0.0_f64; p + 1];
+        for (j, &node) in s1_nodes.iter().enumerate() {
+            // The H1 node set is the GLL set: match the ascending index by
+            // position (endpoints cp[0]/cp[p] included).
+            let idx = cp.iter().position(|&c| c == node).unwrap();
+            s1[j] = sa[idx];
+            s1_d[j] = da[idx];
+        }
+        let eop = gauss_legendre_01(p).0;
+        let (sn, _) = lagrange_eval(&eop, z);
+        (tn, tn_curl, t1, t1_dx, t1_dy, s1, s1_d, sn)
+    }
 
-        let mut pts = Vec::with_capacity(3 * p * (p + 1) * (p + 2) / 2);
-        // edges: (0,1) (1,2) (2,0) at z=0, then at z=1, then (0,3) (1,4) (2,5)
-        for i in 0..p {
-            pts.push([eop[i], 0.0, 0.0]);
-        }
-        for i in 0..p {
-            pts.push([eop[pm1 - i], eop[i], 0.0]);
-        }
-        for i in 0..p {
-            pts.push([0.0, eop[pm1 - i], 0.0]);
-        }
-        for i in 0..p {
-            pts.push([eop[i], 0.0, 1.0]);
-        }
-        for i in 0..p {
-            pts.push([eop[pm1 - i], eop[i], 1.0]);
-        }
-        for i in 0..p {
-            pts.push([0.0, eop[pm1 - i], 1.0]);
-        }
-        for i in 0..p {
-            pts.push([0.0, 0.0, eop[i]]);
-        }
-        for i in 0..p {
-            pts.push([1.0, 0.0, eop[i]]);
-        }
-        for i in 0..p {
-            pts.push([0.0, 1.0, eop[i]]);
-        }
-        if p >= 2 {
-            // Barycentric GL point (i,j) of the ND triangle interior.
-            let tri_pt =
-                |i: usize, j: usize| -> (f64, f64) {
-                    let w = iop[i] + iop[j] + iop[pm2 - i - j];
-                    (iop[i] / w, iop[j] / w)
-                };
-            // The NDTriangle interior points in their own enumeration order
-            // (dof `3p + 2l` / `3p + 2l + 1` sit at `ndtri_pts[l]`).
-            let mut ndtri_pts: Vec<(f64, f64)> = Vec::new();
-            for j in 0..=pm2 {
-                for i in 0..=(pm2 - j) {
-                    ndtri_pts.push(tri_pt(i, j));
-                }
-            }
-            // bottom tri face (0,2,1): the wedge loop enumerates (j,i) but
-            // pushes the NDTriangle point with index `l = j + (2p-1-i)i/2`
-            // — not the loop-count-th point — so both orderings interleave
-            // here (two slots per point, tk4 then tk0).
-            for j in 0..=pm2 {
-                for i in 0..=(pm2 - j) {
-                    let l = j + (2 * p - 1 - i) * i / 2;
-                    let (x, y) = ndtri_pts[l];
-                    pts.push([x, y, 0.0]);
-                    pts.push([x, y, 0.0]);
-                }
-            }
-            // top tri face (3,4,5): tk0 first, then tk4.
-            for j in 0..=pm2 {
-                for i in 0..=(pm2 - j) {
-                    let (x, y) = tri_pt(i, j);
-                    pts.push([x, y, 1.0]);
-                    pts.push([x, y, 1.0]);
-                }
-            }
-            // quad face (0,1,4,3): x-tangent block at closed z layers, then
-            // z-tangent block at open z layers on the H1 edge-(0,1) points.
-            for j in 2..=p {
-                for i in 0..p {
-                    pts.push([eop[i], 0.0, s1[j]]);
-                }
-            }
-            for j in 0..p {
-                for i in 1..=pm1 {
-                    pts.push([cp[i], 0.0, eop[j]]);
-                }
-            }
-            // quad face (1,2,5,4)
-            for j in 2..=p {
-                for i in 0..p {
-                    pts.push([eop[pm1 - i], eop[i], s1[j]]);
-                }
-            }
-            for j in 0..p {
-                for i in 1..=pm1 {
-                    pts.push([cp[p - i], cp[i], eop[j]]);
-                }
-            }
-            // quad face (2,0,3,5)
-            for j in 2..=p {
-                for i in 0..p {
-                    pts.push([0.0, eop[pm1 - i], s1[j]]);
-                }
-            }
-            for j in 0..p {
-                for i in 1..=pm1 {
-                    pts.push([0.0, cp[p - i], eop[j]]);
-                }
-            }
-            // interior: tri-interior points on the closed layers (2 slots
-            // each), then H1 tri-interior points on the open layers.
-            for l in 2..=p {
-                for j in 0..=pm2 {
-                    for i in 0..=(pm2 - j) {
-                        let (x, y) = tri_pt(i, j);
-                        pts.push([x, y, s1[l]]);
-                        pts.push([x, y, s1[l]]);
-                    }
-                }
-            }
-            for k in 0..p {
-                // The `j`/`i` loops run from 0 (MFEM's `l` walks the H1 tri
-                // interior node list in its own enumeration order, whose
-                // barycentric indices are `i+1`, `j+1`).
-                for j in 0..pm2 {
-                    for i in 0..(pm2 - j) {
-                        let w = cp[i + 1] + cp[j + 1] + cp[p - i - j - 2];
-                        pts.push([cp[i + 1] / w, cp[j + 1] / w, eop[k]]);
-                    }
-                }
-            }
-        }
-        debug_assert_eq!(pts.len(), 3 * p * (p + 1) * (p + 2) / 2);
-        pts
+    /// Reference points of the MFEM `ND_WedgeElement(p)` nodal layout
+    /// (`FE::Nodes`, one entry per element slot) in MFEM's wedge frame —
+    /// the triangle {(0,0),(1,0),(0,1)} in (x,y) and z ∈ [0,1] — the layout
+    /// the HCurlSpace prism slot tables mirror (D525).  Derived from the same
+    /// slot table as the basis ([`wedge_layout`]), so the element cannot
+    /// drift from its own DOF layout; `mfem_layout_points()[i]` is the frame
+    /// permutation `(η,ζ,ξ)` of `dof_coords()[i]`.
+    pub fn mfem_layout_points(&self) -> Vec<[f64; 3]> {
+        self.layout
+            .iter()
+            .map(|(x, _)| [x[1], x[2], x[0]])
+            .collect()
     }
 }
 
@@ -528,71 +578,72 @@ impl VectorReferenceElement for PrismNDk {
         3
     }
     fn order(&self) -> u8 {
-        self.k as u8
+        self.order as u8
     }
     fn n_dofs(&self) -> usize {
-        self.n
+        3 * self.order * (self.order + 1) * (self.order + 2) / 2
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        let mut mv = vec![0.0_f64; self.monos.len()];
-        for (j, m) in self.monos.iter().enumerate() {
-            mv[j] = eval_mono(m, xi[0], xi[1], xi[2]);
+        if self.order == 1 {
+            // `ND_WedgeElement(1)` is the Whitney wedge = `PrismND1` slot for
+            // slot (the fem-rs `TriNDk(1)` shortcut used by the general path
+            // below keeps the historical 2-D ND1 flip on tri edge (2,0),
+            // which MFEM's p = 1 does not have).
+            PrismND1.eval_basis_vec(xi, values);
+            return;
         }
-        values.fill(0.0);
-        for i in 0..self.n.min(self.m) {
-            for j in 0..self.m {
-                if i * self.m + j < self.coeff.len() {
-                    let c = self.coeff[i * self.m + j];
-                    if c != 0.0 {
-                        let comp = self.monos[j].comp as usize;
-                        values[i * 3 + comp] += c * mv[j];
-                    }
-                }
+        let (tn, _tn_curl, t1, _t1_dx, _t1_dy, s1, _s1_d, sn) = self.sub_shapes(xi);
+        for (i, &(td, sd, tk)) in self.slots.iter().enumerate() {
+            let (td, sd) = (td as usize, sd as usize);
+            // MFEM (vx,vy,vz) → fem-rs components (ξ,η,ζ) = (z,x,y).
+            let (vx, vy, vz);
+            if tk != 3 {
+                vx = tn[2 * td] * s1[sd];
+                vy = tn[2 * td + 1] * s1[sd];
+                vz = 0.0;
+            } else {
+                vx = 0.0;
+                vy = 0.0;
+                vz = t1[td] * sn[sd];
             }
+            values[3 * i] = vz;
+            values[3 * i + 1] = vx;
+            values[3 * i + 2] = vy;
         }
     }
 
     fn eval_curl(&self, xi: &[f64], curl_vals: &mut [f64]) {
-        let h = 1e-6;
-        let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3];
-        let mut vm = vec![0.0; n3];
-        for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
-            let dfy_dx = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
-            let dfz_dx = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
-            let dfx_dy = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
-            let dfz_dy = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
-            let dfx_dz = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
-            let dfy_dz = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
-            curl_vals[i * 3] = dfz_dy - dfy_dz;
-            curl_vals[i * 3 + 1] = dfx_dz - dfz_dx;
-            curl_vals[i * 3 + 2] = dfy_dx - dfx_dy;
+        if self.order == 1 {
+            PrismND1.eval_curl(xi, curl_vals);
+            return;
+        }
+        // The curl differentiates only the in-plane/vertical 1-D factors and
+        // the Nédélec-triangle scalar curl; the H¹-triangle *values* `t1`
+        // are not needed here.
+        let (tn, tn_curl, _t1, t1_dx, t1_dy, s1, s1_d, sn) = self.sub_shapes(xi);
+        for (i, &(td, sd, tk)) in self.slots.iter().enumerate() {
+            let (td, sd) = (td as usize, sd as usize);
+            // MFEM ND_WedgeElement::CalcCurlShape.
+            let (cx, cy, cz);
+            if tk != 3 {
+                cx = -tn[2 * td + 1] * s1_d[sd];
+                cy = tn[2 * td] * s1_d[sd];
+                cz = tn_curl[td] * s1[sd];
+            } else {
+                cx = t1_dy[td] * sn[sd];
+                cy = -t1_dx[td] * sn[sd];
+                cz = 0.0;
+            }
+            curl_vals[3 * i] = cz;
+            curl_vals[3 * i + 1] = cx;
+            curl_vals[3 * i + 2] = cy;
         }
     }
 
-    fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        let h = 1e-6;
-        let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3];
-        let mut vm = vec![0.0; n3];
-        for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
-            let dfx = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
-            let dfy = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
-            let dfz = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
-            div_vals[i] = dfx + dfy + dfz;
+    fn eval_div(&self, _xi: &[f64], div_vals: &mut [f64]) {
+        for v in div_vals.iter_mut() {
+            *v = 0.0;
         }
     }
 
@@ -601,26 +652,15 @@ impl VectorReferenceElement for PrismNDk {
     }
 
     fn dof_coords(&self) -> Vec<Vec<f64>> {
-        // Edge DOF sites (Gauss-like points on each edge).
-        let k = self.k;
-        let mut coords = Vec::new();
-        let pts: Vec<f64> = if k == 1 {
-            vec![0.5]
-        } else {
-            (0..k).map(|i| (i as f64 + 0.5) / k as f64).collect()
-        };
-        for ei in 0..9 {
-            let (s, e) = edge_geom(ei);
-            for &t in &pts {
-                coords.push(vec![
-                    s[0] + t * (e[0] - s[0]),
-                    s[1] + t * (e[1] - s[1]),
-                    s[2] + t * (e[2] - s[2]),
-                ]);
-            }
-        }
-        coords
+        self.layout.iter().map(|(x, _)| x.to_vec()).collect()
     }
+}
+
+// MFEM 4.10 truth for the ND prism elements (golden dump generated by
+// `tmp/d546/gen_dump.py` from `tmp/d546/d548_nd_prism_pyra_probe.cpp`).
+#[cfg(test)]
+mod mfem_dump {
+    include!("prism/prism_mfem_dump.rs");
 }
 
 #[cfg(test)]
@@ -628,12 +668,12 @@ mod tests {
     use super::*;
 
     /// The MFEM `ND_WedgeElement` layout table: `3p(p+1)(p+2)/2` slots for
-    /// every order (90 at p = 3 — longer than the placeholder Vandermonde
-    /// dimension, which says 87 there).
+    /// every order (90 at p = 3), now the element's own dimension.
     #[test]
     fn mfem_layout_point_counts() {
         let want = |p: usize| 3 * p * (p + 1) * (p + 2) / 2;
         for p in 1..=4usize {
+            assert_eq!(PrismNDk::new(p).n_dofs(), want(p));
             assert_eq!(PrismNDk::new(p).mfem_layout_points().len(), want(p));
         }
     }
@@ -655,10 +695,8 @@ mod tests {
         assert!(c.iter().all(|x| x.is_finite()));
     }
 
-    /// Verify PrismNDk(k=1) spans the same space as PrismND1 (Whitney).
-    /// Note: the Vandermonde basis differs pointwise from Whitney due to
-    /// edge-only DOFs (face+interior omitted pending 1B.2 continuation).
-    /// We only verify both are finite and have the same dimension.
+    /// PrismNDk(1) is MFEM `ND_WedgeElement(1)` — the same slot order and
+    /// basis as PrismND1 (Whitney).
     #[test]
     fn prism_ndk_k1_same_dimension() {
         assert_eq!(PrismND1.n_dofs(), PrismNDk::new(1).n_dofs());
@@ -669,14 +707,123 @@ mod tests {
     }
 
     #[test]
-    fn prism_ndk_k2_n_dofs() {
-        assert_eq!(PrismNDk::new(2).n_dofs(), 36);
-    }
-    #[test]
     fn prism_ndk_k2_basis_finite() {
         let ndk = PrismNDk::new(2);
-        let mut v = vec![0.0; 108];
+        let mut v = vec![0.0; ndk.n_dofs() * 3];
         ndk.eval_basis_vec(&[0.2, 0.3, 0.1], &mut v);
         assert!(v.iter().all(|x| x.is_finite()));
+    }
+
+    /// Per-slot MFEM 4.10 parity (`d548_out.txt` truth): for p = 1..3 the
+    /// fem-rs basis and curl at the two probe points equal MFEM's
+    /// `CalcVShape`/`CalcCurlShape` rows slot by slot — the frame map
+    /// `(ξ,η,ζ) = (z,x,y)` turns fem-rs components into MFEM's `(vx,vy,vz)`.
+    #[test]
+    fn prism_ndk_matches_mfem_410_probe() {
+        // MFEM (x,y,z) sample points; fem-rs evaluates at (z,x,y).
+        let pts = [[0.621, 0.137, 0.413], [0.53, 0.71, 0.22]];
+        for p in 1..=3usize {
+            let (ndofs, vc): (usize, [&[[f64; 6]]; 2]) = match p {
+                1 => (
+                    mfem_dump::NDOFS_1,
+                    [&mfem_dump::VC_1_0, &mfem_dump::VC_1_1],
+                ),
+                2 => (
+                    mfem_dump::NDOFS_2,
+                    [&mfem_dump::VC_2_0, &mfem_dump::VC_2_1],
+                ),
+                _ => (
+                    mfem_dump::NDOFS_3,
+                    [&mfem_dump::VC_3_0, &mfem_dump::VC_3_1],
+                ),
+            };
+            let e = PrismNDk::new(p);
+            assert_eq!(e.n_dofs(), ndofs);
+            let n = e.n_dofs();
+            let mut v = vec![0.0_f64; n * 3];
+            let mut c = vec![0.0_f64; n * 3];
+            for (q, xi) in pts.iter().enumerate() {
+                e.eval_basis_vec(xi, &mut v);
+                e.eval_curl(xi, &mut c);
+                let golden = vc[q];
+                for i in 0..n {
+                    // fem-rs (ξ,η,ζ) = MFEM (z,x,y)
+                    let want_v = [golden[i][2], golden[i][0], golden[i][1]];
+                    let want_c = [golden[i][5], golden[i][3], golden[i][4]];
+                    for d in 0..3 {
+                        assert!(
+                            (v[i * 3 + d] - want_v[d]).abs() < 5e-12,
+                            "p={p} q={q} V[{i}][{d}]: {} vs {}",
+                            v[i * 3 + d],
+                            want_v[d]
+                        );
+                        assert!(
+                            (c[i * 3 + d] - want_c[d]).abs() < 5e-12,
+                            "p={p} q={q} C[{i}][{d}]: {} vs {}",
+                            c[i * 3 + d],
+                            want_c[d]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `FE::Nodes` parity: the frame-permuted layout equals the probe's node
+    /// table slot by slot, and the reference tangents equal the probe's
+    /// unit-vector `Project` tangents rotated into the fem-rs frame.
+    #[test]
+    fn prism_ndk_nodes_and_tangents_match_mfem_410_probe() {
+        for p in 1..=3usize {
+            let (nodes_mfem, tk_mfem): (&[[f64; 3]], &[[f64; 3]]) = match p {
+                1 => (&mfem_dump::NODES_1, &mfem_dump::TK_1),
+                2 => (&mfem_dump::NODES_2, &mfem_dump::TK_2),
+                _ => (&mfem_dump::NODES_3, &mfem_dump::TK_3),
+            };
+            let e = PrismNDk::new(p);
+            let n = e.n_dofs();
+            let nodes = e.mfem_layout_points();
+            let tks = e.dof_tangents();
+            for i in 0..n {
+                for d in 0..3 {
+                    assert!(
+                        (nodes[i][d] - nodes_mfem[i][d]).abs() < 5e-14,
+                        "p={p} NODES[{i}][{d}]"
+                    );
+                    // MFEM tk (tx,ty,tz) → fem-rs (tz,tx,ty).
+                    let want_tk = [tk_mfem[i][2], tk_mfem[i][0], tk_mfem[i][1]];
+                    assert!(
+                        (tks[i][d] - want_tk[d]).abs() < 5e-14,
+                        "p={p} TK[{i}][{d}]"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Nodal property: `σ_j(Φ_i) = Φ(x_j)·t̂_j = δ_ij` with the element's own
+    /// `(dof_coords, dof_tangents)` — MFEM's `Project_ND` duals.
+    #[test]
+    fn prism_ndk_dof_functionals_are_point_values() {
+        for p in 1..=4usize {
+            let e = PrismNDk::new(p);
+            let n = e.n_dofs();
+            let coords = e.dof_coords();
+            let tks = e.dof_tangents();
+            let mut v = vec![0.0_f64; n * 3];
+            for j in 0..n {
+                e.eval_basis_vec(&coords[j], &mut v);
+                for i in 0..n {
+                    let s = v[i * 3] * tks[j][0]
+                        + v[i * 3 + 1] * tks[j][1]
+                        + v[i * 3 + 2] * tks[j][2];
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (s - want).abs() < 1e-10,
+                        "p={p}: σ_{j}(Φ_{i}) = {s} (want {want})"
+                    );
+                }
+            }
+        }
     }
 }
