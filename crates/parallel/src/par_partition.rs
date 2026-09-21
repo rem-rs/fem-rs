@@ -199,6 +199,15 @@ fn extract_submesh_for_rank<const D: usize>(
     identity_nodes: bool,
 ) -> (Mesh<D>, MeshPartition) {
     let n_elems = mesh.n_elems();
+    // D527: the contiguous blocks are `div_ceil`-sized, so trailing ranks get
+    // **no** elements whenever `n_elems % n_ranks != 0` (9 quads at np = 4 →
+    // 3,3,3,0; 2 elements at np = 3 → 1,1,0): such a rank owns no node, no DOF
+    // and no ghost DOF, i.e. it runs idle.  That is legal for the distributed
+    // code (the D504 fix made every rank join the ghost-DOF exchanges
+    // unconditionally — see `crates/parallel/src/dof_partition.rs` and the
+    // `d504_h1_q2_quad_np4_empty_rank` test), but the load balance is wrong.
+    // A balanced block distribution would be `(e * n_ranks / n_elems)`; it is
+    // deliberately not changed here because it shifts every np >= 2 baseline.
     let chunk = n_elems.div_ceil(n_ranks);
     let elem_part: Vec<Rank> = (0..n_elems)
         .map(|e| (e / chunk) as Rank)

@@ -967,6 +967,18 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// For ND1 the DOF sits at the edge midpoint; for NDk (k≥2) at the
     /// Gauss-Legendre points along the canonical (min→max) edge direction —
     /// the point-value DOF locations (MFEM `FE::Nodes` semantics).
+    ///
+    /// Triangular (tet) and quadrilateral (hex) **face-interior** DOFs are the
+    /// `k(k−1)` / 2·`k(k−1)` point-value sites of the face's canonical DOF
+    /// list, so they take the face-creating element's physical anchor points
+    /// (`face_anchor` / `quad_face_anchor`).  D505: the hex quad-face branch
+    /// was missing entirely, leaving all `2k(k−1)` DOFs of every hex face at
+    /// `[0,0,0]` — a coordinate-keyed comparison (e.g. the D124 boundary-set
+    /// oracle) then collapsed all of them onto one key (hex ND2 boundary set
+    /// measured 96 edge keys + one collapsed key = 97 instead of MFEM's 192).
+    /// Prism/pyramid quad faces have no anchor (their `PrismNDk`/pyramid
+    /// reference elements expose no face DOF point table) and keep the
+    /// zero-coordinate placeholder — see the D525 registration.
     pub fn dof_coords(&self) -> Vec<[f64; 3]> {
         let mut out = vec![[0.0f64; 3]; self.n_dofs()];
         let dim = self.mesh.dim() as usize;
@@ -986,15 +998,34 @@ impl<M: MeshTopology> HCurlSpace<M> {
             }
         }
         // Tet face DOFs sit at the canonical face DOF points (the
-        // face-creating element's TetNDk point-value sites).
+        // face-creating element's TetNDk point-value sites).  Prism/pyramid
+        // triangular faces also live in `face_to_dof` but have **no** anchor
+        // (pass 2 fills `face_anchor` for tet faces only, and their block is
+        // `k(k−1)` dofs, not the tet `2·k(k−1)`), so an unguarded lookup panics
+        // on any prism/pyramid mesh at k ≥ 2 (D525) — they keep the zero
+        // placeholder like the prism/pyramid quad faces below.
         for (&key, &first) in &self.face_to_dof {
             if self.order < 2 { break; }
-            let anchor = &self.face_anchor[&key];
+            let Some(anchor) = self.face_anchor.get(&key) else {
+                continue;
+            };
             for p in 0..anchor.n_points() {
                 for j in 0..2 {
                     let d = (first + 2 * p as u32 + j as u32) as usize;
                     out[d] = anchor.point(p);
                 }
+            }
+        }
+        // Hex quad-face DOFs (D505): `2k(k−1)` slots, the point-value sites of
+        // the face's canonical list (`FE::Nodes` semantics), fixed by the
+        // face-creating element.
+        for (&key, &first) in &self.quad_face_to_dof {
+            let Some(anchor) = self.quad_face_anchor.get(&key) else {
+                continue;
+            };
+            for (m, p) in anchor.nodes.iter().enumerate() {
+                let d = (first + m as u32) as usize;
+                out[d] = *p;
             }
         }
         out

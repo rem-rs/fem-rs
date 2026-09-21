@@ -65,12 +65,21 @@ fn key3(c: &[f64]) -> Key {
 /// `ParallelFESpace::essential_true_dofs` on the rank-local mesh, keyed by
 /// coordinates, diffed against the serial whole-mesh set:
 /// `(missing_from_union, extra_in_union)`.
+///
+/// `expected_ess` / `expected_keys` are the MFEM `sum_ess_true` /
+/// `union_keys` numbers of the corresponding `d124_btd_probe` (or
+/// `tmp/r55/d505_bdr_probe.cpp`) run; the dof count is the aliasing-free
+/// invariant (coordinate keys collide when the family's `dof_coords` is an
+/// anchor table, e.g. `HDivSpace`'s D414 quad lattice — D506/D526), so it is
+/// pinned separately from the key count whenever MFEM truth is available.
 fn run_union<const DIM: usize, S, MB>(
     mesh: Mesh<DIM>,
     n_ranks: usize,
     make_space: MB,
     tags: &[i32],
     tag: i32,
+    expected_ess: Option<usize>,
+    expected_keys: Option<usize>,
 ) -> (usize, usize)
 where
     S: FESpace<Mesh = Mesh<DIM>> + 'static,
@@ -113,17 +122,34 @@ where
         // columns — the union test maps to owned slots only.
         let local = par.essential_true_dofs(&tags_vec);
         let mut mine: HashSet<Key> = HashSet::new();
+        let mut n_mine = 0usize;
         for d in local {
             let pid = dp.permute_dof(d);
             if (pid as usize) < dp.n_owned_dofs {
                 mine.insert(key3(&dof_coord(par.local_space(), &dm, d)));
+                n_mine += 1;
             }
         }
         if comm.rank() == 0 {
             let mut union: HashSet<Key> = mine;
+            let mut n_ess = n_mine;
             for src in 1..comm.size() as i32 {
                 let flat: Vec<i64> = comm.recv(src, tag);
                 union.extend(flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]));
+                let cnt: Vec<i64> = comm.recv(src, tag + 1);
+                n_ess += cnt[0] as usize;
+            }
+            if let Some(want) = expected_ess {
+                assert_eq!(
+                    n_ess, want,
+                    "np{n_ranks}: owned essential dof count != MFEM sum_ess_true"
+                );
+            }
+            if let Some(want) = expected_keys {
+                assert_eq!(
+                    union.len(), want,
+                    "np{n_ranks}: distinct boundary key count != MFEM union_keys"
+                );
             }
             let missing = serial.difference(&union).count();
             let extra = union.difference(&serial).count();
@@ -145,6 +171,7 @@ where
         } else {
             let flat: Vec<i64> = mine.iter().flat_map(|k| k.to_vec()).collect();
             comm.send(0, tag, &flat);
+            comm.send(0, tag + 1, &[n_mine as i64]);
         }
     });
     let result = out.lock().unwrap().take().unwrap();
@@ -214,26 +241,38 @@ fn d124_h1_p2_triangulated_boundary_set_np2() {
         |m| H1Space::new(m, 2),
         &(1..=4).collect::<Vec<i32>>(),
         611,
+        None, // no MFEM probe for the 2-D tri mesh in this round
+        None,
     );
     assert_eq!((missing, extra), (0, 0), "H1 P2 tri np2: missing={missing} extra={extra}");
 }
 
 #[test]
-fn d124_h1_q2_quad_boundary_set_np2() {
-    // np = 2 only: at np = 4 the *pre-existing* `DofPartition::from_dof_manager`
-    // halo exchange deadlocks on this 2-D quad Q2 partition before any D124
-    // code runs (all ranks finish `partition_mesh`, none returns from
-    // `ParallelFESpace::new`) — recorded as D504 with the trace log
-    // `tmp/d124/d504_quad_q2_np4_deadlock.log`; out of D124 scope.  The 3-D
-    // hex (edge/face-space partitions) and the solves cover np = 4.
-    let (missing, extra) = run_union(
-        Mesh::<2>::unit_square_quad(3),
-        2,
-        |m| H1Space::new(m, 2),
-        &(1..=4).collect::<Vec<i32>>(),
-        612,
-    );
-    assert_eq!((missing, extra), (0, 0), "H1 Q2 quad np2: missing={missing} extra={extra}");
+fn d124_h1_q2_quad_boundary_set_np1_np2_np4() {
+    // D504 fixed in round 55 lane 1: the np = 4 hang (empty rank 3 from
+    // `extract_submesh_for_rank`'s contiguous blocks + a rank-conditional
+    // alltoallv in the ghost-dof exchanges) is gone, so the quad Q2 case
+    // covers all three rank counts now — see
+    // `crates/parallel/tests/d504_h1_q2_quad_np4_par.rs`.
+    for np in [1usize, 2, 4] {
+        let (missing, extra) = run_union(
+            Mesh::<2>::unit_square_quad(3),
+            np,
+            |m| H1Space::new(m, 2),
+            &(1..=4).collect::<Vec<i32>>(),
+            612,
+            // MFEM MPI probe `tmp/r55/d504_quad_q2_probe.cpp` on the same
+            // 3x3 quad mesh (getboundarytruedofs keys are np-invariant):
+            // sum_ess_true = 24 = union_keys.
+            Some(24),
+            Some(24),
+        );
+        assert_eq!(
+            (missing, extra),
+            (0, 0),
+            "H1 Q2 quad np{np}: missing={missing} extra={extra}"
+        );
+    }
 }
 
 #[test]
@@ -245,6 +284,11 @@ fn d124_h1_q2_hex_boundary_set_np1_np2_np4() {
             |m| H1Space::new(m, 2),
             &(1..=6).collect::<Vec<i32>>(),
             615,
+            // MFEM 4.10 serial probe `tmp/r55/d505_bdr_probe.cpp`: h1 order 2
+            // on the 2x2x2 hex cube gives ness_vdof = ness_true = union =
+            // 98 (24 edge midpoints + 48 face centres + 26 vertices).
+            Some(98),
+            Some(98),
         );
         assert_eq!((missing, extra), (0, 0), "H1 Q2 hex np{np}: missing={missing} extra={extra}");
     }
@@ -259,6 +303,12 @@ fn d124_nd2_hex_boundary_set_np1_np2_np4() {
             |m| HCurlSpace::new(m, 2),
             &(1..=6).collect::<Vec<i32>>(),
             613,
+            // MFEM 4.10 serial probe `tmp/r55/d505_bdr_probe.cpp`: ND2 on the
+            // 2x2x2 hex cube gives ness_vdof = ness_true = 192 = 48 x 2 edge
+            // dofs + 24 x 4 face-interior dofs.  Since the D505 fix the key
+            // table is aliasing-free, so union_keys == 192 as well.
+            Some(192),
+            Some(192),
         );
         assert_eq!((missing, extra), (0, 0), "ND2 hex np{np}: missing={missing} extra={extra}");
     }
@@ -273,6 +323,14 @@ fn d124_rt1_hex_boundary_set_np1_np2_np4() {
             |m| HDivSpace::new(m, 1),
             &(1..=6).collect::<Vec<i32>>(),
             614,
+            // MFEM 4.10 serial probe `tmp/r55/d505_bdr_probe.cpp`: RT1 on the
+            // 2x2x2 hex cube gives ness_vdof = ness_true = 96 = 24 boundary
+            // quads x (k+1)^2.  The distinct-key count is deliberately NOT
+            // pinned: `HDivSpace::dof_coords` is the D414 *anchor* table whose
+            // k=1 quad lattice is the face corners, so the 96 dofs alias onto
+            // 26 cube-boundary vertices (D506 / D526) — an hdiv.rs-lane gap.
+            Some(96),
+            None,
         );
         assert_eq!((missing, extra), (0, 0), "RT1 hex np{np}: missing={missing} extra={extra}");
     }

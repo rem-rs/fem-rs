@@ -2090,12 +2090,22 @@ impl DofPartition {
 ///
 /// Each rank sends its ghost edges (identified by sorted global node pairs) to
 /// the owner rank.  The owner looks up the global DOF ID and sends it back.
+///
+/// D504: the two `alltoallv_bytes` calls are **collectives** — every rank must
+/// join them even when it has nothing to request.  Skipping them for a
+/// locally-empty ghost list (`ghost_edges.is_empty()`, the pre-D504 guard)
+/// desynchronises the call sequence: a rank whose partition is empty
+/// (`extract_submesh_for_rank`'s contiguous blocks leave trailing ranks without
+/// elements, e.g. 9 quads at np = 4) never enters the exchange while its peers
+/// block inside it — the quad Q2 halo deadlock of `tmp/d124/
+/// d504_quad_q2_np4_deadlock.log`.  Only the genuinely single-rank case
+/// (`comm.size() <= 1`, no peers and no backend collective) returns early.
 fn exchange_ghost_edge_ids(
     ghost_edges: &[EdgeDofInfo],
     owned_edge_global_map: &HashMap<(u32, u32, u32), u32>,
     comm: &Comm,
 ) -> Vec<u32> {
-    if comm.size() <= 1 || ghost_edges.is_empty() {
+    if comm.size() <= 1 {
         return Vec::new();
     }
 
@@ -2156,7 +2166,12 @@ fn exchange_ghost_edge_ids(
         let gids: Vec<u32> = bytes.chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
-        let request_indices = &requests_by_owner[responder];
+        let request_indices = requests_by_owner.get(responder).unwrap_or_else(|| {
+            panic!(
+                "exchange_ghost_edge_ids: rank {} replied but no request was sent to it",
+                responder
+            )
+        });
         assert_eq!(gids.len(), request_indices.len());
         for (j, &(orig_idx, _, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
@@ -2178,7 +2193,9 @@ fn exchange_ghost_face_keys<const NK: usize>(
     owned: &HashMap<([u32; NK], u32), u32>,
     comm: &Comm,
 ) -> Vec<u32> {
-    if comm.size() <= 1 || ghost.is_empty() {
+    // D504: collective — join even with an empty request list (see
+    // `exchange_ghost_edge_ids`).
+    if comm.size() <= 1 {
         return Vec::new();
     }
 
@@ -2248,7 +2265,12 @@ fn exchange_ghost_face_keys<const NK: usize>(
             .chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
-        let request_indices = &requests_by_owner[responder];
+        let request_indices = requests_by_owner.get(responder).unwrap_or_else(|| {
+            panic!(
+                "exchange_ghost_face_keys: rank {} replied but no request was sent to it",
+                responder
+            )
+        });
         assert_eq!(gids.len(), request_indices.len());
         for (j, &(orig_idx, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
@@ -2268,7 +2290,9 @@ fn exchange_ghost_interior_ids(
     owned_interior_map: &HashMap<(u32, u32), u32>,
     comm: &Comm,
 ) -> Vec<u32> {
-    if comm.size() <= 1 || ghost_interior.is_empty() {
+    // D504: collective — join even with an empty request list (see
+    // `exchange_ghost_edge_ids`).
+    if comm.size() <= 1 {
         return Vec::new();
     }
 
@@ -2326,7 +2350,12 @@ fn exchange_ghost_interior_ids(
         let gids: Vec<u32> = bytes.chunks_exact(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
-        let request_indices = &requests_by_owner[responder];
+        let request_indices = requests_by_owner.get(responder).unwrap_or_else(|| {
+            panic!(
+                "exchange_ghost_interior_ids: rank {} replied but no request was sent to it",
+                responder
+            )
+        });
         assert_eq!(gids.len(), request_indices.len());
         for (j, &(orig_idx, _, _)) in request_indices.iter().enumerate() {
             result[orig_idx] = gids[j];
