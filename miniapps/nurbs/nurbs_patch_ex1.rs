@@ -26,13 +26,22 @@
 //! * **The second (comparison) solve** uses a fresh `DiffusionIntegrator`
 //!   *without* the patch rules, i.e. the standard element-wise assembly —
 //!   `NurbsFESpace::assemble_diffusion`.
+//! * `-patcha` with the default `-rint` reduced integration runs
+//!   `AssemblePatchMatrix_reducedQuadrature` + `GetReducedRule` through the
+//!   ported `NnlsSolver` (`fem_linalg::nnls`, D533) —
+//!   [`assemble_diffusion_patchwise_reduced`].  MFEM's loud
+//!   `nc_dof <= nw_dof` verify failure (e.g. `-iro 8`) is reproduced with
+//!   MFEM's exact message.
+//! * `-patcha` + `AddRow` drops exact-zero entries (MFEM
+//!   `sparsemat.cpp:3104`) and `FormLinearSystem` then aborts with
+//!   `SparseMatrix::EliminateRowCol #2` when an essential row references a
+//!   column whose row has no symmetric entry (single straight-patch
+//!   geometry, e.g. `beam -patcha -fint`) — both mirrored below (D553).
 //! * Not ported (each prints a gap list and `exit(3)` rather than silently
 //!   running a different problem):
 //!   - `-incdeg > 0`: MFEM's `NURBSPatch::DegreeElevate` raises the order
 //!     while keeping C⁰ joints at the original knots (`NCP += NE·t`), which is
 //!     *not* K-refinement (`NCP = spans + order`); fem-rs has no equivalent.
-//!   - `-patcha` without `-fint` (the default `-rint` reduced integration):
-//!     `GetReducedRule` needs MFEM's `NNLSSolver` (LAPACK).
 //!   - `-pa`: patch-wise partial assembly.
 //! * Not ported, silently (they do not change the printed numbers): the GLVis
 //!   socket (`-vis`/`-p`), `refined.mesh`/`sol.gf` output, `-d cpu`, and the
@@ -41,11 +50,12 @@
 
 use fem_assembly::nurbs_patch::{
     apply_to_knot_intervals, assemble_diffusion_patch_rules,
-    assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise, assemble_domain_lf_exact,
+    assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise,
+    assemble_diffusion_patchwise_reduced, assemble_domain_lf_exact,
     assemble_diffusion_standard_exact, segment_rule, NurbsMeshGeometry, NurbsPatchRules,
 };
 
-use fem_linalg::fem_to_linlvo_csr;
+use fem_linalg::{fem_to_linlvo_csr, CsrMatrix};
 use fem_solver::{fmt_g, solve_pcg, GSSmoother, SolverError};
 use fem_space::constraints::form_linear_system;
 use fem_space::nurbs_extension::NurbsExtension;
@@ -287,6 +297,60 @@ fn gap_exit(what: &str, missing: &str) -> ! {
     std::process::exit(3);
 }
 
+/// Mirror of `SparseMatrix::AddRow`'s exact-zero drop (`sparsemat.cpp:3104`,
+/// `if (a == 0.0) continue`): the patch matrices reach the global matrix row
+/// by row, and structurally-cancelled entries (straight-patch cross terms
+/// that cancel exactly) never enter it.  The BilinearForm patch scatter runs
+/// through AddRow in both the full- and reduced-quadrature modes.
+fn mirror_addrow_drop_zeros(a: &CsrMatrix<f64>) -> CsrMatrix<f64> {
+    let mut dropped = 0usize;
+    let mut row_ptr = Vec::with_capacity(a.row_ptr.len());
+    row_ptr.push(0usize);
+    let mut col_idx = Vec::new();
+    let mut values = Vec::new();
+    for r in 0..a.nrows {
+        for idx in a.row_ptr[r]..a.row_ptr[r + 1] {
+            if a.values[idx] == 0.0 {
+                dropped += 1;
+                continue;
+            }
+            col_idx.push(a.col_idx[idx]);
+            values.push(a.values[idx]);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    let _ = dropped;
+    CsrMatrix { nrows: a.nrows, ncols: a.ncols, row_ptr, col_idx, values }
+}
+
+/// Is there an entry (r, c) in the CSR?
+fn row_contains(a: &CsrMatrix<f64>, r: usize, c: usize) -> bool {
+    a.col_idx[a.row_ptr[r]..a.row_ptr[r + 1]]
+        .iter()
+        .any(|&j| j as usize == c)
+}
+
+/// Mirror of the `SparseMatrix::EliminateRowCol(rc, SparseMatrix&,
+/// DiagonalPolicy)` walk inside `BilinearForm::EliminateVDofs`
+/// (`sparsemat.cpp:2291+`, linked-list branch): zeroing the off-diagonal
+/// entries `(rc, col)` of row `rc` requires a matching entry in row `col`;
+/// a missing symmetric entry is the fatal `SparseMatrix::EliminateRowCol
+/// #2` (D553) instead of a silently wrong elimination.
+fn mirror_eliminate_rowcol_check(a: &CsrMatrix<f64>, ess_dofs: &[u32]) {
+    for &rc in ess_dofs {
+        let rc = rc as usize;
+        for idx in a.row_ptr[rc]..a.row_ptr[rc + 1] {
+            let col = a.col_idx[idx] as usize;
+            if col != rc && !row_contains(a, col, rc) {
+                eprintln!();
+                eprintln!();
+                eprintln!("SparseMatrix::EliminateRowCol #2");
+                std::process::exit(134);
+            }
+        }
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let args = parse_args(&argv);
@@ -341,11 +405,14 @@ fn main() {
     // it: the file control net at `ref_levels == 0`, MFEM's refined
     // `mesh->GetNodes()` for `-patcha -fint -ref > 0`).
     let use_patchwise = args.patch_assembly && !args.reduced_integration;
+    let use_reduced = args.patch_assembly && args.reduced_integration;
     let (b, geo) = if ref_levels == 0 {
         let geo = NurbsMeshGeometry::from_mesh_text(&text, space.extension())
             .expect("NurbsMeshGeometry");
         (assemble_domain_lf_exact(&space, &geo, &|_| 1.0), Some(geo))
-    } else if use_patchwise {
+    } else if args.patch_assembly {
+        // Both patch modes consume the refined patch geometry (the
+        // element transformations behind `SetupPatchPA`).
         let geo = NurbsMeshGeometry::from_mesh_nodes(space.mesh_nodes(), space.extension())
             .expect("NurbsMeshGeometry");
         (space.assemble_domain_lf(&|_| 1.0), Some(geo))
@@ -371,13 +438,6 @@ fn main() {
     rules.finalize(ext);
 
     // `di->SetIntegrationMode(...)` dispatch.
-    if args.patch_assembly && args.reduced_integration && !args.pa {
-        gap_exit(
-            "-patcha with -rint (reduced integration, Mode::PATCHWISE_REDUCED)",
-            "GetReducedRule's NNLSSolver (LAPACK least squares) for the reduced \
-             integration weights (crates/assembly/src/iga/nurbs_patch.rs)",
-        );
-    }
     if args.pa {
         gap_exit(
             "-pa (patch-wise partial assembly on NURBS patches)",
@@ -390,15 +450,29 @@ fn main() {
 
     // Step 10: assemble and solve.
     let mut a_mat = match &geo {
-        Some(geo) => {
-            if use_patchwise {
-                assemble_diffusion_patchwise(&space, geo, &rules, 1.0)
-            } else {
-                assemble_diffusion_patch_rules_exact(&space, geo, &rules, 1.0)
+        Some(geo) if use_reduced => {
+            match assemble_diffusion_patchwise_reduced(&space, geo, &rules, 1.0) {
+                Ok(m) => m,
+                // MFEM_VERIFY(GetReducedRule) — e.g. `-iro 8`; the message is
+                // MFEM's mfem_error text verbatim, abort like SIGABRT.
+                Err(msg) => {
+                    eprint!("{msg}");
+                    std::process::exit(134);
+                }
             }
         }
+        Some(geo) if use_patchwise => assemble_diffusion_patchwise(&space, geo, &rules, 1.0),
+        Some(geo) => assemble_diffusion_patch_rules_exact(&space, geo, &rules, 1.0),
         None => assemble_diffusion_patch_rules(&space, &rules, 1.0),
     };
+
+    // `BilinearForm::FormLinearSystem` on the patch-assembled matrix: the
+    // AddRow zero-drop happened at scatter time, and the essential-DOF
+    // elimination runs the EliminateRowCol #2 guard (D553).
+    if args.patch_assembly {
+        a_mat = mirror_addrow_drop_zeros(&a_mat);
+        mirror_eliminate_rowcol_check(&a_mat, &ess_dofs);
+    }
 
     // `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)` with `x = 0`.
     let mut rhs = b.clone();

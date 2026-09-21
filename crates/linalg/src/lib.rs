@@ -26,6 +26,8 @@ pub mod complex_dense;
 pub mod coo;
 pub mod csr;
 pub mod dense;
+pub mod nnls;
+pub mod qr;
 pub mod sparsity;
 pub mod vector;
 pub mod block;
@@ -36,6 +38,8 @@ pub mod solver_types;
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
 pub use csr::{spadd, csr_spmm};
+pub use nnls::{NnlsSolver, QrResidualMode};
+pub use qr::{apply_q, apply_q_transpose, qr_factor, solve_upper_triangular};
 #[cfg(feature = "parallel")]
 pub use csr::{csr_spmm_parallel, spadd_parallel, spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
 pub use sparsity::SparsityPattern;

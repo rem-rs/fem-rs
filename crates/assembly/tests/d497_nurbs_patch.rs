@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use fem_assembly::nurbs_patch::{
-    apply_to_knot_intervals, assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise,
+    apply_to_knot_intervals, assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise, assemble_diffusion_patchwise_reduced,
     assemble_domain_lf_exact, segment_rule, NurbsMeshGeometry, NurbsPatchRules,
 };
 use fem_space::nurbs_extension::NurbsExtension;
@@ -544,6 +544,73 @@ fn d531_point_element_map_matches_mfem() {
                 assert_eq!(ijk[1], ks1[j], "patch {p} point ({i},{j},0): y span");
                 assert_eq!(ijk[2], ks2[0], "patch {p} point ({i},{j},0): z span");
             }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// D533(b)(c): the reduced-integration (`-patcha -rint`) patch assembly —
+// `GetReducedRule` + `AssemblePatchMatrix_reducedQuadrature` through the
+// ported `NnlsSolver`.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// The `MFEM_VERIFY(nc_dof <= nw_dof)` loud failure of `GetReducedRule`
+/// (`fem/integ/bilininteg_diffusion_patch.cpp:176`): a too-small full
+/// integration rule (here `-iro 4` on the ball) aborts the C++ miniapp with
+/// this exact mfem_error text (MFEM 4.10 reference run, exit code 134 —
+/// `tmp/d533/ball_iro4_fail.log`).
+#[test]
+fn d533_reduced_rule_nc_dof_verify_message_matches_mfem() {
+    let space = build_space("ball-nurbs.mesh", 2);
+    let geo = NurbsMeshGeometry::from_mesh_nodes(space.mesh_nodes(), space.extension())
+        .expect("geometry");
+    let rules = build_rules(&space, 4);
+
+    let err = assemble_diffusion_patchwise_reduced(&space, &geo, &rules, 1.0)
+        .expect_err("iro 4 must fail the nc_dof <= nw_dof verify");
+    assert_eq!(
+        err,
+        "\n\nVerification failed: (nc_dof <= nw_dof) is false:\n --> The NNLS \
+system for the reduced integration rule requires more full integration points. \
+Try increasing the order of the full integration rule.\n ... in function: void \
+mfem::GetReducedRule(int, int, const Array2D<double>&, const Array2D<double>&, \
+std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>, \
+std::vector<int>, std::vector<int>, const IntegrationRule*, bool, \
+std::vector<Vector>&, std::vector<std::vector<int> >&)\n ... in file: \
+fem/integ/bilininteg_diffusion_patch.cpp:176\n"
+    );
+}
+
+/// The reduced patch assembly runs to completion for a rule that passes the
+/// verify (`-iro 10`), produces a finite symmetric matrix of the right size,
+/// and matches its full-integration counterpart in sparsity pattern size
+/// (the reduced rules change weights, not the maxDD band structure).
+#[test]
+fn d533_reduced_patch_assembly_sane_shape() {
+    let space = build_space("ball-nurbs.mesh", 0);
+    let geo = NurbsMeshGeometry::from_mesh_nodes(space.mesh_nodes(), space.extension())
+        .expect("geometry");
+    let rules = build_rules(&space, 10);
+
+    let reduced = assemble_diffusion_patchwise_reduced(&space, &geo, &rules, 1.0)
+        .expect("iro 10 reduced assembly");
+    let full = assemble_diffusion_patchwise(&space, &geo, &rules, 1.0);
+
+    assert_eq!(reduced.nrows, space.n_dofs());
+    assert_eq!(reduced.ncols, space.n_dofs());
+    assert_eq!(reduced.row_ptr.len(), full.row_ptr.len(), "same pattern slots");
+    assert!(reduced.values.iter().all(|&v| v.is_finite()));
+    // Symmetry of the assembled pattern (row r contains column c iff the
+    // reverse, as the reduced weights are strictly positive where present).
+    for r in 0..reduced.nrows {
+        for idx in reduced.row_ptr[r]..reduced.row_ptr[r + 1] {
+            let c = reduced.col_idx[idx] as usize;
+            assert!(
+                reduced.col_idx[reduced.row_ptr[c]..reduced.row_ptr[c + 1]]
+                    .iter()
+                    .any(|&j| j as usize == r),
+                "pattern symmetry at ({r},{c})"
+            );
         }
     }
 }

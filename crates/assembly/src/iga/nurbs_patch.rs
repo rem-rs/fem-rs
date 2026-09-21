@@ -24,7 +24,7 @@
 
 use fem_element::iga::KnotVector;
 use fem_element::nurbs_fe_collection::NurbsScalar3D;
-use fem_linalg::{CooMatrix, CsrMatrix};
+use fem_linalg::{CooMatrix, CsrMatrix, NnlsSolver};
 use fem_space::nurbs_extension::{NurbsExtension, NurbsKnot};
 use fem_space::nurbs_fe_space::NurbsFESpace;
 
@@ -982,6 +982,104 @@ pub fn assemble_diffusion_patch_rules_exact(
 /// integration point).  Requires the [`NurbsMeshGeometry`] point matrix (the
 /// file control net, or the refined net via
 /// [`NurbsMeshGeometry::from_mesh_nodes`]).
+/// `SetupPatchPA` (bilininteg_diffusion_patch.cpp): the per-point patch data
+/// `pa_data` — the symmetric `adj(J)·adj(J)ᵀ/detJ` diffusivity (6 entries per
+/// point) at every patch quadrature point, with the point's Jacobian taken
+/// from the element transformation of [`NurbsPatchRules::point_element`] and
+/// the scalar diffusivity `kappa` (the miniapp's `ConstantCoefficient`).
+/// `unit_weights` (MFEM's `unitWeights = true`) replaces the tensor-product
+/// quadrature weight by one, as the reduced-integration path requires.
+fn setup_patch_pa_data(
+    space: &NurbsFESpace,
+    geo: &NurbsMeshGeometry,
+    rules: &NurbsPatchRules,
+    p: usize,
+    basis: &PatchBasisData,
+    dim: usize,
+    kappa: f64,
+    unit_weights: bool,
+) -> Vec<f64> {
+    let nq = basis.q1d[0] * basis.q1d[1] * basis.q1d[2];
+    let mut pa_data = vec![0.0_f64; nq * 6];
+    let mut jac_cache = vec![[0.0_f64; 9]; nq];
+    let mut weights = vec![0.0_f64; nq];
+    for k in 0..basis.q1d[2] {
+        for j in 0..basis.q1d[1] {
+            for i in 0..basis.q1d[0] {
+                let q = i + basis.q1d[0] * (j + basis.q1d[1] * k);
+                let ipx = rules.patch_rules_1d[p][0][i].0;
+                let ipy = rules.patch_rules_1d[p][1][j].0;
+                let ipz = rules.patch_rules_1d[p][2][k].0;
+                let w = rules.patch_rules_1d[p][0][i].1
+                    * rules.patch_rules_1d[p][1][j].1
+                    * rules.patch_rules_1d[p][2][k].1;
+                weights[q] = w;
+                let e = rules.point_element(p, i, j, k);
+                // C++ `SetupPatchPA`: `tr->SetIntPoint(&ip)` with the
+                // *patch-level* point on the element's transformation —
+                // the element is evaluated at span-local coordinates
+                // numerically equal to the patch coordinates.
+                let el = ExactElement::new(space, geo, e);
+                let jac = el.jacobian(&[ipx, ipy, ipz]);
+                for r in 0..dim {
+                    for c in 0..dim {
+                        jac_cache[q][r * 3 + c] = jac[r][c];
+                    }
+                }
+            }
+        }
+    }
+    if unit_weights {
+        weights.iter_mut().for_each(|w| *w = 1.0);
+    }
+    for q in 0..nq {
+        let j11 = jac_cache[q][0];
+        let j21 = jac_cache[q][3];
+        let j31 = jac_cache[q][6];
+        let j12 = jac_cache[q][1];
+        let j22 = jac_cache[q][4];
+        let j32 = jac_cache[q][7];
+        let j13 = jac_cache[q][2];
+        let j23 = jac_cache[q][5];
+        let j33 = jac_cache[q][8];
+        let det_j = j11 * (j22 * j33 - j32 * j23) - j21 * (j12 * j33 - j32 * j13)
+            + j31 * (j12 * j23 - j22 * j13);
+        let w_det_j = weights[q] / det_j;
+        let a11 = (j22 * j33) - (j23 * j32);
+        let a12 = (j32 * j13) - (j12 * j33);
+        let a13 = (j12 * j23) - (j22 * j13);
+        let a21 = (j31 * j23) - (j21 * j33);
+        let a22 = (j11 * j33) - (j13 * j31);
+        let a23 = (j21 * j13) - (j11 * j23);
+        let a31 = (j21 * j32) - (j31 * j22);
+        let a32 = (j31 * j12) - (j11 * j32);
+        let a33 = (j11 * j22) - (j12 * j21);
+        // Scalar (unit) diffusivity: `w/detJ adj(J) adj(J)^T`.
+        let c = kappa;
+        pa_data[6 * q] = w_det_j * (c * a11 * a11 + c * a12 * a12 + c * a13 * a13);
+        pa_data[6 * q + 1] = w_det_j * (c * a11 * a21 + c * a12 * a22 + c * a13 * a23);
+        pa_data[6 * q + 2] = w_det_j * (c * a11 * a31 + c * a12 * a32 + c * a13 * a33);
+        pa_data[6 * q + 3] = w_det_j * (c * a21 * a21 + c * a22 * a22 + c * a23 * a23);
+        pa_data[6 * q + 4] = w_det_j * (c * a21 * a31 + c * a22 * a32 + c * a23 * a33);
+        pa_data[6 * q + 5] = w_det_j * (c * a31 * a31 + c * a32 * a32 + c * a33 * a33);
+    }
+    pa_data
+}
+
+/// `BilinearForm(DiffusionIntegrator(one) in Mode::PATCHWISE).Assemble()` for a
+/// scalar `NurbsFESpace`: one sparse matrix per patch, assembled by the
+/// full-quadrature patch contraction of
+/// `AssemblePatchMatrix_fullQuadrature`, then scattered to global DOFs with
+/// the patch's VDOF map (`GetPatchVDofs`).
+///
+/// Note that this path inherits MFEM's unit-weight assumption for the patch
+/// basis (`SetupPatchBasisData` uses the raw B-spline knot shapes), and its
+/// quadrature-point Jacobians are evaluated through the element
+/// transformation exactly as `SetupPatchPA` does (the element of
+/// [`NurbsPatchRules::point_element`] is transformed at the *patch-level*
+/// integration point).  Requires the [`NurbsMeshGeometry`] point matrix (the
+/// file control net, or the refined net via
+/// [`NurbsMeshGeometry::from_mesh_nodes`]).
 pub fn assemble_diffusion_patchwise(
     space: &NurbsFESpace,
     geo: &NurbsMeshGeometry,
@@ -1000,68 +1098,7 @@ pub fn assemble_diffusion_patchwise(
 
         // SetupPatchPA: quadrature-point data over the whole patch (weights
         // and Jacobians, evaluated through the element containing each point).
-        let nq = basis.q1d[0] * basis.q1d[1] * basis.q1d[2];
-        // `pa_data`: symmetric 3x3 diffusivity at every point (6 entries).
-        let mut pa_data = vec![0.0_f64; nq * 6];
-        let mut jac_cache = vec![[0.0_f64; 9]; nq];
-        let mut weights = vec![0.0_f64; nq];
-        for k in 0..basis.q1d[2] {
-            for j in 0..basis.q1d[1] {
-                for i in 0..basis.q1d[0] {
-                    let q = i + basis.q1d[0] * (j + basis.q1d[1] * k);
-                    let ipx = rules.patch_rules_1d[p][0][i].0;
-                    let ipy = rules.patch_rules_1d[p][1][j].0;
-                    let ipz = rules.patch_rules_1d[p][2][k].0;
-                    let w = rules.patch_rules_1d[p][0][i].1
-                        * rules.patch_rules_1d[p][1][j].1
-                        * rules.patch_rules_1d[p][2][k].1;
-                    weights[q] = w;
-                    let e = rules.point_element(p, i, j, k);
-                    // C++ `SetupPatchPA`: `tr->SetIntPoint(&ip)` with the
-                    // *patch-level* point on the element's transformation —
-                    // the element is evaluated at span-local coordinates
-                    // numerically equal to the patch coordinates.
-                    let el = ExactElement::new(space, geo, e);
-                    let jac = el.jacobian(&[ipx, ipy, ipz]);
-                    for r in 0..dim {
-                        for c in 0..dim {
-                            jac_cache[q][r * 3 + c] = jac[r][c];
-                        }
-                    }
-                }
-            }
-        }
-        for q in 0..nq {
-            let j11 = jac_cache[q][0];
-            let j21 = jac_cache[q][3];
-            let j31 = jac_cache[q][6];
-            let j12 = jac_cache[q][1];
-            let j22 = jac_cache[q][4];
-            let j32 = jac_cache[q][7];
-            let j13 = jac_cache[q][2];
-            let j23 = jac_cache[q][5];
-            let j33 = jac_cache[q][8];
-            let det_j = j11 * (j22 * j33 - j32 * j23) - j21 * (j12 * j33 - j32 * j13)
-                + j31 * (j12 * j23 - j22 * j13);
-            let w_det_j = weights[q] / det_j;
-            let a11 = (j22 * j33) - (j23 * j32);
-            let a12 = (j32 * j13) - (j12 * j33);
-            let a13 = (j12 * j23) - (j22 * j13);
-            let a21 = (j31 * j23) - (j21 * j33);
-            let a22 = (j11 * j33) - (j13 * j31);
-            let a23 = (j21 * j13) - (j11 * j23);
-            let a31 = (j21 * j32) - (j31 * j22);
-            let a32 = (j31 * j12) - (j11 * j32);
-            let a33 = (j11 * j22) - (j12 * j21);
-            // Scalar (unit) diffusivity: `w/detJ adj(J) adj(J)^T`.
-            let c = kappa;
-            pa_data[6 * q] = w_det_j * (c * a11 * a11 + c * a12 * a12 + c * a13 * a13);
-            pa_data[6 * q + 1] = w_det_j * (c * a11 * a21 + c * a12 * a22 + c * a13 * a23);
-            pa_data[6 * q + 2] = w_det_j * (c * a11 * a31 + c * a12 * a32 + c * a13 * a33);
-            pa_data[6 * q + 3] = w_det_j * (c * a21 * a21 + c * a22 * a22 + c * a23 * a23);
-            pa_data[6 * q + 4] = w_det_j * (c * a21 * a31 + c * a22 * a32 + c * a23 * a33);
-            pa_data[6 * q + 5] = w_det_j * (c * a31 * a31 + c * a32 * a32 + c * a33 * a33);
-        }
+        let pa_data = setup_patch_pa_data(space, geo, rules, p, &basis, dim, kappa, false);
 
         // AssemblePatchMatrix_fullQuadrature: the patch matrix in patch-DOF
         // order with its exact banded sparsity.
@@ -1244,6 +1281,420 @@ pub fn assemble_diffusion_patchwise(
         }
     }
     coo.into_csr()
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Reduced integration (`-patcha -rint`): GetReducedRule's per-dof interval
+// NNLS + AssemblePatchMatrix_reducedQuadrature.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// The exact `mfem::GetReducedRule` signature text of MFEM 4.10 — part of the
+/// byte-for-byte `MFEM_VERIFY` failure output (see
+/// `tmp/r56/nnls/ball_nurbs_iro8_ncdof_fail.log`).
+const GET_REDUCED_RULE_SIG: &str = "void mfem::GetReducedRule(int, int, const \
+Array2D<double>&, const Array2D<double>&, std::vector<int>, std::vector<int>, \
+std::vector<int>, std::vector<int>, std::vector<int>, std::vector<int>, const \
+IntegrationRule*, bool, std::vector<Vector>&, std::vector<std::vector<int> >&)";
+
+/// `GetReducedRule` (bilininteg_diffusion_patch.cpp:148): for every 1-D basis
+/// dof, solve the interval NNLS problem that concentrates the full 1-D rule
+/// onto the points that dof's products actually need.  `b`/`g` are the
+/// `nq × nd` basis value/derivative matrices (row-major in points); `ir1d`
+/// is the stretched 1-D rule.  `zero_order` selects the "00" (B·B, mass-type)
+/// rule vs the "11" (G·G, stiffness-type) rule — MFEM computes both per
+/// dimension (`numTypes = 2`).
+///
+/// Returns, per dof, the reduced weights and their (local, 0-based)
+/// quadrature-point indices.  Errors carry the exact MFEM verify text of the
+/// `nc_dof <= nw_dof` guard (D533(c) loud failure).
+#[allow(clippy::too_many_arguments)]
+fn get_reduced_rule(
+    nq: usize,
+    nd: usize,
+    b: &[f64],
+    g: &[f64],
+    min_q: &[usize],
+    max_q: &[usize],
+    min_d: &[usize],
+    max_d: &[usize],
+    min_dd: &[usize],
+    max_dd: &[usize],
+    ir1d: &[(f64, f64)],
+    zero_order: bool,
+) -> Result<Vec<(Vec<f64>, Vec<usize>)>, String> {
+    assert_eq!(b.len(), nq * nd, "GetReducedRule: B shape");
+    assert_eq!(g.len(), nq * nd, "GetReducedRule: G shape");
+    assert_eq!(ir1d.len(), nq, "GetReducedRule: rule size");
+
+    let mut out = Vec::with_capacity(nd);
+    for dof in 0..nd {
+        let nc_dof = max_dd[dof] - min_dd[dof] + 1;
+        let nw_dof = max_d[dof] - min_d[dof] + 1;
+
+        // G is of size nc_dof x nw_dof (column-major, MFEM DenseMatrix).
+        if nc_dof > nw_dof {
+            return Err(format!(
+                "\n\nVerification failed: (nc_dof <= nw_dof) is false:\n --> The \
+NNLS system for the reduced integration rule requires more full integration \
+points. Try increasing the order of the full integration rule.\n ... in \
+function: {GET_REDUCED_RULE_SIG}\n ... in file: \
+fem/integ/bilininteg_diffusion_patch.cpp:176\n"
+            ));
+        }
+        let mut gmat = vec![0.0_f64; nc_dof * nw_dof];
+        let mut w = vec![0.0_f64; nw_dof];
+
+        for qx in min_d[dof]..=max_d[dof] {
+            let b_qx = if zero_order { b[qx * nd + dof] } else { g[qx * nd + dof] };
+            let w_qx = ir1d[qx].1;
+            w[qx - min_d[dof]] = w_qx;
+            for dx in min_q[qx]..=max_q[qx] {
+                let b_dx = if zero_order { b[qx * nd + dx] } else { g[qx * nd + dx] };
+                gmat[(dx - min_dd[dof]) + (qx - min_d[dof]) * nc_dof] = b_qx * b_dx;
+            }
+        }
+
+        let mut sol = vec![0.0_f64; nw_dof];
+        let mut nnls = NnlsSolver::new(gmat, nc_dof, nw_dof);
+        nnls.mult(&w, &mut sol);
+
+        let mut nnz = 0_usize;
+        for &v in &sol {
+            if v != 0.0 {
+                nnz += 1;
+            }
+        }
+        assert!(nnz > 0, "GetReducedRule: empty reduced rule");
+
+        let mut w_red = Vec::with_capacity(nnz);
+        let mut id_nnz = Vec::with_capacity(nnz);
+        for (i, &v) in sol.iter().enumerate() {
+            if v != 0.0 {
+                w_red.push(v);
+                id_nnz.push(i);
+            }
+        }
+        out.push((w_red, id_nnz));
+    }
+    Ok(out)
+}
+
+/// `BilinearForm(DiffusionIntegrator(one) in Mode::PATCHWISE_REDUCED)
+/// .Assemble()`: `DiffusionIntegrator::AssemblePatchMatrix_reducedQuadrature`
+/// + the same patch scatter as [`assemble_diffusion_patchwise`].
+///
+/// Per patch: `SetupPatchBasisData`, `SetupPatchPA(..., unitWeights = true)`
+/// (unit quadrature weights — the geometry enters only through `pa_data`),
+/// `GetReducedRule` per dimension and type (00/11) through the ported
+/// [`NnlsSolver`], then the reduced tensor contraction that walks the
+/// 2-type × 3-dim reduced rules per output dof.  The exact-zero guard
+/// `smata[i] == 0 → 1e-16` ("prevents failure of SparseMatrix
+/// EliminateRowCol") is part of the C++ and ported verbatim.
+///
+/// Errors carry MFEM's verify text (e.g. the `nc_dof <= nw_dof` failure for
+/// too-small `-iro`).
+pub fn assemble_diffusion_patchwise_reduced(
+    space: &NurbsFESpace,
+    geo: &NurbsMeshGeometry,
+    rules: &NurbsPatchRules,
+    kappa: f64,
+) -> Result<CsrMatrix<f64>, String> {
+    let dim = space.dim();
+    assert_eq!(dim, 3, "patch-wise assembly supports 3D only (as in MFEM)");
+    let ext = space.extension();
+    let n = space.n_dofs();
+    let mut coo = CooMatrix::new(n, n);
+
+    for p in 0..ext.n_patches() {
+        let pkv = ext.patch_knot_vectors(p).expect("patch knot vectors");
+        let basis = rules.setup_basis_data(p, &pkv);
+
+        // SetupPatchPA with unit weights + the reduced rules per dimension.
+        let pa_data = setup_patch_pa_data(space, geo, rules, p, &basis, dim, kappa, true);
+        // reduced[d][t][dof] = (weights, local ids) — dimension d, type
+        // t (0: zeroOrder/00, 1: 11), basis dof.
+        let mut reduced: [Vec<Vec<(Vec<f64>, Vec<usize>)>>; 3] =
+            [Vec::new(), Vec::new(), Vec::new()];
+        for d in 0..3 {
+            // rw(0, d, p): zeroOrder = true (00 terms), rw(1, d, p): false.
+            reduced[d].push(get_reduced_rule(
+                basis.q1d[d],
+                basis.d1d[d],
+                &basis.b[d],
+                &basis.g[d],
+                &basis.min_q[d],
+                &basis.max_q[d],
+                &basis.min_d[d],
+                &basis.max_d[d],
+                &basis.min_dd[d],
+                &basis.max_dd[d],
+                &rules.patch_rules_1d[p][d],
+                true,
+            )?);
+            reduced[d].push(get_reduced_rule(
+                basis.q1d[d],
+                basis.d1d[d],
+                &basis.b[d],
+                &basis.g[d],
+                &basis.min_q[d],
+                &basis.max_q[d],
+                &basis.min_d[d],
+                &basis.max_d[d],
+                &basis.min_dd[d],
+                &basis.max_dd[d],
+                &rules.patch_rules_1d[p][d],
+                false,
+            )?);
+        }
+
+        // AssemblePatchMatrix_reducedQuadrature: the patch matrix in
+        // patch-DOF order with its exact banded sparsity.
+        let ndof = basis.d1d[0] * basis.d1d[1] * basis.d1d[2];
+        let mut smat_i = vec![0usize; ndof + 1];
+        for dof_j in 0..ndof {
+            let (jdx, jdy, jdz) = dof_indices(dof_j, &basis.d1d);
+            let mut ndd = 1usize;
+            for d in 0..3 {
+                let jd = [jdx, jdy, jdz][d];
+                ndd *= basis.max_dd[d][jd] - basis.min_dd[d][jd] + 1;
+            }
+            smat_i[dof_j + 1] = smat_i[dof_j] + ndd;
+        }
+        let nnz = smat_i[ndof];
+        let mut smat_j = vec![-1_i64; nnz];
+        let mut smat_a = vec![0.0_f64; nnz];
+
+        let mut grad: Vec<Vec<f64>> = vec![
+            vec![0.0; basis.q1d[0] * basis.q1d[1] * basis.q1d[2]],
+            vec![0.0; basis.q1d[0] * basis.q1d[1] * basis.q1d[2]],
+            vec![0.0; basis.q1d[0] * basis.q1d[1] * basis.q1d[2]],
+        ];
+        let mut grad_used = vec![false; basis.q1d[0] * basis.q1d[1] * basis.q1d[2]];
+        let mut grad_dxy = vec![0.0_f64; basis.d1d[0] * basis.d1d[1] * 3];
+        let mut grad_dx = vec![0.0_f64; basis.d1d[0] * 3];
+
+        let qpoint = |qx: usize, qy: usize, qz: usize| -> usize {
+            qx + (qy + qz * basis.q1d[1]) * basis.q1d[0]
+        };
+        // rw(t, d, dof, ir) / rid(t, d, dof, ir): entry `ir` of the reduced
+        // rule of dimension `d`, type `t`, for basis dof `dof`.
+        let rw = |t: usize, d: usize, dof: usize, ir: usize| -> f64 {
+            reduced[d][t][dof].0[ir]
+        };
+        let rid = |t: usize, d: usize, dof: usize, ir: usize| -> usize {
+            reduced[d][t][dof].1[ir]
+        };
+
+        for dof_j in 0..ndof {
+            let (jdx, jdy, jdz) = dof_indices(dof_j, &basis.d1d);
+            let nd = [
+                basis.max_dd[0][jdx] - basis.min_dd[0][jdx] + 1,
+                basis.max_dd[1][jdy] - basis.min_dd[1][jdy] + 1,
+                basis.max_dd[2][jdz] - basis.min_dd[2][jdz] + 1,
+            ];
+            let cdofs = |i: usize, j: usize, k: usize| -> usize {
+                basis.min_dd[0][jdx]
+                    + i
+                    + basis.d1d[0]
+                        * (basis.min_dd[1][jdy]
+                            + j
+                            + basis.d1d[1] * (basis.min_dd[2][jdz] + k))
+            };
+
+            // Reset gradUsed over the dof's interaction box.
+            for qz in basis.min_d[2][jdz]..=basis.max_d[2][jdz] {
+                for qy in basis.min_d[1][jdy]..=basis.max_d[1][jdy] {
+                    for qx in basis.min_d[0][jdx]..=basis.max_d[0][jdx] {
+                        grad_used[qpoint(qx, qy, qz)] = false;
+                    }
+                }
+            }
+
+            for zquad in 0..2 {
+                // Reduced quadrature in z.
+                let nwz = reduced[2][zquad][jdz].1.len();
+                for irz in 0..nwz {
+                    let qz = rid(zquad, 2, jdz, irz) + basis.min_d[2][jdz];
+                    let zw = rw(zquad, 2, jdz, irz);
+                    let gwz = basis.b[2][qz * basis.d1d[2] + jdz];
+                    let gw_dz = basis.g[2][qz * basis.d1d[2] + jdz];
+
+                    for dy in basis.min_dd[1][jdy]..=basis.max_dd[1][jdy] {
+                        for dx in basis.min_dd[0][jdx]..=basis.max_dd[0][jdx] {
+                            for d in 0..3 {
+                                grad_dxy[(dx * basis.d1d[1] + dy) * 3 + d] = 0.0;
+                            }
+                        }
+                    }
+
+                    for yquad in 0..2 {
+                        // Reduced quadrature in y.
+                        let nwy = reduced[1][yquad][jdy].1.len();
+                        for iry in 0..nwy {
+                            let qy = rid(yquad, 1, jdy, iry) + basis.min_d[1][jdy];
+                            let yw = rw(yquad, 1, jdy, iry);
+                            let gwy = basis.b[1][qy * basis.d1d[1] + jdy];
+                            let gw_dy = basis.g[1][qy * basis.d1d[1] + jdy];
+
+                            for dx in basis.min_dd[0][jdx]..=basis.max_dd[0][jdx] {
+                                for d in 0..3 {
+                                    grad_dx[dx * 3 + d] = 0.0;
+                                }
+                            }
+
+                            // Reduced quadrature in x.
+                            for xquad in 0..2 {
+                                let nwx = reduced[0][xquad][jdx].1.len();
+                                for irx in 0..nwx {
+                                    let qx = rid(xquad, 0, jdx, irx) + basis.min_d[0][jdx];
+
+                                    if !grad_used[qpoint(qx, qy, qz)] {
+                                        let gwx = basis.b[0][qx * basis.d1d[0] + jdx];
+                                        let gw_dx = basis.g[0][qx * basis.d1d[0] + jdx];
+
+                                        let q = qpoint(qx, qy, qz);
+                                        let o11 = pa_data[6 * q];
+                                        let o12 = pa_data[6 * q + 1];
+                                        let o13 = pa_data[6 * q + 2];
+                                        // symmetric 3x3 diffusivity
+                                        let o21 = o12;
+                                        let o22 = pa_data[6 * q + 3];
+                                        let o23 = pa_data[6 * q + 4];
+                                        let o31 = o13;
+                                        let o32 = o23;
+                                        let o33 = pa_data[6 * q + 5];
+
+                                        let grad_x = gw_dx * gwy * gwz;
+                                        let grad_y = gwx * gw_dy * gwz;
+                                        let grad_z = gwx * gwy * gw_dz;
+
+                                        grad[0][q] =
+                                            (o11 * grad_x) + (o12 * grad_y) + (o13 * grad_z);
+                                        grad[1][q] =
+                                            (o21 * grad_x) + (o22 * grad_y) + (o23 * grad_z);
+                                        grad[2][q] =
+                                            (o31 * grad_x) + (o32 * grad_y) + (o33 * grad_z);
+
+                                        grad_used[q] = true;
+                                    }
+                                }
+                            }
+
+                            // 00 terms.
+                            let nw = reduced[0][0][jdx].1.len();
+                            for irx in 0..nw {
+                                let qx = rid(0, 0, jdx, irx) + basis.min_d[0][jdx];
+                                let q = qpoint(qx, qy, qz);
+                                let g_y = grad[1][q];
+                                let g_z = grad[2][q];
+                                let xw = rw(0, 0, jdx, irx);
+                                for dx in basis.min_q[0][qx]..=basis.max_q[0][qx] {
+                                    let wx = basis.b[0][qx * basis.d1d[0] + dx];
+                                    if yquad == 1 {
+                                        grad_dx[dx * 3 + 1] += g_y * wx * xw;
+                                    }
+                                    if zquad == 1 {
+                                        grad_dx[dx * 3 + 2] += g_z * wx * xw;
+                                    }
+                                }
+                            }
+
+                            // 11 terms.
+                            let nw11 = reduced[0][1][jdx].1.len();
+                            for irx in 0..nw11 {
+                                let qx = rid(1, 0, jdx, irx) + basis.min_d[0][jdx];
+                                let q = qpoint(qx, qy, qz);
+                                let g_x = grad[0][q];
+                                let xw = rw(1, 0, jdx, irx);
+                                for dx in basis.min_q[0][qx]..=basis.max_q[0][qx] {
+                                    let w_dx = basis.g[0][qx * basis.d1d[0] + dx];
+                                    grad_dx[dx * 3] += g_x * w_dx * xw;
+                                }
+                            }
+
+                            for dy in basis.min_q[1][qy]..=basis.max_q[1][qy] {
+                                let wy = basis.b[1][qy * basis.d1d[1] + dy];
+                                let w_dy = basis.g[1][qy * basis.d1d[1] + dy];
+                                for dx in basis.min_dd[0][jdx]..=basis.max_dd[0][jdx] {
+                                    if yquad == 0 {
+                                        if zquad == 1 {
+                                            grad_dxy[(dx * basis.d1d[1] + dy) * 3 + 2] +=
+                                                grad_dx[dx * 3 + 2] * wy * yw;
+                                        } else {
+                                            grad_dxy[(dx * basis.d1d[1] + dy) * 3] +=
+                                                grad_dx[dx * 3] * wy * yw;
+                                        }
+                                    } else if zquad == 0 {
+                                        grad_dxy[(dx * basis.d1d[1] + dy) * 3 + 1] +=
+                                            grad_dx[dx * 3 + 1] * w_dy * yw;
+                                    }
+                                }
+                            }
+                        } // iry
+                    } // yquad
+
+                    for dz in basis.min_q[2][qz]..=basis.max_q[2][qz] {
+                        let wz = basis.b[2][qz * basis.d1d[2] + dz];
+                        let w_dz = basis.g[2][qz * basis.d1d[2] + dz];
+                        for dy in basis.min_dd[1][jdy]..=basis.max_dd[1][jdy] {
+                            for dx in basis.min_dd[0][jdx]..=basis.max_dd[0][jdx] {
+                                let v = if zquad == 0 {
+                                    (grad_dxy[(dx * basis.d1d[1] + dy) * 3] * wz)
+                                        + (grad_dxy[(dx * basis.d1d[1] + dy) * 3 + 1] * wz)
+                                } else {
+                                    grad_dxy[(dx * basis.d1d[1] + dy) * 3 + 2] * w_dz
+                                };
+                                let v = v * zw;
+
+                                let loc = dx
+                                    - basis.min_dd[0][jdx]
+                                    + nd[0]
+                                        * (dy - basis.min_dd[1][jdy]
+                                            + nd[1] * (dz - basis.min_dd[2][jdz]));
+                                let odof = cdofs(
+                                    dx - basis.min_dd[0][jdx],
+                                    dy - basis.min_dd[1][jdy],
+                                    dz - basis.min_dd[2][jdz],
+                                );
+                                let m = smat_i[dof_j] + loc;
+                                debug_assert!(
+                                    smat_j[m] == -1 || smat_j[m] == odof as i64,
+                                    "reduced patch matrix: sparsity collision"
+                                );
+                                smat_j[m] = odof as i64;
+                                smat_a[m] += v;
+                            }
+                        }
+                    }
+                } // irz
+            } // zquad
+        } // dof_j
+
+        // "This prevents failure of SparseMatrix EliminateRowCol."
+        for v in smat_a.iter_mut() {
+            if *v == 0.0 {
+                *v = 1.0e-16;
+            }
+        }
+
+        // BilinearForm::Assemble's patch loop (identical to the full path).
+        let mut vdofs = Vec::with_capacity(ndof);
+        for k in 0..basis.d1d[2] {
+            for j in 0..basis.d1d[1] {
+                for i in 0..basis.d1d[0] {
+                    vdofs.push(ext.patch_dof(p, &[i, j, k]).expect("patch DOF in range"));
+                }
+            }
+        }
+        for r in 0..ndof {
+            for m in smat_i[r]..smat_i[r + 1] {
+                if smat_j[m] >= 0 {
+                    coo.add(vdofs[r], vdofs[smat_j[m] as usize], smat_a[m]);
+                }
+            }
+        }
+    }
+    Ok(coo.into_csr())
 }
 
 /// `(jdx, jdy, jdz)` of a patch-DOF index (x fastest, as in
