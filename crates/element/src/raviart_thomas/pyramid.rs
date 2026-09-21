@@ -558,6 +558,244 @@ fn fuentes_rt_raw_basis(p: usize, x_in: f64, y_in: f64, z_in: f64, f: &mut [[f64
     debug_assert_eq!(o, pyramid_rtk_dim(p - 1), "raw basis slot count for p={p}");
 }
 
+/// MFEM `VT_T(p, s, sds, sdsxds, grad_s2, mu, grad_mu, u, du)`
+/// (`fe_pyramid.cpp:1416-1490`) — the divergence `du(i,j)` of the
+/// homogenised triangular-face block (the values side is [`vt_t`], which
+/// `calcDivBasis` does not consume).  `grad_s2` is MFEM's
+/// `grad_nu2(z, xy, ab)` = `(0, 0, 1)`; `EE = E_E(1, s2, sds) = sds`, so
+/// `EExds2 = sds × grad_s2`.
+fn vt_t_div(
+    p: usize,
+    s: [f64; 3],
+    sds: [f64; 3],
+    sdsxds: [f64; 3],
+    grad_s2: [f64; 3],
+    mu: f64,
+    grad_mu: [f64; 3],
+) -> Vec<f64> {
+    let ms = [mu * s[0], mu * s[1], s[2]];
+    let pi = hom_sca_legendre(p - 1, ms[0], ms[1]);
+    // EE = E_E(1, s2, sds)[0] = sds (P_0 = 1).
+    let eexds2 = cross3(sds, grad_s2);
+    // VT00 = V_T(1, s, sdsxds)(0,0,:) = sdsxds.
+    let vt00 = sdsxds;
+    let mut du = vec![0.0; p * p];
+    for i in 0..p {
+        let jj = hom_sca_jacobi(p - i - 1, 2.0 * i as f64 + 1.0, ms[0] + ms[1], ms[2]);
+        for j in 0..(p - i) {
+            // EV(k) = (i+j+3)·EExds2(k) − VT00(k)
+            let mut ev_dot_dmu = 0.0;
+            for k in 0..3 {
+                let ev = ((i + j + 3) as f64) * eexds2[k] - vt00[k];
+                ev_dot_dmu += grad_mu[k] * ev;
+            }
+            du[i * p + j] = pi[i] * jj[j] * ev_dot_dmu;
+        }
+    }
+    du
+}
+
+/// MFEM `RT_FuentesPyramidElement::calcDivBasis` (`fe_rt.cpp:1761-2006`) —
+/// the analytic divergence of the raw Fuentes expansion at `(x, y, z)` in
+/// the element's RAW slot order (D542).  Families I–III are divergence-free
+/// (MFEM skips them); the face blocks differentiate the `mu` scalings and
+/// the apex-limiting branch overwrites the five lowest-order face dofs.
+fn fuentes_rt_raw_div(p: usize, x_in: f64, y_in: f64, z_in: f64, df: &mut [f64]) {
+    let mut x = x_in;
+    let mut y = y_in;
+    let mut z = z_in;
+    let mut xy = [x, y];
+    let mut limz1 = false;
+    if (1.0 - z).abs() < APEX_TOL {
+        limz1 = true;
+        z = 1.0 - APEX_TOL;
+        y = 0.5 * (1.0 - z);
+        x = 0.5 * (1.0 - z);
+        xy = [x, y];
+    }
+
+    df.fill(0.0);
+    let mut o = 0usize;
+
+    // Quadrilateral face: d( mu0³·V_Q ) = 3·mu0²·∇mu0·V_Q (V_Q div-free).
+    {
+        let vq = v_q(
+            p,
+            [mu0_xy(z, xy, 1), mu1_xy(z, xy, 1)],
+            mu01_grad_mu01(z, xy, 1),
+            [mu0_xy(z, xy, 2), mu1_xy(z, xy, 2)],
+            mu01_grad_mu01(z, xy, 2),
+        );
+        let muz2 = mu0_z(z).powi(2);
+        let dmuz = GRAD_MU0_Z;
+        let o0 = o;
+        for j in 0..p {
+            for i in 0..p {
+                let m = (i * p + j) * 3;
+                df[o] += 3.0 * muz2 * (dmuz[0] * vq[m] + dmuz[1] * vq[m + 1] + dmuz[2] * vq[m + 2]);
+                o += 1;
+            }
+        }
+        if limz1 {
+            df[o0] = -3.0;
+        }
+    }
+
+    // Triangular faces (a,b) = (1,2) then (2,1), c = 0 then c = 1:
+    // dF = 0.5·dVTT + 0.5·∇mu·V_T.
+    {
+        // (a,b) = (1,2)
+        let s_nu = [nu0(z, xy, 1), nu1(xy, 1), nu2(z)];
+        let s_gnu = nu012_grad_nu012(z, xy, 1);
+        let vt = v_t(p, s_nu, s_gnu);
+        let vtt_sd = nu01_grad_nu01(z, xy, 1);
+        for (mu, dmuz) in [
+            (mu0_xy(z, xy, 2), grad_mu0_xy(z, xy, 2)),
+            (mu1_xy(z, xy, 2), grad_mu1_xy(z, xy, 2)),
+        ] {
+            let dvtt = vt_t_div(p, s_nu, vtt_sd, s_gnu, GRAD_NU2, mu, dmuz);
+            for j in 0..p {
+                for i in 0..(p - j) {
+                    let m = (i * p + j) * 3;
+                    df[o] = 0.5 * dvtt[i * p + j]
+                        + 0.5 * (dmuz[0] * vt[m] + dmuz[1] * vt[m + 1] + dmuz[2] * vt[m + 2]);
+                    o += 1;
+                }
+            }
+        }
+
+        // (a,b) = (2,1)
+        let s_nu = [nu0(z, xy, 2), nu1(xy, 2), nu2(z)];
+        let s_gnu = nu012_grad_nu012(z, xy, 2);
+        let vt = v_t(p, s_nu, s_gnu);
+        let vtt_sd = nu01_grad_nu01(z, xy, 2);
+        for (mu, dmuz) in [
+            (mu0_xy(z, xy, 1), grad_mu0_xy(z, xy, 1)),
+            (mu1_xy(z, xy, 1), grad_mu1_xy(z, xy, 1)),
+        ] {
+            let dvtt = vt_t_div(p, s_nu, vtt_sd, s_gnu, GRAD_NU2, mu, dmuz);
+            for j in 0..p {
+                for i in 0..(p - j) {
+                    let m = (i * p + j) * 3;
+                    df[o] = 0.5 * dvtt[i * p + j]
+                        + 0.5 * (dmuz[0] * vt[m] + dmuz[1] * vt[m + 1] + dmuz[2] * vt[m + 2]);
+                    o += 1;
+                }
+            }
+        }
+
+        // Apex limiting: the lowest dof of each of the four triangular-face
+        // blocks (`fe_rt.cpp` o1..o4 = the first slot of each block).
+        if limz1 {
+            let blk = p * (p + 1) / 2;
+            let o1 = o - 4 * blk;
+            df[o1] = 1.5;
+            df[o1 + blk] = -1.5;
+            df[o1 + 2 * blk] = -1.5;
+            df[o1 + 3 * blk] = 1.5;
+        }
+    }
+
+    // Interior families I–III: divergence-free, MFEM skips ahead.
+    if p >= 2 {
+        o += (p - 1) * (p - 1) * p; // Family I
+        o += (p - 1) * (p - 1) * p; // Family II
+        o += (p - 1) * (p - 1); // Family III
+    }
+
+    // Family IV: d( mu0²·phi_k·V_Q ) = (mu0²·∇phi_k + 2·mu0·phi_k·∇mu0)·V_Q.
+    if p >= 2 {
+        let (phi_k, dphi_k) = phi_e_grad(p, [mu0_z(z), mu1_z(z)], [GRAD_MU0_Z, GRAD_MU1_Z]);
+        let vq = v_q(
+            p,
+            [mu0_xy(z, xy, 1), mu1_xy(z, xy, 1)],
+            mu01_grad_mu01(z, xy, 1),
+            [mu0_xy(z, xy, 2), mu1_xy(z, xy, 2)],
+            mu01_grad_mu01(z, xy, 2),
+        );
+        let muz = mu0_z(z);
+        let muz2 = muz.powi(2);
+        let dmuz = GRAD_MU0_Z;
+        for k in 2..=p {
+            for j in 0..p {
+                for i in 0..p {
+                    let m = (i * p + j) * 3;
+                    let mut acc = 0.0;
+                    for l in 0..3 {
+                        acc += (muz2 * dphi_k[k][l] + 2.0 * muz * phi_k[k] * dmuz[l]) * vq[m + l];
+                    }
+                    df[o] += acc;
+                    o += 1;
+                }
+            }
+        }
+    }
+
+    // Family V: d( mu1^(n−1)·V_L ) = (n−1)·mu1^(n−2)·∇mu1·V_L (V_L div-free).
+    if p >= 2 {
+        let vl = v_l(
+            p,
+            [mu0_xy(z, xy, 1), mu1_xy(z, xy, 1)],
+            [grad_mu0_xy(z, xy, 1), grad_mu1_xy(z, xy, 1)],
+            [mu0_xy(z, xy, 2), mu1_xy(z, xy, 2)],
+            [grad_mu0_xy(z, xy, 2), grad_mu1_xy(z, xy, 2)],
+            mu0_z(z),
+            GRAD_MU0_Z,
+        );
+        let muz = mu1_z(z);
+        let dmuz = GRAD_MU1_Z;
+        for j in 2..=p {
+            for i in 2..=p {
+                let n = i.max(j);
+                let muzi = muz.powf((n - 2) as f64);
+                let m = (i * (p + 1) + j) * 3;
+                df[o] += (n - 1) as f64
+                    * muzi
+                    * (dmuz[0] * vl[m] + dmuz[1] * vl[m + 1] + dmuz[2] * vl[m + 2]);
+                o += 1;
+            }
+        }
+    }
+
+    // Families VI/VII: d( mu1^(i−1)·V_R ) = (i−1)·mu1^(i−2)·∇mu1·V_R.
+    if p >= 2 {
+        for swap in [false, true] {
+            let vr = if !swap {
+                v_r(
+                    p,
+                    [mu0_xy(z, xy, 1), mu1_xy(z, xy, 1)],
+                    [grad_mu0_xy(z, xy, 1), grad_mu1_xy(z, xy, 1)],
+                    mu1_xy(z, xy, 2),
+                    grad_mu1_xy(z, xy, 2),
+                    mu0_z(z),
+                    GRAD_MU0_Z,
+                )
+            } else {
+                v_r(
+                    p,
+                    [mu0_xy(z, xy, 2), mu1_xy(z, xy, 2)],
+                    [grad_mu0_xy(z, xy, 2), grad_mu1_xy(z, xy, 2)],
+                    mu1_xy(z, xy, 1),
+                    grad_mu1_xy(z, xy, 1),
+                    mu0_z(z),
+                    GRAD_MU0_Z,
+                )
+            };
+            let muz = mu1_z(z);
+            let dmuz = GRAD_MU1_Z;
+            for i in 2..=p {
+                let muzi = muz.powf((i - 2) as f64);
+                df[o] += (i - 1) as f64
+                    * muzi
+                    * (dmuz[0] * vr[i][0] + dmuz[1] * vr[i][1] + dmuz[2] * vr[i][2]);
+                o += 1;
+            }
+        }
+    }
+
+    debug_assert_eq!(o, pyramid_rtk_dim(p - 1), "raw div slot count for p={p}");
+}
+
 // ─── Nodes, dof→nk map, nk table (fe_rt.cpp:1276-1373) ──────────────────────
 
 /// MFEM `RT_FuentesPyramidElement::nk[24]` (`fe_rt.cpp:1270-1272`) — the
@@ -673,6 +911,22 @@ fn fuentes_rt_nodes(p: usize) -> Vec<[f64; 3]> {
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
+/// MFEM `RT_FuentesPyramidElement(order)` node/normal rows — `(point, nk)`
+/// per dof in the element's slot order (D541 single source): the space
+/// engine's dual rows (`HDivSpace::interp_rows`), the prolongation builder's
+/// slot table (`hdiv_rt_slot_rows`) and the element's own node table all
+/// consume this one definition instead of keeping hand-copied 5-row tables.
+pub fn mfem_nodal_rows(order: usize) -> Vec<([f64; 3], [f64; 3])> {
+    fuentes_rt_nodes(order)
+        .iter()
+        .enumerate()
+        .map(|(m, pt)| {
+            let nk = nk_of(dof2nk_slot(m, order));
+            (*pt, nk)
+        })
+        .collect()
+}
+
 /// Raviart-Thomas H(div) element on the reference pyramid — a 1:1 port of
 /// MFEM `RT_FuentesPyramidElement(p)` (D445 slot layout, D534 Fuentes basis):
 /// `(p+1)(3p(p+2)+5)` DOFs, nodal flux-sample functionals
@@ -770,6 +1024,9 @@ impl VectorReferenceElement for PyraRTk {
         }
     }
 
+    /// MFEM exposes no analytic curl for `RT_FuentesPyramidElement`
+    /// (`fe_rt.cpp` provides `calcDivBasis` only; no in-tree consumer curls
+    /// an H(div) basis), so the curl stays on a central finite difference.
     fn eval_curl(&self, xi: &[f64], cv: &mut [f64]) {
         let h = 1e-6;
         let n3 = self.n * 3;
@@ -794,22 +1051,18 @@ impl VectorReferenceElement for PyraRTk {
         }
     }
 
+    /// Analytic divergence — MFEM `RT_FuentesPyramidElement::CalcDivShape`
+    /// (`fe_rt.cpp:1450-1465`): `calcDivBasis` composed through the same
+    /// nodal `Ti` as the basis (D542).
     fn eval_div(&self, xi: &[f64], dv: &mut [f64]) {
-        let h = 1e-6;
-        let n3 = self.n * 3;
-        let mut vp = vec![0.0; n3];
-        let mut vm = vec![0.0; n3];
-        for i in 0..self.n {
-            self.eval_basis_vec(&[xi[0] + h, xi[1], xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0] - h, xi[1], xi[2]], &mut vm);
-            let dfx = (vp[i * 3] - vm[i * 3]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1] + h, xi[2]], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1] - h, xi[2]], &mut vm);
-            let dfy = (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] + h], &mut vp);
-            self.eval_basis_vec(&[xi[0], xi[1], xi[2] - h], &mut vm);
-            let dfz = (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
-            dv[i] = dfx + dfy + dfz;
+        let mut df = vec![0.0; self.n];
+        fuentes_rt_raw_div(self.p + 1, xi[0], xi[1], xi[2], &mut df);
+        for m in 0..self.n {
+            let mut s = 0.0;
+            for (o, &c) in self.ti[m * self.n..m * self.n + self.n].iter().enumerate() {
+                s += c * df[o];
+            }
+            dv[m] = s;
         }
     }
 
@@ -1127,6 +1380,126 @@ mod tests {
         );
     }
 
+    /// D541: the single-source RT0 row table equals the MFEM probe values the
+    /// space engine (`interp_rows`) and the prolongation builder
+    /// (`hdiv_rt_slot_rows`) used to hand-copy — base quad centre, then the
+    /// four triangular faces with MFEM's unnormalised tri normals.
+    #[test]
+    fn mfem_nodal_rows_rt0_single_source() {
+        let rows = mfem_nodal_rows(0);
+        let want: Vec<([f64; 3], [f64; 3])> = vec![
+            ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
+            ([1.0 / 3.0, 0.0, 1.0 / 3.0], [0.0, -1.0, 0.0]),
+            ([2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], [1.0, 0.0, 1.0]),
+            ([1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], [0.0, 1.0, 1.0]),
+            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-1.0, 0.0, 0.0]),
+        ];
+        assert_eq!(rows.len(), want.len());
+        for (i, ((xi, nk), (wxi, wnk))) in rows.iter().zip(want.iter()).enumerate() {
+            for d in 0..3 {
+                assert!(
+                    (xi[d] - wxi[d]).abs() < 1e-15 && (nk[d] - wnk[d]).abs() < 1e-15,
+                    "row {i} comp {d}: ({xi:?}, {nk:?}) vs ({wxi:?}, {wnk:?})"
+                );
+            }
+        }
+        // Order-1 rows follow MFEM's slot order (quad 9 + 4 tri blocks of 3
+        // + 12 interior) and stay point-dual through PyraRTk.
+        assert_eq!(mfem_nodal_rows(1).len(), 28);
+    }
+
+    /// D542 bitwise pin against the MFEM 4.10 probe
+    /// (`tmp/d540/probe_d542.cpp` → `tmp/d540/d542_pyramid_div.txt`): the
+    /// analytic `eval_div` (`calcDivBasis` through `Ti`) must reproduce
+    /// `CalcDivShape` entry-for-entry at the probe's print precision, for
+    /// orders 0..2 at 8 interior reference points.
+    #[test]
+    fn d542_pyramid_div_matches_mfem_410_probe() {
+        let path = format!(
+            "{}/../../tmp/d540/d542_pyramid_div.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let mut cached: Vec<Option<PyraRTk>> = (0..3).map(|_| None).collect();
+        let mut n_div = 0usize;
+        let mut max_div = 0.0_f64;
+        let mut div = vec![0.0_f64; 200];
+        for line in text.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            match f[0] {
+                "COUNT" => {
+                    let p: usize = f[2].parse().unwrap();
+                    let dof: usize = f[4].parse().unwrap();
+                    assert_eq!(PyraRTk::new(p).n_dofs(), dof, "probe COUNT p={p}");
+                }
+                "DIV" => {
+                    let p: usize = f[1].parse().unwrap();
+                    let t: usize = f[2].parse().unwrap();
+                    let slot: usize = f[3].parse().unwrap();
+                    let want: f64 = f[4].parse().unwrap();
+                    if cached[p].is_none() {
+                        cached[p] = Some(PyraRTk::new(p));
+                    }
+                    let e = cached[p].as_ref().unwrap();
+                    e.eval_div(&nod_point(t), &mut div);
+                    let d = (div[slot] - want).abs();
+                    max_div = max_div.max(d);
+                    let tol = 5e-12 * (1.0 + want.abs());
+                    let got = div[slot];
+                    assert!(d <= tol, "DIV p={p} pt={t} dof={slot}: {got} vs {want}");
+                    n_div += 1;
+                }
+                other => panic!("unexpected probe line {other:?}"),
+            }
+        }
+        assert!(n_div >= (5 + 28 + 87) * 8, "no DIV parity run: {n_div}");
+        eprintln!(
+            "d542 pyramid analytic div vs MFEM 4.10: {n_div} entries matched, \
+             max|delta| {max_div:.3e}"
+        );
+    }
+
+    /// The analytic `eval_div` against a central finite difference of the
+    /// basis — internal consistency guard away from the apex clamp.
+    #[test]
+    fn pyramid_analytic_div_matches_finite_difference() {
+        for p in 0..=2usize {
+            let e = PyraRTk::new(p);
+            let n = e.n_dofs();
+            let h = 1e-6;
+            let mut vp = vec![0.0; n * 3];
+            let mut vm = vec![0.0; n * 3];
+            let mut dv = vec![0.0; n];
+            for pt in [[0.25, 0.25, 0.125], [0.5, 0.5, 0.375], [0.625, 0.875, 0.9]] {
+                e.eval_basis_vec(&[pt[0] + h, pt[1], pt[2]], &mut vp);
+                e.eval_basis_vec(&[pt[0] - h, pt[1], pt[2]], &mut vm);
+                let mut fd: Vec<f64> = (0..n).map(|i| (vp[i * 3] - vm[i * 3]) / (2.0 * h)).collect();
+                e.eval_basis_vec(&[pt[0], pt[1] + h, pt[2]], &mut vp);
+                e.eval_basis_vec(&[pt[0], pt[1] - h, pt[2]], &mut vm);
+                for i in 0..n {
+                    fd[i] += (vp[i * 3 + 1] - vm[i * 3 + 1]) / (2.0 * h);
+                }
+                e.eval_basis_vec(&[pt[0], pt[1], pt[2] + h], &mut vp);
+                e.eval_basis_vec(&[pt[0], pt[1], pt[2] - h], &mut vm);
+                for i in 0..n {
+                    fd[i] += (vp[i * 3 + 2] - vm[i * 3 + 2]) / (2.0 * h);
+                }
+                e.eval_div(&pt, &mut dv);
+                for i in 0..n {
+                    // relative tolerance: the nodal basis values (and their
+                    // FD truncation error) grow like cond(T)
+                    assert!(
+                        (dv[i] - fd[i]).abs() < 1e-6 * (1.0 + fd[i].abs()),
+                        "p={p} at {pt:?}: div[{i}] = {} vs fd {}",
+                        dv[i],
+                        fd[i]
+                    );
+                }
+            }
+        }
+    }
+
     /// The probe's sample point `t` (same table as probe_d534.cpp).
     fn nod_point(t: usize) -> [f64; 3] {
         const PTS: [[f64; 3]; 8] = [
@@ -1147,7 +1520,7 @@ mod tests {
     /// the space layer's interpolation engine relies on (D535).
     #[test]
     fn pyra_rtk_is_point_dual_to_its_nodes() {
-        for p in 0..=2usize {
+        for p in 0..=3usize {
             let e = PyraRTk::new(p);
             let n = e.n_dofs();
             let mut phi = vec![0.0; n * 3];

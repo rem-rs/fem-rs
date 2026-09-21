@@ -34,7 +34,7 @@ use fem_element::quadrature::{
     gauss_legendre_01, gauss_legendre_arbitrary, gauss_lobatto_01, gauss_lobatto_arbitrary,
 };
 use fem_element::raviart_thomas::{
-    HexRTk, PrismRT0, PyraRTk, QuadRTk, TetRT1, TetRT2, TetRTk, TetRTNodal, TriRT1, TriRT2, TriRTk,
+    HexRTk, PrismRT0, PyraRTk, QuadRTk, TetRTk, TriRT1, TriRT2, TriRTk,
 };
 use fem_element::VectorReferenceElement;
 use fem_linalg::Vector;
@@ -1633,11 +1633,11 @@ impl<M: MeshTopology> HDivSpace<M> {
     ///
     /// where `xi_i` / `nk_i` are the reference sample point and outward normal
     /// of local slot `i` and `cof(J) = det(J) J^{-T}` maps reference normals to
-    /// physical ones (contravariant-Piola duality).  When the reference basis is
-    /// exactly dual to the sample set, `W = I`; when it is not (the Vandermonde
-    /// bases keep pivot permutations, e.g. `TetRTk`), the solve supplies the
-    /// missing change of basis — which is what makes the result exact for every
-    /// field representable in the space.
+    /// physical ones (contravariant-Piola duality).  Since D33/D34 (tri RT)
+    /// and D540 (tet RT: `TetRTk` is MFEM's nodal `RT_TetrahedronElement`)
+    /// every RT reference basis served here is exactly dual to its slot sample
+    /// set, so the dual matrix is the identity and the dof values coincide
+    /// with MFEM `Project_RT` (up to fem-rs' unnormalised-normal scaling).
     ///
 /// Slot alignment across element interfaces (which global dof carries which
 /// sample) is handled at construction time: quad 2-D edges and tri 2-D edges
@@ -1713,12 +1713,12 @@ impl<M: MeshTopology> HDivSpace<M> {
 
         // Combinations whose dof values must keep the historical
         // canonical-moment semantics (BDM consumers) are served by the legacy
-        // path.  Since D33/D34 the tet RT bases (TetRTk/TetRT1/TetRT2) and the
-        // tri RT bases (TriRTk/TriRT1/TriRT2) are flux-dual with per-face
-        // support, so RT on tri/quad/tet/hex/prism is served by this engine;
-        // D534/D535: the pyramid joins them — `PyraRTk` is the 1:1 port of
-        // MFEM's nodal `RT_FuentesPyramidElement`, whose nodal dual matrix is
-        // the identity at order 0.
+        // path.  Since D33/D34 the tri RT bases and since D540 the tet RT
+        // family (all of them MFEM's nodal `RT_TetrahedronElement`) are
+        // flux-dual with per-face support, so RT on tri/quad/tet/hex/prism is
+        // served by this engine; D534/D535: the pyramid joins them —
+        // `PyraRTk` is the 1:1 port of MFEM's nodal
+        // `RT_FuentesPyramidElement`, whose nodal dual matrix is the identity.
         let needs_legacy = self.is_bdm;
         if needs_legacy {
             self.interpolate_vector_legacy(f, &mut result);
@@ -1815,23 +1815,11 @@ impl<M: MeshTopology> HDivSpace<M> {
                         }
                         *di = val;
                     }
-                    let re: Box<dyn VectorReferenceElement> = match order {
-                        // D33/D34: must pair with the SAME element the vector
-                        // assembler uses (`vec_ref_elem`): TetRTk(0), TetRT1,
-                        // TetRT2 — all flux-dual with per-face support.
-                        0 => Box::new(TetRTk::new(0)),
-                        1 => Box::new(TetRT1),
-                        2 => Box::new(TetRT2),
-                        // D392: from order 3 on, dispatch the order-generic
-                        // *nodal* element — the same MFEM flux-dual semantics
-                        // as TetRT1/TetRT2 (point-dual to the very
-                        // `mfem_nodal_dofs(k)` rows above, W = I).  The
-                        // moment-dual `TetRTk` family is not point-dual to
-                        // these rows and makes the k ≥ 3 dual solve
-                        // ill-conditioned (measured: RT3 constant-field
-                        // reconstruction error 2.97e1).
-                        o => Box::new(TetRTNodal::new(o as usize)),
-                    };
+                    let re: Box<dyn VectorReferenceElement> =
+                        // D540: the whole tet RT family is MFEM's nodal
+                        // `RT_TetrahedronElement` (point-dual, W = I), paired
+                        // with the SAME `mfem_nodal_dofs(k)` rows above.
+                        Box::new(TetRTk::new(order as usize));
                     fill_dual_matrix(&rows, re.as_ref(), &mut w);
                 }
                 ElementType::Hex8 => {
@@ -2366,17 +2354,21 @@ pub fn hdiv_interpolant_available(et: ElementType, order: u8) -> bool {
         ElementType::Tri3 | ElementType::Tri6 => order <= 2,
         ElementType::Quad4 => order <= 6,
         // D392: was `order <= 2`.  The tet RT interpolation engine is
-        // order-generic (rows from `tet_rt1::mfem_nodal_dofs(k)`, dual matrix
-        // from the order-generic `TetRTk`), but that table's cache holds
-        // exactly 5 slots (k = 0..=4) — the element layer is the binding cap.
+        // order-generic (rows and the MFEM nodal `RT_TetrahedronElement`
+        // basis both from `tet_rt1::mfem_nodal_dofs(k)` / `tet_rtk`, D540),
+        // but that table's cache holds exactly 5 slots (k = 0..=4) — the
+        // element layer is the binding cap.
         ElementType::Tet4 | ElementType::Tet10 => order <= 4,
         // D342: was `order <= 2`.
         ElementType::Hex8 => order <= 6,
         ElementType::Prism6 => order == 0,
-        // D534/D535: the D534 `PyraRTk` is MFEM's nodal
-        // `RT_FuentesPyramidElement`, point-dual to the order-0 rows; the
-        // engine serves pyramid RT0 (RT1..3 wait on the slot bridge, D536).
-        ElementType::Pyramid5 => order == 0,
+        // D534/D535: the D534 `PyraRTk` is MFEM's nodal `RT_FuentesPyramidElement`,
+        // point-dual to the `mfem_nodal_rows(order)` slot rows (D541 single
+        // source).  D536: orders 1..=3 join — the element and the space share
+        // MFEM's Fuentes slot order (D445), so the engine rows are the same
+        // table at each order (RTk interpolation covered 0..=3 by the
+        // element's verified cap).
+        ElementType::Pyramid5 => order <= 3,
         _ => false,
     }
 }
@@ -2535,22 +2527,23 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
             rows.push(InterpRow { xi: [0.5, 0.0, 0.5], nk: [0.0, -1.0, 0.0] });
         }
         // PYRAMID_FACES slot order: base quad (3,2,1,0) centre, then the
-        // triangular faces (0,1,4), (1,2,4), (2,3,4), (3,0,4) — MFEM
-        // `RT_FuentesPyramidElement(0)` nodes/normals (`fe_rt.cpp:1273-1355`
-        // + the `nk[24]` table; D534), the same rows the prolongation builder
-        // consumes via `hdiv_rt_slot_rows(HdivRt0Family::Pyramid, 0)`.  The
-        // D534 `PyraRTk` is point-dual to these rows (W = I).  Orders >= 1
-        // have no engine rows yet (D536).
+        // triangular faces (0,1,4), (1,2,4), (2,3,4), (3,0,4), then the
+        // Fuentes interior component samples — the MFEM
+        // `RT_FuentesPyramidElement` node/normal table (D534), consumed from
+        // its single element-crate definition `PyraRTk::mfem_nodal_rows`
+        // (D541) — the same rows the prolongation builder reads via
+        // `hdiv_rt_slot_rows(HdivRt0Family::Pyramid, order)`.  The D534
+        // `PyraRTk` is point-dual to these rows (W = I) at every order
+        // 0..=3 (D536).
         ElementType::Pyramid5 => {
             assert!(
-                order == 0,
-                "interp_rows: pyramid rows only at order 0 (RT1..3 slot bridge is D536)"
+                order <= 3,
+                "interp_rows: pyramid rows verified 0..=3 (PyraRTk cap)"
             );
-            rows.push(InterpRow { xi: [0.5, 0.5, 0.0], nk: [0.0, 0.0, -1.0] });
-            rows.push(InterpRow { xi: [1.0 / 3.0, 0.0, 1.0 / 3.0], nk: [0.0, -1.0, 0.0] });
-            rows.push(InterpRow { xi: [2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], nk: [1.0, 0.0, 1.0] });
-            rows.push(InterpRow { xi: [1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], nk: [0.0, 1.0, 1.0] });
-            rows.push(InterpRow { xi: [0.0, 1.0 / 3.0, 1.0 / 3.0], nk: [-1.0, 0.0, 0.0] });
+            for (pt, nk) in fem_element::raviart_thomas::pyramid::mfem_nodal_rows(order as usize)
+            {
+                rows.push(InterpRow { xi: pt, nk });
+            }
         }
         other => panic!("interp_rows: unsupported {other:?}"),
     }

@@ -6,7 +6,8 @@
 //! (order `p − 1 = 1`), slot-ordered faces-first in MFEM `FaceVert` order
 //! `(1,2,3), (0,3,2), (0,1,3), (0,2,1)` — matching `HDivSpace::build_3d_tet`.
 
-use super::tet_rt1::{eval_nodal_tet_basis, eval_nodal_tet_div, nodal_tet_dof_coords};
+use super::tet_rtk::{eval_mfem_rt_tet_basis, eval_mfem_rt_tet_div};
+use super::tet_rt1::nodal_tet_dof_coords;
 use crate::quadrature::tet_rule;
 use crate::reference::{QuadratureRule, VectorReferenceElement};
 
@@ -26,11 +27,11 @@ impl VectorReferenceElement for TetRT2 {
     }
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
-        eval_nodal_tet_basis(2, xi, values);
+        eval_mfem_rt_tet_basis(2, xi, values);
     }
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
-        eval_nodal_tet_div(2, xi, div_vals);
+        eval_mfem_rt_tet_div(2, xi, div_vals);
     }
 
     fn eval_curl(&self, _xi: &[f64], curl_vals: &mut [f64]) {

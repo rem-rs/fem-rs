@@ -2710,6 +2710,9 @@ pub fn vec_ref_elem(
         (VecFamily::RaviartThomas, ElemType::Quad) if p == 0 => {
             Box::new(crate::raviart_thomas::QuadRTk::new(0))
         }
+        // D540: `TetRTk` is MFEM's nodal `RT_TetrahedronElement` for every
+        // order (point-dual, `Ti.Factor(T)`), so both arms here agree with
+        // the space engine and the assembler dispatcher by construction.
         (VecFamily::RaviartThomas, ElemType::Tet) if p == 0 => {
             Box::new(crate::raviart_thomas::TetRTk::new(0))
         }

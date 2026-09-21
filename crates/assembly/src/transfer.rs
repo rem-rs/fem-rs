@@ -1329,24 +1329,21 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
             ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
         ]),
-        // D493: `RT_FuentesPyramidElement(p=0)` dof nodes and normals
-        // (`fe_rt.cpp:1273-1355` + the `nk[24]` table), in the element's own
-        // slot order — base quad first, then the four triangular faces
-        // (0,1,4), (1,2,4), (2,3,4), (3,0,4), exactly `HDivSpace`'s
-        // `PYRAMID_FACES`.  The triangular normals are MFEM's *unnormalised*
-        // (1,0,1) / (0,1,1) — the same convention the other families use.
-        // Order ≥ 1 stays on the legacy builder: MFEM's reference element
-        // enumerates its triangular faces with heterogeneous internal orders
-        // (transposed on (0,1,4), reversed on (2,3,4)/(3,0,4)) while fem-rs's
-        // `PyraRTk` normalises them to the standard barycentric grid, so a
-        // slot bridge would be needed first (D534).
-        (HdivRt0Family::Pyramid, 0) => Some(vec![
-            ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
-            ([1.0 / 3.0, 0.0, 1.0 / 3.0], [0.0, -1.0, 0.0]),
-            ([2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], [1.0, 0.0, 1.0]),
-            ([1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0], [0.0, 1.0, 1.0]),
-            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-1.0, 0.0, 0.0]),
-        ]),
+        // D493: `RT_FuentesPyramidElement` dof nodes and normals — the
+        // element's own slot order (base quad first, then the four triangular
+        // faces (0,1,4), (1,2,4), (2,3,4), (3,0,4), then the Fuentes
+        // interior samples), consumed from the single element-crate
+        // definition `PyraRTk::mfem_nodal_rows` (D541).  The triangular
+        // normals are MFEM's *unnormalised* (1,0,1) / (0,1,1) — the same
+        // convention the other families use.  D536: orders 1..=3 serve too —
+        // the space's pyramid slot layout is MFEM's Fuentes order (D445), so
+        // no slot bridge is needed and the rows are the same table at every
+        // order.  The uniform-refinement children (6 pyramids + 4 tets, the
+        // inner one inverted) resolve their own family's rows at the same
+        // order below.
+        (HdivRt0Family::Pyramid, o) if o <= 3 => {
+            Some(fem_element::raviart_thomas::pyramid::mfem_nodal_rows(o as usize))
+        }
         _ => None,
     }
 }
@@ -1835,10 +1832,11 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
     // Reference dual matrix W[i][j] = phi_j(xi_i) . nk_i of the RT0 basis in
     // the slot convention.  The prolongation acts on dof vectors, so the raw
     // interpolation rows B (basis-function pullbacks) must be mapped through
-    // the dual: P = B . W^{-1}.  This is basis-convention agnostic — fem-rs's
-    // tri/quad RT0 bases are point-dual (W = I), while TetRTk carries W = 2I
-    // and HexRTk a non-uniform dual, which is exactly the factor the raw rows
-    // were missing against the MFEM probe.
+    // the dual: P = B . W^{-1}.  This is basis-convention agnostic — since
+    // D33/D34 (tri) and D540 (tet: MFEM's nodal `RT_TetrahedronElement`)
+    // every simplex/quad RT0 basis is point-dual (W = I); HexRTk keeps a
+    // non-uniform dual, which is exactly the factor the raw rows would
+    // otherwise miss against the MFEM probe.
     let n = n_parent_slots;
     let mut w = vec![0.0_f64; n * n];
     {
@@ -2031,8 +2029,9 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         let mut frame_bv = bv;
         let mut frame_a = a;
         // slot k of the mesh element -> slot of the evaluation frame (identity
-        // tail; sized for the largest served slot count — hex RT1 carries 36)
-        const MAX_SLOTS: usize = 40;
+        // tail; sized for the largest served slot count — pyramid RT3 carries
+        // 200 (D536); the hex arm serves RT0/RT1 = 6/36)
+        const MAX_SLOTS: usize = 256;
         let mut slot_map: [usize; MAX_SLOTS] = std::array::from_fn(|i| i);
         // multiplicative sign correction per mesh slot
         let mut slot_eps = [1.0_f64; MAX_SLOTS];
@@ -2070,15 +2069,8 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
                     frame_a[1][comp] = a[1][comp] - a[0][comp];
                     frame_a[2][comp] = a[2][comp] - a[0][comp];
                 }
-                slot_map = [
-                    1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
-                ];
-                slot_eps = [
-                    -1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                ];
+                slot_map = std::array::from_fn(|i| if i == 0 { 1 } else if i == 1 { 0 } else { i });
+                slot_eps = std::array::from_fn(|i| if i < 4 { -1.0 } else { 1.0 });
                 corner_map = [1, 0, 2, 3, 4, 5, 6, 7];
             } else {
                 // Order 1 (tet), and every mirrored pyramid child: keep the
@@ -2280,6 +2272,12 @@ pub fn build_prolongation_hdiv<M: MeshTopology>(
                 // row (no zero columns).
                 (1, HdivRt0Family::Quad | HdivRt0Family::Hex) => true,
                 (1, HdivRt0Family::Tri | HdivRt0Family::Tet) => true,
+                // D536: pyramid RT1..3 join — the Fuentes slot order is
+                // shared by element and space (D445/D534), the slot rows
+                // come from `mfem_nodal_rows(order)` (D541), and the
+                // uniform-refinement children (6 pyramids + 4 tets) resolve
+                // their own family's rows at the same order.
+                (1..=3, HdivRt0Family::Pyramid) => true,
                 _ => false,
             };
             if eligible {
