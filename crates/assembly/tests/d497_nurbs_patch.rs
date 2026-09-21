@@ -504,3 +504,46 @@ fn d497_ball_weights_match_mfem() {
         "element 0 (the inner cube) is unit-weighted"
     );
 }
+
+/// D531 (round 56): the point→element map of [`NurbsPatchRules::finalize`]
+/// must decode consistently with its own build order.  The map was stored
+/// with the `i` loop outermost but decoded as x-fastest — invisible at
+/// `ref_levels == 0` (every patch owns a single element), but from the first
+/// refinement on every non-first-span point picked the wrong mesh element,
+/// so `-patcha -fint -ref > 0` assembled a different stiffness matrix.
+///
+/// MFEM 4.10 truth (`tmp/d531/d531_padata.cpp`, ball -ref 1): patch 0's
+/// points `(i, 0, 0)` belong to element 0 for `i < 5` and element 1 for
+/// `i >= 5` (and their detJ values match bit-for-bit).  The generic
+/// invariant — the owning element of a point has exactly the points' knot
+/// spans as its `el_to_IJK` — is MFEM's own `Finalize` construction.
+#[test]
+fn d531_point_element_map_matches_mfem() {
+    let space = build_space("ball-nurbs.mesh", 1);
+    let ext = space.extension();
+    let rules = build_rules(&space, 8);
+    assert_eq!(ext.n_elements(), 56, "ball -ref 1: GetNE");
+
+    // The concrete row pinned above: patch 0, j = k = 0.
+    let pe: Vec<usize> = (0..rules.patch_rule_1d(0, 0).len())
+        .map(|i| rules.point_element(0, i, 0, 0))
+        .collect();
+    assert_eq!(pe, [0usize, 0, 0, 0, 0, 1, 1, 1, 1, 1], "patch 0 pe(i,0,0)");
+
+    // Generic invariant over every patch.
+    for p in 0..ext.n_patches() {
+        let ks0 = rules.patch_rule_1d_knot_span(p, 0);
+        let ks1 = rules.patch_rule_1d_knot_span(p, 1);
+        let ks2 = rules.patch_rule_1d_knot_span(p, 2);
+        for i in 0..ks0.len() {
+            for j in 0..ks1.len() {
+                let e = rules.point_element(p, i, j, 0);
+                assert_eq!(ext.element_patch(e), p, "patch {p} point ({i},{j},0)");
+                let ijk = ext.element_ijk(e);
+                assert_eq!(ijk[0], ks0[i], "patch {p} point ({i},{j},0): x span");
+                assert_eq!(ijk[1], ks1[j], "patch {p} point ({i},{j},0): y span");
+                assert_eq!(ijk[2], ks2[0], "patch {p} point ({i},{j},0): z span");
+            }
+        }
+    }
+}

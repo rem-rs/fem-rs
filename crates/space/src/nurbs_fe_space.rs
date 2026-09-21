@@ -439,6 +439,12 @@ pub struct NurbsFESpace {
     /// The refined mesh-order extension: its knot vectors give each element's
     /// parameter interval.
     mesh_ext: NurbsExtension,
+    /// The mesh's **current** control net (MFEM `mesh->GetNodes()`): the file's
+    /// control points at `ref_levels == 0`, else the knot-insert refined net
+    /// (`NURBSUniformRefinement`'s homogeneous `NURBSPatch::KnotInsert` divided
+    /// back by the refined weights), in the [`Self::mesh_extension`] DOF
+    /// numbering.
+    mesh_nodes: Vec<Vec<f64>>,
     /// The analysis extension (`NURBSExtension(mesh->NURBSext, orders)`).
     ext: NurbsExtension,
     /// Per-knot-vector orders of the analysis space.
@@ -523,8 +529,15 @@ impl NurbsFESpace {
         }
 
         let mut mesh_ext = geo.clone();
+        let mut mesh_nodes = nodes.coords.clone();
         for _ in 0..ref_levels {
+            // `Mesh::RefineNURBS`: the refined control net is re-derived per
+            // level — homogeneous `NURBSPatch::KnotInsert` on the previous
+            // level's net, divided back by the refined weights.  (The refined
+            // *weights* are refreshed inside `uniform_refinement`.)
+            let old = mesh_ext.clone();
             mesh_ext.uniform_refinement(2)?;
+            mesh_nodes = old.refined_control_points(&mesh_ext, &mesh_nodes, 2)?;
         }
 
         let orders: Vec<usize> = if orders.len() == 1 {
@@ -563,6 +576,7 @@ impl NurbsFESpace {
             geo_coords: nodes.coords,
             ref_levels,
             mesh_ext,
+            mesh_nodes,
             ext,
             orders,
             geo_element,
@@ -612,6 +626,14 @@ impl NurbsFESpace {
     /// `Mesh::UniformRefinement`; its knot vectors carry the *geometry* orders).
     pub fn mesh_extension(&self) -> &NurbsExtension {
         &self.mesh_ext
+    }
+
+    /// The mesh's **current** control net (MFEM `mesh->GetNodes()`): the file's
+    /// control points at `ref_levels == 0`, else the knot-insert refined net of
+    /// [`NurbsExtension::refined_control_points`] — the coordinates that
+    /// MFEM's assembly paths evaluate on a refined NURBS mesh.
+    pub fn mesh_nodes(&self) -> &[Vec<f64>] {
+        &self.mesh_nodes
     }
 
     /// `FiniteElementSpace::GetNDofs`.
@@ -1022,7 +1044,7 @@ impl NurbsFESpace {
                     multi[d] = o[rest % o.len()];
                     rest /= o.len();
                 }
-                let g = self.ext.dof_map(self.ext.patch_dof(patch, &multi).expect("patch dof"));
+                let g = self.ext.patch_dof(patch, &multi).expect("patch dof");
                 mark[g] = true;
             }
         }

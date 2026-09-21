@@ -200,9 +200,15 @@ impl NurbsPatchRules {
     }
 
     /// `GetPointElement(patch, i, j, k)`.
+    ///
+    /// The linear index must match [`Self::finalize`]'s build order (the `i`
+    /// loop outermost, `k` innermost): `i*n1*n2 + j*n2 + k`.  Decoding it as
+    /// x-fastest mapped every refined patch point to the wrong mesh element
+    /// (invisible at `ref_levels == 0`, where every patch has a single
+    /// element, but wrong from the first refinement on — D531).
     pub fn point_element(&self, patch: usize, i: usize, j: usize, k: usize) -> usize {
         let n = &self.npoints[patch];
-        self.point_to_elem[patch][i + n[0] * (j + n[1] * k)]
+        self.point_to_elem[patch][i * n[1] * n[2] + j * n[2] + k]
     }
 
     /// `GetElementRule(elem, patch, ijk, kv)` — the restriction of the patch's
@@ -551,10 +557,12 @@ fn det3_mfem(j: &[[f64; 3]; 3]) -> f64 {
         + j[2][0] * (j[0][1] * j[1][2] - j[0][2] * j[1][1])
 }
 
-/// MFEM-faithful element geometry for an *unrefined* NURBS mesh
-/// (`ref_levels == 0`): the control points come straight from the mesh file's
-/// `FiniteElementSpace` block (`NurbsExtension::parse_nodes`), and every
-/// quantity is evaluated with MFEM's exact operation order
+/// MFEM-faithful NURBS element geometry: the control points are the mesh's
+/// current control net — the file's `FiniteElementSpace` block
+/// (`NurbsExtension::parse_nodes`) on an unrefined mesh, or the knot-insert
+/// refined net (`NurbsMeshGeometry::from_mesh_nodes` of
+/// `NurbsFESpace::mesh_nodes`) after `ref_levels > 0` uniform refinements —
+/// and every quantity is evaluated with MFEM's exact operation order
 /// (`IsoparametricTransformation`: `J = PointMat·dshape`, `Weight = Det J`,
 /// `AdjugateJacobian = CalcAdjugate J`).
 ///
@@ -593,6 +601,38 @@ impl NurbsMeshGeometry {
             }
         }
         Ok(Self { coords, weights })
+    }
+
+    /// Build from the mesh's **current** control net — MFEM
+    /// `mesh->GetNodes()` after `NURBSUniformRefinement` — and the matching
+    /// (refined) extension: the coordinates are
+    /// [`NurbsExtension::refined_control_points`]' dehomogenized A5.5 net
+    /// ([`NurbsFESpace::mesh_nodes`]) and the weights the refined extension's
+    /// ([`NurbsExtension::uniform_refinement`]).  This is what makes the
+    /// `-patcha -fint -ref > 0` assembly bit-comparable: evaluating the
+    /// *refined* control points reproduces MFEM's operation order, while
+    /// re-evaluating the original net over the refined parameter intervals
+    /// rounds differently in the last ulp.
+    pub fn from_mesh_nodes(coords: &[Vec<f64>], ext: &NurbsExtension) -> Result<Self, String> {
+        let vdim = coords
+            .first()
+            .map(|c| c.len())
+            .ok_or_else(|| "NurbsMeshGeometry::from_mesh_nodes: no control points".to_string())?;
+        if vdim != 3 {
+            return Err(format!("expected vdim 3 control points, got {vdim}"));
+        }
+        if coords.len() != ext.n_dofs() {
+            return Err(format!(
+                "NurbsMeshGeometry::from_mesh_nodes: {} control points for {} DOFs",
+                coords.len(),
+                ext.n_dofs()
+            ));
+        }
+        let coords = coords.iter().map(|c| [c[0], c[1], c[2]]).collect();
+        Ok(Self {
+            coords,
+            weights: ext.weights().to_vec(),
+        })
     }
 
     fn element_dofs(&self, space: &NurbsFESpace, e: usize) -> Vec<[f64; 3]> {
@@ -761,7 +801,8 @@ fn physical_point(el: &ExactElement, xi: &[f64; 3]) -> [f64; 3] {
 /// arithmetic: the default rule
 /// `IntRules.Get(CUBE, 2·order + dim − 1)` (`DiffusionIntegrator::GetRule`,
 /// Qk branch → `p + 2` Gauss points per direction) and [`NurbsMeshGeometry`]'s
-/// point matrices.  Requires an unrefined mesh (see [`NurbsMeshGeometry`]).
+/// point matrices.  Requires the [`NurbsMeshGeometry`] point matrix (the file
+/// control net, or the refined net via [`NurbsMeshGeometry::from_mesh_nodes`]).
 pub fn assemble_diffusion_standard_exact(
     space: &NurbsFESpace,
     geo: &NurbsMeshGeometry,
@@ -938,8 +979,9 @@ pub fn assemble_diffusion_patch_rules_exact(
 /// quadrature-point Jacobians are evaluated through the element
 /// transformation exactly as `SetupPatchPA` does (the element of
 /// [`NurbsPatchRules::point_element`] is transformed at the *patch-level*
-/// integration point).  Requires an unrefined mesh (see
-/// [`NurbsMeshGeometry`]).
+/// integration point).  Requires the [`NurbsMeshGeometry`] point matrix (the
+/// file control net, or the refined net via
+/// [`NurbsMeshGeometry::from_mesh_nodes`]).
 pub fn assemble_diffusion_patchwise(
     space: &NurbsFESpace,
     geo: &NurbsMeshGeometry,

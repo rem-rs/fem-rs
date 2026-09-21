@@ -34,12 +34,6 @@
 //!   - `-patcha` without `-fint` (the default `-rint` reduced integration):
 //!     `GetReducedRule` needs MFEM's `NNLSSolver` (LAPACK).
 //!   - `-pa`: patch-wise partial assembly.
-//!   - `-patcha -fint` with `-ref > 0`: the bit-faithful PATCHWISE assembly
-//!     (`NurbsMeshGeometry`) evaluates MFEM's *refined* control net, whereas
-//!     fem-rs evaluates the original rational patch over the refined parameter
-//!     span — the same surface, different rounding.  The refined **weights**
-//!     are already reproduced bit-for-bit (`NurbsExtension::uniform_refinement`);
-//!     what is still missing is the refined net's **coordinates**.
 //! * Not ported, silently (they do not change the printed numbers): the GLVis
 //!   socket (`-vis`/`-p`), `refined.mesh`/`sol.gf` output, `-d cpu`, and the
 //!   `Options used:` / `Device configuration:` / `Timing for ...` banners
@@ -342,10 +336,19 @@ fn main() {
 
     // Step 7: `LinearForm b(&fespace); b.AddDomainIntegrator(new
     // DomainLFIntegrator(one)); b.Assemble();` — the standard rule, as in C++.
+    // `Di::SetIntegrationMode(...)` dispatch (computed here because the exact
+    // `NurbsMeshGeometry` is only materialised where an exact path consumes
+    // it: the file control net at `ref_levels == 0`, MFEM's refined
+    // `mesh->GetNodes()` for `-patcha -fint -ref > 0`).
+    let use_patchwise = args.patch_assembly && !args.reduced_integration;
     let (b, geo) = if ref_levels == 0 {
         let geo = NurbsMeshGeometry::from_mesh_text(&text, space.extension())
             .expect("NurbsMeshGeometry");
         (assemble_domain_lf_exact(&space, &geo, &|_| 1.0), Some(geo))
+    } else if use_patchwise {
+        let geo = NurbsMeshGeometry::from_mesh_nodes(space.mesh_nodes(), space.extension())
+            .expect("NurbsMeshGeometry");
+        (space.assemble_domain_lf(&|_| 1.0), Some(geo))
     } else {
         (space.assemble_domain_lf(&|_| 1.0), None)
     };
@@ -368,7 +371,6 @@ fn main() {
     rules.finalize(ext);
 
     // `di->SetIntegrationMode(...)` dispatch.
-    let use_patchwise = args.patch_assembly && !args.reduced_integration;
     if args.patch_assembly && args.reduced_integration && !args.pa {
         gap_exit(
             "-patcha with -rint (reduced integration, Mode::PATCHWISE_REDUCED)",
@@ -381,16 +383,6 @@ fn main() {
             "-pa (patch-wise partial assembly on NURBS patches)",
             "SetupPatchPA + PADiffusionApply3D + OperatorJacobiSmoother on NURBS patches \
              (crates/assembly/src/pa)",
-        );
-    }
-    if use_patchwise && ref_levels > 0 {
-        gap_exit(
-            "-patcha -fint with -ref > 0 (refined control-point geometry)",
-            "`NurbsMeshGeometry` must evaluate MFEM's refined control net; the refined \
-             weights are already bit-exact (`NurbsExtension::uniform_refinement`), the \
-             refined **coordinates** (projective `NURBSPatch::KnotInsert`) are not \
-             materialised (crates/space/src/nurbs_extension.rs, \
-             crates/assembly/src/iga/nurbs_patch.rs)",
         );
     }
 

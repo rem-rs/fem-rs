@@ -680,6 +680,16 @@ pub struct NurbsExtension {
     /// connected boundaries; see [`Self::dof_map`] and
     /// [`Self::connect_boundaries`].
     d_to_d: Vec<usize>,
+    /// Raw-DOF → compacted-DOF map (MFEM `activeDof` after the finalize pass
+    /// of `GenerateElementDofTable`): the slot of a raw DOF — in the
+    /// [`Self::dof_map`]-mapped numbering — in the compacted element-table
+    /// numbering, or `usize::MAX` for raw slots no element reaches.  The only
+    /// conforming case with such slots is 1-D, where the interior slot of a
+    /// unique edge duplicates the owning patch's interior slot and only the
+    /// patch's is ever addressed (`NURBSPatchMap::operator()(i)` case 1 goes
+    /// to `pOffset`); 2-D/3-D conforming offsets are fully used, so the map is
+    /// the identity there.
+    active_dof: Vec<usize>,
 }
 
 /// Which FE space a boundary DOF table is generated for — MFEM
@@ -974,6 +984,7 @@ impl NurbsExtension {
             f_mesh_offsets: Vec::new(),
             p_mesh_offsets: Vec::new(),
             d_to_d: Vec::new(),
+            active_dof: Vec::new(),
         };
 
         ext.build_patch_topology()?;
@@ -1401,33 +1412,61 @@ impl NurbsExtension {
     }
 
     /// The rational weights of the uniformly refined control net:
-    /// per patch, `NURBSPatch::KnotInsert(dir, knot)` (Piegl & Tiller A5.1)
-    /// applied to the **homogeneous** weight tensor, direction by direction.
+    /// per patch, `NURBSPatch::KnotInsert(dir, knot)` (Piegl & Tiller A5.5 as
+    /// MFEM implements it) applied to the **homogeneous** weight tensor,
+    /// direction by direction.
     ///
     /// `self` is the pre-refinement extension (source of the old weights),
     /// `new` the post-refinement one (source of the new DOF numbering).  The
-    /// projective form of a rational patch is invariant under knot insertion, so
-    /// inserting one knot `u` along direction `d` turns a weight line `w[i]`
-    /// into `boehm_insert(order_d, knots_d, u, w)`; the control points shared by
-    /// neighbouring patches get the same value (both blend the same projective
-    /// net), and the disagreement check keeps a damaged net from passing
-    /// silently.
+    /// projective form of a rational patch is invariant under knot insertion,
+    /// so inserting one knot `u` along direction `d` turns a weight line `w[i]`
+    /// into a blend with the *new* knot vector's factors; the control points
+    /// shared by neighbouring patches get the same value (both blend the same
+    /// projective net), and the disagreement check keeps a damaged net from
+    /// passing silently.
     ///
     /// The local control point ⇄ global DOF correspondence is taken from the
-    /// **element DOF tables** ([`Self::patch_local_dofs`]) rather than from
-    /// [`Self::patch_dof`], whose 1-D arm produces out-of-range values on a
-    /// refined extension (see the debt note on `patch_map_mode`).
+    /// **element DOF tables** ([`Self::patch_local_dofs`]); [`Self::patch_dof`]
+    /// produces the same numbering over its full index domain (pinned by the
+    /// D539 conformance test), and the table route additionally covers meshes
+    /// whose elements do not reach every control point.
     fn refined_weights(&self, new: &NurbsExtension, rf: usize) -> Result<Vec<f64>, String> {
+        let mut comps = self.refined_components(new, rf, std::slice::from_ref(&self.weights))?;
+        Ok(comps.remove(0))
+    }
+
+    /// The per-component tensors of the uniformly refined control net — the
+    /// shared body of [`Self::refined_weights`] (one component: the weights)
+    /// and [`Self::refined_control_points`] (`vdim` homogeneous coordinates
+    /// plus the weight): per patch, `NURBSPatch::KnotInsert(dir, knot)` applied
+    /// direction by direction to every component tensor with the same blend
+    /// factors (`NURBSPatch::KnotInsert`'s `slice(k, ll)` loop runs the A5.5
+    /// recursion over the components of one control polygon line, which is the
+    /// same per-component arithmetic as blending each component's line
+    /// separately).
+    ///
+    /// `comps[c][g]` is component `c` at old-DOF `g`; the returned tensors are
+    /// in `new`'s DOF numbering.  A control point shared by several patches is
+    /// written once and cross-checked against the other patches' values
+    /// (knot-insertion invariance makes them agree).
+    fn refined_components(
+        &self,
+        new: &NurbsExtension,
+        rf: usize,
+        comps: &[Vec<f64>],
+    ) -> Result<Vec<Vec<f64>>, String> {
         let dim = self.dim;
-        let mut out = vec![0.0_f64; new.n_dofs];
+        let mut out = vec![vec![0.0_f64; new.n_dofs]; comps.len()];
         let mut set = vec![false; new.n_dofs];
         for p in 0..self.n_patches() {
             let pkv = self.patch_knot_vectors(p)?;
             let mut ncp: Vec<usize> = pkv.iter().map(|k| k.ncp()).collect();
-            let mut wts = vec![0.0_f64; ncp.iter().product()];
+            let mut tensors = vec![vec![0.0_f64; ncp.iter().product()]; comps.len()];
             for (multi, g) in self.patch_local_dofs(p)? {
                 let flat = multi_index_from(&multi, &ncp);
-                wts[flat] = self.weights[g];
+                for (t, c) in tensors.iter_mut().zip(comps) {
+                    t[flat] = c[g];
+                }
             }
             for d in 0..dim {
                 let order = pkv[d].order();
@@ -1444,19 +1483,24 @@ impl NurbsExtension {
                 if inserted.is_empty() {
                     continue;
                 }
-                wts = insert_knot_direction(&wts, &ncp, d, knots, order, &inserted);
+                for t in tensors.iter_mut() {
+                    *t = insert_knot_direction(t, &ncp, d, knots, order, &inserted);
+                }
                 ncp[d] += inserted.len();
             }
             for (multi, g) in new.patch_local_dofs(p)? {
-                let v = wts[multi_index_from(&multi, &ncp)];
-                if set[g] && (out[g] - v).abs() > 1e-12 * out[g].abs().max(1.0) {
-                    return Err(format!(
-                        "NurbsExtension::uniform_refinement: control point {g} of patch {p} \
-                         disagrees with the value another patch wrote ({} vs {v})",
-                        out[g]
-                    ));
+                let flat = multi_index_from(&multi, &ncp);
+                for (o, t) in out.iter_mut().zip(&tensors) {
+                    let v = t[flat];
+                    if set[g] && (o[g] - v).abs() > 1e-12 * o[g].abs().max(1.0) {
+                        return Err(format!(
+                            "NurbsExtension::uniform_refinement: control point {g} of patch {p} \
+                             disagrees with the value another patch wrote ({} vs {v})",
+                            o[g]
+                        ));
+                    }
+                    o[g] = v;
                 }
-                out[g] = v;
                 set[g] = true;
             }
         }
@@ -1465,6 +1509,84 @@ impl NurbsExtension {
                 "NurbsExtension::uniform_refinement: refined control point {g} is not covered \
                  by any patch"
             ));
+        }
+        Ok(out)
+    }
+
+    /// The control-point **coordinates** of the uniformly refined control net —
+    /// the coordinate half of MFEM's `NURBSUniformRefinement`
+    /// (`Mesh::RefineNURBS`): `NURBSExtension::ConvertToPatches` homogenizes
+    /// the mesh's `Nodes` (`Patch(...,d) = coords(l·vdim+d)·weights(l)`), every
+    /// direction runs `NURBSPatch::KnotInsert` on the homogeneous tensor, and
+    /// `NURBSExtension::Set{1,2,3}DSolutionVector` divides the refined
+    /// components back by the refined weights
+    /// (`coords(l·vdim+d) = patch(...,d)/patch(...,vdim)`).
+    ///
+    /// `self` is the pre-refinement extension (with the mesh's rational
+    /// weights), `new` the post-refinement one, `coords` the original control
+    /// points (`vdim` components per DOF, as [`NurbsNodes::coords`]), and `rf`
+    /// the refinement factor [`Self::uniform_refinement`] ran with.  Returns
+    /// the refined Cartesian control points in `new`'s DOF numbering.
+    pub fn refined_control_points(
+        &self,
+        new: &NurbsExtension,
+        coords: &[Vec<f64>],
+        rf: usize,
+    ) -> Result<Vec<Vec<f64>>, String> {
+        let vdim = coords
+            .first()
+            .map(|c| c.len())
+            .ok_or_else(|| "NurbsExtension::refined_control_points: no control points".to_string())?;
+        if vdim < self.dim {
+            return Err(format!(
+                "NurbsExtension::refined_control_points: {vdim} components for dimension {}",
+                self.dim
+            ));
+        }
+        if coords.len() != self.n_dofs() {
+            return Err(format!(
+                "NurbsExtension::refined_control_points: {} control points for {} DOFs",
+                coords.len(),
+                self.n_dofs()
+            ));
+        }
+        if self.weights.len() != self.n_dofs() {
+            return Err(format!(
+                "NurbsExtension::refined_control_points: {} weights for {} DOFs — the rational \
+                 weights must cover the control net before homogenizing",
+                self.weights.len(),
+                self.n_dofs()
+            ));
+        }
+        let mut comps: Vec<Vec<f64>> = Vec::with_capacity(vdim + 1);
+        for d in 0..vdim {
+            comps.push(
+                coords
+                    .iter()
+                    .zip(&self.weights)
+                    .map(|(c, &w)| c[d] * w)
+                    .collect(),
+            );
+        }
+        comps.push(self.weights.clone());
+        let mut refined = self.refined_components(new, rf, &comps)?;
+        let weights = refined.pop().expect("the weight component");
+        // Dehomogenize componentwise: `coords(l·vdim+d) = patch(...,d) /
+        // patch(...,vdim)` — every dof of every coordinate component is
+        // divided by the refined weight **at that dof**.
+        for c in refined.iter_mut() {
+            for (v, &w) in c.iter_mut().zip(weights.iter()) {
+                *v /= w;
+            }
+        }
+        // Transpose the component-major tensors (`comps[c][g]`) into the
+        // dof-major convention of [`NurbsNodes::coords`] (one coordinate vector
+        // per DOF).
+        let mut out = vec![vec![0.0_f64; vdim]; new.n_dofs()];
+        for (d, comp) in refined.iter().enumerate() {
+            for (g, &v) in comp.iter().enumerate() {
+                out[g][d] = v;
+            }
         }
         Ok(out)
     }
@@ -1483,8 +1605,9 @@ impl NurbsExtension {
     ///
     /// A control point on a patch boundary appears in several elements and is
     /// assigned once per global DOF; the returned pairs are unique per `multi`
-    /// and per `dof`.
-    fn patch_local_dofs(&self, p: usize) -> Result<Vec<(Vec<usize>, usize)>, String> {
+    /// and per `dof`.  Public for the D539 conformance tests, which pin
+    /// [`Self::patch_dof`] against this table over the full index domain.
+    pub fn patch_local_dofs(&self, p: usize) -> Result<Vec<(Vec<usize>, usize)>, String> {
         let dim = self.dim;
         let kvs = self.patch_knot_vectors(p)?;
         let nloc: Vec<usize> = kvs.iter().map(|k| k.order() + 1).collect();
@@ -1526,9 +1649,19 @@ impl NurbsExtension {
         Ok(pairs)
     }
 
-    /// MFEM `NURBSPatchMap::operator()(i, j, k)` with `MapMode::Dof` — the
-    /// global (compacted) DOF index of the patch multi-index `multi` in the
-    /// `(x, y, z)` direction order, `0 <= multi[d] < NCP[d]`.
+    /// MFEM `NURBSExtension::GetPatchDofs` — the global (compacted) DOF index
+    /// of the patch multi-index `multi` in the `(x, y, z)` direction order,
+    /// `0 <= multi[d] < NCP[d]`.
+    ///
+    /// C++ evaluates `DofMap(NURBSPatchMap::operator()(...))`; the element DOF
+    /// table additionally pushes the result through the `activeDof` compaction
+    /// of `GenerateElementDofTable`, and the consumers of `GetPatchVDofs`
+    /// (the patch-wise `BilinearForm` assembly) index compacted vectors with
+    /// it — so this port applies both maps.  For conforming 2-D/3-D meshes the
+    /// compaction is the identity and the result is MFEM's raw value; the 1-D
+    /// refined extension is where they differ (the raw value can alias the
+    /// inactive interior slot of a unique edge, which MFEM itself never
+    /// consumes through `GetPatchDofs` — D539).
     pub fn patch_dof(&self, patch: usize, multi: &[usize]) -> Result<usize, String> {
         if multi.len() != self.dim {
             return Err(format!(
@@ -1537,7 +1670,17 @@ impl NurbsExtension {
                 multi.len()
             ));
         }
-        self.patch_map_mode(patch, multi, MapMode::Dof)
+        let merged = self.dof_map(self.patch_map_mode(patch, multi, MapMode::Dof)?);
+        match self.active_dof.get(merged) {
+            Some(&dof) if dof != usize::MAX => Ok(dof),
+            Some(_) => Err(format!(
+                "NurbsExtension::patch_dof: patch {patch} control point {multi:?} addresses \
+                 raw DOF {merged}, which no element reaches (inactive slot)"
+            )),
+            None => Err(format!(
+                "NurbsExtension::patch_dof: raw DOF {merged} is outside the offset table"
+            )),
+        }
     }
 
     /// The control-point coordinates of a NURBS mesh file: the
@@ -2193,6 +2336,7 @@ impl NurbsExtension {
         self.el_to_patch = el_to_patch;
         self.el_to_ijk = el_to_ijk;
         self.n_dofs = n_active;
+        self.active_dof = map;
         Ok(())
     }
 
@@ -3011,10 +3155,11 @@ impl NurbsExtension {
     /// `NURBSPatchMap::operator()` in MFEM — the element DOF table, the boundary
     /// DOF tables and `GetEssentialTrueDofs` — has to route through here.
     ///
-    /// `dof` must come from [`Self::patch_dof`] / the boundary-patch maps; an
-    /// index of the *compacted* table (e.g. an entry of
-    /// [`Self::element_dof_table`]) is already in the final numbering and must
-    /// not be mapped again.
+    /// `dof` must be the *raw* `NURBSPatchMap::operator()` value (as consumed
+    /// by the element/boundary DOF tables and [`Self::patch_dof`], which apply
+    /// `dof_map` and the `activeDof` compaction internally); an index of the
+    /// *compacted* table (e.g. an entry of [`Self::element_dof_table`]) is
+    /// already in the final numbering and must not be mapped again.
     pub fn dof_map(&self, dof: usize) -> usize {
         if self.d_to_d.is_empty() {
             dof
