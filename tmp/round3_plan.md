@@ -3639,14 +3639,554 @@ Write/Edit、前台单条命令（本轮已执行）；**主会话接管时要�
   d456 6/6、d468 9/0+1ign、assembly lib 700→**703**/0/5、poisson_solve 8/0、
   d143_gaps 6/6、fem-io lib 136/0、space lib 289/0。
 - **全量回归（收尾实测）**：十 crate lib 批 **10/10 ok / 2590 passed / 0 failed**；
-  `--tests` 全层 **219 targets / 3806 passed / 0 failed**；examples 0 错误；pro 层
-  0 error。
+`--tests` 全层 **219 targets / 3806 passed / 0 failed**；examples 0 错误；pro 层
+0 error。
+
+## 第五十五轮（round 55）：hex 高阶边界集 + tri RT 联合置换 + NURBS weights 缺陷 + pyramid prolongation
+
+四路并行 + 一路只读陈账审计（D492–D524 / D1–D491 陈旧条目）。开局 HEAD `1e864e6`
+（round 54 已推送）。
+
+### 开局：round 54 残留清理（主会话亲验）
+
+- **`examples/Cargo.toml` 的 4 条 miniapp 注册 round 54 收尾漏提交**：工作树带注册时
+  `cargo build --release --examples` 0 错误，但 **HEAD 内无这 4 条 `[[example]]`**
+  （`git ls-tree` 确认 4 个 `.rs` 源文件已入库，仅注册缺失）⇒ 新检出无法构建这 4 个
+  miniapp。**本轮开局补提交 `68d7b15`**（`build(examples): register four round-54 nurbs
+  miniapps`）。教训：round 54 的"Cargo.toml 审计通过"只验了工作树，未验 HEAD。
+- 游离产物 `dfem-minimal-surface-output.vtu`（miniapp 运行输出）从仓库根目录移入 `tmp/`。
+
+### 派单与文件独占
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| ① | D504 + D505 + D506 | D525-527 | `crates/space/src/constraints/dirichlet.rs`、`crates/parallel/**` |
+| ② | D492（+D515 执行轮） | D528-530 | `raviart_thomas/tri_*.rs`、`element/src/lib.rs`、`space/src/hdiv.rs` |
+| ③ | D516 + D517 + D518 | D531-533 | 所有 `nurbs*`（space/element/mesh/assembly-iga） |
+| ④ | D493（+D498/499/500 残余） | D534-536 | 所有 `pyramid*`、`lagrange/mod.rs` pyramid 部分 |
+
+### 环境两条纠错（round 55 开局实测）
+
+1. **Rust 工具链在 Windows 侧，不在 WSL。** 派单模板里的
+   `wsl -e bash -lc 'cargo …'` **是错的**——WSL 未安装 cargo
+   （`cargo: command not found`）。正确：Git Bash 直接 `cargo`（`/c/Users/lilu/.cargo/bin/cargo`，
+   rustc 1.94.1）。**WSL 只用于 MFEM C++ 参考编译**（有 `g++`/`mpirun`）。
+2. **⚠️ `/mnt/c/Users/lilu/works/mfem` 是 MFEM 4.9，不是 4.10（本轮发现的静默陷阱）**。
+   主会话亲验版本号：该树 `config/_config.hpp` = `#define MFEM_VERSION 40900` /
+   `MFEM_VERSION_STRING "4.9"`。**全项目纪律写的是"只用 4.10（禁 mfem49）"，但历轮派单
+   模板里的 `-I/mnt/c/Users/lilu/works/mfem` 恰好指向 4.9** ⇒ 凡按模板编 C++ 参考、
+   或从该树读 MFEM 源码/取 `data/*.mesh` 的路线，实际都在用 **4.9**。这解释了
+   round 54 登记的"**Windows MFEM dev 快照 NURBS 路径损坏**"：它既不是 dev 快照、
+   也不是回归，而是 **4.9 头 + 4.10 库的版本错配**（③路实测段错误，产物 16 行；
+   换 4.10 头后同一源码 389 行跑通、与 fem-rs 数值部分逐字节）。
+   **已核实的完整树地图**：
+
+   | 树 | 版本 | 完整度 |
+   |----|------|--------|
+   | `/home/quan/mfem410` | **4.10** | **完整源码树**（`examples/` + `data/` + `mfem.hpp`）⇒ 读源码/取 data/编 miniapp 都用这棵 |
+   | `/home/quan/mfem410_ser` | 4.10 | 串行库（也有 examples/data） |
+   | `/home/quan/mfem410_mpi` | 4.10 | MPI 库（需 `-I/usr/include/hypre -lHYPRE -lmetis -lrt`） |
+   | `/home/quan/mfem410_gslib` | 4.10 | GSLIB 变体 |
+   | `/home/quan/mfem_build` | **4.8.1** | 陷阱树 |
+   | `/mnt/c/Users/lilu/works/mfem` | **4.9** | 陷阱树（历轮被当 4.10 用） |
+
+   正确命令：
+   ```
+   g++ -std=c++17 -O2 -I/home/quan/mfem410 -I/home/quan/mfem410/config \
+     /home/quan/mfem410/miniapps/nurbs/nurbs_patch_ex1.cpp \
+     -L/home/quan/mfem410_ser -lmfem -o ~/work/r55/<name>_410h
+   ```
+   留证 `tmp/r55/cpp/ball_def.txt` 16 行 vs `ball_def_410h.txt` 389 行。
+   **已即时转发给仍在飞的②③路**（②路要重核 D492 的 π/符号表是否抄自 4.9 源码；
+   ③路要重核 `ball-nurbs.mesh` 的 517 与 389 行结论是否取自 4.10 的 data/源码）。
+   ⇒ 登记 **D538**：**"历轮 MFEM 对照是否用了 4.9 源码/data"需要一次专项审计**——
+   D492 的 slot π 与符号表、各轮从 `/mnt/c` 树抄下的 MFEM 表/常量/默认参数都是嫌疑对象。
+
+### 开局：主会话亲验的清理与基线（不占代理）
+
+- **D446 死文件裁剪**：`crates/assembly/tests/d446_hex_hdiv_prolongation.rs` 共 356 行，
+  其中**只有 37 行文档是活的**——`type Qc`/`q`/`elem_faces`/`face_key`/`mesh_faces`/
+  `check_hierarchy` 全部**零调用零 `#[test]`**（`git grep check_hierarchy HEAD -- crates/`
+  仅命中定义处）。按"死代码零容忍"裁成**纯文档目标**（保留原模块文档 + 四段
+  D468/D481/D482/D494 的取代记录 + 状态说明），删去约 270 行死代码。
+  校验：`cargo test -p fem-assembly --test d446_hex_hdiv_prolongation --no-run` 编译通过，
+  **该 target 自身零警告**（同批输出的 5 条警告全属 lib，见 D537）。
+- **陈旧产物清理**：`target/release/examples/` 下删除 **9 个 `mfem_miniapp_*.exe`**
+  （旧命名——`examples/Cargo.toml` 里 `mfem_miniapp` **0 命中**，现行名为 `miniapp_*`；
+  其中 `mfem_miniapp_joule.exe` 日期 Aug 28 而现行 `miniapp_joule.exe` 为 Sep 21，
+  正是 D502 描述的审计陷阱）+ **114 个预 Sep-01 的哈希后缀 `*-<hash>.exe`**。
+- **警告基线（D537 留证）**：`cargo build -p fem-assembly --lib` 报 **5 条**警告、
+  `fem-solver` **8 条**、vendor `linlvo` **20 条**，全部落在**本轮四路都没有独占的文件**里
+  （`assembly/src/physics/nonlinear.rs:23` 未用导入 `solve_gmres`/`solve_pcg_gssmoother`/
+  `solve_sparse_lu`；`assembly/src/physics/topology_optimization.rs:339` `f_c` 从未读取；
+  `solver/src/ode/symplectic.rs:85` 未用变量 `n`/`t`/`p` 等）⇒ **存量，非本轮引入**。
+  留证 `tmp/r55_warn_baseline.txt`。这与 round 54 ④路 "D465/D467/D471 三 crate 警告清零"
+  的说法冲突，登记 **D537**。
+- **D537 已由主会话关闭**（13 条 + ④路遗留 1 条，全部机械修复、编译验证零警告）：
+  - `solver`：`schwarz.rs` 未用导入 `Scalar as linlvoScalar`；`precond.rs` 未用导入
+    `LinearOperator` + 死绑定 `let n = la.nrows();`；`ode/symplectic.rs` 未用形参 `t`→`_t`；
+    `sli.rs` 死初始化 `let mut nom = nom0;`（**只改 CG 那处——BiCGSTAB 的
+    `:260` 同名初始化是活的**，其循环开头 `let alpha = nom / den` 先读后写）、
+    `let mut cf = 0.0f64;`、`let mut betanom = 0.0f64;`、未用 match 绑定 `Some(p)`→`Some(_)`。
+  - `assembly`：`physics/nonlinear.rs` 未用导入 `solve_gmres`/`solve_pcg_gssmoother`/
+    `solve_sparse_lu`；`physics/mixed_hyperelasticity.rs` 三处死绑定 `row`/`col`
+    （同文件 `:161`/`:251`/`:275` 的**同名绑定是活的**，只有 `coo.add` 那支的两个
+    K_uu 绑定与 `// K_up` 那支的 `row` 为死）；`physics/topology_optimization.rs`
+    死初始化 `let mut f_c = 0.0;`。
+  - **④路遗留（本轮新引入，已顺手清）**：`crates/assembly/src/transfer.rs:1912`
+    `let ref_corners = hdiv_rt0_ref_corners(family);` —— ④路把参考角点改成**逐子元**
+    （`:1931` `child_corners`）后，父元那份成了死绑定。
+  - **验证**：`cargo build -p fem-assembly -p fem-solver --lib` 的
+    ` --> crates…` 警告行 = **0**；仅剩 vendor `linlvo` 20 条（按历轮"vendor 不动"纪律保留）。
+  - **行为不变的牙**：`fem-solver --lib` **270 passed / 0 failed**；
+    `fem-assembly --lib` **703 passed / 0 failed / 5 ignored**
+    （与开工前 702/**1**/5ign 相比，那 1 个失败即②路处理的 `hdiv_error` NaN，已消失）。
+  - **纪律注记**：`sli.rs` 曾在一处历轮备忘录里被标"未在可改范围"，那是指**不改它的打印行为**
+    （`PCG: No convergence!` 与 4.9 镜像的差异）；本轮只删死初始化/死绑定，**不改任何数值路径**。
+  - **方法论注记**：这类"赋值未被读取"的改法用 `let mut x;`（删初始化）而非 `#[allow]`，
+    由**编译器验证"每条路径在首次读之前都已赋值"**——这本身就是"行为不变"的强证据。
+
+### ① D505 + D504 关闭、D506 机制三度更正（真根因在 `dof_coords`）
+
+**三个债务的根因都不在最初怀疑的地方**——collector 两次被证明是清白的，问题都在
+`dof_coords` 的坐标约定上。
+
+#### D505 —— **关闭**（根因在 `HCurlSpace::dof_coords`，不在 collector）
+- **更正**：`boundary_dofs_hcurl` **从来就返回 192 个 id**（从不缺那 96 个面内 dof）。
+  真根因：`HCurlSpace::dof_coords` **没有 hex 四边形面 dof 分支**，96 个面内 dof 全停在
+  `[0,0,0]` ⇒ 坐标键塌成 **1** 个 ⇒ 96 个边键 + 1 = **97**（MFEM 是 192）。
+- **MFEM 4.10 权威真值**（探针 `tmp/r55/d505_bdr_probe.cpp`，2×2×2 hex）：
+  `ness_vdof=ness_true=192`，`CLASS entity_dim=1 count=96`（48 条边界边 ×2）+
+  `CLASS entity_dim=2 count=96`（24 个边界面 ×4）。**与 round 54 的 `tmp/d124/mf_nd2.txt`
+  逐位相同（diff 空）**——说明 round 54 的 MFEM 数字一直是对的，"97"纯是 fem-rs 的 key 函数所致。
+  H1 Q2=98、RT1=96 亦逐位相同。
+- **修复**：`crates/space/src/hcurl.rs:982` `dof_coords` 新增 hex 四边形面分支（+13 行），
+  直接读空间里**早已算好但从未被读**的 `quad_face_anchor[key].nodes`
+  （面创建单元的 `FE::Nodes` 点值位）；顺带把 tet 面 `face_anchor[&key]` 改为 `.get()` 容错。
+- **测试**：`crates/space/tests/d505_hex_nd2_bdr_dofs.rs` 3/0 + 金标
+  `crates/space/tests/data/d505_d506_hex_bdr_keys_mfem.txt`（307 行：ND2 192 + RT1 96 行）。
+  含"无 `[0,0,0]` 键""坐标去重后数量不减""与 MFEM dump 逐 dof 集合相等"
+  "96 边/96 面组成""ND3 432 = 48×3 + 24×12"。**有牙**：修复前 `distinct_keys=97`/`at_origin=96`，
+  这些断言必然失败。
+
+#### D506 —— **机制三度更正 + 部分关闭**（真根因是 D414 的坐标约定，库级修复受阻）
+- **更正（推翻审计与主会话转发的"key 匹配"假设）**：collector 同样清白——
+  `boundary_dofs_hdiv(hex, RT1, 1..=6)` = **96**（24 个边界面 × `(k+1)²` 整块）。
+  环序错位**确实存在但已被现有回退吸收**：实测 24 个面**全部命中第 2 个备选三元组
+  `(0,1,3)`**（`hits=[0,24,0,0]`，`(0,1,2)` 从不命中）——若无 `dirichlet.rs` 的 4 三元组
+  回退才会整块丢失。
+- **26 的来源**：`HDivSpace::dof_coords` 是 **D414 的「几何锚点」约定**
+  （`hdiv.rs:1477-1488` 明文写"不是 MFEM 插值节点"），k=1 四边形格点 == 面的 4 个角点
+  ⇒ 96 个 dof 别名到立方体的 **26 个边界顶点**（`tmp/d124/femrs_rt1_hex.txt` 正是这 26 个坐标）。
+- **MFEM 真值**：RT1 `ness=96`（24×4）、`ndofs=240`（= fem-rs `n_dofs` 240）；RT2 `ness=216`（24×9）。
+- **库级修复落在 `hdiv.rs`（②路独占）⇒ 按纪律停手**，登记 **D526**。
+- **测试**：`crates/space/tests/d506_hex_rt1_bdr_dofs.rs` 3/0——其中
+  `..._blocks_are_the_24_face_blocks`（24 块、每块 4、互斥、并集==collector）
+  **直接证伪"块未暴露"**；`..._nodal_points_match_mfem` 用面环 + `gauss_legendre_01(k+1)`
+  张量规则重建 MFEM 节点点集，与金标 96 键**逐点相等**（可直接作为 D526 的验收标准）。
+- **顺带加固**：`crates/parallel/tests/d124_boundary_true_dofs_par.rs` 的 `run_union`
+  现在同时校验 MFEM 的 `sum_ess_true`（dof 计数，**不受别名影响**）与 `union_keys`
+  ⇒ 把原先因键别名而"空转"的 RT1 np 不变性检验变成真检验。
+
+#### D504 —— **关闭**（空分区 + 集合通信被 `is_empty()` 跳过的死锁）
+- **根因链**：`unit_square_quad(3)`=9 个 quad，np=4 ⇒ `extract_submesh_for_rank` 的
+  `chunk = 9.div_ceil(4) = 3`、`elem_part[e]=e/3` ⇒ **rank 3 空分区**
+  （实测 `local_nodes=0 local_elems=0`、`dm n_dofs=0`，四 rank 都到 `pre-new` 后永久挂住）；
+  `dof_partition.rs` 的三个 ghost-dof 交换（`exchange_ghost_edge_ids`/`ghost_face_keys`/
+  `ghost_interior_ids`）用 `ghost…is_empty()` **跳过了 `alltoallv` 集合同步** ⇒ 空 rank
+  不进集合，其余 rank 永久阻塞在 `ParallelFESpace::new`。
+- **修复**：`crates/parallel/src/dof_partition.rs:2108/2198/2295` —— 三个 guard 只保留
+  `comm.size() <= 1`（空请求列表是合法 alltoallv payload，`GhostExchange::from_partition`
+  早就是正确范式）；三处回复解码改带上下文的 `get(...).expect`。
+- **红证据（可复现）**：把 guard 改回 `|| ghost_edges.is_empty()` ⇒
+  `timeout 240 cargo test -p fem-parallel --test d504_h1_q2_quad_np4_par` **无 `test result` 行、被 timeout 杀死**；
+  恢复修复 ⇒ 同一命令 **4 passed**。
+- **修复后实测**：np=4 四 rank 全部返回，`n_owned = 25/14/10/0`（和 = 49 = 串行 dof 数）。
+- **MFEM MPI 参照**（`tmp/r55/d504_quad_q2_probe.cpp`，mfem410_mpi）：3×3 网格
+  `GlobalTrueVSize=49 sum_ess_true=24 union_keys=24`；4×4 `81/32/32`；
+  **np=1/2/4 三档键表逐位相同**。
+- **测试**：`crates/parallel/tests/d504_h1_q2_quad_np4_par.rs` 4/0——含最小死锁复现
+  （断言确实存在空 rank：`stats=[(25,49),(14,49),(10,49),(0,0)]`）、np1/2/4 union == MFEM
+  内联金标（3×3→24、4×4→32 四 rank 全活跃）、非齐次 Dirichlet 解 np1 vs np2/np4
+  `max|Δu| < 1e-9`。另 `d124_h1_q2_quad_boundary_set_np2` 升为 **np1/2/4**（原"np4 会挂"注释已过期）。
+
+#### ① 路新债
+- **D525**（space）：`HCurlSpace::dof_coords` 在非 hex/tet 几何上不完整——
+  (a) prism/pyramid 三角面进 `face_to_dof` 但无 `face_anchor` ⇒ 原来直接 **panic**
+  （`data/beam-wedge.mesh` + ND2 可复现），本轮改为 `.get()` 容错（退化为零坐标），
+  面点表未实现；(b) prism/pyramid 四边形面 dof 无锚点（实测 prism ND2 边界
+  `dofs=198 → distinct_keys=103, origin_keys=1`）；(c) **所有单元内部 dof** 无坐标
+  （hex ND2 `n_dofs=300, at_origin=48, distinct_keys=253`）。线索：hex 内部块 =
+  `hex_coords[12k²+i]` 经文件内已有的私有 `hex_trilinear_map`；prism/pyramid 需新面点表。
+- **D526**（space，`hdiv.rs`——**②路独占，未动**）：HDiv 缺 MFEM-nodal 坐标访问器，
+  即 D506 的真实残留。补丁要点：四边形面块改用 `gauss_legendre_01(k+1)` 张量点
+  （k=0 保持中心）或新增 `dof_nodal_coords()`；`d394_prism_pyramid_hdiv_blocks.rs::
+  dof_coords_anchors_cover_every_block` 现 pin 等距锚点，需同步更新。①路的 D506 测试
+  已复现 MFEM 的 96 键全集，可直接作验收标准。
+- **D527**（parallel，`par_partition.rs:202`）：连续分块分区器让尾部 rank 空载
+  （`9→3,3,3,0`）。**故意未改**：会平移仓库里所有 np≥2 基线；已在函数处留 D527 注释。
+
+#### ① 路验收（最终态实跑）
+`fem-space --lib` **289/0**；`cargo test -p fem-space` **525/0**（47 个 test 二进制全绿）；
+`fem-parallel` **307/0**；`d505` 3/0、`d506` 3/0、`d504` 4/0、`d124_par` 7/0。
+新代码零警告。
+
+### ② D492 —— **关闭**（D515 可关闭）；配对层从"桥"变成**恒等映射**
+
+round 54 用"物理桥 + 符号律"解释通了 220/220（max 3.6e-16），本轮把这层桥**从代码里消掉**——
+`element_dofs(e)[slot] == |MFEM dof|` 且 `element_signs(e)[slot] == MFEM sign` 直接成立。
+
+#### ① π（slot 约定）—— 逐字对齐 MFEM
+- **前**：`hdiv.rs:42` `TRI_FACES = [(1,2),(0,2),(0,1)]`（`edge opposite vertex i`）；
+  element 侧 `mfem_tri_nodal_dofs` 边表 hyp(1,2)→left(0,2)→bottom(0,1)，left 沿 v0→v2。
+- **后**：`hdiv.rs:58` `TRI_EDGES = [(0,1),(1,2),(2,0)]`（= MFEM `Geometry::TRIANGLE::Edges` 逐字），
+  用在 `hdiv.rs:726`；element 侧（`tri_rt1.rs:89/:103-108/:143/:296`）改为
+  bottom(0,1)→hyp(1,2)→left(2,0)，**left 沿 v2→v0**（MFEM `(0, bop[p−i])`）。
+- 因 `mfem_tri_nodal_dofs` 是**三方共享表**，同序改动必须同步落到 `tri_rt2.rs:105/:257`、
+  `tri_rtk.rs`（`tri_data` 三条边泛函块重排 + left 参数由 v2 起算 `−beta_int(p,b)`、k=0 臂
+  `:247`、`dof_coords:371`），否则会造出新的不自洽。
+
+#### ② D513（全局编号：逐元交错 → 实体主序）
+- **前**：`hdiv.rs` 旧 695–736 单趟循环，`next_dof` 在每元三条边后**立刻**发 interior dof
+  （elem0 内插 6,7，elem1 内插 12,13）。
+- **后**：`hdiv.rs:716-762` Pass 1 先跑**全部**边块（边索引 = `TRI_EDGES` 逐元首次遇到序
+  = MFEM 建边表序）；`:768-781` Pass 2 把 interior 放在 `interior_base` 上、按
+  `interior_base + e*interior_dofs` 编号（= MFEM `bbase = nvdofs+nedofs+elem*nb`）。
+- **踩到的坑（已修）**：`dofs_flat` 的**内存布局必须保持 element-major**
+  （`element_dofs` 按 `e*dofs_per_elem` 切片），只有**编号**是 entity-major；
+  第一版两趟 `push` 把布局也打乱了，改为预分配定长缓冲 + 下标写入。
+
+#### ③ D514（符号 = −MFEM）
+- **前**：`hdiv.rs:759-793` `compute_sign_2d_tri` = `global_flip × outward_flip`（几何求值）。
+- **后**：`hdiv.rs:736` `let sign = if gi < gj { 1.0 } else { -1.0 };`
+  （MFEM `SegDofOrd[ori>0?0:1]`）——**`compute_sign_2d_tri` 已删除**（零死代码，主会话 grep 确认 0 处）。
+- **家族一致性的来历**：quad 的 `compute_sign_2d_quad`（`hdiv.rs:1018`）**本来就是** `gi<gj` 规则
+  ——这正是"quad RT1 早绿、只有 tri 差一个 −1 因子"的原因；本轮把 tri 补成同一规则。
+
+#### 验收（**主会话亲跑复现**）
+- `d461_tri_rt1_matches_mfem`（原 `#[ignore]` oracle）**翻绿**：
+  `tri RT1: 220 MFEM entries matched, max|delta| = 3.608e-16`；
+  `d468` **10 passed / 0 failed / 0 ignored**（摘 ignore 后实跑）；`d459` 3/0；`d492` **2/0/0ign**
+  （`d492_tri_rt1_element_dofs_are_mfem_tables` + `d492_tri_rt1_slot_map_is_identity`）。
+- `hdiv_error` **19/0**；`fem-element --lib` **518/0**；`fem-space` 289+全绿；`d493` 7/0/3ign（ignore 全属④路 pyramid）。
+- **D515 可关闭**：三层差异已从代码消除，无剩余协调项（prism 归 D512、pyramid 归④路）。
+
+#### 关键旁证：**D492 的结论扛住了 4.10 版本审计**
+本轮新写的 C++ 探针（`tmp/d492/r55_mfem_probe.cpp` / `r55_mfem_p_probe.cpp`）**头与库都取 4.10**，
+输出与 round 54 的 d468 truth **逐字节一致**（`diff` 220 行 P + 全部 DOFS 行）。且②路明确说明：
+从 4.9 源码读到的每一项（`TRIANGLE::Edges`、`RT_TriangleElement` ctor + `nk`、`SegDofOrd`、
+`GetElementDofs` 的 entity-major + `EncodeDof`、`GetEdgeVertices` 排序注释）
+**已全部在 `/home/quan/mfem410` 重新核对，结论不变** ⇒ **D538 的嫌疑范围可收窄：D492 的 π/符号表已排除**。
+- **独立的规范变换验证**（`tmp/d492/r55_probe --bin sign_check`）：对每个全局 dof，所有
+  (element, slot) 出现处必须给出同一物理法向 `signs[k]·cof(J_e)·nk_k/det(J_e)`；
+  `unit_square_tri(1/2/4)` 与 MFEM fixture 全部 **0 violations** ⇒ 新符号规则是**严格逐 dof
+  规范变换**（`M' = D M D`、`b' = D b`），数学上不可能破坏自洽性。
+
+#### hdiv_error NaN 的最终裁定（主会话先前归因被推翻，如实记录）
+主会话曾归因为"质量矩阵与基约定不自洽"，②路用探针推翻：`5/3 − energy` **只能取 0 或 −2.22e-16**，
+而 `err_routine = 6.9056e-16` ⇒ `‖u_h−u_ex‖² ≈ 4.77e-31`，**远在 f64 表示精度之下**——
+HEAD 通过是舍入巧合。三档实测：tri1 `−6.661e-16`、tri2 `−2.220e-16`（恰好 −1 ulp）、tri4 `0.0`。
+**主会话裁定并补强**：接受诊断、授权改 `hdiv_error.rs`，但要求**下界钳位 + 上界断言**并存
+（原 `.max(0.0)` 单独用会让 `energy > 5/3` 的上界约束消失，而 Galerkin 正交 ⇒
+`energy ≤ ‖u_ex‖² = 5/3` 有明确上界）：
+`assert!(residual_sq > -1e-13, "uᵀ M u exceeds ∫|u_ex|² by …")` + `residual_sq.max(0.0).sqrt()`，
+**容差 1e-10 未放宽**。决定性反证：同文件 `hdiv_rt1_norm_matches_mass_matrix` 改动后仍绿。
+
+#### ② 路新债
+- **D528**（工具链）：探针按模板 `-I/mnt/c/.../mfem`（**4.9 头**）+ 4.10 库 ⇒ `P->Mult`/`GetElementDofs`
+  途中**段错误**；换 `-I/home/quan/mfem410_ser` 后 exit=0。根因即本轮发现的版本陷阱
+  （与主会话的 **D538** 同源，D528 记工具链现象、D538 记"历轮 4.9 使用面"的审计任务）。
+- **D529**（element）：**`TriRTk`(k≥1) 是 moment-dual，dof 值不是 MFEM 的**。`W[i][j]=φ_j(x_i)·nk_i`
+  谱：`TriRT1` 6.7e-16、`TriRT2` 1.2e-15、`TriRTk(0)` 0.0（皆 = I，即 MFEM 点对偶），
+  但 **`TriRTk(1)` = 3.464、`TriRTk(2)` = 17.71**。根因：`tri_rtk.rs::tri_data` 的泛函是
+  边矩 `∫(Φ·n)t^p dt` + interior 矩，与 MFEM 点值泛函是**不同对偶基**；`P = B·W⁻¹` 把差异藏住了，
+  但任何**直接读 tri RTk dof 值**的路径（DC 文件、后处理、`dpg/dpg_basis.rs:140` 的 `TriRTk::new(p)`）
+  与 MFEM 不一致。复现：`cd tmp/d492/r55_probe && cargo run --release --bin wk`。
+  （与④路的 **D534**（pyramid PyraRTk 同病）是**同一族缺陷**。）
+- **D530**（space/mesh）：tri H(div) 空间现在**静默**不容忍负定向单元——反转 fixture elem 0 顶点序
+  后 `HDivSpace` 仍可构造，但全局 dof 出现 **2 处法向不一致**（`sign_check` 末段可复现）。
+  根因：D514 换成 `SegDofOrd`（只看顶点 id）后规则要求单元正定向，MFEM 用 `Mesh::CheckOfFlips`
+  保证，fem-rs **无任何检查**（旧的 outward 规则因几何求值反而容忍 CW）。
+
+#### ② 路诚实清单
+- 未换 `TriRTk` 泛函集（D529）、未加定向检查（D530）、未重跑 `fem-py`（`pyo3-build-config` 失败，与本改动无关）。
+- workspace 全扫 `cargo test --workspace --exclude fem-py` = **4659 passed / 37 failed**：
+  **35 个在 `vendor/linger`**（AMG/预条件收敛断言）——主会话核实 `vendor/` **未被改动**且
+  `linlvo` 只依赖 num-traits/num-complex/thiserror/rayon/mpi/cblas-sys、**不依赖任何 fem crate**
+  ⇒ **不可能由本轮引起，属既有 vendor 状态，且在四道回归门之外**；
+  **4 个 doctest 二进制**失败是 `LNK1318/LNK1201: … insufficient disk space`（**磁盘耗尽伪影**，
+  非代码问题）。
+- **磁盘事件（如实记录）**：途中 `/c` 一度到 **99%**（`target` 80G，其中 `debug/incremental` 20G），
+  一次全量 sweep 因 `ENOSPC` 失败；②路删除 `target/debug/incremental`（可再生成）后重跑通过。
+  主会话复核：删除后 `/c` 可用 **39G**、`target` 72G（debug 64G / release 8G）。
+- 唯一一次未用 Write/Edit 落盘：`tmp/d492/r55_mfem_p.cpp` 是 `sed` 派生的**临时**探针，
+  已被手写的 `r55_mfem_p_probe.cpp` 取代并删除；`crates/**` 全部只用 Write/Edit。
+
+### ③ D516 + D517 关闭、D518 精确登记；**意外解锁 `-ref > 0` 逐字节**
+
+#### D516 —— **关闭**（任务书描述整体改写；含两个真实缺陷）
+**先纠正登记**：round 54 的"**1040 值 vs GetNDof 517**"是**测量错误**——`weights` 段是
+**第 84–600 行、恰好 517 个 token = `GetNDof()`**；1040 是"`weights` 关键字起到 EOF 的行数"，
+把后面的 `FiniteElementSpace` 节点块（1560 token）也算进去了（关键字后总 token = 2077 = 517+1560）。
+**MFEM 取前 517 的确切源码依据**：`NURBSExtension::Load`（`mesh/nurbs.cpp:2941-2948`）
+`if (ident == "weights") weights.Load(input, GetNDof());` → `Vector::Load(istream&, int size)`
+**顺序读 size 个、无计数、无长度校验、多余值留在流里**；`weights` 是 v1.0 格式最后一节,
+故多余值永不消费 ⇒ **根本没有发生截断**。探针（`tmp/r55/d516_probe.cpp`）：
+`RAW=517 GetNDof=517 weights_Size=517 NONUNIT=360 first=16 last=516`、`w(i)==raw[i]` **mismatch=0**。
+**两条已有路径本就不矛盾**（`tokenize_mesh` 遇非数字 token 起新 section ⇒ `section("weights")` 也是 517；
+`nurbs_patch.rs` 的 `parse_weights_section` 同样在 `FiniteElementSpace` 处停止）⇒
+**"静默回退全 1" 在这两条路径上都不存在**。
+
+**缺陷 A（`patches` 变体权重缺失）**：MFEM 的 `weights` 段被 `if (patches.Size() == 0)` 守卫
+（`nurbs.cpp:2943`），`patches` 变体的权重来自 patch 控制点的**齐次末分量**
+（`ReadNURBSMesh` → `SetCoordsFromPatches` → `Set3DSolutionVector`：`weights(p2g(i,j,k)) = patch(i,j,k,vdim)`）。
+fem-rs 原对 `square-disc-nurbs-patch.mesh` 给全 1，MFEM 是 **12 个非单位（first=19, last=36）**。
+→ 新增 `fill_weights_from_patches`。
+
+**缺陷 B（分析侧有理权重被丢弃 —— 本轮真实的高价值缺陷）**：`NurbsExtension::with_orders`
+（`nurbs_extension.rs:1295`）**无条件** `weights = unit_weights()`。MFEM 只在"显式用新 orders
+构造 `NURBSExtension(parent,…)`"时如此（`nurbs_ex1 -o≥1`，`mesh/nurbs.cpp:2998-3001`）；
+而 `nurbs_patch_ex1` 走 `FiniteElementSpace fespace(&mesh, fec)` ⇒ `NURSext_==NULL` ⇒
+`NURBSext = mesh->NURBSext`（`fem/fespace.cpp:2559-2565`），**分析侧继承网格的有理权重**。
+- **观测到的后果**：`NurbsFESpace::element_fe`/`fe_shape`/`fe_grad`/`assemble_diffusion`/
+  `assemble_domain_lf` 在有理网格上**静默变成多项式基**——`element_weights(1)` 全 1
+  （MFEM：125 中 **84 个非单位**），中心点形函数与 MFEM 最大偏差 **5.0902244597286553e-3**
+  （占最大形函数值 0.050018147782311478 的 **10%**）。
+- **未观测到的后果**：`nurbs_patch_ex1` ref=0 走 `ExactElement`（权重独立取自 `NurbsMeshGeometry`）
+  ⇒ ball 默认档**在改动前就已逐字节**。**"全管线百分级偏差"未被观测到，属推演影响**——已如实区分。
+- 修复：`weights` 解析改 MFEM 语义（`len >= n_dofs` 取前 `n_dofs`；短于则**显式 Err**）；
+  新增 `with_orders_keeping_weights` + `NurbsFESpace::from_mesh_isoparametric_str/file`
+  （保持旧 `from_mesh_str` 的 `nurbs_ex1` 语义不变）。
+
+#### 副作用收获：`-ref > 0` 从"被拦住"变"可跑且逐字节"
+移植 MFEM `NURBSPatch::KnotInsert`（A5.5，`nurbs.cpp:1767`）到**齐次权重**张量：
+`get_span`（MFEM 的 `GetSpan` 约定）、`knot_insert_line`、`insert_knot_direction`、
+`refined_weights`、`patch_local_dofs`（用**单元 dof 表**）。**关键教训**：MFEM 的 `alpha`
+用 **newkv** 计算，结果与教科书 A5.1 不同（MFEM `[p0,(p0+p1)/2,(p1+p2)/2,…]` vs
+A5.1 `[p0,p1,(p1+p2)/2,…]`）——第一版按 A5.1 写使 **360/7000 项错**，改逐行移植后**归零**。
+
+**主会话独立复现（`tmp/r55/cmp_tier.sh` 口径）**：
+
+| 档 | cpp/rs 行数 | diff | 状态 |
+|----|-------------|------|------|
+| ball 默认 | 366/366 | 0 | **IDENTICAL**（既有基准保持） |
+| **ball `-ref 1`** | **395/395** | **0** | **IDENTICAL（新增能力）** |
+| **ball `-ref 2`** | **348/348** | **0** | **IDENTICAL（新增能力）** |
+
+r1 细化权重（56 元 ×125 = 7000 项）**worst rel = 0.000e0**；r1/r2 的 `GetNDof`/非单位数
+（976/720、2584/2016）全等。其余基准保持：beam 默认 8/8 diff 0、ball `-patcha -fint` 360/360 diff 0、
+beam `-ref 2 -iro 8` 28/28 diff 2（1 行差、两侧机器精度）；`mini_nurbs_mesh_info` 三档
+stdout+dat 全 IDENTICAL；`mini_nurbs_surface` stdout IDENTICAL（`Output-Surface.mesh`
+32/3468 行末位差 ~1 ulp = 既有 D519，未变）。
+
+#### D517 —— **关闭**（去重复实现本已由 D374/D496 完成，本轮补验证）
+`crates/mesh/src/nurbs_mesh.rs` 现仅 11 行 re-export `NurbsKnotVector`；
+`NurbsKnotVector::degree_elevate` 委派 `fem_element::nurbs_fe_collection::degree_elevate`、
+`NurbsPatch::degree_elevate` 委派 `fem_element::nurbs::elevate_{u,v}_2d`；**旧"中点插结"实现全仓无残留**。
+新测试 `nurbs_patch::tests::degree_elevate_kernels_are_distinct_and_agree_on_one_span`
+**纠正一个流行误解**：两个核**本就该不同**（`KnotVector::DegreeElevate`：`NCP += t`；
+A5.9：`NCP += spans·t`），并断言单跨时两者必须一致。
+
+#### D518 —— **精确登记**（三项裁定，全部有 MFEM 4.10 侧铁证）
+| 子项 | 裁定 | 证据 |
+|------|------|------|
+| `-patcha`（默认 `-rint`） | **本轮不可关闭，且当前参考库无法产生对照** | `mfem410/config/_config.hpp:74` 是 `// #define MFEM_USE_LAPACK` ⇒ `GetReducedRule` → **`MFEM abort: NNLSSolver requires building with LAPACK`**（exit 134）。**C++ 自己就 abort** ⇒ 要出对照须先建 4.10+LAPACK 库（D533） |
+| `-pa` | **可达、可验证；本轮未做**（→D532） | miniapp 自带 `MFEM_VERIFY(!(pa && !patchAssembly))` ⇒ `-pa` 必须配 `-patcha`；**`-patcha -fint -pa` 在 4.10 跑通**（614 行） |
+| `-ref > 0` | **默认档已关闭（逐字节）**；`-patcha -fint` 档仍留（→D531） | 见上；剩余缺口只是**细化后的控制点坐标**（权重已位精确） |
+
+#### ③ 路新债
+- **D531（P2）** 细化控制点坐标（齐次 `NURBSPatch::KnotInsert`）供 `NurbsMeshGeometry`：
+  `-patcha -fint -ref>0` 的位精确 PATCHWISE 装配需要 MFEM **细化网**坐标；fem-rs 现用
+  "原网在细化参数区间上求值"（同一曲面、舍入不同）。**权重半边已位精确**（本轮），缺坐标半边；
+  内核 `knot_insert_line` 已就位，扩成 `dim+1` 分量张量即可。阻断点：
+  `crates/assembly/src/iga/nurbs_patch.rs::NurbsMeshGeometry::from_mesh_text` 只接受文件文本。
+- **D532（P2）** `-pa`（patch-wise PA）：需 `DiffusionIntegrator::SetupPatchPA`
+  （`bilininteg_diffusion_patch.cpp:249+`）+ `PADiffusionApply3D` + NURBS 版 `OperatorJacobiSmoother`。
+- **D533（P1，环境级）** `-patcha -rint` 的 NNLS 不可达且参考侧无法产生对照：依赖
+  `NNLSSolver`（`linalg/solvers.cpp:3814-4030`，用 LAPACK `ormqr`）。子债：
+  (a) 先建 **MFEM 4.10 + LAPACK** 参考库；(b) `GetReducedRule`（逐 dof 区间 NNLS +
+  `min_nnz_`/`max_nnz_` 启发式）+ 有界 `Solve` 的 Householder QR/`ormqr` 等价物——
+  **`crates/linalg` 目前没有 QR**；(c) reduced-rule 装配路径。**无 (a) 则连"逐字节"验收标准都不存在**。
+- **D539（P2，主会话据③路发现登记）** `NurbsExtension::patch_map_mode` 的 **1-D 分支不可靠**：
+  对一个 3-DOF 的细化 1-D 扩展，`patch_dof(0,[2])` 返回 3 = **越界**（实锤：`uniform_refinement`
+  用它时 `index out of bounds: len is 3 but index is 3`）。③路因此改用**单元 dof 表**
+  （`patch_local_dofs`）绕开；**该 1-D 分支本身未修**（2-D/3-D 分支经 `nurbs_patches_variant`
+  的网格断言验证正确）。
+
+#### ③ 路诚实清单与新增/修改测试
+- **没做**：`-pa`（D532）、`-patcha -rint` NNLS（D533）、细化**坐标**（D531）、`-incdeg`（既有债）。
+- **源树差异已排除**：`data/ball-nurbs.mesh` 在 `/mnt/c`、`/home/quan/mfem410`、`fem-rs/data`
+  三份 **md5 完全相同**（`bca98e8eb2bdbebb84af0f6fb5dbf167`）⇒ "517" 结论不受树差异影响；
+  miniapp 源码 4.9/4.10 **完全相同**（`/mnt/c` 那份只是 CRLF）。
+- **参考侧自身限制**：`-patcha -fint -ref>0` 只跑了默认档；`-patcha -fint` 在 **beam（NURBS1）上
+  MFEM 自己 abort**（`SparseMatrix::EliminateRowCol #2`，exit 134），故该档只能用 ball。
+- **测试**：`crates/space/tests/d516_nurbs_weights.rs`（新，324 行）**7/0**——全 14 个可读 NURBS 网格的
+  权重数/非单位数/first/last 对拍、ball 首 16 个 1 与 w[16]/w[17]/w[515]/w[516] 精确值、
+  段加长取前 517、段过短报错、patches 变体 12 非单位且 first19/last36、等参空间有理
+  （元素1 前 15 权重 + 84 非单位 + 形函数 5 个精确值 + 与多项式最大偏差 5.09e-3）、
+  `nurbs_ex1` 语义全 1、r1/r2 细化权重（NDOF/非单位数 + 元素8 前 10 权重 + 全表两个加权和逐位相等）。
+  `d497_nurbs_patch` **9/0**（**无牙测试 `d497_ball_weights_match_mfem` 已改硬断言**）；
+  `nurbs_patch` 2/0；NURBS 目标批次 **53/0**。
+- **改动文件**：`crates/space/src/nurbs_extension.rs`（权重解析 `:1031`、`fill_weights_from_patches`
+  `:1138`、`with_orders_keeping_weights` `:1295`、`uniform_refinement` 携带权重 `:1372`、
+  `refined_weights` `:1420`、`patch_local_dofs` `:1487`、A5.5 内核 `:415-560`、
+  **删除死 API `element_vertices`（D520 顺手关闭）**）、`crates/space/src/nurbs_fe_space.rs`
+  （新增等参入口）、`crates/mesh/src/nurbs_patch.rs`（D517 测试）、`crates/assembly/tests/d497_nurbs_patch.rs`、
+  `crates/space/tests/nurbs_patches_variant.rs`（权重断言由"全 1"改为 MFEM 的 38 个具体值）、
+  `miniapps/nurbs/nurbs_patch_ex1.rs`（等参入口、**删除错误的 `-ref>0` gap_exit**）。
+  **未动共享文件；未新增示例，无需注册。**
+
+### ④ D493 —— **未关闭**，但三条根因全部定位（其中一条是本轮新发现）
+
+**不是"修好了"，而是"把不可解的三层原因全部钉死、并做了正确的 oracle"。**
+
+**(a) MFEM 上游 bug —— 实证 + 正确 oracle + 上报材料（本轮最硬成果）**
+根因（`fem/fespace.cpp:1663-1710` + `1741-1755`）：`GetLocalRefinementMatrices(geom)`
+按**子元**几何取 `fe`/点矩阵，金字塔的 4 个内部 tet 子元因此拿到
+`localP[TETRAHEDRON]`（4×4 的 tet 自插值，且 4 个子元 `emb.matrix` 全为 0），
+再被 `SetRow(r, coarse_vdofs)` 写进父元 **5** 个粗 dof ⇒ `srow(4)` **越界读**，
+实测 4 行都取到 `P[28,4]=0.15625`。MFEM 为此刻画准备的 `pyr_children` 点矩阵
+第 6..9 行从未被查询。
+
+- **关键陷阱**：正确调用是 `fe_child->GetLocalInterpolation(...)`（同几何）/
+  `fe_child->GetTransferMatrix(*fe_parent, ...)`（跨几何）→ `LocalInterpolation_RT`。
+  **不能用** 3 参 `fe_child->Project(*fe_parent, ...)`——tet 与 Fuentes pyramid
+  **都把它重载成 `Project_RT`**（另一种对偶构造，此处差 4 倍）。
+- **修正后 oracle**（`tmp/d493/probe_fixed.cpp` + `d493_pyramid_o0_fixed.txt`）：
+  仿射框架坐标 **138/138** == `pyr_children`；修正算子常场复现 **1.665e-16**，
+  而 **MFEM 出厂算子差 0.6328**；出厂 P 89 条 vs 修正 85 条，共享 83 条，
+  **10 条分歧全部落在 tet 子元 dof**，4 条残值行 `P[29..32,4]=P[28,4]`。
+  ⇒ 上报材料与建议修法（`GetTransferMatrix` + `SetRow` 尺寸断言）写在
+  `tmp/d493/d493_round55_adjudication.md`。**结论：MFEM 出厂 P 在 6 个金字塔子元上
+  可信（28/33），tet 子元 4 行是坏值。**
+
+**(b) fem-rs space 侧 dof 值约定 —— 按纪律停手，只给精确补丁（D535）**
+`hdiv.rs` 是②路独占，④路**一个 space 文件都没碰**。方案（md §3）：
+`needs_legacy`（`hdiv.rs:1713-1725`）去掉 Pyramid 分支；`interp_rows`（`:2364`）
+加 Pyramid5 臂（表已在 `transfer.rs`）；`interpolate_vector` 的 `match et` 加 Pyramid
+臂（注意 `cof(J)` 对金字塔**逐点变化**）；`hdiv_interpolant_available` 打开；消费方复跑清单。
+
+**(c) 本轮新发现的第三条根因（元素级）：`PyraRTk` 与 MFEM `RT_FuentesPyramidElement`
+张成不同的 5 维函数空间**。`PyraRTk` 是「单项式 Vandermonde 极小范数解」的
+**矩对偶**基（`build_pyramid_rtk` + `solve_normal_eq`，`raviart_thomas/pyramid.rs:207/270/349`），
+不是 Fuentes 基 ⇒ `ρ = basis·W⁻¹` ≠ `φ = raw·T⁻¹`（两者都是各自张成空间对同一批采样
+泛函的唯一对偶基 ⟹ 空间不同，论证闭合）。实测 **81/85 条修正 oracle 条目不符**（比值不均匀）；
+同一套配方在 tri/quad/tet/hex/prism 上逐位。
+**主会话代码侧核实**：fem-rs 只有 `H1FuentesPyramidPk`/`L2FuentesPyramidPk`，
+**确实没有 RT 的 Fuentes 元素** ⇒ (c) 成立。
+
+**主会话仲裁（④路提出的取舍）—— 批准"启用精确路径"**：
+④路把 pyramid 精确路径**启用**了，代价是当前值域约定不一致（常场残差 **3.741e-1**
+vs legacy **3.625e-1**）——即两条路都还不正确。**批准保持启用**，理由：
+1. legacy 算子 33 行里 **13 行为空**（细 dof 在 transfer 中被**静默清零**）⇒ 违反本项目
+   "静默零容忍"纪律；精确路径 **33/33 全覆盖**，与 MFEM 的结构意图一致；
+2. 残差是"已知且被单一根因解释"的（D534），而非未知；
+3. **无任何既有测试覆盖 pyramid prolongation** ⇒ 两条路都无回归；主会话实跑确认
+   金字塔消费方全绿：`d365` 12/0、`d462` 5/0、`d340` 3/0；
+4. 缺陷是**响的**：`d493_pyramid_rt0_matches_corrected_mfem` 的 `#[ignore]` 理由里
+   写清了 D534/D535 与两侧实测残差（3.74e-1 / 3.63e-1 with 13 empty rows），
+   D534/D535 落地后该 oracle 自动翻绿。
+回退开关是**一行**（从资格表删 `HdivRt0Family::Pyramid`），已记录。
+
+**pyramid probe 乱值根因**：round 53 的乱值来自 `Mesh(3,5,5,5,0)` 把 spaceDim 传 0 +
+2D dump 越界读 ⇒ **round 54 已修**（代码内建网格、按 `SpaceDimension()` 打印）。
+本轮逐条核验三个 dump 的 `C_VERT/F_VERT` 全为精确 0/0.5/1、无 denormal
+（`tmp/d481/d482_pyramid_o0.txt` 里的 `5.381e-310` 即旧残迹）。
+
+**改动文件**：`crates/assembly/src/transfer.rs`（1256-1295 族分派、1343-1352 Fuentes RT0
+slot 行、1363 基、1414 棱骨架、1469-1482 参考角点（塌缩 apex）、1608-1638 金字塔仿射
+框架+验证、1882-1893 底面中心进父元候选集、1912-1930 **逐子元族**、2050-2062 镜像子元
+保持恒等 slot map、2268-2285 资格）+ `crates/assembly/tests/d493_rt1_prolongation_mfem_parity.rs`
+（新 3 测试：1 ignored oracle + 2 active）。**space 侧零改动。**
+
+**回归（实跑）**：d493 pins quad RT1 **144/144 max 1.665e-16**、hex RT1
+**1728/1728 max 2.498e-16**、tet RT1 自网格 504/504；d468 族 prism RT0 **88/88 max 0e0**、
+tet RT0 **264/264 max 5.551e-17**、tri RT0 28/28、tri RT1 220/220 max 3.608e-16、
+quad RT0 16/16、hex RT0 48/48、tet RT1 4578/4578 max 4.163e-16；
+套件 d493 7/0/3ign、d468 10/0、d459 3/0、d453 2/0、d462 3/0、d491 6/0、
+poisson 17/0/1ign、fem-element lib 518/0、fem-assembly lib 702/**1**/5ign。
+
+**⚠️ 待归因的失败**：`hdiv_error::hdiv_rt1_projection_error_matches_galerkin_identity`
+（`routine 6.90557479974297e-16 vs Galerkin NaN`，主会话复现）。④路隔离实验
+（临时摘掉 Pyramid 资格）复现同样失败 ⇒ 非④路引入；嫌疑是**②路在飞的
+`tri_rt{1,2,k}.rs`/`hdiv.rs`**。**收尾必须归因清零，否则回归门不过。**
+
+**新债**：**D534**（element：移植 MFEM Fuentes **raw 基**——`fe_rt.cpp:1503-1760`
+`calcBasis` + `1374-1396` 的 `T/Ti`；落地后 `d493_pyramid_rt0_matches_corrected_mfem`
+即可翻绿，机制已在位）、**D535**（space：`hdiv.rs` pyramid 约定翻转，精确补丁见 md §3）、
+**D536**（金字塔 RT1..3 —— `hdiv_rt_slot_rows(Pyramid,k>0)` 需 MFEM 三角面异构阶 →
+fem-rs 规范网格的 **slot 置换桥**；+ **H1 pyramid prolongation 空缺**：
+`build_prolongation_h1_3d` 用 `TetPointLocator`，金字塔网格上定位不到）。
+
+**纪律偏差（如实记录）**：修格式串时对测试文件用过一次 `sed -i`（一行），随后改回
+Edit 工具；未用 git commit/push/stash。
+
+### 只读陈账审计（第五路，只读）—— 结论与**可信度警示**
+
+**号段卫生**：round 54 的 **D509 是空号**（`grep D509 tmp/round3_plan.md` = 0，仅 HANDOVER
+提过一次"未用"）⇒ **保留不使用**，round 55 新债从 **D525** 起；主会话另登记 **D537**
+（D525–D536 归四路，D537 为开局亲验发现）。
+
+派了一路只读审计逐条核 **D492–D524**（33 个号，D509 为空号）、对 **D1–D491** 抽样 50 笔。
+产出有价值线索，但**其 "STALE-CLOSED" 判定经主会话亲验后被证伪 3/4**，故**不能作为删改依据**：
+
+- **亲验为真（已据此修正）**：D72（`lor_factory.rs:80/92` 已用 `LorH1::new`）、
+  D74（`quadrature.rs:878` `seg_rule` 对 `n>5` 走 `gauss_legendre_01_arbitrary`，不再封顶 4）、
+  D70⑤（`crates/mesh/src/nurbs_mesh.rs` 已是 11 行 re-export shim）、D386（plan 第五批
+  「③ D380 + D386 —— 关闭」）、D521（`mesh_characteristics.rs:15-27` 的 `# Scope (honest
+  gaps)` 在登记时即已落地）、D404（round 53 `b7018d4`/`74bc68f` + `d491_*` 测试）、
+  D143 残留（`17b169c` "closes the four D143 residue gaps"）、D124/D136/D103/D104（round 54）。
+- **亲验为假（审计错误，条目仍开）**：
+  - **D276 仍开**：`miniapps/tools/gridfunction_bounds.rs` 的 Bernstein PLBound `exit(3)`
+    缺口桩明文写 "has no fem-rs equivalent yet (D276…)"；
+  - **D149 仍开**：`miniapps/README.md` 的注记写"该对照原在 mfem49(MFEM 4.9) 树上做 ⇒
+    **待用 4.10 重核**；本轮只标记未改结论"——债务未消，且**必须用 4.10 重做**；
+  - **D155 证据不实**：引用的 `d274_print_alignment` 测试**在本仓不存在**。
+  - 另有两处路径/事实错误：`amr_refiner.rs` 真路径是 `crates/assembly/src/postproc/amr_refiner.rs`；
+    `crates/mesh/src/nurbs_mesh.rs` 并非"已不存在"（是 shim）。
+- **审计准确性**：D492–D524 段可靠（与 round 54 证据一致，并**抢先纠正了 D506 的机制**——
+  `hdiv.rs:1442-1455` 对 quad 面**已返回 `(k+1)²` 整块**、`dirichlet.rs:520-536` **已有**
+  quad 四三元组分支 ⇒ D506 的失败点是 **key 匹配**而非缺分支；此条已即时转发①路）。
+  **D1–D491 段的"已关"判定不可信，必须先亲验再改文档**。
+- **顺带产出（已被主会话采纳）**：`d497_nurbs_patch.rs::d497_ball_weights_match_mfem`
+  是**无牙测试**（仅 `println!`、零 assert，名字却叫 `match_mfem`）⇒ 已指定③路作为 D516
+  的落点；D520 实为**全仓零调用的死 API**（`nurbs_extension.rs:2621`），已交③路顺带收口。
 
 
 
 
 
 
+
+### 流程注记 + 全量回归（round 55）
+
+- **四路并行 + 一路只读陈账审计；零权限熔断**。主会话在飞行期做了 6 项亲验/纠错
+  （两条环境、D516 前提、审计可信度、D537 警告、hdiv_error NaN 归因），**其中 1 项被代理反过来证伪**
+  （见 ② 路的 1-ulp 抵消伪影）——如实记录。
+- **全量回归（收尾实测，四道门全绿）**：
+  - 十 crate lib 批 **10/10 ok / 2591 passed / 0 failed**（round 54：2590）
+  - `--tests` 全层 **223 targets / 3828 passed / 0 failed**（round 54：219 / 3806；+4 目标 +22 用例）
+  - `cargo build --release --examples --keep-going` → **0 错误**
+  - pro 层 **rc=0 / 0 error**（`cargo check -p pro-bench-tests -p pro-cad`，**必须从 `fem-pro` 根跑**；
+    在 `fem-rs` 里跑会报 `package ID specification ... did not match`——本轮主会话踩过一次）
+  - **警告**：fem-assembly / fem-solver / fem-examples **全 0**（D537 关闭）；仅 vendor `linlvo` 20 条不动
+- **主会话抽查复现（不照抄代理报告）**：`d461_tri_rt1` **220/220 max 3.608e-16**；
+  `d468` **10/0/0 ignored**；`d492` 2/0/0ign；`hdiv_error` **19/0**；`fem-element lib` **518/0**；
+  `d516` **7/0**；**NURBS 三档 diff 全 0（366 / 395 / 348）**；`d365` 12/0、`d462` 5/0、`d340` 3/0。
+- **提交（7 笔，fem-rs）**：`68d7b15`（开局补 miniapp 注册）→ `9dab985`（①D504-506）
+  → `6ec367c`（②D492）→ `3d2fde0`（③NURBS）→ `ea00f54`（④D493）→ `51fc81b`（D537 + d446）
+  → plan 文档提交（本笔；hash 随 amend 变动，以 fem-pro 指针为准）；fem-pro 指针提交见 `git log`。
+- **⚠️ 推送未完成（网络）**：收尾时 **`github.com:443` 不可达**——`curl https://api.github.com`
+  返回 **200** 而 `curl https://github.com` 返回 **000/超时**，`git push` 报
+  `Failed to connect to github.com port 443`；无 `http.proxy` 配置、无代理环境变量。
+  多轮退避重试（含 8×60s 后台循环）全部失败 ⇒ **两仓提交均在本地，网络恢复后
+  `cd fem-rs && git push origin main` 再 `cd .. && git push origin main` 即可**。
+- **方法论新增（已写入 HANDOVER 硬纪律）**：① **审计产物只可当线索**——本轮只读审计的
+  "已关"判定被亲验**证伪 3/4**（D149/D155/D276 仍开；`nurbs_mesh.rs` 被说成"已不存在"实为 11 行 shim；
+  `amr_refiner.rs` 路径写错）。② **测试里做钳位必须配对侧断言**——`residual_sq.max(0.0).sqrt()`
+  单独用会让 `energy > ‖u_ex‖²` 的上界约束静默消失，必须同时
+  `assert!(residual_sq > -1e-13)`。③ **死初始化用 `let mut x;`（删初始化）而非 `#[allow]`**——
+  由编译器证明"每条路径首次读前已赋值"，这本身就是行为不变的强证据。
 
 - **D72（P1）H¹ LOR-AMG 工厂秩亏（假收敛）**：`build_lor_amg_h1`/`_3d` 的 `P` 把"同网格 P1"映到 Pk（289×81，秩 81）⇒ linger 的 CG 按**预条件能量**停机，残差一旦离开 `range(P)` 能量即为 0 ⇒ 报告的"收敛"实测真残差 = **0.585(quad)/0.638(tri)**。MFEM 的 H¹ LOR 用 `Mesh::MakeRefined(mesh_ho, order)` 使 `P` 方阵；fem-rs 已有正确件（`fem_space::lor::LorH1` + `make_refined_2d/3d`）⇒ 应改用它们。
 - **D73（P1）`solver/tests/ams_ads.rs` 6 个 2-D AMS 集成测试失败（归属未定）**：D68 与 D64 两代理各自用"文件还原"法排除了自身改动（还原后同样失败），且 D68 的 `hdiv.rs` 改动**仅限 3-D hex 分支**（hunk 在 `interp_rows` 的 Hex8 臂）⇒ 需下一轮专项二分定位（建议 `git worktree` 到 HEAD 跑该测试以确认是否本轮引入）。另有 `poisson_solve::poisson_nc_amr_convergence` 1 项同批失败。
