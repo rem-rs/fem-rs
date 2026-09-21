@@ -723,6 +723,17 @@ mod tests {
     /// RT1 on triangles: the projection error must equal the independently
     /// assembled Galerkin identity `‖u_h − u_ex‖² = ∫|u_ex|² − uᵀ M u` to
     /// 1e-10 (uses the mass matrix and the RHS only).
+    ///
+    /// Round-55 note (D492): `u_ex = (x, 2y) ∈ RT1`, so the identity holds
+    /// *exactly* — but the right-hand side is a difference of nearly equal
+    /// numbers whose rounding noise is one ulp of `5/3` (2.22e-16), five
+    /// orders of magnitude above the `‖u_h−u_ex‖² ~ 1e-31` being resolved.
+    /// The subtraction must therefore be clamped at its mathematical floor 0
+    /// before `sqrt` (see below), otherwise the test is a coin flip on the
+    /// last ulp of the mass-matrix accumulation order.  Measured on
+    /// `tmp/d492/r55_probe/bin/galerkin.rs`: `5/3 − energy` = `-3 ulp` on
+    /// `unit_square_tri(1)`, `-1 ulp` on `unit_square_tri(2)` (this test) and
+    /// exactly `0` on `unit_square_tri(4)`.
     #[test]
     fn hdiv_rt1_projection_error_matches_galerkin_identity() {
         let mesh = Mesh::<2>::unit_square_tri(2);
@@ -740,7 +751,26 @@ mod tests {
         let mut mu = vec![0.0; uh.len()];
         m.spmv(&uh, &mut mu);
         let energy: f64 = uh.iter().zip(mu.iter()).map(|(a, b)| a * b).sum();
-        let err_galerkin = (5.0 / 3.0 - energy).sqrt();
+        let residual_sq = 5.0 / 3.0 - energy;
+        // Galerkin orthogonality gives `⟨u_h, u_ex⟩ = ‖u_h‖²`, hence by
+        // Cauchy–Schwarz/Bessel `‖u_h‖² = uᵀMu ≤ ‖u_ex‖² = 5/3`: the residual
+        // has a **hard upper bound at 0**.  A materially negative value is a
+        // real violation of that bound (the mass matrix is not the L² form of
+        // the reconstructed field); `-1e-13` is ≈ 450 ulp of 5/3 (spacing
+        // 2.22e-16), wide enough never to trip on cancellation noise alone and
+        // tight enough to catch a genuine overshoot.
+        assert!(
+            residual_sq > -1e-13,
+            "uᵀ M u exceeds ∫|u_ex|² by {:.3e}",
+            -residual_sq
+        );
+        // Clamp at the mathematical floor `‖u_h − u_ex‖² ≥ 0` before `sqrt`
+        // (same idiom as `mat_norm` above): the exact identity holds, but the
+        // cancellation above can land the difference one ulp negative and make
+        // `sqrt` NaN.  Teeth are unchanged — the bound above pins `energy` from
+        // the top and an inconsistent mass matrix moves `err_routine` far above
+        // 1e-10 and still fails the assertion below.
+        let err_galerkin = residual_sq.max(0.0).sqrt();
         assert!(
             (err_routine - err_galerkin).abs() < 1e-10,
             "RT1 projection error mismatch: routine {err_routine:.14e} vs Galerkin {err_galerkin:.14e}"

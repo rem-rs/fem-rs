@@ -1067,7 +1067,12 @@ fn d482_prism_rt0_constant_field_prolongs_exactly() {
 // paired with (element, slot) from the dump's F_DOFS/C_DOFS tables, and the
 // fem-rs dof ids are resolved through `element_dofs` (the meshes are built
 // with MFEM's exact connectivity, so the element order and slot orientations
-// match — verified by the sign assertions below).
+// match — verified by the sign assertions below).  Since round 55 this
+// resolution is exact for **tri** as well: the reference-element slot order,
+// the entity-major global numbering and the orientation sign are MFEM's
+// verbatim (D492/D513/D514, see `crates/space/tests/
+// d492_tri_rt1_slot_semantics.rs`), so `resolve_dof_map` is an identity map
+// rather than a bridge.
 
 /// Resolves an MFEM (element, slot) dof table to fem-rs dof ids and checks the
 /// orientation signs agree.
@@ -1091,14 +1096,21 @@ fn resolve_dof_map<M: MeshTopology>(
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d481/tri_o1_rt1.rs"));
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/d481/tet_o1_rt1.rs"));
 
-/// Tri RT1 oracle — kept for the follow-up round (D461 sliver): fem-rs's
-/// within-face dof layout for order-1 tri edges (identity for orientation 0)
-/// diverges from MFEM's `TriDofOrd` for some orientations, so the element-wise
-/// dof pairing below does not resolve on all slots.  Aligning that layout is
-/// `crates/space` work (read-only this round); the tet RT1 oracle — which
-/// exercises the same machinery plus interior bubble dofs — passes fully.
+/// Tri RT1 oracle (D461 sliver closed by D492, round 55).
+///
+/// Round 54 located three pairing-layer differences between fem-rs's tri RT1
+/// space and MFEM's `RT_TriangleElement` + `FiniteElementSpace` (slot
+/// permutation `π = [4,5,0,1,3,2,6,7]`, element-interleaved vs entity-major
+/// global numbering = D513, and the `−MFEM` sign factor = D514) and proved the
+/// two prolongations equal once all three were bridged by hand
+/// (`tmp/d492/d492_join_proof.txt`: 220/220, max 3.6e-16).
+///
+/// The joint permutation landed in round 55 (`TriRT1`/`TriRT2`/`TriRTk`
+/// reference slots in MFEM's `Geometry::TRIANGLE::Edges` order +
+/// `hdiv.rs::build_2d_tri` entity-major numbering with MFEM's `SegDofOrd`
+/// orientation sign), so the element-wise `(elem, slot)` pairing below is now
+/// the identity and resolves on **every** slot — no bridge of any kind.
 #[test]
-#[ignore = "tri RT1 within-face layout vs MFEM TriDofOrd pending (D461 sliver, fem-space)"]
 fn d461_tri_rt1_matches_mfem() {
     let coarse_mesh = mfem_tri_mesh();
     let fine_mesh = refine_uniform(&coarse_mesh);

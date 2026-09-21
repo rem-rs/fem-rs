@@ -271,10 +271,13 @@ fn lagrange_1d(ts: &[f64], j: usize, t: f64) -> f64 {
     v
 }
 
-/// Local face table: element-local (corner index pairs), matching the
-/// reference-element face order used by the H(div)/H(curl) space builders
-/// (`HDivSpace::build_2d_tri` uses `TRI_FACES = [(1,2), (0,2), (0,1)]`;
-/// `build_2d_quad` uses `QUAD_FACES = [(0,1), (1,2), (2,3), (3,0)]`).
+/// Local face table: element-local (corner index pairs).  Only the *set* of
+/// pairs is consulted here (the local edge carrying the mesh face is found by
+/// matching vertex ids and both `flip` and the reference parameter follow from
+/// that), so the listing order is immaterial — it is kept as a legible
+/// `(min-face-first)` mirror of the space builders (`HDivSpace::build_2d_tri`
+/// walks `TRI_EDGES = [(0,1), (1,2), (2,0)]`; `build_2d_quad` uses
+/// `QUAD_FACES = [(0,1), (1,2), (2,3), (3,0)]`).
 fn local_faces(elem_type: ElementType) -> &'static [(usize, usize)] {
     match elem_type {
         ElementType::Tri3 | ElementType::Tri6 => &[(1, 2), (0, 2), (0, 1)],

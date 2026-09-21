@@ -57,23 +57,18 @@ fn tri_data(k: usize) -> &'static TriRTkData {
         let mut v = vec![vec![0.0; mt]; n];
         let mut di = 0usize;
 
-        // Edge 0: hypotenuse (1-t,t), normal (1,1)/√2, length √2 → ∫(Φ_x+Φ_y)dt
-        for p in 0..=k {
-            for (j, &(a, b, _comp)) in mc.iter().enumerate() {
-                v[di][j] = beta_int(a, b + p);
-            }
-            for (j, &(a, b)) in mb.iter().enumerate() {
-                let jj = mc.len() + j;
-                v[di][jj] = beta_int(a + 1, b + p) + beta_int(a, b + p + 1);
-            }
-            di += 1;
-        }
+        // Edge blocks follow MFEM `RT_TriangleElement`'s local dof order
+        // (`Geometry::TRIANGLE::Edges` = (v0,v1), (v1,v2), (v2,v0)) with the
+        // moment parameter `t` ascending along the *listed* direction and
+        // `p = 0..k` inside each block — the slot order
+        // `mfem_tri_nodal_dofs` publishes.  The functionals are the analytic
+        // moments `∫ (Φ·n) t^p dt` of `tri_data`.
 
-        // Edge 1: left edge (0,t), normal (-1,0)
+        // Edge 0: bottom (t,0), normal (0,-1), length 1 → −∫ Φ_y(t,0) t^p dt
         for p in 0..=k {
             for (j, &(a, b, comp)) in mc.iter().enumerate() {
-                let val = if comp == 0 && a == 0 {
-                    -1.0 / (b + p + 1) as f64
+                let val = if comp == 1 && b == 0 {
+                    -1.0 / (a + p + 1) as f64
                 } else {
                     0.0
                 };
@@ -86,14 +81,25 @@ fn tri_data(k: usize) -> &'static TriRTkData {
             di += 1;
         }
 
-        // Edge 2: bottom edge (t,0), normal (0,-1)
+        // Edge 1: hypotenuse (1-t,t), normal (1,1)/√2, length √2 →
+        // ∫₀¹ (Φ_x+Φ_y)(1−t, t) t^p dt
+        for p in 0..=k {
+            for (j, &(a, b, _comp)) in mc.iter().enumerate() {
+                v[di][j] = beta_int(a, b + p);
+            }
+            for (j, &(a, b)) in mb.iter().enumerate() {
+                let jj = mc.len() + j;
+                v[di][jj] = beta_int(a + 1, b + p) + beta_int(a, b + p + 1);
+            }
+            di += 1;
+        }
+
+        // Edge 2: left (0, 1−t), normal (−1,0), length 1 →
+        // −∫₀¹ Φ_x(0, 1−t) t^p dt with the parameter running from v2=(0,1)
+        // towards v0=(0,0) as in MFEM's `(2,0)` block.
         for p in 0..=k {
             for (j, &(a, b, comp)) in mc.iter().enumerate() {
-                let val = if comp == 1 && b == 0 {
-                    -1.0 / (a + p + 1) as f64
-                } else {
-                    0.0
-                };
+                let val = if comp == 0 && a == 0 { -beta_int(p, b) } else { 0.0 };
                 v[di][j] = val;
             }
             for (j, &(_a, _b)) in mb.iter().enumerate() {
@@ -238,17 +244,18 @@ impl VectorReferenceElement for TriRTk {
         let x = xi[0];
         let y = xi[1];
 
-        // Special case k=0: classical Piola form (matches TriRT0)
+        // Special case k=0: classical Piola form, in MFEM's edge-block order
+        // (bottom (v0,v1), hypotenuse (v1,v2), left (v2,v0)).
         if k == 0 {
-            // Φ₀ = (ξ, η)
+            // Φ₀ = (ξ, η−1)  — bottoms edge (0,1), nk = (0,−1)
             values[0] = x;
-            values[1] = y;
-            // Φ₁ = (ξ−1, η)
-            values[2] = x - 1.0;
+            values[1] = y - 1.0;
+            // Φ₁ = (ξ, η)  — hypotenuse (1,2), nk = (1,1)
+            values[2] = x;
             values[3] = y;
-            // Φ₂ = (ξ, η−1)
-            values[4] = x;
-            values[5] = y - 1.0;
+            // Φ₂ = (ξ−1, η)  — left (2,0), nk = (−1,0)
+            values[4] = x - 1.0;
+            values[5] = y;
             return;
         }
 
@@ -364,12 +371,13 @@ impl VectorReferenceElement for TriRTk {
     fn dof_coords(&self) -> Vec<Vec<f64>> {
         let k = self.order;
 
-        // Special case k=0: edge midpoints (matches TriRT0)
+        // Special case k=0: edge midpoints (matches TriRT0), in MFEM's
+        // edge-block order (bottom, hypotenuse, left).
         if k == 0 {
             return vec![
+                vec![0.5, 0.0],
                 vec![0.5, 0.5],
                 vec![0.0, 0.5],
-                vec![0.5, 0.0],
             ];
         }
 
@@ -377,15 +385,15 @@ impl VectorReferenceElement for TriRTk {
         let mut c = Vec::with_capacity(n);
         for p in 0..=k {
             let t = (p + 1) as f64 / (k + 2) as f64;
+            c.push(vec![t, 0.0]);
+        }
+        for p in 0..=k {
+            let t = (p + 1) as f64 / (k + 2) as f64;
             c.push(vec![1.0 - t, t]);
         }
         for p in 0..=k {
             let t = (p + 1) as f64 / (k + 2) as f64;
-            c.push(vec![0.0, t]);
-        }
-        for p in 0..=k {
-            let t = (p + 1) as f64 / (k + 2) as f64;
-            c.push(vec![t, 0.0]);
+            c.push(vec![0.0, 1.0 - t]);
         }
         let remaining = n - c.len();
         for _ in 0..remaining {
@@ -414,10 +422,11 @@ mod tests {
     #[test]
     fn rt0_nodal_basis() {
         let elem = TriRTk::new(0);
+        // MFEM edge-block order: bottom (0,1), hypotenuse (1,2), left (2,0).
         let faces: [([f64; 2], f64); 3] = [
+            ([0.0, -1.0], 1.0),
             ([1.0 / 2f64.sqrt(), 1.0 / 2f64.sqrt()], 2f64.sqrt()),
             ([-1.0, 0.0], 1.0),
-            ([0.0, -1.0], 1.0),
         ];
 
         let mids = elem.dof_coords();
@@ -464,7 +473,8 @@ mod tests {
     /// monomials whenever a column pivot kicked in (`k ≥ 1`), and `k ≥ 1`
     /// additionally panicked.  The functionals below are the analytic moments
     /// of `tri_data` evaluated with independent quadrature:
-    ///   edges  `∫ (Φ·n_f) t^p ds` with `n_0 = (1,1)/√2·(√2 ds)`, and the
+    ///   edges  `∫ (Φ·n_f) t^p ds` in MFEM's edge-block order — bottom (v0v1),
+    ///   hypotenuse (v1v2) with `n = (1,1)/√2·(√2 ds)`, left (v2v0) — and the
     ///   interior `∫_T Φ_c x^a y^b dA`, `a+b ≤ k-1`.
     #[test]
     fn basis_dual_to_moment_functionals() {
@@ -478,7 +488,18 @@ mod tests {
             let mut phi = vec![0.0f64; n * 2];
             let mut row = 0usize;
 
-            // Edge 0: hypotenuse x+y=1, outward normal (1,1)/√2, ds = √2 dt →
+            // Edge 0: y=0, outward normal (0,−1), length 1 → ∫₀¹ (−Φ_y)(t,0) t^p dt.
+            for p in 0..=k {
+                for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
+                    let (t, w) = (t[0], *w);
+                    e.eval_basis_vec(&[t, 0.0], &mut phi);
+                    for j in 0..n {
+                        dual[row * n + j] -= w * phi[j * 2 + 1] * t.powi(p as i32);
+                    }
+                }
+                row += 1;
+            }
+            // Edge 1: hypotenuse x+y=1, outward normal (1,1)/√2, ds = √2 dt →
             // ∫₀¹ (Φ_x+Φ_y)(1−t, t) t^p dt.
             for p in 0..=k {
                 for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
@@ -491,24 +512,14 @@ mod tests {
                 }
                 row += 1;
             }
-            // Edge 1: x=0, outward normal (−1,0), length 1 → ∫₀¹ (−Φ_x)(0,t) t^p dt.
+            // Edge 2: x=0, outward normal (−1,0), length 1, parameter running
+            // from v2=(0,1) towards v0=(0,0) → ∫₀¹ (−Φ_x)(0,1−t) t^p dt.
             for p in 0..=k {
                 for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
                     let (t, w) = (t[0], *w);
-                    e.eval_basis_vec(&[0.0, t], &mut phi);
+                    e.eval_basis_vec(&[0.0, 1.0 - t], &mut phi);
                     for j in 0..n {
                         dual[row * n + j] -= w * phi[j * 2] * t.powi(p as i32);
-                    }
-                }
-                row += 1;
-            }
-            // Edge 2: y=0, outward normal (0,−1), length 1 → ∫₀¹ (−Φ_y)(t,0) t^p dt.
-            for p in 0..=k {
-                for (t, w) in qs.points.iter().zip(qs.weights.iter()) {
-                    let (t, w) = (t[0], *w);
-                    e.eval_basis_vec(&[t, 0.0], &mut phi);
-                    for j in 0..n {
-                        dual[row * n + j] -= w * phi[j * 2 + 1] * t.powi(p as i32);
                     }
                 }
                 row += 1;

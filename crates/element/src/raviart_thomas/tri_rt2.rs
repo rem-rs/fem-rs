@@ -9,9 +9,9 @@
 //! `RT_TriangleElement::nk` table (see MFEM `fem/fe/fe_rt.cpp`).
 //!
 //! # DOFs (15)
-//! - Edges (hypotenuse, left, bottom as in [`super::tri_rt1::TriRT1`]): three point
-//!   values of `Φ·n̂` at the degree-2 GL open nodes on each edge (`n̂` unnormalized,
-//!   same convention as RT1).
+//! - Edges (bottom, hypotenuse, left — MFEM's `Geometry::TRIANGLE::Edges` order, as in
+//!   [`super::tri_rt1::TriRT1`]): three point values of `Φ·n̂` at the degree-2 GL open
+//!   nodes on each edge (`n̂` unnormalized, same convention as RT1).
 //! - Interior: six point values following MFEM’s interior loop (three reference points,
 //!   each with two normals `(0,−1)` and `(−1,0)`).
 
@@ -112,30 +112,29 @@ fn build_vandermonde() -> [[f64; N]; N] {
     let mut prim = [[0.0f64; 2]; N];
     let mut row = 0usize;
 
-    // Face 0 — hypotenuse `(1−t, t)`, `dof2nk = 1` → `n = (1,1)`.
-    for t in &bop {
-        let x = 1.0 - t;
-        let y = *t;
-        let n = NK[1];
-        eval_primitives(x, y, &mut prim);
-        for col in 0..N {
-            v[row][col] = prim[col][0] * n[0] + prim[col][1] * n[1];
-        }
-        row += 1;
-    }
-    // Face 1 — left `(0, t)`, `dof2nk = 2` → `n = (−1, 0)`.
-    for t in &bop {
-        let n = NK[2];
-        eval_primitives(0.0, *t, &mut prim);
-        for col in 0..N {
-            v[row][col] = prim[col][0] * n[0] + prim[col][1] * n[1];
-        }
-        row += 1;
-    }
-    // Face 2 — bottom `(t, 0)`, `dof2nk = 0` → `n = (0, −1)`.
+    // Edge 0 — bottom `(t, 0)`, `dof2nk = 0` → `n = (0, −1)`.
     for t in &bop {
         let n = NK[0];
         eval_primitives(*t, 0.0, &mut prim);
+        for col in 0..N {
+            v[row][col] = prim[col][0] * n[0] + prim[col][1] * n[1];
+        }
+        row += 1;
+    }
+    // Edge 1 — hypotenuse `(1−t, t)`, `dof2nk = 1` → `n = (1,1)`.
+    for t in &bop {
+        let n = NK[1];
+        eval_primitives(1.0 - t, *t, &mut prim);
+        for col in 0..N {
+            v[row][col] = prim[col][0] * n[0] + prim[col][1] * n[1];
+        }
+        row += 1;
+    }
+    // Edge 2 — left `(0, 1−t)`, `dof2nk = 2` → `n = (−1, 0)`; the parameter
+    // runs from `v2=(0,1)` towards `v0=(0,0)` as in MFEM's `(2,0)` block.
+    for t in &bop {
+        let n = NK[2];
+        eval_primitives(0.0, 1.0 - *t, &mut prim);
         for col in 0..N {
             v[row][col] = prim[col][0] * n[0] + prim[col][1] * n[1];
         }
@@ -260,13 +259,13 @@ impl VectorReferenceElement for TriRT2 {
         let (iop, _) = gauss_legendre_01(2);
         let mut v = Vec::with_capacity(N);
         for t in &bop {
+            v.push(vec![*t, 0.0]);
+        }
+        for t in &bop {
             v.push(vec![1.0 - t, *t]);
         }
         for t in &bop {
-            v.push(vec![0.0, *t]);
-        }
-        for t in &bop {
-            v.push(vec![*t, 0.0]);
+            v.push(vec![0.0, 1.0 - t]);
         }
         let p = 2usize;
         for j in 0..p {
@@ -417,6 +416,15 @@ mod tests {
         let mut dof_mat = [[0.0f64; N]; N];
         let mut row = 0usize;
 
+        // MFEM edge-block order: bottom (v0,v1), hypotenuse (v1,v2), left (v2,v0).
+        for t in &bop {
+            elem.eval_basis_vec(&[*t, 0.0], &mut vals);
+            let n = NK[0];
+            for i in 0..N {
+                dof_mat[row][i] = vals[i * 2] * n[0] + vals[i * 2 + 1] * n[1];
+            }
+            row += 1;
+        }
         for t in &bop {
             elem.eval_basis_vec(&[1.0 - t, *t], &mut vals);
             let n = NK[1];
@@ -426,16 +434,8 @@ mod tests {
             row += 1;
         }
         for t in &bop {
-            elem.eval_basis_vec(&[0.0, *t], &mut vals);
+            elem.eval_basis_vec(&[0.0, 1.0 - t], &mut vals);
             let n = NK[2];
-            for i in 0..N {
-                dof_mat[row][i] = vals[i * 2] * n[0] + vals[i * 2 + 1] * n[1];
-            }
-            row += 1;
-        }
-        for t in &bop {
-            elem.eval_basis_vec(&[*t, 0.0], &mut vals);
-            let n = NK[0];
             for i in 0..N {
                 dof_mat[row][i] = vals[i * 2] * n[0] + vals[i * 2 + 1] * n[1];
             }

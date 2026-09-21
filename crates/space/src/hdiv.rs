@@ -16,8 +16,16 @@
 //!
 //! Each face is given a *global* orientation.  In 2-D this is the canonical
 //! edge direction (from smaller to larger vertex index).  In 3-D it is defined
-//! by the sorted vertex triple.  The sign on an element is +1 when the local
-//! outward normal agrees with the global normal, and −1 otherwise.
+//! by the sorted vertex triple.
+//!
+//! For 2-D **triangles** the sign is MFEM's `SegDofOrd` orientation sign
+//! (`RT_FECollection::DofOrderForOrientation`): +1 when the element's local
+//! edge direction, in `Geometry::TRIANGLE::Edges` order (`TRI_EDGES`), is
+//! ascending, −1 otherwise (D514 — the pre-round-55 rule was the
+//! outward-vs-canonical-normal test, which differs by a negative factor on
+//! every positively oriented element).  Quadrilaterals keep the outward-normal
+//! test (`QUAD_FACES` is already MFEM's `Geometry::SQUARE::Edges` order, whose
+//! listed directions are the CCW boundary walk).
 
 use std::collections::HashMap;
 
@@ -37,9 +45,17 @@ use crate::fe_space::{FESpace, SpaceType};
 
 // ─── Local face tables ──────────────────────────────────────────────────────
 
-/// Local face definitions for 2-D triangles (TriRT0 ordering).
-/// Face `i` is the edge opposite vertex `i`.
-const TRI_FACES: [(usize, usize); 3] = [(1, 2), (0, 2), (0, 1)];
+/// Local edge definitions for 2-D triangles — MFEM `Geometry::TRIANGLE::Edges`
+/// `{(0,1), (1,2), (2,0)}` verbatim.
+///
+/// D528/D513: this is the same listing MFEM's `FiniteElementSpace` walks
+/// (`fespace.cpp::GetElementDofs`: `for (i < E.Size()) ebase = E[i]*ne`) and the
+/// same order as MFEM's `RT_TriangleElement` FE-local dof blocks, so
+/// `build_2d_tri`'s slots pair slot-for-slot with `TriRT1`/`TriRT2`/`TriRTk`
+/// and with MFEM's global dof numbering.  (The former `TRI_FACES = [(1,2),
+/// (0,2), (0,1)]` — "edge opposite vertex `i`" — differed from MFEM's listing
+/// by the element-invariant permutation `π = [4,5,0,1,3,2,6,7]`; D492.)
+const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
 
 /// Local face definitions for 2-D quads (QuadRT0 ordering, CCW).
 /// Face `i` is edge `(i, (i+1)%4)` of the quad.
@@ -684,25 +700,46 @@ impl<M: MeshTopology> HDivSpace<M> {
                 _ => order as usize * (order as usize + 1), // k(k+1) for higher RT
             }
         };
-        let dofs_per_elem = TRI_FACES.len() * dofs_per_face + interior_dofs;
+        let dofs_per_elem = TRI_EDGES.len() * dofs_per_face + interior_dofs;
         let n_elem = mesh.n_elements();
 
         let mut edge_map: HashMap<EdgeKey, DofId> = HashMap::new();
         let mut next_dof: DofId = 0;
-        let mut dofs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
-        let mut signs_flat = Vec::with_capacity(n_elem * dofs_per_elem);
+        // The flat tables stay **element-major** (element `e` owns
+        // `dofs_flat[e·dofs_per_elem .. (e+1)·dofs_per_elem]`, see
+        // `element_dofs`), while the *ids* stored in them are numbered
+        // entity-major.
+        let n_slots = n_elem * dofs_per_elem;
+        let mut dofs_flat = vec![0 as DofId; n_slots];
+        let mut signs_flat = vec![0.0_f64; n_slots];
 
+        // Pass 1 — edge blocks.  D513: MFEM enumerates the global dofs
+        // **entity-major** (`fespace.cpp`: `ebase = E[i]*ne`, then `bbase =
+        // nvdofs + nedofs + elem*nb`), i.e. every edge dof of the mesh before
+        // every element-interior dof, not interleaved per element as the
+        // pre-D513 single pass did.  The mesh edge index order is the
+        // first-encounter order of `TRI_EDGES` over the elements — MFEM's own
+        // edge-table construction order.
         for e in 0..n_elem as u32 {
             let verts = mesh.element_nodes(e);
-            for &(li, lj) in TRI_FACES.iter() {
+            let base = e as usize * dofs_per_elem;
+            for (blk, &(li, lj)) in TRI_EDGES.iter().enumerate() {
                 let (gi, gj) = (verts[li], verts[lj]);
                 let key = EdgeKey::new(gi, gj);
-                let sign = Self::compute_sign_2d_tri(&mesh, verts, li, lj, gi, gj);
+                // D514: MFEM's orientation sign for an edge dof —
+                // `SegDofOrd[orientation > 0 ? 0 : 1]` in
+                // `RT_FECollection::DofOrderForOrientation`: `+1` when the
+                // element's local edge direction is ascending, `−1` otherwise
+                // (the sign is *not* the outward-vs-canonical-normal test the
+                // pre-D514 code computed — that differs from MFEM by a
+                // negative factor on every positively oriented element).
+                let sign = if gi < gj { 1.0 } else { -1.0 };
+                let at = base + blk * dofs_per_face;
 
                 if dofs_per_face == 1 {
                     let dof = *edge_map.entry(key).or_insert_with(|| { let d=next_dof; next_dof+=1; d });
-                    dofs_flat.push(dof);
-                    signs_flat.push(sign);
+                    dofs_flat[at] = dof;
+                    signs_flat[at] = sign;
                 } else {
                     let nd = dofs_per_face as u32;
                     let first = *edge_map.entry(key).or_insert_with(|| {
@@ -717,23 +754,30 @@ impl<M: MeshTopology> HDivSpace<M> {
                     // k to the same physical point as this element's slot
                     // (k+1−1−k') — so the global slots are reversed, exactly
                     // like MFEM's RT `DofOrderForOrientation(SEGMENT, -1)` and
-                    // like `build_2d_quad`.  The element sign (outward vs
-                    // canonical normal) is orthogonal to this reversal.
+                    // like `build_2d_quad`.
                     let rev = gi > gj;
                     for k in 0..dofs_per_face {
                         let kk = if rev { dofs_per_face - 1 - k } else { k };
-                        dofs_flat.push(first + kk as u32);
-                        signs_flat.push(sign);
+                        dofs_flat[at + k] = first + kk as u32;
+                        signs_flat[at + k] = sign;
                     }
                 }
             }
-            // Interior bubble DOFs
-            for _ in 0..interior_dofs {
-                dofs_flat.push(next_dof);
-                next_dof += 1;
-                signs_flat.push(1.0);
+        }
+
+        // Pass 2 — interior bubble DOFs, at the entity-major base
+        // (`nvdofs + nedofs`, zero here) + element index × per-element count,
+        // matching MFEM's `bbase = bdofs[elem]` (D513).
+        let interior_base = next_dof;
+        for e in 0..n_elem as u32 {
+            let at = e as usize * dofs_per_elem + TRI_EDGES.len() * dofs_per_face;
+            let ib = interior_base + e * interior_dofs as DofId;
+            for j in 0..interior_dofs {
+                dofs_flat[at + j] = ib + j as DofId;
+                signs_flat[at + j] = 1.0;
             }
         }
+        next_dof = interior_base + n_elem as DofId * interior_dofs as DofId;
 
         HDivSpace {
             mesh,
@@ -749,47 +793,6 @@ impl<M: MeshTopology> HDivSpace<M> {
             is_bdm,
             quad_igll: false,
         }
-    }
-
-    /// Compute the orientation sign for a 2-D face (edge) on triangles.
-    ///
-    /// Global edge normal is the 90° CCW rotation of (p_max − p_min).
-    /// Local outward normal points away from the opposite vertex.
-    /// Sign = +1 if they agree, −1 otherwise.
-    fn compute_sign_2d_tri(mesh: &M, verts: &[u32], li: usize, lj: usize, gi: u32, gj: u32) -> f64 {
-        let pa = mesh.node_coords(gi);
-        let pb = mesh.node_coords(gj);
-        // Edge tangent gi→gj
-        let tx = pb[0] - pa[0];
-        let ty = pb[1] - pa[1];
-        // Normal of edge gi→gj (90° CCW rotation): (−ty, tx)
-        let nx = -ty;
-        let ny = tx;
-
-        // Opposite vertex = the one of the three local vertices not on the edge.
-        let opp_local = 3 - li - lj;
-        let opp_global = verts[opp_local];
-        let po = mesh.node_coords(opp_global);
-
-        // The outward normal should point AWAY from the opposite vertex.
-        // Test: (midpoint_of_edge → opposite_vertex) · normal < 0 means
-        // the normal already points away from the opposite vertex.
-        let mx = 0.5 * (pa[0] + pb[0]);
-        let my = 0.5 * (pa[1] + pb[1]);
-        let to_opp_x = po[0] - mx;
-        let to_opp_y = po[1] - my;
-        let dot = nx * to_opp_x + ny * to_opp_y;
-
-        // Global orientation: the canonical edge goes min→max.
-        // If gi < gj, the edge tangent is in global direction, and the normal
-        // (nx, ny) is the global normal.  If gi > gj, we need to flip.
-        let global_flip = if gi < gj { 1.0 } else { -1.0 };
-
-        // dot < 0 → normal already points away from opp → outward direction agrees
-        // with the tangent-based normal direction.
-        let outward_flip = if dot < 0.0 { 1.0 } else { -1.0 };
-
-        global_flip * outward_flip
     }
 
     // ─── 3-D tetrahedron construction ──────────────────────────────────────
@@ -2370,10 +2373,11 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
         _ => [0.0, 0.0, 1.0],
     };
     match elem_type {
-        // Reference dual block order = TRI_FACES = [hyp (1,2), left (0,2),
-        // bottom (0,1)] with Gauss-Legendre nodal samples ascending along the
-        // listed edge direction, then MFEM interior component samples.
-        // Table shared with the element crate (`TriRT1::mfem_tri_nodal_dofs`).
+        // Reference dual block order = MFEM `RT_TriangleElement`'s local dof
+        // order = `TRI_EDGES` = [bottom (0,1), hyp (1,2), left (2,0)] with
+        // Gauss-Legendre nodal samples ascending along the listed edge
+        // direction, then MFEM interior component samples.  Table shared with
+        // the element crate (`TriRT1::mfem_tri_nodal_dofs`).
         ElementType::Tri3 | ElementType::Tri6 => {
             let (pts, nks) = fem_element::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs(k);
             for (p, nk) in pts.iter().zip(nks.iter()) {
@@ -2800,40 +2804,69 @@ mod tests {
         assert!(vals.iter().all(|x| x.is_finite()));
     }
 
-    /// tri/tet RT1/RT2 use the dual engine with MFEM **nodal** semantics
-    /// (D34): each slot carries the pointwise normal-flux sample
-    /// `f(x_s)·cof(J)·nk_s` (scaled by the element sign).  For the constant
-    /// field (1,0) on element 0 of `unit_square_tri(2)` (`cof = 0.5·I`): the
-    /// hypotenuse samples are ±0.5, the left-edge samples have the opposite
-    /// sign, the bottom-edge samples vanish (flux ⊥ n̂), interior sample 6
-    /// (nk (0,−1)) vanishes and interior sample 7 (nk (−1,0)) repeats the
-    /// left-edge value.
+    /// tri RT1 uses the dual engine with MFEM **nodal** semantics (D34) and
+    /// MFEM's dof conventions (D492/D513/D514): element slot `k` carries
+    /// `s_k · f(x_k)·(cof(J)·nk_k)` where the sample table is MFEM's
+    /// `RT_TriangleElement` local dof order (edge blocks bottom/hyp/left, then
+    /// the two interior components — the same order `build_2d_tri` now walks)
+    /// and `s_k` is MFEM's `SegDofOrd` orientation sign (+1 iff the element's
+    /// local edge direction is ascending).  Verified here against the law
+    /// evaluated independently from the mesh geometry for a constant field.
     #[test]
     fn hdiv_interpolate_vector_constant_2d_rt1_nodal_semantics() {
         let mesh = Mesh::<2>::unit_square_tri(2);
-        let space = HDivSpace::new(mesh, 1);
+        let space = HDivSpace::new(mesh.clone(), 1);
         let g = space.interpolate_vector(&|_x| vec![1.0, 0.0]);
         let dofs = space.element_dofs(0);
-        let s = |k: usize| g.as_slice()[dofs[k] as usize];
-        let v_hyp = s(0);
-        assert!((v_hyp.abs() - 0.5).abs() < 1e-12, "hyp sample magnitude");
-        assert!(
-            (s(1) - v_hyp).abs() < 1e-12,
-            "hyp nodes share the constant sample value"
-        );
-        assert!(
-            (s(2) - v_hyp).abs() < 1e-12 && (s(3) - v_hyp).abs() < 1e-12,
-            "left samples repeat the hyp value after orientation signs"
-        );
-        assert!(
-            s(4).abs() < 1e-12 && s(5).abs() < 1e-12,
-            "bottom samples vanish for f = (1,0)"
-        );
-        assert!(s(6).abs() < 1e-12, "interior (0,−1) sample vanishes");
-        assert!(
-            (s(7) - s(2)).abs() < 1e-12,
-            "interior (−1,0) sample equals left-edge sample"
-        );
+        let signs = space.element_signs(0);
+        assert_eq!(dofs.len(), 8);
+
+        let verts = mesh.element_nodes(0);
+        let c = |i: usize| {
+            let p = mesh.node_coords(verts[i]);
+            [p[0], p[1]]
+        };
+        // X(ξ,η) = c0 + (∂x/∂ξ, ∂x/∂η)·ξ + (∂y/∂ξ, ∂y/∂η)·η — the layout
+        // `interpolate_vector`'s tri arm uses.
+        let j = [
+            [c(1)[0] - c(0)[0], c(2)[0] - c(0)[0]],
+            [c(1)[1] - c(0)[1], c(2)[1] - c(0)[1]],
+        ];
+        // MFEM slot table (element crate owns it).
+        let (_, nks) = fem_element::raviart_thomas::tri_rt1::mfem_tri_nodal_dofs(1);
+        assert_eq!(nks.len(), 8);
+
+        for k in 0..8 {
+            // cof(J)·nk (contravariant Piola normal), cof = [[j11, −j10], [−j01, j00]].
+            let nx = j[1][1] * nks[k][0] - j[1][0] * nks[k][1];
+            let ny = -j[0][1] * nks[k][0] + j[0][0] * nks[k][1];
+            let expect = signs[k] * nx; // f = (1,0)
+            let got = g.as_slice()[dofs[k] as usize];
+            assert!(
+                (got - expect).abs() < 1e-12,
+                "slot {k}: sample {got} vs sign·(cof(J)·nk)_x = {expect}"
+            );
+        }
+
+        // Per-edge sign law (D514): MFEM's `SegDofOrd` orientation sign —
+        // every node of a block shares it, and it is +1 iff the element's
+        // local edge direction in `TRI_EDGES` order is ascending.  The
+        // interior slots carry +1.
+        for e in 0..mesh.n_elements() as u32 {
+            let v = mesh.element_nodes(e);
+            let sg = space.element_signs(e);
+            for (blk, &(li, lj)) in TRI_EDGES.iter().enumerate() {
+                let want = if v[li] < v[lj] { 1.0 } else { -1.0 };
+                for k in 0..2 {
+                    assert_eq!(
+                        sg[2 * blk + k],
+                        want,
+                        "elem {e} block {blk}: MFEM orientation sign"
+                    );
+                }
+            }
+            assert_eq!(&sg[6..8], &[1.0, 1.0], "interior slots carry no sign");
+        }
     }
 
     #[test]
