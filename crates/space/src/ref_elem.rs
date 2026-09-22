@@ -23,7 +23,7 @@
 //! | unit simplex (area ½ / volume 1/6) | `TriP1`, `TriPk`, `H1TriPk`, `TriL2GL`, `P0Tri`, `TetP1`, `TetP2`, `TetPk`, `H1TetPk`, `TetL2GL`, `P0Tet` |
 //! | `[0,1]²` square | `QuadQk` (closed GLL), `QuadL2GL` (open GL), `P0Tensor{dim:2}`, `P0QuadCentred` |
 //! | `[-1,1]²` square (**legacy**) | `QuadQ1`, `QuadQ2` — only the ZZ-estimator flux paths still evaluate these |
-//! | `[-1,1]³` cube | `HexQ1`, `HexQk` (closed GLL), `HexL2GL` (open GL), `P0Tensor{dim:3}` |
+//! | `[-1,1]³` cube | `HexQ1`, `HexQk` (closed GLL), `HexL2GL` (open GL), `P0Tensor{dim:3}` — one family for **all three hexahedral cell types** `Hex8`/`Hex20`/`Hex27` (D581; MFEM has a single CUBE geometry, `HexQk::new(2)`'s 27-dof lattice is the Hex27 node set) |
 //! | unit prism (triangle × `[0,1]`, volume ½) | `PrismPk` (equispaced, layer-major), `H1PrismPk` (closed GLL, entity order) |
 //! | unit pyramid (`x,y ∈ [0,1−z]`, `z ∈ [0,1]`, volume ⅓) | `PyramidPk` (equispaced layers), `h1_pyramid_element` (Fuentes/Bergot, entity order), `l2_pyramid_element`, `P0Pyr` |
 //!
@@ -31,6 +31,18 @@
 //! cube conventions (fem-rs hexes are `[-1,1]³`, MFEM's are `[0,1]³` — D371
 //! compensated the 2^dim domain factor at the consumers); prisms/pyramids have
 //! *two* slot conventions each (equispaced vs GLL/Fuentes entity order).
+//!
+//! D581 note on the high-order cell labels: `Hex20`/`Hex27`, `Prism15`/
+//! `Prism18` and `Pyramid13` are *cell connectivity* types — every dispatch
+//! below routes them to the same per-geometry family their straight sibling
+//! uses (`HexQk` / the prism tensor family / the Fuentes pyramid).  Two dof
+//! counts are MFEM-pinned and differ from the connectivity label: the
+//! quadratic wedge family has 18 dofs (MFEM `H1_WedgeElement(2)`, the curved
+//! wedge's geometry table), and the quadratic pyramid family has
+//! `p(p²+3)+1 = 15` dofs (MFEM's Fuentes element, `pyr_type = 1`).  There is
+//! no 15-dof MFEM wedge element: a Gmsh 15-node prism reads its geometry
+//! through the shared 18-dof prism family, with the slot count taken from the
+//! mesh's own table.
 //!
 //! # API layers
 //!
@@ -210,12 +222,19 @@ pub fn h1_simplex_slots(elem_type: ElementType, order: u8) -> Box<dyn ReferenceE
 /// Closed Gauss-Lobatto tensor element on the fem-rs tensor frames:
 /// `QuadQk` on **`[0,1]²`**, `HexQk` on **`[-1,1]³`** (fem-rs hex convention;
 /// MFEM's cube is `[0,1]³`), MFEM `H1_FECollection` lexicographic-cum-entity
-/// slot order.  No order clamping and no P0 arm — the caller's contract
-/// decides whether order 0 is legal and what it maps to.
+/// slot order.  All three hexahedral cell types share the one full-tensor
+/// family: `Hex8`, the serendipity `Hex20`, and the complete `Hex27`
+/// (D581 — MFEM has a single CUBE geometry, and `HexQk::new(2)`'s 27-dof
+/// lattice *is* the Hex27 node set; the same family `crates/mesh/src/curved.rs`
+/// reads Hex27 curved-geometry tables with).  No order clamping and no P0 arm
+/// — the caller's contract decides whether order 0 is legal and what it maps
+/// to.
 pub fn gll_tensor(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Quad4 => Box::new(QuadQk::new(order as usize)),
-        ElementType::Hex8 | ElementType::Hex20 => Box::new(HexQk::new(order as usize)),
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            Box::new(HexQk::new(order as usize))
+        }
         _ => panic!(
             "gll_tensor: {elem_type:?} is not a GLL tensor element — use the purpose dispatch"
         ),
@@ -226,12 +245,16 @@ pub fn gll_tensor(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement
 /// `QuadQ1` (bilinear, `[-1,1]²`), `QuadQ2` (biquadratic, `[-1,1]²`),
 /// `HexQ1` (trilinear, `[-1,1]³`).  These predate the `[0,1]`-domain GLL
 /// migration; the ZZ-estimator flux paths still evaluate them because their
-/// bilinear geometry Jacobians are written in the `[-1,1]` frame.
+/// bilinear geometry Jacobians are written in the `[-1,1]` frame.  The
+/// trilinear arm accepts every hexahedral cell type (`Hex8`/`Hex20`/`Hex27`,
+/// D581): an order-1 space on a higher-order hex cell is the same
+/// vertex-only trilinear element (`DofManager::build` routes order 1 through
+/// `build_p1` regardless of the cell's node count).
 pub fn fixed_order_tensor(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Quad4, 1) => Box::new(QuadQ1),
         (ElementType::Quad4, 2) => Box::new(QuadQ2),
-        (ElementType::Hex8, 1) => Box::new(HexQ1),
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 1) => Box::new(HexQ1),
         _ => panic!(
             "fixed_order_tensor: no legacy fixed-order element for ({elem_type:?}, order={order})"
         ),
@@ -324,12 +347,26 @@ pub fn h1_field_element(
         (ElementType::Hex8, 0) => Box::new(P0Tensor { dim: 3 }),
         (ElementType::Hex8, 1) => fixed_order_tensor(elem_type, order),
         (ElementType::Hex8, _) => gll_tensor(elem_type, order),
+        // D581: serendipity Hex20 and complete Hex27 cells share the hex
+        // H¹ family — MFEM has one CUBE geometry, `H1_FECollection(p, 3)`
+        // builds `H1_HexahedronElement(p)` on all of them, and the order
+        // ladder (P0 → HexQ1 → HexQk) mirrors the Hex8 arms exactly.
+        (ElementType::Hex20 | ElementType::Hex27, 0) => Box::new(P0Tensor { dim: 3 }),
+        (ElementType::Hex20 | ElementType::Hex27, 1) => fixed_order_tensor(elem_type, order),
+        (ElementType::Hex20 | ElementType::Hex27, _) => gll_tensor(elem_type, order),
         // MFEM `H1_FECollection(p, 3)`'s wedge element (GLL, entity order).
+        // Both quadratic prism cell types route here (D581): MFEM's curved
+        // wedge is the 18-dof `H1_WedgeElement(2)` (Gmsh code 13 = Prism18),
+        // and a Gmsh 15-node prism (code 18) shares the same family — no
+        // 15-dof MFEM wedge element exists.
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
             h1_prism_slots(order)
         }
         // D299/D347: the pyramid element of the *chosen* family in MFEM's
         // entity slot order, matching `DofManager::build_pyramid_pk`.
+        // Pyramid13 cells (D581) share it: MFEM 4.10's quadratic pyramid is
+        // the Fuentes element with p(p²+3)+1 = 15 dofs, not the 13-node
+        // connectivity label.
         (ElementType::Pyramid5 | ElementType::Pyramid13, _) => {
             h1_pyramid_slots(order, pyr_type)
         }
@@ -372,7 +409,9 @@ pub fn l2_field_element(
             o if gll => Box::new(QuadQk::new_lex(o as usize)),
             o => Box::new(QuadL2GL::new(o as usize)),
         },
-        ElementType::Hex8 => match order {
+        // D581: all three hexahedral cell types share the L² tensor arms —
+        // one CUBE geometry in MFEM, one family here.
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => match order {
             0 => Box::new(P0Tensor { dim: 3 }),
             // HexL2GL keeps the fem-rs hex reference domain [-1,1]³ (same as
             // HexQk/hex_rule) so quadrature and the isoparametric Jacobian
@@ -447,8 +486,12 @@ pub fn geometry_node_element(elem_type: ElementType, order: u8) -> Box<dyn Refer
         (ElementType::Tet4, 1) => Box::new(TetP1),
         (ElementType::Tet4, 2) => Box::new(TetP2),
         (ElementType::Tet4, 3) => Box::new(H1TetPk::new(3)),
-        // Hex8/HexQk: Gauss-Lobatto nodes on [-1,1]³ (same family as QuadQk).
-        (ElementType::Hex8, o) => Box::new(HexQk::new(o.max(1) as usize)),
+        // HexQk: Gauss-Lobatto nodes on [-1,1]³ (same family as QuadQk).
+        // D581: every hexahedral cell type — curved.rs reads Hex20/Hex27
+        // geometry tables with this same `HexQk` family.
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, o) => {
+            Box::new(HexQk::new(o.max(1) as usize))
+        }
         (ElementType::Tet4, o) => Box::new(H1TetPk::new(o.max(1) as usize)),
         // High-order tri geometry readers: GLL at every order (the equispaced
         // TriPk misreads the set_curvature lattice from order 3 on; p ≤ 2 is
@@ -484,12 +527,18 @@ pub fn legacy_equispaced_element(elem_type: ElementType, order: u8) -> Box<dyn R
         (ElementType::Tri3 | ElementType::Tri6, 0) => Box::new(P0Tri),
         (ElementType::Tet4, 0) => Box::new(P0Tet),
         (ElementType::Quad4, 0) => Box::new(P0Tensor { dim: 2 }),
-        (ElementType::Hex8, 0) => Box::new(P0Tensor { dim: 3 }),
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 0) => {
+            Box::new(P0Tensor { dim: 3 })
+        }
         (ElementType::Tri3 | ElementType::Tri6, _) => equispaced_simplex(elem_type, order),
         (ElementType::Tet4, _) => equispaced_simplex(elem_type, order),
         (ElementType::Quad4, _) => gll_tensor(elem_type, order),
-        (ElementType::Hex8, 1) => fixed_order_tensor(elem_type, order),
-        (ElementType::Hex8, _) => gll_tensor(elem_type, order),
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 1) => {
+            fixed_order_tensor(elem_type, order)
+        }
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, _) => {
+            gll_tensor(elem_type, order)
+        }
         (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
             equispaced_prism(order)
         }
