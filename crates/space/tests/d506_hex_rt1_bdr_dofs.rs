@@ -222,3 +222,24 @@ fn d506_hex_rt2_boundary_set_size_matches_mfem() {
         assert_eq!(block.len(), 9, "RT2 quad face block = 3x3 = 9 dofs");
     }
 }
+
+/// D526 (closed) — `HDivSpace::dof_nodal_coords` is the MFEM-nodal accessor
+/// whose absence the file-level docs above registered as the residual gap.
+/// Keyed at its own nodal points, the 96 essential boundary dofs land on
+/// exactly the probe's 96-key golden table (`golden("RT1")`), point for
+/// point — the accessor is not merely set-correct per face but reproduces
+/// the very points MFEM's `GetEssentialVDofs`-keyed dump reports.
+#[test]
+fn d526_hex_rt1_boundary_nodal_accessor_hits_mfem_keys() {
+    let mesh = hex_cube();
+    let space = HDivSpace::new(mesh.clone(), 1);
+    let nodal = space.dof_nodal_coords();
+    let dofs = boundary_dofs_hdiv(space.mesh(), &space, &ALL_TAGS);
+    assert_eq!(dofs.len(), 96);
+
+    let mut got: Vec<[i64; 3]> = dofs.iter().map(|&d| key3(&nodal[d as usize])).collect();
+    got.sort_unstable();
+    got.dedup();
+    assert_eq!(got.len(), 96, "the 96 nodal points must be pairwise distinct");
+    assert_eq!(got, golden("RT1"), "accessor keys vs MFEM GetEssentialVDofs keys");
+}

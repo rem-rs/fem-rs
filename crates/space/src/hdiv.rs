@@ -1608,6 +1608,137 @@ impl<M: MeshTopology> HDivSpace<M> {
         out
     }
 
+    /// Physical coordinates of every global DOF at its **MFEM nodal point**
+    /// — the D526 counterpart to [`Self::dof_coords`].
+    ///
+    /// MFEM-side convention (identical to the D505/D506 oracle probes): the
+    /// nodal point of an H(div) DOF is the slot point of the element's
+    /// `VectorFiniteElement::Nodes` integration rule (`fe->GetNodes()` —
+    /// *not* `Geometry` nodes) pushed through the element isoparametric map
+    /// (`ElementTransformation::Transform`).  fem-rs reads the same slot
+    /// points from the MFEM-anchored tables this file already consumes for
+    /// interpolation ([`interp_rows`]: tri `mfem_tri_nodal_dofs`, quad
+    /// Gauss-face tensors + closed×open interior grids, tet
+    /// `tet_rt1::mfem_nodal_dofs`, hex `HEX_RT_FACES` frames, pyramid
+    /// `pyramid::mfem_nodal_rows`); the one element family with no Rust
+    /// source for its node table, `RT_WedgeElement`, is served by
+    /// [`wedge_nodal_points`] — measured against MFEM 4.10 for p = 0..=3
+    /// (probe/dump/cross-check archived under `tmp/d526/`, every slot equal
+    /// to 1e-14).
+    ///
+    /// Unlike [`Self::dof_coords`] (the D414 *geometric anchor* convention:
+    /// equispaced permutation keys, "not MFEM interpolation nodes"), these
+    /// are the actual interpolation nodes — on the 2×2×2 hex cube the RT1
+    /// boundary DOFs key onto the 96 Gauss-tensor points of the boundary
+    /// quads (the D506 golden) instead of the 26 aliased vertex anchors.
+    /// A DOF shared by two elements is written once (first element in mesh
+    /// order); the `build_*` slot transforms guarantee both neighbours map
+    /// the same global DOF to the same physical point, and a disagreement
+    /// beyond 1e-8 panics.
+    ///
+    /// # Panics
+    /// - for BDM spaces (moment-based DOFs have no MFEM nodal semantics in
+    ///   this engine) and for the integrated-GLL quad variant (its DOFs are
+    ///   sub-cell flux integrals, not point samples) — D587/D588;
+    /// - for orders above the nodal-table caps (tri 8, quad 6, tet 4, hex 6,
+    ///   prism 3, pyramid 3 — the same tables `interp_rows` consumes);
+    /// - if two elements disagree on a shared DOF's point, or a DOF is left
+    ///   without a point.
+    pub fn dof_nodal_coords(&self) -> Vec<[f64; 3]> {
+        assert!(
+            !self.is_bdm,
+            "HDivSpace::dof_nodal_coords: BDM DOFs are moments, not nodal \
+             samples — no MFEM nodal points exist for this engine (D587)"
+        );
+        assert!(
+            !(self.quad_igll && self.elem_type == ElementType::Quad4),
+            "HDivSpace::dof_nodal_coords: the integrated-GLL quad variant's \
+             DOFs are sub-cell flux integrals, not point samples (D588)"
+        );
+        let k = self.order as usize;
+        let dim = self.mesh.dim() as usize;
+        let mut out = vec![[0.0f64; 3]; self.n_dofs()];
+        let mut filled = vec![false; self.n_dofs()];
+        for e in 0..self.mesh.n_elements() as u32 {
+            let et = self.mesh.element_type(e);
+            let points: Vec<[f64; 3]> = match et {
+                ElementType::Tri3 | ElementType::Tri6 => {
+                    assert!(k <= 8, "dof_nodal_coords: tri nodal table covers k<=8");
+                    interp_rows(et, self.order).iter().map(|r| r.xi).collect()
+                }
+                ElementType::Quad4 => {
+                    assert!(
+                        k <= 6,
+                        "dof_nodal_coords: quad RT supports orders 0..=6"
+                    );
+                    interp_rows(et, self.order).iter().map(|r| r.xi).collect()
+                }
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    assert!(
+                        k <= 4,
+                        "dof_nodal_coords: tet nodal table (`tet_rt1::mfem_nodal_dofs`) \
+                         holds k = 0..=4"
+                    );
+                    interp_rows(et, self.order).iter().map(|r| r.xi).collect()
+                }
+                ElementType::Hex8 => {
+                    assert!(
+                        k <= 6,
+                        "dof_nodal_coords: hex RT supports orders 0..=6"
+                    );
+                    interp_rows(et, self.order).iter().map(|r| r.xi).collect()
+                }
+                ElementType::Prism6 => {
+                    assert!(
+                        k <= 3,
+                        "dof_nodal_coords: `wedge_nodal_points` is verified \
+                         against MFEM 4.10 for k = 0..=3"
+                    );
+                    wedge_nodal_points(k)
+                }
+                ElementType::Pyramid5 => {
+                    assert!(
+                        k <= 3,
+                        "dof_nodal_coords: pyramid nodal table covers k<=3 (PyraRTk cap)"
+                    );
+                    interp_rows(et, self.order).iter().map(|r| r.xi).collect()
+                }
+                other => panic!("HDivSpace::dof_nodal_coords: unsupported {other:?}"),
+            };
+            let dofs = self.element_dofs(e);
+            debug_assert_eq!(
+                points.len(),
+                dofs.len(),
+                "dof_nodal_coords: slot/point count mismatch on {et:?} k={k}"
+            );
+            for (row, &dof) in points.iter().zip(dofs) {
+                // MFEM `ElementTransformation::Transform` (straight elements;
+                // the same straightened map `interpolate_vector`'s pyramid
+                // branch already consumes via `element_jacobian_at`).
+                let (_jac, xp) = fem_mesh::element_jacobian_at(&self.mesh, e, &row[..dim], dim);
+                let mut p = [0.0f64; 3];
+                p[..dim].copy_from_slice(&xp);
+                let d = dof as usize;
+                if filled[d] {
+                    let q = out[d];
+                    assert!(
+                        (0..dim).all(|c| (p[c] - q[c]).abs() < 1e-8),
+                        "dof_nodal_coords: elements disagree on the nodal point of \
+                         shared dof {d} ({p:?} vs {q:?}) — broken slot transform"
+                    );
+                } else {
+                    out[d] = p;
+                    filled[d] = true;
+                }
+            }
+        }
+        assert!(
+            filled.iter().all(|&f| f),
+            "dof_nodal_coords: some DOFs received no nodal point"
+        );
+        out
+    }
+
     /// Vector-valued interpolation consistent with the assembly basis.
     ///
     /// The vector assembler pairs element-local dof `i` with reference basis
@@ -1636,8 +1767,18 @@ impl<M: MeshTopology> HDivSpace<M> {
     /// physical ones (contravariant-Piola duality).  Since D33/D34 (tri RT)
     /// and D540 (tet RT: `TetRTk` is MFEM's nodal `RT_TetrahedronElement`)
     /// every RT reference basis served here is exactly dual to its slot sample
-    /// set, so the dual matrix is the identity and the dof values coincide
-    /// with MFEM `Project_RT` (up to fem-rs' unnormalised-normal scaling).
+    /// set, so the dual matrix `W` is diagonal (D576) and the dof values
+    /// coincide with MFEM `Project_RT` (up to fem-rs' unnormalised-normal
+    /// scaling).  Per family (all verified by the unit tests below):
+    /// `W = I` on triangles/tets/pyramids; `W = (1/4) I` on hexes (the nodal
+    /// GaussLegendre variant, D289); on quads `W = diag(±1)` — the
+    /// [`interp_rows`] interior sample normals deliberately carry no
+    /// `dof_map` flip, so the baked reference-orientation sign of
+    /// `QuadRTk`'s interior basis functions appears in `W` instead of in the
+    /// sample values; the ± diagonal cancels between `W⁻¹` and the samples,
+    /// leaving the same MFEM dof values.  (D576: the comment used to claim a
+    /// literal identity for every family — wrong in the quad ± diag and the
+    /// hex 1/4 scaling.)
     ///
 /// Slot alignment across element interfaces (which global dof carries which
 /// sample) is handled at construction time: quad 2-D edges and tri 2-D edges
@@ -2381,6 +2522,92 @@ struct InterpRow {
     nk: [f64; 3],
 }
 
+/// `RT_WedgeElement(p)` reference nodal points, in the fem-rs prism frame
+/// `(ξ, η, ζ)` (ξ = layer axis, triangle plane (η, ζ); MFEM's frame is the
+/// axis renaming `(x, y, z)_MFEM = (η, ζ, ξ)`, so `PrismRTk`'s slot order
+/// `[bottom tri, top tri, q(ζ=0), q(η+ζ=1), q(η=0), interior]` matches
+/// MFEM's `Nodes` table verbatim — D444).
+///
+/// D526: measured against MFEM 4.10 `RT_WedgeElement(p).GetNodes()` for
+/// p = 0..=3 (probe `tmp/d526/wedge_ref.cpp`, dump `wedge_ref.txt`,
+/// generator cross-check `tmp/d526/check_wedge.py` — every slot equal to
+/// 1e-14).  Structure, with `bop(n)` = `gauss_legendre_01(n)`,
+/// `clob(n)` = `gauss_lobatto_01(n)`, and barycentric weights on the
+/// reference triangle (0,0), (1,0), (0,1) given by
+/// `λᵥ = bop(iᵥ) / Σᵥ bop(iᵥ)`, `i₁ + i₂ ≤ k`:
+///
+/// - bottom tri (ξ = 0): grid (i₁ slow, i₂ fast);
+/// - top tri (ξ = 1): transposed (i₁ fast, i₂ slow);
+/// - quad ζ = 0: `bop(k+1)` tensor, η fast ascending;
+/// - quad η + ζ = 1 (diagonal): ζ fast ascending;
+/// - quad η = 0: ζ fast **descending** (MFEM's face parametrisation);
+/// - (η, ζ)-component interiors (dof2nk = 2, 4): RT-tri interior points
+///   (`bop(k)` bary, i₁ fast) × ξ ∈ `bop(k+1)`, each point doubled for the
+///   two components;
+/// - ξ-component interiors (dof2nk = 1): L2-tri full grid (`bop(k+1)` bary,
+///   i₁ fast) × ξ ∈ `clob(k+2)[1..=k]` (the `H1SegmentFE(p+1)` closed
+///   interior nodes — `fe_rt.cpp` `RT_WedgeElement::RT_WedgeElement`).
+fn wedge_nodal_points(k: usize) -> Vec<[f64; 3]> {
+    let bop1 = gauss_legendre_01(k + 1).0;
+    let bary = |bop: &[f64], i1: usize, i2: usize, c: usize| -> (f64, f64) {
+        let w = bop[i1] + bop[i2] + bop[c];
+        (bop[i1] / w, bop[i2] / w)
+    };
+    let mut pts = Vec::new();
+    for i1 in 0..=k {
+        for i2 in 0..=k - i1 {
+            let (l1, l2) = bary(&bop1, i1, i2, k - i1 - i2);
+            pts.push([0.0, l1, l2]);
+        }
+    }
+    for i2 in 0..=k {
+        for i1 in 0..=k - i2 {
+            let (l1, l2) = bary(&bop1, i1, i2, k - i1 - i2);
+            pts.push([1.0, l1, l2]);
+        }
+    }
+    for b in 0..=k {
+        for a in 0..=k {
+            pts.push([bop1[b], bop1[a], 0.0]);
+        }
+    }
+    for b in 0..=k {
+        for a in 0..=k {
+            pts.push([bop1[b], 1.0 - bop1[a], bop1[a]]);
+        }
+    }
+    for b in 0..=k {
+        for a in 0..=k {
+            pts.push([bop1[b], 0.0, bop1[k - a]]);
+        }
+    }
+    if k >= 1 {
+        let bopk = gauss_legendre_01(k).0;
+        // (η, ζ)-component interiors: two components share every point.
+        for b in 0..=k {
+            for i2 in 0..k {
+                for i1 in 0..k - i2 {
+                    let (l1, l2) = bary(&bopk, i1, i2, k - 1 - i1 - i2);
+                    let p = [bop1[b], l1, l2];
+                    pts.push(p);
+                    pts.push(p);
+                }
+            }
+        }
+        // ξ-component interiors at the closed (GLL) interior layers.
+        let clob = gauss_lobatto_01(k + 2).0;
+        for b in 0..k {
+            for i2 in 0..=k {
+                for i1 in 0..=k - i2 {
+                    let (l1, l2) = bary(&bop1, i1, i2, k - i1 - i2);
+                    pts.push([clob[b + 1], l1, l2]);
+                }
+            }
+        }
+    }
+    pts
+}
+
 /// Build the interpolation dual rows for one element type/order, ordered to
 /// match the space's element-local slot layout (faces in face-table order,
 /// one grid of samples per face, then interior samples).
@@ -2425,6 +2652,14 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
                 }
             }
             if k >= 1 {
+                // D576: these interior sample normals deliberately carry NO
+                // `dof_map` orientation flip (unlike the published element
+                // table `quad_rt1::mfem_quad_nodal_dofs`, whose normals are
+                // pre-flipped).  `QuadRTk` bakes the reference-orientation
+                // sign into its interior basis functions, so the dual matrix
+                // comes out `diag(±1)` instead of the identity; the ± diag
+                // cancels between the solve's `W⁻¹` and the un-flipped
+                // sample values, so the dof values still equal MFEM's.
                 let cp = gauss_lobatto_01(k + 2).0;
                 let op = gauss_legendre_01(k + 1).0;
                 for j in 0..=k {
@@ -2878,7 +3113,8 @@ mod tests {
         for k in 0..8 {
             // cof(J)·nk (contravariant Piola normal), cof = [[j11, −j10], [−j01, j00]].
             let nx = j[1][1] * nks[k][0] - j[1][0] * nks[k][1];
-            let ny = -j[0][1] * nks[k][0] + j[0][0] * nks[k][1];
+            // (ny would carry the y-flux for f = (0,1); this test fixes f = (1,0).)
+            let _ny = -j[0][1] * nks[k][0] + j[0][0] * nks[k][1];
             let expect = signs[k] * nx; // f = (1,0)
             let got = g.as_slice()[dofs[k] as usize];
             assert!(
@@ -2930,5 +3166,103 @@ mod tests {
         let space = HDivSpace::new_bdm(mesh, 1);
         let ldofs = space.element_dofs(0);
         assert_eq!(ldofs.len(), 12, "TetBDM1 should have 12 DOFs per element");
+    }
+
+    /// D576 — the quad interpolation dual matrix is `diag(±1)`, *not* the
+    /// identity: the [`interp_rows`] interior sample normals carry no
+    /// `dof_map` flip, so the reference-orientation sign baked into
+    /// `QuadRTk`'s interior basis functions shows up as the diagonal's sign
+    /// (the published element-side table `mfem_quad_nodal_dofs` instead
+    /// pre-flips its normals).  The solve is unaffected — the ± diagonal
+    /// cancels between `W⁻¹` and the un-flipped samples — and this test
+    /// pins exactly the structure the `interpolate_vector` docs describe.
+    #[test]
+    fn quad_interp_dual_matrix_is_diag_pm1() {
+        use fem_element::raviart_thomas::QuadRTk;
+        for k in 1..=3usize {
+            let rows = interp_rows(ElementType::Quad4, k as u8);
+            let re = QuadRTk::new(k);
+            let n = rows.len();
+            assert_eq!(n, re.n_dofs(), "k={k}: one row per basis dof");
+            let mut w = vec![0.0_f64; n * n];
+            fill_dual_matrix(&rows, &re, &mut w);
+            for i in 0..n {
+                for j in 0..n {
+                    let v = w[i * n + j];
+                    if i == j {
+                        assert!(
+                            (v.abs() - 1.0).abs() < 1e-12,
+                            "k={k}: W[{i}][{i}] = {v}, expected |±1| (diag(±1) dual)"
+                        );
+                    } else {
+                        assert!(
+                            v.abs() < 1e-12,
+                            "k={k}: W[{i}][{j}] = {v}, expected off-diagonal zero"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// D526 — `wedge_nodal_points` reproduces the measured MFEM 4.10
+    /// `RT_WedgeElement(1)` node table (`tmp/d526/wedge_ref.txt`, slots
+    /// converted to the fem-rs frame `(ξ, η, ζ) = (z, x, y)_MFEM`).
+    #[test]
+    fn wedge_nodal_points_match_mfem_probe() {
+        assert_eq!(wedge_nodal_points(0).len(), 5);
+        assert_eq!(wedge_nodal_points(2).len(), 69);
+        assert_eq!(wedge_nodal_points(3).len(), 146);
+        let p = wedge_nodal_points(1);
+        assert_eq!(p.len(), 25);
+        let gl2 = [0.21132486540518713, 0.78867513459481287];
+        // Bottom tri: z-GL2-normalised barycentric points at ξ = 0.
+        let w = gl2[0] + gl2[0] + gl2[1];
+        let small = gl2[0] / w; // 0.1744576...
+        let big = gl2[1] / w; // 0.6510847...
+        for (slot, want) in [
+            (0, [0.0, small, small]),
+            (1, [0.0, small, big]),
+            (2, [0.0, big, small]),
+            (3, [1.0, small, small]),
+            (4, [1.0, big, small]),
+            (5, [1.0, small, big]),
+        ] {
+            for d in 0..3 {
+                assert!(
+                    (p[slot][d] - want[d]).abs() < 1e-14,
+                    "slot {slot} dim {d}: {} vs {:#?}",
+                    p[slot][d],
+                    want
+                );
+            }
+        }
+        // Quad faces: GL(k+1) tensors with MFEM's per-face fast axis (η fast
+        // on ζ=0; ζ fast on the diagonal; ζ fast *descending* on η=0).
+        // (Tolerance 1e-14: the quadrature crate's GL nodes may differ from
+        // MFEM's %.17g-printed constants in the last ulp.)
+        let close = |got: &[f64; 3], want: [f64; 3], slot: usize| {
+            for d in 0..3 {
+                assert!(
+                    (got[d] - want[d]).abs() < 1e-14,
+                    "slot {slot} dim {d}: {} vs {}",
+                    got[d],
+                    want[d]
+                );
+            }
+        };
+        close(&p[6], [gl2[0], gl2[0], 0.0], 6);
+        close(&p[7], [gl2[0], gl2[1], 0.0], 7);
+        close(&p[10], [gl2[0], gl2[1], gl2[0]], 10);
+        close(&p[11], [gl2[0], gl2[0], gl2[1]], 11);
+        close(&p[14], [gl2[0], 0.0, gl2[1]], 14);
+        close(&p[15], [gl2[0], 0.0, gl2[0]], 15);
+        // Interiors: the (η,ζ)-component points double up; ξ-component at
+        // the closed interior layer ξ = 1/2.
+        assert_eq!(p[18], p[19]);
+        close(&p[18], [gl2[0], 1.0 / 3.0, 1.0 / 3.0], 18);
+        close(&p[22], [0.5, small, small], 22);
+        close(&p[23], [0.5, big, small], 23);
+        close(&p[24], [0.5, small, big], 24);
     }
 }
