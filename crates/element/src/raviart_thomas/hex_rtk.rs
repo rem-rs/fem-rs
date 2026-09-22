@@ -64,6 +64,18 @@ use crate::gll_basis::{gl_nodes, gll_nodes, ClosedBasis};
 use crate::nedelec::hex_ndk::open_basis;
 use crate::reference::VectorReferenceElement;
 
+/// Per-DOF integrated (sub-cell face flux) functional of the hex
+/// IntegratedGLL RT variant — the 3-D analogue of the quad
+/// `IntegratedDofFunctional` (`crates/element/src/nedelec/quad_ndk_mfem.rs`).
+pub struct IntegratedDofFunctional3D {
+    /// `(reference sample point, weight)` pairs over the DOF's sub-cell face;
+    /// the weight is the 2-D Gauss product `(w_u·h_1)·(w_v·h_2)` with the
+    /// `[0,1]` Gauss-Legendre rule and the `[-1,1]` GLL sub-cell widths.
+    pub samples: Vec<([f64; 3], f64)>,
+    /// Reference normal direction `±e_c` — the `dof_map` flip (MFEM `nk`).
+    pub t: [f64; 3],
+}
+
 /// The 1-D open-factor kind of the tensor RT basis — the `ob_type` argument of
 /// MFEM `RT_HexahedronElement(p, cb_type, ob_type)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -186,6 +198,106 @@ impl HexRTk {
                 (partial_open(&v.dc), partial_open(&v.d2c))
             }
         }
+    }
+
+    /// Per-DOF data of MFEM `RT_HexahedronElement::ProjectIntegrated`
+    /// (`fe_rt.cpp:661-711`) — the *integrated* sub-cell face-flux
+    /// functionals of the IntegratedGLL variant ([`Self::new`]): each local
+    /// DOF is the integral of `f·(adj(J)·n̂)` over one boundary-parallel
+    /// sub-cell face `[cp_j, cp_j+1] × [cp_l, cp_l+1]` (GLL sub-cells of the
+    /// `[-1,1]` frame), sampled with MFEM `IntRules.Get(SQUARE, order)` — the
+    /// `(k+3)/2`-point `[0,1]` Gauss-Legendre rule per axis (4.10 rules live
+    /// on `[0,1]`), weight `(w_u·h_1)·(w_v·h_2)`.
+    ///
+    /// The list is in the element's local DOF order (entry `n` = local DOF
+    /// `n`, the face-block/interior-block enumeration of
+    /// [`VectorReferenceElement::eval_basis_vec`], which is MFEM's dof
+    /// numbering — pinned by `d577_hex_igll_functionals_mfem_truth`), and
+    /// `t` carries the `dof_map` flip (`±e_c`, MFEM's `nk`): face dofs take
+    /// their outward normal, interior dofs flip on the closed block index
+    /// `<= k/2` (fe_rt.cpp:407-430 — no odd-p supplement in 3-D).  A consumer
+    /// scatters `global = sign · Σ w·f(x(ξ))·(adj(J)·t)` exactly as the quad
+    /// IGLL path in `HDivSpace::interpolate_vector`.
+    pub fn integrated_functionals(&self) -> Vec<IntegratedDofFunctional3D> {
+        assert!(
+            self.open == HexRtOpen::IntegratedGLL,
+            "HexRTk::integrated_functionals requires the IntegratedGLL variant"
+        );
+        let k = self.order;
+        let m = k + 1;
+        // Closed GLL nodes of the degree-`k+1` closed basis: `k+2` points
+        // (`gll_nodes` takes the degree), the sub-cell edges of the
+        // integrated dofs — the same nodes `ClosedBasis::new(k + 1)` is
+        // nodal at.
+        let cp = gll_nodes(k + 1);
+        // MFEM `IntRules.Get(Geometry::SQUARE, p+1)`: per-axis SEGMENT rule
+        // of order `p+1` (bit-identical `gauss_legendre_01`, D74).
+        let npts = (k + 3) / 2;
+        let (gx, gw) = crate::quadrature::gauss_legendre_01(npts);
+        let mut out = Vec::with_capacity(self.n_dofs());
+        // One functional per (component c, closed index ic, free-axis
+        // sub-cell indices s1, s2); `flip` is MFEM's `dof_map` negative,
+        // i.e. `t = -e_c` when set (face dofs: the outward normal).
+        let mut push = |c: usize, ic: usize, s1: usize, s2: usize, flip: bool| {
+            let h1 = cp[s1 + 1] - cp[s1];
+            let h2 = cp[s2 + 1] - cp[s2];
+            let (a1, a2) = free_axes(c);
+            let mut samples = Vec::with_capacity(npts * npts);
+            for (&u, &wu) in gx.iter().zip(&gw) {
+                let q1 = cp[s1] + h1 * u;
+                for (&v, &wv) in gx.iter().zip(&gw) {
+                    let q2 = cp[s2] + h2 * v;
+                    let mut pt = [0.0_f64; 3];
+                    pt[c] = cp[ic];
+                    pt[a1] = q1;
+                    pt[a2] = q2;
+                    samples.push((pt, wu * h1 * wv * h2));
+                }
+            }
+            let mut t = [0.0_f64; 3];
+            t[c] = if flip { -1.0 } else { 1.0 };
+            out.push(IntegratedDofFunctional3D { samples, t });
+        };
+        // Face blocks in HEX_RT_FACES order; the sub-cell indices are the
+        // *basis* open-axis indices (the slot reversals relabel the slot, not
+        // the mode), the closed index is the face endpoint.
+        for &(nc, at_max, _s, f1, f2) in &HEX_RT_FACES {
+            let ic = if at_max { k + 1 } else { 0 };
+            let flip = ic <= k / 2;
+            for j in 0..m {
+                let q = if f2 { m - 1 - j } else { j };
+                for i in 0..m {
+                    let p = if f1 { m - 1 - i } else { i };
+                    push(nc, ic, p, q, flip);
+                }
+            }
+        }
+        // Interior blocks, MFEM loop order (closed-interior index innermost).
+        if k >= 1 {
+            for l in 0..m {
+                for j in 0..m {
+                    for i in 1..=k {
+                        push(0, i, j, l, i <= k / 2);
+                    }
+                }
+            }
+            for l in 0..m {
+                for j in 1..=k {
+                    for i in 0..m {
+                        push(1, j, i, l, j <= k / 2);
+                    }
+                }
+            }
+            for l in 1..=k {
+                for j in 0..m {
+                    for i in 0..m {
+                        push(2, l, i, j, l <= k / 2);
+                    }
+                }
+            }
+        }
+        debug_assert_eq!(out.len(), self.n_dofs());
+        out
     }
 }
 

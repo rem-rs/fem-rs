@@ -57,21 +57,31 @@ pub fn mfem_quad_nodal_dofs(k: usize) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
     if k >= 1 {
         let (cp, _) = gauss_lobatto_01(k + 2);
         let (op, _) = gauss_legendre_01(k + 1);
-        // Interior rows carry MFEM's reference orientation flips
-        // (`RT_QuadrilateralElement` dof_map negatives): the x-block flips
-        // its normal once the open index passes k/2, the y-block flips
-        // while it is at or below k/2 (probe-verified at k = 1 against the
-        // d493 quad RT1 prolongation truth).
+        // Interior rows carry MFEM's reference orientation flips: the
+        // `dof_map = -1 - dof_map` loops of `RT_QuadrilateralElement`
+        // (fe_rt.cpp:81-106) judge by the *closed* grid index — the x block
+        // flips every row with closed x index `i <= k/2` (fe_rt.cpp:82-88)
+        // plus, for odd k, the closed column `i = k/2 + 1` on the open rows
+        // `j > k/2` (fe_rt.cpp:89-93); the y block is the transposed image
+        // (fe_rt.cpp:94-106).  A negative dof_map entry carries the nk
+        // normal `(-1,0)` (x) / `(0,-1)` (y), a positive one `(1,0)` /
+        // `(0,1)` (fe_rt.cpp:23, 108-140).  Probe-verified against the
+        // 4.10 nodal tables for k = 0..=4
+        // (tmp/d575/flip_diff.md; d575_quad_rt_nodal_mfem_truth test).
         for j in 0..=k {
             for i in 1..=k {
-                let s = if j <= k / 2 { 1.0 } else { -1.0 };
+                let flip =
+                    i <= k / 2 || (k % 2 == 1 && i == k / 2 + 1 && j > k / 2);
+                let s = if flip { -1.0 } else { 1.0 };
                 pts.push([cp[i], op[j]]);
                 nks.push([s, 0.0]);
             }
         }
         for j in 1..=k {
             for i in 0..=k {
-                let s = if i <= k / 2 { -1.0 } else { 1.0 };
+                let flip =
+                    j <= k / 2 || (k % 2 == 1 && j == k / 2 + 1 && i <= k / 2);
+                let s = if flip { -1.0 } else { 1.0 };
                 pts.push([op[i], cp[j]]);
                 nks.push([0.0, s]);
             }
