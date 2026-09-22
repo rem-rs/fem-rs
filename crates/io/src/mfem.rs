@@ -3096,6 +3096,811 @@ fn tet_slot_map<M: MeshTopology>(
     Ok((conn, keys, n_vert + n_edges * e + n_faces * nf + n_elems * nb))
 }
 
+// ─── D117/D118: mixed-mesh H1 `nodes` geometry ───────────────────────────────
+//
+// MFEM's `nodes` grid function numbers its dofs over the whole mesh regardless
+// of element mixture (`FiniteElementSpace::GetElementDofs`, `fem/fespace.cpp`):
+// vertices, then per-edge blocks of `p-1` dofs, then per-face blocks sized by
+// the *face* geometry (tri `(p-1)(p-2)/2`, quad `(p-1)²` — MFEM's
+// `var_face_dofs` table for mixed faces, `fespace.cpp:2855`), then
+// per-element interior blocks sized by the *element* geometry.  This module
+// reproduces that numbering for tri/quad (2-D) and tet/hex/prism (3-D)
+// mixtures at any order (`mixed_h1_slot_map`), verified slot-for-slot and
+// bit-for-bit against MFEM 4.10 probes on `data/llnl-p3.mesh`,
+// `data/star-mixed-p2.mesh` and `data/fichera-mixed-p2.mesh`
+// (`crates/io/tests/d117_mixed_h1_geometry.rs`; probe `tmp/d117/d117_dump.cpp`).
+//
+// What cannot be done in this file is the *storage*: `GeometryData`
+// (`crates/mesh/src/simplex.rs`) addresses every element's row with a single
+// `nodes_per_elem` stride, and a mixed mesh needs per-element row lengths
+// (tri P3 = 10, quad P3 = 16).  Until that schema grows (D624), a mixed mesh
+// is read straight-sided with a precise warning — never again the silent
+// wrong table the pre-D117 generic arm produced (it attached
+// `DofManager::build_pk`'s 10-dof simplex rows to llnl-p3's 16-dof quads with
+// no warning at all), and never an unverified table for element families the
+// engine does not cover (pyramids).
+
+/// One local slot of a mixed-mesh geometry row: the entity it lives on and the
+/// position within it (MFEM `GetElementDofs`'s entity-blocked layout).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixedSlot {
+    /// Local vertex.
+    Vertex(usize),
+    /// (family edge index, position from the edge's first vertex).
+    Edge(usize, usize),
+    /// (family tri-face index, barycentric `(a, b)` from the face's vertex 0
+    /// towards vertices 1 / 2; both `≥ 1` with `a + b ≤ p - 1`).
+    TriFace(usize, usize, usize),
+    /// (family quad-face index, 1-based in-face GLL indices from the face's
+    /// vertex 0 along vertex0→1 and vertex0→3).
+    QuadFace(usize, usize, usize),
+    /// Element-private interior dof.
+    Interior,
+}
+
+/// The geometry families the mixed engine covers.
+const MIXED_FAMILIES: [ElementType; 5] = [
+    ElementType::Tri3,
+    ElementType::Quad4,
+    ElementType::Tet4,
+    ElementType::Hex8,
+    ElementType::Prism6,
+];
+
+/// Collapse a mesh element type to its geometry family.
+fn mixed_family_type(et: ElementType) -> ElementType {
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => ElementType::Tri3,
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => ElementType::Quad4,
+        ElementType::Tet4 | ElementType::Tet10 => ElementType::Tet4,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => ElementType::Hex8,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => ElementType::Prism6,
+        other => other,
+    }
+}
+
+/// The 1-D closed Gauss-Lobatto points on `[0, 1]` (MFEM
+/// `Poly_1D::ClosedPoints`; the table every `[0,1]`-domain family builds its
+/// lattice from).
+fn gll01(p: usize) -> Vec<f64> {
+    fem_element::quadrature::gauss_lobatto_arbitrary(p + 1)
+        .0
+        .iter()
+        .map(|&x| 0.5 * (x + 1.0))
+        .collect()
+}
+
+/// Position of `x` in a 1-D node table (exact up to floating point; the
+/// reference lattices are well separated).
+fn gll_index(table: &[f64], x: f64) -> Option<usize> {
+    table.iter().position(|&g| (g - x).abs() < 1e-12)
+}
+
+/// Inverse of the `H1_TriangleElement` interior enumeration: the running index
+/// `k` → barycentric `(a, b)` (j-outer, i-inner).
+fn tri_interior_ab(p: usize, k: usize) -> (usize, usize) {
+    let mut run = 0usize;
+    for j in 1..p {
+        for i in 1..(p - j) {
+            if run == k {
+                return (i, j);
+            }
+            run += 1;
+        }
+    }
+    unreachable!("tri interior index {k} out of range for p = {p}")
+}
+
+/// One element geometry for the mixed engine: MFEM's entity tables plus the
+/// slot descriptors **in the consumer's slot order** — the element-layer
+/// reference element family every in-memory consumer evaluates the table with
+/// (`H1TriPk` / `QuadQk` / `H1TetPk` / `HexQk` / `PrismPk`), so the engine's
+/// rows need no second permutation at consumption time.
+struct MixedFamily {
+    edges: &'static [[usize; 2]],
+    tri_faces: &'static [[usize; 3]],
+    quad_faces: &'static [[usize; 4]],
+    slots: Vec<MixedSlot>,
+    interior: usize,
+}
+
+/// MFEM `Geometry::Constants<Geometry::TRIANGLE>::Edges` (fn-local in
+/// `tri2d_slot_map`; module-level here for the mixed families).
+const MIXED_TRI_EDGES: [[usize; 2]; 3] = [[0, 1], [1, 2], [2, 0]];
+
+/// MFEM `Geometry::Constants<Geometry::PRISM>::FaceVert` split by geometry:
+/// faces 0/1 are the bottom/top triangles, 2..4 the quadrilateral sides.
+const MIXED_PRISM_TRI_FACES: [[usize; 3]; 2] = [[0, 2, 1], [3, 4, 5]];
+const MIXED_PRISM_QUAD_FACES: [[usize; 4]; 3] = [[0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5]];
+
+/// MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` **verbatim**
+/// (`fem/geom.cpp:1032`): the face enumeration order (z0, y0, x1, y1, x0, z1)
+/// numbers the mesh's face blocks, so the mixed engine must use MFEM's own
+/// table.  (This file's [`HEX_FACES`] carries the same six faces in another
+/// order with equivalent corner parameterisations — good enough for
+/// `hex_slot_map`'s key-based face lookup on all-hex meshes, where any
+/// consistent face renumbering yields the same physical geometry — but not
+/// for a mixed mesh, whose face-block bases interleave with the other
+/// families'.  See D626.)
+const CUBE_FACEVERT: [[usize; 4]; 6] = [
+    [3, 2, 1, 0],
+    [0, 1, 5, 4],
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [3, 0, 4, 7],
+    [4, 5, 6, 7],
+];
+
+impl MixedFamily {
+    fn tri(p: usize) -> Self {
+        // Consumer family: `H1TriPk` (MFEM `H1_TriangleElement`); slots are
+        // classified from `dof_coords` by GLL-lattice matching — the same
+        // derivation `tri2d_slot_map` pins against MFEM (D178).
+        let e = p - 1;
+        let n_int = if p >= 3 { e * (p - 2) / 2 } else { 0 };
+        let tri = fem_element::lagrange::factory::H1TriPk::new(p);
+        let coords = tri.dof_coords();
+        let gll = gll01(p);
+        let mut slots = Vec::with_capacity(coords.len());
+        for c in &coords {
+            let (x, y) = (c[0], c[1]);
+            let lam = [1.0 - x - y, x, y];
+            let zeros: Vec<usize> = (0..3).filter(|&m| lam[m].abs() < 1e-12).collect();
+            match zeros.len() {
+                2 => {
+                    let v = (0..3).find(|&m| lam[m].abs() > 1e-12).unwrap();
+                    slots.push(MixedSlot::Vertex(v));
+                }
+                1 => {
+                    // local edge (a, b) with λ_a, λ_b > 0; the position from
+                    // the edge's first vertex is the GLL index of λ at the
+                    // *second* vertex, minus one.
+                    let z = zeros[0];
+                    let k = MIXED_TRI_EDGES
+                        .iter()
+                        .position(|&[a, b]| a != z && b != z)
+                        .expect("tri edge slot");
+                    let b = MIXED_TRI_EDGES[k][1];
+                    let t = gll_index(&gll, lam[b]).expect("slot on the GLL lattice") - 1;
+                    slots.push(MixedSlot::Edge(k, t));
+                }
+                _ => slots.push(MixedSlot::Interior),
+            }
+        }
+        debug_assert_eq!(slots.len(), 3 + 3 * e + n_int);
+        Self {
+            edges: &MIXED_TRI_EDGES,
+            tri_faces: &[],
+            quad_faces: &[],
+            slots,
+            interior: n_int,
+        }
+    }
+
+    fn quad(p: usize) -> Self {
+        // Consumer family: `QuadQk` on `[0,1]²` (MFEM `H1_QuadrilateralElement`
+        // lattice, D151).
+        let e = p - 1;
+        let quad = fem_element::lagrange::factory::QuadQk::new(p);
+        let coords = quad.dof_coords();
+        let gll = gll01(p);
+        let mut slots = Vec::with_capacity(coords.len());
+        for c in &coords {
+            let i = gll_index(&gll, c[0]).expect("slot on the GLL tensor grid");
+            let j = gll_index(&gll, c[1]).expect("slot on the GLL tensor grid");
+            let bnd = [i == 0 || i == p, j == 0 || j == p];
+            match bnd.iter().filter(|&&b| b).count() {
+                2 => {
+                    let side = [i / p, j / p];
+                    let v = QUAD_VERT_CORNERS
+                        .iter()
+                        .position(|&s| s == side)
+                        .expect("corner slot");
+                    slots.push(MixedSlot::Vertex(v));
+                }
+                1 => {
+                    let (av, k) = if bnd[0] {
+                        (1usize, if i == 0 { 3 } else { 1 })
+                    } else {
+                        (0usize, if j == 0 { 0 } else { 2 })
+                    };
+                    let vary = if av == 0 { i } else { j };
+                    let la = QUAD_EDGES[k][0];
+                    let t = if QUAD_VERT_CORNERS[la][av] == 0 {
+                        vary - 1
+                    } else {
+                        p - 1 - vary
+                    };
+                    slots.push(MixedSlot::Edge(k, t));
+                }
+                _ => slots.push(MixedSlot::Interior),
+            }
+        }
+        debug_assert_eq!(slots.len(), 4 + 4 * e + e * e);
+        Self {
+            edges: &QUAD_EDGES,
+            tri_faces: &[],
+            quad_faces: &[],
+            slots,
+            interior: e * e,
+        }
+    }
+
+    fn tet(p: usize) -> Self {
+        // Consumer family: `H1TetPk` (MFEM `H1_TetrahedronElement`, D43/D49);
+        // the integer barycentric slot labels are the published truth source.
+        let e = p - 1;
+        let nf = if p >= 3 { e * (p - 2) / 2 } else { 0 };
+        let nb = if p >= 4 { e * (p - 2) * (p - 3) / 6 } else { 0 };
+        let labels = fem_element::lagrange::factory::H1TetPk::slot_labels(p);
+        let mut slots = Vec::with_capacity(labels.len());
+        for idx in &labels {
+            let zeros: Vec<usize> = (0..4).filter(|&m| idx[m] == 0).collect();
+            match zeros.len() {
+                3 => {
+                    let v = (0..4).find(|&m| idx[m] > 0).unwrap();
+                    slots.push(MixedSlot::Vertex(v));
+                }
+                2 => {
+                    let k = TET_EDGES
+                        .iter()
+                        .position(|&[a, b]| idx[a] > 0 && idx[b] > 0)
+                        .expect("tet edge slot");
+                    let lb = TET_EDGES[k][1];
+                    slots.push(MixedSlot::Edge(k, idx[lb] - 1));
+                }
+                1 => {
+                    let m = zeros[0];
+                    let fv = TET_FACES[m];
+                    slots.push(MixedSlot::TriFace(m, idx[fv[1]], idx[fv[2]]));
+                }
+                _ => slots.push(MixedSlot::Interior),
+            }
+        }
+        debug_assert_eq!(slots.len(), 4 + 6 * e + 4 * nf + nb);
+        Self {
+            edges: &TET_EDGES,
+            tri_faces: &TET_FACES,
+            quad_faces: &[],
+            slots,
+            interior: nb,
+        }
+    }
+
+    fn hex(p: usize) -> Self {
+        // Consumer family: `HexQk` on `[-1,1]³` (MFEM `H1_HexahedronElement`
+        // tensor lattice, D41).
+        let e = p - 1;
+        let hex = fem_element::lagrange::factory::HexQk::new(p);
+        let coords = hex.dof_coords();
+        let gll = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1).0;
+        let mut slots = Vec::with_capacity(coords.len());
+        for c in &coords {
+            let mut idx = [0usize; 3];
+            for (d, &x) in c.iter().enumerate() {
+                idx[d] = gll_index(&gll, x).expect("slot on the GLL tensor grid");
+            }
+            let on_bnd = [
+                idx[0] == 0 || idx[0] == p,
+                idx[1] == 0 || idx[1] == p,
+                idx[2] == 0 || idx[2] == p,
+            ];
+            match on_bnd.iter().filter(|&&b| b).count() {
+                3 => {
+                    let side = [idx[0] / p, idx[1] / p, idx[2] / p];
+                    let v = HEX_CORNERS.iter().position(|&s| s == side).expect("corner slot");
+                    slots.push(MixedSlot::Vertex(v));
+                }
+                2 => {
+                    let bnd: Vec<usize> = (0..3).filter(|&d| on_bnd[d]).collect();
+                    let av = (0..3).find(|&d| !on_bnd[d]).unwrap();
+                    let key = (av, idx[bnd[0]] / p, idx[bnd[1]] / p);
+                    let k = (0..12)
+                        .position(|k| {
+                            let (ca, cb) =
+                                (HEX_CORNERS[HEX_EDGES[k][0]], HEX_CORNERS[HEX_EDGES[k][1]]);
+                            let a = match (0..3).find(|&d| ca[d] != cb[d]) {
+                                Some(d) => d,
+                                None => return false,
+                            };
+                            let f: Vec<usize> = (0..3).filter(|&d| d != a).collect();
+                            (a, ca[f[0]], ca[f[1]]) == key
+                        })
+                        .expect("hex edge slot");
+                    let la = HEX_EDGES[k][0];
+                    let t = if HEX_CORNERS[la][av] == 0 {
+                        idx[av] - 1
+                    } else {
+                        p - 1 - idx[av]
+                    };
+                    slots.push(MixedSlot::Edge(k, t));
+                }
+                1 => {
+                    let ax = (0..3).find(|&d| on_bnd[d]).unwrap();
+                    let side = idx[ax] / p;
+                    let f = (0..6)
+                        .find(|&f| CUBE_FACEVERT[f].iter().all(|&v| HEX_CORNERS[v][ax] == side))
+                        .expect("hex face slot");
+                    let fv = CUBE_FACEVERT[f];
+                    let (l0, l1, l3) = (fv[0], fv[1], fv[3]);
+                    let mut in_face = [0usize; 2];
+                    for (s, &lk) in [l1, l3].iter().enumerate() {
+                        let d = (0..3)
+                            .find(|&d| HEX_CORNERS[l0][d] != HEX_CORNERS[lk][d])
+                            .expect("face axis");
+                        assert!(d != ax, "degenerate face slot");
+                        in_face[s] = if HEX_CORNERS[l0][d] == 0 { idx[d] } else { p - idx[d] };
+                        assert!(in_face[s] > 0 && in_face[s] < p, "slot on a face edge");
+                    }
+                    slots.push(MixedSlot::QuadFace(f, in_face[0], in_face[1]));
+                }
+                _ => slots.push(MixedSlot::Interior),
+            }
+        }
+        debug_assert_eq!(slots.len(), 8 + 12 * e + 6 * e * e + e * e * e);
+        Self {
+            edges: &HEX_EDGES,
+            tri_faces: &[],
+            quad_faces: &CUBE_FACEVERT,
+            slots,
+            interior: e * e * e,
+        }
+    }
+
+    fn prism(p: usize) -> Self {
+        // Consumer family: `PrismPk` (layer-major Gauss-Lobatto wedge — the
+        // element `Mesh::element_jacobian` and `geo_ref_elem` evaluate); the
+        // MFEM entity layout comes from `H1PrismPk`'s slot labels (D168/D191
+        // ground truth) paired with its node positions (`prism_h1_slots`).
+        // Rows are re-laid into the layer-major order by lattice-point
+        // matching — the same re-lay D295's `layer_perm` performs on the
+        // all-prism reader path.
+        let e = p - 1;
+        let nf_tri = if p >= 3 { e * (p - 2) / 2 } else { 0 };
+        let h1_slots = prism_h1_slots(p).expect("prism_h1_slots");
+        let mut h1: Vec<(MixedSlot, [f64; 3])> = Vec::with_capacity(h1_slots.len());
+        for slot in &h1_slots {
+            let s = match slot.entity {
+                H1PrismSlot::Vertex(v) => MixedSlot::Vertex(v),
+                H1PrismSlot::Edge(k, j) => MixedSlot::Edge(k, j),
+                // `TriFace`'s running index is the `H1_TriangleElement`
+                // interior order (j-outer i-inner) of the local face; its face
+                // index is already the local face number (0/1).
+                H1PrismSlot::TriFace(f, k) => {
+                    let (a, b) = tri_interior_ab(p, k);
+                    MixedSlot::TriFace(f, a, b)
+                }
+                // `QuadFace`'s face index is the local face number 2..4; the
+                // quad-face table here is the quad-only list, so re-base it.
+                H1PrismSlot::QuadFace(f, i, j) => MixedSlot::QuadFace(f - 2, i, j),
+                H1PrismSlot::Interior(_) => MixedSlot::Interior,
+            };
+            h1.push((s, slot.xi));
+        }
+        let layer_coords = fem_element::lagrange::PrismPk::new(p).dof_coords();
+        let mut slots = Vec::with_capacity(layer_coords.len());
+        for c in &layer_coords {
+            let m = h1
+                .iter()
+                .position(|(_, x)| (0..3).all(|d| (x[d] - c[d]).abs() < 1e-12))
+                .expect("PrismPk slot not on the H1 wedge lattice");
+            slots.push(h1[m].0);
+        }
+        let n_int = nf_tri * e;
+        debug_assert_eq!(slots.len(), 6 + 9 * e + 3 * e * e);
+        Self {
+            edges: &PRISM_EDGES,
+            tri_faces: &MIXED_PRISM_TRI_FACES,
+            quad_faces: &MIXED_PRISM_QUAD_FACES,
+            slots,
+            interior: n_int,
+        }
+    }
+}
+
+/// The element rows of a mesh to map (mixed-engine input).
+struct MixedMeshRows {
+    rows: Vec<(ElementType, Vec<NodeId>)>,
+    n_nodes: usize,
+    dim: usize,
+}
+
+impl MixedMeshRows {
+    fn families(&self, p: usize) -> Result<HashMap<ElementType, MixedFamily>, String> {
+        let mut fams: HashMap<ElementType, MixedFamily> = HashMap::new();
+        for (et, _) in &self.rows {
+            let fam_t = mixed_family_type(*et);
+            if fams.contains_key(&fam_t) {
+                continue;
+            }
+            let f = match fam_t {
+                ElementType::Tri3 => MixedFamily::tri(p),
+                ElementType::Quad4 => MixedFamily::quad(p),
+                ElementType::Tet4 => MixedFamily::tet(p),
+                ElementType::Hex8 => MixedFamily::hex(p),
+                ElementType::Prism6 => MixedFamily::prism(p),
+                other => return Err(format!("unsupported element family {other:?}")),
+            };
+            fams.insert(fam_t, f);
+        }
+        Ok(fams)
+    }
+}
+
+/// D118: the mixed-mesh H1 `nodes` slot map — for every element, the file dof
+/// of every reference slot (in the consumer's slot order), plus the global dof
+/// count.
+///
+/// MFEM's numbering (`FiniteElementSpace::GetElementDofs`, `fem/fespace.cpp`):
+/// vertex dofs, per-edge blocks of `p-1`, per-face blocks sized by the *face*
+/// geometry (MFEM's `var_face_dofs` for mixed faces), then per-element
+/// interior blocks sized by the *element* geometry; edges/faces are enumerated
+/// by element traversal × local entity order (first encounter wins) and each
+/// face is stored with its first-encountering parameterisation.
+fn mixed_h1_slot_map(
+    mesh: &MixedMeshRows,
+    p: usize,
+) -> Result<(Vec<Vec<NodeId>>, usize), String> {
+    if p < 2 {
+        return Err("order < 2".into());
+    }
+    let e_dof = p - 1;
+    let nf_tri = if p >= 3 { e_dof * (p - 2) / 2 } else { 0 };
+    let nf_quad = e_dof * e_dof;
+    let n_elems = mesh.rows.len();
+    let n_vert = mesh.n_nodes;
+    let dim = mesh.dim;
+
+    let fams = mesh.families(p)?;
+    let fam_of =
+        |et: &ElementType| -> &MixedFamily { fams.get(&mixed_family_type(*et)).expect("checked") };
+
+    // MFEM's entity enumeration: element traversal × local entity order,
+    // first encounter wins.
+    let mut edge_ids: HashMap<[u32; 2], u32> = HashMap::new();
+    let mut face_index: HashMap<Vec<u32>, usize> = HashMap::new();
+    // (b't' tri / b'q' quad, stored corner vertex ids)
+    let mut faces: Vec<(u8, Vec<u32>)> = Vec::new();
+    for (et, ns) in &mesh.rows {
+        let fam = fam_of(et);
+        for &[la, lb] in fam.edges {
+            let (a, b) = (ns[la], ns[lb]);
+            let key = if a < b { [a, b] } else { [b, a] };
+            let next = edge_ids.len() as u32;
+            edge_ids.entry(key).or_insert(next);
+        }
+        if dim == 3 {
+            for fv in fam.tri_faces {
+                let mut key: Vec<u32> = fv.iter().map(|&v| ns[v]).collect();
+                key.sort_unstable();
+                let next = faces.len();
+                face_index.entry(key).or_insert_with(|| {
+                    faces.push((b't', fv.iter().map(|&v| ns[v]).collect()));
+                    next
+                });
+            }
+            for fv in fam.quad_faces {
+                let mut key: Vec<u32> = fv.iter().map(|&v| ns[v]).collect();
+                key.sort_unstable();
+                let next = faces.len();
+                face_index.entry(key).or_insert_with(|| {
+                    faces.push((b'q', fv.iter().map(|&v| ns[v]).collect()));
+                    next
+                });
+            }
+        }
+    }
+    let n_edges = edge_ids.len();
+    // Per-face dof blocks in face order (MFEM's `var_face_dofs`).
+    let mut face_base: Vec<usize> = Vec::with_capacity(faces.len());
+    let mut acc = 0usize;
+    for (g, _) in &faces {
+        face_base.push(acc);
+        acc += if *g == b't' { nf_tri } else { nf_quad };
+    }
+    let n_face_dofs = acc;
+
+    // Per-element interior offsets (MFEM's `bdofs`).
+    let mut interior_base: Vec<usize> = Vec::with_capacity(n_elems);
+    acc = 0;
+    for (et, _) in &mesh.rows {
+        interior_base.push(acc);
+        acc += fam_of(et).interior;
+    }
+    let n_interior = acc;
+
+    let edge_base = n_vert;
+    let face_dof_base = edge_base + n_edges * e_dof;
+    let int_base = face_dof_base + n_face_dofs;
+    let n_dofs = int_base + n_interior;
+
+    let mut rows: Vec<Vec<NodeId>> = Vec::with_capacity(n_elems);
+    for (el, (et, ns)) in mesh.rows.iter().enumerate() {
+        let fam = fam_of(et);
+        let mut row = Vec::with_capacity(fam.slots.len());
+        let mut interior_seen = 0usize;
+        for s in &fam.slots {
+            let g: usize = match *s {
+                MixedSlot::Vertex(v) => ns[v] as usize,
+                MixedSlot::Edge(k, t_local) => {
+                    let (a, b) = (ns[fam.edges[k][0]], ns[fam.edges[k][1]]);
+                    let key = if a < b { [a, b] } else { [b, a] };
+                    let ei = *edge_ids.get(&key).expect("edge enumerated") as usize;
+                    let t = if a < b { t_local } else { e_dof - 1 - t_local };
+                    edge_base + ei * e_dof + t
+                }
+                MixedSlot::TriFace(f, a, b) => {
+                    let j = tri_face_index(p, a, b).expect("tri face slot in range");
+                    let fv = fam.tri_faces[f];
+                    let test = [ns[fv[0]], ns[fv[1]], ns[fv[2]]];
+                    let mut key: Vec<u32> = test.to_vec();
+                    key.sort_unstable();
+                    let fi = *face_index.get(&key).expect("face enumerated");
+                    let stored: [u32; 3] = match &faces[fi] {
+                        (b't', verts) => verts[..].try_into().unwrap(),
+                        _ => return Err("tri face slot matched a quadrilateral face".into()),
+                    };
+                    let orient = tri_orientation(&stored, &test).expect("face corner mismatch");
+                    let canon = tri_dof_ord(p, orient, j).expect("tri face dof order");
+                    face_dof_base + face_base[fi] + canon
+                }
+                MixedSlot::QuadFace(f, i, j) => {
+                    let fv = fam.quad_faces[f];
+                    let mut key: Vec<u32> = fv.iter().map(|&v| ns[v]).collect();
+                    key.sort_unstable();
+                    let fi = *face_index.get(&key).expect("face enumerated");
+                    let stored: [u32; 4] = match &faces[fi] {
+                        (b'q', verts) => verts[..].try_into().unwrap(),
+                        _ => return Err("quad face slot matched a triangular face".into()),
+                    };
+                    let off = quad_face_canonical_slot(
+                        &stored,
+                        ns[fv[0]],
+                        ns[fv[1]],
+                        ns[fv[3]],
+                        [i, j],
+                        p,
+                    )
+                    .expect("quad face slot outside the stored face");
+                    face_dof_base + face_base[fi] + off
+                }
+                MixedSlot::Interior => {
+                    let g = int_base + interior_base[el] + interior_seen;
+                    interior_seen += 1;
+                    g
+                }
+            };
+            row.push(g as NodeId);
+        }
+        debug_assert_eq!(interior_seen, fam.interior);
+        rows.push(row);
+    }
+    Ok((rows, n_dofs))
+}
+
+/// One geometry slot of a mixed-mesh table row
+/// ([`read_mfem_mixed_h1_geometry_file`]).
+pub struct MixedGeoSlot {
+    /// The file dof this slot maps to (MFEM's H1 numbering).
+    pub dof: NodeId,
+    /// The file's coordinate at that dof (`sdim` components + zero padding).
+    pub xyz: [f64; 3],
+}
+
+/// The mixed-mesh high-order geometry a file's H1 `nodes` section describes
+/// ([`read_mfem_mixed_h1_geometry_file`]).
+pub struct MixedH1Geometry {
+    pub order: u8,
+    /// Components per dof (the mesh's topological dimension).
+    pub sdim: usize,
+    /// MFEM's global scalar H1 dof count (`FiniteElementSpace::GetNDofs`).
+    pub n_dofs: usize,
+    /// Per element: (element type, row in the consumer's slot order).
+    pub elems: Vec<(ElementType, Vec<MixedGeoSlot>)>,
+}
+
+/// D118 probe API: read an MFEM `.mesh` file and return the **mixed-mesh**
+/// high-order geometry its H1 `nodes` section describes, or `Ok(None)` when
+/// the mesh is uniform (its geometry is attached by [`read_mfem`]/[`read_mfem_file`]
+/// directly) or the file carries no H1 `nodes` section.
+///
+/// This exists because [`GeometryData`](fem_mesh::simplex::GeometryData) is
+/// uniform-stride (one `nodes_per_elem` for every element), so the reader
+/// cannot attach a mixed table yet (D624); the engine's table is validated
+/// against MFEM 4.10 in `crates/io/tests/d117_mixed_h1_geometry.rs`.  The
+/// parse here is the minimal slice of the MFEM v1.0 grammar the engine needs
+/// (dimension, elements, vertices/nodes header) — the main reader stays
+/// `read_mfem`.
+pub fn read_mfem_mixed_h1_geometry_file(
+    path: impl AsRef<std::path::Path>,
+) -> FemResult<Option<MixedH1Geometry>> {
+    let text = std::fs::read_to_string(path.as_ref()).map_err(FemError::from)?;
+    parse_mixed_h1_geometry(&text)
+        .map_err(|e| FemError::Mesh(format!("read_mfem_mixed_h1_geometry_file: {e}")))
+}
+
+fn parse_mixed_h1_geometry(text: &str) -> Result<Option<MixedH1Geometry>, String> {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let _magic = lines.next().ok_or("empty file")?;
+    let mut dim = 0usize;
+    let mut elem_rows: Vec<(ElementType, Vec<NodeId>)> = Vec::new();
+    let mut n_vert = 0usize;
+    let mut order = 0u8;
+    let mut closed_uniform = false;
+    let mut vdim = 0usize;
+    let mut ordering = 0usize;
+    let mut raw: Vec<f64> = Vec::new();
+    let mut seen_vertices = false;
+    while let Some(line) = lines.next() {
+        match line {
+            "dimension" => {
+                dim = lines
+                    .next()
+                    .ok_or("no dimension")?
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("bad dimension")?;
+            }
+            "elements" => {
+                let n: usize = lines
+                    .next()
+                    .ok_or("no element count")?
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("bad element count")?;
+                for _ in 0..n {
+                    let row = lines.next().ok_or("short elements")?;
+                    let t: Vec<&str> = row.split_whitespace().collect();
+                    let code: usize = t[1].parse().map_err(|_| "bad geometry code")?;
+                    let et = mfem_elem_type(code as u32).ok_or("unsupported geometry code")?;
+                    elem_rows.push((et, t[2..].iter().map(|v| v.parse().unwrap()).collect()));
+                }
+            }
+            "boundary" | "edges" => {
+                let n: usize = lines
+                    .next()
+                    .unwrap_or("0")
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                for _ in 0..n {
+                    lines.next();
+                }
+            }
+            "vertices" => {
+                seen_vertices = true;
+                n_vert = lines
+                    .next()
+                    .ok_or("no vertex count")?
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("bad vertex count")?;
+                // The next token is the space dimension (straight vertices
+                // follow) or the `nodes` keyword (curved).
+                let next = lines.next().ok_or("short vertices")?;
+                if next == "nodes" {
+                    let _fes = lines.next().ok_or("short nodes")?;
+                    let fec = lines.next().ok_or("short nodes")?;
+                    let name = fec.split(':').nth(1).unwrap_or("").trim();
+                    vdim = lines
+                        .next()
+                        .ok_or("short nodes")?
+                        .split_whitespace()
+                        .last()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(dim);
+                    ordering = lines
+                        .next()
+                        .ok_or("short nodes")?
+                        .split_whitespace()
+                        .last()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let parsed = parse_nodal_fec(name).ok_or("no H1 `nodes` collection")?;
+                    order = parsed.order;
+                    closed_uniform = parsed.closed_uniform;
+                    for l in lines.by_ref() {
+                        for v in l.split_whitespace() {
+                            if let Ok(x) = v.parse::<f64>() {
+                                raw.push(x);
+                            }
+                        }
+                    }
+                }
+                // straight vertices: the coordinates are not needed (the
+                // values come from the `nodes` section), only `n_vert`.
+            }
+            _ => {}
+        }
+    }
+    if dim == 0 {
+        return Err("no dimension".into());
+    }
+    if !seen_vertices {
+        return Err("no vertices section".into());
+    }
+    if order < 2 || closed_uniform || raw.is_empty() {
+        return Ok(None); // no high-order H1 `nodes` section
+    }
+    // 0-based vs 1-based vertex ids (the reader's heuristic).
+    let max_idx = elem_rows
+        .iter()
+        .flat_map(|(_, ns)| ns.iter())
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let has_zero = elem_rows
+        .iter()
+        .flat_map(|(_, ns)| ns.iter())
+        .any(|&v| v == 0);
+    if !(has_zero || max_idx as usize + 1 == n_vert) {
+        for (_, ns) in elem_rows.iter_mut() {
+            for v in ns.iter_mut() {
+                *v -= 1;
+            }
+        }
+    }
+    let distinct: usize = {
+        let mut fams: Vec<ElementType> = Vec::new();
+        for (et, _) in &elem_rows {
+            let f = mixed_family_type(*et);
+            if !fams.contains(&f) {
+                fams.push(f);
+            }
+        }
+        // a mixture of *raw* types within one supported family (Tri3+Tri6,
+        // Quad4+Quad8, ...) still needs per-type rows
+        let mut raw_types: Vec<ElementType> = Vec::new();
+        for (et, _) in &elem_rows {
+            if !raw_types.contains(et) {
+                raw_types.push(*et);
+            }
+        }
+        fams.len().max(if raw_types.len() > 1 { 2 } else { 1 })
+    };
+    if distinct <= 1 {
+        return Ok(None); // uniform: the normal reader attaches the geometry
+    }
+    let mesh = MixedMeshRows { rows: elem_rows, n_nodes: n_vert, dim };
+    let (rows, n_dofs) = mixed_h1_slot_map(&mesh, order as usize)?;
+    let sdim = dim.min(vdim.max(1));
+    let ndof = raw.len() / vdim.max(1);
+    let dof_xyz = |d: usize| -> [f64; 3] {
+        let mut out = [0.0f64; 3];
+        match ordering {
+            0 => {
+                for c in 0..sdim {
+                    out[c] = raw[c * ndof + d];
+                }
+            }
+            _ => {
+                for c in 0..sdim {
+                    out[c] = raw[d * vdim + c];
+                }
+            }
+        }
+        out
+    };
+    let mut elems = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let et = mesh.rows[i].0;
+        elems.push((
+            et,
+            row.into_iter()
+                .map(|d| MixedGeoSlot { dof: d, xyz: dof_xyz(d as usize) })
+                .collect(),
+        ));
+    }
+    Ok(Some(MixedH1Geometry { order, sdim, n_dofs, elems }))
+}
+
 /// Build the high-order `GeometryData` for an H1-continuous `nodes` section:
 /// the file stores one coordinate triple per DOF of the order-`p` H1 space and
 /// the per-element geometry tables are the element DOF lists (H1 topological
@@ -3115,7 +3920,15 @@ fn tet_slot_map<M: MeshTopology>(
 ///   layer-major order via `H1PrismPk::layer_perm`, because the geometry
 ///   table every in-memory consumer evaluates is contracted to `PrismPk`'s
 ///   slot order (the dof *ids* stay MFEM's file numbering);
-/// - anything else (pyramids, mixes): fem-rs's own numbering, *with* a
+/// - mixed meshes → the D117 gate below: the numbering itself is mapped by
+///   [`mixed_h1_slot_map`] (verified against MFEM 4.10), but a mixed table
+///   needs per-element row lengths which the uniform-stride `GeometryData`
+///   cannot store (D624), so the mesh is read straight-sided *with a precise
+///   warning* — never the silent wrong table the generic arm produced before
+///   D117 (it gave llnl-p3's 16-dof quads 10-dof simplex rows with no
+///   warning), and never an unverified numbering for pyramid-containing
+///   mixtures;
+/// - anything else (uniform pyramids): fem-rs's own numbering, *with* a
 ///   warning — never a silently scrambled mapping (see `D41` notes below).
 fn build_h1_geometry<M: MeshTopology>(
     mesh: &M,
@@ -3128,6 +3941,49 @@ fn build_h1_geometry<M: MeshTopology>(
 ) -> Option<GeometryData> {
     if order < 2 {
         return None; // linear geometry needs no table
+    }
+    // D117/D118: mixed-element meshes.  `mixed_h1_slot_map` reproduces MFEM's
+    // mixed numbering (tri/quad/tet/hex/prism; verified against MFEM 4.10),
+    // but `GeometryData` addresses every element's row with one uniform
+    // `nodes_per_elem` while a mixed mesh needs per-element row lengths
+    // (tri P3 = 10, quad P3 = 16), so a mixed table cannot be attached (D624).
+    // Refuse loudly instead: never again the silent wrong table the generic
+    // arm below used to produce (it gave llnl-p3's 16-dof quads 10-dof simplex
+    // rows with no warning at all), and never an unverified numbering for
+    // element families the engine does not cover (pyramids).
+    if mesh.n_elements() > 1 {
+        let mut fams: Vec<ElementType> = Vec::new();
+        let mut unsup: Vec<ElementType> = Vec::new();
+        for e in 0..mesh.n_elements() as u32 {
+            let f = mixed_family_type(mesh.element_type(e));
+            if MIXED_FAMILIES.contains(&f) {
+                if !fams.contains(&f) {
+                    fams.push(f);
+                }
+            } else if !unsup.contains(&f) {
+                unsup.push(f);
+            }
+        }
+        if fams.len() + unsup.len() > 1 {
+            if unsup.is_empty() {
+                eprintln!(
+                    "warning (D117/D624): mixed-element mesh with a high-order `nodes` section \
+                     ({}): the MFEM numbering is mapped (mixed engine, verified against MFEM \
+                     4.10), but the in-memory geometry store is uniform-stride \
+                     (`GeometryData::nodes_per_elem`, D624), so the mesh is read as \
+                     straight-sided (geometric order 1)",
+                    fams.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>().join(" + ")
+                );
+            } else {
+                eprintln!(
+                    "warning (D41): refusing high-order `nodes` geometry for a mixed mesh \
+                     containing {}: no MFEM-verified numbering for every element type — the \
+                     mesh is read as straight-sided (geometric order 1)",
+                    unsup.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>().join(" + ")
+                );
+            }
+            return None;
+        }
     }
     if dim == 3 {
         match build_h1_hex_geometry(mesh, order, raw, ordering) {
@@ -3749,13 +4605,15 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                     quad([vtx(nx as i32, y, z), vtx(nx as i32, y + 1, z), vtx(nx as i32, y + 1, z + 1), vtx(nx as i32, y, z + 1)], 3);
                 }
             }
-            for z in 0..nz as i32 {
-                for x in 0..nx as i32 {
+            // front, bdr attribute 2 — MFEM Make3D loops `for (x) for (z)`.
+            for x in 0..nx as i32 {
+                for z in 0..nz as i32 {
                     quad([vtx(x, 0, z), vtx(x + 1, 0, z), vtx(x + 1, 0, z + 1), vtx(x, 0, z + 1)], 2);
                 }
             }
-            for z in 0..nz as i32 {
-                for x in 0..nx as i32 {
+            // back, bdr attribute 4 — same `for (x) for (z)` nesting.
+            for x in 0..nx as i32 {
+                for z in 0..nz as i32 {
                     quad([vtx(x, ny as i32, z), vtx(x, ny as i32, z + 1), vtx(x + 1, ny as i32, z + 1), vtx(x + 1, ny as i32, z)], 4);
                 }
             }
@@ -3766,16 +4624,106 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
             Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
         }
         "tet" => {
-            let n = nx.max(ny).max(_nz.unwrap_or(1));
-            let mut mesh = Mesh::<3>::unit_cube_tet(n);
-            let scale_x = sx / n as f64 * nx as f64;
-            let scale_y = sy / n as f64 * ny as f64;
-            let scale_z = _sz.unwrap_or(1.0) / n as f64 * _nz.unwrap_or(1) as f64;
-            for c in mesh.coords.chunks_mut(3) {
-                c[0] *= scale_x;
-                c[1] *= scale_y;
-                c[2] *= scale_z;
+            // MFEM ReadInlineMesh → Make3D(nx,ny,nz, TETRAHEDRON, sx,sy,sz,
+            // true): row-major cells (the SFC ordering applies to HEXAHEDRON
+            // only), each hex split by `AddHexAsTets`' hex_to_tet table in
+            // element-local vertex order (mesh.cpp:2243).  `Mesh::Load`
+            // = Loader + Finalize(refine=1, fix_orientation=true)
+            // (mesh.hpp:823), so the tet table is rotated afterwards by
+            // MarkTetMeshForRefinement — mirrored below.
+            let nz = _nz.unwrap_or(1);
+            let sz = _sz.unwrap_or(1.0);
+            let (nxv, nyv, nzv) = (nx + 1, ny + 1, nz + 1);
+            let mut coords = Vec::with_capacity(nxv * nyv * nzv * 3);
+            for k in 0..nzv {
+                for j in 0..nyv {
+                    for i in 0..nxv {
+                        coords.push(i as f64 / nx as f64 * sx);
+                        coords.push(j as f64 / ny as f64 * sy);
+                        coords.push(k as f64 / nz as f64 * sz);
+                    }
+                }
             }
+            let id = |x: usize, y: usize, z: usize| ((z * nyv + y) * nxv + x) as u32;
+            // AddHexAsTets (element-LOCAL indices 0..7 of the cell's hex).
+            const HEX_TO_TET: [[usize; 4]; 6] = [
+                [0, 1, 2, 6],
+                [0, 5, 1, 6],
+                [0, 4, 5, 6],
+                [0, 2, 3, 6],
+                [0, 3, 7, 6],
+                [0, 7, 4, 6],
+            ];
+            let mut conn = Vec::with_capacity(nx * ny * nz * 6 * 4);
+            let mut elem_tags = Vec::with_capacity(nx * ny * nz * 6);
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let vi = [
+                            id(i, j, k),
+                            id(i + 1, j, k),
+                            id(i + 1, j + 1, k),
+                            id(i, j + 1, k),
+                            id(i, j, k + 1),
+                            id(i + 1, j, k + 1),
+                            id(i + 1, j + 1, k + 1),
+                            id(i, j + 1, k + 1),
+                        ];
+                        for t in HEX_TO_TET {
+                            conn.extend(t.map(|v| vi[v]));
+                            elem_tags.push(1);
+                        }
+                    }
+                }
+            }
+            // Boundary: Make3D's six loops, each quad split by
+            // `AddBdrQuadAsTriangles` = {(0,1,2), (0,2,3)} (mesh.cpp:2510).
+            let mut face_conn = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz) * 3);
+            let mut face_tags = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz));
+            let mut bdr_tri = |q: [u32; 4], tag: i32| {
+                face_conn.extend([q[0], q[1], q[2]]);
+                face_conn.extend([q[0], q[2], q[3]]);
+                face_tags.push(tag);
+                face_tags.push(tag);
+            };
+            for j in 0..ny {
+                for i in 0..nx {
+                    bdr_tri([id(i, j, 0), id(i, j + 1, 0), id(i + 1, j + 1, 0), id(i + 1, j, 0)], 1);
+                }
+            }
+            for j in 0..ny {
+                for i in 0..nx {
+                    bdr_tri([id(i, j, nz), id(i + 1, j, nz), id(i + 1, j + 1, nz), id(i, j + 1, nz)], 6);
+                }
+            }
+            for k in 0..nz {
+                for j in 0..ny {
+                    bdr_tri([id(0, j, k), id(0, j, k + 1), id(0, j + 1, k + 1), id(0, j + 1, k)], 5);
+                }
+            }
+            for k in 0..nz {
+                for j in 0..ny {
+                    bdr_tri([id(nx, j, k), id(nx, j + 1, k), id(nx, j + 1, k + 1), id(nx, j, k + 1)], 3);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    bdr_tri([id(i, 0, k), id(i + 1, 0, k), id(i + 1, 0, k + 1), id(i, 0, k + 1)], 2);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    bdr_tri([id(i, ny, k), id(i, ny, k + 1), id(i + 1, ny, k + 1), id(i + 1, ny, k)], 4);
+                }
+            }
+            let mut mesh = Mesh::<3>::uniform(
+                coords, conn, elem_tags, ElementType::Tet4,
+                face_conn, face_tags, ElementType::Tri3,
+            );
+            // `Mesh::Load` = Loader + Finalize(refine=1): the tet table is
+            // rotated by MarkTetMeshForRefinement (longest edge → (v0,v1)),
+            // exactly like the `tri` arm's marking above (D154).
+            fem_mesh::mark_tet_mesh_for_refinement(&mut mesh);
             Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
         }
         "wedge" => {
@@ -3820,42 +4768,181 @@ fn read_mfem_inline(r: &mut impl BufRead) -> FemResult<MfemFile> {
                     }
                 }
             }
-            // Boundary triangles (bottom attr 1, top attr 6; sides 2–5 like
-            // Make3D's AddBdrQuadAsTriangles layout, simplified per face).
+            // Boundary: Make3D's six loops in Make3D order.  Only the bottom
+            // (attr 1) and top (attr 6) quads are split into triangles for
+            // WEDGE (`AddBdrQuadAsTriangles`); the four side faces remain
+            // quadrilaterals (`AddBdrQuad`) — a MIXED boundary, so the mesh
+            // carries per-face types + CSR offsets like the .mesh reader.
             let mut face_conn = Vec::new();
             let mut face_tags = Vec::new();
-            let mut bdr_tri = |quad: [u32; 4], tag: i32| {
+            let mut face_kinds: Vec<ElementType> = Vec::new();
+            let mut bdr = |quad: [u32; 4], tag: i32, split: bool| {
                 face_conn.extend([quad[0], quad[1], quad[2]]);
                 face_tags.push(tag);
-                face_conn.extend([quad[0], quad[2], quad[3]]);
-                face_tags.push(tag);
+                if split {
+                    face_kinds.push(ElementType::Tri3);
+                    face_conn.extend([quad[0], quad[2], quad[3]]);
+                    face_tags.push(tag);
+                    face_kinds.push(ElementType::Tri3);
+                } else {
+                    face_kinds.push(ElementType::Quad4);
+                    face_conn.push(quad[3]);
+                }
             };
-            for y in 0..ny {
-                for x in 0..nx {
-                    bdr_tri([id(x, y, 0), id(x, y + 1, 0), id(x + 1, y + 1, 0), id(x + 1, y, 0)], 1);
-                    bdr_tri([id(x, y, nz), id(x + 1, y, nz), id(x + 1, y + 1, nz), id(x, y + 1, nz)], 6);
+            for j in 0..ny {
+                for i in 0..nx {
+                    bdr([id(i, j, 0), id(i, j + 1, 0), id(i + 1, j + 1, 0), id(i + 1, j, 0)], 1, true);
                 }
             }
-            for z in 0..nz {
-                for y in 0..ny {
-                    bdr_tri([id(0, y, z), id(0, y, z + 1), id(0, y + 1, z + 1), id(0, y + 1, z)], 5);
-                    bdr_tri([id(nx, y, z + 1), id(nx, y, z), id(nx, y + 1, z), id(nx, y + 1, z + 1)], 2);
+            for j in 0..ny {
+                for i in 0..nx {
+                    bdr([id(i, j, nz), id(i + 1, j, nz), id(i + 1, j + 1, nz), id(i, j + 1, nz)], 6, true);
                 }
             }
-            for z in 0..nz {
-                for x in 0..nx {
-                    bdr_tri([id(x, 0, z + 1), id(x, 0, z), id(x + 1, 0, z), id(x + 1, 0, z + 1)], 4);
-                    bdr_tri([id(x, ny, z), id(x, ny, z + 1), id(x + 1, ny, z + 1), id(x + 1, ny, z)], 3);
+            for k in 0..nz {
+                for j in 0..ny {
+                    bdr([id(0, j, k), id(0, j, k + 1), id(0, j + 1, k + 1), id(0, j + 1, k)], 5, false);
                 }
             }
-            let mesh = Mesh::uniform(
+            for k in 0..nz {
+                for j in 0..ny {
+                    bdr([id(nx, j, k), id(nx, j + 1, k), id(nx, j + 1, k + 1), id(nx, j, k + 1)], 3, false);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    bdr([id(i, 0, k), id(i + 1, 0, k), id(i + 1, 0, k + 1), id(i, 0, k + 1)], 2, false);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    bdr([id(i, ny, k), id(i, ny, k + 1), id(i + 1, ny, k + 1), id(i + 1, ny, k)], 4, false);
+                }
+            }
+            let mut mesh = Mesh::uniform(
                 coords, conn, elem_tags, ElementType::Prism6,
                 face_conn, face_tags, ElementType::Tri3,
+            );
+            // Mixed tri/quad boundary: per-face types + CSR offsets (same
+            // representation the .mesh reader uses).
+            let mut offs = Vec::with_capacity(face_kinds.len() + 1);
+            offs.push(0);
+            for t in &face_kinds {
+                offs.push(offs.last().unwrap() + t.nodes_per_element());
+            }
+            mesh.face_types = Some(face_kinds);
+            mesh.face_offsets = Some(offs);
+            Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
+        }
+        "pyramid" => {
+            // MFEM ReadInlineMesh → Make3D(nx,ny,nz, PYRAMID, ...): row-major
+            // cells, each hex split by `AddHexAsPyramids` (mesh.cpp:2280) into
+            // 6 pyramids with a NEW apex vertex at the cell centre
+            // (`VTXP(x,y,z)` = grid vertices + (z*ny+y)*nx+x, coords at the
+            // cell centre, mesh.cpp:3882).  The boundary stays quadrilateral
+            // (`AddBdrQuad`), in Make3D's six-loop order.
+            let nz = _nz.unwrap_or(1);
+            let sz = _sz.unwrap_or(1.0);
+            let (nxv, nyv, nzv) = (nx + 1, ny + 1, nz + 1);
+            let mut coords = Vec::with_capacity((nxv * nyv * nzv + nx * ny * nz) * 3);
+            for k in 0..nzv {
+                for j in 0..nyv {
+                    for i in 0..nxv {
+                        coords.push(i as f64 / nx as f64 * sx);
+                        coords.push(j as f64 / ny as f64 * sy);
+                        coords.push(k as f64 / nz as f64 * sz);
+                    }
+                }
+            }
+            // Cell-centre apex vertices, Make3D vertex-loop order (z, y, x).
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        coords.push((i as f64 + 0.5) / nx as f64 * sx);
+                        coords.push((j as f64 + 0.5) / ny as f64 * sy);
+                        coords.push((k as f64 + 0.5) / nz as f64 * sz);
+                    }
+                }
+            }
+            let id = |x: usize, y: usize, z: usize| ((z * nyv + y) * nxv + x) as u32;
+            let apex = |x: usize, y: usize, z: usize| {
+                (nxv * nyv * nzv + (z * ny + y) * nx + x) as u32
+            };
+            // AddHexAsPyramids (element-LOCAL hex indices 0..7 + apex 8).
+            const HEX_TO_PYR: [[usize; 5]; 6] = [
+                [0, 1, 2, 3, 8],
+                [0, 4, 5, 1, 8],
+                [1, 5, 6, 2, 8],
+                [2, 6, 7, 3, 8],
+                [3, 7, 4, 0, 8],
+                [7, 6, 5, 4, 8],
+            ];
+            let mut conn = Vec::with_capacity(nx * ny * nz * 6 * 5);
+            let mut elem_tags = Vec::with_capacity(nx * ny * nz * 6);
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let vi = [
+                            id(i, j, k),
+                            id(i + 1, j, k),
+                            id(i + 1, j + 1, k),
+                            id(i, j + 1, k),
+                            id(i, j, k + 1),
+                            id(i + 1, j, k + 1),
+                            id(i + 1, j + 1, k + 1),
+                            id(i, j + 1, k + 1),
+                            apex(i, j, k),
+                        ];
+                        for p in HEX_TO_PYR {
+                            conn.extend(p.map(|v| vi[v]));
+                            elem_tags.push(1);
+                        }
+                    }
+                }
+            }
+            // Boundary: Make3D's six loops, unsplit quads (`AddBdrQuad`).
+            let mut face_conn = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz));
+            let mut face_tags = Vec::with_capacity(2 * 4 * (nx * ny + ny * nz + nx * nz));
+            let mut quad = |f: [u32; 4], tag: i32| { face_conn.extend_from_slice(&f); face_tags.push(tag); };
+            for j in 0..ny {
+                for i in 0..nx {
+                    quad([id(i, j, 0), id(i, j + 1, 0), id(i + 1, j + 1, 0), id(i + 1, j, 0)], 1);
+                }
+            }
+            for j in 0..ny {
+                for i in 0..nx {
+                    quad([id(i, j, nz), id(i + 1, j, nz), id(i + 1, j + 1, nz), id(i, j + 1, nz)], 6);
+                }
+            }
+            for k in 0..nz {
+                for j in 0..ny {
+                    quad([id(0, j, k), id(0, j, k + 1), id(0, j + 1, k + 1), id(0, j + 1, k)], 5);
+                }
+            }
+            for k in 0..nz {
+                for j in 0..ny {
+                    quad([id(nx, j, k), id(nx, j + 1, k), id(nx, j + 1, k + 1), id(nx, j, k + 1)], 3);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    quad([id(i, 0, k), id(i + 1, 0, k), id(i + 1, 0, k + 1), id(i, 0, k + 1)], 2);
+                }
+            }
+            for i in 0..nx {
+                for k in 0..nz {
+                    quad([id(i, ny, k), id(i, ny, k + 1), id(i + 1, ny, k + 1), id(i + 1, ny, k)], 4);
+                }
+            }
+            let mesh = Mesh::<3>::uniform(
+                coords, conn, elem_tags, ElementType::Pyramid5,
+                face_conn, face_tags, ElementType::Quad4,
             );
             Ok(MfemFile { mesh2d: None, mesh3d: Some(mesh) })
         }
         other => Err(FemError::Mesh(format!(
-            "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet, wedge)"
+            "INLINE mesh: unsupported type '{other}' (supported: tri, quad, hex, tet, wedge, pyramid; \
+             'segment' needs a 1-D MfemFile container, see D602 report)"
         ))),
     }
 }
@@ -4229,6 +5316,89 @@ pub fn write_mfem_gf_file(
         }
     }
     Ok(())
+}
+
+/// Parsed contents of an MFEM `.gf` file in the native `FiniteElementSpace`
+/// format written by `GridFunction::Save` (`fem/gridfunc.cpp`).
+#[derive(Debug, Clone)]
+pub struct MfemGf {
+    /// `FiniteElementCollection` name, e.g. `"ND_3D_P2"`.
+    pub collection: String,
+    /// `VDim` header line.
+    pub vdim: usize,
+    /// `Ordering` header line (`0` = byNODES, `vdof = dof + ndofs*vd` —
+    /// the only ordering fem-rs spaces use / write).
+    pub ordering: i32,
+    /// Coefficient values in the file's own (byNODES) layout.
+    ///
+    /// D602: for vector `ND`/`RT` spaces on shared triangular faces this is
+    /// **already fem-rs's canonical convention** — MFEM pins each face's
+    /// storage frame to its face-creating element
+    /// (`Mesh::AddTriangleFaceElement`: `Elem1Inf = 64*lf`, "orientation 0",
+    /// i.e. `Fo(Elem1) = 0` and `T(0) = I`), which is exactly the element
+    /// fem-rs anchors the canonical functionals to.  Verified 74/74 against
+    /// MFEM `ProjectCoefficient` output on the D559 tet ND2 probe
+    /// (`tmp/d602/`); no per-face transform is applied when reading.
+    pub values: Vec<f64>,
+}
+
+/// Read an MFEM `.gf` file in the native `FiniteElementSpace` format:
+///
+/// ```text
+/// FiniteElementSpace
+/// FiniteElementCollection: ND_3D_P2
+/// VDim: 1
+/// Ordering: 0
+///
+/// <value 1>
+/// ...
+/// ```
+///
+/// Everything after the `Ordering` line is parsed as whitespace-separated
+/// `f64` values (the `Vector::Load` rule), so wrapped/aligned layouts parse
+/// the same as MFEM's one-value-per-line output.  The legacy
+/// "MFEM grid function v1.0" container written by [`write_gf`] is *not*
+/// this format and is rejected.
+pub fn read_mfem_gf<R: Read>(reader: R) -> FemResult<MfemGf> {
+    let mut r = BufReader::new(reader);
+    let head = read_line(&mut r)?;
+    if head.trim() != "FiniteElementSpace" {
+        return Err(FemError::Mesh(format!(
+            "MFEM gf: expected 'FiniteElementSpace' header, got: {head}"
+        )));
+    }
+    let coll = read_line(&mut r)?;
+    let collection = coll
+        .strip_prefix("FiniteElementCollection:")
+        .map(str::trim)
+        .ok_or_else(|| FemError::Mesh(format!("MFEM gf: missing collection line: {coll}")))?
+        .to_string();
+    let vdim_line = read_line(&mut r)?;
+    let vdim = vdim_line
+        .strip_prefix("VDim:")
+        .and_then(|t| t.trim().parse().ok())
+        .ok_or_else(|| FemError::Mesh(format!("MFEM gf: bad VDim line: {vdim_line}")))?;
+    let ord_line = read_line(&mut r)?;
+    let ordering = ord_line
+        .strip_prefix("Ordering:")
+        .and_then(|t| t.trim().parse().ok())
+        .ok_or_else(|| FemError::Mesh(format!("MFEM gf: bad Ordering line: {ord_line}")))?;
+    let mut rest = String::new();
+    r.read_to_string(&mut rest)?;
+    let mut values = Vec::new();
+    for tok in rest.split_whitespace() {
+        let v: f64 = tok
+            .parse()
+            .map_err(|_| FemError::Mesh(format!("MFEM gf: bad value token: {tok}")))?;
+        values.push(v);
+    }
+    Ok(MfemGf { collection, vdim, ordering, values })
+}
+
+/// Convenience: read an MFEM `.gf` file from disk.
+pub fn read_mfem_gf_file(path: impl AsRef<std::path::Path>) -> FemResult<MfemGf> {
+    let file = std::fs::File::open(path)?;
+    read_mfem_gf(std::io::BufReader::new(file))
 }
 
 #[cfg(test)]

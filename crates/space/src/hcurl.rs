@@ -170,7 +170,12 @@ const HEX8_REF: [[f64; 3]; 8] = [
 
 /// Physical point and Jacobian of the trilinear hexahedron map at `xi`
 /// (Jacobian columns as `jac[component][derivative]`).
-fn hex_trilinear_map(verts: &[[f64; 3]; 8], xi: &[f64]) -> ([f64; 3], [[f64; 3]; 3]) {
+///
+/// D121: published (`pub`) so the assembly crate's postprocessing and the
+/// joule miniapp can map reference points through the same Q1 hex geometry
+/// the H(curl) space itself uses (MFEM `Hex8` `ElementTransformation`
+/// semantics), instead of each consumer re-deriving the trilinear map.
+pub fn hex_trilinear_map(verts: &[[f64; 3]; 8], xi: &[f64]) -> ([f64; 3], [[f64; 3]; 3]) {
     let (x, y, z) = (xi[0], xi[1], xi[2]);
     let mut p = [0.0_f64; 3];
     let mut jac = [[0.0_f64; 3]; 3];
@@ -1699,6 +1704,116 @@ impl<M: MeshTopology> HCurlSpace<M> {
     /// covered by `crates/assembly/tests/d55_hex_nd2_system_regression.rs`.
     pub fn element_face_blocks(&self, e: u32) -> &[FaceDofBlock] {
         &self.elem_face_blocks[e as usize]
+    }
+
+    /// Inverse of a 2×2 matrix (D602 helper).
+    fn inv2(m: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+        let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+        assert!(det.abs() > 1e-300, "HCurlSpace: singular 2×2 face map");
+        [
+            [m[1][1] / det, -m[0][1] / det],
+            [-m[1][0] / det, m[0][0] / det],
+        ]
+    }
+
+    /// Product of two 2×2 matrices (D602 helper).
+    fn mul2(a: [[f64; 2]; 2], b: [[f64; 2]; 2]) -> [[f64; 2]; 2] {
+        [
+            [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+            [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
+        ]
+    }
+
+    /// D602: cross-element frame view of one shared triangular face's DOF
+    /// pairs — `R = S_last · S_first⁻¹`, the change of basis between the two
+    /// adjacent elements' local face-pair frames, where "first" is the
+    /// face-creating (first-encounter) element and "last" the other one.
+    ///
+    /// Concretely, with the canonical (global) pair values `u_canon` and the
+    /// element-local values `u_loc` of the *second* element,
+    /// `u_loc(last) = R · u_canon`.  In MFEM terms `R` is
+    /// `T(fo)⁻¹ = TInv(Fo(Elem2))` of `ND_DofTransformation`
+    /// (`fem/doftrans.hpp`), because the face-creating element is MFEM's
+    /// `FaceInfo::Elem1No`, whose orientation is pinned to zero
+    /// (`Mesh::AddTriangleFaceElement`: `Elem1Inf = 64*lf`, "orientation 0")
+    /// — the same element this space anchors the canonical functionals to.
+    ///
+    /// **This is not a `.gf` file-storage map.**  The vector MFEM's
+    /// `GridFunction::ProjectCoefficient` stores is, per face pair,
+    /// `T(Fo(ElemE))·raw(E)` for the last writer `E`, and the writer
+    /// independence identity `T(Fo(E))·S(E) = I` (both writers, verified
+    /// 38/38 exactly on the D559 6-tet probe) means the stored values equal
+    /// `u_canon` bit for bit — fem-rs's canonical `.gf` output is already
+    /// MFEM's `.gf` format, no transformation applied or required (D602
+    /// evidence: `tmp/d602/`).  `R` is the *element-frame* relation behind
+    /// that identity, exposed for diagnostics and for pinning fem-rs's S
+    /// blocks against MFEM's T table in tests.
+    ///
+    /// Returns `None` when `face` is not a registered shared tri face of
+    /// exactly two elements (boundary faces, 2-D spaces, k = 1), or when the
+    /// space carries no 2×2 face blocks for it.  For k ≥ 3 every DOF pair of
+    /// a straight face shares the same map; the first pair's map is
+    /// returned.
+    pub fn face_pair_storage_map(&self, face: FaceKey) -> Option<[[f64; 2]; 2]> {
+        if self.order < 2 || self.dim != 3 {
+            return None;
+        }
+        let first_dof = self.face_to_dof.get(&face).copied()?;
+        let nfd = (self.order as usize * (self.order as usize - 1)) as DofId;
+        // Locate the face's adjacent elements by scanning every element's
+        // triangular faces (the only faces carrying 2×2 blocks).  Interior
+        // faces are found twice, boundary faces once (→ `None`).
+        let mut e1 = None;
+        let mut e2 = None;
+        for e in self.mesh.elem_iter() {
+            let verts = self.mesh.element_nodes(e);
+            let tri_faces: &[(usize, usize, usize)] = match self.mesh.element_type(e) {
+                ElementType::Tet4 | ElementType::Tet10 => &TET_FACES,
+                ElementType::Prism6 => &PRISM_TRI_FACES,
+                ElementType::Pyramid5 => &PYRAMID_TRI_FACES,
+                _ => continue,
+            };
+            for &(la, lb, lc) in tri_faces {
+                if FaceKey::new(verts[la], verts[lb], verts[lc]) == face {
+                    if e1.is_none() {
+                        e1 = Some(e);
+                    } else {
+                        e2 = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        let (e1, e2) = match (e1, e2) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return None,
+        };
+        if e1 == e2 {
+            return None;
+        }
+        let (first, last) = if e1 < e2 { (e1, e2) } else { (e2, e1) };
+        // Per element: the 2×2 blocks of *this* face, keyed by the pair's
+        // first canonical DOF (both elements map onto the same global pair).
+        let blocks = |e: u32| -> std::collections::HashMap<DofId, [[f64; 2]; 2]> {
+            self.element_face_blocks(e)
+                .iter()
+                .filter(|b| b.canon_dofs[0] >= first_dof && b.canon_dofs[0] < first_dof + nfd)
+                .map(|b| (b.canon_dofs[0], b.s))
+                .collect()
+        };
+        let last_blocks = blocks(last);
+        let mut map = None;
+        for b in self.element_face_blocks(first) {
+            if b.canon_dofs[0] < first_dof || b.canon_dofs[0] >= first_dof + nfd {
+                continue;
+            }
+            let s_last = last_blocks.get(&b.canon_dofs[0])?;
+            let r = Self::mul2(*s_last, Self::inv2(b.s));
+            if map.is_none() {
+                map = Some(r);
+            }
+        }
+        map
     }
 
     /// Look up all global DOFs associated with a quad face (hex NDk, k≥2).
