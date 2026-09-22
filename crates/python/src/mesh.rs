@@ -1,10 +1,28 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use fem_mesh::Mesh;
-use fem_mesh::boundary_nodes_with_tags;
 use fem_mesh::extrude_tri3_to_prisms;
 use fem_mesh::extrude_quad4_to_hex8;
 use fem_mesh::build_supermesh;
+use fem_mesh::topology::MeshTopology;
+
+/// Collect node ids lying on boundary faces whose tag is in `tags`.
+///
+/// Reimplemented here: the former `fem_mesh::boundary_nodes_with_tags` lived in
+/// the deleted `moving_mesh` module (removed as dead code in 47e09a6 — fem-py,
+/// its only caller, is outside the dead-code audit). Same semantics: sorted
+/// unique nodes over boundary faces with a matching tag.
+fn boundary_nodes_with_tags(mesh: &Mesh<2>, tags: &[i32]) -> Vec<u32> {
+    let mut out = std::collections::BTreeSet::<u32>::new();
+    for f in mesh.face_iter() {
+        if tags.contains(&mesh.face_tag(f)) {
+            for &n in mesh.face_nodes(f) {
+                out.insert(n);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
 
 /// Unstructured simplex mesh in 2-D or 3-D.
 ///

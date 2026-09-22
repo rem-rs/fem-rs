@@ -1,9 +1,8 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use pyo3::types::PyList;
-use numpy::{PyArray1, PyArrayMethods};
+use numpy::PyArray1;
 use fem_mesh::Mesh;
-use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, HDivSpace, ComplexGridFunction};
+use fem_space::{FESpace, H1Space, L2Space, VectorH1Space, HCurlSpace, HDivSpace};
 use crate::mesh::PyMesh;
 
 /// H¹ finite element space (continuous Lagrange).
