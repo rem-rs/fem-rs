@@ -4470,6 +4470,92 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十一轮（round 61）：D624 混合几何落存储（头号）+ slot 序同族三件 + 三态台账 + 小件打包
+
+开局 HEAD = round 60 末笔 `4edcbd4`（已推送，ls-remote 实证）；磁盘 63G；树净。
+
+### 派单（四路并行，号段 D627–D638）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D624（头号）混合高阶几何落存储**（GeometryData per-element 行长 schema 选型；混合门翻转 attach；~30 消费方清单化；四档验收：llnl-p3/fichera-p2 不倒退 + fichera-mixed-16 翻绿 + 单一几何逐位 + AMR 一档） | D627-629 | `crates/mesh/src/` 几何 schema 及直接消费、`crates/io/src/mfem.rs`、`tmp/d624/**` | `mesh/amr/p_refine*`、`gmsh.rs`、`dof_manager.rs`（B 路）；postproc（D 路）；`hcurl/hdiv/ref_elem` |
+| B | **D612 + D619 + D613 slot 序同族**（三套 Hex27 序裁决[neg-det 实锤]；H1 hex 全局 slot 序 vs MFEM[先核 D31 是否已顺带修复]；曲线标签-结点数契约 + DofManager 高阶编号补齐） | D630-632 | `crates/mesh/src/amr/**`、`crates/io/src/gmsh.rs`、`crates/space/src/dof_manager.rs`、`tmp/d612/**` | mfem.rs、mesh 几何 schema（A 路）；postproc（D 路） |
+| C | **examples/miniapps 三态台账**（86 例逐个分类 BIT/RUN/DEV/CRASH/NOREF；新升 BIT ≥5-10 例；miniapp 抽样复核 5-8 档；矩阵 §3 更新）——只读审计，零代码改动 | D633-635 | `tmp/ledger/**`、`tmp/coverage_matrix.md` §3 | 一切代码 |
+| D | **D614 postproc 接线清单**（ref_elem_vol 四臂/geom_jacobian 等参/elem_vertex_count/needs_iso，契约=d581 测试）+ **D615 hex IGLL 装配腿** + **D617 tet GM fixture** | D636-638 | `assembly/src/postproc/**`、`vector_assembler.rs`、`hdiv.rs`（如需）、`element/tests/`（D617） | `mesh/**`、`io/**`、`hcurl/dof_manager/ref_elem`、`element/src` 源码 |
+
+### 四路交付与关门（round 61 主会话收尾）
+
+#### A —— D624 **关闭**（头号，分诊表最后一个 P2 真 GAP）
+- **schema**：GeometryData **零新字段**的"派生 CSR"——`nodes_per_elem==0` 表示 ragged（行长=
+  `h1_family_dofs(族,order)`，与消费端 ref element 同一批元素层构造器 ⇒ 行长/槽序不可能漂移）；
+  行寻址走新增 `Mesh::geometry_row_range/row/row_len`；**uniform 路径逐位不变**（回归红线达成）。
+  选型理由：任何新字段都破坏 ~20 处字面量构造（含 B 路 gmsh.rs）。
+- **消费方 30 项**：实际改 11 文件；assembly ~15 消费方经 `MeshTopology::geometry_nodes` trait
+  自动覆盖零改动；B 路管辖文件一字未动。
+- **四档验收（先红后绿）**：llnl-p3 detJ 1.3e-13 + **wrong orientation 15/26→0**；fichera-mixed-p2
+  与 MFEM 全数字同；**fichera-mixed-16（hex+prism+pyr）从 loud-refuse 翻绿**（pyramid 行长 15=
+  Fuentes）；AMR 细化 mindet=粗/4 精确。五个 crate 回归全绿。
+- 新债：D627（ragged 写出）、D628（混合曲率细化传播）、D629（混合曲面+findpts 曲面金字塔族）。
+
+#### B —— D612 + D619 + D613 **关闭**（slot 序同族）
+- **D612**：MFEM 官方 Hex27 序裁决（面心 z0,y0,x1,y1,x0,z1）；p_refine 旧写侧序换掉；**连带真
+  bug**：体心坐标 = 20 结点求和/8（单位立方"体心"落在 (1.25,1.25,1.25)）→ 8 角点均值。
+  neg-det 红（−6.99e-2）→绿。
+- **D619 误诊关闭**：新 pin 测试（cylinder-hex 2443 dof elem0 逐位）**零改动直接绿**——D31 已
+  顺带修复；HYPOTHESIS 规则反向应用范例。
+- **D613**：曲线标签契约（MFEM npe 实测 tet10/hex27/wedge18/pyramid15）+ DofManager 高阶编号
+  补齐（红 5/6→绿 6/6）。
+- 新债：D630（二次连通行混合编号）、D631（D624 在飞期 D41 安全网红——A 落地后待复核）、
+  D632（refine_curved_3d_nc_general pyramid 分支家族错配静默腐蚀几何——一行修法在案）。
+
+#### C —— examples/miniapps 三态台账（零代码改动，覆盖矩阵最大 "?" 集合扫出）
+- **86 例全跑**：BIT 4 / RUN 63 / RUN* 3 / CRASH 12 / DEV 2 / NOREF 2；101 份日志 + 14 份现编
+  C++ 参考留档（`tmp/ledger/`）。新升 BIT：ex1（缺 10 行 Options 头外逐字节）、ex2、ex24、ex31。
+  **ex26 收窄**：round 60"逐行一致"改口径为机器精度吻合（原命令不可复原，自建同档对拍）。
+- **最有价值的发现面（RUN*/CRASH）**：
+  - **D634（P1，round 62 头号候选）停机规则/残差口径族**：ex4 提前收敛（误差 0.43 vs 0.016，
+    **27×**）、ex5 MINRES 假收敛（u_err O(1)）、ex3/6/8/14/29 同族——修一处收益一片；
+  - **D635a pex5/pex40 并行分区越界回归**（round 30 还绿——回归嫌疑）；**D635b ex20 辛积分器
+    未演化**（能量 1/0）；**D633 data 资产缺失**（e1f16f8 误删 star-hilbert/periodic-hexagon，
+    10 例受益，恢复即修）；
+  - RUN-LONG：pex15 800s、pex30 停滞需专项。
+- **miniapp 抽样 8/8 仍绿**（lor_solvers×3 字节同、mesh_info 现编 C++ 全新逐字节等）。
+- 矩阵 §3 已替换为台账摘要。
+
+#### D —— D614 + D615 + D617 **关闭**（小件包）
+- **D614 接线清单全项**：postproc 三表四臂（落到 d581 钉位家族）、geom_jacobian 等参臂、
+  elem_vertex_count、needs_iso 补 Hex27/Prism18；**hex20 翘曲体积两侧逐位
+  1.15540625000000041e0**；红 7F/2P→绿 9/9。
+- **D615**：hex IGLL 装配腿此前**静默跌落 GaussLegendre**（[0][0] 5.333 vs 0.333 = 4× 框架差
+  显形）；修复后 51984 条目 max 2.26e-13；框架口径与 D591 一致显式断言。
+- **D617**：tet GM fixture 3/3；红证据=旧矩方程 tet 段偏差 **1e18..2.5e32**（D603 闭式化必要性
+  的直接实证）。
+- 新债：D636（elem_vol 对任意 3-D 用前 4 顶点四面体公式 ⇒ hex det≡0、ZZ 估计器系统性压扁）、
+  D637（flux_recovery dof 推断 + HDiv hex FaceDofBlock 空）、D638（HCurl hex IGLL 腿缺位）。
+
+### 全量回归（五道门）+ 流程注记
+
+- 门 1 十 crate lib **2626 / 0**（+8）；门 2 `--tests` **251 targets / 3983 / 1 flake**（mobius
+  同二进制 tmpdir 竞争，单跑 13/0 绿——方法论 #16 类；实质 3984/0）；门 3 examples **0 错误**
+  （16m59s）；门 4 pro **rc=0**；门 5 fem-py **rc=0**。磁盘 65G。
+- 头条逐名 grep：d624 四档 + d612/d619 六测试 + d614 九项 + d615/d617 + llnl/fichera 引擎档
+  全部 ok。
+- **round 61 主线叙事**：真实功能缺口分诊表 P0-P2 **全部关闭**——覆盖矩阵从建成到"分诊表
+  清零"只用了两轮；台账随即接棒把 "?" 转化为新一代已验证债（D633-635）。
+
+### round 62 待办（建议）
+
+**① D634 停机规则族（头号候选：ex4 27×/ex5 假收敛/ex3-29 同族，修一处收益一片）**；
+② **D635a pex5/pex40 并行越界回归**（round 30 绿→现在崩，回归二分）；③ **D633 data 资产回填**
+（10 例受益，恢复即修）；④ **D635b ex20 辛积分器**；⑤ D627/D628/D629/D630/D632 小件族；
+⑥ D586 upstream 投递（待用户）；⑦ miniapps 未抽样 ~80 文件的台账续作。
+
+### 未派单（留后续）
+
+D597/D605/D598（prism.rs 可写轮三件）、D609/D610/D611（D602 余量）、D616（命名）、D618/D620、
+D593（-pa last-ulp）、D631（D624 落地后 D41 安全网复核）、D586 upstream 投递（**需用户 GitHub
+操作**——三篇成稿在 `tmp/d586/`，checklist 已备）。
+
 ## 第六十轮（round 60）：覆盖矩阵建立（主会话）+ 真实功能缺口补全四路（用户优先级裁定）
 
 用户裁定：停止无界流水账，**先建覆盖矩阵与完成定义，优先补真实功能缺口**。
