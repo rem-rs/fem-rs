@@ -4470,6 +4470,32 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第六十轮（round 60）：覆盖矩阵建立（主会话）+ 真实功能缺口补全四路（用户优先级裁定）
+
+用户裁定：停止无界流水账，**先建覆盖矩阵与完成定义，优先补真实功能缺口**。
+
+### 主会话交付：`tmp/coverage_matrix.md`（唯一权威完成度清单）
+
+- 状态图例 BIT/MACH/TOL/DEV/GAP/LAT/? + **完成定义五条**（元素层无 ?/GAP、五条主线路径无 ?、
+  示例/miniapp 全部三态化、mesh+gf 双向往返干净、ignore 全分类）。
+- 元素层矩阵（几何×族×分型）、路径矩阵（求积/装配/求解器/并行/io/NURBS/线代/tmop/绑定）、
+  示例/miniapp 台账现状（逐例台账**未建 = 最大 "?" 集合**，进队列）、未验证队列、分诊表。
+- 维护规程：每轮收尾更新受影响格；债号必须映射到矩阵格；`?` 只能通过补 pin 或登记 GAP/LAT 消除。
+
+### 派单（四路，号段 D609–D620；第二波 D31/D117/D118 等 A 路让出 io/mfem.rs）
+
+| 路 | 债务 | 号段 | 独占文件 |
+|----|------|------|----------|
+| A | **D602 gf 存储视图**（P0：唯一已知"算错"级互操作缺陷；按 d559 报告方案：HCurlSpace `face_pair_storage_map` + `write_gf(storage: Canonical\|Mfem)`；三层验收 74/0 + 跨库往返=0）+ stretch D582 INLINE pyramid | D609-611 | `crates/space/src/hcurl.rs`（+新视图模块）、`crates/io/src/mfem.rs`、新测试、`tmp/d602/**` |
+| B | **D581 ref_elem 家族**（P0：Hex27/Prism15+/Pyramid13+ 分派 panic；R 路 D235 先例：MFEM 体积 parity + 消费方端到端 + 先红后绿） | D612-614 | `crates/space/src/ref_elem.rs`、element H1 族文件、`tmp/d581/**` |
+| C | **D603**（tri ≥26 偶数阶公式差一行修，先红后绿 + 26..32 探针）+ **D591**（hex IGLL 积分泛函接 `HDivSpace` 消费腿，框架因子显式断言） | D615-617 | `crates/element/src/quadrature*`、`crates/space/src/hdiv.rs`、`tmp/d603/**` |
+| D | **D120 + D121**（joule hex 电磁半块两硬阻塞：curl_3d hex 臂[DᵀZ=Yᵀ]+ 三线性感知逐元投影入口[hex_trilinear_map 暴露]；端到端目标 = C++ 参考 107-108 行 dot(E,J) 口径，能走多远走多远，剩余阻塞如实清单化） | D618-620 | `discrete_op.rs`、`postproc/**`、joule miniapp、`tmp/d120/**` |
+
+### 未派单（第二波/后续）
+
+D31（等 io/mfem.rs）、D117/D118（同上，P2）、D113 剩余细化几何搬运、D122 并行 ghost、
+D597/D598/D605（prism.rs 可写轮）、D590、D570、D579、D593、D586 投递（主会话）。
+
 ## 第五十九轮（round 59）：D584+D585（D572 收尾半程，头号）+ D589/D559 + D580/D578 + D596 fem-py
 
 开局 HEAD = round 58 末笔 `311e686`（已推送，ls-remote 实证）；磁盘 94G；工作树仅未跟踪证据。
@@ -4582,6 +4608,82 @@ D582（INLINE pyramid）、D583（永不修）、D593（-pa last-ulp 追踪）�
 GM 回退一行修）+ D604（bpcg trait）小件打包；④ D606/D607/D608 fem-py 维护线（pytest 套件在
 fem-pro 根跑通一次 + 冒烟固化）；⑤ D586 三篇 upstream 实际投递（主会话）；⑥ 未派单余量
 （D31/D120/D121/D117/D118/D570/D579/D581/D582）。
+
+### 【round 60】六路交付与关门（主会话收尾）
+
+#### 真实功能缺口补全（用户优先级裁定，全部关闭）
+
+- **D602（P0，头号）——裁决=误诊，真交付更大**：round 59 的"GF 互操作缺陷"在文件层**不存在**
+  （62/12 是比错列——比了 MFEM 从不存储的 raw 值；MFEM 首遇元素 orientation 0 → T[0]=I 与
+  fem-rs 建面锚点同约定，两写者文件天然一致）。**A 路拒绝执行有害修复**（按简报字面乘
+  S_last·S_first⁻¹ 会把正确文件改出 swap）。真交付：**原生 gf 读取器补齐**（fem-rs 此前没有！
+  `read_mfem_gf`/`MfemGf`）+ 诊断 API `face_pair_storage_map` + 三层验收（写侧 74/0 max 1.3e-15、
+  跨库重构 4.0e-15=MFEM 自写对照同水平、反向 74/74+120/120）。
+- **D582 INLINE pyramid + 3 真 bug**：tet 臂重写（旧 Freudenthal 剖分与 AddHexAsTets 同集不同序
+  + 边界 tag 全错）、wedge 边界 tag/顺序、hex 循环嵌套；全类型矩阵 vs MFEM 逐元素全同。
+- **D581（P0）**：债文部分失真——Prism15/18/Pyramid13 臂 HEAD 已有，真缺口 **Hex27（全分派器）
+  + Hex20（除 gll_tensor）**；补齐后体积 parity Hex27 1.6e-15/Prism18 2.8e-16/Pyramid13 3.5e-18；
+  Pyramid13 实为 15 结点（Fuentes p=2 探针证实）。
+- **D120/D121（P0）joule hex 电磁半块**：curl_3d hex 臂（ND2→RT1 纯参考元矩阵，协变 pullback
+  使 Jacobian 抵消；MFEM 216 项逐项 12 位一致；坑=fem-rs unit_cube_hex 顶点标号 [0,1,3,2] ≠
+  MFEM [0,1,2,3]）+ 三线性感知逐元投影入口（`hex_trilinear_map` pub + `project_coefficient_element`，
+  直/翘 hex parity <1e-9）；**端到端局部目标 el/W-sum/W-max 全部 ~1e-16**（cylinder-hex -o2）；
+  完整 ImplicitSolve 链余项 exit(3) 清单化。
+- **D603+D591**：D603 修正中挖出**真数值缺陷**——GM 权重矩方程解法 s≥13 崩溃（order 26 权重
+  偏差 1e5 级含符号错），闭式化后 26..33 全 0 ulp；D591 hex IGLL 接 `interpolate_vector` 消费腿
+  （1800 dof 3.5e-15；V_mfem/16 框架因子 `assert_eq!(u[0],0.25)` 全精度钉死）。
+- **D31（P1）**：原子切换全貌 = hex×p=2 的 legacy 槽表（HEX_QK_EDGES/FACES、LEGACY_P2_SLOTS、
+  Q2_NODES_HEX、GMSH_PERM_HEX27、wgsl q2map）**全错**——MFEM 三路互证探针（identity/GetNodes/
+  GetDofMap）：p=2 与 p≥3 同构算法。9 文件修正 + 红→绿（"slot 8, left: 16"）；**ex26 端到端 vs
+  C++ 逐行一致**。批注：E 路报告写"用户批准破例"（gmsh/wgsl 延伸）措辞不准——实为授权清单
+  "io+wgsl"字面内、事后披露，主会话裁定接受。
+- **D117/D118（P2）**：登记形态比实际轻——llnl-p3 实为**静默错表**（26 元素全挂 10-dof 单形行、
+  quad 需 16、零告警、wrong orientation 15/26）。交付混合高阶 H¹ 编号引擎（真源=元素层
+  dof_coords/slot_labels，无手抄表）+ 混合门（静默错表/未验证表路径消灭→精确告警+大声拒绝）；
+  llnl-p3 min detJ ≤1.3e-13、逐槽逐位；fichera-mixed-p2 全数字同。
+- **D559/D602 连带裁决**：D559 报告的修复方案草图作废（其根因分析对、文件层推论错）；
+  `face_pair_storage_map` 保留为诊断 API 并文档化"它不是文件存储映射"。
+
+#### 事故记录（round 60 E 路，已完全恢复）
+
+- **经过**：E 路一条 `rm -rf crates examples miniapps data tools tests`（相对路径）因 Bash cwd
+  重置落在主仓根。六目录未提交改动/未跟踪文件灭失。
+- **恢复**：`git restore` 六目录回 HEAD；tmp/ 证据零损失；A/B/C 三路从完成态唤醒原样重放
+  （重放数字与事故前逐位一致，d602/d581/d603 全部复验）；D 路在飞重放后继续完成；
+  data/ 标准件从 MFEM 官方树回填（主会话 13 + B 路 6 + F 路 3，逐件 diff 校验）。
+- **永久损失**：未跟踪 data/ ~25 件（按需再生）、tools/ex31_cpp_helper dumps（探针可再生）。
+- **连带修复**：门 2 五败全部定位为灭失夹具（d560/d547×2/d525/mobius）——逐个从幸存副本回填
+  后全绿（mobius 系同二进制 tmpdir 并发竞争，方法论 #16 类）；`transfer.rs:1908` unused_mut
+  （round 59 漏网——当时警告审计只 grep 了 "unused" 未含 "unused_mut"）已修；D 路 d120 triplet
+  文件重放不完整（缺 const+测试函数）由 D 路补齐。
+- **新纪律（并入 HANDOVER）**：① `rm -rf` 一律绝对路径 + 删前 `pwd` 自证；② 隔离副本一律
+  `git worktree`（主仓工作树是多路共享资源）；③ **测试依赖的夹具一律 `git add -f` 入库**
+  （未跟踪夹具无任何保护）；④ 警告审计 grep 必须含 `unused_mut`/`unused_variables` 全族。
+
+#### 全量回归（五道门）
+
+- 门 1 十 crate lib **2618 / 0**；门 2 `--tests` **246 targets / 3947+5→夹具修复后终值见门日志**
+  （五败均为灭失夹具，修复后四目标单跑全绿：d560 1/0、d547 2/0、d525 8/0、mobius 13/0）；
+  门 3 release examples **0 错误**（19m01s）；门 4 pro 层 **rc=0**；门 5 **fem-py check rc=0**。
+- 警告：我们 crate 全 0（transfer.rs unused_mut 修后；vendor linger 照旧）。
+
+#### 新债（D609–D626，权威 = 覆盖矩阵 + 各路报告）
+
+D609（INLINE segment 1-D 容器）、D610（三层验收只钉 straight tet ND2）、D611（storage_map 仅
+tri-face+O(NE)）、D612（Hex27 slot 序三套并存，p_refine 序 det=−0.242）、D613（曲线标签 vs 表
+结点数）、D614（postproc 接线清单）、D615（hex IGLL 装配腿）、D616（quad_igll 命名 2-D 语义）、
+D617（tet GM ≥26 无 fixture）、D618（hex divergence 奇异）、D619（H1 hex slot 序≠MFEM 阻跨栈
+dof 交换）、D620（Hex20 曲边 EM 角点三线性）、D621（d525/d547 夹具重建——本轮已由主会话完成
+回填，本条转"入库"动作）、D622（d120 triplet 文件——已由 D 路补齐关闭）、D623（40+ 生成型夹具
+入库建议——与③同源）、D624（混合表落存储 per-element 行长——混合高阶最后真 GAP）、D626
+（HEX_FACES 枚举序≠MFEM）。
+
+### 【round 60】round 61 待办（建议）
+
+**① D624（混合高阶几何落存储——最后一个 P2 真 GAP，引擎已备）**；② D612（Hex27 slot 序三方
+裁决，neg-det 实锤在案）+ D619（H1 hex 跨栈 slot 序）同族打包；③ D614（postproc 接线清单执行）
++ D615/D617 小件；④ D586 三篇 upstream 实际投递（主会话）；⑤ examples/miniapps 逐个三态台账
+（覆盖矩阵最大 "?" 集合，批跑脚本一次性扫出）；⑥ D623 夹具入库批处理。
 
 ### 主会话进行时（round 59 飞行期）
 
