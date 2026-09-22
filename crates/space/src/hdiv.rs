@@ -361,13 +361,16 @@ pub struct HDivSpace<M: MeshTopology> {
     elem_type: ElementType,
     /// If true, use BDM elements instead of RT.
     is_bdm: bool,
-    /// 2-D quad basis variant: `true` = MFEM's
-    /// `RT_FECollection(o, 2, GaussLobatto, IntegratedGLL)` collection (the
+    /// Basis-variant flag: `true` = MFEM's
+    /// `RT_FECollection(o, dim, GaussLobatto, IntegratedGLL)` collection (the
     /// LOR-compatible basis pair, built by
     /// [`Self::new_gauss_lobatto_integrated_gll`]); `false` = the library
     /// default (`HDivSpace::new`, GaussLegendre open modes).  The variant
     /// selects which reference element [`fem_assembly::VectorAssembler`]
-    /// pairs with the (identical) dof/slot tables — see `quad_integrated_gll`.
+    /// pairs with the (identical) dof/slot tables — see `quad_integrated_gll`
+    /// for the 2-D quad and the `HexRTk::new` IntegratedGLL element for the
+    /// 3-D hex (D591) — and [`Self::interpolate_vector`], which becomes MFEM's
+    /// `ProjectIntegrated` (normal-flux sub-cell integrals) on both variants.
     quad_igll: bool,
 }
 
@@ -399,27 +402,27 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
     }
 
-    /// Construct the 2-D **quad** H(div) space of MFEM's LOR-compatible
-    /// collection `RT_FECollection(order, 2, BasisType::GaussLobatto,
+    /// Construct the H(div) space of MFEM's LOR-compatible collection
+    /// `RT_FECollection(order, dim, BasisType::GaussLobatto,
     /// BasisType::IntegratedGLL)` (`fem/fe_coll.hpp`).
     ///
     /// The global DOF numbering, slot tables and orientation signs are
-    /// **identical** to [`Self::new`] (MFEM's per-edge
+    /// **identical** to [`Self::new`] (MFEM's per-face
     /// `DofOrderForOrientation` rule does not depend on the 1-D basis); the
     /// variant changes
     ///
     /// * which reference element the assembler pairs with the tables — the
     ///   faithful `fem_element::raviart_thomas::QuadRTk::new_integrated_gll`
-    ///   (integrated Gerritsma open modes) instead of the GaussLegendre
-    ///   defaults — via
-    ///   [`fem_assembly::VectorAssembler::assemble_bilinear_quad_igll`], and
+    ///   on quad meshes (integrated Gerritsma open modes) /
+    ///   `HexRTk::new` on hex meshes — instead of the GaussLegendre
+    ///   defaults, and
     /// * [`Self::interpolate_vector`], which becomes MFEM's
     ///   `ProjectIntegrated` (normal-flux sub-cell integrals) instead of the
-    ///   nodal projection, because `RT_QuadrilateralElement::Project`
-    ///   dispatches to `ProjectIntegrated` for the integrated type
-    ///   (`fe_rt.hpp:63`).
+    ///   nodal projection, because `RT_QuadrilateralElement::Project` /
+    ///   `RT_HexahedronElement::Project` dispatch to `ProjectIntegrated` for
+    ///   the integrated type (`fe_rt.hpp:63`/`:126`).
     ///
-    /// On non-quad meshes the two constructors build the same space.
+    /// On other mesh types the two constructors build the same space.
     pub fn new_gauss_lobatto_integrated_gll(mesh: M, order: u8) -> Self {
         let dim = mesh.dim() as usize;
         let first_type = mesh.element_type(0);
@@ -432,8 +435,10 @@ impl<M: MeshTopology> HDivSpace<M> {
         }
     }
 
-    /// Whether this space carries the `(GaussLobatto, IntegratedGLL)` quad
-    /// basis pair.  The assembler and LOR entry points must key off the same
+    /// Whether this space carries the `(GaussLobatto, IntegratedGLL)` basis
+    /// pair — the 2-D quad collection variant (D368) and, since D591, the 3-D
+    /// hex one (`RT_FECollection(p, 3, GaussLobatto, IntegratedGLL)`).  The
+    /// assembler and LOR entry points must key off the same
     /// variant as the space (D347 pattern): a variant space must be assembled
     /// with the `*_quad_igll` entries, a default space with the plain ones.
     pub fn quad_integrated_gll(&self) -> bool {
@@ -676,7 +681,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             (2, ElementType::Tri3 | ElementType::Tri6) => Self::build_2d_tri(mesh, order, is_bdm),
             (2, ElementType::Quad4) => Self::build_2d_quad(mesh, order, quad_igll),
             (3, ElementType::Tet4 | ElementType::Tet10) => Self::build_3d_tet(mesh, order, elem_type, is_bdm),
-            (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order),
+            (3, ElementType::Hex8) => Self::build_3d_hex(mesh, order, quad_igll),
             (3, ElementType::Prism6) => Self::build_3d_prism(mesh, order),
             (3, ElementType::Pyramid5) => Self::build_3d_pyramid(mesh, order),
             _ => panic!("HDivSpace::build: unsupported (elem_type={elem_type:?})"),
@@ -1022,7 +1027,11 @@ impl<M: MeshTopology> HDivSpace<M> {
 
     // ─── 3-D hexahedron construction ───────────────────────────────────────
 
-    fn build_3d_hex(mesh: M, order: u8) -> Self {
+    /// `quad_igll` selects the MFEM `RT_FECollection(p, 3, GaussLobatto,
+    /// IntegratedGLL)` variant (D591): same dof/slot tables, `interpolate_vector`
+    /// serves MFEM's `ProjectIntegrated` semantics (the numbering/signs are
+    /// basis-independent, round-40 map probes).
+    fn build_3d_hex(mesh: M, order: u8, quad_igll: bool) -> Self {
         let dofs_per_face = (order as usize + 1) * (order as usize + 1);
         let interior_dofs = if order == 0 { 0 } else { 3 * order as usize * (order as usize + 1) * (order as usize + 1) };
         let dofs_per_elem = HEX_FACES.len() * dofs_per_face + interior_dofs;
@@ -1133,7 +1142,7 @@ impl<M: MeshTopology> HDivSpace<M> {
             face_canon_verts,
             elem_type: ElementType::Hex8,
             is_bdm: false,
-            quad_igll: false,
+            quad_igll,
         }
     }
 
@@ -1655,6 +1664,11 @@ impl<M: MeshTopology> HDivSpace<M> {
             "HDivSpace::dof_nodal_coords: the integrated-GLL quad variant's \
              DOFs are sub-cell flux integrals, not point samples (D588)"
         );
+        assert!(
+            !(self.quad_igll && self.elem_type == ElementType::Hex8),
+            "HDivSpace::dof_nodal_coords: the integrated-GLL hex variant's \
+             DOFs are sub-cell flux integrals, not point samples (D591)"
+        );
         let k = self.order as usize;
         let dim = self.mesh.dim() as usize;
         let mut out = vec![[0.0f64; 3]; self.n_dofs()];
@@ -1845,6 +1859,51 @@ impl<M: MeshTopology> HDivSpace<M> {
                         ];
                         let fv = f(&[px, py]);
                         val += w * (fv[0] * adj_n[0] + fv[1] * adj_n[1]);
+                    }
+                    r[dofs[i] as usize] = signs[i] * val;
+                }
+            }
+            return result;
+        }
+
+        // (GaussLobatto, IntegratedGLL) hex variant (D591): MFEM
+        // `RT_HexahedronElement::Project` dispatches to `ProjectIntegrated`
+        // for the integrated type (`fe_rt.hpp:126-131`), so every DOF is the
+        // sub-cell normal-flux integral `Σ w·f(x(ξ))·(adj(J)·t)` over its GLL
+        // sub-cell face — the round-58 pinned consumption contract of
+        // `HexRTk::integrated_functionals` (D577: through the `[-1,1]` map
+        // `adj(J_ξ) = adj(J_mfem)/4` pointwise against the 4× larger `[-1,1]`
+        // sub-cell quadrature weights, so the sum reproduces MFEM's DOF value
+        // exactly; no frame factor enters the DOF value — the standing
+        // `V_mfem/16` reference-basis frame debt lives in field *evaluation*,
+        // not here).
+        if self.quad_igll && self.elem_type == ElementType::Hex8 {
+            let el = HexRTk::new(self.order as usize);
+            let functionals = el.integrated_functionals();
+            let r = result.as_slice_mut();
+            for e in 0..self.mesh.n_elements() as u32 {
+                let nodes = self.mesh.element_nodes(e);
+                let c: Vec<[f64; 3]> = nodes
+                    .iter()
+                    .map(|&nd| {
+                        let p = self.mesh.node_coords(nd);
+                        [p[0], p[1], p[2]]
+                    })
+                    .collect();
+                let dofs = self.element_dofs(e);
+                let signs = self.element_signs(e);
+                for (i, fi) in functionals.iter().enumerate() {
+                    let mut val = 0.0_f64;
+                    for &(xi, w) in &fi.samples {
+                        let (x, jac) = hex_map(&c, &xi);
+                        let cof = cof3(&jac);
+                        let fv = f(&x);
+                        for rr in 0..3 {
+                            val += w * fv[rr]
+                                * (cof[rr][0] * fi.t[0]
+                                    + cof[rr][1] * fi.t[1]
+                                    + cof[rr][2] * fi.t[2]);
+                        }
                     }
                     r[dofs[i] as usize] = signs[i] * val;
                 }

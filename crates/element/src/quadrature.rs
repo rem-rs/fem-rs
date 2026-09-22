@@ -839,9 +839,13 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
         // MFEM's shared 126-point rule for orders 21-25 (D578)
         mfem_tri_rule_21_25()
     } else {
-        // Fallback: Grundmann-Moller beyond MFEM's tabulated range
-        let s = ((order as u32).saturating_sub(1)) / 2;
-        grundmann_moller_simplex(2, s)
+        // Fallback: Grundmann-Moller beyond MFEM's tabulated range.  MFEM
+        // rounds up to the closest odd order `i = (order/2)*2 + 1` and uses
+        // GM level `s = i/2 = order/2` (D603) — even orders are served by the
+        // NEXT odd order's rule (order 26 -> s = 13, exact degree 27), not
+        // the previous one.
+        let i = (order as u32 / 2) * 2 + 1;
+        grundmann_moller_simplex(2, i / 2)
     }
 }
 
@@ -2565,7 +2569,27 @@ pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
 ///
 /// Index `s` gives a rule exact for degree `2s+1`.
 /// Weights sum to 1/d! (volume of the unit simplex).
+///
+/// 1:1 port of MFEM's `IntegrationRule::GrundmannMollerSimplexRule(s, n)`
+/// (`fem/intrules.cpp:117`, D603): level `i = 0..=s` carries the
+/// compositions `beta_0 + … + beta_d ≤ s-i` at barycentric coordinates
+/// `(2*beta_j + 1) / (2(s-i)+d+1)`, all with the level weight
+/// `w_i = ±2^{-2s}·m^{2s+1} / (i!·(2s+d+1-i)!)`, `m = 2(s-i)+d+1`,
+/// sign `(-1)^i` (the rule has negative weights for s ≥ 1).  D603 note:
+/// fem-rs used to fit the level weights by solving the GM moment system,
+/// which at s ≥ 13 (triangle orders ≥ 26) is numerically hopeless and
+/// diverged from MFEM's closed form by up to 2.3e5 relative; the closed
+/// form removes that failure mode.  Point enumeration differs from MFEM's
+/// beta-counter loop only in ORDER (first barycentric component slowest
+/// here vs beta[0] fastest there) — the point/weight multiset is identical.
 fn grundmann_moller_simplex(d: u32, s: u32) -> QuadratureRule {
+    // Factorials 0..=2s+d+1 (MFEM's `fact` vector, same product order).
+    let fmax = (2 * s + d + 1) as usize;
+    let mut fact = vec![1.0f64; fmax + 1];
+    for j in 1..=fmax {
+        fact[j] = fact[j - 1] * j as f64;
+    }
+
     // Generate point sets for each level i = 0..=s.
     let levels: Vec<Vec<Vec<f64>>> = (0..=s)
         .map(|i| {
@@ -2583,58 +2607,23 @@ fn grundmann_moller_simplex(d: u32, s: u32) -> QuadratureRule {
         })
         .collect();
 
-    // For each level i, all points share the same weight w_i.
-    // Compute sum of x₁^{2k} over all points at level i.
-    let n = (s + 1) as usize;
-    let level_sums: Vec<Vec<f64>> = (0..n)
+    // Per-level closed-form weights (MFEM's expression, same operation
+    // order): pow(2., -2s) * pow(m, 2s+1) / fact(i) / fact(2s+d+1-i),
+    // negated on odd levels.
+    let ws_per_level: Vec<f64> = (0..=s)
         .map(|i| {
-            (0..n)
-                .map(|k| {
-                    levels[i]
-                        .iter()
-                        .map(|p| p[0].powi((2 * k) as i32))
-                        .sum::<f64>()
-                })
-                .collect()
-        })
-        .collect();
-
-    // Exact integrals of x^{2k} over the unit simplex in d dimensions:
-    // (2k)! / (2k+d)!
-    let exact: Vec<f64> = (0..n)
-        .map(|k| {
-            let k2 = (2 * k) as u32;
-            fact_f64(k2) / fact_f64(k2 + d)
-        })
-        .collect();
-
-    // Solve the (s+1)×(s+1) linear system for per-level weights.
-    let mut mat: Vec<Vec<f64>> = (0..n)
-        .map(|k| {
-            let mut row: Vec<f64> = (0..n).map(|i| level_sums[i][k]).collect();
-            row.push(exact[k]);
-            row
-        })
-        .collect();
-    for col in 0..n {
-        let piv = (col..n)
-            .max_by(|&a, &b| mat[a][col].abs().partial_cmp(&mat[b][col].abs()).unwrap())
-            .unwrap();
-        mat.swap(col, piv);
-        let scale = mat[col][col];
-        for j in col..=n {
-            mat[col][j] /= scale;
-        }
-        for row in 0..n {
-            if row != col {
-                let f = mat[row][col];
-                for j in col..=n {
-                    mat[row][j] -= f * mat[col][j];
-                }
+            let m = (2 * (s - i) + d + 1) as f64;
+            let mut w = 2.0f64
+                .powf(-((2 * s) as f64))
+                * m.powf((2 * s + 1) as f64)
+                / fact[i as usize]
+                / fact[(2 * s + d + 1 - i) as usize];
+            if i % 2 == 1 {
+                w = -w;
             }
-        }
-    }
-    let ws_per_level: Vec<f64> = (0..n).map(|i| mat[i][n]).collect();
+            w
+        })
+        .collect();
 
     // Assemble the rule.
     let mut pts: Vec<Vec<f64>> = Vec::new();
@@ -3005,8 +2994,10 @@ fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
         // storage sequence.
         mfem_tri_rule_21_25()
     } else {
-        let s = ((order as u32).saturating_sub(1)) / 2;
-        grundmann_moller_simplex(2, s)
+        // MFEM's default branch: `i = (order/2)*2 + 1` (closest odd >= order),
+        // GM level `s = i/2` (D603).
+        let i = (order as u32 / 2) * 2 + 1;
+        grundmann_moller_simplex(2, i / 2)
     }
 }
 
