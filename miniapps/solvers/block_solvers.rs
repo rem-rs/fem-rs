@@ -42,7 +42,7 @@ use fem_element::reference::{ReferenceElement, VectorReferenceElement};
 use fem_linalg::{CooMatrix, CsrMatrix, PrintLevel, SolverConfig};
 use fem_mesh::transformation::geometry_jacobian;
 use fem_mesh::{refine_uniform, Mesh, MeshTopology};
-use fem_solver::darcy_solvers::{BdpMinresSolver, IterSolveParameters, SchurMode};
+use fem_solver::darcy_solvers::{BdpMinresSolver, DarcySolver, IterSolveParameters, SchurMode};
 use fem_solver::div_free_solver::{
     DfsData, DfsParameters, DivFreeSolver, Ql2Projector,
 };
@@ -186,7 +186,10 @@ fn main() {
             // scattered with Assembler::assemble_from_element_matrices —
             // the port of `qVarf.AssembleElementMatrix(i, Q_i, 1)`.
             let q_csr = assemble_element_q_csr(&u_sp, args.order, args.q_scaling);
-            let solver = BramblePasciakSolver::new(&m_csr, &b_csr, &q_csr, param, schur);
+            // D580: held and driven as a `DarcySolver` trait object — the
+            // serial-cut analogue of the C++ driver's `const DarcySolver*`.
+            let solver: Box<dyn DarcySolver> =
+                Box::new(BramblePasciakSolver::new(&m_csr, &b_csr, &q_csr, param, schur));
             let setup = start.elapsed().as_secs_f64();
             let start = Instant::now();
             solver.mult(&rhs, &mut x);
@@ -245,7 +248,10 @@ fn main() {
             println!("{line}");
             println!("Block-diagonal-preconditioned MINRES solver:");
             let start = Instant::now();
-            let solver = BdpMinresSolver::new(&m_csr, &b_csr, param, schur);
+            // D580: `Box<dyn DarcySolver>` trait-object drive (C++
+            // `const DarcySolver*`).
+            let solver: Box<dyn DarcySolver> =
+                Box::new(BdpMinresSolver::new(&m_csr, &b_csr, param, schur));
             let setup = start.elapsed().as_secs_f64();
             let start = Instant::now();
             solver.mult(&rhs, &mut x);
@@ -306,13 +312,18 @@ fn main() {
                 let dim_ker = dfs_data.c.last().map(|c| c.ncols).unwrap_or(0);
                 println!("Dimension of the divergence free subspace: {dim_ker}");
             }
-            let solver = DivFreeSolver::new(&m_csr, &b_csr, &dfs_data);
+            // D580: `Box<dyn DarcySolver>` trait-object drive (C++
+            // `const DarcySolver*`); the FGMRES preconditioner borrows the
+            // trait object (`Send + Sync` for the linlvo preconditioner
+            // bound).
+            let solver: Box<dyn DarcySolver + Send + Sync> =
+                Box::new(DivFreeSolver::new(&m_csr, &b_csr, &dfs_data));
             let setup = start.elapsed().as_secs_f64();
             let start = Instant::now();
             // C++ applies the DFS Mult once as the solver; to reach the same
             // discrete-solution accuracy as the other solvers we run FGMRES
             // with the DFS application as (variable) preconditioner.
-            let precond = DfsPreconditioner { dfs: &solver, n };
+            let precond = DfsPreconditioner { dfs: solver.as_ref(), n };
             let res = fem_solver::solve_fgmres_precond(
                 &flat,
                 &rhs,
@@ -355,8 +366,11 @@ fn main() {
 /// linlvo `Preconditioner` adapter around one [`DivFreeSolver`] application
 /// (always started from a zero iterate — a true fixed linear-in/linear-out
 /// operator application, as a Krylov preconditioner requires).
+/// `linlvo::Preconditioner` requires `Send + Sync`, so the borrowed trait
+/// object carries the auto traits (all three block solvers are plain
+/// data + atomics, i.e. `Send + Sync`).
 struct DfsPreconditioner<'a> {
-    dfs: &'a DivFreeSolver,
+    dfs: &'a (dyn DarcySolver + Send + Sync),
     n: usize,
 }
 

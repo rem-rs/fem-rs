@@ -15,11 +15,22 @@
 //! **40188/40188 points bit-identical** (glibc libm truth vs msvcrt run),
 //! including every weight of every qt family.  The fixture holds
 //! qt = 0..4 x order = 0..=10 plus qt = 0 x order = 20.
+//!
+//! D578 extension: the MFEM tri order 21-25 shared 126-point rule is ported
+//! (`tri_rule`/`tri_rule_mfem_order` dispatch to it), so `prism_rule_qt`'s
+//! triangle factor no longer falls back to Grundmann-Moeller on 21..=25.
+//! The extension fixture `data/d372_prism_qt_mfem_o2125.txt` (probe
+//! `tmp/d580/probe/probe_prism_qt_2125.cpp`, `$HOME/mfem410_ser` tree)
+//! pins qt = 0..4 x order = 21..=25 — **60228/60228 points bit-identical,
+//! zero tolerance** (measured; see tmp/d580/EVIDENCE.md).
 
 use fem_element::quadrature::{prism_rule_qt, Quadrature1DType};
 use fem_element::reference::QuadratureRule;
 
 const MFEM_TRUTH: &str = include_str!("data/d372_prism_qt_mfem.txt");
+
+/// D578 extension grid: qt = 0..4 x order = 21..=25.
+const MFEM_TRUTH_O21_25: &str = include_str!("data/d372_prism_qt_mfem_o2125.txt");
 
 fn qt_from_index(i: usize) -> Quadrature1DType {
     match i {
@@ -54,12 +65,15 @@ fn check_rule(qt: usize, order: usize, pts: &[(f64, f64, f64, f64)]) {
     }
 }
 
-#[test]
-fn d372_prism_qt_matches_mfem_410_bitwise() {
-    let mut rules = 0;
+/// Parse a "qt order npoints" + "x y z w" fixture, checking every block via
+/// [`check_rule`]; returns the number of blocks (qt, order) checked and the
+/// total number of points compared.
+fn check_fixture(text: &str) -> (usize, usize) {
+    let mut rules = 0usize;
+    let mut points = 0usize;
     let mut cur: Option<(usize, usize)> = None;
     let mut buf: Vec<(f64, f64, f64, f64)> = Vec::new();
-    for line in MFEM_TRUTH.lines() {
+    for line in text.lines() {
         let p: Vec<f64> = line
             .split_whitespace()
             .map(|t| t.parse::<f64>().unwrap())
@@ -67,6 +81,8 @@ fn d372_prism_qt_matches_mfem_410_bitwise() {
         if p.len() == 3 {
             if let Some((qt, order)) = cur.take() {
                 check_rule(qt, order, &buf);
+                points += buf.len();
+                rules += 1;
                 buf = Vec::new();
             }
             cur = Some((p[0] as usize, p[1] as usize));
@@ -76,9 +92,28 @@ fn d372_prism_qt_matches_mfem_410_bitwise() {
     }
     if let Some((qt, order)) = cur.take() {
         check_rule(qt, order, &buf);
+        points += buf.len();
+        rules += 1;
     }
-    rules += 1; // count the family, not just the last rule
-    assert!(rules >= 1);
+    (rules, points)
+}
+
+#[test]
+fn d372_prism_qt_matches_mfem_410_bitwise() {
+    let (rules, points) = check_fixture(MFEM_TRUTH);
+    assert!(rules >= 12, "fixture grid size: {rules} rules");
+    assert!(points >= 40188 / 40, "fixture point count: {points}");
+}
+
+/// D578 extension: orders 21..=25 — the shared 126-point triangle rule now
+/// feeds the prism tri factor, so the whole qt grid stays bit-identical to
+/// `IntegrationRules(qt).Get(PRISM, order)` where the old code fell back to
+/// Grundmann-Möller.
+#[test]
+fn d372_prism_qt_matches_mfem_410_bitwise_o21_25() {
+    let (rules, points) = check_fixture(MFEM_TRUTH_O21_25);
+    assert_eq!(rules, 25, "qt = 0..4 x order = 21..=25");
+    assert_eq!(points, 60_228, "extension grid point count");
 }
 
 #[test]

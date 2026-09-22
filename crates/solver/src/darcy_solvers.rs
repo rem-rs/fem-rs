@@ -58,11 +58,14 @@ fn check_options(param: &IterSolveParameters) {
 ///
 /// The C++ base stores `offsets_ = {0, size0, height}` and declares
 /// `GetNumIterations()`; `Mult` arrives from the `Solver` base, and `height`
-/// is `offsets()[2]`.  Deliberately minimal: the ess-dof and convergence
-/// bookkeeping is NOT part of the C++ base either — BDP/BP zero ess dofs
-/// after the solve and expose `converged()`; DFS takes its ess dofs through
-/// [`crate::div_free_solver::DfsData`] — so those remain on the inherent
-/// types.
+/// is `offsets()[2]`.  Deliberately minimal: the ess-dof bookkeeping is NOT
+/// part of the C++ base either — BDP/BP zero ess dofs after the solve; DFS
+/// takes its ess dofs through [`crate::div_free_solver::DfsData`] — so those
+/// remain on the inherent types.  The one serial-cut extension is
+/// [`DarcySolver::converged`]: the C++ driver holds the solvers as
+/// `const DarcySolver*` and never reports stalls, while the serial cut does;
+/// the default `true` keeps the base-class "no stall" semantics for solvers
+/// that do not track convergence.
 pub trait DarcySolver {
     /// MFEM `Solver::Mult`: `y ← solve(x)`.
     fn mult(&self, x: &[f64], y: &mut [f64]);
@@ -73,6 +76,14 @@ pub trait DarcySolver {
     /// MFEM `Solver::height` — `offsets()[2]`.
     fn size(&self) -> usize {
         self.offsets()[2]
+    }
+    /// Whether the last `mult` met the stopping criterion (D580: the
+    /// `block_solvers` driver drives the solvers through `Box<dyn
+    /// DarcySolver>` and still reports non-convergence like the inherent
+    /// path).  C++ has no such base accessor; the default `true` mirrors
+    /// that — only the solvers that track the flag override it.
+    fn converged(&self) -> bool {
+        true
     }
 }
 
@@ -506,6 +517,9 @@ impl DarcySolver for BdpMinresSolver {
     }
     fn offsets(&self) -> [usize; 3] {
         BdpMinresSolver::offsets(self)
+    }
+    fn converged(&self) -> bool {
+        BdpMinresSolver::converged(self)
     }
 }
 

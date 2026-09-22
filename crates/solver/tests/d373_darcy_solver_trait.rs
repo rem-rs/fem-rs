@@ -114,18 +114,67 @@ fn d373_all_three_solvers_behind_dyn_darcy_solver() {
     }
 }
 
+/// One full solve through the **inherent** methods (concrete-type method
+/// resolution takes the inherent path) — `(solution, iterations, offsets,
+/// converged)`.
+fn inherent_bits<S: DarcySolver>(solver: &S, rhs: &[f64]) -> (Vec<f64>, usize, [usize; 3], bool) {
+    let mut x = vec![0.0; rhs.len()];
+    solver.mult(rhs, &mut x);
+    (x, solver.num_iterations(), solver.offsets(), solver.converged())
+}
+
 #[test]
 fn d373_trait_matches_inherent_results_bitwise() {
+    // D580: the trait/inherent bit-consistency assertion covers ALL THREE
+    // solvers (the block_solvers driver arms: BDP / BP / DFS), since the
+    // driver now holds each of them as `Box<dyn DarcySolver>`.
     let (m, b) = saddle_data(6, 3);
     let rhs = vec![1.0; 9];
-    let solver = BdpMinresSolver::new(&m, &b, IterSolveParameters::default(), SchurMode::Dense);
-    let dyn_view: &dyn DarcySolver = &solver;
 
-    let mut via_inherent = vec![0.0; 9];
-    solver.mult(&rhs, &mut via_inherent);
-    let mut via_trait = vec![0.0; 9];
-    dyn_view.mult(&rhs, &mut via_trait);
-    assert_eq!(via_inherent, via_trait);
-    assert_eq!(solver.num_iterations(), dyn_view.num_iterations());
-    assert_eq!(solver.offsets(), dyn_view.offsets());
+    let bdp = BdpMinresSolver::new(&m, &b, IterSolveParameters::default(), SchurMode::Dense);
+    let bp = {
+        let mut coo_q = CooMatrix::<f64>::new(6, 6);
+        for i in 0..6 {
+            coo_q.add(i, i, 0.5 * m.get(i, i));
+        }
+        let q = coo_q.into_csr();
+        BramblePasciakSolver::new(
+            &m,
+            &b,
+            &q,
+            BpsParameters {
+                iter: IterSolveParameters::default(),
+                use_bpcg: true,
+                q_scaling: 0.5,
+            },
+            SchurMode::Dense,
+        )
+    };
+    let dfs = DivFreeSolver::new(
+        &m,
+        &b,
+        &DfsData::single_level(DfsParameters {
+            coarse_schur_mode: SchurMode::Dense,
+            ..DfsParameters::default()
+        }),
+    );
+
+    let inherent: [(Vec<f64>, usize, [usize; 3], bool); 3] = [
+        inherent_bits(&bdp, &rhs),
+        inherent_bits(&bp, &rhs),
+        inherent_bits(&dfs, &rhs),
+    ];
+    let dyn_views: [&dyn DarcySolver; 3] = [&bdp, &bp, &dfs];
+    for (k, dyn_view) in dyn_views.iter().enumerate() {
+        let (x, iters, offsets, converged) = &inherent[k];
+        // Fresh solve through the trait object (each mult restarts from a
+        // zero iterate, so the second run is a bit-copy of the first).
+        let mut via_trait = vec![0.0; rhs.len()];
+        dyn_view.mult(&rhs, &mut via_trait);
+        assert_eq!(x, &via_trait, "solver {k}: solution bits");
+        assert_eq!(*iters, dyn_view.num_iterations(), "solver {k}: iteration count");
+        assert_eq!(*offsets, dyn_view.offsets(), "solver {k}: offsets");
+        assert_eq!(offsets[2], dyn_view.size(), "solver {k}: height");
+        assert_eq!(*converged, dyn_view.converged(), "solver {k}: converged");
+    }
 }

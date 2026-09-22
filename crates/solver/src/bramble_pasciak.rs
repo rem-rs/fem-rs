@@ -476,6 +476,9 @@ impl DarcySolver for BramblePasciakSolver {
     fn offsets(&self) -> [usize; 3] {
         BramblePasciakSolver::offsets(self)
     }
+    fn converged(&self) -> bool {
+        BramblePasciakSolver::converged(self)
+    }
 }
 
 #[cfg(test)]

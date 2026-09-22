@@ -813,7 +813,8 @@ pub fn seg_rule(order: u8) -> QuadratureRule {
 /// Quadrature rule on the reference triangle `(0,0),(1,0),(0,1)`.
 ///
 /// Uses Witherden-Vincent symmetric positive-weight rules (MFEM 4.10+)
-/// for orders 0-20, falling back to Grundmann-Moller for higher orders.
+/// for orders 0-20, MFEM's shared 126-point rule for orders 21-25 (D578),
+/// falling back to Grundmann-Moller beyond MFEM's tabulated range.
 ///
 /// Weights sum to 0.5 (area of reference triangle).
 pub fn tri_rule(order: u8) -> QuadratureRule {
@@ -834,8 +835,11 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
     } else if order <= 20 {
         // Witherden-Vincent rules (MFEM 4.10, positive weights, interior points)
         wv_tri_rule(order)
+    } else if order <= 25 {
+        // MFEM's shared 126-point rule for orders 21-25 (D578)
+        mfem_tri_rule_21_25()
     } else {
-        // Fallback: Grundmann-Moller for very high orders
+        // Fallback: Grundmann-Moller beyond MFEM's tabulated range
         let s = ((order as u32).saturating_sub(1)) / 2;
         grundmann_moller_simplex(2, s)
     }
@@ -852,6 +856,96 @@ pub fn tri_rule(order: u8) -> QuadratureRule {
 fn wv_tri_rule(order: u8) -> QuadratureRule {
     let (centroid, s21, s111) = wv_tri_params(order);
     build_wv_tri(centroid, &s21, &s111, WvTriOrbitOrder::Historical)
+}
+
+/// MFEM `IntegrationRules::TriangleIntegrationRule` orders 21-25 (D578): the
+/// single shared 126-point rule of `fem/intrules.cpp` case `21: 22: 23: 24:
+/// 25:` (`SetOrder(25)`, positive weights, interior points).
+///
+/// Ported 1:1 — every numeric literal is the verbatim source literal and the
+/// orbit generators are the exact `intrules.hpp` helpers:
+/// * `AddTriPoints3b(off, b, w)`: `a = (1.-b)/2.`, orbit `(a,a),(a,b),(b,a)`
+///   (the orbit's second coordinate is the literal `b`, not `1.-2.*a` — the
+///   two can differ by an ulp, so the 3b variant must NOT go through the
+///   `build_wv_tri` S21 path);
+/// * `AddTriPoints3(off, a, w)`: `b = 1.-2.*a`, orbit `(a,a),(a,b),(b,a)`;
+/// * `AddTriPoints6(off, a, b, w)`: `c = 1.-a-b`, orbit
+///   `(a,b),(b,a),(a,c),(c,a),(b,c),(c,b)`.
+///
+/// The storage sequence is MFEM's; there is no historical fem-rs sequence for
+/// these orders (they used to fall through to Grundmann-Moller), so this one
+/// function serves both [`tri_rule`] and [`tri_rule_mfem_order`] — and thus
+/// [`prism_rule_qt`]'s triangle factor at orders 21-25.
+fn mfem_tri_rule_21_25() -> QuadratureRule {
+    const N: usize = 126;
+    let mut points: Vec<Vec<f64>> = Vec::with_capacity(N);
+    let mut weights: Vec<f64> = Vec::with_capacity(N);
+
+    // fem/intrules.cpp, case 21: 22: 23: 24: 25: — verbatim table.
+    // `AddTriPoints3b(0/3/6, b, w)`.
+    add_tri_points_3b(&mut points, &mut weights, 0.0279464830731742, 0.0040027909400102085);
+    add_tri_points_3b(&mut points, &mut weights, 0.131178601327651467, 0.00797353841619525);
+    add_tri_points_3b(&mut points, &mut weights, 0.220221729512072267, 0.006554570615397765);
+    // `AddTriPoints3(9..27, a, w)`.
+    add_tri_points_3(&mut points, &mut weights, 0.298443234019804467, 0.00979150048281781);
+    add_tri_points_3(&mut points, &mut weights, 0.2340441723373718, 0.008235442720768635);
+    add_tri_points_3(&mut points, &mut weights, 0.151468334609017567, 0.00427363953704605);
+    add_tri_points_3(&mut points, &mut weights, 0.112733893545993667, 0.004080942928613246);
+    add_tri_points_3(&mut points, &mut weights, 0.0777156920915263, 0.0030605732699918895);
+    add_tri_points_3(&mut points, &mut weights, 0.034893093614297, 0.0014542491324683325);
+    add_tri_points_3(&mut points, &mut weights, 0.00725818462093236667, 0.00034613762283099815);
+    // `AddTriPoints6(30..120, a, b, w)`.
+    add_tri_points_6(&mut points, &mut weights, 0.0012923527044422, 0.227214452153364077, 0.0006241445996386985);
+    add_tri_points_6(&mut points, &mut weights, 0.0053997012721162, 0.435010554853571706, 0.001702376454401511);
+    add_tri_points_6(&mut points, &mut weights, 0.006384003033975, 0.320309599272204437, 0.0016798271630320255);
+    add_tri_points_6(&mut points, &mut weights, 0.00502821150199306667, 0.0917503222800051889, 0.000858078269748377);
+    add_tri_points_6(&mut points, &mut weights, 0.00682675862178186667, 0.0380108358587243835, 0.000740428158357803);
+    add_tri_points_6(&mut points, &mut weights, 0.0100161996399295333, 0.157425218485311668, 0.0017556563053643425);
+    add_tri_points_6(&mut points, &mut weights, 0.02575781317339, 0.239889659778533193, 0.003696775074853242);
+    add_tri_points_6(&mut points, &mut weights, 0.0302278981199158, 0.361943118126060531, 0.003991543738688279);
+    add_tri_points_6(&mut points, &mut weights, 0.0305049901071620667, 0.0835519609548285602, 0.0021779813065790205);
+    add_tri_points_6(&mut points, &mut weights, 0.0459565473625693333, 0.148443220732418205, 0.003682528350708916);
+    add_tri_points_6(&mut points, &mut weights, 0.0674428005402775333, 0.283739708727534955, 0.005481786423209775);
+    add_tri_points_6(&mut points, &mut weights, 0.0700450914159106, 0.406899375118787573, 0.00587498087177056);
+    add_tri_points_6(&mut points, &mut weights, 0.0839115246401166, 0.194113987024892542, 0.005007800356899285);
+    add_tri_points_6(&mut points, &mut weights, 0.120375535677152667, 0.32413434700070316, 0.00665482039381434);
+    add_tri_points_6(&mut points, &mut weights, 0.148066899157366667, 0.229277483555980969, 0.00707722325261307);
+    add_tri_points_6(&mut points, &mut weights, 0.191771865867325067, 0.325618122595983752, 0.007440689780584005);
+
+    debug_assert_eq!(points.len(), N);
+    debug_assert_eq!(weights.len(), N);
+    QuadratureRule { points, weights }
+}
+
+/// `IntegrationRule::AddTriPoints3b(off, b, w)` (`fem/intrules.hpp:127`):
+/// `AddTriPoints3(off, (1.-b)/2., b, w)` — orbit `(a,a),(a,b),(b,a)` with the
+/// literal `b` as the second orbit coordinate.
+fn add_tri_points_3b(points: &mut Vec<Vec<f64>>, weights: &mut Vec<f64>, b: f64, w: f64) {
+    let a = (1.0 - b) / 2.0;
+    points.push(vec![a, a]);
+    points.push(vec![a, b]);
+    points.push(vec![b, a]);
+    weights.extend(std::iter::repeat(w).take(3));
+}
+
+/// `IntegrationRule::AddTriPoints3(off, a, w)` (`fem/intrules.hpp:118`):
+/// orbit `(a,a),(a,b),(b,a)` with `b = 1.-2.*a`.
+fn add_tri_points_3(points: &mut Vec<Vec<f64>>, weights: &mut Vec<f64>, a: f64, w: f64) {
+    let b = 1.0 - 2.0 * a;
+    points.push(vec![a, a]);
+    points.push(vec![a, b]);
+    points.push(vec![b, a]);
+    weights.extend(std::iter::repeat(w).take(3));
+}
+
+/// `IntegrationRule::AddTriPoints6(off, a, b, w)` (`fem/intrules.hpp:131`):
+/// the six permutations of `(a, b, 1.-a-b)`.
+fn add_tri_points_6(points: &mut Vec<Vec<f64>>, weights: &mut Vec<f64>, a: f64, b: f64, w: f64) {
+    let c = 1.0 - a - b;
+    for &(x, y) in &[(a, b), (b, a), (a, c), (c, a), (b, c), (c, b)] {
+        points.push(vec![x, y]);
+        weights.push(w);
+    }
 }
 
 /// Orbit ordering of the Witherden-Vincent triangle rule builder.  The rule
@@ -2456,8 +2550,9 @@ pub fn hex_rule(order: u8) -> QuadratureRule {
 /// Uses Grundmann-Moller rules which work for any polynomial degree.
 /// Weights sum to 0.5 (area of reference triangle).
 pub fn tri_rule_arbitrary(order: u8) -> QuadratureRule {
-    // Delegate to tri_rule which uses WV rules for orders 0-20,
-    // and Grundmann-Moller fallback for higher orders.
+    // Delegate to tri_rule which uses WV rules for orders 0-20, MFEM's
+    // shared 126-point rule for orders 21-25 (D578), and the
+    // Grundmann-Moller fallback beyond MFEM's tabulated range.
     tri_rule(order)
 }
 
@@ -2884,9 +2979,9 @@ pub fn prism_rule(order: u8) -> QuadratureRule {
 /// The triangle factor of [`prism_rule_qt`]: the quad_type-independent
 /// `IntegrationRules::TriangleIntegrationRule` in MFEM's exact storage
 /// sequence (orbit order `AddTriPoints3`/`AddTriPoints6`; orders 0/1/2 are
-/// MFEM's inline branches).  Orders above 20 fall back to Grundmann-Möller
-/// exactly like [`tri_rule`] (MFEM has 126-point rules for 21-25; porting
-/// those tables is outstanding debt).
+/// MFEM's inline branches).  Orders 21-25 are MFEM's shared 126-point rule
+/// (D578); orders above 25 fall back to Grundmann-Möller exactly like
+/// [`tri_rule`] (MFEM's default branch).
 fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
     if order <= 1 {
         QuadratureRule {
@@ -2905,6 +3000,10 @@ fn tri_rule_mfem_order(order: u8) -> QuadratureRule {
     } else if order <= 20 {
         let (centroid, s21, s111) = wv_tri_params(order);
         build_wv_tri(centroid, &s21, &s111, WvTriOrbitOrder::Mfem)
+    } else if order <= 25 {
+        // MFEM's shared 126-point rule for orders 21-25 (D578), MFEM
+        // storage sequence.
+        mfem_tri_rule_21_25()
     } else {
         let s = ((order as u32).saturating_sub(1)) / 2;
         grundmann_moller_simplex(2, s)
