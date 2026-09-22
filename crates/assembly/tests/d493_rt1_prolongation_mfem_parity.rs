@@ -589,8 +589,15 @@ fn assert_matches_mfem_pyramid(
 /// D493 (round 55) + D534/D535 (round 56): pyramid RT0 prolongation against
 /// the **corrected** MFEM oracle.
 ///
-/// The oracle (`tmp/d493/d493_pyramid_o0_fixed.txt`, probe
-/// `tmp/d493/probe_fixed.cpp`) assembles the operator MFEM *would* produce:
+/// The oracle truth table (`tmp/d493/pyramid_o0_fixed_truth.rs`) was
+/// regenerated in D572 by `tmp/d572/gen_truth_rt03d.py` from probe
+/// `tmp/d572/d572_probe_pyr_o0_rt03d.cpp` in the D572-adjudicated per-family
+/// convention (pyramid = generic-collection `RT_FuentesPyramidElement(0)`
+/// rows, tet children = `RT0TetFiniteElement`'s `n̂|F|` functionals via the
+/// RT0Tet-nk shim) — bitwise identical to the round-55 `probe_fixed.cpp`
+/// dump that round 57 re-pinned by hand (85/85 rows unchanged, tet rows
+/// carry the ½-scaled values).  It assembles the operator MFEM *would*
+/// produce:
 /// per child `LocalInterpolation_RT` with the **parent's** element
 /// (`GetLocalInterpolation` for the 6 pyramid children — the call MFEM's own
 /// assembly makes — and `GetTransferMatrix` across the 4 tetrahedron
@@ -750,28 +757,35 @@ fn d493_pyramid_mfem_shipped_p_diverges_only_on_tet_children() {
 }
 
 /// fem-rs's pyramid RT0 prolongation, structurally complete and
-/// convention-consistent on every dof the pyramid elements own (D534/D535).
+/// convention-exact on every fine dof (D534/D535; re-pinned by the D572
+/// adjudication).
 ///
 /// The exact path serves a pyramid mesh (the 6 pyramid children through
 /// their own geometry, the 4 tets through the parent pyramid's element —
 /// D493), so the operator is complete: every fine dof has a row (the legacy
 /// builder left 13 of the 33 rows empty, i.e. those fine dofs were silently
-/// zeroed on transfer).  With the D534 Fuentes basis (MFEM's space, point
-/// dual) and the D535 `Project_RT` dof values, `interpolate_vector` reproduces
-/// MFEM `ProjectCoefficient` **bitwise** on the coarse pyramid and — since the
-/// D540 tet convention flip — on ALL 33 fine dofs (probe XF truth,
-/// `tmp/d493/d493_pyramid_o0_fixed.txt`).  Pre-D540 the 16 pyramid↔tet shared
-/// face dofs (written LAST by the tet element) stored half the MFEM flux
-/// sample: fem-rs's tet RT0 element carried the moment dual (`W = 2I`) while
-/// the pyramid is nodal (`W = I`), which kept the constant-field residual at
-/// 1.8e-1 with the residual sitting exclusively on the 16 tet-written dofs at
-/// exactly 0.5·MFEM (the D543 lesion this test used to pin).  The D540 flip
-/// made `TetRTk` MFEM's nodal `RT_TetrahedronElement` (W = I on every tet
-/// order), so the whole residual is now machine-exact — this test pins that
-/// on every dof, with the pyramid/tet writer split kept as evidence
-/// granularity.
+/// zeroed on transfer).
+///
+/// D572 adjudication (`tmp/d572/adjudication.md`): fem-rs keeps the pyramid
+/// on MFEM's generic-collection `RT_FuentesPyramidElement(0)` (bitwise pin,
+/// D534) and the tet on `RT0TetFiniteElement`'s `n̂|F|` duals (D560).  Those
+/// are *different* face functionals on shared pyramid↔tet faces — the
+/// Fuentes side samples `f·adj(J)·2n̂|F|`, the RT0Tet side `f·adj(J)·n̂|F|`
+/// — and MFEM's own `RT0_3DFECollection` is no better: probe
+/// `tmp/d572/d572_probe_pyr_o0_rt03d.cpp` measures
+/// `max|P·x_c − x_f| = 0.54375` for ITS hierarchy with its own projections
+/// (RT0Pyr(true) keeps the Fuentes `nk`, so the split survives there too;
+/// only the class comment claims otherwise).  Within any single collection
+/// the shared-face dofs are written by whichever element comes last, so a
+/// mixed hierarchy carries the split in its gridfunction; this test pins
+/// fem-rs's exact value of that behaviour:
+///
+/// * pyramid-only dofs prolong exactly (`≤ 1e-13`; measured 5.6e-17),
+/// * the 12 pyramid↔tet shared faces store exactly half the
+///   Fuentes-convention prolongation: `P·x_c = 2·x_f` (measured 4.2e-17
+///   against the 2x form; 1.813e-1 against the naive equality), and
+/// * the 4 tet↔tet faces prolong exactly (0.0) — single-convention.
 #[test]
-#[ignore = "D572: after the D560/D571 RT0_3D re-normalization the exact-path P rows are scale-invariant (b_row and W both halve) while interpolate_vector's tet dofs halved, so this self-consistency pin reads 1.813e-1 on the 16 tet-written dofs.  Resolving it = the D572 collection-alignment adjudication (per-family nk normalization: tet now RT0_3D, pyramid Fuentes, prism generic -- D572/D573 in round3_plan round 57); recipe and evidence in tmp/d560/trace.md"]
 fn d493_pyramid_rt0_exact_path_serves_every_fine_dof() {
     let coarse_mesh = mfem_pyramid_mesh();
     let fine_mesh = fem_mesh::refine_uniform_3d(&coarse_mesh);
@@ -786,44 +800,77 @@ fn d493_pyramid_rt0_exact_path_serves_every_fine_dof() {
     let x_f = fine_space.interpolate_vector(&|_| c3.to_vec());
     let mut y = vec![0.0_f64; fine_space.n_dofs()];
     p.spmv(x_c.as_slice(), &mut y);
-    // dofs a tet element writes (the D543/D540 lesion carriers, now healed)
-    let mut tet_owned = vec![false; 33];
+    // Ownership split of the fine dofs.  The pyramid↔tet shared faces carry
+    // BOTH conventions (the exact path's first-touch writer is a pyramid
+    // child — Fuentes rows; the engine's last writer is a tet — RT0Tet
+    // values, exactly half the Fuentes functional on the same face).  A
+    // tet↔tet shared dof is single-convention (RT0Tet rows, RT0Tet stored
+    // values), so it must prolong exactly like the pyramid-owned dofs.
+    const PYR: u8 = 1;
+    const TET: u8 = 2;
+    let mut owned = vec![0u8; 33];
     for e in 0..fine_mesh.n_elements() as u32 {
-        if fine_mesh.element_type(e) == ElementType::Tet4 {
-            for &d in fine_space.element_dofs(e) {
-                tet_owned[d as usize] = true;
+        let bit = match fine_mesh.element_type(e) {
+            ElementType::Pyramid5 => PYR,
+            ElementType::Tet4 => TET,
+            other => panic!("unexpected fine element {other:?}"),
+        };
+        for &d in fine_space.element_dofs(e) {
+            owned[d as usize] |= bit;
+        }
+    }
+    let (mut pyr_res, mut split_res, mut tet_res) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut n_pyr, mut n_split, mut n_tettet) = (0usize, 0usize, 0usize);
+    for i in 0..fine_space.n_dofs() {
+        match owned[i] {
+            TET => {
+                // tet↔tet face: single convention, must prolong exactly
+                tet_res = tet_res.max((y[i] - x_f.as_slice()[i]).abs());
+                n_tettet += 1;
+            }
+            _ => {
+                if owned[i] & PYR != 0 {
+                    if owned[i] & TET != 0 {
+                        // pyramid↔tet face: Fuentes functional = 2 x RT0Tet
+                        split_res = split_res.max((y[i] - 2.0 * x_f.as_slice()[i]).abs());
+                        n_split += 1;
+                    } else {
+                        pyr_res = pyr_res.max((y[i] - x_f.as_slice()[i]).abs());
+                        n_pyr += 1;
+                    }
+                } else {
+                    panic!("dof {i} owned by nobody");
+                }
             }
         }
     }
-    let (mut pyr_res, mut tet_res) = (0.0_f64, 0.0_f64);
-    let mut n_pyr = 0usize;
-    let mut n_tet = 0usize;
-    for i in 0..fine_space.n_dofs() {
-        let r = (y[i] - x_f.as_slice()[i]).abs();
-        if tet_owned[i] {
-            tet_res = tet_res.max(r);
-            n_tet += 1;
-        } else {
-            pyr_res = pyr_res.max(r);
-            n_pyr += 1;
-        }
-    }
     assert_eq!(
-        n_pyr + n_tet,
+        n_pyr + n_split + n_tettet,
         fine_space.n_dofs(),
-        "every fine dof is either pyramid- or tet-written"
+        "every fine dof is pyramid-owned, tet-owned or both"
+    );
+    assert_eq!(
+        n_split + n_tettet,
+        16,
+        "the 16 tet-written dofs split into pyramid↔tet and tet↔tet faces"
     );
     eprintln!(
-        "pyramid RT0 constant field (post-D540): {n_pyr} pyramid-owned dofs residual \
-         {pyr_res:.3e}; {n_tet} tet-written dofs residual {tet_res:.3e} — all machine-exact"
+        "pyramid RT0 constant field (D572): {n_pyr} pyramid-only dofs residual {pyr_res:.3e}; \
+         {n_split} pyramid↔tet shared dofs residual-vs-2x {split_res:.3e}; \
+         {n_tettet} tet↔tet dofs residual {tet_res:.3e}"
     );
     assert!(
         pyr_res <= 1e-13,
-        "pyramid-owned dofs must prolong exactly, got {pyr_res:.3e}"
+        "pyramid-only dofs must prolong exactly, got {pyr_res:.3e}"
+    );
+    assert!(
+        split_res <= 1e-13,
+        "pyramid↔tet shared dofs must store exactly half the Fuentes-convention \
+         prolongation (P·x_c = 2·x_f), got {split_res:.3e}"
     );
     assert!(
         tet_res <= 1e-13,
-        "tet-written dofs must prolong exactly at the D540 MFEM convention, got {tet_res:.3e}"
+        "tet↔tet dofs must prolong exactly, got {tet_res:.3e}"
     );
 }
 

@@ -1,4 +1,14 @@
-/// Generated from tmp/d493/d493_pyramid_o0_fixed.txt by tmp/d493/gen_truth.py — do not edit.
+/// Generated from tmp/d572/d493_pyramid_o0_rt03d.txt by
+/// tmp/d572/gen_truth_rt03d.py — do not edit.
+/// D572 (round 58): corrected pyramid RT0 prolongation oracle in fem-rs's
+/// adjudicated per-family convention (probe
+/// tmp/d572/d572_probe_pyr_o0_rt03d.cpp): pyramid children = the generic
+/// collection's RT_FuentesPyramidElement(0) (identical rows to the
+/// round-55 probe_fixed.cpp), tet children = a generic
+/// RT_TetrahedronElement(0) shim carrying RT0TetFiniteElement's
+/// nk = n_hat|F| (fe_fixed_order.cpp:6298) — i.e. the tet rows are
+/// exactly 1/2 of the round-55 full-nk rows, matching the D560 fem-rs
+/// duals.  Measured: bitwise identical to round 57's hand re-pin.
 /// Rows: [sorted fine face vertex coords, sorted coarse face vertex
 /// coords, P value] — the variable-length face-key join form.
 pub(crate) static MFEM_PYRAMID_O0_FIXED: &[&[f64]] = &[

@@ -1,5 +1,6 @@
 //! Raviart-Thomas H(div) element on the reference prism — MFEM
-//! `RT_WedgeElement(p)` alignment (D444/D436).
+//! `RT_WedgeElement(p)` slot layout (D444/D436) with the k = 0 basis
+//! normalized to `RT0WdgFiniteElement` (D572 — see *DOF functionals*).
 //!
 //! Reference prism (MFEM `Geometry::PRISM` vertices, fem-rs axes): bottom
 //! tri {0,1,2} at `xi = 0`, top tri {3,4,5} at `xi = 1`; the triangle plane
@@ -48,9 +49,23 @@
 //!
 //! # DOF functionals
 //!
-//! The `k = 0` basis is the hard-coded MFEM `RT_WedgeElement(0)` tensor
-//! basis (bit-exact, see [`PrismRTk::eval_basis_vec`]; eval bypasses the
-//! Vandermonde coefficients at `k = 0`).  For `k >= 1` the basis is the
+//! The `k = 0` basis is the hard-coded MFEM **`RT0WdgFiniteElement`** tensor
+//! basis (D572 adjudication: fem-rs HDiv k=0 follows the collection MFEM's
+//! `RT0_3DFECollection` serves, `fe_coll.hpp:1470-1476`).  Relative to the
+//! generic `RT_WedgeElement(0)` tensor product, `RT0WdgFiniteElement::
+//! CalcVShape` (`fe_fixed_order.cpp:6403`) doubles the two *triangular-face*
+//! basis functions (slots 0,1) and leaves the three quadrilateral-face ones
+//! untouched; its `nk` table (`fe_fixed_order.cpp:6439`) halves the same two
+//! rows to `n̂|F| = (±1/2, 0, 0)` (probe `tmp/d572/d572_families.txt`: NK
+//! wedge_fix, VSHAPE wedge_fix — tri slots ×2, quads identical).  Both
+//! scalings flow from this one basis: `HDivSpace::interpolate_vector`'s
+//! reference dual `W = φ·nk` becomes `diag(2,2,1,1,1)` against its unchanged
+//! `n̂-axis` sample rows, so the stored dof is `f·adj(J)·n̂|F|` on every face
+//! (tri dofs halve, quad dofs unchanged — probe
+//! `tmp/d572/d572_prism_mass.txt` PROJ: tri `∓0.5`, quads equal across
+//! collections) while `W = φ·nk` stays diagonal; the reconstructed field
+//! `Σ dof·φ` and the transfer/prolongation rows are invariant on
+//! axis-aligned frames (`d482` stays green).  For `k >= 1` the basis is the
 //! moment-dual construction of this crate: the dof functionals are the
 //! *exact* normal-flux moments `∫_face (Φ·n̂) q ds` (`q` over the face
 //! monomials of degree ≤ p in the frame above) plus volume moments
@@ -61,6 +76,8 @@
 //! `P_p(tri) ⊗ P_{p+1}(xi)`).  The span is exactly MFEM's wedge RT space;
 //! dof *values* of a projected field are moment-based, not MFEM's nodal
 //! point samples (that residual gap is recorded in the D444 debt notes).
+//! k ≥ 1 keeps the generic `RT_WedgeElement` alignment, which is what
+//! `RT_FECollection(p, 3)` serves (`fe_coll.cpp:2581`).
 
 use crate::quadrature::{
     gauss_lobatto_01, gauss_legendre_01, prism_rule, quad_rule_01, tri_rule,
@@ -446,16 +463,19 @@ impl VectorReferenceElement for PrismRTk {
 
     fn eval_basis_vec(&self, xi: &[f64], values: &mut [f64]) {
         if self.p == 0 {
-            // MFEM RT_WedgeElement(0) tensor product (CalcVShape in
-            // fe_rt.cpp): reference axes are xi = layer, (eta,zeta) = triangle
-            // plane.  DOF order = wedge face order (bottom/top tri, then 3
-            // quads with t_dof = 2D RT0-triangle edges 0,1,2):
-            //   Φ₀(bottom) = (xi−1, 0, 0)     Φ₁(top) = (xi, 0, 0)
+            // MFEM RT0WdgFiniteElement tensor product (CalcVShape in
+            // fe_fixed_order.cpp:6403; D572): the generic RT_WedgeElement(0)
+            // product with the two TRIANGULAR-face functions doubled
+            // (shape(0,2) = 2z−2, shape(1,2) = 2z in MFEM's z-layer axis).
+            // Reference axes are xi = layer, (eta,zeta) = triangle plane.
+            // DOF order = wedge face order (bottom/top tri, then 3 quads
+            // with t_dof = 2D RT0-triangle edges 0,1,2):
+            //   Φ₀(bottom) = (2(xi−1), 0, 0)     Φ₁(top) = (2xi, 0, 0)
             //   Φ₂ = (0, η, ζ−1)  Φ₃ = (0, η, ζ)  Φ₄ = (0, η−1, ζ)
             let (a, b, c) = (xi[0], xi[1], xi[2]);
             values.fill(0.0);
-            values[0] = a - 1.0;
-            values[3] = a;
+            values[0] = 2.0 * (a - 1.0);
+            values[3] = 2.0 * a;
             values[7] = b;
             values[8] = c - 1.0;
             values[10] = b;
@@ -508,10 +528,12 @@ impl VectorReferenceElement for PrismRTk {
 
     fn eval_div(&self, xi: &[f64], div_vals: &mut [f64]) {
         if self.p == 0 {
-            // div of MFEM wedge RT0: tri dofs (∂/∂xi of (xi±1)) = 1,
-            // quad dofs (∂/∂η + ∂/∂ζ of the 2D RT0 edge) = 1 + 1 = 2.
-            div_vals[0] = 1.0;
-            div_vals[1] = 1.0;
+            // div of MFEM RT0WdgFiniteElement (CalcDivShape,
+            // fe_fixed_order.cpp:6429): every dof carries div 2 — the
+            // doubled tri-face functions (∂/∂xi of 2(xi±1)) and the quad
+            // dofs (∂/∂η + ∂/∂ζ of the 2D RT0 edge) = 1 + 1 = 2 alike.
+            div_vals[0] = 2.0;
+            div_vals[1] = 2.0;
             div_vals[2] = 2.0;
             div_vals[3] = 2.0;
             div_vals[4] = 2.0;
@@ -826,16 +848,26 @@ mod tests {
         }
     }
 
-    /// k=0 behaviour unchanged: hard-coded MFEM basis, dim 5, div (1,1,2,2,2).
+    /// k=0 carries MFEM `RT0WdgFiniteElement` (D572): the generic
+    /// `RT_WedgeElement(0)` tensor basis with the two triangular-face slots
+    /// doubled (`CalcVShape`, fe_fixed_order.cpp:6403) and div 2 on every
+    /// dof (`CalcDivShape`, :6429).  Sample at (0.3, 0.2, 0.5): the old
+    /// generic values (−0.7, 0.3 | 0.2,−0.5 | 0.2,0.5 | −0.8,0.5) double on
+    /// slots 0,1.
     #[test]
-    fn prism_rt0_unchanged() {
+    fn prism_rt0_is_mfem_rt0wdg() {
         let e = PrismRTk::new(0);
         assert_eq!(e.n_dofs(), 5);
         let mut v = vec![0.0; 15];
         e.eval_basis_vec(&[0.3, 0.2, 0.5], &mut v);
-        assert_eq!(v, vec![-0.7, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.2, -0.5, 0.0, 0.2, 0.5, 0.0, -0.8, 0.5]);
+        assert_eq!(
+            v,
+            vec![
+                -1.4, 0.0, 0.0, 0.6, 0.0, 0.0, 0.0, 0.2, -0.5, 0.0, 0.2, 0.5, 0.0, -0.8, 0.5
+            ]
+        );
         let mut d = vec![0.0; 5];
         e.eval_div(&[0.3, 0.2, 0.5], &mut d);
-        assert_eq!(d, vec![1.0, 1.0, 2.0, 2.0, 2.0]);
+        assert_eq!(d, vec![2.0, 2.0, 2.0, 2.0, 2.0]);
     }
 }
