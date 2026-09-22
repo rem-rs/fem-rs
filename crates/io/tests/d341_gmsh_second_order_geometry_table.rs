@@ -175,9 +175,11 @@ fn d341_tet10_geometry_table() {
 #[test]
 fn d341_hex27_geometry_table() {
     let el = fem_element::lagrange::factory::HexQk::new(2);
+    // Gmsh file order → fem-rs (= MFEM `H1_HexahedronElement(2)` order since
+    // D31); matches `GMSH_PERM_HEX27` in `crates/io/src/gmsh.rs`.
     let perm = [
-        0usize, 1, 2, 3, 4, 5, 6, 7, 12, 14, 15, 10, 9, 11, 18, 17, 8, 13, 19, 16, 22, 23, 21, 24,
-        20, 25, 26,
+        0usize, 1, 2, 3, 4, 5, 6, 7, 8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15, 20, 21, 23, 24,
+        22, 25, 26,
     ];
     check_3d("d341_hex27.msh", 12, &el, &perm, &[[-0.5, 0.0, 0.5], [0.0, 0.0, 0.0], [0.75, -0.75, 0.25]]);
 }

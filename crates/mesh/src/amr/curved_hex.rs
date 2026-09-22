@@ -44,10 +44,9 @@
 //! it is `HexQk::new(p).dof_coords()` (crates/element), the same table
 //! `DofManager::build_q2_hex` / `build_pk_hex` (crates/space) and `fem-io`'s
 //! `nodes` reader use, so the element, the global numbering and this module
-//! cannot drift apart.  For `p == 2` that table is `LEGACY_P2_SLOTS`, which
-//! reproduces the previous hand-written Q2 layout
-//! (`vertices → 12 edges → 6 faces → body`) slot for slot, so the whole
-//! order-2 path is unchanged bit for bit.
+//! cannot drift apart.  (D31 switched `HexQk(2)` — and with it `build_q2_hex`
+//! — from the old fem-rs legacy layout to MFEM's `H1_HexahedronElement(2)`
+//! order; this module followed the element automatically.)
 
 use std::collections::HashMap;
 

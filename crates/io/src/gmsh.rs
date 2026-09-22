@@ -175,11 +175,13 @@ struct ElemBlock {
 const GMSH_PERM_TET10: [u8; 10] = [0, 1, 2, 3, 4, 6, 7, 5, 9, 8];
 
 /// `Gmsh type 12 (Hex27) → fem-rs hex order` (`HexQk`'s `dof_coords` lattice:
-/// bottom perimeter, verticals, top perimeter, faces, center).  Gmsh's edge
-/// order is `(0,1) (0,3) (0,4) (1,2) (1,5) (2,3) (2,6) (3,7) (4,5) (4,7)
+/// MFEM `H1_HexahedronElement(2)` order since D31 — vertices, the 12 edges in
+/// `CUBE::Edges` order `(0,1) (1,2) (3,2) (0,3) (4,5) (5,6) (7,6) (4,7)
+/// (0,4) (1,5) (2,6) (3,7)`, the 6 faces in `FaceVert` order, centre).  Gmsh's
+/// edge order is `(0,1) (0,3) (0,4) (1,2) (1,5) (2,3) (2,6) (3,7) (4,5) (4,7)
 /// (5,6) (6,7)` (the same order `findpts::incomplete` documents for Hex20).
 const GMSH_PERM_HEX27: [u8; 27] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 12, 14, 15, 10, 9, 11, 18, 17, 8, 13, 19, 16, 22, 23, 21, 24, 20, 25,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 13, 9, 16, 18, 19, 17, 10, 12, 14, 15, 20, 21, 23, 24, 22, 25,
     26,
 ];
 

@@ -31,10 +31,10 @@
 //! conformity statement (a shared entity carrying two different DOFs, or a
 //! DOF attached to the wrong entity, moves a position).  The `ELEM` lists are
 //! compared as **sets**, not sequences: the per-type *slot* order of the hex
-//! deliberately follows `HexQk`'s positional edge/face order
-//! (`HEX_QK_EDGES`) rather than MFEM's `Geometry::Constants<CUBE>` table order
-//! (`HEX_MFEM_EDGES`, used for the global numbering) — a pre-existing fem-rs
-//! convention the assembler depends on.
+//! follows `HexQk`'s H1 topological order = MFEM's
+//! `Geometry::Constants<CUBE>` table order (`HEX_MFEM_EDGES`/`HEX_MFEM_FACES`)
+//! at every order (D31 removed the former p = 2 legacy positional layout),
+//! which is also the order the assembler depends on.
 
 use std::collections::HashSet;
 

@@ -385,9 +385,11 @@ mod tests {
         fem_element::lagrange::hex::hex_tensor_layout(elem).1
     }
 
-    /// D77 pin: `hex_q2.wgsl`'s hard-coded slot table is the element layer's
-    /// Q2 order — slot by slot, bit-exact.  The pre-D77 table was MFEM's
-    /// (`H1_HexahedronElement(2)`) order, a permutation of the space's DOFs.
+    /// D77 pin (table updated D31): `hex_q2.wgsl`'s hard-coded slot table is
+    /// the element layer's Q2 order — slot by slot, bit-exact.  Since D31 that
+    /// order is MFEM's `H1_HexahedronElement(2)` (`tmp/d31/probe_h1_hex.cpp`),
+    /// identical to the pre-D77 table's block scheme; the old guard against
+    /// "MFEM's order" is obsolete and replaced by a positive pin.
     #[test]
     fn hex_q2_wgsl_slots_match_element() {
         let arrays = u32_arrays(HEX_Q2_WGSL, "array<u32,19>(");
@@ -418,13 +420,19 @@ mod tests {
             };
             assert_eq!(got, want[n], "slot {n}: wgsl vs HexQ2::dof_coords");
         }
-        // … and it is *not* the pre-D77 table, which put the (-1,-1,0)
-        // vertical-edge mid at slot 16 and MFEM's edge order at slots 8..20.
-        let old = [0u32, 0, 1];
-        assert_ne!(
+        // MFEM `H1_HexahedronElement(2)` positive pins: slot 8 is the first
+        // `CUBE::Edges[0]` (0→1) mid, tensor (1,0,0) = array index 0; slot 16
+        // is the first vertical edge (`CUBE::Edges[8]` = 0→4) mid, tensor
+        // (0,0,1) = array index 8.
+        assert_eq!(
+            [arrays[0][0], arrays[1][0], arrays[2][0]],
+            [1u32, 0, 0],
+            "slot 8 must be the (1,0,0) z-low edge mid (MFEM H1 order, D31)"
+        );
+        assert_eq!(
             [arrays[0][8], arrays[1][8], arrays[2][8]],
-            old,
-            "slot 16 is still the pre-D77 MFEM-order table"
+            [0u32, 0, 1],
+            "slot 16 must be the (0,0,1) vertical-edge mid (MFEM H1 order, D31)"
         );
     }
 

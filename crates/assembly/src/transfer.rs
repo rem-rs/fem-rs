@@ -1905,7 +1905,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
             }
         }
     }
-    let mut insert_with_twins = |set: &mut HashSet<u32>, n: u32| {
+    let insert_with_twins = |set: &mut HashSet<u32>, n: u32| {
         set.insert(n);
         if let Some(twins) = coord_twins.get(&n) {
             set.extend(twins.iter().copied());

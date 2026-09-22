@@ -78,17 +78,16 @@ impl ReferenceElement for HexQ1 {
 
 /// Quadratic Lagrange element on the reference hex `[-1,1]³` — 27 DOFs.
 ///
-/// Slot order = [`crate::lagrange::factory::HexQk`]`::new(2)` (converged,
-/// D31 stage A): the layout of `DofManager::build_q2_hex` (crates/space),
-/// i.e. the fem-rs H1 order the factory keeps at `p == 2` until that table
-/// switches to the MFEM `H1_HexahedronElement` order (see
-/// `factory::LEGACY_P2_SLOTS`):
+/// Slot order = [`crate::lagrange::factory::HexQk`]`::new(2)` = MFEM
+/// `H1_HexahedronElement(2)` (D31 closed the pre-D31 fem-rs legacy order;
+/// probe `tmp/d31/probe_h1_hex.cpp`, dump `tmp/d31/fe_nodes_cpp.txt`):
 ///
 /// - 0..7:   8 vertices (bottom ring, then top ring)
-/// - 8..11:  vertical edge mids (1→5, 2→6, 3→7, 0→4)
-/// - 12..15: y-edge mids (3→0, 1→2, 5→6, 4→7)
-/// - 16..19: x-edge mids (0→1, 2→3, 6→7, 4→5)
-/// - 20..25: face centres (ξ=-1, ξ=+1, η=-1, η=+1, ζ=-1, ζ=+1)
+/// - 8..11:  z-low ring edge mids (`CUBE::Edges[0..3]`: 0→1, 1→2, 3→2, 0→3)
+/// - 12..15: z-high ring edge mids (`CUBE::Edges[4..7]`: 4→5, 5→6, 7→6, 4→7)
+/// - 16..19: vertical edge mids (`CUBE::Edges[8..11]`: 0→4, 1→5, 2→6, 3→7)
+/// - 20..25: face centres in `CUBE::FaceVert` order
+///           (z-low, y-low, x-high, y-high, x-low, z-high)
 /// - 26:     volume centre (0,0,0)
 ///
 /// Basis: φᵢ = L_ix(ξᵢ)(ξ) · L_iy(ηᵢ)(η) · L_iz(ζᵢ)(ζ)
@@ -106,27 +105,27 @@ const Q2_NODES_HEX: [(f64, f64, f64); 27] = {
     n[5] = (1.0, -1.0, 1.0);
     n[6] = (1.0, 1.0, 1.0);
     n[7] = (-1.0, 1.0, 1.0);
-    // edges: vertical (1→5, 2→6, 3→7, 0→4)
-    n[8] = (1.0, -1.0, 0.0);
-    n[9] = (1.0, 1.0, 0.0);
-    n[10] = (-1.0, 1.0, 0.0);
-    n[11] = (-1.0, -1.0, 0.0);
-    // edges: y-varying (3→0, 1→2, 5→6, 4→7)
-    n[12] = (-1.0, 0.0, -1.0);
-    n[13] = (1.0, 0.0, -1.0);
-    n[14] = (1.0, 0.0, 1.0);
+    // edges: z-low ring (0→1, 1→2, 3→2, 0→3)
+    n[8] = (0.0, -1.0, -1.0);
+    n[9] = (1.0, 0.0, -1.0);
+    n[10] = (0.0, 1.0, -1.0);
+    n[11] = (-1.0, 0.0, -1.0);
+    // edges: z-high ring (4→5, 5→6, 7→6, 4→7)
+    n[12] = (0.0, -1.0, 1.0);
+    n[13] = (1.0, 0.0, 1.0);
+    n[14] = (0.0, 1.0, 1.0);
     n[15] = (-1.0, 0.0, 1.0);
-    // edges: x-varying (0→1, 2→3, 6→7, 4→5)
-    n[16] = (0.0, -1.0, -1.0);
-    n[17] = (0.0, 1.0, -1.0);
-    n[18] = (0.0, 1.0, 1.0);
-    n[19] = (0.0, -1.0, 1.0);
-    // face centres: ξ=-1, ξ=+1, η=-1, η=+1, ζ=-1, ζ=+1
-    n[20] = (-1.0, 0.0, 0.0);
-    n[21] = (1.0, 0.0, 0.0);
-    n[22] = (0.0, -1.0, 0.0);
+    // edges: vertical (0→4, 1→5, 2→6, 3→7)
+    n[16] = (-1.0, -1.0, 0.0);
+    n[17] = (1.0, -1.0, 0.0);
+    n[18] = (1.0, 1.0, 0.0);
+    n[19] = (-1.0, 1.0, 0.0);
+    // face centres: FaceVert order (z-low, y-low, x-high, y-high, x-low, z-high)
+    n[20] = (0.0, 0.0, -1.0);
+    n[21] = (0.0, -1.0, 0.0);
+    n[22] = (1.0, 0.0, 0.0);
     n[23] = (0.0, 1.0, 0.0);
-    n[24] = (0.0, 0.0, -1.0);
+    n[24] = (-1.0, 0.0, 0.0);
     n[25] = (0.0, 0.0, 1.0);
     // volume centre
     n[26] = (0.0, 0.0, 0.0);
@@ -494,10 +493,11 @@ mod tests {
         }
     }
 
-    /// D31 stage-A convergence pin: `HexQ2`'s layout (slot order + node
+    /// D31 convergence pin: `HexQ2`'s layout (slot order + node
     /// coordinates + basis values) is **slot-by-slot identical** to the
     /// order-generic `HexQk::new(2)` the space numbering (`build_q2_hex`)
-    /// follows — the two must stay in lockstep.
+    /// follows — both are now the MFEM `H1_HexahedronElement(2)` order
+    /// (`tmp/d31/fe_nodes_cpp.txt`) and must stay in lockstep.
     #[test]
     fn hex_q2_layout_matches_hex_qk2() {
         assert_layout_converged(&HexQ2, &crate::lagrange::factory::HexQk::new(2));

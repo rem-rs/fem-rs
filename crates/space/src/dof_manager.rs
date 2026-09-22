@@ -91,31 +91,19 @@ const PYR_P1_SLOT_VERTEX: [usize; 5] = [0, 1, 3, 2, 4];
 
 // ─── D349: mixed-3-D entity tables ───────────────────────────────────────────
 
-/// `HexQk`'s own edge enumeration (vertex-index pairs) — the element-local DOF
-/// **position** order of the hex's 12 edge slots (aligned with the `HexQk`
-/// reference basis, cf. the tmop_form positional tests).  A permutation of
-/// [`HEX_MFEM_EDGES`] in groups of four.
-const HEX_QK_EDGES: [(usize, usize); 12] = [
-    (1, 5), (2, 6), (3, 7), (0, 4), (0, 3), (1, 2),
-    (5, 6), (4, 7), (0, 1), (3, 2), (7, 6), (4, 5),
-];
-
-/// `HexQk`'s face enumeration (vertex-index quads), face order
-/// xmin, xmax, ymin, ymax, zmin, zmax — the hex's 6 face slots.
-const HEX_QK_FACES: [[usize; 4]; 6] = [
-    [0, 3, 7, 4], [1, 2, 6, 5], [0, 1, 5, 4],
-    [3, 2, 6, 7], [0, 1, 2, 3], [4, 5, 6, 7],
-];
-
 /// MFEM `Geometry::Constants<Geometry::CUBE>::Edges` (`fem/geom.cpp:1020`) —
-/// the order in which `FiniteElementSpace::Construct` first-touches the hex's
+/// both the element-local slot order of the hex's 12 edge dofs (`HexQk(2)` and
+/// `HexQk(p>=3)` alike, since D31; cf. the tmop_form positional tests) and the
+/// order in which `FiniteElementSpace::Construct` first-touches the hex's
 /// edges, i.e. the order the global edge DOF ids are assigned in.
 const HEX_MFEM_EDGES: [(usize, usize); 12] = [
     (0, 1), (1, 2), (3, 2), (0, 3), (4, 5), (5, 6),
     (7, 6), (4, 7), (0, 4), (1, 5), (2, 6), (3, 7),
 ];
 
-/// MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` (`fem/geom.cpp:1032`).
+/// MFEM `Geometry::Constants<Geometry::CUBE>::FaceVert` (`fem/geom.cpp:1032`) —
+/// likewise both the element-local face-slot order (D31) and the global
+/// first-touch order.
 const HEX_MFEM_FACES: [[usize; 4]; 6] = [
     [3, 2, 1, 0], [0, 1, 5, 4], [1, 2, 6, 5],
     [2, 3, 7, 6], [3, 0, 4, 7], [4, 5, 6, 7],
@@ -1252,9 +1240,11 @@ impl DofManager {
     /// — 27 DOFs per element: 8 vertices + 12 edge midpoints + 6 face centers
     /// + 1 volume center.
     ///
-    /// DOF ordering matches [`fem_element::HexQk`] at order 2:
-    ///   [0..8) vertices, [8..20) edges, [20..26) faces, [26] volume,
-    /// where the 12 edges and 6 faces use HexQk's enumeration.
+    /// DOF ordering matches [`fem_element::HexQk`] at order 2 = MFEM
+    /// `H1_HexahedronElement(2)` (D31 switched the former legacy element-local
+    /// order; probe `tmp/d31/probe_h1_hex.cpp`):
+    ///   [0..8) vertices, [8..20) edges in `Geometry::CUBE::Edges` order,
+    ///   [20..26) faces in `FaceVert` order, [26] volume.
     fn build_q2_hex<M: MeshTopology>(mesh: &M) -> Self {
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
@@ -1267,29 +1257,24 @@ impl DofManager {
         let mut next_dof = n_nodes as DofId;
         let mut dofs_flat = vec![0u32; n_elems * dofs_per_elem];
 
-        // HexQk edge enumeration (vertex-index pairs), see HexQk::node_to_dof.
-        // This is the element-local dof POSITION order (aligned with the
-        // HexQk reference basis, cf. the tmop_form positional tests).
-        const EDGES: [(usize, usize); 12] = HEX_QK_EDGES;
-        // HexQk face enumeration (vertex-index quads), face order:
-        // xmin, xmax, ymin, ymax, zmin, zmax.
-        const FACES: [[usize; 4]; 6] = HEX_QK_FACES;
-        // MFEM's local hex topology (Geometry::Constants<Geometry::CUBE>):
-        // Edges[12] and FaceVert[6].  Global dof ids follow MFEM
-        // FiniteElementSpace::Construct — vertices, then ALL edge dofs, then
-        // ALL face dofs, then ALL volume dofs, with entity ids assigned
-        // first-touch in element order scanning each element's entities in
-        // MFEM's table order.  Numbering the entities inside the element loop
-        // (interleaving faces/volumes with edges of later elements) misnumbers
-        // them vs MFEM, which breaks reading MFEM `nodes` grid functions
-        // (mesh-optimizer cube.mesh: det(J) -17.4 instead of 0.125).
-        const MFEM_EDGES: [(usize, usize); 12] = HEX_MFEM_EDGES;
-        const MFEM_FACES: [[usize; 4]; 6] = HEX_MFEM_FACES;
+        // Element-local dof POSITION order = MFEM `Geometry::Constants<CUBE>`
+        // topology (`HexQk(2)`'s slot layout since D31, cf. the tmop_form
+        // positional tests), aligned with the HexQk reference basis.  The
+        // global dof ids follow MFEM FiniteElementSpace::Construct — vertices,
+        // then ALL edge dofs, then ALL face dofs, then ALL volume dofs, with
+        // entity ids assigned first-touch in element order scanning each
+        // element's entities in MFEM's table order.  Numbering the entities
+        // inside the element loop (interleaving faces/volumes with edges of
+        // later elements) misnumbers them vs MFEM, which breaks reading MFEM
+        // `nodes` grid functions (mesh-optimizer cube.mesh: det(J) -17.4
+        // instead of 0.125).
+        const EDGES: [(usize, usize); 12] = HEX_MFEM_EDGES;
+        const FACES: [[usize; 4]; 6] = HEX_MFEM_FACES;
 
         // Phase 1: vertex + edge dofs (all edges before any face/volume dof).
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            for &(a, b) in &MFEM_EDGES {
+            for &(a, b) in &EDGES {
                 let key = EdgeKey::new(ns[a], ns[b]);
                 edge_map.entry(key).or_insert_with(|| {
                     let d = next_dof; next_dof += 1; d
@@ -1299,7 +1284,7 @@ impl DofManager {
         // Phase 2: face-center dofs.
         for e in 0..n_elems as u32 {
             let ns = mesh.element_nodes(e);
-            for quad in &MFEM_FACES {
+            for quad in &FACES {
                 let key = QuadFaceKey::new(ns[quad[0]], ns[quad[1]], ns[quad[2]], ns[quad[3]]);
                 qface_map.entry(key).or_insert_with(|| {
                     let d = next_dof; next_dof += 1; d
@@ -2864,14 +2849,16 @@ impl DofManager {
     /// which is MFEM's stored block by construction (orientation 0 is the
     /// identity in `GetElementDofs`); the per-type local slot orders are the
     /// single-type builders' (D157 tet / D177 prism / D352 pyramid, and the
-    /// hex's `H1_DOF_MAP` order = `HexQk(p>=3)`'s positional layout, pinned
-    /// by `tests::hex_qk_dof_coords_match_mfem_node_dump`).  Verified against
+    /// hex's `H1_DOF_MAP` order = `HexQk(p)`'s positional layout at every
+    /// order — p = 2 joined in D31 — pinned by
+    /// `tests::hex_qk_dof_coords_match_mfem_node_dump`).  Verified against
     /// MFEM 4.10's own numbering of `tinyzoo-3d.mesh` at `p = 3, 4`
     /// (`tmp/d354/d354_probe.cpp`, tests `d354_mixed_3d_h1_order3.rs`).
     ///
-    /// At `p = 2` the numbering and coordinates are the D349 code path
-    /// verbatim (entity centroids; the only intra-face block is a single
-    /// DOF, filled by identity) — bit-for-bit unchanged.
+    /// At `p = 2` the coordinates and the global numbering are the D349 code
+    /// path verbatim (entity centroids; the only intra-face block is a single
+    /// DOF, filled by identity); the hex's element-local slot order changed in
+    /// D31 together with `build_q2_hex`/`HexQk(2)` (MFEM `H1_DOF_MAP`).
     ///
     /// **Scope:** the four linear 3-D topologies (Hex8, Prism6, Pyramid5,
     /// Tet4), straight-sided meshes.  A slot position that matches nothing
@@ -2929,77 +2916,35 @@ impl DofManager {
         let desc = |e: u32| -> Desc {
             let ns = mesh.element_nodes(e);
             match ns.len() {
-                // Hex8.  p == 2 keeps the legacy positional order of
-                // `build_q2_hex` (HEX_QK_EDGES/HEX_QK_FACES, the assembler's
-                // HexQk::new(2) convention); p >= 3 follows HexQk(p)'s H1
-                // topological order, which IS MFEM's `H1_DOF_MAP`: vertices,
-                // `CUBE::Edges` blocks, `CUBE::FaceVert` blocks
+                // Hex8.  Every order follows HexQk(p)'s H1 topological order,
+                // which IS MFEM's `H1_DOF_MAP` (p = 2 joined it in D31, so the
+                // former `HEX_QK_EDGES`/`HEX_QK_FACES` legacy branch is gone):
+                // vertices, `CUBE::Edges` blocks, `CUBE::FaceVert` blocks
                 // (`(j-1)(p-1)+(i-1)` within a block), interior — so the
                 // face blocks sit in the walk order directly.
                 8 => {
-                    if p == 2 {
-                        let walk_of_pos: Vec<usize> = HEX_MFEM_FACES
-                            .iter()
-                            .map(|mf| {
-                                let mut a: Vec<usize> = mf.to_vec();
-                                a.sort_unstable();
-                                HEX_QK_FACES
-                                    .iter()
-                                    .position(|qy| {
-                                        let mut b: Vec<usize> = qy.to_vec();
-                                        b.sort_unstable();
-                                        a == b
-                                    })
-                                    .expect("mixed hex p=2: HEX_MFEM_FACES entry \
-                                             matched in HEX_QK_FACES")
+                    let n_interior = ne * ne * ne;
+                    Desc {
+                        n_interior,
+                        slots: (0..8)
+                            .map(MixedSlot::Vertex)
+                            .chain(HEX_MFEM_EDGES.iter().flat_map(|&(a, b)| {
+                                (0..ne).map(move |k| MixedSlot::Edge { a, b, k })
+                            }))
+                            .chain((0..6).flat_map(|f| {
+                                (0..nq).map(move |_| MixedSlot::QuadFace(f))
+                            }))
+                            .chain((0..n_interior).map(|_| MixedSlot::Interior))
+                            .collect(),
+                        faces: (0..6)
+                            .map(|f| FaceTab {
+                                quad: true,
+                                verts: HEX_MFEM_FACES[f],
+                                slots: (8 + 12 * ne + f * nq
+                                    ..8 + 12 * ne + (f + 1) * nq)
+                                    .collect(),
                             })
-                            .collect();
-                        let mut pos_of_walk = vec![0usize; 6];
-                        for (m, &f) in walk_of_pos.iter().enumerate() {
-                            pos_of_walk[f] = m;
-                        }
-                        Desc {
-                            n_interior: 1,
-                            slots: (0..8)
-                                .map(MixedSlot::Vertex)
-                                .chain(HEX_QK_EDGES.iter().map(|&(a, b)| {
-                                    MixedSlot::Edge { a, b, k: 0 }
-                                }))
-                                .chain((0..6).map(|m| MixedSlot::QuadFace(walk_of_pos[m])))
-                                .chain(std::iter::once(MixedSlot::Interior))
-                                .collect(),
-                            faces: (0..6)
-                                .map(|f| FaceTab {
-                                    quad: true,
-                                    verts: HEX_MFEM_FACES[f],
-                                    slots: vec![8 + 12 + pos_of_walk[f]],
-                                })
-                                .collect(),
-                        }
-                    } else {
-                        let n_interior = ne * ne * ne;
-                        Desc {
-                            n_interior,
-                            slots: (0..8)
-                                .map(MixedSlot::Vertex)
-                                .chain(HEX_MFEM_EDGES.iter().flat_map(|&(a, b)| {
-                                    (0..ne).map(move |k| MixedSlot::Edge { a, b, k })
-                                }))
-                                .chain((0..6).flat_map(|f| {
-                                    (0..nq).map(move |_| MixedSlot::QuadFace(f))
-                                }))
-                                .chain((0..n_interior).map(|_| MixedSlot::Interior))
-                                .collect(),
-                            faces: (0..6)
-                                .map(|f| FaceTab {
-                                    quad: true,
-                                    verts: HEX_MFEM_FACES[f],
-                                    slots: (8 + 12 * ne + f * nq
-                                        ..8 + 12 * ne + (f + 1) * nq)
-                                        .collect(),
-                                })
-                                .collect(),
-                        }
+                            .collect(),
                     }
                 }
                 // Prism6: `H1_WedgeElement`'s own slot table.

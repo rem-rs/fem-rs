@@ -272,11 +272,14 @@ mod tests {
     use fem_mesh::Mesh;
     use fem_space::fe_space::FESpace;
 
-    /// D77 pin: the kernel's slot → tensor map is **bit-identical** to
-    /// `HexQ2`'s (and hence `HexQk::new(2)`'s / `DofManager::build_q2_hex`'s)
-    /// own `dof_coords()`.  The pre-D77 `HEX_Q2_MAP` table failed this: it
-    /// carried MFEM's `H1_HexahedronElement(2)` order, not the fem-rs p2 order
-    /// the space numbers element DOFs in.
+    /// D77 pin (guard updated D31): the kernel's slot → tensor map is
+    /// **bit-identical** to `HexQ2`'s (and hence `HexQk::new(2)`'s /
+    /// `DofManager::build_q2_hex`'s) own `dof_coords()`.  The pre-D77
+    /// `HEX_Q2_MAP` table failed the coordinate-matching half; since D31 the
+    /// element order itself is MFEM's `H1_HexahedronElement(2)` (the probe
+    /// `tmp/d31/probe_h1_hex.cpp` is the ground truth), so the former
+    /// "not the pre-D77 order" guard — which pinned `slots[16] != [0,0,1]` —
+    /// is now a positive pin instead.
     #[test]
     fn hex_q2_pa_slots_match_element() {
         let (nodes, slots) = hex_q2_slots();
@@ -290,10 +293,11 @@ mod tests {
                 );
             }
         }
-        // … and it is not the pre-D77 order, i.e. the migration is real.
-        assert_ne!(
+        // MFEM `H1_HexahedronElement(2)` slot 16 = the first vertical edge
+        // (`CUBE::Edges[8]` = 0→4), i.e. the tensor node (0,0,1).
+        assert_eq!(
             slots[16], [0, 0, 1],
-            "pre-D77 HEX_Q2_MAP put the (-1,-1,0) vertical-edge mid at slot 16"
+            "slot 16 must be the (0,0,1) vertical-edge mid (MFEM H1 order, D31)"
         );
     }
 

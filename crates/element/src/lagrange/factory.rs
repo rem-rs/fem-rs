@@ -2348,39 +2348,19 @@ const HEX_FACE_VERTS: [[usize; 4]; 6] = [
     [4, 5, 6, 7],
 ];
 
-/// Pre-D31 fem-rs H1 slot order for `p == 2`, still in force because
-/// `DofManager::build_q2_hex` (`crates/space/src/dof_manager.rs`) hard-codes it
-/// in its element-local `EDGES`/`FACES` tables: slot `s` carries the tensor
-/// node `LEGACY_P2_SLOTS[s]` (vertices 0..8 in ring order, then the 12 edges of
-/// that function's `EDGES` in order, then its 6 `FACES` in order, then the
-/// element centre).  Verified against the pre-D31
-/// `hex_qk_to_mfem_h1_perm(2)` hard table (`17,18,19,16, 11,9,13,15, 8,10,14,12,
-/// 24,22,21,23, 20,25, 26`).  `p >= 3` uses the MFEM order unconditionally;
-/// p = 2 joins it as soon as the crates/space table is switched (see
-/// `tests::hex_qk_p2_keeps_legacy_slot_order_until_dofmanager_follows`).
-const LEGACY_P2_SLOTS: [[usize; 3]; 27] = [
-    [0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0],
-    [0, 0, 2], [2, 0, 2], [2, 2, 2], [0, 2, 2],
-    [2, 0, 1], [2, 2, 1], [0, 2, 1], [0, 0, 1],
-    [0, 1, 0], [2, 1, 0], [2, 1, 2], [0, 1, 2],
-    [1, 0, 0], [1, 2, 0], [1, 2, 2], [1, 0, 2],
-    [0, 1, 1], [2, 1, 1], [1, 0, 1], [1, 2, 1],
-    [1, 1, 0], [1, 1, 2], [1, 1, 1],
-];
-
 /// Arbitrary-order Lagrange element on the reference hex `[-1,1]³` — `(p+1)³` DOFs.
 pub struct HexQk {
     order: usize,
     lag1d: Lagrange1D,
     /// DOF ordering: `false` = H1 *topological* order (vertices → edges →
-    /// faces → interior) in **MFEM `H1_HexahedronElement` order** for
-    /// `p >= 3` — see [`HexQk::node_to_dof`], pinned against the C++ node dump
-    /// by `tests::hex_qk_dof_coords_match_mfem_node_dump` and
-    /// `tests::hex_qk_slots_match_mfem_h1_dof_map`.  `p == 2` is the one order
-    /// still on the pre-D31 fem-rs order because
-    /// `DofManager::build_q2_hex` (`crates/space`) hard-codes it (see
-    /// [`LEGACY_P2_SLOTS`]); the fem-rs global numbering otherwise
-    /// (`DofManager::build_pk_hex`, p >= 3) derives its edge/face slot runs
+    /// faces → interior) in **MFEM `H1_HexahedronElement` order** for every
+    /// `p >= 1` (D31 closed the former p = 2 exception) — see
+    /// [`HexQk::node_to_dof`], pinned against the C++ node dump
+    /// (`tmp/d31/probe_h1_hex.cpp`, MFEM 4.10) by
+    /// `tests::hex_qk_dof_coords_match_mfem_node_dump` and
+    /// `tests::hex_qk_slots_match_mfem_h1_dof_map`.  The fem-rs global
+    /// numbering (`DofManager::build_q2_hex`, p = 2, and
+    /// `DofManager::build_pk_hex`, p >= 3) derives its edge/face slot runs
     /// from `HexQk::dof_coords()` and follows this layout automatically.
     ///
     /// `true` = lexicographic tensor-product order `ix + iy·(p+1) + iz·(p+1)²`
@@ -2434,25 +2414,16 @@ impl HexQk {
     /// * then the `(p-1)³` interior slots with `iz` outermost, `iy` next, `ix`
     ///   fastest.
     ///
-    /// This is MFEM 4.9/4.10 bit-for-bit (the `HEX p=2..5` dumps in
-    /// `tmp/gll_ref/fe_nodes_cpp.txt` are pinned slot-by-slot by
+    /// This is MFEM 4.9/4.10 bit-for-bit for every `p` (the `HEX p=2..5` dumps
+    /// in `tmp/gll_ref/fe_nodes_cpp.txt` and the D31 4.10 re-probe
+    /// `tmp/d31/fe_nodes_cpp.txt` are pinned slot-by-slot by
     /// `tests::hex_qk_dof_coords_match_mfem_node_dump`).  The pre-D31 fem-rs
-    /// order differed: it enumerated edge blocks by an internal
-    /// `(face_i, face_j)` signature table and faces as
+    /// order — which for `p == 2` survived until D31 — had enumerated edge
+    /// blocks by an internal `(face_i, face_j)` signature table and faces as
     /// `xmin/xmax/ymin/ymax/zmin/zmax`.  The global numbering in
     /// `DofManager::build_pk_hex` is derived from `HexQk::dof_coords()`, so it
     /// follows this layout automatically.
     fn node_to_dof(&self, ix: usize, iy: usize, iz: usize) -> usize {
-        // p == 2 is the one order where the fem-rs global numbering does *not*
-        // follow this element: `DofManager::build_q2_hex` (crates/space) has
-        // the pre-D31 slot order hard-coded in its `EDGES`/`FACES` tables, so
-        // the two must switch together.
-        if self.order == 2 {
-            return LEGACY_P2_SLOTS
-                .iter()
-                .position(|s| s == &[ix, iy, iz])
-                .expect("hex p=2 slot");
-        }
         let p = self.order;
         let e = p.saturating_sub(1); // slots per edge == face row count
         let idx = [ix, iy, iz];
@@ -2812,13 +2783,14 @@ mod tests {
     /// D31 pin: `HexQk`'s H1 slot order **is** MFEM's
     /// `H1_HexahedronElement` order, i.e. slot `s` of `dof_coords()` is the
     /// tensor node [`mfem_h1_hex_slot_nodes`] assigns to `s`, and
-    /// `dof_index` inverts it.  Checked for p = 1 and p = 3..=5 (p = 2 is the
-    /// documented legacy exception, see
-    /// [`hex_qk_p2_keeps_legacy_slot_order_until_dofmanager_follows`]), plus
-    /// bijectivity.
+    /// `dof_index` inverts it.  Checked for p = 1..=5 — **including p = 2**,
+    /// which the MFEM 4.10 probe (`tmp/d31/probe_h1_hex.cpp`, dump
+    /// `tmp/d31/fe_nodes_cpp.txt`: identity probe + `GetNodes` +
+    /// `TensorBasisElement::GetDofMap` all agree) shows follows the same
+    /// generic layout as every other order — plus bijectivity.
     #[test]
     fn hex_qk_slots_match_mfem_h1_dof_map() {
-        for p in [1usize, 3, 4, 5] {
+        for p in [1usize, 2, 3, 4, 5] {
             let hex = HexQk::new(p);
             let n = (p + 1) * (p + 1) * (p + 1);
             let mfem = mfem_h1_hex_slot_nodes(p);
@@ -2865,13 +2837,15 @@ mod tests {
     /// D31 numeric ground truth: the per-slot node coordinates of MFEM 4.9/4.10
     /// `H1_HexahedronElement` on `[0,1]³`, dumped from C++ (`node slot N xyz
     /// …` in `tmp/gll_ref/fe_nodes_cpp.txt`, harness
-    /// `tmp/gll_ref/probe_fe_nodes.cpp`).  `HexQk::dof_coords()` mapped to
-    /// `[0,1]³` must reproduce them slot by slot — this pins the *whole*
-    /// layout (vertex/edge/face/interior block order and every block-internal
-    /// offset), not just its block structure.  p = 3 is used because it is the
-    /// lowest order that distinguishes the block-internal offsets (two slots
-    /// per edge, a 2×2 face block); p = 2's MFEM dump is reproduced by
-    /// `HexQk::new_lex(2)`-independent data once the p = 2 exception is lifted.
+    /// `tmp/gll_ref/probe_fe_nodes.cpp`; re-probed on 4.10 in
+    /// `tmp/d31/fe_nodes_cpp.txt`, harness `tmp/d31/probe_h1_hex.cpp`).
+    /// `HexQk::dof_coords()` mapped to `[0,1]³` must reproduce them slot by
+    /// slot — this pins the *whole* layout (vertex/edge/face/interior block
+    /// order and every block-internal offset), not just its block structure.
+    /// p = 3 is used because it is the lowest order that distinguishes the
+    /// block-internal offsets (two slots per edge, a 2×2 face block); the
+    /// p = 2 dump is asserted **directly** (D31 closed the former legacy
+    /// permutation exception).
     #[test]
     fn hex_qk_dof_coords_match_mfem_node_dump() {
         const HEX_P2: [[f64; 3]; 27] = [
@@ -2988,37 +2962,23 @@ mod tests {
         }
         assert!(max_err <= 1e-16, "p={p}: dump match must be bit-exact");
 
-        // p = 2 is the documented legacy exception.  Its slot order is pinned
-        // against the same C++ dump through the pre-D31 permutation table
-        // (`hex_qk_to_mfem_h1_perm(p=2)`, itself taken from the old test):
-        // legacy slot h holds the tensor node MFEM puts in slot PERM[h].
-        const PERM_P2: [usize; 27] = [
-            0, 1, 2, 3, 4, 5, 6, 7,
-            17, 18, 19, 16,
-            11, 9, 13, 15,
-            8, 10, 14, 12,
-            24, 22, 21, 23,
-            20, 25,
-            26,
-        ];
+        // D31: p = 2 asserts the same dump **directly** — legacy slot `s`
+        // carries the tensor node MFEM puts in slot `PERM[s]` no longer; the
+        // element's slot `s` *is* MFEM's slot `s` (probe
+        // `tmp/d31/probe_h1_hex.cpp`: identity probe, `GetNodes` and
+        // `TensorBasisElement::GetDofMap` agree slot for slot).
         let hex2 = HexQk::new(2);
         let coords2 = hex2.dof_coords();
         assert_eq!(coords2.len(), HEX_P2.len());
-        for (slot, &mfem_slot) in PERM_P2.iter().enumerate() {
+        for (slot, want) in HEX_P2.iter().enumerate() {
             for d in 0..3 {
                 let got = 0.5 * (coords2[slot][d] + 1.0);
                 assert!(
-                    (got - HEX_P2[mfem_slot][d]).abs() < 1e-15,
-                    "p=2 legacy slot {slot} coord {d}: got {got} want {} (MFEM slot {mfem_slot})",
-                    HEX_P2[mfem_slot][d]
+                    (got - want[d]).abs() < 1e-15,
+                    "p=2 slot {slot} coord {d}: got {got} want {want:?} (MFEM slot {slot})"
                 );
             }
         }
-        // … and it is *not* the MFEM order, i.e. the exception is real and the
-        // `DofManager::build_q2_hex` fix is still outstanding.  Once that fix
-        // lands this assertion (and `LEGACY_P2_SLOTS`) must be deleted and p=2
-        // folded into the loop above.
-        assert!(PERM_P2.iter().copied().ne(0..27usize));
     }
 
     /// D100 pin: `HexQk::eval_basis` and `HexQk::dof_coords` are both derived
@@ -3037,7 +2997,8 @@ mod tests {
         let coords = e.dof_coords();
         assert_eq!(coords.len(), 27);
         assert_eq!(coords[0], vec![-1.0, -1.0, -1.0], "slot 0 = reference corner");
-        // The legacy p=2 slot order (`LEGACY_P2_SLOTS`) must still cover all 27
+        // The p=2 slot order (`HexQk::node_to_dof`, the MFEM
+        // `H1_HexahedronElement(2)` layout since D31) must cover all 27
         // tensor nodes exactly once.
         let mut nodes: Vec<[i32; 3]> = coords
             .iter()
