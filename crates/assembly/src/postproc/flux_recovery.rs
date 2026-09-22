@@ -62,7 +62,10 @@ pub trait FluxRecovery {
 /// basis and geometry share one frame (`HexQk`/`PrismPk`, `o.max(1)`), and —
 /// D365 — the pyramid arm: the H¹ pyramid element of the default family
 /// (Fuentes, entity slot order), the same slots `DofManager::build_pyramid_pk`
-/// numbers the H¹ space's `element_dofs` in.  Same panic set.
+/// numbers the H¹ space's `element_dofs` in.  D614: the complete `Hex27` and
+/// quadratic `Prism18` cell labels join their families' arms (the consumers'
+/// families are label-independent — one CUBE / one wedge family each).
+/// Same panic set.
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     ref_elem_vol_with_pyramid_basis(
         elem_type,
@@ -88,10 +91,10 @@ fn ref_elem_vol_with_pyramid_basis(
             fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
         ElementType::Quad4 => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
-        ElementType::Hex8 | ElementType::Hex20 => {
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
             fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
         }
-        ElementType::Prism6 | ElementType::Prism15 => {
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
             fem_space::ref_elem::equispaced_prism(order.max(1))
         }
         ElementType::Pyramid5 | ElementType::Pyramid13 => {
@@ -166,10 +169,11 @@ fn geom_jacobian<M: MeshTopology>(
         let det = j00 * j11 - j01 * j10;
         let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
         (jac, det)
-    } else if matches!(elem_type, ElementType::Hex8 | ElementType::Hex20) {
+    } else if matches!(elem_type, ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27) {
         // A curved hex reads its own geometry table; a straight one the
         // vertex connectivity.  `HexQk` is the element `ref_elem_vol(Hex8, o)`
         // returns, so `xi` means the same thing for basis and geometry.
+        // D614: the complete `Hex27` label shares the one CUBE family.
         let geo = fem_element::lagrange::HexQk::new(mesh.geom_order().max(1) as usize);
         let geo_nodes: &[u32] = if mesh.geom_order() > 1 {
             mesh.geometry_nodes(element)
@@ -179,9 +183,13 @@ fn geom_jacobian<M: MeshTopology>(
         let (j, det, _xp) =
             crate::vector_assembler::isoparametric_jacobian(mesh, geo_nodes, &geo, xi, 3);
         (j, det)
-    } else if matches!(elem_type, ElementType::Prism6 | ElementType::Prism15) {
+    } else if matches!(
+        elem_type,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
+    ) {
         // Wedge: `PrismPk` is both the solution basis ([`ref_elem_vol`]) and
-        // the geometry `geo_ref_elem_from_mesh` selects.
+        // the geometry `geo_ref_elem_from_mesh` selects.  D614: `Prism18`
+        // joins the one wedge family.
         let geo = fem_element::lagrange::PrismPk::new(mesh.geom_order().max(1) as usize);
         let geo_nodes: &[u32] = if mesh.geom_order() > 1 {
             mesh.geometry_nodes(element)
@@ -244,14 +252,19 @@ fn infer_fe_order(elem_type: ElementType, n_flux_dofs: usize) -> u8 {
         // D353 sweep: the `_ => 1` fallback happened to be right for the
         // hex only at p = 1 (HexQk(1) has 8 DOFs); at p >= 2 the estimator
         // would read an 8-DOF basis against a 27- (or 64-) DOF flux vector.
-        (ElementType::Hex8 | ElementType::Hex20, 8) => 1,
-        (ElementType::Hex8 | ElementType::Hex20, 27) => 2,
-        (ElementType::Hex8 | ElementType::Hex20, 64) => 3,
-        (ElementType::Hex8 | ElementType::Hex20, 125) => 4,
-        (ElementType::Hex8 | ElementType::Hex20, 216) => 5,
-        (ElementType::Prism6 | ElementType::Prism15, 6) => 1,
-        (ElementType::Prism6 | ElementType::Prism15, 18) => 2,
-        (ElementType::Prism6 | ElementType::Prism15, 40) => 3,
+        // D614: the complete `Hex27` label shares the hex counts.
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 8) => 1,
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 27) => 2,
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 64) => 3,
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 125) => 4,
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, 216) => 5,
+        // D614: `Prism18` shares the wedge counts ((p+1)²(p+2)/2) and the
+        // p = 4/5 arms close the table.
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 6) => 1,
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 18) => 2,
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 40) => 3,
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 75) => 4,
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, 126) => 5,
         (ElementType::Tet4, 4) => 1,
         (ElementType::Tet4, 10) => 2,
         (ElementType::Tet4, 20) => 3,
@@ -731,7 +744,7 @@ mod d366_fe_order_table {
     //! the same order — otherwise the energy integral reads an order-1 basis
     //! against an order-p flux vector (the D353 defect class).
 
-    use super::{infer_fe_order, pyramid_flux_element};
+    use super::{infer_fe_order, pyramid_flux_element, ref_elem_vol, ref_elem_vol_with_pyramid_basis};
     use fem_element::lagrange::PyramidBasisType;
     use fem_mesh::element_type::ElementType;
     use fem_space::ref_elem::{h1_field_element, h1_pyramid_slots};
@@ -794,6 +807,39 @@ mod d366_fe_order_table {
                     "Bergot p={p}: family reconstruction collapsed onto Fuentes"
                 );
             }
+        }
+    }
+
+    // ── D614: the high-order-cell labels in the flux table ──────────────────
+
+    /// D614: `Hex27` and `Prism18` flow through the flux-recovery table on
+    /// the same families as their sibling labels (one CUBE / one wedge
+    /// family), the flux-order inference covers them at every tabulated p,
+    /// and the pyramid threading still honours the explicit family.
+    #[test]
+    fn d614_flux_ref_elem_vol_high_order_labels() {
+        for et in [ElementType::Hex8, ElementType::Hex20, ElementType::Hex27] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 27, "{et:?}");
+            assert_eq!(ref_elem_vol(et, 1).n_dofs(), 8, "{et:?}");
+        }
+        for et in [ElementType::Prism6, ElementType::Prism15, ElementType::Prism18] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 18, "{et:?}");
+            assert_eq!(ref_elem_vol(et, 1).n_dofs(), 6, "{et:?}");
+        }
+        for et in [ElementType::Pyramid5, ElementType::Pyramid13] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 15, "{et:?}");
+            assert_eq!(
+                ref_elem_vol_with_pyramid_basis(et, 2, fem_element::lagrange::PyramidBasisType::Bergot)
+                    .n_dofs(),
+                14,
+                "{et:?} Bergot opt-out"
+            );
+        }
+        for (n, p) in [(8usize, 1u8), (27, 2), (64, 3), (125, 4), (216, 5)] {
+            assert_eq!(infer_fe_order(ElementType::Hex27, n), p, "Hex27 n={n}");
+        }
+        for (n, p) in [(6usize, 1u8), (18, 2), (40, 3), (75, 4), (126, 5)] {
+            assert_eq!(infer_fe_order(ElementType::Prism18, n), p, "Prism18 n={n}");
         }
     }
 }

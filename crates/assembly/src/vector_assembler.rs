@@ -71,6 +71,17 @@ pub(crate) fn vec_ref_elem_with_basis(
                     fem_element::raviart_thomas::QuadRTk::new_integrated_gll(order as usize),
                 );
             }
+            // D615: the hex `(GaussLobatto, IntegratedGLL)` assembly leg —
+            // MFEM `RT_FECollection(p, 3, GaussLobatto, IntegratedGLL)`.
+            // `HexRTk::new` *is* the IntegratedGLL variant (the LOR stack's
+            // pinned element); the same dof/slot/sign tables as the default
+            // `new_gauss_legendre`, so only the basis shape changes.  Without
+            // this arm the quad_igll request silently fell through to the
+            // GaussLegendre element (the D615 defect the d615 mass-parity
+            // test pins).
+            (SpaceType::HDiv, ElementType::Hex8) => {
+                return Box::new(fem_element::raviart_thomas::HexRTk::new(order as usize));
+            }
             _ => {}
         }
     }
@@ -181,10 +192,15 @@ pub fn geo_ref_elem_from_mesh(
     use fem_mesh::element_type::ElementType;
     let et = mesh.element_type(e);
     let g = mesh.geom_order();
+    // D614: the quadratic/complete cell labels (`Hex27`, `Prism18`) join the
+    // isoparametric set — at `geom_order == 1` they were served `None` by the
+    // gate below (every consumer then treated a straight high-order hex/wedge
+    // as an affine P1 simplex), and at `geom_order > 1` the family match had
+    // no arm for them either.
     let needs_iso = matches!(et,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-        | ElementType::Hex8 | ElementType::Hex20
-        | ElementType::Prism6 | ElementType::Prism15
+        | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+        | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
         | ElementType::Pyramid5 | ElementType::Pyramid13);
     if g == 1 && !needs_iso { return None; }
     let order = if g > 1 { g } else { 1 };
@@ -213,8 +229,10 @@ pub fn geo_ref_elem_from_mesh(
             // [0,1]² reference domain — use QuadQk for every geometric order.
             return Some(factory_ref_elem(FactoryElemType::Quad, g.max(1)));
         }
-        ElementType::Hex8 | ElementType::Hex20 => FactoryElemType::Hex,
-        ElementType::Prism6 | ElementType::Prism15 => FactoryElemType::Prism,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => FactoryElemType::Hex,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            FactoryElemType::Prism
+        }
         ElementType::Pyramid5 | ElementType::Pyramid13 if g <= 1 => {
             // D304: straight pyramids need the rational collapsed P1 in MFEM
             // vertex order — the layer-order factory element paired with

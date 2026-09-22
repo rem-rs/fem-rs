@@ -25,13 +25,13 @@ use crate::Assembler;
 /// carries (no local table): `Quad4` from order 3 on through the `QuadQk` GLL
 /// family re-framed onto the legacy `[-1,1]²` frame by [`QuadPM1Frame`]; hexes
 /// (`HexQ1` at order 1 — the H¹ space's own element — and `HexQk` on the
-/// fem-rs `[-1,1]³` cube from order 2 on, `Hex20` cells included); `Tet10`
-/// cells through the shared tet lattice; `Prism6` through the H¹ wedge family
+/// fem-rs `[-1,1]³` cube from order 2 on, `Hex20`/`Hex27` cells included —
+/// D614); `Tet10` cells through the shared tet lattice; wedges (`Prism6` and
+/// the quadratic `Prism15`/`Prism18` labels, D614) through the H¹ wedge family
 /// (`H1PrismPk`, MFEM entity slot order — the slots `DofManager::build_prism_h1`
-/// numbers the space's `element_dofs` in); `Pyramid5` through the H¹ Fuentes
-/// element (the slots `build_pyramid_pk` numbers).  Still unsupported (panic):
-/// `Hex27`/`Prism15+`/`Pyramid13+` cells — no `ref_elem` family and no space
-/// numbering exists for them (D581).
+/// numbers the space's `element_dofs` in); pyramids (`Pyramid5`/`Pyramid13`,
+/// D614) through the H¹ Fuentes element (the slots `build_pyramid_pk`
+/// numbers).
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match (elem_type, order) {
         (ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 | ElementType::Tet10, _) => {
@@ -42,11 +42,13 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
             inner: fem_space::ref_elem::gll_tensor(elem_type, order),
         }),
         (ElementType::Hex8, 1) => fem_space::ref_elem::fixed_order_tensor(elem_type, order),
-        (ElementType::Hex8 | ElementType::Hex20, _) => {
+        (ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27, _) => {
             fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
         }
-        (ElementType::Prism6, _) => fem_space::ref_elem::h1_prism_slots(order.max(1)),
-        (ElementType::Pyramid5, _) => fem_space::ref_elem::h1_pyramid_slots(
+        (ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18, _) => {
+            fem_space::ref_elem::h1_prism_slots(order.max(1))
+        }
+        (ElementType::Pyramid5 | ElementType::Pyramid13, _) => fem_space::ref_elem::h1_pyramid_slots(
             order.max(1),
             fem_element::lagrange::PyramidBasisType::default(),
         ),
@@ -103,15 +105,25 @@ fn is_simplex(elem_type: ElementType) -> bool {
 }
 
 /// Number of element **vertices** the vertex-sampled estimators loop over:
-/// the connectivity node count, except for quadratic simplices (Tet10) whose
-/// conn carries 6 extra edge nodes beyond the 4 vertices (MFEM tet10 order —
-/// `p_refine_tet4_to_tet10` writes `[v0 v1 v2 v3 | m01 m02 m03 m12 m13 m23]`).
-/// D235: without this guard the newly-dispatched Tet10 arm made
-/// `zz_estimator_stress` sample all 10 conn nodes through
-/// `ref_vertex_coords`'s `_ => {}` origin fallback — ten identical
-/// centroid "vertices" (silent garbage where the dispatch used to panic).
+/// the TRUE corner count, never the connectivity node count.  The quadratic
+/// simplices (Tet10) carry 6 extra edge nodes beyond the 4 vertices (MFEM
+/// tet10 order — `p_refine_tet4_to_tet10` writes
+/// `[v0 v1 v2 v3 | m01 m02 m03 m12 m13 m23]`), the quadratic/complete tensor
+/// cells carry 12/19/10/8 extra nodes (Hex20 → 8 corners, Hex27 → 8,
+/// Prism15/18 → 6, Pyramid13 → 5 — D614, the same Tet10/D235 lesson; the
+/// d581 corner-sampling contract pins the slot layouts).
 fn elem_vertex_count(elem_type: ElementType, npe: usize, dim: usize) -> usize {
-    if is_simplex(elem_type) && npe > dim + 1 { dim + 1 } else { npe }
+    if is_simplex(elem_type) {
+        if npe > dim + 1 { dim + 1 } else { npe }
+    } else {
+        match elem_type {
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 8,
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 6,
+            ElementType::Pyramid5 | ElementType::Pyramid13 => 5,
+            ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => 4,
+            _ => npe,
+        }
+    }
 }
 
 /// Geometric-mapping Jacobian at reference point `xi` on element `e`.
@@ -164,23 +176,28 @@ fn geom_jacobian<M: MeshTopology>(mesh: &M, elem: u32, nodes: &[u32], xi: &[f64]
         let det = j00 * j11 - j01 * j10;
         let jac = DMatrix::from_row_slice(2, 2, &[j00, j01, j10, j11]);
         (jac, det)
-    } else if matches!(elem_type, ElementType::Pyramid5) {
+    } else if matches!(elem_type, ElementType::Pyramid5 | ElementType::Pyramid13) {
         // D235/D365: the pyramid geometry is *not* the solution basis family
         // (the straight-pyramid map is the `PyramidPk(1)` layer-slot frame
         // with the D331 vertex permutation; a curved one its own order-`g`
         // Fuentes element) — exactly the cases the mesh crate's
         // `element_jacobian_at` already encodes.  Reuse it instead of a
         // hand-rolled pyramid Jacobian; the unit-pyramid frame is the same
-        // one `h1_pyramid_slots` evaluates.
+        // one `h1_pyramid_slots` evaluates.  D614: the `Pyramid13` quadratic
+        // label takes the same delegation.
         let (j, _xp) = fem_mesh::transformation::element_jacobian_at(mesh, elem, xi, dim);
         let det = j.determinant();
         (j, det)
     } else if matches!(
         elem_type,
         ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9
-            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Prism6
+            | ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27
+            | ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18
     ) {
-        // D250: isoparametric geometry (see the doc above).
+        // D250: isoparametric geometry (see the doc above).  D614: the
+        // `Hex27`/`Prism18` labels join — their straight geometry is the
+        // same corner trilinear/P1 map (`geo_ref_elem_from_mesh`'s `needs_iso`
+        // now covers them), a curved one their own order-`g` table.
         if let Some(geo) = crate::vector_assembler::geo_ref_elem_from_mesh(mesh, elem) {
             let geo_nodes = if mesh.geom_order() > 1 {
                 mesh.geometry_nodes(elem)
@@ -628,6 +645,31 @@ fn ref_vertex_coords(d: usize, npe: usize, k: usize) -> Vec<f64> {
         (3, 4, 1) => { xi[0] = 1.0; }
         (3, 4, 2) => { xi[1] = 1.0; }
         (3, 4, 3) => { xi[2] = 1.0; }
+        (3, 5, kk) => {
+            // D614: pyramid corners in the H¹ (Fuentes) slot order — the
+            // slots `h1_pyramid_slots(1)` anchors at the reference vertices
+            // (MFEM base ring 0,1,2,3 + apex 4).
+            match kk {
+                1 => { xi[0] = 1.0; }
+                2 => { xi[0] = 1.0; xi[1] = 1.0; }
+                3 => { xi[1] = 1.0; }
+                4 => { xi[2] = 1.0; }
+                _ => {}
+            }
+        }
+        (3, 6, kk) => {
+            // D614: wedge corners in the fem-rs reference frame (ξ segment)
+            // × ((η, ζ) triangle) — the corner slots of `h1_prism_slots(1)`
+            // / `PrismPk(1)` (d581 pin: H1 slots 0..5 = the corners).
+            match kk {
+                1 => { xi[1] = 1.0; }
+                2 => { xi[2] = 1.0; }
+                3 => { xi[0] = 1.0; }
+                4 => { xi[0] = 1.0; xi[1] = 1.0; }
+                5 => { xi[0] = 1.0; xi[2] = 1.0; }
+                _ => {}
+            }
+        }
         (3, 8, kk) => {
             // MFEM `CUBE::Vertices` ring order (matches the hex conn; see
             // the vertex_shapes hex arm note — the previous Morton mapping
@@ -2596,7 +2638,7 @@ mod d235_ref_elem_volume {
     //!     this cell; the earlier 0.2-magnitude warp variant FOLDED the
     //!     trilinear map, making |det J| non-polynomial and rule-dependent).
 
-    use super::{geom_jacobian, ref_elem_vol};
+    use super::{elem_vertex_count, geom_jacobian, ref_elem_vol};
     use fem_io::mfem::read_mfem_file;
     use fem_mesh::{ElementType, Mesh, MeshTopology};
 
@@ -2756,6 +2798,145 @@ mod d235_ref_elem_volume {
             }
             let total: f64 = vol.iter().sum();
             assert!((total - cpp_total).abs() < 1e-12, "Pyramid5 o={o} total: {total:.17e}");
+        }
+    }
+
+    // ── D614: high-order-cell wiring (tables / vertex guard / iso arm) ────
+
+    /// TRUE corner counts feed the vertex-sampled estimators — never the
+    /// connectivity length (the Tet10/D235 lesson, extended to the quadratic
+    /// tensor cells by D614).
+    #[test]
+    fn d614_elem_vertex_count_reports_true_corners() {
+        let d = 3usize;
+        assert_eq!(elem_vertex_count(ElementType::Hex8, 8, d), 8);
+        assert_eq!(elem_vertex_count(ElementType::Hex20, 20, d), 8);
+        assert_eq!(elem_vertex_count(ElementType::Hex27, 27, d), 8);
+        assert_eq!(elem_vertex_count(ElementType::Prism6, 6, d), 6);
+        assert_eq!(elem_vertex_count(ElementType::Prism15, 15, d), 6);
+        assert_eq!(elem_vertex_count(ElementType::Prism18, 18, d), 6);
+        assert_eq!(elem_vertex_count(ElementType::Pyramid5, 5, d), 5);
+        assert_eq!(elem_vertex_count(ElementType::Pyramid13, 13, d), 5);
+        // Quadratic simplices keep the D235 guard.
+        assert_eq!(elem_vertex_count(ElementType::Tet10, 10, d), 4);
+        assert_eq!(elem_vertex_count(ElementType::Tri6, 6, 2), 3);
+    }
+
+    /// The D614 table arms land on the D581-pinned families and frames.
+    #[test]
+    fn d614_ref_elem_vol_high_order_arms() {
+        // Hexes: HexQk on [-1,1]^3 (order 2 lattice = the Hex27 node set).
+        let h27 = ref_elem_vol(ElementType::Hex27, 2);
+        assert_eq!(h27.n_dofs(), 27);
+        assert_eq!(h27.dof_coords()[0], vec![-1.0, -1.0, -1.0]);
+        assert_eq!(ref_elem_vol(ElementType::Hex20, 1).n_dofs(), 8);
+        assert_eq!(ref_elem_vol(ElementType::Hex27, 1).n_dofs(), 8);
+        // Wedges: H1PrismPk (MFEM entity order) — 18 dofs at order 2, the
+        // shared family of both quadratic prism labels.
+        for et in [ElementType::Prism6, ElementType::Prism15, ElementType::Prism18] {
+            let e = ref_elem_vol(et, 2);
+            assert_eq!(e.n_dofs(), 18, "{et:?}");
+            assert_eq!(e.dof_coords()[0], vec![0.0, 0.0, 0.0], "{et:?} frame origin");
+        }
+        // Pyramids: Fuentes (default pyr_type) — p(p²+3)+1 = 15 dofs at p=2.
+        for et in [ElementType::Pyramid5, ElementType::Pyramid13] {
+            let e = ref_elem_vol(et, 2);
+            assert_eq!(e.n_dofs(), 15, "{et:?}");
+            assert_eq!(e.dof_coords()[0], vec![0.0, 0.0, 0.0], "{et:?} frame origin");
+        }
+    }
+
+    /// Straight unit high-order cells through the (extended) isoparametric
+    /// arm of `geom_jacobian`: the trilinear hex / P1 wedge / P1 pyramid maps
+    /// at the reference centre.  MFEM GetElementVolume sanity: det(hex) = 1/8,
+    /// det(wedge) = 1/2, det(pyramid) follows the collapsed map (cross-checked
+    /// against `Mesh::element_jacobian`, the D339 oracle).
+    #[test]
+    fn d614_geom_jacobian_isoparametric_arms_straight_cells() {
+        fn single_cell(coords: Vec<f64>, conn: Vec<u32>, et: ElementType) -> Mesh<3> {
+            Mesh::<3>::uniform(coords, conn, vec![1], et, vec![], vec![], ElementType::Tri3)
+        }
+        let hex27 = {
+            // First 8 slots: the corners in the MFEM `CUBE::Vertices` ring
+            // order (= `HexQk(1)`'s corner slot order — the layout the
+            // trilinear geometry map reads); the rest fill the lattice.
+            let ring: [[f64; 3]; 8] = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ];
+            let mut coords: Vec<f64> = ring.iter().flat_map(|p| p.to_vec()).collect();
+            coords.resize(27 * 3, 0.5);
+            single_cell(coords, (0..27).collect(), ElementType::Hex27)
+        };
+        let prism18 = {
+            let verts: [[f64; 3]; 6] = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ];
+            let mut coords = verts.iter().flat_map(|p| p.to_vec()).collect::<Vec<f64>>();
+            coords.resize(18 * 3, 0.5);
+            single_cell(coords, (0..18).collect(), ElementType::Prism18)
+        };
+        let pyramid13 = {
+            let verts: [[f64; 3]; 5] = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ];
+            let mut coords = verts.iter().flat_map(|p| p.to_vec()).collect::<Vec<f64>>();
+            coords.resize(13 * 3, 0.25);
+            single_cell(coords, (0..13).collect(), ElementType::Pyramid13)
+        };
+
+        // Hex27: straight geometry = corner trilinear map; at the centre
+        // J = diag(1/2), det = 1/8 — MFEM's straight CUBE Jacobian.
+        let nodes = hex27.element_nodes(0);
+        let (j, det) = geom_jacobian(&hex27, 0, nodes, &[0.0, 0.0, 0.0], 3, ElementType::Hex27);
+        assert!((det - 1.0 / 8.0).abs() < 1e-15, "Hex27 centre det {det:.17e}");
+        for kk in 0..3 {
+            assert!((j[(kk, kk)] - 0.5).abs() < 1e-15, "Hex27 centre J diag");
+        }
+
+        // Prism18: unit right prism, det = ±1 by frame orientation (the
+        // axes-permuted affine map) — the wedge volume is 1/2 because the
+        // fem-rs reference prism (ξ segment × unit triangle) has volume 1/2
+        // (the MFEM GetElementVolume truth of the d235 round).
+        let nodes = prism18.element_nodes(0);
+        let (j, det) = geom_jacobian(&prism18, 0, nodes, &[0.5, 1.0 / 3.0, 1.0 / 3.0], 3, ElementType::Prism18);
+        assert!((det.abs() - 1.0).abs() < 1e-14, "Prism18 centre det {det:.17e}");
+        let _ = j;
+
+        // Pyramid13: delegated to `Mesh::element_jacobian` — must agree with
+        // it pointwise (the D339 oracle), not with a corner-difference map.
+        let nodes = pyramid13.element_nodes(0);
+        let xi = [0.25, 0.25, 0.125];
+        let (j, det) = geom_jacobian(&pyramid13, 0, nodes, &xi, 3, ElementType::Pyramid13);
+        let (j_mesh, _xp) =
+            fem_mesh::transformation::element_jacobian_at(&pyramid13, 0, &xi, 3);
+        let det_mesh = j_mesh.determinant();
+        assert!(
+            (det - det_mesh).abs() < 1e-15,
+            "Pyramid13 det {det:.17e} vs element_jacobian {det_mesh:.17e}"
+        );
+        for kk in 0..3 {
+            for dd in 0..3 {
+                assert!(
+                    (j[(kk, dd)] - j_mesh[(kk, dd)]).abs() < 1e-14,
+                    "Pyramid13 J[{kk}][{dd}] disagrees with element_jacobian"
+                );
+            }
         }
     }
 }

@@ -21,13 +21,25 @@ use fem_space::fe_space::{FESpace, SpaceType};
 /// D364: delegated to the single source of truth.  Arm-for-arm identical to
 /// the historical local table: H¹-slot simplices (D185/D157/D202 — pairs with
 /// `space.element_dofs`) and the D265 hex arm (`HexQk` GLL slots on `[-1,1]³`,
-/// `o.max(1)`).  Same panic set.
+/// `o.max(1)`).  D614: the hex arm covers every hexahedral cell label
+/// (`Hex20`/`Hex27` share the one `HexQk` CUBE family), and the wedge /
+/// pyramid arms route the H¹ families the DofManager numbers the spaces in
+/// (`H1PrismPk` MFEM entity order, Fuentes pyramid).
 fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> {
     match elem_type {
         ElementType::Tri3 | ElementType::Tri6 | ElementType::Tet4 => {
             fem_space::ref_elem::h1_simplex_slots(elem_type, order)
         }
-        ElementType::Hex8 => fem_space::ref_elem::gll_tensor(elem_type, order.max(1)),
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => {
+            fem_space::ref_elem::gll_tensor(elem_type, order.max(1))
+        }
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            fem_space::ref_elem::h1_prism_slots(order.max(1))
+        }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => fem_space::ref_elem::h1_pyramid_slots(
+            order.max(1),
+            fem_element::lagrange::PyramidBasisType::default(),
+        ),
         _ => panic!("ref_elem_vol: unsupported (element_type={elem_type:?}, order={order})"),
     }
 }
@@ -39,10 +51,18 @@ fn ref_elem_vol(elem_type: ElementType, order: u8) -> Box<dyn ReferenceElement> 
 /// center is the origin.  Quad bases live on `[0,1]²` — same `1/(d+1)` rule
 /// as the simplices.
 fn ref_centroid(elem_type: ElementType, dim: usize) -> Vec<f64> {
-    if elem_type == ElementType::Hex8 {
-        vec![0.0; 3]
-    } else {
-        vec![1.0 / (dim as f64 + 1.0); dim]
+    match elem_type {
+        // The hex bases (`HexNDk`/`HexRTk`/`HexQk`) live on `[-1,1]³` —
+        // centre = origin.  D614: `Hex20`/`Hex27` share the frame.
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => vec![0.0; 3],
+        // D614: the fem-rs reference wedge is (ξ segment) × ((η, ζ) triangle),
+        // centre (½, ⅓, ⅓); the reference pyramid's centroid is (½, ½, ¼)
+        // (base ring at ζ = 0, apex at (0, 0, 1)).
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            vec![0.5, 1.0 / 3.0, 1.0 / 3.0]
+        }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => vec![0.5, 0.5, 0.25],
+        _ => vec![1.0 / (dim as f64 + 1.0); dim],
     }
 }
 
@@ -53,10 +73,22 @@ fn ref_centroid(elem_type: ElementType, dim: usize) -> Vec<f64> {
 /// (nodes 0,1,2) is even coplanar — the simplex transform degenerates.  Same
 /// recipe as the assembler and the D242/D250 error arms:
 /// `geo_ref_elem_from_mesh` + `isoparametric_jacobian`.
+/// D265: whether the element must go through the isoparametric geometry
+/// instead of the corner-difference simplex transform.  Straight (and curved)
+/// Quad4/Hex8 elements: their bases live on `[0,1]²`/`[-1,1]³`, a corner
+/// difference is only exact for parallelepipeds, and the hex corner triple
+/// (nodes 0,1,2) is even coplanar — the simplex transform degenerates.  Same
+/// recipe as the assembler and the D242/D250 error arms:
+/// `geo_ref_elem_from_mesh` + `isoparametric_jacobian`.  D614: every 3-D
+/// non-simplex cell label joins (`Hex20`/`Hex27`/`Prism15`/`Prism18`/
+/// `Pyramid13`) — the wedge/pyramid corner triples are equally coplanar and
+/// their geometry families are served by `geo_ref_elem_from_mesh`.
 fn is_iso_elem(elem_type: ElementType, dim: usize) -> bool {
     match elem_type {
         ElementType::Quad4 => dim == 2,
-        ElementType::Hex8 => dim == 3,
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => dim == 3,
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => dim == 3,
+        ElementType::Pyramid5 | ElementType::Pyramid13 => dim == 3,
         _ => false,
     }
 }
@@ -656,8 +688,16 @@ pub fn recover_gradient_nodal<S: FESpace>(space: &S, dofs: &[f64]) -> Vec<Vec<f6
 
         // Distribute to element vertices: simplices use the first dim+1
         // nodes; hexes all 8 corners (MFEM `CUBE::Vertices` order — the
-        // first 8 slots of the element node list).
-        let n_verts = if elem_type == ElementType::Hex8 { 8 } else { dim + 1 };
+        // first 8 slots of the element node list).  D614: the higher-order
+        // cell labels distribute over their TRUE corner counts
+        // (Hex20/Hex27 → 8, wedges → 6, pyramids → 5), never the conn
+        // length (the Tet10/D235 lesson).
+        let n_verts = match elem_type {
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 8,
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 6,
+            ElementType::Pyramid5 | ElementType::Pyramid13 => 5,
+            _ => dim + 1,
+        };
         for v in 0..n_verts {
             let node = nodes[v] as usize;
             area_accum[node] += elem_area;
@@ -1041,6 +1081,39 @@ mod tests {
         assert_eq!(indicators.len(), space.mesh().n_elements());
         let total: f64 = indicators.iter().sum();
         assert!(total > 0.0, "total Kelly indicator should be > 0, got {total}");
+    }
+
+    // ── D614: the high-order-cell labels in the postprocess table ───────────
+
+    /// D614: every hexahedral/wedge/pyramid cell label lands on its H¹
+    /// family in the postprocess `ref_elem_vol` table (one CUBE / one wedge
+    /// / one Fuentes pyramid family), so the element-wise kernels sample the
+    /// slots `DofManager` numbers.
+    #[test]
+    fn d614_postprocess_ref_elem_vol_high_order_labels() {
+        for et in [ElementType::Hex8, ElementType::Hex20, ElementType::Hex27] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 27, "{et:?}");
+            assert_eq!(ref_elem_vol(et, 1).n_dofs(), 8, "{et:?}");
+            assert!(is_iso_elem(et, 3), "{et:?} routes through the iso geometry");
+        }
+        for et in [ElementType::Prism6, ElementType::Prism15, ElementType::Prism18] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 18, "{et:?}");
+            assert_eq!(ref_elem_vol(et, 1).n_dofs(), 6, "{et:?}");
+            assert!(is_iso_elem(et, 3), "{et:?} routes through the iso geometry");
+        }
+        for et in [ElementType::Pyramid5, ElementType::Pyramid13] {
+            assert_eq!(ref_elem_vol(et, 2).n_dofs(), 15, "{et:?}");
+            assert_eq!(ref_elem_vol(et, 1).n_dofs(), 5, "{et:?}");
+            assert!(is_iso_elem(et, 3), "{et:?} routes through the iso geometry");
+        }
+        // Frame anchors: hex centre at the origin, wedge centroid in the
+        // (ξ segment)×(triangle) frame, pyramid centroid (½, ½, ¼).
+        assert_eq!(ref_centroid(ElementType::Hex27, 3), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            ref_centroid(ElementType::Prism18, 3),
+            vec![0.5, 1.0 / 3.0, 1.0 / 3.0]
+        );
+        assert_eq!(ref_centroid(ElementType::Pyramid13, 3), vec![0.5, 0.5, 0.25]);
     }
 }
 
