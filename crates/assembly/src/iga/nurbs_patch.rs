@@ -1705,3 +1705,274 @@ fn dof_indices(dof: usize, d1d: &[usize; 3]) -> (usize, usize, usize) {
     let jdx = dof - jdz * d1d[0] * d1d[1] - jdy * d1d[0];
     (jdx, jdy, jdz)
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Patch-wise partial assembly (`-patcha -fint -pa`): DiffusionIntegrator's
+// AssembleNURBSPA / AddMultNURBSPA / AddMultPatchPA.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// One patch of the matrix-free patch-PA operator: the [`PatchBasisData`]
+/// of `SetupPatchBasisData` and the patch's VDOF map (`GetPatchVDofs`,
+/// x-fastest patch-CP order).
+struct PatchPaPatch {
+    basis: PatchBasisData,
+    vdofs: Vec<usize>,
+}
+
+/// The matrix-free patch-wise operator behind MFEM's
+/// `BilinearForm::SetAssemblyLevel(AssemblyLevel::PARTIAL)` +
+/// `DiffusionIntegrator` in `Mode::PATCHWISE` (`nurbs_patch_ex1 -pa -fint`):
+/// `AssembleNURBSPA` runs `SetupPatchBasisData` + `SetupPatchPA` per patch,
+/// and every apply is `AddMultNURBSPA` — per patch, gather the patch VDOFs,
+/// run the `AddMultPatchPA` tensor contraction, and scatter-add.
+///
+/// **MFEM quirk mirrored here (D562):** `SetupPatchPA` writes the single
+/// member `pa_data` on every call, so after `AssembleNURBSPA`'s patch loop
+/// the member holds the **last patch's** data — and `AddMultPatchPA` reads
+/// that shared array for *every* patch (verifiable by instrumenting
+/// `bilininteg_diffusion_pa.cpp`; on multi-patch weighted meshes like
+/// ball-nurbs this makes the PA operator differ from the assembled one and
+/// is exactly what the `-pa` reference log embeds).  [`Self::pa_data`] is
+/// therefore the last patch's data, shared by all patches.
+pub struct PatchPaDiffusion {
+    n_dofs: usize,
+    pa_data: Vec<f64>,
+    patches: Vec<PatchPaPatch>,
+}
+
+/// `DiffusionIntegrator::AssembleNURBSPA(fes)`: per-patch setup of the
+/// matrix-free operator for `-Δ` with the constant diffusivity `kappa`.
+pub fn setup_patch_pa_diffusion(
+    space: &NurbsFESpace,
+    geo: &NurbsMeshGeometry,
+    rules: &NurbsPatchRules,
+    kappa: f64,
+) -> PatchPaDiffusion {
+    let dim = space.dim();
+    assert_eq!(dim, 3, "patch-wise PA supports 3D only (as in MFEM)");
+    let ext = space.extension();
+    let mut patches = Vec::with_capacity(ext.n_patches());
+    let mut pa_data = Vec::new();
+    for p in 0..ext.n_patches() {
+        let pkv = ext.patch_knot_vectors(p).expect("patch knot vectors");
+        let basis = rules.setup_basis_data(p, &pkv);
+        // The C++ member `pa_data` is overwritten per patch; mirroring it
+        // leaves the last patch's data in place.
+        pa_data = setup_patch_pa_data(space, geo, rules, p, &basis, dim, kappa, false);
+        let ndof = basis.d1d[0] * basis.d1d[1] * basis.d1d[2];
+        let mut vdofs = Vec::with_capacity(ndof);
+        for k in 0..basis.d1d[2] {
+            for j in 0..basis.d1d[1] {
+                for i in 0..basis.d1d[0] {
+                    vdofs.push(ext.patch_dof(p, &[i, j, k]).expect("patch DOF in range"));
+                }
+            }
+        }
+        patches.push(PatchPaPatch { basis, vdofs });
+    }
+    PatchPaDiffusion { n_dofs: space.n_dofs(), pa_data, patches }
+}
+
+impl PatchPaDiffusion {
+    /// Number of true DOFs the operator acts on.
+    pub fn n_dofs(&self) -> usize {
+        self.n_dofs
+    }
+
+    /// Test hook (D562): the single-patch contraction `AddMultPatchPA`.
+    pub fn add_mult_patch_pa_hook(&self, patch: usize, x: &[f64], y: &mut [f64]) {
+        add_mult_patch_pa(&self.patches[patch], &self.pa_data, x, y);
+    }
+
+    /// Test hook (D562): overwrite the shared `pa_data` (mirrors the C++
+    /// member being clobbered by a later `SetupPatchPA` call).
+    pub fn set_shared_pa_data(&mut self, pa_data: Vec<f64>) {
+        self.pa_data = pa_data;
+    }
+
+    /// Test hook (D562): recompute the patch's own `SetupPatchPA` data.
+    pub fn compute_pa_data(&self, space: &NurbsFESpace, geo: &NurbsMeshGeometry,
+                           rules: &NurbsPatchRules, kappa: f64, patch: usize) -> Vec<f64> {
+        let dim = space.dim();
+        let pkv = space.extension().patch_knot_vectors(patch).unwrap();
+        let basis = rules.setup_basis_data(patch, &pkv);
+        setup_patch_pa_data(space, geo, rules, patch, &basis, dim, kappa, false)
+    }
+
+    /// The patch VDOF list (`GetPatchVDofs`).
+    pub fn patch_vdofs(&self, patch: usize) -> &[usize] {
+        &self.patches[patch].vdofs
+    }
+
+    /// `DiffusionIntegrator::AddMultNURBSPA(x, y)`: `y += A·x`, patch by
+    /// patch (`GetSubVector` / `AddElementVector` on the patch VDOFs).
+    pub fn add_mult_nurbs_pa(&self, x: &[f64], y: &mut [f64]) {
+        assert_eq!(x.len(), self.n_dofs, "PA apply: x size");
+        assert_eq!(y.len(), self.n_dofs, "PA apply: y size");
+        let max_ndof = self
+            .patches
+            .iter()
+            .map(|p| p.vdofs.len())
+            .max()
+            .unwrap_or(0);
+        let mut xp = vec![0.0_f64; max_ndof];
+        let mut yp = vec![0.0_f64; max_ndof];
+        for patch in &self.patches {
+            let ndof = patch.vdofs.len();
+            for (l, &g) in patch.vdofs.iter().enumerate() {
+                xp[l] = x[g];
+            }
+            yp[..ndof].iter_mut().for_each(|v| *v = 0.0);
+            add_mult_patch_pa(patch, &self.pa_data, &xp, &mut yp);
+            for (l, &g) in patch.vdofs.iter().enumerate() {
+                y[g] += yp[l];
+            }
+        }
+    }
+}
+
+/// `DiffusionIntegrator::AddMultPatchPA(patch, xp, yp)` — the full-quadrature
+/// tensor contraction (`bilininteg_diffusion_pa.cpp`), transcribing the C++
+/// loop and scratch-layout order operation for operation: `X`/`Y` shaped
+/// `D1D`, `grad` at the patch quadrature points, the `gradXY`/`gradX`
+/// workspaces shared between the forward and backward passes.  `pa_data` is
+/// the shared quadrature-data array (the C++ member, which the last
+/// `SetupPatchPA` call leaves behind — see [`PatchPaDiffusion`]).
+fn add_mult_patch_pa(
+    patch: &PatchPaPatch,
+    pa_data: &[f64],
+    x: &[f64],
+    y: &mut [f64],
+) {
+    let basis = &patch.basis;
+    let (q1d, d1d) = (&basis.q1d, &basis.d1d);
+    let qpoint = |qx: usize, qy: usize, qz: usize| qx + (qy + qz * q1d[1]) * q1d[0];
+    let m_x = q1d[0].max(d1d[0]);
+    let m_y = q1d[1].max(d1d[1]);
+    let nq = q1d[0] * q1d[1] * q1d[2];
+
+    let mut grad = [vec![0.0_f64; nq], vec![0.0_f64; nq], vec![0.0_f64; nq]];
+    let mut grad_xy = vec![0.0_f64; 3 * m_x * m_y];
+    let mut grad_x = vec![0.0_f64; 3 * m_x];
+    let gxy = |d: usize, i: usize, j: usize| d * m_x * m_y + i * m_y + j;
+
+    // X → grad at the quadrature points.
+    for dz in 0..d1d[2] {
+        for qy in 0..q1d[1] {
+            for qx in 0..q1d[0] {
+                for d in 0..3 {
+                    grad_xy[d * m_x * m_y + qx * m_y + qy] = 0.0;
+                }
+            }
+        }
+        for dy in 0..d1d[1] {
+                for qx in 0..q1d[0] {
+                    grad_x[qx] = 0.0;
+                    grad_x[m_x + qx] = 0.0;
+                }
+                for dx in 0..d1d[0] {
+                    let s = x[dx + d1d[0] * (dy + d1d[1] * dz)];
+                    for qx in basis.min_d[0][dx]..=basis.max_d[0][dx] {
+                        grad_x[qx] += s * basis.b[0][qx * d1d[0] + dx];
+                        grad_x[m_x + qx] += s * basis.g[0][qx * d1d[0] + dx];
+                    }
+                }
+                for qy in basis.min_d[1][dy]..=basis.max_d[1][dy] {
+                    let wy = basis.b[1][qy * d1d[1] + dy];
+                    let w_dy = basis.g[1][qy * d1d[1] + dy];
+                    for qx in 0..q1d[0] {
+                        let wx = grad_x[qx];
+                        let w_dx = grad_x[m_x + qx];
+                        grad_xy[gxy(0, qx, qy)] += w_dx * wy;
+                        grad_xy[gxy(1, qx, qy)] += wx * w_dy;
+                        grad_xy[gxy(2, qx, qy)] += wx * wy;
+                    }
+                }
+            }
+            for qz in basis.min_d[2][dz]..=basis.max_d[2][dz] {
+                let wz = basis.b[2][qz * d1d[2] + dz];
+                let w_dz = basis.g[2][qz * d1d[2] + dz];
+                for qy in 0..q1d[1] {
+                    for qx in 0..q1d[0] {
+                        let q = qpoint(qx, qy, qz);
+                        grad[0][q] += grad_xy[gxy(0, qx, qy)] * wz;
+                        grad[1][q] += grad_xy[gxy(1, qx, qy)] * wz;
+                        grad[2][q] += grad_xy[gxy(2, qx, qy)] * w_dz;
+                    }
+                }
+            }
+        }
+
+    // D·∇ at every quadrature point (symmetric 3×3 diffusivity: D =
+    // w/detJ·adj(J)·adj(J)ᵀ, stored as 6 entries per point).
+    for qz in 0..q1d[2] {
+        for qy in 0..q1d[1] {
+            for qx in 0..q1d[0] {
+                let q = qpoint(qx, qy, qz);
+                let o00 = pa_data[6 * q];
+                let o01 = pa_data[6 * q + 1];
+                let o02 = pa_data[6 * q + 2];
+                let o11 = pa_data[6 * q + 3];
+                let o12 = pa_data[6 * q + 4];
+                let o22 = pa_data[6 * q + 5];
+                let g0 = grad[0][q];
+                let g1 = grad[1][q];
+                let g2 = grad[2][q];
+                grad[0][q] = (o00 * g0) + (o01 * g1) + (o02 * g2);
+                grad[1][q] = (o01 * g0) + (o11 * g1) + (o12 * g2);
+                grad[2][q] = (o02 * g0) + (o12 * g1) + (o22 * g2);
+            }
+        }
+    }
+
+    // grad → Y.
+    for qz in 0..q1d[2] {
+        for dy in 0..d1d[1] {
+            for dx in 0..d1d[0] {
+                for d in 0..3 {
+                    grad_xy[d * m_x * m_y + dx * m_y + dy] = 0.0;
+                }
+            }
+        }
+        for qy in 0..q1d[1] {
+            for dx in 0..d1d[0] {
+                for d in 0..3 {
+                    grad_x[d * m_x + dx] = 0.0;
+                }
+            }
+            for qx in 0..q1d[0] {
+                let q = qpoint(qx, qy, qz);
+                let g_x = grad[0][q];
+                let g_y = grad[1][q];
+                let g_z = grad[2][q];
+                for dx in basis.min_q[0][qx]..=basis.max_q[0][qx] {
+                    let wx = basis.b[0][qx * d1d[0] + dx];
+                    let w_dx = basis.g[0][qx * d1d[0] + dx];
+                    grad_x[dx] += g_x * w_dx;
+                    grad_x[m_x + dx] += g_y * wx;
+                    grad_x[2 * m_x + dx] += g_z * wx;
+                }
+            }
+            for dy in basis.min_q[1][qy]..=basis.max_q[1][qy] {
+                let wy = basis.b[1][qy * d1d[1] + dy];
+                let w_dy = basis.g[1][qy * d1d[1] + dy];
+                for dx in 0..d1d[0] {
+                    grad_xy[dx * m_y + dy] += grad_x[dx] * wy;
+                    grad_xy[m_x * m_y + dx * m_y + dy] += grad_x[m_x + dx] * w_dy;
+                    grad_xy[2 * m_x * m_y + dx * m_y + dy] += grad_x[2 * m_x + dx] * wy;
+                }
+            }
+        }
+        for dz in basis.min_q[2][qz]..=basis.max_q[2][qz] {
+            let wz = basis.b[2][qz * d1d[2] + dz];
+            let w_dz = basis.g[2][qz * d1d[2] + dz];
+            for dy in 0..d1d[1] {
+                for dx in 0..d1d[0] {
+                    y[dx + d1d[0] * (dy + d1d[1] * dz)] += (grad_xy[dx * m_y + dy] * wz)
+                        + (grad_xy[m_x * m_y + dx * m_y + dy] * wz)
+                        + (grad_xy[2 * m_x * m_y + dx * m_y + dy] * w_dz);
+                }
+            }
+        }
+    }
+}

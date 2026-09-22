@@ -21,6 +21,7 @@
 //! ## Re-exports from `linlvo`
 //! - `BlrMatrix`, `BlrBlock` �?Block Low-Rank compression for direct solvers
 
+pub mod block;
 pub mod complex_csr;
 pub mod complex_dense;
 pub mod coo;
@@ -30,29 +31,35 @@ pub mod nnls;
 pub mod qr;
 pub mod sparsity;
 pub mod vector;
-pub mod block;
 
 #[cfg(feature = "direct")]
 pub mod solver_types;
 
+pub use block::{BlockMatrix, BlockVector};
 pub use coo::CooMatrix;
 pub use csr::CsrMatrix;
-pub use csr::{spadd, csr_spmm};
-pub use nnls::{NnlsSolver, QrResidualMode};
-pub use qr::{apply_q, apply_q_transpose, qr_factor, solve_upper_triangular};
+pub use csr::{csr_spmm, spadd};
 #[cfg(feature = "parallel")]
-pub use csr::{csr_spmm_parallel, spadd_parallel, spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS};
+pub use csr::{
+    csr_spmm_parallel, spadd_parallel, spmv_parallel_min_rows, FEM_LINALG_SPMV_PARALLEL_MIN_ROWS,
+};
+pub use nnls::{NnlsSolver, QrResidualMode};
+pub use qr::{
+    apply_q, apply_q_blocked, apply_q_transpose, apply_q_transpose_blocked, qr_factor,
+    qr_factor_blocked, solve_upper_triangular,
+};
 pub use sparsity::SparsityPattern;
 pub use vector::Vector;
-pub use block::{BlockMatrix, BlockVector};
 
 // Re-exports from linlvo for Block Low-Rank compression
 #[cfg(feature = "direct")]
 #[doc(inline)]
-pub use linlvo::direct::{BlrBlock, BlrMatrix, compress_block, compress_block_adaptive};
+pub use linlvo::direct::{compress_block, compress_block_adaptive, BlrBlock, BlrMatrix};
 
 #[cfg(feature = "direct")]
-pub use solver_types::{SolverConfig, SolverError, SolveResult, PrintLevel, fem_to_linlvo_csr, into_result};
+pub use solver_types::{
+    fem_to_linlvo_csr, into_result, PrintLevel, SolveResult, SolverConfig, SolverError,
+};
 
 // ─── Kani proof harnesses (formal verification) ────────────────────────
 // These are only compiled by the Kani verifier (`cargo kani`).
@@ -76,11 +83,25 @@ mod kani_proofs {
             col_idx.push(i as u32);
             values.push(2.0);
         }
-        let a = CsrMatrix { nrows: n, ncols: n, row_ptr, col_idx, values };
-        let x: Vec<f64> = (0..n).map(|_| { let v: f64 = kani::any(); kani::assume(v.is_finite()); v }).collect();
+        let a = CsrMatrix {
+            nrows: n,
+            ncols: n,
+            row_ptr,
+            col_idx,
+            values,
+        };
+        let x: Vec<f64> = (0..n)
+            .map(|_| {
+                let v: f64 = kani::any();
+                kani::assume(v.is_finite());
+                v
+            })
+            .collect();
         let mut y = vec![0.0; n];
         a.spmv(&x, &mut y);
-        for v in &y { assert!(v.is_finite()); }
+        for v in &y {
+            assert!(v.is_finite());
+        }
     }
 
     /// Prove that `row_ptr` is monotonically increasing.
@@ -97,6 +118,8 @@ mod kani_proofs {
             row_ptr[i + 1] = row_ptr[i] + d;
         }
         row_ptr[n] = nnz;
-        for i in 0..n { assert!(row_ptr[i] <= row_ptr[i + 1]); }
+        for i in 0..n {
+            assert!(row_ptr[i] <= row_ptr[i + 1]);
+        }
     }
 }

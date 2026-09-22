@@ -37,12 +37,27 @@
 //!   `SparseMatrix::EliminateRowCol #2` when an essential row references a
 //!   column whose row has no symmetric entry (single straight-patch
 //!   geometry, e.g. `beam -patcha -fint`) — both mirrored below (D553).
+//! * `-patcha` + `-pa` (partial assembly): the matrix-free patch operator
+//!   [`fem_assembly::nurbs_patch::setup_patch_pa_diffusion`] (`AssembleNURBSPA`
+//!   = `SetupPatchBasisData` + `SetupPatchPA` per patch; apply =
+//!   `AddMultNURBSPA` → `AddMultPatchPA` tensor contraction).  MFEM solves it
+//!   with **plain CG, no preconditioner** — `UsesTensorBasis` is false for a
+//!   NURBS space (`NURBSFiniteElement` is not a `TensorBasisElement`), so
+//!   `AssembleAndSolve` takes the `CG(*A, B, X, 1, 400, 1e-20, 0.0)` branch
+//!   and the `OperatorJacobiSmoother` branch (whose `AssembleDiagonal` path
+//!   is unreachable here — and would abort: `AssembleDiagonalPA` reads the
+//!   element-wise `maps` the patchwise setup never builds) is dead.  The
+//!   essential DOFs enter through the `ConstrainedOperator` wrapping
+//!   (`operator.cpp`): essential inputs are zeroed before the apply and the
+//!   essential outputs set to `X[ess]` (= 0) after; the RHS becomes `b` with
+//!   its essential entries zeroed.  Note `-pa -rint` selects the same
+//!   `Mode::PATCHWISE` full-quadrature operator as `-pa -fint` (the reduced
+//!   mode requires `!pa`).
 //! * Not ported (each prints a gap list and `exit(3)` rather than silently
 //!   running a different problem):
 //!   - `-incdeg > 0`: MFEM's `NURBSPatch::DegreeElevate` raises the order
 //!     while keeping C⁰ joints at the original knots (`NCP += NE·t`), which is
 //!     *not* K-refinement (`NCP = spans + order`); fem-rs has no equivalent.
-//!   - `-pa`: patch-wise partial assembly.
 //! * Not ported, silently (they do not change the printed numbers): the GLVis
 //!   socket (`-vis`/`-p`), `refined.mesh`/`sol.gf` output, `-d cpu`, and the
 //!   `Options used:` / `Device configuration:` / `Timing for ...` banners
@@ -52,11 +67,14 @@ use fem_assembly::nurbs_patch::{
     apply_to_knot_intervals, assemble_diffusion_patch_rules,
     assemble_diffusion_patch_rules_exact, assemble_diffusion_patchwise,
     assemble_diffusion_patchwise_reduced, assemble_domain_lf_exact,
-    assemble_diffusion_standard_exact, segment_rule, NurbsMeshGeometry, NurbsPatchRules,
+    assemble_diffusion_standard_exact, segment_rule, setup_patch_pa_diffusion,
+    NurbsMeshGeometry, NurbsPatchRules,
 };
 
-use fem_linalg::{fem_to_linlvo_csr, CsrMatrix};
-use fem_solver::{fmt_g, solve_pcg, GSSmoother, SolverError};
+use fem_linalg::{fem_to_linlvo_csr, CsrMatrix, PrintLevel, SolverConfig};
+use fem_solver::{
+    fmt_g, solve_pcg, solve_pcg_operator_precond, GSSmoother, SolverError,
+};
 use fem_space::constraints::form_linear_system;
 use fem_space::nurbs_extension::NurbsExtension;
 use fem_space::nurbs_fe_space::NurbsFESpace;
@@ -437,57 +455,116 @@ fn main() {
     }
     rules.finalize(ext);
 
-    // `di->SetIntegrationMode(...)` dispatch.
-    if args.pa {
-        gap_exit(
-            "-pa (patch-wise partial assembly on NURBS patches)",
-            "SetupPatchPA + PADiffusionApply3D + OperatorJacobiSmoother on NURBS patches \
-             (crates/assembly/src/pa)",
-        );
-    }
-
+    // `di->SetIntegrationMode(...)` dispatch: `-pa` forces `Mode::PATCHWISE`
+    // (the reduced mode requires `!pa`), the matrix-free operator of
+    // `AssembleNURBSPA`; without `-pa` the reduced mode is
+    // `PATCHWISE_REDUCED` and `-fint` plain `PATCHWISE`, both sparse.
     println!("Assembling system patch-wise and solving");
 
     // Step 10: assemble and solve.
-    let mut a_mat = match &geo {
-        Some(geo) if use_reduced => {
-            match assemble_diffusion_patchwise_reduced(&space, geo, &rules, 1.0) {
-                Ok(m) => m,
-                // MFEM_VERIFY(GetReducedRule) — e.g. `-iro 8`; the message is
-                // MFEM's mfem_error text verbatim, abort like SIGABRT.
-                Err(msg) => {
-                    eprint!("{msg}");
-                    std::process::exit(134);
+    let ess_vals = vec![0.0_f64; ess_dofs.len()];
+    let x_pw: Vec<f64> = if args.pa {
+        let geo = geo.as_ref().expect("patch PA needs the patch geometry");
+        let pa_op = setup_patch_pa_diffusion(&space, geo, &rules, 1.0);
+
+        // `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)` at the PARTIAL
+        // assembly level is `Operator::FormLinearSystem`:
+        // `ConstrainedOperator::EliminateRHS` subtracts `A·X_ess` from `b`
+        // (X = 0 here) and then sets `B[ess] = X[ess] = 0`.
+        let mut rhs = b.clone();
+        let mut x = vec![0.0_f64; space.n_dofs()];
+        let ess: Vec<usize> = ess_dofs.iter().map(|&d| d as usize).collect();
+        for &i in &ess {
+            rhs[i] = 0.0;
+        }
+
+        // `ConstrainedOperator::Mult`: zero the essential entries of the
+        // input, run `AddMultNURBSPA`, then store `X[ess]` (= 0) into the
+        // output.
+        let apply = |x: &[f64], y: &mut [f64]| {
+            let mut z = x.to_vec();
+            for &i in &ess {
+                z[i] = 0.0;
+            }
+            y.iter_mut().for_each(|v| *v = 0.0);
+            pa_op.add_mult_nurbs_pa(&z, y);
+            for &i in &ess {
+                y[i] = x[i];
+            }
+        };
+
+        // `AssembleAndSolve` with `pa = true`:
+        // ```
+        // if (UsesTensorBasis(*fespace)) { OperatorJacobiSmoother M(a, ess); PCG(..., 400, 1e-12); }
+        // else { CG(*A, B, X, 1, 400, 1e-20, 0.0); }
+        // ```
+        // `UsesTensorBasis` is **false** for a NURBS space
+        // (`NURBSFiniteElement` is not a `TensorBasisElement` — verified with
+        // tmp/d562/d561_diag*.cpp): plain CG, no preconditioner, legacy
+        // rtol 1e-20 (SetRelTol(sqrt(1e-20)) = 1e-10), max 400 iterations.
+        // The identity preconditioner reproduces the no-preconditioner
+        // `CGSolver::Mult` arithmetic exactly (z = M⁻¹r = r).
+        let cfg = SolverConfig {
+            rtol: 1e-10,
+            atol: 0.0,
+            max_iter: 400,
+            verbose: false,
+            print_level: PrintLevel::Iterations,
+        };
+        match solve_pcg_operator_precond(
+            pa_op.n_dofs(),
+            apply,
+            &rhs,
+            &mut x,
+            |r: &[f64], z: &mut [f64]| z.copy_from_slice(r),
+            &cfg,
+        ) {
+            Ok(_) => {}
+            // MFEM ignores the solver status ("PCG: No convergence!").
+            Err(SolverError::ConvergenceFailed { .. }) => {}
+            Err(e) => panic!("CG failed: {e}"),
+        }
+        x
+    } else {
+        let mut a_mat = match &geo {
+            Some(geo) if use_reduced => {
+                match assemble_diffusion_patchwise_reduced(&space, geo, &rules, 1.0) {
+                    Ok(m) => m,
+                    // MFEM_VERIFY(GetReducedRule) — e.g. `-iro 8`; the message is
+                    // MFEM's mfem_error text verbatim, abort like SIGABRT.
+                    Err(msg) => {
+                        eprint!("{msg}");
+                        std::process::exit(134);
+                    }
                 }
             }
-        }
-        Some(geo) if use_patchwise => assemble_diffusion_patchwise(&space, geo, &rules, 1.0),
-        Some(geo) => assemble_diffusion_patch_rules_exact(&space, geo, &rules, 1.0),
-        None => assemble_diffusion_patch_rules(&space, &rules, 1.0),
-    };
-
-    // `BilinearForm::FormLinearSystem` on the patch-assembled matrix: the
-    // AddRow zero-drop happened at scatter time, and the essential-DOF
-    // elimination runs the EliminateRowCol #2 guard (D553).
-    if args.patch_assembly {
-        a_mat = mirror_addrow_drop_zeros(&a_mat);
-        mirror_eliminate_rowcol_check(&a_mat, &ess_dofs);
-    }
-
-    // `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)` with `x = 0`.
-    let mut rhs = b.clone();
-    let mut x = vec![0.0_f64; space.n_dofs()];
-    let ess_vals = vec![0.0_f64; ess_dofs.len()];
-    form_linear_system(&mut a_mat, &mut rhs, &mut x, &ess_dofs, &ess_vals);
-
-    // `GSSmoother M((SparseMatrix&)(*A)); PCG(*A, M, B, X, 1, 200, 1e-20, 0.0);`
-    let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mat)).expect("GS smoother");
-    if let Err(e) = solve_pcg(&a_mat, &rhs, &mut x, &gs, 1e-20, 200, true) {
-        let SolverError::ConvergenceFailed { .. } = e else {
-            panic!("PCG failed: {e}");
+            Some(geo) if use_patchwise => assemble_diffusion_patchwise(&space, geo, &rules, 1.0),
+            Some(geo) => assemble_diffusion_patch_rules_exact(&space, geo, &rules, 1.0),
+            None => assemble_diffusion_patch_rules(&space, &rules, 1.0),
         };
-    }
-    let x_pw = x;
+
+        // `BilinearForm::FormLinearSystem` on the patch-assembled matrix: the
+        // AddRow zero-drop happened at scatter time, and the essential-DOF
+        // elimination runs the EliminateRowCol #2 guard (D553).
+        if args.patch_assembly {
+            a_mat = mirror_addrow_drop_zeros(&a_mat);
+            mirror_eliminate_rowcol_check(&a_mat, &ess_dofs);
+        }
+
+        // `a.FormLinearSystem(ess_tdof_list, x, b, A, X, B)` with `x = 0`.
+        let mut rhs = b.clone();
+        let mut x = vec![0.0_f64; space.n_dofs()];
+        form_linear_system(&mut a_mat, &mut rhs, &mut x, &ess_dofs, &ess_vals);
+
+        // `GSSmoother M((SparseMatrix&)(*A)); PCG(*A, M, B, X, 1, 200, 1e-20, 0.0);`
+        let gs = GSSmoother::from_csr(&fem_to_linlvo_csr(&a_mat)).expect("GS smoother");
+        if let Err(e) = solve_pcg(&a_mat, &rhs, &mut x, &gs, 1e-20, 200, true) {
+            let SolverError::ConvergenceFailed { .. } = e else {
+                panic!("PCG failed: {e}");
+            };
+        }
+        x
+    };
 
     // Step 13: element-wise comparison solve (fresh integrator, no patch
     // rules — the standard quadrature; `pa = false`).
