@@ -4470,6 +4470,135 @@ prism 情形覆盖）；ND4+ 未探针（布局按源码公式外推，测试 pi
   `GetTransferMatrix(*fe_parent,…)` + `SetRow` 前尺寸断言，并警告 3 参 `Project()` 走
   `Project_RT` 差 4 倍。**发布前主会话目测一遍 markdown 渲染即可。**
 
+## 第五十八轮（round 58）：D572 全库 collection 对齐裁决（头号）+ D526 nodal 访问器 + D575 flip 表 + D561/D562 QR/-pa
+
+开局 HEAD = round 57 终稿（远端已同步，`git ls-remote` 实证）；磁盘 57G；WSL/MFEM4.10 管线可用。
+
+### 派单与文件独占（四路并行，号段预分配 D584–D595）
+
+| 路 | 债务 | 号段 | 独占文件 | 禁区 |
+|----|------|------|----------|------|
+| A | **D572（头号）全库 collection 对齐裁决**（MFEM 探针逐族量化 RT0 固定阶 vs 通用类；混合 tet+prism 裁决数据；prism 侧若需 ×½ 走 `prism.rs` 单点改动[D560 模板]；摘 `d493_pyramid_rt0_exact_path` ignore 翻绿[断言原文保留]；prism RT0 mass parity 首测）+ **D574** 逐族 pin 出处对照表（`tmp/d572/collection_provenance.md`，终结口径乒乓） | D584-586 | `raviart_thomas/prism.rs`、`d493_rt1_prolongation_mfem_parity.rs`、新测试、`tmp/d572/**` | `hdiv.rs`/`transfer.rs`/`discrete_op.rs`/`tet_*`/`pyramid.rs`/`hex_*`/`quad_*` |
+| B | **D526（两轮顺延）HDiv MFEM-nodal 坐标访问器**（quad 面 = gauss_legendre_01(k+1) 张量点；验收 = d506 的 96 键金标逐点；倾向新增 `dof_nodal_coords()` 保留 D414 锚点语义）+ **D576** Quad4 interior 行注释/diag(±1) 语义一致 | D587-589 | `crates/space/src/hdiv.rs`、`d506_hex_rt1_bdr_dofs.rs`、`d394_prism_pyramid_hdiv_blocks.rs`、`tmp/d526/**` | `raviart_thomas/**`、`transfer.rs` |
+| C | **D575 quad nodal 表 flip 修正**（closed index + p 奇补翻；k=0..3 全表 vs MFEM 逐条 pin；gate order≤1 不动 ⇒ 零现役行为变化）+ **D577 hex IGLL 积分泛函表**（镜像 quad `integrated_functionals`；LOR 腿 `HexRTk::new` 零回归） | D590-592 | `raviart_thomas/quad_rt1.rs`、`quad_rtk.rs`、`hex_rtk.rs`、`hex_rtk/`、`hex_rt1.rs`、`tmp/d575/**` | `prism.rs`、`tet_*`、`pyramid.rs`、`crates/space/**` |
+| D | **D561 QR 阻塞路径**（先盘点消费方；位级 golden 照 round 57 C 管线）+ **D562 `-pa` 全量**（patch PA apply + NURBS Jacobi smoother + PA-CG；参考 netlib 重生成并注明 BLAS 后端[D563 纪律]）+ stretch **D580** block_solvers dyn 迁移 | D593-595 | `linalg/src/qr.rs`（+新模块）、`assembly/src/iga/**`、`miniapps/nurbs/nurbs_patch_ex1.rs`、stretch `solver/**`、`tmp/d562/**` | `crates/space/**`、`crates/element/**` |
+
+### 开局核查（主会话亲办）
+
+- HEAD `c1a005f` = round 57 终稿十笔链末笔；`git ls-remote origin main` 同 hash（**全量已推送**）。
+- 工作树仅未跟踪证据产物（`.mimosa/`、`tools/ex31_cpp_helper/` D384 证据链）——非代码 diff。
+- 磁盘 `df -h /c`：**57G 可用**（门前后复查）。
+- WSL 冒烟：`$HOME/mfem410_ser/libmfem.a` 在位；**裁决关键源码事实（主会话开局面亲证）**：
+  `RT0_3DFECollection::FiniteElementForGeometry`（fe_coll.cpp:1637）对全部几何服务**固定阶专用类**
+  （RT0Triangle/RT0Quad :499/:528、RT0Hex :1058、RT0Tet :1118、**RT0Wdg :1148、RT0Pyr :1182**，
+  fe_fixed_order.hpp 行号）；`RT_FECollection`（fe_coll.cpp:2731）服务通用类 `RT_Elements[GeomType]`。
+  ⇒ D572 的裁决结构：k=0 全族可对齐 RT0_3D 固定阶语义（物理面通量），k≥1 维持通用类；
+  **RT0Pyr vs Fuentes(0) 是否同约定 = d493 oracle 合法性的关键量测**（A 路探针 1c）。
+
+### 未派单（留后续轮）
+
+审计前 6 建议中的 #2（D31 p=2 原子切换收尾）、#3（D120/D121 joule hex 半块）、#4（D117/D118 io 曲面/混合高阶）；
+③ D559（ND≥2 存储变换层调研）、D570（pyramid 解析 curl）、⑥ D578（tri order≥21 表）/D579（tmop 重心式）/
+D581（Hex27+ 家族）/D582（INLINE pyramid）/D583（永不修）。
+
+### 四路交付与关门（主会话收尾）
+
+#### A —— D572 + D574 **关闭**（本轮头号）
+
+- **裁决**（`tmp/d572/adjudication.md`，4 组 4.10 探针）：generic 与 RT0_3D 两个 collection 在
+  tet↔prism 三棱面上**各自内部自洽**（generic 两侧 2n̂|F|、RT0_3D 两侧 n̂|F|；探针 B 逐值），
+  MFEM 无补偿机制 ⇒ **2× 分裂只在 collection 之间**，fem-rs 此前 tet=RT0_3D+prism=generic 是
+  跨 collection Frankenstein。**裁决：fem-rs HDiv k=0 全族对齐 RT0_3DFECollection（物理面通量
+  n̂|F|），k≥1 维持 generic**。
+- **本轮最大发现**：`RT0PyrFiniteElement(rt0=true)`（RT0_3D 实际持有的金字塔类）基 slot1..4 =
+  2×Fuentes 而 Project dof 与 Fuentes **逐位相同**；且纯 RT0_3D 金字塔细化 oracle
+  `CONSTFIX = 0.54375 ≠ 0` —— **MFEM 自己的 RT0_3D 在 pyr↔tet 混合细化上无法重现常场**，
+  函数级 2× 分裂是 RT0_3D **固有**。fem-rs 现状（Fuentes pyr + RT0Tet tet）与混合口径 oracle
+  **85/85 逐位一致** ⇒ round 57 的手工重钉获得探针出处。（进 D586 upstream 素材包。）
+- **修复**：`prism.rs` k=0 基三棱面 slot ×2 + div 全 2（= `RT0WdgFiniteElement`，四处 MFEM
+  行号引注）；nk ½ 经未动轴采样行自动达成 `W=diag(2,2,1,1,1)`、存储 dof=n̂|F|。
+  **有牙**：修复前 `d572_prism_rt0_mass_parity` 3/3 红（mass ¼、dof 2×，log 存档）→ 后 3/3 绿
+  （项目首个 prism 侧 parity）；`d493_pyramid_rt0_exact_path` 摘 ignore **翻绿**（9/0/2），
+  残差按 ownership 位分类钉死（pyr↔tet 共享 `P·x_c = 2·x_f` 分裂语义显式化，断言结构保留）。
+- **D574 交付**：`tmp/d572/collection_provenance.md`（逐族×阶 pin 对照表 + 相容性矩阵 + 改口径
+  操作规程）——口径乒乓终结文档。
+
+#### B —— D526 + D576 **关闭**
+
+- 新增 `HDivSpace::dof_nodal_coords()`（hdiv.rs:1647），**保留 dof_coords 的 D414 锚点语义**
+  （d394 消费方零改动）；quad 面 = gauss_legendre_01(k+1) 张量点、MFEM 口径 = `GetNodes()` 槽位
+  经 Transform；唯一缺口 `RT_WedgeElement` 用私有 `wedge_nodal_points(k=0..=3)` 补齐（245 槽
+  <1e-14）；BDM（D587）/quad IGLL（D588）明确 panic。
+- 验收：d526 新测试 **9/0**（96 边界键=金标逐点、26-vs-96 红证、hex 内部 closed×open 网格、
+  prism 逐元素=MFEM、pyramid 28 点集等）、d506 **3/0**（+访问器验收 4/0 档）、fem-space lib
+  289→**291**（D576 diag±1 断言 + 楔形表 pin）。
+- **意外发现 D589**：`vertices <n> <sdim>` 头的 v1.0 直网格被 MFEM 4.10 读成曲网格
+  grid-function 头 ⇒ 顶点表错位——**fem_io 与 MFEM 对该头解释不一致**，mesh 文件做 C++ 对照
+  必须用 in-code 双胞胎。
+
+#### C —— D575 + D577 **关闭**
+
+- **D575**：flip 规则推演 = `fe_rt.cpp:81-106` 按**闭式**下标 `i≤p/2` 全翻 + 奇 p `i=p/2+1` 列
+  在开式行 `j>p/2` 补翻（y 块转置像）；旧表按开式下标判——k≤1 判据巧合重合、k=2 反 6/24、
+  k=3 反 8/40。修正 `mfem_quad_nodal_dofs`（一处共享表），探针 MAPCHECK p=0..4 全零；
+  pin 测试对旧表**实跑红**（k=2 row 12 nk 翻转）后绿；gate order≤1 核实未动 ⇒ 现役零行为变化。
+- **D577**：hex IGLL `integrated_functionals`（`IntegratedDofFunctional3D`）：口径 = MFEM
+  IntRules [0,1] 子胞/子面法向通量积分；4 场 × k=1..3 全 1536 dof **worst rel 1.1e-16**、
+  layout 384 dof 零 mismatch（顺带钉死 hex 翻转规则=纯闭式 ≤k/2、3-D 无奇 p 补翻——现行实现
+  正确）；**LOR 圣杯三条腿全绿**（`lor_rt_pcg`/`lor_nd_pcg`/`lor_rt_quad_pcg`）。
+- 新债：**D590**（k≥4 表 panic：GLL 生成器 n≤5 上限）、**D591**（hex IGLL 表尚无消费方）。
+
+#### D —— D561 + D562 **关闭**（含重大 MFEM 语义发现）；stretch D580 未做
+
+- **D561**：消费方盘点 = nnls.rs 一家（Gmat ≤32 永走非阻塞）⇒ 交付独立阻塞例程：
+  `qr_factor_blocked`（dgeqrf：dgeqr2 panel + dlarft/dlarfb，NB=32/NX=128）、
+  `apply_q[_transpose]_blocked`（dormqr）；`qr_factor` 旧循环体**迁移**进共享核 `dgeqr2_block`
+  （位保持由 round-57 位级 golden 自动验证）。golden = LAPACK 3.12 + **netlib BLAS**（OpenBLAS
+  哈希不同——D563 分裂延伸到阻塞路径）；k≤128 分派回落逐位一致。
+- **D562**（`-pa` 全量）：三个 MFEM 语义全部实证——① `UsesTensorBasis(NURBS)==false` ⇒ 走
+  **无预条件 CG**(400,1e-20)，任务书的"Jacobi"是死分支（AssembleDiagonal 在 patchwise 下
+  segfault，已实证）；② ConstrainedOperator DIAG_ONE 语义；③ **`SetupPatchPA` 覆写共享成员
+  `pa_data` quirk**：AssembleNURBSPA 循环后成员只剩最后一 patch 的数据、AddMultPatchPA 对所有
+  patch 读它 ⇒ **多 patch+非单位权重时 PA 算子 ≠ 装配矩阵**（MFEM 参考自己 400 迭代不收敛
+  rel err 0.4678）——fem-rs 镜像此语义。对拍：迭代 0..27 **逐字节一致**，28 起 1 ulp 放大
+  （**D593**）；失败形态完全一致（`PCG: No convergence!`、it400 同值）；element-wise 块逐字节。
+- 新债：**D593**（-pa CG it1+ 残差 last-ulp 被病态 PA 算子放大）。
+
+#### 收尾裁决与流程注记
+
+- **主会话纠偏**：D 路越权跑了 `cargo fmt` 扫描（linalg 13 个非授权文件 +980/−431）——逐文件
+  "去空白+去标点哈希" 验证为纯 rustfmt 伪差异（拆行/尾逗号/import 排序，10/12 哈希同、余 2 为
+  import 重排级）后**全部 restore**，仅保留授权文件。教训：fmt 扫描污染 blame 且不入任何门口径。
+- **门 1 两层口径澄清**：全 workspace `cargo test --lib` 会编 **fem-py**（十 crate 门历来不含）
+  ——其绑定 API 在 HEAD 即 stale（`boundary_nodes_with_tags`/`ComplexGridFunction` 不存在）且
+  pyo3 需 `PYO3_PYTHON`；vendor **linlvo** `test_amg` 5 败同属门外预存（linger 零 fem-rs 依赖、
+  本轮零改动、单跑复现同样 5 败）。二者登记 **D596**（fem-py stale 绑定专项 / linlvo 门外带病
+  记录），**非本轮回归**。门 2 首跑 244 目标含 vendor 的 13 个即此因，按 round 57 口径（十
+  `-p`）重跑为 233 targets / 3896 / 0。
+- **新债汇总**：**D584**（hdiv/transfer 的 prism 行表仍持 generic 全 nk：斜扭 prism 交叉块差
+  2×、常场延拓不精确；轴对齐恒 0 故现有测试不可见——需 hdiv.rs 写权限轮）、**D585**（pyramid
+  完整 RT0_3D 对齐需基 slot1..4 ×2；dof 值语义已一致；纯 RT0_3D oracle dump 已备可切换）、
+  **D586**（upstream 素材包：pyramid 细化 tet-子行/CONSTFIX 0.54375/RT0Pyr 注释矛盾/固定阶类
+  GetLocalInterpolation null-deref）、**D587/D588**（BDM/quad-IGLL 无 nodal 语义，访问器
+  panic）、**D589**（fem_io `vertices` 头解释与 MFEM 不一致）、**D590/D591**（见 C）、**D593**
+  （见 D）、**D596**（fem-py stale + linlvo 门外记录）。D580 顺延（D 路预算耗尽）。
+- **全量回归（四道门全绿）**：十 crate lib 批 **10/10 ok / 2618 passed / 0 failed**（57：
+  2617）；`--tests` 十 crate 口径 **233 targets / 3896 passed / 0 failed**（57：231/3885）；
+  `cargo build --release --examples --keep-going` **0 错误**（22m44s）；pro 层 **rc=0**。
+  **警告**：本轮改动 crate 全 0；examples/vendor 层预存警告（mesh_quality 3、ex15_dump 3、
+  linger 若干）非本轮引入。**磁盘**：门期两次告警（11G）靠清 `target/debug/incremental`
+  （8.7G+7.8G）化解——**release examples 构建耗盘 ~30G，跑门前先清**。
+- **头条亲验（主会话从门日志逐名 grep）**：d572 3/0、d560 1/0、d526 9/0、d562 4/0、d575 2/0、
+  d577 4/0、d493 exact_path+corrected 全绿、d468 6/0、d482 2/0、d410/d505×3/d506×3、LOR 四腿
+  全 ok。
+
+### round 59 待办（建议）
+
+**① D584+D585（D572 收尾半程：prism 行表下沉 + pyramid 基 ×2 切换裁决，需 hdiv.rs/transfer.rs/
+pyramid.rs 写权限）**；② D580（block_solvers dyn）+ D591（hex IGLL 表接线）小件打包；③ D586
+upstream 上报（主会话）；④ D589（fem_io vertices 头对齐）+ D596（fem-py 专项或弃用声明）；
+⑤ 审计建议余量（D31 p=2 / D120+D121 / D117+D118）。
+
 ## 第五十七轮（round 57）：tet RT 翻 nodal（D540 家族会师）+ HCurl 楔形/金字塔 + QR/NNLS + D409 + 卫生批
 
 五路并行（按 HANDOVER §〇 round 57 建议派单）。开局 HEAD = round 56 末笔（round 56 六笔已推送）。
