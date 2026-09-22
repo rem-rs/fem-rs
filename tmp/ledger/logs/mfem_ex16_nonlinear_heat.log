@@ -1,0 +1,27 @@
+Number of temperature unknowns: 1361
+step 5, t = 0.05
+step 10, t = 0.1
+step 15, t = 0.15
+step 20, t = 0.2
+step 25, t = 0.25
+step 30, t = 0.3
+step 35, t = 0.35
+step 40, t = 0.4
+step 45, t = 0.45
+step 50, t = 0.5
+
+=== Comparison Metrics ===
+DOFs: 1361
+Steps: 50
+Final t: 5.000000e-1
+L2norm = 4.283176e1
+chksum = 1.072997e6
+kappa = 0.500
+alpha = 0.010
+order = 2
+ref_levels = 2
+dt = 1.0000e-2
+t_final = 5.0000e-1
+=========================
+
+Done.

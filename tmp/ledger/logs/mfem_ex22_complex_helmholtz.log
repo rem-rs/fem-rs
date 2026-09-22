@@ -1,0 +1,20 @@
+Options used:
+   --mesh data/inline-quad.mesh
+   --refine 0
+   --order 1
+   --problem-type 0
+   --mu 1
+   --epsilon 1
+   --sigma 20
+   --omega 10
+   --hermitian true
+Identified a mesh with known exact solution
+Number of finite element unknowns: 25
+Size of linear system: 50
+  GMRES: 13 its  ||r||/||b|| = 7.017e-13
+
+|| Re(u_h-u) ||_{L^2} = 1.422826e-1
+|| Im(u_h-u) ||_{L^2} = 1.422741e-1
+
+Solution amplitude: max=1.000000e0 min=3.852902e-4 mean=2.813562e-1
+Wrote refined.mesh, sol_r.gf, sol_i.gf, sol_z.gf

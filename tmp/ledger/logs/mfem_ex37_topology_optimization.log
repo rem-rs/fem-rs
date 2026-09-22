@@ -1,0 +1,204 @@
+Number of state unknowns: 25090
+Number of filter unknowns: 12545
+Number of control unknowns: 12288
+
+Step = 1
+norm of the reduced gradient = 0.029623
+norm of the increment = 0.029623
+compliance = 0.020200
+volume fraction = 0.500000
+
+Step = 2
+norm of the reduced gradient = 0.023848
+norm of the increment = 0.095391
+compliance = 0.018059
+volume fraction = 0.500000
+
+Step = 3
+norm of the reduced gradient = 0.013053
+norm of the increment = 0.117473
+compliance = 0.013445
+volume fraction = 0.500000
+
+Step = 4
+norm of the reduced gradient = 0.006481
+norm of the increment = 0.103696
+compliance = 0.010260
+volume fraction = 0.500000
+
+Step = 5
+norm of the reduced gradient = 0.003331
+norm of the increment = 0.083278
+compliance = 0.008605
+volume fraction = 0.500000
+
+Step = 6
+norm of the reduced gradient = 0.002001
+norm of the increment = 0.072050
+compliance = 0.007748
+volume fraction = 0.500000
+
+Step = 7
+norm of the reduced gradient = 0.001484
+norm of the increment = 0.072713
+compliance = 0.007232
+volume fraction = 0.500000
+
+Step = 8
+norm of the reduced gradient = 0.001194
+norm of the increment = 0.076434
+compliance = 0.006843
+volume fraction = 0.500000
+
+Step = 9
+norm of the reduced gradient = 0.000995
+norm of the increment = 0.080597
+compliance = 0.006501
+volume fraction = 0.500000
+
+Step = 10
+norm of the reduced gradient = 0.000809
+norm of the increment = 0.080889
+compliance = 0.006182
+volume fraction = 0.500000
+
+Step = 11
+norm of the reduced gradient = 0.000631
+norm of the increment = 0.076365
+compliance = 0.005892
+volume fraction = 0.500000
+
+Step = 12
+norm of the reduced gradient = 0.000480
+norm of the increment = 0.069159
+compliance = 0.005643
+volume fraction = 0.500000
+
+Step = 13
+norm of the reduced gradient = 0.000369
+norm of the increment = 0.062283
+compliance = 0.005438
+volume fraction = 0.500000
+
+Step = 14
+norm of the reduced gradient = 0.000298
+norm of the increment = 0.058370
+compliance = 0.005270
+volume fraction = 0.500000
+
+Step = 15
+norm of the reduced gradient = 0.000253
+norm of the increment = 0.056881
+compliance = 0.005132
+volume fraction = 0.500000
+
+Step = 16
+norm of the reduced gradient = 0.000230
+norm of the increment = 0.059002
+compliance = 0.005013
+volume fraction = 0.500000
+
+Step = 17
+norm of the reduced gradient = 0.000230
+norm of the increment = 0.066504
+compliance = 0.004904
+volume fraction = 0.500000
+
+Step = 18
+norm of the reduced gradient = 0.000245
+norm of the increment = 0.079460
+compliance = 0.004792
+volume fraction = 0.500000
+
+Step = 19
+norm of the reduced gradient = 0.000251
+norm of the increment = 0.090510
+compliance = 0.004663
+volume fraction = 0.500000
+
+Step = 20
+norm of the reduced gradient = 0.000222
+norm of the increment = 0.088803
+compliance = 0.004514
+volume fraction = 0.500000
+
+Step = 21
+norm of the reduced gradient = 0.000176
+norm of the increment = 0.077833
+compliance = 0.004373
+volume fraction = 0.500000
+
+Step = 22
+norm of the reduced gradient = 0.000135
+norm of the increment = 0.065373
+compliance = 0.004259
+volume fraction = 0.500000
+
+Step = 23
+norm of the reduced gradient = 0.000104
+norm of the increment = 0.055116
+compliance = 0.004175
+volume fraction = 0.500000
+
+Step = 24
+norm of the reduced gradient = 0.000083
+norm of the increment = 0.048086
+compliance = 0.004113
+volume fraction = 0.500000
+
+Step = 25
+norm of the reduced gradient = 0.000065
+norm of the increment = 0.040631
+compliance = 0.004061
+volume fraction = 0.500000
+
+Step = 26
+norm of the reduced gradient = 0.000048
+norm of the increment = 0.032588
+compliance = 0.004018
+volume fraction = 0.500000
+
+Step = 27
+norm of the reduced gradient = 0.000036
+norm of the increment = 0.026157
+compliance = 0.003984
+volume fraction = 0.500000
+
+Step = 28
+norm of the reduced gradient = 0.000027
+norm of the increment = 0.021320
+compliance = 0.003956
+volume fraction = 0.500000
+
+Step = 29
+norm of the reduced gradient = 0.000021
+norm of the increment = 0.017606
+compliance = 0.003933
+volume fraction = 0.500000
+
+Step = 30
+norm of the reduced gradient = 0.000016
+norm of the increment = 0.014582
+compliance = 0.003915
+volume fraction = 0.500000
+
+Step = 31
+norm of the reduced gradient = 0.000013
+norm of the increment = 0.012328
+compliance = 0.003900
+volume fraction = 0.500000
+
+Step = 32
+norm of the reduced gradient = 0.000011
+norm of the increment = 0.010929
+compliance = 0.003887
+volume fraction = 0.500000
+
+Step = 33
+norm of the reduced gradient = 0.000009
+norm of the increment = 0.009910
+compliance = 0.003875
+volume fraction = 0.500000
+
+Final step: 33
+Final compliance: 0.003875

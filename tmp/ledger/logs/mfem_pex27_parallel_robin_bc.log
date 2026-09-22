@@ -1,0 +1,24 @@
+Options used:
+   --continuous
+   --order 1
+   --sigma -1
+   --kappa -1
+   --refine-serial 2
+   --refine-parallel 1
+   --material-value 1
+   --dirichlet-value 0
+   --neumann-value 1
+   --robin-a-value 1
+   --robin-b-value 1
+   --radius 0.2
+   --no-visualization
+Number of finite element unknowns: 1118
+  PCG: 26 iters, residual = 9.488e-13, converged = true
+  ||u||_2 = 1.704242e1, sum = 5.08071355e2, checksum = 3.05720286e5
+
+Verifying boundary conditions
+=============================
+Average of solution on Gamma_dbc:	0,	absolute error 0
+Average of n.Grad(u) on Gamma_nbc:	1.00345,	relative error 0.0319399
+Average of n.Grad(u) on Gamma_nbc0:	-0.00050441,	absolute error 0.082736
+Average of n.Grad(u)+a*u on Gamma_rbc:	1.00473,	relative error 0.0246717

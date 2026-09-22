@@ -1,0 +1,6 @@
+=== fem-rs mfem_pex10: Parallel Hyperelastic Dynamics ===
+  Workers: 2, Mesh: data/beam-quad.mesh, Refine: 0, Order: 1
+step 5, t = 0.5, EE = 0.001960, KE = 0.024683
+Number of unknowns: 36
+EE = 0.001960, KE = 0.024683
+=== Done ===

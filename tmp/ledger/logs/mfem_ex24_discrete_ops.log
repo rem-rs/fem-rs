@@ -1,0 +1,16 @@
+Options used:
+   --mesh data/star.mesh
+   --order 1
+   --problem-type 0
+Number of Nedelec finite element unknowns: 41280
+Number of H1 finite element unknowns: 20801
+  DLO interpolant norm = 1.485955e0
+
+ Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{L_2} = 0.00744893
+
+ Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{L_2} = 0.00744893
+
+ Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{L_2} = 0.00744895
+
+
+Wrote refined.mesh and sol.gf

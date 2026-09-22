@@ -1,0 +1,86 @@
+mfem_ex0_mesh_intro	0	Average reduction factor = 0.140201
+mfem_ex10_hyperelastic_dyn	0	  Done.
+mfem_ex14_dg_poisson	0	PCG: No convergence!
+mfem_ex15_dump_A_true	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dump_T002	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dump_flow	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dump_it2_coords	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dump_p1	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dump_p1_it3	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_ex15_dynamic_amr	101	  Done.
+mfem_ex16_nonlinear_heat	0	Done.
+mfem_ex17_dg_elasticity	0	  wrote sol.gf (MFEM FiniteElementSpace format)
+mfem_ex18_euler	0	Solution error: 6.168620814596265e-2
+mfem_ex19_hyperelastic_incomp	0	  Wrote deformation.sol
+mfem_ex1_poisson	0	Average reduction factor = 0.882852
+mfem_ex20_symplectic	0	1	0
+mfem_ex21_amr_elasticity	0	Wrote ex21_displacement.sol
+mfem_ex22_complex_helmholtz	0	Wrote refined.mesh, sol_r.gf, sol_i.gf, sol_z.gf
+mfem_ex23_wave_equation	0	    du/dt checksum = 2.955466e4
+mfem_ex24_discrete_ops	0	Wrote refined.mesh and sol.gf
+mfem_ex25_pml_maxwell	0	  Wrote ex25.mesh
+mfem_ex26_geom_mg	0	Average reduction factor = 0.0273569
+mfem_ex27_robin_bc	0	Average of n.Grad(u)+a*u on Gamma_rbc:	1.011141603842804,	relative error 0.05123838749375407
+mfem_ex28_sliding_elasticity	0	  Lagrange multipliers: 34 constraints
+mfem_ex29_curved_poisson	0	|f - f_h|_2 = 0.00797749
+mfem_ex2_elasticity	101	  Wrote displaced.mesh and sol.gf
+mfem_ex30_aniso_amr	0	  Total time: 2.144s
+mfem_ex31_anisotropic_maxwell	3	|| E_h - E ||_{H(Curl)} = 0.181455
+mfem_ex31_dump	101	|| E_h - E ||_{H(Curl)} = 0.181455
+mfem_ex33_fractional_diffusion	0	Average reduction factor = 0.795112
+mfem_ex34_magnetostatics	0	Finished.
+mfem_ex36_obstacle	0	 Final L2-error (|| u - ϕ - exp(ψₕ)||) = 0.0225115
+mfem_ex37_topology_optimization	0	Final compliance: 0.003875
+mfem_ex38_implicit_integration	0	============================================
+mfem_ex39_compass	0	Average reduction factor = 0.963046
+mfem_ex3_maxwell_cavity	0	|| E_h - E ||_{L^2} = 3.91630923150637e-1
+mfem_ex40_eikonal	0	 Total dofs:       15520
+mfem_ex41_imex	0	  u[9] = 6.4425646514e-2
+mfem_ex4_darcy	101	|| F_h - F ||_{L^2} = 0.432497
+mfem_ex5_mixed_darcy	101	  Wrote ex5.mesh, sol_u.gf, sol_p.gf
+mfem_ex6_flux_recovery	0	  Done.
+mfem_ex7_surface_poisson	0	  Done.
+mfem_ex8_dpg_2x2	101	  Done.
+mfem_ex9_dg_advection	101	  Done. Total time: 4.246s
+mfem_pex0_parallel_poisson	0	PCG: 28 iters, residual = 6.596e-13, converged = true
+mfem_pex10_parallel_hyperelastic	0	=== Done ===
+mfem_pex11_parallel_eigenvalue	0	  5             1.94659883630469e1       7.021960e-1
+mfem_pex12_parallel_elastic_eigen	0	  5             1.76946426401712e0       2.117098e-1
+mfem_pex13_parallel_eigenvalue	0	=== Done ===
+mfem_pex14_parallel_dg_poisson	0	=== Done ===
+mfem_pex15_parallel_dynamic_amr	101	Iteration: 2, number of unknowns: 55550
+mfem_pex16_parallel_nonlinear_heat	0	Done.
+mfem_pex17_parallel_dg_elasticity	0	=== Done ===
+mfem_pex18_parallel_euler	0	=== Done ===
+mfem_pex19_parallel_incomp_hyperelastic	3	  or use the C++ ex19p for the 3-D default. Exiting with status 3.
+mfem_pex1_parallel_poisson	0	=== Done ===
+mfem_pex20_parallel_symplectic	0	0: 1.00204	0.0174915
+mfem_pex21_parallel_amr_elasticity	0	=== Done ===
+mfem_pex22_parallel_complex_helmholtz	0	pex22: dofs=25 conv=true iters=2 res=2.857e-16
+mfem_pex24_parallel_discrete_ops	0	 Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{L_2} = 3.448504e-2
+mfem_pex25_pml_maxwell	0	Finished.
+mfem_pex26_parallel_geom_mg	0	pex26: dofs=82561 converged=true iters=27 residual=6.642e-13
+mfem_pex27_parallel_robin_bc	0	Average of n.Grad(u)+a*u on Gamma_rbc:	1.00473,	relative error 0.0246717
+mfem_pex28_parallel_sliding_elasticity	0	=== Done ===
+mfem_pex29_surface_poisson	0	|f - f_h|_2 = 1.136131e-5
+mfem_pex2_parallel_elasticity	0	=== Done ===
+mfem_pex30_amr_preprocess	124	Osc error 7.752668e-4
+mfem_pex31_restricted_hcurl	0	Finished.
+mfem_pex32_maxwell_eigenvalue	3	  Pass a 3-D mesh for the ported path (e.g. -m data/fichera.mesh), or use the C++ ex32p for the 2-D default.
+mfem_pex33_fractional_laplacian	0	Solving PDE -Δ u + 0.07649165745353441 u = 0.3578966974569634 g 
+mfem_pex34_magnetostatics	0	Finished.
+mfem_pex35_complex_oscillator	0	Finished.
+mfem_pex36_obstacle	0	 Final L2-error (|| u - ϕ - exp(ψₕ)||) = 0.0225115
+mfem_pex37_topology_optimization	0	=== Done ===
+mfem_pex39_named_attributes	0	=== Done ===
+mfem_pex3_maxwell_cavity	0	pex3: dofs=10400 iters=2085 residual=9.971e-9
+mfem_pex40_eikonal	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+mfem_pex41_imex	0	Completed: 1000 steps, final time 10.000000
+mfem_pex4_parallel_hdiv_diffusion	0	=== Done ===
+mfem_pex5_hdiv_darcy	101	ThreadLauncher: worker thread panicked: Any { .. }
+mfem_pex6_parallel_amr	0	=== Done: final unknowns = 123036, total PCG iters = 679 ===
+mfem_pex7_parallel_surface	0	=== Done: dofs = 66, iters = 4, relative L2 error = 1.397652e-1 ===
+mfem_pex8_parallel_dpg	0	=== Done: unknowns = 1361, PCG iters = 305, ||Bx-F||_S⁻¹ = 2.506757e-1, ||u|| = 1.6688119866e0, L2err = 1.4
+mfem_pex9_parallel_dg_advection	101	note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+par_heat_equation_self_test	0	Done.
+DONE	PASS1	

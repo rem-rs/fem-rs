@@ -1,0 +1,5 @@
+mfem_pex32_maxwell_eigenvalue: 2-D mesh 'data/inline-quad.mesh' is not ported (D137 — the port only implements the plain 3-D ND path).
+  C++ ex32p's default mesh is data/inline-quad.mesh (2-D) and it solves it with the *restricted* H(curl) space
+  ND_R2D_FECollection (in-plane Nedelec + out-of-plane H1) and HypreAME, which this port does not implement;
+  solving the same mesh as a plain 2-D ND problem would not be comparable to C++.
+  Pass a 3-D mesh for the ported path (e.g. -m data/fichera.mesh), or use the C++ ex32p for the 2-D default.

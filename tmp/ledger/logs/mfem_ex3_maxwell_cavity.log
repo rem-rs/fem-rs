@@ -1,0 +1,138 @@
+Options used:
+   --mesh (built-in beam-tet)
+   --order 1
+   --frequency 1
+   --no-static-condensation
+   --no-partial-assembly
+   --conforming
+   --device cpu
+   --no-visualization
+Device configuration: cpu
+Memory configuration: host-std
+
+Number of finite element unknowns: 32016
+   Iteration :   0  (B r, r) = 0.12456
+   Iteration :   1  (B r, r) = 0.00272309
+   Iteration :   2  (B r, r) = 0.000211936
+   Iteration :   3  (B r, r) = 6.74753e-05
+   Iteration :   4  (B r, r) = 5.69296e-05
+   Iteration :   5  (B r, r) = 5.499e-05
+   Iteration :   6  (B r, r) = 3.96401e-05
+   Iteration :   7  (B r, r) = 2.53703e-05
+   Iteration :   8  (B r, r) = 2.00053e-05
+   Iteration :   9  (B r, r) = 1.64996e-05
+   Iteration :  10  (B r, r) = 1.01325e-05
+   Iteration :  11  (B r, r) = 7.34876e-06
+   Iteration :  12  (B r, r) = 4.39255e-06
+   Iteration :  13  (B r, r) = 2.59422e-06
+   Iteration :  14  (B r, r) = 1.64609e-06
+   Iteration :  15  (B r, r) = 1.58253e-06
+   Iteration :  16  (B r, r) = 1.46552e-06
+   Iteration :  17  (B r, r) = 1.26604e-06
+   Iteration :  18  (B r, r) = 1.01952e-06
+   Iteration :  19  (B r, r) = 9.39887e-07
+   Iteration :  20  (B r, r) = 9.3977e-07
+   Iteration :  21  (B r, r) = 1.0768e-06
+   Iteration :  22  (B r, r) = 1.59511e-06
+   Iteration :  23  (B r, r) = 2.35813e-06
+   Iteration :  24  (B r, r) = 2.37078e-06
+   Iteration :  25  (B r, r) = 1.65476e-06
+   Iteration :  26  (B r, r) = 9.77497e-07
+   Iteration :  27  (B r, r) = 5.93458e-07
+   Iteration :  28  (B r, r) = 4.78861e-07
+   Iteration :  29  (B r, r) = 3.52079e-07
+   Iteration :  30  (B r, r) = 2.48536e-07
+   Iteration :  31  (B r, r) = 1.65602e-07
+   Iteration :  32  (B r, r) = 1.07999e-07
+   Iteration :  33  (B r, r) = 7.92612e-08
+   Iteration :  34  (B r, r) = 5.65282e-08
+   Iteration :  35  (B r, r) = 4.40037e-08
+   Iteration :  36  (B r, r) = 4.58072e-08
+   Iteration :  37  (B r, r) = 5.67629e-08
+   Iteration :  38  (B r, r) = 6.63757e-08
+   Iteration :  39  (B r, r) = 6.41491e-08
+   Iteration :  40  (B r, r) = 5.3283e-08
+   Iteration :  41  (B r, r) = 4.90381e-08
+   Iteration :  42  (B r, r) = 4.52664e-08
+   Iteration :  43  (B r, r) = 4.51715e-08
+   Iteration :  44  (B r, r) = 3.83677e-08
+   Iteration :  45  (B r, r) = 3.10099e-08
+   Iteration :  46  (B r, r) = 2.47354e-08
+   Iteration :  47  (B r, r) = 1.9465e-08
+   Iteration :  48  (B r, r) = 1.4078e-08
+   Iteration :  49  (B r, r) = 1.01691e-08
+   Iteration :  50  (B r, r) = 7.60917e-09
+   Iteration :  51  (B r, r) = 5.59511e-09
+   Iteration :  52  (B r, r) = 3.88154e-09
+   Iteration :  53  (B r, r) = 2.72415e-09
+   Iteration :  54  (B r, r) = 2.39004e-09
+   Iteration :  55  (B r, r) = 2.71456e-09
+   Iteration :  56  (B r, r) = 3.25707e-09
+   Iteration :  57  (B r, r) = 3.57922e-09
+   Iteration :  58  (B r, r) = 3.88459e-09
+   Iteration :  59  (B r, r) = 4.08523e-09
+   Iteration :  60  (B r, r) = 3.84059e-09
+   Iteration :  61  (B r, r) = 3.27864e-09
+   Iteration :  62  (B r, r) = 2.33501e-09
+   Iteration :  63  (B r, r) = 1.68548e-09
+   Iteration :  64  (B r, r) = 1.37834e-09
+   Iteration :  65  (B r, r) = 1.14533e-09
+   Iteration :  66  (B r, r) = 8.57349e-10
+   Iteration :  67  (B r, r) = 6.94904e-10
+   Iteration :  68  (B r, r) = 5.10237e-10
+   Iteration :  69  (B r, r) = 3.19374e-10
+   Iteration :  70  (B r, r) = 2.19763e-10
+   Iteration :  71  (B r, r) = 1.94268e-10
+   Iteration :  72  (B r, r) = 1.77107e-10
+   Iteration :  73  (B r, r) = 1.49895e-10
+   Iteration :  74  (B r, r) = 1.36486e-10
+   Iteration :  75  (B r, r) = 1.47473e-10
+   Iteration :  76  (B r, r) = 1.84439e-10
+   Iteration :  77  (B r, r) = 2.12352e-10
+   Iteration :  78  (B r, r) = 2.0672e-10
+   Iteration :  79  (B r, r) = 1.97173e-10
+   Iteration :  80  (B r, r) = 2.04827e-10
+   Iteration :  81  (B r, r) = 1.75871e-10
+   Iteration :  82  (B r, r) = 1.18134e-10
+   Iteration :  83  (B r, r) = 7.81723e-11
+   Iteration :  84  (B r, r) = 5.49044e-11
+   Iteration :  85  (B r, r) = 3.71461e-11
+   Iteration :  86  (B r, r) = 2.41834e-11
+   Iteration :  87  (B r, r) = 1.83777e-11
+   Iteration :  88  (B r, r) = 1.39747e-11
+   Iteration :  89  (B r, r) = 1.13233e-11
+   Iteration :  90  (B r, r) = 9.77524e-12
+   Iteration :  91  (B r, r) = 8.2348e-12
+   Iteration :  92  (B r, r) = 6.85792e-12
+   Iteration :  93  (B r, r) = 6.86887e-12
+   Iteration :  94  (B r, r) = 8.5377e-12
+   Iteration :  95  (B r, r) = 1.31473e-11
+   Iteration :  96  (B r, r) = 1.70298e-11
+   Iteration :  97  (B r, r) = 1.63542e-11
+   Iteration :  98  (B r, r) = 1.1097e-11
+   Iteration :  99  (B r, r) = 6.46139e-12
+   Iteration : 100  (B r, r) = 4.23986e-12
+   Iteration : 101  (B r, r) = 2.87147e-12
+   Iteration : 102  (B r, r) = 1.88172e-12
+   Iteration : 103  (B r, r) = 1.2874e-12
+   Iteration : 104  (B r, r) = 9.15322e-13
+   Iteration : 105  (B r, r) = 6.55476e-13
+   Iteration : 106  (B r, r) = 5.12627e-13
+   Iteration : 107  (B r, r) = 4.84644e-13
+   Iteration : 108  (B r, r) = 5.53145e-13
+   Iteration : 109  (B r, r) = 6.89538e-13
+   Iteration : 110  (B r, r) = 8.05096e-13
+   Iteration : 111  (B r, r) = 8.60039e-13
+   Iteration : 112  (B r, r) = 9.20719e-13
+   Iteration : 113  (B r, r) = 9.3899e-13
+   Iteration : 114  (B r, r) = 8.00157e-13
+   Iteration : 115  (B r, r) = 5.96563e-13
+   Iteration : 116  (B r, r) = 3.91667e-13
+   Iteration : 117  (B r, r) = 2.30696e-13
+   Iteration : 118  (B r, r) = 1.39125e-13
+   Iteration : 119  (B r, r) = 8.71097e-14
+Average reduction factor = 0.889052
+PCG+GSSmoother: 119 iters, ||r||/||b|| = 2.951e-7
+
+|| E_h - E ||_{L^2} = 3.91630923150637e-1
+

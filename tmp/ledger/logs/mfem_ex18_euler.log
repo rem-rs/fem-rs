@@ -1,0 +1,14 @@
+Number of unknowns: 576
+Problem 1: Fast vortex
+Order: 1 (P1)
+Refinement levels: 1
+t_final: 2.000
+  --> saved initial mesh + solution files
+  h_min: 3.333333e-1, max_char_speed: 3.133443e0, dt: 1.063793e-2
+  initial dt: 1.063793e-2
+time step:     50, time: 5.391171e-1
+time step:    100, time: 1.082276e0
+time step:    150, time: 1.627277e0
+time step:    185, time: 2.000000e0
+  --> saved final mesh + solution files
+Solution error: 6.168620814596265e-2

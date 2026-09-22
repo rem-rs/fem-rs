@@ -1,0 +1,22 @@
+Options used:
+   --mesh data/star.mesh
+   --order 1
+   --nc-limit 1
+   --max-elems 100000
+   --error 0.001
+   --enriched_order 5
+   --no-visualization
+
+Function 0 (affine) 
+Number of Elements 590
+Osc error 0.000420
+
+Function 1 (discontinuous) 
+Number of Elements 3341
+Osc error 0.000775
+
+Function 2 (singular) 
+Number of Elements 12572
+Osc error 0.000619
+
+  Total time: 2.144s

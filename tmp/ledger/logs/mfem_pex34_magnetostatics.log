@@ -1,0 +1,30 @@
+Options used:
+   --refine-serial 1
+   --refine-parallel 1
+   --order 1
+   --magnetic-cond 0.000001
+   --no-static-condensation
+   --mixed-mesh
+   --no-partial-assembly
+   --device cpu
+   --no-visualization
+  SubMesh: 320 elements, 155 nodes, 208 boundary faces
+  SubMesh H1 DOFs: 155, RT DOFs: 776
+
+Solving for electric potential using CG with AMG
+  phi PCG: 10 iters, residual = 2.880e-13, converged = true
+
+Solving for current density in H(Div) using diagonally scaled CG
+Size of linear system: 776
+  J CG: 27 iters, residual = 6.250e-13, converged = true
+
+Solving for magnetic vector potential using CG with AMS
+Size of linear system: 2174
+  A PCG: 447 iters, residual = 7.718e-13, converged = true
+  ||A||_2 = 3.35328606e4, sum = -1.94981932e4, checksum = -1.12228247e8
+  ||B||_2 = 2.08497184e-1, sum = 6.52650911e-1
+  ||J||_2 = 2.79954891e-1
+  Wrote cond_mesh/cond_j/mesh/sol/dsol per rank
+
+Finished.
+

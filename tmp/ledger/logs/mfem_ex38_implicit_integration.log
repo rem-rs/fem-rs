@@ -1,0 +1,10 @@
+============================================
+Mesh size dx:                       0.4
+Number of div free basis functions: 9
+Number of quadrature points:        16
+============================================
+Computed value of surface integral: 6.2831308145e0
+True value of surface integral:     6.2831853072e0
+Absolute Error (Surface):           5.4492670572e-5
+Relative Error (Surface):           8.6727778839e-6
+============================================

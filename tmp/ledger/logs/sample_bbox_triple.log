@@ -1,0 +1,12 @@
+Options used:
+   --mesh triple-pt-1.mesh
+   --order 2
+   --no-visualization
+   --no-visit
+   --jacobian
+Nodal position minimum bounds:
+0 0
+Nodal position maximum bounds:
+7 3
+Jacobian determinant minimum bound: 0.0699225
+Jacobian determinant maximum bound: 1.19096

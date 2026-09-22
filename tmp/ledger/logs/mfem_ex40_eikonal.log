@@ -1,0 +1,40 @@
+Options used:
+   --mesh data/star.mesh
+   --order 1
+   --refs 3
+   --max-it 5
+   --tol 0.0001
+   --step 1
+   --growth-rate 1
+Number of H(div) dofs: 10400
+Number of L² dofs: 5120
+
+OUTER ITERATION 1
+Newton_update_size = 0.379525087863433
+Newton_update_size = 0.03527021230294873
+Number of Newton iterations = 2
+Increment (|| uₕ - uₕ_prvs||) = 0.3447474492202098
+
+OUTER ITERATION 2
+Newton_update_size = 0.26946713922517296
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.26946713922517296
+
+OUTER ITERATION 3
+Newton_update_size = 0.07580016607159368
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.07580016607159368
+
+OUTER ITERATION 4
+Newton_update_size = 0.04013925855362559
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.04013925855362559
+
+OUTER ITERATION 5
+Newton_update_size = 0.02687451685661206
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.02687451685661206
+
+ Outer iterations: 5
+ Total iterations: 6
+ Total dofs:       15520

@@ -1,0 +1,111 @@
+Options used:
+   --mesh data/beam-tri.mesh
+   --order 1
+
+AMR iteration 0
+Number of unknowns: 36
+  Max err: 1.671901e-2
+  Marked 3 elements
+
+AMR iteration 1
+Number of unknowns: 52
+  Max err: 1.252613e-2
+  Marked 6 elements
+
+AMR iteration 2
+Number of unknowns: 96
+  Max err: 8.116274e-3
+  Marked 5 elements
+
+AMR iteration 3
+Number of unknowns: 142
+  Max err: 5.225124e-3
+  Marked 7 elements
+
+AMR iteration 4
+Number of unknowns: 184
+  Max err: 5.093372e-3
+  Marked 7 elements
+
+AMR iteration 5
+Number of unknowns: 242
+  Max err: 3.549720e-3
+  Marked 13 elements
+
+AMR iteration 6
+Number of unknowns: 326
+  Max err: 2.432353e-3
+  Marked 31 elements
+
+AMR iteration 7
+Number of unknowns: 524
+  Max err: 1.608339e-3
+  Marked 26 elements
+
+AMR iteration 8
+Number of unknowns: 726
+  Max err: 1.229852e-3
+  Marked 41 elements
+
+AMR iteration 9
+Number of unknowns: 1004
+  Max err: 9.079677e-4
+  Marked 58 elements
+
+AMR iteration 10
+Number of unknowns: 1332
+  Max err: 7.011825e-4
+  Marked 53 elements
+
+AMR iteration 11
+Number of unknowns: 1756
+  Max err: 4.733869e-4
+  Marked 111 elements
+
+AMR iteration 12
+Number of unknowns: 2556
+  Max err: 3.872181e-4
+  Marked 69 elements
+
+AMR iteration 13
+Number of unknowns: 3080
+  Max err: 3.218251e-4
+  Marked 106 elements
+
+AMR iteration 14
+Number of unknowns: 3836
+  Max err: 2.512126e-4
+  Marked 150 elements
+
+AMR iteration 15
+Number of unknowns: 4826
+  Max err: 1.894316e-4
+  Marked 204 elements
+
+AMR iteration 16
+Number of unknowns: 6282
+  Max err: 1.552723e-4
+  Marked 139 elements
+
+AMR iteration 17
+Number of unknowns: 7356
+  Max err: 1.187969e-4
+  Marked 336 elements
+
+AMR iteration 18
+Number of unknowns: 9826
+  Max err: 9.545844e-5
+  Marked 310 elements
+
+AMR iteration 19
+Number of unknowns: 12174
+  Max err: 8.038148e-5
+  Marked 371 elements
+
+AMR iteration 20
+Number of unknowns: 14950
+  Max err: 6.428849e-5
+  Marked 612 elements
+Wrote ex21_reference.mesh
+Wrote ex21_deformed.mesh
+Wrote ex21_displacement.sol

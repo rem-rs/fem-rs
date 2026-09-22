@@ -1,0 +1,12 @@
+Options used:
+   --order 1
+   --problem-type 0
+   --number-of-steps 100
+   --time-step 0.1
+   --mass 1
+   --spring-const 1
+   --no-visualization
+   --no-gnuplot
+
+Mean and standard deviation of the energy
+1.00204	0.0174915

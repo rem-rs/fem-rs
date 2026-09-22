@@ -1,0 +1,7 @@
+=== fem-rs mfem_pex2: Parallel Linear Elasticity ===
+  Workers: 2, Mesh: beam-tri.mesh x4 (1:1 MFEM ex2p)
+Number of finite element unknowns: 1170
+  PCG: 107 iters, residual = 9.629e-9, converged = true
+  Average reduction factor = 0.841550
+  ||u||_2 = 9.695914e0, sum = -1.38673601e2, checksum = -1.35933885e5
+=== Done ===

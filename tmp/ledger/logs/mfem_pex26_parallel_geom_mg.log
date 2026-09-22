@@ -1,0 +1,6 @@
+Number of finite element unknowns: 82561
+transfer 1 -> 2: prolong 10643x5281, restrict 5281x20801, coarse_owned 2689
+level 0: mat_ghost 2592 dp_ghost 2592
+transfer 2 -> 4: prolong 41911x20801, restrict 20801x82561, coarse_owned 10643
+level 1: mat_ghost 10158 dp_ghost 10158
+pex26: dofs=82561 converged=true iters=27 residual=6.642e-13

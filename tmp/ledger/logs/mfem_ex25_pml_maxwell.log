@@ -1,0 +1,9 @@
+--mesh data/inline-quad.mesh --order 1 --prob 4 --refinements 3 --freq 5
+
+Number of finite element unknowns: 2112
+  Mode: 2D
+  GMRES(+GS) converged in 169 iters, final residual = 9.720667e-6
+  ||E|| = 3.529612e-2
+
+  Wrote ex25-sol_r.gf, ex25-sol_i.gf
+  Wrote ex25.mesh

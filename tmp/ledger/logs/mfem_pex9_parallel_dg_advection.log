@@ -1,0 +1,5 @@
+=== fem-rs mfem_pex9: Parallel DG Advection (RK4, periodic) ===
+
+thread 'main' (7300) panicked at examples\mfem_pex9_parallel_dg_advection.rs:93:29:
+failed to read data/periodic-hexagon.mesh: IO error: The system cannot find the file specified. (os error 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

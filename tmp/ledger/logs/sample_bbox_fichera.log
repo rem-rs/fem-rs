@@ -1,0 +1,12 @@
+Options used:
+   --mesh fichera-q2.mesh
+   --order 2
+   --no-visualization
+   --no-visit
+   --jacobian
+Nodal position minimum bounds:
+-1.03976 -1.05201 -1.06782
+Nodal position maximum bounds:
+1.05379 1.0582 1.05601
+Jacobian determinant minimum bound: 0.396933
+Jacobian determinant maximum bound: 1.96599

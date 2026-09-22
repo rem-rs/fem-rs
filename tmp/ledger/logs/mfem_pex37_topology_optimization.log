@@ -1,0 +1,7 @@
+=== fem-rs mfem_pex37: Parallel Topology Optimization ===
+  Workers: 2, Mesh: MakeCartesian2D(3,1), Refine: 5, Order: 2
+Number of unknowns: 25090
+Number of unknowns: 25090
+Solution norm: 0.000000e0
+Done
+=== Done ===

@@ -1,0 +1,41 @@
+Mesh Characteristics:
+Dimension          : 2
+Space dimension    : 2
+Number of vertices : 4
+Number of edges    : 4
+Number of elements : 1  --  1 Square(s)
+Number of bdr elem : 4
+Euler Number       : 1
+h_min              : 1
+h_max              : 1
+kappa_min          : 1
+kappa_max          : 1
+
+=======================================;
+ Patch info
+=======================================;
+0: Order = 1x1 : DOFs = 2x2
+=======================================;
+ KnotVector 0
+=======================================;
+Knotvector : 1 2 0 0 1 1
+Write shape function to: k0_n0.dat
+Write shape function to: k0_n1.dat
+plot 0, 'k0_n0.dat' u 1:2 w l, 'k0_n1.dat' u 1:2 w l
+Greville points : 0 1
+Botella  points : 0 1
+Demko    points : 0 1
+Chebyshev spline coeff : 1 -1
+Write Chebyshev spline to: k0_cheby.dat
+=======================================;
+ KnotVector 1
+=======================================;
+Knotvector : 1 2 0 0 1 1
+Write shape function to: k1_n0.dat
+Write shape function to: k1_n1.dat
+plot 0, 'k1_n0.dat' u 1:2 w l, 'k1_n1.dat' u 1:2 w l
+Greville points : 0 1
+Botella  points : 0 1
+Demko    points : 0 1
+Chebyshev spline coeff : 1 -1
+Write Chebyshev spline to: k1_cheby.dat

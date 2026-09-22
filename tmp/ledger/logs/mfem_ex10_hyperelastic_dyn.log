@@ -1,0 +1,1278 @@
+Options used:
+   --mesh data/beam-quad.mesh
+   --refine 2
+   --order 2
+   --ode-solver 23
+   --t-final 300
+   --time-step 3
+   --viscosity 0.01
+   --shear-modulus 0.25
+   --bulk-modulus 5
+   --no-visualization
+   --visualization-steps 1
+  Mesh: 8 elements, 18 nodes, dim=2
+  After refinement: 128 elements, 165 nodes
+Number of velocity/deformation unknowns: 1170
+initial elastic energy (EE) = 0.000000
+initial kinetic energy (KE) = 0.032381
+initial   total energy (TE) = 0.032381
+initial L2 norm of deformation: 0.000000000000e0
+initial L2 norm of velocity:    2.544836041010e-1
+Newton iteration  0 : ||r|| = 0.148477
+Newton iteration  1 : ||r|| = 9.962426e-3, ||r||/||r_0|| = 6.709731e-2
+Newton iteration  2 : ||r|| = 3.637296e-3, ||r||/||r_0|| = 2.449733e-2
+Newton iteration  3 : ||r|| = 2.187698e-5, ||r||/||r_0|| = 1.473423e-4
+Newton iteration  4 : ||r|| = 6.236713e-8, ||r||/||r_0|| = 4.200449e-7
+Newton iteration  0 : ||r|| = 0.042588
+Newton iteration  1 : ||r|| = 1.537036e-3, ||r||/||r_0|| = 3.609079e-2
+Newton iteration  2 : ||r|| = 7.793892e-6, ||r||/||r_0|| = 1.830065e-4
+Newton iteration  3 : ||r|| = 4.280954e-8, ||r||/||r_0|| = 1.005201e-6
+Newton iteration  0 : ||r|| = 0.254093
+Newton iteration  1 : ||r|| = 3.446731e-2, ||r||/||r_0|| = 1.356485e-1
+Newton iteration  2 : ||r|| = 5.280921e-3, ||r||/||r_0|| = 2.078342e-2
+Newton iteration  3 : ||r|| = 1.153768e-4, ||r||/||r_0|| = 4.540734e-4
+Newton iteration  4 : ||r|| = 1.078948e-7, ||r||/||r_0|| = 4.246274e-7
+Newton iteration  5 : ||r|| = 4.128489e-8, ||r||/||r_0|| = 1.624795e-7
+step 1, t = 3, EE = 0.003191, KE = 0.028248, ΔTE = -0.000942
+  L2(||x||)=7.363158975605e-1  L2(||v||)=2.376891727162e-1
+Newton iteration  0 : ||r|| = 0.024460
+Newton iteration  1 : ||r|| = 1.955514e-3, ||r||/||r_0|| = 7.994695e-2
+Newton iteration  2 : ||r|| = 1.907404e-5, ||r||/||r_0|| = 7.798006e-4
+Newton iteration  3 : ||r|| = 4.293818e-8, ||r||/||r_0|| = 1.755434e-6
+Newton iteration  0 : ||r|| = 0.016079
+Newton iteration  1 : ||r|| = 8.802910e-4, ||r||/||r_0|| = 5.474750e-2
+Newton iteration  2 : ||r|| = 1.345197e-5, ||r||/||r_0|| = 8.366118e-4
+Newton iteration  3 : ||r|| = 4.374684e-8, ||r||/||r_0|| = 2.720726e-6
+Newton iteration  0 : ||r|| = 0.059158
+Newton iteration  1 : ||r|| = 1.384039e-3, ||r||/||r_0|| = 2.339564e-2
+Newton iteration  2 : ||r|| = 1.573206e-4, ||r||/||r_0|| = 2.659330e-3
+Newton iteration  3 : ||r|| = 5.092564e-8, ||r||/||r_0|| = 8.608410e-7
+step 2, t = 6, EE = 0.006418, KE = 0.024482, ΔTE = -0.001481
+  L2(||x||)=1.411668000368e0  L2(||v||)=2.212772453948e-1
+Newton iteration  0 : ||r|| = 0.011460
+Newton iteration  1 : ||r|| = 6.891010e-4, ||r||/||r_0|| = 6.012838e-2
+Newton iteration  2 : ||r|| = 1.872826e-6, ||r||/||r_0|| = 1.634158e-4
+Newton iteration  3 : ||r|| = 4.264654e-8, ||r||/||r_0|| = 3.721178e-6
+Newton iteration  0 : ||r|| = 0.012172
+Newton iteration  1 : ||r|| = 4.057425e-4, ||r||/||r_0|| = 3.333433e-2
+Newton iteration  2 : ||r|| = 9.832576e-8, ||r||/||r_0|| = 8.078088e-6
+Newton iteration  0 : ||r|| = 0.054459
+Newton iteration  1 : ||r|| = 9.428944e-4, ||r||/||r_0|| = 1.731379e-2
+Newton iteration  2 : ||r|| = 3.620690e-6, ||r||/||r_0|| = 6.648451e-5
+Newton iteration  3 : ||r|| = 4.385320e-8, ||r||/||r_0|| = 8.052494e-7
+step 3, t = 9, EE = 0.008101, KE = 0.022400, ΔTE = -0.001880
+  L2(||x||)=2.031044331711e0  L2(||v||)=2.116615749818e-1
+Newton iteration  0 : ||r|| = 0.006534
+Newton iteration  1 : ||r|| = 3.537307e-4, ||r||/||r_0|| = 5.414096e-2
+Newton iteration  2 : ||r|| = 1.166019e-7, ||r||/||r_0|| = 1.784674e-5
+Newton iteration  3 : ||r|| = 4.333088e-8, ||r||/||r_0|| = 6.632095e-6
+Newton iteration  0 : ||r|| = 0.008830
+Newton iteration  1 : ||r|| = 3.451324e-4, ||r||/||r_0|| = 3.908674e-2
+Newton iteration  2 : ||r|| = 5.721682e-7, ||r||/||r_0|| = 6.479886e-5
+Newton iteration  3 : ||r|| = 4.306740e-8, ||r||/||r_0|| = 4.877445e-6
+Newton iteration  0 : ||r|| = 0.041770
+Newton iteration  1 : ||r|| = 1.008786e-3, ||r||/||r_0|| = 2.415111e-2
+Newton iteration  2 : ||r|| = 1.634005e-5, ||r||/||r_0|| = 3.911934e-4
+Newton iteration  3 : ||r|| = 4.386214e-8, ||r||/||r_0|| = 1.050093e-6
+step 4, t = 12, EE = 0.008472, KE = 0.021731, ΔTE = -0.002178
+  L2(||x||)=2.614125351914e0  L2(||v||)=2.084735521546e-1
+Newton iteration  0 : ||r|| = 0.007507
+Newton iteration  1 : ||r|| = 6.643275e-4, ||r||/||r_0|| = 8.848871e-2
+Newton iteration  2 : ||r|| = 5.671802e-7, ||r||/||r_0|| = 7.554865e-5
+Newton iteration  3 : ||r|| = 4.342236e-8, ||r||/||r_0|| = 5.783877e-6
+Newton iteration  0 : ||r|| = 0.004187
+Newton iteration  1 : ||r|| = 4.776658e-4, ||r||/||r_0|| = 1.140924e-1
+Newton iteration  2 : ||r|| = 7.180874e-8, ||r||/||r_0|| = 1.715180e-5
+Newton iteration  0 : ||r|| = 0.021100
+Newton iteration  1 : ||r|| = 5.026469e-4, ||r||/||r_0|| = 2.382211e-2
+Newton iteration  2 : ||r|| = 8.121302e-7, ||r||/||r_0|| = 3.848955e-5
+Newton iteration  3 : ||r|| = 4.348982e-8, ||r||/||r_0|| = 2.061127e-6
+step 5, t = 15, EE = 0.010095, KE = 0.019903, ΔTE = -0.002383
+  L2(||x||)=3.168581417271e0  L2(||v||)=1.995123046594e-1
+Newton iteration  0 : ||r|| = 0.005006
+Newton iteration  1 : ||r|| = 3.733672e-4, ||r||/||r_0|| = 7.458685e-2
+Newton iteration  2 : ||r|| = 4.885270e-8, ||r||/||r_0|| = 9.759211e-6
+Newton iteration  0 : ||r|| = 0.006267
+Newton iteration  1 : ||r|| = 3.557488e-4, ||r||/||r_0|| = 5.676111e-2
+Newton iteration  2 : ||r|| = 6.868524e-8, ||r||/||r_0|| = 1.095900e-5
+Newton iteration  0 : ||r|| = 0.025246
+Newton iteration  1 : ||r|| = 5.604620e-4, ||r||/||r_0|| = 2.220001e-2
+Newton iteration  2 : ||r|| = 1.690698e-6, ||r||/||r_0|| = 6.696889e-5
+Newton iteration  3 : ||r|| = 4.378939e-8, ||r||/||r_0|| = 1.734506e-6
+step 6, t = 18, EE = 0.012500, KE = 0.017263, ΔTE = -0.002618
+  L2(||x||)=3.681843988747e0  L2(||v||)=1.858130428628e-1
+Newton iteration  0 : ||r|| = 0.006801
+Newton iteration  1 : ||r|| = 6.968765e-4, ||r||/||r_0|| = 1.024612e-1
+Newton iteration  2 : ||r|| = 2.528288e-7, ||r||/||r_0|| = 3.717322e-5
+Newton iteration  3 : ||r|| = 4.425779e-8, ||r||/||r_0|| = 6.507187e-6
+Newton iteration  0 : ||r|| = 0.010320
+Newton iteration  1 : ||r|| = 7.421126e-4, ||r||/||r_0|| = 7.191164e-2
+Newton iteration  2 : ||r|| = 1.458572e-6, ||r||/||r_0|| = 1.413375e-4
+Newton iteration  3 : ||r|| = 4.374190e-8, ||r||/||r_0|| = 4.238645e-6
+Newton iteration  0 : ||r|| = 0.047953
+Newton iteration  1 : ||r|| = 1.107118e-3, ||r||/||r_0|| = 2.308765e-2
+Newton iteration  2 : ||r|| = 7.151999e-5, ||r||/||r_0|| = 1.491466e-3
+Newton iteration  3 : ||r|| = 4.569716e-8, ||r||/||r_0|| = 9.529607e-7
+step 7, t = 21, EE = 0.013979, KE = 0.015472, ΔTE = -0.002930
+  L2(||x||)=4.140926234819e0  L2(||v||)=1.759094449953e-1
+Newton iteration  0 : ||r|| = 0.012320
+Newton iteration  1 : ||r|| = 9.116997e-4, ||r||/||r_0|| = 7.400068e-2
+Newton iteration  2 : ||r|| = 1.516504e-5, ||r||/||r_0|| = 1.230913e-3
+Newton iteration  3 : ||r|| = 4.510292e-8, ||r||/||r_0|| = 3.660906e-6
+Newton iteration  0 : ||r|| = 0.023194
+Newton iteration  1 : ||r|| = 6.256689e-4, ||r||/||r_0|| = 2.697556e-2
+Newton iteration  2 : ||r|| = 3.246228e-5, ||r||/||r_0|| = 1.399603e-3
+Newton iteration  3 : ||r|| = 4.422721e-8, ||r||/||r_0|| = 1.906845e-6
+Newton iteration  0 : ||r|| = 0.113379
+Newton iteration  1 : ||r|| = 1.813067e-3, ||r||/||r_0|| = 1.599125e-2
+Newton iteration  2 : ||r|| = 2.114059e-4, ||r||/||r_0|| = 1.864600e-3
+Newton iteration  3 : ||r|| = 1.438036e-7, ||r||/||r_0|| = 1.268348e-6
+Newton iteration  4 : ||r|| = 4.397957e-8, ||r||/||r_0|| = 3.878999e-7
+step 8, t = 24, EE = 0.012280, KE = 0.016644, ΔTE = -0.003457
+  L2(||x||)=4.546072007430e0  L2(||v||)=1.824523295995e-1
+Newton iteration  0 : ||r|| = 0.023379
+Newton iteration  1 : ||r|| = 2.484502e-4, ||r||/||r_0|| = 1.062717e-2
+Newton iteration  2 : ||r|| = 4.477869e-6, ||r||/||r_0|| = 1.915356e-4
+Newton iteration  3 : ||r|| = 4.431964e-8, ||r||/||r_0|| = 1.895721e-6
+Newton iteration  0 : ||r|| = 0.042560
+Newton iteration  1 : ||r|| = 3.668973e-4, ||r||/||r_0|| = 8.620640e-3
+Newton iteration  2 : ||r|| = 2.306668e-7, ||r||/||r_0|| = 5.419760e-6
+Newton iteration  3 : ||r|| = 4.313176e-8, ||r||/||r_0|| = 1.013426e-6
+Newton iteration  0 : ||r|| = 0.184072
+Newton iteration  1 : ||r|| = 4.450344e-3, ||r||/||r_0|| = 2.417720e-2
+Newton iteration  2 : ||r|| = 1.079938e-4, ||r||/||r_0|| = 5.866934e-4
+Newton iteration  3 : ||r|| = 5.387897e-7, ||r||/||r_0|| = 2.927061e-6
+Newton iteration  4 : ||r|| = 4.326013e-8, ||r||/||r_0|| = 2.350175e-7
+step 9, t = 27, EE = 0.008966, KE = 0.019188, ΔTE = -0.004227
+  L2(||x||)=4.917494848188e0  L2(||v||)=1.958970436248e-1
+Newton iteration  0 : ||r|| = 0.006933
+Newton iteration  1 : ||r|| = 5.466469e-4, ||r||/||r_0|| = 7.884445e-2
+Newton iteration  2 : ||r|| = 1.640136e-6, ||r||/||r_0|| = 2.365614e-4
+Newton iteration  3 : ||r|| = 4.388061e-8, ||r||/||r_0|| = 6.329025e-6
+Newton iteration  0 : ||r|| = 0.031557
+Newton iteration  1 : ||r|| = 5.154402e-4, ||r||/||r_0|| = 1.633343e-2
+Newton iteration  2 : ||r|| = 3.951681e-5, ||r||/||r_0|| = 1.252221e-3
+Newton iteration  3 : ||r|| = 4.358332e-8, ||r||/||r_0|| = 1.381082e-6
+Newton iteration  0 : ||r|| = 0.164827
+Newton iteration  1 : ||r|| = 3.050228e-3, ||r||/||r_0|| = 1.850562e-2
+Newton iteration  2 : ||r|| = 2.715103e-4, ||r||/||r_0|| = 1.647243e-3
+Newton iteration  3 : ||r|| = 5.736148e-7, ||r||/||r_0|| = 3.480099e-6
+Newton iteration  4 : ||r|| = 4.208210e-8, ||r||/||r_0|| = 2.553105e-7
+step 10, t = 30, EE = 0.006195, KE = 0.021200, ΔTE = -0.004987
+  L2(||x||)=5.280241535119e0  L2(||v||)=2.059111319664e-1
+Newton iteration  0 : ||r|| = 0.018372
+Newton iteration  1 : ||r|| = 3.991944e-4, ||r||/||r_0|| = 2.172890e-2
+Newton iteration  2 : ||r|| = 1.267933e-5, ||r||/||r_0|| = 6.901598e-4
+Newton iteration  3 : ||r|| = 4.225587e-8, ||r||/||r_0|| = 2.300066e-6
+Newton iteration  0 : ||r|| = 0.025602
+Newton iteration  1 : ||r|| = 1.784156e-4, ||r||/||r_0|| = 6.968820e-3
+Newton iteration  2 : ||r|| = 4.640606e-7, ||r||/||r_0|| = 1.812597e-5
+Newton iteration  3 : ||r|| = 4.254773e-8, ||r||/||r_0|| = 1.661892e-6
+Newton iteration  0 : ||r|| = 0.141338
+Newton iteration  1 : ||r|| = 1.448583e-3, ||r||/||r_0|| = 1.024904e-2
+Newton iteration  2 : ||r|| = 7.124096e-6, ||r||/||r_0|| = 5.040455e-5
+Newton iteration  3 : ||r|| = 4.387126e-8, ||r||/||r_0|| = 3.103988e-7
+step 11, t = 33, EE = 0.004640, KE = 0.022036, ΔTE = -0.005704
+  L2(||x||)=5.649667600312e0  L2(||v||)=2.099341110126e-1
+Newton iteration  0 : ||r|| = 0.007599
+Newton iteration  1 : ||r|| = 1.729064e-4, ||r||/||r_0|| = 2.275508e-2
+Newton iteration  2 : ||r|| = 2.216907e-7, ||r||/||r_0|| = 2.917526e-5
+Newton iteration  3 : ||r|| = 4.256021e-8, ||r||/||r_0|| = 5.601071e-6
+Newton iteration  0 : ||r|| = 0.025996
+Newton iteration  1 : ||r|| = 2.311864e-4, ||r||/||r_0|| = 8.893022e-3
+Newton iteration  2 : ||r|| = 2.940695e-6, ||r||/||r_0|| = 1.131194e-4
+Newton iteration  3 : ||r|| = 4.390088e-8, ||r||/||r_0|| = 1.688730e-6
+Newton iteration  0 : ||r|| = 0.137753
+Newton iteration  1 : ||r|| = 1.246001e-3, ||r||/||r_0|| = 9.045158e-3
+Newton iteration  2 : ||r|| = 8.956844e-5, ||r||/||r_0|| = 6.502087e-4
+Newton iteration  3 : ||r|| = 4.714495e-8, ||r||/||r_0|| = 3.422417e-7
+step 12, t = 36, EE = 0.004894, KE = 0.021062, ΔTE = -0.006426
+  L2(||x||)=6.030746051351e0  L2(||v||)=2.052393851387e-1
+Newton iteration  0 : ||r|| = 0.009831
+Newton iteration  1 : ||r|| = 2.149811e-4, ||r||/||r_0|| = 2.186734e-2
+Newton iteration  2 : ||r|| = 2.569639e-6, ||r||/||r_0|| = 2.613772e-4
+Newton iteration  3 : ||r|| = 4.251261e-8, ||r||/||r_0|| = 4.324276e-6
+Newton iteration  0 : ||r|| = 0.028499
+Newton iteration  1 : ||r|| = 2.684929e-4, ||r||/||r_0|| = 9.421295e-3
+Newton iteration  2 : ||r|| = 5.513687e-6, ||r||/||r_0|| = 1.934728e-4
+Newton iteration  3 : ||r|| = 4.289380e-8, ||r||/||r_0|| = 1.505124e-6
+Newton iteration  0 : ||r|| = 0.148197
+Newton iteration  1 : ||r|| = 1.958099e-3, ||r||/||r_0|| = 1.321284e-2
+Newton iteration  2 : ||r|| = 1.504740e-5, ||r||/||r_0|| = 1.015366e-4
+Newton iteration  3 : ||r|| = 4.426079e-8, ||r||/||r_0|| = 2.986624e-7
+step 13, t = 39, EE = 0.006497, KE = 0.018746, ΔTE = -0.007137
+  L2(||x||)=6.418407868520e0  L2(||v||)=1.936295572660e-1
+Newton iteration  0 : ||r|| = 0.010422
+Newton iteration  1 : ||r|| = 2.854893e-4, ||r||/||r_0|| = 2.739198e-2
+Newton iteration  2 : ||r|| = 9.177491e-8, ||r||/||r_0|| = 8.805571e-6
+Newton iteration  0 : ||r|| = 0.030624
+Newton iteration  1 : ||r|| = 2.751117e-4, ||r||/||r_0|| = 8.983639e-3
+Newton iteration  2 : ||r|| = 5.422984e-7, ||r||/||r_0|| = 1.770849e-5
+Newton iteration  3 : ||r|| = 4.317708e-8, ||r||/||r_0|| = 1.409926e-6
+Newton iteration  0 : ||r|| = 0.155641
+Newton iteration  1 : ||r|| = 2.626590e-3, ||r||/||r_0|| = 1.687597e-2
+Newton iteration  2 : ||r|| = 1.802678e-5, ||r||/||r_0|| = 1.158230e-4
+Newton iteration  3 : ||r|| = 4.663760e-8, ||r||/||r_0|| = 2.996489e-7
+step 14, t = 42, EE = 0.008359, KE = 0.016248, ΔTE = -0.007774
+  L2(||x||)=6.798055814669e0  L2(||v||)=1.802643917235e-1
+Newton iteration  0 : ||r|| = 0.005337
+Newton iteration  1 : ||r|| = 8.972881e-5, ||r||/||r_0|| = 1.681186e-2
+Newton iteration  2 : ||r|| = 5.789836e-8, ||r||/||r_0|| = 1.084801e-5
+Newton iteration  0 : ||r|| = 0.025220
+Newton iteration  1 : ||r|| = 2.220664e-4, ||r||/||r_0|| = 8.805235e-3
+Newton iteration  2 : ||r|| = 3.935754e-6, ||r||/||r_0|| = 1.560580e-4
+Newton iteration  3 : ||r|| = 4.361910e-8, ||r||/||r_0|| = 1.729557e-6
+Newton iteration  0 : ||r|| = 0.139925
+Newton iteration  1 : ||r|| = 2.186454e-3, ||r||/||r_0|| = 1.562591e-2
+Newton iteration  2 : ||r|| = 2.779440e-5, ||r||/||r_0|| = 1.986380e-4
+Newton iteration  3 : ||r|| = 5.614042e-8, ||r||/||r_0|| = 4.012182e-7
+step 15, t = 45, EE = 0.010124, KE = 0.013973, ΔTE = -0.008284
+  L2(||x||)=7.157724368042e0  L2(||v||)=1.671682432665e-1
+Newton iteration  0 : ||r|| = 0.004605
+Newton iteration  1 : ||r|| = 1.850650e-4, ||r||/||r_0|| = 4.018426e-2
+Newton iteration  2 : ||r|| = 8.030833e-8, ||r||/||r_0|| = 1.743782e-5
+Newton iteration  0 : ||r|| = 0.016693
+Newton iteration  1 : ||r|| = 2.438915e-4, ||r||/||r_0|| = 1.461059e-2
+Newton iteration  2 : ||r|| = 6.124486e-6, ||r||/||r_0|| = 3.668940e-4
+Newton iteration  3 : ||r|| = 4.392935e-8, ||r||/||r_0|| = 2.631635e-6
+Newton iteration  0 : ||r|| = 0.102389
+Newton iteration  1 : ||r|| = 1.301799e-3, ||r||/||r_0|| = 1.271422e-2
+Newton iteration  2 : ||r|| = 8.684585e-5, ||r||/||r_0|| = 8.481937e-4
+Newton iteration  3 : ||r|| = 5.548376e-8, ||r||/||r_0|| = 5.418909e-7
+step 16, t = 48, EE = 0.012054, KE = 0.011694, ΔTE = -0.008632
+  L2(||x||)=7.501598550665e0  L2(||v||)=1.529330178649e-1
+Newton iteration  0 : ||r|| = 0.006703
+Newton iteration  1 : ||r|| = 3.648921e-4, ||r||/||r_0|| = 5.444024e-2
+Newton iteration  2 : ||r|| = 1.659704e-6, ||r||/||r_0|| = 2.476203e-4
+Newton iteration  3 : ||r|| = 4.374169e-8, ||r||/||r_0|| = 6.526061e-6
+Newton iteration  0 : ||r|| = 0.007704
+Newton iteration  1 : ||r|| = 2.745616e-4, ||r||/||r_0|| = 3.563846e-2
+Newton iteration  2 : ||r|| = 2.102965e-6, ||r||/||r_0|| = 2.729676e-4
+Newton iteration  3 : ||r|| = 4.382950e-8, ||r||/||r_0|| = 5.689126e-6
+Newton iteration  0 : ||r|| = 0.058565
+Newton iteration  1 : ||r|| = 5.641543e-4, ||r||/||r_0|| = 9.632929e-3
+Newton iteration  2 : ||r|| = 5.953895e-5, ||r||/||r_0|| = 1.016627e-3
+Newton iteration  3 : ||r|| = 4.384989e-8, ||r||/||r_0|| = 7.487365e-7
+step 17, t = 51, EE = 0.014033, KE = 0.009511, ΔTE = -0.008837
+  L2(||x||)=7.843443190903e0  L2(||v||)=1.379192880231e-1
+Newton iteration  0 : ||r|| = 0.006250
+Newton iteration  1 : ||r|| = 2.704650e-4, ||r||/||r_0|| = 4.327516e-2
+Newton iteration  2 : ||r|| = 1.470766e-6, ||r||/||r_0|| = 2.353267e-4
+Newton iteration  3 : ||r|| = 4.443859e-8, ||r||/||r_0|| = 7.110299e-6
+Newton iteration  0 : ||r|| = 0.004212
+Newton iteration  1 : ||r|| = 1.775226e-4, ||r||/||r_0|| = 4.214548e-2
+Newton iteration  2 : ||r|| = 4.618955e-8, ||r||/||r_0|| = 1.096582e-5
+Newton iteration  0 : ||r|| = 0.029601
+Newton iteration  1 : ||r|| = 1.994039e-4, ||r||/||r_0|| = 6.736316e-3
+Newton iteration  2 : ||r|| = 4.189221e-6, ||r||/||r_0|| = 1.415214e-4
+Newton iteration  3 : ||r|| = 4.297702e-8, ||r||/||r_0|| = 1.451861e-6
+step 18, t = 54, EE = 0.015347, KE = 0.008071, ΔTE = -0.008963
+  L2(||x||)=8.189216534432e0  L2(||v||)=1.270530515063e-1
+Newton iteration  0 : ||r|| = 0.003109
+Newton iteration  1 : ||r|| = 1.114217e-4, ||r||/||r_0|| = 3.584395e-2
+Newton iteration  2 : ||r|| = 5.566872e-8, ||r||/||r_0|| = 1.790842e-5
+Newton iteration  0 : ||r|| = 0.003596
+Newton iteration  1 : ||r|| = 9.517243e-5, ||r||/||r_0|| = 2.646601e-2
+Newton iteration  2 : ||r|| = 4.407837e-8, ||r||/||r_0|| = 1.225752e-5
+Newton iteration  0 : ||r|| = 0.019315
+Newton iteration  1 : ||r|| = 1.360544e-4, ||r||/||r_0|| = 7.044045e-3
+Newton iteration  2 : ||r|| = 2.758689e-7, ||r||/||r_0|| = 1.428276e-5
+Newton iteration  3 : ||r|| = 4.244340e-8, ||r||/||r_0|| = 2.197454e-6
+step 19, t = 57, EE = 0.015947, KE = 0.007366, ΔTE = -0.009068
+  L2(||x||)=8.533882990991e0  L2(||v||)=1.213781119688e-1
+Newton iteration  0 : ||r|| = 0.002644
+Newton iteration  1 : ||r|| = 8.819296e-5, ||r||/||r_0|| = 3.335185e-2
+Newton iteration  2 : ||r|| = 4.335084e-8, ||r||/||r_0|| = 1.639395e-5
+Newton iteration  0 : ||r|| = 0.004042
+Newton iteration  1 : ||r|| = 7.715283e-5, ||r||/||r_0|| = 1.908891e-2
+Newton iteration  2 : ||r|| = 4.393131e-8, ||r||/||r_0|| = 1.086934e-5
+Newton iteration  0 : ||r|| = 0.018026
+Newton iteration  1 : ||r|| = 1.275484e-4, ||r||/||r_0|| = 7.075992e-3
+Newton iteration  2 : ||r|| = 1.708792e-7, ||r||/||r_0|| = 9.479853e-6
+Newton iteration  3 : ||r|| = 4.351975e-8, ||r||/||r_0|| = 2.414341e-6
+step 20, t = 60, EE = 0.016395, KE = 0.006828, ΔTE = -0.009159
+  L2(||x||)=8.868406861720e0  L2(||v||)=1.168557707465e-1
+Newton iteration  0 : ||r|| = 0.001824
+Newton iteration  1 : ||r|| = 1.060614e-4, ||r||/||r_0|| = 5.814639e-2
+Newton iteration  2 : ||r|| = 4.277805e-8, ||r||/||r_0|| = 2.345234e-5
+Newton iteration  0 : ||r|| = 0.002707
+Newton iteration  1 : ||r|| = 1.104574e-4, ||r||/||r_0|| = 4.080499e-2
+Newton iteration  2 : ||r|| = 4.462885e-8, ||r||/||r_0|| = 1.648672e-5
+Newton iteration  0 : ||r|| = 0.012975
+Newton iteration  1 : ||r|| = 1.765688e-4, ||r||/||r_0|| = 1.360803e-2
+Newton iteration  2 : ||r|| = 2.955650e-7, ||r||/||r_0|| = 2.277898e-5
+Newton iteration  3 : ||r|| = 4.358656e-8, ||r||/||r_0|| = 3.359184e-6
+step 21, t = 63, EE = 0.016383, KE = 0.006778, ΔTE = -0.009220
+  L2(||x||)=9.183885855302e0  L2(||v||)=1.164266402173e-1
+Newton iteration  0 : ||r|| = 0.002219
+Newton iteration  1 : ||r|| = 1.012060e-4, ||r||/||r_0|| = 4.560068e-2
+Newton iteration  2 : ||r|| = 4.383881e-8, ||r||/||r_0|| = 1.975259e-5
+Newton iteration  0 : ||r|| = 0.002286
+Newton iteration  1 : ||r|| = 6.712631e-5, ||r||/||r_0|| = 2.935931e-2
+Newton iteration  2 : ||r|| = 4.513945e-8, ||r||/||r_0|| = 1.974282e-5
+Newton iteration  0 : ||r|| = 0.011104
+Newton iteration  1 : ||r|| = 6.155091e-5, ||r||/||r_0|| = 5.543128e-3
+Newton iteration  2 : ||r|| = 7.232435e-8, ||r||/||r_0|| = 6.513358e-6
+step 22, t = 66, EE = 0.015820, KE = 0.007277, ΔTE = -0.009284
+  L2(||x||)=9.478839061349e0  L2(||v||)=1.206383439446e-1
+Newton iteration  0 : ||r|| = 0.002030
+Newton iteration  1 : ||r|| = 2.040308e-5, ||r||/||r_0|| = 1.004930e-2
+Newton iteration  2 : ||r|| = 4.407393e-8, ||r||/||r_0|| = 2.170810e-5
+Newton iteration  0 : ||r|| = 0.003676
+Newton iteration  1 : ||r|| = 1.718330e-5, ||r||/||r_0|| = 4.674961e-3
+Newton iteration  2 : ||r|| = 4.447434e-8, ||r||/||r_0|| = 1.209988e-5
+Newton iteration  0 : ||r|| = 0.015906
+Newton iteration  1 : ||r|| = 4.019990e-5, ||r||/||r_0|| = 2.527352e-3
+Newton iteration  2 : ||r|| = 5.325226e-8, ||r||/||r_0|| = 3.347949e-6
+step 23, t = 69, EE = 0.015385, KE = 0.007628, ΔTE = -0.009368
+  L2(||x||)=9.764682964600e0  L2(||v||)=1.235138263677e-1
+Newton iteration  0 : ||r|| = 0.001379
+Newton iteration  1 : ||r|| = 2.288033e-5, ||r||/||r_0|| = 1.659609e-2
+Newton iteration  2 : ||r|| = 4.261234e-8, ||r||/||r_0|| = 3.090856e-5
+Newton iteration  0 : ||r|| = 0.003599
+Newton iteration  1 : ||r|| = 1.912541e-5, ||r||/||r_0|| = 5.314252e-3
+Newton iteration  2 : ||r|| = 4.345518e-8, ||r||/||r_0|| = 1.207460e-5
+Newton iteration  0 : ||r|| = 0.016979
+Newton iteration  1 : ||r|| = 4.958435e-5, ||r||/||r_0|| = 2.920249e-3
+Newton iteration  2 : ||r|| = 7.792860e-8, ||r||/||r_0|| = 4.589570e-6
+step 24, t = 72, EE = 0.015034, KE = 0.007893, ΔTE = -0.009454
+  L2(||x||)=1.005531341157e1  L2(||v||)=1.256403673810e-1
+Newton iteration  0 : ||r|| = 0.001280
+Newton iteration  1 : ||r|| = 1.247921e-5, ||r||/||r_0|| = 9.750079e-3
+Newton iteration  2 : ||r|| = 4.349615e-8, ||r||/||r_0|| = 3.398381e-5
+Newton iteration  0 : ||r|| = 0.002812
+Newton iteration  1 : ||r|| = 1.436233e-5, ||r||/||r_0|| = 5.108423e-3
+Newton iteration  2 : ||r|| = 4.311104e-8, ||r||/||r_0|| = 1.533382e-5
+Newton iteration  0 : ||r|| = 0.015558
+Newton iteration  1 : ||r|| = 4.628409e-5, ||r||/||r_0|| = 2.975027e-3
+Newton iteration  2 : ||r|| = 1.002115e-7, ||r||/||r_0|| = 6.441345e-6
+Newton iteration  3 : ||r|| = 4.308718e-8, ||r||/||r_0|| = 2.769538e-6
+step 25, t = 75, EE = 0.014776, KE = 0.008066, ΔTE = -0.009539
+  L2(||x||)=1.035111670093e1  L2(||v||)=1.270090100391e-1
+Newton iteration  0 : ||r|| = 0.001000
+Newton iteration  1 : ||r|| = 4.718794e-5, ||r||/||r_0|| = 4.718108e-2
+Newton iteration  2 : ||r|| = 4.415628e-8, ||r||/||r_0|| = 4.414987e-5
+Newton iteration  0 : ||r|| = 0.002695
+Newton iteration  1 : ||r|| = 4.337750e-5, ||r||/||r_0|| = 1.609375e-2
+Newton iteration  2 : ||r|| = 4.597762e-8, ||r||/||r_0|| = 1.705843e-5
+Newton iteration  0 : ||r|| = 0.015390
+Newton iteration  1 : ||r|| = 7.932476e-5, ||r||/||r_0|| = 5.154452e-3
+Newton iteration  2 : ||r|| = 4.398365e-7, ||r||/||r_0|| = 2.858019e-5
+Newton iteration  3 : ||r|| = 4.176095e-8, ||r||/||r_0|| = 2.713590e-6
+step 26, t = 78, EE = 0.015112, KE = 0.007639, ΔTE = -0.009630
+  L2(||x||)=1.063719171533e1  L2(||v||)=1.236057500568e-1
+Newton iteration  0 : ||r|| = 0.001872
+Newton iteration  1 : ||r|| = 3.467660e-5, ||r||/||r_0|| = 1.852659e-2
+Newton iteration  2 : ||r|| = 4.465969e-8, ||r||/||r_0|| = 2.386023e-5
+Newton iteration  0 : ||r|| = 0.003911
+Newton iteration  1 : ||r|| = 2.432005e-5, ||r||/||r_0|| = 6.217779e-3
+Newton iteration  2 : ||r|| = 4.517583e-8, ||r||/||r_0|| = 1.154986e-5
+Newton iteration  0 : ||r|| = 0.019105
+Newton iteration  1 : ||r|| = 5.842591e-5, ||r||/||r_0|| = 3.058130e-3
+Newton iteration  2 : ||r|| = 5.044337e-8, ||r||/||r_0|| = 2.640308e-6
+step 27, t = 81, EE = 0.015991, KE = 0.006658, ΔTE = -0.009732
+  L2(||x||)=1.089552543462e1  L2(||v||)=1.153909224209e-1
+Newton iteration  0 : ||r|| = 0.001717
+Newton iteration  1 : ||r|| = 1.888915e-5, ||r||/||r_0|| = 1.100252e-2
+Newton iteration  2 : ||r|| = 4.430368e-8, ||r||/||r_0|| = 2.580593e-5
+Newton iteration  0 : ||r|| = 0.004374
+Newton iteration  1 : ||r|| = 2.397288e-5, ||r||/||r_0|| = 5.480839e-3
+Newton iteration  2 : ||r|| = 5.335413e-8, ||r||/||r_0|| = 1.219817e-5
+Newton iteration  0 : ||r|| = 0.020919
+Newton iteration  1 : ||r|| = 8.812655e-5, ||r||/||r_0|| = 4.212816e-3
+Newton iteration  2 : ||r|| = 1.149153e-6, ||r||/||r_0|| = 5.493432e-5
+Newton iteration  3 : ||r|| = 4.337039e-8, ||r||/||r_0|| = 2.073285e-6
+step 28, t = 84, EE = 0.017211, KE = 0.005332, ΔTE = -0.009838
+  L2(||x||)=1.111552758127e1  L2(||v||)=1.032700553565e-1
+Newton iteration  0 : ||r|| = 0.001507
+Newton iteration  1 : ||r|| = 4.578418e-5, ||r||/||r_0|| = 3.038680e-2
+Newton iteration  2 : ||r|| = 4.402849e-8, ||r||/||r_0|| = 2.922156e-5
+Newton iteration  0 : ||r|| = 0.003403
+Newton iteration  1 : ||r|| = 4.225831e-5, ||r||/||r_0|| = 1.241913e-2
+Newton iteration  2 : ||r|| = 4.422268e-8, ||r||/||r_0|| = 1.299643e-5
+Newton iteration  0 : ||r|| = 0.018020
+Newton iteration  1 : ||r|| = 8.125825e-5, ||r||/||r_0|| = 4.509354e-3
+Newton iteration  2 : ||r|| = 3.558600e-7, ||r||/||r_0|| = 1.974813e-5
+Newton iteration  3 : ||r|| = 4.187820e-8, ||r||/||r_0|| = 2.323993e-6
+step 29, t = 87, EE = 0.018635, KE = 0.003814, ΔTE = -0.009932
+  L2(||x||)=1.129378215993e1  L2(||v||)=8.734074527350e-2
+Newton iteration  0 : ||r|| = 0.001879
+Newton iteration  1 : ||r|| = 5.023861e-5, ||r||/||r_0|| = 2.674140e-2
+Newton iteration  2 : ||r|| = 4.380752e-8, ||r||/||r_0|| = 2.331821e-5
+Newton iteration  0 : ||r|| = 0.002880
+Newton iteration  1 : ||r|| = 4.538183e-5, ||r||/||r_0|| = 1.575784e-2
+Newton iteration  2 : ||r|| = 4.320373e-8, ||r||/||r_0|| = 1.500155e-5
+Newton iteration  0 : ||r|| = 0.014596
+Newton iteration  1 : ||r|| = 5.926867e-5, ||r||/||r_0|| = 4.060700e-3
+Newton iteration  2 : ||r|| = 8.274451e-8, ||r||/||r_0|| = 5.669110e-6
+step 30, t = 90, EE = 0.020047, KE = 0.002322, ΔTE = -0.010012
+  L2(||x||)=1.142841336675e1  L2(||v||)=6.814624785293e-2
+Newton iteration  0 : ||r|| = 0.001608
+Newton iteration  1 : ||r|| = 5.726291e-5, ||r||/||r_0|| = 3.561220e-2
+Newton iteration  2 : ||r|| = 4.247202e-8, ||r||/||r_0|| = 2.641364e-5
+Newton iteration  0 : ||r|| = 0.002393
+Newton iteration  1 : ||r|| = 6.538840e-5, ||r||/||r_0|| = 2.733005e-2
+Newton iteration  2 : ||r|| = 4.327984e-8, ||r||/||r_0|| = 1.808945e-5
+Newton iteration  0 : ||r|| = 0.011347
+Newton iteration  1 : ||r|| = 1.047526e-4, ||r||/||r_0|| = 9.231794e-3
+Newton iteration  2 : ||r|| = 1.509667e-7, ||r||/||r_0|| = 1.330462e-5
+Newton iteration  3 : ||r|| = 4.403280e-8, ||r||/||r_0|| = 3.880588e-6
+step 31, t = 93, EE = 0.021199, KE = 0.001108, ΔTE = -0.010073
+  L2(||x||)=1.151640060239e1  L2(||v||)=4.708467362778e-2
+Newton iteration  0 : ||r|| = 0.001835
+Newton iteration  1 : ||r|| = 9.495105e-5, ||r||/||r_0|| = 5.175589e-2
+Newton iteration  2 : ||r|| = 4.278919e-8, ||r||/||r_0|| = 2.332352e-5
+Newton iteration  0 : ||r|| = 0.002355
+Newton iteration  1 : ||r|| = 8.376772e-5, ||r||/||r_0|| = 3.557486e-2
+Newton iteration  2 : ||r|| = 4.290999e-8, ||r||/||r_0|| = 1.822321e-5
+Newton iteration  0 : ||r|| = 0.010282
+Newton iteration  1 : ||r|| = 8.863105e-5, ||r||/||r_0|| = 8.620018e-3
+Newton iteration  2 : ||r|| = 6.781035e-8, ||r||/||r_0|| = 6.595053e-6
+step 32, t = 96, EE = 0.021772, KE = 0.000490, ΔTE = -0.010120
+  L2(||x||)=1.155563816928e1  L2(||v||)=3.129310971634e-2
+Newton iteration  0 : ||r|| = 0.001731
+Newton iteration  1 : ||r|| = 5.993944e-5, ||r||/||r_0|| = 3.463621e-2
+Newton iteration  2 : ||r|| = 4.325364e-8, ||r||/||r_0|| = 2.499426e-5
+Newton iteration  0 : ||r|| = 0.002569
+Newton iteration  1 : ||r|| = 5.486079e-5, ||r||/||r_0|| = 2.135543e-2
+Newton iteration  2 : ||r|| = 4.770868e-8, ||r||/||r_0|| = 1.857135e-5
+Newton iteration  0 : ||r|| = 0.010388
+Newton iteration  1 : ||r|| = 8.592629e-5, ||r||/||r_0|| = 8.271807e-3
+Newton iteration  2 : ||r|| = 8.765526e-7, ||r||/||r_0|| = 8.438248e-5
+Newton iteration  3 : ||r|| = 4.299480e-8, ||r||/||r_0|| = 4.138951e-6
+step 33, t = 99, EE = 0.021751, KE = 0.000471, ΔTE = -0.010159
+  L2(||x||)=1.154794291053e1  L2(||v||)=3.068409928664e-2
+Newton iteration  0 : ||r|| = 0.001443
+Newton iteration  1 : ||r|| = 1.374807e-4, ||r||/||r_0|| = 9.524495e-2
+Newton iteration  2 : ||r|| = 4.440042e-8, ||r||/||r_0|| = 3.076007e-5
+Newton iteration  0 : ||r|| = 0.001522
+Newton iteration  1 : ||r|| = 1.696448e-4, ||r||/||r_0|| = 1.114256e-1
+Newton iteration  2 : ||r|| = 5.036508e-8, ||r||/||r_0|| = 3.308065e-5
+Newton iteration  0 : ||r|| = 0.005894
+Newton iteration  1 : ||r|| = 2.328050e-4, ||r||/||r_0|| = 3.949739e-2
+Newton iteration  2 : ||r|| = 1.211151e-6, ||r||/||r_0|| = 2.054823e-4
+Newton iteration  3 : ||r|| = 4.368658e-8, ||r||/||r_0|| = 7.411807e-6
+step 34, t = 102, EE = 0.021277, KE = 0.000919, ΔTE = -0.010185
+  L2(||x||)=1.149863214204e1  L2(||v||)=4.286765457203e-2
+Newton iteration  0 : ||r|| = 0.001774
+Newton iteration  1 : ||r|| = 2.765782e-4, ||r||/||r_0|| = 1.558823e-1
+Newton iteration  2 : ||r|| = 1.024610e-7, ||r||/||r_0|| = 5.774805e-5
+Newton iteration  3 : ||r|| = 4.342840e-8, ||r||/||r_0|| = 2.447668e-5
+Newton iteration  0 : ||r|| = 0.001585
+Newton iteration  1 : ||r|| = 2.525732e-4, ||r||/||r_0|| = 1.593289e-1
+Newton iteration  2 : ||r|| = 5.100729e-8, ||r||/||r_0|| = 3.217655e-5
+Newton iteration  0 : ||r|| = 0.005163
+Newton iteration  1 : ||r|| = 2.478672e-4, ||r||/||r_0|| = 4.800629e-2
+Newton iteration  2 : ||r|| = 2.984118e-7, ||r||/||r_0|| = 5.779565e-5
+Newton iteration  3 : ||r|| = 4.363469e-8, ||r||/||r_0|| = 8.451057e-6
+step 35, t = 105, EE = 0.020346, KE = 0.001822, ΔTE = -0.010212
+  L2(||x||)=1.141373064686e1  L2(||v||)=6.037006065090e-2
+Newton iteration  0 : ||r|| = 0.001728
+Newton iteration  1 : ||r|| = 1.801953e-4, ||r||/||r_0|| = 1.042954e-1
+Newton iteration  2 : ||r|| = 6.932928e-8, ||r||/||r_0|| = 4.012714e-5
+Newton iteration  0 : ||r|| = 0.002728
+Newton iteration  1 : ||r|| = 1.357247e-4, ||r||/||r_0|| = 4.975286e-2
+Newton iteration  2 : ||r|| = 1.106939e-7, ||r||/||r_0|| = 4.057729e-5
+Newton iteration  3 : ||r|| = 4.302409e-8, ||r||/||r_0|| = 1.577143e-5
+Newton iteration  0 : ||r|| = 0.012846
+Newton iteration  1 : ||r|| = 1.190568e-4, ||r||/||r_0|| = 9.267945e-3
+Newton iteration  2 : ||r|| = 1.481010e-6, ||r||/||r_0|| = 1.152888e-4
+Newton iteration  3 : ||r|| = 4.407934e-8, ||r||/||r_0|| = 3.431343e-6
+step 36, t = 108, EE = 0.019074, KE = 0.003028, ΔTE = -0.010279
+  L2(||x||)=1.129835257397e1  L2(||v||)=7.781706757136e-2
+Newton iteration  0 : ||r|| = 0.003214
+Newton iteration  1 : ||r|| = 7.006522e-5, ||r||/||r_0|| = 2.179977e-2
+Newton iteration  2 : ||r|| = 8.194195e-8, ||r||/||r_0|| = 2.549505e-5
+Newton iteration  0 : ||r|| = 0.005898
+Newton iteration  1 : ||r|| = 5.961472e-5, ||r||/||r_0|| = 1.010780e-2
+Newton iteration  2 : ||r|| = 1.282710e-7, ||r||/||r_0|| = 2.174862e-5
+Newton iteration  3 : ||r|| = 4.370431e-8, ||r||/||r_0|| = 7.410158e-6
+Newton iteration  0 : ||r|| = 0.025814
+Newton iteration  1 : ||r|| = 1.188715e-4, ||r||/||r_0|| = 4.605007e-3
+Newton iteration  2 : ||r|| = 5.093432e-7, ||r||/||r_0|| = 1.973164e-5
+Newton iteration  3 : ||r|| = 4.281902e-8, ||r||/||r_0|| = 1.658783e-6
+step 37, t = 111, EE = 0.017680, KE = 0.004297, ΔTE = -0.010403
+  L2(||x||)=1.115682400741e1  L2(||v||)=9.270819357938e-2
+Newton iteration  0 : ||r|| = 0.002730
+Newton iteration  1 : ||r|| = 3.610359e-5, ||r||/||r_0|| = 1.322314e-2
+Newton iteration  2 : ||r|| = 4.360726e-8, ||r||/||r_0|| = 1.597140e-5
+Newton iteration  0 : ||r|| = 0.007541
+Newton iteration  1 : ||r|| = 2.887560e-5, ||r||/||r_0|| = 3.828899e-3
+Newton iteration  2 : ||r|| = 4.472497e-8, ||r||/||r_0|| = 5.930523e-6
+Newton iteration  0 : ||r|| = 0.036086
+Newton iteration  1 : ||r|| = 1.525297e-4, ||r||/||r_0|| = 4.226820e-3
+Newton iteration  2 : ||r|| = 7.934435e-8, ||r||/||r_0|| = 2.198747e-6
+step 38, t = 114, EE = 0.016405, KE = 0.005400, ΔTE = -0.010576
+  L2(||x||)=1.099305339074e1  L2(||v||)=1.039239141255e-1
+Newton iteration  0 : ||r|| = 0.002073
+Newton iteration  1 : ||r|| = 7.465805e-6, ||r||/||r_0|| = 3.601709e-3
+Newton iteration  2 : ||r|| = 4.428776e-8, ||r||/||r_0|| = 2.136563e-5
+Newton iteration  0 : ||r|| = 0.008080
+Newton iteration  1 : ||r|| = 1.101752e-5, ||r||/||r_0|| = 1.363549e-3
+Newton iteration  2 : ||r|| = 4.285739e-8, ||r||/||r_0|| = 5.304111e-6
+Newton iteration  0 : ||r|| = 0.041434
+Newton iteration  1 : ||r|| = 1.727738e-4, ||r||/||r_0|| = 4.169851e-3
+Newton iteration  2 : ||r|| = 8.343800e-8, ||r||/||r_0|| = 2.013754e-6
+step 39, t = 117, EE = 0.015555, KE = 0.006052, ΔTE = -0.010774
+  L2(||x||)=1.080944471405e1  L2(||v||)=1.100169288074e-1
+Newton iteration  0 : ||r|| = 0.001359
+Newton iteration  1 : ||r|| = 1.352059e-5, ||r||/||r_0|| = 9.951904e-3
+Newton iteration  2 : ||r|| = 4.374557e-8, ||r||/||r_0|| = 3.219916e-5
+Newton iteration  0 : ||r|| = 0.007623
+Newton iteration  1 : ||r|| = 2.819253e-5, ||r||/||r_0|| = 3.698538e-3
+Newton iteration  2 : ||r|| = 5.464701e-8, ||r||/||r_0|| = 7.169061e-6
+Newton iteration  0 : ||r|| = 0.040801
+Newton iteration  1 : ||r|| = 1.901465e-4, ||r||/||r_0|| = 4.660297e-3
+Newton iteration  2 : ||r|| = 9.412856e-7, ||r||/||r_0|| = 2.306995e-5
+Newton iteration  3 : ||r|| = 4.347601e-8, ||r||/||r_0|| = 1.065553e-6
+step 40, t = 120, EE = 0.015311, KE = 0.006106, ΔTE = -0.010964
+  L2(||x||)=1.060489342249e1  L2(||v||)=1.105119888829e-1
+Newton iteration  0 : ||r|| = 0.001405
+Newton iteration  1 : ||r|| = 4.856304e-5, ||r||/||r_0|| = 3.455627e-2
+Newton iteration  2 : ||r|| = 4.366330e-8, ||r||/||r_0|| = 3.106973e-5
+Newton iteration  0 : ||r|| = 0.005788
+Newton iteration  1 : ||r|| = 6.837245e-5, ||r||/||r_0|| = 1.181328e-2
+Newton iteration  2 : ||r|| = 1.827081e-7, ||r||/||r_0|| = 3.156802e-5
+Newton iteration  3 : ||r|| = 4.341362e-8, ||r||/||r_0|| = 7.500936e-6
+Newton iteration  0 : ||r|| = 0.032996
+Newton iteration  1 : ||r|| = 1.958124e-4, ||r||/||r_0|| = 5.934348e-3
+Newton iteration  2 : ||r|| = 4.843659e-6, ||r||/||r_0|| = 1.467933e-4
+Newton iteration  3 : ||r|| = 4.344971e-8, ||r||/||r_0|| = 1.316800e-6
+step 41, t = 123, EE = 0.015478, KE = 0.005796, ΔTE = -0.011108
+  L2(||x||)=1.037530690804e1  L2(||v||)=1.076625406106e-1
+Newton iteration  0 : ||r|| = 0.002196
+Newton iteration  1 : ||r|| = 1.175928e-4, ||r||/||r_0|| = 5.353877e-2
+Newton iteration  2 : ||r|| = 4.848092e-8, ||r||/||r_0|| = 2.207285e-5
+Newton iteration  0 : ||r|| = 0.003023
+Newton iteration  1 : ||r|| = 1.319415e-4, ||r||/||r_0|| = 4.363936e-2
+Newton iteration  2 : ||r|| = 1.365304e-7, ||r||/||r_0|| = 4.515712e-5
+Newton iteration  3 : ||r|| = 4.334069e-8, ||r||/||r_0|| = 1.433483e-5
+Newton iteration  0 : ||r|| = 0.020123
+Newton iteration  1 : ||r|| = 1.868724e-4, ||r||/||r_0|| = 9.286535e-3
+Newton iteration  2 : ||r|| = 5.233519e-6, ||r||/||r_0|| = 2.600772e-4
+Newton iteration  3 : ||r|| = 4.393763e-8, ||r||/||r_0|| = 2.183459e-6
+step 42, t = 126, EE = 0.015629, KE = 0.005559, ΔTE = -0.011193
+  L2(||x||)=1.011821449294e1  L2(||v||)=1.054416018812e-1
+Newton iteration  0 : ||r|| = 0.002435
+Newton iteration  1 : ||r|| = 1.966865e-4, ||r||/||r_0|| = 8.077317e-2
+Newton iteration  2 : ||r|| = 1.235121e-7, ||r||/||r_0|| = 5.072265e-5
+Newton iteration  3 : ||r|| = 4.384241e-8, ||r||/||r_0|| = 1.800475e-5
+Newton iteration  0 : ||r|| = 0.001520
+Newton iteration  1 : ||r|| = 1.934763e-4, ||r||/||r_0|| = 1.273286e-1
+Newton iteration  2 : ||r|| = 4.339073e-8, ||r||/||r_0|| = 2.855586e-5
+Newton iteration  0 : ||r|| = 0.009201
+Newton iteration  1 : ||r|| = 1.985686e-4, ||r||/||r_0|| = 2.158203e-2
+Newton iteration  2 : ||r|| = 1.008492e-6, ||r||/||r_0|| = 1.096110e-4
+Newton iteration  3 : ||r|| = 4.379251e-8, ||r||/||r_0|| = 4.759721e-6
+step 43, t = 129, EE = 0.015572, KE = 0.005573, ΔTE = -0.011236
+  L2(||x||)=9.837418047989e0  L2(||v||)=1.055739472759e-1
+Newton iteration  0 : ||r|| = 0.001394
+Newton iteration  1 : ||r|| = 2.021010e-4, ||r||/||r_0|| = 1.450008e-1
+Newton iteration  2 : ||r|| = 5.782266e-8, ||r||/||r_0|| = 4.148585e-5
+Newton iteration  0 : ||r|| = 0.001346
+Newton iteration  1 : ||r|| = 1.793065e-4, ||r||/||r_0|| = 1.332199e-1
+Newton iteration  2 : ||r|| = 4.451762e-8, ||r||/||r_0|| = 3.307538e-5
+Newton iteration  0 : ||r|| = 0.006172
+Newton iteration  1 : ||r|| = 1.652061e-4, ||r||/||r_0|| = 2.676693e-2
+Newton iteration  2 : ||r|| = 1.492532e-7, ||r||/||r_0|| = 2.418223e-5
+Newton iteration  3 : ||r|| = 4.305638e-8, ||r||/||r_0|| = 6.976058e-6
+step 44, t = 132, EE = 0.015377, KE = 0.005732, ΔTE = -0.011272
+  L2(||x||)=9.542237789869e0  L2(||v||)=1.070675325323e-1
+Newton iteration  0 : ||r|| = 0.001516
+Newton iteration  1 : ||r|| = 1.233914e-4, ||r||/||r_0|| = 8.139046e-2
+Newton iteration  2 : ||r|| = 5.134647e-8, ||r||/||r_0|| = 3.386876e-5
+Newton iteration  0 : ||r|| = 0.002363
+Newton iteration  1 : ||r|| = 9.365187e-5, ||r||/||r_0|| = 3.963474e-2
+Newton iteration  2 : ||r|| = 6.735398e-8, ||r||/||r_0|| = 2.850511e-5
+Newton iteration  0 : ||r|| = 0.010910
+Newton iteration  1 : ||r|| = 8.264497e-5, ||r||/||r_0|| = 7.574898e-3
+Newton iteration  2 : ||r|| = 7.948261e-7, ||r||/||r_0|| = 7.285049e-5
+Newton iteration  3 : ||r|| = 4.329529e-8, ||r||/||r_0|| = 3.968268e-6
+step 45, t = 135, EE = 0.015059, KE = 0.005988, ΔTE = -0.011335
+  L2(||x||)=9.241870961782e0  L2(||v||)=1.094336072383e-1
+Newton iteration  0 : ||r|| = 0.002557
+Newton iteration  1 : ||r|| = 3.677084e-5, ||r||/||r_0|| = 1.438220e-2
+Newton iteration  2 : ||r|| = 5.531881e-8, ||r||/||r_0|| = 2.163687e-5
+Newton iteration  0 : ||r|| = 0.004728
+Newton iteration  1 : ||r|| = 2.451672e-5, ||r||/||r_0|| = 5.185883e-3
+Newton iteration  2 : ||r|| = 7.330376e-8, ||r||/||r_0|| = 1.550553e-5
+Newton iteration  0 : ||r|| = 0.020628
+Newton iteration  1 : ||r|| = 6.554837e-5, ||r||/||r_0|| = 3.177692e-3
+Newton iteration  2 : ||r|| = 2.872866e-7, ||r||/||r_0|| = 1.392725e-5
+Newton iteration  3 : ||r|| = 4.218421e-8, ||r||/||r_0|| = 2.045031e-6
+step 46, t = 138, EE = 0.014618, KE = 0.006333, ΔTE = -0.011430
+  L2(||x||)=8.940342491867e0  L2(||v||)=1.125444686851e-1
+Newton iteration  0 : ||r|| = 0.002081
+Newton iteration  1 : ||r|| = 2.307034e-5, ||r||/||r_0|| = 1.108705e-2
+Newton iteration  2 : ||r|| = 4.268649e-8, ||r||/||r_0|| = 2.051409e-5
+Newton iteration  0 : ||r|| = 0.005593
+Newton iteration  1 : ||r|| = 3.463857e-5, ||r||/||r_0|| = 6.192872e-3
+Newton iteration  2 : ||r|| = 4.454564e-8, ||r||/||r_0|| = 7.964112e-6
+Newton iteration  0 : ||r|| = 0.026241
+Newton iteration  1 : ||r|| = 1.138307e-4, ||r||/||r_0|| = 4.337892e-3
+Newton iteration  2 : ||r|| = 3.732123e-7, ||r||/||r_0|| = 1.422248e-5
+Newton iteration  3 : ||r|| = 4.309281e-8, ||r||/||r_0|| = 1.642193e-6
+step 47, t = 141, EE = 0.014069, KE = 0.006772, ΔTE = -0.011539
+  L2(||x||)=8.635586968582e0  L2(||v||)=1.163798743077e-1
+Newton iteration  0 : ||r|| = 0.001462
+Newton iteration  1 : ||r|| = 7.420700e-5, ||r||/||r_0|| = 5.074645e-2
+Newton iteration  2 : ||r|| = 4.320440e-8, ||r||/||r_0|| = 2.954533e-5
+Newton iteration  0 : ||r|| = 0.004827
+Newton iteration  1 : ||r|| = 7.882689e-5, ||r||/||r_0|| = 1.633094e-2
+Newton iteration  2 : ||r|| = 6.501922e-8, ||r||/||r_0|| = 1.347034e-5
+Newton iteration  0 : ||r|| = 0.025230
+Newton iteration  1 : ||r|| = 1.407335e-4, ||r||/||r_0|| = 5.577919e-3
+Newton iteration  2 : ||r|| = 1.356519e-6, ||r||/||r_0|| = 5.376512e-5
+Newton iteration  3 : ||r|| = 4.434846e-8, ||r||/||r_0|| = 1.757734e-6
+step 48, t = 144, EE = 0.013175, KE = 0.007559, ΔTE = -0.011647
+  L2(||x||)=8.323002217130e0  L2(||v||)=1.229551135643e-1
+Newton iteration  0 : ||r|| = 0.002018
+Newton iteration  1 : ||r|| = 8.279678e-5, ||r||/||r_0|| = 4.102521e-2
+Newton iteration  2 : ||r|| = 4.371142e-8, ||r||/||r_0|| = 2.165870e-5
+Newton iteration  0 : ||r|| = 0.004359
+Newton iteration  1 : ||r|| = 6.952463e-5, ||r||/||r_0|| = 1.595126e-2
+Newton iteration  2 : ||r|| = 4.930785e-8, ||r||/||r_0|| = 1.131286e-5
+Newton iteration  0 : ||r|| = 0.023568
+Newton iteration  1 : ||r|| = 1.048488e-4, ||r||/||r_0|| = 4.448852e-3
+Newton iteration  2 : ||r|| = 5.911638e-7, ||r||/||r_0|| = 2.508373e-5
+Newton iteration  3 : ||r|| = 4.292458e-8, ||r||/||r_0|| = 1.821337e-6
+step 49, t = 147, EE = 0.011738, KE = 0.008877, ΔTE = -0.011766
+  L2(||x||)=8.001110654927e0  L2(||v||)=1.332438924859e-1
+Newton iteration  0 : ||r|| = 0.002544
+Newton iteration  1 : ||r|| = 3.657761e-5, ||r||/||r_0|| = 1.437616e-2
+Newton iteration  2 : ||r|| = 4.317923e-8, ||r||/||r_0|| = 1.697080e-5
+Newton iteration  0 : ||r|| = 0.005672
+Newton iteration  1 : ||r|| = 2.930750e-5, ||r||/||r_0|| = 5.166773e-3
+Newton iteration  2 : ||r|| = 4.441907e-8, ||r||/||r_0|| = 7.830873e-6
+Newton iteration  0 : ||r|| = 0.028142
+Newton iteration  1 : ||r|| = 7.359343e-5, ||r||/||r_0|| = 2.615102e-3
+Newton iteration  2 : ||r|| = 7.995853e-8, ||r||/||r_0|| = 2.841282e-6
+step 50, t = 150, EE = 0.010009, KE = 0.010457, ΔTE = -0.011915
+  L2(||x||)=7.673647597043e0  L2(||v||)=1.446165789487e-1
+Newton iteration  0 : ||r|| = 0.002193
+Newton iteration  1 : ||r|| = 1.594190e-5, ||r||/||r_0|| = 7.270926e-3
+Newton iteration  2 : ||r|| = 4.227889e-8, ||r||/||r_0|| = 1.928294e-5
+Newton iteration  0 : ||r|| = 0.006976
+Newton iteration  1 : ||r|| = 3.040904e-5, ||r||/||r_0|| = 4.359152e-3
+Newton iteration  2 : ||r|| = 4.691573e-8, ||r||/||r_0|| = 6.725396e-6
+Newton iteration  0 : ||r|| = 0.034835
+Newton iteration  1 : ||r|| = 1.204068e-4, ||r||/||r_0|| = 3.456491e-3
+Newton iteration  2 : ||r|| = 8.521463e-7, ||r||/||r_0|| = 2.446237e-5
+Newton iteration  3 : ||r|| = 4.282027e-8, ||r||/||r_0|| = 1.229231e-6
+step 51, t = 153, EE = 0.008380, KE = 0.011904, ΔTE = -0.012097
+  L2(||x||)=7.345933609134e0  L2(||v||)=1.543015524376e-1
+Newton iteration  0 : ||r|| = 0.001959
+Newton iteration  1 : ||r|| = 8.306939e-5, ||r||/||r_0|| = 4.240669e-2
+Newton iteration  2 : ||r|| = 4.762621e-8, ||r||/||r_0|| = 2.431304e-5
+Newton iteration  0 : ||r|| = 0.007917
+Newton iteration  1 : ||r|| = 9.867333e-5, ||r||/||r_0|| = 1.246344e-2
+Newton iteration  2 : ||r|| = 2.187856e-7, ||r||/||r_0|| = 2.763485e-5
+Newton iteration  3 : ||r|| = 4.234565e-8, ||r||/||r_0|| = 5.348686e-6
+Newton iteration  0 : ||r|| = 0.041543
+Newton iteration  1 : ||r|| = 2.294441e-4, ||r||/||r_0|| = 5.523084e-3
+Newton iteration  2 : ||r|| = 5.927405e-6, ||r||/||r_0|| = 1.426821e-4
+Newton iteration  3 : ||r|| = 4.377564e-8, ||r||/||r_0|| = 1.053749e-6
+step 52, t = 156, EE = 0.007101, KE = 0.012966, ΔTE = -0.012314
+  L2(||x||)=7.020463250743e0  L2(||v||)=1.610314806047e-1
+Newton iteration  0 : ||r|| = 0.003689
+Newton iteration  1 : ||r|| = 1.327013e-4, ||r||/||r_0|| = 3.597455e-2
+Newton iteration  2 : ||r|| = 2.468126e-7, ||r||/||r_0|| = 6.690944e-5
+Newton iteration  3 : ||r|| = 4.299122e-8, ||r||/||r_0|| = 1.165467e-5
+Newton iteration  0 : ||r|| = 0.010819
+Newton iteration  1 : ||r|| = 1.328556e-4, ||r||/||r_0|| = 1.227949e-2
+Newton iteration  2 : ||r|| = 1.199815e-6, ||r||/||r_0|| = 1.108957e-4
+Newton iteration  3 : ||r|| = 4.285128e-8, ||r||/||r_0|| = 3.960631e-6
+Newton iteration  0 : ||r|| = 0.055799
+Newton iteration  1 : ||r|| = 3.900527e-4, ||r||/||r_0|| = 6.990343e-3
+Newton iteration  2 : ||r|| = 1.646701e-5, ||r||/||r_0|| = 2.951142e-4
+Newton iteration  3 : ||r|| = 4.390761e-8, ||r||/||r_0|| = 7.868919e-7
+step 53, t = 159, EE = 0.006291, KE = 0.013500, ΔTE = -0.012590
+  L2(||x||)=6.695422046996e0  L2(||v||)=1.643173192795e-1
+Newton iteration  0 : ||r|| = 0.005873
+Newton iteration  1 : ||r|| = 1.000423e-4, ||r||/||r_0|| = 1.703319e-2
+Newton iteration  2 : ||r|| = 4.983867e-7, ||r||/||r_0|| = 8.485528e-5
+Newton iteration  3 : ||r|| = 4.285460e-8, ||r||/||r_0|| = 7.296421e-6
+Newton iteration  0 : ||r|| = 0.016192
+Newton iteration  1 : ||r|| = 1.172766e-4, ||r||/||r_0|| = 7.242930e-3
+Newton iteration  2 : ||r|| = 1.877487e-6, ||r||/||r_0|| = 1.159524e-4
+Newton iteration  3 : ||r|| = 4.350738e-8, ||r||/||r_0|| = 2.686988e-6
+Newton iteration  0 : ||r|| = 0.080405
+Newton iteration  1 : ||r|| = 7.282714e-4, ||r||/||r_0|| = 9.057488e-3
+Newton iteration  2 : ||r|| = 1.347608e-5, ||r||/||r_0|| = 1.676016e-4
+Newton iteration  3 : ||r|| = 4.309356e-8, ||r||/||r_0|| = 5.359532e-7
+step 54, t = 162, EE = 0.005941, KE = 0.013492, ΔTE = -0.012947
+  L2(||x||)=6.365420686820e0  L2(||v||)=1.642710104877e-1
+Newton iteration  0 : ||r|| = 0.006377
+Newton iteration  1 : ||r|| = 3.731707e-5, ||r||/||r_0|| = 5.852181e-3
+Newton iteration  2 : ||r|| = 1.579956e-7, ||r||/||r_0|| = 2.477737e-5
+Newton iteration  3 : ||r|| = 4.354866e-8, ||r||/||r_0|| = 6.829438e-6
+Newton iteration  0 : ||r|| = 0.020761
+Newton iteration  1 : ||r|| = 9.262863e-5, ||r||/||r_0|| = 4.461687e-3
+Newton iteration  2 : ||r|| = 4.835643e-7, ||r||/||r_0|| = 2.329207e-5
+Newton iteration  3 : ||r|| = 4.316011e-8, ||r||/||r_0|| = 2.078913e-6
+Newton iteration  0 : ||r|| = 0.103672
+Newton iteration  1 : ||r|| = 1.177386e-3, ||r||/||r_0|| = 1.135688e-2
+Newton iteration  2 : ||r|| = 2.687070e-6, ||r||/||r_0|| = 2.591905e-5
+Newton iteration  3 : ||r|| = 4.318838e-8, ||r||/||r_0|| = 4.165881e-7
+step 55, t = 165, EE = 0.005932, KE = 0.013075, ΔTE = -0.013374
+  L2(||x||)=6.023441822062e0  L2(||v||)=1.617084883809e-1
+Newton iteration  0 : ||r|| = 0.004676
+Newton iteration  1 : ||r|| = 2.485752e-5, ||r||/||r_0|| = 5.316091e-3
+Newton iteration  2 : ||r|| = 4.395639e-8, ||r||/||r_0|| = 9.400624e-6
+Newton iteration  0 : ||r|| = 0.021563
+Newton iteration  1 : ||r|| = 9.450511e-5, ||r||/||r_0|| = 4.382772e-3
+Newton iteration  2 : ||r|| = 2.308943e-7, ||r||/||r_0|| = 1.070796e-5
+Newton iteration  3 : ||r|| = 4.197399e-8, ||r||/||r_0|| = 1.946587e-6
+Newton iteration  0 : ||r|| = 0.112101
+Newton iteration  1 : ||r|| = 1.353407e-3, ||r||/||r_0|| = 1.207308e-2
+Newton iteration  2 : ||r|| = 6.179818e-6, ||r||/||r_0|| = 5.512713e-5
+Newton iteration  3 : ||r|| = 4.312898e-8, ||r||/||r_0|| = 3.847325e-7
+step 56, t = 168, EE = 0.006056, KE = 0.012509, ΔTE = -0.013816
+  L2(||x||)=5.663143653091e0  L2(||v||)=1.581691171380e-1
+Newton iteration  0 : ||r|| = 0.002882
+Newton iteration  1 : ||r|| = 3.921442e-5, ||r||/||r_0|| = 1.360445e-2
+Newton iteration  2 : ||r|| = 4.615723e-8, ||r||/||r_0|| = 1.601309e-5
+Newton iteration  0 : ||r|| = 0.018296
+Newton iteration  1 : ||r|| = 1.165878e-4, ||r||/||r_0|| = 6.372464e-3
+Newton iteration  2 : ||r|| = 1.540383e-6, ||r||/||r_0|| = 8.419438e-5
+Newton iteration  3 : ||r|| = 4.335904e-8, ||r||/||r_0|| = 2.369921e-6
+Newton iteration  0 : ||r|| = 0.101436
+Newton iteration  1 : ||r|| = 1.109378e-3, ||r||/||r_0|| = 1.093672e-2
+Newton iteration  2 : ||r|| = 1.869075e-5, ||r||/||r_0|| = 1.842614e-4
+Newton iteration  3 : ||r|| = 4.392554e-8, ||r||/||r_0|| = 4.330367e-7
+step 57, t = 171, EE = 0.006074, KE = 0.012101, ΔTE = -0.014205
+  L2(||x||)=5.280440973975e0  L2(||v||)=1.555721916292e-1
+Newton iteration  0 : ||r|| = 0.003534
+Newton iteration  1 : ||r|| = 8.834588e-5, ||r||/||r_0|| = 2.500183e-2
+Newton iteration  2 : ||r|| = 5.541428e-8, ||r||/||r_0|| = 1.568221e-5
+Newton iteration  0 : ||r|| = 0.012843
+Newton iteration  1 : ||r|| = 1.263283e-4, ||r||/||r_0|| = 9.836253e-3
+Newton iteration  2 : ||r|| = 1.558054e-6, ||r||/||r_0|| = 1.213142e-4
+Newton iteration  3 : ||r|| = 4.330223e-8, ||r||/||r_0|| = 3.371625e-6
+Newton iteration  0 : ||r|| = 0.077715
+Newton iteration  1 : ||r|| = 6.800060e-4, ||r||/||r_0|| = 8.749973e-3
+Newton iteration  2 : ||r|| = 2.394259e-5, ||r||/||r_0|| = 3.080811e-4
+Newton iteration  3 : ||r|| = 4.431811e-8, ||r||/||r_0|| = 5.702629e-7
+step 58, t = 174, EE = 0.005875, KE = 0.012004, ΔTE = -0.014502
+  L2(||x||)=4.874189798639e0  L2(||v||)=1.549458996894e-1
+Newton iteration  0 : ||r|| = 0.004162
+Newton iteration  1 : ||r|| = 1.219856e-4, ||r||/||r_0|| = 2.930687e-2
+Newton iteration  2 : ||r|| = 1.597700e-7, ||r||/||r_0|| = 3.838452e-5
+Newton iteration  3 : ||r|| = 4.253620e-8, ||r||/||r_0|| = 1.021926e-5
+Newton iteration  0 : ||r|| = 0.007622
+Newton iteration  1 : ||r|| = 1.176618e-4, ||r||/||r_0|| = 1.543630e-2
+Newton iteration  2 : ||r|| = 5.984207e-7, ||r||/||r_0|| = 7.850805e-5
+Newton iteration  3 : ||r|| = 4.291711e-8, ||r||/||r_0|| = 5.630384e-6
+Newton iteration  0 : ||r|| = 0.051262
+Newton iteration  1 : ||r|| = 3.381531e-4, ||r||/||r_0|| = 6.596529e-3
+Newton iteration  2 : ||r|| = 1.429251e-5, ||r||/||r_0|| = 2.788114e-4
+Newton iteration  3 : ||r|| = 4.417174e-8, ||r||/||r_0|| = 8.616812e-7
+step 59, t = 177, EE = 0.005565, KE = 0.012112, ΔTE = -0.014704
+  L2(||x||)=4.445966589201e0  L2(||v||)=1.556405371213e-1
+Newton iteration  0 : ||r|| = 0.003610
+Newton iteration  1 : ||r|| = 1.084134e-4, ||r||/||r_0|| = 3.002940e-2
+Newton iteration  2 : ||r|| = 1.255961e-7, ||r||/||r_0|| = 3.478885e-5
+Newton iteration  3 : ||r|| = 4.237368e-8, ||r||/||r_0|| = 1.173708e-5
+Newton iteration  0 : ||r|| = 0.004135
+Newton iteration  1 : ||r|| = 9.155828e-5, ||r||/||r_0|| = 2.214373e-2
+Newton iteration  2 : ||r|| = 1.019137e-7, ||r||/||r_0|| = 2.464823e-5
+Newton iteration  3 : ||r|| = 4.245457e-8, ||r||/||r_0|| = 1.026780e-5
+Newton iteration  0 : ||r|| = 0.030041
+Newton iteration  1 : ||r|| = 1.504290e-4, ||r||/||r_0|| = 5.007401e-3
+Newton iteration  2 : ||r|| = 3.798348e-6, ||r||/||r_0|| = 1.264374e-4
+Newton iteration  3 : ||r|| = 4.316631e-8, ||r||/||r_0|| = 1.436897e-6
+step 60, t = 180, EE = 0.005259, KE = 0.012288, ΔTE = -0.014834
+  L2(||x||)=3.998596884167e0  L2(||v||)=1.567682958211e-1
+Newton iteration  0 : ||r|| = 0.002516
+Newton iteration  1 : ||r|| = 7.106430e-5, ||r||/||r_0|| = 2.824847e-2
+Newton iteration  2 : ||r|| = 5.153568e-8, ||r||/||r_0|| = 2.048573e-5
+Newton iteration  0 : ||r|| = 0.002461
+Newton iteration  1 : ||r|| = 6.089650e-5, ||r||/||r_0|| = 2.474097e-2
+Newton iteration  2 : ||r|| = 4.452423e-8, ||r||/||r_0|| = 1.808926e-5
+Newton iteration  0 : ||r|| = 0.016727
+Newton iteration  1 : ||r|| = 7.105245e-5, ||r||/||r_0|| = 4.247854e-3
+Newton iteration  2 : ||r|| = 4.293271e-7, ||r||/||r_0|| = 2.566721e-5
+Newton iteration  3 : ||r|| = 4.176468e-8, ||r||/||r_0|| = 2.496891e-6
+step 61, t = 183, EE = 0.004838, KE = 0.012622, ΔTE = -0.014921
+  L2(||x||)=3.534159172326e0  L2(||v||)=1.588817773231e-1
+Newton iteration  0 : ||r|| = 0.001883
+Newton iteration  1 : ||r|| = 5.196860e-5, ||r||/||r_0|| = 2.760489e-2
+Newton iteration  2 : ||r|| = 4.279851e-8, ||r||/||r_0|| = 2.273388e-5
+Newton iteration  0 : ||r|| = 0.002293
+Newton iteration  1 : ||r|| = 4.834267e-5, ||r||/||r_0|| = 2.108250e-2
+Newton iteration  2 : ||r|| = 4.331609e-8, ||r||/||r_0|| = 1.889038e-5
+Newton iteration  0 : ||r|| = 0.011678
+Newton iteration  1 : ||r|| = 5.572928e-5, ||r||/||r_0|| = 4.772043e-3
+Newton iteration  2 : ||r|| = 6.245597e-8, ||r||/||r_0|| = 5.348042e-6
+step 62, t = 186, EE = 0.004023, KE = 0.013367, ΔTE = -0.014991
+  L2(||x||)=3.053372203793e0  L2(||v||)=1.635026106567e-1
+Newton iteration  0 : ||r|| = 0.001782
+Newton iteration  1 : ||r|| = 4.699219e-5, ||r||/||r_0|| = 2.637315e-2
+Newton iteration  2 : ||r|| = 4.331287e-8, ||r||/||r_0|| = 2.430823e-5
+Newton iteration  0 : ||r|| = 0.003173
+Newton iteration  1 : ||r|| = 4.408287e-5, ||r||/||r_0|| = 1.389495e-2
+Newton iteration  2 : ||r|| = 4.351208e-8, ||r||/||r_0|| = 1.371504e-5
+Newton iteration  0 : ||r|| = 0.014762
+Newton iteration  1 : ||r|| = 5.759848e-5, ||r||/||r_0|| = 3.901824e-3
+Newton iteration  2 : ||r|| = 6.454155e-8, ||r||/||r_0|| = 4.372160e-6
+step 63, t = 189, EE = 0.002740, KE = 0.014575, ΔTE = -0.015066
+  L2(||x||)=2.557752077606e0  L2(||v||)=1.707327128023e-1
+Newton iteration  0 : ||r|| = 0.001638
+Newton iteration  1 : ||r|| = 4.692976e-5, ||r||/||r_0|| = 2.864603e-2
+Newton iteration  2 : ||r|| = 4.414606e-8, ||r||/||r_0|| = 2.694686e-5
+Newton iteration  0 : ||r|| = 0.004174
+Newton iteration  1 : ||r|| = 5.100177e-5, ||r||/||r_0|| = 1.221970e-2
+Newton iteration  2 : ||r|| = 4.270358e-8, ||r||/||r_0|| = 1.023150e-5
+Newton iteration  0 : ||r|| = 0.020284
+Newton iteration  1 : ||r|| = 7.376886e-5, ||r||/||r_0|| = 3.636888e-3
+Newton iteration  2 : ||r|| = 5.226754e-8, ||r||/||r_0|| = 2.576849e-6
+step 64, t = 192, EE = 0.001409, KE = 0.015813, ΔTE = -0.015159
+  L2(||x||)=2.053590465968e0  L2(||v||)=1.778369376246e-1
+Newton iteration  0 : ||r|| = 0.001287
+Newton iteration  1 : ||r|| = 7.209591e-5, ||r||/||r_0|| = 5.602963e-2
+Newton iteration  2 : ||r|| = 4.362119e-8, ||r||/||r_0|| = 3.390038e-5
+Newton iteration  0 : ||r|| = 0.004645
+Newton iteration  1 : ||r|| = 7.027904e-5, ||r||/||r_0|| = 1.513015e-2
+Newton iteration  2 : ||r|| = 4.422312e-8, ||r||/||r_0|| = 9.520653e-6
+Newton iteration  0 : ||r|| = 0.023821
+Newton iteration  1 : ||r|| = 9.889276e-5, ||r||/||r_0|| = 4.151424e-3
+Newton iteration  2 : ||r|| = 6.433028e-8, ||r||/||r_0|| = 2.700524e-6
+step 65, t = 195, EE = 0.000697, KE = 0.016412, ΔTE = -0.015272
+  L2(||x||)=1.554868394853e0  L2(||v||)=1.811757970537e-1
+Newton iteration  0 : ||r|| = 0.001423
+Newton iteration  1 : ||r|| = 6.011642e-5, ||r||/||r_0|| = 4.223356e-2
+Newton iteration  2 : ||r|| = 4.508158e-8, ||r||/||r_0|| = 3.167114e-5
+Newton iteration  0 : ||r|| = 0.004621
+Newton iteration  1 : ||r|| = 3.996637e-5, ||r||/||r_0|| = 8.649467e-3
+Newton iteration  2 : ||r|| = 4.601576e-8, ||r||/||r_0|| = 9.958667e-6
+Newton iteration  0 : ||r|| = 0.024675
+Newton iteration  1 : ||r|| = 8.302803e-5, ||r||/||r_0|| = 3.364894e-3
+Newton iteration  2 : ||r|| = 2.098198e-7, ||r||/||r_0|| = 8.503408e-6
+Newton iteration  3 : ||r|| = 4.316384e-8, ||r||/||r_0|| = 1.749309e-6
+step 66, t = 198, EE = 0.000908, KE = 0.016069, ΔTE = -0.015404
+  L2(||x||)=1.084757962492e0  L2(||v||)=1.792688559268e-1
+Newton iteration  0 : ||r|| = 0.002083
+Newton iteration  1 : ||r|| = 1.311498e-5, ||r||/||r_0|| = 6.296147e-3
+Newton iteration  2 : ||r|| = 4.305768e-8, ||r||/||r_0|| = 2.067083e-5
+Newton iteration  0 : ||r|| = 0.004712
+Newton iteration  1 : ||r|| = 1.353573e-5, ||r||/||r_0|| = 2.872425e-3
+Newton iteration  2 : ||r|| = 4.363762e-8, ||r||/||r_0|| = 9.260364e-6
+Newton iteration  0 : ||r|| = 0.024139
+Newton iteration  1 : ||r|| = 8.344174e-5, ||r||/||r_0|| = 3.456648e-3
+Newton iteration  2 : ||r|| = 3.096151e-7, ||r||/||r_0|| = 1.282608e-5
+Newton iteration  3 : ||r|| = 4.367601e-8, ||r||/||r_0|| = 1.809317e-6
+step 67, t = 201, EE = 0.001708, KE = 0.015133, ΔTE = -0.015539
+  L2(||x||)=6.875265881222e-1  L2(||v||)=1.739736073001e-1
+Newton iteration  0 : ||r|| = 0.001837
+Newton iteration  1 : ||r|| = 7.138472e-5, ||r||/||r_0|| = 3.886090e-2
+Newton iteration  2 : ||r|| = 4.332585e-8, ||r||/||r_0|| = 2.358602e-5
+Newton iteration  0 : ||r|| = 0.003878
+Newton iteration  1 : ||r|| = 1.032715e-4, ||r||/||r_0|| = 2.663252e-2
+Newton iteration  2 : ||r|| = 7.325760e-8, ||r||/||r_0|| = 1.889229e-5
+Newton iteration  0 : ||r|| = 0.020149
+Newton iteration  1 : ||r|| = 1.776888e-4, ||r||/||r_0|| = 8.818527e-3
+Newton iteration  2 : ||r|| = 1.936244e-6, ||r||/||r_0|| = 9.609397e-5
+Newton iteration  3 : ||r|| = 4.312301e-8, ||r||/||r_0|| = 2.140154e-6
+step 68, t = 204, EE = 0.002345, KE = 0.014387, ΔTE = -0.015649
+  L2(||x||)=4.973295520945e-1  L2(||v||)=1.696268084144e-1
+Newton iteration  0 : ||r|| = 0.002298
+Newton iteration  1 : ||r|| = 2.201574e-4, ||r||/||r_0|| = 9.579632e-2
+Newton iteration  2 : ||r|| = 9.336408e-8, ||r||/||r_0|| = 4.062518e-5
+Newton iteration  0 : ||r|| = 0.003117
+Newton iteration  1 : ||r|| = 2.138847e-4, ||r||/||r_0|| = 6.861831e-2
+Newton iteration  2 : ||r|| = 4.603669e-8, ||r||/||r_0|| = 1.476945e-5
+Newton iteration  0 : ||r|| = 0.015431
+Newton iteration  1 : ||r|| = 2.337275e-4, ||r||/||r_0|| = 1.514697e-2
+Newton iteration  2 : ||r|| = 3.066056e-7, ||r||/||r_0|| = 1.986991e-5
+Newton iteration  3 : ||r|| = 4.344096e-8, ||r||/||r_0|| = 2.815239e-6
+step 69, t = 207, EE = 0.002310, KE = 0.014341, ΔTE = -0.015730
+  L2(||x||)=6.735003535627e-1  L2(||v||)=1.693595342616e-1
+Newton iteration  0 : ||r|| = 0.001472
+Newton iteration  1 : ||r|| = 1.899347e-4, ||r||/||r_0|| = 1.290370e-1
+Newton iteration  2 : ||r|| = 4.480829e-8, ||r||/||r_0|| = 3.044165e-5
+Newton iteration  0 : ||r|| = 0.002501
+Newton iteration  1 : ||r|| = 1.488087e-4, ||r||/||r_0|| = 5.948841e-2
+Newton iteration  2 : ||r|| = 4.425389e-8, ||r||/||r_0|| = 1.769112e-5
+Newton iteration  0 : ||r|| = 0.013186
+Newton iteration  1 : ||r|| = 1.194485e-4, ||r||/||r_0|| = 9.058482e-3
+Newton iteration  2 : ||r|| = 4.241864e-7, ||r||/||r_0|| = 3.216856e-5
+Newton iteration  3 : ||r|| = 4.343667e-8, ||r||/||r_0|| = 3.294059e-6
+step 70, t = 210, EE = 0.001964, KE = 0.014601, ΔTE = -0.015816
+  L2(||x||)=1.043152839154e0  L2(||v||)=1.708846435004e-1
+Newton iteration  0 : ||r|| = 0.002202
+Newton iteration  1 : ||r|| = 6.672699e-5, ||r||/||r_0|| = 3.030549e-2
+Newton iteration  2 : ||r|| = 6.415878e-8, ||r||/||r_0|| = 2.913908e-5
+Newton iteration  0 : ||r|| = 0.003808
+Newton iteration  1 : ||r|| = 4.657954e-5, ||r||/||r_0|| = 1.223330e-2
+Newton iteration  2 : ||r|| = 7.937528e-8, ||r||/||r_0|| = 2.084653e-5
+Newton iteration  0 : ||r|| = 0.017419
+Newton iteration  1 : ||r|| = 6.148543e-5, ||r||/||r_0|| = 3.529778e-3
+Newton iteration  2 : ||r|| = 4.114892e-7, ||r||/||r_0|| = 2.362292e-5
+Newton iteration  3 : ||r|| = 4.240948e-8, ||r||/||r_0|| = 2.434658e-6
+step 71, t = 213, EE = 0.002127, KE = 0.014322, ΔTE = -0.015931
+  L2(||x||)=1.472814618912e0  L2(||v||)=1.692459457633e-1
+Newton iteration  0 : ||r|| = 0.002347
+Newton iteration  1 : ||r|| = 2.378082e-5, ||r||/||r_0|| = 1.013117e-2
+Newton iteration  2 : ||r|| = 4.414462e-8, ||r||/||r_0|| = 1.880661e-5
+Newton iteration  0 : ||r|| = 0.005341
+Newton iteration  1 : ||r|| = 2.461104e-5, ||r||/||r_0|| = 4.608279e-3
+Newton iteration  2 : ||r|| = 4.461433e-8, ||r||/||r_0|| = 8.353784e-6
+Newton iteration  0 : ||r|| = 0.024260
+Newton iteration  1 : ||r|| = 7.762150e-5, ||r||/||r_0|| = 3.199594e-3
+Newton iteration  2 : ||r|| = 4.818442e-8, ||r||/||r_0|| = 1.986184e-6
+step 72, t = 216, EE = 0.002904, KE = 0.013409, ΔTE = -0.016068
+  L2(||x||)=1.920332170709e0  L2(||v||)=1.637603073237e-1
+Newton iteration  0 : ||r|| = 0.001987
+Newton iteration  1 : ||r|| = 3.274496e-5, ||r||/||r_0|| = 1.648227e-2
+Newton iteration  2 : ||r|| = 4.389024e-8, ||r||/||r_0|| = 2.209228e-5
+Newton iteration  0 : ||r|| = 0.005750
+Newton iteration  1 : ||r|| = 3.336001e-5, ||r||/||r_0|| = 5.801765e-3
+Newton iteration  2 : ||r|| = 4.205284e-8, ||r||/||r_0|| = 7.313567e-6
+Newton iteration  0 : ||r|| = 0.028204
+Newton iteration  1 : ||r|| = 8.945516e-5, ||r||/||r_0|| = 3.171678e-3
+Newton iteration  2 : ||r|| = 1.369430e-7, ||r||/||r_0|| = 4.855384e-6
+Newton iteration  3 : ||r|| = 4.286071e-8, ||r||/||r_0|| = 1.519648e-6
+step 73, t = 219, EE = 0.003443, KE = 0.012723, ΔTE = -0.016215
+  L2(||x||)=2.366851799796e0  L2(||v||)=1.595177871726e-1
+Newton iteration  0 : ||r|| = 0.002093
+Newton iteration  1 : ||r|| = 3.545637e-5, ||r||/||r_0|| = 1.694097e-2
+Newton iteration  2 : ||r|| = 4.365708e-8, ||r||/||r_0|| = 2.085925e-5
+Newton iteration  0 : ||r|| = 0.006137
+Newton iteration  1 : ||r|| = 3.137942e-5, ||r||/||r_0|| = 5.113406e-3
+Newton iteration  2 : ||r|| = 4.392278e-8, ||r||/||r_0|| = 7.157397e-6
+Newton iteration  0 : ||r|| = 0.031469
+Newton iteration  1 : ||r|| = 8.391646e-5, ||r||/||r_0|| = 2.666630e-3
+Newton iteration  2 : ||r|| = 7.985504e-8, ||r||/||r_0|| = 2.537569e-6
+step 74, t = 222, EE = 0.003092, KE = 0.012908, ΔTE = -0.016380
+  L2(||x||)=2.808100164009e0  L2(||v||)=1.606758392440e-1
+Newton iteration  0 : ||r|| = 0.002011
+Newton iteration  1 : ||r|| = 2.065783e-5, ||r||/||r_0|| = 1.027305e-2
+Newton iteration  2 : ||r|| = 4.324286e-8, ||r||/||r_0|| = 2.150448e-5
+Newton iteration  0 : ||r|| = 0.007007
+Newton iteration  1 : ||r|| = 2.262655e-5, ||r||/||r_0|| = 3.229250e-3
+Newton iteration  2 : ||r|| = 4.441859e-8, ||r||/||r_0|| = 6.339397e-6
+Newton iteration  0 : ||r|| = 0.036738
+Newton iteration  1 : ||r|| = 1.080437e-4, ||r||/||r_0|| = 2.940905e-3
+Newton iteration  2 : ||r|| = 3.481875e-7, ||r||/||r_0|| = 9.477519e-6
+Newton iteration  3 : ||r|| = 4.244011e-8, ||r||/||r_0|| = 1.155202e-6
+step 75, t = 225, EE = 0.002408, KE = 0.013397, ΔTE = -0.016576
+  L2(||x||)=3.248577007596e0  L2(||v||)=1.636890381734e-1
+Newton iteration  0 : ||r|| = 0.001881
+Newton iteration  1 : ||r|| = 2.734243e-5, ||r||/||r_0|| = 1.453822e-2
+Newton iteration  2 : ||r|| = 4.370990e-8, ||r||/||r_0|| = 2.324095e-5
+Newton iteration  0 : ||r|| = 0.008225
+Newton iteration  1 : ||r|| = 4.557766e-5, ||r||/||r_0|| = 5.541201e-3
+Newton iteration  2 : ||r|| = 1.111242e-7, ||r||/||r_0|| = 1.351016e-5
+Newton iteration  3 : ||r|| = 4.254648e-8, ||r||/||r_0|| = 5.172678e-6
+Newton iteration  0 : ||r|| = 0.043766
+Newton iteration  1 : ||r|| = 2.114298e-4, ||r||/||r_0|| = 4.830952e-3
+Newton iteration  2 : ||r|| = 3.235798e-6, ||r||/||r_0|| = 7.393465e-5
+Newton iteration  3 : ||r|| = 4.355337e-8, ||r||/||r_0|| = 9.951496e-7
+step 76, t = 228, EE = 0.002524, KE = 0.013053, ΔTE = -0.016804
+  L2(||x||)=3.689351266037e0  L2(||v||)=1.615714810069e-1
+Newton iteration  0 : ||r|| = 0.002886
+Newton iteration  1 : ||r|| = 7.396507e-5, ||r||/||r_0|| = 2.562585e-2
+Newton iteration  2 : ||r|| = 6.754207e-8, ||r||/||r_0|| = 2.340054e-5
+Newton iteration  0 : ||r|| = 0.010209
+Newton iteration  1 : ||r|| = 8.760103e-5, ||r||/||r_0|| = 8.580706e-3
+Newton iteration  2 : ||r|| = 5.560202e-7, ||r||/||r_0|| = 5.446335e-5
+Newton iteration  3 : ||r|| = 4.319687e-8, ||r||/||r_0|| = 4.231225e-6
+Newton iteration  0 : ||r|| = 0.053639
+Newton iteration  1 : ||r|| = 3.589779e-4, ||r||/||r_0|| = 6.692471e-3
+Newton iteration  2 : ||r|| = 1.082593e-5, ||r||/||r_0|| = 2.018293e-4
+Newton iteration  3 : ||r|| = 4.394778e-8, ||r||/||r_0|| = 8.193240e-7
+step 77, t = 231, EE = 0.003635, KE = 0.011682, ΔTE = -0.017065
+  L2(||x||)=4.120605307044e0  L2(||v||)=1.528506107201e-1
+Newton iteration  0 : ||r|| = 0.004725
+Newton iteration  1 : ||r|| = 7.882816e-5, ||r||/||r_0|| = 1.668376e-2
+Newton iteration  2 : ||r|| = 2.048824e-7, ||r||/||r_0|| = 4.336280e-5
+Newton iteration  3 : ||r|| = 4.277715e-8, ||r||/||r_0|| = 9.053665e-6
+Newton iteration  0 : ||r|| = 0.013516
+Newton iteration  1 : ||r|| = 8.206878e-5, ||r||/||r_0|| = 6.071868e-3
+Newton iteration  2 : ||r|| = 8.048830e-7, ||r||/||r_0|| = 5.954936e-5
+Newton iteration  3 : ||r|| = 4.311781e-8, ||r||/||r_0|| = 3.190076e-6
+Newton iteration  0 : ||r|| = 0.068209
+Newton iteration  1 : ||r|| = 5.594083e-4, ||r||/||r_0|| = 8.201357e-3
+Newton iteration  2 : ||r|| = 6.625841e-6, ||r||/||r_0|| = 9.713995e-5
+Newton iteration  3 : ||r|| = 4.338312e-8, ||r||/||r_0|| = 6.360301e-7
+step 78, t = 234, EE = 0.004745, KE = 0.010281, ΔTE = -0.017355
+  L2(||x||)=4.526875372177e0  L2(||v||)=1.433944401939e-1
+Newton iteration  0 : ||r|| = 0.005196
+Newton iteration  1 : ||r|| = 3.096923e-5, ||r||/||r_0|| = 5.960633e-3
+Newton iteration  2 : ||r|| = 4.465132e-8, ||r||/||r_0|| = 8.594018e-6
+Newton iteration  0 : ||r|| = 0.015618
+Newton iteration  1 : ||r|| = 6.498115e-5, ||r||/||r_0|| = 4.160715e-3
+Newton iteration  2 : ||r|| = 8.860377e-8, ||r||/||r_0|| = 5.673261e-6
+Newton iteration  0 : ||r|| = 0.077342
+Newton iteration  1 : ||r|| = 7.758610e-4, ||r||/||r_0|| = 1.003159e-2
+Newton iteration  2 : ||r|| = 5.377618e-6, ||r||/||r_0|| = 6.953060e-5
+Newton iteration  3 : ||r|| = 4.307924e-8, ||r||/||r_0|| = 5.569985e-7
+step 79, t = 237, EE = 0.004994, KE = 0.009740, ΔTE = -0.017647
+  L2(||x||)=4.898347385334e0  L2(||v||)=1.395699800134e-1
+Newton iteration  0 : ||r|| = 0.002588
+Newton iteration  1 : ||r|| = 8.553465e-5, ||r||/||r_0|| = 3.305223e-2
+Newton iteration  2 : ||r|| = 6.721080e-8, ||r||/||r_0|| = 2.597154e-5
+Newton iteration  0 : ||r|| = 0.012109
+Newton iteration  1 : ||r|| = 1.494655e-4, ||r||/||r_0|| = 1.234334e-2
+Newton iteration  2 : ||r|| = 2.521582e-6, ||r||/||r_0|| = 2.082403e-4
+Newton iteration  3 : ||r|| = 4.256188e-8, ||r||/||r_0|| = 3.514896e-6
+Newton iteration  0 : ||r|| = 0.065403
+Newton iteration  1 : ||r|| = 6.735045e-4, ||r||/||r_0|| = 1.029777e-2
+Newton iteration  2 : ||r|| = 4.502846e-5, ||r||/||r_0|| = 6.884778e-4
+Newton iteration  3 : ||r|| = 4.412688e-8, ||r||/||r_0|| = 6.746928e-7
+step 80, t = 240, EE = 0.004593, KE = 0.009912, ΔTE = -0.017876
+  L2(||x||)=5.237385531227e0  L2(||v||)=1.407963785980e-1
+Newton iteration  0 : ||r|| = 0.004360
+Newton iteration  1 : ||r|| = 2.722623e-4, ||r||/||r_0|| = 6.243922e-2
+Newton iteration  2 : ||r|| = 5.846227e-7, ||r||/||r_0|| = 1.340743e-4
+Newton iteration  3 : ||r|| = 4.179363e-8, ||r||/||r_0|| = 9.584733e-6
+Newton iteration  0 : ||r|| = 0.005012
+Newton iteration  1 : ||r|| = 2.332510e-4, ||r||/||r_0|| = 4.653465e-2
+Newton iteration  2 : ||r|| = 8.630463e-7, ||r||/||r_0|| = 1.721817e-4
+Newton iteration  3 : ||r|| = 4.284602e-8, ||r||/||r_0|| = 8.547976e-6
+Newton iteration  0 : ||r|| = 0.038007
+Newton iteration  1 : ||r|| = 3.722506e-4, ||r||/||r_0|| = 9.794157e-3
+Newton iteration  2 : ||r|| = 3.001745e-5, ||r||/||r_0|| = 7.897787e-4
+Newton iteration  3 : ||r|| = 4.391463e-8, ||r||/||r_0|| = 1.155423e-6
+step 81, t = 243, EE = 0.004402, KE = 0.009961, ΔTE = -0.018018
+  L2(||x||)=5.556719145295e0  L2(||v||)=1.411446109656e-1
+Newton iteration  0 : ||r|| = 0.004591
+Newton iteration  1 : ||r|| = 2.465913e-4, ||r||/||r_0|| = 5.371735e-2
+Newton iteration  2 : ||r|| = 7.138575e-7, ||r||/||r_0|| = 1.555065e-4
+Newton iteration  3 : ||r|| = 4.279036e-8, ||r||/||r_0|| = 9.321437e-6
+Newton iteration  0 : ||r|| = 0.002489
+Newton iteration  1 : ||r|| = 1.758428e-4, ||r||/||r_0|| = 7.064996e-2
+Newton iteration  2 : ||r|| = 4.322158e-8, ||r||/||r_0|| = 1.736553e-5
+Newton iteration  0 : ||r|| = 0.017651
+Newton iteration  1 : ||r|| = 1.579978e-4, ||r||/||r_0|| = 8.951331e-3
+Newton iteration  2 : ||r|| = 2.589524e-6, ||r||/||r_0|| = 1.467089e-4
+Newton iteration  3 : ||r|| = 4.302653e-8, ||r||/||r_0|| = 2.437658e-6
+step 82, t = 246, EE = 0.004942, KE = 0.009323, ΔTE = -0.018116
+  L2(||x||)=5.871623409443e0  L2(||v||)=1.365480441307e-1
+Newton iteration  0 : ||r|| = 0.002897
+Newton iteration  1 : ||r|| = 8.674567e-5, ||r||/||r_0|| = 2.994693e-2
+Newton iteration  2 : ||r|| = 5.208420e-8, ||r||/||r_0|| = 1.798086e-5
+Newton iteration  0 : ||r|| = 0.004352
+Newton iteration  1 : ||r|| = 5.369731e-5, ||r||/||r_0|| = 1.233760e-2
+Newton iteration  2 : ||r|| = 4.386140e-8, ||r||/||r_0|| = 1.007768e-5
+Newton iteration  0 : ||r|| = 0.019536
+Newton iteration  1 : ||r|| = 7.577019e-5, ||r||/||r_0|| = 3.878441e-3
+Newton iteration  2 : ||r|| = 1.453315e-7, ||r||/||r_0|| = 7.439070e-6
+Newton iteration  3 : ||r|| = 4.147226e-8, ||r||/||r_0|| = 2.122837e-6
+step 83, t = 249, EE = 0.005830, KE = 0.008324, ΔTE = -0.018227
+  L2(||x||)=6.192038269191e0  L2(||v||)=1.290278876179e-1
+Newton iteration  0 : ||r|| = 0.002812
+Newton iteration  1 : ||r|| = 2.023009e-5, ||r||/||r_0|| = 7.193349e-3
+Newton iteration  2 : ||r|| = 4.352544e-8, ||r||/||r_0|| = 1.547664e-5
+Newton iteration  0 : ||r|| = 0.006086
+Newton iteration  1 : ||r|| = 1.643806e-5, ||r||/||r_0|| = 2.700962e-3
+Newton iteration  2 : ||r|| = 4.303009e-8, ||r||/||r_0|| = 7.070340e-6
+Newton iteration  0 : ||r|| = 0.027613
+Newton iteration  1 : ||r|| = 5.854722e-5, ||r||/||r_0|| = 2.120281e-3
+Newton iteration  2 : ||r|| = 6.000595e-8, ||r||/||r_0|| = 2.173109e-6
+step 84, t = 252, EE = 0.006570, KE = 0.007444, ΔTE = -0.018367
+  L2(||x||)=6.519903187220e0  L2(||v||)=1.220148487726e-1
+Newton iteration  0 : ||r|| = 0.001727
+Newton iteration  1 : ||r|| = 5.747805e-5, ||r||/||r_0|| = 3.328193e-2
+Newton iteration  2 : ||r|| = 4.354801e-8, ||r||/||r_0|| = 2.521592e-5
+Newton iteration  0 : ||r|| = 0.005401
+Newton iteration  1 : ||r|| = 9.679942e-5, ||r||/||r_0|| = 1.792133e-2
+Newton iteration  2 : ||r|| = 5.247270e-8, ||r||/||r_0|| = 9.714734e-6
+Newton iteration  0 : ||r|| = 0.026668
+Newton iteration  1 : ||r|| = 2.437301e-4, ||r||/||r_0|| = 9.139311e-3
+Newton iteration  2 : ||r|| = 1.117821e-6, ||r||/||r_0|| = 4.191567e-5
+Newton iteration  3 : ||r|| = 4.374284e-8, ||r||/||r_0|| = 1.640254e-6
+step 85, t = 255, EE = 0.007449, KE = 0.006435, ΔTE = -0.018497
+  L2(||x||)=6.849016249311e0  L2(||v||)=1.134481466400e-1
+Newton iteration  0 : ||r|| = 0.002588
+Newton iteration  1 : ||r|| = 2.348835e-4, ||r||/||r_0|| = 9.076921e-2
+Newton iteration  2 : ||r|| = 4.579172e-8, ||r||/||r_0|| = 1.769591e-5
+Newton iteration  0 : ||r|| = 0.002990
+Newton iteration  1 : ||r|| = 2.498005e-4, ||r||/||r_0|| = 8.353968e-2
+Newton iteration  2 : ||r|| = 4.960024e-8, ||r||/||r_0|| = 1.658759e-5
+Newton iteration  0 : ||r|| = 0.016910
+Newton iteration  1 : ||r|| = 3.480112e-4, ||r||/||r_0|| = 2.058000e-2
+Newton iteration  2 : ||r|| = 7.947249e-7, ||r||/||r_0|| = 4.699686e-5
+Newton iteration  3 : ||r|| = 4.324478e-8, ||r||/||r_0|| = 2.557324e-6
+step 86, t = 258, EE = 0.008248, KE = 0.005545, ΔTE = -0.018588
+  L2(||x||)=7.166233607952e0  L2(||v||)=1.053055205552e-1
+Newton iteration  0 : ||r|| = 0.003314
+Newton iteration  1 : ||r|| = 2.688187e-4, ||r||/||r_0|| = 8.111069e-2
+Newton iteration  2 : ||r|| = 8.359720e-8, ||r||/||r_0|| = 2.522379e-5
+Newton iteration  0 : ||r|| = 0.004038
+Newton iteration  1 : ||r|| = 2.149272e-4, ||r||/||r_0|| = 5.323071e-2
+Newton iteration  2 : ||r|| = 2.107222e-7, ||r||/||r_0|| = 5.218926e-5
+Newton iteration  3 : ||r|| = 4.292241e-8, ||r||/||r_0|| = 1.063053e-5
+Newton iteration  0 : ||r|| = 0.018861
+Newton iteration  1 : ||r|| = 2.365434e-4, ||r||/||r_0|| = 1.254166e-2
+Newton iteration  2 : ||r|| = 4.291028e-6, ||r||/||r_0|| = 2.275127e-4
+Newton iteration  3 : ||r|| = 4.289669e-8, ||r||/||r_0|| = 2.274406e-6
+step 87, t = 261, EE = 0.008215, KE = 0.005472, ΔTE = -0.018694
+  L2(||x||)=7.460533168629e0  L2(||v||)=1.046151960520e-1
+Newton iteration  0 : ||r|| = 0.004240
+Newton iteration  1 : ||r|| = 1.117713e-4, ||r||/||r_0|| = 2.635820e-2
+Newton iteration  2 : ||r|| = 1.867486e-7, ||r||/||r_0|| = 4.403953e-5
+Newton iteration  3 : ||r|| = 4.224428e-8, ||r||/||r_0|| = 9.962156e-6
+Newton iteration  0 : ||r|| = 0.007822
+Newton iteration  1 : ||r|| = 6.738450e-5, ||r||/||r_0|| = 8.614231e-3
+Newton iteration  2 : ||r|| = 2.417154e-7, ||r||/||r_0|| = 3.090016e-5
+Newton iteration  3 : ||r|| = 4.251603e-8, ||r||/||r_0|| = 5.435121e-6
+Newton iteration  0 : ||r|| = 0.035020
+Newton iteration  1 : ||r|| = 1.857690e-4, ||r||/||r_0|| = 5.304660e-3
+Newton iteration  2 : ||r|| = 8.794646e-7, ||r||/||r_0|| = 2.511324e-5
+Newton iteration  3 : ||r|| = 4.247794e-8, ||r||/||r_0|| = 1.212964e-6
+step 88, t = 264, EE = 0.008049, KE = 0.005471, ΔTE = -0.018861
+  L2(||x||)=7.732081111087e0  L2(||v||)=1.046042713926e-1
+Newton iteration  0 : ||r|| = 0.003669
+Newton iteration  1 : ||r|| = 4.399626e-5, ||r||/||r_0|| = 1.199024e-2
+Newton iteration  2 : ||r|| = 5.227822e-8, ||r||/||r_0|| = 1.424732e-5
+Newton iteration  0 : ||r|| = 0.008902
+Newton iteration  1 : ||r|| = 8.280575e-5, ||r||/||r_0|| = 9.301526e-3
+Newton iteration  2 : ||r|| = 6.114403e-7, ||r||/||r_0|| = 6.868276e-5
+Newton iteration  3 : ||r|| = 4.214817e-8, ||r||/||r_0|| = 4.734482e-6
+Newton iteration  0 : ||r|| = 0.040211
+Newton iteration  1 : ||r|| = 3.434159e-4, ||r||/||r_0|| = 8.540337e-3
+Newton iteration  2 : ||r|| = 1.793164e-5, ||r||/||r_0|| = 4.459381e-4
+Newton iteration  3 : ||r|| = 4.368598e-8, ||r||/||r_0|| = 1.086417e-6
+step 89, t = 267, EE = 0.008719, KE = 0.004632, ΔTE = -0.019030
+  L2(||x||)=7.987365140349e0  L2(||v||)=9.624632572601e-2
+Newton iteration  0 : ||r|| = 0.002314
+Newton iteration  1 : ||r|| = 3.118637e-4, ||r||/||r_0|| = 1.347535e-1
+Newton iteration  2 : ||r|| = 9.354258e-8, ||r||/||r_0|| = 4.041890e-5
+Newton iteration  0 : ||r|| = 0.003844
+Newton iteration  1 : ||r|| = 3.505548e-4, ||r||/||r_0|| = 9.118529e-2
+Newton iteration  2 : ||r|| = 8.111706e-7, ||r||/||r_0|| = 2.109993e-4
+Newton iteration  3 : ||r|| = 4.343003e-8, ||r||/||r_0|| = 1.129689e-5
+Newton iteration  0 : ||r|| = 0.024128
+Newton iteration  1 : ||r|| = 4.614897e-4, ||r||/||r_0|| = 1.912648e-2
+Newton iteration  2 : ||r|| = 3.043900e-5, ||r||/||r_0|| = 1.261547e-3
+Newton iteration  3 : ||r|| = 4.369963e-8, ||r||/||r_0|| = 1.811135e-6
+step 90, t = 270, EE = 0.009730, KE = 0.003535, ΔTE = -0.019116
+  L2(||x||)=8.229562729993e0  L2(||v||)=8.407933682282e-2
+Newton iteration  0 : ||r|| = 0.004380
+Newton iteration  1 : ||r|| = 5.973319e-4, ||r||/||r_0|| = 1.363726e-1
+Newton iteration  2 : ||r|| = 1.738520e-6, ||r||/||r_0|| = 3.969090e-4
+Newton iteration  3 : ||r|| = 4.314001e-8, ||r||/||r_0|| = 9.848987e-6
+Newton iteration  0 : ||r|| = 0.002100
+Newton iteration  1 : ||r|| = 5.093261e-4, ||r||/||r_0|| = 2.425067e-1
+Newton iteration  2 : ||r|| = 2.334671e-7, ||r||/||r_0|| = 1.111613e-4
+Newton iteration  3 : ||r|| = 4.190463e-8, ||r||/||r_0|| = 1.995215e-5
+Newton iteration  0 : ||r|| = 0.008219
+Newton iteration  1 : ||r|| = 4.571370e-4, ||r||/||r_0|| = 5.561966e-2
+Newton iteration  2 : ||r|| = 3.265732e-6, ||r||/||r_0|| = 3.973402e-4
+Newton iteration  3 : ||r|| = 4.310677e-8, ||r||/||r_0|| = 5.244783e-6
+step 91, t = 273, EE = 0.010130, KE = 0.003102, ΔTE = -0.019148
+  L2(||x||)=8.456996302637e0  L2(||v||)=7.877125203193e-2
+Newton iteration  0 : ||r|| = 0.001683
+Newton iteration  1 : ||r|| = 3.351483e-4, ||r||/||r_0|| = 1.991017e-1
+Newton iteration  2 : ||r|| = 5.194336e-8, ||r||/||r_0|| = 3.085801e-5
+Newton iteration  0 : ||r|| = 0.002389
+Newton iteration  1 : ||r|| = 2.189128e-4, ||r||/||r_0|| = 9.164072e-2
+Newton iteration  2 : ||r|| = 9.532337e-8, ||r||/||r_0|| = 3.990403e-5
+Newton iteration  0 : ||r|| = 0.013440
+Newton iteration  1 : ||r|| = 1.474396e-4, ||r||/||r_0|| = 1.096983e-2
+Newton iteration  2 : ||r|| = 2.510034e-6, ||r||/||r_0|| = 1.867520e-4
+Newton iteration  3 : ||r|| = 4.234628e-8, ||r||/||r_0|| = 3.150656e-6
+step 92, t = 276, EE = 0.010022, KE = 0.003135, ΔTE = -0.019224
+  L2(||x||)=8.665243451783e0  L2(||v||)=7.918526016258e-2
+Newton iteration  0 : ||r|| = 0.004232
+Newton iteration  1 : ||r|| = 3.597925e-5, ||r||/||r_0|| = 8.502242e-3
+Newton iteration  2 : ||r|| = 1.096640e-7, ||r||/||r_0|| = 2.591465e-5
+Newton iteration  3 : ||r|| = 4.190809e-8, ||r||/||r_0|| = 9.903282e-6
+Newton iteration  0 : ||r|| = 0.006610
+Newton iteration  1 : ||r|| = 1.542037e-5, ||r||/||r_0|| = 2.332835e-3
+Newton iteration  2 : ||r|| = 5.093414e-8, ||r||/||r_0|| = 7.705453e-6
+Newton iteration  0 : ||r|| = 0.026716
+Newton iteration  1 : ||r|| = 1.254550e-4, ||r||/||r_0|| = 4.695944e-3
+Newton iteration  2 : ||r|| = 4.902209e-7, ||r||/||r_0|| = 1.834961e-5
+Newton iteration  3 : ||r|| = 4.203071e-8, ||r||/||r_0|| = 1.573264e-6
+step 93, t = 279, EE = 0.010227, KE = 0.002798, ΔTE = -0.019356
+  L2(||x||)=8.847435779876e0  L2(||v||)=7.480544308607e-2
+Newton iteration  0 : ||r|| = 0.001928
+Newton iteration  1 : ||r|| = 8.140550e-5, ||r||/||r_0|| = 4.222393e-2
+Newton iteration  2 : ||r|| = 5.693459e-8, ||r||/||r_0|| = 2.953120e-5
+Newton iteration  0 : ||r|| = 0.005463
+Newton iteration  1 : ||r|| = 1.175051e-4, ||r||/||r_0|| = 2.151065e-2
+Newton iteration  2 : ||r|| = 4.681113e-7, ||r||/||r_0|| = 8.569312e-5
+Newton iteration  3 : ||r|| = 4.294348e-8, ||r||/||r_0|| = 7.861296e-6
+Newton iteration  0 : ||r|| = 0.025348
+Newton iteration  1 : ||r|| = 2.662279e-4, ||r||/||r_0|| = 1.050310e-2
+Newton iteration  2 : ||r|| = 1.189709e-5, ||r||/||r_0|| = 4.693582e-4
+Newton iteration  3 : ||r|| = 4.329452e-8, ||r||/||r_0|| = 1.708034e-6
+step 94, t = 282, EE = 0.010776, KE = 0.002140, ΔTE = -0.019465
+  L2(||x||)=8.996719951819e0  L2(||v||)=6.542765617565e-2
+Newton iteration  0 : ||r|| = 0.002931
+Newton iteration  1 : ||r|| = 2.375498e-4, ||r||/||r_0|| = 8.104610e-2
+Newton iteration  2 : ||r|| = 2.258872e-7, ||r||/||r_0|| = 7.706710e-5
+Newton iteration  3 : ||r|| = 4.355349e-8, ||r||/||r_0|| = 1.485937e-5
+Newton iteration  0 : ||r|| = 0.001749
+Newton iteration  1 : ||r|| = 2.043207e-4, ||r||/||r_0|| = 1.168294e-1
+Newton iteration  2 : ||r|| = 5.330566e-8, ||r||/||r_0|| = 3.047986e-5
+Newton iteration  0 : ||r|| = 0.012509
+Newton iteration  1 : ||r|| = 2.050166e-4, ||r||/||r_0|| = 1.638993e-2
+Newton iteration  2 : ||r|| = 3.584167e-6, ||r||/||r_0|| = 2.865342e-4
+Newton iteration  3 : ||r|| = 4.263838e-8, ||r||/||r_0|| = 3.408701e-6
+step 95, t = 285, EE = 0.011151, KE = 0.001712, ΔTE = -0.019518
+  L2(||x||)=9.112619787496e0  L2(||v||)=5.851921559696e-2
+Newton iteration  0 : ||r|| = 0.002255
+Newton iteration  1 : ||r|| = 1.497805e-4, ||r||/||r_0|| = 6.643306e-2
+Newton iteration  2 : ||r|| = 1.015038e-7, ||r||/||r_0|| = 4.502063e-5
+Newton iteration  3 : ||r|| = 4.209785e-8, ||r||/||r_0|| = 1.867192e-5
+Newton iteration  0 : ||r|| = 0.001360
+Newton iteration  1 : ||r|| = 1.009837e-4, ||r||/||r_0|| = 7.425965e-2
+Newton iteration  2 : ||r|| = 4.427632e-8, ||r||/||r_0|| = 3.255917e-5
+Newton iteration  0 : ||r|| = 0.005059
+Newton iteration  1 : ||r|| = 6.064986e-5, ||r||/||r_0|| = 1.198942e-2
+Newton iteration  2 : ||r|| = 7.187309e-8, ||r||/||r_0|| = 1.420806e-5
+step 96, t = 288, EE = 0.011533, KE = 0.001298, ΔTE = -0.019550
+  L2(||x||)=9.203547644080e0  L2(||v||)=5.095375278403e-2
+Newton iteration  0 : ||r|| = 0.001025
+Newton iteration  1 : ||r|| = 2.956400e-5, ||r||/||r_0|| = 2.885350e-2
+Newton iteration  2 : ||r|| = 4.239008e-8, ||r||/||r_0|| = 4.137134e-5
+Newton iteration  0 : ||r|| = 0.001245
+Newton iteration  1 : ||r|| = 2.339825e-5, ||r||/||r_0|| = 1.878827e-2
+Newton iteration  2 : ||r|| = 4.328686e-8, ||r||/||r_0|| = 3.475838e-5
+Newton iteration  0 : ||r|| = 0.003925
+Newton iteration  1 : ||r|| = 2.902422e-5, ||r||/||r_0|| = 7.394313e-3
+Newton iteration  2 : ||r|| = 4.304286e-8, ||r||/||r_0|| = 1.096575e-5
+step 97, t = 291, EE = 0.012160, KE = 0.000644, ΔTE = -0.019577
+  L2(||x||)=9.280982214922e0  L2(||v||)=3.588170323693e-2
+Newton iteration  0 : ||r|| = 0.001350
+Newton iteration  1 : ||r|| = 5.222690e-5, ||r||/||r_0|| = 3.868835e-2
+Newton iteration  2 : ||r|| = 4.354420e-8, ||r||/||r_0|| = 3.225643e-5
+Newton iteration  0 : ||r|| = 0.001352
+Newton iteration  1 : ||r|| = 5.790940e-5, ||r||/||r_0|| = 4.283668e-2
+Newton iteration  2 : ||r|| = 4.423567e-8, ||r||/||r_0|| = 3.272196e-5
+Newton iteration  0 : ||r|| = 0.002637
+Newton iteration  1 : ||r|| = 7.762715e-5, ||r||/||r_0|| = 2.943515e-2
+Newton iteration  2 : ||r|| = 4.226797e-8, ||r||/||r_0|| = 1.602744e-5
+step 98, t = 294, EE = 0.012496, KE = 0.000291, ΔTE = -0.019594
+  L2(||x||)=9.352391564009e0  L2(||v||)=2.410422208416e-2
+Newton iteration  0 : ||r|| = 0.001270
+Newton iteration  1 : ||r|| = 7.475340e-5, ||r||/||r_0|| = 5.888256e-2
+Newton iteration  2 : ||r|| = 4.347906e-8, ||r||/||r_0|| = 3.424805e-5
+Newton iteration  0 : ||r|| = 0.001110
+Newton iteration  1 : ||r|| = 5.897187e-5, ||r||/||r_0|| = 5.310612e-2
+Newton iteration  2 : ||r|| = 4.332084e-8, ||r||/||r_0|| = 3.901184e-5
+Newton iteration  0 : ||r|| = 0.001979
+Newton iteration  1 : ||r|| = 5.306678e-5, ||r||/||r_0|| = 2.681550e-2
+Newton iteration  2 : ||r|| = 4.312367e-8, ||r||/||r_0|| = 2.179109e-5
+step 99, t = 297, EE = 0.012245, KE = 0.000526, ΔTE = -0.019610
+  L2(||x||)=9.418479155949e0  L2(||v||)=3.244641642438e-2
+Newton iteration  0 : ||r|| = 0.000814
+Newton iteration  1 : ||r|| = 2.554292e-5, ||r||/||r_0|| = 3.136623e-2
+Newton iteration  2 : ||r|| = 4.357960e-8, ||r||/||r_0|| = 5.351493e-5
+Newton iteration  0 : ||r|| = 0.000902
+Newton iteration  1 : ||r|| = 1.479626e-5, ||r||/||r_0|| = 1.639697e-2
+Newton iteration  2 : ||r|| = 4.273783e-8, ||r||/||r_0|| = 4.736136e-5
+Newton iteration  0 : ||r|| = 0.003426
+Newton iteration  1 : ||r|| = 1.613594e-5, ||r||/||r_0|| = 4.709767e-3
+Newton iteration  2 : ||r|| = 4.299491e-8, ||r||/||r_0|| = 1.254937e-5
+step 100, t = 300, EE = 0.011958, KE = 0.000784, ΔTE = -0.019639
+  L2(||x||)=9.472704893960e0  L2(||v||)=3.959854659114e-2
+  Saved deformed.mesh (128 elements)
+  Saved velocity.sol (1170 DOFs)
+  Saved elastic_energy.sol (512 DOFs)
+
+  Total time: 30.234s
+  Done.

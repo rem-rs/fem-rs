@@ -1,0 +1,12 @@
+=== fem-rs mfem_pex5: Parallel Mixed Darcy (RT1 + L2P1) ===
+  Workers: 2, Mesh: star.mesh x3 (1:1 MFEM ex5p, -r 1)
+
+thread '<unnamed>' (30436) panicked at crates\parallel\src\dof_partition.rs:1251:28:
+index out of bounds: the len is 2 but the index is 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (704) panicked at crates\parallel\src\dof_partition.rs:1251:28:
+index out of bounds: the len is 2 but the index is 2
+
+thread 'main' (26708) panicked at crates\parallel\src\launcher\native.rs:154:22:
+ThreadLauncher: worker thread panicked: Any { .. }

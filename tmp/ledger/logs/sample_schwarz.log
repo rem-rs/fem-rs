@@ -1,0 +1,104 @@
+Options used:
+   --mesh data/square-disc.mesh
+   --mesh data/inline-quad.mesh
+   --order 2
+   --no-visualization
+   --refine-serial 0
+   --refine-serial 0
+   --relative tolerance 1e-08
+   --send-port 19916
+Iteration: 0, Relative residual: 0.93183898
+Iteration: 1, Relative residual: 0.56595767
+Iteration: 2, Relative residual: 0.22942415
+Iteration: 3, Relative residual: 0.25881751
+Iteration: 4, Relative residual: 0.12536165
+Iteration: 5, Relative residual: 0.14269252
+Iteration: 6, Relative residual: 0.075039784
+Iteration: 7, Relative residual: 0.083669164
+Iteration: 8, Relative residual: 0.047612627
+Iteration: 9, Relative residual: 0.052403922
+Iteration: 10, Relative residual: 0.031268909
+Iteration: 11, Relative residual: 0.03414195
+Iteration: 12, Relative residual: 0.02097621
+Iteration: 13, Relative residual: 0.022789819
+Iteration: 14, Relative residual: 0.014264492
+Iteration: 15, Relative residual: 0.015447839
+Iteration: 16, Relative residual: 0.0097878257
+Iteration: 17, Relative residual: 0.010577067
+Iteration: 18, Relative residual: 0.006756738
+Iteration: 19, Relative residual: 0.0072909842
+Iteration: 20, Relative residual: 0.0046835093
+Iteration: 21, Relative residual: 0.0050488193
+Iteration: 22, Relative residual: 0.0032555902
+Iteration: 23, Relative residual: 0.0035071137
+Iteration: 24, Relative residual: 0.0022674259
+Iteration: 25, Relative residual: 0.0024414414
+Iteration: 26, Relative residual: 0.001581329
+Iteration: 27, Relative residual: 0.0017021265
+Iteration: 28, Relative residual: 0.0011038715
+Iteration: 29, Relative residual: 0.0011879228
+Iteration: 30, Relative residual: 0.00077107808
+Iteration: 31, Relative residual: 0.00082965673
+Iteration: 32, Relative residual: 0.00053886003
+Iteration: 33, Relative residual: 0.00057973229
+Iteration: 34, Relative residual: 0.00037669655
+Iteration: 35, Relative residual: 0.00040523689
+Iteration: 36, Relative residual: 0.00026339271
+Iteration: 37, Relative residual: 0.00028333301
+Iteration: 38, Relative residual: 0.0001841973
+Iteration: 39, Relative residual: 0.00019813444
+Iteration: 40, Relative residual: 0.00012882788
+Iteration: 41, Relative residual: 0.00013857182
+Iteration: 42, Relative residual: 9.0109262e-05
+Iteration: 43, Relative residual: 9.6922881e-05
+Iteration: 44, Relative residual: 6.3030686e-05
+Iteration: 45, Relative residual: 6.7795864e-05
+Iteration: 46, Relative residual: 4.4091081e-05
+Iteration: 47, Relative residual: 4.7423972e-05
+Iteration: 48, Relative residual: 3.0843292e-05
+Iteration: 49, Relative residual: 3.3174555e-05
+Iteration: 50, Relative residual: 2.1576381e-05
+Iteration: 51, Relative residual: 2.3207108e-05
+Iteration: 52, Relative residual: 1.5093918e-05
+Iteration: 53, Relative residual: 1.6234654e-05
+Iteration: 54, Relative residual: 1.0559156e-05
+Iteration: 55, Relative residual: 1.1357149e-05
+Iteration: 56, Relative residual: 7.386848e-06
+Iteration: 57, Relative residual: 7.9450859e-06
+Iteration: 58, Relative residual: 5.167625e-06
+Iteration: 59, Relative residual: 5.5581461e-06
+Iteration: 60, Relative residual: 3.6151319e-06
+Iteration: 61, Relative residual: 3.888327e-06
+Iteration: 62, Relative residual: 2.5290547e-06
+Iteration: 63, Relative residual: 2.7201736e-06
+Iteration: 64, Relative residual: 1.7692652e-06
+Iteration: 65, Relative residual: 1.9029667e-06
+Iteration: 66, Relative residual: 1.2377362e-06
+Iteration: 67, Relative residual: 1.3312703e-06
+Iteration: 68, Relative residual: 8.6589175e-07
+Iteration: 69, Relative residual: 9.3132586e-07
+Iteration: 70, Relative residual: 6.0575821e-07
+Iteration: 71, Relative residual: 6.5153435e-07
+Iteration: 72, Relative residual: 4.2377485e-07
+Iteration: 73, Relative residual: 4.5579876e-07
+Iteration: 74, Relative residual: 2.9646344e-07
+Iteration: 75, Relative residual: 3.1886664e-07
+Iteration: 76, Relative residual: 2.0739926e-07
+Iteration: 77, Relative residual: 2.2307203e-07
+Iteration: 78, Relative residual: 1.4509194e-07
+Iteration: 79, Relative residual: 1.5605627e-07
+Iteration: 80, Relative residual: 1.0150313e-07
+Iteration: 81, Relative residual: 1.0917353e-07
+Iteration: 82, Relative residual: 7.1009361e-08
+Iteration: 83, Relative residual: 7.6375401e-08
+Iteration: 84, Relative residual: 4.9676591e-08
+Iteration: 85, Relative residual: 5.3430555e-08
+Iteration: 86, Relative residual: 3.4752655e-08
+Iteration: 87, Relative residual: 3.7378845e-08
+Iteration: 88, Relative residual: 2.4312196e-08
+Iteration: 89, Relative residual: 2.6149421e-08
+Iteration: 90, Relative residual: 1.7008281e-08
+Iteration: 91, Relative residual: 1.8293562e-08
+Iteration: 92, Relative residual: 1.1898621e-08
+Iteration: 93, Relative residual: 1.2797777e-08
+Iteration: 94, Relative residual: 8.324015e-09

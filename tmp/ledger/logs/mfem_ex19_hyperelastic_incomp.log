@@ -1,0 +1,16 @@
+=== MFEM ex19: Incompressible neo-Hookean hyperelasticity ===
+dim(u) = 102
+dim(p) = 18
+dim(u+p) = 120
+Initial guess set. DOFs: displacement=102, pressure=18
+Newton 0 ||r|| = 2.94392e0
+  GMRES: 16 its, res=2.156e-12
+Newton  1 ||r|| = 2.02052e-1  r/r0 = 0.068634
+  GMRES: 16 its, res=5.724e-14
+Newton  2 ||r|| = 2.07215e-2  r/r0 = 0.007039
+  GMRES: 16 its, res=2.240e-13
+Newton  3 ||r|| = 5.61346e-5  r/r0 = 0.000019
+Newton converged in 3 iterations.
+  Wrote deformed.mesh
+  Wrote pressure.sol
+  Wrote deformation.sol

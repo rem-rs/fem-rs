@@ -1,0 +1,20 @@
+Solving for eigenvalues using ParLOBPCG
+  [ParLOBPCG] iter=1: bsize=5 lambda=[2.9944e1 3.5090e2 3.8404e2 4.1587e2 4.7813e2] max_rel_res=2.432e-1
+  [ParLOBPCG] iter=10: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=4.860e-5
+  [ParLOBPCG] iter=20: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=30: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=40: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=50: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=60: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=70: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=80: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=90: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+  [ParLOBPCG] iter=100: bsize=5 lambda=[4.5538e0 1.1430e1 1.1430e1 1.9466e1 1.9466e1] max_rel_res=1.069e-6
+Number of unknowns: 361
+
+  Computed eigenvalues:
+  1             4.55383845283908e0       3.396323e-1
+  2             1.14296267801211e1       5.380668e-1
+  3             1.14296392514525e1       5.380670e-1
+  4             1.94659520245637e1       7.021954e-1
+  5             1.94659883630469e1       7.021960e-1

@@ -1,0 +1,8 @@
+=== fem-rs mfem_pex4: Parallel H(div) Diffusion ===
+  Workers: 2, Mesh: star.mesh x4 (1:1 MFEM ex4p), RT0
+Number of finite element unknowns: 10400
+Size of linear system: 10400
+  PCG: 128 iters, residual = 9.113e-9, converged = true
+  Average reduction factor = 0.865336
+|| F_h - F ||_{L^2} = 0.0323354
+=== Done ===

@@ -1,0 +1,456 @@
+
+Time 0
+
+Refinement:
+Iteration: 1, number of unknowns: 101, total error: 0.0233922
+Iteration: 2, number of unknowns: 361, total error: 1.20444
+Iteration: 3, number of unknowns: 1361, total error: 0.228002
+Iteration: 4, number of unknowns: 2049, total error: 0.112178
+Iteration: 5, number of unknowns: 2363, total error: 0.0289985
+Iteration: 6, number of unknowns: 2560, total error: 0.00588916
+Iteration: 7, number of unknowns: 2700, total error: 0.00366041
+
+Derefined elements.
+
+Time 0.01
+
+Refinement:
+Iteration: 1, number of unknowns: 1733, total error: 0.00730583
+Iteration: 2, number of unknowns: 1991, total error: 0.00499457
+
+Derefined elements.
+
+Time 0.02
+
+Refinement:
+Iteration: 1, number of unknowns: 1792, total error: 0.00856121
+Iteration: 2, number of unknowns: 1939, total error: 0.00709024
+
+Time 0.03
+
+Refinement:
+Iteration: 1, number of unknowns: 1898, total error: 0.0129009
+Iteration: 2, number of unknowns: 2173, total error: 0.00801897
+
+Time 0.04
+
+Refinement:
+Iteration: 1, number of unknowns: 2141, total error: 0.0141519
+Iteration: 2, number of unknowns: 2693, total error: 0.00792235
+
+Derefined elements.
+
+Time 0.05
+
+Refinement:
+Iteration: 1, number of unknowns: 2683, total error: 0.0133153
+Iteration: 2, number of unknowns: 2972, total error: 0.00957226
+
+Derefined elements.
+
+Time 0.06
+
+Refinement:
+Iteration: 1, number of unknowns: 2929, total error: 0.0187311
+Iteration: 2, number of unknowns: 3274, total error: 0.0119553
+
+Derefined elements.
+
+Time 0.07
+
+Refinement:
+Iteration: 1, number of unknowns: 3056, total error: 0.031092
+Iteration: 2, number of unknowns: 3753, total error: 0.0133171
+
+Derefined elements.
+
+Time 0.08
+
+Refinement:
+Iteration: 1, number of unknowns: 3599, total error: 0.0235903
+Iteration: 2, number of unknowns: 4102, total error: 0.0139552
+Iteration: 3, number of unknowns: 4136, total error: 0.013668
+
+Derefined elements.
+
+Time 0.09
+
+Refinement:
+Iteration: 1, number of unknowns: 4075, total error: 0.0226634
+Iteration: 2, number of unknowns: 4454, total error: 0.0154936
+
+Derefined elements.
+
+Time 0.1
+
+Refinement:
+Iteration: 1, number of unknowns: 4409, total error: 0.0264604
+Iteration: 2, number of unknowns: 4968, total error: 0.0174228
+
+Derefined elements.
+
+Time 0.11
+
+Refinement:
+Iteration: 1, number of unknowns: 4884, total error: 0.029248
+Iteration: 2, number of unknowns: 5412, total error: 0.0191103
+
+Derefined elements.
+
+Time 0.12
+
+Refinement:
+Iteration: 1, number of unknowns: 5323, total error: 0.0300906
+Iteration: 2, number of unknowns: 5934, total error: 0.0198817
+
+Derefined elements.
+
+Time 0.13
+
+Refinement:
+Iteration: 1, number of unknowns: 5911, total error: 0.0321362
+Iteration: 2, number of unknowns: 6486, total error: 0.0225143
+
+Derefined elements.
+
+Time 0.14
+
+Refinement:
+Iteration: 1, number of unknowns: 6338, total error: 0.0388321
+Iteration: 2, number of unknowns: 7352, total error: 0.0232126
+Iteration: 3, number of unknowns: 7404, total error: 0.0226087
+
+Derefined elements.
+
+Time 0.15
+
+Refinement:
+Iteration: 1, number of unknowns: 7145, total error: 0.0357165
+Iteration: 2, number of unknowns: 7936, total error: 0.02442
+
+Derefined elements.
+
+Time 0.16
+
+Refinement:
+Iteration: 1, number of unknowns: 7818, total error: 0.0388536
+Iteration: 2, number of unknowns: 8487, total error: 0.0265861
+
+Derefined elements.
+
+Time 0.17
+
+Refinement:
+Iteration: 1, number of unknowns: 8354, total error: 0.0423453
+Iteration: 2, number of unknowns: 9468, total error: 0.0261128
+
+Derefined elements.
+
+Time 0.18
+
+Refinement:
+Iteration: 1, number of unknowns: 9108, total error: 0.0414561
+Iteration: 2, number of unknowns: 10307, total error: 0.0263508
+
+Derefined elements.
+
+Time 0.19
+
+Refinement:
+Iteration: 1, number of unknowns: 9959, total error: 0.0419663
+Iteration: 2, number of unknowns: 10773, total error: 0.0319911
+Iteration: 3, number of unknowns: 10797, total error: 0.0306703
+
+Derefined elements.
+
+Time 0.2
+
+Refinement:
+Iteration: 1, number of unknowns: 10510, total error: 0.0508336
+Iteration: 2, number of unknowns: 11848, total error: 0.0310569
+
+Derefined elements.
+
+Time 0.21
+
+Refinement:
+Iteration: 1, number of unknowns: 11430, total error: 0.0476944
+Iteration: 2, number of unknowns: 12687, total error: 0.0310302
+
+Derefined elements.
+
+Time 0.22
+
+Refinement:
+Iteration: 1, number of unknowns: 12243, total error: 0.0478973
+Iteration: 2, number of unknowns: 13145, total error: 0.0356979
+
+Derefined elements.
+
+Time 0.23
+
+Refinement:
+Iteration: 1, number of unknowns: 12786, total error: 0.0565009
+Iteration: 2, number of unknowns: 14376, total error: 0.0342042
+
+Derefined elements.
+
+Time 0.24
+
+Refinement:
+Iteration: 1, number of unknowns: 13938, total error: 0.051486
+Iteration: 2, number of unknowns: 15485, total error: 0.0356599
+
+Derefined elements.
+
+Time 0.25
+
+Refinement:
+Iteration: 1, number of unknowns: 14924, total error: 0.0551076
+Iteration: 2, number of unknowns: 15909, total error: 0.041372
+Iteration: 3, number of unknowns: 16029, total error: 0.0402029
+
+Derefined elements.
+
+Time 0.26
+
+Refinement:
+Iteration: 1, number of unknowns: 15711, total error: 0.0620963
+Iteration: 2, number of unknowns: 17393, total error: 0.0391146
+
+Derefined elements.
+
+Time 0.27
+
+Refinement:
+Iteration: 1, number of unknowns: 16938, total error: 0.0581934
+Iteration: 2, number of unknowns: 18477, total error: 0.0397656
+
+Derefined elements.
+
+Time 0.28
+
+Refinement:
+Iteration: 1, number of unknowns: 17858, total error: 0.061155
+Iteration: 2, number of unknowns: 19314, total error: 0.0413359
+
+Derefined elements.
+
+Time 0.29
+
+Refinement:
+Iteration: 1, number of unknowns: 18982, total error: 0.0623528
+Iteration: 2, number of unknowns: 20442, total error: 0.0432984
+
+Derefined elements.
+
+Time 0.3
+
+Refinement:
+Iteration: 1, number of unknowns: 19911, total error: 0.0673
+Iteration: 2, number of unknowns: 21532, total error: 0.046404
+
+Derefined elements.
+
+Time 0.31
+
+Refinement:
+Iteration: 1, number of unknowns: 20745, total error: 0.0731122
+Iteration: 2, number of unknowns: 22703, total error: 0.0464586
+
+Derefined elements.
+
+Time 0.32
+
+Refinement:
+Iteration: 1, number of unknowns: 22048, total error: 0.0711012
+Iteration: 2, number of unknowns: 23815, total error: 0.0486234
+
+Derefined elements.
+
+Time 0.33
+
+Refinement:
+Iteration: 1, number of unknowns: 23069, total error: 0.0743123
+Iteration: 2, number of unknowns: 25153, total error: 0.0499227
+
+Derefined elements.
+
+Time 0.34
+
+Refinement:
+Iteration: 1, number of unknowns: 24306, total error: 0.075979
+Iteration: 2, number of unknowns: 26270, total error: 0.0509305
+
+Derefined elements.
+
+Time 0.35
+
+Refinement:
+Iteration: 1, number of unknowns: 25488, total error: 0.0776646
+Iteration: 2, number of unknowns: 27592, total error: 0.0529143
+Iteration: 3, number of unknowns: 27701, total error: 0.0521969
+
+Derefined elements.
+
+Time 0.36
+
+Refinement:
+Iteration: 1, number of unknowns: 26864, total error: 0.0778888
+Iteration: 2, number of unknowns: 28927, total error: 0.0543377
+
+Derefined elements.
+
+Time 0.37
+
+Refinement:
+Iteration: 1, number of unknowns: 28234, total error: 0.0821444
+Iteration: 2, number of unknowns: 30476, total error: 0.0549234
+Iteration: 3, number of unknowns: 30505, total error: 0.0541391
+
+Derefined elements.
+
+Time 0.38
+
+Refinement:
+Iteration: 1, number of unknowns: 29457, total error: 0.0811762
+Iteration: 2, number of unknowns: 31672, total error: 0.0553559
+
+Derefined elements.
+
+Time 0.39
+
+Refinement:
+Iteration: 1, number of unknowns: 30875, total error: 0.0816502
+Iteration: 2, number of unknowns: 32860, total error: 0.0597487
+
+Derefined elements.
+
+Time 0.4
+
+Refinement:
+Iteration: 1, number of unknowns: 32015, total error: 0.0920441
+Iteration: 2, number of unknowns: 34518, total error: 0.058966
+
+Derefined elements.
+
+Time 0.41
+
+Refinement:
+Iteration: 1, number of unknowns: 33553, total error: 0.0893392
+Iteration: 2, number of unknowns: 36047, total error: 0.0583243
+
+Derefined elements.
+
+Time 0.42
+
+Refinement:
+Iteration: 1, number of unknowns: 35134, total error: 0.0849756
+Iteration: 2, number of unknowns: 37191, total error: 0.0633259
+
+Derefined elements.
+
+Time 0.43
+
+Refinement:
+Iteration: 1, number of unknowns: 36275, total error: 0.0984237
+Iteration: 2, number of unknowns: 39269, total error: 0.0610723
+
+Derefined elements.
+
+Time 0.44
+
+Refinement:
+Iteration: 1, number of unknowns: 38255, total error: 0.0935743
+Iteration: 2, number of unknowns: 40514, total error: 0.0660178
+Iteration: 3, number of unknowns: 40567, total error: 0.065028
+
+Derefined elements.
+
+Time 0.45
+
+Refinement:
+Iteration: 1, number of unknowns: 39433, total error: 0.0999485
+Iteration: 2, number of unknowns: 42095, total error: 0.0691445
+Iteration: 3, number of unknowns: 42127, total error: 0.0677605
+
+Derefined elements.
+
+Time 0.46
+
+Refinement:
+Iteration: 1, number of unknowns: 41149, total error: 0.103249
+Iteration: 2, number of unknowns: 44097, total error: 0.0656923
+
+Derefined elements.
+
+Time 0.47
+
+Refinement:
+Iteration: 1, number of unknowns: 43057, total error: 0.0956527
+Iteration: 2, number of unknowns: 45443, total error: 0.0698338
+
+Derefined elements.
+
+Time 0.48
+
+Refinement:
+Iteration: 1, number of unknowns: 44100, total error: 0.103303
+Iteration: 2, number of unknowns: 46782, total error: 0.0722265
+
+Derefined elements.
+
+Time 0.49
+
+Refinement:
+Iteration: 1, number of unknowns: 45669, total error: 0.10939
+Iteration: 2, number of unknowns: 48389, total error: 0.0756926
+Iteration: 3, number of unknowns: 48457, total error: 0.0749303
+
+Derefined elements.
+
+Time 0.5
+
+Refinement:
+Iteration: 1, number of unknowns: 47069, total error: 0.112756
+Iteration: 2, number of unknowns: 50122, total error: 0.0755789
+
+Derefined elements.
+
+Time 0.51
+
+Refinement:
+Iteration: 1, number of unknowns: 48787, total error: 0.11358
+Iteration: 2, number of unknowns: 51848, total error: 0.0756464
+
+Derefined elements.
+
+Time 0.52
+
+Refinement:
+Iteration: 1, number of unknowns: 50508, total error: 0.113411
+Iteration: 2, number of unknowns: 53698, total error: 0.0776815
+
+Derefined elements.
+
+Time 0.53
+
+Refinement:
+Iteration: 1, number of unknowns: 52354, total error: 0.115232
+Iteration: 2, number of unknowns: 55550, total error: 0.0782558
+
+Derefined elements.
+
+Time 0.54
+
+Refinement:
+Iteration: 1, number of unknowns: 54057, total error: 0.115347
+Iteration: 2, number of unknowns: 56994, total error: 0.081062
+
+Derefined elements.
+
+Time 0.55
+
+Refinement:
+Iteration: 1, number of unknowns: 55552, total error: 0.122764
+Iteration: 2, number of unknowns: 59352

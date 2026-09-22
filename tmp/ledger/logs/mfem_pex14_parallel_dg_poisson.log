@@ -1,0 +1,6 @@
+=== fem-rs mfem_pex14: Parallel DG Poisson ===
+Number of unknowns: 327680
+  PCG: 327 iters, residual = 9.499e-13, converged = true
+  Average reduction factor = 0.918829
+  ||u||_2 = 9.968082e1, sum = 4.75533498e4, checksum = 6.03652645e9
+=== Done ===

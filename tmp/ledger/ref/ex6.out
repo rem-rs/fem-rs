@@ -1,0 +1,131 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/star.mesh
+   --order 1
+   --no-partial-assembly
+   --device cpu
+   --max-dofs 50000
+   --no-ls-zz
+   --no-visualization
+Device configuration: cpu
+Memory configuration: host-std
+
+AMR iteration 0
+Number of unknowns: 31
+   Iteration :   0  (B r, r) = 0.441629 ...
+   Iteration :   4  (B r, r) = 4.92533e-14
+Average reduction factor = 0.0240393
+
+AMR iteration 1
+Number of unknowns: 76
+   Iteration :   0  (B r, r) = 0.0297211 ...
+   Iteration :   8  (B r, r) = 6.0748e-16
+Average reduction factor = 0.139445
+
+AMR iteration 2
+Number of unknowns: 101
+   Iteration :   0  (B r, r) = 0.00411294 ...
+   Iteration :   9  (B r, r) = 1.31782e-16
+Average reduction factor = 0.177958
+
+AMR iteration 3
+Number of unknowns: 221
+   Iteration :   0  (B r, r) = 0.00806317 ...
+   Iteration :  13  (B r, r) = 1.3918e-15
+Average reduction factor = 0.322937
+
+AMR iteration 4
+Number of unknowns: 246
+   Iteration :   0  (B r, r) = 0.0022724 ...
+   Iteration :  14  (B r, r) = 1.6724e-16
+Average reduction factor = 0.339593
+
+AMR iteration 5
+Number of unknowns: 281
+   Iteration :   0  (B r, r) = 0.000711121 ...
+   Iteration :  14  (B r, r) = 3.02291e-16
+Average reduction factor = 0.361543
+
+AMR iteration 6
+Number of unknowns: 411
+   Iteration :   0  (B r, r) = 0.00103889 ...
+   Iteration :  16  (B r, r) = 7.47836e-16
+Average reduction factor = 0.417387
+
+AMR iteration 7
+Number of unknowns: 716
+   Iteration :   0  (B r, r) = 0.000849369 ...
+   Iteration :  21  (B r, r) = 3.51417e-16
+Average reduction factor = 0.507178
+
+AMR iteration 8
+Number of unknowns: 951
+   Iteration :   0  (B r, r) = 0.000628968 ...
+   Iteration :  26  (B r, r) = 2.2649e-16
+Average reduction factor = 0.576369
+
+AMR iteration 9
+Number of unknowns: 1376
+   Iteration :   0  (B r, r) = 0.000281631 ...
+   Iteration :  29  (B r, r) = 1.55451e-16
+Average reduction factor = 0.614687
+
+AMR iteration 10
+Number of unknowns: 2141
+   Iteration :   0  (B r, r) = 0.000187926 ...
+   Iteration :  38  (B r, r) = 1.82921e-16
+Average reduction factor = 0.694946
+
+AMR iteration 11
+Number of unknowns: 3331
+   Iteration :   0  (B r, r) = 0.000164356 ...
+   Iteration :  44  (B r, r) = 1.35053e-16
+Average reduction factor = 0.728899
+
+AMR iteration 12
+Number of unknowns: 4176
+   Iteration :   0  (B r, r) = 4.65908e-05 ...
+   Iteration :  51  (B r, r) = 1.91331e-17
+Average reduction factor = 0.756073
+
+AMR iteration 13
+Number of unknowns: 5816
+   Iteration :   0  (B r, r) = 4.94905e-05 ...
+   Iteration :  55  (B r, r) = 4.2031e-17
+Average reduction factor = 0.776719
+
+AMR iteration 14
+Number of unknowns: 10521
+   Iteration :   0  (B r, r) = 5.27072e-05 ...
+   Iteration :  68  (B r, r) = 4.51576e-17
+Average reduction factor = 0.815213
+
+AMR iteration 15
+Number of unknowns: 13956
+   Iteration :   0  (B r, r) = 2.19367e-05 ...
+   Iteration :  82  (B r, r) = 1.93575e-17
+Average reduction factor = 0.844302
+
+AMR iteration 16
+Number of unknowns: 17956
+   Iteration :   0  (B r, r) = 1.19424e-05 ...
+   Iteration :  91  (B r, r) = 1.09398e-17
+Average reduction factor = 0.85873
+
+AMR iteration 17
+Number of unknowns: 24256
+   Iteration :   0  (B r, r) = 9.38165e-06 ...
+   Iteration :  96  (B r, r) = 7.06405e-18
+Average reduction factor = 0.864686
+
+AMR iteration 18
+Number of unknowns: 43969
+   Iteration :   0  (B r, r) = 1.24858e-05 ...
+   Iteration : 111  (B r, r) = 1.24834e-17
+Average reduction factor = 0.882969
+
+AMR iteration 19
+Number of unknowns: 56668
+   Iteration :   0  (B r, r) = 4.53616e-06 ...
+   Iteration : 135  (B r, r) = 4.32096e-18
+Average reduction factor = 0.902563
+Reached the maximum number of dofs. Stop.

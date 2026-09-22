@@ -1,0 +1,4 @@
+=== fem-rs mfem_pex7: Parallel Screened Poisson on the Unit Sphere (Tri3 P1) ===
+  Workers: 2, sphere mesh: 128 elements (ref_levels=2)
+Number of unknowns: 66, PCG iters = 4, res = 4.616e-17
+=== Done: dofs = 66, iters = 4, relative L2 error = 1.397652e-1 ===

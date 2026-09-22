@@ -1,0 +1,8 @@
+Number of finite element unknowns: 36
+Using ir_order 2
+Assembling system patch-wise and solving
+   Iteration :   0  (B r, r) = 0
+Assembling system element-wise and solving
+   Iteration :   0  (B r, r) = 0
+Element-wise solution norm 0
+Relative error of patch-wise solution -nan

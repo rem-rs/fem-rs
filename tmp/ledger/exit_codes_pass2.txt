@@ -1,0 +1,22 @@
+0 mfem_ex2_elasticity [-m data/beam-tri.mesh -no-vis]
+0 mfem_ex4_darcy [-m data/star.mesh -no-vis]
+0 mfem_ex5_mixed_darcy [-m data/star.mesh -no-vis]
+0 mfem_ex8_dpg_2x2 [-m data/star.mesh -no-vis]
+0 mfem_ex31_anisotropic_maxwell [-m data/inline-quad.mesh -no-vis]
+0 mfem_ex31_dump [-m data/inline-quad.mesh -r 2 -o 1]
+0 mfem_ex9_dg_advection [-m data/periodic-square.mesh -no-vis]
+124 mfem_ex15_dynamic_amr [-m data/star.mesh -no-vis]
+124 mfem_pex15_parallel_dynamic_amr [-m data/star.mesh -no-vis]
+ex15 long rc=0
+124 mfem_pex30_amr_preprocess [-m data/star.mesh -no-vis]
+101 mfem_pex5_hdiv_darcy [-m data/star.mesh -no-vis]
+101 mfem_pex40_eikonal [-m data/star.mesh -no-vis]
+101 mfem_ex15_dump_A_true []
+101 mfem_ex15_dump_T002 []
+101 mfem_ex15_dump_flow []
+101 mfem_ex15_dump_it2_coords []
+101 mfem_ex15_dump_p1 []
+101 mfem_ex15_dump_p1_it3 []
+PASS2 DONE
+124 mfem_pex15 long
+124 mfem_pex30 long900

@@ -1,0 +1,26 @@
+  Mesh: 258 nodes, 128 triangles on unit sphere
+Number of unknowns: 258
+   Iteration :   0  (B r, r) = 1.23622
+   Iteration :   1  (B r, r) = 0.86118
+   Iteration :   2  (B r, r) = 0.0329415
+   Iteration :   3  (B r, r) = 0.00233295
+   Iteration :   4  (B r, r) = 7.38761e-05
+   Iteration :   5  (B r, r) = 1.96391e-06
+   Iteration :   6  (B r, r) = 7.02092e-07
+   Iteration :   7  (B r, r) = 4.26014e-07
+   Iteration :   8  (B r, r) = 1.67073e-07
+   Iteration :   9  (B r, r) = 6.08084e-08
+   Iteration :  10  (B r, r) = 6.67038e-08
+   Iteration :  11  (B r, r) = 1.92583e-08
+   Iteration :  12  (B r, r) = 1.61231e-08
+   Iteration :  13  (B r, r) = 1.57674e-08
+   Iteration :  14  (B r, r) = 1.15744e-08
+   Iteration :  15  (B r, r) = 2.15701e-09
+   Iteration :  16  (B r, r) = 7.72674e-11
+   Iteration :  17  (B r, r) = 7.73791e-12
+   Iteration :  18  (B r, r) = 5.84641e-13
+Average reduction factor = 0.454604
+
+L2 error: 9.4026555405e-3
+  Total time: 0.007s
+  Done.

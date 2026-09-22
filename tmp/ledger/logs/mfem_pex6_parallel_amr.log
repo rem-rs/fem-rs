@@ -1,0 +1,83 @@
+=== fem-rs mfem_pex6: Parallel AMR Poisson (H1 P1, ZZ + Dörfler 0.7) ===
+AMR iteration 0: unknowns = 31, PCG iters = 1, res = 4.129e-15
+  marked 20 / 20 elements
+  rebalanced: 80 elements across 2 ranks
+AMR iteration 1: unknowns = 101, PCG iters = 5, res = 4.150e-7
+  marked 25 / 80 elements
+  rebalanced: 155 elements across 2 ranks
+AMR iteration 2: unknowns = 171, PCG iters = 5, res = 3.093e-7
+  marked 40 / 155 elements
+  rebalanced: 275 elements across 2 ranks
+AMR iteration 3: unknowns = 291, PCG iters = 8, res = 1.457e-7
+  marked 25 / 275 elements
+  rebalanced: 350 elements across 2 ranks
+AMR iteration 4: unknowns = 386, PCG iters = 8, res = 6.585e-7
+  marked 50 / 350 elements
+  rebalanced: 500 elements across 2 ranks
+AMR iteration 5: unknowns = 526, PCG iters = 9, res = 1.751e-7
+  marked 155 / 500 elements
+  rebalanced: 965 elements across 2 ranks
+AMR iteration 6: unknowns = 1006, PCG iters = 11, res = 1.977e-7
+  marked 115 / 965 elements
+  rebalanced: 1310 elements across 2 ranks
+AMR iteration 7: unknowns = 1386, PCG iters = 14, res = 1.965e-7
+  marked 80 / 1310 elements
+  rebalanced: 1550 elements across 2 ranks
+AMR iteration 8: unknowns = 1611, PCG iters = 14, res = 4.099e-7
+  marked 270 / 1550 elements
+  rebalanced: 2360 elements across 2 ranks
+AMR iteration 9: unknowns = 2371, PCG iters = 14, res = 8.310e-7
+  marked 530 / 2360 elements
+  rebalanced: 3950 elements across 2 ranks
+AMR iteration 10: unknowns = 4036, PCG iters = 18, res = 4.076e-7
+  marked 420 / 3950 elements
+  rebalanced: 5210 elements across 2 ranks
+AMR iteration 11: unknowns = 5361, PCG iters = 21, res = 7.832e-7
+  marked 30 / 5210 elements
+  rebalanced: 5300 elements across 2 ranks
+AMR iteration 12: unknowns = 5436, PCG iters = 21, res = 8.693e-7
+  marked 90 / 5300 elements
+  rebalanced: 5570 elements across 2 ranks
+AMR iteration 13: unknowns = 5696, PCG iters = 21, res = 9.721e-7
+  marked 445 / 5570 elements
+  rebalanced: 6905 elements across 2 ranks
+AMR iteration 14: unknowns = 7021, PCG iters = 22, res = 6.004e-7
+  marked 1775 / 6905 elements
+  rebalanced: 12230 elements across 2 ranks
+AMR iteration 15: unknowns = 12386, PCG iters = 24, res = 9.076e-7
+  marked 2730 / 12230 elements
+  rebalanced: 20420 elements across 2 ranks
+AMR iteration 16: unknowns = 20671, PCG iters = 33, res = 4.628e-7
+  marked 170 / 20420 elements
+  rebalanced: 20930 elements across 2 ranks
+AMR iteration 17: unknowns = 21216, PCG iters = 32, res = 7.711e-7
+  marked 180 / 20930 elements
+  rebalanced: 21470 elements across 2 ranks
+AMR iteration 18: unknowns = 21746, PCG iters = 32, res = 7.417e-7
+  marked 485 / 21470 elements
+  rebalanced: 22925 elements across 2 ranks
+AMR iteration 19: unknowns = 23176, PCG iters = 33, res = 8.610e-7
+  marked 2920 / 22925 elements
+  rebalanced: 31685 elements across 2 ranks
+AMR iteration 20: unknowns = 31811, PCG iters = 35, res = 9.150e-7
+  marked 7080 / 31685 elements
+  rebalanced: 52925 elements across 2 ranks
+AMR iteration 21: unknowns = 53261, PCG iters = 39, res = 5.870e-7
+  marked 10010 / 52925 elements
+  rebalanced: 82955 elements across 2 ranks
+AMR iteration 22: unknowns = 83501, PCG iters = 51, res = 7.395e-7
+  marked 255 / 82955 elements
+  rebalanced: 83720 elements across 2 ranks
+AMR iteration 23: unknowns = 84296, PCG iters = 51, res = 7.274e-7
+  marked 670 / 83720 elements
+  rebalanced: 85730 elements across 2 ranks
+AMR iteration 24: unknowns = 86266, PCG iters = 51, res = 7.580e-7
+  marked 1865 / 85730 elements
+  rebalanced: 91325 elements across 2 ranks
+AMR iteration 25: unknowns = 91806, PCG iters = 51, res = 9.217e-7
+  marked 10480 / 91325 elements
+  rebalanced: 122765 elements across 2 ranks
+AMR iteration 26: unknowns = 123036, PCG iters = 55, res = 7.135e-7
+  marked 28440 / 122765 elements
+Reached the maximum number of dofs. Stop.
+=== Done: final unknowns = 123036, total PCG iters = 679 ===

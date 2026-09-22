@@ -1,0 +1,26 @@
+=== fem-rs Example 17: DG linear elasticity (SIP) ===
+  refinements: 4
+  order: 1
+  kappa: 4, alpha: -1
+Number of finite element unknowns: 24576
+  materials: 4096 elements, λ₁=50/μ₁=50 (attr 1), λ₂=1/μ₂=1 (attr 2)
+Assembling: r.h.s. ...
+matrix ...
+  Initial ‖rhs‖ = 51.2000
+  PCG (symmetric, α=-1)
+  Iterations: 1063
+  Final residual: 1.471e-11
+
+=== Comparison Metrics ===
+DOFs: 24576
+||u_h||_L2 = 227.189938
+checksum = -321937958.515553
+lambda_1 = 50, mu_1 = 50
+lambda_2 = 1, mu_2 = 1
+kappa = 4, alpha = -1
+order = 1, ref_levels = 4
+=========================
+
+Output ...
+  wrote displaced.mesh
+  wrote sol.gf (MFEM FiniteElementSpace format)

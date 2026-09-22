@@ -1,0 +1,3 @@
+Number of DOFs: 625
+CG (35 preconditioned iterations, true relative residual 1.887319e-14)
+L2 error: 5.56315e-06

@@ -1,0 +1,10 @@
+Options: mesh=built-in order=1 quad_order=4 ranks=2
+Number of finite element unknowns: 10400
+PCG Iterations = 2085
+Final PCG Relative Residual Norm = 9.971050e-9
+  Wrote mesh.XXXXXX and sol.XXXXXX per rank
+  GLVis not available: No connection could be made because the target machine actively refused it. (os error 10061)
+
+|| E_h - E ||_{L^2} = 1.62385083181174e0
+
+pex3: dofs=10400 iters=2085 residual=9.971e-9

@@ -1,0 +1,7 @@
+=== fem-rs mfem_pex17: Parallel DG Elasticity (SIP) ===
+  Workers: 2, Mesh: data/beam-tri.mesh, Refine: 0, Order: 1
+Number of unknowns: 96
+Number of unknowns: 96
+Solution norm: 0.000000e0
+Done
+=== Done ===

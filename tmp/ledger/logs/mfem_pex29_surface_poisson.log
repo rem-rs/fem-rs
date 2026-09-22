@@ -1,0 +1,12 @@
+Options used:
+   --mesh-type 4
+   --mesh-order 3
+   --refine-serial 2
+   --refine-parallel 1
+   --order 3
+   --no-static-condensation
+   --visualization
+Number of unknowns: 2400
+Size of linear system: 2400
+|u - u_h|_2 = 2.837520e-7
+|f - f_h|_2 = 1.136131e-5

@@ -1,0 +1,53 @@
+
+Number of finite element unknowns: 302
+   Iteration :   0  (B r, r) = 0.439495
+   Iteration :   1  (B r, r) = 0.114598
+   Iteration :   2  (B r, r) = 0.0905871
+   Iteration :   3  (B r, r) = 0.0844465
+   Iteration :   4  (B r, r) = 0.0992451
+   Iteration :   5  (B r, r) = 0.0766232
+   Iteration :   6  (B r, r) = 0.0250939
+   Iteration :   7  (B r, r) = 0.00757292
+   Iteration :   8  (B r, r) = 0.00347157
+   Iteration :   9  (B r, r) = 0.000611466
+   Iteration :  10  (B r, r) = 6.50546e-05
+   Iteration :  11  (B r, r) = 4.60156e-05
+   Iteration :  12  (B r, r) = 2.95516e-05
+   Iteration :  13  (B r, r) = 1.85946e-05
+   Iteration :  14  (B r, r) = 3.91218e-06
+   Iteration :  15  (B r, r) = 1.20515e-06
+   Iteration :  16  (B r, r) = 3.67626e-07
+   Iteration :  17  (B r, r) = 7.61124e-08
+   Iteration :  18  (B r, r) = 1.35942e-08
+   Iteration :  19  (B r, r) = 4.81419e-09
+   Iteration :  20  (B r, r) = 2.33673e-09
+   Iteration :  21  (B r, r) = 1.03055e-09
+   Iteration :  22  (B r, r) = 7.43836e-10
+   Iteration :  23  (B r, r) = 3.14377e-10
+   Iteration :  24  (B r, r) = 9.40116e-11
+   Iteration :  25  (B r, r) = 1.20959e-11
+   Iteration :  26  (B r, r) = 4.60776e-12
+   Iteration :  27  (B r, r) = 1.65636e-12
+   Iteration :  28  (B r, r) = 3.33828e-13
+   Iteration :  29  (B r, r) = 8.3928e-14
+   Iteration :  30  (B r, r) = 1.06781e-14
+   Iteration :  31  (B r, r) = 1.82657e-15
+   Iteration :  32  (B r, r) = 3.01948e-16
+   Iteration :  33  (B r, r) = 3.58717e-17
+   Iteration :  34  (B r, r) = 3.54036e-18
+   Iteration :  35  (B r, r) = 2.94127e-19
+   Iteration :  36  (B r, r) = 2.57546e-20
+   Iteration :  37  (B r, r) = 1.59197e-21
+   Iteration :  38  (B r, r) = 1.48522e-22
+   Iteration :  39  (B r, r) = 1.54239e-23
+   Iteration :  40  (B r, r) = 1.89925e-24
+   Iteration :  41  (B r, r) = 2.08429e-25
+Average reduction factor = 0.505087
+  Solved in 41 iterations.
+
+Verifying boundary conditions
+=============================
+Average of solution on Gamma_dbc:	0,	absolute error 0
+Average of n.Grad(u) on Gamma_nbc:	1.0086848537636446,	relative error 0.06633542022033076
+Average of n.Grad(u) on Gamma_nbc0:	-0.0012098078173901244,	absolute error 0.14642669225875296
+Average of n.Grad(u)+a*u on Gamma_rbc:	1.011141603842804,	relative error 0.05123838749375407

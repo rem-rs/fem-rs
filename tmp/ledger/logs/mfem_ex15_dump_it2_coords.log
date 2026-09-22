@@ -1,0 +1,4 @@
+
+thread 'main' (17384) panicked at examples\mfem_ex15_dump_it2_coords.rs:16:10:
+failed to read mesh: Io(Os { code: 2, kind: NotFound, message: "The system cannot find the file specified." })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

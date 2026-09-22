@@ -1,0 +1,32 @@
+Options used:
+   --mesh data/star.mesh
+   --refine 2
+   --order 2
+   --ode-solver 10
+   --t-final 0.5
+   --time-step 0.01
+   --speed 1
+   --dirichlet
+   --no-visualization
+   --no-visit-datafiles
+   --visualization-steps 5
+Number of temperature unknowns: 1361
+  ess_bdr count: 160
+step 5, t = 0.05
+step 10, t = 0.09999999999999999
+step 15, t = 0.15
+step 20, t = 0.20000000000000004
+step 25, t = 0.25000000000000006
+step 30, t = 0.3000000000000001
+step 35, t = 0.35000000000000014
+step 40, t = 0.4000000000000002
+step 45, t = 0.45000000000000023
+step 50, t = 0.5
+
+  Final solution stats:
+    max|u| = 1.763529e-1
+    sum(u) = 2.816756e1
+    checksum = 1.889982e4
+    max|du/dt| = 1.709163e0
+    sum(du/dt) = -8.925238e-1
+    du/dt checksum = 2.955466e4

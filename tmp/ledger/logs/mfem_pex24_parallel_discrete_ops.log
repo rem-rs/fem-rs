@@ -1,0 +1,9 @@
+Number of Nedelec finite element unknowns: 14544
+Number of H1 finite element unknowns: 5265
+
+ Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{L_2} = 3.456656e-2
+
+ Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{L_2} = 3.456656e-2
+
+ Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{L_2} = 3.448504e-2
+

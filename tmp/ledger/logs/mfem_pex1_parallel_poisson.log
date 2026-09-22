@@ -1,0 +1,8 @@
+=== fem-rs mfem_pex1: Parallel Poisson (P1) ===
+  Workers: 2, Mesh: star.mesh x6 (1:1 MFEM ex1p), Partitioner: contiguous
+Number of finite element unknowns: 82561
+  PCG: 637 iters, residual = 9.540e-13, converged = true
+  Average reduction factor = 0.957480
+  L2 error (pointwise): 5.195795e-1
+  ||u||_2 = 4.984082e1, sum = 1.18880789e4, checksum = 4.54977013e8
+=== Done ===

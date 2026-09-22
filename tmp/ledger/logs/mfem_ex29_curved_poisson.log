@@ -1,0 +1,26 @@
+Options used:
+   --mesh-type 4
+   --mesh-order 3
+   --refine 0
+   --order 3
+   --no-static-condensation
+   --no-visualization
+  Geometry order = 3
+  Mesh nodes     = 8 (vertices) + 40 (geom)
+Number of finite element unknowns: 48
+Size of linear system: 48
+   Iteration :   0  (B r, r) = 0.910067
+   Iteration :   1  (B r, r) = 0.0288842
+   Iteration :   2  (B r, r) = 0.000165411
+   Iteration :   3  (B r, r) = 1.41176e-06
+   Iteration :   4  (B r, r) = 1.12383e-08
+   Iteration :   5  (B r, r) = 1.94137e-10
+   Iteration :   6  (B r, r) = 1.22519e-12
+   Iteration :   7  (B r, r) = 5.89522e-15
+   Iteration :   8  (B r, r) = 2.95404e-18
+   Iteration :   9  (B r, r) = 1.00684e-20
+   Iteration :  10  (B r, r) = 3.62594e-23
+   Iteration :  11  (B r, r) = 6.52695e-26
+Average reduction factor = 0.0719572
+|u - u_h|_2 = 0.00138643
+|f - f_h|_2 = 0.00797749

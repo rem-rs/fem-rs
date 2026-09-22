@@ -1,0 +1,4 @@
+
+thread 'main' (6592) panicked at examples\mfem_ex15_dump_p1.rs:23:10:
+mesh: Io(Os { code: 2, kind: NotFound, message: "The system cannot find the file specified." })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

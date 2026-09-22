@@ -1,0 +1,7 @@
+Element Attribute Set Names:  "Base" "E Even" "E Odd" "East" "N Even" "N Odd" "North" "Rose" "Rose Even" "Rose Odd" "S Even" "S Odd" "South" "W Even" "W Odd" "West"
+Boundary Attribute Set Names:  "Boundary" "ENE" "ESE" "Eastern Boundary" "NNE" "NNW" "Northern Boundary" "SSE" "SSW" "Southern Boundary" "WNW" "WSW" "Western Boundary"
+Number of finite element unknowns: 33025
+  PCG: 134 iters, residual = 9.455e-13, converged = true
+  Average reduction factor = 0.813329
+  ||u||_2 = 5.494961e0, sum = 8.15240399e2, checksum = 1.30766980e7
+=== Done ===

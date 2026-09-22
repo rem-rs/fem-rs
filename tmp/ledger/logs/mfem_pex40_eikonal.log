@@ -1,0 +1,13 @@
+Options used:
+   --mesh ../data/star.mesh
+   --order 1
+   --refs 3
+   --max-it 5
+   --tol 0.0001
+   --step 1
+   --growth-rate 1
+   --no-visualization
+
+thread 'main' (27984) panicked at crates\parallel\src\dof_partition.rs:1251:28:
+index out of bounds: the len is 2 but the index is 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

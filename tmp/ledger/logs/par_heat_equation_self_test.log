@@ -1,0 +1,9 @@
+=== fem-rs mfem_pex4: Parallel implicit heat equation ===
+  Workers: 2, Mesh: 16x16, P1
+  kappa = 1, dt = 0.01, T = 0.1, steps = 10
+  Global DOFs: 289
+  t = 1.0000e-1, nodal RMS error vs exact = 1.1079e-2
+  ||u(T)||_L2 = 1.2996e0
+  checksum = 2.42826301e3
+  (exact decay factor = 1.389111e-1)
+Done.

@@ -85,7 +85,7 @@
 | 求解器 | MACH | PCG 位历史（round 32 两套 API 教训在案）、AMG/AMS/ADS、LOR 三腿 mesh-independent、block_solvers dyn（D580 六模式逐位） |
 | LOR | MACH | lor_rt_pcg/lor_nd_pcg/lor_rt_quad_pcg；D72 秩亏已修 |
 | 并行 | BIT（np1/2/4 键表逐位） | D124/D136/D156/D504；残：D527 连续分块（故意不动）、D122 并行 ND2/RT1 ghost（**GAP**） |
-| io mesh | BIT（读侧） | D589（vertices token 流对齐 + d394 规范化）；INLINE 全类型矩阵 vs MFEM 逐元素全同（D582 round 60 + 连带修 3 真 bug）；**D117/D118 关闭（round 60）**：混合网格高阶 H¹ 编号引擎（真源=元素层）、llnl-p3 min detJ ≤1.3e-13 逐槽逐位、"静默错表"消灭→精确告警+大声拒绝；残：**D624（混合表落存储，per-element 行长 ~30 消费方——混合高阶几何最后一个 GAP）**、D626（HEX_FACES 枚举序≠MFEM）、D609/D600/D601 |
+| io mesh | BIT（读侧） | D589（vertices token 流对齐）；INLINE 全类型矩阵 vs MFEM 逐元素全同（D582）；**D117/D118+D624 两段关闭（round 60/61）**：混合高阶 H¹ 编号引擎 → 落存储 attach（ragged CSR 派生、零新字段、uniform 逐位不变；llnl-p3 detJ 1.3e-13、wrong orientation 15/26→0、fichera-mixed-16 翻绿、AMR mindet=粗/4 精确）；**D612/D613 关闭（round 61）**：Hex27 官方 slot 序裁决 + p_refine 修正[连带修体心真 bug] + 曲线标签契约；残：D627/D628/D629/D630/D626/D609/D600/D601 |
 | io gridfunction | **BIT（双向）** | **D602 关闭（round 60，裁决=误诊）**：写侧本来就 74/74 一致；真缺口是**原生 gf 读取器缺失**——已补 `read_mfem_gf`；三层验收全过（74/0、跨库重构 4.0e-15=MFEM 自写对照同水平、反向 74/74+120/120）。残：D610（只钉了 straight tet ND2）、D611（face_pair_storage_map 仅 tri-face、O(NE) 扫描） |
 | NURBS/IGA | BIT | 九档 diff=0、`-patcha -rint` netlib 位级（D533/D563）、`-pa` 全量（D562，pa_data quirk 镜像 + D593 last-ulp 残差） |
 | 线代核 | BIT | QR/NNLS vs LAPACK/netlib 位级（D533/D561）； csr/spmv 既有 |
@@ -95,12 +95,22 @@
 ## 3. examples / miniapps 矩阵
 
 - **86 examples** 全部移植可编译（每轮 `cargo build --release --examples` 0 错误）。
-- **逐例 parity 台账尚未建立**（目前只有重点例的记录：ex1/ex24/ex29/ex31 逐字节、ex15 fraction 行、
-  ex21/ex23 golden 机器本地注记、ex33 等）——**进队列（矩阵 v2 的第一件事）**。
-- **100 miniapp 文件**：`miniapps/README.md` 为过程台账（67 处 parity 记录、37 处 exit(3) 裁剪标注）。
-  已知位级档：nurbs_patch_ex1 九档、lor_solvers、mesh_info、bounding-boxes、block-solvers、
-  mg-abs-l1-jacobi、pdiffusion、schwarz；joule = 电磁半块推进中（D120/D121 round 60 进行中）。
-  **逐 miniapp 三态化（BIT/MACH/DEV）同样进队列。**
+- **逐例三态台账已建（round 61）**：`tmp/ledger/examples_ledger.md`（85 实跑 + 1 未注册死文件；
+  C++ 参考 = 现编 `$HOME/mfem410_ser`，diff 证据 `tmp/ledger/logs/` + `tmp/ledger/ref/`）。
+  计数：**BIT 4**（ex1/ex2/ex24/ex31，本轮现编 `$HOME/mfem410_ser` 真对拍逐字节）、
+  **RUN 63**（含 ex26 = 机器精度级吻合非逐字节；含 pex15 替代档/pex30 两个 >600 s 长跑）、
+  **RUN\* 3**（ex4 终误差 27×、ex5 u_err O(1)、ex20 能量恒 1 —— 数值级失配，已立债）、**CRASH 12**（默认档 panic：6×ex15_dump+ex9+ex15dyn+pex9
+  = D633 缺 `star-hilbert/periodic-hexagon` 资产；pex5/pex40 = D635a 分区越界回归）、
+  **DEV 2**（pex19/pex32 维度裁剪 exit(3)）、**NOREF 2**。
+- **Top 缺口清单**（新债 D633–D635，详examples_ledger §新债）：① D633 `data/` 默认网格资产缺失
+  （e1f16f8 误删，真值树可恢复，10 文件默认档受益）；② D634 迭代求解器停机规则/残差口径族
+  （ex14 前 309 行逐字节后 C++ 停 Rust 不收敛、ex4 27×、ex5 O(1)、ex6/ex29 过收敛——修一台处收益一片）；
+  ③ D635a pex5/pex40 并行分区越界（round 30 绿 → 现挂，回归嫌疑）；④ D635b ex20 symplectic 未演化。
+- **miniapps**：`miniapps/README.md` 仍为过程底账（67 处 parity、≈37 处 exit(3) 裁剪标注）；
+  round 61 抽样复核 8 个 BIT 档（lor_solvers×3、mesh_bounding_boxes×2、block_solvers×3、
+  mg_abs_l1_jacobi、nurbs_patch_ex1 netlib oracle 档、schwarz、**mesh_info 现编 C++ 全新逐字节**）
+  **全部仍绿**——`tmp/ledger/miniapps_ledger.md`。逐 miniapp 全量三态化仍进队列（底账可信度高，
+  建议按目录分轮抽摊）；joule = 电磁半块推进中（D120/D121 round 60 进行中）。
 
 ## 4. 未验证队列（`?` 与台账缺口，round 60 起的排单依据）
 
@@ -117,14 +127,17 @@
 |---|---|---|
 | P0 | ~~D602 gf 互操作~~ | **round 60 关闭（裁决=误诊）**：文件层无缺陷；真交付 = 原生 gf 读取器补齐。教训入 §7 |
 | P0 | ~~D581 Hex27/Prism15+/Pyramid13+ ref_elem~~ | **round 60 关闭**：真缺口 Hex27/Hex20（Prism15/Pyramid13 臂已在——债文部分失真）；体积 parity 机器精度 |
-| P0 | D120/D121 joule hex 电磁半块 | **round 60 D 路进行中** |
+| P0 | ~~D120/D121 joule hex 电磁半块~~ | **round 60 关闭**：curl_3d hex 臂 216 项 12 位、三线性投影 <1e-9、局部目标 ~1e-16；完整 ImplicitSolve 链余项 exit(3) 清单化（D618/D619/D620 登记） |
 | P1 | ~~D603 tri ≥26~~（修过程中挖出 GM 权重矩解崩溃真缺陷，一并闭）+ ~~D591 hex IGLL 接线~~（1800 dof 3.5e-15，框架因子全精度钉死） | **round 60 关闭** |
 | P1 | ~~D582 INLINE pyramid~~（+3 真 bug 顺带修） | **round 60 关闭** |
-| P1 | ~~D31 hex p=2 原子切换~~ | **round 60 关闭（E 路）**：MFEM 三路互证探针裁决 legacy 槽表全错（p=2 与 p≥3 同构算法）；9 文件修正（dof_manager/factory/hex/gmsh/wgsl/curved_hex）；红证据 "slot 8, left: 16"；**ex26 端到端 vs C++ 逐行一致**（274625 未知数、六步 (B r,r) 与 ARF 全同） |
-| P2 | ~~D117/D118 io 曲面/混合高阶几何~~ | **round 60 关闭（编号引擎+混合门，llnl-p3 ≤1.3e-13）**；存储落表 = **D624**（新登记，per-element 行长 ~30 消费方——混合高阶几何最后一个真 GAP） |
+| P1 | ~~D31 hex p=2 原子切换~~ | **round 60 关闭（E 路）**：MFEM 三路互证探针裁决 legacy 槽表全错（p=2 与 p≥3 同构算法）；9 文件修正（dof_manager/factory/hex/gmsh/wgsl/curved_hex）；红证据 "slot 8, left: 16"；**ex26 端到端 vs C++ 数值口径一致**（274625 dof；round 61 台账收窄：机器精度非逐字节） |
+| P2 | ~~D117/D118 io 混合高阶几何~~ + ~~D624 落存储~~ | **round 60+61 两段关闭**：编号引擎（60）→ 落存储 attach（61，ragged CSR 零新字段、uniform 逐位不变、llnl-p3 1.3e-13 + wrong orientation 15/26→0 + fichera-mixed-16 翻绿 + AMR mindet=粗/4）；残 D627/D628/D629（写出/细化传播/曲面） |
+| P1 | ~~D612/D619/D613 slot 序同族~~ | **round 61 关闭（B 路）**：Hex27 官方序=MFEM FaceVert 序裁决 + p_refine 旧序换掉[**连带修体心坐标真 bug：20 结点求和/8 → 角点均值**]；D619 误诊关闭（D31 已顺带修复，零改动 pin 直接绿）；D613 曲线标签契约+DofManager 高阶编号补齐（红 5/6→绿 6/6） |
+| P1 | ~~D614 postproc 接线~~ + ~~D615 hex IGLL 装配腿~~（51984 条目 2.26e-13，此前**静默跌落 GaussLegendre**）+ ~~D617 tet GM fixture~~（红证据：旧矩解 tet 段偏差 1e18..2.5e32） | **round 61 关闭（D 路）** |
+| **P1（新，round 61 台账扫出）** | **D634 迭代求解器停机规则/残差口径族**（ex4 提前收敛误差 27×、ex5 MINRES 假收敛 u_err O(1)、ex3/6/8/14/29 同族——修一处收益一片）**← round 62 头号候选**；**D633** data 默认网格资产缺失（e1f16f8 误删，恢复即修 10 例）；**D635a** pex5/pex40 并行分区越界回归（round 30 还绿）；**D635b** ex20 辛积分器未演化（输出 1/0） | **待派** |
 | P2 | D113 剩余细化几何搬运（Hex27/Prism6/Tet4/Pyramid5） | 队列 |
 | P2 | D122 并行 ND2/RT1 ghost 分区缺陷 | 队列 |
-| P3 | D597/D598/D605（prism.rs 可写轮）、D590（GLL 生成器）、D615（hex IGLL 装配腿）、D616/D617、D570、D579 | 挂起明确化 |
+| P3 | D597/D598/D605（prism.rs 可写轮）、D590（GLL 生成器）、D616/D627/D628/D629/D630/D636/D637/D638、D570、D579、D593 | 挂起明确化 |
 
 ## 6. 维护规程
 

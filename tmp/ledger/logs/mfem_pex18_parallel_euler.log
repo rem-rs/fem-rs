@@ -1,0 +1,4 @@
+=== fem-rs mfem_pex18: Parallel Euler (DG, RK4) ===
+  Workers: 2, Problem: 1, Refine: 1, Order: 1
+Number of unknowns: 576
+=== Done ===

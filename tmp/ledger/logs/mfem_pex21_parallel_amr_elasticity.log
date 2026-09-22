@@ -1,0 +1,7 @@
+=== fem-rs mfem_pex21: Parallel AMR Elasticity ===
+  Workers: 2, Mesh: data/beam-tri.mesh, Refine: 0, Order: 1
+Number of unknowns: 36
+Number of unknowns: 36
+Solution norm: 0.000000e0
+Done
+=== Done ===

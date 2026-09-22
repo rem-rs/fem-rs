@@ -1,0 +1,43 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/star.mesh
+   --order 1
+   --problem-type 0
+   --no-static-condensation
+   --no-partial-assembly
+   --device cpu
+   --no-visualization
+Device configuration: cpu
+Memory configuration: host-std
+Number of Nedelec finite element unknowns: 41280
+Number of H1 finite element unknowns: 20801
+   Iteration :   0  (B r, r) = 3.4757
+   Iteration :   1  (B r, r) = 0.198763
+   Iteration :   2  (B r, r) = 0.000183462
+   Iteration :   3  (B r, r) = 3.72749e-06
+   Iteration :   4  (B r, r) = 6.24481e-07
+   Iteration :   5  (B r, r) = 3.19427e-08
+   Iteration :   6  (B r, r) = 5.92467e-09
+   Iteration :   7  (B r, r) = 3.23426e-10
+   Iteration :   8  (B r, r) = 5.76743e-11
+   Iteration :   9  (B r, r) = 3.3273e-12
+   Iteration :  10  (B r, r) = 5.53108e-13
+   Iteration :  11  (B r, r) = 3.45543e-14
+   Iteration :  12  (B r, r) = 5.23191e-15
+   Iteration :  13  (B r, r) = 3.61681e-16
+   Iteration :  14  (B r, r) = 4.89842e-17
+   Iteration :  15  (B r, r) = 3.81109e-18
+   Iteration :  16  (B r, r) = 4.56486e-19
+   Iteration :  17  (B r, r) = 4.0405e-20
+   Iteration :  18  (B r, r) = 4.28163e-21
+   Iteration :  19  (B r, r) = 4.31285e-22
+   Iteration :  20  (B r, r) = 4.15593e-23
+   Iteration :  21  (B r, r) = 4.64016e-24
+   Iteration :  22  (B r, r) = 4.43791e-25
+Average reduction factor = 0.271788
+
+ Solution of (E_h,v) = (grad p_h,v) for E_h and v in H(curl): || E_h - grad p ||_{L_2} = 0.00744893
+
+ Gradient interpolant E_h = grad p_h in H(curl): || E_h - grad p ||_{L_2} = 0.00744893
+
+ Projection E_h of exact grad p in H(curl): || E_h - grad p ||_{L_2} = 0.00744895
+

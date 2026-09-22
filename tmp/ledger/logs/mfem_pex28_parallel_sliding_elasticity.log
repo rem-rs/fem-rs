@@ -1,0 +1,6 @@
+=== fem-rs mfem_pex28: Parallel Sliding Elasticity ===
+  Workers: 2, Offset: 0.3, Order: 1
+Number of finite element unknowns: 2178
+  Schur: 0 iters, residual = 0.000e0, converged = true
+  ||u||_2 = 2.848251e-1
+=== Done ===

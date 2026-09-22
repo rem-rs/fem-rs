@@ -1,0 +1,32 @@
+Number of unknowns: 2304
+time step: 50, time: 0.5, ||u|| = 1.260327e1, sum = 2.591758e2
+time step: 100, time: 1, ||u|| = 1.159745e1, sum = 2.591758e2
+time step: 150, time: 1.5, ||u|| = 1.081873e1, sum = 2.591758e2
+time step: 200, time: 2, ||u|| = 1.018617e1, sum = 2.591758e2
+time step: 250, time: 2.5, ||u|| = 9.656882e0, sum = 2.591758e2
+time step: 300, time: 3, ||u|| = 9.204897e0, sum = 2.591758e2
+time step: 350, time: 3.5, ||u|| = 8.813190e0, sum = 2.591758e2
+time step: 400, time: 4, ||u|| = 8.469981e0, sum = 2.591758e2
+time step: 450, time: 4.5, ||u|| = 8.166761e0, sum = 2.591758e2
+time step: 500, time: 5, ||u|| = 7.897177e0, sum = 2.591758e2
+time step: 550, time: 5.5, ||u|| = 7.656341e0, sum = 2.591758e2
+time step: 600, time: 6, ||u|| = 7.440398e0, sum = 2.591758e2
+time step: 650, time: 6.5, ||u|| = 7.246238e0, sum = 2.591758e2
+time step: 700, time: 7, ||u|| = 7.071297e0, sum = 2.591758e2
+time step: 750, time: 7.5, ||u|| = 6.913424e0, sum = 2.591758e2
+time step: 800, time: 8, ||u|| = 6.770784e0, sum = 2.591758e2
+time step: 850, time: 8.5, ||u|| = 6.641796e0, sum = 2.591758e2
+time step: 900, time: 9, ||u|| = 6.525076e0, sum = 2.591758e2
+time step: 950, time: 9.5, ||u|| = 6.419408e0, sum = 2.591758e2
+time step: 1000, time: 10, ||u|| = 6.323711e0, sum = 2.591758e2
+[ex41] FINAL sol (first 10 dofs):
+  u[0] = 5.2612628082e-2
+  u[1] = 4.9700033169e-2
+  u[2] = 4.6870826115e-2
+  u[3] = 4.6332147395e-2
+  u[4] = 5.8449139016e-2
+  u[5] = 5.5193915520e-2
+  u[6] = 5.2017094380e-2
+  u[7] = 5.1397073578e-2
+  u[8] = 6.8261603802e-2
+  u[9] = 6.4425646514e-2

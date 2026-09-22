@@ -1,0 +1,17 @@
+Options used:
+   --mesh data/inline-quad.mesh
+   --refine-serial 2
+   --refine-parallel 1
+   --order 1
+   --frequency 1
+
+Number of H(Curl) unknowns: 3201
+Size of linear system: 3201
+PCG: 308 iterations, final relative residual = 9.243775e-13
+
+|| E_h - E ||_{H(Curl)} = 9.0716333024e-2
+
+  ||u|| = 3.16188210e1, sum = -8.44398822e2
+  z checksum = -4.63965845e5, nd checksum = 1.67172371e3
+
+Finished.

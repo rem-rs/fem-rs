@@ -1,0 +1,4 @@
+    GMRES iter    1  ‖r‖/‖b‖ = 4.653609e-1
+    GMRES iter    2  ‖r‖/‖b‖ = 1.690310e-16
+  GMRES converged iter 2  ‖r‖/‖b‖=2.857e-16
+pex22: dofs=25 conv=true iters=2 res=2.857e-16

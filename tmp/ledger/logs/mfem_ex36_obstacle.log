@@ -1,0 +1,79 @@
+Options used:
+   --order 1
+   --refs 3
+   --max-it 10
+   --tol 1.00000e-5
+   --step 1
+   --visualization
+Number of H1 finite element unknowns: 1313
+Number of L2 finite element unknowns: 320
+
+OUTER ITERATION 1
+Newton_update_size = 0.796378
+Newton_update_size = 0.147887
+Newton_update_size = 0.0451275
+Number of Newton iterations = 3
+Increment (|| uₕ - uₕ_prvs||) = 0.611162
+H1-error  (|| u - uₕᵏ||)       = 0.272072
+
+OUTER ITERATION 2
+Newton_update_size = 0.0864209
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.0864209
+H1-error  (|| u - uₕᵏ||)       = 0.136973
+
+OUTER ITERATION 3
+Newton_update_size = 0.0297361
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.0297361
+H1-error  (|| u - uₕᵏ||)       = 0.0376233
+
+OUTER ITERATION 4
+Newton_update_size = 0.00289605
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.00289605
+H1-error  (|| u - uₕᵏ||)       = 0.0263667
+
+OUTER ITERATION 5
+Newton_update_size = 0.00331771
+Newton_update_size = 0.000420288
+Number of Newton iterations = 2
+Increment (|| uₕ - uₕ_prvs||) = 0.00368523
+H1-error  (|| u - uₕᵏ||)       = 0.0191953
+
+OUTER ITERATION 6
+Newton_update_size = 0.000755054
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.000755054
+H1-error  (|| u - uₕᵏ||)       = 0.0194594
+
+OUTER ITERATION 7
+Newton_update_size = 0.000190616
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.000190616
+H1-error  (|| u - uₕᵏ||)       = 0.0196899
+
+OUTER ITERATION 8
+Newton_update_size = 4.84477e-5
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 4.84477e-5
+H1-error  (|| u - uₕᵏ||)       = 0.0197603
+
+OUTER ITERATION 9
+Newton_update_size = 1.27321e-5
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 1.27321e-5
+H1-error  (|| u - uₕᵏ||)       = 0.0197795
+
+OUTER ITERATION 10
+Newton_update_size = 3.40180e-6
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 3.40180e-6
+
+ Outer iterations: 10
+ Total iterations: 13
+ Total dofs:       1633
+
+ Final L2-error (|| u - uₕ||)          = 0.00247766
+ Final H1-error (|| u - uₕ||)          = 0.0197847
+ Final L2-error (|| u - ϕ - exp(ψₕ)||) = 0.0225115

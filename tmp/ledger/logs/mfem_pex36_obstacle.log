@@ -1,0 +1,72 @@
+Options used:
+   --order 1
+   --refs 3
+   --max-it 10
+   --tol 1.00000e-5
+   --step 1
+   --visualization
+Number of H1 finite element unknowns: 1313
+Number of L2 finite element unknowns: 320
+
+OUTER ITERATION 1
+Newton_update_size = 0.796377
+Newton_update_size = 0.147886
+Newton_update_size = 0.0451299
+Number of Newton iterations = 3
+Increment (|| uₕ - uₕ_prvs||) = 0.611161
+H1-error  (|| u - uₕᵏ||)       = 0.272075
+
+OUTER ITERATION 2
+Newton_update_size = 0.0864223
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.0864223
+H1-error  (|| u - uₕᵏ||)       = 0.136974
+
+OUTER ITERATION 3
+Newton_update_size = 0.0303367
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.0303367
+H1-error  (|| u - uₕᵏ||)       = 0.0361516
+
+OUTER ITERATION 4
+Newton_update_size = 0.00313331
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.00313331
+H1-error  (|| u - uₕᵏ||)       = 0.0191616
+
+OUTER ITERATION 5
+Newton_update_size = 0.000729815
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.000729815
+H1-error  (|| u - uₕᵏ||)       = 0.0194206
+
+OUTER ITERATION 6
+Newton_update_size = 0.000210868
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 0.000210868
+H1-error  (|| u - uₕᵏ||)       = 0.0196753
+
+OUTER ITERATION 7
+Newton_update_size = 5.59040e-5
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 5.59040e-5
+H1-error  (|| u - uₕᵏ||)       = 0.0197561
+
+OUTER ITERATION 8
+Newton_update_size = 1.48679e-5
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 1.48679e-5
+H1-error  (|| u - uₕᵏ||)       = 0.0197784
+
+OUTER ITERATION 9
+Newton_update_size = 3.98740e-6
+Number of Newton iterations = 1
+Increment (|| uₕ - uₕ_prvs||) = 3.98740e-6
+
+ Outer iterations: 9
+ Total iterations: 11
+ Total dofs:       1633
+
+ Final L2-error (|| u - uₕ||)          = 0.00247748
+ Final H1-error (|| u - uₕ||)          = 0.0197844
+ Final L2-error (|| u - ϕ - exp(ψₕ)||) = 0.0225115

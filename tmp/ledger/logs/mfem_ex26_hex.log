@@ -1,0 +1,16 @@
+Options used:
+   --mesh data/inline-hex.mesh
+   --geometric-refinements 0
+   --order-refinements 2
+   --device cpu
+   --no-visualization
+Device configuration: cpu (host-std)
+Number of finite element unknowns: 274625
+Size of linear system: 274625
+   Iteration :   0  (B r, r) = 0.0200818
+   Iteration :   1  (B r, r) = 1.55112e-06
+   Iteration :   2  (B r, r) = 9.31188e-09
+   Iteration :   3  (B r, r) = 2.6304e-11
+   Iteration :   4  (B r, r) = 1.01207e-13
+   Iteration :   5  (B r, r) = 4.90246e-16
+Average reduction factor = 0.0435272

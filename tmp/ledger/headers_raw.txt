@@ -1,0 +1,1118 @@
+=== mfem_ex0_mesh_intro ===
+//! # Example 0 — Mesh introduction + Poisson (1:1 with MFEM ex0)
+//!
+//! Loads an MFEM-format mesh, applies one uniform refinement, defines an H¹
+//! finite element space, assembles and solves −Δu = 1 with zero Dirichlet BCs,
+//! then saves the solution (`sol.gf`) and mesh (`mesh.mesh`) like MFEM ex0.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex0_mesh_intro
+//! cargo run --example mfem_ex0_mesh_intro -- -m ../data/star.mesh
+//! cargo run --example mfem_ex0_mesh_intro -- -m ../data/star.mesh -o 2
+//! ```
+=== mfem_ex10_hyperelastic_dyn ===
+//! # MFEM Example 10 — Dynamic Hyperelasticity (NeoHookean)
+//!
+//! 1:1 port of `mfem/examples/ex10.cpp`.
+//!
+//! Solves the time-dependent nonlinear elasticity problem:
+//!
+//! ```text
+//!   M dv/dt = -H(x) - S v
+//!   dx/dt   =  v
+//! ```
+//!
+//! where M is the mass matrix, S is a viscosity (vector Laplacian) operator,
+=== mfem_ex14_dg_poisson ===
+//! Example 14 — DG Poisson (1:1 translation of MFEM ex14)
+//!
+//! Solves −Δu = 1 with homogeneous Dirichlet BCs using SIP-DG on the L² space:
+//!
+//! ```text
+//!   a = ∫ κ ∇u·∇v + interior/boundary face terms of DGDiffusionIntegrator(κ, σ, k)
+//!   b = ∫ 1·v  (the DGDirichletLFIntegrator term is zero for homogeneous BCs)
+//! ```
+//!
+//! Solver: sigma == −1 → PCG + GSSmoother; otherwise GMRES(10) + GSSmoother
+//! (matching MFEM ex14: `PCG(A, M, b, x, 1, 500, 1e-12, 0.0)` / `GMRES(..., 10, ...)`).
+//!
+=== mfem_ex15_dump_A_true ===
+//! Dump the Rust it2 true-DOF system matrix (conforming assemble + Dirichlet
+//! elimination, DIAG_KEEP) for 1:1 comparison with tools_ex15_ref/dump_A_true.cpp.
+//! Usage: cargo run --release -p fem-examples --example mfem_ex15_dump_A_true
+
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
+use fem_io::mfem::read_mfem_file;
+use fem_linalg::csr_spmm;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_space::constraints::{apply_dirichlet, boundary_dofs, conforming_assemble};
+use fem_space::fe_space::FESpace;
+use fem_space::H1Space;
+=== mfem_ex15_dump_T002 ===
+//! Debug: run the full ex15 flow to Time 0.01/0.02 it1 and dump A_true +
+//! solution + constraints, for 1:1 comparison with tools_ex15_ref
+//! (ex15_dump_T0deref.cpp / ex15_dump_T002.cpp).
+//! Usage: cargo run --release -p fem-examples --example mfem_ex15_dump_T002
+
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
+use fem_assembly::postproc::amr_refiner::{ThresholdRefiner, ThresholdDerefiner};
+use fem_assembly::postproc::grid_function::GridFunction;
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_space::constraints::{apply_dirichlet, boundary_dofs, conforming_assemble};
+=== mfem_ex15_dump_flow ===
+//! Debug: run the full ex15 flow to Time 0.02 it1 (with both derefs) and dump
+//! P1/P2 constraint counts + cP size, to compare against the working Time 0.01.
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D, HangingNodeConstraint};
+use fem_space::H1Space;
+use fem_space::FESpace;
+use fem_space::dof_manager::DofManager;
+use fem_space::dof_manager::EdgeKey;
+
+fn p2_constraints(p1: &[HangingNodeConstraint], dm: &DofManager) -> Vec<HangingNodeConstraint> {
+    let mut out = Vec::new();
+=== mfem_ex15_dump_it2_coords ===
+//! Dump it2 mesh dof coordinates (Rust side) for the ex15 1:1 dof-numbering
+//! investigation.  Builds the same it2 mesh as C++ tools_ex15_ref/dump_u3_coords.cpp
+//! (m1 = [0,7,8,15,16], GeneralRefinement 3 levels) and prints every dof as
+//! "d x y", one per line, with full precision.
+//!
+//! Usage:
+//!   cargo run --release --example mfem_ex15_dump_it2_coords -- -m data/star-hilbert.mesh
+
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_space::{H1Space, fe_space::FESpace};
+=== mfem_ex15_dump_p1 ===
+//! Temporary debug: dump Rust cP for the 140-elem (641 dof) mesh — HANDOVER
+//! "it3" — and compare rows against tools_ex15_ref/cpp_P_it3.txt.
+//! Usage: cargo run --release -p fem-examples --example mfem_ex15_dump_p1
+//!   (with feature flag DUMP_IT3 env: cargo run ... 2> /dev/null)
+
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D};
+use fem_space::H1Space;
+use fem_space::FESpace;
+use fem_space::dof_manager::EdgeKey;
+
+=== mfem_ex15_dump_p1_it3 ===
+//! Dump Rust it3 (140-elem mesh) A_true + solution for 1:1 comparison with
+//! tools_ex15_ref/dump_A_true_it3.cpp and dump_u3_coords.cpp.
+//! Usage: cargo run --release -p fem-examples --example mfem_ex15_dump_p1_it3
+
+use fem_assembly::{Assembler, standard::{DiffusionIntegrator, DomainSourceIntegrator}};
+use fem_io::mfem::read_mfem_file;
+use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::amr::{NCStateQuad, NcState2D, HangingNodeConstraint};
+use fem_space::constraints::{apply_dirichlet, boundary_dofs, conforming_assemble};
+use fem_space::fe_space::FESpace;
+use fem_space::H1Space;
+use fem_solver::{SolverConfig, solve_pcg_gssmoother};
+=== mfem_ex15_dynamic_amr ===
+//! # MFEM Example 15 — Dynamic AMR for Poisson (1:1 translation)
+//!
+//! Time-dependent Poisson with prescribed solution (spherical front / ball),
+//! adaptive mesh refinement (threshold-based), and derefinement.
+//!
+//! Supports **Quad4** (non-conforming AMR with `NCStateQuad`) and **Tri3**
+//! (non-conforming AMR with `NCState`).
+//!
+//! Reference: `mfem/ex15.cpp`
+//!
+//! ## Usage
+//! ```bash
+=== mfem_ex16_nonlinear_heat ===
+//! # Example 16 — Time-dependent nonlinear heat equation  (analogous to MFEM ex16)
+//!
+//! Solves a time dependent nonlinear heat equation problem of the form
+//! `du/dt = C(u)`, with a non-linear diffusion operator
+//! `C(u) = ∇·((κ + α·u) ∇u)`.
+//!
+//! After spatial discretisation the conduction model can be written as:
+//!
+//! ```text
+//!   du/dt = M⁻¹(−Ku)
+//! ```
+//!
+=== mfem_ex17_dg_elasticity ===
+//! mfem_ex17_dg_elasticity — MFEM ex17: DG SIP linear elasticity with weak Dirichlet BC.
+//!
+//! 1:1 translation of MFEM ex17. Solves a multi-material cantilever beam problem
+//! using DG-SIP (Symmetric Interior Penalty) formulation.
+//!
+//! ## Problem
+//! -div σ(u) = 0                     (no body force)
+//! σ(u) = λ tr(ε(u)) I + 2μ ε(u)   (linear elasticity)
+//! u = u_D on ∂Ω                    (weakly imposed via DG SIP)
+//!
+//! ## Dirichlet BC (InitDisplacement)
+//! u_x = 0
+=== mfem_ex18_euler ===
+//! MFEM Example 18 — 2D compressible Euler equations (DG, SSP-RK3) [1:1 translation]
+//!
+//! Solves the system of hyperbolic conservation laws:
+//!   ∂u/∂t + ∇·F(u) = 0
+//!
+//! using a DG discretization with Rusanov (local Lax-Friedrichs) numerical
+//! flux and explicit SSP-RK3 time integration on a periodic square mesh.
+//!
+//! Problems:
+//!   1: Fast moving isentropic vortex (Minf=0.5, beta=1/5)
+//!   2: Slow moving isentropic vortex (Minf=0.05, beta=1/50)
+//!   3: Moving sine wave (density perturbation)
+=== mfem_ex19_hyperelastic_incomp ===
+//! Example 19 — 1:1 translation of MFEM ex19
+//! Quasi-static incompressible neo-Hookean hyperelasticity (mixed u/p).
+//!
+//! Solves H(x) = 0 via Newton's method with block-preconditioned GMRES.
+//!
+//! BCs (matching MFEM ex19):
+//!   Boundary attribute 1: u = 0 (fixed)
+//!   Boundary attribute 2: u_x = 0, u_y = 0.25·x (prescribed shear)
+//!
+//! Usage:
+//!   cargo run --example mfem_ex19_hyperelastic_incomp
+//!   cargo run --example mfem_ex19_hyperelastic_incomp -- -m data/beam-quad.mesh -o 2 -r 0
+=== mfem_ex1_poisson ===
+//! # Example 1 — Poisson/Laplace  (one-to-one with MFEM ex1)
+//!
+//! Solves: `-Δu = 1` in Ω, `u = 0` on ∂Ω
+//!
+//! ## Usage
+//!
+//! ```text
+//! cargo run --example mfem_ex1_poisson                          # default mesh
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh -o 2
+//! cargo run --example mfem_ex1_poisson -- -m ../data/star.mesh -no-vis
+//! ```
+=== mfem_ex20_symplectic ===
+//! Example 20 — Symplectic integration of Hamiltonian systems
+//! **1:1 translation of MFEM ex20**
+//!
+//! Demonstrates variable-order symplectic ODE integration for 1D Hamiltonian
+//! systems.  Hamiltonian: H(q,p,t) = T(p) + V(q,t)
+//!
+//! Hamilton's equations:
+//!   dq/dt =  dH/dp
+//!   dp/dt = -dH/dq
+//!
+//! Problems (selected with -p):
+//!   0 — Simple Harmonic Oscillator   H = (p^2/m + k·q^2)/2
+=== mfem_ex21_amr_elasticity ===
+//! Example 21 — AMR for linear elasticity (1:1 translation of MFEM ex21).
+//!
+//! Multi-material cantilever beam with adaptive mesh refinement,
+//! ZZ error estimator, and PCG+GSSmoother solver.
+//!
+//! Supports 2D (Tri3/Quad4) and 3D (Tet4/Hex8/Prism6).
+//!
+//! Usage:
+//!   cargo run --example mfem_ex21_amr_elasticity
+//!   cargo run --example mfem_ex21_amr_elasticity -- -m data/beam-tri.mesh -o 2
+//!   cargo run --example mfem_ex21_amr_elasticity -- -m data/beam-tet.mesh -o 2
+//!   cargo run --example mfem_ex21_amr_elasticity -- -m data/beam-hex.mesh -o 2 -sc
+=== mfem_ex22_complex_helmholtz ===
+﻿//! MFEM Example 22 — Complex Helmholtz (3 variants)
+//!
+//! Translates MFEM C++ ex22 1:1, supporting:
+//!   -p 0: Scalar H1   field:  -Div(a Grad u) - ω² b u + i ω c u = 0
+//!   -p 1: Vector H(Curl) field: Curl(a Curl u) - ω² b u + i ω c u = 0
+//!   -p 2: Vector H(Div)  field: -Grad(a Div u) - ω² b u + i ω c u = 0
+//!
+//! Each is driven by a forced oscillation at angular frequency ω imposed on
+//! all boundaries (essential / Dirichlet).  On "inline-*" meshes the exact
+//! solution u(x) = exp(-iκ·x_{dim-1}) is known.
+//!
+//! Solver: GMRES + block-diagonal preconditioner
+=== mfem_ex23_wave_equation ===
+#![allow(dead_code)]
+
+//! # Example 23 — Wave Equation (Second-Order ODE)  [1:1 translation of MFEM ex23]
+//!
+//! Solves the wave equation:
+//!
+//! ```text
+//!   d²u/dt² = c²·Δu
+//! ```
+//!
+//! The example demonstrates the use of a second-order time-dependent operator,
+//! implicit Backward-Euler time integration, and CG solvers.
+=== mfem_ex24_discrete_ops ===
+//! # Example 24 — Mixed Discrete Operators  [1:1 translation of MFEM ex24]
+//!
+//! Projects gradient / curl / divergence operators via mixed FE formulations.
+//! Three problem types:
+//!
+//! ```text
+//!   0 (grad): ∇p       for p ∈ H¹        → E ∈ H(curl)  (2D + 3D)
+//!   1 (curl): curl v   for v ∈ H(curl)   → E ∈ H(div)   (3D)
+//!   2 (div):  div v    for v ∈ H(div)    → f ∈ L²       (2D + 3D)
+//! ```
+//!
+//! ## Usage
+=== mfem_ex25_pml_maxwell ===
+//! # MFEM Example 25 — PML for Maxwell — 1:1 Rust translation
+//!
+//! Solves `(1/μ) curl curl E − ω² ε E = f` with PML.
+//!
+//! Uses core library coefficients (`RestrictedCoefficient`,
+//! `ScalarVectorProductCoefficient`) to match C++ coefficient chain.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex25_pml_maxwell -- -o 2 -f 1.0 -ref 2 -prob 0
+//! cargo run --example mfem_ex25_pml_maxwell -- -o 2 -f 5.0 -ref 3 -prob 4 -m data/inline-quad.mesh
+//! ```
+=== mfem_ex26_geom_mg ===
+//! # Example 26 — Geometric Multigrid for Poisson  [1:1 translation of MFEM ex26]
+//!
+//! Solves the Poisson problem `−Δu = 1` with homogeneous Dirichlet BCs using
+//! a geometric multigrid preconditioner.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex26_geom_mg
+//! cargo run --example mfem_ex26_geom_mg -- -m data/star.mesh
+//! cargo run --example mfem_ex26_geom_mg -- -m data/fichera.mesh
+//! ```
+
+=== mfem_ex27_robin_bc ===
+//! # Example 27 — Mixed Boundary Conditions [1:1 translation of MFEM ex27]
+//!
+//! Solves −Δu = 0 on a periodic (seam-identified) Q3-curved mesh with mixed
+//! boundary conditions (Neumann / Robin / Dirichlet / natural), using either a
+//! continuous H¹ space (essential Dirichlet BC) or a discontinuous L² space
+//! (weak Dirichlet BC via `DGDiffusionIntegrator` + `DGDirichletLFIntegrator`).
+//!
+//! The mesh generation mirrors the C++ `GenerateSerialMesh` flow: the flat
+//! periodic mesh is refined, the x=±1 seam is stitched (right-seam vertices are
+//! rewired onto the left seam at x=-1, seam boundary faces dropped), Q3 geometry
+//! is rebuilt on the stitched flat mesh, and the hole transform is applied to
+//! every geometry node.
+=== mfem_ex28_sliding_elasticity ===
+//! # Example 28 — Sliding Elasticity  [1:1 translation of MFEM ex28]
+//!
+//! Linear elasticity on a trapezoid with sliding (normal-constraint) BC:
+//! A trapezoid is pushed from the right into a rigid notch. Normal displacement
+//! is restricted on boundaries 1 and 4, but tangential movement is allowed.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex28_sliding_elasticity
+//! cargo run --example mfem_ex28_sliding_elasticity -- --offset 0.3 --order 2
+//! ```
+
+=== mfem_ex29_curved_poisson ===
+//! # Example 29 — Curved-surface Poisson  [1:1 translation of MFEM ex29]
+//!
+//! Solves `−∇·(σ ∇u) = 1` on a 2-D surface embedded in 3-D, with homogeneous
+//! Dirichlet BCs.  The diffusion tensor σ is a 3×3 anisotropic matrix.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex29_curved_poisson
+//! cargo run --example mfem_ex29_curved_poisson -- -mt 4 -r 0 -mo 3 -o 3
+//! ```
+//!
+//! ## Known differences vs C++
+=== mfem_ex2_elasticity ===
+//! # Example 2 — Linear Elasticity  (one-to-one with MFEM ex2)
+//!
+//! Solves a multi-material cantilever beam:
+//! ```text
+//!   −∇·σ(u) = 0            in Ω
+//!         u = 0             on boundary attribute 1 (fixed wall)
+//!   σ(u)·n = (0, −1e-2)    on boundary attribute 2 (pull down)
+//! ```
+//! where `σ = λ tr(ε)I + 2μ ε` and λ, μ are piecewise-constant
+//! (material 1 = 50× stiffer than material 2).
+//!
+//! ## Usage
+=== mfem_ex30_aniso_amr ===
+//! # Example 30 — Anisotropic AMR data oscillation (1:1 with MFEM ex30)
+//!
+//! Preprocesses a mesh by adaptively refining to resolve coefficient data.
+//! There is no PDE being solved — this is a mesh preprocessor that lowers
+//! data oscillation to a user-defined relative threshold.
+//!
+//! Three coefficients are tested sequentially, each building on the refined
+//! mesh from the previous step:
+//!   - Function 0: piecewise-affine (mesh-conforming for order > 0)
+//!   - Function 1: piecewise-constant ring (never mesh-conforming)
+//!   - Function 2: singular (Laplacian of steep wavefront from [2])
+//!
+=== mfem_ex31_anisotropic_maxwell ===
+//! # Example 31 — Anisotropic Maxwell (1:1 with MFEM ex31, 2-D order-1 path)
+//!
+//! Solves the definite Maxwell equation `curl μ⁻¹ curl E + Σ·E = f` with the
+//! anisotropic tensor `Σ = [[2, 1/√2, 0], [1/√2, 2, 1/√2], [0, 1/√2, 2]]`,
+//! all-boundary PEC data (`sol.ProjectCoefficient(E_exact)` + `FormLinearSystem`
+//! DIAG_KEEP elimination) and GS-preconditioned PCG — MFEM `ex31.cpp` step by
+//! step, with the C++ print format (`Options used:`, `Number of H(Curl)
+//! unknowns:`, the PCG `(B r, r)` log and the final `|| E_h - E ||_{H(Curl)}`
+//! line in `%g` style via [`fem_solver::fmt_g`]).
+//!
+//! MFEM's `ND_R2D_FECollection` restricted space is reproduced with the
+//! combined `[H¹(z) | H(curl)(xy)]` space: the in-plane components live on the
+=== mfem_ex31_dump ===
+//! ex31 Rust-side dump helper (D375; feeds `tools/ex31_cpp_helper/`).
+//!
+//! Assembles the **same** serial ex31 system as
+//! `examples/mfem_ex31_anisotropic_maxwell.rs` (2-D restricted H(curl), order 1)
+//! and dumps every intermediate the comparison harness reads:
+//!
+//! ```bash
+//! cargo run --release --example mfem_ex31_dump -- -m data/inline-quad.mesh -r 2 -o 1
+//! ```
+//!
+//! Writes into the current directory: `rust_dofpos.txt`, `rust_A.txt`,
+//! `rust_b.txt`, `rust_elmat_0.txt`, `rust_soldofs.txt`, `rust_elim_A.txt`,
+=== mfem_ex33_fractional_diffusion ===
+//! # Example 33 — Fractional Diffusion  [1:1 translation of MFEM ex33 + ex33.hpp]
+//!
+//! Solves the fractional diffusion equation
+//!
+//! ```text
+//!   (-Δ)^α u = f  in Ω,     u = 0  on ∂Ω,     0 < α
+//! ```
+//!
+//! The integer part is handled by solving `(-Δ)^N g = f` (N = floor(α)) with
+//! H¹ + Diffusion/Mass integrators and PCG-GSSmoother (the ex27–ex29 1:1
+//! infrastructure).  The fractional remainder `(-Δ)^{α-N}` is approximated by
+//! a rational (partial-fraction) expansion generated with the triple-A (AAA)
+=== mfem_ex34_magnetostatics ===
+//! # Example 34 — Magnetostatics with SubMesh current density  (1:1 with MFEM ex34)
+//!
+//! Solves `curl curl A = J` where the current density `J = -σ∇φ` is computed on a
+//! SubMesh representing the conducting region.  Nédélec (H(curl)) elements for
+//! the vector potential, Lagrange (H¹) for the scalar potential, Raviart-Thomas
+//! (H(div)) for the current density.
+//!
+//! Demonstrates SubMesh extraction, multi-physics solve, and field transfer
+//! between subdomain and full mesh.
+//!
+//! ## Usage
+//! ```text
+=== mfem_ex36_obstacle ===
+//! # Example 36 — Obstacle problem (proximal Galerkin) — 1:1 port of MFEM ex36
+//!
+//! Solves the bound-constrained energy minimization problem
+//!
+//! ```text
+//!   minimize  ||∇u||²   subject to   u ≥ ϕ  in H¹₀
+//! ```
+//!
+//! (the obstacle problem) on a circular domain using the **proximal Galerkin**
+//! finite element method of Keith & Surowiec (arXiv:2307.12444): a nonlinear
+//! mixed formulation with slack variable `ψ = ln(u)`, solved by Newton
+//! iterations on a 2×2 block system
+=== mfem_ex37_topology_optimization ===
+//! # Example 37 — Topology optimization (1:1 with MFEM ex37)
+//!
+//! Minimum-compliance design with linear elasticity, SIMP material
+//! interpolation, Helmholtz-type PDE density filter, and entropic
+//! mirror descent via the sigmoid link function.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --example mfem_ex37_topology_optimization -- -r 5 -o 2 -no-vis
+//! ```
+//!
+//! ## Reference
+=== mfem_ex38_implicit_integration ===
+//                                MFEM Example 38 — Rust port (1:1)
+//
+// Integration over implicit interfaces and subdomains bounded by implicit
+// interfaces using moment-fitting quadrature rules (Mueller–Kummer–Oberlack
+// 2013). 1:1 port of MFEM `examples/ex38.cpp` + `fem/intrules_cut.cpp`
+// (`MomentFittingIntRules`).
+//
+// Sample runs:
+//   cargo run --example mfem_ex38_implicit_integration -- -i surface2d -r 3 -o 2 -m 0 -no-vis
+//   cargo run --example mfem_ex38_implicit_integration -- -i volumetric1d -r 3 -o 2 -m 0 -no-vis
+//   cargo run --example mfem_ex38_implicit_integration -- -i volumetric2d -r 3 -o 2 -m 0 -no-vis
+//   cargo run --example mfem_ex38_implicit_integration -- -i surface3d  -r 3 -o 2 -m 0 -no-vis
+=== mfem_ex39_compass ===
+//! # Example 39 — Named attribute sets (1:1 with MFEM ex39)
+//!
+//! Solves `−∇·(κ ∇u) = 1_s` on `compass.msh` where:
+//! - the source region `s` is given by name (`-src`, default `Rose Even`),
+//! - the diffusion coefficient is a sum of three pieces:
+//!   `1e-6` everywhere + `1.0` on `Base` + `2.0` on `Rose Even`
+//!   (the `Base`/`Rose Even` markers come from named attribute sets),
+//! - homogeneous Dirichlet BCs on the named boundary set `-ess` (default
+//!   `Boundary`).
+//!
+//! This demonstrates fem-rs named attribute sets: reading them from the
+//! GMSH file, creating new sets from existing ones
+=== mfem_ex3_maxwell_cavity ===
+//! # Example 3 — Maxwell Electromagnetic Diffusion  (1:1 with MFEM ex3)
+//!
+//! Solves ∇×(∇×E) + E = f with non-homogeneous Dirichlet BC.
+//! Supports both 2D and 3D (matching MFEM ex3.cpp `dim` dispatch).
+//!
+//! Default: data/beam-tet.mesh (3D, 32016 unknowns). Use `-m data/star.mesh` for 2D.
+//!
+//! # Canonical (shared-face) DOF basis — D48/D58
+//!
+//! The **default assembly entry points**
+//! ([`VectorAssembler::assemble_bilinear`] / `assemble_linear`) apply the
+//! canonical shared-face rotation themselves (`A ← Sᵀ·A·S`, `b ← Sᵀ·b`) and
+=== mfem_ex40_eikonal ===
+//! # Example 40 — Eikonal equation (1:1 with MFEM ex40)
+//!
+//! Solves `|∇u| = 1` in Ω, `u = 0` on ∂Ω via the proximal Galerkin method
+//! (Hellinger entropy regularization).  The nonlinear saddle-point problems
+//!
+//! ```text
+//!   ( (∇R)⁻¹(ψₖ) , τ ) + ( uₖ , ∇·τ ) = 0        ∀ τ ∈ H(div,Ω)
+//!   ( ∇·ψₖ , v )                     = ( ∇·ψₖ₋₁ - αₖ , v )   ∀ v ∈ L²(Ω)
+//! ```
+//!
+//! with `(∇R)⁻¹(ψ) = ψ / (1+|ψ|²)^{1/2}` are solved by a damped quasi-Newton
+//! method: each Newton step is a MINRES solve of the block system
+=== mfem_ex41_imex ===
+//! mfem_ex41_imex — 1:1 port of MFEM Example 41.
+//!
+//! Solves the time-dependent advection-diffusion equation
+//! `du/dt + v·grad(u) − a·div(grad(u)) = 0` on a (possibly geometrically
+//! periodic) mesh, using a Discontinuous Galerkin (DG) discretization
+//! (`NonconservativeDGTraceIntegrator` + `DGDiffusionIntegrator`) and an IMEX
+//! ODE time integrator (`M du/dt + (C + K) u = 0`; `-s 64` = IMEX_DIRK_RK3).
+//!
+//! Defaults match MFEM ex41: `-m ../data/periodic-square.mesh -p 0 -r 2 -o 3
+//! -s 64 -tf 10 -dt 0.01 -dc 0.01` (DG).  `-cg` switches to continuous
+//! Galerkin (H1).  The `-s` ODE-solver selector is honoured for 61 (IMEX
+//! Euler), 62 (IMEXRK2(2,2,2)), 63 (IMEXRK2(2,3,2)) and 64 (IMEX_DIRK_RK3,
+=== mfem_ex4_darcy ===
+//! Example 4 — H(div) Diffusion / Darcy (1:1 with MFEM ex4)
+//!
+//! Solves the second-order definite H(div) problem:
+//!   -∇(α ∇·F) + β F = f    in Ω
+//!              F·n = 0     on ∂Ω
+//!
+//! with a manufactured source derived from the exact solution
+//! `F = (cos(κx)sin(κy), cos(κy)sin(κx))` where `κ = π·freq`.
+//! Discretisation uses Raviart-Thomas H(div) elements.
+
+use std::f64::consts::PI;
+
+=== mfem_ex4_darcy_simple ===
+//! MFEM ex4: H(div) problem (SIMPLIFIED VERSION).
+//!
+//! Solves the second-order definite H(div) problem:
+//!   -∇(α ∇·F) + β F = f    in Ω
+//!              F·n = 0     on ∂Ω
+//!
+//! SIMPLIFIED VERSION: hybridization and hdiv_error modules not included.
+
+use fem_assembly::standard::DiffusionIntegrator;
+use fem_linalg::CsrMatrix;
+use fem_mesh::Mesh;
+use fem_space::{H1Space, fe_space::FESpace};
+=== mfem_ex5_mixed_darcy ===
+//! Example 5 — Mixed Darcy (1:1 with MFEM ex5)
+//!
+//! Solves the saddle point system:
+//!   k·u + ∇p = f,  −∇·u = g  in Ω,  −p = p̄ on ∂Ω
+//! Exact: u = (−eˣ sin y, −eˣ cos y), p = eˣ sin y.
+//! RT H(div) for velocity, L₂ for pressure.
+//!
+//! Solver structure mirrors MFEM ex5:
+//!   MINRES + BlockDiagonalPreconditioner(DSmoother(M), GSSmoother(S))
+//! where S = B diag(M)^{-1} B^T.
+
+use std::fs::File;
+=== mfem_ex6_flux_recovery ===
+//                                MFEM Example 6
+//
+// 1:1 Rust translation of MFEM C++ ex6.cpp — AMR Poisson with ZZ estimator.
+//
+// Compile: cargo run --example mfem_ex6_flux_recovery -- -m data/square-disc.mesh -o 1 -no-vis
+//
+// Description: This is a version of Example 1 with a simple adaptive mesh
+//              refinement loop. The problem being solved is again the Poisson
+//              equation -Delta u = 1 with homogeneous Dirichlet boundary
+//              conditions. The problem is solved on a sequence of meshes which
+//              are locally refined in a conforming (triangles, tetrahedrons)
+//              or non-conforming (quadrilaterals, hexahedra) manner according
+=== mfem_ex7_surface_poisson ===
+//! # MFEM Example 7 — Screened Poisson on the Unit Sphere
+//!
+//! Solves `-Δu + u = f` on the unit sphere surface with `f = 7·x·y / r²`,
+//! exact solution `u = x·y / r²`.  Demonstrates surface FEM on a 2-D manifold
+//! embedded in 3-D space using `Mesh<3>` with Tri3/Tri6 or Quad4/Quad9 elements.
+//!
+//! Reference: `mfem/ex7.cpp`
+//!
+//! ## Usage
+//! ```bash
+//! # Triangles (default)
+//! cargo run --example mfem_ex7_surface_poisson -- -no-vis
+=== mfem_ex8_dpg_2x2 ===
+//! # Example 8 — DPG Poisson (2×2 block formulation)
+//!
+//! One-to-one translation of MFEM C++ ex8 using the reusable DPG infrastructure.
+//!
+//! Solves `-Δu = 1` with homogeneous Dirichlet BC using the Discontinuous
+//! Petrov-Galerkin (DPG) method in its primal 2×2 block form.
+//!
+//! Three spaces:
+//! - **Trial (X0):** H¹ continuous (`order`)
+//! - **Interface (Xhat):** DPG trace on mesh skeleton (`order - 1`)
+//! - **Test (Y):** L² discontinuous (enriched)
+//!
+=== mfem_ex9_dg_advection ===
+//! # MFEM Example 9 — DG Advection (1:1 translation)
+//!
+//! Solves `du/dt + v·∇u = 0` using DG with upwind flux.
+//! 1:1 translation: periodic meshes, problem types 0-3,
+//! explicit (RK4) time integration, output files.
+//!
+//! Notes:
+//! - Uses standard L2 basis (vs MFEM's GaussLobatto) → different DOF layout.
+//! - Periodic meshes with degenerate quads after refinement may produce INF
+//!   entries in the advection matrix (assembler needs det>0 threshold).
+//! - Works best on well-shaped quad meshes.
+//!
+=== mfem_pex0_parallel_poisson ===
+//!
+//! Parallel Example 0 — Parallel Poisson (1:1 port of MFEM ex0p.cpp).
+//!
+//! Solves -Delta u = 1 with homogeneous Dirichlet BCs.
+//!
+//! Usage:
+//!   cargo run --release --example mfem_pex0_parallel_poisson -- --ranks 2
+//!   cargo run --release --example mfem_pex0_parallel_poisson -- --ranks 4 -o 2
+
+use std::sync::Arc;
+
+use fem_assembly::standard::{DiffusionIntegrator, DomainSourceIntegrator};
+=== mfem_pex10_parallel_hyperelastic ===
+//!
+//! Parallel hyperelastic dynamics (pex10).
+//!
+//! Nonlinear elasticity with NeoHookean model, Forward Euler time integration.
+//! Strategy: rank 0 assembles full system, does time integration, broadcasts.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex10_parallel_hyperelastic
+//! cargo run --release --example mfem_pex10_parallel_hyperelastic -- --ranks 4
+//! ```
+
+=== mfem_pex11_parallel_eigenvalue ===
+//!
+//! Parallel Example 11 — Laplacian Eigenvalue (1:1 port of MFEM ex11p.cpp).
+//!
+//! Solves -Delta u = lambda u with homogeneous Dirichlet BCs using LOBPCG.
+//!
+//! Usage:
+//!   cargo run --release --example mfem_pex11_parallel_eigenvalue -- --ranks 2
+//!   cargo run --release --example mfem_pex11_parallel_eigenvalue -- --ranks 4 -n 5
+
+use std::sync::Arc;
+
+use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator};
+=== mfem_pex12_parallel_elastic_eigen ===
+//!
+//! Multi-material linear eigenvalue problem for a cantilever beam.
+//!
+//! Computes the lowest eigenmodes of the linear elasticity pencil
+//! `K u = λ M u` with piece-wise constant Lame coefficients
+//! λ = μ = 50 on material 1 and λ = μ = 1 on material 2.
+//!
+//! Fixed boundary (attribute 1) is eliminated with
+//! `EliminateEssentialBCDiag` (diag = 1.0 on A, `f64::MIN_POSITIVE` on M)
+//! and the resulting pencil is solved with the parallel LOBPCG eigensolver
+//! preconditioned by the parallel AMG V-cycle — the parallel analog of
+//! MFEM `HypreLOBPCG` + `HypreBoomerAMG`.
+=== mfem_pex13_parallel_eigenvalue ===
+//!
+//! Parallel Maxwell eigenvalue (pex13).
+//!
+//! Solves curl curl E = lambda E with homogeneous Dirichlet BC.
+//! Strategy: rank 0 runs serial solve, broadcasts eigenvalues.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex13_parallel_eigenvalue
+//! cargo run --release --example mfem_pex13_parallel_eigenvalue -- --ranks 4
+//! ```
+
+=== mfem_pex14_parallel_dg_poisson ===
+//! Parallel DG Poisson (1:1 translation of MFEM ex14p)
+//!
+//! Solves −Δu = 1 with homogeneous Dirichlet BCs using SIP-DG on the L² space:
+//!
+//! ```text
+//!   a = ∫ κ ∇u·∇v + interior/boundary face terms of DGDiffusionIntegrator(κ, σ, k)
+//!   b = ∫ 1·v  (the DGDirichletLFIntegrator term is zero for homogeneous BCs:
+//!               ex14p adds DGDirichletLFIntegrator(zero, one, σ, k), where the
+//!               first coefficient is the Dirichlet data uD = 0, so w = 0)
+//! ```
+//!
+//! Parallel layout (following MFEM ex14p / pex9 conventions):
+=== mfem_pex15_parallel_dynamic_amr ===
+//! # MFEM Example 15p — Parallel Dynamic AMR Heat Equation (1:1)
+//!
+//! Parallel version of ex15: time-dependent Poisson with a prescribed
+//! spherical-front solution, adaptive mesh refinement (threshold-based
+//! `ThresholdRefiner`), derefinement (`ThresholdDerefiner`) and load
+//! rebalancing after every mesh change.
+//!
+//! 1:1 with C++ `ex15p.cpp` (MFEM v4.9):
+//! - H1 order 2, `L2ZienkiewiczZhuEstimator` (L2(2) flux → RT1 smooth
+//!   projection → per-element L1 distance), pure local threshold
+//!   (`SetTotalErrorFraction(0.0)`), `SetLocalErrorGoal(max_elem_error)`.
+//! - Solve: PCG(1e-12, 200) + BoomerAMG.
+=== mfem_pex16_parallel_nonlinear_heat ===
+//! # Parallel Example 16 — Nonlinear heat equation  [1:1 translation of MFEM ex16p]
+//!
+//! Solves `du/dt = M⁻¹(−Ku)` with nonlinear diffusion `K = ∇·((κ + αu)∇)` on
+//! `star.mesh`, pure Neumann BCs, SDIRK33 implicit time integration (the
+//! diffusion operator is linearized with the lagged solution, so every stage
+//! is one linear solve of `T = M + dt·K` with CG + Jacobi).
+//!
+//! Parallel layout follows the pex14/pex36 template: serial mesh construction +
+//! refinement, `partition_mesh`, `par_uniform_refine` (2-D), DofManager-aware
+//! P2 parallel space, local assembly → permute → `from_local_matrix`, and
+//! parallel CG with the MFEM `(B r, r)` convergence criterion.
+//!
+=== mfem_pex17_parallel_dg_elasticity ===
+//!
+//! Parallel DG elasticity (pex17).
+//!
+//! Multi-material cantilever beam with DG-SIP formulation.
+//! Strategy: rank 0 runs serial solve, broadcasts result.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex17_parallel_dg_elasticity
+//! cargo run --release --example mfem_pex17_parallel_dg_elasticity -- --ranks 4
+//! ```
+
+=== mfem_pex18_parallel_euler ===
+//!
+//! Parallel Euler (pex18).
+//!
+//! 2D compressible Euler equations (DG, RK4) on a periodic square mesh.
+//! Strategy: rank 0 assembles full system, does time integration, broadcasts.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex18_parallel_euler
+//! cargo run --release --example mfem_pex18_parallel_euler -- --ranks 4
+//! ```
+
+=== mfem_pex19_parallel_incomp_hyperelastic ===
+//!
+//! Parallel incompressible hyperelastic (pex19).
+//!
+//! Quasi-static incompressible neo-Hookean hyperelasticity (mixed u/p).
+//! Strategy: rank 0 runs the full serial example, broadcasts result.
+//!
+//! ## Scope (round 31, D137): **2-D only**
+//!
+//! C++ `ex19p`'s default mesh is `../data/beam-tet.mesh` — a **3-D** mesh, and
+//! its hyperelasticity form is dimension-generic.  This port implements only
+//! the 2-D branch (`dim = 2`, `Mesh<2>`), so a 3-D input (including the C++
+//! default) is refused with an explicit message and status 3.  It used to abort
+=== mfem_pex1_parallel_poisson ===
+//! # Parallel Example 1 -- Parallel Poisson (1:1 port of MFEM pex1 / ex1p.cpp)
+//!
+//! Solves -Laplacian(u) = 1 on data/star.mesh with homogeneous Dirichlet BCs
+//! on all external boundaries, matching MFEM examples/ex1p.cpp defaults:
+//! serial `ref_levels` then 2 parallel uniform refinements (6 total for the
+//! 20-element star.mesh: 81920 quads / 82561 nodes), H1 order 1, f = 1.
+//!
+//! Rust runs the partition with ThreadLauncher (multi-rank threads in one
+//! process); the refinement is done serially before partitioning because
+//! fem-parallel has no parallel *uniform* refinement (C++ refines inside
+//! ParMesh, which yields the same global mesh).
+//!
+=== mfem_pex20_parallel_symplectic ===
+//! # Parallel Example 20 — Symplectic Integration  [1:1 translation of MFEM ex20p]
+//!
+//! Evolves a 1-D Hamiltonian system with the variable-order symplectic
+//! integrator `SIAVSolver` (orders 1–4).  In parallel each rank evolves the
+//! SAME Hamiltonian but from a rank-dependent initial condition
+//! `(q₀, p₀) = (sin(2π·rank/np), cos(2π·rank/np))`; there is no mesh and no
+//! linear solve — the only communication is the final MPI_Gather of each
+//! rank's energy mean / standard deviation to rank 0.
+//!
+//! Hamiltonians (energy shifted to stay positive):
+//! ```text
+//!   0: H = 1 − 1/(2m) + p²/(2m) + k·q²/2                         (oscillator)
+=== mfem_pex21_parallel_amr_elasticity ===
+//!
+//! Parallel AMR elasticity (pex21).
+//!
+//! Multi-material cantilever beam with adaptive mesh refinement.
+//! Strategy: rank 0 runs serial AMR solve, broadcasts result.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex21_parallel_amr_elasticity
+//! cargo run --release --example mfem_pex21_parallel_amr_elasticity -- --ranks 4
+//! ```
+
+=== mfem_pex22_parallel_complex_helmholtz ===
+﻿//! # Parallel Example 22 鈥?Complex Helmholtz  (1:1 with MFEM pex22p)
+//!
+//! Solves `-Div(a Grad u) - w^2 b u + i w c u = f` with damping.
+//!
+//! ## Usage
+//! ```bash
+//! cargo run --example mfem_pex22_parallel_complex_helmholtz -- --ranks 2
+//! cargo run --example mfem_pex22_parallel_complex_helmholtz -- --ranks 1 --freq 2.0
+//! ```
+
+use std::sync::{Arc, Mutex};
+use fem_assembly::standard::{DiffusionIntegrator, MassIntegrator, DomainSourceIntegrator};
+=== mfem_pex24_parallel_discrete_ops ===
+//! # Parallel Example 24 — Mixed Discrete Operators  [1:1 translation of MFEM ex24p]
+//!
+//! Projects the gradient / curl / divergence operators via mixed FE
+//! formulations (mass-matrix L² projections), with three problem types:
+//!
+//! ```text
+//!   0 (grad): ∇p       for p ∈ H¹        → E ∈ H(curl)  (2D + 3D)
+//!   1 (curl): curl v   for v ∈ H(curl)   → E ∈ H(div)   (3D only)
+//!   2 (div):  div v    for v ∈ H(div)    → f ∈ L²       (2D + 3D)
+//! ```
+//!
+//! For each problem type the example:
+=== mfem_pex25_pml_maxwell ===
+//! # Parallel Example 25 — PML for Maxwell, complex-valued (1:1 with MFEM
+//! ex25p / ex25p.cpp)
+//!
+//! Solves the second-order indefinite Maxwell equation
+//! `(1/μ) curl curl E − ω² ε E = f` with a Perfectly Matched Layer (PML),
+//! discretized with Nédélec H(curl) elements in 2-D or 3-D.  The PML is a
+//! complex coordinate stretch: inside the PML region the coefficients become
+//! complex (Re + Im parts), so the system is complex-valued.
+//!
+//! Test problems (prob = 0..4): beam / disc / lshape / fichera have known
+//! exact solutions (relative L² errors are reported, excluding the PML
+//! region); load_src (default) is an approximated point source with PML all
+=== mfem_pex26_parallel_geom_mg ===
+//! # Parallel Example 26 — Geometric Multigrid (1:1 with MFEM ex26p)
+//!
+//! Parallel Poisson −Δu = 1 with homogeneous Dirichlet BC, solved with PCG
+//! preconditioned by a geometric multigrid (p-refinement hierarchy P1→P2→P4,
+//! matching MFEM ex26p defaults: `-or 2`, no geometric refinements).
+//!
+//! C++ ex26p flow:
+//!   1. serial mesh → uniform refine so NE ≤ 1000
+//!   2. ParMesh = partition(serial mesh), then 2 parallel uniform refinements
+//!   3. ParFiniteElementSpaceHierarchy: coarse P1 + order refinements P2, P4
+//!   4. DiffusionMultigrid: coarse = AMG + CG; fine = Chebyshev smoothers
+//!   5. CGSolver(rtol 1e-12, max 2000) with the MG as preconditioner
+=== mfem_pex27_parallel_robin_bc ===
+//! # Parallel Example 27 — Mixed Boundary Conditions (1:1 port of MFEM ex27p)
+//!
+//! Solves −Δu = 0 on a periodic (seam-identified) Q3-curved mesh with mixed
+//! boundary conditions (Dirichlet / Neumann / Robin / natural).  The **H¹
+//! mode** (essential Dirichlet BC) is the 1:1 reference; the **DG mode** is
+//! not supported on this periodic mesh (the `DgAssembler` corner-based face
+//! geometry folds the wrapped seam faces — see `solve_dg`).
+//!
+//! ```text
+//!                    Attribute 3    ^ y  Attribute 2
+//!                          \        |      /
+//!                       +-----------+-----------+
+=== mfem_pex28_parallel_sliding_elasticity ===
+//!
+//! Parallel sliding elasticity (pex28).
+//!
+//! Linear elasticity on a trapezoid with sliding (normal-constraint) BC.
+//! P1 vector space + Lagrange multiplier method for normal constraints.
+//!
+//! Strategy: rank 0 assembles the full system, solves serially with
+//! SchurConstrainedSolver, broadcasts solution to all ranks.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex28_parallel_sliding_elasticity
+=== mfem_pex29_surface_poisson ===
+//! # Parallel Example 29 — Curved-surface Poisson  [1:1 translation of MFEM ex29p]
+//!
+//! Solves `−∇·(σ ∇u) = 1` on a 2-D surface embedded in 3-D, with homogeneous
+//! Dirichlet BCs.  The diffusion tensor σ is a 3×3 anisotropic matrix.
+//!
+//! Parallel layout follows the pex14/pex36 template: serial mesh construction +
+//! refinement, `partition_mesh`, local assembly (owned + ghost elements) →
+//! permute to partition order → `from_local_matrix`, cross-rank essential-DOF
+//! exchange (pex36 pattern), `par_solve_pcg_amg`, owned-only error integration
+//! with allreduce.
+//!
+//! Note on refinement: MFEM refines `-rs` times serially, then `-rp` times
+=== mfem_pex2_parallel_elasticity ===
+//! # Parallel Example 2 — Parallel Linear Elasticity (1:1 port of MFEM pex2 / ex2p.cpp)
+//!
+//! Multi-material cantilever beam: `-div(sigma(u)) = 0` with
+//! `sigma(u) = lambda div(u) I + mu (grad u + u grad)`, Lame coefficients
+//! piecewise-constant per material (boundary/material attribute 1:
+//! lambda = mu = 50, attribute 2: lambda = mu = 1).
+//! BC: `u = 0` on boundary attribute 1 (fixed end); `sigma(u).n = (0, -1e-2)`
+//! on boundary attribute 2 (downward pull), zero elsewhere.
+//!
+//! Matches MFEM `examples/ex2p.cpp` defaults: `beam-tri.mesh` (16 triangles),
+//! serial `ref_levels` (≤1000 elems → 2) then 1 parallel uniform refinement
+//! (4 total children per element, the last refinement done on the partitioned
+=== mfem_pex30_amr_preprocess ===
+//! # Example 30p — Adaptive mesh refinement preprocessing (parallel)
+//!
+//! Parallel version of ex30 (1:1 with MFEM ex30p): preprocesses a mesh by
+//! adaptively refining to lower data oscillation of user-specified
+//! coefficients, without solving a PDE.  Three coefficients are tested
+//! sequentially, each continuing from the mesh refined by the previous one
+//! (like C++ `CoefficientRefiner::PreprocessMesh` on the shared `pmesh`).
+//!
+//! The oscillation math (L2 projection of the coefficient, per-element L2
+//! errors, global norm) lives in `fem_assembly::postproc::grid_function`
+//! (shared with the serial ex30); the parallel loop marks locally, refines
+//! via `par_refine_marked_ordered` and rebalances via
+=== mfem_pex31_restricted_hcurl ===
+//! # Parallel Example 31 — Restricted H(curl) (1:1 with MFEM ex31p / ex31p.cpp)
+//!
+//! Solves the definite Maxwell equation `curl curl E + Σ·E = f` (anisotropic
+//! 3×3 tensor Σ) on a 2-D mesh with **restricted H(curl)** finite elements:
+//! the in-plane components live in the Nédélec space, the out-of-plane (z)
+//! component in a continuous H¹ space — exactly MFEM's `ND_R2D_FECollection`.
+//! All boundary edges are essential (non-homogeneous PEC: `E×n = E_exact×n`).
+//!
+//! ## Parallel structure (mirrors ex31p)
+//! 1. Read the serial mesh (default `data/inline-quad.mesh`), refine
+//!    `ser_ref_levels + par_ref_levels` times **serially** (the final global
+//!    mesh is identical to C++'s serial+parallel refinement), then partition.
+=== mfem_pex32_maxwell_eigenvalue ===
+//! # Parallel Example 32 — Maxwell eigenvalue problem  (partial port of MFEM ex32p)
+//!
+//! ## Status (round 31, D137): 3-D only — the C++ default mesh is **2-D**
+//!
+//! C++ `ex32p` default: `../data/inline-quad.mesh` (2-D), solved with the
+//! **restricted** H(curl) space `ND_R2D_FECollection` (in-plane Nédélec +
+//! out-of-plane H¹ z-component) and `HypreAME` + `HypreAMS`.  This port only
+//! has the plain **3-D** `ND_FECollection` path, so a 2-D input — including
+//! the default — is refused with an explicit message and exit status 3
+//! instead of solving a different problem.
+//!
+//! Ported path (1:1 with the C++ 3-D branch): `-m data/fichera.mesh`.
+=== mfem_pex33_fractional_laplacian ===
+//! # Parallel Example 33 鈥?Fractional Laplacian  [1:1 translation of MFEM ex33p]
+//!
+//! Solves the fractional PDE `(鈭捨?^伪 u = f` on a domain with homogeneous
+//! Dirichlet boundary conditions, using the AAA rational approximation
+//! (Harizanov et al.):
+//!
+//! ```text
+//!   (鈭捨?^(伪鈭扤) u = (鈭捨?^(鈭扤) f,   N = floor(伪),
+//!   A^(鈭抯) 鈮?危_i c_i (A + d_i M)^(鈭?),   s = 伪 鈭?N 鈭?(0,1),
+//! ```
+//!
+//! where `A` is the stiffness matrix, `M` the mass matrix, and the
+=== mfem_pex34_magnetostatics ===
+//! # Parallel Example 34 — Magnetostatics with SubMesh current density
+//! (1:1 with MFEM ex34p / ex34p.cpp)
+//!
+//! Solves `curl curl A = J` where the current density `J = -σ∇φ` is computed
+//! on a (parallel) SubMesh representing the conducting region.  Nédélec
+//! H(curl) elements for the vector potential, Lagrange H¹ for the scalar
+//! potential, Raviart-Thomas H(div) for the current density.
+//!
+//! Flow (mirrors ex34p):
+//! 1. Build the fully-refined serial mesh (mixed `fichera-mixed.mesh` by
+//!    default, or `-hex` → `fichera.mesh`).  All refinement is done serially
+//!    before partitioning (par_uniform_refine is 2-D only; the final global
+=== mfem_pex35_complex_oscillator ===
+//! # Parallel Example 35 �?Complex-valued damped harmonic oscillator
+//! (1:1 with MFEM ex35p / ex35p.cpp)
+//!
+//! Three variants of a damped harmonic oscillator driven by a forced
+//! oscillation imposed on a *port* (a portion of the boundary):
+//!
+//! 0) Scalar H¹ field:  `-Div(a Grad u) - ω² b u + i ω c u = 0`
+//! 1) Vector H(Curl):   `Curl(a Curl u) - ω² b u + i ω c u = 0`
+//! 2) Vector H(Div):    `-Grad(a Div u) - ω² b u + i ω c u = 0`
+//!
+//! The spatial variation of the port boundary condition is computed as an
+//! eigenmode of an appropriate operator defined on the boundary sub-mesh
+=== mfem_pex36_obstacle ===
+//! Parallel Example 36 — Obstacle problem (proximal Galerkin, 1:1 with MFEM ex36p)
+//!
+//! Solves the bound-constrained energy minimization
+//!
+//! ```text
+//!   minimize  ||∇u||²   subject to   u ≥ ϕ  in H¹₀
+//! ```
+//!
+//! (the obstacle problem) on a unit-radius disk using the **proximal Galerkin**
+//! method (Keith & Surowiec, arXiv:2307.12444): Newton iterations on the 2×2
+//! block system
+//!
+=== mfem_pex37_topology_optimization ===
+//!
+//! Parallel topology optimization (pex37).
+//!
+//! Minimum-compliance design with linear elasticity, SIMP material interpolation.
+//! Strategy: rank 0 runs serial solve, broadcasts result.
+//!
+//! Usage:
+//! ```text
+//! cargo run --release --example mfem_pex37_topology_optimization
+//! cargo run --release --example mfem_pex37_topology_optimization -- --ranks 4
+//! ```
+
+=== mfem_pex39_named_attributes ===
+//! Parallel Example 39 — Named attribute sets (1:1 translation of MFEM ex39p)
+//!
+//! Solves `−∇·(κ ∇u) = 1_s` on `compass.msh` where:
+//! - the source region `s` is given by name (`-src`, default `Rose Even`),
+//! - the diffusion coefficient is a sum of three pieces:
+//!   `1e-6` everywhere + `1.0` on `Base` + `2.0` on `Rose Even`
+//!   (markers come from named attribute sets read from the GMSH file),
+//! - homogeneous Dirichlet BCs on the named boundary set `-ess` (default
+//!   `Boundary`).
+//!
+//! Parallel layout (following MFEM ex39p):
+//! - serial mesh read once (GMSH `compass.msh`, with the `refine=1` triangle
+=== mfem_pex3_maxwell_cavity ===
+//! # Parallel Example 3 — Maxwell cavity  (1:1 with MFEM pex3 / ex3p.cpp)
+//!
+//! Solves `curl curl E + E = f` (electromagnetic diffusion) with PEC BC
+//! (`E × n = 0`, non-homogeneous: projected exact tangential values), in
+//! parallel.  Matches MFEM examples/ex3p.cpp defaults: star.mesh, serial
+//! ref_levels (≤1000 elems → 2) then 2 parallel uniform refinements
+//! (4 total, done serially before partitioning), ND1 (ND_FECollection(1,2))
+//! H(curl) space, muinv = sigma = 1, exact solution
+//! `E = (sin(κy), sin(κx))`, `f = (1+κ²)·E`, κ = π.  C++ uses HyprePCG + HypreAMS;
+//! Rust uses PCG + AMG (DIAG_KEEP symmetric elimination, matching C++ FormLinearSystem).
+//!
+//! ## Usage
+=== mfem_pex40_eikonal ===
+//! # Parallel Example 40 — Eikonal equation  [1:1 translation of MFEM ex40p]
+//!
+//! Solves `|∇u| = 1` in Ω, `u = 0` on ∂Ω via the proximal Galerkin method
+//! (Hellinger entropy regularization): damped quasi-Newton on the saddle-point
+//! system with RT(k) × L2(k) spaces, each step a MINRES solve of
+//!
+//! ```text
+//!   [ A00(ψ)  A01 ] [Δψ]   [ -Z(ψ)          ]
+//!   [ A10      0  ] [Δu] = [ -α + div(ψ_old-ψ) ]
+//! ```
+//!
+//! `A00(ψ) = ∫ τ·DZ(ψ)·σ` with `DZ(ψ) = (φ+ε)I − φ³ψψᵀ`, `φ = 1/√(1+|ψ|²)`.
+=== mfem_pex41_imex ===
+//!
+//! Parallel IMEX advection-diffusion (pex41).
+//!
+//! Solves `du/dt + v·grad(u) - a·div(grad(u)) = 0` on a (possibly periodic)
+//! mesh with DG discretization and IMEX ODE time integration.
+//!
+//! MFEM ex41p: `-m ../data/periodic-square.mesh -p 0 -r 2 -o 3 -s 64 -tf 10 -dt 0.01`
+
+use std::f64::consts::PI;
+use std::sync::Arc;
+
+use fem_assembly::dg::dg_imex::{
+=== mfem_pex4_parallel_hdiv_diffusion ===
+//! # Parallel Example 4 — Parallel H(div) Diffusion (1:1 port of MFEM pex4 / ex4p.cpp)
+//!
+//! Solves the 2D H(div) diffusion problem
+//! `-grad(alpha div F) + beta F = f` on data/star.mesh with
+//! `F·n = <projected exact normal>` on all external boundaries, matching
+//! MFEM `examples/ex4p.cpp` defaults:
+//! serial `ref_levels` (≤1000 elems → 2) then 2 parallel uniform refinements
+//! (4 total, done serially before partitioning — same global mesh), RT0
+//! (RT_FECollection(0, 2)) H(div) space, alpha = beta = 1,
+//! exact solution `F = (cos(κx)sin(κy), cos(κy)sin(κx))` with κ = π,
+//! `f = (1+2κ²)·F`.  CG + AMS/ADS in C++ (2D → AMS); Rust uses
+//! PCG + Jacobi (same physical problem, different preconditioner).
+=== mfem_pex5_hdiv_darcy ===
+//! # Parallel Example 5 — Mixed Darcy (1:1 port of MFEM pex5 / ex5p.cpp)
+//!
+//! Saddle-point system from the mixed (dual) formulation of the Darcy
+//! problem on data/star.mesh:
+//!
+//! ```text
+//!   [ M  Bᵀ ] [u]   [f]
+//!   [ B   0 ] [p] = [g]
+//! ```
+//!
+//! with `M = ∫ k u·v` (RT1 velocity space), `B = -∫ div(u)·q`
+//! (L2 P1 pressure space), `f` = boundary flux `f_natural = -p_exact`
+=== mfem_pex6_parallel_amr ===
+//! # Parallel Example 6 — Parallel AMR Poisson (aligned with MFEM pex6 / ex6p.cpp)
+//!
+//! Solves the Poisson problem -Δu = 1 on `data/star.mesh` with homogeneous
+//! Dirichlet BCs on all boundary attributes, in an AMR loop that mirrors the
+//! MFEM ex6p structure (order-1 H1, ZZ error estimator, Dörfler marking with
+//! `SetTotalErrorFraction(0.7)`, parallel non-conforming refinement):
+//!
+//! ```text
+//!   repeat:
+//!     1. assemble + solve  PCG + AMG (C++: CGSolver + BoomerAMG)
+//!     2. ZZ gradient-recovery error indicators (per element)
+//!     3. mark the smallest set of elements covering 70% of the total error
+=== mfem_pex7_parallel_surface ===
+//! # Parallel Example 7 — Screened Poisson on the Unit Sphere
+//! (aligned with MFEM pex7 / ex7p.cpp)
+//!
+//! Solves `-Δu + u = f` on the unit sphere surface with
+//! `f = 7·x·y/r²`, exact solution `u = x·y/r²` — the same surface FEM
+//! problem as ex7p: octahedron Tri3 mesh, radial node snapping, uniform
+//! refinement, H1 space, diffusion + mass integrators, PCG.
+//!
+//! The framework's parallel surface path assembles the Laplace-Beltrami +
+//! mass forms per rank from *owned* elements only (each element contributes
+//! once), packs the local matrix into a [`ParCsrMatrix`] and solves with
+//! AMG-preconditioned PCG.  ex7p defaults to order 2 (Tri6 elements); this
+=== mfem_pex8_parallel_dpg ===
+//! # Parallel Example 8 — DPG Poisson (2×2 block, parallel)
+//! (aligned with MFEM pex8 / ex8p.cpp)
+//!
+//! Discontinuous Petrov-Galerkin Poisson `-Δu = 1` with homogeneous
+//! Dirichlet BC in the primal 2×2 block form:
+//!
+//! ```text
+//!   trial x0 ∈ H¹ (P1), interface xhat ∈ trace space (P0 per face),
+//!   test  y  ∈ L² (enriched)
+//!   B = [B0, Bhat],   A = Bᵀ S⁻¹ B   (normal equations)
+//! ```
+//!
+=== mfem_pex9_parallel_dg_advection ===
+//! # Parallel Example 9 — DG Advection (periodic, aligned with MFEM ex9p)
+//! (aligned with MFEM pex9 / ex9p.cpp)
+//!
+//! Time-dependent advection `du/dt + v·∇u = 0` with `v = (1, 0)` and a smooth
+//! wave, discretized with DG (L2 space on Gauss-Lobatto nodes, order `-o`),
+//! explicit RK4, mass matrix inverted at every stage
+//! (`dudt = M⁻¹ (K u + rhs)`).
+//!
+//! The parallel port assembles the DG operators per rank over the local mesh
+//! (owned + ghost elements — the standard overlap that makes owned rows
+//! complete, including cross-rank interior faces), packs them into
+//! [`ParCsrMatrix`] and time-steps with RK4 whose stage solves use a
+=== par_heat_equation_self_test ===
+//! # Parallel implicit heat equation — framework self-test
+//!
+//! NOTE: this is NOT a 1:1 port of any MFEM example.  MFEM ex4/ex4p is an
+//! H(div) diffusion problem (`mfem_pex4_parallel_hdiv_diffusion.rs`); this
+//! file is a standalone parallel framework self-test for implicit time
+//! stepping (M + dt·K) with ThreadLauncher.  It is kept for its unit tests
+//! (partition invariance, dt accuracy, sign flip, P2, kappa scan).
+//!
+//! Solves the time-dependent heat equation on a distributed mesh:
+//!
+//! ```text
+//!   ∂u/∂t − κ Δu = 0    in Ω = [0,1]², t ∈ [0, T]

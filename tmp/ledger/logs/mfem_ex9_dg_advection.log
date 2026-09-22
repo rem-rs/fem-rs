@@ -1,0 +1,222 @@
+Options used:
+   --mesh data/periodic-square.mesh
+   --problem 0
+   --refine 2
+   --order 3
+   --no-partial-assembly
+   --no-element-assembly
+   --no-full-assembly
+   --device cpu
+   --ode-solver 4
+   --t-final 10
+   --time-step 0.01
+   --no-visualization
+   --no-visit-datafiles
+   --no-paraview-datafiles
+   --ascii-datafiles
+   --visualization-steps 5
+
+Device configuration: cpu
+Memory configuration: host-std
+Number of unknowns: 2304
+time step: 5, time: 0.050
+time step: 10, time: 0.100
+time step: 15, time: 0.150
+time step: 20, time: 0.200
+time step: 25, time: 0.250
+time step: 30, time: 0.300
+time step: 35, time: 0.350
+time step: 40, time: 0.400
+time step: 45, time: 0.450
+time step: 50, time: 0.500
+time step: 55, time: 0.550
+time step: 60, time: 0.600
+time step: 65, time: 0.650
+time step: 70, time: 0.700
+time step: 75, time: 0.750
+time step: 80, time: 0.800
+time step: 85, time: 0.850
+time step: 90, time: 0.900
+time step: 95, time: 0.950
+time step: 100, time: 1.000
+time step: 105, time: 1.050
+time step: 110, time: 1.100
+time step: 115, time: 1.150
+time step: 120, time: 1.200
+time step: 125, time: 1.250
+time step: 130, time: 1.300
+time step: 135, time: 1.350
+time step: 140, time: 1.400
+time step: 145, time: 1.450
+time step: 150, time: 1.500
+time step: 155, time: 1.550
+time step: 160, time: 1.600
+time step: 165, time: 1.650
+time step: 170, time: 1.700
+time step: 175, time: 1.750
+time step: 180, time: 1.800
+time step: 185, time: 1.850
+time step: 190, time: 1.900
+time step: 195, time: 1.950
+time step: 200, time: 2.000
+time step: 205, time: 2.050
+time step: 210, time: 2.100
+time step: 215, time: 2.150
+time step: 220, time: 2.200
+time step: 225, time: 2.250
+time step: 230, time: 2.300
+time step: 235, time: 2.350
+time step: 240, time: 2.400
+time step: 245, time: 2.450
+time step: 250, time: 2.500
+time step: 255, time: 2.550
+time step: 260, time: 2.600
+time step: 265, time: 2.650
+time step: 270, time: 2.700
+time step: 275, time: 2.750
+time step: 280, time: 2.800
+time step: 285, time: 2.850
+time step: 290, time: 2.900
+time step: 295, time: 2.950
+time step: 300, time: 3.000
+time step: 305, time: 3.050
+time step: 310, time: 3.100
+time step: 315, time: 3.150
+time step: 320, time: 3.200
+time step: 325, time: 3.250
+time step: 330, time: 3.300
+time step: 335, time: 3.350
+time step: 340, time: 3.400
+time step: 345, time: 3.450
+time step: 350, time: 3.500
+time step: 355, time: 3.550
+time step: 360, time: 3.600
+time step: 365, time: 3.650
+time step: 370, time: 3.700
+time step: 375, time: 3.750
+time step: 380, time: 3.800
+time step: 385, time: 3.850
+time step: 390, time: 3.900
+time step: 395, time: 3.950
+time step: 400, time: 4.000
+time step: 405, time: 4.050
+time step: 410, time: 4.100
+time step: 415, time: 4.150
+time step: 420, time: 4.200
+time step: 425, time: 4.250
+time step: 430, time: 4.300
+time step: 435, time: 4.350
+time step: 440, time: 4.400
+time step: 445, time: 4.450
+time step: 450, time: 4.500
+time step: 455, time: 4.550
+time step: 460, time: 4.600
+time step: 465, time: 4.650
+time step: 470, time: 4.700
+time step: 475, time: 4.750
+time step: 480, time: 4.800
+time step: 485, time: 4.850
+time step: 490, time: 4.900
+time step: 495, time: 4.950
+time step: 500, time: 5.000
+time step: 505, time: 5.050
+time step: 510, time: 5.100
+time step: 515, time: 5.150
+time step: 520, time: 5.200
+time step: 525, time: 5.250
+time step: 530, time: 5.300
+time step: 535, time: 5.350
+time step: 540, time: 5.400
+time step: 545, time: 5.450
+time step: 550, time: 5.500
+time step: 555, time: 5.550
+time step: 560, time: 5.600
+time step: 565, time: 5.650
+time step: 570, time: 5.700
+time step: 575, time: 5.750
+time step: 580, time: 5.800
+time step: 585, time: 5.850
+time step: 590, time: 5.900
+time step: 595, time: 5.950
+time step: 600, time: 6.000
+time step: 605, time: 6.050
+time step: 610, time: 6.100
+time step: 615, time: 6.150
+time step: 620, time: 6.200
+time step: 625, time: 6.250
+time step: 630, time: 6.300
+time step: 635, time: 6.350
+time step: 640, time: 6.400
+time step: 645, time: 6.450
+time step: 650, time: 6.500
+time step: 655, time: 6.550
+time step: 660, time: 6.600
+time step: 665, time: 6.650
+time step: 670, time: 6.700
+time step: 675, time: 6.750
+time step: 680, time: 6.800
+time step: 685, time: 6.850
+time step: 690, time: 6.900
+time step: 695, time: 6.950
+time step: 700, time: 7.000
+time step: 705, time: 7.050
+time step: 710, time: 7.100
+time step: 715, time: 7.150
+time step: 720, time: 7.200
+time step: 725, time: 7.250
+time step: 730, time: 7.300
+time step: 735, time: 7.350
+time step: 740, time: 7.400
+time step: 745, time: 7.450
+time step: 750, time: 7.500
+time step: 755, time: 7.550
+time step: 760, time: 7.600
+time step: 765, time: 7.650
+time step: 770, time: 7.700
+time step: 775, time: 7.750
+time step: 780, time: 7.800
+time step: 785, time: 7.850
+time step: 790, time: 7.900
+time step: 795, time: 7.950
+time step: 800, time: 8.000
+time step: 805, time: 8.050
+time step: 810, time: 8.100
+time step: 815, time: 8.150
+time step: 820, time: 8.200
+time step: 825, time: 8.250
+time step: 830, time: 8.300
+time step: 835, time: 8.350
+time step: 840, time: 8.400
+time step: 845, time: 8.450
+time step: 850, time: 8.500
+time step: 855, time: 8.550
+time step: 860, time: 8.600
+time step: 865, time: 8.650
+time step: 870, time: 8.700
+time step: 875, time: 8.750
+time step: 880, time: 8.800
+time step: 885, time: 8.850
+time step: 890, time: 8.900
+time step: 895, time: 8.950
+time step: 900, time: 9.000
+time step: 905, time: 9.050
+time step: 910, time: 9.100
+time step: 915, time: 9.150
+time step: 920, time: 9.200
+time step: 925, time: 9.250
+time step: 930, time: 9.300
+time step: 935, time: 9.350
+time step: 940, time: 9.400
+time step: 945, time: 9.450
+time step: 950, time: 9.500
+time step: 955, time: 9.550
+time step: 960, time: 9.600
+time step: 965, time: 9.650
+time step: 970, time: 9.700
+time step: 975, time: 9.750
+time step: 980, time: 9.800
+time step: 985, time: 9.850
+time step: 990, time: 9.900
+time step: 995, time: 9.950
+time step: 1000, time: 10.000
+  Done. Total time: 4.246s

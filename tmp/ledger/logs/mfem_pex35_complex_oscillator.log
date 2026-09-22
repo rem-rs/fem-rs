@@ -1,0 +1,29 @@
+Options used:
+   --mesh data/fichera-mixed.mesh
+   --refine-serial 1
+   --refine-parallel 1
+   --order 1
+   --problem-type 0
+   --eigenmode 1
+   --stiffness-coef 0
+   --permeability 1
+   --permittivity 1
+   --conductivity 2
+   --frequency -1
+   --port-bc-attr 7 8 11 12
+   --hermitian true
+   --no-visualization true
+   --mixed-mesh true
+
+Eigenvalue lambda   1.31376414e1
+Number of finite element port BC unknowns: 85
+Number of finite element unknowns: 655
+Size of linear system: 1310
+
+Solving for the complex field using FGMRES with a block-diagonal preconditioner
+  FGMRES: Number of iterations: 157
+  FGMRES: Final relative residual: 9.773038e-13
+  Re: ||u|| = 5.30612605e0, sum = -3.09052029e0, checksum = -2.16949985e3
+  Im: ||u|| = 4.26139668e0, sum = 1.44103158e0, checksum = 4.21760209e2
+
+Finished.

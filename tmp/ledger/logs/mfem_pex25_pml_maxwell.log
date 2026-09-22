@@ -1,0 +1,13 @@
+--mesh data/inline-quad.mesh --order 1 --prob 4 --refinements-serial 1 --refinements-parallel 2 --frequency 5
+
+Number of finite element unknowns: 2112
+  Mode: 2D
+Size of linear system: 4224
+
+Solving for the complex field using FGMRES with a block-diagonal preconditioner
+  FGMRES: Number of iterations: 272
+  FGMRES: Final relative residual: 9.223024e-11
+  Re: ||u|| = 2.36998307e-2, sum = 1.30787200e-13, checksum = -1.64306606e-1
+  Im: ||u|| = 2.61559597e-2, sum = 2.80166678e-13, checksum = -9.60106238e0
+
+Finished.

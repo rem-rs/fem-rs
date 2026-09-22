@@ -1,0 +1,46 @@
+Options used:
+   --mesh ref-cube.mesh
+   --order 1
+   --geometric-levels 1
+   --order-levels 1
+   --solver 1
+   --integrator 1
+   --assembly 0
+   --refine-serial 3
+   --refine-parallel 0
+   --tolerance 1e-10
+   --iterations 3000
+   --Kershaw-y 0
+   --Kershaw-z 0
+   --frequency 1
+   --device cpu
+   --no-monitor
+   --no-visualization
+Device configuration: cpu
+Memory configuration: host-std
+Number of unknowns: 35937
+Using Legacy type of assembly level...
+   Iteration :   0  (B r, r) = 154.905
+   Iteration :   1  (B r, r) = 13.8286
+   Iteration :   2  (B r, r) = 0.784829
+   Iteration :   3  (B r, r) = 0.058418
+   Iteration :   4  (B r, r) = 0.00450341
+   Iteration :   5  (B r, r) = 0.000213593
+   Iteration :   6  (B r, r) = 1.87248e-05
+   Iteration :   7  (B r, r) = 1.28165e-06
+   Iteration :   8  (B r, r) = 8.69025e-08
+   Iteration :   9  (B r, r) = 5.4888e-09
+   Iteration :  10  (B r, r) = 5.06951e-10
+   Iteration :  11  (B r, r) = 6.36424e-11
+   Iteration :  12  (B r, r) = 7.17381e-12
+   Iteration :  13  (B r, r) = 5.73764e-13
+   Iteration :  14  (B r, r) = 4.81722e-14
+   Iteration :  15  (B r, r) = 3.37379e-15
+   Iteration :  16  (B r, r) = 2.68518e-16
+   Iteration :  17  (B r, r) = 2.9344e-17
+   Iteration :  18  (B r, r) = 3.14495e-18
+   Iteration :  19  (B r, r) = 3.00892e-19
+Average reduction factor = 0.285073
+
+|| u_h - u ||_{L^2} = 2.66219e-05
+

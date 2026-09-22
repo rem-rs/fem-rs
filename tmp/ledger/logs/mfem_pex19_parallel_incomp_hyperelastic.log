@@ -1,0 +1,5 @@
+=== fem-rs mfem_pex19: Parallel Incompressible Hyperelastic ===
+  Workers: 2, Mesh: data/beam-tet.mesh, Refine: 0, Order: 1
+mfem_pex19_parallel_incomp_hyperelastic: mesh 'data/beam-tet.mesh' is not 2-D and this port implements only the 2-D branch (dim = 2).
+  C++ ex19p's default mesh is data/beam-tet.mesh (3-D); for the ported path pass a 2-D mesh, e.g. -m data/beam-tri.mesh,
+  or use the C++ ex19p for the 3-D default. Exiting with status 3.

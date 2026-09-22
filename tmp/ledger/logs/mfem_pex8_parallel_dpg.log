@@ -1,0 +1,4 @@
+=== fem-rs mfem_pex8: Parallel DPG Poisson (H1 + trace + L2) ===
+  Workers: 2, mesh: 640 elements (ref_levels=2)
+Number of unknowns: X0 = 361, Xhat = 1000, Y = 1920 (trial o1, trace o0, test o1)
+=== Done: unknowns = 1361, PCG iters = 305, ||Bx-F||_S⁻¹ = 2.506757e-1, ||u|| = 1.6688119866e0, L2err = 1.431531e-1 ===

@@ -1,0 +1,42 @@
+Options used:
+   --mesh /home/quan/mfem410_ser/data/star.mesh
+   --order 1
+   --no-visualization
+
+Number of Unknowns:
+ Trial space,     X0   : 5281 (order 1)
+ Interface space, Xhat : 10400 (order 0)
+ Test space,      Y    : 20480 (order 1)
+
+   Iteration :   0  (B r, r) = 4.18353
+   Iteration :   1  (B r, r) = 0.47423
+   Iteration :   2  (B r, r) = 0.033055
+   Iteration :   3  (B r, r) = 0.00112103
+   Iteration :   4  (B r, r) = 2.1407e-05
+   Iteration :   5  (B r, r) = 7.50974e-07
+   Iteration :   6  (B r, r) = 3.02446e-07
+   Iteration :   7  (B r, r) = 2.06504e-07
+   Iteration :   8  (B r, r) = 1.24822e-07
+   Iteration :   9  (B r, r) = 8.27615e-08
+   Iteration :  10  (B r, r) = 6.6511e-08
+   Iteration :  11  (B r, r) = 4.86165e-08
+   Iteration :  12  (B r, r) = 2.64479e-08
+   Iteration :  13  (B r, r) = 1.68712e-08
+   Iteration :  14  (B r, r) = 1.0786e-08
+   Iteration :  15  (B r, r) = 6.06685e-09
+   Iteration :  16  (B r, r) = 3.8971e-09
+   Iteration :  17  (B r, r) = 2.25607e-09
+   Iteration :  18  (B r, r) = 1.44115e-09
+   Iteration :  19  (B r, r) = 7.45631e-10
+   Iteration :  20  (B r, r) = 3.32371e-10
+   Iteration :  21  (B r, r) = 1.65527e-10
+   Iteration :  22  (B r, r) = 8.71844e-11
+   Iteration :  23  (B r, r) = 5.51698e-11
+   Iteration :  24  (B r, r) = 4.06375e-11
+   Iteration :  25  (B r, r) = 2.42464e-11
+   Iteration :  26  (B r, r) = 1.27509e-11
+   Iteration :  27  (B r, r) = 6.63679e-12
+   Iteration :  28  (B r, r) = 3.60703e-12
+Average reduction factor = 0.608926
+
+|| B0*x0 + Bhat*xhat - F ||_{S^-1} = 0.0183277

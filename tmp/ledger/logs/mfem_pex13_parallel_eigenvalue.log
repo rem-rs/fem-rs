@@ -1,0 +1,18 @@
+=== fem-rs mfem_pex13: Parallel Maxwell Eigenvalue ===
+  Workers: 2, Mesh: data/beam-tet.mesh, Refine: 0, Order: 1
+Number of unknowns: 117
+  Free DOFs: 15, nullspace dim: 0
+Eigenmode 1, Lambda = 1.16783534418798e1
+Eigenmode 2, Lambda = 1.24042073261551e1
+Eigenmode 3, Lambda = 1.35385789903127e1
+Eigenmode 4, Lambda = 1.49766716253529e1
+Eigenmode 5, Lambda = 1.65809328302745e1
+1 iterations
+Number of unknowns: 117
+Eigenmode 1, Lambda = 1.16783534418798e1
+Eigenmode 2, Lambda = 1.24042073261551e1
+Eigenmode 3, Lambda = 1.35385789903127e1
+Eigenmode 4, Lambda = 1.49766716253529e1
+Eigenmode 5, Lambda = 1.65809328302745e1
+Done
+=== Done ===
