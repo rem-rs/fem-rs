@@ -135,6 +135,7 @@ use fem_mesh::topology::MeshTopology;
 use fem_parallel::launcher::native::ThreadLauncher;
 use fem_parallel::par_partition::partition_mesh;
 use fem_parallel::{ParallelFESpace, WorkerConfig};
+use fem_space::fe_space::FESpace;
 use fem_space::{H1Space, HCurlSpace, HDivSpace, L2Space};
 
 // ─── Banner (joule.cpp:779-788) ─────────────────────────────────────────────
@@ -689,36 +690,113 @@ fn main() {
         };
         assert!(ess_bdr.iter().all(|&v| v == 1));
 
+        // ── D120/D121: the EM half's local targets, assembled on this mesh ──
+        // The ND2/RT1/L2 global DOF numbering is slot-for-slot MFEM's on this
+        // mesh (element-0 tables + counts verified against the MFEM 4.10
+        // probes, tmp/d120/doforder_{mfem,femrs}.txt), so every quantity below
+        // is directly comparable with tmp/d120/d121_emhalf_probe.cpp.
+        let nd_local = nd.local_space();
+        let rt_local = rt.local_space();
+        let h1_local = h1.local_space();
+        let l2_local = l2.local_space();
+
+        // curl_3d(ND2 → RT1) — D120 (was tet-only: "tet face must have an
+        // interpolation anchor" panic on this mesh).
+        let grad = fem_assembly::discrete_op::DiscreteLinearOperator::gradient(h1_local, nd_local)
+            .expect("D110 gradient(P2 -> ND2) on hexes");
+        let curl = fem_assembly::discrete_op::DiscreteLinearOperator::curl_3d(nd_local, rt_local)
+            .expect("D120 curl_3d(ND2 -> RT1) on hexes");
+
+        // Order-2 de Rham closure on this mesh: curl(grad p) = 0.
+        let mut cg_max = 0.0_f64;
+        for j in 0..h1_local.n_dofs() {
+            let mut unit = vec![0.0; h1_local.n_dofs()];
+            unit[j] = 1.0;
+            let mut g = vec![0.0; nd_local.n_dofs()];
+            grad.spmv(&unit, &mut g);
+            let mut c = vec![0.0; rt_local.n_dofs()];
+            curl.spmv(&g, &mut c);
+            for v in c {
+                cg_max = cg_max.max(v.abs());
+            }
+        }
+
+        // ElectricLosses machinery: M1 = ND mass with the rod/air sigma map,
+        // el = E^T M1 E for the deterministic dof vector (MFEM probe:
+        // el = 7715.3007859716654).
+        let m1 = fem_assembly::vector_assembler::VectorAssembler::assemble_bilinear(
+            nd_local,
+            &[&fem_assembly::standard::VectorMassIntegrator {
+                alpha: sigma.map.clone(),
+            }],
+            4,
+        );
+        let e_vec: Vec<f64> = (0..nd_local.n_dofs())
+            .map(|i| {
+                1.0 + (0.7 * (i as f64 + 1.0)).sin()
+                    + 0.25 * (1.3 * (2.0 * i as f64 + 1.0)).cos()
+            })
+            .collect();
+        let mut m1e = vec![0.0; nd_local.n_dofs()];
+        m1.spmv(&e_vec, &mut m1e);
+        let el: f64 = e_vec.iter().zip(m1e.iter()).map(|(a, b)| a * b).sum();
+
+        // GetJouleHeating: sigma |E|^2 projected onto L2(1) — the D121
+        // element-aware, trilinear-aware projection entry.
+        let e_gf = GridFunction::new(nd_local, e_vec);
+        let w = fem_assembly::postproc::project_coefficient_element(l2_local, &|elem, xi, x| {
+            let ev = e_gf.evaluate_vector_at_element(elem, xi);
+            let tag = local_mesh.element_tag(elem);
+            let ctx =
+                fem_assembly::postproc::coefficient::CoeffCtx::from_qp(x, 3, elem, tag, None, None);
+            sigma.scale * sigma.map.eval(&ctx) * (ev[0] * ev[0] + ev[1] * ev[1] + ev[2] * ev[2])
+        });
+        let w_sum: f64 = w.iter().sum();
+        let w_max = w.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+
+        if rank == 0 {
+            println!("D120/D121 EM-half local targets (cylinder-hex, -o 2):");
+            println!(
+                "  curl_3d(ND2->RT1): {} x {}, nnz = {}",
+                curl.nrows,
+                curl.ncols,
+                curl.nnz()
+            );
+            println!("  max |curl(grad P2)| = {cg_max:.3e}   (order-2 de Rham closure)");
+            println!("  dot(E, J) machinery, el = E^T M1 E = {el:.17e}");
+            println!("  joule heating W (L2 projection of sigma |E|^2): sum = {w_sum:.17e}, max = {w_max:.17e}");
+            println!("  MFEM 4.10 probe: el = 7715.3007859716654e0, sum = 7936759.0844848659e0, max = 59455.579501421256e0");
+        }
+
         // ── Not ported: the operator + time loop ────────────────────────────
         if rank == 0 {
             eprintln!(
-                "mfem_miniapp_joule: MagneticDiffusionEOperator is not wired yet.  The run\n\
+                "mfem_miniapp_joule: the coupled solves + time loop are not wired yet.  The run\n\
                  stops after the dof banner (byte-exact against the C++ binary, status 3).\n\
                  Remaining gaps, in dependency order:\n\
-                 1. DiscreteLinearOperator::curl_3d(ND2 -> RT1) is tetrahedron-only; on a hex\n\
-                 mesh it panics ('tet face must have an interpolation anchor'), and joule's\n\
-                 curl->Mult(E, dB) needs it.  (The order-1 pair ND1->RT0 does cover hexes.)\n\
-                 2. GetJouleHeating (L2 projection of sigma |E|^2) needs a trilinear-map-aware\n\
-                 element-wise projection: postproc::project_coefficient takes a physical-point\n\
-                 closure, and GridFunction::evaluate_vector_at_element uses the affine\n\
-                 simplex_jacobian, which is wrong for the trilinear hexes of this mesh.\n\
-                 3. CLOSED by D412: the >=2-ranks parallel ND2/RT1 DOF partition\n\
-                 now resolves the face/interior DOFs of ghost elements through\n\
-                 the canonical face-key exchange (d412 regression test; the\n\
-                 multi-rank D110 test is un-ignored at 2/4 ranks).\n\
-                 CLOSED by D110: the H1(P2) -> ND2 discrete gradient (3-D hexahedra) now\n\
-                 exists -- DiscreteLinearOperator::gradient, tests\n\
-                 crates/assembly/tests/d110_p2_nd2_gradient_3d_hex.rs.\n\
-                 Note the C++ stdout past this point is hypre's own (BoomerAMG SETUP\n\
-                 PARAMETERS + operator tables, emitted even with -hl 0), so only the dof\n\
-                 banner is byte-comparable; the end-to-end target is the C++ run's last two\n\
-                 lines, 'step 1/2, t = 0.5/1.0, dot(E, J) = 1.78064984 / 5.12554673', and\n\
-                 dot(E, J) = ElectricLosses = integral sigma E.E depends only on the EM half\n\
-                 of the operator (P, grad P, weakCurl^T B, M1 + dt S1 solve, E <- E - grad P)\n\
-                 -- never on W, F or T.\n\
+                 1. weakCurl/weakDiv/weakDivC mixed operators (H(curl)->H(div) weak forms)\n\
+                 and the A0 = Div sigma Grad solve (PCG+AMG), A1 = M1 + dt S1 solve (PCG+AMS),\n\
+                 A2 = M2 + dt S2 solve (PCG+ADS), M2/M3 solves, the ODE driver and the time\n\
+                 loop of MagneticDiffusionEOperator::ImplicitSolve (joule_solver.cpp:401-640).\n\
+                 The comparable C++ stdout is still only the dof banner (past it hypre prints\n\
+                 its own diagnostics); the end-to-end target remains the C++ run's last two\n\
+                 lines, 'step 1/2, t = 0.5/1.0, dot(E, J) = 1.78064984 / 5.12554673'.\n\
+                 2. CLOSED by D120: curl_3d(ND2 -> RT1) now covers hexahedra -- see\n\
+                 crates/assembly/tests/d120_curl_3d_nd2_rt1_hex3d.rs (entry-for-entry MFEM\n\
+                 CurlInterpolator parity on the unit hex; curl o grad P2 = 0 above).\n\
+                 3. CLOSED by D121: GetJouleHeating's element-aware, trilinear-aware\n\
+                 projection -- postproc::project_coefficient_element, tests\n\
+                 crates/assembly/tests/d121_element_aware_projection.rs (MFEM parity on\n\
+                 straight + warped hexes); the L2-projection number printed above is the\n\
+                 same machinery on this mesh.\n\
+                 4. CLOSED by D412: the >=2-ranks parallel ND2/RT1 DOF partition.\n\
+                 5. CLOSED by D110: the H1(P2) -> ND2 discrete gradient.\n\
+                 6. -sc 1 / -amr 1 / -debug 1 / -vis / -visit and the .gen NetCDF meshes\n\
+                 remain unported.\n\
                  Ported and checked here: banner, options dump, skin depths, the four FE\n\
                  spaces with their orders, the five GlobalTrueVSize lines, the six-field\n\
-                 BlockVector layout with its make_ref views, the four material maps.\n\
+                 BlockVector layout with its make_ref views, the four material maps, and the\n\
+                 D120/D121 EM-half local targets printed above.\n\
                  Requested: -o {} -s {} -tf {} -dt {} n_bdr={n_bdr}\n\
                  local block sizes [L2,RT,H1,ND] = [{},{},{},{}]  block_len={}\n\
                  H1 true dofs = {h1_true}\n\

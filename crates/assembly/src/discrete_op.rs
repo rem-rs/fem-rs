@@ -39,8 +39,9 @@
 use std::collections::HashSet;
 
 use fem_mesh::ElementType;
+use fem_core::types::DofId;
 use fem_element::{
-    quadrature::gauss_legendre_01, HexNDk, HexQ2, ReferenceElement, TetND2, TetRT1, TriNDk,
+    quadrature::gauss_legendre_01, HexNDk, HexQ2, HexRTk, ReferenceElement, TetRT1, TriNDk,
     TriND2, TriRT1, TriRT2, VectorReferenceElement,
 };
 use fem_element::lagrange::factory::TriPk;
@@ -1428,7 +1429,8 @@ impl DiscreteLinearOperator {
         Ok(coo.into_csr())
     }
 
-    /// Build the discrete curl matrix C: H(curl) -> H(div) in 3D (tetrahedra).
+    /// Build the discrete curl matrix C: H(curl) -> H(div) in 3D
+    /// (tetrahedra and hexahedra).
     ///
     /// For lowest-order (ND1 -> RT0), the discrete curl is the topological
     /// face-edge incidence matrix. Each face is processed once; the Stokes
@@ -1441,13 +1443,21 @@ impl DiscreteLinearOperator {
     ///   - C[face, edge(b,c)] = +1
     ///   - C[face, edge(a,c)] = −1  (traversal goes c→a, opposite to global a→c)
     ///
-    /// For the high-order pair (ND2 -> RT1), a per-element local
-    /// reconstruction is used:
+    /// For the high-order pair (ND2 -> RT1) on **tetrahedra**, a per-element
+    /// local reconstruction is used:
     ///
     /// 1. Choose 20 spanning fields of the TetND2 polynomial space.
     /// 2. Evaluate their ND2 DOFs (`D`) and RT1 DOFs of their curls (`Y`).
     /// 3. Solve `D^T * Z = Y^T`, where `Z = A^T`, to obtain the local map
     ///    `A: ND2_dofs -> RT1_dofs`.
+    ///
+    /// On **hexahedra** (D120) the same `DᵀZ = Yᵀ` pattern runs once on the
+    /// reference element with the `HexNDk(2)` nodal functionals and the
+    /// `hex_rt1::mfem_hex_nodal_dofs(1)` RT1 rows — see
+    /// [`hex_nd2_rt1_reference_tables`].  Because `curl` maps the order-2 hex
+    /// Nédélec space into the order-1 Raviart-Thomas space, the result is
+    /// MFEM's `DiscreteLinearOperator` + `CurlInterpolator` matrix
+    /// entry-for-entry (parity test `d120_curl_3d_nd2_rt1_hex3d`).
     ///
     /// # Errors
     /// Returns [`DiscreteOpError`] if orders are unsupported/incompatible or
@@ -1654,10 +1664,92 @@ impl DiscreteLinearOperator {
         let n_hcurl = hcurl_space.n_dofs();
         let mut coo = CooMatrix::<f64>::new(n_hdiv, n_hcurl);
 
-        let nd2_elem = TetND2;
-        let n_nd2 = nd2_elem.n_dofs(); // 20
-        let rt1_elem = TetRT1;
-        let n_rt1 = rt1_elem.n_dofs(); // 15
+        let mut visited_rt1 = HashSet::with_capacity(n_hdiv);
+
+        // D120: the hexahedral local matrix is shared by every element (it is
+        // a reference-element matrix — see `hex_nd2_rt1_reference_tables`), so
+        // it is built lazily on the first hex.
+        let mut hex_tables: Option<HexNd2Rt1Tables> = None;
+
+        for e in mesh.elem_iter() {
+            let hcurl_dofs = hcurl_space.element_dofs(e);
+            let hdiv_dofs = hdiv_space.element_dofs(e);
+
+            match mesh.element_type(e) {
+                ElementType::Hex8 | ElementType::Hex20 => {
+                    // D120: hex arm.  The local matrix is *reference-element
+                    // only*: the covariant pullback pairs the physical ND
+                    // functional with the reference basis,
+                    //   σ_i(Φ_k) = (J⁻ᵀ φ̂_k)(ξ_i)·(J τ̂_i) = φ̂_k(ξ_i)·τ̂_i,
+                    // and the physical curl with the RT normal flux,
+                    //   curl_x Φ_k · adj(J) n̂_p = (1/detJ) J curl_ξ φ̂_k · adj(J) n̂_p
+                    //                             = (curl_ξ φ̂_k)(ξ_p)·n̂_p,
+                    // so `curl_x Φ_k · adj(J) n̂` is itself the contravariant
+                    // transform of `curl_ξ φ̂_k` and every local matrix entry
+                    // is geometry-independent.  `A = W⁻¹·Zᵀ` with
+                    // `Z = D⁻ᵀ Yᵀ` maps ND2 dof values to RT1 dof values in
+                    // the spaces' own conventions (the same dual the
+                    // `HDivSpace::interpolate_vector` engine inverts).
+                    let tables =
+                        hex_tables.get_or_insert_with(hex_nd2_rt1_reference_tables);
+                    let nd_signs = hcurl_space.element_signs(e);
+                    let rt_signs = hdiv_space.element_signs(e);
+                    debug_assert_eq!(hcurl_dofs.len(), 54, "HexND2 local dof count");
+                    debug_assert_eq!(hdiv_dofs.len(), 36, "HexRT1 local dof count");
+                    for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
+                        let g_rt1 = global_rt1 as usize;
+                        if !visited_rt1.insert(g_rt1) {
+                            continue;
+                        }
+                        for (i_local, &global_nd2) in hcurl_dofs.iter().enumerate() {
+                            let val = rt_signs[p_local]
+                                * nd_signs[i_local]
+                                * tables.a[p_local * 54 + i_local];
+                            if val.abs() > 1e-15 {
+                                coo.add(g_rt1, global_nd2 as usize, val);
+                            }
+                        }
+                    }
+                }
+                ElementType::Tet4 | ElementType::Tet10 => {
+                    Self::curl_3d_nd2_rt1_tet_element(
+                        hcurl_space,
+                        hdiv_space,
+                        e,
+                        hcurl_dofs,
+                        hdiv_dofs,
+                        &mut visited_rt1,
+                        &mut coo,
+                    );
+                }
+                other => {
+                    return Err(DiscreteOpError::UnsupportedCellType {
+                        op: "curl_3d",
+                        cell: element_type_name(other),
+                    });
+                }
+            }
+        }
+
+        Ok(coo.into_csr())
+    }
+
+    /// Tetrahedral element assembly for `curl_3d(ND2 → RT1)` — the historical
+    /// per-element body, moved verbatim under the D120 tet/hex dispatcher
+    /// (`curl_3d_nd2_rt1`).
+    fn curl_3d_nd2_rt1_tet_element<M: MeshTopology>(
+        hcurl_space: &HCurlSpace<M>,
+        hdiv_space: &HDivSpace<M>,
+        e: u32,
+        hcurl_dofs: &[DofId],
+        hdiv_dofs: &[DofId],
+        visited_rt1: &mut HashSet<usize>,
+        coo: &mut CooMatrix<f64>,
+    ) {
+        let mesh = hcurl_space.mesh();
+        let nodes = mesh.element_nodes(e);
+        let n_nd2 = 20usize; // TetND2
+        let n_rt1 = 15usize; // TetRT1
 
         let tet_edges: [(usize, usize); 6] = [
             (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
@@ -1731,149 +1823,249 @@ impl DiscreteLinearOperator {
         // `HDivSpace::interpolate_vector`.
         let (rt_dof_pts, rt_dof_nks) = fem_element::raviart_thomas::tet_rt1::mfem_nodal_dofs(1);
         debug_assert_eq!(rt_dof_pts.len(), n_rt1);
-        let mut visited_rt1 = HashSet::with_capacity(n_hdiv);
 
-        for e in mesh.elem_iter() {
-            let nodes = mesh.element_nodes(e);
-            let hcurl_dofs = hcurl_space.element_dofs(e);
-            let hdiv_dofs = hdiv_space.element_dofs(e);
+        let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
+        let mut ymat = vec![0.0_f64; n_rt1 * n_nd2];
 
-            let mut dmat = vec![0.0_f64; n_nd2 * n_nd2];
-            let mut ymat = vec![0.0_f64; n_rt1 * n_nd2];
+        let x0 = mesh.node_coords(nodes[0]);
+        let x1 = mesh.node_coords(nodes[1]);
+        let x2 = mesh.node_coords(nodes[2]);
+        let x3 = mesh.node_coords(nodes[3]);
+        let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
+        let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
+        let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
+        // cof(J) = det(J)·J^{-T} (adjugate transpose) and the element dof
+        // signs (both shared with `HDivSpace::interpolate_vector`).
+        let cof = [
+            [
+                j1[1] * j2[2] - j1[2] * j2[1],
+                j0[2] * j2[1] - j0[1] * j2[2],
+                j0[1] * j1[2] - j0[2] * j1[1],
+            ],
+            [
+                j1[2] * j2[0] - j1[0] * j2[2],
+                j0[0] * j2[2] - j0[2] * j2[0],
+                j0[2] * j1[0] - j0[0] * j1[2],
+            ],
+            [
+                j1[0] * j2[1] - j1[1] * j2[0],
+                j0[1] * j2[0] - j0[0] * j2[1],
+                j0[0] * j1[1] - j0[1] * j1[0],
+            ],
+        ];
+        let rt_signs = hdiv_space.element_signs(e);
 
-            let x0 = mesh.node_coords(nodes[0]);
-            let x1 = mesh.node_coords(nodes[1]);
-            let x2 = mesh.node_coords(nodes[2]);
-            let x3 = mesh.node_coords(nodes[3]);
-            let j0 = [x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]];
-            let j1 = [x2[0] - x0[0], x2[1] - x0[1], x2[2] - x0[2]];
-            let j2 = [x3[0] - x0[0], x3[1] - x0[1], x3[2] - x0[2]];
-            // cof(J) = det(J)·J^{-T} (adjugate transpose) and the element dof
-            // signs (both shared with `HDivSpace::interpolate_vector`).
-            let cof = [
-                [
-                    j1[1] * j2[2] - j1[2] * j2[1],
-                    j0[2] * j2[1] - j0[1] * j2[2],
-                    j0[1] * j1[2] - j0[2] * j1[1],
-                ],
-                [
-                    j1[2] * j2[0] - j1[0] * j2[2],
-                    j0[0] * j2[2] - j0[2] * j2[0],
-                    j0[2] * j1[0] - j0[0] * j1[2],
-                ],
-                [
-                    j1[0] * j2[1] - j1[1] * j2[0],
-                    j0[1] * j2[0] - j0[0] * j2[1],
-                    j0[0] * j1[1] - j0[1] * j1[0],
-                ],
-            ];
-            let rt_signs = hdiv_space.element_signs(e);
+        for k in 0..n_nd2 {
+            let mut dof_nd2 = vec![0.0_f64; n_nd2];
 
-            for k in 0..n_nd2 {
-                let mut dof_nd2 = vec![0.0_f64; n_nd2];
+            // ND2 edge rows: nodal point values along the canonical
+            // (min,max) direction; the canonical slot index of each
+            // element slot is recovered from its global id (adjacent ids
+            // per block).
+            for (edge_local, &(li, lj)) in tet_edges.iter().enumerate() {
+                let gi = nodes[li];
+                let gj = nodes[lj];
+                let (ga, gb) = if gi < gj { (gi, gj) } else { (gj, gi) };
+                let pa = mesh.node_coords(ga);
+                let pb = mesh.node_coords(gb);
+                let tau = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
 
-                // ND2 edge rows: nodal point values along the canonical
-                // (min,max) direction; the canonical slot index of each
-                // element slot is recovered from its global id (adjacent ids
-                // per block).
-                for (edge_local, &(li, lj)) in tet_edges.iter().enumerate() {
-                    let gi = nodes[li];
-                    let gj = nodes[lj];
-                    let (ga, gb) = if gi < gj { (gi, gj) } else { (gj, gi) };
-                    let pa = mesh.node_coords(ga);
-                    let pb = mesh.node_coords(gb);
-                    let tau = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-
-                    let first = hcurl_dofs[2 * edge_local].min(hcurl_dofs[2 * edge_local + 1]);
-                    for m in 0..2usize {
-                        let j_canon = (hcurl_dofs[2 * edge_local + m] - first) as usize;
-                        let t = gl2[j_canon];
-                        let pt = [
-                            pa[0] + t * tau[0],
-                            pa[1] + t * tau[1],
-                            pa[2] + t * tau[2],
-                        ];
-                        let fv = eval_field(k, pt[0], pt[1], pt[2]);
-                        dof_nd2[2 * edge_local + m] =
-                            fv[0] * tau[0] + fv[1] * tau[1] + fv[2] * tau[2];
-                    }
-                }
-
-                // ND2 face rows: point values at the face centroid with the
-                // shared-face anchor tangents (creation element's TetND2 slot
-                // tangents — the same functionals that produced the dof
-                // values fed into this operator).
-                for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
-                    let key = FaceKey::new(nodes[la], nodes[lb], nodes[lc]);
-                    let anchor = hcurl_space
-                        .face_anchor(key)
-                        .expect("tet face must have an interpolation anchor");
-                    // ND2: the canonical face carries a single DOF point (the
-                    // centroid) with its two anchor tangents.
-                    let centroid = anchor.point(0);
-                    let [w0, w1] = anchor.tangents(0);
-                    let fv = eval_field(k, centroid[0], centroid[1], centroid[2]);
-                    dof_nd2[12 + 2 * face_local] =
-                        fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
-                    dof_nd2[12 + 2 * face_local + 1] =
-                        fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
-                }
-
-                for i in 0..n_nd2 {
-                    dmat[i * n_nd2 + k] = dof_nd2[i];
-                }
-
-                // D34: RT1 nodal dofs of curl(field): signed pointwise samples
-                // curl Φ_k(x_p)·(cof(J)·n̂_p) (same functionals as
-                // `HDivSpace::interpolate_vector`).
-                for p in 0..n_rt1 {
-                    let (xi, nk) = (&rt_dof_pts[p], &rt_dof_nks[p]);
+                let first = hcurl_dofs[2 * edge_local].min(hcurl_dofs[2 * edge_local + 1]);
+                for m in 0..2usize {
+                    let j_canon = (hcurl_dofs[2 * edge_local + m] - first) as usize;
+                    let t = gl2[j_canon];
                     let pt = [
-                        x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
-                        x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
-                        x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
+                        pa[0] + t * tau[0],
+                        pa[1] + t * tau[1],
+                        pa[2] + t * tau[2],
                     ];
-                    let cv = eval_curl(k, pt[0], pt[1], pt[2]);
-                    let mut val = 0.0;
-                    for r in 0..3 {
-                        val += cv[r] * (cof[r][0] * nk[0] + cof[r][1] * nk[1] + cof[r][2] * nk[2]);
-                    }
-                    ymat[p * n_nd2 + k] = rt_signs[p] * val;
+                    let fv = eval_field(k, pt[0], pt[1], pt[2]);
+                    dof_nd2[2 * edge_local + m] =
+                        fv[0] * tau[0] + fv[1] * tau[1] + fv[2] * tau[2];
                 }
             }
 
-            // Solve D^T * Z = Y^T, where Z = A^T and A maps ND2 -> RT1.
-            let mut dt = vec![0.0_f64; n_nd2 * n_nd2];
+            // ND2 face rows: point values at the face centroid with the
+            // shared-face anchor tangents (creation element's TetND2 slot
+            // tangents — the same functionals that produced the dof
+            // values fed into this operator).
+            for (face_local, &(la, lb, lc)) in tet_faces.iter().enumerate() {
+                let key = FaceKey::new(nodes[la], nodes[lb], nodes[lc]);
+                let anchor = hcurl_space
+                    .face_anchor(key)
+                    .expect("tet face must have an interpolation anchor");
+                // ND2: the canonical face carries a single DOF point (the
+                // centroid) with its two anchor tangents.
+                let centroid = anchor.point(0);
+                let [w0, w1] = anchor.tangents(0);
+                let fv = eval_field(k, centroid[0], centroid[1], centroid[2]);
+                dof_nd2[12 + 2 * face_local] =
+                    fv[0] * w0[0] + fv[1] * w0[1] + fv[2] * w0[2];
+                dof_nd2[12 + 2 * face_local + 1] =
+                    fv[0] * w1[0] + fv[1] * w1[1] + fv[2] * w1[2];
+            }
+
             for i in 0..n_nd2 {
-                for j in 0..n_nd2 {
-                    dt[i * n_nd2 + j] = dmat[j * n_nd2 + i];
-                }
+                dmat[i * n_nd2 + k] = dof_nd2[i];
             }
-            let mut yt = vec![0.0_f64; n_nd2 * n_rt1];
+
+            // D34: RT1 nodal dofs of curl(field): signed pointwise samples
+            // curl Φ_k(x_p)·(cof(J)·n̂_p) (same functionals as
+            // `HDivSpace::interpolate_vector`).
             for p in 0..n_rt1 {
-                for k in 0..n_nd2 {
-                    yt[k * n_rt1 + p] = ymat[p * n_nd2 + k];
+                let (xi, nk) = (&rt_dof_pts[p], &rt_dof_nks[p]);
+                let pt = [
+                    x0[0] + j0[0] * xi[0] + j1[0] * xi[1] + j2[0] * xi[2],
+                    x0[1] + j0[1] * xi[0] + j1[1] * xi[1] + j2[1] * xi[2],
+                    x0[2] + j0[2] * xi[0] + j1[2] * xi[1] + j2[2] * xi[2],
+                ];
+                let cv = eval_curl(k, pt[0], pt[1], pt[2]);
+                let mut val = 0.0;
+                for r in 0..3 {
+                    val += cv[r] * (cof[r][0] * nk[0] + cof[r][1] * nk[1] + cof[r][2] * nk[2]);
                 }
-            }
-
-            let z = solve_small(n_nd2, n_rt1, &dt, &yt); // shape 20x15 row-major
-
-            for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
-                let g_rt1 = global_rt1 as usize;
-                if !visited_rt1.insert(g_rt1) {
-                    continue;
-                }
-                for (i_local, &global_nd2) in hcurl_dofs.iter().enumerate() {
-                    let val = z[i_local * n_rt1 + p_local];
-                    if val.abs() > 1e-15 {
-                        coo.add(g_rt1, global_nd2 as usize, val);
-                    }
-                }
+                ymat[p * n_nd2 + k] = rt_signs[p] * val;
             }
         }
 
-        Ok(coo.into_csr())
+        // Solve D^T * Z = Y^T, where Z = A^T and A maps ND2 -> RT1.
+        let mut dt = vec![0.0_f64; n_nd2 * n_nd2];
+        for i in 0..n_nd2 {
+            for j in 0..n_nd2 {
+                dt[i * n_nd2 + j] = dmat[j * n_nd2 + i];
+            }
+        }
+        let mut yt = vec![0.0_f64; n_nd2 * n_rt1];
+        for p in 0..n_rt1 {
+            for k in 0..n_nd2 {
+                yt[k * n_rt1 + p] = ymat[p * n_nd2 + k];
+            }
+        }
+
+        let z = solve_small(n_nd2, n_rt1, &dt, &yt); // shape 20x15 row-major
+
+        for (p_local, &global_rt1) in hdiv_dofs.iter().enumerate() {
+            let g_rt1 = global_rt1 as usize;
+            if !visited_rt1.insert(g_rt1) {
+                continue;
+            }
+            for (i_local, &global_nd2) in hcurl_dofs.iter().enumerate() {
+                let val = z[i_local * n_rt1 + p_local];
+                if val.abs() > 1e-15 {
+                    coo.add(g_rt1, global_nd2 as usize, val);
+                }
+            }
+        }
     }
+}
+
+/// D120: element-independent reference tables for the hexahedral
+/// `curl_3d(ND2 → RT1)` arm.
+struct HexNd2Rt1Tables {
+    /// Local matrix `A[p*54 + k]` mapping ND2 element dof values to RT1 element
+    /// dof values, both in the slot conventions of `HexNDk(2)` /
+    /// `mfem_hex_nodal_dofs(1)`.
+    a: Vec<f64>,
+}
+
+/// Reference-element tables for the hex `ND2 → RT1` discrete curl (D120).
+///
+/// The hexahedral local curl matrix is a **reference-element** matrix: with
+/// `Φ_k = J⁻ᵀ φ̂_k` (covariant pullback) the ND functional is
+/// `σ_i(Φ_k) = Φ_k(x_i)·(J τ̂_i) = φ̂_k(ξ_i)·τ̂_i`, and because the 3-D curl of
+/// the covariant transform is `(1/detJ)·J·curl_ξ`, the RT normal-flux
+/// functional of the curl is
+/// `curl_x Φ_k(x_p)·(adj(J) n̂_p) = (curl_ξ φ̂_k)(ξ_p)·n̂_p`.  Both sides
+/// therefore reduce to reference evaluations — this is MFEM's
+/// `VectorFiniteElement::ProjectCurl3D_RT` (`fe/fe_base.cpp:1385`), computed
+/// with the same nodal dof tables the two spaces use.
+///
+/// What MFEM's `ProjectCurl3D_RT` returns are the *raw* curl samples
+/// `Y = M·D⁻¹·u` written directly as RT rows; the RT1 dof *values* the
+/// fem-rs stack (and MFEM's own RT interpolation) carry are the coefficients
+/// of the nodal-GL RT basis, `W⁻¹·Y` with `W[p,j] = ψ̂_j(ξ_p)·n̂_p` the
+/// reference dual `HDivSpace::interpolate_vector` inverts.  The local matrix
+/// assembled here is that convention-consistent map
+///
+/// ```text
+///   A = W⁻¹ · M · D⁻¹ ,   D[i,k] = φ̂_k(ξ_i)·τ̂_i ,   M[p,k] = (curl_ξ φ̂_k)(ξ_p)·n̂_p ,
+/// ```
+///
+/// with `D` the (diagonal, ±1) ND2 nodal Vandermonde.  Both solves run
+/// through [`solve_small`], so no assumption about the diagonal structure of
+/// `D`/`W` is baked in.
+fn hex_nd2_rt1_reference_tables() -> HexNd2Rt1Tables {
+    const N_ND: usize = 54; // HexNDk(2): 12 edges × 2 + 6 faces × 4 + 6 interior
+    const N_RT: usize = 36; // HexRT1: 6 faces × 4 + 12 interior
+
+    let nd = HexNDk::new(2);
+    debug_assert_eq!(nd.n_dofs(), N_ND);
+    let coords = nd.dof_coords();
+    let tks = nd.dof_tangents();
+
+    // D[i,k] = φ̂_k(ξ_i)·τ̂_i.
+    let mut dmat = vec![0.0_f64; N_ND * N_ND];
+    for (i, (xi, tau)) in coords.iter().zip(tks.iter()).enumerate() {
+        let mut phi = vec![0.0_f64; N_ND * 3];
+        nd.eval_basis_vec(xi, &mut phi);
+        for (k, phi_k) in phi.chunks_exact(3).enumerate() {
+            dmat[i * N_ND + k] =
+                phi_k[0] * tau[0] + phi_k[1] * tau[1] + phi_k[2] * tau[2];
+        }
+    }
+
+    // M[p,k] = (curl_ξ φ̂_k)(ξ_p)·n̂_p — curl sampled at the MFEM RT1 hex nodal
+    // points with the nodal normals (`hex_rt1::mfem_hex_nodal_dofs`, the same
+    // rows `HDivSpace::interpolate_vector` pairs with the `HexRTk` dual).
+    let (pts, nks) = fem_element::raviart_thomas::hex_rt1::mfem_hex_nodal_dofs(1);
+    debug_assert_eq!(pts.len(), N_RT);
+    let mut m = vec![0.0_f64; N_RT * N_ND];
+    for (p, (xi, nk)) in pts.iter().zip(nks.iter()).enumerate() {
+        let mut curl = vec![0.0_f64; N_ND * 3];
+        nd.eval_curl(xi, &mut curl);
+        for (k, c_k) in curl.chunks_exact(3).enumerate() {
+            m[p * N_ND + k] = c_k[0] * nk[0] + c_k[1] * nk[1] + c_k[2] * nk[2];
+        }
+    }
+
+    // Z = D⁻ᵀ Mᵀ (54×36): solve Dᵀ Z = Mᵀ.
+    let mut dt = vec![0.0_f64; N_ND * N_ND];
+    for (i, row) in dmat.chunks_exact(N_ND).enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            dt[j * N_ND + i] = v;
+        }
+    }
+    let mut mt = vec![0.0_f64; N_ND * N_RT];
+    for (p, row) in m.chunks_exact(N_ND).enumerate() {
+        for (k, &v) in row.iter().enumerate() {
+            mt[k * N_RT + p] = v;
+        }
+    }
+    let z = solve_small(N_ND, N_RT, &dt, &mt); // z[k*N_RT + p] = A_raw[p,k]
+
+    // W[p,j] = ψ̂_j(ξ_p)·n̂_p — the reference dual of the nodal-GL RT1 basis
+    // (`HexRTk::new_gauss_legendre(1)`, the basis the assembly/get-values
+    // stack pairs the hex RT dofs with — D289).
+    let rt1 = HexRTk::new_gauss_legendre(1);
+    let mut w = vec![0.0_f64; N_RT * N_RT];
+    for (p, (xi, nk)) in pts.iter().zip(nks.iter()).enumerate() {
+        let mut psi = vec![0.0_f64; N_RT * 3];
+        rt1.eval_basis_vec(xi, &mut psi);
+        for (j, psi_j) in psi.chunks_exact(3).enumerate() {
+            w[p * N_RT + j] =
+                psi_j[0] * nk[0] + psi_j[1] * nk[1] + psi_j[2] * nk[2];
+        }
+    }
+
+    // A = W⁻¹ Zᵀ (36×54): solve W A = Zᵀ.
+    let mut zt = vec![0.0_f64; N_RT * N_ND];
+    for (k, zrow) in z.chunks_exact(N_RT).enumerate() {
+        for (p, &v) in zrow.iter().enumerate() {
+            zt[p * N_ND + k] = v;
+        }
+    }
+    let a = solve_small(N_RT, N_ND, &w, &zt);
+    HexNd2Rt1Tables { a }
 }
 
 /// Solve the small dense linear system `A * X = B` where `A` is `n × n` and

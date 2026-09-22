@@ -338,6 +338,70 @@ pub fn project_coefficient<S: FESpace>(
     space.interpolate(coeff).into_vec()
 }
 
+/// Project a coefficient that is defined **per element** onto the FE space —
+/// the element-aware twin of MFEM's `GridFunction::ProjectCoefficient`.
+///
+/// MFEM evaluates its projections through `Coefficient::Eval(T, ip)`, i.e.
+/// the coefficient may read the *owning element* and its reference point —
+/// the exact shape of joule's `JouleHeatingCoefficient`
+/// (`joule_solver.cpp:898-906`), whose value is
+/// `sigma · |E_gf.GetVectorValue(T, ip)|²` with `E_gf` a vector grid
+/// function.  A physical-point closure (as taken by
+/// [`project_coefficient`]) cannot express that: evaluating a vector field
+/// at a physical point requires locating the element first.
+///
+/// This entry evaluates the MFEM **nodal projection** semantics
+/// (`FiniteElement::Project`): dof `i` of element `e` receives
+/// `elem_coeff(e, xi_i, x_i)` where `xi_i` is the element's `i`-th reference
+/// dof coordinate and `x_i` its physical image through the element's own
+/// geometry map — trilinear for `Hex8` (D121), isoparametric for curved
+/// cells, affine for simplices.  Every dof of a discontinuous space (L2/DG)
+/// is element-owned, so each global dof is written exactly once; for
+/// continuous spaces the shared dofs are written once per incident element
+/// (use only with geometrically consistent coefficients).
+///
+/// `elem_coeff` arguments: `(element id, reference dof coordinates, physical
+/// dof coordinates)`.
+pub fn project_coefficient_element<S: FESpace>(
+    space: &S,
+    elem_coeff: &(dyn Fn(u32, &[f64], &[f64]) -> f64 + Send + Sync),
+) -> Vec<f64> {
+    let mesh = space.mesh();
+    let dim = mesh.dim() as usize;
+    let mut out = vec![0.0_f64; space.n_dofs()];
+    for e in 0..mesh.n_elements() as u32 {
+        let elem_type = mesh.element_type(e);
+        let ref_elem = ref_elem_vol_for_space(space, elem_type, space.order());
+        let ref_coords = ref_elem.dof_coords();
+        let elem_dofs = space.element_dofs(e);
+        let nodes = mesh.element_nodes(e);
+        for (i, &d) in elem_dofs.iter().enumerate() {
+            let xi = &ref_coords[i];
+            // Same geometry source as `GridFunction::evaluate_vector_at_element`:
+            // the geometry table of the mesh (trilinear Q1 for straight Hex8,
+            // isoparametric for curved cells).
+            let (_jac, xp) = match crate::vector_assembler::geo_ref_elem_from_mesh(mesh, e) {
+                Some(geo) => {
+                    let (_j, _d, xp) = crate::vector_assembler::isoparametric_jacobian(
+                        mesh,
+                        nodes,
+                        geo.as_ref(),
+                        xi,
+                        dim,
+                    );
+                    (_j, xp)
+                }
+                None => {
+                    let (jac, xp) = fem_mesh::element_jacobian_at(mesh, e, xi, dim);
+                    (jac, xp)
+                }
+            };
+            out[d as usize] = elem_coeff(e, xi, &xp);
+        }
+    }
+    out
+}
+
 /// The `M c = b` L² projection `M` = mass matrix, `b_i = ∫ φ_i f dx`.
 ///
 /// This is the operator [`project_coefficient`] used to be; it is kept (as a

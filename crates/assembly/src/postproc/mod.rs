@@ -10,6 +10,6 @@ pub mod postprocess;
 // Re-export commonly used utility functions
 pub use grid_function::{
     compute_l2_error_hcurl, compute_l2_error_hdiv, compute_l2_error_l2,
-    vector_l2_norm,
+    project_coefficient_element, vector_l2_norm,
 };
 pub use error_estimate::zz_estimator_l2_hdiv;
