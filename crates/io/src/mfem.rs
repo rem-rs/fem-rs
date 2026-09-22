@@ -142,15 +142,66 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         face_raw.push(vals[2..].to_vec());
     }
 
+    // ── "vertices" header (D589) ────────────────────────────────────────────
+    //
+    // MFEM 4.10 reads this region as whitespace-separated *tokens*, not lines
+    // (`Mesh::ReadMFEMMesh`, `mesh/mesh_readers.cpp:100-118`):
+    //
+    //   input >> ident;          // 'vertices'
+    //   input >> NumOfVertices;
+    //   input >> ws >> ident;    // the NEXT token decides the reading:
+    //   ident != "nodes" → spaceDim = atoi(ident), then NV*spaceDim coord tokens
+    //   ident == "nodes" → curved = 1, a nodes GridFunction section follows
+    //
+    // `Mesh::Printer` writes `<NV>` and `<spaceDim>` on separate lines for
+    // straight meshes and `<NV>` followed by a `nodes` line for curved ones
+    // (`mesh/mesh.cpp:12560-12578`), so `vertices / 9 / 3 / <coords>` is the
+    // canonical straight form — MFEM's own `data/star.mesh` carries
+    // `vertices / 31 / 2`.  The token rule also makes "vertices 9 3" (one
+    // line) and "vertices 9 nodes" equivalent layouts.  This reader stays
+    // line-based, so trailing tokens of the keyword / count lines are carried
+    // in `vert_tail` and consumed before new lines are read.  Coordinates
+    // themselves are still read one vertex per line (the writer's layout; a
+    // fully free token stream is not reproduced).
+    //
+    // Two deliberate divergences from MFEM (D600/D601):
+    //   * MFEM drops vertices unreferenced by any element at this point
+    //     (`RemoveUnusedVertices`, mesh_readers.cpp:38/130, default on) and
+    //     renumbers; this reader keeps the file's vertex table, so `GetNV()`
+    //     can differ for slack-vertex files.
+    //   * the 0-based / 1-based index detection below silently repairs
+    //     1-based files that MFEM would read verbatim (and garble).
+    let mut vert_tail: Vec<String> = Vec::new();
     {
-        let next = read_line(&mut r)?;  // "edges" or "vertices"
-        if next.trim() == "edges" {
-            let n_edges = read_uint(&mut r)?;
+        let next = read_line(&mut r)?;  // "edges" or "vertices" (+ trailing)
+        let mut toks = next.split_whitespace();
+        let kw = toks.next().unwrap_or("");
+        vert_tail.extend(toks.map(str::to_owned));
+        if kw == "edges" {
+            let n_edges = if vert_tail.is_empty() {
+                read_uint(&mut r)?
+            } else {
+                take_tail_uint(&mut vert_tail)?
+            };
             for _ in 0..n_edges { read_uint_line(&mut r)?; }
-            read_line(&mut r)?;  // "vertices"
-        } // else already "vertices"
+            if vert_tail.is_empty() {
+                let vl = read_line(&mut r)?;  // "vertices" (+ trailing)
+                vert_tail.extend(vl.split_whitespace().skip(1).map(str::to_owned));
+            }
+        } // else: the consumed line was the "vertices" keyword
     }
-    let n_vert = read_uint(&mut r)?;
+    let n_vert = if vert_tail.is_empty() {
+        // The <NV> line may carry trailing tokens ("9 3", "9 nodes") — MFEM's
+        // token reader accepts those layouts (mesh_readers.cpp:104-108).
+        let l = read_line(&mut r)?;
+        let mut toks = l.split_whitespace();
+        let first = toks.next().unwrap_or("");
+        vert_tail.extend(toks.map(str::to_owned));
+        first.parse()
+            .map_err(|_| FemError::Mesh(format!("MFEM: expected integer, got: {l}")))?
+    } else {
+        take_tail_uint(&mut vert_tail)?
+    };
 
     // Detect 0-based vs 1-based vertex indexing.
     //
@@ -200,9 +251,17 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
     // the mesh dimension, which is what a conforming `nodes` section has.
     let mut nodes_vdim: usize = dim;
 
-    // Check if next line is "nodes" (MFEM v1.2 curved mesh format),
-    // a dimension number (standard format), or a NURBS keyword (skip).
-    let next = read_line(&mut r)?;
+    // The token after <NV> decides straight vs curved (D589,
+    // `mesh/mesh_readers.cpp:104-118`): "nodes" → the section is the
+    // curved-mesh nodes GridFunction (`Mesh::Loader`, `mesh/mesh.cpp:5291-5300`
+    // then sets spaceDim from the GF's VDim and overwrites the vertex table
+    // from the first NV dofs — `SetVerticesFromNodes`); anything else is the
+    // vertex space dimension (MFEM applies `atoi`) and NV coordinates follow.
+    let next = if vert_tail.is_empty() {
+        read_line(&mut r)?
+    } else {
+        vert_tail.remove(0)
+    };
     if next.trim() == "knotvectors" || next.trim() == "knots" || next.trim().starts_with("FiniteElement") {
         // NURBS or IGA format — read through remaining sections to extract vertex coords.
         // The element/boundary/edges sections provide topology; NURBS data provides geometry.
@@ -264,7 +323,11 @@ pub fn read_mfem<R: Read>(reader: R) -> FemResult<MfemFile> {
         }
         // else: non-NURBS mesh with unexpected keyword — ignore, coords stays empty
     } else if let Ok(_vdim) = next.parse::<usize>() {
-        // Standard format: <n_vert> <vdim> followed by vertex coords
+        // Straight format: the token after <NV> is the vertex space dimension
+        // (MFEM `atoi`s it into spaceDim, mesh_readers.cpp:112) followed by
+        // NV coordinate lines.  One vertex per line, first `dim` components
+        // (MFEM reads NV*spaceDim tokens instead; the layouts coincide for
+        // everything `Mesh::Printer` writes).
         coords.reserve(n_vert * dim);
         for _ in 0..n_vert {
             let v = read_f64_line(&mut r)?;
@@ -3414,6 +3477,14 @@ fn read_line(r: &mut impl BufRead) -> FemResult<String> {
 fn read_uint(r: &mut impl BufRead) -> FemResult<usize> {
     let l = read_line(r)?;
     l.parse().map_err(|_| FemError::Mesh(format!("MFEM: expected integer, got: {l}")))
+}
+
+/// D589: pop the first carried-over token of the `vertices` header and parse
+/// it as `usize` (MFEM's token rule lets `<NV>` / `<spaceDim>` / `nodes`
+/// straddle or share lines; `mesh/mesh_readers.cpp:100-118`).
+fn take_tail_uint(tail: &mut Vec<String>) -> FemResult<usize> {
+    let t = tail.remove(0);
+    t.parse().map_err(|_| FemError::Mesh(format!("MFEM: expected integer, got: {t}")))
 }
 
 fn read_uint_line(r: &mut impl BufRead) -> FemResult<Vec<usize>> {
