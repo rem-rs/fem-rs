@@ -392,6 +392,12 @@ pub fn p_refine_quad4_to_quad9(
 /// Refine Hex8 → Hex20: adds 12 edge midpoints per marked hex.
 ///
 /// Edge midpoints are shared between adjacent hexes (deduplicated by edge key).
+///
+/// Slot contract (D612): the 20-node table's edge block (slots 8..19) runs
+/// bottom ring `(0,1) (1,2) (2,3) (3,0)`, top ring `(4,5) (5,6) (6,7) (7,4)`,
+/// vertical `(0,4) (1,5) (2,6) (3,7)` — the MFEM
+/// `Geometry::Constants<CUBE>::Edges` order (= the Gmsh/VTK Hex20 scan), which
+/// coincides with the official `H1_HexahedronElement(2)` edge slots.
 pub fn p_refine_hex8_to_hex20(
     mesh: &Mesh<3>,
     marked: &[ElemId],
@@ -476,6 +482,18 @@ pub fn p_refine_hex8_to_hex20(
 /// Refine Hex20 → Hex27: adds 6 face centers + 1 volume centroid per marked hex.
 ///
 /// Face centers are shared between adjacent hexes (deduplicated by quad face key).
+///
+/// Slot contract (D612, MFEM 4.10 probe `tmp/d612/mfem_hex27_official.log`):
+/// the 27-node table is laid out in the **official** `H1_HexahedronElement(2)`
+/// order — slots 0..7 corners (Hex8 order), 8..19 edge midpoints (bottom ring
+/// `(0,1) (1,2) (2,3) (3,0)`, top ring `(4,5) (5,6) (6,7) (7,4)`, vertical
+/// `(0,4) (1,5) (2,6) (3,7)` — as `p_refine_hex8_to_hex20` already writes),
+/// 20..25 **face centres in MFEM `FaceVert` order `z0, y0, x1, y1, x0, z1`**,
+/// 26 body centre.  The former VTK-style face scan `(z0, z1, y0, y1, x0, x1)`
+/// disagreed with the `HexQk(2)`/`H1_HexahedronElement(2)` slot layout every
+/// geometry reader evaluates, deforming a straight unit cube's isoparametric
+/// read to det J = −7e−2 (D612); this is the one block that differed from the
+/// MFEM/gmsh-adjucated official order.
 pub fn p_refine_hex20_to_hex27(
     mesh: &Mesh<3>,
     marked: &[ElemId],
@@ -489,7 +507,9 @@ pub fn p_refine_hex20_to_hex27(
     let mut new_coords = mesh.coords.clone();
     let mut new_centroids: Vec<NodeId> = Vec::new();
 
-    let hex_faces = [[0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[0,3,7,4],[1,2,6,5]];
+    // MFEM `Geometry::Constants<CUBE>::FaceVert` order (official slot order):
+    // z0, y0, x1, y1, x0, z1 (D612).
+    let hex_faces = [[0,1,2,3],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7],[4,5,6,7]];
 
     // Face centers + volume center are element-local for Hex20→Hex27 (not shared
     // in the usual case since face centers already belong to the hex, but we still
@@ -511,9 +531,12 @@ pub fn p_refine_hex20_to_hex27(
                 next_node - 1
             });
         }
-        // Volume centroid
+        // Volume centroid — the average of the 8 CORNER nodes (the Hex8
+        // frame's body-center lattice point).  The former loop summed all 20
+        // Hex20 rows and divided by 8, placing the "centre" of a unit cube's
+        // cell at (1.25, 1.25, 1.25) — found by the D612 slot pin.
         let mut cx = 0.0; let mut cy = 0.0; let mut cz = 0.0;
-        for &n in ns.iter() { let c = mesh.coords_of(n); cx += c[0]; cy += c[1]; cz += c[2]; }
+        for &n in ns[0..8].iter() { let c = mesh.coords_of(n); cx += c[0]; cy += c[1]; cz += c[2]; }
         cx /= 8.0; cy /= 8.0; cz /= 8.0;
         new_coords.push(cx); new_coords.push(cy); new_coords.push(cz);
         new_centroids.push(next_node);

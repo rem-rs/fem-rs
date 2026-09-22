@@ -689,11 +689,29 @@ fn linear_elem_type_3d(et: ElementType) -> ElementType {
 }
 
 /// High-order element type for a given curved element type and order.
+///
+/// Label↔table contract (D613, MFEM 4.10 probe
+/// `tmp/d612/mfem_curved_npe.log`: SetCurvature(2) meshes measure
+/// tet 10 / hex 27 / **wedge 18** / **pyramid 15** slots):
+/// * wedge order ≥ 2 → [`ElementType::Prism18`] — the complete quadratic
+///   prism whose label count (18) equals the 18-slot `PrismPk(2)`/MFEM
+///   `H1_WedgeElement(2)` table written here (the former `Prism15` label
+///   claimed 15 nodes against an 18-slot table; gmsh code 18 = 15-node
+///   serendipity prism is a *readers'* connectivity type and never what this
+///   writer emits);
+/// * pyramid order ≥ 2 → [`ElementType::Pyramid13`] — per the D581 doctrine
+///   (`fem_space::ref_elem` module docs) the label is the **connectivity
+///   type**, not the slot count: MFEM's own curved pyramid is the Fuentes
+///   element with `p(p²+3)+1 = 15` slots at order 2, and the table length is
+///   carried by [`CurvedMesh::nodes_per_elem`] (= `curved_geometry_ref_elem_3d`
+///   / `geometry_node_element(Pyramid13, 2)` = 15 dofs), not by
+///   `Pyramid13::nodes_per_element()` (13 — the gmsh/VTK 13-node row).
+/// * hex order ≥ 2 → [`ElementType::Hex27`] (27 = label count = table).
 fn curved_elem_type_3d(et: ElementType, order: u8) -> ElementType {
     match et {
         ElementType::Tet4 | ElementType::Tet10 => if order >= 2 { ElementType::Tet10 } else { ElementType::Tet4 },
         ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => if order >= 2 { ElementType::Hex27 } else { ElementType::Hex8 },
-        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => if order >= 2 { ElementType::Prism15 } else { ElementType::Prism6 },
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => if order >= 2 { ElementType::Prism18 } else { ElementType::Prism6 },
         ElementType::Pyramid5 | ElementType::Pyramid13 => if order >= 2 { ElementType::Pyramid13 } else { ElementType::Pyramid5 },
         _ => panic!("curved_elem_type_3d: unsupported {et:?}"),
     }
@@ -1207,5 +1225,93 @@ mod tests {
         let fine2_amr = refine_uniform_3d(&mesh2);
         assert_eq!(fine2.n_elems, fine2_amr.n_elems(), "Prism P1: curved vs AMR");
         assert_eq!(fine2.n_nodes, fine2_amr.n_nodes(), "Prism P1: curved vs AMR node count");
+    }
+
+    // ── D613: label ↔ table-slot contract of `curved_elem_type_3d` ─────────
+    //
+    // MFEM 4.10 truth (SetCurvature(2) meshes, probe
+    // `tmp/d612/mfem_curved_npe.log`): tet 10 / hex 27 / wedge 18 / pyramid 15
+    // geometry slots.  The writer's label must satisfy: the label's *table*
+    // family (`curved_geometry_ref_elem_3d`) has exactly MFEM's slot count,
+    // and — where a connectivity label with a matching node count exists —
+    // the label itself carries that count (wedge → Prism18; the pyramid has
+    // no 15-node connectivity label, so Pyramid13 stays as the D581
+    // connectivity-type label and the 15-slot table length rides on
+    // `CurvedMesh::nodes_per_elem`).
+
+    #[test]
+    fn d613_curved_elem_type_labels_match_mfem_curved_npe() {
+        // (order-2 label, MFEM SetCurvature(2) slot count)
+        let cases = [
+            (curved_elem_type_3d(ElementType::Tet4, 2), 10, "tet"),
+            (curved_elem_type_3d(ElementType::Hex8, 2), 27, "hex"),
+            (curved_elem_type_3d(ElementType::Prism6, 2), 18, "wedge"),
+            (curved_elem_type_3d(ElementType::Pyramid5, 2), 15, "pyramid"),
+        ];
+        for (label, mfem_npe, name) in cases {
+            assert_eq!(
+                curved_geometry_ref_elem_3d(label, 2).n_dofs(),
+                mfem_npe,
+                "{name}: order-2 curved table slots vs MFEM npe"
+            );
+        }
+        // The wedge label is the 18-node connectivity type (label count =
+        // table count); the pyramid keeps the D581 connectivity label whose
+        // nodes_per_element (13) deliberately differs from the Fuentes table.
+        assert_eq!(curved_elem_type_3d(ElementType::Prism6, 2), ElementType::Prism18);
+        assert_eq!(ElementType::Prism18.nodes_per_element(), 18);
+        assert_eq!(curved_elem_type_3d(ElementType::Pyramid5, 2), ElementType::Pyramid13);
+        assert_eq!(ElementType::Pyramid13.nodes_per_element(), 13);
+        // Linear stays linear for every family.
+        for et in [ElementType::Tet4, ElementType::Hex8, ElementType::Prism6, ElementType::Pyramid5] {
+            assert_eq!(curved_elem_type_3d(et, 1), et);
+        }
+    }
+
+    #[test]
+    fn d613_refine_curved_3d_general_wedge_label_is_prism18() {
+        // The refine flow's re-interpolated CurvedMesh must carry the label
+        // whose node count equals its own table (`nodes_per_elem`).
+        let coords: Vec<f64> = vec![
+            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,
+        ];
+        let mesh: Mesh<3> = Mesh {
+            coords,
+            conn: vec![0u32, 1, 2, 3, 4, 5],
+            elem_tags: vec![1],
+            elem_type: ElementType::Prism6,
+            face_conn: vec![0u32, 2, 1, 3, 4, 5],
+            face_tags: vec![1, 2],
+            face_type: ElementType::Tri3,
+            elem_types: None, elem_offsets: None, face_types: None, face_offsets: None,
+            face_to_elem: None, edge_conn: vec![], edge_to_elem: vec![],
+            geometry: None, nc_vertex_view: None, vertex_parents: vec![],
+        };
+        // An order-2 wedge CurvedMesh: elevate via the general refiner's own
+        // family, then refine and check the emitted label contract.
+        let curved: CurvedMesh<3> = CurvedMesh {
+            coords: mesh.coords.clone(),
+            geom_conn: vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+            ],
+            geom_order: 2,
+            nodes_per_elem: 18,
+            elem_type: ElementType::Prism6,
+            n_elems: 1,
+            n_nodes: 18,
+            face_conn: mesh.face_conn.clone(),
+            face_tags: mesh.face_tags.clone(),
+            face_type: mesh.face_type,
+            elem_tags: mesh.elem_tags.clone(),
+        };
+        // The family that reads this table must have exactly the table's slot
+        // count (18) — the contract the refine flow's `npe` is derived from.
+        let geo = curved_geometry_ref_elem_3d(ElementType::Prism18, 2);
+        assert_eq!(geo.n_dofs(), curved.nodes_per_elem);
+        assert_eq!(
+            curved_elem_type_3d(curved.elem_type, curved.geom_order),
+            ElementType::Prism18
+        );
     }
 }

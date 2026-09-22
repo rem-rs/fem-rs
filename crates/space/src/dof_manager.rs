@@ -477,10 +477,18 @@ impl DofManager {
                     if mesh.n_elements() > 0 {
                         let npe = mesh.element_nodes(0).len();
                         match npe {
-                            6 => Self::build_prism_h1(mesh, 2),
+                            // D613: quadratic-connectivity rows route to their
+                            // topology's builder — the H1 numbering is the
+                            // complete MFEM family's (entity-based), the
+                            // geometry table length is a mesh-side fact:
+                            // Prism15/18 rows → 18-dof wedge numbering,
+                            // Pyramid13 rows → the Fuentes numbering,
+                            // Hex20/Hex27 rows → the Q2 hex numbering.
+                            6 | 15 | 18 => Self::build_prism_h1(mesh, 2),
                             // D191: unified MFEM entity-order pyramid builder.
-                            5 => Self::build_pyramid_pk(mesh, 2, pyr),
-                            8 => Self::build_q2_hex(mesh),
+                            5 | 13 => Self::build_pyramid_pk(mesh, 2, pyr),
+                            8 | 20 | 27 => Self::build_q2_hex(mesh),
+                            4 | 10 => Self::build_tet_h1(mesh, 2),
                             _ => Self::build_pk(mesh, 2, pyr),
                         }
                     } else {
@@ -498,15 +506,16 @@ impl DofManager {
             3 => {
                 if topo_dim == 3 && mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
-                    if npe == 6 { return Self::build_prism_h1(mesh, 3); }
+                    if npe == 6 || npe == 15 || npe == 18 { return Self::build_prism_h1(mesh, 3); }
                     // D191: unified MFEM entity-order pyramid builder.
-                    if npe == 5 { return Self::build_pyramid_pk(mesh, 3, pyr); }
+                    if npe == 5 || npe == 13 { return Self::build_pyramid_pk(mesh, 3, pyr); }
+                    // Quad Q3 / Hex Q3 via general pk path (D613: the
+                    // quadratic-connectivity hex rows ride along).
+                    if npe == 8 || npe == 20 || npe == 27 { return Self::build_pk_hex(mesh, order); }
                 }
-                // Quad Q3 / Hex Q3 via general pk path
                 if mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
-                    if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
                 }
                 Self::build_pk(mesh, 3, pyr)
             }
@@ -515,9 +524,9 @@ impl DofManager {
                 if mesh.n_elements() > 0 {
                     let npe = mesh.element_nodes(0).len();
                     if npe == 4 && topo_dim == 2 { return Self::build_pk_quad(mesh, order); }
-                    if npe == 8 && topo_dim == 3 { return Self::build_pk_hex(mesh, order); }
-                    if npe == 6 && topo_dim == 3 { return Self::build_prism_h1(mesh, order); }
-                    if npe == 5 && topo_dim == 3 {
+                    if npe == 8 || npe == 20 || npe == 27 { return Self::build_pk_hex(mesh, order); }
+                    if npe == 6 || npe == 15 || npe == 18 { return Self::build_prism_h1(mesh, order); }
+                    if npe == 5 || npe == 13 {
                         return Self::build_pyramid_pk(mesh, order, pyr);
                     }
                 }
@@ -1298,8 +1307,9 @@ impl DofManager {
             let ns = mesh.element_nodes(e);
             let base = e as usize * dofs_per_elem;
 
-            // Vertices (positions 0..8)
-            for (k, &n) in ns.iter().enumerate() {
+            // Vertices (positions 0..8) — the first 8 conn slots of any hex
+            // row (Hex8, Hex20, Hex27 alike, D613).
+            for (k, &n) in ns.iter().take(8).enumerate() {
                 dofs_flat[base + k] = n;
             }
 
@@ -1362,7 +1372,7 @@ impl DofManager {
             let ns = mesh.element_nodes(e);
             let vbase = vol_dof * dim;
             for d in 0..dim {
-                dof_coords[vbase + d] = ns.iter().map(|&n| mesh.node_coords(n)[d]).sum::<f64>() / 8.0;
+                dof_coords[vbase + d] = ns.iter().take(8).map(|&n| mesh.node_coords(n)[d]).sum::<f64>() / 8.0;
             }
         }
 
@@ -2361,12 +2371,14 @@ impl DofManager {
         let dim = mesh.dim() as usize;
         let topo_dim = mesh.topological_dim() as usize;
         let p = order as usize;
-        // Prism/pyramid/tet dispatch for general order
+        // Prism/pyramid/tet dispatch for general order (D613: the
+        // quadratic-connectivity rows ride along with their topology's
+        // complete-family builder).
         if topo_dim == 3 && mesh.n_elements() > 0 {
             let npe = mesh.element_nodes(0).len();
-            if npe == 6 { return Self::build_prism_h1(mesh, order); }
-            if npe == 5 { return Self::build_pyramid_pk(mesh, order, pyr); }
-            if npe == 4 { return Self::build_tet_h1(mesh, order); }
+            if npe == 6 || npe == 15 || npe == 18 { return Self::build_prism_h1(mesh, order); }
+            if npe == 5 || npe == 13 { return Self::build_pyramid_pk(mesh, order, pyr); }
+            if npe == 4 || npe == 10 { return Self::build_tet_h1(mesh, order); }
         }
         let n_nodes = mesh.n_nodes();
         let n_elems = mesh.n_elements();
