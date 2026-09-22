@@ -2753,10 +2753,20 @@ fn interp_rows(elem_type: ElementType, order: u8) -> Vec<InterpRow> {
             }
         }
         // PRISM_FACES slot order: xi=0 tri, xi=1 tri, zeta=0 quad, diagonal
-        // quad (eta+zeta=1), eta=0 quad.
+        // quad (eta+zeta=1), eta=0 quad.  D584: the normals are the
+        // `RT0WdgFiniteElement` nk table (`fe_fixed_order.cpp:6439`) — the
+        // triangular-face rows carry n̂|F| = ±½ (the quad-face rows coincide
+        // with the generic `RT_WedgeElement` table) — the same convention as
+        // the `PrismRT0` k = 0 basis (D572: slots 0,1 doubled) and the stored
+        // dofs (dof = f·adj(J)·n̂|F|), so the reference dual is the identity
+        // and the interpolation solve returns the nodal flux samples
+        // verbatim.  (With the historical generic rows — ±1 = 2·n̂|F| on the
+        // triangular faces — the dual was diag(2,2,1,1,1) and the solve undid
+        // the 2× — same stored values, but the table then stated a convention
+        // no MFEM collection pairs with its basis.)
         ElementType::Prism6 => {
-            rows.push(InterpRow { xi: [0.0, 1.0 / 3.0, 1.0 / 3.0], nk: [-1.0, 0.0, 0.0] });
-            rows.push(InterpRow { xi: [1.0, 1.0 / 3.0, 1.0 / 3.0], nk: [1.0, 0.0, 0.0] });
+            rows.push(InterpRow { xi: [0.0, 1.0 / 3.0, 1.0 / 3.0], nk: [-0.5, 0.0, 0.0] });
+            rows.push(InterpRow { xi: [1.0, 1.0 / 3.0, 1.0 / 3.0], nk: [0.5, 0.0, 0.0] });
             rows.push(InterpRow { xi: [0.5, 0.5, 0.0], nk: [0.0, 0.0, -1.0] });
             rows.push(InterpRow { xi: [0.5, 0.5, 0.5], nk: [0.0, 1.0, 1.0] });
             rows.push(InterpRow { xi: [0.5, 0.0, 0.5], nk: [0.0, -1.0, 0.0] });

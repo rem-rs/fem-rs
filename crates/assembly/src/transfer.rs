@@ -1323,8 +1323,21 @@ fn hdiv_rt_slot_rows(family: HdivRt0Family, order: u8) -> Option<Vec<([f64; 3], 
             // mirroring `HDivSpace`'s prism `interp_rows`.  Faces: bottom
             // tri, top tri, front quad (zeta = 0), right quad
             // (eta + zeta = 1), left quad (eta = 0) in MFEM slot order.
-            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-1.0, 0.0, 0.0]),
-            ([1.0, 1.0 / 3.0, 1.0 / 3.0], [1.0, 0.0, 0.0]),
+            // D584: the triangular-face rows carry the `RT0WdgFiniteElement`
+            // nk (n̂|F| = ±½, `fe_fixed_order.cpp:6439` — the quad rows
+            // coincide with the generic table), matching the D572 `PrismRT0`
+            // basis (tri slots doubled) and the stored dofs (physical face
+            // fluxes); the reference dual is the identity, so the
+            // prolongation rows P = B are MFEM's RT0Wdg
+            // `GetLocalInterpolation` (`fe_fixed_order.cpp:6442`) directly.
+            // (The historical generic ±1 rows made W = diag(2,2,1,1,1) and
+            // P = B·W⁻¹ landed on the generic collection's rows — entrywise
+            // equal to RT0Wdg's on prism refinements, whose children are
+            // ENGINE-frame-aligned, but stated in a convention no MFEM
+            // collection pairs with its basis; see
+            // `tests/d584_prism_skew_prolongation.rs`.)
+            ([0.0, 1.0 / 3.0, 1.0 / 3.0], [-0.5, 0.0, 0.0]),
+            ([1.0, 1.0 / 3.0, 1.0 / 3.0], [0.5, 0.0, 0.0]),
             ([0.5, 0.5, 0.0], [0.0, 0.0, -1.0]),
             ([0.5, 0.5, 0.5], [0.0, 1.0, 1.0]),
             ([0.5, 0.0, 0.5], [0.0, -1.0, 0.0]),
@@ -1860,6 +1873,45 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
 
     let maps = HdivVertexMaps::build(coarse.mesh(), fine.mesh(), true);
 
+    // D584: coincident fine vertices make the midpoint→fine-node correlation
+    // scan-order dependent — whenever two coarse edges' midpoints coincide
+    // (pinched diagonal splits: two prisms sharing one diagonal of a face
+    // while two others carry the crossing diagonal refine to two distinct
+    // fine nodes at the same coordinates), a plain nearest-node lookup hands
+    // BOTH coarse edges the first twin, starving one wedge's extended vertex
+    // set and declining the whole exact path.  The coordinate is the reliable
+    // identity, so every inserted node is expanded by its coordinate twins
+    // (1e-9 grid) before the subset scan; genuinely ambiguous children are
+    // then disambiguated by the centroid test below and verified against the
+    // frame.
+    let mut coord_twins: HashMap<u32, Vec<u32>> = HashMap::new();
+    {
+        let dim_f = dim;
+        let mut by_key: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+        for n in 0..fine.mesh().n_nodes() as u32 {
+            let c = fine.mesh().node_coords(n);
+            let key = [
+                (c[0] * 1e9).round() as i64,
+                (c[1] * 1e9).round() as i64,
+                if dim_f >= 3 { (c[2] * 1e9).round() as i64 } else { 0 },
+            ];
+            by_key.entry(key).or_default().push(n);
+        }
+        for group in by_key.into_values() {
+            if group.len() > 1 {
+                for &n in &group {
+                    coord_twins.insert(n, group.clone());
+                }
+            }
+        }
+    }
+    let mut insert_with_twins = |set: &mut HashSet<u32>, n: u32| {
+        set.insert(n);
+        if let Some(twins) = coord_twins.get(&n) {
+            set.extend(twins.iter().copied());
+        }
+    };
+
     // Per coarse element, the fine-node set a uniform-refinement child may draw
     // its vertices from: own vertices + edge midpoints + (hex) quad-face
     // centers + (quad/hex) body center.  Every child's vertex set is contained
@@ -1872,7 +1924,7 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
         let mut set: HashSet<u32> = nodes.iter().copied().collect();
         for &(li, lj) in edges {
             if let Some(&m) = maps.midpoint_map.get(&(nodes[li], nodes[lj])) {
-                set.insert(m);
+                insert_with_twins(&mut set, m);
             }
         }
         if matches!(
@@ -1897,12 +1949,12 @@ fn build_prolongation_hdiv_rt_mfem<M: MeshTopology>(
                 let mut key = [nodes[fv[0]], nodes[fv[1]], nodes[fv[2]], nodes[fv[3]]];
                 key.sort_unstable();
                 if let Some(&c) = maps.quad_center_map.get(&key) {
-                    set.insert(c);
+                    insert_with_twins(&mut set, c);
                 }
             }
         }
         if let Some(&c) = maps.body_center_map.get(&e) {
-            set.insert(c);
+            insert_with_twins(&mut set, c);
         }
         extended.insert(e, set);
     }
