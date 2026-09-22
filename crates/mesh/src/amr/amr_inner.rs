@@ -870,14 +870,29 @@ pub fn mark_tri_mesh_for_refinement(mesh: &mut Mesh<2>) {
         }
         debug_assert!(end <= mesh.conn.len());
         // D179: permute the geometry table slots with the same rotation.
-        if let Some(ref mut geo) = mesh.geometry {
-            let npe = geo.nodes_per_elem;
+        // D624: a ragged (mixed) table stores per-family rows — the tri row
+        // length is still the H1 triangle count, addressed through the mesh's
+        // row range instead of the uniform stride.  (Row addressing happens
+        // before the geometry borrow.)
+        let mut geo_rot: Option<(usize, usize)> = None;
+        if let Some(geo) = mesh.geometry.as_ref() {
             let order = geo.order as usize;
-            if npe != (order + 1) * (order + 2) / 2 || geo.conn.len() < (e as usize + 1) * npe {
-                continue; // not a triangle geometry table in H1TriPk slot order
+            let dpe = (order + 1) * (order + 2) / 2;
+            if geo.nodes_per_elem != 0 {
+                if geo.nodes_per_elem == dpe && geo.conn.len() >= (e as usize + 1) * dpe {
+                    geo_rot = Some((e as usize * dpe, dpe));
+                }
+            } else if geo.conn.len() >= (e as usize + 1) * dpe
+                && crate::h1_family_dofs(mesh.element_type_at(e), geo.order) == dpe
+            {
+                let (s, t) = mesh.geometry_row_range(e);
+                geo_rot = Some((s, t - s));
             }
+        }
+        if let Some((base, npe)) = geo_rot {
+            let geo = mesh.geometry.as_mut().expect("geometry present");
+            let order = geo.order as usize;
             let perm = perms[shift].get_or_insert_with(|| tri_geo_slot_perm(order, shift));
-            let base = e as usize * npe;
             let rotated: Vec<NodeId> = perm.iter().map(|&o| geo.conn[base + o]).collect();
             geo.conn[base..base + npe].copy_from_slice(&rotated);
         }
@@ -1080,7 +1095,7 @@ fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
         new_face_tags.push(tag);
     }
 
-    Mesh {
+    let mut new_mesh = Mesh {
         coords: new_coords,
         conn: child_conn,
         elem_tags: child_tags,
@@ -1098,7 +1113,386 @@ fn refine_uniform_2d_mixed(mesh: &Mesh<2>) -> Mesh<2> {
         geometry: None,
             nc_vertex_view: None,
 vertex_parents: vec![],
+};
+    // D624: a curved (order-p ≥ 2) mixed parent propagates its geometry —
+    // MFEM's `UniformRefinement` + `nodes` update restricts the parent's
+    // isoparametric map onto every child (`refine_mixed_2d_geometry`).
+    if mesh.geometry.as_ref().is_some_and(|g| g.order >= 2) {
+        refine_mixed_2d_geometry(mesh, &mut new_mesh, edge_list, oedge, oelem);
+    }
+    new_mesh
 }
+
+/// D624: propagate an order-`p ≥ 2` mixed (Tri3 + Quad4) parent geometry onto
+/// the uniformly refined child mesh ([`refine_uniform_2d_mixed`]).
+///
+/// MFEM's curved `UniformRefinement` restricts the parent's isoparametric
+/// map onto every child (the `nodes` grid function prolongation): each child
+/// dof value is the parent geometry polynomial evaluated at the child dof's
+/// pre-image in the parent reference element.  Shared dofs are shared
+/// exactly:
+///
+/// * vertex slots → the refined mesh's vertices (their coordinates come from
+///   the parent field too — the edge midpoint is an exact parent edge-dof
+///   pick only when the closed GLL lattice contains 1/2, so every new vertex
+///   is *evaluated*, never averaged);
+/// * edge slots → one geometry node per (fine edge, canonical GLL position),
+///   shared by every child touching that fine edge — the parents' traces on
+///   a shared edge agree because an H1 trace is pinned by its `p + 1` nodal
+///   values;
+/// * interior slots → element-private nodes.
+///
+/// Child rows are laid out in each family's consumer slot order
+/// (`H1TriPk` / `QuadQk` dof tables — the order `Mesh::element_jacobian`
+/// evaluates), and the child table is attached **ragged**
+/// (`GeometryData::nodes_per_elem == 0`).
+fn refine_mixed_2d_geometry(
+    parent: &Mesh<2>,
+    child: &mut Mesh<2>,
+    edge_list: Vec<(NodeId, NodeId)>,
+    oedge: usize,
+    oelem: usize,
+) {
+    use fem_element::lagrange::factory::{H1TriPk, QuadQk};
+    use fem_element::ReferenceElement;
+
+    let geo = parent.geometry.as_ref().expect("parent geometry");
+    let p = geo.order.max(1) as usize;
+    const DIM: usize = 2;
+    // 1-D closed GLL parameters on [0,1] (the lattice every boundary slot of
+    // both families sits on).
+    let (gx, _) = fem_element::quadrature::gauss_lobatto_arbitrary(p + 1);
+    let gll: Vec<f64> = gx.iter().map(|&x| 0.5 * (x + 1.0)).collect();
+
+    let tri = H1TriPk::new(p);
+    let quad = QuadQk::new(p);
+    let tri_coords = tri.dof_coords();
+    let quad_coords = quad.dof_coords();
+
+    /// Parent-field evaluation: Σ_k φ_k(ξ_p)·X_k over the parent's geometry
+    /// row (`row` holds geometry-node ids, `coords` the geometry table).
+    fn eval_parent(
+        tri: &H1TriPk,
+        quad: &QuadQk,
+        is_tri: bool,
+        row: &[usize],
+        coords: &[f64],
+        xi: &[f64; 2],
+    ) -> [f64; DIM] {
+        let mut phi = vec![0.0f64; row.len()];
+        if is_tri {
+            tri.eval_basis(xi, &mut phi);
+        } else {
+            quad.eval_basis(xi, &mut phi);
+        }
+        let mut out = [0.0f64; DIM];
+        for (k, &g) in row.iter().enumerate() {
+            out[0] += phi[k] * coords[g * 2];
+            out[1] += phi[k] * coords[g * 2 + 1];
+        }
+        out
+    }
+
+    // Parent geometry rows materialised once (ragged-aware addressing).
+    let parent_rows: Vec<Vec<usize>> = (0..parent.n_elems() as ElemId)
+        .map(|e| parent.geometry_row(e).iter().map(|&n| n as usize).collect())
+        .collect();
+
+    // ── New-vertex coordinates from the parent field ────────────────────────
+    // Local edge (corner index) tables — MFEM tri/quad edge order.
+    const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+    const QUAD_EDGES: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+    let mut coords = child.coords.clone();
+    // Reference midpoints of the parent's local edges (direction-free).
+    const TRI_EDGE_MID: [[f64; 2]; 3] = [[0.5, 0.0], [0.5, 0.5], [0.0, 0.5]];
+    const QUAD_EDGE_MID: [[f64; 2]; 4] = [[0.5, 0.0], [1.0, 0.5], [0.5, 1.0], [0.0, 0.5]];
+    // The parent edges in el_to_edge order (`edge_list`): id k's midpoint is
+    // the fine vertex `oedge + k`.  The **fine** edges a child's geometry
+    // slots live on come in three classes, all needing their own shared
+    // geometry-node slots: the two halves of every parent edge, the tri
+    // parent's three mid-mid edges (the central triangle's sides), and the
+    // quad parent's four mid-center edges.
+    let mut fine_edge_ids: HashMap<(NodeId, NodeId), usize> =
+        HashMap::with_capacity(4 * edge_list.len());
+    let mut next_fe = 0usize;
+    for (k, &(a, b)) in edge_list.iter().enumerate() {
+        let m = (oedge + k) as NodeId;
+        for key in [(a.min(m), a.max(m)), (b.min(m), b.max(m))] {
+            fine_edge_ids.entry(key).or_insert_with(|| {
+                next_fe += 1;
+                next_fe - 1
+            });
+        }
+    }
+    {
+        // per-parent interior fine edges (mid-mid / mid-center)
+        let mut quad_counter = 0usize;
+        for e in 0..parent.n_elems() as ElemId {
+            let et = parent.element_type_at(e);
+            let ns = parent.elem_nodes(e);
+            let mids: Vec<NodeId> = match et {
+                ElementType::Tri3 | ElementType::Tri6 => TRI_EDGES
+                    .iter()
+                    .map(|&(a, b)| {
+                        let key = (ns[a].min(ns[b]), ns[a].max(ns[b]));
+                        (oedge + edge_list.iter().position(|&k| k == key).expect("edge")) as NodeId
+                    })
+                    .collect(),
+                _ => QUAD_EDGES
+                    .iter()
+                    .map(|&(a, b)| {
+                        let key = (ns[a].min(ns[b]), ns[a].max(ns[b]));
+                        (oedge + edge_list.iter().position(|&k| k == key).expect("edge")) as NodeId
+                    })
+                    .collect(),
+            };
+            if matches!(et, ElementType::Tri3 | ElementType::Tri6) {
+                // central triangle: (m0,m1), (m1,m2), (m2,m0)
+                for i in 0..3 {
+                    let (u, v) = (mids[i], mids[(i + 1) % 3]);
+                    fine_edge_ids.entry((u.min(v), u.max(v))).or_insert_with(|| {
+                        next_fe += 1;
+                        next_fe - 1
+                    });
+                }
+            } else {
+                // quad: (m_k, center) for each local edge k
+                let c = (oelem + quad_counter) as NodeId;
+                quad_counter += 1;
+                for &m in &mids {
+                    fine_edge_ids.entry((m.min(c), m.max(c))).or_insert_with(|| {
+                        next_fe += 1;
+                        next_fe - 1
+                    });
+                }
+            }
+        }
+    }
+    // First-encounter owner (parent element, local edge) per parent edge id —
+    // the same walk that built `edge_list`, so the k-th insertion IS edge k.
+    let mut edge_owner: Vec<(ElemId, usize)> = vec![(0, 0); edge_list.len()];
+    {
+        let mut seen: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+        let mut next = 0usize;
+        for e in 0..parent.n_elems() as ElemId {
+            let et = parent.element_type_at(e);
+            let ns = parent.elem_nodes(e);
+            let is_tri = matches!(et, ElementType::Tri3 | ElementType::Tri6);
+            let edges: &[(usize, usize)] = if is_tri { &TRI_EDGES } else { &QUAD_EDGES };
+            for (li, &(a, b)) in edges.iter().enumerate() {
+                let key: (NodeId, NodeId) = (ns[a].min(ns[b]), ns[a].max(ns[b]));
+                if seen.insert(key, 0).is_none() {
+                    edge_owner[next] = (e, li);
+                    next += 1;
+                }
+            }
+        }
+        debug_assert_eq!(next, edge_list.len(), "edge_list must be complete");
+    }
+    for (k, _) in edge_list.iter().enumerate() {
+        let (owner, li) = edge_owner[k];
+        let et = parent.element_type_at(owner);
+        let is_tri = matches!(et, ElementType::Tri3 | ElementType::Tri6);
+        let mid_ref = if is_tri { TRI_EDGE_MID[li] } else { QUAD_EDGE_MID[li] };
+        let xy = eval_parent(
+            &tri,
+            &quad,
+            is_tri,
+            &parent_rows[owner as usize],
+            &geo.coords,
+            &mid_ref,
+        );
+        let vi = oedge + k;
+        coords[vi * DIM] = xy[0];
+        coords[vi * DIM + 1] = xy[1];
+    }
+    // Quad centers: the parent quad field at its reference center.
+    let mut quad_counter = 0usize;
+    for e in 0..parent.n_elems() as ElemId {
+        if parent.element_type_at(e) != ElementType::Quad4 {
+            continue;
+        }
+        let xy = eval_parent(
+            &tri,
+            &quad,
+            false,
+            &parent_rows[e as usize],
+            &geo.coords,
+            &[0.5, 0.5],
+        );
+        let vi = oelem + quad_counter;
+        quad_counter += 1;
+        coords[vi * DIM] = xy[0];
+        coords[vi * DIM + 1] = xy[1];
+    }
+
+    // ── Shared fine-edge geometry nodes: (fine edge id, canonical GLL pos) ──
+    let mut edge_nodes: Vec<Option<NodeId>> = vec![None; fine_edge_ids.len() * (p - 1)];
+    // The geometry table's id space shares the fine mesh's vertex ids (a
+    // vertex slot's node id IS the fine vertex), so `geom_coords` must carry
+    // the (curvature-corrected) fine vertex coordinates as its prefix and the
+    // new edge/interior dofs continue after them.
+    let mut next_id = child.n_nodes() as NodeId;
+    let mut geom_coords: Vec<f64> = Vec::new();
+
+    // Child corner tables in the parent frame, per child index 0..4.  Tri:
+    // barycentric triples of the child's vertices; quad: the (x, y) origin
+    // (each child is the unit square scaled by 1/2).
+    const TRI_CHILD_CORNERS: [[[f64; 3]; 3]; 4] = [
+        [[1.0, 0.0, 0.0], [0.5, 0.5, 0.0], [0.5, 0.0, 0.5]],
+        [[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]],
+        [[0.5, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.5, 0.5]],
+        [[0.5, 0.0, 0.5], [0.0, 0.5, 0.5], [0.0, 0.0, 1.0]],
+    ];
+    const QUAD_CHILD_ORIGIN: [[f64; 2]; 4] = [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]];
+    const TRI_CHILD_EDGES: [[usize; 2]; 3] = [[0, 1], [1, 2], [2, 0]];
+    const QUAD_CHILD_EDGES: [[usize; 2]; 4] = [[0, 1], [1, 2], [2, 3], [3, 0]];
+
+    let mut conn: Vec<NodeId> = Vec::with_capacity(child.conn.len() * 2);
+    let mut ci = 0usize;
+    for e in 0..parent.n_elems() as ElemId {
+        let et = parent.element_type_at(e);
+        let is_tri = matches!(et, ElementType::Tri3 | ElementType::Tri6);
+        let row = &parent_rows[e as usize];
+        let n_slots = if is_tri { tri_coords.len() } else { quad_coords.len() };
+        let mut conn_row: Vec<NodeId> = vec![0; n_slots];
+        for c in 0..4 {
+            let child_cns = child.elem_nodes(ci as ElemId);
+            for s in 0..n_slots {
+                let dc: &[f64] = if is_tri { &tri_coords[s] } else { &quad_coords[s] };
+                let (xc, yc) = (dc[0], dc[1]);
+                // Child dof position → parent reference position: child 0..4
+                // are the MFEM children [v0,e0,e2]/[e1,e2,e0]/[e0,v1,e1]/
+                // [e2,e1,v2] (tri) and [v0,e0,C,e3]/[e0,v1,e1,C]/[C,e1,v2,
+                // e2]/[e3,C,e2,v3] (quad).
+                let xi_p: [f64; 2] = if is_tri {
+                    let lam = [1.0 - xc - yc, xc, yc];
+                    let mut lam_p = [0.0f64; 3];
+                    for (i, &l) in lam.iter().enumerate() {
+                        for j in 0..3 {
+                            lam_p[j] += l * TRI_CHILD_CORNERS[c][i][j];
+                        }
+                    }
+                    [lam_p[1], lam_p[2]]
+                } else {
+                    [
+                        QUAD_CHILD_ORIGIN[c][0] + 0.5 * xc,
+                        QUAD_CHILD_ORIGIN[c][1] + 0.5 * yc,
+                    ]
+                };
+                // Get-or-create a shared fine-edge geometry node.
+                let mut edge_shared = |fe: usize, t: usize, value: [f64; 2]| -> NodeId {
+                    let slot = fe * (p - 1) + t;
+                    if let Some(id) = edge_nodes[slot] {
+                        return id;
+                    }
+                    let nid = next_id;
+                    next_id += 1;
+                    geom_coords.extend_from_slice(&value);
+                    edge_nodes[slot] = Some(nid);
+                    nid
+                };
+                let value = || eval_parent(&tri, &quad, is_tri, row, &geo.coords, &xi_p);
+                let id: NodeId = if is_tri {
+                    let lam = [1.0 - xc - yc, xc, yc];
+                    let zeros: Vec<usize> = (0..3).filter(|&m| lam[m].abs() < 1e-12).collect();
+                    match zeros.len() {
+                        2 => {
+                            let v = (0..3).find(|&m| lam[m].abs() > 1e-12).unwrap();
+                            child_cns[v]
+                        }
+                        1 => {
+                            let k = TRI_CHILD_EDGES
+                                .iter()
+                                .position(|&[a, b]| a != zeros[0] && b != zeros[0])
+                                .expect("tri edge slot");
+                            let b = TRI_CHILD_EDGES[k][1];
+                            let mut t = gll
+                                .iter()
+                                .position(|&g| (g - lam[b]).abs() < 1e-12)
+                                .expect("slot on the GLL lattice")
+                                - 1;
+                            let (u, v) = (
+                                child_cns[TRI_CHILD_EDGES[k][0]],
+                                child_cns[TRI_CHILD_EDGES[k][1]],
+                            );
+                            // Canonical edge direction (u < v) so both fine
+                            // children sharing the edge hit the same node.
+                            if u > v {
+                                t = p - 2 - t;
+                            }
+                            let fe = fine_edge_ids[&(u.min(v), u.max(v))];
+                            edge_shared(fe, t, value())
+                        }
+                        _ => {
+                            let nid = next_id;
+                            next_id += 1;
+                            geom_coords.extend_from_slice(&value());
+                            nid
+                        }
+                    }
+                } else {
+                    let pi = p as f64;
+                    let (i, j) = ((xc * pi).round() as usize, (yc * pi).round() as usize);
+                    let bnd = [i == 0 || i == p, j == 0 || j == p];
+                    match bnd.iter().filter(|&&b| b).count() {
+                        2 => match (i / p, j / p) {
+                            (0, 0) => child_cns[0],
+                            (1, 0) => child_cns[1],
+                            (1, 1) => child_cns[2],
+                            _ => child_cns[3],
+                        },
+                        1 => {
+                            // Local edge 0: bottom (j=0), 1: right (i=p),
+                            // 2: top (j=p), 3: left (i=0); t from the edge's
+                            // first vertex.
+                            let (k, mut t) = if j == 0 {
+                                (0, i - 1)
+                            } else if i == p {
+                                (1, j - 1)
+                            } else if j == p {
+                                (2, p - 1 - i)
+                            } else {
+                                (3, p - 1 - j)
+                            };
+                            let (u, v) = (
+                                child_cns[QUAD_CHILD_EDGES[k][0]],
+                                child_cns[QUAD_CHILD_EDGES[k][1]],
+                            );
+                            if u > v {
+                                t = p - 2 - t;
+                            }
+                            let fe = fine_edge_ids[&(u.min(v), u.max(v))];
+                            edge_shared(fe, t, value())
+                        }
+                        _ => {
+                            let nid = next_id;
+                            next_id += 1;
+                            geom_coords.extend_from_slice(&value());
+                            nid
+                        }
+                    }
+                };
+                conn_row[s] = id;
+            }
+            conn.extend_from_slice(&conn_row);
+            ci += 1;
+        }
+    }
+
+    child.coords = coords;
+    child.invalidate_locators();
+    // Geometry coords: the fine vertices' (corrected) coordinates first — a
+    // vertex slot's node id is the fine vertex id — then the new nodes.
+    let mut geo_coords_full = child.coords.clone();
+    geo_coords_full.extend_from_slice(&geom_coords);
+    child.geometry = Some(crate::simplex::GeometryData {
+        order: p as u8,
+        conn,
+        nodes_per_elem: 0,
+        coords: geo_coords_full,
+        n_nodes: next_id as usize,
+    });
 }
 
 /// Conforming Quad4 uniform refinement matching MFEM's UniformRefinement2D_base.
@@ -1819,6 +2213,17 @@ fn mark_edge_tri(n: &mut [u32; 3], len: impl Fn(u32, u32) -> usize) {
 /// (`refine_nonconforming_3d_internal`) is the pure-tet analogue of this
 /// function and does carry geometry.
 fn refine_mixed_3d(mesh: &Mesh<3>) -> Mesh<3> {
+    // D624: the reader now attaches mixed 3-D geometry (ragged tables), so a
+    // curved mixed parent is *reachable* here — the 3-D propagation (hex
+    // 8-way, prism/pyramid splits with interpolated children geometry) is
+    // still unimplemented (D628); never drop the curvature silently.
+    if mesh.geometry.as_ref().is_some_and(|g| g.order >= 2) {
+        eprintln!(
+            "warning (D628): refining a curved mixed 3-D mesh drops the high-order `nodes` \
+             geometry (per-family 3-D propagation is not implemented); the refined mesh is \
+             straight-sided"
+        );
+    }
     let n_elems = mesh.n_elems();
     let mut coords = mesh.coords.clone();
     let mut em: HashMap<(NodeId, NodeId), NodeId> = HashMap::new();

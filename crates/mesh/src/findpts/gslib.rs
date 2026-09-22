@@ -253,14 +253,11 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
     /// exact between nodes) plus a small safety margin.
     pub(crate) fn geometry_aabbs(mesh: &Mesh<D>) -> Vec<super::bvh::Aabb<D>> {
         let g = mesh.geometry.as_ref();
-        let npe: usize = match g {
-            Some(g) => g.nodes_per_elem,
-            None => 0,
-        };
         (0..mesh.n_elems() as ElemId)
             .map(|e| {
                 let ids: Vec<u32> = match g {
-                    Some(g) => g.conn[e as usize * npe..(e as usize + 1) * npe].to_vec(),
+                    // D624: ragged (mixed) tables have per-family row lengths.
+                    Some(_) => mesh.geometry_row(e).to_vec(),
                     None => mesh.elem_nodes(e).to_vec(),
                 };
                 let coord = |id: u32| -> [f64; D] {
@@ -465,7 +462,9 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
                     (fe.n_dofs(), table)
                 };
             let conn: Vec<u32> = match g {
-                Some(g) => g.conn[e as usize * npe..(e as usize + 1) * npe].to_vec(),
+                // D624: ragged (mixed) tables have per-family row lengths —
+                // use the mesh's row addressing, not the family stride.
+                Some(_) => self.mesh.geometry_row(e).to_vec(),
                 None => ns.to_vec(),
             };
             let coord = |k: usize| -> [f64; D] {
@@ -477,7 +476,9 @@ impl<'a, const D: usize> GslibFindPoints<'a, D> {
             };
             let mut best_k = 0usize;
             let mut best_d2 = f64::INFINITY;
-            for k in 0..npe {
+            // D624: a ragged row's length is the family count; clamp to the
+            // table so a family/count mismatch cannot index `rc` out of range.
+            for k in 0..npe.min(conn.len()) {
                 let c = coord(k);
                 let d2: f64 = (0..D).map(|d| (c[d] - p[d]) * (c[d] - p[d])).sum();
                 if d2 < best_d2 {

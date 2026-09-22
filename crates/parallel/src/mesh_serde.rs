@@ -143,8 +143,21 @@ pub fn encode_submesh<const D: usize>(
         // order + nodes_per_elem + n_nodes + conn (u32[]) + coords (f64[]).
         mix_flags |= 4;
         ext_tail += 4 + 4 + 4 + g.conn.len() * 4 + g.coords.len() * 8;
+        // D624: a ragged (mixed-mesh) table adds the per-element row offsets
+        // (`n_elems + 1` u32) and bumps the wire format to 3, so a wire-2
+        // reader rejects the blob instead of mis-reading the rows.
+        if g.nodes_per_elem == 0 {
+            mix_flags |= 8;
+            ext_tail += (n_elems + 1) * 4;
+        }
     }
-    let wire_format: u32 = if mix_flags != 0 { 2 } else { 0 };
+    let wire_format: u32 = if mix_flags & 8 != 0 {
+        3
+    } else if mix_flags != 0 {
+        2
+    } else {
+        0
+    };
     if mix_flags != 0 {
         ext_tail += 4; // mix_flags word
     }
@@ -219,7 +232,7 @@ pub fn encode_submesh<const D: usize>(
     // ghosts to rank 1, breaking rank>0 owned-element queries).
     buf.extend_from_slice(bytemuck::cast_slice::<Rank, u8>(&partition.elem_owner));
 
-    if wire_format == 2 {
+    if wire_format >= 2 {
         buf.extend_from_slice(&mix_flags.to_le_bytes());
         if mix_flags & 1 != 0 {
             let eo = mesh.elem_offsets.as_ref().unwrap();
@@ -246,6 +259,16 @@ pub fn encode_submesh<const D: usize>(
             buf.extend_from_slice(&(g.order as u32).to_le_bytes());
             buf.extend_from_slice(&(g.nodes_per_elem as u32).to_le_bytes());
             buf.extend_from_slice(&(g.n_nodes as u32).to_le_bytes());
+            if mix_flags & 8 != 0 {
+                // D624: ragged rows — the per-element offsets precede `conn`
+                // so the decoder can size it (`n_elems + 1` u32, last = len).
+                for e in 0..n_elems {
+                    let (s, _) = mesh.geometry_row_range(e as ElemId);
+                    buf.extend_from_slice(&(s as u32).to_le_bytes());
+                }
+                let (_, end) = mesh.geometry_row_range((n_elems - 1) as ElemId);
+                buf.extend_from_slice(&(end as u32).to_le_bytes());
+            }
             for &x in &g.conn {
                 buf.extend_from_slice(&x.to_le_bytes());
             }
@@ -316,7 +339,7 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
 
     match header.wire_format {
         0 => {}
-        2 => {
+        2 | 3 => {
             let mix_flags = read_u32_at(buf, &mut offset)?;
             if mix_flags & 1 != 0 {
                 let mut eo = Vec::with_capacity(n_elems + 1);
@@ -346,10 +369,27 @@ pub fn decode_submesh<const D: usize>(buf: &[u8]) -> Result<(Mesh<D>, MeshPartit
                 let order = read_u32_at(buf, &mut offset)? as u8;
                 let nodes_per_elem = read_u32_at(buf, &mut offset)? as usize;
                 let n_nodes = read_u32_at(buf, &mut offset)? as usize;
-                // `conn` holds one `nodes_per_elem`-row per LOCAL element
-                // (n_local_elems × npe), NOT n_nodes × npe — n_nodes is the
-                // deduplicated geometry-node count (coords.len() / D).
-                let conn = read_u32_vec(buf, &mut offset, n_local_elems * nodes_per_elem)?;
+                // `conn` holds one row per LOCAL element.  Uniform tables:
+                // `nodes_per_elem`-rows (n_local_elems × npe).  Ragged D624
+                // tables: nodes_per_elem == 0 and a preceding per-element
+                // offsets block sizes the rows (n_nodes is the deduplicated
+                // geometry-node count, coords.len() / D, in both cases).
+                let conn = if nodes_per_elem == 0 {
+                    if mix_flags & 8 == 0 {
+                        return Err(
+                            "ragged geometry without a row-offset block (mix_flags bit 3)"
+                                .to_string(),
+                        );
+                    }
+                    let mut offs = Vec::with_capacity(n_elems + 1);
+                    for _ in 0..=n_elems {
+                        offs.push(read_u32_at(buf, &mut offset)? as usize);
+                    }
+                    let len = *offs.last().expect("non-empty offsets");
+                    read_u32_vec(buf, &mut offset, len)?
+                } else {
+                    read_u32_vec(buf, &mut offset, n_local_elems * nodes_per_elem)?
+                };
                 let coords = read_f64_vec(buf, &mut offset, n_nodes * D)?;
                 mesh.geometry = Some(fem_mesh::simplex::GeometryData {
                     order,
@@ -640,5 +680,70 @@ mod tests {
         assert_eq!(mesh2.face_types, mesh.face_types);
         assert_eq!(mesh.face_conn, mesh2.face_conn);
         mesh2.check().expect("decoded mesh");
+    }
+
+    /// D624: a ragged (mixed-mesh) geometry table round-trips through
+    /// wire_format 3 — the row offsets survive so the per-family rows
+    /// address the same values on decode.
+    #[test]
+    fn round_trip_mixed_ragged_geometry() {
+        // One Tri3 + one Quad4 (serde does not require conformity).
+        let coords: Vec<f64> = vec![
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // nodes 0..2 (tri 0)
+            1.0, 1.0, 2.0, 0.0, 2.0, 1.0, // nodes 3..5 (quad 1)
+        ];
+        let conn = vec![0u32, 1, 2, 1, 3, 5, 4];
+        let mut mesh = Mesh::<2>::uniform(
+            coords,
+            conn,
+            vec![1i32, 1],
+            ElementType::Tri3,
+            vec![0u32, 1],
+            vec![1i32],
+            ElementType::Line2,
+        );
+        mesh.elem_types = Some(vec![ElementType::Tri3, ElementType::Quad4]);
+        mesh.elem_offsets = Some(vec![0usize, 3, 7]);
+
+        // A ragged order-2 table: tri rows 6 dofs, quad rows 9 dofs.  Vertex
+        // slots reuse the mesh's node ids; the rest get fresh ids (values are
+        // arbitrary — this test checks the *storage* round-trip only).
+        let mut gconn: Vec<u32> = vec![0, 1, 2];
+        let mut gcoords: Vec<f64> = mesh.coords.clone();
+        let mut new_node = |gconn: &mut Vec<u32>, gcoords: &mut Vec<f64>| {
+            let id = gcoords.len() as u32 / 2;
+            gconn.push(id);
+            gcoords.extend_from_slice(&[0.5, 0.5]);
+        };
+        for _ in 0..3 {
+            new_node(&mut gconn, &mut gcoords);
+        }
+        gconn.extend_from_slice(&[1, 3, 5, 4]);
+        for _ in 0..5 {
+            new_node(&mut gconn, &mut gcoords);
+        }
+        let n_nodes = gcoords.len() / 2;
+        mesh.geometry = Some(fem_mesh::simplex::GeometryData {
+            order: 2,
+            conn: gconn,
+            nodes_per_elem: 0,
+            coords: gcoords,
+            n_nodes,
+        });
+
+        let partition = MeshPartition::new_serial(mesh.n_nodes(), mesh.n_elems());
+        let buf = encode_submesh(&mesh, &partition);
+        let (mesh2, _) = decode_submesh::<2>(&buf).expect("decode failed");
+
+        let g1 = mesh.geometry.as_ref().expect("source geometry");
+        let g2 = mesh2.geometry.as_ref().expect("decoded geometry");
+        assert_eq!(g2.nodes_per_elem, 0, "ragged layout survives");
+        assert_eq!(g2.order, g1.order);
+        assert_eq!(g2.conn, g1.conn, "ragged rows identical");
+        assert_eq!(g2.coords, g1.coords);
+        assert_eq!(mesh2.elem_types, mesh.elem_types);
+        for e in 0..mesh.n_elems() as u32 {
+            assert_eq!(mesh2.geometry_row(e), mesh.geometry_row(e));
+        }
     }
 }

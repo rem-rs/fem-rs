@@ -83,15 +83,32 @@ const HEX8_REF_CORNERS: [[f64; 3]; 8] = [
 /// `order` basis functions (isoparametric or superparametric).  The `conn`
 /// array maps each element to its high-order geometry nodes, and `coords`
 /// stores their physical coordinates.
+///
+/// Two storage layouts share this struct (D624):
+///
+/// * **uniform** (`nodes_per_elem > 0`): for element `e`, the geometry-node
+///   indices are `conn[e * nodes_per_elem .. (e+1) * nodes_per_elem]` —
+///   every table written before D624, bit-for-bit unchanged;
+/// * **ragged** (`nodes_per_elem == 0`): a *mixed* mesh's per-element row
+///   lengths follow the element's geometry family at the table's `order`
+///   ([`h1_family_dofs`]; MFEM's `nodes` grid function has exactly this
+///   contract — `H1_FECollection::DofForGeometry` per element geometry).
+///   The rows are concatenated in element order and addressed with
+///   [`Mesh::geometry_row_range`].  `nodes_per_elem == 0` makes accidental
+///   uniform-stride indexing fail loudly instead of silently mis-reading a
+///   mixed table (the pre-D117 failure mode).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct GeometryData {
     /// Geometric polynomial order (1 = linear, 2 = quadratic, …).
     pub order: u8,
-    /// High-order geometry connectivity: for element `e`, the geometry-node
-    /// indices are `conn[e * nodes_per_elem .. (e+1) * nodes_per_elem]`.
+    /// High-order geometry connectivity.  Uniform layout: `n_elems`
+    /// `nodes_per_elem`-rows.  Ragged layout (`nodes_per_elem == 0`):
+    /// per-element rows of [`h1_family_dofs`] `elem_type(e, order)` nodes,
+    /// concatenated in element order.
     pub conn: Vec<NodeId>,
-    /// Number of geometry nodes per element.
+    /// Number of geometry nodes per element; `0` marks a ragged (mixed)
+    /// table ([`Mesh::geometry_row_range`] addresses those).
     pub nodes_per_elem: usize,
     /// Coordinates of geometry nodes.  Length = `n_nodes * D`.
     /// Indices 0..n_vertices are the original vertex coordinates; additional
@@ -99,6 +116,47 @@ pub struct GeometryData {
     pub coords: Vec<f64>,
     /// Total number of geometry nodes (≤ `coords.len() / D`).
     pub n_nodes: usize,
+}
+
+/// Number of geometry dofs of element type `et`'s geometry family at
+/// polynomial order `order` — the row length a **ragged** (mixed-mesh)
+/// [`GeometryData`] stores for that element (D624).
+///
+/// MFEM contract: a `nodes` grid function over a mixed mesh gives every
+/// element `H1_FECollection::DofForGeometry(element geometry)` dofs, so the
+/// row length is a function of the *family* (tri/quad/tet/hex/prism/pyramid)
+/// and the order — not of the raw element type.  The counts come from the
+/// same element-layer constructors every consumer evaluates the rows with
+/// (`Mesh::element_jacobian`'s dispatch), so a family's count and its slot
+/// order can never drift apart:
+///
+/// * tri `H1TriPk` `(p+1)(p+2)/2`, quad `QuadQk` `(p+1)²`,
+///   tet `H1TetPk` `(p+1)(p+2)(p+3)/6`, hex `HexQk` `(p+1)³`,
+///   prism `PrismPk` `(p+1)²(p+2)/2` (layer-major consumer order),
+/// * pyramid: MFEM's `SetCurvature` default **Fuentes** element
+///   (`h1_pyramid_element(p, PyramidBasisType::default())`,
+///   `p(p²+3)+1` dofs — D347's consumer contract).
+pub fn h1_family_dofs(et: ElementType, order: u8) -> usize {
+    use fem_element::lagrange::factory::{HexQk, H1TetPk, H1TriPk, QuadQk};
+    use fem_element::ReferenceElement;
+    let p = order.max(1) as usize;
+    match et {
+        ElementType::Tri3 | ElementType::Tri6 => H1TriPk::new(p).n_dofs(),
+        ElementType::Quad4 | ElementType::Quad8 | ElementType::Quad9 => QuadQk::new(p).n_dofs(),
+        ElementType::Tet4 | ElementType::Tet10 => H1TetPk::new(p).n_dofs(),
+        ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => HexQk::new(p).n_dofs(),
+        ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => {
+            fem_element::lagrange::PrismPk::new(p).n_dofs()
+        }
+        ElementType::Pyramid5 | ElementType::Pyramid13 => fem_element::lagrange::h1_pyramid_element(
+            p,
+            fem_element::lagrange::PyramidBasisType::default(),
+        )
+        .n_dofs(),
+        // Non-cell types (points, segments, polygons) never carry a ragged
+        // geometry row; the linear count keeps the arithmetic total.
+        other => other.nodes_per_element(),
+    }
 }
 
 /// Unstructured mesh with uniform or mixed element types.
@@ -259,6 +317,50 @@ impl<const D: usize> Mesh<D> {
         self.geometry.as_ref().map_or(0, |g| g.n_nodes)
     }
 
+    /// Whether the geometry table (if any) is **ragged** — a mixed mesh's
+    /// per-family rows ([`h1_family_dofs`]) instead of one uniform
+    /// `nodes_per_elem` stride (D624).
+    pub fn geometry_is_ragged(&self) -> bool {
+        self.geometry.as_ref().is_some_and(|g| g.nodes_per_elem == 0)
+    }
+
+    /// Length of element `e`'s high-order geometry row
+    /// ([`Mesh::element_nodes`]-length when no table is attached).
+    pub fn geometry_row_len(&self, e: ElemId) -> usize {
+        match self.geometry.as_ref() {
+            None => self.element_type_at(e).nodes_per_element(),
+            Some(g) if g.nodes_per_elem != 0 => g.nodes_per_elem,
+            Some(g) => h1_family_dofs(self.element_type_at(e), g.order),
+        }
+    }
+
+    /// `conn` range `(start, end)` of element `e`'s high-order geometry row.
+    ///
+    /// Uniform tables are O(1); ragged (mixed) tables prefix-sum the
+    /// per-family row lengths — O(e); a caller scanning every element should
+    /// accumulate the running offset instead.
+    pub fn geometry_row_range(&self, e: ElemId) -> (usize, usize) {
+        let g = self
+            .geometry
+            .as_ref()
+            .expect("geometry_row_range: no geometry table attached");
+        if g.nodes_per_elem != 0 {
+            let start = e as usize * g.nodes_per_elem;
+            return (start, start + g.nodes_per_elem);
+        }
+        let mut start = 0usize;
+        for k in 0..e {
+            start += h1_family_dofs(self.element_type_at(k), g.order);
+        }
+        (start, start + h1_family_dofs(self.element_type_at(e), g.order))
+    }
+
+    /// Element `e`'s high-order geometry row ([`Mesh::geometry_row_range`]).
+    pub fn geometry_row(&self, e: ElemId) -> &[NodeId] {
+        let (start, end) = self.geometry_row_range(e);
+        &self.geometry.as_ref().expect("geometry_row: no table").conn[start..end]
+    }
+
     /// Isoparametric Jacobian `J = ∂x/∂ξ` of element `e` at the reference
     /// point `xi`, using the high-order geometry (Q3) when present, else the
     /// linear (P1) mapping.
@@ -284,8 +386,10 @@ impl<const D: usize> Mesh<D> {
         // path, whose geometry table is already written slot-ordered).
         const PYRAMID_P1_SLOT_CORNER: [usize; 5] = [0, 1, 3, 2, 4];
         let nodes: Vec<u32> = if let Some(ref g) = self.geometry {
-            let e = e as usize;
-            g.conn[e * g.nodes_per_elem..(e + 1) * g.nodes_per_elem].to_vec()
+            // D624: ragged (mixed) tables have per-family row lengths —
+            // never index with the uniform stride.
+            let (a, b) = self.geometry_row_range(e);
+            g.conn[a..b].to_vec()
         } else {
             let ns = self.element_nodes(e).to_vec();
             if et == ElementType::Pyramid5 && ns.len() == 5 {
@@ -423,6 +527,16 @@ impl<const D: usize> Mesh<D> {
         if order <= 1 {
             self.geometry = None;
             return;
+        }
+        // D624: the per-type builders below lay one uniform-stride table for
+        // `elem_type`; a mixed mesh needs per-family rows (the MFEM reader's
+        // ragged tables).  Refuse loudly instead of silently mis-sizing.
+        if self.elem_types.is_some() {
+            panic!(
+                "set_curvature: mixed-element meshes need per-family geometry rows (D624); \
+                 programmatic mixed curvature is not implemented — attach the table at read \
+                 time (MFEM `nodes`) instead"
+            );
         }
         let p = order as usize;
 
@@ -3566,9 +3680,9 @@ impl<const D: usize> MeshTopology for Mesh<D> {
 
     fn geometry_nodes(&self, elem: ElemId) -> &[NodeId] {
         if let Some(ref geo) = self.geometry {
-            let e = elem as usize;
-            let off = e * geo.nodes_per_elem;
-            &geo.conn[off..off + geo.nodes_per_elem]
+            // D624: ragged (mixed) tables have per-family row lengths.
+            let (a, b) = self.geometry_row_range(elem);
+            &geo.conn[a..b]
         } else {
             self.element_nodes(elem)
         }
@@ -3663,7 +3777,8 @@ impl<const D: usize> MeshTopology for Mesh<D> {
             })
         })?;
         let en = self.elem_nodes(owner as ElemId);
-        let off = owner as usize * g.nodes_per_elem;
+        // D624: the owner's geometry row may be ragged (mixed table).
+        let (off, _) = self.geometry_row_range(owner);
         let endpoint = |node: u32| -> Option<[f64; 2]> {
             let local = en.iter().position(|&n| n == node)?;
             let gi = g.conn[off + local] as usize;

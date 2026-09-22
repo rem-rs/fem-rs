@@ -488,7 +488,20 @@ fn extract_submesh_from_partition_impl<const D: usize>(
     // falls back to the folded vertex coordinates and the element geometry is
     // silently corrupted (wrong face normals / Jacobians → wrong DG flux).
     if let Some(ref geo) = mesh.geometry {
-        let n_local_geom = all_local_elems * geo.nodes_per_elem;
+        // D624: ragged (mixed) tables carry per-family rows — the local rows
+        // are addressed through `geometry_nodes` (row-range aware) and the
+        // local table stays ragged (`nodes_per_elem == 0`); uniform tables
+        // keep the O(1) stride.
+        let ragged = geo.nodes_per_elem == 0;
+        let n_local_geom: usize = if ragged {
+            local_elem_gids
+                .iter()
+                .chain(ghost_elem_gids.iter())
+                .map(|&ge| mesh.geometry_row_len(ge))
+                .sum()
+        } else {
+            all_local_elems * geo.nodes_per_elem
+        };
         let mut geo_conn = Vec::with_capacity(n_local_geom);
         if identity_nodes {
             // Keep global geometry-node ids (coords stay at global indices).

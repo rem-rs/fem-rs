@@ -57,7 +57,7 @@ pub use nurbs_patch::{NurbsKnotVector, NurbsPatch};
 pub use kdtree::{KdTree, KdTreeNodalProjection, Ordering as KdTreeOrdering};
 pub use point_locator::{LocatedPoint2D, LocatedPoint3D, TetPointLocator, TriPointLocator};
 pub use findpts::{FindPoints, FindPointsOptions, LocatedPoint as FindPointResult};
-pub use simplex::{Mesh, tet_volume};
+pub use simplex::{h1_family_dofs, Mesh, tet_volume};
 pub use submesh::{SubMesh, SubMesh3D, BoundarySubMesh, extract_submesh, extract_submesh_3d, extract_submesh_by_name, extract_boundary_submesh};
 pub use topology::MeshTopology;
 pub use transformation::{ElementTransformation, geometry_jacobian, element_jacobian_at, xform_grads};

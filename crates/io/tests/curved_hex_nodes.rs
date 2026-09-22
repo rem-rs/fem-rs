@@ -33,7 +33,7 @@
 use fem_element::lagrange::factory::HexQk;
 use fem_element::ReferenceElement;
 use fem_io::mfem::read_mfem_file;
-use fem_mesh::{Mesh, MeshTopology};
+use fem_mesh::{element_type::ElementType, Mesh, MeshTopology};
 
 const TOL: f64 = 1e-12;
 
@@ -262,17 +262,30 @@ fn curved_hex_geometry_conn_is_a_surjective_entity_map() {
     assert_eq!(geom.conn.len(), mesh.n_elems() * npe);
 }
 
-/// D41 safety net: a curved mesh with hexahedra that the mapper cannot number
-/// faithfully must come back *without* a high-order table (and with a warning
-/// on stderr) instead of a silently scrambled one.  `data/fichera-mixed-p2.mesh`
-/// is a mixed tet/hex/prism mesh with an H1_3D_P2 `nodes` section.
+/// D41 safety net (D624 update): a curved mesh with hexahedra that the mapper
+/// cannot number faithfully must come back *without* a high-order table (and
+/// with a warning on stderr) instead of a silently scrambled one.
+/// `data/fichera-mixed-p2.mesh` (mixed tet/hex/prism, `H1_3D_P2`) used to hit
+/// that refusal — since D624 its MFEM-verified numbering is mapped and stored
+/// as a **ragged** table (`nodes_per_elem == 0`, per-family row lengths), so
+/// it must attach, never scramble.
 #[test]
-fn curved_mixed_hex_nodes_are_refused_not_scrambled() {
+fn curved_mixed_hex_nodes_attach_ragged_not_scrambled() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/fichera-mixed-p2.mesh");
     let file = read_mfem_file(path).unwrap();
     let mesh: Mesh<3> = file.mesh3d.unwrap();
-    assert!(mesh.geometry.is_none(), "mixed curved mesh must not be half-mapped");
-    assert_eq!(mesh.geom_order(), 1);
+    assert_eq!(mesh.geom_order(), 2, "D624: the verified mixed table attaches");
+    let geom = mesh.geometry.as_ref().expect("ragged geometry attached");
+    assert_eq!(geom.nodes_per_elem, 0, "mixed tables are ragged");
+    for e in 0..mesh.n_elems() as u32 {
+        let want = match mesh.element_type(e) {
+            ElementType::Tet4 | ElementType::Tet10 => 10,
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 27,
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 18,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(mesh.geometry_row_len(e), want, "element {e} row length");
+    }
     // The straight-line vertices are still exact picks of the same file.
     assert!(mesh.n_nodes() > 0 && mesh.n_elems() > 0);
 }

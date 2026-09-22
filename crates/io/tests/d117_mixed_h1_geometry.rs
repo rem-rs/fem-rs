@@ -28,10 +28,12 @@
 //!   MFEM's — for llnl-p3 that is the round's headline number
 //!   `0.0029296874999967192` (MIN_DET_GLL6).
 //!
-//! The in-memory *storage* of a mixed table (per-element row length) is
-//! `GeometryData`'s uniform `nodes_per_elem` contract and is registered as
-//! **D624**: until that lands, the reader keeps mixed meshes straight-sided
-//! *with a precise warning* instead of silently or wrongly curved.
+//! The in-memory *storage* of a mixed table landed in **D624**: a **ragged**
+//! `GeometryData` (`nodes_per_elem == 0`, per-family row lengths — MFEM's own
+//! `nodes` contract), so the reader now *attaches* the verified table; the
+//! never-again contract stays (a mixed table must have the right row length
+//! for every element), and the end-to-end acceptance moved to
+//! `d624_mixed_geometry_storage.rs`.
 
 use fem_element::lagrange::factory::{HexQk, H1TetPk, H1TriPk, QuadQk};
 use fem_element::lagrange::PrismPk;
@@ -53,8 +55,13 @@ const FICHERA_MIXED_16: &str =
 /// attach a wrong table: mixed meshes stay straight-sided (D624) with a
 /// precise warning, and the faithful table moves to
 /// [`read_mfem_mixed_h1_geometry_file`].
+///
+/// D624 update: the reader now attaches the verified mixed table as a
+/// **ragged** store (`nodes_per_elem == 0`, per-family row lengths); the
+/// never-again contract stays — a mixed table must have the right row length
+/// for *every* element.
 #[test]
-fn mixed_2d_reader_never_attaches_a_wrong_table() {
+fn mixed_2d_reader_attaches_the_ragged_table() {
     let mesh = read_mfem_file(LLNL_P3).expect("read").mesh2d.expect("2-D");
     assert_eq!(mesh.n_elems(), 26);
     let mut tris = 0usize;
@@ -67,37 +74,48 @@ fn mixed_2d_reader_never_attaches_a_wrong_table() {
         }
     }
     assert_eq!((tris, quads), (4, 22), "llnl-p3 is 4 tris + 22 quads");
-    // No silent mis-shaped table: either no table, or one whose row length is
-    // right for *every* element (impossible before D624).
-    if let Some(g) = mesh.geometry.as_ref() {
-        let per_type_ok = g.nodes_per_elem == 10 || g.nodes_per_elem == 16;
-        assert!(
-            per_type_ok && g.nodes_per_elem == 16,
-            "a mixed table must use the max row length (16), got {}",
-            g.nodes_per_elem
+    let g = mesh.geometry.as_ref().expect("D624: mixed 2-D geometry attaches");
+    assert_eq!(mesh.geom_order(), 3);
+    assert_eq!(g.nodes_per_elem, 0, "a mixed table is ragged (D624)");
+    for e in 0..mesh.n_elems() as u32 {
+        let want = match mesh.element_type(e) {
+            ElementType::Tri3 | ElementType::Tri6 => 10, // (p+1)(p+2)/2, p=3
+            _ => 16,                                     // (p+1)², p=3
+        };
+        assert_eq!(
+            mesh.geometry_row_len(e),
+            want,
+            "element {e} geometry row length"
         );
     }
-    assert_eq!(
-        mesh.geom_order(),
-        1,
-        "mixed 2-D geometry stays unattached until D624 (no silent wrong table)"
-    );
 }
 
 /// The 3-D mixed tier: `data/fichera-mixed-p2.mesh` (5 tets + 3 hexes + 6
-/// prisms, `H1_3D_P2`) reads straight-sided until D624 — loudly.
+/// prisms, `H1_3D_P2`) attaches the verified ragged table (D624).  The mesh
+/// contains tets, so the reader's `mark_tet_mesh_for_refinement` rotation ran
+/// first — the attached values must survive it (see the D624 physical checks).
 #[test]
-fn mixed_3d_reader_refuses_loudly_straight() {
+fn mixed_3d_reader_attaches_the_ragged_table() {
     let mesh = read_mfem_file(FICHERA_MIXED_P2).expect("read").mesh3d.expect("3-D");
     assert_eq!(mesh.n_elems(), 14);
-    assert_eq!(mesh.geom_order(), 1);
-    assert!(mesh.geometry.is_none());
+    assert_eq!(mesh.geom_order(), 2);
+    let g = mesh.geometry.as_ref().expect("D624: mixed 3-D geometry attaches");
+    assert_eq!(g.nodes_per_elem, 0, "a mixed table is ragged (D624)");
+    for e in 0..mesh.n_elems() as u32 {
+        let want = match mesh.element_type(e) {
+            ElementType::Tet4 | ElementType::Tet10 => 10,        // (p+1)(p+2)(p+3)/6
+            ElementType::Hex8 | ElementType::Hex20 | ElementType::Hex27 => 27, // (p+1)³
+            ElementType::Prism6 | ElementType::Prism15 | ElementType::Prism18 => 18, // (p+1)²(p+2)/2
+            other => panic!("unexpected element type {other:?}"),
+        };
+        assert_eq!(mesh.geometry_row_len(e), want, "element {e} row length");
+    }
 }
 
 /// The pyramid tier: `data/fichera-mixed-16.mesh` (1 hex + 6 prisms + 9
-/// pyramids).  Pyramids are not part of the verified mixed numbering, so the
-/// mesh must stay straight-sided — never a table built from unverified
-/// numbering.
+/// pyramids) carries **no** `nodes` section (linear mesh), so it stays
+/// straight-sided — and a pyramid mix *with* a high-order `nodes` section is
+/// now verified and attaches (D624; see `d624_mixed_geometry_storage.rs`).
 #[test]
 fn pyramid_mix_never_gets_an_unverified_table() {
     let mesh = read_mfem_file(FICHERA_MIXED_16).expect("read").mesh3d.expect("3-D");
