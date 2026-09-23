@@ -222,6 +222,10 @@ fn run_case(n_workers: usize, ref_levels: usize) -> RunResult {
             comm.clone(),
         );
         // SGS smoother (pex2 经验: SGS 比 Jacobi 稳健); strength 0.25 default.
+        // D654: hypre BoomerAMG 是经典 HMIS 粗化 + aggressive + extended-i 插值,
+        // ParAmgConfig 是聚合式 AMG, 无粗化族旋钮 — 同档(θ=0.25/SGS/1 V-cycle/
+        // 精确粗解)下 95 vs 44 迭代为结构性差异, 数值豁免(证据 tmp/d654/*.log:
+        // 基线95 / smoothed 102 / smoothed+1+1 131 / 1+1 113 / 全局聚合 95)。
         let amg_cfg = ParAmgConfig {
             smoother: SmootherType::SymmetricGaussSeidel,
             ..Default::default()

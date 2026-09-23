@@ -40,7 +40,7 @@ use fem_parallel::{
     par_mixed_assembler::ParMixedAssembler, par_partition::partition_mesh_identity,
     par_vector_assembler::ParVectorAssembler,
 };
-use fem_solver::{SolverConfig, SolveResult};
+use fem_solver::SolverConfig;
 use fem_space::{HDivSpace, L2Space, fe_space::FESpace};
 
 // ─── Coefficients from ψ (RT grid function) — serial ex40 ───────────────────
@@ -143,7 +143,6 @@ fn block_minres(
     b: &ParBlockVector2,
     x: &mut ParBlockVector2,
     cfg: &SolverConfig,
-    inv_m_diag: &[f64],
     a00_amg: &ParAmgHierarchy,
     schur_amg: &ParAmgHierarchy,
 ) -> fem_solver::SolveResult {
@@ -172,7 +171,7 @@ fn block_minres(
         ParVector::zeros_like(&b.v0),
         ParVector::zeros_like(&b.v1),
     );
-    prec_apply(&v1, &mut z, inv_m_diag, a00_amg, schur_amg);
+    prec_apply(&v1, &mut z, a00_amg, schur_amg);
 
     let mut eta = a.global_dot(&z, &v1).max(0.0).sqrt();
     let beta0 = eta;
@@ -242,7 +241,7 @@ fn block_minres(
             ParVector::zeros_like(&b.v0),
             ParVector::zeros_like(&b.v1),
         );
-        prec_apply(&v0, &mut pv0, inv_m_diag, a00_amg, schur_amg);
+        prec_apply(&v0, &mut pv0, a00_amg, schur_amg);
         beta = a.global_dot(&v0, &pv0).max(0.0).sqrt();
         let rho1 = (delta * delta + beta * beta).sqrt();
 
@@ -327,7 +326,6 @@ fn block_minres(
 fn prec_apply(
     r: &ParBlockVector2,
     z: &mut ParBlockVector2,
-    inv_m_diag: &[f64],
     a00_amg: &ParAmgHierarchy,
     schur_amg: &ParAmgHierarchy,
 ) {
@@ -439,7 +437,7 @@ fn main() {
     let refs: usize = parse_arg(&args, "-r").unwrap_or(3) as usize;
     let max_it: usize = parse_arg(&args, "-mi").unwrap_or(5) as usize;
     let tol: f64 = parse_arg_f64(&args, "-tol").unwrap_or(1e-4);
-    let mut alpha: f64 = parse_arg_f64(&args, "-step").unwrap_or(1.0);
+    let alpha: f64 = parse_arg_f64(&args, "-step").unwrap_or(1.0);
     let growth_rate: f64 = parse_arg_f64(&args, "-gr").unwrap_or(1.0);
     let newton_scaling: f64 = 0.8;
     let eps: f64 = 1e-6;
@@ -509,11 +507,6 @@ fn main() {
         // matches C++ with a flip.
         scale_csr(&mut b, -1.0);
 
-        // ── State: dx (partition order) persists across Newton steps ───────
-        let mut dx = ParBlockVector2::new(
-            ParVector::zeros(&u_par),
-            ParVector::zeros(&p_par),
-        );
         let mut psi_par = ParVector::zeros(&u_par); // psi (RT)
         let mut psi_old_par = ParVector::zeros(&u_par);
         let mut u_old_par = ParVector::zeros(&p_par);
@@ -539,7 +532,6 @@ fn main() {
                 // ψ in DofManager order with synced ghosts (integrators index
                 // element_dofs into this vector).
                 let psi_dm = to_dm_full(&psi_par, dp_u, u_par.dof_ghost_exchange_arc(), &comm);
-                let psi_old_dm = to_dm_full(&psi_old_par, dp_u, u_par.dof_ghost_exchange_arc(), &comm);
 
                 // b0 = ∫ -Z(ψ)·τ
                 let b0 = ParVectorAssembler::assemble_linear(
@@ -658,7 +650,7 @@ fn main() {
                     verbose: false,
                     ..SolverConfig::default()
                 };
-                let _res = block_minres(&block, &rhs, &mut x, &cfg, &inv_diag, &a00_amg, &schur_amg);
+                let _res = block_minres(&block, &rhs, &mut x, &cfg, &a00_amg, &schur_amg);
 
                 // ── Update (C++ ex40p step 11): MINRES accumulates into tx,
                 //    psi damped, u_tmp tracks the u increment. ──────────────
@@ -722,7 +714,10 @@ fn main() {
         if is_root {
             println!("\n Outer iterations: {}", k_out);
             println!(" Total iterations: {}", total_iterations);
-            println!(" Total dofs:       {}", u_par.n_global_dofs() + p_par.n_global_dofs());
+            // C++ ex40p.cpp:415 prints `RTfes.GetTrueVSize() + L2fes.GetTrueVSize()`
+            // — the *rank-local* true-dof counts of the printing (rank 0) task,
+            // not the global sizes (those go into the two header lines above).
+            println!(" Total dofs:       {}", n_u + n_p);
         }
 
         // ── Optional dump of the final u (L2, dm order) for C++ comparison ──
